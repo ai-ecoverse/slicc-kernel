@@ -67,6 +67,21 @@ Starts `argv` as the session leader on a new terminal and resolves once it is ru
 
 Stops the kernel worker and every process. Pending and later calls reject.
 
+### Headless in Node, for tests
+
+`@ai-ecoverse/slicc-kernel/node` runs the same kernel in Node without a browser, so packages built for SLICC can test against it. It is a testing entry, not a supported runtime: there is no OPFS and no isolation, and nothing beyond what its tests use is promised.
+
+```js
+import { createNodeKernel, nodeTransport } from '@ai-ecoverse/slicc-kernel/node';
+
+const kernel = await createNodeKernel({ network: { transport: nodeTransport() } });
+await kernel.writeFile('/node_modules/@ai-ecoverse/wasm-bash/package.json', manifest);
+const { status, stdout } = await kernel.run(['bash', '-c', 'echo hi'], { cwd: '/home' });
+kernel.terminate();
+```
+
+`createNodeKernel({ root, modules, env, network, worker })` takes the options of `createKernel` except `metadata`. `root` is an in-memory directory by default (`memoryRoot()` makes another), and POSIX metadata stays in memory. Processes and threads run on `worker_threads`. The kernel has `run`, `openTerminal` and `terminate` as above, plus `root`, `writeFile(path, data)` (creating the parent directories) and `readFile(path)` to put files in place and read results. `nodeTransport()` is `fetchTransport()` with Node's `fetch`, which no CORS binds (`crossOrigin: 'any'`).
+
 ## Commands
 
 Commands come from installed packages in npm's `node_modules` layout: every `<modules>/<name>/package.json` and `<modules>/@scope/<name>/package.json` with a `slicc.commands` block. An Emscripten program names its glue and module, for example bash's:
@@ -170,7 +185,7 @@ The kernel is ported from SLICC's `packages/webapp/src/kernel/` with the browser
 - `src/process/`: the runtime inside each process worker. It evaluates the Emscripten glue, mounts the live VFS, routes descriptors through the kernel and implements `fork` by copying the whole linear memory into a new worker (Asyncify). `fork` is the only call allowed to suspend through Asyncify: an `fsync` that Emscripten made asynchronous is answered synchronously by the file's own stream instead. `src/process/wasi/` runs WASI and WASIX programs.
 - `src/realm/`: the synchronous bridge (`SharedArrayBuffer` + `Atomics.wait`) and the live Emscripten filesystem on top of it.
 - `src/fs/`: the OPFS filesystem and the virtual command directories.
-- `src/launcher.ts`, `src/commands.ts`, `src/serve.ts`, `src/index.ts`: command resolution, the kernel worker protocol and the page API. An embedder that uses `Launcher` directly, without `createKernel`, calls `await launcher.prepare()` first: it creates `/tmp` and `/home` and writes the CA certificate.
+- `src/launcher.ts`, `src/commands.ts`, `src/serve.ts`, `src/index.ts`: command resolution, the kernel worker protocol and the page API; `src/node.ts`, `src/node-process-worker.ts` and `src/node/` the headless Node entry. An embedder that uses `Launcher` directly, without `createKernel`, calls `await launcher.prepare()` first: it creates `/tmp` and `/home` and writes the CA certificate.
 - `src/kernel/net/`: the proxy, HTTP/1.1, TLS termination and the local CA, and the bridge to the page's transport; `src/transport.ts` and `src/local-proxy-transport.ts` are the page side.
 
 

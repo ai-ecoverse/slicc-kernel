@@ -12,3 +12,13 @@ await build({
   sourcemap: 'linked',
   logLevel: 'warning',
 });
+await build({
+  entryPoints: ['src/node.ts', 'src/node-process-worker.ts'],
+  outdir: 'dist',
+  bundle: true,
+  format: 'esm',
+  platform: 'node',
+  target: 'node22',
+  sourcemap: 'linked',
+  logLevel: 'warning',
+});
