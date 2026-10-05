@@ -177,6 +177,10 @@ export interface KernelStreamOptions {
   restartable?: () => boolean;
 }
 
+function nonblocking(stream: ProcessStream): { nonblock: true } | undefined {
+  return (stream.flags & O_NONBLOCK) !== 0 ? { nonblock: true } : undefined;
+}
+
 export class KernelStreams {
   private readonly refs = new Map<number, number>();
 
@@ -420,16 +424,16 @@ export class KernelStreams {
         this.call(() => {
           throw new SyscallError('ESPIPE');
         }),
-      read: (_s, buffer, offset, length) =>
+      read: (s, buffer, offset, length) =>
         this.call(() => {
-          const bytes = this.restarting(() => this.sys.read(kfd, length));
+          const bytes = this.restarting(() => this.sys.read(kfd, length, nonblocking(s)));
           buffer.set(bytes, offset);
           return bytes.length;
         }),
-      write: (_s, buffer, offset, length) => {
+      write: (s, buffer, offset, length) => {
         try {
           const bytes = buffer.slice(offset, offset + length);
-          return this.restarting(() => this.sys.write(kfd, bytes));
+          return this.restarting(() => this.sys.write(kfd, bytes, nonblocking(s)));
         } catch (e) {
           if (e instanceof SyscallError && e.code === 'EPIPE' && !this.options.sigpipe?.()) {
             throw new ProcessExit(KILLED_BY_SIGPIPE);
