@@ -12,6 +12,7 @@ import { spawnWasmProcess, type WasmProcessHandle, type WasmWorkerLike } from '.
 import { JobTable } from './kernel/jobs.ts';
 import type { ForkState, WasmProgram } from './kernel/protocol.ts';
 import { PtyTable } from './kernel/pty.ts';
+import { LoopbackNet } from './kernel/socket.ts';
 import { KernelTty } from './kernel/tty.ts';
 
 export interface LauncherOptions {
@@ -133,6 +134,7 @@ export class Launcher {
   private readonly orphans = new Set<number>();
   private readonly jobs = new JobTable();
   private readonly ptys = new PtyTable((tty, sig) => this.jobs.signalOwnedForeground(tty, sig));
+  readonly net = new LoopbackNet();
   private nextPid = 1000;
   private terminals = 0;
 
@@ -265,6 +267,7 @@ export class Launcher {
       kill: (target, sig) => this.kill(target, sig),
       jobs: this.jobs,
       ptys: this.ptys,
+      net: this.net,
       onReap: (child) => this.reaped(child),
       ...(req.fork ? { fork: req.fork } : {}),
       ...(req.ppid !== undefined ? { ppid: req.ppid } : {}),

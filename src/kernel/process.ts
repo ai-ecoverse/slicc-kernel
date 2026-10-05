@@ -23,6 +23,8 @@ import type { ForkState } from './protocol.ts';
 import { PTY_OPS, type PtySyscall, type PtyTable, ptySyscall } from './pty.ts';
 import { selectFds } from './select.ts';
 import { type DefaultAction, defaultAction, isSignal, SIG, sigbit } from './signals.ts';
+import { KernelSocket, LoopbackNet } from './socket.ts';
+import { SOCKET_OPS, type SocketSyscall, socketSyscall } from './socket-syscalls.ts';
 import type { KernelTty, Termios } from './tty.ts';
 import { type VfsFileFs, VfsNodes, vfsFile } from './vfs-file.ts';
 
@@ -128,6 +130,7 @@ export type WasmSyscall =
   | { op: 'tty-pgrp-set'; fd: number; pgrp: number }
   | { op: 'sig-mask'; caught: number; ignored: number }
   | { op: 'sig-pause' }
+  | SocketSyscall
   | PtySyscall;
 
 type FdSyscall = Extract<WasmSyscall, { op: `fd-${string}` }>;
@@ -146,6 +149,10 @@ const JOB_OPS: ReadonlySet<string> = new Set([
 
 function isJobSyscall(req: WasmSyscall): req is JobSyscall {
   return JOB_OPS.has(req.op);
+}
+
+function isSocketSyscall(req: WasmSyscall): req is SocketSyscall {
+  return req.op.startsWith('sock-');
 }
 
 function isPtySyscall(req: WasmSyscall): req is PtySyscall {
@@ -241,6 +248,7 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'tty-pgrp-set',
   'sig-mask',
   'sig-pause',
+  ...SOCKET_OPS,
   ...PTY_OPS,
 ]);
 
@@ -275,6 +283,8 @@ export interface WasmProcessOptions {
   jobs?: JobTable;
 
   ptys?: PtyTable;
+
+  net?: LoopbackNet;
 }
 
 export type StateListener = (state: 'stopped' | 'continued', sig: number) => void;
@@ -300,6 +310,8 @@ export class WasmProcess {
   private resumed: Promise<void> = Promise.resolve();
   private wake: (() => void) | undefined;
   private readonly stateListeners: StateListener[] = [];
+
+  private net: LoopbackNet | undefined;
 
   private readonly nodes: VfsNodes;
 
@@ -391,6 +403,7 @@ export class WasmProcess {
       if (isFdSyscall(req)) return await this.fdSyscall(req);
       if (isTtySyscall(req)) return this.ttySyscall(req);
       if (isJobSyscall(req)) return this.jobSyscall(req);
+      if (isSocketSyscall(req)) return await this.socketSyscall(req);
       if (isPtySyscall(req)) {
         const { ptys, jobs } = this.options;
         return ptySyscall(req, { pid: this.pid, fds: this.fds, ptys, jobs });
@@ -603,7 +616,7 @@ export class WasmProcess {
     const flags = this.fds.statusFlags(fd);
     return {
       tty: file.tty !== undefined,
-      kind: kernelFdKind(file),
+      kind: file instanceof KernelSocket ? 'socket' : kernelFdKind(file),
       ...(file.heldMeta ? { meta: file.heldMeta } : {}),
       ...(flags !== undefined ? { flags } : {}),
       ...(this.fds.closesOnExec(fd) ? { cloexec: true } : {}),
@@ -685,6 +698,15 @@ export class WasmProcess {
     }
   }
 
+  private socketSyscall(req: SocketSyscall): Promise<SyncFsResult> {
+    this.net ??= this.options.net ?? new LoopbackNet();
+    return socketSyscall(req, {
+      fds: this.fds,
+      net: this.net,
+      blocking: () => this.blockingSignal(),
+    });
+  }
+
   private tty(fd: number): KernelTty {
     const file = this.fds.get(fd).file;
     const tty = file.tty ?? file.pty?.slave;
@@ -693,7 +715,7 @@ export class WasmProcess {
   }
 
   private async procSyscall(
-    req: Exclude<WasmSyscall, FdSyscall | TtySyscall | JobSyscall | PtySyscall>
+    req: Exclude<WasmSyscall, FdSyscall | TtySyscall | JobSyscall | SocketSyscall | PtySyscall>
   ): Promise<SyncFsResult> {
     switch (req.op) {
       case 'proc-fork':

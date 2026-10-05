@@ -1,6 +1,7 @@
 import { createKernel } from '/dist/index.js';
 
 const packages = {
+  'node_modules/socktest/': ['package.json', 'bin/socktest', 'bin/socktest.wasm'],
   'node_modules/@ai-ecoverse/wasm-bash/': ['package.json', 'bin/bash', 'bin/bash.wasm'],
   'node_modules/@ai-ecoverse/wasm-coreutils/': [
     'package.json',
@@ -34,7 +35,8 @@ async function file(path, create = false) {
 async function install() {
   for (const [dir, names] of Object.entries(packages)) {
     for (const name of names) {
-      const response = await fetch(`/${dir}${name}`);
+      const source = dir.replace(/^node_modules\/(?!@)/, 'fixtures/');
+      const response = await fetch(`/${source}${name}`);
       if (!response.ok) throw new Error(`${response.status} ${response.url}`);
       await response.body.pipeTo(await (await file(dir + name, true)).createWritable());
     }

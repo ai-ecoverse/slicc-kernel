@@ -4,6 +4,7 @@ import type { ForkState, ForkStream } from '../kernel/protocol.ts';
 import type { SyncFsResult } from '../realm/sync-fs-wire.ts';
 import type { SyncSabTransport } from '../realm/sync-sab-bridge.ts';
 import type { ProcessFs, ProcessStream } from './kernel-streams.ts';
+import type { SocketKernel } from './process-sockets.ts';
 import { wasiErrno } from './wasi-errno.ts';
 
 const POLLIN = 0x001;
@@ -61,6 +62,8 @@ export interface ProcessKernel {
     write: number[],
     timeoutMs: number
   ): { read: number[]; write: number[] } | number;
+
+  net?: SocketKernel;
 }
 
 export interface ProcessKernelDeps {

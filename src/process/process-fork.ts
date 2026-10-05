@@ -75,6 +75,9 @@ export function describeForFork(
 
 function kernelEntry(stream: ProcessStream, kernel: number): ForkStream {
   const cloexec = closesOnExec(stream) ? { cloexec: true } : {};
+  if (stream.sliccKernelSocket) {
+    return { fd: stream.fd, kernel, kind: 'socket', flags: stream.flags, ...cloexec };
+  }
   const kind = stream.sliccKernelFile ? 'file' : stream.tty ? 'tty' : 'stream';
   return { fd: stream.fd, kernel, kind, ...cloexec };
 }
@@ -126,7 +129,8 @@ function inheritedSlot(fd: number, stream: ProcessStream): InheritedSlot | undef
     const access = ACCESS[stream.flags & O_ACCMODE];
     return { fd, device, ...(access ? { access } : {}) };
   }
-  return { fd, kernel: stream.sliccKernelFd };
+  const flags = stream.sliccKernelSocket ? { flags: stream.flags } : {};
+  return { fd, kernel: stream.sliccKernelFd, ...flags };
 }
 
 function place(Fs: ProcessFs, stream: ProcessStream, fd: number): ProcessStream {
@@ -136,7 +140,12 @@ function place(Fs: ProcessFs, stream: ProcessStream, fd: number): ProcessStream 
   return moved;
 }
 
-function placeholder(Fs: ProcessFs, entry: { fd: number; kind: string }): ProcessStream {
+function placeholder(
+  Fs: ProcessFs,
+  streams: KernelStreams,
+  entry: { fd: number; kind: string; flags?: number }
+): ProcessStream {
+  if (entry.kind === 'socket') return streams.socketStream(entry.flags ?? O_RDWR);
   if (entry.kind === 'tty') return Fs.open('/dev/tty', O_RDWR);
   if (entry.kind === 'stream') return Fs.open('/dev/null', O_RDWR);
   Fs.mkdirTree(PLACEHOLDER_DIR);
@@ -166,8 +175,9 @@ export function placeKernelStream(
   streams: KernelStreams,
   entry: KernelStreamEntry
 ): ProcessStream {
-  const stream = place(Fs, placeholder(Fs, entry), entry.fd);
+  const stream = place(Fs, placeholder(Fs, streams, entry), entry.fd);
   if (entry.kind === 'file') streams.attachFile(stream, entry.kernel);
+  else if (entry.kind === 'socket') streams.attachSocket(stream, entry.kernel);
   else streams.attach(stream, entry.kernel, entry.kind === 'tty');
   if (entry.kind === 'tty') streams.nameTerminal(stream);
   if (entry.kind === 'stream') {
