@@ -371,7 +371,7 @@ export class OpfsFs implements KernelFs {
   private async explicitTimes(path: string): Promise<string[]> {
     const timed: string[] = [];
     for (const entry of await this.meta.under(path)) {
-      if (entry.mtimeMs === undefined) continue;
+      if (entry.mtimeFor === undefined || entry.link !== undefined) continue;
       const current = await this.modified(entry.path).catch(() => undefined);
       if (current === entry.mtimeFor) timed.push(entry.path.slice(path.length));
     }
