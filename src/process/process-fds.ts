@@ -195,21 +195,27 @@ const EBADF = 8;
 
 type AsyncImport = ((...args: number[]) => unknown) & { isAsync?: boolean };
 
+function persistsItself(stream: ProcessStream): boolean {
+  const type = stream.node.mount?.type as { syncfs?: unknown } | undefined;
+  return typeof type?.syncfs === 'function';
+}
+
 export function syncFsync(imports: WebAssembly.Imports, fs: () => ProcessFs | undefined): void {
-  const fdSync = (fd: number): number => {
-    const stream = fs()?.getStream(fd);
-    if (!stream) return EBADF;
-    try {
-      const result = stream.stream_ops.fsync?.(stream);
-      return typeof result === 'number' ? result : 0;
-    } catch (err) {
-      const { errno, code } = err as { errno?: unknown; code?: unknown };
-      return typeof errno === 'number' ? errno : wasiErrno(String(code));
-    }
-  };
   for (const namespace of Object.values(imports)) {
-    const value = namespace?.fd_sync as AsyncImport | undefined;
-    if (typeof value === 'function' && value.isAsync) namespace.fd_sync = fdSync;
+    const original = namespace?.fd_sync as AsyncImport | undefined;
+    if (typeof original !== 'function' || !original.isAsync) continue;
+    namespace.fd_sync = (fd: number) => {
+      const stream = fs()?.getStream(fd);
+      if (!stream) return EBADF;
+      if (persistsItself(stream)) return original(fd);
+      try {
+        const result = stream.stream_ops.fsync?.(stream);
+        return typeof result === 'number' ? result : 0;
+      } catch (err) {
+        const { errno, code } = err as { errno?: unknown; code?: unknown };
+        return typeof errno === 'number' ? errno : wasiErrno(String(code));
+      }
+    };
   }
 }
 
