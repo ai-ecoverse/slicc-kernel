@@ -135,7 +135,7 @@ The proxy answers `200` with `Content-Type: application/vnd.slicc.raw-fetch`: a 
 
 ## Filesystem
 
-`/` is the OPFS root. Each process mounts the top-level directories that exist when it starts (plus `/usr` and `/bin`), so files in them are shared by all processes and visible through the OPFS API as soon as the process that wrote them has closed them; `run` resolves only after that. `createKernel` creates `/tmp` and `/home` in OPFS, so they are shared too. `/dev`, `/proc` and anything created directly in `/` while a process runs live in that process's memory unless it already exists in OPFS. File contents are buffered per open file and written back on close, `fsync` and exit; metadata operations (`mkdir`, `rename`, `rm`, …) go straight to OPFS. The kernel worker is the only writer.
+`/` is the OPFS root. Each process mounts the top-level directories that exist when it starts (plus `/usr` and `/bin`), so files in them are shared by all processes and visible through the OPFS API as soon as the process that wrote them has closed them; `run` resolves only after that. `createKernel` creates `/tmp` and `/home` in OPFS, so they are shared too. Files directly in `/`, and directories created there after a process started, are OPFS as well, the same for Emscripten and WASI programs; only `/dev` and `/proc` live in each process's memory. File contents are buffered per open file and written back on close, `fsync` and exit; metadata operations (`mkdir`, `rename`, `rm`, …) go straight to OPFS. The kernel worker is the only writer.
 
 Directories are renamed with `FileSystemHandle.move()` where available, else by copy and delete.
 

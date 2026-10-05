@@ -57,6 +57,7 @@ export interface LiveFsNode {
   node_ops: LiveNodeOps;
   stream_ops: LiveStreamOps;
   live: LiveNodeState;
+  mounted?: unknown;
 }
 
 export interface LiveFsStream {
@@ -538,7 +539,7 @@ export function createLiveVfsPlugin(Fs: LiveFsApi): LiveVfsPlugin {
 }
 
 function ownedBy(plugin: LiveVfsPlugin, node: LiveFsNode | null | undefined): node is LiveFsNode {
-  return !!node && plugin.mounts.has(node.mount);
+  return !!node?.live && plugin.mounts.has(node.mount);
 }
 
 export function flushLiveVfs(Fs: LiveFsApi, plugin: LiveVfsPlugin): void {
@@ -566,7 +567,7 @@ export function invalidateLiveVfs(Fs: LiveFsApi, plugin: LiveVfsPlugin): void {
       s.stat = undefined;
       s.listed = undefined;
       if (s.openCount === 0) {
-        if (node !== node.mount.root) drop.push(node);
+        if (node !== node.mount.root && !node.mounted) drop.push(node);
       } else if (s.loaded && !s.dirty) {
         s.data = undefined;
         s.len = 0;
@@ -579,6 +580,7 @@ export function invalidateLiveVfs(Fs: LiveFsApi, plugin: LiveVfsPlugin): void {
 }
 
 export interface LiveMountFsApi extends LiveFsApi {
+  root?: MemfsRoot;
   filesystems: { SLICC_LIVE_FS?: LiveVfsPlugin };
   mkdirTree(path: string): void;
   mount(type: LiveVfsPlugin, opts: LiveFsMountOpts, mountpoint: string): unknown;
@@ -601,6 +603,7 @@ export function mountLiveVfsDirs(
   dirs: readonly string[],
   warn: (message: string) => void
 ): { plugin: LiveVfsPlugin; mounted: string[] } {
+  if (Fs.root?.memfs) Fs.root.node_ops = Fs.root.memfs;
   if (typeof Fs.filesystems !== 'object' || !Fs.filesystems) {
     throw new Error(
       'the module was linked without filesystem support, so the VFS cannot be mounted ' +
@@ -621,4 +624,34 @@ export function mountLiveVfsDirs(
     }
   }
   return { plugin, mounted };
+}
+
+type MemfsRoot = LiveFsNode & { contents?: Record<string, unknown>; memfs?: LiveNodeOps };
+
+export function liveRoot(Fs: LiveMountFsApi, bridge: SyncFsPosixBridge): void {
+  const root = Fs.root;
+  const plugin = Fs.filesystems.SLICC_LIVE_FS;
+  if (!root || !plugin) return;
+  root.mount.opts = { root: '/', bridge };
+  root.live = { len: 0, loaded: false, dirty: false, openCount: 0 };
+  plugin.mounts.add(root.mount);
+  invalidateLiveVfs(Fs, plugin);
+  const memfs = root.memfs ?? root.node_ops;
+  const live = plugin.node_ops;
+  root.memfs = memfs;
+  const own = (name: string) => Object.hasOwn(root.contents ?? {}, name);
+  root.node_ops = {
+    ...memfs,
+    lookup: (parent, name) => live.lookup(parent, name),
+    mknod: (parent, name, mode, dev) => live.mknod(parent, name, mode, dev),
+    unlink: (parent, name) => live.unlink(parent, name),
+    rmdir: (parent, name) => (own(name) ? memfs : live).rmdir(parent, name),
+    symlink: (parent, name, target) => live.symlink(parent, name, target),
+    rename: (node, dir, name) => (node.live ? live : memfs).rename(node, dir, name),
+    readdir(node) {
+      const names = new Set(memfs.readdir(node));
+      for (const name of live.readdir(node)) names.add(name);
+      return [...names];
+    },
+  };
 }
