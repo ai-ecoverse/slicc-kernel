@@ -28,8 +28,7 @@ export interface LocalProxyProbe {
 export type LocalProxyStatus =
   | { state: 'ready'; probe: LocalProxyProbe }
   | { state: 'blocked' }
-  | { state: 'unanswered' }
-  | { state: 'unreachable' }
+  | { state: 'unreachable'; permission: 'granted' | 'prompt' | 'unknown' }
   | { state: 'refused'; status: number; error: string }
   | { state: 'incompatible' };
 
@@ -165,7 +164,10 @@ export async function checkLocalProxy(options: LocalProxyCheckOptions): Promise<
   } catch {
     const now = await permission(permissions);
     if (now === 'denied') return { state: 'blocked' };
-    return { state: now === 'prompt' ? 'unanswered' : 'unreachable' };
+    return {
+      state: 'unreachable',
+      permission: now === 'granted' || now === 'prompt' ? now : 'unknown',
+    };
   }
   if (!response.ok) {
     return { state: 'refused', status: response.status, error: await refusalMessage(response) };

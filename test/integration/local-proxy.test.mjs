@@ -93,7 +93,10 @@ test('checkLocalProxy tells a ready, refusing and missing proxy apart', async (t
     status: 403,
     error: 'proxy key missing or wrong',
   });
-  assert.deepEqual(await check('http://127.0.0.1:1', key), { state: 'unreachable' });
+  assert.deepEqual(await check('http://127.0.0.1:1', key), {
+    state: 'unreachable',
+    permission: 'unknown',
+  });
 });
 
 test('the page transport names a way out in its 502', async (t) => {
