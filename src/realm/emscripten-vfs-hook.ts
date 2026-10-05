@@ -2,6 +2,7 @@ import {
   flushLiveVfs,
   invalidateLiveVfs,
   type LiveMountFsApi,
+  liveRoot,
   mountLiveVfsDirs,
 } from './live-vfs-fs.ts';
 import type { SyncFsPosixBridge } from './sync-fs-wire.ts';
@@ -26,13 +27,16 @@ export interface EmscriptenVfsHookDeps {
   warn: (message: string) => void;
 }
 
-function topLevelDirs(bridge: SyncFsPosixBridge, warn: (message: string) => void): string[] {
+function topLevelDirs(
+  bridge: SyncFsPosixBridge,
+  warn: (message: string) => void
+): string[] | undefined {
   let names: string[];
   try {
     names = bridge.readdir('/');
   } catch (err) {
     warn(`cannot list the VFS root, nothing mounted: ${String(err)}`);
-    return [];
+    return undefined;
   }
   const candidates = names
     .filter((name) => name && !name.includes('/') && !MODULE_OWNED_DIRS.has(name))
@@ -52,7 +56,9 @@ export function mountVfsIntoEmscripten(
   deps: EmscriptenVfsHookDeps
 ): EmscriptenVfsHandle {
   const { bridge, warn } = deps;
-  const { plugin, mounted } = mountLiveVfsDirs(Fs, bridge, topLevelDirs(bridge, warn), warn);
+  const dirs = topLevelDirs(bridge, warn);
+  const { plugin, mounted } = mountLiveVfsDirs(Fs, bridge, dirs ?? [], warn);
+  if (dirs) liveRoot(Fs, bridge);
   try {
     Fs.chdir(deps.cwd);
   } catch (err) {
