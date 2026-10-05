@@ -113,7 +113,8 @@ function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
 }
 
 async function readHead(
-  reader: ReadableStreamDefaultReader<Uint8Array>
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  idleMs: number
 ): Promise<{ head: ResponseHead; rest: Uint8Array }> {
   let buffer: Uint8Array = new Uint8Array(0);
   for (;;) {
@@ -129,7 +130,7 @@ async function readHead(
         return { head, rest: buffer.subarray(4 + length) };
       }
     }
-    const next = await reader.read();
+    const next = await readWithin(reader, idleMs);
     if (next.done) throw failure('closed before the response head');
     buffer = concat(buffer, next.value);
   }
@@ -236,14 +237,15 @@ export function localProxyTransport(options: LocalProxyTransportOptions): RealmT
         throw await refusal(response);
       }
       const reader = response.body.getReader();
+      const idleMs = options.bodyIdleMs ?? BODY_IDLE_MS;
       let framed: { head: ResponseHead; rest: Uint8Array };
       try {
-        framed = await readHead(reader);
+        framed = await readHead(reader, idleMs);
       } catch (e) {
         await reader.cancel().catch(() => undefined);
         throw e;
       }
-      const body = chunks(framed.rest, reader, options.bodyIdleMs ?? BODY_IDLE_MS);
+      const body = chunks(framed.rest, reader, idleMs);
       return {
         status: framed.head.status,
         statusText: framed.head.statusText,
