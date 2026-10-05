@@ -35,7 +35,7 @@
   "devDependencies": {
     "@ai-ecoverse/wasm-bash": "5.3.0-7",
     "@biomejs/biome": "2.5.15",
-    "@types/node": "24.19.1",
+    "@types/node": "26.6.4",
     "esbuild": "0.28.2",
     "lefthook": "2.1.16",
     "monocart-coverage-reports": "2.13.0",
