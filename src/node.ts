@@ -147,7 +147,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
       );
       return {
         pid: session.pid,
-        exited: session.exited,
+        exited: guard(() => session.exited),
         get onData() {
           return listener;
         },
