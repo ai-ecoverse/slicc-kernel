@@ -1,6 +1,9 @@
 import { META_DB, type MetaStore } from './fs/meta.ts';
 import { OpfsFs } from './fs/opfs.ts';
 import type { WasmWorkerLike } from './kernel/host.ts';
+import { caStore } from './kernel/net/network.ts';
+import { RemoteTransport, type TransportReply } from './kernel/net/remote-transport.ts';
+import type { RealmTransportTraits } from './kernel/net/transport.ts';
 import { SIG } from './kernel/signals.ts';
 import {
   Launcher,
@@ -21,6 +24,7 @@ export interface InitRequest {
   modules?: string;
   env?: Record<string, string>;
   metadata?: string | false;
+  transport?: RealmTransportTraits;
 }
 
 export interface RunRequest {
@@ -73,6 +77,7 @@ function act(session: TerminalSession, req: TerminalAction): void {
 
 export function serveKernel(port: KernelPort, deps: ServeDeps): void {
   let launcher: Promise<Launcher> | undefined;
+  let remote: RemoteTransport | undefined;
   const terminals = new Map<number, TerminalSession>();
   const reply = (id: number, body: object) => port.postMessage({ id, ...body });
 
@@ -98,6 +103,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
       launcher = (req.root ? Promise.resolve(req.root) : deps.storage()).then(async (root) => {
         const name = req.metadata ?? META_DB;
         const meta = name === false ? undefined : await deps.metadata?.(name);
+        remote = req.transport ? new RemoteTransport(port, req.transport) : undefined;
         const fs = new OpfsFs(root, meta);
         await fs.reconcile();
         const started = new Launcher({
@@ -105,6 +111,8 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
           createWorker: deps.createWorker,
           ...(req.modules ? { modules: req.modules } : {}),
           ...(req.env ? { env: req.env } : {}),
+          ...(remote ? { transport: remote } : {}),
+          caStore: caStore(deps.metadata ? name : false),
         });
         await started.prepare();
         return started;
@@ -127,6 +135,10 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
   }
 
   port.addEventListener('message', (event) => {
+    if ((event.data as { net?: unknown }).net !== undefined) {
+      remote?.receive(event.data as TransportReply);
+      return;
+    }
     const req = event.data as KernelRequest;
     handle(req).then(
       (result) => reply(req.id, { result }),

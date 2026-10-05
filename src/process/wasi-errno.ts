@@ -5,6 +5,7 @@ const WASI_ERRNO: Readonly<Partial<Record<string, number>>> = {
   EAFNOSUPPORT: 5,
   EAGAIN: 6,
   ECONNREFUSED: 14,
+  EEXIST: 20,
   EINPROGRESS: 26,
   EISCONN: 30,
   ENETUNREACH: 40,

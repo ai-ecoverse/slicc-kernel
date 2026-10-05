@@ -11,6 +11,7 @@ const POLLRDNORM = 0x040;
 const POLLWRNORM = 0x100;
 
 export const O_NONBLOCK = 0o4000;
+const SOCKET_MODE = 0o140777;
 
 interface PtyPathFs {
   chown?: (path: string, ...rest: number[]) => void;
@@ -134,6 +135,8 @@ export interface ProcessStream {
   sliccKernelFile?: boolean;
 
   sliccCloexec?: boolean;
+
+  sliccKernelSocket?: boolean;
   path?: string;
   flags: number;
   position: number;
@@ -167,6 +170,17 @@ export interface ProcessFs extends EmscriptenFsForHook {
   lookupPath?(path: string, opts?: { follow?: boolean }): { node: object };
 }
 
+interface FsNode {
+  mode: number;
+  node_ops: object;
+}
+
+interface SocketNodeFs {
+  mount(type: { mount(): FsNode }, opts: object, mountpoint: null): FsNode;
+  createNode(parent: FsNode | null, name: string, mode: number, rdev: number): FsNode;
+  createStream(stream: object, fd?: number): ProcessStream;
+}
+
 export interface ProcessPipeFs {
   createPipe(): { readable_fd: number; writable_fd: number };
 }
@@ -183,6 +197,10 @@ function nonblocking(stream: ProcessStream): { nonblock: true } | undefined {
 
 export class KernelStreams {
   private readonly refs = new Map<number, number>();
+
+  private socketRoot: FsNode | undefined;
+
+  private sockets = 0;
 
   private readonly Fs: ProcessFs;
 
@@ -211,6 +229,29 @@ export class KernelStreams {
     stream.stream_ops = this.ops(kfd, stream.stream_ops);
     if (terminal ?? this.sys.isatty?.(kfd) ?? false) stream.tty = this.ttyOps(kfd);
     else delete stream.tty;
+  }
+
+  attachSocket(stream: ProcessStream, kfd: number): void {
+    this.attach(stream, kfd, false);
+    stream.sliccKernelSocket = true;
+  }
+
+  socketStream(flags: number): ProcessStream {
+    const fs = this.Fs as unknown as Partial<SocketNodeFs>;
+    if (!fs.mount || !fs.createNode || !fs.createStream) {
+      const stream = this.Fs.open('/dev/null', 2);
+      stream.flags = flags;
+      return stream;
+    }
+    const createNode = fs.createNode;
+    this.socketRoot ??= fs.mount({ mount: () => createNode(null, '/', 0o40777, 0) }, {}, null);
+    const ino = ++this.sockets;
+    const node = fs.createNode(this.socketRoot, `socket:${ino}`, SOCKET_MODE, 0);
+    const now = new Date();
+    const stat = { dev: 0, ino, mode: SOCKET_MODE, nlink: 1, uid: 0, gid: 0, rdev: 0, size: 0 };
+    const times = { atime: now, mtime: now, ctime: now, blksize: 4096, blocks: 0 };
+    node.node_ops = { getattr: () => ({ ...stat, ...times }) };
+    return fs.createStream({ node, flags, seekable: false, position: 0, stream_ops: {} });
   }
 
   nameTerminal(stream: ProcessStream): void {

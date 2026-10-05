@@ -10,6 +10,7 @@ const here = (path) => fileURLToPath(new URL(path, import.meta.url));
 export const roots = [
   ['/dist/', here('../../dist/')],
   ['/node_modules/@ai-ecoverse/', here('../../node_modules/@ai-ecoverse/')],
+  ['/fixtures/', here('./fixtures/')],
   ['/', here('./page/')],
 ];
 
@@ -25,6 +26,7 @@ const types = {
   '.json': 'application/json; charset=utf-8',
   '.map': 'application/json; charset=utf-8',
   '.wasm': 'application/wasm',
+  '.mjs': 'text/javascript; charset=utf-8',
 };
 
 export function locate(pathname) {

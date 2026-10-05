@@ -19,10 +19,14 @@ import {
   pollFile,
 } from './fd-table.ts';
 import type { JobTable } from './jobs.ts';
+import { HTTP_OPS, type HttpHandles, type HttpSyscall } from './net/http-syscalls.ts';
+import { NO_TRANSPORT } from './net/network.ts';
 import type { ForkState } from './protocol.ts';
 import { PTY_OPS, type PtySyscall, type PtyTable, ptySyscall } from './pty.ts';
 import { selectFds } from './select.ts';
 import { type DefaultAction, defaultAction, isSignal, SIG, sigbit } from './signals.ts';
+import { KernelSocket, LoopbackNet } from './socket.ts';
+import { SOCKET_OPS, type SocketSyscall, socketSyscall } from './socket-syscalls.ts';
 import type { KernelTty, Termios } from './tty.ts';
 import { type VfsFileFs, VfsNodes, vfsFile } from './vfs-file.ts';
 
@@ -128,6 +132,8 @@ export type WasmSyscall =
   | { op: 'tty-pgrp-set'; fd: number; pgrp: number }
   | { op: 'sig-mask'; caught: number; ignored: number }
   | { op: 'sig-pause' }
+  | SocketSyscall
+  | HttpSyscall
   | PtySyscall;
 
 type FdSyscall = Extract<WasmSyscall, { op: `fd-${string}` }>;
@@ -146,6 +152,14 @@ const JOB_OPS: ReadonlySet<string> = new Set([
 
 function isJobSyscall(req: WasmSyscall): req is JobSyscall {
   return JOB_OPS.has(req.op);
+}
+
+function isHttpSyscall(req: WasmSyscall): req is HttpSyscall {
+  return req.op.startsWith('net-');
+}
+
+function isSocketSyscall(req: WasmSyscall): req is SocketSyscall {
+  return req.op.startsWith('sock-');
 }
 
 function isPtySyscall(req: WasmSyscall): req is PtySyscall {
@@ -241,6 +255,8 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'tty-pgrp-set',
   'sig-mask',
   'sig-pause',
+  ...SOCKET_OPS,
+  ...HTTP_OPS,
   ...PTY_OPS,
 ]);
 
@@ -275,6 +291,10 @@ export interface WasmProcessOptions {
   jobs?: JobTable;
 
   ptys?: PtyTable;
+
+  net?: LoopbackNet;
+
+  http?: HttpHandles;
 }
 
 export type StateListener = (state: 'stopped' | 'continued', sig: number) => void;
@@ -300,6 +320,8 @@ export class WasmProcess {
   private resumed: Promise<void> = Promise.resolve();
   private wake: (() => void) | undefined;
   private readonly stateListeners: StateListener[] = [];
+
+  private net: LoopbackNet | undefined;
 
   private readonly nodes: VfsNodes;
 
@@ -391,6 +413,8 @@ export class WasmProcess {
       if (isFdSyscall(req)) return await this.fdSyscall(req);
       if (isTtySyscall(req)) return this.ttySyscall(req);
       if (isJobSyscall(req)) return this.jobSyscall(req);
+      if (isSocketSyscall(req)) return await this.socketSyscall(req);
+      if (isHttpSyscall(req)) return await this.httpSyscall(req);
       if (isPtySyscall(req)) {
         const { ptys, jobs } = this.options;
         return ptySyscall(req, { pid: this.pid, fds: this.fds, ptys, jobs });
@@ -603,7 +627,7 @@ export class WasmProcess {
     const flags = this.fds.statusFlags(fd);
     return {
       tty: file.tty !== undefined,
-      kind: kernelFdKind(file),
+      kind: file instanceof KernelSocket ? 'socket' : kernelFdKind(file),
       ...(file.heldMeta ? { meta: file.heldMeta } : {}),
       ...(flags !== undefined ? { flags } : {}),
       ...(this.fds.closesOnExec(fd) ? { cloexec: true } : {}),
@@ -685,6 +709,21 @@ export class WasmProcess {
     }
   }
 
+  private httpSyscall(req: HttpSyscall): Promise<SyncFsResult> {
+    const http = this.options.http;
+    if (!http) return Promise.resolve({ ok: false, errno: 'ENETUNREACH', message: NO_TRANSPORT });
+    return http.syscall(req);
+  }
+
+  private socketSyscall(req: SocketSyscall): Promise<SyncFsResult> {
+    this.net ??= this.options.net ?? new LoopbackNet();
+    return socketSyscall(req, {
+      fds: this.fds,
+      net: this.net,
+      blocking: () => this.blockingSignal(),
+    });
+  }
+
   private tty(fd: number): KernelTty {
     const file = this.fds.get(fd).file;
     const tty = file.tty ?? file.pty?.slave;
@@ -693,7 +732,10 @@ export class WasmProcess {
   }
 
   private async procSyscall(
-    req: Exclude<WasmSyscall, FdSyscall | TtySyscall | JobSyscall | PtySyscall>
+    req: Exclude<
+      WasmSyscall,
+      FdSyscall | TtySyscall | JobSyscall | SocketSyscall | HttpSyscall | PtySyscall
+    >
   ): Promise<SyncFsResult> {
     switch (req.op) {
       case 'proc-fork':
@@ -795,5 +837,6 @@ export class WasmProcess {
     this.clearAlarm();
     for (const pid of this.children.pids()) this.options.onReap?.(pid);
     await this.fds.closeAll();
+    await this.options.http?.closeAll();
   }
 }

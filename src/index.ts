@@ -1,4 +1,20 @@
+import type { TransportCall } from './kernel/net/remote-transport.ts';
 import type { KernelCall, TerminalAction } from './serve.ts';
+import { type NetworkTransport, serveTransport } from './transport.ts';
+
+export {
+  type FetchTransportOptions,
+  fetchTransport,
+  type HeaderList,
+  type NetworkRequest,
+  type NetworkResponse,
+  type NetworkTraits,
+  type NetworkTransport,
+} from './transport.ts';
+
+export interface NetworkOptions {
+  transport?: NetworkTransport;
+}
 
 export interface KernelOptions {
   root?: FileSystemDirectoryHandle;
@@ -6,6 +22,7 @@ export interface KernelOptions {
   env?: Record<string, string>;
   metadata?: string | false;
   worker?: string | URL;
+  network?: NetworkOptions;
 }
 
 export interface RunOptions {
@@ -94,10 +111,14 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
 
   const fail = (error: Error) => {
     failure = error;
+    bridge?.close();
     for (const call of pending.values()) call.reject(error);
     pending.clear();
   };
-  worker.addEventListener('message', ({ data }: MessageEvent<Reply>) => {
+  const transport = options.network?.transport;
+  const bridge = transport ? serveTransport(worker, transport) : undefined;
+  worker.addEventListener('message', ({ data }: MessageEvent<Reply | TransportCall>) => {
+    if ('net' in data) return bridge?.answer(data);
     const call = pending.get(data.id);
     if (!call) return;
     if (data.fd !== undefined) return call.output?.(data.fd, data.bytes as Uint8Array);
@@ -169,6 +190,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     ...(options.modules ? { modules: options.modules } : {}),
     ...(options.env ? { env: options.env } : {}),
     ...(options.metadata !== undefined ? { metadata: options.metadata } : {}),
+    ...(transport ? { transport: transport.traits } : {}),
   });
 
   return {

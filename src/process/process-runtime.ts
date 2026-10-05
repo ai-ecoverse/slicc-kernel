@@ -35,8 +35,10 @@ import {
   restoreForkedStreams,
   vfsPromoter,
 } from './process-fork.ts';
+import { createHttpKernel } from './process-http.ts';
 import type { PtyKernel } from './process-pty.ts';
 import { SignalGate } from './process-signals.ts';
+import { createSocketKernel } from './process-sockets.ts';
 import { ownByRealmUser } from './realm-user.ts';
 
 export {
@@ -415,6 +417,15 @@ export async function runWasmProcess(
     describeFork: () => describeForFork(running.FS, sys, streams, livePath),
     inherit: (actions) => describeInherited(running.FS, sys, streams, livePath, actions),
     stdioPromoter: () => vfsPromoter(running.FS, sys, streams, livePath),
+  });
+  running.sliccKernel.http = createHttpKernel(transport);
+  running.sliccKernel.net = createSocketKernel({
+    transport,
+    Fs: running.FS,
+    sys,
+    streams,
+    sigpipe,
+    restartable,
   });
   try {
     return runMain(running, init);

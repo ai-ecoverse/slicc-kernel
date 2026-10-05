@@ -1,0 +1,13 @@
+{
+  "name": "socktest",
+  "private": true,
+  "slicc": {
+    "abi": "emscripten",
+    "commands": {
+      "socktest": {
+        "glue": "bin/socktest",
+        "wasm": "bin/socktest.wasm"
+      }
+    }
+  }
+}

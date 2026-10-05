@@ -19,6 +19,7 @@ import {
 import type { ChildForker, ChildSpawner } from './children.ts';
 import { type FdTable, kernelFdKind, type OpenFile } from './fd-table.ts';
 import type { JobTable } from './jobs.ts';
+import type { HttpHandles } from './net/http-syscalls.ts';
 import { isWasmSyscall, type StateListener, WasmProcess } from './process.ts';
 import {
   type ForkState,
@@ -31,6 +32,7 @@ import {
 } from './protocol.ts';
 import type { PtyTable } from './pty.ts';
 import { SIG, sigbit } from './signals.ts';
+import { KernelSocket, type LoopbackNet } from './socket.ts';
 
 export interface WasmWorkerLike {
   postMessage(message: unknown, transfer?: Transferable[]): void;
@@ -57,6 +59,10 @@ export interface SpawnWasmOptions {
   kill?: (pid: number, sig: number) => boolean | Promise<boolean>;
   jobs?: JobTable;
   ptys?: PtyTable;
+
+  net?: LoopbackNet;
+
+  http?: HttpHandles;
   onReap?: (pid: number) => void;
 }
 
@@ -87,7 +93,7 @@ export function inheritedFds(fds: FdTable): InheritedFd[] {
     .map((fd): InheritedFd => {
       const open = fds.get(fd);
       const flags = fds.statusFlags(fd);
-      const kind = kernelFdKind(open.file);
+      const kind = open.file instanceof KernelSocket ? 'socket' : kernelFdKind(open.file);
       const meta = open.file.heldMeta;
       return {
         fd,
@@ -116,6 +122,8 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     kill: opts.kill,
     jobs: opts.jobs,
     ptys: opts.ptys,
+    net: opts.net,
+    http: opts.http,
     onReap: opts.onReap,
     onPending: (sig) => void Atomics.or(header, SAB_I_SIGNALS, sigbit(sig)),
     onTimer: (which) => void Atomics.or(header, SAB_I_TIMERS, 1 << which),
