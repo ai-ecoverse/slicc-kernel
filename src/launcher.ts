@@ -77,6 +77,7 @@ interface Target {
   argv0: string;
   prefix?: string[];
   env?: Record<string, string>;
+  unset?: string[];
   imports?: string;
 }
 
@@ -166,6 +167,7 @@ function targetOf(command: Command): Target {
     argv0: command.argv0,
     ...(command.args ? { prefix: command.args } : {}),
     ...(command.env ? { env: command.env } : {}),
+    ...(command.unset ? { unset: command.unset } : {}),
     ...(command.imports ? { imports: command.imports } : {}),
   };
 }
@@ -282,7 +284,13 @@ export class Launcher {
     const [interp, ...rest] = words;
     const found = interp ? await this.resolve(interp, interp, cwd) : undefined;
     if (!found) return undefined;
-    const target = command?.env ? { ...found, env: { ...found.env, ...command.env } } : found;
+    const target = command
+      ? {
+          ...found,
+          env: { ...found.env, ...command.env },
+          unset: [...(found.unset ?? []), ...(command.unset ?? [])],
+        }
+      : found;
     const arg = rest.join(' ');
     return {
       target,
@@ -360,7 +368,8 @@ export class Launcher {
     req: Omit<StartRequest, 'program' | 'argv0' | 'args'>
   ): Promise<WasmProcessHandle> {
     const { target, args } = planned;
-    const env = { ...expandDefaults(target.env, req.env), ...req.env };
+    const env = { ...expandDefaults(target.env, { ...req.env, cwd: req.cwd }), ...req.env };
+    for (const key of target.unset ?? []) delete env[key];
     let program: WasmProgram;
     try {
       program = await this.program(target, env);

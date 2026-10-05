@@ -10,6 +10,7 @@ export interface Command {
   argv0: string;
   args?: string[];
   env?: Record<string, string>;
+  unset?: string[];
   script?: string;
   imports?: string;
 }
@@ -40,13 +41,30 @@ function inside(pkg: string, rel: unknown): string | undefined {
   return `${pkg}/${clean}`;
 }
 
-function envOf(pkg: string, raw: unknown): Record<string, string> {
-  const env: Record<string, string> = {};
+type ManifestEnv = Record<string, string | null>;
+
+function envOf(pkg: string, raw: unknown): ManifestEnv {
+  const env: ManifestEnv = {};
   if (!raw || typeof raw !== 'object') return env;
   for (const [key, value] of Object.entries(raw)) {
-    if (ENV_KEY.test(key) && typeof value === 'string') env[key] = value.replace(PACKAGE, pkg);
+    if (!ENV_KEY.test(key)) continue;
+    if (typeof value === 'string') env[key] = value.replace(PACKAGE, pkg);
+    else if (value === null) env[key] = null;
   }
   return env;
+}
+
+function envFields(merged: ManifestEnv): { env?: Record<string, string>; unset?: string[] } {
+  const env: Record<string, string> = {};
+  const unset: string[] = [];
+  for (const [key, value] of Object.entries(merged)) {
+    if (value === null) unset.push(key);
+    else env[key] = value;
+  }
+  return {
+    ...(Object.keys(env).length > 0 ? { env } : {}),
+    ...(unset.length > 0 ? { unset } : {}),
+  };
 }
 
 function argsOf(pkg: string, raw: unknown): string[] | undefined {
@@ -65,10 +83,9 @@ function commandOf(
   name: string,
   raw: CommandEntry,
   packageAbi: Abi,
-  shared: Record<string, string>
+  shared: ManifestEnv
 ): Command | undefined {
-  const env = { ...shared, ...envOf(pkg, raw.env) };
-  const withEnv = Object.keys(env).length > 0 ? { env } : {};
+  const withEnv = envFields({ ...shared, ...envOf(pkg, raw.env) });
   const script = inside(pkg, raw.script);
   if (script) {
     return { name, abi: packageAbi, glue: script, wasm: script, argv0: name, script, ...withEnv };
