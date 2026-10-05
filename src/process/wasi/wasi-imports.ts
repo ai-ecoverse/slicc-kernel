@@ -275,6 +275,7 @@ function processes(
     spawn(o) {
       const mine: number[] = [];
       const theirs: number[] = [];
+      host.fds.promoteFiles();
       try {
         const stdio = STDIO.map((name, n) => slot(n, o[name] ?? 'inherit', mine, theirs));
         const pid = call({
@@ -295,12 +296,14 @@ function processes(
         throw err;
       } finally {
         for (const fd of theirs) close(fd);
+        host.o.fs.invalidate?.();
       }
     },
     wait(pid) {
       for (;;) {
         try {
           const [, status] = call({ op: 'proc-wait', pid, nohang: false }) as [number, number];
+          host.o.fs.invalidate?.();
           const signal = status & 0x7f;
           return signal ? { status: 128 + signal, signal } : { status: (status >> 8) & 0xff };
         } catch (err) {
