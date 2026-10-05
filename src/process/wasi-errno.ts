@@ -30,6 +30,7 @@ const WASI_ERRNO: Readonly<Partial<Record<string, number>>> = {
   EPIPE: 64,
   ESPIPE: 70,
   ESRCH: 71,
+  ETIMEDOUT: 73,
 };
 
 const EIO = 29;

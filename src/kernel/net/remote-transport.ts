@@ -22,7 +22,7 @@ export type TransportReply =
   | { net: 'head'; nid: number; status: number; statusText: string; headers: HeaderList }
   | { net: 'chunk'; nid: number; bytes: Uint8Array }
   | { net: 'end'; nid: number }
-  | { net: 'error'; nid: number; message: string; status?: number };
+  | { net: 'error'; nid: number; message: string; status?: number; code?: string };
 
 export interface TransportPort {
   postMessage(message: TransportCall): void;
@@ -30,10 +30,12 @@ export interface TransportPort {
 
 export class TransportError extends Error {
   readonly status: number | undefined;
+  readonly code: string | undefined;
 
-  constructor(message: string, status?: number) {
+  constructor(message: string, status?: number, code?: string) {
     super(message);
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -60,8 +62,9 @@ export class RemoteTransport implements RealmTransport {
     const waiter = this.waiting.get(reply.nid);
     if (!waiter) return;
     this.waiting.delete(reply.nid);
-    if (reply.net === 'error') waiter.reject(new TransportError(reply.message, reply.status));
-    else waiter.resolve(reply);
+    if (reply.net === 'error') {
+      waiter.reject(new TransportError(reply.message, reply.status, reply.code));
+    } else waiter.resolve(reply);
   }
 
   private ask(call: TransportCall): Promise<TransportReply> {

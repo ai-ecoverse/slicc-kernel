@@ -1,3 +1,4 @@
+import { BODY_IDLE_MS, readWithin } from './body-idle.ts';
 import type {
   HeaderList,
   RealmTransport,
@@ -17,6 +18,7 @@ export interface LocalProxyCheckOptions extends LocalProxyOptions {
 
 export interface LocalProxyTransportOptions extends LocalProxyOptions {
   maxRequestBody?: number;
+  bodyIdleMs?: number;
 }
 
 export interface LocalProxyProbe {
@@ -135,11 +137,16 @@ async function readHead(
 
 async function* chunks(
   rest: Uint8Array,
-  reader: ReadableStreamDefaultReader<Uint8Array>
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  idleMs: number
 ): AsyncGenerator<Uint8Array> {
   try {
     if (rest.byteLength > 0) yield rest;
-    for (let next = await reader.read(); !next.done; next = await reader.read()) {
+    for (
+      let next = await readWithin(reader, idleMs);
+      !next.done;
+      next = await readWithin(reader, idleMs)
+    ) {
       if (next.value.byteLength > 0) yield next.value;
     }
   } finally {
@@ -236,7 +243,7 @@ export function localProxyTransport(options: LocalProxyTransportOptions): RealmT
         await reader.cancel().catch(() => undefined);
         throw e;
       }
-      const body = chunks(framed.rest, reader);
+      const body = chunks(framed.rest, reader, options.bodyIdleMs ?? BODY_IDLE_MS);
       return {
         status: framed.head.status,
         statusText: framed.head.statusText,
