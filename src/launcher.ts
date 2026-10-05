@@ -1,4 +1,4 @@
-import { type Command, scanCommands } from './commands.ts';
+import { type Abi, type Command, scanCommands } from './commands.ts';
 import { followLinks, withCommandDirs } from './fs/commands.ts';
 import type { KernelFs } from './fs/types.ts';
 import {
@@ -9,6 +9,7 @@ import {
 } from './kernel/children.ts';
 import { bytesSource, FdTable, nullFile, sinkFile } from './kernel/fd-table.ts';
 import { spawnWasmProcess, type WasmProcessHandle, type WasmWorkerLike } from './kernel/host.ts';
+import { LockTable } from './kernel/host-ops.ts';
 import { JobTable } from './kernel/jobs.ts';
 import { HttpHandles } from './kernel/net/http-syscalls.ts';
 import {
@@ -27,6 +28,7 @@ import type { ForkState, WasmProgram } from './kernel/protocol.ts';
 import { PtyTable } from './kernel/pty.ts';
 import { LoopbackNet } from './kernel/socket.ts';
 import { KernelTty } from './kernel/tty.ts';
+import { type ImportedMemory, importedMemory } from './process/wasi/wasi-module.ts';
 
 export interface LauncherOptions {
   fs: KernelFs;
@@ -69,11 +71,19 @@ export interface RunResult {
 }
 
 interface Target {
+  abi: Abi;
   glue: string;
   wasm: string;
   argv0: string;
   prefix?: string[];
   env?: Record<string, string>;
+  unset?: string[];
+  imports?: string;
+}
+
+interface Compiled {
+  module: WebAssembly.Module;
+  memory?: ImportedMemory;
 }
 
 interface Planned {
@@ -94,6 +104,9 @@ interface StartRequest {
 }
 
 const COMMAND = /^\/(?:usr\/)?bin\/([^/]+)$/;
+const PACKAGE_ROOT = /^(.*\/node_modules\/(?:@[^/]+\/)?[^/]+)\//;
+const ENV_REFERENCE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
+const WASM_MAGIC = [0x00, 0x61, 0x73, 0x6d];
 const SHEBANG_MAX = 256;
 const NOT_FOUND = 127;
 const SHARED_DIRS = ['/tmp', '/home'];
@@ -107,13 +120,55 @@ function modulePath(glue: string): string {
   return glue.endsWith('.js') ? `${glue.slice(0, -3)}.wasm` : `${glue}.wasm`;
 }
 
+function isWasm(bytes: Uint8Array): boolean {
+  return WASM_MAGIC.every((b, i) => bytes[i] === b);
+}
+
+function shebang(head: Uint8Array): string[] | undefined {
+  if (head[0] !== 0x23 || head[1] !== 0x21) return undefined;
+  return new TextDecoder()
+    .decode(head.subarray(0, SHEBANG_MAX))
+    .slice(2)
+    .split('\n')[0]
+    .trim()
+    .split(/[ \t]+/);
+}
+
+function interpreter(head: Uint8Array): string {
+  const words = shebang(head);
+  if (!words) return 'node';
+  if (baseName(words[0]) === 'env') words.shift();
+  if (words[0] === '-S') words.shift();
+  return baseName(words[0] ?? '');
+}
+
+export function expandDefaults(
+  defaults: Readonly<Record<string, string>> | undefined,
+  env: Readonly<Record<string, string>>
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(defaults ?? {})) {
+    let missing = false;
+    const expanded = value.replace(ENV_REFERENCE, (_, name: string) => {
+      const set = Object.hasOwn(env, name) ? env[name] : undefined;
+      if (set === undefined) missing = true;
+      return set ?? '';
+    });
+    if (!missing) out[key] = expanded;
+  }
+  return out;
+}
+
 function targetOf(command: Command): Target {
   return {
+    abi: command.abi,
     glue: command.glue,
     wasm: command.wasm,
     argv0: command.argv0,
     ...(command.args ? { prefix: command.args } : {}),
     ...(command.env ? { env: command.env } : {}),
+    ...(command.unset ? { unset: command.unset } : {}),
+    ...(command.imports ? { imports: command.imports } : {}),
   };
 }
 
@@ -143,11 +198,12 @@ export class Launcher {
   private readonly modulesDir: string;
   private readonly env: Record<string, string>;
   private catalog: Promise<Map<string, Command>> | undefined;
-  private readonly compiled = new Map<string, Promise<WebAssembly.Module>>();
+  private readonly compiled = new Map<string, Promise<Compiled>>();
   private readonly processes = new Map<number, WasmProcessHandle>();
   private readonly zombies = new Set<number>();
   private readonly orphans = new Set<number>();
   private readonly jobs = new JobTable();
+  private readonly locks = new LockTable();
   private readonly ptys = new PtyTable((tty, sig) => this.jobs.signalOwnedForeground(tty, sig));
   readonly net = new LoopbackNet();
   private readonly ca: () => Promise<RealmCa>;
@@ -179,14 +235,40 @@ export class Launcher {
     const name = COMMAND.exec(file)?.[1] ?? (file.includes('/') ? undefined : file);
     if (name !== undefined) {
       const command = (await this.commands()).get(name);
-      return command && targetOf(command);
+      return command && !command.script ? targetOf(command) : undefined;
     }
     const glue = await followLinks(this.base, this.fs.resolvePath(cwd, file));
     const linked = COMMAND.exec(glue)?.[1];
     if (linked !== undefined) return this.resolve(`/bin/${linked}`, argv0, cwd);
+    const head = await this.head(glue);
+    if (!head) return undefined;
+    if (isWasm(head)) {
+      return {
+        abi: 'wasi',
+        glue,
+        wasm: glue,
+        argv0: baseName(argv0 || file).replace(/\.wasm$/, ''),
+      };
+    }
+    if (interpreter(head) !== 'node') return undefined;
     const wasm = modulePath(glue);
-    if (!(await this.base.exists(glue)) || !(await this.base.exists(wasm))) return undefined;
-    return { glue, wasm, argv0: baseName(argv0 || file) };
+    if (!(await this.base.exists(wasm))) return undefined;
+    return { abi: 'emscripten', glue, wasm, argv0: baseName(argv0 || file) };
+  }
+
+  private async head(path: string): Promise<Uint8Array | undefined> {
+    try {
+      return (await this.base.readFileBuffer(path)).subarray(0, SHEBANG_MAX);
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async scriptCommand(file: string): Promise<Command | undefined> {
+    const name = COMMAND.exec(file)?.[1] ?? (file.includes('/') ? undefined : file);
+    if (name === undefined) return undefined;
+    const command = (await this.commands()).get(name);
+    return command?.script ? command : undefined;
   }
 
   private async interpreted(
@@ -194,30 +276,30 @@ export class Launcher {
     argv: string[],
     cwd: string
   ): Promise<Planned | undefined> {
-    let head: Uint8Array;
-    try {
-      head = (await this.base.readFileBuffer(this.fs.resolvePath(cwd, file))).subarray(
-        0,
-        SHEBANG_MAX
-      );
-    } catch {
-      return undefined;
-    }
-    if (head[0] !== 0x23 || head[1] !== 0x21) return undefined;
-    const words = new TextDecoder()
-      .decode(head)
-      .slice(2)
-      .split('\n')[0]
-      .trim()
-      .split(/[ \t]+/);
+    const command = await this.scriptCommand(file);
+    const script = command?.script ?? this.fs.resolvePath(cwd, file);
+    const words = shebang((await this.head(script)) ?? new Uint8Array());
+    if (!words) return undefined;
     if (baseName(words[0]) === 'env') words.shift();
     const [interp, ...rest] = words;
-    const target = interp ? await this.resolve(interp, interp, cwd) : undefined;
-    if (!target) return undefined;
+    const found = interp ? await this.resolve(interp, interp, cwd) : undefined;
+    if (!found) return undefined;
+    const target = command
+      ? {
+          ...found,
+          env: { ...found.env, ...command.env },
+          unset: [...(found.unset ?? []), ...(command.unset ?? [])],
+        }
+      : found;
     const arg = rest.join(' ');
     return {
       target,
-      args: [...(target.prefix ?? []), ...(arg ? [arg] : []), file, ...argv.slice(1)],
+      args: [
+        ...(target.prefix ?? []),
+        ...(arg ? [arg] : []),
+        command ? script : file,
+        ...argv.slice(1),
+      ],
     };
   }
 
@@ -232,14 +314,16 @@ export class Launcher {
     return head && !(head[0] === 0x23 && head[1] === 0x21) ? 'ENOEXEC' : 'ENOENT';
   }
 
-  private module(path: string): Promise<WebAssembly.Module> {
+  private module(path: string): Promise<Compiled> {
     return this.base.stat(path).then((st) => {
       const key = `${path}:${st.size}:${st.mtime.getTime()}`;
       let module = this.compiled.get(key);
       if (!module) {
-        module = this.base
-          .readFileBuffer(path)
-          .then((bytes) => WebAssembly.compile(bytes as BufferSource));
+        module = this.base.readFileBuffer(path).then(async (bytes) => {
+          const memory = importedMemory(bytes);
+          const compiled = await WebAssembly.compile(bytes as BufferSource);
+          return { module: compiled, ...(memory ? { memory } : {}) };
+        });
         this.compiled.set(key, module);
         module.catch(() => this.compiled.delete(key));
       }
@@ -247,29 +331,53 @@ export class Launcher {
     });
   }
 
+  private async names(path: string, module: WebAssembly.Module): Promise<string | undefined> {
+    if (WebAssembly.Module.customSections(module, 'name').length > 0) return undefined;
+    const beside = `${path}.names`;
+    if (await this.base.exists(beside)) return beside;
+    const root = PACKAGE_ROOT.exec(path)?.[1];
+    if (root === undefined) return undefined;
+    const optional = `${root}-names${beside.slice(root.length)}`;
+    return (await this.base.exists(optional)) ? optional : undefined;
+  }
+
+  private async program(target: Target, env: Record<string, string>): Promise<WasmProgram> {
+    if (target.abi !== 'wasi') {
+      const [glue, { module }] = await Promise.all([
+        this.base.readFile(target.glue),
+        this.module(target.wasm),
+      ]);
+      return { glue, module };
+    }
+    const { module, memory } = await this.module(target.wasm);
+    const names =
+      env.SLICC_WASM_BACKTRACE === '1' ? await this.names(target.wasm, module) : undefined;
+    const imports = target.imports ? await this.base.readFile(target.imports) : undefined;
+    return {
+      abi: 'wasi',
+      glue: '',
+      module,
+      ...(memory ? { memory } : {}),
+      ...(names ? { names } : {}),
+      ...(imports !== undefined ? { imports } : {}),
+    };
+  }
+
   private async launch(
     planned: Planned,
     req: Omit<StartRequest, 'program' | 'argv0' | 'args'>
   ): Promise<WasmProcessHandle> {
     const { target, args } = planned;
+    const env = { ...expandDefaults(target.env, { ...req.env, cwd: req.cwd }), ...req.env };
+    for (const key of target.unset ?? []) delete env[key];
     let program: WasmProgram;
     try {
-      const [glue, module] = await Promise.all([
-        this.base.readFile(target.glue),
-        this.module(target.wasm),
-      ]);
-      program = { glue, module };
+      program = await this.program(target, env);
     } catch (err) {
       await req.fds.closeAll();
       throw err;
     }
-    return this.start({
-      ...req,
-      program,
-      argv0: target.argv0,
-      args,
-      env: { ...target.env, ...req.env },
-    });
+    return this.start({ ...req, program, argv0: target.argv0, args, env });
   }
 
   private start(req: StartRequest): WasmProcessHandle {
@@ -293,6 +401,7 @@ export class Launcher {
       ptys: this.ptys,
       net: this.net,
       http: new HttpHandles(this.transport),
+      locks: this.locks,
       onReap: (child) => this.reaped(child),
       ...(req.fork ? { fork: req.fork } : {}),
       ...(req.ppid !== undefined ? { ppid: req.ppid } : {}),

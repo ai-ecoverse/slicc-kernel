@@ -18,17 +18,24 @@ import {
 } from '../realm/sync-sab-wire.ts';
 import type { ChildForker, ChildSpawner } from './children.ts';
 import { type FdTable, kernelFdKind, type OpenFile } from './fd-table.ts';
+import type { LockTable } from './host-ops.ts';
 import type { JobTable } from './jobs.ts';
 import type { HttpHandles } from './net/http-syscalls.ts';
 import { isWasmSyscall, type StateListener, WasmProcess } from './process.ts';
 import {
   type ForkState,
   type InheritedFd,
+  WASM_MAX_THREADS,
   WASM_PROCESS_ERROR,
   WASM_PROCESS_EXIT,
   WASM_PROCESS_INIT,
+  WASM_THREAD_EXIT,
+  WASM_THREAD_INIT,
+  WASM_THREAD_SPAWN,
   type WasmProcessInitMsg,
   type WasmProgram,
+  type WasmThread,
+  type WasmThreadInitMsg,
 } from './protocol.ts';
 import type { PtyTable } from './pty.ts';
 import { SIG, sigbit } from './signals.ts';
@@ -63,6 +70,7 @@ export interface SpawnWasmOptions {
   net?: LoopbackNet;
 
   http?: HttpHandles;
+  locks?: LockTable;
   onReap?: (pid: number) => void;
 }
 
@@ -110,6 +118,7 @@ interface WorkerSays {
   type?: string;
   code?: unknown;
   message?: unknown;
+  thread?: WasmThread;
 }
 
 export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
@@ -124,12 +133,16 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     ptys: opts.ptys,
     net: opts.net,
     http: opts.http,
+    locks: opts.locks,
     onReap: opts.onReap,
     onPending: (sig) => void Atomics.or(header, SAB_I_SIGNALS, sigbit(sig)),
     onTimer: (which) => void Atomics.or(header, SAB_I_TIMERS, 1 << which),
     hasPending: () =>
       Atomics.load(header, SAB_I_SIGNALS) !== 0 || Atomics.load(header, SAB_I_TIMERS) !== 0,
     raise: (sig) => signal(sig),
+    ...(opts.program.abi === 'wasi'
+      ? { pendingBits: () => Atomics.load(header, SAB_I_SIGNALS) }
+      : {}),
   });
   const token = mintSyncFsToken({ fs: opts.fs, cwd: opts.cwd });
   const worker = opts.createWorker();
@@ -150,6 +163,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     endedBy = sig ?? process.execTermsig;
     worker.removeEventListener('message', onMessage);
     worker.removeEventListener('error', onError);
+    for (const tid of [...threads.keys()]) endThread(tid);
     responder.dispose();
     revokeSyncFsToken(token);
     worker.terminate();
@@ -159,15 +173,17 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     );
   };
 
-  const onMessage = (event: MessageEvent): void => {
-    const data = event.data as WorkerSays | undefined;
+  const handle = (data: WorkerSays | undefined): void => {
     if (data?.type === WASM_PROCESS_EXIT) {
       finish(typeof data.code === 'number' ? data.code : CRASHED);
     } else if (data?.type === WASM_PROCESS_ERROR) {
       opts.onError?.(String(data.message));
       finish(CRASHED);
+    } else if (data?.type === WASM_THREAD_SPAWN && data.thread) {
+      spawnThread(data.thread);
     }
   };
+  const onMessage = (event: MessageEvent): void => handle(event.data as WorkerSays | undefined);
   const onError = (event: MessageEvent): void => {
     event.preventDefault();
     opts.onError?.(String((event as unknown as ErrorEvent).message ?? 'worker error'));
@@ -175,6 +191,50 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
   };
   worker.addEventListener('message', onMessage);
   worker.addEventListener('error', onError);
+
+  const threads = new Map<number, () => void>();
+  const endThread = (tid: number): void => {
+    const end = threads.get(tid);
+    threads.delete(tid);
+    end?.();
+  };
+  const spawnThread = (thread: WasmThread): void => {
+    if (done) return;
+    if (threads.size >= WASM_MAX_THREADS - 1) {
+      opts.onError?.(`more than ${WASM_MAX_THREADS} threads`);
+      finish(CRASHED);
+      return;
+    }
+    const tsab = new SharedArrayBuffer(SAB_HEADER_BYTES + SAB_DEFAULT_WINDOW_BYTES);
+    const tw = opts.createWorker();
+    const tresponder = attachSyncSabResponder(tw, tsab, token, { dispatch });
+    const onThreadMessage = (event: MessageEvent): void => {
+      const data = event.data as WorkerSays | undefined;
+      if (data?.type === WASM_THREAD_EXIT) endThread(thread.tid);
+      else handle(data);
+    };
+    tw.addEventListener('message', onThreadMessage);
+    tw.addEventListener('error', onError);
+    threads.set(thread.tid, () => {
+      tw.removeEventListener('message', onThreadMessage);
+      tw.removeEventListener('error', onError);
+      tresponder.dispose();
+      tw.terminate();
+    });
+    const tinit: WasmThreadInitMsg = {
+      type: WASM_THREAD_INIT,
+      pid: opts.pid,
+      program: opts.program,
+      argv0: opts.argv0,
+      args: opts.args,
+      env: opts.env,
+      cwd: opts.cwd,
+      sab: tsab,
+      ...(opts.ppid !== undefined ? { ppid: opts.ppid } : {}),
+      thread,
+    };
+    tw.postMessage(tinit);
+  };
 
   const init: WasmProcessInitMsg = {
     type: WASM_PROCESS_INIT,

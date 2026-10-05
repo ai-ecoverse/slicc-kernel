@@ -49,6 +49,38 @@ async function install() {
   }
 }
 
+async function fetchBytes(url) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(60000) });
+      if (!response.ok) throw new Error(`${response.status} ${response.url}`);
+      return await response.arrayBuffer();
+    } catch (err) {
+      if (attempt === 3) throw err;
+    }
+  }
+}
+
+window.installTree = async (dir, names) => {
+  const dirs = new Set(names.map((name) => (dir + name).split('/').slice(0, -1).join('/')));
+  for (const path of [...dirs].sort()) await walk(path, true);
+  let next = 0;
+  const copy = async () => {
+    while (next < names.length) {
+      const name = names[next++];
+      const bytes = await fetchBytes(`/${dir}${name}`);
+      const parts = (dir + name).split('/');
+      const base = parts.pop();
+      const handle = await (await walk(parts.join('/'))).getFileHandle(base, { create: true });
+      const writable = await handle.createWritable();
+      await writable.write(bytes);
+      await writable.close();
+    }
+  };
+  await Promise.all(Array.from({ length: 8 }, copy));
+  return names.length;
+};
+
 window.probe = async () => {
   const worker = new Worker(new URL('./probe-worker.js', import.meta.url), { type: 'module' });
   const report = await ask(worker, { depth: 1 });

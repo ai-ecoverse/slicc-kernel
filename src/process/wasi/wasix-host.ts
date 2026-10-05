@@ -1,0 +1,489 @@
+import { E, FDFLAGS, WASI_SIGNAL_TO_POSIX, wasiErrnoOf } from './wasi-abi.ts';
+import { WasiError } from './wasi-files.ts';
+import { WasiExit, type WasiFunction, type WasiHost, wrap } from './wasi-host.ts';
+import type { WasiSignals } from './wasi-signals.ts';
+import { MAIN_TID, ThreadExit, type WasiThreads } from './wasi-threads.ts';
+import type { AsyncifyDriver } from './wasix-fork.ts';
+import { DlError, type WasixLinker } from './wasix-linker.ts';
+import { type SpawnFdOp, WasixProcess } from './wasix-process.ts';
+import { wasixSocketImports } from './wasix-sockets.ts';
+
+const FDFLAGSEXT_CLOEXEC = 1;
+const SPAWN_OP_SIZE = 56;
+const SPAWN_OPS = ['close', 'dup2', 'open', 'chdir', 'fchdir'] as const;
+const RIGHTS_FD_WRITE = 1n << 6n;
+
+const ICANON = 0o2;
+const ECHO = 0o10;
+
+export const COMPAT: Readonly<Record<string, readonly string[]>> = {
+  exit: ['proc_exit2'],
+  exec: ['proc_exec', 'proc_exec2', 'proc_exec3', 'proc_exec4'],
+  spawn: ['proc_spawn2', 'proc_spawn3'],
+  open: ['path_open2'],
+  dup: ['fd_dup', 'fd_dup2'],
+  alarm: ['proc_raise_interval', 'proc_raise_interval2'],
+};
+
+export class WasixHost {
+  private readonly process: WasixProcess;
+
+  threads: WasiThreads | undefined;
+
+  linker: WasixLinker | undefined;
+
+  signals: WasiSignals | undefined;
+
+  private readonly host: WasiHost;
+  private readonly driver: AsyncifyDriver;
+  constructor(host: WasiHost, driver: AsyncifyDriver, module?: WebAssembly.Module) {
+    this.host = host;
+    this.driver = driver;
+    this.process = new WasixProcess(host, driver);
+
+    if (module && !WebAssembly.Module.imports(module).some((i) => i.name === 'fd_fdflags_set')) {
+      host.fds.implicitCloexec = true;
+
+      host.interruptWakes = true;
+    }
+  }
+
+  private get mem() {
+    return this.host.mem;
+  }
+
+  private str(ptr: number, len: number): string {
+    const s = this.mem.string(ptr, len);
+    return s.endsWith('\0') ? s.slice(0, -1) : s;
+  }
+
+  private cStrings(ptr: number, count: number): string[] {
+    const v = this.mem.view();
+    return Array.from({ length: count }, (_, i) =>
+      this.mem.cString(v.getUint32(ptr + i * 4, true))
+    );
+  }
+
+  private execOrExit(n: number, nl: number, a: number, al: number, e: number, el: number): never {
+    try {
+      return this.process.exec({
+        name: this.str(n, nl),
+        argv: WasixHost.lines(this.str(a, al)),
+        env: WasixHost.env(e === 0 ? undefined : WasixHost.lines(this.str(e, el))),
+        search: false,
+        path: '',
+      });
+    } catch (err) {
+      if (err instanceof WasiExit) throw err;
+      const code = err instanceof WasiError ? err.code : (err as { code?: unknown } | null)?.code;
+      throw new WasiExit(wasiErrnoOf(typeof code === 'string' ? code : 'ENOEXEC'));
+    }
+  }
+
+  private static env(entries: readonly string[] | undefined): Record<string, string> | undefined {
+    if (!entries) return undefined;
+    const env: Record<string, string> = {};
+    for (const line of entries) {
+      const eq = line.indexOf('=');
+      if (eq > 0) env[line.slice(0, eq)] = line.slice(eq + 1);
+    }
+    return env;
+  }
+
+  private static lines(text: string): string[] {
+    return text.split('\n').filter((line, i, all) => line !== '' || i < all.length - 1);
+  }
+
+  private spawnOps(ptr: number, count: number): SpawnFdOp[] {
+    const v = this.mem.view();
+    return Array.from({ length: count }, (_, i) => {
+      const p = ptr + i * SPAWN_OP_SIZE;
+      const cmd = SPAWN_OPS[v.getUint8(p)];
+      if (!cmd) throw new WasiError('EINVAL');
+      return {
+        cmd,
+        fd: v.getUint32(p + 4, true),
+        srcFd: v.getUint32(p + 8, true),
+        path: this.str(v.getUint32(p + 12, true), v.getUint32(p + 16, true)),
+        oflags: v.getUint16(p + 24, true),
+        rightsWrite: (v.getBigUint64(p + 32, true) & RIGHTS_FD_WRITE) !== 0n,
+        append: (v.getUint16(p + 48, true) & FDFLAGS.APPEND) !== 0,
+      };
+    });
+  }
+
+  imports(): Record<string, WasiFunction> {
+    return wrap({
+      ...this.startupImports(),
+      ...this.fdImports(),
+      ...this.processImports(),
+      ...this.threadImports(),
+      ...this.dlImports(),
+      ...wasixSocketImports(this.host, this.host.imports()),
+    });
+  }
+
+  preview1(): Record<string, WasiFunction> {
+    const { fds } = this.host;
+    return wrap({
+      fd_renumber: (from: number, to: number) => void fds.renumber(from, to, true),
+      fd_close: (fd: number) => {
+        const e = fds.get(fd);
+        if (e.type !== 'dir' || !e.preopen) fds.close(fd);
+      },
+    });
+  }
+
+  private startupImports(): Record<string, WasiFunction> {
+    const { host, mem } = this;
+    return {
+      proc_exit2: (code: number) => {
+        throw new WasiExit(code);
+      },
+
+      proc_signals_sizes_get: (out: number) => void mem.view().setUint32(out, 0, true),
+      proc_signals_get: () => E.SUCCESS,
+
+      callback_signal: (name: number, len: number) =>
+        void this.signals?.register(this.str(name, len)),
+
+      proc_raise_interval: (sig: number, interval: bigint, repeat: number) =>
+        void host.o.kernel.call({
+          op: 'proc-alarm',
+          sig: posixSignal(sig),
+          ms: nsToMs(interval),
+          repeat: repeat !== 0,
+        }),
+
+      proc_raise_interval2: (sig: number, initial: bigint, interval: bigint, repeat: number) => {
+        const ms = nsToMs(interval);
+        host.o.kernel.call({
+          op: 'proc-alarm',
+          sig: posixSignal(sig),
+          ms,
+          firstMs: nsToMs(initial),
+          repeat: repeat !== 0 && ms > 0,
+        });
+      },
+      proc_id: (out: number) => void mem.view().setUint32(out, host.o.pid, true),
+      proc_parent: (pid: number, out: number) => {
+        if (pid !== 0 && pid !== host.o.pid) throw new WasiError('ESRCH');
+        mem.view().setUint32(out, host.o.ppid ?? 1, true);
+      },
+      getcwd: (buf: number, lenPtr: number) => {
+        const bytes = new TextEncoder().encode(host.cwd);
+        const max = mem.view().getUint32(lenPtr, true);
+        mem.view().setUint32(lenPtr, bytes.length, true);
+        if (bytes.length > max) return E.RANGE;
+        mem.bytes(buf, bytes.length).set(bytes);
+        if (bytes.length < max) mem.view().setUint8(buf + bytes.length, 0);
+        return E.SUCCESS;
+      },
+      chdir: (ptr: number, len: number) => {
+        const path = host.fds.resolve(3, this.str(ptr, len));
+        if (!host.o.fs.stat(path).isDirectory) throw new WasiError('ENOTDIR');
+        host.fds.chdir(path);
+      },
+    };
+  }
+
+  private fdImports(): Record<string, WasiFunction> {
+    const { host, mem } = this;
+    const preview1 = host.imports() as Record<string, (...a: unknown[]) => number>;
+    return {
+      fd_dup: (fd: number, out: number) =>
+        void mem.view().setUint32(out, host.fds.dup(fd, 0, false), true),
+      fd_dup2: (fd: number, min: number, cloexec: number, out: number) =>
+        void mem.view().setUint32(out, host.fds.dup(fd, min, cloexec !== 0), true),
+      fd_pipe: (rPtr: number, wPtr: number) => {
+        const [r, w] = host.fds.pipe();
+        mem.view().setUint32(rPtr, r, true);
+        mem.view().setUint32(wPtr, w, true);
+      },
+      fd_fdflags_get: (fd: number, out: number) => {
+        host.fds.get(fd);
+        mem.view().setUint16(out, host.fds.cloexec.has(fd) ? FDFLAGSEXT_CLOEXEC : 0, true);
+      },
+      fd_fdflags_set: (fd: number, flags: number) =>
+        void host.fds.setCloexec(fd, (flags & FDFLAGSEXT_CLOEXEC) !== 0),
+      path_open2: (
+        dirfd: number,
+        lookup: number,
+        p: number,
+        l: number,
+        oflags: number,
+        rights: bigint,
+        inheriting: bigint,
+        fdflags: number,
+        fdflagsext: number,
+        out: number
+      ) => {
+        const r = preview1.path_open(dirfd, lookup, p, l, oflags, rights, inheriting, fdflags, out);
+        if (r === E.SUCCESS && fdflagsext & FDFLAGSEXT_CLOEXEC)
+          host.fds.setCloexec(mem.view().getUint32(out, true), true);
+        return r;
+      },
+      tty_get: (ptr: number) => void this.ttyGet(ptr),
+      tty_set: (ptr: number) => void this.ttySet(ptr),
+    };
+  }
+
+  private processImports(): Record<string, WasiFunction> {
+    const { mem, process } = this;
+    return {
+      proc_fork: (_copy: number, pidPtr: number) => process.fork(pidPtr),
+      stack_checkpoint: (snapPtr: number, retPtr: number) => {
+        const back = this.driver.rewound();
+        if (back === undefined) return this.driver.checkpoint(snapPtr, retPtr);
+        mem.view().setBigUint64(retPtr, BigInt(back), true);
+        return E.SUCCESS;
+      },
+      stack_restore: (snapPtr: number, val: bigint) => void this.driver.restore(snapPtr, val),
+      proc_join: (pidPtr: number, flags: number, statusPtr: number) =>
+        void process.join(pidPtr, flags, statusPtr),
+      proc_signal: (pid: number, sig: number) => {
+        const posix = sig === 0 ? 0 : WASI_SIGNAL_TO_POSIX[sig];
+        if (posix === undefined) throw new WasiError('EINVAL');
+        if (pid === this.host.o.pid && posix !== 0 && this.host.onRaise?.(posix)) return;
+        this.host.o.kernel.call({ op: 'proc-kill', pid, sig: posix });
+      },
+
+      proc_exec: (n: number, nl: number, a: number, al: number) =>
+        this.execOrExit(n, nl, a, al, 0, 0),
+      proc_exec2: (n: number, nl: number, a: number, al: number, e: number, el: number) =>
+        this.execOrExit(n, nl, a, al, e, el),
+
+      proc_exec3: (
+        n: number,
+        nl: number,
+        a: number,
+        al: number,
+        e: number,
+        el: number,
+        search: number,
+        p: number,
+        pl: number
+      ) =>
+        process.exec({
+          name: this.str(n, nl),
+          argv: WasixHost.lines(this.str(a, al)),
+          env: WasixHost.env(WasixHost.lines(this.str(e, el))),
+          search: search !== 0,
+          path: this.str(p, pl),
+        }),
+
+      proc_exec4: (
+        n: number,
+        nl: number,
+        a: number,
+        ac: number,
+        e: number,
+        ec: number,
+        search: number,
+        p: number,
+        pl: number
+      ) =>
+        process.exec({
+          name: this.str(n, nl),
+          argv: this.cStrings(a, ac),
+          env: WasixHost.env(e === 0 ? undefined : this.cStrings(e, ec)),
+          search: search !== 0,
+          path: this.str(p, pl),
+        }),
+      proc_spawn2: (...args: number[]) => {
+        const [n, nl, a, al, e, el, ops, opc, , , search, p, pl, out] = args;
+        const pid = process.spawn({
+          name: this.str(n, nl),
+          argv: WasixHost.lines(this.str(a, al)),
+          env: WasixHost.env(WasixHost.lines(this.str(e, el))),
+          search: search !== 0,
+          path: this.str(p, pl),
+          ops: this.spawnOps(ops, opc),
+        });
+        mem.view().setUint32(out, pid, true);
+      },
+      proc_spawn3: (...args: number[]) => {
+        const [n, nl, a, ac, e, ec, ops, opc, , , search, p, pl, out] = args;
+        const pid = process.spawn({
+          name: this.str(n, nl),
+          argv: this.cStrings(a, ac),
+          env: WasixHost.env(e === 0 ? undefined : this.cStrings(e, ec)),
+          search: search !== 0,
+          path: this.str(p, pl),
+          ops: this.spawnOps(ops, opc),
+        });
+        mem.view().setUint32(out, pid, true);
+      },
+    };
+  }
+
+  private dlImports(): Record<string, WasiFunction> {
+    const { mem, host } = this;
+    const failed = (message: string, buf: number, len: number): number => {
+      if (len > 0) {
+        const bytes = new TextEncoder().encode(message).subarray(0, len - 1);
+        mem.bytes(buf, bytes.length).set(bytes);
+        mem.view().setUint8(buf + bytes.length, 0);
+      }
+      return E.NOEXEC;
+    };
+    const linked = <T>(
+      buf: number,
+      len: number,
+      op: (l: WasixLinker) => T,
+      out: (v: T) => void
+    ): number => {
+      if (!this.linker) return failed('not a dynamically-linked program', buf, len);
+      try {
+        out(op(this.linker));
+        return E.SUCCESS;
+      } catch (e) {
+        if (e instanceof DlError) return failed(e.message, buf, len);
+        throw e;
+      }
+    };
+    return {
+      dlopen: (
+        p: number,
+        pl: number,
+        _flags: number,
+        buf: number,
+        len: number,
+        lp: number,
+        ll: number,
+        out: number
+      ) => {
+        if (p === 0) {
+          mem.view().setUint32(out, 0, true);
+          return E.SUCCESS;
+        }
+        return linked(
+          buf,
+          len,
+          (l) => l.open(this.str(p, pl), host.cwd, lp === 0 ? [] : this.str(lp, ll).split(':')),
+          (h) => void mem.view().setUint32(out, h, true)
+        );
+      },
+
+      dlsym: (handle: number, s: number, sl: number, buf: number, len: number, out: number) =>
+        linked(
+          buf,
+          len,
+          (l) => l.symbol(handle, this.str(s, sl)),
+          (v) => void mem.view().setUint32(out, v, true)
+        ),
+      dl_invalid_handle: (handle: number) =>
+        handle !== 0 && this.linker && !this.linker.invalid(handle) ? E.SUCCESS : E.NOEXEC,
+    };
+  }
+
+  private threadImports(): Record<string, WasiFunction> {
+    const { mem, host } = this;
+    const i32 = () => new Int32Array(mem.view().buffer);
+    return {
+      thread_id: (out: number) =>
+        void mem.view().setUint32(out, this.threads?.tid ?? MAIN_TID, true),
+      thread_parallelism: (out: number) =>
+        void mem.view().setUint32(out, this.threads?.parallelism() ?? 1, true),
+
+      thread_exit: (code: number) => {
+        if (this.threads && this.threads.tid !== MAIN_TID) throw new ThreadExit();
+        throw new WasiExit(code);
+      },
+
+      thread_signal: (tid: number, sig: number) => {
+        if (!(this.threads?.known(tid) ?? tid === MAIN_TID)) throw new WasiError('ESRCH');
+        const posix = WASI_SIGNAL_TO_POSIX[sig];
+        if (posix === undefined) throw new WasiError('EINVAL');
+
+        if (host.onRaise?.(posix)) return;
+        host.o.kernel.call({ op: 'proc-kill', pid: host.o.pid, sig: posix });
+      },
+
+      thread_spawn_v2: (startPtr: number, tidPtr: number) => {
+        if (!this.threads) return E.NOTSUP;
+        const tid = this.threads.spawn(startPtr);
+        if (tid < 0) return E.AGAIN;
+        mem.view().setUint32(tidPtr, tid, true);
+        return E.SUCCESS;
+      },
+      futex_wait: (ptr: number, expected: number, timeoutPtr: number, wokenPtr: number) => {
+        const v = mem.view();
+        const timed = timeoutPtr !== 0 && v.getUint8(timeoutPtr) === 1;
+        const ms = timed
+          ? Number(v.getBigUint64(timeoutPtr + 8, true)) / 1e6
+          : Number.POSITIVE_INFINITY;
+
+        v.setUint8(
+          wokenPtr,
+          Atomics.wait(i32(), ptr >> 2, expected | 0, ms) === 'timed-out' ? 0 : 1
+        );
+      },
+
+      futex_wake: (ptr: number, wokenPtr: number) => {
+        Atomics.notify(i32(), ptr >> 2, 1);
+        mem.view().setUint8(wokenPtr, 1);
+      },
+      futex_wake_all: (ptr: number, wokenPtr: number) => {
+        Atomics.notify(i32(), ptr >> 2);
+        mem.view().setUint8(wokenPtr, 1);
+      },
+    };
+  }
+
+  private ttyFd(): number | undefined {
+    for (const fd of [0, 1, 2]) {
+      const e = this.host.fds.find(fd);
+      if (e?.type === 'kernel' && this.host.fds.kind(fd, e) === 'tty') return fd;
+    }
+    return this.host.fds.terminals().find((fd) => fd > 2);
+  }
+
+  private ttyGet(ptr: number): void {
+    const { host, mem } = this;
+    const v = mem.view();
+    mem.bytes(ptr, 24).fill(0);
+    const fd = this.ttyFd();
+    const isTty = (n: number) => {
+      const e = host.fds.find(n);
+      return e?.type === 'kernel' && host.fds.kind(n, e) === 'tty' ? 1 : 0;
+    };
+    v.setUint8(ptr + 16, isTty(0));
+    v.setUint8(ptr + 17, isTty(1));
+    v.setUint8(ptr + 18, isTty(2));
+    if (fd === undefined) {
+      v.setUint32(ptr, 80, true);
+      v.setUint32(ptr + 4, 24, true);
+      return;
+    }
+    const [rows, cols] = host.o.kernel.sys.winsize?.(fd) ?? [24, 80];
+    const termios = host.o.kernel.sys.tcgets?.(fd);
+    v.setUint32(ptr, cols, true);
+    v.setUint32(ptr + 4, rows, true);
+    v.setUint8(ptr + 19, termios && termios.c_lflag & ECHO ? 1 : 0);
+    v.setUint8(ptr + 20, termios && termios.c_lflag & ICANON ? 1 : 0);
+  }
+
+  private ttySet(ptr: number): void {
+    const fd = this.ttyFd();
+    if (fd === undefined) throw new WasiError('ENOTTY');
+    const { sys } = this.host.o.kernel;
+    const termios = sys.tcgets?.(fd);
+    if (!termios) throw new WasiError('ENOTTY');
+    const v = this.mem.view();
+    let lflag = termios.c_lflag & ~(ECHO | ICANON);
+    if (v.getUint8(ptr + 19)) lflag |= ECHO;
+    if (v.getUint8(ptr + 20)) lflag |= ICANON;
+    sys.tcsets?.(fd, { ...termios, c_lflag: lflag });
+  }
+}
+
+function posixSignal(sig: number): number {
+  const posix = WASI_SIGNAL_TO_POSIX[sig];
+  if (posix === undefined) throw new WasiError('EINVAL');
+  return posix;
+}
+
+function nsToMs(ns: bigint): number {
+  return Math.ceil(Number(ns) / 1e6);
+}

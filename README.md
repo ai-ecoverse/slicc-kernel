@@ -69,13 +69,39 @@ Stops the kernel worker and every process. Pending and later calls reject.
 
 ## Commands
 
-Commands come from installed packages in npm's `node_modules` layout: every `<modules>/<name>/package.json` and `<modules>/@scope/<name>/package.json` with a `slicc.commands` block (`abi` `emscripten`), for example bash's:
+Commands come from installed packages in npm's `node_modules` layout: every `<modules>/<name>/package.json` and `<modules>/@scope/<name>/package.json` with a `slicc.commands` block. An Emscripten program names its glue and module, for example bash's:
 
 ```json
 { "slicc": { "abi": "emscripten", "commands": { "bash": { "glue": "bin/bash", "wasm": "bin/bash.wasm" } } } }
 ```
 
-Entries may also set `argv0`, `args` and `env` (with `${package}` expanded to the package directory), and a package-wide `slicc.env`. The first package to define a name wins. `sh` runs bash as `sh` unless a package provides its own. The installed commands appear as executables in a virtual `/usr/bin` and `/bin`, so `PATH` lookups, `command -v` and `ls /usr/bin` work without writing anything to OPFS. A process can also run a program by the path of its glue when the `.wasm` sits next to it, and a script through its `#!` line (including `#!/usr/bin/env name`). Executing any other file fails with `ENOEXEC`, so bash runs it as a shell script, as POSIX shells do. The catalog is re-read at the start of every `run`, so packages installed in between are picked up.
+A WASI preview1 or WASIX program (Zig, Rust, Go, wasi-libc or wasix-libc C) has no glue: `"abi": "wasi"`, on `slicc` or per command (which wins), and the command names only its module. A command can also be a `#!` script of the package, which its interpreter runs as execve(2) would:
+
+```json
+{ "slicc": { "abi": "wasi", "commands": { "rg": { "wasm": "bin/rg.wasm" }, "rustc": { "script": "bin/rustc" } } } }
+```
+
+Entries may also set `argv0`, `args` and `env`, and a package can set `slicc.env` for all of its commands. In `env`, `${package}` is the package directory, `${cwd}` the process's working directory, and `${NAME}` the caller's `NAME` when the program starts (a default naming an unset variable is left out); a relative path that exists in the package (`lib/python3.14`, `./`) becomes that absolute path. The caller's environment wins over these defaults; a `null` value removes the variable for the command, after the caller's environment is applied (a host-networked program can drop the kernel's proxy settings that way), and a command entry can set a variable its package's `slicc.env` removes. The first package to define a name wins. `sh` runs bash as `sh` unless a package provides its own. The installed commands appear as executables in a virtual `/usr/bin` and `/bin`, so `PATH` lookups, `command -v` and `ls /usr/bin` work without writing anything to OPFS. A process can also run a program by the path of its glue when the `.wasm` sits next to it, a wasm module by its own path (as a WASI program), and a script through its `#!` line (including `#!/usr/bin/env name`). Executing any other file fails with `ENOEXEC`, so bash runs it as a shell script, as POSIX shells do. The catalog is re-read at the start of every `run`, so packages installed in between are picked up.
+
+### WASI programs
+
+A WASI program runs in a process worker of its own like an Emscripten one, against the same kernel: its descriptors, pipes, terminals and job control are the kernel's, and its files are OPFS. Preopens are `.` (the cwd), `/dev` and every top-level directory, plus the virtual `/usr` and `/bin`. On top of preview1 it gets:
+
+- **Threads**: `wasi.thread-spawn` (wasm32-wasip1-threads) and WASIX `thread_spawn_v2` start a worker per thread on the process's shared memory, sized from the module's own import (a 2 GiB maximum when the engine cannot reserve more). The threads share one descriptor table; `exit` or a trap in any thread ends the process. At most 64 threads per process, fewer with `SLICC_WASM_THREADS`.
+- **WASIX** (a module importing `wasix_32v1`): fork and setjmp/longjmp through Asyncify (the module is built with `wasm-opt --asyncify`), exec, `posix_spawn`, `waitpid`, pipes, `dup2`, signal handlers and interval timers, terminal modes, and dynamic linking: a position-independent main module loads side modules with `dlopen` from `LD_LIBRARY_PATH`, its runtime path, `/lib`, `/usr/lib` and `/usr/local/lib`.
+- **Sockets**: the WASIX socket calls (`sock_open`, `bind`, `listen`, `connect`, `accept`, options, local and peer names) are the kernel's loopback sockets, and preview1's `sock_recv` / `sock_send` / `sock_shutdown` work on them and on inherited ones. HTTP and HTTPS leave through the realm proxy that `https_proxy` names, as for any other program; `resolve` answers loopback names and literal addresses.
+- **Diagnostics**: a trap ends the program with 134 and its message on stderr; with `SLICC_WASM_BACKTRACE=1` the wasm frames follow, named from the module's name section, or from a sidecar for a module shipped without one (`<module>.names` beside it, or the same path in a `<package>-names` package). `SLICC_WASI_STATS=1` makes a program print its calls, counted and timed, as it ends.
+
+### Program imports
+
+A WASI command can name an ES module of its package that provides imports of its own, for host functions a program needs beyond WASI (`"imports": "host/pnpm-host.mjs"`). Each worker of the process (the process and every thread) loads it, with the same trust as Emscripten glue, and calls its `createImports(ctx)`, which returns import namespaces (`{ pnpm_host: { … } }`). It may not define `wasi_snapshot_preview1`, `wasix_32v1`, `wasi` or `env`; any other namespace the module imports is then accepted, and functions it does not provide answer `ENOSYS`. `ctx` has:
+
+- `memory()`, `instance()` (after instantiation), `tid` (1 for the main thread), `argv`, `env`, `cwd()`;
+- `fs`: the synchronous filesystem the WASI calls use (absolute paths);
+- `fds`: `open(path, { read, write, append, create, exclusive, truncate, directory, nofollow, mode })` returns a WASI descriptor of the program; `close`, `fstat` (`{ kind, path, mode, uid, gid, size, ino, mtimeMs }`), `fchmod`, and `tryLock(fd, exclusive)` / `unlock(fd)`: advisory locks held by the kernel across processes and threads, keyed by path, released on unlock, on closing the descriptor and at exit (`tryLock` returns 0, or 6 when another process holds the lock);
+- `syscall(req)`: a kernel syscall, synchronously;
+- `async`: operations of the process that any of its threads can wait for: `submit(req)` runs a kernel syscall without blocking the caller, `resolve(value)` completes at once, `hold()` never completes, and each returns an id; `wait(timeoutMs?)` returns the id of a completed one (0 after the timeout, -1 once `close()` was called), `take(id)` its `{ value }` or `{ error }` (`undefined` while it is pending), and `cancel(id)` drops one;
+- `errno(err)`: the WASI errno of an error.
 
 ## Network
 
@@ -126,13 +152,12 @@ The filesystem is our own rather than [ZenFS](https://github.com/zen-fs/core) (w
 The kernel is ported from SLICC's `packages/webapp/src/kernel/` with the browser-specific VFS replaced by an OPFS one:
 
 - `src/kernel/`: the kernel side, per process (`host.ts` starts the worker and answers its syscalls in `process.ts`) and shared tables (descriptors, pipes, children, jobs, signals, terminals and pseudo-terminals, `select`).
-- `src/process/`: the runtime inside each process worker. It evaluates the Emscripten glue, mounts the live VFS, routes descriptors through the kernel and implements `fork` by copying the whole linear memory into a new worker (Asyncify).
+- `src/process/`: the runtime inside each process worker. It evaluates the Emscripten glue, mounts the live VFS, routes descriptors through the kernel and implements `fork` by copying the whole linear memory into a new worker (Asyncify). `src/process/wasi/` runs WASI and WASIX programs.
 - `src/realm/`: the synchronous bridge (`SharedArrayBuffer` + `Atomics.wait`) and the live Emscripten filesystem on top of it.
 - `src/fs/`: the OPFS filesystem and the virtual command directories.
 - `src/launcher.ts`, `src/commands.ts`, `src/serve.ts`, `src/index.ts`: command resolution, the kernel worker protocol and the page API.
 - `src/kernel/net/`: the proxy, HTTP/1.1, TLS termination and the local CA, and the bridge to the page's transport; `src/transport.ts` is the page side.
 
-WASI support is not included.
 
 ## Installing from git
 
