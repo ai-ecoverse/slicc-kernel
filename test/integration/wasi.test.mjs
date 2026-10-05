@@ -35,6 +35,18 @@ test('WASIX python runs threads and imports numpy through the dynamic linker', a
   );
 });
 
+test('a WASI client (python urllib) fetches registry metadata through the realm proxy', async (t) => {
+  const { page, run } = await booted(chrome, t);
+  await installPackage(page, 'wasix-python');
+
+  const code =
+    "import json, urllib.request\nwith urllib.request.urlopen('https://registry.npmjs.org/@ai-ecoverse/wasm-bash/latest') as r:\n    print(json.load(r)['name'])";
+  assert.deepEqual(
+    await run(['python3', '-c', code], { cwd: '/home' }),
+    ok('@ai-ecoverse/wasm-bash\n')
+  );
+});
+
 test('zig builds a program and runs it', async (t) => {
   const { page, bash } = await booted(chrome, t);
   await installPackage(page, 'wasi-zig');

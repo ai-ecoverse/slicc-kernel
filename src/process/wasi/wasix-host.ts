@@ -6,6 +6,7 @@ import { MAIN_TID, ThreadExit, type WasiThreads } from './wasi-threads.ts';
 import type { AsyncifyDriver } from './wasix-fork.ts';
 import { DlError, type WasixLinker } from './wasix-linker.ts';
 import { type SpawnFdOp, WasixProcess } from './wasix-process.ts';
+import { wasixSocketImports } from './wasix-sockets.ts';
 
 const FDFLAGSEXT_CLOEXEC = 1;
 const SPAWN_OP_SIZE = 56;
@@ -118,6 +119,7 @@ export class WasixHost {
       ...this.processImports(),
       ...this.threadImports(),
       ...this.dlImports(),
+      ...wasixSocketImports(this.host, this.host.imports()),
     });
   }
 

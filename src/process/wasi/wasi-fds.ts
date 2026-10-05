@@ -228,6 +228,19 @@ export class WasiFds {
     return fds.sort((a, b) => a - b);
   }
 
+  sockets(): number[] {
+    return [...this.table]
+      .filter(([, e]) => e.type === 'kernel' && e.kind === 'socket')
+      .map(([fd]) => fd)
+      .sort((a, b) => a - b);
+  }
+
+  adopt(fd: number, kind: KernelFdKind, nonblock: boolean): void {
+    this.table.set(fd, { type: 'kernel', kind, nonblock, append: false });
+    if (this.shared && nonblock) this.publishFlags(fd, { nonblock, append: false });
+    this.bump();
+  }
+
   get(fd: number): WasiEntry {
     const e = this.find(fd);
     if (!e) throw new WasiError('EBADF');

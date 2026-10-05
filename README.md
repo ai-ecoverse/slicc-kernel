@@ -89,9 +89,8 @@ A WASI program runs in a process worker of its own like an Emscripten one, again
 
 - **Threads**: `wasi.thread-spawn` (wasm32-wasip1-threads) and WASIX `thread_spawn_v2` start a worker per thread on the process's shared memory, sized from the module's own import (a 2 GiB maximum when the engine cannot reserve more). The threads share one descriptor table; `exit` or a trap in any thread ends the process. At most 64 threads per process, fewer with `SLICC_WASM_THREADS`.
 - **WASIX** (a module importing `wasix_32v1`): fork and setjmp/longjmp through Asyncify (the module is built with `wasm-opt --asyncify`), exec, `posix_spawn`, `waitpid`, pipes, `dup2`, signal handlers and interval timers, terminal modes, and dynamic linking: a position-independent main module loads side modules with `dlopen` from `LD_LIBRARY_PATH`, its runtime path, `/lib`, `/usr/lib` and `/usr/local/lib`.
+- **Sockets**: the WASIX socket calls (`sock_open`, `bind`, `listen`, `connect`, `accept`, options, local and peer names) are the kernel's loopback sockets, and preview1's `sock_recv` / `sock_send` / `sock_shutdown` work on them and on inherited ones. HTTP and HTTPS leave through the realm proxy that `https_proxy` names, as for any other program; `resolve` answers loopback names and literal addresses.
 - **Diagnostics**: a trap ends the program with 134 and its message on stderr; with `SLICC_WASM_BACKTRACE=1` the wasm frames follow, named from the module's name section, or from a sidecar for a module shipped without one (`<module>.names` beside it, or the same path in a `<package>-names` package). `SLICC_WASI_STATS=1` makes a program print its calls, counted and timed, as it ends.
-
-Sockets are not served yet: the WASIX socket calls answer `ENOSYS`.
 
 ### Program imports
 
