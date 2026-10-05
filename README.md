@@ -15,7 +15,7 @@ const { status, stdout, stderr } = await kernel.run(['bash', '-c', 'echo hi > he
 
 - **The page must be cross-origin isolated**: serve it with `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp` (or `credentialless`). Processes block on `Atomics.wait` over a `SharedArrayBuffer`, which only exists in isolated contexts. `createKernel` throws if `crossOriginIsolated` is false.
 - **The kernel lives in a dedicated worker owned by the page.** A `SharedWorker` is never cross-origin isolated in Chromium (and has no `Worker` constructor), so it cannot host the kernel. `createKernel` starts `dist/kernel-worker.js`; that worker owns OPFS and starts one nested dedicated worker (`dist/process-worker.js`) per process. The kernel worker reads `process-worker.js` once when it starts and runs every process and thread from that copy (a `blob:` URL), so updating the package in place while a kernel runs does not mix versions: the next page load switches both.
-- The page's CSP must allow `eval`: each process evaluates its program's Emscripten glue with `new Function`.
+- The page's CSP must allow `eval`, since each process evaluates its program's Emscripten glue with `new Function`, and `blob:` workers (`worker-src 'self' blob:`, or the `script-src` it falls back to), since processes run from the kernel's pinned copy of `process-worker.js`.
 
 `dist/` is plain ESM with no bare imports, and the workers are referenced with `new URL('./….js', import.meta.url)`, so the files work when served as-is (for example from OPFS through a service worker). Whatever serves them must send the COOP/COEP headers on the page and a compatible `Cross-Origin-Resource-Policy` on the scripts.
 
