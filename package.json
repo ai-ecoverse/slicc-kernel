@@ -1,0 +1,45 @@
+{
+  "name": "@ai-ecoverse/slicc-kernel",
+  "version": "0.0.0",
+  "description": "SLICC's wasm-realm kernel: run Emscripten programs in the browser against OPFS, with fork, spawn, pipes and waitpid",
+  "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ai-ecoverse/slicc-kernel.git"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "prepare": "lefthook install",
+    "build": "node build.mjs",
+    "prepack": "npm run build",
+    "start": "npm run build && node test/integration/server.mjs",
+    "pretest": "playwright-core install --no-shell chromium",
+    "test": "node --test --test-global-setup=test/integration/global.mjs 'test/integration/*.test.mjs'",
+    "test:unit": "mcr --name slicc-kernel-unit --reports lcovonly,console-details --outputDir coverage/unit --all src --filter '{\"**/src/**/*.ts\":true,\"**\":false}' node --test 'test/unit/**/*.test.mjs'",
+    "coverage:staged": "npm run --silent test:unit && uvx diff-cover@10.6.0 coverage/unit/lcov.info --compare-branch HEAD --ignore-unstaged --fail-under 100",
+    "typecheck": "tsc",
+    "lint": "biome check . && npm run lint:comments && npm run lint:no-unit-tests",
+    "lint:comments": "d=node_modules/.cache/no-comment-9cc7617; [ -f $d/check.mjs ] || { mkdir -p $d && for f in lib comments marker check; do curl -fsSL -o $d/$f.mjs https://raw.githubusercontent.com/ai-ecoverse/slicc/9cc7617c94c24b84c4d6fd8edf92441378257d07/packages/dev-tools/no-comment/$f.mjs || exit 1; done; } && node $d/check.mjs --force",
+    "lint:no-unit-tests": "! git ls-files --cached --others --exclude-standard | grep -E '(^|/)(tests?|__tests__)/|\\.(test|spec)\\.' | grep -vE '^test/integration/'",
+    "format": "biome check --write ."
+  },
+  "devDependencies": {
+    "@ai-ecoverse/wasm-bash": "5.3.0-7",
+    "@biomejs/biome": "2.5.15",
+    "@types/node": "24.19.1",
+    "esbuild": "0.28.2",
+    "lefthook": "2.1.16",
+    "monocart-coverage-reports": "2.13.0",
+    "playwright-core": "1.63.0",
+    "typescript": "7.0.2"
+  }
+}
