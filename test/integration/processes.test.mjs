@@ -80,3 +80,9 @@ test('stdin, environment and streamed output reach the caller', async (t) => {
   });
   assert.deepEqual(streamed, { chunks: ['out:one\n', 'err:two\n'], status: 0 });
 });
+
+test('a kernel keeps the process worker it started with when the file changes in place', async (t) => {
+  const { bash } = await booted(chrome, t);
+  chrome.overrides.set('/dist/process-worker.js', 'throw new Error("updated in place");');
+  assert.deepEqual(await bash('echo still; bash -c "echo pinned"'), ok('still\npinned\n'));
+});
