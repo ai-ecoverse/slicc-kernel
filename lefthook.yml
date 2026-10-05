@@ -4,6 +4,9 @@ pre-commit:
     - name: biome
       glob: "*.{js,mjs,ts,json,css,html}"
       run: npx biome check --no-errors-on-unmatched --files-ignore-unknown=true {staged_files}
+    - name: typecheck
+      glob: "*.ts"
+      run: npm run --silent typecheck
     - name: no comments
       run: npm run --silent lint:comments
     - name: no unit tests in git

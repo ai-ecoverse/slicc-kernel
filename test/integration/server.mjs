@@ -9,7 +9,7 @@ const here = (path) => fileURLToPath(new URL(path, import.meta.url));
 
 export const roots = [
   ['/dist/', here('../../dist/')],
-  ['/node_modules/@ai-ecoverse/wasm-bash/', here('../../node_modules/@ai-ecoverse/wasm-bash/')],
+  ['/node_modules/@ai-ecoverse/', here('../../node_modules/@ai-ecoverse/')],
   ['/', here('./page/')],
 ];
 

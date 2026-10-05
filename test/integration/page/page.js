@@ -1,3 +1,14 @@
+import { createKernel } from '/dist/index.js';
+
+const packages = {
+  'node_modules/@ai-ecoverse/wasm-bash/': ['package.json', 'bin/bash', 'bin/bash.wasm'],
+  'node_modules/@ai-ecoverse/wasm-coreutils/': [
+    'package.json',
+    'bin/coreutils',
+    'bin/coreutils.wasm',
+  ],
+};
+
 function ask(worker, message) {
   return new Promise((resolve, reject) => {
     worker.onmessage = ({ data }) => resolve(data);
@@ -6,9 +17,65 @@ function ask(worker, message) {
   });
 }
 
+async function walk(path, create = false) {
+  let dir = await navigator.storage.getDirectory();
+  for (const part of path.split('/').filter(Boolean)) {
+    dir = await dir.getDirectoryHandle(part, { create });
+  }
+  return dir;
+}
+
+async function file(path, create = false) {
+  const parts = path.split('/');
+  const name = parts.pop();
+  return (await walk(parts.join('/'), create)).getFileHandle(name, { create });
+}
+
+async function install() {
+  for (const [dir, names] of Object.entries(packages)) {
+    for (const name of names) {
+      const response = await fetch(`/${dir}${name}`);
+      if (!response.ok) throw new Error(`${response.status} ${response.url}`);
+      await response.body.pipeTo(await (await file(dir + name, true)).createWritable());
+    }
+  }
+}
+
 window.probe = async () => {
   const worker = new Worker(new URL('./probe-worker.js', import.meta.url), { type: 'module' });
   const report = await ask(worker, { depth: 1 });
   worker.terminate();
   return { isolated: crossOriginIsolated, workers: report };
+};
+
+window.boot = async () => {
+  await install();
+  window.kernel = await createKernel({ root: await navigator.storage.getDirectory() });
+  return true;
+};
+
+window.opfs = {
+  async read(path) {
+    return (await (await file(path)).getFile()).text().catch(() => null);
+  },
+  async write(path, text) {
+    const writable = await (await file(path, true)).createWritable();
+    await writable.write(text);
+    await writable.close();
+  },
+  async list(path) {
+    const names = [];
+    for await (const name of (await walk(path)).keys()) names.push(name);
+    return names.sort();
+  },
+  async exists(path) {
+    return file(path).then(
+      () => true,
+      () =>
+        walk(path).then(
+          () => true,
+          () => false
+        )
+    );
+  },
 };

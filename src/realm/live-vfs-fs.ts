@@ -1,0 +1,622 @@
+import type { SyncFsBridgeStat, SyncFsPosixBridge } from './sync-fs-wire.ts';
+
+const ERRNO_BY_CODE: Readonly<Record<string, number>> = {
+  EACCES: 2,
+  EBADF: 8,
+  EBUSY: 10,
+  EEXIST: 20,
+  EINVAL: 28,
+  EIO: 29,
+  EISDIR: 31,
+  ELOOP: 32,
+  ENAMETOOLONG: 37,
+  ENOENT: 44,
+  ENOSPC: 51,
+  ENOSYS: 52,
+  ENOTDIR: 54,
+  ENOTEMPTY: 55,
+  EPERM: 63,
+  EROFS: 69,
+  ETIMEDOUT: 73,
+  EXDEV: 75,
+};
+const EIO = 29;
+
+const S_IFDIR = 0o040000;
+const S_IFREG = 0o100000;
+const S_IFLNK = 0o120000;
+const PERM_MASK = 0o7777;
+
+const DEFAULT_DIR_PERM = 0o755;
+
+const UMASK = 0o022;
+const SEEK_CUR = 1;
+const SEEK_END = 2;
+
+interface LiveNodeState {
+  stat?: SyncFsBridgeStat;
+
+  data?: Uint8Array;
+  len: number;
+  loaded: boolean;
+  dirty: boolean;
+  openCount: number;
+
+  orphan?: boolean;
+}
+
+export interface LiveFsNode {
+  id: number;
+  name: string;
+  mode: number;
+  parent: LiveFsNode;
+  mount: LiveFsMount;
+  node_ops: LiveNodeOps;
+  stream_ops: LiveStreamOps;
+  live: LiveNodeState;
+}
+
+export interface LiveFsStream {
+  node: LiveFsNode;
+  position: number;
+  flags: number;
+}
+
+export interface LiveFsMount {
+  opts: LiveFsMountOpts;
+  mountpoint: string;
+  root: LiveFsNode;
+}
+
+export interface LiveFsMountOpts {
+  root: string;
+  bridge: SyncFsPosixBridge;
+}
+
+interface LiveAttr {
+  dev: number;
+  ino: number;
+  mode: number;
+  nlink: number;
+  uid: number;
+  gid: number;
+  rdev: number;
+  size: number;
+  atime: Date;
+  mtime: Date;
+  ctime: Date;
+  blksize: number;
+  blocks: number;
+}
+
+interface LiveSetAttr {
+  mode?: number;
+  size?: number;
+  atime?: number | Date;
+  mtime?: number | Date;
+  timestamp?: number;
+}
+
+export interface LiveNodeOps {
+  getattr(node: LiveFsNode): LiveAttr;
+  setattr(node: LiveFsNode, attr: LiveSetAttr): void;
+  lookup(parent: LiveFsNode, name: string): LiveFsNode;
+  mknod(parent: LiveFsNode, name: string, mode: number, dev: number): LiveFsNode;
+  rename(oldNode: LiveFsNode, newDir: LiveFsNode, newName: string): void;
+  unlink(parent: LiveFsNode, name: string): void;
+  rmdir(parent: LiveFsNode, name: string): void;
+  readdir(node: LiveFsNode): string[];
+  symlink(parent: LiveFsNode, newName: string, target: string): LiveFsNode;
+  readlink(node: LiveFsNode): string;
+}
+
+export interface LiveStreamOps {
+  open(stream: LiveFsStream): void;
+
+  dup(stream: LiveFsStream): void;
+  close(stream: LiveFsStream): void;
+  read(
+    stream: LiveFsStream,
+    buffer: ArrayBufferView,
+    offset: number,
+    length: number,
+    position: number
+  ): number;
+  write(
+    stream: LiveFsStream,
+    buffer: ArrayBufferView,
+    offset: number,
+    length: number,
+    position: number
+  ): number;
+  llseek(stream: LiveFsStream, offset: number, whence: number): number;
+  fsync(stream: LiveFsStream): void;
+}
+
+export interface LiveFsApi {
+  createNode(parent: LiveFsNode | null, name: string, mode: number, dev?: number): LiveFsNode;
+  isDir(mode: number): boolean;
+  isFile(mode: number): boolean;
+  isLink(mode: number): boolean;
+  ErrnoError: new (errno: number) => Error & { errno: number };
+
+  nameTable?: (LiveFsNode | null)[] | null;
+  hashRemoveNode?(node: LiveFsNode): void;
+  lookupNode?(parent: LiveFsNode, name: string): LiveFsNode;
+}
+
+export interface LiveVfsPlugin {
+  mount(mount: LiveFsMount): LiveFsNode;
+  node_ops: LiveNodeOps;
+  stream_ops: LiveStreamOps;
+
+  mounts: Set<LiveFsMount>;
+}
+
+function toErrno(Fs: LiveFsApi, err: unknown): Error {
+  if ((err as { errno?: unknown })?.errno !== undefined && err instanceof Fs.ErrnoError) {
+    return err;
+  }
+  const code = (err as { code?: unknown })?.code;
+  const errno = typeof code === 'string' ? (ERRNO_BY_CODE[code] ?? EIO) : EIO;
+  return new Fs.ErrnoError(errno);
+}
+
+export function liveNodePath(node: LiveFsNode): string {
+  const parts: string[] = [];
+  let cur = node;
+  while (cur !== cur.mount.root) {
+    parts.push(cur.name);
+    cur = cur.parent;
+  }
+  const root = node.mount.opts.root.replace(/\/+$/, '');
+  return parts.length === 0 ? root || '/' : `${root}/${parts.reverse().join('/')}`;
+}
+
+export function inodeOf(path: string): number {
+  let h1 = 0xdeadbeef;
+  let h2 = 0x41c6ce57;
+  for (let i = 0; i < path.length; i++) {
+    const c = path.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 2654435761);
+    h2 = Math.imul(h2 ^ c, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return 4294967296 * (2097151 & h2) + (h1 >>> 0) || 1;
+}
+
+function modeFromStat(st: SyncFsBridgeStat): number {
+  const type = st.isSymbolicLink ? S_IFLNK : st.isDirectory ? S_IFDIR : S_IFREG;
+  const fallback = st.isDirectory || st.isSymbolicLink ? 0o777 : 0o666;
+  return type | ((st.mode ?? fallback) & PERM_MASK || fallback);
+}
+
+function toMs(v: number | Date | undefined): number | undefined {
+  if (v === undefined || v === null) return undefined;
+  return v instanceof Date ? v.getTime() : v;
+}
+
+interface LiveOpsTables {
+  node?: LiveNodeOps;
+  stream?: LiveStreamOps;
+}
+
+function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
+  const bridgeOf = (node: LiveFsNode): SyncFsPosixBridge => node.mount.opts.bridge;
+
+  function call<T>(fn: () => T): T {
+    try {
+      return fn();
+    } catch (err) {
+      throw toErrno(Fs, err);
+    }
+  }
+
+  function metadataCall(fn: () => void): void {
+    try {
+      call(fn);
+    } catch (err) {
+      if ((err as { errno?: number }).errno !== ERRNO_BY_CODE.ENOSYS) throw err;
+    }
+  }
+
+  function freshState(stat?: SyncFsBridgeStat): LiveNodeState {
+    return { ...(stat ? { stat } : {}), len: 0, loaded: false, dirty: false, openCount: 0 };
+  }
+
+  function makeNode(parent: LiveFsNode | null, name: string, st: SyncFsBridgeStat): LiveFsNode {
+    const node = Fs.createNode(parent, name, modeFromStat(st), 0);
+    node.node_ops = ops.node as LiveNodeOps;
+    node.stream_ops = ops.stream as LiveStreamOps;
+    node.live = freshState(st);
+    return node;
+  }
+
+  function statOf(node: LiveFsNode): SyncFsBridgeStat {
+    if (node.live.orphan) {
+      return { ...(node.live.stat as SyncFsBridgeStat), size: node.live.len };
+    }
+    if (!node.live.stat) {
+      const st = call(() => bridgeOf(node).lstat(liveNodePath(node)));
+      node.live.stat = st;
+      node.mode = modeFromStat(st);
+    }
+    return node.live.stat;
+  }
+
+  function childPath(parent: LiveFsNode, name: string): string {
+    const base = liveNodePath(parent);
+    return base === '/' ? `/${name}` : `${base}/${name}`;
+  }
+
+  function ensureLoaded(node: LiveFsNode): void {
+    const s = node.live;
+    if (s.loaded) return;
+    const bytes = call(() => bridgeOf(node).readFile(liveNodePath(node)));
+    s.data = bytes;
+    s.len = bytes.length;
+    s.loaded = true;
+  }
+
+  function ensureCapacity(node: LiveFsNode, need: number): Uint8Array {
+    const s = node.live;
+    const cur = s.data ?? new Uint8Array(0);
+    if (cur.length >= need) return cur;
+    const grown = new Uint8Array(Math.max(need, cur.length * 2, 256));
+    grown.set(cur.subarray(0, s.len));
+    s.data = grown;
+    return grown;
+  }
+
+  function flushNode(node: LiveFsNode): void {
+    const s = node.live;
+    if (!s.dirty || !s.data || s.orphan) return;
+    const bytes = s.data.slice(0, s.len);
+    call(() => bridgeOf(node).writeFile(liveNodePath(node), bytes));
+    s.dirty = false;
+    s.stat = undefined;
+  }
+
+  function truncate(node: LiveFsNode, size: number): void {
+    const s = node.live;
+    if (s.openCount > 0) {
+      if (size > 0) ensureLoaded(node);
+      else s.loaded = true;
+      const buf = ensureCapacity(node, size);
+      if (size > s.len) buf.fill(0, s.len, size);
+      s.len = size;
+      s.dirty = true;
+      return;
+    }
+
+    const path = liveNodePath(node);
+    const bytes = new Uint8Array(size);
+    if (size > 0) {
+      const cur = call(() => bridgeOf(node).readFile(path));
+      bytes.set(cur.subarray(0, Math.min(size, cur.length)));
+    }
+    call(() => bridgeOf(node).writeFile(path, bytes));
+    s.stat = undefined;
+  }
+
+  return {
+    Fs,
+    bridgeOf,
+    call,
+    metadataCall,
+    makeNode,
+    statOf,
+    childPath,
+    ensureLoaded,
+    ensureCapacity,
+    flushNode,
+    truncate,
+  };
+}
+
+type LiveHelpers = ReturnType<typeof createHelpers>;
+
+function createNodeOps(h: LiveHelpers): LiveNodeOps {
+  const { Fs, bridgeOf, call, metadataCall, makeNode, statOf, childPath, flushNode, truncate } = h;
+  const { ensureLoaded } = h;
+  return {
+    getattr(node) {
+      const st = statOf(node);
+      const s = node.live;
+      const size = Fs.isDir(node.mode) ? 4096 : s.loaded ? s.len : st.size;
+      const mtime = new Date(st.mtimeMs ?? 0);
+      return {
+        dev: 1,
+        ino: st.ino ?? inodeOf(liveNodePath(node)),
+        mode: node.mode,
+        nlink: 1,
+        uid: 0,
+        gid: 0,
+        rdev: 0,
+        size,
+        atime: mtime,
+        mtime,
+        ctime: mtime,
+        blksize: 4096,
+        blocks: Math.ceil(size / 4096),
+      };
+    },
+    setattr(node, attr) {
+      if (node.live.orphan) {
+        if (attr.mode !== undefined && attr.mode !== null) {
+          node.mode = (node.mode & ~PERM_MASK) | (attr.mode & PERM_MASK);
+        }
+        if (attr.size !== undefined && attr.size !== null) truncate(node, attr.size);
+        return;
+      }
+      const path = liveNodePath(node);
+      if (attr.mode !== undefined && attr.mode !== null) {
+        const perm = attr.mode & PERM_MASK;
+        if (perm !== (node.mode & PERM_MASK)) {
+          metadataCall(() => bridgeOf(node).chmod(path, perm));
+          node.mode = (node.mode & ~PERM_MASK) | perm;
+        }
+      }
+      if (attr.size !== undefined && attr.size !== null && Fs.isFile(node.mode)) {
+        truncate(node, attr.size);
+      }
+      const mtime = toMs(attr.mtime) ?? attr.timestamp;
+      if (mtime !== undefined) {
+        const atime = toMs(attr.atime) ?? mtime;
+        flushNode(node);
+        metadataCall(() => bridgeOf(node).utimes(path, atime, mtime));
+      }
+      node.live.stat = undefined;
+    },
+    lookup(parent, name) {
+      const st = call(() => bridgeOf(parent).lstat(childPath(parent, name)));
+      return makeNode(parent, name, st);
+    },
+    mknod(parent, name, mode) {
+      const path = childPath(parent, name);
+      if (Fs.isDir(mode)) {
+        call(() => bridgeOf(parent).mkdir(path));
+
+        const perm = mode & PERM_MASK & ~UMASK;
+        if (perm !== DEFAULT_DIR_PERM) metadataCall(() => bridgeOf(parent).chmod(path, perm));
+      } else if (Fs.isFile(mode)) {
+        call(() => bridgeOf(parent).writeFile(path, new Uint8Array(0)));
+      } else {
+        throw new Fs.ErrnoError(ERRNO_BY_CODE.EPERM);
+      }
+      const node = makeNode(parent, name, {
+        isFile: Fs.isFile(mode),
+        isDirectory: Fs.isDir(mode),
+        isSymbolicLink: false,
+        size: 0,
+        mode,
+        mtimeMs: Date.now(),
+      });
+
+      node.live.stat = undefined;
+      return node;
+    },
+    rename(oldNode, newDir, newName) {
+      const from = liveNodePath(oldNode);
+      const to = childPath(newDir, newName);
+      flushNode(oldNode);
+      call(() => bridgeOf(oldNode).rename(from, to));
+
+      try {
+        const existing = Fs.lookupNode?.(newDir, newName);
+        if (existing && existing !== oldNode) Fs.hashRemoveNode?.(existing);
+      } catch {}
+      oldNode.name = newName;
+      oldNode.parent = newDir;
+      oldNode.live.stat = undefined;
+    },
+    unlink(parent, name) {
+      let open: LiveFsNode | undefined;
+      try {
+        const node = Fs.lookupNode?.(parent, name);
+        if (node && node.live?.openCount > 0 && Fs.isFile(node.mode)) open = node;
+      } catch {}
+      if (open) {
+        statOf(open);
+        ensureLoaded(open);
+      }
+      call(() => bridgeOf(parent).unlink(childPath(parent, name)));
+      if (open) open.live.orphan = true;
+    },
+    rmdir(parent, name) {
+      call(() => bridgeOf(parent).rmdir(childPath(parent, name)));
+    },
+    readdir(node) {
+      return ['.', '..', ...call(() => bridgeOf(node).readdir(liveNodePath(node)))];
+    },
+    symlink(parent, newName, target) {
+      const path = childPath(parent, newName);
+      call(() => bridgeOf(parent).symlink(target, path));
+      return makeNode(parent, newName, {
+        isFile: false,
+        isDirectory: false,
+        isSymbolicLink: true,
+        size: target.length,
+      });
+    },
+    readlink(node) {
+      if (!Fs.isLink(node.mode)) throw new Fs.ErrnoError(ERRNO_BY_CODE.EINVAL);
+      return call(() => bridgeOf(node).readlink(liveNodePath(node)));
+    },
+  };
+}
+
+function createStreamOps(h: LiveHelpers): LiveStreamOps {
+  const { Fs, statOf, ensureLoaded, ensureCapacity, flushNode } = h;
+  return {
+    open(stream) {
+      if (!Fs.isFile(stream.node.mode)) return;
+      stream.node.live.openCount++;
+    },
+
+    dup(stream) {
+      if (!Fs.isFile(stream.node.mode)) return;
+      stream.node.live.openCount++;
+    },
+    close(stream) {
+      const node = stream.node;
+      if (!Fs.isFile(node.mode)) return;
+      const s = node.live;
+      s.openCount = Math.max(0, s.openCount - 1);
+      if (s.openCount > 0) return;
+      try {
+        flushNode(node);
+      } finally {
+        s.data = undefined;
+        s.len = 0;
+        s.loaded = false;
+      }
+    },
+    read(stream, buffer, offset, length, position) {
+      const node = stream.node;
+      if (Fs.isDir(node.mode)) throw new Fs.ErrnoError(ERRNO_BY_CODE.EISDIR);
+      ensureLoaded(node);
+      const s = node.live;
+      if (position >= s.len || length <= 0) return 0;
+      const n = Math.min(length, s.len - position);
+      const out = new Uint8Array(buffer.buffer, buffer.byteOffset + offset, n);
+      out.set((s.data as Uint8Array).subarray(position, position + n));
+      return n;
+    },
+    write(stream, buffer, offset, length, position) {
+      const node = stream.node;
+      if (Fs.isDir(node.mode)) throw new Fs.ErrnoError(ERRNO_BY_CODE.EISDIR);
+      if (length <= 0) return 0;
+      ensureLoaded(node);
+      const s = node.live;
+      const end = position + length;
+      const buf = ensureCapacity(node, end);
+      if (position > s.len) buf.fill(0, s.len, position);
+      buf.set(new Uint8Array(buffer.buffer, buffer.byteOffset + offset, length), position);
+      s.len = Math.max(s.len, end);
+      s.dirty = true;
+      return length;
+    },
+    llseek(stream, offset, whence) {
+      let pos = offset;
+      if (whence === SEEK_CUR) pos += stream.position;
+      else if (whence === SEEK_END && Fs.isFile(stream.node.mode)) {
+        const s = stream.node.live;
+        pos += s.loaded ? s.len : statOf(stream.node).size;
+      }
+      if (pos < 0) throw new Fs.ErrnoError(ERRNO_BY_CODE.EINVAL);
+      return pos;
+    },
+    fsync(stream) {
+      flushNode(stream.node);
+    },
+  };
+}
+
+export function createLiveVfsPlugin(Fs: LiveFsApi): LiveVfsPlugin {
+  const mounts = new Set<LiveFsMount>();
+  const ops: LiveOpsTables = {};
+  const h = createHelpers(Fs, ops);
+  const nodeOps = createNodeOps(h);
+  const streamOps = createStreamOps(h);
+  ops.node = nodeOps;
+  ops.stream = streamOps;
+  return {
+    mounts,
+    node_ops: nodeOps,
+    stream_ops: streamOps,
+    mount(mount) {
+      const st = h.call(() => mount.opts.bridge.stat(mount.opts.root));
+      if (!st.isDirectory) throw new Fs.ErrnoError(ERRNO_BY_CODE.ENOTDIR);
+      const root = h.makeNode(null, '/', st);
+      mounts.add(mount);
+      return root;
+    },
+  };
+}
+
+function ownedBy(plugin: LiveVfsPlugin, node: LiveFsNode | null | undefined): node is LiveFsNode {
+  return !!node && plugin.mounts.has(node.mount);
+}
+
+export function flushLiveVfs(Fs: LiveFsApi, plugin: LiveVfsPlugin): void {
+  for (const head of Fs.nameTable ?? []) {
+    for (let node = head; node; node = (node as { name_next?: LiveFsNode }).name_next ?? null) {
+      if (!ownedBy(plugin, node) || !node.live.dirty || !node.live.data) continue;
+      try {
+        const bytes = node.live.data.slice(0, node.live.len);
+        node.mount.opts.bridge.writeFile(liveNodePath(node), bytes);
+        node.live.dirty = false;
+      } catch (err) {
+        throw toErrno(Fs, err);
+      }
+    }
+  }
+}
+
+export function invalidateLiveVfs(Fs: LiveFsApi, plugin: LiveVfsPlugin): void {
+  const table = Fs.nameTable ?? [];
+  const drop: LiveFsNode[] = [];
+  for (const head of table) {
+    for (let node = head; node; node = (node as { name_next?: LiveFsNode }).name_next ?? null) {
+      if (!ownedBy(plugin, node)) continue;
+      const s = node.live;
+      s.stat = undefined;
+      if (s.openCount === 0) {
+        if (node !== node.mount.root) drop.push(node);
+      } else if (s.loaded && !s.dirty) {
+        s.data = undefined;
+        s.len = 0;
+        s.loaded = false;
+      }
+    }
+  }
+  if (!Fs.hashRemoveNode) return;
+  for (const node of drop) Fs.hashRemoveNode(node);
+}
+
+export interface LiveMountFsApi extends LiveFsApi {
+  filesystems: { SLICC_LIVE_FS?: LiveVfsPlugin };
+  mkdirTree(path: string): void;
+  mount(type: LiveVfsPlugin, opts: LiveFsMountOpts, mountpoint: string): unknown;
+}
+
+function outermostDirs(dirs: readonly string[]): string[] {
+  const norm = [...new Set(dirs.map((d) => d.replace(/\/+$/, '') || '/'))].sort();
+  return norm.filter((d) => !norm.some((o) => o !== d && (o === '/' || d.startsWith(`${o}/`))));
+}
+
+function describeMountError(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  const errno = (err as { errno?: unknown } | null)?.errno;
+  return typeof errno === 'number' ? `errno ${errno}` : String(err);
+}
+
+export function mountLiveVfsDirs(
+  Fs: LiveMountFsApi,
+  bridge: SyncFsPosixBridge,
+  dirs: readonly string[],
+  warn: (message: string) => void
+): { plugin: LiveVfsPlugin; mounted: string[] } {
+  if (typeof Fs.filesystems !== 'object' || !Fs.filesystems) {
+    throw new Error(
+      'the module was linked without filesystem support, so the VFS cannot be mounted ' +
+        '(link it with -sFORCE_FILESYSTEM=1)'
+    );
+  }
+  const plugin = Fs.filesystems.SLICC_LIVE_FS ?? createLiveVfsPlugin(Fs);
+  Fs.filesystems.SLICC_LIVE_FS = plugin;
+  const mounted: string[] = [];
+  for (const dir of outermostDirs(dirs)) {
+    if (dir === '/') continue;
+    try {
+      Fs.mkdirTree(dir);
+      Fs.mount(plugin, { root: dir, bridge }, dir);
+      mounted.push(dir);
+    } catch (err) {
+      warn(`live VFS mount of ${dir} failed: ${describeMountError(err)}`);
+    }
+  }
+  return { plugin, mounted };
+}
