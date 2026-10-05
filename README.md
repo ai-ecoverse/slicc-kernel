@@ -118,9 +118,20 @@ await kernel.run(['curl', '-sS', 'https://registry.npmjs.org/@ai-ecoverse/wasm-b
 - **The proxy** listens on `127.0.0.1:3128` from the first connection on. It takes absolute-form `http:` requests and `CONNECT` tunnels, which it terminates with a certificate for the requested host, issued by the kernel's own CA, then hands each request to the transport. Programs start with `http_proxy`, `https_proxy` (and the upper-case names) pointing at it, `no_proxy` covering loopback, and `SSL_CERT_FILE`, `CURL_CA_BUNDLE` and `GIT_SSL_CAINFO` pointing at the CA certificate in `/etc/ssl/certs/slicc-kernel-ca.pem`; variables in `env` override them. The CA's key never leaves WebCrypto; it is kept in IndexedDB (`<metadata>-ca`, or in memory with `metadata: false`).
 - **TLS** needs [`@ai-ecoverse/wasm-tls-engine`](https://www.npmjs.com/package/@ai-ecoverse/wasm-tls-engine) installed under `modules`, like a command. Without it, `CONNECT` is answered `501` with the reason.
 - **The transport** is an object on the page with `traits` (`manualRedirects`, `encodedBodies`, `maxRequestBody`) and `fetch(request)`, which answers `{ status, statusText, headers, body, cancel }` with `body` an async iterable of `Uint8Array`. The kernel pulls the body one chunk at a time, so a slow program slows the download. A rejection with a numeric `status` is answered with that status; any other with `502`. `fetchTransport()` is the plain `fetch` of the page, bound by CORS (`registry.npmjs.org` and jsDelivr allow it); an embedder with a way around CORS passes its own.
+- **`localProxyTransport({ url, key })`** sends every request to a local proxy on loopback, such as [slicc-node](https://github.com/ai-ecoverse/slicc-node) or slicc-swift, which fetches it without CORS. Redirects reach the program unfollowed, with every `Set-Cookie`; bodies arrive decoded. `probeLocalProxy({ url, key })` resolves with the proxy's capabilities, or `null` when it is gone or refuses the key, so a page can fall back to `fetchTransport()`. Both take a `fetch` option, and the transport a `maxRequestBody` (default 64 MiB).
 - **Without a transport**, every request is answered `502` with `slicc-kernel: no network transport (createKernel({ network: { transport } }))`.
 
 Process workers can also use the transport directly, without a socket: the `net-request`, `net-read` and `net-close` syscalls (`Module.sliccKernel.http` in a process) open a request and read its body in pieces. Requests are per process and closed when it exits.
+
+### Local proxy protocol
+
+The page and the proxy speak raw mode of SLICC's `/api/fetch-proxy`. Every request is one `POST {url}/api/fetch-proxy` with `credentials: 'omit'`:
+
+- `X-Bridge-Token: <key>`, the per-process proxy key. It travels only in this header, never in a URL.
+- `X-Slicc-Raw-Request: <json>`, the head to send upstream: `{ "url", "method", "headers": [[name, value], …] }`, with the headers in order and repeats kept apart. Characters past U+007E are `\u`-escaped so the value is a valid header.
+- The request body, if any, as the hop's body.
+
+The proxy answers `200` with `Content-Type: application/vnd.slicc.raw-fetch`: a big-endian `u32` length, that many bytes of UTF-8 JSON `{ "status", "statusText", "headers": [[name, value], …], "url" }`, then the upstream body until the end of the hop. Any other answer is a refusal with a JSON `{ "error" }` body and `X-Proxy-Error: 1`; programs see its status (`400` malformed head, `403` wrong origin or key, `413` body too large, `502` upstream unreachable). A probe is a `POST` with the key and `X-Slicc-Raw-Probe: 1` instead of a head; it is answered with JSON `{ "rawFetch": 1, "requestBodyStreaming", "maxRequestBodyBytes" }` and fetches nothing. The server side (origin allowlist, CORS, the Private Network Access preflight) is specified in [slicc-node's README](https://github.com/ai-ecoverse/slicc-node#protocol).
 
 ## Filesystem
 
@@ -158,7 +169,7 @@ The kernel is ported from SLICC's `packages/webapp/src/kernel/` with the browser
 - `src/realm/`: the synchronous bridge (`SharedArrayBuffer` + `Atomics.wait`) and the live Emscripten filesystem on top of it.
 - `src/fs/`: the OPFS filesystem and the virtual command directories.
 - `src/launcher.ts`, `src/commands.ts`, `src/serve.ts`, `src/index.ts`: command resolution, the kernel worker protocol and the page API.
-- `src/kernel/net/`: the proxy, HTTP/1.1, TLS termination and the local CA, and the bridge to the page's transport; `src/transport.ts` is the page side.
+- `src/kernel/net/`: the proxy, HTTP/1.1, TLS termination and the local CA, and the bridge to the page's transport; `src/transport.ts` and `src/local-proxy-transport.ts` are the page side.
 
 
 ## Installing from git
