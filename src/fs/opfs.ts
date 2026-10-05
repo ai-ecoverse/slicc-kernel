@@ -433,6 +433,8 @@ export class OpfsFs implements KernelFs {
       copied ||= !placed;
     }
     if (copied) await this.restamp(destination, timed);
+    this.forget(source.path);
+    this.forget(destination);
   }
 
   private async modified(path: string): Promise<number> {
