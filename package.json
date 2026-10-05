@@ -37,13 +37,13 @@
     "start": "npm run build && node test/integration/server.mjs",
     "pretest": "npm run build && playwright-core install --no-shell chromium",
     "test": "node --test --test-global-setup=test/integration/global.mjs 'test/integration/*.test.mjs'",
-    "test:unit": "NODE_NO_WARNINGS=1 mcr -c mcr.config.mjs node --import fake-indexeddb/auto --test 'test/unit/**/*.test.mjs'",
+    "test:unit": "NODE_NO_WARNINGS=1 mcr -c node_modules/@ai-ecoverse/slicc-shared-web/mcr.config.mjs node --import fake-indexeddb/auto --test 'test/unit/**/*.test.mjs'",
     "typecheck": "tsc",
-    "lint": "biome check . && npm run typecheck && slicc-lint-comments && slicc-no-unit-tests",
+    "lint": "slicc-lint",
     "format": "biome check --write ."
   },
   "devDependencies": {
-    "@ai-ecoverse/slicc-shared-web": "github:ai-ecoverse/slicc-shared-web#d28ddcb962913aff6771735165fe030e3aeb6f16",
+    "@ai-ecoverse/slicc-shared-web": "1.1.0",
     "@ai-ecoverse/wasm-bash": "5.3.0-7",
     "@ai-ecoverse/wasm-coreutils": "9.7.0-3",
     "@biomejs/biome": "2.5.15",
