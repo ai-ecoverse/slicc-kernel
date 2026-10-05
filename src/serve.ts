@@ -75,6 +75,10 @@ function act(session: TerminalSession, req: TerminalAction): void {
   else session.close();
 }
 
+function dirsChannel(name: string | false): string | undefined {
+  return name === false ? undefined : `slicc-kernel-dirs:${name}`;
+}
+
 export function serveKernel(port: KernelPort, deps: ServeDeps): void {
   let launcher: Promise<Launcher> | undefined;
   let remote: RemoteTransport | undefined;
@@ -104,7 +108,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
         const name = req.metadata ?? META_DB;
         const meta = name === false ? undefined : await deps.metadata?.(name);
         remote = req.transport ? new RemoteTransport(port, req.transport) : undefined;
-        const fs = new OpfsFs(root, meta);
+        const fs = new OpfsFs(root, meta, dirsChannel(name));
         await fs.reconcile();
         const started = new Launcher({
           fs,

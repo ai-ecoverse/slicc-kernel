@@ -7,7 +7,7 @@ const S_IFLNK = 0o120000;
 const PERM_MASK = 0o7777;
 const READ_ATTEMPTS = 3;
 const MAX_LINKS = 40;
-const ALIVE_MS = 1000;
+const CHECK_MS = 1000;
 const EXECUTABLE = /\/node_modules\/(?:@[^/]+\/)?[^/]+\/bin\//;
 
 type Handle = FileSystemFileHandle | FileSystemDirectoryHandle;
@@ -72,9 +72,27 @@ export class OpfsFs implements KernelFs {
   private readonly dirs = new Map<string, FileSystemDirectoryHandle>();
   private readonly checked = new WeakMap<FileSystemDirectoryHandle, number>();
 
-  constructor(root: FileSystemDirectoryHandle, meta: MetaStore = new MemoryMeta()) {
+  private readonly channel: BroadcastChannel | undefined;
+
+  constructor(
+    root: FileSystemDirectoryHandle,
+    meta: MetaStore = new MemoryMeta(),
+    channel?: string
+  ) {
     this.root = root;
     this.meta = meta;
+    this.channel = channel === undefined ? undefined : new BroadcastChannel(channel);
+    if (this.channel) {
+      this.channel.onmessage = ({ data }) => {
+        for (const path of data as string[]) this.forget(path);
+      };
+      (this.channel as BroadcastChannel & { unref?: () => void }).unref?.();
+    }
+  }
+
+  private changed(...paths: string[]): void {
+    for (const path of paths) this.forget(path);
+    this.channel?.postMessage(paths);
   }
 
   resolvePath(base: string, path: string): string {
@@ -86,6 +104,7 @@ export class OpfsFs implements KernelFs {
     for (let at = from; at < parts.length; at++) {
       dir = await dir.getDirectoryHandle(parts[at] as string);
       this.dirs.set(`/${parts.slice(0, at + 1).join('/')}`, dir);
+      this.checked.set(dir, performance.now());
     }
     return dir;
   }
@@ -97,27 +116,23 @@ export class OpfsFs implements KernelFs {
     for (; from > 0 && !cached; from--)
       cached = this.dirs.get(`/${parts.slice(0, from).join('/')}`);
     if (cached) from++;
-    const start = cached ?? this.root;
+    const at = `/${parts.slice(0, from).join('/')}`;
+    if (cached && !(await this.current(at, cached))) {
+      this.forget(at);
+      cached = undefined;
+      from = 0;
+    }
     try {
-      try {
-        return await this.walk(parts, from, start);
-      } catch (err) {
-        if (start === this.root || (await this.alive(start))) throw err;
-        this.forget(`/${parts.slice(0, from).join('/')}`);
-        return await this.walk(parts, 0, this.root);
-      }
+      return await this.walk(parts, from, cached ?? this.root);
     } catch (err) {
       throw translate(err, path);
     }
   }
 
-  private async alive(dir: FileSystemDirectoryHandle): Promise<boolean> {
-    if (performance.now() - (this.checked.get(dir) ?? -ALIVE_MS) < ALIVE_MS) return true;
-    try {
-      for await (const _ of dir.keys()) break;
-    } catch {
-      return false;
-    }
+  private async current(path: string, dir: FileSystemDirectoryHandle): Promise<boolean> {
+    if (performance.now() - (this.checked.get(dir) ?? -CHECK_MS) < CHECK_MS) return true;
+    const where = await this.root.resolve(dir).catch(() => null);
+    if (where === null || `/${where.join('/')}` !== path) return false;
     this.checked.set(dir, performance.now());
     return true;
   }
@@ -131,7 +146,7 @@ export class OpfsFs implements KernelFs {
     try {
       return await op(dir);
     } catch (err) {
-      if ((err as { name?: unknown })?.name !== 'NotFoundError' || (await this.alive(dir)))
+      if ((err as { name?: unknown })?.name !== 'NotFoundError' || (await this.current(path, dir)))
         throw err;
       this.forget(path);
       return op(await this.dir(path));
@@ -378,7 +393,7 @@ export class OpfsFs implements KernelFs {
       } catch (err) {
         throw translate(err, path);
       }
-      this.forget(found.path);
+      this.changed(found.path);
     }
     await this.meta.remove([found.path]);
   }
@@ -433,8 +448,7 @@ export class OpfsFs implements KernelFs {
       copied ||= !placed;
     }
     if (copied) await this.restamp(destination, timed);
-    this.forget(source.path);
-    this.forget(destination);
+    this.changed(source.path, destination);
   }
 
   private async modified(path: string): Promise<number> {
