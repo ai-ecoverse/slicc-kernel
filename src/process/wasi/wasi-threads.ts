@@ -1,4 +1,9 @@
-import { WASM_MAX_THREADS, WASM_THREAD_EXIT, WASM_THREAD_SPAWN } from '../../kernel/protocol.ts';
+import {
+  WASM_DEFAULT_THREADS,
+  WASM_MAX_THREADS,
+  WASM_THREAD_EXIT,
+  WASM_THREAD_SPAWN,
+} from '../../kernel/protocol.ts';
 import type { SabPostLike } from '../../realm/sync-sab-bridge.ts';
 
 const LAST_TID = 0;
@@ -14,7 +19,7 @@ export class ThreadExit extends Error {
 
 export function threadCap(env: Readonly<Record<string, string>>): number {
   const asked = Number.parseInt(env.SLICC_WASM_THREADS ?? '', 10);
-  return asked >= 1 ? Math.min(asked, WASM_MAX_THREADS) : WASM_MAX_THREADS;
+  return asked >= 1 ? Math.min(asked, WASM_MAX_THREADS) : WASM_DEFAULT_THREADS;
 }
 
 export class WasiThreads {

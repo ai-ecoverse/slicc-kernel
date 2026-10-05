@@ -17,6 +17,8 @@ export interface RealmTransportTraits {
   manualRedirects: boolean;
   encodedBodies: boolean;
   maxRequestBody: number;
+  crossOrigin?: 'cors' | 'any';
+  unavailable?: true;
 }
 export interface RealmTransport {
   readonly traits: RealmTransportTraits;

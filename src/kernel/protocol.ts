@@ -8,7 +8,8 @@ export const WASM_PROCESS_ERROR = 'wasm-process-error';
 export const WASM_THREAD_SPAWN = 'wasm-thread-spawn';
 export const WASM_THREAD_INIT = 'wasm-thread-init';
 export const WASM_THREAD_EXIT = 'wasm-thread-exit';
-export const WASM_MAX_THREADS = 64;
+export const WASM_MAX_THREADS = 256;
+export const WASM_DEFAULT_THREADS = 64;
 
 export interface WasmProgram {
   abi?: 'emscripten' | 'wasi';

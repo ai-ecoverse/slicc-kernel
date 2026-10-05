@@ -51,6 +51,7 @@ export function fetchTransport(options: FetchTransportOptions = {}): RealmTransp
       manualRedirects: false,
       encodedBodies: false,
       maxRequestBody: options.maxRequestBody ?? MAX_REQUEST_BODY,
+      crossOrigin: 'cors',
     },
     async fetch(request: RealmTransportRequest): Promise<RealmTransportResponse> {
       let response: Response;

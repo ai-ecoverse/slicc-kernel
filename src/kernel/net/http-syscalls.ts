@@ -11,9 +11,10 @@ export type HttpSyscall =
       body?: Uint8Array;
     }
   | { op: 'net-read'; handle: number; max: number }
-  | { op: 'net-close'; handle: number };
+  | { op: 'net-close'; handle: number }
+  | { op: 'net-traits' };
 
-export const HTTP_OPS: readonly string[] = ['net-request', 'net-read', 'net-close'];
+export const HTTP_OPS: readonly string[] = ['net-request', 'net-read', 'net-close', 'net-traits'];
 
 export interface HttpHead {
   handle: number;
@@ -56,7 +57,14 @@ export class HttpHandles {
   syscall(req: HttpSyscall): Promise<SyncFsResult> {
     if (req.op === 'net-request') return this.request(req);
     if (req.op === 'net-read') return this.read(req.handle, req.max);
+    if (req.op === 'net-traits') return Promise.resolve(this.traits());
     return this.close(req.handle);
+  }
+
+  private traits(): SyncFsResult {
+    const { unavailable, crossOrigin = 'any', ...rest } = this.transport.traits;
+    if (unavailable) return { ok: false, errno: 'ENETUNREACH', message: NO_TRANSPORT };
+    return { ok: true, kind: 'json', json: { ...rest, crossOrigin } };
   }
 
   private add(
