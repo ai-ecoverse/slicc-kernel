@@ -581,6 +581,9 @@ export function invalidateLiveVfs(Fs: LiveFsApi, plugin: LiveVfsPlugin): void {
 
 export interface LiveMountFsApi extends LiveFsApi {
   root?: MemfsRoot;
+  rename?(from: string, to: string): void;
+  lookupPath?(path: string, opts?: { follow?: boolean; parent?: boolean }): { node: object };
+  sliccRename?: true;
   filesystems: { SLICC_LIVE_FS?: LiveVfsPlugin };
   mkdirTree(path: string): void;
   mount(type: LiveVfsPlugin, opts: LiveFsMountOpts, mountpoint: string): unknown;
@@ -636,6 +639,7 @@ export function liveRoot(Fs: LiveMountFsApi, bridge: SyncFsPosixBridge): void {
   root.live = { len: 0, loaded: false, dirty: false, openCount: 0 };
   plugin.mounts.add(root.mount);
   invalidateLiveVfs(Fs, plugin);
+  guardRenames(Fs);
   const memfs = root.memfs ?? root.node_ops;
   const live = plugin.node_ops;
   root.memfs = memfs;
@@ -653,5 +657,29 @@ export function liveRoot(Fs: LiveMountFsApi, bridge: SyncFsPosixBridge): void {
       for (const name of live.readdir(node)) names.add(name);
       return [...names];
     },
+  };
+}
+
+function crosses(Fs: LiveMountFsApi, from: string, to: string): boolean {
+  const parentOf = (path: string) =>
+    Fs.lookupPath?.(path, { parent: true }).node as LiveFsNode | undefined;
+  const name = from.replace(/\/+$/, '').split('/').pop() ?? '';
+  try {
+    const fromDir = parentOf(from);
+    const node = fromDir && Fs.lookupNode?.(fromDir, name);
+    const dir = parentOf(to);
+    return !!node && !!dir && !!node.live !== !!dir.live;
+  } catch {
+    return false;
+  }
+}
+
+function guardRenames(Fs: LiveMountFsApi): void {
+  const rename = Fs.rename?.bind(Fs);
+  if (!rename || Fs.sliccRename) return;
+  Fs.sliccRename = true;
+  Fs.rename = (from, to) => {
+    if (crosses(Fs, from, to)) throw new Fs.ErrnoError(ERRNO_BY_CODE.EXDEV);
+    rename(from, to);
   };
 }
