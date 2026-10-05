@@ -72,13 +72,15 @@ window.inFlight = () => [...inFlight].map((e) => ({ ...e, ms: Date.now() - e.sin
 
 const STALL = 30000;
 
-function fetchBytes(url) {
+function fetchOnce(url) {
   return tracked(`fetch ${url}`, async (entry) => {
     entry.bytes = 0;
     entry.last = Date.now();
     const controller = new AbortController();
     const watch = setInterval(() => {
-      if (Date.now() - entry.last > STALL) controller.abort(new Error(`no data for ${STALL} ms`));
+      if (Date.now() - entry.last > STALL) {
+        controller.abort(Object.assign(new Error(`no data for ${STALL} ms`), { stalled: true }));
+      }
     }, 1000);
     try {
       const response = await fetch(url, { signal: controller.signal });
@@ -101,13 +103,29 @@ function fetchBytes(url) {
       return out;
     } catch (err) {
       const ms = Date.now() - entry.since;
-      throw new Error(
-        `fetching ${url}: ${controller.signal.reason ?? err}, after ${entry.bytes} bytes in ${ms} ms`
+      const reason = controller.signal.reason ?? err;
+      throw Object.assign(
+        new Error(`fetching ${url}: ${reason}, after ${entry.bytes} bytes in ${ms} ms`),
+        { stalled: reason?.stalled === true, bytes: entry.bytes }
       );
     } finally {
       clearInterval(watch);
     }
   });
+}
+
+const stalls = [];
+
+window.takeStalls = () => stalls.splice(0);
+
+async function fetchBytes(url) {
+  try {
+    return await fetchOnce(url);
+  } catch (err) {
+    if (!err.stalled) throw err;
+    stalls.push(`chrome stalled on ${url} after ${err.bytes} bytes; re-fetched`);
+    return fetchOnce(url);
+  }
 }
 
 window.installTree = async (dir, names) => {
