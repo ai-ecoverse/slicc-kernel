@@ -114,6 +114,8 @@ export class ChildTable {
 
   onChildState?: () => void;
 
+  onReap?: (pid: number) => void;
+
   private stateChanged: Array<() => void> = [];
 
   private readonly watchers = new Map<number, ChildStateListener>();
@@ -286,8 +288,13 @@ export class ChildTable {
   private reap(pid: number, code: number): [number, number] {
     const child = this.children.get(pid);
     this.children.delete(pid);
+    this.onReap?.(pid);
     if (child && child.captured.size > 0) this.leftovers.set(pid, child.captured);
     return [pid, waitStatus(code, child?.termsig?.())];
+  }
+
+  pids(): number[] {
+    return [...this.children.keys()];
   }
 
   captured(pid: number, slot: number): Uint8Array {

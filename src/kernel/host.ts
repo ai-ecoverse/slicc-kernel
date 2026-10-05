@@ -57,6 +57,7 @@ export interface SpawnWasmOptions {
   kill?: (pid: number, sig: number) => boolean | Promise<boolean>;
   jobs?: JobTable;
   ptys?: PtyTable;
+  onReap?: (pid: number) => void;
 }
 
 export interface WasmProcessHandle {
@@ -115,6 +116,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     kill: opts.kill,
     jobs: opts.jobs,
     ptys: opts.ptys,
+    onReap: opts.onReap,
     onPending: (sig) => void Atomics.or(header, SAB_I_SIGNALS, sigbit(sig)),
     onTimer: (which) => void Atomics.or(header, SAB_I_TIMERS, 1 << which),
     hasPending: () =>

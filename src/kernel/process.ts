@@ -270,6 +270,8 @@ export interface WasmProcessOptions {
 
   raise?: (sig: number) => void;
 
+  onReap?: (pid: number) => void;
+
   jobs?: JobTable;
 
   ptys?: PtyTable;
@@ -322,6 +324,7 @@ export class WasmProcess {
     this.children = new ChildTable(fds, options.spawner, options.forker);
     this.nodes = new VfsNodes(options.fs);
     this.children.onChildState = () => this.signal(SIG.CHLD);
+    this.children.onReap = options.onReap;
   }
 
   signal(sig: number): SignalOutcome {
@@ -790,6 +793,7 @@ export class WasmProcess {
     if (this.exited) return;
     this.exited = true;
     this.clearAlarm();
+    for (const pid of this.children.pids()) this.options.onReap?.(pid);
     await this.fds.closeAll();
   }
 }

@@ -110,6 +110,8 @@ export class Launcher {
   private catalog: Promise<Map<string, Command>> | undefined;
   private readonly compiled = new Map<string, Promise<WebAssembly.Module>>();
   private readonly processes = new Map<number, WasmProcessHandle>();
+  private readonly zombies = new Set<number>();
+  private readonly orphans = new Set<number>();
   private readonly jobs = new JobTable();
   private readonly ptys = new PtyTable((tty, sig) => this.jobs.signalOwnedForeground(tty, sig));
   private nextPid = 1000;
@@ -236,6 +238,7 @@ export class Launcher {
       kill: (target, sig) => this.kill(target, sig),
       jobs: this.jobs,
       ptys: this.ptys,
+      onReap: (child) => this.reaped(child),
       ...(req.fork ? { fork: req.fork } : {}),
       ...(req.ppid !== undefined ? { ppid: req.ppid } : {}),
     });
@@ -243,9 +246,15 @@ export class Launcher {
     this.jobs.add(pid, req.ppid, (sig) => handle.signal(sig), terminal);
     void handle.exited.then(() => {
       this.processes.delete(pid);
-      this.jobs.remove(pid);
+      if (req.ppid === undefined || this.orphans.delete(pid)) this.jobs.remove(pid);
+      else this.zombies.add(pid);
     });
     return handle;
+  }
+
+  private reaped(pid: number): void {
+    if (this.zombies.delete(pid)) this.jobs.remove(pid);
+    else this.orphans.add(pid);
   }
 
   private spawner(ppid: number, report: (message: string) => void): ChildSpawner {
