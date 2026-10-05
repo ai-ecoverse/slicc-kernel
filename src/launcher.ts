@@ -1,5 +1,5 @@
 import { type Command, scanCommands } from './commands.ts';
-import { withCommandDirs } from './fs/commands.ts';
+import { followLinks, withCommandDirs } from './fs/commands.ts';
 import type { KernelFs } from './fs/types.ts';
 import {
   type ChildForker,
@@ -155,7 +155,9 @@ export class Launcher {
       const command = (await this.commands()).get(name);
       return command && targetOf(command);
     }
-    const glue = this.fs.resolvePath(cwd, file);
+    const glue = await followLinks(this.base, this.fs.resolvePath(cwd, file));
+    const linked = COMMAND.exec(glue)?.[1];
+    if (linked !== undefined) return this.resolve(`/bin/${linked}`, argv0, cwd);
     const wasm = modulePath(glue);
     if (!(await this.base.exists(glue)) || !(await this.base.exists(wasm))) return undefined;
     return { glue, wasm, argv0: baseName(argv0 || file) };

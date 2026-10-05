@@ -4,6 +4,7 @@ export interface KernelOptions {
   root?: FileSystemDirectoryHandle;
   modules?: string;
   env?: Record<string, string>;
+  metadata?: string | false;
   worker?: string | URL;
 }
 
@@ -167,6 +168,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     ...(options.root ? { root: options.root } : {}),
     ...(options.modules ? { modules: options.modules } : {}),
     ...(options.env ? { env: options.env } : {}),
+    ...(options.metadata !== undefined ? { metadata: options.metadata } : {}),
   });
 
   return {

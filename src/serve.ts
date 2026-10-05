@@ -1,3 +1,4 @@
+import { META_DB, type MetaStore } from './fs/meta.ts';
 import { OpfsFs } from './fs/opfs.ts';
 import type { WasmWorkerLike } from './kernel/host.ts';
 import { SIG } from './kernel/signals.ts';
@@ -19,6 +20,7 @@ export interface InitRequest {
   root?: FileSystemDirectoryHandle;
   modules?: string;
   env?: Record<string, string>;
+  metadata?: string | false;
 }
 
 export interface RunRequest {
@@ -52,6 +54,7 @@ export type KernelCall = WithoutId<KernelRequest>;
 export interface ServeDeps {
   storage: () => Promise<FileSystemDirectoryHandle>;
   createWorker: () => WasmWorkerLike;
+  metadata?: (name: string) => Promise<MetaStore>;
 }
 
 function signalNumber(name: string): number {
@@ -93,8 +96,12 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
   async function handle(req: KernelRequest): Promise<unknown> {
     if (req.op === 'init') {
       launcher = (req.root ? Promise.resolve(req.root) : deps.storage()).then(async (root) => {
+        const name = req.metadata ?? META_DB;
+        const meta = name === false ? undefined : await deps.metadata?.(name);
+        const fs = new OpfsFs(root, meta);
+        await fs.reconcile();
         const started = new Launcher({
-          fs: new OpfsFs(root),
+          fs,
           createWorker: deps.createWorker,
           ...(req.modules ? { modules: req.modules } : {}),
           ...(req.env ? { env: req.env } : {}),
