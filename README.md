@@ -114,6 +114,8 @@ npm run test:unit
 
 Unit tests live in `test/unit/`, which stays out of git. They run real wasm bash and coreutils through the whole stack in Node `worker_threads` against an in-memory OPFS. The pre-commit hook runs them under coverage and requires every changed line in `src/` to be covered.
 
+The Biome, TypeScript, lefthook, Renovate and CI configuration comes from [slicc-shared-web](https://github.com/ai-ecoverse/slicc-shared-web), which also provides the `slicc-lint-comments` (no comments anywhere), `slicc-no-unit-tests` (no unit tests in git) and `slicc-diff-cover` (100% coverage of changed lines) commands that `npm run lint` and the pre-commit hook use.
+
 ## License
 
 Apache-2.0

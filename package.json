@@ -38,14 +38,12 @@
     "pretest": "npm run build && playwright-core install --no-shell chromium",
     "test": "node --test --test-global-setup=test/integration/global.mjs 'test/integration/*.test.mjs'",
     "test:unit": "NODE_NO_WARNINGS=1 mcr -c mcr.config.mjs node --test 'test/unit/**/*.test.mjs'",
-    "coverage:staged": "npm run --silent test:unit && uvx diff-cover@10.6.0 coverage/unit/lcov.info --compare-branch HEAD --ignore-unstaged --fail-under 100",
     "typecheck": "tsc",
-    "lint": "biome check . && npm run typecheck && npm run lint:comments && npm run lint:no-unit-tests",
-    "lint:comments": "d=node_modules/.cache/no-comment-9cc7617; [ -f $d/check.mjs ] || { mkdir -p $d && for f in lib comments marker check; do curl -fsSL -o $d/$f.mjs https://raw.githubusercontent.com/ai-ecoverse/slicc/9cc7617c94c24b84c4d6fd8edf92441378257d07/packages/dev-tools/no-comment/$f.mjs || exit 1; done; } && node $d/check.mjs --force",
-    "lint:no-unit-tests": "! git ls-files --cached --others --exclude-standard | grep -E '(^|/)(tests?|__tests__)/|\\.(test|spec)\\.' | grep -vE '^test/integration/'",
+    "lint": "biome check . && npm run typecheck && slicc-lint-comments && slicc-no-unit-tests",
     "format": "biome check --write ."
   },
   "devDependencies": {
+    "@ai-ecoverse/slicc-shared-web": "github:ai-ecoverse/slicc-shared-web#d28ddcb962913aff6771735165fe030e3aeb6f16",
     "@ai-ecoverse/wasm-bash": "5.3.0-7",
     "@ai-ecoverse/wasm-coreutils": "9.7.0-3",
     "@biomejs/biome": "2.5.15",
