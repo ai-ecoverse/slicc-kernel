@@ -1,0 +1,5 @@
+{
+  "extends": "@ai-ecoverse/slicc-shared-web/tsconfig.json",
+  "compilerOptions": { "types": ["node"] },
+  "include": ["src/node.ts", "src/node-process-worker.ts"]
+}

@@ -22,7 +22,8 @@
     "provenance": true
   },
   "exports": {
-    ".": "./dist/index.js"
+    ".": "./dist/index.js",
+    "./node": "./dist/node.js"
   },
   "files": [
     "dist"
@@ -38,7 +39,7 @@
     "pretest": "npm run build && playwright-core install --no-shell chromium",
     "test": "node --test --test-global-setup=node_modules/@ai-ecoverse/slicc-shared-web/harness/global.mjs 'test/integration/*.test.mjs'",
     "test:unit": "NODE_NO_WARNINGS=1 mcr -c node_modules/@ai-ecoverse/slicc-shared-web/mcr.config.mjs node --import fake-indexeddb/auto --test 'test/unit/**/*.test.mjs'",
-    "typecheck": "tsc",
+    "typecheck": "tsc && tsc -p tsconfig.node.json",
     "lint": "slicc-lint",
     "format": "biome check --write ."
   },

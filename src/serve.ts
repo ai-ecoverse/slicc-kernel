@@ -61,7 +61,7 @@ export interface ServeDeps {
   metadata?: (name: string) => Promise<MetaStore>;
 }
 
-function signalNumber(name: string): number {
+export function signalNumber(name: string): number {
   const key = name.slice(3);
   if (!name.startsWith('SIG') || !Object.hasOwn(SIG, key))
     throw new Error(`unknown signal ${name}`);
