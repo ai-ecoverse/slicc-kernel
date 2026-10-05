@@ -56,13 +56,75 @@ async function install() {
   }
 }
 
+const inFlight = new Set();
+
+async function tracked(what, work) {
+  const entry = { what, since: Date.now() };
+  inFlight.add(entry);
+  try {
+    return await work(entry);
+  } finally {
+    inFlight.delete(entry);
+  }
+}
+
+window.inFlight = () => [...inFlight].map((e) => ({ ...e, ms: Date.now() - e.since }));
+
+const STALL = 30000;
+
+function fetchOnce(url) {
+  return tracked(`fetch ${url}`, async (entry) => {
+    entry.bytes = 0;
+    entry.last = Date.now();
+    const controller = new AbortController();
+    const watch = setInterval(() => {
+      if (Date.now() - entry.last > STALL) {
+        controller.abort(Object.assign(new Error(`no data for ${STALL} ms`), { stalled: true }));
+      }
+    }, 1000);
+    try {
+      const response = await fetch(url, { signal: controller.signal });
+      if (!response.ok) throw new Error(`${response.status}`);
+      const reader = response.body.getReader();
+      const chunks = [];
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        entry.bytes += value.length;
+        entry.last = Date.now();
+      }
+      const out = new Uint8Array(entry.bytes);
+      let at = 0;
+      for (const chunk of chunks) {
+        out.set(chunk, at);
+        at += chunk.length;
+      }
+      return out;
+    } catch (err) {
+      const ms = Date.now() - entry.since;
+      const reason = controller.signal.reason ?? err;
+      throw Object.assign(
+        new Error(`fetching ${url}: ${reason}, after ${entry.bytes} bytes in ${ms} ms`),
+        { stalled: reason?.stalled === true, bytes: entry.bytes }
+      );
+    } finally {
+      clearInterval(watch);
+    }
+  });
+}
+
+const stalls = [];
+
+window.takeStalls = () => stalls.splice(0);
+
 async function fetchBytes(url) {
   try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(60000) });
-    if (!response.ok) throw new Error(`${response.status}`);
-    return await response.arrayBuffer();
+    return await fetchOnce(url);
   } catch (err) {
-    throw new Error(`fetching ${url}: ${err}`);
+    if (!err.stalled) throw err;
+    stalls.push(`chrome stalled on ${url} after ${err.bytes} bytes; re-fetched`);
+    return fetchOnce(url);
   }
 }
 
@@ -93,13 +155,21 @@ window.probe = async () => {
   return { isolated: crossOriginIsolated, workers: report };
 };
 
+function withTracking(kernel) {
+  const run = kernel.run.bind(kernel);
+  kernel.run = (argv, options) => tracked(`run ${JSON.stringify(argv)}`, () => run(argv, options));
+  return kernel;
+}
+
 window.boot = async (options = {}) => {
   await install();
   const transport = options.proxy
     ? localProxyTransport(options.proxy)
     : fetchTransport(options.hint ? { hint: options.hint } : {});
   const network = options.network === false ? {} : { network: { transport } };
-  window.kernel = await createKernel({ root: await navigator.storage.getDirectory(), ...network });
+  window.kernel = withTracking(
+    await createKernel({ root: await navigator.storage.getDirectory(), ...network })
+  );
   return true;
 };
 
@@ -149,7 +219,9 @@ window.terminal = async (argv, options) => {
 
 window.reboot = async () => {
   window.kernel.terminate();
-  window.kernel = await createKernel({ root: await navigator.storage.getDirectory() });
+  window.kernel = withTracking(
+    await createKernel({ root: await navigator.storage.getDirectory() })
+  );
   return true;
 };
 
