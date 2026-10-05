@@ -56,11 +56,27 @@ async function install() {
   }
 }
 
+const inFlight = new Map();
+
+async function tracked(what, work) {
+  const entry = { what, since: Date.now() };
+  inFlight.set(entry, entry);
+  try {
+    return await work();
+  } finally {
+    inFlight.delete(entry);
+  }
+}
+
+window.inFlight = () => [...inFlight.values()].map((e) => ({ ...e, ms: Date.now() - e.since }));
+
 async function fetchBytes(url) {
   try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(60000) });
-    if (!response.ok) throw new Error(`${response.status}`);
-    return await response.arrayBuffer();
+    return await tracked(`fetch ${url}`, async () => {
+      const response = await fetch(url, { signal: AbortSignal.timeout(60000) });
+      if (!response.ok) throw new Error(`${response.status}`);
+      return await response.arrayBuffer();
+    });
   } catch (err) {
     throw new Error(`fetching ${url}: ${err}`);
   }
@@ -99,7 +115,10 @@ window.boot = async (options = {}) => {
     ? localProxyTransport(options.proxy)
     : fetchTransport(options.hint ? { hint: options.hint } : {});
   const network = options.network === false ? {} : { network: { transport } };
-  window.kernel = await createKernel({ root: await navigator.storage.getDirectory(), ...network });
+  const kernel = await createKernel({ root: await navigator.storage.getDirectory(), ...network });
+  const run = kernel.run.bind(kernel);
+  kernel.run = (argv, options) => tracked(`run ${JSON.stringify(argv)}`, () => run(argv, options));
+  window.kernel = kernel;
   return true;
 };
 
