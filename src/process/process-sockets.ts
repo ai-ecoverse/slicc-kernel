@@ -1,3 +1,4 @@
+import { normalizePath } from '../fs/types.ts';
 import type { SockAddr, SocketDomain } from '../kernel/socket.ts';
 import type { SocketSyscall } from '../kernel/socket-syscalls.ts';
 import type { SyncFsResult } from '../realm/sync-fs-wire.ts';
@@ -82,6 +83,12 @@ function errno(e: unknown): number {
 const O_WRONLY = 0o1;
 const O_CREAT = 0o100;
 const O_EXCL = 0o200;
+function resolved(Fs: ProcessFs, addr: SockAddr): SockAddr {
+  if (addr.family !== 'unix' || !addr.path || addr.path.startsWith('\0')) return addr;
+  const path = addr.path.startsWith('/') ? addr.path : `${Fs.cwd()}/${addr.path}`;
+  return { family: 'unix', path: normalizePath(path) };
+}
+
 function socketNode(
   Fs: ProcessFs,
   addr: SockAddr
@@ -187,8 +194,9 @@ export function createSocketKernel(deps: SocketKernelDeps): SocketKernel {
           throw e;
         }
       }),
-    bind: (fd, addr) =>
+    bind: (fd, given) =>
       guard(() => {
+        const addr = resolved(Fs, given);
         const node = socketNode(Fs, addr);
         try {
           return done({ op: 'sock-bind', fd: kfd(fd), addr });
@@ -216,7 +224,12 @@ export function createSocketKernel(deps: SocketKernelDeps): SocketKernel {
       guard(() => {
         const stream = socketAt(fd);
         const nonblock = (stream.flags & O_NONBLOCK) !== 0;
-        return done({ op: 'sock-connect', fd: stream.sliccKernelFd, addr, nonblock });
+        return done({
+          op: 'sock-connect',
+          fd: stream.sliccKernelFd,
+          addr: resolved(Fs, addr),
+          nonblock,
+        });
       }),
     shutdown: (fd, how) => guard(() => done({ op: 'sock-shutdown', fd: kfd(fd), how })),
     name: (fd, peer) => guard(() => json({ op: 'sock-name', fd: kfd(fd), peer }) as SockAddr),

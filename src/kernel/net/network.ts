@@ -7,6 +7,7 @@ import {
   indexedDbCaStore,
   type RealmCa,
   realmCa,
+  winner,
 } from './realm-ca.ts';
 import { loadTlsEngine, type TlsEngine, type TlsEngineModule } from './tls-engine.ts';
 import { TlsTerminator } from './tls-tunnel.ts';
@@ -50,8 +51,10 @@ export function memoryCaStore(): CaStore {
   const records = new Map<string, CaRecord>();
   return {
     get: async (owner) => records.get(owner),
-    put: async (owner, record) => {
-      records.set(owner, record);
+    swap: async (owner, expected, record) => {
+      const kept = winner(records.get(owner), expected, record) as CaRecord;
+      records.set(owner, kept);
+      return kept;
     },
   };
 }

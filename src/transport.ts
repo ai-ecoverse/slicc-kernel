@@ -94,10 +94,12 @@ export interface TransportPeer {
   postMessage(message: TransportReply, transfer?: Transferable[]): void;
 }
 
-export function serveTransport(
-  peer: TransportPeer,
-  transport: RealmTransport
-): (call: TransportCall) => void {
+export interface TransportServer {
+  answer(call: TransportCall): void;
+  close(): void;
+}
+
+export function serveTransport(peer: TransportPeer, transport: RealmTransport): TransportServer {
   const open = new Map<
     number,
     { abort: AbortController; body?: AsyncIterator<Uint8Array>; response?: RealmTransportResponse }
@@ -156,14 +158,20 @@ export function serveTransport(
       fail(nid, e);
     }
   };
-  return (call) => {
-    if (call.net === 'fetch') void start(call);
-    else if (call.net === 'read') void read(call.nid);
-    else {
-      const entry = open.get(call.nid);
-      open.delete(call.nid);
-      entry?.abort.abort();
-      void entry?.response?.cancel().catch(() => undefined);
-    }
+  const drop = (nid: number) => {
+    const entry = open.get(nid);
+    open.delete(nid);
+    entry?.abort.abort();
+    void entry?.response?.cancel().catch(() => undefined);
+  };
+  return {
+    answer(call) {
+      if (call.net === 'fetch') void start(call);
+      else if (call.net === 'read') void read(call.nid);
+      else drop(call.nid);
+    },
+    close() {
+      for (const nid of [...open.keys()]) drop(nid);
+    },
   };
 }

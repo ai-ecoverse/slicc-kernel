@@ -111,13 +111,14 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
 
   const fail = (error: Error) => {
     failure = error;
+    bridge?.close();
     for (const call of pending.values()) call.reject(error);
     pending.clear();
   };
   const transport = options.network?.transport;
-  const answer = transport ? serveTransport(worker, transport) : undefined;
+  const bridge = transport ? serveTransport(worker, transport) : undefined;
   worker.addEventListener('message', ({ data }: MessageEvent<Reply | TransportCall>) => {
-    if ('net' in data) return answer?.(data);
+    if ('net' in data) return bridge?.answer(data);
     const call = pending.get(data.id);
     if (!call) return;
     if (data.fd !== undefined) return call.output?.(data.fd, data.bytes as Uint8Array);

@@ -8,7 +8,20 @@ export interface CaRecord {
 }
 export interface CaStore {
   get(owner: string): Promise<CaRecord | undefined>;
-  put(owner: string, record: CaRecord): Promise<void>;
+  swap(owner: string, expected: CaRecord | undefined, record: CaRecord): Promise<CaRecord>;
+}
+
+function sameCert(a: CaRecord | undefined, b: CaRecord | undefined): boolean {
+  if (!a || !b) return a === b;
+  return a.cert.length === b.cert.length && a.cert.every((byte, i) => byte === b.cert[i]);
+}
+
+export function winner(
+  current: CaRecord | undefined,
+  expected: CaRecord | undefined,
+  record: CaRecord
+): CaRecord | undefined {
+  return sameCert(current, expected) ? record : current;
 }
 const DAY = 24 * 60 * 60 * 1000;
 const CA_LIFETIME = 3650 * DAY;
@@ -41,13 +54,22 @@ export function indexedDbCaStore(dbName = 'slicc-realm-ca'): CaStore {
       const store = (await open()).transaction('ca').objectStore('ca');
       return (await request(store.get(owner))) as CaRecord | undefined;
     },
-    async put(owner, record) {
+    async swap(owner, expected, record) {
       const tx = (await open()).transaction('ca', 'readwrite');
-      tx.objectStore('ca').put(record, owner);
+      const store = tx.objectStore('ca');
+      let stored = record;
+      const read = store.get(owner);
+      read.onsuccess = () => {
+        const current = read.result as CaRecord | undefined;
+        const kept = winner(current, expected, record);
+        if (kept === record) store.put(record, owner);
+        else stored = kept as CaRecord;
+      };
       await new Promise<void>((resolve, reject) => {
         tx.oncomplete = () => resolve();
         tx.onerror = () => reject(tx.error);
       });
+      return stored;
     },
   };
 }
@@ -66,8 +88,7 @@ export class RealmCa {
     const stored = await store.get(owner).catch(() => undefined);
     if (stored && stored.notAfter - now > CA_RENEW_BEFORE) return new RealmCa(stored);
     const record = await RealmCa.create(owner, now);
-    await store.put(owner, record);
-    return new RealmCa(record);
+    return new RealmCa(await store.swap(owner, stored, record));
   }
   private static async create(owner: string, now: number): Promise<CaRecord> {
     const pair = await crypto.subtle.generateKey(ECDSA, false, ['sign', 'verify']);

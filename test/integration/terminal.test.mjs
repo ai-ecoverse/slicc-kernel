@@ -46,6 +46,7 @@ test('^C interrupts the foreground job, ^Z stops it, and exit ends the session w
   await type('\u001a', 'Stopped');
   const stopped = (await screen()).length;
   await type('kill %1; wait\r');
+  await until('Terminated', stopped);
   await type('echo listed\r', 'listed');
   assert.match((await screen()).slice(stopped), /Terminated/);
   await type('sh -c "echo \\$((6*7)); exec sleep 30"\r', '42\r\n');
@@ -56,6 +57,7 @@ test('^C interrupts the foreground job, ^Z stops it, and exit ends the session w
   await page.evaluate(() => window.term.signal('SIGTSTP'));
   await until('Stopped', before);
   await type('kill -9 %1; wait\r');
+  await until('Killed', before);
   await type('echo listed\r', 'listed');
   assert.match((await screen()).slice(before), /Killed/);
   await type('exit 3\r');
