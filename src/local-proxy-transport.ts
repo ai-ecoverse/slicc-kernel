@@ -11,6 +11,10 @@ export interface LocalProxyOptions {
   fetch?: typeof globalThis.fetch;
 }
 
+export interface LocalProxyCheckOptions extends LocalProxyOptions {
+  permissions?: Pick<Permissions, 'query'>;
+}
+
 export interface LocalProxyTransportOptions extends LocalProxyOptions {
   maxRequestBody?: number;
 }
@@ -21,10 +25,20 @@ export interface LocalProxyProbe {
   maxRequestBodyBytes: number;
 }
 
+export type LocalProxyStatus =
+  | { state: 'ready'; probe: LocalProxyProbe }
+  | { state: 'blocked' }
+  | { state: 'unanswered' }
+  | { state: 'unreachable' }
+  | { state: 'refused'; status: number; error: string }
+  | { state: 'incompatible' };
+
 const PATH = '/api/fetch-proxy';
 const RAW_CONTENT_TYPE = 'application/vnd.slicc.raw-fetch';
 const MAX_HEAD = 1024 * 1024;
 const MAX_REQUEST_BODY = 64 * 1024 * 1024;
+const PERMISSIONS = ['loopback-network', 'local-network-access'];
+const LOOPBACK_PAGE = /^(127\.\d+\.\d+\.\d+|localhost|\[::1\])$/;
 
 interface ResponseHead {
   status: number;
@@ -50,14 +64,27 @@ function send(options: LocalProxyOptions) {
   return options.fetch ?? globalThis.fetch.bind(globalThis);
 }
 
-async function refusal(response: Response): Promise<Error> {
+async function refusalMessage(response: Response): Promise<string> {
   const text = await response.text().catch(() => '');
-  let message = text || response.statusText || `answered ${response.status}`;
   try {
     const parsed = JSON.parse(text) as { error?: unknown };
-    if (typeof parsed.error === 'string') message = parsed.error;
+    if (typeof parsed.error === 'string') return parsed.error;
   } catch {}
-  return failure(message, response.ok ? 502 : response.status);
+  return text || response.statusText || `answered ${response.status}`;
+}
+
+async function refusal(response: Response): Promise<Error> {
+  return failure(await refusalMessage(response), response.ok ? 502 : response.status);
+}
+
+async function permission(permissions: Pick<Permissions, 'query'> | undefined): Promise<string> {
+  if (!permissions) return 'unknown';
+  for (const name of PERMISSIONS) {
+    try {
+      return (await permissions.query({ name } as PermissionDescriptor)).state;
+    } catch {}
+  }
+  return 'unknown';
 }
 
 function isHead(value: unknown): value is ResponseHead {
@@ -121,27 +148,53 @@ async function* chunks(
   }
 }
 
-export async function probeLocalProxy(options: LocalProxyOptions): Promise<LocalProxyProbe | null> {
+export async function checkLocalProxy(options: LocalProxyCheckOptions): Promise<LocalProxyStatus> {
+  const onLoopback = LOOPBACK_PAGE.test(globalThis.location?.hostname ?? '');
+  const permissions = onLoopback
+    ? undefined
+    : (options.permissions ?? globalThis.navigator?.permissions);
+  if ((await permission(permissions)) === 'denied') return { state: 'blocked' };
+  let response: Response;
   try {
-    const response = await send(options)(new URL(PATH, options.url), {
+    response = await send(options)(new URL(PATH, options.url), {
       method: 'POST',
       headers: hopHeaders(options, { 'X-Slicc-Raw-Probe': '1' }),
       credentials: 'omit',
       mode: 'cors',
     });
-    if (!response.ok) return null;
-    const reply = (await response.json()) as Partial<LocalProxyProbe>;
-    if (typeof reply.rawFetch !== 'number' || reply.rawFetch < 1) return null;
-    if (typeof reply.requestBodyStreaming !== 'boolean') return null;
-    if (typeof reply.maxRequestBodyBytes !== 'number') return null;
-    return {
+  } catch {
+    const now = await permission(permissions);
+    if (now === 'denied') return { state: 'blocked' };
+    return { state: now === 'prompt' ? 'unanswered' : 'unreachable' };
+  }
+  if (!response.ok) {
+    return { state: 'refused', status: response.status, error: await refusalMessage(response) };
+  }
+  const reply = (await response.json().catch(() => null)) as Partial<LocalProxyProbe> | null;
+  if (
+    !reply ||
+    typeof reply.rawFetch !== 'number' ||
+    reply.rawFetch < 1 ||
+    typeof reply.requestBodyStreaming !== 'boolean' ||
+    typeof reply.maxRequestBodyBytes !== 'number'
+  ) {
+    return { state: 'incompatible' };
+  }
+  return {
+    state: 'ready',
+    probe: {
       rawFetch: reply.rawFetch,
       requestBodyStreaming: reply.requestBodyStreaming,
       maxRequestBodyBytes: reply.maxRequestBodyBytes,
-    };
-  } catch {
-    return null;
-  }
+    },
+  };
+}
+
+export async function probeLocalProxy(
+  options: LocalProxyCheckOptions
+): Promise<LocalProxyProbe | null> {
+  const status = await checkLocalProxy(options);
+  return status.state === 'ready' ? status.probe : null;
 }
 
 export function localProxyTransport(options: LocalProxyTransportOptions): RealmTransport {

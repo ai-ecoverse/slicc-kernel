@@ -18,6 +18,7 @@ export type {
 export interface FetchTransportOptions {
   fetch?: typeof globalThis.fetch;
   maxRequestBody?: number;
+  hint?: string;
 }
 
 const MAX_REQUEST_BODY = 64 * 1024 * 1024;
@@ -68,7 +69,9 @@ export function fetchTransport(options: FetchTransportOptions = {}): RealmTransp
       } catch (e) {
         if (request.signal.aborted) throw e;
         throw Object.assign(
-          new Error(`fetch ${request.url} failed (unreachable, or not allowed by CORS)`),
+          new Error(
+            `fetch ${request.url} failed (unreachable, or not allowed by CORS)${options.hint ? `: ${options.hint}` : ''}`
+          ),
           { status: 502 }
         );
       }
