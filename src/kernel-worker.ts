@@ -1,8 +1,9 @@
 import { openMeta } from './fs/meta.ts';
 import type { WasmWorkerLike } from './kernel/host.ts';
+import { pinScript } from './pin.ts';
 import { type KernelPort, serveKernel } from './serve.ts';
 
-const processWorker = new URL('./process-worker.js', import.meta.url);
+const processWorker = pinScript(new URL('./process-worker.js', import.meta.url));
 
 serveKernel(globalThis as unknown as KernelPort, {
   storage: () => navigator.storage.getDirectory(),
