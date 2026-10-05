@@ -408,6 +408,7 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
         if (existing && existing !== oldNode) Fs.hashRemoveNode?.(existing);
       } catch {}
       oldNode.name = newName;
+      oldNode.parent = newDir;
       oldNode.live.stat = undefined;
     },
     unlink(parent, name) {
