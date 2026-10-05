@@ -42,7 +42,7 @@ export function networkEnv(): Record<string, string> {
 
 export function missingTransport(): RealmTransport {
   return {
-    traits: { manualRedirects: true, encodedBodies: true, maxRequestBody: 0 },
+    traits: { manualRedirects: true, encodedBodies: true, maxRequestBody: 0, unavailable: true },
     fetch: () => Promise.reject(Object.assign(new Error(NO_TRANSPORT), { status: 502 })),
   };
 }

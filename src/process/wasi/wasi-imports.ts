@@ -35,6 +35,29 @@ export interface FdStat {
 
 export type Taken = { value: unknown } | { error: string };
 
+export type Stdio = 'pipe' | 'inherit' | 'null';
+
+export interface SpawnOptions {
+  argv: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+  stdin?: Stdio;
+  stdout?: Stdio;
+  stderr?: Stdio;
+}
+
+export interface Spawned {
+  pid: number;
+  stdin?: number;
+  stdout?: number;
+  stderr?: number;
+}
+
+export interface Waited {
+  status: number;
+  signal?: number;
+}
+
 export interface ImportsContext {
   memory(): WebAssembly.Memory;
   instance(): WebAssembly.Instance | undefined;
@@ -52,6 +75,9 @@ export interface ImportsContext {
     unlock(fd: number): void;
   };
   syscall(req: Request): unknown;
+  spawn(options: SpawnOptions): Spawned;
+  wait(pid: number): Waited;
+  kill(pid: number, sig: number): void;
   async: {
     submit(req: Request): number;
     wait(timeoutMs?: number): number;
@@ -197,6 +223,7 @@ export function importsContext({
     fs,
     fds,
     syscall: call,
+    ...processes(host, call),
     async: {
       submit: (req) => call({ op: 'async-submit', req }) as number,
       wait(timeoutMs) {
@@ -224,5 +251,65 @@ export function importsContext({
       close: () => void call({ op: 'async-close' }),
     },
     errno: (err) => wasiErrnoOf(code(err)),
+  };
+}
+
+type ChildSlot = { fd: number } | { none: true };
+
+const STDIO = ['stdin', 'stdout', 'stderr'] as const;
+
+function processes(
+  host: WasiHost,
+  call: (req: Request) => unknown
+): Pick<ImportsContext, 'spawn' | 'wait' | 'kill'> {
+  const close = (fd: number) => void call({ op: 'fd-close', fd });
+  const slot = (n: number, how: Stdio, mine: number[], theirs: number[]): ChildSlot => {
+    if (how === 'inherit') return { fd: n };
+    if (how === 'null') return { none: true };
+    const [read, write] = call({ op: 'fd-pipe' }) as [number, number];
+    mine[n] = n === 0 ? write : read;
+    theirs.push(n === 0 ? read : write);
+    return { fd: n === 0 ? read : write };
+  };
+  return {
+    spawn(o) {
+      const mine: number[] = [];
+      const theirs: number[] = [];
+      try {
+        const stdio = STDIO.map((name, n) => slot(n, o[name] ?? 'inherit', mine, theirs));
+        const pid = call({
+          op: 'proc-spawn',
+          file: o.argv[0],
+          argv: o.argv,
+          env: o.env ?? { ...host.o.env },
+          cwd: o.cwd ?? host.cwd,
+          stdio,
+        }) as number;
+        const out: Spawned = { pid };
+        STDIO.forEach((name, n) => {
+          if (mine[n] !== undefined) out[name] = mine[n];
+        });
+        return out;
+      } catch (err) {
+        for (const fd of mine) if (fd !== undefined) close(fd);
+        throw err;
+      } finally {
+        for (const fd of theirs) close(fd);
+      }
+    },
+    wait(pid) {
+      for (;;) {
+        try {
+          const [, status] = call({ op: 'proc-wait', pid, nohang: false }) as [number, number];
+          const signal = status & 0x7f;
+          return signal ? { status: 128 + signal, signal } : { status: (status >> 8) & 0xff };
+        } catch (err) {
+          if (code(err) !== 'EINTR') throw err;
+        }
+      }
+    },
+    kill(pid, sig) {
+      call({ op: 'proc-kill', pid, sig });
+    },
   };
 }
