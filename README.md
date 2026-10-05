@@ -37,9 +37,29 @@ Runs `argv[0]` with `argv` as its arguments and resolves when it exits. `stdout`
 | option | |
 | --- | --- |
 | `cwd` | working directory, default `/`; created in OPFS if missing |
-| `env` | extra environment; the defaults are `PATH=/usr/bin:/bin`, `HOME=/`, `PWD=<cwd>` |
+| `env` | extra environment; the defaults are `PATH=/usr/bin:/bin`, `HOME=/home`, `PWD=<cwd>` |
 | `stdin` | a string or `Uint8Array`; without it stdin is `/dev/null` |
 | `onStdout`, `onStderr` | called with each chunk of text as it is written |
+
+### `kernel.openTerminal(argv, options?) → Promise<Terminal>`
+
+Starts `argv` as the session leader on a new terminal and resolves once it is running, or rejects if `argv[0]` cannot be found. Its stdin, stdout and stderr are the terminal, which has a line discipline with echo, canonical mode and `ISIG`, and supports job control, so `kernel.openTerminal(['bash', '-i'])` gives an interactive shell. The API was designed with [slicc-spectrum](https://github.com/ai-ecoverse/slicc-spectrum), a terminal web component, and these names are kept stable.
+
+| option | |
+| --- | --- |
+| `cwd`, `env` | as for `run`; `TERM=xterm-256color` and `COLORTERM=truecolor` are added |
+| `cols`, `rows` | initial size, default 80 × 24, so `$COLUMNS` and `$LINES` are right before the first prompt |
+| `onData` | called with each chunk of output as raw bytes (escape sequences included) |
+
+| `Terminal` | |
+| --- | --- |
+| `pid` | the session leader's pid |
+| `onData` | the output listener; output that arrives while it is `null` is kept and delivered when one is set |
+| `write(data)` | types a string or bytes into the terminal; with `ISIG` on, `^C`, `^Z` and `^\` signal the foreground process group |
+| `resize(cols, rows)` | sets the window size (`TIOCGWINSZ`) and sends `SIGWINCH` to the foreground process group |
+| `signal(name)` | sends a signal (`'SIGINT'`, `'SIGTSTP'`, `'SIGQUIT'`, `'SIGHUP'`, …) to the foreground process group, regardless of termios |
+| `exited` | resolves with the session leader's exit status (`128 + n` if killed by signal `n`) |
+| `close()` | hangs up: `SIGHUP` to the foreground process group, and reads from the terminal return end-of-file |
 
 ### `kernel.terminate()`
 
@@ -53,13 +73,17 @@ Commands come from installed packages in npm's `node_modules` layout: every `<mo
 { "slicc": { "abi": "emscripten", "commands": { "bash": { "glue": "bin/bash", "wasm": "bin/bash.wasm" } } } }
 ```
 
-Entries may also set `argv0`, `args` and `env` (with `${package}` expanded to the package directory), and a package-wide `slicc.env`. The first package to define a name wins. `sh` runs bash as `sh` unless a package provides its own. The installed commands appear as executables in a virtual `/usr/bin` and `/bin`, so `PATH` lookups, `command -v` and `ls /usr/bin` work without writing anything to OPFS. A process can also run a program by the path of its glue when the `.wasm` sits next to it, and a script through its `#!` line (including `#!/usr/bin/env name`). The catalog is re-read at the start of every `run`, so packages installed in between are picked up.
+Entries may also set `argv0`, `args` and `env` (with `${package}` expanded to the package directory), and a package-wide `slicc.env`. The first package to define a name wins. `sh` runs bash as `sh` unless a package provides its own. The installed commands appear as executables in a virtual `/usr/bin` and `/bin`, so `PATH` lookups, `command -v` and `ls /usr/bin` work without writing anything to OPFS. A process can also run a program by the path of its glue when the `.wasm` sits next to it, and a script through its `#!` line (including `#!/usr/bin/env name`). Executing any other file fails with `ENOEXEC`, so bash runs it as a shell script, as POSIX shells do. The catalog is re-read at the start of every `run`, so packages installed in between are picked up.
 
 ## Filesystem
 
-`/` is the OPFS root. Each process mounts the top-level directories that exist when it starts (plus `/usr` and `/bin`), so files in them are shared by all processes and visible through the OPFS API as soon as the process that wrote them has closed them; `run` resolves only after that. `/tmp`, `/dev`, `/proc` and anything created directly in `/` while a process runs live in that process's memory unless the directory already exists in OPFS. File contents are buffered per open file and written back on close, `fsync` and exit; metadata operations (`mkdir`, `rename`, `rm`, …) go straight to OPFS. The kernel worker is the only writer.
+`/` is the OPFS root. Each process mounts the top-level directories that exist when it starts (plus `/usr` and `/bin`), so files in them are shared by all processes and visible through the OPFS API as soon as the process that wrote them has closed them; `run` resolves only after that. `createKernel` creates `/tmp` and `/home` in OPFS, so they are shared too. `/dev`, `/proc` and anything created directly in `/` while a process runs live in that process's memory unless it already exists in OPFS. File contents are buffered per open file and written back on close, `fsync` and exit; metadata operations (`mkdir`, `rename`, `rm`, …) go straight to OPFS. The kernel worker is the only writer.
 
 OPFS stores no POSIX metadata, so modes are synthesized: directories `0755`, files `0644`, and files under `node_modules/*/bin/` `0755`. `chmod` and `utime` are remembered for the lifetime of the kernel worker. Symlinks are not supported (`ENOSYS`). Directories are renamed with `FileSystemHandle.move()` where available, else by copy and delete.
+
+Reads retry briefly when a concurrent write has invalidated the OPFS file snapshot (`NotReadableError`).
+
+The filesystem is our own rather than [ZenFS](https://github.com/zen-fs/core) (which SLICC uses), because OPFS stays the single source of truth: other writers, such as the BIOS installing packages or a page writing files, need no index to stay consistent with, and nothing is preloaded into memory at mount. In exchange there are no persistent POSIX modes, times, inode numbers or symlinks.
 
 ## What is in here
 
@@ -72,6 +96,10 @@ The kernel is ported from SLICC's `packages/webapp/src/kernel/` with the browser
 - `src/launcher.ts`, `src/commands.ts`, `src/serve.ts`, `src/index.ts`: command resolution, the kernel worker protocol and the page API.
 
 SLICC's networking (sockets, the TLS proxy) and WASI support are not included.
+
+## Installing from git
+
+`npm install github:ai-ecoverse/slicc-kernel#<sha>` works: the `prepare` script builds `dist/`.
 
 ## Development
 

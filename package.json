@@ -18,7 +18,7 @@
     "dist"
   ],
   "scripts": {
-    "prepare": "lefthook install",
+    "prepare": "node build.mjs && { [ ! -e .git ] || lefthook install; }",
     "build": "node build.mjs",
     "prepack": "npm run build",
     "start": "npm run build && node test/integration/server.mjs",
