@@ -70,3 +70,11 @@ test('a directory rename keeps the modes of everything inside it', async (t) => 
     ok('700 z/b\n755 z/b/f\nf\nx\n')
   );
 });
+
+test('a symlink to an installed command runs it', async (t) => {
+  const { bash } = await booted(chrome, t);
+  assert.deepEqual(
+    await bash('ln -s /bin/bash mybash && ./mybash -c "echo via link"'),
+    ok('via link\n')
+  );
+});

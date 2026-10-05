@@ -438,7 +438,7 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
         isFile: false,
         isDirectory: false,
         isSymbolicLink: true,
-        size: target.length,
+        size: new TextEncoder().encode(target).length,
       });
     },
     readlink(node) {

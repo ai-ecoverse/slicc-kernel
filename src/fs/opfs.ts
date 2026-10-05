@@ -157,7 +157,7 @@ export class OpfsFs implements KernelFs {
       mode: this.mode(path, directory, meta),
       mtime: new Date(mtime),
       atime: new Date(meta?.atimeMs ?? mtime),
-      ctime: new Date(meta?.ctimeMs ?? mtime),
+      ctime: new Date(Math.max(meta?.ctimeMs ?? mtime, modified)),
       ino: meta?.ino ?? inodeOf(path),
     };
   }
@@ -168,7 +168,7 @@ export class OpfsFs implements KernelFs {
       isFile: false,
       isDirectory: false,
       isSymbolicLink: true,
-      size: (entry.link as string).length,
+      size: new TextEncoder().encode(entry.link).length,
       mode: S_IFLNK | 0o777,
       mtime: time,
       atime: time,

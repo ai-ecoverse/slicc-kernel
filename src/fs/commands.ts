@@ -3,6 +3,7 @@ import { type FsStat, inodeOf, type KernelFs } from './types.ts';
 const S_IFDIR = 0o040000;
 const S_IFREG = 0o100000;
 const COMMAND = /^\/(?:usr\/)?bin\/([^/]+)$/;
+const MAX_LINKS = 40;
 
 function missing(err: unknown): boolean {
   return (err as { code?: unknown })?.code === 'ENOENT';
@@ -23,6 +24,17 @@ function synthetic(directory: boolean, path: string): FsStat {
   };
 }
 
+export async function followLinks(fs: KernelFs, path: string): Promise<string> {
+  let current = path;
+  for (let hops = 0; hops < MAX_LINKS; hops++) {
+    const st = await fs.lstat(current).catch(() => undefined);
+    if (!st?.isSymbolicLink) return current;
+    const parent = current.slice(0, current.lastIndexOf('/')) || '/';
+    current = fs.resolvePath(parent, await fs.readlink(current));
+  }
+  return current;
+}
+
 export function withCommandDirs(fs: KernelFs, names: () => Promise<ReadonlySet<string>>): KernelFs {
   async function children(path: string): Promise<string[] | undefined> {
     if (path === '/') return ['bin', 'usr'];
@@ -37,11 +49,15 @@ export function withCommandDirs(fs: KernelFs, names: () => Promise<ReadonlySet<s
     return name !== undefined && (await names()).has(name) ? synthetic(false, path) : undefined;
   }
 
+  async function linked(path: string): Promise<FsStat | undefined> {
+    return (await virtual(path)) ?? virtual(await followLinks(fs, path));
+  }
+
   async function stat(path: string, real: (path: string) => Promise<FsStat>): Promise<FsStat> {
     try {
       return await real(path);
     } catch (err) {
-      const found = missing(err) ? await virtual(path) : undefined;
+      const found = missing(err) ? await linked(path) : undefined;
       if (found) return found;
       throw err;
     }
@@ -54,13 +70,13 @@ export function withCommandDirs(fs: KernelFs, names: () => Promise<ReadonlySet<s
       try {
         return await fs.readFileBuffer(path);
       } catch (err) {
-        if (missing(err) && (await virtual(path))?.isFile) return new Uint8Array(0);
+        if (missing(err) && (await linked(path))?.isFile) return new Uint8Array(0);
         throw err;
       }
     },
     writeFile: (path, content) => fs.writeFile(path, content),
     async exists(path) {
-      return (await fs.exists(path)) || (await virtual(path)) !== undefined;
+      return (await fs.exists(path)) || (await linked(path)) !== undefined;
     },
     stat: (path) => stat(path, (p) => fs.stat(p)),
     lstat: (path) => stat(path, (p) => fs.lstat(p)),
