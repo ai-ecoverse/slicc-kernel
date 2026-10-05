@@ -117,7 +117,6 @@ export function importsContext({
 }: ContextOptions): ImportsContext {
   const { fs } = host.o;
   const call = (req: Request) => value(raw(req));
-  const locked = new Map<number, string>();
   const pathOf = (fd: number): string | undefined => {
     const e = host.fds.get(fd);
     if (e.type === 'file') return e.file.path;
@@ -131,12 +130,6 @@ export function importsContext({
     const path = pathOf(fd);
     if (path === undefined) throw new WasiError('EBADF');
     return path;
-  };
-  const unlock = (fd: number) => {
-    const path = locked.get(fd);
-    if (path === undefined) return;
-    locked.delete(fd);
-    if (![...locked.values()].includes(path)) call({ op: 'unlock', path });
   };
   const fds: ImportsContext['fds'] = {
     open(path, o = {}) {
@@ -155,7 +148,6 @@ export function importsContext({
       return fd;
     },
     close(fd) {
-      unlock(fd);
       host.fds.close(fd);
     },
     fstat(fd) {
@@ -184,15 +176,16 @@ export function importsContext({
     tryLock(fd, exclusive) {
       const path = requirePath(fd);
       try {
-        call({ op: 'lock', path, exclusive });
+        call({ op: 'lock', path, exclusive, fd });
       } catch (err) {
         if (code(err) === 'EAGAIN') return E.AGAIN;
         throw err;
       }
-      locked.set(fd, path);
       return E.SUCCESS;
     },
-    unlock,
+    unlock(fd) {
+      call({ op: 'unlock', path: requirePath(fd) });
+    },
   };
   return {
     memory,

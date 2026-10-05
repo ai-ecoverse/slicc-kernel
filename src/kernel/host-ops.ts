@@ -2,7 +2,7 @@ import type { SyncFsResult } from '../realm/sync-fs-wire.ts';
 import { KernelError } from './fd-table.ts';
 
 export type HostSyscall =
-  | { op: 'lock'; path: string; exclusive: boolean }
+  | { op: 'lock'; path: string; exclusive: boolean; fd: number }
   | { op: 'unlock'; path: string }
   | { op: 'async-submit'; req: { op: string } }
   | { op: 'async-wait'; timeoutMs?: number }
@@ -27,13 +27,21 @@ export const HOST_OPS: readonly HostSyscall['op'][] = [
 const json = (value: unknown): SyncFsResult => ({ ok: true, kind: 'json', json: value });
 const done: SyncFsResult = { ok: true, kind: 'void' };
 
-export class LockTable {
-  private readonly held = new Map<string, Map<number, boolean>>();
+interface Holder {
+  exclusive: boolean;
+  fds: Set<number>;
+}
 
-  lock(pid: number, path: string, exclusive: boolean): boolean {
-    const holders = this.held.get(path) ?? new Map<number, boolean>();
-    for (const [other, ex] of holders) if (other !== pid && (exclusive || ex)) return false;
-    holders.set(pid, exclusive);
+export class LockTable {
+  private readonly held = new Map<string, Map<number, Holder>>();
+
+  lock(pid: number, path: string, exclusive: boolean, fd: number): boolean {
+    const holders = this.held.get(path) ?? new Map<number, Holder>();
+    for (const [other, h] of holders) if (other !== pid && (exclusive || h.exclusive)) return false;
+    const mine = holders.get(pid) ?? { exclusive, fds: new Set<number>() };
+    mine.exclusive = exclusive;
+    mine.fds.add(fd);
+    holders.set(pid, mine);
     this.held.set(path, holders);
     return true;
   }
@@ -42,6 +50,13 @@ export class LockTable {
     const holders = this.held.get(path);
     holders?.delete(pid);
     if (holders?.size === 0) this.held.delete(path);
+  }
+
+  closed(pid: number, fd: number): void {
+    for (const [path, holders] of [...this.held]) {
+      const mine = holders.get(pid);
+      if (mine?.fds.delete(fd) && mine.fds.size === 0) this.unlock(pid, path);
+    }
   }
 
   release(pid: number): void {
@@ -165,7 +180,8 @@ export async function hostSyscall(req: HostSyscall, ctx: HostOpsContext): Promis
   switch (req.op) {
     case 'lock':
       if (!ctx.locks) throw new KernelError('ENOSYS');
-      if (!ctx.locks.lock(ctx.pid, req.path, req.exclusive)) throw new KernelError('EAGAIN');
+      if (!ctx.locks.lock(ctx.pid, req.path, req.exclusive, req.fd))
+        throw new KernelError('EAGAIN');
       return done;
     case 'unlock':
       ctx.locks?.unlock(ctx.pid, req.path);

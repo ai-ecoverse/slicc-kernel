@@ -119,13 +119,23 @@ export function createImportedMemory(
 ): WebAssembly.Memory | undefined {
   if (!spec) return undefined;
   const memory = newImportedMemory(spec);
-  if (copy) {
-    const pages = copy.byteLength / 65536 - memory.buffer.byteLength / 65536;
-    if (pages > 0) memory.grow(pages);
-
-    new Uint8Array(memory.buffer).set(copy);
-  }
+  if (copy) fillMemory(memory, copy);
   return memory;
+}
+
+function restoreExportedMemory(
+  instance: WebAssembly.Instance,
+  imported: WebAssembly.Memory | undefined,
+  init: WasmProcessInitMsg
+): void {
+  if (imported || !init.fork?.wasi) return;
+  fillMemory(instance.exports.memory as WebAssembly.Memory, init.fork.memory);
+}
+
+function fillMemory(memory: WebAssembly.Memory, copy: Uint8Array): void {
+  const pages = copy.byteLength / 65536 - memory.buffer.byteLength / 65536;
+  if (pages > 0) memory.grow(pages);
+  new Uint8Array(memory.buffer).set(copy);
 }
 
 function kernelOf(
@@ -384,6 +394,7 @@ export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike
     signals,
     ...(program ? { program } : {}),
   });
+  restoreExportedMemory(instance, memory, init);
   signals.bind(instance.exports);
   host.onRaise = (sig) => signals.raised(sig);
   const exports = instance.exports as { _start: () => void };

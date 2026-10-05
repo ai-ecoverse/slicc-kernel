@@ -512,6 +512,7 @@ export class WasmProcess {
       case 'fd-write':
         return { ok: true, kind: 'json', json: await this.write(req.fd, req.body, req.nonblock) };
       case 'fd-close':
+        this.options.locks?.closed(this.pid, req.fd);
         await Promise.resolve(this.fds.close(req.fd));
         return { ok: true, kind: 'void' };
       case 'fd-pipe': {
