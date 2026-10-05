@@ -78,3 +78,31 @@ test('a wrong key is refused, and curl sees the refusal', async (t) => {
     maxRequestBodyBytes: 1024,
   });
 });
+
+test('checkLocalProxy tells a ready, refusing and missing proxy apart', async (t) => {
+  const { page } = await withProxy(t);
+  const check = (url, presented) =>
+    page.evaluate((o) => window.checkLocalProxy(o), { url, key: presented });
+
+  assert.deepEqual(await check(proxy.url, key), {
+    state: 'ready',
+    probe: { rawFetch: 1, requestBodyStreaming: false, maxRequestBodyBytes: 1024 },
+  });
+  assert.deepEqual(await check(proxy.url, 'wrong-key'), {
+    state: 'refused',
+    status: 403,
+    error: 'proxy key missing or wrong',
+  });
+  assert.deepEqual(await check('http://127.0.0.1:1', key), {
+    state: 'unreachable',
+    permission: 'unknown',
+  });
+});
+
+test('the page transport names a way out in its 502', async (t) => {
+  const { bash } = await booted(chrome, t, { hint: 'run npx @ai-ecoverse/slicc-node' });
+
+  const { stdout } = await bash('curl -sS -w " %{http_code}" https://unreachable.invalid/');
+  assert.match(stdout, /not allowed by CORS\): run npx @ai-ecoverse\/slicc-node/);
+  assert.match(stdout, / 502$/);
+});

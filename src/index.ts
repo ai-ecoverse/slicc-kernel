@@ -3,8 +3,11 @@ import type { KernelCall, TerminalAction } from './serve.ts';
 import { type NetworkTransport, serveTransport } from './transport.ts';
 
 export {
+  checkLocalProxy,
+  type LocalProxyCheckOptions,
   type LocalProxyOptions,
   type LocalProxyProbe,
+  type LocalProxyStatus,
   type LocalProxyTransportOptions,
   localProxyTransport,
   probeLocalProxy,
