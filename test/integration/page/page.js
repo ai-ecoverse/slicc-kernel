@@ -56,30 +56,58 @@ async function install() {
   }
 }
 
-const inFlight = new Map();
+const inFlight = new Set();
 
 async function tracked(what, work) {
   const entry = { what, since: Date.now() };
-  inFlight.set(entry, entry);
+  inFlight.add(entry);
   try {
-    return await work();
+    return await work(entry);
   } finally {
     inFlight.delete(entry);
   }
 }
 
-window.inFlight = () => [...inFlight.values()].map((e) => ({ ...e, ms: Date.now() - e.since }));
+window.inFlight = () => [...inFlight].map((e) => ({ ...e, ms: Date.now() - e.since }));
 
-async function fetchBytes(url) {
-  try {
-    return await tracked(`fetch ${url}`, async () => {
-      const response = await fetch(url, { signal: AbortSignal.timeout(60000) });
+const STALL = 30000;
+
+function fetchBytes(url) {
+  return tracked(`fetch ${url}`, async (entry) => {
+    entry.bytes = 0;
+    entry.last = Date.now();
+    const controller = new AbortController();
+    const watch = setInterval(() => {
+      if (Date.now() - entry.last > STALL) controller.abort(new Error(`no data for ${STALL} ms`));
+    }, 1000);
+    try {
+      const response = await fetch(url, { signal: controller.signal });
       if (!response.ok) throw new Error(`${response.status}`);
-      return await response.arrayBuffer();
-    });
-  } catch (err) {
-    throw new Error(`fetching ${url}: ${err}`);
-  }
+      const reader = response.body.getReader();
+      const chunks = [];
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        entry.bytes += value.length;
+        entry.last = Date.now();
+      }
+      const out = new Uint8Array(entry.bytes);
+      let at = 0;
+      for (const chunk of chunks) {
+        out.set(chunk, at);
+        at += chunk.length;
+      }
+      return out;
+    } catch (err) {
+      const ms = Date.now() - entry.since;
+      throw new Error(
+        `fetching ${url}: ${controller.signal.reason ?? err}, after ${entry.bytes} bytes in ${ms} ms`
+      );
+    } finally {
+      clearInterval(watch);
+    }
+  });
 }
 
 window.installTree = async (dir, names) => {
@@ -109,16 +137,21 @@ window.probe = async () => {
   return { isolated: crossOriginIsolated, workers: report };
 };
 
+function withTracking(kernel) {
+  const run = kernel.run.bind(kernel);
+  kernel.run = (argv, options) => tracked(`run ${JSON.stringify(argv)}`, () => run(argv, options));
+  return kernel;
+}
+
 window.boot = async (options = {}) => {
   await install();
   const transport = options.proxy
     ? localProxyTransport(options.proxy)
     : fetchTransport(options.hint ? { hint: options.hint } : {});
   const network = options.network === false ? {} : { network: { transport } };
-  const kernel = await createKernel({ root: await navigator.storage.getDirectory(), ...network });
-  const run = kernel.run.bind(kernel);
-  kernel.run = (argv, options) => tracked(`run ${JSON.stringify(argv)}`, () => run(argv, options));
-  window.kernel = kernel;
+  window.kernel = withTracking(
+    await createKernel({ root: await navigator.storage.getDirectory(), ...network })
+  );
   return true;
 };
 
@@ -168,7 +201,9 @@ window.terminal = async (argv, options) => {
 
 window.reboot = async () => {
   window.kernel.terminate();
-  window.kernel = await createKernel({ root: await navigator.storage.getDirectory() });
+  window.kernel = withTracking(
+    await createKernel({ root: await navigator.storage.getDirectory() })
+  );
   return true;
 };
 
