@@ -11,6 +11,16 @@
   "engines": {
     "node": ">=24"
   },
+  "fledgling": {
+    "provider": "github",
+    "workflow": "release.yml",
+    "repo": "ai-ecoverse/slicc-kernel",
+    "publish": true
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "exports": {
     ".": "./dist/index.js"
   },
@@ -21,6 +31,9 @@
     "prepare": "lefthook install",
     "build": "node build.mjs",
     "prepack": "npm run build",
+    "trust": "npx fledgling sync -y --skip-publish",
+    "trust:dry": "npx fledgling sync --dry-run -y --skip-publish",
+    "release": "semantic-release",
     "start": "npm run build && node test/integration/server.mjs",
     "pretest": "npm run build && playwright-core install --no-shell chromium",
     "test": "node --test --test-global-setup=test/integration/global.mjs 'test/integration/*.test.mjs'",
@@ -41,6 +54,7 @@
     "lefthook": "2.1.16",
     "monocart-coverage-reports": "2.13.0",
     "playwright-core": "1.63.0",
+    "semantic-release": "25.0.9",
     "typescript": "7.0.2"
   }
 }
