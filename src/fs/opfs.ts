@@ -7,6 +7,7 @@ const S_IFLNK = 0o120000;
 const PERM_MASK = 0o7777;
 const READ_ATTEMPTS = 3;
 const MAX_LINKS = 40;
+const ALIVE_MS = 1000;
 const EXECUTABLE = /\/node_modules\/(?:@[^/]+\/)?[^/]+\/bin\//;
 
 type Handle = FileSystemFileHandle | FileSystemDirectoryHandle;
@@ -68,6 +69,8 @@ function isHandle(child: Handle | MetaEntry): child is Handle {
 export class OpfsFs implements KernelFs {
   private readonly root: FileSystemDirectoryHandle;
   private readonly meta: MetaStore;
+  private readonly dirs = new Map<string, FileSystemDirectoryHandle>();
+  private readonly checked = new WeakMap<FileSystemDirectoryHandle, number>();
 
   constructor(root: FileSystemDirectoryHandle, meta: MetaStore = new MemoryMeta()) {
     this.root = root;
@@ -78,32 +81,95 @@ export class OpfsFs implements KernelFs {
     return resolvePath(base, path);
   }
 
-  private async dir(path: string): Promise<FileSystemDirectoryHandle> {
-    let dir = this.root;
-    try {
-      for (const part of split(path)) dir = await dir.getDirectoryHandle(part);
-    } catch (err) {
-      throw translate(err, path);
+  private async walk(parts: string[], from: number, start: FileSystemDirectoryHandle) {
+    let dir = start;
+    for (let at = from; at < parts.length; at++) {
+      dir = await dir.getDirectoryHandle(parts[at] as string);
+      this.dirs.set(`/${parts.slice(0, at + 1).join('/')}`, dir);
     }
     return dir;
   }
 
-  private async parent(path: string): Promise<[FileSystemDirectoryHandle, string]> {
+  private async dir(path: string): Promise<FileSystemDirectoryHandle> {
+    const parts = split(path);
+    let from = parts.length;
+    let cached: FileSystemDirectoryHandle | undefined;
+    for (; from > 0 && !cached; from--)
+      cached = this.dirs.get(`/${parts.slice(0, from).join('/')}`);
+    if (cached) from++;
+    const start = cached ?? this.root;
+    try {
+      try {
+        return await this.walk(parts, from, start);
+      } catch (err) {
+        if (start === this.root || (await this.alive(start))) throw err;
+        this.forget(`/${parts.slice(0, from).join('/')}`);
+        return await this.walk(parts, 0, this.root);
+      }
+    } catch (err) {
+      throw translate(err, path);
+    }
+  }
+
+  private async alive(dir: FileSystemDirectoryHandle): Promise<boolean> {
+    if (performance.now() - (this.checked.get(dir) ?? -ALIVE_MS) < ALIVE_MS) return true;
+    try {
+      for await (const _ of dir.keys()) break;
+    } catch {
+      return false;
+    }
+    this.checked.set(dir, performance.now());
+    return true;
+  }
+
+  private forget(path: string): void {
+    for (const key of [...this.dirs.keys()]) if (within(key, path)) this.dirs.delete(key);
+  }
+
+  private async inDir<T>(path: string, op: (dir: FileSystemDirectoryHandle) => Promise<T>) {
+    const dir = await this.dir(path);
+    try {
+      return await op(dir);
+    } catch (err) {
+      if ((err as { name?: unknown })?.name !== 'NotFoundError' || (await this.alive(dir)))
+        throw err;
+      this.forget(path);
+      return op(await this.dir(path));
+    }
+  }
+
+  private async child(
+    parent: FileSystemDirectoryHandle,
+    name: string,
+    kind: 'file' | 'directory'
+  ): Promise<Handle> {
+    return kind === 'file' ? parent.getFileHandle(name) : parent.getDirectoryHandle(name);
+  }
+
+  private async parent(path: string): Promise<[string, string]> {
     const parts = split(path);
     const name = parts.pop();
     if (name === undefined) throw fsError('EBUSY', path);
-    return [await this.dir(`/${parts.join('/')}`), name];
+    return [`/${parts.join('/')}`, name];
   }
 
   private async handle(path: string): Promise<Handle> {
     if (split(path).length === 0) return this.root;
     const [dir, name] = await this.parent(path);
-    try {
-      return await dir.getFileHandle(name);
-    } catch (err) {
-      if ((err as { name?: unknown })?.name !== 'TypeMismatchError') throw translate(err, path);
-    }
-    return dir.getDirectoryHandle(name);
+    const known = this.dirs.has(path);
+    return this.inDir(dir, async (parent): Promise<Handle> => {
+      const [first, second] = known
+        ? (['directory', 'file'] as const)
+        : (['file', 'directory'] as const);
+      try {
+        return await this.child(parent, name, first);
+      } catch (err) {
+        if ((err as { name?: unknown })?.name !== 'TypeMismatchError') throw err;
+      }
+      return this.child(parent, name, second);
+    }).catch((err) => {
+      throw translate(err, path);
+    });
   }
 
   private real(path: string): Promise<boolean> {
@@ -217,27 +283,28 @@ export class OpfsFs implements KernelFs {
     return new TextDecoder().decode(await this.readFileBuffer(path));
   }
 
-  private async writeTarget(path: string): Promise<string> {
+  private async writeTarget(path: string): Promise<[string, boolean]> {
     try {
-      return (await this.locate(path, true)).path;
+      return [(await this.locate(path, true)).path, true];
     } catch (err) {
       if (!missing(err)) throw err;
     }
     const [entry] = await this.meta.get([path]);
     const wanted = entry?.link === undefined ? path : resolvePath(parentOf(path), entry.link);
-    return resolvePath((await this.locate(parentOf(wanted), true)).path, baseOf(wanted));
+    return [resolvePath((await this.locate(parentOf(wanted), true)).path, baseOf(wanted)), false];
   }
 
   async writeFile(path: string, content: Uint8Array | string): Promise<void> {
-    const target = await this.writeTarget(path);
+    const [target, existed] = await this.writeTarget(path);
     const [dir, name] = await this.parent(target);
     let file: FileSystemFileHandle;
     try {
-      file = await dir.getFileHandle(name, { create: true });
+      file = await this.inDir(dir, (parent) => parent.getFileHandle(name, { create: true }));
     } catch (err) {
       const code = (err as { name?: unknown })?.name === 'TypeMismatchError' ? 'EISDIR' : null;
       throw code ? fsError(code, path) : translate(err, path);
     }
+    if (!existed && content.length === 0) return;
     const writable = await file.createWritable();
     await writable.write(content as FileSystemWriteChunkType);
     await writable.close();
@@ -305,10 +372,13 @@ export class OpfsFs implements KernelFs {
     if (found.handle) {
       const [dir, name] = await this.parent(found.path);
       try {
-        await dir.removeEntry(name, { recursive: options.recursive === true });
+        await this.inDir(dir, (parent) =>
+          parent.removeEntry(name, { recursive: options.recursive === true })
+        );
       } catch (err) {
         throw translate(err, path);
       }
+      this.forget(found.path);
     }
     await this.meta.remove([found.path]);
   }
@@ -316,6 +386,7 @@ export class OpfsFs implements KernelFs {
   async rename(from: string, to: string): Promise<void> {
     if (from === to) return;
     const source = await this.locate(from, false);
+    this.forget(source.path);
     const parent = await this.locate(parentOf(to), true);
     const destination = resolvePath(parent.path, baseOf(to));
     const sourceStat = await this.describe(source);
@@ -348,6 +419,7 @@ export class OpfsFs implements KernelFs {
     const name = baseOf(destination);
     const swap = targetStat?.isDirectory === true;
     const staging = swap ? `.${name}.${crypto.randomUUID()}` : name;
+    this.forget(destination);
     const timed = await this.explicitTimes(source.path);
     const moved = await this.place(source.handle as Handle, dir, staging);
     if (swap) await this.rm(destination, { recursive: true });

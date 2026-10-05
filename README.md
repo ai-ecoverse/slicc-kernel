@@ -145,6 +145,8 @@ Not covered: hard links (they fail with `EMLINK`, as Emscripten reports; OPFS ca
 
 Reads retry briefly when a concurrent write has invalidated the OPFS file snapshot (`NotReadableError`).
 
+A kernel caches the directory handles it has walked and the sidecar entries it has read. Its own changes keep both caches current. A change another kernel makes to the sidecar reaches the others through a `BroadcastChannel` named after the database. A directory removed (or replaced) outside the kernel is noticed when a lookup through it misses, at most a second after the kernel last checked it.
+
 The filesystem is our own rather than [ZenFS](https://github.com/zen-fs/core) (which SLICC uses), because OPFS stays the single source of truth: other writers, such as the BIOS installing packages or a page writing files, need no index to stay consistent with, and nothing is preloaded into memory at mount. POSIX metadata lives in the IndexedDB sidecar described above, which has per-entry transactions instead of one JSON file rewritten on every change.
 
 ## What is in here
