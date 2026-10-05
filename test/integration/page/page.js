@@ -1,4 +1,4 @@
-import { createKernel, fetchTransport } from '/dist/index.js';
+import { createKernel, fetchTransport, localProxyTransport, probeLocalProxy } from '/dist/index.js';
 
 const packages = {
   'node_modules/socktest/': ['package.json', 'bin/socktest', 'bin/socktest.wasm'],
@@ -90,10 +90,13 @@ window.probe = async () => {
 
 window.boot = async (options = {}) => {
   await install();
-  const network = options.network === false ? {} : { network: { transport: fetchTransport() } };
+  const transport = options.proxy ? localProxyTransport(options.proxy) : fetchTransport();
+  const network = options.network === false ? {} : { network: { transport } };
   window.kernel = await createKernel({ root: await navigator.storage.getDirectory(), ...network });
   return true;
 };
+
+window.probeLocalProxy = probeLocalProxy;
 
 window.opfs = {
   async read(path) {
