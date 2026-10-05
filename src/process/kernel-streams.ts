@@ -124,7 +124,7 @@ export interface StreamOps {
   close?: (stream: ProcessStream) => void;
   dup?: (stream: ProcessStream) => void;
   poll?: (stream: ProcessStream) => number;
-  fsync?: () => number;
+  fsync?: (stream: ProcessStream) => unknown;
 }
 
 export interface ProcessStream {
