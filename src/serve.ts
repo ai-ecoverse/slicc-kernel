@@ -1,6 +1,12 @@
 import { OpfsFs } from './fs/opfs.ts';
 import type { WasmWorkerLike } from './kernel/host.ts';
-import { Launcher, type RunOptions } from './launcher.ts';
+import { SIG } from './kernel/signals.ts';
+import {
+  Launcher,
+  type RunOptions,
+  type TerminalOptions,
+  type TerminalSession,
+} from './launcher.ts';
 
 export interface KernelPort {
   postMessage(message: unknown): void;
@@ -22,35 +28,91 @@ export interface RunRequest {
   options: Omit<RunOptions, 'onStdout' | 'onStderr'>;
 }
 
-export type KernelRequest = InitRequest | RunRequest;
+export interface OpenTerminalRequest {
+  id: number;
+  op: 'open-terminal';
+  argv: string[];
+  options: Omit<TerminalOptions, 'onData'>;
+}
 
-export type KernelCall = Omit<InitRequest, 'id'> | Omit<RunRequest, 'id'>;
+export type TerminalAction =
+  | { action: 'write'; bytes: Uint8Array }
+  | { action: 'resize'; cols: number; rows: number }
+  | { action: 'signal'; signal: string }
+  | { action: 'close' };
+
+export type TerminalRequest = { id: number; op: 'terminal'; terminal: number } & TerminalAction;
+
+export type KernelRequest = InitRequest | RunRequest | OpenTerminalRequest | TerminalRequest;
+
+type WithoutId<T> = T extends unknown ? Omit<T, 'id'> : never;
+
+export type KernelCall = WithoutId<KernelRequest>;
 
 export interface ServeDeps {
   storage: () => Promise<FileSystemDirectoryHandle>;
   createWorker: () => WasmWorkerLike;
 }
 
+function signalNumber(name: string): number {
+  const key = name.slice(3);
+  if (!name.startsWith('SIG') || !Object.hasOwn(SIG, key))
+    throw new Error(`unknown signal ${name}`);
+  return (SIG as Record<string, number>)[key];
+}
+
+function act(session: TerminalSession, req: TerminalAction): void {
+  if (req.action === 'write') session.write(req.bytes);
+  else if (req.action === 'resize') session.resize(req.cols, req.rows);
+  else if (req.action === 'signal') session.signal(signalNumber(req.signal));
+  else session.close();
+}
+
 export function serveKernel(port: KernelPort, deps: ServeDeps): void {
   let launcher: Promise<Launcher> | undefined;
+  const terminals = new Map<number, TerminalSession>();
   const reply = (id: number, body: object) => port.postMessage({ id, ...body });
+
+  async function ready(): Promise<Launcher> {
+    if (!launcher) throw new Error('the kernel is not initialized');
+    return launcher;
+  }
+
+  async function terminal(req: OpenTerminalRequest): Promise<number> {
+    const onData = (bytes: Uint8Array) => reply(req.id, { fd: 1, bytes });
+    const session = await (await ready()).openTerminal(req.argv, { ...req.options, onData });
+    terminals.set(req.id, session);
+    reply(req.id, { started: session.pid });
+    try {
+      return await session.exited;
+    } finally {
+      terminals.delete(req.id);
+    }
+  }
 
   async function handle(req: KernelRequest): Promise<unknown> {
     if (req.op === 'init') {
-      launcher = (req.root ? Promise.resolve(req.root) : deps.storage()).then(
-        (root) =>
-          new Launcher({
-            fs: new OpfsFs(root),
-            createWorker: deps.createWorker,
-            ...(req.modules ? { modules: req.modules } : {}),
-            ...(req.env ? { env: req.env } : {}),
-          })
-      );
+      launcher = (req.root ? Promise.resolve(req.root) : deps.storage()).then(async (root) => {
+        const started = new Launcher({
+          fs: new OpfsFs(root),
+          createWorker: deps.createWorker,
+          ...(req.modules ? { modules: req.modules } : {}),
+          ...(req.env ? { env: req.env } : {}),
+        });
+        await started.prepare();
+        return started;
+      });
       await launcher;
       return true;
     }
-    if (!launcher) throw new Error('the kernel is not initialized');
-    return (await launcher).run(req.argv, {
+    if (req.op === 'open-terminal') return terminal(req);
+    if (req.op === 'terminal') {
+      const session = terminals.get(req.terminal);
+      if (!session) throw new Error(`no terminal ${req.terminal}`);
+      act(session, req);
+      return true;
+    }
+    return (await ready()).run(req.argv, {
       ...req.options,
       onStdout: (bytes) => reply(req.id, { fd: 1, bytes }),
       onStderr: (bytes) => reply(req.id, { fd: 2, bytes }),

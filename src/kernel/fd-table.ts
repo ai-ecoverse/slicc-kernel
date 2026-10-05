@@ -8,6 +8,7 @@ export type KernelErrno =
   | 'EMFILE'
   | 'EINVAL'
   | 'ENOENT'
+  | 'ENOEXEC'
   | 'ECHILD'
   | 'ENOSYS'
   | 'ESPIPE'

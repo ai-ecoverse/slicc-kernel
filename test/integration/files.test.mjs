@@ -60,3 +60,23 @@ test('an executable script runs through its #! line', async (t) => {
     ok('hello from ./hello.sh with arg\n')
   );
 });
+
+test('/tmp and /home are in OPFS, shared by every process', async (t) => {
+  const { bash, read } = await booted(chrome, t);
+
+  assert.deepEqual(
+    await bash('echo shared > /tmp/note; cat /tmp/note; echo "$HOME"'),
+    ok('shared\n/home\n')
+  );
+  assert.equal(await read('tmp/note'), 'shared\n');
+});
+
+test('an executable without #! runs as a shell script', async (t) => {
+  const { page, bash } = await booted(chrome, t);
+  await page.evaluate(() => window.opfs.write('os/plain', 'echo "plain script $1"\nexit 4\n'));
+
+  assert.deepEqual(
+    await bash('chmod +x plain; ./plain one; echo "status $?"'),
+    ok('plain script one\nstatus 4\n')
+  );
+});

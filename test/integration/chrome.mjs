@@ -114,7 +114,11 @@ export async function launch() {
   async function dump(sessionId, target, restart) {
     const coverage = cdp.send('Profiler.takePreciseCoverage', {}, sessionId);
     const cpu = cdp.send('Profiler.stop', {}, sessionId);
-    const [{ result }, { profile }] = await Promise.all([coverage, cpu]).catch(() => [{}, {}]);
+    const answer = Promise.all([coverage, cpu]).catch(() => [{}, {}]);
+    const [{ result }, { profile }] = await Promise.race([
+      answer,
+      sleep(3000).then(() => [{}, {}]),
+    ]);
     if (!result || !run) return;
     if (restart) cdp.send('Profiler.start', {}, sessionId).catch(() => {});
     const ours = (script) => script.url.startsWith(`${server.url}dist/`);

@@ -28,7 +28,7 @@
     "dist"
   ],
   "scripts": {
-    "prepare": "lefthook install",
+    "prepare": "node build.mjs && { [ ! -e .git ] || lefthook install; }",
     "build": "node build.mjs",
     "prepack": "npm run build",
     "trust": "npx fledgling sync -y --skip-publish",

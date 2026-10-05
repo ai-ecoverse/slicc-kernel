@@ -21,6 +21,7 @@ const WASI_ERRNO: Readonly<Partial<Record<string, number>>> = {
   EIO: 29,
   EMFILE: 33,
   ENOENT: 44,
+  ENOEXEC: 45,
   ENOSYS: 52,
   ENOTTY: 59,
   ENXIO: 60,

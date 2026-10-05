@@ -79,3 +79,18 @@ window.opfs = {
     );
   },
 };
+
+window.terminal = async (argv, options) => {
+  const decoder = new TextDecoder();
+  const state = { screen: '', status: null };
+  const term = await window.kernel.openTerminal(argv, options);
+  term.onData = (bytes) => {
+    state.screen += decoder.decode(bytes, { stream: true });
+  };
+  term.exited.then((status) => {
+    state.status = status;
+  });
+  window.term = term;
+  window.screen = state;
+  return term.pid;
+};

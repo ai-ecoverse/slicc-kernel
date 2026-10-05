@@ -3,6 +3,7 @@ import { type FsStat, fsError, type KernelFs, resolvePath } from './types.ts';
 const S_IFDIR = 0o040000;
 const S_IFREG = 0o100000;
 const PERM_MASK = 0o7777;
+const READ_ATTEMPTS = 3;
 const EXECUTABLE = /\/node_modules\/(?:@[^/]+\/)?[^/]+\/bin\//;
 
 type Handle = FileSystemFileHandle | FileSystemDirectoryHandle;
@@ -108,7 +109,16 @@ export class OpfsFs implements KernelFs {
   async readFileBuffer(path: string): Promise<Uint8Array> {
     const handle = await this.handle(path);
     if (handle.kind === 'directory') throw fsError('EISDIR', path);
-    return new Uint8Array(await (await handle.getFile()).arrayBuffer());
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return new Uint8Array(await (await handle.getFile()).arrayBuffer());
+      } catch (err) {
+        if ((err as { name?: unknown })?.name !== 'NotReadableError' || attempt >= READ_ATTEMPTS) {
+          throw translate(err, path);
+        }
+        await new Promise((resolve) => setTimeout(resolve, attempt * 10));
+      }
+    }
   }
 
   async readFile(path: string): Promise<string> {
