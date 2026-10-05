@@ -1,3 +1,4 @@
+import type { LinkRecord } from '../process/wasi/wasix-linker.ts';
 import type { SyncFsResult } from '../realm/sync-fs-wire.ts';
 import {
   type ChildForker,
@@ -18,6 +19,7 @@ import {
   openPipe,
   pollFile,
 } from './fd-table.ts';
+import { AsyncOps, HOST_OPS, type HostSyscall, hostSyscall, type LockTable } from './host-ops.ts';
 import type { JobTable } from './jobs.ts';
 import { HTTP_OPS, type HttpHandles, type HttpSyscall } from './net/http-syscalls.ts';
 import { NO_TRANSPORT } from './net/network.ts';
@@ -75,6 +77,7 @@ export type WasmSyscall =
   | { op: 'fd-setfl'; fd: number; flags: number }
   | { op: 'fd-cloexec'; fd: number; on: boolean }
   | { op: 'fd-list' }
+  | { op: 'dl-log'; append?: LinkRecord; from: number }
   | {
       op: 'proc-alarm';
       sig: number;
@@ -134,7 +137,8 @@ export type WasmSyscall =
   | { op: 'sig-pause' }
   | SocketSyscall
   | HttpSyscall
-  | PtySyscall;
+  | PtySyscall
+  | HostSyscall;
 
 type FdSyscall = Extract<WasmSyscall, { op: `fd-${string}` }>;
 
@@ -160,6 +164,10 @@ function isHttpSyscall(req: WasmSyscall): req is HttpSyscall {
 
 function isSocketSyscall(req: WasmSyscall): req is SocketSyscall {
   return req.op.startsWith('sock-');
+}
+
+function isHostSyscall(req: { op: string }): req is HostSyscall {
+  return (HOST_OPS as readonly string[]).includes(req.op);
 }
 
 function isPtySyscall(req: WasmSyscall): req is PtySyscall {
@@ -234,6 +242,7 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'fd-cloexec',
   'fd-list',
   'proc-alarm',
+  'dl-log',
   'fd-renumber',
   'fd-promote',
   'fd-open-tty',
@@ -258,6 +267,7 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   ...SOCKET_OPS,
   ...HTTP_OPS,
   ...PTY_OPS,
+  ...HOST_OPS,
 ]);
 
 type TtySyscall = Extract<WasmSyscall, { op: `tty-${string}` }>;
@@ -284,6 +294,8 @@ export interface WasmProcessOptions {
 
   hasPending?: () => boolean;
 
+  pendingBits?: () => number;
+
   raise?: (sig: number) => void;
 
   onReap?: (pid: number) => void;
@@ -295,6 +307,8 @@ export interface WasmProcessOptions {
   net?: LoopbackNet;
 
   http?: HttpHandles;
+
+  locks?: LockTable;
 }
 
 export type StateListener = (state: 'stopped' | 'continued', sig: number) => void;
@@ -364,6 +378,9 @@ export class WasmProcess {
       const action = defaultAction(sig);
       return action === 'stop' ? this.stop(sig) : action;
     }
+    if (((this.options.pendingBits?.() ?? 0) & bit) !== 0 && defaultAction(sig) === 'terminate') {
+      return 'terminate';
+    }
     this.options.onPending?.(sig);
     const blocked = this.interrupt;
     this.interrupt = new AbortController();
@@ -415,6 +432,15 @@ export class WasmProcess {
       if (isJobSyscall(req)) return this.jobSyscall(req);
       if (isSocketSyscall(req)) return await this.socketSyscall(req);
       if (isHttpSyscall(req)) return await this.httpSyscall(req);
+      if (isHostSyscall(req)) {
+        return await hostSyscall(req, {
+          pid: this.pid,
+          locks: this.options.locks,
+          ops: this.asyncOps,
+          blocking: () => this.blockingSignal(),
+          valid: (inner) => isWasmSyscall(inner) && !isHostSyscall(inner),
+        });
+      }
       if (isPtySyscall(req)) {
         const { ptys, jobs } = this.options;
         return ptySyscall(req, { pid: this.pid, fds: this.fds, ptys, jobs });
@@ -734,7 +760,7 @@ export class WasmProcess {
   private async procSyscall(
     req: Exclude<
       WasmSyscall,
-      FdSyscall | TtySyscall | JobSyscall | SocketSyscall | HttpSyscall | PtySyscall
+      FdSyscall | TtySyscall | JobSyscall | SocketSyscall | HttpSyscall | PtySyscall | HostSyscall
     >
   ): Promise<SyncFsResult> {
     switch (req.op) {
@@ -783,6 +809,9 @@ export class WasmProcess {
       case 'proc-alarm':
         this.setAlarm(req.sig, req.firstMs ?? req.ms, req.repeat ? req.ms : 0, req.timer);
         return { ok: true, kind: 'void' };
+      case 'dl-log':
+        if (req.append) this.dlLog.push(req.append);
+        return { ok: true, kind: 'json', json: this.dlLog.slice(req.from) };
       case 'sig-mask':
         this.caught = req.caught;
         this.ignored = req.ignored;
@@ -802,6 +831,8 @@ export class WasmProcess {
   }
 
   private alarm: ReturnType<typeof setTimeout> | undefined;
+  private readonly dlLog: LinkRecord[] = [];
+  private readonly asyncOps = new AsyncOps((req) => this.syscall(req as WasmSyscall));
   private alarmEvery: ReturnType<typeof setInterval> | undefined;
 
   private setAlarm(sig: number, first: number, every: number, timer?: number): void {
@@ -835,6 +866,8 @@ export class WasmProcess {
     if (this.exited) return;
     this.exited = true;
     this.clearAlarm();
+    this.options.locks?.release(this.pid);
+    this.asyncOps.close();
     for (const pid of this.children.pids()) this.options.onReap?.(pid);
     await this.fds.closeAll();
     await this.options.http?.closeAll();

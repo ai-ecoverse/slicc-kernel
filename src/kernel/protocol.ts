@@ -1,12 +1,22 @@
+import type { ImportedMemory } from '../process/wasi/wasi-module.ts';
+import type { WasiForkState } from '../process/wasi/wasix-fork.ts';
 import type { DeviceMeta, KernelFdKind } from './fd-table.ts';
 
 export const WASM_PROCESS_INIT = 'wasm-process-init';
 export const WASM_PROCESS_EXIT = 'wasm-process-exit';
 export const WASM_PROCESS_ERROR = 'wasm-process-error';
+export const WASM_THREAD_SPAWN = 'wasm-thread-spawn';
+export const WASM_THREAD_INIT = 'wasm-thread-init';
+export const WASM_THREAD_EXIT = 'wasm-thread-exit';
+export const WASM_MAX_THREADS = 64;
 
 export interface WasmProgram {
+  abi?: 'emscripten' | 'wasi';
   glue: string;
   module: WebAssembly.Module;
+  memory?: ImportedMemory;
+  names?: string;
+  imports?: string;
 }
 
 export interface ForkState {
@@ -17,6 +27,7 @@ export interface ForkState {
   ppid: number;
   streams?: ForkStream[];
   cwd?: string;
+  wasi?: WasiForkState;
 }
 
 export interface KernelStreamEntry {
@@ -61,4 +72,26 @@ export interface WasmProcessExitMsg {
 export interface WasmProcessErrorMsg {
   type: typeof WASM_PROCESS_ERROR;
   message: string;
+}
+
+export interface WasmThread {
+  tid: number;
+  arg: number;
+  memory: WebAssembly.Memory;
+  ids: SharedArrayBuffer;
+  modules?: Record<string, WebAssembly.Module>;
+}
+
+export interface WasmThreadSpawnMsg {
+  type: typeof WASM_THREAD_SPAWN;
+  thread: WasmThread;
+}
+
+export interface WasmThreadInitMsg extends Omit<WasmProcessInitMsg, 'type' | 'fork' | 'fds'> {
+  type: typeof WASM_THREAD_INIT;
+  thread: WasmThread;
+}
+
+export interface WasmThreadExitMsg {
+  type: typeof WASM_THREAD_EXIT;
 }

@@ -1,12 +1,17 @@
 import type { KernelFs } from './fs/types.ts';
 
+export type Abi = 'emscripten' | 'wasi';
+
 export interface Command {
   name: string;
+  abi: Abi;
   glue: string;
   wasm: string;
   argv0: string;
   args?: string[];
   env?: Record<string, string>;
+  script?: string;
+  imports?: string;
 }
 
 interface CommandEntry {
@@ -16,6 +21,8 @@ interface CommandEntry {
   argv0?: unknown;
   args?: unknown;
   env?: unknown;
+  script?: unknown;
+  imports?: unknown;
 }
 
 interface Manifest {
@@ -48,34 +55,69 @@ function argsOf(pkg: string, raw: unknown): string[] | undefined {
   return raw.map((arg) => arg.replace(PACKAGE, pkg));
 }
 
+function abiOf(raw: unknown, fallback: Abi): Abi | undefined {
+  const abi = raw ?? fallback;
+  return abi === 'emscripten' || abi === 'wasi' ? abi : undefined;
+}
+
+function commandOf(
+  pkg: string,
+  name: string,
+  raw: CommandEntry,
+  packageAbi: Abi,
+  shared: Record<string, string>
+): Command | undefined {
+  const env = { ...shared, ...envOf(pkg, raw.env) };
+  const withEnv = Object.keys(env).length > 0 ? { env } : {};
+  const script = inside(pkg, raw.script);
+  if (script) {
+    return { name, abi: packageAbi, glue: script, wasm: script, argv0: name, script, ...withEnv };
+  }
+  const abi = abiOf(raw.abi, packageAbi);
+  const wasm = inside(pkg, raw.wasm);
+  const glue = abi === 'wasi' ? wasm : inside(pkg, raw.glue);
+  if (!abi || !glue || !wasm) return undefined;
+  const argv0 = typeof raw.argv0 === 'string' && raw.argv0 ? raw.argv0 : name;
+  const args = argsOf(pkg, raw.args);
+  const imports = abi === 'wasi' ? inside(pkg, raw.imports) : undefined;
+  return {
+    name,
+    abi,
+    glue,
+    wasm,
+    argv0,
+    ...(args ? { args } : {}),
+    ...withEnv,
+    ...(imports ? { imports } : {}),
+  };
+}
+
 export function commandsOf(pkg: string, manifest: Manifest): Command[] {
   const slicc = manifest.slicc;
-  if (!slicc || typeof slicc !== 'object' || (slicc.abi ?? 'emscripten') !== 'emscripten')
-    return [];
+  if (!slicc || typeof slicc !== 'object') return [];
+  const packageAbi = abiOf(slicc.abi, 'emscripten');
   const entries = slicc.commands;
-  if (!entries || typeof entries !== 'object') return [];
+  if (!packageAbi || !entries || typeof entries !== 'object') return [];
   const shared = envOf(pkg, slicc.env);
   const out: Command[] = [];
   for (const [name, raw] of Object.entries(entries as Record<string, CommandEntry>)) {
     if (!NAME.test(name) || name === '.' || name === '..' || !raw || typeof raw !== 'object') {
       continue;
     }
-    const glue = inside(pkg, raw.glue);
-    const wasm = inside(pkg, raw.wasm);
-    if ((raw.abi ?? 'emscripten') !== 'emscripten' || !glue || !wasm) continue;
-    const argv0 = typeof raw.argv0 === 'string' && raw.argv0 ? raw.argv0 : name;
-    const args = argsOf(pkg, raw.args);
-    const env = { ...shared, ...envOf(pkg, raw.env) };
-    out.push({
-      name,
-      glue,
-      wasm,
-      argv0,
-      ...(args ? { args } : {}),
-      ...(Object.keys(env).length > 0 ? { env } : {}),
-    });
+    const command = commandOf(pkg, name, raw, packageAbi, shared);
+    if (command) out.push(command);
   }
   return out;
+}
+
+async function withPackagePaths(fs: KernelFs, pkg: string, command: Command): Promise<Command> {
+  if (!command.env) return command;
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(command.env)) {
+    const path = !value.startsWith('/') && value.includes('/') && inside(pkg, value);
+    env[key] = path && (await fs.exists(path)) ? path : value;
+  }
+  return { ...command, env };
 }
 
 async function packages(fs: KernelFs, modules: string): Promise<string[]> {
@@ -104,7 +146,8 @@ export async function scanCommands(fs: KernelFs, modules: string): Promise<Map<s
       continue;
     }
     for (const command of commandsOf(pkg, manifest)) {
-      if (!found.has(command.name)) found.set(command.name, command);
+      if (!found.has(command.name))
+        found.set(command.name, await withPackagePaths(fs, pkg, command));
     }
   }
   if (!found.has('sh') && found.has('bash')) {
