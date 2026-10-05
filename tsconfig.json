@@ -1,18 +1,4 @@
 {
-  "compilerOptions": {
-    "target": "ES2024",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "lib": ["ES2024", "DOM", "DOM.Iterable", "WebWorker.ImportScripts"],
-    "types": [],
-    "strict": true,
-    "skipLibCheck": true,
-    "isolatedModules": true,
-    "verbatimModuleSyntax": true,
-    "erasableSyntaxOnly": true,
-    "allowImportingTsExtensions": true,
-    "rewriteRelativeImportExtensions": false,
-    "noEmit": true
-  },
+  "extends": "@ai-ecoverse/slicc-shared-web/tsconfig.json",
   "include": ["src/**/*.ts"]
 }

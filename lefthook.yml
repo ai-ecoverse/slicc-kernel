@@ -1,16 +1,2 @@
-pre-commit:
-  parallel: true
-  jobs:
-    - name: biome
-      glob: "*.{js,mjs,ts,json,css,html}"
-      run: npx biome check --no-errors-on-unmatched --files-ignore-unknown=true {staged_files}
-    - name: typecheck
-      glob: "*.ts"
-      run: npm run --silent typecheck
-    - name: no comments
-      run: npm run --silent lint:comments
-    - name: no unit tests in git
-      run: npm run --silent lint:no-unit-tests
-    - name: diff coverage
-      glob: "src/**.ts"
-      run: npm run --silent coverage:staged
+extends:
+  - node_modules/@ai-ecoverse/slicc-shared-web/lefthook.yml
