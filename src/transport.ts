@@ -1,3 +1,4 @@
+import { BODY_IDLE_MS, readWithin } from './body-idle.ts';
 import type { TransportCall, TransportReply } from './kernel/net/remote-transport.ts';
 import type {
   HeaderList,
@@ -19,6 +20,7 @@ export interface FetchTransportOptions {
   fetch?: typeof globalThis.fetch;
   maxRequestBody?: number;
   hint?: string;
+  bodyIdleMs?: number;
 }
 
 const MAX_REQUEST_BODY = 64 * 1024 * 1024;
@@ -33,11 +35,18 @@ function joinHeaders(headers: HeaderList): Headers {
   return out;
 }
 
-async function* chunks(body: ReadableStream<Uint8Array> | null): AsyncGenerator<Uint8Array> {
+async function* chunks(
+  body: ReadableStream<Uint8Array> | null,
+  idleMs: number
+): AsyncGenerator<Uint8Array> {
   if (!body) return;
   const reader = body.getReader();
   try {
-    for (let next = await reader.read(); !next.done; next = await reader.read()) {
+    for (
+      let next = await readWithin(reader, idleMs);
+      !next.done;
+      next = await readWithin(reader, idleMs)
+    ) {
       if (next.value.byteLength > 0) yield next.value;
     }
   } finally {
@@ -79,7 +88,7 @@ export function fetchTransport(options: FetchTransportOptions = {}): RealmTransp
       response.headers.forEach((value, name) => {
         headers.push([name, value]);
       });
-      const body = chunks(response.body);
+      const body = chunks(response.body, options.bodyIdleMs ?? BODY_IDLE_MS);
       return {
         status: response.status,
         statusText: response.statusText,
@@ -110,12 +119,13 @@ export function serveTransport(peer: TransportPeer, transport: RealmTransport): 
   >();
   const fail = (nid: number, e: unknown) => {
     open.delete(nid);
-    const status = (e as { status?: unknown }).status;
+    const { status, code } = e as { status?: unknown; code?: unknown };
     peer.postMessage({
       net: 'error',
       nid,
       message: e instanceof Error ? e.message : String(e),
       ...(typeof status === 'number' ? { status } : {}),
+      ...(typeof code === 'string' ? { code } : {}),
     });
   };
   const start = async (call: Extract<TransportCall, { net: 'fetch' }>) => {

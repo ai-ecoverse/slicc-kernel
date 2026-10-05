@@ -139,7 +139,8 @@ export class HttpHandles {
         else entry.left = next.value;
       } catch (e) {
         entry.done = true;
-        return { ok: false, errno: 'EIO', message: message(e) };
+        const timedOut = (e as { code?: unknown } | null)?.code === 'ETIMEDOUT';
+        return { ok: false, errno: timedOut ? 'ETIMEDOUT' : 'EIO', message: message(e) };
       }
     }
     const bytes = entry.left.subarray(0, Math.max(0, max));
