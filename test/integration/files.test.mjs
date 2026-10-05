@@ -1,0 +1,62 @@
+import assert from 'node:assert/strict';
+import { after, test } from 'node:test';
+import { launch } from './chrome.mjs';
+import { booted, ok } from './kernel.mjs';
+
+const chrome = await launch();
+after(() => chrome.close());
+
+test('each file change is in OPFS as soon as the command exits', async (t) => {
+  const { page, bash, read, list, exists } = await booted(chrome, t);
+
+  assert.deepEqual(await bash('echo first > notes.txt'), ok());
+  assert.equal(await read('os/notes.txt'), 'first\n');
+
+  assert.deepEqual(await bash('echo second >> notes.txt'), ok());
+  assert.equal(await read('os/notes.txt'), 'first\nsecond\n');
+
+  assert.deepEqual(await bash('mv notes.txt renamed.txt'), ok());
+  assert.deepEqual(await list('os'), ['renamed.txt']);
+  assert.equal(await read('os/renamed.txt'), 'first\nsecond\n');
+
+  assert.deepEqual(await bash('rm renamed.txt'), ok());
+  assert.deepEqual(await list('os'), []);
+  assert.equal(await exists('os/renamed.txt'), false);
+  assert.deepEqual(page.errors, []);
+});
+
+test('directories are created, renamed with their contents, and removed', async (t) => {
+  const { bash, read, list, exists } = await booted(chrome, t);
+
+  assert.deepEqual(await bash('mkdir -p a/b && printf deep > a/b/c.txt'), ok());
+  assert.equal(await read('os/a/b/c.txt'), 'deep');
+
+  assert.deepEqual(await bash('mv a z'), ok());
+  assert.deepEqual(await list('os'), ['z']);
+  assert.equal(await read('os/z/b/c.txt'), 'deep');
+
+  assert.deepEqual(await bash('rm -r z'), ok());
+  assert.equal(await exists('os/z'), false);
+});
+
+test('commands see files written through the OPFS API', async (t) => {
+  const { page, bash } = await booted(chrome, t);
+  await page.evaluate(() => window.opfs.write('os/from-page.txt', 'written by the page\n'));
+
+  assert.deepEqual(
+    await bash('cat from-page.txt; wc -c < from-page.txt'),
+    ok('written by the page\n20\n')
+  );
+});
+
+test('an executable script runs through its #! line', async (t) => {
+  const { page, bash } = await booted(chrome, t);
+  await page.evaluate(() =>
+    window.opfs.write('os/hello.sh', '#!/usr/bin/env bash\necho "hello from $0 with $1"\n')
+  );
+
+  assert.deepEqual(
+    await bash('chmod +x hello.sh && ./hello.sh arg'),
+    ok('hello from ./hello.sh with arg\n')
+  );
+});
