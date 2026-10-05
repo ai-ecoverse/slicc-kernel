@@ -1,3 +1,4 @@
+import { inodeOf } from '../fs/types.ts';
 import type { SyncFsBridgeStat, SyncFsPosixBridge } from './sync-fs-wire.ts';
 
 const ERRNO_BY_CODE: Readonly<Record<string, number>> = {
@@ -43,6 +44,8 @@ interface LiveNodeState {
   openCount: number;
 
   orphan?: boolean;
+
+  listed?: Map<string, SyncFsBridgeStat>;
 }
 
 export interface LiveFsNode {
@@ -171,19 +174,6 @@ export function liveNodePath(node: LiveFsNode): string {
   }
   const root = node.mount.opts.root.replace(/\/+$/, '');
   return parts.length === 0 ? root || '/' : `${root}/${parts.reverse().join('/')}`;
-}
-
-export function inodeOf(path: string): number {
-  let h1 = 0xdeadbeef;
-  let h2 = 0x41c6ce57;
-  for (let i = 0; i < path.length; i++) {
-    const c = path.charCodeAt(i);
-    h1 = Math.imul(h1 ^ c, 2654435761);
-    h2 = Math.imul(h2 ^ c, 1597334677);
-  }
-  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
-  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
-  return 4294967296 * (2097151 & h2) + (h1 >>> 0) || 1;
 }
 
 function modeFromStat(st: SyncFsBridgeStat): number {
@@ -335,9 +325,9 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
         gid: 0,
         rdev: 0,
         size,
-        atime: mtime,
+        atime: new Date(st.atimeMs ?? mtime.getTime()),
         mtime,
-        ctime: mtime,
+        ctime: new Date(st.ctimeMs ?? mtime.getTime()),
         blksize: 4096,
         blocks: Math.ceil(size / 4096),
       };
@@ -370,10 +360,13 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
       node.live.stat = undefined;
     },
     lookup(parent, name) {
-      const st = call(() => bridgeOf(parent).lstat(childPath(parent, name)));
+      const listed = parent.live.listed?.get(name);
+      parent.live.listed?.delete(name);
+      const st = listed ?? call(() => bridgeOf(parent).lstat(childPath(parent, name)));
       return makeNode(parent, name, st);
     },
     mknod(parent, name, mode) {
+      parent.live.listed = undefined;
       const path = childPath(parent, name);
       if (Fs.isDir(mode)) {
         call(() => bridgeOf(parent).mkdir(path));
@@ -398,6 +391,8 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
       return node;
     },
     rename(oldNode, newDir, newName) {
+      oldNode.parent.live.listed = undefined;
+      newDir.live.listed = undefined;
       const from = liveNodePath(oldNode);
       const to = childPath(newDir, newName);
       flushNode(oldNode);
@@ -412,6 +407,7 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
       oldNode.live.stat = undefined;
     },
     unlink(parent, name) {
+      parent.live.listed = undefined;
       let open: LiveFsNode | undefined;
       try {
         const node = Fs.lookupNode?.(parent, name);
@@ -425,12 +421,17 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
       if (open) open.live.orphan = true;
     },
     rmdir(parent, name) {
+      parent.live.listed = undefined;
       call(() => bridgeOf(parent).rmdir(childPath(parent, name)));
     },
     readdir(node) {
-      return ['.', '..', ...call(() => bridgeOf(node).readdir(liveNodePath(node)))];
+      const listed = call(() => bridgeOf(node).readdirStat(liveNodePath(node)));
+      node.live.listed = new Map();
+      for (const [name, st] of listed) if (st) node.live.listed.set(name, st);
+      return ['.', '..', ...listed.map(([name]) => name)];
     },
     symlink(parent, newName, target) {
+      parent.live.listed = undefined;
       const path = childPath(parent, newName);
       call(() => bridgeOf(parent).symlink(target, path));
       return makeNode(parent, newName, {
@@ -563,6 +564,7 @@ export function invalidateLiveVfs(Fs: LiveFsApi, plugin: LiveVfsPlugin): void {
       if (!ownedBy(plugin, node)) continue;
       const s = node.live;
       s.stat = undefined;
+      s.listed = undefined;
       if (s.openCount === 0) {
         if (node !== node.mount.root) drop.push(node);
       } else if (s.loaded && !s.dirty) {

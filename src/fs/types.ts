@@ -5,6 +5,9 @@ export interface FsStat {
   size: number;
   mode: number;
   mtime: Date;
+  atime: Date;
+  ctime: Date;
+  ino: number;
 }
 
 export interface KernelFs {
@@ -16,6 +19,7 @@ export interface KernelFs {
   stat(path: string): Promise<FsStat>;
   lstat(path: string): Promise<FsStat>;
   readdir(path: string): Promise<string[]>;
+  readdirStat(path: string): Promise<Array<[string, FsStat | null]>>;
   mkdir(path: string, options?: { recursive?: boolean }): Promise<void>;
   rm(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
   rename(from: string, to: string): Promise<void>;
@@ -41,4 +45,17 @@ export function normalizePath(path: string): string {
 
 export function resolvePath(base: string, path: string): string {
   return normalizePath(path.startsWith('/') ? path : `${base}/${path}`);
+}
+
+export function inodeOf(path: string): number {
+  let h1 = 0xdeadbeef;
+  let h2 = 0x41c6ce57;
+  for (let i = 0; i < path.length; i++) {
+    const c = path.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 2654435761);
+    h2 = Math.imul(h2 ^ c, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return 4294967296 * (2097151 & h2) + (h1 >>> 0) || 1;
 }

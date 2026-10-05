@@ -42,6 +42,8 @@ export interface SyncFsBridgeStat {
   size: number;
   mode?: number;
   mtimeMs?: number;
+  atimeMs?: number;
+  ctimeMs?: number;
   ino?: number;
 }
 
@@ -85,6 +87,8 @@ export function parseSyncFsStat(json: unknown): SyncFsBridgeStat | null {
     size: s.size,
     ...(typeof s.mode === 'number' ? { mode: s.mode } : {}),
     ...(typeof s.mtimeMs === 'number' ? { mtimeMs: s.mtimeMs } : {}),
+    ...(typeof s.atimeMs === 'number' ? { atimeMs: s.atimeMs } : {}),
+    ...(typeof s.ctimeMs === 'number' ? { ctimeMs: s.ctimeMs } : {}),
     ...(typeof s.ino === 'number' ? { ino: s.ino } : {}),
   };
 }

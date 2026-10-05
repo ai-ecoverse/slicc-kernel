@@ -94,3 +94,16 @@ window.terminal = async (argv, options) => {
   window.screen = state;
   return term.pid;
 };
+
+window.reboot = async () => {
+  window.kernel.terminate();
+  window.kernel = await createKernel({ root: await navigator.storage.getDirectory() });
+  return true;
+};
+
+window.remove = async (path) => {
+  const parts = path.split('/');
+  const name = parts.pop();
+  await (await walk(parts.join('/'))).removeEntry(name, { recursive: true });
+  return true;
+};

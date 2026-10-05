@@ -28,6 +28,7 @@ const { status, stdout, stderr } = await kernel.run(['bash', '-c', 'echo hi > he
 | `root` | `navigator.storage.getDirectory()` | the `FileSystemDirectoryHandle` that becomes `/` |
 | `modules` | `'/node_modules'` | where installed packages are scanned for commands |
 | `env` | `{}` | environment added to every run |
+| `metadata` | `'slicc-kernel'` | the IndexedDB database for POSIX metadata (see [Metadata](#metadata)); `false` keeps it in memory for the kernel's lifetime |
 | `worker` | `new URL('./kernel-worker.js', import.meta.url)` | the kernel worker script |
 
 ### `kernel.run(argv, options?) → Promise<{ status, stdout, stderr }>`
@@ -79,11 +80,26 @@ Entries may also set `argv0`, `args` and `env` (with `${package}` expanded to th
 
 `/` is the OPFS root. Each process mounts the top-level directories that exist when it starts (plus `/usr` and `/bin`), so files in them are shared by all processes and visible through the OPFS API as soon as the process that wrote them has closed them; `run` resolves only after that. `createKernel` creates `/tmp` and `/home` in OPFS, so they are shared too. `/dev`, `/proc` and anything created directly in `/` while a process runs live in that process's memory unless it already exists in OPFS. File contents are buffered per open file and written back on close, `fsync` and exit; metadata operations (`mkdir`, `rename`, `rm`, …) go straight to OPFS. The kernel worker is the only writer.
 
-OPFS stores no POSIX metadata, so modes are synthesized: directories `0755`, files `0644`, and files under `node_modules/*/bin/` `0755`. `chmod` and `utime` are remembered for the lifetime of the kernel worker. Symlinks are not supported (`ENOSYS`). Directories are renamed with `FileSystemHandle.move()` where available, else by copy and delete.
+Directories are renamed with `FileSystemHandle.move()` where available, else by copy and delete.
+
+### Metadata
+
+OPFS stores names, bytes, sizes and modification times, nothing else. Everything POSIX needs on top of that lives in an IndexedDB sidecar, so it survives reloads and new kernels:
+
+- mode bits (`chmod`);
+- access and change times, and a modification time set explicitly with `utime` (it holds until the file is written again);
+- inode numbers that stay stable across renames;
+- symbolic links (`symlink`, `readlink`, `lstat`, and following them in paths), which exist only in the sidecar.
+
+OPFS stays authoritative: an entry is consulted only for a path that exists in OPFS (symlinks only for paths that don't), so files written straight to OPFS, for example by the BIOS installer or a page, get the defaults: directories `0755`, files `0644`, and files under `node_modules/*/bin/` `0755`. A file deleted through the OPFS API disappears at once; its leftover entry is ignored and removed when the next kernel starts. Changes go to OPFS first and then to the sidecar, so a crash in between at worst loses the metadata of that one change. Each change is a read-modify-write inside one IndexedDB transaction, so two kernels (two tabs) on the same origin don't lose each other's updates.
+
+The database is `slicc-kernel` (or the `metadata` option), schema version 1, with one object store, `entries`, keyed by absolute path (`keyPath: 'path'`) and an index `dir` on the parent directory of symlinks. A record looks like `{ path, mode?, atimeMs?, mtimeMs?, mtimeFor?, ctimeMs?, ino?, link?, dir? }`, where `mtimeFor` is the OPFS `lastModified` an explicit `mtimeMs` belongs to. A future schema bumps the version and migrates in `onupgradeneeded`; an older kernel then closes its connection. The sidecar is keyed by path from the `root` handle, so use a different `metadata` name for each distinct root.
+
+Not covered: hard links (they fail with `EMLINK`, as Emscripten reports; OPFS cannot share contents between names) and file ownership. Emscripten's `chown` doesn't pass the owner to filesystem backends, so there is nothing to store, and processes see every file as owned by uid and gid 1000. Emscripten also doesn't enforce permission bits, so a file runs whether or not its exec bit is set; the bits are what `ls`, `stat` and `test` report.
 
 Reads retry briefly when a concurrent write has invalidated the OPFS file snapshot (`NotReadableError`).
 
-The filesystem is our own rather than [ZenFS](https://github.com/zen-fs/core) (which SLICC uses), because OPFS stays the single source of truth: other writers, such as the BIOS installing packages or a page writing files, need no index to stay consistent with, and nothing is preloaded into memory at mount. In exchange there are no persistent POSIX modes, times, inode numbers or symlinks.
+The filesystem is our own rather than [ZenFS](https://github.com/zen-fs/core) (which SLICC uses), because OPFS stays the single source of truth: other writers, such as the BIOS installing packages or a page writing files, need no index to stay consistent with, and nothing is preloaded into memory at mount. POSIX metadata lives in the IndexedDB sidecar described above, which has per-entry transactions instead of one JSON file rewritten on every change.
 
 ## What is in here
 

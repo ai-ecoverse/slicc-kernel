@@ -1,4 +1,4 @@
-import type { FsStat, KernelFs } from './types.ts';
+import { type FsStat, inodeOf, type KernelFs } from './types.ts';
 
 const S_IFDIR = 0o040000;
 const S_IFREG = 0o100000;
@@ -8,14 +8,18 @@ function missing(err: unknown): boolean {
   return (err as { code?: unknown })?.code === 'ENOENT';
 }
 
-function synthetic(directory: boolean): FsStat {
+function synthetic(directory: boolean, path: string): FsStat {
+  const epoch = new Date(0);
   return {
     isFile: !directory,
     isDirectory: directory,
     isSymbolicLink: false,
     size: 0,
     mode: (directory ? S_IFDIR : S_IFREG) | 0o755,
-    mtime: new Date(0),
+    mtime: epoch,
+    atime: epoch,
+    ctime: epoch,
+    ino: inodeOf(path),
   };
 }
 
@@ -28,9 +32,9 @@ export function withCommandDirs(fs: KernelFs, names: () => Promise<ReadonlySet<s
   }
 
   async function virtual(path: string): Promise<FsStat | undefined> {
-    if (path === '/usr' || path === '/bin' || path === '/usr/bin') return synthetic(true);
+    if (path === '/usr' || path === '/bin' || path === '/usr/bin') return synthetic(true, path);
     const name = COMMAND.exec(path)?.[1];
-    return name !== undefined && (await names()).has(name) ? synthetic(false) : undefined;
+    return name !== undefined && (await names()).has(name) ? synthetic(false, path) : undefined;
   }
 
   async function stat(path: string, real: (path: string) => Promise<FsStat>): Promise<FsStat> {
@@ -68,6 +72,26 @@ export function withCommandDirs(fs: KernelFs, names: () => Promise<ReadonlySet<s
         throw err;
       });
       return [...new Set([...real, ...extra])].sort();
+    },
+    async readdirStat(path) {
+      const extra = await children(path);
+      if (!extra) return fs.readdirStat(path);
+      const real = await fs.readdirStat(path).catch((err) => {
+        if (missing(err)) return [];
+        throw err;
+      });
+      const seen = new Set(real.map(([name]) => name));
+      const base = path === '/' ? '' : path;
+      const added = extra.filter((name) => !seen.has(name));
+      const virtuals = await Promise.all(
+        added.map(
+          async (name): Promise<[string, FsStat | null]> => [
+            name,
+            (await virtual(`${base}/${name}`)) as FsStat,
+          ]
+        )
+      );
+      return [...real, ...virtuals].sort(([a], [b]) => (a < b ? -1 : 1));
     },
     mkdir: (path, options) => fs.mkdir(path, options),
     rm: (path, options) => fs.rm(path, options),

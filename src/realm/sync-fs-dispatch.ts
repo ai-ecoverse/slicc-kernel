@@ -18,6 +18,9 @@ export interface SyncFsStatJson {
   size: number;
   mode: number;
   mtimeMs: number;
+  atimeMs: number;
+  ctimeMs: number;
+  ino: number;
 }
 
 function statJson(s: FsStat): SyncFsStatJson {
@@ -28,6 +31,9 @@ function statJson(s: FsStat): SyncFsStatJson {
     size: s.size,
     mode: s.mode,
     mtimeMs: s.mtime.getTime(),
+    atimeMs: s.atime.getTime(),
+    ctimeMs: s.ctime.getTime(),
+    ino: s.ino,
   };
 }
 
@@ -35,17 +41,7 @@ async function readdirStat(
   fs: KernelFs,
   dir: string
 ): Promise<Array<[string, SyncFsStatJson | null]>> {
-  const names = await fs.readdir(dir);
-  const base = dir === '/' ? '' : dir;
-  return Promise.all(
-    names.map(async (name): Promise<[string, SyncFsStatJson | null]> => {
-      try {
-        return [name, statJson(await fs.lstat(`${base}/${name}`))];
-      } catch {
-        return [name, null];
-      }
-    })
-  );
+  return (await fs.readdirStat(dir)).map(([name, stat]) => [name, stat && statJson(stat)]);
 }
 
 const done: SyncFsResult = { ok: true, kind: 'void' };
