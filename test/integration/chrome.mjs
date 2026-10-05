@@ -45,6 +45,14 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+const TIMED_OUT = Symbol('timed out');
+
+async function bounded(promise, label, ms = 10000) {
+  const result = await Promise.race([promise, sleep(ms).then(() => TIMED_OUT)]);
+  if (result === TIMED_OUT) console.warn(`chrome: ${label} took over ${ms} ms, moving on`);
+  return result;
+}
+
 async function exitLines() {
   const file = new URL('../../dist/process-worker.js', import.meta.url);
   const lines = (await readFile(file, 'utf8').catch(() => '')).split('\n');
@@ -167,7 +175,13 @@ export async function launch() {
     if (waitingForDebugger) commands.push(['Runtime.runIfWaitingForDebugger']);
     const ready = commands.reduce(
       (chain, [method, params]) =>
-        chain.then(() => cdp.send(method, params, sessionId).catch(() => {})),
+        chain.then(() =>
+          bounded(
+            cdp.send(method, params, sessionId).catch(() => {}),
+            method,
+            5000
+          )
+        ),
       Promise.resolve()
     );
     if (targetInfo.type === 'page') tab(targetInfo.targetId).resolve(ready.then(() => sessionId));
@@ -249,7 +263,7 @@ export async function launch() {
     );
     for (const opened of pages) opened.dispose();
     run = null;
-    await cdp.send('Target.disposeBrowserContext', { browserContextId });
+    await bounded(cdp.send('Target.disposeBrowserContext', { browserContextId }), 'dispose');
   }
 
   return {
@@ -275,9 +289,16 @@ export async function launch() {
       return opened;
     },
     async close() {
-      await cdp.send('Browser.close').catch(() => {});
+      const exited = new Promise((resolve) => child.once('exit', resolve));
+      await bounded(
+        cdp.send('Browser.close').catch(() => {}),
+        'Browser.close'
+      );
       cdp.close();
-      if (child.exitCode === null) await new Promise((resolve) => child.once('exit', resolve));
+      if (child.exitCode === null && (await bounded(exited, 'exit')) === TIMED_OUT) {
+        child.kill('SIGKILL');
+        await exited;
+      }
       await rm(profile, { recursive: true, force: true });
       await server.close();
     },
