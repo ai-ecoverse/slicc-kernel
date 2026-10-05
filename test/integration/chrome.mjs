@@ -1,4 +1,5 @@
-import { env } from 'node:process';
+import { argv, env } from 'node:process';
+import { fileURLToPath } from 'node:url';
 import { serve, launch as start } from '@ai-ecoverse/slicc-shared-web/harness';
 
 const options = {
@@ -15,7 +16,7 @@ const options = {
 
 export const launch = () => start(options);
 
-if (import.meta.main) {
+if (argv[1] === fileURLToPath(import.meta.url)) {
   const { url } = await serve({ ...options, port: Number(env.PORT ?? 8080) });
   console.log(`slicc-kernel test page on ${url}`);
 }
