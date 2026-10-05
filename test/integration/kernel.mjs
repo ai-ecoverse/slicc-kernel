@@ -1,8 +1,8 @@
-export async function booted(chrome, t) {
+export async function booted(chrome, t, options = {}) {
   const page = await chrome.page(t);
   await page.goto('/');
   await page.until(() => typeof window.boot === 'function');
-  await page.evaluate(() => window.boot());
+  await page.evaluate((o) => window.boot(o), options);
   return {
     page,
     bash: (script, options = { cwd: '/os' }) =>

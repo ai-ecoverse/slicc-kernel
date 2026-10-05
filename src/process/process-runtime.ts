@@ -35,6 +35,7 @@ import {
   restoreForkedStreams,
   vfsPromoter,
 } from './process-fork.ts';
+import { createHttpKernel } from './process-http.ts';
 import type { PtyKernel } from './process-pty.ts';
 import { SignalGate } from './process-signals.ts';
 import { createSocketKernel } from './process-sockets.ts';
@@ -417,6 +418,7 @@ export async function runWasmProcess(
     inherit: (actions) => describeInherited(running.FS, sys, streams, livePath, actions),
     stdioPromoter: () => vfsPromoter(running.FS, sys, streams, livePath),
   });
+  running.sliccKernel.http = createHttpKernel(transport);
   running.sliccKernel.net = createSocketKernel({
     transport,
     Fs: running.FS,

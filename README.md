@@ -30,6 +30,7 @@ const { status, stdout, stderr } = await kernel.run(['bash', '-c', 'echo hi > he
 | `env` | `{}` | environment added to every run |
 | `metadata` | `'slicc-kernel'` | the IndexedDB database for POSIX metadata (see [Metadata](#metadata)); `false` keeps it in memory for the kernel's lifetime |
 | `worker` | `new URL('./kernel-worker.js', import.meta.url)` | the kernel worker script |
+| `network` | none | `{ transport }`: how programs reach the outside world (see [Network](#network)) |
 
 ### `kernel.run(argv, options?) → Promise<{ status, stdout, stderr }>`
 
@@ -76,6 +77,25 @@ Commands come from installed packages in npm's `node_modules` layout: every `<mo
 
 Entries may also set `argv0`, `args` and `env` (with `${package}` expanded to the package directory), and a package-wide `slicc.env`. The first package to define a name wins. `sh` runs bash as `sh` unless a package provides its own. The installed commands appear as executables in a virtual `/usr/bin` and `/bin`, so `PATH` lookups, `command -v` and `ls /usr/bin` work without writing anything to OPFS. A process can also run a program by the path of its glue when the `.wasm` sits next to it, and a script through its `#!` line (including `#!/usr/bin/env name`). Executing any other file fails with `ENOEXEC`, so bash runs it as a shell script, as POSIX shells do. The catalog is re-read at the start of every `run`, so packages installed in between are picked up.
 
+## Network
+
+Programs talk to each other over sockets, and to the outside world through a proxy that hands every request to a transport the page passes in.
+
+```js
+import { createKernel, fetchTransport } from './node_modules/@ai-ecoverse/slicc-kernel/dist/index.js';
+
+const kernel = await createKernel({ network: { transport: fetchTransport() } });
+await kernel.run(['curl', '-sS', 'https://registry.npmjs.org/@ai-ecoverse/wasm-bash/latest']);
+```
+
+- **Sockets**: `AF_INET` stream sockets on `127.x` and `AF_UNIX` sockets are kernel descriptors on one loopback network per kernel, so processes can serve and connect to each other. They survive `dup`, `fork` and `exec` and work with `select` and `poll`, like pipe ends. A bind of an `AF_UNIX` socket creates its path in OPFS. Other addresses are unreachable: programs reach the outside world only through the proxy.
+- **The proxy** listens on `127.0.0.1:3128` from the first connection on. It takes absolute-form `http:` requests and `CONNECT` tunnels, which it terminates with a certificate for the requested host, issued by the kernel's own CA, then hands each request to the transport. Programs start with `http_proxy`, `https_proxy` (and the upper-case names) pointing at it, `no_proxy` covering loopback, and `SSL_CERT_FILE`, `CURL_CA_BUNDLE` and `GIT_SSL_CAINFO` pointing at the CA certificate in `/etc/ssl/certs/slicc-kernel-ca.pem`; variables in `env` override them. The CA's key never leaves WebCrypto; it is kept in IndexedDB (`<metadata>-ca`, or in memory with `metadata: false`).
+- **TLS** needs [`@ai-ecoverse/wasm-tls-engine`](https://www.npmjs.com/package/@ai-ecoverse/wasm-tls-engine) installed under `modules`, like a command. Without it, `CONNECT` is answered `501` with the reason.
+- **The transport** is an object on the page with `traits` (`manualRedirects`, `encodedBodies`, `maxRequestBody`) and `fetch(request)`, which answers `{ status, statusText, headers, body, cancel }` with `body` an async iterable of `Uint8Array`. The kernel pulls the body one chunk at a time, so a slow program slows the download. A rejection with a numeric `status` is answered with that status; any other with `502`. `fetchTransport()` is the plain `fetch` of the page, bound by CORS (`registry.npmjs.org` and jsDelivr allow it); an embedder with a way around CORS passes its own.
+- **Without a transport**, every request is answered `502` with `slicc-kernel: no network transport (createKernel({ network: { transport } }))`.
+
+Process workers can also use the transport directly, without a socket: the `net-request`, `net-read` and `net-close` syscalls (`Module.sliccKernel.http` in a process) open a request and read its body in pieces. Requests are per process and closed when it exits.
+
 ## Filesystem
 
 `/` is the OPFS root. Each process mounts the top-level directories that exist when it starts (plus `/usr` and `/bin`), so files in them are shared by all processes and visible through the OPFS API as soon as the process that wrote them has closed them; `run` resolves only after that. `createKernel` creates `/tmp` and `/home` in OPFS, so they are shared too. `/dev`, `/proc` and anything created directly in `/` while a process runs live in that process's memory unless it already exists in OPFS. File contents are buffered per open file and written back on close, `fsync` and exit; metadata operations (`mkdir`, `rename`, `rm`, …) go straight to OPFS. The kernel worker is the only writer.
@@ -110,8 +130,9 @@ The kernel is ported from SLICC's `packages/webapp/src/kernel/` with the browser
 - `src/realm/`: the synchronous bridge (`SharedArrayBuffer` + `Atomics.wait`) and the live Emscripten filesystem on top of it.
 - `src/fs/`: the OPFS filesystem and the virtual command directories.
 - `src/launcher.ts`, `src/commands.ts`, `src/serve.ts`, `src/index.ts`: command resolution, the kernel worker protocol and the page API.
+- `src/kernel/net/`: the proxy, HTTP/1.1, TLS termination and the local CA, and the bridge to the page's transport; `src/transport.ts` is the page side.
 
-SLICC's networking (sockets, the TLS proxy) and WASI support are not included.
+WASI support is not included.
 
 ## Installing from git
 

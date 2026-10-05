@@ -26,6 +26,7 @@ const types = {
   '.json': 'application/json; charset=utf-8',
   '.map': 'application/json; charset=utf-8',
   '.wasm': 'application/wasm',
+  '.mjs': 'text/javascript; charset=utf-8',
 };
 
 export function locate(pathname) {

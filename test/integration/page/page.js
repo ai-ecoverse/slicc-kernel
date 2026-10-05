@@ -1,8 +1,14 @@
-import { createKernel } from '/dist/index.js';
+import { createKernel, fetchTransport } from '/dist/index.js';
 
 const packages = {
   'node_modules/socktest/': ['package.json', 'bin/socktest', 'bin/socktest.wasm'],
   'node_modules/@ai-ecoverse/wasm-bash/': ['package.json', 'bin/bash', 'bin/bash.wasm'],
+  'node_modules/@ai-ecoverse/wasm-curl/': ['package.json', 'bin/curl', 'bin/curl.wasm'],
+  'node_modules/@ai-ecoverse/wasm-tls-engine/': [
+    'package.json',
+    'dist/slicc-tls-engine.mjs',
+    'dist/slicc-tls-engine.wasm',
+  ],
   'node_modules/@ai-ecoverse/wasm-coreutils/': [
     'package.json',
     'bin/coreutils',
@@ -50,9 +56,10 @@ window.probe = async () => {
   return { isolated: crossOriginIsolated, workers: report };
 };
 
-window.boot = async () => {
+window.boot = async (options = {}) => {
   await install();
-  window.kernel = await createKernel({ root: await navigator.storage.getDirectory() });
+  const network = options.network === false ? {} : { network: { transport: fetchTransport() } };
+  window.kernel = await createKernel({ root: await navigator.storage.getDirectory(), ...network });
   return true;
 };
 

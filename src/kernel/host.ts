@@ -19,6 +19,7 @@ import {
 import type { ChildForker, ChildSpawner } from './children.ts';
 import { type FdTable, kernelFdKind, type OpenFile } from './fd-table.ts';
 import type { JobTable } from './jobs.ts';
+import type { HttpHandles } from './net/http-syscalls.ts';
 import { isWasmSyscall, type StateListener, WasmProcess } from './process.ts';
 import {
   type ForkState,
@@ -60,6 +61,8 @@ export interface SpawnWasmOptions {
   ptys?: PtyTable;
 
   net?: LoopbackNet;
+
+  http?: HttpHandles;
   onReap?: (pid: number) => void;
 }
 
@@ -120,6 +123,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     jobs: opts.jobs,
     ptys: opts.ptys,
     net: opts.net,
+    http: opts.http,
     onReap: opts.onReap,
     onPending: (sig) => void Atomics.or(header, SAB_I_SIGNALS, sigbit(sig)),
     onTimer: (which) => void Atomics.or(header, SAB_I_TIMERS, 1 << which),

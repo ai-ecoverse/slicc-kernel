@@ -10,6 +10,19 @@ import {
 import { bytesSource, FdTable, nullFile, sinkFile } from './kernel/fd-table.ts';
 import { spawnWasmProcess, type WasmProcessHandle, type WasmWorkerLike } from './kernel/host.ts';
 import { JobTable } from './kernel/jobs.ts';
+import { HttpHandles } from './kernel/net/http-syscalls.ts';
+import {
+  enableNetwork,
+  kernelCa,
+  kernelTlsEngine,
+  memoryCaStore,
+  missingTransport,
+  networkEnv,
+  packageTlsEngine,
+  writeCaFile,
+} from './kernel/net/network.ts';
+import type { CaStore, RealmCa } from './kernel/net/realm-ca.ts';
+import type { RealmTransport } from './kernel/net/transport.ts';
 import type { ForkState, WasmProgram } from './kernel/protocol.ts';
 import { PtyTable } from './kernel/pty.ts';
 import { LoopbackNet } from './kernel/socket.ts';
@@ -20,6 +33,8 @@ export interface LauncherOptions {
   createWorker: () => WasmWorkerLike;
   modules?: string;
   env?: Record<string, string>;
+  transport?: RealmTransport;
+  caStore?: CaStore;
 }
 
 export interface RunOptions {
@@ -135,6 +150,8 @@ export class Launcher {
   private readonly jobs = new JobTable();
   private readonly ptys = new PtyTable((tty, sig) => this.jobs.signalOwnedForeground(tty, sig));
   readonly net = new LoopbackNet();
+  private readonly ca: () => Promise<RealmCa>;
+  private readonly transport: RealmTransport;
   private nextPid = 1000;
   private terminals = 0;
 
@@ -142,7 +159,14 @@ export class Launcher {
     this.base = options.fs;
     this.createWorker = options.createWorker;
     this.modulesDir = options.modules ?? '/node_modules';
-    this.env = options.env ?? {};
+    this.env = { ...networkEnv(), ...options.env };
+    this.ca = kernelCa(options.caStore ?? memoryCaStore());
+    this.transport = options.transport ?? missingTransport();
+    enableNetwork(this.net, {
+      transport: this.transport,
+      engine: kernelTlsEngine(packageTlsEngine(options.fs, this.modulesDir)),
+      ca: this.ca,
+    });
     this.fs = withCommandDirs(options.fs, async () => new Set((await this.commands()).keys()));
   }
 
@@ -268,6 +292,7 @@ export class Launcher {
       jobs: this.jobs,
       ptys: this.ptys,
       net: this.net,
+      http: new HttpHandles(this.transport),
       onReap: (child) => this.reaped(child),
       ...(req.fork ? { fork: req.fork } : {}),
       ...(req.ppid !== undefined ? { ppid: req.ppid } : {}),
@@ -314,6 +339,7 @@ export class Launcher {
 
   async prepare(): Promise<void> {
     for (const dir of SHARED_DIRS) await this.base.mkdir(dir, { recursive: true });
+    await writeCaFile(this.base, this.ca).catch(() => undefined);
   }
 
   private environment(cwd: string, extra: Record<string, string> | undefined) {

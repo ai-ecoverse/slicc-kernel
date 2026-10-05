@@ -4,6 +4,7 @@ import type { ForkState, ForkStream } from '../kernel/protocol.ts';
 import type { SyncFsResult } from '../realm/sync-fs-wire.ts';
 import type { SyncSabTransport } from '../realm/sync-sab-bridge.ts';
 import type { ProcessFs, ProcessStream } from './kernel-streams.ts';
+import type { HttpKernel } from './process-http.ts';
 import type { SocketKernel } from './process-sockets.ts';
 import { wasiErrno } from './wasi-errno.ts';
 
@@ -64,6 +65,8 @@ export interface ProcessKernel {
   ): { read: number[]; write: number[] } | number;
 
   net?: SocketKernel;
+
+  http?: HttpKernel;
 }
 
 export interface ProcessKernelDeps {
