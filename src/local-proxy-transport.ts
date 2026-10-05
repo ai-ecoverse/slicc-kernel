@@ -57,7 +57,7 @@ async function refusal(response: Response): Promise<Error> {
     const parsed = JSON.parse(text) as { error?: unknown };
     if (typeof parsed.error === 'string') message = parsed.error;
   } catch {}
-  return failure(message, response.status);
+  return failure(message, response.ok ? 502 : response.status);
 }
 
 function isHead(value: unknown): value is ResponseHead {
