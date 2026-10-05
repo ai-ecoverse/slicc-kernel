@@ -187,15 +187,31 @@ export class OpfsFs implements KernelFs {
       throw fsError('ENOTEMPTY', to);
     }
     const [dir, name] = await this.parent(to);
-    if (target) await this.rm(to, { recursive: true });
-    const handle = (await this.handle(from)) as Handle & MovableHandle;
-    const moved = await handle.move?.(dir, name).then(
+    const handle = await this.handle(from);
+    const swap = target?.isDirectory === true;
+    const staging = swap ? `.${name}.${crypto.randomUUID()}` : name;
+    const moved = await this.place(handle, dir, staging);
+    if (swap) await this.rm(to, { recursive: true });
+    this.carry(from, to);
+    if (!moved) await this.rm(from, { recursive: true });
+    if (!swap) return;
+    const staged = await dir.getDirectoryHandle(staging);
+    if (!(await this.place(staged, dir, name))) await dir.removeEntry(staging, { recursive: true });
+  }
+
+  private async place(handle: Handle, dir: FileSystemDirectoryHandle, name: string) {
+    const moved = await (handle as Handle & MovableHandle).move?.(dir, name).then(
       () => true,
       () => false
     );
-    if (!moved) await this.copy(handle, dir, name);
-    this.carry(from, to);
-    if (!moved) await this.rm(from, { recursive: true });
+    if (moved) return true;
+    try {
+      await this.copy(handle, dir, name);
+    } catch (err) {
+      if (handle.kind === 'directory') await dir.removeEntry(name, { recursive: true });
+      throw translate(err, name);
+    }
+    return false;
   }
 
   private async copy(handle: Handle, dir: FileSystemDirectoryHandle, name: string): Promise<void> {
