@@ -42,22 +42,21 @@ async function install() {
   for (const [dir, names] of Object.entries(packages)) {
     for (const name of names) {
       const source = dir.replace(/^node_modules\/(?!@)/, 'fixtures/');
-      const response = await fetch(`/${source}${name}`);
-      if (!response.ok) throw new Error(`${response.status} ${response.url}`);
-      await response.body.pipeTo(await (await file(dir + name, true)).createWritable());
+      const bytes = await fetchBytes(`/${source}${name}`);
+      const writable = await (await file(dir + name, true)).createWritable();
+      await writable.write(bytes);
+      await writable.close();
     }
   }
 }
 
 async function fetchBytes(url) {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      const response = await fetch(url, { signal: AbortSignal.timeout(60000) });
-      if (!response.ok) throw new Error(`${response.status} ${response.url}`);
-      return await response.arrayBuffer();
-    } catch (err) {
-      if (attempt === 3) throw err;
-    }
+  try {
+    const response = await fetch(url, { signal: AbortSignal.timeout(60000) });
+    if (!response.ok) throw new Error(`${response.status}`);
+    return await response.arrayBuffer();
+  } catch (err) {
+    throw new Error(`fetching ${url}: ${err}`);
   }
 }
 
