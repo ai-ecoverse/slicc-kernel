@@ -28,7 +28,12 @@ import type { ForkState, WasmProgram } from './kernel/protocol.ts';
 import { PtyTable } from './kernel/pty.ts';
 import { LoopbackNet } from './kernel/socket.ts';
 import { KernelTty } from './kernel/tty.ts';
-import { type ImportedMemory, importedMemory } from './process/wasi/wasi-module.ts';
+import {
+  type ForeignResult,
+  foreignImports,
+  type ImportedMemory,
+  importedMemory,
+} from './process/wasi/wasi-module.ts';
 
 export interface LauncherOptions {
   fs: KernelFs;
@@ -84,6 +89,7 @@ interface Target {
 interface Compiled {
   module: WebAssembly.Module;
   memory?: ImportedMemory;
+  foreign?: Record<string, ForeignResult> | undefined;
 }
 
 interface Planned {
@@ -321,8 +327,13 @@ export class Launcher {
       if (!module) {
         module = this.base.readFileBuffer(path).then(async (bytes) => {
           const memory = importedMemory(bytes);
+          const foreign = foreignImports(bytes);
           const compiled = await WebAssembly.compile(bytes as BufferSource);
-          return { module: compiled, ...(memory ? { memory } : {}) };
+          return {
+            module: compiled,
+            ...(memory ? { memory } : {}),
+            foreign,
+          };
         });
         this.compiled.set(key, module);
         module.catch(() => this.compiled.delete(key));
@@ -349,7 +360,7 @@ export class Launcher {
       ]);
       return { glue, module };
     }
-    const { module, memory } = await this.module(target.wasm);
+    const { module, memory, foreign } = await this.module(target.wasm);
     const names =
       env.SLICC_WASM_BACKTRACE === '1' ? await this.names(target.wasm, module) : undefined;
     const imports = target.imports ? await this.base.readFile(target.imports) : undefined;
@@ -358,6 +369,7 @@ export class Launcher {
       glue: '',
       module,
       ...(memory ? { memory } : {}),
+      foreign,
       ...(names ? { names } : {}),
       ...(imports !== undefined ? { imports } : {}),
     };
