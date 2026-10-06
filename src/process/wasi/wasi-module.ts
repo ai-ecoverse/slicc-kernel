@@ -70,6 +70,8 @@ export const RESERVED_NAMESPACES: ReadonlySet<string> = new Set([
 
 export type ForeignResult = 'none' | 'i32' | 'i64' | 'f32' | 'f64' | 'other';
 
+export type ForeignResults = Record<string, Record<string, ForeignResult>>;
+
 const RESULTS: Readonly<Record<number, ForeignResult>> = {
   127: 'i32',
   126: 'i64',
@@ -151,8 +153,8 @@ function skipImport(r: Reader, kind: number): void {
   }
 }
 
-function readImports(r: Reader, types: ForeignResult[]): Record<string, ForeignResult> {
-  const foreign: Record<string, ForeignResult> = {};
+function readImports(r: Reader, types: ForeignResult[]): ForeignResults {
+  const foreign: ForeignResults = {};
   for (let i = r.u32(); i > 0; i--) {
     const module = r.name();
     const field = r.name();
@@ -160,13 +162,13 @@ function readImports(r: Reader, types: ForeignResult[]): Record<string, ForeignR
     if (kind !== 0) skipImport(r, kind);
     else {
       const type = types[r.u32()] ?? 'other';
-      if (!RESERVED_NAMESPACES.has(module)) foreign[`${module}.${field}`] = type;
+      if (!RESERVED_NAMESPACES.has(module)) (foreign[module] ??= {})[field] = type;
     }
   }
   return foreign;
 }
 
-export function foreignImports(bytes: Uint8Array): Record<string, ForeignResult> | undefined {
+export function foreignImports(bytes: Uint8Array): ForeignResults | undefined {
   const r = new Reader(bytes);
   let types: ForeignResult[] | undefined = [];
   while (r.at < bytes.length) {

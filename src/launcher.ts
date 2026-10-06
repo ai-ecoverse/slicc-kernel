@@ -29,7 +29,7 @@ import { PtyTable } from './kernel/pty.ts';
 import { LoopbackNet } from './kernel/socket.ts';
 import { KernelTty } from './kernel/tty.ts';
 import {
-  type ForeignResult,
+  type ForeignResults,
   foreignImports,
   type ImportedMemory,
   importedMemory,
@@ -89,7 +89,7 @@ interface Target {
 interface Compiled {
   module: WebAssembly.Module;
   memory?: ImportedMemory;
-  foreign?: Record<string, ForeignResult> | undefined;
+  foreign?: ForeignResults | undefined;
 }
 
 interface Planned {

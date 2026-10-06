@@ -19,7 +19,7 @@ import { dylinkInfo } from './dylink.ts';
 import { cachingBridge } from './wasi-files.ts';
 import { WasiExit, type WasiFunction, WasiHost } from './wasi-host.ts';
 import { importsContext, loadImports, type ProgramImports, type Raw } from './wasi-imports.ts';
-import { type ForeignResult, type ImportedMemory, RESERVED_NAMESPACES } from './wasi-module.ts';
+import { type ForeignResults, type ImportedMemory, RESERVED_NAMESPACES } from './wasi-module.ts';
 import { WasiSignals } from './wasi-signals.ts';
 import { WasiStats } from './wasi-stats.ts';
 import { MAIN_TID, ThreadExit, threadCap, WasiThreads } from './wasi-threads.ts';
@@ -43,12 +43,20 @@ const RESERVED = RESERVED_NAMESPACES;
 const noErrno = (key: string) =>
   `imports ${key}: its result cannot carry ENOSYS, and this host does not provide it`;
 
-function enosys(key: string, foreign: Record<string, ForeignResult> | undefined) {
-  const type = foreign?.[key];
-  if (type === 'other') throw new Error(noErrno(key));
+function enosys(module: string, name: string, foreign: ForeignResults | undefined) {
+  const type = foreign?.[module]?.[name];
+  if (type === 'other') throw new Error(noErrno(`${module}.${name}`));
   if (type === 'none') return () => undefined;
   if (type === 'i64') return () => 52n;
   return () => 52;
+}
+
+function firstOther(foreign: ForeignResults): string | undefined {
+  for (const [module, fields] of Object.entries(foreign)) {
+    const name = Object.keys(fields).find((field) => fields[field] === 'other');
+    if (name !== undefined) return `${module}.${name}`;
+  }
+  return undefined;
 }
 
 interface ImportScope {
@@ -74,7 +82,7 @@ export function unsupportedImport(
   module: WebAssembly.Module,
   memory?: ImportedMemory,
   extended = false,
-  foreign: Record<string, ForeignResult> = {}
+  foreign: ForeignResults = {}
 ): string | undefined {
   const imports = WebAssembly.Module.imports(module);
   const wasix = imports.some((i) => i.module === WASIX);
@@ -87,9 +95,7 @@ export function unsupportedImport(
     }
     return `imports ${refused.module}.${refused.name}: no WASI preview1 program (an Emscripten one runs with its glue)`;
   }
-  const unanswerable = extended
-    ? undefined
-    : Object.keys(foreign).find((k) => foreign[k] === 'other');
+  const unanswerable = extended ? undefined : firstOther(foreign);
   if (unanswerable) return noErrno(unanswerable);
   if (!WebAssembly.Module.exports(module).some((e) => e.name === '_start')) {
     return 'no WASI command (it exports no _start)';
@@ -104,7 +110,7 @@ function linkImports(
   memory: WebAssembly.Memory | undefined,
   threads: WasiThreads | undefined,
   program: ProgramImports = {},
-  foreign?: Record<string, ForeignResult>
+  foreign?: ForeignResults
 ): WebAssembly.Imports {
   for (const ns of Object.keys(program)) {
     if (RESERVED.has(ns)) throw new Error(`the imports module may not define ${ns}`);
@@ -120,7 +126,7 @@ function linkImports(
     if (imp.name in ns) continue;
     if (imp.kind === 'memory' && memory) ns[imp.name] = memory;
     else if (imp.module === 'wasi' && imp.name === 'thread-spawn') ns[imp.name] = () => -1;
-    else if (imp.kind === 'function') ns[imp.name] = enosys(`${imp.module}.${imp.name}`, foreign);
+    else if (imp.kind === 'function') ns[imp.name] = enosys(imp.module, imp.name, foreign);
   }
   return imports;
 }
@@ -227,7 +233,7 @@ async function instantiate(
     stats?: WasiStats;
     signals?: WasiSignals;
     program?: ProgramOption;
-    foreign?: Record<string, ForeignResult> | undefined;
+    foreign?: ForeignResults | undefined;
   } = {}
 ): Promise<{ instance: WebAssembly.Instance; driver: AsyncifyDriver }> {
   const driver = new AsyncifyDriver(host.mem);
