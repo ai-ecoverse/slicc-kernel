@@ -208,6 +208,8 @@ Unit tests live in `test/unit/`, which stays out of git. They run real wasm bash
 
 The Biome, TypeScript, lefthook, Renovate and CI configuration comes from [slicc-shared-web](https://github.com/ai-ecoverse/slicc-shared-web), which also provides the `slicc-lint-comments` (no comments anywhere), `slicc-no-unit-tests` (no unit tests in git) and `slicc-diff-cover` (100% coverage of changed lines) commands that `npm run lint` and the pre-commit hook use.
 
+Releases are cut by semantic-release on every push to `main`. A failure after the version is tagged (a rejected push, a failed `npm publish`) doesn't strand that version: `tools/release-recover.mjs` runs next. For any version tagged at HEAD, it first pushes the tag if origin lacks it, then publishes the version if npm lacks it, with retries, and creates its GitHub release if that is missing too. Re-running the Release workflow completes such a version the same way.
+
 ## License
 
 Apache-2.0
