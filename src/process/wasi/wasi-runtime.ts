@@ -40,6 +40,25 @@ const WASIX = 'wasix_32v1';
 
 const RESERVED = new Set([PREVIEW1, WASIX, 'wasi', 'env']);
 
+interface ImportScope {
+  extended: boolean;
+  wasi: boolean;
+  wasix: boolean;
+  pie: boolean;
+  memory: ImportedMemory | undefined;
+}
+
+function accepted(imp: WebAssembly.ModuleImportDescriptor, scope: ImportScope): boolean {
+  const { module, name, kind } = imp;
+  if (module === PREVIEW1 || module === WASIX) return true;
+  if (!RESERVED.has(module) && (scope.extended || (scope.wasi && kind === 'function'))) return true;
+  if (scope.pie && (module === 'GOT.mem' || module === 'GOT.func')) return true;
+  if (scope.pie && module === 'env' && kind !== 'memory') return true;
+  if (kind === 'memory' && scope.memory?.module === module && scope.memory.name === name)
+    return true;
+  return module === 'wasi' && name === 'thread-spawn' && (scope.wasix || !!scope.memory?.shared);
+}
+
 export function unsupportedImport(
   module: WebAssembly.Module,
   memory?: ImportedMemory,
@@ -47,22 +66,14 @@ export function unsupportedImport(
 ): string | undefined {
   const imports = WebAssembly.Module.imports(module);
   const wasix = imports.some((i) => i.module === WASIX);
-
-  const pie = dylinkInfo(module) !== undefined;
-  for (const imp of imports) {
-    if (imp.module === PREVIEW1 || imp.module === WASIX) continue;
-    if (extended && !RESERVED.has(imp.module)) continue;
-    if (pie && (imp.module === 'GOT.mem' || imp.module === 'GOT.func')) continue;
-
-    if (pie && imp.module === 'env' && imp.kind !== 'memory') continue;
-    if (imp.kind === 'memory' && memory?.module === imp.module && memory.name === imp.name)
-      continue;
-
-    if (imp.module === 'wasi' && imp.name === 'thread-spawn' && (wasix || memory?.shared)) continue;
-    if (imp.kind === 'memory' || imp.module === 'wasi') {
-      return `imports ${imp.module}.${imp.name}: no WASI program this host runs`;
+  const wasi = wasix || imports.some((i) => i.module === PREVIEW1);
+  const scope = { extended, wasi, wasix, pie: dylinkInfo(module) !== undefined, memory };
+  const refused = imports.find((imp) => !accepted(imp, scope));
+  if (refused) {
+    if (refused.kind === 'memory' || refused.module === 'wasi') {
+      return `imports ${refused.module}.${refused.name}: no WASI program this host runs`;
     }
-    return `imports ${imp.module}.${imp.name}: no WASI preview1 program (an Emscripten one runs with its glue)`;
+    return `imports ${refused.module}.${refused.name}: no WASI preview1 program (an Emscripten one runs with its glue)`;
   }
   if (!WebAssembly.Module.exports(module).some((e) => e.name === '_start')) {
     return 'no WASI command (it exports no _start)';
