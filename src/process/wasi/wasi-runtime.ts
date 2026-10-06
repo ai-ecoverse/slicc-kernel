@@ -102,7 +102,9 @@ function linkImports(
     const ns = (imports[imp.module] ??= {});
     if (imp.name in ns) continue;
     if (imp.kind === 'memory' && memory) ns[imp.name] = memory;
-    else if (imp.kind === 'function') ns[imp.name] = () => (imp.name === 'thread-spawn' ? -1 : 52);
+    else if (imp.kind === 'function') {
+      ns[imp.name] = () => (imp.module === 'wasi' && imp.name === 'thread-spawn' ? -1 : 52);
+    }
   }
   return imports;
 }
