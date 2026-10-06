@@ -10,6 +10,8 @@ import {
   decodeSabResult,
   SAB_I_CHUNK,
   SAB_I_OFFSET,
+  SAB_I_PUB,
+  SAB_I_REQ,
   SAB_I_SEQ,
   SAB_I_STATE,
   SAB_I_STATUS,
@@ -54,19 +56,16 @@ export function createSyncSabTransport(
 
   function awaitReady(id: number, deadline: number, label: string): void {
     for (;;) {
-      const remaining = deadline - now();
-      if (remaining <= 0) throw syncError('ETIMEDOUT', label);
-
-      wait(header, SAB_I_STATE, SAB_STATE_PENDING, remaining);
+      const published = Atomics.load(header, SAB_I_PUB);
       if (
         Atomics.load(header, SAB_I_STATE) === SAB_STATE_READY &&
         Atomics.load(header, SAB_I_SEQ) === id
       ) {
         return;
       }
-      if (Atomics.load(header, SAB_I_STATE) === SAB_STATE_READY) {
-        Atomics.store(header, SAB_I_STATE, SAB_STATE_PENDING);
-      }
+      const remaining = deadline - now();
+      if (remaining <= 0) throw syncError('ETIMEDOUT', label);
+      wait(header, SAB_I_PUB, published, remaining);
     }
   }
 
@@ -77,6 +76,7 @@ export function createSyncSabTransport(
       let out: Uint8Array | null = null;
       let status = 0;
       let offset = 0;
+      Atomics.store(header, SAB_I_REQ, id);
       try {
         for (;;) {
           Atomics.store(header, SAB_I_STATE, SAB_STATE_PENDING);
@@ -107,6 +107,7 @@ export function createSyncSabTransport(
           if (chunk === 0) throw syncError('EIO', label);
         }
       } finally {
+        Atomics.store(header, SAB_I_REQ, 0);
         Atomics.store(header, SAB_I_STATE, SAB_STATE_IDLE);
       }
       return decodeSabResult(status, out);

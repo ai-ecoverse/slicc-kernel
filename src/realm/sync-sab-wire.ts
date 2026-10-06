@@ -10,6 +10,8 @@ export const SAB_I_STATUS = 2;
 export const SAB_I_TOTAL = 3;
 export const SAB_I_CHUNK = 4;
 export const SAB_I_OFFSET = 5;
+export const SAB_I_REQ = 6;
+export const SAB_I_PUB = 7;
 
 export const SAB_I_SIGNALS = 8;
 
