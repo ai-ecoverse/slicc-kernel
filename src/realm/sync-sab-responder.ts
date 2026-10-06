@@ -8,6 +8,8 @@ import {
   encodeSabResult,
   SAB_I_CHUNK,
   SAB_I_OFFSET,
+  SAB_I_PUB,
+  SAB_I_REQ,
   SAB_I_SEQ,
   SAB_I_STATE,
   SAB_I_STATUS,
@@ -65,6 +67,10 @@ export function attachSyncSabResponder(
   }
 
   function publish(id: number, entry: PendingPayload, offset: number): void {
+    if (Atomics.load(header, SAB_I_REQ) !== id) {
+      drop(id);
+      return;
+    }
     const chunk = Math.min(window.byteLength, entry.payload.byteLength - offset);
     if (chunk > 0) window.set(entry.payload.subarray(offset, offset + chunk));
     Atomics.store(header, SAB_I_STATUS, entry.status);
@@ -73,7 +79,8 @@ export function attachSyncSabResponder(
     Atomics.store(header, SAB_I_OFFSET, offset);
     Atomics.store(header, SAB_I_SEQ, id);
     Atomics.store(header, SAB_I_STATE, SAB_STATE_READY);
-    Atomics.notify(header, SAB_I_STATE);
+    Atomics.add(header, SAB_I_PUB, 1);
+    Atomics.notify(header, SAB_I_PUB);
 
     if (offset + chunk >= entry.payload.byteLength) drop(id);
   }
