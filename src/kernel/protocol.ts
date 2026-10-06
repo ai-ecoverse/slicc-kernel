@@ -1,4 +1,4 @@
-import type { ImportedMemory } from '../process/wasi/wasi-module.ts';
+import type { ForeignResults, ImportedMemory } from '../process/wasi/wasi-module.ts';
 import type { WasiForkState } from '../process/wasi/wasix-fork.ts';
 import type { DeviceMeta, KernelFdKind } from './fd-table.ts';
 
@@ -16,6 +16,7 @@ export interface WasmProgram {
   glue: string;
   module: WebAssembly.Module;
   memory?: ImportedMemory;
+  foreign?: ForeignResults | undefined;
   names?: string;
   imports?: string;
 }
