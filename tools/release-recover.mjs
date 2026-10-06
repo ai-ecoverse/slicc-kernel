@@ -21,6 +21,16 @@ export function exec(cmd, args) {
   });
 }
 
+async function retried({ label, attempt, done, sleep, log }) {
+  for (let n = 0; ; n++) {
+    const r = await attempt();
+    if (r.code === 0 || (await done())) return;
+    if (n >= DELAYS.length) throw new Error(`${label} failed: ${r.stderr.trim()}`);
+    log(`${label} failed, retrying: ${r.stderr.trim().split('\n').pop()}`);
+    await sleep(DELAYS[n]);
+  }
+}
+
 export async function recover({
   name,
   outcome,
@@ -37,21 +47,38 @@ export async function recover({
     const r = await run('npm', ['view', `${name}@${version}`, 'version']);
     return r.code === 0 && r.stdout.trim() === version;
   };
+  const remote = async (ref) =>
+    (await run('git', ['ls-remote', '--exit-code', 'origin', ref])).code === 0;
   const recovered = [];
   for (const tag of tags) {
     const version = tag.slice(1);
+    const ref = `refs/tags/${tag}`;
+    if (!(await remote(ref))) {
+      await retried({
+        label: `git push ${ref}`,
+        attempt: () => run('git', ['push', 'origin', ref]),
+        done: () => remote(ref),
+        sleep,
+        log,
+      });
+      recovered.push(`tag ${tag} on origin`);
+    }
+    const notes = `refs/notes/semantic-release-${tag}`;
+    const local = (await run('git', ['show-ref', '--verify', '--quiet', notes])).code === 0;
+    if (local && !(await remote(notes))) {
+      const r = await run('git', ['push', 'origin', notes]);
+      if (r.code === 0) recovered.push(`notes ${tag} on origin`);
+      else log(`git push ${notes} failed, leaving it: ${r.stderr.trim().split('\n').pop()}`);
+    }
     if (!(await published(version))) {
       await run('npm', ['version', version, '--no-git-tag-version', '--allow-same-version']);
-      let done = false;
-      for (let attempt = 0; !done; attempt++) {
-        const r = await run('npm', ['publish']);
-        done = r.code === 0 || (await published(version));
-        if (done) break;
-        if (attempt >= DELAYS.length)
-          throw new Error(`npm publish ${version} failed: ${r.stderr.trim()}`);
-        log(`npm publish ${version} failed, retrying: ${r.stderr.trim().split('\n').pop()}`);
-        await sleep(DELAYS[attempt]);
-      }
+      await retried({
+        label: `npm publish ${version}`,
+        attempt: () => run('npm', ['publish']),
+        done: () => published(version),
+        sleep,
+        log,
+      });
       recovered.push(`${name}@${version} on npm`);
     }
     if ((await run('gh', ['release', 'view', tag])).code !== 0) {
