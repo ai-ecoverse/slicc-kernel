@@ -37,6 +37,10 @@ export function ttyNumber(tty: string | null): number {
   return vt ? (4 << 8) | Number(vt[1]) : 0;
 }
 
+function pages(bytes: number): number {
+  return Math.ceil(bytes / 4096);
+}
+
 function ticks(ms: number): number {
   return Math.max(0, Math.floor((ms * HZ) / 1000));
 }
@@ -65,8 +69,8 @@ export function pidStat(info: ProcessInfo, boot: number): string {
     1,
     0,
     ticks(info.started - boot),
-    0,
-    0,
+    info.memory,
+    pages(info.memory),
     '18446744073709551615',
     ...Array<number>(12).fill(0),
     17,
@@ -97,6 +101,8 @@ export function pidStatus(info: ProcessInfo): string {
     `Uid:\t${ids}`,
     `Gid:\t${ids}`,
     'FDSize:\t64',
+    `VmSize:\t${Math.ceil(info.memory / KIB)} kB`,
+    `VmRSS:\t${Math.ceil(info.memory / KIB)} kB`,
     'Groups:\t',
     `NSpid:\t${info.pid}`,
     `NSpgid:\t${info.pgid}`,
@@ -116,13 +122,16 @@ export function pidFile(name: PidFile, info: ProcessInfo, boot: number): string 
   if (name === 'cmdline') return info.state === 'Z' ? '' : `${info.argv.join('\0')}\0`;
   if (name === 'comm') return `${commOf(info)}\n`;
   if (name === 'stat') return pidStat(info, boot);
-  if (name === 'statm') return '0 0 0 0 0 0 0\n';
+  if (name === 'statm') {
+    const p = pages(info.memory);
+    return `${p} ${p} 0 0 0 ${p} 0\n`;
+  }
   return pidStatus(info);
 }
 
-export function memoryInfo(source: MemorySource): string {
+export function memoryInfo(source: MemorySource, used = 0): string {
   const total = source.deviceMemory ? source.deviceMemory * KIB * KIB * KIB : FALLBACK_MEMORY;
-  const free = Math.max(0, total - (source.usedHeap ?? 0));
+  const free = Math.max(0, total - used - (source.usedHeap ?? 0));
   const kb = (bytes: number) => `${Math.floor(bytes / KIB)} kB`;
   return [
     ['MemTotal', kb(total)],
@@ -149,7 +158,12 @@ export function systemFile(
 ): string {
   const up = Math.max(0, now - listing.boot) / 1000;
   if (name === 'uptime') return `${up.toFixed(2)} ${up.toFixed(2)}\n`;
-  if (name === 'meminfo') return memoryInfo(memory);
+  if (name === 'meminfo') {
+    return memoryInfo(
+      memory,
+      listing.processes.reduce((sum, p) => sum + p.memory, 0)
+    );
+  }
   const live = listing.processes.filter((p) => p.state !== 'Z');
   if (name === 'loadavg') {
     const last = Math.max(0, ...listing.processes.map((p) => p.pid));

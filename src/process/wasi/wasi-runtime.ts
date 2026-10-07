@@ -173,14 +173,26 @@ function fillMemory(memory: WebAssembly.Memory, copy: Uint8Array): void {
   new Uint8Array(memory.buffer).set(copy);
 }
 
+function sizeOf(main: { memory?: WebAssembly.Memory }): () => number {
+  return () => main.memory?.buffer.byteLength ?? 0;
+}
+
+function memoryOf(
+  instance: WebAssembly.Instance,
+  imported: WebAssembly.Memory | undefined
+): WebAssembly.Memory | undefined {
+  return imported ?? (instance.exports.memory as WebAssembly.Memory | undefined);
+}
+
 function kernelOf(
   init: { sab: SharedArrayBuffer; argv0: string },
   port: SabPostLike,
 
-  hooks: SignalHooks = { masks: () => null, raise: () => {} }
+  hooks: SignalHooks = { masks: () => null, raise: () => {} },
+  memory?: () => number
 ) {
   const transport = new SignalGate(
-    createSyncSabTransport(init.sab, port),
+    createSyncSabTransport(init.sab, port, memory ? { memory } : {}),
     new Int32Array(init.sab, 0, SAB_HEADER_I32),
     hooks
   ).transport();
@@ -386,7 +398,8 @@ export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike
     call({ op: 'proc-kill', pid: init.pid, sig });
     throw new WasiExit(128 + sig);
   });
-  const { transport, sys, call: kernelCall, say } = kernelOf(init, port, signals);
+  const main: { memory?: WebAssembly.Memory } = {};
+  const { transport, sys, call: kernelCall, say } = kernelOf(init, port, signals, sizeOf(main));
 
   const stats = init.env.SLICC_WASI_STATS === '1' ? new WasiStats() : undefined;
   const call = stats ? timedCalls(stats, kernelCall) : kernelCall;
@@ -434,6 +447,7 @@ export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike
     ...(program ? { program } : {}),
   });
   restoreExportedMemory(instance, memory, init);
+  main.memory = memoryOf(instance, memory);
   signals.bind(instance.exports);
   host.onRaise = (sig) => signals.raised(sig);
   const exports = instance.exports as { _start: () => void };

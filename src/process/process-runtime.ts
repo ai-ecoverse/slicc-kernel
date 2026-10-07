@@ -324,7 +324,9 @@ export async function runWasmProcess(
   deps: { evaluate?: GlueEvaluator; warn?: (message: string) => void } = {}
 ): Promise<number> {
   const signals = new SignalGate(
-    createSyncSabTransport(init.sab, port),
+    createSyncSabTransport(init.sab, port, {
+      memory: () => memory?.buffer.byteLength ?? 0,
+    }),
     new Int32Array(init.sab, 0, SAB_HEADER_I32),
     {
       masks: () => signalMasks(module as unknown as RunningModule),

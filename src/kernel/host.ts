@@ -13,6 +13,7 @@ import {
   SAB_DEFAULT_WINDOW_BYTES,
   SAB_HEADER_BYTES,
   SAB_HEADER_I32,
+  SAB_I_MEMORY,
   SAB_I_SIGNALS,
   SAB_I_TIMERS,
 } from '../realm/sync-sab-wire.ts';
@@ -83,6 +84,7 @@ export interface WasmProcessHandle {
   signal(sig: number): void;
   termsig(): number | undefined;
   onState(listener: StateListener): void;
+  memory(): number;
 }
 
 const CRASHED = 70;
@@ -265,5 +267,6 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     signal,
     termsig: () => endedBy,
     onState: (listener) => process.onState(listener),
+    memory: () => Atomics.load(header, SAB_I_MEMORY) * 65536,
   };
 }

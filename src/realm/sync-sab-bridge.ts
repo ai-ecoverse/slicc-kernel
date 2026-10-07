@@ -10,6 +10,7 @@ import {
 import {
   decodeSabResult,
   SAB_I_CHUNK,
+  SAB_I_MEMORY,
   SAB_I_OFFSET,
   SAB_I_PUB,
   SAB_I_REQ,
@@ -47,7 +48,7 @@ export type AtomicsWaitLike = (
 export function createSyncSabTransport(
   sab: SharedArrayBuffer,
   port: SabPostLike,
-  deps: { wait?: AtomicsWaitLike; now?: () => number } = {}
+  deps: { wait?: AtomicsWaitLike; now?: () => number; memory?: () => number } = {}
 ): SyncSabTransport {
   const views: SabViews = sabViews(sab);
   const { header, window } = views;
@@ -72,6 +73,8 @@ export function createSyncSabTransport(
 
   return {
     call(req, timeoutMs, label): SyncFsResult {
+      const bytes = deps.memory?.() ?? 0;
+      if (bytes > 0) Atomics.store(header, SAB_I_MEMORY, Math.ceil(bytes / 65536));
       const id = ++seq;
       const deadline = now() + timeoutMs;
       let out: Uint8Array | null = null;
