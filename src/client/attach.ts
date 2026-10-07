@@ -1,4 +1,5 @@
 import type { FsStat } from '../fs/types.ts';
+import type { WatchChange } from '../fs/watch.ts';
 import { RemoteTransport, type TransportReply } from '../kernel/net/remote-transport.ts';
 import type {
   RealmTransport,
@@ -19,6 +20,7 @@ import {
   versionError,
 } from './protocol.ts';
 
+export type { WatchChange } from '../fs/watch.ts';
 export type { ProcessEntry } from './protocol.ts';
 
 export class KernelGoneError extends Error {
@@ -106,6 +108,11 @@ export interface ClientFs {
   symlink(target: string, path: string): Promise<void>;
   readlink(path: string): Promise<string>;
   exists(path: string): Promise<boolean>;
+  watch(
+    paths: string[],
+    options: { recursive?: boolean },
+    onChange: (change: WatchChange) => void
+  ): Promise<{ close(): void }>;
 }
 
 export type ClientFetchRequest = Omit<RealmTransportRequest, 'signal'> & { signal?: AbortSignal };
@@ -175,6 +182,8 @@ class Channel {
   remote: RemoteTransport | undefined;
   failure: Error | undefined;
   private readonly pending = new Map<number, Pending>();
+  readonly watching = new Map<number, (change: WatchChange) => void>();
+  protocol: readonly [number, number] = PROTOCOL;
   private nextId = 0;
   private readonly port: MessagePortLike;
   private readonly release: () => void;
@@ -219,7 +228,17 @@ class Channel {
     return this.request(call).done;
   }
 
-  private receive(data: { hello?: KernelHello; net?: unknown; bye?: string }): void {
+  private receive(data: {
+    hello?: KernelHello;
+    net?: unknown;
+    bye?: string;
+    watch?: number;
+    change?: WatchChange;
+  }): void {
+    if (data.watch !== undefined) {
+      this.watching.get(data.watch)?.(data.change as WatchChange);
+      return;
+    }
     if (data.bye !== undefined) {
       this.end(new KernelGoneError(data.bye));
       return;
@@ -351,6 +370,32 @@ function fsOn(channel: Channel): ClientFs {
     symlink: (target, path) => done('symlink', target, path),
     readlink: (path) => fs('readlink', path) as Promise<string>,
     exists: (path) => fs('exists', path) as Promise<boolean>,
+    async watch(paths, options, onChange) {
+      if (channel.protocol[1] < 1) {
+        throw new KernelCallError(
+          `this kernel speaks protocol ${channel.protocol.join('.')}, which has no watch`,
+          'ENOSYS'
+        );
+      }
+      const { id, done } = channel.request({
+        op: 'watch',
+        paths,
+        recursive: options.recursive === true,
+      });
+      channel.watching.set(id, onChange);
+      try {
+        await done;
+      } catch (error) {
+        channel.watching.delete(id);
+        throw error;
+      }
+      return {
+        close: () => {
+          if (!channel.watching.delete(id)) return;
+          void channel.call({ op: 'unwatch', watch: id }).catch(() => undefined);
+        },
+      };
+    },
   };
 }
 
@@ -390,6 +435,7 @@ export async function attachKernel(
   const own = await holdLock(locks);
   const channel = new Channel(port, own.release);
   const hello = await greet(channel, own.name, options.timeoutMs ?? 10_000);
+  channel.protocol = hello.protocol;
   if (hello.lock && locks) void locks.request(hello.lock, () => channel.end(new KernelGoneError()));
   const transport = new RemoteTransport(
     { postMessage: (call) => channel.post(call) },

@@ -1,6 +1,7 @@
 import { type Abi, type Command, scanCommands } from './commands.ts';
 import { followLinks, withCommandDirs } from './fs/commands.ts';
 import type { KernelFs } from './fs/types.ts';
+import { FsWatchers } from './fs/watch.ts';
 import {
   type ChildForker,
   type ChildHandle,
@@ -218,12 +219,13 @@ export class Launcher {
   readonly net = new LoopbackNet();
   private readonly ca: () => Promise<RealmCa>;
   readonly transport: RealmTransport;
+  readonly watchers = new FsWatchers();
   private nextPid = 1000;
   readonly boot = Date.now();
   private terminals = 0;
 
   constructor(options: LauncherOptions) {
-    this.base = options.fs;
+    this.base = this.watchers.wrap(options.fs);
     this.createWorker = options.createWorker;
     this.modulesDir = options.modules ?? '/node_modules';
     this.env = { ...networkEnv(), ...options.env };
@@ -234,7 +236,7 @@ export class Launcher {
       engine: kernelTlsEngine(packageTlsEngine(options.fs, this.modulesDir)),
       ca: this.ca,
     });
-    this.fs = withCommandDirs(options.fs, async () => new Set((await this.commands()).keys()));
+    this.fs = withCommandDirs(this.base, async () => new Set((await this.commands()).keys()));
   }
 
   commands(): Promise<Map<string, Command>> {
