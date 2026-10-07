@@ -227,9 +227,12 @@ interface PositionalDeps {
   memory: () => WebAssembly.Memory | undefined;
 }
 
-function offsetOf(rest: (number | bigint)[]): number {
-  if (rest.length >= 3) return Number(rest[0]) + Number(rest[1]) * 2 ** 32;
-  return Number(rest[0]);
+function offsetOf(rest: (number | bigint)[]): number | undefined {
+  const at =
+    rest.length >= 3
+      ? Number(rest[1]) * 2 ** 32 + (Number(rest[0]) >>> 0)
+      : Number(BigInt.asIntN(64, BigInt(rest[0])));
+  return at >= 0 && Number.isSafeInteger(at) ? at : undefined;
 }
 
 function readInto(sys: PositionalDeps['sys'], kfd: number, target: Uint8Array, at: number): number {
@@ -251,8 +254,9 @@ function positioned(original: Positional, write: boolean, deps: PositionalDeps):
     if (kfd === undefined || !memory || !(write ? deps.sys.pwrite : deps.sys.pread)) {
       return original(fd, iov, iovcnt, ...rest);
     }
-    const view = new DataView(memory.buffer);
     const at = offsetOf(rest);
+    if (at === undefined) return wasiErrno('EINVAL');
+    const view = new DataView(memory.buffer);
     let done = 0;
     try {
       for (let i = 0; i < Number(iovcnt); i++) {
