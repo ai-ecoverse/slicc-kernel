@@ -21,10 +21,27 @@ export function exec(cmd, args) {
   });
 }
 
-async function retried({ label, attempt, done, sleep, log }) {
+const PUBLISHED = /cannot publish over the previously published versions/i;
+const CONFIRM = { every: 15000, times: 20 };
+
+async function confirmed(done, sleep) {
+  for (let n = 0; n < CONFIRM.times; n++) {
+    if (await done()) return true;
+    await sleep(CONFIRM.every);
+  }
+  return done();
+}
+
+async function retried({ label, attempt, done, sleep, log, already = () => false }) {
   for (let n = 0; ; n++) {
     const r = await attempt();
     if (r.code === 0) return true;
+    if (already(r)) {
+      if (await confirmed(done, sleep)) return false;
+      throw new Error(
+        `${label}: npm refuses it as already published, but the registry does not show it (unpublished?)`
+      );
+    }
     if (await done()) return false;
     if (n >= DELAYS.length) throw new Error(`${label} failed: ${r.stderr.trim()}`);
     log(`${label} failed, retrying: ${r.stderr.trim().split('\n').pop()}`);
@@ -45,7 +62,7 @@ export async function recover({
     .map((t) => t.trim())
     .filter((t) => TAG.test(t));
   const published = async (version) => {
-    const r = await run('npm', ['view', `${name}@${version}`, 'version']);
+    const r = await run('npm', ['view', `${name}@${version}`, 'version', '--prefer-online']);
     return r.code === 0 && r.stdout.trim() === version;
   };
   const remote = async (ref) =>
@@ -78,6 +95,7 @@ export async function recover({
         label: `npm publish ${version}`,
         attempt: () => run('npm', ['publish']),
         done: () => published(version),
+        already: (r) => PUBLISHED.test(r.stderr),
         sleep,
         log,
       });
