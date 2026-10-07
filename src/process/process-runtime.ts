@@ -421,6 +421,8 @@ export async function runWasmProcess(
   const restartable = (): boolean => signals.restartable();
   const streams = new KernelStreams(running.FS, sys, { sigpipe, restartable });
   trackCloseOnExec(running.FS);
+  useMounts(running.FS, init.env);
+  useProcfs(running.FS as unknown as ProcFs, sys, init.pid);
   if (init.fork) restoreForkedStreams(running.FS, streams, init.fork.streams ?? []);
   else {
     wireKernelStdio(running.FS, streams);
@@ -430,8 +432,6 @@ export async function runWasmProcess(
   if (pipefs) streams.usePipes(pipefs);
   streams.useControllingTerminal();
   useDevFd(running.FS);
-  useMounts(running.FS);
-  useProcfs(running.FS as unknown as ProcFs, sys, init.pid);
   ownByRealmUser(running.FS);
   const livePath = (s: ProcessStream) => liveNodePath(s.node as unknown as LiveFsNode);
   running.sliccKernel = createProcessKernel({
