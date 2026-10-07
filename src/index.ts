@@ -3,6 +3,22 @@ import type { KernelCall, TerminalAction } from './serve.ts';
 import { type NetworkTransport, serveTransport } from './transport.ts';
 
 export {
+  type AttachOptions,
+  attachKernel,
+  type ClientFetchRequest,
+  type ClientFs,
+  type ClientRunOptions,
+  type ClientRunResult,
+  type ClientTerminal,
+  type ClientTerminalOptions,
+  KernelCallError,
+  type KernelClient,
+  KernelGoneError,
+  type ProcessEntry,
+  type SpawnedProcess,
+  type SpawnOptions,
+} from './client/attach.ts';
+export {
   checkLocalProxy,
   type LocalProxyCheckOptions,
   type LocalProxyOptions,
@@ -52,6 +68,7 @@ export interface RunResult {
 export interface Kernel {
   run(argv: string[], options?: RunOptions): Promise<RunResult>;
   openTerminal(argv: string[], options?: TerminalOptions): Promise<Terminal>;
+  connect(): Promise<MessagePort>;
   terminate(): void;
 }
 
@@ -220,6 +237,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
       };
     },
     openTerminal,
+    connect: async () => (await call({ op: 'connect' })) as MessagePort,
     terminate() {
       fail(new Error('slicc-kernel terminated'));
       worker.terminate();

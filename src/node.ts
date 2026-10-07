@@ -1,4 +1,6 @@
-import { Worker } from 'node:worker_threads';
+import { MessageChannel, type MessagePort, Worker } from 'node:worker_threads';
+import type { MessagePortLike } from './client/protocol.ts';
+import { type ServedClient, serveClient } from './client/serve-client.ts';
 import { OpfsFs } from './fs/opfs.ts';
 import type { RunOptions, RunResult, Terminal, TerminalOptions } from './index.ts';
 import type { WasmWorkerLike } from './kernel/host.ts';
@@ -7,6 +9,22 @@ import { memoryRoot } from './node/memory-root.ts';
 import { signalNumber } from './serve.ts';
 import { fetchTransport, type NetworkTransport } from './transport.ts';
 
+export {
+  type AttachOptions,
+  attachKernel,
+  type ClientFetchRequest,
+  type ClientFs,
+  type ClientRunOptions,
+  type ClientRunResult,
+  type ClientTerminal,
+  type ClientTerminalOptions,
+  KernelCallError,
+  type KernelClient,
+  KernelGoneError,
+  type ProcessEntry,
+  type SpawnedProcess,
+  type SpawnOptions,
+} from './client/attach.ts';
 export type {
   RunOptions,
   RunResult,
@@ -31,6 +49,7 @@ export interface NodeKernel {
   openTerminal(argv: string[], options?: TerminalOptions): Promise<Terminal>;
   writeFile(path: string, data: string | Uint8Array): Promise<void>;
   readFile(path: string): Promise<Uint8Array>;
+  connect(): Promise<MessagePort>;
   terminate(): void;
 }
 
@@ -93,6 +112,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
   await fs.reconcile();
   const live = new Set<() => void>();
   const pending = new Set<(err: Error) => void>();
+  const clients = new Set<ServedClient>();
   let terminated = false;
   const file = options.worker ?? new URL('./node-process-worker.js', import.meta.url);
   const transport = options.network?.transport;
@@ -168,8 +188,20 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
       await fs.writeFile(path, data);
     },
     readFile: async (path) => fs.readFileBuffer(path),
+    async connect() {
+      if (terminated) throw new Error(TERMINATED);
+      const { port1, port2 } = new MessageChannel();
+      const served = serveClient(port1 as unknown as MessagePortLike, {
+        launcher: async () => launcher,
+        signal: signalNumber,
+      });
+      clients.add(served);
+      void served.closed.then(() => clients.delete(served));
+      return port2;
+    },
     terminate() {
       terminated = true;
+      for (const client of [...clients]) client.detach();
       for (const reject of [...pending]) reject(new Error(TERMINATED));
       for (const kill of [...live]) kill();
     },

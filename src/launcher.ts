@@ -10,7 +10,7 @@ import {
 import { bytesSource, FdTable, nullFile, sinkFile } from './kernel/fd-table.ts';
 import { spawnWasmProcess, type WasmProcessHandle, type WasmWorkerLike } from './kernel/host.ts';
 import { LockTable } from './kernel/host-ops.ts';
-import { JobTable } from './kernel/jobs.ts';
+import { type JobMember, JobTable } from './kernel/jobs.ts';
 import { HttpHandles } from './kernel/net/http-syscalls.ts';
 import {
   enableNetwork,
@@ -24,6 +24,7 @@ import {
 } from './kernel/net/network.ts';
 import type { CaStore, RealmCa } from './kernel/net/realm-ca.ts';
 import type { RealmTransport } from './kernel/net/transport.ts';
+import type { ProcessInfo } from './kernel/proc-info.ts';
 import type { ForkState, WasmProgram } from './kernel/protocol.ts';
 import { PtyTable } from './kernel/pty.ts';
 import { LoopbackNet } from './kernel/socket.ts';
@@ -50,6 +51,8 @@ export interface RunOptions {
   stdin?: Uint8Array;
   onStdout?: (bytes: Uint8Array) => void;
   onStderr?: (bytes: Uint8Array) => void;
+  onStarted?: (pid: number) => void;
+  collect?: boolean;
 }
 
 export interface TerminalOptions {
@@ -208,13 +211,15 @@ export class Launcher {
   private readonly processes = new Map<number, WasmProcessHandle>();
   private readonly zombies = new Set<number>();
   private readonly orphans = new Set<number>();
+  private readonly described = new Map<number, Pick<ProcessInfo, 'argv' | 'tty' | 'started'>>();
   private readonly jobs = new JobTable();
   private readonly locks = new LockTable();
   private readonly ptys = new PtyTable((tty, sig) => this.jobs.signalOwnedForeground(tty, sig));
   readonly net = new LoopbackNet();
   private readonly ca: () => Promise<RealmCa>;
-  private readonly transport: RealmTransport;
+  readonly transport: RealmTransport;
   private nextPid = 1000;
+  readonly boot = Date.now();
   private terminals = 0;
 
   constructor(options: LauncherOptions) {
@@ -409,6 +414,7 @@ export class Launcher {
       spawner: this.spawner(pid, req.report),
       forker: this.forker(pid, req),
       kill: (target, sig) => this.kill(target, sig),
+      processes: () => ({ boot: this.boot, processes: this.list() }),
       jobs: this.jobs,
       ptys: this.ptys,
       net: this.net,
@@ -420,17 +426,59 @@ export class Launcher {
     });
     this.processes.set(pid, handle);
     this.jobs.add(pid, req.ppid, (sig) => handle.signal(sig), terminal);
+    this.described.set(pid, {
+      argv: [req.argv0, ...req.args],
+      tty: terminal?.name ?? null,
+      started: Date.now(),
+    });
     void handle.exited.then(() => {
       this.processes.delete(pid);
-      if (req.ppid === undefined || this.orphans.delete(pid)) this.jobs.remove(pid);
+      if (req.ppid === undefined || this.orphans.delete(pid)) this.forget(pid);
       else this.zombies.add(pid);
     });
     return handle;
   }
 
+  private forget(pid: number): void {
+    this.jobs.remove(pid);
+    this.described.delete(pid);
+  }
+
   private reaped(pid: number): void {
-    if (this.zombies.delete(pid)) this.jobs.remove(pid);
+    if (this.zombies.delete(pid)) this.forget(pid);
     else this.orphans.add(pid);
+  }
+
+  list(): ProcessInfo[] {
+    const members = new Map(this.jobs.list().map((member) => [member.pid, member]));
+    const rootOf = (member: JobMember): JobMember => {
+      let root = member;
+      for (let up = members.get(root.execParent ?? -1); up; up = members.get(up.execParent ?? -1)) {
+        root = up;
+      }
+      return root;
+    };
+    const shown = (pid: number | undefined): number => {
+      const member = pid === undefined ? undefined : members.get(pid);
+      return member ? rootOf(member).pid : (pid ?? 0);
+    };
+    const listed: ProcessInfo[] = [];
+    for (const member of members.values()) {
+      const described = this.described.get(member.pid);
+      if (member.execed || !described) continue;
+      const root = rootOf(member);
+      listed.push({
+        pid: root.pid,
+        tid: member.pid,
+        ppid: shown(root.ppid),
+        pgid: member.pgid,
+        sid: member.sid,
+        ...described,
+        started: (this.described.get(root.pid) ?? described).started,
+        state: this.processes.has(member.pid) ? 'S' : 'Z',
+      });
+    }
+    return listed;
   }
 
   private spawner(ppid: number, report: (message: string) => void): ChildSpawner {
@@ -517,9 +565,10 @@ export class Launcher {
     const env = this.environment(cwd, options.env);
     const out: Uint8Array[] = [];
     const err: Uint8Array[] = [];
+    const keep = options.collect !== false;
     const collect =
       (chunks: Uint8Array[], tee?: (bytes: Uint8Array) => void) => (bytes: Uint8Array) => {
-        chunks.push(bytes);
+        if (keep) chunks.push(bytes);
         tee?.(bytes);
       };
     const stdout = collect(out, options.onStdout);
@@ -534,7 +583,10 @@ export class Launcher {
     fds.installAt(1, sinkFile(stdout));
     fds.installAt(2, sinkFile(stderr));
     const handle = await this.launch(planned, { env, cwd, fds, report });
+    options.onStarted?.(handle.pid);
     const status = await handle.exited;
     return { status, stdout: concat(out), stderr: concat(err) };
   }
 }
+
+export type { ProcessInfo, ProcessListing } from './kernel/proc-info.ts';

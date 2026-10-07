@@ -40,6 +40,10 @@ export class JobTable {
     return member;
   }
 
+  list(): JobMember[] {
+    return [...this.members.values()];
+  }
+
   remove(pid: number): void {
     this.members.delete(pid);
   }
