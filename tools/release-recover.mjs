@@ -24,7 +24,8 @@ export function exec(cmd, args) {
 async function retried({ label, attempt, done, sleep, log }) {
   for (let n = 0; ; n++) {
     const r = await attempt();
-    if (r.code === 0 || (await done())) return;
+    if (r.code === 0) return true;
+    if (await done()) return false;
     if (n >= DELAYS.length) throw new Error(`${label} failed: ${r.stderr.trim()}`);
     log(`${label} failed, retrying: ${r.stderr.trim().split('\n').pop()}`);
     await sleep(DELAYS[n]);
@@ -54,14 +55,15 @@ export async function recover({
     const version = tag.slice(1);
     const ref = `refs/tags/${tag}`;
     if (!(await remote(ref))) {
-      await retried({
+      const pushed = await retried({
         label: `git push ${ref}`,
         attempt: () => run('git', ['push', 'origin', ref]),
         done: () => remote(ref),
         sleep,
         log,
       });
-      recovered.push(`tag ${tag} on origin`);
+      if (pushed) recovered.push(`tag ${tag} on origin`);
+      else log(`tag ${tag} was already on origin`);
     }
     const notes = `refs/notes/semantic-release-${tag}`;
     const local = (await run('git', ['show-ref', '--verify', '--quiet', notes])).code === 0;
@@ -72,14 +74,15 @@ export async function recover({
     }
     if (!(await published(version))) {
       await run('npm', ['version', version, '--no-git-tag-version', '--allow-same-version']);
-      await retried({
+      const ours = await retried({
         label: `npm publish ${version}`,
         attempt: () => run('npm', ['publish']),
         done: () => published(version),
         sleep,
         log,
       });
-      recovered.push(`${name}@${version} on npm`);
+      if (ours) recovered.push(`${name}@${version} on npm`);
+      else log(`${name}@${version} was already on npm`);
     }
     if ((await run('gh', ['release', 'view', tag])).code !== 0) {
       const r = await run('gh', [
