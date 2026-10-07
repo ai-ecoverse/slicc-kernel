@@ -60,7 +60,7 @@
     "@types/node": "24.19.1",
     "esbuild": "0.28.2",
     "fake-indexeddb": "6.2.5",
-    "lefthook": "2.1.16",
+    "lefthook": "2.1.17",
     "monocart-coverage-reports": "2.13.0",
     "playwright-core": "1.63.0",
     "semantic-release": "25.0.9",
