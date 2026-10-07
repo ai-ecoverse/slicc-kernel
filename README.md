@@ -67,6 +67,28 @@ Starts `argv` as the session leader on a new terminal and resolves once it is ru
 
 Stops the kernel worker and every process. Pending and later calls reject.
 
+### `kernel.connect() → Promise<MessagePort>`
+
+Makes a port for another client of the same kernel. Hand it to a dedicated worker, or through a SharedWorker to another tab: it can be transferred any number of times. All clients share one process table, so a terminal on the page can `ps` and `kill` what a worker started.
+
+### `attachKernel(port, options?) → Promise<KernelClient>`
+
+Attaches to a kernel over a port from `kernel.connect()`, in any realm: a worker, another tab, or Node. `options.timeoutMs` (10 s by default) bounds the handshake: a port with no kernel behind it rejects with `KernelGoneError`.
+
+| Client | |
+|---|---|
+| `spawn(argv, { cwd, env, stdin, onStdout, onStderr })` | runs over pipes and resolves with `{ pid, pgid, exited, signal(name) }` once the process has started; output arrives in chunks, as bytes, and the kernel keeps no copy; every spawn leads its own process group, which `signal` (default `SIGTERM`) signals; a program that cannot start rejects with `code: 'ENOENT'` |
+| `run(argv, options?)` | `spawn` and wait: `{ pid, status, stdout, stderr }` as text, with `onStdout`/`onStderr` streaming text |
+| `openTerminal(argv, options?)` | a pty session, as `kernel.openTerminal` |
+| `ps()` | the kernel's processes: `{ pid, ppid, pgid, sid, argv, tty, started, state }`, `state` being `'S'` or `'Z'` |
+| `kill(pid, signal?)` | any process, or a process group with a negative pid; no such process rejects with `code: 'ESRCH'` |
+| `fs` | `readFile`, `readText`, `writeFile(path, string \| bytes)`, `stat`, `lstat`, `readdir`, `mkdir` (with parents), `rm(path, { force })` (recursive), `rename`, `realpath`, `symlink(target, path)`, `readlink`, `exists`, on the processes' file system; failures reject with `KernelCallError` and a POSIX `code` |
+| `fetch({ url, method, headers, body, signal })` | through the kernel's network transport (the one the page passed to `createKernel`), with a streaming body; `transport` is the same as a `NetworkTransport` |
+| `close({ kill })` | detaches: the client's processes keep running unless `kill` is set, which ends their process groups with `SIGKILL`; its terminals are hung up |
+| `closed` | resolves with the error that ended the client |
+
+When the kernel goes away (the page closed or reloaded, `terminate()`), pending calls and `exited` reject with `KernelGoneError`, and so do later calls. Each side holds a Web Lock and waits on the other's, since a `MessagePort` reports no close in browsers; in Node, the port's `close` event does the same. The first message is a handshake on the protocol version, `1.0`: a client or kernel of another major version is refused with an error naming both.
+
 ### Headless in Node, for tests
 
 `@ai-ecoverse/slicc-kernel/node` runs the same kernel in Node without a browser, so packages built for SLICC can test against it. It is a testing entry, not a supported runtime: there is no OPFS and no isolation, and nothing beyond what its tests use is promised.
@@ -80,7 +102,7 @@ const { status, stdout } = await kernel.run(['bash', '-c', 'echo hi'], { cwd: '/
 kernel.terminate();
 ```
 
-`createNodeKernel({ root, modules, env, network, worker })` takes the options of `createKernel` except `metadata`. `root` is an in-memory directory by default (`memoryRoot()` makes another), and POSIX metadata stays in memory. Processes and threads run on `worker_threads`. The kernel has `run`, `openTerminal` and `terminate` as above, plus `root`, `writeFile(path, data)` (creating the parent directories) and `readFile(path)` to put files in place and read results. `nodeTransport()` is `fetchTransport()` with Node's `fetch`, which no CORS binds (`crossOrigin: 'any'`).
+`createNodeKernel({ root, modules, env, network, worker })` takes the options of `createKernel` except `metadata`. `root` is an in-memory directory by default (`memoryRoot()` makes another), and POSIX metadata stays in memory. Processes and threads run on `worker_threads`. The kernel has `run`, `openTerminal` and `terminate` as above, plus `root`, `writeFile(path, data)` (creating the parent directories) and `readFile(path)` to put files in place and read results. `nodeTransport()` is `fetchTransport()` with Node's `fetch`, which no CORS binds (`crossOrigin: 'any'`). `connect()` and `attachKernel` work as in the browser: the port is a `worker_threads` `MessagePort`, which a worker thread can attach with, and `terminate()` ends every attached client.
 
 ## Commands
 
@@ -155,6 +177,10 @@ The proxy answers `200` with `Content-Type: application/vnd.slicc.raw-fetch`: a 
 `/` is the OPFS root. Each process mounts the top-level directories that exist when it starts (plus `/usr` and `/bin`), so files in them are shared by all processes and visible through the OPFS API as soon as the process that wrote them has closed them; `run` resolves only after that. `createKernel` creates `/tmp` and `/home` in OPFS, so they are shared too. Files directly in `/`, and directories created there after a process started, are OPFS as well, the same for Emscripten and WASI programs; only `/dev` and `/proc` live in each process's memory. File contents are buffered per open file and written back on close, `fsync` and exit; metadata operations (`mkdir`, `rename`, `rm`, …) go straight to OPFS. The kernel worker is the only writer.
 
 Directories are renamed with `FileSystemHandle.move()` where available, else by copy and delete.
+
+### `/proc`
+
+Every process of the kernel has `/proc/<pid>/` with `cmdline`, `comm`, `stat`, `statm` and `status`, in the formats procps reads, and `/proc/self/` has the same files for the process that reads them. They come from the kernel's process table when they are opened, so a terminal sees the processes of every client; an exec'd program shows under the pid its parent knows. `/proc/uptime`, `/proc/loadavg`, `/proc/stat` and `/proc/meminfo` are there too, and `/proc/mounts`. Pids, parents, process groups, sessions, command lines, terminals, start and boot times are real; CPU times, memory sizes, load and `MemTotal` (from `navigator.deviceMemory`, else 4 GiB) are placeholders. Only Emscripten processes see this `/proc`.
 
 ### Metadata
 

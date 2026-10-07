@@ -53,6 +53,8 @@ export class RemoteTransport implements RealmTransport {
 
   private nextId = 0;
 
+  private failure: Error | undefined;
+
   constructor(port: TransportPort, traits: RealmTransportTraits) {
     this.port = port;
     this.traits = traits;
@@ -67,7 +69,14 @@ export class RemoteTransport implements RealmTransport {
     } else waiter.resolve(reply);
   }
 
+  fail(error: Error): void {
+    this.failure = error;
+    for (const waiter of this.waiting.values()) waiter.reject(error);
+    this.waiting.clear();
+  }
+
   private ask(call: TransportCall): Promise<TransportReply> {
+    if (this.failure) return Promise.reject(this.failure);
     return new Promise((resolve, reject) => {
       this.waiting.set(call.nid, { resolve, reject });
       this.port.postMessage(call);

@@ -67,3 +67,40 @@ test('nodeTransport reaches the registry through the realm proxy, without CORS',
   assert.match(r.stdout, /"name":"@ai-ecoverse\/wasm-bash"/);
   kernel.terminate();
 });
+
+test('a worker thread attaches to a Node kernel, spawns, and sees its process in the shared table', async () => {
+  const { Worker } = await import('node:worker_threads');
+  const kernel = await createNodeKernel();
+  await install(kernel, 'wasm-bash');
+  await install(kernel, 'wasm-coreutils');
+  const port = await kernel.connect();
+  const dist = new URL('../../dist/node.js', import.meta.url).href;
+  const worker = new Worker(
+    `
+      const { parentPort, workerData } = require('node:worker_threads');
+      import(workerData.dist).then(async ({ attachKernel }) => {
+        const client = await attachKernel(workerData.port);
+        const child = await client.spawn(['sleep', '100']);
+        parentPort.postMessage({ pid: child.pid });
+        parentPort.postMessage({ status: await child.exited });
+        await client.close();
+      });
+    `,
+    { eval: true, workerData: { port, dist }, transferList: [port] }
+  );
+  const messages = [];
+  const next = () =>
+    new Promise((resolve) => worker.once('message', (m) => resolve(messages.push(m) && m)));
+  const { pid } = await next();
+  const seen = await kernel.run(['bash', '-c', `cat /proc/${pid}/comm`]);
+  assert.deepEqual(seen, { status: 0, stdout: 'sleep\n', stderr: '' });
+  const exited = next();
+  assert.deepEqual(await kernel.run(['bash', '-c', `kill ${pid}`]), {
+    status: 0,
+    stdout: '',
+    stderr: '',
+  });
+  assert.deepEqual(await exited, { status: 143 });
+  await worker.terminate();
+  kernel.terminate();
+});

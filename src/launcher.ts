@@ -217,7 +217,7 @@ export class Launcher {
   private readonly ptys = new PtyTable((tty, sig) => this.jobs.signalOwnedForeground(tty, sig));
   readonly net = new LoopbackNet();
   private readonly ca: () => Promise<RealmCa>;
-  private readonly transport: RealmTransport;
+  readonly transport: RealmTransport;
   private nextPid = 1000;
   readonly boot = Date.now();
   private terminals = 0;

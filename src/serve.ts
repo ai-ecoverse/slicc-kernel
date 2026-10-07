@@ -1,3 +1,5 @@
+import { type LockManagerLike, locksOf } from './client/protocol.ts';
+import { type ServedClient, serveClient } from './client/serve-client.ts';
 import { META_DB, type MetaStore } from './fs/meta.ts';
 import { OpfsFs } from './fs/opfs.ts';
 import type { WasmWorkerLike } from './kernel/host.ts';
@@ -13,7 +15,7 @@ import {
 } from './launcher.ts';
 
 export interface KernelPort {
-  postMessage(message: unknown): void;
+  postMessage(message: unknown, transfer?: Transferable[]): void;
   addEventListener(type: 'message', handler: (event: MessageEvent) => void): void;
 }
 
@@ -49,7 +51,17 @@ export type TerminalAction =
 
 export type TerminalRequest = { id: number; op: 'terminal'; terminal: number } & TerminalAction;
 
-export type KernelRequest = InitRequest | RunRequest | OpenTerminalRequest | TerminalRequest;
+export interface ConnectRequest {
+  id: number;
+  op: 'connect';
+}
+
+export type KernelRequest =
+  | InitRequest
+  | RunRequest
+  | OpenTerminalRequest
+  | TerminalRequest
+  | ConnectRequest;
 
 type WithoutId<T> = T extends unknown ? Omit<T, 'id'> : never;
 
@@ -59,6 +71,7 @@ export interface ServeDeps {
   storage: () => Promise<FileSystemDirectoryHandle>;
   createWorker: () => WasmWorkerLike;
   metadata?: (name: string) => Promise<MetaStore>;
+  locks?: LockManagerLike | null;
 }
 
 export function signalNumber(name: string): number {
@@ -83,7 +96,38 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
   let launcher: Promise<Launcher> | undefined;
   let remote: RemoteTransport | undefined;
   const terminals = new Map<number, TerminalSession>();
-  const reply = (id: number, body: object) => port.postMessage({ id, ...body });
+  const reply = (id: number, body: object, transfer?: Transferable[]) =>
+    port.postMessage({ id, ...body }, transfer);
+  const clients = new Set<ServedClient>();
+
+  const locks = deps.locks === null ? undefined : (deps.locks ?? locksOf());
+  let holding: Promise<string> | undefined;
+
+  function holdLock(locks: LockManagerLike): Promise<string> {
+    holding ??= new Promise<string>((resolve) => {
+      const name = `slicc-kernel:${crypto.randomUUID()}`;
+      void locks.request(name, () => {
+        resolve(name);
+        return new Promise(() => {});
+      });
+    });
+    return holding;
+  }
+
+  async function connect(): Promise<MessagePort> {
+    await ready();
+    const { port1, port2 } = new MessageChannel();
+    const held = locks ? await holdLock(locks) : undefined;
+    const served = serveClient(port1, {
+      launcher: ready,
+      signal: signalNumber,
+      ...(locks ? { locks } : {}),
+      ...(held ? { lock: held } : {}),
+    });
+    clients.add(served);
+    void served.closed.then(() => clients.delete(served));
+    return port2;
+  }
 
   async function ready(): Promise<Launcher> {
     if (!launcher) throw new Error('the kernel is not initialized');
@@ -125,6 +169,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
       return true;
     }
     if (req.op === 'open-terminal') return terminal(req);
+    if (req.op === 'connect') return connect();
     if (req.op === 'terminal') {
       const session = terminals.get(req.terminal);
       if (!session) throw new Error(`no terminal ${req.terminal}`);
@@ -145,7 +190,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
     }
     const req = event.data as KernelRequest;
     handle(req).then(
-      (result) => reply(req.id, { result }),
+      (result) => reply(req.id, { result }, result instanceof MessagePort ? [result] : undefined),
       (err) => reply(req.id, { error: err instanceof Error ? err.message : String(err) })
     );
   });

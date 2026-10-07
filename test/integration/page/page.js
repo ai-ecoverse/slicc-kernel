@@ -1,4 +1,5 @@
 import {
+  attachKernel,
   checkLocalProxy,
   createKernel,
   fetchTransport,
@@ -230,4 +231,24 @@ window.remove = async (path) => {
   const name = parts.pop();
   await (await walk(parts.join('/'))).removeEntry(name, { recursive: true });
   return true;
+};
+
+window.attachKernel = attachKernel;
+
+window.agent = () => {
+  const worker = new Worker(new URL('./agent-worker.js', import.meta.url), { type: 'module' });
+  const events = [];
+  const waiting = new Map();
+  let id = 0;
+  worker.onmessage = ({ data }) => {
+    if (data.event) events.push(data);
+    else waiting.get(data.id)?.(data);
+  };
+  const ask = (action, payload = {}, transfer = []) =>
+    new Promise((resolve, reject) => {
+      const n = ++id;
+      waiting.set(n, (d) => (d.error ? reject(new Error(d.error)) : resolve(d.result)));
+      worker.postMessage({ id: n, action, ...payload }, transfer);
+    });
+  return { worker, events, ask };
 };
