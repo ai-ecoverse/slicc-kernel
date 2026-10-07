@@ -207,11 +207,43 @@ function persistsItself(stream: ProcessStream): boolean {
   return typeof type?.syncfs === 'function';
 }
 
-export function syncFsync(imports: WebAssembly.Imports, fs: () => ProcessFs | undefined): void {
+export interface FdImports {
+  fd_sync?: unknown;
+  fd_pread?: unknown;
+  fd_pwrite?: unknown;
+}
+
+function namespaces(imports: WebAssembly.Imports): WebAssembly.ModuleImports[] {
+  const seen = new Set<WebAssembly.ModuleImports>();
   for (const namespace of Object.values(imports)) {
-    const original = namespace?.fd_sync as AsyncImport | undefined;
-    if (typeof original !== 'function' || !original.isAsync) continue;
-    namespace.fd_sync = (fd: number) => {
+    if (namespace && typeof namespace === 'object') seen.add(namespace);
+  }
+  return [...seen];
+}
+
+function keyOf(
+  namespace: WebAssembly.ModuleImports,
+  name: keyof FdImports,
+  glue: FdImports | undefined
+): string | undefined {
+  const own = glue?.[name];
+  const found =
+    typeof own === 'function'
+      ? Object.keys(namespace).find((k) => namespace[k] === own)
+      : undefined;
+  return found ?? (typeof namespace[name] === 'function' ? name : undefined);
+}
+
+export function syncFsync(
+  imports: WebAssembly.Imports,
+  fs: () => ProcessFs | undefined,
+  glue?: FdImports
+): void {
+  for (const namespace of namespaces(imports)) {
+    const key = keyOf(namespace, 'fd_sync', glue);
+    const original = key === undefined ? undefined : (namespace[key] as AsyncImport);
+    if (key === undefined || !original?.isAsync) continue;
+    namespace[key] = (fd: number) => {
       const stream = fs()?.getStream(fd);
       if (!stream) return EBADF;
       if (persistsItself(stream)) return original(fd);
@@ -228,6 +260,7 @@ export function syncFsync(imports: WebAssembly.Imports, fs: () => ProcessFs | un
 type Positional = (...args: (number | bigint)[]) => number;
 
 interface PositionalDeps {
+  glue?: FdImports | undefined;
   fs: () => ProcessFs | undefined;
   sys: Pick<ProcessSys, 'pread' | 'pwrite'>;
   memory: () => WebAssembly.Memory | undefined;
@@ -284,14 +317,14 @@ function positioned(original: Positional, write: boolean, deps: PositionalDeps):
 }
 
 export function positionalIo(imports: WebAssembly.Imports, deps: PositionalDeps): void {
-  for (const namespace of Object.values(imports)) {
+  for (const namespace of namespaces(imports)) {
     for (const [name, write] of [
       ['fd_pread', false],
       ['fd_pwrite', true],
     ] as const) {
-      const original = namespace?.[name];
-      if (typeof original === 'function') {
-        namespace[name] = positioned(original as Positional, write, deps);
+      const key = keyOf(namespace, name, deps.glue);
+      if (key !== undefined) {
+        namespace[key] = positioned(namespace[key] as Positional, write, deps);
       }
     }
   }
