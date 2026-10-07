@@ -11,7 +11,7 @@ import {
   createSyncSabTransport,
   type SabPostLike,
 } from '../../realm/sync-sab-bridge.ts';
-import { SAB_HEADER_I32 } from '../../realm/sync-sab-wire.ts';
+import { publishMemory, SAB_HEADER_I32 } from '../../realm/sync-sab-wire.ts';
 import { SyscallError } from '../kernel-streams.ts';
 import { kernelSys } from '../process-runtime.ts';
 import { SignalGate, type SignalHooks } from '../process-signals.ts';
@@ -448,6 +448,7 @@ export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike
   });
   restoreExportedMemory(instance, memory, init);
   main.memory = memoryOf(instance, memory);
+  publishMemory(init.sab, sizeOf(main)());
   signals.bind(instance.exports);
   host.onRaise = (sig) => signals.raised(sig);
   const exports = instance.exports as { _start: () => void };
