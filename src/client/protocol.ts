@@ -1,7 +1,8 @@
+import type { WatchChange } from '../fs/watch.ts';
 import type { TransportCall, TransportReply } from '../kernel/net/remote-transport.ts';
 import type { RealmTransportTraits } from '../kernel/net/transport.ts';
 
-export const PROTOCOL: readonly [number, number] = [1, 0];
+export const PROTOCOL: readonly [number, number] = [1, 1];
 
 export interface ClientHello {
   protocol: readonly [number, number];
@@ -58,6 +59,8 @@ export type ClientCall =
   | { op: 'kill'; pid: number; signal: string }
   | { op: 'ps' }
   | { op: 'fs'; method: FsMethod; args: unknown[] }
+  | { op: 'watch'; paths: string[]; recursive: boolean }
+  | { op: 'unwatch'; watch: number }
   | { op: 'detach'; kill?: boolean };
 
 export type ClientRequest = ClientCall & { id: number };
@@ -74,7 +77,12 @@ export interface ClientReply {
 
 export type ClientMessage = { hello: ClientHello } | ClientRequest | TransportCall;
 
-export type KernelMessage = { hello: KernelHello } | ClientReply | TransportReply;
+export interface WatchEvent {
+  watch: number;
+  change: WatchChange;
+}
+
+export type KernelMessage = { hello: KernelHello } | ClientReply | WatchEvent | TransportReply;
 
 export interface ProcessEntry {
   pid: number;

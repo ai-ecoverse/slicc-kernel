@@ -41,6 +41,13 @@ const actions = {
     const missing = await client.fs.stat('/home/agent/none').catch((e) => e.code);
     return { listed, text: await client.fs.readText('/home/agent/sub/a.txt'), missing };
   },
+  async watch({ paths, recursive }) {
+    await client.fs.mkdir(paths[0]);
+    await client.fs.watch(paths, { recursive }, (change) =>
+      postMessage({ event: 'changed', change })
+    );
+    return true;
+  },
   close: ({ kill }) => client.close({ kill }),
 };
 

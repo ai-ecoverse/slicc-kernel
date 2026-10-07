@@ -104,6 +104,7 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
   let state: 'new' | 'open' | 'closed' = 'new';
   const terminals = new Map<number, TerminalSession>();
   const groups = new Set<number>();
+  const watches = new Map<number, () => void>();
   let net: TransportServer | undefined;
   const ended = Promise.withResolvers<void>();
   const send = (message: object, transfer: Transferable[] = []) => {
@@ -117,6 +118,8 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
     send({ bye });
     state = 'closed';
     net?.close();
+    for (const unwatch of watches.values()) unwatch();
+    watches.clear();
     for (const session of terminals.values()) session.close();
     terminals.clear();
     const pids = [...groups];
@@ -214,6 +217,17 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
           throw new Error(`unknown file system call ${req.method}`);
         }
         return fsCall(l.fs, req.method, req.args);
+      case 'watch': {
+        const unwatch = l.watchers.watch(req.paths, { recursive: req.recursive }, (change) =>
+          send({ watch: req.id, change })
+        );
+        watches.set(req.id, unwatch);
+        return { result: req.id };
+      }
+      case 'unwatch':
+        watches.get(req.watch)?.();
+        watches.delete(req.watch);
+        return { result: true };
       case 'detach':
         return { result: true };
       default:

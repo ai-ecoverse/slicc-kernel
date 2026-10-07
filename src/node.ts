@@ -24,6 +24,7 @@ export {
   type ProcessEntry,
   type SpawnedProcess,
   type SpawnOptions,
+  type WatchChange,
 } from './client/attach.ts';
 export type {
   RunOptions,
