@@ -109,5 +109,10 @@ test('du counts the blocks a file takes, and df reports the origin quota and usa
     df.stdout,
     /^opfs \/ opfs rw 0 0\ndevfs \/dev devfs rw 0 0\nproc \/proc proc rw 0 0$/m
   );
+  const blocks = await bash('stat -f -c %b / /dev');
+  assert.deepEqual(blocks.stdout.trim().split('\n'), [
+    String(Math.ceil(estimate.quota / 4096)),
+    '1000000',
+  ]);
   assert.deepEqual(page.errors, []);
 });

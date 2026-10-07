@@ -686,7 +686,7 @@ function guardStatfs(Fs: LiveMountFsApi): void {
     const defaults = statfsNode(node);
     let usage: SyncFsUsage | null | undefined;
     try {
-      usage = node.mount?.opts?.bridge?.statfs?.();
+      usage = node.live ? node.mount?.opts?.bridge?.statfs?.() : undefined;
     } catch {
       return defaults;
     }
