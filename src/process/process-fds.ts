@@ -195,6 +195,13 @@ const EBADF = 8;
 
 type AsyncImport = ((...args: number[]) => unknown) & { isAsync?: boolean };
 
+function errnoOf(err: unknown): number {
+  const { errno, code } = (err ?? {}) as { errno?: unknown; code?: unknown };
+  if (typeof errno === 'number') return errno;
+  if (typeof code === 'string') return wasiErrno(code);
+  throw err;
+}
+
 function persistsItself(stream: ProcessStream): boolean {
   const type = stream.node.mount?.type as { syncfs?: unknown } | undefined;
   return typeof type?.syncfs === 'function';
@@ -212,8 +219,7 @@ export function syncFsync(imports: WebAssembly.Imports, fs: () => ProcessFs | un
         const result = stream.stream_ops.fsync?.(stream);
         return typeof result === 'number' ? result : 0;
       } catch (err) {
-        const { errno, code } = err as { errno?: unknown; code?: unknown };
-        return typeof errno === 'number' ? errno : wasiErrno(String(code));
+        return errnoOf(err);
       }
     };
   }
@@ -270,7 +276,7 @@ function positioned(original: Positional, write: boolean, deps: PositionalDeps):
         if (moved < len) break;
       }
     } catch (err) {
-      return wasiErrno(String((err as { code?: unknown }).code));
+      return errnoOf(err);
     }
     view.setUint32(Number(rest[rest.length - 1]), done, true);
     return 0;
