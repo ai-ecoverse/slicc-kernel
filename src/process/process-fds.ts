@@ -456,7 +456,8 @@ export function mountTable(): string {
 const NAME = /^[a-z_][a-z0-9_-]*$/i;
 
 export function accounts(env: Record<string, string> = {}): { passwd: string; group: string } {
-  const name = env.USER && NAME.test(env.USER) && env.USER !== 'root' ? env.USER : 'user';
+  const user = env.USER ?? 'web_user';
+  const name = NAME.test(user) && user !== 'root' ? user : 'user';
   const home = env.HOME || '/home';
   return {
     passwd: `root:x:0:0:root:/root:/bin/sh\n${name}:x:1000:1000:${name}:${home}:/bin/bash\n`,

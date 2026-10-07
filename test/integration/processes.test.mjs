@@ -116,3 +116,17 @@ test('id, whoami and ls -l name the user from a synthetic /etc/passwd', async (t
   assert.equal(await page.evaluate(() => window.opfs.exists('etc/passwd')), false);
   assert.deepEqual(page.errors, []);
 });
+
+test('a forked child keeps an inherited descriptor on /etc/passwd and /proc', async (t) => {
+  const { page, bash } = await booted(chrome, t);
+  const r = await bash(
+    'exec 3</etc/passwd 4</proc/loadavg; (head -1 <&3; cut -d" " -f1 <&4); echo "own $(whoami)"',
+    { cwd: '/home' }
+  );
+  assert.deepEqual(r, {
+    status: 0,
+    stdout: 'root:x:0:0:root:/root:/bin/sh\n0.00\nown web_user\n',
+    stderr: '',
+  });
+  assert.deepEqual(page.errors, []);
+});
