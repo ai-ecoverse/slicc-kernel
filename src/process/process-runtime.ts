@@ -12,7 +12,7 @@ import {
   type SabPostLike,
   type SyncSabTransport,
 } from '../realm/sync-sab-bridge.ts';
-import { SAB_HEADER_I32, type SyncSabRequestBody } from '../realm/sync-sab-wire.ts';
+import { publishMemory, SAB_HEADER_I32, type SyncSabRequestBody } from '../realm/sync-sab-wire.ts';
 import {
   KernelStreams,
   type ProcessFs,
@@ -318,13 +318,26 @@ export function signalMasks(
   return { caught, ignored: mask(1), restart: mask(2) };
 }
 
+export function reportGrowth(imports: WebAssembly.Imports, publish: () => void): void {
+  const env = imports.env as Record<string, unknown> | undefined;
+  const resize = env?.emscripten_resize_heap;
+  if (!env || typeof resize !== 'function') return;
+  env.emscripten_resize_heap = (...args: unknown[]) => {
+    const grown = resize(...args);
+    publish();
+    return grown;
+  };
+}
+
 export async function runWasmProcess(
   init: WasmProcessInitMsg,
   port: SabPostLike,
   deps: { evaluate?: GlueEvaluator; warn?: (message: string) => void } = {}
 ): Promise<number> {
   const signals = new SignalGate(
-    createSyncSabTransport(init.sab, port),
+    createSyncSabTransport(init.sab, port, {
+      memory: () => memory?.buffer.byteLength ?? 0,
+    }),
     new Int32Array(init.sab, 0, SAB_HEADER_I32),
     {
       masks: () => signalMasks(module as unknown as RunningModule),
@@ -385,10 +398,12 @@ export async function runWasmProcess(
             sys,
             memory: () => memory,
           });
+          reportGrowth(imports, () => publishMemory(init.sab, memory?.buffer.byteLength ?? 0));
           return WebAssembly.instantiate(init.program.module, imports);
         })
         .then((instance) => {
           memory = wasmMemory(instance, imports);
+          publishMemory(init.sab, memory?.buffer.byteLength ?? 0);
           done(instance, init.program.module);
         }, failed);
       return {};

@@ -9,6 +9,7 @@ import {
 } from './sync-fs-wire.ts';
 import {
   decodeSabResult,
+  publishMemory,
   SAB_I_CHUNK,
   SAB_I_OFFSET,
   SAB_I_PUB,
@@ -47,7 +48,7 @@ export type AtomicsWaitLike = (
 export function createSyncSabTransport(
   sab: SharedArrayBuffer,
   port: SabPostLike,
-  deps: { wait?: AtomicsWaitLike; now?: () => number } = {}
+  deps: { wait?: AtomicsWaitLike; now?: () => number; memory?: () => number } = {}
 ): SyncSabTransport {
   const views: SabViews = sabViews(sab);
   const { header, window } = views;
@@ -72,6 +73,7 @@ export function createSyncSabTransport(
 
   return {
     call(req, timeoutMs, label): SyncFsResult {
+      if (deps.memory) publishMemory(sab, deps.memory());
       const id = ++seq;
       const deadline = now() + timeoutMs;
       let out: Uint8Array | null = null;

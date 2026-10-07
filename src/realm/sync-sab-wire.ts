@@ -17,6 +17,13 @@ export const SAB_I_SIGNALS = 8;
 
 export const SAB_I_TIMERS = 9;
 
+export const SAB_I_MEMORY = 10;
+
+export function publishMemory(sab: SharedArrayBuffer, bytes: number): void {
+  if (bytes > 0)
+    Atomics.store(new Int32Array(sab, 0, SAB_HEADER_I32), SAB_I_MEMORY, Math.ceil(bytes / 65536));
+}
+
 export const SAB_STATE_IDLE = 0;
 export const SAB_STATE_PENDING = 1;
 export const SAB_STATE_READY = 2;

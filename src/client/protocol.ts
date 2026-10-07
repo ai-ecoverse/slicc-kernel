@@ -93,6 +93,7 @@ export interface ProcessEntry {
   tty: string | null;
   started: number;
   state: 'S' | 'Z';
+  memory: number;
 }
 
 export interface MessagePortLike {

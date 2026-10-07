@@ -130,3 +130,16 @@ test('a forked child keeps an inherited descriptor on /etc/passwd and /proc', as
   });
   assert.deepEqual(page.errors, []);
 });
+
+test('/proc reports the memory of each process, and meminfo counts it as used', async (t) => {
+  const { page, bash } = await booted(chrome, t);
+  const r = await bash(
+    'sleep 30 & p=$!; sleep 0.3; cut -d" " -f2 /proc/$p/statm; head -2 /proc/meminfo | tr -s " " | cut -d" " -f2; kill $p',
+    { cwd: '/home' }
+  );
+  const [rss, total, free] = r.stdout.trim().split('\n').map(Number);
+  assert.equal(r.stderr, '');
+  assert.ok(rss > 0, r.stdout);
+  assert.ok(free < total, r.stdout);
+  assert.deepEqual(page.errors, []);
+});

@@ -8,6 +8,7 @@ export interface ProcessInfo {
   tty: string | null;
   started: number;
   state: 'S' | 'Z';
+  memory: number;
 }
 
 export interface ProcessListing {

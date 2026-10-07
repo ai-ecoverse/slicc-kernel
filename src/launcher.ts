@@ -478,6 +478,7 @@ export class Launcher {
         ...described,
         started: (this.described.get(root.pid) ?? described).started,
         state: this.processes.has(member.pid) ? 'S' : 'Z',
+        memory: this.processes.get(member.pid)?.memory() ?? 0,
       });
     }
     return listed;
