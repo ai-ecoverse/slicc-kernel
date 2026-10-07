@@ -1,4 +1,4 @@
-import type { ProcessFs, ProcessStream } from './kernel-streams.ts';
+import type { ProcessFs, ProcessStream, ProcessSys } from './kernel-streams.ts';
 import { type PtyKernel, ptyIoctl } from './process-pty.ts';
 import { wasiErrno } from './wasi-errno.ts';
 
@@ -216,6 +216,78 @@ export function syncFsync(imports: WebAssembly.Imports, fs: () => ProcessFs | un
         return typeof errno === 'number' ? errno : wasiErrno(String(code));
       }
     };
+  }
+}
+
+type Positional = (...args: (number | bigint)[]) => number;
+
+interface PositionalDeps {
+  fs: () => ProcessFs | undefined;
+  sys: Pick<ProcessSys, 'pread' | 'pwrite'>;
+  memory: () => WebAssembly.Memory | undefined;
+}
+
+function offsetOf(rest: (number | bigint)[]): number | undefined {
+  const at =
+    rest.length >= 3
+      ? Number(rest[1]) * 2 ** 32 + (Number(rest[0]) >>> 0)
+      : Number(BigInt.asIntN(64, BigInt(rest[0])));
+  return at >= 0 && Number.isSafeInteger(at) ? at : undefined;
+}
+
+function readInto(sys: PositionalDeps['sys'], kfd: number, target: Uint8Array, at: number): number {
+  let done = 0;
+  while (done < target.length) {
+    const got = sys.pread?.(kfd, target.length - done, at + done) ?? new Uint8Array(0);
+    if (got.length === 0) break;
+    target.set(got, done);
+    done += got.length;
+  }
+  return done;
+}
+
+function positioned(original: Positional, write: boolean, deps: PositionalDeps): Positional {
+  return (fd, iov, iovcnt, ...rest) => {
+    const stream = deps.fs()?.getStream(Number(fd));
+    const memory = deps.memory();
+    const kfd = stream?.sliccKernelFile ? stream.sliccKernelFd : undefined;
+    if (kfd === undefined || !memory || !(write ? deps.sys.pwrite : deps.sys.pread)) {
+      return original(fd, iov, iovcnt, ...rest);
+    }
+    const at = offsetOf(rest);
+    if (at === undefined) return wasiErrno('EINVAL');
+    const view = new DataView(memory.buffer);
+    let done = 0;
+    try {
+      for (let i = 0; i < Number(iovcnt); i++) {
+        const ptr = view.getUint32(Number(iov) + i * 8, true);
+        const len = view.getUint32(Number(iov) + i * 8 + 4, true);
+        const part = new Uint8Array(memory.buffer, ptr, len);
+        const moved = write
+          ? (deps.sys.pwrite?.(kfd, part.slice(), at + done) ?? 0)
+          : readInto(deps.sys, kfd, part, at + done);
+        done += moved;
+        if (moved < len) break;
+      }
+    } catch (err) {
+      return wasiErrno(String((err as { code?: unknown }).code));
+    }
+    view.setUint32(Number(rest[rest.length - 1]), done, true);
+    return 0;
+  };
+}
+
+export function positionalIo(imports: WebAssembly.Imports, deps: PositionalDeps): void {
+  for (const namespace of Object.values(imports)) {
+    for (const [name, write] of [
+      ['fd_pread', false],
+      ['fd_pwrite', true],
+    ] as const) {
+      const original = namespace?.[name];
+      if (typeof original === 'function') {
+        namespace[name] = positioned(original as Positional, write, deps);
+      }
+    }
   }
 }
 
