@@ -1,5 +1,6 @@
 import {
   parseSyncFsStat,
+  parseSyncFsUsage,
   SYNC_FS_REQUEST_TIMEOUT_MS,
   type SyncFsBridgeStat,
   type SyncFsPosixBridge,
@@ -209,5 +210,6 @@ export function createSyncFsSabBridge(
     utimes: (path, atimeMs, mtimeMs) => {
       run({ op: 'utimes', path, atimeMs, mtimeMs }, path);
     },
+    statfs: () => parseSyncFsUsage(json({ op: 'statfs', path: '/' }, '/')),
   };
 }

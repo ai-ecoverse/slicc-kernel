@@ -80,3 +80,34 @@ test('an executable without #! runs as a shell script', async (t) => {
     ok('plain script one\nstatus 4\n')
   );
 });
+
+test('du counts the blocks a file takes, and df reports the origin quota and usage', async (t) => {
+  const { page, bash } = await booted(chrome, t);
+  const du = await bash(
+    'head -c 300000 /dev/urandom > big.bin && du -B1 big.bin && du -sh big.bin'
+  );
+  assert.equal(du.status, 0, du.stderr);
+  const [bytes] = du.stdout.split('\n')[0].split('\t');
+  assert.ok(Number(bytes) >= 300000 && Number(bytes) < 300000 + 4096, du.stdout);
+  assert.match(du.stdout, /^296K\tbig\.bin$/m);
+
+  const df = await bash('df -B1 /; cat /etc/mtab');
+  const estimate = await page.evaluate(async () => {
+    const { quota, usage } = await navigator.storage.estimate();
+    return { quota, usage };
+  });
+  assert.equal(df.status, 0, df.stderr);
+  assert.equal(df.stderr, '');
+  const [, row] = df.stdout.split('\n');
+  const [name, size, used, avail, , mounted] = row.split(/\s+/);
+  assert.deepEqual([name, mounted], ['opfs', '/']);
+  const near = (actual, expected) => Math.abs(Number(actual) - expected) < 1024 * 1024;
+  assert.ok(near(size, estimate.quota), row);
+  assert.ok(near(used, estimate.usage), row);
+  assert.ok(near(avail, estimate.quota - estimate.usage), row);
+  assert.match(
+    df.stdout,
+    /^opfs \/ opfs rw 0 0\ndevfs \/dev devfs rw 0 0\nproc \/proc proc rw 0 0$/m
+  );
+  assert.deepEqual(page.errors, []);
+});

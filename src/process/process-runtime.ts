@@ -28,6 +28,7 @@ import {
   syncFsync,
   trackCloseOnExec,
   useDevFd,
+  useMounts,
   wasmMemory,
   wrapCloexecSyscalls,
 } from './process-fds.ts';
@@ -424,6 +425,7 @@ export async function runWasmProcess(
   if (pipefs) streams.usePipes(pipefs);
   streams.useControllingTerminal();
   useDevFd(running.FS);
+  useMounts(running.FS);
   ownByRealmUser(running.FS);
   const livePath = (s: ProcessStream) => liveNodePath(s.node as unknown as LiveFsNode);
   running.sliccKernel = createProcessKernel({

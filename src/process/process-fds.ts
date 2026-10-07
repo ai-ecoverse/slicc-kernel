@@ -442,3 +442,35 @@ export function useDevFd(Fs: ProcessFs): void {
     return fstat.call(Fs, fd);
   };
 }
+
+const O_ACCMODE = 0o3;
+const O_CREAT = 0o100;
+
+export function mountTable(): string {
+  const root = globalThis.navigator?.storage ? 'opfs' : 'memory';
+  return [`${root} / ${root} rw 0 0`, 'devfs /dev devfs rw 0 0', 'proc /proc proc rw 0 0', ''].join(
+    '\n'
+  );
+}
+
+export function useMounts(Fs: ProcessFs): void {
+  const { writeFile } = Fs;
+  if (typeof Fs.open !== 'function' || typeof writeFile !== 'function') return;
+  try {
+    writeFile.call(Fs, '/proc/mounts', mountTable());
+  } catch {
+    return;
+  }
+  const open = Fs.open.bind(Fs);
+  Fs.open = (path, flags, mode) => {
+    if (path !== '/etc/mtab' || (flags & (O_ACCMODE | O_CREAT)) !== 0) {
+      return open(path, flags, mode);
+    }
+    try {
+      return open(path, flags, mode);
+    } catch (e) {
+      if ((e as { errno?: unknown })?.errno !== wasiErrno('ENOENT')) throw e;
+      return open('/proc/mounts', flags, mode);
+    }
+  };
+}
