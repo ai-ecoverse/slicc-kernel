@@ -18,6 +18,7 @@ export interface DriverPortLike {
 export interface ConnectionOptions {
   timeoutMs?: number;
   onInvalidate?: (paths: string[] | true) => void;
+  onFail?: (error: Error) => void;
 }
 
 interface Waiting {
@@ -44,17 +45,20 @@ export class DriverConnection {
   private readonly waiting: Map<number, Waiting>;
   private readonly timeoutMs: number;
   private nextId = 0;
+  private readonly onFail: ((error: Error) => void) | undefined;
 
   private constructor(
     port: DriverPortLike,
     capabilities: DriverCapabilities,
     waiting: Map<number, Waiting>,
-    timeoutMs: number
+    timeoutMs: number,
+    onFail: ((error: Error) => void) | undefined
   ) {
     this.port = port;
     this.capabilities = capabilities;
     this.waiting = waiting;
     this.timeoutMs = timeoutMs;
+    this.onFail = onFail;
   }
 
   static async open(
@@ -96,7 +100,7 @@ export class DriverConnection {
     const refused = driverVersionError(hello.protocol);
     if (refused) throw errnoError('EPROTO', refused);
     if (hello.error) throw errnoError(hello.errno ?? 'EIO', hello.error);
-    return new DriverConnection(port, hello.capabilities ?? {}, waiting, timeoutMs);
+    return new DriverConnection(port, hello.capabilities ?? {}, waiting, timeoutMs, options.onFail);
   }
 
   call(call: DriverCall, transfer: Transferable[] = []): Promise<unknown> {
@@ -106,9 +110,13 @@ export class DriverConnection {
       const timer = unref(
         setTimeout(() => {
           this.waiting.delete(id);
-          reject(
-            errnoError('EIO', `the driver did not answer ${call.op} within ${this.timeoutMs} ms`)
+          const error = errnoError(
+            'EIO',
+            `the driver did not answer ${call.op} within ${this.timeoutMs} ms`
           );
+          reject(error);
+          this.fail(error);
+          this.onFail?.(error);
         }, this.timeoutMs)
       );
       this.waiting.set(id, { resolve, reject, timer });

@@ -139,6 +139,9 @@ export function tmpfs(): FilesystemHandlers {
       dir.children.delete(name);
     },
     async rename(from, to) {
+      const a = `/${parts(from).join('/')}`;
+      const b = `/${parts(to).join('/')}`;
+      if (b !== a && b.startsWith(`${a}/`)) throw fsError('EINVAL', `${to} is inside ${from}`);
       const source = parent(from);
       const node = source.dir.children.get(source.name);
       if (!node) throw fsError('ENOENT', from);

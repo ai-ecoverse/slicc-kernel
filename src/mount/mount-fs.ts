@@ -58,6 +58,11 @@ export function parseSize(text: string): number {
 
 const within = (path: string, target: string) =>
   path === target || target === '/' || path.startsWith(`${target}/`);
+export function heldUnder(held: Iterable<Map<string, number>>, target: string): boolean {
+  for (const paths of held) for (const path of paths.keys()) if (within(path, target)) return true;
+  return false;
+}
+
 const parentOf = (path: string) => path.slice(0, path.lastIndexOf('/')) || '/';
 
 function statOf(attr: DriverAttr, path: string, dev: number): FsStat {
@@ -92,6 +97,7 @@ function concat(chunks: Uint8Array[], total: number): Uint8Array {
 export class MountTable {
   private readonly mounts = new Map<string, Mount>();
   private devices = 0;
+  private readonly pending = new Set<string>();
   private readonly deps: MountDeps;
 
   constructor(deps: MountDeps) {
@@ -122,7 +128,18 @@ export class MountTable {
 
   async mount(spec: MountSpec, fs: KernelFs): Promise<MountEntry> {
     const target = normalizePath(spec.target);
-    if (this.mounts.has(target)) throw errnoError('EBUSY', `${target} is already mounted`);
+    if (this.mounts.has(target) || this.pending.has(target)) {
+      throw errnoError('EBUSY', `${target} is already mounted`);
+    }
+    this.pending.add(target);
+    try {
+      return await this.attach(spec, target, fs);
+    } finally {
+      this.pending.delete(target);
+    }
+  }
+
+  private async attach(spec: MountSpec, target: string, fs: KernelFs): Promise<MountEntry> {
     const st = await fs.stat(target);
     if (!st.isDirectory) throw errnoError('ENOTDIR', target);
     const options = { ...spec.options };
@@ -145,6 +162,9 @@ export class MountTable {
           {
             ...(this.deps.timeoutMs ? { timeoutMs: this.deps.timeoutMs } : {}),
             onInvalidate: (paths) => this.invalidated(target, paths),
+            onFail: (error) => {
+              if (mounted) this.crashed(mounted, error);
+            },
           }
         ),
         started.promise,
@@ -185,6 +205,8 @@ export class MountTable {
 
   private crashed(mount: Mount, error: Error): void {
     mount.state = 'failed';
+    mount.attrs.clear();
+    mount.lists.clear();
     mount.error = error.message;
     mount.conn.fail(
       errnoError('EIO', `the ${mount.type} driver for ${mount.target} failed: ${error.message}`)
@@ -213,6 +235,7 @@ export class MountTable {
   }
 
   async getattr(mount: Mount, path: string, rel: string): Promise<DriverAttr> {
+    if (mount.conn.failure) throw mount.conn.failure;
     const cached = mount.attrs.get(path);
     if (cached && cached.expires > Date.now()) return cached.value;
     const attr = (await mount.conn.call({ op: 'getattr', path: rel })) as DriverAttr;
@@ -222,6 +245,7 @@ export class MountTable {
   }
 
   async readdir(mount: Mount, path: string, rel: string): Promise<DriverEntry[]> {
+    if (mount.conn.failure) throw mount.conn.failure;
     const cached = mount.lists.get(path);
     if (cached && cached.expires > Date.now()) return cached.value;
     const entries = (await mount.conn.call({ op: 'readdir', path: rel })) as DriverEntry[];
@@ -262,15 +286,21 @@ class MountFs implements KernelFs {
     if (mount.caps.readonly) throw errnoError('EROFS', path);
   }
 
-  private async follow(path: string, hops = 0): Promise<string> {
+  private async follow(path: string, hops = 0, create = false): Promise<string> {
     const found = this.at(path);
     if (!found) return path;
     const real = normalizePath(path);
-    const attr = await this.table.getattr(found.mount, real, found.rel);
+    let attr: DriverAttr;
+    try {
+      attr = await this.table.getattr(found.mount, real, found.rel);
+    } catch (err) {
+      if (create && (err as { code?: unknown }).code === 'ENOENT') return real;
+      throw err;
+    }
     if (attr.kind !== 'symlink') return real;
     if (hops >= MAX_LINKS) throw errnoError('ELOOP', path);
     const target = (await found.mount.conn.call({ op: 'readlink', path: found.rel })) as string;
-    return this.follow(this.base.resolvePath(parentOf(real), target), hops + 1);
+    return this.follow(this.base.resolvePath(parentOf(real), target), hops + 1, create);
   }
 
   private async open(mount: Mount, rel: string, write: boolean): Promise<number> {
@@ -326,7 +356,7 @@ class MountFs implements KernelFs {
   }
 
   async writeFile(path: string, content: Uint8Array | string): Promise<void> {
-    const real = await this.follow(path).catch(() => normalizePath(path));
+    const real = await this.follow(path, 0, true);
     const found = this.at(real);
     if (!found) return this.base.writeFile(real, content);
     const { mount, rel } = found;
@@ -496,6 +526,7 @@ class MountFs implements KernelFs {
   async chmod(path: string, mode: number): Promise<void> {
     const found = this.at(path);
     if (!found) return this.base.chmod(path, mode);
+    this.writable(found.mount, normalizePath(path));
     if (!found.mount.caps.chmod) return;
     this.table.forget(found.mount, normalizePath(path));
     await found.mount.conn.call({ op: 'setattr', path: found.rel, mode });
@@ -504,6 +535,7 @@ class MountFs implements KernelFs {
   async utimes(path: string, atime: Date, mtime: Date): Promise<void> {
     const found = this.at(path);
     if (!found) return this.base.utimes(path, atime, mtime);
+    this.writable(found.mount, normalizePath(path));
     this.table.forget(found.mount, normalizePath(path));
     await found.mount.conn.call({ op: 'setattr', path: found.rel, mtime: mtime.getTime() });
   }

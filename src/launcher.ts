@@ -35,6 +35,7 @@ import { KernelTty } from './kernel/tty.ts';
 import type { VfsNodes } from './kernel/vfs-file.ts';
 import { serveFilesystem } from './mount/driver.ts';
 import {
+  heldUnder,
   type MountEntry,
   type MountSpec,
   MountTable,
@@ -244,10 +245,7 @@ export class Launcher {
     this.mounts = new MountTable({
       open: (type, spec) => this.driver(type, spec),
       busy: (target) =>
-        [...this.openFiles].some((nodes) => nodes.holds(target)) ||
-        [...this.held].some((paths) =>
-          [...paths.keys()].some((p) => p === target || p.startsWith(`${target}/`))
-        ),
+        [...this.openFiles].some((nodes) => nodes.holds(target)) || heldUnder(this.held, target),
       changed: this.watchers.changed.bind(this.watchers),
     });
     this.base = this.watchers.wrap(this.mounts.wrap(options.fs));
