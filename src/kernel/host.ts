@@ -21,6 +21,7 @@ import { type FdTable, kernelFdKind, type OpenFile } from './fd-table.ts';
 import type { LockTable } from './host-ops.ts';
 import type { JobTable } from './jobs.ts';
 import type { HttpHandles } from './net/http-syscalls.ts';
+import type { ProcessListing } from './proc-info.ts';
 import { isWasmSyscall, type StateListener, WasmProcess } from './process.ts';
 import {
   type ForkState,
@@ -64,6 +65,7 @@ export interface SpawnWasmOptions {
   fork?: ForkState;
   ppid?: number;
   kill?: (pid: number, sig: number) => boolean | Promise<boolean>;
+  processes?: () => ProcessListing;
   jobs?: JobTable;
   ptys?: PtyTable;
 
@@ -129,6 +131,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     forker: opts.forker,
     fs: opts.fs,
     kill: opts.kill,
+    processes: opts.processes,
     jobs: opts.jobs,
     ptys: opts.ptys,
     net: opts.net,

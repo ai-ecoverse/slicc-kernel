@@ -1,4 +1,5 @@
 import type { DeviceMeta, PollState } from '../kernel/fd-table.ts';
+import type { ProcessListing } from '../kernel/proc-info.ts';
 import type { ForkState, InheritedFd, WasmProcessInitMsg } from '../kernel/protocol.ts';
 import { SIG } from '../kernel/signals.ts';
 import type { Termios } from '../kernel/tty.ts';
@@ -43,6 +44,7 @@ import { createHttpKernel } from './process-http.ts';
 import type { PtyKernel } from './process-pty.ts';
 import { SignalGate } from './process-signals.ts';
 import { createSocketKernel } from './process-sockets.ts';
+import { type ProcFs, useProcfs } from './procfs.ts';
 import { ownByRealmUser } from './realm-user.ts';
 
 export {
@@ -149,6 +151,9 @@ export function kernelSys(transport: SyncSabTransport): ProcessSys & PtyKernel {
     },
     ptyNumbers() {
       return json(call({ op: 'pty-list' }, 'pty-list')) as number[];
+    },
+    procList() {
+      return json(call({ op: 'proc-list' }, 'proc-list')) as ProcessListing;
     },
     ptyNumber(fd) {
       return json(call({ op: 'pty-number', fd }, `pty-number ${fd}`)) as number;
@@ -426,6 +431,7 @@ export async function runWasmProcess(
   streams.useControllingTerminal();
   useDevFd(running.FS);
   useMounts(running.FS);
+  useProcfs(running.FS as unknown as ProcFs, sys, init.pid);
   ownByRealmUser(running.FS);
   const livePath = (s: ProcessStream) => liveNodePath(s.node as unknown as LiveFsNode);
   running.sliccKernel = createProcessKernel({

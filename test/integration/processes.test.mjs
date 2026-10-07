@@ -86,3 +86,19 @@ test('a kernel keeps the process worker it started with when the file changes in
   chrome.overrides.set('/dist/process-worker.js', 'throw new Error("updated in place");');
   assert.deepEqual(await bash('echo still; bash -c "echo pinned"'), ok('still\npinned\n'));
 });
+
+test('/proc lists every process of the kernel in the formats procps reads', async (t) => {
+  const { page, bash } = await booted(chrome, t);
+  const r = await bash(
+    'sleep 100 & p=$!; ls /proc; cut -d" " -f1-4 /proc/$p/stat; cat /proc/$p/comm; head -3 /proc/self/status; cat /proc/loadavg; head -1 /proc/meminfo; head -5 /proc/stat | tail -1; kill $p; wait $p; test -e /proc/$p || echo gone',
+    { cwd: '/home' }
+  );
+  assert.equal(r.stderr, '');
+  assert.match(r.stdout, /^1000\n(?:\d+\n)*loadavg\nmeminfo\nmounts\nself\nstat\nuptime\n/);
+  assert.match(
+    r.stdout,
+    /\n(\d+) \(sleep\) S 1000\nsleep\nName:\thead\nUmask:\t0022\nState:\tS \(sleeping\)\n/
+  );
+  assert.match(r.stdout, /\n0\.00 0\.00 0\.00 1\/\d+ \d+\nMemTotal: +\d+ kB\nbtime \d+\ngone\n$/);
+  assert.deepEqual(page.errors, []);
+});

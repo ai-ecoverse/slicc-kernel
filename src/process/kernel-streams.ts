@@ -1,4 +1,5 @@
 import type { PollState } from '../kernel/fd-table.ts';
+import type { ProcessListing } from '../kernel/proc-info.ts';
 import type { Termios } from '../kernel/tty.ts';
 import type { EmscriptenFsForHook } from '../realm/emscripten-vfs-hook.ts';
 import { wasiErrno } from './wasi-errno.ts';
@@ -124,6 +125,7 @@ export interface ProcessSys {
   openPts?(n: number, noctty: boolean): number;
 
   ptyNumbers?(): number[];
+  procList?(): ProcessListing;
 }
 
 export interface StreamOps {

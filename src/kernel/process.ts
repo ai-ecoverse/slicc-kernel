@@ -23,6 +23,7 @@ import { AsyncOps, HOST_OPS, type HostSyscall, hostSyscall, type LockTable } fro
 import type { JobTable } from './jobs.ts';
 import { HTTP_OPS, type HttpHandles, type HttpSyscall } from './net/http-syscalls.ts';
 import { NO_TRANSPORT } from './net/network.ts';
+import type { ProcessListing } from './proc-info.ts';
 import type { ForkState } from './protocol.ts';
 import { PTY_OPS, type PtySyscall, type PtyTable, ptySyscall } from './pty.ts';
 import { selectFds } from './select.ts';
@@ -126,6 +127,7 @@ export type WasmSyscall =
   | { op: 'proc-captured'; pid: number; slot: number }
   | { op: 'proc-fork'; state: ForkState }
   | { op: 'proc-kill'; pid: number; sig: number }
+  | { op: 'proc-list' }
   | { op: 'proc-exec'; pid: number }
   | { op: 'proc-setpgid'; pid: number; pgid: number }
   | { op: 'proc-getpgid'; pid: number }
@@ -255,6 +257,7 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'proc-captured',
   'proc-fork',
   'proc-kill',
+  'proc-list',
   'proc-exec',
   'proc-setpgid',
   'proc-getpgid',
@@ -287,6 +290,8 @@ export interface WasmProcessOptions {
   fs: VfsFileFs;
 
   kill?: (pid: number, sig: number) => boolean | Promise<boolean>;
+
+  processes?: () => ProcessListing;
 
   onPending?: (sig: number) => void;
 
@@ -807,6 +812,12 @@ export class WasmProcess {
           throw new KernelError('ESRCH');
         }
         return { ok: true, kind: 'void' };
+      case 'proc-list':
+        return {
+          ok: true,
+          kind: 'json',
+          json: this.options.processes?.() ?? { boot: 0, processes: [] },
+        };
       case 'proc-alarm':
         this.setAlarm(req.sig, req.firstMs ?? req.ms, req.repeat ? req.ms : 0, req.timer);
         return { ok: true, kind: 'void' };
