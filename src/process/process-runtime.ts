@@ -22,6 +22,7 @@ import {
 } from './kernel-streams.ts';
 import { createProcessKernel, type ProcessKernel } from './process-children.ts';
 import {
+  type FdImports,
   type GlueSyscalls,
   positionalIo,
   syncFsync,
@@ -252,6 +253,11 @@ const GLUE_TRAILER = [
   "  ioctl: typeof ___syscall_ioctl === 'function' ? ___syscall_ioctl : undefined,",
   "  setitimer: typeof __setitimer_js === 'function' ? __setitimer_js : undefined,",
   '};',
+  'Module.sliccFdImports ??= {',
+  "  fd_sync: typeof _fd_sync === 'function' ? _fd_sync : undefined,",
+  "  fd_pread: typeof _fd_pread === 'function' ? _fd_pread : undefined,",
+  "  fd_pwrite: typeof _fd_pwrite === 'function' ? _fd_pwrite : undefined,",
+  '};',
 
   'const __sliccUp = () =>',
   "  (typeof runtimeInitialized === 'undefined' || runtimeInitialized) &&",
@@ -365,8 +371,10 @@ export async function runWasmProcess(
               },
             },
           });
-          syncFsync(imports, () => ownValue<ProcessFs>(module, 'FS'));
+          const glue = ownValue<FdImports>(module, 'sliccFdImports');
+          syncFsync(imports, () => ownValue<ProcessFs>(module, 'FS'), glue);
           positionalIo(imports, {
+            glue,
             fs: () => ownValue<ProcessFs>(module, 'FS'),
             sys,
             memory: () => memory,
