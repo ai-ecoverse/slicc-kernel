@@ -1,5 +1,5 @@
 import { inodeOf } from '../fs/types.ts';
-import type { SyncFsBridgeStat, SyncFsPosixBridge } from './sync-fs-wire.ts';
+import type { SyncFsBridgeStat, SyncFsPosixBridge, SyncFsUsage } from './sync-fs-wire.ts';
 
 const ERRNO_BY_CODE: Readonly<Record<string, number>> = {
   EACCES: 2,
@@ -330,7 +330,7 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
         mtime,
         ctime: new Date(st.ctimeMs ?? mtime.getTime()),
         blksize: 4096,
-        blocks: Math.ceil(size / 4096),
+        blocks: Math.ceil(size / 4096) * 8,
       };
     },
     setattr(node, attr) {
@@ -584,6 +584,8 @@ export interface LiveMountFsApi extends LiveFsApi {
   rename?(from: string, to: string): void;
   lookupPath?(path: string, opts?: { follow?: boolean; parent?: boolean }): { node: object };
   sliccRename?: true;
+  statfsNode?(node: LiveFsNode): Record<string, number>;
+  sliccStatfs?: true;
   filesystems: { SLICC_LIVE_FS?: LiveVfsPlugin };
   mkdirTree(path: string): void;
   mount(type: LiveVfsPlugin, opts: LiveFsMountOpts, mountpoint: string): unknown;
@@ -615,6 +617,7 @@ export function mountLiveVfsDirs(
   }
   const plugin = Fs.filesystems.SLICC_LIVE_FS ?? createLiveVfsPlugin(Fs);
   Fs.filesystems.SLICC_LIVE_FS = plugin;
+  guardStatfs(Fs);
   const mounted: string[] = [];
   for (const dir of outermostDirs(dirs)) {
     if (dir === '/') continue;
@@ -640,6 +643,7 @@ export function liveRoot(Fs: LiveMountFsApi, bridge: SyncFsPosixBridge): void {
   plugin.mounts.add(root.mount);
   invalidateLiveVfs(Fs, plugin);
   guardRenames(Fs);
+  guardStatfs(Fs);
   const memfs = root.memfs ?? root.node_ops;
   const live = plugin.node_ops;
   root.memfs = memfs;
@@ -672,6 +676,31 @@ function crosses(Fs: LiveMountFsApi, from: string, to: string): boolean {
   } catch {
     return false;
   }
+}
+
+function guardStatfs(Fs: LiveMountFsApi): void {
+  const statfsNode = Fs.statfsNode?.bind(Fs);
+  if (!statfsNode || Fs.sliccStatfs) return;
+  Fs.sliccStatfs = true;
+  Fs.statfsNode = (node) => {
+    const defaults = statfsNode(node);
+    let usage: SyncFsUsage | null | undefined;
+    try {
+      usage = node.live ? node.mount?.opts?.bridge?.statfs?.() : undefined;
+    } catch {
+      return defaults;
+    }
+    if (!usage) return defaults;
+    const free = Math.max(0, Math.floor((usage.quota - usage.usage) / 4096));
+    return {
+      ...defaults,
+      bsize: 4096,
+      frsize: 4096,
+      blocks: Math.ceil(usage.quota / 4096),
+      bfree: free,
+      bavail: free,
+    };
+  };
 }
 
 function guardRenames(Fs: LiveMountFsApi): void {

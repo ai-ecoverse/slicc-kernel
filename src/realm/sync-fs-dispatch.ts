@@ -1,6 +1,11 @@
 import type { FsStat, KernelFs } from '../fs/types.ts';
 import { resolveSyncFsToken } from './sync-fs-token-registry.ts';
-import { type SyncFsRequest, type SyncFsResult, syncError } from './sync-fs-wire.ts';
+import {
+  type SyncFsRequest,
+  type SyncFsResult,
+  type SyncFsUsage,
+  syncError,
+} from './sync-fs-wire.ts';
 
 export function toErrno(err: unknown): SyncFsResult {
   const message = err instanceof Error ? err.message : String(err);
@@ -42,6 +47,12 @@ async function readdirStat(
   dir: string
 ): Promise<Array<[string, SyncFsStatJson | null]>> {
   return (await fs.readdirStat(dir)).map(([name, stat]) => [name, stat && statJson(stat)]);
+}
+
+async function storageUsage(): Promise<SyncFsUsage | null> {
+  const estimate = await globalThis.navigator?.storage?.estimate?.();
+  if (typeof estimate?.quota !== 'number') return null;
+  return { quota: estimate.quota, usage: estimate.usage ?? 0 };
 }
 
 const done: SyncFsResult = { ok: true, kind: 'void' };
@@ -101,6 +112,8 @@ async function run(
     case 'utimes':
       await fs.utimes(path, new Date(req.atimeMs ?? 0), new Date(req.mtimeMs ?? 0));
       return done;
+    case 'statfs':
+      return json(await storageUsage());
     default:
       return { ok: false, errno: 'EINVAL', message: `sync-fs: unknown op '${req.op as string}'` };
   }

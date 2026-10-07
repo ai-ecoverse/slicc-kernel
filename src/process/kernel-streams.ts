@@ -175,6 +175,7 @@ export interface ProcessFs extends EmscriptenFsForHook {
   write(stream: ProcessStream, buffer: Uint8Array, offset: number, length: number): number;
 
   stat?(path: string, dontFollow?: boolean): object;
+  writeFile?(path: string, data: string | Uint8Array): void;
   fstat?(fd: number): object;
   symlink?(target: string, path: string): void;
   lookupPath?(path: string, opts?: { follow?: boolean }): { node: object };

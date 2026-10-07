@@ -14,7 +14,8 @@ export type SyncFsOp =
   | 'symlink'
   | 'readlink'
   | 'chmod'
-  | 'utimes';
+  | 'utimes'
+  | 'statfs';
 
 export interface SyncFsRequest {
   token: string;
@@ -47,6 +48,17 @@ export interface SyncFsBridgeStat {
   ino?: number;
 }
 
+export interface SyncFsUsage {
+  quota: number;
+  usage: number;
+}
+
+export function parseSyncFsUsage(json: unknown): SyncFsUsage | null {
+  const u = json as Partial<SyncFsUsage> | null;
+  if (!u || typeof u.quota !== 'number' || typeof u.usage !== 'number') return null;
+  return { quota: u.quota, usage: u.usage };
+}
+
 export interface SyncFsPosixBridge {
   readFile(path: string): Uint8Array;
   writeFile(path: string, bytes: Uint8Array): void;
@@ -64,6 +76,7 @@ export interface SyncFsPosixBridge {
   chmod(path: string, mode: number): void;
   utimes(path: string, atimeMs: number, mtimeMs: number): void;
   readdirStat(path: string): Array<[string, SyncFsBridgeStat | null]>;
+  statfs?(): SyncFsUsage | null;
 }
 
 export function syncError(code: string, label: string): Error & { code: string } {
