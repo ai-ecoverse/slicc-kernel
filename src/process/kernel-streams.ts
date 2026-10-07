@@ -1,5 +1,5 @@
 import type { PollState } from '../kernel/fd-table.ts';
-import type { ProcessListing } from '../kernel/proc-info.ts';
+import type { MountLine, ProcessListing } from '../kernel/proc-info.ts';
 import type { Termios } from '../kernel/tty.ts';
 import type { EmscriptenFsForHook } from '../realm/emscripten-vfs-hook.ts';
 import { wasiErrno } from './wasi-errno.ts';
@@ -126,6 +126,7 @@ export interface ProcessSys {
 
   ptyNumbers?(): number[];
   procList?(): ProcessListing;
+  mountList?(): MountLine[];
 }
 
 export interface StreamOps {

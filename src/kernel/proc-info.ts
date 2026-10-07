@@ -11,6 +11,14 @@ export interface ProcessInfo {
   memory: number;
 }
 
+export interface MountLine {
+  type: string;
+  source: string;
+  target: string;
+  options: Record<string, string>;
+  state: 'ok' | 'failed';
+}
+
 export interface ProcessListing {
   boot: number;
   processes: ProcessInfo[];

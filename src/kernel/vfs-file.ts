@@ -214,6 +214,11 @@ export class VfsNodes {
     return node;
   }
 
+  holds(prefix: string): boolean {
+    for (const path of this.byPath.keys()) if (within(path, prefix)) return true;
+    return false;
+  }
+
   closed(node: VfsNode): void {
     node.opens--;
     if (node.opens === 0 && this.byPath.get(node.path) === node) this.byPath.delete(node.path);

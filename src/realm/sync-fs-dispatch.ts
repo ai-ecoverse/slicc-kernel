@@ -26,6 +26,7 @@ export interface SyncFsStatJson {
   atimeMs: number;
   ctimeMs: number;
   ino: number;
+  dev?: number;
 }
 
 function statJson(s: FsStat): SyncFsStatJson {
@@ -39,6 +40,7 @@ function statJson(s: FsStat): SyncFsStatJson {
     atimeMs: s.atime.getTime(),
     ctimeMs: s.ctime.getTime(),
     ino: s.ino,
+    ...(s.dev !== undefined ? { dev: s.dev } : {}),
   };
 }
 
@@ -112,8 +114,6 @@ async function run(
     case 'utimes':
       await fs.utimes(path, new Date(req.atimeMs ?? 0), new Date(req.mtimeMs ?? 0));
       return done;
-    case 'statfs':
-      return json(await storageUsage());
     default:
       return { ok: false, errno: 'EINVAL', message: `sync-fs: unknown op '${req.op as string}'` };
   }
@@ -124,7 +124,13 @@ export async function dispatchSyncFs(req: SyncFsRequest): Promise<SyncFsResult> 
   if (!entry) return { ok: false, errno: 'EACCES', message: 'sync-fs: unknown or revoked token' };
   const { fs, cwd } = entry;
   try {
-    return await run(fs, fs.resolvePath(cwd, req.path), req, cwd);
+    const path = fs.resolvePath(cwd, req.path);
+    if (req.op === 'statfs') return json((await entry.statfs?.(path)) ?? (await storageUsage()));
+    if (req.op === 'hold') {
+      entry.hold?.(path, req.mode === 1);
+      return done;
+    }
+    return await run(fs, path, req, cwd);
   } catch (err) {
     return toErrno(err);
   }

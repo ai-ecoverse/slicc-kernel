@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { readdir, readFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { join, relative } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -103,4 +104,85 @@ test('a worker thread attaches to a Node kernel, spawns, and sees its process in
   assert.deepEqual(await exited, { status: 143 });
   await worker.terminate();
   kernel.terminate();
+});
+
+async function installDir(kernel, dir, at) {
+  const entries = await readdir(dir, { recursive: true, withFileTypes: true });
+  for (const entry of entries.filter((e) => e.isFile())) {
+    const file = join(entry.parentPath, entry.name);
+    await kernel.writeFile(`${at}/${relative(dir, file)}`, await readFile(file));
+  }
+}
+
+function objectStore() {
+  const objects = new Map();
+  const server = createServer(async (req, res) => {
+    const url = new URL(req.url, 'http://store');
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const key = decodeURIComponent(url.pathname.replace(/^\/bucket\/?/, ''));
+    if (req.method === 'GET' && url.searchParams.has('list')) {
+      const prefix = url.searchParams.get('list');
+      const listed = [...objects]
+        .filter(([k]) => k.startsWith(prefix))
+        .map(([k, o]) => ({ key: k, size: o.body.length, mtime: o.mtime }));
+      res.end(JSON.stringify(listed));
+    } else if (req.method === 'PUT') {
+      objects.set(key, { body: Buffer.concat(chunks), mtime: Date.now() });
+      res.end();
+    } else if (!objects.has(key)) {
+      res.statusCode = 404;
+      res.end();
+    } else if (req.method === 'DELETE') {
+      objects.delete(key);
+      res.end();
+    } else res.end(objects.get(key).body);
+  });
+  return { objects, server };
+}
+
+const SCRIPT = [
+  'git config --global user.name kernel && git config --global user.email kernel@example.com',
+  'cd /mnt/s3 && echo one > a.txt && echo two >> a.txt && printf three > b.txt && echo over > b.txt',
+  'mv b.txt c.txt && mkdir -p d/e && rmdir d/e && echo gone > g.txt && rm g.txt',
+  'git init -q && git add . && git commit -qm first && git log --format=%s && git status --porcelain',
+  'echo moved > m.txt && mv m.txt /home/m.txt && cat /home/m.txt && ls /mnt/s3',
+].join(' && ');
+
+test('a package driver mounts a mock S3; programs and git work on it, unmounting leaves it in the store, and a remount shows it all again', async (t) => {
+  const { objects, server } = objectStore();
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const endpoint = `http://127.0.0.1:${server.address().port}/bucket`;
+  const kernel = await createNodeKernel({ network: { transport: nodeTransport() } });
+  t.after(() => {
+    kernel.terminate();
+    server.close();
+  });
+  for (const name of ['wasm-bash', 'wasm-coreutils', 'wasm-git']) await install(kernel, name);
+  await installDir(
+    kernel,
+    fileURLToPath(new URL('./fixtures/mock-s3/', import.meta.url)),
+    '/node_modules/mock-s3'
+  );
+  await kernel.run(['bash', '-c', 'mkdir -p /mnt/s3']);
+  const mounted = await kernel.mount({ type: 'mocks3', source: endpoint, target: '/mnt/s3' });
+  assert.equal(mounted.state, 'ok');
+  const r = await kernel.run(['bash', '-c', SCRIPT]);
+  assert.equal(r.stderr, '');
+  assert.equal(r.stdout, 'first\nmoved\nINDEX\n'.replace('INDEX\n', 'a.txt\nc.txt\nd\n'));
+  await kernel.umount('/mnt/s3');
+  const text = (k) => objects.get(k)?.body.toString();
+  assert.deepEqual(
+    [text('a.txt'), text('c.txt'), text('g.txt'), text('m.txt')],
+    ['one\ntwo\n', 'over\n', undefined, undefined]
+  );
+  assert.ok([...objects.keys()].some((k) => k.startsWith('.git/objects/')));
+  await kernel.mount({ type: 'mocks3', source: endpoint, target: '/mnt/s3' });
+  const again = await kernel.run([
+    'bash',
+    '-c',
+    'cd /mnt/s3 && cat a.txt c.txt && ls -l a.txt | cut -d" " -f5 && git log --format=%s && git status --porcelain && echo clean',
+  ]);
+  assert.deepEqual(again, { status: 0, stdout: 'one\ntwo\nover\n8\nfirst\nclean\n', stderr: '' });
+  await kernel.umount('/mnt/s3');
 });

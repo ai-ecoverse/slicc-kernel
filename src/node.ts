@@ -5,6 +5,7 @@ import { OpfsFs } from './fs/opfs.ts';
 import type { RunOptions, RunResult, Terminal, TerminalOptions } from './index.ts';
 import type { WasmWorkerLike } from './kernel/host.ts';
 import { Launcher } from './launcher.ts';
+import type { MountEntry, MountSpec } from './mount/mount-fs.ts';
 import { memoryRoot } from './node/memory-root.ts';
 import { signalNumber } from './serve.ts';
 import { fetchTransport, type NetworkTransport } from './transport.ts';
@@ -33,6 +34,7 @@ export type {
   TerminalOptions,
   TerminalSignal,
 } from './index.ts';
+export type { MountEntry, MountSpec } from './mount/mount-fs.ts';
 export { fetchTransport, type NetworkTransport } from './transport.ts';
 export { memoryRoot };
 
@@ -42,6 +44,7 @@ export interface NodeKernelOptions {
   env?: Record<string, string>;
   network?: { transport?: NetworkTransport };
   worker?: string | URL;
+  driverWorker?: string | URL;
 }
 
 export interface NodeKernel {
@@ -51,6 +54,9 @@ export interface NodeKernel {
   writeFile(path: string, data: string | Uint8Array): Promise<void>;
   readFile(path: string): Promise<Uint8Array>;
   connect(): Promise<MessagePort>;
+  mount(spec: MountSpec): Promise<MountEntry>;
+  umount(target: string): Promise<void>;
+  mounts(): Promise<MountEntry[]>;
   terminate(): void;
 }
 
@@ -120,6 +126,12 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
   const launcher = new Launcher({
     fs,
     createWorker: () => nodeWorker(file, live, terminated),
+    createDriverWorker: () =>
+      nodeWorker(
+        options.driverWorker ?? new URL('./node-driver-worker.js', import.meta.url),
+        live,
+        terminated
+      ),
     ...(options.modules ? { modules: options.modules } : {}),
     ...(options.env ? { env: options.env } : {}),
     ...(transport ? { transport } : {}),
@@ -189,6 +201,9 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
       await fs.writeFile(path, data);
     },
     readFile: async (path) => fs.readFileBuffer(path),
+    mount: (spec) => guard(() => launcher.mount(spec)),
+    umount: (target) => guard(async () => launcher.umount(target)),
+    mounts: async () => launcher.mounts.list(),
     async connect() {
       if (terminated) throw new Error(TERMINATED);
       const { port1, port2 } = new MessageChannel();

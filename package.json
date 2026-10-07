@@ -23,7 +23,8 @@
   },
   "exports": {
     ".": "./dist/index.js",
-    "./node": "./dist/node.js"
+    "./node": "./dist/node.js",
+    "./driver": "./dist/driver.js"
   },
   "files": [
     "dist"

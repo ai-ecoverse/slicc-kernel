@@ -27,7 +27,7 @@ interface CommandEntry {
 }
 
 interface Manifest {
-  slicc?: { abi?: unknown; commands?: unknown; env?: unknown };
+  slicc?: { abi?: unknown; commands?: unknown; env?: unknown; filesystems?: unknown };
 }
 
 const NAME = /^[A-Za-z0-9._+-]+$/;
@@ -169,6 +169,25 @@ export async function scanCommands(fs: KernelFs, modules: string): Promise<Map<s
   }
   if (!found.has('sh') && found.has('bash')) {
     found.set('sh', { ...(found.get('bash') as Command), name: 'sh', argv0: 'sh' });
+  }
+  return found;
+}
+
+export async function scanFilesystems(fs: KernelFs, modules: string): Promise<Map<string, string>> {
+  const found = new Map<string, string>();
+  for (const pkg of await packages(fs, modules)) {
+    let manifest: Manifest;
+    try {
+      manifest = JSON.parse(await fs.readFile(`${pkg}/package.json`));
+    } catch {
+      continue;
+    }
+    const declared = manifest.slicc?.filesystems;
+    if (!declared || typeof declared !== 'object') continue;
+    for (const [type, entry] of Object.entries(declared)) {
+      const module = inside(pkg, (entry as { module?: unknown } | null)?.module);
+      if (NAME.test(type) && module && !found.has(type)) found.set(type, module);
+    }
   }
   return found;
 }

@@ -1,0 +1,11 @@
+{
+  "name": "mock-s3",
+  "version": "1.0.0",
+  "slicc": {
+    "filesystems": {
+      "mocks3": {
+        "module": "driver.mjs"
+      }
+    }
+  }
+}

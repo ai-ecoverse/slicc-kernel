@@ -1,4 +1,5 @@
-import type { ProcessInfo, ProcessListing } from '../kernel/proc-info.ts';
+import type { MountLine, ProcessInfo, ProcessListing } from '../kernel/proc-info.ts';
+import { mountTable } from './process-fds.ts';
 
 const HZ = 100;
 const DIR_MODE = 0o40555;
@@ -18,6 +19,7 @@ type SystemFile = (typeof SYSTEM_FILES)[number];
 
 export interface ProcSys {
   procList?(): ProcessListing;
+  mountList?(): MountLine[];
 }
 
 export interface MemorySource {
@@ -325,6 +327,7 @@ export function useProcfs(Fs: ProcFs, sys: ProcSys, pid: number, memory = memory
         if (!infoOf(Number(name))) throw error();
         return pidDir(name, Number(name));
       }
+      if (name === 'mounts') return file(parent, name, () => mountTable(sys.mountList?.() ?? []));
       if ((SYSTEM_FILES as readonly string[]).includes(name)) {
         return file(parent, name, () =>
           systemFile(name as SystemFile, procList(), Date.now(), memory)
@@ -335,7 +338,7 @@ export function useProcfs(Fs: ProcFs, sys: ProcSys, pid: number, memory = memory
     },
     readdir: (node) => {
       const names = new Set(readdir ? readdir(node) : ['.', '..']);
-      for (const name of SYSTEM_FILES) names.add(name);
+      for (const name of [...SYSTEM_FILES, 'mounts']) names.add(name);
       for (const p of procList().processes) names.add(String(p.pid));
       return [...names];
     },

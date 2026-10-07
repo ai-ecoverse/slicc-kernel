@@ -17,11 +17,12 @@ import {
 } from './protocol.ts';
 
 export interface ClientHost {
+  scope?: 'transport';
   launcher: () => Promise<Launcher>;
   transport?: () => RealmTransport;
   locks?: LockManagerLike;
   lock?: string;
-  signal: (name: string) => number;
+  signal?: (name: string) => number;
 }
 
 export interface ServedClient {
@@ -98,6 +99,15 @@ async function fsCall(fs: KernelFs, method: string, args: unknown[]): Promise<An
     default:
       return { result: await fs.exists(path(0)) };
   }
+}
+
+function signalOf(host: ClientHost): (name: string) => number {
+  return (
+    host.signal ??
+    ((name) => {
+      throw fsError('EINVAL', `this kernel names no signal ${name}`);
+    })
+  );
 }
 
 export function serveClient(port: MessagePortLike, host: ClientHost): ServedClient {
@@ -193,6 +203,9 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
   }
 
   async function handle(req: ClientRequest): Promise<Answer> {
+    if (host.scope === 'transport' && req.op !== 'detach') {
+      throw fsError('EPERM', `${req.op}: this client may only use the network transport`);
+    }
     const l = await host.launcher();
     switch (req.op) {
       case 'spawn':
@@ -202,11 +215,11 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
       case 'terminal': {
         const session = terminals.get(req.terminal);
         if (!session) throw new Error(`no terminal ${req.terminal}`);
-        act(session, req, host.signal);
+        act(session, req, signalOf(host));
         return { result: true };
       }
       case 'kill':
-        if (!l.kill(req.pid, host.signal(req.signal))) throw fsError('ESRCH', `pid ${req.pid}`);
+        if (!l.kill(req.pid, signalOf(host)(req.signal))) throw fsError('ESRCH', `pid ${req.pid}`);
         return { result: true };
       case 'ps':
         return {
@@ -228,6 +241,13 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
         watches.get(req.watch)?.();
         watches.delete(req.watch);
         return { result: true };
+      case 'mount':
+        return { result: await l.mount(req.spec) };
+      case 'umount':
+        l.umount(req.target);
+        return { result: true };
+      case 'mounts':
+        return { result: l.mounts.list() };
       case 'detach':
         return { result: true };
       default:

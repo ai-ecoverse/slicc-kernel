@@ -22,7 +22,7 @@ import { type FdTable, kernelFdKind, type OpenFile } from './fd-table.ts';
 import type { LockTable } from './host-ops.ts';
 import type { JobTable } from './jobs.ts';
 import type { HttpHandles } from './net/http-syscalls.ts';
-import type { ProcessListing } from './proc-info.ts';
+import type { MountLine, ProcessListing } from './proc-info.ts';
 import { isWasmSyscall, type StateListener, WasmProcess } from './process.ts';
 import {
   type ForkState,
@@ -42,6 +42,7 @@ import {
 import type { PtyTable } from './pty.ts';
 import { SIG, sigbit } from './signals.ts';
 import { KernelSocket, type LoopbackNet } from './socket.ts';
+import type { VfsNodes } from './vfs-file.ts';
 
 export interface WasmWorkerLike {
   postMessage(message: unknown, transfer?: Transferable[]): void;
@@ -67,6 +68,10 @@ export interface SpawnWasmOptions {
   ppid?: number;
   kill?: (pid: number, sig: number) => boolean | Promise<boolean>;
   processes?: () => ProcessListing;
+  openFiles?: Set<VfsNodes>;
+  statfs?: (path: string) => Promise<{ quota: number; usage: number } | undefined>;
+  mounts?: () => MountLine[];
+  held?: Set<Map<string, number>>;
   jobs?: JobTable;
   ptys?: PtyTable;
 
@@ -134,6 +139,8 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     fs: opts.fs,
     kill: opts.kill,
     processes: opts.processes,
+    openFiles: opts.openFiles,
+    mounts: opts.mounts,
     jobs: opts.jobs,
     ptys: opts.ptys,
     net: opts.net,
@@ -149,7 +156,18 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
       ? { pendingBits: () => Atomics.load(header, SAB_I_SIGNALS) }
       : {}),
   });
-  const token = mintSyncFsToken({ fs: opts.fs, cwd: opts.cwd });
+  const holds = new Map<string, number>();
+  opts.held?.add(holds);
+  const token = mintSyncFsToken({
+    fs: opts.fs,
+    cwd: opts.cwd,
+    ...(opts.statfs ? { statfs: opts.statfs } : {}),
+    hold: (path, on) => {
+      const count = (holds.get(path) ?? 0) + (on ? 1 : -1);
+      if (count > 0) holds.set(path, count);
+      else holds.delete(path);
+    },
+  });
   const worker = opts.createWorker();
   const dispatch = async (req: SyncSabDispatchRequest): Promise<SyncFsResult> => {
     if (isWasmSyscall(req)) return process.syscall(req);
@@ -171,6 +189,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     for (const tid of [...threads.keys()]) endThread(tid);
     responder.dispose();
     revokeSyncFsToken(token);
+    opts.held?.delete(holds);
     worker.terminate();
     void process.exit().then(
       () => settle(code),
