@@ -21,11 +21,13 @@ export function exec(cmd, args) {
   });
 }
 
-async function retried({ label, attempt, done, sleep, log }) {
+const PUBLISHED = /cannot publish over the previously published versions/i;
+
+async function retried({ label, attempt, done, sleep, log, already = () => false }) {
   for (let n = 0; ; n++) {
     const r = await attempt();
     if (r.code === 0) return true;
-    if (await done()) return false;
+    if (already(r) || (await done())) return false;
     if (n >= DELAYS.length) throw new Error(`${label} failed: ${r.stderr.trim()}`);
     log(`${label} failed, retrying: ${r.stderr.trim().split('\n').pop()}`);
     await sleep(DELAYS[n]);
@@ -78,6 +80,7 @@ export async function recover({
         label: `npm publish ${version}`,
         attempt: () => run('npm', ['publish']),
         done: () => published(version),
+        already: (r) => PUBLISHED.test(r.stderr),
         sleep,
         log,
       });
