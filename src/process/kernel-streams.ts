@@ -24,6 +24,14 @@ interface PtyPathFs {
 
 const PTY_PATH = /^\/dev\/(?:ptmx|pts\/(\d+))$/;
 
+const TTY_PATH = /^\/dev\/tty\d+$/;
+
+interface TtyNodeFs {
+  analyzePath?: (path: string) => { exists: boolean };
+  mkdev?: (path: string, dev: number) => unknown;
+  makedev?: (major: number, minor: number) => number;
+}
+
 function isPtyPath(path: string): boolean {
   return PTY_PATH.test(path);
 }
@@ -265,9 +273,17 @@ export class KernelStreams {
 
   private nameStream(stream: ProcessStream, name: string): void {
     stream.path = name;
+    this.ttyNode(name);
     if (typeof this.Fs.stat !== 'function') return;
 
     stream.stream_ops = { ...stream.stream_ops, getattr: () => this.Fs.stat?.(name) ?? {} };
+  }
+
+  private ttyNode(name: string): void {
+    const { analyzePath, mkdev, makedev } = this.Fs as unknown as TtyNodeFs;
+    if (!TTY_PATH.test(name) || !analyzePath || !mkdev || !makedev) return;
+    if (!analyzePath.call(this.Fs, name).exists)
+      mkdev.call(this.Fs, name, makedev.call(this.Fs, 6, 0));
   }
 
   private ttyOps(kfd: number): object {
