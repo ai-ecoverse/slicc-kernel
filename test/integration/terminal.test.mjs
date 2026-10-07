@@ -70,3 +70,19 @@ test('closing a terminal hangs up its shell', async (t) => {
   await page.evaluate(() => window.term.close());
   await page.until(() => window.screen.status === 129);
 });
+
+test('every terminal of a kernel gives its programs a working stdout, also after the first closes', async (t) => {
+  const { page, until, type } = await terminal(chrome, t, ['bash', '-i'], { cwd: '/home' });
+  await until('$ ');
+  await type('echo one > a.txt; cat a.txt; tty\r', 'one\r\n/dev/tty1');
+  for (const name of ['/dev/tty2', '/dev/tty3']) {
+    if (name === '/dev/tty3') await page.evaluate(() => window.term.close());
+    await page.evaluate(() => window.terminal(['bash', '-i'], { cwd: '/home' }));
+    await until('$ ');
+    await type('cat a.txt; tty; echo "rc $?"\r', 'rc 0');
+    const shown = await page.evaluate(() => window.screen.screen);
+    assert.match(shown, new RegExp(`one\\r\\n${name}\\r\\nrc 0`));
+    assert.doesNotMatch(shown, /No such file or directory/);
+  }
+  assert.deepEqual(page.errors, []);
+});
