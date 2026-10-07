@@ -179,6 +179,27 @@ The proxy answers `200` with `Content-Type: application/vnd.slicc.raw-fetch`: a 
 
 Directories are renamed with `FileSystemHandle.move()` where available, else by copy and delete.
 
+### Mounts
+
+`kernel.mount({ type, source, target, options })` mounts a file system on an existing directory. Every process sees it, Emscripten and WASI alike, and so does every attached client. `kernel.umount(target)` unmounts it, and fails with `EBUSY` while a process has a file open under it. `kernel.mounts()` lists the table, as does `/proc/mounts`. The Node entry and attached clients have the same three calls (client protocol 1.2).
+
+- **Built in:** `tmpfs`, which lives in memory until unmounted.
+- **Package drivers:** a package declares a type in `"slicc": { "filesystems": { "<type>": { "module": "<file>" } } }`, and the kernel starts that module in a worker of its own for each mount. The module is a single self-contained file: it can't import bare specifiers.
+  - Its default export receives `{ fetch }`, the kernel's network transport. It returns `{ handlers, capabilities }`.
+  - The handlers are path-based: `getattr`, `readdir`, `open`/`read`/`write`/`release` on handles, `mkdir`, `rmdir`, `unlink`, `rename`, and optionally `symlink`, `readlink`, `setattr` and `statfs`.
+  - An optional `mount({ source, options })` handler validates the source.
+  - Errors carry a POSIX `code`.
+  - `@ai-ecoverse/slicc-kernel/driver` exports the types and `fsError`.
+- **Capabilities:** `readonly`, `symlinks`, `chmod`, `maxIo` (the largest read or write per message), `maxFile`, `listingStats`, and `attrTtl`/`entryTtl` (in ms, default 1000).
+- **Caching:** the kernel caches attributes and listings for those TTLs, and a driver can push `invalidate` for changes made outside. File contents are read whole when a program opens a file and written back when it closes it, which gives close-to-open consistency as NFS has.
+- **Rules on a mount:**
+  - a rename across mounts is `EXDEV`, so `mv` copies;
+  - `df` reports each mount from its driver's `statfs`;
+  - each mount has its own device number;
+  - without `chmod` support, `chmod` succeeds and changes nothing;
+  - a file over `maxFile` is `EFBIG`, and `options.maxfile` (`"2G"`, or `"0"` for none) changes that limit for one mount;
+  - a driver that crashes or doesn't answer within 30 s makes its mount's calls fail with `EIO`, and the mount is listed as `failed`.
+
 ### `/proc`
 
 Every process of the kernel has `/proc/<pid>/` with `cmdline`, `comm`, `stat`, `statm` and `status`, in the formats procps reads, and `/proc/self/` has the same files for the process that reads them. They come from the kernel's process table when they are opened, so a terminal sees the processes of every client; an exec'd program shows under the pid its parent knows. `/proc/uptime`, `/proc/loadavg`, `/proc/stat` and `/proc/meminfo` are there too, and `/proc/mounts`. Pids, parents, process groups, sessions, command lines, terminals, start and boot times are real, and so is each process's memory: the size of its wasm memory (`VSZ` and `RSS` alike, as wasm has no paging), which `/proc/meminfo` counts as used. CPU times, load and `MemTotal` (from `navigator.deviceMemory`, else 4 GiB) are placeholders. Only Emscripten processes see this `/proc`.

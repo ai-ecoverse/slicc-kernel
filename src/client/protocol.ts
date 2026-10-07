@@ -1,8 +1,9 @@
 import type { WatchChange } from '../fs/watch.ts';
 import type { TransportCall, TransportReply } from '../kernel/net/remote-transport.ts';
 import type { RealmTransportTraits } from '../kernel/net/transport.ts';
+import type { MountSpec } from '../mount/mount-fs.ts';
 
-export const PROTOCOL: readonly [number, number] = [1, 1];
+export const PROTOCOL: readonly [number, number] = [1, 2];
 
 export interface ClientHello {
   protocol: readonly [number, number];
@@ -61,6 +62,9 @@ export type ClientCall =
   | { op: 'fs'; method: FsMethod; args: unknown[] }
   | { op: 'watch'; paths: string[]; recursive: boolean }
   | { op: 'unwatch'; watch: number }
+  | { op: 'mount'; spec: MountSpec }
+  | { op: 'umount'; target: string }
+  | { op: 'mounts' }
   | { op: 'detach'; kill?: boolean };
 
 export type ClientRequest = ClientCall & { id: number };

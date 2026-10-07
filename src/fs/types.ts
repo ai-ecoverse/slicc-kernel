@@ -8,6 +8,7 @@ export interface FsStat {
   atime: Date;
   ctime: Date;
   ino: number;
+  dev?: number;
 }
 
 export interface KernelFs {

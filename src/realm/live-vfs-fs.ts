@@ -42,6 +42,7 @@ interface LiveNodeState {
   loaded: boolean;
   dirty: boolean;
   openCount: number;
+  writers?: number;
 
   orphan?: boolean;
 
@@ -318,7 +319,7 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
       const size = Fs.isDir(node.mode) ? 4096 : s.loaded ? s.len : st.size;
       const mtime = new Date(st.mtimeMs ?? 0);
       return {
-        dev: 1,
+        dev: st.dev ?? 1,
         ino: st.ino ?? inodeOf(liveNodePath(node)),
         mode: node.mode,
         nlink: 1,
@@ -450,29 +451,46 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
 }
 
 function createStreamOps(h: LiveHelpers): LiveStreamOps {
-  const { Fs, statOf, ensureLoaded, ensureCapacity, flushNode } = h;
+  const { Fs, statOf, ensureLoaded, ensureCapacity, flushNode, bridgeOf } = h;
+  const held = (stream: LiveFsStream, change: 1 | -1) => {
+    const s = stream.node.live;
+    if ((stream.flags & 3) === 0 || s.orphan) return;
+    const before = s.writers ?? 0;
+    s.writers = Math.max(0, before + change);
+    if ((before === 0) !== (s.writers === 0)) {
+      try {
+        bridgeOf(stream.node).hold?.(liveNodePath(stream.node), s.writers > 0);
+      } catch {}
+    }
+  };
   return {
     open(stream) {
       if (!Fs.isFile(stream.node.mode)) return;
       stream.node.live.openCount++;
+      held(stream, 1);
     },
 
     dup(stream) {
       if (!Fs.isFile(stream.node.mode)) return;
       stream.node.live.openCount++;
+      held(stream, 1);
     },
     close(stream) {
       const node = stream.node;
       if (!Fs.isFile(node.mode)) return;
       const s = node.live;
       s.openCount = Math.max(0, s.openCount - 1);
-      if (s.openCount > 0) return;
+      if (s.openCount > 0) {
+        held(stream, -1);
+        return;
+      }
       try {
         flushNode(node);
       } finally {
         s.data = undefined;
         s.len = 0;
         s.loaded = false;
+        held(stream, -1);
       }
     },
     read(stream, buffer, offset, length, position) {
@@ -686,7 +704,7 @@ function guardStatfs(Fs: LiveMountFsApi): void {
     const defaults = statfsNode(node);
     let usage: SyncFsUsage | null | undefined;
     try {
-      usage = node.live ? node.mount?.opts?.bridge?.statfs?.() : undefined;
+      usage = node.live ? node.mount?.opts?.bridge?.statfs?.(liveNodePath(node)) : undefined;
     } catch {
       return defaults;
     }

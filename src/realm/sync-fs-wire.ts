@@ -15,7 +15,8 @@ export type SyncFsOp =
   | 'readlink'
   | 'chmod'
   | 'utimes'
-  | 'statfs';
+  | 'statfs'
+  | 'hold';
 
 export interface SyncFsRequest {
   token: string;
@@ -46,6 +47,7 @@ export interface SyncFsBridgeStat {
   atimeMs?: number;
   ctimeMs?: number;
   ino?: number;
+  dev?: number;
 }
 
 export interface SyncFsUsage {
@@ -75,8 +77,9 @@ export interface SyncFsPosixBridge {
   readlink(path: string): string;
   chmod(path: string, mode: number): void;
   utimes(path: string, atimeMs: number, mtimeMs: number): void;
+  hold?(path: string, held: boolean): void;
   readdirStat(path: string): Array<[string, SyncFsBridgeStat | null]>;
-  statfs?(): SyncFsUsage | null;
+  statfs?(path?: string): SyncFsUsage | null;
 }
 
 export function syncError(code: string, label: string): Error & { code: string } {
@@ -103,5 +106,6 @@ export function parseSyncFsStat(json: unknown): SyncFsBridgeStat | null {
     ...(typeof s.atimeMs === 'number' ? { atimeMs: s.atimeMs } : {}),
     ...(typeof s.ctimeMs === 'number' ? { ctimeMs: s.ctimeMs } : {}),
     ...(typeof s.ino === 'number' ? { ino: s.ino } : {}),
+    ...(typeof s.dev === 'number' ? { dev: s.dev } : {}),
   };
 }

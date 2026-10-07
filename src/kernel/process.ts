@@ -23,7 +23,7 @@ import { AsyncOps, HOST_OPS, type HostSyscall, hostSyscall, type LockTable } fro
 import type { JobTable } from './jobs.ts';
 import { HTTP_OPS, type HttpHandles, type HttpSyscall } from './net/http-syscalls.ts';
 import { NO_TRANSPORT } from './net/network.ts';
-import type { ProcessListing } from './proc-info.ts';
+import type { MountLine, ProcessListing } from './proc-info.ts';
 import type { ForkState } from './protocol.ts';
 import { PTY_OPS, type PtySyscall, type PtyTable, ptySyscall } from './pty.ts';
 import { selectFds } from './select.ts';
@@ -128,6 +128,7 @@ export type WasmSyscall =
   | { op: 'proc-fork'; state: ForkState }
   | { op: 'proc-kill'; pid: number; sig: number }
   | { op: 'proc-list' }
+  | { op: 'mount-list' }
   | { op: 'proc-exec'; pid: number }
   | { op: 'proc-setpgid'; pid: number; pgid: number }
   | { op: 'proc-getpgid'; pid: number }
@@ -258,6 +259,7 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'proc-fork',
   'proc-kill',
   'proc-list',
+  'mount-list',
   'proc-exec',
   'proc-setpgid',
   'proc-getpgid',
@@ -292,6 +294,10 @@ export interface WasmProcessOptions {
   kill?: (pid: number, sig: number) => boolean | Promise<boolean>;
 
   processes?: () => ProcessListing;
+
+  openFiles?: Set<VfsNodes>;
+
+  mounts?: () => MountLine[];
 
   onPending?: (sig: number) => void;
 
@@ -364,6 +370,7 @@ export class WasmProcess {
     this.options = options;
     this.children = new ChildTable(fds, options.spawner, options.forker);
     this.nodes = new VfsNodes(options.fs);
+    options.openFiles?.add(this.nodes);
     this.children.onChildState = () => this.signal(SIG.CHLD);
     this.children.onReap = options.onReap;
   }
@@ -818,6 +825,8 @@ export class WasmProcess {
           kind: 'json',
           json: this.options.processes?.() ?? { boot: 0, processes: [] },
         };
+      case 'mount-list':
+        return { ok: true, kind: 'json', json: this.options.mounts?.() ?? [] };
       case 'proc-alarm':
         this.setAlarm(req.sig, req.firstMs ?? req.ms, req.repeat ? req.ms : 0, req.timer);
         return { ok: true, kind: 'void' };
@@ -882,6 +891,7 @@ export class WasmProcess {
     this.asyncOps.close();
     for (const pid of this.children.pids()) this.options.onReap?.(pid);
     await this.fds.closeAll();
+    this.options.openFiles?.delete(this.nodes);
     await this.options.http?.closeAll();
   }
 }

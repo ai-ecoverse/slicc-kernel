@@ -129,6 +129,58 @@ async function fetchBytes(url) {
   }
 }
 
+window.copyTree = async (from, to, names) => {
+  for (const name of names) {
+    const parts = (to + name).split('/');
+    const base = parts.pop();
+    const handle = await (await walk(parts.join('/'), true)).getFileHandle(base, { create: true });
+    const writable = await handle.createWritable();
+    await writable.write(await fetchBytes(`/${from}${name}`));
+    await writable.close();
+  }
+  return names.length;
+};
+
+window.objects = new Map();
+
+function storeTransport(inner) {
+  const reply = (status, bytes = new Uint8Array(0)) => ({
+    status,
+    statusText: '',
+    headers: [],
+    body: (async function* () {
+      if (bytes.length) yield bytes;
+    })(),
+    cancel: async () => {},
+  });
+  return {
+    traits: inner.traits,
+    async fetch(req) {
+      if (!req.url.startsWith('http://mock-s3.test/')) return inner.fetch(req);
+      const url = new URL(req.url);
+      const key = decodeURIComponent(url.pathname.replace(/^\/bucket\/?/, ''));
+      const objects = window.objects;
+      if (req.method === 'GET' && url.searchParams.has('list')) {
+        const prefix = url.searchParams.get('list');
+        const listed = [...objects]
+          .filter(([k]) => k.startsWith(prefix))
+          .map(([k, o]) => ({ key: k, size: o.body.length, mtime: o.mtime }));
+        return reply(200, new TextEncoder().encode(JSON.stringify(listed)));
+      }
+      if (req.method === 'PUT') {
+        objects.set(key, { body: req.body ?? new Uint8Array(0), mtime: Date.now() });
+        return reply(200);
+      }
+      if (!objects.has(key)) return reply(404);
+      if (req.method === 'DELETE') {
+        objects.delete(key);
+        return reply(200);
+      }
+      return reply(200, objects.get(key).body);
+    },
+  };
+}
+
 window.installTree = async (dir, names) => {
   const dirs = new Set(names.map((name) => (dir + name).split('/').slice(0, -1).join('/')));
   for (const path of [...dirs].sort()) await walk(path, true);
@@ -164,9 +216,10 @@ function withTracking(kernel) {
 
 window.boot = async (options = {}) => {
   await install();
-  const transport = options.proxy
+  const base = options.proxy
     ? localProxyTransport(options.proxy)
     : fetchTransport(options.hint ? { hint: options.hint } : {});
+  const transport = options.store ? storeTransport(base) : base;
   const network = options.network === false ? {} : { network: { transport } };
   window.kernel = withTracking(
     await createKernel({ root: await navigator.storage.getDirectory(), ...network })

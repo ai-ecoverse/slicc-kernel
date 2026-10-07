@@ -1,5 +1,5 @@
 import type { DeviceMeta, PollState } from '../kernel/fd-table.ts';
-import type { ProcessListing } from '../kernel/proc-info.ts';
+import type { MountLine, ProcessListing } from '../kernel/proc-info.ts';
 import type { ForkState, InheritedFd, WasmProcessInitMsg } from '../kernel/protocol.ts';
 import { SIG } from '../kernel/signals.ts';
 import type { Termios } from '../kernel/tty.ts';
@@ -154,6 +154,9 @@ export function kernelSys(transport: SyncSabTransport): ProcessSys & PtyKernel {
     },
     procList() {
       return json(call({ op: 'proc-list' }, 'proc-list')) as ProcessListing;
+    },
+    mountList() {
+      return json(call({ op: 'mount-list' }, 'mount-list')) as MountLine[];
     },
     ptyNumber(fd) {
       return json(call({ op: 'pty-number', fd }, `pty-number ${fd}`)) as number;
@@ -436,7 +439,7 @@ export async function runWasmProcess(
   const restartable = (): boolean => signals.restartable();
   const streams = new KernelStreams(running.FS, sys, { sigpipe, restartable });
   trackCloseOnExec(running.FS);
-  useMounts(running.FS, init.env);
+  useMounts(running.FS, init.env, true);
   useProcfs(running.FS as unknown as ProcFs, sys, init.pid);
   if (init.fork) restoreForkedStreams(running.FS, streams, init.fork.streams ?? []);
   else {

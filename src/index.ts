@@ -1,4 +1,5 @@
 import type { TransportCall } from './kernel/net/remote-transport.ts';
+import type { MountEntry, MountSpec } from './mount/mount-fs.ts';
 import type { KernelCall, TerminalAction } from './serve.ts';
 import { type NetworkTransport, serveTransport } from './transport.ts';
 
@@ -29,6 +30,7 @@ export {
   localProxyTransport,
   probeLocalProxy,
 } from './local-proxy-transport.ts';
+export type { MountEntry, MountSpec } from './mount/mount-fs.ts';
 export {
   type FetchTransportOptions,
   fetchTransport,
@@ -70,6 +72,9 @@ export interface Kernel {
   run(argv: string[], options?: RunOptions): Promise<RunResult>;
   openTerminal(argv: string[], options?: TerminalOptions): Promise<Terminal>;
   connect(): Promise<MessagePort>;
+  mount(spec: MountSpec): Promise<MountEntry>;
+  umount(target: string): Promise<void>;
+  mounts(): Promise<MountEntry[]>;
   terminate(): void;
 }
 
@@ -239,6 +244,9 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     },
     openTerminal,
     connect: async () => (await call({ op: 'connect' })) as MessagePort,
+    mount: async (spec) => (await call({ op: 'mount', spec })) as MountEntry,
+    umount: async (target) => void (await call({ op: 'umount', target })),
+    mounts: async () => (await call({ op: 'mounts' })) as MountEntry[],
     terminate() {
       fail(new Error('slicc-kernel terminated'));
       worker.terminate();

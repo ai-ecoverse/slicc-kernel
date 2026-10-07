@@ -21,7 +21,7 @@ const events = (page, name) => page.evaluate((n) => window[n].events, name);
 
 test('a worker attaches, its sleep shows in a terminal, the terminal kills it, and the worker sees the exit', async (t) => {
   const { page } = await booted(chrome, t);
-  assert.deepEqual(await attached(page, 'a'), { protocol: [1, 1] });
+  assert.deepEqual(await attached(page, 'a'), { protocol: [1, 2] });
   const { pid, pgid } = await ask(page, 'a', 'spawn', { argv: ['sleep', '100'] });
   assert.equal(pgid, pid);
   const listed = await ask(page, 'a', 'ps');
@@ -80,7 +80,7 @@ test('a port survives a second transfer; files, fetch, refusal of another protoc
     const { port } = window.a.events.find((e) => e.event === 'forwarded');
     return window.b.ask('attach', { port }, [port]);
   });
-  assert.deepEqual(protocol, { protocol: [1, 1] });
+  assert.deepEqual(protocol, { protocol: [1, 2] });
 
   assert.deepEqual(await ask(page, 'b', 'files'), {
     listed: ['a.txt'],
@@ -109,7 +109,7 @@ test('a port survives a second transfer; files, fetch, refusal of another protoc
   });
   assert.match(
     refused,
-    /^hello,bye: the slicc-kernel detached this client: slicc-kernel client protocol 2\.x is not supported: this side speaks 1\.1$/
+    /^hello,bye: the slicc-kernel detached this client: slicc-kernel client protocol 2\.x is not supported: this side speaks 1\.2$/
   );
   const silent = await page.evaluate(() =>
     window

@@ -1,3 +1,4 @@
+import type { MountLine } from '../kernel/proc-info.ts';
 import type { ProcessFs, ProcessStream, ProcessSys } from './kernel-streams.ts';
 import { type PtyKernel, ptyIoctl } from './process-pty.ts';
 import { wasiErrno } from './wasi-errno.ts';
@@ -446,11 +447,20 @@ export function useDevFd(Fs: ProcessFs): void {
 const O_ACCMODE = 0o3;
 const O_CREAT = 0o100;
 
-export function mountTable(): string {
+const field = (text: string) =>
+  (text || 'none').replace(/[\s\\]/g, (c) => `\\${c.charCodeAt(0).toString(8).padStart(3, '0')}`);
+
+export function mountTable(mounts: MountLine[] = []): string {
   const root = globalThis.navigator?.storage ? 'opfs' : 'memory';
-  return [`${root} / ${root} rw 0 0`, 'devfs /dev devfs rw 0 0', 'proc /proc proc rw 0 0', ''].join(
-    '\n'
-  );
+  const lines = [`${root} / ${root} rw 0 0`, 'devfs /dev devfs rw 0 0', 'proc /proc proc rw 0 0'];
+  for (const m of mounts) {
+    const options = Object.entries(m.options).map(([k, v]) => (v === '' ? k : `${k}=${v}`));
+    const access = options.includes('ro') ? [] : ['rw'];
+    lines.push(
+      `${field(m.source)} ${field(m.target)} ${m.type} ${[...access, ...options].join(',')} 0 0`
+    );
+  }
+  return `${lines.join('\n')}\n`;
 }
 
 const NAME = /^[a-z_][a-z0-9_-]*$/i;
@@ -465,13 +475,13 @@ export function accounts(env: Record<string, string> = {}): { passwd: string; gr
   };
 }
 
-export function useMounts(Fs: ProcessFs, env: Record<string, string> = {}): void {
+export function useMounts(Fs: ProcessFs, env: Record<string, string> = {}, live = false): void {
   const { writeFile, mkdirTree } = Fs;
   if (typeof Fs.open !== 'function' || typeof writeFile !== 'function') return;
   const { passwd, group } = accounts(env);
   const backing: Record<string, string> = { '/etc/mtab': '/proc/mounts' };
   try {
-    writeFile.call(Fs, '/proc/mounts', mountTable());
+    if (!live) writeFile.call(Fs, '/proc/mounts', mountTable());
   } catch {
     return;
   }

@@ -1,6 +1,8 @@
-import { type Abi, type Command, scanCommands } from './commands.ts';
+import { serveClient } from './client/serve-client.ts';
+import { type Abi, type Command, scanCommands, scanFilesystems } from './commands.ts';
 import { followLinks, withCommandDirs } from './fs/commands.ts';
 import type { KernelFs } from './fs/types.ts';
+import { fsError } from './fs/types.ts';
 import { FsWatchers } from './fs/watch.ts';
 import {
   type ChildForker,
@@ -30,6 +32,15 @@ import type { ForkState, WasmProgram } from './kernel/protocol.ts';
 import { PtyTable } from './kernel/pty.ts';
 import { LoopbackNet } from './kernel/socket.ts';
 import { KernelTty } from './kernel/tty.ts';
+import type { VfsNodes } from './kernel/vfs-file.ts';
+import { serveFilesystem } from './mount/driver.ts';
+import {
+  type MountEntry,
+  type MountSpec,
+  MountTable,
+  type OpenedDriver,
+} from './mount/mount-fs.ts';
+import { tmpfs } from './mount/tmpfs.ts';
 import {
   type ForeignResults,
   foreignImports,
@@ -44,6 +55,7 @@ export interface LauncherOptions {
   env?: Record<string, string>;
   transport?: RealmTransport;
   caStore?: CaStore;
+  createDriverWorker?: () => WasmWorkerLike;
 }
 
 export interface RunOptions {
@@ -220,13 +232,27 @@ export class Launcher {
   private readonly ca: () => Promise<RealmCa>;
   readonly transport: RealmTransport;
   readonly watchers = new FsWatchers();
+  readonly mounts: MountTable;
+  private readonly createDriverWorker: (() => WasmWorkerLike) | undefined;
+  private readonly openFiles = new Set<VfsNodes>();
+  private readonly held = new Set<Map<string, number>>();
   private nextPid = 1000;
   readonly boot = Date.now();
   private terminals = 0;
 
   constructor(options: LauncherOptions) {
-    this.base = this.watchers.wrap(options.fs);
+    this.mounts = new MountTable({
+      open: (type, spec) => this.driver(type, spec),
+      busy: (target) =>
+        [...this.openFiles].some((nodes) => nodes.holds(target)) ||
+        [...this.held].some((paths) =>
+          [...paths.keys()].some((p) => p === target || p.startsWith(`${target}/`))
+        ),
+      changed: this.watchers.changed.bind(this.watchers),
+    });
+    this.base = this.watchers.wrap(this.mounts.wrap(options.fs));
     this.createWorker = options.createWorker;
+    this.createDriverWorker = options.createDriverWorker;
     this.modulesDir = options.modules ?? '/node_modules';
     this.env = { ...networkEnv(), ...options.env };
     this.ca = kernelCa(options.caStore ?? memoryCaStore());
@@ -417,6 +443,10 @@ export class Launcher {
       forker: this.forker(pid, req),
       kill: (target, sig) => this.kill(target, sig),
       processes: () => ({ boot: this.boot, processes: this.list() }),
+      openFiles: this.openFiles,
+      held: this.held,
+      statfs: (path) => this.mounts.statfs(path),
+      mounts: () => this.mounts.list(),
       jobs: this.jobs,
       ptys: this.ptys,
       net: this.net,
@@ -507,6 +537,57 @@ export class Launcher {
     if (!handle) return false;
     if (sig !== 0) handle.signal(sig);
     return true;
+  }
+
+  private async driver(type: string, _spec: MountSpec): Promise<OpenedDriver> {
+    if (type === 'tmpfs') {
+      const { port1, port2 } = new MessageChannel();
+      serveFilesystem(port2, tmpfs(), { symlinks: true, chmod: true, attrTtl: 0 });
+      return {
+        port: port1,
+        dispose: () => {
+          port1.close();
+          port2.close();
+        },
+      };
+    }
+    const module = (await scanFilesystems(this.base, this.modulesDir)).get(type);
+    if (!module) throw fsError('ENODEV', `unknown file system type ${type}`);
+    if (!this.createDriverWorker)
+      throw fsError('ENODEV', `this kernel cannot start ${type} drivers`);
+    const code = await this.base.readFile(module);
+    const worker = this.createDriverWorker();
+    const driver = new MessageChannel();
+    const client = new MessageChannel();
+    const served = serveClient(client.port1, {
+      launcher: async () => this,
+      scope: 'transport',
+    });
+    worker.postMessage({ code, driver: driver.port2, client: client.port2 }, [
+      driver.port2,
+      client.port2,
+    ]);
+    return {
+      port: driver.port1,
+      dispose: () => {
+        worker.terminate();
+        served.detach();
+        driver.port1.close();
+      },
+      onCrash: (listener) =>
+        worker.addEventListener('error', (event) => {
+          (event as { preventDefault?: () => void }).preventDefault?.();
+          listener(new Error(String((event as { message?: unknown }).message)));
+        }),
+    };
+  }
+
+  mount(spec: MountSpec): Promise<MountEntry> {
+    return this.mounts.mount(spec, this.fs);
+  }
+
+  umount(target: string): void {
+    this.mounts.umount(target);
   }
 
   async prepare(): Promise<void> {

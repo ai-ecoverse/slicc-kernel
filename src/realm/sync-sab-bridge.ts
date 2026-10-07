@@ -212,6 +212,9 @@ export function createSyncFsSabBridge(
     utimes: (path, atimeMs, mtimeMs) => {
       run({ op: 'utimes', path, atimeMs, mtimeMs }, path);
     },
-    statfs: () => parseSyncFsUsage(json({ op: 'statfs', path: '/' }, '/')),
+    hold: (path, held) => {
+      run({ op: 'hold', path, mode: held ? 1 : 0 }, path);
+    },
+    statfs: (path = '/') => parseSyncFsUsage(json({ op: 'statfs', path }, path)),
   };
 }

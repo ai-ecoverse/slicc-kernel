@@ -13,6 +13,7 @@ import {
   type TerminalOptions,
   type TerminalSession,
 } from './launcher.ts';
+import type { MountSpec } from './mount/mount-fs.ts';
 
 export interface KernelPort {
   postMessage(message: unknown, transfer?: Transferable[]): void;
@@ -56,12 +57,18 @@ export interface ConnectRequest {
   op: 'connect';
 }
 
+export type MountRequest =
+  | { id: number; op: 'mount'; spec: MountSpec }
+  | { id: number; op: 'umount'; target: string }
+  | { id: number; op: 'mounts' };
+
 export type KernelRequest =
   | InitRequest
   | RunRequest
   | OpenTerminalRequest
   | TerminalRequest
-  | ConnectRequest;
+  | ConnectRequest
+  | MountRequest;
 
 type WithoutId<T> = T extends unknown ? Omit<T, 'id'> : never;
 
@@ -70,6 +77,7 @@ export type KernelCall = WithoutId<KernelRequest>;
 export interface ServeDeps {
   storage: () => Promise<FileSystemDirectoryHandle>;
   createWorker: () => WasmWorkerLike;
+  createDriverWorker?: () => WasmWorkerLike;
   metadata?: (name: string) => Promise<MetaStore>;
   locks?: LockManagerLike | null;
 }
@@ -146,30 +154,41 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
     }
   }
 
-  async function handle(req: KernelRequest): Promise<unknown> {
-    if (req.op === 'init') {
-      launcher = (req.root ? Promise.resolve(req.root) : deps.storage()).then(async (root) => {
-        const name = req.metadata ?? META_DB;
-        const meta = name === false ? undefined : await deps.metadata?.(name);
-        remote = req.transport ? new RemoteTransport(port, req.transport) : undefined;
-        const fs = new OpfsFs(root, meta, dirsChannel(name));
-        await fs.reconcile();
-        const started = new Launcher({
-          fs,
-          createWorker: deps.createWorker,
-          ...(req.modules ? { modules: req.modules } : {}),
-          ...(req.env ? { env: req.env } : {}),
-          ...(remote ? { transport: remote } : {}),
-          caStore: caStore(deps.metadata ? name : false),
-        });
-        await started.prepare();
-        return started;
+  async function init(req: InitRequest): Promise<boolean> {
+    launcher = (req.root ? Promise.resolve(req.root) : deps.storage()).then(async (root) => {
+      const name = req.metadata ?? META_DB;
+      const meta = name === false ? undefined : await deps.metadata?.(name);
+      remote = req.transport ? new RemoteTransport(port, req.transport) : undefined;
+      const fs = new OpfsFs(root, meta, dirsChannel(name));
+      await fs.reconcile();
+      const started = new Launcher({
+        fs,
+        createWorker: deps.createWorker,
+        ...(deps.createDriverWorker ? { createDriverWorker: deps.createDriverWorker } : {}),
+        ...(req.modules ? { modules: req.modules } : {}),
+        ...(req.env ? { env: req.env } : {}),
+        ...(remote ? { transport: remote } : {}),
+        caStore: caStore(deps.metadata ? name : false),
       });
-      await launcher;
-      return true;
-    }
+      await started.prepare();
+      return started;
+    });
+    await launcher;
+    return true;
+  }
+
+  async function mountOp(req: MountRequest): Promise<unknown> {
+    const l = await ready();
+    if (req.op === 'mount') return l.mount(req.spec);
+    if (req.op === 'umount') return l.umount(req.target);
+    return l.mounts.list();
+  }
+
+  async function handle(req: KernelRequest): Promise<unknown> {
+    if (req.op === 'init') return init(req);
     if (req.op === 'open-terminal') return terminal(req);
     if (req.op === 'connect') return connect();
+    if (req.op === 'mount' || req.op === 'umount' || req.op === 'mounts') return mountOp(req);
     if (req.op === 'terminal') {
       const session = terminals.get(req.terminal);
       if (!session) throw new Error(`no terminal ${req.terminal}`);

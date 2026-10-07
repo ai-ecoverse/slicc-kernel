@@ -6,6 +6,7 @@ import type {
   RealmTransportRequest,
   RealmTransportResponse,
 } from '../kernel/net/transport.ts';
+import type { MountEntry, MountSpec } from '../mount/mount-fs.ts';
 import {
   type ClientCall,
   type ClientReply,
@@ -125,6 +126,9 @@ export interface KernelClient {
   run(argv: string[], options?: ClientRunOptions): Promise<ClientRunResult>;
   openTerminal(argv: string[], options?: ClientTerminalOptions): Promise<ClientTerminal>;
   ps(): Promise<ProcessEntry[]>;
+  mount(spec: MountSpec): Promise<MountEntry>;
+  umount(target: string): Promise<void>;
+  mounts(): Promise<MountEntry[]>;
   kill(pid: number, signal?: string): Promise<void>;
   fetch(request: ClientFetchRequest): Promise<RealmTransportResponse>;
   readonly fs: ClientFs;
@@ -399,6 +403,18 @@ function fsOn(channel: Channel): ClientFs {
   };
 }
 
+function since(channel: Channel, minor: number, what: string, run: () => Promise<unknown>) {
+  if (channel.protocol[1] < minor) {
+    return Promise.reject(
+      new KernelCallError(
+        `this kernel speaks protocol ${channel.protocol.join('.')}, which has no ${what}`,
+        'ENOSYS'
+      )
+    );
+  }
+  return run();
+}
+
 async function greet(
   channel: Channel,
   lock: string | undefined,
@@ -450,6 +466,12 @@ export async function attachKernel(
     run: (argv, opts = {}) => runOn(channel, argv, opts),
     openTerminal: (argv, opts = {}) => terminalOn(channel, argv, opts),
     ps: () => channel.call({ op: 'ps' }) as Promise<ProcessEntry[]>,
+    mount: (spec) =>
+      since(channel, 2, 'mount', () => channel.call({ op: 'mount', spec })) as Promise<MountEntry>,
+    umount: async (target) =>
+      void (await since(channel, 2, 'umount', () => channel.call({ op: 'umount', target }))),
+    mounts: () =>
+      since(channel, 2, 'mounts', () => channel.call({ op: 'mounts' })) as Promise<MountEntry[]>,
     kill: async (pid, signal = 'SIGTERM') => void (await channel.call({ op: 'kill', pid, signal })),
     fetch: (req) => {
       const { signal, ...rest } = req;

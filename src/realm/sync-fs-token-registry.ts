@@ -3,6 +3,8 @@ import type { KernelFs } from '../fs/types.ts';
 export interface SyncFsTokenEntry {
   fs: KernelFs;
   cwd: string;
+  statfs?: (path: string) => Promise<{ quota: number; usage: number } | undefined>;
+  hold?: (path: string, held: boolean) => void;
 }
 
 const registry = new Map<string, SyncFsTokenEntry>();
