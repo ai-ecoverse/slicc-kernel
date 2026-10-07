@@ -10,7 +10,7 @@ import {
 import { bytesSource, FdTable, nullFile, sinkFile } from './kernel/fd-table.ts';
 import { spawnWasmProcess, type WasmProcessHandle, type WasmWorkerLike } from './kernel/host.ts';
 import { LockTable } from './kernel/host-ops.ts';
-import { JobTable } from './kernel/jobs.ts';
+import { type JobMember, JobTable } from './kernel/jobs.ts';
 import { HttpHandles } from './kernel/net/http-syscalls.ts';
 import {
   enableNetwork,
@@ -451,18 +451,26 @@ export class Launcher {
 
   list(): ProcessInfo[] {
     const members = new Map(this.jobs.list().map((member) => [member.pid, member]));
-    const listed: ProcessInfo[] = [];
-    for (const member of members.values()) {
-      const described = this.described.get(member.pid);
-      if (member.execed || !described) continue;
+    const rootOf = (member: JobMember): JobMember => {
       let root = member;
       for (let up = members.get(root.execParent ?? -1); up; up = members.get(up.execParent ?? -1)) {
         root = up;
       }
+      return root;
+    };
+    const shown = (pid: number | undefined): number => {
+      const member = pid === undefined ? undefined : members.get(pid);
+      return member ? rootOf(member).pid : (pid ?? 0);
+    };
+    const listed: ProcessInfo[] = [];
+    for (const member of members.values()) {
+      const described = this.described.get(member.pid);
+      if (member.execed || !described) continue;
+      const root = rootOf(member);
       listed.push({
         pid: root.pid,
         tid: member.pid,
-        ppid: root.ppid ?? 0,
+        ppid: shown(root.ppid),
         pgid: member.pgid,
         sid: member.sid,
         ...described,

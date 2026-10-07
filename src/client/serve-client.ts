@@ -103,7 +103,7 @@ async function fsCall(fs: KernelFs, method: string, args: unknown[]): Promise<An
 export function serveClient(port: MessagePortLike, host: ClientHost): ServedClient {
   let state: 'new' | 'open' | 'closed' = 'new';
   const terminals = new Map<number, TerminalSession>();
-  const spawned = new Map<number, number>();
+  const groups = new Set<number>();
   let net: TransportServer | undefined;
   const ended = Promise.withResolvers<void>();
   const send = (message: object, transfer: Transferable[] = []) => {
@@ -119,8 +119,8 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
     net?.close();
     for (const session of terminals.values()) session.close();
     terminals.clear();
-    const pids = [...spawned.values()];
-    spawned.clear();
+    const pids = [...groups];
+    groups.clear();
     if (kill && pids.length > 0) {
       void host.launcher().then((launcher) => {
         for (const pid of pids) launcher.kill(-pid, SIG.KILL);
@@ -171,21 +171,21 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
 
   async function spawn(req: Extract<ClientRequest, { op: 'spawn' }>, l: Launcher) {
     const out = (fd: 1 | 2) => (bytes: Uint8Array) => reply(req.id, { fd, bytes: bytes.slice() });
-    let started = false;
+    let leader: number | undefined;
     const result = await l.run(req.argv, {
       ...req.options,
       collect: false,
       onStdout: out(1),
       onStderr: out(2),
       onStarted: (pid) => {
-        started = true;
+        leader = pid;
         if (state === 'closed') return;
-        spawned.set(req.id, pid);
+        groups.add(pid);
         reply(req.id, { started: pid });
       },
     });
-    spawned.delete(req.id);
-    if (!started) throw fsError('ENOENT', `${req.argv[0] ?? ''}: command not found`);
+    if (leader === undefined) throw fsError('ENOENT', `${req.argv[0] ?? ''}: command not found`);
+    if (!l.list().some((p) => p.pgid === leader)) groups.delete(leader);
     return { result: result.status };
   }
 
