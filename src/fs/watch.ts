@@ -80,7 +80,21 @@ export class FsWatchers {
       };
     const overrides: Partial<Record<keyof KernelFs, unknown>> = {
       writeFile: after(fs.writeFile.bind(fs), (path) => [path]),
-      mkdir: after(fs.mkdir.bind(fs), (path) => [path]),
+      mkdir: async (path: string, options?: { recursive?: boolean }) => {
+        const created: string[] = [];
+        if (options?.recursive) {
+          const parts = normalizePath(path).split('/').filter(Boolean);
+          for (let at = 1; at < parts.length; at++) {
+            const ancestor = `/${parts.slice(0, at).join('/')}`;
+            if (created.length > 0 || !(await fs.exists(ancestor))) created.push(ancestor);
+          }
+        }
+        try {
+          await fs.mkdir(path, options);
+        } finally {
+          this.changed(...created, path);
+        }
+      },
       rm: after(fs.rm.bind(fs), (path) => [path]),
       rename: after(fs.rename.bind(fs), (from, to) => [from, to]),
       symlink: after(fs.symlink.bind(fs), (_target, path) => [path]),
