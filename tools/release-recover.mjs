@@ -30,7 +30,7 @@ function gist(stderr) {
   return (errors.length > 0 ? errors : lines).slice(0, 2).join(' | ') || stderr.trim();
 }
 
-const PUBLISHED = /cannot publish over the previously published versions/i;
+const PUBLISHED = /cannot publish over (the )?previously (published|staged) version/i;
 const CONFIRM = { every: 15000, times: 20 };
 
 async function confirmed(done, sleep) {
