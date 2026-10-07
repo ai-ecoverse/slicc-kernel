@@ -61,6 +61,7 @@ async function retried({ label, attempt, done, sleep, log, already = () => false
 export async function recover({
   name,
   outcome,
+  prior = [],
   run = exec,
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
   log = console.log,
@@ -69,7 +70,12 @@ export async function recover({
   const tags = listed.stdout
     .split('\n')
     .map((t) => t.trim())
-    .filter((t) => TAG.test(t));
+    .filter((t) => TAG.test(t))
+    .filter((t) => {
+      if (outcome !== 'success' || prior.includes(t)) return true;
+      log(`semantic-release just released ${t}, nothing to recover`);
+      return false;
+    });
   const published = async (version) => {
     const r = await run('npm', ['view', `${name}@${version}`, 'version', '--prefer-online']);
     return r.code === 0 && r.stdout.trim() === version;
@@ -134,7 +140,8 @@ export async function recover({
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const { name } = JSON.parse(await readFile('package.json', 'utf8'));
-  await recover({ name, outcome: process.env.RELEASE_OUTCOME }).catch((err) => {
+  const prior = (process.env.RELEASE_PRIOR_TAGS ?? '').split(/\s+/).filter(Boolean);
+  await recover({ name, outcome: process.env.RELEASE_OUTCOME, prior }).catch((err) => {
     console.error(err.message);
     process.exitCode = 1;
   });

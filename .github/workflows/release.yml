@@ -42,6 +42,9 @@ jobs:
 
       - run: npm test
 
+      - id: prior
+        run: echo "tags=$(git tag --points-at HEAD | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+
       - id: release
         run: npx semantic-release
         continue-on-error: true
@@ -52,3 +55,4 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_OUTCOME: ${{ steps.release.outcome }}
+          RELEASE_PRIOR_TAGS: ${{ steps.prior.outputs.tags }}
