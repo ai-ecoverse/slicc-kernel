@@ -45,7 +45,7 @@
   },
   "devDependencies": {
     "@ai-ecoverse/py-numpy": "2.3.2-4",
-    "@ai-ecoverse/slicc-shared-web": "1.4.1",
+    "@ai-ecoverse/slicc-shared-web": "1.5.0",
     "@ai-ecoverse/wasi-cargo": "0.99.0-2",
     "@ai-ecoverse/wasi-ripgrep": "15.2.0-2",
     "@ai-ecoverse/wasi-rustc": "1.98.1-4",
