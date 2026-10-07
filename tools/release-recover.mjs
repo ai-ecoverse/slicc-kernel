@@ -65,6 +65,10 @@ export async function recover({
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
   log = console.log,
 }) {
+  if (outcome === 'success') {
+    log('semantic-release succeeded, nothing to recover');
+    return [];
+  }
   const listed = await run('git', ['tag', '--points-at', 'HEAD']);
   const tags = listed.stdout
     .split('\n')
