@@ -453,24 +453,43 @@ export function mountTable(): string {
   );
 }
 
-export function useMounts(Fs: ProcessFs): void {
-  const { writeFile } = Fs;
+const NAME = /^[a-z_][a-z0-9_-]*$/i;
+
+export function accounts(env: Record<string, string> = {}): { passwd: string; group: string } {
+  const name = env.USER && NAME.test(env.USER) && env.USER !== 'root' ? env.USER : 'user';
+  const home = env.HOME || '/home';
+  return {
+    passwd: `root:x:0:0:root:/root:/bin/sh\n${name}:x:1000:1000:${name}:${home}:/bin/bash\n`,
+    group: `root:x:0:\n${name}:x:1000:\n`,
+  };
+}
+
+export function useMounts(Fs: ProcessFs, env: Record<string, string> = {}): void {
+  const { writeFile, mkdirTree } = Fs;
   if (typeof Fs.open !== 'function' || typeof writeFile !== 'function') return;
+  const { passwd, group } = accounts(env);
+  const backing: Record<string, string> = { '/etc/mtab': '/proc/mounts' };
   try {
     writeFile.call(Fs, '/proc/mounts', mountTable());
   } catch {
     return;
   }
+  try {
+    mkdirTree.call(Fs, '/dev/.etc');
+    writeFile.call(Fs, '/dev/.etc/passwd', passwd);
+    writeFile.call(Fs, '/dev/.etc/group', group);
+    backing['/etc/passwd'] = '/dev/.etc/passwd';
+    backing['/etc/group'] = '/dev/.etc/group';
+  } catch {}
   const open = Fs.open.bind(Fs);
   Fs.open = (path, flags, mode) => {
-    if (path !== '/etc/mtab' || (flags & (O_ACCMODE | O_CREAT)) !== 0) {
-      return open(path, flags, mode);
-    }
+    const instead = backing[path];
+    if (!instead || (flags & (O_ACCMODE | O_CREAT)) !== 0) return open(path, flags, mode);
     try {
       return open(path, flags, mode);
     } catch (e) {
       if ((e as { errno?: unknown })?.errno !== wasiErrno('ENOENT')) throw e;
-      return open('/proc/mounts', flags, mode);
+      return open(instead, flags, mode);
     }
   };
 }

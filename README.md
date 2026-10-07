@@ -183,6 +183,8 @@ Directories are renamed with `FileSystemHandle.move()` where available, else by 
 
 Every process of the kernel has `/proc/<pid>/` with `cmdline`, `comm`, `stat`, `statm` and `status`, in the formats procps reads, and `/proc/self/` has the same files for the process that reads them. They come from the kernel's process table when they are opened, so a terminal sees the processes of every client; an exec'd program shows under the pid its parent knows. `/proc/uptime`, `/proc/loadavg`, `/proc/stat` and `/proc/meminfo` are there too, and `/proc/mounts`. Pids, parents, process groups, sessions, command lines, terminals, start and boot times are real; CPU times, memory sizes, load and `MemTotal` (from `navigator.deviceMemory`, else 4 GiB) are placeholders. Only Emscripten processes see this `/proc`.
 
+While OPFS has no `/etc/passwd`, `/etc/group` or `/etc/mtab`, reading them gets per-process ones: root is uid 0 and the realm user, uid 1000, is named after `USER` (Emscripten's default is `web_user`, else `user`) with `HOME` as its home, so `id`, `whoami`, `ls -l` and `ps` show names. Nothing is written to OPFS, and a real file there wins.
+
 ### Metadata
 
 OPFS stores names, bytes, sizes and modification times, nothing else. Everything POSIX needs on top of that lives in an IndexedDB sidecar, so it survives reloads and new kernels:

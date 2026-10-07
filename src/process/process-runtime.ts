@@ -430,7 +430,7 @@ export async function runWasmProcess(
   if (pipefs) streams.usePipes(pipefs);
   streams.useControllingTerminal();
   useDevFd(running.FS);
-  useMounts(running.FS);
+  useMounts(running.FS, init.env);
   useProcfs(running.FS as unknown as ProcFs, sys, init.pid);
   ownByRealmUser(running.FS);
   const livePath = (s: ProcessStream) => liveNodePath(s.node as unknown as LiveFsNode);
