@@ -21,6 +21,15 @@ export function exec(cmd, args) {
   });
 }
 
+function gist(stderr) {
+  const lines = stderr
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l && !/A complete log of this run/.test(l));
+  const errors = lines.filter((l) => /^npm (error|ERR!)/.test(l));
+  return (errors.length > 0 ? errors : lines).slice(0, 2).join(' | ') || stderr.trim();
+}
+
 const PUBLISHED = /cannot publish over the previously published versions/i;
 const CONFIRM = { every: 15000, times: 20 };
 
@@ -44,7 +53,7 @@ async function retried({ label, attempt, done, sleep, log, already = () => false
     }
     if (await done()) return false;
     if (n >= DELAYS.length) throw new Error(`${label} failed: ${r.stderr.trim()}`);
-    log(`${label} failed, retrying: ${r.stderr.trim().split('\n').pop()}`);
+    log(`${label} failed, retrying: ${gist(r.stderr)}`);
     await sleep(DELAYS[n]);
   }
 }
@@ -87,7 +96,7 @@ export async function recover({
     if (local && !(await remote(notes))) {
       const r = await run('git', ['push', 'origin', notes]);
       if (r.code === 0) recovered.push(`notes ${tag} on origin`);
-      else log(`git push ${notes} failed, leaving it: ${r.stderr.trim().split('\n').pop()}`);
+      else log(`git push ${notes} failed, leaving it: ${gist(r.stderr)}`);
     }
     if (!(await published(version))) {
       await run('npm', ['version', version, '--no-git-tag-version', '--allow-same-version']);
