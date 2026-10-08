@@ -1,6 +1,7 @@
 import type { TransportCall } from './kernel/net/remote-transport.ts';
 import type { PendingMedium } from './launcher.ts';
 import type { MediumHandle } from './mount/fsa.ts';
+import type { HostfsGrantHook } from './mount/hostfs.ts';
 import type { MountEntry, MountSpec } from './mount/mount-fs.ts';
 import type { KernelCall, TerminalAction } from './serve.ts';
 import { type NetworkTransport, serveTransport } from './transport.ts';
@@ -32,6 +33,7 @@ export {
   localProxyTransport,
   probeLocalProxy,
 } from './local-proxy-transport.ts';
+export type { HostfsGrant, HostfsGrantHook } from './mount/hostfs.ts';
 export type { MountEntry, MountSpec } from './mount/mount-fs.ts';
 export {
   type FetchTransportOptions,
@@ -56,6 +58,13 @@ export interface KernelOptions {
   network?: NetworkOptions;
   requestDirectory?: () => Promise<FileSystemDirectoryHandle>;
   onMountPending?: (pending: MountPending) => void;
+  hostfs?: HostfsGrantHook;
+}
+
+interface HostfsRequest {
+  id: number;
+  source: string;
+  readonly: boolean;
 }
 
 export interface MountPending {
@@ -170,6 +179,15 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     if (!options.requestDirectory) throw new Error('this page cannot ask for a folder');
     return options.requestDirectory();
   }
+  async function grantHostfs({ id, source, readonly }: HostfsRequest): Promise<void> {
+    try {
+      if (!options.hostfs) throw new Error('this page gives no host folders');
+      const grant = await options.hostfs(source, { readonly });
+      worker.postMessage({ hostfsGrant: { id, grant } });
+    } catch (err) {
+      worker.postMessage({ hostfsGrant: { id, error: (err as Error).message ?? String(err) } });
+    }
+  }
   const pendingMedium = ({ target, source, handle }: PendingMedium) =>
     options.onMountPending?.({
       target,
@@ -179,9 +197,14 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     });
   worker.addEventListener(
     'message',
-    ({ data }: MessageEvent<Reply | TransportCall | { medium: PendingMedium }>) => {
+    ({
+      data,
+    }: MessageEvent<
+      Reply | TransportCall | { medium: PendingMedium } | { hostfs: HostfsRequest }
+    >) => {
       if ('net' in data) return bridge?.answer(data);
       if ('medium' in data) return pendingMedium(data.medium);
+      if ('hostfs' in data) return void grantHostfs(data.hostfs);
       const call = pending.get(data.id);
       if (!call) return;
       if (data.fd !== undefined) return call.output?.(data.fd, data.bytes as Uint8Array);
@@ -255,6 +278,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     ...(options.env ? { env: options.env } : {}),
     ...(options.metadata !== undefined ? { metadata: options.metadata } : {}),
     ...(transport ? { transport: transport.traits } : {}),
+    ...(options.hostfs ? { hostfs: true } : {}),
   });
 
   return {

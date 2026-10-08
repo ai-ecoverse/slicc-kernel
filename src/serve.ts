@@ -14,6 +14,7 @@ import {
   type TerminalSession,
 } from './launcher.ts';
 import type { MediumHandle } from './mount/fsa.ts';
+import type { HostfsGrant, HostfsGrantHook } from './mount/hostfs.ts';
 import type { MediaStore } from './mount/media.ts';
 import type { MountSpec } from './mount/mount-fs.ts';
 
@@ -30,6 +31,7 @@ export interface InitRequest {
   env?: Record<string, string>;
   metadata?: string | false;
   transport?: RealmTransportTraits;
+  hostfs?: boolean;
 }
 
 export interface RunRequest {
@@ -112,6 +114,12 @@ async function stores(
   return { meta: await deps.metadata?.(name), media: await deps.media?.(`${name}:media`) };
 }
 
+export interface GrantReply {
+  id: number;
+  grant?: HostfsGrant;
+  error?: string;
+}
+
 export function serveKernel(port: KernelPort, deps: ServeDeps): void {
   let launcher: Promise<Launcher> | undefined;
   let remote: RemoteTransport | undefined;
@@ -182,6 +190,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
         ...(remote ? { transport: remote } : {}),
         ...(media ? { media } : {}),
         onMountPending: (medium) => port.postMessage({ medium }),
+        ...(req.hostfs ? { hostfs: askGrant } : {}),
         caStore: caStore(deps.metadata ? name : false),
       });
       await started.prepare();
@@ -218,7 +227,26 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
     });
   }
 
+  const grants = new Map<number, PromiseWithResolvers<HostfsGrant>>();
+  let nextGrant = 0;
+  const askGrant: HostfsGrantHook = (source, options) => {
+    const id = ++nextGrant;
+    const waiting = Promise.withResolvers<HostfsGrant>();
+    grants.set(id, waiting);
+    port.postMessage({ hostfs: { id, source, ...options } });
+    return waiting.promise;
+  };
+  function granted({ id, grant, error }: GrantReply): void {
+    const waiting = grants.get(id);
+    if (!waiting) return;
+    grants.delete(id);
+    if (grant) waiting.resolve(grant);
+    else waiting.reject(Object.assign(new Error(error ?? 'no grant'), { code: 'EACCES' }));
+  }
+
   port.addEventListener('message', (event) => {
+    const grant = (event.data as { hostfsGrant?: GrantReply }).hostfsGrant;
+    if (grant) return granted(grant);
     if ((event.data as { net?: unknown }).net !== undefined) {
       remote?.receive(event.data as TransportReply);
       return;

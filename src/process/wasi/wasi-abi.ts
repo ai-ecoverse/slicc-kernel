@@ -45,6 +45,7 @@ export const E = {
   ROFS: 69,
   SPIPE: 70,
   SRCH: 71,
+  STALE: 72,
   TIMEDOUT: 73,
   XDEV: 75,
   NOTCAPABLE: 76,

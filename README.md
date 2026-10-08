@@ -32,6 +32,7 @@ const { status, stdout, stderr } = await kernel.run(['bash', '-c', 'echo hi > he
 | `worker` | `new URL('./kernel-worker.js', import.meta.url)` | the kernel worker script |
 | `network` | none | `{ transport }`: how programs reach the outside world (see [Network](#network)) |
 | `requestDirectory` | none | `() => Promise<FileSystemDirectoryHandle>`, typically `showDirectoryPicker`: how an `fsa` mount gets its folder (see [Removable media](#removable-media-fsa)) |
+| `hostfs` | none | `(source, { readonly }) => Promise<{ url, token, capabilities? }>`: a grant for a `hostfs` mount from the local proxy (see [Host folders](#host-folders-hostfs)) |
 | `onMountPending` | none | `({ target, source, insert }) => void`: an `fsa` mount needs a folder; call `insert()` from a user gesture |
 
 ### `kernel.run(argv, options?) → Promise<{ status, stdout, stderr }>`
@@ -185,7 +186,7 @@ Directories are renamed with `FileSystemHandle.move()` where available, else by 
 
 `kernel.mount({ type, source, target, options })` mounts a file system on an existing directory. Every process sees it, Emscripten and WASI alike, and so does every attached client. `kernel.umount(target)` unmounts it, and fails with `EBUSY` while a process has a file open under it. `kernel.mounts()` lists the table, as does `/proc/mounts`. The Node entry and attached clients have the same three calls (client protocol 1.2).
 
-- **Built in:** `tmpfs`, which lives in memory until unmounted, and `fsa`, a folder the user picks (see [Removable media](#removable-media-fsa)).
+- **Built in:** `tmpfs`, which lives in memory until unmounted; `fsa`, a folder the user picks (see [Removable media](#removable-media-fsa)); and `hostfs`, a folder the local proxy exports (see [Host folders](#host-folders-hostfs)).
 - **Package drivers:** a package declares a type in `"slicc": { "filesystems": { "<type>": { "module": "<file>" } } }`, and the kernel starts that module in a worker of its own for each mount. The module is a single self-contained file: it can't import bare specifiers.
   - Its default export receives `{ fetch }`, the kernel's network transport. It returns `{ handlers, capabilities }`.
   - The handlers are path-based: `getattr`, `readdir`, `open`/`read`/`write`/`release` on handles, `mkdir`, `rmdir`, `unlink`, `rename`, and optionally `symlink`, `readlink`, `setattr` and `statfs`.
@@ -216,6 +217,16 @@ An `fsa` mount is a drive for a local folder, from the File System Access API, a
 - **Persistence:** the drive's source is `fsa:<id>`, and the kernel keeps the folder's handle under that id in IndexedDB (`<metadata>:media`). Mounting `fsa:<id>` again, after a reboot too, inserts the folder at once while its permission holds, and asks again when it is back to `prompt`. In an Incognito window Chrome crashes a page that reads a folder handle back from IndexedDB. Pass `metadata: false` there, which keeps the handles in memory, so a remount finds its folder only within the same kernel.
 - **Ejecting:** `umount` ejects. So does the permission going away: the next operation fails with `ENOMEDIUM` and the kernel asks again. The folder is untouched either way.
 - **Limits:** the folder has no symlinks or modes, and `df` reports no size for it either.
+
+### Host folders: `hostfs`
+
+A `hostfs` mount is a folder exported by the local proxy ([slicc-node](https://github.com/ai-ecoverse/slicc-node) or slicc-swift), with no picker and no permission prompt. The protocol is specified in [slicc-node#13](https://github.com/ai-ecoverse/slicc-node/issues/13).
+
+- **Grants:** `kernel.mount({ type: 'hostfs', source: 'project', target: '/mnt/project' })` asks the page's `hostfs(source, { readonly })` hook for a grant. The page holds the proxy key and asks the proxy (`POST /api/hostfs/grant`) for a token scoped to that one folder. The kernel sees only `{ url, token }`, never the proxy key, and the token never appears in mount options or `/proc/mounts`. When the proxy refuses a token, the kernel asks the hook once for a new one.
+- **Options:** `ro` mounts read-only, and `maxfile` caps file size as on any mount. There is no other size limit: reads and writes go in `maxIo` pieces (16 MiB unless the proxy says otherwise), so a file of any size the host can hold works.
+- **Changes on the host** arrive as invalidations on a watch stream (`POST /api/hostfs/watch`), so an edit made outside shows up on the next access without a remount.
+- **Proxy loss:** when the watch stream ends, or is silent for 45 s, the kernel reconnects once at once. If that fails, the mount is `nomedium`, as with [removable media](#removable-media-fsa): operations fail with `ENOMEDIUM` (`ENODEV` for WASI), and the kernel keeps reconnecting with backoff (1 s to 30 s), so the folder comes back by itself when the proxy does. A mount made while the proxy is down starts as `nomedium`.
+- **Consistency:** a file that changes on the host while a program reads it fails with `ESTALE`, and the kernel restarts the whole read (up to 3 times) instead of stitching two versions together.
 
 ### `/proc`
 

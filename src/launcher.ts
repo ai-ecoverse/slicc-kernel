@@ -50,6 +50,12 @@ import {
   type MediumHandle,
   removableMedium,
 } from './mount/fsa.ts';
+import {
+  type FetchLike,
+  type HostfsGrantHook,
+  type HostfsTiming,
+  openHostfs,
+} from './mount/hostfs.ts';
 import { type MediaStore, memoryMedia } from './mount/media.ts';
 import {
   heldUnder,
@@ -76,6 +82,9 @@ export interface LauncherOptions {
   createDriverWorker?: () => WasmWorkerLike;
   media?: MediaStore;
   onMountPending?: (pending: PendingMedium) => void;
+  hostfs?: HostfsGrantHook;
+  hostfsFetch?: FetchLike;
+  hostfsTiming?: HostfsTiming;
 }
 
 export interface PendingMedium {
@@ -270,6 +279,7 @@ export class Launcher {
   private readonly media: MediaStore;
   private readonly onMountPending: ((pending: PendingMedium) => void) | undefined;
   private readonly removable = new Map<string, Removable>();
+  private readonly hostfs: Pick<LauncherOptions, 'hostfs' | 'hostfsFetch' | 'hostfsTiming'>;
   private readonly inserted = new Map<string, MediumHandle>();
   private readonly openFiles = new Set<VfsNodes>();
   private readonly held = new Set<Map<string, number>>();
@@ -289,6 +299,7 @@ export class Launcher {
     this.createDriverWorker = options.createDriverWorker;
     this.media = options.media ?? memoryMedia();
     this.onMountPending = options.onMountPending;
+    this.hostfs = options;
     this.pnpmHome = options.env?.PNPM_HOME ?? PNPM_HOME;
     this.modulesDir = options.modules ?? '/node_modules';
     this.env = { ...networkEnv(), ...options.env };
@@ -585,6 +596,17 @@ export class Launcher {
 
   private async driver(type: string, spec: MountSpec): Promise<OpenedDriver> {
     if (type === 'fsa') return this.fsaDriver(spec);
+    if (type === 'hostfs') {
+      const { hostfs, hostfsFetch, hostfsTiming } = this.hostfs;
+      if (!hostfs)
+        throw fsError('ENODEV', 'this kernel has no hostfs hook (createKernel({ hostfs }))');
+      return openHostfs(
+        spec,
+        hostfs,
+        hostfsFetch ?? ((url, init) => fetch(url, init)),
+        hostfsTiming
+      );
+    }
     if (type === 'tmpfs') {
       const { port1, port2 } = new MessageChannel();
       serveFilesystem(port2, tmpfs(), { symlinks: true, chmod: true, attrTtl: 0 });
