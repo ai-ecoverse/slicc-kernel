@@ -13,6 +13,8 @@ export interface JobMember {
   ppid?: number;
 
   execed?: boolean;
+
+  shownAs?: number;
 }
 
 export class JobTable {
@@ -48,8 +50,9 @@ export class JobTable {
     this.members.delete(pid);
   }
 
-  exec(pid: number, child: number): void {
+  exec(pid: number, child: number, adopt = false): void {
     const member = this.members.get(child);
+    if (member && adopt) member.shownAs = this.shown(pid);
     if (member) member.execParent = pid;
     const execer = this.members.get(pid);
     if (execer) execer.execed = true;
@@ -76,38 +79,52 @@ export class JobTable {
     return member;
   }
 
+  private idOf(pid: number): number {
+    return this.members.get(pid)?.shownAs ?? pid;
+  }
+
+  private byId(id: number): JobMember {
+    for (const member of this.members.values()) if (member.shownAs === id) return member;
+    return this.member(id);
+  }
+
   setpgid(caller: number, pid: number, pgid: number): void {
-    const target = this.member(pid || caller);
-    const group = pgid || target.pid;
+    const me = this.idOf(caller);
+    const target = this.byId(pid || me);
+    const id = this.idOf(target.pid);
+    const group = pgid || id;
     if (group < 0) throw new KernelError('EINVAL');
     const self = this.member(caller);
-    if (target.pid !== caller) {
-      if (target.ppid !== caller) throw new KernelError('ESRCH');
+    if (id !== me) {
+      if (target.ppid === undefined || this.idOf(target.ppid) !== me) {
+        throw new KernelError('ESRCH');
+      }
       if (target.execed) throw new KernelError('EACCES');
     }
     if (target.sid !== self.sid) throw new KernelError('EPERM');
-    if (target.pid === target.sid) throw new KernelError('EPERM');
+    if (id === target.sid) throw new KernelError('EPERM');
 
     const exists = [...this.members.values()].some((m) => m.pgid === group && m.sid === target.sid);
-    if (group !== target.pid && !exists) throw new KernelError('EPERM');
+    if (group !== id && !exists) throw new KernelError('EPERM');
     target.pgid = group;
   }
 
   getpgid(caller: number, pid: number): number {
-    return this.member(pid || caller).pgid;
+    return this.byId(pid || this.idOf(caller)).pgid;
   }
 
   getsid(caller: number, pid: number): number {
-    return this.member(pid || caller).sid;
+    return this.byId(pid || this.idOf(caller)).sid;
   }
 
   setsid(pid: number): number {
     const member = this.member(pid);
-    if (member.pgid === pid) throw new KernelError('EPERM');
-    member.sid = pid;
-    member.pgid = pid;
-    this.terminals.delete(pid);
-    return pid;
+    const id = this.idOf(pid);
+    if (member.pgid === id) throw new KernelError('EPERM');
+    member.sid = id;
+    member.pgid = id;
+    this.terminals.delete(id);
+    return id;
   }
 
   terminalNamed(name: string): KernelTty | undefined {
@@ -122,9 +139,10 @@ export class JobTable {
 
   acquireTerminal(pid: number, tty: KernelTty): boolean {
     const member = this.members.get(pid);
-    if (!member || member.sid !== pid || this.terminals.has(pid)) return false;
+    const id = this.idOf(pid);
+    if (!member || member.sid !== id || this.terminals.has(id)) return false;
     if ([...this.terminals.values()].includes(tty)) return false;
-    this.terminals.set(pid, tty);
+    this.terminals.set(id, tty);
     this.foreground.set(tty, member.pgid);
     return true;
   }

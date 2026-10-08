@@ -527,7 +527,7 @@ export class Launcher {
     });
     this.processes.set(pid, handle);
     this.jobs.add(pid, req.ppid, (sig) => handle.signal(sig), terminal);
-    if (req.exec && req.ppid !== undefined) this.jobs.exec(req.ppid, pid);
+    if (req.exec && req.ppid !== undefined) this.jobs.exec(req.ppid, pid, true);
     this.described.set(pid, {
       argv: [req.argv0, ...req.args],
       tty: terminal?.name ?? null,

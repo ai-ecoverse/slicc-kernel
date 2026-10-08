@@ -247,6 +247,8 @@ export function createProcessKernel(deps: ProcessKernelDeps): ProcessKernel {
     }
   };
 
+  const execCaptures = new Map<number, () => void>();
+
   const execWait = (pid: number): number => {
     const r = transport.call({ op: 'proc-exec', pid }, Infinity, `exec ${pid}`);
     if (!r.ok) return -wasiErrno(r.errno);
@@ -286,6 +288,12 @@ export function createProcessKernel(deps: ProcessKernelDeps): ProcessKernel {
     const pid = r.kind === 'json' ? (r.json as number) : 0;
     const captures = [1, 2].filter((n) => 'capture' in (stdio[n] as ChildStdio));
     if (captures.length === 0) return pid;
+    if (exec) {
+      execCaptures.set(pid, () => {
+        for (const n of captures) deliver(pid, n, fds[n] as number);
+      });
+      return pid;
+    }
     const waited = kernelWait(pid, false);
     if (typeof waited === 'number') return waited;
     for (const n of captures) deliver(pid, n, fds[n] as number);
@@ -314,9 +322,10 @@ export function createProcessKernel(deps: ProcessKernelDeps): ProcessKernel {
     execve(file, argv, env, cwd) {
       const pid = spawnChild(file, argv, env, cwd, [0, 1, 2], undefined, true);
       if (pid < 0) return pid;
-      const status = reaped.get(pid);
-      reaped.delete(pid);
-      return status ?? execWait(pid);
+      const status = execWait(pid);
+      execCaptures.get(pid)?.();
+      execCaptures.delete(pid);
+      return status;
     },
     pause() {
       return status(call({ op: 'sig-pause' }, 'pause'));
