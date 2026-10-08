@@ -168,6 +168,7 @@ function storeTransport(inner) {
         return reply(200, new TextEncoder().encode(JSON.stringify(listed)));
       }
       if (req.method === 'PUT') {
+        if (window.refusePuts) return reply(503);
         objects.set(key, { body: req.body ?? new Uint8Array(0), mtime: Date.now() });
         return reply(200);
       }

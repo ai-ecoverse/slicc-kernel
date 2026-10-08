@@ -31,6 +31,11 @@ const WASI_ERRNO: Readonly<Partial<Record<string, number>>> = {
   ESPIPE: 70,
   ESRCH: 71,
   ETIMEDOUT: 73,
+
+  EFBIG: 22,
+  ENOSPC: 51,
+  EROFS: 69,
+  ENOMEDIUM: 148,
 };
 
 const EIO = 29;

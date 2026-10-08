@@ -242,7 +242,7 @@ export class WasiHost {
       fd_datasync: (fd: number) => void this.sync(fd),
       fd_advise: (fd: number) => void fds.get(fd),
       fd_allocate: (fd: number, offset: bigint, len: bigint) => {
-        const file = this.positional(fd);
+        const file = this.positional(fd, 'write');
         const end = Number(offset + len);
         if (end > file.size()) file.truncate(end);
       },
@@ -259,7 +259,7 @@ export class WasiHost {
       fd_filestat_get: (fd: number, out: number) =>
         void this.writeFilestat(out, this.fdFilestat(fd)),
       fd_filestat_set_size: (fd: number, size: bigint) =>
-        void this.positional(fd).truncate(Number(size)),
+        void this.positional(fd, 'write').truncate(Number(size)),
       fd_filestat_set_times: (fd: number, atim: bigint, mtim: bigint, flags: number) => {
         const e = fds.get(fd);
         if (e.type === 'file') {

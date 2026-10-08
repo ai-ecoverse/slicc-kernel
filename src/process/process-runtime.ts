@@ -439,6 +439,7 @@ export async function runWasmProcess(
   const restartable = (): boolean => signals.restartable();
   const streams = new KernelStreams(running.FS, sys, { sigpipe, restartable });
   trackCloseOnExec(running.FS);
+  quietQuit(running.FS as unknown as QuitFs);
   useMounts(running.FS, init.env, true);
   useProcfs(running.FS as unknown as ProcFs, sys, init.pid);
   if (init.fork) restoreForkedStreams(running.FS, streams, init.fork.streams ?? []);
@@ -477,8 +478,32 @@ export async function runWasmProcess(
   try {
     return runMain(running, init);
   } finally {
-    vfs.flush();
+    try {
+      vfs.flush();
+    } catch {}
   }
+}
+
+interface QuitFs {
+  quit?: () => void;
+  close: (stream: unknown) => void;
+}
+
+export function quietQuit(Fs: QuitFs): void {
+  const { quit, close } = Fs;
+  if (!quit) return;
+  Fs.quit = () => {
+    Fs.close = (stream) => {
+      try {
+        close.call(Fs, stream);
+      } catch {}
+    };
+    try {
+      quit.call(Fs);
+    } finally {
+      Fs.close = close;
+    }
+  };
 }
 
 function hasStreams(module: object): boolean {

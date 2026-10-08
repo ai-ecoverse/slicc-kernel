@@ -500,9 +500,7 @@ export class WasiFds {
     rights: bigint,
     fdflags: number
   ): LocalFile {
-    const writable =
-      (rights & RIGHTS.FD_WRITE) !== 0n || (oflags & (OFLAGS.CREAT | OFLAGS.TRUNC)) !== 0;
-    const readable = (rights & RIGHTS.FD_READ) !== 0n || !writable;
+    const { readable, writable } = openAccess(existing, oflags, rights);
     let buffer = this.buffers.get(path);
     if (buffer) {
       if (oflags & OFLAGS.TRUNC) buffer.truncate(0);
@@ -522,9 +520,7 @@ export class WasiFds {
     rights: bigint,
     fdflags: number
   ): number {
-    const writable =
-      (rights & RIGHTS.FD_WRITE) !== 0n || (oflags & (OFLAGS.CREAT | OFLAGS.TRUNC)) !== 0;
-    const readable = (rights & RIGHTS.FD_READ) !== 0n || !writable;
+    const { readable, writable } = openAccess(existing, oflags, rights);
     const append = (fdflags & FDFLAGS.APPEND) !== 0;
     const flags = (writable ? (readable ? O_RDWR : O_WRONLY) : 0) | (append ? O_APPEND : 0);
 
@@ -592,6 +588,18 @@ function entryOf(info: FdInfo): WasiEntry | undefined {
     nonblock: ((info.flags ?? 0) & O_NONBLOCK) !== 0,
     append: ((info.flags ?? 0) & O_APPEND) !== 0,
   };
+}
+
+function openAccess(
+  existing: SyncFsBridgeStat | undefined,
+  oflags: number,
+  rights: bigint
+): { readable: boolean; writable: boolean } {
+  const readonly = existing?.readonly === true;
+  const mutating = readonly ? OFLAGS.TRUNC : OFLAGS.CREAT | OFLAGS.TRUNC;
+  const writable = (rights & RIGHTS.FD_WRITE) !== 0n || (oflags & mutating) !== 0;
+  if (writable && readonly) throw new WasiError('EROFS');
+  return { readable: (rights & RIGHTS.FD_READ) !== 0n || !writable, writable };
 }
 
 function promoteRequest(

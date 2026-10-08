@@ -281,3 +281,116 @@ test('hostfs against the mock proxy: programs and git work on a host folder, a f
 
 test('hostfs against slicc-node: the same run against the real local proxy', (t) =>
   hostFolder(t, (dir) => sliccNode(dir, new URL(chrome.url).origin)));
+
+test('hostfs: a read-only mount refuses an append or read-write open of an existing file with EROFS at open, and the shell stays usable', async (t) => {
+  const stage = join(homedir(), 'Developer/ai-ecoverse/work/stage/hostfs-int');
+  await mkdir(stage, { recursive: true });
+  const dir = await mkdtemp(join(stage, 'host-'));
+  await writeFile(join(dir, 'a.txt'), 'host\n');
+  const proxy = await hostfsProxy({ folders: { project: dir } });
+  t.after(async () => {
+    await proxy.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+  const { page, bash } = await booted(chrome, t);
+  await page.evaluate(
+    (p) => {
+      window.hostfsProxy = p;
+    },
+    { url: proxy.url, key: proxy.key }
+  );
+  await bash('mkdir -p /mnt/r', { cwd: '/home' });
+  const spec = { type: 'hostfs', source: 'project', target: '/mnt/r', options: { ro: '' } };
+  assert.equal((await page.evaluate((s) => window.kernel.mount(s), spec)).state, 'ok');
+  assert.deepEqual(
+    await bash(
+      'exec 4</mnt/r/a.txt; echo no >> /mnt/r/a.txt; echo "append $?"; exec 3<>/mnt/r/a.txt; echo "rdwr $?"; echo hi >&3; echo "fd3 $?"; : > /mnt/r/a.txt; cat <&4; cat /mnt/r/a.txt',
+      { cwd: '/home' }
+    ),
+    {
+      status: 0,
+      stdout: 'append 1\nrdwr 1\nfd3 1\nhost\nhost\n',
+      stderr: [
+        'bash: line 1: /mnt/r/a.txt: Read-only file system',
+        'bash: line 1: /mnt/r/a.txt: Read-only file system',
+        'bash: line 1: 3: Bad file descriptor',
+        'bash: line 1: /mnt/r/a.txt: Read-only file system',
+        '',
+      ].join('\n'),
+    }
+  );
+  assert.equal(await readFile(join(dir, 'a.txt'), 'utf8'), 'host\n');
+  await page.evaluate(() => window.kernel.umount('/mnt/r'));
+  assert.deepEqual(page.errors, []);
+});
+
+test('a write the mount refuses after the program wrote it fails the next spawn with its errno, and crashes neither that spawn nor the exit', async (t) => {
+  const { page, bash } = await booted(chrome, t);
+  await bash('mkdir -p /mnt/t', { cwd: '/home' });
+  await page.evaluate(() =>
+    window.kernel.mount({
+      type: 'tmpfs',
+      source: 'none',
+      target: '/mnt/t',
+      options: { maxfile: '10' },
+    })
+  );
+  assert.deepEqual(
+    await bash(
+      'echo 1 > /mnt/t/c; exec 3>>/mnt/t/c; printf 0123456789abcdef >&3; sleep 0.1; echo "spawned $?"',
+      { cwd: '/home' }
+    ),
+    { status: 0, stdout: 'spawned 126\n', stderr: 'bash: line 1: /usr/bin/sleep: File too large\n' }
+  );
+  assert.deepEqual(await bash('cat /mnt/t/c', { cwd: '/home' }), {
+    status: 0,
+    stdout: '1\n',
+    stderr: '',
+  });
+  await page.evaluate(() => window.kernel.umount('/mnt/t'));
+  assert.deepEqual(page.errors, []);
+});
+
+test('bytes a program wrote before a spawn whose write-back failed are kept, with what it wrote after, and reach the store once it takes them', async (t) => {
+  const { page, bash } = await booted(chrome, t, { store: true });
+  await fixture(page);
+  await bash('mkdir -p /mnt/s3', { cwd: '/home' });
+  const spec = { type: 'mocks3', source: 'http://mock-s3.test/bucket', target: '/mnt/s3' };
+  assert.equal((await page.evaluate((s) => window.kernel.mount(s), spec)).state, 'ok');
+  await bash('echo host > /mnt/s3/a.txt', { cwd: '/home' });
+  const until = async (ok) => {
+    for (let i = 0; i < 150 && !(await ok()); i++) await new Promise((r) => setTimeout(r, 100));
+  };
+  await page.evaluate(() => {
+    window.refusePuts = true;
+  });
+  const running = bash(
+    [
+      'exec 3>>/mnt/s3/a.txt',
+      'printf "before\\n" >&3',
+      'sleep 0.1',
+      ': > /home/spawned',
+      'while [ ! -e /home/up ]; do :; done',
+      'printf "after\\n" >&3',
+      'exec 3>&-',
+      'echo "closed $?"',
+    ].join('; '),
+    { cwd: '/home' }
+  );
+  await until(() => page.evaluate(() => window.opfs.exists('home/spawned')));
+  await page.evaluate(() => {
+    window.refusePuts = false;
+  });
+  await page.evaluate(() => window.opfs.write('home/up', ''));
+  assert.deepEqual(await running, {
+    status: 0,
+    stdout: 'closed 0\n',
+    stderr: 'bash: line 1: /usr/bin/sleep: I/O error\n',
+  });
+  await page.evaluate(() => window.kernel.umount('/mnt/s3'));
+  const stored = await page.evaluate(() =>
+    new TextDecoder().decode(window.objects.get('a.txt')?.body ?? new Uint8Array())
+  );
+  assert.equal(stored, 'host\nbefore\nafter\n');
+  assert.deepEqual(page.errors, []);
+});

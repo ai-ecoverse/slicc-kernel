@@ -69,6 +69,7 @@ export interface LiveFsStream {
   node: LiveFsNode;
   position: number;
   flags: number;
+  fd?: number;
 }
 
 export interface LiveFsMount {
@@ -148,6 +149,7 @@ export interface LiveFsApi {
   isFile(mode: number): boolean;
   isLink(mode: number): boolean;
   ErrnoError: new (errno: number) => Error & { errno: number };
+  closeStream?(fd: number): void;
 
   nameTable?: (LiveFsNode | null)[] | null;
   hashRemoveNode?(node: LiveFsNode): void;
@@ -276,6 +278,7 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
 
   function truncate(node: LiveFsNode, size: number): void {
     const s = node.live;
+    if (!s.orphan && statOf(node).readonly) throw new Fs.ErrnoError(ERRNO_BY_CODE.EROFS);
     if (s.openCount > 0) {
       if (size > 0) ensureLoaded(node);
       else s.loaded = true;
@@ -470,6 +473,14 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
   return {
     open(stream) {
       if (!Fs.isFile(stream.node.mode)) return;
+      if ((stream.flags & 3) !== 0) {
+        try {
+          if (statOf(stream.node).readonly) throw new Fs.ErrnoError(ERRNO_BY_CODE.EROFS);
+        } catch (err) {
+          if (stream.fd !== undefined) Fs.closeStream?.(stream.fd);
+          throw err;
+        }
+      }
       stream.node.live.openCount++;
       held(stream, 1);
     },

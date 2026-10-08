@@ -31,7 +31,7 @@ import { type DefaultAction, defaultAction, isSignal, SIG, sigbit } from './sign
 import { KernelSocket, LoopbackNet } from './socket.ts';
 import { SOCKET_OPS, type SocketSyscall, socketSyscall } from './socket-syscalls.ts';
 import type { KernelTty, Termios } from './tty.ts';
-import { type VfsFileFs, VfsNodes, vfsFile } from './vfs-file.ts';
+import { refuseReadonly, type VfsFileFs, VfsNodes, vfsFile } from './vfs-file.ts';
 
 export type WasmSyscall =
   | {
@@ -462,6 +462,10 @@ export class WasmProcess {
       if (e instanceof KernelError || e instanceof SpawnError) {
         return { ok: false, errno: e.code, message: e.code };
       }
+      const code = (e as { code?: unknown } | null)?.code;
+      if (typeof code === 'string' && /^E[A-Z]+$/.test(code)) {
+        return { ok: false, errno: code, message: code };
+      }
       throw e;
     }
   }
@@ -542,6 +546,7 @@ export class WasmProcess {
       case 'fd-poll':
         return { ok: true, kind: 'json', json: pollFile(this.fds.get(req.fd).file) };
       case 'fd-open-vfs':
+        await refuseReadonly(this.options.fs, req.path, req.flags, req);
         return { ok: true, kind: 'json', json: this.fds.install(this.openVfsFile(req), 3) };
       case 'fd-info':
         return { ok: true, kind: 'json', json: this.fdInfo(req.fd) };

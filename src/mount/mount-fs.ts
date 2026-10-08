@@ -68,7 +68,9 @@ export function heldUnder(held: Iterable<Map<string, number>>, target: string): 
 
 const parentOf = (path: string) => path.slice(0, path.lastIndexOf('/')) || '/';
 
-function statOf(attr: DriverAttr, path: string, dev: number): FsStat {
+const readonly = (mount: Mount): boolean => mount.caps.readonly === true;
+
+function statOf(attr: DriverAttr, path: string, mount: Mount): FsStat {
   const mtime = new Date(attr.mtime);
   const fallback =
     attr.kind === 'directory' ? 0o40755 : attr.kind === 'symlink' ? 0o120777 : 0o100644;
@@ -82,7 +84,8 @@ function statOf(attr: DriverAttr, path: string, dev: number): FsStat {
     atime: mtime,
     ctime: mtime,
     ino: attr.ino ?? inodeOf(path),
-    dev,
+    dev: mount.dev,
+    ...(readonly(mount) ? { readonly: true } : {}),
   };
 }
 
@@ -289,7 +292,7 @@ class MountFs implements KernelFs {
   }
 
   private writable(mount: Mount, path: string): void {
-    if (mount.caps.readonly) throw errnoError('EROFS', path);
+    if (readonly(mount)) throw errnoError('EROFS', path);
   }
 
   private async follow(path: string, hops = 0, create = false): Promise<string> {
@@ -428,7 +431,7 @@ class MountFs implements KernelFs {
     const found = this.at(path);
     if (!found) return this.base.lstat(path);
     const real = normalizePath(path);
-    return statOf(await this.table.getattr(found.mount, real, found.rel), real, found.mount.dev);
+    return statOf(await this.table.getattr(found.mount, real, found.rel), real, found.mount);
   }
 
   async stat(path: string): Promise<FsStat> {
@@ -461,7 +464,7 @@ class MountFs implements KernelFs {
       list.map(async (entry): Promise<[string, FsStat | null]> => {
         const child = normalizePath(`${real}/${entry.name}`);
         if (entry.attr && mount.caps.listingStats) {
-          return [entry.name, statOf(entry.attr, child, mount.dev)];
+          return [entry.name, statOf(entry.attr, child, mount)];
         }
         return [entry.name, await this.lstat(child).catch(() => null)];
       })
