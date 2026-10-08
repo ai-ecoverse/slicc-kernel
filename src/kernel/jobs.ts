@@ -55,6 +55,17 @@ export class JobTable {
     if (execer) execer.execed = true;
   }
 
+  shown(pid: number): number {
+    let member = this.members.get(pid);
+    for (let up = member; up; up = this.members.get(up.execParent ?? -1)) member = up;
+    return member?.pid ?? pid;
+  }
+
+  shownParent(pid: number): number | undefined {
+    const parent = this.members.get(this.shown(pid))?.ppid;
+    return parent === undefined ? undefined : this.shown(parent);
+  }
+
   pgidOf(pid: number): number | undefined {
     return this.members.get(pid)?.pgid;
   }

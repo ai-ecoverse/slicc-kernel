@@ -122,6 +122,8 @@ export type WasmSyscall =
       stdio: ChildStdio[];
 
       inherit?: InheritedSlot[];
+
+      exec?: boolean;
     }
   | {
       op: 'proc-wait';
@@ -800,8 +802,9 @@ export class WasmProcess {
       case 'proc-fork':
         return { ok: true, kind: 'json', json: await this.children.fork(req.state) };
       case 'proc-spawn': {
-        const { file, argv, env, cwd, stdio, inherit } = req;
-        const pid = await this.children.spawn({ file, argv, env, cwd }, stdio, inherit);
+        const { file, argv, env, cwd, stdio, inherit, exec } = req;
+        const spawned = { file, argv, env, cwd, ...(exec ? { exec } : {}) };
+        const pid = await this.children.spawn(spawned, stdio, inherit);
         return { ok: true, kind: 'json', json: pid };
       }
       case 'proc-wait': {

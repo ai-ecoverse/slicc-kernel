@@ -173,6 +173,7 @@ interface StartRequest {
   report: (message: string) => void;
   ppid?: number;
   fork?: ForkState;
+  exec?: boolean;
 }
 
 const COMMAND = /^\/(?:usr\/)?bin\/([^/]+)$/;
@@ -522,10 +523,11 @@ export class Launcher {
       locks: this.locks,
       onReap: (child) => this.reaped(child),
       ...(req.fork ? { fork: req.fork } : {}),
-      ...(req.ppid !== undefined ? { ppid: req.ppid } : {}),
+      ...this.shownIds(req),
     });
     this.processes.set(pid, handle);
     this.jobs.add(pid, req.ppid, (sig) => handle.signal(sig), terminal);
+    if (req.exec && req.ppid !== undefined) this.jobs.exec(req.ppid, pid);
     this.described.set(pid, {
       argv: [req.argv0, ...req.args],
       tty: terminal?.name ?? null,
@@ -537,6 +539,13 @@ export class Launcher {
       else this.zombies.add(pid);
     });
     return handle;
+  }
+
+  private shownIds(req: StartRequest): { ppid?: number; shownPid?: number } {
+    if (req.ppid === undefined) return {};
+    if (!req.exec) return { ppid: this.jobs.shown(req.ppid) };
+    const ppid = this.jobs.shownParent(req.ppid);
+    return { shownPid: this.jobs.shown(req.ppid), ...(ppid !== undefined ? { ppid } : {}) };
   }
 
   private forget(pid: number): void {
@@ -589,14 +598,23 @@ export class Launcher {
         await fds.closeAll();
         throw new SpawnError(await this.unrunnable(req.file, req.cwd));
       }
-      const handle = await this.launch(planned, { env: req.env, cwd: req.cwd, fds, report, ppid });
+      const exec = req.exec ? { exec: true } : {};
+      const handle = await this.launch(planned, {
+        env: req.env,
+        cwd: req.cwd,
+        fds,
+        report,
+        ppid,
+        ...exec,
+      });
       return childHandle(handle);
     };
   }
 
   private forker(ppid: number, parent: StartRequest): ChildForker {
+    const { exec: _exec, ...image } = parent;
     return async (state, fds) =>
-      childHandle(this.start({ ...parent, cwd: state.cwd ?? parent.cwd, fds, ppid, fork: state }));
+      childHandle(this.start({ ...image, cwd: state.cwd ?? parent.cwd, fds, ppid, fork: state }));
   }
 
   kill(pid: number, sig: number): boolean {

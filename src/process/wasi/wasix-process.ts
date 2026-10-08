@@ -148,7 +148,7 @@ export class WasixProcess {
     });
   }
 
-  spawn(req: ChildRequest): number {
+  spawn(req: ChildRequest, exec = false): number {
     const { stdio, inherit, cwd, opened } = this.childFds(req.ops ?? []);
     try {
       return this.call({
@@ -159,6 +159,7 @@ export class WasixProcess {
         cwd,
         stdio,
         inherit,
+        ...(exec ? { exec } : {}),
       }) as number;
     } finally {
       for (const kfd of opened) this.host.o.kernel.sys.close(kfd);
@@ -168,7 +169,7 @@ export class WasixProcess {
   }
 
   exec(req: ChildRequest): never {
-    const pid = this.spawn(req);
+    const pid = this.spawn(req, true);
     const [, status] = this.call({ op: 'proc-exec', pid }) as [number, number];
     const sig = status & 0x7f;
     throw new WasiExit(sig ? 128 + sig : (status >> 8) & 0xff);

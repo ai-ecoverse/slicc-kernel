@@ -58,6 +58,13 @@ export interface ProcessKernel {
 
   execWait(pid: number): number;
 
+  execve(
+    file: string,
+    argv: string[],
+    env: Record<string, string> | null,
+    cwd: string | null
+  ): number;
+
   mount(source: string, target: string, fstype: string, flags: number, data: string): number;
 
   umount2(target: string, flags: number): number;
@@ -163,6 +170,32 @@ function ownReady(
   };
 }
 
+function anySelect(
+  Fs: ProcessFs,
+  transport: SyncSabTransport,
+  read: number[],
+  write: number[],
+  timeoutMs: number
+): { read: number[]; write: number[] } | number {
+  const kernel = (fd: number) => Fs.getStream(fd)?.sliccKernelFd;
+  const own = (fd: number) => kernel(fd) === undefined;
+  if (![...read, ...write].some(own)) return kernelSelect(Fs, transport, read, write, timeoutMs);
+  const deadline = timeoutMs < 0 ? Number.POSITIVE_INFINITY : Date.now() + timeoutMs;
+  const kernelRead = read.filter((fd) => !own(fd));
+  const kernelWrite = write.filter((fd) => !own(fd));
+  for (;;) {
+    const local = ownReady(Fs, read.filter(own), write.filter(own));
+    const pending = local.read.length > 0 || local.write.length > 0;
+    const slice = pending ? 0 : Math.min(SELECT_SLICE_MS, Math.max(0, deadline - Date.now()));
+    const got = kernelSelect(Fs, transport, kernelRead, kernelWrite, slice);
+    if (typeof got === 'number') return got;
+    const ready = { read: [...local.read, ...got.read], write: [...local.write, ...got.write] };
+    if (ready.read.length > 0 || ready.write.length > 0 || Date.now() >= deadline) {
+      return ready;
+    }
+  }
+}
+
 export function createProcessKernel(deps: ProcessKernelDeps): ProcessKernel {
   const { transport, Fs } = deps;
 
@@ -214,35 +247,55 @@ export function createProcessKernel(deps: ProcessKernelDeps): ProcessKernel {
     }
   };
 
+  const execWait = (pid: number): number => {
+    const r = transport.call({ op: 'proc-exec', pid }, Infinity, `exec ${pid}`);
+    if (!r.ok) return -wasiErrno(r.errno);
+    deps.afterChild();
+    return r.kind === 'json' ? (r.json as [number, number])[1] : 0;
+  };
+
+  const spawnChild = (
+    file: string,
+    argv: string[],
+    env: Record<string, string> | null,
+    cwd: string | null,
+    fds: number[],
+    actions: ReadonlyArray<readonly [number, number]> | undefined,
+    exec: boolean
+  ): number => {
+    const unflushed = flushed(deps.beforeSpawn);
+    if (unflushed < 0) return unflushed;
+    const promote = deps.stdioPromoter?.();
+    const stdio = [0, 1, 2].map((n) => slot(fds[n] ?? -1, n, promote));
+    const inherit = deps.inherit?.(actions) ?? [];
+    const r = transport.call(
+      {
+        op: 'proc-spawn',
+        file,
+        argv,
+        env: env ?? deps.env,
+        cwd: cwd ?? Fs.cwd(),
+        stdio,
+        ...(inherit.length > 0 ? { inherit } : {}),
+        ...(exec ? { exec } : {}),
+      },
+      Infinity,
+      `proc-spawn ${file}`
+    );
+    if (!r.ok) return -wasiErrno(r.errno);
+    const pid = r.kind === 'json' ? (r.json as number) : 0;
+    const captures = [1, 2].filter((n) => 'capture' in (stdio[n] as ChildStdio));
+    if (captures.length === 0) return pid;
+    const waited = kernelWait(pid, false);
+    if (typeof waited === 'number') return waited;
+    for (const n of captures) deliver(pid, n, fds[n] as number);
+    reaped.set(pid, waited[1]);
+    return pid;
+  };
+
   return {
     spawn(file, argv, env, cwd, fds, actions) {
-      const unflushed = flushed(deps.beforeSpawn);
-      if (unflushed < 0) return unflushed;
-      const promote = deps.stdioPromoter?.();
-      const stdio = [0, 1, 2].map((n) => slot(fds[n] ?? -1, n, promote));
-      const inherit = deps.inherit?.(actions) ?? [];
-      const r = transport.call(
-        {
-          op: 'proc-spawn',
-          file,
-          argv,
-          env: env ?? deps.env,
-          cwd: cwd ?? Fs.cwd(),
-          stdio,
-          ...(inherit.length > 0 ? { inherit } : {}),
-        },
-        Infinity,
-        `proc-spawn ${file}`
-      );
-      if (!r.ok) return -wasiErrno(r.errno);
-      const pid = r.kind === 'json' ? (r.json as number) : 0;
-      const captures = [1, 2].filter((n) => 'capture' in (stdio[n] as ChildStdio));
-      if (captures.length === 0) return pid;
-      const waited = kernelWait(pid, false);
-      if (typeof waited === 'number') return waited;
-      for (const n of captures) deliver(pid, n, fds[n] as number);
-      reaped.set(pid, waited[1]);
-      return pid;
+      return spawnChild(file, argv, env, cwd, fds, actions, false);
     },
     fork(state) {
       const unflushed = flushed(deps.beforeSpawn);
@@ -256,31 +309,14 @@ export function createProcessKernel(deps: ProcessKernelDeps): ProcessKernel {
       if (!r.ok) return -wasiErrno(r.errno);
       return r.kind === 'json' ? (r.json as number) : -wasiErrno('EIO');
     },
-    select(read, write, timeoutMs) {
-      const kernel = (fd: number) => Fs.getStream(fd)?.sliccKernelFd;
-      const own = (fd: number) => kernel(fd) === undefined;
-      if (![...read, ...write].some(own))
-        return kernelSelect(Fs, transport, read, write, timeoutMs);
-      const deadline = timeoutMs < 0 ? Number.POSITIVE_INFINITY : Date.now() + timeoutMs;
-      const kernelRead = read.filter((fd) => !own(fd));
-      const kernelWrite = write.filter((fd) => !own(fd));
-      for (;;) {
-        const local = ownReady(Fs, read.filter(own), write.filter(own));
-        const pending = local.read.length > 0 || local.write.length > 0;
-        const slice = pending ? 0 : Math.min(SELECT_SLICE_MS, Math.max(0, deadline - Date.now()));
-        const got = kernelSelect(Fs, transport, kernelRead, kernelWrite, slice);
-        if (typeof got === 'number') return got;
-        const ready = { read: [...local.read, ...got.read], write: [...local.write, ...got.write] };
-        if (ready.read.length > 0 || ready.write.length > 0 || Date.now() >= deadline) {
-          return ready;
-        }
-      }
-    },
-    execWait(pid) {
-      const r = transport.call({ op: 'proc-exec', pid }, Infinity, `exec ${pid}`);
-      if (!r.ok) return -wasiErrno(r.errno);
-      deps.afterChild();
-      return r.kind === 'json' ? (r.json as [number, number])[1] : 0;
+    select: (read, write, timeoutMs) => anySelect(Fs, transport, read, write, timeoutMs),
+    execWait: execWait,
+    execve(file, argv, env, cwd) {
+      const pid = spawnChild(file, argv, env, cwd, [0, 1, 2], undefined, true);
+      if (pid < 0) return pid;
+      const status = reaped.get(pid);
+      reaped.delete(pid);
+      return status ?? execWait(pid);
     },
     pause() {
       return status(call({ op: 'sig-pause' }, 'pause'));

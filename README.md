@@ -244,6 +244,13 @@ Programs mount and unmount with `mount(2)` and `umount2(2)`, so a `mount`/`umoun
 - **Errors** are Linux's: `ENODEV` for an unknown type (or `hostfs` without a hook), `ENOENT` and `ENOTDIR` for the target, `EBUSY` for a target that is mounted already, and `EINVAL` for unmounting what is not a mount point.
 - **`/proc/mounts`** escapes spaces and backslashes as Linux does, and adds `nomedium` or `failed` to the options of a mount in that state.
 
+### Exec
+
+An exec'd program takes over the pid of the process it replaces, as on Linux: `getpid()` and `$$` in the new image, `/proc`, `ps`, `kill` and the parent's `waitpid` all agree on that pid, and the image's parent pid is the replaced process's. Its own children see that pid as their parent.
+
+- **Emscripten:** `Module.sliccKernel.execve(file, argv, env, cwd)` runs `file` as this process's new image on its fds 0, 1 and 2, waits for it, and returns its wait status, or a negative errno when it cannot start. `env` and `cwd` may be `null` for this process's own. An exec shim detects it with `typeof Module.sliccKernel.execve === 'function'` and exits with the status it returns, as `execve` never returns on success. Older shims spawn the program and then call `Module.sliccKernel.execWait(pid)`; that still works, but the image then reports a pid of its own from `getpid()`.
+- **WASIX:** `proc_exec` does this by itself.
+
 ### `/proc`
 
 Every process of the kernel has `/proc/<pid>/` with `cmdline`, `comm`, `stat`, `statm` and `status`, in the formats procps reads, and `/proc/self/` has the same files for the process that reads them. They come from the kernel's process table when they are opened, so a terminal sees the processes of every client; an exec'd program shows under the pid its parent knows. `/proc/uptime`, `/proc/loadavg`, `/proc/stat` and `/proc/meminfo` are there too, and `/proc/mounts`. Pids, parents, process groups, sessions, command lines, terminals, start and boot times are real, and so is each process's memory: the size of its wasm memory (`VSZ` and `RSS` alike, as wasm has no paging), which `/proc/meminfo` counts as used. CPU times, load and `MemTotal` (from `navigator.deviceMemory`, else 4 GiB) are placeholders. Only Emscripten processes see this `/proc`.
