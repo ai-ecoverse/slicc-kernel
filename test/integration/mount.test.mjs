@@ -412,7 +412,7 @@ test('hostfs: a read-only mount refuses an append or read-write open of an exist
   assert.deepEqual(page.errors, []);
 });
 
-test('a write the mount refuses after the program wrote it fails the next spawn with its errno, and crashes neither that spawn nor the exit', async (t) => {
+test('a write past maxfile on a descriptor kept open fails at the write, and the next spawn and the exit run normally', async (t) => {
   const { page, bash } = await booted(chrome, t);
   await bash('mkdir -p /mnt/t', { cwd: '/home' });
   await page.evaluate(() =>
@@ -428,7 +428,11 @@ test('a write the mount refuses after the program wrote it fails the next spawn 
       'echo 1 > /mnt/t/c; exec 3>>/mnt/t/c; printf 0123456789abcdef >&3; sleep 0.1; echo "spawned $?"',
       { cwd: '/home' }
     ),
-    { status: 0, stdout: 'spawned 126\n', stderr: 'bash: line 1: /usr/bin/sleep: File too large\n' }
+    {
+      status: 0,
+      stdout: 'spawned 0\n',
+      stderr: 'bash: line 1: printf: write error: File too large\n',
+    }
   );
   assert.deepEqual(await bash('cat /mnt/t/c', { cwd: '/home' }), {
     status: 0,

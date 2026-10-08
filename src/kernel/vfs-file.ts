@@ -145,7 +145,8 @@ export class VfsNode {
 
   private cap: Promise<number | undefined> | undefined;
 
-  private limit(): Promise<number | undefined> {
+  limit(): Promise<number | undefined> {
+    if (this.cap !== undefined) return this.cap;
     const stat = this.fs.stat?.bind(this.fs);
     if (!stat || this.orphaned) return Promise.resolve(undefined);
     const parent = this.path.slice(0, this.path.lastIndexOf('/')) || '/';
@@ -169,6 +170,7 @@ export class VfsNode {
   }
 
   async pwrite(bytes: Uint8Array, at: number): Promise<number> {
+    if (bytes.length === 0) return 0;
     await this.fits(at + bytes.length);
     await this.load();
     const buf = this.ensure(at + bytes.length);
@@ -269,7 +271,7 @@ export class VfsNodes {
 
   async unlinking(path: string): Promise<void> {
     const node = this.byPath.get(path);
-    if (node) await node.serial(() => node.load());
+    if (node) await node.serial(async () => void (await Promise.all([node.load(), node.limit()])));
   }
 
   revoke(prefix: string): void {

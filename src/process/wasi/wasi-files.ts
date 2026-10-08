@@ -62,6 +62,7 @@ export class FileBuffer {
   }
 
   pwrite(bytes: Uint8Array, at: number): number {
+    if (bytes.length === 0) return 0;
     const end = at + bytes.length;
     this.fits(end);
     this.load();
