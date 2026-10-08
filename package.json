@@ -49,7 +49,7 @@
     "@ai-ecoverse/slicc-node": "2.1.0",
     "@ai-ecoverse/slicc-shared-web": "1.5.0",
     "@ai-ecoverse/wasi-cargo": "0.99.0-2",
-    "@ai-ecoverse/wasi-pnpm": "12.9.1-5",
+    "@ai-ecoverse/wasi-pnpm": "12.9.1-6",
     "@ai-ecoverse/wasi-ripgrep": "15.2.0-2",
     "@ai-ecoverse/wasi-rustc": "1.98.1-4",
     "@ai-ecoverse/wasi-zig": "0.16.0-15",
