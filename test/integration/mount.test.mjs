@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
+import { startProxy } from '@ai-ecoverse/slicc-node';
 import { launch } from './chrome.mjs';
 import { hostfsProxy } from './hostfs-proxy.mjs';
 import { booted, installPackage } from './kernel.mjs';
@@ -194,11 +195,29 @@ test('fsa: with no medium, a WASI program below the mount point gets ENODEV', as
   assert.deepEqual(page.errors, []);
 });
 
-test('hostfs: programs and git work on a host folder through the proxy, a file over 100 MB has no cap, host edits show up, and the mount survives the proxy restarting', async (t) => {
+async function sliccNode(dir, origin) {
+  let key;
+  const start = (port) =>
+    startProxy({ port, origins: [origin], mounts: [`${dir}:project`], ...(key ? { key } : {}) });
+  let proxy = await start(0);
+  key = proxy.key;
+  const port = new URL(proxy.url).port;
+  return {
+    url: proxy.url,
+    key: proxy.key,
+    stop: () => proxy.close(),
+    async start() {
+      proxy = await start(Number(port));
+    },
+    close: () => proxy.close().catch(() => undefined),
+  };
+}
+
+async function hostFolder(t, makeProxy) {
   const stage = join(homedir(), 'Developer/ai-ecoverse/work/stage/hostfs-int');
   await mkdir(stage, { recursive: true });
   const dir = await mkdtemp(join(stage, 'host-'));
-  const proxy = await hostfsProxy({ folders: { project: dir }, pingMs: 1000 });
+  const proxy = await makeProxy(dir);
   t.after(async () => {
     await proxy.close();
     await rm(dir, { recursive: true, force: true });
@@ -255,4 +274,10 @@ test('hostfs: programs and git work on a host folder through the proxy, a file o
   });
   await page.evaluate(() => window.kernel.umount('/mnt/h'));
   assert.deepEqual(page.errors, []);
-});
+}
+
+test('hostfs against the mock proxy: programs and git work on a host folder, a file over 100 MB has no cap, host edits show up, and the mount survives the proxy restarting', (t) =>
+  hostFolder(t, (dir) => hostfsProxy({ folders: { project: dir }, pingMs: 1000 })));
+
+test('hostfs against slicc-node: the same run against the real local proxy', (t) =>
+  hostFolder(t, (dir) => sliccNode(dir, new URL(chrome.url).origin)));
