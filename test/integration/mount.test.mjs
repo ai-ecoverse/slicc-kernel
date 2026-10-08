@@ -324,7 +324,7 @@ test('hostfs: a read-only mount refuses an append or read-write open of an exist
   assert.deepEqual(page.errors, []);
 });
 
-test('a write the mount refuses after the program wrote it does not crash the shell when it spawns or exits', async (t) => {
+test('a write the mount refuses after the program wrote it fails the next spawn with its errno, and crashes neither that spawn nor the exit', async (t) => {
   const { page, bash } = await booted(chrome, t);
   await bash('mkdir -p /mnt/t', { cwd: '/home' });
   await page.evaluate(() =>
@@ -340,7 +340,7 @@ test('a write the mount refuses after the program wrote it does not crash the sh
       'echo 1 > /mnt/t/c; exec 3>>/mnt/t/c; printf 0123456789abcdef >&3; sleep 0.1; echo "spawned $?"',
       { cwd: '/home' }
     ),
-    { status: 0, stdout: 'spawned 0\n', stderr: '' }
+    { status: 0, stdout: 'spawned 126\n', stderr: 'bash: line 1: /usr/bin/sleep: File too large\n' }
   );
   assert.deepEqual(await bash('cat /mnt/t/c', { cwd: '/home' }), {
     status: 0,
@@ -369,7 +369,7 @@ test('bytes a program wrote before a spawn whose write-back failed are kept, wit
       'exec 3>>/mnt/s3/a.txt',
       'printf "before\\n" >&3',
       'sleep 0.1',
-      'touch /home/spawned',
+      ': > /home/spawned',
       'while [ ! -e /home/up ]; do :; done',
       'printf "after\\n" >&3',
       'exec 3>&-',
@@ -382,7 +382,11 @@ test('bytes a program wrote before a spawn whose write-back failed are kept, wit
     window.refusePuts = false;
   });
   await page.evaluate(() => window.opfs.write('home/up', ''));
-  assert.deepEqual(await running, { status: 0, stdout: 'closed 0\n', stderr: '' });
+  assert.deepEqual(await running, {
+    status: 0,
+    stdout: 'closed 0\n',
+    stderr: 'bash: line 1: /usr/bin/sleep: I/O error\n',
+  });
   await page.evaluate(() => window.kernel.umount('/mnt/s3'));
   const stored = await page.evaluate(() =>
     new TextDecoder().decode(window.objects.get('a.txt')?.body ?? new Uint8Array())

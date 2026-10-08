@@ -92,6 +92,17 @@ export interface ProcessKernelDeps {
   restartable?(): boolean;
 }
 
+function flushed(beforeSpawn: () => void): number {
+  try {
+    beforeSpawn();
+    return 0;
+  } catch (err) {
+    const errno = (err as { errno?: unknown } | null)?.errno;
+    if (typeof errno !== 'number') throw err;
+    return -errno;
+  }
+}
+
 function drain(Fs: ProcessFs, stream: ProcessStream): Uint8Array {
   const chunks: Uint8Array[] = [];
   const buffer = new Uint8Array(65536);
@@ -199,7 +210,8 @@ export function createProcessKernel(deps: ProcessKernelDeps): ProcessKernel {
 
   return {
     spawn(file, argv, env, cwd, fds, actions) {
-      deps.beforeSpawn();
+      const unflushed = flushed(deps.beforeSpawn);
+      if (unflushed < 0) return unflushed;
       const promote = deps.stdioPromoter?.();
       const stdio = [0, 1, 2].map((n) => slot(fds[n] ?? -1, n, promote));
       const inherit = deps.inherit?.(actions) ?? [];
@@ -227,7 +239,8 @@ export function createProcessKernel(deps: ProcessKernelDeps): ProcessKernel {
       return pid;
     },
     fork(state) {
-      deps.beforeSpawn();
+      const unflushed = flushed(deps.beforeSpawn);
+      if (unflushed < 0) return unflushed;
       const streams = deps.describeFork();
       const r = transport.call(
         { op: 'proc-fork', state: { ...state, streams, cwd: Fs.cwd() } },

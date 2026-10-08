@@ -583,7 +583,9 @@ export function flushLiveVfs(Fs: LiveFsApi, plugin: LiveVfsPlugin): void {
         const bytes = node.live.data.slice(0, node.live.len);
         node.mount.opts.bridge.writeFile(liveNodePath(node), bytes);
         node.live.dirty = false;
-      } catch {}
+      } catch (err) {
+        throw toErrno(Fs, err);
+      }
     }
   }
 }
