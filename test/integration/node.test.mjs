@@ -186,3 +186,39 @@ test('a package driver mounts a mock S3; programs and git work on it, unmounting
   assert.deepEqual(again, { status: 0, stdout: 'one\ntwo\nover\n8\nfirst\nclean\n', stderr: '' });
   await kernel.umount('/mnt/s3');
 });
+
+test('a command pnpm installs globally runs in the same shell, and is gone once removed', async (t) => {
+  const kernel = await createNodeKernel({
+    network: { transport: nodeTransport() },
+  });
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils', 'wasm-tls-engine', 'wasi-pnpm']) {
+    await install(kernel, name);
+  }
+  const term = await kernel.openTerminal(['bash', '-i'], { cwd: '/home' });
+  let screen = '';
+  term.onData = (bytes) => {
+    screen += new TextDecoder().decode(bytes);
+  };
+  const until = async (text) => {
+    for (let i = 0; i < 1200 && !screen.includes(text); i++) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.ok(screen.includes(text), screen);
+  };
+  await until('$ ');
+  term.write('echo "home $PNPM_HOME"; rg --version 2>/dev/null; echo "before $((100+27))"\r');
+  await until('before 127');
+  assert.match(screen, /home \/home\/.local\/share\/pnpm/);
+  term.write(
+    'pnpm add -g @ai-ecoverse/wasi-ripgrep >/dev/null && rg --version | head -1 && echo "added $((40+2))"\r'
+  );
+  await until('added 42');
+  assert.match(screen, /ripgrep 15\.2\.0/);
+  term.write(
+    'pnpm remove -g @ai-ecoverse/wasi-ripgrep >/dev/null; rg --version 2>/dev/null; echo "removed $?"\r'
+  );
+  await until('removed 127');
+  term.close();
+  assert.equal(await term.exited, 129);
+});

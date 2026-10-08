@@ -1,5 +1,14 @@
 import { serveClient } from './client/serve-client.ts';
-import { type Abi, type Command, scanCommands, scanFilesystems } from './commands.ts';
+import {
+  type Abi,
+  type Command,
+  pnpmGlobalRoots,
+  scanCommands,
+  scanFilesystems,
+} from './commands.ts';
+
+export const PNPM_HOME = '/home/.local/share/pnpm';
+
 import { followLinks, withCommandDirs } from './fs/commands.ts';
 import type { KernelFs } from './fs/types.ts';
 import { fsError } from './fs/types.ts';
@@ -233,6 +242,7 @@ export class Launcher {
   private readonly ca: () => Promise<RealmCa>;
   readonly transport: RealmTransport;
   readonly watchers = new FsWatchers();
+  private readonly pnpmHome: string;
   readonly mounts: MountTable;
   private readonly createDriverWorker: (() => WasmWorkerLike) | undefined;
   private readonly openFiles = new Set<VfsNodes>();
@@ -251,6 +261,7 @@ export class Launcher {
     this.base = this.watchers.wrap(this.mounts.wrap(options.fs));
     this.createWorker = options.createWorker;
     this.createDriverWorker = options.createDriverWorker;
+    this.pnpmHome = options.env?.PNPM_HOME ?? PNPM_HOME;
     this.modulesDir = options.modules ?? '/node_modules';
     this.env = { ...networkEnv(), ...options.env };
     this.ca = kernelCa(options.caStore ?? memoryCaStore());
@@ -261,11 +272,18 @@ export class Launcher {
       ca: this.ca,
     });
     this.fs = withCommandDirs(this.base, async () => new Set((await this.commands()).keys()));
+    this.watchers.watch([this.modulesDir, this.pnpmHome], { recursive: true }, () => {
+      this.catalog = undefined;
+    });
   }
 
   commands(): Promise<Map<string, Command>> {
-    this.catalog ??= scanCommands(this.base, this.modulesDir);
+    this.catalog ??= this.roots().then((roots) => scanCommands(this.base, roots));
     return this.catalog;
+  }
+
+  private async roots(): Promise<string[]> {
+    return [this.modulesDir, ...(await pnpmGlobalRoots(this.base, this.pnpmHome))];
   }
 
   async resolve(file: string, argv0: string, cwd: string): Promise<Target | undefined> {
@@ -549,7 +567,7 @@ export class Launcher {
         },
       };
     }
-    const module = (await scanFilesystems(this.base, this.modulesDir)).get(type);
+    const module = (await scanFilesystems(this.base, await this.roots())).get(type);
     if (!module) throw fsError('ENODEV', `unknown file system type ${type}`);
     if (!this.createDriverWorker)
       throw fsError('ENODEV', `this kernel cannot start ${type} drivers`);
@@ -594,7 +612,14 @@ export class Launcher {
   }
 
   private environment(cwd: string, extra: Record<string, string> | undefined) {
-    return { PATH: '/usr/bin:/bin', HOME: '/home', ...this.env, PWD: cwd, ...extra };
+    return {
+      PATH: `/usr/bin:/bin:${this.pnpmHome}/bin`,
+      HOME: '/home',
+      PNPM_HOME: this.pnpmHome,
+      ...this.env,
+      PWD: cwd,
+      ...extra,
+    };
   }
 
   private async starting(argv: string[], dir: string | undefined) {
