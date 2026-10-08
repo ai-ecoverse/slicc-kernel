@@ -153,9 +153,33 @@ async function packages(fs: KernelFs, modules: string): Promise<string[]> {
   return dirs;
 }
 
-export async function scanCommands(fs: KernelFs, modules: string): Promise<Map<string, Command>> {
+export async function pnpmGlobalRoots(fs: KernelFs, home: string): Promise<string[]> {
+  const roots: string[] = [];
+  const global = `${home}/global`;
+  for (const version of (await fs.readdir(global).catch(() => [])).sort()) {
+    for (const group of (await fs.readdir(`${global}/${version}`).catch(() => [])).sort()) {
+      const dir = `${global}/${version}/${group}`;
+      const st = await fs.lstat(dir).catch(() => undefined);
+      if (st?.isDirectory && (await fs.exists(`${dir}/node_modules`)))
+        roots.push(`${dir}/node_modules`);
+    }
+  }
+  return roots;
+}
+
+async function packagesIn(fs: KernelFs, roots: string | string[]): Promise<string[]> {
+  const dirs: string[] = [];
+  for (const root of typeof roots === 'string' ? [roots] : roots)
+    dirs.push(...(await packages(fs, root)));
+  return dirs;
+}
+
+export async function scanCommands(
+  fs: KernelFs,
+  modules: string | string[]
+): Promise<Map<string, Command>> {
   const found = new Map<string, Command>();
-  for (const pkg of await packages(fs, modules)) {
+  for (const pkg of await packagesIn(fs, modules)) {
     let manifest: Manifest;
     try {
       manifest = JSON.parse(await fs.readFile(`${pkg}/package.json`));
@@ -173,9 +197,12 @@ export async function scanCommands(fs: KernelFs, modules: string): Promise<Map<s
   return found;
 }
 
-export async function scanFilesystems(fs: KernelFs, modules: string): Promise<Map<string, string>> {
+export async function scanFilesystems(
+  fs: KernelFs,
+  modules: string | string[]
+): Promise<Map<string, string>> {
   const found = new Map<string, string>();
-  for (const pkg of await packages(fs, modules)) {
+  for (const pkg of await packagesIn(fs, modules)) {
     let manifest: Manifest;
     try {
       manifest = JSON.parse(await fs.readFile(`${pkg}/package.json`));
