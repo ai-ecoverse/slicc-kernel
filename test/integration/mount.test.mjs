@@ -158,3 +158,34 @@ test('fsa: a drive with no medium fails with ENOMEDIUM and asks for a folder; on
   assert.equal(await page.evaluate(() => window.pendingMedia.length), 1);
   assert.deepEqual(page.errors, []);
 });
+
+test('fsa: with no medium, a mkdir in the mount point fails with ENOMEDIUM, and ls and stat show an empty directory', async (t) => {
+  const { page, bash } = await booted(chrome, t);
+  await bash('mkdir -p /mnt/f', { cwd: '/home' });
+  await page.evaluate(() => window.kernel.mount({ type: 'fsa', source: 'none', target: '/mnt/f' }));
+  assert.deepEqual(
+    await bash(
+      'mkdir /mnt/f/d; echo "mkdir $?"; ls -A /mnt/f | wc -l; stat -c %F /mnt/f; test -d /mnt/f && echo dir',
+      { cwd: '/home' }
+    ),
+    {
+      status: 0,
+      stdout: 'mkdir 1\n0\ndirectory\ndir\n',
+      stderr: 'mkdir: cannot create directory ‘/mnt/f/d’: No medium found\n',
+    }
+  );
+  await page.evaluate(() => window.kernel.umount('/mnt/f'));
+  assert.deepEqual(page.errors, []);
+});
+
+test('fsa: with no medium, a WASI program below the mount point gets ENODEV', async (t) => {
+  const { page, bash } = await booted(chrome, t);
+  await installPackage(page, 'wasi-ripgrep');
+  await bash('mkdir -p /mnt/f', { cwd: '/home' });
+  await page.evaluate(() => window.kernel.mount({ type: 'fsa', source: 'none', target: '/mnt/f' }));
+  const r = await bash('rg x /mnt/f/a.txt', { cwd: '/home' });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /No such device \(os error 43\)/);
+  await page.evaluate(() => window.kernel.umount('/mnt/f'));
+  assert.deepEqual(page.errors, []);
+});

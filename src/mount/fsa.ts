@@ -111,7 +111,7 @@ export function kernelFsHandlers(fs: KernelFs): Handlers {
   };
 }
 
-const EMPTY_ROOT: DriverAttr = { kind: 'directory', size: 0, mtime: 0, mode: 0o40555 };
+const EMPTY_ROOT: DriverAttr = { kind: 'directory', size: 0, mtime: 0, mode: 0o40755 };
 
 export interface Medium {
   readonly handlers: FilesystemHandlers;

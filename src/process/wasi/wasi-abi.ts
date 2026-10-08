@@ -12,7 +12,7 @@ export const E = {
   CHILD: 12,
   CONNREFUSED: 14,
   CONNRESET: 15,
-  NODEV: 19,
+  NODEV: 43,
   EXIST: 20,
   FAULT: 21,
   FBIG: 22,
