@@ -179,20 +179,25 @@ export class WasiHost {
       ...this.statImports(),
       ...this.pathImports(),
       ...this.socketImports(),
-      poll_oneoff: (inPtr: number, outPtr: number, n: number, nevents: number) =>
-        pollOneoff(
-          {
-            mem: this.mem,
-            fds: this.fds,
-            kernel: this.o.kernel,
-            now: (id) => this.now(id),
-            interruptWakes: this.interruptWakes,
-          },
-          inPtr,
-          outPtr,
-          n,
-          nevents
-        ),
+      poll_oneoff: (inPtr: number, outPtr: number, n: number, nevents: number) => {
+        try {
+          return pollOneoff(
+            {
+              mem: this.mem,
+              fds: this.fds,
+              kernel: this.o.kernel,
+              now: (id) => this.now(id),
+              interruptWakes: this.interruptWakes,
+            },
+            inPtr,
+            outPtr,
+            n,
+            nevents
+          );
+        } finally {
+          this.o.fs.invalidate?.();
+        }
+      },
     });
     return this.cache;
   }
