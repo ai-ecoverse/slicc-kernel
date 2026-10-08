@@ -296,7 +296,8 @@ export function useProcfs(Fs: ProcFs, sys: ProcSys, pid: number, memory = memory
     return node;
   };
   const find = (processes: ProcessInfo[], target: number, own: boolean) =>
-    processes.find((p) => (own ? p.tid === target : p.pid === target || p.tid === target));
+    (own ? processes.find((p) => p.tid === target) : undefined) ??
+    processes.find((p) => p.pid === target || p.tid === target);
   const infoOf = (target: number): ProcessInfo | undefined =>
     find(procList().processes, target, false);
   const pidContent =
