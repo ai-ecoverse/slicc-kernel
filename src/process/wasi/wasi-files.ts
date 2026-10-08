@@ -208,22 +208,30 @@ export function pathInode(path: string): bigint {
   return h;
 }
 
+export const MISS_TTL_MS = 20;
+
+interface Miss {
+  error: Error;
+  until: number;
+}
+
 export function cachingBridge(
-  bridge: SyncFsPosixBridge
+  bridge: SyncFsPosixBridge,
+  now: () => number = () => performance.now()
 ): SyncFsPosixBridge & { invalidate(): void } {
-  const stats = new Map<string, SyncFsBridgeStat | Error>();
-  const lstats = new Map<string, SyncFsBridgeStat | Error>();
+  const stats = new Map<string, SyncFsBridgeStat | Miss>();
+  const lstats = new Map<string, SyncFsBridgeStat | Miss>();
   const cached = (map: typeof stats, path: string, get: () => SyncFsBridgeStat) => {
     let hit = map.get(path);
-    if (hit === undefined) {
+    if (hit === undefined || ('until' in hit && hit.until <= now())) {
       try {
         hit = get();
       } catch (e) {
-        hit = e as Error;
+        hit = { error: e as Error, until: now() + MISS_TTL_MS };
       }
       map.set(path, hit);
     }
-    if (hit instanceof Error) throw hit;
+    if ('until' in hit) throw hit.error;
     return hit;
   };
   const invalidate = () => {

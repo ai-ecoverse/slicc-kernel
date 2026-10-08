@@ -20,6 +20,8 @@ interface PollEvent {
 
 export type ClockNow = (id: number) => bigint;
 
+const CLOCK_SLACK_MS = 0.5;
+
 function readSubscriptions(mem: WasiMemory, ptr: number, n: number, now: ClockNow): Subscription[] {
   const v = mem.view();
   const at = performance.now();
@@ -112,28 +114,31 @@ export function pollOneoff(
   const subs = readSubscriptions(mem, inPtr, nsubs, deps.now);
   const { events, read, write } = classify(deps.fds, subs);
   let interrupted = false;
+  const earliest = Math.min(...subs.map((s) => s.deadline));
+  const expired = () => performance.now() + CLOCK_SLACK_MS >= earliest;
   if (read.length > 0 || write.length > 0 || events.length === 0) {
-    const earliest = Math.min(...subs.map((s) => s.deadline));
-    let timeoutMs = -1;
-    if (events.length > 0) timeoutMs = 0;
-    else if (earliest !== Infinity)
-      timeoutMs = Math.max(0, Math.ceil(earliest - performance.now()));
-    let ready: unknown;
-    try {
-      ready = kernel.call({ op: 'fd-select', read, write, timeoutMs });
-    } catch (e) {
-      if (!deps.interruptWakes || (e as { code?: unknown }).code !== 'EINTR') throw e;
-      interrupted = true;
-      ready = { read: [], write: [] };
-    }
-    events.push(
-      ...readyEvents(subs, ready as { read: number[]; write: number[]; hangup?: number[] })
-    );
+    do {
+      let timeoutMs = -1;
+      if (events.length > 0) timeoutMs = 0;
+      else if (earliest !== Infinity)
+        timeoutMs = Math.max(0, Math.ceil(earliest - performance.now()));
+      let ready: unknown;
+      try {
+        ready = kernel.call({ op: 'fd-select', read, write, timeoutMs });
+      } catch (e) {
+        if (!deps.interruptWakes || (e as { code?: unknown }).code !== 'EINTR') throw e;
+        interrupted = true;
+        ready = { read: [], write: [] };
+      }
+      events.push(
+        ...readyEvents(subs, ready as { read: number[]; write: number[]; hangup?: number[] })
+      );
+    } while (events.length === 0 && !interrupted && earliest !== Infinity && !expired());
   }
   const after = performance.now();
 
   for (const s of subs) {
-    if (s.type === EVENTTYPE.CLOCK && (interrupted || s.deadline <= after + 0.5)) {
+    if (s.type === EVENTTYPE.CLOCK && (interrupted || s.deadline <= after + CLOCK_SLACK_MS)) {
       events.push({ userdata: s.userdata, error: E.SUCCESS, type: s.type });
     }
   }
