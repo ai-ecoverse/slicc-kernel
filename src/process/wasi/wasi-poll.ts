@@ -114,7 +114,7 @@ export function pollOneoff(
   const subs = readSubscriptions(mem, inPtr, nsubs, deps.now);
   const { events, read, write } = classify(deps.fds, subs);
   let interrupted = false;
-  const earliest = Math.min(...subs.map((s) => s.deadline));
+  const earliest = subs.reduce((min, s) => Math.min(min, s.deadline), Infinity);
   const expired = () => performance.now() + CLOCK_SLACK_MS >= earliest;
   if (read.length > 0 || write.length > 0 || events.length === 0) {
     do {
