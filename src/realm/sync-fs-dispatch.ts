@@ -28,6 +28,7 @@ export interface SyncFsStatJson {
   ino: number;
   dev?: number;
   readonly?: boolean;
+  maxFile?: number;
 }
 
 function statJson(s: FsStat): SyncFsStatJson {
@@ -43,6 +44,7 @@ function statJson(s: FsStat): SyncFsStatJson {
     ino: s.ino,
     ...(s.dev !== undefined ? { dev: s.dev } : {}),
     ...(s.readonly ? { readonly: true } : {}),
+    ...(s.maxFile ? { maxFile: s.maxFile } : {}),
   };
 }
 

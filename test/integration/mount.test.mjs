@@ -256,6 +256,33 @@ test('mount(2) from a program: the page can forbid it', async (t) => {
   assert.deepEqual(page.errors, []);
 });
 
+test('maxfile: a write past the cap fails with "File too large" and a non-zero status, keeps what was there, and bash keeps its stdout', async (t) => {
+  const { page, bash } = await booted(chrome, t);
+  await bash('mkdir -p /mnt/c', { cwd: '/home' });
+  await page.evaluate(() =>
+    window.kernel.mount({
+      type: 'tmpfs',
+      source: 'none',
+      target: '/mnt/c',
+      options: { maxfile: '10' },
+    })
+  );
+  assert.deepEqual(
+    await bash(
+      'printf 0123456789abcdef > /mnt/c/a; echo "rc=$?"; wc -c < /mnt/c/a; printf ab > /mnt/c/b; printf 0123456789abcdef >> /mnt/c/b; echo "rc=$?"; cat /mnt/c/b; echo; echo after',
+      { cwd: '/home' }
+    ),
+    {
+      status: 0,
+      stdout: 'rc=1\n0\nrc=1\nab\nafter\n',
+      stderr:
+        'bash: line 1: printf: write error: File too large\nbash: line 1: printf: write error: File too large\n',
+    }
+  );
+  await page.evaluate(() => window.kernel.umount('/mnt/c'));
+  assert.deepEqual(page.errors, []);
+});
+
 async function sliccNode(dir, origin) {
   let key;
   const start = (port) =>

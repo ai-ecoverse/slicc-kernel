@@ -118,6 +118,7 @@ function statOf(attr: DriverAttr, path: string, mount: Mount): FsStat {
     ino: attr.ino ?? inodeOf(path),
     dev: mount.dev,
     ...(readonly(mount) ? { readonly: true } : {}),
+    ...(mount.maxFile > 0 ? { maxFile: mount.maxFile } : {}),
   };
 }
 

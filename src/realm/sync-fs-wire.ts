@@ -49,6 +49,7 @@ export interface SyncFsBridgeStat {
   ino?: number;
   dev?: number;
   readonly?: boolean;
+  maxFile?: number;
 }
 
 export interface SyncFsUsage {
@@ -109,5 +110,6 @@ export function parseSyncFsStat(json: unknown): SyncFsBridgeStat | null {
     ...(typeof s.ino === 'number' ? { ino: s.ino } : {}),
     ...(typeof s.dev === 'number' ? { dev: s.dev } : {}),
     ...(s.readonly === true ? { readonly: true } : {}),
+    ...(typeof s.maxFile === 'number' ? { maxFile: s.maxFile } : {}),
   };
 }
