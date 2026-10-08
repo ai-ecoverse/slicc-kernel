@@ -259,8 +259,13 @@ export class VfsNodes {
   }
 }
 
-export async function refuseReadonly(fs: VfsFileFs, path: string, flags: number): Promise<void> {
-  if ((flags & O_ACCMODE) === 0 || !fs.stat) return;
+export async function refuseReadonly(
+  fs: VfsFileFs,
+  path: string,
+  flags: number,
+  mutates = false
+): Promise<void> {
+  if (((flags & O_ACCMODE) === 0 && !mutates) || !fs.stat) return;
   const stat = fs.stat.bind(fs);
   const parent = path.slice(0, path.lastIndexOf('/')) || '/';
   const st = await stat(path)

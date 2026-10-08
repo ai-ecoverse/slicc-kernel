@@ -546,7 +546,7 @@ export class WasmProcess {
       case 'fd-poll':
         return { ok: true, kind: 'json', json: pollFile(this.fds.get(req.fd).file) };
       case 'fd-open-vfs':
-        await refuseReadonly(this.options.fs, req.path, req.flags);
+        await refuseReadonly(this.options.fs, req.path, req.flags, !!(req.create || req.truncate));
         return { ok: true, kind: 'json', json: this.fds.install(this.openVfsFile(req), 3) };
       case 'fd-info':
         return { ok: true, kind: 'json', json: this.fdInfo(req.fd) };
