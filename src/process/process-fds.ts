@@ -114,6 +114,19 @@ function cloexecPipe2(pipe2: GlueSyscall, deps: CloexecDeps): GlueSyscall {
   };
 }
 
+function quietTarget(dup3: GlueSyscall, deps: CloexecDeps): GlueSyscall {
+  return (fd = -1, newfd = -1, ...rest) => {
+    const Fs = deps.fs();
+    const target = fd === newfd ? undefined : Fs?.getStream(newfd);
+    if (target && Fs?.getStream(fd)) {
+      try {
+        Fs.close?.(target);
+      } catch {}
+    }
+    return dup3(fd, newfd, ...rest);
+  };
+}
+
 function cloexecByFlag(syscall: GlueSyscall, flagArg: number, deps: CloexecDeps): GlueSyscall {
   const mark = marker(deps);
   return (...args) => {
@@ -146,7 +159,7 @@ function wrapperFactories(
     fcntl: (f) => cloexecFcntl(f, deps),
     pipe2: (f) => cloexecPipe2(f, deps),
 
-    dup3: (f) => cloexecByFlag(f, 2, deps),
+    dup3: (f) => cloexecByFlag(quietTarget(f, deps), 2, deps),
     socket: (f) => cloexecByFlag(f, 1, deps),
     accept4: (f) => cloexecByFlag(f, 3, deps),
     ...(pty
