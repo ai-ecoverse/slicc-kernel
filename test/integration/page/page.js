@@ -214,6 +214,18 @@ function withTracking(kernel) {
   return kernel;
 }
 
+window.pendingMedia = [];
+
+const media = {
+  requestDirectory: () => walk('picked', true),
+  onMountPending: (pending) => window.pendingMedia.push(pending),
+};
+
+window.insertPending = async (index) => {
+  await window.pendingMedia[index].insert();
+  return true;
+};
+
 window.boot = async (options = {}) => {
   await install();
   const base = options.proxy
@@ -222,7 +234,7 @@ window.boot = async (options = {}) => {
   const transport = options.store ? storeTransport(base) : base;
   const network = options.network === false ? {} : { network: { transport } };
   window.kernel = withTracking(
-    await createKernel({ root: await navigator.storage.getDirectory(), ...network })
+    await createKernel({ root: await navigator.storage.getDirectory(), ...network, ...media })
   );
   return true;
 };
@@ -274,7 +286,7 @@ window.terminal = async (argv, options) => {
 window.reboot = async () => {
   window.kernel.terminate();
   window.kernel = withTracking(
-    await createKernel({ root: await navigator.storage.getDirectory() })
+    await createKernel({ root: await navigator.storage.getDirectory(), ...media })
   );
   return true;
 };

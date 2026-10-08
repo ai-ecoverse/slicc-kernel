@@ -14,7 +14,7 @@ export interface MountEntry {
   source: string;
   target: string;
   options: Record<string, string>;
-  state: 'ok' | 'failed';
+  state: 'ok' | 'failed' | 'nomedium';
   error?: string;
 }
 
@@ -22,6 +22,7 @@ export interface OpenedDriver {
   port: DriverPortLike;
   dispose(): void;
   onCrash?(listener: (error: Error) => void): void;
+  present?(): boolean;
 }
 
 export interface MountDeps {
@@ -44,6 +45,7 @@ interface Mount extends MountEntry {
   attrs: Map<string, Cached<DriverAttr>>;
   lists: Map<string, Cached<DriverEntry[]>>;
   dispose(): void;
+  present?(): boolean;
 }
 
 const MAX_LINKS = 40;
@@ -105,14 +107,16 @@ export class MountTable {
   }
 
   list(): MountEntry[] {
-    return [...this.mounts.values()].map(({ type, source, target, options, state, error }) => ({
-      type,
-      source,
-      target,
-      options: { ...options },
-      state,
-      ...(error ? { error } : {}),
-    }));
+    return [...this.mounts.values()].map(
+      ({ type, source, target, options, state, error, present }) => ({
+        type,
+        source,
+        target,
+        options: { ...options },
+        state: state === 'ok' && present?.() === false ? 'nomedium' : state,
+        ...(error ? { error } : {}),
+      })
+    );
   }
 
   locate(path: string): { mount: Mount; rel: string } | undefined {
@@ -187,6 +191,7 @@ export class MountTable {
       attrs: new Map(),
       lists: new Map(),
       dispose: () => opened.dispose(),
+      ...(opened.present ? { present: opened.present } : {}),
     };
     mounted = mount;
     this.mounts.set(target, mount);

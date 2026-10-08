@@ -1,4 +1,6 @@
 import type { TransportCall } from './kernel/net/remote-transport.ts';
+import type { PendingMedium } from './launcher.ts';
+import type { MediumHandle } from './mount/fsa.ts';
 import type { MountEntry, MountSpec } from './mount/mount-fs.ts';
 import type { KernelCall, TerminalAction } from './serve.ts';
 import { type NetworkTransport, serveTransport } from './transport.ts';
@@ -52,6 +54,14 @@ export interface KernelOptions {
   metadata?: string | false;
   worker?: string | URL;
   network?: NetworkOptions;
+  requestDirectory?: () => Promise<FileSystemDirectoryHandle>;
+  onMountPending?: (pending: MountPending) => void;
+}
+
+export interface MountPending {
+  target: string;
+  source: string;
+  insert(): Promise<void>;
 }
 
 export interface RunOptions {
@@ -75,6 +85,7 @@ export interface Kernel {
   mount(spec: MountSpec): Promise<MountEntry>;
   umount(target: string): Promise<void>;
   mounts(): Promise<MountEntry[]>;
+  insert(target: string, handle: FileSystemDirectoryHandle): Promise<void>;
   terminate(): void;
 }
 
@@ -150,16 +161,36 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
   };
   const transport = options.network?.transport;
   const bridge = transport ? serveTransport(worker, transport) : undefined;
-  worker.addEventListener('message', ({ data }: MessageEvent<Reply | TransportCall>) => {
-    if ('net' in data) return bridge?.answer(data);
-    const call = pending.get(data.id);
-    if (!call) return;
-    if (data.fd !== undefined) return call.output?.(data.fd, data.bytes as Uint8Array);
-    if (data.started !== undefined) return call.started?.(data.started);
-    pending.delete(data.id);
-    if (data.error !== undefined) call.reject(new Error(data.error));
-    else call.resolve(data.result);
-  });
+  async function chosen(handle: MediumHandle | undefined): Promise<FileSystemDirectoryHandle> {
+    if (handle) {
+      const state = await handle.requestPermission?.({ mode: 'readwrite' });
+      if (state === undefined || state === 'granted') return handle;
+      throw new Error('permission for the folder was not granted');
+    }
+    if (!options.requestDirectory) throw new Error('this page cannot ask for a folder');
+    return options.requestDirectory();
+  }
+  const pendingMedium = ({ target, source, handle }: PendingMedium) =>
+    options.onMountPending?.({
+      target,
+      source,
+      insert: async () =>
+        void (await call({ op: 'insert', target, source, handle: await chosen(handle) })),
+    });
+  worker.addEventListener(
+    'message',
+    ({ data }: MessageEvent<Reply | TransportCall | { medium: PendingMedium }>) => {
+      if ('net' in data) return bridge?.answer(data);
+      if ('medium' in data) return pendingMedium(data.medium);
+      const call = pending.get(data.id);
+      if (!call) return;
+      if (data.fd !== undefined) return call.output?.(data.fd, data.bytes as Uint8Array);
+      if (data.started !== undefined) return call.started?.(data.started);
+      pending.delete(data.id);
+      if (data.error !== undefined) call.reject(new Error(data.error));
+      else call.resolve(data.result);
+    }
+  );
   worker.addEventListener('error', (event) => {
     event.preventDefault();
     fail(new Error(`slicc-kernel worker failed: ${event.message}`));
@@ -247,6 +278,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     mount: async (spec) => (await call({ op: 'mount', spec })) as MountEntry,
     umount: async (target) => void (await call({ op: 'umount', target })),
     mounts: async () => (await call({ op: 'mounts' })) as MountEntry[],
+    insert: async (target, handle) => void (await call({ op: 'insert', target, handle })),
     terminate() {
       fail(new Error('slicc-kernel terminated'));
       worker.terminate();

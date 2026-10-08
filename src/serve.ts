@@ -13,6 +13,8 @@ import {
   type TerminalOptions,
   type TerminalSession,
 } from './launcher.ts';
+import type { MediumHandle } from './mount/fsa.ts';
+import type { MediaStore } from './mount/media.ts';
 import type { MountSpec } from './mount/mount-fs.ts';
 
 export interface KernelPort {
@@ -60,7 +62,8 @@ export interface ConnectRequest {
 export type MountRequest =
   | { id: number; op: 'mount'; spec: MountSpec }
   | { id: number; op: 'umount'; target: string }
-  | { id: number; op: 'mounts' };
+  | { id: number; op: 'mounts' }
+  | { id: number; op: 'insert'; target: string; source?: string; handle: MediumHandle };
 
 export type KernelRequest =
   | InitRequest
@@ -79,6 +82,7 @@ export interface ServeDeps {
   createWorker: () => WasmWorkerLike;
   createDriverWorker?: () => WasmWorkerLike;
   metadata?: (name: string) => Promise<MetaStore>;
+  media?: (name: string) => Promise<MediaStore>;
   locks?: LockManagerLike | null;
 }
 
@@ -98,6 +102,14 @@ function act(session: TerminalSession, req: TerminalAction): void {
 
 function dirsChannel(name: string | false): string | undefined {
   return name === false ? undefined : `slicc-kernel-dirs:${name}`;
+}
+
+async function stores(
+  deps: ServeDeps,
+  name: string | false
+): Promise<{ meta?: MetaStore | undefined; media?: MediaStore | undefined }> {
+  if (name === false) return {};
+  return { meta: await deps.metadata?.(name), media: await deps.media?.(`${name}:media`) };
 }
 
 export function serveKernel(port: KernelPort, deps: ServeDeps): void {
@@ -157,7 +169,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
   async function init(req: InitRequest): Promise<boolean> {
     launcher = (req.root ? Promise.resolve(req.root) : deps.storage()).then(async (root) => {
       const name = req.metadata ?? META_DB;
-      const meta = name === false ? undefined : await deps.metadata?.(name);
+      const { meta, media } = await stores(deps, name);
       remote = req.transport ? new RemoteTransport(port, req.transport) : undefined;
       const fs = new OpfsFs(root, meta, dirsChannel(name));
       await fs.reconcile();
@@ -168,6 +180,8 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
         ...(req.modules ? { modules: req.modules } : {}),
         ...(req.env ? { env: req.env } : {}),
         ...(remote ? { transport: remote } : {}),
+        ...(media ? { media } : {}),
+        onMountPending: (medium) => port.postMessage({ medium }),
         caStore: caStore(deps.metadata ? name : false),
       });
       await started.prepare();
@@ -181,6 +195,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
     const l = await ready();
     if (req.op === 'mount') return l.mount(req.spec);
     if (req.op === 'umount') return l.umount(req.target);
+    if (req.op === 'insert') return l.insert(req.target, req.handle, req.source);
     return l.mounts.list();
   }
 
@@ -188,7 +203,8 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
     if (req.op === 'init') return init(req);
     if (req.op === 'open-terminal') return terminal(req);
     if (req.op === 'connect') return connect();
-    if (req.op === 'mount' || req.op === 'umount' || req.op === 'mounts') return mountOp(req);
+    if (req.op === 'mount' || req.op === 'umount' || req.op === 'mounts' || req.op === 'insert')
+      return mountOp(req);
     if (req.op === 'terminal') {
       const session = terminals.get(req.terminal);
       if (!session) throw new Error(`no terminal ${req.terminal}`);
