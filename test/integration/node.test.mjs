@@ -190,7 +190,6 @@ test('a package driver mounts a mock S3; programs and git work on it, unmounting
 test('a command pnpm installs globally runs in the same shell, and is gone once removed', async (t) => {
   const kernel = await createNodeKernel({
     network: { transport: nodeTransport() },
-    env: { PNPM_WASM_EXECUTABLE: '/node_modules/@ai-ecoverse/wasi-pnpm/bin/pnpm.wasm' },
   });
   t.after(() => kernel.terminate());
   for (const name of ['wasm-bash', 'wasm-coreutils', 'wasm-tls-engine', 'wasi-pnpm']) {
