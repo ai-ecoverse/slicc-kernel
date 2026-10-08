@@ -14,7 +14,6 @@ const WASI_ERRNO: Readonly<Partial<Record<string, number>>> = {
   EPROTONOSUPPORT: 66,
 
   EOPNOTSUPP: 138,
-  ENOMEDIUM: 148,
   EBADF: 8,
   EBUSY: 10,
   ECHILD: 12,
@@ -32,7 +31,6 @@ const WASI_ERRNO: Readonly<Partial<Record<string, number>>> = {
   ENXIO: 60,
   EPERM: 63,
   EPIPE: 64,
-  EROFS: 69,
   ESPIPE: 70,
   ESRCH: 71,
   ETIMEDOUT: 73,
