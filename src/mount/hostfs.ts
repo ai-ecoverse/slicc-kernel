@@ -1,4 +1,4 @@
-import { fsError, type OpenFlags, type ServedFilesystem, serveFilesystem } from './driver.ts';
+import { fsError, type OpenFlags, serveFilesystem } from './driver.ts';
 import { type MediumHandlers, mediumSlot } from './medium.ts';
 import type { MountSpec, OpenedDriver } from './mount-fs.ts';
 import type { DriverAttr, DriverCapabilities, DriverEntry, DriverStatfs } from './protocol.ts';
@@ -48,7 +48,20 @@ export class HostfsClient {
     return this.grant.capabilities ?? {};
   }
 
-  private async send(path: string, init: RequestInit, retried = false): Promise<Response> {
+  get token(): string {
+    return this.grant.token;
+  }
+
+  get maxIo(): number {
+    return this.capabilities.maxIo ?? HOSTFS_IO;
+  }
+
+  private async send(
+    path: string,
+    init: RequestInit,
+    handle = false,
+    retried = false
+  ): Promise<Response> {
     let response: Response;
     try {
       response = await this.fetch(`${this.grant.url}${path}`, {
@@ -69,40 +82,54 @@ export class HostfsClient {
         throw fsError('EACCES', `the host proxy refused this folder (${response.status})`);
       }
       this.grant = await this.regrant();
-      return this.send(path, init, true);
+      if (handle)
+        throw fsError('ESTALE', 'the folder was granted again, so its open files are gone');
+      return this.send(path, init, false, true);
     }
     const errno = response.headers.get('X-Hostfs-Errno') ?? 'EIO';
     const body = (await response.json().catch(() => ({}))) as { message?: unknown };
     throw fsError(errno, typeof body.message === 'string' ? body.message : errno);
   }
 
-  async call<T>(op: string, body: Record<string, unknown> = {}): Promise<T> {
-    const response = await this.send('/api/hostfs', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ op, ...body }),
-    });
+  async call<T>(op: string, body: Record<string, unknown> = {}, handle = false): Promise<T> {
+    const response = await this.send(
+      '/api/hostfs',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ op, ...body }),
+      },
+      handle
+    );
     return (await response.json()) as T;
   }
 
   async read(fh: number, offset: number, size: number, ifMatch?: string): Promise<Uint8Array> {
-    const response = await this.send('/api/hostfs', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ op: 'read', fh, offset, size, ...(ifMatch ? { ifMatch } : {}) }),
-    });
+    const response = await this.send(
+      '/api/hostfs',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ op: 'read', fh, offset, size, ...(ifMatch ? { ifMatch } : {}) }),
+      },
+      true
+    );
     return new Uint8Array(await response.arrayBuffer());
   }
 
   async write(fh: number, offset: number, bytes: Uint8Array): Promise<void> {
-    const response = await this.send('/api/hostfs/write', {
-      method: 'PUT',
-      headers: {
-        'Content-Type': 'application/octet-stream',
-        'X-Hostfs-Request': JSON.stringify({ fh, offset }),
+    const response = await this.send(
+      '/api/hostfs/write',
+      {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'X-Hostfs-Request': JSON.stringify({ fh, offset }),
+        },
+        body: bytes as BodyInit,
       },
-      body: bytes as BodyInit,
-    });
+      true
+    );
     await response.body?.cancel();
   }
 
@@ -138,59 +165,102 @@ export class HostfsClient {
   }
 }
 
-export function hostfsHandlers(client: HostfsClient): MediumHandlers {
-  const etags = new Map<number, string | undefined>();
-  const restore = new Map<number, { path: string; mode: number }>();
+interface Remote {
+  client: HostfsClient;
+  token: string;
+  fh: number;
+  etag: string | undefined;
+  restore: { path: string; mode: number } | undefined;
+}
+
+export function hostfsHandlers(current: () => HostfsClient): MediumHandlers {
+  const handles = new Map<number, Remote>();
+  let nextFh = 0;
+  const fresh = (remote: Remote): Remote => {
+    if (remote.client.token === remote.token) return remote;
+    throw fsError('ESTALE', 'the folder was granted again, so this open file is gone');
+  };
+  const live = (fh: number): Remote => {
+    const remote = handles.get(fh);
+    if (!remote) throw fsError('EBADF', `handle ${fh}`);
+    return fresh(remote);
+  };
+  const call = <T>(op: string, body: Record<string, unknown> = {}) => current().call<T>(op, body);
+  async function writable(client: HostfsClient, path: string, flags: OpenFlags) {
+    const opening = () =>
+      client.call<{ fh: number; attr?: DriverAttr }>('open', { path: rel(path), ...flags });
+    try {
+      return { opened: await opening(), restore: undefined };
+    } catch (err) {
+      if (!flags.write || codeOf(err) !== 'EACCES') throw err;
+      const mode = (await client.call<DriverAttr>('stat', { path: rel(path) })).mode ?? 0;
+      if (mode & 0o200) throw err;
+      const restore = { path: rel(path), mode };
+      await client.call('setattr', { path: rel(path), mode: mode | 0o200 });
+      const opened = await opening().catch(async (again: unknown) => {
+        await client.call('setattr', restore);
+        throw again;
+      });
+      return { opened, restore };
+    }
+  }
   return {
-    getattr: async (path) => await client.call<DriverAttr>('stat', { path: rel(path) }),
+    getattr: async (path) => await call<DriverAttr>('stat', { path: rel(path) }),
     async readdir(path) {
-      const { entries } = await client.call<{ entries: Array<{ name: string; attr: DriverAttr }> }>(
+      const { entries } = await call<{ entries: Array<{ name: string; attr: DriverAttr }> }>(
         'list',
         { path: rel(path) }
       );
       return entries.map(({ name, attr }): DriverEntry => ({ name, kind: attr.kind, attr }));
     },
     async open(path: string, flags: OpenFlags) {
-      const opening = () =>
-        client.call<{ fh: number; attr?: DriverAttr }>('open', { path: rel(path), ...flags });
-      let opened: { fh: number; attr?: DriverAttr };
-      try {
-        opened = await opening();
-      } catch (err) {
-        if (!flags.write || codeOf(err) !== 'EACCES') throw err;
-        const mode = (await client.call<DriverAttr>('stat', { path: rel(path) })).mode ?? 0;
-        if (mode & 0o200) throw err;
-        await client.call('setattr', { path: rel(path), mode: mode | 0o200 });
-        opened = await opening().catch(async (again: unknown) => {
-          await client.call('setattr', { path: rel(path), mode });
-          throw again;
-        });
-        restore.set(opened.fh, { path: rel(path), mode });
+      const client = current();
+      const token = client.token;
+      const { opened, restore } = await writable(client, path, flags);
+      handles.set(++nextFh, {
+        client,
+        token,
+        fh: opened.fh,
+        etag: flags.write ? undefined : opened.attr?.etag,
+        restore,
+      });
+      return nextFh;
+    },
+    async read(fh, offset, size) {
+      const remote = live(fh);
+      return remote.client.read(
+        remote.fh,
+        offset,
+        Math.min(size, remote.client.maxIo),
+        remote.etag
+      );
+    },
+    async write(fh, offset, bytes) {
+      const remote = live(fh);
+      const most = remote.client.maxIo;
+      for (let at = 0; at < bytes.length; at += most) {
+        await remote.client.write(remote.fh, offset + at, bytes.subarray(at, at + most));
       }
-      etags.set(opened.fh, flags.write ? undefined : opened.attr?.etag);
-      return opened.fh;
     },
-    read: (fh, offset, size) => client.read(fh, offset, size, etags.get(fh)),
-    write: (fh, offset, bytes) => client.write(fh, offset, bytes),
     async release(fh) {
-      etags.delete(fh);
-      await client.call('release', { fh });
-      const back = restore.get(fh);
-      restore.delete(fh);
-      if (back) await client.call('setattr', back);
+      const remote = handles.get(fh);
+      if (!remote) throw fsError('EBADF', `handle ${fh}`);
+      handles.delete(fh);
+      try {
+        await fresh(remote).client.call('release', { fh: remote.fh }, true);
+      } finally {
+        if (remote.restore) await current().call('setattr', remote.restore);
+      }
     },
-    mkdir: async (path) => void (await client.call('mkdir', { path: rel(path) })),
-    rmdir: async (path) => void (await client.call('rmdir', { path: rel(path) })),
-    unlink: async (path) => void (await client.call('unlink', { path: rel(path) })),
-    rename: async (from, to) =>
-      void (await client.call('rename', { from: rel(from), to: rel(to) })),
-    symlink: async (target, path) =>
-      void (await client.call('symlink', { target, path: rel(path) })),
+    mkdir: async (path) => void (await call('mkdir', { path: rel(path) })),
+    rmdir: async (path) => void (await call('rmdir', { path: rel(path) })),
+    unlink: async (path) => void (await call('unlink', { path: rel(path) })),
+    rename: async (from, to) => void (await call('rename', { from: rel(from), to: rel(to) })),
+    symlink: async (target, path) => void (await call('symlink', { target, path: rel(path) })),
     readlink: async (path) =>
-      (await client.call<{ target: string }>('readlink', { path: rel(path) })).target,
-    setattr: async (path, change) =>
-      void (await client.call('setattr', { path: rel(path), ...change })),
-    statfs: () => client.call<DriverStatfs>('statfs'),
+      (await call<{ target: string }>('readlink', { path: rel(path) })).target,
+    setattr: async (path, change) => void (await call('setattr', { path: rel(path), ...change })),
+    statfs: () => call<DriverStatfs>('statfs'),
   };
 }
 
@@ -306,39 +376,33 @@ export async function openHostfs(
   );
   const stop = new AbortController();
   const grant = () => hook(spec.source, { readonly });
-  let served: ServedFilesystem | undefined;
-  let granted: DriverCapabilities | undefined;
+  let active: HostfsClient | undefined;
+  const handlers = hostfsHandlers(() => active as HostfsClient);
+  const served = serveFilesystem(port2, slot.handlers, {
+    symlinks: true,
+    chmod: true,
+    listingStats: true,
+    maxIo: HOSTFS_IO,
+    ...(readonly ? { readonly: true } : {}),
+  });
   const watching = keepWatching(
     {
-      async connect() {
-        const client = new HostfsClient(await grant(), grant, fetch);
-        granted ??= client.capabilities;
-        return client;
-      },
+      connect: async () => new HostfsClient(await grant(), grant, fetch),
       up(client) {
-        slot.insert(client, hostfsHandlers(client));
-        served?.invalidate(true);
+        active = client;
+        slot.insert(client, handlers);
+        served.invalidate(true);
       },
-      event: (event) => served?.invalidate(invalidation(event)),
+      event: (event) => served.invalidate(invalidation(event)),
       down() {
         slot.eject();
-        served?.invalidate(true);
+        served.invalidate(true);
       },
       ...timing,
     },
     stop.signal
   );
   await watching.ready;
-  const { maxIo, caseInsensitive, normalization } = granted ?? {};
-  served = serveFilesystem(port2, slot.handlers, {
-    symlinks: true,
-    chmod: true,
-    listingStats: true,
-    maxIo: maxIo ?? HOSTFS_IO,
-    ...(caseInsensitive !== undefined ? { caseInsensitive } : {}),
-    ...(normalization ? { normalization } : {}),
-    ...(readonly ? { readonly: true } : {}),
-  });
   return {
     port: port1,
     present: slot.present,

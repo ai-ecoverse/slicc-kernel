@@ -384,6 +384,16 @@ class MountFs implements KernelFs {
         `${real} would be larger than this mount's maxfile (${mount.maxFile})`
       );
     }
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await this.writeWhole(mount, real, rel, bytes);
+      } catch (err) {
+        if ((err as { code?: unknown }).code !== 'ESTALE' || attempt >= STALE_RETRIES) throw err;
+      }
+    }
+  }
+
+  private async writeWhole(mount: Mount, real: string, rel: string, bytes: Uint8Array) {
     this.table.forget(mount, real);
     const fh = await this.open(mount, rel, true);
     const chunk = mount.caps.maxIo ?? DEFAULT_IO;
