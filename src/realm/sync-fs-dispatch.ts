@@ -1,5 +1,5 @@
 import type { FsStat, KernelFs } from '../fs/types.ts';
-import { resolveSyncFsToken } from './sync-fs-token-registry.ts';
+import { resolveSyncFsToken, type SyncFsTokenEntry } from './sync-fs-token-registry.ts';
 import {
   type SyncFsRequest,
   type SyncFsResult,
@@ -66,11 +66,11 @@ function json(value: unknown): SyncFsResult {
 }
 
 async function run(
-  fs: KernelFs,
+  entry: SyncFsTokenEntry,
   path: string,
-  req: SyncFsRequest,
-  cwd: string
+  req: SyncFsRequest
 ): Promise<SyncFsResult> {
+  const { fs, cwd } = entry;
   switch (req.op) {
     case 'read':
       return { ok: true, kind: 'bytes', bytes: await fs.readFileBuffer(path) };
@@ -93,9 +93,12 @@ async function run(
     case 'rm':
       await fs.rm(path, { recursive: true });
       return done;
-    case 'rename':
-      await fs.rename(path, fs.resolvePath(cwd, req.arg2 ?? ''));
+    case 'rename': {
+      const to = fs.resolvePath(cwd, req.arg2 ?? '');
+      await fs.rename(path, to);
+      entry.renamed?.(path, to);
       return done;
+    }
     case 'unlink':
       if ((await fs.lstat(path)).isDirectory) throw syncError('EISDIR', path);
       await fs.rm(path);
@@ -133,7 +136,7 @@ export async function dispatchSyncFs(req: SyncFsRequest): Promise<SyncFsResult> 
       return done;
     }
     if (entry.revoked?.(path)) return { ok: false, errno: 'EIO', message: `${path} was unmounted` };
-    return await run(fs, path, req, cwd);
+    return await run(entry, path, req);
   } catch (err) {
     return toErrno(err);
   }

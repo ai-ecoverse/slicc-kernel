@@ -174,6 +174,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     ...(opts.statfs ? { statfs: opts.statfs } : {}),
     hold: (path, on) => holds.hold(path, on),
     revoked: (path) => holds.isRevoked(path),
+    renamed: (from, to) => holds.renamed(from, to),
   });
   const worker = opts.createWorker();
   const dispatch = async (req: SyncSabDispatchRequest): Promise<SyncFsResult> => {

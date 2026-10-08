@@ -82,6 +82,16 @@ export class HeldPaths extends Map<string, number> {
     for (const path of this.keys()) if (within(path, prefix)) this.revoked.add(path);
   }
 
+  renamed(from: string, to: string): void {
+    for (const [path, count] of [...this]) {
+      if (!within(path, from)) continue;
+      const moved = to + path.slice(from.length);
+      this.delete(path);
+      this.set(moved, (this.get(moved) ?? 0) + count);
+      if (this.revoked.delete(path)) this.revoked.add(moved);
+    }
+  }
+
   isRevoked(path: string): boolean {
     return this.revoked.has(path);
   }
@@ -130,6 +140,10 @@ export class MountTable {
 
   constructor(deps: MountDeps) {
     this.deps = deps;
+  }
+
+  mounted(target: string): MountEntry | undefined {
+    return this.mounts.get(target);
   }
 
   list(): MountEntry[] {

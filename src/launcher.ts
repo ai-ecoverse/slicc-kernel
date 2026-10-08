@@ -731,13 +731,16 @@ export class Launcher {
 
   private async processUmount(pid: number, target: string, flags: number): Promise<void> {
     const call = umountCall(target, flags);
-    const entry = this.mounts.list().find((m) => m.target === call.target);
-    await this.permit({
-      op: 'umount',
-      pid,
-      target: call.target,
-      ...(entry ? { type: entry.type, source: entry.source } : {}),
-    });
+    for (;;) {
+      const mounted = this.mounts.mounted(call.target);
+      await this.permit({
+        op: 'umount',
+        pid,
+        target: call.target,
+        ...(mounted ? { type: mounted.type, source: mounted.source } : {}),
+      });
+      if (this.mounts.mounted(call.target) === mounted) break;
+    }
     this.umount(call.target, call.detach);
   }
 
