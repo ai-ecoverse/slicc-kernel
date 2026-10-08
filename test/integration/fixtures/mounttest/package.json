@@ -1,0 +1,12 @@
+{
+  "name": "mounttest",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "mounttest": {
+        "wasm": "bin/mounttest.wasm"
+      }
+    }
+  }
+}

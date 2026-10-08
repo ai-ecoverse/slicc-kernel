@@ -34,6 +34,7 @@ const { status, stdout, stderr } = await kernel.run(['bash', '-c', 'echo hi > he
 | `requestDirectory` | none | `() => Promise<FileSystemDirectoryHandle>`, typically `showDirectoryPicker`: how an `fsa` mount gets its folder (see [Removable media](#removable-media-fsa)) |
 | `hostfs` | none | `(source, { readonly }) => Promise<{ url, token, capabilities? }>`: a grant for a `hostfs` mount from the local proxy (see [Host folders](#host-folders-hostfs)) |
 | `onMountPending` | none | `({ target, source, insert }) => void`: an `fsa` mount needs a folder; call `insert()` from a user gesture |
+| `processMounts` | `true` | whether programs may call `mount(2)` and `umount2(2)`: `false`, or `(req) => boolean \| Promise<boolean>` to decide each call (see [Mounting from a program](#mounting-from-a-program)) |
 
 ### `kernel.run(argv, options?) → Promise<{ status, stdout, stderr }>`
 
@@ -106,7 +107,7 @@ const { status, stdout } = await kernel.run(['bash', '-c', 'echo hi'], { cwd: '/
 kernel.terminate();
 ```
 
-`createNodeKernel({ root, modules, env, network, worker })` takes the options of `createKernel` except `metadata`. `root` is an in-memory directory by default (`memoryRoot()` makes another), and POSIX metadata stays in memory. Processes and threads run on `worker_threads`. The kernel has `run`, `openTerminal` and `terminate` as above, plus `root`, `writeFile(path, data)` (creating the parent directories) and `readFile(path)` to put files in place and read results. `nodeTransport()` is `fetchTransport()` with Node's `fetch`, which no CORS binds (`crossOrigin: 'any'`). `connect()` and `attachKernel` work as in the browser: the port is a `worker_threads` `MessagePort`, which a worker thread can attach with, and `terminate()` ends every attached client.
+`createNodeKernel({ root, modules, env, network, worker, processMounts })` takes the options of `createKernel` except `metadata`. `root` is an in-memory directory by default (`memoryRoot()` makes another), and POSIX metadata stays in memory. Processes and threads run on `worker_threads`. The kernel has `run`, `openTerminal` and `terminate` as above, plus `root`, `writeFile(path, data)` (creating the parent directories) and `readFile(path)` to put files in place and read results. `nodeTransport()` is `fetchTransport()` with Node's `fetch`, which no CORS binds (`crossOrigin: 'any'`). `connect()` and `attachKernel` work as in the browser: the port is a `worker_threads` `MessagePort`, which a worker thread can attach with, and `terminate()` ends every attached client.
 
 ## Commands
 
@@ -201,6 +202,7 @@ Directories are renamed with `FileSystemHandle.move()` where available, else by 
   - each mount has its own device number;
   - without `chmod` support, `chmod` succeeds and changes nothing;
   - a file over `maxFile` is `EFBIG`, and `options.maxfile` (`"2G"`, or `"0"` for none) changes that limit for one mount;
+  - `options.ro` makes any mount read-only: writes fail with `EROFS`;
   - a driver that crashes or doesn't answer within 30 s makes its mount's calls fail with `EIO`, and the mount is listed as `failed`.
 
 ### Removable media: `fsa`
@@ -225,8 +227,22 @@ A `hostfs` mount is a folder exported by the local proxy ([slicc-node](https://g
 - **Grants:** `kernel.mount({ type: 'hostfs', source: 'project', target: '/mnt/project' })` asks the page's `hostfs(source, { readonly })` hook for a grant. The page holds the proxy key and asks the proxy (`POST /api/hostfs/grant`) for a token scoped to that one folder. The kernel sees only `{ url, token }`, never the proxy key, and the token never appears in mount options or `/proc/mounts`. When the proxy refuses a token, the kernel asks the hook once for a new one.
 - **Options:** `ro` mounts read-only, and `maxfile` caps file size as on any mount. There is no other size limit: reads and writes go in `maxIo` pieces (16 MiB unless the proxy says otherwise), so a file of any size the host can hold works.
 - **Changes on the host** arrive as invalidations on a watch stream (`POST /api/hostfs/watch`), so an edit made outside shows up on the next access without a remount.
-- **Proxy loss:** when the watch stream ends, or is silent for 45 s, the kernel reconnects once at once. If that fails, the mount is `nomedium`, as with [removable media](#removable-media-fsa): operations fail with `ENOMEDIUM` (`ENODEV` for WASI), and the kernel keeps reconnecting with backoff (1 s to 30 s), so the folder comes back by itself when the proxy does. A mount made while the proxy is down starts as `nomedium`.
+- **Proxy loss:** when the watch stream ends, or is silent for 45 s, the kernel reconnects once at once. If that fails, the mount is `nomedium`, as with [removable media](#removable-media-fsa): operations fail with `ENOMEDIUM` (`ENODEV` for WASI), and the kernel keeps reconnecting with backoff (1 s to 30 s), so the folder comes back by itself when the proxy does. A mount made while the proxy is down starts as `nomedium`, and so does one whose grant or first watch takes more than 15 s; it comes up by itself when they arrive.
 - **Consistency:** a file that changes on the host while a program reads it fails with `ESTALE`, and the kernel restarts the whole read (up to 3 times) instead of stitching two versions together.
+
+### Mounting from a program
+
+Programs mount and unmount with `mount(2)` and `umount2(2)`, so a `mount`/`umount` package works as on Linux. They reach the same table as `kernel.mount` and `kernel.umount`, with the same types, insert requests and grants: `mount -t fsa none /mnt/x` returns at once with the drive in the `nomedium` state, and `mount -t hostfs project /mnt/p` asks the page's `hostfs` hook. The grant's token never reaches the program.
+
+- **Emscripten:** `Module.sliccKernel.mount(source, target, fstype, flags, data)` and `Module.sliccKernel.umount2(target, flags)` return `0` or a negative errno. A relative target is taken from the program's cwd.
+- **WASI:** the import module `slicc` has `mount(source, source_len, target, target_len, fstype, fstype_len, flags, data, data_len)` and `umount2(target, target_len, flags)`, with UTF-8 strings as pointer and length, and return a preview1 errno. Kernels without them answer `ENOSYS`.
+- **Flags:** `MS_RDONLY` sets `ro`. `MS_NOSUID`, `MS_NODEV`, `MS_NOEXEC`, `MS_SYNCHRONOUS`, `MS_DIRSYNC`, `MS_NOATIME`, `MS_NODIRATIME`, `MS_SILENT`, `MS_RELATIME`, `MS_STRICTATIME` and `MS_LAZYTIME` are accepted and change nothing, and the old `MS_MGC_VAL` magic is dropped. Remounts, bind and move mounts, and any other flag are `EINVAL`.
+- **Options:** `data` is the `-o` string, such as `ro,maxfile=1G`. `key=value` and `key` become `options`, `rw` cancels `ro`, and generic words (`defaults`, `noatime`, `nofail`, …) are dropped. A bad `maxfile` is `EINVAL`.
+- **Unmounting:** `umount2(target, 0)` fails with `EBUSY` while a file is open under the mount. `MNT_DETACH` (`umount -l`) and `MNT_FORCE` unmount anyway: the mount leaves the table and `/proc/mounts` at once and its driver stops, and descriptors still open on it fail with `EIO`, without ever writing to the directory below.
+- **Waiting:** `mount` waits for the mount to be made, which for `hostfs` is the grant and the first watch, up to 15 s. A signal ends the wait with `EINTR`, and a mount that is made after that is unmounted again.
+- **Policy:** seven is single-user and every program runs as uid 1000, so any program may mount, unless the page passes `processMounts: false` (then every call fails with `EPERM`) or a function. The function gets `{ op: 'mount' | 'umount', pid, target, type?, source?, options? }` and returns whether to allow it. Whatever the policy, the kernel refuses mounts on `/` and on or under `/proc` and `/dev` with `EBUSY`.
+- **Errors** are Linux's: `ENODEV` for an unknown type (or `hostfs` without a hook), `ENOENT` and `ENOTDIR` for the target, `EBUSY` for a target that is mounted already, and `EINVAL` for unmounting what is not a mount point.
+- **`/proc/mounts`** escapes spaces and backslashes as Linux does, and adds `nomedium` or `failed` to the options of a mount in that state.
 
 ### `/proc`
 

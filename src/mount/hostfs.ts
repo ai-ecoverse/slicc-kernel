@@ -271,6 +271,7 @@ export interface WatchLoop {
   down(): void;
   silenceMs?: number;
   backoffMs?: [number, number];
+  connectMs?: number;
 }
 
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
@@ -294,6 +295,10 @@ export function keepWatching(loop: WatchLoop, signal: AbortSignal): Watching {
   const silenceMs = loop.silenceMs ?? 45_000;
   const [first, most] = loop.backoffMs ?? [1000, 30_000];
   const ready = Promise.withResolvers<void>();
+  const capped = setTimeout(ready.resolve, loop.connectMs ?? 15_000);
+  const uncap = () => clearTimeout(capped);
+  void ready.promise.then(uncap);
+  signal.addEventListener('abort', uncap, { once: true });
   let wait = first;
   let up = false;
   let current: AbortController | undefined;
@@ -310,6 +315,7 @@ export function keepWatching(loop: WatchLoop, signal: AbortSignal): Watching {
     let opened = false;
     try {
       const client = await loop.connect();
+      quiet();
       await client.watch(
         session.signal,
         (event) => {
@@ -360,6 +366,7 @@ export function invalidation(event: HostfsEvent): string[] | true {
 export interface HostfsTiming {
   silenceMs?: number;
   backoffMs?: [number, number];
+  connectMs?: number;
 }
 
 export async function openHostfs(

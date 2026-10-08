@@ -58,12 +58,20 @@ import {
 } from './mount/hostfs.ts';
 import { type MediaStore, memoryMedia } from './mount/media.ts';
 import {
+  type HeldPaths,
   heldUnder,
   type MountEntry,
   type MountSpec,
   MountTable,
   type OpenedDriver,
 } from './mount/mount-fs.ts';
+import {
+  type MountCall,
+  mountCall,
+  type ProcessMountPolicy,
+  type ProcessMountRequest,
+  umountCall,
+} from './mount/syscall.ts';
 import { tmpfs } from './mount/tmpfs.ts';
 import {
   type ForeignResults,
@@ -85,6 +93,7 @@ export interface LauncherOptions {
   hostfs?: HostfsGrantHook;
   hostfsFetch?: FetchLike;
   hostfsTiming?: HostfsTiming;
+  processMounts?: ProcessMountPolicy;
 }
 
 export interface PendingMedium {
@@ -282,7 +291,8 @@ export class Launcher {
   private readonly hostfs: Pick<LauncherOptions, 'hostfs' | 'hostfsFetch' | 'hostfsTiming'>;
   private readonly inserted = new Map<string, MediumHandle>();
   private readonly openFiles = new Set<VfsNodes>();
-  private readonly held = new Set<Map<string, number>>();
+  private readonly held = new Set<HeldPaths>();
+  private readonly processMounts: ProcessMountPolicy;
   private nextPid = 1000;
   readonly boot = Date.now();
   private terminals = 0;
@@ -300,6 +310,7 @@ export class Launcher {
     this.media = options.media ?? memoryMedia();
     this.onMountPending = options.onMountPending;
     this.hostfs = options;
+    this.processMounts = options.processMounts ?? true;
     this.pnpmHome = options.env?.PNPM_HOME ?? PNPM_HOME;
     this.modulesDir = options.modules ?? '/node_modules';
     this.env = { ...networkEnv(), ...options.env };
@@ -502,6 +513,8 @@ export class Launcher {
       held: this.held,
       statfs: (path) => this.mounts.statfs(path),
       mounts: () => this.mounts.list(),
+      mount: (call, signal) => this.processMount(pid, call, signal),
+      umount: (target, flags) => this.processUmount(pid, target, flags),
       jobs: this.jobs,
       ptys: this.ptys,
       net: this.net,
@@ -695,8 +708,37 @@ export class Launcher {
     slot.served.invalidate(true);
   }
 
-  umount(target: string): void {
-    this.mounts.umount(target);
+  umount(target: string, detach = false): void {
+    const at = normalizePath(target);
+    this.mounts.umount(at, detach);
+    if (!detach) return;
+    for (const nodes of this.openFiles) nodes.revoke(at);
+    for (const holds of this.held) holds.revoke(at);
+  }
+
+  private async permit(req: ProcessMountRequest): Promise<void> {
+    const policy = this.processMounts;
+    const allowed = typeof policy === 'function' ? await policy(req) : policy;
+    if (!allowed) throw fsError('EPERM', `process ${req.pid} may not ${req.op} ${req.target}`);
+  }
+
+  private async processMount(pid: number, call: MountCall, signal: AbortSignal): Promise<void> {
+    const spec = mountCall(call);
+    await this.permit({ op: 'mount', pid, ...spec, options: { ...spec.options } });
+    const entry = await this.mount(spec);
+    if (signal.aborted) this.umount(entry.target, true);
+  }
+
+  private async processUmount(pid: number, target: string, flags: number): Promise<void> {
+    const call = umountCall(target, flags);
+    const entry = this.mounts.list().find((m) => m.target === call.target);
+    await this.permit({
+      op: 'umount',
+      pid,
+      target: call.target,
+      ...(entry ? { type: entry.type, source: entry.source } : {}),
+    });
+    this.umount(call.target, call.detach);
   }
 
   async prepare(): Promise<void> {

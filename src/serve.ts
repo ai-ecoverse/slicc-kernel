@@ -17,6 +17,7 @@ import type { MediumHandle } from './mount/fsa.ts';
 import type { HostfsGrant, HostfsGrantHook } from './mount/hostfs.ts';
 import type { MediaStore } from './mount/media.ts';
 import type { MountSpec } from './mount/mount-fs.ts';
+import type { ProcessMountRequest } from './mount/syscall.ts';
 
 export interface KernelPort {
   postMessage(message: unknown, transfer?: Transferable[]): void;
@@ -32,6 +33,7 @@ export interface InitRequest {
   metadata?: string | false;
   transport?: RealmTransportTraits;
   hostfs?: boolean;
+  processMounts?: boolean | 'ask';
 }
 
 export interface RunRequest {
@@ -191,6 +193,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
         ...(media ? { media } : {}),
         onMountPending: (medium) => port.postMessage({ medium }),
         ...(req.hostfs ? { hostfs: askGrant } : {}),
+        ...mountPolicy(req.processMounts),
         caStore: caStore(deps.metadata ? name : false),
       });
       await started.prepare();
@@ -244,9 +247,27 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
     else waiting.reject(Object.assign(new Error(error ?? 'no grant'), { code: 'EACCES' }));
   }
 
+  const policies = new Map<number, (allowed: boolean) => void>();
+  let nextPolicy = 0;
+  const askPolicy = (req: ProcessMountRequest) =>
+    new Promise<boolean>((resolve) => {
+      const id = ++nextPolicy;
+      policies.set(id, resolve);
+      port.postMessage({ mountPolicy: { id, req } });
+    });
+
+  const mountPolicy = (policy: InitRequest['processMounts']) =>
+    policy === undefined ? {} : { processMounts: policy === 'ask' ? askPolicy : policy };
+
   port.addEventListener('message', (event) => {
     const grant = (event.data as { hostfsGrant?: GrantReply }).hostfsGrant;
     if (grant) return granted(grant);
+    const answer = (event.data as { mountAllowed?: { id: number; allowed: boolean } }).mountAllowed;
+    if (answer) {
+      policies.get(answer.id)?.(answer.allowed);
+      policies.delete(answer.id);
+      return;
+    }
     if ((event.data as { net?: unknown }).net !== undefined) {
       remote?.receive(event.data as TransportReply);
       return;

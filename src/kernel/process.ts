@@ -1,3 +1,4 @@
+import type { MountCall } from '../mount/syscall.ts';
 import type { LinkRecord } from '../process/wasi/wasix-linker.ts';
 import type { SyncFsResult } from '../realm/sync-fs-wire.ts';
 import {
@@ -32,6 +33,12 @@ import { KernelSocket, LoopbackNet } from './socket.ts';
 import { SOCKET_OPS, type SocketSyscall, socketSyscall } from './socket-syscalls.ts';
 import type { KernelTty, Termios } from './tty.ts';
 import { refuseReadonly, type VfsFileFs, VfsNodes, vfsFile } from './vfs-file.ts';
+
+function aborted(signal: AbortSignal): Promise<never> {
+  return new Promise<never>((_, reject) => {
+    signal.addEventListener('abort', () => reject(new KernelError('EINTR')), { once: true });
+  });
+}
 
 export type WasmSyscall =
   | {
@@ -129,6 +136,8 @@ export type WasmSyscall =
   | { op: 'proc-kill'; pid: number; sig: number }
   | { op: 'proc-list' }
   | { op: 'mount-list' }
+  | ({ op: 'mount' } & MountCall)
+  | { op: 'umount'; target: string; flags: number }
   | { op: 'proc-exec'; pid: number }
   | { op: 'proc-setpgid'; pid: number; pgid: number }
   | { op: 'proc-getpgid'; pid: number }
@@ -260,6 +269,8 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'proc-kill',
   'proc-list',
   'mount-list',
+  'mount',
+  'umount',
   'proc-exec',
   'proc-setpgid',
   'proc-getpgid',
@@ -298,6 +309,10 @@ export interface WasmProcessOptions {
   openFiles?: Set<VfsNodes>;
 
   mounts?: () => MountLine[];
+
+  mount?: (call: MountCall, signal: AbortSignal) => Promise<unknown>;
+
+  umount?: (target: string, flags: number) => Promise<void>;
 
   onPending?: (sig: number) => void;
 
@@ -832,6 +847,9 @@ export class WasmProcess {
         };
       case 'mount-list':
         return { ok: true, kind: 'json', json: this.options.mounts?.() ?? [] };
+      case 'mount':
+      case 'umount':
+        return this.mountSyscall(req);
       case 'proc-alarm':
         this.setAlarm(req.sig, req.firstMs ?? req.ms, req.repeat ? req.ms : 0, req.timer);
         return { ok: true, kind: 'void' };
@@ -849,11 +867,28 @@ export class WasmProcess {
     }
   }
 
+  private async mountSyscall(
+    req: Extract<WasmSyscall, { op: 'mount' | 'umount' }>
+  ): Promise<SyncFsResult> {
+    const { mount, umount } = this.options;
+    if (!mount || !umount) throw new KernelError('ENOSYS');
+    try {
+      if (req.op === 'umount') await umount(req.target, req.flags);
+      else {
+        const { source, target, type, flags, data } = req;
+        const signal = this.blockingSignal();
+        await Promise.race([mount({ source, target, type, flags, data }, signal), aborted(signal)]);
+      }
+    } catch (err) {
+      const code = (err as { code?: unknown } | null)?.code;
+      if (typeof code !== 'string') throw err;
+      return { ok: false, errno: code, message: (err as Error).message };
+    }
+    return { ok: true, kind: 'void' };
+  }
+
   private pause(): Promise<never> {
-    const signal = this.blockingSignal();
-    return new Promise<never>((_, reject) => {
-      signal.addEventListener('abort', () => reject(new KernelError('EINTR')), { once: true });
-    });
+    return aborted(this.blockingSignal());
   }
 
   private alarm: ReturnType<typeof setTimeout> | undefined;

@@ -132,6 +132,7 @@ export async function dispatchSyncFs(req: SyncFsRequest): Promise<SyncFsResult> 
       entry.hold?.(path, req.mode === 1);
       return done;
     }
+    if (entry.revoked?.(path)) return { ok: false, errno: 'EIO', message: `${path} was unmounted` };
     return await run(fs, path, req, cwd);
   } catch (err) {
     return toErrno(err);

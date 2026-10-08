@@ -9,6 +9,7 @@ import {
 
 const packages = {
   'node_modules/socktest/': ['package.json', 'bin/socktest', 'bin/socktest.wasm'],
+  'node_modules/mounttest/': ['package.json', 'bin/mounttest.wasm'],
   'node_modules/@ai-ecoverse/wasm-bash/': ['package.json', 'bin/bash', 'bin/bash.wasm'],
   'node_modules/@ai-ecoverse/wasm-curl/': ['package.json', 'bin/curl', 'bin/curl.wasm'],
   'node_modules/@ai-ecoverse/wasm-tls-engine/': [
@@ -244,8 +245,15 @@ window.boot = async (options = {}) => {
     : fetchTransport(options.hint ? { hint: options.hint } : {});
   const transport = options.store ? storeTransport(base) : base;
   const network = options.network === false ? {} : { network: { transport } };
+  const policy =
+    options.processMounts === undefined ? {} : { processMounts: options.processMounts };
   window.kernel = withTracking(
-    await createKernel({ root: await navigator.storage.getDirectory(), ...network, ...media })
+    await createKernel({
+      root: await navigator.storage.getDirectory(),
+      ...network,
+      ...media,
+      ...policy,
+    })
   );
   return true;
 };

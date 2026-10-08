@@ -58,6 +58,10 @@ export interface ProcessKernel {
 
   execWait(pid: number): number;
 
+  mount(source: string, target: string, fstype: string, flags: number, data: string): number;
+
+  umount2(target: string, flags: number): number;
+
   select(
     read: number[],
     write: number[],
@@ -166,6 +170,8 @@ export function createProcessKernel(deps: ProcessKernelDeps): ProcessKernel {
 
   const call = (req: WasmSyscall, label: string): SyncFsResult =>
     transport.call(req, Infinity, label);
+
+  const at = (path: string) => (path === '' || path.startsWith('/') ? path : `${Fs.cwd()}/${path}`);
 
   const slot = (fd: number, n: number, promote?: (stream: ProcessStream) => void): ChildStdio => {
     const stream = fd >= 0 ? Fs.getStream(fd) : null;
@@ -278,6 +284,13 @@ export function createProcessKernel(deps: ProcessKernelDeps): ProcessKernel {
     },
     pause() {
       return status(call({ op: 'sig-pause' }, 'pause'));
+    },
+    mount(source, target, type, flags, data) {
+      const req = { op: 'mount' as const, source, target: at(target), type, flags, data };
+      return status(call(req, `mount ${target}`));
+    },
+    umount2(target, flags) {
+      return status(call({ op: 'umount', target: at(target), flags }, `umount ${target}`));
     },
     kill(pid, sig) {
       if (pid === deps.pid) {

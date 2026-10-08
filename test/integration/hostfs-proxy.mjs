@@ -224,6 +224,7 @@ export async function hostfsProxy({
   function watchFolder(grant, req, res) {
     counts.watches++;
     res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-store' });
+    res.flushHeaders();
     let pending = new Set();
     let timer;
     const flush = () => {

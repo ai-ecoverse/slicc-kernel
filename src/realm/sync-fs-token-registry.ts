@@ -5,6 +5,7 @@ export interface SyncFsTokenEntry {
   cwd: string;
   statfs?: (path: string) => Promise<{ quota: number; usage: number } | undefined>;
   hold?: (path: string, held: boolean) => void;
+  revoked?: (path: string) => boolean;
 }
 
 const registry = new Map<string, SyncFsTokenEntry>();

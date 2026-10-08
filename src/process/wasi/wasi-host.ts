@@ -141,6 +141,37 @@ export class WasiHost {
     return this.fds.cwd() ?? this.startCwd;
   }
 
+  sliccImports(): Record<string, WasiFunction> {
+    const { mem } = this;
+    const path = (p: number, l: number) => {
+      const text = mem.string(p, l);
+      return text === '' || text.startsWith('/') ? text : normalize(`${this.cwd}/${text}`);
+    };
+    return wrap({
+      mount: (
+        sp: number,
+        sl: number,
+        tp: number,
+        tl: number,
+        fp: number,
+        fl: number,
+        flags: number,
+        dp: number,
+        dl: number
+      ) =>
+        void this.o.kernel.call({
+          op: 'mount',
+          source: mem.string(sp, sl),
+          target: path(tp, tl),
+          type: mem.string(fp, fl),
+          flags,
+          data: mem.string(dp, dl),
+        }),
+      umount2: (tp: number, tl: number, flags: number) =>
+        void this.o.kernel.call({ op: 'umount', target: path(tp, tl), flags }),
+    });
+  }
+
   imports(): Record<string, WasiFunction> {
     this.cache ??= wrap({
       ...this.processImports(),

@@ -6,6 +6,7 @@ import type { RunOptions, RunResult, Terminal, TerminalOptions } from './index.t
 import type { WasmWorkerLike } from './kernel/host.ts';
 import { Launcher } from './launcher.ts';
 import type { MountEntry, MountSpec } from './mount/mount-fs.ts';
+import type { ProcessMountPolicy } from './mount/syscall.ts';
 import { memoryRoot } from './node/memory-root.ts';
 import { signalNumber } from './serve.ts';
 import { fetchTransport, type NetworkTransport } from './transport.ts';
@@ -45,6 +46,7 @@ export interface NodeKernelOptions {
   network?: { transport?: NetworkTransport };
   worker?: string | URL;
   driverWorker?: string | URL;
+  processMounts?: ProcessMountPolicy;
 }
 
 export interface NodeKernel {
@@ -135,6 +137,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     ...(options.modules ? { modules: options.modules } : {}),
     ...(options.env ? { env: options.env } : {}),
     ...(transport ? { transport } : {}),
+    ...(options.processMounts !== undefined ? { processMounts: options.processMounts } : {}),
   });
   await launcher.prepare();
   const guard = <T>(work: () => Promise<T>): Promise<T> =>
