@@ -278,6 +278,7 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
 
   function truncate(node: LiveFsNode, size: number): void {
     const s = node.live;
+    if (!s.orphan && statOf(node).readonly) throw new Fs.ErrnoError(ERRNO_BY_CODE.EROFS);
     if (s.openCount > 0) {
       if (size > 0) ensureLoaded(node);
       else s.loaded = true;

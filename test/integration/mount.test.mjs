@@ -304,16 +304,17 @@ test('hostfs: a read-only mount refuses an append or read-write open of an exist
   assert.equal((await page.evaluate((s) => window.kernel.mount(s), spec)).state, 'ok');
   assert.deepEqual(
     await bash(
-      'echo no >> /mnt/r/a.txt; echo "append $?"; exec 3<>/mnt/r/a.txt; echo "rdwr $?"; echo hi >&3; echo "fd3 $?"; cat /mnt/r/a.txt',
+      'exec 4</mnt/r/a.txt; echo no >> /mnt/r/a.txt; echo "append $?"; exec 3<>/mnt/r/a.txt; echo "rdwr $?"; echo hi >&3; echo "fd3 $?"; : > /mnt/r/a.txt; cat <&4; cat /mnt/r/a.txt',
       { cwd: '/home' }
     ),
     {
       status: 0,
-      stdout: 'append 1\nrdwr 1\nfd3 1\nhost\n',
+      stdout: 'append 1\nrdwr 1\nfd3 1\nhost\nhost\n',
       stderr: [
         'bash: line 1: /mnt/r/a.txt: Read-only file system',
         'bash: line 1: /mnt/r/a.txt: Read-only file system',
         'bash: line 1: 3: Bad file descriptor',
+        'bash: line 1: /mnt/r/a.txt: Read-only file system',
         '',
       ].join('\n'),
     }

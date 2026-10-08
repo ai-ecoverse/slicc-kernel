@@ -28,15 +28,22 @@ function orphanContents(stream: ProcessStream): Uint8Array | undefined {
   return live.data?.slice(0, live.len ?? live.data.length) ?? new Uint8Array(0);
 }
 
-function handedContents(
-  stream: ProcessStream
-): { contents: Uint8Array; orphan?: true; dirty?: true } | undefined {
+interface Handover {
+  opts: { contents: Uint8Array; orphan?: true; dirty?: true };
+  handed(): void;
+}
+
+function handover(stream: ProcessStream): Handover | undefined {
   const orphan = orphanContents(stream);
-  if (orphan !== undefined) return { contents: orphan, orphan: true };
+  if (orphan !== undefined) return { opts: { contents: orphan, orphan: true }, handed: () => {} };
   const live = (stream.node as LiveNodeBag).live;
   if (!live?.dirty || !live.data) return undefined;
-  live.dirty = false;
-  return { contents: live.data.slice(0, live.len ?? live.data.length), dirty: true };
+  return {
+    opts: { contents: live.data.slice(0, live.len), dirty: true },
+    handed: () => {
+      live.dirty = false;
+    },
+  };
 }
 
 export function vfsPromoter(
@@ -50,7 +57,9 @@ export function vfsPromoter(
     if (stream.sliccKernelFd !== undefined || !isVfsFile(Fs, stream)) return;
     let kfd = promoted.get(stream.shared);
     if (kfd === undefined) {
-      kfd = sys.openVfs(livePath(stream), stream.flags, stream.position, handedContents(stream));
+      const handing = handover(stream);
+      kfd = sys.openVfs(livePath(stream), stream.flags, stream.position, handing?.opts);
+      handing?.handed();
       promoted.set(stream.shared, kfd);
     }
     streams.attachFile(stream, kfd);
