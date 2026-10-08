@@ -11,7 +11,7 @@ export const PNPM_HOME = '/home/.local/share/pnpm';
 
 import { followLinks, withCommandDirs } from './fs/commands.ts';
 import type { KernelFs } from './fs/types.ts';
-import { fsError } from './fs/types.ts';
+import { fsError, normalizePath } from './fs/types.ts';
 import { FsWatchers } from './fs/watch.ts';
 import {
   type ChildForker,
@@ -42,7 +42,15 @@ import { PtyTable } from './kernel/pty.ts';
 import { LoopbackNet } from './kernel/socket.ts';
 import { KernelTty } from './kernel/tty.ts';
 import type { VfsNodes } from './kernel/vfs-file.ts';
-import { serveFilesystem } from './mount/driver.ts';
+import { type ServedFilesystem, serveFilesystem } from './mount/driver.ts';
+import {
+  FSA_CAPABILITIES,
+  granted,
+  type Medium,
+  type MediumHandle,
+  removableMedium,
+} from './mount/fsa.ts';
+import { type MediaStore, memoryMedia } from './mount/media.ts';
 import {
   heldUnder,
   type MountEntry,
@@ -66,6 +74,20 @@ export interface LauncherOptions {
   transport?: RealmTransport;
   caStore?: CaStore;
   createDriverWorker?: () => WasmWorkerLike;
+  media?: MediaStore;
+  onMountPending?: (pending: PendingMedium) => void;
+}
+
+export interface PendingMedium {
+  target: string;
+  source: string;
+  handle?: MediumHandle;
+}
+
+interface Removable {
+  id: string;
+  medium: Medium;
+  served: ServedFilesystem;
 }
 
 export interface RunOptions {
@@ -245,6 +267,10 @@ export class Launcher {
   private readonly pnpmHome: string;
   readonly mounts: MountTable;
   private readonly createDriverWorker: (() => WasmWorkerLike) | undefined;
+  private readonly media: MediaStore;
+  private readonly onMountPending: ((pending: PendingMedium) => void) | undefined;
+  private readonly removable = new Map<string, Removable>();
+  private readonly inserted = new Map<string, MediumHandle>();
   private readonly openFiles = new Set<VfsNodes>();
   private readonly held = new Set<Map<string, number>>();
   private nextPid = 1000;
@@ -261,6 +287,8 @@ export class Launcher {
     this.base = this.watchers.wrap(this.mounts.wrap(options.fs));
     this.createWorker = options.createWorker;
     this.createDriverWorker = options.createDriverWorker;
+    this.media = options.media ?? memoryMedia();
+    this.onMountPending = options.onMountPending;
     this.pnpmHome = options.env?.PNPM_HOME ?? PNPM_HOME;
     this.modulesDir = options.modules ?? '/node_modules';
     this.env = { ...networkEnv(), ...options.env };
@@ -555,7 +583,8 @@ export class Launcher {
     return true;
   }
 
-  private async driver(type: string, _spec: MountSpec): Promise<OpenedDriver> {
+  private async driver(type: string, spec: MountSpec): Promise<OpenedDriver> {
+    if (type === 'fsa') return this.fsaDriver(spec);
     if (type === 'tmpfs') {
       const { port1, port2 } = new MessageChannel();
       serveFilesystem(port2, tmpfs(), { symlinks: true, chmod: true, attrTtl: 0 });
@@ -598,8 +627,47 @@ export class Launcher {
     };
   }
 
+  private async fsaDriver(spec: MountSpec): Promise<OpenedDriver> {
+    const { target, source } = spec;
+    const ask = (handle?: MediumHandle) =>
+      this.onMountPending?.({ target, source, ...(handle ? { handle } : {}) });
+    const { port1, port2 } = new MessageChannel();
+    const medium = removableMedium((handle) => {
+      served.invalidate(true);
+      ask(handle);
+    });
+    const served = serveFilesystem(port2, medium.handlers, FSA_CAPABILITIES);
+    const id = source.slice('fsa:'.length);
+    this.removable.set(target, { id, medium, served });
+    const stored = this.inserted.get(id) ?? (await this.media.get(id));
+    if (stored && (await granted(stored))) medium.insert(stored);
+    else ask(stored);
+    return {
+      port: port1,
+      present: () => medium.present(),
+      dispose: () => {
+        this.removable.delete(target);
+        port1.close();
+        port2.close();
+      },
+    };
+  }
+
   mount(spec: MountSpec): Promise<MountEntry> {
-    return this.mounts.mount(spec, this.fs);
+    if (spec.type !== 'fsa' || spec.source.startsWith('fsa:'))
+      return this.mounts.mount(spec, this.fs);
+    return this.mounts.mount({ ...spec, source: `fsa:${crypto.randomUUID()}` }, this.fs);
+  }
+
+  async insert(target: string, handle: MediumHandle): Promise<void> {
+    const at = normalizePath(target);
+    const slot = this.removable.get(at);
+    if (!slot) throw fsError('EINVAL', `${at} is not a removable mount`);
+    if (!(await granted(handle))) throw fsError('EACCES', `${at}: no permission for this folder`);
+    this.inserted.set(slot.id, handle);
+    await this.media.put(slot.id, handle);
+    slot.medium.insert(handle);
+    slot.served.invalidate(true);
   }
 
   umount(target: string): void {

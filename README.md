@@ -31,6 +31,8 @@ const { status, stdout, stderr } = await kernel.run(['bash', '-c', 'echo hi > he
 | `metadata` | `'slicc-kernel'` | the IndexedDB database for POSIX metadata (see [Metadata](#metadata)); `false` keeps it in memory for the kernel's lifetime |
 | `worker` | `new URL('./kernel-worker.js', import.meta.url)` | the kernel worker script |
 | `network` | none | `{ transport }`: how programs reach the outside world (see [Network](#network)) |
+| `requestDirectory` | none | `() => Promise<FileSystemDirectoryHandle>`, typically `showDirectoryPicker`: how an `fsa` mount gets its folder (see [Removable media](#removable-media-fsa)) |
+| `onMountPending` | none | `({ target, source, insert }) => void`: an `fsa` mount needs a folder; call `insert()` from a user gesture |
 
 ### `kernel.run(argv, options?) → Promise<{ status, stdout, stderr }>`
 
@@ -183,7 +185,7 @@ Directories are renamed with `FileSystemHandle.move()` where available, else by 
 
 `kernel.mount({ type, source, target, options })` mounts a file system on an existing directory. Every process sees it, Emscripten and WASI alike, and so does every attached client. `kernel.umount(target)` unmounts it, and fails with `EBUSY` while a process has a file open under it. `kernel.mounts()` lists the table, as does `/proc/mounts`. The Node entry and attached clients have the same three calls (client protocol 1.2).
 
-- **Built in:** `tmpfs`, which lives in memory until unmounted.
+- **Built in:** `tmpfs`, which lives in memory until unmounted, and `fsa`, a folder the user picks (see [Removable media](#removable-media-fsa)).
 - **Package drivers:** a package declares a type in `"slicc": { "filesystems": { "<type>": { "module": "<file>" } } }`, and the kernel starts that module in a worker of its own for each mount. The module is a single self-contained file: it can't import bare specifiers.
   - Its default export receives `{ fetch }`, the kernel's network transport. It returns `{ handlers, capabilities }`.
   - The handlers are path-based: `getattr`, `readdir`, `open`/`read`/`write`/`release` on handles, `mkdir`, `rmdir`, `unlink`, `rename`, and optionally `symlink`, `readlink`, `setattr` and `statfs`.
@@ -199,6 +201,21 @@ Directories are renamed with `FileSystemHandle.move()` where available, else by 
   - without `chmod` support, `chmod` succeeds and changes nothing;
   - a file over `maxFile` is `EFBIG`, and `options.maxfile` (`"2G"`, or `"0"` for none) changes that limit for one mount;
   - a driver that crashes or doesn't answer within 30 s makes its mount's calls fail with `EIO`, and the mount is listed as `failed`.
+
+### Removable media: `fsa`
+
+An `fsa` mount is a drive for a local folder, from the File System Access API, and the folder is its medium.
+
+- **Mounting** never waits for the user. `kernel.mount({ type: 'fsa', source: 'none', target })` mounts the drive with no medium:
+  - it is listed in `/proc/mounts` and by `kernel.mounts()` with state `nomedium`;
+  - `df` shows it with size 0;
+  - the mount point is an empty directory, and every other operation under it fails with `ENOMEDIUM` ("No medium found");
+  - WASI has no `ENOMEDIUM`, so WASI programs get `ENODEV` ("No such device"), the nearest errno.
+- **Insert request:** at the same time the kernel calls the page's `onMountPending({ target, source, insert })`, so the page can show "Insert a folder for /mnt/x" with a button.
+- **Inserting:** calling `insert()` from that button's click picks the folder with `requestDirectory()`, or asks for permission again on a folder the drive had before. The medium goes in without a remount, and the state becomes `ok`. `kernel.insert(target, handle)` inserts a handle the page already has.
+- **Persistence:** the drive's source is `fsa:<id>`, and the kernel keeps the folder's handle under that id in IndexedDB (`<metadata>:media`). Mounting `fsa:<id>` again, after a reboot too, inserts the folder at once while its permission holds, and asks again when it is back to `prompt`. In an Incognito window Chrome crashes a page that reads a folder handle back from IndexedDB. Pass `metadata: false` there, which keeps the handles in memory, so a remount finds its folder only within the same kernel.
+- **Ejecting:** `umount` ejects. So does the permission going away: the next operation fails with `ENOMEDIUM` and the kernel asks again. The folder is untouched either way.
+- **Limits:** the folder has no symlinks or modes, and `df` reports no size for it either.
 
 ### `/proc`
 

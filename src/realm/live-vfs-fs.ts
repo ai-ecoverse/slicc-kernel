@@ -12,6 +12,7 @@ const ERRNO_BY_CODE: Readonly<Record<string, number>> = {
   ELOOP: 32,
   ENAMETOOLONG: 37,
   ENOENT: 44,
+  ENOMEDIUM: 148,
   ENOSPC: 51,
   ENOSYS: 52,
   ENOTDIR: 54,

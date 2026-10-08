@@ -12,6 +12,7 @@ export const E = {
   CHILD: 12,
   CONNREFUSED: 14,
   CONNRESET: 15,
+  NODEV: 19,
   EXIST: 20,
   FAULT: 21,
   FBIG: 22,
@@ -54,6 +55,7 @@ export function wasiErrnoOf(code: string | undefined): number {
   const name = code.startsWith('E') ? code.slice(1) : code;
   if (name === 'OPNOTSUPP') return E.NOTSUP;
   if (name === 'WOULDBLOCK') return E.AGAIN;
+  if (name === 'NOMEDIUM') return E.NODEV;
   return (E as Record<string, number>)[name] ?? E.IO;
 }
 

@@ -28,6 +28,7 @@ const ERRNO_BY_DOM_ERROR: Readonly<Record<string, string>> = {
   InvalidModificationError: 'ENOTEMPTY',
   NoModificationAllowedError: 'EBUSY',
   TypeError: 'EINVAL',
+  NotAllowedError: 'EACCES',
 };
 
 function translate(err: unknown, path: string): Error {
