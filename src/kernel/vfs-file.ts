@@ -267,15 +267,16 @@ export async function refuseReadonly(
 ): Promise<void> {
   const writes = (flags & O_ACCMODE) !== 0 || opts.truncate === true;
   if ((!writes && !opts.create) || !fs.stat) return;
-  const stat = fs.stat.bind(fs);
+  const stat = (p: string) =>
+    fs.stat?.(p).catch((err: unknown) => {
+      const code = (err as { code?: unknown } | null)?.code;
+      if (isMissing(err) || typeof code !== 'string') return undefined;
+      throw err;
+    });
   const parent = path.slice(0, path.lastIndexOf('/')) || '/';
-  const own = await stat(path).catch((err: unknown) => {
-    const code = (err as { code?: unknown } | null)?.code;
-    if (isMissing(err) || typeof code !== 'string') return undefined;
-    throw err;
-  });
+  const own = await stat(path);
   if (own && !writes) return;
-  const st = own ?? (await stat(parent).catch(() => undefined));
+  const st = own ?? (await stat(parent));
   if (st?.readonly) throw new KernelError('EROFS');
 }
 
