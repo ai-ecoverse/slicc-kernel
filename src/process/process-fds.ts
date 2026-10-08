@@ -115,15 +115,15 @@ function cloexecPipe2(pipe2: GlueSyscall, deps: CloexecDeps): GlueSyscall {
 }
 
 function quietTarget(dup3: GlueSyscall, deps: CloexecDeps): GlueSyscall {
-  return (fd = -1, newfd = -1, ...rest) => {
+  return (fd = -1, newfd = -1, flags = 0, ...rest) => {
     const Fs = deps.fs();
-    const target = fd === newfd ? undefined : Fs?.getStream(newfd);
+    const target = fd === newfd || flags !== 0 ? undefined : Fs?.getStream(newfd);
     if (target && Fs?.getStream(fd)) {
       try {
         Fs.close?.(target);
       } catch {}
     }
-    return dup3(fd, newfd, ...rest);
+    return dup3(fd, newfd, flags, ...rest);
   };
 }
 
