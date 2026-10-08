@@ -31,7 +31,8 @@ export type KernelErrno =
   | 'EINPROGRESS'
   | 'EISCONN'
   | 'ENOTCONN'
-  | 'EROFS';
+  | 'EROFS'
+  | 'EFBIG';
 
 export class KernelError extends Error {
   readonly code: KernelErrno;

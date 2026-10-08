@@ -3,7 +3,7 @@ import { KernelError, OpenFile } from './fd-table.ts';
 export interface VfsFileFs {
   readFileBuffer(path: string): Promise<Uint8Array>;
   writeFile(path: string, content: Uint8Array): Promise<void>;
-  stat?(path: string): Promise<{ readonly?: boolean }>;
+  stat?(path: string): Promise<{ readonly?: boolean; maxFile?: number }>;
 }
 
 const O_ACCMODE = 0o3;
@@ -143,7 +143,35 @@ export class VfsNode {
     return bytes.slice(at, at + n);
   }
 
+  private cap: Promise<number | undefined> | undefined;
+
+  limit(): Promise<number | undefined> {
+    if (this.cap !== undefined) return this.cap;
+    const stat = this.fs.stat?.bind(this.fs);
+    if (!stat || this.orphaned) return Promise.resolve(undefined);
+    const parent = this.path.slice(0, this.path.lastIndexOf('/')) || '/';
+    this.cap ??= stat(this.path)
+      .catch(() => stat(parent))
+      .then(
+        (st) => st.maxFile,
+        () => undefined
+      );
+    return this.cap;
+  }
+
+  private async fits(end: number): Promise<void> {
+    const max = await this.limit();
+    if (max !== undefined && end > max) throw new KernelError('EFBIG');
+  }
+
+  renamedTo(path: string): void {
+    this.path = path;
+    this.cap = undefined;
+  }
+
   async pwrite(bytes: Uint8Array, at: number): Promise<number> {
+    if (bytes.length === 0) return 0;
+    await this.fits(at + bytes.length);
     await this.load();
     const buf = this.ensure(at + bytes.length);
     if (at > this.length) buf.fill(0, this.length, at);
@@ -154,6 +182,7 @@ export class VfsNode {
   }
 
   async truncate(size: number): Promise<void> {
+    await this.fits(size);
     await this.load();
     const buf = this.ensure(size);
     if (size > this.length) buf.fill(0, this.length, size);
@@ -242,7 +271,7 @@ export class VfsNodes {
 
   async unlinking(path: string): Promise<void> {
     const node = this.byPath.get(path);
-    if (node) await node.serial(() => node.load());
+    if (node) await node.serial(async () => void (await Promise.all([node.load(), node.limit()])));
   }
 
   revoke(prefix: string): void {
@@ -272,7 +301,7 @@ export class VfsNodes {
     }
     for (const node of moved) {
       this.byPath.delete(node.path);
-      node.path = to + node.path.slice(from.length);
+      node.renamedTo(to + node.path.slice(from.length));
       this.byPath.set(node.path, node);
     }
   }

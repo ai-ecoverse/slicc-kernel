@@ -10,6 +10,7 @@ export interface FsStat {
   ino: number;
   dev?: number;
   readonly?: boolean;
+  maxFile?: number;
 }
 
 export interface KernelFs {

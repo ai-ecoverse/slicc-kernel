@@ -506,7 +506,8 @@ export class WasiFds {
       if (oflags & OFLAGS.TRUNC) buffer.truncate(0);
     } else {
       if (!existing) this.fs.writeFile(path, new Uint8Array(0));
-      buffer = new FileBuffer(this.fs, path, !existing || (oflags & OFLAGS.TRUNC) !== 0);
+      const empty = !existing || (oflags & OFLAGS.TRUNC) !== 0;
+      buffer = new FileBuffer(this.fs, path, empty, (existing ?? this.fs.stat(path)).maxFile);
       this.buffers.set(path, buffer);
     }
     buffer.opens++;

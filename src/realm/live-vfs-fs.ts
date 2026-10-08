@@ -51,6 +51,8 @@ interface LiveNodeState {
   orphan?: boolean;
 
   listed?: Map<string, SyncFsBridgeStat>;
+
+  maxFile?: number;
 }
 
 export interface LiveFsNode {
@@ -278,7 +280,13 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
 
   function truncate(node: LiveFsNode, size: number): void {
     const s = node.live;
-    if (!s.orphan && statOf(node).readonly) throw new Fs.ErrnoError(ERRNO_BY_CODE.EROFS);
+    if (!s.orphan) {
+      const st = statOf(node);
+      if (st.readonly) throw new Fs.ErrnoError(ERRNO_BY_CODE.EROFS);
+      if (st.maxFile !== undefined && size > st.maxFile) {
+        throw new Fs.ErrnoError(ERRNO_BY_CODE.EFBIG);
+      }
+    }
     if (s.openCount > 0) {
       if (size > 0) ensureLoaded(node);
       else s.loaded = true;
@@ -475,7 +483,9 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
       if (!Fs.isFile(stream.node.mode)) return;
       if ((stream.flags & 3) !== 0) {
         try {
-          if (statOf(stream.node).readonly) throw new Fs.ErrnoError(ERRNO_BY_CODE.EROFS);
+          const st = statOf(stream.node);
+          if (st.readonly) throw new Fs.ErrnoError(ERRNO_BY_CODE.EROFS);
+          stream.node.live.maxFile = st.maxFile;
         } catch (err) {
           if (stream.fd !== undefined) Fs.closeStream?.(stream.fd);
           throw err;
@@ -523,9 +533,10 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
       const node = stream.node;
       if (Fs.isDir(node.mode)) throw new Fs.ErrnoError(ERRNO_BY_CODE.EISDIR);
       if (length <= 0) return 0;
-      ensureLoaded(node);
       const s = node.live;
       const end = position + length;
+      if (s.maxFile !== undefined && end > s.maxFile) throw new Fs.ErrnoError(ERRNO_BY_CODE.EFBIG);
+      ensureLoaded(node);
       const buf = ensureCapacity(node, end);
       if (position > s.len) buf.fill(0, s.len, position);
       buf.set(new Uint8Array(buffer.buffer, buffer.byteOffset + offset, length), position);

@@ -20,14 +20,18 @@ export class FileBuffer {
 
   private readonly fs: SyncFsPosixBridge;
   path: string;
+
+  maxFile: number | undefined;
   constructor(
     fs: SyncFsPosixBridge,
     path: string,
 
-    empty: boolean
+    empty: boolean,
+    maxFile?: number
   ) {
     this.fs = fs;
     this.path = path;
+    this.maxFile = maxFile;
     if (empty) {
       this.data = new Uint8Array(0);
       this.dirty = true;
@@ -53,9 +57,15 @@ export class FileBuffer {
     return bytes.subarray(at, at + n);
   }
 
+  private fits(end: number): void {
+    if (this.maxFile !== undefined && end > this.maxFile) throw new WasiError('EFBIG');
+  }
+
   pwrite(bytes: Uint8Array, at: number): number {
-    this.load();
+    if (bytes.length === 0) return 0;
     const end = at + bytes.length;
+    this.fits(end);
+    this.load();
     this.ensure(end);
     const buf = this.data as Uint8Array;
     if (at > this.length) buf.fill(0, this.length, at);
@@ -66,6 +76,7 @@ export class FileBuffer {
   }
 
   truncate(size: number): void {
+    this.fits(size);
     this.load();
     this.ensure(size);
     if (size > this.length) (this.data as Uint8Array).fill(0, this.length, size);

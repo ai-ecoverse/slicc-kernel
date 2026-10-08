@@ -201,7 +201,7 @@ Directories are renamed with `FileSystemHandle.move()` where available, else by 
   - `df` reports each mount from its driver's `statfs`;
   - each mount has its own device number;
   - without `chmod` support, `chmod` succeeds and changes nothing;
-  - a file over `maxFile` is `EFBIG`, and `options.maxfile` (`"2G"`, or `"0"` for none) changes that limit for one mount;
+  - a write or truncate that would make a file larger than `maxFile` fails with `EFBIG` at once and changes nothing, and `options.maxfile` (`"2G"`, or `"0"` for none) changes that limit for one mount;
   - `options.ro` makes any mount read-only: writes fail with `EROFS`;
   - a driver that crashes or doesn't answer within 30 s makes its mount's calls fail with `EIO`, and the mount is listed as `failed`.
 
