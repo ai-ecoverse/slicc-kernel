@@ -219,6 +219,16 @@ window.pendingMedia = [];
 const media = {
   requestDirectory: () => walk('picked', true),
   onMountPending: (pending) => window.pendingMedia.push(pending),
+  hostfs: async (source, { readonly }) => {
+    const { url, key } = window.hostfsProxy;
+    const response = await fetch(`${url}/api/hostfs/grant`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Bridge-Token': key },
+      body: JSON.stringify({ mount: source, readonly }),
+    });
+    if (!response.ok) throw new Error(`grant refused: ${response.status}`);
+    return { url, ...(await response.json()) };
+  },
 };
 
 window.insertPending = async (index) => {

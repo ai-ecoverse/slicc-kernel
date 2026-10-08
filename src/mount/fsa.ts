@@ -1,6 +1,7 @@
 import { OpfsFs } from '../fs/opfs.ts';
 import type { FsStat, KernelFs } from '../fs/types.ts';
 import { type FilesystemHandlers, fsError, type OpenFlags } from './driver.ts';
+import { mediumSlot } from './medium.ts';
 import type { DriverAttr, DriverCapabilities, DriverEntry } from './protocol.ts';
 
 export const FSA_CAPABILITIES: DriverCapabilities = { listingStats: true };
@@ -111,8 +112,6 @@ export function kernelFsHandlers(fs: KernelFs): Handlers {
   };
 }
 
-const EMPTY_ROOT: DriverAttr = { kind: 'directory', size: 0, mtime: 0, mode: 0o40755 };
-
 export interface Medium {
   readonly handlers: FilesystemHandlers;
   present(): boolean;
@@ -132,50 +131,14 @@ export function removableMedium(
   onLost: (handle: MediumHandle) => void,
   open: (handle: MediumHandle) => KernelFs = (handle) => new OpfsFs(handle)
 ): Medium {
-  let current: { handle: MediumHandle; handlers: Handlers } | undefined;
-  const absent = () => fsError('ENOMEDIUM', 'No medium found');
-  function wrap<A extends unknown[], R>(
-    pick: (h: Handlers) => (...args: A) => Promise<R>
-  ): (...args: A) => Promise<R> {
-    return async (...args) => {
-      const medium = current;
-      if (!medium) throw absent();
-      try {
-        return await pick(medium.handlers)(...args);
-      } catch (err) {
-        if (!denied(err) || (await granted(medium.handle))) throw err;
-        if (current === medium) {
-          current = undefined;
-          onLost(medium.handle);
-        }
-        throw absent();
-      }
-    };
-  }
-  const getattr = wrap((h) => h.getattr);
-  const readdir = wrap((h) => h.readdir);
+  const slot = mediumSlot<MediumHandle>(
+    async (err, handle) => denied(err) && !(await granted(handle)),
+    onLost
+  );
   return {
-    handlers: {
-      getattr: (path) => (current || path !== '/' ? getattr(path) : Promise.resolve(EMPTY_ROOT)),
-      readdir: (path) => (current || path !== '/' ? readdir(path) : Promise.resolve([])),
-      open: wrap((h) => h.open),
-      read: wrap((h) => h.read),
-      write: wrap((h) => h.write),
-      release: wrap((h) => h.release),
-      mkdir: wrap((h) => h.mkdir),
-      rmdir: wrap((h) => h.rmdir),
-      unlink: wrap((h) => h.unlink),
-      rename: wrap((h) => h.rename),
-      symlink: wrap((h) => h.symlink),
-      readlink: wrap((h) => h.readlink),
-      setattr: wrap((h) => h.setattr),
-    },
-    present: () => current !== undefined,
-    insert(handle) {
-      current = { handle, handlers: kernelFsHandlers(open(handle)) };
-    },
-    eject() {
-      current = undefined;
-    },
+    handlers: slot.handlers,
+    present: slot.present,
+    insert: (handle) => slot.insert(handle, kernelFsHandlers(open(handle))),
+    eject: slot.eject,
   };
 }

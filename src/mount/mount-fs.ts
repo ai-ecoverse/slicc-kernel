@@ -49,6 +49,7 @@ interface Mount extends MountEntry {
 }
 
 const MAX_LINKS = 40;
+const STALE_RETRIES = 3;
 const DEFAULT_IO = 8 * 1024 * 1024;
 const UNITS: Record<string, number> = { '': 1, k: 1024, m: 1024 ** 2, g: 1024 ** 3, t: 1024 ** 4 };
 
@@ -331,7 +332,17 @@ class MountFs implements KernelFs {
     const real = await this.follow(path);
     const found = this.at(real);
     if (!found) return this.base.readFileBuffer(real);
-    const { mount, rel } = found;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await this.readWhole(found.mount, real, found.rel);
+      } catch (err) {
+        if ((err as { code?: unknown }).code !== 'ESTALE' || attempt >= STALE_RETRIES) throw err;
+        this.table.forget(found.mount, real);
+      }
+    }
+  }
+
+  private async readWhole(mount: Mount, real: string, rel: string): Promise<Uint8Array> {
     const attr = await this.table.getattr(mount, real, rel);
     if (attr.kind === 'directory') throw errnoError('EISDIR', real);
     if (mount.maxFile > 0 && attr.size > mount.maxFile) {
