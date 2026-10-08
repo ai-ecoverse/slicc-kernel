@@ -30,7 +30,8 @@ export type KernelErrno =
   | 'ECONNREFUSED'
   | 'EINPROGRESS'
   | 'EISCONN'
-  | 'ENOTCONN';
+  | 'ENOTCONN'
+  | 'EROFS';
 
 export class KernelError extends Error {
   readonly code: KernelErrno;

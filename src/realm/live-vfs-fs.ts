@@ -69,6 +69,7 @@ export interface LiveFsStream {
   node: LiveFsNode;
   position: number;
   flags: number;
+  fd?: number;
 }
 
 export interface LiveFsMount {
@@ -148,6 +149,7 @@ export interface LiveFsApi {
   isFile(mode: number): boolean;
   isLink(mode: number): boolean;
   ErrnoError: new (errno: number) => Error & { errno: number };
+  closeStream?(fd: number): void;
 
   nameTable?: (LiveFsNode | null)[] | null;
   hashRemoveNode?(node: LiveFsNode): void;
@@ -470,6 +472,10 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
   return {
     open(stream) {
       if (!Fs.isFile(stream.node.mode)) return;
+      if ((stream.flags & 3) !== 0 && statOf(stream.node).readonly) {
+        if (stream.fd !== undefined) Fs.closeStream?.(stream.fd);
+        throw new Fs.ErrnoError(ERRNO_BY_CODE.EROFS);
+      }
       stream.node.live.openCount++;
       held(stream, 1);
     },
@@ -572,9 +578,7 @@ export function flushLiveVfs(Fs: LiveFsApi, plugin: LiveVfsPlugin): void {
         const bytes = node.live.data.slice(0, node.live.len);
         node.mount.opts.bridge.writeFile(liveNodePath(node), bytes);
         node.live.dirty = false;
-      } catch (err) {
-        throw toErrno(Fs, err);
-      }
+      } catch {}
     }
   }
 }

@@ -27,6 +27,7 @@ export interface SyncFsStatJson {
   ctimeMs: number;
   ino: number;
   dev?: number;
+  readonly?: boolean;
 }
 
 function statJson(s: FsStat): SyncFsStatJson {
@@ -41,6 +42,7 @@ function statJson(s: FsStat): SyncFsStatJson {
     ctimeMs: s.ctime.getTime(),
     ino: s.ino,
     ...(s.dev !== undefined ? { dev: s.dev } : {}),
+    ...(s.readonly ? { readonly: true } : {}),
   };
 }
 

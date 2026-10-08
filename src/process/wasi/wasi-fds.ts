@@ -503,6 +503,7 @@ export class WasiFds {
     const writable =
       (rights & RIGHTS.FD_WRITE) !== 0n || (oflags & (OFLAGS.CREAT | OFLAGS.TRUNC)) !== 0;
     const readable = (rights & RIGHTS.FD_READ) !== 0n || !writable;
+    if (writable && existing?.readonly) throw new WasiError('EROFS');
     let buffer = this.buffers.get(path);
     if (buffer) {
       if (oflags & OFLAGS.TRUNC) buffer.truncate(0);
@@ -525,6 +526,7 @@ export class WasiFds {
     const writable =
       (rights & RIGHTS.FD_WRITE) !== 0n || (oflags & (OFLAGS.CREAT | OFLAGS.TRUNC)) !== 0;
     const readable = (rights & RIGHTS.FD_READ) !== 0n || !writable;
+    if (writable && existing?.readonly) throw new WasiError('EROFS');
     const append = (fdflags & FDFLAGS.APPEND) !== 0;
     const flags = (writable ? (readable ? O_RDWR : O_WRONLY) : 0) | (append ? O_APPEND : 0);
 

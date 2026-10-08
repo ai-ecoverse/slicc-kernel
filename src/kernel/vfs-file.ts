@@ -3,6 +3,7 @@ import { KernelError, OpenFile } from './fd-table.ts';
 export interface VfsFileFs {
   readFileBuffer(path: string): Promise<Uint8Array>;
   writeFile(path: string, content: Uint8Array): Promise<void>;
+  stat?(path: string): Promise<{ readonly?: boolean }>;
 }
 
 const O_ACCMODE = 0o3;
@@ -256,6 +257,16 @@ export class VfsNodes {
       this.byPath.set(node.path, node);
     }
   }
+}
+
+export async function refuseReadonly(fs: VfsFileFs, path: string, flags: number): Promise<void> {
+  if ((flags & O_ACCMODE) === 0 || !fs.stat) return;
+  const stat = fs.stat.bind(fs);
+  const parent = path.slice(0, path.lastIndexOf('/')) || '/';
+  const st = await stat(path)
+    .catch(() => stat(parent))
+    .catch(() => undefined);
+  if (st?.readonly) throw new KernelError('EROFS');
 }
 
 export function vfsFile(fs: VfsFileFs, opts: VfsFileOptions, nodes?: VfsNodes): OpenFile {

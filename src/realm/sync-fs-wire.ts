@@ -48,6 +48,7 @@ export interface SyncFsBridgeStat {
   ctimeMs?: number;
   ino?: number;
   dev?: number;
+  readonly?: boolean;
 }
 
 export interface SyncFsUsage {
@@ -107,5 +108,6 @@ export function parseSyncFsStat(json: unknown): SyncFsBridgeStat | null {
     ...(typeof s.ctimeMs === 'number' ? { ctimeMs: s.ctimeMs } : {}),
     ...(typeof s.ino === 'number' ? { ino: s.ino } : {}),
     ...(typeof s.dev === 'number' ? { dev: s.dev } : {}),
+    ...(s.readonly === true ? { readonly: true } : {}),
   };
 }
