@@ -174,7 +174,8 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     options.onMountPending?.({
       target,
       source,
-      insert: async () => void (await call({ op: 'insert', target, handle: await chosen(handle) })),
+      insert: async () =>
+        void (await call({ op: 'insert', target, source, handle: await chosen(handle) })),
     });
   worker.addEventListener(
     'message',

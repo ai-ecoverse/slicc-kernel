@@ -22,6 +22,8 @@ interface Opened {
 }
 
 const codeOf = (err: unknown) => (err as { code?: unknown } | null)?.code;
+const denied = (err: unknown) =>
+  codeOf(err) === 'EACCES' || (err as { name?: unknown } | null)?.name === 'NotAllowedError';
 
 function attrOf(st: FsStat): DriverAttr {
   return {
@@ -141,7 +143,7 @@ export function removableMedium(
       try {
         return await pick(medium.handlers)(...args);
       } catch (err) {
-        if (codeOf(err) !== 'EACCES' || (await granted(medium.handle))) throw err;
+        if (!denied(err) || (await granted(medium.handle))) throw err;
         if (current === medium) {
           current = undefined;
           onLost(medium.handle);
@@ -151,10 +153,11 @@ export function removableMedium(
     };
   }
   const getattr = wrap((h) => h.getattr);
+  const readdir = wrap((h) => h.readdir);
   return {
     handlers: {
       getattr: (path) => (current || path !== '/' ? getattr(path) : Promise.resolve(EMPTY_ROOT)),
-      readdir: wrap((h) => h.readdir),
+      readdir: (path) => (current || path !== '/' ? readdir(path) : Promise.resolve([])),
       open: wrap((h) => h.open),
       read: wrap((h) => h.read),
       write: wrap((h) => h.write),

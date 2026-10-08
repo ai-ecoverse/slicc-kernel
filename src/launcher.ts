@@ -659,10 +659,13 @@ export class Launcher {
     return this.mounts.mount({ ...spec, source: `fsa:${crypto.randomUUID()}` }, this.fs);
   }
 
-  async insert(target: string, handle: MediumHandle): Promise<void> {
+  async insert(target: string, handle: MediumHandle, source?: string): Promise<void> {
     const at = normalizePath(target);
     const slot = this.removable.get(at);
     if (!slot) throw fsError('EINVAL', `${at} is not a removable mount`);
+    if (source !== undefined && source !== `fsa:${slot.id}`) {
+      throw fsError('EINVAL', `${at} is no longer the drive ${source}`);
+    }
     if (!(await granted(handle))) throw fsError('EACCES', `${at}: no permission for this folder`);
     this.inserted.set(slot.id, handle);
     await this.media.put(slot.id, handle);

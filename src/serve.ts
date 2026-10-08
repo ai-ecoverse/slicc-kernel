@@ -63,7 +63,7 @@ export type MountRequest =
   | { id: number; op: 'mount'; spec: MountSpec }
   | { id: number; op: 'umount'; target: string }
   | { id: number; op: 'mounts' }
-  | { id: number; op: 'insert'; target: string; handle: MediumHandle };
+  | { id: number; op: 'insert'; target: string; source?: string; handle: MediumHandle };
 
 export type KernelRequest =
   | InitRequest
@@ -195,7 +195,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
     const l = await ready();
     if (req.op === 'mount') return l.mount(req.spec);
     if (req.op === 'umount') return l.umount(req.target);
-    if (req.op === 'insert') return l.insert(req.target, req.handle);
+    if (req.op === 'insert') return l.insert(req.target, req.handle, req.source);
     return l.mounts.list();
   }
 
