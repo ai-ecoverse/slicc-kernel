@@ -472,9 +472,13 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
   return {
     open(stream) {
       if (!Fs.isFile(stream.node.mode)) return;
-      if ((stream.flags & 3) !== 0 && statOf(stream.node).readonly) {
-        if (stream.fd !== undefined) Fs.closeStream?.(stream.fd);
-        throw new Fs.ErrnoError(ERRNO_BY_CODE.EROFS);
+      if ((stream.flags & 3) !== 0) {
+        try {
+          if (statOf(stream.node).readonly) throw new Fs.ErrnoError(ERRNO_BY_CODE.EROFS);
+        } catch (err) {
+          if (stream.fd !== undefined) Fs.closeStream?.(stream.fd);
+          throw err;
+        }
       }
       stream.node.live.openCount++;
       held(stream, 1);

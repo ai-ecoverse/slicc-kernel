@@ -13,7 +13,7 @@ const O_TRUNC = 0o1000;
 const PLACEHOLDER_DIR = '/dev/slicc-fd';
 
 interface LiveNodeBag {
-  live?: { orphan?: boolean; data?: Uint8Array; len?: number };
+  live?: { orphan?: boolean; dirty?: boolean; data?: Uint8Array; len?: number };
   mode: number;
 }
 
@@ -28,6 +28,17 @@ function orphanContents(stream: ProcessStream): Uint8Array | undefined {
   return live.data?.slice(0, live.len ?? live.data.length) ?? new Uint8Array(0);
 }
 
+function handedContents(
+  stream: ProcessStream
+): { contents: Uint8Array; orphan?: true; dirty?: true } | undefined {
+  const orphan = orphanContents(stream);
+  if (orphan !== undefined) return { contents: orphan, orphan: true };
+  const live = (stream.node as LiveNodeBag).live;
+  if (!live?.dirty || !live.data) return undefined;
+  live.dirty = false;
+  return { contents: live.data.slice(0, live.len ?? live.data.length), dirty: true };
+}
+
 export function vfsPromoter(
   Fs: ProcessFs,
   sys: ProcessSys,
@@ -39,13 +50,7 @@ export function vfsPromoter(
     if (stream.sliccKernelFd !== undefined || !isVfsFile(Fs, stream)) return;
     let kfd = promoted.get(stream.shared);
     if (kfd === undefined) {
-      const contents = orphanContents(stream);
-      kfd = sys.openVfs(
-        livePath(stream),
-        stream.flags,
-        stream.position,
-        contents !== undefined ? { contents, orphan: true } : undefined
-      );
+      kfd = sys.openVfs(livePath(stream), stream.flags, stream.position, handedContents(stream));
       promoted.set(stream.shared, kfd);
     }
     streams.attachFile(stream, kfd);

@@ -57,6 +57,8 @@ export type WasmSyscall =
 
       orphan?: boolean;
 
+      dirty?: boolean;
+
       truncate?: boolean;
 
       create?: boolean;
@@ -513,6 +515,7 @@ export class WasmProcess {
         position: req.position,
         ...(req.contents !== undefined ? { contents: req.contents } : {}),
         ...(req.orphan ? { orphan: true } : {}),
+        ...(req.dirty ? { dirty: true } : {}),
         ...(req.truncate ? { truncate: true } : {}),
         ...(req.create ? { create: true } : {}),
       },

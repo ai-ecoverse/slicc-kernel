@@ -99,6 +99,7 @@ export function kernelSys(transport: SyncSabTransport): ProcessSys & PtyKernel {
             position,
             ...(opts?.contents !== undefined ? { contents: opts.contents } : {}),
             ...(opts?.orphan ? { orphan: true } : {}),
+            ...(opts?.dirty ? { dirty: true } : {}),
             ...(opts?.truncate ? { truncate: true } : {}),
             ...(opts?.create ? { create: true } : {}),
           },

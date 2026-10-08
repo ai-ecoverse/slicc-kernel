@@ -349,3 +349,43 @@ test('a write the mount refuses after the program wrote it does not crash the sh
   await page.evaluate(() => window.kernel.umount('/mnt/t'));
   assert.deepEqual(page.errors, []);
 });
+
+test('bytes a program wrote before a spawn whose write-back failed are kept, with what it wrote after, and reach the store once it takes them', async (t) => {
+  const { page, bash } = await booted(chrome, t, { store: true });
+  await fixture(page);
+  await bash('mkdir -p /mnt/s3', { cwd: '/home' });
+  const spec = { type: 'mocks3', source: 'http://mock-s3.test/bucket', target: '/mnt/s3' };
+  assert.equal((await page.evaluate((s) => window.kernel.mount(s), spec)).state, 'ok');
+  await bash('echo host > /mnt/s3/a.txt', { cwd: '/home' });
+  const until = async (ok) => {
+    for (let i = 0; i < 150 && !(await ok()); i++) await new Promise((r) => setTimeout(r, 100));
+  };
+  await page.evaluate(() => {
+    window.refusePuts = true;
+  });
+  const running = bash(
+    [
+      'exec 3>>/mnt/s3/a.txt',
+      'printf "before\\n" >&3',
+      'sleep 0.1',
+      'touch /home/spawned',
+      'while [ ! -e /home/up ]; do :; done',
+      'printf "after\\n" >&3',
+      'exec 3>&-',
+      'echo "closed $?"',
+    ].join('; '),
+    { cwd: '/home' }
+  );
+  await until(() => page.evaluate(() => window.opfs.exists('home/spawned')));
+  await page.evaluate(() => {
+    window.refusePuts = false;
+  });
+  await page.evaluate(() => window.opfs.write('home/up', ''));
+  assert.deepEqual(await running, { status: 0, stdout: 'closed 0\n', stderr: '' });
+  await page.evaluate(() => window.kernel.umount('/mnt/s3'));
+  const stored = await page.evaluate(() =>
+    new TextDecoder().decode(window.objects.get('a.txt')?.body ?? new Uint8Array())
+  );
+  assert.equal(stored, 'host\nbefore\nafter\n');
+  assert.deepEqual(page.errors, []);
+});
