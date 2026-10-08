@@ -263,14 +263,15 @@ export async function refuseReadonly(
   fs: VfsFileFs,
   path: string,
   flags: number,
-  mutates = false
+  opts: { create?: boolean; truncate?: boolean } = {}
 ): Promise<void> {
-  if (((flags & O_ACCMODE) === 0 && !mutates) || !fs.stat) return;
+  const writes = (flags & O_ACCMODE) !== 0 || opts.truncate === true;
+  if ((!writes && !opts.create) || !fs.stat) return;
   const stat = fs.stat.bind(fs);
   const parent = path.slice(0, path.lastIndexOf('/')) || '/';
-  const st = await stat(path)
-    .catch(() => stat(parent))
-    .catch(() => undefined);
+  const own = await stat(path).catch(() => undefined);
+  if (own && !writes) return;
+  const st = own ?? (await stat(parent).catch(() => undefined));
   if (st?.readonly) throw new KernelError('EROFS');
 }
 
