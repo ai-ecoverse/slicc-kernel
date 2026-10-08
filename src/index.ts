@@ -3,6 +3,7 @@ import type { PendingMedium } from './launcher.ts';
 import type { MediumHandle } from './mount/fsa.ts';
 import type { HostfsGrantHook } from './mount/hostfs.ts';
 import type { MountEntry, MountSpec } from './mount/mount-fs.ts';
+import type { ProcessMountPolicy, ProcessMountRequest } from './mount/syscall.ts';
 import type { KernelCall, TerminalAction } from './serve.ts';
 import { type NetworkTransport, serveTransport } from './transport.ts';
 
@@ -35,6 +36,7 @@ export {
 } from './local-proxy-transport.ts';
 export type { HostfsGrant, HostfsGrantHook } from './mount/hostfs.ts';
 export type { MountEntry, MountSpec } from './mount/mount-fs.ts';
+export type { ProcessMountPolicy, ProcessMountRequest } from './mount/syscall.ts';
 export {
   type FetchTransportOptions,
   fetchTransport,
@@ -59,6 +61,7 @@ export interface KernelOptions {
   requestDirectory?: () => Promise<FileSystemDirectoryHandle>;
   onMountPending?: (pending: MountPending) => void;
   hostfs?: HostfsGrantHook;
+  processMounts?: ProcessMountPolicy;
 }
 
 interface HostfsRequest {
@@ -188,6 +191,14 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
       worker.postMessage({ hostfsGrant: { id, error: (err as Error).message ?? String(err) } });
     }
   }
+  async function policy({ id, req }: { id: number; req: ProcessMountRequest }): Promise<void> {
+    const decide = options.processMounts;
+    let allowed = false;
+    try {
+      allowed = typeof decide === 'function' ? await decide(req) : decide !== false;
+    } catch {}
+    worker.postMessage({ mountAllowed: { id, allowed } });
+  }
   const pendingMedium = ({ target, source, handle }: PendingMedium) =>
     options.onMountPending?.({
       target,
@@ -200,9 +211,14 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     ({
       data,
     }: MessageEvent<
-      Reply | TransportCall | { medium: PendingMedium } | { hostfs: HostfsRequest }
+      | Reply
+      | TransportCall
+      | { medium: PendingMedium }
+      | { hostfs: HostfsRequest }
+      | { mountPolicy: { id: number; req: ProcessMountRequest } }
     >) => {
       if ('net' in data) return bridge?.answer(data);
+      if ('mountPolicy' in data) return void policy(data.mountPolicy);
       if ('medium' in data) return pendingMedium(data.medium);
       if ('hostfs' in data) return void grantHostfs(data.hostfs);
       const call = pending.get(data.id);
@@ -279,6 +295,12 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     ...(options.metadata !== undefined ? { metadata: options.metadata } : {}),
     ...(transport ? { transport: transport.traits } : {}),
     ...(options.hostfs ? { hostfs: true } : {}),
+    ...(options.processMounts !== undefined
+      ? {
+          processMounts:
+            typeof options.processMounts === 'function' ? 'ask' : options.processMounts,
+        }
+      : {}),
   });
 
   return {

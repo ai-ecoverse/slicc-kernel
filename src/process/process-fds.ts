@@ -455,6 +455,7 @@ export function mountTable(mounts: MountLine[] = []): string {
   const lines = [`${root} / ${root} rw 0 0`, 'devfs /dev devfs rw 0 0', 'proc /proc proc rw 0 0'];
   for (const m of mounts) {
     const options = Object.entries(m.options).map(([k, v]) => (v === '' ? k : `${k}=${v}`));
+    if (m.state !== 'ok') options.push(m.state);
     const access = options.includes('ro') ? [] : ['rw'];
     lines.push(
       `${field(m.source)} ${field(m.target)} ${m.type} ${[...access, ...options].join(',')} 0 0`

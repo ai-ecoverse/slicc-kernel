@@ -123,7 +123,7 @@ test('fsa: a drive with no medium fails with ENOMEDIUM and asks for a folder; on
     ),
     {
       status: 0,
-      stdout: `cat 1\n${mounted.source} /mnt/f fsa rw 0 0\n0 -\n`,
+      stdout: `cat 1\n${mounted.source} /mnt/f fsa rw,nomedium 0 0\n0 -\n`,
       stderr: 'cat: /mnt/f/a.txt: No medium found\n',
     }
   );
@@ -192,6 +192,67 @@ test('fsa: with no medium, a WASI program below the mount point gets ENODEV', as
   assert.equal(r.status, 2);
   assert.match(r.stderr, /No such device \(os error 43\)/);
   await page.evaluate(() => window.kernel.umount('/mnt/f'));
+  assert.deepEqual(page.errors, []);
+});
+
+test('mount(2) from a program: tmpfs, and fsa with no medium that git uses once a folder is inserted; plain mount lists both, umount -l detaches, and refusals carry their errno', async (t) => {
+  const { page, bash, run } = await booted(chrome, t);
+  await installPackage(page, 'wasm-git');
+  await bash('mkdir -p /mnt/t /mnt/f', { cwd: '/home' });
+  const mount = (...args) => run(['mounttest', 'mount', ...args], { cwd: '/home' });
+  const umount = (...args) => run(['mounttest', 'umount', ...args], { cwd: '/home' });
+  const ok = { status: 0, stdout: '', stderr: '' };
+  assert.deepEqual(await mount('none', '/mnt/t', 'tmpfs', '0', ''), ok);
+  assert.deepEqual(await mount('none', '/mnt/f', 'fsa', '0', ''), ok);
+  const [, drive] = await page.evaluate(() => window.kernel.mounts());
+  assert.equal(drive.state, 'nomedium');
+  assert.deepEqual(await page.evaluate(() => window.pendingMedia.map(({ target }) => target)), [
+    '/mnt/f',
+  ]);
+  assert.deepEqual(
+    await bash(
+      'echo kept > /mnt/t/a && cat /mnt/t/a && ls -A /mnt/f | wc -l; ls /mnt/f/x; tail -2 /proc/mounts',
+      { cwd: '/home' }
+    ),
+    {
+      status: 0,
+      stdout: `kept\n0\nnone /mnt/t tmpfs rw 0 0\n${drive.source} /mnt/f fsa rw,nomedium 0 0\n`,
+      stderr: "ls: cannot access '/mnt/f/x': No medium found\n",
+    }
+  );
+  await page.evaluate(() => window.insertPending(0));
+  assert.deepEqual(await bash(programs('/mnt/f'), { cwd: '/home' }), {
+    status: 0,
+    stdout: 'first\nmoved\na.txt\nc.txt\nd\n',
+    stderr: '',
+  });
+  assert.deepEqual(await umount('/mnt/t', '0'), ok);
+  assert.deepEqual(await umount('/mnt/f', '2'), ok);
+  assert.deepEqual(await page.evaluate(() => window.kernel.mounts()), []);
+  assert.deepEqual(await bash('ls -A /mnt/t /mnt/f', { cwd: '/home' }), {
+    status: 0,
+    stdout: '/mnt/f:\n\n/mnt/t:\n',
+    stderr: '',
+  });
+  const refused = async (args, text) =>
+    assert.deepEqual(await mount(...args), { status: 1, stdout: '', stderr: text });
+  await refused(['none', '/mnt/t', 'nosuchfs', '0', ''], 'mount /mnt/t: No such device (43)\n');
+  await refused(['none', '/proc', 'tmpfs', '0', ''], 'mount /proc: Resource busy (10)\n');
+  await refused(
+    ['none', '/mnt/t', 'tmpfs', '1', 'maxfile=xyz'],
+    'mount /mnt/t: Invalid argument (28)\n'
+  );
+  assert.deepEqual(page.errors, []);
+});
+
+test('mount(2) from a program: the page can forbid it', async (t) => {
+  const { page, run } = await booted(chrome, t, { processMounts: false });
+  const r = await run(['mounttest', 'mount', 'none', '/tmp', 'tmpfs', '0', '']);
+  assert.deepEqual(r, {
+    status: 1,
+    stdout: '',
+    stderr: 'mount /tmp: Operation not permitted (63)\n',
+  });
   assert.deepEqual(page.errors, []);
 });
 

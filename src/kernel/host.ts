@@ -1,3 +1,4 @@
+import { HeldPaths } from '../mount/mount-fs.ts';
 import { dispatchSyncFs } from '../realm/sync-fs-dispatch.ts';
 import {
   mintSyncFsToken,
@@ -23,7 +24,12 @@ import type { LockTable } from './host-ops.ts';
 import type { JobTable } from './jobs.ts';
 import type { HttpHandles } from './net/http-syscalls.ts';
 import type { MountLine, ProcessListing } from './proc-info.ts';
-import { isWasmSyscall, type StateListener, WasmProcess } from './process.ts';
+import {
+  isWasmSyscall,
+  type StateListener,
+  WasmProcess,
+  type WasmProcessOptions,
+} from './process.ts';
 import {
   type ForkState,
   type InheritedFd,
@@ -71,7 +77,9 @@ export interface SpawnWasmOptions {
   openFiles?: Set<VfsNodes>;
   statfs?: (path: string) => Promise<{ quota: number; usage: number } | undefined>;
   mounts?: () => MountLine[];
-  held?: Set<Map<string, number>>;
+  mount?: WasmProcessOptions['mount'];
+  umount?: WasmProcessOptions['umount'];
+  held?: Set<HeldPaths>;
   jobs?: JobTable;
   ptys?: PtyTable;
 
@@ -141,6 +149,8 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     processes: opts.processes,
     openFiles: opts.openFiles,
     mounts: opts.mounts,
+    ...(opts.mount ? { mount: opts.mount } : {}),
+    ...(opts.umount ? { umount: opts.umount } : {}),
     jobs: opts.jobs,
     ptys: opts.ptys,
     net: opts.net,
@@ -156,17 +166,15 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
       ? { pendingBits: () => Atomics.load(header, SAB_I_SIGNALS) }
       : {}),
   });
-  const holds = new Map<string, number>();
+  const holds = new HeldPaths();
   opts.held?.add(holds);
   const token = mintSyncFsToken({
     fs: opts.fs,
     cwd: opts.cwd,
     ...(opts.statfs ? { statfs: opts.statfs } : {}),
-    hold: (path, on) => {
-      const count = (holds.get(path) ?? 0) + (on ? 1 : -1);
-      if (count > 0) holds.set(path, count);
-      else holds.delete(path);
-    },
+    hold: (path, on) => holds.hold(path, on),
+    revoked: (path) => holds.isRevoked(path),
+    renamed: (from, to) => holds.renamed(from, to),
   });
   const worker = opts.createWorker();
   const dispatch = async (req: SyncSabDispatchRequest): Promise<SyncFsResult> => {

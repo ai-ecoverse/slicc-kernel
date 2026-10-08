@@ -37,6 +37,7 @@ const TRAPPED = 134;
 
 const PREVIEW1 = 'wasi_snapshot_preview1';
 const WASIX = 'wasix_32v1';
+const SLICC = 'slicc';
 
 const RESERVED = RESERVED_NAMESPACES;
 
@@ -110,13 +111,16 @@ function linkImports(
   memory: WebAssembly.Memory | undefined,
   threads: WasiThreads | undefined,
   program: ProgramImports = {},
-  foreign?: ForeignResults
+  foreign?: ForeignResults,
+  slicc: Record<string, WasiFunction> = {}
 ): WebAssembly.Imports {
   for (const ns of Object.keys(program)) {
-    if (RESERVED.has(ns)) throw new Error(`the imports module may not define ${ns}`);
+    if (RESERVED.has(ns) || ns === SLICC)
+      throw new Error(`the imports module may not define ${ns}`);
   }
   const imports: Record<string, Record<string, WebAssembly.ImportValue>> = {
     ...program,
+    [SLICC]: { ...slicc },
     [PREVIEW1]: preview1,
     ...(wasix ? { [WASIX]: { ...wasix } } : {}),
     ...(threads ? { wasi: { 'thread-spawn': (arg: number) => threads.spawn(arg) } } : {}),
@@ -290,7 +294,8 @@ async function instantiate(
     () => memory ?? (instance?.exports.memory as WebAssembly.Memory),
     () => instance
   );
-  const hostImports = linkImports(module, preview1, wasix, memory, threads, extra, foreign);
+  const slicc = traced(stats, 'slicc', host.sliccImports());
+  const hostImports = linkImports(module, preview1, wasix, memory, threads, extra, foreign, slicc);
   const imports: WebAssembly.Imports = sync
     ? merge(hostImports, sync.linker.mainImports(module))
     : hostImports;

@@ -66,9 +66,41 @@ export function heldUnder(held: Iterable<Map<string, number>>, target: string): 
   return false;
 }
 
+export class HeldPaths extends Map<string, number> {
+  private readonly revoked = new Set<string>();
+
+  hold(path: string, on: boolean): void {
+    const count = (this.get(path) ?? 0) + (on ? 1 : -1);
+    if (count > 0) this.set(path, count);
+    else {
+      this.delete(path);
+      this.revoked.delete(path);
+    }
+  }
+
+  revoke(prefix: string): void {
+    for (const path of this.keys()) if (within(path, prefix)) this.revoked.add(path);
+  }
+
+  renamed(from: string, to: string): void {
+    for (const [path, count] of [...this]) {
+      if (!within(path, from)) continue;
+      const moved = to + path.slice(from.length);
+      this.delete(path);
+      this.set(moved, (this.get(moved) ?? 0) + count);
+      if (this.revoked.delete(path)) this.revoked.add(moved);
+    }
+  }
+
+  isRevoked(path: string): boolean {
+    return this.revoked.has(path);
+  }
+}
+
 const parentOf = (path: string) => path.slice(0, path.lastIndexOf('/')) || '/';
 
-const readonly = (mount: Mount): boolean => mount.caps.readonly === true;
+const readonly = (mount: Mount): boolean =>
+  mount.caps.readonly === true || mount.options.ro !== undefined;
 
 function statOf(attr: DriverAttr, path: string, mount: Mount): FsStat {
   const mtime = new Date(attr.mtime);
@@ -108,6 +140,10 @@ export class MountTable {
 
   constructor(deps: MountDeps) {
     this.deps = deps;
+  }
+
+  mounted(target: string): MountEntry | undefined {
+    return this.mounts.get(target);
   }
 
   list(): MountEntry[] {
@@ -151,6 +187,7 @@ export class MountTable {
     const st = await fs.stat(target);
     if (!st.isDirectory) throw errnoError('ENOTDIR', target);
     const options = { ...spec.options };
+    const maxFile = options.maxfile !== undefined ? parseSize(options.maxfile) : undefined;
     const opened = await this.deps.open(spec.type, { ...spec, target, options });
     let mounted: Mount | undefined;
     const started = Promise.withResolvers<never>();
@@ -191,7 +228,7 @@ export class MountTable {
       dev: 256 + ++this.devices,
       conn,
       caps,
-      maxFile: options.maxfile !== undefined ? parseSize(options.maxfile) : (caps.maxFile ?? 0),
+      maxFile: maxFile ?? caps.maxFile ?? 0,
       attrs: new Map(),
       lists: new Map(),
       dispose: () => opened.dispose(),
@@ -202,11 +239,11 @@ export class MountTable {
     return this.list().find((m) => m.target === target) as MountEntry;
   }
 
-  umount(target: string): void {
+  umount(target: string, detach = false): void {
     const at = normalizePath(target);
     const mount = this.mounts.get(at);
     if (!mount) throw errnoError('EINVAL', `${at} is not mounted`);
-    if (this.deps.busy(at)) throw errnoError('EBUSY', `${at} has open files`);
+    if (!detach && this.deps.busy(at)) throw errnoError('EBUSY', `${at} has open files`);
     this.mounts.delete(at);
     mount.conn.close();
     mount.dispose();

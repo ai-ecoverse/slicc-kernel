@@ -60,6 +60,8 @@ export class VfsNode {
 
   private missing = false;
 
+  private revoked = false;
+
   private readonly fs: VfsFileFs;
 
   path: string;
@@ -94,7 +96,15 @@ export class VfsNode {
     return next;
   }
 
+  revoke(): void {
+    this.revoked = true;
+    clearTimeout(this.writeBack);
+    this.writeBack = undefined;
+    this.data = undefined;
+  }
+
   async load(): Promise<Uint8Array> {
+    if (this.revoked) throw new KernelError('EIO');
     if (!this.data) {
       try {
         this.data = await this.fs.readFileBuffer(this.path);
@@ -171,6 +181,7 @@ export class VfsNode {
   }
 
   async flush(): Promise<void> {
+    if (this.revoked && this.dirty) throw new KernelError('EIO');
     if (!this.dirty || !this.data || this.orphaned) return;
     this.dirty = false;
     const started = performance.now();
@@ -232,6 +243,14 @@ export class VfsNodes {
   async unlinking(path: string): Promise<void> {
     const node = this.byPath.get(path);
     if (node) await node.serial(() => node.load());
+  }
+
+  revoke(prefix: string): void {
+    for (const [path, node] of this.byPath) {
+      if (!within(path, prefix)) continue;
+      node.revoke();
+      this.byPath.delete(path);
+    }
   }
 
   unlinked(path: string): void {
