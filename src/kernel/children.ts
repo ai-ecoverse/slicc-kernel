@@ -27,6 +27,8 @@ export interface ChildSpawnRequest {
   argv: string[];
   env: Record<string, string>;
   cwd: string;
+
+  exec?: boolean;
 }
 
 export interface ChildHandle {

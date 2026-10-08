@@ -72,6 +72,8 @@ export interface SpawnWasmOptions {
   forker?: ChildForker;
   fork?: ForkState;
   ppid?: number;
+
+  shownPid?: number;
   kill?: (pid: number, sig: number) => boolean | Promise<boolean>;
   processes?: () => ProcessListing;
   openFiles?: Set<VfsNodes>;
@@ -255,7 +257,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     });
     const tinit: WasmThreadInitMsg = {
       type: WASM_THREAD_INIT,
-      pid: opts.pid,
+      pid: opts.shownPid ?? opts.pid,
       program: opts.program,
       argv0: opts.argv0,
       args: opts.args,
@@ -270,7 +272,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
 
   const init: WasmProcessInitMsg = {
     type: WASM_PROCESS_INIT,
-    pid: opts.pid,
+    pid: opts.shownPid ?? opts.pid,
     program: opts.program,
     argv0: opts.argv0,
     args: opts.args,
