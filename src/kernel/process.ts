@@ -585,11 +585,16 @@ export class WasmProcess {
 
   private async openVfs(req: Extract<FdSyscall, { op: 'fd-open-vfs' }>): Promise<number> {
     await refuseReadonly(this.options.fs, req.path, req.flags, req);
-    if (req.exclusive) await this.nodes.createExclusive(req.path);
-    const fd = this.fds.install(this.openVfsFile(req), 3);
-    if (req.existing && !(await present(this.options.fs, req.path, true))) {
+    const fd = this.fds.install(heldFile(), 3);
+    try {
+      if (req.exclusive) await this.nodes.createExclusive(req.path);
+      this.fds.installAt(fd, this.openVfsFile(req));
+      if (req.existing && !(await present(this.options.fs, req.path, true))) {
+        throw new KernelError('ENOENT');
+      }
+    } catch (err) {
       await Promise.resolve(this.fds.close(fd));
-      throw new KernelError('ENOENT');
+      throw err;
     }
     return fd;
   }

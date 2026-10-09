@@ -34,8 +34,10 @@ export class JsKernel {
   private readonly transport: AsyncSabTransport;
   private readonly waitAsync: WaitAsyncLike | undefined;
   private readonly onError: (err: unknown) => void;
-  private readonly handlers = new Map<number, SignalHandler>();
+  private handlers = new Map<number, SignalHandler>();
   private ignored = 0;
+  private changing: Promise<unknown> = Promise.resolve();
+  pid = 0;
   private reported = { caught: 0, ignored: 0 };
   private watching = false;
 
@@ -90,7 +92,10 @@ export class JsKernel {
     const pending = Atomics.exchange(this.header, SAB_I_SIGNALS, 0);
     for (const sig of signalsIn(pending)) {
       const handler = this.handlers.get(sig);
-      if (!handler) continue;
+      if (!handler) {
+        if (!(this.ignored & sigbit(sig))) this.raise(sig);
+        continue;
+      }
       try {
         Promise.resolve(handler(sig)).catch(this.onError);
       } catch (err) {
@@ -119,20 +124,38 @@ export class JsKernel {
     while (Atomics.load(this.header, SAB_I_STOP) === 1) Atomics.wait(this.header, SAB_I_STOP, 1);
   }
 
-  async setHandler(sig: number, handler: SignalHandler | 'ignore' | 'default'): Promise<void> {
-    if (sig === SIG.KILL || sig === SIG.STOP) throw new JsCallError('EINVAL', 'signal');
-    this.handlers.delete(sig);
-    this.ignored &= ~sigbit(sig);
-    if (handler === 'ignore') this.ignored |= sigbit(sig);
-    else if (handler !== 'default') this.handlers.set(sig, handler);
-    await this.report(handler === 'default' ? sigbit(sig) : 0);
-    if (this.handlers.size > 0) void this.watch();
+  setHandler(sig: number, handler: SignalHandler | 'ignore' | 'default'): Promise<void> {
+    if (sig === SIG.KILL || sig === SIG.STOP) {
+      return Promise.reject(new JsCallError('EINVAL', 'signal'));
+    }
+    const run = this.changing.then(() => this.change(sig, handler));
+    this.changing = run.catch(() => undefined);
+    return run;
   }
 
-  private async report(defaults: number): Promise<void> {
+  private async change(sig: number, handler: SignalHandler | 'ignore' | 'default'): Promise<void> {
+    const handlers = new Map(this.handlers);
+    handlers.delete(sig);
+    let ignored = this.ignored & ~sigbit(sig);
+    if (handler === 'ignore') ignored |= sigbit(sig);
+    else if (handler !== 'default') handlers.set(sig, handler);
+    await this.report(handlers, ignored, handler === 'default' ? sigbit(sig) : 0);
+    this.handlers = handlers;
+    this.ignored = ignored;
+    if (handlers.size > 0) void this.watch();
+  }
+
+  private raise(sig: number): void {
+    this.call({ op: 'proc-kill', pid: this.pid, sig }).catch(this.onError);
+  }
+
+  private async report(
+    handlers: Map<number, SignalHandler>,
+    ignored: number,
+    defaults: number
+  ): Promise<void> {
     let caught = 0;
-    for (const sig of this.handlers.keys()) caught |= sigbit(sig);
-    const { ignored } = this;
+    for (const sig of handlers.keys()) caught |= sigbit(sig);
     const same = caught === this.reported.caught && ignored === this.reported.ignored;
     if (same && defaults === 0) return;
     this.reported = { caught, ignored };
