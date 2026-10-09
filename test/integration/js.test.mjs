@@ -136,7 +136,7 @@ test('a JS program gets WebCodecs in its process worker, and no network or stora
   );
 });
 
-test('on a terminal: isatty, ^C to a handler or by default, ^Z, then kill', async (t) => {
+test('on a terminal: isatty, ^C to a handler or by default, ^Z and fg, ^Z then kill', async (t) => {
   const { page } = await booted(chrome, t);
   await page.evaluate((a, o) => window.terminal(a, o), ['bash', '-i'], { cwd: '/home' });
   const screen = () => page.evaluate(() => window.screen.screen);
@@ -162,6 +162,11 @@ test('on a terminal: isatty, ^C to a handler or by default, ^Z, then kill', asyn
   await type('jstest wait\r', 'ready');
   await type('\u0003');
   await type('echo "rc $?"\r', 'rc 130');
+  await type('jstest count\r', 'jstest count');
+  await type('\u001a', 'Stopped');
+  await type('fg\r', 'jstest count');
+  await type('abcdefghij\r');
+  await type('\u0004', '11\r\n');
   await type('jstest wait\r', 'ready');
   await type('\u001a', 'Stopped');
   const stopped = (await screen()).length;
