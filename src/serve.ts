@@ -120,7 +120,12 @@ function dirsChannel(name: string | false): string | undefined {
 }
 
 function caDb(req: InitRequest): string | false {
-  return req.ca ?? (req.metadata ? `${req.metadata}-ca` : CA_DB);
+  const name = req.ca ?? (req.metadata ? `${req.metadata}-ca` : CA_DB);
+  const taken = [req.metadata ?? META_DB, req.media ?? `${req.metadata ?? META_DB}:media`];
+  if (name !== false && taken.includes(name)) {
+    throw new Error(`the CA cannot share the IndexedDB database ${name}`);
+  }
+  return name;
 }
 
 async function stores(
