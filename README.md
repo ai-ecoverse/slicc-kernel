@@ -82,7 +82,7 @@ Attaches to a kernel over a port from `kernel.connect()`, in any realm: a worker
 
 | Client | |
 |---|---|
-| `spawn(argv, { cwd, env, stdin, onStdout, onStderr })` | runs over pipes and resolves with `{ pid, pgid, exited, signal(name) }` once the process has started; output arrives in chunks, as bytes, and the kernel keeps no copy; every spawn leads its own process group, which `signal` (default `SIGTERM`) signals; a program that cannot start rejects with `code: 'ENOENT'` |
+| `spawn(argv, { cwd, env, stdin, pgid, onStdout, onStderr })` | runs over pipes and resolves with `{ pid, pgid, exited, signal(name) }` once the process has started; output arrives in chunks, as bytes, and the kernel keeps no copy; every spawn leads its own process group, which `signal` (default `SIGTERM`) signals, unless `pgid` names an existing group to join (protocol 1.3): the process then joins that group and that group's session, as `setpgid` would (a client has no session of its own: each of its spawns and terminals leads one, and `setpgid` cannot cross sessions), and `signal` signals the whole group. The group must have been started by this client (a spawn or a terminal it opened), even if its leader has exited; an unknown group rejects with `code: 'ESRCH'`, another session's with `code: 'EPERM'`, and against a 1.2 kernel the client rejects with `code: 'ENOSYS'` before sending anything, as an older kernel would ignore the option; a program that cannot start rejects with `code: 'ENOENT'` |
 | `run(argv, options?)` | `spawn` and wait: `{ pid, status, stdout, stderr }` as text, with `onStdout`/`onStderr` streaming text |
 | `openTerminal(argv, options?)` | a pty session, as `kernel.openTerminal` |
 | `ps()` | the kernel's processes: `{ pid, ppid, pgid, sid, argv, tty, started, state }`, `state` being `'S'` or `'Z'` |
@@ -93,7 +93,7 @@ Attaches to a kernel over a port from `kernel.connect()`, in any realm: a worker
 | `close({ kill })` | detaches: the client's processes keep running unless `kill` is set, which ends their process groups with `SIGKILL`; its terminals are hung up |
 | `closed` | resolves with the error that ended the client |
 
-When the kernel goes away (the page closed or reloaded, `terminate()`), pending calls and `exited` reject with `KernelGoneError`, and so do later calls. Each side holds a Web Lock and waits on the other's, since a `MessagePort` reports no close in browsers; in Node, the port's `close` event does the same. The first message is a handshake on the protocol version, `1.1` (`1.0` had no `watch`, which rejects with `code: 'ENOSYS'` on such a kernel): a client or kernel of another major version is refused with an error naming both.
+When the kernel goes away (the page closed or reloaded, `terminate()`), pending calls and `exited` reject with `KernelGoneError`, and so do later calls. Each side holds a Web Lock and waits on the other's, since a `MessagePort` reports no close in browsers; in Node, the port's `close` event does the same. The first message is a handshake on the protocol version, `1.3` (`1.0` had no `watch`, `1.1` no mounts and `1.2` no `spawn` into a group, which reject with `code: 'ENOSYS'` on such a kernel): a client or kernel of another major version is refused with an error naming both.
 
 ### Headless in Node, for tests
 
