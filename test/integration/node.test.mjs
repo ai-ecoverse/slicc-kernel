@@ -222,3 +222,19 @@ test('a command pnpm installs globally runs in the same shell, and is gone once 
   term.close();
   assert.equal(await term.exited, 129);
 });
+
+test('a WASI process killed by SIGKILL keeps the bytes it wrote but never fsynced', async () => {
+  const kernel = await createNodeKernel();
+  for (const pkg of ['wasm-bash', 'wasm-coreutils', 'wasix-python']) await install(kernel, pkg);
+  const program =
+    "f=open('/home/f','wb'); f.write(b'x'*3145728); print('wrote',flush=True); import time; time.sleep(600)";
+  const r = await kernel.run([
+    'bash',
+    '-c',
+    `python3 -c "${program}" > /tmp/out & P=$!; until [ -s /tmp/out ]; do sleep 0.1; done; ` +
+      'kill -KILL $P; wait $P; echo rc=$?',
+  ]);
+  assert.match(r.stdout, /^rc=137\n/);
+  assert.equal((await kernel.readFile('/home/f')).length, 3145728);
+  kernel.terminate();
+});
