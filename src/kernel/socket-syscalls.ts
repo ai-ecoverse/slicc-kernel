@@ -112,10 +112,15 @@ export async function socketSyscall(
       return ok();
     case 'sock-accept':
       return ok(await accept(proc, req.fd, req.nonblock));
-    case 'sock-connect':
-      socketAt(fds, req.fd).connect(req.addr);
-      if (req.nonblock) throw new KernelError('EINPROGRESS');
+    case 'sock-connect': {
+      const dialing = socketAt(fds, req.fd).connect(req.addr);
+      if (req.nonblock) {
+        dialing?.catch(() => undefined);
+        throw new KernelError('EINPROGRESS');
+      }
+      if (dialing !== undefined) await interruptible(dialing, proc.blocking());
       return ok();
+    }
     case 'sock-shutdown':
       socketAt(fds, req.fd).shutdown(req.how);
       return ok();
@@ -136,6 +141,13 @@ export async function socketSyscall(
       return ok(addresses);
     }
   }
+}
+function interruptible(dialing: Promise<void>, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(new KernelError('EINTR'));
+    signal.addEventListener('abort', abort, { once: true });
+    dialing.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
+  });
 }
 function unnamed(domain: SocketDomain): SockAddr {
   return domain === 'inet'
