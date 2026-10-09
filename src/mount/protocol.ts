@@ -4,6 +4,7 @@ export interface DriverCapabilities {
   readonly?: boolean;
   symlinks?: boolean;
   chmod?: boolean;
+  linkTimes?: boolean;
   ranges?: boolean;
   listingStats?: boolean;
   caseInsensitive?: boolean;

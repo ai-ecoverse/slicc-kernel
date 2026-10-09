@@ -1,4 +1,4 @@
-import { type FsStat, type KernelFs, rangedOps } from '../fs/types.ts';
+import { type FsStat, type KernelFs, lutimesOf, rangedOps } from '../fs/types.ts';
 import { resolveSyncFsToken, type SyncFsTokenEntry } from './sync-fs-token-registry.ts';
 import {
   type SyncFsRequest,
@@ -124,6 +124,9 @@ async function run(
       return done;
     case 'utimes':
       await fs.utimes(path, new Date(req.atimeMs ?? 0), new Date(req.mtimeMs ?? 0));
+      return done;
+    case 'lutimes':
+      await lutimesOf(fs, path, new Date(req.atimeMs ?? 0), new Date(req.mtimeMs ?? 0));
       return done;
     case 'pread':
     case 'pwrite':

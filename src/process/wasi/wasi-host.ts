@@ -337,7 +337,7 @@ export class WasiHost {
         void this.writeFilestat(out, this.pathFilestat(at(dirfd, p, l), lookup)),
       path_filestat_set_times: (
         dirfd: number,
-        _lookup: number,
+        lookup: number,
         p: number,
         l: number,
         atim: bigint,
@@ -346,7 +346,7 @@ export class WasiHost {
       ) => {
         const path = at(dirfd, p, l);
         fds.flushPath(path);
-        this.setTimes(path, atim, mtim, flags);
+        this.setTimes(path, atim, mtim, flags, (lookup & LOOKUP_SYMLINK_FOLLOW) !== 0);
       },
       path_create_directory: (dirfd: number, p: number, l: number) => {
         const path = at(dirfd, p, l);
@@ -624,16 +624,25 @@ export class WasiHost {
     return filestatOf(path, follow ? this.o.fs.stat(path) : this.o.fs.lstat(path));
   }
 
-  private setTimes(path: string, atim: bigint, mtim: bigint, flags: number): void {
+  private setTimes(path: string, atim: bigint, mtim: bigint, flags: number, follow = true): void {
     const now = Date.now();
-    let current: number | undefined;
-    const kept = (): number => (current ??= this.o.fs.stat(path).mtimeMs ?? now);
-    const pick = (set: number, setNow: number, value: bigint): number =>
-      flags & setNow ? now : flags & set ? Number(value / NS_PER_MS) : kept();
-    this.o.fs.utimes(
+    let current: SyncFsBridgeStat | undefined;
+    const statOf = follow ? this.o.fs.stat.bind(this.o.fs) : this.o.fs.lstat.bind(this.o.fs);
+    const kept = (field: 'atimeMs' | 'mtimeMs'): number => {
+      current ??= statOf(path);
+      return current[field] ?? current.mtimeMs ?? now;
+    };
+    const pick = (
+      set: number,
+      setNow: number,
+      value: bigint,
+      field: 'atimeMs' | 'mtimeMs'
+    ): number => (flags & setNow ? now : flags & set ? Number(value / NS_PER_MS) : kept(field));
+    (follow ? this.o.fs.utimes : this.o.fs.lutimes).call(
+      this.o.fs,
       path,
-      pick(FSTFLAGS.ATIM, FSTFLAGS.ATIM_NOW, atim),
-      pick(FSTFLAGS.MTIM, FSTFLAGS.MTIM_NOW, mtim)
+      pick(FSTFLAGS.ATIM, FSTFLAGS.ATIM_NOW, atim, 'atimeMs'),
+      pick(FSTFLAGS.MTIM, FSTFLAGS.MTIM_NOW, mtim, 'mtimeMs')
     );
   }
 

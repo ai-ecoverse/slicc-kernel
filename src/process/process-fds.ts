@@ -207,6 +207,51 @@ export function wrapCloexecSyscalls(
 }
 
 const EBADF = 8;
+const AT_SYMLINK_NOFOLLOW = 0x100;
+const EMSCRIPTEN_EPERM = 63;
+
+interface UtimeNode {
+  node_ops: {
+    setattr?(node: UtimeNode, attr: { atime: number | null; mtime: number | null }): void;
+  };
+}
+
+interface UtimeFs {
+  utime?(path: string, atime: number | null, mtime: number | null): void;
+  lookupPath?(path: string, opts: { follow: boolean }): { node: UtimeNode };
+  ErrnoError?: new (errno: number) => Error;
+}
+
+export function noFollowUtimes(
+  imports: WebAssembly.Imports,
+  fs: () => ProcessFs | undefined,
+  glue?: unknown
+): void {
+  for (const namespace of namespaces(imports)) {
+    const key = Object.keys(namespace).find(
+      (name) => (glue !== undefined && namespace[name] === glue) || name === '__syscall_utimensat'
+    );
+    const utimensat = key === undefined ? undefined : namespace[key];
+    if (key === undefined || typeof utimensat !== 'function') continue;
+    namespace[key] = (dirfd: number, path: number, times: number, flags: number) => {
+      const Fs = fs() as UtimeFs | undefined;
+      const { utime, lookupPath, ErrnoError } = Fs ?? {};
+      if (!Fs || !(flags & AT_SYMLINK_NOFOLLOW) || !utime || !lookupPath || !ErrnoError) {
+        return utimensat(dirfd, path, times, flags);
+      }
+      Fs.utime = (at, atime, mtime) => {
+        const { node } = lookupPath.call(Fs, at, { follow: false });
+        if (!node.node_ops.setattr) throw new ErrnoError(EMSCRIPTEN_EPERM);
+        node.node_ops.setattr(node, { atime, mtime });
+      };
+      try {
+        return utimensat(dirfd, path, times, flags);
+      } finally {
+        Fs.utime = utime;
+      }
+    };
+  }
+}
 
 type AsyncImport = ((...args: number[]) => unknown) & { isAsync?: boolean };
 

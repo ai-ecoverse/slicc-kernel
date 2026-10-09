@@ -83,8 +83,8 @@ interface LiveAttr {
 interface LiveSetAttr {
   mode?: number;
   size?: number;
-  atime?: number | Date;
-  mtime?: number | Date;
+  atime?: number | Date | null;
+  mtime?: number | Date | null;
   timestamp?: number;
 }
 
@@ -171,7 +171,7 @@ function modeFromStat(st: SyncFsBridgeStat): number {
   return type | ((st.mode ?? fallback) & PERM_MASK || fallback);
 }
 
-function toMs(v: number | Date | undefined): number | undefined {
+function toMs(v: number | Date | null | undefined): number | undefined {
   if (v === undefined || v === null) return undefined;
   return v instanceof Date ? v.getTime() : v;
 }
@@ -341,6 +341,22 @@ type LiveHelpers = ReturnType<typeof createHelpers>;
 function createNodeOps(h: LiveHelpers): LiveNodeOps {
   const { Fs, bridgeOf, call, metadataCall, makeNode, statOf, childPath, flushNode, truncate } = h;
   const { ensureLoaded } = h;
+  const setTimes = (node: LiveFsNode, path: string, atime: number, mtime: number): void => {
+    if (Fs.isLink(node.mode)) {
+      metadataCall(() => bridgeOf(node).lutimes(path, atime, mtime));
+      return;
+    }
+    flushNode(node);
+    metadataCall(() => bridgeOf(node).utimes(path, atime, mtime));
+  };
+  const timesOf = (node: LiveFsNode, attr: LiveSetAttr): [number, number] | undefined => {
+    const mtime = toMs(attr.mtime) ?? attr.timestamp;
+    const atime = toMs(attr.atime);
+    if (mtime !== undefined && attr.atime !== null) return [atime ?? mtime, mtime];
+    if (atime === undefined && mtime === undefined) return undefined;
+    const st = statOf(node);
+    return [atime ?? st.atimeMs ?? st.mtimeMs ?? 0, mtime ?? st.mtimeMs ?? 0];
+  };
   return {
     getattr(node) {
       const st = statOf(node);
@@ -382,12 +398,8 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
       if (attr.size !== undefined && attr.size !== null && Fs.isFile(node.mode)) {
         truncate(node, attr.size);
       }
-      const mtime = toMs(attr.mtime) ?? attr.timestamp;
-      if (mtime !== undefined) {
-        const atime = toMs(attr.atime) ?? mtime;
-        flushNode(node);
-        metadataCall(() => bridgeOf(node).utimes(path, atime, mtime));
-      }
+      const times = timesOf(node, attr);
+      if (times) setTimes(node, path, ...times);
       node.live.stat = undefined;
     },
     lookup(parent, name) {

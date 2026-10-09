@@ -1,4 +1,4 @@
-import { type FsStat, inodeOf, type KernelFs, normalizePath } from '../fs/types.ts';
+import { type FsStat, inodeOf, type KernelFs, lutimesOf, normalizePath } from '../fs/types.ts';
 import { DriverConnection, type DriverPortLike, errnoError } from './connection.ts';
 import type { DriverAttr, DriverCapabilities, DriverEntry, DriverStatfs } from './protocol.ts';
 
@@ -742,10 +742,25 @@ class MountFs implements KernelFs {
   }
 
   async utimes(path: string, atime: Date, mtime: Date): Promise<void> {
+    const real = await this.follow(path);
+    const found = this.at(real);
+    if (!found) return this.base.utimes(real, atime, mtime);
+    await this.setMtime(found, real, mtime);
+  }
+
+  async lutimes(path: string, atime: Date, mtime: Date): Promise<void> {
     const found = this.at(path);
-    if (!found) return this.base.utimes(path, atime, mtime);
-    this.writable(found.mount, normalizePath(path));
-    this.table.forget(found.mount, normalizePath(path));
+    if (!found) return lutimesOf(this.base, path, atime, mtime);
+    const real = normalizePath(path);
+    if (!found.mount.caps.linkTimes && (await this.lstat(real)).isSymbolicLink) {
+      throw errnoError('EOPNOTSUPP', path);
+    }
+    await this.setMtime(found, real, mtime);
+  }
+
+  private async setMtime(found: Located, real: string, mtime: Date): Promise<void> {
+    this.writable(found.mount, real);
+    this.table.forget(found.mount, real);
     await found.mount.conn.call({ op: 'setattr', path: found.rel, mtime: mtime.getTime() });
   }
 }

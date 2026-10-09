@@ -1,4 +1,4 @@
-import { type FsStat, inodeOf, type KernelFs, rangedOps } from './types.ts';
+import { type FsStat, inodeOf, type KernelFs, lutimesOf, rangedOps } from './types.ts';
 
 const S_IFDIR = 0o040000;
 const S_IFREG = 0o100000;
@@ -116,6 +116,7 @@ export function withCommandDirs(fs: KernelFs, names: () => Promise<ReadonlySet<s
     readlink: (path) => fs.readlink(path),
     chmod: (path, mode) => fs.chmod(path, mode),
     utimes: (path, atime, mtime) => fs.utimes(path, atime, mtime),
+    lutimes: (path, atime, mtime) => lutimesOf(fs, path, atime, mtime),
     ...(rangedOps(fs) ?? {}),
   };
 }
