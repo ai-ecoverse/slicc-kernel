@@ -1,4 +1,8 @@
-import { KernelError, type KernelFile, type PollState } from './fd-table.ts';
+import { wasiErrno } from '../process/wasi-errno.ts';
+import { type KernelErrno, KernelError, type KernelFile, type PollState } from './fd-table.ts';
+import type { NetworkLabel, Routes } from './net/routes.ts';
+import type { NetworkUplink } from './net/uplink.ts';
+import { hostPort, uplinkLink } from './net/uplink-socket.ts';
 import { KernelPipe, PIPE_CAPACITY, PipeError } from './pipe.ts';
 export type SockAddr =
   | {
@@ -27,6 +31,25 @@ const AF_INET = 2;
 export const SHUT_RD = 0;
 export const SHUT_WR = 1;
 export const SHUT_RDWR = 2;
+export const DIAL_TIMEOUT_MS = 30_000;
+const DIAL_ERRORS: readonly KernelErrno[] = [
+  'ECONNREFUSED',
+  'ENETUNREACH',
+  'EHOSTUNREACH',
+  'ETIMEDOUT',
+  'ECONNRESET',
+];
+export interface UplinkRoute {
+  uplink: NetworkUplink;
+  routes: Routes;
+  timeoutMs?: number;
+}
+function dialError(e: unknown, timedOut: boolean): KernelError {
+  if (timedOut) return new KernelError('ETIMEDOUT');
+  const code = (e as { code?: unknown } | null)?.code;
+  const known = DIAL_ERRORS.find((errno) => errno === code);
+  return new KernelError(known ?? 'EHOSTUNREACH');
+}
 function isLoopback(host: string): boolean {
   return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
 }
@@ -78,7 +101,10 @@ function link(a: KernelSocket, b: KernelSocket): void {
 export class KernelSocket implements KernelFile {
   private readonly net: LoopbackNet;
   readonly domain: SocketDomain;
-  private state: 'open' | 'listening' | 'connected' | 'closed' = 'open';
+  private state: 'open' | 'connecting' | 'listening' | 'connected' | 'closed' = 'open';
+  label: NetworkLabel = 'default';
+  private dialing: AbortController | undefined;
+  private failed: string | undefined;
   local: SockAddr | undefined;
   peer: SockAddr | undefined;
   private link: Link | undefined;
@@ -124,6 +150,8 @@ export class KernelSocket implements KernelFile {
     if (this.state === 'listening') {
       return { readable: this.queue.length > 0, writable: false, hangup: false };
     }
+    if (this.state === 'connecting') return { readable: false, writable: false, hangup: false };
+    if (this.failed) return { readable: true, writable: true, hangup: true };
     if (this.state !== 'connected' || !this.link) {
       return { readable: false, writable: false, hangup: true };
     }
@@ -172,10 +200,13 @@ export class KernelSocket implements KernelFile {
     this.changes.wake();
     return true;
   }
-  connect(addr: SockAddr): void {
+  connect(addr: SockAddr): Promise<void> | undefined {
     if (this.state === 'connected') throw new KernelError('EISCONN');
+    if (this.state === 'connecting') throw new KernelError('EALREADY');
     if (this.state !== 'open') throw new KernelError('EINVAL');
     if (addr.family !== this.domain) throw new KernelError('EAFNOSUPPORT');
+    const route = addr.family === 'inet' ? this.net.uplinkFor(addr.host, this.label) : undefined;
+    if (route) return this.dial(addr as Extract<SockAddr, { family: 'inet' }>, route);
     const target = this.net.target(addr);
     if (!this.local) {
       if (addr.family === 'inet') {
@@ -193,6 +224,44 @@ export class KernelSocket implements KernelFile {
       server.close();
       throw new KernelError('ECONNREFUSED');
     }
+    return undefined;
+  }
+  private dial(addr: Extract<SockAddr, { family: 'inet' }>, route: UplinkRoute): Promise<void> {
+    this.state = 'connecting';
+    this.failed = undefined;
+    const abort = new AbortController();
+    this.dialing = abort;
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      abort.abort(new KernelError('ETIMEDOUT'));
+    }, route.timeoutMs ?? DIAL_TIMEOUT_MS);
+    const { host, port } = addr;
+    return route.uplink
+      .dial({ network: 'tcp', host, port, signal: abort.signal })
+      .then(
+        (conn) => {
+          if (this.dialing !== abort) {
+            conn.close();
+            throw new KernelError('ECONNABORTED');
+          }
+          this.local = { family: 'inet', host: '0.0.0.0', port: 0, ...hostPort(conn.localAddr) };
+          this.peer = { ...addr, ...hostPort(conn.remoteAddr) };
+          this.dialing = undefined;
+          this.attach(uplinkLink(conn));
+        },
+        (e: unknown) => {
+          const error = dialError(e, timedOut);
+          if (this.dialing === abort) {
+            this.dialing = undefined;
+            this.failed = error.code;
+            this.state = 'open';
+            this.changes.wake();
+          }
+          throw error;
+        }
+      )
+      .finally(() => clearTimeout(timer));
   }
   private unlink(): void {
     const link = this.link;
@@ -222,8 +291,11 @@ export class KernelSocket implements KernelFile {
       switch (name) {
         case SO_TYPE:
           return SOCK_STREAM;
-        case SO_ERROR:
-          return 0;
+        case SO_ERROR: {
+          const failed = this.failed;
+          this.failed = undefined;
+          return failed ? wasiErrno(failed) : 0;
+        }
         case SO_ACCEPTCONN:
           return this.state === 'listening' ? 1 : 0;
         case SO_DOMAIN:
@@ -241,6 +313,8 @@ export class KernelSocket implements KernelFile {
   close(): void {
     const was = this.state;
     this.state = 'closed';
+    this.dialing?.abort(new KernelError('ECONNABORTED'));
+    this.dialing = undefined;
     if (was === 'listening') {
       for (const pending of this.queue.splice(0)) pending.close();
     }
@@ -277,6 +351,15 @@ export class LoopbackNet {
   private readonly activators = new Map<string, () => void>();
   private readonly internal = new Set<number>();
   private nextEphemeral = EPHEMERAL_FIRST;
+  private route: UplinkRoute | undefined;
+  useUplink(route: UplinkRoute): void {
+    this.route = route;
+  }
+  uplinkFor(host: string, label: NetworkLabel): UplinkRoute | undefined {
+    const route = this.route;
+    if (!route || label !== 'uplink') return undefined;
+    return route.routes.classify(host) === 'uplink' ? route : undefined;
+  }
   kernelOnly(port: number, reserve = false): boolean {
     if (reserve) this.internal.add(port);
     return this.internal.has(port);
@@ -295,7 +378,7 @@ export class LoopbackNet {
   }
   connect(addr: SockAddr): KernelSocket {
     const socket = this.socket(addr.family);
-    socket.connect(addr);
+    void socket.connect(addr);
     return socket;
   }
   bind(socket: KernelSocket, addr: SockAddr): SockAddr {

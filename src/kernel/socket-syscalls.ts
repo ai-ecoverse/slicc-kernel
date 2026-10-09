@@ -1,5 +1,6 @@
 import type { SyncFsResult } from '../realm/sync-fs-wire.ts';
 import { type FdTable, KernelError, OpenFile, pollFile } from './fd-table.ts';
+import type { NetworkLabel } from './net/routes.ts';
 import type { ResolveFamily } from './net/uplink.ts';
 import { KernelSocket, type LoopbackNet, type SockAddr, type SocketDomain } from './socket.ts';
 export type SocketSyscall =
@@ -78,6 +79,7 @@ export interface SocketProcess {
   net: LoopbackNet;
   blocking(): AbortSignal;
   resolve(name: string, family: ResolveFamily, blocking: () => AbortSignal): Promise<string[]>;
+  network?: NetworkLabel;
 }
 function socketAt(fds: FdTable, fd: number): KernelSocket {
   const file = fds.get(fd).file;
@@ -92,8 +94,11 @@ export async function socketSyscall(
 ): Promise<SyncFsResult> {
   const { fds, net } = proc;
   switch (req.op) {
-    case 'sock-open':
-      return ok(fds.install(new OpenFile(net.socket(req.domain)), 3));
+    case 'sock-open': {
+      const socket = net.socket(req.domain);
+      socket.label = proc.network ?? 'default';
+      return ok(fds.install(new OpenFile(socket), 3));
+    }
     case 'sock-pair': {
       const [a, b] = KernelSocket.pair(net, req.domain);
       const first = fds.install(new OpenFile(a), 3);
@@ -112,10 +117,15 @@ export async function socketSyscall(
       return ok();
     case 'sock-accept':
       return ok(await accept(proc, req.fd, req.nonblock));
-    case 'sock-connect':
-      socketAt(fds, req.fd).connect(req.addr);
-      if (req.nonblock) throw new KernelError('EINPROGRESS');
+    case 'sock-connect': {
+      const dialing = socketAt(fds, req.fd).connect(req.addr);
+      if (req.nonblock) {
+        dialing?.catch(() => undefined);
+        throw new KernelError('EINPROGRESS');
+      }
+      if (dialing !== undefined) await interruptible(dialing, proc.blocking());
       return ok();
+    }
     case 'sock-shutdown':
       socketAt(fds, req.fd).shutdown(req.how);
       return ok();
@@ -136,6 +146,13 @@ export async function socketSyscall(
       return ok(addresses);
     }
   }
+}
+function interruptible(dialing: Promise<void>, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(new KernelError('EINTR'));
+    signal.addEventListener('abort', abort, { once: true });
+    dialing.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
+  });
 }
 function unnamed(domain: SocketDomain): SockAddr {
   return domain === 'inet'

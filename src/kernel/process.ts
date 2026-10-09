@@ -811,6 +811,7 @@ export class WasmProcess {
       net: this.net,
       blocking: () => this.blockingSignal(),
       resolve: (name, family, blocking) => resolver.resolve(name, family, network, blocking),
+      network,
     });
   }
 
