@@ -389,6 +389,7 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
       }
       const path = liveNodePath(node);
       if (attr.mode !== undefined && attr.mode !== null) {
+        if (Fs.isLink(node.mode)) throw new Fs.ErrnoError(wasiErrno('EOPNOTSUPP'));
         const perm = attr.mode & PERM_MASK;
         if (perm !== (node.mode & PERM_MASK)) {
           metadataCall(() => bridgeOf(node).chmod(path, perm));

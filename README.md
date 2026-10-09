@@ -410,7 +410,7 @@ OPFS stores names, bytes, sizes and modification times, nothing else. Everything
 - mode bits (`chmod`);
 - access and change times, and a modification time set explicitly with `utime` (it holds until the file is written again);
 - inode numbers that stay stable across renames;
-- symbolic links (`symlink`, `readlink`, `lstat`, and following them in paths), which exist only in the sidecar, with their own times: `touch -h`, `lutimes` and `utimensat` with `AT_SYMLINK_NOFOLLOW` set the link's, never the target's.
+- symbolic links (`symlink`, `readlink`, `lstat`, and following them in paths), which exist only in the sidecar, with their own times: `touch -h`, `lutimes` and `utimensat` with `AT_SYMLINK_NOFOLLOW` set the link's, never the target's. A link's own mode can't be changed, as on Linux: `chmod -h`, `lchmod` and `fchmodat` with `AT_SYMLINK_NOFOLLOW` fail with `EOPNOTSUPP` (which `chmod -h` and `tar` ignore for links) and never follow it, and `open` with `O_PATH | O_NOFOLLOW` gives a descriptor for the link itself.
 
 OPFS stays authoritative: an entry is consulted only for a path that exists in OPFS (symlinks only for paths that don't), so files written straight to OPFS, for example by the BIOS installer or a page, get the defaults: directories `0755`, files `0644`, and files under `node_modules/*/bin/` `0755`. A file deleted through the OPFS API disappears at once; its leftover entry is ignored and removed when the next kernel starts. Changes go to OPFS first and then to the sidecar, so a crash in between at worst loses the metadata of that one change. Each change is a read-modify-write inside one IndexedDB transaction, so two kernels (two tabs) on the same origin don't lose each other's updates.
 
