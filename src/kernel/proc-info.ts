@@ -16,7 +16,7 @@ export interface MountLine {
   source: string;
   target: string;
   options: Record<string, string>;
-  state: 'ok' | 'failed' | 'nomedium';
+  state: 'ok' | 'failed' | 'nomedium' | 'pending';
 }
 
 export interface ProcessListing {
