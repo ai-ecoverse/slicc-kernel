@@ -270,15 +270,15 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
     const bridge = bridgeOf(node);
     const path = () => liveNodePath(node);
     const io = {
-      pread: (_: string, at: number, n: number) =>
-        (bridge.pread as NonNullable<typeof bridge.pread>)(path(), at, n),
+      pread: (_: string, at: number, n: number, version?: string) =>
+        (bridge.pread as NonNullable<typeof bridge.pread>)(path(), at, n, version),
       pwrite: (_: string, at: number, bytes: Uint8Array, transfer?: boolean) =>
         (bridge.pwrite as NonNullable<typeof bridge.pwrite>)(path(), at, bytes, transfer),
       truncate: (_: string, size: number) =>
         (bridge.truncate as NonNullable<typeof bridge.truncate>)(path(), size),
     };
     const st = call(() => bridge.stat(path()));
-    s.ranged = new RangedFile(io, path(), st.size);
+    s.ranged = new RangedFile(io, path(), st.size, st.version);
     return s.ranged;
   }
 

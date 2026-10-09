@@ -120,6 +120,7 @@ function statOf(attr: DriverAttr, path: string, mount: Mount): FsStat {
     ...(readonly(mount) ? { readonly: true } : {}),
     ...(mount.maxFile > 0 ? { maxFile: mount.maxFile } : {}),
     ...(mount.caps.ranges ? { ranged: true } : {}),
+    ...(attr.etag !== undefined ? { version: attr.etag } : {}),
   };
 }
 
@@ -490,7 +491,7 @@ class MountFs implements KernelFs {
     }
   }
 
-  async pread(path: string, offset: number, length: number): Promise<Uint8Array> {
+  async pread(path: string, offset: number, length: number, version?: string): Promise<Uint8Array> {
     const real = await this.follow(path);
     const found = this.at(real);
     if (!found && this.base.pread) return this.base.pread(real, offset, length);
@@ -499,7 +500,15 @@ class MountFs implements KernelFs {
     if ((await this.table.getattr(mount, real, rel)).kind === 'directory') {
       throw errnoError('EISDIR', real);
     }
-    const fh = await this.open(mount, rel, false);
+    const fh = (await mount.conn.call({
+      op: 'open',
+      path: rel,
+      write: false,
+      create: false,
+      truncate: false,
+      exclusive: false,
+      ...(version !== undefined ? { ifMatch: version } : {}),
+    })) as number;
     const chunk = mount.caps.maxIo ?? DEFAULT_IO;
     const chunks: Uint8Array[] = [];
     let total = 0;

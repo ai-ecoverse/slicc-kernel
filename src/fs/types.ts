@@ -12,6 +12,7 @@ export interface FsStat {
   readonly?: boolean;
   maxFile?: number;
   ranged?: boolean;
+  version?: string;
 }
 
 export interface KernelFs {
@@ -31,7 +32,7 @@ export interface KernelFs {
   readlink(path: string): Promise<string>;
   chmod(path: string, mode: number): Promise<void>;
   utimes(path: string, atime: Date, mtime: Date): Promise<void>;
-  pread?(path: string, offset: number, length: number): Promise<Uint8Array>;
+  pread?(path: string, offset: number, length: number, version?: string): Promise<Uint8Array>;
   pwrite?(path: string, offset: number, bytes: Uint8Array, transfer?: boolean): Promise<void>;
   truncate?(path: string, size: number): Promise<void>;
 }

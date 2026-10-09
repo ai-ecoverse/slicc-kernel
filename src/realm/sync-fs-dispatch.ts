@@ -30,6 +30,7 @@ export interface SyncFsStatJson {
   readonly?: boolean;
   maxFile?: number;
   ranged?: boolean;
+  version?: string;
 }
 
 function statJson(s: FsStat): SyncFsStatJson {
@@ -47,6 +48,7 @@ function statJson(s: FsStat): SyncFsStatJson {
     ...(s.readonly ? { readonly: true } : {}),
     ...(s.maxFile ? { maxFile: s.maxFile } : {}),
     ...(s.ranged ? { ranged: true } : {}),
+    ...(s.version !== undefined ? { version: s.version } : {}),
   };
 }
 
@@ -137,7 +139,11 @@ async function ranged(fs: KernelFs, path: string, req: SyncFsRequest): Promise<S
   if (!ops) throw syncError('ENOSYS', path);
   const offset = req.offset ?? 0;
   if (req.op === 'pread')
-    return { ok: true, kind: 'bytes', bytes: await ops.pread(path, offset, req.length ?? 0) };
+    return {
+      ok: true,
+      kind: 'bytes',
+      bytes: await ops.pread(path, offset, req.length ?? 0, req.version),
+    };
   if (req.op === 'pwrite') await ops.pwrite(path, offset, req.body ?? new Uint8Array(0), true);
   else await ops.truncate(path, req.length ?? 0);
   return done;

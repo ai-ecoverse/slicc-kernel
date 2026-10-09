@@ -32,6 +32,7 @@ export interface SyncFsRequest {
   mtimeMs?: number;
   offset?: number;
   length?: number;
+  version?: string;
 }
 
 export type SyncFsResult =
@@ -56,6 +57,7 @@ export interface SyncFsBridgeStat {
   readonly?: boolean;
   maxFile?: number;
   ranged?: boolean;
+  version?: string;
 }
 
 export interface SyncFsUsage {
@@ -88,7 +90,7 @@ export interface SyncFsPosixBridge {
   hold?(path: string, held: boolean): void;
   readdirStat(path: string): Array<[string, SyncFsBridgeStat | null]>;
   statfs?(path?: string): SyncFsUsage | null;
-  pread?(path: string, offset: number, length: number): Uint8Array;
+  pread?(path: string, offset: number, length: number, version?: string): Uint8Array;
   pwrite?(path: string, offset: number, bytes: Uint8Array, transfer?: boolean): void;
   truncate?(path: string, size: number): void;
 }
@@ -121,5 +123,6 @@ export function parseSyncFsStat(json: unknown): SyncFsBridgeStat | null {
     ...(s.readonly === true ? { readonly: true } : {}),
     ...(typeof s.maxFile === 'number' ? { maxFile: s.maxFile } : {}),
     ...(s.ranged === true ? { ranged: true } : {}),
+    ...(typeof s.version === 'string' ? { version: s.version } : {}),
   };
 }

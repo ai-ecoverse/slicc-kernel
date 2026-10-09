@@ -23,6 +23,7 @@ export interface OpenFlags {
   create: boolean;
   truncate: boolean;
   exclusive: boolean;
+  ifMatch?: string;
 }
 
 export interface FilesystemHandlers {
@@ -71,6 +72,7 @@ async function dispatch(h: FilesystemHandlers, req: DriverRequest): Promise<unkn
         create: req.create,
         truncate: req.truncate,
         exclusive: req.exclusive,
+        ...(req.ifMatch !== undefined ? { ifMatch: req.ifMatch } : {}),
       });
     case 'read':
       return h.read(req.fh, req.offset, req.size);

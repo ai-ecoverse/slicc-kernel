@@ -187,8 +187,9 @@ export function hostfsHandlers(current: () => HostfsClient): MediumHandlers {
   };
   const call = <T>(op: string, body: Record<string, unknown> = {}) => current().call<T>(op, body);
   async function writable(client: HostfsClient, path: string, flags: OpenFlags) {
+    const { ifMatch: _, ...asked } = flags;
     const opening = () =>
-      client.call<{ fh: number; attr?: DriverAttr }>('open', { path: rel(path), ...flags });
+      client.call<{ fh: number; attr?: DriverAttr }>('open', { path: rel(path), ...asked });
     try {
       return { opened: await opening(), restore: undefined };
     } catch (err) {
@@ -217,6 +218,10 @@ export function hostfsHandlers(current: () => HostfsClient): MediumHandlers {
       const client = current();
       const token = client.token;
       const { opened, restore } = await writable(client, path, flags);
+      if (flags.ifMatch !== undefined && opened.attr?.etag !== flags.ifMatch) {
+        await client.call('release', { fh: opened.fh }, true);
+        throw fsError('ESTALE', `${path} changed on the host while it was being read`);
+      }
       handles.set(++nextFh, {
         client,
         token,
