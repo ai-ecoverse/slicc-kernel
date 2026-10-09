@@ -1,6 +1,6 @@
 import type { KernelFs } from '../../fs/types.ts';
 import type { LoopbackNet } from '../socket.ts';
-import { HOST_LOOPBACK, PAGE_LOOPBACK, PAGE_LOOPBACK_URL } from './loopback-names.ts';
+import { CDP_LOOPBACK, HOST_LOOPBACK, PAGE_LOOPBACK, PAGE_LOOPBACK_URL } from './loopback-names.ts';
 import { REALM_PROXY_PORT, RealmProxy } from './proxy-service.ts';
 import {
   type CaRecord,
@@ -23,7 +23,7 @@ export const CA_PATH = '/etc/ssl/certs/slicc-kernel-ca.pem';
 
 const PROXY_URL = `http://127.0.0.1:${REALM_PROXY_PORT}`;
 
-const NO_PROXY = 'localhost,.localhost,127.0.0.1,127.0.0.0/8';
+const NO_PROXY = `localhost,.localhost,127.0.0.1,127.0.0.0/8,${CDP_LOOPBACK}`;
 
 const CA_OWNER = 'slicc-kernel';
 

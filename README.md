@@ -183,7 +183,12 @@ await kernel.run(['curl', '-sS', 'https://registry.npmjs.org/@ai-ecoverse/wasm-b
 
 Programs drive a browser with the Chrome DevTools Protocol over a WebSocket, whichever host actually has the browser: slicc-extension's `chrome.debugger`, slicc-node's or slicc-swift's CDP proxy, or a test harness. The kernel relays; it does not launch a browser.
 
-- **Programs** find the endpoint in `SLICC_CDP_URL`, `ws://127.0.0.1:9222/devtools/browser/<id>`, where `<id>` is random for each kernel boot. `http://127.0.0.1:9222/json/version` answers `{ "Browser", "Protocol-Version", "webSocketDebuggerUrl" }` with the same URL (carrying the request's query), and `/json/list` (or `/json`) lists the host's targets, without per-target sockets. Every other path is `404`. The listener starts on the first connection, on the kernel's loopback; a program that binds `9222` first keeps it.
+- **Programs** find the facade in one of three ways, in this order:
+  1. `SLICC_CDP_URL`, `ws://127.0.0.1:9222/devtools/browser/<id>`, where `<id>` is random for each kernel boot. It uses the IP, so Emscripten programs, which do not read `/etc/hosts`, can use it too.
+  2. `cdp.slicc.internal`, which `/etc/hosts` and WASIX name resolution map to `127.0.0.1` (unlike `host.slicc.internal`, this is the kernel's own loopback), and which `no_proxy` covers: `http://cdp.slicc.internal:9222/json/version`.
+  3. Chrome's own default, `http://127.0.0.1:9222/json/version`.
+
+  `/json/version` answers `{ "Browser", "Protocol-Version", "webSocketDebuggerUrl" }` with the URL to open, carrying the request's `Host` and query, and `/json/list` (or `/json`) lists the host's targets, without per-target sockets. Every other path is `404`. The listener starts on the first connection, on the kernel's loopback; a program that binds `9222` first keeps it.
 - **Sessions** are Chrome's flattened ones: `Target.attachToTarget` with `flatten: true`, then commands with a top-level `sessionId`. Messages pass unchanged, as text frames up to 256 MiB (a larger one closes the socket with `1009`). Each program WebSocket gets a host connection of its own: closing the socket (or exiting) closes it, which detaches its sessions, and a host that closes is passed on as a close frame (`1011` with its reason). `terminate()` closes them all.
 - **Runtime**: a program adds `runtime=<name>` to the query of the URL it opens, and the kernel gives it to the host; the kernel does not interpret it.
 - **No host**: `/json/*` and the WebSocket handshake answer `503` with `slicc-kernel: no CDP host is attached (createKernel({ cdp }) or client.serveCdp)`, and a host that refuses (an unknown runtime, say) gives `502` with its message.
