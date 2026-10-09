@@ -606,7 +606,7 @@ export class Launcher {
     };
     const shown = (pid: number | undefined): number => {
       const member = pid === undefined ? undefined : members.get(pid);
-      return member ? rootOf(member).pid : (pid ?? INIT_PID);
+      return member ? rootOf(member).pid : INIT_PID;
     };
     const listed: ProcessInfo[] = [];
     for (const member of members.values()) {
