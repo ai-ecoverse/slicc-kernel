@@ -9,6 +9,8 @@ const SETUP_OPS = new Set([
 
 export const SETTLE_MS = 250;
 
+const KEY_SIGNALS = new Set([2, 3, 20]);
+
 interface Held {
   pgid: number;
   send: () => void;
@@ -52,8 +54,8 @@ export class SettlingChildren {
     for (const h of ready) h.send();
   }
 
-  deliver(pgid: number, send: () => void): void {
-    if (this.blocking(pgid)) this.held.push({ pgid, send });
+  deliver(sig: number, pgid: number, send: () => void): void {
+    if (KEY_SIGNALS.has(sig) && this.blocking(pgid)) this.held.push({ pgid, send });
     else send();
   }
 

@@ -303,7 +303,7 @@ export class Launcher {
   private readonly locks = new LockTable();
   private readonly settling = new SettlingChildren((pid) => this.jobs.pgidOf(pid));
   private readonly ptys = new PtyTable((tty, sig) =>
-    this.settling.deliver(this.jobs.tcgetpgrp(tty, 0), () =>
+    this.settling.deliver(sig, this.jobs.tcgetpgrp(tty, 0), () =>
       this.jobs.signalOwnedForeground(tty, sig)
     )
   );
@@ -965,7 +965,7 @@ export class Launcher {
     const tty: KernelTty = new KernelTty(
       { write: (bytes) => options.onData(bytes.slice()) },
       (sig) =>
-        this.settling.deliver(this.jobs.tcgetpgrp(tty, leader), () =>
+        this.settling.deliver(sig, this.jobs.tcgetpgrp(tty, leader), () =>
           this.jobs.signalForeground(tty, leader, sig)
         )
     );
