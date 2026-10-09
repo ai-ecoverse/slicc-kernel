@@ -110,6 +110,13 @@ function signalOf(host: ClientHost): (name: string) => number {
   );
 }
 
+function killGroups(host: ClientHost, pgids: number[]): void {
+  if (pgids.length === 0) return;
+  void host.launcher().then((launcher) => {
+    for (const pgid of pgids) launcher.kill(-pgid, SIG.KILL);
+  });
+}
+
 function joinable(l: Launcher, pgid: number, ours: (sid: number) => boolean): void {
   const sid = l.groupSession(pgid);
   if (sid === undefined) throw fsError('ESRCH', `no process group ${pgid}`);
@@ -120,6 +127,7 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
   let state: 'new' | 'open' | 'closed' = 'new';
   const terminals = new Map<number, TerminalSession>();
   const groups = new Set<number>();
+  const sessions = new Set<number>();
   const watches = new Map<number, () => void>();
   let net: TransportServer | undefined;
   const ended = Promise.withResolvers<void>();
@@ -138,13 +146,8 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
     watches.clear();
     for (const session of terminals.values()) session.close();
     terminals.clear();
-    const pids = [...groups];
+    if (kill) killGroups(host, [...groups]);
     groups.clear();
-    if (kill && pids.length > 0) {
-      void host.launcher().then((launcher) => {
-        for (const pid of pids) launcher.kill(-pid, SIG.KILL);
-      });
-    }
     port.close?.();
     ended.resolve();
   }
@@ -179,6 +182,7 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
       session.close();
     } else {
       terminals.set(req.id, session);
+      sessions.add(session.pid);
       reply(req.id, { started: session.pid });
     }
     try {
@@ -190,9 +194,7 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
 
   async function spawn(req: Extract<ClientRequest, { op: 'spawn' }>, l: Launcher) {
     const out = (fd: 1 | 2) => (bytes: Uint8Array) => reply(req.id, { fd, bytes: bytes.slice() });
-    const ours = (sid: number) =>
-      groups.has(sid) || [...terminals.values()].some((t) => t.pid === sid);
-    if (req.options.pgid !== undefined) joinable(l, req.options.pgid, ours);
+    if (req.options.pgid !== undefined) joinable(l, req.options.pgid, (sid) => sessions.has(sid));
     let leader: number | undefined;
     const result = await l.run(req.argv, {
       ...req.options,
@@ -202,7 +204,8 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
       onStarted: (pid) => {
         leader = pid;
         if (state === 'closed') return;
-        if (req.options.pgid === undefined) groups.add(pid);
+        groups.add(req.options.pgid ?? pid);
+        if (req.options.pgid === undefined) sessions.add(pid);
         reply(req.id, { started: pid });
       },
     });
