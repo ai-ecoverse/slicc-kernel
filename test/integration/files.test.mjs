@@ -41,6 +41,27 @@ test('a file of several megabytes is read, overwritten and truncated in place in
   assert.deepEqual(page.errors, []);
 });
 
+test('two kernels write one OPFS file at once without losing a block', async (t) => {
+  const { page } = await booted(chrome, t);
+  await page.evaluate(() => window.secondKernel({ metadata: false }));
+  const run = (kernel, script) =>
+    page.evaluate((k, s) => window[k].run(['bash', '-c', s]), kernel, script);
+  const blocks = (letter, first) =>
+    `for i in $(seq ${first} 2 31); do printf "%65536s" "" | tr " " ${letter} | dd of=/home/shared.bin bs=65536 seek=$i count=1 iflag=fullblock conv=notrunc 2>/dev/null || echo fail; done`;
+  assert.deepEqual(await run('kernel', 'truncate -s 2097152 /home/shared.bin'), ok());
+  const [a, b] = await Promise.all([run('kernel', blocks('A', 0)), run('second', blocks('B', 1))]);
+  assert.deepEqual([a, b], [ok(), ok()]);
+  assert.deepEqual(
+    await run(
+      'second',
+      'tr -cd A < /home/shared.bin | wc -c; tr -cd B < /home/shared.bin | wc -c; wc -c < /home/shared.bin'
+    ),
+    ok('1048576\n1048576\n2097152\n')
+  );
+  await page.evaluate(() => window.second.terminate());
+  assert.deepEqual(page.errors, []);
+});
+
 test('directories are created, renamed with their contents, and removed', async (t) => {
   const { bash, read, list, exists } = await booted(chrome, t);
 

@@ -81,10 +81,26 @@ type SyncCapable = FileSystemFileHandle & {
 
 const LOCKED = new Set(['NotReadableError', 'NoModificationAllowedError', 'InvalidStateError']);
 
-async function positioned(handle: FileSystemFileHandle, op: (io: Positioned) => unknown) {
+const SYNC_BACKOFF_MS = [5, 10, 20, 40, 80];
+
+async function openSync(handle: FileSystemFileHandle): Promise<SyncAccess | undefined> {
   const sync = (handle as SyncCapable).createSyncAccessHandle;
-  if (sync) {
-    const access = await sync.call(handle, { mode: 'readwrite-unsafe' });
+  if (!sync) return undefined;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await sync.call(handle, { mode: 'readwrite-unsafe' });
+    } catch (err) {
+      const delay = SYNC_BACKOFF_MS[attempt];
+      if (!LOCKED.has((err as { name?: unknown })?.name as string)) throw err;
+      if (delay === undefined) return undefined;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+}
+
+async function positioned(handle: FileSystemFileHandle, op: (io: Positioned) => unknown) {
+  const access = await openSync(handle);
+  if (access) {
     try {
       op({
         write: (at, bytes) => access.write(bytes, { at }),
