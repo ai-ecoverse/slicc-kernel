@@ -193,7 +193,7 @@ interface StartRequest {
   exec?: boolean;
   pgid?: number;
   ignored?: number;
-  decided?: Promise<void>;
+  decided?: Promise<boolean>;
 }
 
 const COMMAND = /^\/(?:usr\/)?bin\/([^/]+)$/;
@@ -319,7 +319,8 @@ export class Launcher {
   private readonly fstabRetries: readonly number[];
   private readonly inserted = new Map<string, MediumHandle>();
   private readonly openFiles = new Set<VfsNodes>();
-  private readonly deciding = new Map<number, Set<() => void>>();
+  private readonly deciding = new Map<number, Set<(byParent: boolean) => void>>();
+  readonly identities = { asked: 0, timedOut: 0 };
   private readonly nodes: VfsNodes;
   private readonly held = new Set<HeldPaths>();
   private readonly processMounts: ProcessMountPolicy;
@@ -553,11 +554,16 @@ export class Launcher {
     }
     const pid = this.nextPid++;
     const terminal = req.fds.stdioTerminal();
-    const decided = req.decided ?? Promise.resolve();
+    const decided = req.decided ?? Promise.resolve(true);
+    const count = (byParent: boolean) => {
+      this.identities.asked++;
+      if (!byParent) this.identities.timedOut++;
+    };
+    let asked: Promise<void> | undefined;
     const handle = spawnWasmProcess({
       pid,
       identity: async () => {
-        await decided;
+        await (asked ??= decided.then(count));
         return this.identityOf(pid);
       },
       onSyscall: () => this.decide(pid),
@@ -637,7 +643,8 @@ export class Launcher {
     };
     const shown = (pid: number | undefined): number => {
       const member = pid === undefined ? undefined : members.get(pid);
-      return member ? rootOf(member).pid : INIT_PID;
+      const root = member && rootOf(member).pid;
+      return root !== undefined && this.running(root) ? root : INIT_PID;
     };
     const listed: ProcessInfo[] = [];
     for (const member of members.values()) {
@@ -684,12 +691,12 @@ export class Launcher {
   }
 
   private undecided(ppid: number) {
-    const decided = Promise.withResolvers<void>();
-    const timer = setTimeout(decided.resolve, DECIDE_MS);
-    void decided.promise.then(() => clearTimeout(timer));
+    const decided = Promise.withResolvers<boolean>();
     return {
       promise: decided.promise,
       attach: () => {
+        const timer = setTimeout(() => decided.resolve(false), DECIDE_MS);
+        void decided.promise.then(() => clearTimeout(timer));
         const waiting = this.deciding.get(ppid) ?? new Set();
         waiting.add(decided.resolve);
         this.deciding.set(ppid, waiting);
@@ -699,8 +706,14 @@ export class Launcher {
 
   private identityOf(pid: number): { pid: number; ppid: number } {
     const parent = this.jobs.shownParent(pid);
-    const alive = parent !== undefined && this.jobs.has(parent);
+    const alive = parent !== undefined && this.running(parent);
     return { pid: this.jobs.shown(pid), ppid: alive ? parent : INIT_PID };
+  }
+
+  private running(shown: number): boolean {
+    return this.jobs
+      .list()
+      .some((member) => !this.zombies.has(member.pid) && this.jobs.shown(member.pid) === shown);
   }
 
   private decide(ppid: number): void {
@@ -708,7 +721,7 @@ export class Launcher {
     if (!waiting) return;
     this.deciding.delete(ppid);
     setTimeout(() => {
-      for (const resolve of waiting) resolve();
+      for (const resolve of waiting) resolve(true);
     }, 0);
   }
 

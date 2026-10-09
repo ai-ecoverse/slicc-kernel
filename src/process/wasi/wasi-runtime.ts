@@ -535,12 +535,14 @@ export async function runWasiThread(init: WasmThreadInitMsg, port: SabPostLike):
   const { thread } = init;
   const threads = new WasiThreads(port, thread.memory, threadCap(init.env), thread.tid, thread.ids);
   threads.received = thread.modules;
+  const id = identify(transport, init);
   const host = new WasiHost({
     args: [init.argv0, ...init.args],
     env: init.env,
     cwd: init.cwd,
-    pid: init.pid,
-    ...(init.ppid !== undefined ? { ppid: init.ppid } : {}),
+    pid: id.pid,
+    ppid: id.ppid,
+    parent: () => identify(transport, init).ppid,
     kernel: { sys, call },
     fs: cachingBridge(createSyncFsSabBridge(transport)),
     shared: threads.ids,
