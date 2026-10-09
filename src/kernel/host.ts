@@ -81,6 +81,7 @@ export interface SpawnWasmOptions {
 
   shownPid?: number;
   kill?: (pid: number, sig: number) => boolean | Promise<boolean>;
+  writesBack?: (pid: number) => boolean;
   processes?: () => ProcessListing;
   openFiles?: Set<VfsNodes>;
   nodes?: VfsNodes;
@@ -109,6 +110,7 @@ export interface WasmProcessHandle {
   onState(listener: StateListener): void;
   memory(): number;
   ignoredSignals(fork?: boolean): number;
+  writesBack(): boolean;
 }
 
 const CRASHED = 70;
@@ -153,13 +155,32 @@ interface WorkerSays {
 class Dying {
   ending: { code: number; sig: number } | undefined;
   private timer: ReturnType<typeof setTimeout> | undefined;
+  private busy = 0;
+  private finish: (() => void) | undefined;
 
   start(code: number, sig: number, header: Int32Array, process: WasmProcess, finish: () => void) {
     if (this.ending) return;
     this.ending = { code, sig };
-    this.timer = setTimeout(finish, KILL_GRACE_MS);
+    this.finish = finish;
+    this.arm();
     Atomics.store(header, SAB_I_KILLED, code);
     process.die();
+  }
+
+  async serving<T>(work: () => Promise<T>): Promise<T> {
+    this.busy++;
+    clearTimeout(this.timer);
+    try {
+      return await work();
+    } finally {
+      this.busy--;
+      this.arm();
+    }
+  }
+
+  private arm(): void {
+    clearTimeout(this.timer);
+    if (this.busy === 0 && this.finish) this.timer = setTimeout(this.finish, KILL_GRACE_MS);
   }
 
   clear(): void {
@@ -183,6 +204,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     forker: opts.forker,
     fs: opts.fs,
     kill: opts.kill,
+    ...(opts.writesBack ? { writesBack: opts.writesBack } : {}),
     processes: opts.processes,
     openFiles: opts.openFiles,
     ...(opts.nodes ? { nodes: opts.nodes } : {}),
@@ -216,17 +238,14 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     renamed: (from, to) => holds.renamed(from, to),
   });
   const worker = opts.createWorker();
-  const dispatch = async (req: SyncSabDispatchRequest): Promise<SyncFsResult> => {
-    if (isWasmSyscall(req)) return process.syscall(req);
-    return dispatchSyncFs(req);
-  };
+  const dying = new Dying();
+  const dispatch = (req: SyncSabDispatchRequest): Promise<SyncFsResult> =>
+    dying.serving(() => (isWasmSyscall(req) ? process.syscall(req) : dispatchSyncFs(req)));
   const responder = attachSyncSabResponder(worker, sab, token, { dispatch });
 
-  let settle!: (code: number) => void;
-  const exited = new Promise<number>((resolve) => (settle = resolve));
+  const { promise: exited, resolve: settle } = Promise.withResolvers<number>();
   let done = false;
   let endedBy: number | undefined;
-  const dying = new Dying();
 
   const finish = (code: number, sig?: number): void => {
     if (done) return;
@@ -250,8 +269,8 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     if (data?.type === WASM_PROCESS_EXIT) {
       finish(...dying.status(data.code));
     } else if (data?.type === WASM_PROCESS_ERROR) {
-      opts.onError?.(String(data.message));
-      finish(CRASHED);
+      if (!dying.ending) opts.onError?.(String(data.message));
+      finish(...dying.status(CRASHED));
     } else if (data?.type === WASM_THREAD_SPAWN && data.thread) {
       spawnThread(data.thread);
     }
@@ -340,5 +359,6 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     onState: (listener) => process.onState(listener),
     memory: () => Atomics.load(header, SAB_I_MEMORY) * 65536,
     ignoredSignals: (fork) => process.inheritable(fork),
+    writesBack: () => opts.program.abi === 'wasi' && !done,
   };
 }

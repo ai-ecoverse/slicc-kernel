@@ -592,6 +592,7 @@ export class Launcher {
       spawner: this.spawner(pid, req.report),
       forker: this.forker(pid, req),
       kill: (target, sig) => this.kill(target, sig),
+      writesBack: (target) => this.processes.get(target)?.writesBack() === true,
       processes: () => ({ boot: this.boot, processes: this.list() }),
       openFiles: this.openFiles,
       nodes: this.nodes,

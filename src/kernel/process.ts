@@ -324,6 +324,8 @@ export interface WasmProcessOptions {
 
   kill?: (pid: number, sig: number) => boolean | Promise<boolean>;
 
+  writesBack?: (pid: number) => boolean;
+
   processes?: () => ProcessListing;
 
   openFiles?: Set<VfsNodes>;
@@ -429,7 +431,9 @@ export class WasmProcess {
   signal(sig: number): SignalOutcome {
     if (this.execChild !== undefined) {
       void Promise.resolve(this.options.kill?.(this.execChild, sig)).catch(() => undefined);
-      if (sig === SIG.KILL) this.wake?.();
+      if (sig !== SIG.KILL) return 'forward';
+      if (!this.options.writesBack?.(this.execChild)) return 'terminate';
+      this.wake?.();
       return 'forward';
     }
     if (sig === SIG.KILL) return 'terminate';
