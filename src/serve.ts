@@ -95,8 +95,15 @@ type WithoutId<T> = T extends unknown ? Omit<T, 'id'> : never;
 
 export type KernelCall = WithoutId<KernelRequest>;
 
+export async function inOpfs(deps: ServeDeps, root: FileSystemDirectoryHandle): Promise<boolean> {
+  if (deps.syncAccess !== true) return false;
+  const opfs = await deps.storage().catch(() => undefined);
+  return (await opfs?.resolve(root).catch(() => null)) != null;
+}
+
 export interface ServeDeps {
   storage: () => Promise<FileSystemDirectoryHandle>;
+  syncAccess?: boolean;
   createWorker: () => WasmWorkerLike;
   createDriverWorker?: () => WasmWorkerLike;
   metadata?: (name: string) => Promise<MetaStore>;
@@ -227,7 +234,8 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
       const name = req.metadata ?? META_DB;
       const { meta, media } = await stores(deps, name, req.media);
       remote = req.transport ? new RemoteTransport(port, req.transport) : undefined;
-      const fs = new OpfsFs(root, meta, dirsChannel(name));
+      const ranged = await inOpfs(deps, root);
+      const fs = new OpfsFs(root, meta, dirsChannel(name), { ranged });
       await fs.reconcile();
       const started = new Launcher({
         fs,

@@ -63,6 +63,83 @@ function within(path: string, root: string): boolean {
   return path === root || path.startsWith(`${root}/`);
 }
 
+interface Positioned {
+  write(at: number, bytes: Uint8Array): unknown;
+  truncate(size: number): unknown;
+}
+
+interface SyncAccess {
+  write(bytes: Uint8Array, options: { at: number }): number;
+  truncate(size: number): void;
+  flush(): void;
+  close(): void;
+}
+
+type SyncCapable = FileSystemFileHandle & {
+  createSyncAccessHandle?(options?: { mode?: string }): Promise<SyncAccess>;
+};
+
+const LOCKED = new Set(['NotReadableError', 'NoModificationAllowedError', 'InvalidStateError']);
+
+const SYNC_BACKOFF_MS = [5, 10, 20, 40, 80];
+
+async function openSync(handle: FileSystemFileHandle): Promise<SyncAccess | undefined> {
+  const sync = (handle as SyncCapable).createSyncAccessHandle;
+  if (!sync) return undefined;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await sync.call(handle, { mode: 'readwrite-unsafe' });
+    } catch (err) {
+      const delay = SYNC_BACKOFF_MS[attempt];
+      if (!LOCKED.has((err as { name?: unknown })?.name as string)) throw err;
+      if (delay === undefined) return undefined;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+}
+
+function writeAll(access: SyncAccess, at: number, bytes: Uint8Array): void {
+  for (let done = 0; done < bytes.length; ) {
+    const n = access.write(bytes.subarray(done), { at: at + done });
+    if (!(n > 0))
+      throw Object.assign(new Error('the file system took no more bytes'), { code: 'ENOSPC' });
+    done += n;
+  }
+}
+
+async function positioned(handle: FileSystemFileHandle, op: (io: Positioned) => unknown) {
+  const access = await openSync(handle);
+  if (access) {
+    try {
+      op({
+        write: (at, bytes) => writeAll(access, at, bytes),
+        truncate: (n) => access.truncate(n),
+      });
+      access.flush();
+    } finally {
+      access.close();
+    }
+    return;
+  }
+  const writable = await handle.createWritable({ keepExistingData: true });
+  try {
+    await op({
+      write: (at, bytes) =>
+        writable.write({ type: 'write', position: at, data: bytes as Uint8Array<ArrayBuffer> }),
+      truncate: (n) => writable.truncate(n),
+    });
+  } catch (err) {
+    await writable.abort();
+    throw err;
+  }
+  await writable.close();
+}
+
+export function syncAccessHandles(scope: object = globalThis): boolean {
+  const handle = (scope as { FileSystemFileHandle?: { prototype: object } }).FileSystemFileHandle;
+  return handle !== undefined && 'createSyncAccessHandle' in handle.prototype;
+}
+
 function isHandle(child: Handle | MetaEntry): child is Handle {
   return 'kind' in child;
 }
@@ -74,14 +151,17 @@ export class OpfsFs implements KernelFs {
   private readonly checked = new WeakMap<FileSystemDirectoryHandle, number>();
 
   private readonly channel: BroadcastChannel | undefined;
+  private readonly ranged: boolean;
 
   constructor(
     root: FileSystemDirectoryHandle,
     meta: MetaStore = new MemoryMeta(),
-    channel?: string
+    channel?: string,
+    options: { ranged?: boolean } = {}
   ) {
     this.root = root;
     this.meta = meta;
+    this.ranged = options.ranged === true;
     this.channel = channel === undefined ? undefined : new BroadcastChannel(channel);
     if (this.channel) {
       this.channel.onmessage = ({ data }) => {
@@ -241,6 +321,7 @@ export class OpfsFs implements KernelFs {
       atime: new Date(meta?.atimeMs ?? mtime),
       ctime: new Date(Math.max(meta?.ctimeMs ?? mtime, modified)),
       ino: meta?.ino ?? inodeOf(path),
+      ...(this.ranged && !directory ? { ranged: true } : {}),
     };
   }
 
@@ -280,19 +361,52 @@ export class OpfsFs implements KernelFs {
     );
   }
 
-  async readFileBuffer(path: string): Promise<Uint8Array> {
-    const handle = (await this.locate(path, true)).handle as Handle;
-    if (handle.kind === 'directory') throw fsError('EISDIR', path);
+  private async retrying<T>(path: string, op: () => Promise<T>, locks: boolean): Promise<T> {
     for (let attempt = 1; ; attempt++) {
       try {
-        return new Uint8Array(await (await handle.getFile()).arrayBuffer());
+        return await op();
       } catch (err) {
-        if ((err as { name?: unknown })?.name !== 'NotReadableError' || attempt >= READ_ATTEMPTS) {
-          throw translate(err, path);
-        }
+        const name = (err as { name?: unknown })?.name;
+        const again = name === 'NotReadableError' || (locks && LOCKED.has(name as string));
+        if (!again || attempt >= READ_ATTEMPTS) throw translate(err, path);
         await new Promise((resolve) => setTimeout(resolve, attempt * 10));
       }
     }
+  }
+
+  private async existing(path: string): Promise<FileSystemFileHandle> {
+    const handle = (await this.locate(path, true)).handle as Handle;
+    if (handle.kind === 'directory') throw fsError('EISDIR', path);
+    return handle;
+  }
+
+  async readFileBuffer(path: string): Promise<Uint8Array> {
+    const handle = await this.existing(path);
+    return this.retrying(
+      path,
+      async () => new Uint8Array(await (await handle.getFile()).arrayBuffer()),
+      false
+    );
+  }
+
+  async pread(path: string, offset: number, length: number): Promise<Uint8Array> {
+    const handle = await this.existing(path);
+    return this.retrying(
+      path,
+      async () =>
+        new Uint8Array(await (await handle.getFile()).slice(offset, offset + length).arrayBuffer()),
+      false
+    );
+  }
+
+  async pwrite(path: string, offset: number, bytes: Uint8Array): Promise<void> {
+    const handle = (await this.fileFor(path))[0];
+    await this.retrying(path, () => positioned(handle, (io) => io.write(offset, bytes)), true);
+  }
+
+  async truncate(path: string, size: number): Promise<void> {
+    const handle = await this.existing(path);
+    await this.retrying(path, () => positioned(handle, (io) => io.truncate(size)), true);
   }
 
   async readFile(path: string): Promise<string> {
@@ -310,16 +424,22 @@ export class OpfsFs implements KernelFs {
     return [resolvePath((await this.locate(parentOf(wanted), true)).path, baseOf(wanted)), false];
   }
 
-  async writeFile(path: string, content: Uint8Array | string): Promise<void> {
+  private async fileFor(path: string): Promise<[FileSystemFileHandle, boolean]> {
     const [target, existed] = await this.writeTarget(path);
     const [dir, name] = await this.parent(target);
-    let file: FileSystemFileHandle;
     try {
-      file = await this.inDir(dir, (parent) => parent.getFileHandle(name, { create: true }));
+      return [
+        await this.inDir(dir, (parent) => parent.getFileHandle(name, { create: true })),
+        existed,
+      ];
     } catch (err) {
       const code = (err as { name?: unknown })?.name === 'TypeMismatchError' ? 'EISDIR' : null;
       throw code ? fsError(code, path) : translate(err, path);
     }
+  }
+
+  async writeFile(path: string, content: Uint8Array | string): Promise<void> {
+    const [file, existed] = await this.fileFor(path);
     if (!existed && content.length === 0) return;
     const writable = await file.createWritable();
     await writable.write(content as FileSystemWriteChunkType);

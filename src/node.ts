@@ -8,7 +8,7 @@ import type { WasmWorkerLike } from './kernel/host.ts';
 import { Launcher } from './launcher.ts';
 import type { MountEntry, MountSpec } from './mount/mount-fs.ts';
 import type { ProcessMountPolicy } from './mount/syscall.ts';
-import { memoryRoot } from './node/memory-root.ts';
+import { isMemoryRoot, memoryRoot } from './node/memory-root.ts';
 import { signalNumber } from './serve.ts';
 import { fetchTransport, type NetworkTransport } from './transport.ts';
 
@@ -121,7 +121,7 @@ function textOf(on: ((text: string) => void) | undefined) {
 
 export async function createNodeKernel(options: NodeKernelOptions = {}): Promise<NodeKernel> {
   const root = options.root ?? memoryRoot();
-  const fs = new OpfsFs(root);
+  const fs = new OpfsFs(root, undefined, undefined, { ranged: isMemoryRoot(root) });
   await fs.reconcile();
   const live = new Set<() => void>();
   const pending = new Set<(err: Error) => void>();

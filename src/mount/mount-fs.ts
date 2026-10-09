@@ -493,6 +493,7 @@ class MountFs implements KernelFs {
   async pread(path: string, offset: number, length: number): Promise<Uint8Array> {
     const real = await this.follow(path);
     const found = this.at(real);
+    if (!found && this.base.pread) return this.base.pread(real, offset, length);
     if (!found) return (await this.base.readFileBuffer(real)).slice(offset, offset + length);
     const { mount, rel } = found;
     if ((await this.table.getattr(mount, real, rel)).kind === 'directory') {
@@ -532,6 +533,7 @@ class MountFs implements KernelFs {
   async pwrite(path: string, offset: number, bytes: Uint8Array, transfer = false): Promise<void> {
     const real = await this.follow(path, 0, true);
     const found = this.at(real);
+    if (!found && this.base.pwrite) return this.base.pwrite(real, offset, bytes);
     if (!found)
       return this.base.writeFile(
         real,
@@ -564,6 +566,7 @@ class MountFs implements KernelFs {
   async truncate(path: string, size: number): Promise<void> {
     const real = await this.follow(path);
     const found = this.at(real);
+    if (!found && this.base.truncate) return this.base.truncate(real, size);
     if (!found?.mount.caps.ranges) {
       return this.writeFile(real, resized(await this.readFileBuffer(real), size));
     }
