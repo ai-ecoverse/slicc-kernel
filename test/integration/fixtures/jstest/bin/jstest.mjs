@@ -375,6 +375,14 @@ async function encode(ctx) {
   );
 }
 
+async function full(ctx) {
+  const r = await ctx.write(1, 'x').then(
+    () => 'ok',
+    (err) => err.code
+  );
+  await ctx.write(2, `${r}\n`);
+}
+
 async function devices(ctx) {
   const zero = await ctx.read(0, 8);
   await ctx.write(1, `${zero.length} ${zero.every((b) => b === 0)}\n`);
@@ -416,6 +424,7 @@ const modes = {
   dangling,
   globals,
   devices,
+  full,
   encode,
   status: async (_ctx, [n]) => Number(n),
   exit: (ctx, [n]) => ctx.exit(Number(n)),

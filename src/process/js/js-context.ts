@@ -203,6 +203,7 @@ export function createContext(o: ContextOptions): CreatedContext {
     const dev = device(i);
     if (dev) {
       if (dev.access === 'read') throw new JsCallError('EBADF', 'write');
+      if (dev.device === 'full') throw new JsCallError('ENOSPC', 'write');
       return;
     }
     let at = 0;

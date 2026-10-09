@@ -18,6 +18,15 @@ test('a JS program runs as a process: argv, pipes with backpressure, files, exit
     await bash('jstest yes | head -c 4; echo " ${PIPESTATUS[0]}"'),
     ok('y\ny\n 141\n')
   );
+  assert.deepEqual(
+    await bash('jstest devices < /dev/null; jstest devices < /dev/zero'),
+    ok('0 true\n8 true\n')
+  );
+  assert.deepEqual(await bash('jstest full > /dev/full'), {
+    status: 0,
+    stdout: '',
+    stderr: 'ENOSPC\n',
+  });
   const size = 3 * 1024 * 1024 + 21;
   assert.deepEqual(
     await run(['jstest', 'files', 'big.bin'], { cwd: '/home' }),
