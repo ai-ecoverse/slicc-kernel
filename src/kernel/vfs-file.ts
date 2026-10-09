@@ -1,5 +1,5 @@
 import { AsyncRangedFile, type AsyncRangedIo } from '../fs/ranged.ts';
-import { rangedOps } from '../fs/types.ts';
+import { type KernelFs, rangedOps } from '../fs/types.ts';
 import { KernelError, OpenFile } from './fd-table.ts';
 
 export interface VfsFileFs extends Partial<AsyncRangedIo> {
@@ -331,8 +331,10 @@ export class VfsNodes {
   }
 
   async unlinking(path: string): Promise<void> {
-    const node = this.byPath.get(path);
-    if (node) await node.serial(async () => void (await Promise.all([node.keep(), node.limit()])));
+    for (const [held, node] of [...this.byPath]) {
+      if (!within(held, path)) continue;
+      await node.serial(async () => void (await Promise.all([node.keep(), node.limit()])));
+    }
   }
 
   revoke(prefix: string): void {
@@ -344,10 +346,11 @@ export class VfsNodes {
   }
 
   unlinked(path: string): void {
-    const node = this.byPath.get(path);
-    if (!node) return;
-    node.orphaned = true;
-    this.byPath.delete(path);
+    for (const [held, node] of [...this.byPath]) {
+      if (!within(held, path)) continue;
+      node.orphaned = true;
+      this.byPath.delete(held);
+    }
   }
 
   renamed(from: string, to: string): void {
@@ -433,6 +436,24 @@ export async function refuseReadonly(
   if (own && !writes) return;
   const st = own ?? (await stat(await targetDir(fs, path)));
   if (st?.readonly) throw new KernelError('EROFS');
+}
+
+export function keepingOpen(fs: KernelFs, nodes: VfsNodes): KernelFs {
+  return {
+    ...fs,
+    async rm(path, options) {
+      const at = fs.resolvePath('/', path);
+      await nodes.unlinking(at);
+      await fs.rm(path, options);
+      nodes.unlinked(at);
+    },
+    async rename(from, to) {
+      const [a, b] = [fs.resolvePath('/', from), fs.resolvePath('/', to)];
+      await nodes.unlinking(b);
+      await fs.rename(from, to);
+      nodes.renamed(a, b);
+    },
+  };
 }
 
 export function vfsFile(fs: VfsFileFs, opts: VfsFileOptions, nodes?: VfsNodes): OpenFile {

@@ -181,16 +181,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     ...(opts.statfs ? { statfs: opts.statfs } : {}),
     hold: (path, on) => holds.hold(path, on),
     revoked: (path) => holds.isRevoked(path),
-    renamed: (from, to) => {
-      holds.renamed(from, to);
-      for (const nodes of opts.openFiles ?? []) nodes.renamed(from, to);
-    },
-    unlinking: async (path) => {
-      for (const nodes of opts.openFiles ?? []) await nodes.unlinking(path);
-    },
-    unlinked: (path) => {
-      for (const nodes of opts.openFiles ?? []) nodes.unlinked(path);
-    },
+    renamed: (from, to) => holds.renamed(from, to),
   });
   const worker = opts.createWorker();
   const dispatch = async (req: SyncSabDispatchRequest): Promise<SyncFsResult> => {

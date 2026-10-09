@@ -7,8 +7,6 @@ export interface SyncFsTokenEntry {
   hold?: (path: string, held: boolean) => void;
   revoked?: (path: string) => boolean;
   renamed?: (from: string, to: string) => void;
-  unlinking?: (path: string) => Promise<void>;
-  unlinked?: (path: string) => void;
 }
 
 const registry = new Map<string, SyncFsTokenEntry>();

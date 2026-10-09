@@ -44,7 +44,7 @@ import type { ForkState, WasmProgram } from './kernel/protocol.ts';
 import { PtyTable } from './kernel/pty.ts';
 import { LoopbackNet } from './kernel/socket.ts';
 import { KernelTty } from './kernel/tty.ts';
-import { VfsNodes } from './kernel/vfs-file.ts';
+import { keepingOpen, VfsNodes } from './kernel/vfs-file.ts';
 import { type ServedFilesystem, serveFilesystem } from './mount/driver.ts';
 import {
   FSA_CAPABILITIES,
@@ -345,9 +345,10 @@ export class Launcher {
       ca: this.ca,
     });
     enableCdp(this.net, this.cdp);
-    this.fs = withCommandDirs(this.base, async () => new Set((await this.commands()).keys()));
-    this.nodes = new VfsNodes(this.fs);
+    const fs = withCommandDirs(this.base, async () => new Set((await this.commands()).keys()));
+    this.nodes = new VfsNodes(fs);
     this.openFiles.add(this.nodes);
+    this.fs = keepingOpen(fs, this.nodes);
     this.watchers.watch([this.modulesDir, this.pnpmHome], { recursive: true }, () => {
       this.catalog = undefined;
     });
