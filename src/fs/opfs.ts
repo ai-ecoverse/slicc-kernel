@@ -98,12 +98,21 @@ async function openSync(handle: FileSystemFileHandle): Promise<SyncAccess | unde
   }
 }
 
+function writeAll(access: SyncAccess, at: number, bytes: Uint8Array): void {
+  for (let done = 0; done < bytes.length; ) {
+    const n = access.write(bytes.subarray(done), { at: at + done });
+    if (!(n > 0))
+      throw Object.assign(new Error('the file system took no more bytes'), { code: 'ENOSPC' });
+    done += n;
+  }
+}
+
 async function positioned(handle: FileSystemFileHandle, op: (io: Positioned) => unknown) {
   const access = await openSync(handle);
   if (access) {
     try {
       op({
-        write: (at, bytes) => access.write(bytes, { at }),
+        write: (at, bytes) => writeAll(access, at, bytes),
         truncate: (n) => access.truncate(n),
       });
       access.flush();
