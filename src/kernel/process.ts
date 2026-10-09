@@ -312,7 +312,7 @@ export interface WasmProcessOptions {
 
   identity?: () => Promise<{ pid: number; ppid: number }>;
 
-  onSyscall?: () => void;
+  onSyscall?: (req: WasmSyscall) => void;
 
   spawner?: ChildSpawner;
 
@@ -471,7 +471,7 @@ export class WasmProcess {
   }
 
   async syscall(req: WasmSyscall): Promise<SyncFsResult> {
-    this.options.onSyscall?.();
+    this.options.onSyscall?.(req);
     for (;;) {
       await this.resumed;
       const stops = this.stops;
