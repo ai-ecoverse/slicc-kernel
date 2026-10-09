@@ -50,12 +50,14 @@ export function vfsPromoter(
     let kfd = promoted.get(stream.shared);
     if (kfd === undefined) {
       const contents = orphanContents(stream);
-      const pin = (stream.node as LiveNodeBag).live?.ranged?.pinnedVersion;
+      const ranged = (stream.node as LiveNodeBag).live?.ranged;
+      const version = ranged?.pinnedVersion;
+      const pin = ranged && version !== undefined ? { version, size: ranged.size() } : undefined;
       kfd = sys.openVfs(
         livePath(stream),
         stream.flags,
         stream.position,
-        contents !== undefined ? { contents, orphan: true } : pin ? { version: pin } : undefined
+        contents !== undefined ? { contents, orphan: true } : pin ? { pin } : undefined
       );
       promoted.set(stream.shared, kfd);
     }

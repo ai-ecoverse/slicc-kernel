@@ -37,11 +37,16 @@ export interface VfsFileOptions {
 
   dirty?: boolean;
 
-  version?: string;
+  pin?: VersionPin;
 
   truncate?: boolean;
 
   create?: boolean;
+}
+
+export interface VersionPin {
+  version: string;
+  size: number;
 }
 
 export const WRITEBACK_MS = 250;
@@ -60,7 +65,7 @@ function within(path: string, root: string): boolean {
 export class VfsNode {
   private data: Uint8Array | undefined;
   private ranged: AsyncRangedFile | undefined;
-  private readonly pin: string | undefined;
+  private readonly pin: VersionPin | undefined;
   private length = 0;
   private dirty = false;
   private queue: Promise<unknown> = Promise.resolve();
@@ -92,7 +97,7 @@ export class VfsNode {
 
     dirty = false,
 
-    pin?: string
+    pin?: VersionPin
   ) {
     this.fs = fs;
     this.pin = pin;
@@ -124,10 +129,14 @@ export class VfsNode {
     if (this.revoked) throw new KernelError('EIO');
     if (this.ranged || this.data) return this.ranged;
     const io = rangedOps(this.fs);
+    if (io && this.pin && !this.orphaned) {
+      this.ranged = new AsyncRangedFile(io, this.path, this.pin.size, this.pin.version);
+      return this.ranged;
+    }
     const st =
       io && !this.orphaned ? await this.fs.stat?.(this.path).catch(() => undefined) : undefined;
     if (io && st?.ranged) {
-      this.ranged = new AsyncRangedFile(io, this.path, st.size ?? 0, this.pin ?? st.version);
+      this.ranged = new AsyncRangedFile(io, this.path, st.size ?? 0, st.version);
       return this.ranged;
     }
     await this.load();
@@ -285,7 +294,7 @@ export class VfsNodes {
     this.fs = fs;
   }
 
-  open(path: string, pin?: string): VfsNode {
+  open(path: string, pin?: VersionPin): VfsNode {
     let node = this.byPath.get(path);
     if (!node) {
       node = new VfsNode(this.fs, path, undefined, false, false, pin);
@@ -436,7 +445,7 @@ export function vfsFile(fs: VfsFileFs, opts: VfsFileOptions, nodes?: VfsNodes): 
       ? new VfsNode(fs, opts.path, opts.contents, opts.orphan === true, opts.dirty === true)
       : opts.contents !== undefined
         ? nodes.adopt(opts.path, opts.contents, opts.dirty === true)
-        : nodes.open(opts.path, opts.version);
+        : nodes.open(opts.path, opts.pin);
 
   let openError: { err: unknown } | undefined;
   const atOpen = (op: () => Promise<void>): void => {

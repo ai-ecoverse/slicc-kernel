@@ -32,7 +32,7 @@ import { type DefaultAction, defaultAction, isSignal, SIG, sigbit } from './sign
 import { KernelSocket, LoopbackNet } from './socket.ts';
 import { SOCKET_OPS, type SocketSyscall, socketSyscall } from './socket-syscalls.ts';
 import type { KernelTty, Termios } from './tty.ts';
-import { refuseReadonly, type VfsFileFs, VfsNodes, vfsFile } from './vfs-file.ts';
+import { refuseReadonly, type VersionPin, type VfsFileFs, VfsNodes, vfsFile } from './vfs-file.ts';
 
 function aborted(signal: AbortSignal): Promise<never> {
   return new Promise<never>((_, reject) => {
@@ -68,7 +68,7 @@ export type WasmSyscall =
 
       create?: boolean;
 
-      version?: string;
+      pin?: VersionPin;
     }
   | { op: 'fd-pread'; fd: number; offset: number; max: number }
   | { op: 'fd-pwrite'; fd: number; offset: number; body: Uint8Array }
@@ -110,7 +110,7 @@ export type WasmSyscall =
 
       dirty?: boolean;
 
-      version?: string;
+      pin?: VersionPin;
     }
   | { op: 'fd-open-tty'; name?: string }
   | { op: 'tty-get'; fd: number }
@@ -536,7 +536,7 @@ export class WasmProcess {
         ...(req.orphan ? { orphan: true } : {}),
         ...(req.truncate ? { truncate: true } : {}),
         ...(req.create ? { create: true } : {}),
-        ...(req.version !== undefined ? { version: req.version } : {}),
+        ...(req.pin ? { pin: req.pin } : {}),
       },
       this.nodes
     );
@@ -675,7 +675,7 @@ export class WasmProcess {
         ...(req.contents !== undefined ? { contents: req.contents } : {}),
         ...(req.orphan ? { orphan: true } : {}),
         ...(req.dirty ? { dirty: true } : {}),
-        ...(req.version !== undefined ? { version: req.version } : {}),
+        ...(req.pin ? { pin: req.pin } : {}),
       },
       this.nodes
     );
