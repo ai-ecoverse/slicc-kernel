@@ -261,13 +261,7 @@ export function createContext(o: ContextOptions): CreatedContext {
       path: abs,
       flags: flagsOf(options),
       position: 0,
-      ...(exclusive
-        ? { exclusive: true }
-        : !existing
-          ? { create: true }
-          : options.create
-            ? {}
-            : { existing: true }),
+      ...(exclusive ? { exclusive: true } : options.create ? { create: true } : { existing: true }),
       ...(options.truncate ? { truncate: true } : {}),
     })) as number;
     try {
@@ -330,7 +324,14 @@ export function createContext(o: ContextOptions): CreatedContext {
     },
     exit,
   };
-  return { ctx, drain: () => Promise.all([...pending]) };
+  const drain = async (): Promise<void> => {
+    for (;;) {
+      await Promise.all([...pending]);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      if (pending.size === 0) return;
+    }
+  };
+  return { ctx, drain };
 }
 
 function fileHandle(

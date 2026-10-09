@@ -89,6 +89,16 @@ test('open files and path operations agree, append appends, exclusive creation i
     .trim()
     .split('\n');
   assert.equal(ex[1], ex[0]);
+  assert.deepEqual(
+    await bash('jstest queued | wc -c; jstest queued | tail -c 4'),
+    ok('3145732\nEND\n')
+  );
+  assert.deepEqual(
+    await bash(
+      `bash -c 'trap "" PIPE; jstest resetpipe | head -c 1 >/dev/null; echo "\${PIPESTATUS[0]}"'`
+    ),
+    ok('141\n')
+  );
   assert.deepEqual(await run(['jstest', 'strayw']), {
     status: 1,
     stdout: '',

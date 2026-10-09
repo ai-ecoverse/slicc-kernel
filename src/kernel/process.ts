@@ -165,7 +165,7 @@ export type WasmSyscall =
   | { op: 'proc-setsid' }
   | { op: 'tty-pgrp-get'; fd: number }
   | { op: 'tty-pgrp-set'; fd: number; pgrp: number }
-  | { op: 'sig-mask'; caught: number; ignored: number }
+  | { op: 'sig-mask'; caught: number; ignored: number; defaults?: number }
   | { op: 'sig-pause' }
   | SocketSyscall
   | HttpSyscall
@@ -941,6 +941,7 @@ export class WasmProcess {
       case 'sig-mask':
         this.caught = req.caught;
         this.ignored = req.ignored;
+        this.inherited &= ~(req.defaults ?? 0);
         return { ok: true, kind: 'void' };
       case 'sig-pause':
         return this.pause();

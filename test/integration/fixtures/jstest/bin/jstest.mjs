@@ -207,6 +207,18 @@ async function pid(ctx) {
   await ctx.write(1, `${ctx.pid} ${await ctx.ppid()}\n`);
 }
 
+async function queued(ctx) {
+  const w = ctx.stdout.getWriter();
+  for (let i = 0; i < 3; i++) w.write(new Uint8Array(1024 * 1024).fill(97 + i));
+  w.write(new TextEncoder().encode('END\n'));
+  return 0;
+}
+
+async function resetpipe(ctx) {
+  await ctx.signals.reset('SIGPIPE');
+  await yes(ctx);
+}
+
 async function strayw(ctx) {
   ctx.write(99, 'x');
   return 0;
@@ -353,6 +365,8 @@ const modes = {
   nodir,
   unawaited,
   pid,
+  queued,
+  resetpipe,
   strayw,
   ctxclose,
   badpos,

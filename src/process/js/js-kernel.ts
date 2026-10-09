@@ -113,16 +113,17 @@ export class JsKernel {
     this.ignored &= ~sigbit(sig);
     if (handler === 'ignore') this.ignored |= sigbit(sig);
     else if (handler !== 'default') this.handlers.set(sig, handler);
-    await this.report();
+    await this.report(handler === 'default' ? sigbit(sig) : 0);
     if (this.handlers.size > 0) void this.watch();
   }
 
-  private async report(): Promise<void> {
+  private async report(defaults: number): Promise<void> {
     let caught = 0;
     for (const sig of this.handlers.keys()) caught |= sigbit(sig);
     const { ignored } = this;
-    if (caught === this.reported.caught && ignored === this.reported.ignored) return;
+    const same = caught === this.reported.caught && ignored === this.reported.ignored;
+    if (same && defaults === 0) return;
     this.reported = { caught, ignored };
-    await this.call({ op: 'sig-mask', caught, ignored });
+    await this.call({ op: 'sig-mask', caught, ignored, ...(defaults ? { defaults } : {}) });
   }
 }
