@@ -78,6 +78,7 @@ export interface SpawnWasmOptions {
   kill?: (pid: number, sig: number) => boolean | Promise<boolean>;
   processes?: () => ProcessListing;
   openFiles?: Set<VfsNodes>;
+  nodes?: VfsNodes;
   statfs?: (path: string) => Promise<{ quota: number; usage: number } | undefined>;
   mounts?: () => MountLine[];
   mount?: WasmProcessOptions['mount'];
@@ -153,6 +154,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     kill: opts.kill,
     processes: opts.processes,
     openFiles: opts.openFiles,
+    ...(opts.nodes ? { nodes: opts.nodes } : {}),
     mounts: opts.mounts,
     ...(opts.mount ? { mount: opts.mount } : {}),
     ...(opts.umount ? { umount: opts.umount } : {}),

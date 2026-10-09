@@ -316,6 +316,8 @@ export interface WasmProcessOptions {
 
   openFiles?: Set<VfsNodes>;
 
+  nodes?: VfsNodes;
+
   mounts?: () => MountLine[];
 
   mount?: (call: MountCall, signal: AbortSignal) => Promise<unknown>;
@@ -394,8 +396,8 @@ export class WasmProcess {
     this.options = options;
     this.inherited = options.ignored ?? 0;
     this.children = new ChildTable(fds, options.spawner, options.forker);
-    this.nodes = new VfsNodes(options.fs);
-    options.openFiles?.add(this.nodes);
+    this.nodes = options.nodes ?? new VfsNodes(options.fs);
+    if (!options.nodes) options.openFiles?.add(this.nodes);
     this.children.onChildState = () => this.signal(SIG.CHLD);
     this.children.onReap = options.onReap;
   }
@@ -953,7 +955,7 @@ export class WasmProcess {
     this.asyncOps.close();
     for (const pid of this.children.pids()) this.options.onReap?.(pid);
     await this.fds.closeAll();
-    this.options.openFiles?.delete(this.nodes);
+    if (!this.options.nodes) this.options.openFiles?.delete(this.nodes);
     await this.options.http?.closeAll();
   }
 }
