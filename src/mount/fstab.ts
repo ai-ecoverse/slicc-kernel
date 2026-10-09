@@ -51,6 +51,7 @@ function codeOf(err: unknown): string {
 }
 
 function wait(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
   return new Promise((resolve) => {
     const done = () => {
       clearTimeout(timer);
@@ -66,14 +67,19 @@ export async function mountFstab(
   lines: readonly FstabLine[],
   mount: (spec: MountSpec) => Promise<MountEntry>,
   signal: AbortSignal,
-  retries: readonly number[] = FSTAB_RETRIES
+  retries: readonly number[] = FSTAB_RETRIES,
+  discard: (entry: MountEntry) => void = () => {}
 ): Promise<FstabResult[]> {
   return Promise.all(
     lines.map(async ({ line, spec, invalid }) => {
       let failed: unknown = invalid;
       for (let attempt = 0; !invalid && attempt <= retries.length && !signal.aborted; attempt++) {
         try {
-          return { line, target: spec.target, entry: await mount(spec) };
+          const entry = await mount(spec);
+          if (!signal.aborted) return { line, target: spec.target, entry };
+          discard(entry);
+          failed = Object.assign(new Error('the kernel stopped'), { code: 'ECANCELED' });
+          break;
         } catch (err) {
           failed = err;
           if (FINAL.has(codeOf(err)) || attempt === retries.length) break;

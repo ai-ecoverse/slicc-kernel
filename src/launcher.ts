@@ -50,7 +50,13 @@ import {
   type MediumHandle,
   removableMedium,
 } from './mount/fsa.ts';
-import { FSTAB_PATH, type FstabResult, mountFstab, parseFstab } from './mount/fstab.ts';
+import {
+  FSTAB_PATH,
+  FSTAB_RETRIES,
+  type FstabResult,
+  mountFstab,
+  parseFstab,
+} from './mount/fstab.ts';
 import {
   type FetchLike,
   type HostfsGrantHook,
@@ -789,7 +795,13 @@ export class Launcher {
 
   private async mountFstab(): Promise<FstabResult[]> {
     const text = await this.base.readFile(FSTAB_PATH).catch(() => '');
-    return mountFstab(parseFstab(text), (spec) => this.mount(spec), this.booting.signal);
+    return mountFstab(
+      parseFstab(text),
+      (spec) => this.mount(spec),
+      this.booting.signal,
+      FSTAB_RETRIES,
+      (entry) => this.umount(entry.target, true)
+    );
   }
 
   private environment(cwd: string, extra: Record<string, string> | undefined) {
