@@ -104,6 +104,7 @@ export class KernelSocket implements KernelFile {
   readonly domain: SocketDomain;
   private state: 'open' | 'connecting' | 'listening' | 'connected' | 'closed' = 'open';
   label: NetworkLabel = 'default';
+  peerLabel: NetworkLabel = 'default';
   private dialing: AbortController | undefined;
   private failed: string | undefined;
   local: SockAddr | undefined;
@@ -218,6 +219,7 @@ export class KernelSocket implements KernelFile {
     const server = new KernelSocket(this.net, this.domain);
     server.local = addr.family === 'inet' ? { ...addr, host: canonicalHost(addr.host) } : addr;
     server.peer = this.local;
+    server.peerLabel = this.label;
     this.peer = server.local;
     link(this, server);
     if (!target.offer(server)) {

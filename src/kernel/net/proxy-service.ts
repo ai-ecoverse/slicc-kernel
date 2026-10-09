@@ -1,5 +1,6 @@
 import { KernelError } from '../fd-table.ts';
 import type { KernelSocket, LoopbackNet } from '../socket.ts';
+import { labelled, refusal } from './gate.ts';
 import {
   type ByteSource,
   chunk,
@@ -17,6 +18,7 @@ import {
   responseHead,
 } from './http1.ts';
 import { toHostLoopback } from './loopback-names.ts';
+import type { NetworkLabel, Routes } from './routes.ts';
 import type { HeaderList, RealmTransport, RealmTransportResponse } from './transport.ts';
 
 export const REALM_PROXY_PORT = 3128;
@@ -55,6 +57,7 @@ export interface RealmProxyOptions {
   tunnel?: TunnelHandler;
   tunnelReady?: () => Promise<void>;
   limits?: Partial<ProxyLimits>;
+  routes?: Routes;
 }
 const HOP_BY_HOP = new Set([
   'connection',
@@ -377,7 +380,7 @@ export class RealmProxy {
         const waiting = new AbortController();
         void watchHangup(ctx.socket, abort, waiting.signal);
         try {
-          response = await this.upstream(req, url, body, abort.signal);
+          response = await this.upstream(req, url, body, abort.signal, ctx.socket.peerLabel);
         } finally {
           waiting.abort();
         }
@@ -407,10 +410,12 @@ export class RealmProxy {
     req: RequestHead,
     url: string,
     body: Uint8Array | undefined,
-    signal: AbortSignal
+    signal: AbortSignal,
+    label: NetworkLabel
   ): Promise<RealmTransportResponse> {
     try {
-      const fetching = this.options.transport.fetch({
+      const transport = labelled(this.options.transport, label, this.options.routes);
+      const fetching = transport.fetch({
         url: toHostLoopback(url),
         method: req.method.toUpperCase(),
         headers: forwardRequestHeaders(req.headers),
@@ -469,6 +474,8 @@ export class RealmProxy {
   }
   private async connect(conn: KernelSocket, incoming: Incoming, req: RequestHead): Promise<void> {
     const target = tunnelTarget(req);
+    const refused = refusal(target.host, conn.peerLabel, this.options.routes);
+    if (refused) throw new HttpError(502, refused);
     const tunnel = this.options.tunnel;
     if (!tunnel) {
       throw new HttpError(

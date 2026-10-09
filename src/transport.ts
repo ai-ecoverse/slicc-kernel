@@ -138,6 +138,7 @@ export function serveTransport(peer: TransportPeer, transport: RealmTransport): 
         method: call.method,
         headers: call.headers,
         ...(call.body ? { body: call.body } : {}),
+        ...(call.network ? { network: call.network } : {}),
         signal: abort.signal,
       });
       if (!open.has(call.nid)) {

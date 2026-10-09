@@ -4,7 +4,7 @@ import type { NetworkLabel } from '../kernel/net/routes.ts';
 import type { RealmTransportTraits } from '../kernel/net/transport.ts';
 import type { MountSpec } from '../mount/mount-fs.ts';
 
-export const PROTOCOL: readonly [number, number] = [1, 7];
+export const PROTOCOL: readonly [number, number] = [1, 8];
 
 export interface ClientHello {
   protocol: readonly [number, number];

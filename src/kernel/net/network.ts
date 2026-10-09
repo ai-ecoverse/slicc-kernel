@@ -10,6 +10,7 @@ import {
   realmCa,
   winner,
 } from './realm-ca.ts';
+import type { Routes } from './routes.ts';
 import { loadTlsEngine, type TlsEngine, type TlsEngineModule } from './tls-engine.ts';
 import { TlsTerminator } from './tls-tunnel.ts';
 import type { RealmTransport } from './transport.ts';
@@ -106,6 +107,7 @@ export interface NetworkOptions {
   engine: () => Promise<TlsEngine>;
   ca: () => Promise<RealmCa>;
   now?: () => number;
+  routes?: Routes;
 }
 
 export function kernelCa(store: CaStore): () => Promise<RealmCa> {
@@ -165,6 +167,7 @@ export function enableNetwork(
     const started = new RealmProxy({
       net,
       transport,
+      ...(options.routes ? { routes: options.routes } : {}),
       tunnel: tls.handler,
       tunnelReady: async () => {
         await options.engine();

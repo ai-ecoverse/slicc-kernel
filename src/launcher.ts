@@ -372,6 +372,7 @@ export class Launcher {
     if (options.uplink) this.net.useUplink({ uplink: options.uplink, routes: this.routes });
     enableNetwork(this.net, {
       transport: this.transport,
+      routes: this.routes,
       engine: kernelTlsEngine(packageTlsEngine(options.fs, this.modulesDir)),
       ca: this.ca,
     });
@@ -586,7 +587,7 @@ export class Launcher {
       jobs: this.jobs,
       ptys: this.ptys,
       net: this.net,
-      http: new HttpHandles(this.transport),
+      http: new HttpHandles(this.transport, req.network, this.routes),
       locks: this.locks,
       network: req.network,
       resolver: this.resolver,
@@ -754,6 +755,7 @@ export class Launcher {
     const served = serveClient(client.port1, {
       launcher: async () => this,
       scope: 'transport',
+      network: 'default',
     });
     worker.postMessage({ code, driver: driver.port2, client: client.port2 }, [
       driver.port2,

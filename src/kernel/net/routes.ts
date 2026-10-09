@@ -115,6 +115,12 @@ export class Routes {
     this.exit = table.exit === true;
   }
 
+  onUplink(host: string): boolean {
+    if (this.classify(host) !== 'uplink') return false;
+    const addr = addressBits(host.toLowerCase()) as { v6: boolean; bits: bigint };
+    return this.table.some((p) => p.length > 0 && within(p, addr));
+  }
+
   classify(host: string): Destination {
     const name = host.toLowerCase().replace(/\.$/, '');
     if (name === 'localhost' || name.endsWith('.localhost') || name === '0.0.0.0') {

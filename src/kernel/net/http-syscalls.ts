@@ -1,5 +1,7 @@
 import type { SyncFsResult } from '../../realm/sync-fs-wire.ts';
+import { labelled } from './gate.ts';
 import { NO_TRANSPORT } from './network.ts';
+import type { NetworkLabel, Routes } from './routes.ts';
 import type { HeaderList, RealmTransport } from './transport.ts';
 
 export type HttpSyscall =
@@ -50,8 +52,8 @@ export class HttpHandles {
 
   private nextHandle = 0;
 
-  constructor(transport: RealmTransport) {
-    this.transport = transport;
+  constructor(transport: RealmTransport, label: NetworkLabel = 'default', routes?: Routes) {
+    this.transport = labelled(transport, label, routes);
   }
 
   syscall(req: HttpSyscall): Promise<SyncFsResult> {
@@ -105,7 +107,9 @@ export class HttpHandles {
       return { ok: true, kind: 'json', json: head };
     } catch (e) {
       const text = message(e);
-      if (text === NO_TRANSPORT) return { ok: false, errno: 'ENETUNREACH', message: text };
+      const refused = (e as { code?: unknown }).code === 'ENETUNREACH';
+      if (text === NO_TRANSPORT || refused)
+        return { ok: false, errno: 'ENETUNREACH', message: text };
       const status = (e as { status?: unknown }).status;
       if (typeof status !== 'number' || status === 502) {
         return { ok: false, errno: 'ECONNREFUSED', message: text };

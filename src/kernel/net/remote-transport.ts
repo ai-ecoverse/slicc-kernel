@@ -1,3 +1,4 @@
+import type { NetworkLabel } from './routes.ts';
 import type {
   HeaderList,
   RealmTransport,
@@ -14,6 +15,7 @@ export type TransportCall =
       method: string;
       headers: HeaderList;
       body?: Uint8Array;
+      network?: NetworkLabel;
     }
   | { net: 'read'; nid: number }
   | { net: 'cancel'; nid: number };
@@ -114,6 +116,7 @@ export class RemoteTransport implements RealmTransport {
         method: request.method,
         headers: request.headers,
         ...(request.body ? { body: request.body } : {}),
+        ...(request.network ? { network: request.network } : {}),
       });
     } catch (e) {
       finish();

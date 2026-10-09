@@ -1,6 +1,7 @@
 import { portCdpHook } from '../cdp/port.ts';
 import { fsError, type KernelFs } from '../fs/types.ts';
 import { dialSocket, serveSocket } from '../kernel/dial.ts';
+import { labelled } from '../kernel/net/gate.ts';
 import type { TransportCall } from '../kernel/net/remote-transport.ts';
 import { isNetworkLabel, type NetworkLabel, widens } from '../kernel/net/routes.ts';
 import type { RealmTransport } from '../kernel/net/transport.ts';
@@ -247,7 +248,8 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
     }
     const launcher = await host.launcher();
     const transport = host.transport?.() ?? launcher.transport;
-    net = serveTransport({ postMessage: (m, t) => send(m, t) }, transport);
+    const gated = labelled(transport, host.network ?? 'uplink', launcher.routes);
+    net = serveTransport({ postMessage: (m, t) => send(m, t) }, gated);
     state = 'open';
     if (message.lock && host.locks) void host.locks.request(message.lock, () => detach());
     send({ hello: helloOf(host, transport) });

@@ -1,3 +1,4 @@
+import type { NetworkLabel } from './routes.ts';
 export type HeaderList = ReadonlyArray<readonly [name: string, value: string]>;
 export interface RealmTransportRequest {
   url: string;
@@ -5,6 +6,7 @@ export interface RealmTransportRequest {
   headers: HeaderList;
   body?: Uint8Array;
   signal: AbortSignal;
+  network?: NetworkLabel;
 }
 export interface RealmTransportResponse {
   status: number;
