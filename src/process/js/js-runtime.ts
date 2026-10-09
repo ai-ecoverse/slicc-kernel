@@ -60,8 +60,13 @@ export async function runJsProcess(
   deps: JsRuntimeDeps = {}
 ): Promise<number> {
   const transport = createAsyncSabTransport(init.sab, port, deps.waitAsync);
-  let exited!: (status: number) => void;
-  const exit = new Promise<number>((resolve) => (exited = resolve));
+  let resolveExit!: (status: number) => void;
+  const exit = new Promise<number>((resolve) => (resolveExit = resolve));
+  let exitedWith: number | undefined;
+  const exited = (status: number): void => {
+    exitedWith ??= status;
+    resolveExit(status);
+  };
   const fail = (err: unknown): void => {
     if (err instanceof JsExit) return;
     void say(message(err)).then(() => exited(1));
@@ -105,5 +110,6 @@ export async function runJsProcess(
     });
   const status = await Promise.race([ran, exit]);
   await drain();
+  if (exitedWith !== undefined) return exitedWith;
   return status;
 }

@@ -145,6 +145,7 @@ export interface CreatedContext {
 export function createContext(o: ContextOptions): CreatedContext {
   const { kernel } = o;
   const infos = new Map<number, FdInfo>();
+  const handles = new Map<number, () => void>();
   const pending = new Set<Promise<unknown>>();
   const random =
     o.random ??
@@ -247,37 +248,15 @@ export function createContext(o: ContextOptions): CreatedContext {
       throw err;
     }
     infos.set(fd, { kind: 'file' });
-    return fileHandle(kernel, fd, abs, options.append === true, () => infos.delete(fd));
+    const handle = fileHandle(kernel, fd, abs, options.append === true, () => {
+      infos.delete(fd);
+      handles.delete(fd);
+    });
+    handles.set(fd, handle.invalidate);
+    return handle.file;
   };
 
-  const fs: JsProgramContext['fs'] = {
-    stat: (path) => statOf('stat', path),
-    lstat: (path) => statOf('lstat', path),
-    exists: async (path) => (await kernel.json({ op: 'exists', path: resolve(path) })) === true,
-    readdir: async (path) =>
-      (await kernel.json({ op: 'readdir', path: resolve(path) })) as string[],
-    mkdir: async (path) => void (await kernel.call({ op: 'mkdir', path: resolve(path) })),
-    rm: async (path) => void (await kernel.call({ op: 'rm', path: resolve(path) })),
-    unlink: async (path) => void (await kernel.call({ op: 'unlink', path: resolve(path) })),
-    rename: async (from, to) =>
-      void (await kernel.call({ op: 'rename', path: resolve(from), arg2: resolve(to) })),
-    symlink: async (target, path) =>
-      void (await kernel.call({ op: 'symlink', path: resolve(path), arg2: target })),
-    readlink: async (path) => String(await kernel.json({ op: 'readlink', path: resolve(path) })),
-    async readFile(path) {
-      const abs = resolve(path);
-      await kernel.call({ op: 'fd-path-flush', path: abs });
-      return kernel.bytes({ op: 'read', path: abs });
-    },
-    async writeFile(path, data) {
-      const file = await open(path, { write: true, create: true, truncate: true });
-      try {
-        await file.write(0, typeof data === 'string' ? encoder.encode(data) : data);
-      } finally {
-        await file.close();
-      }
-    },
-  };
+  const fs = pathOps(kernel, resolve, statOf, open);
 
   const ctx: JsProgramContext = {
     argv: o.argv,
@@ -299,6 +278,8 @@ export function createContext(o: ContextOptions): CreatedContext {
     read,
     write,
     async close(fd) {
+      handles.get(fd)?.();
+      handles.delete(fd);
       infos.delete(fd);
       await kernel.call({ op: 'fd-close', fd });
     },
@@ -326,12 +307,12 @@ function fileHandle(
   path: string,
   append: boolean,
   forget: () => void
-): JsFile {
+): { file: JsFile; invalidate: () => void } {
   let open = true;
   const live = (): void => {
     if (!open) throw new JsCallError('EBADF', path);
   };
-  return {
+  const file: JsFile = {
     fd,
     path,
     async size() {
@@ -340,6 +321,8 @@ function fileHandle(
       return s.size;
     },
     async read(position, length) {
+      index(position, 'read');
+      index(length, 'read');
       const parts: Uint8Array[] = [];
       let got = 0;
       do {
@@ -361,6 +344,7 @@ function fileHandle(
       return out;
     },
     async write(position, data) {
+      index(position, 'write');
       let at = 0;
       do {
         live();
@@ -378,7 +362,7 @@ function fileHandle(
     },
     async truncate(size) {
       live();
-      if (!Number.isSafeInteger(size) || size < 0) throw new JsCallError('EINVAL', 'truncate');
+      index(size, 'truncate');
       await kernel.call({ op: 'fd-resize', fd, size });
     },
     async sync() {
@@ -390,6 +374,52 @@ function fileHandle(
       open = false;
       forget();
       await kernel.call({ op: 'fd-close', fd });
+    },
+  };
+  return {
+    file,
+    invalidate: () => {
+      open = false;
+    },
+  };
+}
+
+function index(n: number, what: string): void {
+  if (!Number.isSafeInteger(n) || n < 0) throw new JsCallError('EINVAL', what);
+}
+
+function pathOps(
+  kernel: JsKernel,
+  resolve: (path: string) => string,
+  statOf: (op: 'stat' | 'lstat', path: string) => Promise<SyncFsBridgeStat>,
+  open: (path: string, options?: JsOpenOptions) => Promise<JsFile>
+): JsProgramContext['fs'] {
+  return {
+    stat: (path) => statOf('stat', path),
+    lstat: (path) => statOf('lstat', path),
+    exists: async (path) => (await kernel.json({ op: 'exists', path: resolve(path) })) === true,
+    readdir: async (path) =>
+      (await kernel.json({ op: 'readdir', path: resolve(path) })) as string[],
+    mkdir: async (path) => void (await kernel.call({ op: 'mkdir', path: resolve(path) })),
+    rm: async (path) => void (await kernel.call({ op: 'rm', path: resolve(path) })),
+    unlink: async (path) => void (await kernel.call({ op: 'unlink', path: resolve(path) })),
+    rename: async (from, to) =>
+      void (await kernel.call({ op: 'rename', path: resolve(from), arg2: resolve(to) })),
+    symlink: async (target, path) =>
+      void (await kernel.call({ op: 'symlink', path: resolve(path), arg2: target })),
+    readlink: async (path) => String(await kernel.json({ op: 'readlink', path: resolve(path) })),
+    async readFile(path) {
+      const abs = resolve(path);
+      await kernel.call({ op: 'fd-path-flush', path: abs });
+      return kernel.bytes({ op: 'read', path: abs });
+    },
+    async writeFile(path, data) {
+      const file = await open(path, { write: true, create: true, truncate: true });
+      try {
+        await file.write(0, typeof data === 'string' ? encoder.encode(data) : data);
+      } finally {
+        await file.close();
+      }
     },
   };
 }

@@ -198,6 +198,51 @@ async function dangling(ctx, [path]) {
   await ctx.write(1, `${r} ${await ctx.fs.exists(`${path}.target`)}\n`);
 }
 
+async function unawaited(ctx) {
+  ctx.write(1, new Uint8Array(4 * 1024 * 1024).fill(121));
+  return 0;
+}
+
+async function ctxclose(ctx, [path]) {
+  const f = await ctx.open(path, { write: true, create: true, truncate: true });
+  await ctx.close(f.fd);
+  const g = await ctx.open(`${path}.other`, {
+    read: true,
+    write: true,
+    create: true,
+    truncate: true,
+  });
+  await g.write(0, new TextEncoder().encode('keep'));
+  const r = await f.write(0, new TextEncoder().encode('XX')).then(
+    () => 'ok',
+    (err) => err.code
+  );
+  const kept = text(await g.read(0, 10));
+  await g.close();
+  await ctx.write(1, `${g.fd === f.fd} ${r} ${kept}\n`);
+}
+
+async function badpos(ctx, [path]) {
+  const f = await ctx.open(path, { read: true, write: true, create: true, truncate: true });
+  await f.write(0, new TextEncoder().encode('abc'));
+  const code = (p) =>
+    p.then(
+      () => 'ok',
+      (err) => err.code
+    );
+  const one = new TextEncoder().encode('Z');
+  const tries = [
+    await code(f.read(-1, 1)),
+    await code(f.read(1.5, 1)),
+    await code(f.read(0, -1)),
+    await code(f.read(0, Number.POSITIVE_INFINITY)),
+    await code(f.write(-1, one)),
+    await code(f.write(0.5, one)),
+  ];
+  await f.close();
+  await ctx.write(1, `${tries.join(',')} ${text(await ctx.fs.readFile(path))}\n`);
+}
+
 async function nodir(ctx, [path]) {
   const r = await ctx.open(path, { write: true, create: true }).then(
     () => 'opened',
@@ -297,6 +342,9 @@ const modes = {
   exclusive,
   lock,
   nodir,
+  unawaited,
+  ctxclose,
+  badpos,
   closed,
   badtrunc,
   dangling,

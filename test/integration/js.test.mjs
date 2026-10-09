@@ -74,6 +74,15 @@ test('open files and path operations agree, append appends, exclusive creation i
     ok('EINVAL,EINVAL,EINVAL 3 abc\n')
   );
   assert.deepEqual(await run(['jstest', 'dangling', 'd.lnk'], home), ok('EEXIST false\n'));
+  assert.deepEqual(await run(['jstest', 'ctxclose', 'q.txt'], home), ok('true EBADF keep\n'));
+  assert.deepEqual(
+    await run(['jstest', 'badpos', 'p.txt'], home),
+    ok('EINVAL,EINVAL,EINVAL,EINVAL,EINVAL,EINVAL abc\n')
+  );
+  assert.deepEqual(
+    await bash('jstest unawaited | head -c 1 >/dev/null; echo "${PIPESTATUS[0]}"'),
+    ok('141\n')
+  );
 });
 
 test('a JS program gets WebCodecs in its process worker, and no network or storage of its own', async (t) => {
