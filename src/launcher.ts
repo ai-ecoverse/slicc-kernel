@@ -197,6 +197,7 @@ const ENV_REFERENCE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
 const WASM_MAGIC = [0x00, 0x61, 0x73, 0x6d];
 const SHEBANG_MAX = 256;
 const NOT_FOUND = 127;
+const INIT_PID = 1;
 const SHARED_DIRS = ['/tmp', '/home'];
 const encoder = new TextEncoder();
 
@@ -605,7 +606,7 @@ export class Launcher {
     };
     const shown = (pid: number | undefined): number => {
       const member = pid === undefined ? undefined : members.get(pid);
-      return member ? rootOf(member).pid : (pid ?? 0);
+      return member ? rootOf(member).pid : INIT_PID;
     };
     const listed: ProcessInfo[] = [];
     for (const member of members.values()) {

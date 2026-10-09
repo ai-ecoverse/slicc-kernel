@@ -4,6 +4,7 @@ import { mountTable } from './process-fds.ts';
 const HZ = 100;
 const DIR_MODE = 0o40555;
 const FILE_MODE = 0o100444;
+const LINK_MODE = 0o120777;
 const ENOENT = 44;
 const ESRCH = 71;
 const EINVAL = 28;
@@ -206,6 +207,7 @@ interface ProcNode {
     readdir?: (node: ProcNode) => string[];
     getattr?: (node: ProcNode) => object;
     setattr?: (node: ProcNode, attr: object) => void;
+    readlink?: (node: ProcNode) => string;
   };
   stream_ops?: object;
 }
@@ -344,6 +346,13 @@ export function useProcfs(Fs: ProcFs, sys: ProcSys, pid: number, memory = memory
       return [...names];
     },
   };
+  hashRemoveNode.call(Fs, self);
+  const link = fresh(proc, 'self', LINK_MODE);
+  const shownPid = () => String(find(procList().processes, pid, true)?.pid ?? pid);
+  link.node_ops.readlink = shownPid;
+  const procLookup = proc.node_ops.lookup as NonNullable<ProcNode['node_ops']['lookup']>;
+  proc.node_ops.lookup = (parent, name) =>
+    name === 'self' ? link : name === shownPid() ? self : procLookup(parent, name);
   const selfOps = self.node_ops;
   const selfLookup = selfOps.lookup?.bind(selfOps);
   const selfReaddir = selfOps.readdir?.bind(selfOps);

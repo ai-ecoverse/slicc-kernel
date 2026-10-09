@@ -58,6 +58,7 @@
     "@ai-ecoverse/wasm-coreutils": "9.7.0-3",
     "@ai-ecoverse/wasm-curl": "8.22.0-1",
     "@ai-ecoverse/wasm-git": "2.55.0-9",
+    "@ai-ecoverse/wasm-procps": "4.0.5-2",
     "@ai-ecoverse/wasm-tls-engine": "3.6.5-1",
     "@biomejs/biome": "2.5.15",
     "@types/node": "24.19.1",
