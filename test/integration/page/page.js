@@ -247,12 +247,14 @@ window.boot = async (options = {}) => {
   const network = options.network === false ? {} : { network: { transport } };
   const policy =
     options.processMounts === undefined ? {} : { processMounts: options.processMounts };
+  const handles = options.media === undefined ? {} : { media: options.media };
   window.kernel = withTracking(
     await createKernel({
       root: await navigator.storage.getDirectory(),
       ...network,
       ...media,
       ...policy,
+      ...handles,
     })
   );
   return true;

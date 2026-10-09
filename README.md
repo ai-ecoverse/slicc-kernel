@@ -29,6 +29,7 @@ const { status, stdout, stderr } = await kernel.run(['bash', '-c', 'echo hi > he
 | `modules` | `'/node_modules'` | where installed packages are scanned for commands |
 | `env` | `{}` | environment added to every run |
 | `metadata` | `'slicc-kernel'` | the IndexedDB database for POSIX metadata (see [Metadata](#metadata)); `false` keeps it in memory for the kernel's lifetime |
+| `media` | `'<metadata>:media'` | the IndexedDB database for the folder handles of `fsa` drives (see [Removable media](#removable-media-fsa)); `false` keeps them in memory, as `metadata: false` does |
 | `worker` | `new URL('./kernel-worker.js', import.meta.url)` | the kernel worker script |
 | `network` | none | `{ transport }`: how programs reach the outside world (see [Network](#network)) |
 | `requestDirectory` | none | `() => Promise<FileSystemDirectoryHandle>`, typically `showDirectoryPicker`: how an `fsa` mount gets its folder (see [Removable media](#removable-media-fsa)) |
@@ -216,7 +217,7 @@ An `fsa` mount is a drive for a local folder, from the File System Access API, a
   - WASI has no `ENOMEDIUM`, so WASI programs get `ENODEV` ("No such device"), the nearest errno.
 - **Insert request:** at the same time the kernel calls the page's `onMountPending({ target, source, insert })`, so the page can show "Insert a folder for /mnt/x" with a button.
 - **Inserting:** calling `insert()` from that button's click picks the folder with `requestDirectory()`, or asks for permission again on a folder the drive had before. The medium goes in without a remount, and the state becomes `ok`. `kernel.insert(target, handle)` inserts a handle the page already has.
-- **Persistence:** the drive's source is `fsa:<id>`, and the kernel keeps the folder's handle under that id in IndexedDB (`<metadata>:media`). Mounting `fsa:<id>` again, after a reboot too, inserts the folder at once while its permission holds, and asks again when it is back to `prompt`. In an Incognito window Chrome crashes a page that reads a folder handle back from IndexedDB. Pass `metadata: false` there, which keeps the handles in memory, so a remount finds its folder only within the same kernel.
+- **Persistence:** the drive's source is `fsa:<id>`, and the kernel keeps the folder's handle under that id in IndexedDB (`<metadata>:media`). Mounting `fsa:<id>` again, after a reboot too, inserts the folder at once while its permission holds, and asks again when it is back to `prompt`. In an Incognito window Chrome crashes a page that reads a folder handle back from IndexedDB ([#95](https://github.com/ai-ecoverse/slicc-kernel/issues/95)). Pass `media: false` there: the kernel then never opens the handle database, and keeps the handles in memory, so a remount finds its folder only within the same kernel, while POSIX metadata still persists. `metadata: false` keeps the handles in memory too.
 - **Ejecting:** `umount` ejects. So does the permission going away: the next operation fails with `ENOMEDIUM` and the kernel asks again. The folder is untouched either way.
 - **Limits:** the folder has no symlinks or modes, and `df` reports no size for it either.
 

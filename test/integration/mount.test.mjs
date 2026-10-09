@@ -283,6 +283,27 @@ test('maxfile: a write past the cap fails with "File too large" and a non-zero s
   assert.deepEqual(page.errors, []);
 });
 
+test('fsa with media: false: mount, insert, read and write, umount, with metadata kept and no folder handle in IndexedDB (#95, #116)', async (t) => {
+  const { page, bash } = await booted(chrome, t, { media: false });
+  await bash('mkdir -p /mnt/f', { cwd: '/home' });
+  await page.evaluate(() => window.kernel.mount({ type: 'fsa', source: 'none', target: '/mnt/f' }));
+  await page.evaluate(() => window.insertPending(0));
+  assert.deepEqual(
+    await bash('echo kept > /mnt/f/a.txt && chmod 600 /mnt/f/a.txt && cat /mnt/f/a.txt', {
+      cwd: '/home',
+    }),
+    { status: 0, stdout: 'kept\n', stderr: '' }
+  );
+  await page.evaluate(() => window.kernel.umount('/mnt/f'));
+  const databases = await page.evaluate(async () =>
+    (await indexedDB.databases()).map((d) => d.name)
+  );
+  assert.ok(databases.includes('slicc-kernel'));
+  assert.ok(!databases.some((name) => name.endsWith(':media')));
+  assert.equal(await page.evaluate(() => window.opfs.read('picked/a.txt')), 'kept\n');
+  assert.deepEqual(page.errors, []);
+});
+
 async function sliccNode(dir, origin) {
   let key;
   const start = (port) =>

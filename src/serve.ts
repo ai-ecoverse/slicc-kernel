@@ -31,6 +31,7 @@ export interface InitRequest {
   modules?: string;
   env?: Record<string, string>;
   metadata?: string | false;
+  media?: string | false;
   transport?: RealmTransportTraits;
   hostfs?: boolean;
   processMounts?: boolean | 'ask';
@@ -110,10 +111,17 @@ function dirsChannel(name: string | false): string | undefined {
 
 async function stores(
   deps: ServeDeps,
-  name: string | false
+  name: string | false,
+  media: string | false | undefined
 ): Promise<{ meta?: MetaStore | undefined; media?: MediaStore | undefined }> {
-  if (name === false) return {};
-  return { meta: await deps.metadata?.(name), media: await deps.media?.(`${name}:media`) };
+  const handles = media ?? (name === false ? false : `${name}:media`);
+  if (handles !== false && handles === name) {
+    throw new Error(`media and metadata cannot share the IndexedDB database ${name}`);
+  }
+  return {
+    ...(name === false ? {} : { meta: await deps.metadata?.(name) }),
+    ...(handles === false ? {} : { media: await deps.media?.(handles) }),
+  };
 }
 
 export interface GrantReply {
@@ -179,7 +187,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
   async function init(req: InitRequest): Promise<boolean> {
     launcher = (req.root ? Promise.resolve(req.root) : deps.storage()).then(async (root) => {
       const name = req.metadata ?? META_DB;
-      const { meta, media } = await stores(deps, name);
+      const { meta, media } = await stores(deps, name, req.media);
       remote = req.transport ? new RemoteTransport(port, req.transport) : undefined;
       const fs = new OpfsFs(root, meta, dirsChannel(name));
       await fs.reconcile();
