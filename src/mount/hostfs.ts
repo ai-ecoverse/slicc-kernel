@@ -1,4 +1,4 @@
-import { fsError, type OpenFlags, serveFilesystem } from './driver.ts';
+import { type FilesystemHandlers, fsError, type OpenFlags, serveFilesystem } from './driver.ts';
 import { type MediumHandlers, mediumSlot } from './medium.ts';
 import type { MountSpec, OpenedDriver } from './mount-fs.ts';
 import type { DriverAttr, DriverCapabilities, DriverEntry, DriverStatfs } from './protocol.ts';
@@ -204,7 +204,7 @@ export function hostfsHandlers(current: () => HostfsClient): MediumHandlers {
       return { opened, restore };
     }
   }
-  return {
+  const handlers: MediumHandlers = {
     getattr: async (path) => await call<DriverAttr>('stat', { path: rel(path) }),
     async readdir(path) {
       const { entries } = await call<{ entries: Array<{ name: string; attr: DriverAttr }> }>(
@@ -259,9 +259,46 @@ export function hostfsHandlers(current: () => HostfsClient): MediumHandlers {
     symlink: async (target, path) => void (await call('symlink', { target, path: rel(path) })),
     readlink: async (path) =>
       (await call<{ target: string }>('readlink', { path: rel(path) })).target,
-    setattr: async (path, change) => void (await call('setattr', { path: rel(path), ...change })),
+    async setattr(path, { size, ...change }) {
+      if (size !== undefined && !current().capabilities.ranges) await resize(handlers, path, size);
+      else if (size !== undefined) change = { ...change, size } as typeof change;
+      if (Object.keys(change).length > 0) await call('setattr', { path: rel(path), ...change });
+    },
     statfs: () => call<DriverStatfs>('statfs'),
   };
+  return handlers;
+}
+
+const KEEP: OpenFlags = { write: false, create: false, truncate: false, exclusive: false };
+
+async function resize(h: FilesystemHandlers, path: string, size: number): Promise<void> {
+  const was = (await h.getattr(path)).size;
+  if (size === was) return;
+  const kept: Uint8Array[] = [];
+  if (size < was && size > 0) {
+    const fh = await h.open(path, KEEP);
+    try {
+      for (let at = 0; at < size; ) {
+        const bytes = await h.read(fh, at, size - at);
+        if (bytes.length === 0) break;
+        kept.push(bytes);
+        at += bytes.length;
+      }
+    } finally {
+      await h.release(fh);
+    }
+  }
+  const fh = await h.open(path, { ...KEEP, write: true, truncate: size < was });
+  try {
+    if (size > was) await h.write(fh, size - 1, new Uint8Array(1));
+    let at = 0;
+    for (const bytes of kept) {
+      await h.write(fh, at, bytes);
+      at += bytes.length;
+    }
+  } finally {
+    await h.release(fh);
+  }
 }
 
 export interface WatchLoop {
@@ -385,13 +422,18 @@ export async function openHostfs(
   const grant = () => hook(spec.source, { readonly });
   let active: HostfsClient | undefined;
   const handlers = hostfsHandlers(() => active as HostfsClient);
-  const served = serveFilesystem(port2, slot.handlers, {
-    symlinks: true,
-    chmod: true,
-    listingStats: true,
-    maxIo: HOSTFS_IO,
-    ...(readonly ? { readonly: true } : {}),
-  });
+  const ranged = () => (active?.capabilities.ranges === true ? { ranges: true } : {});
+  const served = serveFilesystem(
+    port2,
+    { ...slot.handlers, mount: ranged },
+    {
+      symlinks: true,
+      chmod: true,
+      listingStats: true,
+      maxIo: HOSTFS_IO,
+      ...(readonly ? { readonly: true } : {}),
+    }
+  );
   const watching = keepWatching(
     {
       connect: async () => new HostfsClient(await grant(), grant, fetch),
