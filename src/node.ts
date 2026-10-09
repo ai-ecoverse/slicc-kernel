@@ -8,7 +8,7 @@ import type { WasmWorkerLike } from './kernel/host.ts';
 import type { RouteTable } from './kernel/net/routes.ts';
 import type { NetworkUplink } from './kernel/net/uplink.ts';
 import { Launcher } from './launcher.ts';
-import type { HostfsGrantHook } from './mount/hostfs.ts';
+import type { FetchLike, HostfsGrantHook } from './mount/hostfs.ts';
 import type { MountEntry, MountSpec } from './mount/mount-fs.ts';
 import type { ProcessMountPolicy } from './mount/syscall.ts';
 import { isMemoryRoot, memoryRoot } from './node/memory-root.ts';
@@ -58,6 +58,8 @@ export interface NodeKernelOptions {
   processMounts?: ProcessMountPolicy;
   fstabRetries?: readonly number[];
   hostfs?: HostfsGrantHook;
+  hostfsFetch?: FetchLike;
+  hostfsOrigin?: string;
   cdp?: CdpHook;
   hostname?: string;
 }
@@ -74,6 +76,19 @@ export interface NodeKernel {
   umount(target: string): Promise<void>;
   mounts(): Promise<MountEntry[]>;
   terminate(): void;
+}
+
+function hostfsFetchOf(options: NodeKernelOptions): { hostfsFetch?: FetchLike } {
+  const { hostfsFetch, hostfsOrigin } = options;
+  if (hostfsOrigin === undefined) return hostfsFetch ? { hostfsFetch } : {};
+  const base: FetchLike = hostfsFetch ?? ((url, init) => fetch(url, init));
+  return {
+    hostfsFetch: (url, init) =>
+      base(url, {
+        ...init,
+        headers: { ...(init.headers as Record<string, string>), Origin: hostfsOrigin },
+      }),
+  };
 }
 
 export function nodeTransport(): NetworkTransport {
@@ -155,6 +170,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     ...(options.processMounts !== undefined ? { processMounts: options.processMounts } : {}),
     ...(options.fstabRetries ? { fstabRetries: options.fstabRetries } : {}),
     ...(options.hostfs ? { hostfs: options.hostfs } : {}),
+    ...hostfsFetchOf(options),
     ...(options.cdp ? { cdp: options.cdp } : {}),
     ...(options.hostname !== undefined ? { hostname: options.hostname } : {}),
   });
