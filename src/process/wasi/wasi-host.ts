@@ -626,16 +626,23 @@ export class WasiHost {
 
   private setTimes(path: string, atim: bigint, mtim: bigint, flags: number, follow = true): void {
     const now = Date.now();
-    let current: number | undefined;
+    let current: SyncFsBridgeStat | undefined;
     const statOf = follow ? this.o.fs.stat.bind(this.o.fs) : this.o.fs.lstat.bind(this.o.fs);
-    const kept = (): number => (current ??= statOf(path).mtimeMs ?? now);
-    const pick = (set: number, setNow: number, value: bigint): number =>
-      flags & setNow ? now : flags & set ? Number(value / NS_PER_MS) : kept();
+    const kept = (field: 'atimeMs' | 'mtimeMs'): number => {
+      current ??= statOf(path);
+      return current[field] ?? current.mtimeMs ?? now;
+    };
+    const pick = (
+      set: number,
+      setNow: number,
+      value: bigint,
+      field: 'atimeMs' | 'mtimeMs'
+    ): number => (flags & setNow ? now : flags & set ? Number(value / NS_PER_MS) : kept(field));
     (follow ? this.o.fs.utimes : this.o.fs.lutimes).call(
       this.o.fs,
       path,
-      pick(FSTFLAGS.ATIM, FSTFLAGS.ATIM_NOW, atim),
-      pick(FSTFLAGS.MTIM, FSTFLAGS.MTIM_NOW, mtim)
+      pick(FSTFLAGS.ATIM, FSTFLAGS.ATIM_NOW, atim, 'atimeMs'),
+      pick(FSTFLAGS.MTIM, FSTFLAGS.MTIM_NOW, mtim, 'mtimeMs')
     );
   }
 

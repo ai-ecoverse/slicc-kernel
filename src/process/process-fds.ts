@@ -224,12 +224,16 @@ interface UtimeFs {
 
 export function noFollowUtimes(
   imports: WebAssembly.Imports,
-  fs: () => ProcessFs | undefined
+  fs: () => ProcessFs | undefined,
+  glue?: unknown
 ): void {
   for (const namespace of namespaces(imports)) {
-    const utimensat = namespace.__syscall_utimensat;
-    if (typeof utimensat !== 'function') continue;
-    namespace.__syscall_utimensat = (dirfd: number, path: number, times: number, flags: number) => {
+    const key = Object.keys(namespace).find(
+      (name) => (glue !== undefined && namespace[name] === glue) || name === '__syscall_utimensat'
+    );
+    const utimensat = key === undefined ? undefined : namespace[key];
+    if (key === undefined || typeof utimensat !== 'function') continue;
+    namespace[key] = (dirfd: number, path: number, times: number, flags: number) => {
       const Fs = fs() as UtimeFs | undefined;
       const { utime, lookupPath, ErrnoError } = Fs ?? {};
       if (!Fs || !(flags & AT_SYMLINK_NOFOLLOW) || !utime || !lookupPath || !ErrnoError) {

@@ -410,7 +410,11 @@ export async function runWasmProcess(
             },
           });
           liveParent(imports, () => identify(transport, init).ppid);
-          noFollowUtimes(imports, () => ownValue<ProcessFs>(module, 'FS'));
+          noFollowUtimes(
+            imports,
+            () => ownValue<ProcessFs>(module, 'FS'),
+            ownValue<{ utimensat?: unknown }>(module, 'sliccSyscalls')?.utimensat
+          );
           const glue = ownValue<FdImports>(module, 'sliccFdImports');
           syncFsync(imports, () => ownValue<ProcessFs>(module, 'FS'), glue);
           positionalIo(imports, {
