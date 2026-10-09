@@ -41,7 +41,7 @@ export interface FilesystemHandlers {
   rename(from: string, to: string): Promise<void>;
   symlink?(target: string, path: string): Promise<void>;
   readlink?(path: string): Promise<string>;
-  setattr?(path: string, attr: { mode?: number; mtime?: number }): Promise<void>;
+  setattr?(path: string, attr: { mode?: number; mtime?: number; size?: number }): Promise<void>;
   statfs?(): Promise<DriverStatfs>;
 }
 
@@ -96,6 +96,7 @@ async function dispatch(h: FilesystemHandlers, req: DriverRequest): Promise<unkn
       return h.setattr?.(req.path, {
         ...(req.mode !== undefined ? { mode: req.mode } : {}),
         ...(req.mtime !== undefined ? { mtime: req.mtime } : {}),
+        ...(req.size !== undefined ? { size: req.size } : {}),
       });
     case 'statfs':
       return h.statfs?.() ?? null;
@@ -107,7 +108,8 @@ async function dispatch(h: FilesystemHandlers, req: DriverRequest): Promise<unkn
 export function serveFilesystem(
   port: DriverPort,
   handlers: FilesystemHandlers,
-  capabilities: DriverCapabilities = {}
+  capabilities: DriverCapabilities = {},
+  options: { owned?: boolean } = {}
 ): ServedFilesystem {
   let open = false;
   const reply = (message: object, transfer: Transferable[] = []) =>
@@ -145,7 +147,8 @@ export function serveFilesystem(
     dispatch(handlers, data).then(
       (result) => {
         if (result instanceof Uint8Array) {
-          const bytes = result.slice();
+          const whole = result.byteOffset === 0 && result.byteLength === result.buffer.byteLength;
+          const bytes = options.owned && whole ? result : result.slice();
           reply({ id: data.id, result: bytes }, [bytes.buffer]);
         } else reply({ id: data.id, result: result ?? null });
       },

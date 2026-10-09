@@ -1,3 +1,4 @@
+import { RangedFile } from '../fs/ranged.ts';
 import { inodeOf } from '../fs/types.ts';
 import type { SyncFsBridgeStat, SyncFsPosixBridge, SyncFsUsage } from './sync-fs-wire.ts';
 
@@ -53,6 +54,9 @@ interface LiveNodeState {
   listed?: Map<string, SyncFsBridgeStat>;
 
   maxFile?: number;
+
+  ranges?: boolean;
+  ranged?: RangedFile;
 }
 
 export interface LiveFsNode {
@@ -235,7 +239,8 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
 
   function statOf(node: LiveFsNode): SyncFsBridgeStat {
     if (node.live.orphan) {
-      return { ...(node.live.stat as SyncFsBridgeStat), size: node.live.len };
+      const size = node.live.ranged?.size() ?? node.live.len;
+      return { ...(node.live.stat as SyncFsBridgeStat), size };
     }
     if (!node.live.stat) {
       const st = call(() => bridgeOf(node).lstat(liveNodePath(node)));
@@ -259,6 +264,24 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
     s.loaded = true;
   }
 
+  function rangedOf(node: LiveFsNode): RangedFile | undefined {
+    const s = node.live;
+    if (s.ranged || !s.ranges) return s.ranged;
+    const bridge = bridgeOf(node);
+    const path = () => liveNodePath(node);
+    const io = {
+      pread: (_: string, at: number, n: number) =>
+        (bridge.pread as NonNullable<typeof bridge.pread>)(path(), at, n),
+      pwrite: (_: string, at: number, bytes: Uint8Array, transfer?: boolean) =>
+        (bridge.pwrite as NonNullable<typeof bridge.pwrite>)(path(), at, bytes, transfer),
+      truncate: (_: string, size: number) =>
+        (bridge.truncate as NonNullable<typeof bridge.truncate>)(path(), size),
+    };
+    const st = call(() => bridge.stat(path()));
+    s.ranged = new RangedFile(io, path(), st.size);
+    return s.ranged;
+  }
+
   function ensureCapacity(node: LiveFsNode, need: number): Uint8Array {
     const s = node.live;
     const cur = s.data ?? new Uint8Array(0);
@@ -271,9 +294,12 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
 
   function flushNode(node: LiveFsNode): void {
     const s = node.live;
-    if (!s.dirty || !s.data || s.orphan) return;
-    const bytes = s.data.slice(0, s.len);
-    call(() => bridgeOf(node).writeFile(liveNodePath(node), bytes));
+    if (!s.dirty || s.orphan || !(s.data || s.ranged)) return;
+    if (s.ranged) call(() => s.ranged?.flush());
+    else {
+      const bytes = (s.data as Uint8Array).slice(0, s.len);
+      call(() => bridgeOf(node).writeFile(liveNodePath(node), bytes));
+    }
     s.dirty = false;
     s.stat = undefined;
   }
@@ -287,6 +313,12 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
         throw new Fs.ErrnoError(ERRNO_BY_CODE.EFBIG);
       }
     }
+    const ranged = s.openCount > 0 ? rangedOf(node) : undefined;
+    if (ranged) {
+      ranged.truncate(size);
+      s.dirty = true;
+      return;
+    }
     if (s.openCount > 0) {
       if (size > 0) ensureLoaded(node);
       else s.loaded = true;
@@ -298,6 +330,12 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
     }
 
     const path = liveNodePath(node);
+    const bridge = bridgeOf(node);
+    if (statOf(node).ranged && bridge.truncate) {
+      call(() => bridge.truncate?.(path, size));
+      s.stat = undefined;
+      return;
+    }
     const bytes = new Uint8Array(size);
     if (size > 0) {
       const cur = call(() => bridgeOf(node).readFile(path));
@@ -317,6 +355,7 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
     childPath,
     ensureLoaded,
     ensureCapacity,
+    rangedOf,
     flushNode,
     truncate,
   };
@@ -331,7 +370,7 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
     getattr(node) {
       const st = statOf(node);
       const s = node.live;
-      const size = Fs.isDir(node.mode) ? 4096 : s.loaded ? s.len : st.size;
+      const size = Fs.isDir(node.mode) ? 4096 : (s.ranged?.size() ?? (s.loaded ? s.len : st.size));
       const mtime = new Date(st.mtimeMs ?? 0);
       return {
         dev: st.dev ?? 1,
@@ -432,7 +471,9 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
       } catch {}
       if (open) {
         statOf(open);
-        ensureLoaded(open);
+        const ranged = h.rangedOf(open);
+        if (ranged) ranged.pin();
+        else ensureLoaded(open);
       }
       call(() => bridgeOf(parent).unlink(childPath(parent, name)));
       if (open) open.live.orphan = true;
@@ -466,7 +507,7 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
 }
 
 function createStreamOps(h: LiveHelpers): LiveStreamOps {
-  const { Fs, statOf, ensureLoaded, ensureCapacity, flushNode, bridgeOf } = h;
+  const { Fs, statOf, ensureLoaded, ensureCapacity, flushNode, bridgeOf, rangedOf } = h;
   const held = (stream: LiveFsStream, change: 1 | -1) => {
     const s = stream.node.live;
     if ((stream.flags & 3) === 0 || s.orphan) return;
@@ -481,6 +522,16 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
   return {
     open(stream) {
       if (!Fs.isFile(stream.node.mode)) return;
+      const s = stream.node.live;
+      if (s.openCount === 0 && !s.orphan) {
+        const bridge = bridgeOf(stream.node);
+        s.ranges = !!(
+          bridge.pread &&
+          bridge.pwrite &&
+          bridge.truncate &&
+          statOf(stream.node).ranged
+        );
+      }
       if ((stream.flags & 3) !== 0) {
         try {
           const st = statOf(stream.node);
@@ -513,6 +564,8 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
         flushNode(node);
       } finally {
         s.data = undefined;
+        s.ranged = undefined;
+        s.ranges = false;
         s.len = 0;
         s.loaded = false;
         held(stream, -1);
@@ -521,6 +574,11 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
     read(stream, buffer, offset, length, position) {
       const node = stream.node;
       if (Fs.isDir(node.mode)) throw new Fs.ErrnoError(ERRNO_BY_CODE.EISDIR);
+      const ranged = rangedOf(node);
+      if (ranged) {
+        const out = new Uint8Array(buffer.buffer, buffer.byteOffset + offset, Math.max(0, length));
+        return h.call(() => ranged.readInto(position, out));
+      }
       ensureLoaded(node);
       const s = node.live;
       if (position >= s.len || length <= 0) return 0;
@@ -536,6 +594,13 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
       const s = node.live;
       const end = position + length;
       if (s.maxFile !== undefined && end > s.maxFile) throw new Fs.ErrnoError(ERRNO_BY_CODE.EFBIG);
+      const ranged = rangedOf(node);
+      if (ranged) {
+        const bytes = new Uint8Array(buffer.buffer, buffer.byteOffset + offset, length);
+        h.call(() => ranged.write(position, bytes));
+        s.dirty = true;
+        return length;
+      }
       ensureLoaded(node);
       const buf = ensureCapacity(node, end);
       if (position > s.len) buf.fill(0, s.len, position);
@@ -549,7 +614,7 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
       if (whence === SEEK_CUR) pos += stream.position;
       else if (whence === SEEK_END && Fs.isFile(stream.node.mode)) {
         const s = stream.node.live;
-        pos += s.loaded ? s.len : statOf(stream.node).size;
+        pos += rangedOf(stream.node)?.size() ?? (s.loaded ? s.len : statOf(stream.node).size);
       }
       if (pos < 0) throw new Fs.ErrnoError(ERRNO_BY_CODE.EINVAL);
       return pos;
@@ -589,11 +654,15 @@ function ownedBy(plugin: LiveVfsPlugin, node: LiveFsNode | null | undefined): no
 export function flushLiveVfs(Fs: LiveFsApi, plugin: LiveVfsPlugin): void {
   for (const head of Fs.nameTable ?? []) {
     for (let node = head; node; node = (node as { name_next?: LiveFsNode }).name_next ?? null) {
-      if (!ownedBy(plugin, node) || !node.live.dirty || !node.live.data) continue;
+      const s = node.live;
+      if (!ownedBy(plugin, node) || !s.dirty || !(s.data || s.ranged)) continue;
       try {
-        const bytes = node.live.data.slice(0, node.live.len);
-        node.mount.opts.bridge.writeFile(liveNodePath(node), bytes);
-        node.live.dirty = false;
+        if (s.ranged) s.ranged.flush();
+        else {
+          const bytes = (s.data as Uint8Array).slice(0, s.len);
+          node.mount.opts.bridge.writeFile(liveNodePath(node), bytes);
+        }
+        s.dirty = false;
       } catch (err) {
         throw toErrno(Fs, err);
       }
@@ -612,8 +681,9 @@ export function invalidateLiveVfs(Fs: LiveFsApi, plugin: LiveVfsPlugin): void {
       s.listed = undefined;
       if (s.openCount === 0) {
         if (node !== node.mount.root && !node.mounted) drop.push(node);
-      } else if (s.loaded && !s.dirty) {
+      } else if (!s.dirty && !s.orphan) {
         s.data = undefined;
+        s.ranged = undefined;
         s.len = 0;
         s.loaded = false;
       }

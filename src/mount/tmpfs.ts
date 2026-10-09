@@ -1,3 +1,4 @@
+import { ChunkedBytes } from './chunked.ts';
 import { type FilesystemHandlers, fsError, type OpenFlags } from './driver.ts';
 import type { DriverAttr, DriverEntry } from './protocol.ts';
 
@@ -6,16 +7,14 @@ interface Node {
   ino: number;
   mode: number;
   mtime: number;
-  data: Uint8Array;
+  data: ChunkedBytes;
   target: string;
   children: Map<string, Node>;
 }
 
 interface Handle {
   node: Node;
-  data: Uint8Array;
-  length: number;
-  dirty: boolean;
+  write: boolean;
 }
 
 export function tmpfs(): FilesystemHandlers {
@@ -25,7 +24,7 @@ export function tmpfs(): FilesystemHandlers {
     ino: ++inodes,
     mode,
     mtime: Date.now(),
-    data: new Uint8Array(0),
+    data: new ChunkedBytes(),
     target: '',
     children: new Map(),
   });
@@ -55,7 +54,7 @@ export function tmpfs(): FilesystemHandlers {
   const attr = (node: Node): DriverAttr => ({
     kind: node.kind,
     size:
-      node.kind === 'file' ? node.data.length : node.kind === 'symlink' ? node.target.length : 4096,
+      node.kind === 'file' ? node.data.size : node.kind === 'symlink' ? node.target.length : 4096,
     mtime: node.mtime,
     mode: node.mode,
     ino: node.ino,
@@ -91,32 +90,25 @@ export function tmpfs(): FilesystemHandlers {
     },
     async open(path, flags) {
       const node = opened(path, flags);
-      const data = flags.truncate ? new Uint8Array(0) : node.data.slice();
-      handles.set(++nextFh, { node, data, length: data.length, dirty: flags.truncate });
+      if (flags.truncate && node.kind === 'file') {
+        node.data.truncate(0);
+        node.mtime = Date.now();
+      }
+      handles.set(++nextFh, { node, write: flags.write });
       return nextFh;
     },
     async read(fh, offset, size) {
-      const h = handle(fh);
-      return h.data.slice(offset, Math.min(h.length, offset + size));
+      return handle(fh).node.data.read(offset, size);
     },
     async write(fh, offset, bytes) {
       const h = handle(fh);
-      const end = offset + bytes.length;
-      if (end > h.data.length) {
-        const grown = new Uint8Array(Math.max(end, h.data.length * 2));
-        grown.set(h.data.subarray(0, h.length));
-        h.data = grown;
-      }
-      h.data.set(bytes, offset);
-      h.length = Math.max(h.length, end);
-      h.dirty = true;
+      if (!h.write) throw fsError('EBADF', `handle ${fh} is read-only`);
+      h.node.data.write(offset, bytes, true);
+      h.node.mtime = Date.now();
     },
     async release(fh) {
-      const h = handle(fh);
+      handle(fh);
       handles.delete(fh);
-      if (!h.dirty) return;
-      h.node.data = h.data.slice(0, h.length);
-      h.node.mtime = Date.now();
     },
     async mkdir(path) {
       const { dir, name } = parent(path);
@@ -172,6 +164,12 @@ export function tmpfs(): FilesystemHandlers {
     async setattr(path, change) {
       const node = find(path);
       if (change.mode !== undefined) node.mode = (node.mode & ~0o7777) | (change.mode & 0o7777);
+      if (change.size !== undefined) {
+        if (node.kind !== 'file')
+          throw fsError(node.kind === 'directory' ? 'EISDIR' : 'EINVAL', path);
+        node.data.truncate(change.size);
+        node.mtime = Date.now();
+      }
       if (change.mtime !== undefined) node.mtime = change.mtime;
     },
     async statfs() {

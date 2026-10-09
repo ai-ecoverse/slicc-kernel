@@ -1,9 +1,13 @@
+import { AsyncRangedFile, type AsyncRangedIo } from '../fs/ranged.ts';
+import { rangedOps } from '../fs/types.ts';
 import { KernelError, OpenFile } from './fd-table.ts';
 
-export interface VfsFileFs {
+export interface VfsFileFs extends Partial<AsyncRangedIo> {
   readFileBuffer(path: string): Promise<Uint8Array>;
   writeFile(path: string, content: Uint8Array): Promise<void>;
-  stat?(path: string): Promise<{ readonly?: boolean; maxFile?: number }>;
+  stat?(
+    path: string
+  ): Promise<{ readonly?: boolean; maxFile?: number; size?: number; ranged?: boolean }>;
   readlink?(path: string): Promise<string>;
 }
 
@@ -49,6 +53,7 @@ function within(path: string, root: string): boolean {
 
 export class VfsNode {
   private data: Uint8Array | undefined;
+  private ranged: AsyncRangedFile | undefined;
   private length = 0;
   private dirty = false;
   private queue: Promise<unknown> = Promise.resolve();
@@ -102,6 +107,26 @@ export class VfsNode {
     clearTimeout(this.writeBack);
     this.writeBack = undefined;
     this.data = undefined;
+    this.ranged = undefined;
+  }
+
+  private async prepare(): Promise<AsyncRangedFile | undefined> {
+    if (this.revoked) throw new KernelError('EIO');
+    if (this.ranged || this.data) return this.ranged;
+    const io = rangedOps(this.fs);
+    const st =
+      io && !this.orphaned ? await this.fs.stat?.(this.path).catch(() => undefined) : undefined;
+    if (io && st?.ranged) {
+      this.ranged = new AsyncRangedFile(io, this.path, st.size ?? 0);
+      return this.ranged;
+    }
+    await this.load();
+    return undefined;
+  }
+
+  async keep(): Promise<void> {
+    const ranged = await this.prepare();
+    await ranged?.pin();
   }
 
   async load(): Promise<Uint8Array> {
@@ -120,6 +145,7 @@ export class VfsNode {
   }
 
   replace(contents: Uint8Array): void {
+    this.ranged = undefined;
     this.data = new Uint8Array(contents);
     this.length = this.data.length;
     this.missing = false;
@@ -127,18 +153,21 @@ export class VfsNode {
   }
 
   async materialize(): Promise<void> {
-    await this.load();
+    if (await this.prepare()) return;
     if (!this.missing || this.orphaned) return;
     this.missing = false;
     await this.fs.writeFile(this.path, this.data?.slice(0, this.length) ?? new Uint8Array(0));
+    if (!this.dirty) this.data = undefined;
   }
 
   async size(): Promise<number> {
-    await this.load();
-    return this.length;
+    const ranged = await this.prepare();
+    return ranged ? ranged.size() : this.length;
   }
 
   async pread(max: number, at: number): Promise<Uint8Array> {
+    const ranged = await this.prepare();
+    if (ranged) return ranged.read(at, max);
     const bytes = await this.load();
     const n = Math.max(0, Math.min(max, this.length - at));
     return bytes.slice(at, at + n);
@@ -167,13 +196,19 @@ export class VfsNode {
 
   renamedTo(path: string): void {
     this.path = path;
+    if (this.ranged) this.ranged.path = path;
     this.cap = undefined;
   }
 
   async pwrite(bytes: Uint8Array, at: number): Promise<number> {
     if (bytes.length === 0) return 0;
     await this.fits(at + bytes.length);
-    await this.load();
+    const ranged = await this.prepare();
+    if (ranged) {
+      await ranged.write(at, bytes);
+      this.markDirty();
+      return bytes.length;
+    }
     const buf = this.ensure(at + bytes.length);
     if (at > this.length) buf.fill(0, this.length, at);
     buf.set(bytes, at);
@@ -184,7 +219,12 @@ export class VfsNode {
 
   async truncate(size: number): Promise<void> {
     await this.fits(size);
-    await this.load();
+    const ranged = await this.prepare();
+    if (ranged) {
+      ranged.truncate(size);
+      this.markDirty();
+      return;
+    }
     const buf = this.ensure(size);
     if (size > this.length) buf.fill(0, this.length, size);
     this.length = size;
@@ -212,11 +252,12 @@ export class VfsNode {
 
   async flush(): Promise<void> {
     if (this.revoked && this.dirty) throw new KernelError('EIO');
-    if (!this.dirty || !this.data || this.orphaned) return;
+    if (!this.dirty || this.orphaned || !(this.data || this.ranged)) return;
     this.dirty = false;
     const started = performance.now();
     try {
-      await this.fs.writeFile(this.path, this.data.slice(0, this.length));
+      if (this.ranged) await this.ranged.flush();
+      else await this.fs.writeFile(this.path, (this.data as Uint8Array).slice(0, this.length));
     } catch (err) {
       this.dirty = true;
       throw err;
@@ -272,7 +313,7 @@ export class VfsNodes {
 
   async unlinking(path: string): Promise<void> {
     const node = this.byPath.get(path);
-    if (node) await node.serial(async () => void (await Promise.all([node.load(), node.limit()])));
+    if (node) await node.serial(async () => void (await Promise.all([node.keep(), node.limit()])));
   }
 
   revoke(prefix: string): void {

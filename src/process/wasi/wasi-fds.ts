@@ -434,7 +434,7 @@ export class WasiFds {
   }
 
   unlinking(path: string): void {
-    this.buffers.get(path)?.load();
+    this.buffers.get(path)?.keep();
     if (this.shared) this.kernel.call({ op: 'fd-path-unlinking', path });
   }
 
@@ -507,7 +507,8 @@ export class WasiFds {
     } else {
       if (!existing) this.fs.writeFile(path, new Uint8Array(0));
       const empty = !existing || (oflags & OFLAGS.TRUNC) !== 0;
-      buffer = new FileBuffer(this.fs, path, empty, (existing ?? this.fs.stat(path)).maxFile);
+      const st = existing ?? this.fs.stat(path);
+      buffer = new FileBuffer(this.fs, path, empty, st.maxFile, st.ranged ? st.size : undefined);
       this.buffers.set(path, buffer);
     }
     buffer.opens++;
@@ -609,7 +610,8 @@ function promoteRequest(
   handed: ReadonlySet<FileBuffer>
 ): Extract<WasmSyscall, { op: 'fd-promote' }> {
   const orphan = f.buffer.isOrphan();
-  const joins = !orphan && handed.has(f.buffer);
+  if (!orphan && f.buffer.isRanged) f.buffer.flush();
+  const joins = !orphan && (handed.has(f.buffer) || f.buffer.isRanged);
   return {
     op: 'fd-promote',
     fd,

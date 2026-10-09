@@ -25,10 +25,18 @@ if (size > SAFE && process.env.SLICC_BIG_FILE_I_HAVE_THE_RAM !== '1') {
 const { launcher } = await import('../test/unit/helpers/node-process.mjs');
 const { bash, kernel } = await launcher({ coreutils: true });
 await kernel.fs.mkdir('/mnt/t', { recursive: true });
-await kernel.mount({ type: 'tmpfs', source: 'none', target: '/mnt/t' });
+await kernel.mount({
+  type: 'tmpfs',
+  source: 'none',
+  target: '/mnt/t',
+  options: { maxfile: String(Math.max(size, MiB)) },
+});
+const run = (bytes) =>
+  bash(`head -c ${bytes} /dev/urandom > /mnt/t/big && wc -c < /mnt/t/big && rm /mnt/t/big`);
+await run(MiB);
 const before = process.resourceUsage().maxRSS * 1024;
 const started = Date.now();
-const result = await bash(`head -c ${size} /dev/urandom > /mnt/t/big && wc -c < /mnt/t/big`);
+const result = await run(size);
 const peak = process.resourceUsage().maxRSS * 1024;
 console.log(
   JSON.stringify({
