@@ -83,6 +83,12 @@ test('open files and path operations agree, append appends, exclusive creation i
     await bash('jstest unawaited | head -c 1 >/dev/null; echo "${PIPESTATUS[0]}"'),
     ok('141\n')
   );
+  const bg = (await bash('jstest pid & p=$!; wait; echo "$p $$"')).stdout.trim().split('\n');
+  assert.equal(bg[0], bg[1]);
+  const ex = (await bash(`bash -c 'echo "$$ $PPID"; exec jstest pid'; true`)).stdout
+    .trim()
+    .split('\n');
+  assert.equal(ex[1], ex[0]);
   assert.deepEqual(await run(['jstest', 'strayw']), {
     status: 1,
     stdout: '',

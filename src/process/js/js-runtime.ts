@@ -2,7 +2,7 @@ import type { JsProcessInitMsg } from '../../kernel/protocol.ts';
 import type { SabPostLike } from '../../realm/sync-sab-bridge.ts';
 import { importSource } from '../wasi/wasi-imports.ts';
 import { createAsyncSabTransport, type WaitAsyncLike } from './async-sab.ts';
-import { createContext, JsExit, type JsProgramContext } from './js-context.ts';
+import { createContext, identityOf, JsExit, type JsProgramContext } from './js-context.ts';
 import { JsKernel } from './js-kernel.ts';
 import { lockdown } from './lockdown.ts';
 
@@ -82,11 +82,13 @@ export async function runJsProcess(
     onError: fail,
     waitAsync: deps.waitAsync,
   });
+  const id = identityOf(await kernel.json({ op: 'proc-identity' }), init);
   const { ctx, drain } = createContext({
     kernel,
     argv: [init.argv0, ...init.args],
     env: init.env,
-    pid: init.pid,
+    pid: id.pid,
+    ppid: id.ppid,
     cwd: init.cwd,
     exit: (status) => exited(statusOf(status)),
   });

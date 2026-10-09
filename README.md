@@ -198,7 +198,7 @@ A command can be an ES module instead of a wasm program: `"abi": "js"` and `modu
 
 The module's default export (or its `main` export) is called with a context and returns the exit status, or nothing for 0. It runs as an ordinary process in a process worker of its own: it has a pid and a process group, shows in `ps` and `/proc`, takes part in pipes, redirects and job control, and `kill`, `^C` and `^Z` reach it. A process worker is a dedicated worker, so a JS program can use what browsers offer there, such as WebCodecs (`VideoEncoder`, `VideoDecoder`, `AudioEncoder`, `AudioDecoder`, `ImageDecoder`) and `OffscreenCanvas`, without the page's main thread. The context (`JsProgramContext`, exported as a type) has:
 
-- `argv` (with `argv[0]`), `env`, `pid` and `cwd`, and `resolve(path)` to make a path absolute against `cwd`;
+- `argv` (with `argv[0]`), `env`, `pid` (the pid `ps` shows, also after an `exec`), `ppid()` (asked each time, so an orphan sees 1) and `cwd`, and `resolve(path)` to make a path absolute against `cwd`;
 - `stdin`, `stdout` and `stderr` as web streams, and `read(fd, max?)` (empty at end of file), `write(fd, bytes | string)` and `close(fd)` on any descriptor it inherited. A write waits until the pipe has room, so a slow reader slows the program down;
 - `fdStatus(fd)` (`{ type, tty, seekable }`, `type` being `file`, `pipe`, `tty`, `socket`, `device` or `directory`) and `isatty(fd)`, to tell `< file` from a pipe;
 - `open(path, { read, write, append, create, exclusive, truncate })`, which returns a file with `read(position, length)`, `write(position, bytes)`, `size()`, `truncate(size)`, `sync()` and `close()`. Reads and writes go through the kernel's paged files at those positions, so a large file is never read whole;

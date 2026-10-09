@@ -37,6 +37,7 @@ export interface JsProgramContext {
   readonly argv: readonly string[];
   readonly env: Readonly<Record<string, string>>;
   readonly pid: number;
+  ppid(): Promise<number>;
   readonly cwd: string;
   readonly stdin: ReadableStream<Uint8Array>;
   readonly stdout: WritableStream<Uint8Array>;
@@ -91,6 +92,7 @@ export interface ContextOptions {
   argv: readonly string[];
   env: Readonly<Record<string, string>>;
   pid: number;
+  ppid: number;
   cwd: string;
   exit(status: number): void;
   random?: (bytes: Uint8Array) => void;
@@ -102,6 +104,19 @@ const O_WRONLY = 0o1;
 const O_RDWR = 0o2;
 const O_APPEND = 0o2000;
 const encoder = new TextEncoder();
+
+export interface Identity {
+  pid: number;
+  ppid: number;
+}
+
+export function identityOf(answer: unknown, fallback: { pid: number; ppid?: number }): Identity {
+  const id = answer as Partial<Identity> | null;
+  return {
+    pid: typeof id?.pid === 'number' ? id.pid : fallback.pid,
+    ppid: typeof id?.ppid === 'number' ? id.ppid : (fallback.ppid ?? 1),
+  };
+}
 
 export function signalNumber(signal: JsSignal): number {
   if (typeof signal === 'number') {
@@ -276,6 +291,9 @@ export function createContext(o: ContextOptions): CreatedContext {
     argv: o.argv,
     env: o.env,
     pid: o.pid,
+    async ppid() {
+      return identityOf(await kernel.json({ op: 'proc-identity' }), o).ppid;
+    },
     cwd: o.cwd,
     stdin: new ReadableStream<Uint8Array>(
       {

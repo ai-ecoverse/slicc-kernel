@@ -203,6 +203,10 @@ async function unawaited(ctx) {
   return 0;
 }
 
+async function pid(ctx) {
+  await ctx.write(1, `${ctx.pid} ${await ctx.ppid()}\n`);
+}
+
 async function strayw(ctx) {
   ctx.write(99, 'x');
   return 0;
@@ -348,6 +352,7 @@ const modes = {
   lock,
   nodir,
   unawaited,
+  pid,
   strayw,
   ctxclose,
   badpos,
