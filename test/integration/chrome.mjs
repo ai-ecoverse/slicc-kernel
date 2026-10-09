@@ -14,7 +14,7 @@ const options = {
   exits: { '/dist/process-worker.js': [/WASM_PROCESS_EXIT, code/, /WASM_PROCESS_ERROR,$/] },
 };
 
-export const launch = () => start(options);
+export const launch = (args = []) => start({ ...options, args });
 
 if (argv[1] === fileURLToPath(import.meta.url)) {
   const { url } = await serve({ ...options, port: Number(env.PORT ?? 8080) });

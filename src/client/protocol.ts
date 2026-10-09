@@ -3,7 +3,7 @@ import type { TransportCall, TransportReply } from '../kernel/net/remote-transpo
 import type { RealmTransportTraits } from '../kernel/net/transport.ts';
 import type { MountSpec } from '../mount/mount-fs.ts';
 
-export const PROTOCOL: readonly [number, number] = [1, 4];
+export const PROTOCOL: readonly [number, number] = [1, 5];
 
 export interface ClientHello {
   protocol: readonly [number, number];
@@ -67,6 +67,8 @@ export type ClientCall =
   | { op: 'umount'; target: string }
   | { op: 'mounts' }
   | { op: 'dial'; port: number; host?: string }
+  | { op: 'serve-cdp'; runtime?: string }
+  | { op: 'unserve-cdp'; registration: number }
   | { op: 'detach'; kill?: boolean };
 
 export type ClientRequest = ClientCall & { id: number };

@@ -1,4 +1,5 @@
 import { MessageChannel, type MessagePort, Worker } from 'node:worker_threads';
+import type { CdpHook } from './cdp/types.ts';
 import type { MessagePortLike } from './client/protocol.ts';
 import { type ServedClient, serveClient } from './client/serve-client.ts';
 import { OpfsFs } from './fs/opfs.ts';
@@ -11,6 +12,7 @@ import { memoryRoot } from './node/memory-root.ts';
 import { signalNumber } from './serve.ts';
 import { fetchTransport, type NetworkTransport } from './transport.ts';
 
+export type { CdpConnection, CdpHook, CdpRequest } from './cdp/types.ts';
 export {
   type AttachOptions,
   attachKernel,
@@ -48,6 +50,7 @@ export interface NodeKernelOptions {
   driverWorker?: string | URL;
   processMounts?: ProcessMountPolicy;
   fstabRetries?: readonly number[];
+  cdp?: CdpHook;
 }
 
 export interface NodeKernel {
@@ -140,6 +143,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     ...(transport ? { transport } : {}),
     ...(options.processMounts !== undefined ? { processMounts: options.processMounts } : {}),
     ...(options.fstabRetries ? { fstabRetries: options.fstabRetries } : {}),
+    ...(options.cdp ? { cdp: options.cdp } : {}),
   });
   await launcher.prepare();
   const guard = <T>(work: () => Promise<T>): Promise<T> =>
@@ -225,6 +229,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
       for (const client of [...clients]) client.detach();
       for (const reject of [...pending]) reject(new Error(TERMINATED));
       for (const kill of [...live]) kill();
+      launcher.cdp.close();
       launcher.unmountAll();
     },
   };

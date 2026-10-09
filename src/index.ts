@@ -1,3 +1,5 @@
+import { type CdpOpen, serveCdpPort } from './cdp/port.ts';
+import type { CdpHook } from './cdp/types.ts';
 import {
   type DialHandle,
   type DialledSocket,
@@ -15,6 +17,7 @@ import type { ProcessMountPolicy, ProcessMountRequest } from './mount/syscall.ts
 import type { KernelCall, TerminalAction } from './serve.ts';
 import { type NetworkTransport, serveTransport } from './transport.ts';
 
+export type { CdpConnection, CdpHook, CdpRequest } from './cdp/types.ts';
 export {
   type AttachOptions,
   attachKernel,
@@ -74,6 +77,7 @@ export interface KernelOptions {
   onMountPending?: (pending: MountPending) => void;
   hostfs?: HostfsGrantHook;
   processMounts?: ProcessMountPolicy;
+  cdp?: CdpHook;
 }
 
 interface HostfsRequest {
@@ -190,6 +194,46 @@ function dialer(call: (req: KernelCall) => Promise<unknown>) {
   return { dial, reset };
 }
 
+function initCall(options: KernelOptions, transport: NetworkTransport | undefined): KernelCall {
+  return {
+    op: 'init',
+    ...(options.root ? { root: options.root } : {}),
+    ...(options.modules ? { modules: options.modules } : {}),
+    ...(options.env ? { env: options.env } : {}),
+    ...(options.metadata !== undefined ? { metadata: options.metadata } : {}),
+    ...(options.media !== undefined ? { media: options.media } : {}),
+    ...(options.ca !== undefined ? { ca: options.ca } : {}),
+    ...(transport ? { transport: transport.traits } : {}),
+    ...(options.hostfs ? { hostfs: true } : {}),
+    ...(options.cdp ? { cdp: true } : {}),
+    ...(options.processMounts !== undefined
+      ? {
+          processMounts:
+            typeof options.processMounts === 'function' ? 'ask' : options.processMounts,
+        }
+      : {}),
+  };
+}
+
+function cdpBridge(hook: CdpHook | undefined) {
+  const open = new Set<() => void>();
+  let closed = false;
+  return {
+    open({ cdpOpen, port }: CdpOpen): void {
+      if (!hook || closed) {
+        port.close();
+        return;
+      }
+      const close = serveCdpPort(port, hook, cdpOpen, () => open.delete(close));
+      open.add(close);
+    },
+    close(): void {
+      closed = true;
+      for (const close of [...open]) close();
+    },
+  };
+}
+
 export async function createKernel(options: KernelOptions = {}): Promise<Kernel> {
   if (!globalThis.crossOriginIsolated) throw new Error(ISOLATION);
   const url = options.worker ?? new URL('./kernel-worker.js', import.meta.url);
@@ -199,8 +243,10 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
   let failure: Error | undefined;
 
   const dials = dialer((req) => call(req));
+  const cdp = cdpBridge(options.cdp);
   const fail = (error: Error) => {
     dials.reset();
+    cdp.close();
     failure = error;
     bridge?.close();
     for (const call of pending.values()) call.reject(error);
@@ -251,8 +297,10 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
       | { medium: PendingMedium }
       | { hostfs: HostfsRequest }
       | { mountPolicy: { id: number; req: ProcessMountRequest } }
+      | CdpOpen
     >) => {
       if ('net' in data) return bridge?.answer(data);
+      if ('cdpOpen' in data) return cdp.open(data);
       if ('mountPolicy' in data) return void policy(data.mountPolicy);
       if ('medium' in data) return pendingMedium(data.medium);
       if ('hostfs' in data) return void grantHostfs(data.hostfs);
@@ -324,23 +372,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
 
   const { dial } = dials;
 
-  await call({
-    op: 'init',
-    ...(options.root ? { root: options.root } : {}),
-    ...(options.modules ? { modules: options.modules } : {}),
-    ...(options.env ? { env: options.env } : {}),
-    ...(options.metadata !== undefined ? { metadata: options.metadata } : {}),
-    ...(options.media !== undefined ? { media: options.media } : {}),
-    ...(options.ca !== undefined ? { ca: options.ca } : {}),
-    ...(transport ? { transport: transport.traits } : {}),
-    ...(options.hostfs ? { hostfs: true } : {}),
-    ...(options.processMounts !== undefined
-      ? {
-          processMounts:
-            typeof options.processMounts === 'function' ? 'ask' : options.processMounts,
-        }
-      : {}),
-  });
+  await call(initCall(options, transport));
 
   return {
     async run(argv, runOptions = {}) {

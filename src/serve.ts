@@ -1,3 +1,5 @@
+import { portCdpHook } from './cdp/port.ts';
+import type { CdpHook } from './cdp/types.ts';
 import { type LockManagerLike, locksOf } from './client/protocol.ts';
 import { type ServedClient, serveClient } from './client/serve-client.ts';
 import { META_DB, type MetaStore } from './fs/meta.ts';
@@ -37,6 +39,7 @@ export interface InitRequest {
   transport?: RealmTransportTraits;
   hostfs?: boolean;
   processMounts?: boolean | 'ask';
+  cdp?: boolean;
 }
 
 export interface RunRequest {
@@ -143,6 +146,15 @@ async function stores(
   };
 }
 
+function cdpOption(req: InitRequest, port: KernelPort): { cdp?: CdpHook } {
+  if (!req.cdp) return {};
+  return {
+    cdp: portCdpHook((request, cdp) =>
+      port.postMessage({ cdpOpen: request, port: cdp }, [cdp as unknown as MessagePort])
+    ),
+  };
+}
+
 export interface GrantReply {
   id: number;
   grant?: HostfsGrant;
@@ -227,6 +239,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
         ...(media ? { media } : {}),
         onMountPending: (medium) => port.postMessage({ medium }),
         ...(req.hostfs ? { hostfs: askGrant } : {}),
+        ...cdpOption(req, port),
         ...mountPolicy(req.processMounts),
         caStore: caStore(deps.metadata ? caDb(req) : false),
       });

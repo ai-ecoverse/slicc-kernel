@@ -18,6 +18,8 @@ export const REASON: Readonly<Record<number, string>> = {
   200: 'OK',
   400: 'Bad Request',
   403: 'Forbidden',
+  404: 'Not Found',
+  405: 'Method Not Allowed',
   408: 'Request Timeout',
   411: 'Length Required',
   413: 'Content Too Large',
@@ -27,6 +29,7 @@ export const REASON: Readonly<Record<number, string>> = {
   501: 'Not Implemented',
   502: 'Bad Gateway',
   503: 'Service Unavailable',
+  504: 'Gateway Timeout',
   505: 'HTTP Version Not Supported',
 };
 export class Incoming {
