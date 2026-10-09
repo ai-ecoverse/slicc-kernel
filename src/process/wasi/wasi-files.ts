@@ -60,6 +60,10 @@ export class FileBuffer {
     return this.ranged !== undefined;
   }
 
+  get pin(): string | undefined {
+    return this.ranged?.pinnedVersion;
+  }
+
   keep(): void {
     if (this.ranged) this.ranged.pin();
     else this.load();

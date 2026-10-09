@@ -100,7 +100,13 @@ export interface ProcessSys {
     path: string,
     flags: number,
     position: number,
-    opts?: { contents?: Uint8Array; orphan?: boolean; truncate?: boolean; create?: boolean }
+    opts?: {
+      contents?: Uint8Array;
+      orphan?: boolean;
+      truncate?: boolean;
+      create?: boolean;
+      pin?: { version: string; size: number };
+    }
   ): number;
 
   seek(fd: number, offset: number, whence: number): number;

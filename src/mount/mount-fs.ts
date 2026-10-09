@@ -500,15 +500,20 @@ class MountFs implements KernelFs {
     if ((await this.table.getattr(mount, real, rel)).kind === 'directory') {
       throw errnoError('EISDIR', real);
     }
-    const fh = (await mount.conn.call({
-      op: 'open',
-      path: rel,
-      write: false,
-      create: false,
-      truncate: false,
-      exclusive: false,
-      ...(version !== undefined ? { ifMatch: version } : {}),
-    })) as number;
+    const fh = (await mount.conn
+      .call({
+        op: 'open',
+        path: rel,
+        write: false,
+        create: false,
+        truncate: false,
+        exclusive: false,
+        ...(version !== undefined ? { ifMatch: version } : {}),
+      })
+      .catch((err: unknown) => {
+        const gone = version !== undefined && (err as { code?: unknown }).code === 'ENOENT';
+        throw gone ? errnoError('ESTALE', `${real} is gone from the host`) : err;
+      })) as number;
     const chunk = mount.caps.maxIo ?? DEFAULT_IO;
     const chunks: Uint8Array[] = [];
     let total = 0;

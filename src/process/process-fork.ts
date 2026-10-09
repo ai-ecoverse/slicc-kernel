@@ -13,7 +13,16 @@ const O_TRUNC = 0o1000;
 const PLACEHOLDER_DIR = '/dev/slicc-fd';
 
 interface LiveNodeBag {
-  live?: { orphan?: boolean; data?: Uint8Array; len?: number };
+  live?: {
+    orphan?: boolean;
+    data?: Uint8Array;
+    len?: number;
+    ranged?: {
+      pinnedVersion?: string;
+      size(): number;
+      read(at: number, length: number): Uint8Array;
+    };
+  };
   mode: number;
 }
 
@@ -25,6 +34,7 @@ function isVfsFile(Fs: ProcessFs, stream: ProcessStream): boolean {
 function orphanContents(stream: ProcessStream): Uint8Array | undefined {
   const live = (stream.node as LiveNodeBag).live;
   if (!live?.orphan) return undefined;
+  if (live.ranged) return live.ranged.read(0, live.ranged.size());
   return live.data?.slice(0, live.len ?? live.data.length) ?? new Uint8Array(0);
 }
 
@@ -40,11 +50,14 @@ export function vfsPromoter(
     let kfd = promoted.get(stream.shared);
     if (kfd === undefined) {
       const contents = orphanContents(stream);
+      const ranged = (stream.node as LiveNodeBag).live?.ranged;
+      const version = ranged?.pinnedVersion;
+      const pin = ranged && version !== undefined ? { version, size: ranged.size() } : undefined;
       kfd = sys.openVfs(
         livePath(stream),
         stream.flags,
         stream.position,
-        contents !== undefined ? { contents, orphan: true } : undefined
+        contents !== undefined ? { contents, orphan: true } : pin ? { pin } : undefined
       );
       promoted.set(stream.shared, kfd);
     }
