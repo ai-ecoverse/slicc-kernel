@@ -273,6 +273,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     cdp.close();
     failure = error;
     bridge?.close();
+    uplinks?.close();
     for (const call of pending.values()) call.reject(error);
     pending.clear();
   };
@@ -327,7 +328,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
       | CdpOpen
     >) => {
       if ('net' in data) return bridge?.answer(data);
-      if ('uplink' in data) return uplinks?.(data);
+      if ('uplink' in data) return uplinks?.answer(data);
       if ('cdpOpen' in data) return cdp.open(data);
       if ('mountPolicy' in data) return void policy(data.mountPolicy);
       if ('medium' in data) return pendingMedium(data.medium);

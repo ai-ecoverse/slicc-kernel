@@ -60,9 +60,14 @@ function failure(uid: number, e: unknown): UplinkReply {
   };
 }
 
-export function serveUplink(peer: UplinkPeer, uplink: NetworkUplink): (call: UplinkCall) => void {
+export interface UplinkServer {
+  answer(call: UplinkCall): void;
+  close(): void;
+}
+
+export function serveUplink(peer: UplinkPeer, uplink: NetworkUplink): UplinkServer {
   const pending = new Map<number, AbortController>();
-  return (call) => {
+  const answer = (call: UplinkCall) => {
     if (call.uplink === 'cancel') return pending.get(call.uid)?.abort();
     const abort = new AbortController();
     pending.set(call.uid, abort);
@@ -76,6 +81,12 @@ export function serveUplink(peer: UplinkPeer, uplink: NetworkUplink): (call: Upl
         pending.delete(call.uid);
       }
     })();
+  };
+  return {
+    answer,
+    close: () => {
+      for (const abort of pending.values()) abort.abort();
+    },
   };
 }
 
