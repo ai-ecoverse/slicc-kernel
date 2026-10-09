@@ -47,6 +47,7 @@ export interface NodeKernelOptions {
   worker?: string | URL;
   driverWorker?: string | URL;
   processMounts?: ProcessMountPolicy;
+  fstabRetries?: readonly number[];
 }
 
 export interface NodeKernel {
@@ -138,6 +139,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     ...(options.env ? { env: options.env } : {}),
     ...(transport ? { transport } : {}),
     ...(options.processMounts !== undefined ? { processMounts: options.processMounts } : {}),
+    ...(options.fstabRetries ? { fstabRetries: options.fstabRetries } : {}),
   });
   await launcher.prepare();
   const guard = <T>(work: () => Promise<T>): Promise<T> =>

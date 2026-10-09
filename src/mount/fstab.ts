@@ -68,26 +68,39 @@ export async function mountFstab(
   mount: (spec: MountSpec) => Promise<MountEntry>,
   signal: AbortSignal,
   retries: readonly number[] = FSTAB_RETRIES,
-  discard: (entry: MountEntry) => void = () => {}
+  discard: (entry: MountEntry) => void = () => {},
+  settled: (line: FstabLine, result: FstabResult) => void = () => {}
 ): Promise<FstabResult[]> {
   return Promise.all(
-    lines.map(async ({ line, spec, invalid }) => {
-      let failed: unknown = invalid;
-      for (let attempt = 0; !invalid && attempt <= retries.length && !signal.aborted; attempt++) {
-        try {
-          const entry = await mount(spec);
-          if (!signal.aborted) return { line, target: spec.target, entry };
-          discard(entry);
-          failed = Object.assign(new Error('the kernel stopped'), { code: 'ECANCELED' });
-          break;
-        } catch (err) {
-          failed = err;
-          if (FINAL.has(codeOf(err)) || attempt === retries.length) break;
-          await wait(retries[attempt] as number, signal);
-        }
-      }
-      const code = codeOf(failed);
-      return { line, target: spec.target, code, error: String((failed as Error)?.message ?? code) };
+    lines.map(async (each) => {
+      const result = await mountLine(each, mount, signal, retries, discard);
+      settled(each, result);
+      return result;
     })
   );
+}
+
+async function mountLine(
+  { line, spec, invalid }: FstabLine,
+  mount: (spec: MountSpec) => Promise<MountEntry>,
+  signal: AbortSignal,
+  retries: readonly number[],
+  discard: (entry: MountEntry) => void
+): Promise<FstabResult> {
+  let failed: unknown = invalid;
+  for (let attempt = 0; !invalid && attempt <= retries.length && !signal.aborted; attempt++) {
+    try {
+      const entry = await mount(spec);
+      if (!signal.aborted) return { line, target: spec.target, entry };
+      discard(entry);
+      failed = Object.assign(new Error('the kernel stopped'), { code: 'ECANCELED' });
+      break;
+    } catch (err) {
+      failed = err;
+      if (FINAL.has(codeOf(err)) || attempt === retries.length) break;
+      await wait(retries[attempt] as number, signal);
+    }
+  }
+  const code = codeOf(failed);
+  return { line, target: spec.target, code, error: String((failed as Error)?.message ?? code) };
 }

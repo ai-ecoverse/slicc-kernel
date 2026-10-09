@@ -101,6 +101,7 @@ export interface LauncherOptions {
   hostfsFetch?: FetchLike;
   hostfsTiming?: HostfsTiming;
   processMounts?: ProcessMountPolicy;
+  fstabRetries?: readonly number[];
 }
 
 export interface PendingMedium {
@@ -299,6 +300,7 @@ export class Launcher {
   private readonly onMountPending: ((pending: PendingMedium) => void) | undefined;
   private readonly removable = new Map<string, Removable>();
   private readonly hostfs: Pick<LauncherOptions, 'hostfs' | 'hostfsFetch' | 'hostfsTiming'>;
+  private readonly fstabRetries: readonly number[];
   private readonly inserted = new Map<string, MediumHandle>();
   private readonly openFiles = new Set<VfsNodes>();
   private readonly held = new Set<HeldPaths>();
@@ -322,6 +324,7 @@ export class Launcher {
     this.media = options.media ?? memoryMedia();
     this.onMountPending = options.onMountPending;
     this.hostfs = options;
+    this.fstabRetries = options.fstabRetries ?? FSTAB_RETRIES;
     this.processMounts = options.processMounts ?? true;
     this.pnpmHome = options.env?.PNPM_HOME ?? PNPM_HOME;
     this.modulesDir = options.modules ?? '/node_modules';
@@ -800,12 +803,23 @@ export class Launcher {
 
   private async mountFstab(): Promise<FstabResult[]> {
     const text = await this.base.readFile(FSTAB_PATH).catch(() => '');
+    const lines = parseFstab(text);
+    for (const { spec } of lines) this.mounts.note(spec, 'pending');
     return mountFstab(
-      parseFstab(text),
-      (spec) => this.mount(spec),
+      lines,
+      (spec) =>
+        this.mount(spec).catch((err: unknown) => {
+          this.mounts.note(spec, 'pending', (err as Error)?.message ?? String(err));
+          throw err;
+        }),
       this.booting.signal,
-      FSTAB_RETRIES,
-      (entry) => this.umount(entry.target, true)
+      this.fstabRetries,
+      (entry) => this.umount(entry.target, true),
+      ({ spec }, result) => {
+        if (!result.code || result.code === 'ECANCELED' || this.booting.signal.aborted) {
+          this.mounts.unnote(spec.target);
+        } else this.mounts.note(spec, 'failed', result.error);
+      }
     );
   }
 

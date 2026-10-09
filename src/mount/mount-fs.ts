@@ -14,7 +14,7 @@ export interface MountEntry {
   source: string;
   target: string;
   options: Record<string, string>;
-  state: 'ok' | 'failed' | 'nomedium';
+  state: 'ok' | 'failed' | 'nomedium' | 'pending';
   error?: string;
 }
 
@@ -156,6 +156,7 @@ export class MountTable {
   private readonly mounts = new Map<string, Mount>();
   private devices = 0;
   private readonly pending = new Set<string>();
+  private readonly notes = new Map<string, MountEntry>();
   private readonly deps: MountDeps;
 
   constructor(deps: MountDeps) {
@@ -167,8 +168,8 @@ export class MountTable {
   }
 
   list(): MountEntry[] {
-    return [...this.mounts.values()].map(
-      ({ type, source, target, options, state, error, present }) => ({
+    const mounted = [...this.mounts.values()].map(
+      ({ type, source, target, options, state, error, present }): MountEntry => ({
         type,
         source,
         target,
@@ -177,6 +178,20 @@ export class MountTable {
         ...(error ? { error } : {}),
       })
     );
+    const noted = [...this.notes.values()].filter((note) => !this.mounts.has(note.target));
+    return [...mounted, ...noted.map((note) => ({ ...note, options: { ...note.options } }))];
+  }
+
+  note(spec: MountSpec, state: 'pending' | 'failed', error?: string): void {
+    const target = normalizePath(spec.target);
+    this.notes.set(target, {
+      type: spec.type,
+      source: spec.source,
+      target,
+      options: { ...spec.options },
+      state,
+      ...(error ? { error } : {}),
+    });
   }
 
   locate(path: string): { mount: Mount; rel: string } | undefined {
@@ -256,14 +271,21 @@ export class MountTable {
     };
     mounted = mount;
     this.mounts.set(target, mount);
+    this.notes.delete(target);
     return this.list().find((m) => m.target === target) as MountEntry;
+  }
+
+  unnote(target: string): void {
+    this.notes.delete(normalizePath(target));
   }
 
   umount(target: string, detach = false): void {
     const at = normalizePath(target);
     const mount = this.mounts.get(at);
+    if (!mount && this.notes.delete(at)) return;
     if (!mount) throw errnoError('EINVAL', `${at} is not mounted`);
     if (!detach && this.deps.busy(at)) throw errnoError('EBUSY', `${at} has open files`);
+    this.notes.delete(at);
     this.mounts.delete(at);
     mount.conn.close();
     mount.dispose();
