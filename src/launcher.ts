@@ -53,7 +53,6 @@ import {
 import {
   FSTAB_PATH,
   FSTAB_RETRIES,
-  type FstabLine,
   type FstabResult,
   mountFstab,
   parseFstab,
@@ -806,7 +805,7 @@ export class Launcher {
     const text = await this.base.readFile(FSTAB_PATH).catch(() => '');
     const lines = parseFstab(text);
     for (const { spec } of lines) this.mounts.note(spec, 'pending');
-    const results = await mountFstab(
+    return mountFstab(
       lines,
       (spec) =>
         this.mount(spec).catch((err: unknown) => {
@@ -815,15 +814,13 @@ export class Launcher {
         }),
       this.booting.signal,
       this.fstabRetries,
-      (entry) => this.umount(entry.target, true)
+      (entry) => this.umount(entry.target, true),
+      ({ spec }, result) => {
+        if (!result.code || result.code === 'ECANCELED' || this.booting.signal.aborted) {
+          this.mounts.unnote(spec.target);
+        } else this.mounts.note(spec, 'failed', result.error);
+      }
     );
-    results.forEach((result, i) => {
-      const { spec } = lines[i] as FstabLine;
-      if (!result.code || result.code === 'ECANCELED' || this.booting.signal.aborted) {
-        this.mounts.unnote(spec.target);
-      } else this.mounts.note(spec, 'failed', result.error);
-    });
-    return results;
   }
 
   private environment(cwd: string, extra: Record<string, string> | undefined) {
