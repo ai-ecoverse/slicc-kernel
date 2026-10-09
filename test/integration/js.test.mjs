@@ -83,6 +83,17 @@ test('open files and path operations agree, append appends, exclusive creation i
     await bash('jstest unawaited | head -c 1 >/dev/null; echo "${PIPESTATUS[0]}"'),
     ok('141\n')
   );
+  assert.deepEqual(await run(['jstest', 'strayw']), {
+    status: 1,
+    stdout: '',
+    stderr: 'jstest: fd-info: EBADF\n',
+  });
+  assert.deepEqual(
+    await bash(
+      `bash -c 'trap "" PIPE; jstest yes | head -c 1 >/dev/null; echo "\${PIPESTATUS[0]}"'`
+    ),
+    { status: 0, stdout: '1\n', stderr: 'jstest: fd-write: EPIPE\n' }
+  );
 });
 
 test('a JS program gets WebCodecs in its process worker, and no network or storage of its own', async (t) => {

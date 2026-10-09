@@ -34,7 +34,14 @@ import { type DefaultAction, defaultAction, isSignal, SIG, sigbit } from './sign
 import { KernelSocket, LoopbackNet } from './socket.ts';
 import { SOCKET_OPS, type SocketSyscall, socketSyscall } from './socket-syscalls.ts';
 import type { KernelTty, Termios } from './tty.ts';
-import { refuseReadonly, type VersionPin, type VfsFileFs, VfsNodes, vfsFile } from './vfs-file.ts';
+import {
+  present,
+  refuseReadonly,
+  type VersionPin,
+  type VfsFileFs,
+  VfsNodes,
+  vfsFile,
+} from './vfs-file.ts';
 
 function aborted(signal: AbortSignal): Promise<never> {
   return new Promise<never>((_, reject) => {
@@ -71,6 +78,8 @@ export type WasmSyscall =
       create?: boolean;
 
       exclusive?: boolean;
+
+      existing?: boolean;
 
       pin?: VersionPin;
     }
@@ -574,6 +583,17 @@ export class WasmProcess {
     );
   }
 
+  private async openVfs(req: Extract<FdSyscall, { op: 'fd-open-vfs' }>): Promise<number> {
+    await refuseReadonly(this.options.fs, req.path, req.flags, req);
+    if (req.exclusive) await this.nodes.createExclusive(req.path);
+    const fd = this.fds.install(this.openVfsFile(req), 3);
+    if (req.existing && !(await present(this.options.fs, req.path, true))) {
+      await Promise.resolve(this.fds.close(fd));
+      throw new KernelError('ENOENT');
+    }
+    return fd;
+  }
+
   private openVfsFile(req: Extract<FdSyscall, { op: 'fd-open-vfs' }>): OpenFile {
     return vfsFile(
       this.options.fs,
@@ -617,9 +637,7 @@ export class WasmProcess {
       case 'fd-poll':
         return { ok: true, kind: 'json', json: pollFile(this.fds.get(req.fd).file) };
       case 'fd-open-vfs':
-        await refuseReadonly(this.options.fs, req.path, req.flags, req);
-        if (req.exclusive) await this.nodes.createExclusive(req.path);
-        return { ok: true, kind: 'json', json: this.fds.install(this.openVfsFile(req), 3) };
+        return { ok: true, kind: 'json', json: await this.openVfs(req) };
       case 'fd-info':
         return { ok: true, kind: 'json', json: this.fdInfo(req.fd) };
       case 'fd-list':

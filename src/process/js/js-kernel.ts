@@ -117,10 +117,6 @@ export class JsKernel {
     if (this.handlers.size > 0) void this.watch();
   }
 
-  handles(sig: number): boolean {
-    return this.handlers.has(sig) || (this.ignored & sigbit(sig)) !== 0;
-  }
-
   private async report(): Promise<void> {
     let caught = 0;
     for (const sig of this.handlers.keys()) caught |= sigbit(sig);

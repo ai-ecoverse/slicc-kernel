@@ -203,6 +203,11 @@ async function unawaited(ctx) {
   return 0;
 }
 
+async function strayw(ctx) {
+  ctx.write(99, 'x');
+  return 0;
+}
+
 async function ctxclose(ctx, [path]) {
   const f = await ctx.open(path, { write: true, create: true, truncate: true });
   await ctx.close(f.fd);
@@ -343,6 +348,7 @@ const modes = {
   lock,
   nodir,
   unawaited,
+  strayw,
   ctxclose,
   badpos,
   closed,

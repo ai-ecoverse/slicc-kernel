@@ -384,9 +384,10 @@ export class VfsNodes {
   }
 }
 
-async function present(fs: VfsFileFs, path: string): Promise<boolean> {
+export async function present(fs: VfsFileFs, path: string, follow = false): Promise<boolean> {
+  const look = (follow ? undefined : fs.lstat) ?? fs.stat;
   try {
-    await (fs.lstat ? fs.lstat(path) : fs.stat ? fs.stat(path) : fs.readFileBuffer(path));
+    await (look ? look.call(fs, path) : fs.readFileBuffer(path));
     return true;
   } catch (err) {
     if ((err as { code?: unknown } | null)?.code === 'ENOENT') return false;

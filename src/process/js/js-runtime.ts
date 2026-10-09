@@ -41,6 +41,10 @@ export function trapStrays(scope: StrayScope, fail: (err: unknown) => void): voi
   });
 }
 
+async function settledStrays(): Promise<void> {
+  for (let turn = 0; turn < 2; turn++) await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -67,9 +71,10 @@ export async function runJsProcess(
     exitedWith ??= status;
     resolveExit(status);
   };
+  let failing: Promise<void> | undefined;
   const fail = (err: unknown): void => {
     if (err instanceof JsExit) return;
-    void say(message(err)).then(() => exited(1));
+    failing ??= say(message(err)).then(() => exited(1));
   };
   const kernel = new JsKernel({
     sab: init.sab,
@@ -110,6 +115,8 @@ export async function runJsProcess(
     });
   const status = await Promise.race([ran, exit]);
   await drain();
+  await settledStrays();
+  await failing;
   if (exitedWith !== undefined) return exitedWith;
   return status;
 }

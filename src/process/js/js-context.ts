@@ -197,7 +197,9 @@ export function createContext(o: ContextOptions): CreatedContext {
         at += r.ok && r.kind === 'json' && typeof r.json === 'number' ? r.json : body.length;
       } catch (err) {
         const broken = err instanceof JsCallError && err.code === 'EPIPE';
-        if (broken && typeOf(i) !== 'socket' && !kernel.handles(SIG.PIPE)) exit(128 + SIG.PIPE);
+        if (broken && typeOf(i) !== 'socket') {
+          await kernel.call({ op: 'proc-kill', pid: o.pid, sig: SIG.PIPE });
+        }
         throw err;
       }
     }
@@ -205,11 +207,17 @@ export function createContext(o: ContextOptions): CreatedContext {
 
   const write = (fd: number, data: Uint8Array | string): Promise<void> => {
     const bytes = typeof data === 'string' ? encoder.encode(data) : data;
-    const run = writeAll(fd, bytes);
-    pending.add(run);
-    const forget = () => void pending.delete(run);
-    run.then(forget, forget);
-    return run;
+    let settle!: () => void;
+    const settled = new Promise<void>((resolve) => (settle = resolve));
+    pending.add(settled);
+    return (async () => {
+      try {
+        await writeAll(fd, bytes);
+      } finally {
+        pending.delete(settled);
+        settle();
+      }
+    })();
   };
 
   const writable = (fd: number) =>
@@ -238,7 +246,13 @@ export function createContext(o: ContextOptions): CreatedContext {
       path: abs,
       flags: flagsOf(options),
       position: 0,
-      ...(exclusive ? { exclusive: true } : existing ? {} : { create: true }),
+      ...(exclusive
+        ? { exclusive: true }
+        : !existing
+          ? { create: true }
+          : options.create
+            ? {}
+            : { existing: true }),
       ...(options.truncate ? { truncate: true } : {}),
     })) as number;
     try {
@@ -298,7 +312,7 @@ export function createContext(o: ContextOptions): CreatedContext {
     },
     exit,
   };
-  return { ctx, drain: () => Promise.allSettled([...pending]) };
+  return { ctx, drain: () => Promise.all([...pending]) };
 }
 
 function fileHandle(
