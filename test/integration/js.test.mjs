@@ -46,6 +46,27 @@ test('a JS program runs as a process: argv, pipes with backpressure, files, exit
   assert.deepEqual(page.errors, []);
 });
 
+test('open files and path operations agree, append appends, exclusive creation is atomic', async (t) => {
+  const { bash, run } = await booted(chrome, t);
+  const home = { cwd: '/home' };
+  assert.deepEqual(
+    await run(['jstest', 'coherent', 'c.txt'], home),
+    ok('hello world! World! World!? false\n')
+  );
+  assert.deepEqual(await run(['jstest', 'append', 'a.txt'], home), ok('abcdef\n'));
+  assert.deepEqual(await run(['jstest', 'exclusive', 'x.lock'], home), ok('1 EEXIST\n'));
+  const locks = await bash('cd /home && for i in 1 2 3 4 5 6; do jstest lock z.lock & done; wait');
+  assert.deepEqual(locks.stdout.split('\n').filter(Boolean).sort(), [
+    'EEXIST',
+    'EEXIST',
+    'EEXIST',
+    'EEXIST',
+    'EEXIST',
+    'got',
+  ]);
+  assert.deepEqual(await run(['jstest', 'nodir', 'no/such/dir/f'], home), ok('ENOENT\n'));
+});
+
 test('a JS program gets WebCodecs in its process worker, and no network or storage of its own', async (t) => {
   const { run } = await booted(chrome, t);
   const g = await run(['jstest', 'globals']);
