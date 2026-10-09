@@ -44,8 +44,9 @@ export interface UplinkRoute {
   routes: Routes;
   timeoutMs?: number;
 }
-function dialError(e: unknown, timedOut: boolean): KernelError {
+function dialError(e: unknown, timedOut: boolean, closed: boolean): KernelError {
   if (timedOut) return new KernelError('ETIMEDOUT');
+  if (closed) return new KernelError('ECONNABORTED');
   const code = (e as { code?: unknown } | null)?.code;
   const known = DIAL_ERRORS.find((errno) => errno === code);
   return new KernelError(known ?? 'EHOSTUNREACH');
@@ -251,7 +252,7 @@ export class KernelSocket implements KernelFile {
           this.attach(uplinkLink(conn));
         },
         (e: unknown) => {
-          const error = dialError(e, timedOut);
+          const error = dialError(e, timedOut, abort.signal.aborted);
           if (this.dialing === abort) {
             this.dialing = undefined;
             this.failed = error.code;

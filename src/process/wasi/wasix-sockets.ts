@@ -1,3 +1,4 @@
+import { ipv6Groups } from '../../kernel/net/routes.ts';
 import type { SockAddr } from '../../kernel/socket.ts';
 import { E, FDFLAGS } from './wasi-abi.ts';
 import { WasiError } from './wasi-files.ts';
@@ -67,8 +68,14 @@ export function writeAddr(view: DataView, ptr: number, addr: SockAddr | undefine
     );
     return;
   }
-  view.setUint8(ptr, INET4);
   view.setUint16(ptr + 2, addr.port, true);
+  const groups = ipv4(addr.host) ? undefined : ipv6Groups(addr.host);
+  if (groups) {
+    view.setUint8(ptr, INET6);
+    groups.forEach((g, i) => void view.setUint16(ptr + 4 + i * 2, g));
+    return;
+  }
+  view.setUint8(ptr, INET4);
   const octets = ipv4(addr.host) ?? [127, 0, 0, 1];
   octets.forEach((b, i) => void view.setUint8(ptr + 4 + i, b));
 }
