@@ -32,7 +32,7 @@ const { status, stdout, stderr } = await kernel.run(['bash', '-c', 'echo hi > he
 | `ca` | `'<metadata>-ca'`, or `'slicc-kernel-ca'` | the IndexedDB database for the proxy's CA (see [Network](#network)); `false` keeps it in memory |
 | `media` | `'<metadata>:media'` | the IndexedDB database for the folder handles of `fsa` drives (see [Removable media](#removable-media-fsa)); `false` keeps them in memory, as `metadata: false` does |
 | `worker` | `new URL('./kernel-worker.js', import.meta.url)` | the kernel worker script |
-| `network` | none | `{ transport }`: how programs reach the outside world (see [Network](#network)) |
+| `network` | none | `{ transport, uplink }`: how programs reach the outside world (see [Network](#network) and [Uplink](#uplink)) |
 | `requestDirectory` | none | `() => Promise<FileSystemDirectoryHandle>`, typically `showDirectoryPicker`: how an `fsa` mount gets its folder (see [Removable media](#removable-media-fsa)) |
 | `hostfs` | none | `(source, { readonly }) => Promise<{ url, token, capabilities? }>`: a grant for a `hostfs` mount from the local proxy (see [Host folders](#host-folders-hostfs)) |
 | `onMountPending` | none | `({ target, source, insert }) => void`: an `fsa` mount needs a folder; call `insert()` from a user gesture |
@@ -78,6 +78,10 @@ Stops the kernel worker and every process. Pending and later calls reject.
 
 Makes a port for another client of the same kernel. Hand it to a dedicated worker, or through a SharedWorker to another tab: it can be transferred any number of times. All clients share one process table, so a terminal on the page can `ps` and `kill` what a worker started.
 
+### `kernel.setRoutes({ prefixes, exit }) → Promise<void>`
+
+Replaces the [uplink](#uplink)'s route table: `prefixes` are addresses or CIDR prefixes (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`), and `exit: true` routes every address, as an exit node does. A prefix that does not parse rejects the whole table and keeps the old one.
+
 ### `kernel.dial({ port, host? })` and `kernel.loopbackFetch(input, { port, host?, signal? })`
 
 Reach a server a program runs on the kernel's loopback (a dev server, `python -m http.server`) from the page, a service worker or an attached client, which have both calls too (protocol 1.4).
@@ -105,7 +109,7 @@ Attaches to a kernel over a port from `kernel.connect()`, in any realm: a worker
 | `close({ kill })` | detaches: the client's processes keep running unless `kill` is set, which ends their process groups with `SIGKILL`; its terminals are hung up |
 | `closed` | resolves with the error that ended the client |
 
-When the kernel goes away (the page closed or reloaded, `terminate()`), pending calls and `exited` reject with `KernelGoneError`, and so do later calls. Each side holds a Web Lock and waits on the other's, since a `MessagePort` reports no close in browsers; in Node, the port's `close` event does the same. The first message is a handshake on the protocol version, `1.5` (`1.0` had no `watch`, `1.1` no mounts, `1.2` no `spawn` into a group, `1.3` no `dial` and `1.4` no `serveCdp`, which reject with `code: 'ENOSYS'` on such a kernel): a client or kernel of another major version is refused with an error naming both.
+When the kernel goes away (the page closed or reloaded, `terminate()`), pending calls and `exited` reject with `KernelGoneError`, and so do later calls. Each side holds a Web Lock and waits on the other's, since a `MessagePort` reports no close in browsers; in Node, the port's `close` event does the same. The first message is a handshake on the protocol version, `1.6` (`1.0` had no `watch`, `1.1` no mounts, `1.2` no `spawn` into a group, `1.3` no `dial` and `1.4` no `serveCdp`, which reject with `code: 'ENOSYS'` on such a kernel; a `1.5` kernel has no [uplink](#uplink)): a client or kernel of another major version is refused with an error naming both.
 
 ### Headless in Node, for tests
 
@@ -120,7 +124,7 @@ const { status, stdout } = await kernel.run(['bash', '-c', 'echo hi'], { cwd: '/
 kernel.terminate();
 ```
 
-`createNodeKernel({ root, modules, env, network, worker, processMounts, fstabRetries, cdp, hostfs })` takes the options of `createKernel` except `metadata`, and `fstabRetries`, the delays in ms between tries of a failing `/etc/fstab` line (default `[1000, 4000, 16000]`). `root` is an in-memory directory by default (`memoryRoot()` makes another), which keeps each file in 1 MiB chunks, and POSIX metadata stays in memory. Processes and threads run on `worker_threads`. The kernel has `run`, `openTerminal` and `terminate` as above, plus `root`, `writeFile(path, data)` (creating the parent directories) and `readFile(path)` to put files in place and read results. `nodeTransport()` is `fetchTransport()` with Node's `fetch`, which no CORS binds (`crossOrigin: 'any'`). `connect()` and `attachKernel` work as in the browser: the port is a `worker_threads` `MessagePort`, which a worker thread can attach with, and `terminate()` ends every attached client.
+`createNodeKernel({ root, modules, env, network, worker, processMounts, fstabRetries, cdp, hostfs })` takes the options of `createKernel` except `metadata`, and `fstabRetries`, the delays in ms between tries of a failing `/etc/fstab` line (default `[1000, 4000, 16000]`). `root` is an in-memory directory by default (`memoryRoot()` makes another), which keeps each file in 1 MiB chunks, and POSIX metadata stays in memory. Processes and threads run on `worker_threads`. The kernel has `run`, `openTerminal`, `setRoutes` and `terminate` as above, plus `root`, `writeFile(path, data)` (creating the parent directories) and `readFile(path)` to put files in place and read results. `nodeTransport()` is `fetchTransport()` with Node's `fetch`, which no CORS binds (`crossOrigin: 'any'`). `connect()` and `attachKernel` work as in the browser: the port is a `worker_threads` `MessagePort`, which a worker thread can attach with, and `terminate()` ends every attached client.
 
 ## Commands
 
@@ -178,6 +182,25 @@ await kernel.run(['curl', '-sS', 'https://registry.npmjs.org/@ai-ecoverse/wasm-b
 - **`localProxyTransport({ url, key })`** sends every request to a local proxy on loopback, such as [slicc-node](https://github.com/ai-ecoverse/slicc-node) or slicc-swift, which fetches it without CORS. Redirects reach the program unfollowed, with every `Set-Cookie`; bodies arrive decoded. `probeLocalProxy({ url, key })` resolves with the proxy's capabilities, or `null` when it is gone or refuses the key, so a page can fall back to `fetchTransport()`. `checkLocalProxy({ url, key })` says why: it resolves with `{ state }`, which is `ready` (with `probe`), `blocked` (the user denied Chrome's Local Network Access permission, `loopback-network`), `unreachable` (nothing answered; its `permission` is `granted`, `prompt` or `unknown`, and with `prompt` the page cannot tell a dismissed prompt from a proxy that is not running, since Chrome asks only once it has a connection), `refused` (with `status` and `error`, such as a stale key) or `incompatible`. The permission is not consulted when the page itself is on loopback. Both take a `fetch` option, and the transport `maxRequestBody` (default 64 MiB) and `bodyIdleMs` like `fetchTransport`.
 - **The host machine** is `host.slicc.internal` (`SLICC_HOST_LOOPBACK`), as `host.docker.internal` is in Docker, while `localhost` and `127.0.0.1` stay the kernel's own loopback. The proxy forwards `http(s)://host.slicc.internal:<port>/…` to the transport as `http(s)://127.0.0.1:<port>/…`, so it reaches the real machine's loopback through the local proxy or Node's `fetch` (through the page's own `fetch`, a request needs CORS from that server and Chrome's Local Network Access permission); other loopback addresses are still refused. This is HTTP and HTTPS through the proxy only: `/etc/hosts` and WASIX name resolution give the name `10.0.2.2`, QEMU's address for its host, so a program that connects a socket to it directly fails with `ENETUNREACH` instead of reaching the kernel's loopback.
 - **Without a transport**, every request is answered `502` with `slicc-kernel: no network transport (createKernel({ network: { transport } }))`.
+
+### Uplink
+
+`createKernel({ network: { uplink } })` (or `createNodeKernel`) gives the kernel a page-owned way into another network, such as a tailnet. It is the whole kernel's: while the page passes an uplink, every process gets its names. The uplink is an object with:
+
+- `traits`: `{ tcp: true, udp: false, ipv6 }`. Without `ipv6: true`, the kernel asks only for, and keeps only, IPv4 addresses.
+- `routes`: the first route table, `{ prefixes, exit }`, which `kernel.setRoutes` replaces when it changes. The kernel matches it itself, so a destination outside it costs no round trip.
+- `resolve(name, family, signal)`: resolves with the name's addresses, as a list or as `{ addresses, ttl }` (seconds). `[]` means the name is not the uplink's. `family` is `4`, `6` or `0` (either), and `signal` aborts when the kernel stops waiting.
+
+**Name resolution** (WASIX `sock_addr_resolve`; `Module.sliccKernel.net.resolve(name, family)` for Emscripten programs):
+- `/etc/hosts` names are answered by the kernel itself: `localhost`, every `*.localhost`, `host.slicc.internal`, and literal addresses, IPv6 included.
+- Any other name goes to the uplink. With no uplink or no answer, the name is not found (`EAI_NONAME`).
+- Answers are cached for their TTL, at most 60 s, so a change of exit node takes effect quickly.
+- **DNS cannot bridge into the kernel:** an answer that is loopback (`127.0.0.0/8`, `::1`), unspecified (`0.0.0.0`, `::`), the host (`10.0.2.2`), link-local, multicast or otherwise reserved, including the `::ffff:` forms, is dropped and logged with `console.warn`. A name cannot lead a program back to the kernel's loopback.
+- An uplink that does not answer within 10 s resolves nothing.
+
+In the browser, the page serves the uplink to the kernel worker over the same port as the transport, and `terminate()` cancels whatever is pending. Connecting to uplink addresses is the next step; until then they are unreachable like any other address.
+
+`@ai-ecoverse/slicc-kernel/testing` has `fakeUplink({ names, routes, ipv6 })` for tests. It is an uplink that answers `resolve` from `names` (a list or `{ addresses, ttl }` per name) and records each question in `asked`.
 
 ### Browser automation (CDP)
 

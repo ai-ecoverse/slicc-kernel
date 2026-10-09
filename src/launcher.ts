@@ -38,7 +38,10 @@ import {
   writeCaFile,
 } from './kernel/net/network.ts';
 import type { CaStore, RealmCa } from './kernel/net/realm-ca.ts';
+import { Resolver } from './kernel/net/resolver.ts';
+import { Routes, type RouteTable } from './kernel/net/routes.ts';
 import type { RealmTransport } from './kernel/net/transport.ts';
+import type { NetworkUplink } from './kernel/net/uplink.ts';
 import type { ProcessInfo } from './kernel/proc-info.ts';
 import type { ForkState, WasmProgram } from './kernel/protocol.ts';
 import { PtyTable } from './kernel/pty.ts';
@@ -106,6 +109,7 @@ export interface LauncherOptions {
   processMounts?: ProcessMountPolicy;
   fstabRetries?: readonly number[];
   cdp?: CdpHook;
+  uplink?: NetworkUplink;
 }
 
 export interface PendingMedium {
@@ -299,6 +303,9 @@ export class Launcher {
   readonly cdp: CdpHosts;
   private readonly ca: () => Promise<RealmCa>;
   readonly transport: RealmTransport;
+  readonly uplink: NetworkUplink | undefined;
+  readonly routes: Routes;
+  readonly resolver: Resolver;
   readonly watchers = new FsWatchers();
   private readonly pnpmHome: string;
   readonly mounts: MountTable;
@@ -340,6 +347,10 @@ export class Launcher {
     this.env = { ...networkEnv(), SLICC_CDP_URL: this.cdp.url, ...options.env };
     this.ca = kernelCa(options.caStore ?? memoryCaStore());
     this.transport = options.transport ?? missingTransport();
+    this.uplink = options.uplink;
+    this.routes = new Routes(options.uplink?.traits.ipv6 === true);
+    if (options.uplink?.routes) this.routes.set(options.uplink.routes);
+    this.resolver = new Resolver({ uplink: options.uplink, routes: this.routes });
     enableNetwork(this.net, {
       transport: this.transport,
       engine: kernelTlsEngine(packageTlsEngine(options.fs, this.modulesDir)),
@@ -353,6 +364,10 @@ export class Launcher {
     this.watchers.watch([this.modulesDir, this.pnpmHome], { recursive: true }, () => {
       this.catalog = undefined;
     });
+  }
+
+  setRoutes(table: RouteTable): void {
+    this.routes.set(table);
   }
 
   commands(): Promise<Map<string, Command>> {
@@ -557,6 +572,7 @@ export class Launcher {
       net: this.net,
       http: new HttpHandles(this.transport),
       locks: this.locks,
+      resolver: this.resolver,
       onReap: (child) => this.reaped(child),
       ...(req.fork ? { fork: req.fork } : {}),
       ...this.shownIds(req),

@@ -9,6 +9,7 @@ await build({
     'src/process-worker.ts',
     'src/driver-worker.ts',
     'src/driver.ts',
+    'src/testing.ts',
   ],
   outdir: 'dist',
   bundle: true,

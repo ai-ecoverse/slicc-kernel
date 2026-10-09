@@ -45,6 +45,7 @@ export interface SocketKernel {
       }
     | number;
   setopt(fd: number, level: number, name: number, value: number): number;
+  resolve(name: string, family?: 0 | 4 | 6): string[] | number;
   send(
     fd: number,
     bytes: Uint8Array,
@@ -237,6 +238,8 @@ export function createSocketKernel(deps: SocketKernelDeps): SocketKernel {
       guard(() => ({ value: json({ op: 'sock-getopt', fd: kfd(fd), level, name }) as number })),
     setopt: (fd, level, name, value) =>
       guard(() => done({ op: 'sock-setopt', fd: kfd(fd), level, name, value })),
+    resolve: (name, family = 4) =>
+      guard(() => json({ op: 'sock-resolve', name, family }) as string[]),
     send: (fd, bytes, flags) =>
       guard(() => {
         const stream = socketAt(fd);

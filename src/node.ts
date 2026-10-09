@@ -5,6 +5,8 @@ import { type ServedClient, serveClient } from './client/serve-client.ts';
 import { OpfsFs } from './fs/opfs.ts';
 import type { RunOptions, RunResult, Terminal, TerminalOptions } from './index.ts';
 import type { WasmWorkerLike } from './kernel/host.ts';
+import type { RouteTable } from './kernel/net/routes.ts';
+import type { NetworkUplink } from './kernel/net/uplink.ts';
 import { Launcher } from './launcher.ts';
 import type { HostfsGrantHook } from './mount/hostfs.ts';
 import type { MountEntry, MountSpec } from './mount/mount-fs.ts';
@@ -32,6 +34,10 @@ export {
   type WatchChange,
 } from './client/attach.ts';
 export type {
+  NetworkUplink,
+  ResolveAnswer,
+  ResolveFamily,
+  RouteTable,
   RunOptions,
   RunResult,
   Terminal,
@@ -46,7 +52,7 @@ export interface NodeKernelOptions {
   root?: FileSystemDirectoryHandle;
   modules?: string;
   env?: Record<string, string>;
-  network?: { transport?: NetworkTransport };
+  network?: { transport?: NetworkTransport; uplink?: NetworkUplink };
   worker?: string | URL;
   driverWorker?: string | URL;
   processMounts?: ProcessMountPolicy;
@@ -62,6 +68,7 @@ export interface NodeKernel {
   writeFile(path: string, data: string | Uint8Array): Promise<void>;
   readFile(path: string): Promise<Uint8Array>;
   connect(): Promise<MessagePort>;
+  setRoutes(routes: RouteTable): Promise<void>;
   mount(spec: MountSpec): Promise<MountEntry>;
   umount(target: string): Promise<void>;
   mounts(): Promise<MountEntry[]>;
@@ -143,6 +150,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     ...(options.modules ? { modules: options.modules } : {}),
     ...(options.env ? { env: options.env } : {}),
     ...(transport ? { transport } : {}),
+    ...(options.network?.uplink ? { uplink: options.network.uplink } : {}),
     ...(options.processMounts !== undefined ? { processMounts: options.processMounts } : {}),
     ...(options.fstabRetries ? { fstabRetries: options.fstabRetries } : {}),
     ...(options.hostfs ? { hostfs: options.hostfs } : {}),
@@ -216,6 +224,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     mount: (spec) => guard(() => launcher.mount(spec)),
     umount: (target) => guard(async () => launcher.umount(target)),
     mounts: async () => launcher.mounts.list(),
+    setRoutes: (routes) => guard(async () => launcher.setRoutes(routes)),
     async connect() {
       if (terminated) throw new Error(TERMINATED);
       const { port1, port2 } = new MessageChannel();

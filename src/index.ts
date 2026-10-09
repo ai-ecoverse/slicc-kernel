@@ -9,12 +9,14 @@ import {
 } from './client/dial-stream.ts';
 import { type LoopbackFetchOptions, loopbackFetch } from './client/loopback-fetch.ts';
 import type { TransportCall } from './kernel/net/remote-transport.ts';
+import type { RouteTable } from './kernel/net/routes.ts';
+import { type NetworkUplink, serveUplink, type UplinkCall } from './kernel/net/uplink.ts';
 import type { PendingMedium } from './launcher.ts';
 import type { MediumHandle } from './mount/fsa.ts';
 import type { HostfsGrantHook } from './mount/hostfs.ts';
 import type { MountEntry, MountSpec } from './mount/mount-fs.ts';
 import type { ProcessMountPolicy, ProcessMountRequest } from './mount/syscall.ts';
-import type { KernelCall, TerminalAction } from './serve.ts';
+import type { InitRequest, KernelCall, TerminalAction } from './serve.ts';
 import { type NetworkTransport, serveTransport } from './transport.ts';
 
 export type { CdpConnection, CdpHook, CdpRequest } from './cdp/types.ts';
@@ -37,6 +39,13 @@ export {
 } from './client/attach.ts';
 export type { DialledSocket, DialOptions } from './client/dial-stream.ts';
 export type { LoopbackFetchOptions } from './client/loopback-fetch.ts';
+export type { RouteTable } from './kernel/net/routes.ts';
+export type {
+  NetworkUplink,
+  ResolveAnswer,
+  ResolveFamily,
+  UplinkTraits,
+} from './kernel/net/uplink.ts';
 export {
   checkLocalProxy,
   type LocalProxyCheckOptions,
@@ -62,6 +71,7 @@ export {
 
 export interface NetworkOptions {
   transport?: NetworkTransport;
+  uplink?: NetworkUplink;
 }
 
 export interface KernelOptions {
@@ -110,6 +120,7 @@ export interface Kernel {
   run(argv: string[], options?: RunOptions): Promise<RunResult>;
   openTerminal(argv: string[], options?: TerminalOptions): Promise<Terminal>;
   connect(): Promise<MessagePort>;
+  setRoutes(routes: RouteTable): Promise<void>;
   dial(options: DialOptions): Promise<DialledSocket>;
   loopbackFetch(input: RequestInfo | URL, options: LoopbackFetchOptions): Promise<Response>;
   mount(spec: MountSpec): Promise<MountEntry>;
@@ -194,6 +205,12 @@ function dialer(call: (req: KernelCall) => Promise<unknown>) {
   return { dial, reset };
 }
 
+function uplinkInit(uplink: NetworkUplink | undefined): Pick<InitRequest, 'uplink'> {
+  if (!uplink) return {};
+  const traits = { tcp: true, udp: false, ipv6: uplink.traits.ipv6 === true } as const;
+  return { uplink: { traits, ...(uplink.routes ? { routes: uplink.routes } : {}) } };
+}
+
 function initCall(options: KernelOptions, transport: NetworkTransport | undefined): KernelCall {
   return {
     op: 'init',
@@ -204,6 +221,7 @@ function initCall(options: KernelOptions, transport: NetworkTransport | undefine
     ...(options.media !== undefined ? { media: options.media } : {}),
     ...(options.ca !== undefined ? { ca: options.ca } : {}),
     ...(transport ? { transport: transport.traits } : {}),
+    ...uplinkInit(options.network?.uplink),
     ...(options.hostfs ? { hostfs: true } : {}),
     ...(options.cdp ? { cdp: true } : {}),
     ...(options.processMounts !== undefined
@@ -249,11 +267,14 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     cdp.close();
     failure = error;
     bridge?.close();
+    uplinks?.close();
     for (const call of pending.values()) call.reject(error);
     pending.clear();
   };
   const transport = options.network?.transport;
   const bridge = transport ? serveTransport(worker, transport) : undefined;
+  const uplink = options.network?.uplink;
+  const uplinks = uplink ? serveUplink(worker, uplink) : undefined;
   async function chosen(handle: MediumHandle | undefined): Promise<FileSystemDirectoryHandle> {
     if (handle) {
       const state = await handle.requestPermission?.({ mode: 'readwrite' });
@@ -294,12 +315,14 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     }: MessageEvent<
       | Reply
       | TransportCall
+      | UplinkCall
       | { medium: PendingMedium }
       | { hostfs: HostfsRequest }
       | { mountPolicy: { id: number; req: ProcessMountRequest } }
       | CdpOpen
     >) => {
       if ('net' in data) return bridge?.answer(data);
+      if ('uplink' in data) return uplinks?.answer(data);
       if ('cdpOpen' in data) return cdp.open(data);
       if ('mountPolicy' in data) return void policy(data.mountPolicy);
       if ('medium' in data) return pendingMedium(data.medium);
@@ -392,6 +415,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     },
     openTerminal,
     connect: async () => (await call({ op: 'connect' })) as MessagePort,
+    setRoutes: async (routes) => void (await call({ op: 'routes', routes })),
     dial,
     loopbackFetch: (input, fetchOptions) => loopbackFetch(dial, input, fetchOptions),
     mount: async (spec) => (await call({ op: 'mount', spec })) as MountEntry,
