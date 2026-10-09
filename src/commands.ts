@@ -8,6 +8,7 @@ export interface Command {
   glue: string;
   wasm: string;
   argv0: string;
+  argv0Path?: boolean;
   args?: string[];
   env?: Record<string, string>;
   unset?: string[];
@@ -20,6 +21,7 @@ interface CommandEntry {
   glue?: unknown;
   wasm?: unknown;
   argv0?: unknown;
+  argv0Path?: unknown;
   args?: unknown;
   env?: unknown;
   script?: unknown;
@@ -103,6 +105,7 @@ function commandOf(
     glue,
     wasm,
     argv0,
+    ...(raw.argv0Path === true ? { argv0Path: true } : {}),
     ...(args ? { args } : {}),
     ...withEnv,
     ...(imports ? { imports } : {}),
