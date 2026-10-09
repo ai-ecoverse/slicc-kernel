@@ -1,5 +1,5 @@
 import type { InheritedSlot } from '../kernel/children.ts';
-import type { DeviceAccess, KernelDevice } from '../kernel/fd-table.ts';
+import type { DeviceAccess, DeviceMeta, KernelDevice } from '../kernel/fd-table.ts';
 import type { ForkStream, KernelStreamEntry } from '../kernel/protocol.ts';
 import type { KernelStreams, ProcessFs, ProcessStream, ProcessSys } from './kernel-streams.ts';
 import { closesOnExec, O_CLOEXEC, setCloseOnExec } from './process-fds.ts';
@@ -100,6 +100,7 @@ const ACCESS: Readonly<Record<number, DeviceAccess>> = { 0: 'read', 1: 'write' }
 const DEVICES: Readonly<Record<string, KernelDevice>> = {
   '/dev/null': 'null',
   '/dev/zero': 'zero',
+  '/dev/full': 'full',
   '/dev/urandom': 'urandom',
   '/dev/random': 'urandom',
 };
@@ -135,12 +136,17 @@ export function describeInherited(
   return out;
 }
 
+export function deviceOfStream(stream: ProcessStream): DeviceMeta | undefined {
+  const device = stream.path === undefined ? undefined : DEVICES[stream.path];
+  if (!device || stream.sliccKernelFd !== undefined) return undefined;
+  const access = ACCESS[stream.flags & O_ACCMODE];
+  return { device, ...(access ? { access } : {}) };
+}
+
 function inheritedSlot(fd: number, stream: ProcessStream): InheritedSlot | undefined {
   if (stream.sliccKernelFd === undefined) {
-    const device = stream.path === undefined ? undefined : DEVICES[stream.path];
-    if (!device) return undefined;
-    const access = ACCESS[stream.flags & O_ACCMODE];
-    return { fd, device, ...(access ? { access } : {}) };
+    const device = deviceOfStream(stream);
+    return device ? { fd, ...device } : undefined;
   }
   const flags = stream.sliccKernelSocket ? { flags: stream.flags } : {};
   return { fd, kernel: stream.sliccKernelFd, ...flags };
@@ -177,10 +183,12 @@ function asFifo(stream: ProcessStream, streams: KernelStreams, identity: string)
   const fixed = inos.get(identity) ?? nextStreamIno++;
   inos.set(identity, fixed);
   const node = stream.node;
-  stream.stream_ops = {
-    ...stream.stream_ops,
-    getattr: () => ({ ...node.node_ops?.getattr?.(node), mode: FIFO_MODE, ino: fixed, size: 0 }),
-  };
+  streams.describe(stream, `pipe:[${fixed}]`, () => ({
+    ...node.node_ops?.getattr?.(node),
+    mode: FIFO_MODE,
+    ino: fixed,
+    size: 0,
+  }));
 }
 
 export function placeKernelStream(
@@ -189,8 +197,10 @@ export function placeKernelStream(
   entry: KernelStreamEntry
 ): ProcessStream {
   const stream = place(Fs, placeholder(Fs, streams, entry), entry.fd);
-  if (entry.kind === 'file') streams.attachFile(stream, entry.kernel);
-  else if (entry.kind === 'socket') streams.attachSocket(stream, entry.kernel);
+  if (entry.kind === 'file') {
+    streams.attachFile(stream, entry.kernel);
+    streams.sizeFromKernel(stream, entry.kernel);
+  } else if (entry.kind === 'socket') streams.attachSocket(stream, entry.kernel);
   else streams.attach(stream, entry.kernel, entry.kind === 'tty');
   if (entry.kind === 'tty') streams.nameTerminal(stream);
   if (entry.kind === 'stream') {

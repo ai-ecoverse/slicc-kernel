@@ -12,6 +12,7 @@ export type KernelErrno =
   | 'ECHILD'
   | 'ENOSYS'
   | 'ESPIPE'
+  | 'ENOSPC'
   | 'EINTR'
   | 'ESRCH'
   | 'ENOTTY'
@@ -99,7 +100,7 @@ export interface DeviceMeta {
 
 export type DeviceAccess = 'read' | 'write';
 
-export type KernelDevice = 'null' | 'zero' | 'urandom';
+export type KernelDevice = 'null' | 'zero' | 'full' | 'urandom';
 
 export function pollFile(file: KernelFile): PollState {
   return file.poll?.() ?? { readable: !!file.read, writable: !!file.write, hangup: false };
@@ -187,6 +188,11 @@ export function nullFile(): OpenFile {
   });
 }
 
+function written(device: KernelDevice, bytes: Uint8Array): number {
+  if (device === 'full' && bytes.length > 0) throw new KernelError('ENOSPC');
+  return bytes.length;
+}
+
 export function deviceFile(device: KernelDevice, access?: DeviceAccess): OpenFile {
   const read = async (max: number): Promise<Uint8Array> => {
     if (device === 'null') return new Uint8Array(0);
@@ -200,7 +206,7 @@ export function deviceFile(device: KernelDevice, access?: DeviceAccess): OpenFil
   };
   return new OpenFile({
     ...(access !== 'write' ? { read } : {}),
-    ...(access !== 'read' ? { write: async (bytes: Uint8Array) => bytes.length } : {}),
+    ...(access !== 'read' ? { write: async (bytes: Uint8Array) => written(device, bytes) } : {}),
     seek: async () => 0,
     heldMeta: { device, ...(access ? { access } : {}) },
     close: () => {},

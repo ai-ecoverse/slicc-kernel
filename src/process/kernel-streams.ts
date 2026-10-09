@@ -121,6 +121,10 @@ export interface ProcessSys {
 
   ttyName?(fd: number): string | undefined;
 
+  kind?(fd: number): string | undefined;
+
+  size?(fd: number): number;
+
   openTty?(name?: string): number;
 
   tcgets?(fd: number): Termios;
@@ -221,6 +225,10 @@ export class KernelStreams {
   private socketRoot: FsNode | undefined;
 
   private sockets = 0;
+
+  private readonly descriptions = new Map<string, () => object>();
+
+  private described = 0;
 
   private readonly Fs: ProcessFs;
 
@@ -324,6 +332,35 @@ export class KernelStreams {
           return 0;
         }),
     };
+  }
+
+  sizeFromKernel(stream: ProcessStream, kfd: number): void {
+    const { size } = this.sys;
+    if (!size) return;
+    const node = stream.node;
+    this.describe(stream, `${stream.path ?? ''}:${++this.described}`, () => ({
+      ...node.node_ops?.getattr?.(node),
+      size: this.call(() => size.call(this.sys, kfd)),
+    }));
+  }
+
+  describe(stream: ProcessStream, name: string, getattr: () => object): void {
+    if (this.descriptions.size === 0) this.useDescriptions();
+    this.descriptions.set(name, getattr);
+    stream.path = name;
+    stream.stream_ops = { ...stream.stream_ops, getattr };
+  }
+
+  private useDescriptions(): void {
+    const fs = this.Fs as unknown as PtyPathFs;
+    for (const name of ['stat', 'lstat'] as const) {
+      const original = fs[name];
+      if (typeof original !== 'function') continue;
+      fs[name] = (path: string, ...rest: unknown[]) => {
+        const getattr = this.descriptions.get(path);
+        return getattr ? getattr() : original.call(fs, path, ...rest);
+      };
+    }
   }
 
   useControllingTerminal(): void {

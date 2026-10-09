@@ -15,7 +15,8 @@ export type ChildStdio =
   | { fd: number }
   | { input: Uint8Array }
   | { capture: true }
-  | { none: true };
+  | { none: true }
+  | DeviceMeta;
 
 export type InheritedSlot =
   | { fd: number; kernel: number; flags?: number }
@@ -213,6 +214,7 @@ export class ChildTable {
   private openSlot(slot: ChildStdio, n: number, captured: Map<number, Uint8Array[]>): OpenFile {
     if ('fd' in slot) return this.parentFds.get(slot.fd).retain();
     if ('input' in slot) return bytesSource(slot.input);
+    if ('device' in slot) return deviceFile(slot.device, slot.access);
     if ('capture' in slot) {
       const chunks: Uint8Array[] = [];
       captured.set(n, chunks);

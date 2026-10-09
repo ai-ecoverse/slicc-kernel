@@ -20,7 +20,7 @@ export interface WasiKernel {
   call(req: WasmSyscall): unknown;
 }
 
-type Device = 'null' | 'zero' | 'urandom';
+type Device = 'null' | 'zero' | 'full' | 'urandom';
 
 const O_NONBLOCK = 0o4000;
 const O_WRONLY = 0o1;
@@ -30,11 +30,12 @@ const O_APPEND = 0o2000;
 export type WasiForkFd =
   | { fd: number; type: 'kernel'; nonblock: boolean; append: boolean }
   | { fd: number; type: 'dir'; path: string; preopen?: string; twin?: number }
-  | { fd: number; type: 'device'; device: 'null' | 'zero' | 'urandom'; access?: DeviceAccess };
+  | { fd: number; type: 'device'; device: Device; access?: DeviceAccess };
 
 const DEVICES: Readonly<Record<string, Device>> = {
   '/dev/null': 'null',
   '/dev/zero': 'zero',
+  '/dev/full': 'full',
   '/dev/urandom': 'urandom',
   '/dev/random': 'urandom',
 };
