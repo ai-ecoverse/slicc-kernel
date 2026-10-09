@@ -188,6 +188,7 @@ interface StartRequest {
   fork?: ForkState;
   exec?: boolean;
   pgid?: number;
+  ignored?: number;
 }
 
 const COMMAND = /^\/(?:usr\/)?bin\/([^/]+)$/;
@@ -525,6 +526,7 @@ export class Launcher {
     const terminal = req.fds.stdioTerminal();
     const handle = spawnWasmProcess({
       pid,
+      ...(req.ignored ? { ignored: req.ignored } : {}),
       program: req.program,
       argv0: req.argv0,
       args: req.args,
@@ -634,6 +636,7 @@ export class Launcher {
         fds,
         report,
         ppid,
+        ignored: this.ignoredBy(ppid),
         ...exec,
       });
       return childHandle(handle);
@@ -643,7 +646,20 @@ export class Launcher {
   private forker(ppid: number, parent: StartRequest): ChildForker {
     const { exec: _exec, ...image } = parent;
     return async (state, fds) =>
-      childHandle(this.start({ ...image, cwd: state.cwd ?? parent.cwd, fds, ppid, fork: state }));
+      childHandle(
+        this.start({
+          ...image,
+          cwd: state.cwd ?? parent.cwd,
+          fds,
+          ppid,
+          fork: state,
+          ignored: this.ignoredBy(ppid, true),
+        })
+      );
+  }
+
+  private ignoredBy(pid: number, fork = false): number {
+    return this.processes.get(pid)?.ignoredSignals(fork) ?? 0;
   }
 
   kill(pid: number, sig: number): boolean {
