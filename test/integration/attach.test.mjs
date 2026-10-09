@@ -197,7 +197,7 @@ test('a port survives a second transfer; files, fetch, refusal of another protoc
   });
   assert.match(
     refused,
-    /^hello,bye: the slicc-kernel detached this client: slicc-kernel client protocol 2\.x is not supported: this side speaks 1\.7$/
+    /^hello,bye: the slicc-kernel detached this client: slicc-kernel client protocol 2\.x is not supported: this side speaks 1\.8$/
   );
   const silent = await page.evaluate(() =>
     window
