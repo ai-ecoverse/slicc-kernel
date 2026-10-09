@@ -291,20 +291,28 @@ export class VfsNodes {
 
   private readonly fs: VfsFileFs;
 
-  private creating: Promise<unknown> = Promise.resolve();
+  private readonly entries = new Map<string, Promise<unknown>>();
 
   constructor(fs: VfsFileFs) {
     this.fs = fs;
   }
 
+  onEntry<T>(path: string, op: () => Promise<T>): Promise<T> {
+    const run = (this.entries.get(path) ?? Promise.resolve()).then(op);
+    const tail = run.catch(() => undefined);
+    this.entries.set(path, tail);
+    void tail.then(() => {
+      if (this.entries.get(path) === tail) this.entries.delete(path);
+    });
+    return run;
+  }
+
   createExclusive(path: string): Promise<void> {
-    const run = this.creating.then(async () => {
+    return this.onEntry(path, async () => {
       const found = this.byPath.has(path) || (await present(this.fs, path));
       if (found) throw fsError('EEXIST', path);
       await this.fs.writeFile(path, new Uint8Array(0));
     });
-    this.creating = run.catch(() => undefined);
-    return run;
   }
 
   open(path: string, pin?: VersionPin): VfsNode {
@@ -471,12 +479,20 @@ export function keepingOpen(fs: KernelFs, nodes: VfsNodes): KernelFs {
       await fs.rm(path, options);
       nodes.unlinked(at);
     },
-    async rename(from, to) {
+    rename(from, to) {
       const [a, b] = [fs.resolvePath('/', from), fs.resolvePath('/', to)];
-      await nodes.unlinking(b);
-      await fs.rename(from, to);
-      nodes.renamed(a, b);
+      return nodes.onEntry(b, async () => {
+        await nodes.unlinking(b);
+        await fs.rename(from, to);
+        nodes.renamed(a, b);
+      });
     },
+    writeFile: (path, content) =>
+      nodes.onEntry(fs.resolvePath('/', path), () => fs.writeFile(path, content)),
+    symlink: (target, path) =>
+      nodes.onEntry(fs.resolvePath('/', path), () => fs.symlink(target, path)),
+    mkdir: (path, options) =>
+      nodes.onEntry(fs.resolvePath('/', path), () => fs.mkdir(path, options)),
   };
 }
 

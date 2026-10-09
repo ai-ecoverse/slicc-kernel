@@ -101,7 +101,7 @@ test('open files and path operations agree, append appends, exclusive creation i
   );
   assert.deepEqual(
     await bash(
-      'jstest nap 1000 > n.out & p=$!; until [ -n "$(cat n.out 2>/dev/null)" ]; do sleep 0.05; done; kill -STOP $p; sleep 1.5; kill -CONT $p; wait $p; echo "st=$?"'
+      'jstest nap 3000 > n.out & p=$!; until [ -n "$(cat n.out 2>/dev/null)" ]; do sleep 0.05; done; kill -STOP $p; sleep 3.5; kill -CONT $p; wait $p; echo "st=$?"'
     ),
     { status: 0, stdout: 'st=3\n', stderr: 'held\n' }
   );

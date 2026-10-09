@@ -231,7 +231,7 @@ async function nap(ctx, [ms = '1000']) {
   const started = performance.now();
   await sleep(Number(ms));
   const slept = performance.now() - started;
-  await ctx.write(2, `${slept >= 1400 ? 'held' : 'ran'}\n`);
+  await ctx.write(2, `${slept >= Number(ms) + 400 ? 'held' : 'ran'}\n`);
   return 3;
 }
 
