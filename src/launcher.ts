@@ -50,6 +50,7 @@ import {
   type MediumHandle,
   removableMedium,
 } from './mount/fsa.ts';
+import { FSTAB_PATH, type FstabResult, mountFstab, parseFstab } from './mount/fstab.ts';
 import {
   type FetchLike,
   type HostfsGrantHook,
@@ -296,6 +297,8 @@ export class Launcher {
   private readonly openFiles = new Set<VfsNodes>();
   private readonly held = new Set<HeldPaths>();
   private readonly processMounts: ProcessMountPolicy;
+  private readonly booting = new AbortController();
+  fstab: Promise<FstabResult[]> = Promise.resolve([]);
   private nextPid = 1000;
   readonly boot = Date.now();
   private terminals = 0;
@@ -745,6 +748,7 @@ export class Launcher {
   }
 
   unmountAll(): void {
+    this.booting.abort();
     const targets = this.mounts.list().map((m) => m.target);
     for (const target of targets.sort((a, b) => b.length - a.length)) this.umount(target, true);
   }
@@ -780,6 +784,12 @@ export class Launcher {
   async prepare(): Promise<void> {
     for (const dir of SHARED_DIRS) await this.base.mkdir(dir, { recursive: true });
     await writeCaFile(this.base, this.ca).catch(() => undefined);
+    this.fstab = this.mountFstab();
+  }
+
+  private async mountFstab(): Promise<FstabResult[]> {
+    const text = await this.base.readFile(FSTAB_PATH).catch(() => '');
+    return mountFstab(parseFstab(text), (spec) => this.mount(spec), this.booting.signal);
   }
 
   private environment(cwd: string, extra: Record<string, string> | undefined) {

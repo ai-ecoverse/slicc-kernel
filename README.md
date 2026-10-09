@@ -217,6 +217,20 @@ Directories are renamed with `FileSystemHandle.move()` where available, else by 
   - `options.ro` makes any mount read-only: writes fail with `EROFS`;
   - a driver that crashes or doesn't answer within 30 s makes its mount's calls fail with `EIO`, and the mount is listed as `failed`.
 
+### `/etc/fstab`
+
+At boot the kernel mounts what `/etc/fstab` lists, in fstab(5) format: `source target type options` (the dump and pass fields are ignored), with `#` comments and `\040` for a space in a field. Options are those of `mount -o`, and lines with `noauto` are left out.
+
+```
+none           /mnt/scratch  tmpfs   maxfile=1G   0 0
+fsa:<id>       /mnt/folder   fsa     rw           0 0
+project        /mnt/project  hostfs  ro           0 0
+```
+
+- **Boot never waits for it:** the lines are mounted in the background once the kernel has started, all at once, so a slow source holds up nothing.
+- **Retries:** a line that fails is tried again after 1, 4 and 16 seconds (a driver package installed meanwhile, a mount point created later), except when it cannot succeed (`EINVAL`, `EBUSY`, `EPERM`, `EACCES`). `terminate()` stops the retries.
+- **No user involvement:** an `fsa` line names a drive by its id: it comes up with the folder it had while its permission holds, and otherwise with no medium, asking the page for the folder through `onMountPending`, as any `fsa` mount does. With `media: false` the drive finds its folder only within the same kernel. A `hostfs` line waits only for its first connection, and comes up with no medium if the proxy is not there yet.
+
 ### Removable media: `fsa`
 
 An `fsa` mount is a drive for a local folder, from the File System Access API, and the folder is its medium.
