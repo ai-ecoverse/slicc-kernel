@@ -21,7 +21,7 @@ const events = (page, name) => page.evaluate((n) => window[n].events, name);
 
 test('a worker attaches, its sleep shows in a terminal, the terminal kills it, and the worker sees the exit', async (t) => {
   const { page } = await booted(chrome, t);
-  assert.deepEqual(await attached(page, 'a'), { protocol: [1, 3] });
+  assert.deepEqual(await attached(page, 'a'), { protocol: [1, 4] });
   const { pid, pgid } = await ask(page, 'a', 'spawn', { argv: ['sleep', '100'] });
   assert.equal(pgid, pid);
   const listed = await ask(page, 'a', 'ps');
@@ -65,6 +65,72 @@ test('a worker spawns into its own process group, and kill -- -pgid from a termi
   assert.deepEqual(page.errors, []);
 });
 
+test('the page and a worker reach a kernel server: dial, a streamed SSE fetch, a script, and ECONNREFUSED', async (t) => {
+  const { page } = await booted(chrome, t);
+  await page.evaluate(() => {
+    window.server = window.kernel.run(['httptest', '8400']);
+  });
+  await page.until(async () => {
+    try {
+      (await window.kernel.dial({ port: 8400 })).close();
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  const raw = await page.evaluate(async () => {
+    const socket = await window.kernel.dial({ port: 8400 });
+    const writer = socket.writable.getWriter();
+    await writer.write(new TextEncoder().encode('GET /file HTTP/1.1\r\nHost: x\r\n\r\n'));
+    await writer.close();
+    let text = '';
+    for await (const chunk of socket.readable) text += new TextDecoder().decode(chunk);
+    return text;
+  });
+  assert.match(raw, /^HTTP\/1\.1 200 OK\r\n[\s\S]*\r\n\r\nhello from the kernel\n$/);
+  const sse = await page.evaluate(async () => {
+    const response = await window.kernel.loopbackFetch('http://8400.kernel.localhost/events', {
+      port: 8400,
+    });
+    const reader = response.body.getReader();
+    const seen = [];
+    for (let next = await reader.read(); !next.done; next = await reader.read()) {
+      seen.push([new TextDecoder().decode(next.value), performance.now()]);
+    }
+    return { type: response.headers.get('content-type'), seen };
+  });
+  assert.equal(sse.type, 'text/event-stream');
+  assert.deepEqual(
+    sse.seen.map(([data]) => data),
+    ['data: event 1\n\n', 'data: event 2\n\n', 'data: event 3\n\n']
+  );
+  assert.ok(sse.seen[2][1] - sse.seen[0][1] >= 150, 'the events arrive as they are sent');
+  const script = await page.evaluate(async () => {
+    const response = await window.kernel.loopbackFetch('http://8400.kernel.localhost/x.js', {
+      port: 8400,
+    });
+    return response.text();
+  });
+  assert.equal(script, "globalThis.fromKernel = 'hello from the kernel';\n");
+  const refused = await page.evaluate(() =>
+    window.kernel.dial({ port: 8499 }).then(
+      () => 'connected',
+      (error) => error.code
+    )
+  );
+  assert.equal(refused, 'ECONNREFUSED');
+  await attached(page, 'a');
+  assert.deepEqual(
+    await ask(page, 'a', 'loopback', { url: 'http://8400.kernel.localhost/file', port: 8400 }),
+    { status: 200, text: 'hello from the kernel\n' }
+  );
+  assert.deepEqual(
+    await ask(page, 'a', 'loopback', { url: 'http://8499.kernel.localhost/', port: 8499 }),
+    { code: 'ECONNREFUSED' }
+  );
+  assert.deepEqual(page.errors, []);
+});
+
 test('a detached client leaves its processes running, and a gone kernel fails a client instead of hanging', async (t) => {
   const { page, bash } = await booted(chrome, t);
   await attached(page, 'a');
@@ -102,7 +168,7 @@ test('a port survives a second transfer; files, fetch, refusal of another protoc
     const { port } = window.a.events.find((e) => e.event === 'forwarded');
     return window.b.ask('attach', { port }, [port]);
   });
-  assert.deepEqual(protocol, { protocol: [1, 3] });
+  assert.deepEqual(protocol, { protocol: [1, 4] });
 
   assert.deepEqual(await ask(page, 'b', 'files'), {
     listed: ['a.txt'],
@@ -131,7 +197,7 @@ test('a port survives a second transfer; files, fetch, refusal of another protoc
   });
   assert.match(
     refused,
-    /^hello,bye: the slicc-kernel detached this client: slicc-kernel client protocol 2\.x is not supported: this side speaks 1\.3$/
+    /^hello,bye: the slicc-kernel detached this client: slicc-kernel client protocol 2\.x is not supported: this side speaks 1\.4$/
   );
   const silent = await page.evaluate(() =>
     window

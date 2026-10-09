@@ -1,3 +1,11 @@
+import {
+  type DialHandle,
+  type DialledSocket,
+  type DialOptions,
+  dialStream,
+  errorWithCode,
+} from './client/dial-stream.ts';
+import { type LoopbackFetchOptions, loopbackFetch } from './client/loopback-fetch.ts';
 import type { TransportCall } from './kernel/net/remote-transport.ts';
 import type { PendingMedium } from './launcher.ts';
 import type { MediumHandle } from './mount/fsa.ts';
@@ -24,6 +32,8 @@ export {
   type SpawnOptions,
   type WatchChange,
 } from './client/attach.ts';
+export type { DialledSocket, DialOptions } from './client/dial-stream.ts';
+export type { LoopbackFetchOptions } from './client/loopback-fetch.ts';
 export {
   checkLocalProxy,
   type LocalProxyCheckOptions,
@@ -95,6 +105,8 @@ export interface Kernel {
   run(argv: string[], options?: RunOptions): Promise<RunResult>;
   openTerminal(argv: string[], options?: TerminalOptions): Promise<Terminal>;
   connect(): Promise<MessagePort>;
+  dial(options: DialOptions): Promise<DialledSocket>;
+  loopbackFetch(input: RequestInfo | URL, options: LoopbackFetchOptions): Promise<Response>;
   mount(spec: MountSpec): Promise<MountEntry>;
   umount(target: string): Promise<void>;
   mounts(): Promise<MountEntry[]>;
@@ -158,6 +170,25 @@ function streamer(callback: ((text: string) => void) | undefined) {
   return (bytes: Uint8Array) => callback?.(decoder.decode(bytes, { stream: true }));
 }
 
+function dialer(call: (req: KernelCall) => Promise<unknown>) {
+  const open = new Set<DialHandle>();
+  const dial = async ({ port, host }: DialOptions): Promise<DialledSocket> => {
+    let reply: unknown;
+    try {
+      reply = await call({ op: 'dial', port, ...(host ? { host } : {}) });
+    } catch (err) {
+      throw errorWithCode((err as Error).message);
+    }
+    const handle = dialStream(reply as MessagePort, () => open.delete(handle));
+    open.add(handle);
+    return handle;
+  };
+  const reset = () => {
+    for (const handle of [...open]) handle.fail(errorWithCode('ECONNRESET: the kernel is gone'));
+  };
+  return { dial, reset };
+}
+
 export async function createKernel(options: KernelOptions = {}): Promise<Kernel> {
   if (!globalThis.crossOriginIsolated) throw new Error(ISOLATION);
   const url = options.worker ?? new URL('./kernel-worker.js', import.meta.url);
@@ -166,7 +197,9 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
   let nextId = 0;
   let failure: Error | undefined;
 
+  const dials = dialer((req) => call(req));
   const fail = (error: Error) => {
+    dials.reset();
     failure = error;
     bridge?.close();
     for (const call of pending.values()) call.reject(error);
@@ -288,6 +321,8 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     };
   }
 
+  const { dial } = dials;
+
   await call({
     op: 'init',
     ...(options.root ? { root: options.root } : {}),
@@ -323,6 +358,8 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     },
     openTerminal,
     connect: async () => (await call({ op: 'connect' })) as MessagePort,
+    dial,
+    loopbackFetch: (input, fetchOptions) => loopbackFetch(dial, input, fetchOptions),
     mount: async (spec) => (await call({ op: 'mount', spec })) as MountEntry,
     umount: async (target) => void (await call({ op: 'umount', target })),
     mounts: async () => (await call({ op: 'mounts' })) as MountEntry[],

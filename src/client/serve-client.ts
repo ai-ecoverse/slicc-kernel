@@ -1,4 +1,5 @@
 import { fsError, type KernelFs } from '../fs/types.ts';
+import { dialSocket, serveSocket } from '../kernel/dial.ts';
 import type { TransportCall } from '../kernel/net/remote-transport.ts';
 import type { RealmTransport } from '../kernel/net/transport.ts';
 import { SIG } from '../kernel/signals.ts';
@@ -108,6 +109,20 @@ function signalOf(host: ClientHost): (name: string) => number {
       throw fsError('EINVAL', `this kernel names no signal ${name}`);
     })
   );
+}
+
+function dialFor(
+  l: Launcher,
+  req: Extract<ClientRequest, { op: 'dial' }>,
+  open: Map<number, () => void>
+): Answer {
+  const socket = dialSocket(l.net, req.port, req.host);
+  const { port1, port2 } = new MessageChannel();
+  open.set(
+    req.id,
+    serveSocket(socket, port1, () => open.delete(req.id))
+  );
+  return { result: port2, transfer: [port2] };
 }
 
 function killGroups(host: ClientHost, pgids: number[]): void {
@@ -260,6 +275,8 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
         return { result: true };
       case 'mounts':
         return { result: l.mounts.list() };
+      case 'dial':
+        return dialFor(l, req, watches);
       case 'detach':
         return { result: true };
       default:

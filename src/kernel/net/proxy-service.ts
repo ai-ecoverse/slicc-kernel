@@ -16,6 +16,7 @@ import {
   requestFraming,
   responseHead,
 } from './http1.ts';
+import { toHostLoopback } from './loopback-names.ts';
 import type { HeaderList, RealmTransport, RealmTransportResponse } from './transport.ts';
 
 export const REALM_PROXY_PORT = 3128;
@@ -410,7 +411,7 @@ export class RealmProxy {
   ): Promise<RealmTransportResponse> {
     try {
       const fetching = this.options.transport.fetch({
-        url,
+        url: toHostLoopback(url),
         method: req.method.toUpperCase(),
         headers: forwardRequestHeaders(req.headers),
         body: req.method === 'GET' || req.method === 'HEAD' ? undefined : body,
