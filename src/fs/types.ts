@@ -32,6 +32,7 @@ export interface KernelFs {
   readlink(path: string): Promise<string>;
   chmod(path: string, mode: number): Promise<void>;
   utimes(path: string, atime: Date, mtime: Date): Promise<void>;
+  lutimes?(path: string, atime: Date, mtime: Date): Promise<void>;
   pread?(path: string, offset: number, length: number, version?: string): Promise<Uint8Array>;
   pwrite?(path: string, offset: number, bytes: Uint8Array, transfer?: boolean): Promise<void>;
   truncate?(path: string, size: number): Promise<void>;
@@ -43,6 +44,17 @@ export function rangedOps(fs: Partial<RangedOps>): RangedOps | undefined {
   const { pread, pwrite, truncate } = fs;
   if (!pread || !pwrite || !truncate) return undefined;
   return { pread: pread.bind(fs), pwrite: pwrite.bind(fs), truncate: truncate.bind(fs) };
+}
+
+export async function lutimesOf(
+  fs: KernelFs,
+  path: string,
+  atime: Date,
+  mtime: Date
+): Promise<void> {
+  if (fs.lutimes) return fs.lutimes(path, atime, mtime);
+  if ((await fs.lstat(path)).isSymbolicLink) throw fsError('EOPNOTSUPP', path);
+  return fs.utimes(path, atime, mtime);
 }
 
 export function fsError(code: string, path: string): Error & { code: string } {

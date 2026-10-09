@@ -334,7 +334,7 @@ export class OpfsFs implements KernelFs {
       size: new TextEncoder().encode(entry.link).length,
       mode: S_IFLNK | 0o777,
       mtime: time,
-      atime: time,
+      atime: entry.atimeMs === undefined ? time : new Date(entry.atimeMs),
       ctime: new Date(entry.ctimeMs ?? 0),
       ino: entry.ino ?? inodeOf(entry.path),
     };
@@ -661,7 +661,26 @@ export class OpfsFs implements KernelFs {
   }
 
   async utimes(path: string, atime: Date, mtime: Date): Promise<void> {
-    const found = await this.locate(path, true);
+    await this.setTimes(await this.locate(path, true), atime, mtime);
+  }
+
+  async lutimes(path: string, atime: Date, mtime: Date): Promise<void> {
+    await this.setTimes(await this.locate(path, false), atime, mtime);
+  }
+
+  private async setTimes(found: Located, atime: Date, mtime: Date): Promise<void> {
+    const { link } = found;
+    if (link) {
+      const ctimeMs = Date.now();
+      await this.meta.update(found.path, (entry) => ({
+        ...link,
+        ...entry,
+        atimeMs: atime.getTime(),
+        mtimeMs: mtime.getTime(),
+        ctimeMs,
+      }));
+      return;
+    }
     const handle = found.handle as Handle;
     const file = handle.kind === 'file' ? await handle.getFile() : undefined;
     const ctimeMs = Date.now();

@@ -1,4 +1,4 @@
-import { type KernelFs, normalizePath, rangedOps } from './types.ts';
+import { type KernelFs, lutimesOf, normalizePath, rangedOps } from './types.ts';
 
 export type WatchChange = { paths: string[] } | { overflow: true };
 
@@ -100,6 +100,10 @@ export class FsWatchers {
       symlink: after(fs.symlink.bind(fs), (_target, path) => [path]),
       chmod: after(fs.chmod.bind(fs), (path) => [path]),
       utimes: after(fs.utimes.bind(fs), (path) => [path]),
+      lutimes: after(
+        (path: string, atime: Date, mtime: Date) => lutimesOf(fs, path, atime, mtime),
+        (path) => [path]
+      ),
     };
     const ranged = rangedOps(fs);
     if (ranged) {

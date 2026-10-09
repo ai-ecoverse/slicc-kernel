@@ -341,6 +341,14 @@ type LiveHelpers = ReturnType<typeof createHelpers>;
 function createNodeOps(h: LiveHelpers): LiveNodeOps {
   const { Fs, bridgeOf, call, metadataCall, makeNode, statOf, childPath, flushNode, truncate } = h;
   const { ensureLoaded } = h;
+  const setTimes = (node: LiveFsNode, path: string, atime: number, mtime: number): void => {
+    if (Fs.isLink(node.mode)) {
+      metadataCall(() => bridgeOf(node).lutimes(path, atime, mtime));
+      return;
+    }
+    flushNode(node);
+    metadataCall(() => bridgeOf(node).utimes(path, atime, mtime));
+  };
   return {
     getattr(node) {
       const st = statOf(node);
@@ -383,11 +391,7 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
         truncate(node, attr.size);
       }
       const mtime = toMs(attr.mtime) ?? attr.timestamp;
-      if (mtime !== undefined) {
-        const atime = toMs(attr.atime) ?? mtime;
-        flushNode(node);
-        metadataCall(() => bridgeOf(node).utimes(path, atime, mtime));
-      }
+      if (mtime !== undefined) setTimes(node, path, toMs(attr.atime) ?? mtime, mtime);
       node.live.stat = undefined;
     },
     lookup(parent, name) {

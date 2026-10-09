@@ -15,6 +15,7 @@ export type SyncFsOp =
   | 'readlink'
   | 'chmod'
   | 'utimes'
+  | 'lutimes'
   | 'statfs'
   | 'hold'
   | 'pread'
@@ -87,6 +88,7 @@ export interface SyncFsPosixBridge {
   readlink(path: string): string;
   chmod(path: string, mode: number): void;
   utimes(path: string, atimeMs: number, mtimeMs: number): void;
+  lutimes(path: string, atimeMs: number, mtimeMs: number): void;
   hold?(path: string, held: boolean): void;
   readdirStat(path: string): Array<[string, SyncFsBridgeStat | null]>;
   statfs?(path?: string): SyncFsUsage | null;

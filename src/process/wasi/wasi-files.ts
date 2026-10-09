@@ -336,6 +336,7 @@ export function cachingBridge(
     symlink: (target, link) => mutating(() => bridge.symlink(target, link)),
     chmod: (p, mode) => mutating(() => bridge.chmod(p, mode)),
     utimes: (p, a, m) => mutating(() => bridge.utimes(p, a, m)),
+    lutimes: (p, a, m) => mutating(() => bridge.lutimes(p, a, m)),
     ...(bridge.pread && bridge.pwrite && bridge.truncate
       ? {
           pread: bridge.pread.bind(bridge),

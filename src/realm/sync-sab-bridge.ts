@@ -221,6 +221,9 @@ export function createSyncFsSabBridge(
     utimes: (path, atimeMs, mtimeMs) => {
       run({ op: 'utimes', path, atimeMs, mtimeMs }, path);
     },
+    lutimes: (path, atimeMs, mtimeMs) => {
+      run({ op: 'lutimes', path, atimeMs, mtimeMs }, path);
+    },
     hold: (path, held) => {
       run({ op: 'hold', path, mode: held ? 1 : 0 }, path);
     },
