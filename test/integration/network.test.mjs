@@ -39,12 +39,15 @@ test('two kernels on one origin, one without metadata, both reach https in eithe
   assert.equal(await certs(), 1);
   await page.evaluate(() => window.second.terminate());
   await page.evaluate(() => window.secondKernel({ metadata: false, ca: false }));
-  await page.evaluate(() => window.reboot());
-  for (const kernel of ['second', 'kernel']) {
+  await page.evaluate(() => window.secondKernel({}, 'third'));
+  for (const kernel of ['second', 'third', 'kernel']) {
     assert.deepEqual(await curl(kernel), { status: 0, stdout: '200', stderr: '' });
   }
   assert.equal(await certs(), 2);
-  await page.evaluate(() => window.second.terminate());
+  await page.evaluate(() => {
+    window.second.terminate();
+    window.third.terminate();
+  });
   assert.deepEqual(page.errors, []);
 });
 

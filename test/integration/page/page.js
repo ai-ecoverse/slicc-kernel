@@ -261,8 +261,8 @@ window.boot = async (options = {}) => {
   return true;
 };
 
-window.secondKernel = async (options) => {
-  window.second = await createKernel({
+window.secondKernel = async (options, name = 'second') => {
+  window[name] = await createKernel({
     root: await navigator.storage.getDirectory(),
     network: { transport: fetchTransport() },
     ...options,
