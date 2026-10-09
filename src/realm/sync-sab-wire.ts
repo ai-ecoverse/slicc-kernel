@@ -19,6 +19,21 @@ export const SAB_I_TIMERS = 9;
 
 export const SAB_I_MEMORY = 10;
 
+export const SAB_I_TOTAL_HI = 11;
+
+export const SAB_I_OFFSET_HI = 12;
+
+const U32 = 2 ** 32;
+
+export function storeU53(header: Int32Array, lo: number, hi: number, value: number): void {
+  Atomics.store(header, hi, Math.floor(value / U32));
+  Atomics.store(header, lo, (value % U32) | 0);
+}
+
+export function loadU53(header: Int32Array, lo: number, hi: number): number {
+  return (Atomics.load(header, lo) >>> 0) + Atomics.load(header, hi) * U32;
+}
+
 export function publishMemory(sab: SharedArrayBuffer, bytes: number): void {
   if (bytes > 0)
     Atomics.store(new Int32Array(sab, 0, SAB_HEADER_I32), SAB_I_MEMORY, Math.ceil(bytes / 65536));

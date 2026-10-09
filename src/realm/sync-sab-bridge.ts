@@ -9,15 +9,18 @@ import {
 } from './sync-fs-wire.ts';
 import {
   decodeSabResult,
+  loadU53,
   publishMemory,
   SAB_I_CHUNK,
   SAB_I_OFFSET,
+  SAB_I_OFFSET_HI,
   SAB_I_PUB,
   SAB_I_REQ,
   SAB_I_SEQ,
   SAB_I_STATE,
   SAB_I_STATUS,
   SAB_I_TOTAL,
+  SAB_I_TOTAL_HI,
   SAB_STATE_IDLE,
   SAB_STATE_PENDING,
   SAB_STATE_READY,
@@ -93,9 +96,9 @@ export function createSyncSabTransport(
             throw syncError('EIO', label);
           }
           awaitReady(id, deadline, label);
-          const total = Atomics.load(header, SAB_I_TOTAL);
+          const total = loadU53(header, SAB_I_TOTAL, SAB_I_TOTAL_HI);
           const chunk = Atomics.load(header, SAB_I_CHUNK);
-          const at = Atomics.load(header, SAB_I_OFFSET);
+          const at = loadU53(header, SAB_I_OFFSET, SAB_I_OFFSET_HI);
           if (at !== offset || chunk < 0 || total < 0 || offset + chunk > total) {
             throw syncError('EIO', label);
           }
