@@ -390,6 +390,64 @@ export function positionalIo(imports: WebAssembly.Imports, deps: PositionalDeps)
   }
 }
 
+const PROT_WRITE = 2;
+const MAP_PRIVATE = 2;
+const O_WRONLY = 1;
+const MAP_ALIGN = 65536;
+
+type Mmap = (
+  stream: ProcessStream,
+  length: number,
+  position: number,
+  prot: number,
+  flags: number
+) => { ptr: number; allocated: boolean };
+
+export type Memalign = (alignment: number, size: number) => number;
+
+export interface MmapDeps {
+  sys: Pick<ProcessSys, 'pread'>;
+  memory: () => WebAssembly.Memory | undefined;
+  memalign: () => Memalign | undefined;
+}
+
+export function useFileMmap(Fs: ProcessFs, deps: MmapDeps): void {
+  const fs = Fs as ProcessFs & { mmap?: Mmap };
+  const mmap = fs.mmap;
+  if (typeof mmap !== 'function') return;
+  fs.mmap = (stream, length, position, prot, flags) => {
+    const memalign = deps.memalign();
+    const memory = deps.memory();
+    const shared = (flags & MAP_PRIVATE) === 0 && (prot & PROT_WRITE) !== 0;
+    const kfd = stream.sliccKernelFile ? stream.sliccKernelFd : undefined;
+    if (
+      (stream.stream_ops.mmap && kfd === undefined) ||
+      !memalign ||
+      !memory ||
+      length <= 0 ||
+      shared ||
+      (stream.flags & O_ACCMODE) === O_WRONLY ||
+      !Fs.isFile(stream.node.mode)
+    ) {
+      return mmap.call(fs, stream, length, position, prot, flags);
+    }
+    const size = Math.ceil(length / MAP_ALIGN) * MAP_ALIGN;
+    const ptr = memalign(MAP_ALIGN, size);
+    if (!ptr) throw new Fs.ErrnoError(wasiErrno('ENOMEM'));
+    const target = () => new Uint8Array(memory.buffer, ptr, size);
+    target().fill(0);
+    if (kfd !== undefined) readInto(deps.sys, kfd, target().subarray(0, length), position);
+    else {
+      for (let done = 0; done < length; ) {
+        const got = Fs.read(stream, target(), done, length - done, position + done);
+        if (got <= 0) break;
+        done += got;
+      }
+    }
+    return { ptr, allocated: true };
+  };
+}
+
 export function wasmMemory(
   instance: WebAssembly.Instance,
   imports: WebAssembly.Imports

@@ -26,11 +26,13 @@ import { createProcessKernel, type ProcessKernel } from './process-children.ts';
 import {
   type FdImports,
   type GlueSyscalls,
+  type Memalign,
   noFollowUtimes,
   positionalIo,
   syncFsync,
   trackCloseOnExec,
   useDevFd,
+  useFileMmap,
   useMounts,
   useZeroDevices,
   wasmMemory,
@@ -393,6 +395,7 @@ export async function runWasmProcess(
   let ready!: () => void;
   let failed!: (error: unknown) => void;
   let memory: WebAssembly.Memory | undefined;
+  let exports: WebAssembly.Exports | undefined;
   const initialized = new Promise<void>((resolve, reject) => {
     ready = resolve;
     failed = reject;
@@ -446,6 +449,7 @@ export async function runWasmProcess(
         })
         .then((instance) => {
           memory = wasmMemory(instance, imports);
+          exports = instance.exports;
           publishMemory(init.sab, memory?.buffer.byteLength ?? 0);
           done(instance, init.program.module);
         }, failed);
@@ -492,6 +496,11 @@ export async function runWasmProcess(
   if (pipefs) streams.usePipes(pipefs);
   streams.useControllingTerminal();
   useDevFd(running.FS);
+  useFileMmap(running.FS, {
+    sys,
+    memory: () => memory,
+    memalign: () => exports?.emscripten_builtin_memalign as Memalign | undefined,
+  });
   ownByRealmUser(running.FS);
   const livePath = (s: ProcessStream) => liveNodePath(s.node as unknown as LiveFsNode);
   running.sliccKernel = createProcessKernel({

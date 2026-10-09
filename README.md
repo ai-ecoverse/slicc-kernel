@@ -312,6 +312,8 @@ The proxy answers `200` with `Content-Type: application/vnd.slicc.raw-fetch`: a 
 
 Directories are renamed with `FileSystemHandle.move()` where available, else by copy and delete.
 
+`mmap` of a regular file works on every file system, for Emscripten programs built with `mmap` (whose glue exports `emscripten_builtin_memalign`) as well as for WASIX ones: the kernel reads the mapped range into fresh memory of the process, as Emscripten's MEMFS does. A `MAP_PRIVATE` mapping may be written, and its changes stay in the process. A writable `MAP_SHARED` mapping is `ENODEV`. A read-only `MAP_SHARED` mapping is a copy taken at `mmap`, so later changes to the file do not show in it.
+
 ### Mounts
 
 `kernel.mount({ type, source, target, options })` mounts a file system on an existing directory. Every process sees it, Emscripten and WASI alike, and so does every attached client. `kernel.umount(target)` unmounts it, and fails with `EBUSY` while a process has a file open under it. `kernel.mounts()` lists the table, as does `/proc/mounts`. The Node entry and attached clients have the same three calls (client protocol 1.2).
