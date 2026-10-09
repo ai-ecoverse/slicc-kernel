@@ -127,6 +127,12 @@ def main():
         print('screenshot', base64.b64decode(shot['data'])[:8].hex())
         cdp.call('Target.closeTarget', {'targetId': target})
         print('done')
+    elif mode == 'goaway':
+        cdp = Cdp(base)
+        ws_send(cdp.s, json.dumps({'id': 1, 'method': 'Browser.close'}))
+        op, payload = ws_recv(cdp.f)
+        ws_send(cdp.s, payload[:2], opcode=8)
+        print('closed', op, struct.unpack('>H', payload[:2])[0], payload[2:].decode())
     elif mode == 'hold':
         cdp = Cdp(base)
         print('held', flush=True)
