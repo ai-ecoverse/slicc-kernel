@@ -33,7 +33,7 @@ export class Resolver {
   private readonly now: () => number;
   private readonly timeoutMs: number;
   private readonly cache = new Map<string, Cached>();
-  private readonly pending = new Map<string, Promise<string[]>>();
+  private readonly pending = new Map<string, Lookup>();
 
   constructor(options: ResolverOptions) {
     this.uplink = options.uplink;
@@ -63,16 +63,22 @@ export class Resolver {
     if (hit && hit.expires > this.now()) return hit.addresses;
     let lookup = this.pending.get(id);
     if (!lookup) {
-      lookup = this.lookup(key, asked, id);
+      const abort = new AbortController();
+      lookup = { work: this.lookup(key, asked, id, abort.signal), abort, waiters: 0 };
       this.pending.set(id, lookup);
-      void lookup.then(() => this.pending.delete(id));
+      void lookup.work.then(() => this.pending.delete(id));
     }
-    return interruptible(lookup, blocking?.());
+    return waitFor(lookup, blocking?.());
   }
 
-  private async lookup(name: string, family: ResolveFamily, id: string): Promise<string[]> {
+  private async lookup(
+    name: string,
+    family: ResolveFamily,
+    id: string,
+    abandoned: AbortSignal
+  ): Promise<string[]> {
     const uplink = this.uplink as NetworkUplink;
-    const timeout = AbortSignal.timeout(this.timeoutMs);
+    const timeout = AbortSignal.any([AbortSignal.timeout(this.timeoutMs), abandoned]);
     let answer: { addresses: string[]; ttl?: number };
     try {
       answer = answerOf(
@@ -110,14 +116,25 @@ export class Resolver {
   }
 }
 
-function interruptible(work: Promise<string[]>, signal: AbortSignal | undefined) {
-  if (!signal) return work;
-  if (signal.aborted) return Promise.reject(new KernelError('EINTR'));
+interface Lookup {
+  work: Promise<string[]>;
+  abort: AbortController;
+  waiters: number;
+}
+
+function waitFor(lookup: Lookup, signal: AbortSignal | undefined): Promise<string[]> {
+  if (signal?.aborted) return Promise.reject(new KernelError('EINTR'));
+  lookup.waiters++;
   return new Promise<string[]>((resolve, reject) => {
-    const abort = () => reject(new KernelError('EINTR'));
-    signal.addEventListener('abort', abort, { once: true });
-    void work.then((value) => {
-      signal.removeEventListener('abort', abort);
+    const abort = () => {
+      if (--lookup.waiters === 0) lookup.abort.abort(new KernelError('EINTR'));
+      reject(new KernelError('EINTR'));
+    };
+    signal?.addEventListener('abort', abort, { once: true });
+    void lookup.work.then((value) => {
+      if (signal?.aborted) return;
+      lookup.waiters--;
+      signal?.removeEventListener('abort', abort);
       resolve(value);
     });
   });

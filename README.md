@@ -187,7 +187,7 @@ await kernel.run(['curl', '-sS', 'https://registry.npmjs.org/@ai-ecoverse/wasm-b
 
 ### Network labels
 
-Every process has a network label, like a Linux network namespace: `'none'` (loopback only), `'default'` (loopback, and the outside world through the proxy) or `'uplink'` (also the [uplink](#uplink)'s names and, later, its addresses). It is set when a process starts (`run`, `openTerminal`, a client's `spawn`), `'uplink'` unless the caller says otherwise, and children inherit it across `fork`, `exec` and `posix_spawn`. A process reads its own in `SLICC_NETWORK`, which the kernel sets on every start whatever the environment says; a process can narrow its children's by setting `SLICC_NETWORK` to a narrower label for them, and never widen it. Without an uplink, `'uplink'` and `'default'` reach the same places.
+Every process has a network label, like a Linux network namespace: `'none'` (loopback only), `'default'` (loopback, and the outside world through the proxy) or `'uplink'` (also the [uplink](#uplink)'s names and, later, its addresses). It is set when a process starts (`run`, `openTerminal`, a client's `spawn`), `'uplink'` unless the caller says otherwise, and children inherit it across `fork`, `exec` and `posix_spawn`. A process reads its own in `SLICC_NETWORK`, which the kernel sets on every start whatever the environment says; a process can narrow its children's by setting `SLICC_NETWORK` to a narrower label for them, and never widen it. Without an uplink, `'uplink'` and `'default'` reach the same places. In this release the label governs name resolution only: the realm proxy and `Module.sliccKernel.http` do not check it yet, so a `'none'` process can still reach the transport over HTTP.
 
 ### Uplink
 
