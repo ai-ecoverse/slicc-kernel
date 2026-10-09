@@ -69,6 +69,19 @@ export class JobTable {
     return parent === undefined ? undefined : this.shown(parent);
   }
 
+  sessionOf(pgid: number): number | undefined {
+    for (const member of this.members.values()) if (member.pgid === pgid) return member.sid;
+    return undefined;
+  }
+
+  join(pid: number, pgid: number): void {
+    const sid = this.sessionOf(pgid);
+    if (sid === undefined) throw new KernelError('ESRCH');
+    const member = this.member(pid);
+    member.pgid = pgid;
+    member.sid = sid;
+  }
+
   pgidOf(pid: number): number | undefined {
     return this.members.get(pid)?.pgid;
   }

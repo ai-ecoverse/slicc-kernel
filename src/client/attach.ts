@@ -51,6 +51,7 @@ export interface SpawnOptions {
   env?: Record<string, string>;
   stdin?: string | Uint8Array;
   group?: 'new';
+  pgid?: number;
   onStdout?: (bytes: Uint8Array) => void;
   onStderr?: (bytes: Uint8Array) => void;
 }
@@ -278,6 +279,8 @@ async function spawnOn(
   opts: SpawnOptions
 ): Promise<SpawnedProcess> {
   const { onStdout, onStderr, stdin, group: _, ...rest } = opts;
+  if (opts.pgid !== undefined)
+    await since(channel, 3, 'spawn into a process group', async () => {});
   const started = Promise.withResolvers<number>();
   const options = { ...rest, ...(stdin !== undefined ? { stdin: bytesOf(stdin) } : {}) };
   const { done } = channel.request(
@@ -289,12 +292,13 @@ async function spawnOn(
   );
   done.catch(started.reject);
   const pid = await started.promise;
+  const pgid = opts.pgid ?? pid;
   return {
     pid,
-    pgid: pid,
+    pgid,
     exited: done as Promise<number>,
     signal: async (name = 'SIGTERM') =>
-      void (await channel.call({ op: 'kill', pid: -pid, signal: name })),
+      void (await channel.call({ op: 'kill', pid: -pgid, signal: name })),
   };
 }
 

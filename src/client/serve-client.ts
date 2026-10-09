@@ -110,6 +110,12 @@ function signalOf(host: ClientHost): (name: string) => number {
   );
 }
 
+function joinable(l: Launcher, pgid: number, ours: (sid: number) => boolean): void {
+  const sid = l.groupSession(pgid);
+  if (sid === undefined) throw fsError('ESRCH', `no process group ${pgid}`);
+  if (!ours(sid)) throw fsError('EPERM', `process group ${pgid} is in another session`);
+}
+
 export function serveClient(port: MessagePortLike, host: ClientHost): ServedClient {
   let state: 'new' | 'open' | 'closed' = 'new';
   const terminals = new Map<number, TerminalSession>();
@@ -184,6 +190,9 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
 
   async function spawn(req: Extract<ClientRequest, { op: 'spawn' }>, l: Launcher) {
     const out = (fd: 1 | 2) => (bytes: Uint8Array) => reply(req.id, { fd, bytes: bytes.slice() });
+    const ours = (sid: number) =>
+      groups.has(sid) || [...terminals.values()].some((t) => t.pid === sid);
+    if (req.options.pgid !== undefined) joinable(l, req.options.pgid, ours);
     let leader: number | undefined;
     const result = await l.run(req.argv, {
       ...req.options,
@@ -193,7 +202,7 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
       onStarted: (pid) => {
         leader = pid;
         if (state === 'closed') return;
-        groups.add(pid);
+        if (req.options.pgid === undefined) groups.add(pid);
         reply(req.id, { started: pid });
       },
     });

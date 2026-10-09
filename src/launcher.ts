@@ -116,6 +116,7 @@ export interface RunOptions {
   onStderr?: (bytes: Uint8Array) => void;
   onStarted?: (pid: number) => void;
   collect?: boolean;
+  pgid?: number;
 }
 
 export interface TerminalOptions {
@@ -174,6 +175,7 @@ interface StartRequest {
   ppid?: number;
   fork?: ForkState;
   exec?: boolean;
+  pgid?: number;
 }
 
 const COMMAND = /^\/(?:usr\/)?bin\/([^/]+)$/;
@@ -492,7 +494,14 @@ export class Launcher {
     return this.start({ ...req, program, argv0: target.argv0, args, env });
   }
 
+  groupSession(pgid: number): number | undefined {
+    return this.jobs.sessionOf(pgid);
+  }
+
   private start(req: StartRequest): WasmProcessHandle {
+    if (req.pgid !== undefined && this.jobs.sessionOf(req.pgid) === undefined) {
+      throw fsError('ESRCH', `no process group ${req.pgid}`);
+    }
     const pid = this.nextPid++;
     const terminal = req.fds.stdioTerminal();
     const handle = spawnWasmProcess({
@@ -528,6 +537,7 @@ export class Launcher {
     this.processes.set(pid, handle);
     this.jobs.add(pid, req.ppid, (sig) => handle.signal(sig), terminal);
     if (req.exec && req.ppid !== undefined) this.jobs.exec(req.ppid, pid, true);
+    if (req.pgid !== undefined) this.jobs.join(pid, req.pgid);
     this.described.set(pid, {
       argv: [req.argv0, ...req.args],
       tty: terminal?.name ?? null,
@@ -850,7 +860,8 @@ export class Launcher {
     fds.installAt(0, options.stdin ? bytesSource(options.stdin) : nullFile());
     fds.installAt(1, sinkFile(stdout));
     fds.installAt(2, sinkFile(stderr));
-    const handle = await this.launch(planned, { env, cwd, fds, report });
+    const group = options.pgid !== undefined ? { pgid: options.pgid } : {};
+    const handle = await this.launch(planned, { env, cwd, fds, report, ...group });
     options.onStarted?.(handle.pid);
     const status = await handle.exited;
     return { status, stdout: concat(out), stderr: concat(err) };

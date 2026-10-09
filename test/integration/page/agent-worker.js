@@ -13,9 +13,10 @@ const actions = {
     postMessage({ event: 'forwarded', port }, [port]);
     return true;
   },
-  async spawn({ argv }) {
+  async spawn({ argv, pgid }) {
     let out = '';
     const child = await client.spawn(argv, {
+      ...(pgid !== undefined ? { pgid } : {}),
       onStdout: (bytes) => {
         out += new TextDecoder().decode(bytes);
       },

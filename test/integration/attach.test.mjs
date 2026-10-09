@@ -21,7 +21,7 @@ const events = (page, name) => page.evaluate((n) => window[n].events, name);
 
 test('a worker attaches, its sleep shows in a terminal, the terminal kills it, and the worker sees the exit', async (t) => {
   const { page } = await booted(chrome, t);
-  assert.deepEqual(await attached(page, 'a'), { protocol: [1, 2] });
+  assert.deepEqual(await attached(page, 'a'), { protocol: [1, 3] });
   const { pid, pgid } = await ask(page, 'a', 'spawn', { argv: ['sleep', '100'] });
   assert.equal(pgid, pid);
   const listed = await ask(page, 'a', 'ps');
@@ -40,6 +40,28 @@ test('a worker attaches, its sleep shows in a terminal, the terminal kills it, a
   await page.until((p) => window.a.events.some((e) => e.event === 'exited' && e.pid === p), pid);
   const exit = (await events(page, 'a')).find((e) => e.event === 'exited');
   assert.deepEqual([exit.pid, exit.status], [pid, 143]);
+  assert.deepEqual(page.errors, []);
+});
+
+test('a worker spawns into its own process group, and kill -- -pgid from a terminal ends every member', async (t) => {
+  const { page } = await booted(chrome, t);
+  await attached(page, 'a');
+  const leader = await ask(page, 'a', 'spawn', { argv: ['sleep', '100'] });
+  const member = await ask(page, 'a', 'spawn', { argv: ['sleep', '100'], pgid: leader.pid });
+  assert.equal(member.pgid, leader.pid);
+  const groups = (await ask(page, 'a', 'ps'))
+    .filter((p) => p.pid === leader.pid || p.pid === member.pid)
+    .map((p) => p.pgid);
+  assert.deepEqual(groups, [leader.pid, leader.pid]);
+  await page.evaluate(() => window.terminal(['bash', '-i'], { cwd: '/home' }));
+  await page.until(() => window.screen.screen.includes('$ '));
+  await page.evaluate((g) => window.term.write(`kill -- -${g}\r`), leader.pid);
+  await page.until(
+    (pids) => pids.every((p) => window.a.events.some((e) => e.event === 'exited' && e.pid === p)),
+    [leader.pid, member.pid]
+  );
+  const exits = (await events(page, 'a')).filter((e) => e.event === 'exited').map((e) => e.status);
+  assert.deepEqual(exits, [143, 143]);
   assert.deepEqual(page.errors, []);
 });
 
@@ -80,7 +102,7 @@ test('a port survives a second transfer; files, fetch, refusal of another protoc
     const { port } = window.a.events.find((e) => e.event === 'forwarded');
     return window.b.ask('attach', { port }, [port]);
   });
-  assert.deepEqual(protocol, { protocol: [1, 2] });
+  assert.deepEqual(protocol, { protocol: [1, 3] });
 
   assert.deepEqual(await ask(page, 'b', 'files'), {
     listed: ['a.txt'],
@@ -109,7 +131,7 @@ test('a port survives a second transfer; files, fetch, refusal of another protoc
   });
   assert.match(
     refused,
-    /^hello,bye: the slicc-kernel detached this client: slicc-kernel client protocol 2\.x is not supported: this side speaks 1\.2$/
+    /^hello,bye: the slicc-kernel detached this client: slicc-kernel client protocol 2\.x is not supported: this side speaks 1\.3$/
   );
   const silent = await page.evaluate(() =>
     window
