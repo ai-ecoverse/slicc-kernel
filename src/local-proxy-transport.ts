@@ -27,6 +27,7 @@ export interface LocalProxyProbe {
   maxRequestBodyBytes: number;
   kernelTunnel?: number;
   kernelPort?: number;
+  cdp?: number;
 }
 
 export type LocalProxyStatus =
@@ -200,6 +201,7 @@ export async function checkLocalProxy(options: LocalProxyCheckOptions): Promise<
       maxRequestBodyBytes: reply.maxRequestBodyBytes,
       ...(typeof reply.kernelTunnel === 'number' ? { kernelTunnel: reply.kernelTunnel } : {}),
       ...(typeof reply.kernelPort === 'number' ? { kernelPort: reply.kernelPort } : {}),
+      ...(typeof reply.cdp === 'number' ? { cdp: reply.cdp } : {}),
     },
   };
 }
