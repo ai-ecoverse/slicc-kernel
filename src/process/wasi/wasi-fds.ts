@@ -507,8 +507,10 @@ export class WasiFds {
     } else {
       if (!existing) this.fs.writeFile(path, new Uint8Array(0));
       const empty = !existing || (oflags & OFLAGS.TRUNC) !== 0;
-      const st = existing ?? this.fs.stat(path);
-      buffer = new FileBuffer(this.fs, path, empty, st.maxFile, st.ranged ? st.size : undefined);
+      if (existing?.ranged) (this.fs as { invalidate?(): void }).invalidate?.();
+      const st = existing?.ranged || !existing ? this.fs.stat(path) : existing;
+      const ranged = st.ranged ? st.size : undefined;
+      buffer = new FileBuffer(this.fs, path, empty, st.maxFile, ranged, st.version);
       this.buffers.set(path, buffer);
     }
     buffer.opens++;

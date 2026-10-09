@@ -30,7 +30,8 @@ export class FileBuffer {
 
     empty: boolean,
     maxFile?: number,
-    size?: number
+    size?: number,
+    version?: string
   ) {
     this.fs = fs;
     this.where = path;
@@ -38,7 +39,7 @@ export class FileBuffer {
     const { pread, pwrite, truncate } = fs;
     if (size !== undefined && pread && pwrite && truncate) {
       const io = { pread: pread.bind(fs), pwrite: pwrite.bind(fs), truncate: truncate.bind(fs) };
-      this.ranged = new RangedFile(io, path, size);
+      this.ranged = new RangedFile(io, path, size, version);
       if (empty) this.truncate(0);
     } else if (empty) {
       this.data = new Uint8Array(0);

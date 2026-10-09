@@ -1,13 +1,13 @@
 import { Pages, WRITEBACK } from './pages.ts';
 
 export interface RangedIo {
-  pread(path: string, offset: number, length: number): Uint8Array;
+  pread(path: string, offset: number, length: number, version?: string): Uint8Array;
   pwrite(path: string, offset: number, bytes: Uint8Array, transfer?: boolean): void;
   truncate(path: string, size: number): void;
 }
 
 export interface AsyncRangedIo {
-  pread(path: string, offset: number, length: number): Promise<Uint8Array>;
+  pread(path: string, offset: number, length: number, version?: string): Promise<Uint8Array>;
   pwrite(path: string, offset: number, bytes: Uint8Array, transfer?: boolean): Promise<void>;
   truncate(path: string, size: number): Promise<void>;
 }
@@ -16,11 +16,13 @@ export class RangedFile {
   private readonly pages: Pages;
   private readonly io: RangedIo;
   private pinned = false;
+  private version: string | undefined;
   path: string;
 
-  constructor(io: RangedIo, path: string, size: number) {
+  constructor(io: RangedIo, path: string, size: number, version?: string) {
     this.io = io;
     this.path = path;
+    this.version = version;
     this.pages = new Pages(size);
   }
 
@@ -33,7 +35,9 @@ export class RangedFile {
   }
 
   private fetch(runs: Array<[number, number]>): void {
-    for (const [start, n] of runs) this.pages.fill(start, this.io.pread(this.path, start, n));
+    for (const [start, n] of runs) {
+      this.pages.fill(start, this.io.pread(this.path, start, n, this.version));
+    }
   }
 
   read(at: number, length: number): Uint8Array {
@@ -62,6 +66,7 @@ export class RangedFile {
     if (plan.shrink !== undefined) this.io.truncate(this.path, plan.shrink);
     for (const run of plan.runs) this.io.pwrite(this.path, run.offset, run.bytes, true);
     if (plan.extend !== undefined) this.io.truncate(this.path, plan.extend);
+    this.version = undefined;
     this.pages.flushed();
   }
 
@@ -80,11 +85,13 @@ export class AsyncRangedFile {
   private readonly pages: Pages;
   private readonly io: AsyncRangedIo;
   private pinned = false;
+  private version: string | undefined;
   path: string;
 
-  constructor(io: AsyncRangedIo, path: string, size: number) {
+  constructor(io: AsyncRangedIo, path: string, size: number, version?: string) {
     this.io = io;
     this.path = path;
+    this.version = version;
     this.pages = new Pages(size);
   }
 
@@ -93,7 +100,9 @@ export class AsyncRangedFile {
   }
 
   private async fetch(runs: Array<[number, number]>): Promise<void> {
-    for (const [start, n] of runs) this.pages.fill(start, await this.io.pread(this.path, start, n));
+    for (const [start, n] of runs) {
+      this.pages.fill(start, await this.io.pread(this.path, start, n, this.version));
+    }
   }
 
   async read(at: number, length: number): Promise<Uint8Array> {
@@ -117,6 +126,7 @@ export class AsyncRangedFile {
     if (plan.shrink !== undefined) await this.io.truncate(this.path, plan.shrink);
     for (const run of plan.runs) await this.io.pwrite(this.path, run.offset, run.bytes, true);
     if (plan.extend !== undefined) await this.io.truncate(this.path, plan.extend);
+    this.version = undefined;
     this.pages.flushed();
   }
 

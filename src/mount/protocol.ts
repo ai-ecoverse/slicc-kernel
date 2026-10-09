@@ -50,6 +50,7 @@ export type DriverCall =
       create: boolean;
       truncate: boolean;
       exclusive: boolean;
+      ifMatch?: string;
     }
   | { op: 'read'; fh: number; offset: number; size: number }
   | { op: 'write'; fh: number; offset: number; bytes: Uint8Array }

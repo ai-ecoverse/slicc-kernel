@@ -5,9 +5,13 @@ import { KernelError, OpenFile } from './fd-table.ts';
 export interface VfsFileFs extends Partial<AsyncRangedIo> {
   readFileBuffer(path: string): Promise<Uint8Array>;
   writeFile(path: string, content: Uint8Array): Promise<void>;
-  stat?(
-    path: string
-  ): Promise<{ readonly?: boolean; maxFile?: number; size?: number; ranged?: boolean }>;
+  stat?(path: string): Promise<{
+    readonly?: boolean;
+    maxFile?: number;
+    size?: number;
+    ranged?: boolean;
+    version?: string;
+  }>;
   readlink?(path: string): Promise<string>;
 }
 
@@ -117,7 +121,7 @@ export class VfsNode {
     const st =
       io && !this.orphaned ? await this.fs.stat?.(this.path).catch(() => undefined) : undefined;
     if (io && st?.ranged) {
-      this.ranged = new AsyncRangedFile(io, this.path, st.size ?? 0);
+      this.ranged = new AsyncRangedFile(io, this.path, st.size ?? 0, st.version);
       return this.ranged;
     }
     await this.load();

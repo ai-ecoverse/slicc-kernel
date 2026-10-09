@@ -143,6 +143,10 @@ export async function hostfsProxy({
       case 'setattr': {
         write();
         const path = at(req.path);
+        if (req.size !== undefined && capabilities.ranges) {
+          if ((await fsp.lstat(path)).isDirectory()) throw fail('EISDIR', req.path);
+          await fsp.truncate(path, req.size);
+        }
         if (req.mode !== undefined) await fsp.chmod(path, req.mode & 0o7777);
         if (req.mtime !== undefined) {
           const st = await fsp.lstat(path);

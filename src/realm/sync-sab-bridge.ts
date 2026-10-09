@@ -225,7 +225,8 @@ export function createSyncFsSabBridge(
       run({ op: 'hold', path, mode: held ? 1 : 0 }, path);
     },
     statfs: (path = '/') => parseSyncFsUsage(json({ op: 'statfs', path }, path)),
-    pread: (path, offset, length) => bytes({ op: 'pread', path, offset, length }, path),
+    pread: (path, offset, length, version) =>
+      bytes({ op: 'pread', path, offset, length, ...(version ? { version } : {}) }, path),
     pwrite: (path, offset, body, transfer) => {
       const whole = body.byteOffset === 0 && body.byteLength === body.buffer.byteLength;
       const owned = transfer && whole && body.buffer instanceof ArrayBuffer;
