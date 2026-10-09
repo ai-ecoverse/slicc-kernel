@@ -985,6 +985,7 @@ export class WasmProcess {
   async exit(): Promise<void> {
     if (this.exited) return;
     this.exited = true;
+    this.die();
     this.clearAlarm();
     this.interrupt.abort();
     this.options.locks?.release(this.pid);

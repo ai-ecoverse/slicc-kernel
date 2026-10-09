@@ -306,10 +306,9 @@ export class Launcher {
   private readonly jobs = new JobTable();
   private readonly locks = new LockTable();
   private readonly settling = new SettlingChildren((pid) => this.jobs.pgidOf(pid));
-  private readonly ptys = new PtyTable((tty, sig) =>
-    this.settling.deliver(sig, this.jobs.tcgetpgrp(tty, 0), () =>
-      this.jobs.signalOwnedForeground(tty, sig)
-    )
+  private readonly ptys = new PtyTable(
+    (tty, sig) => this.keySignal(tty, 0, sig, () => this.jobs.signalOwnedForeground(tty, sig)),
+    (tty) => this.settling.reading(this.jobs.tcgetpgrp(tty, 0))
   );
   readonly net = new LoopbackNet();
   readonly cdp: CdpHosts;
@@ -763,6 +762,12 @@ export class Launcher {
       );
   }
 
+  private keySignal(tty: KernelTty, fallback: number, sig: number, send: () => void): void {
+    const pgid = this.jobs.tcgetpgrp(tty, fallback);
+    const foreground = () => this.jobs.tcgetpgrp(tty, fallback);
+    this.settling.deliver(sig, pgid, send, tty.reading ? undefined : foreground);
+  }
+
   private ignoredBy(pid: number, fork = false): number {
     return this.processes.get(pid)?.ignoredSignals(fork) ?? 0;
   }
@@ -976,11 +981,9 @@ export class Launcher {
     let leader = 0;
     const tty: KernelTty = new KernelTty(
       { write: (bytes) => options.onData(bytes.slice()) },
-      (sig) =>
-        this.settling.deliver(sig, this.jobs.tcgetpgrp(tty, leader), () =>
-          this.jobs.signalForeground(tty, leader, sig)
-        )
+      (sig) => this.keySignal(tty, leader, sig, () => this.jobs.signalForeground(tty, leader, sig))
     );
+    tty.onRead = () => this.settling.reading(this.jobs.tcgetpgrp(tty, leader));
     tty.name = `/dev/tty${++this.terminals}`;
     tty.setSize(options.cols ?? 80, options.rows ?? 24);
     const fds = new FdTable();

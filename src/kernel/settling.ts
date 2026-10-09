@@ -5,9 +5,11 @@ const SETUP_OPS = new Set([
   'sig-mask',
   'proc-setpgid',
   'tty-pgrp-set',
+  'proc-exec',
+  'proc-spawn',
 ]);
 
-export const SETTLE_MS = 250;
+export const SETTLE_MS = 2000;
 
 const KEY_SIGNALS = new Set([2, 3, 20]);
 
@@ -19,9 +21,10 @@ interface Held {
 export class SettlingChildren {
   private readonly children = new Map<
     number,
-    { ppid: number; timer?: ReturnType<typeof setTimeout> }
+    { ppid: number; execer?: number; timer?: ReturnType<typeof setTimeout> }
   >();
   private held: Held[] = [];
+  private parked: Held[] = [];
   private readonly pgidOf: (pid: number) => number | undefined;
   private readonly settleMs: number;
 
@@ -31,7 +34,15 @@ export class SettlingChildren {
   }
 
   started(pid: number, ppid: number): void {
-    this.children.set(pid, { ppid });
+    const parent = this.children.get(ppid);
+    this.children.set(pid, parent ? { ppid: parent.ppid, execer: ppid } : { ppid });
+    const group = this.pgidOf(ppid);
+    this.held.push(...this.parked.filter((p) => p.pgid === group));
+    this.parked = this.parked.filter((p) => p.pgid !== group);
+  }
+
+  reading(pgid: number): void {
+    this.parked = this.parked.filter((p) => p.pgid !== pgid);
   }
 
   syscall(pid: number, op: string): void {
@@ -49,14 +60,26 @@ export class SettlingChildren {
     if (!child) return;
     clearTimeout(child.timer);
     this.children.delete(pid);
+    if (child.execer !== undefined) this.settled(child.execer);
     const ready = this.held.filter((h) => !this.blocking(h.pgid));
     this.held = this.held.filter((h) => this.blocking(h.pgid));
     for (const h of ready) h.send();
   }
 
-  deliver(sig: number, pgid: number, send: () => void): void {
-    if (KEY_SIGNALS.has(sig) && this.blocking(pgid)) this.held.push({ pgid, send });
-    else send();
+  deliver(sig: number, pgid: number, send: () => void, foreground?: () => number): void {
+    if (!KEY_SIGNALS.has(sig)) {
+      send();
+    } else if (this.blocking(pgid)) {
+      this.held.push({ pgid, send });
+    } else if (foreground) {
+      send();
+      const moved = () => {
+        if (foreground() !== pgid) send();
+      };
+      this.parked.push({ pgid, send: moved });
+    } else {
+      send();
+    }
   }
 
   private blocking(pgid: number): boolean {

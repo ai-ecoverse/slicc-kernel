@@ -26,7 +26,9 @@ export class PtyPair {
 
     signal: PtySignal,
 
-    onFree: (pair: PtyPair) => void
+    onFree: (pair: PtyPair) => void,
+
+    onRead?: (tty: KernelTty) => void
   ) {
     this.index = index;
 
@@ -34,6 +36,7 @@ export class PtyPair {
     this.slave = new KernelTty({ write: (bytes) => this.fromSlave(bytes) }, (sig) =>
       signal(this.slave, sig)
     );
+    if (onRead) this.slave.onRead = () => onRead(this.slave);
     this.slave.name = `/dev/pts/${index}`;
   }
 
@@ -146,14 +149,17 @@ export class PtyTable {
 
   private readonly signal: PtySignal;
 
-  constructor(signal: PtySignal) {
+  private readonly onRead: ((tty: KernelTty) => void) | undefined;
+
+  constructor(signal: PtySignal, onRead?: (tty: KernelTty) => void) {
     this.signal = signal;
+    this.onRead = onRead;
   }
 
   open(): { pair: PtyPair; master: OpenFile } {
     let index = 0;
     while (this.pairs.has(index)) index += 1;
-    const pair = new PtyPair(index, this.signal, (p) => this.pairs.delete(p.index));
+    const pair = new PtyPair(index, this.signal, (p) => this.pairs.delete(p.index), this.onRead);
     this.pairs.set(index, pair);
     return { pair, master: pair.master() };
   }
