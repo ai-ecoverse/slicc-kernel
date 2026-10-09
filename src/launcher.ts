@@ -659,7 +659,12 @@ export class Launcher {
     }
     if (type === 'tmpfs') {
       const { port1, port2 } = new MessageChannel();
-      serveFilesystem(port2, tmpfs(), { symlinks: true, chmod: true, attrTtl: 0 });
+      serveFilesystem(
+        port2,
+        tmpfs(),
+        { symlinks: true, chmod: true, ranges: true, attrTtl: 0 },
+        { owned: true }
+      );
       return {
         port: port1,
         dispose: () => {

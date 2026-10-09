@@ -1,4 +1,4 @@
-import { type KernelFs, normalizePath } from './types.ts';
+import { type KernelFs, normalizePath, rangedOps } from './types.ts';
 
 export type WatchChange = { paths: string[] } | { overflow: true };
 
@@ -101,6 +101,11 @@ export class FsWatchers {
       chmod: after(fs.chmod.bind(fs), (path) => [path]),
       utimes: after(fs.utimes.bind(fs), (path) => [path]),
     };
+    const ranged = rangedOps(fs);
+    if (ranged) {
+      overrides.pwrite = after(ranged.pwrite, (path) => [path]);
+      overrides.truncate = after(ranged.truncate, (path) => [path]);
+    }
     return new Proxy(fs, {
       get(target, key, receiver) {
         if (Object.hasOwn(overrides, key)) return overrides[key as keyof KernelFs];

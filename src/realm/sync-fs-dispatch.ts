@@ -1,4 +1,4 @@
-import type { FsStat, KernelFs } from '../fs/types.ts';
+import { type FsStat, type KernelFs, rangedOps } from '../fs/types.ts';
 import { resolveSyncFsToken, type SyncFsTokenEntry } from './sync-fs-token-registry.ts';
 import {
   type SyncFsRequest,
@@ -29,6 +29,7 @@ export interface SyncFsStatJson {
   dev?: number;
   readonly?: boolean;
   maxFile?: number;
+  ranged?: boolean;
 }
 
 function statJson(s: FsStat): SyncFsStatJson {
@@ -45,6 +46,7 @@ function statJson(s: FsStat): SyncFsStatJson {
     ...(s.dev !== undefined ? { dev: s.dev } : {}),
     ...(s.readonly ? { readonly: true } : {}),
     ...(s.maxFile ? { maxFile: s.maxFile } : {}),
+    ...(s.ranged ? { ranged: true } : {}),
   };
 }
 
@@ -121,9 +123,24 @@ async function run(
     case 'utimes':
       await fs.utimes(path, new Date(req.atimeMs ?? 0), new Date(req.mtimeMs ?? 0));
       return done;
+    case 'pread':
+    case 'pwrite':
+    case 'truncate':
+      return ranged(fs, path, req);
     default:
       return { ok: false, errno: 'EINVAL', message: `sync-fs: unknown op '${req.op as string}'` };
   }
+}
+
+async function ranged(fs: KernelFs, path: string, req: SyncFsRequest): Promise<SyncFsResult> {
+  const ops = rangedOps(fs);
+  if (!ops) throw syncError('ENOSYS', path);
+  const offset = req.offset ?? 0;
+  if (req.op === 'pread')
+    return { ok: true, kind: 'bytes', bytes: await ops.pread(path, offset, req.length ?? 0) };
+  if (req.op === 'pwrite') await ops.pwrite(path, offset, req.body ?? new Uint8Array(0), true);
+  else await ops.truncate(path, req.length ?? 0);
+  return done;
 }
 
 export async function dispatchSyncFs(req: SyncFsRequest): Promise<SyncFsResult> {

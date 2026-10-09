@@ -199,15 +199,16 @@ Directories are renamed with `FileSystemHandle.move()` where available, else by 
 
 `kernel.mount({ type, source, target, options })` mounts a file system on an existing directory. Every process sees it, Emscripten and WASI alike, and so does every attached client. `kernel.umount(target)` unmounts it, and fails with `EBUSY` while a process has a file open under it. `kernel.mounts()` lists the table, as does `/proc/mounts`. The Node entry and attached clients have the same three calls (client protocol 1.2).
 
-- **Built in:** `tmpfs`, which lives in memory until unmounted; `fsa`, a folder the user picks (see [Removable media](#removable-media-fsa)); and `hostfs`, a folder the local proxy exports (see [Host folders](#host-folders-hostfs)).
+- **Built in:** `tmpfs`, which lives in memory until unmounted, in 1 MiB chunks; `fsa`, a folder the user picks (see [Removable media](#removable-media-fsa)); and `hostfs`, a folder the local proxy exports (see [Host folders](#host-folders-hostfs)).
 - **Package drivers:** a package declares a type in `"slicc": { "filesystems": { "<type>": { "module": "<file>" } } }`, and the kernel starts that module in a worker of its own for each mount. The module is a single self-contained file: it can't import bare specifiers.
   - Its default export receives `{ fetch }`, the kernel's network transport. It returns `{ handlers, capabilities }`.
-  - The handlers are path-based: `getattr`, `readdir`, `open`/`read`/`write`/`release` on handles, `mkdir`, `rmdir`, `unlink`, `rename`, and optionally `symlink`, `readlink`, `setattr` and `statfs`.
+  - The handlers are path-based: `getattr`, `readdir`, `open`/`read`/`write`/`release` on handles, `mkdir`, `rmdir`, `unlink`, `rename`, and optionally `symlink`, `readlink`, `setattr` (`mode`, `mtime`, and `size` to truncate) and `statfs`.
   - An optional `mount({ source, options })` handler validates the source.
   - Errors carry a POSIX `code`.
   - `@ai-ecoverse/slicc-kernel/driver` exports the types and `fsError`.
-- **Capabilities:** `readonly`, `symlinks`, `chmod`, `maxIo` (the largest read or write per message), `maxFile`, `listingStats`, and `attrTtl`/`entryTtl` (in ms, default 1000).
-- **Caching:** the kernel caches attributes and listings for those TTLs, and a driver can push `invalidate` for changes made outside. File contents are read whole when a program opens a file and written back when it closes it, which gives close-to-open consistency as NFS has.
+- **Capabilities:** `readonly`, `symlinks`, `chmod`, `ranges`, `maxIo` (the largest read or write per message), `maxFile`, `listingStats`, and `attrTtl`/`entryTtl` (in ms, default 1000). `ranges` (driver protocol 1.1) promises that a write lands in the file at once, with no copy of the whole file on `open` or `release`, and that `setattr` takes `size`.
+- **Caching:** the kernel caches attributes and listings for those TTLs, and a driver can push `invalidate` for changes made outside.
+- **File contents:** on a mount with `ranges`, as `tmpfs` is, a program reads and writes a file in 64 KiB pages: reads come from the driver 1 MiB at a time, and changed pages go back in 1 MiB runs once 8 MiB have changed, at `fsync`, and when the file is closed (from the kernel's own descriptors also 250 ms after a write). A file of any size the mount can hold works, with memory to spare for about one more copy of it. Elsewhere, file contents are read whole when a program opens a file and written back when it closes it. Both give close-to-open consistency, as NFS has.
 - **Rules on a mount:**
   - a rename across mounts is `EXDEV`, so `mv` copies;
   - `df` reports each mount from its driver's `statfs`;
@@ -335,7 +336,7 @@ Unit tests live in `test/unit/`, which stays out of git. They run real wasm bash
 
 The Biome, TypeScript, lefthook, Renovate and CI configuration comes from [slicc-shared-web](https://github.com/ai-ecoverse/slicc-shared-web), which also provides the `slicc-lint-comments` (no comments anywhere), `slicc-no-unit-tests` (no unit tests in git) and `slicc-diff-cover` (100% coverage of changed lines) commands that `npm run lint` and the pre-commit hook use.
 
-`tools/big-file.mjs [bytes]` is a manual check, not part of any suite. It writes a file of that size (64 MiB by default) through a tmpfs mount with the unit-test launcher, reads it back, and prints the peak RSS and its ratio to the file size. A whole file is still held in memory several times over (#86), so a 1.1 GiB file peaked at 18 GB of RSS. **Do not run it past 1 GiB on a workstation.** It refuses anything over 256 MiB unless `SLICC_BIG_FILE_I_HAVE_THE_RAM=1` is set. Measure a small file and extrapolate instead.
+`tools/big-file.mjs [bytes]` is a manual check, not part of any suite. It writes a file of that size (64 MiB by default) through a tmpfs mount with the unit-test launcher, reads it back, and prints the peak RSS and its ratio to the file size. A 256 MiB file peaks at about 1.8 times its size. Before ranged I/O (#127), a 1.1 GiB file peaked at 18 GB of RSS. **Do not run it past 1 GiB on a workstation.** It refuses anything over 256 MiB unless `SLICC_BIG_FILE_I_HAVE_THE_RAM=1` is set. Measure a small file and extrapolate instead. The unit suite checks a 32 MiB file the same way, and allows a fixed 192 MiB for garbage V8 has yet to collect, which dominates at that size.
 
 Releases are cut by semantic-release on every push to `main`. A failure after the version is tagged (a rejected push, a failed `npm publish`) doesn't strand that version: `tools/release-recover.mjs` runs next. For any version tagged at HEAD, it first pushes the tag if origin lacks it, then publishes the version if npm lacks it, with retries, and creates its GitHub release if that is missing too. Re-running the Release workflow completes such a version the same way.
 

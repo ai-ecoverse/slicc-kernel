@@ -16,7 +16,10 @@ export type SyncFsOp =
   | 'chmod'
   | 'utimes'
   | 'statfs'
-  | 'hold';
+  | 'hold'
+  | 'pread'
+  | 'pwrite'
+  | 'truncate';
 
 export interface SyncFsRequest {
   token: string;
@@ -27,6 +30,8 @@ export interface SyncFsRequest {
   mode?: number;
   atimeMs?: number;
   mtimeMs?: number;
+  offset?: number;
+  length?: number;
 }
 
 export type SyncFsResult =
@@ -50,6 +55,7 @@ export interface SyncFsBridgeStat {
   dev?: number;
   readonly?: boolean;
   maxFile?: number;
+  ranged?: boolean;
 }
 
 export interface SyncFsUsage {
@@ -82,6 +88,9 @@ export interface SyncFsPosixBridge {
   hold?(path: string, held: boolean): void;
   readdirStat(path: string): Array<[string, SyncFsBridgeStat | null]>;
   statfs?(path?: string): SyncFsUsage | null;
+  pread?(path: string, offset: number, length: number): Uint8Array;
+  pwrite?(path: string, offset: number, bytes: Uint8Array, transfer?: boolean): void;
+  truncate?(path: string, size: number): void;
 }
 
 export function syncError(code: string, label: string): Error & { code: string } {
@@ -111,5 +120,6 @@ export function parseSyncFsStat(json: unknown): SyncFsBridgeStat | null {
     ...(typeof s.dev === 'number' ? { dev: s.dev } : {}),
     ...(s.readonly === true ? { readonly: true } : {}),
     ...(typeof s.maxFile === 'number' ? { maxFile: s.maxFile } : {}),
+    ...(s.ranged === true ? { ranged: true } : {}),
   };
 }

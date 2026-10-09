@@ -34,11 +34,16 @@ import {
 } from './sync-sab-wire.ts';
 
 export interface SabPostLike {
-  postMessage(message: unknown): void;
+  postMessage(message: unknown, transfer?: Transferable[]): void;
 }
 
 export interface SyncSabTransport {
-  call(req: SyncSabRequestBody, timeoutMs: number, label: string): SyncFsResult;
+  call(
+    req: SyncSabRequestBody,
+    timeoutMs: number,
+    label: string,
+    transfer?: Transferable[]
+  ): SyncFsResult;
 }
 
 export type AtomicsWaitLike = (
@@ -75,7 +80,7 @@ export function createSyncSabTransport(
   }
 
   return {
-    call(req, timeoutMs, label): SyncFsResult {
+    call(req, timeoutMs, label, transfer = []): SyncFsResult {
       if (deps.memory) publishMemory(sab, deps.memory());
       const id = ++seq;
       const deadline = now() + timeoutMs;
@@ -91,7 +96,8 @@ export function createSyncSabTransport(
               ? { type: SYNC_SAB_REQ_MSG, id, req }
               : { type: SYNC_SAB_NEXT_MSG, id, offset };
           try {
-            port.postMessage(msg);
+            if (offset === 0 && transfer.length > 0) port.postMessage(msg, transfer);
+            else port.postMessage(msg);
           } catch {
             throw syncError('EIO', label);
           }
@@ -131,8 +137,8 @@ export function createSyncFsSabBridge(
 ): SyncFsPosixBridge {
   const timeoutMs = opts.timeoutMs ?? SYNC_FS_REQUEST_TIMEOUT_MS;
 
-  function run(req: SyncSabRequestBody, path: string): SyncFsResult {
-    const result = transport.call(req, timeoutMs, `sync-sab bridge, '${path}'`);
+  function run(req: SyncSabRequestBody, path: string, transfer?: Transferable[]): SyncFsResult {
+    const result = transport.call(req, timeoutMs, `sync-sab bridge, '${path}'`, transfer);
     if (!result.ok) throw errnoError(result.errno, path);
     return result;
   }
@@ -219,5 +225,14 @@ export function createSyncFsSabBridge(
       run({ op: 'hold', path, mode: held ? 1 : 0 }, path);
     },
     statfs: (path = '/') => parseSyncFsUsage(json({ op: 'statfs', path }, path)),
+    pread: (path, offset, length) => bytes({ op: 'pread', path, offset, length }, path),
+    pwrite: (path, offset, body, transfer) => {
+      const whole = body.byteOffset === 0 && body.byteLength === body.buffer.byteLength;
+      const owned = transfer && whole && body.buffer instanceof ArrayBuffer;
+      run({ op: 'pwrite', path, offset, body }, path, owned ? [body.buffer as ArrayBuffer] : []);
+    },
+    truncate: (path, length) => {
+      run({ op: 'truncate', path, length }, path);
+    },
   };
 }

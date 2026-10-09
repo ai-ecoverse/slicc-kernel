@@ -1,4 +1,4 @@
-export const DRIVER_PROTOCOL: readonly [number, number] = [1, 0];
+export const DRIVER_PROTOCOL: readonly [number, number] = [1, 1];
 
 export interface DriverCapabilities {
   readonly?: boolean;
@@ -60,7 +60,7 @@ export type DriverCall =
   | { op: 'rename'; from: string; to: string }
   | { op: 'symlink'; target: string; path: string }
   | { op: 'readlink'; path: string }
-  | { op: 'setattr'; path: string; mode?: number; mtime?: number }
+  | { op: 'setattr'; path: string; mode?: number; mtime?: number; size?: number }
   | { op: 'statfs' };
 
 export type DriverRequest = DriverCall & { id: number };

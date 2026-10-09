@@ -1,3 +1,4 @@
+import { RangedFile } from '../../fs/ranged.ts';
 import type { DeviceAccess, KernelFdKind } from '../../kernel/fd-table.ts';
 import type { SyncFsBridgeStat, SyncFsPosixBridge } from '../../realm/sync-fs-wire.ts';
 
@@ -19,7 +20,8 @@ export class FileBuffer {
   opens = 0;
 
   private readonly fs: SyncFsPosixBridge;
-  path: string;
+  private where: string;
+  private readonly ranged: RangedFile | undefined;
 
   maxFile: number | undefined;
   constructor(
@@ -27,15 +29,39 @@ export class FileBuffer {
     path: string,
 
     empty: boolean,
-    maxFile?: number
+    maxFile?: number,
+    size?: number
   ) {
     this.fs = fs;
-    this.path = path;
+    this.where = path;
     this.maxFile = maxFile;
-    if (empty) {
+    const { pread, pwrite, truncate } = fs;
+    if (size !== undefined && pread && pwrite && truncate) {
+      const io = { pread: pread.bind(fs), pwrite: pwrite.bind(fs), truncate: truncate.bind(fs) };
+      this.ranged = new RangedFile(io, path, size);
+      if (empty) this.truncate(0);
+    } else if (empty) {
       this.data = new Uint8Array(0);
       this.dirty = true;
     }
+  }
+
+  get path(): string {
+    return this.where;
+  }
+
+  set path(path: string) {
+    this.where = path;
+    if (this.ranged) this.ranged.path = path;
+  }
+
+  get isRanged(): boolean {
+    return this.ranged !== undefined;
+  }
+
+  keep(): void {
+    if (this.ranged) this.ranged.pin();
+    else this.load();
   }
 
   load(): Uint8Array {
@@ -47,11 +73,13 @@ export class FileBuffer {
   }
 
   size(): number {
+    if (this.ranged) return this.ranged.size();
     this.load();
     return this.length;
   }
 
   pread(max: number, at: number): Uint8Array {
+    if (this.ranged) return this.ranged.read(at, max);
     const bytes = this.load();
     const n = Math.max(0, Math.min(max, this.length - at));
     return bytes.subarray(at, at + n);
@@ -65,23 +93,31 @@ export class FileBuffer {
     if (bytes.length === 0) return 0;
     const end = at + bytes.length;
     this.fits(end);
+    this.dirty = true;
+    if (this.ranged) {
+      this.ranged.write(at, bytes);
+      return bytes.length;
+    }
     this.load();
     this.ensure(end);
     const buf = this.data as Uint8Array;
     if (at > this.length) buf.fill(0, this.length, at);
     buf.set(bytes, at);
     this.length = Math.max(this.length, end);
-    this.dirty = true;
     return bytes.length;
   }
 
   truncate(size: number): void {
     this.fits(size);
+    this.dirty = true;
+    if (this.ranged) {
+      this.ranged.truncate(size);
+      return;
+    }
     this.load();
     this.ensure(size);
     if (size > this.length) (this.data as Uint8Array).fill(0, this.length, size);
     this.length = size;
-    this.dirty = true;
   }
 
   private ensure(need: number): void {
@@ -94,6 +130,7 @@ export class FileBuffer {
 
   orphan(): void {
     this.orphaned = true;
+    this.ranged?.pin();
   }
 
   isOrphan(): boolean {
@@ -105,12 +142,15 @@ export class FileBuffer {
   }
 
   contents(): Uint8Array {
+    if (this.ranged) return this.ranged.read(0, this.ranged.size());
     return this.load().slice(0, this.length);
   }
 
   flush(): void {
-    if (this.orphaned || !this.dirty || !this.data) return;
-    this.fs.writeFile(this.path, this.data.slice(0, this.length));
+    if (this.orphaned || !this.dirty) return;
+    if (this.ranged) this.ranged.flush();
+    else if (this.data) this.fs.writeFile(this.path, this.data.slice(0, this.length));
+    else return;
     this.dirty = false;
   }
 }
@@ -291,6 +331,14 @@ export function cachingBridge(
     symlink: (target, link) => mutating(() => bridge.symlink(target, link)),
     chmod: (p, mode) => mutating(() => bridge.chmod(p, mode)),
     utimes: (p, a, m) => mutating(() => bridge.utimes(p, a, m)),
+    ...(bridge.pread && bridge.pwrite && bridge.truncate
+      ? {
+          pread: bridge.pread.bind(bridge),
+          pwrite: (p: string, at: number, bytes: Uint8Array, transfer?: boolean) =>
+            mutating(() => bridge.pwrite?.(p, at, bytes, transfer)),
+          truncate: (p: string, size: number) => mutating(() => bridge.truncate?.(p, size)),
+        }
+      : {}),
     invalidate,
   };
 }

@@ -119,6 +119,7 @@ function statOf(attr: DriverAttr, path: string, mount: Mount): FsStat {
     dev: mount.dev,
     ...(readonly(mount) ? { readonly: true } : {}),
     ...(mount.maxFile > 0 ? { maxFile: mount.maxFile } : {}),
+    ...(mount.caps.ranges ? { ranged: true } : {}),
   };
 }
 
@@ -130,6 +131,24 @@ function concat(chunks: Uint8Array[], total: number): Uint8Array {
     out.set(chunk, at);
     at += chunk.length;
   }
+  return out;
+}
+
+function resized(bytes: Uint8Array, size: number): Uint8Array {
+  if (size <= bytes.length) return bytes.subarray(0, size);
+  const out = new Uint8Array(size);
+  out.set(bytes);
+  return out;
+}
+
+function handed(bytes: Uint8Array, transfer: boolean, chunk: number): boolean {
+  const whole = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength;
+  return transfer && whole && bytes.length <= chunk && bytes.buffer instanceof ArrayBuffer;
+}
+
+function spliced(bytes: Uint8Array, offset: number, part: Uint8Array): Uint8Array {
+  const out = resized(bytes, Math.max(bytes.length, offset + part.length));
+  out.set(part, offset);
   return out;
 }
 
@@ -440,15 +459,99 @@ class MountFs implements KernelFs {
     const chunk = mount.caps.maxIo ?? DEFAULT_IO;
     try {
       for (let offset = 0; offset < bytes.length; offset += chunk) {
-        await mount.conn.call({
-          op: 'write',
-          fh,
-          offset,
-          bytes: bytes.slice(offset, offset + chunk),
-        });
+        const part = bytes.slice(offset, offset + chunk);
+        await mount.conn.call({ op: 'write', fh, offset, bytes: part }, [part.buffer]);
       }
     } finally {
       await mount.conn.call({ op: 'release', fh });
+      this.table.forget(mount, real);
+    }
+  }
+
+  async pread(path: string, offset: number, length: number): Promise<Uint8Array> {
+    const real = await this.follow(path);
+    const found = this.at(real);
+    if (!found) return (await this.base.readFileBuffer(real)).slice(offset, offset + length);
+    const { mount, rel } = found;
+    if ((await this.table.getattr(mount, real, rel)).kind === 'directory') {
+      throw errnoError('EISDIR', real);
+    }
+    const fh = await this.open(mount, rel, false);
+    const chunk = mount.caps.maxIo ?? DEFAULT_IO;
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    try {
+      while (total < length) {
+        const bytes = (await mount.conn.call({
+          op: 'read',
+          fh,
+          offset: offset + total,
+          size: Math.min(chunk, length - total),
+        })) as Uint8Array;
+        if (bytes.length === 0) break;
+        chunks.push(bytes);
+        total += bytes.length;
+      }
+    } finally {
+      await mount.conn.call({ op: 'release', fh });
+    }
+    return concat(chunks, total);
+  }
+
+  private fits(mount: Mount, real: string, end: number): void {
+    if (mount.maxFile > 0 && end > mount.maxFile) {
+      throw errnoError(
+        'EFBIG',
+        `${real} would be larger than this mount's maxfile (${mount.maxFile})`
+      );
+    }
+  }
+
+  async pwrite(path: string, offset: number, bytes: Uint8Array, transfer = false): Promise<void> {
+    const real = await this.follow(path, 0, true);
+    const found = this.at(real);
+    if (!found)
+      return this.base.writeFile(
+        real,
+        spliced(await this.base.readFileBuffer(real), offset, bytes)
+      );
+    const { mount, rel } = found;
+    this.writable(mount, real);
+    this.fits(mount, real, offset + bytes.length);
+    this.table.forget(mount, real);
+    const fh = (await mount.conn.call({
+      op: 'open',
+      path: rel,
+      write: true,
+      create: true,
+      truncate: false,
+      exclusive: false,
+    })) as number;
+    const chunk = mount.caps.maxIo ?? DEFAULT_IO;
+    try {
+      for (let at = 0; at < bytes.length; at += chunk) {
+        const part = handed(bytes, transfer, chunk) ? bytes : bytes.slice(at, at + chunk);
+        await mount.conn.call({ op: 'write', fh, offset: offset + at, bytes: part }, [part.buffer]);
+      }
+    } finally {
+      await mount.conn.call({ op: 'release', fh });
+      this.table.forget(mount, real);
+    }
+  }
+
+  async truncate(path: string, size: number): Promise<void> {
+    const real = await this.follow(path);
+    const found = this.at(real);
+    if (!found?.mount.caps.ranges) {
+      return this.writeFile(real, resized(await this.readFileBuffer(real), size));
+    }
+    const { mount, rel } = found;
+    this.writable(mount, real);
+    this.fits(mount, real, size);
+    this.table.forget(mount, real);
+    try {
+      await mount.conn.call({ op: 'setattr', path: rel, size });
+    } finally {
       this.table.forget(mount, real);
     }
   }

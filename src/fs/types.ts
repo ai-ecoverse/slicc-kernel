@@ -11,6 +11,7 @@ export interface FsStat {
   dev?: number;
   readonly?: boolean;
   maxFile?: number;
+  ranged?: boolean;
 }
 
 export interface KernelFs {
@@ -30,6 +31,17 @@ export interface KernelFs {
   readlink(path: string): Promise<string>;
   chmod(path: string, mode: number): Promise<void>;
   utimes(path: string, atime: Date, mtime: Date): Promise<void>;
+  pread?(path: string, offset: number, length: number): Promise<Uint8Array>;
+  pwrite?(path: string, offset: number, bytes: Uint8Array, transfer?: boolean): Promise<void>;
+  truncate?(path: string, size: number): Promise<void>;
+}
+
+export type RangedOps = Required<Pick<KernelFs, 'pread' | 'pwrite' | 'truncate'>>;
+
+export function rangedOps(fs: Partial<RangedOps>): RangedOps | undefined {
+  const { pread, pwrite, truncate } = fs;
+  if (!pread || !pwrite || !truncate) return undefined;
+  return { pread: pread.bind(fs), pwrite: pwrite.bind(fs), truncate: truncate.bind(fs) };
 }
 
 export function fsError(code: string, path: string): Error & { code: string } {
