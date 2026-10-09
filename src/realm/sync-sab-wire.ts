@@ -27,7 +27,7 @@ export const SAB_I_KILLED = 13;
 
 export const SAB_I_ASYNC = 14;
 
-export const SAB_I_STOP = 14;
+export const SAB_I_STOP = 15;
 
 const U32 = 2 ** 32;
 
