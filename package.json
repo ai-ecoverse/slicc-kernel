@@ -24,7 +24,8 @@
   "exports": {
     ".": "./dist/index.js",
     "./node": "./dist/node.js",
-    "./driver": "./dist/driver.js"
+    "./driver": "./dist/driver.js",
+    "./testing": "./dist/testing.js"
   },
   "files": [
     "dist"

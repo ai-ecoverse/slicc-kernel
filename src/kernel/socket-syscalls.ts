@@ -1,5 +1,6 @@
 import type { SyncFsResult } from '../realm/sync-fs-wire.ts';
 import { type FdTable, KernelError, OpenFile, pollFile } from './fd-table.ts';
+import type { ResolveFamily } from './net/uplink.ts';
 import { KernelSocket, type LoopbackNet, type SockAddr, type SocketDomain } from './socket.ts';
 export type SocketSyscall =
   | {
@@ -53,6 +54,11 @@ export type SocketSyscall =
       level: number;
       name: number;
       value: number;
+    }
+  | {
+      op: 'sock-resolve';
+      name: string;
+      family: ResolveFamily;
     };
 export const SOCKET_OPS: readonly SocketSyscall['op'][] = [
   'sock-open',
@@ -65,11 +71,13 @@ export const SOCKET_OPS: readonly SocketSyscall['op'][] = [
   'sock-name',
   'sock-getopt',
   'sock-setopt',
+  'sock-resolve',
 ];
 export interface SocketProcess {
   fds: FdTable;
   net: LoopbackNet;
   blocking(): AbortSignal;
+  resolve(name: string, family: ResolveFamily, blocking: () => AbortSignal): Promise<string[]>;
 }
 function socketAt(fds: FdTable, fd: number): KernelSocket {
   const file = fds.get(fd).file;
@@ -122,6 +130,11 @@ export async function socketSyscall(
     case 'sock-setopt':
       socketAt(fds, req.fd).setOption(req.level, req.name, req.value);
       return ok();
+    case 'sock-resolve': {
+      const addresses = await proc.resolve(req.name, req.family, () => proc.blocking());
+      if (addresses.length === 0) throw new KernelError('ENOENT');
+      return ok(addresses);
+    }
   }
 }
 function unnamed(domain: SocketDomain): SockAddr {
