@@ -115,6 +115,9 @@ async function stores(
   media: string | false | undefined
 ): Promise<{ meta?: MetaStore | undefined; media?: MediaStore | undefined }> {
   const handles = media ?? (name === false ? false : `${name}:media`);
+  if (handles !== false && handles === name) {
+    throw new Error(`media and metadata cannot share the IndexedDB database ${name}`);
+  }
   return {
     ...(name === false ? {} : { meta: await deps.metadata?.(name) }),
     ...(handles === false ? {} : { media: await deps.media?.(handles) }),
