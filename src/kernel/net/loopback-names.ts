@@ -13,6 +13,44 @@ export function toHostLoopback(href: string): string {
   return url.href;
 }
 
-export function hostsFile(): string {
-  return `127.0.0.1 localhost\n::1 localhost ip6-localhost\n${HOST_LOOPBACK_ADDRESS.join('.')} ${HOST_LOOPBACK}\n`;
+export const DEFAULT_HOSTNAME = 'slicc';
+
+export const HOSTNAME_ADDRESS = '127.0.1.1';
+
+export const LIBC_HOSTNAMES: readonly string[] = ['emscripten', 'wasmer.sh'];
+
+const LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i;
+
+function reserved(name: string): boolean {
+  const lower = name.toLowerCase();
+  return (
+    lower === 'localhost' ||
+    lower.endsWith('.localhost') ||
+    lower === HOST_LOOPBACK ||
+    lower === 'wasmer.sh' ||
+    /^\d+(\.\d+){3}$/.test(lower)
+  );
+}
+
+export function isHostname(name: unknown): name is string {
+  if (typeof name !== 'string' || name.length > 253 || reserved(name)) return false;
+  return name.split('.').every((l) => LABEL.test(l));
+}
+
+export function hostnameOf(env: Readonly<Record<string, string>>): string {
+  return isHostname(env.HOSTNAME) ? env.HOSTNAME : DEFAULT_HOSTNAME;
+}
+
+export function ownNames(hostname: string): string[] {
+  return [...new Set([hostname.toLowerCase(), ...LIBC_HOSTNAMES])];
+}
+
+export function hostsFile(hostname: string = DEFAULT_HOSTNAME): string {
+  return [
+    '127.0.0.1 localhost localhost.localdomain',
+    '::1 localhost ip6-localhost',
+    `${HOSTNAME_ADDRESS} ${ownNames(hostname).join(' ')}`,
+    `${HOST_LOOPBACK_ADDRESS.join('.')} ${HOST_LOOPBACK}`,
+    '',
+  ].join('\n');
 }

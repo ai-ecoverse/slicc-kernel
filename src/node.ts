@@ -59,6 +59,7 @@ export interface NodeKernelOptions {
   fstabRetries?: readonly number[];
   hostfs?: HostfsGrantHook;
   cdp?: CdpHook;
+  hostname?: string;
 }
 
 export interface NodeKernel {
@@ -155,6 +156,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     ...(options.fstabRetries ? { fstabRetries: options.fstabRetries } : {}),
     ...(options.hostfs ? { hostfs: options.hostfs } : {}),
     ...(options.cdp ? { cdp: options.cdp } : {}),
+    ...(options.hostname !== undefined ? { hostname: options.hostname } : {}),
   });
   await launcher.prepare();
   const guard = <T>(work: () => Promise<T>): Promise<T> =>

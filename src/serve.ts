@@ -41,6 +41,7 @@ export interface InitRequest {
   transport?: RealmTransportTraits;
   uplink?: { traits: UplinkTraits; routes?: RouteTable };
   hostfs?: boolean;
+  hostname?: string;
   processMounts?: boolean | 'ask';
   cdp?: boolean;
 }
@@ -276,6 +277,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
         ...(deps.createDriverWorker ? { createDriverWorker: deps.createDriverWorker } : {}),
         ...(req.modules ? { modules: req.modules } : {}),
         ...(req.env ? { env: req.env } : {}),
+        ...(req.hostname !== undefined ? { hostname: req.hostname } : {}),
         ...net,
         ...(media ? { media } : {}),
         onMountPending: (medium) => port.postMessage({ medium }),

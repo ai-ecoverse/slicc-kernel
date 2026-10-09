@@ -8,6 +8,7 @@ import {
   errorWithCode,
 } from './client/dial-stream.ts';
 import { type LoopbackFetchOptions, loopbackFetch } from './client/loopback-fetch.ts';
+import { isHostname } from './kernel/net/loopback-names.ts';
 import type { TransportCall } from './kernel/net/remote-transport.ts';
 import type { RouteTable } from './kernel/net/routes.ts';
 import { type NetworkUplink, serveUplink, type UplinkCall } from './kernel/net/uplink.ts';
@@ -88,6 +89,7 @@ export interface KernelOptions {
   hostfs?: HostfsGrantHook;
   processMounts?: ProcessMountPolicy;
   cdp?: CdpHook;
+  hostname?: string;
 }
 
 interface HostfsRequest {
@@ -224,6 +226,7 @@ function initCall(options: KernelOptions, transport: NetworkTransport | undefine
     ...uplinkInit(options.network?.uplink),
     ...(options.hostfs ? { hostfs: true } : {}),
     ...(options.cdp ? { cdp: true } : {}),
+    ...(options.hostname !== undefined ? { hostname: options.hostname } : {}),
     ...(options.processMounts !== undefined
       ? {
           processMounts:
@@ -254,6 +257,9 @@ function cdpBridge(hook: CdpHook | undefined) {
 
 export async function createKernel(options: KernelOptions = {}): Promise<Kernel> {
   if (!globalThis.crossOriginIsolated) throw new Error(ISOLATION);
+  if (options.hostname !== undefined && !isHostname(options.hostname)) {
+    throw new Error(`not a host name: ${String(options.hostname)}`);
+  }
   const url = options.worker ?? new URL('./kernel-worker.js', import.meta.url);
   const worker = new Worker(url, { type: 'module', name: 'slicc-kernel' });
   const pending = new Map<number, Pending>();
