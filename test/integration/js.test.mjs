@@ -99,6 +99,13 @@ test('open files and path operations agree, append appends, exclusive creation i
     ),
     ok('141\n')
   );
+  assert.deepEqual(
+    await bash(
+      'jstest nap 1000 > n.out & p=$!; until [ -n "$(cat n.out 2>/dev/null)" ]; do sleep 0.05; done; kill -STOP $p; sleep 1.5; kill -CONT $p; wait $p; echo "st=$?"'
+    ),
+    { status: 0, stdout: 'st=3\n', stderr: 'held\n' }
+  );
+  assert.deepEqual(await bash('jstest badmax < /dev/null'), ok('EINVAL,EINVAL,EINVAL,EINVAL\n'));
   assert.deepEqual(await run(['jstest', 'strayw']), {
     status: 1,
     stdout: '',

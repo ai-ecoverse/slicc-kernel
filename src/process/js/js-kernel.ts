@@ -5,6 +5,7 @@ import {
   SAB_HEADER_I32,
   SAB_I_ASYNC,
   SAB_I_SIGNALS,
+  SAB_I_STOP,
   type SyncSabRequestBody,
 } from '../../realm/sync-sab-wire.ts';
 import { type AsyncSabTransport, changed, type WaitAsyncLike } from './async-sab.ts';
@@ -105,6 +106,17 @@ export class JsKernel {
       await changed(this.header, SAB_I_SIGNALS, 0, this.waitAsync);
       this.deliver();
     }
+  }
+
+  async watchStops(): Promise<void> {
+    for (;;) {
+      await changed(this.header, SAB_I_STOP, 0, this.waitAsync);
+      this.freeze();
+    }
+  }
+
+  freeze(): void {
+    while (Atomics.load(this.header, SAB_I_STOP) === 1) Atomics.wait(this.header, SAB_I_STOP, 1);
   }
 
   async setHandler(sig: number, handler: SignalHandler | 'ignore' | 'default'): Promise<void> {

@@ -82,6 +82,7 @@ export async function runJsProcess(
     onError: fail,
     waitAsync: deps.waitAsync,
   });
+  void kernel.watchStops();
   const id = identityOf(await kernel.json({ op: 'proc-identity' }), init);
   const { ctx, drain } = createContext({
     kernel,

@@ -27,6 +27,8 @@ export const SAB_I_KILLED = 13;
 
 export const SAB_I_ASYNC = 14;
 
+export const SAB_I_STOP = 14;
+
 const U32 = 2 ** 32;
 
 export function storeU53(header: Int32Array, lo: number, hi: number, value: number): void {

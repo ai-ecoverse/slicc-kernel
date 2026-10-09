@@ -18,6 +18,7 @@ import {
   SAB_I_KILLED,
   SAB_I_MEMORY,
   SAB_I_SIGNALS,
+  SAB_I_STOP,
   SAB_I_TIMERS,
 } from '../realm/sync-sab-wire.ts';
 import type { ChildForker, ChildSpawner } from './children.ts';
@@ -255,6 +256,10 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     ...(opts.program.abi === 'wasi' || opts.program.abi === 'js'
       ? { pendingBits: () => Atomics.load(header, SAB_I_SIGNALS) }
       : {}),
+  });
+  process.onState((state) => {
+    Atomics.store(header, SAB_I_STOP, state === 'stopped' ? 1 : 0);
+    Atomics.notify(header, SAB_I_STOP);
   });
   const holds = new HeldPaths();
   opts.held?.add(holds);

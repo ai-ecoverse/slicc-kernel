@@ -219,6 +219,34 @@ async function resetpipe(ctx) {
   await yes(ctx);
 }
 
+async function ticker(ctx, [count = '20', ms = '50']) {
+  for (let i = 0; i < Number(count); i++) {
+    await ctx.write(1, `tick ${i}\n`);
+    await sleep(Number(ms));
+  }
+}
+
+async function nap(ctx, [ms = '1000']) {
+  await ctx.write(1, 'ready\n');
+  const started = performance.now();
+  await sleep(Number(ms));
+  const slept = performance.now() - started;
+  await ctx.write(2, `${slept >= 1400 ? 'held' : 'ran'}\n`);
+  return 3;
+}
+
+async function badmax(ctx) {
+  const code = (p) =>
+    p.then(
+      () => 'ok',
+      (err) => err.code
+    );
+  const out = [];
+  for (const max of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])
+    out.push(await code(ctx.read(0, max)));
+  await ctx.write(1, `${out.join(',')}\n`);
+}
+
 async function strayw(ctx) {
   ctx.write(99, 'x');
   return 0;
@@ -365,6 +393,9 @@ const modes = {
   nodir,
   unawaited,
   pid,
+  ticker,
+  nap,
+  badmax,
   queued,
   resetpipe,
   strayw,

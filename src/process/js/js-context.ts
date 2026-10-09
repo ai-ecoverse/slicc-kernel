@@ -182,6 +182,7 @@ export function createContext(o: ContextOptions): CreatedContext {
     i.meta && 'device' in i.meta ? i.meta : undefined;
 
   const read = async (fd: number, max = CHUNK): Promise<Uint8Array> => {
+    index(max, 'read');
     const i = await info(fd);
     if (typeOf(i) === 'directory') throw new JsCallError('EISDIR', 'read');
     const dev = device(i);
