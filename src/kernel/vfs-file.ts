@@ -13,6 +13,7 @@ export interface VfsFileFs extends Partial<AsyncRangedIo> {
     version?: string;
   }>;
   readlink?(path: string): Promise<string>;
+  lstat?(path: string): Promise<unknown>;
 }
 
 const O_ACCMODE = 0o3;
@@ -385,7 +386,7 @@ export class VfsNodes {
 
 async function present(fs: VfsFileFs, path: string): Promise<boolean> {
   try {
-    await (fs.stat ? fs.stat(path) : fs.readFileBuffer(path));
+    await (fs.lstat ? fs.lstat(path) : fs.stat ? fs.stat(path) : fs.readFileBuffer(path));
     return true;
   } catch (err) {
     if ((err as { code?: unknown } | null)?.code === 'ENOENT') return false;

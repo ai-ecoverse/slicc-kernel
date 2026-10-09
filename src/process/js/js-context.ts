@@ -327,23 +327,30 @@ function fileHandle(
   append: boolean,
   forget: () => void
 ): JsFile {
+  let open = true;
+  const live = (): void => {
+    if (!open) throw new JsCallError('EBADF', path);
+  };
   return {
     fd,
     path,
     async size() {
+      live();
       const s = (await kernel.json({ op: 'fd-vfs-stat', fd })) as { size: number };
       return s.size;
     },
     async read(position, length) {
       const parts: Uint8Array[] = [];
       let got = 0;
-      while (got < length) {
+      do {
+        live();
         const max = Math.min(length - got, MAX_IO);
+        if (max <= 0) break;
         const chunk = await kernel.bytes({ op: 'fd-pread', fd, offset: position + got, max });
         if (chunk.length === 0) break;
         parts.push(chunk);
         got += chunk.length;
-      }
+      } while (got < length);
       if (parts.length === 1) return parts[0] as Uint8Array;
       const out = new Uint8Array(got);
       let at = 0;
@@ -355,7 +362,9 @@ function fileHandle(
     },
     async write(position, data) {
       let at = 0;
-      while (at < data.length) {
+      do {
+        live();
+        if (at >= data.length) break;
         const body = data.subarray(at, at + MAX_IO);
         const n = (await kernel.json(
           append
@@ -364,16 +373,21 @@ function fileHandle(
         )) as number;
         if (!(n > 0)) throw new JsCallError('EIO', 'write');
         at += n;
-      }
+      } while (at < data.length);
       return at;
     },
     async truncate(size) {
+      live();
+      if (!Number.isSafeInteger(size) || size < 0) throw new JsCallError('EINVAL', 'truncate');
       await kernel.call({ op: 'fd-resize', fd, size });
     },
     async sync() {
+      live();
       await kernel.call({ op: 'fd-flush', fd });
     },
     async close() {
+      live();
+      open = false;
       forget();
       await kernel.call({ op: 'fd-close', fd });
     },

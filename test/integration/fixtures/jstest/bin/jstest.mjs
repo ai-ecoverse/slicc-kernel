@@ -140,6 +140,64 @@ async function lock(ctx, [path]) {
   await ctx.write(1, `${r}\n`);
 }
 
+async function closed(ctx, [path]) {
+  const f = await ctx.open(path, { write: true, create: true, truncate: true });
+  await f.close();
+  const g = await ctx.open(`${path}.other`, {
+    read: true,
+    write: true,
+    create: true,
+    truncate: true,
+  });
+  await g.write(0, new TextEncoder().encode('keep'));
+  const code = (p) =>
+    p.then(
+      () => 'ok',
+      (err) => err.code
+    );
+  const after = [
+    await code(f.write(0, new TextEncoder().encode('XX'))),
+    await code(f.read(0, 4)),
+    await code(f.truncate(0)),
+    await code(f.size()),
+    await code(f.sync()),
+    await code(f.close()),
+  ];
+  const kept = text(await g.read(0, 10));
+  await g.close();
+  await ctx.write(1, `${after.join(',')} ${kept}\n`);
+}
+
+async function badtrunc(ctx, [path]) {
+  const f = await ctx.open(path, { read: true, write: true, create: true, truncate: true });
+  await f.write(0, new TextEncoder().encode('abc'));
+  const code = (p) =>
+    p.then(
+      () => 'ok',
+      (err) => err.code
+    );
+  const tries = [
+    await code(f.truncate(-1)),
+    await code(f.truncate(1.5)),
+    await code(f.truncate(Number.NaN)),
+  ];
+  const size = await f.size();
+  await f.close();
+  await ctx.write(1, `${tries.join(',')} ${size} ${text(await ctx.fs.readFile(path))}\n`);
+}
+
+async function dangling(ctx, [path]) {
+  await ctx.fs.symlink(`${path}.target`, path);
+  const r = await ctx.open(path, { write: true, create: true, exclusive: true }).then(
+    async (f) => {
+      await f.close();
+      return 'opened';
+    },
+    (err) => err.code
+  );
+  await ctx.write(1, `${r} ${await ctx.fs.exists(`${path}.target`)}\n`);
+}
+
 async function nodir(ctx, [path]) {
   const r = await ctx.open(path, { write: true, create: true }).then(
     () => 'opened',
@@ -239,6 +297,9 @@ const modes = {
   exclusive,
   lock,
   nodir,
+  closed,
+  badtrunc,
+  dangling,
   globals,
   devices,
   encode,

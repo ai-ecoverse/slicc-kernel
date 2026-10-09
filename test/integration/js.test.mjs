@@ -65,6 +65,15 @@ test('open files and path operations agree, append appends, exclusive creation i
     'got',
   ]);
   assert.deepEqual(await run(['jstest', 'nodir', 'no/such/dir/f'], home), ok('ENOENT\n'));
+  assert.deepEqual(
+    await run(['jstest', 'closed', 'k.txt'], home),
+    ok('EBADF,EBADF,EBADF,EBADF,EBADF,EBADF keep\n')
+  );
+  assert.deepEqual(
+    await run(['jstest', 'badtrunc', 't.txt'], home),
+    ok('EINVAL,EINVAL,EINVAL 3 abc\n')
+  );
+  assert.deepEqual(await run(['jstest', 'dangling', 'd.lnk'], home), ok('EEXIST false\n'));
 });
 
 test('a JS program gets WebCodecs in its process worker, and no network or storage of its own', async (t) => {
