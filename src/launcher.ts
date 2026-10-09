@@ -734,6 +734,11 @@ export class Launcher {
     for (const holds of this.held) holds.revoke(at);
   }
 
+  unmountAll(): void {
+    const targets = this.mounts.list().map((m) => m.target);
+    for (const target of targets.sort((a, b) => b.length - a.length)) this.umount(target, true);
+  }
+
   private async permit(req: ProcessMountRequest): Promise<void> {
     const policy = this.processMounts;
     const allowed = typeof policy === 'function' ? await policy(req) : policy;

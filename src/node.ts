@@ -223,6 +223,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
       for (const client of [...clients]) client.detach();
       for (const reject of [...pending]) reject(new Error(TERMINATED));
       for (const kill of [...live]) kill();
+      launcher.unmountAll();
     },
   };
 }
