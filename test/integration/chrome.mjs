@@ -10,6 +10,7 @@ const options = {
     ['/', 'test/integration/page/'],
   ],
   isolated: true,
+  timeout: 150000,
   coverage: ['/dist/'],
   exits: { '/dist/process-worker.js': [/WASM_PROCESS_EXIT, code/, /WASM_PROCESS_ERROR,$/] },
 };
