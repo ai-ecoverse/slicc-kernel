@@ -1,4 +1,3 @@
-import { HOST_LOOPBACK, HOST_LOOPBACK_ADDRESS } from '../../kernel/net/loopback-names.ts';
 import type { SockAddr } from '../../kernel/socket.ts';
 import { E, FDFLAGS } from './wasi-abi.ts';
 import { WasiError } from './wasi-files.ts';
@@ -79,15 +78,6 @@ function ipv4(host: string): number[] | undefined {
   if (parts.length !== 4) return undefined;
   const bytes = parts.map((p) => (/^\d{1,3}$/.test(p) ? Number(p) : Number.NaN));
   return bytes.every((b) => b >= 0 && b <= 255) ? bytes : undefined;
-}
-
-export function resolveName(name: string): number[] | undefined {
-  if (name === 'localhost' || name === 'localhost.localdomain' || name === 'ip6-localhost') {
-    return [127, 0, 0, 1];
-  }
-  if (name === '::1') return [127, 0, 0, 1];
-  if (name.toLowerCase() === HOST_LOOPBACK) return [...HOST_LOOPBACK_ADDRESS];
-  return ipv4(name);
 }
 
 export function wasixSocketImports(
@@ -218,14 +208,19 @@ export function wasixSocketImports(
       naddrs: number,
       out: number
     ) => {
-      const ip = resolveName(mem.string(name, len));
-      if (!ip) throw new WasiError('ENOENT');
+      const found = call({ op: 'sock-resolve', name: mem.string(name, len), family: 4 });
+      const ips = (found as string[]).map(ipv4).filter((ip) => ip !== undefined);
+      if (ips.length === 0) throw new WasiError('ENOENT');
       if (naddrs < 1) throw new WasiError('EINVAL');
       const view = mem.view();
-      new Uint8Array(view.buffer, addrs, ADDR_IP_SIZE).fill(0);
-      view.setUint8(addrs, INET4);
-      ip.forEach((b, i) => void view.setUint8(addrs + 2 + i, b));
-      view.setUint32(out, 1, true);
+      const count = Math.min(ips.length, naddrs);
+      new Uint8Array(view.buffer, addrs, ADDR_IP_SIZE * count).fill(0);
+      for (let i = 0; i < count; i++) {
+        const at = addrs + i * ADDR_IP_SIZE;
+        view.setUint8(at, INET4);
+        ips[i].forEach((b, j) => void view.setUint8(at + 2 + j, b));
+      }
+      view.setUint32(out, count, true);
     },
   };
 }

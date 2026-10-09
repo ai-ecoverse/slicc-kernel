@@ -38,7 +38,16 @@ import {
   writeCaFile,
 } from './kernel/net/network.ts';
 import type { CaStore, RealmCa } from './kernel/net/realm-ca.ts';
+import { Resolver } from './kernel/net/resolver.ts';
+import {
+  isNetworkLabel,
+  type NetworkLabel,
+  narrower,
+  Routes,
+  type RouteTable,
+} from './kernel/net/routes.ts';
 import type { RealmTransport } from './kernel/net/transport.ts';
+import type { NetworkUplink } from './kernel/net/uplink.ts';
 import type { ProcessInfo } from './kernel/proc-info.ts';
 import type { ForkState, WasmProgram } from './kernel/protocol.ts';
 import { PtyTable } from './kernel/pty.ts';
@@ -106,6 +115,7 @@ export interface LauncherOptions {
   processMounts?: ProcessMountPolicy;
   fstabRetries?: readonly number[];
   cdp?: CdpHook;
+  uplink?: NetworkUplink;
 }
 
 export interface PendingMedium {
@@ -129,6 +139,7 @@ export interface RunOptions {
   onStarted?: (pid: number) => void;
   collect?: boolean;
   pgid?: number;
+  network?: NetworkLabel;
 }
 
 export interface TerminalOptions {
@@ -136,6 +147,7 @@ export interface TerminalOptions {
   env?: Record<string, string>;
   cols?: number;
   rows?: number;
+  network?: NetworkLabel;
   onData: (bytes: Uint8Array) => void;
 }
 
@@ -189,6 +201,7 @@ interface StartRequest {
   exec?: boolean;
   pgid?: number;
   ignored?: number;
+  network: NetworkLabel;
 }
 
 const COMMAND = /^\/(?:usr\/)?bin\/([^/]+)$/;
@@ -260,6 +273,17 @@ function targetOf(command: Command): Target {
   };
 }
 
+function labelIn(env: Record<string, string>): NetworkLabel | undefined {
+  const asked = env.SLICC_NETWORK;
+  return isNetworkLabel(asked) ? asked : undefined;
+}
+
+function chosenLabel(asked: unknown): NetworkLabel {
+  if (asked === undefined) return 'uplink';
+  if (!isNetworkLabel(asked)) throw fsError('EINVAL', `unknown network label ${String(asked)}`);
+  return asked;
+}
+
 function childHandle(handle: WasmProcessHandle): ChildHandle {
   return {
     pid: handle.pid,
@@ -298,6 +322,9 @@ export class Launcher {
   readonly cdp: CdpHosts;
   private readonly ca: () => Promise<RealmCa>;
   readonly transport: RealmTransport;
+  readonly uplink: NetworkUplink | undefined;
+  readonly routes: Routes;
+  readonly resolver: Resolver;
   readonly watchers = new FsWatchers();
   private readonly pnpmHome: string;
   readonly mounts: MountTable;
@@ -338,6 +365,10 @@ export class Launcher {
     this.env = { ...networkEnv(), SLICC_CDP_URL: this.cdp.url, ...options.env };
     this.ca = kernelCa(options.caStore ?? memoryCaStore());
     this.transport = options.transport ?? missingTransport();
+    this.uplink = options.uplink;
+    this.routes = new Routes(options.uplink?.traits.ipv6 === true);
+    if (options.uplink?.routes) this.routes.set(options.uplink.routes);
+    this.resolver = new Resolver({ uplink: options.uplink, routes: this.routes });
     enableNetwork(this.net, {
       transport: this.transport,
       engine: kernelTlsEngine(packageTlsEngine(options.fs, this.modulesDir)),
@@ -348,6 +379,10 @@ export class Launcher {
     this.watchers.watch([this.modulesDir, this.pnpmHome], { recursive: true }, () => {
       this.catalog = undefined;
     });
+  }
+
+  setRoutes(table: RouteTable): void {
+    this.routes.set(table);
   }
 
   commands(): Promise<Map<string, Command>> {
@@ -504,6 +539,7 @@ export class Launcher {
     const { target, args } = planned;
     const env = { ...expandDefaults(target.env, { ...req.env, cwd: req.cwd }), ...req.env };
     for (const key of target.unset ?? []) delete env[key];
+    env.SLICC_NETWORK = req.network;
     let program: WasmProgram;
     try {
       program = await this.program(target, env);
@@ -536,7 +572,7 @@ export class Launcher {
       fs: this.fs,
       createWorker: this.createWorker,
       onError: req.report,
-      spawner: this.spawner(pid, req.report),
+      spawner: this.spawner(pid, req.report, req.network),
       forker: this.forker(pid, req),
       kill: (target, sig) => this.kill(target, sig),
       processes: () => ({ boot: this.boot, processes: this.list() }),
@@ -551,6 +587,8 @@ export class Launcher {
       net: this.net,
       http: new HttpHandles(this.transport),
       locks: this.locks,
+      network: req.network,
+      resolver: this.resolver,
       onReap: (child) => this.reaped(child),
       ...(req.fork ? { fork: req.fork } : {}),
       ...this.shownIds(req),
@@ -622,7 +660,11 @@ export class Launcher {
     return listed;
   }
 
-  private spawner(ppid: number, report: (message: string) => void): ChildSpawner {
+  private spawner(
+    ppid: number,
+    report: (message: string) => void,
+    network: NetworkLabel
+  ): ChildSpawner {
     return async (req, fds) => {
       const planned = await this.plan(req.file, req.argv, req.cwd);
       if (!planned) {
@@ -637,6 +679,7 @@ export class Launcher {
         report,
         ppid,
         ignored: this.ignoredBy(ppid),
+        network: narrower(network, labelIn(req.env)),
         ...exec,
       });
       return childHandle(handle);
@@ -866,6 +909,7 @@ export class Launcher {
   }
 
   async openTerminal(argv: string[], options: TerminalOptions): Promise<TerminalSession> {
+    const network = chosenLabel(options.network);
     const { cwd, file, planned } = await this.starting(argv, options.cwd);
     if (!planned) throw new Error(`${file}: command not found`);
     let leader = 0;
@@ -886,7 +930,7 @@ export class Launcher {
       ...options.env,
     });
     const report = (message: string) => options.onData(encoder.encode(`${message}\r\n`));
-    const handle = await this.launch(planned, { env, cwd, fds, report });
+    const handle = await this.launch(planned, { env, cwd, fds, report, network });
     leader = handle.pid;
     void handle.exited.then(() => tty.hangup());
     return {
@@ -903,6 +947,7 @@ export class Launcher {
   }
 
   async run(argv: string[], options: RunOptions = {}): Promise<RunResult> {
+    const network = chosenLabel(options.network);
     const { cwd, file, planned } = await this.starting(argv, options.cwd);
     const env = this.environment(cwd, options.env);
     const out: Uint8Array[] = [];
@@ -925,7 +970,7 @@ export class Launcher {
     fds.installAt(1, sinkFile(stdout));
     fds.installAt(2, sinkFile(stderr));
     const group = options.pgid !== undefined ? { pgid: options.pgid } : {};
-    const handle = await this.launch(planned, { env, cwd, fds, report, ...group });
+    const handle = await this.launch(planned, { env, cwd, fds, report, network, ...group });
     options.onStarted?.(handle.pid);
     const status = await handle.exited;
     return { status, stdout: concat(out), stderr: concat(err) };

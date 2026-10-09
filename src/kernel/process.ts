@@ -24,6 +24,9 @@ import { AsyncOps, HOST_OPS, type HostSyscall, hostSyscall, type LockTable } fro
 import type { JobTable } from './jobs.ts';
 import { HTTP_OPS, type HttpHandles, type HttpSyscall } from './net/http-syscalls.ts';
 import { NO_TRANSPORT } from './net/network.ts';
+import { Resolver } from './net/resolver.ts';
+import type { NetworkLabel } from './net/routes.ts';
+import { Routes } from './net/routes.ts';
 import type { MountLine, ProcessListing } from './proc-info.ts';
 import type { ForkState } from './protocol.ts';
 import { PTY_OPS, type PtySyscall, type PtyTable, ptySyscall } from './pty.ts';
@@ -301,6 +304,8 @@ export function isWasmSyscall(req: object): req is WasmSyscall {
 
 const MAX_READ = 1024 * 1024;
 
+const HOSTS_ONLY = new Resolver({ routes: new Routes() });
+
 export interface WasmProcessOptions {
   ignored?: number;
 
@@ -343,6 +348,10 @@ export interface WasmProcessOptions {
   http?: HttpHandles;
 
   locks?: LockTable;
+
+  network?: NetworkLabel;
+
+  resolver?: Resolver;
 }
 
 export type StateListener = (state: 'stopped' | 'continued', sig: number) => void;
@@ -796,10 +805,12 @@ export class WasmProcess {
 
   private socketSyscall(req: SocketSyscall): Promise<SyncFsResult> {
     this.net ??= this.options.net ?? new LoopbackNet();
+    const { resolver = HOSTS_ONLY, network = 'default' } = this.options;
     return socketSyscall(req, {
       fds: this.fds,
       net: this.net,
       blocking: () => this.blockingSignal(),
+      resolve: (name, family, blocking) => resolver.resolve(name, family, network, blocking),
     });
   }
 

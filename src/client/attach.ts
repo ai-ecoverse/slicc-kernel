@@ -3,6 +3,7 @@ import type { CdpHook } from '../cdp/types.ts';
 import type { FsStat } from '../fs/types.ts';
 import type { WatchChange } from '../fs/watch.ts';
 import { RemoteTransport, type TransportReply } from '../kernel/net/remote-transport.ts';
+import type { NetworkLabel } from '../kernel/net/routes.ts';
 import type {
   RealmTransport,
   RealmTransportRequest,
@@ -56,6 +57,7 @@ export interface SpawnOptions {
   stdin?: string | Uint8Array;
   group?: 'new';
   pgid?: number;
+  network?: NetworkLabel;
   onStdout?: (bytes: Uint8Array) => void;
   onStderr?: (bytes: Uint8Array) => void;
 }
@@ -71,6 +73,7 @@ export interface ClientRunOptions {
   cwd?: string;
   env?: Record<string, string>;
   stdin?: string | Uint8Array;
+  network?: NetworkLabel;
   onStdout?: (text: string) => void;
   onStderr?: (text: string) => void;
 }
@@ -87,6 +90,7 @@ export interface ClientTerminalOptions {
   env?: Record<string, string>;
   cols?: number;
   rows?: number;
+  network?: NetworkLabel;
   onData?: (bytes: Uint8Array) => void;
 }
 
@@ -125,6 +129,7 @@ export type ClientFetchRequest = Omit<RealmTransportRequest, 'signal'> & { signa
 
 export interface KernelClient {
   readonly protocol: readonly [number, number];
+  readonly network: NetworkLabel | undefined;
   readonly transport: RealmTransport;
   readonly closed: Promise<Error>;
   spawn(argv: string[], options?: SpawnOptions): Promise<SpawnedProcess>;
@@ -340,6 +345,7 @@ async function spawnOn(
   const { onStdout, onStderr, stdin, group: _, ...rest } = opts;
   if (opts.pgid !== undefined)
     await since(channel, 3, 'spawn into a process group', async () => {});
+  if (opts.network !== undefined) await since(channel, 6, 'network labels', async () => {});
   const started = Promise.withResolvers<number>();
   const options = { ...rest, ...(stdin !== undefined ? { stdin: bytesOf(stdin) } : {}) };
   const { done } = channel.request(
@@ -389,6 +395,7 @@ async function terminalOn(
   opts: ClientTerminalOptions
 ): Promise<ClientTerminal> {
   const { onData, ...options } = opts;
+  if (opts.network !== undefined) await since(channel, 6, 'network labels', async () => {});
   let listener = onData ?? null;
   const backlog: Uint8Array[] = [];
   const started = Promise.withResolvers<number>();
@@ -523,6 +530,7 @@ export async function attachKernel(
   channel.remote = transport;
   return {
     protocol: hello.protocol,
+    network: hello.network,
     transport,
     closed: channel.ended.promise,
     spawn: (argv, opts = {}) => spawnOn(channel, argv, opts),

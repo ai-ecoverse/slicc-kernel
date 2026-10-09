@@ -32,7 +32,7 @@ const { status, stdout, stderr } = await kernel.run(['bash', '-c', 'echo hi > he
 | `ca` | `'<metadata>-ca'`, or `'slicc-kernel-ca'` | the IndexedDB database for the proxy's CA (see [Network](#network)); `false` keeps it in memory |
 | `media` | `'<metadata>:media'` | the IndexedDB database for the folder handles of `fsa` drives (see [Removable media](#removable-media-fsa)); `false` keeps them in memory, as `metadata: false` does |
 | `worker` | `new URL('./kernel-worker.js', import.meta.url)` | the kernel worker script |
-| `network` | none | `{ transport }`: how programs reach the outside world (see [Network](#network)) |
+| `network` | none | `{ transport, uplink }`: how programs reach the outside world (see [Network](#network) and [Uplink](#uplink)) |
 | `requestDirectory` | none | `() => Promise<FileSystemDirectoryHandle>`, typically `showDirectoryPicker`: how an `fsa` mount gets its folder (see [Removable media](#removable-media-fsa)) |
 | `hostfs` | none | `(source, { readonly }) => Promise<{ url, token, capabilities? }>`: a grant for a `hostfs` mount from the local proxy (see [Host folders](#host-folders-hostfs)) |
 | `onMountPending` | none | `({ target, source, insert }) => void`: an `fsa` mount needs a folder; call `insert()` from a user gesture |
@@ -48,6 +48,7 @@ Runs `argv[0]` with `argv` as its arguments and resolves when it exits. `stdout`
 | `cwd` | working directory, default `/`; created in OPFS if missing |
 | `env` | extra environment; the defaults are `PATH=/usr/bin:/bin`, `HOME=/home`, `PWD=<cwd>` |
 | `stdin` | a string or `Uint8Array`; without it stdin is `/dev/null` |
+| `network` | the process's [network label](#network-labels): `'none'`, `'default'` or `'uplink'` (the default) |
 | `onStdout`, `onStderr` | called with each chunk of text as it is written |
 
 ### `kernel.openTerminal(argv, options?) → Promise<Terminal>`
@@ -56,7 +57,7 @@ Starts `argv` as the session leader on a new terminal and resolves once it is ru
 
 | option | |
 | --- | --- |
-| `cwd`, `env` | as for `run`; `TERM=xterm-256color` and `COLORTERM=truecolor` are added |
+| `cwd`, `env`, `network` | as for `run`; `TERM=xterm-256color` and `COLORTERM=truecolor` are added |
 | `cols`, `rows` | initial size, default 80 × 24, so `$COLUMNS` and `$LINES` are right before the first prompt |
 | `onData` | called with each chunk of output as raw bytes (escape sequences included) |
 
@@ -74,9 +75,13 @@ Starts `argv` as the session leader on a new terminal and resolves once it is ru
 
 Stops the kernel worker and every process. Pending and later calls reject.
 
-### `kernel.connect() → Promise<MessagePort>`
+### `kernel.connect({ network }?) → Promise<MessagePort>`
 
-Makes a port for another client of the same kernel. Hand it to a dedicated worker, or through a SharedWorker to another tab: it can be transferred any number of times. All clients share one process table, so a terminal on the page can `ps` and `kill` what a worker started.
+Makes a port for another client of the same kernel. Hand it to a dedicated worker, or through a SharedWorker to another tab: it can be transferred any number of times. All clients share one process table, so a terminal on the page can `ps` and `kill` what a worker started. `network` is the widest [network label](#network-labels) the client's processes may have (default `'uplink'`): what it spawns gets that label unless it asks for a narrower one, and asking for a wider one rejects with `code: 'EPERM'`.
+
+### `kernel.setRoutes({ prefixes, exit }) → Promise<void>`
+
+Replaces the [uplink](#uplink)'s route table: `prefixes` are addresses or CIDR prefixes (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`), and `exit: true` routes every address, as an exit node does. A prefix that does not parse rejects the whole table and keeps the old one.
 
 ### `kernel.dial({ port, host? })` and `kernel.loopbackFetch(input, { port, host?, signal? })`
 
@@ -93,7 +98,7 @@ Attaches to a kernel over a port from `kernel.connect()`, in any realm: a worker
 
 | Client | |
 |---|---|
-| `spawn(argv, { cwd, env, stdin, pgid, onStdout, onStderr })` | runs over pipes and resolves with `{ pid, pgid, exited, signal(name) }` once the process has started; output arrives in chunks, as bytes, and the kernel keeps no copy; every spawn leads its own process group, which `signal` (default `SIGTERM`) signals, unless `pgid` names an existing group to join (protocol 1.3): the process then joins that group and that group's session, as `setpgid` would (a client has no session of its own: each of its spawns and terminals leads one, and `setpgid` cannot cross sessions), and `signal` signals the whole group. The group must have been started by this client (a spawn or a terminal it opened), even if its leader has exited; an unknown group rejects with `code: 'ESRCH'`, another session's with `code: 'EPERM'`, and against a 1.2 kernel the client rejects with `code: 'ENOSYS'` before sending anything, as an older kernel would ignore the option; a program that cannot start rejects with `code: 'ENOENT'` |
+| `spawn(argv, { cwd, env, stdin, pgid, network, onStdout, onStderr })` | runs over pipes and resolves with `{ pid, pgid, exited, signal(name) }` once the process has started; output arrives in chunks, as bytes, and the kernel keeps no copy; every spawn leads its own process group, which `signal` (default `SIGTERM`) signals, unless `pgid` names an existing group to join (protocol 1.3): the process then joins that group and that group's session, as `setpgid` would (a client has no session of its own: each of its spawns and terminals leads one, and `setpgid` cannot cross sessions), and `signal` signals the whole group. The group must have been started by this client (a spawn or a terminal it opened), even if its leader has exited; an unknown group rejects with `code: 'ESRCH'`, another session's with `code: 'EPERM'`, and against a 1.2 kernel the client rejects with `code: 'ENOSYS'` before sending anything, as an older kernel would ignore the option; a program that cannot start rejects with `code: 'ENOENT'`; `network` (protocol 1.6) is the process's [network label](#network-labels), the client's own by default, and a wider one than the client's rejects with `code: 'EPERM'` |
 | `run(argv, options?)` | `spawn` and wait: `{ pid, status, stdout, stderr }` as text, with `onStdout`/`onStderr` streaming text |
 | `openTerminal(argv, options?)` | a pty session, as `kernel.openTerminal` |
 | `ps()` | the kernel's processes: `{ pid, ppid, pgid, sid, argv, tty, started, state }`, `state` being `'S'` or `'Z'` |
@@ -104,8 +109,9 @@ Attaches to a kernel over a port from `kernel.connect()`, in any realm: a worker
 | `serveCdp(hook, { runtime })` | offers this client's browser to the kernel's programs (protocol 1.5): `hook` is the `cdp` hook of `createKernel`, asked once per program connection; resolves with `{ close() }`, and closing or detaching takes the offer back and closes its connections (see [Browser automation](#browser-automation-cdp)) |
 | `close({ kill })` | detaches: the client's processes keep running unless `kill` is set, which ends their process groups with `SIGKILL`; its terminals are hung up |
 | `closed` | resolves with the error that ended the client |
+| `network` | the widest network label this client may give its processes (protocol 1.6; `undefined` on an older kernel) |
 
-When the kernel goes away (the page closed or reloaded, `terminate()`), pending calls and `exited` reject with `KernelGoneError`, and so do later calls. Each side holds a Web Lock and waits on the other's, since a `MessagePort` reports no close in browsers; in Node, the port's `close` event does the same. The first message is a handshake on the protocol version, `1.5` (`1.0` had no `watch`, `1.1` no mounts, `1.2` no `spawn` into a group, `1.3` no `dial` and `1.4` no `serveCdp`, which reject with `code: 'ENOSYS'` on such a kernel): a client or kernel of another major version is refused with an error naming both.
+When the kernel goes away (the page closed or reloaded, `terminate()`), pending calls and `exited` reject with `KernelGoneError`, and so do later calls. Each side holds a Web Lock and waits on the other's, since a `MessagePort` reports no close in browsers; in Node, the port's `close` event does the same. The first message is a handshake on the protocol version, `1.6` (`1.0` had no `watch`, `1.1` no mounts, `1.2` no `spawn` into a group, `1.3` no `dial`, `1.4` no `serveCdp` and `1.5` no network labels, which reject with `code: 'ENOSYS'` on such a kernel): a client or kernel of another major version is refused with an error naming both.
 
 ### Headless in Node, for tests
 
@@ -120,7 +126,7 @@ const { status, stdout } = await kernel.run(['bash', '-c', 'echo hi'], { cwd: '/
 kernel.terminate();
 ```
 
-`createNodeKernel({ root, modules, env, network, worker, processMounts, fstabRetries, cdp, hostfs })` takes the options of `createKernel` except `metadata`, and `fstabRetries`, the delays in ms between tries of a failing `/etc/fstab` line (default `[1000, 4000, 16000]`). `root` is an in-memory directory by default (`memoryRoot()` makes another), which keeps each file in 1 MiB chunks, and POSIX metadata stays in memory. Processes and threads run on `worker_threads`. The kernel has `run`, `openTerminal` and `terminate` as above, plus `root`, `writeFile(path, data)` (creating the parent directories) and `readFile(path)` to put files in place and read results. `nodeTransport()` is `fetchTransport()` with Node's `fetch`, which no CORS binds (`crossOrigin: 'any'`). `connect()` and `attachKernel` work as in the browser: the port is a `worker_threads` `MessagePort`, which a worker thread can attach with, and `terminate()` ends every attached client.
+`createNodeKernel({ root, modules, env, network, worker, processMounts, fstabRetries, cdp, hostfs })` takes the options of `createKernel` except `metadata`, and `fstabRetries`, the delays in ms between tries of a failing `/etc/fstab` line (default `[1000, 4000, 16000]`). `root` is an in-memory directory by default (`memoryRoot()` makes another), which keeps each file in 1 MiB chunks, and POSIX metadata stays in memory. Processes and threads run on `worker_threads`. The kernel has `run`, `openTerminal`, `setRoutes` and `terminate` as above, plus `root`, `writeFile(path, data)` (creating the parent directories) and `readFile(path)` to put files in place and read results. `nodeTransport()` is `fetchTransport()` with Node's `fetch`, which no CORS binds (`crossOrigin: 'any'`). `connect({ network })` and `attachKernel` work as in the browser: the port is a `worker_threads` `MessagePort`, which a worker thread can attach with, and `terminate()` ends every attached client.
 
 ## Commands
 
@@ -178,6 +184,20 @@ await kernel.run(['curl', '-sS', 'https://registry.npmjs.org/@ai-ecoverse/wasm-b
 - **`localProxyTransport({ url, key })`** sends every request to a local proxy on loopback, such as [slicc-node](https://github.com/ai-ecoverse/slicc-node) or slicc-swift, which fetches it without CORS. Redirects reach the program unfollowed, with every `Set-Cookie`; bodies arrive decoded. `probeLocalProxy({ url, key })` resolves with the proxy's capabilities, or `null` when it is gone or refuses the key, so a page can fall back to `fetchTransport()`. `checkLocalProxy({ url, key })` says why: it resolves with `{ state }`, which is `ready` (with `probe`), `blocked` (the user denied Chrome's Local Network Access permission, `loopback-network`), `unreachable` (nothing answered; its `permission` is `granted`, `prompt` or `unknown`, and with `prompt` the page cannot tell a dismissed prompt from a proxy that is not running, since Chrome asks only once it has a connection), `refused` (with `status` and `error`, such as a stale key) or `incompatible`. The permission is not consulted when the page itself is on loopback. Both take a `fetch` option, and the transport `maxRequestBody` (default 64 MiB) and `bodyIdleMs` like `fetchTransport`.
 - **The host machine** is `host.slicc.internal` (`SLICC_HOST_LOOPBACK`), as `host.docker.internal` is in Docker, while `localhost` and `127.0.0.1` stay the kernel's own loopback. The proxy forwards `http(s)://host.slicc.internal:<port>/…` to the transport as `http(s)://127.0.0.1:<port>/…`, so it reaches the real machine's loopback through the local proxy or Node's `fetch` (through the page's own `fetch`, a request needs CORS from that server and Chrome's Local Network Access permission); other loopback addresses are still refused. This is HTTP and HTTPS through the proxy only: `/etc/hosts` and WASIX name resolution give the name `10.0.2.2`, QEMU's address for its host, so a program that connects a socket to it directly fails with `ENETUNREACH` instead of reaching the kernel's loopback.
 - **Without a transport**, every request is answered `502` with `slicc-kernel: no network transport (createKernel({ network: { transport } }))`.
+
+### Network labels
+
+Every process has a network label, like a Linux network namespace: `'none'` (loopback only), `'default'` (loopback, and the outside world through the proxy) or `'uplink'` (also the [uplink](#uplink)'s names and, later, its addresses). It is set when a process starts (`run`, `openTerminal`, a client's `spawn`), `'uplink'` unless the caller says otherwise, and children inherit it across `fork`, `exec` and `posix_spawn`. A process reads its own in `SLICC_NETWORK`, which the kernel sets on every start whatever the environment says; a process can narrow its children's by setting `SLICC_NETWORK` to a narrower label for them, and never widen it. Without an uplink, `'uplink'` and `'default'` reach the same places.
+
+### Uplink
+
+`createKernel({ network: { uplink } })` gives the kernel a page-owned way into another network, such as a tailnet. The uplink is an object with:
+
+- `traits`: `{ tcp: true, udp: false, ipv6 }`. Without `ipv6: true`, the kernel asks only for and keeps only IPv4 addresses.
+- `routes`: the first route table, `{ prefixes, exit }`, which `kernel.setRoutes` replaces when it changes. The kernel matches it itself, so a destination outside it costs no round trip.
+- `resolve(name, family)`: resolves with the name's addresses, as a list or as `{ addresses, ttl }` (seconds); `[]` means the name is not the uplink's. `family` is `4`, `6` or `0` (either).
+
+Name resolution (WASIX `sock_addr_resolve`; `Module.sliccKernel.net.resolve(name, family)` for Emscripten programs) answers `/etc/hosts` names itself (`localhost`, every `*.localhost`, `host.slicc.internal` and literal addresses), then asks the uplink, for `'uplink'` processes only, and caches the answer for its TTL, at most 60 s. It never hands a program an answer that is loopback, `10.0.2.2`, link-local, multicast or otherwise reserved, so a name cannot lead a program back into the kernel, and an uplink that does not answer within 10 s resolves nothing. Connecting to uplink addresses is the next step; until then they are unreachable like any other address.
 
 ### Browser automation (CDP)
 

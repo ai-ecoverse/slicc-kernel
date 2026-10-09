@@ -1,9 +1,10 @@
 import type { WatchChange } from '../fs/watch.ts';
 import type { TransportCall, TransportReply } from '../kernel/net/remote-transport.ts';
+import type { NetworkLabel } from '../kernel/net/routes.ts';
 import type { RealmTransportTraits } from '../kernel/net/transport.ts';
 import type { MountSpec } from '../mount/mount-fs.ts';
 
-export const PROTOCOL: readonly [number, number] = [1, 5];
+export const PROTOCOL: readonly [number, number] = [1, 6];
 
 export interface ClientHello {
   protocol: readonly [number, number];
@@ -14,6 +15,7 @@ export interface KernelHello {
   protocol: readonly [number, number];
   lock?: string;
   traits?: RealmTransportTraits;
+  network?: NetworkLabel;
   error?: string;
 }
 
@@ -22,6 +24,7 @@ export interface SpawnRequestOptions {
   env?: Record<string, string>;
   stdin?: Uint8Array;
   pgid?: number;
+  network?: NetworkLabel;
 }
 
 export interface TerminalRequestOptions {
@@ -29,6 +32,7 @@ export interface TerminalRequestOptions {
   env?: Record<string, string>;
   cols?: number;
   rows?: number;
+  network?: NetworkLabel;
 }
 
 export type TerminalAction =

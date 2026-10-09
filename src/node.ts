@@ -3,8 +3,10 @@ import type { CdpHook } from './cdp/types.ts';
 import type { MessagePortLike } from './client/protocol.ts';
 import { type ServedClient, serveClient } from './client/serve-client.ts';
 import { OpfsFs } from './fs/opfs.ts';
-import type { RunOptions, RunResult, Terminal, TerminalOptions } from './index.ts';
+import type { ConnectOptions, RunOptions, RunResult, Terminal, TerminalOptions } from './index.ts';
 import type { WasmWorkerLike } from './kernel/host.ts';
+import { isNetworkLabel, type RouteTable } from './kernel/net/routes.ts';
+import type { NetworkUplink } from './kernel/net/uplink.ts';
 import { Launcher } from './launcher.ts';
 import type { HostfsGrantHook } from './mount/hostfs.ts';
 import type { MountEntry, MountSpec } from './mount/mount-fs.ts';
@@ -32,6 +34,12 @@ export {
   type WatchChange,
 } from './client/attach.ts';
 export type {
+  ConnectOptions,
+  NetworkLabel,
+  NetworkUplink,
+  ResolveAnswer,
+  ResolveFamily,
+  RouteTable,
   RunOptions,
   RunResult,
   Terminal,
@@ -46,7 +54,7 @@ export interface NodeKernelOptions {
   root?: FileSystemDirectoryHandle;
   modules?: string;
   env?: Record<string, string>;
-  network?: { transport?: NetworkTransport };
+  network?: { transport?: NetworkTransport; uplink?: NetworkUplink };
   worker?: string | URL;
   driverWorker?: string | URL;
   processMounts?: ProcessMountPolicy;
@@ -61,7 +69,8 @@ export interface NodeKernel {
   openTerminal(argv: string[], options?: TerminalOptions): Promise<Terminal>;
   writeFile(path: string, data: string | Uint8Array): Promise<void>;
   readFile(path: string): Promise<Uint8Array>;
-  connect(): Promise<MessagePort>;
+  connect(options?: ConnectOptions): Promise<MessagePort>;
+  setRoutes(routes: RouteTable): Promise<void>;
   mount(spec: MountSpec): Promise<MountEntry>;
   umount(target: string): Promise<void>;
   mounts(): Promise<MountEntry[]>;
@@ -143,6 +152,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     ...(options.modules ? { modules: options.modules } : {}),
     ...(options.env ? { env: options.env } : {}),
     ...(transport ? { transport } : {}),
+    ...(options.network?.uplink ? { uplink: options.network.uplink } : {}),
     ...(options.processMounts !== undefined ? { processMounts: options.processMounts } : {}),
     ...(options.fstabRetries ? { fstabRetries: options.fstabRetries } : {}),
     ...(options.hostfs ? { hostfs: options.hostfs } : {}),
@@ -216,12 +226,18 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     mount: (spec) => guard(() => launcher.mount(spec)),
     umount: (target) => guard(async () => launcher.umount(target)),
     mounts: async () => launcher.mounts.list(),
-    async connect() {
+    setRoutes: async (routes) => launcher.setRoutes(routes),
+    async connect(connectOptions = {}) {
       if (terminated) throw new Error(TERMINATED);
+      const ceiling = connectOptions.network;
+      if (ceiling !== undefined && !isNetworkLabel(ceiling)) {
+        throw new Error(`unknown network label ${String(ceiling)}`);
+      }
       const { port1, port2 } = new MessageChannel();
       const served = serveClient(port1 as unknown as MessagePortLike, {
         launcher: async () => launcher,
         signal: signalNumber,
+        ...(ceiling ? { network: ceiling } : {}),
       });
       clients.add(served);
       void served.closed.then(() => clients.delete(served));

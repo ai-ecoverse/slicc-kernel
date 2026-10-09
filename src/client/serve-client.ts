@@ -2,6 +2,7 @@ import { portCdpHook } from '../cdp/port.ts';
 import { fsError, type KernelFs } from '../fs/types.ts';
 import { dialSocket, serveSocket } from '../kernel/dial.ts';
 import type { TransportCall } from '../kernel/net/remote-transport.ts';
+import { isNetworkLabel, type NetworkLabel, widens } from '../kernel/net/routes.ts';
 import type { RealmTransport } from '../kernel/net/transport.ts';
 import { SIG } from '../kernel/signals.ts';
 import type { Launcher, TerminalSession } from '../launcher.ts';
@@ -10,6 +11,7 @@ import {
   type ClientHello,
   type ClientRequest,
   FS_METHODS,
+  type KernelHello,
   type LockManagerLike,
   type MessagePortLike,
   PROTOCOL,
@@ -25,6 +27,7 @@ export interface ClientHost {
   locks?: LockManagerLike;
   lock?: string;
   signal?: (name: string) => number;
+  network?: NetworkLabel;
 }
 
 export interface ServedClient {
@@ -124,6 +127,25 @@ function dialFor(
     serveSocket(socket, port1, () => open.delete(req.id))
   );
   return { result: port2, transfer: [port2] };
+}
+
+function labelFor(host: ClientHost, asked: unknown): NetworkLabel {
+  const ceiling = host.network ?? 'uplink';
+  if (asked === undefined) return ceiling;
+  if (!isNetworkLabel(asked)) throw fsError('EINVAL', `unknown network label ${String(asked)}`);
+  if (widens(ceiling, asked)) {
+    throw fsError('EPERM', `network ${asked}: this client may use ${ceiling} at most`);
+  }
+  return asked;
+}
+
+function helloOf(host: ClientHost, transport: RealmTransport): KernelHello {
+  return {
+    protocol: PROTOCOL,
+    traits: transport.traits,
+    network: host.network ?? 'uplink',
+    ...(host.lock ? { lock: host.lock } : {}),
+  };
 }
 
 function killGroups(host: ClientHost, pgids: number[]): void {
@@ -228,18 +250,13 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
     net = serveTransport({ postMessage: (m, t) => send(m, t) }, transport);
     state = 'open';
     if (message.lock && host.locks) void host.locks.request(message.lock, () => detach());
-    send({
-      hello: {
-        protocol: PROTOCOL,
-        traits: transport.traits,
-        ...(host.lock ? { lock: host.lock } : {}),
-      },
-    });
+    send({ hello: helloOf(host, transport) });
   }
 
   async function terminal(req: Extract<ClientRequest, { op: 'open-terminal' }>, l: Launcher) {
     const session = await l.openTerminal(req.argv, {
       ...req.options,
+      network: labelFor(host, req.options.network),
       onData: (bytes) => reply(req.id, { fd: 1, bytes: bytes.slice() }),
     });
     if (state === 'closed') {
@@ -259,9 +276,11 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
   async function spawn(req: Extract<ClientRequest, { op: 'spawn' }>, l: Launcher) {
     const out = (fd: 1 | 2) => (bytes: Uint8Array) => reply(req.id, { fd, bytes: bytes.slice() });
     if (req.options.pgid !== undefined) joinable(l, req.options.pgid, (sid) => sessions.has(sid));
+    const network = labelFor(host, req.options.network);
     let leader: number | undefined;
     const result = await l.run(req.argv, {
       ...req.options,
+      network,
       collect: false,
       onStdout: out(1),
       onStderr: out(2),

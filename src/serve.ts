@@ -8,7 +8,9 @@ import { dialSocket, serveSocket } from './kernel/dial.ts';
 import type { WasmWorkerLike } from './kernel/host.ts';
 import { CA_DB, caStore } from './kernel/net/network.ts';
 import { RemoteTransport, type TransportReply } from './kernel/net/remote-transport.ts';
+import { isNetworkLabel, type NetworkLabel, type RouteTable } from './kernel/net/routes.ts';
 import type { RealmTransportTraits } from './kernel/net/transport.ts';
+import { RemoteUplink, type UplinkReply, type UplinkTraits } from './kernel/net/uplink.ts';
 import { SIG } from './kernel/signals.ts';
 import {
   Launcher,
@@ -37,6 +39,7 @@ export interface InitRequest {
   media?: string | false;
   ca?: string | false;
   transport?: RealmTransportTraits;
+  uplink?: { traits: UplinkTraits; routes?: RouteTable };
   hostfs?: boolean;
   processMounts?: boolean | 'ask';
   cdp?: boolean;
@@ -67,6 +70,13 @@ export type TerminalRequest = { id: number; op: 'terminal'; terminal: number } &
 export interface ConnectRequest {
   id: number;
   op: 'connect';
+  network?: NetworkLabel;
+}
+
+export interface RoutesRequest {
+  id: number;
+  op: 'routes';
+  routes: RouteTable;
 }
 
 export type MountRequest =
@@ -89,7 +99,8 @@ export type KernelRequest =
   | TerminalRequest
   | ConnectRequest
   | MountRequest
-  | DialRequest;
+  | DialRequest
+  | RoutesRequest;
 
 type WithoutId<T> = T extends unknown ? Omit<T, 'id'> : never;
 
@@ -162,6 +173,27 @@ function cdpOption(req: InitRequest, port: KernelPort): { cdp?: CdpHook } {
   };
 }
 
+function remotes(
+  port: KernelPort,
+  req: InitRequest
+): { transport?: RemoteTransport; uplink?: RemoteUplink } {
+  return {
+    ...(req.transport ? { transport: new RemoteTransport(port, req.transport) } : {}),
+    ...(req.uplink ? { uplink: new RemoteUplink(port, req.uplink.traits, req.uplink.routes) } : {}),
+  };
+}
+
+function answered(
+  data: { net?: unknown; uplink?: unknown },
+  remote: RemoteTransport | undefined,
+  uplink: RemoteUplink | undefined
+): boolean {
+  if (data.net !== undefined) remote?.receive(data as TransportReply);
+  else if (typeof data.uplink === 'string') uplink?.receive(data as UplinkReply);
+  else return false;
+  return true;
+}
+
 export interface GrantReply {
   id: number;
   grant?: HostfsGrant;
@@ -171,6 +203,7 @@ export interface GrantReply {
 export function serveKernel(port: KernelPort, deps: ServeDeps): void {
   let launcher: Promise<Launcher> | undefined;
   let remote: RemoteTransport | undefined;
+  let uplink: RemoteUplink | undefined;
   const terminals = new Map<number, TerminalSession>();
   const reply = (id: number, body: object, transfer?: Transferable[]) =>
     port.postMessage({ id, ...body }, transfer);
@@ -190,8 +223,11 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
     return holding;
   }
 
-  async function connect(): Promise<MessagePort> {
+  async function connect(req: ConnectRequest): Promise<MessagePort> {
     await ready();
+    if (req.network !== undefined && !isNetworkLabel(req.network)) {
+      throw new Error(`unknown network label ${String(req.network)}`);
+    }
     const { port1, port2 } = new MessageChannel();
     const held = locks ? await holdLock(locks) : undefined;
     const served = serveClient(port1, {
@@ -199,6 +235,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
       signal: signalNumber,
       ...(locks ? { locks } : {}),
       ...(held ? { lock: held } : {}),
+      ...(req.network ? { network: req.network } : {}),
     });
     clients.add(served);
     void served.closed.then(() => clients.delete(served));
@@ -233,7 +270,8 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
     launcher = (req.root ? Promise.resolve(req.root) : deps.storage()).then(async (root) => {
       const name = req.metadata ?? META_DB;
       const { meta, media } = await stores(deps, name, req.media);
-      remote = req.transport ? new RemoteTransport(port, req.transport) : undefined;
+      const net = remotes(port, req);
+      ({ transport: remote, uplink } = net);
       const ranged = await inOpfs(deps, root);
       const fs = new OpfsFs(root, meta, dirsChannel(name), { ranged });
       await fs.reconcile();
@@ -243,7 +281,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
         ...(deps.createDriverWorker ? { createDriverWorker: deps.createDriverWorker } : {}),
         ...(req.modules ? { modules: req.modules } : {}),
         ...(req.env ? { env: req.env } : {}),
-        ...(remote ? { transport: remote } : {}),
+        ...net,
         ...(media ? { media } : {}),
         onMountPending: (medium) => port.postMessage({ medium }),
         ...(req.hostfs ? { hostfs: askGrant } : {}),
@@ -269,7 +307,11 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
   async function handle(req: KernelRequest): Promise<unknown> {
     if (req.op === 'init') return init(req);
     if (req.op === 'open-terminal') return terminal(req);
-    if (req.op === 'connect') return connect();
+    if (req.op === 'connect') return connect(req);
+    if (req.op === 'routes') {
+      (await ready()).setRoutes(req.routes);
+      return true;
+    }
     if (req.op === 'dial') return dial(req);
     if (req.op === 'mount' || req.op === 'umount' || req.op === 'mounts' || req.op === 'insert')
       return mountOp(req);
@@ -324,10 +366,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
       policies.delete(answer.id);
       return;
     }
-    if ((event.data as { net?: unknown }).net !== undefined) {
-      remote?.receive(event.data as TransportReply);
-      return;
-    }
+    if (answered(event.data, remote, uplink)) return;
     const req = event.data as KernelRequest;
     handle(req).then(
       (result) => reply(req.id, { result }, result instanceof MessagePort ? [result] : undefined),

@@ -23,6 +23,8 @@ import { type FdTable, kernelFdKind, type OpenFile } from './fd-table.ts';
 import type { LockTable } from './host-ops.ts';
 import type { JobTable } from './jobs.ts';
 import type { HttpHandles } from './net/http-syscalls.ts';
+import type { Resolver } from './net/resolver.ts';
+import type { NetworkLabel } from './net/routes.ts';
 import type { MountLine, ProcessListing } from './proc-info.ts';
 import {
   isWasmSyscall,
@@ -91,6 +93,8 @@ export interface SpawnWasmOptions {
   http?: HttpHandles;
   locks?: LockTable;
   onReap?: (pid: number) => void;
+  network?: NetworkLabel;
+  resolver?: Resolver;
 }
 
 export interface WasmProcessHandle {
@@ -162,6 +166,8 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     http: opts.http,
     locks: opts.locks,
     onReap: opts.onReap,
+    network: opts.network,
+    resolver: opts.resolver,
     onPending: (sig) => void Atomics.or(header, SAB_I_SIGNALS, sigbit(sig)),
     onTimer: (which) => void Atomics.or(header, SAB_I_TIMERS, 1 << which),
     hasPending: () =>
