@@ -37,6 +37,7 @@ const { status, stdout, stderr } = await kernel.run(['bash', '-c', 'echo hi > he
 | `hostfs` | none | `(source, { readonly }) => Promise<{ url, token, capabilities? }>`: a grant for a `hostfs` mount from the local proxy (see [Host folders](#host-folders-hostfs)) |
 | `onMountPending` | none | `({ target, source, insert }) => void`: an `fsa` mount needs a folder; call `insert()` from a user gesture |
 | `processMounts` | `true` | whether programs may call `mount(2)` and `umount2(2)`: `false`, or `(req) => boolean \| Promise<boolean>` to decide each call (see [Mounting from a program](#mounting-from-a-program)) |
+| `cdp` | none | `({ runtime }) => Promise<CdpConnection>`: a browser-level DevTools connection for programs that drive a browser (see [Browser automation](#browser-automation-cdp)) |
 
 ### `kernel.run(argv, options?) → Promise<{ status, stdout, stderr }>`
 
@@ -83,7 +84,7 @@ Reach a server a program runs on the kernel's loopback (a dev server, `python -m
 
 - **`dial`** connects to `127.0.0.1:<port>` inside the kernel (`host` may also be `localhost` or `::1`) and resolves with `{ readable, writable, close() }`: a `ReadableStream` and a `WritableStream` of bytes. `writable.close()` half-closes the connection, as `shutdown(SHUT_WR)` does, and `close()` closes it. Each connection has a `MessagePort` of its own, and an attached client's connections close when it detaches; the other end then reads `ECONNRESET`.
 - **`loopbackFetch`** sends an HTTP/1.1 request over `dial` and resolves with a `Response` as soon as the headers arrive. The body streams (chunked, counted, or until the connection closes), so server-sent events and long polls work; cancelling the body or aborting `signal` closes the connection. The request is routed by `port`, not by the URL, whose host is sent as `Host`; a request body is sent with `Content-Length`, and every request uses a connection of its own (`Connection: close`).
-- **Errors** reject with an `Error` whose `code` is the errno: `ECONNREFUSED` when nothing listens on the port, `ENETUNREACH` for a host that is not the loopback, `EINVAL` for a port outside 1–65535.
+- **Errors** reject with an `Error` whose `code` is the errno: `ECONNREFUSED` when nothing listens on the port or the port is kernel-only (`9222`, the [CDP facade](#browser-automation-cdp)), `ENETUNREACH` for a host that is not the loopback, `EINVAL` for a port outside 1–65535.
 - **Names**: a page reaches the kernel's loopback as `<port>.kernel.localhost`, which is the loopback and a secure context, so a request no service worker routes lands on port 80 of the real machine instead of a real server on that port; the service worker routes the name to `loopbackFetch` with that port. Programs find the name in `SLICC_PAGE_LOOPBACK` (`kernel.localhost`) and `SLICC_PAGE_LOOPBACK_URL` (`http://{port}.kernel.localhost`), to print or inject the right URL.
 
 ### `attachKernel(port, options?) → Promise<KernelClient>`
@@ -100,10 +101,11 @@ Attaches to a kernel over a port from `kernel.connect()`, in any realm: a worker
 | `fs` | `readFile`, `readText`, `writeFile(path, string \| bytes)`, `stat`, `lstat`, `readdir`, `mkdir` (with parents), `rm(path, { force })` (recursive), `rename`, `realpath`, `symlink(target, path)`, `readlink`, `exists`, on the processes' file system; failures reject with `KernelCallError` and a POSIX `code` |
 | `fetch({ url, method, headers, body, signal })` | through the kernel's network transport (the one the page passed to `createKernel`), with a streaming body; `transport` is the same as a `NetworkTransport` |
 | `fs.watch(paths, { recursive }, onChange)` | resolves with `{ close() }`; `onChange` gets `{ paths }`, the changed paths at, below (or, without `recursive`, directly in) the watched ones, batched per task, or `{ overflow: true }` when there were too many to list, to rescan; it covers every change made through this kernel, by its processes and its clients |
+| `serveCdp(hook, { runtime })` | offers this client's browser to the kernel's programs (protocol 1.5): `hook` is the `cdp` hook of `createKernel`, asked once per program connection; resolves with `{ close() }`, and closing or detaching takes the offer back and closes its connections (see [Browser automation](#browser-automation-cdp)) |
 | `close({ kill })` | detaches: the client's processes keep running unless `kill` is set, which ends their process groups with `SIGKILL`; its terminals are hung up |
 | `closed` | resolves with the error that ended the client |
 
-When the kernel goes away (the page closed or reloaded, `terminate()`), pending calls and `exited` reject with `KernelGoneError`, and so do later calls. Each side holds a Web Lock and waits on the other's, since a `MessagePort` reports no close in browsers; in Node, the port's `close` event does the same. The first message is a handshake on the protocol version, `1.4` (`1.0` had no `watch`, `1.1` no mounts, `1.2` no `spawn` into a group and `1.3` no `dial`, which reject with `code: 'ENOSYS'` on such a kernel): a client or kernel of another major version is refused with an error naming both.
+When the kernel goes away (the page closed or reloaded, `terminate()`), pending calls and `exited` reject with `KernelGoneError`, and so do later calls. Each side holds a Web Lock and waits on the other's, since a `MessagePort` reports no close in browsers; in Node, the port's `close` event does the same. The first message is a handshake on the protocol version, `1.5` (`1.0` had no `watch`, `1.1` no mounts, `1.2` no `spawn` into a group, `1.3` no `dial` and `1.4` no `serveCdp`, which reject with `code: 'ENOSYS'` on such a kernel): a client or kernel of another major version is refused with an error naming both.
 
 ### Headless in Node, for tests
 
@@ -118,7 +120,7 @@ const { status, stdout } = await kernel.run(['bash', '-c', 'echo hi'], { cwd: '/
 kernel.terminate();
 ```
 
-`createNodeKernel({ root, modules, env, network, worker, processMounts, fstabRetries })` takes the options of `createKernel` except `metadata`, and `fstabRetries`, the delays in ms between tries of a failing `/etc/fstab` line (default `[1000, 4000, 16000]`). `root` is an in-memory directory by default (`memoryRoot()` makes another), and POSIX metadata stays in memory. Processes and threads run on `worker_threads`. The kernel has `run`, `openTerminal` and `terminate` as above, plus `root`, `writeFile(path, data)` (creating the parent directories) and `readFile(path)` to put files in place and read results. `nodeTransport()` is `fetchTransport()` with Node's `fetch`, which no CORS binds (`crossOrigin: 'any'`). `connect()` and `attachKernel` work as in the browser: the port is a `worker_threads` `MessagePort`, which a worker thread can attach with, and `terminate()` ends every attached client.
+`createNodeKernel({ root, modules, env, network, worker, processMounts, fstabRetries, cdp })` takes the options of `createKernel` except `metadata`, and `fstabRetries`, the delays in ms between tries of a failing `/etc/fstab` line (default `[1000, 4000, 16000]`). `root` is an in-memory directory by default (`memoryRoot()` makes another), and POSIX metadata stays in memory. Processes and threads run on `worker_threads`. The kernel has `run`, `openTerminal` and `terminate` as above, plus `root`, `writeFile(path, data)` (creating the parent directories) and `readFile(path)` to put files in place and read results. `nodeTransport()` is `fetchTransport()` with Node's `fetch`, which no CORS binds (`crossOrigin: 'any'`). `connect()` and `attachKernel` work as in the browser: the port is a `worker_threads` `MessagePort`, which a worker thread can attach with, and `terminate()` ends every attached client.
 
 ## Commands
 
@@ -176,6 +178,30 @@ await kernel.run(['curl', '-sS', 'https://registry.npmjs.org/@ai-ecoverse/wasm-b
 - **`localProxyTransport({ url, key })`** sends every request to a local proxy on loopback, such as [slicc-node](https://github.com/ai-ecoverse/slicc-node) or slicc-swift, which fetches it without CORS. Redirects reach the program unfollowed, with every `Set-Cookie`; bodies arrive decoded. `probeLocalProxy({ url, key })` resolves with the proxy's capabilities, or `null` when it is gone or refuses the key, so a page can fall back to `fetchTransport()`. `checkLocalProxy({ url, key })` says why: it resolves with `{ state }`, which is `ready` (with `probe`), `blocked` (the user denied Chrome's Local Network Access permission, `loopback-network`), `unreachable` (nothing answered; its `permission` is `granted`, `prompt` or `unknown`, and with `prompt` the page cannot tell a dismissed prompt from a proxy that is not running, since Chrome asks only once it has a connection), `refused` (with `status` and `error`, such as a stale key) or `incompatible`. The permission is not consulted when the page itself is on loopback. Both take a `fetch` option, and the transport `maxRequestBody` (default 64 MiB) and `bodyIdleMs` like `fetchTransport`.
 - **The host machine** is `host.slicc.internal` (`SLICC_HOST_LOOPBACK`), as `host.docker.internal` is in Docker, while `localhost` and `127.0.0.1` stay the kernel's own loopback. The proxy forwards `http(s)://host.slicc.internal:<port>/…` to the transport as `http(s)://127.0.0.1:<port>/…`, so it reaches the real machine's loopback through the local proxy or Node's `fetch` (through the page's own `fetch`, a request needs CORS from that server and Chrome's Local Network Access permission); other loopback addresses are still refused. This is HTTP and HTTPS through the proxy only: `/etc/hosts` and WASIX name resolution give the name `10.0.2.2`, QEMU's address for its host, so a program that connects a socket to it directly fails with `ENETUNREACH` instead of reaching the kernel's loopback.
 - **Without a transport**, every request is answered `502` with `slicc-kernel: no network transport (createKernel({ network: { transport } }))`.
+
+### Browser automation (CDP)
+
+Programs drive a browser with the Chrome DevTools Protocol over a WebSocket, whichever host actually has the browser: slicc-extension's `chrome.debugger`, slicc-node's or slicc-swift's CDP proxy, or a test harness. The kernel relays; it does not launch a browser.
+
+- **Programs** find the endpoint in `SLICC_CDP_URL`, `ws://127.0.0.1:9222/devtools/browser/<id>`, where `<id>` is random for each kernel boot. `http://127.0.0.1:9222/json/version` answers `{ "Browser", "Protocol-Version", "webSocketDebuggerUrl" }` with the same URL (carrying the request's query), and `/json/list` (or `/json`) lists the host's targets, without per-target sockets. Every other path is `404`. The listener starts on the first connection, on the kernel's loopback; a program that binds `9222` first keeps it.
+- **Sessions** are Chrome's flattened ones: `Target.attachToTarget` with `flatten: true`, then commands with a top-level `sessionId`. Messages pass unchanged, as text frames up to 256 MiB (a larger one closes the socket with `1009`). Each program WebSocket gets a host connection of its own: closing the socket (or exiting) closes it, which detaches its sessions, and a host that closes is passed on as a close frame (`1011` with its reason). `terminate()` closes them all.
+- **Runtime**: a program adds `runtime=<name>` to the query of the URL it opens, and the kernel gives it to the host; the kernel does not interpret it.
+- **No host**: `/json/*` and the WebSocket handshake answer `503` with `slicc-kernel: no CDP host is attached (createKernel({ cdp }) or client.serveCdp)`, and a host that refuses (an unknown runtime, say) gives `502` with its message.
+- **Kernel-only**: port `9222` takes connections only from programs in the kernel. `kernel.dial`, a client's `dial` and `loopbackFetch` (and so `9222.kernel.localhost` and slicc-node's tunnel) are refused with `ECONNREFUSED`, since the facade drives the user's real browser.
+
+An embedder offers a browser with the `cdp` option of `createKernel` or `createNodeKernel`, or from an attached client with `client.serveCdp(hook, { runtime })`:
+
+```ts
+interface CdpConnection {
+  send(message: string): void;
+  onmessage: ((message: string) => void) | null;
+  onclose: ((reason?: string) => void) | null;
+  close(): void;
+}
+type CdpHook = (request: { runtime?: string }) => Promise<CdpConnection>;
+```
+
+A connection is one browser-level CDP session; a host with only per-tab debugging emulates the `Target` domain behind it. A connection asking for a `runtime` goes to the newest client that offered that name; any other goes to the `cdp` option, or else to the newest client offer. In the browser the hook runs on the page, with a `MessagePort` per connection to the kernel worker.
 
 Process workers can also use the transport directly, without a socket: the `net-request`, `net-read` and `net-close` syscalls (`Module.sliccKernel.http` in a process) open a request and read its body in pieces. Requests are per process and closed when it exits, and a request body has no size limit of its own (the transport's `maxRequestBody` applies to the proxy). `net-traits` answers the transport's `traits` with `crossOrigin`: `'cors'` when it is bound by CORS like `fetchTransport()`, `'any'` (the default for a transport that does not say) when it is not; without a transport it fails with `ENETUNREACH`.
 
@@ -316,6 +342,7 @@ The kernel is ported from SLICC's `packages/webapp/src/kernel/` with the browser
 - `src/fs/`: the OPFS filesystem and the virtual command directories.
 - `src/launcher.ts`, `src/commands.ts`, `src/serve.ts`, `src/index.ts`: command resolution, the kernel worker protocol and the page API; `src/node.ts`, `src/node-process-worker.ts` and `src/node/` the headless Node entry. An embedder that uses `Launcher` directly, without `createKernel`, calls `await launcher.prepare()` first: it creates `/tmp` and `/home` and writes the CA certificate.
 - `src/kernel/net/`: the proxy, HTTP/1.1, TLS termination and the local CA, and the bridge to the page's transport; `src/transport.ts` and `src/local-proxy-transport.ts` are the page side.
+- `src/cdp/`: the CDP facade on `127.0.0.1:9222`, its WebSocket framing, the registry of hosts and the `MessagePort` bridge to them.
 
 
 ## Installing from git

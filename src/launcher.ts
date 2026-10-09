@@ -1,3 +1,6 @@
+import { enableCdp } from './cdp/facade.ts';
+import { CdpHosts } from './cdp/hosts.ts';
+import type { CdpHook } from './cdp/types.ts';
 import { serveClient } from './client/serve-client.ts';
 import {
   type Abi,
@@ -102,6 +105,7 @@ export interface LauncherOptions {
   hostfsTiming?: HostfsTiming;
   processMounts?: ProcessMountPolicy;
   fstabRetries?: readonly number[];
+  cdp?: CdpHook;
 }
 
 export interface PendingMedium {
@@ -290,6 +294,7 @@ export class Launcher {
   private readonly locks = new LockTable();
   private readonly ptys = new PtyTable((tty, sig) => this.jobs.signalOwnedForeground(tty, sig));
   readonly net = new LoopbackNet();
+  readonly cdp: CdpHosts;
   private readonly ca: () => Promise<RealmCa>;
   readonly transport: RealmTransport;
   readonly watchers = new FsWatchers();
@@ -328,7 +333,8 @@ export class Launcher {
     this.processMounts = options.processMounts ?? true;
     this.pnpmHome = options.env?.PNPM_HOME ?? PNPM_HOME;
     this.modulesDir = options.modules ?? '/node_modules';
-    this.env = { ...networkEnv(), ...options.env };
+    this.cdp = new CdpHosts(options.cdp);
+    this.env = { ...networkEnv(), SLICC_CDP_URL: this.cdp.url, ...options.env };
     this.ca = kernelCa(options.caStore ?? memoryCaStore());
     this.transport = options.transport ?? missingTransport();
     enableNetwork(this.net, {
@@ -336,6 +342,7 @@ export class Launcher {
       engine: kernelTlsEngine(packageTlsEngine(options.fs, this.modulesDir)),
       ca: this.ca,
     });
+    enableCdp(this.net, this.cdp);
     this.fs = withCommandDirs(this.base, async () => new Set((await this.commands()).keys()));
     this.watchers.watch([this.modulesDir, this.pnpmHome], { recursive: true }, () => {
       this.catalog = undefined;

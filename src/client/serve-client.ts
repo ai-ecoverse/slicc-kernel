@@ -1,3 +1,4 @@
+import { portCdpHook } from '../cdp/port.ts';
 import { fsError, type KernelFs } from '../fs/types.ts';
 import { dialSocket, serveSocket } from '../kernel/dial.ts';
 import type { TransportCall } from '../kernel/net/remote-transport.ts';
@@ -138,6 +139,52 @@ function joinable(l: Launcher, pgid: number, ours: (sid: number) => boolean): vo
   if (!ours(sid)) throw fsError('EPERM', `process group ${pgid} is in another session`);
 }
 
+function cdpRegistry(
+  send: (message: object, transfer: Transferable[]) => void,
+  gone: Promise<void>
+) {
+  const registered = new Map<number, () => void>();
+  const drop = (id: number) => {
+    registered.get(id)?.();
+    return registered.delete(id);
+  };
+  return {
+    serve(l: Launcher, req: Extract<ClientRequest, { op: 'serve-cdp' }>): number {
+      const hook = portCdpHook(
+        (request, cdp) =>
+          send({ cdpOpen: { ...request, registration: req.id }, port: cdp }, [
+            cdp as unknown as Transferable,
+          ]),
+        gone
+      );
+      registered.set(req.id, l.cdp.register(hook, req.runtime));
+      return req.id;
+    },
+    drop,
+    close: () => {
+      for (const id of [...registered.keys()]) drop(id);
+    },
+  };
+}
+
+function watchOp(
+  l: Launcher,
+  req: Extract<ClientRequest, { op: 'watch' | 'unwatch' }>,
+  watches: Map<number, () => void>,
+  send: (message: object) => void
+): Answer {
+  if (req.op === 'unwatch') {
+    watches.get(req.watch)?.();
+    watches.delete(req.watch);
+    return { result: true };
+  }
+  const unwatch = l.watchers.watch(req.paths, { recursive: req.recursive }, (change) =>
+    send({ watch: req.id, change })
+  );
+  watches.set(req.id, unwatch);
+  return { result: req.id };
+}
+
 export function serveClient(port: MessagePortLike, host: ClientHost): ServedClient {
   let state: 'new' | 'open' | 'closed' = 'new';
   const terminals = new Map<number, TerminalSession>();
@@ -151,6 +198,7 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
   };
   const reply = (id: number, body: object, transfer?: Transferable[]) =>
     send({ id, ...body }, transfer);
+  const cdps = cdpRegistry(send, ended.promise);
 
   function detach(kill = false, bye = 'the slicc-kernel detached this client'): void {
     if (state === 'closed') return;
@@ -159,6 +207,7 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
     net?.close();
     for (const unwatch of watches.values()) unwatch();
     watches.clear();
+    cdps.close();
     for (const session of terminals.values()) session.close();
     terminals.clear();
     if (kill) killGroups(host, [...groups]);
@@ -257,17 +306,9 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
           throw new Error(`unknown file system call ${req.method}`);
         }
         return fsCall(l.fs, req.method, req.args);
-      case 'watch': {
-        const unwatch = l.watchers.watch(req.paths, { recursive: req.recursive }, (change) =>
-          send({ watch: req.id, change })
-        );
-        watches.set(req.id, unwatch);
-        return { result: req.id };
-      }
+      case 'watch':
       case 'unwatch':
-        watches.get(req.watch)?.();
-        watches.delete(req.watch);
-        return { result: true };
+        return watchOp(l, req, watches, send);
       case 'mount':
         return { result: await l.mount(req.spec) };
       case 'umount':
@@ -277,6 +318,10 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
         return { result: l.mounts.list() };
       case 'dial':
         return dialFor(l, req, watches);
+      case 'serve-cdp':
+        return { result: cdps.serve(l, req) };
+      case 'unserve-cdp':
+        return { result: cdps.drop(req.registration) };
       case 'detach':
         return { result: true };
       default:

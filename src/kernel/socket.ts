@@ -275,7 +275,12 @@ function keyOf(addr: SockAddr): string {
 export class LoopbackNet {
   private readonly bound = new Map<string, KernelSocket>();
   private readonly activators = new Map<string, () => void>();
+  private readonly internal = new Set<number>();
   private nextEphemeral = EPHEMERAL_FIRST;
+  kernelOnly(port: number, reserve = false): boolean {
+    if (reserve) this.internal.add(port);
+    return this.internal.has(port);
+  }
   activate(addr: SockAddr, start: () => void): void {
     this.activators.set(keyOf(addr), start);
   }

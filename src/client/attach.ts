@@ -1,3 +1,5 @@
+import { type CdpOpen, serveCdpPort } from '../cdp/port.ts';
+import type { CdpHook } from '../cdp/types.ts';
 import type { FsStat } from '../fs/types.ts';
 import type { WatchChange } from '../fs/watch.ts';
 import { RemoteTransport, type TransportReply } from '../kernel/net/remote-transport.ts';
@@ -137,6 +139,7 @@ export interface KernelClient {
   dial(options: DialOptions): Promise<DialledSocket>;
   loopbackFetch(input: RequestInfo | URL, options: LoopbackFetchOptions): Promise<Response>;
   readonly fs: ClientFs;
+  serveCdp(hook: CdpHook, options?: { runtime?: string }): Promise<{ close(): void }>;
   close(options?: { kill?: boolean }): Promise<void>;
 }
 
@@ -192,6 +195,8 @@ class Channel {
   failure: Error | undefined;
   private readonly pending = new Map<number, Pending>();
   readonly watching = new Map<number, (change: WatchChange) => void>();
+  readonly cdpHooks = new Map<number, CdpHook>();
+  private readonly cdpOpen = new Set<() => void>();
   protocol: readonly [number, number] = PROTOCOL;
   private nextId = 0;
   private readonly port: MessagePortLike;
@@ -215,6 +220,8 @@ class Channel {
     this.failure = error;
     this.greeted.reject(error);
     this.remote?.fail(error);
+    for (const close of [...this.cdpOpen]) close();
+    this.cdpOpen.clear();
     for (const call of this.pending.values()) call.reject(error);
     this.pending.clear();
     this.release();
@@ -243,7 +250,13 @@ class Channel {
     bye?: string;
     watch?: number;
     change?: WatchChange;
+    cdpOpen?: CdpOpen['cdpOpen'];
+    port?: CdpOpen['port'];
   }): void {
+    if (data.cdpOpen && data.port) {
+      this.openCdp(data as CdpOpen);
+      return;
+    }
     if (data.watch !== undefined) {
       this.watching.get(data.watch)?.(data.change as WatchChange);
       return;
@@ -275,6 +288,43 @@ class Channel {
     if (reply.error !== undefined) call.reject(new KernelCallError(reply.error, reply.code));
     else call.resolve(reply.result);
   }
+
+  private openCdp({ cdpOpen: { registration, ...request }, port }: CdpOpen): void {
+    const hook = registration === undefined ? undefined : this.cdpHooks.get(registration);
+    if (!hook || this.failure) {
+      port.postMessage({ error: 'this client no longer serves CDP' });
+      port.close();
+      return;
+    }
+    const close = serveCdpPort(port, hook, request, () => this.cdpOpen.delete(close));
+    this.cdpOpen.add(close);
+  }
+}
+
+async function serveCdpOn(
+  channel: Channel,
+  hook: CdpHook,
+  options: { runtime?: string }
+): Promise<{ close(): void }> {
+  await since(channel, 5, 'CDP serving', async () => {});
+  const req = {
+    op: 'serve-cdp' as const,
+    ...(options.runtime ? { runtime: options.runtime } : {}),
+  };
+  const { id, done } = channel.request(req);
+  channel.cdpHooks.set(id, hook);
+  try {
+    await done;
+  } catch (error) {
+    channel.cdpHooks.delete(id);
+    throw error;
+  }
+  return {
+    close: () => {
+      if (!channel.cdpHooks.delete(id)) return;
+      void channel.call({ op: 'unserve-cdp', registration: id }).catch(() => undefined);
+    },
+  };
 }
 
 async function dialOn(channel: Channel, { port, host }: DialOptions): Promise<DialledSocket> {
@@ -493,6 +543,7 @@ export async function attachKernel(
     dial: (options) => dialOn(channel, options),
     loopbackFetch: (input, options) => loopbackFetch((o) => dialOn(channel, o), input, options),
     fs: fsOn(channel),
+    serveCdp: (hook, options = {}) => serveCdpOn(channel, hook, options),
     async close(o = {}) {
       if (channel.failure) return;
       await channel

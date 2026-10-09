@@ -23,6 +23,14 @@ const LOOPBACK_NAMES = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
 export function dialSocket(net: LoopbackNet, port: number, host = '127.0.0.1'): KernelSocket {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new KernelError('EINVAL');
   const target = LOOPBACK_NAMES.has(host.toLowerCase()) ? '127.0.0.1' : host;
+  if (net.kernelOnly(port)) {
+    throw Object.assign(
+      new Error(`ECONNREFUSED: port ${port} only takes connections from inside the kernel`),
+      {
+        code: 'ECONNREFUSED',
+      }
+    );
+  }
   return net.connect({ family: 'inet', host: target, port });
 }
 

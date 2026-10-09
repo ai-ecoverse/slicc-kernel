@@ -239,6 +239,36 @@ window.insertPending = async (index) => {
   return true;
 };
 
+const cdpLinks = new Map();
+let cdpNext = 0;
+
+window.cdpIn = (id, message, closed) => {
+  const conn = cdpLinks.get(id);
+  if (!conn) return false;
+  if (closed === undefined) conn.onmessage?.(message);
+  else {
+    cdpLinks.delete(id);
+    conn.onclose?.(closed || undefined);
+  }
+  return true;
+};
+
+const cdpHook = async (request) => {
+  const id = ++cdpNext;
+  const out = (message) => window.cdpOut(JSON.stringify({ id, ...message }));
+  const conn = {
+    onmessage: null,
+    onclose: null,
+    send: (m) => out({ m }),
+    close: () => {
+      if (cdpLinks.delete(id)) out({ close: true });
+    },
+  };
+  cdpLinks.set(id, conn);
+  out({ open: request });
+  return conn;
+};
+
 window.boot = async (options = {}) => {
   await install();
   const base = options.proxy
@@ -256,6 +286,7 @@ window.boot = async (options = {}) => {
       ...media,
       ...policy,
       ...handles,
+      ...(options.cdp ? { cdp: cdpHook } : {}),
     })
   );
   return true;
