@@ -25,6 +25,22 @@ test('each file change is in OPFS as soon as the command exits', async (t) => {
   assert.deepEqual(page.errors, []);
 });
 
+test('a file of several megabytes is read, overwritten and truncated in place in OPFS', async (t) => {
+  const { page, bash } = await booted(chrome, t);
+  const script = [
+    'head -c 8388608 /dev/urandom > big.bin',
+    'a=$(md5sum big.bin | cut -c1-32); b=$(md5sum < big.bin | cut -c1-32); [ "$a" = "$b" ] && echo same',
+    'head -c 196608 big.bin | tail -c 131072 | md5sum | cut -c1-32 > want',
+    'dd if=big.bin of=big.bin bs=65536 skip=1 seek=100 count=2 conv=notrunc 2>/dev/null',
+    'dd if=big.bin bs=65536 skip=100 count=2 2>/dev/null | md5sum | cut -c1-32 > got',
+    '[ "$(cat want)" = "$(cat got)" ] && echo moved',
+    'wc -c < big.bin',
+    'truncate -s 1000000 big.bin && wc -c < big.bin',
+  ].join('; ');
+  assert.deepEqual(await bash(script), ok('same\nmoved\n8388608\n1000000\n'));
+  assert.deepEqual(page.errors, []);
+});
+
 test('directories are created, renamed with their contents, and removed', async (t) => {
   const { bash, read, list, exists } = await booted(chrome, t);
 

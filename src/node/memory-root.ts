@@ -10,20 +10,94 @@ function valid(name: string): void {
   }
 }
 
+const CHUNK = 1024 * 1024;
+
 function bytesOf(data: unknown): Promise<Uint8Array> | Uint8Array {
   if (typeof data === 'string') return new TextEncoder().encode(data);
   if (data instanceof Blob) return data.arrayBuffer().then((buffer) => new Uint8Array(buffer));
   if (ArrayBuffer.isView(data)) {
-    return new Uint8Array(data.buffer, data.byteOffset, data.byteLength).slice();
+    return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
   }
-  return new Uint8Array(data as ArrayBuffer).slice();
+  return new Uint8Array(data as ArrayBuffer);
+}
+
+interface WriteParams {
+  type: 'write' | 'seek' | 'truncate';
+  data?: unknown;
+  position?: number;
+  size?: number;
+}
+
+const isParams = (data: unknown): data is WriteParams =>
+  ['write', 'seek', 'truncate'].includes((data as { type?: unknown } | null)?.type as string) &&
+  !(data instanceof Blob);
+
+class Chunks {
+  blobs: Blob[];
+  size: number;
+
+  constructor(blobs: Blob[] = [], size = 0) {
+    this.blobs = blobs;
+    this.size = size;
+  }
+
+  private pad(index: number, length: number): void {
+    const blob = this.blobs[index] ?? new Blob([]);
+    if (blob.size < length)
+      this.blobs[index] = new Blob([blob, new Uint8Array(length - blob.size)]);
+  }
+
+  private grow(end: number): void {
+    if (end <= this.size) return;
+    const last = Math.floor((end - 1) / CHUNK);
+    for (let i = 0; i < last; i++) this.pad(i, CHUNK);
+    this.pad(last, end - last * CHUNK);
+    this.size = end;
+  }
+
+  async write(at: number, bytes: Uint8Array): Promise<void> {
+    if (bytes.length === 0) return;
+    const first = Math.floor(at / CHUNK);
+    for (let i = 0; i < first; i++) this.pad(i, CHUNK);
+    for (let done = 0; done < bytes.length; ) {
+      const index = Math.floor((at + done) / CHUNK);
+      const from = at + done - index * CHUNK;
+      const n = Math.min(CHUNK - from, bytes.length - done);
+      const view = bytes.subarray(done, done + n);
+      const part = (
+        view.buffer instanceof ArrayBuffer ? view : view.slice()
+      ) as Uint8Array<ArrayBuffer>;
+      const old = this.blobs[index];
+      if (from === 0 && n >= (old?.size ?? 0)) this.blobs[index] = new Blob([part]);
+      else {
+        const merged = new Uint8Array(Math.max(old?.size ?? 0, from + n));
+        if (old) merged.set(new Uint8Array(await old.arrayBuffer()));
+        merged.set(part, from);
+        this.blobs[index] = new Blob([merged]);
+      }
+      done += n;
+    }
+    this.size = Math.max(this.size, at + bytes.length);
+  }
+
+  truncate(size: number): void {
+    if (size >= this.size) {
+      this.grow(size);
+      return;
+    }
+    const keep = Math.ceil(size / CHUNK);
+    this.blobs.length = keep;
+    if (keep > 0)
+      this.blobs[keep - 1] = (this.blobs[keep - 1] as Blob).slice(0, size - (keep - 1) * CHUNK);
+    this.size = size;
+  }
 }
 
 class MemoryFile {
   readonly kind = 'file';
   name: string;
   parent: MemoryDirectory;
-  bytes = new Uint8Array(0);
+  data = new Chunks();
   lastModified = Date.now();
 
   constructor(name: string, parent: MemoryDirectory) {
@@ -32,23 +106,33 @@ class MemoryFile {
   }
 
   async getFile(): Promise<File> {
-    return new File([this.bytes], this.name, { lastModified: this.lastModified });
+    return new File(this.data.blobs, this.name, { lastModified: this.lastModified });
   }
 
-  async createWritable() {
-    const chunks: Uint8Array[] = [];
+  async createWritable({ keepExistingData = false } = {}) {
+    const next = keepExistingData ? new Chunks([...this.data.blobs], this.data.size) : new Chunks();
+    let position = 0;
+    const put = async (data: unknown) => {
+      const bytes = await bytesOf(data);
+      await next.write(position, bytes);
+      position += bytes.length;
+    };
     return {
-      write: async (data: unknown) => void chunks.push(await bytesOf(data)),
+      write: async (data: unknown) => {
+        if (!isParams(data)) return put(data);
+        if (data.type === 'truncate') return next.truncate(data.size ?? 0);
+        position = data.position ?? position;
+        if (data.type === 'write') await put(data.data);
+      },
+      seek: async (at: number) => {
+        position = at;
+      },
+      truncate: async (size: number) => next.truncate(size),
       close: async () => {
-        const out = new Uint8Array(chunks.reduce((n, chunk) => n + chunk.length, 0));
-        let at = 0;
-        for (const chunk of chunks) {
-          out.set(chunk, at);
-          at += chunk.length;
-        }
-        this.bytes = out;
+        this.data = next;
         this.lastModified = Date.now();
       },
+      abort: async () => {},
     };
   }
 
@@ -153,4 +237,8 @@ class MemoryDirectory {
 
 export function memoryRoot(): FileSystemDirectoryHandle {
   return new MemoryDirectory('', null) as unknown as FileSystemDirectoryHandle;
+}
+
+export function isMemoryRoot(handle: FileSystemDirectoryHandle): boolean {
+  return (handle as unknown) instanceof MemoryDirectory;
 }
