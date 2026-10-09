@@ -105,8 +105,12 @@ function base64(text: string): string {
   return btoa(binary);
 }
 
+export function importSource(source: string): Promise<Record<string, unknown>> {
+  return import(`data:text/javascript;base64,${base64(source)}`);
+}
+
 export async function loadImports(source: string): Promise<CreateImports> {
-  const loaded = (await import(`data:text/javascript;base64,${base64(source)}`)) as {
+  const loaded = (await importSource(source)) as {
     createImports?: unknown;
   };
   if (typeof loaded.createImports !== 'function') {

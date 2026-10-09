@@ -6,5 +6,6 @@ interface WorkerScope {
 }
 
 const scope = globalThis as unknown as WorkerScope;
-const onMessage = processEntry({ postMessage: (message) => scope.postMessage(message) });
+const post = scope.postMessage.bind(scope);
+const onMessage = processEntry({ postMessage: (message) => post(message) });
 scope.addEventListener('message', (event) => onMessage(event.data));

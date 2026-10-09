@@ -22,6 +22,14 @@ export interface WasmProgram {
   preopenRoot?: boolean;
 }
 
+export interface JsProgram {
+  abi: 'js';
+  glue: string;
+  path: string;
+}
+
+export type Program = WasmProgram | JsProgram;
+
 export interface ForkState {
   memory: Uint8Array;
   currData: number;
@@ -66,6 +74,12 @@ export interface WasmProcessInitMsg {
   fork?: ForkState;
   fds?: InheritedFd[];
 }
+
+export type JsProcessInitMsg = Omit<WasmProcessInitMsg, 'program' | 'fork'> & {
+  program: JsProgram;
+};
+
+export type ProcessInitMsg = WasmProcessInitMsg | JsProcessInitMsg;
 
 export interface WasmProcessExitMsg {
   type: typeof WASM_PROCESS_EXIT;

@@ -14,6 +14,7 @@ import {
   SAB_DEFAULT_WINDOW_BYTES,
   SAB_HEADER_BYTES,
   SAB_HEADER_I32,
+  SAB_I_ASYNC,
   SAB_I_KILLED,
   SAB_I_MEMORY,
   SAB_I_SIGNALS,
@@ -36,6 +37,8 @@ import {
 import {
   type ForkState,
   type InheritedFd,
+  type ProcessInitMsg,
+  type Program,
   WASM_MAX_THREADS,
   WASM_PROCESS_ERROR,
   WASM_PROCESS_EXIT,
@@ -43,8 +46,6 @@ import {
   WASM_THREAD_EXIT,
   WASM_THREAD_INIT,
   WASM_THREAD_SPAWN,
-  type WasmProcessInitMsg,
-  type WasmProgram,
   type WasmThread,
   type WasmThreadInitMsg,
 } from './protocol.ts';
@@ -65,7 +66,7 @@ export interface SpawnWasmOptions {
   ignored?: number;
   identity?: () => Promise<{ pid: number; ppid: number }>;
   onSyscall?: (req: WasmSyscall) => void;
-  program: WasmProgram;
+  program: Program;
   argv0: string;
   args: string[];
   env: Record<string, string>;
@@ -193,6 +194,27 @@ class Dying {
   }
 }
 
+function processInit(opts: SpawnWasmOptions, sab: SharedArrayBuffer): ProcessInitMsg {
+  const base = {
+    type: WASM_PROCESS_INIT,
+    pid: opts.shownPid ?? opts.pid,
+    argv0: opts.argv0,
+    args: opts.args,
+    env: opts.env,
+    cwd: opts.cwd,
+    sab,
+    ...(opts.ppid !== undefined ? { ppid: opts.ppid } : {}),
+  } as const;
+  if (opts.program.abi === 'js') {
+    return { ...base, program: opts.program, fds: inheritedFds(opts.fds) };
+  }
+  return {
+    ...base,
+    program: opts.program,
+    ...(opts.fork ? { fork: opts.fork } : { fds: inheritedFds(opts.fds) }),
+  };
+}
+
 export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
   const sab = new SharedArrayBuffer(SAB_HEADER_BYTES + SAB_DEFAULT_WINDOW_BYTES);
   const header = new Int32Array(sab, 0, SAB_HEADER_I32);
@@ -218,12 +240,19 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     locks: opts.locks,
     onReap: opts.onReap,
     resolver: opts.resolver,
-    onPending: (sig) => void Atomics.or(header, SAB_I_SIGNALS, sigbit(sig)),
+    onPending: (sig) => {
+      Atomics.or(header, SAB_I_SIGNALS, sigbit(sig));
+      Atomics.notify(header, SAB_I_SIGNALS);
+    },
+    onAsync: () => {
+      Atomics.add(header, SAB_I_ASYNC, 1);
+      Atomics.notify(header, SAB_I_ASYNC);
+    },
     onTimer: (which) => void Atomics.or(header, SAB_I_TIMERS, 1 << which),
     hasPending: () =>
       Atomics.load(header, SAB_I_SIGNALS) !== 0 || Atomics.load(header, SAB_I_TIMERS) !== 0,
     raise: (sig) => signal(sig),
-    ...(opts.program.abi === 'wasi'
+    ...(opts.program.abi === 'wasi' || opts.program.abi === 'js'
       ? { pendingBits: () => Atomics.load(header, SAB_I_SIGNALS) }
       : {}),
   });
@@ -291,7 +320,8 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     end?.();
   };
   const spawnThread = (thread: WasmThread): void => {
-    if (done) return;
+    const { program } = opts;
+    if (done || program.abi === 'js') return;
     if (threads.size >= WASM_MAX_THREADS - 1) {
       opts.onError?.(`more than ${WASM_MAX_THREADS} threads`);
       finish(CRASHED);
@@ -316,7 +346,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     const tinit: WasmThreadInitMsg = {
       type: WASM_THREAD_INIT,
       pid: opts.shownPid ?? opts.pid,
-      program: opts.program,
+      program,
       argv0: opts.argv0,
       args: opts.args,
       env: opts.env,
@@ -328,18 +358,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     tw.postMessage(tinit);
   };
 
-  const init: WasmProcessInitMsg = {
-    type: WASM_PROCESS_INIT,
-    pid: opts.shownPid ?? opts.pid,
-    program: opts.program,
-    argv0: opts.argv0,
-    args: opts.args,
-    env: opts.env,
-    cwd: opts.cwd,
-    sab,
-    ...(opts.ppid !== undefined ? { ppid: opts.ppid } : {}),
-    ...(opts.fork ? { fork: opts.fork } : { fds: inheritedFds(opts.fds) }),
-  };
+  const init = processInit(opts, sab);
   worker.postMessage(init, opts.fork ? [opts.fork.memory.buffer as ArrayBuffer] : []);
 
   const signal = (sig: number): void => {

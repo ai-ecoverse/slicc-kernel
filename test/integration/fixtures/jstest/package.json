@@ -1,0 +1,26 @@
+{
+  "name": "jstest",
+  "private": true,
+  "slicc": {
+    "commands": {
+      "jstest": {
+        "abi": "js",
+        "module": "bin/jstest.mjs",
+        "env": {
+          "JSTEST_PACKAGE": "${package}"
+        }
+      },
+      "jsbad": {
+        "abi": "js",
+        "module": "bin/nomain.mjs"
+      },
+      "jsbroken": {
+        "abi": "js",
+        "module": "bin/broken.mjs"
+      },
+      "jsnomodule": {
+        "abi": "js"
+      }
+    }
+  }
+}

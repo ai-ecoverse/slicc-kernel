@@ -342,6 +342,8 @@ export interface WasmProcessOptions {
 
   onTimer?: (which: number) => void;
 
+  onAsync?: () => void;
+
   hasPending?: () => boolean;
 
   pendingBits?: () => number;
@@ -952,7 +954,10 @@ export class WasmProcess {
 
   private alarm: ReturnType<typeof setTimeout> | undefined;
   private readonly dlLog: LinkRecord[] = [];
-  private readonly asyncOps = new AsyncOps((req) => this.syscall(req as WasmSyscall));
+  private readonly asyncOps = new AsyncOps(
+    (req) => this.syscall(req as WasmSyscall),
+    () => this.options.onAsync?.()
+  );
   private alarmEvery: ReturnType<typeof setInterval> | undefined;
 
   private setAlarm(sig: number, first: number, every: number, timer?: number): void {

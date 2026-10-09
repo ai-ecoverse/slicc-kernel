@@ -44,7 +44,7 @@ import { Routes, type RouteTable } from './kernel/net/routes.ts';
 import type { RealmTransport } from './kernel/net/transport.ts';
 import type { NetworkUplink } from './kernel/net/uplink.ts';
 import type { ProcessInfo } from './kernel/proc-info.ts';
-import type { ForkState, WasmProgram } from './kernel/protocol.ts';
+import type { ForkState, Program } from './kernel/protocol.ts';
 import { PtyTable } from './kernel/pty.ts';
 import { SettlingChildren } from './kernel/settling.ts';
 import { LoopbackNet } from './kernel/socket.ts';
@@ -185,7 +185,7 @@ interface Planned {
 }
 
 interface StartRequest {
-  program: WasmProgram;
+  program: Program;
   argv0: string;
   args: string[];
   env: Record<string, string>;
@@ -518,7 +518,10 @@ export class Launcher {
     return (await this.base.exists(optional)) ? optional : undefined;
   }
 
-  private async program(target: Target, env: Record<string, string>): Promise<WasmProgram> {
+  private async program(target: Target, env: Record<string, string>): Promise<Program> {
+    if (target.abi === 'js') {
+      return { abi: 'js', glue: await this.base.readFile(target.wasm), path: target.wasm };
+    }
     if (target.abi !== 'wasi') {
       const [glue, { module }] = await Promise.all([
         this.base.readFile(target.glue),
@@ -551,7 +554,7 @@ export class Launcher {
     const env = { ...expandDefaults(target.env, seen), ...req.env };
     for (const key of target.unset ?? []) delete env[key];
     env.HOSTNAME = this.hostname;
-    let program: WasmProgram;
+    let program: Program;
     try {
       program = await this.program(target, env);
     } catch (err) {

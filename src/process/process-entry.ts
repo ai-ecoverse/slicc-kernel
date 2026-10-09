@@ -1,4 +1,6 @@
 import {
+  type JsProcessInitMsg,
+  type ProcessInitMsg,
   WASM_PROCESS_ERROR,
   WASM_PROCESS_EXIT,
   WASM_PROCESS_INIT,
@@ -20,12 +22,37 @@ export interface WasiRuntime {
 
 export type WasiLoader = () => Promise<WasiRuntime>;
 
+export interface JsRuntime {
+  runJsProcess(init: JsProcessInitMsg, port: SabPostLike): Promise<number>;
+}
+
+export type JsLoader = () => Promise<JsRuntime>;
+
 const loadWasi: WasiLoader = () => import('./wasi/wasi-runtime.ts');
+
+const loadJs: JsLoader = () => import('./js/js-runtime.ts');
+
+function started(
+  init: ProcessInitMsg,
+  port: SabPostLike,
+  run: ProcessRunner,
+  wasi: WasiLoader,
+  js: JsLoader
+): Promise<number> {
+  if (init.program?.abi === 'js') {
+    const jsInit = init as JsProcessInitMsg;
+    return js().then((m) => m.runJsProcess(jsInit, port));
+  }
+  const wasmInit = init as WasmProcessInitMsg;
+  if (wasmInit.program?.abi === 'wasi') return wasi().then((m) => m.runWasiProcess(wasmInit, port));
+  return run(wasmInit, port);
+}
 
 export function processEntry(
   port: SabPostLike,
   run: ProcessRunner = runWasmProcess,
-  wasi: WasiLoader = loadWasi
+  wasi: WasiLoader = loadWasi,
+  js: JsLoader = loadJs
 ): (data: unknown) => void {
   const failed = (err: unknown): void =>
     port.postMessage({
@@ -41,12 +68,7 @@ export function processEntry(
       return;
     }
     if (type !== WASM_PROCESS_INIT) return;
-    const init = data as WasmProcessInitMsg;
-    const started =
-      init.program?.abi === 'wasi'
-        ? wasi().then((m) => m.runWasiProcess(init, port))
-        : run(init, port);
-    started.then(
+    started(data as ProcessInitMsg, port, run, wasi, js).then(
       (code) => port.postMessage({ type: WASM_PROCESS_EXIT, code } satisfies WasmProcessExitMsg),
       failed
     );

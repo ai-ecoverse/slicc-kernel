@@ -1,6 +1,6 @@
 import type { KernelFs } from './fs/types.ts';
 
-export type Abi = 'emscripten' | 'wasi';
+export type Abi = 'emscripten' | 'wasi' | 'js';
 
 export interface Command {
   name: string;
@@ -28,6 +28,7 @@ interface CommandEntry {
   env?: unknown;
   script?: unknown;
   imports?: unknown;
+  module?: unknown;
 }
 
 interface Manifest {
@@ -79,7 +80,7 @@ function argsOf(pkg: string, raw: unknown): string[] | undefined {
 
 function abiOf(raw: unknown, fallback: Abi): Abi | undefined {
   const abi = raw ?? fallback;
-  return abi === 'emscripten' || abi === 'wasi' ? abi : undefined;
+  return abi === 'emscripten' || abi === 'wasi' || abi === 'js' ? abi : undefined;
 }
 
 function commandOf(
@@ -95,11 +96,16 @@ function commandOf(
     return { name, abi: packageAbi, glue: script, wasm: script, argv0: name, script, ...withEnv };
   }
   const abi = abiOf(raw.abi, packageAbi);
+  const argv0 = typeof raw.argv0 === 'string' && raw.argv0 ? raw.argv0 : name;
+  const args = argsOf(pkg, raw.args);
+  if (abi === 'js') {
+    const module = inside(pkg, raw.module);
+    if (!module) return undefined;
+    return { name, abi, glue: module, wasm: module, argv0, ...(args ? { args } : {}), ...withEnv };
+  }
   const wasm = inside(pkg, raw.wasm);
   const glue = abi === 'wasi' ? wasm : inside(pkg, raw.glue);
   if (!abi || !glue || !wasm) return undefined;
-  const argv0 = typeof raw.argv0 === 'string' && raw.argv0 ? raw.argv0 : name;
-  const args = argsOf(pkg, raw.args);
   const imports = abi === 'wasi' ? inside(pkg, raw.imports) : undefined;
   return {
     name,

@@ -73,9 +73,11 @@ export class AsyncOps {
   private readonly waiters = new Set<() => void>();
   private closed = false;
   private readonly run: Run;
+  private readonly onReady: (() => void) | undefined;
 
-  constructor(run: Run) {
+  constructor(run: Run, onReady?: () => void) {
     this.run = run;
+    this.onReady = onReady;
   }
 
   submit(req: { op: string }): number {
@@ -161,6 +163,7 @@ export class AsyncOps {
     this.results.set(id, result);
     this.ready.push(id);
     this.wake();
+    this.onReady?.();
   }
 
   private wake(): void {

@@ -1,0 +1,233 @@
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const text = (bytes) => new TextDecoder().decode(bytes);
+
+async function cat(ctx) {
+  await ctx.stdin.pipeTo(ctx.stdout, { preventClose: true });
+}
+
+async function count(ctx) {
+  let total = 0;
+  for (;;) {
+    const chunk = await ctx.read(0, 1 << 20);
+    if (chunk.length === 0) break;
+    total += chunk.length;
+  }
+  await ctx.write(1, `${total}\n`);
+}
+
+async function yes(ctx) {
+  const line = new TextEncoder().encode('y\n'.repeat(4096));
+  for (;;) await ctx.write(1, line);
+}
+
+async function trap(ctx, [name = 'SIGINT', code = '130']) {
+  let caught = 0;
+  await ctx.signals.on(name, (sig) => {
+    caught = sig;
+  });
+  await ctx.write(1, 'ready\n');
+  while (!caught) await sleep(5);
+  await ctx.write(1, `caught ${caught}\n`);
+  return Number(code);
+}
+
+async function blocked(ctx) {
+  await ctx.signals.on('SIGINT', () => ctx.exit(42));
+  await ctx.write(1, 'ready\n');
+  await ctx.read(0);
+  return 0;
+}
+
+async function files(ctx, [path]) {
+  const f = await ctx.open(path, { read: true, write: true, create: true, truncate: true });
+  const big = new Uint8Array(3 * 1024 * 1024 + 17);
+  for (let i = 0; i < big.length; i++) big[i] = i % 251;
+  await f.write(0, big);
+  await f.write(big.length, new TextEncoder().encode('tail'));
+  const size = await f.size();
+  const back = await f.read(1024 * 1024 - 3, 2 * 1024 * 1024 + 9);
+  let same = back.length === 2 * 1024 * 1024 + 9;
+  for (let i = 0; same && i < back.length; i++) same = back[i] === (1024 * 1024 - 3 + i) % 251;
+  const end = text(await f.read(size - 4, 100));
+  await f.truncate(10);
+  await f.sync();
+  const cut = await f.size();
+  await f.close();
+  const st = await ctx.fs.stat(path);
+  const again = await ctx.open(path);
+  const head = await again.read(0, 3);
+  await ctx.close(again.fd);
+  await ctx.write(1, `${size} ${same} ${end} ${cut} ${st.size} ${st.isFile} ${head.join('.')}\n`);
+}
+
+async function fsops(ctx, [dir]) {
+  await ctx.fs.mkdir(`${dir}/a/b`);
+  await ctx.fs.writeFile(`${dir}/a/b/one.txt`, 'one');
+  await ctx.fs.rename(`${dir}/a/b/one.txt`, `${dir}/a/two.txt`);
+  await ctx.fs.symlink('two.txt', `${dir}/a/link`);
+  const listed = (await ctx.fs.readdir(`${dir}/a`)).sort().join(',');
+  const linked = await ctx.fs.readlink(`${dir}/a/link`);
+  const content = text(await ctx.fs.readFile(`${dir}/a/two.txt`));
+  const lst = await ctx.fs.lstat(`${dir}/a/link`);
+  await ctx.fs.unlink(`${dir}/a/link`);
+  const gone = await ctx.fs.exists(`${dir}/a/link`);
+  const errors = [];
+  for (const attempt of [
+    () => ctx.open(`${dir}/missing`),
+    () => ctx.open(`${dir}/a/two.txt`, { create: true, exclusive: true }),
+    () => ctx.open(`${dir}/a`),
+  ]) {
+    errors.push(
+      await attempt().then(
+        () => 'ok',
+        (err) => err.code
+      )
+    );
+  }
+  await ctx.fs.rm(`${dir}/a`);
+  await ctx.write(
+    1,
+    `${listed} ${linked} ${content} ${lst.isSymbolicLink} ${gone} ${errors.join(',')} ${await ctx.fs.exists(dir + '/a')}\n`
+  );
+}
+
+async function fds(ctx) {
+  const out = [];
+  for (const fd of [0, 1, 2]) {
+    const s = await ctx.fdStatus(fd);
+    out.push(`${fd}:${s.type}:${s.tty}:${s.seekable}:${await ctx.isatty(fd)}`);
+  }
+  await ctx.write(2, `${out.join(' ')}\n`);
+}
+
+async function globals(ctx) {
+  const names = [
+    'fetch',
+    'XMLHttpRequest',
+    'WebSocket',
+    'Worker',
+    'indexedDB',
+    'caches',
+    'postMessage',
+    'importScripts',
+  ];
+  const seen = names.map((n) => `${n}=${typeof globalThis[n]}`);
+  seen.push(`storage=${typeof globalThis.navigator?.storage}`);
+  seen.push(`locks=${typeof globalThis.navigator?.locks}`);
+  for (const n of [
+    'VideoEncoder',
+    'VideoDecoder',
+    'AudioEncoder',
+    'ImageDecoder',
+    'OffscreenCanvas',
+  ]) {
+    seen.push(`${n}=${typeof globalThis[n]}`);
+  }
+  await ctx.write(1, `${seen.join(' ')}\n`);
+}
+
+async function encode(ctx) {
+  if (typeof VideoEncoder === 'undefined') {
+    await ctx.write(2, 'no WebCodecs here\n');
+    return 69;
+  }
+  const config = { codec: 'vp8', width: 64, height: 64, bitrate: 200_000, framerate: 30 };
+  const { supported } = await VideoEncoder.isConfigSupported(config);
+  const chunks = [];
+  const encoder = new VideoEncoder({
+    output: (chunk) => chunks.push(chunk),
+    error: (err) => ctx.write(2, `${err.message}\n`),
+  });
+  encoder.configure(config);
+  const canvas = new OffscreenCanvas(64, 64);
+  const g = canvas.getContext('2d');
+  for (let i = 0; i < 3; i++) {
+    g.fillStyle = `rgb(${i * 80}, 40, 200)`;
+    g.fillRect(0, 0, 64, 64);
+    const frame = new VideoFrame(canvas, { timestamp: i * 33_333 });
+    encoder.encode(frame, { keyFrame: i === 0 });
+    frame.close();
+  }
+  await encoder.flush();
+  encoder.close();
+  const bytes = chunks.reduce((n, c) => n + c.byteLength, 0);
+  await ctx.write(
+    1,
+    `supported=${supported} chunks=${chunks.length} first=${chunks[0]?.type} bytes>0=${bytes > 0}\n`
+  );
+}
+
+async function devices(ctx) {
+  const zero = await ctx.read(0, 8);
+  await ctx.write(1, `${zero.length} ${zero.every((b) => b === 0)}\n`);
+}
+
+const modes = {
+  echo: async (ctx, args) => {
+    await ctx.write(
+      1,
+      `${ctx.argv.join('|')}\n${ctx.cwd}\n${ctx.env.JSTEST_PACKAGE ?? ''}\n${ctx.pid > 0}\n${ctx.resolve('../x/./y')}\n${args.length}\n`
+    );
+  },
+  cat,
+  count,
+  yes,
+  trap,
+  blocked,
+  files,
+  fsops,
+  fds,
+  globals,
+  devices,
+  encode,
+  status: async (_ctx, [n]) => Number(n),
+  exit: (ctx, [n]) => ctx.exit(Number(n)),
+  throw: (_ctx, [m]) => {
+    throw new Error(m);
+  },
+  wait: async (ctx) => {
+    await ctx.write(1, 'ready\n');
+    await new Promise(() => {});
+  },
+  stray: async () => {
+    setTimeout(() => {
+      throw new Error('late');
+    }, 1);
+    await new Promise(() => {});
+  },
+  ignore: async (ctx) => {
+    await ctx.signals.ignore('SIGPIPE');
+    try {
+      await yes(ctx);
+    } catch (err) {
+      await ctx.write(2, `${err.code}\n`);
+      return 7;
+    }
+  },
+  badsig: async (ctx) => {
+    const out = [];
+    for (const s of ['SIGBOGUS', 0, 'SIGKILL']) {
+      out.push(
+        await ctx.signals
+          .on(s, () => {})
+          .then(
+            () => 'ok',
+            (err) => err.code
+          )
+      );
+    }
+    await ctx.signals.on(10, () => {});
+    await ctx.signals.reset('SIGUSR1');
+    await ctx.write(1, `${out.join(',')}\n`);
+  },
+};
+
+export default async function main(ctx) {
+  const [, mode, ...args] = ctx.argv;
+  const run = modes[mode];
+  if (!run) {
+    await ctx.write(2, `usage: jstest <${Object.keys(modes).join('|')}>\n`);
+    return 2;
+  }
+  return run(ctx, args);
+}
