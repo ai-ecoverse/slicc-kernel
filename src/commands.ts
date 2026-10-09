@@ -101,7 +101,16 @@ function commandOf(
   if (abi === 'js') {
     const module = inside(pkg, raw.module);
     if (!module) return undefined;
-    return { name, abi, glue: module, wasm: module, argv0, ...(args ? { args } : {}), ...withEnv };
+    return {
+      name,
+      abi,
+      glue: module,
+      wasm: module,
+      argv0,
+      ...(raw.argv0Path === true ? { argv0Path: true } : {}),
+      ...(args ? { args } : {}),
+      ...withEnv,
+    };
   }
   const wasm = inside(pkg, raw.wasm);
   const glue = abi === 'wasi' ? wasm : inside(pkg, raw.glue);
