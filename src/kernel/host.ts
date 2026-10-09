@@ -59,6 +59,7 @@ export interface WasmWorkerLike {
 
 export interface SpawnWasmOptions {
   pid: number;
+  ignored?: number;
   program: WasmProgram;
   argv0: string;
   args: string[];
@@ -100,6 +101,7 @@ export interface WasmProcessHandle {
   termsig(): number | undefined;
   onState(listener: StateListener): void;
   memory(): number;
+  ignoredSignals(fork?: boolean): number;
 }
 
 const CRASHED = 70;
@@ -144,6 +146,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
   const sab = new SharedArrayBuffer(SAB_HEADER_BYTES + SAB_DEFAULT_WINDOW_BYTES);
   const header = new Int32Array(sab, 0, SAB_HEADER_I32);
   const process = new WasmProcess(opts.pid, opts.fds, {
+    ...(opts.ignored ? { ignored: opts.ignored } : {}),
     spawner: opts.spawner,
     forker: opts.forker,
     fs: opts.fs,
@@ -297,5 +300,6 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     termsig: () => endedBy,
     onState: (listener) => process.onState(listener),
     memory: () => Atomics.load(header, SAB_I_MEMORY) * 65536,
+    ignoredSignals: (fork) => process.inheritable(fork),
   };
 }

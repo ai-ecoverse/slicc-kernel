@@ -300,7 +300,7 @@ Programs mount and unmount with `mount(2)` and `umount2(2)`, so a `mount`/`umoun
 
 ### Exec
 
-An exec'd program takes over the pid of the process it replaces, as on Linux: `getpid()` and `$$` in the new image, `/proc`, `ps`, `kill` and the parent's `waitpid` all agree on that pid, and the image's parent pid is the replaced process's. Its own children see that pid as their parent.
+An exec'd program takes over the pid of the process it replaces, as on Linux: `getpid()` and `$$` in the new image, `/proc`, `ps`, `kill` and the parent's `waitpid` all agree on that pid, and the image's parent pid is the replaced process's. Its own children see that pid as their parent. Signals a program ignores stay ignored in the image it execs and in the children it spawns or forks, as POSIX has it, so `nohup cmd` and `trap '' TERM; exec cmd` keep `cmd` safe from them; caught signals go back to their default. The kernel holds what was handed down, so a new image that sets one of those signals back to the default with `signal(SIG_DFL)` still ignores it, until it installs a handler.
 
 - **Emscripten:** `Module.sliccKernel.execve(file, argv, env, cwd)` runs `file` as this process's new image on its fds 0, 1 and 2, waits for it, and returns its wait status, or a negative errno when it cannot start. `env` and `cwd` may be `null` for this process's own. An exec shim detects it with `typeof Module.sliccKernel.execve === 'function'` and exits with the status it returns, as `execve` never returns on success. Older shims spawn the program and then call `Module.sliccKernel.execWait(pid)`; that still works, but the image then reports a pid of its own from `getpid()`.
 - **WASIX:** `proc_exec` does this by itself.

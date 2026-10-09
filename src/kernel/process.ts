@@ -302,6 +302,8 @@ export function isWasmSyscall(req: object): req is WasmSyscall {
 const MAX_READ = 1024 * 1024;
 
 export interface WasmProcessOptions {
+  ignored?: number;
+
   spawner?: ChildSpawner;
 
   forker?: ChildForker;
@@ -353,6 +355,7 @@ export class WasmProcess {
 
   private caught = 0;
   private ignored = 0;
+  private inherited = 0;
 
   private interrupt = new AbortController();
 
@@ -389,11 +392,20 @@ export class WasmProcess {
     this.fds = fds;
 
     this.options = options;
+    this.inherited = options.ignored ?? 0;
     this.children = new ChildTable(fds, options.spawner, options.forker);
     this.nodes = new VfsNodes(options.fs);
     options.openFiles?.add(this.nodes);
     this.children.onChildState = () => this.signal(SIG.CHLD);
     this.children.onReap = options.onReap;
+  }
+
+  private ignores(bit: number): boolean {
+    return ((this.ignored | (this.inherited & ~this.caught)) & bit) !== 0;
+  }
+
+  inheritable(fork = false): number {
+    return ((fork ? 0 : this.ignored) | this.inherited) & ~this.caught;
   }
 
   signal(sig: number): SignalOutcome {
@@ -406,7 +418,7 @@ export class WasmProcess {
     if (sig === SIG.CONT) this.cont();
     if (sig === SIG.STOP) return this.stop(sig);
     const bit = sigbit(sig);
-    if (this.ignored & bit) return 'ignore';
+    if (this.ignores(bit)) return 'ignore';
     if (!(this.caught & bit)) {
       const action = defaultAction(sig);
       return action === 'stop' ? this.stop(sig) : action;
@@ -729,7 +741,7 @@ export class WasmProcess {
     if (session !== undefined && session !== tty) return;
     const pgid = this.pgid();
     if (jobs.tcgetpgrp(tty, this.sid()) === pgid) return;
-    if (this.ignored & sigbit(SIG.TTIN)) throw new KernelError('EIO');
+    if (this.ignores(sigbit(SIG.TTIN))) throw new KernelError('EIO');
     jobs.killGroup(pgid, SIG.TTIN);
     throw new KernelError('EINTR');
   }
