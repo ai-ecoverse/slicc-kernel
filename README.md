@@ -109,7 +109,7 @@ Attaches to a kernel over a port from `kernel.connect()`, in any realm: a worker
 | `close({ kill })` | detaches: the client's processes keep running unless `kill` is set, which ends their process groups with `SIGKILL`; its terminals are hung up |
 | `closed` | resolves with the error that ended the client |
 
-When the kernel goes away (the page closed or reloaded, `terminate()`), pending calls and `exited` reject with `KernelGoneError`, and so do later calls. Each side holds a Web Lock and waits on the other's, since a `MessagePort` reports no close in browsers; in Node, the port's `close` event does the same. The first message is a handshake on the protocol version, `1.6` (`1.0` had no `watch`, `1.1` no mounts, `1.2` no `spawn` into a group, `1.3` no `dial` and `1.4` no `serveCdp`, which reject with `code: 'ENOSYS'` on such a kernel; a `1.5` kernel has no [uplink](#uplink)): a client or kernel of another major version is refused with an error naming both.
+When the kernel goes away (the page closed or reloaded, `terminate()`), pending calls and `exited` reject with `KernelGoneError`, and so do later calls. Each side holds a Web Lock and waits on the other's, since a `MessagePort` reports no close in browsers; in Node, the port's `close` event does the same. The first message is a handshake on the protocol version, `1.7` (`1.0` had no `watch`, `1.1` no mounts, `1.2` no `spawn` into a group, `1.3` no `dial` and `1.4` no `serveCdp`, which reject with `code: 'ENOSYS'` on such a kernel; a `1.5` kernel has no [uplink](#uplink), and a `1.6` kernel resolves names through one but connects nothing to it): a client or kernel of another major version is refused with an error naming both.
 
 ### Headless in Node, for tests
 
@@ -175,7 +175,7 @@ const kernel = await createKernel({ network: { transport: fetchTransport() } });
 await kernel.run(['curl', '-sS', 'https://registry.npmjs.org/@ai-ecoverse/wasm-bash/latest']);
 ```
 
-- **Sockets**: `AF_INET` stream sockets on `127.x` and `AF_UNIX` sockets are kernel descriptors on one loopback network per kernel, so processes can serve and connect to each other. They survive `dup`, `fork` and `exec` and work with `select` and `poll`, like pipe ends. A bind of an `AF_UNIX` socket creates its path in OPFS. Other addresses are unreachable: programs reach the outside world only through the proxy.
+- **Sockets**: `AF_INET` stream sockets on `127.x` and `AF_UNIX` sockets are kernel descriptors on one loopback network per kernel, so processes can serve and connect to each other. They survive `dup`, `fork` and `exec` and work with `select` and `poll`, like pipe ends. A bind of an `AF_UNIX` socket creates its path in OPFS. Other addresses are unreachable (`ENETUNREACH`) unless the [uplink](#uplink) routes them: otherwise programs reach the outside world only through the proxy.
 - **The proxy** listens on `127.0.0.1:3128` from the first connection on. It takes absolute-form `http:` requests and `CONNECT` tunnels, which it terminates with a certificate for the requested host, issued by the kernel's own CA, then hands each request to the transport. Programs start with `http_proxy`, `https_proxy` (and the upper-case names) pointing at it, `no_proxy` covering loopback, and `SSL_CERT_FILE`, `CURL_CA_BUNDLE` and `GIT_SSL_CAINFO` pointing at the CA bundle in `/etc/ssl/certs/slicc-kernel-ca.pem`; variables in `env` override them. The CA's key never leaves WebCrypto; it is kept in IndexedDB, in `<metadata>-ca`, or in `slicc-kernel-ca` when `metadata` is the default or `false`, so kernels on one origin share one CA whether or not they keep metadata. `ca` names another database, and `ca: false` keeps a CA in memory for the kernel's lifetime. Each kernel adds its CA to the bundle instead of replacing it, so every kernel on the origin stays trusted; the bundle keeps the newest 16.
 - **TLS** needs [`@ai-ecoverse/wasm-tls-engine`](https://www.npmjs.com/package/@ai-ecoverse/wasm-tls-engine) installed under `modules`, like a command. Without it, `CONNECT` is answered `501` with the reason.
 - **The transport** is an object on the page with `traits` (`manualRedirects`, `encodedBodies`, `maxRequestBody`, and `crossOrigin`: `'cors'` or `'any'`) and `fetch(request)`, which answers `{ status, statusText, headers, body, cancel }` with `body` an async iterable of `Uint8Array`. The kernel pulls the body one chunk at a time, so a slow program slows the download. A rejection with a numeric `status` is answered with that status; any other with `502`. `fetchTransport()` is the plain `fetch` of the page, bound by CORS; its `hint` option is appended to the message of a request it could not make, so a program's 502 can name a way around CORS (`registry.npmjs.org` and jsDelivr allow it); an embedder with a way around CORS passes its own. A response body that delivers no data for `bodyIdleMs` (default 5 minutes; `0` or `Infinity` turns it off) fails with `ETIMEDOUT` instead of waiting forever, which matters because Chrome under heavy load can stop handing a page the rest of a body. A slow body that keeps delivering is never cut off.
@@ -190,6 +190,12 @@ await kernel.run(['curl', '-sS', 'https://registry.npmjs.org/@ai-ecoverse/wasm-b
 - `traits`: `{ tcp: true, udp: false, ipv6 }`. Without `ipv6: true`, the kernel asks only for, and keeps only, IPv4 addresses.
 - `routes`: the first route table, `{ prefixes, exit }`, which `kernel.setRoutes` replaces when it changes. The kernel matches it itself, so a destination outside it costs no round trip.
 - `resolve(name, family, signal)`: resolves with the name's addresses, as a list or as `{ addresses, ttl }` (seconds). `[]` means the name is not the uplink's. `family` is `4`, `6` or `0` (either), and `signal` aborts when the kernel stops waiting.
+- `dial({ network: 'tcp', host, port, signal })`: opens a TCP connection and resolves with `{ localAddr, remoteAddr, read(), write(bytes), closeWrite(), close() }`.
+  - `read()` resolves with the next bytes, or `null` at the end.
+  - `write` resolves with how many bytes it took.
+  - `closeWrite()` is `shutdown(SHUT_WR)`.
+  - A rejection's `code` (`ECONNREFUSED`, `ENETUNREACH`, `EHOSTUNREACH`, `ETIMEDOUT`, `ECONNRESET`) is what the program sees, and any other is `EHOSTUNREACH`.
+  - `signal` aborts when the program gives up.
 
 **Name resolution** (WASIX `sock_addr_resolve`; `Module.sliccKernel.net.resolve(name, family)` for Emscripten programs):
 - `/etc/hosts` names are answered by the kernel itself: `localhost`, every `*.localhost`, `host.slicc.internal`, and literal addresses, IPv6 included.
@@ -198,9 +204,38 @@ await kernel.run(['curl', '-sS', 'https://registry.npmjs.org/@ai-ecoverse/wasm-b
 - **DNS cannot bridge into the kernel:** an answer that is loopback (`127.0.0.0/8`, `::1`), unspecified (`0.0.0.0`, `::`), the host (`10.0.2.2`), link-local, multicast or otherwise reserved, including the `::ffff:` forms, is dropped and logged with `console.warn`. A name cannot lead a program back to the kernel's loopback.
 - An uplink that does not answer within 10 s resolves nothing.
 
-In the browser, the page serves the uplink to the kernel worker over the same port as the transport, and `terminate()` cancels whatever is pending. Connecting to uplink addresses is the next step; until then they are unreachable like any other address.
+**Connections.** A `connect()` decides in a fixed order:
+1. Loopback (`127.0.0.0/8`, `::1`, `0.0.0.0`, `localhost`) is always the kernel's own, including the [CDP facade](#browser-automation-cdp) on `9222`.
+2. `host.slicc.internal` (`10.0.2.2`) and reserved addresses are `ENETUNREACH`.
+3. An address the route table matches goes through `dial`.
+4. Anything else is `ENETUNREACH`.
 
-`@ai-ecoverse/slicc-kernel/testing` has `fakeUplink({ names, routes, ipv6 })` for tests. It is an uplink that answers `resolve` from `names` (a list or `{ addresses, ttl }` per name) and records each question in `asked`.
+`bind()` still takes only loopback and `0.0.0.0`, so nothing listens on an uplink address.
+
+An uplink connection is an ordinary socket fd: it survives `dup`, `fork` and `exec`, and works with `select` and `poll`.
+- **Blocking `connect`** waits for the dial, at most 30 s (then `ETIMEDOUT`, even if the uplink ignores `signal`; a connection it opens later is closed). A signal interrupts it with `EINTR` while the dial goes on.
+- **Non-blocking `connect`** answers `EINPROGRESS`. The socket turns writable when the dial is done, and `SO_ERROR` says how it went.
+- **Closing the socket** during the dial gives `ECONNABORTED`.
+- **A connection that fails** (its `read()` rejects) closes; the program's next read fails with `ECONNRESET`, and its writes with `EPIPE`. `read()` resolving `null` is an orderly end of stream.
+- **`getsockname` and `getpeername`** answer the uplink's `localAddr` and `remoteAddr`.
+- **Flow control:** the kernel reads from the connection only while the socket's receive buffer (64 KiB) has room, and writes as the program does, so a slow side slows the other.
+
+In the browser, the page serves the uplink to the kernel worker over the same port as the transport, with buffers copied and transferred. `terminate()` closes every connection and cancels whatever is pending, and the page refuses to dial loopback, `10.0.2.2` or reserved addresses itself as well.
+
+`@ai-ecoverse/slicc-kernel/testing` is test support, kept out of the main entry so it never reaches a page bundle. It runs with the Node kernel and needs no wasm of its own. `fakeUplink({ names, routes, ipv6, peers, address })` is an uplink to pass as `network.uplink`:
+- **Names:** `resolve` answers from `names` (a list or `{ addresses, ttl }` per name) and records each question in `asked`.
+- **Routes:** `routes` is the first table; `kernel.setRoutes` changes it as for a real uplink.
+- **Dials:** each dial is recorded in `dialled`. `localAddr` is `address` (default `100.100.100.100`) with a fresh port. `peers`, keyed `'host:port'` (or `'[v6]:port'`), decides how a dial ends:
+  - `{ error: 'ETIMEDOUT' }` (or any code) rejects with that code;
+  - `{ hang: true }` never answers, until the kernel aborts the dial;
+  - anything not listed is refused with `ECONNREFUSED`;
+  - a function is called with the server's side of the connection.
+- **The server's side**, `{ read(), write(bytes), end(), reset(code?), buffered, drained(), closed }`:
+  - `read()` resolves with what the program wrote, and `null` after its `shutdown(SHUT_WR)` or `close()`. The program's write completes only once the server reads it, so a server that doesn't read holds the program back.
+  - `write` queues bytes for the program, and `buffered` counts those the kernel hasn't taken yet; `drained()` resolves when it has taken them all.
+  - `end()` is the server's end of stream.
+  - `reset(code)` (default `ECONNRESET`) breaks the connection both ways: writes the peer has not read fail, the program's next read fails with `ECONNRESET`, and its writes with `EPIPE`.
+  - `closed` resolves when the kernel closes the connection.
 
 ### Browser automation (CDP)
 

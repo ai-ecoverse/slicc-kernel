@@ -32,7 +32,12 @@ export type KernelErrno =
   | 'EISCONN'
   | 'ENOTCONN'
   | 'EROFS'
-  | 'EFBIG';
+  | 'EFBIG'
+  | 'EALREADY'
+  | 'ETIMEDOUT'
+  | 'ECONNABORTED'
+  | 'EHOSTUNREACH'
+  | 'ECONNRESET';
 
 export class KernelError extends Error {
   readonly code: KernelErrno;
