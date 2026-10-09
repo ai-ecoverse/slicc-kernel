@@ -1,32 +1,7 @@
 import { RangedFile } from '../fs/ranged.ts';
 import { inodeOf } from '../fs/types.ts';
+import { wasiErrno } from '../process/wasi-errno.ts';
 import type { SyncFsBridgeStat, SyncFsPosixBridge, SyncFsUsage } from './sync-fs-wire.ts';
-
-const ERRNO_BY_CODE: Readonly<Record<string, number>> = {
-  EACCES: 2,
-  EBADF: 8,
-  EBUSY: 10,
-  EEXIST: 20,
-  EFBIG: 22,
-  EINVAL: 28,
-  EIO: 29,
-  EISDIR: 31,
-  ELOOP: 32,
-  ENAMETOOLONG: 37,
-  ENOENT: 44,
-  ENOMEDIUM: 148,
-  ENOSPC: 51,
-  ENOSYS: 52,
-  ENOTCONN: 53,
-  ENOTDIR: 54,
-  ENOTEMPTY: 55,
-  EPERM: 63,
-  EROFS: 69,
-  ESTALE: 72,
-  ETIMEDOUT: 73,
-  EXDEV: 75,
-};
-const EIO = 29;
 
 const S_IFDIR = 0o040000;
 const S_IFREG = 0o100000;
@@ -175,7 +150,7 @@ function toErrno(Fs: LiveFsApi, err: unknown): Error {
     return err;
   }
   const code = (err as { code?: unknown })?.code;
-  const errno = typeof code === 'string' ? (ERRNO_BY_CODE[code] ?? EIO) : EIO;
+  const errno = wasiErrno(typeof code === 'string' ? code : 'EIO');
   return new Fs.ErrnoError(errno);
 }
 
@@ -221,7 +196,7 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
     try {
       call(fn);
     } catch (err) {
-      if ((err as { errno?: number }).errno !== ERRNO_BY_CODE.ENOSYS) throw err;
+      if ((err as { errno?: number }).errno !== wasiErrno('ENOSYS')) throw err;
     }
   }
 
@@ -308,9 +283,9 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
     const s = node.live;
     if (!s.orphan) {
       const st = statOf(node);
-      if (st.readonly) throw new Fs.ErrnoError(ERRNO_BY_CODE.EROFS);
+      if (st.readonly) throw new Fs.ErrnoError(wasiErrno('EROFS'));
       if (st.maxFile !== undefined && size > st.maxFile) {
-        throw new Fs.ErrnoError(ERRNO_BY_CODE.EFBIG);
+        throw new Fs.ErrnoError(wasiErrno('EFBIG'));
       }
     }
     const ranged = s.openCount > 0 ? rangedOf(node) : undefined;
@@ -432,7 +407,7 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
       } else if (Fs.isFile(mode)) {
         call(() => bridgeOf(parent).writeFile(path, new Uint8Array(0)));
       } else {
-        throw new Fs.ErrnoError(ERRNO_BY_CODE.EPERM);
+        throw new Fs.ErrnoError(wasiErrno('EPERM'));
       }
       const node = makeNode(parent, name, {
         isFile: Fs.isFile(mode),
@@ -500,7 +475,7 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
       });
     },
     readlink(node) {
-      if (!Fs.isLink(node.mode)) throw new Fs.ErrnoError(ERRNO_BY_CODE.EINVAL);
+      if (!Fs.isLink(node.mode)) throw new Fs.ErrnoError(wasiErrno('EINVAL'));
       return call(() => bridgeOf(node).readlink(liveNodePath(node)));
     },
   };
@@ -535,7 +510,7 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
       if ((stream.flags & 3) !== 0) {
         try {
           const st = statOf(stream.node);
-          if (st.readonly) throw new Fs.ErrnoError(ERRNO_BY_CODE.EROFS);
+          if (st.readonly) throw new Fs.ErrnoError(wasiErrno('EROFS'));
           stream.node.live.maxFile = st.maxFile;
         } catch (err) {
           if (stream.fd !== undefined) Fs.closeStream?.(stream.fd);
@@ -573,7 +548,7 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
     },
     read(stream, buffer, offset, length, position) {
       const node = stream.node;
-      if (Fs.isDir(node.mode)) throw new Fs.ErrnoError(ERRNO_BY_CODE.EISDIR);
+      if (Fs.isDir(node.mode)) throw new Fs.ErrnoError(wasiErrno('EISDIR'));
       const ranged = rangedOf(node);
       if (ranged) {
         const out = new Uint8Array(buffer.buffer, buffer.byteOffset + offset, Math.max(0, length));
@@ -589,11 +564,11 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
     },
     write(stream, buffer, offset, length, position) {
       const node = stream.node;
-      if (Fs.isDir(node.mode)) throw new Fs.ErrnoError(ERRNO_BY_CODE.EISDIR);
+      if (Fs.isDir(node.mode)) throw new Fs.ErrnoError(wasiErrno('EISDIR'));
       if (length <= 0) return 0;
       const s = node.live;
       const end = position + length;
-      if (s.maxFile !== undefined && end > s.maxFile) throw new Fs.ErrnoError(ERRNO_BY_CODE.EFBIG);
+      if (s.maxFile !== undefined && end > s.maxFile) throw new Fs.ErrnoError(wasiErrno('EFBIG'));
       const ranged = rangedOf(node);
       if (ranged) {
         const bytes = new Uint8Array(buffer.buffer, buffer.byteOffset + offset, length);
@@ -616,7 +591,7 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
         const s = stream.node.live;
         pos += rangedOf(stream.node)?.size() ?? (s.loaded ? s.len : statOf(stream.node).size);
       }
-      if (pos < 0) throw new Fs.ErrnoError(ERRNO_BY_CODE.EINVAL);
+      if (pos < 0) throw new Fs.ErrnoError(wasiErrno('EINVAL'));
       return pos;
     },
     fsync(stream) {
@@ -639,7 +614,7 @@ export function createLiveVfsPlugin(Fs: LiveFsApi): LiveVfsPlugin {
     stream_ops: streamOps,
     mount(mount) {
       const st = h.call(() => mount.opts.bridge.stat(mount.opts.root));
-      if (!st.isDirectory) throw new Fs.ErrnoError(ERRNO_BY_CODE.ENOTDIR);
+      if (!st.isDirectory) throw new Fs.ErrnoError(wasiErrno('ENOTDIR'));
       const root = h.makeNode(null, '/', st);
       mounts.add(mount);
       return root;
@@ -829,7 +804,7 @@ function guardRenames(Fs: LiveMountFsApi): void {
   if (!rename || Fs.sliccRename) return;
   Fs.sliccRename = true;
   Fs.rename = (from, to) => {
-    if (crosses(Fs, from, to)) throw new Fs.ErrnoError(ERRNO_BY_CODE.EXDEV);
+    if (crosses(Fs, from, to)) throw new Fs.ErrnoError(wasiErrno('EXDEV'));
     rename(from, to);
   };
 }

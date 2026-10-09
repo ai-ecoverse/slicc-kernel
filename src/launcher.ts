@@ -44,7 +44,7 @@ import type { ForkState, WasmProgram } from './kernel/protocol.ts';
 import { PtyTable } from './kernel/pty.ts';
 import { LoopbackNet } from './kernel/socket.ts';
 import { KernelTty } from './kernel/tty.ts';
-import type { VfsNodes } from './kernel/vfs-file.ts';
+import { VfsNodes } from './kernel/vfs-file.ts';
 import { type ServedFilesystem, serveFilesystem } from './mount/driver.ts';
 import {
   FSA_CAPABILITIES,
@@ -309,6 +309,7 @@ export class Launcher {
   private readonly fstabRetries: readonly number[];
   private readonly inserted = new Map<string, MediumHandle>();
   private readonly openFiles = new Set<VfsNodes>();
+  private readonly nodes: VfsNodes;
   private readonly held = new Set<HeldPaths>();
   private readonly processMounts: ProcessMountPolicy;
   private readonly booting = new AbortController();
@@ -345,6 +346,8 @@ export class Launcher {
     });
     enableCdp(this.net, this.cdp);
     this.fs = withCommandDirs(this.base, async () => new Set((await this.commands()).keys()));
+    this.nodes = new VfsNodes(this.fs);
+    this.openFiles.add(this.nodes);
     this.watchers.watch([this.modulesDir, this.pnpmHome], { recursive: true }, () => {
       this.catalog = undefined;
     });
@@ -541,6 +544,7 @@ export class Launcher {
       kill: (target, sig) => this.kill(target, sig),
       processes: () => ({ boot: this.boot, processes: this.list() }),
       openFiles: this.openFiles,
+      nodes: this.nodes,
       held: this.held,
       statfs: (path) => this.mounts.statfs(path),
       mounts: () => this.mounts.list(),

@@ -101,13 +101,16 @@ async function run(
       return done;
     case 'rename': {
       const to = fs.resolvePath(cwd, req.arg2 ?? '');
+      await entry.unlinking?.(to);
       await fs.rename(path, to);
       entry.renamed?.(path, to);
       return done;
     }
     case 'unlink':
       if ((await fs.lstat(path)).isDirectory) throw syncError('EISDIR', path);
+      await entry.unlinking?.(path);
       await fs.rm(path);
+      entry.unlinked?.(path);
       return done;
     case 'rmdir':
       if (!(await fs.lstat(path)).isDirectory) throw syncError('ENOTDIR', path);
