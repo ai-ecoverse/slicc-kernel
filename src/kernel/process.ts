@@ -930,6 +930,7 @@ export class WasmProcess {
     if (this.exited) return;
     this.exited = true;
     this.clearAlarm();
+    this.interrupt.abort();
     this.options.locks?.release(this.pid);
     this.asyncOps.close();
     for (const pid of this.children.pids()) this.options.onReap?.(pid);
