@@ -606,9 +606,10 @@ export class WasmProcess {
           json: this.fds.numbers().map((fd) => ({ fd, ...this.fdInfo(fd) })),
         };
       case 'fd-meta': {
-        const file = this.fds.get(req.fd).file;
-        if (!file.held) throw new KernelError('EBADF');
-        file.heldMeta = req.meta;
+        if (!this.fds.get(req.fd).file.held) throw new KernelError('EBADF');
+        const cloexec = this.fds.closesOnExec(req.fd);
+        this.fds.installAt(req.fd, heldFile(req.meta));
+        if (cloexec) this.fds.setCloseOnExec(req.fd);
         return { ok: true, kind: 'void' };
       }
       case 'fd-setfl':

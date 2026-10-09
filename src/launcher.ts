@@ -167,6 +167,7 @@ interface Target {
   env?: Record<string, string>;
   unset?: string[];
   imports?: string;
+  preopenRoot?: boolean;
 }
 
 interface Compiled {
@@ -264,6 +265,7 @@ function targetOf(command: Command): Target {
     ...(command.env ? { env: command.env } : {}),
     ...(command.unset ? { unset: command.unset } : {}),
     ...(command.imports ? { imports: command.imports } : {}),
+    ...(command.preopenRoot ? { preopenRoot: true } : {}),
   };
 }
 
@@ -524,6 +526,7 @@ export class Launcher {
       foreign,
       ...(names ? { names } : {}),
       ...(imports !== undefined ? { imports } : {}),
+      ...(target.preopenRoot ? { preopenRoot: true } : {}),
     };
   }
 

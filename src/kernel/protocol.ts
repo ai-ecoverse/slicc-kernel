@@ -19,6 +19,7 @@ export interface WasmProgram {
   foreign?: ForeignResults | undefined;
   names?: string;
   imports?: string;
+  preopenRoot?: boolean;
 }
 
 export interface ForkState {
