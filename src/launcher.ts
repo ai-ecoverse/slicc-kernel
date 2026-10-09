@@ -193,6 +193,7 @@ interface StartRequest {
   exec?: boolean;
   pgid?: number;
   ignored?: number;
+  decided?: Promise<boolean>;
 }
 
 const COMMAND = /^\/(?:usr\/)?bin\/([^/]+)$/;
@@ -201,6 +202,7 @@ const ENV_REFERENCE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
 const WASM_MAGIC = [0x00, 0x61, 0x73, 0x6d];
 const SHEBANG_MAX = 256;
 const NOT_FOUND = 127;
+const DECIDE_MS = 100;
 const INIT_PID = 1;
 const SHARED_DIRS = ['/tmp', '/home'];
 const encoder = new TextEncoder();
@@ -317,6 +319,8 @@ export class Launcher {
   private readonly fstabRetries: readonly number[];
   private readonly inserted = new Map<string, MediumHandle>();
   private readonly openFiles = new Set<VfsNodes>();
+  private readonly deciding = new Map<number, Set<(byParent: boolean) => void>>();
+  readonly identities = { asked: 0, timedOut: 0 };
   private readonly nodes: VfsNodes;
   private readonly held = new Set<HeldPaths>();
   private readonly processMounts: ProcessMountPolicy;
@@ -550,8 +554,19 @@ export class Launcher {
     }
     const pid = this.nextPid++;
     const terminal = req.fds.stdioTerminal();
+    const decided = req.decided ?? Promise.resolve(true);
+    const count = (byParent: boolean) => {
+      this.identities.asked++;
+      if (!byParent) this.identities.timedOut++;
+    };
+    let asked: Promise<void> | undefined;
     const handle = spawnWasmProcess({
       pid,
+      identity: async () => {
+        await (asked ??= decided.then(count));
+        return this.identityOf(pid);
+      },
+      onSyscall: () => this.decide(pid),
       ...(req.ignored ? { ignored: req.ignored } : {}),
       program: req.program,
       argv0: req.argv0,
@@ -628,7 +643,8 @@ export class Launcher {
     };
     const shown = (pid: number | undefined): number => {
       const member = pid === undefined ? undefined : members.get(pid);
-      return member ? rootOf(member).pid : INIT_PID;
+      const root = member && rootOf(member).pid;
+      return root !== undefined && this.running(root) ? root : INIT_PID;
     };
     const listed: ProcessInfo[] = [];
     for (const member of members.values()) {
@@ -658,7 +674,9 @@ export class Launcher {
         throw new SpawnError(await this.unrunnable(req.file, req.cwd));
       }
       const exec = req.exec ? { exec: true } : {};
+      const deciding = req.exec ? undefined : this.undecided(ppid);
       const handle = await this.launch(planned, {
+        ...(deciding ? { decided: deciding.promise } : {}),
         env: req.env,
         cwd: req.cwd,
         fds,
@@ -667,8 +685,44 @@ export class Launcher {
         ignored: this.ignoredBy(ppid),
         ...exec,
       });
+      deciding?.attach();
       return childHandle(handle);
     };
+  }
+
+  private undecided(ppid: number) {
+    const decided = Promise.withResolvers<boolean>();
+    return {
+      promise: decided.promise,
+      attach: () => {
+        const timer = setTimeout(() => decided.resolve(false), DECIDE_MS);
+        void decided.promise.then(() => clearTimeout(timer));
+        const waiting = this.deciding.get(ppid) ?? new Set();
+        waiting.add(decided.resolve);
+        this.deciding.set(ppid, waiting);
+      },
+    };
+  }
+
+  private identityOf(pid: number): { pid: number; ppid: number } {
+    const parent = this.jobs.shownParent(pid);
+    const alive = parent !== undefined && this.running(parent);
+    return { pid: this.jobs.shown(pid), ppid: alive ? parent : INIT_PID };
+  }
+
+  private running(shown: number): boolean {
+    return this.jobs
+      .list()
+      .some((member) => !this.zombies.has(member.pid) && this.jobs.shown(member.pid) === shown);
+  }
+
+  private decide(ppid: number): void {
+    const waiting = this.deciding.get(ppid);
+    if (!waiting) return;
+    this.deciding.delete(ppid);
+    setTimeout(() => {
+      for (const resolve of waiting) resolve(true);
+    }, 0);
   }
 
   private forker(ppid: number, parent: StartRequest): ChildForker {

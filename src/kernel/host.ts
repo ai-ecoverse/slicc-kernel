@@ -61,6 +61,8 @@ export interface WasmWorkerLike {
 export interface SpawnWasmOptions {
   pid: number;
   ignored?: number;
+  identity?: () => Promise<{ pid: number; ppid: number }>;
+  onSyscall?: () => void;
   program: WasmProgram;
   argv0: string;
   args: string[];
@@ -150,6 +152,8 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
   const header = new Int32Array(sab, 0, SAB_HEADER_I32);
   const process = new WasmProcess(opts.pid, opts.fds, {
     ...(opts.ignored ? { ignored: opts.ignored } : {}),
+    ...(opts.identity ? { identity: opts.identity } : {}),
+    ...(opts.onSyscall ? { onSyscall: opts.onSyscall } : {}),
     spawner: opts.spawner,
     forker: opts.forker,
     fs: opts.fs,
