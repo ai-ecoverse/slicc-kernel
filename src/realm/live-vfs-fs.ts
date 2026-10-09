@@ -670,6 +670,18 @@ export function flushLiveVfs(Fs: LiveFsApi, plugin: LiveVfsPlugin): void {
   }
 }
 
+function refresh(s: LiveNodeState): void {
+  if (s.dirty || s.orphan) return;
+  if (s.ranged?.pinnedVersion !== undefined) {
+    s.ranged.forget();
+    return;
+  }
+  s.data = undefined;
+  s.ranged = undefined;
+  s.len = 0;
+  s.loaded = false;
+}
+
 export function invalidateLiveVfs(Fs: LiveFsApi, plugin: LiveVfsPlugin): void {
   const table = Fs.nameTable ?? [];
   const drop: LiveFsNode[] = [];
@@ -681,12 +693,7 @@ export function invalidateLiveVfs(Fs: LiveFsApi, plugin: LiveVfsPlugin): void {
       s.listed = undefined;
       if (s.openCount === 0) {
         if (node !== node.mount.root && !node.mounted) drop.push(node);
-      } else if (!s.dirty && !s.orphan) {
-        s.data = undefined;
-        s.ranged = undefined;
-        s.len = 0;
-        s.loaded = false;
-      }
+      } else refresh(s);
     }
   }
   if (!Fs.hashRemoveNode) return;

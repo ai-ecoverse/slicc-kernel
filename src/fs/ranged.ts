@@ -30,6 +30,14 @@ export class RangedFile {
     return this.pages.changed;
   }
 
+  get pinnedVersion(): string | undefined {
+    return this.version;
+  }
+
+  forget(): void {
+    this.pages.reset(this.pages.length);
+  }
+
   size(): number {
     return this.pages.length;
   }

@@ -6,6 +6,7 @@ import { OpfsFs } from './fs/opfs.ts';
 import type { RunOptions, RunResult, Terminal, TerminalOptions } from './index.ts';
 import type { WasmWorkerLike } from './kernel/host.ts';
 import { Launcher } from './launcher.ts';
+import type { HostfsGrantHook } from './mount/hostfs.ts';
 import type { MountEntry, MountSpec } from './mount/mount-fs.ts';
 import type { ProcessMountPolicy } from './mount/syscall.ts';
 import { isMemoryRoot, memoryRoot } from './node/memory-root.ts';
@@ -50,6 +51,7 @@ export interface NodeKernelOptions {
   driverWorker?: string | URL;
   processMounts?: ProcessMountPolicy;
   fstabRetries?: readonly number[];
+  hostfs?: HostfsGrantHook;
   cdp?: CdpHook;
 }
 
@@ -143,6 +145,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     ...(transport ? { transport } : {}),
     ...(options.processMounts !== undefined ? { processMounts: options.processMounts } : {}),
     ...(options.fstabRetries ? { fstabRetries: options.fstabRetries } : {}),
+    ...(options.hostfs ? { hostfs: options.hostfs } : {}),
     ...(options.cdp ? { cdp: options.cdp } : {}),
   });
   await launcher.prepare();

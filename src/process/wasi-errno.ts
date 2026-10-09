@@ -1,48 +1,13 @@
+import { E } from './wasi/wasi-abi.ts';
+
 const WASI_ERRNO: Readonly<Partial<Record<string, number>>> = {
-  EACCES: 2,
-  EADDRINUSE: 3,
-  EADDRNOTAVAIL: 4,
-  EAFNOSUPPORT: 5,
-  EAGAIN: 6,
-  ECONNREFUSED: 14,
-  EEXIST: 20,
-  EINPROGRESS: 26,
-  EISCONN: 30,
-  ENETUNREACH: 40,
-  ENOTCONN: 53,
-  ENOTSOCK: 57,
-  EPROTONOSUPPORT: 66,
-
+  ...Object.fromEntries(Object.entries(E).map(([name, errno]) => [`E${name}`, errno])),
+  EWOULDBLOCK: E.AGAIN,
+  ENOTSUP: 138,
   EOPNOTSUPP: 138,
-  EBADF: 8,
-  EBUSY: 10,
-  ECHILD: 12,
-  EFAULT: 21,
-  EINTR: 27,
-  EINVAL: 28,
-  EIO: 29,
-  EMFILE: 33,
-  ENODEV: 43,
-  ENOENT: 44,
-  ENOEXEC: 45,
-  ENOSYS: 52,
-  ENOTDIR: 54,
-  ENOTTY: 59,
-  ENXIO: 60,
-  EPERM: 63,
-  EPIPE: 64,
-  ESPIPE: 70,
-  ESRCH: 71,
-  ETIMEDOUT: 73,
-
-  EFBIG: 22,
-  ENOSPC: 51,
-  EROFS: 69,
   ENOMEDIUM: 148,
 };
 
-const EIO = 29;
-
 export function wasiErrno(code: string): number {
-  return WASI_ERRNO[code] ?? EIO;
+  return WASI_ERRNO[code] ?? E.IO;
 }

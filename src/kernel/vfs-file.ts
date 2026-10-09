@@ -37,6 +37,8 @@ export interface VfsFileOptions {
 
   dirty?: boolean;
 
+  version?: string;
+
   truncate?: boolean;
 
   create?: boolean;
@@ -58,6 +60,7 @@ function within(path: string, root: string): boolean {
 export class VfsNode {
   private data: Uint8Array | undefined;
   private ranged: AsyncRangedFile | undefined;
+  private readonly pin: string | undefined;
   private length = 0;
   private dirty = false;
   private queue: Promise<unknown> = Promise.resolve();
@@ -87,9 +90,12 @@ export class VfsNode {
 
     orphaned: boolean = false,
 
-    dirty = false
+    dirty = false,
+
+    pin?: string
   ) {
     this.fs = fs;
+    this.pin = pin;
 
     this.path = path;
 
@@ -121,7 +127,7 @@ export class VfsNode {
     const st =
       io && !this.orphaned ? await this.fs.stat?.(this.path).catch(() => undefined) : undefined;
     if (io && st?.ranged) {
-      this.ranged = new AsyncRangedFile(io, this.path, st.size ?? 0, st.version);
+      this.ranged = new AsyncRangedFile(io, this.path, st.size ?? 0, this.pin ?? st.version);
       return this.ranged;
     }
     await this.load();
@@ -279,10 +285,10 @@ export class VfsNodes {
     this.fs = fs;
   }
 
-  open(path: string): VfsNode {
+  open(path: string, pin?: string): VfsNode {
     let node = this.byPath.get(path);
     if (!node) {
-      node = new VfsNode(this.fs, path);
+      node = new VfsNode(this.fs, path, undefined, false, false, pin);
       this.byPath.set(path, node);
     }
     node.opens++;
@@ -430,7 +436,7 @@ export function vfsFile(fs: VfsFileFs, opts: VfsFileOptions, nodes?: VfsNodes): 
       ? new VfsNode(fs, opts.path, opts.contents, opts.orphan === true, opts.dirty === true)
       : opts.contents !== undefined
         ? nodes.adopt(opts.path, opts.contents, opts.dirty === true)
-        : nodes.open(opts.path);
+        : nodes.open(opts.path, opts.version);
 
   let openError: { err: unknown } | undefined;
   const atOpen = (op: () => Promise<void>): void => {

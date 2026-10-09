@@ -67,6 +67,8 @@ export type WasmSyscall =
       truncate?: boolean;
 
       create?: boolean;
+
+      version?: string;
     }
   | { op: 'fd-pread'; fd: number; offset: number; max: number }
   | { op: 'fd-pwrite'; fd: number; offset: number; body: Uint8Array }
@@ -107,6 +109,8 @@ export type WasmSyscall =
       orphan?: boolean;
 
       dirty?: boolean;
+
+      version?: string;
     }
   | { op: 'fd-open-tty'; name?: string }
   | { op: 'tty-get'; fd: number }
@@ -532,6 +536,7 @@ export class WasmProcess {
         ...(req.orphan ? { orphan: true } : {}),
         ...(req.truncate ? { truncate: true } : {}),
         ...(req.create ? { create: true } : {}),
+        ...(req.version !== undefined ? { version: req.version } : {}),
       },
       this.nodes
     );
@@ -670,6 +675,7 @@ export class WasmProcess {
         ...(req.contents !== undefined ? { contents: req.contents } : {}),
         ...(req.orphan ? { orphan: true } : {}),
         ...(req.dirty ? { dirty: true } : {}),
+        ...(req.version !== undefined ? { version: req.version } : {}),
       },
       this.nodes
     );

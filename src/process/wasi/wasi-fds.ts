@@ -622,6 +622,7 @@ function promoteRequest(
     position: f.offset,
     ...(joins ? {} : { contents: f.buffer.contents() }),
     ...(orphan ? { orphan: true } : {}),
+    ...(!orphan && f.buffer.pin !== undefined ? { version: f.buffer.pin } : {}),
 
     ...(!joins && f.buffer.isDirty() ? { dirty: true } : {}),
   };
