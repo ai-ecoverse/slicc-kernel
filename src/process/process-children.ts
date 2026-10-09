@@ -77,6 +77,8 @@ export interface ProcessKernel {
 
   net?: SocketKernel;
 
+  hostname?: string;
+
   http?: HttpKernel;
 }
 

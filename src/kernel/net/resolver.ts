@@ -1,5 +1,11 @@
 import { KernelError } from '../fd-table.ts';
-import { HOST_LOOPBACK, HOST_LOOPBACK_ADDRESS } from './loopback-names.ts';
+import {
+  DEFAULT_HOSTNAME,
+  HOST_LOOPBACK,
+  HOST_LOOPBACK_ADDRESS,
+  HOSTNAME_ADDRESS,
+  ownNames,
+} from './loopback-names.ts';
 import { ipv4Bytes, ipv6Groups, type Routes } from './routes.ts';
 import { answerOf, type NetworkUplink, type ResolveFamily } from './uplink.ts';
 
@@ -20,9 +26,18 @@ export interface ResolverOptions {
   now?: () => number;
   timeoutMs?: number;
   log?: (message: string) => void;
+  hostname?: string;
 }
 
-export function hostsEntry(name: string): string | undefined {
+function loopbackName(name: string, own: readonly string[]): boolean {
+  return LOOPBACK_NAMES.has(name) || name.endsWith('.localhost') || own.includes(name);
+}
+
+export function hostsEntry(
+  name: string,
+  own: readonly string[] = ownNames(DEFAULT_HOSTNAME)
+): string | undefined {
+  if (own.includes(name)) return HOSTNAME_ADDRESS;
   if (LOOPBACK_NAMES.has(name) || name.endsWith('.localhost')) return '127.0.0.1';
   if (name === HOST_LOOPBACK) return HOST_LOOPBACK_ADDRESS.join('.');
   return ipv4Bytes(name) ? name : undefined;
@@ -34,6 +49,7 @@ export class Resolver {
   private readonly now: () => number;
   private readonly timeoutMs: number;
   private readonly log: (message: string) => void;
+  private readonly own: readonly string[];
   private readonly cache = new Map<string, Cached>();
   private readonly pending = new Map<string, Lookup>();
 
@@ -43,6 +59,7 @@ export class Resolver {
     this.now = options.now ?? Date.now;
     this.timeoutMs = options.timeoutMs ?? RESOLVE_TIMEOUT_MS;
     this.log = options.log ?? ((message) => console.warn(message));
+    this.own = ownNames(options.hostname ?? DEFAULT_HOSTNAME);
   }
 
   async resolve(
@@ -51,13 +68,13 @@ export class Resolver {
     blocking?: () => AbortSignal
   ): Promise<string[]> {
     const key = name.toLowerCase().replace(/\.$/, '');
-    const local = hostsEntry(key);
+    const local = hostsEntry(key, this.own);
     if (ipv6Groups(key)) {
       const v4 = family !== 6 && local ? [local] : [];
       return family === 4 ? v4 : [...v4, key];
     }
     if (local) {
-      const six = LOOPBACK_NAMES.has(key) || key.endsWith('.localhost') ? ['::1'] : [];
+      const six = loopbackName(key, this.own) ? ['::1'] : [];
       return family === 6 ? six : family === 4 ? [local] : [local, ...six];
     }
     if (!this.uplink || key === '') return [];

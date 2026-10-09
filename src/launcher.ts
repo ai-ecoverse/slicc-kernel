@@ -27,6 +27,7 @@ import { spawnWasmProcess, type WasmProcessHandle, type WasmWorkerLike } from '.
 import { LockTable } from './kernel/host-ops.ts';
 import { type JobMember, JobTable } from './kernel/jobs.ts';
 import { HttpHandles } from './kernel/net/http-syscalls.ts';
+import { DEFAULT_HOSTNAME, isHostname } from './kernel/net/loopback-names.ts';
 import {
   enableNetwork,
   kernelCa,
@@ -110,6 +111,7 @@ export interface LauncherOptions {
   fstabRetries?: readonly number[];
   cdp?: CdpHook;
   uplink?: NetworkUplink;
+  hostname?: string;
 }
 
 export interface PendingMedium {
@@ -310,6 +312,7 @@ export class Launcher {
   readonly uplink: NetworkUplink | undefined;
   readonly routes: Routes;
   readonly resolver: Resolver;
+  readonly hostname: string;
   readonly watchers = new FsWatchers();
   private readonly pnpmHome: string;
   readonly mounts: MountTable;
@@ -350,13 +353,16 @@ export class Launcher {
     this.pnpmHome = options.env?.PNPM_HOME ?? PNPM_HOME;
     this.modulesDir = options.modules ?? '/node_modules';
     this.cdp = new CdpHosts(options.cdp);
-    this.env = { ...networkEnv(), SLICC_CDP_URL: this.cdp.url, ...options.env };
+    const hostname = options.hostname ?? DEFAULT_HOSTNAME;
+    if (!isHostname(hostname)) throw new Error(`not a host name: ${String(hostname)}`);
+    this.hostname = hostname;
+    this.env = { ...networkEnv(hostname), SLICC_CDP_URL: this.cdp.url, ...options.env };
     this.ca = kernelCa(options.caStore ?? memoryCaStore());
     this.transport = options.transport ?? missingTransport();
     this.uplink = options.uplink;
     this.routes = new Routes(options.uplink?.traits.ipv6 === true);
     if (options.uplink?.routes) this.routes.set(options.uplink.routes);
-    this.resolver = new Resolver({ uplink: options.uplink, routes: this.routes });
+    this.resolver = new Resolver({ uplink: options.uplink, routes: this.routes, hostname });
     if (options.uplink) this.net.useUplink({ uplink: options.uplink, routes: this.routes });
     enableNetwork(this.net, {
       transport: this.transport,
@@ -535,8 +541,10 @@ export class Launcher {
     req: Omit<StartRequest, 'program' | 'argv0' | 'args'>
   ): Promise<WasmProcessHandle> {
     const { target, args } = planned;
-    const env = { ...expandDefaults(target.env, { ...req.env, cwd: req.cwd }), ...req.env };
+    const seen = { ...req.env, HOSTNAME: this.hostname, cwd: req.cwd };
+    const env = { ...expandDefaults(target.env, seen), ...req.env };
     for (const key of target.unset ?? []) delete env[key];
+    env.HOSTNAME = this.hostname;
     let program: WasmProgram;
     try {
       program = await this.program(target, env);

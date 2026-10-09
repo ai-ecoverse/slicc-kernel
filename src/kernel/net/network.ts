@@ -1,6 +1,12 @@
 import type { KernelFs } from '../../fs/types.ts';
 import type { LoopbackNet } from '../socket.ts';
-import { HOST_LOOPBACK, PAGE_LOOPBACK, PAGE_LOOPBACK_URL } from './loopback-names.ts';
+import {
+  DEFAULT_HOSTNAME,
+  HOST_LOOPBACK,
+  ownNames,
+  PAGE_LOOPBACK,
+  PAGE_LOOPBACK_URL,
+} from './loopback-names.ts';
 import { REALM_PROXY_PORT, RealmProxy } from './proxy-service.ts';
 import {
   type CaRecord,
@@ -29,14 +35,15 @@ const CA_OWNER = 'slicc-kernel';
 
 export const CA_DB = 'slicc-kernel-ca';
 
-export function networkEnv(): Record<string, string> {
+export function networkEnv(hostname: string = DEFAULT_HOSTNAME): Record<string, string> {
+  const bypass = [NO_PROXY, ...ownNames(hostname).filter((n) => n !== 'wasmer.sh')].join(',');
   return {
     http_proxy: PROXY_URL,
     https_proxy: PROXY_URL,
     HTTP_PROXY: PROXY_URL,
     HTTPS_PROXY: PROXY_URL,
-    no_proxy: NO_PROXY,
-    NO_PROXY: NO_PROXY,
+    no_proxy: bypass,
+    NO_PROXY: bypass,
     SSL_CERT_FILE: CA_PATH,
     CURL_CA_BUNDLE: CA_PATH,
     GIT_SSL_CAINFO: CA_PATH,

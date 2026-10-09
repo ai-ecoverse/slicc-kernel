@@ -1,4 +1,5 @@
 import type { DeviceMeta, PollState } from '../kernel/fd-table.ts';
+import { hostnameOf } from '../kernel/net/loopback-names.ts';
 import type { MountLine, ProcessListing } from '../kernel/proc-info.ts';
 import type { ForkState, InheritedFd, WasmProcessInitMsg } from '../kernel/protocol.ts';
 import { SIG } from '../kernel/signals.ts';
@@ -489,6 +490,7 @@ export async function runWasmProcess(
     stdioPromoter: () => vfsPromoter(running.FS, sys, streams, livePath),
   });
   running.sliccKernel.http = createHttpKernel(transport);
+  running.sliccKernel.hostname = hostnameOf(init.env);
   running.sliccKernel.net = createSocketKernel({
     transport,
     Fs: running.FS,
