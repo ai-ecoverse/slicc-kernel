@@ -4,7 +4,7 @@ import { META_DB, type MetaStore } from './fs/meta.ts';
 import { OpfsFs } from './fs/opfs.ts';
 import { dialSocket, serveSocket } from './kernel/dial.ts';
 import type { WasmWorkerLike } from './kernel/host.ts';
-import { caStore } from './kernel/net/network.ts';
+import { CA_DB, caStore } from './kernel/net/network.ts';
 import { RemoteTransport, type TransportReply } from './kernel/net/remote-transport.ts';
 import type { RealmTransportTraits } from './kernel/net/transport.ts';
 import { SIG } from './kernel/signals.ts';
@@ -33,6 +33,7 @@ export interface InitRequest {
   env?: Record<string, string>;
   metadata?: string | false;
   media?: string | false;
+  ca?: string | false;
   transport?: RealmTransportTraits;
   hostfs?: boolean;
   processMounts?: boolean | 'ask';
@@ -116,6 +117,10 @@ function act(session: TerminalSession, req: TerminalAction): void {
 
 function dirsChannel(name: string | false): string | undefined {
   return name === false ? undefined : `slicc-kernel-dirs:${name}`;
+}
+
+function caDb(req: InitRequest): string | false {
+  return req.ca ?? (req.metadata ? `${req.metadata}-ca` : CA_DB);
 }
 
 async function stores(
@@ -218,7 +223,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
         onMountPending: (medium) => port.postMessage({ medium }),
         ...(req.hostfs ? { hostfs: askGrant } : {}),
         ...mountPolicy(req.processMounts),
-        caStore: caStore(deps.metadata ? name : false),
+        caStore: caStore(deps.metadata ? caDb(req) : false),
       });
       await started.prepare();
       return started;

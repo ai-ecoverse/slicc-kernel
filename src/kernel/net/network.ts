@@ -27,6 +27,8 @@ const NO_PROXY = 'localhost,.localhost,127.0.0.1,127.0.0.0/8';
 
 const CA_OWNER = 'slicc-kernel';
 
+export const CA_DB = 'slicc-kernel-ca';
+
 export function networkEnv(): Record<string, string> {
   return {
     http_proxy: PROXY_URL,
@@ -63,8 +65,8 @@ export function memoryCaStore(): CaStore {
   };
 }
 
-export function caStore(metadata: string | false): CaStore {
-  return metadata === false ? memoryCaStore() : indexedDbCaStore(`${metadata}-ca`);
+export function caStore(name: string | false): CaStore {
+  return name === false ? memoryCaStore() : indexedDbCaStore(name);
 }
 
 function base64(bytes: Uint8Array): string {
@@ -114,12 +116,20 @@ export function kernelTlsEngine(load: () => Promise<TlsEngineModule>): () => Pro
   return () => loadTlsEngine(load);
 }
 
+const CERTIFICATE = /-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g;
+
+export const CA_BUNDLE_MAX = 16;
+
 export async function writeCaFile(fs: KernelFs, ca: () => Promise<RealmCa>): Promise<void> {
   const { pem } = await ca();
-  const current = (await fs.exists(CA_PATH)) ? await fs.readFile(CA_PATH) : undefined;
-  if (current === pem) return;
+  const own = pem.trim();
+  const current = (await fs.exists(CA_PATH)) ? await fs.readFile(CA_PATH) : '';
+  const all = current.match(CERTIFICATE) ?? [];
+  const others = all.filter((cert) => cert !== own);
+  if (others.length < all.length) return;
+  const bundle = [...others, own].slice(-CA_BUNDLE_MAX);
   await fs.mkdir(CA_PATH.slice(0, CA_PATH.lastIndexOf('/')), { recursive: true });
-  await fs.writeFile(CA_PATH, pem);
+  await fs.writeFile(CA_PATH, `${bundle.join('\n')}\n`);
 }
 
 export function enableNetwork(
