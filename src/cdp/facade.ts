@@ -26,11 +26,14 @@ import {
 const MAX_HEAD = 64 * 1024;
 const LIST_TIMEOUT = 10000;
 
+const CLOSE_WAIT_MS = 1000;
+
 export interface CdpFacadeOptions {
   net: LoopbackNet;
   hosts: CdpHosts;
   port?: number;
   maxMessage?: number;
+  closeWaitMs?: number;
   listTimeout?: number;
 }
 
@@ -195,7 +198,11 @@ export class CdpFacade {
   ): Promise<void> {
     const accept = await acceptKey(req.headers);
     const host = await this.host(runtime);
-    await new Relay(conn, incoming, host, this.options.maxMessage ?? MAX_MESSAGE, this.stop.signal)
+    const limits = {
+      max: this.options.maxMessage ?? MAX_MESSAGE,
+      closeWaitMs: this.options.closeWaitMs ?? CLOSE_WAIT_MS,
+    };
+    await new Relay(conn, incoming, host, limits, this.stop.signal)
       .start(switchingHead(accept))
       .finally(() => host.close());
   }
@@ -209,19 +216,21 @@ class Relay {
   private readonly incoming: Incoming;
   private readonly host: CdpConnection;
   private readonly max: number;
+  private readonly closeWaitMs: number;
   private readonly stop: AbortSignal;
 
   constructor(
     conn: KernelSocket,
     incoming: Incoming,
     host: CdpConnection,
-    max: number,
+    limits: { max: number; closeWaitMs: number },
     stop: AbortSignal
   ) {
     this.conn = conn;
     this.incoming = incoming;
     this.host = host;
-    this.max = max;
+    this.max = limits.max;
+    this.closeWaitMs = limits.closeWaitMs;
     this.stop = stop;
   }
 
@@ -250,8 +259,15 @@ class Relay {
         void this.end(CLOSE.tooBig, `a message is over ${this.max} bytes`);
       else void this.send(frame(OP_TEXT, bytes));
     };
-    await Promise.race([this.pump(), hostGone]);
+    const pumping = this.pump();
+    await Promise.race([pumping, hostGone]);
     await this.writes;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const waited = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, this.closeWaitMs);
+    });
+    await Promise.race([pumping, waited]);
+    clearTimeout(timer);
   }
 
   private async pump(): Promise<void> {

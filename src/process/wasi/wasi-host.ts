@@ -507,7 +507,8 @@ export class WasiHost {
       try {
         return this.o.kernel.sys.write(fd, data, { nonblock: e.nonblock });
       } catch (err) {
-        if ((err as { code?: string }).code === 'EPIPE') throw new WasiExit(SIGPIPE_EXIT);
+        const broken = (err as { code?: string }).code === 'EPIPE';
+        if (broken && this.fds.kind(fd, e) !== 'socket') throw new WasiExit(SIGPIPE_EXIT);
         throw err;
       }
     }
