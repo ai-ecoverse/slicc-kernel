@@ -30,6 +30,7 @@ import {
   type StateListener,
   WasmProcess,
   type WasmProcessOptions,
+  type WasmSyscall,
 } from './process.ts';
 import {
   type ForkState,
@@ -62,7 +63,7 @@ export interface SpawnWasmOptions {
   pid: number;
   ignored?: number;
   identity?: () => Promise<{ pid: number; ppid: number }>;
-  onSyscall?: () => void;
+  onSyscall?: (req: WasmSyscall) => void;
   program: WasmProgram;
   argv0: string;
   args: string[];

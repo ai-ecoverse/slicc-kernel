@@ -45,6 +45,7 @@ import type { NetworkUplink } from './kernel/net/uplink.ts';
 import type { ProcessInfo } from './kernel/proc-info.ts';
 import type { ForkState, WasmProgram } from './kernel/protocol.ts';
 import { PtyTable } from './kernel/pty.ts';
+import { SettlingChildren } from './kernel/settling.ts';
 import { LoopbackNet } from './kernel/socket.ts';
 import { KernelTty } from './kernel/tty.ts';
 import { keepingOpen, VfsNodes } from './kernel/vfs-file.ts';
@@ -300,7 +301,12 @@ export class Launcher {
   private readonly described = new Map<number, Pick<ProcessInfo, 'argv' | 'tty' | 'started'>>();
   private readonly jobs = new JobTable();
   private readonly locks = new LockTable();
-  private readonly ptys = new PtyTable((tty, sig) => this.jobs.signalOwnedForeground(tty, sig));
+  private readonly settling = new SettlingChildren((pid) => this.jobs.pgidOf(pid));
+  private readonly ptys = new PtyTable((tty, sig) =>
+    this.settling.deliver(this.jobs.tcgetpgrp(tty, 0), () =>
+      this.jobs.signalOwnedForeground(tty, sig)
+    )
+  );
   readonly net = new LoopbackNet();
   readonly cdp: CdpHosts;
   private readonly ca: () => Promise<RealmCa>;
@@ -566,7 +572,10 @@ export class Launcher {
         await (asked ??= decided.then(count));
         return this.identityOf(pid);
       },
-      onSyscall: () => this.decide(pid),
+      onSyscall: (call) => {
+        this.decide(pid);
+        this.settling.syscall(pid, call.op);
+      },
       ...(req.ignored ? { ignored: req.ignored } : {}),
       program: req.program,
       argv0: req.argv0,
@@ -599,6 +608,7 @@ export class Launcher {
       ...this.shownIds(req),
     });
     this.processes.set(pid, handle);
+    if (req.ppid !== undefined) this.settling.started(pid, req.ppid);
     this.jobs.add(pid, req.ppid, (sig) => handle.signal(sig), terminal);
     if (req.exec && req.ppid !== undefined) this.jobs.exec(req.ppid, pid, true);
     if (req.pgid !== undefined) this.jobs.join(pid, req.pgid);
@@ -609,6 +619,7 @@ export class Launcher {
     });
     void handle.exited.then(() => {
       this.processes.delete(pid);
+      this.settling.settled(pid);
       if (req.ppid === undefined || this.orphans.delete(pid)) this.forget(pid);
       else this.zombies.add(pid);
     });
@@ -953,7 +964,10 @@ export class Launcher {
     let leader = 0;
     const tty: KernelTty = new KernelTty(
       { write: (bytes) => options.onData(bytes.slice()) },
-      (sig) => this.jobs.signalForeground(tty, leader, sig)
+      (sig) =>
+        this.settling.deliver(this.jobs.tcgetpgrp(tty, leader), () =>
+          this.jobs.signalForeground(tty, leader, sig)
+        )
     );
     tty.name = `/dev/tty${++this.terminals}`;
     tty.setSize(options.cols ?? 80, options.rows ?? 24);

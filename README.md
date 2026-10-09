@@ -64,7 +64,7 @@ Starts `argv` as the session leader on a new terminal and resolves once it is ru
 | --- | --- |
 | `pid` | the session leader's pid |
 | `onData` | the output listener; output that arrives while it is `null` is kept and delivered when one is set |
-| `write(data)` | types a string or bytes into the terminal; with `ISIG` on, `^C`, `^Z` and `^\` signal the foreground process group |
+| `write(data)` | types a string or bytes into the terminal; with `ISIG` on, `^C`, `^Z` and `^\` signal the foreground process group. A key typed while a child of that group is still setting up is held until the child has finished, then sent to the group in the foreground at that point. Setting up means the child's calls before its first other one: `setpgid`, `tcsetpgrp` and signal masks. The hold ends 250 ms after the child's first call at the latest. So `^Z` right after a command line stops the new job, as it does on Linux, where that setup takes microseconds rather than a worker start. |
 | `resize(cols, rows)` | sets the window size (`TIOCGWINSZ`) and sends `SIGWINCH` to the foreground process group |
 | `signal(name)` | sends a signal (`'SIGINT'`, `'SIGTSTP'`, `'SIGQUIT'`, `'SIGHUP'`, …) to the foreground process group, regardless of termios |
 | `exited` | resolves with the session leader's exit status (`128 + n` if killed by signal `n`) |
