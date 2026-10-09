@@ -1,4 +1,3 @@
-import { normalizePath } from '../fs/types.ts';
 import { KernelError, OpenFile } from './fd-table.ts';
 
 export interface VfsFileFs {
@@ -315,14 +314,45 @@ function parentOf(path: string): string {
   return path.slice(0, path.lastIndexOf('/')) || '/';
 }
 
-async function danglingTarget(fs: VfsFileFs, path: string): Promise<string> {
-  let at = path;
-  for (let hops = 0; hops < MAX_LINKS; hops++) {
-    const link = await fs.readlink?.(at).catch(() => undefined);
-    if (link === undefined) return at;
-    at = normalizePath(link.startsWith('/') ? link : `${parentOf(at)}/${link}`);
+async function linkOf(fs: VfsFileFs, path: string): Promise<string | undefined> {
+  return fs.readlink?.(path).catch(() => undefined);
+}
+
+async function realDir(fs: VfsFileFs, dir: string): Promise<string> {
+  const queue = dir.split('/').filter(Boolean);
+  let at = '/';
+  let hops = 0;
+  while (queue.length > 0) {
+    const part = queue.shift() as string;
+    if (part === '.') continue;
+    if (part === '..') {
+      at = parentOf(at);
+      continue;
+    }
+    const next = at === '/' ? `/${part}` : `${at}/${part}`;
+    const link = hops < MAX_LINKS ? await linkOf(fs, next) : undefined;
+    if (link === undefined) {
+      at = next;
+      continue;
+    }
+    hops++;
+    queue.unshift(...link.split('/').filter(Boolean));
+    if (link.startsWith('/')) at = '/';
   }
   return at;
+}
+
+async function targetDir(fs: VfsFileFs, path: string): Promise<string> {
+  let dir = await realDir(fs, parentOf(path));
+  let name = path.slice(path.lastIndexOf('/') + 1);
+  for (let hops = 0; hops < MAX_LINKS; hops++) {
+    const link = await linkOf(fs, dir === '/' ? `/${name}` : `${dir}/${name}`);
+    if (link === undefined) return dir;
+    const target = link.startsWith('/') ? link : `${dir}/${link}`;
+    dir = await realDir(fs, parentOf(target));
+    name = target.slice(target.lastIndexOf('/') + 1);
+  }
+  return dir;
 }
 
 export async function refuseReadonly(
@@ -341,7 +371,7 @@ export async function refuseReadonly(
     });
   const own = await stat(path);
   if (own && !writes) return;
-  const st = own ?? (await stat(parentOf(await danglingTarget(fs, path))));
+  const st = own ?? (await stat(await targetDir(fs, path)));
   if (st?.readonly) throw new KernelError('EROFS');
 }
 
