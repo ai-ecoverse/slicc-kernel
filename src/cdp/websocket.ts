@@ -14,7 +14,9 @@ export const CLOSE = {
   error: 1011,
 } as const;
 
-const OP = { continuation: 0, text: 1, binary: 2, close: 8, ping: 9, pong: 10 } as const;
+export const OP_TEXT = 1;
+
+const OP = { continuation: 0, text: OP_TEXT, binary: 2, close: 8, ping: 9, pong: 10 } as const;
 
 export interface Sink {
   write(bytes: Uint8Array, signal?: AbortSignal): Promise<unknown>;
@@ -72,10 +74,6 @@ export function frame(opcode: number, payload: Uint8Array): Uint8Array {
   }
   out.set(payload, size);
   return out;
-}
-
-export function textFrame(text: string): Uint8Array {
-  return frame(OP.text, new TextEncoder().encode(text));
 }
 
 export function closeFrame(code: number, reason = ''): Uint8Array {

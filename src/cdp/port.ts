@@ -40,7 +40,7 @@ export function serveCdpPort(
     }
   });
   port.start?.();
-  hook(request).then(
+  new Promise<CdpConnection>((resolve) => resolve(hook(request))).then(
     (opened) => {
       conn = opened;
       if (done) return opened.close();

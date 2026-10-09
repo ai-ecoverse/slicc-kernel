@@ -53,7 +53,7 @@ export class CdpHosts {
     } catch (e) {
       throw new HttpError(502, `CDP host: ${e instanceof Error ? e.message : String(e)}`);
     }
-    if (this.closed) {
+    if (this.closed || !(entry === this.embedder || this.clients.includes(entry))) {
       conn.close();
       throw new HttpError(503, NO_CDP_HOST);
     }

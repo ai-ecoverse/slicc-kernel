@@ -13,11 +13,12 @@ import {
   acceptKey,
   CLOSE,
   closeFrame,
+  frame,
   isUpgrade,
   MAX_MESSAGE,
+  OP_TEXT,
   pongFrame,
   switchingHead,
-  textFrame,
   WsError,
   WsReader,
 } from './websocket.ts';
@@ -243,7 +244,11 @@ class Relay {
       };
     });
     this.host.onmessage = (message) => {
-      if (!this.ended) void this.send(textFrame(message));
+      if (this.ended) return;
+      const bytes = new TextEncoder().encode(message);
+      if (bytes.length > this.max)
+        void this.end(CLOSE.tooBig, `a message is over ${this.max} bytes`);
+      else void this.send(frame(OP_TEXT, bytes));
     };
     await Promise.race([this.pump(), hostGone]);
     await this.writes;
