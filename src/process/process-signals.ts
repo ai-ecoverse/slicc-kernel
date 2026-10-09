@@ -1,7 +1,7 @@
 import { SIG, sigbit, signalsIn } from '../kernel/signals.ts';
 import type { SyncFsResult } from '../realm/sync-fs-wire.ts';
 import type { SyncSabTransport } from '../realm/sync-sab-bridge.ts';
-import { SAB_I_SIGNALS, SAB_I_TIMERS } from '../realm/sync-sab-wire.ts';
+import { SAB_I_KILLED, SAB_I_SIGNALS, SAB_I_TIMERS } from '../realm/sync-sab-wire.ts';
 
 export interface SignalHooks {
   masks(): { caught: number; ignored: number; restart: number } | null;
@@ -9,6 +9,8 @@ export interface SignalHooks {
   raise(sig: number): void;
 
   timer?(which: number): void;
+
+  killed?(code: number): void;
 }
 
 export class SignalGate {
@@ -20,6 +22,8 @@ export class SignalGate {
   private depth = 0;
 
   private reporting = false;
+
+  private unwinding = false;
 
   private readonly raw: SyncSabTransport;
 
@@ -81,6 +85,11 @@ export class SignalGate {
   }
 
   deliver(): void {
+    const killed = Atomics.load(this.header, SAB_I_KILLED);
+    if (killed !== 0 && !this.unwinding && this.hooks.killed) {
+      this.unwinding = true;
+      this.hooks.killed(killed);
+    }
     const timers = Atomics.exchange(this.header, SAB_I_TIMERS, 0);
     const pending = Atomics.exchange(this.header, SAB_I_SIGNALS, 0);
 

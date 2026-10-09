@@ -13,8 +13,14 @@ export class WasiSignals implements SignalHooks {
   private delivering: number | undefined;
 
   private readonly fallBack: (sig: number) => void;
-  constructor(fallBack: (sig: number) => void) {
+  private readonly onKilled: ((code: number) => void) | undefined;
+  constructor(fallBack: (sig: number) => void, onKilled?: (code: number) => void) {
     this.fallBack = fallBack;
+    this.onKilled = onKilled;
+  }
+
+  killed(code: number): void {
+    this.onKilled?.(code);
   }
 
   bind(exports: WebAssembly.Exports): void {

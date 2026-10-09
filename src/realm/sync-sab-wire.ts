@@ -23,6 +23,8 @@ export const SAB_I_TOTAL_HI = 11;
 
 export const SAB_I_OFFSET_HI = 12;
 
+export const SAB_I_KILLED = 13;
+
 const U32 = 2 ** 32;
 
 export function storeU53(header: Int32Array, lo: number, hi: number, value: number): void {

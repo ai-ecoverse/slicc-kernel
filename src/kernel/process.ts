@@ -305,6 +305,8 @@ export function isWasmSyscall(req: object): req is WasmSyscall {
 
 const MAX_READ = 1024 * 1024;
 
+const DYING: SyncFsResult = { ok: false, errno: 'EINTR', message: 'the process is being killed' };
+
 const HOSTS_ONLY = new Resolver({ routes: new Routes() });
 
 export interface WasmProcessOptions {
@@ -373,6 +375,8 @@ export class WasmProcess {
 
   private interrupt = new AbortController();
 
+  private dying = false;
+
   private execChild: number | undefined;
 
   execTermsig: number | undefined;
@@ -425,7 +429,8 @@ export class WasmProcess {
   signal(sig: number): SignalOutcome {
     if (this.execChild !== undefined) {
       void Promise.resolve(this.options.kill?.(this.execChild, sig)).catch(() => undefined);
-      return sig === SIG.KILL ? 'terminate' : 'forward';
+      if (sig === SIG.KILL) this.wake?.();
+      return 'forward';
     }
     if (sig === SIG.KILL) return 'terminate';
 
@@ -474,8 +479,10 @@ export class WasmProcess {
     this.options.onSyscall?.(req);
     for (;;) {
       await this.resumed;
+      if (this.dying) return DYING;
       const stops = this.stops;
       const result = await this.dispatch(req);
+      if (this.dying) return DYING;
 
       const restart = !result.ok && result.errno === 'EINTR' && this.stops !== stops;
       if (restart && !this.options.hasPending?.()) continue;
@@ -483,6 +490,13 @@ export class WasmProcess {
       await this.resumed;
       return result;
     }
+  }
+
+  die(): void {
+    if (this.dying) return;
+    this.dying = true;
+    this.interrupt.abort();
+    this.wake?.();
   }
 
   private async dispatch(req: WasmSyscall): Promise<SyncFsResult> {
