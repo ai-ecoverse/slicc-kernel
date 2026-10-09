@@ -1,5 +1,6 @@
 import type { KernelFs } from '../../fs/types.ts';
 import type { LoopbackNet } from '../socket.ts';
+import { HOST_LOOPBACK, PAGE_LOOPBACK, PAGE_LOOPBACK_URL } from './loopback-names.ts';
 import { REALM_PROXY_PORT, RealmProxy } from './proxy-service.ts';
 import {
   type CaRecord,
@@ -37,6 +38,9 @@ export function networkEnv(): Record<string, string> {
     SSL_CERT_FILE: CA_PATH,
     CURL_CA_BUNDLE: CA_PATH,
     GIT_SSL_CAINFO: CA_PATH,
+    SLICC_HOST_LOOPBACK: HOST_LOOPBACK,
+    SLICC_PAGE_LOOPBACK: PAGE_LOOPBACK,
+    SLICC_PAGE_LOOPBACK_URL: PAGE_LOOPBACK_URL,
   };
 }
 

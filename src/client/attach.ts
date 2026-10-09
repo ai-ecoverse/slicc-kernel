@@ -7,6 +7,8 @@ import type {
   RealmTransportResponse,
 } from '../kernel/net/transport.ts';
 import type { MountEntry, MountSpec } from '../mount/mount-fs.ts';
+import { type DialledSocket, type DialOptions, dialStream } from './dial-stream.ts';
+import { type LoopbackFetchOptions, loopbackFetch } from './loopback-fetch.ts';
 import {
   type ClientCall,
   type ClientReply,
@@ -132,6 +134,8 @@ export interface KernelClient {
   mounts(): Promise<MountEntry[]>;
   kill(pid: number, signal?: string): Promise<void>;
   fetch(request: ClientFetchRequest): Promise<RealmTransportResponse>;
+  dial(options: DialOptions): Promise<DialledSocket>;
+  loopbackFetch(input: RequestInfo | URL, options: LoopbackFetchOptions): Promise<Response>;
   readonly fs: ClientFs;
   close(options?: { kill?: boolean }): Promise<void>;
 }
@@ -271,6 +275,11 @@ class Channel {
     if (reply.error !== undefined) call.reject(new KernelCallError(reply.error, reply.code));
     else call.resolve(reply.result);
   }
+}
+
+async function dialOn(channel: Channel, { port, host }: DialOptions): Promise<DialledSocket> {
+  const req = { op: 'dial' as const, port, ...(host ? { host } : {}) };
+  return dialStream((await since(channel, 4, 'dial', () => channel.call(req))) as MessagePort);
 }
 
 async function spawnOn(
@@ -481,6 +490,8 @@ export async function attachKernel(
       const { signal, ...rest } = req;
       return transport.fetch({ ...rest, signal: signal ?? new AbortController().signal });
     },
+    dial: (options) => dialOn(channel, options),
+    loopbackFetch: (input, options) => loopbackFetch((o) => dialOn(channel, o), input, options),
     fs: fsOn(channel),
     async close(o = {}) {
       if (channel.failure) return;

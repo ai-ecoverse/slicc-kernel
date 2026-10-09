@@ -2,6 +2,7 @@ import { type LockManagerLike, locksOf } from './client/protocol.ts';
 import { type ServedClient, serveClient } from './client/serve-client.ts';
 import { META_DB, type MetaStore } from './fs/meta.ts';
 import { OpfsFs } from './fs/opfs.ts';
+import { dialSocket, serveSocket } from './kernel/dial.ts';
 import type { WasmWorkerLike } from './kernel/host.ts';
 import { caStore } from './kernel/net/network.ts';
 import { RemoteTransport, type TransportReply } from './kernel/net/remote-transport.ts';
@@ -70,13 +71,21 @@ export type MountRequest =
   | { id: number; op: 'mounts' }
   | { id: number; op: 'insert'; target: string; source?: string; handle: MediumHandle };
 
+export interface DialRequest {
+  id: number;
+  op: 'dial';
+  port: number;
+  host?: string;
+}
+
 export type KernelRequest =
   | InitRequest
   | RunRequest
   | OpenTerminalRequest
   | TerminalRequest
   | ConnectRequest
-  | MountRequest;
+  | MountRequest
+  | DialRequest;
 
 type WithoutId<T> = T extends unknown ? Omit<T, 'id'> : never;
 
@@ -167,6 +176,13 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
     return port2;
   }
 
+  async function dial(req: DialRequest): Promise<MessagePort> {
+    const socket = dialSocket((await ready()).net, req.port, req.host);
+    const { port1, port2 } = new MessageChannel();
+    serveSocket(socket, port1);
+    return port2;
+  }
+
   async function ready(): Promise<Launcher> {
     if (!launcher) throw new Error('the kernel is not initialized');
     return launcher;
@@ -223,6 +239,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
     if (req.op === 'init') return init(req);
     if (req.op === 'open-terminal') return terminal(req);
     if (req.op === 'connect') return connect();
+    if (req.op === 'dial') return dial(req);
     if (req.op === 'mount' || req.op === 'umount' || req.op === 'mounts' || req.op === 'insert')
       return mountOp(req);
     if (req.op === 'terminal') {

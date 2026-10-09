@@ -1,3 +1,10 @@
+import {
+  type DialledSocket,
+  type DialOptions,
+  dialStream,
+  errorWithCode,
+} from './client/dial-stream.ts';
+import { type LoopbackFetchOptions, loopbackFetch } from './client/loopback-fetch.ts';
 import type { TransportCall } from './kernel/net/remote-transport.ts';
 import type { PendingMedium } from './launcher.ts';
 import type { MediumHandle } from './mount/fsa.ts';
@@ -24,6 +31,8 @@ export {
   type SpawnOptions,
   type WatchChange,
 } from './client/attach.ts';
+export type { DialledSocket, DialOptions } from './client/dial-stream.ts';
+export type { LoopbackFetchOptions } from './client/loopback-fetch.ts';
 export {
   checkLocalProxy,
   type LocalProxyCheckOptions,
@@ -95,6 +104,8 @@ export interface Kernel {
   run(argv: string[], options?: RunOptions): Promise<RunResult>;
   openTerminal(argv: string[], options?: TerminalOptions): Promise<Terminal>;
   connect(): Promise<MessagePort>;
+  dial(options: DialOptions): Promise<DialledSocket>;
+  loopbackFetch(input: RequestInfo | URL, options: LoopbackFetchOptions): Promise<Response>;
   mount(spec: MountSpec): Promise<MountEntry>;
   umount(target: string): Promise<void>;
   mounts(): Promise<MountEntry[]>;
@@ -156,6 +167,18 @@ const ISOLATION =
 function streamer(callback: ((text: string) => void) | undefined) {
   const decoder = new TextDecoder();
   return (bytes: Uint8Array) => callback?.(decoder.decode(bytes, { stream: true }));
+}
+
+function dialer(call: (req: KernelCall) => Promise<unknown>) {
+  return async ({ port, host }: DialOptions): Promise<DialledSocket> => {
+    try {
+      return dialStream(
+        (await call({ op: 'dial', port, ...(host ? { host } : {}) })) as MessagePort
+      );
+    } catch (err) {
+      throw errorWithCode((err as Error).message);
+    }
+  };
 }
 
 export async function createKernel(options: KernelOptions = {}): Promise<Kernel> {
@@ -288,6 +311,8 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     };
   }
 
+  const dial = dialer((req) => call(req));
+
   await call({
     op: 'init',
     ...(options.root ? { root: options.root } : {}),
@@ -323,6 +348,8 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     },
     openTerminal,
     connect: async () => (await call({ op: 'connect' })) as MessagePort,
+    dial,
+    loopbackFetch: (input, fetchOptions) => loopbackFetch(dial, input, fetchOptions),
     mount: async (spec) => (await call({ op: 'mount', spec })) as MountEntry,
     umount: async (target) => void (await call({ op: 'umount', target })),
     mounts: async () => (await call({ op: 'mounts' })) as MountEntry[],

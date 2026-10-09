@@ -1,3 +1,4 @@
+import { hostsFile } from '../kernel/net/loopback-names.ts';
 import type { MountLine } from '../kernel/proc-info.ts';
 import type { ProcessFs, ProcessStream, ProcessSys } from './kernel-streams.ts';
 import { type PtyKernel, ptyIoctl } from './process-pty.ts';
@@ -503,8 +504,10 @@ export function useMounts(Fs: ProcessFs, env: Record<string, string> = {}, live 
     mkdirTree.call(Fs, '/dev/.etc');
     writeFile.call(Fs, '/dev/.etc/passwd', passwd);
     writeFile.call(Fs, '/dev/.etc/group', group);
+    writeFile.call(Fs, '/dev/.etc/hosts', hostsFile());
     backing['/etc/passwd'] = '/dev/.etc/passwd';
     backing['/etc/group'] = '/dev/.etc/group';
+    backing['/etc/hosts'] = '/dev/.etc/hosts';
   } catch {}
   const open = Fs.open.bind(Fs);
   Fs.open = (path, flags, mode) => {

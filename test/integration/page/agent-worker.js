@@ -29,6 +29,14 @@ const actions = {
     return { pid: child.pid, pgid: child.pgid };
   },
   ps: () => client.ps(),
+  async loopback({ url, port }) {
+    try {
+      const response = await client.loopbackFetch(url, { port });
+      return { status: response.status, text: await response.text() };
+    } catch (error) {
+      return { code: error.code };
+    }
+  },
   async fetchText({ url }) {
     const response = await client.fetch({ url, method: 'GET', headers: [] });
     let text = '';

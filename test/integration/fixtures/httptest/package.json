@@ -1,0 +1,12 @@
+{
+  "name": "httptest",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "httptest": {
+        "wasm": "bin/httptest.wasm"
+      }
+    }
+  }
+}
