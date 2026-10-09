@@ -1,5 +1,5 @@
 import { AsyncRangedFile, type AsyncRangedIo } from '../fs/ranged.ts';
-import { type KernelFs, rangedOps } from '../fs/types.ts';
+import { fsError, type KernelFs, rangedOps } from '../fs/types.ts';
 import { KernelError, OpenFile } from './fd-table.ts';
 
 export interface VfsFileFs extends Partial<AsyncRangedIo> {
@@ -290,8 +290,20 @@ export class VfsNodes {
 
   private readonly fs: VfsFileFs;
 
+  private creating: Promise<unknown> = Promise.resolve();
+
   constructor(fs: VfsFileFs) {
     this.fs = fs;
+  }
+
+  createExclusive(path: string): Promise<void> {
+    const run = this.creating.then(async () => {
+      const found = this.byPath.has(path) || (await present(this.fs, path));
+      if (found) throw fsError('EEXIST', path);
+      await this.fs.writeFile(path, new Uint8Array(0));
+    });
+    this.creating = run.catch(() => undefined);
+    return run;
   }
 
   open(path: string, pin?: VersionPin): VfsNode {
@@ -368,6 +380,16 @@ export class VfsNodes {
       node.renamedTo(to + node.path.slice(from.length));
       this.byPath.set(node.path, node);
     }
+  }
+}
+
+async function present(fs: VfsFileFs, path: string): Promise<boolean> {
+  try {
+    await (fs.stat ? fs.stat(path) : fs.readFileBuffer(path));
+    return true;
+  } catch (err) {
+    if ((err as { code?: unknown } | null)?.code === 'ENOENT') return false;
+    throw err;
   }
 }
 

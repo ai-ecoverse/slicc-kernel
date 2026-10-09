@@ -70,6 +70,8 @@ export type WasmSyscall =
 
       create?: boolean;
 
+      exclusive?: boolean;
+
       pin?: VersionPin;
     }
   | { op: 'fd-pread'; fd: number; offset: number; max: number }
@@ -616,6 +618,7 @@ export class WasmProcess {
         return { ok: true, kind: 'json', json: pollFile(this.fds.get(req.fd).file) };
       case 'fd-open-vfs':
         await refuseReadonly(this.options.fs, req.path, req.flags, req);
+        if (req.exclusive) await this.nodes.createExclusive(req.path);
         return { ok: true, kind: 'json', json: this.fds.install(this.openVfsFile(req), 3) };
       case 'fd-info':
         return { ok: true, kind: 'json', json: this.fdInfo(req.fd) };

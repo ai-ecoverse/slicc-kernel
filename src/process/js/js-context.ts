@@ -222,6 +222,34 @@ export function createContext(o: ContextOptions): CreatedContext {
     return s;
   };
 
+  const open = async (path: string, options: JsOpenOptions = {}): Promise<JsFile> => {
+    const abs = resolve(path);
+    const existing = await statOf('stat', abs).catch((err: unknown) => {
+      if (err instanceof JsCallError && err.code === 'ENOENT') return undefined;
+      throw err;
+    });
+    const exclusive = options.create === true && options.exclusive === true;
+    if (existing && exclusive) throw new JsCallError('EEXIST', abs);
+    if (!existing && !options.create) throw new JsCallError('ENOENT', abs);
+    if (existing?.isDirectory) throw new JsCallError('EISDIR', abs);
+    const fd = (await kernel.json({
+      op: 'fd-open-vfs',
+      path: abs,
+      flags: flagsOf(options),
+      position: 0,
+      ...(exclusive ? { exclusive: true } : existing ? {} : { create: true }),
+      ...(options.truncate ? { truncate: true } : {}),
+    })) as number;
+    try {
+      await kernel.call({ op: 'fd-vfs-stat', fd });
+    } catch (err) {
+      await kernel.raw({ op: 'fd-close', fd });
+      throw err;
+    }
+    infos.set(fd, { kind: 'file' });
+    return fileHandle(kernel, fd, abs, options.append === true, () => infos.delete(fd));
+  };
+
   const fs: JsProgramContext['fs'] = {
     stat: (path) => statOf('stat', path),
     lstat: (path) => statOf('lstat', path),
@@ -236,32 +264,19 @@ export function createContext(o: ContextOptions): CreatedContext {
     symlink: async (target, path) =>
       void (await kernel.call({ op: 'symlink', path: resolve(path), arg2: target })),
     readlink: async (path) => String(await kernel.json({ op: 'readlink', path: resolve(path) })),
-    readFile: (path) => kernel.bytes({ op: 'read', path: resolve(path) }),
-    writeFile: async (path, data) => {
-      const body = typeof data === 'string' ? encoder.encode(data) : data;
-      await kernel.call({ op: 'write', path: resolve(path), body });
+    async readFile(path) {
+      const abs = resolve(path);
+      await kernel.call({ op: 'fd-path-flush', path: abs });
+      return kernel.bytes({ op: 'read', path: abs });
     },
-  };
-
-  const open = async (path: string, options: JsOpenOptions = {}): Promise<JsFile> => {
-    const abs = resolve(path);
-    const existing = await statOf('stat', abs).catch((err: unknown) => {
-      if (err instanceof JsCallError && err.code === 'ENOENT') return undefined;
-      throw err;
-    });
-    if (existing && options.create && options.exclusive) throw new JsCallError('EEXIST', abs);
-    if (!existing && !options.create) throw new JsCallError('ENOENT', abs);
-    if (existing?.isDirectory) throw new JsCallError('EISDIR', abs);
-    const fd = (await kernel.json({
-      op: 'fd-open-vfs',
-      path: abs,
-      flags: flagsOf(options),
-      position: 0,
-      ...(existing ? {} : { create: true }),
-      ...(options.truncate ? { truncate: true } : {}),
-    })) as number;
-    infos.set(fd, { kind: 'file' });
-    return fileHandle(kernel, fd, abs, () => infos.delete(fd));
+    async writeFile(path, data) {
+      const file = await open(path, { write: true, create: true, truncate: true });
+      try {
+        await file.write(0, typeof data === 'string' ? encoder.encode(data) : data);
+      } finally {
+        await file.close();
+      }
+    },
   };
 
   const ctx: JsProgramContext = {
@@ -305,7 +320,13 @@ export function createContext(o: ContextOptions): CreatedContext {
   return { ctx, drain: () => Promise.allSettled([...pending]) };
 }
 
-function fileHandle(kernel: JsKernel, fd: number, path: string, forget: () => void): JsFile {
+function fileHandle(
+  kernel: JsKernel,
+  fd: number,
+  path: string,
+  append: boolean,
+  forget: () => void
+): JsFile {
   return {
     fd,
     path,
@@ -336,13 +357,12 @@ function fileHandle(kernel: JsKernel, fd: number, path: string, forget: () => vo
       let at = 0;
       while (at < data.length) {
         const body = data.subarray(at, at + MAX_IO);
-        const n = (await kernel.json({
-          op: 'fd-pwrite',
-          fd,
-          offset: position + at,
-          body,
-        })) as number;
-        if (!(n > 0)) throw new JsCallError('EIO', 'fd-pwrite');
+        const n = (await kernel.json(
+          append
+            ? { op: 'fd-write', fd, body }
+            : { op: 'fd-pwrite', fd, offset: position + at, body }
+        )) as number;
+        if (!(n > 0)) throw new JsCallError('EIO', 'write');
         at += n;
       }
       return at;

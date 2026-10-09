@@ -91,6 +91,63 @@ async function fsops(ctx, [dir]) {
   );
 }
 
+async function coherent(ctx, [path]) {
+  const f = await ctx.open(path, { read: true, write: true, create: true, truncate: true });
+  await f.write(0, new TextEncoder().encode('hello'));
+  const a = text(await ctx.fs.readFile(path));
+  await ctx.fs.writeFile(path, 'world!');
+  const b = text(await f.read(0, 10));
+  await ctx.fs.rename(path, `${path}.moved`);
+  await f.write(0, new TextEncoder().encode('W'));
+  const c = text(await ctx.fs.readFile(`${path}.moved`));
+  await ctx.fs.unlink(`${path}.moved`);
+  await f.write(6, new TextEncoder().encode('?'));
+  const d = text(await f.read(0, 10));
+  await f.close();
+  await ctx.write(1, `${a} ${b} ${c} ${d} ${await ctx.fs.exists(`${path}.moved`)}\n`);
+}
+
+async function append(ctx, [path]) {
+  const f = await ctx.open(path, { write: true, create: true, truncate: true });
+  await f.write(0, new TextEncoder().encode('ab'));
+  await f.close();
+  const g = await ctx.open(path, { append: true });
+  await g.write(0, new TextEncoder().encode('cd'));
+  await g.write(0, new TextEncoder().encode('ef'));
+  await g.close();
+  await ctx.write(1, `${text(await ctx.fs.readFile(path))}\n`);
+}
+
+async function exclusive(ctx, [path]) {
+  const tries = await Promise.allSettled([
+    ctx.open(path, { write: true, create: true, exclusive: true }),
+    ctx.open(path, { write: true, create: true, exclusive: true }),
+  ]);
+  const got = tries.filter((t) => t.status === 'fulfilled');
+  for (const t of got) await t.value.close();
+  const codes = tries.filter((t) => t.status === 'rejected').map((t) => t.reason.code);
+  await ctx.write(1, `${got.length} ${codes.join(',')}\n`);
+}
+
+async function lock(ctx, [path]) {
+  const r = await ctx.open(path, { write: true, create: true, exclusive: true }).then(
+    async (f) => {
+      await f.close();
+      return 'got';
+    },
+    (err) => err.code
+  );
+  await ctx.write(1, `${r}\n`);
+}
+
+async function nodir(ctx, [path]) {
+  const r = await ctx.open(path, { write: true, create: true }).then(
+    () => 'opened',
+    (err) => err.code
+  );
+  await ctx.write(1, `${r}\n`);
+}
+
 async function fds(ctx) {
   const out = [];
   for (const fd of [0, 1, 2]) {
@@ -177,6 +234,11 @@ const modes = {
   files,
   fsops,
   fds,
+  coherent,
+  append,
+  exclusive,
+  lock,
+  nodir,
   globals,
   devices,
   encode,
