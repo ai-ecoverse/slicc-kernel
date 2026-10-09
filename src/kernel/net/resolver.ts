@@ -50,8 +50,12 @@ export class Resolver {
   ): Promise<string[]> {
     const key = name.toLowerCase().replace(/\.$/, '');
     const local = hostsEntry(key);
+    if (ipv6Groups(key)) {
+      const v4 = family !== 6 && local ? [local] : [];
+      return family === 4 ? v4 : [...v4, key];
+    }
     if (local) return family === 6 ? [] : [local];
-    if (label !== 'uplink' || !this.uplink || key === '' || ipv6Groups(key)) return [];
+    if (label !== 'uplink' || !this.uplink || key === '') return [];
     const asked: ResolveFamily = this.uplink.traits.ipv6 ? family : 4;
     if (family === 6 && asked !== 6) return [];
     const id = `${asked}:${key}`;
