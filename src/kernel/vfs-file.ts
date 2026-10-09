@@ -1,9 +1,11 @@
+import { normalizePath } from '../fs/types.ts';
 import { KernelError, OpenFile } from './fd-table.ts';
 
 export interface VfsFileFs {
   readFileBuffer(path: string): Promise<Uint8Array>;
   writeFile(path: string, content: Uint8Array): Promise<void>;
   stat?(path: string): Promise<{ readonly?: boolean; maxFile?: number }>;
+  readlink?(path: string): Promise<string>;
 }
 
 const O_ACCMODE = 0o3;
@@ -307,6 +309,22 @@ export class VfsNodes {
   }
 }
 
+const MAX_LINKS = 40;
+
+function parentOf(path: string): string {
+  return path.slice(0, path.lastIndexOf('/')) || '/';
+}
+
+async function danglingTarget(fs: VfsFileFs, path: string): Promise<string> {
+  let at = path;
+  for (let hops = 0; hops < MAX_LINKS; hops++) {
+    const link = await fs.readlink?.(at).catch(() => undefined);
+    if (link === undefined) return at;
+    at = normalizePath(link.startsWith('/') ? link : `${parentOf(at)}/${link}`);
+  }
+  return at;
+}
+
 export async function refuseReadonly(
   fs: VfsFileFs,
   path: string,
@@ -321,10 +339,9 @@ export async function refuseReadonly(
       if (isMissing(err) || typeof code !== 'string') return undefined;
       throw err;
     });
-  const parent = path.slice(0, path.lastIndexOf('/')) || '/';
   const own = await stat(path);
   if (own && !writes) return;
-  const st = own ?? (await stat(parent));
+  const st = own ?? (await stat(parentOf(await danglingTarget(fs, path))));
   if (st?.readonly) throw new KernelError('EROFS');
 }
 
