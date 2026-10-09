@@ -1,4 +1,5 @@
 import {
+  type DialHandle,
   type DialledSocket,
   type DialOptions,
   dialStream,
@@ -170,15 +171,22 @@ function streamer(callback: ((text: string) => void) | undefined) {
 }
 
 function dialer(call: (req: KernelCall) => Promise<unknown>) {
-  return async ({ port, host }: DialOptions): Promise<DialledSocket> => {
+  const open = new Set<DialHandle>();
+  const dial = async ({ port, host }: DialOptions): Promise<DialledSocket> => {
+    let reply: unknown;
     try {
-      return dialStream(
-        (await call({ op: 'dial', port, ...(host ? { host } : {}) })) as MessagePort
-      );
+      reply = await call({ op: 'dial', port, ...(host ? { host } : {}) });
     } catch (err) {
       throw errorWithCode((err as Error).message);
     }
+    const handle = dialStream(reply as MessagePort, () => open.delete(handle));
+    open.add(handle);
+    return handle;
   };
+  const reset = () => {
+    for (const handle of [...open]) handle.fail(errorWithCode('ECONNRESET: the kernel is gone'));
+  };
+  return { dial, reset };
 }
 
 export async function createKernel(options: KernelOptions = {}): Promise<Kernel> {
@@ -189,7 +197,9 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
   let nextId = 0;
   let failure: Error | undefined;
 
+  const dials = dialer((req) => call(req));
   const fail = (error: Error) => {
+    dials.reset();
     failure = error;
     bridge?.close();
     for (const call of pending.values()) call.reject(error);
@@ -311,7 +321,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     };
   }
 
-  const dial = dialer((req) => call(req));
+  const { dial } = dials;
 
   await call({
     op: 'init',

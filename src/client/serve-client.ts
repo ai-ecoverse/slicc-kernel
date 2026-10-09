@@ -118,7 +118,10 @@ function dialFor(
 ): Answer {
   const socket = dialSocket(l.net, req.port, req.host);
   const { port1, port2 } = new MessageChannel();
-  open.set(req.id, serveSocket(socket, port1));
+  open.set(
+    req.id,
+    serveSocket(socket, port1, () => open.delete(req.id))
+  );
   return { result: port2, transfer: [port2] };
 }
 

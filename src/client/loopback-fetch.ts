@@ -113,11 +113,19 @@ function bodyOf(source: ByteSource, head: ResponseHead, method: string) {
   if (method === 'HEAD' || head.status === 204 || head.status === 304) return undefined;
   if (header(head, 'transfer-encoding')?.toLowerCase().includes('chunked')) return chunked(source);
   const length = header(head, 'content-length');
-  return length !== undefined ? counted(source, Number(length)) : untilClose(source);
+  if (length === undefined) return untilClose(source);
+  const size = Number(length);
+  if (!/^\d+$/.test(length.trim()) || !Number.isSafeInteger(size)) {
+    throw errorWithCode(`EPROTO: a malformed Content-Length: ${length}`);
+  }
+  return counted(source, size);
 }
 
-function stream(chunks: AsyncGenerator<Uint8Array>, socket: DialledSocket) {
+function stream(chunks: AsyncGenerator<Uint8Array>, socket: DialledSocket, signal?: AbortSignal) {
   return new ReadableStream<Uint8Array>({
+    start(controller) {
+      signal?.addEventListener('abort', () => controller.error(signal.reason), { once: true });
+    },
     async pull(controller) {
       try {
         const next = await chunks.next();
@@ -157,6 +165,7 @@ export async function loopbackFetch(
   input: RequestInfo | URL,
   options: LoopbackFetchOptions
 ): Promise<Response> {
+  options.signal?.throwIfAborted();
   const request = input instanceof Request ? input : new Request(input);
   const bytes = await requestBytes(request);
   const socket = await dial({
@@ -177,7 +186,7 @@ export async function loopbackFetch(
     } while (head.status >= 100 && head.status < 200);
     const chunks = bodyOf(source, head, request.method);
     if (!chunks) socket.close();
-    return new Response(chunks ? stream(chunks, socket) : null, {
+    return new Response(chunks ? stream(chunks, socket, options.signal) : null, {
       status: head.status,
       statusText: head.statusText,
       headers: head.headers,
