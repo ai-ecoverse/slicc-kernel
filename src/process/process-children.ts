@@ -4,6 +4,7 @@ import type { ForkState, ForkStream } from '../kernel/protocol.ts';
 import type { SyncFsResult } from '../realm/sync-fs-wire.ts';
 import type { SyncSabTransport } from '../realm/sync-sab-bridge.ts';
 import type { ProcessFs, ProcessStream } from './kernel-streams.ts';
+import { deviceOfStream } from './process-fork.ts';
 import type { HttpKernel } from './process-http.ts';
 import type { SocketKernel } from './process-sockets.ts';
 import { wasiErrno } from './wasi-errno.ts';
@@ -215,6 +216,8 @@ export function createProcessKernel(deps: ProcessKernelDeps): ProcessKernel {
     if (stream.sliccKernelFd !== undefined) return { fd: stream.sliccKernelFd };
 
     if (stream.path === '/dev/null') return { none: true };
+    const device = deviceOfStream(stream);
+    if (device) return device;
     return n === 0 ? { input: drain(Fs, stream) } : { capture: true };
   };
 

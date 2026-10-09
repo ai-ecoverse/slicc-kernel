@@ -472,11 +472,60 @@ function describeFdDir(Fs: ProcessFs): void {
   };
 }
 
+interface DeviceFs {
+  analyzePath?: (path: string) => { exists: boolean };
+  registerDevice?: (dev: number, ops: object) => void;
+  mkdev?: (path: string, mode: number, dev: number) => unknown;
+  makedev?: (major: number, minor: number) => number;
+}
+
+const CHAR_DEVICE = 0o20666;
+
+export function useZeroDevices(Fs: ProcessFs): void {
+  const { analyzePath, registerDevice, mkdev, makedev } = Fs as unknown as DeviceFs;
+  if (!analyzePath || !registerDevice || !mkdev || !makedev) return;
+  const zeros = (_s: unknown, buffer: Uint8Array, offset: number, length: number) => {
+    buffer.fill(0, offset, offset + length);
+    return length;
+  };
+  const devices = [
+    ['/dev/zero', 5, (_s: unknown, _b: Uint8Array, _o: number, length: number) => length],
+    [
+      '/dev/full',
+      7,
+      (_s: unknown, _b: Uint8Array, _o: number, length: number) => {
+        if (length > 0) throw new Fs.ErrnoError(wasiErrno('ENOSPC'));
+        return 0;
+      },
+    ],
+  ] as const;
+  for (const [path, minor, write] of devices) {
+    if (analyzePath.call(Fs, path).exists) continue;
+    const dev = makedev.call(Fs, 1, minor);
+    registerDevice.call(Fs, dev, { read: zeros, write, llseek: () => 0 });
+    mkdev.call(Fs, path, CHAR_DEVICE, dev);
+  }
+}
+
+function linkStdio(Fs: ProcessFs): void {
+  const { unlink, symlink } = Fs as { unlink?: (path: string) => void } & ProcessFs;
+  if (!unlink || !symlink) return;
+  for (const [fd, name] of ['stdin', 'stdout', 'stderr'].entries()) {
+    try {
+      unlink.call(Fs, `/dev/${name}`);
+    } catch {}
+    try {
+      symlink.call(Fs, `/proc/self/fd/${fd}`, `/dev/${name}`);
+    } catch {}
+  }
+}
+
 export function useDevFd(Fs: ProcessFs): void {
   if (typeof Fs.open !== 'function') return;
   try {
     Fs.symlink?.('/proc/self/fd', '/dev/fd');
   } catch {}
+  linkStdio(Fs);
   describeFdDir(Fs);
   const fdOf = (path: unknown): number | undefined =>
     typeof path === 'string' ? fdOfPath(path, Fs.cwd()) : undefined;

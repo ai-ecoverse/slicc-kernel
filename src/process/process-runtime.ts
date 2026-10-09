@@ -32,6 +32,7 @@ import {
   trackCloseOnExec,
   useDevFd,
   useMounts,
+  useZeroDevices,
   wasmMemory,
   wrapCloexecSyscalls,
 } from './process-fds.ts';
@@ -132,6 +133,12 @@ export function kernelSys(transport: SyncSabTransport): ProcessSys & PtyKernel {
     ttyName(fd) {
       return (json(call({ op: 'fd-info', fd }, `fd-info ${fd}`)) as { name?: string })?.name;
     },
+    kind(fd) {
+      return (json(call({ op: 'fd-info', fd }, `fd-info ${fd}`)) as { kind?: string })?.kind;
+    },
+    size(fd) {
+      return (json(call({ op: 'fd-vfs-stat', fd }, `fd-vfs-stat ${fd}`)) as { size: number }).size;
+    },
     openTty(name) {
       const req =
         name === undefined ? { op: 'fd-open-tty' as const } : { op: 'fd-open-tty' as const, name };
@@ -208,10 +215,20 @@ function openDevice(Fs: ProcessFs, fd: number, meta: DeviceMeta): boolean {
   return true;
 }
 
-export function wireKernelStdio(Fs: ProcessFs, streams: KernelStreams): void {
+const PLACED: ReadonlySet<string> = new Set(['stream', 'file', 'socket']);
+
+export function wireKernelStdio(Fs: ProcessFs, streams: KernelStreams, sys?: ProcessSys): void {
   for (const fd of [0, 1, 2]) {
     const stream = Fs.getStream(fd);
     if (!stream) continue;
+    const kind = sys?.kind?.(fd);
+    if (kind && PLACED.has(kind)) {
+      const { flags } = stream;
+      Fs.closeStream(fd);
+      const kernel = { fd, kernel: fd, kind: kind as InheritedFd['kind'], flags };
+      placeKernelStream(Fs, streams, kernel).flags = flags;
+      continue;
+    }
     streams.attach(stream, fd);
     streams.nameTerminal(stream);
   }
@@ -464,10 +481,11 @@ export async function runWasmProcess(
   trackCloseOnExec(running.FS);
   quietQuit(running.FS as unknown as QuitFs);
   useMounts(running.FS, init.env, true);
+  useZeroDevices(running.FS);
   useProcfs(running.FS as unknown as ProcFs, sys, init.pid);
   if (init.fork) restoreForkedStreams(running.FS, streams, init.fork.streams ?? []);
   else {
-    wireKernelStdio(running.FS, streams);
+    wireKernelStdio(running.FS, streams, sys);
     for (const entry of init.fds ?? []) wireKernelFd(running.FS, streams, entry);
   }
   const pipefs = ownValue<ProcessPipeFs>(running, 'PIPEFS');

@@ -250,7 +250,7 @@ export type WasiEntry =
     }
   | {
       type: 'device';
-      device: 'null' | 'zero' | 'urandom';
+      device: 'null' | 'zero' | 'full' | 'urandom';
 
       access?: DeviceAccess;
     };
