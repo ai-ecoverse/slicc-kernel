@@ -1,8 +1,4 @@
-import {
-  CDP_LOOPBACK,
-  HOST_LOOPBACK,
-  HOST_LOOPBACK_ADDRESS,
-} from '../../kernel/net/loopback-names.ts';
+import { HOST_LOOPBACK, HOST_LOOPBACK_ADDRESS } from '../../kernel/net/loopback-names.ts';
 import type { SockAddr } from '../../kernel/socket.ts';
 import { E, FDFLAGS } from './wasi-abi.ts';
 import { WasiError } from './wasi-files.ts';
@@ -82,7 +78,6 @@ export function resolveName(name: string): number[] | undefined {
   }
   if (name === '::1') return [127, 0, 0, 1];
   if (name.toLowerCase() === HOST_LOOPBACK) return [...HOST_LOOPBACK_ADDRESS];
-  if (name.toLowerCase() === CDP_LOOPBACK) return [127, 0, 0, 1];
   return ipv4(name);
 }
 

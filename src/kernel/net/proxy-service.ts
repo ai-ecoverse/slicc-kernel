@@ -16,7 +16,7 @@ import {
   requestFraming,
   responseHead,
 } from './http1.ts';
-import { CDP_LOOPBACK, toHostLoopback } from './loopback-names.ts';
+import { toHostLoopback } from './loopback-names.ts';
 import type { HeaderList, RealmTransport, RealmTransportResponse } from './transport.ts';
 
 export const REALM_PROXY_PORT = 3128;
@@ -132,7 +132,7 @@ export function isLoopbackHost(hostname: string): boolean {
   const canonical = canonicalHost(hostname);
   if (canonical === undefined) return false;
   const host = canonical.replace(/\.+$/, '');
-  if (host === 'localhost' || host.endsWith('.localhost') || host === CDP_LOOPBACK) return true;
+  if (host === 'localhost' || host.endsWith('.localhost')) return true;
   if (host.startsWith('[')) return localV6(host.slice(1, -1));
   const v4 = /^(\d+)\.(\d+)\.\d+\.\d+$/.exec(host);
   return v4 ? localV4(Number(v4[1]), Number(v4[2])) : false;
