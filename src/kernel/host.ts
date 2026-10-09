@@ -14,6 +14,7 @@ import {
   SAB_DEFAULT_WINDOW_BYTES,
   SAB_HEADER_BYTES,
   SAB_HEADER_I32,
+  SAB_I_KILLED,
   SAB_I_MEMORY,
   SAB_I_SIGNALS,
   SAB_I_TIMERS,
@@ -80,6 +81,7 @@ export interface SpawnWasmOptions {
 
   shownPid?: number;
   kill?: (pid: number, sig: number) => boolean | Promise<boolean>;
+  writesBack?: (pid: number) => boolean;
   processes?: () => ProcessListing;
   openFiles?: Set<VfsNodes>;
   nodes?: VfsNodes;
@@ -108,9 +110,11 @@ export interface WasmProcessHandle {
   onState(listener: StateListener): void;
   memory(): number;
   ignoredSignals(fork?: boolean): number;
+  writesBack(): boolean;
 }
 
 const CRASHED = 70;
+export const KILL_GRACE_MS = 2000;
 
 const descIds = new WeakMap<OpenFile, number>();
 let nextDescId = 1;
@@ -148,6 +152,47 @@ interface WorkerSays {
   thread?: WasmThread;
 }
 
+class Dying {
+  ending: { code: number; sig: number } | undefined;
+  private timer: ReturnType<typeof setTimeout> | undefined;
+  private busy = 0;
+  private finish: (() => void) | undefined;
+
+  start(code: number, sig: number, header: Int32Array, process: WasmProcess, finish: () => void) {
+    if (this.ending) return;
+    this.ending = { code, sig };
+    this.finish = finish;
+    this.arm();
+    Atomics.store(header, SAB_I_KILLED, code);
+    process.die();
+  }
+
+  async serving<T>(work: () => Promise<T>): Promise<T> {
+    this.busy++;
+    clearTimeout(this.timer);
+    try {
+      return await work();
+    } finally {
+      this.busy--;
+      this.arm();
+    }
+  }
+
+  private arm(): void {
+    clearTimeout(this.timer);
+    if (this.busy === 0 && this.finish) this.timer = setTimeout(this.finish, KILL_GRACE_MS);
+  }
+
+  clear(): void {
+    clearTimeout(this.timer);
+  }
+
+  status(reported: unknown): [number, number | undefined] {
+    if (this.ending) return [this.ending.code, this.ending.sig];
+    return [typeof reported === 'number' ? reported : CRASHED, undefined];
+  }
+}
+
 export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
   const sab = new SharedArrayBuffer(SAB_HEADER_BYTES + SAB_DEFAULT_WINDOW_BYTES);
   const header = new Int32Array(sab, 0, SAB_HEADER_I32);
@@ -159,6 +204,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     forker: opts.forker,
     fs: opts.fs,
     kill: opts.kill,
+    ...(opts.writesBack ? { writesBack: opts.writesBack } : {}),
     processes: opts.processes,
     openFiles: opts.openFiles,
     ...(opts.nodes ? { nodes: opts.nodes } : {}),
@@ -192,20 +238,19 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     renamed: (from, to) => holds.renamed(from, to),
   });
   const worker = opts.createWorker();
-  const dispatch = async (req: SyncSabDispatchRequest): Promise<SyncFsResult> => {
-    if (isWasmSyscall(req)) return process.syscall(req);
-    return dispatchSyncFs(req);
-  };
+  const dying = new Dying();
+  const dispatch = (req: SyncSabDispatchRequest): Promise<SyncFsResult> =>
+    dying.serving(() => (isWasmSyscall(req) ? process.syscall(req) : dispatchSyncFs(req)));
   const responder = attachSyncSabResponder(worker, sab, token, { dispatch });
 
-  let settle!: (code: number) => void;
-  const exited = new Promise<number>((resolve) => (settle = resolve));
+  const { promise: exited, resolve: settle } = Promise.withResolvers<number>();
   let done = false;
   let endedBy: number | undefined;
 
   const finish = (code: number, sig?: number): void => {
     if (done) return;
     done = true;
+    dying.clear();
     endedBy = sig ?? process.execTermsig;
     worker.removeEventListener('message', onMessage);
     worker.removeEventListener('error', onError);
@@ -222,10 +267,10 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
 
   const handle = (data: WorkerSays | undefined): void => {
     if (data?.type === WASM_PROCESS_EXIT) {
-      finish(typeof data.code === 'number' ? data.code : CRASHED);
+      finish(...dying.status(data.code));
     } else if (data?.type === WASM_PROCESS_ERROR) {
-      opts.onError?.(String(data.message));
-      finish(CRASHED);
+      if (!dying.ending) opts.onError?.(String(data.message));
+      finish(...dying.status(CRASHED));
     } else if (data?.type === WASM_THREAD_SPAWN && data.thread) {
       spawnThread(data.thread);
     }
@@ -298,7 +343,10 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
   worker.postMessage(init, opts.fork ? [opts.fork.memory.buffer as ArrayBuffer] : []);
 
   const signal = (sig: number): void => {
-    if (process.signal(sig) === 'terminate') finish(sig === SIG.KILL ? 137 : 128 + sig, sig);
+    if (process.signal(sig) !== 'terminate') return;
+    const code = sig === SIG.KILL ? 137 : 128 + sig;
+    if (opts.program.abi !== 'wasi' || done) finish(code, sig);
+    else dying.start(code, sig, header, process, () => finish(code, sig));
   };
   const kill = (code = 137): void =>
     finish(code, code > 128 && code < 160 ? code - 128 : undefined);
@@ -311,5 +359,6 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     onState: (listener) => process.onState(listener),
     memory: () => Atomics.load(header, SAB_I_MEMORY) * 65536,
     ignoredSignals: (fork) => process.inheritable(fork),
+    writesBack: () => opts.program.abi === 'wasi' && !done,
   };
 }

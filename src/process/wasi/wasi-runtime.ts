@@ -409,10 +409,15 @@ function descriptors(
 export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike): Promise<number> {
   captureBacktraces(init.env);
 
-  const signals = new WasiSignals((sig) => {
-    call({ op: 'proc-kill', pid: init.pid, sig });
-    throw new WasiExit(128 + sig);
-  });
+  const signals = new WasiSignals(
+    (sig) => {
+      call({ op: 'proc-kill', pid: init.pid, sig });
+      throw new WasiExit(128 + sig);
+    },
+    (code) => {
+      throw new WasiExit(code);
+    }
+  );
   const main: { memory?: WebAssembly.Memory } = {};
   const { transport, sys, call: kernelCall, say } = kernelOf(init, port, signals, sizeOf(main));
   const id = identify(transport, init);
