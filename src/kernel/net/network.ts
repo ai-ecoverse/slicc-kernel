@@ -27,6 +27,8 @@ const NO_PROXY = 'localhost,.localhost,127.0.0.1,127.0.0.0/8';
 
 const CA_OWNER = 'slicc-kernel';
 
+export const CA_DB = 'slicc-kernel-ca';
+
 export function networkEnv(): Record<string, string> {
   return {
     http_proxy: PROXY_URL,
@@ -63,8 +65,8 @@ export function memoryCaStore(): CaStore {
   };
 }
 
-export function caStore(metadata: string | false): CaStore {
-  return metadata === false ? memoryCaStore() : indexedDbCaStore(`${metadata}-ca`);
+export function caStore(name: string | false): CaStore {
+  return name === false ? memoryCaStore() : indexedDbCaStore(name);
 }
 
 function base64(bytes: Uint8Array): string {
@@ -114,12 +116,38 @@ export function kernelTlsEngine(load: () => Promise<TlsEngineModule>): () => Pro
   return () => loadTlsEngine(load);
 }
 
-export async function writeCaFile(fs: KernelFs, ca: () => Promise<RealmCa>): Promise<void> {
-  const { pem } = await ca();
-  const current = (await fs.exists(CA_PATH)) ? await fs.readFile(CA_PATH) : undefined;
-  if (current === pem) return;
+const CERTIFICATE = /-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g;
+
+export const CA_BUNDLE_MAX = 16;
+
+export interface LockLike {
+  request<T>(name: string, run: () => Promise<T>): Promise<T>;
+}
+
+const CA_FILE_LOCK = 'slicc-kernel-ca-file';
+const CA_FILE_TRIES = 3;
+
+async function addToBundle(fs: KernelFs, own: string): Promise<boolean> {
+  const current = (await fs.exists(CA_PATH)) ? await fs.readFile(CA_PATH) : '';
+  const all = current.match(CERTIFICATE) ?? [];
+  const others = all.filter((cert) => cert !== own);
+  if (others.length < all.length) return true;
+  const bundle = [...others, own].slice(-CA_BUNDLE_MAX);
   await fs.mkdir(CA_PATH.slice(0, CA_PATH.lastIndexOf('/')), { recursive: true });
-  await fs.writeFile(CA_PATH, pem);
+  await fs.writeFile(CA_PATH, `${bundle.join('\n')}\n`);
+  return false;
+}
+
+export async function writeCaFile(
+  fs: KernelFs,
+  ca: () => Promise<RealmCa>,
+  locks: LockLike | undefined = globalThis.navigator?.locks as LockLike | undefined
+): Promise<void> {
+  const own = (await ca()).pem.trim();
+  const update = async () => {
+    for (let i = 0; i < CA_FILE_TRIES && !(await addToBundle(fs, own)); i++);
+  };
+  await (locks ? locks.request(CA_FILE_LOCK, update) : update());
 }
 
 export function enableNetwork(

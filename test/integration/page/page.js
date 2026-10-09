@@ -261,6 +261,15 @@ window.boot = async (options = {}) => {
   return true;
 };
 
+window.secondKernel = async (options, name = 'second') => {
+  window[name] = await createKernel({
+    root: await navigator.storage.getDirectory(),
+    network: { transport: fetchTransport() },
+    ...options,
+  });
+  return true;
+};
+
 window.probeLocalProxy = probeLocalProxy;
 window.checkLocalProxy = checkLocalProxy;
 
