@@ -370,12 +370,13 @@ export class Launcher {
       const command = (await this.commands()).get(name);
       return command && !command.script ? targetOf(command) : undefined;
     }
-    const glue = await followLinks(this.base, this.fs.resolvePath(cwd, file));
+    const path = this.fs.resolvePath(cwd, file);
+    const glue = await followLinks(this.base, path);
     const linked = COMMAND.exec(glue)?.[1];
     if (linked !== undefined) {
       const target = await this.resolve(`/bin/${linked}`, argv0, cwd);
-      const byPath = (await this.commands()).get(linked)?.argv0Path === true;
-      return target && byPath ? { ...target, argv0: this.fs.resolvePath(cwd, file) } : target;
+      const byPath = !COMMAND.test(path) && (await this.commands()).get(linked)?.argv0Path === true;
+      return target && byPath ? { ...target, argv0: path } : target;
     }
     const head = await this.head(glue);
     if (!head) return undefined;
