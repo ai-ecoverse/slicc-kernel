@@ -15,6 +15,10 @@ export class FileBuffer {
   private length = 0;
   private dirty = false;
 
+  private whole = false;
+  private from = Infinity;
+  private to = 0;
+
   private orphaned = false;
 
   opens = 0;
@@ -44,6 +48,7 @@ export class FileBuffer {
     } else if (empty) {
       this.data = new Uint8Array(0);
       this.dirty = true;
+      this.whole = true;
     }
   }
 
@@ -106,6 +111,8 @@ export class FileBuffer {
     this.load();
     this.ensure(end);
     const buf = this.data as Uint8Array;
+    this.from = Math.min(this.from, at, this.length);
+    this.to = Math.max(this.to, end);
     if (at > this.length) buf.fill(0, this.length, at);
     buf.set(bytes, at);
     this.length = Math.max(this.length, end);
@@ -121,6 +128,7 @@ export class FileBuffer {
     }
     this.load();
     this.ensure(size);
+    this.whole = true;
     if (size > this.length) (this.data as Uint8Array).fill(0, this.length, size);
     this.length = size;
   }
@@ -154,9 +162,14 @@ export class FileBuffer {
   flush(): void {
     if (this.orphaned || !this.dirty) return;
     if (this.ranged) this.ranged.flush();
-    else if (this.data) this.fs.writeFile(this.path, this.data.slice(0, this.length));
-    else return;
+    else if (!this.data) return;
+    else if (this.whole || !this.fs.pwrite)
+      this.fs.writeFile(this.path, this.data.slice(0, this.length));
+    else this.fs.pwrite(this.path, this.from, this.data.slice(this.from, this.to), true);
     this.dirty = false;
+    this.whole = false;
+    this.from = Infinity;
+    this.to = 0;
   }
 }
 

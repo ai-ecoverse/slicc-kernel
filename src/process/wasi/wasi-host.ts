@@ -131,9 +131,14 @@ export class WasiHost {
 
   readonly o: WasiHostOptions;
   constructor(o: WasiHostOptions) {
-    this.o = o;
+    const { kernel } = o;
+    const call: WasiKernel['call'] = (req) => {
+      if (req.op !== 'fd-promote') this.fds.flushEarly();
+      return kernel.call(req);
+    };
+    this.o = { ...o, kernel: { ...kernel, call } };
     this.startCwd = o.cwd;
-    this.fds = new WasiFds(o.kernel, o.fs);
+    this.fds = new WasiFds(this.o.kernel, o.fs);
     if (o.shared) this.fds.share(o.shared, true);
     else if (o.forked) this.fds.restore(o.forked.fds, o.forked.cloexec);
     else this.fds.setup(o.cwd, o.inherited ?? [], o.preopenRoot === true);

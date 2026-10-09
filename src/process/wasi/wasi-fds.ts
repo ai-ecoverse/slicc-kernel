@@ -436,6 +436,14 @@ export class WasiFds {
     for (const buffer of this.buffers.values()) buffer.flush();
   }
 
+  flushEarly(): void {
+    for (const buffer of this.buffers.values()) {
+      try {
+        buffer.flush();
+      } catch {}
+    }
+  }
+
   flushPath(path: string): void {
     for (const [p, buffer] of this.buffers) if (within(p, path)) buffer.flush();
 
