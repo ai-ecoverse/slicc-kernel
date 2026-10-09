@@ -392,6 +392,7 @@ export function positionalIo(imports: WebAssembly.Imports, deps: PositionalDeps)
 
 const PROT_WRITE = 2;
 const MAP_PRIVATE = 2;
+const MAP_TYPE = 0xf;
 const O_WRONLY = 1;
 const MAP_ALIGN = 65536;
 
@@ -418,7 +419,7 @@ export function useFileMmap(Fs: ProcessFs, deps: MmapDeps): void {
   fs.mmap = (stream, length, position, prot, flags) => {
     const memalign = deps.memalign();
     const memory = deps.memory();
-    const shared = (flags & MAP_PRIVATE) === 0 && (prot & PROT_WRITE) !== 0;
+    const shared = (flags & MAP_TYPE) !== MAP_PRIVATE && (prot & PROT_WRITE) !== 0;
     const kfd = stream.sliccKernelFile ? stream.sliccKernelFd : undefined;
     if (
       (stream.stream_ops.mmap && kfd === undefined) ||
@@ -431,19 +432,24 @@ export function useFileMmap(Fs: ProcessFs, deps: MmapDeps): void {
     ) {
       return mmap.call(fs, stream, length, position, prot, flags);
     }
+    const data = new Uint8Array(length);
+    let done = 0;
+    try {
+      if (kfd !== undefined) done = readInto(deps.sys, kfd, data, position);
+      else {
+        for (let got = 1; done < length && got > 0; done += got) {
+          got = Fs.read(stream, data, done, length - done, position + done);
+        }
+      }
+    } catch (err) {
+      throw new Fs.ErrnoError(errnoOf(err));
+    }
     const size = Math.ceil(length / MAP_ALIGN) * MAP_ALIGN;
     const ptr = memalign(MAP_ALIGN, size);
     if (!ptr) throw new Fs.ErrnoError(wasiErrno('ENOMEM'));
-    const target = () => new Uint8Array(memory.buffer, ptr, size);
-    target().fill(0);
-    if (kfd !== undefined) readInto(deps.sys, kfd, target().subarray(0, length), position);
-    else {
-      for (let done = 0; done < length; ) {
-        const got = Fs.read(stream, target(), done, length - done, position + done);
-        if (got <= 0) break;
-        done += got;
-      }
-    }
+    const target = new Uint8Array(memory.buffer, ptr, size);
+    target.fill(0);
+    target.set(data.subarray(0, done));
     return { ptr, allocated: true };
   };
 }
