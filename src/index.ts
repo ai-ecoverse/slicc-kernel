@@ -56,6 +56,7 @@ export interface KernelOptions {
   modules?: string;
   env?: Record<string, string>;
   metadata?: string | false;
+  media?: string | false;
   worker?: string | URL;
   network?: NetworkOptions;
   requestDirectory?: () => Promise<FileSystemDirectoryHandle>;
@@ -293,6 +294,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     ...(options.modules ? { modules: options.modules } : {}),
     ...(options.env ? { env: options.env } : {}),
     ...(options.metadata !== undefined ? { metadata: options.metadata } : {}),
+    ...(options.media !== undefined ? { media: options.media } : {}),
     ...(transport ? { transport: transport.traits } : {}),
     ...(options.hostfs ? { hostfs: true } : {}),
     ...(options.processMounts !== undefined
