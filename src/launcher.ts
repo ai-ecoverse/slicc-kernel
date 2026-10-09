@@ -372,7 +372,11 @@ export class Launcher {
     }
     const glue = await followLinks(this.base, this.fs.resolvePath(cwd, file));
     const linked = COMMAND.exec(glue)?.[1];
-    if (linked !== undefined) return this.resolve(`/bin/${linked}`, argv0, cwd);
+    if (linked !== undefined) {
+      const target = await this.resolve(`/bin/${linked}`, argv0, cwd);
+      const byPath = (await this.commands()).get(linked)?.argv0Path === true;
+      return target && byPath ? { ...target, argv0: this.fs.resolvePath(cwd, file) } : target;
+    }
     const head = await this.head(glue);
     if (!head) return undefined;
     if (isWasm(head)) {
