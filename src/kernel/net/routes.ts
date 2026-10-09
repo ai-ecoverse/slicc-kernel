@@ -69,7 +69,9 @@ function addressBits(host: string): { v6: boolean; bits: bigint } | undefined {
 }
 
 function parsePrefix(text: string): Prefix | undefined {
-  const [address = '', size] = text.trim().split('/');
+  const parts = text.trim().split('/');
+  if (parts.length > 2) return undefined;
+  const [address = '', size] = parts;
   const parsed = addressBits(address);
   if (!parsed) return undefined;
   const max = parsed.v6 ? 128 : 32;

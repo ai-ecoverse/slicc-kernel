@@ -422,7 +422,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     connect: async (connectOptions = {}) =>
       (await call({
         op: 'connect',
-        ...(connectOptions.network ? { network: connectOptions.network } : {}),
+        ...(connectOptions.network !== undefined ? { network: connectOptions.network } : {}),
       })) as MessagePort,
     setRoutes: async (routes) => void (await call({ op: 'routes', routes })),
     dial,

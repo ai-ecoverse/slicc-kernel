@@ -23,7 +23,9 @@ export interface NetworkUplink {
   ): Promise<string[] | ResolveAnswer>;
 }
 
-export type UplinkCall = { uplink: 'resolve'; uid: number; name: string; family: ResolveFamily };
+export type UplinkCall =
+  | { uplink: 'resolve'; uid: number; name: string; family: ResolveFamily }
+  | { uplink: 'cancel'; uid: number };
 
 export type UplinkReply =
   | { uplink: 'resolved'; uid: number; addresses: string[]; ttl?: number }
@@ -59,13 +61,19 @@ function failure(uid: number, e: unknown): UplinkReply {
 }
 
 export function serveUplink(peer: UplinkPeer, uplink: NetworkUplink): (call: UplinkCall) => void {
+  const pending = new Map<number, AbortController>();
   return (call) => {
+    if (call.uplink === 'cancel') return pending.get(call.uid)?.abort();
+    const abort = new AbortController();
+    pending.set(call.uid, abort);
     void (async () => {
       try {
-        const answer = answerOf(await uplink.resolve(call.name, call.family));
+        const answer = answerOf(await uplink.resolve(call.name, call.family, abort.signal));
         peer.postMessage({ uplink: 'resolved', uid: call.uid, ...answer });
       } catch (e) {
         peer.postMessage(failure(call.uid, e));
+      } finally {
+        pending.delete(call.uid);
       }
     })();
   };
@@ -101,6 +109,7 @@ export class RemoteUplink implements NetworkUplink {
       'abort',
       () => {
         this.waiting.delete(uid);
+        this.port.postMessage({ uplink: 'cancel', uid });
         waiter.reject(signal.reason);
       },
       { once: true }
