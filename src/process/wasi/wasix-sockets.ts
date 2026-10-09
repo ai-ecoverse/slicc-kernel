@@ -42,11 +42,20 @@ export function readAddr(view: DataView, ptr: number): SockAddr {
     return { family: 'inet', host, port };
   }
   if (tag === INET6) {
-    const bytes = new Uint8Array(view.buffer, ptr + 4, 16);
-    const any = bytes.every((b) => b === 0);
-    return { family: 'inet', host: any ? '0.0.0.0' : LOOPBACK, port };
+    return { family: 'inet', host: ipv6Host(new Uint8Array(view.buffer, ptr + 4, 16)), port };
   }
   throw new WasiError('EAFNOSUPPORT');
+}
+
+function ipv6Host(bytes: Uint8Array): string {
+  const zeros = (n: number) => bytes.subarray(0, n).every((b) => b === 0);
+  if (zeros(16)) return '0.0.0.0';
+  if (zeros(15) && bytes[15] === 1) return LOOPBACK;
+  if (zeros(10) && bytes[10] === 0xff && bytes[11] === 0xff) return bytes.subarray(12).join('.');
+  const groups = [0, 2, 4, 6, 8, 10, 12, 14].map((i) =>
+    ((bytes[i] << 8) | bytes[i + 1]).toString(16)
+  );
+  return new URL(`http://[${groups.join(':')}]/`).hostname.slice(1, -1);
 }
 
 export function writeAddr(view: DataView, ptr: number, addr: SockAddr | undefined): void {
