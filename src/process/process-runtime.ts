@@ -27,6 +27,7 @@ import {
   type FdImports,
   type GlueSyscalls,
   noFollowUtimes,
+  pathOpensLinks,
   positionalIo,
   syncFsync,
   trackCloseOnExec,
@@ -458,6 +459,7 @@ export async function runWasmProcess(
         const fs = (m as RunningModule).FS;
 
         trackCloseOnExec(fs);
+        pathOpensLinks(fs);
         try {
           fs.mkdirTree(init.cwd);
           fs.chdir(init.cwd);

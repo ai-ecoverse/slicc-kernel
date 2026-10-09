@@ -222,6 +222,21 @@ interface UtimeFs {
   ErrnoError?: new (errno: number) => Error;
 }
 
+const O_PATH = 0o10000000;
+
+interface MayOpenFs {
+  mayOpen?(node: { mode: number }, flags: number): number;
+  isLink?(mode: number): boolean;
+}
+
+export function pathOpensLinks(Fs: ProcessFs): void {
+  const fs = Fs as unknown as MayOpenFs;
+  const { mayOpen, isLink } = fs;
+  if (!mayOpen || !isLink) return;
+  fs.mayOpen = (node, flags) =>
+    flags & O_PATH && isLink.call(fs, node.mode) ? 0 : mayOpen.call(fs, node, flags);
+}
+
 export function noFollowUtimes(
   imports: WebAssembly.Imports,
   fs: () => ProcessFs | undefined,
