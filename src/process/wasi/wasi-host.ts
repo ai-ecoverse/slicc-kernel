@@ -136,7 +136,17 @@ export class WasiHost {
       if (req.op !== 'fd-promote') this.fds.flushEarly();
       return kernel.call(req);
     };
-    this.o = { ...o, kernel: { ...kernel, call } };
+    const sys = new Proxy(kernel.sys, {
+      get: (target, name) => {
+        const member = Reflect.get(target, name);
+        if (typeof member !== 'function') return member;
+        return (...args: unknown[]) => {
+          this.fds.flushEarly();
+          return member.apply(target, args);
+        };
+      },
+    });
+    this.o = { ...o, kernel: { sys, call } };
     this.startCwd = o.cwd;
     this.fds = new WasiFds(this.o.kernel, o.fs);
     if (o.shared) this.fds.share(o.shared, true);
