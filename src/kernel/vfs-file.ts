@@ -4,6 +4,7 @@ export interface VfsFileFs {
   readFileBuffer(path: string): Promise<Uint8Array>;
   writeFile(path: string, content: Uint8Array): Promise<void>;
   stat?(path: string): Promise<{ readonly?: boolean; maxFile?: number }>;
+  readlink?(path: string): Promise<string>;
 }
 
 const O_ACCMODE = 0o3;
@@ -307,6 +308,53 @@ export class VfsNodes {
   }
 }
 
+const MAX_LINKS = 40;
+
+function parentOf(path: string): string {
+  return path.slice(0, path.lastIndexOf('/')) || '/';
+}
+
+async function linkOf(fs: VfsFileFs, path: string): Promise<string | undefined> {
+  return fs.readlink?.(path).catch(() => undefined);
+}
+
+async function realDir(fs: VfsFileFs, dir: string): Promise<string> {
+  const queue = dir.split('/').filter(Boolean);
+  let at = '/';
+  let hops = 0;
+  while (queue.length > 0) {
+    const part = queue.shift() as string;
+    if (part === '.') continue;
+    if (part === '..') {
+      at = parentOf(at);
+      continue;
+    }
+    const next = at === '/' ? `/${part}` : `${at}/${part}`;
+    const link = hops < MAX_LINKS ? await linkOf(fs, next) : undefined;
+    if (link === undefined) {
+      at = next;
+      continue;
+    }
+    hops++;
+    queue.unshift(...link.split('/').filter(Boolean));
+    if (link.startsWith('/')) at = '/';
+  }
+  return at;
+}
+
+async function targetDir(fs: VfsFileFs, path: string): Promise<string> {
+  let dir = await realDir(fs, parentOf(path));
+  let name = path.slice(path.lastIndexOf('/') + 1);
+  for (let hops = 0; hops < MAX_LINKS; hops++) {
+    const link = await linkOf(fs, dir === '/' ? `/${name}` : `${dir}/${name}`);
+    if (link === undefined) return dir;
+    const target = link.startsWith('/') ? link : `${dir}/${link}`;
+    dir = await realDir(fs, parentOf(target));
+    name = target.slice(target.lastIndexOf('/') + 1);
+  }
+  return dir;
+}
+
 export async function refuseReadonly(
   fs: VfsFileFs,
   path: string,
@@ -321,10 +369,9 @@ export async function refuseReadonly(
       if (isMissing(err) || typeof code !== 'string') return undefined;
       throw err;
     });
-  const parent = path.slice(0, path.lastIndexOf('/')) || '/';
   const own = await stat(path);
   if (own && !writes) return;
-  const st = own ?? (await stat(parent));
+  const st = own ?? (await stat(await targetDir(fs, path)));
   if (st?.readonly) throw new KernelError('EROFS');
 }
 
