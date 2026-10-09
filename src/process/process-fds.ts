@@ -412,6 +412,14 @@ export interface MmapDeps {
   memalign: () => Memalign | undefined;
 }
 
+function staging(Fs: ProcessFs, length: number): Uint8Array {
+  try {
+    return new Uint8Array(length);
+  } catch {
+    throw new Fs.ErrnoError(wasiErrno('ENOMEM'));
+  }
+}
+
 export function useFileMmap(Fs: ProcessFs, deps: MmapDeps): void {
   const fs = Fs as ProcessFs & { mmap?: Mmap };
   const mmap = fs.mmap;
@@ -432,7 +440,7 @@ export function useFileMmap(Fs: ProcessFs, deps: MmapDeps): void {
     ) {
       return mmap.call(fs, stream, length, position, prot, flags);
     }
-    const data = new Uint8Array(length);
+    const data = staging(Fs, length);
     let done = 0;
     try {
       if (kfd !== undefined) done = readInto(deps.sys, kfd, data, position);
