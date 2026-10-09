@@ -335,6 +335,8 @@ Unit tests live in `test/unit/`, which stays out of git. They run real wasm bash
 
 The Biome, TypeScript, lefthook, Renovate and CI configuration comes from [slicc-shared-web](https://github.com/ai-ecoverse/slicc-shared-web), which also provides the `slicc-lint-comments` (no comments anywhere), `slicc-no-unit-tests` (no unit tests in git) and `slicc-diff-cover` (100% coverage of changed lines) commands that `npm run lint` and the pre-commit hook use.
 
+`tools/big-file.mjs [bytes]` is a manual check, not part of any suite. It writes a file of that size (64 MiB by default) through a tmpfs mount with the unit-test launcher, reads it back, and prints the peak RSS and its ratio to the file size. A whole file is still held in memory several times over (#86), so a 1.1 GiB file peaked at 18 GB of RSS. **Do not run it past 1 GiB on a workstation.** It refuses anything over 256 MiB unless `SLICC_BIG_FILE_I_HAVE_THE_RAM=1` is set. Measure a small file and extrapolate instead.
+
 Releases are cut by semantic-release on every push to `main`. A failure after the version is tagged (a rejected push, a failed `npm publish`) doesn't strand that version: `tools/release-recover.mjs` runs next. For any version tagged at HEAD, it first pushes the tag if origin lacks it, then publishes the version if npm lacks it, with retries, and creates its GitHub release if that is missing too. Re-running the Release workflow completes such a version the same way.
 
 ## License

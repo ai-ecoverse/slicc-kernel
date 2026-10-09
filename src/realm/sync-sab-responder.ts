@@ -8,12 +8,14 @@ import {
   encodeSabResult,
   SAB_I_CHUNK,
   SAB_I_OFFSET,
+  SAB_I_OFFSET_HI,
   SAB_I_PUB,
   SAB_I_REQ,
   SAB_I_SEQ,
   SAB_I_STATE,
   SAB_I_STATUS,
   SAB_I_TOTAL,
+  SAB_I_TOTAL_HI,
   SAB_STATE_READY,
   type SabViews,
   SYNC_SAB_NEXT_MSG,
@@ -21,6 +23,7 @@ import {
   type SyncSabNextMsg,
   type SyncSabReqMsg,
   sabViews,
+  storeU53,
 } from './sync-sab-wire.ts';
 
 export interface SabPortLike {
@@ -74,9 +77,9 @@ export function attachSyncSabResponder(
     const chunk = Math.min(window.byteLength, entry.payload.byteLength - offset);
     if (chunk > 0) window.set(entry.payload.subarray(offset, offset + chunk));
     Atomics.store(header, SAB_I_STATUS, entry.status);
-    Atomics.store(header, SAB_I_TOTAL, entry.payload.byteLength);
+    storeU53(header, SAB_I_TOTAL, SAB_I_TOTAL_HI, entry.payload.byteLength);
     Atomics.store(header, SAB_I_CHUNK, chunk);
-    Atomics.store(header, SAB_I_OFFSET, offset);
+    storeU53(header, SAB_I_OFFSET, SAB_I_OFFSET_HI, offset);
     Atomics.store(header, SAB_I_SEQ, id);
     Atomics.store(header, SAB_I_STATE, SAB_STATE_READY);
     Atomics.add(header, SAB_I_PUB, 1);
