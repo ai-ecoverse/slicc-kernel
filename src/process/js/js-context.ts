@@ -249,11 +249,11 @@ export function createContext(o: ContextOptions): CreatedContext {
 
   const open = async (path: string, options: JsOpenOptions = {}): Promise<JsFile> => {
     const abs = resolve(path);
-    const existing = await statOf('stat', abs).catch((err: unknown) => {
+    const exclusive = options.create === true && options.exclusive === true;
+    const existing = await statOf(exclusive ? 'lstat' : 'stat', abs).catch((err: unknown) => {
       if (err instanceof JsCallError && err.code === 'ENOENT') return undefined;
       throw err;
     });
-    const exclusive = options.create === true && options.exclusive === true;
     if (existing && exclusive) throw new JsCallError('EEXIST', abs);
     if (!existing && !options.create) throw new JsCallError('ENOENT', abs);
     if (existing?.isDirectory) throw new JsCallError('EISDIR', abs);

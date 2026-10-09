@@ -164,6 +164,10 @@ export class VfsNode {
     return this.data;
   }
 
+  holds(): boolean {
+    return this.dirty;
+  }
+
   replace(contents: Uint8Array): void {
     this.ranged = undefined;
     this.data = new Uint8Array(contents);
@@ -297,20 +301,29 @@ export class VfsNodes {
     this.fs = fs;
   }
 
-  onEntry<T>(path: string, op: () => Promise<T>): Promise<T> {
-    const run = (this.entries.get(path) ?? Promise.resolve()).then(op);
+  async onEntry<T>(path: string, op: () => Promise<T>): Promise<T> {
+    const key = await this.entryKey(path);
+    const run = (this.entries.get(key) ?? Promise.resolve()).then(op);
     const tail = run.catch(() => undefined);
-    this.entries.set(path, tail);
+    this.entries.set(key, tail);
     void tail.then(() => {
-      if (this.entries.get(path) === tail) this.entries.delete(path);
+      if (this.entries.get(key) === tail) this.entries.delete(key);
     });
     return run;
   }
 
+  private async entryKey(path: string): Promise<string> {
+    const parent = parentOf(path);
+    const dir = await realDir(this.fs, parent).catch(() => parent);
+    const name = path.slice(path.lastIndexOf('/') + 1);
+    return dir === '/' ? `/${name}` : `${dir}/${name}`;
+  }
+
   createExclusive(path: string): Promise<void> {
     return this.onEntry(path, async () => {
-      const found = this.byPath.has(path) || (await present(this.fs, path));
-      if (found) throw fsError('EEXIST', path);
+      const node = this.byPath.get(path);
+      const held = node ? await node.serial(async () => node.holds()) : false;
+      if (held || (await present(this.fs, path))) throw fsError('EEXIST', path);
       await this.fs.writeFile(path, new Uint8Array(0));
     });
   }

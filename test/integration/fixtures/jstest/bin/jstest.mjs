@@ -292,6 +292,15 @@ async function badpos(ctx, [path]) {
   await ctx.write(1, `${tries.join(',')} ${text(await ctx.fs.readFile(path))}\n`);
 }
 
+async function selfloop(ctx, [path]) {
+  await ctx.fs.symlink(path.split('/').pop(), path);
+  const r = await ctx.open(path, { write: true, create: true, exclusive: true }).then(
+    () => 'opened',
+    (err) => err.code
+  );
+  await ctx.write(1, `${r}\n`);
+}
+
 async function nodir(ctx, [path]) {
   const r = await ctx.open(path, { write: true, create: true }).then(
     () => 'opened',
@@ -391,6 +400,7 @@ const modes = {
   exclusive,
   lock,
   nodir,
+  selfloop,
   unawaited,
   pid,
   ticker,
