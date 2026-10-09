@@ -223,8 +223,10 @@ export function wireKernelStdio(Fs: ProcessFs, streams: KernelStreams, sys?: Pro
     if (!stream) continue;
     const kind = sys?.kind?.(fd);
     if (kind && PLACED.has(kind)) {
+      const { flags } = stream;
       Fs.closeStream(fd);
-      placeKernelStream(Fs, streams, { fd, kernel: fd, kind: kind as InheritedFd['kind'] });
+      const kernel = { fd, kernel: fd, kind: kind as InheritedFd['kind'], flags };
+      placeKernelStream(Fs, streams, kernel).flags = flags;
       continue;
     }
     streams.attach(stream, fd);
