@@ -13,7 +13,7 @@ import {
 } from '../../realm/sync-sab-bridge.ts';
 import { publishMemory, SAB_HEADER_I32 } from '../../realm/sync-sab-wire.ts';
 import { SyscallError } from '../kernel-streams.ts';
-import { kernelSys } from '../process-runtime.ts';
+import { identify, kernelSys } from '../process-runtime.ts';
 import { SignalGate, type SignalHooks } from '../process-signals.ts';
 import { dylinkInfo } from './dylink.ts';
 import { cachingBridge } from './wasi-files.ts';
@@ -405,6 +405,7 @@ export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike
   });
   const main: { memory?: WebAssembly.Memory } = {};
   const { transport, sys, call: kernelCall, say } = kernelOf(init, port, signals, sizeOf(main));
+  const id = identify(transport, init);
 
   const stats = init.env.SLICC_WASI_STATS === '1' ? new WasiStats() : undefined;
   const call = stats ? timedCalls(stats, kernelCall) : kernelCall;
@@ -429,8 +430,9 @@ export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike
     args: [init.argv0, ...init.args],
     env: init.env,
     cwd: fork?.cwd ?? init.cwd,
-    pid: init.pid,
-    ...(init.ppid !== undefined ? { ppid: init.ppid } : {}),
+    pid: id.pid,
+    ppid: id.ppid,
+    parent: () => identify(transport, init).ppid,
     kernel: { sys: traced(stats, 'kernel', sys), call },
     fs: cachingBridge(traced(stats, 'fs', createSyncFsSabBridge(transport))),
     ...(fork?.shared && threads

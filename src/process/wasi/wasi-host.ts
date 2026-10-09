@@ -43,6 +43,7 @@ export interface WasiHostOptions {
   pid: number;
 
   ppid?: number;
+  parent?: () => number;
   kernel: WasiKernel;
 
   fs: SyncFsPosixBridge & { invalidate?(): void };

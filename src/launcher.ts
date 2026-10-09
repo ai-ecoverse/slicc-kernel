@@ -193,6 +193,7 @@ interface StartRequest {
   exec?: boolean;
   pgid?: number;
   ignored?: number;
+  decided?: Promise<void>;
 }
 
 const COMMAND = /^\/(?:usr\/)?bin\/([^/]+)$/;
@@ -201,6 +202,7 @@ const ENV_REFERENCE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
 const WASM_MAGIC = [0x00, 0x61, 0x73, 0x6d];
 const SHEBANG_MAX = 256;
 const NOT_FOUND = 127;
+const DECIDE_MS = 100;
 const INIT_PID = 1;
 const SHARED_DIRS = ['/tmp', '/home'];
 const encoder = new TextEncoder();
@@ -317,6 +319,7 @@ export class Launcher {
   private readonly fstabRetries: readonly number[];
   private readonly inserted = new Map<string, MediumHandle>();
   private readonly openFiles = new Set<VfsNodes>();
+  private readonly deciding = new Map<number, Set<() => void>>();
   private readonly nodes: VfsNodes;
   private readonly held = new Set<HeldPaths>();
   private readonly processMounts: ProcessMountPolicy;
@@ -550,8 +553,14 @@ export class Launcher {
     }
     const pid = this.nextPid++;
     const terminal = req.fds.stdioTerminal();
+    const decided = req.decided ?? Promise.resolve();
     const handle = spawnWasmProcess({
       pid,
+      identity: async () => {
+        await decided;
+        return this.identityOf(pid);
+      },
+      onSyscall: () => this.decide(pid),
       ...(req.ignored ? { ignored: req.ignored } : {}),
       program: req.program,
       argv0: req.argv0,
@@ -658,7 +667,9 @@ export class Launcher {
         throw new SpawnError(await this.unrunnable(req.file, req.cwd));
       }
       const exec = req.exec ? { exec: true } : {};
+      const deciding = req.exec ? undefined : this.undecided(ppid);
       const handle = await this.launch(planned, {
+        ...(deciding ? { decided: deciding.promise } : {}),
         env: req.env,
         cwd: req.cwd,
         fds,
@@ -667,8 +678,38 @@ export class Launcher {
         ignored: this.ignoredBy(ppid),
         ...exec,
       });
+      deciding?.attach();
       return childHandle(handle);
     };
+  }
+
+  private undecided(ppid: number) {
+    const decided = Promise.withResolvers<void>();
+    const timer = setTimeout(decided.resolve, DECIDE_MS);
+    void decided.promise.then(() => clearTimeout(timer));
+    return {
+      promise: decided.promise,
+      attach: () => {
+        const waiting = this.deciding.get(ppid) ?? new Set();
+        waiting.add(decided.resolve);
+        this.deciding.set(ppid, waiting);
+      },
+    };
+  }
+
+  private identityOf(pid: number): { pid: number; ppid: number } {
+    const parent = this.jobs.shownParent(pid);
+    const alive = parent !== undefined && this.jobs.has(parent);
+    return { pid: this.jobs.shown(pid), ppid: alive ? parent : INIT_PID };
+  }
+
+  private decide(ppid: number): void {
+    const waiting = this.deciding.get(ppid);
+    if (!waiting) return;
+    this.deciding.delete(ppid);
+    setTimeout(() => {
+      for (const resolve of waiting) resolve();
+    }, 0);
   }
 
   private forker(ppid: number, parent: StartRequest): ChildForker {

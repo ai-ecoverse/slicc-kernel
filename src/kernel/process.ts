@@ -147,6 +147,7 @@ export type WasmSyscall =
   | ({ op: 'mount' } & MountCall)
   | { op: 'umount'; target: string; flags: number }
   | { op: 'proc-exec'; pid: number }
+  | { op: 'proc-identity' }
   | { op: 'proc-setpgid'; pid: number; pgid: number }
   | { op: 'proc-getpgid'; pid: number }
   | { op: 'proc-getsid'; pid: number }
@@ -280,6 +281,7 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'mount',
   'umount',
   'proc-exec',
+  'proc-identity',
   'proc-setpgid',
   'proc-getpgid',
   'proc-getsid',
@@ -307,6 +309,10 @@ const HOSTS_ONLY = new Resolver({ routes: new Routes() });
 
 export interface WasmProcessOptions {
   ignored?: number;
+
+  identity?: () => Promise<{ pid: number; ppid: number }>;
+
+  onSyscall?: () => void;
 
   spawner?: ChildSpawner;
 
@@ -465,6 +471,7 @@ export class WasmProcess {
   }
 
   async syscall(req: WasmSyscall): Promise<SyncFsResult> {
+    this.options.onSyscall?.();
     for (;;) {
       await this.resumed;
       const stops = this.stops;
@@ -845,6 +852,8 @@ export class WasmProcess {
         const waited = await this.children.wait(req.pid, req.nohang, signal, flags);
         return { ok: true, kind: 'json', json: waited };
       }
+      case 'proc-identity':
+        return { ok: true, kind: 'json', json: (await this.options.identity?.()) ?? null };
       case 'proc-exec': {
         this.execChild = req.pid;
         this.options.jobs?.exec(this.pid, req.pid);

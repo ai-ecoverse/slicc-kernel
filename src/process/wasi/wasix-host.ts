@@ -168,7 +168,7 @@ export class WasixHost {
       proc_id: (out: number) => void mem.view().setUint32(out, host.o.pid, true),
       proc_parent: (pid: number, out: number) => {
         if (pid !== 0 && pid !== host.o.pid) throw new WasiError('ESRCH');
-        mem.view().setUint32(out, host.o.ppid ?? 1, true);
+        mem.view().setUint32(out, host.o.parent?.() ?? host.o.ppid ?? 1, true);
       },
       getcwd: (buf: number, lenPtr: number) => {
         const bytes = new TextEncoder().encode(host.cwd);

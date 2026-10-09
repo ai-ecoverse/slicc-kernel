@@ -313,6 +313,20 @@ export const EVAL_BLOCKED =
   "the wasm realm evaluates the program's Emscripten glue, and this page's CSP forbids eval " +
   "(no 'unsafe-eval')";
 
+export function identify(
+  transport: SyncSabTransport,
+  init: { pid: number; ppid?: number }
+): { pid: number; ppid: number } {
+  const r = transport.call({ op: 'proc-identity' }, Number.POSITIVE_INFINITY, 'proc-identity');
+  const id = r.ok && r.kind === 'json' ? (r.json as { pid: number; ppid: number } | null) : null;
+  return id ?? { pid: init.pid, ppid: init.ppid ?? 1 };
+}
+
+export function liveParent(imports: WebAssembly.Imports, parent: () => number): void {
+  const env = imports.env as Record<string, unknown> | undefined;
+  if (env && typeof env.slicc_getppid_js === 'function') env.slicc_getppid_js = parent;
+}
+
 export function signalMasks(
   m: Pick<RunningModule, 'sliccSigMask'>
 ): { caught: number; ignored: number; restart: number } | null {
@@ -364,12 +378,12 @@ export async function runWasmProcess(
     ready = resolve;
     failed = reject;
   });
+  const id = identify(transport, init);
   const module = {
     noInitialRun: true,
     thisProgram: init.argv0,
-    sliccPid: init.pid,
-
-    ...(init.ppid !== undefined ? { sliccPpid: init.ppid } : {}),
+    sliccPid: id.pid,
+    sliccPpid: id.ppid,
     sliccEnv: init.env,
     print: say(1),
     printErr: say(2),
@@ -394,6 +408,7 @@ export async function runWasmProcess(
               },
             },
           });
+          liveParent(imports, () => identify(transport, init).ppid);
           const glue = ownValue<FdImports>(module, 'sliccFdImports');
           syncFsync(imports, () => ownValue<ProcessFs>(module, 'FS'), glue);
           positionalIo(imports, {

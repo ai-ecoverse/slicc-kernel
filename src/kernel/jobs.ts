@@ -58,6 +58,10 @@ export class JobTable {
     if (execer) execer.execed = true;
   }
 
+  has(pid: number): boolean {
+    return this.members.has(pid);
+  }
+
   shown(pid: number): number {
     let member = this.members.get(pid);
     for (let up = member; up; up = this.members.get(up.execParent ?? -1)) member = up;
