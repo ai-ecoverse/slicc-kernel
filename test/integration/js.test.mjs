@@ -130,6 +130,9 @@ test('on a terminal: isatty, ^C to a handler or by default, ^Z, then kill', asyn
   await type('echo "rc $?"\r', 'rc 130');
   await type('jstest wait\r', 'ready');
   await type('\u001a', 'Stopped');
-  await type('kill %1; wait %1; echo "killed $?"\r', 'killed 143');
+  const stopped = (await screen()).length;
+  await type('kill %1\r');
+  await type('sleep 0.3; jobs; echo "listed $?"\r', 'listed 0');
+  await until('Terminated', stopped);
   assert.deepEqual(page.errors, []);
 });
