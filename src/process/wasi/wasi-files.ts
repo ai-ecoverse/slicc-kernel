@@ -232,6 +232,7 @@ export type WasiEntry =
       path: string;
 
       preopen?: string;
+      twin?: number;
       listing?: DirListing;
     }
   | {

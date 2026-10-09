@@ -9,6 +9,7 @@ export interface Command {
   wasm: string;
   argv0: string;
   argv0Path?: boolean;
+  preopenRoot?: boolean;
   args?: string[];
   env?: Record<string, string>;
   unset?: string[];
@@ -22,6 +23,7 @@ interface CommandEntry {
   wasm?: unknown;
   argv0?: unknown;
   argv0Path?: unknown;
+  preopenRoot?: unknown;
   args?: unknown;
   env?: unknown;
   script?: unknown;
@@ -106,6 +108,7 @@ function commandOf(
     wasm,
     argv0,
     ...(raw.argv0Path === true ? { argv0Path: true } : {}),
+    ...(abi === 'wasi' && raw.preopenRoot === true ? { preopenRoot: true } : {}),
     ...(args ? { args } : {}),
     ...withEnv,
     ...(imports ? { imports } : {}),

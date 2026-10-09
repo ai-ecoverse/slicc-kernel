@@ -17,13 +17,13 @@ import { kernelSys } from '../process-runtime.ts';
 import { SignalGate, type SignalHooks } from '../process-signals.ts';
 import { dylinkInfo } from './dylink.ts';
 import { cachingBridge } from './wasi-files.ts';
-import { WasiExit, type WasiFunction, WasiHost } from './wasi-host.ts';
+import { WasiExit, type WasiFunction, WasiHost, type WasiHostOptions } from './wasi-host.ts';
 import { importsContext, loadImports, type ProgramImports, type Raw } from './wasi-imports.ts';
 import { type ForeignResults, type ImportedMemory, RESERVED_NAMESPACES } from './wasi-module.ts';
 import { WasiSignals } from './wasi-signals.ts';
 import { WasiStats } from './wasi-stats.ts';
 import { MAIN_TID, ThreadExit, threadCap, WasiThreads } from './wasi-threads.ts';
-import { AsyncifyDriver } from './wasix-fork.ts';
+import { AsyncifyDriver, type WasiForkState } from './wasix-fork.ts';
 import { WasixHost } from './wasix-host.ts';
 import { type LinkerHost, type LinkRecord, WasixLinker } from './wasix-linker.ts';
 import { mainModule, nameFrame, sidecarNames } from './wasm-names.ts';
@@ -396,6 +396,16 @@ class LinkSync {
 
 const DL_GEN = 3;
 
+function descriptors(
+  init: WasmProcessInitMsg,
+  fork: WasiForkState | undefined,
+  threads: WasiThreads | undefined
+): Pick<WasiHostOptions, 'shared' | 'forked' | 'inherited' | 'preopenRoot'> {
+  if (fork?.shared && threads) return { shared: threads.ids };
+  if (fork) return { forked: { fds: fork.fds, cloexec: fork.cloexec } };
+  return { inherited: init.fds ?? [], ...(init.program.preopenRoot ? { preopenRoot: true } : {}) };
+}
+
 export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike): Promise<number> {
   captureBacktraces(init.env);
 
@@ -433,11 +443,7 @@ export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike
     ...(init.ppid !== undefined ? { ppid: init.ppid } : {}),
     kernel: { sys: traced(stats, 'kernel', sys), call },
     fs: cachingBridge(traced(stats, 'fs', createSyncFsSabBridge(transport))),
-    ...(fork?.shared && threads
-      ? { shared: threads.ids }
-      : fork
-        ? { forked: { fds: fork.fds, cloexec: fork.cloexec } }
-        : { inherited: init.fds }),
+    ...descriptors(init, fork, threads),
   });
   if (threads) {
     threads.beforeSpawn = () => {

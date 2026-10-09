@@ -29,7 +29,7 @@ const O_APPEND = 0o2000;
 
 export type WasiForkFd =
   | { fd: number; type: 'kernel'; nonblock: boolean; append: boolean }
-  | { fd: number; type: 'dir'; path: string; preopen?: string }
+  | { fd: number; type: 'dir'; path: string; preopen?: string; twin?: number }
   | { fd: number; type: 'device'; device: 'null' | 'zero' | 'urandom'; access?: DeviceAccess };
 
 const DEVICES: Readonly<Record<string, Device>> = {
@@ -72,10 +72,11 @@ export class WasiFds {
       kind?: KernelFdKind;
       flags?: number;
       device?: DeviceMeta;
-    }>
+    }>,
+    root = false
   ): void {
     for (const fd of [0, 1, 2]) this.table.set(fd, kernelEntry());
-    const preopens = this.preopens(cwd);
+    const preopens = this.preopens(cwd, root);
     const top = 3 + preopens.length;
     for (const { fd, kind, flags, device } of inherited) {
       let at = fd;
@@ -97,8 +98,10 @@ export class WasiFds {
     });
   }
 
-  private preopens(cwd: string): WasiEntry[] {
-    const out: WasiEntry[] = [{ type: 'dir', path: normalize(cwd), preopen: '.' }];
+  private preopens(cwd: string, root: boolean): WasiEntry[] {
+    const here = normalize(cwd);
+    const dot: Extract<WasiEntry, { type: 'dir' }> = { type: 'dir', path: here, preopen: '.' };
+    const out: WasiEntry[] = [dot];
     let names: string[] = [];
     try {
       names = this.fs.readdir('/');
@@ -115,6 +118,13 @@ export class WasiFds {
       try {
         if (this.fs.stat(path).isDirectory) out.push({ type: 'dir', path, preopen: path });
       } catch {}
+    }
+    if (root) {
+      out.push(
+        { type: 'dir', path: '/', preopen: '/' },
+        { type: 'dir', path: here, preopen: './' }
+      );
+      dot.twin = 3 + out.length - 1;
     }
     return out;
   }
@@ -301,9 +311,13 @@ export class WasiFds {
   chdir(path: string): void {
     const dot = this.find(3);
     if (dot?.type !== 'dir' || dot.preopen !== '.') return;
-    dot.path = path;
-
-    this.kernel.call({ op: 'fd-meta', fd: 3, meta: { dir: path, preopen: '.' } });
+    const moved: Array<[number, Extract<WasiEntry, { type: 'dir' }>]> = [[3, dot]];
+    const twin = dot.twin === undefined ? undefined : this.find(dot.twin);
+    if (twin?.type === 'dir' && twin.preopen === './') moved.push([dot.twin as number, twin]);
+    for (const [fd, e] of moved) {
+      e.path = path;
+      this.kernel.call({ op: 'fd-meta', fd, meta: metaOf(e) as HeldMeta });
+    }
     this.bump();
   }
 
@@ -335,8 +349,7 @@ export class WasiFds {
     for (const [fd, e] of this.table) {
       if (e.type === 'kernel')
         out.push({ fd, type: 'kernel', nonblock: e.nonblock, append: e.append });
-      else if (e.type === 'dir')
-        out.push({ fd, type: 'dir', path: e.path, ...(e.preopen ? { preopen: e.preopen } : {}) });
+      else if (e.type === 'dir') out.push({ fd, type: 'dir', path: e.path, ...preopenOf(e) });
       else if (e.type === 'device') out.push({ fd, ...deviceEntry(e) });
     }
     return out;
@@ -348,11 +361,7 @@ export class WasiFds {
       if (f.type === 'kernel')
         this.table.set(f.fd, { type: 'kernel', nonblock: f.nonblock, append: f.append });
       else if (f.type === 'dir')
-        this.table.set(f.fd, {
-          type: 'dir',
-          path: f.path,
-          ...(f.preopen ? { preopen: f.preopen } : {}),
-        });
+        this.table.set(f.fd, { type: 'dir', path: f.path, ...preopenOf(f) });
       else this.table.set(f.fd, deviceEntry(f));
     }
     for (const fd of cloexec) this.cloexec.add(fd);
@@ -570,19 +579,22 @@ function deviceEntry(meta: DeviceMeta): Extract<WasiEntry, { type: 'device' }> {
   return { type: 'device', device: meta.device, ...(meta.access ? { access: meta.access } : {}) };
 }
 
+function preopenOf(e: { preopen?: string; twin?: number }): { preopen?: string; twin?: number } {
+  return {
+    ...(e.preopen ? { preopen: e.preopen } : {}),
+    ...(e.twin !== undefined ? { twin: e.twin } : {}),
+  };
+}
+
 function metaOf(e: WasiEntry): HeldMeta | undefined {
-  if (e.type === 'dir') return { dir: e.path, ...(e.preopen ? { preopen: e.preopen } : {}) };
+  if (e.type === 'dir') return { dir: e.path, ...preopenOf(e) };
   if (e.type === 'device') return { device: e.device, ...(e.access ? { access: e.access } : {}) };
   return undefined;
 }
 
 function entryOf(info: FdInfo): WasiEntry | undefined {
   if (info.meta && 'dir' in info.meta) {
-    return {
-      type: 'dir',
-      path: info.meta.dir,
-      ...(info.meta.preopen ? { preopen: info.meta.preopen } : {}),
-    };
+    return { type: 'dir', path: info.meta.dir, ...preopenOf(info.meta) };
   }
   if (info.meta && 'device' in info.meta) return deviceEntry(info.meta);
   if (info.kind === 'held') return undefined;

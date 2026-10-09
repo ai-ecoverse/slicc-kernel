@@ -57,6 +57,8 @@ export interface WasiHostOptions {
   shared?: Int32Array;
 
   forked?: { fds: readonly WasiForkFd[]; cloexec: readonly number[] };
+
+  preopenRoot?: boolean;
 }
 
 export type WasiFunction = (...args: never[]) => number | undefined;
@@ -133,7 +135,7 @@ export class WasiHost {
     this.fds = new WasiFds(o.kernel, o.fs);
     if (o.shared) this.fds.share(o.shared, true);
     else if (o.forked) this.fds.restore(o.forked.fds, o.forked.cloexec);
-    else this.fds.setup(o.cwd, o.inherited ?? []);
+    else this.fds.setup(o.cwd, o.inherited ?? [], o.preopenRoot === true);
     this.listening = o.shared ? [] : this.fds.sockets();
   }
 

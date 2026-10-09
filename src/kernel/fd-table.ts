@@ -90,7 +90,7 @@ export interface KernelFile {
   heldMeta?: HeldMeta;
 }
 
-export type HeldMeta = { dir: string; preopen?: string } | DeviceMeta;
+export type HeldMeta = { dir: string; preopen?: string; twin?: number } | DeviceMeta;
 
 export interface DeviceMeta {
   device: KernelDevice;
