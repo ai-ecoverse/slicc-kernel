@@ -436,7 +436,7 @@ export class WasiFds {
   }
 
   private letGo(buffer: FileBuffer): void {
-    this.fs.hold?.(buffer.path, false, true);
+    this.fs.hold?.(buffer.path, false, true, buffer.handle);
   }
 
   kind(fd: number, e: Extract<WasiEntry, { type: 'kernel' }>): KernelFdKind {
@@ -543,6 +543,10 @@ export class WasiFds {
   ): LocalFile {
     const { readable, writable } = openAccess(existing, oflags, rights);
     let buffer = this.buffers.get(path);
+    if (buffer?.handle !== undefined && this.fs.kept?.(buffer.handle)) {
+      this.buffers.delete(path);
+      buffer = undefined;
+    }
     if (buffer) {
       if (oflags & OFLAGS.TRUNC) buffer.truncate(0);
     } else {
@@ -551,9 +555,11 @@ export class WasiFds {
       if (existing?.ranged) (this.fs as { invalidate?(): void }).invalidate?.();
       const st = existing?.ranged || !existing ? this.fs.stat(path) : existing;
       const ranged = st.ranged ? st.size : undefined;
-      buffer = new FileBuffer(this.fs, path, empty, st.maxFile, ranged, st.version);
+      const handle = this.fs.hold?.(path, true, true);
+      const io = handle !== undefined && this.fs.pinned ? this.fs.pinned(handle) : this.fs;
+      buffer = new FileBuffer(io, path, empty, st.maxFile, ranged, st.version);
+      buffer.handle = handle;
       this.buffers.set(path, buffer);
-      this.fs.hold?.(path, true, true);
     }
     buffer.opens++;
     return new LocalFile(buffer, readable, writable, (fdflags & FDFLAGS.APPEND) !== 0);

@@ -19,6 +19,7 @@ export const SYNC_FS_OPS = [
   'statfs',
   'hold',
   'create',
+  'kept',
   'pread',
   'pwrite',
   'truncate',
@@ -38,6 +39,7 @@ export interface SyncFsRequest {
   offset?: number;
   length?: number;
   version?: string;
+  handle?: number;
 }
 
 export type SyncFsResult =
@@ -76,7 +78,14 @@ export function parseSyncFsUsage(json: unknown): SyncFsUsage | null {
   return { quota: u.quota, usage: u.usage };
 }
 
+export type SyncFsFileIo = Pick<
+  SyncFsPosixBridge,
+  'readFile' | 'writeFile' | 'pread' | 'pwrite' | 'truncate'
+>;
+
 export interface SyncFsPosixBridge {
+  pinned?(handle: number): SyncFsFileIo;
+  kept?(handle: number): boolean;
   readFile(path: string): Uint8Array;
   writeFile(path: string, bytes: Uint8Array, open?: boolean): void;
   stat(path: string): SyncFsBridgeStat;
@@ -93,7 +102,7 @@ export interface SyncFsPosixBridge {
   chmod(path: string, mode: number): void;
   utimes(path: string, atimeMs: number, mtimeMs: number): void;
   lutimes(path: string, atimeMs: number, mtimeMs: number): void;
-  hold?(path: string, held: boolean, open?: boolean): void;
+  hold?(path: string, held: boolean, open?: boolean, handle?: number): number | undefined;
   create?(path: string): void;
   readdirStat(path: string): Array<[string, SyncFsBridgeStat | null]>;
   statfs?(path?: string): SyncFsUsage | null;

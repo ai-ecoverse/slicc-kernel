@@ -286,7 +286,8 @@ function holdingToken(opts: SpawnWasmOptions, holds: HeldPaths): string {
     fs: opts.fs,
     cwd: opts.cwd,
     ...(opts.statfs ? { statfs: opts.statfs } : {}),
-    hold: (path, on, open, real) => holds.hold(path, on, open, real),
+    hold: (path, on, open, real, handle) => holds.hold(path, on, open, real, handle),
+    keptFor: (handle) => holds.keptFor(handle),
     unlinked: (path) => holds.keptAt(path),
     gate: (path, op) =>
       opts.unlinkGate && holds.holding(path) ? opts.unlinkGate.run(holds.keyOf(path), op) : op(),

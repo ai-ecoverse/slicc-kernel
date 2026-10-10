@@ -94,6 +94,9 @@ export class HeldPaths extends Map<string, number> implements UnlinkHolder {
   readonly opens = new Map<string, number>();
   readonly unlinked = new Map<string, KeptFile>();
   private readonly aliases = new Map<string, string>();
+  private readonly handles = new Map<number, string>();
+  private readonly keptHandles = new Map<number, KeptFile>();
+  private lastHandle = 0;
   private owning: string | undefined;
 
   onIdle?: (path: string) => void;
@@ -118,29 +121,55 @@ export class HeldPaths extends Map<string, number> implements UnlinkHolder {
     return this.unlinked.has(path);
   }
 
+  keptFor(handle: number): KeptFile | undefined {
+    return this.keptHandles.get(handle);
+  }
+
   keep(path: string, file: KeptFile): void {
     this.unlinked.set(path, file);
+    for (const [id, key] of this.handles) if (key === path) this.keptHandles.set(id, file);
   }
 
   unkeep(path: string): void {
     this.unlinked.delete(path);
+    for (const [id, key] of this.handles) if (key === path) this.keptHandles.delete(id);
   }
 
-  hold(path: string, on: boolean, open = false, real?: string): void {
-    if (open) {
-      const key = real ?? this.keyOf(path);
-      if (key !== path) this.aliases.set(path, key);
-      const count = (this.opens.get(key) ?? 0) + (on ? 1 : -1);
-      if (count > 0) this.opens.set(key, count);
-      else {
-        this.opens.delete(key);
-        this.unlinked.get(key)?.release();
-        this.unlinked.delete(key);
-        for (const [alias, target] of this.aliases) if (target === key) this.aliases.delete(alias);
-        this.onIdle?.(key);
-      }
-      return;
+  hold(
+    path: string,
+    on: boolean,
+    open = false,
+    real?: string,
+    handle?: number
+  ): number | undefined {
+    if (open) return this.holdOpen(path, on, real, handle);
+    this.holdWrite(path, on);
+    return undefined;
+  }
+
+  private holdOpen(path: string, on: boolean, real?: string, handle?: number): number | undefined {
+    const known = handle === undefined ? undefined : this.handles.get(handle);
+    const key = known ?? real ?? this.keyOf(path);
+    if (key !== path) this.aliases.set(path, key);
+    if (handle !== undefined) {
+      this.handles.delete(handle);
+      this.keptHandles.delete(handle);
     }
+    const count = (this.opens.get(key) ?? 0) + (on ? 1 : -1);
+    if (count > 0) this.opens.set(key, count);
+    else {
+      this.opens.delete(key);
+      this.unlinked.get(key)?.release();
+      this.unlinked.delete(key);
+      for (const [alias, target] of this.aliases) if (target === key) this.aliases.delete(alias);
+      this.onIdle?.(key);
+    }
+    if (!on) return undefined;
+    this.handles.set(++this.lastHandle, key);
+    return this.lastHandle;
+  }
+
+  private holdWrite(path: string, on: boolean): void {
     const count = (this.get(path) ?? 0) + (on ? 1 : -1);
     if (count > 0) this.set(path, count);
     else {
@@ -180,6 +209,9 @@ export class HeldPaths extends Map<string, number> implements UnlinkHolder {
       const moved = to + path.slice(from.length);
       this.opens.delete(path);
       this.opens.set(moved, (this.opens.get(moved) ?? 0) + count);
+    }
+    for (const [id, key] of this.handles) {
+      if (within(key, from)) this.handles.set(id, to + key.slice(from.length));
     }
   }
 

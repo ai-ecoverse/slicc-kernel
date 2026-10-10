@@ -1,6 +1,10 @@
 import { RangedFile } from '../../fs/ranged.ts';
 import type { DeviceAccess, KernelFdKind } from '../../kernel/fd-table.ts';
-import type { SyncFsBridgeStat, SyncFsPosixBridge } from '../../realm/sync-fs-wire.ts';
+import type {
+  SyncFsBridgeStat,
+  SyncFsFileIo,
+  SyncFsPosixBridge,
+} from '../../realm/sync-fs-wire.ts';
 
 export class WasiError extends Error {
   readonly code: string;
@@ -23,13 +27,15 @@ export class FileBuffer {
 
   opens = 0;
 
-  private readonly fs: SyncFsPosixBridge;
+  private readonly fs: SyncFsFileIo;
   private where: string;
   private readonly ranged: RangedFile | undefined;
 
   maxFile: number | undefined;
+  handle: number | undefined;
+
   constructor(
-    fs: SyncFsPosixBridge,
+    fs: SyncFsFileIo,
     path: string,
 
     empty: boolean,
@@ -352,6 +358,8 @@ export function cachingBridge(
     utimes: (p, a, m) => mutating(() => bridge.utimes(p, a, m)),
     lutimes: (p, a, m) => mutating(() => bridge.lutimes(p, a, m)),
     ...(bridge.hold ? { hold: bridge.hold.bind(bridge) } : {}),
+    ...(bridge.kept ? { kept: bridge.kept.bind(bridge) } : {}),
+    ...(bridge.pinned ? { pinned: (handle: number) => pinnedIo(bridge, handle, mutating) } : {}),
     ...(bridge.create ? { create: (p: string) => mutating(() => bridge.create?.(p)) } : {}),
     ...(bridge.pread && bridge.pwrite && bridge.truncate
       ? {
@@ -362,5 +370,21 @@ export function cachingBridge(
         }
       : {}),
     invalidate,
+  };
+}
+
+function pinnedIo(
+  bridge: SyncFsPosixBridge,
+  handle: number,
+  mutating: <T>(op: () => T) => T
+): SyncFsFileIo {
+  const io = (bridge.pinned as NonNullable<SyncFsPosixBridge['pinned']>)(handle);
+  const { pread, pwrite, truncate } = io as Required<SyncFsFileIo>;
+  return {
+    readFile: (p) => io.readFile(p),
+    writeFile: (p, bytes, open) => mutating(() => io.writeFile(p, bytes, open)),
+    pread: (p, at, n, version) => pread(p, at, n, version),
+    pwrite: (p, at, bytes, transfer) => mutating(() => pwrite(p, at, bytes, transfer)),
+    truncate: (p, size) => mutating(() => truncate(p, size)),
   };
 }
