@@ -1,5 +1,6 @@
 import { type DylinkInfo, dylinkInfo } from './dylink.ts';
 import { normalize } from './wasi-files.ts';
+import { type Scalar, Trampolines } from './wasix-trampoline.ts';
 import { FuncTypes } from './wasm-functypes.ts';
 
 export const TABLE_BASE = 1;
@@ -17,12 +18,22 @@ export type LinkRecord =
   | { kind: 'load'; handle: number; path: string; memoryBase: number; tableBase: number }
   | { kind: 'slot'; index: number; handle: number; name: string }
   | { kind: 'closure'; index: number }
-  | { kind: 'closure-free'; index: number };
+  | { kind: 'closure-free'; index: number }
+  | {
+      kind: 'closure-prepare';
+      index: number;
+      backing: number;
+      userData: number;
+      params: Scalar[];
+      results: Scalar[];
+    };
 
 export interface LinkerHost {
   read(path: string): Uint8Array<ArrayBuffer> | undefined;
 
   hostImports(module: WebAssembly.Module): WebAssembly.Imports;
+
+  real?(path: string): string;
 }
 
 interface Linked {
@@ -66,6 +77,8 @@ export class WasixLinker {
     | undefined;
 
   types = new FuncTypes();
+
+  readonly trampolines = new Trampolines();
 
   private readonly memory: WebAssembly.Memory;
   private readonly host: LinkerHost;
@@ -145,8 +158,19 @@ export class WasixLinker {
     if (relocate) call(instance, '__wasm_apply_data_relocs');
   }
 
+  mainPath: string | undefined;
+
+  private isMain(path: string): boolean {
+    if (this.mainPath === undefined) return false;
+    if (path === this.mainPath) return true;
+    const real = this.host.real;
+    return real !== undefined && real(path) === real(this.mainPath);
+  }
+
   open(name: string, cwd: string, ldPath: readonly string[]): number {
-    return this.load(this.locate(name, cwd, ldPath), cwd, ldPath).handle;
+    const path = this.locate(name, cwd, ldPath);
+    if (this.isMain(path)) return 0;
+    return this.load(path, cwd, ldPath).handle;
   }
 
   symbol(handle: number, name: string): number {
@@ -182,6 +206,27 @@ export class WasixLinker {
     this.table.set(index, null);
   }
 
+  prepareClosure(record: Omit<Extract<LinkRecord, { kind: 'closure-prepare' }>, 'kind'>): void {
+    if (record.index >= this.table.length)
+      throw new DlError(`closure ${record.index}: no such slot`);
+    const full: LinkRecord = { kind: 'closure-prepare', ...record };
+    this.install(full);
+    this.publisher?.(full);
+  }
+
+  private install(record: Extract<LinkRecord, { kind: 'closure-prepare' }>): void {
+    growTable(this.table, record.index + 1);
+    const { fn, sig } = this.trampolines.make(record.params, record.results, {
+      memory: this.memory,
+      table: this.table,
+      stackPointer: this.stackPointer,
+      backing: record.backing,
+      userData: record.userData,
+    });
+    this.table.set(record.index, fn as never);
+    this.types.set(fn, sig);
+  }
+
   private reserve(size: number): number {
     return this.indices?.reserve(this.table.length, size) ?? this.table.length;
   }
@@ -193,6 +238,10 @@ export class WasixLinker {
     }
     if (record.kind === 'closure-free') {
       if (record.index < this.table.length) this.table.set(record.index, null);
+      return;
+    }
+    if (record.kind === 'closure-prepare') {
+      this.install(record);
       return;
     }
     if (record.kind === 'load') {
@@ -391,7 +440,18 @@ export class WasixLinker {
     return handle === 0 ? this.memoryBase : this.module(handle).memoryBase;
   }
 
+  private indexed = 0;
+
+  private indexTable(): void {
+    for (let i = this.indexed; i < this.table.length; i++) {
+      const fn = this.table.get(i);
+      if (fn && !this.slots.has(fn)) this.slots.set(fn, i);
+    }
+    this.indexed = this.table.length;
+  }
+
   private slot(fn: unknown, handle: number, name: string): number {
+    this.indexTable();
     const known = this.slots.get(fn);
     if (known !== undefined) return known;
     const index = this.reserve(1);

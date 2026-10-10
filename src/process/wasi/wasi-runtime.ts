@@ -1,3 +1,4 @@
+import { physicalPath } from '../../fs/physical-path.ts';
 import type { WasmSyscall } from '../../kernel/process.ts';
 import {
   WASM_PROCESS_EXIT,
@@ -352,6 +353,7 @@ async function instantiate(
   }
   if (sync) {
     sync.linker.bindMain(instance, !thread);
+    if (path !== undefined) sync.linker.mainPath = path;
 
     if (thread) sync.catchUp();
 
@@ -378,6 +380,7 @@ function linkerHost(host: WasiHost, imports: () => WebAssembly.Imports): LinkerH
       const { env: _env, 'GOT.mem': _mem, 'GOT.func': _func, ...rest } = imports();
       return rest;
     },
+    real: (path) => physicalPath(host.o.fs, path),
   };
 }
 
