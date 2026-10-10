@@ -3,14 +3,17 @@ import { NO_TRANSPORT } from './network.ts';
 import type { HeaderList, RealmTransport } from './transport.ts';
 import { WS_OPS, WsHandles, type WsSyscall } from './ws-syscalls.ts';
 
+export interface HttpRequestBody {
+  url: string;
+  method: string;
+  headers: HeaderList;
+  body?: Uint8Array;
+}
+
 export type HttpSyscall =
-  | {
-      op: 'net-request';
-      url: string;
-      method: string;
-      headers: HeaderList;
-      body?: Uint8Array;
-    }
+  | ({ op: 'net-request' } & HttpRequestBody)
+  | ({ op: 'net-open' } & HttpRequestBody)
+  | { op: 'net-head'; handle: number }
   | { op: 'net-read'; handle: number; max: number }
   | { op: 'net-close'; handle: number }
   | { op: 'net-traits' }
@@ -18,6 +21,8 @@ export type HttpSyscall =
 
 export const HTTP_OPS: readonly string[] = [
   'net-request',
+  'net-open',
+  'net-head',
   'net-read',
   'net-close',
   'net-traits',
@@ -34,6 +39,7 @@ export interface HttpHead {
 
 interface Open {
   abort: AbortController;
+  head: Promise<SyncFsResult>;
   body: AsyncIterator<Uint8Array>;
   left: Uint8Array;
   done: boolean;
@@ -68,6 +74,8 @@ export class HttpHandles {
   syscall(req: HttpSyscall): Promise<SyncFsResult> {
     if (req.op.startsWith('net-ws-')) return this.ws.syscall(req as WsSyscall);
     if (req.op === 'net-request') return this.request(req);
+    if (req.op === 'net-open') return Promise.resolve(this.opened(req));
+    if (req.op === 'net-head') return this.head(req.handle);
     if (req.op === 'net-read') return this.read(req.handle, req.max);
     if (req.op === 'net-traits') return Promise.resolve(this.traits());
     return this.close((req as { handle: number }).handle);
@@ -79,60 +87,77 @@ export class HttpHandles {
     return { ok: true, kind: 'json', json: { ...rest, crossOrigin } };
   }
 
-  private add(
-    abort: AbortController,
-    body: AsyncIterable<Uint8Array>,
-    cancel: () => Promise<void>
-  ) {
+  private async request(req: HttpRequestBody): Promise<SyncFsResult> {
+    const { handle, head } = this.start(req);
+    const result = await head;
+    if (!result.ok) this.open.delete(handle);
+    return result;
+  }
+
+  private opened(req: HttpRequestBody): SyncFsResult {
+    return { ok: true, kind: 'json', json: this.start(req).handle };
+  }
+
+  private start(req: HttpRequestBody): { handle: number; head: Promise<SyncFsResult> } {
     const handle = ++this.nextHandle;
-    this.open.set(handle, {
+    const abort = new AbortController();
+    const entry: Open = {
       abort,
-      body: body[Symbol.asyncIterator](),
+      head: Promise.resolve({ ok: true, kind: 'void' }),
+      body: once(EMPTY),
       left: EMPTY,
       done: false,
       reading: Promise.resolve(),
-      cancel,
-    });
-    return handle;
+      cancel: async () => undefined,
+    };
+    this.open.set(handle, entry);
+    entry.head = this.respond(handle, req, entry);
+    return { handle, head: entry.head };
   }
 
-  private async request(req: Extract<HttpSyscall, { op: 'net-request' }>): Promise<SyncFsResult> {
-    const abort = new AbortController();
+  private async respond(handle: number, req: HttpRequestBody, entry: Open): Promise<SyncFsResult> {
     try {
       const response = await this.transport.fetch({
         url: req.url,
         method: req.method,
         headers: req.headers,
         ...(req.body ? { body: req.body } : {}),
-        signal: abort.signal,
+        signal: entry.abort.signal,
       });
-      const handle = this.add(abort, response.body, () => response.cancel());
-      const head: HttpHead = {
-        handle,
-        status: response.status,
-        statusText: response.statusText,
-        url: req.url,
-        headers: response.headers,
-      };
-      return { ok: true, kind: 'json', json: head };
+      entry.body = response.body[Symbol.asyncIterator]();
+      entry.cancel = () => response.cancel();
+      if (!this.open.has(handle)) await entry.cancel().catch(() => undefined);
+      return this.headOf(handle, req.url, response.status, response.statusText, response.headers);
     } catch (e) {
       const text = message(e);
-      if (text === NO_TRANSPORT) return { ok: false, errno: 'ENETUNREACH', message: text };
       const status = (e as { status?: unknown }).status;
-      if (typeof status !== 'number' || status === 502) {
-        return { ok: false, errno: 'ECONNREFUSED', message: text };
+      if (text === NO_TRANSPORT || typeof status !== 'number' || status === 502) {
+        const errno = text === NO_TRANSPORT ? 'ENETUNREACH' : 'ECONNREFUSED';
+        return { ok: false, errno, message: text };
       }
-      const body = new TextEncoder().encode(text);
-      const handle = this.add(abort, once(body), async () => undefined);
-      const head: HttpHead = {
-        handle,
-        status,
-        statusText: '',
-        url: req.url,
-        headers: [['content-type', 'text/plain; charset=utf-8']],
-      };
-      return { ok: true, kind: 'json', json: head };
+      entry.body = once(new TextEncoder().encode(text))[Symbol.asyncIterator]();
+      return this.headOf(handle, req.url, status, '', [
+        ['content-type', 'text/plain; charset=utf-8'],
+      ]);
     }
+  }
+
+  private headOf(
+    handle: number,
+    url: string,
+    status: number,
+    statusText: string,
+    headers: HeaderList
+  ): SyncFsResult {
+    const head: HttpHead = { handle, status, statusText, url, headers };
+    return { ok: true, kind: 'json', json: head };
+  }
+
+  private head(handle: number): Promise<SyncFsResult> {
+    const entry = this.open.get(handle);
+    if (!entry)
+      return Promise.resolve({ ok: false, errno: 'EBADF', message: `no request ${handle}` });
+    return entry.head;
   }
 
   private async read(handle: number, max: number): Promise<SyncFsResult> {

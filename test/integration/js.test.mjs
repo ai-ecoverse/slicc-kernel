@@ -211,6 +211,17 @@ test('a JS program asks for a WebSocket over the kernel transport, which the def
   assert.deepEqual(page.errors, []);
 });
 
+test('a JS program fetches over the kernel transport, which follows redirects itself in a browser', async (t) => {
+  const { page, run } = await booted(chrome, t);
+  const latest = 'https://registry.npmjs.org/@ai-ecoverse/wasm-bash/latest';
+  assert.deepEqual(await run(['jstest', 'fetchone', latest]), ok('one 200 true\n'));
+  assert.deepEqual(
+    await run(['jstest', 'fetchone', latest, 'manual']),
+    ok('one TypeError:ENOTSUP\n')
+  );
+  assert.deepEqual(page.errors, []);
+});
+
 test('a file whose suffix a package maps (binfmt) runs with that command, unless #! says otherwise', async (t) => {
   const { bash } = await booted(chrome, t);
   assert.deepEqual(

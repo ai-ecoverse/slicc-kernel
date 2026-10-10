@@ -1,6 +1,7 @@
 import { SIG } from '../../kernel/signals.ts';
 import { parseSyncFsStat, type SyncFsBridgeStat } from '../../realm/sync-fs-wire.ts';
 import { childOps, type JsChild, type JsExited, type JsSpawnOptions } from './js-children.ts';
+import { fetchOp } from './js-fetch.ts';
 import {
   absent,
   brokenPipe,
@@ -87,6 +88,7 @@ export interface JsProgramContext {
   kill(pid: number, signal?: JsSignal): Promise<void>;
   net: JsNet;
   websocket(url: string | URL, options?: JsWebSocketOptions): Promise<JsWebSocket>;
+  fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
   exit(code?: number): never;
 }
 
@@ -303,6 +305,7 @@ export function createContext(o: ContextOptions): CreatedContext {
       reset: async (signal) => kernel.setHandler(signalNumber(signal), 'default'),
     },
     sync,
+    fetch: fetchOp(kernel),
     ...children,
     net: netOps(kernel, io),
     websocket: websocketOp(kernel),
