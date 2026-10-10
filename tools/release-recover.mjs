@@ -32,6 +32,7 @@ function gist(stderr) {
 
 const PUBLISHED = /cannot publish over (the )?previously (published|staged) version/i;
 const CONFIRM = { every: 15000, times: 20 };
+const SERVED = { every: 30000, times: 50 };
 
 async function confirmed(done, sleep) {
   for (let n = 0; n < CONFIRM.times; n++) {
@@ -58,6 +59,17 @@ async function retried({ label, attempt, done, sleep, log, already = () => false
   }
 }
 
+async function serving(label, served, sleep, log) {
+  for (let n = 0; !(await served()); n++) {
+    if (n >= SERVED.times) {
+      const minutes = (SERVED.every * SERVED.times) / 60000;
+      throw new Error(`npm took ${label}, but does not serve it after ${minutes} min`);
+    }
+    await sleep(SERVED.every);
+  }
+  log(`npm serves ${label}`);
+}
+
 export async function recover({
   name,
   outcome,
@@ -65,8 +77,10 @@ export async function recover({
   run = exec,
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
   log = console.log,
+  head = async (url) => (await fetch(url, { method: 'HEAD' })).ok,
 }) {
   const listed = await run('git', ['tag', '--points-at', 'HEAD']);
+  const fresh = [];
   const tags = listed.stdout
     .split('\n')
     .map((t) => t.trim())
@@ -74,11 +88,16 @@ export async function recover({
     .filter((t) => {
       if (outcome !== 'success' || prior.includes(t)) return true;
       log(`semantic-release just released ${t}, nothing to recover`);
+      fresh.push(t);
       return false;
     });
   const published = async (version) => {
     const r = await run('npm', ['view', `${name}@${version}`, 'version', '--prefer-online']);
     return r.code === 0 && r.stdout.trim() === version;
+  };
+  const served = async (version) => {
+    const r = await run('npm', ['view', `${name}@${version}`, 'dist.tarball', '--prefer-online']);
+    return r.code === 0 && r.stdout.trim() !== '' && (await head(r.stdout.trim()));
   };
   const remote = async (ref) =>
     (await run('git', ['ls-remote', '--exit-code', 'origin', ref])).code === 0;
@@ -131,6 +150,8 @@ export async function recover({
       recovered.push(`GitHub release ${tag}`);
     }
   }
+  for (const tag of fresh)
+    await serving(`${name}@${tag.slice(1)}`, () => served(tag.slice(1)), sleep, log);
   for (const line of recovered) log(`recovered ${line}`);
   if (outcome === 'failure' && recovered.length === 0) {
     throw new Error('semantic-release failed, and no version tagged at HEAD was left to complete');
