@@ -45,6 +45,11 @@ export class WsError extends Error {
   }
 }
 
+function sendableCode(code: number): boolean {
+  if (code >= 3000 && code <= 4999) return true;
+  return code >= 1000 && code <= 1014 && code !== 1004 && code !== 1005 && code !== 1006;
+}
+
 function field(headers: HeaderList, name: string): string | undefined {
   return headers.find(([n]) => n.toLowerCase() === name)?.[1];
 }
@@ -208,6 +213,9 @@ export class WsReader<Binary extends boolean = false> {
       case OP.close: {
         if (payload.length === 1) throw new WsError(CLOSE.protocol, 'a close frame is malformed');
         const code = payload.length >= 2 ? new DataView(payload.buffer).getUint16(0) : 1005;
+        if (payload.length >= 2 && !sendableCode(code)) {
+          throw new WsError(CLOSE.protocol, `close code ${code} may not be sent`);
+        }
         return { kind: 'close', code, reason: decode(payload.subarray(2)) };
       }
       case OP.binary:
