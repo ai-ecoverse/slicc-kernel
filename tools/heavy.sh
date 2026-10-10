@@ -17,8 +17,8 @@ measure() {
       sum = 0; max = 0; pids = ""
       for (p in parent) {
         q = p; hops = 0
-        while (q != root && (q in parent) && hops++ < 64) q = parent[q]
-        if (q != root && group[p] != root && known[p] != began[p]) continue
+        while (q != root && !((q in known) && known[q] == began[q]) && (q in parent) && hops++ < 64) q = parent[q]
+        if (q != root && !((q in known) && known[q] == began[q]) && group[p] != root) continue
         sum += rss[p]; if (rss[p] > max) max = rss[p]; pids = pids " " p
         print p "\t" began[p] > (state ".new")
       }
