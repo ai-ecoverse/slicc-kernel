@@ -28,6 +28,7 @@ import {
 } from './wasi-files.ts';
 import { WasiMemory } from './wasi-memory.ts';
 import { pollOneoff } from './wasi-poll.ts';
+import type { WasiSignals } from './wasi-signals.ts';
 
 export class WasiExit extends Error {
   readonly code: number;
@@ -133,6 +134,8 @@ export class WasiHost {
 
   muted: ((fd: number, data: Uint8Array) => boolean) | undefined;
 
+  signals: WasiSignals | undefined;
+
   private readonly listening: number[];
 
   readonly o: WasiHostOptions;
@@ -235,6 +238,8 @@ export class WasiHost {
         }),
       umount2: (tp: number, tl: number, flags: number) =>
         void this.o.kernel.call({ op: 'umount', target: path(tp, tl), flags }),
+      sigaction_set: (sig: number, disposition: number, flags: number) =>
+        this.signals ? this.signals.disposition(sig, disposition, flags) : E.NOSYS,
     });
   }
 

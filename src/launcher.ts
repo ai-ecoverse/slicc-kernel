@@ -737,6 +737,7 @@ export class Launcher {
         state: this.processes.has(member.pid) ? 'S' : 'Z',
         memory: this.processes.get(member.pid)?.memory() ?? 0,
         umask: this.umaskOf(member.pid),
+        ...this.signalMasksOf(member.pid),
       });
     }
     return listed;
@@ -833,6 +834,11 @@ export class Launcher {
     this.unlinked.closed(at);
     const open = [...this.openFiles].some((nodes) => nodes.writes(at)) || heldUnder(this.held, at);
     if (!open) void this.mounts.commit(at).catch(() => undefined);
+  }
+
+  private signalMasksOf(pid: number): { sigIgn?: number; sigCgt?: number } {
+    const masks = this.processes.get(pid)?.signalMasks?.();
+    return masks ? { sigIgn: masks.ignored, sigCgt: masks.caught } : {};
   }
 
   private ignoredBy(pid: number, fork = false): number {
