@@ -15,6 +15,11 @@ async function count(ctx) {
   await ctx.write(1, `${total}\n`);
 }
 
+async function readycount(ctx) {
+  await ctx.write(1, 'ready\n');
+  await count(ctx);
+}
+
 async function yes(ctx) {
   const line = new TextEncoder().encode('y\n'.repeat(4096));
   for (;;) await ctx.write(1, line);
@@ -397,6 +402,7 @@ const modes = {
   },
   cat,
   count,
+  readycount,
   yes,
   trap,
   blocked,

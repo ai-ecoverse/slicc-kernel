@@ -172,9 +172,9 @@ test('on a terminal: isatty, ^C to a handler or by default, ^Z and fg, ^Z then k
   await type('jstest wait\r', 'ready');
   await type('\u0003');
   await type('echo "rc $?"\r', 'rc 130');
-  await type('jstest count\r', 'jstest count');
+  await type('jstest readycount\r', 'ready\r\n');
   await type('\u001a', 'Stopped');
-  await type('fg\r', 'jstest count');
+  await type('fg\r', 'jstest readycount');
   await type('abcdefghij\r');
   await type('\u0004', '11\r\n');
   await type('jstest wait\r', 'ready');
