@@ -1126,6 +1126,24 @@ async function fetches(ctx, [base]) {
     const body = new ReadableStream({ pull: () => new Promise(() => {}) });
     return f('/echo', { method: 'POST', body, duplex: 'half', signal: c.signal });
   });
+  await fetchTry(out, 'brokenupload', () => {
+    const body = new ReadableStream({
+      pull(c) {
+        c.error(new Error('upload broke'));
+      },
+    });
+    return f('/echo', { method: 'POST', body, duplex: 'half' }).then(
+      () => 'ok',
+      (err) => `${err.name} ${err.message} ${err.cause?.message}`
+    );
+  });
+  await fetchTry(out, 'abortearly', () => {
+    const body = new ReadableStream({ pull: () => new Promise(() => {}) });
+    const c = new AbortController();
+    const fetching = f('/echo', { method: 'POST', body, duplex: 'half', signal: c.signal });
+    c.abort();
+    return fetching;
+  });
   await fetchTry(out, 'idleabort', async () => {
     const c = new AbortController();
     const r = await f('/idle', { signal: c.signal });

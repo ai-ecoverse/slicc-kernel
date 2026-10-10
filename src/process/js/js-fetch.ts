@@ -83,6 +83,7 @@ async function bodyOf(
   signal: AbortSignal
 ): Promise<Uint8Array | undefined | typeof OVER> {
   if (!request.body || request.method === 'GET' || request.method === 'HEAD') return undefined;
+  signal.throwIfAborted();
   const reader = request.body.getReader();
   const stop = (): void => void reader.cancel(signal.reason).catch(() => undefined);
   signal.addEventListener('abort', stop, { once: true });
@@ -90,7 +91,9 @@ async function bodyOf(
   let length = 0;
   try {
     for (;;) {
-      const next = await reader.read();
+      const next = await reader.read().catch((err: unknown) => {
+        throw signal.aborted ? signal.reason : failed(err);
+      });
       signal.throwIfAborted();
       if (next.done) break;
       length += next.value.length;
