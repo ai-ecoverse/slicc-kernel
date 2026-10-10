@@ -16,7 +16,8 @@ function expandOrigin(entry: string, dir: string): string {
 export type LinkRecord =
   | { kind: 'load'; handle: number; path: string; memoryBase: number; tableBase: number }
   | { kind: 'slot'; index: number; handle: number; name: string }
-  | { kind: 'closure'; index: number };
+  | { kind: 'closure'; index: number }
+  | { kind: 'closure-free'; index: number };
 
 export interface LinkerHost {
   read(path: string): Uint8Array<ArrayBuffer> | undefined;
@@ -56,7 +57,13 @@ export class WasixLinker {
 
   publisher: ((record: LinkRecord) => void) | undefined;
 
-  closures: { allocate(floor: number): number; free(index: number): void } | undefined;
+  indices:
+    | {
+        reserve(floor: number, size: number): number;
+        allocate(floor: number): number;
+        free(index: number): void;
+      }
+    | undefined;
 
   types = new FuncTypes();
 
@@ -165,21 +172,27 @@ export class WasixLinker {
   }
 
   allocateClosure(): number {
-    const index = (this.closures as NonNullable<WasixLinker['closures']>).allocate(
-      this.table.length
-    );
+    const index = (this.indices as NonNullable<WasixLinker['indices']>).allocate(this.table.length);
     growTable(this.table, index + 1);
     return index;
   }
 
   freeClosure(index: number): void {
-    this.closures?.free(index);
+    this.indices?.free(index);
     this.table.set(index, null);
+  }
+
+  private reserve(size: number): number {
+    return this.indices?.reserve(this.table.length, size) ?? this.table.length;
   }
 
   replay(record: LinkRecord): void {
     if (record.kind === 'closure') {
       growTable(this.table, record.index + 1);
+      return;
+    }
+    if (record.kind === 'closure-free') {
+      if (record.index < this.table.length) this.table.set(record.index, null);
       return;
     }
     if (record.kind === 'load') {
@@ -242,7 +255,7 @@ export class WasixLinker {
       (n) => this.load(this.locate(n, cwd, search), cwd, ldPath).handle
     );
     const memoryBase = this.allocate(info.memorySize, 2 ** info.memoryAlign);
-    const tableBase = this.table.length;
+    const tableBase = this.reserve(info.tableSize);
     const record: LinkRecord = {
       kind: 'load',
       handle: this.nextHandle++,
@@ -381,8 +394,8 @@ export class WasixLinker {
   private slot(fn: unknown, handle: number, name: string): number {
     const known = this.slots.get(fn);
     if (known !== undefined) return known;
-    const index = this.table.length;
-    this.table.grow(1);
+    const index = this.reserve(1);
+    growTable(this.table, index + 1);
     this.table.set(index, fn as never);
     this.slots.set(fn, index);
     this.publisher?.({ kind: 'slot', index, handle, name });
@@ -391,9 +404,9 @@ export class WasixLinker {
 
   private allocate(size: number, alignment: number): number {
     if (size === 0) return 0;
-    const base = align(this.memory.buffer.byteLength, Math.max(alignment, 16));
-    growTo(this.memory, base + size);
-    return base;
+    const to = Math.max(alignment, 16);
+    const pages = Math.ceil((size + (to > PAGE ? to : 0)) / PAGE);
+    return align(this.memory.grow(pages) * PAGE, to);
   }
 }
 

@@ -106,6 +106,7 @@ export type WasmSyscall =
   | { op: 'fd-list' }
   | { op: 'dl-log'; append?: LinkRecord; from: number }
   | { op: 'dl-closure'; floor: number }
+  | { op: 'dl-reserve'; floor: number; size: number }
   | { op: 'dl-closure-free'; index: number }
   | {
       op: 'proc-alarm';
@@ -298,6 +299,7 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'dl-log',
   'dl-closure',
   'dl-closure-free',
+  'dl-reserve',
   'fd-renumber',
   'fd-promote',
   'fd-open-tty',
@@ -1091,6 +1093,8 @@ export class WasmProcess {
       case 'dl-closure-free':
         this.freeClosure(req.index);
         return { ok: true, kind: 'void' };
+      case 'dl-reserve':
+        return { ok: true, kind: 'json', json: this.reserveSlots(req.floor, req.size) };
       case 'sig-mask':
         this.caught = req.caught;
         this.ignored = req.ignored;
@@ -1145,6 +1149,13 @@ export class WasmProcess {
   private freeClosure(index: number): void {
     if (!this.closures.live.delete(index)) throw new KernelError('EINVAL');
     this.closures.free.push(index);
+    this.dlLog.push({ kind: 'closure-free', index });
+  }
+
+  private reserveSlots(floor: number, size: number): number {
+    const base = Math.max(floor, this.closures.next);
+    this.closures.next = base + size;
+    return base;
   }
   private readonly asyncOps = new AsyncOps(
     (req, cancelled) => this.syscall(req as WasmSyscall, cancelled),

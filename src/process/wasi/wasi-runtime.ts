@@ -406,7 +406,8 @@ class LinkSync {
     this.call = call;
     this.ids = ids;
     linker.publisher = (record) => this.publish(record);
-    linker.closures = {
+    linker.indices = {
+      reserve: (floor, size) => this.call({ op: 'dl-reserve', floor, size }) as number,
       allocate: (floor) => {
         const index = this.call({ op: 'dl-closure', floor }) as number;
         this.catchUp();
