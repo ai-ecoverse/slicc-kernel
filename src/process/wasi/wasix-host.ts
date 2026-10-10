@@ -8,6 +8,7 @@ import type { AsyncifyDriver } from './wasix-fork.ts';
 import { DlError, type WasixLinker } from './wasix-linker.ts';
 import { type SpawnFdOp, WasixProcess } from './wasix-process.ts';
 import { wasixSocketImports } from './wasix-sockets.ts';
+import { valueTypes } from './wasix-trampoline.ts';
 import { FuncTypes } from './wasm-functypes.ts';
 
 const FDFLAGSEXT_CLOEXEC = 1;
@@ -45,6 +46,8 @@ export function futexWait(
     if (ms <= 0) return false;
   }
 }
+
+const MAIN_HANDLE = 0x7fffffff;
 
 export class WasixHost {
   private readonly process: WasixProcess;
@@ -151,6 +154,26 @@ export class WasixHost {
       closure_allocate: (out: number) => {
         if (!this.linker) throw new WasiError('ENOTSUP');
         this.mem.view().setUint32(out, this.linker.allocateClosure(), true);
+      },
+      closure_prepare: (
+        backing: number,
+        index: number,
+        argTypes: number,
+        argCount: number,
+        resultTypes: number,
+        resultCount: number,
+        userData: number
+      ) => {
+        if (!this.linker) throw new WasiError('ENOTSUP');
+        const params = valueTypes(this.mem.bytes(argTypes, argCount));
+        const results = valueTypes(this.mem.bytes(resultTypes, resultCount));
+        if (!params || !results) throw new WasiError('EINVAL');
+        try {
+          this.linker.prepareClosure({ index, backing, userData, params, results });
+        } catch (e) {
+          if (e instanceof DlError) throw new WasiError('EINVAL');
+          throw e;
+        }
       },
       closure_free: (index: number) => {
         if (!this.linker) throw new WasiError('ENOTSUP');
@@ -396,14 +419,14 @@ export class WasixHost {
         out: number
       ) => {
         if (p === 0) {
-          mem.view().setUint32(out, 0, true);
+          mem.view().setUint32(out, MAIN_HANDLE, true);
           return E.SUCCESS;
         }
         return linked(
           buf,
           len,
           (l) => l.open(this.str(p, pl), host.cwd, lp === 0 ? [] : this.str(lp, ll).split(':')),
-          (h) => void mem.view().setUint32(out, h, true)
+          (h) => void mem.view().setUint32(out, h === 0 ? MAIN_HANDLE : h, true)
         );
       },
 
@@ -411,11 +434,13 @@ export class WasixHost {
         linked(
           buf,
           len,
-          (l) => l.symbol(handle, this.str(s, sl)),
+          (l) => l.symbol(handle === MAIN_HANDLE ? 0 : handle, this.str(s, sl)),
           (v) => void mem.view().setUint32(out, v, true)
         ),
       dl_invalid_handle: (handle: number) =>
-        handle !== 0 && this.linker && !this.linker.invalid(handle) ? E.SUCCESS : E.NOEXEC,
+        handle === MAIN_HANDLE || (handle !== 0 && this.linker && !this.linker.invalid(handle))
+          ? E.SUCCESS
+          : E.NOEXEC,
     };
   }
 

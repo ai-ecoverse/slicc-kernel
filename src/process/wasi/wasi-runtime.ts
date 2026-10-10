@@ -352,6 +352,7 @@ async function instantiate(
   }
   if (sync) {
     sync.linker.bindMain(instance, !thread);
+    if (path !== undefined) sync.linker.mainPath = path;
 
     if (thread) sync.catchUp();
 
