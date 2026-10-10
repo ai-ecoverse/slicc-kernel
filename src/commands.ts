@@ -165,7 +165,7 @@ async function withPackagePaths(fs: KernelFs, pkg: string, command: Command): Pr
 }
 
 async function packages(fs: KernelFs, modules: string): Promise<string[]> {
-  const names = await fs.readdir(modules).catch(() => []);
+  const names = (await fs.readdir(modules).catch(() => [])).sort();
   const dirs: string[] = [];
   for (const name of names) {
     if (name.startsWith('.')) continue;
@@ -173,7 +173,7 @@ async function packages(fs: KernelFs, modules: string): Promise<string[]> {
       dirs.push(`${modules}/${name}`);
       continue;
     }
-    for (const inner of await fs.readdir(`${modules}/${name}`).catch(() => [])) {
+    for (const inner of (await fs.readdir(`${modules}/${name}`).catch(() => [])).sort()) {
       dirs.push(`${modules}/${name}/${inner}`);
     }
   }
@@ -250,9 +250,11 @@ const SUFFIX = /^\.[A-Za-z0-9_+-][A-Za-z0-9._+-]*$/;
 
 export async function scanBinfmts(
   fs: KernelFs,
-  modules: string | string[]
+  modules: string | string[],
+  warn: (message: string) => void = () => {}
 ): Promise<Map<string, string>> {
   const found = new Map<string, string>();
+  const owners = new Map<string, string>();
   for (const pkg of await packagesIn(fs, modules)) {
     let manifest: Manifest;
     try {
@@ -264,7 +266,15 @@ export async function scanBinfmts(
     if (!declared || typeof declared !== 'object') continue;
     for (const [suffix, command] of Object.entries(declared)) {
       if (!SUFFIX.test(suffix) || typeof command !== 'string' || !NAME.test(command)) continue;
-      if (!found.has(suffix)) found.set(suffix, command);
+      const owner = owners.get(suffix);
+      if (owner === undefined) {
+        found.set(suffix, command);
+        owners.set(suffix, pkg);
+      } else if (found.get(suffix) !== command) {
+        warn(
+          `binfmt ${suffix}: ${owner} maps it to ${found.get(suffix)}, so ${pkg}'s ${command} is ignored`
+        );
+      }
     }
   }
   return found;
