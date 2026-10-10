@@ -600,6 +600,15 @@ async function globals(ctx) {
   ]) {
     seen.push(`${n}=${typeof globalThis[n]}`);
   }
+  const slot = (name) => {
+    try {
+      globalThis[name] = () => name;
+      return `${name}:${globalThis[name]?.() === name ? 'own' : 'kept'}`;
+    } catch {
+      return `${name}:fixed`;
+    }
+  };
+  seen.push(`slots=${['fetch', 'WebSocket', 'EventSource', 'XMLHttpRequest'].map(slot).join(',')}`);
   await ctx.write(1, `${seen.join(' ')}\n`);
 }
 
