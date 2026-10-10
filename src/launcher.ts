@@ -318,6 +318,7 @@ export class Launcher {
   private readonly env: Record<string, string>;
   private catalog: Promise<Map<string, Command>> | undefined;
   private binfmts: Promise<Map<string, string>> | undefined;
+  private readonly warned = new Set<string>();
   private readonly compiled = new Map<string, Promise<Compiled>>();
   private readonly processes = new Map<number, WasmProcessHandle>();
   private readonly zombies = new Set<number>();
@@ -429,7 +430,13 @@ export class Launcher {
   }
 
   private interpreters(): Promise<Map<string, string>> {
-    this.binfmts ??= this.roots().then((roots) => scanBinfmts(this.base, roots));
+    this.binfmts ??= this.roots().then((roots) =>
+      scanBinfmts(this.base, roots, (message) => {
+        if (this.warned.has(message)) return;
+        this.warned.add(message);
+        console.warn(message);
+      })
+    );
     return this.binfmts;
   }
 
