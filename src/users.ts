@@ -249,13 +249,16 @@ export class UserDb {
       );
       for (const r of parsed(keptGroups)) r.members = r.members.filter((m) => m !== name);
       const home = this.fs.resolvePath('/', row.home);
-      const removeHome = !options.keepHome && HOME_DIR.test(home);
+      const removeHome = !options.keepHome && HOME_DIR.test(home) && (await this.fs.exists(home));
+      const staged = `/home/.${name}.removed-${Date.now()}`;
       await this.commit(
         formatPasswd(passwd.filter((r) => r !== row)),
         formatGroup(keptGroups),
-        removeHome ? () => this.fs.rm(home, { recursive: true, force: true }) : undefined
+        removeHome ? () => this.fs.rename(home, staged) : undefined
       );
       this.umasks.delete(name);
+      if (removeHome)
+        await this.fs.rm(staged, { recursive: true, force: true }).catch(() => undefined);
       return true;
     });
   }

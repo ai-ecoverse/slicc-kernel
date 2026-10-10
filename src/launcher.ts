@@ -876,7 +876,7 @@ export class Launcher {
       maySignal(sender, this.credOf(target)) ||
       (sig === SIG.CONT && session !== undefined && this.jobs.sidOf(target) === session) ||
       (from !== undefined && this.imageOf(from) === this.imageOf(target));
-    if (pid < 0) return this.jobs.killGroup(-pid, sig, may);
+    if (pid < 0) return this.jobs.killGroup(-pid, sig, (member) => may(this.imageOf(member)));
     const handle = this.processes.get(pid);
     if (!handle) return false;
     if (!may(this.imageOf(pid))) throw fsError('EPERM', `pid ${pid}`);
