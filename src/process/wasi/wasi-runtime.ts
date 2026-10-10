@@ -5,6 +5,7 @@ import {
   type WasmProgram,
   type WasmThreadInitMsg,
 } from '../../kernel/protocol.ts';
+import { defaultAction } from '../../kernel/signals.ts';
 import type { SyncFsResult } from '../../realm/sync-fs-wire.ts';
 import {
   createSyncFsSabBridge,
@@ -427,7 +428,7 @@ export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike
   const signals = new WasiSignals(
     (sig) => {
       call({ op: 'proc-kill', pid: init.pid, sig });
-      throw new WasiExit(128 + sig);
+      if (defaultAction(sig) === 'terminate') throw new WasiExit(128 + sig);
     },
     (code) => {
       throw new WasiExit(code);

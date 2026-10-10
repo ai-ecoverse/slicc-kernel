@@ -1,8 +1,9 @@
 import { SIG, sigbit } from '../../kernel/signals.ts';
 import type { SignalHooks } from '../process-signals.ts';
 
-const DELIVERED = [SIG.HUP, SIG.INT, SIG.QUIT, SIG.USR1, SIG.USR2, SIG.ALRM, SIG.TERM];
-const DELIVERED_MASK = DELIVERED.reduce((m, sig) => m | sigbit(sig), 0);
+const DELIVERED_MASK = Object.values(SIG)
+  .filter((sig) => sig !== SIG.KILL && sig !== SIG.STOP)
+  .reduce((m, sig) => m | sigbit(sig), 0);
 
 export class WasiSignals implements SignalHooks {
   private exports: WebAssembly.Exports | undefined;

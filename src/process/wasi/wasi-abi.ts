@@ -137,3 +137,7 @@ export const SIZE = {
 export const WASI_SIGNAL_TO_POSIX: Readonly<Record<number, number>> = Object.fromEntries(
   Array.from({ length: 30 }, (_, i) => [i + 1, i + 1 < 16 ? i + 1 : i + 2])
 );
+
+export function wasixSignal(sig: number): number | undefined {
+  return Number.isInteger(sig) && sig >= 1 && sig <= 31 ? sig : undefined;
+}
