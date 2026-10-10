@@ -56,7 +56,9 @@ export function physicalPath(fs: LinkReader, path: string): string {
       return rest(walk, part);
     }
     if (target === undefined) walk.done.push(part);
-    else if (!follow(walk, target)) return lexical(path);
+    else if (!follow(walk, target)) {
+      throw Object.assign(new Error('too many levels of symbolic links'), { code: 'ELOOP' });
+    }
   }
   return `/${walk.done.join('/')}`;
 }
