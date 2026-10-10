@@ -108,10 +108,10 @@ export function netOps(kernel: JsKernel, io: NetIo): JsNet {
     return { fd, local, remote, readable, writable, close };
   };
 
-  const resolve = async (host: string): Promise<string> => {
+  const resolve = async (host: string, signal: AbortSignal): Promise<string> => {
     if (IPV4.test(host)) return host;
-    const found = (await kernel.json({ op: 'sock-resolve', name: host, family: 4 })) as string[];
-    return found[0] as string;
+    const r = await kernel.blocking({ op: 'sock-resolve', name: host, family: 4 }, signal);
+    return ((r.ok && r.kind === 'json' ? r.json : []) as string[])[0] as string;
   };
 
   const opened = async <T>(use: (fd: number) => Promise<T>): Promise<T> => {
@@ -169,15 +169,15 @@ export function netOps(kernel: JsKernel, io: NetIo): JsNet {
         await kernel.call({ op: 'sock-listen', fd, backlog: options.backlog ?? 128 });
         return listener(fd, await name(fd, false));
       }),
-    connect: (options) =>
-      opened(async (fd) => {
-        options.signal?.throwIfAborted();
-        const addr: InetAddr = {
-          family: 'inet',
-          host: await resolve(options.host),
-          port: port(options.port),
-        };
-        const signal = options.signal ?? NEVER;
+    connect: async (options) => {
+      const signal = options.signal ?? NEVER;
+      signal.throwIfAborted();
+      const addr: InetAddr = {
+        family: 'inet',
+        host: await resolve(options.host, signal),
+        port: port(options.port),
+      };
+      return opened(async (fd) => {
         const r = await kernel.raw({ op: 'sock-connect', fd, addr, nonblock: true });
         if (!r.ok && r.errno !== 'EINPROGRESS') throw new JsCallError(r.errno, 'connect');
         await kernel.blocking({ op: 'fd-select', read: [], write: [fd], timeoutMs: -1 }, signal);
@@ -189,6 +189,7 @@ export function netOps(kernel: JsKernel, io: NetIo): JsNet {
         })) as number;
         if (failed !== 0) throw new JsCallError(errnoName(failed), 'connect');
         return connection(fd);
-      }),
+      });
+    },
   };
 }
