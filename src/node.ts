@@ -104,7 +104,7 @@ function hostfsFetchOf(options: NodeKernelOptions): { hostfsFetch?: FetchLike } 
 }
 
 export function nodeTransport(): NetworkTransport {
-  const transport = fetchTransport({ webSocket: true, webSocketHeaders: true });
+  const transport = fetchTransport({ webSocket: true, webSocketHeaders: true, redirect: 'manual' });
   return { ...transport, traits: { ...transport.traits, crossOrigin: 'any' } };
 }
 

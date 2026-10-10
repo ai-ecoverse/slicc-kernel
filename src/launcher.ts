@@ -42,6 +42,7 @@ import {
   writeCaFile,
 } from './kernel/net/network.ts';
 import type { CaStore, RealmCa } from './kernel/net/realm-ca.ts';
+import { replayingHops } from './kernel/net/redirect-hops.ts';
 import { Resolver } from './kernel/net/resolver.ts';
 import { Routes, type RouteTable } from './kernel/net/routes.ts';
 import type { RealmTransport } from './kernel/net/transport.ts';
@@ -392,7 +393,7 @@ export class Launcher {
     this.hostname = hostname;
     this.env = { ...networkEnv(hostname), SLICC_CDP_URL: this.cdp.url, ...options.env };
     this.ca = kernelCa(options.caStore ?? memoryCaStore());
-    this.transport = options.transport ?? missingTransport();
+    this.transport = replayingHops(options.transport ?? missingTransport());
     this.uplink = options.uplink;
     this.routes = new Routes(options.uplink?.traits.ipv6 === true);
     if (options.uplink?.routes) this.routes.set(options.uplink.routes);
@@ -674,7 +675,7 @@ export class Launcher {
       jobs: this.jobs,
       ptys: this.ptys,
       net: this.net,
-      http: new HttpHandles(this.transport),
+      http: new HttpHandles(this.transport, pid),
       locks: this.locks,
       resolver: this.resolver,
       onReap: (child) => this.reaped(child),

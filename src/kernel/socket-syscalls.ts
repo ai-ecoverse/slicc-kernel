@@ -1,7 +1,13 @@
 import type { SyncFsResult } from '../realm/sync-fs-wire.ts';
 import { type FdTable, KernelError, OpenFile, pollFile } from './fd-table.ts';
 import type { ResolveFamily } from './net/uplink.ts';
-import { KernelSocket, type LoopbackNet, type SockAddr, type SocketDomain } from './socket.ts';
+import {
+  KernelSocket,
+  type LoopbackNet,
+  type PeerCred,
+  type SockAddr,
+  type SocketDomain,
+} from './socket.ts';
 export type SocketSyscall =
   | {
       op: 'sock-open';
@@ -78,6 +84,7 @@ export interface SocketProcess {
   net: LoopbackNet;
   blocking(): AbortSignal;
   resolve(name: string, family: ResolveFamily, blocking: () => AbortSignal): Promise<string[]>;
+  cred?(): PeerCred;
 }
 function socketAt(fds: FdTable, fd: number): KernelSocket {
   const file = fds.get(fd).file;
@@ -95,7 +102,7 @@ export async function socketSyscall(
     case 'sock-open':
       return ok(fds.install(new OpenFile(net.socket(req.domain)), 3));
     case 'sock-pair': {
-      const [a, b] = KernelSocket.pair(net, req.domain);
+      const [a, b] = KernelSocket.pair(net, req.domain, proc.cred?.());
       const first = fds.install(new OpenFile(a), 3);
       try {
         return ok([first, fds.install(new OpenFile(b), 3)]);
@@ -108,12 +115,12 @@ export async function socketSyscall(
       socketAt(fds, req.fd).bind(req.addr);
       return ok();
     case 'sock-listen':
-      socketAt(fds, req.fd).listen(req.backlog);
+      socketAt(fds, req.fd).listen(req.backlog, proc.cred?.());
       return ok();
     case 'sock-accept':
       return ok(await accept(proc, req.fd, req.nonblock));
     case 'sock-connect': {
-      const dialing = socketAt(fds, req.fd).connect(req.addr);
+      const dialing = socketAt(fds, req.fd).connect(req.addr, true, proc.cred?.());
       if (req.nonblock) {
         dialing?.catch(() => undefined);
         throw new KernelError('EINPROGRESS');

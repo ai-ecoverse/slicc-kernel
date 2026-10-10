@@ -6,9 +6,15 @@ export interface RealmTransportRequest {
   body?: Uint8Array;
   signal: AbortSignal;
 }
+export interface RealmRedirectHop {
+  status: number;
+  url: string;
+  headers: HeaderList;
+}
 export interface RealmTransportResponse {
   url?: string;
   redirected?: boolean;
+  redirects?: readonly RealmRedirectHop[];
   status: number;
   statusText: string;
   headers: HeaderList;
@@ -22,6 +28,7 @@ export interface RealmTransportTraits {
   crossOrigin?: 'cors' | 'any';
   unavailable?: true;
   websocket?: true;
+  redirectHops?: true;
 }
 export interface RealmWebSocketRequest {
   url: string;
@@ -44,6 +51,6 @@ export interface RealmWebSocket {
 }
 export interface RealmTransport {
   readonly traits: RealmTransportTraits;
-  fetch(request: RealmTransportRequest): Promise<RealmTransportResponse>;
+  fetch(request: RealmTransportRequest, owner?: number): Promise<RealmTransportResponse>;
   websocket?(request: RealmWebSocketRequest): Promise<RealmWebSocket>;
 }

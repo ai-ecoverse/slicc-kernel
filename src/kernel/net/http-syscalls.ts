@@ -67,8 +67,11 @@ export class HttpHandles {
 
   private readonly ws: WsHandles;
 
-  constructor(transport: RealmTransport) {
+  private readonly owner: number | undefined;
+
+  constructor(transport: RealmTransport, owner?: number) {
     this.transport = transport;
+    this.owner = owner;
     this.ws = new WsHandles(transport, () => ++this.nextHandle);
   }
 
@@ -118,13 +121,16 @@ export class HttpHandles {
 
   private async respond(handle: number, req: HttpRequestBody, entry: Open): Promise<SyncFsResult> {
     try {
-      const response = await this.transport.fetch({
-        url: req.url,
-        method: req.method,
-        headers: req.headers,
-        ...(req.body ? { body: req.body } : {}),
-        signal: entry.abort.signal,
-      });
+      const response = await this.transport.fetch(
+        {
+          url: req.url,
+          method: req.method,
+          headers: req.headers,
+          ...(req.body ? { body: req.body } : {}),
+          signal: entry.abort.signal,
+        },
+        this.owner
+      );
       entry.body = response.body[Symbol.asyncIterator]();
       entry.cancel = () => response.cancel();
       if (!this.open.has(handle)) await entry.cancel().catch(() => undefined);

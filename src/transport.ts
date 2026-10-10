@@ -2,6 +2,7 @@ import { BODY_IDLE_MS, readWithin } from './body-idle.ts';
 import type { TransportCall, TransportReply } from './kernel/net/remote-transport.ts';
 import type {
   HeaderList,
+  RealmRedirectHop,
   RealmTransport,
   RealmTransportRequest,
   RealmTransportResponse,
@@ -14,6 +15,7 @@ import { openWebSocket, type WebSocketConstructor } from './websocket-transport.
 
 export type {
   HeaderList,
+  RealmRedirectHop as NetworkRedirectHop,
   RealmTransport as NetworkTransport,
   RealmTransportRequest as NetworkRequest,
   RealmTransportResponse as NetworkResponse,
@@ -29,6 +31,7 @@ export interface FetchTransportOptions {
   bodyIdleMs?: number;
   webSocket?: boolean | WebSocketConstructor;
   webSocketHeaders?: boolean;
+  redirect?: 'follow' | 'manual';
 }
 
 export const SEND_BUFFER = 1024 * 1024;
@@ -75,9 +78,10 @@ export function fetchTransport(options: FetchTransportOptions = {}): RealmTransp
       ? (globalThis as { WebSocket?: WebSocketConstructor }).WebSocket
       : options.webSocket || undefined;
   const headers = options.webSocketHeaders === true;
+  const redirect = options.redirect ?? 'follow';
   return {
     traits: {
-      manualRedirects: false,
+      manualRedirects: redirect === 'manual',
       encodedBodies: false,
       maxRequestBody: options.maxRequestBody ?? MAX_REQUEST_BODY,
       crossOrigin: 'cors',
@@ -92,7 +96,7 @@ export function fetchTransport(options: FetchTransportOptions = {}): RealmTransp
           headers: joinHeaders(request.headers),
           ...(request.body ? { body: request.body as BodyInit } : {}),
           signal: request.signal,
-          redirect: 'follow',
+          redirect,
           credentials: 'omit',
           mode: 'cors',
         });
@@ -182,6 +186,7 @@ export function serveTransport(
         net: 'head',
         nid: call.nid,
         ...(response.redirected ? { url: response.url, redirected: true } : {}),
+        ...(response.redirects ? { redirects: response.redirects } : {}),
         status: response.status,
         statusText: response.statusText,
         headers: response.headers,
