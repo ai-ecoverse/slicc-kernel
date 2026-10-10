@@ -32,6 +32,8 @@ export interface LinkerHost {
   read(path: string): Uint8Array<ArrayBuffer> | undefined;
 
   hostImports(module: WebAssembly.Module): WebAssembly.Imports;
+
+  real?(path: string): string;
 }
 
 interface Linked {
@@ -158,9 +160,16 @@ export class WasixLinker {
 
   mainPath: string | undefined;
 
+  private isMain(path: string): boolean {
+    if (this.mainPath === undefined) return false;
+    if (path === this.mainPath) return true;
+    const real = this.host.real;
+    return real !== undefined && real(path) === real(this.mainPath);
+  }
+
   open(name: string, cwd: string, ldPath: readonly string[]): number {
     const path = this.locate(name, cwd, ldPath);
-    if (path === this.mainPath) return 0;
+    if (this.isMain(path)) return 0;
     return this.load(path, cwd, ldPath).handle;
   }
 
