@@ -561,6 +561,8 @@ export async function runWasmProcess(
     pid: init.pid,
     raise: (sig) => running.sliccRaise?.(sig),
     restartable,
+    memory: () => memory,
+    deliveries: () => signals.deliveries(),
     describeFork: () => describeForFork(running.FS, sys, streams, livePath),
     inherit: (actions) => describeInherited(running.FS, sys, streams, livePath, actions),
     stdioPromoter: () => vfsPromoter(running.FS, sys, streams, livePath),

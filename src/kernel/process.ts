@@ -151,6 +151,8 @@ export type WasmSyscall =
       inherit?: InheritedSlot[];
 
       exec?: boolean;
+
+      restart?: true;
     }
   | {
       op: 'proc-wait';
@@ -161,7 +163,7 @@ export type WasmSyscall =
       continued?: boolean;
     }
   | { op: 'proc-captured'; pid: number; slot: number }
-  | { op: 'proc-fork'; state: ForkState }
+  | { op: 'proc-fork'; state: ForkState; restart?: true }
   | { op: 'proc-kill'; pid: number; sig: number }
   | { op: 'proc-list' }
   | { op: 'mount-list' }
@@ -607,6 +609,10 @@ export class WasmProcess {
     }
   }
 
+  private refuseIfPending(restart: true | undefined): void {
+    if (restart && this.options.hasPending?.()) throw new KernelError('EINTR');
+  }
+
   private blockingSignal(): AbortSignal {
     if (this.options.hasPending?.()) throw new KernelError('EINTR');
     return this.interrupt.signal;
@@ -983,8 +989,10 @@ export class WasmProcess {
   ): Promise<SyncFsResult> {
     switch (req.op) {
       case 'proc-fork':
+        this.refuseIfPending(req.restart);
         return { ok: true, kind: 'json', json: await this.children.fork(req.state) };
       case 'proc-spawn':
+        this.refuseIfPending(req.restart);
         return { ok: true, kind: 'json', json: await this.spawn(req) };
       case 'proc-wait': {
         const signal = req.nohang ? this.interrupt.signal : this.blockingSignal();

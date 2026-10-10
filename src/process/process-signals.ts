@@ -27,6 +27,8 @@ export class SignalGate {
 
   private quieted = 0;
 
+  private delivered = 0;
+
   private readonly raw: SyncSabTransport;
 
   private readonly header: Int32Array;
@@ -61,6 +63,10 @@ export class SignalGate {
         }
       },
     };
+  }
+
+  deliveries(): number {
+    return this.delivered;
   }
 
   restartable(): boolean {
@@ -108,6 +114,7 @@ export class SignalGate {
     const pending = Atomics.exchange(this.header, SAB_I_SIGNALS, 0);
 
     if (this.depth <= 1) this.lastDelivered = pending | (timers & 1 ? sigbit(SIG.ALRM) : 0);
+    if (pending !== 0 || timers !== 0) this.delivered++;
     for (let which = 0; which < 3; which++) {
       if (timers & (1 << which)) this.hooks.timer?.(which);
     }

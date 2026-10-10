@@ -39,7 +39,11 @@ export class WasixHost {
   constructor(host: WasiHost, driver: AsyncifyDriver, module?: WebAssembly.Module) {
     this.host = host;
     this.driver = driver;
-    this.process = new WasixProcess(host, driver);
+    this.process = new WasixProcess(
+      host,
+      driver,
+      () => (this.threads?.tid ?? MAIN_TID) !== MAIN_TID
+    );
 
     if (module && !WebAssembly.Module.imports(module).some((i) => i.name === 'fd_fdflags_set')) {
       host.fds.implicitCloexec = true;
