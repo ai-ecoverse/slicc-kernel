@@ -25,6 +25,25 @@ export const COMPAT: Readonly<Record<string, readonly string[]>> = {
   alarm: ['proc_raise_interval', 'proc_raise_interval2'],
 };
 
+const FUTEX_SLICE_MS = 50;
+
+export function futexWait(
+  view: Int32Array,
+  index: number,
+  expected: number,
+  ms: number,
+  interrupted: (() => boolean) | undefined
+): boolean {
+  const deadline = performance.now() + ms;
+  for (;;) {
+    const slice = interrupted ? Math.min(FUTEX_SLICE_MS, ms) : ms;
+    if (Atomics.wait(view, index, expected, slice) !== 'timed-out') return true;
+    if (interrupted?.()) return true;
+    ms = deadline - performance.now();
+    if (ms <= 0) return false;
+  }
+}
+
 export class WasixHost {
   private readonly process: WasixProcess;
 
@@ -399,7 +418,7 @@ export class WasixHost {
         if (!(this.threads?.known(tid) ?? tid === MAIN_TID)) throw new WasiError('ESRCH');
         const posix = posixSignal(sig);
         if (host.onRaise?.(posix)) return;
-        host.o.kernel.call({ op: 'proc-kill', pid: host.o.pid, sig: posix });
+        host.o.kernel.call({ op: 'thread-kill', tid, sig: posix });
       },
 
       thread_spawn_v2: (startPtr: number, tidPtr: number) => {
@@ -415,10 +434,9 @@ export class WasixHost {
         const ms = timed
           ? Number(v.getBigUint64(timeoutPtr + 8, true)) / 1e6
           : Number.POSITIVE_INFINITY;
-
         v.setUint8(
           wokenPtr,
-          Atomics.wait(i32(), ptr >> 2, expected | 0, ms) === 'timed-out' ? 0 : 1
+          futexWait(i32(), ptr >> 2, expected | 0, ms, host.interrupted) ? 1 : 0
         );
       },
 

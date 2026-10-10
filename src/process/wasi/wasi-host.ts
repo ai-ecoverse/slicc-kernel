@@ -138,6 +138,8 @@ export class WasiHost {
 
   signals: WasiSignals | undefined;
 
+  interrupted: (() => boolean) | undefined;
+
   private readonly listening: number[];
 
   readonly o: WasiHostOptions;

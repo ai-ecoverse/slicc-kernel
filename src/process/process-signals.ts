@@ -103,6 +103,17 @@ export class SignalGate {
     }
   }
 
+  interrupt(): boolean {
+    const header = this.header;
+    const pending =
+      Atomics.load(header, SAB_I_SIGNALS) |
+      Atomics.load(header, SAB_I_TIMERS) |
+      Atomics.load(header, SAB_I_KILLED);
+    if (pending === 0) return false;
+    this.deliver();
+    return true;
+  }
+
   deliver(): void {
     if (this.quieted > 0) return;
     const killed = Atomics.load(this.header, SAB_I_KILLED);

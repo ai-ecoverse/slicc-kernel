@@ -204,6 +204,27 @@ class Dying {
   }
 }
 
+interface ThreadSignals {
+  header: Int32Array;
+  interrupt: AbortController;
+}
+
+function killThread(thread: ThreadSignals | undefined, caught: number, sig: number): boolean {
+  if (!thread || (caught & sigbit(sig)) === 0) return false;
+  Atomics.or(thread.header, SAB_I_SIGNALS, sigbit(sig));
+  Atomics.notify(thread.header, SAB_I_SIGNALS);
+  const blocked = thread.interrupt;
+  thread.interrupt = new AbortController();
+  blocked.abort();
+  return true;
+}
+
+function threadCancel(thread: ThreadSignals): AbortSignal {
+  return Atomics.load(thread.header, SAB_I_SIGNALS) !== 0
+    ? AbortSignal.abort()
+    : thread.interrupt.signal;
+}
+
 function notifiers(header: Int32Array): { onPending(sig: number): void; onAsync(): void } {
   return {
     onPending(sig) {
@@ -302,10 +323,12 @@ function holdingToken(opts: SpawnWasmOptions, holds: HeldPaths): string {
   });
 }
 
-export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
-  const sab = new SharedArrayBuffer(SAB_HEADER_BYTES + SAB_DEFAULT_WINDOW_BYTES);
-  const header = new Int32Array(sab, 0, SAB_HEADER_I32);
-  const process = new WasmProcess(opts.pid, opts.fds, {
+function processOptions(
+  opts: SpawnWasmOptions,
+  header: Int32Array,
+  hooks: Pick<WasmProcessOptions, 'raise' | 'threadKill'>
+): WasmProcessOptions {
+  return {
     ...inherited(opts),
     ...(opts.identity ? { identity: opts.identity } : {}),
     ...(opts.onSyscall ? { onSyscall: opts.onSyscall } : {}),
@@ -331,11 +354,27 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     onTimer: (which) => void Atomics.or(header, SAB_I_TIMERS, 1 << which),
     hasPending: () =>
       Atomics.load(header, SAB_I_SIGNALS) !== 0 || Atomics.load(header, SAB_I_TIMERS) !== 0,
-    raise: (sig) => signal(sig),
+    raise: hooks.raise,
+    threadKill: hooks.threadKill,
     ...(opts.program.abi === 'wasi' || opts.program.abi === 'js'
       ? { pendingBits: () => Atomics.load(header, SAB_I_SIGNALS) }
       : {}),
-  });
+  };
+}
+
+export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
+  const sab = new SharedArrayBuffer(SAB_HEADER_BYTES + SAB_DEFAULT_WINDOW_BYTES);
+  const header = new Int32Array(sab, 0, SAB_HEADER_I32);
+  const threadSignals = new Map<number, ThreadSignals>();
+  const process: WasmProcess = new WasmProcess(
+    opts.pid,
+    opts.fds,
+    processOptions(opts, header, {
+      raise: (sig) => signal(sig),
+      threadKill: (tid, sig) =>
+        killThread(threadSignals.get(tid), process.signalMasks().caught, sig),
+    })
+  );
   publishStops(process, header);
   const holds = new HeldPaths();
   opts.held?.add(holds);
@@ -407,7 +446,16 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     }
     const tsab = new SharedArrayBuffer(SAB_HEADER_BYTES + SAB_DEFAULT_WINDOW_BYTES);
     const tw = opts.createWorker();
-    const tresponder = attachSyncSabResponder(tw, tsab, token, { dispatch });
+    const tsignals = {
+      header: new Int32Array(tsab, 0, SAB_HEADER_I32),
+      interrupt: new AbortController(),
+    };
+    threadSignals.set(thread.tid, tsignals);
+    const tdispatch = (req: SyncSabDispatchRequest): Promise<SyncFsResult> =>
+      dying.serving(() =>
+        isWasmSyscall(req) ? process.syscall(req, threadCancel(tsignals)) : dispatchSyncFs(req)
+      );
+    const tresponder = attachSyncSabResponder(tw, tsab, token, { dispatch: tdispatch });
     const onThreadMessage = (event: MessageEvent): void => {
       const data = event.data as WorkerSays | undefined;
       if (data?.type === WASM_THREAD_EXIT) endThread(thread.tid);
@@ -416,6 +464,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     tw.addEventListener('message', onThreadMessage);
     tw.addEventListener('error', onError);
     threads.set(thread.tid, () => {
+      threadSignals.delete(thread.tid);
       tw.removeEventListener('message', onThreadMessage);
       tw.removeEventListener('error', onError);
       tresponder.dispose();
