@@ -413,6 +413,8 @@ export class WasmProcess {
 
   private execChild: number | undefined;
 
+  private killed = false;
+
   execTermsig: number | undefined;
 
   private stopped = 0;
@@ -470,7 +472,10 @@ export class WasmProcess {
       this.wake?.();
       return 'forward';
     }
-    if (sig === SIG.KILL) return 'terminate';
+    if (sig === SIG.KILL) {
+      this.killed = true;
+      return 'terminate';
+    }
 
     if (sig === SIG.CONT) this.cont();
     if (sig === SIG.STOP) return this.stop(sig);
@@ -488,6 +493,21 @@ export class WasmProcess {
     this.interrupt = new AbortController();
     blocked.abort();
     return 'deliver';
+  }
+
+  private async spawn(req: Extract<WasmSyscall, { op: 'proc-spawn' }>): Promise<number> {
+    const { file, argv, env, cwd, stdio, inherit, exec } = req;
+    const spawned = { file, argv, env, cwd, ...(exec ? { exec } : {}) };
+    const pid = await this.children.spawn(spawned, stdio, inherit);
+    if (!exec) return pid;
+    if (this.killed) void Promise.allSettled([this.options.kill?.(pid, SIG.KILL)]);
+    else this.adoptExec(pid);
+    return pid;
+  }
+
+  private adoptExec(pid: number): void {
+    this.execChild = pid;
+    this.children.watch(pid, (state, sig) => (state === 'stopped' ? this.stop(sig) : this.cont()));
   }
 
   onState(listener: StateListener): void {
@@ -944,12 +964,8 @@ export class WasmProcess {
     switch (req.op) {
       case 'proc-fork':
         return { ok: true, kind: 'json', json: await this.children.fork(req.state) };
-      case 'proc-spawn': {
-        const { file, argv, env, cwd, stdio, inherit, exec } = req;
-        const spawned = { file, argv, env, cwd, ...(exec ? { exec } : {}) };
-        const pid = await this.children.spawn(spawned, stdio, inherit);
-        return { ok: true, kind: 'json', json: pid };
-      }
+      case 'proc-spawn':
+        return { ok: true, kind: 'json', json: await this.spawn(req) };
       case 'proc-wait': {
         const signal = req.nohang ? this.interrupt.signal : this.blockingSignal();
         const flags = {
@@ -963,12 +979,8 @@ export class WasmProcess {
       case 'proc-identity':
         return { ok: true, kind: 'json', json: (await this.options.identity?.()) ?? null };
       case 'proc-exec': {
-        this.execChild = req.pid;
+        this.adoptExec(req.pid);
         this.options.jobs?.exec(this.pid, req.pid);
-
-        this.children.watch(req.pid, (state, sig) =>
-          state === 'stopped' ? this.stop(sig) : this.cont()
-        );
 
         await this.fds.closeAll();
         try {

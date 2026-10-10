@@ -442,7 +442,7 @@ An exec'd program takes over the pid of the process it replaces, as on Linux: `g
 
 ### File modes and the umask
 
-Every process has a umask in the kernel, `022` for a process the embedder starts, inherited across fork, spawn and exec and shown in `/proc/<pid>/status` (`Umask:`). The kernel applies it when a program creates a file or directory, whatever its libc does: an Emscripten program's `open` with `O_CREAT`, `mkdir` and `mknod` (so `umask 077; touch f` gives `600` in a child too), and a WASI program's `path_open` with `O_CREAT` and `path_create_directory` (`0666` and `0777` less the umask).
+Every process has a umask in the kernel, `022` for a process the embedder starts, inherited across fork, spawn and exec and shown in `/proc/<pid>/status` (`Umask:`). The kernel applies it when a program creates a file or directory, whatever its libc does: an Emscripten program's `open` with `O_CREAT`, `mkdir` and `mknod` (so `umask 077; touch f` gives `600` in a child too), and a WASI program's `path_open` with `O_CREAT` and `path_create_directory` (`0666` and `0777` less the umask). An Emscripten program's `umask()` sets and reads the kernel's umask through the glue's `__syscall_umask` import, so `umask 077` in bash shows in `/proc` and reaches every child. A build that resolves `umask` inside its wasm, as wasm-bash 5.3.0-8 to 5.3.0-10 do, keeps a umask of its own that the kernel never sees.
 
 WASI and WASIX have no call for file modes, so the kernel adds the import module `slicc_fs`, whose functions return a preview1 errno (kernels without them answer `ENOSYS`):
 

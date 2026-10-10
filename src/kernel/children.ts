@@ -73,6 +73,7 @@ interface Child {
   code?: number;
 
   stopReport?: number;
+  stoppedBy?: number;
 
   continueReport?: boolean;
 
@@ -197,6 +198,7 @@ export class ChildTable {
     });
     handle.onState?.((state, sig) => {
       child.stopReport = state === 'stopped' ? sig : undefined;
+      child.stoppedBy = child.stopReport;
       child.continueReport = state === 'continued';
       this.watchers.get(handle.pid)?.(state, sig);
       const waiters = this.stateChanged;
@@ -209,7 +211,10 @@ export class ChildTable {
   }
 
   watch(pid: number, listener: ChildStateListener): void {
-    if (this.children.has(pid)) this.watchers.set(pid, listener);
+    const child = this.children.get(pid);
+    if (!child) return;
+    this.watchers.set(pid, listener);
+    if (child.stoppedBy !== undefined) listener('stopped', child.stoppedBy);
   }
 
   private openSlot(slot: ChildStdio, n: number, captured: Map<number, Uint8Array[]>): OpenFile {

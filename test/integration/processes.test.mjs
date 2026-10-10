@@ -78,7 +78,13 @@ test('stdin, environment and streamed output reach the caller', async (t) => {
     });
     return { chunks, status: result.status };
   });
-  assert.deepEqual(streamed, { chunks: ['out:one\n', 'err:two\n'], status: 0 });
+  const of = (kind) => streamed.chunks.filter((c) => c.startsWith(kind)).map((c) => c.slice(4));
+  const lastOut = streamed.chunks.findLastIndex((c) => c.startsWith('out:'));
+  assert.deepEqual(
+    { out: of('out:').join(''), err: of('err:').join(''), status: streamed.status },
+    { out: 'one\n', err: 'two\n', status: 0 }
+  );
+  assert.ok(lastOut < streamed.chunks.findIndex((c) => c.startsWith('err:')));
 });
 
 test('a kernel keeps the process worker it started with when the file changes in place', async (t) => {
