@@ -31,6 +31,7 @@ export interface KernelFs {
   symlink(target: string, path: string): Promise<void>;
   readlink(path: string): Promise<string>;
   realpath?(path: string, follow: boolean): Promise<string>;
+  createExclusive?(path: string): Promise<void>;
   chmod(path: string, mode: number): Promise<void>;
   utimes(path: string, atime: Date, mtime: Date): Promise<void>;
   lutimes?(path: string, atime: Date, mtime: Date): Promise<void>;

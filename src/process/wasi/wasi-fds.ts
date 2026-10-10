@@ -508,8 +508,9 @@ export class WasiFds {
     const alias = stdioAlias(path);
     if (alias !== undefined) return this.reopen(alias);
     const exclusive = (oflags & OFLAGS.CREAT) !== 0 && (oflags & OFLAGS.EXCL) !== 0;
-    if (exclusive) this.createExclusive(path);
+    if (exclusive && this.isLink(path)) throw new WasiError('EEXIST');
     const s = this.statOrMissing(path);
+    if (exclusive && s) throw new WasiError('EEXIST');
     if (oflags & OFLAGS.DIRECTORY && !s?.isDirectory) {
       throw new WasiError(s ? 'ENOTDIR' : 'ENOENT');
     }
@@ -531,8 +532,8 @@ export class WasiFds {
     if (buffer) {
       if (oflags & OFLAGS.TRUNC) buffer.truncate(0);
     } else {
-      if (!existing) this.fs.writeFile(path, new Uint8Array(0));
-      const empty = !existing || (oflags & OFLAGS.TRUNC) !== 0;
+      const made = !existing && this.createNew(path, oflags);
+      const empty = made || (oflags & OFLAGS.TRUNC) !== 0;
       if (existing?.ranged) (this.fs as { invalidate?(): void }).invalidate?.();
       const st = existing?.ranged || !existing ? this.fs.stat(path) : existing;
       const ranged = st.ranged ? st.size : undefined;
@@ -555,9 +556,9 @@ export class WasiFds {
     const append = (fdflags & FDFLAGS.APPEND) !== 0;
     const flags = (writable ? (readable ? O_RDWR : O_WRONLY) : 0) | (append ? O_APPEND : 0);
 
-    if (!existing) this.fs.writeFile(path, new Uint8Array(0));
+    const made = !existing && this.createNew(path, oflags);
 
-    const truncate = !existing || (oflags & OFLAGS.TRUNC) !== 0;
+    const truncate = made || (oflags & OFLAGS.TRUNC) !== 0;
     const fd = this.kernel.sys.openVfs(path, flags, 0, truncate ? { truncate } : {});
     this.table.set(fd, { type: 'kernel', kind: 'file', nonblock: false, append });
     if (append) this.publishFlags(fd, { nonblock: false, append });
@@ -565,19 +566,25 @@ export class WasiFds {
     return fd;
   }
 
-  private createExclusive(path: string): void {
-    if (this.entryExists(path)) throw new WasiError('EEXIST');
-    const sys = this.kernel.sys;
-    sys.close(sys.openVfs(path, O_WRONLY, 0, { exclusive: true }));
+  private createNew(path: string, oflags: number): boolean {
+    if (!this.fs.create) {
+      this.fs.writeFile(path, new Uint8Array(0));
+      return true;
+    }
+    try {
+      this.fs.create(path);
+      return true;
+    } catch (err) {
+      if (oflags & OFLAGS.EXCL || (err as { code?: string }).code !== 'EEXIST') throw err;
+      return false;
+    }
   }
 
-  private entryExists(path: string): boolean {
+  private isLink(path: string): boolean {
     try {
-      this.fs.lstat(path);
-      return true;
-    } catch (e) {
-      if ((e as { code?: string }).code === 'ENOENT') return false;
-      throw e;
+      return this.fs.lstat(path).isSymbolicLink === true;
+    } catch {
+      return false;
     }
   }
 

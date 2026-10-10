@@ -352,6 +352,7 @@ export function cachingBridge(
     utimes: (p, a, m) => mutating(() => bridge.utimes(p, a, m)),
     lutimes: (p, a, m) => mutating(() => bridge.lutimes(p, a, m)),
     ...(bridge.hold ? { hold: bridge.hold.bind(bridge) } : {}),
+    ...(bridge.create ? { create: (p: string) => mutating(() => bridge.create?.(p)) } : {}),
     ...(bridge.pread && bridge.pwrite && bridge.truncate
       ? {
           pread: bridge.pread.bind(bridge),

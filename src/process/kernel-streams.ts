@@ -115,7 +115,6 @@ export interface ProcessSys {
       orphan?: boolean;
       truncate?: boolean;
       create?: boolean;
-      exclusive?: boolean;
       pin?: { version: string; size: number };
     }
   ): number;
@@ -431,7 +430,7 @@ export class KernelStreams {
       const pty = this.openPty(open, path, flags, mode);
       if (pty) return pty;
       this.refuseExclusiveLink(path, flags);
-      const stream = open(path, flags, mode);
+      const stream = this.openRacing(open, path, flags, mode);
 
       if (!stream.tty) return stream;
       if (stream.path === '/dev/tty' && this.sys.openTty) {
@@ -462,6 +461,21 @@ export class KernelStreams {
       if (terminal !== undefined) this.attach(stream, terminal, true);
       return stream;
     };
+  }
+
+  private openRacing(
+    open: NonNullable<ProcessFs['open']>,
+    path: string,
+    flags: number,
+    mode?: number
+  ): ProcessStream {
+    try {
+      return open(path, flags, mode);
+    } catch (err) {
+      const lost = (err as { errno?: number }).errno === wasiErrno('EEXIST') && !(flags & O_EXCL);
+      if (!lost) throw err;
+      return open(path, flags, mode);
+    }
   }
 
   private refuseExclusiveLink(path: string, flags: number): void {

@@ -18,6 +18,7 @@ export const SYNC_FS_OPS = [
   'lutimes',
   'statfs',
   'hold',
+  'create',
   'pread',
   'pwrite',
   'truncate',
@@ -93,6 +94,7 @@ export interface SyncFsPosixBridge {
   utimes(path: string, atimeMs: number, mtimeMs: number): void;
   lutimes(path: string, atimeMs: number, mtimeMs: number): void;
   hold?(path: string, held: boolean, open?: boolean): void;
+  create?(path: string): void;
   readdirStat(path: string): Array<[string, SyncFsBridgeStat | null]>;
   statfs?(path?: string): SyncFsUsage | null;
   pread?(path: string, offset: number, length: number, version?: string): Uint8Array;

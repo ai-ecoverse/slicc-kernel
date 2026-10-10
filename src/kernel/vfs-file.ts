@@ -556,6 +556,8 @@ export function keepingOpen(fs: KernelFs, nodes: VfsNodes): KernelFs {
     },
     writeFile: (path, content) =>
       nodes.onEntry(fs.resolvePath('/', path), () => fs.writeFile(path, content)),
+    createExclusive: async (path) =>
+      nodes.createExclusive(await nodes.entryKey(fs.resolvePath('/', path))),
     symlink: (target, path) =>
       nodes.onEntry(fs.resolvePath('/', path), () => fs.symlink(target, path)),
     mkdir: (path, options) =>

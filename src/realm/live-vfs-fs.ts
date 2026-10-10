@@ -444,7 +444,10 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
         const perm = mode & PERM_MASK & ~UMASK;
         if (perm !== DEFAULT_DIR_PERM) metadataCall(() => bridgeOf(parent).chmod(path, perm));
       } else if (Fs.isFile(mode)) {
-        call(() => bridgeOf(parent).writeFile(path, new Uint8Array(0)));
+        const bridge = bridgeOf(parent);
+        call(() =>
+          bridge.create ? bridge.create(path) : bridge.writeFile(path, new Uint8Array(0))
+        );
       } else {
         throw new Fs.ErrnoError(wasiErrno('EPERM'));
       }
