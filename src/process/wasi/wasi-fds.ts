@@ -524,7 +524,12 @@ export class WasiFds {
     if (oflags & OFLAGS.DIRECTORY && !s?.isDirectory) {
       throw new WasiError(s ? 'ENOTDIR' : 'ENOENT');
     }
-    if (s?.isDirectory) return this.install({ type: 'dir', path });
+    if (s?.isDirectory) {
+      const writing =
+        (rights & RIGHTS.FD_WRITE) !== 0n || (oflags & (OFLAGS.CREAT | OFLAGS.TRUNC)) !== 0;
+      if (writing && !(oflags & OFLAGS.DIRECTORY)) throw new WasiError('EISDIR');
+      return this.install({ type: 'dir', path });
+    }
     if (!s && !(oflags & OFLAGS.CREAT)) throw new WasiError('ENOENT');
     if (this.shared) return this.kernelFile(path, s, oflags, rights, fdflags);
     return this.install({ type: 'file', file: this.file(path, s, oflags, rights, fdflags) });
