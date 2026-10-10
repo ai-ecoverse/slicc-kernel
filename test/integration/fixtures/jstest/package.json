@@ -26,10 +26,19 @@
         "module": "bin/echo.mjs"
       },
       "jsscript": {
-        "script": "bin/jsscript"
+        "script": "bin/jsscript",
+        "env": {
+          "JSECHO_ENV": "jss"
+        }
       },
       "jsloop": {
         "script": "bin/jsloop"
+      },
+      "jsouter": {
+        "script": "bin/jsouter",
+        "env": {
+          "JSECHO_ENV2": "jso"
+        }
       }
     },
     "binfmt": {

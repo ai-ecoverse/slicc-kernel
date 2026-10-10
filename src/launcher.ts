@@ -277,6 +277,15 @@ function targetOf(command: Command): Target {
   };
 }
 
+function withScriptEnv(target: Target, command: Command | undefined): Target {
+  if (!command) return target;
+  return {
+    ...target,
+    env: { ...target.env, ...command.env },
+    unset: [...(target.unset ?? []), ...(command.unset ?? [])],
+  };
+}
+
 function childHandle(handle: WasmProcessHandle): ChildHandle {
   return {
     pid: handle.pid,
@@ -476,15 +485,10 @@ export class Launcher {
       if (!interp || depth >= MAX_INTERPRETERS || !(await this.scriptCommand(interp))) {
         return undefined;
       }
-      return this.interpreted(interp, [interp, ...passed], cwd, depth + 1);
+      const inner = await this.interpreted(interp, [interp, ...passed], cwd, depth + 1);
+      return inner && { ...inner, target: withScriptEnv(inner.target, command) };
     }
-    const target = command
-      ? {
-          ...found,
-          env: { ...found.env, ...command.env },
-          unset: [...(found.unset ?? []), ...(command.unset ?? [])],
-        }
-      : found;
+    const target = withScriptEnv(found, command);
     return { target, args: [...(target.prefix ?? []), ...passed] };
   }
 
