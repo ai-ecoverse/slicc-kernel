@@ -1,5 +1,6 @@
 import type {
   HeaderList,
+  RealmRedirectHop,
   RealmTransport,
   RealmTransportRequest,
   RealmTransportResponse,
@@ -35,6 +36,7 @@ export type TransportReply =
       headers: HeaderList;
       url?: string;
       redirected?: boolean;
+      redirects?: readonly RealmRedirectHop[];
     }
   | { net: 'chunk'; nid: number; bytes: Uint8Array }
   | { net: 'end'; nid: number }
@@ -159,7 +161,7 @@ export class RemoteTransport implements RealmTransport {
       finish();
       throw e;
     }
-    const { status, statusText, headers, url, redirected } = head as Extract<
+    const { status, statusText, headers, url, redirected, redirects } = head as Extract<
       TransportReply,
       { net: 'head' }
     >;
@@ -180,6 +182,7 @@ export class RemoteTransport implements RealmTransport {
     };
     return {
       ...(redirected ? { url, redirected } : {}),
+      ...(redirects ? { redirects } : {}),
       status,
       statusText,
       headers,

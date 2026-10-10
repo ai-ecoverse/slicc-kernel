@@ -99,6 +99,11 @@ function link(a: KernelSocket, b: KernelSocket): void {
   a.attach({ rx: ba, tx: ab });
   b.attach({ rx: ab, tx: ba });
 }
+export interface PeerCred {
+  pid: number;
+  uid: number;
+  gid: number;
+}
 export class KernelSocket implements KernelFile {
   private readonly net: LoopbackNet;
   readonly domain: SocketDomain;
@@ -108,6 +113,8 @@ export class KernelSocket implements KernelFile {
   private reset = false;
   local: SockAddr | undefined;
   peer: SockAddr | undefined;
+  peerCred: PeerCred | undefined;
+  private listenerCred: PeerCred | undefined;
   private link: Link | undefined;
   private readShut = false;
   private writeShut = false;
@@ -183,7 +190,7 @@ export class KernelSocket implements KernelFile {
     this.local = this.net.bind(this, addr);
     this.boundAt = this.local;
   }
-  listen(backlog: number): void {
+  listen(backlog: number, cred?: PeerCred): void {
     if (this.state === 'connected') throw new KernelError('EISCONN');
     if (this.state !== 'open' && this.state !== 'listening') throw new KernelError('EINVAL');
     if (!this.local) {
@@ -192,6 +199,7 @@ export class KernelSocket implements KernelFile {
     }
     this.backlog = Math.min(Math.max(backlog, 1), SOMAXCONN);
     this.state = 'listening';
+    this.listenerCred ??= cred;
   }
   async accept(signal?: AbortSignal, nonblock = false): Promise<KernelSocket> {
     for (;;) {
@@ -208,7 +216,7 @@ export class KernelSocket implements KernelFile {
     this.changes.wake();
     return true;
   }
-  connect(addr: SockAddr, viaUplink = true): Promise<void> | undefined {
+  connect(addr: SockAddr, viaUplink = true, cred?: PeerCred): Promise<void> | undefined {
     if (this.state === 'connected') throw new KernelError('EISCONN');
     if (this.state === 'connecting') throw new KernelError('EALREADY');
     if (this.state !== 'open') throw new KernelError('EINVAL');
@@ -226,7 +234,9 @@ export class KernelSocket implements KernelFile {
     const server = new KernelSocket(this.net, this.domain);
     server.local = addr.family === 'inet' ? { ...addr, host: canonicalHost(addr.host) } : addr;
     server.peer = this.local;
+    server.peerCred = cred;
     this.peer = server.local;
+    this.peerCred = target.listenerCred;
     link(this, server);
     if (!target.offer(server)) {
       this.unlink();
@@ -347,9 +357,14 @@ export class KernelSocket implements KernelFile {
     this.boundAt = undefined;
     this.changes.wake();
   }
-  static pair(net: LoopbackNet, domain: SocketDomain): [KernelSocket, KernelSocket] {
+  static pair(
+    net: LoopbackNet,
+    domain: SocketDomain,
+    cred?: PeerCred
+  ): [KernelSocket, KernelSocket] {
     const a = new KernelSocket(net, domain);
     const b = new KernelSocket(net, domain);
+    a.peerCred = b.peerCred = cred;
     const name: SockAddr =
       domain === 'inet'
         ? { family: 'inet', host: '127.0.0.1', port: 0 }

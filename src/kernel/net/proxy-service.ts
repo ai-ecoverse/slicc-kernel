@@ -430,7 +430,7 @@ export class RealmProxy {
         const waiting = new AbortController();
         void watchHangup(ctx.socket, abort, waiting.signal);
         try {
-          response = await this.upstream(req, url, body, abort.signal);
+          response = await this.upstream(req, url, body, abort.signal, ctx.socket.peerCred?.pid);
         } finally {
           waiting.abort();
         }
@@ -460,16 +460,20 @@ export class RealmProxy {
     req: RequestHead,
     url: string,
     body: Uint8Array | undefined,
-    signal: AbortSignal
+    signal: AbortSignal,
+    owner?: number
   ): Promise<RealmTransportResponse> {
     try {
-      const fetching = this.options.transport.fetch({
-        url: toHostLoopback(url),
-        method: req.method.toUpperCase(),
-        headers: forwardRequestHeaders(req.headers),
-        body: req.method === 'GET' || req.method === 'HEAD' ? undefined : body,
-        signal,
-      });
+      const fetching = this.options.transport.fetch(
+        {
+          url: toHostLoopback(url),
+          method: req.method.toUpperCase(),
+          headers: forwardRequestHeaders(req.headers),
+          body: req.method === 'GET' || req.method === 'HEAD' ? undefined : body,
+          signal,
+        },
+        owner
+      );
       return await untilAborted(fetching, signal);
     } catch (e) {
       if (signal.aborted) throw e;

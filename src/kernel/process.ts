@@ -1007,6 +1007,7 @@ export class WasmProcess {
       net: this.net,
       blocking: () => this.blockingSignal(cancelled),
       resolve: (name, family, blocking) => resolver.resolve(name, family, blocking),
+      cred: () => ({ pid: this.pid, uid: this.cred.euid, gid: this.cred.egid }),
     });
   }
 
