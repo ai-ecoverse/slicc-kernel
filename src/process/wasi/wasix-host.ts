@@ -3,10 +3,12 @@ import { WasiError } from './wasi-files.ts';
 import { WasiExit, type WasiFunction, type WasiHost, wrap } from './wasi-host.ts';
 import type { WasiSignals } from './wasi-signals.ts';
 import { MAIN_TID, ThreadExit, type WasiThreads } from './wasi-threads.ts';
+import { callDynamic } from './wasix-ffi.ts';
 import type { AsyncifyDriver } from './wasix-fork.ts';
 import { DlError, type WasixLinker } from './wasix-linker.ts';
 import { type SpawnFdOp, WasixProcess } from './wasix-process.ts';
 import { wasixSocketImports } from './wasix-sockets.ts';
+import { FuncTypes } from './wasm-functypes.ts';
 
 const FDFLAGSEXT_CLOEXEC = 1;
 const SPAWN_OP_SIZE = 56;
@@ -50,6 +52,10 @@ export class WasixHost {
   threads: WasiThreads | undefined;
 
   linker: WasixLinker | undefined;
+
+  types = new FuncTypes();
+
+  table: WebAssembly.Table | undefined;
 
   signals: WasiSignals | undefined;
 
@@ -142,6 +148,19 @@ export class WasixHost {
       ...this.processImports(),
       ...this.threadImports(),
       ...this.dlImports(),
+      closure_allocate: (out: number) => {
+        if (!this.linker) throw new WasiError('ENOTSUP');
+        this.mem.view().setUint32(out, this.linker.allocateClosure(), true);
+      },
+      closure_free: (index: number) => {
+        if (!this.linker) throw new WasiError('ENOTSUP');
+        this.linker.freeClosure(index);
+      },
+      call_dynamic: (...a: number[]) =>
+        void callDynamic(
+          { mem: this.mem, table: () => this.table, types: this.types },
+          ...(a as [number, number, number, number, number, number])
+        ),
       ...wasixSocketImports(this.host, this.host.imports()),
     });
   }

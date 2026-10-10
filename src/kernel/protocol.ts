@@ -18,6 +18,7 @@ export interface WasmProgram {
   module: WebAssembly.Module;
   memory?: ImportedMemory;
   foreign?: ForeignResults | undefined;
+  path?: string;
   names?: string;
   imports?: string;
   preopenRoot?: boolean;

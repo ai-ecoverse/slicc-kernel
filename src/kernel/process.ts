@@ -105,6 +105,8 @@ export type WasmSyscall =
   | { op: 'fd-cloexec'; fd: number; on: boolean }
   | { op: 'fd-list' }
   | { op: 'dl-log'; append?: LinkRecord; from: number }
+  | { op: 'dl-closure'; floor: number }
+  | { op: 'dl-closure-free'; index: number }
   | {
       op: 'proc-alarm';
       sig: number;
@@ -294,6 +296,8 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'proc-cred',
   'proc-setcred',
   'dl-log',
+  'dl-closure',
+  'dl-closure-free',
   'fd-renumber',
   'fd-promote',
   'fd-open-tty',
@@ -1082,6 +1086,11 @@ export class WasmProcess {
       case 'dl-log':
         if (req.append) this.dlLog.push(req.append);
         return { ok: true, kind: 'json', json: this.dlLog.slice(req.from) };
+      case 'dl-closure':
+        return { ok: true, kind: 'json', json: this.allocateClosure(req.floor) };
+      case 'dl-closure-free':
+        this.freeClosure(req.index);
+        return { ok: true, kind: 'void' };
       case 'sig-mask':
         this.caught = req.caught;
         this.ignored = req.ignored;
@@ -1123,6 +1132,20 @@ export class WasmProcess {
 
   private alarm: ReturnType<typeof setTimeout> | undefined;
   private readonly dlLog: LinkRecord[] = [];
+  private readonly closures = { next: 0, free: [] as number[], live: new Set<number>() };
+
+  private allocateClosure(floor: number): number {
+    const index = this.closures.free.pop() ?? Math.max(floor, this.closures.next);
+    this.closures.next = Math.max(this.closures.next, index + 1);
+    this.closures.live.add(index);
+    this.dlLog.push({ kind: 'closure', index });
+    return index;
+  }
+
+  private freeClosure(index: number): void {
+    if (!this.closures.live.delete(index)) throw new KernelError('EINVAL');
+    this.closures.free.push(index);
+  }
   private readonly asyncOps = new AsyncOps(
     (req, cancelled) => this.syscall(req as WasmSyscall, cancelled),
     () => this.options.onAsync?.()

@@ -592,6 +592,7 @@ export class Launcher {
       module,
       ...(memory ? { memory } : {}),
       foreign,
+      path: target.wasm,
       ...(names ? { names } : {}),
       ...(imports !== undefined ? { imports } : {}),
       ...(target.preopenRoot ? { preopenRoot: true } : {}),

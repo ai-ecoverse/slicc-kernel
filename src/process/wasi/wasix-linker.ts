@@ -1,7 +1,8 @@
 import { type DylinkInfo, dylinkInfo } from './dylink.ts';
 import { normalize } from './wasi-files.ts';
+import { FuncTypes } from './wasm-functypes.ts';
 
-const TABLE_BASE = 1;
+export const TABLE_BASE = 1;
 const PAGE = 65536;
 
 export const STACK_SIZE = 8 * 1024 * 1024;
@@ -14,7 +15,8 @@ function expandOrigin(entry: string, dir: string): string {
 
 export type LinkRecord =
   | { kind: 'load'; handle: number; path: string; memoryBase: number; tableBase: number }
-  | { kind: 'slot'; index: number; handle: number; name: string };
+  | { kind: 'slot'; index: number; handle: number; name: string }
+  | { kind: 'closure'; index: number };
 
 export interface LinkerHost {
   read(path: string): Uint8Array<ArrayBuffer> | undefined;
@@ -53,6 +55,10 @@ export class WasixLinker {
   private nextHandle = 1;
 
   publisher: ((record: LinkRecord) => void) | undefined;
+
+  closures: { allocate(floor: number): number; free(index: number): void } | undefined;
+
+  types = new FuncTypes();
 
   private readonly memory: WebAssembly.Memory;
   private readonly host: LinkerHost;
@@ -158,7 +164,24 @@ export class WasixLinker {
     return out;
   }
 
+  allocateClosure(): number {
+    const index = (this.closures as NonNullable<WasixLinker['closures']>).allocate(
+      this.table.length
+    );
+    growTable(this.table, index + 1);
+    return index;
+  }
+
+  freeClosure(index: number): void {
+    this.closures?.free(index);
+    this.table.set(index, null);
+  }
+
   replay(record: LinkRecord): void {
+    if (record.kind === 'closure') {
+      growTable(this.table, record.index + 1);
+      return;
+    }
     if (record.kind === 'load') {
       if (this.modules.has(record.handle)) return;
       this.instantiate(record.path, this.moduleAt(record.path), record, false);
@@ -288,6 +311,7 @@ export class WasixLinker {
       'GOT.func': gotFunc,
     };
     linked.instance = new WebAssembly.Instance(module, imports);
+    this.types.register(() => this.host.read(path), linked.instance, this.table, at.tableBase);
     this.modules.set(at.handle, linked);
     this.byPath.set(path, linked);
     for (const resolve of pending) resolve();
