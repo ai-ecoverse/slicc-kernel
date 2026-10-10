@@ -76,6 +76,8 @@ export {
   type NetworkResponse,
   type NetworkTraits,
   type NetworkTransport,
+  type NetworkWebSocket,
+  type NetworkWebSocketRequest,
 } from './transport.ts';
 
 export interface NetworkOptions {

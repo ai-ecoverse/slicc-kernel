@@ -19,8 +19,29 @@ export interface RealmTransportTraits {
   maxRequestBody: number;
   crossOrigin?: 'cors' | 'any';
   unavailable?: true;
+  websocket?: true;
+}
+export interface RealmWebSocketRequest {
+  url: string;
+  protocols: string[];
+  headers: HeaderList;
+  signal: AbortSignal;
+}
+export interface RealmWebSocketClose {
+  code: number;
+  reason: string;
+}
+export type RealmWebSocketMessage = string | Uint8Array;
+export interface RealmWebSocket {
+  readonly protocol: string;
+  readonly buffered: number;
+  send(data: RealmWebSocketMessage): void;
+  readonly messages: AsyncIterable<RealmWebSocketMessage>;
+  close(code?: number, reason?: string): void;
+  readonly closed: Promise<RealmWebSocketClose>;
 }
 export interface RealmTransport {
   readonly traits: RealmTransportTraits;
   fetch(request: RealmTransportRequest): Promise<RealmTransportResponse>;
+  websocket?(request: RealmWebSocketRequest): Promise<RealmWebSocket>;
 }
