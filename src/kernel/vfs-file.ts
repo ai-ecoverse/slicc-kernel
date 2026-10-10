@@ -1,5 +1,6 @@
 import { AsyncRangedFile, type AsyncRangedIo } from '../fs/ranged.ts';
 import { fsError, type KernelFs, rangedOps } from '../fs/types.ts';
+import type { KeptFile, UnlinkHolder } from '../fs/unlinked.ts';
 import { KernelError, OpenFile } from './fd-table.ts';
 
 export interface VfsFileFs extends Partial<AsyncRangedIo> {
@@ -293,8 +294,12 @@ export class VfsNode {
   }
 }
 
-export class VfsNodes {
+export class VfsNodes implements UnlinkHolder {
   private readonly byPath = new Map<string, VfsNode>();
+
+  private readonly kept = new Map<VfsNode, KeptFile>();
+
+  keepsOnDisk = false;
 
   private readonly fs: VfsFileFs;
 
@@ -391,7 +396,42 @@ export class VfsNodes {
       return;
     }
     if (this.byPath.get(node.path) === node) this.byPath.delete(node.path);
+    this.kept.get(node)?.release();
+    this.kept.delete(node);
     this.onClosed?.(node.path);
+  }
+
+  held(): Iterable<string> {
+    return this.byPath.keys();
+  }
+
+  owns(): boolean {
+    return false;
+  }
+
+  isKept(): boolean {
+    return false;
+  }
+
+  keep(path: string, file: KeptFile): void {
+    const node = this.byPath.get(path);
+    if (!node) {
+      file.release();
+      return;
+    }
+    this.byPath.delete(path);
+    node.renamedTo(file.hidden);
+    this.byPath.set(file.hidden, node);
+    this.kept.set(node, file);
+  }
+
+  unkeep(path: string, file: KeptFile): void {
+    const node = this.byPath.get(file.hidden);
+    if (!node) return;
+    this.byPath.delete(file.hidden);
+    node.renamedTo(path);
+    this.byPath.set(path, node);
+    this.kept.delete(node);
   }
 
   async flush(path: string): Promise<void> {
@@ -401,7 +441,9 @@ export class VfsNodes {
   async unlinking(path: string): Promise<void> {
     for (const [held, node] of [...this.byPath]) {
       if (!within(held, path)) continue;
-      await node.serial(async () => void (await Promise.all([node.keep(), node.limit()])));
+      await node.serial(async () => {
+        await Promise.all([this.keepsOnDisk || node.keep(), node.limit()]);
+      });
     }
   }
 

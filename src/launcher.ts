@@ -17,7 +17,7 @@ export const PNPM_HOME = '/home/.local/share/pnpm';
 import { followLinks, withCommandDirs } from './fs/commands.ts';
 import type { KernelFs } from './fs/types.ts';
 import { fsError, normalizePath } from './fs/types.ts';
-import { UnlinkedKeeper, webLocks } from './fs/unlinked.ts';
+import { UnlinkedKeeper, type UnlinkOwner, webLocks } from './fs/unlinked.ts';
 import { FsWatchers } from './fs/watch.ts';
 import {
   type ChildForker,
@@ -100,6 +100,7 @@ import {
 } from './process/wasi/wasi-module.ts';
 
 export interface LauncherOptions {
+  unlinkOwner?: UnlinkOwner;
   fs: KernelFs;
   createWorker: () => WasmWorkerLike;
   modules?: string;
@@ -397,15 +398,20 @@ export class Launcher {
     enableCdp(this.net, this.cdp);
     const fs = withCommandDirs(this.base, async () => new Set((await this.commands()).keys()));
     this.nodes = new VfsNodes(fs, (path) => this.released(path));
+    this.nodes.keepsOnDisk = true;
     this.openFiles.add(this.nodes);
+    const holders = [this.held, [this.nodes]];
     this.unlinked = new UnlinkedKeeper(
       fs,
-      this.held,
+      { [Symbol.iterator]: () => holders.flatMap((set) => [...set]).values() },
       (path) => this.mountRoot(path),
-      webLocks(),
-      (path) => [...this.openFiles].some((nodes) => nodes.holds(path))
+      {
+        locks: webLocks(),
+        busy: (path) => [...this.openFiles].some((nodes) => nodes.holds(path)),
+        owner: options.unlinkOwner,
+      }
     );
-    this.fs = keepingOpen(this.unlinked.wrap(), this.nodes);
+    this.fs = this.unlinked.wrap(keepingOpen(fs, this.nodes));
     void this.unlinked.sweep('/');
     this.watchers.watch([this.modulesDir, this.pnpmHome], { recursive: true }, () => {
       this.catalog = undefined;

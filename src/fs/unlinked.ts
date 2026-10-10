@@ -8,14 +8,38 @@ export interface KeptFile {
 }
 
 export interface UnlinkHolder {
-  readonly opens: ReadonlyMap<string, number>;
-  readonly unlinked: Map<string, KeptFile>;
+  held(): Iterable<string>;
   owns(path: string): boolean;
+  isKept(path: string): boolean;
+  keep(path: string, file: KeptFile): void;
+  unkeep(path: string, file: KeptFile): void;
+}
+
+export interface UnlinkOwner {
+  readonly id: string;
+  alive(id: string): boolean;
 }
 
 export interface UnlinkLocks {
   request(name: string, callback: () => Promise<unknown>): Promise<unknown>;
   query?(): Promise<{ held?: Array<{ name?: string }> }>;
+}
+
+export function pidOwner(proc: {
+  pid: number;
+  kill(pid: number, signal: number): unknown;
+}): UnlinkOwner {
+  return {
+    id: `p${proc.pid}`,
+    alive(id) {
+      try {
+        proc.kill(Number(id.slice(1)), 0);
+        return true;
+      } catch (err) {
+        return (err as { code?: string }).code !== 'ESRCH';
+      }
+    },
+  };
 }
 
 export function webLocks(): UnlinkLocks | undefined {
@@ -69,7 +93,8 @@ export class UnlinkedKeeper {
   private readonly locks: UnlinkLocks | undefined;
   private readonly busy: (path: string) => boolean;
   private readonly waiting = new Set<string>();
-  private readonly instance = crypto.randomUUID();
+  private readonly owner: UnlinkOwner | undefined;
+  private readonly instance: string;
   readonly gate = new PathGate();
   private queue: Promise<unknown> = Promise.resolve();
   private count = 0;
@@ -78,14 +103,20 @@ export class UnlinkedKeeper {
     fs: KernelFs,
     holders: Iterable<UnlinkHolder>,
     rootOf: (path: string) => string,
-    locks?: UnlinkLocks,
-    busy: (path: string) => boolean = () => false
+    options: {
+      locks?: UnlinkLocks | undefined;
+      busy?: (path: string) => boolean;
+      owner?: UnlinkOwner | undefined;
+    } = {}
   ) {
+    const { locks, owner } = options;
     this.fs = fs;
     this.holders = holders;
     this.rootOf = rootOf;
     this.locks = locks;
-    this.busy = busy;
+    this.busy = options.busy ?? (() => false);
+    this.owner = owner;
+    this.instance = owner ? `${owner.id}~${crypto.randomUUID()}` : crypto.randomUUID();
     void locks?.request(lockName(this.instance), () => new Promise(() => undefined));
   }
 
@@ -95,8 +126,7 @@ export class UnlinkedKeeper {
     return next;
   }
 
-  wrap(): KernelFs {
-    const fs = this.fs;
+  wrap(fs: KernelFs = this.fs): KernelFs {
     const keeper = this;
     const visible = (names: string[]) => names.filter((name) => name !== UNLINKED_DIR);
     return {
@@ -131,8 +161,8 @@ export class UnlinkedKeeper {
     const held = new Map<string, UnlinkHolder[]>();
     for (const holder of this.holders) {
       if (holder.owns(target)) continue;
-      for (const path of holder.opens.keys()) {
-        if (!within(path, target) || holder.unlinked.has(path)) continue;
+      for (const path of holder.held()) {
+        if (!within(path, target) || holder.isKept(path)) continue;
         held.set(path, [...(held.get(path) ?? []), holder]);
       }
     }
@@ -147,21 +177,22 @@ export class UnlinkedKeeper {
     const done = () => {
       for (const release of releases) release();
     };
+    const files = new Map<string, KeptFile>();
+    for (const [path, at] of hidden) {
+      const holders = held.get(path) as UnlinkHolder[];
+      const file = this.keptFile(at, { refs: holders.length });
+      files.set(path, file);
+      for (const holder of holders) holder.keep(path, file);
+    }
     return {
       moved: new Set(hidden.keys()),
-      commit: () => {
-        for (const [path, at] of hidden) {
-          const holders = held.get(path) as UnlinkHolder[];
-          const file = this.keptFile(at, { refs: holders.length });
-          for (const holder of holders) holder.unlinked.set(path, file);
-        }
-        done();
-      },
+      commit: done,
       rollback: async () => {
-        for (const [path, at] of hidden) {
+        for (const [path, file] of files) {
+          for (const holder of held.get(path) as UnlinkHolder[]) holder.unkeep(path, file);
           await this.serial(async () => {
-            await Promise.allSettled([this.fs.rename(at, path)]);
-            await this.tidy(parentOf(at));
+            await Promise.allSettled([this.fs.rename(file.hidden, path)]);
+            await this.tidy(parentOf(file.hidden));
           });
         }
         done();
@@ -213,16 +244,22 @@ export class UnlinkedKeeper {
 
   sweep(root: string): Promise<void> {
     const query = this.locks?.query?.bind(this.locks);
-    if (!query) return Promise.resolve();
+    const owner = this.owner;
+    if (!query && !owner) return Promise.resolve();
     return this.serial(async () => {
       const dir = dirOf(root);
       const names = await this.fs.readdir(dir).catch(() => undefined);
       if (!names) return;
-      const held = new Set(((await query()).held ?? []).map((lock) => lock.name));
+      const held = query && new Set(((await query()).held ?? []).map((lock) => lock.name));
       for (const name of names) {
-        const owner = name.slice(0, name.lastIndexOf('.'));
-        if (owner === this.instance || held.has(lockName(owner))) continue;
-        await this.fs.rm(`${dir}/${name}`, { recursive: true }).catch(() => undefined);
+        const id = name.slice(0, name.lastIndexOf('.'));
+        const at = id.indexOf('~');
+        const dead =
+          id !== this.instance &&
+          (at < 0
+            ? held !== undefined && !held.has(lockName(id))
+            : owner?.alive(id.slice(0, at)) === false);
+        if (dead) await this.fs.rm(`${dir}/${name}`, { recursive: true }).catch(() => undefined);
       }
       await this.tidy(dir);
     });
