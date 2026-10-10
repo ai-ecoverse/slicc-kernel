@@ -119,13 +119,18 @@ function nodeWorker(file: string | URL, live: Set<() => void>, closed: boolean):
     }
   };
   const worker = closed ? undefined : new Worker(file);
+  let ending = false;
   if (worker) {
     const kill = () => {
+      ending = true;
       void worker.terminate();
       fail(TERMINATED);
     };
     live.add(kill);
-    worker.once('exit', () => live.delete(kill));
+    worker.once('exit', (code) => {
+      live.delete(kill);
+      if (!ending) fail(`the process worker exited with ${code}`);
+    });
     worker.on('error', (err) => fail(String(err)));
   } else {
     setTimeout(() => fail(TERMINATED), 0);
@@ -146,7 +151,10 @@ function nodeWorker(file: string | URL, live: Set<() => void>, closed: boolean):
       const listener = messages.get(handler);
       if (listener) worker?.off('message', listener);
     },
-    terminate: () => void worker?.terminate(),
+    terminate: () => {
+      ending = true;
+      void worker?.terminate();
+    },
   };
 }
 

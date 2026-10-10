@@ -2,7 +2,13 @@ import type { JsProcessInitMsg } from '../../kernel/protocol.ts';
 import type { SabPostLike } from '../../realm/sync-sab-bridge.ts';
 import { importSource } from '../wasi/wasi-imports.ts';
 import { createAsyncSabTransport, type WaitAsyncLike } from './async-sab.ts';
-import { createContext, identityOf, JsExit, type JsProgramContext } from './js-context.ts';
+import {
+  createContext,
+  identityOf,
+  JsExit,
+  type JsProgramContext,
+  type JsStrays,
+} from './js-context.ts';
 import { JsKernel } from './js-kernel.ts';
 import { laneOf } from './js-sync.ts';
 import { lockdown } from './lockdown.ts';
@@ -18,27 +24,37 @@ export interface JsRuntimeDeps {
 
 const NOT_RUNNABLE = 126;
 
+type StrayKind = keyof JsStrays;
+type Stray = (kind: StrayKind, err: unknown, promise?: Promise<unknown>) => void;
+
 interface StrayScope {
-  process?: { on?: (event: string, listener: (err: unknown) => void) => void };
+  process?: {
+    on?: (event: string, listener: (err: unknown, promise?: Promise<unknown>) => void) => void;
+  };
   addEventListener?: (
     type: string,
-    listener: (event: { preventDefault(): void; reason?: unknown; error?: unknown }) => void
+    listener: (event: {
+      preventDefault(): void;
+      reason?: unknown;
+      error?: unknown;
+      promise?: Promise<unknown>;
+    }) => void
   ) => void;
 }
 
-export function trapStrays(scope: StrayScope, fail: (err: unknown) => void): void {
+export function trapStrays(scope: StrayScope, stray: Stray): void {
   if (typeof scope.process?.on === 'function') {
-    scope.process.on('unhandledRejection', fail);
-    scope.process.on('uncaughtException', fail);
+    scope.process.on('unhandledRejection', (err, promise) => stray('rejection', err, promise));
+    scope.process.on('uncaughtException', (err) => stray('exception', err));
     return;
   }
   scope.addEventListener?.('unhandledrejection', (event) => {
     event.preventDefault();
-    fail(event.reason);
+    stray('rejection', event.reason, event.promise);
   });
   scope.addEventListener?.('error', (event) => {
     event.preventDefault();
-    fail(event.error);
+    stray('exception', event.error);
   });
 }
 
@@ -84,6 +100,7 @@ export async function runJsProcess(
     waitAsync: deps.waitAsync,
   });
   void kernel.watchStops();
+  const strays: JsStrays = { exception: new Set(), rejection: new Set() };
   const id = identityOf(await kernel.json({ op: 'proc-identity' }), init);
   kernel.pid = id.pid;
   const { ctx, drain } = createContext({
@@ -95,11 +112,22 @@ export async function runJsProcess(
     cwd: init.cwd,
     exit: (status) => exited(statusOf(status)),
     lane: laneOf(init.lane),
+    strays,
   });
   const say = (text: string) => ctx.write(2, `${init.argv0}: ${text}\n`).catch(() => undefined);
 
   let main: JsMain | undefined;
-  trapStrays((deps.scope ?? globalThis) as StrayScope, fail);
+  trapStrays((deps.scope ?? globalThis) as StrayScope, (kind, err, promise) => {
+    const listeners = [...strays[kind]];
+    if (listeners.length === 0) return fail(err);
+    for (const listener of listeners) {
+      try {
+        listener(err, promise);
+      } catch (thrown) {
+        fail(thrown);
+      }
+    }
+  });
   try {
     (deps.lockdown ?? lockdown)();
     main = mainOf(await (deps.load ?? importSource)(init.program.glue));
