@@ -40,7 +40,7 @@
     "start": "npm run build && node test/integration/chrome.mjs",
     "pretest": "npm run build && playwright-core install --no-shell chromium",
     "test": "node --test --test-timeout=180000 --test-global-setup=node_modules/@ai-ecoverse/slicc-shared-web/harness/global.mjs 'test/integration/*.test.mjs'",
-    "test:unit": "tools/heavy.sh env NODE_NO_WARNINGS=1 mcr -c node_modules/@ai-ecoverse/slicc-shared-web/mcr.config.mjs node --import fake-indexeddb/auto --test --test-concurrency=4 'test/unit/**/*.test.mjs'",
+    "test:unit": "tools/heavy.sh env NODE_NO_WARNINGS=1 mcr -c node_modules/@ai-ecoverse/slicc-shared-web/mcr.config.mjs node --import fake-indexeddb/auto --test --test-concurrency=2 --test-timeout=180000 'test/unit/**/*.test.mjs'",
     "typecheck": "tsc && tsc -p tsconfig.node.json",
     "lint": "slicc-lint",
     "format": "biome check --write ."
