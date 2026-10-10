@@ -305,12 +305,39 @@ export class OpfsFs implements KernelFs {
     return (directory ? S_IFDIR : S_IFREG) | (meta?.mode ?? fallback);
   }
 
+  private readonly dirTimes = new Map<string, number>();
+  private dirFlush: Promise<void> | undefined;
+
+  private touch(...dirs: string[]): void {
+    const now = Date.now();
+    for (const dir of dirs) this.dirTimes.set(dir, now);
+    this.dirFlush ??= Promise.resolve()
+      .then(() => this.flushDirTimes())
+      .catch(() => undefined);
+  }
+
+  private async flushDirTimes(): Promise<void> {
+    const pending = [...this.dirTimes];
+    this.dirFlush = undefined;
+    for (const [path, ms] of pending) {
+      await this.meta.update(path, (entry) => ({
+        ...entry,
+        path,
+        mtimeMs: ms,
+        mtimeFor: 0,
+        ctimeMs: ms,
+      }));
+    }
+  }
+
   private async statOf(path: string, handle: Handle, meta: MetaEntry | undefined): Promise<FsStat> {
     const directory = handle.kind === 'directory';
     const file = directory ? undefined : await (handle as FileSystemFileHandle).getFile();
     const modified = file?.lastModified ?? 0;
-    const mtime =
+    const touched = directory ? this.dirTimes.get(path) : undefined;
+    const kept =
       meta?.mtimeMs !== undefined && meta.mtimeFor === modified ? meta.mtimeMs : modified;
+    const mtime = touched ?? kept;
     return {
       isFile: !directory,
       isDirectory: directory,
@@ -319,7 +346,7 @@ export class OpfsFs implements KernelFs {
       mode: this.mode(path, directory, meta),
       mtime: new Date(mtime),
       atime: new Date(meta?.atimeMs ?? mtime),
-      ctime: new Date(Math.max(meta?.ctimeMs ?? mtime, modified)),
+      ctime: new Date(Math.max(touched ?? meta?.ctimeMs ?? mtime, modified)),
       ino: meta?.ino ?? inodeOf(path),
       ...(this.ranged && !directory ? { ranged: true } : {}),
     };
@@ -428,10 +455,11 @@ export class OpfsFs implements KernelFs {
     const [target, existed] = await this.writeTarget(path);
     const [dir, name] = await this.parent(target);
     try {
-      return [
-        await this.inDir(dir, (parent) => parent.getFileHandle(name, { create: true })),
-        existed,
-      ];
+      const handle = await this.inDir(dir, (parent) =>
+        parent.getFileHandle(name, { create: true })
+      );
+      if (!existed) this.touch(parentOf(target));
+      return [handle, existed];
     } catch (err) {
       const code = (err as { name?: unknown })?.name === 'TypeMismatchError' ? 'EISDIR' : null;
       throw code ? fsError(code, path) : translate(err, path);
@@ -494,6 +522,7 @@ export class OpfsFs implements KernelFs {
     const parent = await this.locate(parentOf(path), true);
     if (parent.handle?.kind !== 'directory') throw fsError('ENOTDIR', path);
     await parent.handle.getDirectoryHandle(baseOf(path), { create: true });
+    this.touch(parent.path);
   }
 
   async rm(path: string, options: { recursive?: boolean; force?: boolean } = {}): Promise<void> {
@@ -517,6 +546,7 @@ export class OpfsFs implements KernelFs {
       this.changed(found.path);
     }
     await this.meta.remove([found.path]);
+    this.touch(parentOf(found.path));
   }
 
   async rename(from: string, to: string): Promise<void> {
@@ -549,6 +579,7 @@ export class OpfsFs implements KernelFs {
     if (source.link) {
       if (target?.handle) await this.rm(destination);
       await this.meta.move(source.path, destination, carry);
+      this.touch(parentOf(source.path), parent.path);
       return;
     }
     const dir = parent.handle as FileSystemDirectoryHandle;
@@ -570,6 +601,7 @@ export class OpfsFs implements KernelFs {
     }
     if (copied) await this.restamp(destination, timed);
     this.changed(source.path, destination);
+    this.touch(parentOf(source.path), parent.path);
   }
 
   private async modified(path: string): Promise<number> {
@@ -641,6 +673,7 @@ export class OpfsFs implements KernelFs {
       mtimeMs: now,
       ctimeMs: now,
     }));
+    this.touch(parent.path);
   }
 
   async readlink(path: string): Promise<string> {
