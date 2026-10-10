@@ -1,4 +1,4 @@
-import type { DeviceMeta, PollState } from '../kernel/fd-table.ts';
+import type { DeviceMeta, HeldMeta, PollState } from '../kernel/fd-table.ts';
 import { hostnameOf } from '../kernel/net/loopback-names.ts';
 import type { MountLine, ProcessListing } from '../kernel/proc-info.ts';
 import type { ForkState, InheritedFd, WasmProcessInitMsg } from '../kernel/protocol.ts';
@@ -142,8 +142,8 @@ export function kernelSys(transport: SyncSabTransport): ProcessSys & PtyKernel {
     kind(fd) {
       return (json(call({ op: 'fd-info', fd }, `fd-info ${fd}`)) as { kind?: string })?.kind;
     },
-    device(fd) {
-      return (json(call({ op: 'fd-info', fd }, `fd-info ${fd}`)) as { meta?: DeviceMeta }).meta;
+    heldMeta(fd) {
+      return (json(call({ op: 'fd-info', fd }, `fd-info ${fd}`)) as { meta?: HeldMeta }).meta;
     },
     size(fd) {
       return (json(call({ op: 'fd-vfs-stat', fd }, `fd-vfs-stat ${fd}`)) as { size: number }).size;
@@ -212,11 +212,23 @@ const O_RDONLY = 0;
 const O_WRONLY = 1;
 const O_RDWR = 2;
 
+const O_DIRECTORY = 0o200000;
+
 function openDevice(Fs: ProcessFs, fd: number, meta: DeviceMeta): boolean {
   const flags = meta.access === 'read' ? O_RDONLY : meta.access === 'write' ? O_WRONLY : O_RDWR;
+  return openAt(Fs, fd, `/dev/${meta.device}`, flags);
+}
+
+function openHeld(Fs: ProcessFs, fd: number, meta: HeldMeta): boolean {
+  return 'dir' in meta
+    ? openAt(Fs, fd, meta.dir, O_RDONLY | O_DIRECTORY)
+    : openDevice(Fs, fd, meta);
+}
+
+function openAt(Fs: ProcessFs, fd: number, path: string, flags: number): boolean {
   let stream: ProcessStream;
   try {
-    stream = Fs.open(`/dev/${meta.device}`, flags);
+    stream = Fs.open(path, flags);
   } catch {
     return false;
   }
@@ -234,8 +246,8 @@ export function wireKernelStdio(Fs: ProcessFs, streams: KernelStreams, sys?: Pro
     const stream = Fs.getStream(fd);
     if (!stream) continue;
     const kind = sys?.kind?.(fd);
-    const device = kind === 'device' ? sys?.device?.(fd) : undefined;
-    if (device && openDevice(Fs, fd, device)) continue;
+    const meta = kind === 'device' || kind === 'held' ? sys?.heldMeta?.(fd) : undefined;
+    if (meta && openHeld(Fs, fd, meta)) continue;
     if (kind && PLACED.has(kind)) {
       const { flags } = stream;
       Fs.closeStream(fd);

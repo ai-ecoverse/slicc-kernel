@@ -76,7 +76,7 @@ export class WasiFds {
     }>,
     root = false
   ): void {
-    for (const fd of [0, 1, 2]) this.table.set(fd, kernelEntry());
+    for (const fd of [0, 1, 2]) this.table.set(fd, this.stdioEntry(fd));
     const preopens = this.preopens(cwd, root);
     const top = 3 + preopens.length;
     for (const { fd, kind, flags, device } of inherited) {
@@ -171,6 +171,16 @@ export class WasiFds {
     const gen = Atomics.add(this.shared, GEN, 1) + 1;
 
     if (gen - 1 === this.seen) this.seen = gen;
+  }
+
+  private stdioEntry(fd: number): WasiEntry {
+    let info: FdInfo;
+    try {
+      info = this.kernel.call({ op: 'fd-info', fd }) as FdInfo;
+    } catch {
+      return kernelEntry();
+    }
+    return info?.meta && 'dir' in info.meta ? { type: 'dir', path: info.meta.dir } : kernelEntry();
   }
 
   private fetch(fd: number): WasiEntry | undefined {
