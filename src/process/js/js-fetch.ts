@@ -27,6 +27,12 @@ const BODY_HEADERS = new Set([
   'content-length',
 ]);
 const DECODED = new Set(['gzip', 'x-gzip', 'deflate']);
+const CREDENTIALS = new Set(['authorization', 'proxy-authorization', 'cookie', 'cookie2']);
+
+function withoutFragment(url: URL): string {
+  url.hash = '';
+  return url.href;
+}
 
 function failed(err: unknown): TypeError {
   return new TypeError('fetch failed', { cause: err });
@@ -51,10 +57,10 @@ function rewrite(hop: Hop, status: number, location: string): Hop {
   const headers = hop.headers.filter(
     ([name]) =>
       !(toGet && BODY_HEADERS.has(name.toLowerCase())) &&
-      !(crossOrigin && name.toLowerCase() === 'authorization')
+      !(crossOrigin && CREDENTIALS.has(name.toLowerCase()))
   );
   return {
-    url: next.href,
+    url: withoutFragment(next),
     method: toGet ? 'GET' : hop.method,
     headers,
     body: toGet ? undefined : hop.body,
@@ -217,7 +223,7 @@ export function fetchOp(kernel: JsKernel) {
       throw failed(new JsCallError('ENOTSUP', `redirect: ${request.redirect}`));
     }
     let hop: Hop = {
-      url: request.url,
+      url: withoutFragment(new URL(request.url)),
       method: request.method,
       headers: [...request.headers],
       body: bytes,

@@ -1066,7 +1066,18 @@ async function fetches(ctx, [base]) {
   });
   await fetchTry(out, '302', async () => (await f('/to/302/echo', post)).text());
   await fetchTry(out, '307', async () => (await f('/to/307/echo', post)).text());
-  await fetchTry(out, 'xorigin', async () => (await f('/away', post)).text());
+  await fetchTry(out, 'xorigin', async () =>
+    (
+      await f('/away', {
+        ...post,
+        headers: { ...post.headers, cookie: 'c=1', 'proxy-authorization': 'p' },
+      })
+    ).text()
+  );
+  await fetchTry(out, 'fragment', async () => {
+    const r = await f('/where#secret');
+    return `${await r.text()} ${r.url}`;
+  });
   await fetchTry(out, 'manual', async () => {
     const r = await f('/to/302/echo', { redirect: 'manual' });
     return `${r.status} ${r.headers.get('location')}`;
