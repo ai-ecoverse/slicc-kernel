@@ -1,7 +1,12 @@
 import { RangedFile } from '../fs/ranged.ts';
 import { inodeOf } from '../fs/types.ts';
 import { wasiErrno } from '../process/wasi-errno.ts';
-import type { SyncFsBridgeStat, SyncFsPosixBridge, SyncFsUsage } from './sync-fs-wire.ts';
+import type {
+  SyncFsBridgeStat,
+  SyncFsFileIo,
+  SyncFsPosixBridge,
+  SyncFsUsage,
+} from './sync-fs-wire.ts';
 
 const S_IFDIR = 0o040000;
 const S_IFREG = 0o100000;
@@ -32,6 +37,7 @@ interface LiveNodeState {
 
   ranges?: boolean;
   ranged?: RangedFile;
+  handle?: number;
 }
 
 export interface LiveFsNode {
@@ -144,6 +150,7 @@ export interface LiveVfsPlugin {
   flushDirty(): void;
 
   mounts: Set<LiveFsMount>;
+  handled?: Set<LiveFsNode>;
 }
 
 function toErrno(Fs: LiveFsApi, err: unknown): Error {
@@ -186,7 +193,9 @@ const EARLY_WHOLE_FILE = 64 * 1024;
 
 function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
   const bridgeOf = (node: LiveFsNode): SyncFsPosixBridge => node.mount.opts.bridge;
+  const fileIo = (node: LiveFsNode): SyncFsFileIo => pinnedIo(bridgeOf(node), node.live.handle);
   const dirty = new Set<LiveFsNode>();
+  const handled = new Set<LiveFsNode>();
 
   function markDirty(node: LiveFsNode): void {
     node.live.dirty = true;
@@ -257,7 +266,7 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
   function ensureLoaded(node: LiveFsNode): void {
     const s = node.live;
     if (s.loaded) return;
-    const bytes = call(() => bridgeOf(node).readFile(liveNodePath(node)));
+    const bytes = call(() => fileIo(node).readFile(liveNodePath(node)));
     s.data = bytes;
     s.len = bytes.length;
     s.loaded = true;
@@ -268,13 +277,13 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
     if (s.ranged || !s.ranges) return s.ranged;
     const bridge = bridgeOf(node);
     const path = () => liveNodePath(node);
+    const file = () => fileIo(node) as Required<SyncFsFileIo>;
     const io = {
       pread: (_: string, at: number, n: number, version?: string) =>
-        (bridge.pread as NonNullable<typeof bridge.pread>)(path(), at, n, version),
+        file().pread(path(), at, n, version),
       pwrite: (_: string, at: number, bytes: Uint8Array, transfer?: boolean) =>
-        (bridge.pwrite as NonNullable<typeof bridge.pwrite>)(path(), at, bytes, transfer),
-      truncate: (_: string, size: number) =>
-        (bridge.truncate as NonNullable<typeof bridge.truncate>)(path(), size),
+        file().pwrite(path(), at, bytes, transfer),
+      truncate: (_: string, size: number) => file().truncate(path(), size),
     };
     const st = call(() => bridge.stat(path()));
     s.ranged = new RangedFile(io, path(), st.size, st.version);
@@ -297,7 +306,7 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
     if (s.ranged) call(() => s.ranged?.flush());
     else {
       const bytes = (s.data as Uint8Array).slice(0, s.len);
-      call(() => bridgeOf(node).writeFile(liveNodePath(node), bytes, true));
+      call(() => fileIo(node).writeFile(liveNodePath(node), bytes, true));
     }
     s.dirty = false;
     s.stat = undefined;
@@ -347,6 +356,7 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
   return {
     Fs,
     bridgeOf,
+    handled,
     call,
     metadataCall,
     makeNode,
@@ -537,8 +547,12 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
     }
   };
   const opened = (node: LiveFsNode, on: boolean) => {
+    const s = node.live;
     try {
-      bridgeOf(node).hold?.(liveNodePath(node), on, true);
+      const handle = bridgeOf(node).hold?.(liveNodePath(node), on, true, s.handle);
+      s.handle = on ? handle : undefined;
+      if (s.handle === undefined) h.handled.delete(node);
+      else h.handled.add(node);
     } catch {}
   };
   return {
@@ -662,6 +676,7 @@ export function createLiveVfsPlugin(Fs: LiveFsApi): LiveVfsPlugin {
     mounts,
     node_ops: nodeOps,
     stream_ops: streamOps,
+    handled: h.handled,
     flushDirty: () => h.flushDirty(),
     mount(mount) {
       const st = h.call(() => mount.opts.bridge.stat(mount.opts.root));
@@ -686,7 +701,7 @@ export function flushLiveVfs(Fs: LiveFsApi, plugin: LiveVfsPlugin): void {
         if (s.ranged) s.ranged.flush();
         else {
           const bytes = (s.data as Uint8Array).slice(0, s.len);
-          node.mount.opts.bridge.writeFile(liveNodePath(node), bytes, true);
+          pinnedIo(node.mount.opts.bridge, s.handle).writeFile(liveNodePath(node), bytes, true);
         }
         s.dirty = false;
       } catch (err) {
@@ -731,6 +746,8 @@ export interface LiveMountFsApi extends LiveFsApi {
   rename?(from: string, to: string): void;
   lookupPath?(path: string, opts?: { follow?: boolean; parent?: boolean }): { node: object };
   sliccRename?: true;
+  sliccKept?: true;
+  open?(path: string, flags: number, mode?: number): unknown;
   statfsNode?(node: LiveFsNode): Record<string, number>;
   sliccStatfs?: true;
   filesystems: { SLICC_LIVE_FS?: LiveVfsPlugin };
@@ -790,6 +807,7 @@ export function liveRoot(Fs: LiveMountFsApi, bridge: SyncFsPosixBridge): void {
   plugin.mounts.add(root.mount);
   invalidateLiveVfs(Fs, plugin);
   guardRenames(Fs);
+  guardKeptNodes(Fs, plugin.handled);
   guardStatfs(Fs);
   const memfs = root.memfs ?? root.node_ops;
   const live = plugin.node_ops;
@@ -847,6 +865,29 @@ function guardStatfs(Fs: LiveMountFsApi): void {
       bfree: free,
       bavail: free,
     };
+  };
+}
+
+function pinnedIo(bridge: SyncFsPosixBridge, handle: number | undefined): SyncFsFileIo {
+  return handle !== undefined && bridge.pinned ? bridge.pinned(handle) : bridge;
+}
+
+function guardKeptNodes(Fs: LiveMountFsApi, handled: Set<LiveFsNode> | undefined): void {
+  const open = Fs.open?.bind(Fs);
+  const forget = Fs.hashRemoveNode?.bind(Fs);
+  if (!open || !forget || !Fs.lookupPath || !handled || Fs.sliccKept) return;
+  Fs.sliccKept = true;
+  const lookupPath = Fs.lookupPath.bind(Fs);
+  Fs.open = (path, flags, mode) => {
+    const name = path.slice(path.lastIndexOf('/') + 1);
+    if (![...handled].some((held) => held.name === name)) return open(path, flags, mode);
+    let node: LiveFsNode | undefined;
+    try {
+      node = lookupPath(path, { follow: true }).node as LiveFsNode;
+    } catch {}
+    const handle = node?.live?.openCount ? node.live.handle : undefined;
+    if (node && handle !== undefined && node.mount.opts.bridge.kept?.(handle)) forget(node);
+    return open(path, flags, mode);
   };
 }
 

@@ -171,25 +171,32 @@ async function ranged(fs: KernelFs, path: string, req: SyncFsRequest): Promise<S
 const UNLINKED_OPS = new Set<SyncFsOp>(['read', 'pread', 'pwrite', 'truncate']);
 const OWN_OPS = new Set<SyncFsOp>(['rm', 'unlink', 'rmdir', 'rename']);
 
+async function keptOr(entry: SyncFsTokenEntry, path: string, handle?: number): Promise<string> {
+  if (handle !== undefined) return entry.keptFor?.(handle)?.hidden ?? path;
+  const kept = entry.unlinked?.(path);
+  return kept && !(await entry.fs.exists(path)) ? kept.hidden : path;
+}
+
 export async function dispatchSyncFs(req: SyncFsRequest): Promise<SyncFsResult> {
   const entry = resolveSyncFsToken(req.token);
   if (!entry) return { ok: false, errno: 'EACCES', message: 'sync-fs: unknown or revoked token' };
   const { fs, cwd } = entry;
   try {
     const path = fs.resolvePath(cwd, req.path);
+    if (req.op === 'kept') return json(entry.keptFor?.(req.handle ?? -1) !== undefined);
     if (req.op === 'statfs') return json((await entry.statfs?.(path)) ?? (await storageUsage()));
     if (req.op === 'hold') {
       const [on, open] = [((req.mode ?? 0) & 1) === 1, ((req.mode ?? 0) & 2) === 2];
-      const real = on && open ? await fs.realpath?.(path, true).catch(() => path) : undefined;
-      entry.hold?.(path, on, open, real);
+      if (on && open) {
+        const real = await fs.realpath?.(path, true).catch(() => path);
+        return json(entry.hold?.(path, on, open, real) ?? null);
+      }
+      entry.hold?.(path, on, open, undefined, req.handle);
       return done;
     }
     if (entry.revoked?.(path)) return { ok: false, errno: 'EIO', message: `${path} was unmounted` };
     if ((req.op === 'write' && req.mode === 1) || UNLINKED_OPS.has(req.op)) {
-      const serve = async () => {
-        const kept = entry.unlinked?.(path);
-        return run(entry, kept && !(await fs.exists(path)) ? kept.hidden : path, req);
-      };
+      const serve = async () => run(entry, await keptOr(entry, path, req.handle), req);
       return await (entry.gate ? entry.gate(path, serve) : serve());
     }
     if (!entry.own || !OWN_OPS.has(req.op)) return await run(entry, path, req);

@@ -3,6 +3,7 @@ import {
   parseSyncFsUsage,
   SYNC_FS_REQUEST_TIMEOUT_MS,
   type SyncFsBridgeStat,
+  type SyncFsFileIo,
   type SyncFsPosixBridge,
   type SyncFsResult,
   syncError,
@@ -153,11 +154,28 @@ export function createSyncFsSabBridge(
     throw errnoError('EIO', path);
   }
 
-  return {
-    readFile: (path) => bytes({ op: 'read', path }, path),
+  const io = (id: { handle?: number }): SyncFsFileIo => ({
+    readFile: (path) => bytes({ op: 'read', path, ...id }, path),
     writeFile: (path, data, open) => {
-      run({ op: 'write', path, body: data, ...(open ? { mode: 1 } : {}) }, path);
+      run({ op: 'write', path, body: data, ...(open ? { mode: 1 } : {}), ...id }, path);
     },
+    pread: (path, offset, length, version) =>
+      bytes({ op: 'pread', path, offset, length, ...(version ? { version } : {}), ...id }, path),
+    pwrite: (path, offset, body, transfer) => {
+      const whole = body.byteOffset === 0 && body.byteLength === body.buffer.byteLength;
+      const owned = transfer && whole && body.buffer instanceof ArrayBuffer;
+      const transferred = owned ? [body.buffer as ArrayBuffer] : [];
+      run({ op: 'pwrite', path, offset, body, ...id }, path, transferred);
+    },
+    truncate: (path, length) => {
+      run({ op: 'truncate', path, length, ...id }, path);
+    },
+  });
+
+  return {
+    ...io({}),
+    pinned: (handle) => io({ handle }),
+    kept: (handle) => json({ op: 'kept', path: '/', handle }, '/') === true,
     stat: (path) => {
       const s = parseSyncFsStat(json({ op: 'stat', path }, path));
       if (!s) throw errnoError('EIO', path);
@@ -227,19 +245,12 @@ export function createSyncFsSabBridge(
     create: (path) => {
       run({ op: 'create', path }, path);
     },
-    hold: (path, held, open) => {
-      run({ op: 'hold', path, mode: (held ? 1 : 0) | (open ? 2 : 0) }, path);
+    hold: (path, held, open, handle) => {
+      const mode = (held ? 1 : 0) | (open ? 2 : 0);
+      if (mode === 3) return json({ op: 'hold', path, mode }, path) as number;
+      run({ op: 'hold', path, mode, ...(handle !== undefined ? { handle } : {}) }, path);
+      return undefined;
     },
     statfs: (path = '/') => parseSyncFsUsage(json({ op: 'statfs', path }, path)),
-    pread: (path, offset, length, version) =>
-      bytes({ op: 'pread', path, offset, length, ...(version ? { version } : {}) }, path),
-    pwrite: (path, offset, body, transfer) => {
-      const whole = body.byteOffset === 0 && body.byteLength === body.buffer.byteLength;
-      const owned = transfer && whole && body.buffer instanceof ArrayBuffer;
-      run({ op: 'pwrite', path, offset, body }, path, owned ? [body.buffer as ArrayBuffer] : []);
-    },
-    truncate: (path, length) => {
-      run({ op: 'truncate', path, length }, path);
-    },
   };
 }

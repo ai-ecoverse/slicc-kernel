@@ -5,7 +5,14 @@ export interface SyncFsTokenEntry {
   fs: KernelFs;
   cwd: string;
   statfs?: (path: string) => Promise<{ quota: number; usage: number } | undefined>;
-  hold?: (path: string, held: boolean, open: boolean, real?: string) => void;
+  hold?: (
+    path: string,
+    held: boolean,
+    open: boolean,
+    real?: string,
+    handle?: number
+  ) => number | undefined;
+  keptFor?: (handle: number) => KeptFile | undefined;
   gate?: <T>(path: string, op: () => Promise<T>) => Promise<T>;
   unlinked?: (path: string) => KeptFile | undefined;
   own?: <T>(path: string, op: () => Promise<T>) => Promise<T>;
