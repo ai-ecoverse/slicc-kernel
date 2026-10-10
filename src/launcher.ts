@@ -44,6 +44,7 @@ import { Routes, type RouteTable } from './kernel/net/routes.ts';
 import type { RealmTransport } from './kernel/net/transport.ts';
 import type { NetworkUplink } from './kernel/net/uplink.ts';
 import type { ProcessInfo } from './kernel/proc-info.ts';
+import { DEFAULT_UMASK } from './kernel/process.ts';
 import type { ForkState, Program } from './kernel/protocol.ts';
 import { PtyTable } from './kernel/pty.ts';
 import { SettlingChildren } from './kernel/settling.ts';
@@ -197,6 +198,7 @@ interface StartRequest {
   exec?: boolean;
   pgid?: number;
   ignored?: number;
+  umask?: number;
   decided?: Promise<boolean>;
 }
 
@@ -590,6 +592,7 @@ export class Launcher {
         this.settling.syscall(pid, call.op);
       },
       ...(req.ignored ? { ignored: req.ignored } : {}),
+      ...(req.umask !== undefined ? { umask: req.umask } : {}),
       program: req.program,
       argv0: req.argv0,
       args: req.args,
@@ -686,6 +689,7 @@ export class Launcher {
         started: (this.described.get(root.pid) ?? described).started,
         state: this.processes.has(member.pid) ? 'S' : 'Z',
         memory: this.processes.get(member.pid)?.memory() ?? 0,
+        umask: this.umaskOf(member.pid),
       });
     }
     return listed;
@@ -708,6 +712,7 @@ export class Launcher {
         report,
         ppid,
         ignored: this.ignoredBy(ppid),
+        umask: this.umaskOf(ppid),
         ...exec,
       });
       deciding?.attach();
@@ -761,6 +766,7 @@ export class Launcher {
           ppid,
           fork: state,
           ignored: this.ignoredBy(ppid, true),
+          umask: this.umaskOf(ppid),
         })
       );
   }
@@ -769,6 +775,10 @@ export class Launcher {
     const pgid = this.jobs.tcgetpgrp(tty, fallback);
     const foreground = () => this.jobs.tcgetpgrp(tty, fallback);
     this.settling.deliver(sig, pgid, send, tty.reading ? undefined : foreground);
+  }
+
+  private umaskOf(pid: number): number {
+    return this.processes.get(pid)?.umask?.() ?? DEFAULT_UMASK;
   }
 
   private ignoredBy(pid: number, fork = false): number {

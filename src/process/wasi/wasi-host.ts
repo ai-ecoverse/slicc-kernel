@@ -7,6 +7,7 @@ import {
   FILETYPE,
   FSTFLAGS,
   LOOKUP_SYMLINK_FOLLOW,
+  OFLAGS,
   PREOPENTYPE_DIR,
   RIFLAGS,
   RIGHTS,
@@ -44,6 +45,7 @@ export interface WasiHostOptions {
 
   ppid?: number;
   parent?: () => number;
+  umask?: number | undefined;
   kernel: WasiKernel;
 
   fs: SyncFsPosixBridge & { invalidate?(): void };
@@ -65,6 +67,8 @@ export interface WasiHostOptions {
 export type WasiFunction = (...args: never[]) => number | undefined;
 
 const NS_PER_MS = 1_000_000n;
+const AT_SYMLINK_NOFOLLOW = 1;
+const DEFAULT_UMASK = 0o022;
 
 const MONOTONIC_BASE = BigInt(Math.round(performance.timeOrigin)) * NS_PER_MS;
 
@@ -157,6 +161,48 @@ export class WasiHost {
 
   get cwd(): string {
     return this.fds.cwd() ?? this.startCwd;
+  }
+
+  private umask: number | undefined;
+
+  private created(path: string, mode: number): void {
+    const umask = this.umask ?? this.o.umask ?? DEFAULT_UMASK;
+    if (umask !== DEFAULT_UMASK) this.o.fs.chmod(path, mode & ~umask);
+  }
+
+  sliccFsImports(): Record<string, WasiFunction> {
+    const { mem, fds } = this;
+    const at = (dirfd: number, p: number, l: number) => fds.resolve(dirfd, mem.string(p, l));
+    const pathOf = (fd: number): string => {
+      const e = fds.get(fd);
+      if (e.type === 'dir') return e.path;
+      if (e.type === 'file') return e.file.path;
+      throw new WasiError('EBADF');
+    };
+    const target = (path: string, flags: number): string => {
+      if (flags & AT_SYMLINK_NOFOLLOW && this.o.fs.lstat(path).isSymbolicLink) {
+        throw new WasiError('ENOTSUP');
+      }
+      return path;
+    };
+    const modeOf = (st: { mode?: number }) => (st.mode ?? 0) & 0o7777;
+    return wrap({
+      fd_chmod: (fd: number, mode: number) => void this.o.fs.chmod(pathOf(fd), mode & 0o7777),
+      path_chmod: (dirfd: number, p: number, l: number, mode: number, flags: number) =>
+        void this.o.fs.chmod(target(at(dirfd, p, l), flags), mode & 0o7777),
+      umask: (mask: number, out: number) => {
+        const old = this.o.kernel.call({ op: 'proc-umask', mask }) as number;
+        this.umask = mask & 0o777;
+        mem.view().setUint32(out, old, true);
+      },
+      fd_mode: (fd: number, out: number) =>
+        void mem.view().setUint32(out, modeOf(this.o.fs.stat(pathOf(fd))), true),
+      path_mode: (dirfd: number, p: number, l: number, flags: number, out: number) => {
+        const path = at(dirfd, p, l);
+        const st = flags & AT_SYMLINK_NOFOLLOW ? this.o.fs.lstat(path) : this.o.fs.stat(path);
+        mem.view().setUint32(out, modeOf(st), true);
+      },
+    });
   }
 
   sliccImports(): Record<string, WasiFunction> {
@@ -349,7 +395,12 @@ export class WasiHost {
         _inheriting: bigint,
         fdflags: number,
         out: number
-      ) => void mem.view().setUint32(out, fds.open(at(dirfd, p, l), oflags, rights, fdflags), true),
+      ) => {
+        const path = at(dirfd, p, l);
+        const fresh = (oflags & OFLAGS.CREAT) !== 0 && !o.fs.exists(path);
+        mem.view().setUint32(out, fds.open(path, oflags, rights, fdflags), true);
+        if (fresh) this.created(path, 0o666);
+      },
       path_filestat_get: (dirfd: number, lookup: number, p: number, l: number, out: number) =>
         void this.writeFilestat(out, this.pathFilestat(at(dirfd, p, l), lookup)),
       path_filestat_set_times: (
@@ -369,6 +420,7 @@ export class WasiHost {
         const path = at(dirfd, p, l);
         if (o.fs.exists(path)) throw new WasiError('EEXIST');
         o.fs.mkdir(path);
+        this.created(path, 0o777);
       },
       path_remove_directory: (dirfd: number, p: number, l: number) =>
         void o.fs.rmdir(at(dirfd, p, l)),

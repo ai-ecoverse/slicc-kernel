@@ -26,6 +26,7 @@ import { createProcessKernel, type ProcessKernel } from './process-children.ts';
 import {
   type FdImports,
   type GlueSyscalls,
+  kernelUmask,
   type Memalign,
   noFollowUtimes,
   pathOpensLinks,
@@ -432,6 +433,12 @@ export async function runWasmProcess(
             },
           });
           liveParent(imports, () => identify(transport, init).ppid);
+          kernelUmask(imports, {
+            initial: init.umask ?? 0o022,
+            memory: () => memory,
+            set: (mask) =>
+              void transport.call({ op: 'proc-umask', mask }, Number.POSITIVE_INFINITY, 'umask'),
+          });
           noFollowUtimes(
             imports,
             () => ownValue<ProcessFs>(module, 'FS'),

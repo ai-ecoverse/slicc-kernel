@@ -71,6 +71,7 @@ export interface WasmProcessInitMsg {
   cwd: string;
   sab: SharedArrayBuffer;
   ppid?: number;
+  umask?: number;
   fork?: ForkState;
   fds?: InheritedFd[];
 }

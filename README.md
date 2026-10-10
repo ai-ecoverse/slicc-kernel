@@ -421,6 +421,22 @@ An exec'd program takes over the pid of the process it replaces, as on Linux: `g
 - **Emscripten:** `Module.sliccKernel.execve(file, argv, env, cwd)` runs `file` as this process's new image on its fds 0, 1 and 2, waits for it, and returns its wait status, or a negative errno when it cannot start. `env` and `cwd` may be `null` for this process's own. An exec shim detects it with `typeof Module.sliccKernel.execve === 'function'` and exits with the status it returns, as `execve` never returns on success. Older shims spawn the program and then call `Module.sliccKernel.execWait(pid)`; that works the same way: a new program asks the kernel for its pid before `main`, and the kernel answers once its parent has made its next call, so an image an older shim execs also reports the pid it replaced (the wait starts once the program is loaded; should the parent make no call within 100 ms after that, the kernel answers anyway, and the image may then report its own pid; `launcher.identities` counts the programs that asked and those answered by that timeout).
 - **WASIX:** `proc_exec` does this by itself.
 
+### File modes and the umask
+
+Every process has a umask in the kernel, `022` for a process the embedder starts, inherited across fork, spawn and exec and shown in `/proc/<pid>/status` (`Umask:`). The kernel applies it when a program creates a file or directory, whatever its libc does: an Emscripten program's `open` with `O_CREAT`, `mkdir` and `mknod` (so `umask 077; touch f` gives `600` in a child too), and a WASI program's `path_open` with `O_CREAT` and `path_create_directory` (`0666` and `0777` less the umask).
+
+WASI and WASIX have no call for file modes, so the kernel adds the import module `slicc_fs`, whose functions return a preview1 errno (kernels without them answer `ENOSYS`):
+
+| Import | Does |
+| --- | --- |
+| `fd_chmod(fd, mode)` | `fchmod` on an open file or directory |
+| `path_chmod(dirfd, path, path_len, mode, flags)` | `fchmodat`; with `flags & 1` (`AT_SYMLINK_NOFOLLOW`) a symlink answers `ENOTSUP` and is never followed |
+| `umask(mask, old_out)` | sets the process's umask and writes the previous one |
+| `fd_mode(fd, mode_out)` | the permission bits of an open file or directory |
+| `path_mode(dirfd, path, path_len, flags, mode_out)` | those of a path, of the link itself with `flags & 1` |
+
+Lowering a soft resource limit (`ulimit -S -n 64`) still fails with `EPERM` in Emscripten programs: their libc's `setrlimit` is a stub compiled into the program, not a call to the kernel.
+
 ### `/proc`
 
 Every process of the kernel has `/proc/<pid>/` with `cmdline`, `comm`, `stat`, `statm` and `status`, in the formats procps reads, and `/proc/self` is a link to the `/proc/<pid>` of the process that reads it, as on Linux (`readlink /proc/self` is its pid, the one it was exec'd under included). They come from the kernel's process table when they are opened, so a terminal sees the processes of every client; an exec'd program shows under the pid its parent knows. `/proc/uptime`, `/proc/loadavg`, `/proc/stat` and `/proc/meminfo` are there too, and `/proc/mounts`. A process with no parent in the kernel (one a page, a client or the Node entry started) has parent 1, as children of init do, in `getppid()`, `/proc/<pid>/stat` and `ps` alike, and so does a process whose parent has ended, waited for or not (`getppid()` asks the kernel each time; a shell's `$PPID` keeps the value it started with, as on Linux). Pids, parents, process groups, sessions, command lines, terminals, start and boot times are real, and so is each process's memory: the size of its wasm memory (`VSZ` and `RSS` alike, as wasm has no paging), which `/proc/meminfo` counts as used. CPU times, load and `MemTotal` (from `navigator.deviceMemory`, else 4 GiB) are placeholders. Only Emscripten processes see this `/proc`.

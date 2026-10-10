@@ -237,6 +237,48 @@ export function pathOpensLinks(Fs: ProcessFs): void {
     flags & O_PATH && isLink.call(fs, node.mode) ? 0 : mayOpen.call(fs, node, flags);
 }
 
+type Syscall = (...args: number[]) => number;
+
+export interface UmaskDeps {
+  initial: number;
+  memory(): WebAssembly.Memory | undefined;
+  set(mask: number): void;
+}
+
+export function kernelUmask(imports: WebAssembly.Imports, deps: UmaskDeps): void {
+  let umask = deps.initial & 0o777;
+  for (const ns of namespaces(imports)) {
+    const { __syscall_openat: openat, __syscall_mkdirat: mkdirat } = ns as Record<string, Syscall>;
+    const { __syscall_mknodat: mknodat, __syscall_umask: own } = ns as Record<string, Syscall>;
+    if (typeof openat === 'function') {
+      ns.__syscall_openat = (dirfd: number, path: number, flags: number, varargs: number) => {
+        const memory = deps.memory();
+        if (flags & O_CREAT && varargs && memory)
+          new Int32Array(memory.buffer)[varargs >> 2] &= ~umask;
+        return openat(dirfd, path, flags, varargs);
+      };
+    }
+    if (typeof mkdirat === 'function') {
+      ns.__syscall_mkdirat = (dirfd: number, path: number, mode: number) =>
+        mkdirat(dirfd, path, mode & ~umask);
+    }
+    if (typeof mknodat === 'function') {
+      ns.__syscall_mknodat = (dirfd: number, path: number, mode: number, dev: number) =>
+        mknodat(dirfd, path, mode & ~umask, dev);
+    }
+    if (typeof own === 'function') {
+      own(umask);
+      ns.__syscall_umask = (mask: number) => {
+        const old = umask;
+        umask = mask & 0o777;
+        own(umask);
+        deps.set(umask);
+        return old;
+      };
+    }
+  }
+}
+
 export function noFollowUtimes(
   imports: WebAssembly.Imports,
   fs: () => ProcessFs | undefined,
