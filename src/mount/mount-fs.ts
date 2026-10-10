@@ -45,12 +45,14 @@ interface Mount extends MountEntry {
   maxFile: number;
   attrs: Map<string, Cached<DriverAttr>>;
   lists: Map<string, Cached<DriverEntry[]>>;
+  epoch: number;
   dispose(): void;
   present?(): boolean;
 }
 
 const MAX_LINKS = 40;
 const STALE_RETRIES = 3;
+const SETTLE_ROUNDS = 4;
 const DEFAULT_IO = 8 * 1024 * 1024;
 const UNITS: Record<string, number> = { '': 1, k: 1024, m: 1024 ** 2, g: 1024 ** 3, t: 1024 ** 4 };
 
@@ -314,7 +316,6 @@ export class MountTable {
   private readonly mounts = new Map<string, Mount>();
   private readonly sessions = new Map<string, WriteSession>();
   private readonly committing = new Map<string, { mount: Mount; done: Promise<void> }>();
-  private epoch = 0;
   private devices = 0;
   private readonly pending = new Set<string>();
   private readonly notes = new Map<string, MountEntry>();
@@ -427,6 +428,7 @@ export class MountTable {
       maxFile: maxFile ?? caps.maxFile ?? 0,
       attrs: new Map(),
       lists: new Map(),
+      epoch: 0,
       dispose: () => opened.dispose(),
       ...(opened.present ? { present: opened.present } : {}),
     };
@@ -489,7 +491,7 @@ export class MountTable {
     const session = this.sessions.get(real);
     if (!session) return this.committing.get(real)?.done;
     this.sessions.delete(real);
-    this.epoch++;
+    session.mount.epoch++;
     const done = (async () => {
       try {
         await session.mount.conn.call({ op: 'release', fh: await session.fh });
@@ -547,7 +549,7 @@ export class MountTable {
   }
 
   forget(mount: Mount, path: string): void {
-    this.epoch++;
+    mount.epoch++;
     for (const key of [...mount.attrs.keys()]) if (within(key, path)) mount.attrs.delete(key);
     mount.lists.delete(path);
     mount.lists.delete(parentOf(path));
@@ -555,16 +557,17 @@ export class MountTable {
   }
 
   async getattr(mount: Mount, path: string, rel: string, settled = false): Promise<DriverAttr> {
-    for (;;) {
+    for (let round = 1; ; round++) {
       if (mount.conn.failure) throw mount.conn.failure;
       if (settled) await this.committing.get(path)?.done.catch(() => undefined);
       const cached = mount.attrs.get(path);
       if (cached && cached.expires > Date.now()) return cached.value;
-      const seen = this.epoch;
+      const seen = mount.epoch;
       const session = this.sessions.get(path);
       const attr = (await mount.conn.call({ op: 'getattr', path: rel })) as DriverAttr;
-      if (this.epoch !== seen) {
-        if (settled && (this.sessions.get(path) !== session || this.committing.has(path))) continue;
+      if (mount.epoch !== seen) {
+        const moved = this.sessions.get(path) !== session || this.committing.has(path);
+        if (settled && moved && round < SETTLE_ROUNDS) continue;
         return attr;
       }
       const ttl = mount.caps.attrTtl ?? 1000;

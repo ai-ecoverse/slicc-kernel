@@ -93,6 +93,7 @@ export function replayingHops(inner: RealmTransport, heldMs = HELD_MS): RealmTra
         clearTimeout(waiting.timer);
         return replay(waiting);
       }
+      if (waiting) drop(key);
       const response = await inner.fetch(request);
       if (!response.redirects?.length) return response;
       return replay({

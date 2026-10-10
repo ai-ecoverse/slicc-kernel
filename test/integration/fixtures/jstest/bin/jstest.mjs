@@ -1303,6 +1303,16 @@ async function rawpipe(ctx) {
   await ctx.write(1, `rawpipe ${code}\n`);
 }
 
+async function rawclosed(ctx, [which = 'one']) {
+  await ctx.tty.setRaw(1, true);
+  await ctx.close(1);
+  if (which === 'all') {
+    await ctx.close(0);
+    await ctx.close(2);
+  }
+  throw new Error('closed');
+}
+
 async function rawthrow(ctx) {
   await ctx.tty.setRaw(0, true);
   throw new Error('boom');
@@ -1356,6 +1366,7 @@ async function ttyroundtrip(ctx) {
 
 const modes = {
   rawkeys,
+  rawclosed,
   rawpair,
   rawpipe,
   rawthrow,
