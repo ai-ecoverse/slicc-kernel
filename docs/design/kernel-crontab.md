@@ -1,8 +1,8 @@
 # Kernel crontab (the only scheduler)
 
-Status: **approved** (Lars via seven, 2026-10-10), **ordered after N1 (users)**. Tracks [slicc-kernel#156](https://github.com/ai-ecoverse/slicc-kernel/issues/156).
+Status: **approved** (Lars via seven, 2026-10-10); **PR plan approved** (seven/Lars, 2026-10-10). **Ordered after N1 (users).** Tracks [slicc-kernel#156](https://github.com/ai-ecoverse/slicc-kernel/issues/156).
 
-**Do not write kernel cron code until N1's enforcement PR has merged.** N1 is [users and groups](https://github.com/ai-ecoverse/slicc-kernel/blob/design/users-and-groups/docs/design/users-and-groups.md) ([#153](https://github.com/ai-ecoverse/slicc-kernel/issues/153)); implementation is in flight (@thread:thr_9ab5eajk3x).
+**Do not write kernel cron code until N1's K3 (enforcement) PR has merged.** The coordinator opens that gate. N1 is [users and groups](https://github.com/ai-ecoverse/slicc-kernel/blob/design/users-and-groups/docs/design/users-and-groups.md) ([#153](https://github.com/ai-ecoverse/slicc-kernel/issues/153)); implementation is in flight (@thread:thr_9ab5eajk3x).
 
 Decision (Lars, 2026-10-09 / 2026-10-10): **the kernel crontab is the only scheduler.** A real crontab in slicc-kernel fires commands (for seven, typically `agent send …`) for scheduled agent wake-ups. The agent's durable `slicc.cron` tasks go away once this exists.
 
@@ -283,7 +283,7 @@ Cases:
 
 ## PR plan (N2)
 
-Gate: **N1 enforcement PR merged** (`createKernel({ users: 'enforce' })` available and green). Until then: design only. Pure schedule math could be drafted behind a flag, but the coordinator holds the start signal.
+Gate: **N1 K3 (enforcement) PR merged** (`createKernel({ users: 'enforce' })` available and green). Until then: design only. Pure schedule math could be drafted behind a flag, but the coordinator holds the start signal. Plan ownership: this thread does **C1→C2→C3→C4**; **A1** is @thread:thr_5kkzgixscm; **B1** is @thread:thr_fcm57qmnug.
 
 N1 APIs this plan assumes (from [users-and-groups](https://github.com/ai-ecoverse/slicc-kernel/blob/design/users-and-groups/docs/design/users-and-groups.md)):
 
@@ -310,8 +310,8 @@ N1: credentials → ownership → enforcement ──┬──▶ C1 → C2 → C
 | **C2** | slicc-kernel | `feat(cron): CronService — fire, stamp, lock, catch-up` | `CronService` in `prepare()`/`terminate()`; watch spool dir + `/etc/crontab`; Web Lock `slicc-kernel-cron`; stamp-before-spawn; anacron catch-up; `@reboot`; spawn `bash -c` **as user** with `SLICC_CRON*`; logs under `/var/log/cron/`; overlap allowed. | **Hard:** passwd lookup, `spawn` as user, homes. Soft: ownership for log/stamp files (root). | Node: cases 1–7 in §7 with `users: 'enforce'` (or `'report'` + explicit creds if enforce not default yet). Two-kernel lock test with fake `LockManager`. |
 | **C3** | slicc-kernel | `feat(cron): crontab command and spool permissions` | In-tree `crontab` (`-l`/`-e`/`-r`/`file`/`-u`); install path writes `0600` owner=user; document `/etc/crontab` editing. | **Hard: N1 enforcement** (EACCES matrix). `crontab -e` needs `$EDITOR` or documented file edit. | Node: permission matrix; install/list/remove as cone vs root `-u`; editor path with a stub editor script. |
 | **C4** | slicc-kernel | `docs(cron): README + feature advertisement` | README section; optional `/proc` or version note so agent can feature-detect; changelog via release. | None beyond C2+C3 merged. | Cert bump in homescoop/seven when pinned (below). |
-| **A1** | slicc-agent | migrate off durable cron; cron licks | Import → per-user spool; delete `~/.slicc/crontab`; abort `slicc.cron`; gelatiere writes spool; `agent send` + `SLICC_CRON=1` → `<lick channel="cron">`; skills/README. | Needs kernel with C2 (+ ideally C3) published; N1 agent mapping for which user owns the spool. | Agent integration: import fixture, lick shape, no double-fire with durable tasks gone. |
-| **B1** | slicc-bios | pin kernel (+ agent) | Bump `@ai-ecoverse/slicc-kernel` / agent; one smoke: `crontab -l` / a `@reboot` or short schedule in the booted page. | N1+N2 releases. | Existing bios integration suite + one cron smoke. |
+| **A1** | slicc-agent (@thread:thr_5kkzgixscm) | migrate off durable cron; cron licks | Import → per-user spool; delete `~/.slicc/crontab`; abort `slicc.cron`; gelatiere writes spool; `agent send` + `SLICC_CRON=1` → `<lick channel="cron">`; skills/README. Cron lick **screenshots go to seven** with this PR. | Needs kernel with C2 (+ ideally C3) published; N1 agent mapping for which user owns the spool. | Agent integration: import fixture, lick shape, no double-fire with durable tasks gone; screenshots for seven. |
+| **B1** | slicc-bios (@thread:thr_fcm57qmnug) | pin kernel (+ agent) | Bump `@ai-ecoverse/slicc-kernel` / agent; one smoke: `crontab -l` / a `@reboot` or short schedule in the booted page. | N1+N2 releases. | Existing bios integration suite + one cron smoke. |
 
 ### Cert (homescoop / seven)
 
