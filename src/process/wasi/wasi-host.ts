@@ -71,6 +71,7 @@ export type WasiFunction = (...args: never[]) => number | undefined;
 const IDS = ['ruid', 'euid', 'suid', 'rgid', 'egid', 'sgid'] as const;
 const NS_PER_MS = 1_000_000n;
 const AT_SYMLINK_NOFOLLOW = 1;
+const S_IFIFO = 0o010000;
 const DEFAULT_UMASK = 0o022;
 
 const MONOTONIC_BASE = BigInt(Math.round(performance.timeOrigin)) * NS_PER_MS;
@@ -115,7 +116,6 @@ function kernelFiletype(kind: string): { filetype: number; seeks: boolean } {
     case 'device':
       return { filetype: FILETYPE.CHARACTER_DEVICE, seeks: true };
     case 'socket':
-    case 'stream':
       return { filetype: FILETYPE.SOCKET_STREAM, seeks: false };
     case 'file':
       return { filetype: FILETYPE.REGULAR_FILE, seeks: true };
@@ -210,8 +210,12 @@ export class WasiHost {
         const old = this.o.kernel.call({ op: 'proc-umask', mask }) as number;
         mem.view().setUint32(out, old, true);
       },
-      fd_mode: (fd: number, out: number) =>
-        void mem.view().setUint32(out, modeOf(this.o.fs.stat(pathOf(fd))), true),
+      fd_mode: (fd: number, out: number) => {
+        const e = fds.get(fd);
+        const pipe = e.type === 'kernel' && fds.kind(fd, e) === 'stream';
+        const mode = pipe ? S_IFIFO | 0o600 : modeOf(this.o.fs.stat(pathOf(fd)));
+        mem.view().setUint32(out, mode, true);
+      },
       path_mode: (dirfd: number, p: number, l: number, flags: number, out: number) => {
         const path = at(dirfd, p, l);
         const st = flags & AT_SYMLINK_NOFOLLOW ? this.o.fs.lstat(path) : this.o.fs.stat(path);
