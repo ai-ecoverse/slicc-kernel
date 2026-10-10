@@ -89,20 +89,24 @@ export function websocketOp(kernel: JsKernel) {
     closed.catch(() => undefined);
     const stop = new AbortController();
     let freed = false;
+    const onAbort = (): void => hardStop(signal.reason);
+    const finish = (): void => {
+      freed = true;
+      signal.removeEventListener('abort', onAbort);
+      void free();
+    };
     const hardStop = (reason: unknown): void => {
       if (stop.signal.aborted) return;
       stop.abort(reason);
       lose(reason);
-      freed = true;
-      void free();
+      finish();
     };
-    signal.addEventListener('abort', () => hardStop(signal.reason), { once: true });
+    signal.addEventListener('abort', onAbort, { once: true });
     let settled = false;
     let readDone = false;
     const release = (): void => {
       if (!settled || !readDone || freed) return;
-      freed = true;
-      void free();
+      finish();
     };
     kernel
       .blocking({ op: 'net-ws-wait', handle }, stop.signal)
