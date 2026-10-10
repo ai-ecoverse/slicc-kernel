@@ -26,7 +26,7 @@ import { WasiStats } from './wasi-stats.ts';
 import { MAIN_TID, ThreadExit, threadCap, WasiThreads } from './wasi-threads.ts';
 import { AsyncifyDriver, type WasiForkState } from './wasix-fork.ts';
 import { WasixHost } from './wasix-host.ts';
-import { type LinkerHost, type LinkRecord, WasixLinker } from './wasix-linker.ts';
+import { type LinkerHost, type LinkRecord, TABLE_BASE, WasixLinker } from './wasix-linker.ts';
 import { mainModule, nameFrame, sidecarNames } from './wasm-names.ts';
 
 type ProgramOption = (
@@ -265,12 +265,14 @@ async function instantiate(
     signals,
     program,
     foreign,
+    path,
   }: {
     thread?: boolean;
     stats?: WasiStats;
     signals?: WasiSignals;
     program?: ProgramOption;
     foreign?: ForeignResults | undefined;
+    path?: string | undefined;
   } = {}
 ): Promise<{ instance: WebAssembly.Instance; driver: AsyncifyDriver }> {
   const driver = new AsyncifyDriver(host.mem);
@@ -303,7 +305,10 @@ async function instantiate(
       : undefined;
   if (sync) {
     ({ preview1, wasix } = sync.guard(preview1, wasix));
-    if (wasixHost) wasixHost.linker = sync.linker;
+    if (wasixHost) {
+      wasixHost.linker = sync.linker;
+      wasixHost.types = sync.linker.types;
+    }
 
     if (threads) {
       sync.linker.cache = threads.received;
@@ -337,6 +342,14 @@ async function instantiate(
   stats?.phase('instantiate');
   const exports = instance.exports as { memory?: WebAssembly.Memory };
   host.mem.bind(memory ?? (exports.memory as WebAssembly.Memory));
+  if (wasixHost) {
+    const table = sync?.linker.table ?? exportedTable(instance);
+    wasixHost.table = table;
+    if (path !== undefined) {
+      const read = linkerHost(host, () => ({})).read;
+      wasixHost.types.register(() => read(path), instance, table, sync ? TABLE_BASE : 0);
+    }
+  }
   if (sync) {
     sync.linker.bindMain(instance, !thread);
 
@@ -345,6 +358,11 @@ async function instantiate(
     sync.linker.bindMainGot();
   }
   return { instance, driver };
+}
+
+function exportedTable(instance: WebAssembly.Instance): WebAssembly.Table | undefined {
+  const table = instance.exports.__indirect_function_table;
+  return table instanceof WebAssembly.Table ? table : undefined;
 }
 
 function linkerHost(host: WasiHost, imports: () => WebAssembly.Imports): LinkerHost {
@@ -388,6 +406,14 @@ class LinkSync {
     this.call = call;
     this.ids = ids;
     linker.publisher = (record) => this.publish(record);
+    linker.closures = {
+      allocate: (floor) => {
+        const index = this.call({ op: 'dl-closure', floor }) as number;
+        this.catchUp();
+        return index;
+      },
+      free: (index) => void this.call({ op: 'dl-closure-free', index }),
+    };
   }
 
   private publish(record: LinkRecord): void {
@@ -499,6 +525,7 @@ export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike
     stats,
     signals,
     foreign: init.program.foreign,
+    path: init.program.path,
     ...(program ? { program } : {}),
   });
   restoreExportedMemory(instance, memory, init);
@@ -609,6 +636,7 @@ export async function runWasiThread(init: WasmThreadInitMsg, port: SabPostLike):
   const { instance } = await instantiate(host, init.program.module, thread.memory, threads, {
     thread: true,
     foreign: init.program.foreign,
+    path: init.program.path,
     ...(program ? { program } : {}),
   });
   signals.bind(instance.exports);
