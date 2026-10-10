@@ -24,6 +24,7 @@ import {
 import { JsCallError, type JsKernel } from './js-kernel.ts';
 import { type JsNet, netOps } from './js-net.ts';
 import { type JsSyncContext, JsSyncKernel, laneOf, type SyncCall, syncOps } from './js-sync.ts';
+import { type JsTty, ttyOps } from './js-tty.ts';
 import { type JsWebSocket, type JsWebSocketOptions, websocketOp } from './js-websocket.ts';
 
 export type { JsFdType, JsOpenOptions } from './js-io.ts';
@@ -88,6 +89,7 @@ export interface JsProgramContext {
   kill(pid: number, signal?: JsSignal): Promise<void>;
   net: JsNet;
   websocket(url: string | URL, options?: JsWebSocketOptions): Promise<JsWebSocket>;
+  tty: JsTty;
   fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
   exit(code?: number): never;
 }
@@ -260,6 +262,7 @@ export function createContext(o: ContextOptions): CreatedContext {
     handles,
   });
 
+  const terminal = ttyOps(kernel);
   const io = { read, send: writeAll, close: (fd: number) => ctx.close(fd) };
   const children = childOps(kernel, io, { env: o.env, cwd: o.cwd, signal: signalNumber });
 
@@ -309,14 +312,16 @@ export function createContext(o: ContextOptions): CreatedContext {
     ...children,
     net: netOps(kernel, io),
     websocket: websocketOp(kernel),
+    tty: terminal.tty,
     exit,
   };
   const drain = async (): Promise<void> => {
     for (;;) {
       await Promise.all([...pending]);
       await new Promise((resolve) => setTimeout(resolve, 0));
-      if (pending.size === 0) return;
+      if (pending.size === 0) break;
     }
+    await terminal.restore();
   };
   return { ctx, drain };
 }

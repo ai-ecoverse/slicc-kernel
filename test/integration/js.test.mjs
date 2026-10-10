@@ -284,6 +284,10 @@ test('on a terminal: isatty, ^C to a handler or by default, ^Z and fg, ^Z then k
   await type('fg\r', 'jstest readycount');
   await type('abcdefghij\r');
   await type('\u0004', '11\r\n');
+  await type('jstest rawkeys\r', 'raw true');
+  await type('a');
+  await type('\u0003');
+  await type('q', 'keys 61,3,71 cooked true');
   await type('jstest wait\r', 'ready');
   await type('\u001a', 'Stopped');
   const stopped = (await screen()).length;

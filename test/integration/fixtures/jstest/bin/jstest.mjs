@@ -1224,7 +1224,82 @@ async function fetchone(ctx, [url, redirect = 'follow', upload]) {
   await ctx.write(1, `${out.join('\n')}\n`);
 }
 
+async function rawkeys(ctx) {
+  await ctx.tty.setRaw(0, true);
+  const raw = await ctx.tty.getAttr(0);
+  await ctx.write(1, `raw ${(raw.c_lflag & 0o12) === 0}\n`);
+  const keys = [];
+  for (;;) {
+    const bytes = await ctx.read(0, 1);
+    keys.push(...bytes);
+    if (bytes.length === 0 || bytes.includes(0x71)) break;
+  }
+  await ctx.tty.setRaw(0, false);
+  await ctx.tty.setRaw(0, false);
+  const back = await ctx.tty.getAttr(0);
+  await ctx.write(
+    1,
+    `keys ${keys.map((k) => k.toString(16)).join(',')} cooked ${(back.c_lflag & 0o12) === 0o12}\n`
+  );
+}
+
+async function rawthrow(ctx) {
+  await ctx.tty.setRaw(0, true);
+  throw new Error('boom');
+}
+
+async function ttyinfo(ctx, [fd = '0']) {
+  const n = Number(fd);
+  const out = [];
+  const attempt = async (fn) => {
+    try {
+      out.push(await fn());
+    } catch (err) {
+      out.push(err.code);
+    }
+  };
+  await attempt(async () => {
+    const t = await ctx.tty.getAttr(n);
+    return `icanon ${(t.c_lflag & 2) !== 0} echo ${(t.c_lflag & 8) !== 0}`;
+  });
+  await attempt(async () => {
+    const size = await ctx.tty.size(n);
+    return `${size.columns}x${size.rows}`;
+  });
+  await attempt(async () => `fg ${(await ctx.tty.foreground(n)) > 0}`);
+  await ctx.write(1, `${out.join(' ')}\n`);
+}
+
+async function winch(ctx) {
+  let seen = 0;
+  await ctx.signals.on('SIGWINCH', async () => {
+    const size = await ctx.tty.size(1);
+    await ctx.write(1, `winch ${size.columns}x${size.rows}\n`);
+    seen++;
+  });
+  await ctx.write(1, 'ready\n');
+  while (seen === 0) await sleep(5);
+}
+
+async function ttyroundtrip(ctx) {
+  const before = await ctx.tty.getAttr(0);
+  await ctx.tty.setAttr(0, { ...before, c_lflag: before.c_lflag & ~0o10 });
+  const noecho = await ctx.tty.getAttr(0);
+  await ctx.tty.setAttr(0, before);
+  const pgrp = await ctx.tty.foreground(0);
+  await ctx.tty.setForeground(0, pgrp);
+  await ctx.write(
+    1,
+    `noecho ${(noecho.c_lflag & 0o10) === 0} fg ${pgrp === (await ctx.tty.foreground(0))}\n`
+  );
+}
+
 const modes = {
+  rawkeys,
+  rawthrow,
+  ttyinfo,
+  winch,
+  ttyroundtrip,
   httpserver,
   echoserver,
   netclient,
