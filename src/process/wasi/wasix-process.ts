@@ -43,6 +43,9 @@ const O_RDWR = 0o2;
 const O_APPEND = 0o2000;
 const OFLAG_CREAT = 1;
 const OFLAG_TRUNC = 8;
+const JOIN_NON_BLOCKING = 1;
+const JOIN_WAKE_STOPPED = 2;
+const JOIN_STOPPED = 3;
 
 export class WasixProcess {
   private readonly host: WasiHost;
@@ -197,17 +200,22 @@ export class WasixProcess {
     const v = this.host.mem.view();
     const pid = v.getUint8(pidPtr) === 1 ? v.getUint32(pidPtr + 4, true) : -1;
     this.host.mem.bytes(statusPtr, 6).fill(0);
-    const [child, status] = this.call({ op: 'proc-wait', pid, nohang: (flags & 1) !== 0 }) as [
-      number,
-      number,
-    ];
+    const [child, status] = this.call({
+      op: 'proc-wait',
+      pid,
+      nohang: (flags & JOIN_NON_BLOCKING) !== 0,
+      ...(flags & JOIN_WAKE_STOPPED ? { untraced: true } : {}),
+    }) as [number, number];
     if (child === 0) return;
 
     this.host.o.fs.invalidate?.();
     v.setUint8(pidPtr, 1);
     v.setUint32(pidPtr + 4, child, true);
     const sig = status & 0x7f;
-    if (sig) {
+    if (sig === 0x7f) {
+      v.setUint8(statusPtr, JOIN_STOPPED);
+      v.setUint8(statusPtr + 2, (status >> 8) & 0xff);
+    } else if (sig) {
       v.setUint8(statusPtr, 2);
       v.setUint8(statusPtr + 4, sig);
     } else {
