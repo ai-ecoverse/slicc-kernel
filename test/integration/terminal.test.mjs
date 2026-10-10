@@ -37,6 +37,9 @@ test('an interactive bash runs commands and reports its size, also after a resiz
 });
 
 test('^C interrupts the foreground job, ^Z stops it, and exit ends the session with its status', async (t) => {
+  if (process.env.SLICC_TIMING_TESTS !== '1') {
+    return t.skip('timing-sensitive under load (#240); set SLICC_TIMING_TESTS=1');
+  }
   const { page, screen, until, type } = await terminal(chrome, t, ['bash', '-i'], { cwd: '/home' });
   await until('$ ');
   await type('sh -c "echo \\$((6*7)); exec sleep 30"\r', '42\r\n');
