@@ -113,6 +113,16 @@ export function wasixSocketImports(
       fds.adopt(fd, 'socket', false);
       mem.view().setUint32(out, fd, true);
     },
+    sock_pair: (af: number, type: number, _proto: number, out1: number, out2: number) => {
+      if (af !== UNIX)
+        throw new WasiError(af === INET4 || af === INET6 ? 'EOPNOTSUPP' : 'EAFNOSUPPORT');
+      if (type !== STREAM) throw new WasiError('EPROTONOSUPPORT');
+      const [a, b] = call({ op: 'sock-pair', domain: 'unix' }) as [number, number];
+      fds.adopt(a, 'socket', false);
+      fds.adopt(b, 'socket', false);
+      mem.view().setUint32(out1, a, true);
+      mem.view().setUint32(out2, b, true);
+    },
     sock_bind: (fd: number, addr: number) => {
       socket(fd);
       call({ op: 'sock-bind', fd, addr: readAddr(mem.view(), addr) });
