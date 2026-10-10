@@ -70,6 +70,14 @@ export type {
   JsProgramContext,
   JsSignal,
 } from './process/js/js-context.ts';
+export type {
+  JsAddress,
+  JsConnection,
+  JsConnectOptions,
+  JsListener,
+  JsListenOptions,
+  JsNet,
+} from './process/js/js-net.ts';
 export type { JsSyncContext, JsSyncFile } from './process/js/js-sync.ts';
 export {
   type FetchTransportOptions,

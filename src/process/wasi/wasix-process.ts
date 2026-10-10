@@ -1,6 +1,5 @@
 import { physicalPath } from '../../fs/physical-path.ts';
 import type { ChildStdio, InheritedSlot } from '../../kernel/children.ts';
-import { WASI_SIGNAL_TO_POSIX } from './wasi-abi.ts';
 import { normalize } from './wasi-files.ts';
 import { WasiExit, type WasiHost } from './wasi-host.ts';
 import type { AsyncifyDriver, WasiForkState } from './wasix-fork.ts';
@@ -28,10 +27,6 @@ export interface ChildRequest {
 function resolveFrom(cwd: string, path: string): string {
   return normalize(path.startsWith('/') ? path : `${cwd}/${path}`);
 }
-
-const POSIX_TO_WASI_SIGNAL: Readonly<Record<number, number>> = Object.fromEntries(
-  Object.entries(WASI_SIGNAL_TO_POSIX).map(([wasi, posix]) => [posix, Number(wasi)])
-);
 
 const O_WRONLY = 0o1;
 const O_RDWR = 0o2;
@@ -196,7 +191,7 @@ export class WasixProcess {
     const sig = status & 0x7f;
     if (sig) {
       v.setUint8(statusPtr, 2);
-      v.setUint8(statusPtr + 4, POSIX_TO_WASI_SIGNAL[sig] ?? sig);
+      v.setUint8(statusPtr + 4, sig);
     } else {
       v.setUint8(statusPtr, 1);
       v.setUint16(statusPtr + 2, (status >> 8) & 0xff, true);

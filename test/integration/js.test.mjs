@@ -183,6 +183,25 @@ test('a JS program makes the same calls synchronously, and a caught signal resta
   );
 });
 
+test('a JS program serves the page and other processes over the kernel loopback (ctx.net)', async (t) => {
+  const { page, bash } = await booted(chrome, t);
+  await bash(
+    'cd /home; jstest httpserver 8093 2 > h.out & until [ -n "$(cat /home/h.out 2>/dev/null)" ]; do sleep 0.05; done'
+  );
+  const fromPage = await page.evaluate(async () => {
+    const response = await window.kernel.loopbackFetch('http://8093.kernel.localhost/page', {
+      port: 8093,
+    });
+    return `${response.status} ${await response.text()}`;
+  });
+  assert.equal(fromPage, '200 hello from js /page 127.0.0.1\n');
+  assert.match(
+    (await bash('jstest netclient 8093 "GET /proc HTTP/1.1\r\n\r\n"')).stdout,
+    /hello from js \/proc 127\.0\.0\.1/
+  );
+  assert.deepEqual(page.errors, []);
+});
+
 test('a file whose suffix a package maps (binfmt) runs with that command, unless #! says otherwise', async (t) => {
   const { bash } = await booted(chrome, t);
   assert.deepEqual(

@@ -751,7 +751,116 @@ function syncdev(ctx) {
   ctx.sync.write(1, `${zero.length} ${zero.every((b) => b === 0)}\n`);
 }
 
+async function readAll(readable) {
+  let out = '';
+  for await (const chunk of readable) out += text(chunk);
+  return out;
+}
+
+async function httpserver(ctx, [port = '0', count = '1']) {
+  const listener = await ctx.net.listen({ port: Number(port) });
+  await ctx.write(1, `listening ${listener.port > 0}\n`);
+  let served = 0;
+  for await (const c of listener) {
+    const reader = c.readable.getReader();
+    let head = '';
+    while (!head.includes('\r\n\r\n')) {
+      const next = await reader.read();
+      if (next.done) break;
+      head += text(next.value);
+    }
+    const path = head.split(' ')[1];
+    const body = `hello from js ${path} ${c.remote.host}\n`;
+    const w = c.writable.getWriter();
+    await w.write(
+      new TextEncoder().encode(
+        `HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n${body}`
+      )
+    );
+    await w.close();
+    await c.close();
+    if (++served >= Number(count)) await listener.close();
+  }
+  await ctx.write(1, `served ${served}\n`);
+}
+
+async function echoserver(ctx, [port]) {
+  const listener = await ctx.net.listen({ port: Number(port) });
+  await ctx.write(1, 'ready\n');
+  const c = await listener.accept();
+  await c.readable.pipeTo(c.writable);
+  await c.close();
+  await listener.close();
+}
+
+async function netclient(ctx, [port, message = 'ping']) {
+  const c = await ctx.net.connect({ host: 'localhost', port: Number(port) });
+  const w = c.writable.getWriter();
+  await w.write(new TextEncoder().encode(message));
+  await w.close();
+  const answer = await readAll(c.readable);
+  await c.close();
+  await ctx.write(1, `${answer} ${c.local.host} ${c.remote.port === Number(port)}\n`);
+}
+
+async function netmisc(ctx) {
+  const out = [];
+  const code = (p) =>
+    p.then(
+      () => 'ok',
+      (err) => (err.name === 'AbortError' ? 'AbortError' : err.code)
+    );
+  const l = await ctx.net.listen();
+  out.push(`ephemeral ${l.port >= 32768} ${l.host}`);
+  out.push(`inuse ${await code(ctx.net.listen({ port: l.port }))}`);
+  out.push(`badport ${await code(ctx.net.listen({ port: 70000 }))}`);
+  out.push(`v6 ${await code(ctx.net.listen({ host: '::1' }))}`);
+  const c = new AbortController();
+  setTimeout(() => c.abort(), 50);
+  out.push(`abort ${await code(l.accept({ signal: c.signal }))}`);
+  const client = await ctx.net.connect({ host: '127.0.0.1', port: l.port });
+  const server = await l.accept();
+  out.push(`next ${server.remote.port === client.local.port}`);
+  await server.close();
+  const w = client.writable.getWriter();
+  let broken = 'ok';
+  for (let i = 0; i < 64 && broken === 'ok'; i++) {
+    broken = await w.write(new Uint8Array(64 * 1024)).then(
+      () => 'ok',
+      (err) => err.code
+    );
+  }
+  out.push(`reset ${broken}`);
+  await client.close();
+  const other = await ctx.net.connect({ host: '127.0.0.1', port: l.port });
+  const peer = await l.accept();
+  await other.readable.cancel();
+  await other.writable.abort();
+  out.push(`cancelled ${(await readAll(peer.readable)) === ''}`);
+  await peer.close();
+  const closing = (async () => {
+    const seen = [];
+    for await (const conn of l) seen.push(conn);
+    return seen.length;
+  })();
+  await sleep(20);
+  await l.close();
+  out.push(`iterclosed ${await closing}`);
+  out.push(`refused ${await code(ctx.net.connect({ host: '127.0.0.1', port: l.port }))}`);
+  const pre = new AbortController();
+  pre.abort();
+  out.push(
+    `preabort ${await code(ctx.net.connect({ host: '127.0.0.1', port: 9, signal: pre.signal }))}`
+  );
+  out.push(`noname ${await code(ctx.net.connect({ host: 'no.such.name.invalid', port: 80 }))}`);
+  await ctx.write(1, `${out.join('\n')}\n`);
+}
+
 const modes = {
+  httpserver,
+  echoserver,
+  netclient,
+  netmisc,
   stdiochecks,
   ab,
   readsteal,
