@@ -88,10 +88,25 @@ export function ttyOps(kernel: JsKernel): { tty: JsTty; restore(): Promise<void>
     },
   };
 
+  const openOn = async (terminal: string, fd: number): Promise<number | undefined> => {
+    const open = (await kernel.json({ op: 'fd-list' })) as Array<FdInfo & { fd: number }>;
+    const on = open.filter((entry) => entry.terminal === terminal);
+    return (on.find((entry) => entry.fd === fd) ?? on[0])?.fd;
+  };
+  const reopened = async (terminal: string, termios: JsTermios): Promise<void> => {
+    const fd = (await kernel.json({ op: 'fd-open-tty', name: terminal })) as number;
+    try {
+      await setAttr(fd, termios);
+    } finally {
+      await kernel.call({ op: 'fd-close', fd });
+    }
+  };
   const restore = async (): Promise<void> => {
     for (const [terminal, { fd, termios }] of [...saved].reverse()) {
       saved.delete(terminal);
-      await setAttr(fd, termios).catch(() => undefined);
+      const at = await openOn(terminal, fd).catch(() => undefined);
+      const back = at === undefined ? reopened(terminal, termios) : setAttr(at, termios);
+      await back.catch(() => undefined);
     }
   };
 
