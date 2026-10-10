@@ -1,5 +1,6 @@
 import type { ForeignResults, ImportedMemory } from '../process/wasi/wasi-module.ts';
 import type { WasiForkState } from '../process/wasi/wasix-fork.ts';
+import type { Cred } from './cred.ts';
 import type { DeviceMeta, KernelFdKind } from './fd-table.ts';
 
 export const WASM_PROCESS_INIT = 'wasm-process-init';
@@ -72,6 +73,7 @@ export interface WasmProcessInitMsg {
   sab: SharedArrayBuffer;
   ppid?: number;
   umask?: number;
+  cred?: Cred;
   fork?: ForkState;
   fds?: InheritedFd[];
 }
