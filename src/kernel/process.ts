@@ -336,6 +336,7 @@ export function isWasmSyscall(req: object): req is WasmSyscall {
 }
 
 const MAX_READ = 1024 * 1024;
+const KEYBOARD: ReadonlySet<number> = new Set([SIG.INT, SIG.QUIT, SIG.TSTP]);
 
 export const DEFAULT_UMASK = 0o022;
 
@@ -436,6 +437,8 @@ export class WasmProcess {
   private stopped = 0;
 
   private stops = 0;
+  private owed = false;
+  private waits = 0;
   private resumed: Promise<void> = Promise.resolve();
   private wake: (() => void) | undefined;
   private readonly stateListeners: StateListener[] = [];
@@ -510,6 +513,7 @@ export class WasmProcess {
       return 'terminate';
     }
     this.options.onPending?.(sig);
+    if (this.options.jobs?.keyboard && KEYBOARD.has(sig)) this.owed = true;
     const blocked = this.interrupt;
     this.interrupt = new AbortController();
     blocked.abort();
@@ -560,8 +564,10 @@ export class WasmProcess {
       await this.resumed;
       if (this.dying) return DYING;
       const stops = this.stops;
+      const waits = this.waits;
       const result = await this.dispatch(req, cancelled);
       if (this.dying) return DYING;
+      if (!result.ok && result.errno === 'EINTR' && this.waits !== waits) this.owed = false;
 
       const restart = !result.ok && result.errno === 'EINTR' && this.stops !== stops;
       if (restart && !this.options.hasPending?.()) continue;
@@ -621,8 +627,11 @@ export class WasmProcess {
     if (restart && this.options.hasPending?.()) throw new KernelError('EINTR');
   }
 
-  private blockingSignal(cancelled?: AbortSignal): AbortSignal {
-    if (this.options.hasPending?.() || cancelled?.aborted) throw new KernelError('EINTR');
+  private blockingSignal(cancelled?: AbortSignal, owing = true): AbortSignal {
+    if (owing) this.waits++;
+    if (this.options.hasPending?.() || cancelled?.aborted || (owing && this.owed)) {
+      throw new KernelError('EINTR');
+    }
     return cancelled ? AbortSignal.any([this.interrupt.signal, cancelled]) : this.interrupt.signal;
   }
 
@@ -793,7 +802,7 @@ export class WasmProcess {
         return { ok: true, kind: 'json', json: this.options.jobs?.terminalNames() ?? [] };
       case 'fd-select': {
         const { read, write, timeoutMs } = req;
-        const signal = this.blockingSignal(cancelled);
+        const signal = this.blockingSignal(cancelled, timeoutMs !== 0);
         const selected = await selectFds(this.fds, read, write, timeoutMs, signal);
         return { ok: true, kind: 'json', json: selected };
       }

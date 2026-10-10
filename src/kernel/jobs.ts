@@ -25,6 +25,8 @@ export class JobTable {
 
   private readonly terminals = new Map<number, KernelTty>();
 
+  keyboard = false;
+
   add(
     pid: number,
     parentPid: number | undefined,
@@ -228,5 +230,14 @@ export class JobTable {
 
   signalForeground(tty: KernelTty, fallback: number, sig: number): void {
     this.killGroup(this.tcgetpgrp(tty, fallback), sig);
+  }
+
+  fromKeyboard(send: () => void): void {
+    this.keyboard = true;
+    try {
+      send();
+    } finally {
+      this.keyboard = false;
+    }
   }
 }

@@ -839,7 +839,8 @@ export class Launcher {
   private keySignal(tty: KernelTty, fallback: number, sig: number, send: () => void): void {
     const pgid = this.jobs.tcgetpgrp(tty, fallback);
     const foreground = () => this.jobs.tcgetpgrp(tty, fallback);
-    this.settling.deliver(sig, pgid, send, tty.reading ? undefined : foreground);
+    const keyed = () => this.jobs.fromKeyboard(send);
+    this.settling.deliver(sig, pgid, keyed, tty.reading ? undefined : foreground);
   }
 
   private umaskOf(pid: number): number {
