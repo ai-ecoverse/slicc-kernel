@@ -1,0 +1,12 @@
+{
+  "name": "ttytest",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "ttytest": {
+        "wasm": "bin/ttytest.wasm"
+      }
+    }
+  }
+}

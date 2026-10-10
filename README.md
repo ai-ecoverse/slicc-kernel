@@ -460,6 +460,16 @@ WASI and WASIX have no call for file modes, so the kernel adds the import module
 | `fd_mode(fd, mode_out)` | the permission bits of an open file or directory |
 | `path_mode(dirfd, path, path_len, flags, mode_out)` | those of a path, of the link itself with `flags & 1` |
 
+WASIX's own terminal calls carry only echo and line buffering (`tty_set`) and answer for "the" terminal whatever the descriptor (`tty_get`), so a WASIX program's `cfmakeraw` would leave `^C` a signal and its output post-processed. The kernel adds the import module `slicc_tty`, with the full Linux `struct termios` (musl's 60-byte layout: four `u32` flag words, `c_line`, `c_cc[32]`, then input and output speed; speeds read as `B38400` and are ignored when set) and answers per descriptor, again as a preview1 errno (`ENOTTY` for a descriptor that is no terminal, `EBADF` for one that isn't open, `ENOSYS` from kernels without them):
+
+| Import | Does |
+| --- | --- |
+| `tcgetattr(fd, termios_out)` | writes the terminal's termios |
+| `tcsetattr(fd, actions, termios)` | sets every flag and `c_cc` as given (unknown bits are kept and read back), at once for `TCSANOW`, `TCSADRAIN` and `TCSAFLUSH` (0 to 2; anything else is `EINVAL`) |
+| `winsize(fd, winsize_out)` | writes `struct winsize` (`u16` rows, columns, then zero pixels) |
+
+A wasix-sysroot that builds `tcgetattr`, `tcsetattr`, `isatty` and `ioctl(TCGETS, TCSETS*, TIOCGWINSZ)` on them gives WASIX programs (python's `tty.setraw`, curses, ruby's `IO#raw`) a really raw terminal. Stock `tty_get` answers `ENOTTY` when none of the process's descriptors is a terminal, instead of an 80×24 terminal that isn't there, so stdio on pipes and files isn't taken for a terminal.
+
 Lowering a soft resource limit (`ulimit -S -n 64`) still fails with `EPERM` in Emscripten programs: their libc's `setrlimit` is a stub compiled into the program, not a call to the kernel.
 
 ### Users

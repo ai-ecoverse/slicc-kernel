@@ -30,6 +30,7 @@ import {
 import { WasiMemory } from './wasi-memory.ts';
 import { pollOneoff } from './wasi-poll.ts';
 import type { WasiSignals } from './wasi-signals.ts';
+import { sliccTty } from './wasi-termios.ts';
 
 export class WasiExit extends Error {
   readonly code: number;
@@ -176,6 +177,10 @@ export class WasiHost {
   private created(path: string, mode: number): void {
     const umask = this.o.kernel.call({ op: 'proc-umask' }) as number;
     if (umask !== DEFAULT_UMASK) this.o.fs.chmod(path, mode & ~umask);
+  }
+
+  sliccTtyImports(): Record<string, WasiFunction> {
+    return wrap(sliccTty(this.mem, this.fds, this.o.kernel));
   }
 
   sliccFsImports(): Record<string, WasiFunction> {
