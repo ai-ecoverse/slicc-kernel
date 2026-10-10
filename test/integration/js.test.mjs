@@ -131,6 +131,20 @@ test('open files and path operations agree, append appends, exclusive creation i
   );
 });
 
+test('a file whose suffix a package maps (binfmt) runs with that command, unless #! says otherwise', async (t) => {
+  const { bash } = await booted(chrome, t);
+  assert.deepEqual(
+    await bash('cd /home && printf "x\\n" > s.jse && chmod +x s.jse && ./s.jse a "b c"'),
+    ok('jsecho|./s.jse|a|b c\n')
+  );
+  assert.deepEqual(
+    await bash(
+      'cd /home && printf "#!/usr/bin/env jsecho one\\n" > sh.jse && chmod +x sh.jse && ./sh.jse two'
+    ),
+    ok('jsecho|one|./sh.jse|two\n')
+  );
+});
+
 test('a JS program gets WebCodecs in its process worker, and no network or storage of its own', async (t) => {
   const { run } = await booted(chrome, t);
   const g = await run(['jstest', 'globals']);

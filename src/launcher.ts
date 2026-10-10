@@ -4,8 +4,10 @@ import type { CdpHook } from './cdp/types.ts';
 import { serveClient } from './client/serve-client.ts';
 import {
   type Abi,
+  binfmtOf,
   type Command,
   pnpmGlobalRoots,
+  scanBinfmts,
   scanCommands,
   scanFilesystems,
 } from './commands.ts';
@@ -207,6 +209,7 @@ const PACKAGE_ROOT = /^(.*\/node_modules\/(?:@[^/]+\/)?[^/]+)\//;
 const ENV_REFERENCE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
 const WASM_MAGIC = [0x00, 0x61, 0x73, 0x6d];
 const SHEBANG_MAX = 256;
+const MAX_INTERPRETERS = 4;
 const NOT_FOUND = 127;
 const DECIDE_MS = 100;
 const INIT_PID = 1;
@@ -274,6 +277,18 @@ function targetOf(command: Command): Target {
   };
 }
 
+function withScriptEnv(target: Target, command: Command | undefined): Target {
+  if (!command) return target;
+  return {
+    ...target,
+    env: { ...target.env, ...command.env },
+    unset: [
+      ...(target.unset ?? []).filter((key) => !Object.hasOwn(command.env ?? {}, key)),
+      ...(command.unset ?? []),
+    ],
+  };
+}
+
 function childHandle(handle: WasmProcessHandle): ChildHandle {
   return {
     pid: handle.pid,
@@ -300,6 +315,7 @@ export class Launcher {
   private readonly modulesDir: string;
   private readonly env: Record<string, string>;
   private catalog: Promise<Map<string, Command>> | undefined;
+  private binfmts: Promise<Map<string, string>> | undefined;
   private readonly compiled = new Map<string, Promise<Compiled>>();
   private readonly processes = new Map<number, WasmProcessHandle>();
   private readonly zombies = new Set<number>();
@@ -383,6 +399,7 @@ export class Launcher {
     this.fs = keepingOpen(fs, this.nodes);
     this.watchers.watch([this.modulesDir, this.pnpmHome], { recursive: true }, () => {
       this.catalog = undefined;
+      this.binfmts = undefined;
     });
   }
 
@@ -393,6 +410,11 @@ export class Launcher {
   commands(): Promise<Map<string, Command>> {
     this.catalog ??= this.roots().then((roots) => scanCommands(this.base, roots));
     return this.catalog;
+  }
+
+  private interpreters(): Promise<Map<string, string>> {
+    this.binfmts ??= this.roots().then((roots) => scanBinfmts(this.base, roots));
+    return this.binfmts;
   }
 
   private async roots(): Promise<string[]> {
@@ -447,33 +469,30 @@ export class Launcher {
   private async interpreted(
     file: string,
     argv: string[],
-    cwd: string
+    cwd: string,
+    depth = 0
   ): Promise<Planned | undefined> {
     const command = await this.scriptCommand(file);
     const script = command?.script ?? this.fs.resolvePath(cwd, file);
-    const words = shebang((await this.head(script)) ?? new Uint8Array());
+    const head = await this.head(script);
+    if (!head) return undefined;
+    const binfmt = isWasm(head) ? undefined : binfmtOf(await this.interpreters(), script);
+    const words = shebang(head) ?? (binfmt ? [binfmt] : undefined);
     if (!words) return undefined;
     if (baseName(words[0]) === 'env') words.shift();
     const [interp, ...rest] = words;
-    const found = interp ? await this.resolve(interp, interp, cwd) : undefined;
-    if (!found) return undefined;
-    const target = command
-      ? {
-          ...found,
-          env: { ...found.env, ...command.env },
-          unset: [...(found.unset ?? []), ...(command.unset ?? [])],
-        }
-      : found;
     const arg = rest.join(' ');
-    return {
-      target,
-      args: [
-        ...(target.prefix ?? []),
-        ...(arg ? [arg] : []),
-        command ? script : file,
-        ...argv.slice(1),
-      ],
-    };
+    const passed = [...(arg ? [arg] : []), command ? script : file, ...argv.slice(1)];
+    const found = interp ? await this.resolve(interp, interp, cwd) : undefined;
+    if (!found) {
+      if (!interp || depth >= MAX_INTERPRETERS || !(await this.scriptCommand(interp))) {
+        return undefined;
+      }
+      const inner = await this.interpreted(interp, [interp, ...passed], cwd, depth + 1);
+      return inner && { ...inner, target: withScriptEnv(inner.target, command) };
+    }
+    const target = withScriptEnv(found, command);
+    return { target, args: [...(target.prefix ?? []), ...passed] };
   }
 
   private async plan(file: string, argv: string[], cwd: string): Promise<Planned | undefined> {
@@ -483,8 +502,10 @@ export class Launcher {
   }
 
   private async unrunnable(file: string, cwd: string): Promise<'ENOEXEC' | 'ENOENT'> {
-    const head = await this.base.readFileBuffer(this.fs.resolvePath(cwd, file)).catch(() => null);
-    return head && !(head[0] === 0x23 && head[1] === 0x21) ? 'ENOEXEC' : 'ENOENT';
+    const path = this.fs.resolvePath(cwd, file);
+    const head = await this.base.readFileBuffer(path).catch(() => null);
+    if (!head || (head[0] === 0x23 && head[1] === 0x21)) return 'ENOENT';
+    return binfmtOf(await this.interpreters(), path) ? 'ENOENT' : 'ENOEXEC';
   }
 
   private module(path: string): Promise<Compiled> {
@@ -988,6 +1009,7 @@ export class Launcher {
 
   private async starting(argv: string[], dir: string | undefined) {
     this.catalog = undefined;
+    this.binfmts = undefined;
     const cwd = this.fs.resolvePath('/', dir ?? '/');
     const [file = ''] = argv;
     await this.base.mkdir(cwd, { recursive: true });

@@ -32,7 +32,13 @@ interface CommandEntry {
 }
 
 interface Manifest {
-  slicc?: { abi?: unknown; commands?: unknown; env?: unknown; filesystems?: unknown };
+  slicc?: {
+    abi?: unknown;
+    commands?: unknown;
+    env?: unknown;
+    filesystems?: unknown;
+    binfmt?: unknown;
+  };
 }
 
 const NAME = /^[A-Za-z0-9._+-]+$/;
@@ -238,4 +244,39 @@ export async function scanFilesystems(
     }
   }
   return found;
+}
+
+const SUFFIX = /^\.[A-Za-z0-9_+-][A-Za-z0-9._+-]*$/;
+
+export async function scanBinfmts(
+  fs: KernelFs,
+  modules: string | string[]
+): Promise<Map<string, string>> {
+  const found = new Map<string, string>();
+  for (const pkg of await packagesIn(fs, modules)) {
+    let manifest: Manifest;
+    try {
+      manifest = JSON.parse(await fs.readFile(`${pkg}/package.json`));
+    } catch {
+      continue;
+    }
+    const declared = manifest.slicc?.binfmt;
+    if (!declared || typeof declared !== 'object') continue;
+    for (const [suffix, command] of Object.entries(declared)) {
+      if (!SUFFIX.test(suffix) || typeof command !== 'string' || !NAME.test(command)) continue;
+      if (!found.has(suffix)) found.set(suffix, command);
+    }
+  }
+  return found;
+}
+
+export function binfmtOf(binfmts: ReadonlyMap<string, string>, path: string): string | undefined {
+  const name = path.slice(path.lastIndexOf('/') + 1);
+  let best: string | undefined;
+  for (const suffix of binfmts.keys()) {
+    if (name.length > suffix.length && name.endsWith(suffix)) {
+      if (best === undefined || suffix.length > best.length) best = suffix;
+    }
+  }
+  return best === undefined ? undefined : binfmts.get(best);
 }

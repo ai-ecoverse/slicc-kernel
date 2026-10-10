@@ -20,7 +20,37 @@
       },
       "jsnomodule": {
         "abi": "js"
+      },
+      "jsecho": {
+        "abi": "js",
+        "module": "bin/echo.mjs"
+      },
+      "jsscript": {
+        "script": "bin/jsscript",
+        "env": {
+          "JSECHO_ENV": "jss",
+          "JSECHO_ENV2": null
+        }
+      },
+      "jsloop": {
+        "script": "bin/jsloop"
+      },
+      "jsouter": {
+        "script": "bin/jsouter",
+        "env": {
+          "JSECHO_ENV2": "jso"
+        }
+      },
+      "jsplain": {
+        "script": "bin/jsplain"
       }
+    },
+    "binfmt": {
+      ".jse": "jsecho",
+      ".x.jse": "jstest",
+      ".jss": "jsscript",
+      ".jsl": "jsloop",
+      ".jsm": "jsmissing"
     }
   }
 }
