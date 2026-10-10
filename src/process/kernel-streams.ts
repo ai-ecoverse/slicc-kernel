@@ -1,4 +1,4 @@
-import type { PollState } from '../kernel/fd-table.ts';
+import type { DeviceMeta, PollState } from '../kernel/fd-table.ts';
 import type { MountLine, ProcessListing } from '../kernel/proc-info.ts';
 import type { Termios } from '../kernel/tty.ts';
 import type { EmscriptenFsForHook } from '../realm/emscripten-vfs-hook.ts';
@@ -122,6 +122,8 @@ export interface ProcessSys {
   ttyName?(fd: number): string | undefined;
 
   kind?(fd: number): string | undefined;
+
+  device?(fd: number): DeviceMeta | undefined;
 
   size?(fd: number): number;
 

@@ -83,11 +83,11 @@ function hostfsFetchOf(options: NodeKernelOptions): { hostfsFetch?: FetchLike } 
   if (hostfsOrigin === undefined) return hostfsFetch ? { hostfsFetch } : {};
   const base: FetchLike = hostfsFetch ?? ((url, init) => fetch(url, init));
   return {
-    hostfsFetch: (url, init) =>
-      base(url, {
-        ...init,
-        headers: { ...(init.headers as Record<string, string>), Origin: hostfsOrigin },
-      }),
+    hostfsFetch: (url, init) => {
+      const headers = new Headers(init.headers);
+      headers.set('Origin', hostfsOrigin);
+      return base(url, { ...init, headers });
+    },
   };
 }
 

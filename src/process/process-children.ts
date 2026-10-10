@@ -215,7 +215,6 @@ export function createProcessKernel(deps: ProcessKernelDeps): ProcessKernel {
     promote?.(stream);
     if (stream.sliccKernelFd !== undefined) return { fd: stream.sliccKernelFd };
 
-    if (stream.path === '/dev/null') return { none: true };
     const device = deviceOfStream(stream);
     if (device) return device;
     return n === 0 ? { input: drain(Fs, stream) } : { capture: true };

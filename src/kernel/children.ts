@@ -5,7 +5,6 @@ import {
   FdTable,
   type KernelErrno,
   KernelError,
-  nullFile,
   type OpenFile,
   sinkFile,
 } from './fd-table.ts';
@@ -220,7 +219,7 @@ export class ChildTable {
       captured.set(n, chunks);
       return sinkFile((bytes) => chunks.push(bytes));
     }
-    return nullFile();
+    return deviceFile('null');
   }
 
   async wait(
