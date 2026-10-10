@@ -89,6 +89,21 @@ function formatGroup(rows: Rows<GroupRow>): string {
 
 const parsed = <T>(rows: Rows<T>): T[] => rows.filter((r): r is T => typeof r !== 'string');
 
+function homeOf(home: unknown): string {
+  if (typeof home !== 'string' || !home.startsWith('/') || /[:\r\n]/.test(home)) {
+    throw fsError('EINVAL', `not a home directory: ${String(home)}`);
+  }
+  return home;
+}
+
+function freeId(users: PasswdRow[], groups: GroupRow[]): number {
+  const taken = new Set([...users.map((r) => r.uid), ...groups.map((r) => r.gid)]);
+  let uid = FIRST_UID;
+  while (taken.has(uid)) uid++;
+  if (uid > LAST_UID) throw fsError('ENOSPC', 'no free user id');
+  return uid;
+}
+
 export function credOf(account: Account): Cred {
   return userCred(account.uid, account.gid, account.groups);
 }
@@ -199,10 +214,6 @@ export class UserDb {
       if (typeof name !== 'string' || name.length > MAX_NAME || !NAME.test(name)) {
         throw fsError('EINVAL', `not a user name: ${String(name)}`);
       }
-      const home = options.home ?? `/home/${name}`;
-      if (typeof home !== 'string' || !home.startsWith('/') || /[:\r\n]/.test(home)) {
-        throw fsError('EINVAL', `not a home directory: ${String(home)}`);
-      }
       const remember = () => {
         if (options.umask !== undefined) this.umasks.set(name, options.umask & 0o777);
       };
@@ -214,23 +225,27 @@ export class UserDb {
         remember();
         return this.account(found, groups);
       }
+      const home = homeOf(options.home ?? `/home/${name}`);
       const extra = [USERS_GROUP, ...(options.groups ?? [])].map((g) => {
         const row = groups.find((r) => r.name === g);
         if (!row) throw fsError('ENOENT', `no group ${g}`);
         return row;
       });
       if (groups.some((r) => r.name === name)) throw fsError('EEXIST', `group ${name} exists`);
-      const taken = new Set([...users.map((r) => r.uid), ...groups.map((r) => r.gid)]);
-      let uid = FIRST_UID;
-      while (taken.has(uid)) uid++;
-      if (uid > LAST_UID) throw fsError('ENOSPC', 'no free user id');
+      const uid = freeId(users, groups);
       const row = { name, uid, gid: uid, gecos: name, home, shell: '/bin/bash' };
       for (const g of extra) if (!g.members.includes(name)) g.members.push(name);
       group.push({ name, gid: uid, members: [] });
       passwd.push(row);
+      const fresh = !(await this.fs.exists(home));
       await this.fs.mkdir(home, { recursive: true });
-      await this.fs.mkdir('/etc', { recursive: true });
-      await this.commit(formatPasswd(passwd), formatGroup(group));
+      try {
+        await this.fs.mkdir('/etc', { recursive: true });
+        await this.commit(formatPasswd(passwd), formatGroup(group));
+      } catch (err) {
+        if (fresh) await this.fs.rm(home, { recursive: true, force: true });
+        throw err;
+      }
       remember();
       return this.account(row, parsed(group));
     });
