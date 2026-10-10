@@ -152,7 +152,7 @@ export class WasiHost {
       },
     });
     this.o = { ...o, kernel: { sys, call } };
-    const cwd = o.shared || o.forked ? o.cwd : physicalOr(o.fs, o.cwd);
+    const cwd = physicalOr(o.fs, o.cwd);
     this.startCwd = cwd;
     this.fds = new WasiFds(this.o.kernel, o.fs);
     if (o.shared) this.fds.share(o.shared, true);
