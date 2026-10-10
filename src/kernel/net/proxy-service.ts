@@ -6,6 +6,7 @@ import {
   OP_BINARY,
   OP_TEXT,
   pongFrame,
+  sendableCode,
   switchingHead,
   WsError,
   WsReader,
@@ -311,7 +312,7 @@ export function webSocketTarget(req: RequestHead): RequestHead {
 }
 function wireCode(code: number): number {
   if (code === 1005) return 1000;
-  return code === 1006 || code === 1015 ? 1011 : code;
+  return sendableCode(code) ? code : 1011;
 }
 function quietly(ms: number): Promise<void> {
   return new Promise((resolve) => {

@@ -45,7 +45,7 @@ export class WsError extends Error {
   }
 }
 
-function sendableCode(code: number): boolean {
+export function sendableCode(code: number): boolean {
   if (code >= 3000 && code <= 4999) return true;
   return code >= 1000 && code <= 1014 && code !== 1004 && code !== 1005 && code !== 1006;
 }
@@ -93,7 +93,11 @@ export function frame(opcode: number, payload: Uint8Array): Uint8Array {
 
 export function closeFrame(code: number, reason = ''): Uint8Array {
   let bytes = new TextEncoder().encode(reason);
-  if (bytes.length > 123) bytes = bytes.subarray(0, 123);
+  if (bytes.length > 123) {
+    let end = 123;
+    while ((bytes[end] & 0xc0) === 0x80) end--;
+    bytes = bytes.subarray(0, end);
+  }
   const payload = new Uint8Array(2 + bytes.length);
   new DataView(payload.buffer).setUint16(0, code);
   payload.set(bytes, 2);

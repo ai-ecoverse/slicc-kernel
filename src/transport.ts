@@ -9,7 +9,7 @@ import type {
   RealmWebSocket,
   RealmWebSocketRequest,
 } from './kernel/net/transport.ts';
-import { INBOUND_LIMIT, payloadSize } from './kernel/net/ws-queue.ts';
+import { INBOUND_LIMIT, MESSAGE_LIMIT, payloadSize } from './kernel/net/ws-queue.ts';
 import { openWebSocket, type WebSocketConstructor } from './websocket-transport.ts';
 
 export type {
@@ -214,9 +214,14 @@ export function serveTransport(peer: TransportPeer, transport: RealmTransport): 
       closing: false,
     };
     credit.set(nid, flow);
+    let oversize = false;
     try {
       for await (const data of socket.messages) {
         if (flow.closing) continue;
+        if (payloadSize(data) > MESSAGE_LIMIT) {
+          oversize = true;
+          break;
+        }
         if (typeof data === 'string') peer.postMessage({ net: 'ws-message', nid, data });
         else {
           const bytes = data.slice();
@@ -229,7 +234,10 @@ export function serveTransport(peer: TransportPeer, transport: RealmTransport): 
           });
         }
       }
-      ending = await socket.closed;
+      if (oversize) socket.close(1000, 'a message is too big');
+      ending = oversize
+        ? { code: 1009, reason: `a message is over ${MESSAGE_LIMIT} bytes` }
+        : await socket.closed;
     } catch (e) {
       socket.close(1000, 'the relay failed');
       ending = { code: 1011, reason: e instanceof Error ? e.message : String(e) };
