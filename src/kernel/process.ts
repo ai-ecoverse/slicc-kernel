@@ -10,6 +10,7 @@ import {
   SpawnError,
 } from './children.ts';
 import {
+  type DeviceAccess,
   type FdTable,
   type HeldMeta,
   heldFile,
@@ -82,6 +83,8 @@ export type WasmSyscall =
       existing?: boolean;
 
       pin?: VersionPin;
+
+      handle?: number;
     }
   | { op: 'fd-pread'; fd: number; offset: number; max: number }
   | { op: 'fd-pwrite'; fd: number; offset: number; body: Uint8Array }
@@ -125,6 +128,8 @@ export type WasmSyscall =
       dirty?: boolean;
 
       pin?: VersionPin;
+
+      handle?: number;
     }
   | { op: 'fd-open-tty'; name?: string }
   | { op: 'fd-tty-names' }
@@ -247,6 +252,8 @@ export interface FdInfo {
   meta?: HeldMeta;
   flags?: number;
   cloexec?: true;
+
+  access?: DeviceAccess;
 
   name?: string;
 }
@@ -631,7 +638,7 @@ export class WasmProcess {
           ? await nodes.entryKey(req.path)
           : req.create
             ? await nodes.targetKey(req.path)
-            : await this.keptOr(await nodes.targetKey(req.path));
+            : await this.keptOr(await nodes.targetKey(req.path), req.handle);
       const open = { ...req, path };
       if (req.exclusive) {
         await nodes.createExclusive(path);
@@ -797,7 +804,11 @@ export class WasmProcess {
 
   keptPath?: (path: string) => string | undefined;
 
-  private async keptOr(path: string): Promise<string> {
+  keptHandle?: (handle: number) => string | undefined;
+
+  private async keptOr(path: string, handle?: number): Promise<string> {
+    const held = handle === undefined ? undefined : this.keptHandle?.(handle);
+    if (held !== undefined) return held;
     const kept = this.keptPath?.(path);
     return kept !== undefined && !(await present(this.options.fs, path, true)) ? kept : path;
   }
@@ -809,7 +820,9 @@ export class WasmProcess {
       return;
     }
     if (req.path === undefined) throw new KernelError('EINVAL');
-    const path = req.orphan ? req.path : await this.keptOr(await this.nodes.targetKey(req.path));
+    const path = req.orphan
+      ? req.path
+      : await this.keptOr(await this.nodes.targetKey(req.path), req.handle);
     if (!this.fds.get(req.fd).file.held) throw new KernelError('EBADF');
     const file = vfsFile(
       this.options.fs,
@@ -843,6 +856,8 @@ export class WasmProcess {
       ...(file.heldMeta ? { meta: file.heldMeta } : {}),
       ...(flags !== undefined ? { flags } : {}),
       ...(this.fds.closesOnExec(fd) ? { cloexec: true } : {}),
+      ...(file.read && !file.write ? { access: 'read' as const } : {}),
+      ...(file.write && !file.read ? { access: 'write' as const } : {}),
       ...(file.tty?.name ? { name: file.tty.name } : file.pty ? { name: '/dev/ptmx' } : {}),
     };
   }

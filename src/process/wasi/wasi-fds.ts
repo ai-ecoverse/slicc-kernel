@@ -700,5 +700,6 @@ function promoteRequest(
       : {}),
 
     ...(!joins && f.buffer.isDirty() ? { dirty: true } : {}),
+    ...(f.buffer.handle !== undefined ? { handle: f.buffer.handle } : {}),
   };
 }

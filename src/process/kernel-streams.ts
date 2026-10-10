@@ -116,6 +116,7 @@ export interface ProcessSys {
       truncate?: boolean;
       create?: boolean;
       pin?: { version: string; size: number };
+      handle?: number;
     }
   ): number;
 
@@ -134,6 +135,8 @@ export interface ProcessSys {
   kind?(fd: number): string | undefined;
 
   heldMeta?(fd: number): HeldMeta | undefined;
+
+  access?(fd: number): 'read' | 'write' | undefined;
 
   size?(fd: number): number;
 
