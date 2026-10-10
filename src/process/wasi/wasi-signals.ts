@@ -1,9 +1,14 @@
 import { defaultAction, SIG, sigbit } from '../../kernel/signals.ts';
 import type { SignalHooks } from '../process-signals.ts';
+import { WasiExit } from './wasi-host.ts';
 
 const DELIVERED_MASK = Object.values(SIG)
   .filter((sig) => sig !== SIG.KILL && sig !== SIG.STOP)
   .reduce((m, sig) => m | sigbit(sig), 0);
+
+const LIBC_DEFAULT_EXIT = 127;
+
+const WASIX_LIBC_DEFAULT_LINE = /^Program recieved (?:stop|termination|fatal) signal: [^\n]+\n$/;
 
 export class WasiSignals implements SignalHooks {
   private exports: WebAssembly.Exports | undefined;
@@ -14,6 +19,8 @@ export class WasiSignals implements SignalHooks {
   private delivering: number | undefined;
 
   private defaulted = false;
+
+  private libcDefault = false;
 
   private readonly fallBack: (sig: number) => void;
   private readonly onKilled: ((code: number) => void) | undefined;
@@ -42,18 +49,28 @@ export class WasiSignals implements SignalHooks {
   raise(sig: number): void {
     const handler = this.handler();
     if (!handler) return;
-    const outer = { sig: this.delivering, defaulted: this.defaulted };
+    const outer = { sig: this.delivering, defaulted: this.defaulted, libc: this.libcDefault };
     this.delivering = sig;
     this.defaulted = false;
+    this.libcDefault = false;
     try {
       handler(sig);
     } catch (e) {
-      if (!(e instanceof WebAssembly.RuntimeError)) throw e;
+      const libcExit = e instanceof WasiExit && e.code === LIBC_DEFAULT_EXIT && this.libcDefault;
+      if (!(libcExit && !this.defaulted) && !(e instanceof WebAssembly.RuntimeError)) throw e;
       if (!this.defaulted) this.defaultAction(sig);
     } finally {
       this.delivering = outer.sig;
       this.defaulted = outer.defaulted;
+      this.libcDefault = outer.libc;
     }
+  }
+
+  muted(fd: number, data: Uint8Array): boolean {
+    if (fd !== 2 || this.delivering === undefined) return false;
+    if (!WASIX_LIBC_DEFAULT_LINE.test(new TextDecoder().decode(data))) return false;
+    this.libcDefault = true;
+    return true;
   }
 
   raised(sig: number): boolean {
