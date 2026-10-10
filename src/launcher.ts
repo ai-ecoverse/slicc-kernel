@@ -73,6 +73,7 @@ import {
 } from './mount/fstab.ts';
 import {
   type FetchLike,
+  grantConnect,
   type HostfsGrantHook,
   type HostfsTiming,
   openHostfs,
@@ -902,8 +903,7 @@ export class Launcher {
         throw fsError('ENODEV', 'this kernel has no hostfs hook (createKernel({ hostfs }))');
       return openHostfs(
         spec,
-        hostfs,
-        hostfsFetch ?? ((url, init) => fetch(url, init)),
+        grantConnect(hostfs, hostfsFetch ?? ((url, init) => fetch(url, init))),
         hostfsTiming
       );
     }
