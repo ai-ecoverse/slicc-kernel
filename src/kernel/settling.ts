@@ -16,6 +16,7 @@ const KEY_SIGNALS = new Set([2, 3, 20]);
 interface Held {
   pgid: number;
   send: () => void;
+  copy?: boolean;
 }
 
 export class SettlingChildren {
@@ -37,12 +38,13 @@ export class SettlingChildren {
     const parent = this.children.get(ppid);
     this.children.set(pid, parent ? { ppid: parent.ppid, execer: ppid } : { ppid });
     const group = this.pgidOf(ppid);
-    this.held.push(...this.parked.filter((p) => p.pgid === group));
+    for (const p of this.parked) if (p.pgid === group) this.held.push({ ...p, copy: true });
     this.parked = this.parked.filter((p) => p.pgid !== group);
   }
 
   reading(pgid: number): void {
     this.parked = this.parked.filter((p) => p.pgid !== pgid);
+    this.held = this.held.filter((h) => !(h.copy && h.pgid === pgid));
   }
 
   syscall(pid: number, op: string): void {
