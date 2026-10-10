@@ -1,6 +1,6 @@
 # `node` and `.jsh` on JS programs
 
-Status: **design, not approved**. Tracks [slicc-kernel#68](https://github.com/ai-ecoverse/slicc-kernel/issues/68). Builds on `abi: "js"` ([#174](https://github.com/ai-ecoverse/slicc-kernel/pull/174)).
+Status: **design; Lars answered its questions on 2026-10-10** (see "Decisions" at the end). Tracks [slicc-kernel#68](https://github.com/ai-ecoverse/slicc-kernel/issues/68). Builds on `abi: "js"` ([#174](https://github.com/ai-ecoverse/slicc-kernel/pull/174)).
 
 Lars decided on 2026-10-09 to rebuild #68 on JS programs instead of porting slicc 6's JS realm as it is. This note says how `node` and `.jsh` map onto JS programs, what the kernel has to add, which Node APIs the shim offers, how modules resolve, and what is out of scope.
 
@@ -38,13 +38,14 @@ Each item is generic, released and certified like other kernel features. None of
 3. **Network: `ctx.fetch`.** A `fetch` over the kernel's transport (the `net-request`/`net-read`/`net-close` syscalls), so it follows the same rules as every program's HTTP. The worker's own `fetch` stays withheld. The shim installs `ctx.fetch` as the global `fetch`.
 4. **Terminal: `ctx.tty`.** Get and set termios (raw mode) and read the window size; `SIGWINCH` arrives through the existing signal handlers.
 5. **binfmt.** A package can map a file suffix to an interpreter command: `"slicc": { "binfmt": { ".jsh": "jsh" } }`. Exec of a non-wasm file with that suffix and no `#!` runs `jsh <path> args…`, as execve with a shebang would. `#!` still wins. This is generic: `.py` → `python3` would work the same way, if anyone wants it.
-6. **Module loading: `ctx.loadModule(path)`.** It imports a VFS file as an ES module from a `blob:` URL, and takes a resolver for its specifiers (see "Modules"). The `data:` import the runtime uses today can't resolve relative imports.
+6. **Sockets: `ctx.listen` and `ctx.connect`.** Listeners and connections on the kernel loopback, the same sockets WASIX servers use. A JS server is reachable from other processes, as `<port>.kernel.localhost` from the page and through `loopbackFetch`. The design is in [a comment on #68](https://github.com/ai-ecoverse/slicc-kernel/issues/68#issuecomment-6095035961). `net` and `http.createServer` build on it.
+7. **Module loading: `ctx.loadModule(path)`.** It imports a VFS file as an ES module from a `blob:` URL, and takes a resolver for its specifiers (see "Modules"). The `data:` import the runtime uses today can't resolve relative imports.
 
-Items 1 to 4 are about 600 lines with their tests. Items 5 and 6 are smaller.
+Items 1, 2 and 5 are merged (#222, #229, #218, #214, #224). Item 3 is in review, and WebSocket over the same transport follows it. Items 4, 6 and 7 come next.
 
 ## The shim (its own package)
 
-`node` and `jsh` are commands of one package, provisionally **`@ai-ecoverse/slicc-jsh`** (the name is a question for Lars; "slicc-node" is taken by the local proxy). It is ported from slicc's realm (Apache-2.0) and changed where JS programs make the real thing possible.
+`node` and `jsh` are commands of one package, **`@ai-ecoverse/slicc-jsh`**, in its own repo ("slicc-node" is taken by the local proxy). It is ported from slicc's realm (Apache-2.0) and changed where JS programs make the real thing possible.
 
 - **`process`:**
   - `argv`, `argv0`, `env`;
@@ -69,7 +70,7 @@ Items 1 to 4 are about 600 lines with their tests. Items 5 and 6 are smaller.
 - **`stream`:** `readable-stream` (MIT), Node's own stream code, with backpressure, so `pipe` and `pipeline` behave.
 - **`crypto`:** `randomBytes`/`randomUUID`/`webcrypto`/`subtle` and `createHash`/`createHmac` for md5, sha1, sha256 and sha512. The SHA family uses WebCrypto for one-shot digests, with a pure-JS fallback for streaming `update()`. Ciphers, signing and KDFs other than `pbkdf2` stay out.
 - **`zlib`:** `pako` for the sync and callback forms. The streaming classes come for free through `readable-stream`.
-- **`http`/`https`:** only a **client** subset, `request`/`get` over `ctx.fetch`, enough for libraries that use them for plain requests. Servers are out (see below).
+- **`http`/`https`:** the client (`request`/`get`) over `ctx.fetch`, and `http.createServer` over `ctx.listen`, with HTTP/1.1 parsed in the shim. **`net`:** `net.createServer`, `net.connect` and `net.Socket` over `ctx.listen`/`ctx.connect`. Servers are in the first milestone (decision 5). `tls` servers stay out.
 - **`.jsh`:** `jsh script.jsh args` runs the script in v6's async wrapper. The globals are the same: `process`, `console`, `fetch`, `require`, `Buffer`, timers, `__dirname`/`__filename`, `module`/`exports`, and `process.argv.parseFlags()`. A `.jsh` from slicc 6 runs unchanged when it uses only those globals and the pure `sliccy:` helpers.
 - **`sliccy:` modules:**
   - `cli`, `color`, `time`, `fmt` and `pool` ship in the shim;
@@ -98,11 +99,11 @@ Items 1 to 4 are about 600 lines with their tests. Items 5 and 6 are smaller.
 
 ## Out of scope (v1)
 
-- **Servers:** `http.createServer`, `net` and `tls`. The kernel has loopback sockets, so a later `ctx.net` could carry `net.createServer` and `http.createServer` on the kernel's loopback, reachable through `kernel.dial` and `<port>.kernel.localhost`. That is a natural follow-up, not v1.
+- **`tls` servers** and `https.createServer`. Plain `net` and `http` servers are in v1 (decision 5).
 - `worker_threads`, `cluster`, `inspector`, `v8`, `dgram`, `dns` (beyond `lookup` of loopback names), and an isolated `vm`, since a worker can't create a realm synchronously. v6's best-effort `vm` comes along.
 - `fork()`. JS programs can't fork; `child_process.fork` would need IPC channels over a pipe, which can come later.
 - Native addons and WASI addons (`.node`).
-- **npm itself:** `npm`/`npx` under the shim. pnpm is wasi-pnpm. Whether `npx <bin>` should run a package's `bin` under the shim is a question below.
+- **npm itself** (`npm install` under the shim): pnpm is wasi-pnpm. **`npx <bin>` is in** (decision 4): it and `node_modules/.bin/*` scripts such as prettier and eslint run under the shim.
 - **QuickJS code mode (pi-codemode):** kept separate, as #68 says; this shim doesn't touch it.
 
 ## Testing
@@ -118,10 +119,10 @@ Items 1 to 4 are about 600 lines with their tests. Items 5 and 6 are smaller.
   - and a set of real npm CLIs run from `node_modules`: prettier, eslint (flat config), typescript `tsc --noEmit`, marked, js-yaml.
 - **The cert:** slicc 6's `.jsh` skills (`wiki.jsh`, `x_search.jsh`, the jshd examples) under `jsh` in Chromium, plus `node -e` with pipes and `^C` on a terminal.
 
-## Questions for Lars
+## Decisions (Lars, 2026-10-10)
 
-1. **Name and home of the shim package.** I suggest `@ai-ecoverse/slicc-jsh` with commands `node` and `jsh`. Should it live in its own repo, or in slicc-kernel as a second published package? I recommend its own repo, since its dependencies (readable-stream, buffer, pako, es-module-lexer) and release pace aren't the kernel's.
-2. **Which Node version to claim:** `process.versions.node` and the module rules would follow 22.x. Is that the right target?
-3. **`sliccy:` modules from the embedder**, resolved as `sliccy-<name>` packages. Is that acceptable, or should the embedder register them at `createKernel` time instead? (That would mean page code, which seven avoids so far.)
-4. **`npx`:** should `npx <bin>` or `node_modules/.bin/*` scripts run under the shim (for example prettier and eslint from a project), or stay with pnpm's `pnpm exec`?
-5. **Servers:** are `net`/`http` servers on the kernel loopback wanted soon (stdio MCP servers don't need them, but HTTP ones would)?
+1. **Home:** its own repo, `@ai-ecoverse/slicc-jsh`, with commands `node` and `jsh`.
+2. **Node version:** 22.x.
+3. **`sliccy:` modules** come from `sliccy-<name>` packages, not from registration at `createKernel`.
+4. **`npx`:** yes. `npx <bin>` and `node_modules/.bin/*` scripts run under the shim.
+5. **Servers:** yes, in the first milestone. `net.createServer` and `http.createServer` on the kernel loopback, over `ctx.listen` (kernel item 6).
