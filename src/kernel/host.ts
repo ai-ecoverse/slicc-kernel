@@ -72,6 +72,8 @@ export interface SpawnWasmOptions {
   cred?: Cred;
   identity?: () => Promise<{ pid: number; ppid: number }>;
   onSyscall?: (req: WasmSyscall) => void;
+
+  settling?: () => boolean;
   program: Program;
   argv0: string;
   args: string[];
@@ -334,6 +336,7 @@ function processOptions(
     ...inherited(opts),
     ...(opts.identity ? { identity: opts.identity } : {}),
     ...(opts.onSyscall ? { onSyscall: opts.onSyscall } : {}),
+    ...(opts.settling ? { settling: opts.settling } : {}),
     spawner: opts.spawner,
     forker: opts.forker,
     fs: opts.fs,

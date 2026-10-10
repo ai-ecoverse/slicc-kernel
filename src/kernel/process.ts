@@ -385,6 +385,8 @@ export interface WasmProcessOptions {
 
   threadKill?: (tid: number, sig: number) => boolean;
 
+  settling?: () => boolean;
+
   pendingBits?: () => number;
 
   raise?: (sig: number) => void;
@@ -912,7 +914,7 @@ export class WasmProcess {
       case 'tty-pgrp-get':
         return { ok: true, kind: 'json', json: jobs ? jobs.tcgetpgrp(tty, this.sid()) : this.pid };
       case 'tty-pgrp-set':
-        if (jobs) jobs.tcsetpgrp(this.pid, tty, req.pgrp);
+        if (jobs) jobs.tcsetpgrp(this.pid, tty, req.pgrp, this.options.settling?.() ?? false);
         else if (req.pgrp !== this.pid) throw new KernelError('EPERM');
         return { ok: true, kind: 'void' };
     }

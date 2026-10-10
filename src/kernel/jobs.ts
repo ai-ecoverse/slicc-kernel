@@ -19,6 +19,8 @@ export interface JobMember {
 
 export class JobTable {
   private readonly members = new Map<number, JobMember>();
+
+  private readonly handoffs = new Map<number, { by: number; reclaimed: boolean }>();
   private readonly foreground = new Map<KernelTty, number>();
 
   private readonly terminals = new Map<number, KernelTty>();
@@ -187,11 +189,24 @@ export class JobTable {
     return this.foreground.get(tty) ?? fallback;
   }
 
-  tcsetpgrp(caller: number, tty: KernelTty, pgid: number): void {
+  tcsetpgrp(caller: number, tty: KernelTty, pgid: number, settling = false): void {
     const self = this.member(caller);
     const inSession = [...this.members.values()].some((m) => m.pgid === pgid && m.sid === self.sid);
     if (!inSession) throw new KernelError('EPERM');
+    const current = this.foreground.get(tty);
+    if (settling && pgid === self.pgid && current !== pgid && this.reclaimed(pgid, self.ppid))
+      return;
+    if (pgid !== self.pgid) this.handoffs.set(pgid, { by: caller, reclaimed: false });
+    else if (current !== undefined) {
+      const handoff = this.handoffs.get(current);
+      if (handoff?.by === caller) handoff.reclaimed = true;
+    }
     this.foreground.set(tty, pgid);
+  }
+
+  private reclaimed(pgid: number, parent: number | undefined): boolean {
+    const handoff = this.handoffs.get(pgid);
+    return handoff?.reclaimed === true && handoff.by === parent;
   }
 
   signalOwnedForeground(tty: KernelTty, sig: number): void {

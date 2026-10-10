@@ -47,6 +47,10 @@ export class SettlingChildren {
     this.held = this.held.filter((h) => !(h.copy && h.pgid === pgid));
   }
 
+  isSettling(pid: number): boolean {
+    return this.children.has(pid);
+  }
+
   syscall(pid: number, op: string): void {
     const child = this.children.get(pid);
     if (!child) return;
