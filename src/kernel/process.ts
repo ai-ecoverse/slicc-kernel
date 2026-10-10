@@ -464,7 +464,11 @@ export class WasmProcess {
   }
 
   private ignores(bit: number): boolean {
-    return ((this.ignored | (this.inherited & ~this.caught)) & bit) !== 0;
+    return (this.signalMasks().ignored & bit) !== 0;
+  }
+
+  signalMasks(): { ignored: number; caught: number } {
+    return { ignored: this.ignored | (this.inherited & ~this.caught), caught: this.caught };
   }
 
   inheritable(fork = false): number {

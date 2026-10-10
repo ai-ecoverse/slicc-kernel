@@ -13,6 +13,8 @@ export interface ProcessInfo {
   memory: number;
   umask?: number;
   cred?: Cred;
+  sigIgn?: number;
+  sigCgt?: number;
 }
 
 export interface MountLine {

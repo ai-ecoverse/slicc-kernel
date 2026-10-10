@@ -1,12 +1,30 @@
 import { defaultAction, SIG, sigbit } from '../../kernel/signals.ts';
 import type { SignalHooks } from '../process-signals.ts';
+import { E } from './wasi-abi.ts';
 import { WasiExit } from './wasi-host.ts';
 
 const DELIVERED_MASK = Object.values(SIG)
   .filter((sig) => sig !== SIG.KILL && sig !== SIG.STOP)
   .reduce((m, sig) => m | sigbit(sig), 0);
 
+const STOP_DEFAULTS = sigbit(SIG.TSTP) | sigbit(SIG.TTIN) | sigbit(SIG.TTOU);
+
 const LIBC_DEFAULT_EXIT = 127;
+
+const SA_RESTART = 0x10000000;
+const DISPOSITION_IGNORE = 1;
+const DISPOSITION_HANDLER = 2;
+
+export interface WasiSignalState {
+  callback?: string;
+  hooked?: true;
+  handlers: number;
+  ignoring: number;
+  restarting: number;
+  uncaught: number;
+}
+
+const withBit = (mask: number, bit: number, on: boolean): number => (on ? mask | bit : mask & ~bit);
 
 const WASIX_LIBC_DEFAULT_LINE = /^Program recieved (?:stop|termination|fatal) signal: [^\n]+\n$/;
 
@@ -21,6 +39,16 @@ export class WasiSignals implements SignalHooks {
   private defaulted = false;
 
   private libcDefault = false;
+
+  private hooked = false;
+
+  private handlers = 0;
+
+  private ignoring = 0;
+
+  private restarting = 0;
+
+  private defaults = 0;
 
   private readonly fallBack: (sig: number) => void;
   private readonly onKilled: ((code: number) => void) | undefined;
@@ -41,9 +69,49 @@ export class WasiSignals implements SignalHooks {
     if (typeof this.exports?.[name] === 'function') this.callback = name;
   }
 
-  masks(): { caught: number; ignored: number; restart: number } | null {
+  useHook(): void {
+    this.hooked = true;
+  }
+
+  disposition(sig: number, disposition: number, flags: number): number {
+    if (sig < 1 || sig > 31 || (DELIVERED_MASK & sigbit(sig)) === 0) return E.INVAL;
+    const bit = sigbit(sig);
+    this.handlers = withBit(this.handlers, bit, disposition === DISPOSITION_HANDLER);
+    this.ignoring = withBit(this.ignoring, bit, disposition === DISPOSITION_IGNORE);
+    this.restarting = withBit(this.restarting, bit, (flags & SA_RESTART) !== 0);
+    this.defaults = withBit(this.defaults, bit, disposition === 0);
+    return E.SUCCESS;
+  }
+
+  snapshot(): WasiSignalState {
+    return {
+      ...(this.callback ? { callback: this.callback } : {}),
+      ...(this.hooked ? { hooked: true as const } : {}),
+      handlers: this.handlers,
+      ignoring: this.ignoring,
+      restarting: this.restarting,
+      uncaught: this.uncaught,
+    };
+  }
+
+  restore(state: WasiSignalState): void {
+    if (state.callback) this.register(state.callback);
+    if (state.hooked) this.hooked = true;
+    this.handlers = state.handlers;
+    this.ignoring = state.ignoring;
+    this.restarting = state.restarting;
+    this.uncaught = state.uncaught;
+  }
+
+  masks(): { caught: number; ignored: number; restart: number; defaults?: number } | null {
+    if (this.hooked) {
+      const caught = this.handler() ? this.handlers : 0;
+      const defaults = this.defaults;
+      this.defaults = 0;
+      return { caught, ignored: this.ignoring, restart: this.restarting, defaults };
+    }
     if (!this.handler()) return null;
-    return { caught: DELIVERED_MASK & ~this.uncaught, ignored: 0, restart: 0 };
+    return { caught: DELIVERED_MASK & ~this.uncaught & ~STOP_DEFAULTS, ignored: 0, restart: 0 };
   }
 
   raise(sig: number): void {

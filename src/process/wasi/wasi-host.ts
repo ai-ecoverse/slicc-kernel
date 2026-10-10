@@ -29,6 +29,7 @@ import {
 } from './wasi-files.ts';
 import { WasiMemory } from './wasi-memory.ts';
 import { pollOneoff } from './wasi-poll.ts';
+import type { WasiSignals } from './wasi-signals.ts';
 
 export class WasiExit extends Error {
   readonly code: number;
@@ -134,6 +135,8 @@ export class WasiHost {
   onRaise: ((sig: number) => boolean) | undefined;
 
   muted: ((fd: number, data: Uint8Array) => boolean) | undefined;
+
+  signals: WasiSignals | undefined;
 
   private readonly listening: number[];
 
@@ -266,6 +269,8 @@ export class WasiHost {
         const groups = Array.from({ length: n }, (_, i) => view.getUint32(buf + i * 4, true));
         void this.o.kernel.call({ op: 'proc-setcred', change: { groups } });
       },
+      sigaction_set: (sig: number, disposition: number, flags: number) =>
+        this.signals ? this.signals.disposition(sig, disposition, flags) : E.NOSYS,
     });
   }
 

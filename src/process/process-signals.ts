@@ -4,7 +4,7 @@ import type { SyncSabTransport } from '../realm/sync-sab-bridge.ts';
 import { SAB_I_KILLED, SAB_I_SIGNALS, SAB_I_TIMERS } from '../realm/sync-sab-wire.ts';
 
 export interface SignalHooks {
-  masks(): { caught: number; ignored: number; restart: number } | null;
+  masks(): { caught: number; ignored: number; restart: number; defaults?: number } | null;
 
   raise(sig: number): void;
 
@@ -80,10 +80,12 @@ export class SignalGate {
     }
     if (!masks) return;
     this.restart = masks.restart;
-    const { caught, ignored } = masks;
-    if (caught === this.reported.caught && ignored === this.reported.ignored) return;
+    const { caught, ignored, defaults = 0 } = masks;
+    const same = caught === this.reported.caught && ignored === this.reported.ignored;
+    if (same && defaults === 0) return;
     this.reported = { caught, ignored };
-    this.raw.call({ op: 'sig-mask', caught, ignored }, Number.POSITIVE_INFINITY, 'sig-mask');
+    const req = { op: 'sig-mask' as const, caught, ignored, ...(defaults ? { defaults } : {}) };
+    this.raw.call(req, Number.POSITIVE_INFINITY, 'sig-mask');
   }
 
   quiet<T>(fn: () => T): T {
