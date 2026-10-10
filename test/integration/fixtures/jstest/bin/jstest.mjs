@@ -948,6 +948,14 @@ async function wsclient(ctx, [base]) {
     c.abort();
     return writing;
   });
+  await wsTry(out, 'abortwriter', async () => {
+    const ws = await ctx.websocket(`${base}/full`);
+    const w = ws.writable.getWriter();
+    const writing = w.write('x').then(() => 'sent', wsErr);
+    await sleep(30);
+    const aborting = w.abort(new Error('stop writing'));
+    return `${await writing} ${await aborting.then(() => 'aborted', wsErr)} ${(await ws.closed).code}`;
+  });
   await wsTry(out, 'writerabort', async () => {
     const ws = await ctx.websocket(`${base}/echo`);
     await ws.writable.abort();
