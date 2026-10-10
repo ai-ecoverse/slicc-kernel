@@ -78,6 +78,8 @@ export class VfsNode {
 
   opens = 0;
 
+  writers = 0;
+
   private missing = false;
 
   private revoked = false;
@@ -298,8 +300,11 @@ export class VfsNodes {
 
   private readonly entries = new Map<string, Promise<unknown>>();
 
-  constructor(fs: VfsFileFs) {
+  private readonly onClosed: ((path: string) => void) | undefined;
+
+  constructor(fs: VfsFileFs, onClosed?: (path: string) => void) {
     this.fs = fs;
+    this.onClosed = onClosed;
   }
 
   async onEntry<T>(path: string, op: () => Promise<T>): Promise<T> {
@@ -343,17 +348,18 @@ export class VfsNodes {
     });
   }
 
-  open(path: string, pin?: VersionPin): VfsNode {
+  open(path: string, pin?: VersionPin, writable = false): VfsNode {
     let node = this.byPath.get(path);
     if (!node) {
       node = new VfsNode(this.fs, path, undefined, false, false, pin);
       this.byPath.set(path, node);
     }
     node.opens++;
+    if (writable) node.writers++;
     return node;
   }
 
-  adopt(path: string, contents: Uint8Array, dirty: boolean): VfsNode {
+  adopt(path: string, contents: Uint8Array, dirty: boolean, writable = false): VfsNode {
     let node = this.byPath.get(path);
     if (!node) {
       node = new VfsNode(this.fs, path, contents, false, dirty);
@@ -362,6 +368,7 @@ export class VfsNodes {
       node.replace(contents);
     }
     node.opens++;
+    if (writable) node.writers++;
     return node;
   }
 
@@ -370,9 +377,21 @@ export class VfsNodes {
     return false;
   }
 
-  closed(node: VfsNode): void {
+  writes(prefix: string): boolean {
+    for (const [path, node] of this.byPath)
+      if (node.writers > 0 && within(path, prefix)) return true;
+    return false;
+  }
+
+  closed(node: VfsNode, writable = false): void {
     node.opens--;
-    if (node.opens === 0 && this.byPath.get(node.path) === node) this.byPath.delete(node.path);
+    if (writable) node.writers--;
+    if (node.opens > 0) {
+      if (writable && node.writers === 0) this.onClosed?.(node.path);
+      return;
+    }
+    if (this.byPath.get(node.path) === node) this.byPath.delete(node.path);
+    this.onClosed?.(node.path);
   }
 
   async flush(path: string): Promise<void> {
@@ -553,8 +572,8 @@ export function vfsFile(fs: VfsFileFs, opts: VfsFileOptions, nodes?: VfsNodes): 
     !nodes || opts.orphan
       ? new VfsNode(fs, opts.path, opts.contents, opts.orphan === true, opts.dirty === true)
       : opts.contents !== undefined
-        ? nodes.adopt(opts.path, opts.contents, opts.dirty === true)
-        : nodes.open(opts.path, opts.pin);
+        ? nodes.adopt(opts.path, opts.contents, opts.dirty === true, writable)
+        : nodes.open(opts.path, opts.pin, writable);
 
   let openError: { err: unknown } | undefined;
   const atOpen = (op: () => Promise<void>): void => {
@@ -633,7 +652,7 @@ export function vfsFile(fs: VfsFileFs, opts: VfsFileOptions, nodes?: VfsNodes): 
           takeOpenError();
           await node.flush();
         } finally {
-          nodes?.closed(node);
+          nodes?.closed(node, writable);
         }
       }),
   });

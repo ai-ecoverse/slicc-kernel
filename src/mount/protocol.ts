@@ -6,6 +6,7 @@ export interface DriverCapabilities {
   chmod?: boolean;
   linkTimes?: boolean;
   ranges?: boolean;
+  sessions?: boolean;
   listingStats?: boolean;
   caseInsensitive?: boolean;
   normalization?: 'none' | 'nfc' | 'nfd-insensitive';

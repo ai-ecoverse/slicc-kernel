@@ -1,10 +1,14 @@
-import { OpfsFs } from '../fs/opfs.ts';
+import { OpfsFs, type WriteSession } from '../fs/opfs.ts';
 import type { FsStat, KernelFs } from '../fs/types.ts';
 import { type FilesystemHandlers, fsError, type OpenFlags } from './driver.ts';
 import { mediumSlot } from './medium.ts';
 import type { DriverAttr, DriverCapabilities, DriverEntry } from './protocol.ts';
 
-export const FSA_CAPABILITIES: DriverCapabilities = { listingStats: true };
+export const FSA_CAPABILITIES: DriverCapabilities = {
+  listingStats: true,
+  ranges: true,
+  sessions: true,
+};
 
 export interface PermissionHandle {
   queryPermission?(descriptor: { mode: 'read' | 'readwrite' }): Promise<PermissionState>;
@@ -15,11 +19,11 @@ export type MediumHandle = FileSystemDirectoryHandle & PermissionHandle;
 
 type Handlers = Required<Omit<FilesystemHandlers, 'mount' | 'statfs'>>;
 
+export type SessionFs = KernelFs & Pick<OpfsFs, 'writeSession' | 'pread'>;
+
 interface Opened {
   path: string;
-  data: Uint8Array;
-  length: number;
-  dirty: boolean;
+  session?: Promise<WriteSession>;
 }
 
 const codeOf = (err: unknown) => (err as { code?: unknown } | null)?.code;
@@ -36,7 +40,7 @@ function attrOf(st: FsStat): DriverAttr {
   };
 }
 
-export function kernelFsHandlers(fs: KernelFs): Handlers {
+export function kernelFsHandlers(fs: SessionFs): Handlers {
   const handles = new Map<number, Opened>();
   let nextFh = 0;
   const handle = (fh: number): Opened => {
@@ -65,30 +69,20 @@ export function kernelFsHandlers(fs: KernelFs): Handlers {
       if (st && flags.exclusive) throw fsError('EEXIST', path);
       if (st?.isDirectory && flags.write) throw fsError('EISDIR', path);
       if (!st && !flags.create) throw fsError('ENOENT', path);
-      const data = st && !flags.truncate ? await fs.readFileBuffer(path) : new Uint8Array(0);
-      handles.set(++nextFh, { path, data, length: data.length, dirty: !st || flags.truncate });
+      if (!st || flags.truncate) await fs.writeFile(path, new Uint8Array(0));
+      handles.set(++nextFh, { path });
       return nextFh;
     },
-    async read(fh, offset, size) {
-      const h = handle(fh);
-      return h.data.slice(offset, Math.min(h.length, offset + size));
-    },
+    read: async (fh, offset, size) => fs.pread(handle(fh).path, offset, size),
     async write(fh, offset, bytes) {
       const h = handle(fh);
-      const end = offset + bytes.length;
-      if (end > h.data.length) {
-        const grown = new Uint8Array(Math.max(end, h.data.length * 2));
-        grown.set(h.data.subarray(0, h.length));
-        h.data = grown;
-      }
-      h.data.set(bytes, offset);
-      h.length = Math.max(h.length, end);
-      h.dirty = true;
+      h.session ??= fs.writeSession(h.path, false);
+      await (await h.session).write(offset, bytes);
     },
     async release(fh) {
       const h = handle(fh);
       handles.delete(fh);
-      if (h.dirty) await fs.writeFile(h.path, h.data.slice(0, h.length));
+      if (h.session !== undefined) await (await h.session).close();
     },
     mkdir: (path) => fs.mkdir(path),
     async rmdir(path) {
@@ -104,6 +98,13 @@ export function kernelFsHandlers(fs: KernelFs): Handlers {
     symlink: (target, path) => fs.symlink(target, path),
     readlink: (path) => fs.readlink(path),
     async setattr(path, change) {
+      if (change.size !== undefined) {
+        const open = [...handles.values()].find(
+          (h) => h.path === path && h.session !== undefined
+        )?.session;
+        if (open !== undefined) await (await open).truncate(change.size);
+        else await fs.truncate?.(path, change.size);
+      }
       if (change.mode !== undefined) await fs.chmod(path, change.mode);
       if (change.mtime !== undefined) {
         await fs.utimes(path, new Date(change.mtime), new Date(change.mtime));
@@ -129,7 +130,7 @@ export function granted(handle: PermissionHandle): Promise<boolean> {
 
 export function removableMedium(
   onLost: (handle: MediumHandle) => void,
-  open: (handle: MediumHandle) => KernelFs = (handle) => new OpfsFs(handle)
+  open: (handle: MediumHandle) => SessionFs = (handle) => new OpfsFs(handle)
 ): Medium {
   const slot = mediumSlot<MediumHandle>(
     async (err, handle) => denied(err) && !(await granted(handle)),

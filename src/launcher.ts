@@ -74,7 +74,7 @@ import {
 } from './mount/hostfs.ts';
 import { type MediaStore, memoryMedia } from './mount/media.ts';
 import {
-  type HeldPaths,
+  HeldSet,
   heldUnder,
   type MountEntry,
   type MountSpec,
@@ -334,7 +334,7 @@ export class Launcher {
   private readonly deciding = new Map<number, Set<(byParent: boolean) => void>>();
   readonly identities = { asked: 0, timedOut: 0 };
   private readonly nodes: VfsNodes;
-  private readonly held = new Set<HeldPaths>();
+  private readonly held = new HeldSet((path) => this.released(path));
   private readonly processMounts: ProcessMountPolicy;
   private readonly booting = new AbortController();
   fstab: Promise<FstabResult[]> = Promise.resolve([]);
@@ -378,7 +378,7 @@ export class Launcher {
     });
     enableCdp(this.net, this.cdp);
     const fs = withCommandDirs(this.base, async () => new Set((await this.commands()).keys()));
-    this.nodes = new VfsNodes(fs);
+    this.nodes = new VfsNodes(fs, (path) => this.released(path));
     this.openFiles.add(this.nodes);
     this.fs = keepingOpen(fs, this.nodes);
     this.watchers.watch([this.modulesDir, this.pnpmHome], { recursive: true }, () => {
@@ -779,6 +779,12 @@ export class Launcher {
 
   private umaskOf(pid: number): number {
     return this.processes.get(pid)?.umask?.() ?? DEFAULT_UMASK;
+  }
+
+  private released(path: string): void {
+    const at = normalizePath(path);
+    const open = [...this.openFiles].some((nodes) => nodes.writes(at)) || heldUnder(this.held, at);
+    if (!open) void this.mounts.commit(at).catch(() => undefined);
   }
 
   private ignoredBy(pid: number, fork = false): number {

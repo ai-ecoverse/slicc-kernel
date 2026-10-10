@@ -135,6 +135,12 @@ async function positioned(handle: FileSystemFileHandle, op: (io: Positioned) => 
   await writable.close();
 }
 
+export interface WriteSession {
+  write(at: number, bytes: Uint8Array): Promise<void>;
+  truncate(size: number): Promise<void>;
+  close(): Promise<void>;
+}
+
 export function syncAccessHandles(scope: object = globalThis): boolean {
   const handle = (scope as { FileSystemFileHandle?: { prototype: object } }).FileSystemFileHandle;
   return handle !== undefined && 'createSyncAccessHandle' in handle.prototype;
@@ -407,6 +413,21 @@ export class OpfsFs implements KernelFs {
   async truncate(path: string, size: number): Promise<void> {
     const handle = await this.existing(path);
     await this.retrying(path, () => positioned(handle, (io) => io.truncate(size)), true);
+  }
+
+  async writeSession(path: string, truncate: boolean): Promise<WriteSession> {
+    const handle = (await this.fileFor(path))[0];
+    const writable = await this.retrying(
+      path,
+      () => handle.createWritable({ keepExistingData: !truncate }),
+      true
+    );
+    return {
+      write: (at, bytes) =>
+        writable.write({ type: 'write', position: at, data: bytes as Uint8Array<ArrayBuffer> }),
+      truncate: (size) => writable.truncate(size),
+      close: () => writable.close(),
+    };
   }
 
   async readFile(path: string): Promise<string> {
