@@ -139,6 +139,7 @@ export function fetchOp(kernel: JsKernel) {
   const close = (handle: number): Promise<unknown> => kernel.raw({ op: 'net-close', handle });
 
   const send = async (hop: Hop, signal: AbortSignal): Promise<HttpHead> => {
+    signal.throwIfAborted();
     const handle = (await kernel.json({
       op: 'net-open',
       url: hop.url,

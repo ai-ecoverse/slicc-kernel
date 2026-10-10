@@ -1189,6 +1189,12 @@ async function fetches(ctx, [base]) {
     const copy = r.clone();
     return `${r.redirected} ${r.url} ${copy.redirected} ${copy.url === r.url}`;
   });
+  await fetchTry(out, 'abortredirect', async () => {
+    const c = new AbortController();
+    setTimeout(() => c.abort(), 30);
+    const result = await f('/slowredirect', { signal: c.signal }).then(() => 'ok', fetchErr);
+    return `${result} ${await (await f('/targethits')).text()}`;
+  });
   await fetchTry(out, 'gzip', async () => (await f('/gzip')).text());
   await fetchTry(out, 'brokenbody', async () => (await f('/broken')).text());
   await ctx.write(1, `${out.join('\n')}\n`);
