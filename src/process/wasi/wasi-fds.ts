@@ -76,7 +76,7 @@ export class WasiFds {
     }>,
     root = false
   ): void {
-    for (const fd of [0, 1, 2]) this.table.set(fd, this.stdioEntry(fd));
+    for (const fd of [0, 1, 2]) this.table.set(fd, kernelEntry());
     const preopens = this.preopens(cwd, root);
     const top = 3 + preopens.length;
     for (const { fd, kind, flags, device } of inherited) {
@@ -171,16 +171,6 @@ export class WasiFds {
     const gen = Atomics.add(this.shared, GEN, 1) + 1;
 
     if (gen - 1 === this.seen) this.seen = gen;
-  }
-
-  private stdioEntry(fd: number): WasiEntry {
-    let info: FdInfo;
-    try {
-      info = this.kernel.call({ op: 'fd-info', fd }) as FdInfo;
-    } catch {
-      return kernelEntry();
-    }
-    return info?.meta && 'dir' in info.meta ? { type: 'dir', path: info.meta.dir } : kernelEntry();
   }
 
   private fetch(fd: number): WasiEntry | undefined {
@@ -524,7 +514,11 @@ export class WasiFds {
     if (oflags & OFLAGS.DIRECTORY && !s?.isDirectory) {
       throw new WasiError(s ? 'ENOTDIR' : 'ENOENT');
     }
-    if (s?.isDirectory) return this.install({ type: 'dir', path });
+    if (s?.isDirectory) {
+      const asked = (oflags & OFLAGS.DIRECTORY) === 0 && (rights & RIGHTS.FD_WRITE) !== 0n;
+      if (asked || (oflags & (OFLAGS.CREAT | OFLAGS.TRUNC)) !== 0) throw new WasiError('EISDIR');
+      return this.install({ type: 'dir', path });
+    }
     if (!s && !(oflags & OFLAGS.CREAT)) throw new WasiError('ENOENT');
     if (this.shared) return this.kernelFile(path, s, oflags, rights, fdflags);
     return this.install({ type: 'file', file: this.file(path, s, oflags, rights, fdflags) });
