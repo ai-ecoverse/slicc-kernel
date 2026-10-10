@@ -46,6 +46,8 @@ export class WasiSignals implements SignalHooks {
 
   private restarting = 0;
 
+  private defaults = 0;
+
   private readonly fallBack: (sig: number) => void;
   private readonly onKilled: ((code: number) => void) | undefined;
   constructor(fallBack: (sig: number) => void, onKilled?: (code: number) => void) {
@@ -75,6 +77,7 @@ export class WasiSignals implements SignalHooks {
     this.handlers = withBit(this.handlers, bit, disposition === DISPOSITION_HANDLER);
     this.ignoring = withBit(this.ignoring, bit, disposition === DISPOSITION_IGNORE);
     this.restarting = withBit(this.restarting, bit, (flags & SA_RESTART) !== 0);
+    this.defaults = withBit(this.defaults, bit, disposition === 0);
     return E.SUCCESS;
   }
 
@@ -98,10 +101,12 @@ export class WasiSignals implements SignalHooks {
     this.uncaught = state.uncaught;
   }
 
-  masks(): { caught: number; ignored: number; restart: number } | null {
+  masks(): { caught: number; ignored: number; restart: number; defaults?: number } | null {
     if (this.hooked) {
       const caught = this.handler() ? this.handlers : 0;
-      return { caught, ignored: this.ignoring, restart: this.restarting };
+      const defaults = this.defaults;
+      this.defaults = 0;
+      return { caught, ignored: this.ignoring, restart: this.restarting, defaults };
     }
     if (!this.handler()) return null;
     return { caught: DELIVERED_MASK & ~this.uncaught, ignored: 0, restart: 0 };
