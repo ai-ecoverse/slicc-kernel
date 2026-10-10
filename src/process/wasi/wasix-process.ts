@@ -47,9 +47,15 @@ const OFLAG_TRUNC = 8;
 export class WasixProcess {
   private readonly host: WasiHost;
   private readonly driver: AsyncifyDriver;
-  constructor(host: WasiHost, driver: AsyncifyDriver) {
+  private readonly inThread: () => boolean;
+  constructor(host: WasiHost, driver: AsyncifyDriver, inThread: () => boolean = () => false) {
     this.host = host;
     this.driver = driver;
+    this.inThread = inThread;
+  }
+
+  private restart(): { restart?: true } {
+    return this.inThread() ? {} : { restart: true };
   }
 
   private call(req: Parameters<WasiHost['o']['kernel']['call']>[0]): unknown {
@@ -170,7 +176,7 @@ export class WasixProcess {
         stdio,
         inherit,
         ...(exec ? { exec } : {}),
-        restart: true as const,
+        ...this.restart(),
       };
       return restarted(() => this.call(spawn)) as number;
     } finally {
@@ -243,7 +249,7 @@ export class WasixProcess {
     return this.call({
       op: 'proc-fork',
       state: { memory, currData: 0, forkSp, callStackNames: [], ppid: this.host.o.pid, wasi },
-      restart: true,
+      ...this.restart(),
     });
   }
 }

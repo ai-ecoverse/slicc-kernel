@@ -118,6 +118,8 @@ export interface ProcessKernelDeps {
   restartable?(): boolean;
 
   memory?(): WebAssembly.Memory | undefined;
+
+  deliveries?(): number;
 }
 
 function restarted(issue: () => SyncFsResult): SyncFsResult {
@@ -127,19 +129,27 @@ function restarted(issue: () => SyncFsResult): SyncFsResult {
   }
 }
 
-function forkRestarted(deps: ProcessKernelDeps, state: ForkState): SyncFsResult {
+function forkRestarted(
+  deps: ProcessKernelDeps,
+  state: ForkState,
+  snapshotAt: number | undefined
+): SyncFsResult {
   let memory = state.memory;
+  let seen = snapshotAt;
   return restarted(() => {
     const streams = deps.describeFork();
+    const now = deps.deliveries?.();
+    if (now !== seen) {
+      seen = now;
+      const live = deps.memory?.();
+      if (live) memory = new Uint8Array(live.buffer).slice();
+    }
     const forked = { ...state, memory, streams, cwd: deps.Fs.cwd() };
-    const result = deps.transport.call(
+    return deps.transport.call(
       { op: 'proc-fork', state: forked, restart: true },
       Infinity,
       'proc-fork'
     );
-    const live = deps.memory?.();
-    memory = live ? new Uint8Array(live.buffer).slice() : memory;
-    return result;
   });
 }
 
@@ -346,9 +356,10 @@ export function createProcessKernel(deps: ProcessKernelDeps): ProcessKernel {
       return spawnChild(file, argv, env, cwd, fds, actions, false);
     },
     fork(state) {
+      const snapshotAt = deps.deliveries?.();
       const unflushed = flushed(deps.beforeSpawn);
       if (unflushed < 0) return unflushed;
-      const r = forkRestarted(deps, state);
+      const r = forkRestarted(deps, state, snapshotAt);
       if (!r.ok) return -wasiErrno(r.errno);
       return r.kind === 'json' ? (r.json as number) : -wasiErrno('EIO');
     },

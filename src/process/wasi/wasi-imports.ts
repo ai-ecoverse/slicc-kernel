@@ -2,6 +2,7 @@ import type { SyncFsPosixBridge, SyncFsResult } from '../../realm/sync-fs-wire.t
 import { E, FDFLAGS, OFLAGS, RIGHTS, wasiErrnoOf } from './wasi-abi.ts';
 import { WasiError } from './wasi-files.ts';
 import type { WasiHost } from './wasi-host.ts';
+import { MAIN_TID } from './wasi-threads.ts';
 import { restarted } from './wasix-process.ts';
 
 export interface Request {
@@ -228,7 +229,7 @@ export function importsContext({
     fs,
     fds,
     syscall: call,
-    ...processes(host, call),
+    ...processes(host, call, tid !== MAIN_TID),
     async: {
       submit: (req) => call({ op: 'async-submit', req }) as number,
       wait(timeoutMs) {
@@ -265,7 +266,8 @@ const STDIO = ['stdin', 'stdout', 'stderr'] as const;
 
 function processes(
   host: WasiHost,
-  call: (req: Request) => unknown
+  call: (req: Request) => unknown,
+  inThread: boolean
 ): Pick<ImportsContext, 'spawn' | 'wait' | 'kill'> {
   const close = (fd: number) => void call({ op: 'fd-close', fd });
   const slot = (n: number, how: Stdio, mine: number[], theirs: number[]): ChildSlot => {
@@ -290,7 +292,7 @@ function processes(
           env: o.env ?? { ...host.o.env },
           cwd: o.cwd ?? host.cwd,
           stdio,
-          restart: true as const,
+          ...(inThread ? {} : { restart: true as const }),
         };
         const pid = restarted(() => call(req)) as number;
         const out: Spawned = { pid };
