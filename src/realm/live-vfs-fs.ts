@@ -141,6 +141,7 @@ export interface LiveVfsPlugin {
   mount(mount: LiveFsMount): LiveFsNode;
   node_ops: LiveNodeOps;
   stream_ops: LiveStreamOps;
+  flushDirty(): void;
 
   mounts: Set<LiveFsMount>;
 }
@@ -181,8 +182,31 @@ interface LiveOpsTables {
   stream?: LiveStreamOps;
 }
 
+const EARLY_WHOLE_FILE = 64 * 1024;
+
 function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
   const bridgeOf = (node: LiveFsNode): SyncFsPosixBridge => node.mount.opts.bridge;
+  const dirty = new Set<LiveFsNode>();
+
+  function markDirty(node: LiveFsNode): void {
+    node.live.dirty = true;
+    dirty.add(node);
+  }
+
+  function flushDirty(): void {
+    for (const node of [...dirty]) {
+      const s = node.live;
+      if (!s.dirty || s.orphan) {
+        dirty.delete(node);
+        continue;
+      }
+      if (!s.ranged && s.len > EARLY_WHOLE_FILE) continue;
+      try {
+        flushNode(node);
+        dirty.delete(node);
+      } catch {}
+    }
+  }
 
   function call<T>(fn: () => T): T {
     try {
@@ -291,7 +315,7 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
     const ranged = s.openCount > 0 ? rangedOf(node) : undefined;
     if (ranged) {
       ranged.truncate(size);
-      s.dirty = true;
+      markDirty(node);
       return;
     }
     if (s.openCount > 0) {
@@ -300,7 +324,7 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
       const buf = ensureCapacity(node, size);
       if (size > s.len) buf.fill(0, s.len, size);
       s.len = size;
-      s.dirty = true;
+      markDirty(node);
       return;
     }
 
@@ -332,6 +356,8 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
     ensureCapacity,
     rangedOf,
     flushNode,
+    markDirty,
+    flushDirty,
     truncate,
   };
 }
@@ -586,7 +612,7 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
       if (ranged) {
         const bytes = new Uint8Array(buffer.buffer, buffer.byteOffset + offset, length);
         h.call(() => ranged.write(position, bytes));
-        s.dirty = true;
+        h.markDirty(node);
         return length;
       }
       ensureLoaded(node);
@@ -594,7 +620,7 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
       if (position > s.len) buf.fill(0, s.len, position);
       buf.set(new Uint8Array(buffer.buffer, buffer.byteOffset + offset, length), position);
       s.len = Math.max(s.len, end);
-      s.dirty = true;
+      h.markDirty(node);
       return length;
     },
     llseek(stream, offset, whence) {
@@ -625,6 +651,7 @@ export function createLiveVfsPlugin(Fs: LiveFsApi): LiveVfsPlugin {
     mounts,
     node_ops: nodeOps,
     stream_ops: streamOps,
+    flushDirty: () => h.flushDirty(),
     mount(mount) {
       const st = h.call(() => mount.opts.bridge.stat(mount.opts.root));
       if (!st.isDirectory) throw new Fs.ErrnoError(wasiErrno('ENOTDIR'));
