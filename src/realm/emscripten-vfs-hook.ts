@@ -18,6 +18,7 @@ export interface EmscriptenFsForHook extends LiveMountFsApi {
 export interface EmscriptenVfsHandle {
   mounted: string[];
   flush(): void;
+  flushDirty(): void;
   invalidate(): void;
 }
 
@@ -67,6 +68,7 @@ export function mountVfsIntoEmscripten(
   return {
     mounted,
     flush: () => flushLiveVfs(Fs, plugin),
+    flushDirty: () => plugin.flushDirty(),
     invalidate: () => invalidateLiveVfs(Fs, plugin),
   };
 }

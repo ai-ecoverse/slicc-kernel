@@ -1,26 +1,29 @@
-export type SyncFsOp =
-  | 'read'
-  | 'write'
-  | 'exists'
-  | 'stat'
-  | 'lstat'
-  | 'readdir'
-  | 'readdir-stat'
-  | 'mkdir'
-  | 'rm'
-  | 'rename'
-  | 'unlink'
-  | 'rmdir'
-  | 'symlink'
-  | 'readlink'
-  | 'chmod'
-  | 'utimes'
-  | 'lutimes'
-  | 'statfs'
-  | 'hold'
-  | 'pread'
-  | 'pwrite'
-  | 'truncate';
+export const SYNC_FS_OPS = [
+  'read',
+  'write',
+  'exists',
+  'stat',
+  'lstat',
+  'readdir',
+  'readdir-stat',
+  'mkdir',
+  'rm',
+  'rename',
+  'unlink',
+  'rmdir',
+  'symlink',
+  'readlink',
+  'chmod',
+  'utimes',
+  'lutimes',
+  'statfs',
+  'hold',
+  'pread',
+  'pwrite',
+  'truncate',
+] as const;
+
+export type SyncFsOp = (typeof SYNC_FS_OPS)[number];
 
 export interface SyncFsRequest {
   token: string;

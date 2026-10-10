@@ -6,7 +6,7 @@ import { SIG } from '../kernel/signals.ts';
 import type { Termios } from '../kernel/tty.ts';
 import { mountVfsIntoEmscripten } from '../realm/emscripten-vfs-hook.ts';
 import { type LiveFsNode, liveNodePath } from '../realm/live-vfs-fs.ts';
-import type { SyncFsResult } from '../realm/sync-fs-wire.ts';
+import { SYNC_FS_OPS, type SyncFsResult } from '../realm/sync-fs-wire.ts';
 import {
   createSyncFsSabBridge,
   createSyncSabTransport,
@@ -59,6 +59,8 @@ export {
   type ProcessSys,
   SyscallError,
 } from './kernel-streams.ts';
+
+const FS_OPS: ReadonlySet<string> = new Set(SYNC_FS_OPS);
 
 export function kernelSys(transport: SyncSabTransport): ProcessSys & PtyKernel {
   const call = (req: SyncSabRequestBody, label: string): SyncFsResult => {
@@ -394,7 +396,14 @@ export async function runWasmProcess(
       },
     }
   );
-  const transport = signals.transport();
+  const gated = signals.transport();
+  let early = (): void => {};
+  const transport: SyncSabTransport = {
+    call: (req, timeoutMs, label) => {
+      if (!FS_OPS.has(req.op)) early();
+      return gated.call(req, timeoutMs, label);
+    },
+  };
   const sys = kernelSys(transport);
   const encoder = new TextEncoder();
   const say = (fd: number) => (text: string) => sys.write(fd, encoder.encode(`${text}\n`));
@@ -486,6 +495,7 @@ export async function runWasmProcess(
     cwd: init.cwd,
     warn: deps.warn ?? say(2),
   });
+  early = () => signals.quiet(() => vfs.flushDirty());
   const sigpipe = (): boolean => running.sliccSigpipe?.() === 1;
   const restartable = (): boolean => signals.restartable();
   const streams = new KernelStreams(running.FS, sys, { sigpipe, restartable });
