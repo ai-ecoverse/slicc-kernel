@@ -32,6 +32,7 @@ export interface FetchTransportOptions {
 }
 
 export const SEND_BUFFER = 1024 * 1024;
+const CLOSE_WAIT_MS = 5000;
 
 const NO_WEBSOCKET =
   'WebSocket not supported by this transport (fetchTransport needs { webSocket: true })';
@@ -132,7 +133,18 @@ export interface TransportServer {
   close(): void;
 }
 
-export function serveTransport(peer: TransportPeer, transport: RealmTransport): TransportServer {
+interface Flow {
+  inflight: number;
+  closing: boolean;
+  deadline(): void;
+  wake?: () => void;
+}
+
+export function serveTransport(
+  peer: TransportPeer,
+  transport: RealmTransport,
+  { closeWaitMs = CLOSE_WAIT_MS }: { closeWaitMs?: number } = {}
+): TransportServer {
   const open = new Map<
     number,
     { abort: AbortController; body?: AsyncIterator<Uint8Array>; response?: RealmTransportResponse }
@@ -177,12 +189,15 @@ export function serveTransport(peer: TransportPeer, transport: RealmTransport): 
     }
   };
   const sockets = new Map<number, RealmWebSocket>();
-  const credit = new Map<number, { inflight: number; closing: boolean; wake?: () => void }>();
+  const credit = new Map<number, Flow>();
   const refill = (nid: number, n: number, closing = false) => {
     const flow = credit.get(nid);
     if (!flow) return;
     flow.inflight -= n;
-    flow.closing ||= closing;
+    if (closing && !flow.closing) {
+      flow.closing = true;
+      flow.deadline();
+    }
     flow.wake?.();
   };
   const openSocket = async (call: Extract<TransportCall, { net: 'ws-open' }>) => {
@@ -209,14 +224,25 @@ export function serveTransport(peer: TransportPeer, transport: RealmTransport): 
   };
   const relay = async (nid: number, socket: RealmWebSocket) => {
     let ending: { code: number; reason: string };
-    const flow: { inflight: number; closing: boolean; wake?: () => void } = {
+    let late!: () => void;
+    const unanswered = new Promise<'late'>((resolve) => {
+      late = () => resolve('late');
+    });
+    const flow: Flow = {
       inflight: 0,
       closing: false,
+      deadline: () =>
+        AbortSignal.timeout(closeWaitMs).addEventListener('abort', late, { once: true }),
     };
     credit.set(nid, flow);
+    const timedOut = { code: 1006, reason: 'the far end did not answer the close' };
     let oversize = false;
     try {
-      for await (const data of socket.messages) {
+      const messages = socket.messages[Symbol.asyncIterator]();
+      for (;;) {
+        const next = await Promise.race([messages.next(), unanswered]);
+        if (next === 'late' || next.done) break;
+        const data = next.value;
         if (flow.closing) continue;
         if (payloadSize(data) > MESSAGE_LIMIT) {
           oversize = true;
@@ -237,7 +263,7 @@ export function serveTransport(peer: TransportPeer, transport: RealmTransport): 
       if (oversize) socket.close(1000, 'a message is too big');
       ending = oversize
         ? { code: 1009, reason: `a message is over ${MESSAGE_LIMIT} bytes` }
-        : await socket.closed;
+        : await Promise.race([socket.closed, unanswered.then(() => timedOut)]);
     } catch (e) {
       socket.close(1000, 'the relay failed');
       ending = { code: 1011, reason: e instanceof Error ? e.message : String(e) };

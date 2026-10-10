@@ -40,6 +40,7 @@ import { MESSAGE_LIMIT } from './ws-queue.ts';
 
 const SEND_BUFFER = 1024 * 1024;
 const TLS_HANDSHAKE = 0x16;
+const TOKEN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 const NO_WEBSOCKET =
   'WebSocket not supported by this transport (fetchTransport needs { webSocket: true })';
 
@@ -587,6 +588,12 @@ export class RealmProxy {
     ctx.idle.ms = Number.POSITIVE_INFINITY;
     try {
       if (hangup.signal.aborted) throw hangup.signal.reason;
+      if (
+        socket.protocol &&
+        !(protocols.includes(socket.protocol) && TOKEN.test(socket.protocol))
+      ) {
+        throw new HttpError(502, 'the far end chose a subprotocol the client did not offer');
+      }
       await ctx.sink.write(switchingHead(accept, socket.protocol), this.stop.signal);
       await this.bridge(ctx, socket, hangup.signal);
     } catch (e) {
