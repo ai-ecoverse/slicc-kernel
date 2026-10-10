@@ -15,12 +15,14 @@ export class MessageQueue implements AsyncIterable<RealmWebSocketMessage> {
   private size = 0;
   private ended = false;
   private readonly overflow: () => void;
+  private readonly taken: ((n: number) => void) | undefined;
   readonly closed: Promise<RealmWebSocketClose>;
   private settle!: (close: RealmWebSocketClose) => void;
 
-  constructor(overflow: () => void, limit = INBOUND_LIMIT) {
+  constructor(overflow: () => void, limit = INBOUND_LIMIT, taken?: (n: number) => void) {
     this.overflow = overflow;
     this.limit = limit;
+    this.taken = taken;
     this.closed = new Promise((resolve) => {
       this.settle = resolve;
     });
@@ -60,7 +62,9 @@ export class MessageQueue implements AsyncIterable<RealmWebSocketMessage> {
     for (;;) {
       const next = this.items.shift();
       if (next !== undefined) {
-        this.size -= payloadSize(next);
+        const n = payloadSize(next);
+        this.size -= n;
+        this.taken?.(n);
         yield next;
         continue;
       }

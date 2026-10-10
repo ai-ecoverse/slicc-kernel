@@ -629,8 +629,11 @@ export class RealmProxy {
           if (closeSent) break;
           const code = wireCode(event.code);
           socket.close(code, event.reason);
-          await Promise.race([socket.closed, quietly(this.limits.closeWaitMs)]);
-          await toGuest(closeFrame(code, event.reason));
+          const reply = await Promise.race([
+            socket.closed,
+            quietly(this.limits.closeWaitMs).then(() => ({ code, reason: event.reason })),
+          ]);
+          await toGuest(closeFrame(wireCode(reply.code), reply.reason));
           break;
         }
         while (socket.buffered > SEND_BUFFER && !reading.aborted) await quietly(10);

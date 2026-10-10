@@ -23,7 +23,8 @@ export type TransportCall =
   | { net: 'cancel'; nid: number }
   | { net: 'ws-open'; nid: number; url: string; protocols: string[]; headers: HeaderList }
   | { net: 'ws-send'; nid: number; data: RealmWebSocketMessage }
-  | { net: 'ws-close'; nid: number; code?: number; reason?: string };
+  | { net: 'ws-close'; nid: number; code?: number; reason?: string }
+  | { net: 'ws-consumed'; nid: number; n: number };
 
 export type TransportReply =
   | { net: 'head'; nid: number; status: number; statusText: string; headers: HeaderList }
@@ -206,7 +207,11 @@ export class RemoteTransport implements RealmTransport {
     }
     const close = (code?: number, reason?: string) =>
       this.port.postMessage({ net: 'ws-close', nid, code, reason });
-    const queue = new MessageQueue(() => close(1000, 'too many waiting messages'));
+    const queue = new MessageQueue(
+      () => close(1000, 'a message is too big'),
+      Number.POSITIVE_INFINITY,
+      (n) => this.port.postMessage({ net: 'ws-consumed', nid, n })
+    );
     let unacked = 0;
     this.sockets.set(nid, { queue, acked: (n) => void (unacked -= n) });
     return {

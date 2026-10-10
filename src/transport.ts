@@ -9,7 +9,7 @@ import type {
   RealmWebSocket,
   RealmWebSocketRequest,
 } from './kernel/net/transport.ts';
-import { payloadSize } from './kernel/net/ws-queue.ts';
+import { INBOUND_LIMIT, payloadSize } from './kernel/net/ws-queue.ts';
 import { openWebSocket, type WebSocketConstructor } from './websocket-transport.ts';
 
 export type {
@@ -174,6 +174,14 @@ export function serveTransport(peer: TransportPeer, transport: RealmTransport): 
     }
   };
   const sockets = new Map<number, RealmWebSocket>();
+  const credit = new Map<number, { inflight: number; ended: boolean; wake?: () => void }>();
+  const refill = (nid: number, n: number, ended = false) => {
+    const flow = credit.get(nid);
+    if (!flow) return;
+    flow.inflight -= n;
+    flow.ended ||= ended;
+    flow.wake?.();
+  };
   const openSocket = async (call: Extract<TransportCall, { net: 'ws-open' }>) => {
     const abort = new AbortController();
     open.set(call.nid, { abort });
@@ -198,12 +206,23 @@ export function serveTransport(peer: TransportPeer, transport: RealmTransport): 
   };
   const relay = async (nid: number, socket: RealmWebSocket) => {
     let ending: { code: number; reason: string };
+    const flow: { inflight: number; ended: boolean; wake?: () => void } = {
+      inflight: 0,
+      ended: false,
+    };
+    credit.set(nid, flow);
     try {
       for await (const data of socket.messages) {
         if (typeof data === 'string') peer.postMessage({ net: 'ws-message', nid, data });
         else {
           const bytes = data.slice();
           peer.postMessage({ net: 'ws-message', nid, data: bytes }, [bytes.buffer]);
+        }
+        flow.inflight += payloadSize(data);
+        while (flow.inflight > INBOUND_LIMIT && !flow.ended) {
+          await new Promise<void>((resolve) => {
+            flow.wake = resolve;
+          });
         }
       }
       ending = await socket.closed;
@@ -212,6 +231,7 @@ export function serveTransport(peer: TransportPeer, transport: RealmTransport): 
       ending = { code: 1011, reason: e instanceof Error ? e.message : String(e) };
     }
     sockets.delete(nid);
+    credit.delete(nid);
     peer.postMessage({ net: 'ws-closed', nid, ...ending });
   };
   const sendOn = async (call: Extract<TransportCall, { net: 'ws-send' }>) => {
@@ -241,6 +261,7 @@ export function serveTransport(peer: TransportPeer, transport: RealmTransport): 
   };
   const drop = (nid: number) => {
     sockets.get(nid)?.close(1000, 'cancelled');
+    refill(nid, 0, true);
     const entry = open.get(nid);
     open.delete(nid);
     entry?.abort.abort();
@@ -252,7 +273,10 @@ export function serveTransport(peer: TransportPeer, transport: RealmTransport): 
       else if (call.net === 'read') void read(call.nid);
       else if (call.net === 'ws-open') void openSocket(call);
       else if (call.net === 'ws-send') void sendOn(call);
-      else if (call.net === 'ws-close') sockets.get(call.nid)?.close(call.code, call.reason);
+      else if (call.net === 'ws-close') {
+        sockets.get(call.nid)?.close(call.code, call.reason);
+        refill(call.nid, 0, true);
+      } else if (call.net === 'ws-consumed') refill(call.nid, call.n);
       else drop(call.nid);
     },
     close() {
