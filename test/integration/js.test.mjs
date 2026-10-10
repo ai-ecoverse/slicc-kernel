@@ -131,6 +131,35 @@ test('open files and path operations agree, append appends, exclusive creation i
   );
 });
 
+test('a JS program makes the same calls synchronously, and a caught signal restarts a blocked one', async (t) => {
+  const { bash, run } = await booted(chrome, t);
+  assert.deepEqual(
+    await run(['jstest', 'syncfiles', 'sd'], { cwd: '/home' }),
+    ok(
+      '2097157 true 3 EBADF,ENOENT,EEXIST,EISDIR,EINVAL,ENOENT,ENOENT,EBADF big.bin,link,log,two two one true 4 false abcd\n'
+    )
+  );
+  assert.deepEqual(
+    await bash('yes abcdefgh | head -c 3000000 | jstest synccat | wc -c'),
+    ok('3000000\n')
+  );
+  assert.deepEqual(
+    await bash('jstest syncyes | head -c 4 >/dev/null; echo "${PIPESTATUS[0]}"'),
+    ok('141\n')
+  );
+  assert.deepEqual(
+    await bash('jstest syncyes ignore | head -c 4 >/dev/null; echo "${PIPESTATUS[0]}"'),
+    { status: 0, stdout: '7\n', stderr: 'EPIPE\n' }
+  );
+  assert.deepEqual(await bash('jstest syncdev < /dev/zero 2>/dev/null'), ok('8 true\n'));
+  assert.deepEqual(
+    await bash(
+      'cd /home; (sleep 2; echo data) | jstest synctrap > s.out & until [ -n "$(cat /home/s.out 2>/dev/null)" ]; do sleep 0.05; done; kill -USR1 $!; wait $!; echo "st=$?"; cat /home/s.out'
+    ),
+    ok('st=0\nready\ncaught 10 data\n')
+  );
+});
+
 test('a file whose suffix a package maps (binfmt) runs with that command, unless #! says otherwise', async (t) => {
   const { bash } = await booted(chrome, t);
   assert.deepEqual(

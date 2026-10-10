@@ -76,8 +76,14 @@ export interface WasmProcessInitMsg {
   fds?: InheritedFd[];
 }
 
+export interface JsLane {
+  sab: SharedArrayBuffer;
+  port: MessagePort;
+}
+
 export type JsProcessInitMsg = Omit<WasmProcessInitMsg, 'program' | 'fork'> & {
   program: JsProgram;
+  lane?: JsLane;
 };
 
 export type ProcessInitMsg = WasmProcessInitMsg | JsProcessInitMsg;

@@ -440,6 +440,92 @@ async function devices(ctx) {
   await ctx.write(1, `${zero.length} ${zero.every((b) => b === 0)}\n`);
 }
 
+function synccat(ctx) {
+  for (;;) {
+    const chunk = ctx.sync.read(0, 1 << 20);
+    if (chunk.length === 0) return 0;
+    ctx.sync.write(1, chunk);
+  }
+}
+
+async function syncyes(ctx, [how]) {
+  const line = new TextEncoder().encode('y\n'.repeat(4096));
+  if (how === 'ignore') await ctx.signals.ignore('SIGPIPE');
+  try {
+    for (;;) ctx.sync.write(1, line);
+  } catch (err) {
+    ctx.sync.write(2, `${err.code}\n`);
+    return 7;
+  }
+}
+
+async function synctrap(ctx) {
+  let caught = 0;
+  await ctx.signals.on('SIGUSR1', (sig) => {
+    caught = sig;
+  });
+  await ctx.write(1, 'ready\n');
+  const line = text(ctx.sync.read(0));
+  ctx.sync.write(1, `caught ${caught} ${line}`);
+}
+
+function syncerr(fn) {
+  try {
+    fn();
+    return 'ok';
+  } catch (err) {
+    return err.code;
+  }
+}
+
+function syncfiles(ctx, [dir]) {
+  const { sync } = ctx;
+  sync.fs.mkdir(dir);
+  const f = sync.open(`${dir}/big.bin`, { read: true, write: true, create: true });
+  const big = new Uint8Array(2 * 1024 * 1024 + 5).map((_, i) => i % 251);
+  const wrote = f.write(0, big);
+  const back = f.read(1024 * 1024 - 1, 1024 * 1024 + 3);
+  const same = back.every((b, i) => b === (1024 * 1024 - 1 + i) % 251);
+  f.truncate(3);
+  f.sync();
+  const size = f.size();
+  f.close();
+  const errors = [
+    syncerr(() => f.size()),
+    syncerr(() => sync.open(`${dir}/none`)),
+    syncerr(() => sync.open(`${dir}/big.bin`, { create: true, exclusive: true })),
+    syncerr(() => sync.open(dir)),
+    syncerr(() => sync.read(0, -1)),
+    syncerr(() => sync.fs.stat(`${dir}/none`)),
+    syncerr(() => sync.open(`${dir}/no/such`, { write: true, create: true })),
+  ];
+  const log = sync.open(`${dir}/log`, { write: true, append: true, create: true });
+  log.write(0, new TextEncoder().encode('ab'));
+  log.write(0, new TextEncoder().encode('cd'));
+  sync.close(log.fd);
+  errors.push(syncerr(() => log.sync()));
+  sync.fs.writeFile(`${dir}/one`, 'one');
+  sync.fs.rename(`${dir}/one`, `${dir}/two`);
+  sync.fs.symlink('two', `${dir}/link`);
+  const listed = sync.fs.readdir(dir).sort().join(',');
+  const linked = `${sync.fs.readlink(`${dir}/link`)} ${text(sync.fs.readFile(`${dir}/link`))}`;
+  const kinds = `${sync.fs.lstat(`${dir}/link`).isSymbolicLink} ${sync.fs.stat(`${dir}/log`).size}`;
+  sync.fs.unlink(`${dir}/link`);
+  const gone = sync.fs.exists(`${dir}/link`);
+  sync.fs.rm(`${dir}/two`);
+  const head = text(sync.open(`${dir}/log`).read(0, 10));
+  sync.write(
+    1,
+    `${wrote} ${same} ${size} ${errors.join(',')} ${listed} ${linked} ${kinds} ${gone} ${head}\n`
+  );
+}
+
+function syncdev(ctx) {
+  const zero = ctx.sync.read(0, 8);
+  ctx.sync.write(2, 'gone');
+  ctx.sync.write(1, `${zero.length} ${zero.every((b) => b === 0)}\n`);
+}
+
 const modes = {
   echo: async (ctx, args) => {
     await ctx.write(
@@ -478,6 +564,11 @@ const modes = {
   closed,
   badtrunc,
   dangling,
+  synccat,
+  syncyes,
+  synctrap,
+  syncfiles,
+  syncdev,
   globals,
   devices,
   full,

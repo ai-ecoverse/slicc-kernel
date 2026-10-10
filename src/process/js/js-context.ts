@@ -1,16 +1,28 @@
-import type { DeviceMeta, KernelFdKind } from '../../kernel/fd-table.ts';
 import { SIG } from '../../kernel/signals.ts';
 import { parseSyncFsStat, type SyncFsBridgeStat } from '../../realm/sync-fs-wire.ts';
+import {
+  absent,
+  brokenPipe,
+  CHUNK,
+  checkOpen,
+  type FdInfo,
+  fileWrite,
+  index,
+  isExclusive,
+  type JsFdType,
+  type JsOpenOptions,
+  joined,
+  MAX_IO,
+  openRequest,
+  readDevice,
+  typeOf,
+  writeDevice,
+  written,
+} from './js-io.ts';
 import { JsCallError, type JsKernel } from './js-kernel.ts';
+import { type JsSyncContext, JsSyncKernel, laneOf, type SyncCall, syncOps } from './js-sync.ts';
 
-export interface JsOpenOptions {
-  read?: boolean;
-  write?: boolean;
-  append?: boolean;
-  create?: boolean;
-  exclusive?: boolean;
-  truncate?: boolean;
-}
+export type { JsFdType, JsOpenOptions } from './js-io.ts';
 
 export interface JsFile {
   readonly fd: number;
@@ -22,8 +34,6 @@ export interface JsFile {
   sync(): Promise<void>;
   close(): Promise<void>;
 }
-
-export type JsFdType = 'file' | 'pipe' | 'tty' | 'socket' | 'device' | 'directory';
 
 export interface JsFdStatus {
   type: JsFdType;
@@ -68,6 +78,7 @@ export interface JsProgramContext {
     ignore(signal: JsSignal): Promise<void>;
     reset(signal: JsSignal): Promise<void>;
   };
+  sync: JsSyncContext;
   exit(code?: number): never;
 }
 
@@ -81,12 +92,6 @@ export class JsExit extends Error {
   }
 }
 
-interface FdInfo {
-  tty?: boolean;
-  kind?: KernelFdKind;
-  meta?: DeviceMeta | { dir: string };
-}
-
 export interface ContextOptions {
   kernel: JsKernel;
   argv: readonly string[];
@@ -96,13 +101,9 @@ export interface ContextOptions {
   cwd: string;
   exit(status: number): void;
   random?: (bytes: Uint8Array) => void;
+  lane?: SyncCall;
 }
 
-const CHUNK = 64 * 1024;
-const MAX_IO = 1024 * 1024;
-const O_WRONLY = 0o1;
-const O_RDWR = 0o2;
-const O_APPEND = 0o2000;
 const encoder = new TextEncoder();
 
 export interface Identity {
@@ -138,20 +139,6 @@ export function resolvePath(cwd: string, path: string): string {
   return `/${parts.join('/')}`;
 }
 
-function typeOf(info: FdInfo): JsFdType {
-  if (info.meta && 'dir' in info.meta) return 'directory';
-  if (info.meta && 'device' in info.meta) return 'device';
-  if (info.tty || info.kind === 'tty') return 'tty';
-  if (info.kind === 'socket') return 'socket';
-  return info.kind === 'file' ? 'file' : 'pipe';
-}
-
-function flagsOf(o: JsOpenOptions): number {
-  const write = o.write || o.append || o.truncate;
-  const access = write ? (o.read ? O_RDWR : O_WRONLY) : 0;
-  return access | (o.append ? O_APPEND : 0);
-}
-
 export interface CreatedContext {
   ctx: JsProgramContext;
   drain(): Promise<unknown>;
@@ -178,45 +165,25 @@ export function createContext(o: ContextOptions): CreatedContext {
     infos.set(fd, got);
     return got;
   };
-  const device = (i: FdInfo): DeviceMeta | undefined =>
-    i.meta && 'device' in i.meta ? i.meta : undefined;
-
   const read = async (fd: number, max = CHUNK): Promise<Uint8Array> => {
     index(max, 'read');
-    const i = await info(fd);
-    if (typeOf(i) === 'directory') throw new JsCallError('EISDIR', 'read');
-    const dev = device(i);
-    if (dev) {
-      if (dev.access === 'write') throw new JsCallError('EBADF', 'read');
-      if (dev.device === 'null') return new Uint8Array(0);
-      const out = new Uint8Array(Math.min(max, CHUNK));
-      if (dev.device === 'urandom') random(out);
-      return out;
-    }
+    const emulated = readDevice(await info(fd), max, random);
+    if (emulated) return emulated;
     const r = await kernel.blocking({ op: 'fd-read', fd, max: Math.min(max, MAX_IO) });
     return r.ok && r.kind === 'bytes' ? r.bytes : new Uint8Array(0);
   };
 
   const writeAll = async (fd: number, data: Uint8Array): Promise<void> => {
     const i = await info(fd);
-    if (typeOf(i) === 'directory') throw new JsCallError('EISDIR', 'write');
-    const dev = device(i);
-    if (dev) {
-      if (dev.access === 'read') throw new JsCallError('EBADF', 'write');
-      if (dev.device === 'full') throw new JsCallError('ENOSPC', 'write');
-      return;
-    }
+    if (writeDevice(i)) return;
     let at = 0;
     while (at < data.length) {
       const body = data.subarray(at, at + MAX_IO);
       try {
         const r = await kernel.blocking({ op: 'fd-write', fd, body });
-        at += r.ok && r.kind === 'json' && typeof r.json === 'number' ? r.json : body.length;
+        at += written(r, body.length);
       } catch (err) {
-        const broken = err instanceof JsCallError && err.code === 'EPIPE';
-        if (broken && typeOf(i) !== 'socket') {
-          await kernel.call({ op: 'proc-kill', pid: o.pid, sig: SIG.PIPE });
-        }
+        if (brokenPipe(err, i)) await kernel.call({ op: 'proc-kill', pid: o.pid, sig: SIG.PIPE });
         throw err;
       }
     }
@@ -250,22 +217,9 @@ export function createContext(o: ContextOptions): CreatedContext {
 
   const open = async (path: string, options: JsOpenOptions = {}): Promise<JsFile> => {
     const abs = resolve(path);
-    const exclusive = options.create === true && options.exclusive === true;
-    const existing = await statOf(exclusive ? 'lstat' : 'stat', abs).catch((err: unknown) => {
-      if (err instanceof JsCallError && err.code === 'ENOENT') return undefined;
-      throw err;
-    });
-    if (existing && exclusive) throw new JsCallError('EEXIST', abs);
-    if (!existing && !options.create) throw new JsCallError('ENOENT', abs);
-    if (existing?.isDirectory) throw new JsCallError('EISDIR', abs);
-    const fd = (await kernel.json({
-      op: 'fd-open-vfs',
-      path: abs,
-      flags: flagsOf(options),
-      position: 0,
-      ...(exclusive ? { exclusive: true } : options.create ? { create: true } : { existing: true }),
-      ...(options.truncate ? { truncate: true } : {}),
-    })) as number;
+    const existing = await statOf(isExclusive(options) ? 'lstat' : 'stat', abs).catch(absent);
+    checkOpen(abs, options, existing);
+    const fd = (await kernel.json(openRequest(abs, options))) as number;
     try {
       await kernel.call({ op: 'fd-vfs-stat', fd });
     } catch (err) {
@@ -282,6 +236,13 @@ export function createContext(o: ContextOptions): CreatedContext {
   };
 
   const fs = pathOps(kernel, resolve, statOf, open);
+  const sync = syncOps(new JsSyncKernel(o.lane ?? laneOf(undefined), kernel), {
+    pid: o.pid,
+    resolve,
+    random,
+    infos,
+    handles,
+  });
 
   const ctx: JsProgramContext = {
     argv: o.argv,
@@ -324,6 +285,7 @@ export function createContext(o: ContextOptions): CreatedContext {
       ignore: async (signal) => kernel.setHandler(signalNumber(signal), 'ignore'),
       reset: async (signal) => kernel.setHandler(signalNumber(signal), 'default'),
     },
+    sync,
     exit,
   };
   const drain = async (): Promise<void> => {
@@ -369,14 +331,7 @@ function fileHandle(
         parts.push(chunk);
         got += chunk.length;
       } while (got < length);
-      if (parts.length === 1) return parts[0] as Uint8Array;
-      const out = new Uint8Array(got);
-      let at = 0;
-      for (const part of parts) {
-        out.set(part, at);
-        at += part.length;
-      }
-      return out;
+      return joined(parts, got);
     },
     async write(position, data) {
       index(position, 'write');
@@ -385,11 +340,7 @@ function fileHandle(
         live();
         if (at >= data.length) break;
         const body = data.subarray(at, at + MAX_IO);
-        const n = (await kernel.json(
-          append
-            ? { op: 'fd-write', fd, body }
-            : { op: 'fd-pwrite', fd, offset: position + at, body }
-        )) as number;
+        const n = (await kernel.json(fileWrite(fd, append, position + at, body))) as number;
         if (!(n > 0)) throw new JsCallError('EIO', 'write');
         at += n;
       } while (at < data.length);
@@ -417,10 +368,6 @@ function fileHandle(
       open = false;
     },
   };
-}
-
-function index(n: number, what: string): void {
-  if (!Number.isSafeInteger(n) || n < 0) throw new JsCallError('EINVAL', what);
 }
 
 function pathOps(

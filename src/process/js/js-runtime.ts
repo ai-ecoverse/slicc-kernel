@@ -4,6 +4,7 @@ import { importSource } from '../wasi/wasi-imports.ts';
 import { createAsyncSabTransport, type WaitAsyncLike } from './async-sab.ts';
 import { createContext, identityOf, JsExit, type JsProgramContext } from './js-context.ts';
 import { JsKernel } from './js-kernel.ts';
+import { laneOf } from './js-sync.ts';
 import { lockdown } from './lockdown.ts';
 
 export type JsMain = (ctx: JsProgramContext) => unknown;
@@ -93,6 +94,7 @@ export async function runJsProcess(
     ppid: id.ppid,
     cwd: init.cwd,
     exit: (status) => exited(statusOf(status)),
+    lane: laneOf(init.lane),
   });
   const say = (text: string) => ctx.write(2, `${init.argv0}: ${text}\n`).catch(() => undefined);
 

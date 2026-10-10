@@ -68,6 +68,7 @@ export type {
   JsProgramContext,
   JsSignal,
 } from './process/js/js-context.ts';
+export type { JsSyncContext, JsSyncFile } from './process/js/js-sync.ts';
 export {
   type FetchTransportOptions,
   fetchTransport,
