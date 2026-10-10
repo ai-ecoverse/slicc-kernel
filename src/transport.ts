@@ -191,19 +191,28 @@ export function serveTransport(peer: TransportPeer, transport: RealmTransport): 
       }
       sockets.set(call.nid, socket);
       peer.postMessage({ net: 'ws-opened', nid: call.nid, protocol: socket.protocol });
-      for await (const data of socket.messages) {
-        if (typeof data === 'string') peer.postMessage({ net: 'ws-message', nid: call.nid, data });
-        else {
-          const bytes = data.slice();
-          peer.postMessage({ net: 'ws-message', nid: call.nid, data: bytes }, [bytes.buffer]);
-        }
-      }
-      const { code, reason } = await socket.closed;
-      sockets.delete(call.nid);
-      peer.postMessage({ net: 'ws-closed', nid: call.nid, code, reason });
+      void relay(call.nid, socket);
     } catch (e) {
       fail(call.nid, e);
     }
+  };
+  const relay = async (nid: number, socket: RealmWebSocket) => {
+    let ending: { code: number; reason: string };
+    try {
+      for await (const data of socket.messages) {
+        if (typeof data === 'string') peer.postMessage({ net: 'ws-message', nid, data });
+        else {
+          const bytes = data.slice();
+          peer.postMessage({ net: 'ws-message', nid, data: bytes }, [bytes.buffer]);
+        }
+      }
+      ending = await socket.closed;
+    } catch (e) {
+      socket.close(1000, 'the relay failed');
+      ending = { code: 1011, reason: e instanceof Error ? e.message : String(e) };
+    }
+    sockets.delete(nid);
+    peer.postMessage({ net: 'ws-closed', nid, ...ending });
   };
   const sendOn = async (call: Extract<TransportCall, { net: 'ws-send' }>) => {
     const socket = sockets.get(call.nid);

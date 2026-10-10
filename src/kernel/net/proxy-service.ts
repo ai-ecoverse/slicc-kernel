@@ -39,7 +39,6 @@ import { MESSAGE_LIMIT } from './ws-queue.ts';
 
 const SEND_BUFFER = 1024 * 1024;
 const TLS_HANDSHAKE = 0x16;
-const CLOSE_WAIT_MS = 5000;
 
 export const REALM_PROXY_PORT = 3128;
 export interface ProxyLimits {
@@ -47,12 +46,14 @@ export interface ProxyLimits {
   maxHead: number;
   idleMs: number;
   bodyBudget: number;
+  closeWaitMs: number;
 }
 const DEFAULT_LIMITS: ProxyLimits = {
   maxConnections: 64,
   maxHead: 64 * 1024,
   idleMs: 120000,
   bodyBudget: 128 * 1024 * 1024,
+  closeWaitMs: 5000,
 };
 export interface TunnelTarget {
   host: string;
@@ -561,19 +562,30 @@ export class RealmProxy {
       .flatMap((v) => v.split(','))
       .map((t) => t.trim())
       .filter((t) => t !== '');
+    const hangup = new AbortController();
+    const waiting = new AbortController();
+    void watchHangup(ctx.socket, hangup, waiting.signal);
     let socket: RealmWebSocket;
     try {
       socket = await transport.websocket({
         url: toHostLoopback(href).replace(/^http/, 'ws'),
         protocols,
         headers: forwardRequestHeaders(req.headers),
-        signal: this.stop.signal,
+        signal: AbortSignal.any([this.stop.signal, hangup.signal]),
       });
     } catch (e) {
       throw new HttpError(502, e instanceof Error ? e.message : String(e));
+    } finally {
+      waiting.abort();
     }
     ctx.idle.ms = Number.POSITIVE_INFINITY;
-    await ctx.sink.write(switchingHead(accept, socket.protocol), this.stop.signal);
+    try {
+      if (hangup.signal.aborted) throw hangup.signal.reason;
+      await ctx.sink.write(switchingHead(accept, socket.protocol), this.stop.signal);
+    } catch (e) {
+      socket.close(1001, 'the client went away');
+      throw e;
+    }
     await this.bridge(ctx, socket);
   }
   private async bridge(ctx: Exchange, socket: RealmWebSocket): Promise<void> {
@@ -600,7 +612,7 @@ export class RealmProxy {
       if (guestDone) return;
       closeSent = true;
       await toGuest(closeFrame(wireCode(closed.code), closed.reason));
-      AbortSignal.timeout(CLOSE_WAIT_MS).addEventListener('abort', () => done.abort(), {
+      AbortSignal.timeout(this.limits.closeWaitMs).addEventListener('abort', () => done.abort(), {
         once: true,
       });
     })().catch(() => done.abort());
@@ -618,7 +630,7 @@ export class RealmProxy {
           if (closeSent) break;
           const code = wireCode(event.code);
           socket.close(code, event.reason);
-          await Promise.race([socket.closed, quietly(CLOSE_WAIT_MS)]);
+          await Promise.race([socket.closed, quietly(this.limits.closeWaitMs)]);
           await toGuest(closeFrame(code, event.reason));
           break;
         }
@@ -635,7 +647,7 @@ export class RealmProxy {
       guestDone = true;
       socket.close(1000, 'the client went away');
       stop.removeEventListener('abort', stopping);
-      await outbound;
+      await Promise.race([outbound, quietly(this.limits.closeWaitMs)]);
     }
   }
 }
