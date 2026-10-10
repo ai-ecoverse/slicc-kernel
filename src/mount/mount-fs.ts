@@ -1,4 +1,5 @@
 import { type FsStat, inodeOf, type KernelFs, lutimesOf, normalizePath } from '../fs/types.ts';
+import type { UnlinkedFile, UnlinkHolder } from '../fs/unlinked.ts';
 import { DriverConnection, type DriverPortLike, errnoError } from './connection.ts';
 import type { DriverAttr, DriverCapabilities, DriverEntry, DriverStatfs } from './protocol.ts';
 
@@ -76,7 +77,8 @@ export class HeldSet extends Set<HeldPaths> {
 
   override delete(holds: HeldPaths): boolean {
     const removed = super.delete(holds);
-    for (const path of holds.keys()) this.idle(path);
+    for (const path of new Set([...holds.keys(), ...holds.opens.keys()])) this.idle(path);
+    holds.unlinked.clear();
     return removed;
   }
 }
@@ -86,12 +88,25 @@ export function heldUnder(held: Iterable<Map<string, number>>, target: string): 
   return false;
 }
 
-export class HeldPaths extends Map<string, number> {
+export class HeldPaths extends Map<string, number> implements UnlinkHolder {
   private readonly revoked = new Set<string>();
+  readonly opens = new Map<string, number>();
+  readonly unlinked = new Map<string, UnlinkedFile>();
+  private owning: string | undefined;
 
   onIdle?: (path: string) => void;
 
-  hold(path: string, on: boolean): void {
+  hold(path: string, on: boolean, open = false): void {
+    if (open) {
+      const count = (this.opens.get(path) ?? 0) + (on ? 1 : -1);
+      if (count > 0) this.opens.set(path, count);
+      else {
+        this.opens.delete(path);
+        this.unlinked.delete(path);
+        this.onIdle?.(path);
+      }
+      return;
+    }
     const count = (this.get(path) ?? 0) + (on ? 1 : -1);
     if (count > 0) this.set(path, count);
     else {
@@ -99,6 +114,19 @@ export class HeldPaths extends Map<string, number> {
       this.revoked.delete(path);
       this.onIdle?.(path);
     }
+  }
+
+  async own<T>(path: string, op: () => Promise<T>): Promise<T> {
+    this.owning = path;
+    try {
+      return await op();
+    } finally {
+      this.owning = undefined;
+    }
+  }
+
+  owns(path: string): boolean {
+    return this.owning === path;
   }
 
   revoke(prefix: string): void {
@@ -112,6 +140,12 @@ export class HeldPaths extends Map<string, number> {
       this.delete(path);
       this.set(moved, (this.get(moved) ?? 0) + count);
       if (this.revoked.delete(path)) this.revoked.add(moved);
+    }
+    for (const [path, count] of [...this.opens]) {
+      if (!within(path, from)) continue;
+      const moved = to + path.slice(from.length);
+      this.opens.delete(path);
+      this.opens.set(moved, (this.opens.get(moved) ?? 0) + count);
     }
   }
 

@@ -15,6 +15,7 @@ export const PNPM_HOME = '/home/.local/share/pnpm';
 import { followLinks, withCommandDirs } from './fs/commands.ts';
 import type { KernelFs } from './fs/types.ts';
 import { fsError, normalizePath } from './fs/types.ts';
+import { keepingUnlinked } from './fs/unlinked.ts';
 import { FsWatchers } from './fs/watch.ts';
 import {
   type ChildForker,
@@ -380,7 +381,11 @@ export class Launcher {
     const fs = withCommandDirs(this.base, async () => new Set((await this.commands()).keys()));
     this.nodes = new VfsNodes(fs, (path) => this.released(path));
     this.openFiles.add(this.nodes);
-    this.fs = keepingOpen(fs, this.nodes);
+    const nodes = this.nodes;
+    this.fs = keepingOpen(
+      keepingUnlinked(fs, this.held, (path) => nodes.kept(path)),
+      nodes
+    );
     this.watchers.watch([this.modulesDir, this.pnpmHome], { recursive: true }, () => {
       this.catalog = undefined;
     });

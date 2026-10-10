@@ -1,10 +1,13 @@
 import type { KernelFs } from '../fs/types.ts';
+import type { UnlinkedFile } from '../fs/unlinked.ts';
 
 export interface SyncFsTokenEntry {
   fs: KernelFs;
   cwd: string;
   statfs?: (path: string) => Promise<{ quota: number; usage: number } | undefined>;
-  hold?: (path: string, held: boolean) => void;
+  hold?: (path: string, held: boolean, open: boolean) => void;
+  unlinked?: (path: string) => UnlinkedFile | undefined;
+  own?: <T>(path: string, op: () => Promise<T>) => Promise<T>;
   revoked?: (path: string) => boolean;
   renamed?: (from: string, to: string) => void;
 }

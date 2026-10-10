@@ -1,5 +1,6 @@
 import { AsyncRangedFile, type AsyncRangedIo } from '../fs/ranged.ts';
 import { fsError, type KernelFs, rangedOps } from '../fs/types.ts';
+import type { UnlinkedFile } from '../fs/unlinked.ts';
 import { KernelError, OpenFile } from './fd-table.ts';
 
 export interface VfsFileFs extends Partial<AsyncRangedIo> {
@@ -370,6 +371,17 @@ export class VfsNodes {
     node.opens++;
     if (writable) node.writers++;
     return node;
+  }
+
+  kept(path: string): UnlinkedFile | undefined {
+    const node = this.byPath.get(path);
+    if (!node) return undefined;
+    return {
+      size: () => node.serial(() => node.size()),
+      pread: (max, at) => node.serial(() => node.pread(max, at)),
+      pwrite: (bytes, at) => node.serial(() => node.pwrite(bytes, at)),
+      truncate: (size) => node.serial(() => node.truncate(size)),
+    };
   }
 
   holds(prefix: string): boolean {

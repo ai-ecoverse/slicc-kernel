@@ -164,7 +164,7 @@ export class FileBuffer {
     if (this.ranged) this.ranged.flush();
     else if (!this.data) return;
     else if (this.whole || !this.fs.pwrite)
-      this.fs.writeFile(this.path, this.data.slice(0, this.length));
+      this.fs.writeFile(this.path, this.data.slice(0, this.length), true);
     else this.fs.pwrite(this.path, this.from, this.data.slice(this.from, this.to), true);
     this.dirty = false;
     this.whole = false;
@@ -341,7 +341,7 @@ export function cachingBridge(
         return false;
       }
     },
-    writeFile: (p, bytes) => mutating(() => bridge.writeFile(p, bytes)),
+    writeFile: (p, bytes, open) => mutating(() => bridge.writeFile(p, bytes, open)),
     mkdir: (p) => mutating(() => bridge.mkdir(p)),
     rm: (p) => mutating(() => bridge.rm(p)),
     rename: (from, to) => mutating(() => bridge.rename(from, to)),
@@ -351,6 +351,7 @@ export function cachingBridge(
     chmod: (p, mode) => mutating(() => bridge.chmod(p, mode)),
     utimes: (p, a, m) => mutating(() => bridge.utimes(p, a, m)),
     lutimes: (p, a, m) => mutating(() => bridge.lutimes(p, a, m)),
+    ...(bridge.hold ? { hold: bridge.hold.bind(bridge) } : {}),
     ...(bridge.pread && bridge.pwrite && bridge.truncate
       ? {
           pread: bridge.pread.bind(bridge),

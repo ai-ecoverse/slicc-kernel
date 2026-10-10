@@ -1,6 +1,8 @@
 import { type FsStat, type KernelFs, lutimesOf, rangedOps } from '../fs/types.ts';
+import type { UnlinkedFile } from '../fs/unlinked.ts';
 import { resolveSyncFsToken, type SyncFsTokenEntry } from './sync-fs-token-registry.ts';
 import {
+  type SyncFsOp,
   type SyncFsRequest,
   type SyncFsResult,
   type SyncFsUsage,
@@ -152,6 +154,23 @@ async function ranged(fs: KernelFs, path: string, req: SyncFsRequest): Promise<S
   return done;
 }
 
+const UNLINKED_OPS = new Set<SyncFsOp>(['read', 'pread', 'pwrite', 'truncate']);
+const OWN_OPS = new Set<SyncFsOp>(['rm', 'unlink', 'rmdir', 'rename']);
+
+async function fromCopy(copy: UnlinkedFile, req: SyncFsRequest): Promise<SyncFsResult> {
+  if (req.op === 'read') {
+    return { ok: true, kind: 'bytes', bytes: await copy.pread(await copy.size(), 0) };
+  }
+  if (req.op === 'pread') {
+    return { ok: true, kind: 'bytes', bytes: await copy.pread(req.length ?? 0, req.offset ?? 0) };
+  }
+  const body = req.body ?? new Uint8Array(0);
+  if (req.op === 'write') await copy.truncate(0);
+  if (req.op === 'truncate') await copy.truncate(req.length ?? 0);
+  else await copy.pwrite(body, req.op === 'write' ? 0 : (req.offset ?? 0));
+  return done;
+}
+
 export async function dispatchSyncFs(req: SyncFsRequest): Promise<SyncFsResult> {
   const entry = resolveSyncFsToken(req.token);
   if (!entry) return { ok: false, errno: 'EACCES', message: 'sync-fs: unknown or revoked token' };
@@ -160,11 +179,16 @@ export async function dispatchSyncFs(req: SyncFsRequest): Promise<SyncFsResult> 
     const path = fs.resolvePath(cwd, req.path);
     if (req.op === 'statfs') return json((await entry.statfs?.(path)) ?? (await storageUsage()));
     if (req.op === 'hold') {
-      entry.hold?.(path, req.mode === 1);
+      entry.hold?.(path, ((req.mode ?? 0) & 1) === 1, ((req.mode ?? 0) & 2) === 2);
       return done;
     }
     if (entry.revoked?.(path)) return { ok: false, errno: 'EIO', message: `${path} was unmounted` };
-    return await run(entry, path, req);
+    const writeBack = req.op === 'write' && req.mode === 1;
+    const copy = writeBack || UNLINKED_OPS.has(req.op) ? entry.unlinked?.(path) : undefined;
+    if (copy && !(await fs.exists(path))) return await fromCopy(copy, req);
+    if (!entry.own || !OWN_OPS.has(req.op)) return await run(entry, path, req);
+    const target = req.op === 'rename' ? fs.resolvePath(cwd, req.arg2 ?? '') : path;
+    return await entry.own(target, () => run(entry, path, req));
   } catch (err) {
     return toErrno(err);
   }
