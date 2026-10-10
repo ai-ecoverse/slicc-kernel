@@ -491,8 +491,13 @@ export class WasmProcess {
     const pid = await this.children.spawn(spawned, stdio, inherit);
     if (!exec) return pid;
     if (this.killed) void Promise.allSettled([this.options.kill?.(pid, SIG.KILL)]);
-    else this.execChild = pid;
+    else this.adoptExec(pid);
     return pid;
+  }
+
+  private adoptExec(pid: number): void {
+    this.execChild = pid;
+    this.children.watch(pid, (state, sig) => (state === 'stopped' ? this.stop(sig) : this.cont()));
   }
 
   onState(listener: StateListener): void {
@@ -964,12 +969,8 @@ export class WasmProcess {
       case 'proc-identity':
         return { ok: true, kind: 'json', json: (await this.options.identity?.()) ?? null };
       case 'proc-exec': {
-        this.execChild = req.pid;
+        this.adoptExec(req.pid);
         this.options.jobs?.exec(this.pid, req.pid);
-
-        this.children.watch(req.pid, (state, sig) =>
-          state === 'stopped' ? this.stop(sig) : this.cont()
-        );
 
         await this.fds.closeAll();
         try {
