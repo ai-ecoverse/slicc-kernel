@@ -137,7 +137,7 @@ export type WasmSyscall =
   | { op: 'fd-open-tty'; name?: string }
   | { op: 'fd-tty-names' }
   | { op: 'tty-get'; fd: number }
-  | { op: 'tty-set'; fd: number; termios: Termios }
+  | { op: 'tty-set'; fd: number; termios: Termios; flush?: boolean }
   | { op: 'tty-winsz'; fd: number }
   | { op: 'fd-flush'; fd: number }
   | {
@@ -262,6 +262,7 @@ export interface FdInfo {
   access?: DeviceAccess;
 
   name?: string;
+  terminal?: string;
 }
 
 const SYSCALL_OPS: ReadonlySet<string> = new Set([
@@ -889,6 +890,7 @@ export class WasmProcess {
   private fdInfo(fd: number): FdInfo {
     const file = this.fds.get(fd).file;
     const flags = this.fds.statusFlags(fd);
+    const terminal = (file.tty ?? file.pty?.slave)?.name;
     return {
       tty: file.tty !== undefined,
       kind: file instanceof KernelSocket ? 'socket' : kernelFdKind(file),
@@ -898,6 +900,7 @@ export class WasmProcess {
       ...(file.read && !file.write ? { access: 'read' as const } : {}),
       ...(file.write && !file.read ? { access: 'write' as const } : {}),
       ...(file.tty?.name ? { name: file.tty.name } : file.pty ? { name: '/dev/ptmx' } : {}),
+      ...(terminal ? { terminal } : {}),
     };
   }
 
@@ -908,7 +911,7 @@ export class WasmProcess {
       case 'tty-get':
         return { ok: true, kind: 'json', json: tty.tcgets() };
       case 'tty-set':
-        tty.tcsets(req.termios);
+        tty.tcsets(req.termios, req.flush === true);
         return { ok: true, kind: 'void' };
       case 'tty-winsz':
         return { ok: true, kind: 'json', json: tty.winsize() };

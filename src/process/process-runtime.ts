@@ -164,8 +164,8 @@ export function kernelSys(transport: SyncSabTransport): ProcessSys & PtyKernel {
     tcgets(fd) {
       return json(call({ op: 'tty-get', fd }, `tty-get ${fd}`)) as Termios;
     },
-    tcsets(fd, termios) {
-      call({ op: 'tty-set', fd, termios }, `tty-set ${fd}`);
+    tcsets(fd, termios, flush) {
+      call({ op: 'tty-set', fd, termios, ...(flush ? { flush } : {}) }, `tty-set ${fd}`);
     },
     winsize(fd) {
       return json(call({ op: 'tty-winsz', fd }, `tty-winsz ${fd}`)) as [number, number];

@@ -51,7 +51,7 @@ export function sliccTty(mem: WasiMemory, fds: WasiFds, kernel: WasiKernel) {
     if (actions < 0 || actions > TCSAFLUSH) throw new WasiError('EINVAL');
     const at = terminal(fd);
     needs(sys.tcsets);
-    sys.tcsets?.(at, readTermios(mem, ptr));
+    sys.tcsets?.(at, readTermios(mem, ptr), actions === TCSAFLUSH);
   };
   const size = (fd: number, ptr: number): void => {
     const [rows, cols] = needs(sys.winsize?.(terminal(fd)));

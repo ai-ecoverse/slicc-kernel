@@ -10,6 +10,7 @@ const POLLERR = 0x008;
 const POLLHUP = 0x010;
 const POLLRDNORM = 0x040;
 const POLLWRNORM = 0x100;
+const TCSETSF = 0x5404;
 
 export const O_NONBLOCK = 0o4000;
 const SOCKET_MODE = 0o140777;
@@ -144,7 +145,7 @@ export interface ProcessSys {
   ttyNames?(): string[];
 
   tcgets?(fd: number): Termios;
-  tcsets?(fd: number, termios: Termios): void;
+  tcsets?(fd: number, termios: Termios, flush?: boolean): void;
   winsize?(fd: number): [number, number];
 
   openPty?(): number;
@@ -365,9 +366,9 @@ export class KernelStreams {
     return {
       ops: {
         ioctl_tcgets: () => this.call(() => this.sys.tcgets?.(kfd)),
-        ioctl_tcsets: (_tty: unknown, _op: number, termios: Termios) =>
+        ioctl_tcsets: (_tty: unknown, op: number, termios: Termios) =>
           this.call(() => {
-            this.sys.tcsets?.(kfd, termios);
+            this.sys.tcsets?.(kfd, termios, op === TCSETSF);
             return 0;
           }),
         ioctl_tiocgwinsz: () => this.call(() => this.sys.winsize?.(kfd) ?? [24, 80]),

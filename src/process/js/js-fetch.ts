@@ -68,7 +68,9 @@ function rewrite(hop: Hop, status: number, location: string): Hop {
 }
 
 const OVER = Symbol('over');
-const MIME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+\/[!#$%&'*+.^_`|~0-9A-Za-z-]+(?:[\t ]*;.*)?$/s;
+const TOKEN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+const QUOTABLE = /^[\t\x20-\x7e\x80-\xff]*$/;
+const SPACE = /[\t\n\r ]/;
 const BASE64 = /; *base64$/i;
 const SLICE = 0x8000;
 
@@ -101,6 +103,59 @@ function latin1(bytes: Uint8Array): string {
   return text;
 }
 
+function quoted(input: string, from: number): [string, number] {
+  let value = '';
+  let at = from + 1;
+  while (at < input.length) {
+    const char = input[at++] as string;
+    if (char === '"') break;
+    if (char !== '\\') value += char;
+    else if (at < input.length) value += input[at++];
+    else value += char;
+  }
+  return [value, at];
+}
+
+function parameter(text: string, from: number, params: Map<string, string>): number {
+  let at = from + 1;
+  while (SPACE.test(text[at] ?? '')) at++;
+  let end = at;
+  while (end < text.length && text[end] !== ';' && text[end] !== '=') end++;
+  const name = text.slice(at, end).toLowerCase();
+  if (text[end] !== '=') return end;
+  const start = end + 1;
+  let value: string;
+  if (text[start] === '"') {
+    [value, at] = quoted(text, start);
+    end = text.indexOf(';', at);
+  } else {
+    end = text.indexOf(';', start);
+    value = text.slice(start, end < 0 ? undefined : end).replace(/[\t\n\r ]+$/, '');
+    if (!value) return end < 0 ? text.length : end;
+  }
+  if (end < 0) end = text.length;
+  if (TOKEN.test(name) && QUOTABLE.test(value) && !params.has(name)) {
+    params.set(name, value);
+  }
+  return end;
+}
+
+function mimeType(input: string): string | undefined {
+  const text = input.replace(/^[\t\n\r ]+|[\t\n\r ]+$/g, '');
+  const slash = text.indexOf('/');
+  const semi = text.indexOf(';', slash);
+  const type = text.slice(0, slash);
+  const subtype = text.slice(slash + 1, semi < 0 ? undefined : semi).replace(/[\t\n\r ]+$/, '');
+  if (slash < 0 || !TOKEN.test(type) || !TOKEN.test(subtype)) return undefined;
+  const params = new Map<string, string>();
+  for (let at = semi < 0 ? text.length : semi; at < text.length; ) at = parameter(text, at, params);
+  let out = `${type}/${subtype}`.toLowerCase();
+  for (const [name, value] of params) {
+    out += `;${name}=${TOKEN.test(value) ? value : `"${value.replace(/["\\]/g, '\\$&')}"`}`;
+  }
+  return out;
+}
+
 function dataResponse(request: Request): Response {
   const url = withoutFragment(new URL(request.url));
   const rest = url.slice('data:'.length);
@@ -110,7 +165,7 @@ function dataResponse(request: Request): Response {
   let body = percentDecode(rest.slice(comma + 1));
   const base64 = BASE64.exec(type);
   if (base64) {
-    type = type.slice(0, base64.index).replace(/[\t\n\f\r ]+$/, '');
+    type = type.slice(0, base64.index);
     let binary: string;
     try {
       binary = atob(latin1(body));
@@ -120,11 +175,10 @@ function dataResponse(request: Request): Response {
     body = Uint8Array.from(binary, (c) => c.charCodeAt(0));
   }
   if (type.startsWith(';')) type = `text/plain${type}`;
-  if (!MIME.test(type)) type = 'text/plain;charset=US-ASCII';
-  const response = new Response(body as Uint8Array<ArrayBuffer>, {
-    status: 200,
-    headers: { 'content-type': type },
-  });
+  const response = new Response(
+    request.method === 'HEAD' ? null : (body as Uint8Array<ArrayBuffer>),
+    { status: 200, headers: { 'content-type': mimeType(type) ?? 'text/plain;charset=US-ASCII' } }
+  );
   return withMeta(response, url, false);
 }
 

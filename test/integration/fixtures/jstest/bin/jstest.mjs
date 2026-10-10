@@ -1285,6 +1285,24 @@ async function rawtwice(ctx) {
   throw new Error('twice');
 }
 
+async function rawpair(ctx) {
+  const cooked = async () => ((await ctx.tty.getAttr(0)).c_lflag & 0o12) === 0o12;
+  await ctx.tty.setRaw(0, true);
+  await ctx.tty.setRaw(1, true);
+  await ctx.tty.setRaw(1, false);
+  const one = await cooked();
+  await ctx.tty.setRaw(0, true);
+  await ctx.tty.setRaw(1, true);
+  await ctx.tty.setRaw(0, false);
+  await ctx.tty.setRaw(1, false);
+  await ctx.write(1, `pair ${one} ${await cooked()}\n`);
+}
+
+async function rawpipe(ctx) {
+  const code = await ctx.tty.setRaw(0, true).catch((err) => err.code);
+  await ctx.write(1, `rawpipe ${code}\n`);
+}
+
 async function rawthrow(ctx) {
   await ctx.tty.setRaw(0, true);
   throw new Error('boom');
@@ -1338,6 +1356,8 @@ async function ttyroundtrip(ctx) {
 
 const modes = {
   rawkeys,
+  rawpair,
+  rawpipe,
   rawthrow,
   rawtwice,
   ttyinfo,

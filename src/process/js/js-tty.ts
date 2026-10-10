@@ -1,3 +1,4 @@
+import type { FdInfo } from './js-io.ts';
 import type { JsKernel } from './js-kernel.ts';
 
 export interface JsTermios {
@@ -52,7 +53,9 @@ export function rawOf(termios: JsTermios): JsTermios {
 }
 
 export function ttyOps(kernel: JsKernel): { tty: JsTty; restore(): Promise<void> } {
-  const saved = new Map<number, JsTermios>();
+  const saved = new Map<string, { fd: number; termios: JsTermios }>();
+  const terminalOf = async (fd: number): Promise<string> =>
+    ((await kernel.json({ op: 'fd-info', fd })) as FdInfo).terminal ?? `fd ${fd}`;
 
   const getAttr = async (fd: number): Promise<JsTermios> =>
     (await kernel.json({ op: 'tty-get', fd })) as JsTermios;
@@ -64,14 +67,15 @@ export function ttyOps(kernel: JsKernel): { tty: JsTty; restore(): Promise<void>
     getAttr,
     setAttr,
     async setRaw(fd, raw) {
+      const terminal = await terminalOf(fd);
       if (!raw) {
-        const original = saved.get(fd);
-        saved.delete(fd);
-        if (original) await setAttr(fd, original);
+        const original = saved.get(terminal);
+        saved.delete(terminal);
+        if (original) await setAttr(fd, original.termios);
         return;
       }
       const current = await getAttr(fd);
-      if (!saved.has(fd)) saved.set(fd, current);
+      if (!saved.has(terminal)) saved.set(terminal, { fd, termios: current });
       await setAttr(fd, rawOf(current));
     },
     async size(fd) {
@@ -85,9 +89,9 @@ export function ttyOps(kernel: JsKernel): { tty: JsTty; restore(): Promise<void>
   };
 
   const restore = async (): Promise<void> => {
-    for (const [fd, original] of [...saved].reverse()) {
-      saved.delete(fd);
-      await setAttr(fd, original).catch(() => undefined);
+    for (const [terminal, { fd, termios }] of [...saved].reverse()) {
+      saved.delete(terminal);
+      await setAttr(fd, termios).catch(() => undefined);
     }
   };
 
