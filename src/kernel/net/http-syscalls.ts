@@ -34,6 +34,7 @@ export interface HttpHead {
   status: number;
   statusText: string;
   url: string;
+  redirected?: boolean;
   headers: HeaderList;
 }
 
@@ -127,7 +128,8 @@ export class HttpHandles {
       entry.body = response.body[Symbol.asyncIterator]();
       entry.cancel = () => response.cancel();
       if (!this.open.has(handle)) await entry.cancel().catch(() => undefined);
-      return this.headOf(handle, req.url, response.status, response.statusText, response.headers);
+      const head = this.headOf(handle, response.url ?? req.url, response);
+      return response.redirected ? { ...head, json: { ...head.json, redirected: true } } : head;
     } catch (e) {
       const text = message(e);
       const status = (e as { status?: unknown }).status;
@@ -136,21 +138,21 @@ export class HttpHandles {
         return { ok: false, errno, message: text };
       }
       entry.body = once(new TextEncoder().encode(text))[Symbol.asyncIterator]();
-      return this.headOf(handle, req.url, status, '', [
-        ['content-type', 'text/plain; charset=utf-8'],
-      ]);
+      return this.headOf(handle, req.url, {
+        status,
+        statusText: '',
+        headers: [['content-type', 'text/plain; charset=utf-8']],
+      });
     }
   }
 
   private headOf(
     handle: number,
     url: string,
-    status: number,
-    statusText: string,
-    headers: HeaderList
-  ): SyncFsResult {
-    const head: HttpHead = { handle, status, statusText, url, headers };
-    return { ok: true, kind: 'json', json: head };
+    response: { status: number; statusText: string; headers: HeaderList }
+  ): { ok: true; kind: 'json'; json: HttpHead } {
+    const { status, statusText, headers } = response;
+    return { ok: true, kind: 'json', json: { handle, status, statusText, url, headers } };
   }
 
   private head(handle: number): Promise<SyncFsResult> {

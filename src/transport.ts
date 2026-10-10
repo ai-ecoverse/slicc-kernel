@@ -111,6 +111,7 @@ export function fetchTransport(options: FetchTransportOptions = {}): RealmTransp
       });
       const body = chunks(response.body, options.bodyIdleMs ?? BODY_IDLE_MS);
       return {
+        ...(response.redirected ? { url: response.url, redirected: true } : {}),
         status: response.status,
         statusText: response.statusText,
         headers,

@@ -1108,6 +1108,24 @@ async function fetches(ctx, [base]) {
     await reader.cancel();
     return 'cancelled';
   });
+  await fetchTry(out, 'slowbody', () => {
+    const c = new AbortController();
+    setTimeout(() => c.abort(), 50);
+    const body = new ReadableStream({ pull: () => new Promise(() => {}) });
+    return f('/echo', { method: 'POST', body, duplex: 'half', signal: c.signal });
+  });
+  await fetchTry(out, 'idleabort', async () => {
+    const c = new AbortController();
+    const r = await f('/idle', { signal: c.signal });
+    c.abort();
+    const read = await r.text().then(() => 'read', fetchErr);
+    await sleep(20);
+    return `${read} ${await (await f('/idlecount')).text()}`;
+  });
+  await fetchTry(out, 'followed', async () => {
+    const r = await f('/followed');
+    return `${r.redirected} ${r.url}`;
+  });
   await fetchTry(out, 'gzip', async () => (await f('/gzip')).text());
   await fetchTry(out, 'brokenbody', async () => (await f('/broken')).text());
   await ctx.write(1, `${out.join('\n')}\n`);

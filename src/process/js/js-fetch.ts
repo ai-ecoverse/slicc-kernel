@@ -61,6 +61,44 @@ function rewrite(hop: Hop, status: number, location: string): Hop {
   };
 }
 
+const OVER = Symbol('over');
+
+async function bodyOf(
+  request: Request,
+  cap: number,
+  signal: AbortSignal
+): Promise<Uint8Array | undefined | typeof OVER> {
+  if (!request.body || request.method === 'GET' || request.method === 'HEAD') return undefined;
+  const reader = request.body.getReader();
+  const stop = (): void => void reader.cancel(signal.reason).catch(() => undefined);
+  signal.addEventListener('abort', stop, { once: true });
+  const parts: Uint8Array[] = [];
+  let length = 0;
+  try {
+    for (;;) {
+      const next = await reader.read();
+      signal.throwIfAborted();
+      if (next.done) break;
+      length += next.value.length;
+      if (length > cap) {
+        await reader.cancel();
+        return OVER;
+      }
+      parts.push(next.value);
+    }
+  } finally {
+    signal.removeEventListener('abort', stop);
+  }
+  if (length === 0) return undefined;
+  const out = new Uint8Array(length);
+  let at = 0;
+  for (const part of parts) {
+    out.set(part, at);
+    at += part.length;
+  }
+  return out;
+}
+
 export function fetchOp(kernel: JsKernel) {
   let traits: Promise<FetchTraits> | undefined;
   const traitsOf = (): Promise<FetchTraits> => {
@@ -90,14 +128,27 @@ export function fetchOp(kernel: JsKernel) {
     }
   };
 
-  const body = (handle: number, signal: AbortSignal): ReadableStream<Uint8Array> =>
-    new ReadableStream<Uint8Array>(
+  const body = (handle: number, signal: AbortSignal): ReadableStream<Uint8Array> => {
+    let aborted: (() => void) | undefined;
+    const settle = (): void => {
+      if (aborted) signal.removeEventListener('abort', aborted);
+    };
+    return new ReadableStream<Uint8Array>(
       {
+        start(controller) {
+          aborted = () => {
+            controller.error(signal.reason);
+            void close(handle);
+          };
+          signal.addEventListener('abort', aborted, { once: true });
+        },
         async pull(controller) {
           let r: Awaited<ReturnType<JsKernel['blocking']>>;
           try {
+            signal.throwIfAborted();
             r = await kernel.blocking({ op: 'net-read', handle, max: CHUNK }, signal);
           } catch (err) {
+            settle();
             await close(handle);
             throw signal.aborted ? signal.reason : failed(err);
           }
@@ -106,13 +157,18 @@ export function fetchOp(kernel: JsKernel) {
             controller.enqueue(bytes);
             return;
           }
+          settle();
           controller.close();
           await close(handle);
         },
-        cancel: () => close(handle).then(() => undefined),
+        cancel: async () => {
+          settle();
+          await close(handle);
+        },
       },
       { highWaterMark: 0 }
     );
+  };
 
   const respond = (
     head: HttpHead,
@@ -155,13 +211,8 @@ export function fetchOp(kernel: JsKernel) {
     const known = await traitsOf().catch((err: unknown) => {
       throw failed(err);
     });
-    const bytes =
-      request.method === 'GET' || request.method === 'HEAD'
-        ? undefined
-        : new Uint8Array(await request.arrayBuffer());
-    if (bytes && bytes.length > known.maxRequestBody) {
-      return plain(413, `request body over ${known.maxRequestBody} bytes`);
-    }
+    const bytes = await bodyOf(request, known.maxRequestBody, signal);
+    if (bytes === OVER) return plain(413, `request body over ${known.maxRequestBody} bytes`);
     if (!known.manualRedirects && request.redirect !== 'follow') {
       throw failed(new JsCallError('ENOTSUP', `redirect: ${request.redirect}`));
     }
@@ -169,7 +220,7 @@ export function fetchOp(kernel: JsKernel) {
       url: request.url,
       method: request.method,
       headers: [...request.headers],
-      body: bytes && bytes.length > 0 ? bytes : undefined,
+      body: bytes,
     };
     for (let hops = 0; ; hops++) {
       const head = await send(hop, signal);
@@ -179,7 +230,10 @@ export function fetchOp(kernel: JsKernel) {
         REDIRECTS.has(head.status) &&
         location !== undefined &&
         request.redirect !== 'manual';
-      if (!follow) return respond(head, hop.method, hops > 0, known.encodedBodies, signal);
+      if (!follow) {
+        const redirected = hops > 0 || head.redirected === true;
+        return respond(head, hop.method, redirected, known.encodedBodies, signal);
+      }
       await close(head.handle);
       if (request.redirect === 'error') throw failed(new JsCallError('EREDIRECT', hop.url));
       if (hops >= MAX_REDIRECTS) throw failed(new JsCallError('ELOOP', hop.url));

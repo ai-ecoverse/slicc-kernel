@@ -7,6 +7,8 @@ export interface RealmTransportRequest {
   signal: AbortSignal;
 }
 export interface RealmTransportResponse {
+  url?: string;
+  redirected?: boolean;
   status: number;
   statusText: string;
   headers: HeaderList;
