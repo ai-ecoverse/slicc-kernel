@@ -353,6 +353,213 @@ async function opens(ctx, [path, n = '200']) {
   await ctx.write(1, `${Math.round(performance.now() - started)}\n`);
 }
 
+const drainText = async (stream) => {
+  let out = '';
+  for await (const chunk of stream) out += text(chunk);
+  return out;
+};
+
+async function spawning(ctx, [dir]) {
+  const lines = [];
+  const echo = await ctx.spawn({ argv: ['jstest', 'echo', 'a', 'b c'], stdout: 'pipe' });
+  lines.push(`${(await drainText(echo.stdout)).split('\n')[0]} ${(await echo.wait()).status}`);
+  const counting = await ctx.spawn({ argv: ['jstest', 'count'], stdin: 'pipe', stdout: 'pipe' });
+  const w = counting.stdin.getWriter();
+  await w.write(new TextEncoder().encode('hello'));
+  await w.close();
+  lines.push(`${(await drainText(counting.stdout)).trim()} ${(await counting.wait()).status}`);
+  const status = await ctx.spawn({ argv: ['jstest', 'status', '7'] });
+  lines.push(`status ${(await ctx.wait(status.pid)).status}`);
+  await ctx.fs.mkdir(dir);
+  const where = await ctx.spawn({
+    argv: ['jstest', 'echo'],
+    cwd: ctx.resolve(dir),
+    stdout: 'pipe',
+  });
+  lines.push(`cwd ${(await drainText(where.stdout)).split('\n')[1] === ctx.resolve(dir)}`);
+  await where.wait();
+  const silent = await ctx.spawn({ argv: ['jstest', 'echo', 'hidden'], stdout: 'null' });
+  await silent.wait();
+  const waiting = await ctx.spawn({ argv: ['jstest', 'wait'], stdout: 'pipe' });
+  const reader = waiting.stdout.getReader();
+  await reader.read();
+  await ctx.kill(waiting.pid, 'SIGTERM');
+  const killed = await waiting.wait();
+  lines.push(`killed ${killed.status} ${killed.signal}`);
+  const failing = await ctx.spawn({ argv: ['jstest', 'throw', 'oops'], stderr: 'pipe' });
+  lines.push(`stderr ${(await drainText(failing.stderr)).trim()} ${(await failing.wait()).status}`);
+  const stopped = await ctx.spawn({ argv: ['jstest', 'wait'], stdout: 'pipe' });
+  await stopped.stdout.getReader().read();
+  await stopped.kill();
+  lines.push(`child.kill ${(await stopped.wait()).status}`);
+  const yes = await ctx.spawn({ argv: ['jstest', 'yes'], stdout: 'pipe' });
+  const yesReader = yes.stdout.getReader();
+  await yesReader.read();
+  await yesReader.cancel();
+  lines.push(`cancel ${(await yes.wait()).status}`);
+  const aborted = await ctx.spawn({ argv: ['jstest', 'count'], stdin: 'pipe', stdout: 'pipe' });
+  await aborted.stdin.abort();
+  lines.push(`abort ${(await drainText(aborted.stdout)).trim()} ${(await aborted.wait()).status}`);
+  const toErr = await ctx.spawn({ argv: ['jstest', 'echo', 'to-stderr'], stdout: 2 });
+  await toErr.wait();
+  const missing = await ctx.spawn({ argv: ['no-such-command'] }).then(
+    () => 'ok',
+    (err) => err.code
+  );
+  const empty = await ctx.spawn({ argv: [] }).then(
+    () => 'ok',
+    (err) => err.code
+  );
+  lines.push(`errors ${missing} ${empty}`);
+  await ctx.write(1, `${lines.join('\n')}\n`);
+  const inherited = await ctx.spawn({ argv: ['jstest', 'status', '0'], stdout: 'inherit' });
+  await inherited.wait();
+  const told = await ctx.spawn({ argv: ['jstest', 'echo', 'inherited'] });
+  await told.wait();
+}
+
+async function numfd(ctx) {
+  const free = [];
+  for (let fd = 3; free.length < 2; fd++) {
+    if (
+      await ctx.fdStatus(fd).then(
+        () => false,
+        () => true
+      )
+    )
+      free.push(fd);
+  }
+  const r = await ctx.spawn({ argv: ['jstest', 'echo'], stdin: 'pipe', stdout: free[1] }).then(
+    () => 'spawned',
+    (err) => err.code
+  );
+  await ctx.write(1, `${r}\n`);
+}
+
+async function stdiochecks(ctx) {
+  const code = (p) =>
+    p.then(
+      () => 'ok',
+      (err) => err.code
+    );
+  const typo = await code(ctx.spawn({ argv: ['jstest', 'echo'], stdout: 'pip' }));
+  const c = await ctx.spawn({ argv: ['jstest', 'wait'], stdout: 'null', stderr: 'null' });
+  await c.kill(0);
+  await c.kill('SIGKILL');
+  await c.wait();
+  const gone = await code(c.kill(0));
+  await ctx.close(2);
+  const closed = await code(ctx.spawn({ argv: ['jstest', 'echo'], stdin: 'pipe' }));
+  await ctx.write(1, `${typo} ${gone} ${closed}\n`);
+}
+
+async function ab(ctx) {
+  let go = false;
+  await ctx.signals.on('SIGUSR1', () => {
+    go = true;
+  });
+  await ctx.write(1, 'A');
+  while (!go) await sleep(5);
+  await ctx.write(1, 'B');
+}
+
+async function lowestFree(ctx) {
+  for (let fd = 3; ; fd++) {
+    if (
+      await ctx.fdStatus(fd).then(
+        () => false,
+        () => true
+      )
+    )
+      return fd;
+  }
+}
+
+async function readsteal(ctx) {
+  const readEnd = await lowestFree(ctx);
+  const c = await ctx.spawn({ argv: ['jstest', 'ab'], stdout: 'pipe', stderr: 'null' });
+  const out = c.stdout.getReader();
+  const a = text((await out.read()).value);
+  const pending = out.read();
+  await sleep(50);
+  const cat = await ctx.spawn({ argv: ['jstest', 'cat'], stdin: readEnd, stdout: 'pipe' });
+  await out.cancel();
+  await pending;
+  await c.kill('SIGUSR1');
+  await c.wait();
+  let got = '';
+  const r = cat.stdout.getReader();
+  for (let x = await r.read(); !x.done; x = await r.read()) got += text(x.value);
+  await cat.wait();
+  await ctx.write(1, `${a} ${got}\n`);
+}
+
+async function readcancel(ctx) {
+  const c = await ctx.spawn({ argv: ['jstest', 'wait'], stdout: 'pipe', stderr: 'null' });
+  const out = c.stdout.getReader();
+  await out.read();
+  const pending = out.read();
+  await sleep(50);
+  await out.cancel();
+  const after = await pending;
+  await c.kill();
+  const exited = await c.wait();
+  await ctx.write(1, `cancelled ${after.done} ${exited.status}\n`);
+}
+
+async function waitcount(ctx) {
+  let go = false;
+  await ctx.signals.on('SIGUSR1', () => {
+    go = true;
+  });
+  await ctx.write(1, 'ready\n');
+  while (!go) await sleep(5);
+  let total = 0;
+  for (;;) {
+    const chunk = await ctx.read(0, 1 << 20);
+    if (chunk.length === 0) break;
+    total += chunk.length;
+  }
+  await ctx.write(1, `${total}`);
+}
+
+async function spawnabort(ctx) {
+  const c = await ctx.spawn({
+    argv: ['jstest', 'waitcount'],
+    stdin: 'pipe',
+    stdout: 'pipe',
+    stderr: 'null',
+  });
+  const out = c.stdout.getReader();
+  await out.read();
+  const w = c.stdin.getWriter();
+  const big = 4 * 1024 * 1024;
+  w.write(new Uint8Array(big)).catch(() => undefined);
+  await sleep(50);
+  await w.abort().catch(() => undefined);
+  await c.kill('SIGUSR1');
+  let got = '';
+  for (let r = await out.read(); !r.done; r = await out.read()) got += text(r.value);
+  await c.wait();
+  const short = Number(got) < 1024 * 1024;
+  const free = [];
+  for (let fd = 3; free.length < 2; fd++) {
+    if (
+      await ctx.fdStatus(fd).then(
+        () => false,
+        () => true
+      )
+    )
+      free.push(fd);
+  }
+  const badfd = await ctx.spawn({ argv: ['jstest', 'echo'], stdin: 'pipe', stdout: free[1] }).then(
+    () => 'ok',
+    (err) => err.code
+  );
+  await ctx.write(1, `aborted ${short} ${badfd}\n`);
+  return 0;
+}
+
 async function nodir(ctx, [path]) {
   const r = await ctx.open(path, { write: true, create: true }).then(
     () => 'opened',
@@ -543,6 +750,11 @@ function syncdev(ctx) {
 }
 
 const modes = {
+  stdiochecks,
+  ab,
+  readsteal,
+  readcancel,
+  waitcount,
   echo: async (ctx, args) => {
     await ctx.write(
       1,
@@ -563,6 +775,9 @@ const modes = {
   exclusive,
   lock,
   nodir,
+  spawning,
+  spawnabort,
+  numfd,
   alias,
   aliasrm,
   opens,

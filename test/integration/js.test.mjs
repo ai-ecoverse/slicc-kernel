@@ -74,6 +74,17 @@ test('open files and path operations agree, append appends, exclusive creation i
     'got',
   ]);
   assert.deepEqual(await run(['jstest', 'nodir', 'no/such/dir/f'], home), ok('ENOENT\n'));
+  assert.deepEqual(await run(['jstest', 'readsteal']), ok('A B\n'));
+  assert.deepEqual(await run(['jstest', 'readcancel']), ok('cancelled true 143\n'));
+  assert.deepEqual(await run(['jstest', 'spawnabort'], home), ok('aborted true EBADF\n'));
+  assert.deepEqual(await run(['jstest', 'numfd'], home), ok('EBADF\n'));
+  assert.deepEqual(await run(['jstest', 'stdiochecks'], home), ok('EINVAL ESRCH EBADF\n'));
+  assert.deepEqual(await run(['jstest', 'spawning', 'sp'], home), {
+    status: 0,
+    stdout:
+      'jstest|echo|a|b c 0\n5 0\nstatus 7\ncwd true\nkilled 143 15\nstderr jstest: oops 1\nchild.kill 143\ncancel 141\nabort 0 0\nerrors ENOENT EINVAL\njstest|echo|inherited\n/home\n/node_modules/jstest\ntrue\n/x/y\n1\n',
+    stderr: 'jstest|echo|to-stderr\n/home\n/node_modules/jstest\ntrue\n/x/y\n1\n',
+  });
   assert.deepEqual(
     await run(['jstest', 'closed', 'k.txt'], home),
     ok('EBADF,EBADF,EBADF,EBADF,EBADF,EBADF keep\n')

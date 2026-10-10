@@ -64,12 +64,13 @@ export class LockTable {
   }
 }
 
-type Run = (req: { op: string }) => Promise<SyncFsResult>;
+type Run = (req: { op: string }, cancelled: AbortSignal) => Promise<SyncFsResult>;
 
 export class AsyncOps {
   private next = 1;
   private readonly results = new Map<number, SyncFsResult | undefined>();
   private readonly ready: number[] = [];
+  private readonly running = new Map<number, AbortController>();
   private readonly waiters = new Set<() => void>();
   private closed = false;
   private readonly run: Run;
@@ -82,7 +83,9 @@ export class AsyncOps {
 
   submit(req: { op: string }): number {
     const id = this.hold();
-    this.run(req).then(
+    const running = new AbortController();
+    this.running.set(id, running);
+    this.run(req, running.signal).then(
       (result) => this.complete(id, result),
       (err: unknown) => this.complete(id, { ok: false, errno: 'EIO', message: String(err) })
     );
@@ -105,11 +108,17 @@ export class AsyncOps {
     if (!this.results.has(id)) throw new KernelError('EINVAL');
     const result = this.results.get(id);
     if (!result) throw new KernelError('EAGAIN');
-    this.cancel(id);
+    this.forget(id);
     return result;
   }
 
   cancel(id: number): void {
+    this.running.get(id)?.abort();
+    this.forget(id);
+  }
+
+  private forget(id: number): void {
+    this.running.delete(id);
     this.results.delete(id);
     const at = this.ready.indexOf(id);
     if (at >= 0) this.ready.splice(at, 1);
@@ -159,6 +168,7 @@ export class AsyncOps {
   }
 
   private complete(id: number, result: SyncFsResult): void {
+    this.running.delete(id);
     if (!this.results.has(id)) return;
     this.results.set(id, result);
     this.ready.push(id);
