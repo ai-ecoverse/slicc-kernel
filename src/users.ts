@@ -133,6 +133,19 @@ export class UserDb {
     };
   }
 
+  private async commit(passwd: string, group: string, then?: () => Promise<void>): Promise<void> {
+    const before = [await this.read(PASSWD, DEFAULT_PASSWD), await this.read(GROUP, DEFAULT_GROUP)];
+    try {
+      await this.fs.writeFile(GROUP, group);
+      await this.fs.writeFile(PASSWD, passwd);
+      await then?.();
+    } catch (err) {
+      await this.fs.writeFile(GROUP, before[1] as string);
+      await this.fs.writeFile(PASSWD, before[0] as string);
+      throw err;
+    }
+  }
+
   private serial<T>(work: () => Promise<T>): Promise<T> {
     const next = this.writing.then(work);
     this.writing = next.catch(() => undefined);
@@ -186,12 +199,21 @@ export class UserDb {
       if (typeof name !== 'string' || name.length > MAX_NAME || !NAME.test(name)) {
         throw fsError('EINVAL', `not a user name: ${String(name)}`);
       }
-      if (options.umask !== undefined) this.umasks.set(name, options.umask & 0o777);
+      const home = options.home ?? `/home/${name}`;
+      if (typeof home !== 'string' || !home.startsWith('/') || /[:\r\n]/.test(home)) {
+        throw fsError('EINVAL', `not a home directory: ${String(home)}`);
+      }
+      const remember = () => {
+        if (options.umask !== undefined) this.umasks.set(name, options.umask & 0o777);
+      };
       const { passwd, group } = await this.tables();
       const users = parsed(passwd);
       const groups = parsed(group);
       const found = users.find((r) => r.name === name);
-      if (found) return this.account(found, groups);
+      if (found) {
+        remember();
+        return this.account(found, groups);
+      }
       const extra = [USERS_GROUP, ...(options.groups ?? [])].map((g) => {
         const row = groups.find((r) => r.name === g);
         if (!row) throw fsError('ENOENT', `no group ${g}`);
@@ -202,21 +224,14 @@ export class UserDb {
       let uid = FIRST_UID;
       while (taken.has(uid)) uid++;
       if (uid > LAST_UID) throw fsError('ENOSPC', 'no free user id');
-      const home = options.home ?? `/home/${name}`;
       const row = { name, uid, gid: uid, gecos: name, home, shell: '/bin/bash' };
       for (const g of extra) if (!g.members.includes(name)) g.members.push(name);
       group.push({ name, gid: uid, members: [] });
       passwd.push(row);
-      const before = await this.read(GROUP, DEFAULT_GROUP);
       await this.fs.mkdir(home, { recursive: true });
       await this.fs.mkdir('/etc', { recursive: true });
-      await this.fs.writeFile(GROUP, formatGroup(group));
-      try {
-        await this.fs.writeFile(PASSWD, formatPasswd(passwd));
-      } catch (err) {
-        await this.fs.writeFile(GROUP, before);
-        throw err;
-      }
+      await this.commit(formatPasswd(passwd), formatGroup(group));
+      remember();
       return this.account(row, parsed(group));
     });
   }
@@ -233,19 +248,14 @@ export class UserDb {
         (r) => typeof r === 'string' || !(r.name === name && r.gid === row.gid)
       );
       for (const r of parsed(keptGroups)) r.members = r.members.filter((m) => m !== name);
-      const before = await this.read(GROUP, DEFAULT_GROUP);
-      await this.fs.writeFile(GROUP, formatGroup(keptGroups));
-      try {
-        await this.fs.writeFile(PASSWD, formatPasswd(passwd.filter((r) => r !== row)));
-      } catch (err) {
-        await this.fs.writeFile(GROUP, before);
-        throw err;
-      }
-      this.umasks.delete(name);
       const home = this.fs.resolvePath('/', row.home);
-      if (!options.keepHome && HOME_DIR.test(home)) {
-        await this.fs.rm(home, { recursive: true, force: true });
-      }
+      const removeHome = !options.keepHome && HOME_DIR.test(home);
+      await this.commit(
+        formatPasswd(passwd.filter((r) => r !== row)),
+        formatGroup(keptGroups),
+        removeHome ? () => this.fs.rm(home, { recursive: true, force: true }) : undefined
+      );
+      this.umasks.delete(name);
       return true;
     });
   }
