@@ -138,7 +138,9 @@ export class UnlinkedKeeper {
         else await keeper.settle(pinned, () => fs.rm(path, options));
       },
       async rename(from, to) {
-        const pinned = await keeper.pin(fs.resolvePath('/', to));
+        const target = fs.resolvePath('/', to);
+        if (target === fs.resolvePath('/', from)) return fs.rename(from, to);
+        const pinned = await keeper.pin(target);
         await keeper.settle(pinned, () => fs.rename(from, to));
       },
       readdir: async (path) => visible(await fs.readdir(path)),
@@ -180,13 +182,16 @@ export class UnlinkedKeeper {
     const files = new Map<string, KeptFile>();
     for (const [path, at] of hidden) {
       const holders = held.get(path) as UnlinkHolder[];
-      const file = this.keptFile(at, { refs: holders.length });
+      const file = this.keptFile(at, { refs: holders.length + 1 });
       files.set(path, file);
       for (const holder of holders) holder.keep(path, file);
     }
     return {
       moved: new Set(hidden.keys()),
-      commit: done,
+      commit: () => {
+        for (const file of files.values()) file.release();
+        done();
+      },
       rollback: async () => {
         for (const [path, file] of files) {
           for (const holder of held.get(path) as UnlinkHolder[]) holder.unkeep(path, file);
