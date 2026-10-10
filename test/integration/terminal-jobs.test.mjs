@@ -46,16 +46,21 @@ async function session(t) {
     term.write(new TextEncoder().encode(input));
     if (expect) await until(expect, from);
   };
+  let syncs = 0;
+  const settled = async () => {
+    const n = 40 + syncs++;
+    await type(`echo $((${n} + 0))\r`, `\r${n}\r\n`);
+  };
   const killed = async () => {
     const stopped = screen.length;
     await type('kill -KILL %1\r');
     for (let i = 0; i < 100 && !screen.slice(stopped).includes('Killed'); i++)
       await type('jobs\r', '$ ');
     await until('Killed', stopped);
-    await until('$ ', screen.lastIndexOf('Killed'));
+    await settled();
   };
   await until('$ ');
-  return { type, until, killed, screen: () => screen };
+  return { type, until, killed, settled, screen: () => screen };
 }
 
 test('a job typed at once is stopped or interrupted before it has taken the terminal, and a background job is left alone', async (t) => {
@@ -93,7 +98,7 @@ test('^C and ^Z reach a job typed 0, 20 or 50 ms after the shell has the line', 
     if (delay) await tick(delay);
     await s.type('\u0003');
     await s.type('echo "rc=$?"\r', 'rc=130');
-    await s.until('$ ', s.screen().lastIndexOf('rc=130'));
+    await s.settled();
     await s.type('sleep 30\r', 'sleep 30\r\n');
     if (delay) await tick(delay);
     await s.type('\u001a', '[1]+  Stopped');
