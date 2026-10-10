@@ -49,7 +49,13 @@ export class JobTable {
   }
 
   remove(pid: number): void {
+    const member = this.members.get(pid);
     this.members.delete(pid);
+    if (member) this.prune(member.pgid);
+  }
+
+  private prune(pgid: number): void {
+    if (![...this.members.values()].some((m) => m.pgid === pgid)) this.handoffs.delete(pgid);
   }
 
   exec(pid: number, child: number, adopt = false): void {
@@ -125,7 +131,13 @@ export class JobTable {
 
     const exists = [...this.members.values()].some((m) => m.pgid === group && m.sid === target.sid);
     if (group !== id && !exists) throw new KernelError('EPERM');
+    const left = target.pgid;
     target.pgid = group;
+    this.prune(left);
+  }
+
+  get handoffCount(): number {
+    return this.handoffs.size;
   }
 
   getpgid(caller: number, pid: number): number {
