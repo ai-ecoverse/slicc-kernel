@@ -1,6 +1,7 @@
 import { type FsStat, type KernelFs, lutimesOf, rangedOps } from '../fs/types.ts';
 import { resolveSyncFsToken, type SyncFsTokenEntry } from './sync-fs-token-registry.ts';
 import {
+  type SyncFsOp,
   type SyncFsRequest,
   type SyncFsResult,
   type SyncFsUsage,
@@ -152,6 +153,9 @@ async function ranged(fs: KernelFs, path: string, req: SyncFsRequest): Promise<S
   return done;
 }
 
+const UNLINKED_OPS = new Set<SyncFsOp>(['read', 'pread', 'pwrite', 'truncate']);
+const OWN_OPS = new Set<SyncFsOp>(['rm', 'unlink', 'rmdir', 'rename']);
+
 export async function dispatchSyncFs(req: SyncFsRequest): Promise<SyncFsResult> {
   const entry = resolveSyncFsToken(req.token);
   if (!entry) return { ok: false, errno: 'EACCES', message: 'sync-fs: unknown or revoked token' };
@@ -160,11 +164,22 @@ export async function dispatchSyncFs(req: SyncFsRequest): Promise<SyncFsResult> 
     const path = fs.resolvePath(cwd, req.path);
     if (req.op === 'statfs') return json((await entry.statfs?.(path)) ?? (await storageUsage()));
     if (req.op === 'hold') {
-      entry.hold?.(path, req.mode === 1);
+      const [on, open] = [((req.mode ?? 0) & 1) === 1, ((req.mode ?? 0) & 2) === 2];
+      const real = on && open ? await fs.realpath?.(path, true).catch(() => path) : undefined;
+      entry.hold?.(path, on, open, real);
       return done;
     }
     if (entry.revoked?.(path)) return { ok: false, errno: 'EIO', message: `${path} was unmounted` };
-    return await run(entry, path, req);
+    if ((req.op === 'write' && req.mode === 1) || UNLINKED_OPS.has(req.op)) {
+      const serve = async () => {
+        const kept = entry.unlinked?.(path);
+        return run(entry, kept && !(await fs.exists(path)) ? kept.hidden : path, req);
+      };
+      return await (entry.gate ? entry.gate(path, serve) : serve());
+    }
+    if (!entry.own || !OWN_OPS.has(req.op)) return await run(entry, path, req);
+    const target = req.op === 'rename' ? fs.resolvePath(cwd, req.arg2 ?? '') : path;
+    return await entry.own(target, () => run(entry, path, req));
   } catch (err) {
     return toErrno(err);
   }

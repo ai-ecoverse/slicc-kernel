@@ -77,7 +77,7 @@ export function parseSyncFsUsage(json: unknown): SyncFsUsage | null {
 
 export interface SyncFsPosixBridge {
   readFile(path: string): Uint8Array;
-  writeFile(path: string, bytes: Uint8Array): void;
+  writeFile(path: string, bytes: Uint8Array, open?: boolean): void;
   stat(path: string): SyncFsBridgeStat;
   lstat(path: string): SyncFsBridgeStat;
   readdir(path: string): string[];
@@ -92,7 +92,7 @@ export interface SyncFsPosixBridge {
   chmod(path: string, mode: number): void;
   utimes(path: string, atimeMs: number, mtimeMs: number): void;
   lutimes(path: string, atimeMs: number, mtimeMs: number): void;
-  hold?(path: string, held: boolean): void;
+  hold?(path: string, held: boolean, open?: boolean): void;
   readdirStat(path: string): Array<[string, SyncFsBridgeStat | null]>;
   statfs?(path?: string): SyncFsUsage | null;
   pread?(path: string, offset: number, length: number, version?: string): Uint8Array;

@@ -297,7 +297,7 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
     if (s.ranged) call(() => s.ranged?.flush());
     else {
       const bytes = (s.data as Uint8Array).slice(0, s.len);
-      call(() => bridgeOf(node).writeFile(liveNodePath(node), bytes));
+      call(() => bridgeOf(node).writeFile(liveNodePath(node), bytes, true));
     }
     s.dirty = false;
     s.stat = undefined;
@@ -533,6 +533,11 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
       } catch {}
     }
   };
+  const opened = (node: LiveFsNode, on: boolean) => {
+    try {
+      bridgeOf(node).hold?.(liveNodePath(node), on, true);
+    } catch {}
+  };
   return {
     open(stream) {
       if (!Fs.isFile(stream.node.mode)) return;
@@ -545,6 +550,7 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
           bridge.truncate &&
           statOf(stream.node).ranged
         );
+        rangedOf(stream.node);
       }
       if ((stream.flags & 3) !== 0) {
         try {
@@ -557,6 +563,7 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
         }
       }
       stream.node.live.openCount++;
+      if (stream.node.live.openCount === 1) opened(stream.node, true);
       held(stream, 1);
     },
 
@@ -583,6 +590,7 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
         s.len = 0;
         s.loaded = false;
         held(stream, -1);
+        opened(node, false);
       }
     },
     read(stream, buffer, offset, length, position) {
@@ -675,7 +683,7 @@ export function flushLiveVfs(Fs: LiveFsApi, plugin: LiveVfsPlugin): void {
         if (s.ranged) s.ranged.flush();
         else {
           const bytes = (s.data as Uint8Array).slice(0, s.len);
-          node.mount.opts.bridge.writeFile(liveNodePath(node), bytes);
+          node.mount.opts.bridge.writeFile(liveNodePath(node), bytes, true);
         }
         s.dirty = false;
       } catch (err) {

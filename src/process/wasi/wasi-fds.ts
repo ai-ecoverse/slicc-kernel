@@ -339,7 +339,10 @@ export class WasiFds {
       this.table.set(fd, { type: 'kernel', kind: 'file', nonblock: false, append: e.file.append });
     }
     for (const file of promoted.keys()) {
-      if (--file.buffer.opens <= 0) this.buffers.delete(file.path);
+      if (--file.buffer.opens <= 0) {
+        this.buffers.delete(file.path);
+        this.letGo(file.buffer);
+      }
     }
   }
 
@@ -417,9 +420,13 @@ export class WasiFds {
     if (e.type !== 'file' || --e.file.refs > 0) return;
     const { buffer } = e.file;
     buffer.flush();
-    if (--buffer.opens === 0 && this.buffers.get(buffer.path) === buffer) {
-      this.buffers.delete(buffer.path);
-    }
+    if (--buffer.opens > 0) return;
+    if (this.buffers.get(buffer.path) === buffer) this.buffers.delete(buffer.path);
+    this.letGo(buffer);
+  }
+
+  private letGo(buffer: FileBuffer): void {
+    this.fs.hold?.(buffer.path, false, true);
   }
 
   kind(fd: number, e: Extract<WasiEntry, { type: 'kernel' }>): KernelFdKind {
@@ -530,6 +537,7 @@ export class WasiFds {
       const ranged = st.ranged ? st.size : undefined;
       buffer = new FileBuffer(this.fs, path, empty, st.maxFile, ranged, st.version);
       this.buffers.set(path, buffer);
+      this.fs.hold?.(path, true, true);
     }
     buffer.opens++;
     return new LocalFile(buffer, readable, writable, (fdflags & FDFLAGS.APPEND) !== 0);

@@ -17,6 +17,7 @@ export const PNPM_HOME = '/home/.local/share/pnpm';
 import { followLinks, withCommandDirs } from './fs/commands.ts';
 import type { KernelFs } from './fs/types.ts';
 import { fsError, normalizePath } from './fs/types.ts';
+import { UnlinkedKeeper, webLocks } from './fs/unlinked.ts';
 import { FsWatchers } from './fs/watch.ts';
 import {
   type ChildForker,
@@ -350,6 +351,7 @@ export class Launcher {
   private readonly deciding = new Map<number, Set<(byParent: boolean) => void>>();
   readonly identities = { asked: 0, timedOut: 0 };
   private readonly nodes: VfsNodes;
+  private readonly unlinked: UnlinkedKeeper;
   private readonly held = new HeldSet((path) => this.released(path));
   private readonly processMounts: ProcessMountPolicy;
   private readonly booting = new AbortController();
@@ -396,7 +398,15 @@ export class Launcher {
     const fs = withCommandDirs(this.base, async () => new Set((await this.commands()).keys()));
     this.nodes = new VfsNodes(fs, (path) => this.released(path));
     this.openFiles.add(this.nodes);
-    this.fs = keepingOpen(fs, this.nodes);
+    this.unlinked = new UnlinkedKeeper(
+      fs,
+      this.held,
+      (path) => this.mountRoot(path),
+      webLocks(),
+      (path) => [...this.openFiles].some((nodes) => nodes.holds(path))
+    );
+    this.fs = keepingOpen(this.unlinked.wrap(), this.nodes);
+    void this.unlinked.sweep('/');
     this.watchers.watch([this.modulesDir, this.pnpmHome], { recursive: true }, () => {
       this.catalog = undefined;
       this.binfmts = undefined;
@@ -631,6 +641,7 @@ export class Launcher {
       openFiles: this.openFiles,
       nodes: this.nodes,
       held: this.held,
+      unlinkGate: this.unlinked.gate,
       statfs: (path) => this.mounts.statfs(path),
       mounts: () => this.mounts.list(),
       mount: (call, signal) => this.processMount(pid, call, signal),
@@ -804,6 +815,7 @@ export class Launcher {
 
   private released(path: string): void {
     const at = normalizePath(path);
+    this.unlinked.closed(at);
     const open = [...this.openFiles].some((nodes) => nodes.writes(at)) || heldUnder(this.held, at);
     if (!open) void this.mounts.commit(at).catch(() => undefined);
   }
@@ -906,10 +918,24 @@ export class Launcher {
     };
   }
 
-  mount(spec: MountSpec): Promise<MountEntry> {
-    if (spec.type !== 'fsa' || spec.source.startsWith('fsa:'))
-      return this.mounts.mount(spec, this.fs);
-    return this.mounts.mount({ ...spec, source: `fsa:${crypto.randomUUID()}` }, this.fs);
+  async mount(spec: MountSpec): Promise<MountEntry> {
+    const fsa = spec.type === 'fsa' && !spec.source.startsWith('fsa:');
+    const entry = await this.mounts.mount(
+      fsa ? { ...spec, source: `fsa:${crypto.randomUUID()}` } : spec,
+      this.fs
+    );
+    void this.unlinked.sweep(entry.target);
+    return entry;
+  }
+
+  private mountRoot(path: string): string {
+    let root = '/';
+    for (const { target } of this.mounts.list()) {
+      if (target.length > root.length && (path === target || path.startsWith(`${target}/`))) {
+        root = target;
+      }
+    }
+    return root;
   }
 
   async insert(target: string, handle: MediumHandle, source?: string): Promise<void> {
@@ -924,6 +950,7 @@ export class Launcher {
     await this.media.put(slot.id, handle);
     slot.medium.insert(handle);
     slot.served.invalidate(true);
+    void this.unlinked.sweep(at);
   }
 
   umount(target: string, detach = false): void {

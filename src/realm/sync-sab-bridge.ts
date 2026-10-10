@@ -155,8 +155,8 @@ export function createSyncFsSabBridge(
 
   return {
     readFile: (path) => bytes({ op: 'read', path }, path),
-    writeFile: (path, data) => {
-      run({ op: 'write', path, body: data }, path);
+    writeFile: (path, data, open) => {
+      run({ op: 'write', path, body: data, ...(open ? { mode: 1 } : {}) }, path);
     },
     stat: (path) => {
       const s = parseSyncFsStat(json({ op: 'stat', path }, path));
@@ -224,8 +224,8 @@ export function createSyncFsSabBridge(
     lutimes: (path, atimeMs, mtimeMs) => {
       run({ op: 'lutimes', path, atimeMs, mtimeMs }, path);
     },
-    hold: (path, held) => {
-      run({ op: 'hold', path, mode: held ? 1 : 0 }, path);
+    hold: (path, held, open) => {
+      run({ op: 'hold', path, mode: (held ? 1 : 0) | (open ? 2 : 0) }, path);
     },
     statfs: (path = '/') => parseSyncFsUsage(json({ op: 'statfs', path }, path)),
     pread: (path, offset, length, version) =>
