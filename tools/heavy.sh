@@ -25,8 +25,7 @@ stop() {
   kill -9 "$@" 2> /dev/null
   wait "$child" 2> /dev/null
 }
-set -m
-"$@" &
+perl -e 'setpgrp(0, 0); exec { $ARGV[0] } @ARGV or die "$ARGV[0]: $!\n"' "$@" &
 child=$!
 trap 'stop; exit 129' HUP
 trap 'stop; exit 130' INT
