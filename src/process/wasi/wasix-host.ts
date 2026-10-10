@@ -1,4 +1,4 @@
-import { E, FDFLAGS, WASI_SIGNAL_TO_POSIX, wasiErrnoOf } from './wasi-abi.ts';
+import { E, FDFLAGS, wasiErrnoOf, wasixSignal } from './wasi-abi.ts';
 import { WasiError } from './wasi-files.ts';
 import { WasiExit, type WasiFunction, type WasiHost, wrap } from './wasi-host.ts';
 import type { WasiSignals } from './wasi-signals.ts';
@@ -242,7 +242,7 @@ export class WasixHost {
       proc_join: (pidPtr: number, flags: number, statusPtr: number) =>
         void process.join(pidPtr, flags, statusPtr),
       proc_signal: (pid: number, sig: number) => {
-        const posix = sig === 0 ? 0 : WASI_SIGNAL_TO_POSIX[sig];
+        const posix = sig === 0 ? 0 : wasixSignal(sig);
         if (posix === undefined) throw new WasiError('EINVAL');
         if (pid === this.host.o.pid && posix !== 0 && this.host.onRaise?.(posix)) return;
         this.host.o.kernel.call({ op: 'proc-kill', pid, sig: posix });
@@ -393,9 +393,7 @@ export class WasixHost {
 
       thread_signal: (tid: number, sig: number) => {
         if (!(this.threads?.known(tid) ?? tid === MAIN_TID)) throw new WasiError('ESRCH');
-        const posix = WASI_SIGNAL_TO_POSIX[sig];
-        if (posix === undefined) throw new WasiError('EINVAL');
-
+        const posix = posixSignal(sig);
         if (host.onRaise?.(posix)) return;
         host.o.kernel.call({ op: 'proc-kill', pid: host.o.pid, sig: posix });
       },
@@ -479,7 +477,7 @@ export class WasixHost {
 }
 
 function posixSignal(sig: number): number {
-  const posix = WASI_SIGNAL_TO_POSIX[sig];
+  const posix = wasixSignal(sig);
   if (posix === undefined) throw new WasiError('EINVAL');
   return posix;
 }
