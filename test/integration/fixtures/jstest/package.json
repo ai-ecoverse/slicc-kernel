@@ -20,7 +20,15 @@
       },
       "jsnomodule": {
         "abi": "js"
+      },
+      "jsecho": {
+        "abi": "js",
+        "module": "bin/echo.mjs"
       }
+    },
+    "binfmt": {
+      ".jse": "jsecho",
+      ".x.jse": "jstest"
     }
   }
 }

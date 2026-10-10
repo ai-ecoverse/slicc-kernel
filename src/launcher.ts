@@ -4,8 +4,10 @@ import type { CdpHook } from './cdp/types.ts';
 import { serveClient } from './client/serve-client.ts';
 import {
   type Abi,
+  binfmtOf,
   type Command,
   pnpmGlobalRoots,
+  scanBinfmts,
   scanCommands,
   scanFilesystems,
 } from './commands.ts';
@@ -300,6 +302,7 @@ export class Launcher {
   private readonly modulesDir: string;
   private readonly env: Record<string, string>;
   private catalog: Promise<Map<string, Command>> | undefined;
+  private binfmts: Promise<Map<string, string>> | undefined;
   private readonly compiled = new Map<string, Promise<Compiled>>();
   private readonly processes = new Map<number, WasmProcessHandle>();
   private readonly zombies = new Set<number>();
@@ -383,6 +386,7 @@ export class Launcher {
     this.fs = keepingOpen(fs, this.nodes);
     this.watchers.watch([this.modulesDir, this.pnpmHome], { recursive: true }, () => {
       this.catalog = undefined;
+      this.binfmts = undefined;
     });
   }
 
@@ -393,6 +397,11 @@ export class Launcher {
   commands(): Promise<Map<string, Command>> {
     this.catalog ??= this.roots().then((roots) => scanCommands(this.base, roots));
     return this.catalog;
+  }
+
+  private interpreters(): Promise<Map<string, string>> {
+    this.binfmts ??= this.roots().then((roots) => scanBinfmts(this.base, roots));
+    return this.binfmts;
   }
 
   private async roots(): Promise<string[]> {
@@ -451,7 +460,10 @@ export class Launcher {
   ): Promise<Planned | undefined> {
     const command = await this.scriptCommand(file);
     const script = command?.script ?? this.fs.resolvePath(cwd, file);
-    const words = shebang((await this.head(script)) ?? new Uint8Array());
+    const head = await this.head(script);
+    if (!head) return undefined;
+    const binfmt = isWasm(head) ? undefined : binfmtOf(await this.interpreters(), script);
+    const words = shebang(head) ?? (binfmt ? [binfmt] : undefined);
     if (!words) return undefined;
     if (baseName(words[0]) === 'env') words.shift();
     const [interp, ...rest] = words;
@@ -988,6 +1000,7 @@ export class Launcher {
 
   private async starting(argv: string[], dir: string | undefined) {
     this.catalog = undefined;
+    this.binfmts = undefined;
     const cwd = this.fs.resolvePath('/', dir ?? '/');
     const [file = ''] = argv;
     await this.base.mkdir(cwd, { recursive: true });
