@@ -165,19 +165,20 @@ async function withPackagePaths(fs: KernelFs, pkg: string, command: Command): Pr
 }
 
 async function packages(fs: KernelFs, modules: string): Promise<string[]> {
-  const names = (await fs.readdir(modules).catch(() => [])).sort();
-  const dirs: string[] = [];
+  const names = await fs.readdir(modules).catch(() => []);
+  const packageNames: string[] = [];
   for (const name of names) {
     if (name.startsWith('.')) continue;
     if (!name.startsWith('@')) {
-      dirs.push(`${modules}/${name}`);
+      packageNames.push(name);
       continue;
     }
-    for (const inner of (await fs.readdir(`${modules}/${name}`).catch(() => [])).sort()) {
-      dirs.push(`${modules}/${name}/${inner}`);
+    for (const inner of await fs.readdir(`${modules}/${name}`).catch(() => [])) {
+      packageNames.push(`${name}/${inner}`);
     }
   }
-  return dirs;
+  packageNames.sort();
+  return packageNames.map((name) => `${modules}/${name}`);
 }
 
 export async function pnpmGlobalRoots(fs: KernelFs, home: string): Promise<string[]> {
