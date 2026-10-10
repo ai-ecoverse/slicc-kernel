@@ -67,6 +67,17 @@ test('^C interrupts the foreground job, ^Z stops it, and exit ends the session w
   await page.until(() => window.screen.status === 3);
 });
 
+test('a WASIX program makes its terminal really raw through slicc_tty and sets it back', async (t) => {
+  const { page, screen, until, type } = await terminal(chrome, t, ['bash', '-i'], { cwd: '/home' });
+  await until('$ ');
+  await type('ttytest\r', 'RAW\n');
+  assert.doesNotMatch(await screen(), /RAW\r\n/);
+  await type('\u0003', '=000000010300011c0018500008');
+  await type('stty -a\r', '\r\nisig icanon');
+  await type('ttytest < /dev/null 2>/dev/null | cat\r', '=3bffffffffffffff3b00003b08');
+  assert.deepEqual(page.errors, []);
+});
+
 test('closing a terminal hangs up its shell', async (t) => {
   const { page, until } = await terminal(chrome, t, ['bash', '-i'], { cwd: '/home' });
   await until('$ ');

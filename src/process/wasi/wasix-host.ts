@@ -471,11 +471,7 @@ export class WasixHost {
     v.setUint8(ptr + 16, isTty(0));
     v.setUint8(ptr + 17, isTty(1));
     v.setUint8(ptr + 18, isTty(2));
-    if (fd === undefined) {
-      v.setUint32(ptr, 80, true);
-      v.setUint32(ptr + 4, 24, true);
-      return;
-    }
+    if (fd === undefined) throw new WasiError('ENOTTY');
     const [rows, cols] = host.o.kernel.sys.winsize?.(fd) ?? [24, 80];
     const termios = host.o.kernel.sys.tcgets?.(fd);
     v.setUint32(ptr, cols, true);
