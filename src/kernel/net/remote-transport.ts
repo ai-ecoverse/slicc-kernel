@@ -4,7 +4,11 @@ import type {
   RealmTransportRequest,
   RealmTransportResponse,
   RealmTransportTraits,
+  RealmWebSocket,
+  RealmWebSocketMessage,
+  RealmWebSocketRequest,
 } from './transport.ts';
+import { MessageQueue, payloadSize } from './ws-queue.ts';
 
 export type TransportCall =
   | {
@@ -16,13 +20,20 @@ export type TransportCall =
       body?: Uint8Array;
     }
   | { net: 'read'; nid: number }
-  | { net: 'cancel'; nid: number };
+  | { net: 'cancel'; nid: number }
+  | { net: 'ws-open'; nid: number; url: string; protocols: string[]; headers: HeaderList }
+  | { net: 'ws-send'; nid: number; data: RealmWebSocketMessage }
+  | { net: 'ws-close'; nid: number; code?: number; reason?: string };
 
 export type TransportReply =
   | { net: 'head'; nid: number; status: number; statusText: string; headers: HeaderList }
   | { net: 'chunk'; nid: number; bytes: Uint8Array }
   | { net: 'end'; nid: number }
-  | { net: 'error'; nid: number; message: string; status?: number; code?: string };
+  | { net: 'error'; nid: number; message: string; status?: number; code?: string }
+  | { net: 'ws-opened'; nid: number; protocol: string }
+  | { net: 'ws-message'; nid: number; data: RealmWebSocketMessage }
+  | { net: 'ws-acked'; nid: number; n: number }
+  | { net: 'ws-closed'; nid: number; code: number; reason: string };
 
 export interface TransportPort {
   postMessage(message: TransportCall): void;
@@ -53,6 +64,8 @@ export class RemoteTransport implements RealmTransport {
 
   private nextId = 0;
 
+  private readonly sockets = new Map<number, { queue: MessageQueue; acked(n: number): void }>();
+
   private failure: Error | undefined;
 
   constructor(port: TransportPort, traits: RealmTransportTraits) {
@@ -61,6 +74,8 @@ export class RemoteTransport implements RealmTransport {
   }
 
   receive(reply: TransportReply): void {
+    const socket = this.sockets.get(reply.nid);
+    if (socket && this.toSocket(reply, socket)) return;
     const waiter = this.waiting.get(reply.nid);
     if (!waiter) return;
     this.waiting.delete(reply.nid);
@@ -69,10 +84,26 @@ export class RemoteTransport implements RealmTransport {
     } else waiter.resolve(reply);
   }
 
+  private toSocket(
+    reply: TransportReply,
+    socket: { queue: MessageQueue; acked(n: number): void }
+  ): boolean {
+    if (reply.net === 'ws-message') socket.queue.push(reply.data);
+    else if (reply.net === 'ws-acked') socket.acked(reply.n);
+    else if (reply.net === 'ws-closed') {
+      this.sockets.delete(reply.nid);
+      socket.queue.end({ code: reply.code, reason: reply.reason });
+    } else return false;
+    return true;
+  }
+
   fail(error: Error): void {
     this.failure = error;
     for (const waiter of this.waiting.values()) waiter.reject(error);
     this.waiting.clear();
+    for (const socket of this.sockets.values())
+      socket.queue.end({ code: 1011, reason: error.message });
+    this.sockets.clear();
   }
 
   private ask(call: TransportCall): Promise<TransportReply> {
@@ -152,6 +183,44 @@ export class RemoteTransport implements RealmTransport {
           },
         }),
       },
+    };
+  }
+
+  async websocket(request: RealmWebSocketRequest): Promise<RealmWebSocket> {
+    const nid = ++this.nextId;
+    const { signal } = request;
+    signal.throwIfAborted();
+    const abort = () => this.cancel(nid);
+    signal.addEventListener('abort', abort, { once: true });
+    let opened: TransportReply;
+    try {
+      opened = await this.ask({
+        net: 'ws-open',
+        nid,
+        url: request.url,
+        protocols: request.protocols,
+        headers: request.headers,
+      });
+    } finally {
+      signal.removeEventListener('abort', abort);
+    }
+    const close = (code?: number, reason?: string) =>
+      this.port.postMessage({ net: 'ws-close', nid, code, reason });
+    const queue = new MessageQueue(() => close(1000, 'too many waiting messages'));
+    let unacked = 0;
+    this.sockets.set(nid, { queue, acked: (n) => void (unacked -= n) });
+    return {
+      protocol: (opened as Extract<TransportReply, { net: 'ws-opened' }>).protocol,
+      get buffered() {
+        return unacked;
+      },
+      send: (data) => {
+        unacked += payloadSize(data);
+        this.port.postMessage({ net: 'ws-send', nid, data });
+      },
+      messages: queue,
+      close,
+      closed: queue.closed,
     };
   }
 }

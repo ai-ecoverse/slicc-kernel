@@ -15,8 +15,16 @@ export const CLOSE = {
 } as const;
 
 export const OP_TEXT = 1;
+export const OP_BINARY = 2;
 
-const OP = { continuation: 0, text: OP_TEXT, binary: 2, close: 8, ping: 9, pong: 10 } as const;
+const OP = {
+  continuation: 0,
+  text: OP_TEXT,
+  binary: OP_BINARY,
+  close: 8,
+  ping: 9,
+  pong: 10,
+} as const;
 
 export interface Sink {
   write(bytes: Uint8Array, signal?: AbortSignal): Promise<unknown>;
@@ -26,6 +34,8 @@ export type WsEvent =
   | { kind: 'text'; text: string }
   | { kind: 'ping'; payload: Uint8Array }
   | { kind: 'close'; code: number; reason: string };
+
+export type WsBinaryEvent = { kind: 'binary'; bytes: Uint8Array };
 
 export class WsError extends Error {
   readonly code: number;
@@ -108,19 +118,24 @@ function decode(bytes: Uint8Array): string {
   }
 }
 
-export class WsReader {
+export class WsReader<Binary extends boolean = false> {
   private readonly incoming: Incoming;
   private readonly max: number;
   private parts: Uint8Array[] = [];
   private size = 0;
   private continuing = false;
+  private binaryMessage = false;
+  private readonly binary: Binary | undefined;
 
-  constructor(incoming: Incoming, max = MAX_MESSAGE) {
+  constructor(incoming: Incoming, max = MAX_MESSAGE, binary?: Binary) {
     this.incoming = incoming;
     this.max = max;
+    this.binary = binary;
   }
 
-  async next(signal?: AbortSignal): Promise<WsEvent | null> {
+  async next(
+    signal?: AbortSignal
+  ): Promise<WsEvent | (Binary extends true ? WsBinaryEvent : never) | null> {
     for (;;) {
       const first = await this.incoming.some(1, signal);
       if (first.length === 0) return null;
@@ -145,8 +160,29 @@ export class WsReader {
       await fill(this.incoming, payload, signal);
       for (let i = 0; i < length; i++) payload[i] ^= mask[i & 3];
       const event = this.take(opcode, fin, payload);
-      if (event) return event;
+      if (event) return event as WsEvent | (Binary extends true ? WsBinaryEvent : never);
     }
+  }
+
+  private data(
+    opcode: number,
+    fin: boolean,
+    payload: Uint8Array
+  ): WsEvent | WsBinaryEvent | undefined {
+    if ((opcode === OP.continuation) !== this.continuing) {
+      throw new WsError(CLOSE.protocol, 'unexpected continuation frame');
+    }
+    if (opcode !== OP.continuation) this.binaryMessage = opcode === OP.binary;
+    this.parts.push(payload);
+    this.size += payload.length;
+    this.continuing = !fin;
+    if (!fin) return undefined;
+    const whole = this.parts.length === 1 ? payload : concat(this.parts, this.size);
+    this.parts = [];
+    this.size = 0;
+    return this.binaryMessage
+      ? { kind: 'binary', bytes: whole }
+      : { kind: 'text', text: decode(whole) };
   }
 
   private async length(short: number, signal?: AbortSignal): Promise<number> {
@@ -159,7 +195,11 @@ export class WsReader {
     return long > BigInt(this.max) ? this.max + 1 : Number(long);
   }
 
-  private take(opcode: number, fin: boolean, payload: Uint8Array): WsEvent | undefined {
+  private take(
+    opcode: number,
+    fin: boolean,
+    payload: Uint8Array
+  ): WsEvent | WsBinaryEvent | undefined {
     switch (opcode) {
       case OP.ping:
         return { kind: 'ping', payload };
@@ -170,30 +210,21 @@ export class WsReader {
         const code = payload.length >= 2 ? new DataView(payload.buffer).getUint16(0) : 1005;
         return { kind: 'close', code, reason: decode(payload.subarray(2)) };
       }
-      case OP.text:
-      case OP.continuation: {
-        if ((opcode === OP.continuation) !== this.continuing) {
-          throw new WsError(CLOSE.protocol, 'unexpected continuation frame');
-        }
-        this.parts.push(payload);
-        this.size += payload.length;
-        this.continuing = !fin;
-        if (!fin) return undefined;
-        const whole = this.parts.length === 1 ? payload : concat(this.parts, this.size);
-        this.parts = [];
-        this.size = 0;
-        return { kind: 'text', text: decode(whole) };
-      }
       case OP.binary:
-        throw new WsError(CLOSE.unsupported, 'CDP messages are text');
+        if (!this.binary) throw new WsError(CLOSE.unsupported, 'CDP messages are text');
+        return this.data(opcode, fin, payload);
+      case OP.text:
+      case OP.continuation:
+        return this.data(opcode, fin, payload);
       default:
         throw new WsError(CLOSE.protocol, `unknown opcode ${opcode}`);
     }
   }
 }
 
-export function switchingHead(accept: string): Uint8Array {
+export function switchingHead(accept: string, protocol = ''): Uint8Array {
+  const chosen = protocol ? `Sec-WebSocket-Protocol: ${protocol}\r\n` : '';
   return latin1Bytes(
-    `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`
+    `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n${chosen}\r\n`
   );
 }

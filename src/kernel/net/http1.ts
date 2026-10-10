@@ -60,6 +60,10 @@ export class Incoming {
     this.buf = this.buf.subarray(n);
     return out;
   }
+  async peek(signal?: AbortSignal): Promise<number | undefined> {
+    if (this.buf.length === 0) await this.fill(signal);
+    return this.buf[0];
+  }
   async some(max: number, signal?: AbortSignal): Promise<Uint8Array> {
     if (this.buf.length > 0) return this.take(Math.min(max, this.buf.length));
     if (this.eof) return new Uint8Array(0);

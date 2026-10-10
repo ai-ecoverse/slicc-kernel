@@ -1,3 +1,15 @@
+import {
+  acceptKey,
+  closeFrame,
+  frame,
+  isUpgrade,
+  OP_BINARY,
+  OP_TEXT,
+  pongFrame,
+  switchingHead,
+  WsError,
+  WsReader,
+} from '../../cdp/websocket.ts';
 import { KernelError } from '../fd-table.ts';
 import type { KernelSocket, LoopbackNet } from '../socket.ts';
 import {
@@ -17,7 +29,17 @@ import {
   responseHead,
 } from './http1.ts';
 import { toHostLoopback } from './loopback-names.ts';
-import type { HeaderList, RealmTransport, RealmTransportResponse } from './transport.ts';
+import type {
+  HeaderList,
+  RealmTransport,
+  RealmTransportResponse,
+  RealmWebSocket,
+} from './transport.ts';
+import { MESSAGE_LIMIT } from './ws-queue.ts';
+
+const SEND_BUFFER = 1024 * 1024;
+const TLS_HANDSHAKE = 0x16;
+const CLOSE_WAIT_MS = 5000;
 
 export const REALM_PROXY_PORT = 3128;
 export interface ProxyLimits {
@@ -249,12 +271,16 @@ function untilAborted(
     response.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
   });
 }
+interface Idle {
+  ms: number;
+}
 interface Exchange {
   sink: HttpSink;
   incoming: Incoming;
   origin?: string;
   conn?: KernelSocket;
   socket: KernelSocket;
+  idle: Idle;
 }
 function plainResponse(status: number, message: string): RealmTransportResponse {
   const body = latin1Bytes(`slicc realm proxy: ${message}\n`);
@@ -268,10 +294,26 @@ function plainResponse(status: number, message: string): RealmTransportResponse 
     cancel: async () => undefined,
   };
 }
-function timedSource(conn: KernelSocket, idleMs: number, stop: AbortSignal): ByteSource {
+function timedSource(conn: KernelSocket, idle: Idle, stop: AbortSignal): ByteSource {
   return {
-    read: (max) => conn.read(max, AbortSignal.any([stop, AbortSignal.timeout(idleMs)])),
+    read: (max, signal) => {
+      const own = signal ? [stop, signal] : [stop];
+      if (Number.isFinite(idle.ms)) own.push(AbortSignal.timeout(idle.ms));
+      return conn.read(max, AbortSignal.any(own));
+    },
   };
+}
+export function webSocketTarget(req: RequestHead): RequestHead {
+  return { ...req, target: req.target.replace(/^ws(s?):/i, (_, s) => `http${s.toLowerCase()}:`) };
+}
+function wireCode(code: number): number {
+  if (code === 1005) return 1000;
+  return code === 1006 || code === 1015 ? 1011 : code;
+}
+function quietly(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    AbortSignal.timeout(ms).addEventListener('abort', () => resolve(), { once: true });
+  });
 }
 export class RealmProxy {
   private readonly options: RealmProxyOptions;
@@ -328,9 +370,10 @@ export class RealmProxy {
   }
   private async serve(conn: KernelSocket): Promise<void> {
     this.connections.add(conn);
-    const incoming = new Incoming(timedSource(conn, this.limits.idleMs, this.stop.signal));
+    const idle = { ms: this.limits.idleMs };
+    const incoming = new Incoming(timedSource(conn, idle, this.stop.signal));
     try {
-      await this.requests({ sink: conn, incoming, conn, socket: conn });
+      await this.requests({ sink: conn, incoming, conn, socket: conn, idle });
     } finally {
       this.connections.delete(conn);
       conn.close();
@@ -356,7 +399,11 @@ export class RealmProxy {
     const req = parseRequestHead(head);
     if (req.method === 'CONNECT') {
       if (!ctx.conn) throw new HttpError(400, 'CONNECT inside a tunnel');
-      await this.connect(ctx.conn, incoming, req);
+      await this.connect(ctx.conn, incoming, req, ctx.idle);
+      return false;
+    }
+    if (req.method === 'GET' && isUpgrade(req.headers)) {
+      await this.websocket(ctx, req);
       return false;
     }
     const url = ctx.origin ? tunnelRequestUrl(req, ctx.origin) : requestUrl(req);
@@ -467,26 +514,128 @@ export class RealmProxy {
     if (chunked) await conn.write(LAST_CHUNK, signal);
     return keep;
   }
-  private async connect(conn: KernelSocket, incoming: Incoming, req: RequestHead): Promise<void> {
+  private async connect(
+    conn: KernelSocket,
+    incoming: Incoming,
+    req: RequestHead,
+    idle: Idle
+  ): Promise<void> {
     const target = tunnelTarget(req);
-    const tunnel = this.options.tunnel;
-    if (!tunnel) {
-      throw new HttpError(
-        501,
-        `CONNECT ${target.host}:${target.port}: no tunnels through this proxy`
-      );
-    }
-    await this.options.tunnelReady?.().catch((e: unknown) => {
-      throw new HttpError(
-        501,
-        `CONNECT ${target.host}:${target.port}: ${e instanceof Error ? e.message : String(e)}`
-      );
-    });
+    const ready = this.tunnelReady(target);
+    const refused = target.port === 443 ? await ready : undefined;
+    if (refused) throw refused;
     await conn.write(latin1Bytes('HTTP/1.1 200 Connection Established\r\n\r\n'), this.stop.signal);
     try {
+      const first = await incoming.peek(this.stop.signal);
+      if (first === undefined) return;
+      if (first !== TLS_HANDSHAKE) {
+        const origin = `http://${target.port === 80 ? target.host : `${target.host}:${target.port}`}`;
+        await this.requests({ sink: conn, incoming, origin, socket: conn, idle });
+        return;
+      }
+      const tunnel = this.options.tunnel;
+      if (!tunnel || (await ready)) return;
       await tunnel(conn, incoming, target, this.stop.signal, (source, sink, origin) =>
-        this.requests({ sink, incoming: new Incoming(source), origin, socket: conn })
+        this.requests({ sink, incoming: new Incoming(source), origin, socket: conn, idle })
       );
     } catch {}
+  }
+  private async tunnelReady(target: TunnelTarget): Promise<HttpError | undefined> {
+    const name = `CONNECT ${target.host}:${target.port}`;
+    if (!this.options.tunnel) return new HttpError(501, `${name}: no tunnels through this proxy`);
+    try {
+      await this.options.tunnelReady?.();
+      return undefined;
+    } catch (e) {
+      return new HttpError(501, `${name}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  private async websocket(ctx: Exchange, req: RequestHead): Promise<void> {
+    const href = ctx.origin ? tunnelRequestUrl(req, ctx.origin) : requestUrl(webSocketTarget(req));
+    const { transport } = this.options;
+    if (!transport.traits.websocket || !transport.websocket) {
+      throw new HttpError(501, 'WebSocket not supported by this transport');
+    }
+    const accept = await acceptKey(req.headers);
+    const protocols = fieldValues(req.headers, 'sec-websocket-protocol')
+      .flatMap((v) => v.split(','))
+      .map((t) => t.trim())
+      .filter((t) => t !== '');
+    let socket: RealmWebSocket;
+    try {
+      socket = await transport.websocket({
+        url: toHostLoopback(href).replace(/^http/, 'ws'),
+        protocols,
+        headers: forwardRequestHeaders(req.headers),
+        signal: this.stop.signal,
+      });
+    } catch (e) {
+      throw new HttpError(502, e instanceof Error ? e.message : String(e));
+    }
+    ctx.idle.ms = Number.POSITIVE_INFINITY;
+    await ctx.sink.write(switchingHead(accept, socket.protocol), this.stop.signal);
+    await this.bridge(ctx, socket);
+  }
+  private async bridge(ctx: Exchange, socket: RealmWebSocket): Promise<void> {
+    const stop = this.stop.signal;
+    let chain: Promise<unknown> = Promise.resolve();
+    const toGuest = (bytes: Uint8Array): Promise<unknown> => {
+      chain = chain.then(() => ctx.sink.write(bytes, stop));
+      return chain;
+    };
+    const done = new AbortController();
+    const reading = AbortSignal.any([stop, done.signal]);
+    const stopping = () => socket.close(1001, 'the proxy is stopping');
+    stop.addEventListener('abort', stopping, { once: true });
+    let guestDone = false;
+    let closeSent = false;
+    const outbound = (async () => {
+      for await (const data of socket.messages) {
+        const text = typeof data === 'string';
+        await toGuest(
+          frame(text ? OP_TEXT : OP_BINARY, text ? new TextEncoder().encode(data) : data)
+        );
+      }
+      const closed = await socket.closed;
+      if (guestDone) return;
+      closeSent = true;
+      await toGuest(closeFrame(wireCode(closed.code), closed.reason));
+      AbortSignal.timeout(CLOSE_WAIT_MS).addEventListener('abort', () => done.abort(), {
+        once: true,
+      });
+    })().catch(() => done.abort());
+    const reader = new WsReader(ctx.incoming, MESSAGE_LIMIT, true);
+    try {
+      for (;;) {
+        const event = await reader.next(reading);
+        if (!event) break;
+        if (event.kind === 'ping') {
+          await toGuest(pongFrame(event.payload));
+          continue;
+        }
+        if (event.kind === 'close') {
+          guestDone = true;
+          if (closeSent) break;
+          const code = wireCode(event.code);
+          socket.close(code, event.reason);
+          await Promise.race([socket.closed, quietly(CLOSE_WAIT_MS)]);
+          await toGuest(closeFrame(code, event.reason));
+          break;
+        }
+        while (socket.buffered > SEND_BUFFER && !reading.aborted) await quietly(10);
+        socket.send(event.kind === 'text' ? event.text : event.bytes);
+      }
+    } catch (e) {
+      if (e instanceof WsError) {
+        guestDone = true;
+        socket.close(e.code, e.message);
+        await toGuest(closeFrame(e.code, e.message)).catch(() => undefined);
+      }
+    } finally {
+      guestDone = true;
+      socket.close(1000, 'the client went away');
+      stop.removeEventListener('abort', stopping);
+      await outbound;
+    }
   }
 }

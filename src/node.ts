@@ -92,7 +92,7 @@ function hostfsFetchOf(options: NodeKernelOptions): { hostfsFetch?: FetchLike } 
 }
 
 export function nodeTransport(): NetworkTransport {
-  const transport = fetchTransport();
+  const transport = fetchTransport({ webSocketHeaders: true });
   return { ...transport, traits: { ...transport.traits, crossOrigin: 'any' } };
 }
 

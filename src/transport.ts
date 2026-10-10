@@ -6,7 +6,11 @@ import type {
   RealmTransportRequest,
   RealmTransportResponse,
   RealmTransportTraits,
+  RealmWebSocket,
+  RealmWebSocketRequest,
 } from './kernel/net/transport.ts';
+import { payloadSize } from './kernel/net/ws-queue.ts';
+import { openWebSocket, type WebSocketConstructor } from './websocket-transport.ts';
 
 export type {
   HeaderList,
@@ -14,6 +18,8 @@ export type {
   RealmTransportRequest as NetworkRequest,
   RealmTransportResponse as NetworkResponse,
   RealmTransportTraits as NetworkTraits,
+  RealmWebSocket as NetworkWebSocket,
+  RealmWebSocketRequest as NetworkWebSocketRequest,
 };
 
 export interface FetchTransportOptions {
@@ -21,7 +27,11 @@ export interface FetchTransportOptions {
   maxRequestBody?: number;
   hint?: string;
   bodyIdleMs?: number;
+  webSocket?: false | WebSocketConstructor;
+  webSocketHeaders?: boolean;
 }
+
+export const SEND_BUFFER = 1024 * 1024;
 
 const MAX_REQUEST_BODY = 64 * 1024 * 1024;
 
@@ -56,13 +66,20 @@ async function* chunks(
 
 export function fetchTransport(options: FetchTransportOptions = {}): RealmTransport {
   const send = options.fetch ?? globalThis.fetch.bind(globalThis);
+  const Socket =
+    options.webSocket === false
+      ? undefined
+      : (options.webSocket ?? (globalThis as { WebSocket?: WebSocketConstructor }).WebSocket);
+  const headers = options.webSocketHeaders === true;
   return {
     traits: {
       manualRedirects: false,
       encodedBodies: false,
       maxRequestBody: options.maxRequestBody ?? MAX_REQUEST_BODY,
       crossOrigin: 'cors',
+      ...(Socket ? { websocket: true as const } : {}),
     },
+    ...(Socket ? { websocket: (request) => openWebSocket(Socket, request, headers) } : {}),
     async fetch(request: RealmTransportRequest): Promise<RealmTransportResponse> {
       let response: Response;
       try {
@@ -156,6 +173,47 @@ export function serveTransport(peer: TransportPeer, transport: RealmTransport): 
       fail(call.nid, e);
     }
   };
+  const sockets = new Map<number, RealmWebSocket>();
+  const openSocket = async (call: Extract<TransportCall, { net: 'ws-open' }>) => {
+    const abort = new AbortController();
+    open.set(call.nid, { abort });
+    try {
+      if (!transport.websocket) throw new Error('WebSocket not supported by this transport');
+      const socket = await transport.websocket({
+        url: call.url,
+        protocols: call.protocols,
+        headers: call.headers,
+        signal: abort.signal,
+      });
+      if (!open.delete(call.nid)) {
+        socket.close(1000, 'cancelled');
+        return;
+      }
+      sockets.set(call.nid, socket);
+      peer.postMessage({ net: 'ws-opened', nid: call.nid, protocol: socket.protocol });
+      for await (const data of socket.messages) {
+        if (typeof data === 'string') peer.postMessage({ net: 'ws-message', nid: call.nid, data });
+        else {
+          const bytes = data.slice();
+          peer.postMessage({ net: 'ws-message', nid: call.nid, data: bytes }, [bytes.buffer]);
+        }
+      }
+      const { code, reason } = await socket.closed;
+      sockets.delete(call.nid);
+      peer.postMessage({ net: 'ws-closed', nid: call.nid, code, reason });
+    } catch (e) {
+      fail(call.nid, e);
+    }
+  };
+  const sendOn = async (call: Extract<TransportCall, { net: 'ws-send' }>) => {
+    const socket = sockets.get(call.nid);
+    if (!socket) return;
+    socket.send(call.data);
+    while (socket.buffered > SEND_BUFFER && sockets.has(call.nid)) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    peer.postMessage({ net: 'ws-acked', nid: call.nid, n: payloadSize(call.data) });
+  };
   const read = async (nid: number) => {
     const body = open.get(nid)?.body;
     if (!body) return;
@@ -173,6 +231,7 @@ export function serveTransport(peer: TransportPeer, transport: RealmTransport): 
     }
   };
   const drop = (nid: number) => {
+    sockets.get(nid)?.close(1000, 'cancelled');
     const entry = open.get(nid);
     open.delete(nid);
     entry?.abort.abort();
@@ -182,10 +241,13 @@ export function serveTransport(peer: TransportPeer, transport: RealmTransport): 
     answer(call) {
       if (call.net === 'fetch') void start(call);
       else if (call.net === 'read') void read(call.nid);
+      else if (call.net === 'ws-open') void openSocket(call);
+      else if (call.net === 'ws-send') void sendOn(call);
+      else if (call.net === 'ws-close') sockets.get(call.nid)?.close(call.code, call.reason);
       else drop(call.nid);
     },
     close() {
-      for (const nid of [...open.keys()]) drop(nid);
+      for (const nid of [...open.keys(), ...sockets.keys()]) drop(nid);
     },
   };
 }
