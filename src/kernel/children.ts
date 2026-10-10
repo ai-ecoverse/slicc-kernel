@@ -3,6 +3,7 @@ import {
   type DeviceMeta,
   deviceFile,
   FdTable,
+  heldFile,
   type KernelErrno,
   KernelError,
   type OpenFile,
@@ -15,6 +16,7 @@ export type ChildStdio =
   | { input: Uint8Array }
   | { capture: true }
   | { none: true }
+  | { dir: string }
   | DeviceMeta;
 
 export type InheritedSlot =
@@ -214,6 +216,7 @@ export class ChildTable {
     if ('fd' in slot) return this.parentFds.get(slot.fd).retain();
     if ('input' in slot) return bytesSource(slot.input);
     if ('device' in slot) return deviceFile(slot.device, slot.access);
+    if ('dir' in slot) return heldFile({ dir: slot.dir });
     if ('capture' in slot) {
       const chunks: Uint8Array[] = [];
       captured.set(n, chunks);

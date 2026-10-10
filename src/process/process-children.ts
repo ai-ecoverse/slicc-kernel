@@ -9,6 +9,9 @@ import type { HttpKernel } from './process-http.ts';
 import type { SocketKernel } from './process-sockets.ts';
 import { wasiErrno } from './wasi-errno.ts';
 
+const S_IFMT = 0o170000;
+const S_IFDIR = 0o040000;
+
 const POLLIN = 0x001;
 const POLLOUT = 0x004;
 const POLLERR = 0x008;
@@ -215,6 +218,7 @@ export function createProcessKernel(deps: ProcessKernelDeps): ProcessKernel {
     promote?.(stream);
     if (stream.sliccKernelFd !== undefined) return { fd: stream.sliccKernelFd };
 
+    if (((stream.node?.mode ?? 0) & S_IFMT) === S_IFDIR && stream.path) return { dir: stream.path };
     const device = deviceOfStream(stream);
     if (device) return device;
     return n === 0 ? { input: drain(Fs, stream) } : { capture: true };
