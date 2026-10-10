@@ -485,6 +485,7 @@ export class WasmProcess {
 
   signal(sig: number): SignalOutcome {
     if (this.execChild !== undefined) {
+      if (sig === SIG.CONT) this.cont();
       void Promise.resolve(this.options.kill?.(this.execChild, sig)).catch(() => undefined);
       if (sig !== SIG.KILL) return 'forward';
       if (!this.options.writesBack?.(this.execChild)) return 'terminate';
