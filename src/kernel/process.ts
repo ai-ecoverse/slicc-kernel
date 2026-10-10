@@ -34,7 +34,14 @@ import { type DefaultAction, defaultAction, isSignal, SIG, sigbit } from './sign
 import { KernelSocket, LoopbackNet } from './socket.ts';
 import { SOCKET_OPS, type SocketSyscall, socketSyscall } from './socket-syscalls.ts';
 import type { KernelTty, Termios } from './tty.ts';
-import { refuseReadonly, type VersionPin, type VfsFileFs, VfsNodes, vfsFile } from './vfs-file.ts';
+import {
+  present,
+  refuseReadonly,
+  type VersionPin,
+  type VfsFileFs,
+  VfsNodes,
+  vfsFile,
+} from './vfs-file.ts';
 
 function aborted(signal: AbortSignal): Promise<never> {
   return new Promise<never>((_, reject) => {
@@ -69,6 +76,10 @@ export type WasmSyscall =
       truncate?: boolean;
 
       create?: boolean;
+
+      exclusive?: boolean;
+
+      existing?: boolean;
 
       pin?: VersionPin;
     }
@@ -154,7 +165,7 @@ export type WasmSyscall =
   | { op: 'proc-setsid' }
   | { op: 'tty-pgrp-get'; fd: number }
   | { op: 'tty-pgrp-set'; fd: number; pgrp: number }
-  | { op: 'sig-mask'; caught: number; ignored: number }
+  | { op: 'sig-mask'; caught: number; ignored: number; defaults?: number }
   | { op: 'sig-pause' }
   | SocketSyscall
   | HttpSyscall
@@ -341,6 +352,8 @@ export interface WasmProcessOptions {
   onPending?: (sig: number) => void;
 
   onTimer?: (which: number) => void;
+
+  onAsync?: () => void;
 
   hasPending?: () => boolean;
 
@@ -570,6 +583,22 @@ export class WasmProcess {
     );
   }
 
+  private async openVfs(req: Extract<FdSyscall, { op: 'fd-open-vfs' }>): Promise<number> {
+    await refuseReadonly(this.options.fs, req.path, req.flags, req);
+    const fd = this.fds.install(heldFile(), 3);
+    try {
+      if (req.exclusive) await this.nodes.createExclusive(req.path);
+      this.fds.installAt(fd, this.openVfsFile(req));
+      if (req.existing && !(await present(this.options.fs, req.path, true))) {
+        throw new KernelError('ENOENT');
+      }
+    } catch (err) {
+      await Promise.resolve(this.fds.close(fd));
+      throw err;
+    }
+    return fd;
+  }
+
   private openVfsFile(req: Extract<FdSyscall, { op: 'fd-open-vfs' }>): OpenFile {
     return vfsFile(
       this.options.fs,
@@ -613,8 +642,7 @@ export class WasmProcess {
       case 'fd-poll':
         return { ok: true, kind: 'json', json: pollFile(this.fds.get(req.fd).file) };
       case 'fd-open-vfs':
-        await refuseReadonly(this.options.fs, req.path, req.flags, req);
-        return { ok: true, kind: 'json', json: this.fds.install(this.openVfsFile(req), 3) };
+        return { ok: true, kind: 'json', json: await this.openVfs(req) };
       case 'fd-info':
         return { ok: true, kind: 'json', json: this.fdInfo(req.fd) };
       case 'fd-list':
@@ -918,6 +946,7 @@ export class WasmProcess {
       case 'sig-mask':
         this.caught = req.caught;
         this.ignored = req.ignored;
+        this.inherited &= ~(req.defaults ?? 0);
         return { ok: true, kind: 'void' };
       case 'sig-pause':
         return this.pause();
@@ -952,7 +981,10 @@ export class WasmProcess {
 
   private alarm: ReturnType<typeof setTimeout> | undefined;
   private readonly dlLog: LinkRecord[] = [];
-  private readonly asyncOps = new AsyncOps((req) => this.syscall(req as WasmSyscall));
+  private readonly asyncOps = new AsyncOps(
+    (req) => this.syscall(req as WasmSyscall),
+    () => this.options.onAsync?.()
+  );
   private alarmEvery: ReturnType<typeof setInterval> | undefined;
 
   private setAlarm(sig: number, first: number, every: number, timer?: number): void {

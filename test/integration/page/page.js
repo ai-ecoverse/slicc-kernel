@@ -11,6 +11,7 @@ const packages = {
   'node_modules/socktest/': ['package.json', 'bin/socktest', 'bin/socktest.wasm'],
   'node_modules/mounttest/': ['package.json', 'bin/mounttest.wasm'],
   'node_modules/httptest/': ['package.json', 'bin/httptest.wasm'],
+  'node_modules/jstest/': ['package.json', 'bin/jstest.mjs', 'bin/nomain.mjs', 'bin/broken.mjs'],
   'node_modules/@ai-ecoverse/wasm-bash/': ['package.json', 'bin/bash', 'bin/bash.wasm'],
   'node_modules/@ai-ecoverse/wasm-curl/': ['package.json', 'bin/curl', 'bin/curl.wasm'],
   'node_modules/@ai-ecoverse/wasm-tls-engine/': [

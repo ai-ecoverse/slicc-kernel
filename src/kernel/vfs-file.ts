@@ -1,5 +1,5 @@
 import { AsyncRangedFile, type AsyncRangedIo } from '../fs/ranged.ts';
-import { type KernelFs, rangedOps } from '../fs/types.ts';
+import { fsError, type KernelFs, rangedOps } from '../fs/types.ts';
 import { KernelError, OpenFile } from './fd-table.ts';
 
 export interface VfsFileFs extends Partial<AsyncRangedIo> {
@@ -13,6 +13,7 @@ export interface VfsFileFs extends Partial<AsyncRangedIo> {
     version?: string;
   }>;
   readlink?(path: string): Promise<string>;
+  lstat?(path: string): Promise<unknown>;
 }
 
 const O_ACCMODE = 0o3;
@@ -163,6 +164,10 @@ export class VfsNode {
     return this.data;
   }
 
+  holds(): boolean {
+    return this.dirty;
+  }
+
   replace(contents: Uint8Array): void {
     this.ranged = undefined;
     this.data = new Uint8Array(contents);
@@ -290,8 +295,37 @@ export class VfsNodes {
 
   private readonly fs: VfsFileFs;
 
+  private readonly entries = new Map<string, Promise<unknown>>();
+
   constructor(fs: VfsFileFs) {
     this.fs = fs;
+  }
+
+  async onEntry<T>(path: string, op: () => Promise<T>): Promise<T> {
+    const key = await this.entryKey(path);
+    const run = (this.entries.get(key) ?? Promise.resolve()).then(op);
+    const tail = run.catch(() => undefined);
+    this.entries.set(key, tail);
+    void tail.then(() => {
+      if (this.entries.get(key) === tail) this.entries.delete(key);
+    });
+    return run;
+  }
+
+  private async entryKey(path: string): Promise<string> {
+    const parent = parentOf(path);
+    const dir = await realDir(this.fs, parent).catch(() => parent);
+    const name = path.slice(path.lastIndexOf('/') + 1);
+    return dir === '/' ? `/${name}` : `${dir}/${name}`;
+  }
+
+  createExclusive(path: string): Promise<void> {
+    return this.onEntry(path, async () => {
+      const node = this.byPath.get(path);
+      const held = node ? await node.serial(async () => node.holds()) : false;
+      if (held || (await present(this.fs, path))) throw fsError('EEXIST', path);
+      await this.fs.writeFile(path, new Uint8Array(0));
+    });
   }
 
   open(path: string, pin?: VersionPin): VfsNode {
@@ -371,6 +405,17 @@ export class VfsNodes {
   }
 }
 
+export async function present(fs: VfsFileFs, path: string, follow = false): Promise<boolean> {
+  const look = (follow ? undefined : fs.lstat) ?? fs.stat;
+  try {
+    await (look ? look.call(fs, path) : fs.readFileBuffer(path));
+    return true;
+  } catch (err) {
+    if ((err as { code?: unknown } | null)?.code === 'ENOENT') return false;
+    throw err;
+  }
+}
+
 const MAX_LINKS = 40;
 
 function parentOf(path: string): string {
@@ -447,12 +492,20 @@ export function keepingOpen(fs: KernelFs, nodes: VfsNodes): KernelFs {
       await fs.rm(path, options);
       nodes.unlinked(at);
     },
-    async rename(from, to) {
+    rename(from, to) {
       const [a, b] = [fs.resolvePath('/', from), fs.resolvePath('/', to)];
-      await nodes.unlinking(b);
-      await fs.rename(from, to);
-      nodes.renamed(a, b);
+      return nodes.onEntry(b, async () => {
+        await nodes.unlinking(b);
+        await fs.rename(from, to);
+        nodes.renamed(a, b);
+      });
     },
+    writeFile: (path, content) =>
+      nodes.onEntry(fs.resolvePath('/', path), () => fs.writeFile(path, content)),
+    symlink: (target, path) =>
+      nodes.onEntry(fs.resolvePath('/', path), () => fs.symlink(target, path)),
+    mkdir: (path, options) =>
+      nodes.onEntry(fs.resolvePath('/', path), () => fs.mkdir(path, options)),
   };
 }
 

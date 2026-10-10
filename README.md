@@ -188,6 +188,28 @@ A WASI command can name an ES module of its package that provides imports of its
 - `async`: operations of the process that any of its threads can wait for: `submit(req)` runs a kernel syscall without blocking the caller, `resolve(value)` completes at once, `hold()` never completes, and each returns an id; `wait(timeoutMs?)` returns the id of a completed one (0 after the timeout, -1 once `close()` was called), `take(id)` its `{ value }` or `{ error }` (`undefined` while it is pending), and `cancel(id)` drops one;
 - `errno(err)`: the WASI errno of an error.
 
+### JS programs
+
+A command can be an ES module instead of a wasm program: `"abi": "js"` and `module` name the module in the package, which must be one self-contained file (no relative or bare imports), and `args`, `argv0` and `env` work as for other commands.
+
+```json
+{ "slicc": { "commands": { "jstool": { "abi": "js", "module": "dist/jstool.mjs" } } } }
+```
+
+The module's default export (or its `main` export) is called with a context and returns the exit status, or nothing for 0. It runs as an ordinary process in a process worker of its own: it has a pid and a process group, shows in `ps` and `/proc`, takes part in pipes, redirects and job control, and `kill`, `^C` and `^Z` reach it. A stopped program freezes at its next turn of the event loop (an `await`, a timer, a callback) and stays frozen, its timers and callbacks included, until `SIGCONT`; a synchronous loop that never yields runs on until it does, as a WASI program runs on until its next system call, since nothing can preempt a worker's running code short of ending it. A process worker is a dedicated worker, so a JS program can use what browsers offer there, such as WebCodecs (`VideoEncoder`, `VideoDecoder`, `AudioEncoder`, `AudioDecoder`, `ImageDecoder`) and `OffscreenCanvas`, without the page's main thread. The context (`JsProgramContext`, exported as a type) has:
+
+- `argv` (with `argv[0]`), `env`, `pid` (the pid `ps` shows, also after an `exec`), `ppid()` (asked each time, so an orphan sees 1) and `cwd`, and `resolve(path)` to make a path absolute against `cwd`;
+- `stdin`, `stdout` and `stderr` as web streams, and `read(fd, max?)` (empty at end of file), `write(fd, bytes | string)` and `close(fd)` on any descriptor it inherited. A write waits until the pipe has room, so a slow reader slows the program down;
+- `fdStatus(fd)` (`{ type, tty, seekable }`, `type` being `file`, `pipe`, `tty`, `socket`, `device` or `directory`) and `isatty(fd)`, to tell `< file` from a pipe;
+- `open(path, { read, write, append, create, exclusive, truncate })`, which returns a file with `read(position, length)`, `write(position, bytes)`, `size()`, `truncate(size)`, `sync()` and `close()`. Reads and writes go through the kernel's paged files at those positions, so a large file is never read whole;
+- `fs`: `stat`, `lstat`, `exists`, `readdir`, `mkdir` (with parents), `rm` (recursive), `unlink`, `rename`, `symlink`, `readlink`, and `readFile`/`writeFile` for small files;
+- `signals`: `on(signal, handler)` catches a signal (by number or as `'SIGINT'`), `ignore(signal)` ignores it and `reset(signal)` restores its default action. A call blocked in a read or write is restarted after a handler runs; signals without a handler keep their default actions, so an uncaught `SIGINT` ends the program with 130 and `SIGKILL` always does;
+- `exit(status)`, which ends the program once its pending writes are done.
+
+A program that throws, or leaves an error or a rejected promise unhandled, ends with status 1 and the message on stderr; one whose module cannot be loaded, or exports no function, ends with 126. A write to a pipe whose reader is gone ends the program with 141, unless it ignores or catches `SIGPIPE` (an ignore inherited from its parent counts), in which case the write fails with `EPIPE`. Errors carry a POSIX `code`. Reads and writes of pipes, terminals and sockets go through the kernel's asynchronous operations, so a program blocked reading stdin can still write and handle signals; other calls of one process are made one at a time. A JS program cannot `fork`, and threads it starts itself are not the kernel's.
+
+The module has the trust of an Emscripten program's glue or a WASI program's imports module: it comes from a package that was installed, and it runs in the worker of its own process. The kernel withholds the worker's own ways out before it loads the module: `fetch`, `XMLHttpRequest`, `WebSocket`, `WebTransport`, `EventSource`, `importScripts`, `indexedDB`, `caches`, `cookieStore`, `Worker`, `SharedWorker`, `BroadcastChannel`, `postMessage`, `close`, and `navigator.storage`, `navigator.locks` and `navigator.serviceWorker` are `undefined`, and a worker where one of them cannot be removed refuses to run the program (126). A program's files are the kernel's, through the context; it reaches the kernel only through its own process's system calls, as the context makes them, and no other process's. This is a guard against programs going around the kernel, not a sandbox: `import()` of a URL is a request the kernel cannot withhold. Under the Node entry, a JS program also has Node's own modules.
+
 ## Network
 
 Programs talk to each other over sockets, and to the outside world through a proxy that hands every request to a transport the page passes in.
