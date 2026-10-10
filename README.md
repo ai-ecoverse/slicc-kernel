@@ -312,7 +312,7 @@ The proxy answers `200` with `Content-Type: application/vnd.slicc.raw-fetch`: a 
 
 Directories are renamed with `FileSystemHandle.move()` where available, else by copy and delete.
 
-`mmap` of a regular file works on every file system, for Emscripten programs built with `mmap` (whose glue exports `emscripten_builtin_memalign`) as well as for WASIX ones: the kernel reads the mapped range into fresh memory of the process, as Emscripten's MEMFS does. A `MAP_PRIVATE` mapping may be written, and its changes stay in the process. A writable `MAP_SHARED` mapping is `ENODEV`. A read-only `MAP_SHARED` mapping is a copy taken at `mmap`, so later changes to the file do not show in it.
+`mmap` of a regular file works on every file system, for Emscripten programs built with `mmap` (whose glue exports `emscripten_builtin_memalign`) as well as for WASIX ones: the kernel reads the mapped range into fresh memory of the process, as Emscripten's MEMFS does. A `MAP_PRIVATE` mapping may be written, and its changes stay in the process. A writable `MAP_SHARED` mapping of such a file is `ENODEV`; a file in the process's own in-memory file system (MEMFS, as under `/dev`) keeps Emscripten's own mapping, which writes back. A read-only `MAP_SHARED` mapping is a copy taken at `mmap`, so later changes to the file do not show in it.
 
 ### Mounts
 
