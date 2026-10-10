@@ -30,7 +30,7 @@ export interface JsListenOptions {
 }
 
 export interface JsConnectOptions {
-  host: string;
+  host?: string;
   port: number;
   signal?: AbortSignal;
 }
@@ -172,9 +172,11 @@ export function netOps(kernel: JsKernel, io: NetIo): JsNet {
     connect: async (options) => {
       const signal = options.signal ?? NEVER;
       signal.throwIfAborted();
+      const host = options.host ?? '127.0.0.1';
+      if (host.includes(':')) throw new JsCallError('EADDRNOTAVAIL', host);
       const addr: InetAddr = {
         family: 'inet',
-        host: await resolve(options.host, signal),
+        host: await resolve(host, signal),
         port: port(options.port),
       };
       return opened(async (fd) => {
