@@ -610,6 +610,7 @@ export class RealmProxy {
     let closeSent = false;
     const outbound = (async () => {
       for await (const data of socket.messages) {
+        if (guestDone) continue;
         const text = typeof data === 'string';
         await toGuest(
           frame(text ? OP_TEXT : OP_BINARY, text ? new TextEncoder().encode(data) : data)
