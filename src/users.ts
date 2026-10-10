@@ -249,7 +249,11 @@ export class UserDb {
       );
       for (const r of parsed(keptGroups)) r.members = r.members.filter((m) => m !== name);
       const home = this.fs.resolvePath('/', row.home);
-      const removeHome = !options.keepHome && HOME_DIR.test(home) && (await this.fs.exists(home));
+      const shared = parsed(passwd).some(
+        (r) => r !== row && this.fs.resolvePath('/', r.home) === home
+      );
+      const removeHome =
+        !options.keepHome && !shared && HOME_DIR.test(home) && (await this.fs.exists(home));
       const staged = `/home/.${name}.removed-${Date.now()}`;
       await this.commit(
         formatPasswd(passwd.filter((r) => r !== row)),
