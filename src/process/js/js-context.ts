@@ -21,6 +21,7 @@ import {
   written,
 } from './js-io.ts';
 import { JsCallError, type JsKernel } from './js-kernel.ts';
+import { type JsNet, netOps } from './js-net.ts';
 import { type JsSyncContext, JsSyncKernel, laneOf, type SyncCall, syncOps } from './js-sync.ts';
 
 export type { JsFdType, JsOpenOptions } from './js-io.ts';
@@ -83,6 +84,7 @@ export interface JsProgramContext {
   spawn(options: JsSpawnOptions): Promise<JsChild>;
   wait(pid: number): Promise<JsExited>;
   kill(pid: number, signal?: JsSignal): Promise<void>;
+  net: JsNet;
   exit(code?: number): never;
 }
 
@@ -254,11 +256,8 @@ export function createContext(o: ContextOptions): CreatedContext {
     handles,
   });
 
-  const children = childOps(
-    kernel,
-    { read, send: writeAll, close: (fd) => ctx.close(fd) },
-    { env: o.env, cwd: o.cwd, signal: signalNumber }
-  );
+  const io = { read, send: writeAll, close: (fd: number) => ctx.close(fd) };
+  const children = childOps(kernel, io, { env: o.env, cwd: o.cwd, signal: signalNumber });
 
   const ctx: JsProgramContext = {
     argv: o.argv,
@@ -303,6 +302,7 @@ export function createContext(o: ContextOptions): CreatedContext {
     },
     sync,
     ...children,
+    net: netOps(kernel, io),
     exit,
   };
   const drain = async (): Promise<void> => {
