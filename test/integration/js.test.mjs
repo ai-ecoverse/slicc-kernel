@@ -202,6 +202,15 @@ test('a JS program serves the page and other processes over the kernel loopback 
   assert.deepEqual(page.errors, []);
 });
 
+test('a JS program asks for a WebSocket over the kernel transport, which the default browser transport declines', async (t) => {
+  const { page, run } = await booted(chrome, t);
+  assert.deepEqual(
+    await run(['jstest', 'wsone', 'wss://echo.example/socket']),
+    ok('one TypeError:ENOTSUP\n')
+  );
+  assert.deepEqual(page.errors, []);
+});
+
 test('a file whose suffix a package maps (binfmt) runs with that command, unless #! says otherwise', async (t) => {
   const { bash } = await booted(chrome, t);
   assert.deepEqual(

@@ -79,6 +79,12 @@ export type {
   JsNet,
 } from './process/js/js-net.ts';
 export type { JsSyncContext, JsSyncFile } from './process/js/js-sync.ts';
+export type {
+  JsWebSocket,
+  JsWebSocketClose,
+  JsWebSocketMessage,
+  JsWebSocketOptions,
+} from './process/js/js-websocket.ts';
 export {
   type FetchTransportOptions,
   fetchTransport,

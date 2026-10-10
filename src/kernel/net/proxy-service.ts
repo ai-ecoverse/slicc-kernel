@@ -41,7 +41,7 @@ import { MESSAGE_LIMIT } from './ws-queue.ts';
 const SEND_BUFFER = 1024 * 1024;
 const TLS_HANDSHAKE = 0x16;
 const TOKEN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
-const NO_WEBSOCKET =
+export const NO_WEBSOCKET =
   'WebSocket not supported by this transport (fetchTransport needs { webSocket: true })';
 
 export const REALM_PROXY_PORT = 3128;
