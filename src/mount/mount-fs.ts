@@ -186,6 +186,7 @@ interface WriteSession {
 export class MountTable {
   private readonly mounts = new Map<string, Mount>();
   private readonly sessions = new Map<string, WriteSession>();
+  private readonly committing = new Map<string, { mount: Mount; done: Promise<void> }>();
   private devices = 0;
   private readonly pending = new Set<string>();
   private readonly notes = new Map<string, MountEntry>();
@@ -319,26 +320,32 @@ export class MountTable {
     if (!detach && this.deps.busy(at)) throw errnoError('EBUSY', `${at} has open files`);
     this.notes.delete(at);
     this.mounts.delete(at);
-    const open = [...this.sessions].filter(([, s]) => s.mount === mount);
+    const waits = [...this.sessions]
+      .filter(([, s]) => s.mount === mount)
+      .map(([real]) => this.commit(real));
+    for (const c of this.committing.values()) if (c.mount === mount) waits.push(c.done);
     const close = () => {
       mount.conn.close();
       mount.dispose();
     };
-    if (open.length === 0) close();
-    else void Promise.allSettled(open.map(([real]) => this.commit(real))).then(close);
+    if (waits.length === 0) close();
+    else void Promise.allSettled(waits).then(close);
   }
 
   session(mount: Mount, real: string, rel: string): WriteSession {
     let session = this.sessions.get(real);
     if (!session) {
-      const fh = mount.conn.call({
-        op: 'open',
-        path: rel,
-        write: true,
-        create: true,
-        truncate: false,
-        exclusive: false,
-      }) as Promise<number>;
+      const open = () =>
+        mount.conn.call({
+          op: 'open',
+          path: rel,
+          write: true,
+          create: true,
+          truncate: false,
+          exclusive: false,
+        }) as Promise<number>;
+      const before = this.committing.get(real)?.done ?? Promise.resolve();
+      const fh = before.then(open, open);
       session = { mount, fh, extents: [], truncated: false };
       this.sessions.set(real, session);
       fh.catch(() => this.sessions.delete(real));
@@ -352,13 +359,22 @@ export class MountTable {
 
   async commit(real: string): Promise<void> {
     const session = this.sessions.get(real);
-    if (!session) return;
+    if (!session) return this.committing.get(real)?.done;
     this.sessions.delete(real);
-    try {
-      await session.mount.conn.call({ op: 'release', fh: await session.fh });
-    } finally {
-      this.forget(session.mount, real);
-    }
+    const done = (async () => {
+      try {
+        await session.mount.conn.call({ op: 'release', fh: await session.fh });
+      } finally {
+        this.forget(session.mount, real);
+      }
+    })();
+    const entry = { mount: session.mount, done };
+    this.committing.set(real, entry);
+    const settle = () => {
+      if (this.committing.get(real) === entry) this.committing.delete(real);
+    };
+    done.then(settle, settle);
+    return done;
   }
 
   async commitUnder(prefix: string): Promise<void> {
@@ -736,8 +752,8 @@ class MountFs implements KernelFs {
   }
 
   private statWriting(attr: DriverAttr, real: string, mount: Mount): FsStat {
-    const written = this.table.writing(real)?.extents.at(-1)?.[1] ?? 0;
-    return statOf({ ...attr, size: Math.max(attr.size, written) }, real, mount);
+    const ends = (this.table.writing(real)?.extents ?? []).map(([, end]) => end);
+    return statOf({ ...attr, size: Math.max(attr.size, ...ends) }, real, mount);
   }
 
   async stat(path: string): Promise<FsStat> {

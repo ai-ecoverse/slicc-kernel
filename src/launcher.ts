@@ -783,7 +783,7 @@ export class Launcher {
 
   private released(path: string): void {
     const at = normalizePath(path);
-    const open = [...this.openFiles].some((nodes) => nodes.holds(at)) || heldUnder(this.held, at);
+    const open = [...this.openFiles].some((nodes) => nodes.writes(at)) || heldUnder(this.held, at);
     if (!open) void this.mounts.commit(at).catch(() => undefined);
   }
 
