@@ -128,6 +128,9 @@ export class KernelSocket implements KernelFile {
   get listening(): boolean {
     return this.state === 'listening';
   }
+  get unconnected(): boolean {
+    return this.state === 'open' || this.state === 'listening';
+  }
   private connection(): Link {
     if (!this.link || this.state !== 'connected') throw new KernelError('ENOTCONN');
     return this.link;
