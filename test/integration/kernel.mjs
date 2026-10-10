@@ -10,6 +10,8 @@ async function reportStalls(page) {
     stalled++;
     console.log(line);
   }
+  for (const line of await page.evaluate(() => window.takeLargeFetches?.() ?? []))
+    console.log(line);
 }
 
 export async function booted(chrome, t, options = {}) {

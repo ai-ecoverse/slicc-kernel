@@ -80,7 +80,7 @@ async function tracked(what, work) {
 
 window.inFlight = () => [...inFlight].map((e) => ({ ...e, ms: Date.now() - e.since }));
 
-const STALL = 30000;
+const STALL = 12000;
 
 function fetchOnce(url) {
   return tracked(`fetch ${url}`, async (entry) => {
@@ -116,7 +116,7 @@ function fetchOnce(url) {
       const reason = controller.signal.reason ?? err;
       throw Object.assign(
         new Error(`fetching ${url}: ${reason}, after ${entry.bytes} bytes in ${ms} ms`),
-        { stalled: reason?.stalled === true, bytes: entry.bytes }
+        { stalled: reason?.stalled === true, bytes: entry.bytes, ms }
       );
     } finally {
       clearInterval(watch);
@@ -125,16 +125,34 @@ function fetchOnce(url) {
 }
 
 const stalls = [];
+const large = [];
+const LARGE = 20 * 1024 * 1024;
+const RETRIES = 3;
 
 window.takeStalls = () => stalls.splice(0);
+window.takeLargeFetches = () => large.splice(0);
 
 async function fetchBytes(url) {
-  try {
-    return await fetchOnce(url);
-  } catch (err) {
-    if (!err.stalled) throw err;
-    stalls.push(`chrome stalled on ${url} after ${err.bytes} bytes; re-fetched`);
-    return fetchOnce(url);
+  const start = Date.now();
+  for (let retry = 0; ; retry++) {
+    const attempt = Date.now();
+    try {
+      const bytes = await fetchOnce(url);
+      if (bytes.length > LARGE || retry > 0) {
+        large.push(
+          `chrome fetched ${url}: ${bytes.length} bytes in ${Date.now() - start} ms, ${retry} re-fetches`
+        );
+      }
+      return bytes;
+    } catch (err) {
+      if (!err.stalled) throw err;
+      stalls.push(
+        `chrome stalled on ${url} (attempt ${retry + 1}) after ${err.bytes} bytes ` +
+          `(no data for ${STALL / 1000} s, ${((Date.now() - attempt) / 1000).toFixed(1)} s in)` +
+          (retry < RETRIES ? '; re-fetching' : '; giving up')
+      );
+      if (retry === RETRIES) throw err;
+    }
   }
 }
 
