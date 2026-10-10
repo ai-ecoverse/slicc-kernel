@@ -10,10 +10,16 @@ export interface HostfsGrant {
   capabilities?: DriverCapabilities;
 }
 
+export interface HostfsPortGrant {
+  port: MessagePort;
+  token?: string;
+  capabilities?: DriverCapabilities;
+}
+
 export type HostfsGrantHook = (
   source: string,
   options: { readonly: boolean }
-) => Promise<HostfsGrant>;
+) => Promise<HostfsGrant | HostfsPortGrant>;
 
 export type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
 
@@ -430,10 +436,172 @@ export interface HostfsTiming {
   connectMs?: number;
 }
 
+let nextPortToken = 0;
+
+type PortReply = {
+  id: number;
+  result?: unknown;
+  bytes?: Uint8Array;
+  event?: HostfsEvent;
+  open?: boolean;
+  end?: boolean;
+  error?: { code?: string; message?: string };
+};
+
+export class PortTransport implements HostfsTransport {
+  readonly capabilities: DriverCapabilities;
+  readonly token: string;
+  private readonly port: MessagePort;
+  private readonly waiting = new Map<number, (reply: PortReply) => void>();
+  private next = 0;
+
+  constructor(grant: HostfsPortGrant) {
+    this.port = grant.port;
+    this.capabilities = grant.capabilities ?? {};
+    this.token = grant.token ?? `port-${++nextPortToken}`;
+    this.port.addEventListener('message', (event: MessageEvent<PortReply>) => {
+      this.waiting.get(event.data?.id)?.(event.data);
+    });
+    this.port.start();
+  }
+
+  get maxIo(): number {
+    return this.capabilities.maxIo ?? HOSTFS_IO;
+  }
+
+  private ask(message: Record<string, unknown>, transfer: Transferable[] = []): Promise<PortReply> {
+    const id = ++this.next;
+    return new Promise((resolve, reject) => {
+      this.waiting.set(id, (reply) => {
+        this.waiting.delete(id);
+        if (reply.error) reject(fsError(reply.error.code ?? 'EIO', reply.error.message ?? ''));
+        else resolve(reply);
+      });
+      try {
+        this.port.postMessage({ id, ...message }, transfer);
+      } catch (err) {
+        this.waiting.delete(id);
+        reject(fsError('ENOTCONN', `the folder's port is closed: ${(err as Error).message}`));
+      }
+    });
+  }
+
+  async call<T>(op: string, body: Record<string, unknown> = {}): Promise<T> {
+    return (await this.ask({ op: 'call', name: op, body })).result as T;
+  }
+
+  async read(fh: number, offset: number, size: number, ifMatch?: string): Promise<Uint8Array> {
+    const reply = await this.ask({ op: 'read', fh, offset, size, ...(ifMatch ? { ifMatch } : {}) });
+    return reply.bytes ?? new Uint8Array(0);
+  }
+
+  async write(fh: number, offset: number, bytes: Uint8Array): Promise<void> {
+    await this.ask({ op: 'write', fh, offset, bytes });
+  }
+
+  watch(
+    signal: AbortSignal,
+    onEvent: (event: HostfsEvent) => void,
+    onOpen: () => void = () => undefined
+  ): Promise<void> {
+    const id = ++this.next;
+    return new Promise((resolve, reject) => {
+      const finish = () => {
+        this.waiting.delete(id);
+        signal.removeEventListener('abort', stop);
+      };
+      const stop = () => {
+        finish();
+        this.port.postMessage({ id, op: 'unwatch' });
+        resolve();
+      };
+      this.waiting.set(id, (reply) => {
+        if (reply.open) return onOpen();
+        if (reply.event) return onEvent(reply.event);
+        finish();
+        if (reply.error) reject(fsError(reply.error.code ?? 'ENOTCONN', reply.error.message ?? ''));
+        else resolve();
+      });
+      signal.addEventListener('abort', stop, { once: true });
+      this.port.postMessage({ id, op: 'watch' });
+    });
+  }
+}
+
+const errorOf = (err: unknown) => ({
+  code: typeof codeOf(err) === 'string' ? (codeOf(err) as string) : 'EIO',
+  message: (err as Error | null)?.message ?? String(err),
+});
+
+export function serveHostfsPort(port: MessagePort, transport: HostfsTransport): () => void {
+  const watches = new Map<number, AbortController>();
+  const send = (reply: PortReply, transfer: Transferable[] = []) =>
+    port.postMessage(reply, transfer);
+  const listener = async ({
+    data,
+  }: MessageEvent<Record<string, unknown> & { id: number; op: string }>) => {
+    const { id, op } = data;
+    if (op === 'unwatch') return watches.get(id)?.abort();
+    if (op === 'watch') {
+      const stop = new AbortController();
+      watches.set(id, stop);
+      try {
+        await transport.watch(
+          stop.signal,
+          (event) => send({ id, event }),
+          () => send({ id, open: true })
+        );
+        send({ id, end: true });
+      } catch (err) {
+        send({ id, error: errorOf(err) });
+      } finally {
+        watches.delete(id);
+      }
+      return;
+    }
+    try {
+      if (op === 'read') {
+        const bytes = await transport.read(
+          data.fh as number,
+          data.offset as number,
+          data.size as number,
+          data.ifMatch as string | undefined
+        );
+        return send({ id, bytes }, [bytes.buffer as ArrayBuffer]);
+      }
+      if (op === 'write') {
+        await transport.write(data.fh as number, data.offset as number, data.bytes as Uint8Array);
+        return send({ id });
+      }
+      if (op !== 'call') throw fsError('EINVAL', `unknown hostfs port op ${op}`);
+      send({
+        id,
+        result: await transport.call(data.name as string, data.body as Record<string, unknown>),
+      });
+    } catch (err) {
+      send({ id, error: errorOf(err) });
+    }
+  };
+  port.addEventListener('message', listener as (event: MessageEvent) => void);
+  port.start();
+  return () => {
+    port.removeEventListener('message', listener as (event: MessageEvent) => void);
+    for (const stop of watches.values()) stop.abort();
+    port.close();
+  };
+}
+
 export function grantConnect(hook: HostfsGrantHook, fetch: FetchLike): HostfsConnect {
   return async (source, options) => {
-    const grant = () => hook(source, options);
-    return new HostfsClient(await grant(), grant, fetch);
+    const first = await hook(source, options);
+    if ('port' in first) return new PortTransport(first);
+    const grant = async () => {
+      const again = await hook(source, options);
+      if ('port' in again)
+        throw fsError('ESTALE', 'the folder moved to a port, so its open files are gone');
+      return again;
+    };
+    return new HostfsClient(first, grant, fetch);
   };
 }
 

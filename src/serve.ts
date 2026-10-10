@@ -20,7 +20,7 @@ import {
   type TerminalSession,
 } from './launcher.ts';
 import type { MediumHandle } from './mount/fsa.ts';
-import type { HostfsGrant, HostfsGrantHook } from './mount/hostfs.ts';
+import type { HostfsGrant, HostfsGrantHook, HostfsPortGrant } from './mount/hostfs.ts';
 import type { MediaStore } from './mount/media.ts';
 import type { MountSpec } from './mount/mount-fs.ts';
 import type { ProcessMountRequest } from './mount/syscall.ts';
@@ -205,7 +205,7 @@ function answered(
 
 export interface GrantReply {
   id: number;
-  grant?: HostfsGrant;
+  grant?: HostfsGrant | HostfsPortGrant;
   error?: string;
 }
 
@@ -359,11 +359,11 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
     });
   }
 
-  const grants = new Map<number, PromiseWithResolvers<HostfsGrant>>();
+  const grants = new Map<number, PromiseWithResolvers<HostfsGrant | HostfsPortGrant>>();
   let nextGrant = 0;
   const askGrant: HostfsGrantHook = (source, options) => {
     const id = ++nextGrant;
-    const waiting = Promise.withResolvers<HostfsGrant>();
+    const waiting = Promise.withResolvers<HostfsGrant | HostfsPortGrant>();
     grants.set(id, waiting);
     port.postMessage({ hostfs: { id, source, ...options } });
     return waiting.promise;
