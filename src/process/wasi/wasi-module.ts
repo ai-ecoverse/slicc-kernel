@@ -181,3 +181,13 @@ export function foreignImports(bytes: Uint8Array): ForeignResults | undefined {
   }
   return {};
 }
+
+const LIBC_MARK = /^wasix-sysroot \d{4}\.\d+\.\d+-(\d+)/;
+
+export function libcVersion(module: WebAssembly.Module): number | undefined {
+  for (const section of WebAssembly.Module.customSections(module, 'slicc.libc')) {
+    const found = LIBC_MARK.exec(new TextDecoder().decode(section));
+    if (found) return Number(found[1]);
+  }
+  return undefined;
+}

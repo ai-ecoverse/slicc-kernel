@@ -1,6 +1,7 @@
 import { E, FDFLAGS, wasiErrnoOf, wasixSignal } from './wasi-abi.ts';
 import { WasiError } from './wasi-files.ts';
 import { WasiExit, type WasiFunction, type WasiHost, wrap } from './wasi-host.ts';
+import { libcVersion } from './wasi-module.ts';
 import type { WasiSignals } from './wasi-signals.ts';
 import { MAIN_TID, ThreadExit, type WasiThreads } from './wasi-threads.ts';
 import { callDynamic } from './wasix-ffi.ts';
@@ -47,6 +48,7 @@ export function futexWait(
   }
 }
 
+const EINTR_LIBC = 22;
 const MAIN_HANDLE = 0x7fffffff;
 
 export class WasixHost {
@@ -76,7 +78,7 @@ export class WasixHost {
     if (module && !WebAssembly.Module.imports(module).some((i) => i.name === 'fd_fdflags_set')) {
       host.fds.implicitCloexec = true;
 
-      host.interruptWakes = true;
+      host.interruptWakes = (libcVersion(module) ?? 0) < EINTR_LIBC;
     }
   }
 
