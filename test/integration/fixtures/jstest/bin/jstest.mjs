@@ -1137,6 +1137,38 @@ async function fetches(ctx, [base]) {
       (err) => `${err.name} ${err.message} ${err.cause?.message}`
     );
   });
+  await fetchTry(out, 'chunks', async () => {
+    const body = new ReadableStream({
+      start(c) {
+        c.enqueue('ab');
+        c.enqueue(new Uint16Array([0x1234]));
+        c.enqueue(new Uint8Array([0x41, 0x42]).buffer);
+        c.close();
+      },
+    });
+    return (await f('/hex', { method: 'PUT', body, duplex: 'half' })).text();
+  });
+  await fetchTry(out, 'badchunk', () => {
+    const body = new ReadableStream({
+      start(c) {
+        c.enqueue(42);
+        c.close();
+      },
+    });
+    return f('/hex', { method: 'PUT', body, duplex: 'half' }).then(
+      () => 'ok',
+      (err) => `${err.name} ${err.message} ${err.cause?.message}`
+    );
+  });
+  await fetchTry(out, 'bigstuck', async () => {
+    const body = new ReadableStream({
+      start(c) {
+        c.enqueue(new Uint8Array(2000));
+      },
+      cancel: () => new Promise(() => {}),
+    });
+    return (await f('/hex', { method: 'PUT', body, duplex: 'half' })).status;
+  });
   await fetchTry(out, 'abortearly', () => {
     const body = new ReadableStream({ pull: () => new Promise(() => {}) });
     const c = new AbortController();

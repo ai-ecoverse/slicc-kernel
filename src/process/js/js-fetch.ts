@@ -77,13 +77,22 @@ function withMeta(response: Response, url: string, redirected: boolean): Respons
   return response;
 }
 
+function bytesOf(chunk: unknown): Uint8Array {
+  if (typeof chunk === 'string') return new TextEncoder().encode(chunk);
+  if (chunk instanceof ArrayBuffer) return new Uint8Array(chunk);
+  if (ArrayBuffer.isView(chunk)) {
+    return new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+  }
+  throw failed(new TypeError('a request body chunk must be bytes or a string'));
+}
+
 async function bodyOf(
   request: Request,
   cap: number,
   signal: AbortSignal
 ): Promise<Uint8Array | undefined | typeof OVER> {
-  if (!request.body || request.method === 'GET' || request.method === 'HEAD') return undefined;
   signal.throwIfAborted();
+  if (!request.body || request.method === 'GET' || request.method === 'HEAD') return undefined;
   const reader = request.body.getReader();
   const stop = (): void => void reader.cancel(signal.reason).catch(() => undefined);
   signal.addEventListener('abort', stop, { once: true });
@@ -96,12 +105,13 @@ async function bodyOf(
       });
       signal.throwIfAborted();
       if (next.done) break;
-      length += next.value.length;
+      const chunk = bytesOf(next.value);
+      length += chunk.length;
       if (length > cap) {
-        await reader.cancel();
+        reader.cancel().catch(() => undefined);
         return OVER;
       }
-      parts.push(next.value);
+      parts.push(chunk);
     }
   } finally {
     signal.removeEventListener('abort', stop);
