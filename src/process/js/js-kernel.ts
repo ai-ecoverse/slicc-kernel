@@ -40,6 +40,7 @@ export class JsKernel {
   pid = 0;
   private reported = { caught: 0, ignored: 0 };
   private watching = false;
+  faulted = false;
 
   constructor(o: JsKernelOptions) {
     this.header = new Int32Array(o.sab, 0, SAB_HEADER_I32);
@@ -97,11 +98,16 @@ export class JsKernel {
         continue;
       }
       try {
-        Promise.resolve(handler(sig)).catch(this.onError);
+        Promise.resolve(handler(sig)).catch((err) => this.fault(err));
       } catch (err) {
-        this.onError(err);
+        this.fault(err);
       }
     }
+  }
+
+  private fault(err: unknown): void {
+    this.faulted = true;
+    this.onError(err);
   }
 
   async watch(): Promise<void> {

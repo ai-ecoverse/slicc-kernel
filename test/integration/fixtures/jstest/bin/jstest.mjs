@@ -476,6 +476,15 @@ async function syncexit(ctx) {
   return 0;
 }
 
+async function syncthrow(ctx) {
+  await ctx.signals.on('SIGINT', () => {
+    throw new Error('handler boom');
+  });
+  await ctx.write(1, 'ready\n');
+  ctx.sync.read(0);
+  return 0;
+}
+
 function syncerr(fn) {
   try {
     fn();
@@ -577,6 +586,7 @@ const modes = {
   syncfiles,
   syncdev,
   syncexit,
+  syncthrow,
   globals,
   devices,
   full,
