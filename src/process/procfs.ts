@@ -94,7 +94,7 @@ export function pidStatus(info: ProcessInfo): string {
   const ids = `${UID}\t${UID}\t${UID}\t${UID}`;
   return [
     `Name:\t${commOf(info)}`,
-    'Umask:\t0022',
+    `Umask:\t${(info.umask ?? 0o022).toString(8).padStart(4, '0')}`,
     `State:\t${state}`,
     `Tgid:\t${info.pid}`,
     'Ngid:\t0',

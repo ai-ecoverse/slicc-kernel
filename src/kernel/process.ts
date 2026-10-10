@@ -111,6 +111,7 @@ export type WasmSyscall =
       timer?: number;
     }
   | { op: 'fd-renumber'; from: number; to: number; keep?: boolean }
+  | { op: 'proc-umask'; mask?: number }
   | {
       op: 'fd-promote';
       fd: number;
@@ -274,6 +275,7 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'fd-cloexec',
   'fd-list',
   'proc-alarm',
+  'proc-umask',
   'dl-log',
   'fd-renumber',
   'fd-promote',
@@ -316,12 +318,16 @@ export function isWasmSyscall(req: object): req is WasmSyscall {
 
 const MAX_READ = 1024 * 1024;
 
+export const DEFAULT_UMASK = 0o022;
+
 const DYING: SyncFsResult = { ok: false, errno: 'EINTR', message: 'the process is being killed' };
 
 const HOSTS_ONLY = new Resolver({ routes: new Routes() });
 
 export interface WasmProcessOptions {
   ignored?: number;
+
+  umask?: number;
 
   identity?: () => Promise<{ pid: number; ppid: number }>;
 
@@ -392,6 +398,8 @@ export class WasmProcess {
 
   private dying = false;
 
+  umask = DEFAULT_UMASK;
+
   private execChild: number | undefined;
 
   execTermsig: number | undefined;
@@ -426,6 +434,7 @@ export class WasmProcess {
 
     this.options = options;
     this.inherited = options.ignored ?? 0;
+    this.umask = options.umask ?? DEFAULT_UMASK;
     this.children = new ChildTable(fds, options.spawner, options.forker);
     this.nodes = options.nodes ?? new VfsNodes(options.fs);
     if (!options.nodes) options.openFiles?.add(this.nodes);
@@ -507,6 +516,12 @@ export class WasmProcess {
       await this.resumed;
       return result;
     }
+  }
+
+  setUmask(mask?: number): number {
+    const old = this.umask;
+    if (mask !== undefined) this.umask = mask & 0o777;
+    return old;
   }
 
   die(): void {
@@ -940,6 +955,8 @@ export class WasmProcess {
       case 'proc-alarm':
         this.setAlarm(req.sig, req.firstMs ?? req.ms, req.repeat ? req.ms : 0, req.timer);
         return { ok: true, kind: 'void' };
+      case 'proc-umask':
+        return { ok: true, kind: 'json', json: this.setUmask(req.mask) };
       case 'dl-log':
         if (req.append) this.dlLog.push(req.append);
         return { ok: true, kind: 'json', json: this.dlLog.slice(req.from) };

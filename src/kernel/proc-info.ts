@@ -9,6 +9,7 @@ export interface ProcessInfo {
   started: number;
   state: 'S' | 'Z';
   memory: number;
+  umask?: number;
 }
 
 export interface MountLine {

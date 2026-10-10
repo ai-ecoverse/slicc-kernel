@@ -65,6 +65,7 @@ export interface WasmWorkerLike {
 export interface SpawnWasmOptions {
   pid: number;
   ignored?: number;
+  umask?: number;
   identity?: () => Promise<{ pid: number; ppid: number }>;
   onSyscall?: (req: WasmSyscall) => void;
   program: Program;
@@ -112,6 +113,7 @@ export interface WasmProcessHandle {
   onState(listener: StateListener): void;
   memory(): number;
   ignoredSignals(fork?: boolean): number;
+  umask?(): number;
   writesBack(): boolean;
 }
 
@@ -195,7 +197,11 @@ class Dying {
   }
 }
 
-function processInit(opts: SpawnWasmOptions, sab: SharedArrayBuffer): ProcessInitMsg {
+function processInit(
+  opts: SpawnWasmOptions,
+  sab: SharedArrayBuffer,
+  umask: number
+): ProcessInitMsg {
   const base = {
     type: WASM_PROCESS_INIT,
     pid: opts.shownPid ?? opts.pid,
@@ -204,6 +210,7 @@ function processInit(opts: SpawnWasmOptions, sab: SharedArrayBuffer): ProcessIni
     env: opts.env,
     cwd: opts.cwd,
     sab,
+    umask,
     ...(opts.ppid !== undefined ? { ppid: opts.ppid } : {}),
   } as const;
   if (opts.program.abi === 'js') {
@@ -216,11 +223,18 @@ function processInit(opts: SpawnWasmOptions, sab: SharedArrayBuffer): ProcessIni
   };
 }
 
+function inherited(opts: SpawnWasmOptions): { ignored?: number; umask?: number } {
+  return {
+    ...(opts.ignored ? { ignored: opts.ignored } : {}),
+    ...(opts.umask !== undefined ? { umask: opts.umask } : {}),
+  };
+}
+
 export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
   const sab = new SharedArrayBuffer(SAB_HEADER_BYTES + SAB_DEFAULT_WINDOW_BYTES);
   const header = new Int32Array(sab, 0, SAB_HEADER_I32);
   const process = new WasmProcess(opts.pid, opts.fds, {
-    ...(opts.ignored ? { ignored: opts.ignored } : {}),
+    ...inherited(opts),
     ...(opts.identity ? { identity: opts.identity } : {}),
     ...(opts.onSyscall ? { onSyscall: opts.onSyscall } : {}),
     spawner: opts.spawner,
@@ -363,7 +377,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     tw.postMessage(tinit);
   };
 
-  const init = processInit(opts, sab);
+  const init = processInit(opts, sab, process.umask);
   worker.postMessage(init, opts.fork ? [opts.fork.memory.buffer as ArrayBuffer] : []);
 
   const signal = (sig: number): void => {
@@ -383,6 +397,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     onState: (listener) => process.onState(listener),
     memory: () => Atomics.load(header, SAB_I_MEMORY) * 65536,
     ignoredSignals: (fork) => process.inheritable(fork),
+    umask: () => process.umask,
     writesBack: () => opts.program.abi === 'wasi' && !done,
   };
 }

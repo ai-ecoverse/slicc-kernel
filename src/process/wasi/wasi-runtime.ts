@@ -39,6 +39,8 @@ const PREVIEW1 = 'wasi_snapshot_preview1';
 const WASIX = 'wasix_32v1';
 const SLICC = 'slicc';
 
+const SLICC_FS = 'slicc_fs';
+
 const RESERVED = RESERVED_NAMESPACES;
 
 const noErrno = (key: string) =>
@@ -112,15 +114,17 @@ function linkImports(
   threads: WasiThreads | undefined,
   program: ProgramImports = {},
   foreign?: ForeignResults,
-  slicc: Record<string, WasiFunction> = {}
+  slicc: Record<string, WasiFunction> = {},
+  sliccFs: Record<string, WasiFunction> = {}
 ): WebAssembly.Imports {
   for (const ns of Object.keys(program)) {
-    if (RESERVED.has(ns) || ns === SLICC)
+    if (RESERVED.has(ns) || ns === SLICC || ns === SLICC_FS)
       throw new Error(`the imports module may not define ${ns}`);
   }
   const imports: Record<string, Record<string, WebAssembly.ImportValue>> = {
     ...program,
     [SLICC]: { ...slicc },
+    [SLICC_FS]: { ...sliccFs },
     [PREVIEW1]: preview1,
     ...(wasix ? { [WASIX]: { ...wasix } } : {}),
     ...(threads ? { wasi: { 'thread-spawn': (arg: number) => threads.spawn(arg) } } : {}),
@@ -295,7 +299,18 @@ async function instantiate(
     () => instance
   );
   const slicc = traced(stats, 'slicc', host.sliccImports());
-  const hostImports = linkImports(module, preview1, wasix, memory, threads, extra, foreign, slicc);
+  const sliccFs = traced(stats, 'slicc_fs', host.sliccFsImports());
+  const hostImports = linkImports(
+    module,
+    preview1,
+    wasix,
+    memory,
+    threads,
+    extra,
+    foreign,
+    slicc,
+    sliccFs
+  );
   const imports: WebAssembly.Imports = sync
     ? merge(hostImports, sync.linker.mainImports(module))
     : hostImports;
