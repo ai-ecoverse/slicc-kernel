@@ -177,12 +177,12 @@ export function serveTransport(peer: TransportPeer, transport: RealmTransport): 
     }
   };
   const sockets = new Map<number, RealmWebSocket>();
-  const credit = new Map<number, { inflight: number; ended: boolean; wake?: () => void }>();
-  const refill = (nid: number, n: number, ended = false) => {
+  const credit = new Map<number, { inflight: number; closing: boolean; wake?: () => void }>();
+  const refill = (nid: number, n: number, closing = false) => {
     const flow = credit.get(nid);
     if (!flow) return;
     flow.inflight -= n;
-    flow.ended ||= ended;
+    flow.closing ||= closing;
     flow.wake?.();
   };
   const openSocket = async (call: Extract<TransportCall, { net: 'ws-open' }>) => {
@@ -209,20 +209,21 @@ export function serveTransport(peer: TransportPeer, transport: RealmTransport): 
   };
   const relay = async (nid: number, socket: RealmWebSocket) => {
     let ending: { code: number; reason: string };
-    const flow: { inflight: number; ended: boolean; wake?: () => void } = {
+    const flow: { inflight: number; closing: boolean; wake?: () => void } = {
       inflight: 0,
-      ended: false,
+      closing: false,
     };
     credit.set(nid, flow);
     try {
       for await (const data of socket.messages) {
+        if (flow.closing) continue;
         if (typeof data === 'string') peer.postMessage({ net: 'ws-message', nid, data });
         else {
           const bytes = data.slice();
           peer.postMessage({ net: 'ws-message', nid, data: bytes }, [bytes.buffer]);
         }
         flow.inflight += payloadSize(data);
-        while (flow.inflight > INBOUND_LIMIT && !flow.ended) {
+        while (flow.inflight > INBOUND_LIMIT && !flow.closing) {
           await new Promise<void>((resolve) => {
             flow.wake = resolve;
           });

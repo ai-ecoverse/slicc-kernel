@@ -580,21 +580,22 @@ export class RealmProxy {
         signal: AbortSignal.any([this.stop.signal, hangup.signal]),
       });
     } catch (e) {
-      throw new HttpError(502, e instanceof Error ? e.message : String(e));
-    } finally {
       waiting.abort();
+      throw new HttpError(502, e instanceof Error ? e.message : String(e));
     }
     ctx.idle.ms = Number.POSITIVE_INFINITY;
     try {
       if (hangup.signal.aborted) throw hangup.signal.reason;
       await ctx.sink.write(switchingHead(accept, socket.protocol), this.stop.signal);
+      await this.bridge(ctx, socket, hangup.signal);
     } catch (e) {
       socket.close(1001, 'the client went away');
       throw e;
+    } finally {
+      waiting.abort();
     }
-    await this.bridge(ctx, socket);
   }
-  private async bridge(ctx: Exchange, socket: RealmWebSocket): Promise<void> {
+  private async bridge(ctx: Exchange, socket: RealmWebSocket, hangup: AbortSignal): Promise<void> {
     const stop = this.stop.signal;
     let chain: Promise<unknown> = Promise.resolve();
     const toGuest = (bytes: Uint8Array): Promise<unknown> => {
@@ -602,7 +603,7 @@ export class RealmProxy {
       return chain;
     };
     const done = new AbortController();
-    const reading = AbortSignal.any([stop, done.signal]);
+    const reading = AbortSignal.any([stop, done.signal, hangup]);
     const stopping = () => socket.close(1001, 'the proxy is stopping');
     stop.addEventListener('abort', stopping, { once: true });
     let guestDone = false;
