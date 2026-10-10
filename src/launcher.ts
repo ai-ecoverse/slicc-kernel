@@ -644,6 +644,7 @@ export class Launcher {
         this.decide(pid);
         this.settling.syscall(pid, call.op);
       },
+      settling: () => this.settling.isSettling(pid),
       ...(req.ignored ? { ignored: req.ignored } : {}),
       ...(req.umask !== undefined ? { umask: req.umask } : {}),
       cred: req.cred,

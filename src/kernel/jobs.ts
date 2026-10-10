@@ -19,6 +19,8 @@ export interface JobMember {
 
 export class JobTable {
   private readonly members = new Map<number, JobMember>();
+
+  private readonly handoffs = new Map<number, { by: number; reclaimed: boolean }>();
   private readonly foreground = new Map<KernelTty, number>();
 
   private readonly terminals = new Map<number, KernelTty>();
@@ -47,7 +49,13 @@ export class JobTable {
   }
 
   remove(pid: number): void {
+    const member = this.members.get(pid);
     this.members.delete(pid);
+    if (member) this.prune(member.pgid);
+  }
+
+  private prune(pgid: number): void {
+    if (![...this.members.values()].some((m) => m.pgid === pgid)) this.handoffs.delete(pgid);
   }
 
   exec(pid: number, child: number, adopt = false): void {
@@ -123,7 +131,13 @@ export class JobTable {
 
     const exists = [...this.members.values()].some((m) => m.pgid === group && m.sid === target.sid);
     if (group !== id && !exists) throw new KernelError('EPERM');
+    const left = target.pgid;
     target.pgid = group;
+    this.prune(left);
+  }
+
+  get handoffCount(): number {
+    return this.handoffs.size;
   }
 
   getpgid(caller: number, pid: number): number {
@@ -187,11 +201,24 @@ export class JobTable {
     return this.foreground.get(tty) ?? fallback;
   }
 
-  tcsetpgrp(caller: number, tty: KernelTty, pgid: number): void {
+  tcsetpgrp(caller: number, tty: KernelTty, pgid: number, settling = false): void {
     const self = this.member(caller);
     const inSession = [...this.members.values()].some((m) => m.pgid === pgid && m.sid === self.sid);
     if (!inSession) throw new KernelError('EPERM');
+    const current = this.foreground.get(tty);
+    if (settling && pgid === self.pgid && current !== pgid && this.reclaimed(pgid, self.ppid))
+      return;
+    if (pgid !== self.pgid) this.handoffs.set(pgid, { by: caller, reclaimed: false });
+    else if (current !== undefined) {
+      const handoff = this.handoffs.get(current);
+      if (handoff?.by === caller) handoff.reclaimed = true;
+    }
     this.foreground.set(tty, pgid);
+  }
+
+  private reclaimed(pgid: number, parent: number | undefined): boolean {
+    const handoff = this.handoffs.get(pgid);
+    return handoff?.reclaimed === true && handoff.by === parent;
   }
 
   signalOwnedForeground(tty: KernelTty, sig: number): void {
