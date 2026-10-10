@@ -143,7 +143,7 @@ export interface RunOptions {
   onStarted?: (pid: number) => void;
   collect?: boolean;
   pgid?: number;
-  user?: string | number;
+  user?: string | number | Account;
 }
 
 export interface TerminalOptions {
@@ -151,7 +151,7 @@ export interface TerminalOptions {
   env?: Record<string, string>;
   cols?: number;
   rows?: number;
-  user?: string | number;
+  user?: string | number | Account;
   onData: (bytes: Uint8Array) => void;
 }
 
@@ -874,7 +874,8 @@ export class Launcher {
     const may = (target: number) =>
       !sender ||
       maySignal(sender, this.credOf(target)) ||
-      (sig === SIG.CONT && session !== undefined && this.jobs.sidOf(target) === session);
+      (sig === SIG.CONT && session !== undefined && this.jobs.sidOf(target) === session) ||
+      (from !== undefined && this.imageOf(from) === this.imageOf(target));
     if (pid < 0) return this.jobs.killGroup(-pid, sig, may);
     const handle = this.processes.get(pid);
     if (!handle) return false;
@@ -1079,7 +1080,8 @@ export class Launcher {
     return { ...this.env, ...userEnv(account, this.pnpmHome), PWD: cwd, ...extra };
   }
 
-  private async account(user: string | number | undefined): Promise<Account> {
+  private async account(user: string | number | Account | undefined): Promise<Account> {
+    if (typeof user === 'object') return user;
     const found = await this.users.lookup(user ?? 0);
     if (!found) throw fsError('ENOENT', `no user ${String(user)}`);
     return found;

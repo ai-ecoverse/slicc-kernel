@@ -23,7 +23,7 @@ export const ROOT: Readonly<Cred> = Object.freeze({
 });
 
 const MAX_ID = 0xfffffffe;
-const MAX_GROUPS = 65536;
+export const MAX_GROUPS = 65536;
 const UIDS = ['ruid', 'euid', 'suid'] as const;
 const GIDS = ['rgid', 'egid', 'sgid'] as const;
 

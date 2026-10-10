@@ -1,4 +1,4 @@
-import type { Cred, CredChange } from '../../kernel/cred.ts';
+import { type Cred, type CredChange, MAX_GROUPS } from '../../kernel/cred.ts';
 import type { DeviceMeta, KernelFdKind } from '../../kernel/fd-table.ts';
 import type { SyncFsBridgeStat, SyncFsPosixBridge } from '../../realm/sync-fs-wire.ts';
 import {
@@ -259,6 +259,7 @@ export class WasiHost {
         view.setUint32(count, groups.length, true);
       },
       groups_set: (buf: number, n: number) => {
+        if (n < 0 || n > MAX_GROUPS) throw new WasiError('EINVAL');
         const view = mem.view();
         const groups = Array.from({ length: n }, (_, i) => view.getUint32(buf + i * 4, true));
         void this.o.kernel.call({ op: 'proc-setcred', change: { groups } });

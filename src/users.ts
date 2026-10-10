@@ -233,8 +233,14 @@ export class UserDb {
         (r) => typeof r === 'string' || !(r.name === name && r.gid === row.gid)
       );
       for (const r of parsed(keptGroups)) r.members = r.members.filter((m) => m !== name);
+      const before = await this.read(GROUP, DEFAULT_GROUP);
       await this.fs.writeFile(GROUP, formatGroup(keptGroups));
-      await this.fs.writeFile(PASSWD, formatPasswd(passwd.filter((r) => r !== row)));
+      try {
+        await this.fs.writeFile(PASSWD, formatPasswd(passwd.filter((r) => r !== row)));
+      } catch (err) {
+        await this.fs.writeFile(GROUP, before);
+        throw err;
+      }
       this.umasks.delete(name);
       const home = this.fs.resolvePath('/', row.home);
       if (!options.keepHome && HOME_DIR.test(home)) {
