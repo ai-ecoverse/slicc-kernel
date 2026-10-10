@@ -60,6 +60,7 @@ export {
 export type { HostfsGrant, HostfsGrantHook } from './mount/hostfs.ts';
 export type { MountEntry, MountSpec } from './mount/mount-fs.ts';
 export type { ProcessMountPolicy, ProcessMountRequest } from './mount/syscall.ts';
+export type { JsChild, JsExited, JsSpawnOptions, JsStdio } from './process/js/js-children.ts';
 export type {
   JsFdStatus,
   JsFdType,

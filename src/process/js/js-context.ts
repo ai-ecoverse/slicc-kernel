@@ -1,5 +1,6 @@
 import { SIG } from '../../kernel/signals.ts';
 import { parseSyncFsStat, type SyncFsBridgeStat } from '../../realm/sync-fs-wire.ts';
+import { childOps, type JsChild, type JsExited, type JsSpawnOptions } from './js-children.ts';
 import {
   absent,
   brokenPipe,
@@ -79,6 +80,9 @@ export interface JsProgramContext {
     reset(signal: JsSignal): Promise<void>;
   };
   sync: JsSyncContext;
+  spawn(options: JsSpawnOptions): Promise<JsChild>;
+  wait(pid: number): Promise<JsExited>;
+  kill(pid: number, signal?: JsSignal): Promise<void>;
   exit(code?: number): never;
 }
 
@@ -171,23 +175,23 @@ export function createContext(o: ContextOptions): CreatedContext {
     infos.set(fd, got);
     return got;
   };
-  const read = async (fd: number, max = CHUNK): Promise<Uint8Array> => {
+  const read = async (fd: number, max = CHUNK, signal?: AbortSignal): Promise<Uint8Array> => {
     index(max, 'read');
     const emulated = readDevice(await info(fd), max, random);
     if (emulated) return emulated;
-    const r = await kernel.blocking({ op: 'fd-read', fd, max: Math.min(max, MAX_IO) });
-    return r.ok && r.kind === 'bytes' ? r.bytes : new Uint8Array(0);
+    return readPipe(kernel, fd, Math.min(max, MAX_IO), signal);
   };
 
-  const writeAll = async (fd: number, data: Uint8Array): Promise<void> => {
+  const writeAll = async (fd: number, data: Uint8Array, signal?: AbortSignal): Promise<void> => {
     const i = await info(fd);
     if (writeDevice(i)) return;
     let at = 0;
     while (at < data.length) {
       const body = data.subarray(at, at + MAX_IO);
       try {
-        const r = await kernel.blocking({ op: 'fd-write', fd, body });
-        at += written(r, body.length);
+        at += signal
+          ? await sendSome(kernel, fd, body, signal)
+          : written(await kernel.blocking({ op: 'fd-write', fd, body }), body.length);
       } catch (err) {
         if (brokenPipe(err, i)) await kernel.call({ op: 'proc-kill', pid: o.pid, sig: SIG.PIPE });
         throw err;
@@ -250,6 +254,12 @@ export function createContext(o: ContextOptions): CreatedContext {
     handles,
   });
 
+  const children = childOps(
+    kernel,
+    { read, send: writeAll, close: (fd) => ctx.close(fd) },
+    { env: o.env, cwd: o.cwd, signal: signalNumber }
+  );
+
   const ctx: JsProgramContext = {
     argv: o.argv,
     env: o.env,
@@ -292,6 +302,7 @@ export function createContext(o: ContextOptions): CreatedContext {
       reset: async (signal) => kernel.setHandler(signalNumber(signal), 'default'),
     },
     sync,
+    ...children,
     exit,
   };
   const drain = async (): Promise<void> => {
@@ -374,6 +385,47 @@ function fileHandle(
       open = false;
     },
   };
+}
+
+async function readPipe(
+  kernel: JsKernel,
+  fd: number,
+  max: number,
+  signal: AbortSignal | undefined
+): Promise<Uint8Array> {
+  if (signal) return receiveSome(kernel, fd, max, signal);
+  const r = await kernel.blocking({ op: 'fd-read', fd, max });
+  return r.ok && r.kind === 'bytes' ? r.bytes : new Uint8Array(0);
+}
+
+async function receiveSome(
+  kernel: JsKernel,
+  fd: number,
+  max: number,
+  signal: AbortSignal
+): Promise<Uint8Array> {
+  for (;;) {
+    signal.throwIfAborted();
+    const r = await kernel.raw({ op: 'fd-read', fd, max, nonblock: true });
+    if (r.ok) return r.kind === 'bytes' ? r.bytes : new Uint8Array(0);
+    if (r.errno !== 'EAGAIN') throw new JsCallError(r.errno, 'fd-read');
+    await kernel.blocking({ op: 'fd-select', read: [fd], write: [], timeoutMs: -1 }, signal);
+  }
+}
+
+async function sendSome(
+  kernel: JsKernel,
+  fd: number,
+  body: Uint8Array,
+  signal: AbortSignal
+): Promise<number> {
+  for (;;) {
+    signal.throwIfAborted();
+    const r = await kernel.raw({ op: 'fd-write', fd, body, nonblock: true });
+    if (r.ok) return written(r, body.length);
+    if (r.errno !== 'EAGAIN') throw new JsCallError(r.errno, 'fd-write');
+    await kernel.blocking({ op: 'fd-select', read: [], write: [fd], timeoutMs: -1 }, signal);
+  }
 }
 
 function pathOps(

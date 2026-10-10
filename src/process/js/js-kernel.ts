@@ -20,6 +20,18 @@ export class JsCallError extends Error {
   }
 }
 
+function untilAborted(work: Promise<void>, signal: AbortSignal | undefined): Promise<void> {
+  if (!signal) return work;
+  return new Promise<void>((resolve) => {
+    const done = () => {
+      signal.removeEventListener('abort', done);
+      resolve();
+    };
+    signal.addEventListener('abort', done, { once: true });
+    work.then(done, done);
+  });
+}
+
 export type SignalHandler = (signal: number) => unknown;
 
 export interface JsKernelOptions {
@@ -71,21 +83,25 @@ export class JsKernel {
     return result.ok && result.kind === 'bytes' ? result.bytes : new Uint8Array(0);
   }
 
-  async blocking(req: WasmSyscall): Promise<SyncFsResult> {
+  async blocking(req: WasmSyscall, signal?: AbortSignal): Promise<SyncFsResult> {
     for (;;) {
       const id = (await this.json({ op: 'async-submit', req })) as number;
-      const result = await this.settled(id);
+      const result = await this.settled(id, signal);
       if (result.ok) return result;
       if (result.errno !== 'EINTR') throw new JsCallError(result.errno, req.op);
     }
   }
 
-  private async settled(id: number): Promise<SyncFsResult> {
+  private async settled(id: number, signal?: AbortSignal): Promise<SyncFsResult> {
     for (;;) {
       const seen = Atomics.load(this.header, SAB_I_ASYNC);
       const taken = await this.raw({ op: 'async-take', id });
       if (taken.ok || taken.errno !== 'EAGAIN') return taken;
-      await changed(this.header, SAB_I_ASYNC, seen, this.waitAsync);
+      if (signal?.aborted) {
+        await this.raw({ op: 'async-cancel', id });
+        throw signal.reason;
+      }
+      await untilAborted(changed(this.header, SAB_I_ASYNC, seen, this.waitAsync), signal);
     }
   }
 
