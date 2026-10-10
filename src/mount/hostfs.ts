@@ -23,6 +23,25 @@ export interface HostfsEvent {
   ping?: number;
 }
 
+export interface HostfsTransport {
+  readonly capabilities: DriverCapabilities;
+  readonly token: string;
+  readonly maxIo: number;
+  call<T>(op: string, body?: Record<string, unknown>, handle?: boolean): Promise<T>;
+  read(fh: number, offset: number, size: number, ifMatch?: string): Promise<Uint8Array>;
+  write(fh: number, offset: number, bytes: Uint8Array): Promise<void>;
+  watch(
+    signal: AbortSignal,
+    onEvent: (event: HostfsEvent) => void,
+    onOpen?: () => void
+  ): Promise<void>;
+}
+
+export type HostfsConnect = (
+  source: string,
+  options: { readonly: boolean }
+) => Promise<HostfsTransport>;
+
 export const HOSTFS_IO = 16 * 1024 * 1024;
 
 const codeOf = (err: unknown) => (err as { code?: unknown } | null)?.code;
@@ -33,7 +52,7 @@ function rel(path: string): string {
   return path.replace(/^\/+/, '');
 }
 
-export class HostfsClient {
+export class HostfsClient implements HostfsTransport {
   private grant: HostfsGrant;
   private readonly regrant: () => Promise<HostfsGrant>;
   private readonly fetch: FetchLike;
@@ -166,14 +185,14 @@ export class HostfsClient {
 }
 
 interface Remote {
-  client: HostfsClient;
+  client: HostfsTransport;
   token: string;
   fh: number;
   etag: string | undefined;
   restore: { path: string; mode: number } | undefined;
 }
 
-export function hostfsHandlers(current: () => HostfsClient): MediumHandlers {
+export function hostfsHandlers(current: () => HostfsTransport): MediumHandlers {
   const handles = new Map<number, Remote>();
   let nextFh = 0;
   const fresh = (remote: Remote): Remote => {
@@ -186,7 +205,7 @@ export function hostfsHandlers(current: () => HostfsClient): MediumHandlers {
     return fresh(remote);
   };
   const call = <T>(op: string, body: Record<string, unknown> = {}) => current().call<T>(op, body);
-  async function writable(client: HostfsClient, path: string, flags: OpenFlags) {
+  async function writable(client: HostfsTransport, path: string, flags: OpenFlags) {
     const { ifMatch: _, ...asked } = flags;
     const opening = () =>
       client.call<{ fh: number; attr?: DriverAttr }>('open', { path: rel(path), ...asked });
@@ -307,8 +326,8 @@ async function resize(h: FilesystemHandlers, path: string, size: number): Promis
 }
 
 export interface WatchLoop {
-  connect(): Promise<HostfsClient>;
-  up(client: HostfsClient): void;
+  connect(): Promise<HostfsTransport>;
+  up(client: HostfsTransport): void;
   event(event: HostfsEvent): void;
   down(): void;
   silenceMs?: number;
@@ -411,22 +430,27 @@ export interface HostfsTiming {
   connectMs?: number;
 }
 
+export function grantConnect(hook: HostfsGrantHook, fetch: FetchLike): HostfsConnect {
+  return async (source, options) => {
+    const grant = () => hook(source, options);
+    return new HostfsClient(await grant(), grant, fetch);
+  };
+}
+
 export async function openHostfs(
   spec: MountSpec,
-  hook: HostfsGrantHook,
-  fetch: FetchLike,
+  connect: HostfsConnect,
   timing: HostfsTiming = {}
 ): Promise<OpenedDriver> {
   const readonly = spec.options?.ro !== undefined;
   const { port1, port2 } = new MessageChannel();
-  const slot = mediumSlot<HostfsClient>(
+  const slot = mediumSlot<HostfsTransport>(
     async (err) => unreachable(err),
     () => watching.kick()
   );
   const stop = new AbortController();
-  const grant = () => hook(spec.source, { readonly });
-  let active: HostfsClient | undefined;
-  const handlers = hostfsHandlers(() => active as HostfsClient);
+  let active: HostfsTransport | undefined;
+  const handlers = hostfsHandlers(() => active as HostfsTransport);
   const ranged = () => (active?.capabilities.ranges === true ? { ranges: true } : {});
   const served = serveFilesystem(
     port2,
@@ -441,7 +465,7 @@ export async function openHostfs(
   );
   const watching = keepWatching(
     {
-      connect: async () => new HostfsClient(await grant(), grant, fetch),
+      connect: () => connect(spec.source, { readonly }),
       up(client) {
         active = client;
         slot.insert(client, handlers);
