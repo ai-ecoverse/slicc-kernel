@@ -530,6 +530,7 @@ export class WasiFds {
       return this.install({ type: 'dir', path });
     }
     if (!s && !(oflags & OFLAGS.CREAT)) throw new WasiError('ENOENT');
+    refuseWrite(s, oflags, rights);
     if (this.shared) return this.kernelFile(path, s, oflags, rights, fdflags);
     return this.install({ type: 'file', file: this.file(path, s, oflags, rights, fdflags) });
   }
@@ -638,6 +639,11 @@ const GEN = 2;
 
 function deviceEntry(meta: DeviceMeta): Extract<WasiEntry, { type: 'device' }> {
   return { type: 'device', device: meta.device, ...(meta.access ? { access: meta.access } : {}) };
+}
+
+function refuseWrite(s: { readonly?: boolean } | undefined, oflags: number, rights: bigint): void {
+  const writes = (rights & RIGHTS.FD_WRITE) !== 0n || (oflags & OFLAGS.TRUNC) !== 0;
+  if (s?.readonly && writes) throw new WasiError('EROFS');
 }
 
 function preopenOf(e: { preopen?: string; twin?: number }): { preopen?: string; twin?: number } {

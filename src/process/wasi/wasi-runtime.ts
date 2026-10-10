@@ -1,4 +1,5 @@
 import { physicalPath } from '../../fs/physical-path.ts';
+import type { MountLine, ProcessListing } from '../../kernel/proc-info.ts';
 import type { WasmSyscall } from '../../kernel/process.ts';
 import {
   WASM_PROCESS_EXIT,
@@ -22,6 +23,7 @@ import { cachingBridge } from './wasi-files.ts';
 import { WasiExit, type WasiFunction, WasiHost, type WasiHostOptions } from './wasi-host.ts';
 import { importsContext, loadImports, type ProgramImports, type Raw } from './wasi-imports.ts';
 import { type ForeignResults, type ImportedMemory, RESERVED_NAMESPACES } from './wasi-module.ts';
+import { ProcTree, procfsBridge } from './wasi-procfs.ts';
 import { WasiSignals } from './wasi-signals.ts';
 import { WasiStats } from './wasi-stats.ts';
 import { MAIN_TID, ThreadExit, threadCap, WasiThreads } from './wasi-threads.ts';
@@ -362,6 +364,16 @@ async function instantiate(
   return { instance, driver };
 }
 
+function procTree(call: (req: WasmSyscall) => unknown, pid: number): ProcTree {
+  return new ProcTree(
+    {
+      procList: () => call({ op: 'proc-list' }) as ProcessListing,
+      mountList: () => call({ op: 'mount-list' }) as MountLine[],
+    },
+    pid
+  );
+}
+
 function exportedTable(instance: WebAssembly.Instance): WebAssembly.Table | undefined {
   const table = instance.exports.__indirect_function_table;
   return table instanceof WebAssembly.Table ? table : undefined;
@@ -516,7 +528,10 @@ export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike
     ppid: id.ppid,
     parent: () => identify(transport, init).ppid,
     kernel: { sys: traced(stats, 'kernel', sys), call },
-    fs: cachingBridge(traced(stats, 'fs', createSyncFsSabBridge(transport))),
+    fs: procfsBridge(
+      cachingBridge(traced(stats, 'fs', createSyncFsSabBridge(transport))),
+      procTree(call, id.pid)
+    ),
     ...descriptors(init, fork, threads),
   });
   if (threads) {
@@ -632,7 +647,7 @@ export async function runWasiThread(init: WasmThreadInitMsg, port: SabPostLike):
     ppid: id.ppid,
     parent: () => identify(transport, init).ppid,
     kernel: { sys, call },
-    fs: cachingBridge(createSyncFsSabBridge(transport)),
+    fs: procfsBridge(cachingBridge(createSyncFsSabBridge(transport)), procTree(call, id.pid)),
     shared: threads.ids,
   });
 
