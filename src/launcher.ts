@@ -282,7 +282,10 @@ function withScriptEnv(target: Target, command: Command | undefined): Target {
   return {
     ...target,
     env: { ...target.env, ...command.env },
-    unset: [...(target.unset ?? []), ...(command.unset ?? [])],
+    unset: [
+      ...(target.unset ?? []).filter((key) => !Object.hasOwn(command.env ?? {}, key)),
+      ...(command.unset ?? []),
+    ],
   };
 }
 
@@ -499,8 +502,10 @@ export class Launcher {
   }
 
   private async unrunnable(file: string, cwd: string): Promise<'ENOEXEC' | 'ENOENT'> {
-    const head = await this.base.readFileBuffer(this.fs.resolvePath(cwd, file)).catch(() => null);
-    return head && !(head[0] === 0x23 && head[1] === 0x21) ? 'ENOEXEC' : 'ENOENT';
+    const path = this.fs.resolvePath(cwd, file);
+    const head = await this.base.readFileBuffer(path).catch(() => null);
+    if (!head || (head[0] === 0x23 && head[1] === 0x21)) return 'ENOENT';
+    return binfmtOf(await this.interpreters(), path) ? 'ENOENT' : 'ENOEXEC';
   }
 
   private module(path: string): Promise<Compiled> {

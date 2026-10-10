@@ -28,7 +28,8 @@
       "jsscript": {
         "script": "bin/jsscript",
         "env": {
-          "JSECHO_ENV": "jss"
+          "JSECHO_ENV": "jss",
+          "JSECHO_ENV2": null
         }
       },
       "jsloop": {
@@ -39,13 +40,17 @@
         "env": {
           "JSECHO_ENV2": "jso"
         }
+      },
+      "jsplain": {
+        "script": "bin/jsplain"
       }
     },
     "binfmt": {
       ".jse": "jsecho",
       ".x.jse": "jstest",
       ".jss": "jsscript",
-      ".jsl": "jsloop"
+      ".jsl": "jsloop",
+      ".jsm": "jsmissing"
     }
   }
 }
