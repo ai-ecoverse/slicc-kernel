@@ -298,8 +298,11 @@ export class VfsNodes {
 
   private readonly entries = new Map<string, Promise<unknown>>();
 
-  constructor(fs: VfsFileFs) {
+  private readonly onClosed: ((path: string) => void) | undefined;
+
+  constructor(fs: VfsFileFs, onClosed?: (path: string) => void) {
     this.fs = fs;
+    this.onClosed = onClosed;
   }
 
   async onEntry<T>(path: string, op: () => Promise<T>): Promise<T> {
@@ -372,7 +375,9 @@ export class VfsNodes {
 
   closed(node: VfsNode): void {
     node.opens--;
-    if (node.opens === 0 && this.byPath.get(node.path) === node) this.byPath.delete(node.path);
+    if (node.opens > 0) return;
+    if (this.byPath.get(node.path) === node) this.byPath.delete(node.path);
+    this.onClosed?.(node.path);
   }
 
   async flush(path: string): Promise<void> {

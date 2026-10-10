@@ -61,6 +61,26 @@ export function parseSize(text: string): number {
 
 const within = (path: string, target: string) =>
   path === target || target === '/' || path.startsWith(`${target}/`);
+export class HeldSet extends Set<HeldPaths> {
+  private readonly idle: (path: string) => void;
+
+  constructor(idle: (path: string) => void) {
+    super();
+    this.idle = idle;
+  }
+
+  override add(holds: HeldPaths): this {
+    holds.onIdle = this.idle;
+    return super.add(holds);
+  }
+
+  override delete(holds: HeldPaths): boolean {
+    const removed = super.delete(holds);
+    for (const path of holds.keys()) this.idle(path);
+    return removed;
+  }
+}
+
 export function heldUnder(held: Iterable<Map<string, number>>, target: string): boolean {
   for (const paths of held) for (const path of paths.keys()) if (within(path, target)) return true;
   return false;
@@ -69,12 +89,15 @@ export function heldUnder(held: Iterable<Map<string, number>>, target: string): 
 export class HeldPaths extends Map<string, number> {
   private readonly revoked = new Set<string>();
 
+  onIdle?: (path: string) => void;
+
   hold(path: string, on: boolean): void {
     const count = (this.get(path) ?? 0) + (on ? 1 : -1);
     if (count > 0) this.set(path, count);
     else {
       this.delete(path);
       this.revoked.delete(path);
+      this.onIdle?.(path);
     }
   }
 
@@ -153,8 +176,16 @@ function spliced(bytes: Uint8Array, offset: number, part: Uint8Array): Uint8Arra
   return out;
 }
 
+interface WriteSession {
+  mount: Mount;
+  fh: Promise<number>;
+  extents: Array<[number, number]>;
+  truncated: boolean;
+}
+
 export class MountTable {
   private readonly mounts = new Map<string, Mount>();
+  private readonly sessions = new Map<string, WriteSession>();
   private devices = 0;
   private readonly pending = new Set<string>();
   private readonly notes = new Map<string, MountEntry>();
@@ -288,8 +319,62 @@ export class MountTable {
     if (!detach && this.deps.busy(at)) throw errnoError('EBUSY', `${at} has open files`);
     this.notes.delete(at);
     this.mounts.delete(at);
-    mount.conn.close();
-    mount.dispose();
+    const open = [...this.sessions].filter(([, s]) => s.mount === mount);
+    const close = () => {
+      mount.conn.close();
+      mount.dispose();
+    };
+    if (open.length === 0) close();
+    else void Promise.allSettled(open.map(([real]) => this.commit(real))).then(close);
+  }
+
+  session(mount: Mount, real: string, rel: string): WriteSession {
+    let session = this.sessions.get(real);
+    if (!session) {
+      const fh = mount.conn.call({
+        op: 'open',
+        path: rel,
+        write: true,
+        create: true,
+        truncate: false,
+        exclusive: false,
+      }) as Promise<number>;
+      session = { mount, fh, extents: [], truncated: false };
+      this.sessions.set(real, session);
+      fh.catch(() => this.sessions.delete(real));
+    }
+    return session;
+  }
+
+  writing(real: string): WriteSession | undefined {
+    return this.sessions.get(real);
+  }
+
+  async commit(real: string): Promise<void> {
+    const session = this.sessions.get(real);
+    if (!session) return;
+    this.sessions.delete(real);
+    try {
+      await session.mount.conn.call({ op: 'release', fh: await session.fh });
+    } finally {
+      this.forget(session.mount, real);
+    }
+  }
+
+  async commitUnder(prefix: string): Promise<void> {
+    const at = normalizePath(prefix);
+    await Promise.all(
+      [...this.sessions.keys()].filter((p) => within(p, at)).map((p) => this.commit(p))
+    );
+  }
+
+  async commitOverlapping(real: string, offset: number, length: number): Promise<void> {
+    const session = this.sessions.get(real);
+    if (!session) return;
+    const end = offset + length;
+    if (session.truncated || session.extents.some(([a, b]) => a < end && offset < b)) {
+      await this.commit(real);
+    }
   }
 
   private crashed(mount: Mount, error: Error): void {
@@ -357,6 +442,14 @@ export class MountTable {
 }
 
 type Located = { mount: Mount; rel: string };
+
+function noteExtent(extents: Array<[number, number]>, from: number, to: number): void {
+  const last = extents.at(-1);
+  if (last && from <= last[1] && to >= last[0]) {
+    last[0] = Math.min(last[0], from);
+    last[1] = Math.max(last[1], to);
+  } else extents.push([from, to]);
+}
 
 class MountFs implements KernelFs {
   private readonly table: MountTable;
@@ -426,6 +519,7 @@ class MountFs implements KernelFs {
   }
 
   private async readWhole(mount: Mount, real: string, rel: string): Promise<Uint8Array> {
+    await this.table.commit(real);
     const attr = await this.table.getattr(mount, real, rel);
     if (attr.kind === 'directory') throw errnoError('EISDIR', real);
     if (mount.maxFile > 0 && attr.size > mount.maxFile) {
@@ -477,6 +571,7 @@ class MountFs implements KernelFs {
   }
 
   private async writeWhole(mount: Mount, real: string, rel: string, bytes: Uint8Array) {
+    await this.table.commit(real);
     this.table.forget(mount, real);
     const fh = await this.open(mount, rel, true);
     const chunk = mount.caps.maxIo ?? DEFAULT_IO;
@@ -500,6 +595,7 @@ class MountFs implements KernelFs {
     if ((await this.table.getattr(mount, real, rel)).kind === 'directory') {
       throw errnoError('EISDIR', real);
     }
+    await this.table.commitOverlapping(real, offset, length);
     const fh = (await mount.conn
       .call({
         op: 'open',
@@ -557,6 +653,14 @@ class MountFs implements KernelFs {
     this.writable(mount, real);
     this.fits(mount, real, offset + bytes.length);
     this.table.forget(mount, real);
+    if (mount.caps.sessions) {
+      const session = this.table.session(mount, real, rel);
+      const end = offset + bytes.length;
+      await this.writeRuns(mount, await session.fh, offset, bytes, transfer);
+      noteExtent(session.extents, offset, end);
+      this.table.forget(mount, real);
+      return;
+    }
     const fh = (await mount.conn.call({
       op: 'open',
       path: rel,
@@ -565,15 +669,25 @@ class MountFs implements KernelFs {
       truncate: false,
       exclusive: false,
     })) as number;
-    const chunk = mount.caps.maxIo ?? DEFAULT_IO;
     try {
-      for (let at = 0; at < bytes.length; at += chunk) {
-        const part = handed(bytes, transfer, chunk) ? bytes : bytes.slice(at, at + chunk);
-        await mount.conn.call({ op: 'write', fh, offset: offset + at, bytes: part }, [part.buffer]);
-      }
+      await this.writeRuns(mount, fh, offset, bytes, transfer);
     } finally {
       await mount.conn.call({ op: 'release', fh });
       this.table.forget(mount, real);
+    }
+  }
+
+  private async writeRuns(
+    mount: Mount,
+    fh: number,
+    offset: number,
+    bytes: Uint8Array,
+    transfer: boolean
+  ): Promise<void> {
+    const chunk = mount.caps.maxIo ?? DEFAULT_IO;
+    for (let at = 0; at < bytes.length; at += chunk) {
+      const part = handed(bytes, transfer, chunk) ? bytes : bytes.slice(at, at + chunk);
+      await mount.conn.call({ op: 'write', fh, offset: offset + at, bytes: part }, [part.buffer]);
     }
   }
 
@@ -588,6 +702,8 @@ class MountFs implements KernelFs {
     this.writable(mount, real);
     this.fits(mount, real, size);
     this.table.forget(mount, real);
+    const session = this.table.writing(real);
+    if (session) session.truncated = true;
     try {
       await mount.conn.call({ op: 'setattr', path: rel, size });
     } finally {
@@ -611,7 +727,17 @@ class MountFs implements KernelFs {
     const found = this.at(path);
     if (!found) return this.base.lstat(path);
     const real = normalizePath(path);
-    return statOf(await this.table.getattr(found.mount, real, found.rel), real, found.mount);
+    if (this.table.writing(real)?.truncated) await this.table.commit(real);
+    return this.statWriting(
+      await this.table.getattr(found.mount, real, found.rel),
+      real,
+      found.mount
+    );
+  }
+
+  private statWriting(attr: DriverAttr, real: string, mount: Mount): FsStat {
+    const written = this.table.writing(real)?.extents.at(-1)?.[1] ?? 0;
+    return statOf({ ...attr, size: Math.max(attr.size, written) }, real, mount);
   }
 
   async stat(path: string): Promise<FsStat> {
@@ -644,7 +770,7 @@ class MountFs implements KernelFs {
       list.map(async (entry): Promise<[string, FsStat | null]> => {
         const child = normalizePath(`${real}/${entry.name}`);
         if (entry.attr && mount.caps.listingStats) {
-          return [entry.name, statOf(entry.attr, child, mount)];
+          return [entry.name, this.statWriting(entry.attr, child, mount)];
         }
         return [entry.name, await this.lstat(child).catch(() => null)];
       })
@@ -682,6 +808,7 @@ class MountFs implements KernelFs {
     const real = normalizePath(path);
     if (rel === '/') throw errnoError('EBUSY', `${real} is a mount point`);
     this.writable(mount, real);
+    await this.table.commitUnder(real);
     let attr: DriverAttr;
     try {
       attr = await this.table.getattr(mount, real, rel);
@@ -706,6 +833,8 @@ class MountFs implements KernelFs {
     if (!a && !b) return this.base.rename(from, to);
     if (!a || !b || a.mount !== b.mount) throw errnoError('EXDEV', `${from} -> ${to}`);
     this.writable(a.mount, normalizePath(to));
+    await this.table.commitUnder(from);
+    await this.table.commitUnder(to);
     this.table.forget(a.mount, normalizePath(from));
     this.table.forget(a.mount, normalizePath(to));
     try {
