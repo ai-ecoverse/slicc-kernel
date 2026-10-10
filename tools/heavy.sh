@@ -5,18 +5,24 @@ fi
 tree_kb=${SLICC_HEAVY_TREE_KB:-3000000}
 proc_kb=${SLICC_HEAVY_PROC_KB:-2000000}
 measure() {
-  ps -axo pid=,ppid=,pgid=,rss= | awk -v root="$child" '
-    { parent[$1] = $2; group[$1] = $3; rss[$1] = $4 }
+  ps -axo pid=,ppid=,pgid=,rss=,lstart= | awk -v root="$child" -v state="$seen" '
+    BEGIN { while ((getline line < state) > 0) { split(line, f, "\t"); known[f[1]] = f[2] } }
+    {
+      start = $5; for (i = 6; i <= NF; i++) start = start " " $i
+      parent[$1] = $2; group[$1] = $3; rss[$1] = $4; began[$1] = start
+    }
     END {
       sum = 0; max = 0; pids = ""
       for (p in parent) {
         q = p; hops = 0
         while (q != root && (q in parent) && hops++ < 64) q = parent[q]
-        if (q != root && group[p] != root) continue
+        if (q != root && group[p] != root && known[p] != began[p]) continue
         sum += rss[p]; if (rss[p] > max) max = rss[p]; pids = pids " " p
+        print p "\t" began[p] > (state ".new")
       }
       print sum, max, pids
     }'
+  mv "$seen.new" "$seen" 2> /dev/null || : > "$seen"
 }
 stop() {
   trap - HUP INT TERM
@@ -24,7 +30,9 @@ stop() {
   shift 2
   kill -9 "$@" 2> /dev/null
   wait "$child" 2> /dev/null
+  rm -f "$seen" "$seen.new"
 }
+seen=$(mktemp "${TMPDIR:-/tmp}/slicc-heavy.XXXXXX")
 perl -e 'setpgrp(0, 0); exec { $ARGV[0] } @ARGV or die "$ARGV[0]: $!\n"' "$@" &
 child=$!
 trap 'stop; exit 129' HUP
