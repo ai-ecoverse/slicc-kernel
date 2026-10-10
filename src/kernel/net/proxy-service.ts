@@ -522,8 +522,7 @@ export class RealmProxy {
     idle: Idle
   ): Promise<void> {
     const target = tunnelTarget(req);
-    const ready = this.tunnelReady(target);
-    const refused = target.port === 443 ? await ready : undefined;
+    const refused = target.port === 443 ? await this.tunnelReady(target) : undefined;
     if (refused) throw refused;
     await conn.write(latin1Bytes('HTTP/1.1 200 Connection Established\r\n\r\n'), this.stop.signal);
     try {
@@ -535,7 +534,7 @@ export class RealmProxy {
         return;
       }
       const tunnel = this.options.tunnel;
-      if (!tunnel || (await ready)) return;
+      if (!tunnel || (target.port !== 443 && (await this.tunnelReady(target)))) return;
       await tunnel(conn, incoming, target, this.stop.signal, (source, sink, origin) =>
         this.requests({ sink, incoming: new Incoming(source), origin, socket: conn, idle })
       );
