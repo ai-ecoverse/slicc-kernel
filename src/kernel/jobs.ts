@@ -141,8 +141,15 @@ export class JobTable {
   }
 
   terminalNamed(name: string): KernelTty | undefined {
-    const known = new Set([...this.terminals.values(), ...this.foreground.keys()]);
-    return [...known].find((tty) => tty.name === name);
+    return this.knownTerminals().find((tty) => tty.name === name);
+  }
+
+  terminalNames(): string[] {
+    return this.knownTerminals().flatMap((tty) => (tty.name ? [tty.name] : []));
+  }
+
+  private knownTerminals(): KernelTty[] {
+    return [...new Set([...this.terminals.values(), ...this.foreground.keys()])];
   }
 
   controllingTerminal(pid: number): KernelTty | null | undefined {

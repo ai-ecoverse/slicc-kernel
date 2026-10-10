@@ -33,6 +33,14 @@ interface TtyNodeFs {
   makedev?: (major: number, minor: number) => number;
 }
 
+interface DevDirFs extends TtyNodeFs {
+  lookupNode?: (parent: object, name: string) => object;
+  readdir?: (path: string) => string[];
+  getPath?: (node: object) => string;
+}
+
+const TTY_NAME = /^tty\d+$/;
+
 function isPtyPath(path: string): boolean {
   return PTY_PATH.test(path);
 }
@@ -126,6 +134,7 @@ export interface ProcessSys {
   size?(fd: number): number;
 
   openTty?(name?: string): number;
+  ttyNames?(): string[];
 
   tcgets?(fd: number): Termios;
   tcsets?(fd: number, termios: Termios): void;
@@ -304,6 +313,40 @@ export class KernelStreams {
     stream.stream_ops = { ...stream.stream_ops, getattr: () => this.Fs.stat?.(name) ?? {} };
   }
 
+  private creatingTerminal = false;
+
+  private useTerminalNodes(): void {
+    const fs = this.Fs as unknown as DevDirFs;
+    const { lookupNode, readdir, getPath, mkdev, makedev } = fs;
+    const ttyNames = this.sys.ttyNames?.bind(this.sys);
+    if (!lookupNode || !readdir || !getPath || !mkdev || !makedev || !ttyNames) return;
+    fs.lookupNode = (parent, name) => {
+      try {
+        return lookupNode.call(fs, parent, name);
+      } catch (e) {
+        const path = `/dev/${name}`;
+        if (this.creatingTerminal || !TTY_NAME.test(name) || getPath.call(fs, parent) !== '/dev')
+          throw e;
+        if (!ttyNames().includes(path)) throw e;
+        this.creatingTerminal = true;
+        try {
+          mkdev.call(fs, path, makedev.call(fs, 6, 0));
+        } finally {
+          this.creatingTerminal = false;
+        }
+        return lookupNode.call(fs, parent, name);
+      }
+    };
+    fs.readdir = (path) => {
+      const names = readdir.call(fs, path);
+      if (path.replace(/\/+$/, '') !== '/dev') return names;
+      const missing = ttyNames()
+        .map((tty) => tty.slice('/dev/'.length))
+        .filter((name) => TTY_NAME.test(name) && !names.includes(name));
+      return [...names, ...missing];
+    };
+  }
+
   private ttyNode(name: string): void {
     const { analyzePath, mkdev, makedev } = this.Fs as unknown as TtyNodeFs;
     if (!TTY_PATH.test(name) || !analyzePath || !mkdev || !makedev) return;
@@ -373,8 +416,12 @@ export class KernelStreams {
   useControllingTerminal(): void {
     if (typeof this.Fs.open !== 'function') return;
     this.usePtyPaths();
+    this.useTerminalNodes();
     const open = this.Fs.open.bind(this.Fs);
     this.Fs.open = (path, flags, mode) => {
+      if (typeof path === 'string' && TTY_PATH.test(path) && !this.terminalExists(path)) {
+        throw new this.Fs.ErrnoError(wasiErrno('ENOENT'));
+      }
       const pty = this.openPty(open, path, flags, mode);
       if (pty) return pty;
       const stream = open(path, flags, mode);
@@ -463,6 +510,11 @@ export class KernelStreams {
         ? this.sys.openPty !== undefined
         : (this.sys.ptyNumbers?.().includes(Number(n)) ?? false);
     if (!exists) throw new this.Fs.ErrnoError(wasiErrno('ENOENT'));
+  }
+
+  private terminalExists(path: string): boolean {
+    const { analyzePath } = this.Fs as unknown as TtyNodeFs;
+    return analyzePath?.call(this.Fs, path).exists ?? true;
   }
 
   private openNamedTerminal(path: string): number | undefined {
