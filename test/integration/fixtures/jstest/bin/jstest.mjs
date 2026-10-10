@@ -672,7 +672,9 @@ async function synctrap(ctx) {
     caught = sig;
   });
   await ctx.write(1, 'ready\n');
-  const line = text(ctx.sync.read(0));
+  let line = '';
+  for (let chunk = ctx.sync.read(0); chunk.length > 0; chunk = ctx.sync.read(0))
+    line += text(chunk);
   ctx.sync.write(1, `caught ${caught} ${line}`);
 }
 
