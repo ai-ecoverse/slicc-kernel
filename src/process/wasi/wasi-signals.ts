@@ -1,4 +1,4 @@
-import { SIG, sigbit } from '../../kernel/signals.ts';
+import { defaultAction, SIG, sigbit } from '../../kernel/signals.ts';
 import type { SignalHooks } from '../process-signals.ts';
 
 const DELIVERED_MASK = Object.values(SIG)
@@ -12,6 +12,8 @@ export class WasiSignals implements SignalHooks {
   private uncaught = 0;
 
   private delivering: number | undefined;
+
+  private defaulted = false;
 
   private readonly fallBack: (sig: number) => void;
   private readonly onKilled: ((code: number) => void) | undefined;
@@ -40,27 +42,31 @@ export class WasiSignals implements SignalHooks {
   raise(sig: number): void {
     const handler = this.handler();
     if (!handler) return;
-    const outer = this.delivering;
+    const outer = { sig: this.delivering, defaulted: this.defaulted };
     this.delivering = sig;
+    this.defaulted = false;
     try {
       handler(sig);
     } catch (e) {
       if (!(e instanceof WebAssembly.RuntimeError)) throw e;
-      this.defaultAction(sig);
+      if (!this.defaulted) this.defaultAction(sig);
     } finally {
-      this.delivering = outer;
+      this.delivering = outer.sig;
+      this.defaulted = outer.defaulted;
     }
   }
 
   raised(sig: number): boolean {
     if (sig !== SIG.ABRT || this.delivering === undefined) return false;
-    this.defaultAction(this.delivering);
+    if (!this.defaulted) this.defaultAction(this.delivering);
     return true;
   }
 
   private defaultAction(sig: number): void {
+    this.defaulted = true;
     this.uncaught |= sigbit(sig);
     this.fallBack(sig);
+    if (defaultAction(sig) !== 'terminate') this.uncaught &= ~sigbit(sig);
   }
 
   private handler(): ((sig: number) => void) | undefined {
