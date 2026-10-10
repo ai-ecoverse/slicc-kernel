@@ -507,9 +507,9 @@ export class WasiFds {
     }
     const alias = stdioAlias(path);
     if (alias !== undefined) return this.reopen(alias);
-    const s = this.statOrMissing(path);
     const exclusive = (oflags & OFLAGS.CREAT) !== 0 && (oflags & OFLAGS.EXCL) !== 0;
-    if (exclusive && (s || this.isLink(path))) throw new WasiError('EEXIST');
+    if (exclusive) this.createExclusive(path);
+    const s = this.statOrMissing(path);
     if (oflags & OFLAGS.DIRECTORY && !s?.isDirectory) {
       throw new WasiError(s ? 'ENOTDIR' : 'ENOENT');
     }
@@ -565,11 +565,19 @@ export class WasiFds {
     return fd;
   }
 
-  private isLink(path: string): boolean {
+  private createExclusive(path: string): void {
+    if (this.entryExists(path)) throw new WasiError('EEXIST');
+    const sys = this.kernel.sys;
+    sys.close(sys.openVfs(path, O_WRONLY, 0, { exclusive: true }));
+  }
+
+  private entryExists(path: string): boolean {
     try {
-      return this.fs.lstat(path).isSymbolicLink === true;
-    } catch {
-      return false;
+      this.fs.lstat(path);
+      return true;
+    } catch (e) {
+      if ((e as { code?: string }).code === 'ENOENT') return false;
+      throw e;
     }
   }
 

@@ -110,6 +110,7 @@ export function kernelSys(transport: SyncSabTransport): ProcessSys & PtyKernel {
             ...(opts?.orphan ? { orphan: true } : {}),
             ...(opts?.truncate ? { truncate: true } : {}),
             ...(opts?.create ? { create: true } : {}),
+            ...(opts?.exclusive ? { exclusive: true } : {}),
             ...(opts?.pin ? { pin: opts.pin } : {}),
           },
           `fd-open-vfs ${path}`
