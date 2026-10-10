@@ -165,6 +165,7 @@ export type WasmSyscall =
   | { op: 'proc-captured'; pid: number; slot: number }
   | { op: 'proc-fork'; state: ForkState; restart?: true }
   | { op: 'proc-kill'; pid: number; sig: number }
+  | { op: 'thread-kill'; tid: number; sig: number }
   | { op: 'proc-list' }
   | { op: 'mount-list' }
   | ({ op: 'mount' } & MountCall)
@@ -305,6 +306,7 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'proc-captured',
   'proc-fork',
   'proc-kill',
+  'thread-kill',
   'proc-list',
   'mount-list',
   'mount',
@@ -380,6 +382,8 @@ export interface WasmProcessOptions {
   onAsync?: () => void;
 
   hasPending?: () => boolean;
+
+  threadKill?: (tid: number, sig: number) => boolean;
 
   pendingBits?: () => number;
 
@@ -581,14 +585,14 @@ export class WasmProcess {
       if (isFdSyscall(req)) return await this.fdSyscall(req, cancelled);
       if (isTtySyscall(req)) return this.ttySyscall(req);
       if (isJobSyscall(req)) return this.jobSyscall(req);
-      if (isSocketSyscall(req)) return await this.socketSyscall(req);
+      if (isSocketSyscall(req)) return await this.socketSyscall(req, cancelled);
       if (isHttpSyscall(req)) return await this.httpSyscall(req);
       if (isHostSyscall(req)) {
         return await hostSyscall(req, {
           pid: this.pid,
           locks: this.options.locks,
           ops: this.asyncOps,
-          blocking: () => this.blockingSignal(),
+          blocking: () => this.blockingSignal(cancelled),
           valid: (inner) => isWasmSyscall(inner) && !isHostSyscall(inner),
         });
       }
@@ -596,7 +600,7 @@ export class WasmProcess {
         const { ptys, jobs } = this.options;
         return ptySyscall(req, { pid: this.pid, fds: this.fds, ptys, jobs });
       }
-      return await this.procSyscall(req);
+      return await this.procSyscall(req, cancelled);
     } catch (e) {
       if (e instanceof KernelError || e instanceof SpawnError) {
         return { ok: false, errno: e.code, message: e.code };
@@ -613,12 +617,15 @@ export class WasmProcess {
     if (restart && this.options.hasPending?.()) throw new KernelError('EINTR');
   }
 
-  private blockingSignal(): AbortSignal {
-    if (this.options.hasPending?.()) throw new KernelError('EINTR');
-    return this.interrupt.signal;
+  private blockingSignal(cancelled?: AbortSignal): AbortSignal {
+    if (this.options.hasPending?.() || cancelled?.aborted) throw new KernelError('EINTR');
+    return cancelled ? AbortSignal.any([this.interrupt.signal, cancelled]) : this.interrupt.signal;
   }
 
-  private async read(req: Extract<WasmSyscall, { op: 'fd-read' }>): Promise<Uint8Array> {
+  private async read(
+    req: Extract<WasmSyscall, { op: 'fd-read' }>,
+    cancelled?: AbortSignal
+  ): Promise<Uint8Array> {
     const file = this.fds.get(req.fd).file;
     const read = req.peek ? file.peek : file.read;
     if (!read) throw new KernelError(req.peek && file.read ? 'EOPNOTSUPP' : 'EBADF');
@@ -628,16 +635,21 @@ export class WasmProcess {
     if (file instanceof KernelSocket && file.unconnected) throw new KernelError('ENOTCONN');
     const ready = pollFile(file).readable;
     if (!ready && req.nonblock) throw new KernelError('EAGAIN');
-    const signal = ready ? this.interrupt.signal : this.blockingSignal();
+    const signal = ready ? this.interrupt.signal : this.blockingSignal(cancelled);
     return read.call(file, Math.max(0, Math.min(req.max, MAX_READ)), signal);
   }
 
-  private async write(fd: number, body: Uint8Array, nonblock = false): Promise<number> {
+  private async write(
+    fd: number,
+    body: Uint8Array,
+    nonblock = false,
+    cancelled?: AbortSignal
+  ): Promise<number> {
     const file = this.fds.get(fd).file;
     if (!file.write) throw new KernelError('EBADF');
     if (!pollFile(file).writable) {
       if (nonblock) throw new KernelError('EAGAIN');
-      return file.write(body, this.blockingSignal());
+      return file.write(body, this.blockingSignal(cancelled));
     }
 
     if (nonblock) return file.write(body, AbortSignal.abort());
@@ -703,9 +715,13 @@ export class WasmProcess {
     if (isVfsSyscall(req)) return this.vfsSyscall(req);
     switch (req.op) {
       case 'fd-read':
-        return { ok: true, kind: 'bytes', bytes: await this.read(req) };
+        return { ok: true, kind: 'bytes', bytes: await this.read(req, cancelled) };
       case 'fd-write':
-        return { ok: true, kind: 'json', json: await this.write(req.fd, req.body, req.nonblock) };
+        return {
+          ok: true,
+          kind: 'json',
+          json: await this.write(req.fd, req.body, req.nonblock, cancelled),
+        };
       case 'fd-close':
         this.options.locks?.closed(this.pid, req.fd);
         await Promise.resolve(this.fds.close(req.fd));
@@ -773,8 +789,7 @@ export class WasmProcess {
         return { ok: true, kind: 'json', json: this.options.jobs?.terminalNames() ?? [] };
       case 'fd-select': {
         const { read, write, timeoutMs } = req;
-        const blocking = this.blockingSignal();
-        const signal = cancelled ? AbortSignal.any([blocking, cancelled]) : blocking;
+        const signal = this.blockingSignal(cancelled);
         const selected = await selectFds(this.fds, read, write, timeoutMs, signal);
         return { ok: true, kind: 'json', json: selected };
       }
@@ -963,13 +978,13 @@ export class WasmProcess {
     return http.syscall(req);
   }
 
-  private socketSyscall(req: SocketSyscall): Promise<SyncFsResult> {
+  private socketSyscall(req: SocketSyscall, cancelled?: AbortSignal): Promise<SyncFsResult> {
     this.net ??= this.options.net ?? new LoopbackNet();
     const resolver = this.options.resolver ?? HOSTS_ONLY;
     return socketSyscall(req, {
       fds: this.fds,
       net: this.net,
-      blocking: () => this.blockingSignal(),
+      blocking: () => this.blockingSignal(cancelled),
       resolve: (name, family, blocking) => resolver.resolve(name, family, blocking),
     });
   }
@@ -985,7 +1000,8 @@ export class WasmProcess {
     req: Exclude<
       WasmSyscall,
       FdSyscall | TtySyscall | JobSyscall | SocketSyscall | HttpSyscall | PtySyscall | HostSyscall
-    >
+    >,
+    cancelled?: AbortSignal
   ): Promise<SyncFsResult> {
     switch (req.op) {
       case 'proc-fork':
@@ -995,7 +1011,7 @@ export class WasmProcess {
         this.refuseIfPending(req.restart);
         return { ok: true, kind: 'json', json: await this.spawn(req) };
       case 'proc-wait': {
-        const signal = req.nohang ? this.interrupt.signal : this.blockingSignal();
+        const signal = req.nohang ? this.interrupt.signal : this.blockingSignal(cancelled);
         const flags = {
           untraced: req.untraced,
           continued: req.continued,
@@ -1057,7 +1073,10 @@ export class WasmProcess {
         this.inherited &= ~(req.defaults ?? 0);
         return { ok: true, kind: 'void' };
       case 'sig-pause':
-        return this.pause();
+        return this.pause(cancelled);
+      case 'thread-kill':
+        if (!this.options.threadKill?.(req.tid, req.sig)) this.options.raise?.(req.sig);
+        return { ok: true, kind: 'void' };
       case 'proc-captured':
         return { ok: true, kind: 'bytes', bytes: this.children.captured(req.pid, req.slot) };
     }
@@ -1083,8 +1102,8 @@ export class WasmProcess {
     return { ok: true, kind: 'void' };
   }
 
-  private pause(): Promise<never> {
-    return aborted(this.blockingSignal());
+  private pause(cancelled?: AbortSignal): Promise<never> {
+    return aborted(this.blockingSignal(cancelled));
   }
 
   private alarm: ReturnType<typeof setTimeout> | undefined;

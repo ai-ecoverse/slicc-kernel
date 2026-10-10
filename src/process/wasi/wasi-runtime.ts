@@ -40,6 +40,15 @@ const PREVIEW1 = 'wasi_snapshot_preview1';
 const WASIX = 'wasix_32v1';
 const SLICC = 'slicc';
 
+const SIGNAL_CALLBACK = '__wasm_signal';
+
+const takeDefault =
+  (call: (req: WasmSyscall) => unknown, pid: number) =>
+  (sig: number): void => {
+    call({ op: 'proc-kill', pid, sig });
+    if (defaultAction(sig) === 'terminate') throw new WasiExit(128 + sig);
+  };
+
 const SLICC_FS = 'slicc_fs';
 
 const RESERVED = RESERVED_NAMESPACES;
@@ -203,11 +212,12 @@ function kernelOf(
   hooks: SignalHooks = { masks: () => null, raise: () => {} },
   memory?: () => number
 ) {
-  const transport = new SignalGate(
+  const gate = new SignalGate(
     createSyncSabTransport(init.sab, port, memory ? { memory } : {}),
     new Int32Array(init.sab, 0, SAB_HEADER_I32),
     hooks
-  ).transport();
+  );
+  const transport = gate.transport();
   const sys = kernelSys(transport);
   const call = (req: WasmSyscall): unknown => {
     const r: SyncFsResult = transport.call(req, Number.POSITIVE_INFINITY, req.op);
@@ -215,7 +225,7 @@ function kernelOf(
     return r.kind === 'json' ? r.json : undefined;
   };
   const say = (text: string) => sys.write(2, new TextEncoder().encode(`${init.argv0}: ${text}\n`));
-  return { transport, sys, call, say };
+  return { transport, sys, call, say, gate };
 }
 
 function traced<T extends object>(stats: WasiStats | undefined, tag: string, table: T): T {
@@ -429,16 +439,19 @@ export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike
   captureBacktraces(init.env);
 
   const signals = new WasiSignals(
-    (sig) => {
-      call({ op: 'proc-kill', pid: init.pid, sig });
-      if (defaultAction(sig) === 'terminate') throw new WasiExit(128 + sig);
-    },
+    takeDefault((req) => call(req), init.pid),
     (code) => {
       throw new WasiExit(code);
     }
   );
   const main: { memory?: WebAssembly.Memory } = {};
-  const { transport, sys, call: kernelCall, say } = kernelOf(init, port, signals, sizeOf(main));
+  const {
+    transport,
+    sys,
+    call: kernelCall,
+    say,
+    gate,
+  } = kernelOf(init, port, signals, sizeOf(main));
   const id = identify(transport, init);
 
   const stats = init.env.SLICC_WASI_STATS === '1' ? new WasiStats() : undefined;
@@ -490,6 +503,7 @@ export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike
   if (importsSigactionHook(module)) signals.useHook();
   if (fork?.signals) signals.restore(fork.signals);
   host.signals = signals;
+  host.interrupted = () => gate.interrupt();
   host.onRaise = (sig) => signals.raised(sig);
   host.muted = (fd, data) => signals.muted(fd, data);
   const exports = instance.exports as { _start: () => void };
@@ -565,8 +579,12 @@ export function captureBacktraces(env: Readonly<Record<string, string>>): void {
 
 export async function runWasiThread(init: WasmThreadInitMsg, port: SabPostLike): Promise<void> {
   captureBacktraces(init.env);
-  const { transport, sys, call, say } = kernelOf(init, port);
   const { thread } = init;
+  const { transport, sys, call, say, gate } = kernelOf(init, port, {
+    masks: () => null,
+    raise: (sig) => signals.raise(sig),
+  });
+  const signals = new WasiSignals(takeDefault(call, init.pid));
   const threads = new WasiThreads(port, thread.memory, threadCap(init.env), thread.tid, thread.ids);
   threads.received = thread.modules;
   const id = identify(transport, init);
@@ -588,6 +606,10 @@ export async function runWasiThread(init: WasmThreadInitMsg, port: SabPostLike):
     foreign: init.program.foreign,
     ...(program ? { program } : {}),
   });
+  signals.bind(instance.exports);
+  signals.register(SIGNAL_CALLBACK);
+  host.interrupted = () => gate.interrupt();
+  host.onRaise = (sig) => signals.raised(sig);
   const start = instance.exports.wasi_thread_start as (tid: number, arg: number) => void;
   try {
     start(thread.tid, thread.arg);
