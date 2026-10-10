@@ -78,8 +78,7 @@ export class HeldSet extends Set<HeldPaths> {
   override delete(holds: HeldPaths): boolean {
     const removed = super.delete(holds);
     for (const path of new Set([...holds.keys(), ...holds.opens.keys()])) this.idle(path);
-    for (const kept of holds.unlinked.values()) kept.release();
-    holds.unlinked.clear();
+    holds.releaseAll();
     return removed;
   }
 }
@@ -96,6 +95,7 @@ export class HeldPaths extends Map<string, number> implements UnlinkHolder {
   private readonly aliases = new Map<string, string>();
   private readonly handles = new Map<number, string>();
   private readonly keptHandles = new Map<number, KeptFile>();
+  private readonly uses = new Map<KeptFile, number>();
   private lastHandle = 0;
   private owning: string | undefined;
 
@@ -118,7 +118,12 @@ export class HeldPaths extends Map<string, number> implements UnlinkHolder {
   }
 
   isKept(path: string): boolean {
-    return this.unlinked.has(path);
+    const ids = this.handlesAt(path);
+    return ids.length === 0 ? this.unlinked.has(path) : ids.every((id) => this.keptHandles.has(id));
+  }
+
+  private handlesAt(path: string): number[] {
+    return [...this.handles].filter(([, key]) => key === path).map(([id]) => id);
   }
 
   keptFor(handle: number): KeptFile | undefined {
@@ -126,13 +131,32 @@ export class HeldPaths extends Map<string, number> implements UnlinkHolder {
   }
 
   keep(path: string, file: KeptFile): void {
+    const fresh = this.handlesAt(path).filter((id) => !this.keptHandles.has(id));
+    for (const id of fresh) this.keptHandles.set(id, file);
+    this.uses.set(file, Math.max(fresh.length, 1));
     this.unlinked.set(path, file);
-    for (const [id, key] of this.handles) if (key === path) this.keptHandles.set(id, file);
   }
 
-  unkeep(path: string): void {
-    this.unlinked.delete(path);
-    for (const [id, key] of this.handles) if (key === path) this.keptHandles.delete(id);
+  unkeep(path: string, file: KeptFile): void {
+    for (const [id, kept] of this.keptHandles) if (kept === file) this.keptHandles.delete(id);
+    this.uses.delete(file);
+    if (this.unlinked.get(path) === file) this.unlinked.delete(path);
+  }
+
+  private letGo(file: KeptFile, all = false): void {
+    const left = all ? 0 : (this.uses.get(file) ?? 0) - 1;
+    if (left > 0) {
+      this.uses.set(file, left);
+      return;
+    }
+    if (!this.uses.delete(file)) return;
+    file.release();
+    for (const [path, kept] of this.unlinked) if (kept === file) this.unlinked.delete(path);
+  }
+
+  releaseAll(): void {
+    for (const file of [...this.uses.keys()]) this.letGo(file, true);
+    this.keptHandles.clear();
   }
 
   hold(
@@ -152,15 +176,18 @@ export class HeldPaths extends Map<string, number> implements UnlinkHolder {
     const key = known ?? real ?? this.keyOf(path);
     if (key !== path) this.aliases.set(path, key);
     if (handle !== undefined) {
+      const kept = this.keptHandles.get(handle);
       this.handles.delete(handle);
       this.keptHandles.delete(handle);
+      if (kept) this.letGo(kept);
     }
     const count = (this.opens.get(key) ?? 0) + (on ? 1 : -1);
     if (count > 0) this.opens.set(key, count);
     else {
       this.opens.delete(key);
-      this.unlinked.get(key)?.release();
-      this.unlinked.delete(key);
+      for (const id of this.handlesAt(key)) this.handles.delete(id);
+      const kept = this.unlinked.get(key);
+      if (kept) this.letGo(kept, true);
       for (const [alias, target] of this.aliases) if (target === key) this.aliases.delete(alias);
       this.onIdle?.(key);
     }
