@@ -329,6 +329,20 @@ async function alias(ctx, [dir]) {
   await ctx.write(1, `${seen1} ${seen2} ${final}\n`);
 }
 
+async function aliasrm(ctx, [dir]) {
+  await ctx.fs.mkdir(`${dir}/real`);
+  await ctx.fs.writeFile(`${dir}/real/f`, 'keep');
+  await ctx.fs.symlink('real', `${dir}/alias`);
+  const h = await ctx.open(`${dir}/alias/f`, { read: true, write: true });
+  await ctx.fs.unlink(`${dir}/real/f`);
+  const before = text(await h.read(0, 10));
+  await h.write(4, new TextEncoder().encode('!'));
+  const after = text(await h.read(0, 10));
+  const gone = !(await ctx.fs.exists(`${dir}/real/f`));
+  await h.close();
+  await ctx.write(1, `${before} ${after} ${gone}\n`);
+}
+
 async function nodir(ctx, [path]) {
   const r = await ctx.open(path, { write: true, create: true }).then(
     () => 'opened',
@@ -438,6 +452,7 @@ const modes = {
   lock,
   nodir,
   alias,
+  aliasrm,
   selfloop,
   unawaited,
   pid,

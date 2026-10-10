@@ -85,6 +85,7 @@ test('open files and path operations agree, append appends, exclusive creation i
   assert.deepEqual(await run(['jstest', 'dangling', 'd.lnk'], home), ok('EEXIST false\n'));
   assert.deepEqual(await run(['jstest', 'selfloop', 'loop.lnk'], home), ok('EEXIST\n'));
   assert.deepEqual(await run(['jstest', 'alias', 'adir'], home), ok('one TWO TWO+\n'));
+  assert.deepEqual(await run(['jstest', 'aliasrm', 'rmdir1'], home), ok('keep keep! true\n'));
   assert.deepEqual(await run(['jstest', 'ctxclose', 'q.txt'], home), ok('true EBADF keep\n'));
   assert.deepEqual(
     await run(['jstest', 'badpos', 'p.txt'], home),
