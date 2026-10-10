@@ -508,7 +508,8 @@ export class WasiFds {
     const alias = stdioAlias(path);
     if (alias !== undefined) return this.reopen(alias);
     const s = this.statOrMissing(path);
-    if (s && oflags & OFLAGS.CREAT && oflags & OFLAGS.EXCL) throw new WasiError('EEXIST');
+    const exclusive = (oflags & OFLAGS.CREAT) !== 0 && (oflags & OFLAGS.EXCL) !== 0;
+    if (exclusive && (s || this.isLink(path))) throw new WasiError('EEXIST');
     if (oflags & OFLAGS.DIRECTORY && !s?.isDirectory) {
       throw new WasiError(s ? 'ENOTDIR' : 'ENOENT');
     }
@@ -562,6 +563,14 @@ export class WasiFds {
     if (append) this.publishFlags(fd, { nonblock: false, append });
     this.bump();
     return fd;
+  }
+
+  private isLink(path: string): boolean {
+    try {
+      return this.fs.lstat(path).isSymbolicLink === true;
+    } catch {
+      return false;
+    }
   }
 
   private statOrMissing(path: string): SyncFsBridgeStat | undefined {

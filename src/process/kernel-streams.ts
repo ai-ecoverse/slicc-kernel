@@ -429,6 +429,7 @@ export class KernelStreams {
       }
       const pty = this.openPty(open, path, flags, mode);
       if (pty) return pty;
+      this.refuseExclusiveLink(path, flags);
       const stream = open(path, flags, mode);
 
       if (!stream.tty) return stream;
@@ -460,6 +461,15 @@ export class KernelStreams {
       if (terminal !== undefined) this.attach(stream, terminal, true);
       return stream;
     };
+  }
+
+  private refuseExclusiveLink(path: string, flags: number): void {
+    if ((flags & (O_CREAT | O_EXCL)) !== (O_CREAT | O_EXCL)) return;
+    let mode = 0;
+    try {
+      mode = (this.Fs.stat?.(path, true) as { mode?: number } | undefined)?.mode ?? 0;
+    } catch {}
+    if ((mode & 0o170000) === 0o120000) throw new this.Fs.ErrnoError(wasiErrno('EEXIST'));
   }
 
   private openPty(
