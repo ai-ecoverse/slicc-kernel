@@ -23,6 +23,7 @@ import {
 import { JsCallError, type JsKernel } from './js-kernel.ts';
 import { type JsNet, netOps } from './js-net.ts';
 import { type JsSyncContext, JsSyncKernel, laneOf, type SyncCall, syncOps } from './js-sync.ts';
+import { type JsWebSocket, type JsWebSocketOptions, websocketOp } from './js-websocket.ts';
 
 export type { JsFdType, JsOpenOptions } from './js-io.ts';
 
@@ -85,6 +86,7 @@ export interface JsProgramContext {
   wait(pid: number): Promise<JsExited>;
   kill(pid: number, signal?: JsSignal): Promise<void>;
   net: JsNet;
+  websocket(url: string | URL, options?: JsWebSocketOptions): Promise<JsWebSocket>;
   exit(code?: number): never;
 }
 
@@ -303,6 +305,7 @@ export function createContext(o: ContextOptions): CreatedContext {
     sync,
     ...children,
     net: netOps(kernel, io),
+    websocket: websocketOp(kernel),
     exit,
   };
   const drain = async (): Promise<void> => {

@@ -862,11 +862,129 @@ async function netmisc(ctx) {
   await ctx.write(1, `${out.join('\n')}\n`);
 }
 
+function wsErr(err) {
+  if (err.name === 'AbortError') return 'AbortError';
+  return `${err.name}:${err.cause?.code ?? err.code ?? err.message}`;
+}
+
+async function wsTry(out, label, fn) {
+  try {
+    out.push(`${label} ${await fn()}`);
+  } catch (err) {
+    out.push(`${label} ${wsErr(err)}`);
+  }
+}
+
+async function wsclient(ctx, [base]) {
+  const out = [];
+  const enc = new TextEncoder();
+  await wsTry(out, 'echo', async () => {
+    const ws = await ctx.websocket(`${base}/echo`, { protocols: ['chat', 'other'] });
+    const w = ws.writable.getWriter();
+    const r = ws.readable.getReader();
+    await w.write('hi');
+    await w.write(enc.encode('\x01\x02'));
+    const a = (await r.read()).value;
+    const b = (await r.read()).value;
+    ws.close({ code: 4000, reason: 'done' });
+    const end = await r.read();
+    const closed = await ws.closed;
+    return `${ws.protocol} ${a} ${[...b].join(',')} ${end.done} ${closed.code} ${closed.reason} ${ws.url}`;
+  });
+  await wsTry(out, 'serverclose', async () => {
+    const ws = await ctx.websocket(base.replace(/^ws/, 'http') + '/echo');
+    const w = ws.writable.getWriter();
+    await w.write('bye');
+    let n = 0;
+    for await (const _ of ws.readable) n++;
+    const closed = await ws.closed;
+    return `${n} ${closed.code} ${closed.reason} ${ws.protocol === ''}`;
+  });
+  await wsTry(out, 'writerclose', async () => {
+    const ws = await ctx.websocket(`${base}/echo`);
+    await ws.writable.getWriter().close();
+    return `${(await ws.closed).code}`;
+  });
+  await wsTry(out, 'cancel', async () => {
+    const ws = await ctx.websocket(`${base}/echo`);
+    await ws.readable.cancel();
+    return `${(await ws.closed).code}`;
+  });
+  await wsTry(out, 'reset', async () => {
+    const ws = await ctx.websocket(`${base}/reset`);
+    const read = await ws.readable
+      .getReader()
+      .read()
+      .then(() => 'read', wsErr);
+    return `${read} ${await ws.closed.then(() => 'closed', wsErr)}`;
+  });
+  await wsTry(out, 'sendfail', async () => {
+    const ws = await ctx.websocket(`${base}/echo`);
+    return ws.writable
+      .getWriter()
+      .write('boom')
+      .then(() => 'sent', wsErr);
+  });
+  await wsTry(out, 'backpressure', async () => {
+    const ws = await ctx.websocket(`${base}/slow`);
+    await ws.writable.getWriter().write('x');
+    return 'sent';
+  });
+  await wsTry(out, 'writerabort', async () => {
+    const ws = await ctx.websocket(`${base}/echo`);
+    await ws.writable.abort();
+    return `${(await ws.closed).code}`;
+  });
+  await wsTry(out, 'refused', () => ctx.websocket(`${base}/refuse`));
+  await wsTry(out, 'badproto', () => ctx.websocket(`${base}/badproto`, { protocols: 'chat' }));
+  await wsTry(out, 'abortopen', () => {
+    const c = new AbortController();
+    setTimeout(() => c.abort(), 50);
+    return ctx.websocket(`${base}/hang`, { signal: c.signal });
+  });
+  await wsTry(out, 'preabort', () =>
+    ctx.websocket(`${base}/echo`, { signal: AbortSignal.abort() })
+  );
+  await wsTry(out, 'abortlater', async () => {
+    const c = new AbortController();
+    const ws = await ctx.websocket(`${base}/echo`, { signal: c.signal });
+    const reading = ws.readable
+      .getReader()
+      .read()
+      .then(() => 'read', wsErr);
+    c.abort();
+    const closed = await ws.closed.then(() => 'closed', wsErr);
+    const sent = await ws.writable
+      .getWriter()
+      .write('x')
+      .then(() => 'sent', wsErr);
+    return `${await reading} ${closed} ${sent}`;
+  });
+  await wsTry(out, 'badurl', () => ctx.websocket('ftp://x/y'));
+  await wsTry(out, 'badcode', async () => {
+    const ws = await ctx.websocket(`${base}/echo`);
+    try {
+      ws.close({ code: 1001 });
+    } finally {
+      ws.close();
+    }
+  });
+  await ctx.write(1, `${out.join('\n')}\n`);
+}
+
+async function wsone(ctx, [url]) {
+  const out = [];
+  await wsTry(out, 'one', async () => (await ctx.websocket(url)).protocol);
+  await ctx.write(1, `${out.join('\n')}\n`);
+}
+
 const modes = {
   httpserver,
   echoserver,
   netclient,
   netmisc,
+  wsclient,
+  wsone,
   stdiochecks,
   ab,
   readsteal,

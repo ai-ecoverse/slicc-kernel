@@ -1,6 +1,7 @@
 import type { SyncFsResult } from '../../realm/sync-fs-wire.ts';
 import { NO_TRANSPORT } from './network.ts';
 import type { HeaderList, RealmTransport } from './transport.ts';
+import { WS_OPS, WsHandles, type WsSyscall } from './ws-syscalls.ts';
 
 export type HttpSyscall =
   | {
@@ -12,9 +13,16 @@ export type HttpSyscall =
     }
   | { op: 'net-read'; handle: number; max: number }
   | { op: 'net-close'; handle: number }
-  | { op: 'net-traits' };
+  | { op: 'net-traits' }
+  | WsSyscall;
 
-export const HTTP_OPS: readonly string[] = ['net-request', 'net-read', 'net-close', 'net-traits'];
+export const HTTP_OPS: readonly string[] = [
+  'net-request',
+  'net-read',
+  'net-close',
+  'net-traits',
+  ...WS_OPS,
+];
 
 export interface HttpHead {
   handle: number;
@@ -50,15 +58,19 @@ export class HttpHandles {
 
   private nextHandle = 0;
 
+  private readonly ws: WsHandles;
+
   constructor(transport: RealmTransport) {
     this.transport = transport;
+    this.ws = new WsHandles(transport, () => ++this.nextHandle);
   }
 
   syscall(req: HttpSyscall): Promise<SyncFsResult> {
+    if (req.op.startsWith('net-ws-')) return this.ws.syscall(req as WsSyscall);
     if (req.op === 'net-request') return this.request(req);
     if (req.op === 'net-read') return this.read(req.handle, req.max);
     if (req.op === 'net-traits') return Promise.resolve(this.traits());
-    return this.close(req.handle);
+    return this.close((req as { handle: number }).handle);
   }
 
   private traits(): SyncFsResult {
@@ -149,6 +161,10 @@ export class HttpHandles {
   }
 
   private async close(handle: number): Promise<SyncFsResult> {
+    if (this.ws.owns(handle)) {
+      this.ws.close(handle);
+      return { ok: true, kind: 'void' };
+    }
     const entry = this.open.get(handle);
     if (!entry) return { ok: false, errno: 'EBADF', message: `no request ${handle}` };
     this.open.delete(handle);
@@ -158,6 +174,7 @@ export class HttpHandles {
   }
 
   async closeAll(): Promise<void> {
+    this.ws.closeAll();
     await Promise.all([...this.open.keys()].map((handle) => this.close(handle)));
   }
 }
