@@ -429,6 +429,7 @@ export function useFileMmap(Fs: ProcessFs, deps: MmapDeps): void {
     const memory = deps.memory();
     const shared = (flags & MAP_TYPE) !== MAP_PRIVATE && (prot & PROT_WRITE) !== 0;
     const kfd = stream.sliccKernelFile ? stream.sliccKernelFd : undefined;
+    if (shared && kfd !== undefined) throw new Fs.ErrnoError(wasiErrno('ENODEV'));
     if (
       (stream.stream_ops.mmap && kfd === undefined) ||
       !memalign ||
