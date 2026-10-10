@@ -190,6 +190,7 @@ interface Reply {
   id: number;
   result?: unknown;
   error?: string;
+  code?: string;
   fd?: 1 | 2;
   bytes?: Uint8Array;
   started?: number;
@@ -280,6 +281,10 @@ function cdpBridge(hook: CdpHook | undefined) {
       for (const close of [...open]) close();
     },
   };
+}
+
+function failed(message: string, code: string | undefined): Error {
+  return Object.assign(new Error(message), code === undefined ? {} : { code });
 }
 
 function kernelUsers(call: (req: KernelCall) => Promise<unknown>): KernelUsers {
@@ -374,7 +379,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
       if (data.fd !== undefined) return call.output?.(data.fd, data.bytes as Uint8Array);
       if (data.started !== undefined) return call.started?.(data.started);
       pending.delete(data.id);
-      if (data.error !== undefined) call.reject(new Error(data.error));
+      if (data.error !== undefined) call.reject(failed(data.error, data.code));
       else call.resolve(data.result);
     }
   );

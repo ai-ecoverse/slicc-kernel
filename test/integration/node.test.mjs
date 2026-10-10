@@ -209,7 +209,7 @@ test('a command pnpm installs globally runs in the same shell, and is gone once 
   await until('$ ');
   term.write('echo "home $PNPM_HOME"; rg --version 2>/dev/null; echo "before $((100+27))"\r');
   await until('before 127');
-  assert.match(screen, /home \/home\/.local\/share\/pnpm/);
+  assert.match(screen, /home \/usr\/local\/share\/pnpm/);
   term.write(
     'pnpm add -g @ai-ecoverse/wasi-ripgrep >/dev/null && rg --version | head -1 && echo "added $((40+2))"\r'
   );

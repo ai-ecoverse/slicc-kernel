@@ -843,6 +843,16 @@ export class Launcher {
     return this.processes.get(pid)?.umask?.() ?? DEFAULT_UMASK;
   }
 
+  private imageOf(pid: number): number {
+    const members = this.jobs.list();
+    let image = pid;
+    for (;;) {
+      const next = members.find((m) => m.execParent === image);
+      if (!next) return image;
+      image = next.pid;
+    }
+  }
+
   credOf(pid: number): Cred {
     return this.creds.get(pid)?.() ?? copyCred(ROOT);
   }
@@ -863,7 +873,7 @@ export class Launcher {
     if (pid < 0) return this.jobs.killGroup(-pid, sig, may);
     const handle = this.processes.get(pid);
     if (!handle) return false;
-    if (!may(pid)) throw fsError('EPERM', `pid ${pid}`);
+    if (!may(this.imageOf(pid))) throw fsError('EPERM', `pid ${pid}`);
     if (sig !== 0) handle.signal(sig);
     return true;
   }

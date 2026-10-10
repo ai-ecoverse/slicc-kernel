@@ -215,6 +215,14 @@ function isUsersRequest(req: KernelRequest): req is UsersRequest {
   return USERS_OPS.has(req.op);
 }
 
+function failure(err: unknown): { error: string; code?: string } {
+  const code = (err as { code?: unknown } | null)?.code;
+  return {
+    error: err instanceof Error ? err.message : String(err),
+    ...(typeof code === 'string' ? { code } : {}),
+  };
+}
+
 function usersOp(l: Launcher, req: UsersRequest): Promise<unknown> {
   if (req.op === 'users-add') return l.users.add(req.user);
   if (req.op === 'users-remove') return l.users.remove(req.name, req.options);
@@ -393,7 +401,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
     const req = event.data as KernelRequest;
     handle(req).then(
       (result) => reply(req.id, { result }, result instanceof MessagePort ? [result] : undefined),
-      (err) => reply(req.id, { error: err instanceof Error ? err.message : String(err) })
+      (err) => reply(req.id, failure(err))
     );
   });
 }
