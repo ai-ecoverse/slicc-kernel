@@ -6,6 +6,7 @@ import type { RealmTransport } from '../kernel/net/transport.ts';
 import { SIG } from '../kernel/signals.ts';
 import type { Launcher, TerminalSession } from '../launcher.ts';
 import { serveTransport, type TransportServer } from '../transport.ts';
+import { type Account, credOf } from '../users.ts';
 import {
   type ClientHello,
   type ClientRequest,
@@ -25,6 +26,7 @@ export interface ClientHost {
   locks?: LockManagerLike;
   lock?: string;
   signal?: (name: string) => number;
+  user?: string | number;
 }
 
 export interface ServedClient {
@@ -124,6 +126,43 @@ function dialFor(
     serveSocket(socket, port1, () => open.delete(req.id))
   );
   return { result: port2, transfer: [port2] };
+}
+
+async function accountOf(l: Launcher, user: string | number): Promise<Account> {
+  const found = await l.users.lookup(user);
+  if (!found) throw fsError('ENOENT', `no user ${String(user)}`);
+  return found;
+}
+
+async function runAs(l: Launcher, host: ClientHost, requested?: string | number): Promise<string> {
+  const self = await accountOf(l, host.user ?? 0);
+  if (requested === undefined) return self.name;
+  const target = await accountOf(l, requested);
+  if (self.uid !== 0 && target.uid !== self.uid) {
+    throw fsError('EPERM', `${self.name} may not run as ${target.name}`);
+  }
+  return target.name;
+}
+
+async function processes(l: Launcher, host: ClientHost): Promise<ProcessEntry[]> {
+  const viewer = credOf(await accountOf(l, host.user ?? 0));
+  return l.list(viewer).map(({ tid: _, cred = viewer, umask: _umask, ...entry }) => ({
+    ...entry,
+    uid: cred.euid,
+    gid: cred.egid,
+  }));
+}
+
+async function killAs(
+  l: Launcher,
+  host: ClientHost,
+  req: Extract<ClientRequest, { op: 'kill' }>
+): Promise<Answer> {
+  const sender = credOf(await accountOf(l, host.user ?? 0));
+  if (!l.kill(req.pid, signalOf(host)(req.signal), sender)) {
+    throw fsError('ESRCH', `pid ${req.pid}`);
+  }
+  return { result: true };
 }
 
 function killGroups(host: ClientHost, pgids: number[]): void {
@@ -240,6 +279,7 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
   async function terminal(req: Extract<ClientRequest, { op: 'open-terminal' }>, l: Launcher) {
     const session = await l.openTerminal(req.argv, {
       ...req.options,
+      user: await runAs(l, host, req.options.user),
       onData: (bytes) => reply(req.id, { fd: 1, bytes: bytes.slice() }),
     });
     if (state === 'closed') {
@@ -262,6 +302,7 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
     let leader: number | undefined;
     const result = await l.run(req.argv, {
       ...req.options,
+      user: await runAs(l, host, req.options.user),
       collect: false,
       onStdout: out(1),
       onStderr: out(2),
@@ -295,12 +336,9 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
         return { result: true };
       }
       case 'kill':
-        if (!l.kill(req.pid, signalOf(host)(req.signal))) throw fsError('ESRCH', `pid ${req.pid}`);
-        return { result: true };
+        return killAs(l, host, req);
       case 'ps':
-        return {
-          result: l.list().map(({ tid: _, ...entry }): ProcessEntry => entry),
-        };
+        return { result: await processes(l, host) };
       case 'fs':
         if (!(FS_METHODS as readonly string[]).includes(req.method)) {
           throw new Error(`unknown file system call ${req.method}`);

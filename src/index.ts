@@ -19,6 +19,7 @@ import type { MountEntry, MountSpec } from './mount/mount-fs.ts';
 import type { ProcessMountPolicy, ProcessMountRequest } from './mount/syscall.ts';
 import type { InitRequest, KernelCall, TerminalAction } from './serve.ts';
 import { type NetworkTransport, serveTransport } from './transport.ts';
+import type { Account, AddUser, RemoveUser } from './users.ts';
 
 export type { CdpConnection, CdpHook, CdpRequest } from './cdp/types.ts';
 export {
@@ -81,6 +82,7 @@ export {
   type NetworkWebSocket,
   type NetworkWebSocketRequest,
 } from './transport.ts';
+export type { Account, AddUser, RemoveUser } from './users.ts';
 
 export interface NetworkOptions {
   transport?: NetworkTransport;
@@ -118,6 +120,7 @@ export interface MountPending {
 
 export interface RunOptions {
   cwd?: string;
+  user?: string | number;
   env?: Record<string, string>;
   stdin?: string | Uint8Array;
   onStdout?: (text: string) => void;
@@ -130,10 +133,21 @@ export interface RunResult {
   stderr: string;
 }
 
+export interface ConnectOptions {
+  user?: string | number;
+}
+
+export interface KernelUsers {
+  add(user: AddUser): Promise<Account>;
+  remove(name: string, options?: RemoveUser): Promise<boolean>;
+  list(): Promise<Account[]>;
+}
+
 export interface Kernel {
   run(argv: string[], options?: RunOptions): Promise<RunResult>;
   openTerminal(argv: string[], options?: TerminalOptions): Promise<Terminal>;
-  connect(): Promise<MessagePort>;
+  connect(options?: ConnectOptions): Promise<MessagePort>;
+  readonly users: KernelUsers;
   setRoutes(routes: RouteTable): Promise<void>;
   dial(options: DialOptions): Promise<DialledSocket>;
   loopbackFetch(input: RequestInfo | URL, options: LoopbackFetchOptions): Promise<Response>;
@@ -146,6 +160,7 @@ export interface Kernel {
 
 export interface TerminalOptions {
   cwd?: string;
+  user?: string | number;
   env?: Record<string, string>;
   cols?: number;
   rows?: number;
@@ -264,6 +279,15 @@ function cdpBridge(hook: CdpHook | undefined) {
       closed = true;
       for (const close of [...open]) close();
     },
+  };
+}
+
+function kernelUsers(call: (req: KernelCall) => Promise<unknown>): KernelUsers {
+  return {
+    add: async (user) => (await call({ op: 'users-add', user })) as Account,
+    remove: async (name, options) =>
+      (await call({ op: 'users-remove', name, ...(options ? { options } : {}) })) as boolean,
+    list: async () => (await call({ op: 'users-list' })) as Account[],
   };
 }
 
@@ -432,7 +456,9 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
       };
     },
     openTerminal,
-    connect: async () => (await call({ op: 'connect' })) as MessagePort,
+    connect: async (connectOptions = {}) =>
+      (await call({ op: 'connect', ...connectOptions })) as MessagePort,
+    users: kernelUsers(call),
     setRoutes: async (routes) => void (await call({ op: 'routes', routes })),
     dial,
     loopbackFetch: (input, fetchOptions) => loopbackFetch(dial, input, fetchOptions),

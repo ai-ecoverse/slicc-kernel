@@ -3,7 +3,7 @@ import type { TransportCall, TransportReply } from '../kernel/net/remote-transpo
 import type { RealmTransportTraits } from '../kernel/net/transport.ts';
 import type { MountSpec } from '../mount/mount-fs.ts';
 
-export const PROTOCOL: readonly [number, number] = [1, 7];
+export const PROTOCOL: readonly [number, number] = [1, 8];
 
 export interface ClientHello {
   protocol: readonly [number, number];
@@ -19,6 +19,7 @@ export interface KernelHello {
 
 export interface SpawnRequestOptions {
   cwd?: string;
+  user?: string | number;
   env?: Record<string, string>;
   stdin?: Uint8Array;
   pgid?: number;
@@ -26,6 +27,7 @@ export interface SpawnRequestOptions {
 
 export interface TerminalRequestOptions {
   cwd?: string;
+  user?: string | number;
   env?: Record<string, string>;
   cols?: number;
   rows?: number;
@@ -102,6 +104,8 @@ export interface ProcessEntry {
   started: number;
   state: 'S' | 'Z';
   memory: number;
+  uid: number;
+  gid: number;
 }
 
 export interface MessagePortLike {

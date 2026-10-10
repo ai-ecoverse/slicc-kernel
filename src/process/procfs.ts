@@ -1,3 +1,4 @@
+import { ROOT } from '../kernel/cred.ts';
 import type { MountLine, ProcessInfo, ProcessListing } from '../kernel/proc-info.ts';
 import { mountTable } from './process-fds.ts';
 
@@ -91,7 +92,8 @@ export function pidStat(info: ProcessInfo, boot: number): string {
 
 export function pidStatus(info: ProcessInfo): string {
   const state = info.state === 'Z' ? 'Z (zombie)' : 'S (sleeping)';
-  const ids = `${UID}\t${UID}\t${UID}\t${UID}`;
+  const c = info.cred ?? ROOT;
+  const ids = (r: number, e: number, s: number) => `${r}\t${e}\t${s}\t${e}`;
   return [
     `Name:\t${commOf(info)}`,
     `Umask:\t${(info.umask ?? 0o022).toString(8).padStart(4, '0')}`,
@@ -101,12 +103,12 @@ export function pidStatus(info: ProcessInfo): string {
     `Pid:\t${info.pid}`,
     `PPid:\t${info.ppid}`,
     'TracerPid:\t0',
-    `Uid:\t${ids}`,
-    `Gid:\t${ids}`,
+    `Uid:\t${ids(c.ruid, c.euid, c.suid)}`,
+    `Gid:\t${ids(c.rgid, c.egid, c.sgid)}`,
     'FDSize:\t64',
     `VmSize:\t${Math.ceil(info.memory / KIB)} kB`,
     `VmRSS:\t${Math.ceil(info.memory / KIB)} kB`,
-    'Groups:\t',
+    `Groups:\t${c.groups.join(' ')}`,
     `NSpid:\t${info.pid}`,
     `NSpgid:\t${info.pgid}`,
     `NSsid:\t${info.sid}`,

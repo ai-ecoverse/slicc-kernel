@@ -167,9 +167,11 @@ export class JobTable {
     return true;
   }
 
-  killGroup(pgid: number, sig: number): boolean {
-    const targets = [...this.members.values()].filter((m) => m.pgid === pgid);
-    const pids = new Set(targets.map((m) => m.pid));
+  killGroup(pgid: number, sig: number, may: (pid: number) => boolean = () => true): boolean {
+    const group = [...this.members.values()].filter((m) => m.pgid === pgid);
+    const targets = group.filter((m) => may(m.pid));
+    if (targets.length === 0 && group.length > 0) throw new KernelError('EPERM');
+    const pids = new Set(group.map((m) => m.pid));
     if (sig !== 0) {
       for (const m of targets)
         if (m.execParent === undefined || !pids.has(m.execParent)) m.signal(sig);

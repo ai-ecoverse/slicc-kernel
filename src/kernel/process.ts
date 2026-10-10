@@ -9,6 +9,7 @@ import {
   type InheritedSlot,
   SpawnError,
 } from './children.ts';
+import { type Cred, type CredChange, changeCred, copyCred, ROOT } from './cred.ts';
 import {
   type FdTable,
   type HeldMeta,
@@ -112,6 +113,8 @@ export type WasmSyscall =
     }
   | { op: 'fd-renumber'; from: number; to: number; keep?: boolean }
   | { op: 'proc-umask'; mask?: number }
+  | { op: 'proc-cred' }
+  | { op: 'proc-setcred'; change: CredChange }
   | {
       op: 'fd-promote';
       fd: number;
@@ -277,6 +280,8 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'fd-list',
   'proc-alarm',
   'proc-umask',
+  'proc-cred',
+  'proc-setcred',
   'dl-log',
   'fd-renumber',
   'fd-promote',
@@ -330,6 +335,8 @@ export interface WasmProcessOptions {
   ignored?: number;
 
   umask?: number;
+
+  cred?: Cred;
 
   identity?: () => Promise<{ pid: number; ppid: number }>;
 
@@ -402,6 +409,8 @@ export class WasmProcess {
 
   umask = DEFAULT_UMASK;
 
+  cred: Cred;
+
   private execChild: number | undefined;
 
   execTermsig: number | undefined;
@@ -437,6 +446,7 @@ export class WasmProcess {
     this.options = options;
     this.inherited = options.ignored ?? 0;
     this.umask = options.umask ?? DEFAULT_UMASK;
+    this.cred = copyCred(options.cred ?? ROOT);
     this.children = new ChildTable(fds, options.spawner, options.forker);
     this.nodes = options.nodes ?? new VfsNodes(options.fs);
     if (!options.nodes) options.openFiles?.add(this.nodes);
@@ -993,6 +1003,11 @@ export class WasmProcess {
         return { ok: true, kind: 'void' };
       case 'proc-umask':
         return { ok: true, kind: 'json', json: this.setUmask(req.mask) };
+      case 'proc-cred':
+        return { ok: true, kind: 'json', json: copyCred(this.cred) };
+      case 'proc-setcred':
+        this.cred = changeCred(this.cred, req.change);
+        return { ok: true, kind: 'json', json: copyCred(this.cred) };
       case 'dl-log':
         if (req.append) this.dlLog.push(req.append);
         return { ok: true, kind: 'json', json: this.dlLog.slice(req.from) };

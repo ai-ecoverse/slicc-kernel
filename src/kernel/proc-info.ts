@@ -1,3 +1,5 @@
+import type { Cred } from './cred.ts';
+
 export interface ProcessInfo {
   pid: number;
   tid: number;
@@ -10,6 +12,7 @@ export interface ProcessInfo {
   state: 'S' | 'Z';
   memory: number;
   umask?: number;
+  cred?: Cred;
 }
 
 export interface MountLine {
