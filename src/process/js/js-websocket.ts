@@ -23,6 +23,7 @@ export interface JsWebSocket {
 }
 
 const SEND_BUFFER = 1024 * 1024;
+const MAX_REASON = 123;
 const NEVER = new AbortController().signal;
 
 function failed(err: unknown): TypeError {
@@ -44,6 +45,14 @@ function closeCode(code: number | undefined): number {
   if (code === undefined) return 1000;
   if (code === 1000 || (code >= 3000 && code <= 4999)) return code;
   throw new JsCallError('EINVAL', `close code ${code}`);
+}
+
+function closeReason(reason: string | undefined): string {
+  if (reason === undefined) return '';
+  if (new TextEncoder().encode(reason).length > MAX_REASON) {
+    throw new JsCallError('EINVAL', `close reason over ${MAX_REASON} bytes`);
+  }
+  return reason;
 }
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -108,7 +117,7 @@ export function websocketOp(kernel: JsKernel) {
         op: 'net-ws-close',
         handle,
         code: closeCode(how.code),
-        reason: how.reason ?? '',
+        reason: closeReason(how.reason),
       });
     };
 

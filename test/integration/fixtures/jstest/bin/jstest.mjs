@@ -961,6 +961,14 @@ async function wsclient(ctx, [base]) {
     return `${await reading} ${closed} ${sent}`;
   });
   await wsTry(out, 'badurl', () => ctx.websocket('ftp://x/y'));
+  await wsTry(out, 'longreason', async () => {
+    const ws = await ctx.websocket(`${base}/echo`);
+    try {
+      ws.close({ reason: 'é'.repeat(62) });
+    } finally {
+      ws.close({ reason: 'é'.repeat(61) });
+    }
+  });
   await wsTry(out, 'badcode', async () => {
     const ws = await ctx.websocket(`${base}/echo`);
     try {
