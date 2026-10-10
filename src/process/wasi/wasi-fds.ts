@@ -507,8 +507,10 @@ export class WasiFds {
     }
     const alias = stdioAlias(path);
     if (alias !== undefined) return this.reopen(alias);
+    const exclusive = (oflags & OFLAGS.CREAT) !== 0 && (oflags & OFLAGS.EXCL) !== 0;
+    if (exclusive && this.isLink(path)) throw new WasiError('EEXIST');
     const s = this.statOrMissing(path);
-    if (s && oflags & OFLAGS.CREAT && oflags & OFLAGS.EXCL) throw new WasiError('EEXIST');
+    if (exclusive && s) throw new WasiError('EEXIST');
     if (oflags & OFLAGS.DIRECTORY && !s?.isDirectory) {
       throw new WasiError(s ? 'ENOTDIR' : 'ENOENT');
     }
@@ -530,8 +532,8 @@ export class WasiFds {
     if (buffer) {
       if (oflags & OFLAGS.TRUNC) buffer.truncate(0);
     } else {
-      if (!existing) this.fs.writeFile(path, new Uint8Array(0));
-      const empty = !existing || (oflags & OFLAGS.TRUNC) !== 0;
+      const made = !existing && this.createNew(path, oflags);
+      const empty = made || (oflags & OFLAGS.TRUNC) !== 0;
       if (existing?.ranged) (this.fs as { invalidate?(): void }).invalidate?.();
       const st = existing?.ranged || !existing ? this.fs.stat(path) : existing;
       const ranged = st.ranged ? st.size : undefined;
@@ -554,14 +556,36 @@ export class WasiFds {
     const append = (fdflags & FDFLAGS.APPEND) !== 0;
     const flags = (writable ? (readable ? O_RDWR : O_WRONLY) : 0) | (append ? O_APPEND : 0);
 
-    if (!existing) this.fs.writeFile(path, new Uint8Array(0));
+    const made = !existing && this.createNew(path, oflags);
 
-    const truncate = !existing || (oflags & OFLAGS.TRUNC) !== 0;
+    const truncate = made || (oflags & OFLAGS.TRUNC) !== 0;
     const fd = this.kernel.sys.openVfs(path, flags, 0, truncate ? { truncate } : {});
     this.table.set(fd, { type: 'kernel', kind: 'file', nonblock: false, append });
     if (append) this.publishFlags(fd, { nonblock: false, append });
     this.bump();
     return fd;
+  }
+
+  private createNew(path: string, oflags: number): boolean {
+    if (!this.fs.create) {
+      this.fs.writeFile(path, new Uint8Array(0));
+      return true;
+    }
+    try {
+      this.fs.create(path);
+      return true;
+    } catch (err) {
+      if (oflags & OFLAGS.EXCL || (err as { code?: string }).code !== 'EEXIST') throw err;
+      return false;
+    }
+  }
+
+  private isLink(path: string): boolean {
+    try {
+      return this.fs.lstat(path).isSymbolicLink === true;
+    } catch {
+      return false;
+    }
   }
 
   private statOrMissing(path: string): SyncFsBridgeStat | undefined {

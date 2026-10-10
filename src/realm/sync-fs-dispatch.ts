@@ -118,6 +118,9 @@ async function run(
     case 'symlink':
       await fs.symlink(req.arg2 ?? '', path);
       return done;
+    case 'create':
+      await createExclusive(fs, path);
+      return done;
     case 'readlink':
       return json(await fs.readlink(path));
     case 'chmod':
@@ -136,6 +139,18 @@ async function run(
     default:
       return { ok: false, errno: 'EINVAL', message: `sync-fs: unknown op '${req.op as string}'` };
   }
+}
+
+async function createExclusive(fs: KernelFs, path: string): Promise<void> {
+  if (fs.createExclusive) return fs.createExclusive(path);
+  if (
+    await fs.lstat(path).then(
+      () => true,
+      () => false
+    )
+  )
+    throw syncError('EEXIST', path);
+  await fs.writeFile(path, new Uint8Array(0));
 }
 
 async function ranged(fs: KernelFs, path: string, req: SyncFsRequest): Promise<SyncFsResult> {
