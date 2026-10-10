@@ -25,6 +25,8 @@ export class SignalGate {
 
   private unwinding = false;
 
+  private quieted = 0;
+
   private readonly raw: SyncSabTransport;
 
   private readonly header: Int32Array;
@@ -84,7 +86,17 @@ export class SignalGate {
     this.raw.call({ op: 'sig-mask', caught, ignored }, Number.POSITIVE_INFINITY, 'sig-mask');
   }
 
+  quiet<T>(fn: () => T): T {
+    this.quieted++;
+    try {
+      return fn();
+    } finally {
+      this.quieted--;
+    }
+  }
+
   deliver(): void {
+    if (this.quieted > 0) return;
     const killed = Atomics.load(this.header, SAB_I_KILLED);
     if (killed !== 0 && !this.unwinding && this.hooks.killed) {
       this.unwinding = true;

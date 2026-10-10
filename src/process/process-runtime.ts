@@ -490,7 +490,7 @@ export async function runWasmProcess(
     cwd: init.cwd,
     warn: deps.warn ?? say(2),
   });
-  early = () => vfs.flushDirty();
+  early = () => signals.quiet(() => vfs.flushDirty());
   const sigpipe = (): boolean => running.sliccSigpipe?.() === 1;
   const restartable = (): boolean => signals.restartable();
   const streams = new KernelStreams(running.FS, sys, { sigpipe, restartable });
