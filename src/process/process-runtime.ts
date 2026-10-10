@@ -111,6 +111,7 @@ export function kernelSys(transport: SyncSabTransport): ProcessSys & PtyKernel {
             ...(opts?.truncate ? { truncate: true } : {}),
             ...(opts?.create ? { create: true } : {}),
             ...(opts?.pin ? { pin: opts.pin } : {}),
+            ...(opts?.handle !== undefined ? { handle: opts.handle } : {}),
           },
           `fd-open-vfs ${path}`
         )
@@ -144,6 +145,10 @@ export function kernelSys(transport: SyncSabTransport): ProcessSys & PtyKernel {
     },
     heldMeta(fd) {
       return (json(call({ op: 'fd-info', fd }, `fd-info ${fd}`)) as { meta?: HeldMeta }).meta;
+    },
+    access(fd) {
+      return (json(call({ op: 'fd-info', fd }, `fd-info ${fd}`)) as { access?: 'read' | 'write' })
+        .access;
     },
     size(fd) {
       return (json(call({ op: 'fd-vfs-stat', fd }, `fd-vfs-stat ${fd}`)) as { size: number }).size;
@@ -211,12 +216,15 @@ export function wireKernelFd(Fs: ProcessFs, streams: KernelStreams, entry: Inher
 const O_RDONLY = 0;
 const O_WRONLY = 1;
 const O_RDWR = 2;
+const O_ACCMODE = 3;
 
 const O_DIRECTORY = 0o200000;
 
+const accessMode = (access: 'read' | 'write' | undefined): number =>
+  access === 'read' ? O_RDONLY : access === 'write' ? O_WRONLY : O_RDWR;
+
 function openDevice(Fs: ProcessFs, fd: number, meta: DeviceMeta): boolean {
-  const flags = meta.access === 'read' ? O_RDONLY : meta.access === 'write' ? O_WRONLY : O_RDWR;
-  return openAt(Fs, fd, `/dev/${meta.device}`, flags);
+  return openAt(Fs, fd, `/dev/${meta.device}`, accessMode(meta.access));
 }
 
 function openHeld(Fs: ProcessFs, fd: number, meta: HeldMeta): boolean {
@@ -249,7 +257,9 @@ export function wireKernelStdio(Fs: ProcessFs, streams: KernelStreams, sys?: Pro
     const meta = kind === 'device' || kind === 'held' ? sys?.heldMeta?.(fd) : undefined;
     if (meta && openHeld(Fs, fd, meta)) continue;
     if (kind && PLACED.has(kind)) {
-      const { flags } = stream;
+      const flags = sys?.access
+        ? (stream.flags & ~O_ACCMODE) | accessMode(sys.access(fd))
+        : stream.flags;
       Fs.closeStream(fd);
       const kernel = { fd, kernel: fd, kind: kind as InheritedFd['kind'], flags };
       placeKernelStream(Fs, streams, kernel).flags = flags;

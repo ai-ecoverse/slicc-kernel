@@ -17,6 +17,7 @@ interface LiveNodeBag {
     orphan?: boolean;
     data?: Uint8Array;
     len?: number;
+    handle?: number;
     ranged?: {
       pinnedVersion?: string;
       size(): number;
@@ -53,11 +54,17 @@ export function vfsPromoter(
       const ranged = (stream.node as LiveNodeBag).live?.ranged;
       const version = ranged?.pinnedVersion;
       const pin = ranged && version !== undefined ? { version, size: ranged.size() } : undefined;
+      const handle = (stream.node as LiveNodeBag).live?.handle;
+      const held = { ...(pin ? { pin } : {}), ...(handle !== undefined ? { handle } : {}) };
       kfd = sys.openVfs(
         livePath(stream),
         stream.flags,
         stream.position,
-        contents !== undefined ? { contents, orphan: true } : pin ? { pin } : undefined
+        contents !== undefined
+          ? { contents, orphan: true }
+          : Object.keys(held).length > 0
+            ? held
+            : undefined
       );
       promoted.set(stream.shared, kfd);
     }

@@ -340,6 +340,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
   opts.held?.add(holds);
   const token = holdingToken(opts, holds);
   process.keptPath = (path) => holds.keptAt(path)?.hidden;
+  process.keptHandle = (handle) => holds.keptFor(handle)?.hidden;
   const worker = opts.createWorker();
   const dying = new Dying();
   const dispatch = (req: SyncSabDispatchRequest): Promise<SyncFsResult> =>
