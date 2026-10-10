@@ -1,4 +1,5 @@
 import type { ChildStdio, InheritedSlot } from '../../kernel/children.ts';
+import { physicalOr } from './physical-path.ts';
 import { WASI_SIGNAL_TO_POSIX } from './wasi-abi.ts';
 import { normalize } from './wasi-files.ts';
 import { WasiExit, type WasiHost } from './wasi-host.ts';
@@ -129,7 +130,7 @@ export class WasixProcess {
       const kfd = this.openFor(op, cwd);
       opened.push(kfd);
       point(op.fd, kfd);
-    } else if (op.cmd === 'chdir') return resolveFrom(cwd, op.path);
+    } else if (op.cmd === 'chdir') return physicalOr(this.host.o.fs, resolveFrom(cwd, op.path));
     else return fds.dir(op.fd).path;
     return cwd;
   }
