@@ -5,14 +5,14 @@ fi
 tree_kb=${SLICC_HEAVY_TREE_KB:-3000000}
 proc_kb=${SLICC_HEAVY_PROC_KB:-2000000}
 measure() {
-  ps -axo pid=,ppid=,rss= | awk -v root="$child" '
-    { parent[$1] = $2; rss[$1] = $3 }
+  ps -axo pid=,ppid=,pgid=,rss= | awk -v root="$child" '
+    { parent[$1] = $2; group[$1] = $3; rss[$1] = $4 }
     END {
       sum = 0; max = 0; pids = ""
       for (p in parent) {
         q = p; hops = 0
         while (q != root && (q in parent) && hops++ < 64) q = parent[q]
-        if (q != root) continue
+        if (q != root && group[p] != root) continue
         sum += rss[p]; if (rss[p] > max) max = rss[p]; pids = pids " " p
       }
       print sum, max, pids
@@ -25,6 +25,7 @@ stop() {
   kill -9 "$@" 2> /dev/null
   wait "$child" 2> /dev/null
 }
+set -m
 "$@" &
 child=$!
 trap 'stop; exit 129' HUP
@@ -45,5 +46,6 @@ while kill -0 "$child" 2> /dev/null; do
 done
 wait "$child"
 status=$?
+stop
 [ -n "${SLICC_HEAVY_REPORT:-}" ] && printf 'heavy.sh: peak %s KB for the process tree\n' "$peak" >&2
 exit "$status"
