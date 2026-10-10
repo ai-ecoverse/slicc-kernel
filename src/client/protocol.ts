@@ -104,8 +104,8 @@ export interface ProcessEntry {
   started: number;
   state: 'S' | 'Z';
   memory: number;
-  uid: number;
-  gid: number;
+  uid?: number;
+  gid?: number;
 }
 
 export interface MessagePortLike {

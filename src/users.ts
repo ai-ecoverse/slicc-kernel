@@ -177,7 +177,12 @@ export class UserDb {
     }
     if (!(await this.fs.exists('/root'))) {
       await this.fs.mkdir('/root', { recursive: true });
-      await this.fs.chmod('/root', 0o700);
+      try {
+        await this.fs.chmod('/root', 0o700);
+      } catch (err) {
+        await this.fs.rm('/root', { recursive: true, force: true });
+        throw err;
+      }
     }
   }
 
