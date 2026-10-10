@@ -643,6 +643,10 @@ export class OpfsFs implements KernelFs {
     }));
   }
 
+  async realpath(path: string, follow: boolean): Promise<string> {
+    return (await this.locate(path, follow)).path;
+  }
+
   async readlink(path: string): Promise<string> {
     const found = await this.locate(path, false);
     if (found.link) return found.link.link as string;

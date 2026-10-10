@@ -726,6 +726,13 @@ class MountFs implements KernelFs {
     await found.mount.conn.call({ op: 'symlink', target, path: found.rel });
   }
 
+  async realpath(path: string, follow: boolean): Promise<string> {
+    if (this.at(path) || !this.base.realpath) throw errnoError('ENOSYS', path);
+    const real = await this.base.realpath(path, follow);
+    if (this.at(real)) throw errnoError('ENOSYS', path);
+    return real;
+  }
+
   async readlink(path: string): Promise<string> {
     const found = this.at(path);
     if (!found) return this.base.readlink(path);

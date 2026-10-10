@@ -343,6 +343,16 @@ async function aliasrm(ctx, [dir]) {
   await ctx.write(1, `${before} ${after} ${gone}\n`);
 }
 
+async function opens(ctx, [path, n = '200']) {
+  const started = performance.now();
+  for (let i = 0; i < Number(n); i++) {
+    const f = await ctx.open(path, { read: true });
+    await f.read(0, 16);
+    await f.close();
+  }
+  await ctx.write(1, `${Math.round(performance.now() - started)}\n`);
+}
+
 async function nodir(ctx, [path]) {
   const r = await ctx.open(path, { write: true, create: true }).then(
     () => 'opened',
@@ -453,6 +463,7 @@ const modes = {
   nodir,
   alias,
   aliasrm,
+  opens,
   selfloop,
   unawaited,
   pid,

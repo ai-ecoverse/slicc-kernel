@@ -14,6 +14,7 @@ export interface VfsFileFs extends Partial<AsyncRangedIo> {
   }>;
   readlink?(path: string): Promise<string>;
   lstat?(path: string): Promise<unknown>;
+  realpath?(path: string, follow: boolean): Promise<string>;
 }
 
 const O_ACCMODE = 0o3;
@@ -314,12 +315,21 @@ export class VfsNodes {
 
   async entryKey(path: string): Promise<string> {
     const parent = parentOf(path);
-    const dir = await realDir(this.fs, parent).catch(() => parent);
+    const dir = await this.real(parent, true, () => realDir(this.fs, parent)).catch(() => parent);
     return joinName(dir, path.slice(path.lastIndexOf('/') + 1));
   }
 
   async targetKey(path: string): Promise<string> {
-    return realTarget(this.fs, path).catch(() => path);
+    return this.real(path, true, () => realTarget(this.fs, path)).catch(() => path);
+  }
+
+  private async real(path: string, follow: boolean, walk: () => Promise<string>): Promise<string> {
+    if (this.fs.realpath) {
+      try {
+        return await this.fs.realpath(path, follow);
+      } catch {}
+    }
+    return walk();
   }
 
   createExclusive(path: string): Promise<void> {

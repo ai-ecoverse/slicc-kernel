@@ -114,6 +114,7 @@ export function withCommandDirs(fs: KernelFs, names: () => Promise<ReadonlySet<s
     rename: (from, to) => fs.rename(from, to),
     symlink: (target, path) => fs.symlink(target, path),
     readlink: (path) => fs.readlink(path),
+    ...(fs.realpath ? { realpath: fs.realpath.bind(fs) } : {}),
     chmod: (path, mode) => fs.chmod(path, mode),
     utimes: (path, atime, mtime) => fs.utimes(path, atime, mtime),
     lutimes: (path, atime, mtime) => lutimesOf(fs, path, atime, mtime),
