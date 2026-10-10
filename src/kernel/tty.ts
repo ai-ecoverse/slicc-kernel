@@ -198,9 +198,9 @@ export class KernelTty {
       this.line = [];
     } else if (byte === 0x0a) {
       this.line.push(byte);
-      if (echo) this.output(encoder.encode('\n'));
       this.readable.push(Uint8Array.from(this.line));
       this.line = [];
+      if (echo) this.output(encoder.encode('\n'));
     } else {
       this.line.push(byte);
       if (echo) this.echo(byte);
