@@ -4,6 +4,8 @@ if [ -z "${SLICC_HEAVY_LOCKED:-}" ] && command -v lockf > /dev/null 2>&1; then
 fi
 tree_kb=${SLICC_HEAVY_TREE_KB:-3000000}
 proc_kb=${SLICC_HEAVY_PROC_KB:-2000000}
+limit_s=${SLICC_HEAVY_TIMEOUT:-900}
+began=$(date +%s)
 measure() {
   ps -axo pid=,ppid=,pgid=,rss=,lstart= | awk -v root="$child" -v state="$seen" '
     BEGIN { while ((getline line < state) > 0) { split(line, f, "\t"); known[f[1]] = f[2] } }
@@ -48,6 +50,11 @@ while kill -0 "$child" 2> /dev/null; do
     printf 'heavy.sh: stopped at %s KB for the process tree, %s KB for one process (caps %s and %s KB)\n' "$sum" "$max" "$tree_kb" "$proc_kb" >&2
     stop
     exit 137
+  fi
+  if [ $(($(date +%s) - began)) -gt "$limit_s" ]; then
+    printf 'heavy.sh: stopped after %s s, the time limit (SLICC_HEAVY_TIMEOUT)\n' "$limit_s" >&2
+    stop
+    exit 124
   fi
   sleep 0.25
 done
