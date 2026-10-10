@@ -1,3 +1,4 @@
+import { physicalPath } from '../../fs/physical-path.ts';
 import type { ChildStdio, InheritedSlot } from '../../kernel/children.ts';
 import { WASI_SIGNAL_TO_POSIX } from './wasi-abi.ts';
 import { normalize } from './wasi-files.ts';
@@ -129,9 +130,13 @@ export class WasixProcess {
       const kfd = this.openFor(op, cwd);
       opened.push(kfd);
       point(op.fd, kfd);
-    } else if (op.cmd === 'chdir') return resolveFrom(cwd, op.path);
-    else return fds.dir(op.fd).path;
+    } else if (op.cmd === 'chdir') return this.physicalFrom(cwd, op.path);
+    else return physicalPath(this.host.o.fs, fds.dir(op.fd).path);
     return cwd;
+  }
+
+  private physicalFrom(cwd: string, path: string): string {
+    return physicalPath(this.host.o.fs, path.startsWith('/') ? path : `${cwd}/${path}`);
   }
 
   private openFor(op: SpawnFdOp, cwd: string): number {

@@ -15,6 +15,7 @@ import {
 export const PNPM_HOME = '/home/.local/share/pnpm';
 
 import { followLinks, withCommandDirs } from './fs/commands.ts';
+import { physicalPathAsync } from './fs/physical-path.ts';
 import type { KernelFs } from './fs/types.ts';
 import { fsError, normalizePath } from './fs/types.ts';
 import { UnlinkedKeeper, type UnlinkOwner, webLocks } from './fs/unlinked.ts';
@@ -595,7 +596,8 @@ export class Launcher {
     req: Omit<StartRequest, 'program' | 'argv0' | 'args'>
   ): Promise<WasmProcessHandle> {
     const { target, args } = planned;
-    const seen = { ...req.env, HOSTNAME: this.hostname, cwd: req.cwd };
+    const cwd = await physicalPathAsync(this.base, req.cwd);
+    const seen = { ...req.env, HOSTNAME: this.hostname, cwd };
     const env = { ...expandDefaults(target.env, seen), ...req.env };
     for (const key of target.unset ?? []) delete env[key];
     env.HOSTNAME = this.hostname;
@@ -606,7 +608,7 @@ export class Launcher {
       await req.fds.closeAll();
       throw err;
     }
-    return this.start({ ...req, program, argv0: target.argv0, args, env });
+    return this.start({ ...req, cwd, program, argv0: target.argv0, args, env });
   }
 
   groupSession(pgid: number): number | undefined {
@@ -1050,7 +1052,8 @@ export class Launcher {
   private async starting(argv: string[], dir: string | undefined) {
     this.catalog = undefined;
     this.binfmts = undefined;
-    const cwd = this.fs.resolvePath('/', dir ?? '/');
+    const start = dir ?? '/';
+    const cwd = await physicalPathAsync(this.base, start.startsWith('/') ? start : `/${start}`);
     const [file = ''] = argv;
     await this.base.mkdir(cwd, { recursive: true });
     return { cwd, file, planned: await this.plan(file, argv, cwd) };
