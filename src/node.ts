@@ -235,10 +235,10 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     },
     async writeFile(path, data) {
       const parent = path.slice(0, path.lastIndexOf('/')) || '/';
-      await fs.mkdir(parent, { recursive: true });
-      await fs.writeFile(path, data);
+      await launcher.fs.mkdir(parent, { recursive: true });
+      await launcher.fs.writeFile(path, data);
     },
-    readFile: async (path) => fs.readFileBuffer(path),
+    readFile: async (path) => launcher.fs.readFileBuffer(path),
     mount: (spec) => guard(() => launcher.mount(spec)),
     umount: (target) => guard(async () => launcher.umount(target)),
     mounts: async () => launcher.mounts.list(),
