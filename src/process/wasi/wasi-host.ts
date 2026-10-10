@@ -133,6 +133,8 @@ export class WasiHost {
 
   onRaise: ((sig: number) => boolean) | undefined;
 
+  muted: ((fd: number, data: Uint8Array) => boolean) | undefined;
+
   private readonly listening: number[];
 
   readonly o: WasiHostOptions;
@@ -603,6 +605,7 @@ export class WasiHost {
   }
 
   private write(fd: number, data: Uint8Array): number {
+    if (this.muted?.(fd, data)) return data.length;
     const e = this.fds.get(fd);
     if (e.type === 'kernel') {
       try {
