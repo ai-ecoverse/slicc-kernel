@@ -24,6 +24,16 @@ export interface ChildRequest {
   ops?: readonly SpawnFdOp[];
 }
 
+export function restarted(issue: () => unknown): unknown {
+  for (;;) {
+    try {
+      return issue();
+    } catch (e) {
+      if ((e as { code?: unknown } | null)?.code !== 'EINTR') throw e;
+    }
+  }
+}
+
 function resolveFrom(cwd: string, path: string): string {
   return normalize(path.startsWith('/') ? path : `${cwd}/${path}`);
 }
@@ -151,8 +161,8 @@ export class WasixProcess {
   spawn(req: ChildRequest, exec = false): number {
     const { stdio, inherit, cwd, opened } = this.childFds(req.ops ?? []);
     try {
-      return this.call({
-        op: 'proc-spawn',
+      const spawn = {
+        op: 'proc-spawn' as const,
         file: this.locate(req.name, req.search, req.path),
         argv: req.argv.length > 0 ? req.argv : [req.name],
         env: req.env ?? this.environment(),
@@ -160,7 +170,9 @@ export class WasixProcess {
         stdio,
         inherit,
         ...(exec ? { exec } : {}),
-      }) as number;
+        restart: true as const,
+      };
+      return restarted(() => this.call(spawn)) as number;
     } finally {
       for (const kfd of opened) this.host.o.kernel.sys.close(kfd);
 
@@ -204,24 +216,34 @@ export class WasixProcess {
       this.host.mem.view().setUint32(pidPtr, back, true);
       return undefined;
     }
-    return this.driver.fork((asyncifyData, globals, forkSp) => {
-      const { fds } = this.host;
-      fds.promoteFiles();
-      const memory = this.host.mem.bytes(0, this.host.mem.size()).slice();
-      const wasi: WasiForkState = {
-        asyncifyData,
-        globals,
-        fds: fds.snapshot(),
-        cloexec: [...fds.cloexec],
-        cwd: this.host.cwd,
-        ...(fds.isShared ? { shared: true as const } : {}),
-        setjmps: this.driver.setjmps(),
-        ...(this.host.signals ? { signals: this.host.signals.snapshot() } : {}),
-      };
-      return this.call({
-        op: 'proc-fork',
-        state: { memory, currData: 0, forkSp, callStackNames: [], ppid: this.host.o.pid, wasi },
-      }) as number;
+    return this.driver.fork(
+      (asyncifyData, globals, forkSp) =>
+        restarted(() => this.forkCall(asyncifyData, globals, forkSp)) as number
+    );
+  }
+
+  private forkCall(
+    asyncifyData: number,
+    globals: Array<[string, number]>,
+    forkSp: number
+  ): unknown {
+    const { fds } = this.host;
+    fds.promoteFiles();
+    const memory = this.host.mem.bytes(0, this.host.mem.size()).slice();
+    const wasi: WasiForkState = {
+      asyncifyData,
+      globals,
+      fds: fds.snapshot(),
+      cloexec: [...fds.cloexec],
+      cwd: this.host.cwd,
+      ...(fds.isShared ? { shared: true as const } : {}),
+      setjmps: this.driver.setjmps(),
+      ...(this.host.signals ? { signals: this.host.signals.snapshot() } : {}),
+    };
+    return this.call({
+      op: 'proc-fork',
+      state: { memory, currData: 0, forkSp, callStackNames: [], ppid: this.host.o.pid, wasi },
+      restart: true,
     });
   }
 }

@@ -116,6 +116,31 @@ export interface ProcessKernelDeps {
   raise?(sig: number): void;
 
   restartable?(): boolean;
+
+  memory?(): WebAssembly.Memory | undefined;
+}
+
+function restarted(issue: () => SyncFsResult): SyncFsResult {
+  for (;;) {
+    const r = issue();
+    if (r.ok || r.errno !== 'EINTR') return r;
+  }
+}
+
+function forkRestarted(deps: ProcessKernelDeps, state: ForkState): SyncFsResult {
+  let memory = state.memory;
+  return restarted(() => {
+    const streams = deps.describeFork();
+    const forked = { ...state, memory, streams, cwd: deps.Fs.cwd() };
+    const result = deps.transport.call(
+      { op: 'proc-fork', state: forked, restart: true },
+      Infinity,
+      'proc-fork'
+    );
+    const live = deps.memory?.();
+    memory = live ? new Uint8Array(live.buffer).slice() : memory;
+    return result;
+  });
 }
 
 function flushed(beforeSpawn: () => void): number {
@@ -287,20 +312,18 @@ export function createProcessKernel(deps: ProcessKernelDeps): ProcessKernel {
     const promote = deps.stdioPromoter?.();
     const stdio = [0, 1, 2].map((n) => slot(fds[n] ?? -1, n, promote));
     const inherit = deps.inherit?.(actions) ?? [];
-    const r = transport.call(
-      {
-        op: 'proc-spawn',
-        file,
-        argv,
-        env: env ?? deps.env,
-        cwd: cwd ?? Fs.cwd(),
-        stdio,
-        ...(inherit.length > 0 ? { inherit } : {}),
-        ...(exec ? { exec } : {}),
-      },
-      Infinity,
-      `proc-spawn ${file}`
-    );
+    const req = {
+      op: 'proc-spawn' as const,
+      file,
+      argv,
+      env: env ?? deps.env,
+      cwd: cwd ?? Fs.cwd(),
+      stdio,
+      ...(inherit.length > 0 ? { inherit } : {}),
+      ...(exec ? { exec } : {}),
+      restart: true as const,
+    };
+    const r = restarted(() => transport.call(req, Infinity, `proc-spawn ${file}`));
     if (!r.ok) return -wasiErrno(r.errno);
     const pid = r.kind === 'json' ? (r.json as number) : 0;
     const captures = [1, 2].filter((n) => 'capture' in (stdio[n] as ChildStdio));
@@ -325,12 +348,7 @@ export function createProcessKernel(deps: ProcessKernelDeps): ProcessKernel {
     fork(state) {
       const unflushed = flushed(deps.beforeSpawn);
       if (unflushed < 0) return unflushed;
-      const streams = deps.describeFork();
-      const r = transport.call(
-        { op: 'proc-fork', state: { ...state, streams, cwd: Fs.cwd() } },
-        Infinity,
-        'proc-fork'
-      );
+      const r = forkRestarted(deps, state);
       if (!r.ok) return -wasiErrno(r.errno);
       return r.kind === 'json' ? (r.json as number) : -wasiErrno('EIO');
     },
