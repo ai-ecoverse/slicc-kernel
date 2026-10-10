@@ -68,6 +68,57 @@ function rewrite(hop: Hop, status: number, location: string): Hop {
 }
 
 const OVER = Symbol('over');
+const MIME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+\/[!#$%&'*+.^_`|~0-9A-Za-z-]+(?:[\t ]*;.*)?$/s;
+const BASE64 = /;[\t\n\f\r ]*base64$/i;
+
+function isHex(byte: number | undefined): boolean {
+  return byte !== undefined && /^[0-9A-Fa-f]$/.test(String.fromCharCode(byte));
+}
+
+function percentDecode(input: string): Uint8Array {
+  const bytes = new TextEncoder().encode(input);
+  const out: number[] = [];
+  for (let i = 0; i < bytes.length; i++) {
+    const byte = bytes[i] as number;
+    if (byte === 0x25 && isHex(bytes[i + 1]) && isHex(bytes[i + 2])) {
+      out.push(
+        Number.parseInt(String.fromCharCode(bytes[i + 1] as number, bytes[i + 2] as number), 16)
+      );
+      i += 2;
+    } else out.push(byte);
+  }
+  return Uint8Array.from(out);
+}
+
+function dataResponse(request: Request): Response {
+  if (request.method !== 'GET') {
+    throw failed(new JsCallError('EINVAL', `${request.method} of a data: URL`));
+  }
+  const url = withoutFragment(new URL(request.url));
+  const rest = url.slice('data:'.length);
+  const comma = rest.indexOf(',');
+  if (comma < 0) throw failed(new JsCallError('EINVAL', 'a data: URL without a comma'));
+  let type = rest.slice(0, comma).replace(/^[\t\n\f\r ]+|[\t\n\f\r ]+$/g, '');
+  let body = percentDecode(rest.slice(comma + 1));
+  const base64 = BASE64.exec(type);
+  if (base64) {
+    type = type.slice(0, base64.index).replace(/[\t\n\f\r ]+$/, '');
+    let binary: string;
+    try {
+      binary = atob(String.fromCharCode(...body));
+    } catch {
+      throw failed(new JsCallError('EINVAL', 'a data: URL whose base64 does not decode'));
+    }
+    body = Uint8Array.from(binary, (c) => c.charCodeAt(0));
+  }
+  if (type.startsWith(';')) type = `text/plain${type}`;
+  if (!MIME.test(type)) type = 'text/plain;charset=US-ASCII';
+  const response = new Response(body as Uint8Array<ArrayBuffer>, {
+    status: 200,
+    headers: { 'content-type': type },
+  });
+  return withMeta(response, url, false);
+}
 
 function withMeta(response: Response, url: string, redirected: boolean): Response {
   const clone = response.clone.bind(response);
@@ -235,6 +286,11 @@ export function fetchOp(kernel: JsKernel) {
     const request = new Request(input, init);
     const { signal } = request;
     signal.throwIfAborted();
+    const { protocol } = new URL(request.url);
+    if (protocol === 'data:') return dataResponse(request);
+    if (protocol !== 'http:' && protocol !== 'https:') {
+      throw failed(new JsCallError('EPROTONOSUPPORT', protocol));
+    }
     const known = await traitsOf().catch((err: unknown) => {
       throw failed(err);
     });

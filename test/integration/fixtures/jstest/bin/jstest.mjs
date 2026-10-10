@@ -1210,6 +1210,27 @@ async function fetches(ctx, [base]) {
   await ctx.write(1, `${out.join('\n')}\n`);
 }
 
+async function schemes(ctx, [base]) {
+  const out = [];
+  const show = async (r) => `${r.status} ${r.headers.get('content-type')} ${await r.text()}`;
+  await fetchTry(out, 'plain', async () => show(await ctx.fetch('data:,Hello%2C%20World%21')));
+  await fetchTry(out, 'base64', async () =>
+    show(await ctx.fetch('data:text/plain ; base64,SGVsbG8=#frag'))
+  );
+  await fetchTry(out, 'charset', async () => {
+    const r = await ctx.fetch('data:;charset=utf-8,%C3%A9');
+    return `${await show(r)} ${r.url}`;
+  });
+  await fetchTry(out, 'badtype', async () => show(await ctx.fetch('data:nonsense,x')));
+  await fetchTry(out, 'badbase64', () => ctx.fetch('data:;base64,%%%'));
+  await fetchTry(out, 'nocomma', () => ctx.fetch('data:abc'));
+  await fetchTry(out, 'post', () => ctx.fetch('data:,x', { method: 'POST', body: 'y' }));
+  await fetchTry(out, 'ftp', () => ctx.fetch('ftp://example.com/x'));
+  await fetchTry(out, 'file', () => ctx.fetch('file:///etc/hosts'));
+  if (base) await fetchTry(out, 'todata', () => ctx.fetch(`${base}/todata`));
+  await ctx.write(1, `${out.join('\n')}\n`);
+}
+
 async function fetchone(ctx, [url, redirect = 'follow', upload]) {
   const out = [];
   const endless = {
@@ -1241,6 +1262,12 @@ async function rawkeys(ctx) {
     1,
     `keys ${keys.map((k) => k.toString(16)).join(',')} cooked ${(back.c_lflag & 0o12) === 0o12}\n`
   );
+}
+
+async function rawtwice(ctx) {
+  await ctx.tty.setRaw(0, true);
+  await ctx.tty.setRaw(1, true);
+  throw new Error('twice');
 }
 
 async function rawthrow(ctx) {
@@ -1297,9 +1324,11 @@ async function ttyroundtrip(ctx) {
 const modes = {
   rawkeys,
   rawthrow,
+  rawtwice,
   ttyinfo,
   winch,
   ttyroundtrip,
+  schemes,
   httpserver,
   echoserver,
   netclient,

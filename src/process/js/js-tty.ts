@@ -85,7 +85,7 @@ export function ttyOps(kernel: JsKernel): { tty: JsTty; restore(): Promise<void>
   };
 
   const restore = async (): Promise<void> => {
-    for (const [fd, original] of [...saved]) {
+    for (const [fd, original] of [...saved].reverse()) {
       saved.delete(fd);
       await setAttr(fd, original).catch(() => undefined);
     }
