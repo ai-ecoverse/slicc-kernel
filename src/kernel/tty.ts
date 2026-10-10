@@ -66,6 +66,10 @@ export class KernelTty {
 
   name?: string;
 
+  onRead?: () => void;
+
+  private readers = 0;
+
   private readonly screen: TtyScreen;
 
   private readonly signal: (sig: number) => void;
@@ -250,7 +254,21 @@ export class KernelTty {
     this.screen.write(Uint8Array.from(out));
   }
 
+  get reading(): boolean {
+    return this.readers > 0;
+  }
+
   private async read(max: number, signal?: AbortSignal): Promise<Uint8Array> {
+    this.onRead?.();
+    this.readers++;
+    try {
+      return await this.take(max, signal);
+    } finally {
+      this.readers--;
+    }
+  }
+
+  private async take(max: number, signal?: AbortSignal): Promise<Uint8Array> {
     while (this.readable.length === 0) {
       if (this.hungUp) return new Uint8Array(0);
       await this.changed(signal);
