@@ -247,6 +247,7 @@ test('a JS program gets WebCodecs in its process worker, and no network or stora
     g.stdout,
     /VideoEncoder=function VideoDecoder=function AudioEncoder=function ImageDecoder=function OffscreenCanvas=function/
   );
+  assert.match(g.stdout, /slots=fetch:own,WebSocket:own,EventSource:fixed,XMLHttpRequest:fixed/);
   assert.deepEqual(
     await run(['jstest', 'encode']),
     ok('supported=true chunks=3 first=key bytes>0=true\n')

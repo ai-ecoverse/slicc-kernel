@@ -1,7 +1,5 @@
 export const BLOCKED_GLOBALS: readonly string[] = [
-  'fetch',
   'XMLHttpRequest',
-  'WebSocket',
   'WebSocketStream',
   'WebTransport',
   'EventSource',
@@ -17,6 +15,8 @@ export const BLOCKED_GLOBALS: readonly string[] = [
 ];
 
 export const BLOCKED_NAVIGATOR: readonly string[] = ['storage', 'locks', 'serviceWorker'];
+
+export const OPEN_SLOTS: readonly string[] = ['fetch', 'WebSocket'];
 
 function chain(target: object): object[] {
   const out: object[] = [];
@@ -48,8 +48,27 @@ export function hide(target: object, names: readonly string[]): void {
   }
 }
 
+export function vacate(target: object, names: readonly string[]): void {
+  for (const name of names) {
+    for (let at: object | null = target; at && at !== Object.prototype; ) {
+      if (Object.getOwnPropertyDescriptor(at, name)?.configurable) Reflect.deleteProperty(at, name);
+      at = Object.getPrototypeOf(at);
+    }
+    Reflect.defineProperty(target, name, {
+      value: undefined,
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+    if (Reflect.get(target, name) !== undefined) {
+      throw new Error(`slicc-kernel: cannot withhold ${name} from a JS program`);
+    }
+  }
+}
+
 export function lockdown(scope: object = globalThis): void {
   hide(scope, BLOCKED_GLOBALS);
+  vacate(scope, OPEN_SLOTS);
   const navigator = (scope as { navigator?: unknown }).navigator;
   if (navigator && typeof navigator === 'object') hide(navigator, BLOCKED_NAVIGATOR);
 }
