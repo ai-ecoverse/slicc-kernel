@@ -161,13 +161,16 @@ export function websocketOp(kernel: JsKernel) {
     const writable = new WritableStream<JsWebSocketMessage>({
       async write(chunk, controller) {
         stop.signal.throwIfAborted();
-        const body = typeof chunk === 'string' ? { text: chunk } : { body: chunk };
-        let buffered = (await kernel.json({ op: 'net-ws-send', handle, ...body })) as number;
+        const send = async (body: object): Promise<number> => {
+          if (settled) throw new JsCallError('EPIPE', 'the websocket is closed');
+          return (await kernel.json({ op: 'net-ws-send', handle, ...body })) as number;
+        };
+        let buffered = await send(typeof chunk === 'string' ? { text: chunk } : { body: chunk });
         while (buffered > SEND_BUFFER) {
           await wait(10);
           stop.signal.throwIfAborted();
           controller.signal.throwIfAborted();
-          buffered = (await kernel.json({ op: 'net-ws-send', handle })) as number;
+          buffered = await send({});
         }
       },
       close: () => close(),
