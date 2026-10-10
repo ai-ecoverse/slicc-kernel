@@ -306,20 +306,28 @@ export class OpfsFs implements KernelFs {
   }
 
   private readonly dirTimes = new Map<string, number>();
+  private readonly dirDirty = new Set<string>();
   private dirFlush: Promise<void> | undefined;
 
   private touch(...dirs: string[]): void {
     const now = Date.now();
-    for (const dir of dirs) this.dirTimes.set(dir, now);
+    for (const dir of dirs) {
+      this.dirTimes.set(dir, now);
+      this.dirDirty.add(dir);
+    }
     this.dirFlush ??= Promise.resolve()
       .then(() => this.flushDirTimes())
-      .catch(() => undefined);
+      .catch(() => undefined)
+      .finally(() => {
+        this.dirFlush = undefined;
+      });
   }
 
   private async flushDirTimes(): Promise<void> {
-    const pending = [...this.dirTimes];
-    this.dirFlush = undefined;
-    for (const [path, ms] of pending) {
+    for (const path of this.dirDirty) {
+      this.dirDirty.delete(path);
+      const ms = this.dirTimes.get(path);
+      if (ms === undefined) continue;
       await this.meta.update(path, (entry) => ({
         ...entry,
         path,
@@ -327,6 +335,7 @@ export class OpfsFs implements KernelFs {
         mtimeFor: 0,
         ctimeMs: ms,
       }));
+      if (this.dirTimes.get(path) === ms) this.dirTimes.delete(path);
     }
   }
 
@@ -716,6 +725,7 @@ export class OpfsFs implements KernelFs {
     }
     const handle = found.handle as Handle;
     const file = handle.kind === 'file' ? await handle.getFile() : undefined;
+    this.dirTimes.delete(found.path);
     const ctimeMs = Date.now();
     await this.meta.update(found.path, (entry) => ({
       ...entry,
