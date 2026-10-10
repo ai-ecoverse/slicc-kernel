@@ -13,7 +13,6 @@ export const NODE_GLOBALS: readonly string[] = [
 
 export const NODE_SLOTS: readonly string[] = [
   'process',
-  'Buffer',
   'global',
   'setImmediate',
   'clearImmediate',
