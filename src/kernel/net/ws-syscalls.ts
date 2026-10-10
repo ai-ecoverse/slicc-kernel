@@ -24,6 +24,7 @@ interface OpenSocket {
   ready: Promise<SyncFsResult>;
   socket?: RealmWebSocket;
   messages?: AsyncIterator<string | Uint8Array>;
+  ended?: boolean;
 }
 
 const TOKEN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
@@ -58,7 +59,7 @@ export class WsHandles {
     if (!entry.socket) return Promise.resolve(fail('ENOTCONN', 'websocket not open'));
     if (req.op === 'net-ws-recv') return this.recv(entry.socket, entry);
     if (req.op === 'net-ws-wait') return this.closed(entry.socket);
-    if (req.op === 'net-ws-send') return Promise.resolve(this.send(entry.socket, req));
+    if (req.op === 'net-ws-send') return Promise.resolve(this.send(entry.socket, req, entry));
     entry.socket.close(req.code ?? 1000, req.reason ?? '');
     return Promise.resolve({ ok: true, kind: 'void' });
   }
@@ -104,6 +105,9 @@ export class WsHandles {
       return fail('EPROTO', 'the far end chose a subprotocol the program did not offer');
     }
     entry.socket = socket;
+    void socket.closed.then(() => {
+      entry.ended = true;
+    });
     entry.messages = socket.messages[Symbol.asyncIterator]();
     return { ok: true, kind: 'json', json: { protocol: socket.protocol } };
   }
@@ -128,8 +132,13 @@ export class WsHandles {
     return { ok: true, kind: 'json', json: { code, reason } };
   }
 
-  private send(socket: RealmWebSocket, req: Extract<WsSyscall, { op: 'net-ws-send' }>) {
+  private send(
+    socket: RealmWebSocket,
+    req: Extract<WsSyscall, { op: 'net-ws-send' }>,
+    entry: OpenSocket
+  ) {
     const data = req.text ?? req.body;
+    if (data !== undefined && entry.ended) return fail('EPIPE', 'the websocket is closed');
     try {
       if (data !== undefined) socket.send(data);
     } catch (e) {

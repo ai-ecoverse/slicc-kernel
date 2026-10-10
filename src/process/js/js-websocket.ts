@@ -159,8 +159,9 @@ export function websocketOp(kernel: JsKernel) {
         stop.signal.throwIfAborted();
         const body = typeof chunk === 'string' ? { text: chunk } : { body: chunk };
         let buffered = (await kernel.json({ op: 'net-ws-send', handle, ...body })) as number;
-        while (buffered > SEND_BUFFER && !stop.signal.aborted) {
+        while (buffered > SEND_BUFFER) {
           await wait(10);
+          stop.signal.throwIfAborted();
           buffered = (await kernel.json({ op: 'net-ws-send', handle })) as number;
         }
       },

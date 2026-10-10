@@ -930,6 +930,24 @@ async function wsclient(ctx, [base]) {
     await ws.writable.getWriter().write('x');
     return 'sent';
   });
+  await wsTry(out, 'sendafterclose', async () => {
+    const ws = await ctx.websocket(`${base}/echo`);
+    const w = ws.writable.getWriter();
+    await w.write('bye');
+    await ws.closed;
+    return w.write('late').then(() => 'sent', wsErr);
+  });
+  await wsTry(out, 'abortbackpressure', async () => {
+    const c = new AbortController();
+    const ws = await ctx.websocket(`${base}/full`, { signal: c.signal });
+    const writing = ws.writable
+      .getWriter()
+      .write('x')
+      .then(() => 'sent', wsErr);
+    await sleep(30);
+    c.abort();
+    return writing;
+  });
   await wsTry(out, 'writerabort', async () => {
     const ws = await ctx.websocket(`${base}/echo`);
     await ws.writable.abort();
