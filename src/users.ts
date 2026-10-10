@@ -207,10 +207,16 @@ export class UserDb {
       for (const g of extra) if (!g.members.includes(name)) g.members.push(name);
       group.push({ name, gid: uid, members: [] });
       passwd.push(row);
+      const before = await this.read(GROUP, DEFAULT_GROUP);
+      await this.fs.mkdir(home, { recursive: true });
       await this.fs.mkdir('/etc', { recursive: true });
       await this.fs.writeFile(GROUP, formatGroup(group));
-      await this.fs.writeFile(PASSWD, formatPasswd(passwd));
-      await this.fs.mkdir(home, { recursive: true });
+      try {
+        await this.fs.writeFile(PASSWD, formatPasswd(passwd));
+      } catch (err) {
+        await this.fs.writeFile(GROUP, before);
+        throw err;
+      }
       return this.account(row, parsed(group));
     });
   }

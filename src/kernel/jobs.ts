@@ -86,6 +86,10 @@ export class JobTable {
     return this.members.get(pid)?.pgid;
   }
 
+  sidOf(pid: number): number | undefined {
+    return this.members.get(pid)?.sid;
+  }
+
   private member(pid: number): JobMember {
     const member = this.members.get(pid);
     if (!member) throw new KernelError('ESRCH');

@@ -51,6 +51,7 @@ import { DEFAULT_UMASK } from './kernel/process.ts';
 import type { ForkState, Program } from './kernel/protocol.ts';
 import { PtyTable } from './kernel/pty.ts';
 import { SettlingChildren } from './kernel/settling.ts';
+import { SIG } from './kernel/signals.ts';
 import { LoopbackNet } from './kernel/socket.ts';
 import { KernelTty } from './kernel/tty.ts';
 import { keepingOpen, VfsNodes } from './kernel/vfs-file.ts';
@@ -657,7 +658,7 @@ export class Launcher {
       onError: req.report,
       spawner: this.spawner(pid, req.report),
       forker: this.forker(pid, req),
-      kill: (target, sig) => this.kill(target, sig, this.credOf(pid)),
+      kill: (target, sig) => this.kill(target, sig, this.credOf(pid), pid),
       writesBack: (target) => this.processes.get(target)?.writesBack() === true,
       processes: () => ({ boot: this.boot, processes: this.list(this.credOf(pid)) }),
       openFiles: this.openFiles,
@@ -868,8 +869,12 @@ export class Launcher {
     return this.processes.get(pid)?.ignoredSignals(fork) ?? 0;
   }
 
-  kill(pid: number, sig: number, sender?: Readonly<Cred>): boolean {
-    const may = (target: number) => !sender || maySignal(sender, this.credOf(target));
+  kill(pid: number, sig: number, sender?: Readonly<Cred>, from?: number): boolean {
+    const session = from === undefined ? undefined : this.jobs.sidOf(from);
+    const may = (target: number) =>
+      !sender ||
+      maySignal(sender, this.credOf(target)) ||
+      (sig === SIG.CONT && session !== undefined && this.jobs.sidOf(target) === session);
     if (pid < 0) return this.jobs.killGroup(-pid, sig, may);
     const handle = this.processes.get(pid);
     if (!handle) return false;
