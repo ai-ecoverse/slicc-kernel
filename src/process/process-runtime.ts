@@ -139,6 +139,9 @@ export function kernelSys(transport: SyncSabTransport): ProcessSys & PtyKernel {
     kind(fd) {
       return (json(call({ op: 'fd-info', fd }, `fd-info ${fd}`)) as { kind?: string })?.kind;
     },
+    device(fd) {
+      return (json(call({ op: 'fd-info', fd }, `fd-info ${fd}`)) as { meta?: DeviceMeta }).meta;
+    },
     size(fd) {
       return (json(call({ op: 'fd-vfs-stat', fd }, `fd-vfs-stat ${fd}`)) as { size: number }).size;
     },
@@ -225,6 +228,8 @@ export function wireKernelStdio(Fs: ProcessFs, streams: KernelStreams, sys?: Pro
     const stream = Fs.getStream(fd);
     if (!stream) continue;
     const kind = sys?.kind?.(fd);
+    const device = kind === 'device' ? sys?.device?.(fd) : undefined;
+    if (device && openDevice(Fs, fd, device)) continue;
     if (kind && PLACED.has(kind)) {
       const { flags } = stream;
       Fs.closeStream(fd);

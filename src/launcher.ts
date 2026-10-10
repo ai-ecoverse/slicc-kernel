@@ -22,7 +22,7 @@ import {
   type ChildSpawner,
   SpawnError,
 } from './kernel/children.ts';
-import { bytesSource, FdTable, nullFile, sinkFile } from './kernel/fd-table.ts';
+import { bytesSource, deviceFile, FdTable, sinkFile } from './kernel/fd-table.ts';
 import { spawnWasmProcess, type WasmProcessHandle, type WasmWorkerLike } from './kernel/host.ts';
 import { LockTable } from './kernel/host-ops.ts';
 import { type JobMember, JobTable } from './kernel/jobs.ts';
@@ -1035,7 +1035,7 @@ export class Launcher {
       return { status: NOT_FOUND, stdout: concat(out), stderr: concat(err) };
     }
     const fds = new FdTable();
-    fds.installAt(0, options.stdin ? bytesSource(options.stdin) : nullFile());
+    fds.installAt(0, options.stdin ? bytesSource(options.stdin) : deviceFile('null'));
     fds.installAt(1, sinkFile(stdout));
     fds.installAt(2, sinkFile(stderr));
     const group = options.pgid !== undefined ? { pgid: options.pgid } : {};

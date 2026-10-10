@@ -104,8 +104,9 @@ function filestatOf(path: string, s: SyncFsBridgeStat): Filestat {
 function kernelFiletype(kind: string): { filetype: number; seeks: boolean } {
   switch (kind) {
     case 'tty':
-    case 'device':
       return { filetype: FILETYPE.CHARACTER_DEVICE, seeks: false };
+    case 'device':
+      return { filetype: FILETYPE.CHARACTER_DEVICE, seeks: true };
     case 'socket':
       return { filetype: FILETYPE.SOCKET_STREAM, seeks: false };
     case 'file':
@@ -555,7 +556,9 @@ export class WasiHost {
   private seek(fd: number, offset: number, whence: number): number {
     const e = this.fds.get(fd);
     if (e.type === 'kernel') {
-      if (this.fds.kind(fd, e) !== 'file') throw new WasiError('ESPIPE');
+      const kind = this.fds.kind(fd, e);
+      if (kind === 'device') return 0;
+      if (kind !== 'file') throw new WasiError('ESPIPE');
       return this.o.kernel.sys.seek(fd, offset, whence);
     }
     if (e.type === 'device') return 0;
