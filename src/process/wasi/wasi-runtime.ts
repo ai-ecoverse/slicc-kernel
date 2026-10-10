@@ -485,6 +485,7 @@ export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike
   publishMemory(init.sab, sizeOf(main)());
   signals.bind(instance.exports);
   host.onRaise = (sig) => signals.raised(sig);
+  host.muted = (fd, data) => signals.muted(fd, data);
   const exports = instance.exports as { _start: () => void };
   driver.bind(instance.exports);
   try {
