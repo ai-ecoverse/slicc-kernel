@@ -92,6 +92,21 @@ export interface JsProgramContext {
   tty: JsTty;
   fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
   exit(code?: number): never;
+  onUncaught(listener: JsStrayListener): () => void;
+  onUnhandledRejection(listener: JsStrayListener): () => void;
+}
+
+export type JsStrayListener = (error: unknown, promise?: Promise<unknown>) => void;
+
+export interface JsStrays {
+  exception: Set<JsStrayListener>;
+  rejection: Set<JsStrayListener>;
+}
+
+function listen(listeners: Set<JsStrayListener>, listener: JsStrayListener): () => void {
+  const own = (error: unknown, promise?: Promise<unknown>) => listener(error, promise);
+  listeners.add(own);
+  return () => void listeners.delete(own);
 }
 
 export class JsExit extends Error {
@@ -114,6 +129,7 @@ export interface ContextOptions {
   exit(status: number): void;
   random?: (bytes: Uint8Array) => void;
   lane?: SyncCall;
+  strays?: JsStrays;
 }
 
 const encoder = new TextEncoder();
@@ -266,6 +282,7 @@ export function createContext(o: ContextOptions): CreatedContext {
   const io = { read, send: writeAll, close: (fd: number) => ctx.close(fd) };
   const children = childOps(kernel, io, { env: o.env, cwd: o.cwd, signal: signalNumber });
 
+  const strays = o.strays ?? { exception: new Set(), rejection: new Set() };
   const ctx: JsProgramContext = {
     argv: o.argv,
     env: o.env,
@@ -314,6 +331,8 @@ export function createContext(o: ContextOptions): CreatedContext {
     websocket: websocketOp(kernel),
     tty: terminal.tty,
     exit,
+    onUncaught: (listener) => listen(strays.exception, listener),
+    onUnhandledRejection: (listener) => listen(strays.rejection, listener),
   };
   const drain = async (): Promise<void> => {
     for (;;) {

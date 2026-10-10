@@ -27,7 +27,7 @@ function chain(target: object): object[] {
   return out;
 }
 
-function hide(target: object, names: readonly string[]): void {
+export function hide(target: object, names: readonly string[]): void {
   for (const name of names) {
     const holders = chain(target);
     for (const holder of holders) {
