@@ -14,6 +14,7 @@ export interface VfsFileFs extends Partial<AsyncRangedIo> {
   }>;
   readlink?(path: string): Promise<string>;
   lstat?(path: string): Promise<unknown>;
+  realpath?(path: string, follow: boolean): Promise<string>;
 }
 
 const O_ACCMODE = 0o3;
@@ -312,11 +313,25 @@ export class VfsNodes {
     return run;
   }
 
-  private async entryKey(path: string): Promise<string> {
+  async entryKey(path: string): Promise<string> {
     const parent = parentOf(path);
-    const dir = await realDir(this.fs, parent).catch(() => parent);
-    const name = path.slice(path.lastIndexOf('/') + 1);
-    return dir === '/' ? `/${name}` : `${dir}/${name}`;
+    const dir = await this.real(parent, true, () => realDir(this.fs, parent));
+    return joinName(dir, path.slice(path.lastIndexOf('/') + 1));
+  }
+
+  targetKey(path: string): Promise<string> {
+    return this.real(path, true, () => realTarget(this.fs, path));
+  }
+
+  private async real(path: string, follow: boolean, walk: () => Promise<string>): Promise<string> {
+    if (this.fs.realpath) {
+      try {
+        return await this.fs.realpath(path, follow);
+      } catch (err) {
+        if (errCode(err) === 'ELOOP') throw err;
+      }
+    }
+    return walk();
   }
 
   createExclusive(path: string): Promise<void> {
@@ -426,10 +441,13 @@ async function linkOf(fs: VfsFileFs, path: string): Promise<string | undefined> 
   return fs.readlink?.(path).catch(() => undefined);
 }
 
-async function realDir(fs: VfsFileFs, dir: string): Promise<string> {
+interface Budget {
+  hops: number;
+}
+
+async function realDir(fs: VfsFileFs, dir: string, budget: Budget = { hops: 0 }): Promise<string> {
   const queue = dir.split('/').filter(Boolean);
   let at = '/';
-  let hops = 0;
   while (queue.length > 0) {
     const part = queue.shift() as string;
     if (part === '.') continue;
@@ -438,29 +456,45 @@ async function realDir(fs: VfsFileFs, dir: string): Promise<string> {
       continue;
     }
     const next = at === '/' ? `/${part}` : `${at}/${part}`;
-    const link = hops < MAX_LINKS ? await linkOf(fs, next) : undefined;
+    const link = await linkOf(fs, next);
     if (link === undefined) {
       at = next;
       continue;
     }
-    hops++;
+    if (budget.hops >= MAX_LINKS) throw fsError('ELOOP', dir);
+    budget.hops++;
     queue.unshift(...link.split('/').filter(Boolean));
     if (link.startsWith('/')) at = '/';
   }
   return at;
 }
 
-async function targetDir(fs: VfsFileFs, path: string): Promise<string> {
-  let dir = await realDir(fs, parentOf(path));
+function errCode(err: unknown): unknown {
+  return (err as { code?: unknown } | null)?.code;
+}
+
+function joinName(dir: string, name: string): string {
+  return dir === '/' ? `/${name}` : `${dir}/${name}`;
+}
+
+async function realTarget(fs: VfsFileFs, path: string): Promise<string> {
+  const budget: Budget = { hops: 0 };
+  let dir = await realDir(fs, parentOf(path), budget);
   let name = path.slice(path.lastIndexOf('/') + 1);
-  for (let hops = 0; hops < MAX_LINKS; hops++) {
-    const link = await linkOf(fs, dir === '/' ? `/${name}` : `${dir}/${name}`);
-    if (link === undefined) return dir;
-    const target = link.startsWith('/') ? link : `${dir}/${link}`;
-    dir = await realDir(fs, parentOf(target));
+  for (;;) {
+    const link = await linkOf(fs, joinName(dir, name));
+    if (link === undefined) break;
+    if (budget.hops >= MAX_LINKS) throw fsError('ELOOP', path);
+    budget.hops++;
+    const target = link.startsWith('/') ? link : joinName(dir, link);
+    dir = await realDir(fs, parentOf(target), budget);
     name = target.slice(target.lastIndexOf('/') + 1);
   }
-  return dir;
+  return joinName(dir, name);
+}
+
+async function targetDir(fs: VfsFileFs, path: string): Promise<string> {
+  return parentOf(await realTarget(fs, path).catch(() => path));
 }
 
 export async function refuseReadonly(
@@ -487,13 +521,14 @@ export function keepingOpen(fs: KernelFs, nodes: VfsNodes): KernelFs {
   return {
     ...fs,
     async rm(path, options) {
-      const at = fs.resolvePath('/', path);
+      const at = await nodes.entryKey(fs.resolvePath('/', path));
       await nodes.unlinking(at);
       await fs.rm(path, options);
       nodes.unlinked(at);
     },
-    rename(from, to) {
-      const [a, b] = [fs.resolvePath('/', from), fs.resolvePath('/', to)];
+    async rename(from, to) {
+      const a = await nodes.entryKey(fs.resolvePath('/', from));
+      const b = await nodes.entryKey(fs.resolvePath('/', to));
       return nodes.onEntry(b, async () => {
         await nodes.unlinking(b);
         await fs.rename(from, to);

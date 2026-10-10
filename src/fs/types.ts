@@ -30,6 +30,7 @@ export interface KernelFs {
   rename(from: string, to: string): Promise<void>;
   symlink(target: string, path: string): Promise<void>;
   readlink(path: string): Promise<string>;
+  realpath?(path: string, follow: boolean): Promise<string>;
   chmod(path: string, mode: number): Promise<void>;
   utimes(path: string, atime: Date, mtime: Date): Promise<void>;
   lutimes?(path: string, atime: Date, mtime: Date): Promise<void>;

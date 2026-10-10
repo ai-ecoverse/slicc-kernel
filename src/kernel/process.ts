@@ -604,9 +604,25 @@ export class WasmProcess {
     await refuseReadonly(this.options.fs, req.path, req.flags, req);
     const fd = this.fds.install(heldFile(), 3);
     try {
-      if (req.exclusive) await this.nodes.createExclusive(req.path);
-      this.fds.installAt(fd, this.openVfsFile(req));
-      if (req.existing && !(await present(this.options.fs, req.path, true))) {
+      const nodes = this.nodes;
+      const path = req.orphan
+        ? req.path
+        : req.exclusive
+          ? await nodes.entryKey(req.path)
+          : await nodes.targetKey(req.path);
+      const open = { ...req, path };
+      if (req.exclusive) {
+        await nodes.createExclusive(path);
+        this.fds.installAt(fd, this.openVfsFile(open));
+      } else if (req.create) {
+        await nodes.onEntry(path, async () => {
+          this.fds.installAt(fd, this.openVfsFile(open));
+          await this.fds.get(fd).file.stat?.();
+        });
+      } else {
+        this.fds.installAt(fd, this.openVfsFile(open));
+      }
+      if (req.existing && !(await present(this.options.fs, path, true))) {
         throw new KernelError('ENOENT');
       }
     } catch (err) {
@@ -687,7 +703,7 @@ export class WasmProcess {
       case 'fd-reserve':
         return { ok: true, kind: 'json', json: this.reserve(req.fd, req.min, req.meta) };
       case 'fd-promote':
-        this.promote(req);
+        await this.promote(req);
         return { ok: true, kind: 'void' };
       case 'fd-renumber':
         if (req.from !== req.to) {
@@ -727,10 +743,14 @@ export class WasmProcess {
   private async vfsSyscall(req: VfsSyscall): Promise<SyncFsResult> {
     if ('path' in req || 'from' in req) {
       const nodes = this.nodes;
-      if (req.op === 'fd-path-flush') await nodes.flush(req.path);
-      else if (req.op === 'fd-path-unlinking') await nodes.unlinking(req.path);
-      else if (req.op === 'fd-path-unlinked') nodes.unlinked(req.path);
-      else if (req.op === 'fd-path-renamed') nodes.renamed(req.from, req.to);
+      if (req.op === 'fd-path-flush') {
+        await nodes.flush(await nodes.targetKey(req.path).catch(() => req.path));
+      } else if (req.op === 'fd-path-unlinking')
+        await nodes.unlinking(await nodes.entryKey(req.path));
+      else if (req.op === 'fd-path-unlinked') nodes.unlinked(await nodes.entryKey(req.path));
+      else if (req.op === 'fd-path-renamed') {
+        nodes.renamed(await nodes.entryKey(req.from), await nodes.entryKey(req.to));
+      }
       return { ok: true, kind: 'void' };
     }
     const file = this.fds.get(req.fd).file;
@@ -752,17 +772,19 @@ export class WasmProcess {
     }
   }
 
-  private promote(req: Extract<WasmSyscall, { op: 'fd-promote' }>): void {
+  private async promote(req: Extract<WasmSyscall, { op: 'fd-promote' }>): Promise<void> {
     if (!this.fds.get(req.fd).file.held) throw new KernelError('EBADF');
     if (req.share !== undefined) {
       this.fds.dup2(req.share, req.fd);
       return;
     }
     if (req.path === undefined) throw new KernelError('EINVAL');
+    const path = req.orphan ? req.path : await this.nodes.targetKey(req.path);
+    if (!this.fds.get(req.fd).file.held) throw new KernelError('EBADF');
     const file = vfsFile(
       this.options.fs,
       {
-        path: req.path,
+        path,
         flags: req.flags ?? 0,
         position: req.position ?? 0,
         ...(req.contents !== undefined ? { contents: req.contents } : {}),

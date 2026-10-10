@@ -306,6 +306,53 @@ async function selfloop(ctx, [path]) {
   await ctx.write(1, `${r}\n`);
 }
 
+async function alias(ctx, [dir]) {
+  const enc = (t) => new TextEncoder().encode(t);
+  await ctx.fs.mkdir(`${dir}/real`);
+  await ctx.fs.symlink('real', `${dir}/alias`);
+  const a = await ctx.open(`${dir}/alias/f`, {
+    read: true,
+    write: true,
+    create: true,
+    truncate: true,
+  });
+  const r = await ctx.open(`${dir}/real/f`, { read: true, write: true });
+  await a.write(0, enc('one'));
+  const seen1 = text(await r.read(0, 10));
+  await r.write(0, enc('TWO'));
+  const seen2 = text(await a.read(0, 10));
+  await ctx.fs.unlink(`${dir}/alias`);
+  await r.write(3, enc('+'));
+  await a.close();
+  await r.close();
+  const final = text(await ctx.fs.readFile(`${dir}/real/f`));
+  await ctx.write(1, `${seen1} ${seen2} ${final}\n`);
+}
+
+async function aliasrm(ctx, [dir]) {
+  await ctx.fs.mkdir(`${dir}/real`);
+  await ctx.fs.writeFile(`${dir}/real/f`, 'keep');
+  await ctx.fs.symlink('real', `${dir}/alias`);
+  const h = await ctx.open(`${dir}/alias/f`, { read: true, write: true });
+  await ctx.fs.unlink(`${dir}/real/f`);
+  const before = text(await h.read(0, 10));
+  await h.write(4, new TextEncoder().encode('!'));
+  const after = text(await h.read(0, 10));
+  const gone = !(await ctx.fs.exists(`${dir}/real/f`));
+  await h.close();
+  await ctx.write(1, `${before} ${after} ${gone}\n`);
+}
+
+async function opens(ctx, [path, n = '200']) {
+  const started = performance.now();
+  for (let i = 0; i < Number(n); i++) {
+    const f = await ctx.open(path, { read: true });
+    await f.read(0, 16);
+    await f.close();
+  }
+  await ctx.write(1, `${Math.round(performance.now() - started)}\n`);
+}
+
 async function nodir(ctx, [path]) {
   const r = await ctx.open(path, { write: true, create: true }).then(
     () => 'opened',
@@ -414,6 +461,9 @@ const modes = {
   exclusive,
   lock,
   nodir,
+  alias,
+  aliasrm,
+  opens,
   selfloop,
   unawaited,
   pid,
