@@ -405,6 +405,79 @@ export function positionalIo(imports: WebAssembly.Imports, deps: PositionalDeps)
   }
 }
 
+const PROT_WRITE = 2;
+const MAP_PRIVATE = 2;
+const MAP_TYPE = 0xf;
+const O_WRONLY = 1;
+const MAP_ALIGN = 65536;
+
+type Mmap = (
+  stream: ProcessStream,
+  length: number,
+  position: number,
+  prot: number,
+  flags: number
+) => { ptr: number; allocated: boolean };
+
+export type Memalign = (alignment: number, size: number) => number;
+
+export interface MmapDeps {
+  sys: Pick<ProcessSys, 'pread'>;
+  memory: () => WebAssembly.Memory | undefined;
+  memalign: () => Memalign | undefined;
+}
+
+function staging(Fs: ProcessFs, length: number): Uint8Array {
+  try {
+    return new Uint8Array(length);
+  } catch {
+    throw new Fs.ErrnoError(wasiErrno('ENOMEM'));
+  }
+}
+
+export function useFileMmap(Fs: ProcessFs, deps: MmapDeps): void {
+  const fs = Fs as ProcessFs & { mmap?: Mmap };
+  const mmap = fs.mmap;
+  if (typeof mmap !== 'function') return;
+  fs.mmap = (stream, length, position, prot, flags) => {
+    const memalign = deps.memalign();
+    const memory = deps.memory();
+    const shared = (flags & MAP_TYPE) !== MAP_PRIVATE && (prot & PROT_WRITE) !== 0;
+    const kfd = stream.sliccKernelFile ? stream.sliccKernelFd : undefined;
+    if (shared && kfd !== undefined) throw new Fs.ErrnoError(wasiErrno('ENODEV'));
+    if (
+      (stream.stream_ops.mmap && kfd === undefined) ||
+      !memalign ||
+      !memory ||
+      length <= 0 ||
+      shared ||
+      (stream.flags & O_ACCMODE) === O_WRONLY ||
+      !Fs.isFile(stream.node.mode)
+    ) {
+      return mmap.call(fs, stream, length, position, prot, flags);
+    }
+    const data = staging(Fs, length);
+    let done = 0;
+    try {
+      if (kfd !== undefined) done = readInto(deps.sys, kfd, data, position);
+      else {
+        for (let got = 1; done < length && got > 0; done += got) {
+          got = Fs.read(stream, data, done, length - done, position + done);
+        }
+      }
+    } catch (err) {
+      throw new Fs.ErrnoError(errnoOf(err));
+    }
+    const size = Math.ceil(length / MAP_ALIGN) * MAP_ALIGN;
+    const ptr = memalign(MAP_ALIGN, size);
+    if (!ptr) throw new Fs.ErrnoError(wasiErrno('ENOMEM'));
+    const target = new Uint8Array(memory.buffer, ptr, size);
+    target.fill(0);
+    target.set(data.subarray(0, done));
+    return { ptr, allocated: true };
+  };
+}
+
 export function wasmMemory(
   instance: WebAssembly.Instance,
   imports: WebAssembly.Imports

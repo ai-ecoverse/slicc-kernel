@@ -148,6 +148,7 @@ export interface StreamOps {
   dup?: (stream: ProcessStream) => void;
   poll?: (stream: ProcessStream) => number;
   fsync?: (stream: ProcessStream) => unknown;
+  mmap?: unknown;
 }
 
 export interface ProcessStream {
@@ -184,7 +185,13 @@ export interface ProcessFs extends EmscriptenFsForHook {
   isFile(mode: number): boolean;
   mkdirTree(path: string): void;
   cwd(): string;
-  read(stream: ProcessStream, buffer: Uint8Array, offset: number, length: number): number;
+  read(
+    stream: ProcessStream,
+    buffer: Uint8Array,
+    offset: number,
+    length: number,
+    position?: number
+  ): number;
   write(stream: ProcessStream, buffer: Uint8Array, offset: number, length: number): number;
 
   stat?(path: string, dontFollow?: boolean): object;
