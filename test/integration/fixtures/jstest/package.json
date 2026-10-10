@@ -24,11 +24,19 @@
       "jsecho": {
         "abi": "js",
         "module": "bin/echo.mjs"
+      },
+      "jsscript": {
+        "script": "bin/jsscript"
+      },
+      "jsloop": {
+        "script": "bin/jsloop"
       }
     },
     "binfmt": {
       ".jse": "jsecho",
-      ".x.jse": "jstest"
+      ".x.jse": "jstest",
+      ".jss": "jsscript",
+      ".jsl": "jsloop"
     }
   }
 }

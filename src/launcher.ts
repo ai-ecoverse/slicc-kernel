@@ -209,6 +209,7 @@ const PACKAGE_ROOT = /^(.*\/node_modules\/(?:@[^/]+\/)?[^/]+)\//;
 const ENV_REFERENCE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
 const WASM_MAGIC = [0x00, 0x61, 0x73, 0x6d];
 const SHEBANG_MAX = 256;
+const MAX_INTERPRETERS = 4;
 const NOT_FOUND = 127;
 const DECIDE_MS = 100;
 const INIT_PID = 1;
@@ -456,7 +457,8 @@ export class Launcher {
   private async interpreted(
     file: string,
     argv: string[],
-    cwd: string
+    cwd: string,
+    depth = 0
   ): Promise<Planned | undefined> {
     const command = await this.scriptCommand(file);
     const script = command?.script ?? this.fs.resolvePath(cwd, file);
@@ -467,8 +469,15 @@ export class Launcher {
     if (!words) return undefined;
     if (baseName(words[0]) === 'env') words.shift();
     const [interp, ...rest] = words;
+    const arg = rest.join(' ');
+    const passed = [...(arg ? [arg] : []), command ? script : file, ...argv.slice(1)];
     const found = interp ? await this.resolve(interp, interp, cwd) : undefined;
-    if (!found) return undefined;
+    if (!found) {
+      if (!interp || depth >= MAX_INTERPRETERS || !(await this.scriptCommand(interp))) {
+        return undefined;
+      }
+      return this.interpreted(interp, [interp, ...passed], cwd, depth + 1);
+    }
     const target = command
       ? {
           ...found,
@@ -476,16 +485,7 @@ export class Launcher {
           unset: [...(found.unset ?? []), ...(command.unset ?? [])],
         }
       : found;
-    const arg = rest.join(' ');
-    return {
-      target,
-      args: [
-        ...(target.prefix ?? []),
-        ...(arg ? [arg] : []),
-        command ? script : file,
-        ...argv.slice(1),
-      ],
-    };
+    return { target, args: [...(target.prefix ?? []), ...passed] };
   }
 
   private async plan(file: string, argv: string[], cwd: string): Promise<Planned | undefined> {
