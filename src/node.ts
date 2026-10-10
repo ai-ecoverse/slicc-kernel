@@ -3,6 +3,7 @@ import type { CdpHook } from './cdp/types.ts';
 import type { MessagePortLike } from './client/protocol.ts';
 import { type ServedClient, serveClient } from './client/serve-client.ts';
 import { OpfsFs } from './fs/opfs.ts';
+import { pidOwner } from './fs/unlinked.ts';
 import type { RunOptions, RunResult, Terminal, TerminalOptions } from './index.ts';
 import type { WasmWorkerLike } from './kernel/host.ts';
 import type { RouteTable } from './kernel/net/routes.ts';
@@ -156,6 +157,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
   const transport = options.network?.transport;
   const launcher = new Launcher({
     fs,
+    unlinkOwner: pidOwner(process),
     createWorker: () => nodeWorker(file, live, terminated),
     createDriverWorker: () =>
       nodeWorker(

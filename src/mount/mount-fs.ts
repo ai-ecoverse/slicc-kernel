@@ -110,6 +110,22 @@ export class HeldPaths extends Map<string, number> implements UnlinkHolder {
     return this.opens.has(this.keyOf(path));
   }
 
+  held(): Iterable<string> {
+    return this.opens.keys();
+  }
+
+  isKept(path: string): boolean {
+    return this.unlinked.has(path);
+  }
+
+  keep(path: string, file: KeptFile): void {
+    this.unlinked.set(path, file);
+  }
+
+  unkeep(path: string): void {
+    this.unlinked.delete(path);
+  }
+
   hold(path: string, on: boolean, open = false, real?: string): void {
     if (open) {
       const key = real ?? this.keyOf(path);
