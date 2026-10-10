@@ -69,7 +69,8 @@ function rewrite(hop: Hop, status: number, location: string): Hop {
 
 const OVER = Symbol('over');
 const MIME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+\/[!#$%&'*+.^_`|~0-9A-Za-z-]+(?:[\t ]*;.*)?$/s;
-const BASE64 = /;[\t\n\f\r ]*base64$/i;
+const BASE64 = /; *base64$/i;
+const SLICE = 0x8000;
 
 function isHex(byte: number | undefined): boolean {
   return byte !== undefined && /^[0-9A-Fa-f]$/.test(String.fromCharCode(byte));
@@ -77,23 +78,30 @@ function isHex(byte: number | undefined): boolean {
 
 function percentDecode(input: string): Uint8Array {
   const bytes = new TextEncoder().encode(input);
-  const out: number[] = [];
+  const out = new Uint8Array(bytes.length);
+  let at = 0;
   for (let i = 0; i < bytes.length; i++) {
     const byte = bytes[i] as number;
     if (byte === 0x25 && isHex(bytes[i + 1]) && isHex(bytes[i + 2])) {
-      out.push(
-        Number.parseInt(String.fromCharCode(bytes[i + 1] as number, bytes[i + 2] as number), 16)
+      out[at++] = Number.parseInt(
+        String.fromCharCode(bytes[i + 1] as number, bytes[i + 2] as number),
+        16
       );
       i += 2;
-    } else out.push(byte);
+    } else out[at++] = byte;
   }
-  return Uint8Array.from(out);
+  return out.subarray(0, at);
+}
+
+function latin1(bytes: Uint8Array): string {
+  let text = '';
+  for (let at = 0; at < bytes.length; at += SLICE) {
+    text += String.fromCharCode(...bytes.subarray(at, at + SLICE));
+  }
+  return text;
 }
 
 function dataResponse(request: Request): Response {
-  if (request.method !== 'GET') {
-    throw failed(new JsCallError('EINVAL', `${request.method} of a data: URL`));
-  }
   const url = withoutFragment(new URL(request.url));
   const rest = url.slice('data:'.length);
   const comma = rest.indexOf(',');
@@ -105,7 +113,7 @@ function dataResponse(request: Request): Response {
     type = type.slice(0, base64.index).replace(/[\t\n\f\r ]+$/, '');
     let binary: string;
     try {
-      binary = atob(String.fromCharCode(...body));
+      binary = atob(latin1(body));
     } catch {
       throw failed(new JsCallError('EINVAL', 'a data: URL whose base64 does not decode'));
     }

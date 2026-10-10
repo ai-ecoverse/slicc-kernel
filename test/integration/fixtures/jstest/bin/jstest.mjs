@@ -1224,7 +1224,22 @@ async function schemes(ctx, [base]) {
   await fetchTry(out, 'badtype', async () => show(await ctx.fetch('data:nonsense,x')));
   await fetchTry(out, 'badbase64', () => ctx.fetch('data:;base64,%%%'));
   await fetchTry(out, 'nocomma', () => ctx.fetch('data:abc'));
-  await fetchTry(out, 'post', () => ctx.fetch('data:,x', { method: 'POST', body: 'y' }));
+  await fetchTry(out, 'post', async () =>
+    show(await ctx.fetch('data:,x', { method: 'POST', body: 'y' }))
+  );
+  await fetchTry(out, 'big', async () => {
+    const bytes = new Uint8Array(3 * 1024 * 1024).map((_, i) => (i * 7) % 251);
+    let text = '';
+    for (let at = 0; at < bytes.length; at += 0x8000)
+      text += String.fromCharCode(...bytes.subarray(at, at + 0x8000));
+    const url = `data:application/octet-stream;base64,${btoa(text)}`;
+    const got = new Uint8Array(await (await ctx.fetch(url)).arrayBuffer());
+    const hex = async (b) =>
+      [...new Uint8Array(await crypto.subtle.digest('SHA-256', b))]
+        .map((x) => x.toString(16).padStart(2, '0'))
+        .join('');
+    return `${url.length >= 4 * 1024 * 1024} ${got.length} ${(await hex(got)) === (await hex(bytes))}`;
+  });
   await fetchTry(out, 'ftp', () => ctx.fetch('ftp://example.com/x'));
   await fetchTry(out, 'file', () => ctx.fetch('file:///etc/hosts'));
   if (base) await fetchTry(out, 'todata', () => ctx.fetch(`${base}/todata`));
