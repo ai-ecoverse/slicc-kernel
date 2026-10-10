@@ -78,6 +78,7 @@ test('open files and path operations agree, append appends, exclusive creation i
   assert.deepEqual(await run(['jstest', 'readcancel']), ok('cancelled true 143\n'));
   assert.deepEqual(await run(['jstest', 'spawnabort'], home), ok('aborted true EBADF\n'));
   assert.deepEqual(await run(['jstest', 'numfd'], home), ok('EBADF\n'));
+  assert.deepEqual(await run(['jstest', 'stdiochecks'], home), ok('EINVAL ESRCH EBADF\n'));
   assert.deepEqual(await run(['jstest', 'spawning', 'sp'], home), {
     status: 0,
     stdout:

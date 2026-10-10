@@ -503,13 +503,13 @@ export class WasmProcess {
     for (const listener of this.stateListeners) listener('continued', SIG.CONT);
   }
 
-  async syscall(req: WasmSyscall): Promise<SyncFsResult> {
+  async syscall(req: WasmSyscall, cancelled?: AbortSignal): Promise<SyncFsResult> {
     this.options.onSyscall?.(req);
     for (;;) {
       await this.resumed;
       if (this.dying) return DYING;
       const stops = this.stops;
-      const result = await this.dispatch(req);
+      const result = await this.dispatch(req, cancelled);
       if (this.dying) return DYING;
 
       const restart = !result.ok && result.errno === 'EINTR' && this.stops !== stops;
@@ -533,9 +533,9 @@ export class WasmProcess {
     this.wake?.();
   }
 
-  private async dispatch(req: WasmSyscall): Promise<SyncFsResult> {
+  private async dispatch(req: WasmSyscall, cancelled?: AbortSignal): Promise<SyncFsResult> {
     try {
-      if (isFdSyscall(req)) return await this.fdSyscall(req);
+      if (isFdSyscall(req)) return await this.fdSyscall(req, cancelled);
       if (isTtySyscall(req)) return this.ttySyscall(req);
       if (isJobSyscall(req)) return this.jobSyscall(req);
       if (isSocketSyscall(req)) return await this.socketSyscall(req);
@@ -651,7 +651,7 @@ export class WasmProcess {
     );
   }
 
-  private async fdSyscall(req: FdSyscall): Promise<SyncFsResult> {
+  private async fdSyscall(req: FdSyscall, cancelled?: AbortSignal): Promise<SyncFsResult> {
     if (isVfsSyscall(req)) return this.vfsSyscall(req);
     switch (req.op) {
       case 'fd-read':
@@ -725,7 +725,8 @@ export class WasmProcess {
         return { ok: true, kind: 'json', json: this.options.jobs?.terminalNames() ?? [] };
       case 'fd-select': {
         const { read, write, timeoutMs } = req;
-        const signal = this.blockingSignal();
+        const blocking = this.blockingSignal();
+        const signal = cancelled ? AbortSignal.any([blocking, cancelled]) : blocking;
         const selected = await selectFds(this.fds, read, write, timeoutMs, signal);
         return { ok: true, kind: 'json', json: selected };
       }
@@ -1034,7 +1035,7 @@ export class WasmProcess {
   private alarm: ReturnType<typeof setTimeout> | undefined;
   private readonly dlLog: LinkRecord[] = [];
   private readonly asyncOps = new AsyncOps(
-    (req) => this.syscall(req as WasmSyscall),
+    (req, cancelled) => this.syscall(req as WasmSyscall, cancelled),
     () => this.options.onAsync?.()
   );
   private alarmEvery: ReturnType<typeof setInterval> | undefined;

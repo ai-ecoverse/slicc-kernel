@@ -436,6 +436,23 @@ async function numfd(ctx) {
   await ctx.write(1, `${r}\n`);
 }
 
+async function stdiochecks(ctx) {
+  const code = (p) =>
+    p.then(
+      () => 'ok',
+      (err) => err.code
+    );
+  const typo = await code(ctx.spawn({ argv: ['jstest', 'echo'], stdout: 'pip' }));
+  const c = await ctx.spawn({ argv: ['jstest', 'wait'], stdout: 'null', stderr: 'null' });
+  await c.kill(0);
+  await c.kill('SIGKILL');
+  await c.wait();
+  const gone = await code(c.kill(0));
+  await ctx.close(2);
+  const closed = await code(ctx.spawn({ argv: ['jstest', 'echo'], stdin: 'pipe' }));
+  await ctx.write(1, `${typo} ${gone} ${closed}\n`);
+}
+
 async function ab(ctx) {
   let go = false;
   await ctx.signals.on('SIGUSR1', () => {
@@ -733,6 +750,7 @@ function syncdev(ctx) {
 }
 
 const modes = {
+  stdiochecks,
   ab,
   readsteal,
   readcancel,

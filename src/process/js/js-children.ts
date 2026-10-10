@@ -88,7 +88,7 @@ export function childOps(kernel: JsKernel, io: ChildIo, defaults: ChildDefaults)
     return exitedOf(status);
   };
   const kill = async (pid: number, signal: number | `SIG${string}` = SIGTERM): Promise<void> => {
-    await kernel.call({ op: 'proc-kill', pid, sig: defaults.signal(signal) });
+    await kernel.call({ op: 'proc-kill', pid, sig: signal === 0 ? 0 : defaults.signal(signal) });
   };
 
   const childOf = (pid: number, mine: Array<number | undefined>): JsChild => {
@@ -134,19 +134,24 @@ async function closeAll(io: ChildIo, fds: ReadonlyArray<number | undefined>): Pr
   for (const fd of fds) if (fd !== undefined) await io.close(fd).catch(() => undefined);
 }
 
+async function preflight(kernel: JsKernel, hows: readonly JsStdio[]): Promise<void> {
+  for (const [n, how] of hows.entries()) {
+    if (how === 'pipe' || how === 'null') continue;
+    if (how !== 'inherit' && typeof how !== 'number') throw new JsCallError('EINVAL', 'spawn');
+    await kernel.json({ op: 'fd-info', fd: how === 'inherit' ? n : how });
+  }
+}
+
 async function slots(
   kernel: JsKernel,
   o: JsSpawnOptions,
   mine: Array<number | undefined>,
   theirs: number[]
 ): Promise<Slot[]> {
-  for (const name of STDIO) {
-    const how = o[name];
-    if (typeof how === 'number') await kernel.json({ op: 'fd-info', fd: how });
-  }
+  const hows = STDIO.map((name) => o[name] ?? ('inherit' as const));
+  await preflight(kernel, hows);
   const stdio: Slot[] = [];
-  for (const [n, name] of STDIO.entries()) {
-    const how = o[name] ?? 'inherit';
+  for (const [n, how] of hows.entries()) {
     if (how === 'inherit') stdio.push({ fd: n });
     else if (how === 'null') stdio.push({ none: true });
     else if (typeof how === 'number') stdio.push({ fd: how });
