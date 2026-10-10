@@ -619,6 +619,7 @@ export class WasmProcess {
     if (file.tty) this.checkForeground(file.tty);
 
     if (req.max <= 0) return new Uint8Array(0);
+    if (file instanceof KernelSocket && file.unconnected) throw new KernelError('ENOTCONN');
     const ready = pollFile(file).readable;
     if (!ready && req.nonblock) throw new KernelError('EAGAIN');
     const signal = ready ? this.interrupt.signal : this.blockingSignal();
