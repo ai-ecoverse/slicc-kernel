@@ -605,7 +605,11 @@ export class WasmProcess {
     const fd = this.fds.install(heldFile(), 3);
     try {
       const nodes = this.nodes;
-      const path = req.exclusive ? await nodes.entryKey(req.path) : await nodes.targetKey(req.path);
+      const path = req.orphan
+        ? req.path
+        : req.exclusive
+          ? await nodes.entryKey(req.path)
+          : await nodes.targetKey(req.path);
       const open = { ...req, path };
       if (req.exclusive) {
         await nodes.createExclusive(path);
@@ -775,7 +779,7 @@ export class WasmProcess {
       return;
     }
     if (req.path === undefined) throw new KernelError('EINVAL');
-    const path = await this.nodes.targetKey(req.path);
+    const path = req.orphan ? req.path : await this.nodes.targetKey(req.path);
     if (!this.fds.get(req.fd).file.held) throw new KernelError('EBADF');
     const file = vfsFile(
       this.options.fs,
