@@ -97,7 +97,12 @@ export async function recover({
   };
   const served = async (version) => {
     const r = await run('npm', ['view', `${name}@${version}`, 'dist.tarball', '--prefer-online']);
-    return r.code === 0 && r.stdout.trim() !== '' && (await head(r.stdout.trim()));
+    if (r.code !== 0 || r.stdout.trim() === '') return false;
+    try {
+      return await head(r.stdout.trim());
+    } catch {
+      return false;
+    }
   };
   const remote = async (ref) =>
     (await run('git', ['ls-remote', '--exit-code', 'origin', ref])).code === 0;
@@ -133,8 +138,10 @@ export async function recover({
         sleep,
         log,
       });
-      if (ours) recovered.push(`${name}@${version} on npm`);
-      else log(`${name}@${version} was already on npm`);
+      if (ours) {
+        recovered.push(`${name}@${version} on npm`);
+        fresh.push(tag);
+      } else log(`${name}@${version} was already on npm`);
     }
     if ((await run('gh', ['release', 'view', tag])).code !== 0) {
       const r = await run('gh', [
