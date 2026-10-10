@@ -127,6 +127,7 @@ export type WasmSyscall =
       pin?: VersionPin;
     }
   | { op: 'fd-open-tty'; name?: string }
+  | { op: 'fd-tty-names' }
   | { op: 'tty-get'; fd: number }
   | { op: 'tty-set'; fd: number; termios: Termios }
   | { op: 'tty-winsz'; fd: number }
@@ -280,6 +281,7 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'fd-renumber',
   'fd-promote',
   'fd-open-tty',
+  'fd-tty-names',
   'tty-get',
   'tty-set',
   'tty-winsz',
@@ -701,6 +703,8 @@ export class WasmProcess {
         if (!tty) throw new KernelError('ENXIO');
         return { ok: true, kind: 'json', json: this.fds.install(tty.file(), 3) };
       }
+      case 'fd-tty-names':
+        return { ok: true, kind: 'json', json: this.options.jobs?.terminalNames() ?? [] };
       case 'fd-select': {
         const { read, write, timeoutMs } = req;
         const signal = this.blockingSignal();

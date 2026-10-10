@@ -148,6 +148,9 @@ export function kernelSys(transport: SyncSabTransport): ProcessSys & PtyKernel {
     size(fd) {
       return (json(call({ op: 'fd-vfs-stat', fd }, `fd-vfs-stat ${fd}`)) as { size: number }).size;
     },
+    ttyNames() {
+      return json(call({ op: 'fd-tty-names' }, 'fd-tty-names')) as string[];
+    },
     openTty(name) {
       const req =
         name === undefined ? { op: 'fd-open-tty' as const } : { op: 'fd-open-tty' as const, name };
