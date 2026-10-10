@@ -1052,7 +1052,8 @@ export class Launcher {
   private async starting(argv: string[], dir: string | undefined) {
     this.catalog = undefined;
     this.binfmts = undefined;
-    const cwd = this.fs.resolvePath('/', dir ?? '/');
+    const start = dir ?? '/';
+    const cwd = await physicalPathAsync(this.base, start.startsWith('/') ? start : `/${start}`);
     const [file = ''] = argv;
     await this.base.mkdir(cwd, { recursive: true });
     return { cwd, file, planned: await this.plan(file, argv, cwd) };

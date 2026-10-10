@@ -131,7 +131,7 @@ export class WasixProcess {
       opened.push(kfd);
       point(op.fd, kfd);
     } else if (op.cmd === 'chdir') return this.physicalFrom(cwd, op.path);
-    else return fds.dir(op.fd).path;
+    else return physicalPath(this.host.o.fs, fds.dir(op.fd).path);
     return cwd;
   }
 
