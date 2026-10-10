@@ -1,3 +1,4 @@
+import type { PathGate } from '../fs/unlinked.ts';
 import { HeldPaths } from '../mount/mount-fs.ts';
 import { dispatchSyncFs } from '../realm/sync-fs-dispatch.ts';
 import {
@@ -93,6 +94,7 @@ export interface SpawnWasmOptions {
   mount?: WasmProcessOptions['mount'];
   umount?: WasmProcessOptions['umount'];
   held?: Set<HeldPaths>;
+  unlinkGate?: PathGate;
   jobs?: JobTable;
   ptys?: PtyTable;
 
@@ -235,8 +237,10 @@ function holdingToken(opts: SpawnWasmOptions, holds: HeldPaths): string {
     fs: opts.fs,
     cwd: opts.cwd,
     ...(opts.statfs ? { statfs: opts.statfs } : {}),
-    hold: (path, on, open) => holds.hold(path, on, open),
-    unlinked: (path) => holds.unlinked.get(path),
+    hold: (path, on, open, real) => holds.hold(path, on, open, real),
+    unlinked: (path) => holds.keptAt(path),
+    gate: (path, op) =>
+      opts.unlinkGate && holds.holding(path) ? opts.unlinkGate.run(holds.keyOf(path), op) : op(),
     own: (path, op) => holds.own(path, op),
     revoked: (path) => holds.isRevoked(path),
     renamed: (from, to) => holds.renamed(from, to),
@@ -291,6 +295,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
   const holds = new HeldPaths();
   opts.held?.add(holds);
   const token = holdingToken(opts, holds);
+  process.keptPath = (path) => holds.keptAt(path)?.hidden;
   const worker = opts.createWorker();
   const dying = new Dying();
   const dispatch = (req: SyncSabDispatchRequest): Promise<SyncFsResult> =>

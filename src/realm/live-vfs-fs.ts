@@ -550,6 +550,7 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
           bridge.truncate &&
           statOf(stream.node).ranged
         );
+        rangedOf(stream.node);
       }
       if ((stream.flags & 3) !== 0) {
         try {

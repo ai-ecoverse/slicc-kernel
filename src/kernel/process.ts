@@ -609,7 +609,9 @@ export class WasmProcess {
         ? req.path
         : req.exclusive
           ? await nodes.entryKey(req.path)
-          : await nodes.targetKey(req.path);
+          : req.create
+            ? await nodes.targetKey(req.path)
+            : await this.keptOr(await nodes.targetKey(req.path));
       const open = { ...req, path };
       if (req.exclusive) {
         await nodes.createExclusive(path);
@@ -772,6 +774,13 @@ export class WasmProcess {
     }
   }
 
+  keptPath?: (path: string) => string | undefined;
+
+  private async keptOr(path: string): Promise<string> {
+    const kept = this.keptPath?.(path);
+    return kept !== undefined && !(await present(this.options.fs, path, true)) ? kept : path;
+  }
+
   private async promote(req: Extract<WasmSyscall, { op: 'fd-promote' }>): Promise<void> {
     if (!this.fds.get(req.fd).file.held) throw new KernelError('EBADF');
     if (req.share !== undefined) {
@@ -779,7 +788,7 @@ export class WasmProcess {
       return;
     }
     if (req.path === undefined) throw new KernelError('EINVAL');
-    const path = req.orphan ? req.path : await this.nodes.targetKey(req.path);
+    const path = req.orphan ? req.path : await this.keptOr(await this.nodes.targetKey(req.path));
     if (!this.fds.get(req.fd).file.held) throw new KernelError('EBADF');
     const file = vfsFile(
       this.options.fs,
