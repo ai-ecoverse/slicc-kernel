@@ -27,7 +27,15 @@ export type TransportCall =
   | { net: 'ws-consumed'; nid: number; n: number };
 
 export type TransportReply =
-  | { net: 'head'; nid: number; status: number; statusText: string; headers: HeaderList }
+  | {
+      net: 'head';
+      nid: number;
+      status: number;
+      statusText: string;
+      headers: HeaderList;
+      url?: string;
+      redirected?: boolean;
+    }
   | { net: 'chunk'; nid: number; bytes: Uint8Array }
   | { net: 'end'; nid: number }
   | { net: 'error'; nid: number; message: string; status?: number; code?: string }
@@ -151,7 +159,10 @@ export class RemoteTransport implements RealmTransport {
       finish();
       throw e;
     }
-    const { status, statusText, headers } = head as Extract<TransportReply, { net: 'head' }>;
+    const { status, statusText, headers, url, redirected } = head as Extract<
+      TransportReply,
+      { net: 'head' }
+    >;
     const read = async (): Promise<Uint8Array | undefined> => {
       if (finished) return undefined;
       const reply = await this.ask({ net: 'read', nid }).catch((e: unknown) => {
@@ -168,6 +179,7 @@ export class RemoteTransport implements RealmTransport {
       this.cancel(nid);
     };
     return {
+      ...(redirected ? { url, redirected } : {}),
       status,
       statusText,
       headers,

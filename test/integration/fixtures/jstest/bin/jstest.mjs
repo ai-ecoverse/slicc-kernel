@@ -1135,17 +1135,23 @@ async function fetches(ctx, [base]) {
   });
   await fetchTry(out, 'followed', async () => {
     const r = await f('/followed');
-    return `${r.redirected} ${r.url}`;
+    const copy = r.clone();
+    return `${r.redirected} ${r.url} ${copy.redirected} ${copy.url === r.url}`;
   });
   await fetchTry(out, 'gzip', async () => (await f('/gzip')).text());
   await fetchTry(out, 'brokenbody', async () => (await f('/broken')).text());
   await ctx.write(1, `${out.join('\n')}\n`);
 }
 
-async function fetchone(ctx, [url, redirect = 'follow']) {
+async function fetchone(ctx, [url, redirect = 'follow', upload]) {
   const out = [];
+  const endless = {
+    method: 'POST',
+    duplex: 'half',
+    body: new ReadableStream({ pull: () => new Promise(() => {}) }),
+  };
   await fetchTry(out, 'one', async () => {
-    const r = await ctx.fetch(url, { redirect });
+    const r = await ctx.fetch(url, { redirect, ...(upload === 'endless' ? endless : {}) });
     return `${r.status} ${(await r.text()).length > 0}`;
   });
   await ctx.write(1, `${out.join('\n')}\n`);

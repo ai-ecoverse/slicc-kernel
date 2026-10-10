@@ -181,6 +181,7 @@ export function serveTransport(
       peer.postMessage({
         net: 'head',
         nid: call.nid,
+        ...(response.redirected ? { url: response.url, redirected: true } : {}),
         status: response.status,
         statusText: response.statusText,
         headers: response.headers,

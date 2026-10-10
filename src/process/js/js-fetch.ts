@@ -69,6 +69,14 @@ function rewrite(hop: Hop, status: number, location: string): Hop {
 
 const OVER = Symbol('over');
 
+function withMeta(response: Response, url: string, redirected: boolean): Response {
+  const clone = response.clone.bind(response);
+  Object.defineProperty(response, 'url', { value: url });
+  Object.defineProperty(response, 'redirected', { value: redirected });
+  Object.defineProperty(response, 'clone', { value: () => withMeta(clone(), url, redirected) });
+  return response;
+}
+
 async function bodyOf(
   request: Request,
   cap: number,
@@ -205,9 +213,7 @@ export function fetchOp(kernel: JsKernel) {
       statusText: head.statusText,
       headers,
     });
-    Object.defineProperty(response, 'url', { value: head.url });
-    Object.defineProperty(response, 'redirected', { value: redirected });
-    return response;
+    return withMeta(response, head.url, redirected);
   };
 
   return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
@@ -217,11 +223,11 @@ export function fetchOp(kernel: JsKernel) {
     const known = await traitsOf().catch((err: unknown) => {
       throw failed(err);
     });
-    const bytes = await bodyOf(request, known.maxRequestBody, signal);
-    if (bytes === OVER) return plain(413, `request body over ${known.maxRequestBody} bytes`);
     if (!known.manualRedirects && request.redirect !== 'follow') {
       throw failed(new JsCallError('ENOTSUP', `redirect: ${request.redirect}`));
     }
+    const bytes = await bodyOf(request, known.maxRequestBody, signal);
+    if (bytes === OVER) return plain(413, `request body over ${known.maxRequestBody} bytes`);
     let hop: Hop = {
       url: withoutFragment(new URL(request.url)),
       method: request.method,
