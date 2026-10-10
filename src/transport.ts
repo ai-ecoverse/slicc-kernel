@@ -27,11 +27,14 @@ export interface FetchTransportOptions {
   maxRequestBody?: number;
   hint?: string;
   bodyIdleMs?: number;
-  webSocket?: false | WebSocketConstructor;
+  webSocket?: boolean | WebSocketConstructor;
   webSocketHeaders?: boolean;
 }
 
 export const SEND_BUFFER = 1024 * 1024;
+
+const NO_WEBSOCKET =
+  'WebSocket not supported by this transport (fetchTransport needs { webSocket: true })';
 
 const MAX_REQUEST_BODY = 64 * 1024 * 1024;
 
@@ -67,9 +70,9 @@ async function* chunks(
 export function fetchTransport(options: FetchTransportOptions = {}): RealmTransport {
   const send = options.fetch ?? globalThis.fetch.bind(globalThis);
   const Socket =
-    options.webSocket === false
-      ? undefined
-      : (options.webSocket ?? (globalThis as { WebSocket?: WebSocketConstructor }).WebSocket);
+    options.webSocket === true
+      ? (globalThis as { WebSocket?: WebSocketConstructor }).WebSocket
+      : options.webSocket || undefined;
   const headers = options.webSocketHeaders === true;
   return {
     traits: {
@@ -186,7 +189,7 @@ export function serveTransport(peer: TransportPeer, transport: RealmTransport): 
     const abort = new AbortController();
     open.set(call.nid, { abort });
     try {
-      if (!transport.websocket) throw new Error('WebSocket not supported by this transport');
+      if (!transport.websocket) throw new Error(NO_WEBSOCKET);
       const socket = await transport.websocket({
         url: call.url,
         protocols: call.protocols,

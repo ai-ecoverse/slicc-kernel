@@ -39,6 +39,8 @@ import { MESSAGE_LIMIT } from './ws-queue.ts';
 
 const SEND_BUFFER = 1024 * 1024;
 const TLS_HANDSHAKE = 0x16;
+const NO_WEBSOCKET =
+  'WebSocket not supported by this transport (fetchTransport needs { webSocket: true })';
 
 export const REALM_PROXY_PORT = 3128;
 export interface ProxyLimits {
@@ -324,6 +326,7 @@ export class RealmProxy {
   private readonly slots: Budget;
   private readonly bodies: Budget;
   private readonly connections = new Set<KernelSocket>();
+  private warnedWebSocket = false;
   readonly closed: Promise<void>;
   readonly port: number;
   constructor(options: RealmProxyOptions) {
@@ -554,7 +557,11 @@ export class RealmProxy {
     const href = ctx.origin ? tunnelRequestUrl(req, ctx.origin) : requestUrl(webSocketTarget(req));
     const { transport } = this.options;
     if (!transport.traits.websocket || !transport.websocket) {
-      throw new HttpError(501, 'WebSocket not supported by this transport');
+      if (!this.warnedWebSocket) {
+        this.warnedWebSocket = true;
+        console.warn(`slicc-kernel: a program asked for a WebSocket: ${NO_WEBSOCKET}`);
+      }
+      throw new HttpError(501, NO_WEBSOCKET);
     }
     const accept = await acceptKey(req.headers);
     const protocols = fieldValues(req.headers, 'sec-websocket-protocol')
