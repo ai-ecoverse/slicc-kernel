@@ -271,6 +271,7 @@ function processInit(
   opts: SpawnWasmOptions,
   sab: SharedArrayBuffer,
   umask: number,
+  cred: Cred,
   lane: JsLane | undefined
 ): ProcessInitMsg {
   const base = {
@@ -282,6 +283,7 @@ function processInit(
     cwd: opts.cwd,
     sab,
     umask,
+    cred,
     ...(opts.ppid !== undefined ? { ppid: opts.ppid } : {}),
   } as const;
   if (opts.program.abi === 'js') {
@@ -479,6 +481,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
       env: opts.env,
       cwd: opts.cwd,
       sab: tsab,
+      cred: copyCred(process.cred),
       ...(opts.ppid !== undefined ? { ppid: opts.ppid } : {}),
       thread,
     };
@@ -486,7 +489,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
   };
 
   worker.postMessage(
-    processInit(opts, sab, process.umask, lane?.lane),
+    processInit(opts, sab, process.umask, copyCred(process.cred), lane?.lane),
     transferOf(opts, lane?.lane)
   );
 

@@ -8,6 +8,7 @@ import type { ProcessFs, ProcessStream } from './kernel-streams.ts';
 import { deviceOfStream } from './process-fork.ts';
 import type { HttpKernel } from './process-http.ts';
 import type { SocketKernel } from './process-sockets.ts';
+import type { Owner } from './realm-user.ts';
 import { wasiErrno } from './wasi-errno.ts';
 
 const S_IFMT = 0o170000;
@@ -97,6 +98,7 @@ export interface ProcessKernel {
 
 export interface ProcessKernelDeps {
   transport: SyncSabTransport;
+  owner?: Owner;
   Fs: ProcessFs;
 
   env: Record<string, string>;
@@ -395,7 +397,14 @@ export function createProcessKernel(deps: ProcessKernelDeps): ProcessKernel {
     getpgid: (pid) => number(call({ op: 'proc-getpgid', pid }, 'getpgid')),
     getsid: (pid) => number(call({ op: 'proc-getsid', pid }, 'getsid')),
     cred: () => credOf(call({ op: 'proc-cred' }, 'cred')),
-    setcred: (change) => credOf(call({ op: 'proc-setcred', change }, 'setcred')),
+    setcred(change) {
+      const cred = credOf(call({ op: 'proc-setcred', change }, 'setcred'));
+      if (typeof cred === 'object' && deps.owner) {
+        deps.owner.uid = cred.euid;
+        deps.owner.gid = cred.egid;
+      }
+      return cred;
+    },
     tcgetpgrp(fd) {
       const kfd = Fs.getStream(fd)?.sliccKernelFd;
       if (kfd === undefined) return -wasiErrno('ENOTTY');

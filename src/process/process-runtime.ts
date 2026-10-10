@@ -52,7 +52,7 @@ import type { PtyKernel } from './process-pty.ts';
 import { SignalGate } from './process-signals.ts';
 import { createSocketKernel } from './process-sockets.ts';
 import { type ProcFs, useProcfs } from './procfs.ts';
-import { ownByRealmUser } from './realm-user.ts';
+import { ownByCaller } from './realm-user.ts';
 
 export {
   type ProcessFs,
@@ -550,7 +550,6 @@ export async function runWasmProcess(
     memory: () => memory,
     memalign: () => exports?.emscripten_builtin_memalign as Memalign | undefined,
   });
-  ownByRealmUser(running.FS);
   const livePath = (s: ProcessStream) => liveNodePath(s.node as unknown as LiveFsNode);
   running.sliccKernel = createProcessKernel({
     transport,
@@ -566,6 +565,7 @@ export async function runWasmProcess(
     describeFork: () => describeForFork(running.FS, sys, streams, livePath),
     inherit: (actions) => describeInherited(running.FS, sys, streams, livePath, actions),
     stdioPromoter: () => vfsPromoter(running.FS, sys, streams, livePath),
+    owner: ownByCaller(running.FS, init.cred),
   });
   running.sliccKernel.http = createHttpKernel(transport);
   running.sliccKernel.hostname = hostnameOf(init.env);

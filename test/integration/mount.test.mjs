@@ -14,7 +14,7 @@ after(() => chrome.close());
 
 const programs = (dir) =>
   [
-    'git config --global user.name kernel && git config --global user.email kernel@example.com',
+    "git config --global user.name kernel && git config --global user.email kernel@example.com && git config --global --add safe.directory '*'",
     `cd ${dir} && echo one > a.txt && echo two >> a.txt && printf three > b.txt && echo over > b.txt`,
     'mv b.txt c.txt && mkdir -p d/e && rmdir d/e && echo gone > g.txt && rm g.txt',
     'git init -q && git add . && git commit -qm first && git log --format=%s && git status --porcelain',

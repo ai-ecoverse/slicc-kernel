@@ -11,7 +11,7 @@ test('git commits, and clones over the pack protocol: upload-pack piped into ind
   await installPackage(page, 'wasm-git');
 
   const script = [
-    'git config --global user.name kernel && git config --global user.email kernel@example.com',
+    "git config --global user.name kernel && git config --global user.email kernel@example.com && git config --global --add safe.directory '*'",
     'git init -q /home/origin && cd /home/origin',
     'echo hello > a.txt && git add a.txt && git commit -qm first',
     'git clone -q --no-local /home/origin /home/copy',
@@ -26,7 +26,7 @@ test('git fetches into a clone, reading the pack at the offsets it asks for (pre
   await installPackage(page, 'wasm-git');
 
   const script = [
-    'git config --global user.name kernel && git config --global user.email kernel@example.com',
+    "git config --global user.name kernel && git config --global user.email kernel@example.com && git config --global --add safe.directory '*'",
     'git config --global init.defaultBranch master',
     'git init -q --bare /home/g/repo.git && git init -q -b main /home/g/w && cd /home/g/w',
     'echo hello > a.txt && git add a.txt && git commit -qm first',
