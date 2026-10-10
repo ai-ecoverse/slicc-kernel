@@ -117,6 +117,8 @@ export function wasixSocketImports(
       if (af !== UNIX)
         throw new WasiError(af === INET4 || af === INET6 ? 'EOPNOTSUPP' : 'EAFNOSUPPORT');
       if (type !== STREAM) throw new WasiError('EPROTONOSUPPORT');
+      mem.view().setUint32(out1, 0, true);
+      mem.view().setUint32(out2, 0, true);
       const [a, b] = call({ op: 'sock-pair', domain: 'unix' }) as [number, number];
       fds.adopt(a, 'socket', false);
       fds.adopt(b, 'socket', false);
