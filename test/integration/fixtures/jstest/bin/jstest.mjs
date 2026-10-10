@@ -1025,6 +1025,195 @@ async function wsone(ctx, [url]) {
   await ctx.write(1, `${out.join('\n')}\n`);
 }
 
+function fetchErr(err) {
+  return `${err.name}:${err.cause?.code ?? err.message}`;
+}
+
+async function fetchTry(out, label, fn) {
+  try {
+    out.push(`${label} ${await fn()}`);
+  } catch (err) {
+    out.push(`${label} ${fetchErr(err)}`);
+  }
+}
+
+async function fetches(ctx, [base]) {
+  const out = [];
+  const f = (path, init) => ctx.fetch(`${base}${path}`, init);
+  const post = {
+    method: 'POST',
+    body: 'abc',
+    headers: { authorization: 'a', 'content-type': 't' },
+  };
+  await fetchTry(out, 'get', async () => {
+    const r = await f('/hello');
+    return `${r.status} ${r.headers.get('x-test')} ${await r.text()} ${r.url === `${base}/hello`} ${r.redirected}`;
+  });
+  await fetchTry(out, 'post', async () => (await f('/echo', post)).text());
+  await fetchTry(out, 'stream', async () => {
+    const body = new ReadableStream({
+      start(c) {
+        c.enqueue(new TextEncoder().encode('st'));
+        c.enqueue(new TextEncoder().encode('ream'));
+        c.close();
+      },
+    });
+    return (await f('/echo', { method: 'PUT', body, duplex: 'half' })).text();
+  });
+  await fetchTry(out, '303', async () => {
+    const r = await f('/to/303/echo', post);
+    return `${r.redirected} ${r.url === `${base}/echo`} ${await r.text()}`;
+  });
+  await fetchTry(out, '302', async () => (await f('/to/302/echo', post)).text());
+  await fetchTry(out, '307', async () => (await f('/to/307/echo', post)).text());
+  await fetchTry(out, 'xorigin', async () =>
+    (
+      await f('/away', {
+        ...post,
+        headers: { ...post.headers, cookie: 'c=1', 'proxy-authorization': 'p' },
+      })
+    ).text()
+  );
+  await fetchTry(out, 'fragment', async () => {
+    const r = await f('/where#secret');
+    return `${await r.text()} ${r.url}`;
+  });
+  await fetchTry(out, 'manual', async () => {
+    const r = await f('/to/302/echo', { redirect: 'manual' });
+    return `${r.status} ${r.headers.get('location')}`;
+  });
+  await fetchTry(out, 'error', () => f('/to/302/echo', { redirect: 'error' }));
+  await fetchTry(out, 'loop', () => f('/loop'));
+  await fetchTry(out, 'ftp', () => f('/ftp'));
+  await fetchTry(out, 'teapot', async () => {
+    const r = await f('/teapot');
+    return `${r.status} ${await r.text()}`;
+  });
+  await fetchTry(out, 'down', () => f('/down'));
+  await fetchTry(out, 'big', async () => {
+    const r = await f('/echo#frag', { method: 'POST', body: 'x'.repeat(2000) });
+    const copy = r.clone();
+    return `${r.status} ${await r.text()} ${r.url === `${base}/echo`} ${copy.url === r.url}`;
+  });
+  await fetchTry(out, 'head', async () => {
+    const r = await f('/hello', { method: 'HEAD' });
+    return `${r.status} ${r.body === null}`;
+  });
+  await fetchTry(out, 'nocontent', async () => `${(await f('/204')).body === null}`);
+  await fetchTry(out, 'info', () => f('/101'));
+  await fetchTry(out, 'abort', () => {
+    const c = new AbortController();
+    setTimeout(() => c.abort(), 50);
+    return f('/hang', { signal: c.signal });
+  });
+  await fetchTry(out, 'preaborted', () => f('/hello', { signal: AbortSignal.abort() }));
+  await fetchTry(out, 'abortbody', async () => {
+    const c = new AbortController();
+    const reader = (await f('/forever', { signal: c.signal })).body.getReader();
+    const first = new TextDecoder().decode((await reader.read()).value);
+    c.abort();
+    return `${first} ${await reader.read().then(() => 'read', fetchErr)}`;
+  });
+  await fetchTry(out, 'cancel', async () => {
+    const reader = (await f('/forever')).body.getReader();
+    await reader.read();
+    await reader.cancel();
+    return 'cancelled';
+  });
+  await fetchTry(out, 'slowbody', () => {
+    const c = new AbortController();
+    setTimeout(() => c.abort(), 50);
+    const body = new ReadableStream({ pull: () => new Promise(() => {}) });
+    return f('/echo', { method: 'POST', body, duplex: 'half', signal: c.signal });
+  });
+  await fetchTry(out, 'brokenupload', () => {
+    const body = new ReadableStream({
+      pull(c) {
+        c.error(new Error('upload broke'));
+      },
+    });
+    return f('/echo', { method: 'POST', body, duplex: 'half' }).then(
+      () => 'ok',
+      (err) => `${err.name} ${err.message} ${err.cause?.message}`
+    );
+  });
+  await fetchTry(out, 'chunks', async () => {
+    const body = new ReadableStream({
+      start(c) {
+        c.enqueue('ab');
+        c.enqueue(new Uint16Array([0x1234]));
+        c.enqueue(new Uint8Array([0x41, 0x42]).buffer);
+        c.close();
+      },
+    });
+    return (await f('/hex', { method: 'PUT', body, duplex: 'half' })).text();
+  });
+  await fetchTry(out, 'badchunk', () => {
+    const body = new ReadableStream({
+      start(c) {
+        c.enqueue(42);
+        c.close();
+      },
+    });
+    return f('/hex', { method: 'PUT', body, duplex: 'half' }).then(
+      () => 'ok',
+      (err) => `${err.name} ${err.message} ${err.cause?.message}`
+    );
+  });
+  await fetchTry(out, 'bigstuck', async () => {
+    const body = new ReadableStream({
+      start(c) {
+        c.enqueue(new Uint8Array(2000));
+      },
+      cancel: () => new Promise(() => {}),
+    });
+    return (await f('/hex', { method: 'PUT', body, duplex: 'half' })).status;
+  });
+  await fetchTry(out, 'abortearly', () => {
+    const body = new ReadableStream({ pull: () => new Promise(() => {}) });
+    const c = new AbortController();
+    const fetching = f('/echo', { method: 'POST', body, duplex: 'half', signal: c.signal });
+    c.abort();
+    return fetching;
+  });
+  await fetchTry(out, 'idleabort', async () => {
+    const c = new AbortController();
+    const r = await f('/idle', { signal: c.signal });
+    c.abort();
+    const read = await r.text().then(() => 'read', fetchErr);
+    await sleep(20);
+    return `${read} ${await (await f('/idlecount')).text()}`;
+  });
+  await fetchTry(out, 'followed', async () => {
+    const r = await f('/followed');
+    const copy = r.clone();
+    return `${r.redirected} ${r.url} ${copy.redirected} ${copy.url === r.url}`;
+  });
+  await fetchTry(out, 'abortredirect', async () => {
+    const c = new AbortController();
+    setTimeout(() => c.abort(), 30);
+    const result = await f('/slowredirect', { signal: c.signal }).then(() => 'ok', fetchErr);
+    return `${result} ${await (await f('/targethits')).text()}`;
+  });
+  await fetchTry(out, 'gzip', async () => (await f('/gzip')).text());
+  await fetchTry(out, 'brokenbody', async () => (await f('/broken')).text());
+  await ctx.write(1, `${out.join('\n')}\n`);
+}
+
+async function fetchone(ctx, [url, redirect = 'follow', upload]) {
+  const out = [];
+  const endless = {
+    method: 'POST',
+    duplex: 'half',
+    body: new ReadableStream({ pull: () => new Promise(() => {}) }),
+  };
+  await fetchTry(out, 'one', async () => {
+    const r = await ctx.fetch(url, { redirect, ...(upload === 'endless' ? endless : {}) });
+    return `${r.status} ${(await r.text()).length > 0}`;
+  });
+  await ctx.write(1, `${out.join('\n')}\n`);
+}
+
 const modes = {
   httpserver,
   echoserver,
@@ -1032,6 +1221,8 @@ const modes = {
   netmisc,
   wsclient,
   wsone,
+  fetches,
+  fetchone,
   stdiochecks,
   ab,
   readsteal,
