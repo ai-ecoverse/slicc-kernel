@@ -11,7 +11,7 @@ test('git commits, and clones over the pack protocol: upload-pack piped into ind
   await installPackage(page, 'wasm-git');
 
   const script = [
-    "git config --global user.name kernel && git config --global user.email kernel@example.com && git config --global --add safe.directory '*'",
+    'git config --global user.name kernel && git config --global user.email kernel@example.com',
     'git init -q /home/origin && cd /home/origin',
     'echo hello > a.txt && git add a.txt && git commit -qm first',
     'git clone -q --no-local /home/origin /home/copy',
@@ -26,7 +26,7 @@ test('git fetches into a clone, reading the pack at the offsets it asks for (pre
   await installPackage(page, 'wasm-git');
 
   const script = [
-    "git config --global user.name kernel && git config --global user.email kernel@example.com && git config --global --add safe.directory '*'",
+    'git config --global user.name kernel && git config --global user.email kernel@example.com',
     'git config --global init.defaultBranch master',
     'git init -q --bare /home/g/repo.git && git init -q -b main /home/g/w && cd /home/g/w',
     'echo hello > a.txt && git add a.txt && git commit -qm first',
@@ -35,4 +35,23 @@ test('git fetches into a clone, reading the pack at the offsets it asks for (pre
     'git fetch -q origin && git log --format=%s origin/main',
   ].join(' && ');
   assert.deepEqual(await bash(script, { cwd: '/home' }), ok('first\n'));
+});
+
+const REPO =
+  'git init -q "$HOME/r" && cd "$HOME/r" && git status --short && git rev-parse --is-inside-work-tree';
+
+test('git works on its own repository as root and as a user', async (t) => {
+  const { page, bash } = await booted(chrome, t);
+  await installPackage(page, 'wasm-git');
+  await page.evaluate(() => window.kernel.users.add({ name: 'cone' }));
+  assert.deepEqual(await bash(REPO, { cwd: '/home' }), ok('true\n'));
+  assert.deepEqual(await bash(REPO, { cwd: '/home', user: 'cone' }), ok('true\n'));
+  assert.deepEqual(page.errors, []);
+});
+
+test('a pre-H1 git, which says it is uid 1000, works on its own repository as root', async (t) => {
+  const { page, bash } = await booted(chrome, t);
+  await installPackage(page, 'wasm-git-pre-h1');
+  assert.deepEqual(await bash(REPO, { cwd: '/home' }), ok('true\n'));
+  assert.deepEqual(page.errors, []);
 });
