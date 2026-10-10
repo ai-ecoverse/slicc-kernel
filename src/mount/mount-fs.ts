@@ -314,6 +314,7 @@ export class MountTable {
   private readonly mounts = new Map<string, Mount>();
   private readonly sessions = new Map<string, WriteSession>();
   private readonly committing = new Map<string, { mount: Mount; done: Promise<void> }>();
+  private epoch = 0;
   private devices = 0;
   private readonly pending = new Set<string>();
   private readonly notes = new Map<string, MountEntry>();
@@ -488,6 +489,7 @@ export class MountTable {
     const session = this.sessions.get(real);
     if (!session) return this.committing.get(real)?.done;
     this.sessions.delete(real);
+    this.epoch++;
     const done = (async () => {
       try {
         await session.mount.conn.call({ op: 'release', fh: await session.fh });
@@ -545,20 +547,30 @@ export class MountTable {
   }
 
   forget(mount: Mount, path: string): void {
+    this.epoch++;
     for (const key of [...mount.attrs.keys()]) if (within(key, path)) mount.attrs.delete(key);
     mount.lists.delete(path);
     mount.lists.delete(parentOf(path));
     for (const key of [...mount.lists.keys()]) if (within(key, path)) mount.lists.delete(key);
   }
 
-  async getattr(mount: Mount, path: string, rel: string): Promise<DriverAttr> {
-    if (mount.conn.failure) throw mount.conn.failure;
-    const cached = mount.attrs.get(path);
-    if (cached && cached.expires > Date.now()) return cached.value;
-    const attr = (await mount.conn.call({ op: 'getattr', path: rel })) as DriverAttr;
-    const ttl = mount.caps.attrTtl ?? 1000;
-    if (ttl > 0) mount.attrs.set(path, { value: attr, expires: Date.now() + ttl });
-    return attr;
+  async getattr(mount: Mount, path: string, rel: string, settled = false): Promise<DriverAttr> {
+    for (;;) {
+      if (mount.conn.failure) throw mount.conn.failure;
+      if (settled) await this.committing.get(path)?.done.catch(() => undefined);
+      const cached = mount.attrs.get(path);
+      if (cached && cached.expires > Date.now()) return cached.value;
+      const seen = this.epoch;
+      const session = this.sessions.get(path);
+      const attr = (await mount.conn.call({ op: 'getattr', path: rel })) as DriverAttr;
+      if (this.epoch !== seen) {
+        if (settled && (this.sessions.get(path) !== session || this.committing.has(path))) continue;
+        return attr;
+      }
+      const ttl = mount.caps.attrTtl ?? 1000;
+      if (ttl > 0) mount.attrs.set(path, { value: attr, expires: Date.now() + ttl });
+      return attr;
+    }
   }
 
   async readdir(mount: Mount, path: string, rel: string): Promise<DriverEntry[]> {
@@ -872,7 +884,7 @@ class MountFs implements KernelFs {
     const real = normalizePath(path);
     if (this.table.writing(real)?.truncated) await this.table.commit(real);
     return this.statWriting(
-      await this.table.getattr(found.mount, real, found.rel),
+      await this.table.getattr(found.mount, real, found.rel, true),
       real,
       found.mount
     );
