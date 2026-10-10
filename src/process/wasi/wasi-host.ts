@@ -1,6 +1,5 @@
 import type { DeviceMeta, KernelFdKind } from '../../kernel/fd-table.ts';
 import type { SyncFsBridgeStat, SyncFsPosixBridge } from '../../realm/sync-fs-wire.ts';
-import { physicalOr } from './physical-path.ts';
 import {
   CLOCK,
   E,
@@ -152,12 +151,11 @@ export class WasiHost {
       },
     });
     this.o = { ...o, kernel: { sys, call } };
-    const cwd = physicalOr(o.fs, o.cwd);
-    this.startCwd = cwd;
+    this.startCwd = o.cwd;
     this.fds = new WasiFds(this.o.kernel, o.fs);
     if (o.shared) this.fds.share(o.shared, true);
     else if (o.forked) this.fds.restore(o.forked.fds, o.forked.cloexec);
-    else this.fds.setup(cwd, o.inherited ?? [], o.preopenRoot === true);
+    else this.fds.setup(o.cwd, o.inherited ?? [], o.preopenRoot === true);
     this.listening = o.shared ? [] : this.fds.sockets();
   }
 
