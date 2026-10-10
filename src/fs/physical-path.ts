@@ -49,14 +49,14 @@ export function physicalPath(fs: LinkReader, path: string): string {
   const walk = start(path);
   for (let part = next(walk); part !== undefined; part = next(walk)) {
     const at = `/${[...walk.done, part].join('/')}`;
-    let link: boolean | undefined;
+    let target: string | undefined;
     try {
-      link = fs.lstat(at).isSymbolicLink;
+      target = fs.lstat(at).isSymbolicLink ? fs.readlink(at) : undefined;
     } catch {
       return rest(walk, part);
     }
-    if (!link) walk.done.push(part);
-    else if (!follow(walk, fs.readlink(at))) return lexical(path);
+    if (target === undefined) walk.done.push(part);
+    else if (!follow(walk, target)) return lexical(path);
   }
   return `/${walk.done.join('/')}`;
 }
@@ -70,14 +70,14 @@ export async function physicalPathAsync(fs: AsyncLinkReader, path: string): Prom
   const walk = start(path);
   for (let part = next(walk); part !== undefined; part = next(walk)) {
     const at = `/${[...walk.done, part].join('/')}`;
-    let link: boolean | undefined;
+    let target: string | undefined;
     try {
-      link = (await fs.lstat(at)).isSymbolicLink;
+      target = (await fs.lstat(at)).isSymbolicLink ? await fs.readlink(at) : undefined;
     } catch {
       return rest(walk, part);
     }
-    if (!link) walk.done.push(part);
-    else if (!follow(walk, await fs.readlink(at))) return lexical(path);
+    if (target === undefined) walk.done.push(part);
+    else if (!follow(walk, target)) return lexical(path);
   }
   return `/${walk.done.join('/')}`;
 }
