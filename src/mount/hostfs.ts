@@ -434,7 +434,11 @@ export interface HostfsTiming {
   silenceMs?: number;
   backoffMs?: [number, number];
   connectMs?: number;
+  requestMs?: number;
 }
+
+export const PORT_REQUEST_MS = 60_000;
+const PORT_MS_PER_MIB = 1000;
 
 let nextPortToken = 0;
 
@@ -452,16 +456,20 @@ export class PortTransport implements HostfsTransport {
   readonly capabilities: DriverCapabilities;
   readonly token: string;
   private readonly port: MessagePort;
+  private readonly requestMs: number;
   private readonly waiting = new Map<number, (reply: PortReply) => void>();
   private next = 0;
+  private dead: string | undefined;
 
-  constructor(grant: HostfsPortGrant) {
+  constructor(grant: HostfsPortGrant, requestMs = PORT_REQUEST_MS) {
     this.port = grant.port;
+    this.requestMs = requestMs;
     this.capabilities = grant.capabilities ?? {};
     this.token = grant.token ?? `port-${++nextPortToken}`;
     this.port.addEventListener('message', (event: MessageEvent<PortReply>) => {
       this.waiting.get(event.data?.id)?.(event.data);
     });
+    this.port.addEventListener('close', () => this.fail("the folder's port closed"));
     this.port.start();
   }
 
@@ -469,10 +477,30 @@ export class PortTransport implements HostfsTransport {
     return this.capabilities.maxIo ?? HOSTFS_IO;
   }
 
-  private ask(message: Record<string, unknown>, transfer: Transferable[] = []): Promise<PortReply> {
+  fail(why: string): void {
+    this.dead ??= why;
+    for (const settle of [...this.waiting.values()])
+      settle({ id: 0, error: { code: 'ENOTCONN', message: why } });
+  }
+
+  private ask(
+    message: Record<string, unknown>,
+    bytes = 0,
+    transfer: Transferable[] = []
+  ): Promise<PortReply> {
     const id = ++this.next;
+    if (this.dead) return Promise.reject(fsError('ENOTCONN', this.dead));
     return new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => {
+          this.waiting.delete(id);
+          reject(fsError('ETIMEDOUT', "the folder's port did not answer"));
+          this.fail("the folder's port stopped answering");
+        },
+        this.requestMs + Math.ceil(bytes / 1_048_576) * PORT_MS_PER_MIB
+      );
       this.waiting.set(id, (reply) => {
+        clearTimeout(timer);
         this.waiting.delete(id);
         if (reply.error) reject(fsError(reply.error.code ?? 'EIO', reply.error.message ?? ''));
         else resolve(reply);
@@ -480,8 +508,7 @@ export class PortTransport implements HostfsTransport {
       try {
         this.port.postMessage({ id, ...message }, transfer);
       } catch (err) {
-        this.waiting.delete(id);
-        reject(fsError('ENOTCONN', `the folder's port is closed: ${(err as Error).message}`));
+        this.fail(`the folder's port is closed: ${(err as Error).message}`);
       }
     });
   }
@@ -491,12 +518,15 @@ export class PortTransport implements HostfsTransport {
   }
 
   async read(fh: number, offset: number, size: number, ifMatch?: string): Promise<Uint8Array> {
-    const reply = await this.ask({ op: 'read', fh, offset, size, ...(ifMatch ? { ifMatch } : {}) });
+    const reply = await this.ask(
+      { op: 'read', fh, offset, size, ...(ifMatch ? { ifMatch } : {}) },
+      size
+    );
     return reply.bytes ?? new Uint8Array(0);
   }
 
   async write(fh: number, offset: number, bytes: Uint8Array): Promise<void> {
-    await this.ask({ op: 'write', fh, offset, bytes });
+    await this.ask({ op: 'write', fh, offset, bytes }, bytes.length);
   }
 
   watch(
@@ -505,14 +535,17 @@ export class PortTransport implements HostfsTransport {
     onOpen: () => void = () => undefined
   ): Promise<void> {
     const id = ++this.next;
-    return new Promise((resolve, reject) => {
+    if (this.dead) return Promise.reject(fsError('ENOTCONN', this.dead));
+    return new Promise<void>((resolve, reject) => {
       const finish = () => {
         this.waiting.delete(id);
         signal.removeEventListener('abort', stop);
       };
       const stop = () => {
         finish();
-        this.port.postMessage({ id, op: 'unwatch' });
+        try {
+          this.port.postMessage({ id, op: 'unwatch' });
+        } catch {}
         resolve();
       };
       this.waiting.set(id, (reply) => {
@@ -523,8 +556,13 @@ export class PortTransport implements HostfsTransport {
         else resolve();
       });
       signal.addEventListener('abort', stop, { once: true });
-      this.port.postMessage({ id, op: 'watch' });
-    });
+      try {
+        this.port.postMessage({ id, op: 'watch' });
+      } catch (err) {
+        finish();
+        reject(fsError('ENOTCONN', `the folder's port is closed: ${(err as Error).message}`));
+      }
+    }).finally(() => this.fail("the folder's watch ended"));
   }
 }
 
@@ -561,12 +599,14 @@ export function serveHostfsPort(port: MessagePort, transport: HostfsTransport): 
     }
     try {
       if (op === 'read') {
-        const bytes = await transport.read(
+        const read = await transport.read(
           data.fh as number,
           data.offset as number,
           data.size as number,
           data.ifMatch as string | undefined
         );
+        const whole = read.byteOffset === 0 && read.byteLength === read.buffer.byteLength;
+        const bytes = whole ? read : read.slice();
         return send({ id, bytes }, [bytes.buffer as ArrayBuffer]);
       }
       if (op === 'write') {
@@ -591,10 +631,14 @@ export function serveHostfsPort(port: MessagePort, transport: HostfsTransport): 
   };
 }
 
-export function grantConnect(hook: HostfsGrantHook, fetch: FetchLike): HostfsConnect {
+export function grantConnect(
+  hook: HostfsGrantHook,
+  fetch: FetchLike,
+  requestMs?: number
+): HostfsConnect {
   return async (source, options) => {
     const first = await hook(source, options);
-    if ('port' in first) return new PortTransport(first);
+    if ('port' in first) return new PortTransport(first, requestMs);
     const grant = async () => {
       const again = await hook(source, options);
       if ('port' in again)
