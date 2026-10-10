@@ -7,6 +7,8 @@ const DELIVERED_MASK = Object.values(SIG)
   .filter((sig) => sig !== SIG.KILL && sig !== SIG.STOP)
   .reduce((m, sig) => m | sigbit(sig), 0);
 
+const STOP_DEFAULTS = sigbit(SIG.TSTP) | sigbit(SIG.TTIN) | sigbit(SIG.TTOU);
+
 const LIBC_DEFAULT_EXIT = 127;
 
 const SA_RESTART = 0x10000000;
@@ -109,7 +111,7 @@ export class WasiSignals implements SignalHooks {
       return { caught, ignored: this.ignoring, restart: this.restarting, defaults };
     }
     if (!this.handler()) return null;
-    return { caught: DELIVERED_MASK & ~this.uncaught, ignored: 0, restart: 0 };
+    return { caught: DELIVERED_MASK & ~this.uncaught & ~STOP_DEFAULTS, ignored: 0, restart: 0 };
   }
 
   raise(sig: number): void {
