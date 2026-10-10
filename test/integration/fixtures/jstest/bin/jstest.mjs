@@ -1091,8 +1091,9 @@ async function fetches(ctx, [base]) {
   });
   await fetchTry(out, 'down', () => f('/down'));
   await fetchTry(out, 'big', async () => {
-    const r = await f('/echo', { method: 'POST', body: 'x'.repeat(2000) });
-    return `${r.status} ${await r.text()}`;
+    const r = await f('/echo#frag', { method: 'POST', body: 'x'.repeat(2000) });
+    const copy = r.clone();
+    return `${r.status} ${await r.text()} ${r.url === `${base}/echo`} ${copy.url === r.url}`;
   });
   await fetchTry(out, 'head', async () => {
     const r = await f('/hello', { method: 'HEAD' });

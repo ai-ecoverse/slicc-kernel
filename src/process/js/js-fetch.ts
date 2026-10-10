@@ -135,6 +135,7 @@ export function fetchOp(kernel: JsKernel) {
     })) as number;
     try {
       const r = await kernel.blocking({ op: 'net-head', handle }, signal);
+      signal.throwIfAborted();
       return (r.ok && r.kind === 'json' ? r.json : undefined) as HttpHead;
     } catch (err) {
       await close(handle);
@@ -226,10 +227,13 @@ export function fetchOp(kernel: JsKernel) {
     if (!known.manualRedirects && request.redirect !== 'follow') {
       throw failed(new JsCallError('ENOTSUP', `redirect: ${request.redirect}`));
     }
+    const url = withoutFragment(new URL(request.url));
     const bytes = await bodyOf(request, known.maxRequestBody, signal);
-    if (bytes === OVER) return plain(413, `request body over ${known.maxRequestBody} bytes`);
+    if (bytes === OVER) {
+      return withMeta(plain(413, `request body over ${known.maxRequestBody} bytes`), url, false);
+    }
     let hop: Hop = {
-      url: withoutFragment(new URL(request.url)),
+      url,
       method: request.method,
       headers: [...request.headers],
       body: bytes,
