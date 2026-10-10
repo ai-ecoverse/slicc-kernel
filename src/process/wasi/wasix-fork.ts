@@ -1,6 +1,7 @@
 import { E } from './wasi-abi.ts';
 import type { WasiForkFd } from './wasi-fds.ts';
 import type { WasiMemory } from './wasi-memory.ts';
+import type { WasiSignalState } from './wasi-signals.ts';
 
 export interface WasiForkState {
   asyncifyData: number;
@@ -13,6 +14,8 @@ export interface WasiForkState {
   shared?: true;
 
   setjmps?: WasiSetjmps;
+
+  signals?: WasiSignalState;
 }
 
 export interface WasiSetjmps {

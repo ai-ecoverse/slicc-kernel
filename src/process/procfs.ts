@@ -89,6 +89,8 @@ export function pidStat(info: ProcessInfo, boot: number): string {
   return `${fields.join(' ')}\n`;
 }
 
+const sigMask = (mask = 0): string => (mask >>> 1).toString(16).padStart(16, '0');
+
 export function pidStatus(info: ProcessInfo): string {
   const state = info.state === 'Z' ? 'Z (zombie)' : 'S (sleeping)';
   const ids = `${UID}\t${UID}\t${UID}\t${UID}`;
@@ -115,8 +117,8 @@ export function pidStatus(info: ProcessInfo): string {
     'SigPnd:\t0000000000000000',
     'ShdPnd:\t0000000000000000',
     'SigBlk:\t0000000000000000',
-    'SigIgn:\t0000000000000000',
-    'SigCgt:\t0000000000000000',
+    `SigIgn:\t${sigMask(info.sigIgn)}`,
+    `SigCgt:\t${sigMask(info.sigCgt)}`,
     '',
   ].join('\n');
 }

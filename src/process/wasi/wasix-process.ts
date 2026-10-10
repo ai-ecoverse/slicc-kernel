@@ -216,6 +216,7 @@ export class WasixProcess {
         cwd: this.host.cwd,
         ...(fds.isShared ? { shared: true as const } : {}),
         setjmps: this.driver.setjmps(),
+        ...(this.host.signals ? { signals: this.host.signals.snapshot() } : {}),
       };
       return this.call({
         op: 'proc-fork',

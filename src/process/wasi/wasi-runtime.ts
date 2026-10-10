@@ -44,6 +44,9 @@ const SLICC_FS = 'slicc_fs';
 
 const RESERVED = RESERVED_NAMESPACES;
 
+const importsSigactionHook = (module: WebAssembly.Module): boolean =>
+  WebAssembly.Module.imports(module).some((i) => i.module === SLICC && i.name === 'sigaction_set');
+
 const noErrno = (key: string) =>
   `imports ${key}: its result cannot carry ENOSYS, and this host does not provide it`;
 
@@ -484,6 +487,9 @@ export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike
   main.memory = memoryOf(instance, memory);
   publishMemory(init.sab, sizeOf(main)());
   signals.bind(instance.exports);
+  if (importsSigactionHook(module)) signals.useHook();
+  if (fork?.signals) signals.restore(fork.signals);
+  host.signals = signals;
   host.onRaise = (sig) => signals.raised(sig);
   host.muted = (fd, data) => signals.muted(fd, data);
   const exports = instance.exports as { _start: () => void };

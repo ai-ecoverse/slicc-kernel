@@ -116,6 +116,7 @@ export interface WasmProcessHandle {
   onState(listener: StateListener): void;
   memory(): number;
   ignoredSignals(fork?: boolean): number;
+  signalMasks?(): { ignored: number; caught: number };
   umask?(): number;
   writesBack(): boolean;
 }
@@ -453,6 +454,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     onState: (listener) => process.onState(listener),
     memory: () => Atomics.load(header, SAB_I_MEMORY) * 65536,
     ignoredSignals: (fork) => process.inheritable(fork),
+    signalMasks: () => process.signalMasks(),
     umask: () => process.umask,
     writesBack: () => opts.program.abi === 'wasi' && !done,
   };
