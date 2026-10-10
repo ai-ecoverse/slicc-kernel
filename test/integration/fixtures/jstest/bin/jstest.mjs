@@ -853,6 +853,12 @@ async function netmisc(ctx) {
     `preabort ${await code(ctx.net.connect({ host: '127.0.0.1', port: 9, signal: pre.signal }))}`
   );
   out.push(`noname ${await code(ctx.net.connect({ host: 'no.such.name.invalid', port: 80 }))}`);
+  const local = await ctx.net.listen();
+  const plain = await ctx.net.connect({ port: local.port });
+  out.push(`defaulthost ${plain.remote.host}:${plain.remote.port === local.port}`);
+  await plain.close();
+  out.push(`v6 ${await code(ctx.net.connect({ host: '::1', port: local.port }))}`);
+  await local.close();
   await ctx.write(1, `${out.join('\n')}\n`);
 }
 
