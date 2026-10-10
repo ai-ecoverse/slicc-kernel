@@ -47,7 +47,8 @@ Runs `argv[0]` with `argv` as its arguments and resolves when it exits. `stdout`
 | option | |
 | --- | --- |
 | `cwd` | working directory, default `/`; created in OPFS if missing |
-| `env` | extra environment; the defaults are `PATH=/usr/bin:/bin`, `HOME=/home`, `PWD=<cwd>` |
+| `user` | the user to run as, by name or uid (see [Users](#users)); default `root`. An unknown user rejects with `code: 'ENOENT'` |
+| `env` | extra environment, over the user's defaults: `HOME`, `USER`, `LOGNAME`, `PNPM_HOME` and `PATH=$PNPM_HOME/bin:/usr/local/bin:/usr/bin:/bin` (see [Users](#users)), and `PWD=<cwd>` |
 | `stdin` | a string or `Uint8Array`; without it stdin is `/dev/null` |
 | `onStdout`, `onStderr` | called with each chunk of text as it is written |
 
@@ -57,7 +58,7 @@ Starts `argv` as the session leader on a new terminal and resolves once it is ru
 
 | option | |
 | --- | --- |
-| `cwd`, `env` | as for `run`; `TERM=xterm-256color` and `COLORTERM=truecolor` are added |
+| `cwd`, `user`, `env` | as for `run`; `TERM=xterm-256color` and `COLORTERM=truecolor` are added |
 | `cols`, `rows` | initial size, default 80 × 24, so `$COLUMNS` and `$LINES` are right before the first prompt |
 | `onData` | called with each chunk of output as raw bytes (escape sequences included) |
 
@@ -75,9 +76,21 @@ Starts `argv` as the session leader on a new terminal and resolves once it is ru
 
 Stops the kernel worker and every process. Pending and later calls reject.
 
-### `kernel.connect() → Promise<MessagePort>`
+### `kernel.connect({ user }?) → Promise<MessagePort>`
 
 Makes a port for another client of the same kernel. Hand it to a dedicated worker, or through a SharedWorker to another tab: it can be transferred any number of times. All clients share one process table, so a terminal on the page can `ps` and `kill` what a worker started.
+
+**`user`** (a name or uid) binds the client to that user; without it the client is root. The binding is a capability: the client's `spawn`, `run` and `openTerminal` run as that user, its `ps` lists only that user's processes, and its `kill` follows POSIX permission. A bound client can't run anything as another user (`code: 'EPERM'`). A root client may pass `user` to `spawn`, `run` or `openTerminal` to run one command as any user. An unknown user rejects with `code: 'ENOENT'`.
+
+### `kernel.users`
+
+The user database, `/etc/passwd` and `/etc/group` (see [Users](#users)):
+
+| | |
+| --- | --- |
+| `add({ name, home?, groups?, umask? })` | adds a user and resolves with `{ name, uid, gid, home, shell, groups, umask? }`. It's idempotent: an existing name resolves with its entry and changes nothing but the remembered `umask`. The new user gets the lowest free id from 1000 up, a private group of the same id and name, membership of `users` and of each group in `groups` (such as `sudo`), `home` (default `/home/<name>`, created), and `/bin/bash`. `umask` is the umask its processes start with; the kernel keeps it in memory, so pass it again after a reload. A name must match `[a-z_][a-z0-9_.-]*`; a group that doesn't exist rejects with `ENOENT` |
+| `remove(name, { keepHome }?)` | removes the user, its private group and its group memberships, and deletes its home unless `keepHome` is set. A home outside `/home/<dir>` is never deleted. Resolves `false` for an unknown name; system accounts (ids below 1000 or above 60000) reject with `EPERM` |
+| `list()` | every user, as `add` returns them |
 
 ### `kernel.setRoutes({ prefixes, exit }) → Promise<void>`
 
@@ -98,11 +111,11 @@ Attaches to a kernel over a port from `kernel.connect()`, in any realm: a worker
 
 | Client | |
 |---|---|
-| `spawn(argv, { cwd, env, stdin, pgid, onStdout, onStderr })` | runs over pipes and resolves with `{ pid, pgid, exited, signal(name) }` once the process has started; output arrives in chunks, as bytes, and the kernel keeps no copy; every spawn leads its own process group, which `signal` (default `SIGTERM`) signals, unless `pgid` names an existing group to join (protocol 1.3): the process then joins that group and that group's session, as `setpgid` would (a client has no session of its own: each of its spawns and terminals leads one, and `setpgid` cannot cross sessions), and `signal` signals the whole group. The group must have been started by this client (a spawn or a terminal it opened), even if its leader has exited; an unknown group rejects with `code: 'ESRCH'`, another session's with `code: 'EPERM'`, and against a 1.2 kernel the client rejects with `code: 'ENOSYS'` before sending anything, as an older kernel would ignore the option; a program that cannot start rejects with `code: 'ENOENT'` |
+| `spawn(argv, { cwd, user, env, stdin, pgid, onStdout, onStderr })` | runs over pipes and resolves with `{ pid, pgid, exited, signal(name) }` once the process has started; output arrives in chunks, as bytes, and the kernel keeps no copy; every spawn leads its own process group, which `signal` (default `SIGTERM`) signals, unless `pgid` names an existing group to join (protocol 1.3): the process then joins that group and that group's session, as `setpgid` would (a client has no session of its own: each of its spawns and terminals leads one, and `setpgid` cannot cross sessions), and `signal` signals the whole group. The group must have been started by this client (a spawn or a terminal it opened), even if its leader has exited; an unknown group rejects with `code: 'ESRCH'`, another session's with `code: 'EPERM'`, and against a 1.2 kernel the client rejects with `code: 'ENOSYS'` before sending anything, as an older kernel would ignore the option; a program that cannot start rejects with `code: 'ENOENT'`. `user` runs it as another user, which only a root client may (see `kernel.connect`); against a 1.7 kernel the client rejects with `code: 'ENOSYS'` |
 | `run(argv, options?)` | `spawn` and wait: `{ pid, status, stdout, stderr }` as text, with `onStdout`/`onStderr` streaming text |
 | `openTerminal(argv, options?)` | a pty session, as `kernel.openTerminal` |
-| `ps()` | the kernel's processes: `{ pid, ppid, pgid, sid, argv, tty, started, state }`, `state` being `'S'` or `'Z'` |
-| `kill(pid, signal?)` | any process, or a process group with a negative pid; no such process rejects with `code: 'ESRCH'` |
+| `ps()` | the kernel's processes: `{ pid, ppid, pgid, sid, argv, tty, started, state, uid, gid }`, `state` being `'S'` or `'Z'` and `uid`/`gid` the effective ids (absent from a 1.7 kernel). A client bound to a user sees only that user's processes |
+| `kill(pid, signal?)` | a process, or a process group with a negative pid; no such process rejects with `code: 'ESRCH'`, and one the client's user may not signal with `code: 'EPERM'` |
 | `fs` | `readFile`, `readText`, `writeFile(path, string \| bytes)`, `stat`, `lstat`, `readdir`, `mkdir` (with parents), `rm(path, { force })` (recursive), `rename`, `realpath`, `symlink(target, path)`, `readlink`, `exists`, on the processes' file system, mounts included (a path under a `tmpfs`, `fsa` or `hostfs` mount reads and writes the mounted file system, as `cat` in a process would); failures reject with `KernelCallError` and a POSIX `code` |
 | `fetch({ url, method, headers, body, signal })` | through the kernel's network transport (the one the page passed to `createKernel`), with a streaming body; `transport` is the same as a `NetworkTransport` |
 | `fs.watch(paths, { recursive }, onChange)` | resolves with `{ close() }`; `onChange` gets `{ paths }`, the changed paths at, below (or, without `recursive`, directly in) the watched ones, batched per task, or `{ overflow: true }` when there were too many to list, to rescan; it covers every change made through this kernel, by its processes and its clients |
@@ -110,7 +123,7 @@ Attaches to a kernel over a port from `kernel.connect()`, in any realm: a worker
 | `close({ kill })` | detaches: the client's processes keep running unless `kill` is set, which ends their process groups with `SIGKILL`; its terminals are hung up |
 | `closed` | resolves with the error that ended the client |
 
-When the kernel goes away (the page closed or reloaded, `terminate()`), pending calls and `exited` reject with `KernelGoneError`, and so do later calls. Each side holds a Web Lock and waits on the other's, since a `MessagePort` reports no close in browsers; in Node, the port's `close` event does the same. The first message is a handshake on the protocol version, `1.7` (`1.0` had no `watch`, `1.1` no mounts, `1.2` no `spawn` into a group, `1.3` no `dial` and `1.4` no `serveCdp`, which reject with `code: 'ENOSYS'` on such a kernel; a `1.5` kernel has no [uplink](#uplink), and a `1.6` kernel resolves names through one but connects nothing to it): a client or kernel of another major version is refused with an error naming both.
+When the kernel goes away (the page closed or reloaded, `terminate()`), pending calls and `exited` reject with `KernelGoneError`, and so do later calls. Each side holds a Web Lock and waits on the other's, since a `MessagePort` reports no close in browsers; in Node, the port's `close` event does the same. The first message is a handshake on the protocol version, `1.8` (`1.0` had no `watch`, `1.1` no mounts, `1.2` no `spawn` into a group, `1.3` no `dial` and `1.4` no `serveCdp`, which reject with `code: 'ENOSYS'` on such a kernel; a `1.5` kernel has no [uplink](#uplink), a `1.6` kernel resolves names through one but connects nothing to it, and a `1.7` kernel has no users): a client or kernel of another major version is refused with an error naming both.
 
 ### Headless in Node, for tests
 
@@ -125,7 +138,7 @@ const { status, stdout } = await kernel.run(['bash', '-c', 'echo hi'], { cwd: '/
 kernel.terminate();
 ```
 
-`createNodeKernel({ root, modules, env, network, worker, processMounts, fstabRetries, cdp, hostfs, hostfsOrigin, hostfsFetch })` takes the options of `createKernel` except `metadata`, and `fstabRetries`, the delays in ms between tries of a failing `/etc/fstab` line (default `[1000, 4000, 16000]`). `root` is an in-memory directory by default (`memoryRoot()` makes another), which keeps each file in 1 MiB chunks, and POSIX metadata stays in memory. Processes and threads run on `worker_threads`. The kernel has `run`, `openTerminal`, `setRoutes` and `terminate` as above, plus `root`, `writeFile(path, data)` (creating the parent directories) and `readFile(path)` to put files in place and read results; like the `fs` of an attached client, they go through the mounts, as the processes see them. `nodeTransport()` is `fetchTransport()` with Node's `fetch`, which no CORS binds (`crossOrigin: 'any'`). `connect()` and `attachKernel` work as in the browser: the port is a `worker_threads` `MessagePort`, which a worker thread can attach with, and `terminate()` ends every attached client.
+`createNodeKernel({ root, modules, env, network, worker, processMounts, fstabRetries, cdp, hostfs, hostfsOrigin, hostfsFetch })` takes the options of `createKernel` except `metadata`, and `fstabRetries`, the delays in ms between tries of a failing `/etc/fstab` line (default `[1000, 4000, 16000]`). `root` is an in-memory directory by default (`memoryRoot()` makes another), which keeps each file in 1 MiB chunks, and POSIX metadata stays in memory. Processes and threads run on `worker_threads`. The kernel has `run`, `openTerminal`, `users`, `setRoutes` and `terminate` as above, plus `root`, `writeFile(path, data)` (creating the parent directories) and `readFile(path)` to put files in place and read results; like the `fs` of an attached client, they go through the mounts, as the processes see them. `nodeTransport()` is `fetchTransport()` with Node's `fetch`, which no CORS binds (`crossOrigin: 'any'`). `connect({ user })` and `attachKernel` work as in the browser: the port is a `worker_threads` `MessagePort`, which a worker thread can attach with, and `terminate()` ends every attached client.
 
 ## Commands
 
@@ -418,7 +431,7 @@ Programs mount and unmount with `mount(2)` and `umount2(2)`, so a `mount`/`umoun
 - **Options:** `data` is the `-o` string, such as `ro,maxfile=1G`. `key=value` and `key` become `options`, `rw` cancels `ro`, and generic words (`defaults`, `noatime`, `nofail`, …) are dropped. A bad `maxfile` is `EINVAL`.
 - **Unmounting:** `umount2(target, 0)` fails with `EBUSY` while a file is open under the mount. `MNT_DETACH` (`umount -l`) and `MNT_FORCE` unmount anyway: the mount leaves the table and `/proc/mounts` at once and its driver stops, and descriptors still open on it fail with `EIO`, without ever writing to the directory below.
 - **Waiting:** `mount` waits for the mount to be made, which for `hostfs` is the grant and the first watch, up to 15 s. A signal ends the wait with `EINTR`, and a mount that is made after that is unmounted again.
-- **Policy:** seven is single-user and every program runs as uid 1000, so any program may mount, unless the page passes `processMounts: false` (then every call fails with `EPERM`) or a function. The function gets `{ op: 'mount' | 'umount', pid, target, type?, source?, options? }` and returns whether to allow it. Whatever the policy, the kernel refuses mounts on `/` and on or under `/proc` and `/dev` with `EBUSY`.
+- **Policy:** any program may mount, whatever user it runs as, unless the page passes `processMounts: false` (then every call fails with `EPERM`) or a function. The function gets `{ op: 'mount' | 'umount', pid, target, type?, source?, options? }` and returns whether to allow it. Whatever the policy, the kernel refuses mounts on `/` and on or under `/proc` and `/dev` with `EBUSY`.
 - **Errors** are Linux's: `ENODEV` for an unknown type (or `hostfs` without a hook), `ENOENT` and `ENOTDIR` for the target, `EBUSY` for a target that is mounted already, and `EINVAL` for unmounting what is not a mount point.
 - **`/proc/mounts`** escapes spaces and backslashes as Linux does, and adds `nomedium` or `failed` to the options of a mount in that state.
 
@@ -445,11 +458,26 @@ WASI and WASIX have no call for file modes, so the kernel adds the import module
 
 Lowering a soft resource limit (`ulimit -S -n 64`) still fails with `EPERM` in Emscripten programs: their libc's `setrlimit` is a stub compiled into the program, not a call to the kernel.
 
+### Users
+
+Every process has credentials in the kernel, as on Linux: real, effective and saved user and group ids, and supplementary groups. A process gets them from the user it was started as (`run`, `openTerminal`, a client's `spawn`, or the client's own user; root by default) and keeps its parent's across fork, spawn and exec. Setuid and setgid bits are never honoured on exec. Files aren't checked against the credentials yet; they decide who may signal whom, and what `/proc` and `ps` show.
+
+- **The database:** `/etc/passwd` and `/etc/group` are real files. On first start the kernel writes them when they're missing, with `root` (uid 0, home `/root`, created `0700`) and `nobody` (65534), and the groups `root`, `sudo` (27), `users` (100) and `nogroup` (65534); files already there are kept as they are. The kernel reads them for every lookup, so an edit counts at once. [`kernel.users`](#kernelusers) adds and removes users.
+- **Environment:** a process started as a user gets `HOME`, `USER`, `LOGNAME`, `PNPM_HOME` and `PATH`. A user's `PNPM_HOME` is `~/.local/share/pnpm`; root's is `/usr/local/share/pnpm` (or the embedder's `env.PNPM_HOME`), whose global packages are the commands every user finds. `PATH` is `$PNPM_HOME/bin:/usr/local/bin:/usr/bin:/bin`.
+- **Changing credentials:** POSIX `setresuid`/`setresgid` rules. Root (effective uid 0) may set any id and the group list; anyone else may only swap among their own real, effective and saved ids, and gets `EPERM` otherwise.
+- **Signals:** a process may signal another if its effective uid is 0, or if its real or effective uid is the target's real or saved uid; otherwise `kill` fails with `EPERM`. A group kill signals the members it may, and fails with `EPERM` only when it may signal none.
+- **Visibility:** a process that isn't root sees only processes whose real or effective uid is its effective uid, in `/proc` and in `ps`, like Linux's `hidepid=2`; so does a client bound to a user.
+
+Programs ask the kernel for their ids:
+
+- **Emscripten:** `Module.sliccKernel.cred()` returns `{ ruid, euid, suid, rgid, egid, sgid, groups }`, and `Module.sliccKernel.setcred(change)` applies `change` (the same fields, each optional; `-1` keeps an id) and returns the new credentials, or a negative errno.
+- **WASI:** the import module `slicc` has `cred_get(out)`, which writes the six ids as `u32`s (`ruid`, `euid`, `suid`, `rgid`, `egid`, `sgid`); `cred_set(ruid, euid, suid, rgid, egid, sgid)`, where `-1` keeps an id; `groups_get(buf, cap, count_out)`, which writes the group list to `buf` and its length to `count_out` (with `cap` 0 only the length, and `EINVAL` when `cap` is too small); and `groups_set(buf, count)`. They return a preview1 errno; kernels without them answer `ENOSYS`.
+
 ### `/proc`
 
-Every process of the kernel has `/proc/<pid>/` with `cmdline`, `comm`, `stat`, `statm` and `status`, in the formats procps reads, and `/proc/self` is a link to the `/proc/<pid>` of the process that reads it, as on Linux (`readlink /proc/self` is its pid, the one it was exec'd under included). They come from the kernel's process table when they are opened, so a terminal sees the processes of every client; an exec'd program shows under the pid its parent knows. `/proc/uptime`, `/proc/loadavg`, `/proc/stat` and `/proc/meminfo` are there too, and `/proc/mounts`. A process with no parent in the kernel (one a page, a client or the Node entry started) has parent 1, as children of init do, in `getppid()`, `/proc/<pid>/stat` and `ps` alike, and so does a process whose parent has ended, waited for or not (`getppid()` asks the kernel each time; a shell's `$PPID` keeps the value it started with, as on Linux). Pids, parents, process groups, sessions, command lines, terminals, start and boot times are real, and so is each process's memory: the size of its wasm memory (`VSZ` and `RSS` alike, as wasm has no paging), which `/proc/meminfo` counts as used. CPU times, load and `MemTotal` (from `navigator.deviceMemory`, else 4 GiB) are placeholders. Only Emscripten processes see this `/proc`.
+Every process of the kernel has `/proc/<pid>/` with `cmdline`, `comm`, `stat`, `statm` and `status`, in the formats procps reads, and `/proc/self` is a link to the `/proc/<pid>` of the process that reads it, as on Linux (`readlink /proc/self` is its pid, the one it was exec'd under included). They come from the kernel's process table when they are opened, so a terminal sees the processes of every client; an exec'd program shows under the pid its parent knows. `/proc/uptime`, `/proc/loadavg`, `/proc/stat` and `/proc/meminfo` are there too, and `/proc/mounts`. A process with no parent in the kernel (one a page, a client or the Node entry started) has parent 1, as children of init do, in `getppid()`, `/proc/<pid>/stat` and `ps` alike, and so does a process whose parent has ended, waited for or not (`getppid()` asks the kernel each time; a shell's `$PPID` keeps the value it started with, as on Linux). Pids, parents, process groups, sessions, command lines, terminals, start and boot times are real, and so are the credentials in `status` (`Uid:`, `Gid:`, `Groups:`) and each process's memory: the size of its wasm memory (`VSZ` and `RSS` alike, as wasm has no paging), which `/proc/meminfo` counts as used. CPU times, load and `MemTotal` (from `navigator.deviceMemory`, else 4 GiB) are placeholders. A process that isn't root sees only its own user's processes (see [Users](#users)). Only Emscripten processes see this `/proc`.
 
-While OPFS has no `/etc/passwd`, `/etc/group` or `/etc/mtab`, reading them gets per-process ones: root is uid 0 and the realm user, uid 1000, is named after `USER`, or `web_user` (Emscripten's default) without one, so it matches `$USER`, with `HOME` as its home, so `id`, `whoami`, `ls -l` and `ps` show names. Nothing is written to OPFS, and a real file there wins.
+The kernel writes `/etc/passwd` and `/etc/group` when it starts (see [Users](#users)). While the root has none of them, or no `/etc/mtab`, reading them gets per-process ones: root is uid 0 and the realm user, uid 1000, is named after `USER`, or `web_user` (Emscripten's default) without one, so it matches `$USER`, with `HOME` as its home, so `id`, `whoami`, `ls -l` and `ps` show names. Nothing is written to OPFS, and a real file there wins.
 
 ### Metadata
 
@@ -476,11 +504,11 @@ The filesystem is our own rather than [ZenFS](https://github.com/zen-fs/core) (w
 
 The kernel is ported from SLICC's `packages/webapp/src/kernel/` with the browser-specific VFS replaced by an OPFS one:
 
-- `src/kernel/`: the kernel side, per process (`host.ts` starts the worker and answers its syscalls in `process.ts`) and shared tables (descriptors, pipes, children, jobs, signals, terminals and pseudo-terminals, `select`).
+- `src/kernel/`: the kernel side, per process (`host.ts` starts the worker and answers its syscalls in `process.ts`) and shared tables (descriptors, pipes, children, jobs, signals, terminals and pseudo-terminals, `select`), and process credentials (`cred.ts`).
 - `src/process/`: the runtime inside each process worker. It evaluates the Emscripten glue, mounts the live VFS, routes descriptors through the kernel and implements `fork` by copying the whole linear memory into a new worker (Asyncify). `fork` is the only call allowed to suspend through Asyncify: an `fsync` that Emscripten made asynchronous is answered synchronously by the file's own stream instead. `src/process/wasi/` runs WASI and WASIX programs.
 - `src/realm/`: the synchronous bridge (`SharedArrayBuffer` + `Atomics.wait`) and the live Emscripten filesystem on top of it.
 - `src/fs/`: the OPFS filesystem and the virtual command directories.
-- `src/launcher.ts`, `src/commands.ts`, `src/serve.ts`, `src/index.ts`: command resolution, the kernel worker protocol and the page API; `src/node.ts`, `src/node-process-worker.ts` and `src/node/` the headless Node entry. An embedder that uses `Launcher` directly, without `createKernel`, calls `await launcher.prepare()` first: it creates `/tmp` and `/home` and writes the CA certificate.
+- `src/launcher.ts`, `src/commands.ts`, `src/serve.ts`, `src/index.ts`, `src/users.ts`: command resolution, the kernel worker protocol, the page API and the user database; `src/node.ts`, `src/node-process-worker.ts` and `src/node/` the headless Node entry. An embedder that uses `Launcher` directly, without `createKernel`, calls `await launcher.prepare()` first: it creates `/tmp` and `/home` and writes the CA certificate.
 - `src/kernel/net/`: the proxy, HTTP/1.1, TLS termination and the local CA, and the bridge to the page's transport; `src/transport.ts` and `src/local-proxy-transport.ts` are the page side.
 - `src/cdp/`: the CDP facade on `127.0.0.1:9222`, its WebSocket framing, the registry of hosts and the `MessagePort` bridge to them.
 

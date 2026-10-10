@@ -1,4 +1,5 @@
 import type { ChildStdio, InheritedSlot } from '../kernel/children.ts';
+import type { Cred, CredChange } from '../kernel/cred.ts';
 import type { WasmSyscall } from '../kernel/process.ts';
 import type { ForkState, ForkStream } from '../kernel/protocol.ts';
 import type { SyncFsResult } from '../realm/sync-fs-wire.ts';
@@ -25,6 +26,10 @@ const WCONTINUED = 8;
 
 function status(r: SyncFsResult): number {
   return r.ok ? 0 : -wasiErrno(r.errno);
+}
+
+function credOf(r: SyncFsResult): Cred | number {
+  return r.ok ? ((r as { json?: unknown }).json as Cred) : -wasiErrno(r.errno);
 }
 
 function number(r: SyncFsResult): number {
@@ -55,6 +60,10 @@ export interface ProcessKernel {
 
   getpgid(pid: number): number;
   getsid(pid: number): number;
+
+  cred(): Cred | number;
+
+  setcred(change: CredChange): Cred | number;
 
   tcgetpgrp(fd: number): number;
 
@@ -356,6 +365,8 @@ export function createProcessKernel(deps: ProcessKernelDeps): ProcessKernel {
     setsid: () => number(call({ op: 'proc-setsid' }, 'setsid')),
     getpgid: (pid) => number(call({ op: 'proc-getpgid', pid }, 'getpgid')),
     getsid: (pid) => number(call({ op: 'proc-getsid', pid }, 'getsid')),
+    cred: () => credOf(call({ op: 'proc-cred' }, 'cred')),
+    setcred: (change) => credOf(call({ op: 'proc-setcred', change }, 'setcred')),
     tcgetpgrp(fd) {
       const kfd = Fs.getStream(fd)?.sliccKernelFd;
       if (kfd === undefined) return -wasiErrno('ENOTTY');

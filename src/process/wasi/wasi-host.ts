@@ -1,3 +1,4 @@
+import { type Cred, type CredChange, MAX_GROUPS } from '../../kernel/cred.ts';
 import type { DeviceMeta, KernelFdKind } from '../../kernel/fd-table.ts';
 import type { SyncFsBridgeStat, SyncFsPosixBridge } from '../../realm/sync-fs-wire.ts';
 import {
@@ -66,6 +67,7 @@ export interface WasiHostOptions {
 
 export type WasiFunction = (...args: never[]) => number | undefined;
 
+const IDS = ['ruid', 'euid', 'suid', 'rgid', 'egid', 'sgid'] as const;
 const NS_PER_MS = 1_000_000n;
 const AT_SYMLINK_NOFOLLOW = 1;
 const DEFAULT_UMASK = 0o022;
@@ -238,6 +240,35 @@ export class WasiHost {
         }),
       umount2: (tp: number, tl: number, flags: number) =>
         void this.o.kernel.call({ op: 'umount', target: path(tp, tl), flags }),
+      cred_get: (out: number) => {
+        const cred = this.o.kernel.call({ op: 'proc-cred' }) as Cred;
+        const view = mem.view();
+        view.getUint32(out + 20, true);
+        IDS.forEach((key, i) => void view.setUint32(out + i * 4, cred[key], true));
+      },
+      cred_set: (...ids: number[]) => {
+        const change: CredChange = {};
+        IDS.forEach((key, i) => {
+          if (ids[i] !== -1) change[key] = (ids[i] as number) >>> 0;
+        });
+        void this.o.kernel.call({ op: 'proc-setcred', change });
+      },
+      groups_get: (buf: number, cap: number, count: number) => {
+        const { groups } = this.o.kernel.call({ op: 'proc-cred' }) as Cred;
+        if (cap !== 0 && cap < groups.length) throw new WasiError('EINVAL');
+        const shown = cap === 0 ? [] : groups;
+        const view = mem.view();
+        view.getUint32(count, true);
+        if (shown.length > 0) view.getUint32(buf + (shown.length - 1) * 4, true);
+        shown.forEach((g, i) => void view.setUint32(buf + i * 4, g, true));
+        view.setUint32(count, groups.length, true);
+      },
+      groups_set: (buf: number, n: number) => {
+        if (n < 0 || n > MAX_GROUPS) throw new WasiError('EINVAL');
+        const view = mem.view();
+        const groups = Array.from({ length: n }, (_, i) => view.getUint32(buf + i * 4, true));
+        void this.o.kernel.call({ op: 'proc-setcred', change: { groups } });
+      },
       sigaction_set: (sig: number, disposition: number, flags: number) =>
         this.signals ? this.signals.disposition(sig, disposition, flags) : E.NOSYS,
     });

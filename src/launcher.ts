@@ -12,8 +12,6 @@ import {
   scanFilesystems,
 } from './commands.ts';
 
-export const PNPM_HOME = '/home/.local/share/pnpm';
-
 import { followLinks, withCommandDirs } from './fs/commands.ts';
 import { physicalPathAsync } from './fs/physical-path.ts';
 import type { KernelFs } from './fs/types.ts';
@@ -26,6 +24,7 @@ import {
   type ChildSpawner,
   SpawnError,
 } from './kernel/children.ts';
+import { type Cred, copyCred, maySee, maySignal, ROOT } from './kernel/cred.ts';
 import { bytesSource, deviceFile, FdTable, sinkFile } from './kernel/fd-table.ts';
 import { spawnWasmProcess, type WasmProcessHandle, type WasmWorkerLike } from './kernel/host.ts';
 import { LockTable } from './kernel/host-ops.ts';
@@ -52,6 +51,7 @@ import { DEFAULT_UMASK } from './kernel/process.ts';
 import type { ForkState, Program } from './kernel/protocol.ts';
 import { PtyTable } from './kernel/pty.ts';
 import { SettlingChildren } from './kernel/settling.ts';
+import { SIG } from './kernel/signals.ts';
 import { LoopbackNet } from './kernel/socket.ts';
 import { KernelTty } from './kernel/tty.ts';
 import { keepingOpen, VfsNodes } from './kernel/vfs-file.ts';
@@ -99,6 +99,7 @@ import {
   type ImportedMemory,
   importedMemory,
 } from './process/wasi/wasi-module.ts';
+import { type Account, credOf, SYSTEM_PNPM_HOME, UserDb, userEnv } from './users.ts';
 
 export interface LauncherOptions {
   unlinkOwner?: UnlinkOwner;
@@ -142,6 +143,7 @@ export interface RunOptions {
   onStarted?: (pid: number) => void;
   collect?: boolean;
   pgid?: number;
+  user?: string | number | Account;
 }
 
 export interface TerminalOptions {
@@ -149,6 +151,7 @@ export interface TerminalOptions {
   env?: Record<string, string>;
   cols?: number;
   rows?: number;
+  user?: string | number | Account;
   onData: (bytes: Uint8Array) => void;
 }
 
@@ -204,6 +207,7 @@ interface StartRequest {
   pgid?: number;
   ignored?: number;
   umask?: number;
+  cred: Cred;
   decided?: Promise<boolean>;
 }
 
@@ -325,6 +329,8 @@ export class Launcher {
   private readonly zombies = new Set<number>();
   private readonly orphans = new Set<number>();
   private readonly described = new Map<number, Pick<ProcessInfo, 'argv' | 'tty' | 'started'>>();
+  private readonly creds = new Map<number, () => Cred>();
+  readonly users: UserDb;
   private readonly jobs = new JobTable();
   private readonly locks = new LockTable();
   private readonly settling = new SettlingChildren((pid) => this.jobs.pgidOf(pid));
@@ -378,7 +384,7 @@ export class Launcher {
     this.hostfs = options;
     this.fstabRetries = options.fstabRetries ?? FSTAB_RETRIES;
     this.processMounts = options.processMounts ?? true;
-    this.pnpmHome = options.env?.PNPM_HOME ?? PNPM_HOME;
+    this.pnpmHome = options.env?.PNPM_HOME ?? SYSTEM_PNPM_HOME;
     this.modulesDir = options.modules ?? '/node_modules';
     this.cdp = new CdpHosts(options.cdp);
     const hostname = options.hostname ?? DEFAULT_HOSTNAME;
@@ -414,6 +420,7 @@ export class Launcher {
       }
     );
     this.fs = this.unlinked.wrap(keepingOpen(fs, this.nodes));
+    this.users = new UserDb(this.fs);
     void this.unlinked.sweep('/');
     this.watchers.watch([this.modulesDir, this.pnpmHome], { recursive: true }, () => {
       this.catalog = undefined;
@@ -639,6 +646,7 @@ export class Launcher {
       },
       ...(req.ignored ? { ignored: req.ignored } : {}),
       ...(req.umask !== undefined ? { umask: req.umask } : {}),
+      cred: req.cred,
       program: req.program,
       argv0: req.argv0,
       args: req.args,
@@ -650,9 +658,9 @@ export class Launcher {
       onError: req.report,
       spawner: this.spawner(pid, req.report),
       forker: this.forker(pid, req),
-      kill: (target, sig) => this.kill(target, sig),
+      kill: (target, sig) => this.kill(target, sig, this.credOf(pid), pid),
       writesBack: (target) => this.processes.get(target)?.writesBack() === true,
-      processes: () => ({ boot: this.boot, processes: this.list() }),
+      processes: () => ({ boot: this.boot, processes: this.list(this.credOf(pid)) }),
       openFiles: this.openFiles,
       nodes: this.nodes,
       held: this.held,
@@ -672,6 +680,8 @@ export class Launcher {
       ...this.shownIds(req),
     });
     this.processes.set(pid, handle);
+    const { cred } = req;
+    this.creds.set(pid, () => handle.cred?.() ?? copyCred(cred));
     if (req.ppid !== undefined) this.settling.started(pid, req.ppid);
     this.jobs.add(pid, req.ppid, (sig) => handle.signal(sig), terminal);
     if (req.exec && req.ppid !== undefined) this.jobs.exec(req.ppid, pid, true);
@@ -700,6 +710,7 @@ export class Launcher {
   private forget(pid: number): void {
     this.jobs.remove(pid);
     this.described.delete(pid);
+    this.creds.delete(pid);
   }
 
   private reaped(pid: number): void {
@@ -707,7 +718,7 @@ export class Launcher {
     else this.orphans.add(pid);
   }
 
-  list(): ProcessInfo[] {
+  list(viewer: Readonly<Cred> = ROOT): ProcessInfo[] {
     const members = new Map(this.jobs.list().map((member) => [member.pid, member]));
     const rootOf = (member: JobMember): JobMember => {
       let root = member;
@@ -725,6 +736,8 @@ export class Launcher {
     for (const member of members.values()) {
       const described = this.described.get(member.pid);
       if (member.execed || !described) continue;
+      const cred = this.credOf(member.pid);
+      if (!maySee(viewer, cred)) continue;
       const root = rootOf(member);
       listed.push({
         pid: root.pid,
@@ -737,6 +750,7 @@ export class Launcher {
         state: this.processes.has(member.pid) ? 'S' : 'Z',
         memory: this.processes.get(member.pid)?.memory() ?? 0,
         umask: this.umaskOf(member.pid),
+        cred,
         ...this.signalMasksOf(member.pid),
       });
     }
@@ -761,6 +775,7 @@ export class Launcher {
         ppid,
         ignored: this.ignoredBy(ppid),
         umask: this.umaskOf(ppid),
+        cred: this.credOf(ppid),
         ...exec,
       });
       deciding?.attach();
@@ -815,6 +830,7 @@ export class Launcher {
           fork: state,
           ignored: this.ignoredBy(ppid, true),
           umask: this.umaskOf(ppid),
+          cred: this.credOf(ppid),
         })
       );
   }
@@ -827,6 +843,20 @@ export class Launcher {
 
   private umaskOf(pid: number): number {
     return this.processes.get(pid)?.umask?.() ?? DEFAULT_UMASK;
+  }
+
+  private imageOf(pid: number): number {
+    const members = this.jobs.list();
+    let image = pid;
+    for (;;) {
+      const next = members.find((m) => m.execParent === image);
+      if (!next) return image;
+      image = next.pid;
+    }
+  }
+
+  credOf(pid: number): Cred {
+    return this.creds.get(pid)?.() ?? copyCred(ROOT);
   }
 
   private released(path: string): void {
@@ -845,10 +875,17 @@ export class Launcher {
     return this.processes.get(pid)?.ignoredSignals(fork) ?? 0;
   }
 
-  kill(pid: number, sig: number): boolean {
-    if (pid < 0) return this.jobs.killGroup(-pid, sig);
+  kill(pid: number, sig: number, sender?: Readonly<Cred>, from?: number): boolean {
+    const session = from === undefined ? undefined : this.jobs.sidOf(from);
+    const may = (target: number) =>
+      !sender ||
+      maySignal(sender, this.credOf(target)) ||
+      (sig === SIG.CONT && session !== undefined && this.jobs.sidOf(target) === session) ||
+      (from !== undefined && this.imageOf(from) === this.imageOf(target));
+    if (pid < 0) return this.jobs.killGroup(-pid, sig, (member) => may(this.imageOf(member)));
     const handle = this.processes.get(pid);
     if (!handle) return false;
+    if (!may(this.imageOf(pid))) throw fsError('EPERM', `pid ${pid}`);
     if (sig !== 0) handle.signal(sig);
     return true;
   }
@@ -1018,6 +1055,7 @@ export class Launcher {
 
   async prepare(): Promise<void> {
     for (const dir of SHARED_DIRS) await this.base.mkdir(dir, { recursive: true });
+    await this.users.ensure();
     await writeCaFile(this.base, this.ca).catch(() => undefined);
     this.fstab = this.mountFstab();
   }
@@ -1044,14 +1082,21 @@ export class Launcher {
     );
   }
 
-  private environment(cwd: string, extra: Record<string, string> | undefined) {
+  private environment(cwd: string, extra: Record<string, string> | undefined, account: Account) {
+    return { ...this.env, ...userEnv(account, this.pnpmHome), PWD: cwd, ...extra };
+  }
+
+  private async account(user: string | number | Account | undefined): Promise<Account> {
+    if (typeof user === 'object') return user;
+    const found = await this.users.lookup(user ?? 0);
+    if (!found) throw fsError('ENOENT', `no user ${String(user)}`);
+    return found;
+  }
+
+  private identity(account: Account): Pick<StartRequest, 'cred' | 'umask'> {
     return {
-      PATH: `/usr/bin:/bin:${this.pnpmHome}/bin`,
-      HOME: '/home',
-      PNPM_HOME: this.pnpmHome,
-      ...this.env,
-      PWD: cwd,
-      ...extra,
+      cred: credOf(account),
+      ...(account.umask !== undefined ? { umask: account.umask } : {}),
     };
   }
 
@@ -1066,6 +1111,7 @@ export class Launcher {
   }
 
   async openTerminal(argv: string[], options: TerminalOptions): Promise<TerminalSession> {
+    const account = await this.account(options.user);
     const { cwd, file, planned } = await this.starting(argv, options.cwd);
     if (!planned) throw new Error(`${file}: command not found`);
     let leader = 0;
@@ -1081,13 +1127,17 @@ export class Launcher {
     fds.installAt(0, stdio);
     fds.installAt(1, stdio.retain());
     fds.installAt(2, stdio.retain());
-    const env = this.environment(cwd, {
-      TERM: 'xterm-256color',
-      COLORTERM: 'truecolor',
-      ...options.env,
-    });
+    const env = this.environment(
+      cwd,
+      {
+        TERM: 'xterm-256color',
+        COLORTERM: 'truecolor',
+        ...options.env,
+      },
+      account
+    );
     const report = (message: string) => options.onData(encoder.encode(`${message}\r\n`));
-    const handle = await this.launch(planned, { env, cwd, fds, report });
+    const handle = await this.launch(planned, { env, cwd, fds, report, ...this.identity(account) });
     leader = handle.pid;
     void handle.exited.then(() => tty.hangup());
     return {
@@ -1104,8 +1154,9 @@ export class Launcher {
   }
 
   async run(argv: string[], options: RunOptions = {}): Promise<RunResult> {
+    const account = await this.account(options.user);
     const { cwd, file, planned } = await this.starting(argv, options.cwd);
-    const env = this.environment(cwd, options.env);
+    const env = this.environment(cwd, options.env, account);
     const out: Uint8Array[] = [];
     const err: Uint8Array[] = [];
     const keep = options.collect !== false;
@@ -1126,7 +1177,14 @@ export class Launcher {
     fds.installAt(1, sinkFile(stdout));
     fds.installAt(2, sinkFile(stderr));
     const group = options.pgid !== undefined ? { pgid: options.pgid } : {};
-    const handle = await this.launch(planned, { env, cwd, fds, report, ...group });
+    const handle = await this.launch(planned, {
+      env,
+      cwd,
+      fds,
+      report,
+      ...group,
+      ...this.identity(account),
+    });
     options.onStarted?.(handle.pid);
     const status = await handle.exited;
     return { status, stdout: concat(out), stderr: concat(err) };

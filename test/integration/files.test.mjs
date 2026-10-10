@@ -103,7 +103,7 @@ test('/tmp and /home are in OPFS, shared by every process', async (t) => {
 
   assert.deepEqual(
     await bash('echo shared > /tmp/note; cat /tmp/note; echo "$HOME"'),
-    ok('shared\n/home\n')
+    ok('shared\n/root\n')
   );
   assert.equal(await read('tmp/note'), 'shared\n');
 });

@@ -23,6 +23,7 @@ import {
   SAB_I_TIMERS,
 } from '../realm/sync-sab-wire.ts';
 import type { ChildForker, ChildSpawner } from './children.ts';
+import { type Cred, copyCred } from './cred.ts';
 import { type FdTable, kernelFdKind, type OpenFile } from './fd-table.ts';
 import type { LockTable } from './host-ops.ts';
 import type { JobTable } from './jobs.ts';
@@ -68,6 +69,7 @@ export interface SpawnWasmOptions {
   pid: number;
   ignored?: number;
   umask?: number;
+  cred?: Cred;
   identity?: () => Promise<{ pid: number; ppid: number }>;
   onSyscall?: (req: WasmSyscall) => void;
   program: Program;
@@ -118,6 +120,7 @@ export interface WasmProcessHandle {
   ignoredSignals(fork?: boolean): number;
   signalMasks?(): { ignored: number; caught: number };
   umask?(): number;
+  cred?(): Cred;
   writesBack(): boolean;
 }
 
@@ -275,10 +278,11 @@ function processInit(
   };
 }
 
-function inherited(opts: SpawnWasmOptions): { ignored?: number; umask?: number } {
+function inherited(opts: SpawnWasmOptions): { ignored?: number; umask?: number; cred?: Cred } {
   return {
     ...(opts.ignored ? { ignored: opts.ignored } : {}),
     ...(opts.umask !== undefined ? { umask: opts.umask } : {}),
+    ...(opts.cred ? { cred: opts.cred } : {}),
   };
 }
 
@@ -456,6 +460,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     ignoredSignals: (fork) => process.inheritable(fork),
     signalMasks: () => process.signalMasks(),
     umask: () => process.umask,
+    cred: () => copyCred(process.cred),
     writesBack: () => opts.program.abi === 'wasi' && !done,
   };
 }

@@ -52,6 +52,7 @@ export interface AttachOptions {
 
 export interface SpawnOptions {
   cwd?: string;
+  user?: string | number;
   env?: Record<string, string>;
   stdin?: string | Uint8Array;
   group?: 'new';
@@ -69,6 +70,7 @@ export interface SpawnedProcess {
 
 export interface ClientRunOptions {
   cwd?: string;
+  user?: string | number;
   env?: Record<string, string>;
   stdin?: string | Uint8Array;
   onStdout?: (text: string) => void;
@@ -84,6 +86,7 @@ export interface ClientRunResult {
 
 export interface ClientTerminalOptions {
   cwd?: string;
+  user?: string | number;
   env?: Record<string, string>;
   cols?: number;
   rows?: number;
@@ -340,6 +343,7 @@ async function spawnOn(
   const { onStdout, onStderr, stdin, group: _, ...rest } = opts;
   if (opts.pgid !== undefined)
     await since(channel, 3, 'spawn into a process group', async () => {});
+  if (opts.user !== undefined) await since(channel, 8, 'spawn as a user', async () => {});
   const started = Promise.withResolvers<number>();
   const options = { ...rest, ...(stdin !== undefined ? { stdin: bytesOf(stdin) } : {}) };
   const { done } = channel.request(
@@ -389,6 +393,7 @@ async function terminalOn(
   opts: ClientTerminalOptions
 ): Promise<ClientTerminal> {
   const { onData, ...options } = opts;
+  if (opts.user !== undefined) await since(channel, 8, 'a terminal as a user', async () => {});
   let listener = onData ?? null;
   const backlog: Uint8Array[] = [];
   const started = Promise.withResolvers<number>();

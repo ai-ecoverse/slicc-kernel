@@ -4,6 +4,7 @@ import { type LockManagerLike, locksOf } from './client/protocol.ts';
 import { type ServedClient, serveClient } from './client/serve-client.ts';
 import { META_DB, type MetaStore } from './fs/meta.ts';
 import { OpfsFs } from './fs/opfs.ts';
+import { fsError } from './fs/types.ts';
 import { dialSocket, serveSocket } from './kernel/dial.ts';
 import type { WasmWorkerLike } from './kernel/host.ts';
 import { CA_DB, caStore } from './kernel/net/network.ts';
@@ -23,6 +24,7 @@ import type { HostfsGrant, HostfsGrantHook } from './mount/hostfs.ts';
 import type { MediaStore } from './mount/media.ts';
 import type { MountSpec } from './mount/mount-fs.ts';
 import type { ProcessMountRequest } from './mount/syscall.ts';
+import type { AddUser, RemoveUser } from './users.ts';
 
 export interface KernelPort {
   postMessage(message: unknown, transfer?: Transferable[]): void;
@@ -71,7 +73,13 @@ export type TerminalRequest = { id: number; op: 'terminal'; terminal: number } &
 export interface ConnectRequest {
   id: number;
   op: 'connect';
+  user?: string | number;
 }
+
+export type UsersRequest =
+  | { id: number; op: 'users-add'; user: AddUser }
+  | { id: number; op: 'users-remove'; name: string; options?: RemoveUser }
+  | { id: number; op: 'users-list' };
 
 export interface RoutesRequest {
   id: number;
@@ -98,6 +106,7 @@ export type KernelRequest =
   | OpenTerminalRequest
   | TerminalRequest
   | ConnectRequest
+  | UsersRequest
   | MountRequest
   | DialRequest
   | RoutesRequest;
@@ -200,6 +209,26 @@ export interface GrantReply {
   error?: string;
 }
 
+const USERS_OPS: ReadonlySet<string> = new Set(['users-add', 'users-remove', 'users-list']);
+
+function isUsersRequest(req: KernelRequest): req is UsersRequest {
+  return USERS_OPS.has(req.op);
+}
+
+function failure(err: unknown): { error: string; code?: string } {
+  const code = (err as { code?: unknown } | null)?.code;
+  return {
+    error: err instanceof Error ? err.message : String(err),
+    ...(typeof code === 'string' ? { code } : {}),
+  };
+}
+
+function usersOp(l: Launcher, req: UsersRequest): Promise<unknown> {
+  if (req.op === 'users-add') return l.users.add(req.user);
+  if (req.op === 'users-remove') return l.users.remove(req.name, req.options);
+  return l.users.list();
+}
+
 export function serveKernel(port: KernelPort, deps: ServeDeps): void {
   let launcher: Promise<Launcher> | undefined;
   let remote: RemoteTransport | undefined;
@@ -223,13 +252,17 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
     return holding;
   }
 
-  async function connect(): Promise<MessagePort> {
-    await ready();
+  async function connect(user: string | number | undefined): Promise<MessagePort> {
+    const l = await ready();
+    if (user !== undefined && !(await l.users.lookup(user))) {
+      throw fsError('ENOENT', `no user ${String(user)}`);
+    }
     const { port1, port2 } = new MessageChannel();
     const held = locks ? await holdLock(locks) : undefined;
     const served = serveClient(port1, {
       launcher: ready,
       signal: signalNumber,
+      ...(user !== undefined ? { user } : {}),
       ...(locks ? { locks } : {}),
       ...(held ? { lock: held } : {}),
     });
@@ -304,7 +337,8 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
   async function handle(req: KernelRequest): Promise<unknown> {
     if (req.op === 'init') return init(req);
     if (req.op === 'open-terminal') return terminal(req);
-    if (req.op === 'connect') return connect();
+    if (req.op === 'connect') return connect(req.user);
+    if (isUsersRequest(req)) return usersOp(await ready(), req);
     if (req.op === 'routes') {
       (await ready()).setRoutes(req.routes);
       return true;
@@ -367,7 +401,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
     const req = event.data as KernelRequest;
     handle(req).then(
       (result) => reply(req.id, { result }, result instanceof MessagePort ? [result] : undefined),
-      (err) => reply(req.id, { error: err instanceof Error ? err.message : String(err) })
+      (err) => reply(req.id, failure(err))
     );
   });
 }

@@ -6,6 +6,7 @@ import type { RealmTransport } from '../kernel/net/transport.ts';
 import { SIG } from '../kernel/signals.ts';
 import type { Launcher, TerminalSession } from '../launcher.ts';
 import { serveTransport, type TransportServer } from '../transport.ts';
+import { type Account, credOf } from '../users.ts';
 import {
   type ClientHello,
   type ClientRequest,
@@ -25,6 +26,7 @@ export interface ClientHost {
   locks?: LockManagerLike;
   lock?: string;
   signal?: (name: string) => number;
+  user?: string | number;
 }
 
 export interface ServedClient {
@@ -126,6 +128,53 @@ function dialFor(
   return { result: port2, transfer: [port2] };
 }
 
+async function accountOf(l: Launcher, user: string | number): Promise<Account> {
+  const found = await l.users.lookup(user);
+  if (!found) throw fsError('ENOENT', `no user ${String(user)}`);
+  return found;
+}
+
+async function runAs(l: Launcher, self: Account, requested?: string | number): Promise<Account> {
+  if (requested === undefined) return self;
+  const target = await accountOf(l, requested);
+  if (self.uid !== 0 && target.uid !== self.uid) {
+    throw fsError('EPERM', `${self.name} may not run as ${target.name}`);
+  }
+  return target;
+}
+
+function processes(l: Launcher, self: Account): ProcessEntry[] {
+  const viewer = credOf(self);
+  return l.list(viewer).map(({ tid: _, cred = viewer, umask: _umask, ...entry }) => ({
+    ...entry,
+    uid: cred.euid,
+    gid: cred.egid,
+  }));
+}
+
+function killAs(
+  l: Launcher,
+  host: ClientHost,
+  self: Account,
+  req: Extract<ClientRequest, { op: 'kill' }>
+): Answer {
+  if (!l.kill(req.pid, signalOf(host)(req.signal), credOf(self))) {
+    throw fsError('ESRCH', `pid ${req.pid}`);
+  }
+  return { result: true };
+}
+
+function terminalAction(
+  terminals: Map<number, TerminalSession>,
+  req: Extract<ClientRequest, { op: 'terminal' }>,
+  host: ClientHost
+): Answer {
+  const session = terminals.get(req.terminal);
+  if (!session) throw new Error(`no terminal ${req.terminal}`);
+  act(session, req, signalOf(host));
+  return { result: true };
+}
+
 function killGroups(host: ClientHost, pgids: number[]): void {
   if (pgids.length === 0) return;
   void host.launcher().then((launcher) => {
@@ -187,6 +236,7 @@ function watchOp(
 
 export function serveClient(port: MessagePortLike, host: ClientHost): ServedClient {
   let state: 'new' | 'open' | 'closed' = 'new';
+  let self: Account | undefined;
   const terminals = new Map<number, TerminalSession>();
   const groups = new Set<number>();
   const sessions = new Set<number>();
@@ -224,6 +274,7 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
       return;
     }
     const launcher = await host.launcher();
+    if (host.scope !== 'transport') self = await accountOf(launcher, host.user ?? 0);
     const transport = host.transport?.() ?? launcher.transport;
     net = serveTransport({ postMessage: (m, t) => send(m, t) }, transport);
     state = 'open';
@@ -240,6 +291,7 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
   async function terminal(req: Extract<ClientRequest, { op: 'open-terminal' }>, l: Launcher) {
     const session = await l.openTerminal(req.argv, {
       ...req.options,
+      user: await runAs(l, self as Account, req.options.user),
       onData: (bytes) => reply(req.id, { fd: 1, bytes: bytes.slice() }),
     });
     if (state === 'closed') {
@@ -262,6 +314,7 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
     let leader: number | undefined;
     const result = await l.run(req.argv, {
       ...req.options,
+      user: await runAs(l, self as Account, req.options.user),
       collect: false,
       onStdout: out(1),
       onStderr: out(2),
@@ -288,19 +341,12 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
         return spawn(req, l);
       case 'open-terminal':
         return terminal(req, l);
-      case 'terminal': {
-        const session = terminals.get(req.terminal);
-        if (!session) throw new Error(`no terminal ${req.terminal}`);
-        act(session, req, signalOf(host));
-        return { result: true };
-      }
+      case 'terminal':
+        return terminalAction(terminals, req, host);
       case 'kill':
-        if (!l.kill(req.pid, signalOf(host)(req.signal))) throw fsError('ESRCH', `pid ${req.pid}`);
-        return { result: true };
+        return killAs(l, host, self as Account, req);
       case 'ps':
-        return {
-          result: l.list().map(({ tid: _, ...entry }): ProcessEntry => entry),
-        };
+        return { result: processes(l, self as Account) };
       case 'fs':
         if (!(FS_METHODS as readonly string[]).includes(req.method)) {
           throw new Error(`unknown file system call ${req.method}`);

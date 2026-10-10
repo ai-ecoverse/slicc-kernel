@@ -109,29 +109,33 @@ test('/proc lists every process of the kernel in the formats procps reads', asyn
   assert.deepEqual(page.errors, []);
 });
 
-test('id, whoami and ls -l name the user from a synthetic /etc/passwd', async (t) => {
+test('id and whoami name a user added to the real /etc/passwd', async (t) => {
   const { page, bash } = await booted(chrome, t);
-  const r = await bash('id; whoami; ls -ld /home | cut -d" " -f3,4; cat /etc/passwd | head -1', {
+  const cone = await page.evaluate(() => window.kernel.users.add({ name: 'cone' }));
+  assert.equal(cone.uid, 1000);
+  const r = await bash('id; whoami; head -1 /etc/passwd; tail -1 /etc/passwd', {
     cwd: '/home',
+    user: 'cone',
   });
   assert.equal(r.stderr, '');
   assert.match(
     r.stdout,
-    /^uid=1000\(([a-z_]+)\) gid=1000\(\1\) groups=1000\(\1\)\n\1\n\1 \1\nroot:x:0:0:root:\/root:\/bin\/sh\n$/
+    /^uid=1000\(cone\) gid=1000\(cone\) groups=1000\(cone\)(?:,100\(users\))?\ncone\nroot:x:0:0:root:\/root:\/bin\/bash\ncone:x:1000:1000:cone:\/home\/cone:\/bin\/bash\n$/
   );
-  assert.equal(await page.evaluate(() => window.opfs.exists('etc/passwd')), false);
+  assert.equal(await page.evaluate(() => window.opfs.exists('etc/passwd')), true);
   assert.deepEqual(page.errors, []);
 });
 
 test('a forked child keeps an inherited descriptor on /etc/passwd and /proc', async (t) => {
   const { page, bash } = await booted(chrome, t);
+  await page.evaluate(() => window.kernel.users.add({ name: 'cone' }));
   const r = await bash(
     'exec 3</etc/passwd 4</proc/loadavg; (head -1 <&3; cut -d" " -f1 <&4); echo "own $(whoami)"',
-    { cwd: '/home' }
+    { cwd: '/home', user: 'cone' }
   );
   assert.deepEqual(r, {
     status: 0,
-    stdout: 'root:x:0:0:root:/root:/bin/sh\n0.00\nown web_user\n',
+    stdout: 'root:x:0:0:root:/root:/bin/bash\n0.00\nown cone\n',
     stderr: '',
   });
   assert.deepEqual(page.errors, []);

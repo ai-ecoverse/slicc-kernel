@@ -3,8 +3,16 @@ import type { CdpHook } from './cdp/types.ts';
 import type { MessagePortLike } from './client/protocol.ts';
 import { type ServedClient, serveClient } from './client/serve-client.ts';
 import { OpfsFs } from './fs/opfs.ts';
+import { fsError } from './fs/types.ts';
 import { pidOwner } from './fs/unlinked.ts';
-import type { RunOptions, RunResult, Terminal, TerminalOptions } from './index.ts';
+import type {
+  ConnectOptions,
+  KernelUsers,
+  RunOptions,
+  RunResult,
+  Terminal,
+  TerminalOptions,
+} from './index.ts';
 import type { WasmWorkerLike } from './kernel/host.ts';
 import type { RouteTable } from './kernel/net/routes.ts';
 import type { NetworkUplink } from './kernel/net/uplink.ts';
@@ -35,6 +43,8 @@ export {
   type WatchChange,
 } from './client/attach.ts';
 export type {
+  ConnectOptions,
+  KernelUsers,
   NetworkUplink,
   ResolveAnswer,
   ResolveFamily,
@@ -71,7 +81,8 @@ export interface NodeKernel {
   openTerminal(argv: string[], options?: TerminalOptions): Promise<Terminal>;
   writeFile(path: string, data: string | Uint8Array): Promise<void>;
   readFile(path: string): Promise<Uint8Array>;
-  connect(): Promise<MessagePort>;
+  connect(options?: ConnectOptions): Promise<MessagePort>;
+  readonly users: KernelUsers;
   setRoutes(routes: RouteTable): Promise<void>;
   mount(spec: MountSpec): Promise<MountEntry>;
   umount(target: string): Promise<void>;
@@ -245,12 +256,21 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     umount: (target) => guard(async () => launcher.umount(target)),
     mounts: async () => launcher.mounts.list(),
     setRoutes: (routes) => guard(async () => launcher.setRoutes(routes)),
-    async connect() {
+    users: {
+      add: (user) => guard(() => launcher.users.add(user)),
+      remove: (name, options) => guard(() => launcher.users.remove(name, options)),
+      list: () => guard(() => launcher.users.list()),
+    },
+    async connect({ user } = {}) {
       if (terminated) throw new Error(TERMINATED);
+      if (user !== undefined && !(await launcher.users.lookup(user))) {
+        throw fsError('ENOENT', `no user ${String(user)}`);
+      }
       const { port1, port2 } = new MessageChannel();
       const served = serveClient(port1 as unknown as MessagePortLike, {
         launcher: async () => launcher,
         signal: signalNumber,
+        ...(user !== undefined ? { user } : {}),
       });
       clients.add(served);
       void served.closed.then(() => clients.delete(served));

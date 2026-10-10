@@ -86,6 +86,10 @@ export class JobTable {
     return this.members.get(pid)?.pgid;
   }
 
+  sidOf(pid: number): number | undefined {
+    return this.members.get(pid)?.sid;
+  }
+
   private member(pid: number): JobMember {
     const member = this.members.get(pid);
     if (!member) throw new KernelError('ESRCH');
@@ -167,8 +171,10 @@ export class JobTable {
     return true;
   }
 
-  killGroup(pgid: number, sig: number): boolean {
-    const targets = [...this.members.values()].filter((m) => m.pgid === pgid);
+  killGroup(pgid: number, sig: number, may: (pid: number) => boolean = () => true): boolean {
+    const group = [...this.members.values()].filter((m) => m.pgid === pgid);
+    const targets = group.filter((m) => may(m.pid));
+    if (targets.length === 0 && group.length > 0) throw new KernelError('EPERM');
     const pids = new Set(targets.map((m) => m.pid));
     if (sig !== 0) {
       for (const m of targets)
