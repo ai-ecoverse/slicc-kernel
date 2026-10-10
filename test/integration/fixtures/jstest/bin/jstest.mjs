@@ -469,6 +469,13 @@ async function synctrap(ctx) {
   ctx.sync.write(1, `caught ${caught} ${line}`);
 }
 
+async function syncexit(ctx) {
+  await ctx.signals.on('SIGINT', () => ctx.exit(42));
+  await ctx.write(1, 'ready\n');
+  ctx.sync.read(0);
+  return 0;
+}
+
 function syncerr(fn) {
   try {
     fn();
@@ -569,6 +576,7 @@ const modes = {
   synctrap,
   syncfiles,
   syncdev,
+  syncexit,
   globals,
   devices,
   full,

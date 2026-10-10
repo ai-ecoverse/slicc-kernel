@@ -79,15 +79,19 @@ export function laneOf(lane: JsLane | undefined): SyncCall {
 export class JsSyncKernel {
   private readonly lane: SyncCall;
   private readonly kernel: Pick<JsKernel, 'deliver'>;
+  private readonly unwind: () => void;
 
-  constructor(lane: SyncCall, kernel: Pick<JsKernel, 'deliver'>) {
+  constructor(lane: SyncCall, kernel: Pick<JsKernel, 'deliver'>, unwind: () => void = () => {}) {
     this.lane = lane;
     this.kernel = kernel;
+    this.unwind = unwind;
   }
 
   raw(req: SyncSabRequestBody): SyncFsResult {
+    this.unwind();
     const result = this.lane(req);
     this.kernel.deliver();
+    this.unwind();
     return result;
   }
 

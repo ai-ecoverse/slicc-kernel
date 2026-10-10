@@ -158,6 +158,12 @@ test('a JS program makes the same calls synchronously, and a caught signal resta
     ),
     ok('st=0\nready\ncaught 10 data\n')
   );
+  assert.deepEqual(
+    await bash(
+      'cd /home; sleep 3 2>/dev/null | jstest syncexit > e.out & until [ -n "$(cat /home/e.out 2>/dev/null)" ]; do sleep 0.05; done; kill -INT $!; sleep 1; kill -0 $! 2>/dev/null && echo alive; wait $!; echo "st=$?"'
+    ),
+    ok('st=42\n')
+  );
 });
 
 test('a file whose suffix a package maps (binfmt) runs with that command, unless #! says otherwise', async (t) => {

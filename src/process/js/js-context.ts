@@ -153,9 +153,14 @@ export function createContext(o: ContextOptions): CreatedContext {
     o.random ??
     ((bytes: Uint8Array) => void crypto.getRandomValues(bytes as Uint8Array<ArrayBuffer>));
   const resolve = (path: string) => resolvePath(o.cwd, path);
+  let exiting: number | undefined;
   const exit = (code = 0): never => {
+    exiting ??= code;
     o.exit(code);
     throw new JsExit(code);
+  };
+  const unwind = (): void => {
+    if (exiting !== undefined) throw new JsExit(exiting);
   };
 
   const info = async (fd: number): Promise<FdInfo> => {
@@ -236,7 +241,7 @@ export function createContext(o: ContextOptions): CreatedContext {
   };
 
   const fs = pathOps(kernel, resolve, statOf, open);
-  const sync = syncOps(new JsSyncKernel(o.lane ?? laneOf(undefined), kernel), {
+  const sync = syncOps(new JsSyncKernel(o.lane ?? laneOf(undefined), kernel, unwind), {
     pid: o.pid,
     resolve,
     random,
