@@ -17,6 +17,7 @@ export interface FdInfo {
   tty?: boolean;
   kind?: KernelFdKind;
   meta?: DeviceMeta | { dir: string };
+  terminal?: string;
 }
 
 export const CHUNK = 64 * 1024;

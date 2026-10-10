@@ -112,9 +112,13 @@ export class KernelTty {
     return { ...this.termios, c_cc: [...this.termios.c_cc] };
   }
 
-  tcsets(termios: Termios): void {
+  tcsets(termios: Termios, flush = false): void {
     const wasCanonical = this.canonical;
     this.termios = { ...termios, c_cc: [...termios.c_cc] };
+    if (flush) {
+      this.line = [];
+      this.readable = [];
+    }
 
     if (wasCanonical && !this.canonical && this.line.length > 0) {
       this.readable.push(Uint8Array.from(this.line));
