@@ -114,6 +114,7 @@ function kernelFiletype(kind: string): { filetype: number; seeks: boolean } {
     case 'device':
       return { filetype: FILETYPE.CHARACTER_DEVICE, seeks: true };
     case 'socket':
+    case 'stream':
       return { filetype: FILETYPE.SOCKET_STREAM, seeks: false };
     case 'file':
       return { filetype: FILETYPE.REGULAR_FILE, seeks: true };
