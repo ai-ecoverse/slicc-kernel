@@ -37,6 +37,8 @@ interface DevDirFs extends TtyNodeFs {
   lookupNode?: (parent: object, name: string) => object;
   readdir?: (path: string) => string[];
   getPath?: (node: object) => string;
+  lookupPath?: (path: string, opts: { follow: boolean }) => { path: string };
+  cwd?: () => string;
 }
 
 const TTY_NAME = /^tty\d+$/;
@@ -419,7 +421,8 @@ export class KernelStreams {
     this.useTerminalNodes();
     const open = this.Fs.open.bind(this.Fs);
     this.Fs.open = (path, flags, mode) => {
-      if (typeof path === 'string' && TTY_PATH.test(path) && !this.terminalExists(path)) {
+      const device = typeof path === 'string' ? this.devicePath(path) : undefined;
+      if (device !== undefined && TTY_PATH.test(device) && !this.terminalExists(device)) {
         throw new this.Fs.ErrnoError(wasiErrno('ENOENT'));
       }
       const pty = this.openPty(open, path, flags, mode);
@@ -510,6 +513,20 @@ export class KernelStreams {
         ? this.sys.openPty !== undefined
         : (this.sys.ptyNumbers?.().includes(Number(n)) ?? false);
     if (!exists) throw new this.Fs.ErrnoError(wasiErrno('ENOENT'));
+  }
+
+  private devicePath(path: string): string | undefined {
+    const name = path.slice(path.lastIndexOf('/') + 1);
+    if (!TTY_NAME.test(name)) return undefined;
+    const { lookupPath, cwd } = this.Fs as unknown as DevDirFs;
+    const absolute = path.startsWith('/') ? path : `${cwd?.call(this.Fs) ?? '/'}/${path}`;
+    const dir = absolute.slice(0, absolute.lastIndexOf('/')) || '/';
+    try {
+      const real = lookupPath?.call(this.Fs, dir, { follow: true }).path ?? dir;
+      return `${real === '/' ? '' : real}/${name}`;
+    } catch {
+      return absolute;
+    }
   }
 
   private terminalExists(path: string): boolean {
