@@ -45,7 +45,6 @@ export interface WasiHostOptions {
 
   ppid?: number;
   parent?: () => number;
-  umask?: number | undefined;
   kernel: WasiKernel;
 
   fs: SyncFsPosixBridge & { invalidate?(): void };
@@ -163,10 +162,8 @@ export class WasiHost {
     return this.fds.cwd() ?? this.startCwd;
   }
 
-  private umask: number | undefined;
-
   private created(path: string, mode: number): void {
-    const umask = this.umask ?? this.o.umask ?? DEFAULT_UMASK;
+    const umask = this.o.kernel.call({ op: 'proc-umask' }) as number;
     if (umask !== DEFAULT_UMASK) this.o.fs.chmod(path, mode & ~umask);
   }
 
@@ -177,7 +174,10 @@ export class WasiHost {
       const e = fds.get(fd);
       if (e.type === 'dir') return e.path;
       if (e.type === 'file') return e.file.path;
-      throw new WasiError('EBADF');
+      const path =
+        e.type === 'kernel' && fds.kind(fd, e) === 'file' ? this.kernelStat(fd).path : undefined;
+      if (path === undefined) throw new WasiError('EBADF');
+      return path;
     };
     const target = (path: string, flags: number): string => {
       if (flags & AT_SYMLINK_NOFOLLOW && this.o.fs.lstat(path).isSymbolicLink) {
@@ -192,7 +192,6 @@ export class WasiHost {
         void this.o.fs.chmod(target(at(dirfd, p, l), flags), mode & 0o7777),
       umask: (mask: number, out: number) => {
         const old = this.o.kernel.call({ op: 'proc-umask', mask }) as number;
-        this.umask = mask & 0o777;
         mem.view().setUint32(out, old, true);
       },
       fd_mode: (fd: number, out: number) =>
