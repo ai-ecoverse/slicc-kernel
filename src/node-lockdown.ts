@@ -22,9 +22,12 @@ export const NODE_SLOTS: readonly string[] = [
 
 export function zeroedBuffers(buffer: typeof Buffer): void {
   const alloc = buffer.alloc.bind(buffer);
-  buffer.allocUnsafe = (size: number) => alloc(size);
-  buffer.allocUnsafeSlow = (size: number) => alloc(size);
-  buffer.poolSize = 0;
+  const fixed = (value: unknown) => ({ value, writable: false, configurable: false });
+  Object.defineProperties(buffer, {
+    allocUnsafe: fixed((size: number) => alloc(size)),
+    allocUnsafeSlow: fixed((size: number) => alloc(size)),
+    poolSize: fixed(0),
+  });
 }
 
 function refused(specifier: string): Error {
