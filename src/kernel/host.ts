@@ -39,6 +39,7 @@ import {
 import {
   type ForkState,
   type InheritedFd,
+  type JsLane,
   type ProcessInitMsg,
   type Program,
   WASM_MAX_THREADS,
@@ -199,10 +200,53 @@ class Dying {
   }
 }
 
+function notifiers(header: Int32Array): { onPending(sig: number): void; onAsync(): void } {
+  return {
+    onPending(sig) {
+      Atomics.or(header, SAB_I_SIGNALS, sigbit(sig));
+      Atomics.notify(header, SAB_I_SIGNALS);
+    },
+    onAsync() {
+      Atomics.add(header, SAB_I_ASYNC, 1);
+      Atomics.notify(header, SAB_I_ASYNC);
+    },
+  };
+}
+
+function publishStops(process: WasmProcess, header: Int32Array): void {
+  process.onState((state) => {
+    Atomics.store(header, SAB_I_STOP, state === 'stopped' ? 1 : 0);
+    Atomics.notify(header, SAB_I_STOP);
+  });
+}
+
+function transferOf(opts: SpawnWasmOptions, lane: JsLane | undefined): Transferable[] {
+  const transfer: Transferable[] = opts.fork ? [opts.fork.memory.buffer as ArrayBuffer] : [];
+  return lane ? [...transfer, lane.port] : transfer;
+}
+
+function openLane(
+  token: string,
+  dispatch: (req: SyncSabDispatchRequest) => Promise<SyncFsResult>
+): { lane: JsLane; dispose(): void } {
+  const sab = new SharedArrayBuffer(SAB_HEADER_BYTES + SAB_DEFAULT_WINDOW_BYTES);
+  const { port1, port2 } = new MessageChannel();
+  const responder = attachSyncSabResponder(port1, sab, token, { dispatch });
+  port1.start();
+  return {
+    lane: { sab, port: port2 },
+    dispose() {
+      responder.dispose();
+      port1.close();
+    },
+  };
+}
+
 function processInit(
   opts: SpawnWasmOptions,
   sab: SharedArrayBuffer,
-  umask: number
+  umask: number,
+  lane: JsLane | undefined
 ): ProcessInitMsg {
   const base = {
     type: WASM_PROCESS_INIT,
@@ -216,7 +260,12 @@ function processInit(
     ...(opts.ppid !== undefined ? { ppid: opts.ppid } : {}),
   } as const;
   if (opts.program.abi === 'js') {
-    return { ...base, program: opts.program, fds: inheritedFds(opts.fds) };
+    return {
+      ...base,
+      program: opts.program,
+      fds: inheritedFds(opts.fds),
+      lane,
+    };
   }
   return {
     ...base,
@@ -272,14 +321,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     locks: opts.locks,
     onReap: opts.onReap,
     resolver: opts.resolver,
-    onPending: (sig) => {
-      Atomics.or(header, SAB_I_SIGNALS, sigbit(sig));
-      Atomics.notify(header, SAB_I_SIGNALS);
-    },
-    onAsync: () => {
-      Atomics.add(header, SAB_I_ASYNC, 1);
-      Atomics.notify(header, SAB_I_ASYNC);
-    },
+    ...notifiers(header),
     onTimer: (which) => void Atomics.or(header, SAB_I_TIMERS, 1 << which),
     hasPending: () =>
       Atomics.load(header, SAB_I_SIGNALS) !== 0 || Atomics.load(header, SAB_I_TIMERS) !== 0,
@@ -288,10 +330,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
       ? { pendingBits: () => Atomics.load(header, SAB_I_SIGNALS) }
       : {}),
   });
-  process.onState((state) => {
-    Atomics.store(header, SAB_I_STOP, state === 'stopped' ? 1 : 0);
-    Atomics.notify(header, SAB_I_STOP);
-  });
+  publishStops(process, header);
   const holds = new HeldPaths();
   opts.held?.add(holds);
   const token = holdingToken(opts, holds);
@@ -301,6 +340,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
   const dispatch = (req: SyncSabDispatchRequest): Promise<SyncFsResult> =>
     dying.serving(() => (isWasmSyscall(req) ? process.syscall(req) : dispatchSyncFs(req)));
   const responder = attachSyncSabResponder(worker, sab, token, { dispatch });
+  const lane = opts.program.abi === 'js' ? openLane(token, dispatch) : undefined;
 
   const { promise: exited, resolve: settle } = Promise.withResolvers<number>();
   let done = false;
@@ -315,6 +355,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     worker.removeEventListener('error', onError);
     for (const tid of [...threads.keys()]) endThread(tid);
     responder.dispose();
+    lane?.dispose();
     revokeSyncFsToken(token);
     opts.held?.delete(holds);
     worker.terminate();
@@ -388,8 +429,10 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     tw.postMessage(tinit);
   };
 
-  const init = processInit(opts, sab, process.umask);
-  worker.postMessage(init, opts.fork ? [opts.fork.memory.buffer as ArrayBuffer] : []);
+  worker.postMessage(
+    processInit(opts, sab, process.umask, lane?.lane),
+    transferOf(opts, lane?.lane)
+  );
 
   const signal = (sig: number): void => {
     if (process.signal(sig) !== 'terminate') return;
