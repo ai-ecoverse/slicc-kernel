@@ -161,6 +161,7 @@ export function createContext(o: ContextOptions): CreatedContext {
   };
   const unwind = (): void => {
     if (exiting !== undefined) throw new JsExit(exiting);
+    if (kernel.faulted) throw new JsExit(1);
   };
 
   const info = async (fd: number): Promise<FdInfo> => {
