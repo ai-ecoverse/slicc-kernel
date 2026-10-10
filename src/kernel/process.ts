@@ -739,8 +739,9 @@ export class WasmProcess {
   private async vfsSyscall(req: VfsSyscall): Promise<SyncFsResult> {
     if ('path' in req || 'from' in req) {
       const nodes = this.nodes;
-      if (req.op === 'fd-path-flush') await nodes.flush(await nodes.targetKey(req.path));
-      else if (req.op === 'fd-path-unlinking')
+      if (req.op === 'fd-path-flush') {
+        await nodes.flush(await nodes.targetKey(req.path).catch(() => req.path));
+      } else if (req.op === 'fd-path-unlinking')
         await nodes.unlinking(await nodes.entryKey(req.path));
       else if (req.op === 'fd-path-unlinked') nodes.unlinked(await nodes.entryKey(req.path));
       else if (req.op === 'fd-path-renamed') {

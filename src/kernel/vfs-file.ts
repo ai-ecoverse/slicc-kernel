@@ -315,19 +315,21 @@ export class VfsNodes {
 
   async entryKey(path: string): Promise<string> {
     const parent = parentOf(path);
-    const dir = await this.real(parent, true, () => realDir(this.fs, parent)).catch(() => parent);
+    const dir = await this.real(parent, true, () => realDir(this.fs, parent));
     return joinName(dir, path.slice(path.lastIndexOf('/') + 1));
   }
 
-  async targetKey(path: string): Promise<string> {
-    return this.real(path, true, () => realTarget(this.fs, path)).catch(() => path);
+  targetKey(path: string): Promise<string> {
+    return this.real(path, true, () => realTarget(this.fs, path));
   }
 
   private async real(path: string, follow: boolean, walk: () => Promise<string>): Promise<string> {
     if (this.fs.realpath) {
       try {
         return await this.fs.realpath(path, follow);
-      } catch {}
+      } catch (err) {
+        if (errCode(err) === 'ELOOP') throw err;
+      }
     }
     return walk();
   }
@@ -451,16 +453,21 @@ async function realDir(fs: VfsFileFs, dir: string): Promise<string> {
       continue;
     }
     const next = at === '/' ? `/${part}` : `${at}/${part}`;
-    const link = hops < MAX_LINKS ? await linkOf(fs, next) : undefined;
+    const link = await linkOf(fs, next);
     if (link === undefined) {
       at = next;
       continue;
     }
+    if (hops >= MAX_LINKS) throw fsError('ELOOP', dir);
     hops++;
     queue.unshift(...link.split('/').filter(Boolean));
     if (link.startsWith('/')) at = '/';
   }
   return at;
+}
+
+function errCode(err: unknown): unknown {
+  return (err as { code?: unknown } | null)?.code;
 }
 
 function joinName(dir: string, name: string): string {
@@ -470,9 +477,10 @@ function joinName(dir: string, name: string): string {
 async function realTarget(fs: VfsFileFs, path: string): Promise<string> {
   let dir = await realDir(fs, parentOf(path));
   let name = path.slice(path.lastIndexOf('/') + 1);
-  for (let hops = 0; hops < MAX_LINKS; hops++) {
+  for (let hops = 0; ; hops++) {
     const link = await linkOf(fs, joinName(dir, name));
     if (link === undefined) break;
+    if (hops >= MAX_LINKS) throw fsError('ELOOP', path);
     const target = link.startsWith('/') ? link : joinName(dir, link);
     dir = await realDir(fs, parentOf(target));
     name = target.slice(target.lastIndexOf('/') + 1);
@@ -481,7 +489,7 @@ async function realTarget(fs: VfsFileFs, path: string): Promise<string> {
 }
 
 async function targetDir(fs: VfsFileFs, path: string): Promise<string> {
-  return parentOf(await realTarget(fs, path));
+  return parentOf(await realTarget(fs, path).catch(() => path));
 }
 
 export async function refuseReadonly(
