@@ -114,6 +114,7 @@ export function tmpfs(): FilesystemHandlers {
       const { dir, name } = parent(path);
       if (dir.children.has(name)) throw fsError('EEXIST', path);
       dir.children.set(name, make('directory', 0o40755));
+      dir.mtime = Date.now();
     },
     async rmdir(path) {
       const { dir, name } = parent(path);
@@ -122,6 +123,7 @@ export function tmpfs(): FilesystemHandlers {
       if (node.kind !== 'directory') throw fsError('ENOTDIR', path);
       if (node.children.size > 0) throw fsError('ENOTEMPTY', path);
       dir.children.delete(name);
+      dir.mtime = Date.now();
     },
     async unlink(path) {
       const { dir, name } = parent(path);
@@ -129,6 +131,7 @@ export function tmpfs(): FilesystemHandlers {
       if (!node) throw fsError('ENOENT', path);
       if (node.kind === 'directory') throw fsError('EISDIR', path);
       dir.children.delete(name);
+      dir.mtime = Date.now();
     },
     async rename(from, to) {
       const a = `/${parts(from).join('/')}`;
@@ -148,6 +151,8 @@ export function tmpfs(): FilesystemHandlers {
       }
       source.dir.children.delete(source.name);
       target.dir.children.set(target.name, node);
+      source.dir.mtime = Date.now();
+      target.dir.mtime = source.dir.mtime;
     },
     async symlink(target, path) {
       const { dir, name } = parent(path);
@@ -155,6 +160,7 @@ export function tmpfs(): FilesystemHandlers {
       const node = make('symlink', 0o120777);
       node.target = target;
       dir.children.set(name, node);
+      dir.mtime = Date.now();
     },
     async readlink(path) {
       const node = find(path);

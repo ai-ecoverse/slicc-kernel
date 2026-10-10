@@ -448,7 +448,7 @@ While OPFS has no `/etc/passwd`, `/etc/group` or `/etc/mtab`, reading them gets 
 OPFS stores names, bytes, sizes and modification times, nothing else. Everything POSIX needs on top of that lives in an IndexedDB sidecar, so it survives reloads and new kernels:
 
 - mode bits (`chmod`);
-- access and change times, and a modification time set explicitly with `utime` (it holds until the file is written again);
+- access and change times, and a modification time set explicitly with `utime` (it holds until the file is written again); a directory's times move whenever an entry is created, removed or renamed in it, as POSIX asks;
 - inode numbers that stay stable across renames;
 - symbolic links (`symlink`, `readlink`, `lstat`, and following them in paths), which exist only in the sidecar, with their own times: `touch -h`, `lutimes` and `utimensat` with `AT_SYMLINK_NOFOLLOW` set the link's, never the target's. A link's own mode can't be changed, as on Linux: `chmod -h`, `lchmod` and `fchmodat` with `AT_SYMLINK_NOFOLLOW` fail with `EOPNOTSUPP` (which `chmod -h` and `tar` ignore for links) and never follow it, and `open` with `O_PATH | O_NOFOLLOW` gives a descriptor for the link itself.
 
