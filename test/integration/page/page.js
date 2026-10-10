@@ -80,7 +80,7 @@ async function tracked(what, work) {
 
 window.inFlight = () => [...inFlight].map((e) => ({ ...e, ms: Date.now() - e.since }));
 
-const STALL = 30000;
+const STALL = 12000;
 
 function fetchOnce(url) {
   return tracked(`fetch ${url}`, async (entry) => {
@@ -116,7 +116,7 @@ function fetchOnce(url) {
       const reason = controller.signal.reason ?? err;
       throw Object.assign(
         new Error(`fetching ${url}: ${reason}, after ${entry.bytes} bytes in ${ms} ms`),
-        { stalled: reason?.stalled === true, bytes: entry.bytes }
+        { stalled: reason?.stalled === true, bytes: entry.bytes, ms }
       );
     } finally {
       clearInterval(watch);
@@ -133,8 +133,13 @@ async function fetchBytes(url) {
     return await fetchOnce(url);
   } catch (err) {
     if (!err.stalled) throw err;
-    stalls.push(`chrome stalled on ${url} after ${err.bytes} bytes; re-fetched`);
-    return fetchOnce(url);
+    const again = Date.now();
+    const bytes = await fetchOnce(url);
+    stalls.push(
+      `chrome stalled on ${url} after ${err.bytes} bytes (no data for ${STALL / 1000} s, ` +
+        `${(err.ms / 1000).toFixed(1)} s in); re-fetched in ${((Date.now() - again) / 1000).toFixed(1)} s`
+    );
+    return bytes;
   }
 }
 
