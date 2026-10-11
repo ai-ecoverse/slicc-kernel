@@ -303,7 +303,7 @@ async function instantiate(
             thread
           ),
           (req) => host.o.kernel.call(req),
-          threads?.ids
+          threads
         )
       : undefined;
   if (sync) {
@@ -412,20 +412,26 @@ export class LinkSync {
   readonly linker: WasixLinker;
   private readonly call: (req: WasmSyscall) => unknown;
   private readonly ids: Int32Array | undefined;
+  private readonly owner: number;
   constructor(
     linker: WasixLinker,
     call: (req: WasmSyscall) => unknown,
-    ids: Int32Array | undefined
+    threads: Pick<WasiThreads, 'ids' | 'tid'> | undefined
   ) {
     this.linker = linker;
     this.call = call;
-    this.ids = ids;
+    this.ids = threads?.ids;
+    this.owner = threads?.tid ?? 0;
     linker.publisher = (record) => this.publish(record);
     linker.indices = {
       reserve: (floor, size) => this.call({ op: 'dl-reserve', floor, size }) as number,
       load: (floor, size) =>
         this.call({ op: 'dl-load-reserve', floor, size }) as { base: number; handle: number },
-      sync: () => this.catchUp(),
+      lock: () => {
+        this.call({ op: 'dl-lock', owner: this.owner });
+        this.catchUp();
+      },
+      unlock: () => this.call({ op: 'dl-unlock', owner: this.owner }),
       allocate: (floor) => {
         const index = this.call({ op: 'dl-closure', floor }) as number;
         this.catchUp();
@@ -448,7 +454,8 @@ export class LinkSync {
 
     for (const r of since.slice(0, -1)) this.linker.replay(r);
     this.count += since.length;
-    if (this.ids) this.gen = Atomics.add(this.ids, DL_GEN, 1) + 1;
+    this.bump();
+    this.catchUp();
   }
 
   catchUp(): void {

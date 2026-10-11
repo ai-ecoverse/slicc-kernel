@@ -439,6 +439,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
   const endThread = (tid: number): void => {
     const end = threads.get(tid);
     threads.delete(tid);
+    process.threadEnded(tid);
     end?.();
   };
   const spawnThread = (thread: WasmThread): void => {

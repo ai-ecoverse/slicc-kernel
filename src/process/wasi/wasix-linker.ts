@@ -79,7 +79,8 @@ export class WasixLinker {
     | {
         reserve(floor: number, size: number): number;
         load(floor: number, size: number): { base: number; handle: number };
-        sync?(): void;
+        lock(): void;
+        unlock(): void;
         allocate(floor: number): number;
         free(index: number): void;
       }
@@ -184,7 +185,12 @@ export class WasixLinker {
   open(name: string, cwd: string, ldPath: readonly string[]): number {
     const path = this.locate(name, cwd, ldPath);
     if (this.isMain(path)) return 0;
-    return this.load(path, cwd, ldPath).handle;
+    this.indices?.lock();
+    try {
+      return this.load(path, cwd, ldPath).handle;
+    } finally {
+      this.indices?.unlock();
+    }
   }
 
   symbol(handle: number, name: string): number {
@@ -334,9 +340,6 @@ export class WasixLinker {
     );
     const memoryBase = this.allocate(info.memorySize, 2 ** info.memoryAlign);
     const { base: tableBase, handle } = this.reserveLoad(info.tableSize);
-    this.indices?.sync?.();
-    const earlier = this.byPath.get(path);
-    if (earlier && earlier.handle < handle) return earlier;
     const record: LinkRecord = {
       kind: 'load',
       handle,
@@ -348,7 +351,7 @@ export class WasixLinker {
     const linked = this.instantiate(path, module, record, true);
     linked.needed.push(...needed);
     this.publisher?.(record);
-    return this.byPath.get(path) ?? linked;
+    return linked;
   }
 
   private instantiate(
