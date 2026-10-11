@@ -436,15 +436,53 @@ export interface HostfsTiming {
   backoffMs?: [number, number];
   connectMs?: number;
   requestMs?: number;
+  callMs?: number;
+  beatMs?: number;
+  deadMs?: number;
 }
 
 export const PORT_REQUEST_MS = 60_000;
+export const HOSTFS_CALL_MS = 20_000;
+export const PORT_BEAT_MS = 1000;
+export const PORT_DEAD_MS = 4000;
+
+export interface PortLiveness {
+  requestMs?: number;
+  beatMs?: number;
+  deadMs?: number;
+}
+
+export function bounded(handlers: MediumHandlers, ms: number): MediumHandlers {
+  const out: Record<string, unknown> = {};
+  for (const [name, fn] of Object.entries(handlers)) {
+    out[name] = (...args: unknown[]) =>
+      new Promise((resolve, reject) => {
+        const timer = setTimeout(
+          () =>
+            reject(fsError('ENOTCONN', `the host folder did not answer ${name} within ${ms} ms`)),
+          ms
+        );
+        (fn as (...a: unknown[]) => Promise<unknown>)(...args).then(
+          (value) => {
+            clearTimeout(timer);
+            resolve(value);
+          },
+          (err) => {
+            clearTimeout(timer);
+            reject(err);
+          }
+        );
+      });
+  }
+  return out as unknown as MediumHandlers;
+}
 const PORT_MS_PER_MIB = 1000;
 
 let nextPortToken = 0;
 
 type PortReply = {
   id: number;
+  pong?: boolean;
   result?: unknown;
   bytes?: Uint8Array;
   event?: HostfsEvent;
@@ -461,14 +499,24 @@ export class PortTransport implements HostfsTransport {
   private readonly waiting = new Map<number, (reply: PortReply) => void>();
   private next = 0;
   private dead: string | undefined;
+  private readonly beatMs: number;
+  private readonly deadMs: number;
+  private beat: ReturnType<typeof setInterval> | undefined;
+  private answers = false;
+  private pinged: number | undefined;
 
-  constructor(grant: HostfsPortGrant, requestMs = PORT_REQUEST_MS) {
+  constructor(grant: HostfsPortGrant, liveness: PortLiveness = {}) {
     this.port = grant.port;
-    this.requestMs = requestMs;
+    this.requestMs = liveness.requestMs ?? PORT_REQUEST_MS;
+    this.beatMs = liveness.beatMs ?? PORT_BEAT_MS;
+    this.deadMs = liveness.deadMs ?? PORT_DEAD_MS;
     this.capabilities = grant.capabilities ?? {};
     this.token = grant.token ?? `port-${++nextPortToken}`;
     this.port.addEventListener('message', (event: MessageEvent<PortReply>) => {
-      this.waiting.get(event.data?.id)?.(event.data);
+      if (event.data?.pong) {
+        this.answers = true;
+        this.pinged = undefined;
+      } else this.waiting.get(event.data?.id)?.(event.data);
     });
     this.port.addEventListener('close', () => this.fail("the folder's port closed"));
     this.port.start();
@@ -482,8 +530,35 @@ export class PortTransport implements HostfsTransport {
     return this.dead !== undefined;
   }
 
+  private ping(): void {
+    if (this.pinged !== undefined) return;
+    this.pinged = Date.now();
+    try {
+      this.port.postMessage({ id: 0, op: 'ping' });
+    } catch {}
+  }
+
+  private watchBeat(): void {
+    if (this.beat || this.dead) return;
+    this.ping();
+    this.beat = setInterval(() => {
+      if (this.waiting.size === 0) {
+        clearInterval(this.beat);
+        this.beat = undefined;
+        return;
+      }
+      if (this.answers && this.pinged !== undefined && Date.now() - this.pinged > this.deadMs) {
+        this.fail("the folder's port stopped answering");
+        return;
+      }
+      this.ping();
+    }, this.beatMs);
+  }
+
   fail(why: string): void {
     if (this.dead === undefined) this.port.close();
+    clearInterval(this.beat);
+    this.beat = undefined;
     this.dead ??= why;
     for (const settle of [...this.waiting.values()])
       settle({ id: 0, error: { code: 'ENOTCONN', message: why } });
@@ -505,6 +580,7 @@ export class PortTransport implements HostfsTransport {
         },
         this.requestMs + Math.ceil(bytes / 1_048_576) * PORT_MS_PER_MIB
       );
+      this.watchBeat();
       this.waiting.set(id, (reply) => {
         clearTimeout(timer);
         this.waiting.delete(id);
@@ -558,6 +634,7 @@ export class PortTransport implements HostfsTransport {
         } catch {}
         resolve();
       };
+      this.watchBeat();
       this.waiting.set(id, (reply) => {
         if (reply.open) return onOpen();
         if (reply.event) return onEvent(reply.event);
@@ -589,6 +666,7 @@ export function serveHostfsPort(port: MessagePort, transport: HostfsTransport): 
     data,
   }: MessageEvent<Record<string, unknown> & { id: number; op: string }>) => {
     const { id, op } = data;
+    if (op === 'ping') return send({ id, pong: true });
     if (op === 'unwatch') return watches.get(id)?.abort();
     if (op === 'watch') {
       const stop = new AbortController();
@@ -646,11 +724,11 @@ export function serveHostfsPort(port: MessagePort, transport: HostfsTransport): 
 export function grantConnect(
   hook: HostfsGrantHook,
   fetch: FetchLike,
-  requestMs?: number
+  liveness: PortLiveness = {}
 ): HostfsConnect {
   return async (source, options) => {
     const first = await hook(source, options);
-    if ('port' in first) return new PortTransport(first, requestMs);
+    if ('port' in first) return new PortTransport(first, liveness);
     const grant = async () => {
       const again = await hook(source, options);
       if ('port' in again)
@@ -692,7 +770,7 @@ export async function openHostfs(
       connect: () => connect(spec.source, { readonly }),
       up(client) {
         active = client;
-        slot.insert(client, handlers);
+        slot.insert(client, bounded(handlers, timing.callMs ?? HOSTFS_CALL_MS));
         served.invalidate(true);
       },
       event: (event) => served.invalidate(invalidation(event)),

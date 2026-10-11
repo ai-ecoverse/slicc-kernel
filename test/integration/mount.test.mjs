@@ -507,3 +507,55 @@ test('bytes a program wrote before a spawn whose write-back failed are kept, wit
   assert.equal(stored, 'host\nbefore\nafter\n');
   assert.deepEqual(page.errors, []);
 });
+
+test('hostfs over a port the page drops: Chromium sends no close, the heartbeat finds it within seconds, and the mount reconnects through the hook without a remount', async (t) => {
+  const stage = join(homedir(), 'Developer/ai-ecoverse/work/stage/hostfs-int');
+  await mkdir(stage, { recursive: true });
+  const dir = await mkdtemp(join(stage, 'port-'));
+  await writeFile(join(dir, 'a.txt'), 'over a port\n');
+  const proxy = await hostfsProxy({ folders: { project: dir } });
+  t.after(async () => {
+    await proxy.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+  const { page, bash } = await booted(chrome, t);
+  await page.evaluate(
+    (p) => {
+      window.hostfsProxy = p;
+      window.hostfsOverPort = true;
+    },
+    { url: proxy.url, key: proxy.key }
+  );
+  await bash('mkdir -p /mnt/p', { cwd: '/home' });
+  const spec = { type: 'hostfs', source: 'project', target: '/mnt/p' };
+  assert.equal((await page.evaluate((s) => window.kernel.mount(s), spec)).state, 'ok');
+  assert.deepEqual(await bash('cat /mnt/p/a.txt', { cwd: '/home' }), {
+    status: 0,
+    stdout: 'over a port\n',
+    stderr: '',
+  });
+  await page.evaluate(() => window.dropHostfsPort());
+  const began = Date.now();
+  const dropped = await bash('cat /mnt/p/a.txt; echo "cat $?"', { cwd: '/home' });
+  assert.ok(Date.now() - began < 8000, `${Date.now() - began} ms`);
+  assert.match(dropped.stdout, /^(over a port\ncat 0|cat 1)\n$/);
+  let state = '';
+  for (let i = 0; i < 150 && state !== 'ok'; i++) {
+    state = (await page.evaluate(() => window.kernel.mounts()))[0].state;
+    if (state !== 'ok') await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.equal(state, 'ok');
+  assert.deepEqual(
+    await bash('cat /mnt/p/a.txt && echo again > /mnt/p/b.txt && cat /mnt/p/b.txt', {
+      cwd: '/home',
+    }),
+    {
+      status: 0,
+      stdout: 'over a port\nagain\n',
+      stderr: '',
+    }
+  );
+  assert.ok((await page.evaluate(() => window.hostfsPorts.length)) >= 2);
+  await page.evaluate(() => window.kernel.umount('/mnt/p'));
+  assert.deepEqual(page.errors, []);
+});
