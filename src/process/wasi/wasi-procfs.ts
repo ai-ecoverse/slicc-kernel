@@ -186,7 +186,7 @@ function* procWalk(path: string, follow: boolean): ProcWalk {
     const whole = normalize(`/${[...done, part, ...todo].join('/')}`);
     if (inProc(at) && inProc(whole)) return broken ?? whole;
     if (!follow && todo.length === 0) return undefined;
-    const target = yield { at, check: todo[0] === '..' };
+    const target = yield { at, check: todo.find((next) => next !== '.') === '..' };
     if (typeof target === 'string') {
       if (++hops > MAX_HOPS) return undefined;
       [done, todo] = throughLink(target, done, todo);
@@ -196,6 +196,10 @@ function* procWalk(path: string, follow: boolean): ProcWalk {
     }
   }
   return undefined;
+}
+
+function notDirectory(err: unknown): boolean {
+  return (err as { code?: unknown } | null)?.code === 'ENOTDIR';
 }
 
 function refusalOf(found: boolean | null): ProcRefusal | undefined {
@@ -221,8 +225,8 @@ function procPath(
     try {
       const st = fs.lstat(at);
       target = st.isSymbolicLink ? fs.readlink(at) : !check || st.isDirectory;
-    } catch {
-      target = null;
+    } catch (err) {
+      target = notDirectory(err) ? false : null;
     }
     step = walk.next(target);
   }
@@ -249,7 +253,8 @@ export async function procAlias(
     const { at, check } = step.value;
     const link = await readlink.call(fs, at).catch(() => undefined);
     const isDir = (st: unknown) => (st as { isDirectory?: boolean }).isDirectory === true;
-    const target = link ?? (check ? await lstat.call(fs, at).then(isDir, () => null) : true);
+    const missed = (err: unknown) => (notDirectory(err) ? false : null);
+    const target = link ?? (check ? await lstat.call(fs, at).then(isDir, missed) : true);
     step = walk.next(target);
   }
   return step.value;
