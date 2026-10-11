@@ -299,11 +299,38 @@ export class OpfsFs implements KernelFs {
         const link = await this.linkAlong(current);
         if (!link) throw err;
         if (link.path === current && !follow) return { path: current, link };
-        const rest = current.slice(link.path.length);
-        current = resolvePath(parentOf(link.path), `${link.link}${rest}`);
+        const target = `${link.link}${current.slice(link.path.length)}`;
+        current = target.split('/').includes('..')
+          ? await this.physical(parentOf(link.path), target, hops + 1)
+          : resolvePath(parentOf(link.path), target);
       }
     }
     throw fsError('ELOOP', path);
+  }
+
+  private async physical(base: string, path: string, used: number): Promise<string> {
+    let done: string[] = [];
+    let todo = (path.startsWith('/') ? path : `${base}/${path}`)
+      .split('/')
+      .filter((p) => p !== '' && p !== '.');
+    for (let hops = used; todo.length > 0; ) {
+      const part = todo.shift() as string;
+      if (part === '..') done.pop();
+      else if (!todo.includes('..')) done.push(part);
+      else {
+        const at = `/${[...done, part].join('/')}`;
+        const st = await this.lstat(at);
+        if (!st.isSymbolicLink && !st.isDirectory) throw fsError('ENOTDIR', at);
+        if (!st.isSymbolicLink) done.push(part);
+        else if (++hops > MAX_LINKS) throw fsError('ELOOP', path);
+        else {
+          const link = await this.readlink(at);
+          if (link.startsWith('/')) done = [];
+          todo = [...link.split('/').filter((p) => p !== '' && p !== '.'), ...todo];
+        }
+      }
+    }
+    return `/${done.join('/')}`;
   }
 
   private mode(path: string, directory: boolean, meta: MetaEntry | undefined): number {

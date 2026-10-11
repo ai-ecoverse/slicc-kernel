@@ -498,6 +498,12 @@ function parentOf(path: string): string {
   return path.slice(0, path.lastIndexOf('/')) || '/';
 }
 
+async function mustBeDir(fs: VfsFileFs, path: string): Promise<void> {
+  if (!fs.lstat) return;
+  const st = await fs.lstat(path);
+  if ((st as { isDirectory?: boolean }).isDirectory !== true) throw fsError('ENOTDIR', path);
+}
+
 async function linkOf(fs: VfsFileFs, path: string): Promise<string | undefined> {
   return fs.readlink?.(path).catch(() => undefined);
 }
@@ -519,6 +525,7 @@ async function realDir(fs: VfsFileFs, dir: string, budget: Budget = { hops: 0 })
     const next = at === '/' ? `/${part}` : `${at}/${part}`;
     const link = await linkOf(fs, next);
     if (link === undefined) {
+      if (queue.find((p) => p !== '.') === '..') await mustBeDir(fs, next);
       at = next;
       continue;
     }

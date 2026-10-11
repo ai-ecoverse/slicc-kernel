@@ -271,6 +271,38 @@ export function normalize(path: string): string {
   return `/${out.join('/')}`;
 }
 
+const MAX_LINKS = 40;
+
+export function physical(fs: Pick<SyncFsPosixBridge, 'lstat' | 'readlink'>, path: string): string {
+  let done: string[] = [];
+  let todo = path.split('/').filter((part) => part !== '' && part !== '.');
+  let hops = 0;
+  while (todo.length > 0) {
+    const part = todo.shift() as string;
+    if (part === '..') {
+      done.pop();
+      continue;
+    }
+    if (!todo.includes('..')) {
+      done.push(part);
+      continue;
+    }
+    const at = `/${[...done, part].join('/')}`;
+    const st = fs.lstat(at);
+    if (st.isSymbolicLink) {
+      if (++hops > MAX_LINKS) throw new WasiError('ELOOP');
+      const target = fs.readlink(at);
+      if (target.startsWith('/')) done = [];
+      todo = [...target.split('/').filter((p) => p !== '' && p !== '.'), ...todo];
+    } else if (!st.isDirectory) {
+      throw new WasiError('ENOTDIR');
+    } else {
+      done.push(part);
+    }
+  }
+  return `/${done.join('/')}`;
+}
+
 export function resolveUnder(dir: string, path: string): string {
   return normalize(path.startsWith('/') ? path : `${dir}/${path}`);
 }

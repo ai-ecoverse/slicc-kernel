@@ -7,7 +7,7 @@ import {
   FileBuffer,
   LocalFile,
   normalize,
-  resolveUnder,
+  physical,
   type WasiEntry,
   WasiError,
 } from './wasi-files.ts';
@@ -500,8 +500,8 @@ export class WasiFds {
   }
 
   resolve(dirfd: number, path: string): string {
-    if (path.startsWith('/')) return normalize(path);
-    return resolveUnder(this.dir(dirfd).path, path);
+    const joined = path.startsWith('/') ? path : `${this.dir(dirfd).path}/${path}`;
+    return joined.split('/').includes('..') ? physical(this.fs, joined) : normalize(joined);
   }
 
   open(path: string, oflags: number, rights: bigint, fdflags: number): number {
