@@ -20,6 +20,7 @@ export interface SyncFsTokenEntry {
   revoked?: (path: string) => boolean;
   renamed?: (from: string, to: string) => void;
   cred?: () => Readonly<Cred>;
+  umask?: () => number;
 }
 
 const registry = new Map<string, SyncFsTokenEntry>();

@@ -71,9 +71,7 @@ export async function chownAs(
   const current = { uid: st.uid ?? 0, gid: st.gid ?? 0 };
   if (!fs.chown || !mayChown(cred, current, uid, gid)) throw fsError('EPERM', path);
   const clear =
-    cred.euid !== 0 && st.isFile && (uid !== undefined || gid !== undefined)
-      ? clearedSetId(st.mode)
-      : undefined;
+    st.isFile && (uid !== undefined || gid !== undefined) ? clearedSetId(st.mode) : undefined;
   await fs.chown(path, {
     ...(uid !== undefined ? { uid } : {}),
     ...(gid !== undefined ? { gid } : {}),

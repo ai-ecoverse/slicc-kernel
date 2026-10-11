@@ -313,9 +313,13 @@ function inherited(opts: SpawnWasmOptions): { ignored?: number; umask?: number; 
   };
 }
 
-function holdingToken(opts: SpawnWasmOptions, holds: HeldPaths, cred: () => Cred): string {
+function holdingToken(
+  opts: SpawnWasmOptions,
+  holds: HeldPaths,
+  caller: { cred: () => Cred; umask: () => number }
+): string {
   return mintSyncFsToken({
-    ...(opts.owners ? { cred } : {}),
+    ...(opts.owners ? caller : {}),
     fs: opts.fs,
     cwd: opts.cwd,
     ...(opts.statfs ? { statfs: opts.statfs } : {}),
@@ -387,7 +391,10 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
   publishStops(process, header);
   const holds = new HeldPaths();
   opts.held?.add(holds);
-  const token = holdingToken(opts, holds, () => process.cred);
+  const token = holdingToken(opts, holds, {
+    cred: () => process.cred,
+    umask: () => process.umask,
+  });
   process.keptPath = (path) => holds.keptAt(path)?.hidden;
   process.keptHandle = (handle) => holds.keptFor(handle)?.hidden;
   const worker = opts.createWorker();

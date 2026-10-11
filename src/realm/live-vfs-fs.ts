@@ -908,6 +908,8 @@ function guardRenames(Fs: LiveMountFsApi): void {
 export interface LiveChownFs extends LiveFsApi {
   lookupPath(path: string, opts?: { follow?: boolean }): { node: object };
   chown?(path: string | object, uid: number, gid: number, dontFollow?: boolean): void;
+  fchown?(fd: number, uid: number, gid: number): void;
+  getStreamChecked?(fd: number): { node: object; path?: string };
 }
 
 function idOf(value: number): number | undefined {
@@ -929,5 +931,13 @@ export function useLiveChown(Fs: LiveChownFs): void {
     }
     node.live.stat = undefined;
     if (node.parent?.live) node.parent.live.listed = undefined;
+  };
+  const { getStreamChecked } = Fs;
+  if (!Fs.fchown || !getStreamChecked) return;
+  Fs.fchown = (fd, uid, gid) => {
+    const stream = getStreamChecked.call(Fs, fd);
+    const live = (stream.node as LiveFsNode).live !== undefined;
+    const target = live || stream.path === undefined ? stream.node : stream.path;
+    (Fs.chown as NonNullable<LiveChownFs['chown']>)(target, uid, gid);
   };
 }

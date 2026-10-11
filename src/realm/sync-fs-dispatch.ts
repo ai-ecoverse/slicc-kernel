@@ -79,10 +79,11 @@ function json(value: unknown): SyncFsResult {
 
 function ownerFor(entry: SyncFsTokenEntry, mode?: number): NewOwner | undefined {
   const cred = entry.cred?.();
-  return cred && ownerOf(cred, mode);
+  if (!cred) return undefined;
+  return ownerOf(cred, mode === undefined ? undefined : mode & ~(entry.umask?.() ?? 0o022));
 }
 
-function mkdirOptions(entry: SyncFsTokenEntry, mode?: number) {
+function mkdirOptions(entry: SyncFsTokenEntry, mode = 0o777) {
   const owner = ownerFor(entry, mode);
   return owner ? { recursive: true, owner } : { recursive: true };
 }
@@ -108,7 +109,7 @@ async function run(
     case 'read':
       return { ok: true, kind: 'bytes', bytes: await fs.readFileBuffer(path) };
     case 'write':
-      await fs.writeFile(path, req.body ?? new Uint8Array(0), ownerFor(entry));
+      await fs.writeFile(path, req.body ?? new Uint8Array(0), ownerFor(entry, 0o666));
       return done;
     case 'exists':
       return json(await fs.exists(path));
@@ -145,7 +146,7 @@ async function run(
       await fs.symlink(req.arg2 ?? '', path, ownerFor(entry));
       return done;
     case 'create':
-      await createExclusive(fs, path, ownerFor(entry, req.mode));
+      await createExclusive(fs, path, ownerFor(entry, req.mode ?? 0o666));
       return done;
     case 'readlink':
       return json(await fs.readlink(path));

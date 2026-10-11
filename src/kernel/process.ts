@@ -1,4 +1,4 @@
-import type { Owner } from '../fs/types.ts';
+import type { NewOwner } from '../fs/types.ts';
 import type { MountCall } from '../mount/syscall.ts';
 import { inProc, ProcTree, procAlias } from '../process/wasi/wasi-procfs.ts';
 import type { LinkRecord } from '../process/wasi/wasix-linker.ts';
@@ -768,8 +768,9 @@ export class WasmProcess {
     return fd;
   }
 
-  private newOwner(): Owner | undefined {
-    return this.options.owners ? { uid: this.cred.euid, gid: this.cred.egid } : undefined;
+  private newOwner(): NewOwner | undefined {
+    if (!this.options.owners) return undefined;
+    return { uid: this.cred.euid, gid: this.cred.egid, mode: 0o666 & ~this.umask };
   }
 
   private async openProc(
