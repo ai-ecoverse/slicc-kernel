@@ -220,6 +220,7 @@ interface ProcStream {
   position: number;
   sliccProc?: Uint8Array;
   getdents?: string[] | null;
+  fd?: number | null;
 }
 
 interface DirStreamOps {
@@ -232,6 +233,7 @@ export interface ProcFs {
   lookupPath?(path: string, opts?: { follow?: boolean }): { node: object };
   createNode?(parent: object, name: string, mode: number, rdev: number): object;
   hashRemoveNode?(node: object): void;
+  streams?: unknown[];
   ErrnoError: new (errno: number) => Error;
 }
 
@@ -331,7 +333,14 @@ export function useProcfs(Fs: ProcFs, sys: ProcSys, pid: number, memory = memory
     return dir;
   };
   const scans = new Map<ProcStream, Set<number>>();
-  const listed = (target: number) => [...scans.values()].some((pids) => pids.has(target));
+  const listed = (target: number) => {
+    let found = false;
+    for (const [stream, pids] of scans) {
+      if (Fs.streams && Fs.streams[stream.fd ?? -1] !== stream) scans.delete(stream);
+      else found ||= pids.has(target);
+    }
+    return found;
+  };
   const procOps = proc.node_ops;
   const lookup = procOps.lookup?.bind(procOps);
   const readdir = procOps.readdir?.bind(procOps);
