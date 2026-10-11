@@ -120,7 +120,9 @@ export function decodeSabResult(status: number, payload: Uint8Array): SyncFsResu
           message?: unknown;
         };
         const errno =
-          typeof parsed.errno === 'string' && /^E[A-Z]+$/.test(parsed.errno) ? parsed.errno : 'EIO';
+          typeof parsed.errno === 'string' && /^E[A-Z]+$|^EAI_[A-Z]+$/.test(parsed.errno)
+            ? parsed.errno
+            : 'EIO';
         return { ok: false, errno, message: String(parsed.message ?? errno) };
       } catch {
         return { ok: false, errno: 'EIO', message: 'sync-sab: malformed errno payload' };

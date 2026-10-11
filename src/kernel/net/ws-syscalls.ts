@@ -1,4 +1,5 @@
 import type { SyncFsResult } from '../../realm/sync-fs-wire.ts';
+import { toHostLoopback } from './loopback-names.ts';
 import { NO_WEBSOCKET } from './proxy-service.ts';
 import type { HeaderList, RealmTransport, RealmWebSocket } from './transport.ts';
 
@@ -31,6 +32,13 @@ const TOKEN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 
 function message(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+const ERRNO = /^E[A-Z]+$|^EAI_[A-Z]+$/;
+
+function errnoOf(e: unknown): string {
+  const code = (e as { code?: unknown } | null)?.code;
+  return typeof code === 'string' && ERRNO.test(code) ? code : 'ECONNREFUSED';
 }
 
 function fail(errno: string, text: string): SyncFsResult {
@@ -86,13 +94,13 @@ export class WsHandles {
     let socket: RealmWebSocket;
     try {
       socket = await transport.websocket({
-        url: req.url,
+        url: toHostLoopback(req.url),
         protocols: req.protocols,
         headers: req.headers,
         signal: entry.abort.signal,
       });
     } catch (e) {
-      return fail('ECONNREFUSED', message(e));
+      return fail(errnoOf(e), message(e));
     }
     if (!this.open.has(handle)) {
       socket.close(1001, 'the program went away');
