@@ -377,7 +377,8 @@ class StatCache {
       const g = this.publish(this.shared, path === undefined ? 0 : pathHash(path), key);
       this.replay(g - 1);
       this.seen = g;
-      if (path !== undefined) this.drop(pathHash(path), key);
+      if (path === undefined) this.clear();
+      else this.drop(pathHash(path), key);
     }
     if (path === undefined) return;
     this.stats.delete(path);
@@ -395,6 +396,7 @@ class StatCache {
 
   inoOf(path: string, look: () => SyncFsBridgeStat): number {
     if (!this.shared) return 0;
+    this.fresh();
     const hit = this.stats.get(path);
     if (hit && 'ino' in hit && typeof hit.ino === 'number') return hit.ino;
     try {

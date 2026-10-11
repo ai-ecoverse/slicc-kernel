@@ -613,15 +613,31 @@ export class WasiHost {
         return kernel.sys.pread(fd, Math.min(max, MAX_READ), at);
       },
       pwrite: (body, at) =>
-        this.changed(e, kernel.call({ op: 'fd-pwrite', fd, offset: at, body }) as number),
+        this.changed(fd, e, kernel.call({ op: 'fd-pwrite', fd, offset: at, body }) as number),
       size: () => this.kernelStat(fd).size,
-      truncate: (size) => this.changed(e, void kernel.call({ op: 'fd-resize', fd, size })),
+      truncate: (size) => this.changed(fd, e, void kernel.call({ op: 'fd-resize', fd, size })),
     };
   }
 
-  private changed<T>(e: { path?: string; ino?: number }, result: T): T {
+  private readonly unnamed = new WeakSet<object>();
+
+  private changed<T>(fd: number, e: { path?: string; ino?: number }, result: T): T {
+    if (e.path === undefined && !this.unnamed.has(e)) this.learnPath(fd, e);
     this.o.fs.touched?.(e.path, e.ino);
     return result;
+  }
+
+  private learnPath(fd: number, e: { path?: string; ino?: number }): void {
+    this.unnamed.add(e);
+    let path: string | undefined;
+    try {
+      const st = this.kernelStat(fd);
+      path = st.orphan ? undefined : st.path;
+      if (path !== undefined) e.ino = this.o.fs.stat(path).ino;
+    } catch {
+      return;
+    }
+    e.path = path;
   }
 
   private kernelStat(fd: number): { path?: string; size: number; orphan?: true } {
@@ -638,7 +654,7 @@ export class WasiHost {
     if (e.type === 'kernel') {
       try {
         const n = this.o.kernel.sys.write(fd, data, { nonblock: e.nonblock });
-        return this.fds.kind(fd, e) === 'file' ? this.changed(e, n) : n;
+        return this.fds.kind(fd, e) === 'file' ? this.changed(fd, e, n) : n;
       } catch (err) {
         const broken = (err as { code?: string }).code === 'EPIPE';
         if (broken && this.fds.kind(fd, e) !== 'socket') throw new WasiExit(SIGPIPE_EXIT);

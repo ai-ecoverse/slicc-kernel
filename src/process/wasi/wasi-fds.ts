@@ -602,8 +602,9 @@ export class WasiFds {
 
     const truncate = made || (oflags & OFLAGS.TRUNC) !== 0;
     const fd = this.kernel.sys.openVfs(path, flags, 0, truncate ? { truncate } : {});
+    if (truncate)
+      (this.fs as { touched?(path?: string, ino?: number): void }).touched?.(path, existing?.ino);
     const ino = this.inoOf(path, existing);
-    if (truncate) (this.fs as { touched?(path?: string, ino?: number): void }).touched?.(path, ino);
     this.table.set(fd, { type: 'kernel', kind: 'file', nonblock: false, append, path, ino });
     if (append) this.publishFlags(fd, { nonblock: false, append });
     this.bump();
