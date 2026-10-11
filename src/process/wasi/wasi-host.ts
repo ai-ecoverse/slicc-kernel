@@ -699,7 +699,9 @@ export class WasiHost {
     let seeks = true;
     let flags = 0;
     if (e.type === 'kernel') {
-      ({ filetype, seeks } = kernelFiletype(this.fds.kind(fd, e)));
+      const kind = this.fds.kind(fd, e);
+      if (kind === 'device') this.interrupted?.();
+      ({ filetype, seeks } = kernelFiletype(kind));
       if (e.nonblock) flags |= FDFLAGS.NONBLOCK;
       if (e.append) flags |= FDFLAGS.APPEND;
     } else if (e.type === 'file') {
