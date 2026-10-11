@@ -219,11 +219,12 @@ interface ProcStream {
   node: ProcNode;
   position: number;
   sliccProc?: Uint8Array;
-  getdents?: string[];
+  getdents?: string[] | null;
 }
 
 interface DirStreamOps {
   open?: (stream: ProcStream) => void;
+  dup?: (stream: ProcStream) => void;
   close?: (stream: ProcStream) => void;
 }
 
@@ -358,14 +359,31 @@ export function useProcfs(Fs: ProcFs, sys: ProcSys, pid: number, memory = memory
     },
     readdir: (node) => listAll(node),
   };
+  const track = (stream: ProcStream, names: string[] | null | undefined) => {
+    let current = names;
+    const remember = (list: string[]) =>
+      scans.set(stream, new Set(list.filter((n) => /^[1-9]\d*$/.test(n)).map(Number)));
+    remember(current ?? []);
+    Object.defineProperty(stream, 'getdents', {
+      configurable: true,
+      enumerable: true,
+      get: () => current,
+      set: (next: string[] | null) => {
+        current = next;
+        if (next) remember(next);
+      },
+    });
+  };
   const dirOps = (proc.stream_ops ?? {}) as DirStreamOps;
   proc.stream_ops = {
     ...dirOps,
     open: (stream: ProcStream) => {
       dirOps.open?.(stream);
-      const names = listAll(proc);
-      stream.getdents = names;
-      scans.set(stream, new Set(names.filter((n) => /^[1-9]\d*$/.test(n)).map(Number)));
+      track(stream, listAll(proc));
+    },
+    dup: (stream: ProcStream) => {
+      dirOps.dup?.(stream);
+      track(stream, stream.getdents);
     },
     close: (stream: ProcStream) => {
       scans.delete(stream);
