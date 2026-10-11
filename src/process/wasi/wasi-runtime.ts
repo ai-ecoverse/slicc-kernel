@@ -65,6 +65,18 @@ export const UNDELIVERED: Readonly<Record<string, readonly string[]>> = {
 
 const DELIVERED = [PREVIEW1, WASIX, SLICC, SLICC_FS, SLICC_TTY];
 
+export function wireSignals(host: WasiHost, gate: SignalGate): void {
+  host.interrupted = () => gate.interrupt();
+  host.quietly = (fn) => gate.quiet(fn);
+}
+
+export function catchUpFirst(
+  host: WasiHost,
+  sync: { current(): void } | undefined
+): (() => void) | undefined {
+  return sync && (() => host.quietly(() => sync.current()));
+}
+
 function deliverAll(
   imports: WebAssembly.Imports,
   host: WasiHost,
@@ -384,7 +396,7 @@ async function instantiate(
     sliccFs,
     sliccTty
   );
-  deliverAll(hostImports, host, driver, sync && (() => host.quietly(() => sync.current())));
+  deliverAll(hostImports, host, driver, catchUpFirst(host, sync));
   const imports: WebAssembly.Imports = sync
     ? merge(hostImports, sync.linker.mainImports(module))
     : hostImports;
@@ -633,8 +645,7 @@ export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike
   if (importsSigactionHook(module)) signals.useHook();
   if (fork?.signals) signals.restore(fork.signals);
   host.signals = signals;
-  host.interrupted = () => gate.interrupt();
-  host.quietly = (fn) => gate.quiet(fn);
+  wireSignals(host, gate);
   host.onRaise = (sig) => signals.raised(sig);
   host.muted = (fd, data) => signals.muted(fd, data);
   const exports = instance.exports as { _start: () => void };
@@ -740,8 +751,7 @@ export async function runWasiThread(init: WasmThreadInitMsg, port: SabPostLike):
   });
   signals.bind(instance.exports);
   signals.register(SIGNAL_CALLBACK);
-  host.interrupted = () => gate.interrupt();
-  host.quietly = (fn) => gate.quiet(fn);
+  wireSignals(host, gate);
   host.onRaise = (sig) => signals.raised(sig);
   const start = instance.exports.wasi_thread_start as (tid: number, arg: number) => void;
   try {
