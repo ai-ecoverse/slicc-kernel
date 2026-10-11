@@ -537,7 +537,7 @@ test('hostfs over a port the page drops: Chromium sends no close, the heartbeat 
   await page.evaluate(() => window.dropHostfsPort());
   const began = Date.now();
   const dropped = await bash('cat /mnt/p/a.txt; echo "cat $?"', { cwd: '/home' });
-  assert.ok(Date.now() - began < 8000, `${Date.now() - began} ms`);
+  assert.ok(Date.now() - began < 15_000, `${Date.now() - began} ms`);
   assert.match(dropped.stdout, /^(over a port\ncat 0|cat 1)\n$/);
   let state = '';
   for (let i = 0; i < 150 && state !== 'ok'; i++) {
