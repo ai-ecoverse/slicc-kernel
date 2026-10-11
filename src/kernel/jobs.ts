@@ -154,9 +154,11 @@ export class JobTable {
     const member = this.member(pid);
     const id = this.idOf(pid);
     if (member.pgid === id) throw new KernelError('EPERM');
+    const left = member.pgid;
     member.sid = id;
     member.pgid = id;
     this.terminals.delete(id);
+    this.prune(left);
     return id;
   }
 
@@ -208,19 +210,19 @@ export class JobTable {
     const inSession = [...this.members.values()].some((m) => m.pgid === pgid && m.sid === self.sid);
     if (!inSession) throw new KernelError('EPERM');
     const current = this.foreground.get(tty);
-    if (settling && pgid === self.pgid && current !== pgid && this.reclaimed(pgid, self.ppid))
-      return;
-    if (pgid !== self.pgid) this.handoffs.set(pgid, { by: caller, reclaimed: false });
+    if (settling && pgid === self.pgid && current !== pgid && this.reclaimed(pgid, caller)) return;
+    const by = this.shown(caller);
+    if (pgid !== self.pgid) this.handoffs.set(pgid, { by, reclaimed: false });
     else if (current !== undefined) {
       const handoff = this.handoffs.get(current);
-      if (handoff?.by === caller) handoff.reclaimed = true;
+      if (handoff?.by === by) handoff.reclaimed = true;
     }
     this.foreground.set(tty, pgid);
   }
 
-  private reclaimed(pgid: number, parent: number | undefined): boolean {
+  private reclaimed(pgid: number, caller: number): boolean {
     const handoff = this.handoffs.get(pgid);
-    return handoff?.reclaimed === true && handoff.by === parent;
+    return handoff?.reclaimed === true && handoff.by === this.shownParent(caller);
   }
 
   signalOwnedForeground(tty: KernelTty, sig: number): void {
