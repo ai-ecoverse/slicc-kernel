@@ -405,7 +405,7 @@ function merge(
   return out;
 }
 
-class LinkSync {
+export class LinkSync {
   private count = 0;
   private gen = 0;
 
@@ -423,13 +423,23 @@ class LinkSync {
     linker.publisher = (record) => this.publish(record);
     linker.indices = {
       reserve: (floor, size) => this.call({ op: 'dl-reserve', floor, size }) as number,
+      load: (floor, size) =>
+        this.call({ op: 'dl-load-reserve', floor, size }) as { base: number; handle: number },
       allocate: (floor) => {
         const index = this.call({ op: 'dl-closure', floor }) as number;
         this.catchUp();
+        this.bump();
         return index;
       },
-      free: (index) => void this.call({ op: 'dl-closure-free', index }),
+      free: (index) => {
+        this.call({ op: 'dl-closure-free', index });
+        this.bump();
+      },
     };
+  }
+
+  private bump(): void {
+    if (this.ids) Atomics.add(this.ids, DL_GEN, 1);
   }
 
   private publish(record: LinkRecord): void {

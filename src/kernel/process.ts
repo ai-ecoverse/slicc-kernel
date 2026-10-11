@@ -107,6 +107,7 @@ export type WasmSyscall =
   | { op: 'dl-log'; append?: LinkRecord; from: number }
   | { op: 'dl-closure'; floor: number }
   | { op: 'dl-reserve'; floor: number; size: number }
+  | { op: 'dl-load-reserve'; floor: number; size: number }
   | { op: 'dl-closure-free'; index: number }
   | {
       op: 'proc-alarm';
@@ -300,6 +301,7 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'dl-closure',
   'dl-closure-free',
   'dl-reserve',
+  'dl-load-reserve',
   'fd-renumber',
   'fd-promote',
   'fd-open-tty',
@@ -1096,6 +1098,12 @@ export class WasmProcess {
         return { ok: true, kind: 'void' };
       case 'dl-reserve':
         return { ok: true, kind: 'json', json: this.reserveSlots(req.floor, req.size) };
+      case 'dl-load-reserve':
+        return {
+          ok: true,
+          kind: 'json',
+          json: { base: this.reserveSlots(req.floor, req.size), handle: this.closures.handle++ },
+        };
       case 'sig-mask':
         this.caught = req.caught;
         this.ignored = req.ignored;
@@ -1137,7 +1145,12 @@ export class WasmProcess {
 
   private alarm: ReturnType<typeof setTimeout> | undefined;
   private readonly dlLog: LinkRecord[] = [];
-  private readonly closures = { next: 0, free: [] as number[], live: new Set<number>() };
+  private readonly closures = {
+    next: 0,
+    handle: 1,
+    free: [] as number[],
+    live: new Set<number>(),
+  };
 
   private allocateClosure(floor: number): number {
     const index = this.closures.free.pop() ?? Math.max(floor, this.closures.next);
