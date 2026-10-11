@@ -528,6 +528,7 @@ export class WasixHost {
   }
 
   private ttySet(ptr: number): void {
+    this.host.interrupted?.();
     const fd = this.ttyFd();
     if (fd === undefined) throw new WasiError('ENOTTY');
     const { sys } = this.host.o.kernel;

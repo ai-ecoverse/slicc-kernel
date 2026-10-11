@@ -447,6 +447,7 @@ export class WasiHost {
         out: number
       ) => {
         const path = at(dirfd, p, l);
+        if (deviceOf(path)) this.interrupted?.();
         const fresh = (oflags & OFLAGS.CREAT) !== 0 && !o.fs.exists(path);
         mem.view().setUint32(out, fds.open(path, oflags, rights, fdflags), true);
         if (fresh) this.created(path, 0o666);
@@ -748,7 +749,12 @@ export class WasiHost {
 
   private pathFilestat(path: string, lookup: number): Filestat {
     if (deviceOf(path)) {
-      return { filetype: FILETYPE.CHARACTER_DEVICE, size: 0n, ino: pathInode(path), mtimeNs: 0n };
+      return this.local({
+        filetype: FILETYPE.CHARACTER_DEVICE,
+        size: 0n,
+        ino: pathInode(path),
+        mtimeNs: 0n,
+      });
     }
     this.fds.flushPath(path);
     const follow = (lookup & LOOKUP_SYMLINK_FOLLOW) !== 0;
