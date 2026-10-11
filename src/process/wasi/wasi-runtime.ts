@@ -574,6 +574,10 @@ function descriptors(
   return { inherited: init.fds ?? [], ...(init.program.preopenRoot ? { preopenRoot: true } : {}) };
 }
 
+function ownersOf(init: { owners?: boolean }): { owners?: boolean } {
+  return init.owners ? { owners: true } : {};
+}
+
 export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike): Promise<number> {
   captureBacktraces(init.env);
 
@@ -621,7 +625,11 @@ export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike
     parent: () => identify(transport, init).ppid,
     kernel: { sys: traced(stats, 'kernel', sys), call },
     fs: procfsBridge(
-      cachingBridge(traced(stats, 'fs', createSyncFsSabBridge(transport)), undefined, threads?.ids),
+      cachingBridge(
+        traced(stats, 'fs', createSyncFsSabBridge(transport, ownersOf(init))),
+        undefined,
+        threads?.ids
+      ),
       procTree(call, id.pid)
     ),
     ...descriptors(init, fork, threads),
@@ -740,7 +748,7 @@ export async function runWasiThread(init: WasmThreadInitMsg, port: SabPostLike):
     parent: () => identify(transport, init).ppid,
     kernel: { sys, call },
     fs: procfsBridge(
-      cachingBridge(createSyncFsSabBridge(transport), undefined, threads.ids),
+      cachingBridge(createSyncFsSabBridge(transport, ownersOf(init)), undefined, threads.ids),
       procTree(call, id.pid)
     ),
     shared: threads.ids,

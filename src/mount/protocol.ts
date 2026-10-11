@@ -1,10 +1,11 @@
-export const DRIVER_PROTOCOL: readonly [number, number] = [1, 1];
+export const DRIVER_PROTOCOL: readonly [number, number] = [1, 2];
 
 export interface DriverCapabilities {
   readonly?: boolean;
   symlinks?: boolean;
   links?: boolean;
   chmod?: boolean;
+  owners?: boolean;
   linkTimes?: boolean;
   ranges?: boolean;
   sessions?: boolean;
@@ -25,6 +26,14 @@ export interface DriverAttr {
   ino?: number;
   nlink?: number;
   etag?: string;
+  uid?: number;
+  gid?: number;
+}
+
+export interface DriverOwner {
+  uid?: number;
+  gid?: number;
+  mode?: number;
 }
 
 export interface DriverEntry {
@@ -47,7 +56,7 @@ export interface MountRequestInfo {
 export type DriverCall =
   | { op: 'getattr'; path: string }
   | { op: 'readdir'; path: string }
-  | {
+  | ({
       op: 'open';
       path: string;
       write: boolean;
@@ -55,18 +64,26 @@ export type DriverCall =
       truncate: boolean;
       exclusive: boolean;
       ifMatch?: string;
-    }
+    } & DriverOwner)
   | { op: 'read'; fh: number; offset: number; size: number }
   | { op: 'write'; fh: number; offset: number; bytes: Uint8Array }
   | { op: 'release'; fh: number }
-  | { op: 'mkdir'; path: string }
+  | ({ op: 'mkdir'; path: string } & DriverOwner)
   | { op: 'rmdir'; path: string }
   | { op: 'unlink'; path: string }
   | { op: 'rename'; from: string; to: string }
   | { op: 'link'; from: string; to: string }
-  | { op: 'symlink'; target: string; path: string }
+  | ({ op: 'symlink'; target: string; path: string } & DriverOwner)
   | { op: 'readlink'; path: string }
-  | { op: 'setattr'; path: string; mode?: number; mtime?: number; size?: number }
+  | {
+      op: 'setattr';
+      path: string;
+      mode?: number;
+      mtime?: number;
+      size?: number;
+      uid?: number;
+      gid?: number;
+    }
   | { op: 'statfs' };
 
 export type DriverRequest = DriverCall & { id: number };

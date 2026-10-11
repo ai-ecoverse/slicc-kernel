@@ -433,6 +433,11 @@ export function procfsBridge<T extends SyncFsPosixBridge>(fs: T, tree: ProcTree)
         readOnly([[p, follow]], () => fn.call(fs, p, ...rest));
     }
   }
+  const { chown } = fs;
+  if (chown) {
+    over.chown = (p: string, uid?: number, gid?: number, follow?: boolean) =>
+      readOnly([[p, follow === true]], () => chown.call(fs, p, uid, gid, follow));
+  }
   return new Proxy(fs, {
     get: (target, key, receiver) =>
       key in over ? over[key as keyof SyncFsPosixBridge] : Reflect.get(target, key, receiver),

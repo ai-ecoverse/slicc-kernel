@@ -72,6 +72,13 @@ export type WasiFunction = (...args: never[]) => number | undefined;
 const IDS = ['ruid', 'euid', 'suid', 'rgid', 'egid', 'sgid'] as const;
 const NS_PER_MS = 1_000_000n;
 const AT_SYMLINK_NOFOLLOW = 1;
+
+const ROOT_IDS = Object.freeze({ uid: 0, gid: 0 });
+const GONE: ReadonlySet<string> = new Set(['ENOENT', 'ENOTDIR']);
+
+function idOf(value: number): number | undefined {
+  return value >>> 0 === 0xffffffff ? undefined : value >>> 0;
+}
 const S_IFIFO = 0o010000;
 const DEFAULT_UMASK = 0o022;
 
@@ -222,7 +229,68 @@ export class WasiHost {
       return path;
     };
     const modeOf = (st: { mode?: number }) => (st.mode ?? 0) & 0o7777;
+    const chown = (path: string, uid: number, gid: number, follow: boolean) => {
+      const { chown: own } = this.o.fs;
+      if (!own) throw new WasiError('ENOSYS');
+      own.call(this.o.fs, path, idOf(uid), idOf(gid), follow);
+    };
+    const caller = (): [number, number] => {
+      const cred = this.o.kernel.call({ op: 'proc-cred' }) as Cred;
+      return [cred.euid, cred.egid];
+    };
+    const owner = (st: { uid?: number; gid?: number } | undefined, out: number): void => {
+      const [uid, gid] = st?.uid === undefined ? caller() : [st.uid, st.gid as number];
+      const view = mem.view();
+      view.getUint32(out + 4, true);
+      view.setUint32(out, uid, true);
+      view.setUint32(out + 4, gid, true);
+    };
+    const fdOwned = (fd: number): { uid?: number; gid?: number } | undefined => {
+      const e = fds.get(fd);
+      if (e.type === 'device') return ROOT_IDS;
+      if (e.type === 'kernel' && fds.kind(fd, e) !== 'file') return undefined;
+      try {
+        return this.o.fs.stat(pathOf(fd));
+      } catch (err) {
+        if (!GONE.has((err as { code?: unknown })?.code as string)) throw err;
+        return undefined;
+      }
+    };
+    const pathOwned = (path: string, follow: boolean) => {
+      if (deviceOf(path)) return ROOT_IDS;
+      return follow ? this.o.fs.stat(path) : this.o.fs.lstat(path);
+    };
     return wrap({
+      fd_chown: (fd: number, uid: number, gid: number) => void chown(pathOf(fd), uid, gid, true),
+      path_chown: (dirfd: number, p: number, l: number, uid: number, gid: number, flags: number) =>
+        void chown(at(dirfd, p, l), uid, gid, (flags & AT_SYMLINK_NOFOLLOW) === 0),
+      fd_owner: (fd: number, out: number) => {
+        if (!this.o.fs.owners) throw new WasiError('ENOTSUP');
+        owner(fdOwned(fd), out);
+      },
+      fd_filestat_owner: (fd: number, statOut: number, out: number) => {
+        if (!this.o.fs.owners) throw new WasiError('ENOTSUP');
+        this.writeFilestat(statOut, this.fdFilestat(fd));
+        owner(fdOwned(fd), out);
+      },
+      path_filestat_owner: (
+        dirfd: number,
+        lookup: number,
+        p: number,
+        l: number,
+        statOut: number,
+        out: number
+      ) => {
+        if (!this.o.fs.owners) throw new WasiError('ENOTSUP');
+        const path = at(dirfd, p, l);
+        this.writeFilestat(statOut, this.pathFilestat(path, lookup));
+        owner(pathOwned(path, (lookup & LOOKUP_SYMLINK_FOLLOW) !== 0), out);
+      },
+      path_owner: (dirfd: number, p: number, l: number, flags: number, out: number) => {
+        if (!this.o.fs.owners) throw new WasiError('ENOTSUP');
+        const path = at(dirfd, p, l);
+        owner(pathOwned(path, (flags & AT_SYMLINK_NOFOLLOW) === 0), out);
+      },
       fd_chmod: (fd: number, mode: number) => void this.o.fs.chmod(pathOf(fd), mode & 0o7777),
       path_chmod: (dirfd: number, p: number, l: number, mode: number, flags: number) =>
         void this.o.fs.chmod(target(at(dirfd, p, l), flags), mode & 0o7777),

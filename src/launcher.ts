@@ -404,6 +404,7 @@ export class Launcher {
       busy: (target) =>
         [...this.openFiles].some((nodes) => nodes.holds(target)) || heldUnder(this.held, target),
       changed: this.watchers.changed.bind(this.watchers),
+      owners: this.owners,
     });
     this.base = this.watchers.wrap(this.mounts.wrap(options.fs));
     this.createWorker = options.createWorker;
@@ -436,7 +437,8 @@ export class Launcher {
     const fs = withCommandDirs(
       this.base,
       async () => new Set((await this.commands()).keys()),
-      (dir) => this.userCommandDir(dir)
+      (dir) => this.userCommandDir(dir),
+      this.owners
     );
     this.nodes = new VfsNodes(fs, (path) => this.released(path));
     this.nodes.keepsOnDisk = true;
@@ -1033,7 +1035,15 @@ export class Launcher {
       serveFilesystem(
         port2,
         tmpfs(),
-        { symlinks: true, links: true, chmod: true, linkTimes: true, ranges: true, attrTtl: 0 },
+        {
+          symlinks: true,
+          links: true,
+          chmod: true,
+          owners: true,
+          linkTimes: true,
+          ranges: true,
+          attrTtl: 0,
+        },
         { owned: true }
       );
       return {
@@ -1111,6 +1121,12 @@ export class Launcher {
     return entry;
   }
 
+  private mountedBy(spec: MountSpec, cred: Cred): MountSpec {
+    if (!this.owners || (cred.euid === 0 && cred.egid === 0)) return spec;
+    const ids = { uid: String(cred.euid), gid: String(cred.egid) };
+    return { ...spec, options: { ...ids, ...spec.options } };
+  }
+
   private mountRoot(path: string): string {
     let root = '/';
     for (const { target } of this.mounts.list()) {
@@ -1159,7 +1175,7 @@ export class Launcher {
   private async processMount(pid: number, call: MountCall, signal: AbortSignal): Promise<void> {
     const spec = mountCall(call);
     await this.permit({ op: 'mount', pid, ...spec, options: { ...spec.options } });
-    const entry = await this.mount(spec);
+    const entry = await this.mount(this.mountedBy(spec, this.credOf(pid)));
     if (signal.aborted) this.umount(entry.target, true);
   }
 

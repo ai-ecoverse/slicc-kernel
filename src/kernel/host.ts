@@ -497,6 +497,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
       cwd: opts.cwd,
       sab: tsab,
       cred: copyCred(process.cred),
+      owners: opts.owners === true,
       ...(opts.ppid !== undefined ? { ppid: opts.ppid } : {}),
       thread,
     };

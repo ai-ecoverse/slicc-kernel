@@ -11,7 +11,13 @@ import {
 import type { KeptFile, UnlinkHolder } from '../fs/unlinked.ts';
 import { joinName, realDir, realTarget } from '../fs/walk.ts';
 import { DriverConnection, type DriverPortLike, errnoError } from './connection.ts';
-import type { DriverAttr, DriverCapabilities, DriverEntry, DriverStatfs } from './protocol.ts';
+import type {
+  DriverAttr,
+  DriverCapabilities,
+  DriverEntry,
+  DriverOwner,
+  DriverStatfs,
+} from './protocol.ts';
 
 export interface MountSpec {
   type: string;
@@ -41,6 +47,7 @@ export interface MountDeps {
   busy(target: string): boolean;
   changed?(...paths: string[]): void;
   timeoutMs?: number;
+  owners?: boolean;
 }
 
 interface Cached<T> {
@@ -56,8 +63,25 @@ interface Mount extends MountEntry {
   attrs: Map<string, Cached<DriverAttr>>;
   lists: Map<string, Cached<DriverEntry[]>>;
   epoch: number;
+  owners: boolean;
   dispose(): void;
   present?(): boolean;
+}
+
+const S_ISGID = 0o2000;
+const ID = /^\d{1,10}$/;
+const MAX_ID = 0xfffffffe;
+
+function idOption(value: string | undefined): number {
+  return value === undefined ? 0 : Number(value);
+}
+
+function checkIds(options: Record<string, string>): void {
+  for (const key of ['uid', 'gid']) {
+    const value = options[key];
+    if (value === undefined) continue;
+    if (!ID.test(value) || Number(value) > MAX_ID) throw errnoError('EINVAL', `${key}=${value}`);
+  }
 }
 
 const MAX_LINKS = 40;
@@ -291,6 +315,12 @@ function statOf(attr: DriverAttr, path: string, mount: Mount): FsStat {
     ...(mount.caps.ranges ? { ranged: true } : {}),
     ...(mount.caps.links ? { linkable: true } : {}),
     ...(attr.etag !== undefined ? { version: attr.etag } : {}),
+    ...(mount.owners
+      ? {
+          uid: (mount.caps.owners ? attr.uid : undefined) ?? idOption(mount.options.uid),
+          gid: (mount.caps.owners ? attr.gid : undefined) ?? idOption(mount.options.gid),
+        }
+      : {}),
   };
 }
 
@@ -402,6 +432,7 @@ export class MountTable {
     const st = await fs.stat(target);
     if (!st.isDirectory) throw errnoError('ENOTDIR', target);
     const options = { ...spec.options };
+    if (this.deps.owners) checkIds(options);
     const maxFile = options.maxfile !== undefined ? parseSize(options.maxfile) : undefined;
     const opened = await this.deps.open(spec.type, { ...spec, target, options });
     let mounted: Mount | undefined;
@@ -447,6 +478,7 @@ export class MountTable {
       attrs: new Map(),
       lists: new Map(),
       epoch: 0,
+      owners: this.deps.owners === true,
       dispose: () => opened.dispose(),
       ...(opened.present ? { present: opened.present } : {}),
     };
@@ -661,7 +693,12 @@ class MountFs implements KernelFs {
     return this.follow(this.base.resolvePath(parentOf(real), target), hops + 1, create);
   }
 
-  private async open(mount: Mount, rel: string, write: boolean): Promise<number> {
+  private async open(
+    mount: Mount,
+    rel: string,
+    write: boolean,
+    owner?: DriverOwner
+  ): Promise<number> {
     return (await mount.conn.call({
       op: 'open',
       path: rel,
@@ -669,7 +706,28 @@ class MountFs implements KernelFs {
       create: write,
       truncate: write,
       exclusive: false,
+      ...owner,
     })) as number;
+  }
+
+  private async driverOwner(
+    found: Located,
+    real: string,
+    owner: NewOwner | undefined,
+    directory: boolean
+  ): Promise<DriverOwner | undefined> {
+    const { mount, rel } = found;
+    if (!owner || !mount.owners || !mount.caps.owners) return undefined;
+    const dir = parentOf(real);
+    const above = statOf(await this.table.getattr(mount, dir, parentOf(rel)), dir, mount);
+    const setgid = (above.mode & S_ISGID) !== 0;
+    let mode = owner.mode;
+    if (directory && setgid) mode = (mode ?? 0o755) | S_ISGID;
+    return {
+      uid: owner.uid,
+      gid: setgid ? (above.gid as number) : owner.gid,
+      ...(mode !== undefined ? { mode } : {}),
+    };
   }
 
   resolvePath(base: string, path: string): string {
@@ -737,19 +795,26 @@ class MountFs implements KernelFs {
         `${real} would be larger than this mount's maxfile (${mount.maxFile})`
       );
     }
+    const made = await this.driverOwner(found, real, owner, false);
     for (let attempt = 1; ; attempt++) {
       try {
-        return await this.writeWhole(mount, real, rel, bytes);
+        return await this.writeWhole(mount, real, rel, bytes, made);
       } catch (err) {
         if ((err as { code?: unknown }).code !== 'ESTALE' || attempt >= STALE_RETRIES) throw err;
       }
     }
   }
 
-  private async writeWhole(mount: Mount, real: string, rel: string, bytes: Uint8Array) {
+  private async writeWhole(
+    mount: Mount,
+    real: string,
+    rel: string,
+    bytes: Uint8Array,
+    owner?: DriverOwner
+  ) {
     await this.table.commit(real);
     this.table.forget(mount, real);
-    const fh = await this.open(mount, rel, true);
+    const fh = await this.open(mount, rel, true, owner);
     const chunk = mount.caps.maxIo ?? DEFAULT_IO;
     try {
       for (let offset = 0; offset < bytes.length; offset += chunk) {
@@ -962,10 +1027,12 @@ class MountFs implements KernelFs {
     const { mount, rel } = found;
     const real = normalizePath(path);
     this.writable(mount, real);
+    const { owner } = options;
     if (!options.recursive) {
       if (rel === '/') throw errnoError('EEXIST', real);
+      const made = await this.driverOwner(found, real, owner, true);
       this.table.forget(mount, real);
-      await mount.conn.call({ op: 'mkdir', path: rel });
+      await mount.conn.call({ op: 'mkdir', path: rel, ...made });
       return;
     }
     const parts = rel.split('/').filter(Boolean);
@@ -975,8 +1042,10 @@ class MountFs implements KernelFs {
       const exists = await this.table.getattr(mount, full, sub).catch(() => undefined);
       if (exists?.kind === 'directory') continue;
       if (exists) throw errnoError('ENOTDIR', full);
+      const own = n === parts.length ? owner : owner && { ...owner, mode: owner.parents };
+      const made = await this.driverOwner({ mount, rel: sub }, full, own, true);
       this.table.forget(mount, full);
-      await mount.conn.call({ op: 'mkdir', path: sub });
+      await mount.conn.call({ op: 'mkdir', path: sub, ...made });
     }
   }
 
@@ -1061,8 +1130,10 @@ class MountFs implements KernelFs {
     this.writable(found.mount, normalizePath(path));
     if (!found.mount.caps.symlinks)
       throw errnoError('EPERM', `${path}: this file system has no symlinks`);
+    const link = owner && { uid: owner.uid, gid: owner.gid };
+    const made = await this.driverOwner(found, normalizePath(path), link, false);
     this.table.forget(found.mount, normalizePath(path));
-    await found.mount.conn.call({ op: 'symlink', target, path: found.rel });
+    await found.mount.conn.call({ op: 'symlink', target, path: found.rel, ...made });
   }
 
   async realpath(path: string, follow: boolean): Promise<string> {
@@ -1080,12 +1151,29 @@ class MountFs implements KernelFs {
 
   async chown(path: string, change: OwnerChange): Promise<void> {
     const real = change.follow === false || change.kind === 'new' ? path : await this.follow(path);
-    if (this.at(real)) {
-      if (change.kind === 'new') return;
-      throw errnoError('EPERM', `${path}: this file system keeps no owners`);
-    }
+    const found = this.at(real);
+    if (found) return this.chownMounted(found, normalizePath(real), change);
     if (!this.base.chown) throw errnoError('EPERM', path);
     return this.base.chown(real, change);
+  }
+
+  private async chownMounted(found: Located, real: string, change: OwnerChange): Promise<void> {
+    const { mount, rel } = found;
+    if (!mount.owners || !mount.caps.owners) {
+      if (change.kind === 'new') return;
+      throw errnoError('EPERM', `${real}: this file system keeps no owners`);
+    }
+    this.writable(mount, real);
+    const { uid, gid, mode } = change;
+    const fresh = change.kind === 'new' && ({ uid, gid, mode } as NewOwner);
+    const set = (fresh ? await this.driverOwner(found, real, fresh, false) : change) as DriverOwner;
+    this.table.forget(mount, real);
+    const attrs = Object.entries({ uid: set.uid, gid: set.gid, mode: set.mode });
+    await mount.conn.call({
+      op: 'setattr',
+      path: rel,
+      ...Object.fromEntries(attrs.filter(([, value]) => value !== undefined)),
+    });
   }
 
   async chmod(path: string, mode: number): Promise<void> {

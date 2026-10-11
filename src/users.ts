@@ -147,12 +147,23 @@ export class UserDb {
   private async stampHome(row: PasswdRow, shared: GroupRow | undefined): Promise<void> {
     const home = this.fs.resolvePath('/', row.home);
     if (!this.owners || !this.fs.chown || !HOME_DIR.test(home)) return;
-    if ((await this.fs.realpath?.(home, false).catch(() => undefined)) !== home) return;
-    if (!(await this.fs.lstat(home)).isDirectory) return;
+    if (!(await this.realDir(home))) return;
     const gid = shared?.gid ?? row.gid;
     await this.fs.chown(home, { uid: row.uid, gid, follow: false, kind: 'adopt' });
-    const mode = shared ? 0o2750 : row.name.startsWith('scoop-') ? 0o750 : 0o700;
-    await this.fs.chmod(home, mode);
+    const scoop = row.name.startsWith('scoop-');
+    await this.fs.chmod(home, shared ? 0o2750 : scoop ? 0o750 : 0o700);
+    const pnpm = `${home}/.local/share/pnpm`;
+    if (await this.realDir(pnpm)) await this.fs.chmod(pnpm, scoop ? 0o750 : 0o700);
+  }
+
+  private async realDir(path: string): Promise<boolean> {
+    const parts = path.split('/').filter(Boolean);
+    for (let n = 1; n <= parts.length; n++) {
+      const at = `/${parts.slice(0, n).join('/')}`;
+      const st = await this.fs.lstat(at).catch(() => undefined);
+      if (!st?.isDirectory) return false;
+    }
+    return true;
   }
 
   private async read(path: string, fallback: string): Promise<string> {
@@ -172,15 +183,17 @@ export class UserDb {
   }
 
   private async provision(row: PasswdRow): Promise<void> {
+    const owner = this.owners ? { uid: row.uid, gid: row.gid } : undefined;
+    const made = owner ? { recursive: true, owner } : { recursive: true };
     const pnpm = `${row.home}/.local/share/pnpm`;
     if (!(await this.fs.exists(pnpm))) {
-      await this.fs.mkdir(pnpm, { recursive: true });
+      await this.fs.mkdir(pnpm, made);
       await this.fs.chmod(pnpm, row.name.startsWith('scoop-') ? 0o750 : 0o700);
     }
     const config = `${row.home}/.config/pnpm/config.yaml`;
     if (!(await this.fs.exists(config))) {
-      await this.fs.mkdir(`${row.home}/.config/pnpm`, { recursive: true });
-      await this.fs.writeFile(config, PNPM_CONFIG);
+      await this.fs.mkdir(`${row.home}/.config/pnpm`, made);
+      await this.fs.writeFile(config, PNPM_CONFIG, owner);
     }
   }
 

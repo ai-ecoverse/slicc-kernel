@@ -248,9 +248,9 @@ export function createSyncFsSabBridge(
     create: (path, mode) => {
       run({ op: 'create', path, ...(mode !== undefined ? { mode } : {}) }, path);
     },
-    chown: (path, uid, gid) => {
+    chown: (path, uid, gid, follow) => {
       const ids = { ...(uid !== undefined ? { uid } : {}), ...(gid !== undefined ? { gid } : {}) };
-      run({ op: 'lchown', path, ...ids }, path);
+      run({ op: follow ? 'chown' : 'lchown', path, ...ids }, path);
     },
     ...(opts.owners ? { owners: true } : {}),
     hold: (path, held, open, handle) => {
