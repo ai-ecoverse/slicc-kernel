@@ -163,12 +163,18 @@ const FOLLOWING = ['writeFile', 'chmod', 'utimes', 'pwrite', 'truncate'] as cons
 const NOT_FOLLOWING = ['mkdir', 'rm', 'unlink', 'rmdir', 'lutimes', 'create'] as const;
 const MAX_HOPS = 40;
 
-type ProcWalk = Generator<string, string | undefined, string | null | undefined>;
+type ProcRefusal = { refused: 'ENOENT' | 'ENOTDIR' };
+type ProcWalk = Generator<
+  { at: string; check: boolean },
+  string | undefined | ProcRefusal,
+  string | boolean | null
+>;
 
 function* procWalk(path: string, follow: boolean): ProcWalk {
   let done: string[] = [];
   let todo = path.split('/').filter((part) => part !== '');
   let hops = 0;
+  let broken: ProcRefusal | undefined;
   while (todo.length > 0) {
     const part = todo.shift() as string;
     if (part === '.') continue;
@@ -178,18 +184,28 @@ function* procWalk(path: string, follow: boolean): ProcWalk {
     }
     const at = `/${[...done, part].join('/')}`;
     const whole = normalize(`/${[...done, part, ...todo].join('/')}`);
-    if (inProc(at) && inProc(whole)) return whole;
+    if (inProc(at) && inProc(whole)) return broken ?? whole;
     if (!follow && todo.length === 0) return undefined;
-    const target = yield at;
-    if (target === null) return undefined;
-    if (target === undefined) done.push(part);
-    else {
+    const target = yield { at, check: todo[0] === '..' };
+    if (typeof target === 'string') {
       if (++hops > MAX_HOPS) return undefined;
-      if (target.startsWith('/')) done = [];
-      todo = [...target.split('/').filter((part) => part !== ''), ...todo];
+      [done, todo] = throughLink(target, done, todo);
+    } else {
+      broken ??= refusalOf(target);
+      done.push(part);
     }
   }
   return undefined;
+}
+
+function refusalOf(found: boolean | null): ProcRefusal | undefined {
+  if (found === true) return undefined;
+  return { refused: found === null ? 'ENOENT' : 'ENOTDIR' };
+}
+
+function throughLink(target: string, done: string[], todo: string[]): [string[], string[]] {
+  const parts = target.split('/').filter((part) => part !== '');
+  return [target.startsWith('/') ? [] : done, [...parts, ...todo]];
 }
 
 function procPath(
@@ -200,22 +216,26 @@ function procPath(
   const walk = procWalk(path, follow);
   let step = walk.next();
   while (!step.done) {
-    let target: string | null | undefined;
+    const { at, check } = step.value;
+    let target: string | boolean | null;
     try {
-      target = fs.lstat(step.value).isSymbolicLink ? fs.readlink(step.value) : undefined;
+      const st = fs.lstat(at);
+      target = st.isSymbolicLink ? fs.readlink(at) : !check || st.isDirectory;
     } catch {
       target = null;
     }
     step = walk.next(target);
   }
-  return step.value;
+  const result = step.value;
+  if (typeof result === 'object') throw syncError(result.refused, path);
+  return result;
 }
 
 export async function procAlias(
   fs: { readlink?(path: string): Promise<string>; lstat?(path: string): Promise<unknown> },
   path: string,
   follow: boolean
-): Promise<string | undefined> {
+): Promise<string | undefined | ProcRefusal> {
   const { readlink, lstat } = fs;
   if (!readlink || !lstat) return undefined;
   const physical = await lstat.call(fs, '/proc').then(
@@ -226,7 +246,10 @@ export async function procAlias(
   const walk = procWalk(path, follow);
   let step = walk.next();
   while (!step.done) {
-    const target = await readlink.call(fs, step.value).catch(() => undefined);
+    const { at, check } = step.value;
+    const link = await readlink.call(fs, at).catch(() => undefined);
+    const isDir = (st: unknown) => (st as { isDirectory?: boolean }).isDirectory === true;
+    const target = link ?? (check ? await lstat.call(fs, at).then(isDir, () => null) : true);
     step = walk.next(target);
   }
   return step.value;
@@ -317,11 +340,19 @@ export function procfsBridge<T extends SyncFsPosixBridge>(fs: T, tree: ProcTree)
       ),
     exists: (p: string) => {
       if (inProc(p)) return tree.exists(p);
-      const real = shadowing() ? toProc(p, true) : undefined;
+      const probe = () => {
+        try {
+          return toProc(p, true);
+        } catch {
+          return null;
+        }
+      };
+      const real = shadowing() ? probe() : undefined;
+      if (real === null) return false;
       if (real !== undefined) return tree.exists(real);
       if (fs.exists(p)) return true;
-      const late = toProc(p, true);
-      return late !== undefined && tree.exists(late);
+      const late = probe();
+      return typeof late === 'string' && tree.exists(late);
     },
     readlink: (p: string) =>
       via(
