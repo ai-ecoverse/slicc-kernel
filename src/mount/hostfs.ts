@@ -498,7 +498,12 @@ export interface PortLiveness {
 
 export function timed(transport: HostfsTransport, ms: number): HostfsTransport {
   const inflight = new Set<Promise<unknown>>();
-  const guard = <T>(name: string, run: () => Promise<T>, late?: (value: T) => void) =>
+  const guard = <T>(
+    name: string,
+    run: () => Promise<T>,
+    late?: (value: T) => void,
+    expire?: (running: Promise<T>) => void
+  ) =>
     new Promise<T>((resolve, reject) => {
       let expired = false;
       const running = run();
@@ -509,6 +514,7 @@ export function timed(transport: HostfsTransport, ms: number): HostfsTransport {
         expired = true;
         const why = `the host folder did not answer ${name} within ${ms} ms`;
         transport.retire?.(why);
+        expire?.(running);
         reject(fsError('ENOTCONN', why));
       }, ms);
       running.then(
@@ -523,8 +529,8 @@ export function timed(transport: HostfsTransport, ms: number): HostfsTransport {
         }
       );
     });
-  const cleanup = async (op: string, body: Record<string, unknown>) => {
-    await Promise.allSettled([...inflight]);
+  const cleanup = async (op: string, body: Record<string, unknown>, skip?: Promise<unknown>) => {
+    await Promise.allSettled([...inflight].filter((work) => work !== skip));
     await transport.cleanup?.(op, body);
   };
   const release = (opened: unknown) => {
@@ -547,7 +553,14 @@ export function timed(transport: HostfsTransport, ms: number): HostfsTransport {
     retire: (why) => transport.retire?.(why),
     ...(transport.cleanup ? { cleanup } : {}),
     call: (op, body, handle) =>
-      guard(op, () => transport.call(op, body, handle), op === 'open' ? release : undefined),
+      guard(
+        op,
+        () => transport.call(op, body, handle),
+        op === 'open' ? release : undefined,
+        op === 'release'
+          ? (running) => void cleanup('release', body ?? {}, running).catch(() => {})
+          : undefined
+      ),
     read: (fh, offset, size, ifMatch) =>
       guard('read', () => transport.read(fh, offset, size, ifMatch)),
     write: (fh, offset, bytes) => guard('write', () => transport.write(fh, offset, bytes)),
@@ -767,8 +780,15 @@ export function serveHostfsPort(port: MessagePort, transport: HostfsTransport): 
   };
   const send = (reply: PortReply, transfer: Transferable[] = []) =>
     port.postMessage(reply, transfer);
+  const pending = new Set<Promise<unknown>>();
+  const track = <T>(work: Promise<T>) => {
+    pending.add(work);
+    const done = () => pending.delete(work);
+    work.then(done, done);
+    return work;
+  };
   const answer = async (name: string, body: Record<string, unknown>) => {
-    const result = await transport.call(name, body);
+    const result = await track(transport.call(name, body));
     const opened = (result as { fh?: unknown } | null)?.fh;
     if (name === 'open' && typeof opened === 'number') handles.add(opened);
     if (name === 'release') handles.delete(body?.fh as number);
@@ -782,7 +802,9 @@ export function serveHostfsPort(port: MessagePort, transport: HostfsTransport): 
     if (op === 'ping') return send({ id, pong: true });
     if (op === 'bye') return stop();
     if (op === 'cleanup')
-      return void answer(data.name as string, data.body as Record<string, unknown>).catch(() => {});
+      return void Promise.allSettled([...pending])
+        .then(() => answer(data.name as string, data.body as Record<string, unknown>))
+        .catch(() => {});
     if (op === 'unwatch') return watches.get(id)?.abort();
     if (op === 'watch') {
       const stop = new AbortController();
@@ -803,17 +825,21 @@ export function serveHostfsPort(port: MessagePort, transport: HostfsTransport): 
     }
     try {
       if (op === 'read') {
-        const read = await transport.read(
-          data.fh as number,
-          data.offset as number,
-          data.size as number,
-          data.ifMatch as string | undefined
+        const read = await track(
+          transport.read(
+            data.fh as number,
+            data.offset as number,
+            data.size as number,
+            data.ifMatch as string | undefined
+          )
         );
         const bytes = read.slice();
         return send({ id, bytes }, [bytes.buffer as ArrayBuffer]);
       }
       if (op === 'write') {
-        await transport.write(data.fh as number, data.offset as number, data.bytes as Uint8Array);
+        await track(
+          transport.write(data.fh as number, data.offset as number, data.bytes as Uint8Array)
+        );
         return send({ id });
       }
       if (op !== 'call') throw fsError('EINVAL', `unknown hostfs port op ${op}`);
