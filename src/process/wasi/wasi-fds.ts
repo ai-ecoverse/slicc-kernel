@@ -548,8 +548,9 @@ export class WasiFds {
   private openedIno(fd: number): number | undefined {
     try {
       return (this.kernel.call({ op: 'fd-vfs-stat', fd, identity: true }) as { ino?: number }).ino;
-    } catch {
-      return undefined;
+    } catch (err) {
+      this.kernel.sys.close(fd);
+      throw err;
     }
   }
 
