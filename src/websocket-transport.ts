@@ -80,8 +80,8 @@ export function openWebSocket(
       reject(error);
     };
     const abort = () => {
-      socket.close(1000, 'aborted');
       fail(signal.reason);
+      socket.close(1000, 'aborted');
     };
     signal.addEventListener('abort', abort, { once: true });
     socket.addEventListener('open', () => {
@@ -105,11 +105,11 @@ export function openWebSocket(
     });
     socket.addEventListener('error', () => {
       if (open || settled) return;
+      fail(unopened(url, 1006));
+      queue.end({ code: 1006, reason: '' });
       try {
         socket.close();
       } catch {}
-      queue.end({ code: 1006, reason: '' });
-      fail(unopened(url, 1006));
     });
     socket.addEventListener('close', (event: { code: number; reason: string }) => {
       queue.end({ code: event.code, reason: event.reason });
