@@ -35,6 +35,7 @@ export interface HostfsTransport {
   readonly maxIo: number;
   readonly gone?: boolean;
   retire?(why: string): void;
+  cleanup?(fh: number): Promise<void>;
   call<T>(op: string, body?: Record<string, unknown>, handle?: boolean): Promise<T>;
   read(fh: number, offset: number, size: number, ifMatch?: string): Promise<Uint8Array>;
   write(fh: number, offset: number, bytes: Uint8Array): Promise<void>;
@@ -144,11 +145,24 @@ export class HostfsClient implements HostfsTransport {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ op, ...body }),
       },
-      handle,
-      false,
-      op === 'release'
+      handle
     );
     return (await response.json()) as T;
+  }
+
+  async cleanup(fh: number): Promise<void> {
+    const response = await this.send(
+      '/api/hostfs',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ op: 'release', fh }),
+      },
+      true,
+      false,
+      true
+    );
+    await response.body?.cancel();
   }
 
   async read(fh: number, offset: number, size: number, ifMatch?: string): Promise<Uint8Array> {
@@ -497,7 +511,7 @@ export function timed(transport: HostfsTransport, ms: number): HostfsTransport {
     });
   const release = (opened: unknown) => {
     const fh = (opened as { fh?: unknown } | null)?.fh;
-    if (typeof fh === 'number') void transport.call('release', { fh }, true).catch(() => {});
+    if (typeof fh === 'number') void transport.cleanup?.(fh).catch(() => {});
   };
   return {
     get capabilities() {
@@ -605,7 +619,12 @@ export class PortTransport implements HostfsTransport {
   }
 
   fail(why: string): void {
-    if (this.dead === undefined) this.port.close();
+    if (this.dead === undefined) {
+      try {
+        this.port.postMessage({ id: 0, op: 'bye' });
+      } catch {}
+      this.port.close();
+    }
     clearInterval(this.beat);
     this.beat = undefined;
     this.dead ??= why;
@@ -709,13 +728,28 @@ const errorOf = (err: unknown) => ({
 
 export function serveHostfsPort(port: MessagePort, transport: HostfsTransport): () => void {
   const watches = new Map<number, AbortController>();
+  const handles = new Set<number>();
+  let stopped = false;
+  const closeHandles = () => {
+    for (const fh of handles) void transport.call('release', { fh }, true).catch(() => {});
+    handles.clear();
+  };
   const send = (reply: PortReply, transfer: Transferable[] = []) =>
     port.postMessage(reply, transfer);
+  const answer = async (name: string, body: Record<string, unknown>) => {
+    const result = await transport.call(name, body);
+    const opened = (result as { fh?: unknown } | null)?.fh;
+    if (name === 'open' && typeof opened === 'number') handles.add(opened);
+    if (name === 'release') handles.delete(body?.fh as number);
+    if (stopped) closeHandles();
+    return result;
+  };
   const listener = async ({
     data,
   }: MessageEvent<Record<string, unknown> & { id: number; op: string }>) => {
     const { id, op } = data;
     if (op === 'ping') return send({ id, pong: true });
+    if (op === 'bye') return stop();
     if (op === 'unwatch') return watches.get(id)?.abort();
     if (op === 'watch') {
       const stop = new AbortController();
@@ -750,18 +784,17 @@ export function serveHostfsPort(port: MessagePort, transport: HostfsTransport): 
         return send({ id });
       }
       if (op !== 'call') throw fsError('EINVAL', `unknown hostfs port op ${op}`);
-      send({
-        id,
-        result: await transport.call(data.name as string, data.body as Record<string, unknown>),
-      });
+      send({ id, result: await answer(data.name as string, data.body as Record<string, unknown>) });
     } catch (err) {
       send({ id, error: errorOf(err) });
     }
   };
   const stop = () => {
+    stopped = true;
     port.removeEventListener('message', listener as (event: MessageEvent) => void);
     port.removeEventListener('close', stop);
     for (const watch of watches.values()) watch.abort();
+    closeHandles();
     port.close();
   };
   port.addEventListener('message', listener as (event: MessageEvent) => void);
