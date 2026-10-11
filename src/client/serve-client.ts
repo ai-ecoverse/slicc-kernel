@@ -169,6 +169,7 @@ function processes(l: Launcher, self: Account): ProcessEntry[] {
   const viewer = credOf(self);
   return l.list(viewer).map(({ tid: _, cred = viewer, umask: _umask, ...entry }) => ({
     ...entry,
+    rss: entry.memory,
     uid: cred.euid,
     gid: cred.egid,
   }));
