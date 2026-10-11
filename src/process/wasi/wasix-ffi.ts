@@ -14,6 +14,13 @@ function read(view: DataView, at: number, type: Scalar): Value {
   return view.getFloat64(at, true);
 }
 
+function readSome(view: DataView, at: number, end: number, type: Scalar): Value {
+  if (at + SIZE[type] <= end) return read(view, at, type);
+  const some = new DataView(new ArrayBuffer(8));
+  for (let i = 0; at + i < end; i++) some.setUint8(i, view.getUint8(at + i));
+  return read(some, 0, type);
+}
+
 function write(view: DataView, at: number, type: Scalar, value: Value): void {
   if (type === 'i32') view.setInt32(at, Number(value), true);
   else if (type === 'i64') view.setBigInt64(at, BigInt(value), true);
@@ -34,13 +41,9 @@ export interface FfiContext {
 
 export function callDynamic(
   ctx: FfiContext,
-  id: number,
-  values: number,
-  valuesLen: number,
-  results: number,
-  resultsLen: number,
-  strict: number
+  ...operands: [number, number, number, number, number, number]
 ): void {
+  const [id, values, valuesLen, results, resultsLen, strict] = operands.map((n) => n >>> 0);
   const table = ctx.table();
   if (!table) throw new WasiError('ENOTSUP');
   const fn = id < table.length ? table.get(id) : null;
@@ -48,31 +51,29 @@ export function callDynamic(
   if (!fn || !sig) throw new WasiError('EINVAL');
   const params = scalars(sig.params);
   const outs = scalars(sig.results);
+  const size = (types: Scalar[]) => types.reduce((n, type) => n + SIZE[type], 0);
+  if (strict && (size(params) !== valuesLen || size(outs) !== resultsLen)) {
+    throw new WasiError('EINVAL');
+  }
   const view = ctx.mem.view();
+  if (values + valuesLen > view.byteLength || results + resultsLen > view.byteLength) {
+    throw new WasiError('EFAULT');
+  }
   const end = values + valuesLen;
   let at = values;
   const args = params.map((type) => {
-    if (at + SIZE[type] > end) {
-      if (strict) throw new WasiError('EINVAL');
-      return type === 'i64' ? 0n : 0;
-    }
-    const v = read(view, at, type);
+    const v = readSome(view, at, end, type);
     at += SIZE[type];
     return v;
   });
-  if (strict && at !== end) throw new WasiError('EINVAL');
   const returned = (fn as (...a: Value[]) => Value | Value[] | undefined)(...args);
   const got = outs.length === 1 ? [returned as Value] : ((returned ?? []) as Value[]);
   const after = ctx.mem.view();
   const stop = results + resultsLen;
   let out = results;
   outs.forEach((type, i) => {
-    if (out + SIZE[type] > stop) {
-      if (strict) throw new WasiError('EINVAL');
-      return;
-    }
+    if (out + SIZE[type] > stop) return;
     write(after, out, type, got[i] as Value);
     out += SIZE[type];
   });
-  if (strict && out !== stop) throw new WasiError('EINVAL');
 }
