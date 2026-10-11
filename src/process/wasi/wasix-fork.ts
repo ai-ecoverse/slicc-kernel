@@ -78,6 +78,10 @@ export class AsyncifyDriver {
     return typeof this.exports.asyncify_start_unwind === 'function';
   }
 
+  get idle(): boolean {
+    return (this.exports.asyncify_get_state?.() ?? 0) === 0;
+  }
+
   resume(): boolean {
     if (this.exports.asyncify_get_state?.() !== UNWINDING) return false;
     this.exports.asyncify_stop_unwind?.();

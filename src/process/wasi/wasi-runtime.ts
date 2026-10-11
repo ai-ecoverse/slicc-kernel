@@ -57,6 +57,31 @@ const SLICC_TTY = 'slicc_tty';
 
 const RESERVED = RESERVED_NAMESPACES;
 
+export const UNDELIVERED: Readonly<Record<string, readonly string[]>> = {
+  [PREVIEW1]: ['proc_exit'],
+  [WASIX]: ['proc_exit2', 'thread_exit', 'thread_spawn_v2', 'callback_signal'],
+  [SLICC]: ['sigaction_set'],
+};
+
+export function delivering<T extends Record<string, WasiFunction>>(
+  ns: string,
+  table: T,
+  host: WasiHost,
+  driver: AsyncifyDriver
+): T {
+  const exempt = new Set(UNDELIVERED[ns]);
+  const out: Record<string, WasiFunction> = {};
+  for (const [name, fn] of Object.entries(table)) {
+    out[name] = exempt.has(name)
+      ? fn
+      : (...args: never[]) => {
+          if (driver.idle) host.interrupted?.();
+          return fn(...args);
+        };
+  }
+  return out as T;
+}
+
 const importsSigactionHook = (module: WebAssembly.Module): boolean =>
   WebAssembly.Module.imports(module).some((i) => i.module === SLICC && i.name === 'sigaction_set');
 
@@ -323,13 +348,23 @@ async function instantiate(
     () => memory ?? (instance?.exports.memory as WebAssembly.Memory),
     () => instance
   );
-  const slicc = traced(stats, 'slicc', host.sliccImports());
-  const sliccFs = traced(stats, 'slicc_fs', host.sliccFsImports());
-  const sliccTty = traced(stats, 'slicc_tty', host.sliccTtyImports());
+  const slicc = delivering(SLICC, traced(stats, 'slicc', host.sliccImports()), host, driver);
+  const sliccFs = delivering(
+    SLICC_FS,
+    traced(stats, 'slicc_fs', host.sliccFsImports()),
+    host,
+    driver
+  );
+  const sliccTty = delivering(
+    SLICC_TTY,
+    traced(stats, 'slicc_tty', host.sliccTtyImports()),
+    host,
+    driver
+  );
   const hostImports = linkImports(
     module,
-    preview1,
-    wasix,
+    delivering(PREVIEW1, preview1, host, driver),
+    wasix && delivering(WASIX, wasix, host, driver),
     memory,
     threads,
     extra,
