@@ -393,10 +393,22 @@ class StatCache {
     }
   }
 
-  inoOf(path: string, look: () => SyncFsBridgeStat, map = this.stats): number {
+  named(path: string, look: () => SyncFsBridgeStat): SyncFsBridgeStat | undefined {
+    if (!this.shared) return undefined;
+    this.fresh();
+    const hit = this.lstats.get(path);
+    if (hit && !('until' in hit)) return hit;
+    try {
+      return look();
+    } catch {
+      return undefined;
+    }
+  }
+
+  inoOf(path: string, look: () => SyncFsBridgeStat): number {
     if (!this.shared) return 0;
     this.fresh();
-    const hit = map.get(path);
+    const hit = this.stats.get(path);
     if (hit && 'ino' in hit && typeof hit.ino === 'number') return hit.ino;
     try {
       return look().ino ?? 0;
@@ -491,8 +503,15 @@ export function cachingBridge(
       cache.mutated(paths, ...inos);
     }
   };
-  const linkIno = (p: string, known?: SyncFsBridgeStat) =>
-    cache.inoOf(p, () => known ?? bridge.lstat(p), lstats);
+  const removal = <T>(op: () => T, paths: string[], gone: Array<SyncFsBridgeStat | undefined>) =>
+    gone.some((st) => st?.isSymbolicLink)
+      ? mutating(op)
+      : removing(
+          op,
+          paths,
+          gone.map((st) => st?.ino ?? 0)
+        );
+  const named = (p: string) => cache.named(p, () => bridge.lstat(p));
   const rewriting = <T>(p: string, op: () => T, ...also: string[]): T => {
     const ino = cache.inoOf(p, () => bridge.stat(p));
     try {
@@ -541,15 +560,15 @@ export function cachingBridge(
     rm: (p) => {
       const st = fileAt(p);
       if (!st) return mutating(() => bridge.rm(p));
-      return removing(() => bridge.rm(p), entry(p), [linkIno(p, st)]);
+      return removal(() => bridge.rm(p), entry(p), [st]);
     },
     rename: (from, to) => {
       const st = fileAt(from);
       if (!st) return mutating(() => bridge.rename(from, to));
-      const inos = [linkIno(from, st), 0, linkIno(to), 0];
-      return removing(() => bridge.rename(from, to), [...entry(from), ...entry(to)], inos);
+      const gone = [st, undefined, named(to), undefined];
+      return removal(() => bridge.rename(from, to), [...entry(from), ...entry(to)], gone);
     },
-    unlink: (p) => removing(() => bridge.unlink(p), entry(p), [linkIno(p)]),
+    unlink: (p) => removal(() => bridge.unlink(p), entry(p), [named(p)]),
     rmdir: (p) => mutating(() => bridge.rmdir(p), ...entry(p)),
     symlink: (target, link) => mutating(() => bridge.symlink(target, link), ...entry(link)),
     chmod: (p, mode) => rewriting(p, () => bridge.chmod(p, mode)),
