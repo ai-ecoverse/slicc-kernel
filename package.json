@@ -72,6 +72,7 @@
     "monocart-coverage-reports": "2.13.0",
     "playwright-core": "1.63.0",
     "semantic-release": "25.0.9",
-    "typescript": "7.0.2"
+    "typescript": "7.0.2",
+    "wabt": "1.0.37"
   }
 }
