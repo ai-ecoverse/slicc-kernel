@@ -1,4 +1,15 @@
 import { portCdpHook } from '../cdp/port.ts';
+import {
+  type Guard,
+  inParent,
+  listable,
+  makeIn,
+  readable,
+  removable,
+  renamable,
+  searchable,
+  writable,
+} from '../fs/dac.ts';
 import { fsError, type KernelFs, type NewOwner, type Owner } from '../fs/types.ts';
 import { dialSocket, serveSocket } from '../kernel/dial.ts';
 import type { TransportCall } from '../kernel/net/remote-transport.ts';
@@ -68,13 +79,41 @@ async function realpath(fs: KernelFs, path: string): Promise<string> {
   return resolved || '/';
 }
 
+type ClientCheck = (g: Guard, at: (i: number) => string) => Promise<unknown>;
+
+const CLIENT_CHECKS: Readonly<Record<string, ClientCheck>> = {
+  readFile: (g, at) => readable(g, 'read', at(0)),
+  writeFile: (g, at) => writable(g, 'write', at(0)),
+  stat: (g, at) => searchable(g, 'stat', at(0), true),
+  lstat: (g, at) => searchable(g, 'lstat', at(0), false),
+  readdir: (g, at) => listable(g, 'readdir', at(0)),
+  mkdir: (g, at) => makeIn(g, 'mkdir', at(0)),
+  rm: (g, at) => removable(g, 'rm', at(0)),
+  rename: (g, at) => renamable(g, at(0), at(1)),
+  realpath: (g, at) => searchable(g, 'realpath', at(0), true),
+  symlink: (g, at) => inParent(g, 'symlink', at(1)),
+  readlink: (g, at) => searchable(g, 'readlink', at(0), false),
+  exists: (g, at) => searchable(g, 'exists', at(0), true),
+};
+
 async function fsCall(
   fs: KernelFs,
   method: string,
   args: unknown[],
-  owner?: Owner & { umask: number }
+  owner?: Owner & { umask: number },
+  g?: Guard
 ): Promise<Answer> {
   const path = (i: number) => fs.resolvePath('/', String(args[i]));
+  if (g) {
+    const denied = await Promise.resolve((CLIENT_CHECKS[method] as ClientCheck)(g, path)).then(
+      () => false,
+      (err: unknown) => {
+        if (method === 'exists') return true;
+        throw err;
+      }
+    );
+    if (denied) return { result: false };
+  }
   switch (method) {
     case 'readFile': {
       const bytes = (await fs.readFileBuffer(path(0))).slice();
@@ -148,6 +187,11 @@ function made(owner: Owner & { umask: number }): NewOwner {
 function ownerFor(l: Launcher, self: Account | undefined): (Owner & { umask: number }) | undefined {
   if (!l.owners || !self) return undefined;
   return { uid: self.uid, gid: self.gid, umask: self.umask ?? 0o022 };
+}
+
+function guardFor(l: Launcher, self: Account | undefined): Guard | undefined {
+  if (!l.dac || !self) return undefined;
+  return { fs: l.fs, cred: credOf(self), pid: 0, dac: l.dac };
 }
 
 async function accountOf(l: Launcher, user: string | number): Promise<Account> {
@@ -375,7 +419,7 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
         if (!(FS_METHODS as readonly string[]).includes(req.method)) {
           throw new Error(`unknown file system call ${req.method}`);
         }
-        return fsCall(l.fs, req.method, req.args, ownerFor(l, self));
+        return fsCall(l.fs, req.method, req.args, ownerFor(l, self), guardFor(l, self));
       case 'watch':
       case 'unwatch':
         return watchOp(l, req, watches, send);

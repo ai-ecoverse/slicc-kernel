@@ -1,3 +1,4 @@
+import type { Dac } from '../fs/dac.ts';
 import type { PathGate } from '../fs/unlinked.ts';
 import { HeldPaths } from '../mount/mount-fs.ts';
 import { dispatchSyncFs } from '../realm/sync-fs-dispatch.ts';
@@ -71,6 +72,7 @@ export interface SpawnWasmOptions {
   umask?: number;
   cred?: Cred;
   owners?: boolean;
+  dac?: Dac;
   identity?: () => Promise<{ pid: number; ppid: number }>;
   onSyscall?: (req: WasmSyscall) => void;
 
@@ -320,6 +322,7 @@ function holdingToken(
 ): string {
   return mintSyncFsToken({
     ...(opts.owners ? caller : {}),
+    ...(opts.dac ? { dac: opts.dac, pid: opts.pid } : {}),
     fs: opts.fs,
     cwd: opts.cwd,
     ...(opts.statfs ? { statfs: opts.statfs } : {}),

@@ -13,6 +13,7 @@ import {
 } from './commands.ts';
 
 import { followLinks, withCommandDirs } from './fs/commands.ts';
+import { Dac, type DenialHook } from './fs/dac.ts';
 import { physicalPathAsync } from './fs/physical-path.ts';
 import type { KernelFs, UsersMode } from './fs/types.ts';
 import { fsError, normalizePath } from './fs/types.ts';
@@ -131,6 +132,7 @@ export interface LauncherOptions {
   uplink?: NetworkUplink;
   hostname?: string;
   users?: UsersMode;
+  onDenial?: DenialHook;
 }
 
 export interface PendingMedium {
@@ -392,12 +394,14 @@ export class Launcher {
   private readonly booting = new AbortController();
   fstab: Promise<FstabResult[]> = Promise.resolve([]);
   readonly usersMode: UsersMode;
+  readonly dac: Dac | undefined;
   private nextPid = 1000;
   readonly boot = Date.now();
   private terminals = 0;
 
   constructor(options: LauncherOptions) {
     this.usersMode = usersMode(options.users);
+    this.dac = this.usersMode === 'off' ? undefined : new Dac(this.usersMode, options.onDenial);
     if (this.owners) options.fs.trackOwners?.();
     this.mounts = new MountTable({
       open: (type, spec) => this.driver(type, spec),
@@ -769,6 +773,7 @@ export class Launcher {
       ...(req.umask !== undefined ? { umask: req.umask } : {}),
       cred: req.cred,
       ...(this.owners ? { owners: true } : {}),
+      ...(this.dac ? { dac: this.dac } : {}),
       program: req.program,
       argv0: req.argv0,
       args: req.args,

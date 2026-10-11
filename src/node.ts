@@ -2,6 +2,7 @@ import { MessageChannel, type MessagePort, Worker } from 'node:worker_threads';
 import type { CdpHook } from './cdp/types.ts';
 import type { MessagePortLike } from './client/protocol.ts';
 import { type ServedClient, serveClient } from './client/serve-client.ts';
+import type { DenialHook } from './fs/dac.ts';
 import { OpfsFs } from './fs/opfs.ts';
 import { fsError, type UsersMode } from './fs/types.ts';
 import { pidOwner } from './fs/unlinked.ts';
@@ -44,6 +45,7 @@ export {
   type SpawnOptions,
   type WatchChange,
 } from './client/attach.ts';
+export type { Denial, DenialHook } from './fs/dac.ts';
 export type {
   ConnectOptions,
   KernelGroups,
@@ -85,6 +87,7 @@ export interface NodeKernelOptions {
   cdp?: CdpHook;
   hostname?: string;
   users?: UsersMode;
+  onDenial?: DenialHook;
 }
 
 export interface NodeKernel {
@@ -211,6 +214,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     ...(options.cdp ? { cdp: options.cdp } : {}),
     ...(options.hostname !== undefined ? { hostname: options.hostname } : {}),
     ...(options.users !== undefined ? { users: options.users } : {}),
+    ...(options.onDenial ? { onDenial: options.onDenial } : {}),
   });
   await launcher.prepare();
   const guard = <T>(work: () => Promise<T>): Promise<T> =>
