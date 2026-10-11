@@ -48,6 +48,7 @@ export interface OwnerChange {
 
 export interface KernelFs {
   resolvePath(base: string, path: string): string;
+  exclusive?<T>(path: string, run: (held: Pick<KernelFs, 'writeFile'>) => Promise<T>): Promise<T>;
   readFile(path: string): Promise<string>;
   readFileBuffer(path: string): Promise<Uint8Array>;
   writeFile(path: string, content: Uint8Array | string, owner?: NewOwner): Promise<void>;

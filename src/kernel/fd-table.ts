@@ -82,6 +82,8 @@ export interface KernelFile {
 
   stat?(): Promise<{ path: string; size: number; orphan?: true }>;
 
+  known?(): number | undefined;
+
   tty?: KernelTty;
 
   pty?: PtyPair;

@@ -29,6 +29,7 @@ export interface VfsFileFs extends Partial<AsyncRangedIo> {
   realpath?(path: string, follow: boolean): Promise<string>;
   chown?(path: string, change: OwnerChange): Promise<void>;
   links?(path: string): boolean;
+  exclusive?<T>(path: string, run: () => Promise<T>): Promise<T>;
 }
 
 const O_ACCMODE = 0o3;
@@ -155,8 +156,9 @@ export class VfsNode {
       this.ranged = new AsyncRangedFile(io, this.path, this.pin.size, this.pin.version);
       return this.ranged;
     }
-    const st =
-      io && !this.orphaned ? await this.fs.stat?.(this.path).catch(() => undefined) : undefined;
+    const at = this.path;
+    const st = io && !this.orphaned ? await this.fs.stat?.(at).catch(() => undefined) : undefined;
+    this.note(at, st);
     if (io && st?.ranged) {
       this.ranged = new AsyncRangedFile(io, this.path, st.size ?? 0, st.version);
       return this.ranged;
@@ -225,13 +227,28 @@ export class VfsNode {
     const stat = this.fs.stat?.bind(this.fs);
     if (!stat || this.orphaned) return Promise.resolve(undefined);
     const parent = this.path.slice(0, this.path.lastIndexOf('/')) || '/';
-    this.cap ??= stat(this.path)
+    const at = this.path;
+    this.cap ??= stat(at)
+      .then((st) => {
+        this.note(at, st);
+        return st;
+      })
       .catch(() => stat(parent))
       .then(
         (st) => st.maxFile,
         () => undefined
       );
     return this.cap;
+  }
+
+  private seen: { path: string; ino: number } | undefined;
+
+  private note(path: string, st: { ino?: number } | undefined): void {
+    if (st?.ino !== undefined) this.seen = { path, ino: st.ino };
+  }
+
+  known(): number | undefined {
+    return this.seen?.path === this.path && !this.orphaned ? this.seen.ino : undefined;
   }
 
   private async fits(end: number): Promise<void> {
@@ -611,6 +628,10 @@ export async function refuseReadonly(
 export function keepingOpen(fs: KernelFs, nodes: VfsNodes): KernelFs {
   return {
     ...fs,
+    exclusive: (path, run) =>
+      nodes.onEntry(fs.resolvePath('/', path), () =>
+        run({ writeFile: (p, content, owner) => fs.writeFile(p, content, owner) })
+      ),
     async rm(path, options) {
       const at = await nodes.entryKey(fs.resolvePath('/', path));
       await nodes.unlinking(at);
@@ -728,6 +749,7 @@ export function vfsFile(fs: VfsFileFs, opts: VfsFileOptions, nodes?: VfsNodes): 
         size: await node.size(),
         ...(node.orphaned ? { orphan: true as const } : {}),
       })),
+    known: () => node.known(),
     flush: () => serial(() => node.flush()),
 
     close: () =>

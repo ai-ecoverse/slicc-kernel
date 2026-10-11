@@ -46,6 +46,7 @@ export interface SyncFsRequest {
   uid?: number;
   gid?: number;
   exclusive?: boolean;
+  identity?: boolean;
 }
 
 export type SyncFsResult =
@@ -123,6 +124,8 @@ export interface SyncFsPosixBridge {
   pread?(path: string, offset: number, length: number, version?: string): Uint8Array;
   pwrite?(path: string, offset: number, bytes: Uint8Array, transfer?: boolean): void;
   truncate?(path: string, size: number): void;
+  identify?(): void;
+  identified?(): SyncFsBridgeStat | null;
 }
 
 export function syncError(code: string, label: string): Error & { code: string } {

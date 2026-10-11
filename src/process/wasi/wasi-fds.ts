@@ -159,6 +159,7 @@ export class WasiFds {
       this.cloexec.clear();
     }
     this.shared = ids;
+    (this.fs as { threaded?(): void }).threaded?.();
     this.seen = Atomics.load(ids, GEN);
   }
 
@@ -544,6 +545,14 @@ export class WasiFds {
     this.buffers.delete(path);
   }
 
+  private openedIno(fd: number): number | undefined {
+    try {
+      return (this.kernel.call({ op: 'fd-vfs-stat', fd, identity: true }) as { ino?: number }).ino;
+    } catch {
+      return undefined;
+    }
+  }
+
   private inoOf(path: string): number | undefined {
     try {
       return this.fs.stat(path).ino;
@@ -709,9 +718,8 @@ export class WasiFds {
 
     const truncate = made || (oflags & OFLAGS.TRUNC) !== 0;
     const fd = this.kernel.sys.openVfs(path, flags, 0, truncate ? { truncate } : {});
-    const was = existing && this.inoOf(path);
-    if (truncate) (this.fs as { touched?(path?: string, ino?: number): void }).touched?.(path, was);
-    const ino = existing ? was : this.inoOf(path);
+    const ino = writable ? (this.openedIno(fd) ?? this.inoOf(path)) : undefined;
+    if (truncate) (this.fs as { touched?(path?: string, ino?: number): void }).touched?.(path, ino);
     this.table.set(fd, { type: 'kernel', kind: 'file', nonblock: false, append, path, ino });
     if (append) this.publishFlags(fd, { nonblock: false, append });
     this.bump();

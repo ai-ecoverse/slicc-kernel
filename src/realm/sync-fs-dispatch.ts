@@ -349,9 +349,28 @@ async function holdOp(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest)
   return done;
 }
 
+const IDENTITY_OPS = new Set<SyncFsOp>(['write', 'pwrite', 'truncate', 'chmod', 'utimes']);
+
 export async function dispatchSyncFs(req: SyncFsRequest): Promise<SyncFsResult> {
   const entry = resolveSyncFsToken(req.token);
   if (!entry) return { ok: false, errno: 'EACCES', message: 'sync-fs: unknown or revoked token' };
+  if (!req.identity || !IDENTITY_OPS.has(req.op)) return dispatchOne(entry, req);
+  const { fs, cwd } = entry;
+  const path = fs.resolvePath(cwd, req.path);
+  const identified = async (held?: Pick<KernelFs, 'writeFile'>): Promise<SyncFsResult> => {
+    const result = await dispatchOne(held ? { ...entry, fs: { ...fs, ...held } } : entry, req);
+    if (!result.ok) return result;
+    const st = await fs.stat(path).catch(() => undefined);
+    return json(st ? statJson(st) : null);
+  };
+  try {
+    return await (fs.exclusive ? fs.exclusive(path, identified) : identified());
+  } catch (err) {
+    return toErrno(err);
+  }
+}
+
+async function dispatchOne(entry: SyncFsTokenEntry, req: SyncFsRequest): Promise<SyncFsResult> {
   const { fs, cwd } = entry;
   try {
     const path = fs.resolvePath(cwd, req.path);

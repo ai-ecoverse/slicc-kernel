@@ -154,10 +154,18 @@ export function createSyncFsSabBridge(
     throw errnoError('EIO', path);
   }
 
+  let identity: { identity: true } | Record<string, never> = {};
+  let last: SyncFsBridgeStat | null = null;
+  const changing = (req: SyncSabRequestBody, path: string, transfer?: Transferable[]): void => {
+    last = null;
+    const r = run({ ...req, ...identity }, path, transfer);
+    if (r.ok && r.kind === 'json') last = parseSyncFsStat(r.json);
+  };
+
   const io = (id: { handle?: number }): SyncFsFileIo => ({
     readFile: (path) => bytes({ op: 'read', path, ...id }, path),
     writeFile: (path, data, open) => {
-      run({ op: 'write', path, body: data, ...(open ? { mode: 1 } : {}), ...id }, path);
+      changing({ op: 'write', path, body: data, ...(open ? { mode: 1 } : {}), ...id }, path);
     },
     pread: (path, offset, length, version) =>
       bytes({ op: 'pread', path, offset, length, ...(version ? { version } : {}), ...id }, path),
@@ -165,10 +173,10 @@ export function createSyncFsSabBridge(
       const whole = body.byteOffset === 0 && body.byteLength === body.buffer.byteLength;
       const owned = transfer && whole && body.buffer instanceof ArrayBuffer;
       const transferred = owned ? [body.buffer as ArrayBuffer] : [];
-      run({ op: 'pwrite', path, offset, body, ...id }, path, transferred);
+      changing({ op: 'pwrite', path, offset, body, ...id }, path, transferred);
     },
     truncate: (path, length) => {
-      run({ op: 'truncate', path, length, ...id }, path);
+      changing({ op: 'truncate', path, length, ...id }, path);
     },
   });
 
@@ -242,11 +250,15 @@ export function createSyncFsSabBridge(
       return target;
     },
     chmod: (path, mode) => {
-      run({ op: 'chmod', path, mode }, path);
+      changing({ op: 'chmod', path, mode }, path);
     },
     utimes: (path, atimeMs, mtimeMs) => {
-      run({ op: 'utimes', path, atimeMs, mtimeMs }, path);
+      changing({ op: 'utimes', path, atimeMs, mtimeMs }, path);
     },
+    identify: () => {
+      identity = { identity: true };
+    },
+    identified: () => last,
     lutimes: (path, atimeMs, mtimeMs) => {
       run({ op: 'lutimes', path, atimeMs, mtimeMs }, path);
     },
