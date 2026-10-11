@@ -488,8 +488,7 @@ export class WasiFds {
     this.buffers.delete(path);
   }
 
-  private inoOf(path: string, known?: SyncFsBridgeStat): number | undefined {
-    if (known?.ino !== undefined) return known.ino;
+  private inoOf(path: string): number | undefined {
     try {
       return this.fs.stat(path).ino;
     } catch {
@@ -602,9 +601,9 @@ export class WasiFds {
 
     const truncate = made || (oflags & OFLAGS.TRUNC) !== 0;
     const fd = this.kernel.sys.openVfs(path, flags, 0, truncate ? { truncate } : {});
-    if (truncate)
-      (this.fs as { touched?(path?: string, ino?: number): void }).touched?.(path, existing?.ino);
-    const ino = this.inoOf(path, existing);
+    const was = existing && this.inoOf(path);
+    if (truncate) (this.fs as { touched?(path?: string, ino?: number): void }).touched?.(path, was);
+    const ino = existing ? was : this.inoOf(path);
     this.table.set(fd, { type: 'kernel', kind: 'file', nonblock: false, append, path, ino });
     if (append) this.publishFlags(fd, { nonblock: false, append });
     this.bump();

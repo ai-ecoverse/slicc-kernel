@@ -385,23 +385,12 @@ class StatCache {
     this.lstats.delete(path);
   }
 
-  mutated(paths: readonly string[], ...inos: number[]): void {
+  mutated(paths: readonly string[], ino = 0): void {
     this.clear();
     if (!this.shared) return;
+    const key = (ino % 4294967296) | 0;
     for (const [i, hash] of (paths.length > 0 ? paths.map(pathHash) : [0]).entries()) {
-      this.seen = this.publish(this.shared, hash, ((inos[i] ?? 0) % 4294967296) | 0);
-    }
-  }
-
-  named(path: string, look: () => SyncFsBridgeStat): SyncFsBridgeStat | undefined {
-    if (!this.shared) return undefined;
-    this.fresh();
-    const hit = this.lstats.get(path);
-    if (hit && !('until' in hit)) return hit;
-    try {
-      return look();
-    } catch {
-      return undefined;
+      this.seen = this.publish(this.shared, hash, i === 0 ? key : 0);
     }
   }
 
@@ -495,23 +484,13 @@ export function cachingBridge(
   const invalidate = () => cache.mutated([]);
   const touched = (path?: string, ino?: number) => cache.changed(path, ino);
 
-  const mutating = <T>(op: () => T, ...paths: string[]): T => removing(op, paths, []);
-  const removing = <T>(op: () => T, paths: string[], inos: number[]): T => {
+  const mutating = <T>(op: () => T, ...paths: string[]): T => {
     try {
       return op();
     } finally {
-      cache.mutated(paths, ...inos);
+      cache.mutated(paths);
     }
   };
-  const removal = <T>(op: () => T, paths: string[], gone: Array<SyncFsBridgeStat | undefined>) =>
-    gone.some((st) => st?.isSymbolicLink)
-      ? mutating(op)
-      : removing(
-          op,
-          paths,
-          gone.map((st) => st?.ino ?? 0)
-        );
-  const named = (p: string) => cache.named(p, () => bridge.lstat(p));
   const rewriting = <T>(p: string, op: () => T, ...also: string[]): T => {
     const ino = cache.inoOf(p, () => bridge.stat(p));
     try {
@@ -521,14 +500,6 @@ export function cachingBridge(
     }
   };
   const entry = (p: string) => [p, p.slice(0, p.lastIndexOf('/')) || '/'];
-  const fileAt = (p: string) => {
-    try {
-      const st = bridge.lstat(p);
-      return st.isDirectory ? undefined : st;
-    } catch {
-      return undefined;
-    }
-  };
   return {
     readFile: (p) => bridge.readFile(p),
     readdir: (p) => bridge.readdir(p),
@@ -557,19 +528,10 @@ export function cachingBridge(
     writeFile: (p, bytes, open) =>
       rewriting(p, () => bridge.writeFile(p, bytes, open), ...entry(p).slice(1)),
     mkdir: (p) => mutating(() => bridge.mkdir(p), ...entry(p)),
-    rm: (p) => {
-      const st = fileAt(p);
-      if (!st) return mutating(() => bridge.rm(p));
-      return removal(() => bridge.rm(p), entry(p), [st]);
-    },
-    rename: (from, to) => {
-      const st = fileAt(from);
-      if (!st) return mutating(() => bridge.rename(from, to));
-      const gone = [st, undefined, named(to), undefined];
-      return removal(() => bridge.rename(from, to), [...entry(from), ...entry(to)], gone);
-    },
-    unlink: (p) => removal(() => bridge.unlink(p), entry(p), [named(p)]),
-    rmdir: (p) => mutating(() => bridge.rmdir(p), ...entry(p)),
+    rm: (p) => mutating(() => bridge.rm(p)),
+    rename: (from, to) => mutating(() => bridge.rename(from, to)),
+    unlink: (p) => mutating(() => bridge.unlink(p)),
+    rmdir: (p) => mutating(() => bridge.rmdir(p)),
     symlink: (target, link) => mutating(() => bridge.symlink(target, link), ...entry(link)),
     chmod: (p, mode) => rewriting(p, () => bridge.chmod(p, mode)),
     utimes: (p, a, m) => rewriting(p, () => bridge.utimes(p, a, m)),
