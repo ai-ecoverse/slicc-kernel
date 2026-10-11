@@ -682,7 +682,12 @@ export class WasiHost {
   private sync(fd: number): void {
     const e = this.fds.get(fd);
     if (e.type === 'file') e.file.flush();
-    else if (e.type === 'kernel' && this.fds.kind(fd, e) === 'file') this.o.kernel.sys.flush(fd);
+    else if (e.type === 'device') this.interrupted?.();
+    else if (e.type === 'kernel') {
+      const kind = this.fds.kind(fd, e);
+      if (kind === 'file') this.o.kernel.sys.flush(fd);
+      else if (kind === 'device') this.interrupted?.();
+    }
   }
 
   private fdstat(fd: number, out: number): void {

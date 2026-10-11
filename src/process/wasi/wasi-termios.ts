@@ -43,7 +43,6 @@ export function sliccTty(
 ) {
   const { sys } = kernel;
   const terminal = (fd: number): number => {
-    interrupted();
     const e = fds.find(fd);
     if (!e) throw new WasiError('EBADF');
     if (e.type !== 'kernel' || fds.kind(fd, e) !== 'tty') throw new WasiError('ENOTTY');
@@ -53,13 +52,19 @@ export function sliccTty(
     if (value === undefined) throw new WasiError('ENOTTY');
     return value;
   };
+  const getAttr = (fd: number, ptr: number): void => {
+    interrupted();
+    writeTermios(mem, ptr, needs(sys.tcgets?.(terminal(fd))));
+  };
   const setAttr = (fd: number, actions: number, ptr: number): void => {
+    interrupted();
     if (actions < 0 || actions > TCSAFLUSH) throw new WasiError('EINVAL');
     const at = terminal(fd);
     needs(sys.tcsets);
     sys.tcsets?.(at, readTermios(mem, ptr), actions === TCSAFLUSH);
   };
   const size = (fd: number, ptr: number): void => {
+    interrupted();
     const [rows, cols] = needs(sys.winsize?.(terminal(fd)));
     mem.bytes(ptr, 8).fill(0);
     const v = mem.view();
@@ -67,8 +72,7 @@ export function sliccTty(
     v.setUint16(ptr + 2, cols, true);
   };
   return {
-    tcgetattr: (fd: number, ptr: number) =>
-      void writeTermios(mem, ptr, needs(sys.tcgets?.(terminal(fd)))),
+    tcgetattr: (fd: number, ptr: number) => void getAttr(fd, ptr),
     tcsetattr: (fd: number, actions: number, ptr: number) => void setAttr(fd, actions, ptr),
     winsize: (fd: number, ptr: number) => void size(fd, ptr),
   };
