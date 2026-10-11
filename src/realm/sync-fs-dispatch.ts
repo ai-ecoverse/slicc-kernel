@@ -13,6 +13,7 @@ import {
 import { chownAs, ownerOf } from '../fs/owners.ts';
 import {
   type FsStat,
+  type HeldEntry,
   type KernelFs,
   lutimesOf,
   mayLink,
@@ -349,7 +350,15 @@ async function holdOp(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest)
   return done;
 }
 
-const IDENTITY_OPS = new Set<SyncFsOp>(['write', 'pwrite', 'truncate', 'chmod', 'utimes']);
+const IDENTITY_OPS = new Set<SyncFsOp>([
+  'write',
+  'pwrite',
+  'truncate',
+  'chmod',
+  'utimes',
+  'chown',
+  'lchown',
+]);
 
 export async function dispatchSyncFs(req: SyncFsRequest): Promise<SyncFsResult> {
   const entry = resolveSyncFsToken(req.token);
@@ -357,9 +366,11 @@ export async function dispatchSyncFs(req: SyncFsRequest): Promise<SyncFsResult> 
   if (!req.identity || !IDENTITY_OPS.has(req.op)) return dispatchOne(entry, req);
   const { fs, cwd } = entry;
   const path = fs.resolvePath(cwd, req.path);
-  const identified = async (held?: Pick<KernelFs, 'writeFile'>): Promise<SyncFsResult> => {
-    const result = await dispatchOne(held ? { ...entry, fs: { ...fs, ...held } } : entry, req);
+  const identified = async (held?: HeldEntry): Promise<SyncFsResult> => {
+    const own = held ? { ...entry, fs: { ...fs, writeFile: held.writeFile } } : entry;
+    const result = await dispatchOne(own, req);
     if (!result.ok) return result;
+    if (held && (await held.moved())) return json(null);
     const st = await fs.stat(path).catch(() => undefined);
     return json(st ? statJson(st) : null);
   };

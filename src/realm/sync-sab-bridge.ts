@@ -137,8 +137,11 @@ export function createSyncFsSabBridge(
   opts: { timeoutMs?: number; owners?: boolean } = {}
 ): SyncFsPosixBridge {
   const timeoutMs = opts.timeoutMs ?? SYNC_FS_REQUEST_TIMEOUT_MS;
+  let identity: { identity: true } | Record<string, never> = {};
+  let last: SyncFsBridgeStat | null = null;
 
   function run(req: SyncSabRequestBody, path: string, transfer?: Transferable[]): SyncFsResult {
+    last = null;
     const result = transport.call(req, timeoutMs, `sync-sab bridge, '${path}'`, transfer);
     if (!result.ok) throw errnoError(result.errno, path);
     return result;
@@ -154,10 +157,7 @@ export function createSyncFsSabBridge(
     throw errnoError('EIO', path);
   }
 
-  let identity: { identity: true } | Record<string, never> = {};
-  let last: SyncFsBridgeStat | null = null;
   const changing = (req: SyncSabRequestBody, path: string, transfer?: Transferable[]): void => {
-    last = null;
     const r = run({ ...req, ...identity }, path, transfer);
     if (r.ok && r.kind === 'json') last = parseSyncFsStat(r.json);
   };
@@ -267,7 +267,7 @@ export function createSyncFsSabBridge(
     },
     chown: (path, uid, gid, follow) => {
       const ids = { ...(uid !== undefined ? { uid } : {}), ...(gid !== undefined ? { gid } : {}) };
-      run({ op: follow ? 'chown' : 'lchown', path, ...ids }, path);
+      changing({ op: follow ? 'chown' : 'lchown', path, ...ids }, path);
     },
     ...(opts.owners ? { owners: true } : {}),
     hold: (path, held, open, handle) => {
