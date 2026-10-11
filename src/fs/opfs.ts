@@ -552,7 +552,7 @@ export class OpfsFs implements KernelFs {
     const parent = await this.locate(parentOf(path), true);
     if (parent.handle?.kind !== 'directory') throw fsError('ENOTDIR', path);
     await parent.handle.getDirectoryHandle(baseOf(path), { create: true });
-    this.touch(parent.path);
+    this.touch(parent.path, `${parent.path === '/' ? '' : parent.path}/${baseOf(path)}`);
   }
 
   async rm(path: string, options: { recursive?: boolean; force?: boolean } = {}): Promise<void> {
