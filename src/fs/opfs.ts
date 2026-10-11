@@ -980,3 +980,51 @@ export class OpfsFs implements KernelFs {
     return removed;
   }
 }
+
+const READS = [
+  'stat',
+  'lstat',
+  'exists',
+  'readFile',
+  'readFileBuffer',
+  'pread',
+  'readdir',
+  'readdirStat',
+  'readlink',
+  'realpath',
+] as const;
+const WRITES = [
+  'writeFile',
+  'pwrite',
+  'truncate',
+  'writeSession',
+  'mkdir',
+  'rm',
+  'link',
+  'rename',
+  'symlink',
+  'chmod',
+  'utimes',
+  'lutimes',
+  'chown',
+] as const;
+
+for (const [names, op] of [
+  [READS, 'read'],
+  [WRITES, 'write'],
+] as const) {
+  for (const name of names) {
+    const proto = OpfsFs.prototype as unknown as Record<
+      string,
+      (...args: unknown[]) => Promise<unknown>
+    >;
+    const inner = proto[name] as (...args: unknown[]) => Promise<unknown>;
+    proto[name] = async function (this: OpfsFs, ...args: unknown[]) {
+      try {
+        return await inner.apply(this, args);
+      } catch (err) {
+        throw translate(err, String(args[0]), op, false);
+      }
+    };
+  }
+}
