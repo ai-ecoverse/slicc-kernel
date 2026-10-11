@@ -22,6 +22,7 @@ import type { FetchLike, HostfsGrantHook } from './mount/hostfs.ts';
 import type { MountEntry, MountSpec } from './mount/mount-fs.ts';
 import type { ProcessMountPolicy } from './mount/syscall.ts';
 import { isMemoryRoot, memoryRoot } from './node/memory-root.ts';
+import { diagnosing } from './node/ws-diagnose.ts';
 import { signalNumber } from './serve.ts';
 import { fetchTransport, type NetworkTransport } from './transport.ts';
 
@@ -117,7 +118,7 @@ function hostfsFetchOf(options: NodeKernelOptions): { hostfsFetch?: FetchLike } 
 
 export function nodeTransport(): NetworkTransport {
   const transport = fetchTransport({ webSocket: true, webSocketHeaders: true, redirect: 'manual' });
-  return { ...transport, traits: { ...transport.traits, crossOrigin: 'any' } };
+  return diagnosing({ ...transport, traits: { ...transport.traits, crossOrigin: 'any' } });
 }
 
 const TERMINATED = 'the kernel is terminated';

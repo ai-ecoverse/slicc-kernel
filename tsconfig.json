@@ -5,6 +5,7 @@
     "src/node.ts",
     "src/node-process-worker.ts",
     "src/node-driver-worker.ts",
-    "src/node-lockdown.ts"
+    "src/node-lockdown.ts",
+    "src/node/ws-diagnose.ts"
   ]
 }
