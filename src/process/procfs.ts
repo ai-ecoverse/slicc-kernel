@@ -7,7 +7,6 @@ const DIR_MODE = 0o40555;
 const FILE_MODE = 0o100444;
 const LINK_MODE = 0o120777;
 const ENOENT = 44;
-const ESRCH = 71;
 const EINVAL = 28;
 const UID = 1000;
 const KIB = 1024;
@@ -220,12 +219,21 @@ interface ProcStream {
   node: ProcNode;
   position: number;
   sliccProc?: Uint8Array;
+  getdents?: string[] | null;
+  fd?: number | null;
+}
+
+interface DirStreamOps {
+  open?: (stream: ProcStream) => void;
+  dup?: (stream: ProcStream) => void;
+  close?: (stream: ProcStream) => void;
 }
 
 export interface ProcFs {
   lookupPath?(path: string, opts?: { follow?: boolean }): { node: object };
   createNode?(parent: object, name: string, mode: number, rdev: number): object;
   hashRemoveNode?(node: object): void;
+  streams?: unknown[];
   ErrnoError: new (errno: number) => Error;
 }
 
@@ -311,7 +319,7 @@ export function useProcfs(Fs: ProcFs, sys: ProcSys, pid: number, memory = memory
     () => {
       const listing = procList();
       const info = find(listing.processes, target, own);
-      if (!info) throw error(ESRCH);
+      if (!info) throw error();
       return pidFile(name, info, listing.boot);
     };
   const pidNames = (names: string[]) => [...new Set([...names, ...PID_FILES])];
@@ -324,14 +332,29 @@ export function useProcfs(Fs: ProcFs, sys: ProcSys, pid: number, memory = memory
     dir.node_ops.readdir = () => ['.', '..', ...PID_FILES];
     return dir;
   };
+  const scans = new Map<ProcStream, Set<number>>();
+  const listed = (target: number) => {
+    let found = false;
+    for (const [stream, pids] of scans) {
+      if (Fs.streams && Fs.streams[stream.fd ?? -1] !== stream) scans.delete(stream);
+      else found ||= pids.has(target);
+    }
+    return found;
+  };
   const procOps = proc.node_ops;
   const lookup = procOps.lookup?.bind(procOps);
   const readdir = procOps.readdir?.bind(procOps);
+  const listAll = (node: ProcNode) => {
+    const names = new Set(readdir ? readdir(node) : ['.', '..']);
+    for (const name of [...SYSTEM_FILES, 'mounts']) names.add(name);
+    for (const p of procList().processes) names.add(String(p.pid));
+    return [...names];
+  };
   proc.node_ops = {
     ...procOps,
     lookup: (parent, name) => {
       if (/^[1-9]\d*$/.test(name)) {
-        if (!infoOf(Number(name))) throw error();
+        if (!infoOf(Number(name)) && !listed(Number(name))) throw error();
         return pidDir(name, Number(name));
       }
       if (name === 'mounts') return file(parent, name, () => mountTable(sys.mountList?.() ?? []));
@@ -343,11 +366,37 @@ export function useProcfs(Fs: ProcFs, sys: ProcSys, pid: number, memory = memory
       if (!lookup) throw error();
       return lookup(parent, name);
     },
-    readdir: (node) => {
-      const names = new Set(readdir ? readdir(node) : ['.', '..']);
-      for (const name of [...SYSTEM_FILES, 'mounts']) names.add(name);
-      for (const p of procList().processes) names.add(String(p.pid));
-      return [...names];
+    readdir: (node) => listAll(node),
+  };
+  const track = (stream: ProcStream, names: string[] | null | undefined) => {
+    let current = names;
+    const remember = (list: string[]) =>
+      scans.set(stream, new Set(list.filter((n) => /^[1-9]\d*$/.test(n)).map(Number)));
+    remember(current ?? []);
+    Object.defineProperty(stream, 'getdents', {
+      configurable: true,
+      enumerable: true,
+      get: () => current,
+      set: (next: string[] | null) => {
+        current = next;
+        if (next) remember(next);
+      },
+    });
+  };
+  const dirOps = (proc.stream_ops ?? {}) as DirStreamOps;
+  proc.stream_ops = {
+    ...dirOps,
+    open: (stream: ProcStream) => {
+      dirOps.open?.(stream);
+      track(stream, listAll(proc));
+    },
+    dup: (stream: ProcStream) => {
+      dirOps.dup?.(stream);
+      track(stream, stream.getdents);
+    },
+    close: (stream: ProcStream) => {
+      scans.delete(stream);
+      dirOps.close?.(stream);
     },
   };
   hashRemoveNode.call(Fs, self);
