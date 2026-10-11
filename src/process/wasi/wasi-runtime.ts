@@ -63,23 +63,35 @@ export const UNDELIVERED: Readonly<Record<string, readonly string[]>> = {
   [SLICC]: ['sigaction_set'],
 };
 
-export function delivering<T extends Record<string, WasiFunction>>(
+const DELIVERED = [PREVIEW1, WASIX, SLICC, SLICC_FS, SLICC_TTY];
+
+function deliverAll(imports: WebAssembly.Imports, host: WasiHost, driver: AsyncifyDriver): void {
+  for (const ns of DELIVERED) {
+    const table = imports[ns];
+    if (table) imports[ns] = delivering(ns, table, host, driver);
+  }
+}
+
+export function delivering(
   ns: string,
-  table: T,
+  table: WebAssembly.ModuleImports,
   host: WasiHost,
   driver: AsyncifyDriver
-): T {
+): WebAssembly.ModuleImports {
   const exempt = new Set(UNDELIVERED[ns]);
-  const out: Record<string, WasiFunction> = {};
-  for (const [name, fn] of Object.entries(table)) {
-    out[name] = exempt.has(name)
-      ? fn
-      : (...args: never[]) => {
-          if (driver.idle) host.interrupted?.();
-          return fn(...args);
-        };
+  const out: WebAssembly.ModuleImports = {};
+  for (const [name, value] of Object.entries(table)) {
+    if (exempt.has(name) || typeof value !== 'function') {
+      out[name] = value;
+      continue;
+    }
+    const fn = value as (...args: unknown[]) => unknown;
+    out[name] = (...args: unknown[]) => {
+      if (driver.idle) host.interrupted?.();
+      return fn(...args);
+    };
   }
-  return out as T;
+  return out;
 }
 
 const importsSigactionHook = (module: WebAssembly.Module): boolean =>
@@ -348,23 +360,13 @@ async function instantiate(
     () => memory ?? (instance?.exports.memory as WebAssembly.Memory),
     () => instance
   );
-  const slicc = delivering(SLICC, traced(stats, 'slicc', host.sliccImports()), host, driver);
-  const sliccFs = delivering(
-    SLICC_FS,
-    traced(stats, 'slicc_fs', host.sliccFsImports()),
-    host,
-    driver
-  );
-  const sliccTty = delivering(
-    SLICC_TTY,
-    traced(stats, 'slicc_tty', host.sliccTtyImports()),
-    host,
-    driver
-  );
+  const slicc = traced(stats, 'slicc', host.sliccImports());
+  const sliccFs = traced(stats, 'slicc_fs', host.sliccFsImports());
+  const sliccTty = traced(stats, 'slicc_tty', host.sliccTtyImports());
   const hostImports = linkImports(
     module,
-    delivering(PREVIEW1, preview1, host, driver),
-    wasix && delivering(WASIX, wasix, host, driver),
+    preview1,
+    wasix,
     memory,
     threads,
     extra,
@@ -373,6 +375,7 @@ async function instantiate(
     sliccFs,
     sliccTty
   );
+  deliverAll(hostImports, host, driver);
   const imports: WebAssembly.Imports = sync
     ? merge(hostImports, sync.linker.mainImports(module))
     : hostImports;
