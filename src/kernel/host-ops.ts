@@ -124,12 +124,14 @@ export class AsyncOps {
     if (at >= 0) this.ready.splice(at, 1);
   }
 
-  async wait(timeoutMs: number | undefined, signal: AbortSignal): Promise<number> {
+  async wait(timeoutMs: number | undefined, blocking: () => AbortSignal): Promise<number> {
+    let signal: AbortSignal | undefined;
     for (;;) {
       if (this.closed) return -1;
       const id = this.ready.shift();
       if (id !== undefined) return id;
       if (timeoutMs !== undefined && timeoutMs <= 0) return 0;
+      signal ??= blocking();
       const woke = await this.sleep(timeoutMs, signal);
       if (!woke) return 0;
     }
@@ -203,7 +205,7 @@ export async function hostSyscall(req: HostSyscall, ctx: HostOpsContext): Promis
       if (!ctx.valid(req.req)) throw new KernelError('EINVAL');
       return json(ctx.ops.submit(req.req));
     case 'async-wait':
-      return json(await ctx.ops.wait(req.timeoutMs, ctx.blocking()));
+      return json(await ctx.ops.wait(req.timeoutMs, ctx.blocking));
     case 'async-take':
       return ctx.ops.take(req.id);
     case 'async-resolve':
