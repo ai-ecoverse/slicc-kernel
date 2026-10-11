@@ -47,6 +47,12 @@ function blockedReason(url: string, e: unknown): string {
   return `${url}: ${e instanceof Error ? e.message : String(e)}`;
 }
 
+function unopened(url: string, code: number): Error {
+  return Object.assign(new Error(`${url}: the WebSocket closed (${code}) before it opened`), {
+    status: 502,
+  });
+}
+
 export function openWebSocket(
   Socket: WebSocketConstructor,
   request: RealmWebSocketRequest,
@@ -66,13 +72,22 @@ export function openWebSocket(
   const queue = new MessageQueue(() => socket.close(1000, 'too many waiting messages'));
   return new Promise((resolve, reject) => {
     let open = false;
+    let settled = false;
+    const fail = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', abort);
+      reject(error);
+    };
     const abort = () => {
       socket.close(1000, 'aborted');
-      reject(signal.reason);
+      fail(signal.reason);
     };
     signal.addEventListener('abort', abort, { once: true });
     socket.addEventListener('open', () => {
+      if (settled) return;
       open = true;
+      settled = true;
       signal.removeEventListener('abort', abort);
       resolve({
         protocol: socket.protocol,
@@ -88,15 +103,18 @@ export function openWebSocket(
     socket.addEventListener('message', (event: { data: string | ArrayBuffer }) => {
       queue.push(typeof event.data === 'string' ? event.data : new Uint8Array(event.data));
     });
+    socket.addEventListener('error', () => {
+      if (open || settled) return;
+      try {
+        socket.close();
+      } catch {}
+      queue.end({ code: 1006, reason: '' });
+      fail(unopened(url, 1006));
+    });
     socket.addEventListener('close', (event: { code: number; reason: string }) => {
       queue.end({ code: event.code, reason: event.reason });
       if (open) return;
-      signal.removeEventListener('abort', abort);
-      reject(
-        Object.assign(new Error(`${url}: the WebSocket closed (${event.code}) before it opened`), {
-          status: 502,
-        })
-      );
+      fail(unopened(url, event.code));
     });
   });
 }
