@@ -180,7 +180,7 @@ export class WasiHost {
   }
 
   sliccTtyImports(): Record<string, WasiFunction> {
-    return wrap(sliccTty(this.mem, this.fds, this.o.kernel));
+    return wrap(sliccTty(this.mem, this.fds, this.o.kernel, () => this.interrupted?.()));
   }
 
   sliccFsImports(): Record<string, WasiFunction> {
@@ -447,6 +447,7 @@ export class WasiHost {
         out: number
       ) => {
         const path = at(dirfd, p, l);
+        if (deviceOf(path)) this.interrupted?.();
         const fresh = (oflags & OFLAGS.CREAT) !== 0 && !o.fs.exists(path);
         mem.view().setUint32(out, fds.open(path, oflags, rights, fdflags), true);
         if (fresh) this.created(path, 0o666);
@@ -600,7 +601,9 @@ export class WasiHost {
 
   private positional(fd: number, access?: 'read' | 'write'): Positional {
     const e = this.fds.get(fd);
-    if (e.type !== 'kernel' || this.fds.kind(fd, e) !== 'file') return this.file(fd, access);
+    const kind = e.type === 'kernel' ? this.fds.kind(fd, e) : e.type;
+    if (kind === 'device') this.interrupted?.();
+    if (kind !== 'file' || e.type !== 'kernel') return this.file(fd, access);
     const kernel = this.o.kernel;
     return {
       pread: (max, at) => {
@@ -634,6 +637,7 @@ export class WasiHost {
       }
     }
     if (e.type === 'device') {
+      this.interrupted?.();
       if (e.access === 'read') throw new WasiError('EBADF');
       if (e.device === 'full' && data.length > 0) throw new WasiError('ENOSPC');
       return data.length;
@@ -647,6 +651,7 @@ export class WasiHost {
       return this.o.kernel.sys.read(fd, Math.min(max, MAX_READ), { nonblock: e.nonblock });
     }
     if (e.type === 'device') {
+      this.interrupted?.();
       if (e.access === 'write') throw new WasiError('EBADF');
       if (e.device === 'null') return new Uint8Array(0);
       const out = new Uint8Array(Math.min(max, 65536));
@@ -655,15 +660,20 @@ export class WasiHost {
     return this.file(fd, 'read').read(max);
   }
 
+  private local<T>(answer: T): T {
+    this.interrupted?.();
+    return answer;
+  }
+
   private seek(fd: number, offset: number, whence: number): number {
     const e = this.fds.get(fd);
     if (e.type === 'kernel') {
       const kind = this.fds.kind(fd, e);
-      if (kind === 'device') return 0;
+      if (kind === 'device') return this.local(0);
       if (kind !== 'file') throw new WasiError('ESPIPE');
       return this.o.kernel.sys.seek(fd, offset, whence);
     }
-    if (e.type === 'device') return 0;
+    if (e.type === 'device') return this.local(0);
     const file = this.file(fd);
     const base = whence === WHENCE.SET ? 0 : whence === WHENCE.CUR ? file.offset : file.size();
     if (whence > WHENCE.END || base + offset < 0) throw new WasiError('EINVAL');
@@ -674,16 +684,24 @@ export class WasiHost {
   private sync(fd: number): void {
     const e = this.fds.get(fd);
     if (e.type === 'file') e.file.flush();
-    else if (e.type === 'kernel' && this.fds.kind(fd, e) === 'file') this.o.kernel.sys.flush(fd);
+    else if (e.type === 'device') this.interrupted?.();
+    else if (e.type === 'kernel') {
+      const kind = this.fds.kind(fd, e);
+      if (kind === 'file') this.o.kernel.sys.flush(fd);
+      else if (kind === 'device') this.interrupted?.();
+    }
   }
 
   private fdstat(fd: number, out: number): void {
     const e = this.fds.get(fd);
+    if (e.type === 'device') this.interrupted?.();
     let filetype: number = FILETYPE.CHARACTER_DEVICE;
     let seeks = true;
     let flags = 0;
     if (e.type === 'kernel') {
-      ({ filetype, seeks } = kernelFiletype(this.fds.kind(fd, e)));
+      const kind = this.fds.kind(fd, e);
+      if (kind === 'device') this.interrupted?.();
+      ({ filetype, seeks } = kernelFiletype(kind));
       if (e.nonblock) flags |= FDFLAGS.NONBLOCK;
       if (e.append) flags |= FDFLAGS.APPEND;
     } else if (e.type === 'file') {
@@ -721,7 +739,7 @@ export class WasiHost {
       if (vfs.path) return this.statOrphanable(vfs.path, vfs.size, vfs.orphan);
     }
     const filetype = kind ? kernelFiletype(kind).filetype : FILETYPE.CHARACTER_DEVICE;
-    return { filetype, size: 0n, ino: BigInt(fd + 1), mtimeNs: 0n };
+    return this.local({ filetype, size: 0n, ino: BigInt(fd + 1), mtimeNs: 0n });
   }
 
   private statOrphanable(path: string, size: number, orphan = false): Filestat {
@@ -740,7 +758,12 @@ export class WasiHost {
 
   private pathFilestat(path: string, lookup: number): Filestat {
     if (deviceOf(path)) {
-      return { filetype: FILETYPE.CHARACTER_DEVICE, size: 0n, ino: pathInode(path), mtimeNs: 0n };
+      return this.local({
+        filetype: FILETYPE.CHARACTER_DEVICE,
+        size: 0n,
+        ino: pathInode(path),
+        mtimeNs: 0n,
+      });
     }
     this.fds.flushPath(path);
     const follow = (lookup & LOOKUP_SYMLINK_FOLLOW) !== 0;
