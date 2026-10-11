@@ -52,7 +52,7 @@ import { DEFAULT_UMASK } from './kernel/process.ts';
 import type { ForkState, Program } from './kernel/protocol.ts';
 import { PtyTable } from './kernel/pty.ts';
 import { SettlingChildren } from './kernel/settling.ts';
-import { SIG } from './kernel/signals.ts';
+import { SIG, sigbit } from './kernel/signals.ts';
 import { LoopbackNet } from './kernel/socket.ts';
 import { KernelTty } from './kernel/tty.ts';
 import { keepingOpen, VfsNodes } from './kernel/vfs-file.ts';
@@ -686,7 +686,7 @@ export class Launcher {
     this.processes.set(pid, handle);
     const { cred } = req;
     this.creds.set(pid, () => handle.cred?.() ?? copyCred(cred));
-    if (req.ppid !== undefined) this.settling.started(pid, req.ppid);
+    if (req.ppid !== undefined && this.controlsJobs(req.ppid)) this.settling.started(pid, req.ppid);
     this.jobs.add(pid, req.ppid, (sig) => handle.signal(sig), terminal);
     if (req.exec && req.ppid !== undefined) this.jobs.exec(req.ppid, pid, true);
     if (req.pgid !== undefined) this.jobs.join(pid, req.pgid);
@@ -874,6 +874,10 @@ export class Launcher {
   private signalMasksOf(pid: number): { sigIgn?: number; sigCgt?: number } {
     const masks = this.processes.get(pid)?.signalMasks?.();
     return masks ? { sigIgn: masks.ignored, sigCgt: masks.caught } : {};
+  }
+
+  private controlsJobs(pid: number): boolean {
+    return this.settling.isSettling(pid) || (this.ignoredBy(pid) & sigbit(SIG.TTOU)) !== 0;
   }
 
   private ignoredBy(pid: number, fork = false): number {
