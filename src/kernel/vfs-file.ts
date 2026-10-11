@@ -382,6 +382,13 @@ export class VfsNodes implements UnlinkHolder {
     return this.byPath.has(path) || !mayLink(this.fs, path) ? undefined : this.identity(path);
   }
 
+  async flushLinked(path: string): Promise<void> {
+    if (this.byId.size === 0 || !mayLink(this.fs, path)) return;
+    const id = await this.identity(path);
+    const node = id === undefined ? undefined : this.byId.get(id);
+    if (node) await node.serial(() => node.flush());
+  }
+
   async linked(from: string, to: string): Promise<void> {
     const node = this.byPath.get(from);
     if (!node || node.orphaned) return;
@@ -630,6 +637,7 @@ export function keepingOpen(fs: KernelFs, nodes: VfsNodes): KernelFs {
       const source = fs.resolvePath('/', from);
       const at = await (follow ? nodes.targetKey(source) : nodes.entryKey(source));
       await nodes.flush(at);
+      await nodes.flushLinked(at);
       const key = await nodes.entryKey(fs.resolvePath('/', to));
       await nodes.onEntry(key, () => fs.link(from, to, follow));
       await nodes.linked(at, key);
