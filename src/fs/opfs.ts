@@ -301,19 +301,19 @@ export class OpfsFs implements KernelFs {
         if (link.path === current && !follow) return { path: current, link };
         const target = `${link.link}${current.slice(link.path.length)}`;
         current = target.split('/').includes('..')
-          ? await this.physical(parentOf(link.path), target)
+          ? await this.physical(parentOf(link.path), target, hops + 1)
           : resolvePath(parentOf(link.path), target);
       }
     }
     throw fsError('ELOOP', path);
   }
 
-  private async physical(base: string, path: string): Promise<string> {
+  private async physical(base: string, path: string, used: number): Promise<string> {
     let done: string[] = [];
     let todo = (path.startsWith('/') ? path : `${base}/${path}`)
       .split('/')
       .filter((p) => p !== '' && p !== '.');
-    for (let hops = 0; todo.length > 0; ) {
+    for (let hops = used; todo.length > 0; ) {
       const part = todo.shift() as string;
       if (part === '..') done.pop();
       else if (!todo.includes('..')) done.push(part);
