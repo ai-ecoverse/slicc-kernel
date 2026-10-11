@@ -101,6 +101,20 @@ function mkdirOptions(entry: SyncFsTokenEntry, mode = 0o777) {
   return { recursive: true, owner: { ...owner, parents } };
 }
 
+async function mkdirExclusive(entry: SyncFsTokenEntry, path: string, mode?: number) {
+  const { fs } = entry;
+  const { owner } = mkdirOptions(entry, mode);
+  const own = owner ? { owner } : {};
+  try {
+    await fs.mkdir(path, own);
+  } catch (err) {
+    if ((err as { code?: unknown } | null)?.code !== 'ENOENT') throw err;
+    const above = owner ? { owner: { ...owner, mode: owner.parents } } : {};
+    await fs.mkdir(path.slice(0, path.lastIndexOf('/')) || '/', { recursive: true, ...above });
+    await fs.mkdir(path, own);
+  }
+}
+
 async function chown(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest) {
   const cred = entry.cred?.();
   if (!cred) {
@@ -138,7 +152,9 @@ async function run(
     case 'readdir-stat':
       return json(await readdirStat(fs, path));
     case 'mkdir':
-      await fs.mkdir(path, mkdirOptions(entry, req.mode));
+      await (req.exclusive
+        ? mkdirExclusive(entry, path, req.mode)
+        : fs.mkdir(path, mkdirOptions(entry, req.mode)));
       return done;
     case 'rm':
       await fs.rm(path, { recursive: true });

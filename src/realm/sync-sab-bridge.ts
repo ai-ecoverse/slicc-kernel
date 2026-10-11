@@ -211,7 +211,7 @@ export function createSyncFsSabBridge(
       return v;
     },
     mkdir: (path, mode) => {
-      run({ op: 'mkdir', path, ...(mode !== undefined ? { mode } : {}) }, path);
+      run({ op: 'mkdir', path, exclusive: true, ...(mode !== undefined ? { mode } : {}) }, path);
     },
     rm: (path) => {
       run({ op: 'rm', path }, path);
