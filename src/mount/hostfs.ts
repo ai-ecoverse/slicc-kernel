@@ -33,6 +33,7 @@ export interface HostfsTransport {
   readonly capabilities: DriverCapabilities;
   readonly token: string;
   readonly maxIo: number;
+  readonly gone?: boolean;
   call<T>(op: string, body?: Record<string, unknown>, handle?: boolean): Promise<T>;
   read(fh: number, offset: number, size: number, ifMatch?: string): Promise<Uint8Array>;
   write(fh: number, offset: number, bytes: Uint8Array): Promise<void>;
@@ -202,7 +203,7 @@ export function hostfsHandlers(current: () => HostfsTransport): MediumHandlers {
   const handles = new Map<number, Remote>();
   let nextFh = 0;
   const fresh = (remote: Remote): Remote => {
-    if (remote.client.token === remote.token) return remote;
+    if (remote.client.token === remote.token && !remote.client.gone) return remote;
     throw fsError('ESTALE', 'the folder was granted again, so this open file is gone');
   };
   const live = (fh: number): Remote => {
@@ -477,7 +478,12 @@ export class PortTransport implements HostfsTransport {
     return this.capabilities.maxIo ?? HOSTFS_IO;
   }
 
+  get gone(): boolean {
+    return this.dead !== undefined;
+  }
+
   fail(why: string): void {
+    if (this.dead === undefined) this.port.close();
     this.dead ??= why;
     for (const settle of [...this.waiting.values()])
       settle({ id: 0, error: { code: 'ENOTCONN', message: why } });
@@ -536,6 +542,10 @@ export class PortTransport implements HostfsTransport {
   ): Promise<void> {
     const id = ++this.next;
     if (this.dead) return Promise.reject(fsError('ENOTCONN', this.dead));
+    if (signal.aborted) {
+      this.fail("the folder's watch ended");
+      return Promise.resolve();
+    }
     return new Promise<void>((resolve, reject) => {
       const finish = () => {
         this.waiting.delete(id);
@@ -605,8 +615,7 @@ export function serveHostfsPort(port: MessagePort, transport: HostfsTransport): 
           data.size as number,
           data.ifMatch as string | undefined
         );
-        const whole = read.byteOffset === 0 && read.byteLength === read.buffer.byteLength;
-        const bytes = whole ? read : read.slice();
+        const bytes = read.slice();
         return send({ id, bytes }, [bytes.buffer as ArrayBuffer]);
       }
       if (op === 'write') {
@@ -622,13 +631,16 @@ export function serveHostfsPort(port: MessagePort, transport: HostfsTransport): 
       send({ id, error: errorOf(err) });
     }
   };
-  port.addEventListener('message', listener as (event: MessageEvent) => void);
-  port.start();
-  return () => {
+  const stop = () => {
     port.removeEventListener('message', listener as (event: MessageEvent) => void);
-    for (const stop of watches.values()) stop.abort();
+    port.removeEventListener('close', stop);
+    for (const watch of watches.values()) watch.abort();
     port.close();
   };
+  port.addEventListener('message', listener as (event: MessageEvent) => void);
+  port.addEventListener('close', stop);
+  port.start();
+  return stop;
 }
 
 export function grantConnect(
