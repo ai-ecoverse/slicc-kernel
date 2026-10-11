@@ -110,7 +110,7 @@ export interface SyncFsPosixBridge {
   lutimes(path: string, atimeMs: number, mtimeMs: number): void;
   hold?(path: string, held: boolean, open?: boolean, handle?: number): number | undefined;
   create?(path: string, mode?: number): void;
-  chown?(path: string, uid: number | undefined, gid: number | undefined): void;
+  chown?(path: string, uid: number | undefined, gid: number | undefined, follow?: boolean): void;
   owners?: boolean;
   readdirStat(path: string): Array<[string, SyncFsBridgeStat | null]>;
   statfs?(path?: string): SyncFsUsage | null;

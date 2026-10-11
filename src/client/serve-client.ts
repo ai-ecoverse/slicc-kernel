@@ -1,5 +1,5 @@
 import { portCdpHook } from '../cdp/port.ts';
-import { fsError, type KernelFs, type Owner } from '../fs/types.ts';
+import { fsError, type KernelFs, type NewOwner, type Owner } from '../fs/types.ts';
 import { dialSocket, serveSocket } from '../kernel/dial.ts';
 import type { TransportCall } from '../kernel/net/remote-transport.ts';
 import type { RealmTransport } from '../kernel/net/transport.ts';
@@ -72,7 +72,7 @@ async function fsCall(
   fs: KernelFs,
   method: string,
   args: unknown[],
-  owner?: Owner
+  owner?: Owner & { umask: number }
 ): Promise<Answer> {
   const path = (i: number) => fs.resolvePath('/', String(args[i]));
   switch (method) {
@@ -81,7 +81,7 @@ async function fsCall(
       return { result: bytes, transfer: [bytes.buffer] };
     }
     case 'writeFile':
-      await fs.writeFile(path(0), args[1] as Uint8Array | string, owner);
+      await fs.writeFile(path(0), args[1] as Uint8Array | string, created(owner, 0o666));
       return { result: true };
     case 'stat':
       return { result: await fs.stat(path(0)) };
@@ -90,7 +90,10 @@ async function fsCall(
     case 'readdir':
       return { result: await fs.readdir(path(0)) };
     case 'mkdir':
-      await fs.mkdir(path(0), owner ? { recursive: true, owner } : { recursive: true });
+      await fs.mkdir(
+        path(0),
+        owner ? { recursive: true, owner: made(owner) } : { recursive: true }
+      );
       return { result: true };
     case 'rm':
       await fs.rm(path(0), { recursive: true, force: args[1] === true });
@@ -101,7 +104,7 @@ async function fsCall(
     case 'realpath':
       return { result: await realpath(fs, String(args[0])) };
     case 'symlink':
-      await fs.symlink(String(args[0]), path(1), owner);
+      await fs.symlink(String(args[0]), path(1), owner && { uid: owner.uid, gid: owner.gid });
       return { result: true };
     case 'readlink':
       return { result: await fs.readlink(path(0)) };
@@ -133,8 +136,18 @@ function dialFor(
   return { result: port2, transfer: [port2] };
 }
 
-function ownerFor(l: Launcher, self: Account | undefined): Owner | undefined {
-  return l.owners && self ? { uid: self.uid, gid: self.gid } : undefined;
+function created(owner: (Owner & { umask: number }) | undefined, mode: number) {
+  return owner && { uid: owner.uid, gid: owner.gid, mode: mode & ~owner.umask };
+}
+
+function made(owner: Owner & { umask: number }): NewOwner {
+  const mode = 0o777 & ~owner.umask;
+  return { uid: owner.uid, gid: owner.gid, mode, parents: mode | 0o300 };
+}
+
+function ownerFor(l: Launcher, self: Account | undefined): (Owner & { umask: number }) | undefined {
+  if (!l.owners || !self) return undefined;
+  return { uid: self.uid, gid: self.gid, umask: self.umask ?? 0o022 };
 }
 
 async function accountOf(l: Launcher, user: string | number): Promise<Account> {

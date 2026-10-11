@@ -147,12 +147,18 @@ export class UserDb {
   private async stampHome(row: PasswdRow, shared: GroupRow | undefined): Promise<void> {
     const home = this.fs.resolvePath('/', row.home);
     if (!this.owners || !this.fs.chown || !HOME_DIR.test(home)) return;
-    if ((await this.fs.realpath?.(home, false).catch(() => undefined)) !== home) return;
-    if (!(await this.fs.lstat(home)).isDirectory) return;
+    if (!(await this.realDir(home))) return;
     const gid = shared?.gid ?? row.gid;
     await this.fs.chown(home, { uid: row.uid, gid, follow: false, kind: 'adopt' });
-    const mode = shared ? 0o2750 : row.name.startsWith('scoop-') ? 0o750 : 0o700;
-    await this.fs.chmod(home, mode);
+    const scoop = row.name.startsWith('scoop-');
+    await this.fs.chmod(home, shared ? 0o2750 : scoop ? 0o750 : 0o700);
+    const pnpm = `${home}/.local/share/pnpm`;
+    if (await this.realDir(pnpm)) await this.fs.chmod(pnpm, scoop ? 0o750 : 0o700);
+  }
+
+  private async realDir(path: string): Promise<boolean> {
+    if ((await this.fs.realpath?.(path, false).catch(() => undefined)) !== path) return false;
+    return (await this.fs.lstat(path)).isDirectory;
   }
 
   private async read(path: string, fallback: string): Promise<string> {

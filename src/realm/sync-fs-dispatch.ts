@@ -92,7 +92,10 @@ function mkdirOptions(entry: SyncFsTokenEntry, mode = 0o777) {
 
 async function chown(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest) {
   const cred = entry.cred?.();
-  if (!cred) return done;
+  if (!cred) {
+    await (req.op === 'chown' ? entry.fs.stat(path) : entry.fs.lstat(path));
+    return done;
+  }
   await chownAs(entry.fs, cred, path, {
     ...(req.uid !== undefined ? { uid: req.uid } : {}),
     ...(req.gid !== undefined ? { gid: req.gid } : {}),

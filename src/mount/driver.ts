@@ -3,6 +3,7 @@ import {
   type DriverAttr,
   type DriverCapabilities,
   type DriverEntry,
+  type DriverOwner,
   type DriverRequest,
   type DriverStatfs,
   driverVersionError,
@@ -14,6 +15,7 @@ export type {
   DriverAttr,
   DriverCapabilities,
   DriverEntry,
+  DriverOwner,
   DriverStatfs,
   MountRequestInfo,
 } from './protocol.ts';
@@ -24,6 +26,7 @@ export interface OpenFlags {
   truncate: boolean;
   exclusive: boolean;
   ifMatch?: string;
+  owner?: DriverOwner;
 }
 
 export interface FilesystemHandlers {
@@ -36,14 +39,35 @@ export interface FilesystemHandlers {
   read(fh: number, offset: number, size: number): Promise<Uint8Array>;
   write(fh: number, offset: number, bytes: Uint8Array): Promise<void>;
   release(fh: number): Promise<void>;
-  mkdir(path: string): Promise<void>;
+  mkdir(path: string, owner?: DriverOwner): Promise<void>;
   rmdir(path: string): Promise<void>;
   unlink(path: string): Promise<void>;
   rename(from: string, to: string): Promise<void>;
-  symlink?(target: string, path: string): Promise<void>;
+  symlink?(target: string, path: string, owner?: DriverOwner): Promise<void>;
   readlink?(path: string): Promise<string>;
-  setattr?(path: string, attr: { mode?: number; mtime?: number; size?: number }): Promise<void>;
+  setattr?(path: string, attr: DriverSetAttr): Promise<void>;
   statfs?(): Promise<DriverStatfs>;
+}
+
+export interface DriverSetAttr {
+  mode?: number;
+  mtime?: number;
+  size?: number;
+  uid?: number;
+  gid?: number;
+}
+
+function ownerOf(req: DriverOwner): DriverOwner | undefined {
+  const owner = {
+    ...(req.uid !== undefined ? { uid: req.uid } : {}),
+    ...(req.gid !== undefined ? { gid: req.gid } : {}),
+    ...(req.mode !== undefined ? { mode: req.mode } : {}),
+  };
+  return Object.keys(owner).length > 0 ? owner : undefined;
+}
+
+function withOwner<T extends object>(base: T, owner: DriverOwner | undefined): T {
+  return owner ? { ...base, owner } : base;
 }
 
 export interface DriverPort {
@@ -67,13 +91,19 @@ async function dispatch(h: FilesystemHandlers, req: DriverRequest): Promise<unkn
     case 'readdir':
       return h.readdir(req.path);
     case 'open':
-      return h.open(req.path, {
-        write: req.write,
-        create: req.create,
-        truncate: req.truncate,
-        exclusive: req.exclusive,
-        ...(req.ifMatch !== undefined ? { ifMatch: req.ifMatch } : {}),
-      });
+      return h.open(
+        req.path,
+        withOwner(
+          {
+            write: req.write,
+            create: req.create,
+            truncate: req.truncate,
+            exclusive: req.exclusive,
+            ...(req.ifMatch !== undefined ? { ifMatch: req.ifMatch } : {}),
+          },
+          ownerOf(req)
+        )
+      );
     case 'read':
       return h.read(req.fh, req.offset, req.size);
     case 'write':
@@ -81,7 +111,7 @@ async function dispatch(h: FilesystemHandlers, req: DriverRequest): Promise<unkn
     case 'release':
       return h.release(req.fh);
     case 'mkdir':
-      return h.mkdir(req.path);
+      return ownerOf(req) ? h.mkdir(req.path, ownerOf(req)) : h.mkdir(req.path);
     case 'rmdir':
       return h.rmdir(req.path);
     case 'unlink':
@@ -90,7 +120,9 @@ async function dispatch(h: FilesystemHandlers, req: DriverRequest): Promise<unkn
       return h.rename(req.from, req.to);
     case 'symlink':
       if (!h.symlink) throw fsError('EPERM', 'this file system has no symlinks');
-      return h.symlink(req.target, req.path);
+      return ownerOf(req)
+        ? h.symlink(req.target, req.path, ownerOf(req))
+        : h.symlink(req.target, req.path);
     case 'readlink':
       if (!h.readlink) throw fsError('EINVAL', `${req.path} is not a symlink`);
       return h.readlink(req.path);
@@ -99,6 +131,8 @@ async function dispatch(h: FilesystemHandlers, req: DriverRequest): Promise<unkn
         ...(req.mode !== undefined ? { mode: req.mode } : {}),
         ...(req.mtime !== undefined ? { mtime: req.mtime } : {}),
         ...(req.size !== undefined ? { size: req.size } : {}),
+        ...(req.uid !== undefined ? { uid: req.uid } : {}),
+        ...(req.gid !== undefined ? { gid: req.gid } : {}),
       });
     case 'statfs':
       return h.statfs?.() ?? null;

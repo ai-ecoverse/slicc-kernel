@@ -1,6 +1,6 @@
 import { ChunkedBytes } from './chunked.ts';
 import { type FilesystemHandlers, fsError, type OpenFlags } from './driver.ts';
-import type { DriverAttr, DriverEntry } from './protocol.ts';
+import type { DriverAttr, DriverEntry, DriverOwner } from './protocol.ts';
 
 interface Node {
   kind: DriverAttr['kind'];
@@ -10,6 +10,12 @@ interface Node {
   data: ChunkedBytes;
   target: string;
   children: Map<string, Node>;
+  uid: number;
+  gid: number;
+}
+
+function idOption(value: string | undefined): number {
+  return value !== undefined && /^\d+$/.test(value) ? Number(value) : 0;
 }
 
 interface Handle {
@@ -19,14 +25,16 @@ interface Handle {
 
 export function tmpfs(): FilesystemHandlers {
   let inodes = 0;
-  const make = (kind: Node['kind'], mode: number): Node => ({
+  const make = (kind: Node['kind'], mode: number, from?: Node, owner?: DriverOwner): Node => ({
     kind,
     ino: ++inodes,
-    mode,
+    mode: owner?.mode === undefined ? mode : (mode & ~0o7777) | (owner.mode & 0o7777),
     mtime: Date.now(),
     data: new ChunkedBytes(),
     target: '',
     children: new Map(),
+    uid: owner?.uid ?? from?.uid ?? 0,
+    gid: owner?.gid ?? from?.gid ?? 0,
   });
   const root = make('directory', 0o40755);
   const handles = new Map<number, Handle>();
@@ -58,6 +66,8 @@ export function tmpfs(): FilesystemHandlers {
     mtime: node.mtime,
     mode: node.mode,
     ino: node.ino,
+    uid: node.uid,
+    gid: node.gid,
   });
   const handle = (fh: number): Handle => {
     const found = handles.get(fh);
@@ -71,13 +81,18 @@ export function tmpfs(): FilesystemHandlers {
     if (existing?.kind === 'directory' && flags.write) throw fsError('EISDIR', path);
     if (existing) return existing;
     if (!flags.create) throw fsError('ENOENT', path);
-    const node = make('file', 0o100644);
+    const node = make('file', 0o100644, dir, flags.owner);
     dir.children.set(name, node);
     dir.mtime = Date.now();
     return node;
   }
 
   return {
+    mount(info) {
+      root.uid = idOption(info.options.uid);
+      root.gid = idOption(info.options.gid);
+      return undefined;
+    },
     async getattr(path) {
       return attr(find(path));
     },
@@ -110,10 +125,10 @@ export function tmpfs(): FilesystemHandlers {
       handle(fh);
       handles.delete(fh);
     },
-    async mkdir(path) {
+    async mkdir(path, owner) {
       const { dir, name } = parent(path);
       if (dir.children.has(name)) throw fsError('EEXIST', path);
-      dir.children.set(name, make('directory', 0o40755));
+      dir.children.set(name, make('directory', 0o40755, dir, owner));
       dir.mtime = Date.now();
     },
     async rmdir(path) {
@@ -154,10 +169,10 @@ export function tmpfs(): FilesystemHandlers {
       source.dir.mtime = Date.now();
       target.dir.mtime = source.dir.mtime;
     },
-    async symlink(target, path) {
+    async symlink(target, path, owner) {
       const { dir, name } = parent(path);
       if (dir.children.has(name)) throw fsError('EEXIST', path);
-      const node = make('symlink', 0o120777);
+      const node = make('symlink', 0o120777, dir, owner && { ...owner, mode: 0o777 });
       node.target = target;
       dir.children.set(name, node);
       dir.mtime = Date.now();
@@ -177,6 +192,8 @@ export function tmpfs(): FilesystemHandlers {
         node.mtime = Date.now();
       }
       if (change.mtime !== undefined) node.mtime = change.mtime;
+      if (change.uid !== undefined) node.uid = change.uid;
+      if (change.gid !== undefined) node.gid = change.gid;
     },
     async statfs() {
       return { bsize: 4096, blocks: 262144, bfree: 262144 };

@@ -484,6 +484,7 @@ export function cachingBridge(
   const invalidate = () => cache.mutated([]);
   const touched = (path?: string, ino?: number) => cache.changed(path, ino);
 
+  const { chown } = bridge;
   const mutating = <T>(op: () => T, ...paths: string[]): T => {
     try {
       return op();
@@ -542,6 +543,12 @@ export function cachingBridge(
     ...(bridge.create
       ? { create: (p: string) => mutating(() => bridge.create?.(p), ...entry(p)) }
       : {}),
+    ...(chown
+      ? {
+          chown: (p: string, uid?: number, gid?: number, follow?: boolean) =>
+            rewriting(p, () => chown.call(bridge, p, uid, gid, follow)),
+        }
+      : {}),
     ...(bridge.pread && bridge.pwrite && bridge.truncate
       ? {
           pread: bridge.pread.bind(bridge),
@@ -550,6 +557,7 @@ export function cachingBridge(
           truncate: (p: string, size: number) => rewriting(p, () => bridge.truncate?.(p, size)),
         }
       : {}),
+    ...(bridge.owners ? { owners: true } : {}),
     invalidate,
     touched,
   };

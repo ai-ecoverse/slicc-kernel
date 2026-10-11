@@ -40,8 +40,21 @@ export type UserCommandDir = (dir: string) => Promise<ReadonlySet<string> | unde
 export function withCommandDirs(
   fs: KernelFs,
   names: () => Promise<ReadonlySet<string>>,
-  userDir: UserCommandDir = async () => undefined
+  userDir: UserCommandDir = async () => undefined,
+  owners = false
 ): KernelFs {
+  async function nearest(path: string): Promise<Partial<FsStat>> {
+    const st = await fs.stat(path).catch(() => undefined);
+    if (st || path === '/') return st ?? {};
+    return nearest(path.slice(0, path.lastIndexOf('/')) || '/');
+  }
+
+  async function owned(stat: FsStat, dir?: string): Promise<FsStat> {
+    if (!owners) return stat;
+    const { uid = 0, gid = 0 } = dir === undefined ? {} : await nearest(dir);
+    return { ...stat, uid, gid };
+  }
+
   async function children(path: string): Promise<string[] | undefined> {
     if (path === '/') return ['bin', 'usr'];
     if (path === '/usr') return ['bin'];
@@ -51,13 +64,18 @@ export function withCommandDirs(
   }
 
   async function virtual(path: string): Promise<FsStat | undefined> {
-    if (path === '/usr' || path === '/bin' || path === '/usr/bin') return synthetic(true, path);
+    if (path === '/usr' || path === '/bin' || path === '/usr/bin') {
+      return owned(synthetic(true, path));
+    }
     const name = COMMAND.exec(path)?.[1];
-    if (name !== undefined) return (await names()).has(name) ? synthetic(false, path) : undefined;
-    if ((await userDir(path))?.size) return synthetic(true, path);
+    if (name !== undefined) {
+      return (await names()).has(name) ? owned(synthetic(false, path)) : undefined;
+    }
+    if ((await userDir(path))?.size) return owned(synthetic(true, path), path);
     const slash = path.lastIndexOf('/');
-    const own = await userDir(path.slice(0, slash));
-    return own?.has(path.slice(slash + 1)) ? synthetic(false, path) : undefined;
+    const dir = path.slice(0, slash);
+    const own = await userDir(dir);
+    return own?.has(path.slice(slash + 1)) ? owned(synthetic(false, path), dir) : undefined;
   }
 
   async function linked(path: string): Promise<FsStat | undefined> {
