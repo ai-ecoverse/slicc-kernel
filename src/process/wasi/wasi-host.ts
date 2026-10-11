@@ -537,7 +537,8 @@ export class WasiHost {
         fds.flushPath(from);
         if (source !== from) fds.flushPath(source);
         o.fs.link(from, to, follow);
-        fds.linked(source, to);
+        fds.linked(from, to);
+        if (source !== from) fds.linked(source, to);
       },
     };
   }
