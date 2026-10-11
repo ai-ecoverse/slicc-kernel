@@ -163,11 +163,11 @@ const FOLLOWING = ['writeFile', 'chmod', 'utimes', 'pwrite', 'truncate'] as cons
 const NOT_FOLLOWING = ['mkdir', 'rm', 'unlink', 'rmdir', 'lutimes', 'create'] as const;
 const MAX_HOPS = 40;
 
-type ProcRefusal = { refused: 'ENOENT' | 'ENOTDIR' };
+type ProcRefusal = { refused: string };
 type ProcWalk = Generator<
   { at: string; check: boolean },
   string | undefined | ProcRefusal,
-  string | boolean | null
+  string | boolean | ProcRefusal
 >;
 
 function* procWalk(path: string, follow: boolean): ProcWalk {
@@ -198,13 +198,14 @@ function* procWalk(path: string, follow: boolean): ProcWalk {
   return undefined;
 }
 
-function notDirectory(err: unknown): boolean {
-  return (err as { code?: unknown } | null)?.code === 'ENOTDIR';
+function failed(err: unknown): ProcRefusal {
+  const code = (err as { code?: unknown } | null)?.code;
+  return { refused: typeof code === 'string' ? code : 'ENOENT' };
 }
 
-function refusalOf(found: boolean | null): ProcRefusal | undefined {
+function refusalOf(found: boolean | ProcRefusal): ProcRefusal | undefined {
   if (found === true) return undefined;
-  return { refused: found === null ? 'ENOENT' : 'ENOTDIR' };
+  return found === false ? { refused: 'ENOTDIR' } : found;
 }
 
 function throughLink(target: string, done: string[], todo: string[]): [string[], string[]] {
@@ -221,12 +222,12 @@ function procPath(
   let step = walk.next();
   while (!step.done) {
     const { at, check } = step.value;
-    let target: string | boolean | null;
+    let target: string | boolean | ProcRefusal;
     try {
       const st = fs.lstat(at);
       target = st.isSymbolicLink ? fs.readlink(at) : !check || st.isDirectory;
     } catch (err) {
-      target = notDirectory(err) ? false : null;
+      target = failed(err);
     }
     step = walk.next(target);
   }
@@ -253,8 +254,7 @@ export async function procAlias(
     const { at, check } = step.value;
     const link = await readlink.call(fs, at).catch(() => undefined);
     const isDir = (st: unknown) => (st as { isDirectory?: boolean }).isDirectory === true;
-    const missed = (err: unknown) => (notDirectory(err) ? false : null);
-    const target = link ?? (check ? await lstat.call(fs, at).then(isDir, missed) : true);
+    const target = link ?? (check ? await lstat.call(fs, at).then(isDir, failed) : true);
     step = walk.next(target);
   }
   return step.value;
