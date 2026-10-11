@@ -452,10 +452,16 @@ export class LinkSync {
   }
 
   catchUp(): void {
-    const since = this.call({ op: 'dl-log', from: this.count }) as LinkRecord[];
-    for (const r of since) this.linker.replay(r);
-    this.count += since.length;
-    if (this.ids) this.gen = Atomics.load(this.ids, DL_GEN);
+    for (;;) {
+      const gen = this.ids ? Atomics.load(this.ids, DL_GEN) : 0;
+      const since = this.call({ op: 'dl-log', from: this.count }) as LinkRecord[];
+      for (const r of since) this.linker.replay(r);
+      this.count += since.length;
+      if (!this.ids || Atomics.load(this.ids, DL_GEN) === gen) {
+        this.gen = gen;
+        return;
+      }
+    }
   }
 
   guard(

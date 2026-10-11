@@ -15,7 +15,14 @@ function expandOrigin(entry: string, dir: string): string {
 }
 
 export type LinkRecord =
-  | { kind: 'load'; handle: number; path: string; memoryBase: number; tableBase: number }
+  | {
+      kind: 'load';
+      handle: number;
+      path: string;
+      memoryBase: number;
+      tableBase: number;
+      needed?: number[];
+    }
   | { kind: 'slot'; index: number; handle: number; name: string }
   | { kind: 'closure'; index: number }
   | { kind: 'closure-free'; index: number }
@@ -267,7 +274,8 @@ export class WasixLinker {
     }
     if (record.kind === 'load') {
       if (this.modules.has(record.handle)) return;
-      this.instantiate(record.path, this.moduleAt(record.path), record, false);
+      const linked = this.instantiate(record.path, this.moduleAt(record.path), record, false);
+      linked.needed.push(...(record.needed ?? []));
       this.nextHandle = Math.max(this.nextHandle, record.handle + 1);
       return;
     }
@@ -335,11 +343,12 @@ export class WasixLinker {
       path,
       memoryBase,
       tableBase,
+      ...(needed.length > 0 ? { needed } : {}),
     };
     const linked = this.instantiate(path, module, record, true);
     linked.needed.push(...needed);
     this.publisher?.(record);
-    return linked;
+    return this.byPath.get(path) ?? linked;
   }
 
   private instantiate(
