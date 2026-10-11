@@ -7,6 +7,7 @@ import { fsError, type UsersMode } from './fs/types.ts';
 import { pidOwner } from './fs/unlinked.ts';
 import type {
   ConnectOptions,
+  KernelGroups,
   KernelUsers,
   RunOptions,
   RunResult,
@@ -45,6 +46,7 @@ export {
 } from './client/attach.ts';
 export type {
   ConnectOptions,
+  KernelGroups,
   KernelUsers,
   NetworkUplink,
   ResolveAnswer,
@@ -93,6 +95,7 @@ export interface NodeKernel {
   readFile(path: string): Promise<Uint8Array>;
   connect(options?: ConnectOptions): Promise<MessagePort>;
   readonly users: KernelUsers;
+  readonly groups: KernelGroups;
   setRoutes(routes: RouteTable): Promise<void>;
   mount(spec: MountSpec): Promise<MountEntry>;
   umount(target: string): Promise<void>;
@@ -283,6 +286,11 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
       add: (user) => guard(() => launcher.users.add(user)),
       remove: (name, options) => guard(() => launcher.users.remove(name, options)),
       list: () => guard(() => launcher.users.list()),
+    },
+    groups: {
+      list: () => guard(() => launcher.users.groups()),
+      addMember: (group, user) => guard(() => launcher.users.addMember(group, user)),
+      removeMember: (group, user) => guard(() => launcher.users.removeMember(group, user)),
     },
     async connect({ user } = {}) {
       if (terminated) throw new Error(TERMINATED);

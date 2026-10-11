@@ -80,7 +80,9 @@ export interface ConnectRequest {
 export type UsersRequest =
   | { id: number; op: 'users-add'; user: AddUser }
   | { id: number; op: 'users-remove'; name: string; options?: RemoveUser }
-  | { id: number; op: 'users-list' };
+  | { id: number; op: 'users-list' }
+  | { id: number; op: 'groups-list' }
+  | { id: number; op: 'groups-add-member' | 'groups-remove-member'; group: string; user: string };
 
 export interface RoutesRequest {
   id: number;
@@ -210,7 +212,14 @@ export interface GrantReply {
   error?: string;
 }
 
-const USERS_OPS: ReadonlySet<string> = new Set(['users-add', 'users-remove', 'users-list']);
+const USERS_OPS: ReadonlySet<string> = new Set([
+  'users-add',
+  'users-remove',
+  'users-list',
+  'groups-list',
+  'groups-add-member',
+  'groups-remove-member',
+]);
 
 function isUsersRequest(req: KernelRequest): req is UsersRequest {
   return USERS_OPS.has(req.op);
@@ -227,6 +236,9 @@ function failure(err: unknown): { error: string; code?: string } {
 function usersOp(l: Launcher, req: UsersRequest): Promise<unknown> {
   if (req.op === 'users-add') return l.users.add(req.user);
   if (req.op === 'users-remove') return l.users.remove(req.name, req.options);
+  if (req.op === 'groups-list') return l.users.groups();
+  if (req.op === 'groups-add-member') return l.users.addMember(req.group, req.user);
+  if (req.op === 'groups-remove-member') return l.users.removeMember(req.group, req.user);
   return l.users.list();
 }
 

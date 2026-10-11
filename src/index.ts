@@ -20,7 +20,7 @@ import type { MountEntry, MountSpec } from './mount/mount-fs.ts';
 import type { ProcessMountPolicy, ProcessMountRequest } from './mount/syscall.ts';
 import type { InitRequest, KernelCall, TerminalAction } from './serve.ts';
 import { type NetworkTransport, serveTransport } from './transport.ts';
-import type { Account, AddUser, RemoveUser } from './users.ts';
+import type { Account, AddUser, Group, RemoveUser } from './users.ts';
 
 export type { CdpConnection, CdpHook, CdpRequest } from './cdp/types.ts';
 export {
@@ -105,7 +105,7 @@ export {
   type NetworkWebSocket,
   type NetworkWebSocketRequest,
 } from './transport.ts';
-export type { Account, AddUser, RemoveUser } from './users.ts';
+export type { Account, AddUser, Group, RemoveUser } from './users.ts';
 
 export interface NetworkOptions {
   transport?: NetworkTransport;
@@ -161,6 +161,12 @@ export interface ConnectOptions {
   user?: string | number;
 }
 
+export interface KernelGroups {
+  list(): Promise<Group[]>;
+  addMember(group: string, user: string): Promise<Group>;
+  removeMember(group: string, user: string): Promise<Group>;
+}
+
 export interface KernelUsers {
   readonly mode: UsersMode;
   add(user: AddUser): Promise<Account>;
@@ -173,6 +179,7 @@ export interface Kernel {
   openTerminal(argv: string[], options?: TerminalOptions): Promise<Terminal>;
   connect(options?: ConnectOptions): Promise<MessagePort>;
   readonly users: KernelUsers;
+  readonly groups: KernelGroups;
   setRoutes(routes: RouteTable): Promise<void>;
   dial(options: DialOptions): Promise<DialledSocket>;
   loopbackFetch(input: RequestInfo | URL, options: LoopbackFetchOptions): Promise<Response>;
@@ -311,6 +318,24 @@ function cdpBridge(hook: CdpHook | undefined) {
 
 function failed(message: string, code: string | undefined): Error {
   return Object.assign(new Error(message), code === undefined ? {} : { code });
+}
+
+function kernelGroups(call: (req: KernelCall) => Promise<unknown>): KernelGroups {
+  const member =
+    (op: 'groups-add-member' | 'groups-remove-member') => async (group: string, user: string) =>
+      (await call({ op, group, user })) as Group;
+  return {
+    list: async () => (await call({ op: 'groups-list' })) as Group[],
+    addMember: member('groups-add-member'),
+    removeMember: member('groups-remove-member'),
+  };
+}
+
+function accounts(
+  call: (req: KernelCall) => Promise<unknown>,
+  mode: UsersMode | undefined
+): { users: KernelUsers; groups: KernelGroups } {
+  return { users: kernelUsers(call, mode), groups: kernelGroups(call) };
 }
 
 function kernelUsers(
@@ -493,7 +518,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     openTerminal,
     connect: async (connectOptions = {}) =>
       (await call({ op: 'connect', ...connectOptions })) as MessagePort,
-    users: kernelUsers(call, options.users),
+    ...accounts(call, options.users),
     setRoutes: async (routes) => void (await call({ op: 'routes', routes })),
     dial,
     loopbackFetch: (input, fetchOptions) => loopbackFetch(dial, input, fetchOptions),

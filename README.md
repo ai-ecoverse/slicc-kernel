@@ -90,9 +90,28 @@ The user database, `/etc/passwd` and `/etc/group` (see [Users](#users)):
 | | |
 | --- | --- |
 | `mode` | the `users` option the kernel was created with |
-| `add({ name, home?, groups?, umask?, homeGroup? })` | adds a user and resolves with `{ name, uid, gid, home, shell, groups, umask? }`. It's idempotent: an existing name resolves with its entry, keeps its ids, groups and home, and only remembers `umask`, creates a missing pnpm home or `config.yaml` (an existing pnpm home keeps its mode with `users: 'off'`), and, with owners on, gives the home to the user again. The new user gets the lowest free id from 1000 up, a private group of the same id and name, membership of `users` and of each group in `groups` (such as `sudo`), `home` (default `/home/<name>`, created), its pnpm home `~/.local/share/pnpm` (`0700`, `0750` for a `scoop-` user) and `~/.config/pnpm/config.yaml` with `minimumReleaseAge: 1440` (pnpm skips releases less than a day old), each only if missing, which an `add` of an existing user also does, and `/bin/bash`. `umask` is the umask its processes start with; the kernel keeps it in memory, so pass it again after a reload. With owners on, every `add`, of a new or an existing user, also gives a home under `/home/<dir>` to the user and sets its pnpm home to `0700` (`0750` for a `scoop-` user) again (see [File owners](#file-owners)). `homeGroup` names the group the home belongs to instead of the user's own, without making the user a member, and its mode is then `2750`. A name must match `[a-z_][a-z0-9_.-]*`; a group that doesn't exist, in `groups` or `homeGroup`, rejects with `ENOENT` |
+| `add({ name, home?, groups?, umask?, homeGroup?, homeMode? })` | adds a user and resolves with `{ name, uid, gid, home, shell, groups, umask? }`. It's idempotent: an existing name resolves with its entry, keeps its ids and home, joins the groups in `groups` it isn't in yet (it never leaves one), remembers `umask`, creates a missing pnpm home or `config.yaml` (an existing pnpm home keeps its mode with `users: 'off'`), and, with owners on, gives the home to the user again. The new user gets the lowest free id from 1000 up, a private group of the same id and name, membership of `users` and of each group in `groups` (such as `sudo`), `home` (default `/home/<name>`, created), its pnpm home `~/.local/share/pnpm` (`0700`, `0750` for a `scoop-` user) and `~/.config/pnpm/config.yaml` with `minimumReleaseAge: 1440` (pnpm skips releases less than a day old), each only if missing, which an `add` of an existing user also does, and `/bin/bash`. `umask` is the umask its processes start with; the kernel keeps it in memory, so pass it again after a reload. With owners on, every `add`, of a new or an existing user, also gives a home under `/home/<dir>` to the user and sets its pnpm home to `0700` (`0750` for a `scoop-` user) again (see [File owners](#file-owners)). `homeGroup` names the group the home belongs to instead of the user's own, without making the user a member (`groups` does that), and its mode is then `2750`. `homeMode` sets the home's mode instead (setgid included, so `0o2750` makes new files in it take the home's group); like the owner, it is set again by every `add` with owners on, on the home itself only. A name must match `[a-z_][a-z0-9_.-]*`; a group that doesn't exist, in `groups` or `homeGroup`, rejects with `ENOENT` |
 | `remove(name, { keepHome }?)` | removes the user, its private group and its group memberships, and deletes its home unless `keepHome` is set. A home outside `/home/<dir>` is never deleted. Resolves `false` for an unknown name; system accounts (ids below 1000 or above 60000) reject with `EPERM` |
 | `list()` | every user, as `add` returns them |
+
+### `kernel.groups`
+
+The groups of `/etc/group`, on the page and the Node entry (not on attached clients):
+
+| | |
+| --- | --- |
+| `list()` | every group as `{ name, gid, members }`, `members` being the users listed in it (a user's own group lists nobody) |
+| `addMember(group, user)` | adds `user` to `group`'s members and resolves with the group; a member already in it changes nothing |
+| `removeMember(group, user)` | removes `user` from `group`'s members, the same way |
+
+An unknown group or user rejects with `ENOENT`, and a user's own (primary) group with `EINVAL`. Every user has an own group with its name and its uid as gid, which is how a cone shares with its scoops: the scoops join the cone's group. As on Linux, a change counts from the user's next process (and the next client connected for it): processes already running keep the groups they started with, and so does a client already connected. The embedder's recipe, which bios and slicc-agent share, run at every boot:
+
+```js
+await kernel.users.add({ name: 'cone', groups: ['sudo'], homeMode: 0o710, umask: 0o077 });
+await kernel.users.add({ name: 'scoop-site', groups: ['cone'], homeGroup: 'cone', homeMode: 0o2750, umask: 0o027 });
+```
+
+The cone's home lets its group in only to pass through (`0710`), and the cone opens what it shares with `chmod g+r`. A scoop's home belongs to the cone's group, so the cone reads it, and new files there take that group. Change `/etc/passwd` and `/etc/group` through `kernel.users` and `kernel.groups`, which keep the two consistent and serialize their writes.
 
 ### `kernel.setRoutes({ prefixes, exit }) → Promise<void>`
 
