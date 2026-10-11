@@ -45,6 +45,7 @@ export interface SyncFsRequest {
   handle?: number;
   uid?: number;
   gid?: number;
+  exclusive?: boolean;
 }
 
 export type SyncFsResult =

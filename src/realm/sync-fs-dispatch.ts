@@ -94,8 +94,9 @@ function ownerFor(entry: SyncFsTokenEntry, mode?: number): NewOwner | undefined 
   return ownerOf(cred, mode === undefined ? undefined : mode & ~(entry.umask?.() ?? 0o022));
 }
 
-function mkdirOptions(entry: SyncFsTokenEntry, mode = 0o777) {
+function mkdirOptions(entry: SyncFsTokenEntry, mode = 0o777, exclusive = false) {
   const owner = ownerFor(entry, mode);
+  if (exclusive) return owner ? { owner } : {};
   if (!owner) return { recursive: true };
   const parents = (0o777 & ~(entry.umask?.() ?? 0o022)) | 0o300;
   return { recursive: true, owner: { ...owner, parents } };
@@ -138,7 +139,7 @@ async function run(
     case 'readdir-stat':
       return json(await readdirStat(fs, path));
     case 'mkdir':
-      await fs.mkdir(path, mkdirOptions(entry, req.mode));
+      await fs.mkdir(path, mkdirOptions(entry, req.mode, req.exclusive === true));
       return done;
     case 'rm':
       await fs.rm(path, { recursive: true });
