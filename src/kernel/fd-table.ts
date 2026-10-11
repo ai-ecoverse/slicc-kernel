@@ -170,6 +170,32 @@ export function bytesSource(data: Uint8Array): OpenFile {
   });
 }
 
+export function memoryFile(data: Uint8Array, path: string, position = 0): OpenFile {
+  let offset = position;
+  return new OpenFile({
+    read: async (max) => {
+      const out = data.subarray(offset, offset + max);
+      offset += out.length;
+      return out;
+    },
+    pread: async (max, at) => data.subarray(at, at + max),
+    seek: async (by, whence) => {
+      const at = (whence === 1 ? offset : whence === 2 ? data.length : 0) + by;
+      if (at < 0) throw new KernelError('EINVAL');
+      offset = at;
+      return at;
+    },
+    pwrite: async () => {
+      throw new KernelError('EBADF');
+    },
+    resize: async () => {
+      throw new KernelError('EBADF');
+    },
+    stat: async () => ({ path, size: data.length }),
+    close: () => {},
+  });
+}
+
 export function sinkFile(onData: (bytes: Uint8Array) => void): OpenFile {
   return new OpenFile({
     write: async (bytes) => {
