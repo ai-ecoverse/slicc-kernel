@@ -22,6 +22,7 @@ import {
 import { deviceOf, WasiFds, type WasiForkFd, type WasiKernel } from './wasi-fds.ts';
 import {
   type DirListing,
+  type LocalFile,
   normalize,
   pathInode,
   resolveUnder,
@@ -864,17 +865,45 @@ export class WasiHost {
   private fdFilestat(fd: number): Filestat {
     const e = this.fds.get(fd);
     if (e.type === 'dir') return filestatOf(e.path, this.o.fs.stat(e.path));
-    if (e.type === 'file') return this.statOrphanable(e.file.path, e.file.size());
+    if (e.type === 'file') return this.localFilestat(e.file);
     const kind = e.type === 'kernel' ? this.fds.kind(fd, e) : undefined;
     if (kind === 'file') {
       const vfs = this.kernelStat(fd);
-      if (vfs.path) return this.statOrphanable(vfs.path, vfs.size, vfs.orphan);
+      if (vfs.path) return this.statOrphanable(vfs.path, vfs.size, vfs.orphan, vfs.orphan);
     }
     const filetype = kind ? kernelFiletype(kind).filetype : FILETYPE.CHARACTER_DEVICE;
     return this.local({ filetype, size: 0n, ino: BigInt(fd + 1), mtimeNs: 0n });
   }
 
-  private statOrphanable(path: string, size: number, orphan = false): Filestat {
+  private localFilestat(file: LocalFile): Filestat {
+    const { buffer } = file;
+    if (buffer.isOrphan()) return this.statOrphanable(file.path, file.size(), false, true);
+    let s: SyncFsBridgeStat | undefined;
+    try {
+      s = this.o.fs.stat(file.path);
+    } catch {
+      s = this.keptStat(buffer.handle);
+    }
+    return this.sized(file.path, s, file.size());
+  }
+
+  private keptStat(handle: number | undefined): SyncFsBridgeStat | undefined {
+    if (handle === undefined) return undefined;
+    try {
+      return this.o.fs.keptStat?.(handle);
+    } catch {
+      return undefined;
+    }
+  }
+
+  private sized(path: string, s: SyncFsBridgeStat | undefined, size: number): Filestat {
+    return {
+      ...filestatOf(path, s ?? { isFile: true, isDirectory: false, size: 0 }),
+      size: BigInt(size),
+    };
+  }
+
+  private statOrphanable(path: string, size: number, orphan = false, gone = false): Filestat {
     let s: SyncFsBridgeStat | undefined;
 
     if (!orphan) {
@@ -882,10 +911,8 @@ export class WasiHost {
         s = this.o.fs.stat(path);
       } catch {}
     }
-    return {
-      ...filestatOf(path, s ?? { isFile: true, isDirectory: false, size: 0 }),
-      size: BigInt(size),
-    };
+    const out = this.sized(path, s, size);
+    return gone ? { ...out, nlink: 0n } : out;
   }
 
   private pathFilestat(path: string, lookup: number): Filestat {

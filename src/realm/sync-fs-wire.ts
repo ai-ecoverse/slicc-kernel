@@ -96,6 +96,7 @@ export type SyncFsFileIo = Pick<
 export interface SyncFsPosixBridge {
   pinned?(handle: number): SyncFsFileIo;
   kept?(handle: number): boolean;
+  keptStat?(handle: number): SyncFsBridgeStat;
   readFile(path: string): Uint8Array;
   writeFile(path: string, bytes: Uint8Array, open?: boolean): void;
   stat(path: string): SyncFsBridgeStat;

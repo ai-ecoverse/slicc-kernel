@@ -540,6 +540,7 @@ export function cachingBridge(
     lutimes: (p, a, m) => mutating(() => bridge.lutimes(p, a, m), p),
     ...(bridge.hold ? { hold: bridge.hold.bind(bridge) } : {}),
     ...(bridge.kept ? { kept: bridge.kept.bind(bridge) } : {}),
+    ...(bridge.keptStat ? { keptStat: bridge.keptStat.bind(bridge) } : {}),
     ...(bridge.pinned ? { pinned: (handle: number) => pinnedIo(bridge, handle, rewriting) } : {}),
     ...(bridge.create
       ? { create: (p: string) => mutating(() => bridge.create?.(p), ...entry(p)) }
