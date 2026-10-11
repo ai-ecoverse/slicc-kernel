@@ -55,6 +55,14 @@ export type {
   TerminalOptions,
   TerminalSignal,
 } from './index.ts';
+export type {
+  HostfsEvent,
+  HostfsGrant,
+  HostfsGrantHook,
+  HostfsPortGrant,
+  HostfsTransport,
+} from './mount/hostfs.ts';
+export { serveHostfsPort } from './mount/hostfs.ts';
 export type { MountEntry, MountSpec } from './mount/mount-fs.ts';
 export { fetchTransport, type NetworkTransport } from './transport.ts';
 export { memoryRoot };

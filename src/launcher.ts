@@ -903,7 +903,11 @@ export class Launcher {
         throw fsError('ENODEV', 'this kernel has no hostfs hook (createKernel({ hostfs }))');
       return openHostfs(
         spec,
-        grantConnect(hostfs, hostfsFetch ?? ((url, init) => fetch(url, init))),
+        grantConnect(
+          hostfs,
+          hostfsFetch ?? ((url, init) => fetch(url, init)),
+          hostfsTiming?.requestMs
+        ),
         hostfsTiming
       );
     }

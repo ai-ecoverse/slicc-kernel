@@ -62,8 +62,10 @@ export type {
   HostfsEvent,
   HostfsGrant,
   HostfsGrantHook,
+  HostfsPortGrant,
   HostfsTransport,
 } from './mount/hostfs.ts';
+export { serveHostfsPort } from './mount/hostfs.ts';
 export type { MountEntry, MountSpec } from './mount/mount-fs.ts';
 export type { ProcessMountPolicy, ProcessMountRequest } from './mount/syscall.ts';
 export type { JsChild, JsExited, JsSpawnOptions, JsStdio } from './process/js/js-children.ts';
@@ -355,7 +357,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     try {
       if (!options.hostfs) throw new Error('this page gives no host folders');
       const grant = await options.hostfs(source, { readonly });
-      worker.postMessage({ hostfsGrant: { id, grant } });
+      worker.postMessage({ hostfsGrant: { id, grant } }, 'port' in grant ? [grant.port] : []);
     } catch (err) {
       worker.postMessage({ hostfsGrant: { id, error: (err as Error).message ?? String(err) } });
     }
