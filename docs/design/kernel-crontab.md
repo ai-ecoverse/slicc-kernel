@@ -2,7 +2,7 @@
 
 Status: **approved** (Lars via seven, 2026-10-10); **PR plan approved** (seven/Lars, 2026-10-10). **Ordered after N1 (users).** Tracks [slicc-kernel#156](https://github.com/ai-ecoverse/slicc-kernel/issues/156).
 
-**Do not write kernel cron code until N1's K3 (enforcement) PR has merged.** The coordinator opens that gate. N1 is [users and groups](https://github.com/ai-ecoverse/slicc-kernel/blob/design/users-and-groups/docs/design/users-and-groups.md) ([#153](https://github.com/ai-ecoverse/slicc-kernel/issues/153)); implementation is in flight (@thread:thr_9ab5eajk3x).
+**Do not write kernel cron code until N1's K3 (enforcement) PR has merged.** The Homescoop Coordinator (@thread:thr_m6q5dc8t4k) opens that gate. N1 is [users and groups](https://github.com/ai-ecoverse/slicc-kernel/blob/design/users-and-groups/docs/design/users-and-groups.md) ([#153](https://github.com/ai-ecoverse/slicc-kernel/issues/153)); implementation is in flight (@thread:thr_9ab5eajk3x).
 
 Decision (Lars, 2026-10-09 / 2026-10-10): **the kernel crontab is the only scheduler.** A real crontab in slicc-kernel fires commands (for seven, typically `agent send …`) for scheduled agent wake-ups. The agent's durable `slicc.cron` tasks go away once this exists.
 
@@ -283,7 +283,7 @@ Cases:
 
 ## PR plan (N2)
 
-Gate: **N1 K3 (enforcement) PR merged** (`createKernel({ users: 'enforce' })` available and green). Until then: design only. Pure schedule math could be drafted behind a flag, but the coordinator holds the start signal. Plan ownership: this thread does **C1→C2→C3→C4**; **A1** is @thread:thr_5kkzgixscm; **B1** is @thread:thr_fcm57qmnug.
+Gate: **N1 K3 (enforcement) PR merged** (`createKernel({ users: 'enforce' })` available and green). Until then: design only. Pure schedule math could be drafted behind a flag, but @thread:thr_m6q5dc8t4k holds the start signal. Plan ownership: this thread does **C1→C2→C3→C4**; **A1** is @thread:thr_5kkzgixscm; **B1** is @thread:thr_fcm57qmnug. Reports go to @thread:thr_m6q5dc8t4k.
 
 N1 APIs this plan assumes (from [users-and-groups](https://github.com/ai-ecoverse/slicc-kernel/blob/design/users-and-groups/docs/design/users-and-groups.md)):
 
@@ -323,7 +323,7 @@ N1: credentials → ownership → enforcement ──┬──▶ C1 → C2 → C
 
 | Need | Stub? | Wait? |
 |---|---|---|
-| Schedule parser / clock | Can implement in C1 in isolation | Start only when coordinator opens N2 coding |
+| Schedule parser / clock | Can implement in C1 in isolation | Start only when @thread:thr_m6q5dc8t4k opens N2 coding |
 | User home + spawn-as-user | Do not stub fake uids in production path | **Wait for N1 credentials + users API** |
 | DAC on spool | Do not ship `crontab -u` security without it | **Wait for N1 enforcement PR** (explicit gate) |
 | `kernel.users.add` in tests | Hand-written `/etc/passwd` + mkdir home only if `add` is late | Prefer real `users.add` |
