@@ -1,3 +1,4 @@
+import { physicalPath } from '../../fs/physical-path.ts';
 import { type Cred, type CredChange, MAX_GROUPS } from '../../kernel/cred.ts';
 import type { DeviceMeta, KernelFdKind } from '../../kernel/fd-table.ts';
 import type { SyncFsBridgeStat, SyncFsPosixBridge } from '../../realm/sync-fs-wire.ts';
@@ -92,6 +93,14 @@ interface Filestat {
   ino: bigint;
   nlink?: bigint;
   mtimeNs: bigint;
+}
+
+function linkedElsewhere(fs: Pick<SyncFsPosixBridge, 'lstat'>, path: string): boolean {
+  try {
+    return (fs.lstat(path).nlink ?? 1) > 1;
+  } catch {
+    return false;
+  }
 }
 
 function filetypeOf(s: SyncFsBridgeStat | null | undefined): number {
@@ -481,17 +490,20 @@ export class WasiHost {
         void o.fs.rmdir(at(dirfd, p, l)),
       path_unlink_file: (dirfd: number, p: number, l: number) => {
         const path = at(dirfd, p, l);
-        if (o.fs.lstat(path).isDirectory) throw new WasiError('EISDIR');
-        fds.unlinking(path);
+        const st = o.fs.lstat(path);
+        if (st.isDirectory) throw new WasiError('EISDIR');
+        const linked = (st.nlink ?? 1) > 1;
+        fds.unlinking(path, linked);
         o.fs.unlink(path);
-        fds.unlinked(path);
+        fds.unlinked(path, linked);
       },
       path_rename: (fd: number, p: number, l: number, fd2: number, p2: number, l2: number) => {
         const from = at(fd, p, l);
         const to = at(fd2, p2, l2);
         fds.flushPath(from);
+        const replaced = linkedElsewhere(o.fs, to);
         o.fs.rename(from, to);
-        fds.renamed(from, to);
+        fds.renamed(from, to, replaced);
       },
       path_symlink: (tp: number, tl: number, dirfd: number, p: number, l: number) =>
         void o.fs.symlink(mem.string(tp, tl), at(dirfd, p, l)),
@@ -519,8 +531,9 @@ export class WasiHost {
         l2: number
       ) => {
         const from = at(fd, p, l);
-        fds.flushPath(from);
-        o.fs.link(from, at(fd2, p2, l2), (lookup & LOOKUP_SYMLINK_FOLLOW) !== 0);
+        const follow = (lookup & LOOKUP_SYMLINK_FOLLOW) !== 0;
+        fds.flushPath(follow ? physicalPath(o.fs, from) : from);
+        o.fs.link(from, at(fd2, p2, l2), follow);
       },
     };
   }

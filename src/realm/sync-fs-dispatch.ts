@@ -208,6 +208,14 @@ async function ranged(fs: KernelFs, path: string, req: SyncFsRequest): Promise<S
 const UNLINKED_OPS = new Set<SyncFsOp>(['read', 'pread', 'pwrite', 'truncate']);
 const OWN_OPS = new Set<SyncFsOp>(['rm', 'unlink', 'rmdir', 'rename', 'link']);
 const TWO_PATHS = new Set<SyncFsOp>(['rename', 'link']);
+const UNLINKING_OPS = new Set<SyncFsOp>(['rm', 'unlink', 'rename']);
+
+async function linkedElsewhere(fs: KernelFs, path: string): Promise<boolean> {
+  return fs.lstat(path).then(
+    (st) => (st.nlink ?? 1) > 1,
+    () => false
+  );
+}
 
 async function keptOr(entry: SyncFsTokenEntry, path: string, handle?: number): Promise<string> {
   if (handle !== undefined) return entry.keptFor?.(handle)?.hidden ?? path;
@@ -239,6 +247,9 @@ export async function dispatchSyncFs(req: SyncFsRequest): Promise<SyncFsResult> 
     }
     if (!entry.own || !OWN_OPS.has(req.op)) return await run(entry, path, req);
     const target = TWO_PATHS.has(req.op) ? fs.resolvePath(cwd, req.arg2 ?? '') : path;
+    if (UNLINKING_OPS.has(req.op) && (await linkedElsewhere(fs, target))) {
+      return await run(entry, path, req);
+    }
     return await entry.own(target, () => run(entry, path, req));
   } catch (err) {
     return toErrno(err);

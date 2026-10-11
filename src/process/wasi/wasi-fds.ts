@@ -475,16 +475,18 @@ export class WasiFds {
     if (this.shared) this.kernel.call({ op: 'fd-path-flush', path });
   }
 
-  unlinking(path: string): void {
-    this.buffers.get(path)?.keep();
+  unlinking(path: string, linked = false): void {
+    const buffer = this.buffers.get(path);
+    if (buffer && this.survives(buffer, linked)) buffer.flush();
+    else buffer?.keep();
     if (this.shared) this.kernel.call({ op: 'fd-path-unlinking', path });
   }
 
-  unlinked(path: string): void {
+  unlinked(path: string, linked = false): void {
     if (this.shared) this.kernel.call({ op: 'fd-path-unlinked', path });
     const buffer = this.buffers.get(path);
     if (!buffer) return;
-    buffer.orphan();
+    this.detach(buffer, linked);
     this.buffers.delete(path);
   }
 
@@ -496,7 +498,15 @@ export class WasiFds {
     }
   }
 
-  renamed(from: string, to: string): void {
+  private survives(buffer: FileBuffer, linked: boolean): boolean {
+    return linked && buffer.handle !== undefined;
+  }
+
+  private detach(buffer: FileBuffer, linked: boolean): void {
+    if (!this.survives(buffer, linked)) buffer.orphan();
+  }
+
+  renamed(from: string, to: string, replacedLinked = false): void {
     if (from === to) return;
     if (this.shared) this.kernel.call({ op: 'fd-path-renamed', from, to });
     for (const e of this.table.values()) {
@@ -508,7 +518,7 @@ export class WasiFds {
     for (const [p, buffer] of this.buffers) {
       if (within(p, from)) moved.push([p, buffer]);
       else if (within(p, to)) {
-        buffer.orphan();
+        this.detach(buffer, replacedLinked);
         this.buffers.delete(p);
       }
     }
