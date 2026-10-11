@@ -10,12 +10,53 @@ interface Node {
   data: ChunkedBytes;
   target: string;
   children: Map<string, Node>;
+  links: number;
   uid: number;
   gid: number;
 }
 
 function idOption(value: string | undefined): number {
   return value !== undefined && /^\d+$/.test(value) ? Number(value) : 0;
+}
+
+function created(
+  ino: number,
+  kind: Node['kind'],
+  mode: number,
+  from?: Node,
+  owner?: DriverOwner
+): Node {
+  return {
+    kind,
+    ino,
+    mode: owner?.mode === undefined ? mode : (mode & ~0o7777) | (owner.mode & 0o7777),
+    mtime: Date.now(),
+    data: new ChunkedBytes(),
+    target: '',
+    children: new Map(),
+    links: 1,
+    uid: owner?.uid ?? from?.uid ?? 0,
+    gid: owner?.gid ?? from?.gid ?? 0,
+  };
+}
+
+function owned(node: Node, change: { uid?: number; gid?: number }): void {
+  if (change.uid !== undefined) node.uid = change.uid;
+  if (change.gid !== undefined) node.gid = change.gid;
+}
+
+function attr(node: Node): DriverAttr {
+  return {
+    kind: node.kind,
+    size:
+      node.kind === 'file' ? node.data.size : node.kind === 'symlink' ? node.target.length : 4096,
+    mtime: node.mtime,
+    mode: node.mode,
+    ino: node.ino,
+    ...(node.kind === 'directory' ? {} : { nlink: node.links }),
+    uid: node.uid,
+    gid: node.gid,
+  };
 }
 
 interface Handle {
@@ -25,22 +66,17 @@ interface Handle {
 
 export function tmpfs(): FilesystemHandlers {
   let inodes = 0;
-  const make = (kind: Node['kind'], mode: number, from?: Node, owner?: DriverOwner): Node => ({
-    kind,
-    ino: ++inodes,
-    mode: owner?.mode === undefined ? mode : (mode & ~0o7777) | (owner.mode & 0o7777),
-    mtime: Date.now(),
-    data: new ChunkedBytes(),
-    target: '',
-    children: new Map(),
-    uid: owner?.uid ?? from?.uid ?? 0,
-    gid: owner?.gid ?? from?.gid ?? 0,
-  });
+  const make = (kind: Node['kind'], mode: number, from?: Node, owner?: DriverOwner): Node =>
+    created(++inodes, kind, mode, from, owner);
   const root = make('directory', 0o40755);
   const handles = new Map<number, Handle>();
   let nextFh = 0;
 
   const parts = (path: string) => path.split('/').filter(Boolean);
+  const place = (dir: Node, name: string, node: Node): void => {
+    dir.children.set(name, node);
+    dir.mtime = Date.now();
+  };
   function find(path: string): Node {
     let node = root;
     for (const name of parts(path)) {
@@ -59,16 +95,6 @@ export function tmpfs(): FilesystemHandlers {
     if (dir.kind !== 'directory') throw fsError('ENOTDIR', path);
     return { dir, name };
   }
-  const attr = (node: Node): DriverAttr => ({
-    kind: node.kind,
-    size:
-      node.kind === 'file' ? node.data.size : node.kind === 'symlink' ? node.target.length : 4096,
-    mtime: node.mtime,
-    mode: node.mode,
-    ino: node.ino,
-    uid: node.uid,
-    gid: node.gid,
-  });
   const handle = (fh: number): Handle => {
     const found = handles.get(fh);
     if (!found) throw fsError('EBADF', `handle ${fh}`);
@@ -82,8 +108,7 @@ export function tmpfs(): FilesystemHandlers {
     if (existing) return existing;
     if (!flags.create) throw fsError('ENOENT', path);
     const node = make('file', 0o100644, dir, flags.owner);
-    dir.children.set(name, node);
-    dir.mtime = Date.now();
+    place(dir, name, node);
     return node;
   }
 
@@ -128,8 +153,7 @@ export function tmpfs(): FilesystemHandlers {
     async mkdir(path, owner) {
       const { dir, name } = parent(path);
       if (dir.children.has(name)) throw fsError('EEXIST', path);
-      dir.children.set(name, make('directory', 0o40755, dir, owner));
-      dir.mtime = Date.now();
+      place(dir, name, make('directory', 0o40755, dir, owner));
     },
     async rmdir(path) {
       const { dir, name } = parent(path);
@@ -146,6 +170,7 @@ export function tmpfs(): FilesystemHandlers {
       if (!node) throw fsError('ENOENT', path);
       if (node.kind === 'directory') throw fsError('EISDIR', path);
       dir.children.delete(name);
+      node.links--;
       dir.mtime = Date.now();
     },
     async rename(from, to) {
@@ -165,17 +190,25 @@ export function tmpfs(): FilesystemHandlers {
         throw fsError(node.kind === 'directory' ? 'ENOTEMPTY' : 'EISDIR', to);
       }
       source.dir.children.delete(source.name);
+      if (replaced) replaced.links--;
       target.dir.children.set(target.name, node);
       source.dir.mtime = Date.now();
       target.dir.mtime = source.dir.mtime;
+    },
+    async link(from, to) {
+      const node = find(from);
+      if (node.kind === 'directory') throw fsError('EPERM', `${from} is a directory`);
+      const { dir, name } = parent(to);
+      if (dir.children.has(name)) throw fsError('EEXIST', to);
+      place(dir, name, node);
+      node.links++;
     },
     async symlink(target, path, owner) {
       const { dir, name } = parent(path);
       if (dir.children.has(name)) throw fsError('EEXIST', path);
       const node = make('symlink', 0o120777, dir, owner && { ...owner, mode: 0o777 });
       node.target = target;
-      dir.children.set(name, node);
-      dir.mtime = Date.now();
+      place(dir, name, node);
     },
     async readlink(path) {
       const node = find(path);
@@ -192,8 +225,7 @@ export function tmpfs(): FilesystemHandlers {
         node.mtime = Date.now();
       }
       if (change.mtime !== undefined) node.mtime = change.mtime;
-      if (change.uid !== undefined) node.uid = change.uid;
-      if (change.gid !== undefined) node.gid = change.gid;
+      owned(node, change);
     },
     async statfs() {
       return { bsize: 4096, blocks: 262144, bfree: 262144 };

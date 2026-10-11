@@ -73,6 +73,7 @@ export interface JsProgramContext {
     rm(path: string): Promise<void>;
     unlink(path: string): Promise<void>;
     rename(from: string, to: string): Promise<void>;
+    link(from: string, to: string): Promise<void>;
     symlink(target: string, path: string): Promise<void>;
     readlink(path: string): Promise<string>;
     readFile(path: string): Promise<Uint8Array>;
@@ -475,6 +476,8 @@ function pathOps(
     unlink: async (path) => void (await kernel.call({ op: 'unlink', path: resolve(path) })),
     rename: async (from, to) =>
       void (await kernel.call({ op: 'rename', path: resolve(from), arg2: resolve(to) })),
+    link: async (from, to) =>
+      void (await kernel.call({ op: 'link', path: resolve(from), arg2: resolve(to) })),
     symlink: async (target, path) =>
       void (await kernel.call({ op: 'symlink', path: resolve(path), arg2: target })),
     readlink: async (path) => String(await kernel.json({ op: 'readlink', path: resolve(path) })),

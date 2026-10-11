@@ -3,6 +3,7 @@ export const DRIVER_PROTOCOL: readonly [number, number] = [1, 2];
 export interface DriverCapabilities {
   readonly?: boolean;
   symlinks?: boolean;
+  links?: boolean;
   chmod?: boolean;
   owners?: boolean;
   linkTimes?: boolean;
@@ -23,6 +24,7 @@ export interface DriverAttr {
   mtime: number;
   mode?: number;
   ino?: number;
+  nlink?: number;
   etag?: string;
   uid?: number;
   gid?: number;
@@ -70,6 +72,7 @@ export type DriverCall =
   | { op: 'rmdir'; path: string }
   | { op: 'unlink'; path: string }
   | { op: 'rename'; from: string; to: string }
+  | { op: 'link'; from: string; to: string }
   | ({ op: 'symlink'; target: string; path: string } & DriverOwner)
   | { op: 'readlink'; path: string }
   | {

@@ -9,6 +9,7 @@ export const SYNC_FS_OPS = [
   'mkdir',
   'rm',
   'rename',
+  'link',
   'unlink',
   'rmdir',
   'symlink',
@@ -64,10 +65,12 @@ export interface SyncFsBridgeStat {
   atimeMs?: number;
   ctimeMs?: number;
   ino?: number;
+  nlink?: number;
   dev?: number;
   readonly?: boolean;
   maxFile?: number;
   ranged?: boolean;
+  linkable?: boolean;
   version?: string;
   uid?: number;
   gid?: number;
@@ -101,6 +104,7 @@ export interface SyncFsPosixBridge {
   mkdir(path: string, mode?: number): void;
   rm(path: string): void;
   rename(from: string, to: string): void;
+  link(from: string, to: string, follow?: boolean): void;
   unlink(path: string): void;
   rmdir(path: string): void;
   symlink(target: string, linkPath: string): void;
@@ -143,10 +147,12 @@ export function parseSyncFsStat(json: unknown): SyncFsBridgeStat | null {
     ...(typeof s.atimeMs === 'number' ? { atimeMs: s.atimeMs } : {}),
     ...(typeof s.ctimeMs === 'number' ? { ctimeMs: s.ctimeMs } : {}),
     ...(typeof s.ino === 'number' ? { ino: s.ino } : {}),
+    ...(typeof s.nlink === 'number' ? { nlink: s.nlink } : {}),
     ...(typeof s.dev === 'number' ? { dev: s.dev } : {}),
     ...(s.readonly === true ? { readonly: true } : {}),
     ...(typeof s.maxFile === 'number' ? { maxFile: s.maxFile } : {}),
     ...(s.ranged === true ? { ranged: true } : {}),
+    ...(s.linkable === true ? { linkable: true } : {}),
     ...(typeof s.version === 'string' ? { version: s.version } : {}),
     ...(typeof s.uid === 'number' ? { uid: s.uid } : {}),
     ...(typeof s.gid === 'number' ? { gid: s.gid } : {}),

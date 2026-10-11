@@ -43,6 +43,7 @@ export interface FilesystemHandlers {
   rmdir(path: string): Promise<void>;
   unlink(path: string): Promise<void>;
   rename(from: string, to: string): Promise<void>;
+  link?(from: string, to: string): Promise<void>;
   symlink?(target: string, path: string, owner?: DriverOwner): Promise<void>;
   readlink?(path: string): Promise<string>;
   setattr?(path: string, attr: DriverSetAttr): Promise<void>;
@@ -118,6 +119,9 @@ async function dispatch(h: FilesystemHandlers, req: DriverRequest): Promise<unkn
       return h.unlink(req.path);
     case 'rename':
       return h.rename(req.from, req.to);
+    case 'link':
+      if (!h.link) throw fsError('EPERM', 'this file system has no hard links');
+      return h.link(req.from, req.to);
     case 'symlink':
       if (!h.symlink) throw fsError('EPERM', 'this file system has no symlinks');
       return ownerOf(req)

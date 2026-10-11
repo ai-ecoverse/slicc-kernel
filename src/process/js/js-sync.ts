@@ -53,6 +53,7 @@ export interface JsSyncContext {
     rm(path: string): void;
     unlink(path: string): void;
     rename(from: string, to: string): void;
+    link(from: string, to: string): void;
     symlink(target: string, path: string): void;
     readlink(path: string): string;
     readFile(path: string): Uint8Array;
@@ -289,6 +290,7 @@ function syncPathOps(
     unlink: (path) => void kernel.call({ op: 'unlink', path: resolve(path) }),
     rename: (from, to) =>
       void kernel.call({ op: 'rename', path: resolve(from), arg2: resolve(to) }),
+    link: (from, to) => void kernel.call({ op: 'link', path: resolve(from), arg2: resolve(to) }),
     symlink: (target, path) =>
       void kernel.call({ op: 'symlink', path: resolve(path), arg2: target }),
     readlink: (path) => String(kernel.json({ op: 'readlink', path: resolve(path) })),

@@ -751,12 +751,12 @@ export class WasmProcess {
       } else if (req.create) {
         await nodes.onEntry(path, async () => {
           const fresh = this.options.owners && !(await present(this.options.fs, path, true));
-          this.fds.installAt(fd, this.openVfsFile(open));
+          this.fds.installAt(fd, this.openVfsFile(open, await nodes.identify(path)));
           await this.fds.get(fd).file.stat?.();
           if (fresh) await this.options.fs.chown?.(path, { ...this.newOwner(), kind: 'new' });
         });
       } else {
-        this.fds.installAt(fd, this.openVfsFile(open));
+        this.fds.installAt(fd, this.openVfsFile(open, await nodes.identify(path)));
       }
       if (req.existing && !(await present(this.options.fs, path, true))) {
         throw new KernelError('ENOENT');
@@ -797,7 +797,7 @@ export class WasmProcess {
     return memoryFile(tree.read(path), path, req.position);
   }
 
-  private openVfsFile(req: Extract<FdSyscall, { op: 'fd-open-vfs' }>): OpenFile {
+  private openVfsFile(req: Extract<FdSyscall, { op: 'fd-open-vfs' }>, id?: string): OpenFile {
     return vfsFile(
       this.options.fs,
       {
@@ -809,6 +809,7 @@ export class WasmProcess {
         ...(req.truncate ? { truncate: true } : {}),
         ...(req.create ? { create: true } : {}),
         ...(req.pin ? { pin: req.pin } : {}),
+        ...(id !== undefined && !req.orphan ? { id } : {}),
       },
       this.nodes
     );
@@ -967,6 +968,7 @@ export class WasmProcess {
     const path = req.orphan
       ? req.path
       : await this.keptOr(await this.nodes.targetKey(req.path), req.handle);
+    const id = req.orphan ? undefined : await this.nodes.identify(path);
     if (!this.fds.get(req.fd).file.held) throw new KernelError('EBADF');
     const file = vfsFile(
       this.options.fs,
@@ -978,6 +980,7 @@ export class WasmProcess {
         ...(req.orphan ? { orphan: true } : {}),
         ...(req.dirty ? { dirty: true } : {}),
         ...(req.pin ? { pin: req.pin } : {}),
+        ...(id !== undefined ? { id } : {}),
       },
       this.nodes
     );

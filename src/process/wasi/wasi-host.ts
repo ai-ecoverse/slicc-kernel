@@ -1,3 +1,4 @@
+import { physicalPath } from '../../fs/physical-path.ts';
 import { type Cred, type CredChange, MAX_GROUPS } from '../../kernel/cred.ts';
 import type { DeviceMeta, KernelFdKind } from '../../kernel/fd-table.ts';
 import type { SyncFsBridgeStat, SyncFsPosixBridge } from '../../realm/sync-fs-wire.ts';
@@ -96,7 +97,23 @@ interface Filestat {
   filetype: number;
   size: bigint;
   ino: bigint;
+  nlink?: bigint;
   mtimeNs: bigint;
+}
+
+function linkedOf(st: SyncFsBridgeStat): SyncFsBridgeStat | undefined {
+  return (st.nlink ?? 1) > 1 ? st : undefined;
+}
+
+function linkedElsewhere(
+  fs: Pick<SyncFsPosixBridge, 'lstat'>,
+  path: string
+): SyncFsBridgeStat | undefined {
+  try {
+    return linkedOf(fs.lstat(path));
+  } catch {
+    return undefined;
+  }
 }
 
 function filetypeOf(s: SyncFsBridgeStat | null | undefined): number {
@@ -111,6 +128,7 @@ function filestatOf(path: string, s: SyncFsBridgeStat): Filestat {
     filetype: filetypeOf(s),
     size: BigInt(s.size),
     ino: s.ino !== undefined ? BigInt(s.ino) : pathInode(path),
+    ...(s.nlink !== undefined ? { nlink: BigInt(s.nlink) } : {}),
     mtimeNs: BigInt(Math.round(s.mtimeMs ?? 0)) * NS_PER_MS,
   };
 }
@@ -226,9 +244,19 @@ export class WasiHost {
       view.setUint32(out, uid, true);
       view.setUint32(out + 4, gid, true);
     };
-    const streamed = (fd: number): boolean => {
+    const fdOwned = (fd: number): { uid?: number; gid?: number } | undefined => {
       const e = fds.get(fd);
-      return e.type === 'kernel' && fds.kind(fd, e) === 'stream';
+      if (e.type === 'device') return ROOT_IDS;
+      if (e.type === 'kernel' && fds.kind(fd, e) !== 'file') return undefined;
+      try {
+        return this.o.fs.stat(pathOf(fd));
+      } catch {
+        return undefined;
+      }
+    };
+    const pathOwned = (path: string, follow: boolean) => {
+      if (deviceOf(path)) return ROOT_IDS;
+      return follow ? this.o.fs.stat(path) : this.o.fs.lstat(path);
     };
     return wrap({
       fd_chown: (fd: number, uid: number, gid: number) => void chown(pathOf(fd), uid, gid, true),
@@ -236,14 +264,12 @@ export class WasiHost {
         void chown(at(dirfd, p, l), uid, gid, (flags & AT_SYMLINK_NOFOLLOW) === 0),
       fd_owner: (fd: number, out: number) => {
         if (!this.o.fs.owners) throw new WasiError('ENOTSUP');
-        owner(streamed(fd) ? undefined : this.o.fs.stat(pathOf(fd)), out);
+        owner(fdOwned(fd), out);
       },
       fd_filestat_owner: (fd: number, statOut: number, out: number) => {
         if (!this.o.fs.owners) throw new WasiError('ENOTSUP');
         this.writeFilestat(statOut, this.fdFilestat(fd));
-        const e = fds.get(fd);
-        const named = e.type !== 'device' && (e.type !== 'kernel' || fds.kind(fd, e) === 'file');
-        owner(e.type === 'device' ? ROOT_IDS : named ? this.o.fs.stat(pathOf(fd)) : undefined, out);
+        owner(fdOwned(fd), out);
       },
       path_filestat_owner: (
         dirfd: number,
@@ -256,18 +282,12 @@ export class WasiHost {
         if (!this.o.fs.owners) throw new WasiError('ENOTSUP');
         const path = at(dirfd, p, l);
         this.writeFilestat(statOut, this.pathFilestat(path, lookup));
-        const follow = (lookup & LOOKUP_SYMLINK_FOLLOW) !== 0;
-        const st = deviceOf(path)
-          ? ROOT_IDS
-          : follow
-            ? this.o.fs.stat(path)
-            : this.o.fs.lstat(path);
-        owner(st, out);
+        owner(pathOwned(path, (lookup & LOOKUP_SYMLINK_FOLLOW) !== 0), out);
       },
       path_owner: (dirfd: number, p: number, l: number, flags: number, out: number) => {
         if (!this.o.fs.owners) throw new WasiError('ENOTSUP');
         const path = at(dirfd, p, l);
-        owner(flags & AT_SYMLINK_NOFOLLOW ? this.o.fs.lstat(path) : this.o.fs.stat(path), out);
+        owner(pathOwned(path, (flags & AT_SYMLINK_NOFOLLOW) === 0), out);
       },
       fd_chmod: (fd: number, mode: number) => void this.o.fs.chmod(pathOf(fd), mode & 0o7777),
       path_chmod: (dirfd: number, p: number, l: number, mode: number, flags: number) =>
@@ -543,17 +563,20 @@ export class WasiHost {
         void o.fs.rmdir(at(dirfd, p, l)),
       path_unlink_file: (dirfd: number, p: number, l: number) => {
         const path = at(dirfd, p, l);
-        if (o.fs.lstat(path).isDirectory) throw new WasiError('EISDIR');
-        fds.unlinking(path);
+        const st = o.fs.lstat(path);
+        if (st.isDirectory) throw new WasiError('EISDIR');
+        const linked = linkedOf(st);
+        fds.unlinking(path, linked);
         o.fs.unlink(path);
-        fds.unlinked(path);
+        fds.unlinked(path, linked);
       },
       path_rename: (fd: number, p: number, l: number, fd2: number, p2: number, l2: number) => {
         const from = at(fd, p, l);
         const to = at(fd2, p2, l2);
         fds.flushPath(from);
+        const replaced = fds.holdsUnder(to) ? linkedElsewhere(o.fs, to) : undefined;
         o.fs.rename(from, to);
-        fds.renamed(from, to);
+        fds.renamed(from, to, replaced);
       },
       path_symlink: (tp: number, tl: number, dirfd: number, p: number, l: number) =>
         void o.fs.symlink(mem.string(tp, tl), at(dirfd, p, l)),
@@ -571,7 +594,25 @@ export class WasiHost {
         mem.view().setUint32(used, n, true);
       },
 
-      path_link: () => E.NOTSUP,
+      path_link: (
+        fd: number,
+        lookup: number,
+        p: number,
+        l: number,
+        fd2: number,
+        p2: number,
+        l2: number
+      ) => {
+        const from = at(fd, p, l);
+        const to = at(fd2, p2, l2);
+        const follow = (lookup & LOOKUP_SYMLINK_FOLLOW) !== 0;
+        const source = follow ? physicalPath(o.fs, from) : from;
+        fds.flushPath(from);
+        if (source !== from) fds.flushPath(source);
+        o.fs.link(from, to, follow);
+        fds.linked(from, to);
+        if (source !== from) fds.linked(source, to);
+      },
     };
   }
 
@@ -811,7 +852,7 @@ export class WasiHost {
     v.setBigUint64(ptr, 1n, true);
     v.setBigUint64(ptr + 8, f.ino, true);
     v.setUint8(ptr + 16, f.filetype);
-    v.setBigUint64(ptr + 24, 1n, true);
+    v.setBigUint64(ptr + 24, f.nlink ?? 1n, true);
     v.setBigUint64(ptr + 32, f.size, true);
     v.setBigUint64(ptr + 40, f.mtimeNs, true);
     v.setBigUint64(ptr + 48, f.mtimeNs, true);

@@ -393,6 +393,14 @@ export function procfsBridge<T extends SyncFsPosixBridge>(fs: T, tree: ProcTree)
       ),
     symlink: (target: string, link: string) =>
       readOnly([[link, false]], () => fs.symlink(target, link)),
+    link: (from: string, to: string, follow?: boolean) =>
+      readOnly(
+        [
+          [from, follow === true],
+          [to, false],
+        ],
+        () => fs.link(from, to, follow)
+      ),
     hold: (p: string, held: boolean, open?: boolean, handle?: number) => {
       if (handle !== undefined && snapshots.delete(handle)) return undefined;
       if (!held) return fs.hold?.(p, held, open, handle);

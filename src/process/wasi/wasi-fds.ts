@@ -59,6 +59,10 @@ export class WasiFds {
 
   private readonly buffers = new Map<string, FileBuffer>();
 
+  private readonly byId = new Map<string, FileBuffer>();
+
+  private readonly ids = new Map<FileBuffer, string>();
+
   private readonly kernel: WasiKernel;
   private readonly fs: SyncFsPosixBridge;
   constructor(kernel: WasiKernel, fs: SyncFsPosixBridge) {
@@ -357,7 +361,7 @@ export class WasiFds {
     }
     for (const file of promoted.keys()) {
       if (--file.buffer.opens <= 0) {
-        this.buffers.delete(file.path);
+        this.forget(file.buffer);
         this.letGo(file.buffer);
       }
     }
@@ -438,8 +442,53 @@ export class WasiFds {
     const { buffer } = e.file;
     buffer.flush();
     if (--buffer.opens > 0) return;
-    if (this.buffers.get(buffer.path) === buffer) this.buffers.delete(buffer.path);
+    this.forget(buffer);
     this.letGo(buffer);
+  }
+
+  private forget(buffer: FileBuffer): void {
+    for (const [p, b] of [...this.buffers]) if (b === buffer) this.buffers.delete(p);
+    const id = this.ids.get(buffer);
+    if (id !== undefined && this.byId.get(id) === buffer) this.byId.delete(id);
+    this.ids.delete(buffer);
+  }
+
+  private know(buffer: FileBuffer, id: string): void {
+    if (this.ids.has(buffer)) return;
+    this.ids.set(buffer, id);
+    if (!this.byId.has(id)) this.byId.set(id, buffer);
+  }
+
+  private identity(st: SyncFsBridgeStat | undefined): string | undefined {
+    if (!st || st.ino === undefined || (st.nlink ?? 1) < 2) return undefined;
+    return `${st.dev ?? 0}:${st.ino}`;
+  }
+
+  private sharing(path: string, st: SyncFsBridgeStat | undefined): FileBuffer | undefined {
+    if (st?.ino === undefined) return undefined;
+    const id = `${st.dev ?? 0}:${st.ino}`;
+    if (!this.byId.has(id) && this.identity(st) !== undefined) this.learn();
+    const buffer = this.byId.get(id);
+    if (!buffer) return undefined;
+    this.buffers.set(path, buffer);
+    return buffer;
+  }
+
+  private learn(): void {
+    for (const [p, buffer] of this.buffers) {
+      if (this.ids.has(buffer) || buffer.isOrphan()) continue;
+      const known = this.identity(this.statOrMissing(p));
+      if (known !== undefined) this.know(buffer, known);
+    }
+  }
+
+  linked(from: string, to: string): void {
+    const buffer = this.buffers.get(from);
+    if (!buffer || buffer.isOrphan()) return;
+    const id = this.identity(this.statOrMissing(to));
+    if (id === undefined) return;
+    this.know(buffer, id);
+    if (!this.buffers.has(to)) this.buffers.set(to, buffer);
   }
 
   private letGo(buffer: FileBuffer): void {
@@ -475,16 +524,23 @@ export class WasiFds {
     if (this.shared) this.kernel.call({ op: 'fd-path-flush', path });
   }
 
-  unlinking(path: string): void {
-    this.buffers.get(path)?.keep();
+  holdsUnder(path: string): boolean {
+    for (const p of this.buffers.keys()) if (within(p, path)) return true;
+    return false;
+  }
+
+  unlinking(path: string, linked?: SyncFsBridgeStat): void {
+    const buffer = this.buffers.get(path);
+    if (buffer && this.survives(buffer, linked)) buffer.flush();
+    else buffer?.keep();
     if (this.shared) this.kernel.call({ op: 'fd-path-unlinking', path });
   }
 
-  unlinked(path: string): void {
+  unlinked(path: string, linked?: SyncFsBridgeStat): void {
     if (this.shared) this.kernel.call({ op: 'fd-path-unlinked', path });
     const buffer = this.buffers.get(path);
     if (!buffer) return;
-    buffer.orphan();
+    this.detach(buffer, linked);
     this.buffers.delete(path);
   }
 
@@ -496,7 +552,21 @@ export class WasiFds {
     }
   }
 
-  renamed(from: string, to: string): void {
+  private survives(buffer: FileBuffer, linked: SyncFsBridgeStat | undefined): boolean {
+    return linked !== undefined && buffer.handle !== undefined;
+  }
+
+  private detach(buffer: FileBuffer, linked: SyncFsBridgeStat | undefined): void {
+    if (this.survives(buffer, linked)) {
+      const id = this.identity(linked);
+      if (id !== undefined) this.know(buffer, id);
+      return;
+    }
+    buffer.orphan();
+    this.forget(buffer);
+  }
+
+  renamed(from: string, to: string, replacedLinked?: SyncFsBridgeStat): void {
     if (from === to) return;
     if (this.shared) this.kernel.call({ op: 'fd-path-renamed', from, to });
     for (const e of this.table.values()) {
@@ -508,14 +578,15 @@ export class WasiFds {
     for (const [p, buffer] of this.buffers) {
       if (within(p, from)) moved.push([p, buffer]);
       else if (within(p, to)) {
-        buffer.orphan();
+        this.detach(buffer, replacedLinked);
         this.buffers.delete(p);
       }
     }
+    for (const [p] of moved) this.buffers.delete(p);
     for (const [p, buffer] of moved) {
-      this.buffers.delete(p);
-      buffer.path = to + p.slice(from.length);
-      this.buffers.set(buffer.path, buffer);
+      const next = to + p.slice(from.length);
+      if (buffer.path === p) buffer.path = next;
+      this.buffers.set(next, buffer);
     }
   }
 
@@ -568,6 +639,7 @@ export class WasiFds {
       this.buffers.delete(path);
       buffer = undefined;
     }
+    buffer ??= this.sharing(path, existing);
     if (buffer) {
       if (oflags & OFLAGS.TRUNC) buffer.truncate(0);
     } else {
@@ -581,6 +653,8 @@ export class WasiFds {
       buffer = new FileBuffer(io, path, empty, st.maxFile, ranged, st.version);
       buffer.handle = handle;
       this.buffers.set(path, buffer);
+      const id = this.identity(st);
+      if (id !== undefined) this.know(buffer, id);
     }
     buffer.opens++;
     return new LocalFile(buffer, readable, writable, (fdflags & FDFLAGS.APPEND) !== 0);

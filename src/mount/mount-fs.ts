@@ -3,11 +3,13 @@ import {
   inodeOf,
   type KernelFs,
   lutimesOf,
+  mayLink,
   type NewOwner,
   normalizePath,
   type OwnerChange,
 } from '../fs/types.ts';
 import type { KeptFile, UnlinkHolder } from '../fs/unlinked.ts';
+import { joinName, realDir, realTarget } from '../fs/walk.ts';
 import { DriverConnection, type DriverPortLike, errnoError } from './connection.ts';
 import type {
   DriverAttr,
@@ -286,6 +288,12 @@ const parentOf = (path: string) => path.slice(0, path.lastIndexOf('/')) || '/';
 const readonly = (mount: Mount): boolean =>
   mount.caps.readonly === true || mount.options.ro !== undefined;
 
+function inodeless(mount: Mount, attr: DriverAttr): boolean {
+  if (attr.ino !== undefined) return false;
+  if (mount.caps.links) mount.caps = { ...mount.caps, links: false };
+  return true;
+}
+
 function statOf(attr: DriverAttr, path: string, mount: Mount): FsStat {
   const mtime = new Date(attr.mtime);
   const fallback =
@@ -300,10 +308,12 @@ function statOf(attr: DriverAttr, path: string, mount: Mount): FsStat {
     atime: mtime,
     ctime: mtime,
     ino: attr.ino ?? inodeOf(path),
+    ...(!inodeless(mount, attr) && attr.nlink !== undefined ? { nlink: attr.nlink } : {}),
     dev: mount.dev,
     ...(readonly(mount) ? { readonly: true } : {}),
     ...(mount.maxFile > 0 ? { maxFile: mount.maxFile } : {}),
     ...(mount.caps.ranges ? { ranged: true } : {}),
+    ...(mount.caps.links ? { linkable: true } : {}),
     ...(attr.etag !== undefined ? { version: attr.etag } : {}),
     ...(mount.owners
       ? {
@@ -1077,6 +1087,37 @@ class MountFs implements KernelFs {
     this.table.forget(a.mount, normalizePath(to));
     try {
       await a.mount.conn.call({ op: 'rename', from: a.rel, to: b.rel });
+    } finally {
+      this.table.forget(a.mount, normalizePath(from));
+      this.table.forget(a.mount, normalizePath(to));
+    }
+  }
+
+  links(path: string): boolean {
+    const found = this.at(path);
+    return found ? found.mount.caps.links === true : mayLink(this.base, path);
+  }
+
+  private async named(path: string): Promise<string> {
+    const at = normalizePath(path);
+    return joinName(await realDir(this, parentOf(at)), at.slice(at.lastIndexOf('/') + 1));
+  }
+
+  async link(source: string, target: string, follow = false): Promise<void> {
+    const from = follow ? await realTarget(this, normalizePath(source)) : await this.named(source);
+    const to = await this.named(target);
+    const a = this.at(from);
+    const b = this.at(to);
+    if (!a && !b) return this.base.link(from, to);
+    if (!a || !b || a.mount !== b.mount) throw errnoError('EXDEV', `${from} -> ${to}`);
+    this.writable(a.mount, normalizePath(to));
+    if (a.mount.caps.links) await this.lstat(from);
+    if (!a.mount.caps.links) {
+      throw errnoError('EPERM', `${from}: this file system has no hard links`);
+    }
+    await this.table.commitUnder(from);
+    try {
+      await a.mount.conn.call({ op: 'link', from: a.rel, to: b.rel });
     } finally {
       this.table.forget(a.mount, normalizePath(from));
       this.table.forget(a.mount, normalizePath(to));
