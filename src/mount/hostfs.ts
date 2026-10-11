@@ -487,11 +487,13 @@ export const PORT_REQUEST_MS = 60_000;
 export const HOSTFS_CALL_MS = 20_000;
 export const PORT_BEAT_MS = 1000;
 export const PORT_DEAD_MS = 10_000;
+export const PORT_LINGER_MS = 1000;
 
 export interface PortLiveness {
   requestMs?: number;
   beatMs?: number;
   deadMs?: number;
+  lingerMs?: number;
 }
 
 export function timed(transport: HostfsTransport, ms: number): HostfsTransport {
@@ -534,6 +536,12 @@ export function timed(transport: HostfsTransport, ms: number): HostfsTransport {
       return transport.gone;
     },
     retire: (why) => transport.retire?.(why),
+    ...(transport.cleanup
+      ? {
+          cleanup: (op: string, body: Record<string, unknown>) =>
+            transport.cleanup?.(op, body) as Promise<void>,
+        }
+      : {}),
     call: (op, body, handle) =>
       guard(op, () => transport.call(op, body, handle), op === 'open' ? release : undefined),
     read: (fh, offset, size, ifMatch) =>
@@ -567,6 +575,7 @@ export class PortTransport implements HostfsTransport {
   private dead: string | undefined;
   private readonly beatMs: number;
   private readonly deadMs: number;
+  private readonly lingerMs: number;
   private beat: ReturnType<typeof setInterval> | undefined;
   private answers = false;
   private pinged: number | undefined;
@@ -576,6 +585,7 @@ export class PortTransport implements HostfsTransport {
     this.requestMs = liveness.requestMs ?? PORT_REQUEST_MS;
     this.beatMs = liveness.beatMs ?? PORT_BEAT_MS;
     this.deadMs = liveness.deadMs ?? PORT_DEAD_MS;
+    this.lingerMs = liveness.lingerMs ?? PORT_LINGER_MS;
     this.capabilities = grant.capabilities ?? {};
     this.token = grant.token ?? `port-${++nextPortToken}`;
     this.port.addEventListener('message', (event: MessageEvent<PortReply>) => {
@@ -625,12 +635,22 @@ export class PortTransport implements HostfsTransport {
     }, this.beatMs);
   }
 
+  async cleanup(op: string, body: Record<string, unknown>): Promise<void> {
+    if (this.closed) throw fsError('ENOTCONN', "the folder's port is closed");
+    this.port.postMessage({ id: 0, op: 'cleanup', name: op, body });
+  }
+
+  private closed = false;
+
   fail(why: string): void {
     if (this.dead === undefined) {
-      try {
-        this.port.postMessage({ id: 0, op: 'bye' });
-      } catch {}
-      this.port.close();
+      setTimeout(() => {
+        try {
+          this.port.postMessage({ id: 0, op: 'bye' });
+        } catch {}
+        this.closed = true;
+        this.port.close();
+      }, this.lingerMs);
     }
     clearInterval(this.beat);
     this.beat = undefined;
@@ -757,6 +777,8 @@ export function serveHostfsPort(port: MessagePort, transport: HostfsTransport): 
     const { id, op } = data;
     if (op === 'ping') return send({ id, pong: true });
     if (op === 'bye') return stop();
+    if (op === 'cleanup')
+      return void answer(data.name as string, data.body as Record<string, unknown>).catch(() => {});
     if (op === 'unwatch') return watches.get(id)?.abort();
     if (op === 'watch') {
       const stop = new AbortController();
