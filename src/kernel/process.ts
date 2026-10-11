@@ -1,4 +1,5 @@
 import type { MountCall } from '../mount/syscall.ts';
+import { inProc, ProcTree, procAlias } from '../process/wasi/wasi-procfs.ts';
 import type { LinkRecord } from '../process/wasi/wasix-linker.ts';
 import type { SyncFsResult } from '../realm/sync-fs-wire.ts';
 import {
@@ -18,6 +19,7 @@ import {
   KernelError,
   type KernelFdKind,
   kernelFdKind,
+  memoryFile,
   type OpenFile,
   openPipe,
   pollFile,
@@ -342,6 +344,7 @@ export function isWasmSyscall(req: object): req is WasmSyscall {
 }
 
 const MAX_READ = 1024 * 1024;
+const WRITE_ACCESS = 0o3;
 const KEYBOARD: ReadonlySet<number> = new Set([SIG.INT, SIG.QUIT, SIG.TSTP]);
 
 export const DEFAULT_UMASK = 0o022;
@@ -680,6 +683,11 @@ export class WasmProcess {
   }
 
   private async openVfs(req: Extract<FdSyscall, { op: 'fd-open-vfs' }>): Promise<number> {
+    if (inProc(req.path)) return this.openProc(req, req.path);
+    const alias = req.orphan
+      ? undefined
+      : await procAlias(this.options.fs, req.path, !req.exclusive);
+    if (alias !== undefined) return this.openProc(req, alias);
     await refuseReadonly(this.options.fs, req.path, req.flags, req);
     const fd = this.fds.install(heldFile(), 3);
     try {
@@ -691,6 +699,10 @@ export class WasmProcess {
           : req.create
             ? await nodes.targetKey(req.path)
             : await this.keptOr(await nodes.targetKey(req.path), req.handle);
+      if (inProc(path)) {
+        this.fds.installAt(fd, await this.procFile(req, path));
+        return fd;
+      }
       const open = { ...req, path };
       if (req.exclusive) {
         await nodes.createExclusive(path);
@@ -711,6 +723,30 @@ export class WasmProcess {
       throw err;
     }
     return fd;
+  }
+
+  private async openProc(
+    req: Extract<FdSyscall, { op: 'fd-open-vfs' }>,
+    path: string
+  ): Promise<number> {
+    return this.fds.install(await this.procFile(req, path), 3);
+  }
+
+  private async procFile(
+    req: Extract<FdSyscall, { op: 'fd-open-vfs' }>,
+    path: string
+  ): Promise<OpenFile> {
+    if (req.flags & WRITE_ACCESS || req.create || req.truncate || req.exclusive) {
+      throw new KernelError('EROFS');
+    }
+    const tree = new ProcTree(
+      {
+        procList: () => this.options.processes?.() ?? { boot: 0, processes: [] },
+        mountList: () => this.options.mounts?.() ?? [],
+      },
+      (await this.options.identity?.())?.pid ?? this.pid
+    );
+    return memoryFile(tree.read(path), path, req.position);
   }
 
   private openVfsFile(req: Extract<FdSyscall, { op: 'fd-open-vfs' }>): OpenFile {

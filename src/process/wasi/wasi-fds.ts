@@ -690,7 +690,7 @@ function promoteRequest(
   f: LocalFile,
   handed: ReadonlySet<FileBuffer>
 ): Extract<WasmSyscall, { op: 'fd-promote' }> {
-  const orphan = f.buffer.isOrphan();
+  const orphan = f.buffer.isOrphan() || (f.buffer.handle ?? 0) < 0;
   if (!orphan && f.buffer.isRanged) f.buffer.flush();
   const joins = !orphan && (handed.has(f.buffer) || f.buffer.isRanged);
   return {
