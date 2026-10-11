@@ -601,7 +601,9 @@ export class WasiHost {
 
   private positional(fd: number, access?: 'read' | 'write'): Positional {
     const e = this.fds.get(fd);
-    if (e.type !== 'kernel' || this.fds.kind(fd, e) !== 'file') return this.file(fd, access);
+    const kind = e.type === 'kernel' ? this.fds.kind(fd, e) : e.type;
+    if (kind === 'device') this.interrupted?.();
+    if (kind !== 'file' || e.type !== 'kernel') return this.file(fd, access);
     const kernel = this.o.kernel;
     return {
       pread: (max, at) => {
