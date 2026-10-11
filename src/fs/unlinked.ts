@@ -1,4 +1,4 @@
-import type { KernelFs } from './types.ts';
+import type { FsStat, KernelFs } from './types.ts';
 
 export const UNLINKED_DIR = '.slicc-unlinked';
 
@@ -99,6 +99,10 @@ export class UnlinkedKeeper {
   private queue: Promise<unknown> = Promise.resolve();
   private count = 0;
 
+  private readonly links = new Map<string, number>();
+
+  private readonly linked = new Map<string, string>();
+
   constructor(
     fs: KernelFs,
     holders: Iterable<UnlinkHolder>,
@@ -129,8 +133,16 @@ export class UnlinkedKeeper {
   wrap(fs: KernelFs = this.fs): KernelFs {
     const keeper = this;
     const visible = (names: string[]) => names.filter((name) => name !== UNLINKED_DIR);
+    const counted = (st: FsStat): FsStat => {
+      const hidden = keeper.links.get(`${st.dev ?? 0}:${st.ino}`) ?? 0;
+      return hidden === 0 || st.nlink === undefined
+        ? st
+        : { ...st, nlink: Math.max(0, st.nlink - hidden) };
+    };
     return {
       ...fs,
+      stat: async (path) => counted(await fs.stat(path)),
+      lstat: async (path) => counted(await fs.lstat(path)),
       async rm(path, options) {
         const target = fs.resolvePath('/', path);
         const pinned = await keeper.pin(target);
@@ -145,7 +157,9 @@ export class UnlinkedKeeper {
       },
       readdir: async (path) => visible(await fs.readdir(path)),
       readdirStat: async (path) =>
-        (await fs.readdirStat(path)).filter(([name]) => name !== UNLINKED_DIR),
+        (await fs.readdirStat(path))
+          .filter(([name]) => name !== UNLINKED_DIR)
+          .map(([name, st]) => [name, st && counted(st)]),
     };
   }
 
@@ -197,6 +211,7 @@ export class UnlinkedKeeper {
           for (const holder of held.get(path) as UnlinkHolder[]) holder.unkeep(path, file);
           await this.serial(async () => {
             await Promise.allSettled([this.fs.rename(file.hidden, path)]);
+            this.unlinkedName(file.hidden);
             await this.tidy(parentOf(file.hidden));
           });
         }
@@ -221,6 +236,7 @@ export class UnlinkedKeeper {
       try {
         await this.fs.mkdir(dir, { recursive: true });
         await this.fs.rename(path, hidden);
+        await this.linkedName(hidden);
         return hidden;
       } catch {
         await this.tidy(dir);
@@ -239,7 +255,25 @@ export class UnlinkedKeeper {
       return;
     }
     await this.fs.rm(hidden).catch(() => undefined);
+    this.unlinkedName(hidden);
     await this.tidy(parentOf(hidden));
+  }
+
+  private async linkedName(hidden: string): Promise<void> {
+    const st = await this.fs.lstat(hidden).catch(() => undefined);
+    if (!st || (st.nlink ?? 1) < 2) return;
+    const id = `${st.dev ?? 0}:${st.ino}`;
+    this.linked.set(hidden, id);
+    this.links.set(id, (this.links.get(id) ?? 0) + 1);
+  }
+
+  private unlinkedName(hidden: string): void {
+    const id = this.linked.get(hidden);
+    if (id === undefined) return;
+    this.linked.delete(hidden);
+    const left = (this.links.get(id) ?? 1) - 1;
+    if (left > 0) this.links.set(id, left);
+    else this.links.delete(id);
   }
 
   private async tidy(dir: string): Promise<void> {
