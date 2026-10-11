@@ -1,5 +1,6 @@
 import type { KernelFs } from '../fs/types.ts';
 import type { KeptFile } from '../fs/unlinked.ts';
+import type { Cred } from '../kernel/cred.ts';
 
 export interface SyncFsTokenEntry {
   fs: KernelFs;
@@ -18,6 +19,7 @@ export interface SyncFsTokenEntry {
   own?: <T>(path: string, op: () => Promise<T>) => Promise<T>;
   revoked?: (path: string) => boolean;
   renamed?: (from: string, to: string) => void;
+  cred?: () => Readonly<Cred>;
 }
 
 const registry = new Map<string, SyncFsTokenEntry>();

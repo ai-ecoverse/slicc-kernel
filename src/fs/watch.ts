@@ -1,4 +1,4 @@
-import { type KernelFs, lutimesOf, normalizePath, rangedOps } from './types.ts';
+import { type KernelFs, lutimesOf, type NewOwner, normalizePath, rangedOps } from './types.ts';
 
 export type WatchChange = { paths: string[] } | { overflow: true };
 
@@ -80,7 +80,7 @@ export class FsWatchers {
       };
     const overrides: Partial<Record<keyof KernelFs, unknown>> = {
       writeFile: after(fs.writeFile.bind(fs), (path) => [path]),
-      mkdir: async (path: string, options?: { recursive?: boolean }) => {
+      mkdir: async (path: string, options?: { recursive?: boolean; owner?: NewOwner }) => {
         const created: string[] = [];
         if (options?.recursive) {
           const parts = normalizePath(path).split('/').filter(Boolean);
@@ -99,6 +99,7 @@ export class FsWatchers {
       rename: after(fs.rename.bind(fs), (from, to) => [from, to]),
       symlink: after(fs.symlink.bind(fs), (_target, path) => [path]),
       chmod: after(fs.chmod.bind(fs), (path) => [path]),
+      ...(fs.chown ? { chown: after(fs.chown.bind(fs), (path) => [path]) } : {}),
       utimes: after(fs.utimes.bind(fs), (path) => [path]),
       lutimes: after(
         (path: string, atime: Date, mtime: Date) => lutimesOf(fs, path, atime, mtime),

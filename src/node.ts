@@ -3,7 +3,7 @@ import type { CdpHook } from './cdp/types.ts';
 import type { MessagePortLike } from './client/protocol.ts';
 import { type ServedClient, serveClient } from './client/serve-client.ts';
 import { OpfsFs } from './fs/opfs.ts';
-import { fsError } from './fs/types.ts';
+import { fsError, type UsersMode } from './fs/types.ts';
 import { pidOwner } from './fs/unlinked.ts';
 import type {
   ConnectOptions,
@@ -81,6 +81,7 @@ export interface NodeKernelOptions {
   hostfsOrigin?: string;
   cdp?: CdpHook;
   hostname?: string;
+  users?: UsersMode;
 }
 
 export interface NodeKernel {
@@ -205,6 +206,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     ...hostfsFetchOf(options),
     ...(options.cdp ? { cdp: options.cdp } : {}),
     ...(options.hostname !== undefined ? { hostname: options.hostname } : {}),
+    ...(options.users !== undefined ? { users: options.users } : {}),
   });
   await launcher.prepare();
   const guard = <T>(work: () => Promise<T>): Promise<T> =>
@@ -276,6 +278,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     mounts: async () => launcher.mounts.list(),
     setRoutes: (routes) => guard(async () => launcher.setRoutes(routes)),
     users: {
+      mode: launcher.usersMode,
       add: (user) => guard(() => launcher.users.add(user)),
       remove: (name, options) => guard(() => launcher.users.remove(name, options)),
       list: () => guard(() => launcher.users.list()),

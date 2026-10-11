@@ -1,3 +1,4 @@
+import type { UsersMode } from '../fs/types.ts';
 import type { WatchChange } from '../fs/watch.ts';
 import type { TransportCall, TransportReply } from '../kernel/net/remote-transport.ts';
 import type { RealmTransportTraits } from '../kernel/net/transport.ts';
@@ -14,6 +15,7 @@ export interface KernelHello {
   protocol: readonly [number, number];
   lock?: string;
   traits?: RealmTransportTraits;
+  users?: UsersMode;
   error?: string;
 }
 

@@ -52,7 +52,7 @@ import type { PtyKernel } from './process-pty.ts';
 import { SignalGate } from './process-signals.ts';
 import { createSocketKernel } from './process-sockets.ts';
 import { type ProcFs, useProcfs } from './procfs.ts';
-import { credAbi, ownByCaller } from './realm-user.ts';
+import { credAbi, type Owner, ownByCaller } from './realm-user.ts';
 
 export {
   type ProcessFs,
@@ -402,6 +402,10 @@ export function reportGrowth(imports: WebAssembly.Imports, publish: () => void):
   };
 }
 
+function callerOwner(Fs: ProcessFs, init: WasmProcessInitMsg): { owner?: Owner } {
+  return init.owners ? {} : { owner: ownByCaller(Fs, init.cred, credAbi(init.program.glue)) };
+}
+
 export async function runWasmProcess(
   init: WasmProcessInitMsg,
   port: SabPostLike,
@@ -523,7 +527,7 @@ export async function runWasmProcess(
   const running = module as unknown as RunningModule;
   if (!hasStreams(running)) return runStdioOnly(running, init);
   const vfs = mountVfsIntoEmscripten(running.FS, {
-    bridge: createSyncFsSabBridge(transport),
+    bridge: createSyncFsSabBridge(transport, init.owners ? { owners: true } : {}),
     cwd: init.cwd,
     warn: deps.warn ?? say(2),
   });
@@ -565,7 +569,7 @@ export async function runWasmProcess(
     describeFork: () => describeForFork(running.FS, sys, streams, livePath),
     inherit: (actions) => describeInherited(running.FS, sys, streams, livePath, actions),
     stdioPromoter: () => vfsPromoter(running.FS, sys, streams, livePath),
-    owner: ownByCaller(running.FS, init.cred, credAbi(init.program.glue)),
+    ...callerOwner(running.FS, init),
   });
   running.sliccKernel.http = createHttpKernel(transport);
   running.sliccKernel.hostname = hostnameOf(init.env);

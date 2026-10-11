@@ -396,6 +396,7 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
   return {
     getattr(node) {
       const st = statOf(node);
+      const owned = bridgeOf(node).owners === true;
       const s = node.live;
       const size = Fs.isDir(node.mode) ? 4096 : (s.ranged?.size() ?? (s.loaded ? s.len : st.size));
       const mtime = new Date(st.mtimeMs ?? 0);
@@ -404,8 +405,8 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
         ino: st.ino ?? inodeOf(liveNodePath(node)),
         mode: node.mode,
         nlink: 1,
-        uid: 0,
-        gid: 0,
+        uid: owned ? (st.uid ?? 0) : 0,
+        gid: owned ? (st.gid ?? 0) : 0,
         rdev: 0,
         size,
         atime: new Date(st.atimeMs ?? mtime.getTime()),
@@ -448,15 +449,18 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
     mknod(parent, name, mode) {
       parent.live.listed = undefined;
       const path = childPath(parent, name);
-      if (Fs.isDir(mode)) {
-        call(() => bridgeOf(parent).mkdir(path));
+      const bridge = bridgeOf(parent);
+      const perm = bridge.owners ? mode & PERM_MASK : undefined;
+      if (Fs.isDir(mode) && perm !== undefined) {
+        call(() => bridge.mkdir(path, perm));
+      } else if (Fs.isDir(mode)) {
+        call(() => bridge.mkdir(path));
 
-        const perm = mode & PERM_MASK & ~UMASK;
-        if (perm !== DEFAULT_DIR_PERM) metadataCall(() => bridgeOf(parent).chmod(path, perm));
+        const masked = mode & PERM_MASK & ~UMASK;
+        if (masked !== DEFAULT_DIR_PERM) metadataCall(() => bridge.chmod(path, masked));
       } else if (Fs.isFile(mode)) {
-        const bridge = bridgeOf(parent);
         call(() =>
-          bridge.create ? bridge.create(path) : bridge.writeFile(path, new Uint8Array(0))
+          bridge.create ? bridge.create(path, perm) : bridge.writeFile(path, new Uint8Array(0))
         );
       } else {
         throw new Fs.ErrnoError(wasiErrno('EPERM'));
@@ -898,5 +902,32 @@ function guardRenames(Fs: LiveMountFsApi): void {
   Fs.rename = (from, to) => {
     if (crosses(Fs, from, to)) throw new Fs.ErrnoError(wasiErrno('EXDEV'));
     rename(from, to);
+  };
+}
+
+export interface LiveChownFs extends LiveFsApi {
+  lookupPath(path: string, opts?: { follow?: boolean }): { node: object };
+  chown?(path: string | object, uid: number, gid: number, dontFollow?: boolean): void;
+}
+
+function idOf(value: number): number | undefined {
+  return value === -1 || value === 0xffffffff ? undefined : value >>> 0;
+}
+
+export function useLiveChown(Fs: LiveChownFs): void {
+  const chown = Fs.chown?.bind(Fs);
+  if (!chown) return;
+  Fs.chown = (path, uid, gid, dontFollow) => {
+    const node = (
+      typeof path === 'string' ? Fs.lookupPath(path, { follow: !dontFollow }).node : path
+    ) as LiveFsNode;
+    if (!node.live || node.live.orphan) return chown(path, uid, gid, dontFollow);
+    try {
+      node.mount.opts.bridge.chown?.(liveNodePath(node), idOf(uid), idOf(gid));
+    } catch (err) {
+      throw toErrno(Fs, err);
+    }
+    node.live.stat = undefined;
+    if (node.parent?.live) node.parent.live.listed = undefined;
   };
 }

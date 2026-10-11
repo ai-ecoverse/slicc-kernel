@@ -4,7 +4,7 @@ import { type LockManagerLike, locksOf } from './client/protocol.ts';
 import { type ServedClient, serveClient } from './client/serve-client.ts';
 import { META_DB, type MetaStore } from './fs/meta.ts';
 import { OpfsFs } from './fs/opfs.ts';
-import { fsError } from './fs/types.ts';
+import { fsError, type UsersMode } from './fs/types.ts';
 import { dialSocket, serveSocket } from './kernel/dial.ts';
 import type { WasmWorkerLike } from './kernel/host.ts';
 import { CA_DB, caStore } from './kernel/net/network.ts';
@@ -44,6 +44,7 @@ export interface InitRequest {
   uplink?: { traits: UplinkTraits; routes?: RouteTable };
   hostfs?: boolean;
   hostname?: string;
+  users?: UsersMode;
   processMounts?: boolean | 'ask';
   cdp?: boolean;
 }
@@ -229,6 +230,13 @@ function usersOp(l: Launcher, req: UsersRequest): Promise<unknown> {
   return l.users.list();
 }
 
+function hostOptions(req: InitRequest): { hostname?: string; users?: UsersMode } {
+  return {
+    ...(req.hostname !== undefined ? { hostname: req.hostname } : {}),
+    ...(req.users !== undefined ? { users: req.users } : {}),
+  };
+}
+
 export function serveKernel(port: KernelPort, deps: ServeDeps): void {
   let launcher: Promise<Launcher> | undefined;
   let remote: RemoteTransport | undefined;
@@ -310,7 +318,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
         ...(deps.createDriverWorker ? { createDriverWorker: deps.createDriverWorker } : {}),
         ...(req.modules ? { modules: req.modules } : {}),
         ...(req.env ? { env: req.env } : {}),
-        ...(req.hostname !== undefined ? { hostname: req.hostname } : {}),
+        ...hostOptions(req),
         ...net,
         ...(media ? { media } : {}),
         onMountPending: (medium) => port.postMessage({ medium }),

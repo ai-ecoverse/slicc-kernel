@@ -23,6 +23,8 @@ export const SYNC_FS_OPS = [
   'pread',
   'pwrite',
   'truncate',
+  'chown',
+  'lchown',
 ] as const;
 
 export type SyncFsOp = (typeof SYNC_FS_OPS)[number];
@@ -40,6 +42,8 @@ export interface SyncFsRequest {
   length?: number;
   version?: string;
   handle?: number;
+  uid?: number;
+  gid?: number;
 }
 
 export type SyncFsResult =
@@ -65,6 +69,8 @@ export interface SyncFsBridgeStat {
   maxFile?: number;
   ranged?: boolean;
   version?: string;
+  uid?: number;
+  gid?: number;
 }
 
 export interface SyncFsUsage {
@@ -92,7 +98,7 @@ export interface SyncFsPosixBridge {
   lstat(path: string): SyncFsBridgeStat;
   readdir(path: string): string[];
   exists(path: string): boolean;
-  mkdir(path: string): void;
+  mkdir(path: string, mode?: number): void;
   rm(path: string): void;
   rename(from: string, to: string): void;
   unlink(path: string): void;
@@ -103,7 +109,9 @@ export interface SyncFsPosixBridge {
   utimes(path: string, atimeMs: number, mtimeMs: number): void;
   lutimes(path: string, atimeMs: number, mtimeMs: number): void;
   hold?(path: string, held: boolean, open?: boolean, handle?: number): number | undefined;
-  create?(path: string): void;
+  create?(path: string, mode?: number): void;
+  chown?(path: string, uid: number | undefined, gid: number | undefined): void;
+  owners?: boolean;
   readdirStat(path: string): Array<[string, SyncFsBridgeStat | null]>;
   statfs?(path?: string): SyncFsUsage | null;
   pread?(path: string, offset: number, length: number, version?: string): Uint8Array;
@@ -140,5 +148,7 @@ export function parseSyncFsStat(json: unknown): SyncFsBridgeStat | null {
     ...(typeof s.maxFile === 'number' ? { maxFile: s.maxFile } : {}),
     ...(s.ranged === true ? { ranged: true } : {}),
     ...(typeof s.version === 'string' ? { version: s.version } : {}),
+    ...(typeof s.uid === 'number' ? { uid: s.uid } : {}),
+    ...(typeof s.gid === 'number' ? { gid: s.gid } : {}),
   };
 }

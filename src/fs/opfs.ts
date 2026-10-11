@@ -1,10 +1,21 @@
 import { MemoryMeta, type MetaEntry, type MetaStore } from './meta.ts';
-import { type FsStat, fsError, inodeOf, type KernelFs, resolvePath } from './types.ts';
+import { chain, inherit, ownOf, ROOT_OWNER, sameOwner } from './owners.ts';
+import {
+  type FsStat,
+  fsError,
+  inodeOf,
+  type KernelFs,
+  type NewOwner,
+  type Owner,
+  type OwnerChange,
+  resolvePath,
+} from './types.ts';
 
 const S_IFDIR = 0o040000;
 const S_IFREG = 0o100000;
 const S_IFLNK = 0o120000;
 const PERM_MASK = 0o7777;
+const S_ISGID = 0o2000;
 const READ_ATTEMPTS = 3;
 const MAX_LINKS = 40;
 const CHECK_MS = 1000;
@@ -158,6 +169,7 @@ export class OpfsFs implements KernelFs {
 
   private readonly channel: BroadcastChannel | undefined;
   private readonly ranged: boolean;
+  private owners = false;
 
   constructor(
     root: FileSystemDirectoryHandle,
@@ -184,6 +196,89 @@ export class OpfsFs implements KernelFs {
 
   resolvePath(base: string, path: string): string {
     return resolvePath(base, path);
+  }
+
+  trackOwners(): void {
+    this.owners = true;
+  }
+
+  private async handedTo(dir: string): Promise<Owner> {
+    return inherit(await this.meta.get(chain(dir)));
+  }
+
+  private async ownerAt(path: string, entry: MetaEntry | undefined): Promise<Owner> {
+    const own = ownOf(entry);
+    if (own) return own;
+    return path === '/' ? { ...ROOT_OWNER } : this.handedTo(parentOf(path));
+  }
+
+  private async owned(stat: FsStat, path: string, entry: MetaEntry | undefined): Promise<FsStat> {
+    return this.owners ? { ...stat, ...(await this.ownerAt(path, entry)) } : stat;
+  }
+
+  private async newFields(
+    path: string,
+    owner: NewOwner | undefined,
+    directory: boolean
+  ): Promise<Partial<MetaEntry> | undefined> {
+    if (!this.owners || !owner) return undefined;
+    const entries = await this.meta.get(chain(path));
+    const self = entries.pop();
+    const parent = entries.at(-1);
+    const setgid = ((parent?.mode ?? 0) & S_ISGID) !== 0;
+    const parentGid = (ownOf(parent) ?? inherit(entries.slice(0, -1))).gid;
+    const want = { uid: owner.uid, gid: setgid ? parentGid : owner.gid };
+    let mode = owner.mode === undefined ? undefined : owner.mode & PERM_MASK;
+    if (directory && setgid) mode = (mode ?? 0o755) | S_ISGID;
+    const fields: Partial<MetaEntry> = {};
+    if (mode !== undefined && mode !== (this.mode(path, directory, undefined) & PERM_MASK)) {
+      fields.mode = mode;
+    }
+    if (self) fields.heir = undefined;
+    if (ownOf(self) || !sameOwner(want, inherit(entries))) Object.assign(fields, want);
+    return Object.keys(fields).length > 0 ? fields : undefined;
+  }
+
+  private async stampNew(path: string, owner: NewOwner | undefined, directory: boolean) {
+    const fields = await this.newFields(path, owner, directory);
+    if (fields) await this.meta.update(path, (entry) => ({ ...entry, path, ...fields }));
+  }
+
+  async chown(path: string, change: OwnerChange): Promise<void> {
+    if (!this.owners) return;
+    if (change.kind === 'new') {
+      const at = resolvePath((await this.locate(parentOf(path), true)).path, baseOf(path));
+      const { uid = 0, gid = 0, mode } = change;
+      return this.stampNew(at, { uid, gid, ...(mode !== undefined ? { mode } : {}) }, false);
+    }
+    const found = await this.locate(path, change.follow !== false);
+    const [stored] = found.link ? [found.link] : await this.meta.get([found.path]);
+    const current = await this.ownerAt(found.path, stored);
+    const next = { uid: change.uid ?? current.uid, gid: change.gid ?? current.gid };
+    const handing = found.handle?.kind === 'directory' && !sameOwner(next, current);
+    const heir =
+      change.kind === 'adopt'
+        ? undefined
+        : (stored?.heir ??
+          (handing ? ([current.uid, current.gid] as [number, number]) : undefined));
+    const ctimeMs = Date.now();
+    await this.meta.update(found.path, (entry) => {
+      const { heir: _, ...rest } = entry ?? found.link ?? { path: found.path };
+      return {
+        ...rest,
+        path: found.path,
+        ...next,
+        ...(heir ? { heir } : {}),
+        ...(change.mode !== undefined ? { mode: change.mode & PERM_MASK } : {}),
+        ctimeMs,
+      };
+    });
+  }
+
+  private async movedOwner(source: Located): Promise<Owner | undefined> {
+    if (!this.owners) return undefined;
+    const [stored] = source.link ? [source.link] : await this.meta.get([source.path]);
+    return ownOf(stored) ? undefined : this.ownerAt(source.path, stored);
   }
 
   private async walk(parts: string[], from: number, start: FileSystemDirectoryHandle) {
@@ -383,9 +478,15 @@ export class OpfsFs implements KernelFs {
   }
 
   private async describe(found: Located): Promise<FsStat> {
-    if (found.link) return this.linkStat(found.link);
-    const [meta] = await this.meta.get([found.path]);
-    return this.statOf(found.path, found.handle as Handle, meta);
+    if (found.link) return this.owned(this.linkStat(found.link), found.path, found.link);
+    if (!this.owners) {
+      const [meta] = await this.meta.get([found.path]);
+      return this.statOf(found.path, found.handle as Handle, meta);
+    }
+    const entries = await this.meta.get(chain(found.path));
+    const meta = entries.pop();
+    const stat = await this.statOf(found.path, found.handle as Handle, meta);
+    return { ...stat, ...(ownOf(meta) ?? inherit(entries)) };
   }
 
   async stat(path: string): Promise<FsStat> {
@@ -481,7 +582,7 @@ export class OpfsFs implements KernelFs {
     return [resolvePath((await this.locate(parentOf(wanted), true)).path, baseOf(wanted)), false];
   }
 
-  private async fileFor(path: string): Promise<[FileSystemFileHandle, boolean]> {
+  private async fileFor(path: string): Promise<[FileSystemFileHandle, boolean, string]> {
     const [target, existed] = await this.writeTarget(path);
     const [dir, name] = await this.parent(target);
     try {
@@ -489,15 +590,16 @@ export class OpfsFs implements KernelFs {
         parent.getFileHandle(name, { create: true })
       );
       if (!existed) this.touch(parentOf(target));
-      return [handle, existed];
+      return [handle, existed, target];
     } catch (err) {
       const code = (err as { name?: unknown })?.name === 'TypeMismatchError' ? 'EISDIR' : null;
       throw code ? fsError(code, path) : translate(err, path);
     }
   }
 
-  async writeFile(path: string, content: Uint8Array | string): Promise<void> {
-    const [file, existed] = await this.fileFor(path);
+  async writeFile(path: string, content: Uint8Array | string, owner?: NewOwner): Promise<void> {
+    const [file, existed, target] = await this.fileFor(path);
+    if (!existed) await this.stampNew(target, owner, false);
     if (!existed && content.length === 0) return;
     const writable = await file.createWritable();
     await writable.write(content as FileSystemWriteChunkType);
@@ -525,16 +627,22 @@ export class OpfsFs implements KernelFs {
     const [dir, children] = await this.listing(path);
     const base = dir === '/' ? '' : dir;
     const metas = await this.meta.get(children.map(([name]) => `${base}/${name}`));
+    const handed = this.owners ? await this.handedTo(dir) : undefined;
+    const owned = (stat: FsStat, entry: MetaEntry | undefined): FsStat =>
+      handed ? { ...stat, ...(ownOf(entry) ?? handed) } : stat;
     return Promise.all(
       children.map(async ([name, child], i): Promise<[string, FsStat | null]> => {
-        if (!isHandle(child)) return [name, this.linkStat(child)];
+        if (!isHandle(child)) return [name, owned(this.linkStat(child), child)];
         const stat = await this.statOf(`${base}/${name}`, child, metas[i]).catch(() => null);
-        return [name, stat];
+        return [name, stat && owned(stat, metas[i])];
       })
     );
   }
 
-  async mkdir(path: string, options: { recursive?: boolean } = {}): Promise<void> {
+  async mkdir(
+    path: string,
+    options: { recursive?: boolean; owner?: NewOwner } = {}
+  ): Promise<void> {
     let found: Located | undefined;
     try {
       found = await this.locate(path, true);
@@ -548,11 +656,17 @@ export class OpfsFs implements KernelFs {
     }
     const [entry] = await this.meta.get([path]);
     if (entry?.link !== undefined) throw fsError('EEXIST', path);
-    if (options.recursive) await this.mkdir(parentOf(path), options);
+    const { owner } = options;
+    if (options.recursive) {
+      const above = owner && { uid: owner.uid, gid: owner.gid };
+      await this.mkdir(parentOf(path), { recursive: true, ...(above ? { owner: above } : {}) });
+    }
     const parent = await this.locate(parentOf(path), true);
     if (parent.handle?.kind !== 'directory') throw fsError('ENOTDIR', path);
     await parent.handle.getDirectoryHandle(baseOf(path), { create: true });
-    this.touch(parent.path, `${parent.path === '/' ? '' : parent.path}/${baseOf(path)}`);
+    const made = `${parent.path === '/' ? '' : parent.path}/${baseOf(path)}`;
+    await this.stampNew(made, owner, true);
+    this.touch(parent.path, made);
   }
 
   async rm(path: string, options: { recursive?: boolean; force?: boolean } = {}): Promise<void> {
@@ -600,9 +714,11 @@ export class OpfsFs implements KernelFs {
       throw fsError('ENOTEMPTY', to);
     }
     const now = Date.now();
+    const moving = await this.movedOwner(source);
     const carry = (entry: MetaEntry | undefined): MetaEntry => ({
       ino: inodeOf(source.path),
       ...entry,
+      ...moving,
       path: destination,
       ctimeMs: now,
     });
@@ -682,7 +798,7 @@ export class OpfsFs implements KernelFs {
     for await (const child of handle.values()) await this.copy(child, target, child.name);
   }
 
-  async symlink(target: string, path: string): Promise<void> {
+  async symlink(target: string, path: string, owner?: NewOwner): Promise<void> {
     const parent = await this.locate(parentOf(path), true);
     if (parent.handle?.kind !== 'directory') throw fsError('ENOTDIR', path);
     const at = resolvePath(parent.path, baseOf(path));
@@ -695,6 +811,7 @@ export class OpfsFs implements KernelFs {
       throw fsError('EEXIST', path);
     }
     const now = Date.now();
+    const fields = await this.newFields(at, owner && { uid: owner.uid, gid: owner.gid }, false);
     await this.meta.update(at, () => ({
       path: at,
       link: target,
@@ -702,6 +819,7 @@ export class OpfsFs implements KernelFs {
       ino: inodeOf(at),
       mtimeMs: now,
       ctimeMs: now,
+      ...fields,
     }));
     this.touch(parent.path);
   }

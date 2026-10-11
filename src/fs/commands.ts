@@ -85,7 +85,7 @@ export function withCommandDirs(
         throw err;
       }
     },
-    writeFile: (path, content) => fs.writeFile(path, content),
+    writeFile: (path, content, owner) => fs.writeFile(path, content, owner),
     async exists(path) {
       return (await fs.exists(path)) || (await linked(path)) !== undefined;
     },
@@ -123,9 +123,10 @@ export function withCommandDirs(
     mkdir: (path, options) => fs.mkdir(path, options),
     rm: (path, options) => fs.rm(path, options),
     rename: (from, to) => fs.rename(from, to),
-    symlink: (target, path) => fs.symlink(target, path),
+    symlink: (target, path, owner) => fs.symlink(target, path, owner),
     readlink: (path) => fs.readlink(path),
     ...(fs.realpath ? { realpath: fs.realpath.bind(fs) } : {}),
+    ...(fs.chown ? { chown: fs.chown.bind(fs) } : {}),
     chmod: (path, mode) => fs.chmod(path, mode),
     utimes: (path, atime, mtime) => fs.utimes(path, atime, mtime),
     lutimes: (path, atime, mtime) => lutimesOf(fs, path, atime, mtime),

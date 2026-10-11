@@ -75,6 +75,7 @@ export interface WasmProcessInitMsg {
   ppid?: number;
   umask?: number;
   cred?: Cred;
+  owners?: boolean;
   fork?: ForkState;
   fds?: InheritedFd[];
 }
