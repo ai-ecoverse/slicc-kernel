@@ -421,6 +421,7 @@ export class WasixHost {
         out: number
       ) => {
         if (p === 0) {
+          if (!this.linker) return failed('not a dynamically-linked program', buf, len);
           mem.view().setUint32(out, MAIN_HANDLE, true);
           return E.SUCCESS;
         }
@@ -440,7 +441,7 @@ export class WasixHost {
           (v) => void mem.view().setUint32(out, v, true)
         ),
       dl_invalid_handle: (handle: number) =>
-        handle === MAIN_HANDLE || (handle !== 0 && this.linker && !this.linker.invalid(handle))
+        this.linker && (handle === MAIN_HANDLE || (handle !== 0 && !this.linker.invalid(handle)))
           ? E.SUCCESS
           : E.NOEXEC,
     };

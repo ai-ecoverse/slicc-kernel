@@ -303,7 +303,7 @@ async function instantiate(
             thread
           ),
           (req) => host.o.kernel.call(req),
-          threads?.ids
+          threads
         )
       : undefined;
   if (sync) {
@@ -405,31 +405,53 @@ function merge(
   return out;
 }
 
-class LinkSync {
+export class LinkSync {
   private count = 0;
   private gen = 0;
 
   readonly linker: WasixLinker;
   private readonly call: (req: WasmSyscall) => unknown;
   private readonly ids: Int32Array | undefined;
+  private readonly owner: number;
   constructor(
     linker: WasixLinker,
     call: (req: WasmSyscall) => unknown,
-    ids: Int32Array | undefined
+    threads: Pick<WasiThreads, 'ids' | 'tid'> | undefined
   ) {
     this.linker = linker;
     this.call = call;
-    this.ids = ids;
+    this.ids = threads?.ids;
+    this.owner = threads?.tid ?? 0;
     linker.publisher = (record) => this.publish(record);
     linker.indices = {
       reserve: (floor, size) => this.call({ op: 'dl-reserve', floor, size }) as number,
+      load: (floor, size) =>
+        this.call({ op: 'dl-load-reserve', floor, size }) as { base: number; handle: number },
+      lock: () => {
+        this.call({ op: 'dl-lock', owner: this.owner });
+        try {
+          this.catchUp();
+        } catch (e) {
+          this.call({ op: 'dl-unlock', owner: this.owner });
+          throw e;
+        }
+      },
+      unlock: () => this.call({ op: 'dl-unlock', owner: this.owner }),
       allocate: (floor) => {
         const index = this.call({ op: 'dl-closure', floor }) as number;
         this.catchUp();
+        this.bump();
         return index;
       },
-      free: (index) => void this.call({ op: 'dl-closure-free', index }),
+      free: (index) => {
+        this.call({ op: 'dl-closure-free', index });
+        this.bump();
+      },
     };
+  }
+
+  private bump(): void {
+    if (this.ids) Atomics.add(this.ids, DL_GEN, 1);
   }
 
   private publish(record: LinkRecord): void {
@@ -437,14 +459,21 @@ class LinkSync {
 
     for (const r of since.slice(0, -1)) this.linker.replay(r);
     this.count += since.length;
-    if (this.ids) this.gen = Atomics.add(this.ids, DL_GEN, 1) + 1;
+    this.bump();
+    this.catchUp();
   }
 
   catchUp(): void {
-    const since = this.call({ op: 'dl-log', from: this.count }) as LinkRecord[];
-    for (const r of since) this.linker.replay(r);
-    this.count += since.length;
-    if (this.ids) this.gen = Atomics.load(this.ids, DL_GEN);
+    for (;;) {
+      const gen = this.ids ? Atomics.load(this.ids, DL_GEN) : 0;
+      const since = this.call({ op: 'dl-log', from: this.count }) as LinkRecord[];
+      for (const r of since) this.linker.replay(r);
+      this.count += since.length;
+      if (!this.ids || Atomics.load(this.ids, DL_GEN) === gen) {
+        this.gen = gen;
+        return;
+      }
+    }
   }
 
   guard(

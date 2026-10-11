@@ -109,6 +109,9 @@ export type WasmSyscall =
   | { op: 'dl-log'; append?: LinkRecord; from: number }
   | { op: 'dl-closure'; floor: number }
   | { op: 'dl-reserve'; floor: number; size: number }
+  | { op: 'dl-load-reserve'; floor: number; size: number }
+  | { op: 'dl-lock'; owner: number }
+  | { op: 'dl-unlock'; owner: number }
   | { op: 'dl-closure-free'; index: number }
   | {
       op: 'proc-alarm';
@@ -302,6 +305,9 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'dl-closure',
   'dl-closure-free',
   'dl-reserve',
+  'dl-load-reserve',
+  'dl-lock',
+  'dl-unlock',
   'fd-renumber',
   'fd-promote',
   'fd-open-tty',
@@ -1132,6 +1138,18 @@ export class WasmProcess {
         return { ok: true, kind: 'void' };
       case 'dl-reserve':
         return { ok: true, kind: 'json', json: this.reserveSlots(req.floor, req.size) };
+      case 'dl-load-reserve':
+        return {
+          ok: true,
+          kind: 'json',
+          json: { base: this.reserveSlots(req.floor, req.size), handle: this.closures.handle++ },
+        };
+      case 'dl-lock':
+        await this.lockDl(req.owner);
+        return { ok: true, kind: 'void' };
+      case 'dl-unlock':
+        this.unlockDl(req.owner);
+        return { ok: true, kind: 'void' };
       case 'sig-mask':
         this.caught = req.caught;
         this.ignored = req.ignored;
@@ -1173,7 +1191,12 @@ export class WasmProcess {
 
   private alarm: ReturnType<typeof setTimeout> | undefined;
   private readonly dlLog: LinkRecord[] = [];
-  private readonly closures = { next: 0, free: [] as number[], live: new Set<number>() };
+  private readonly closures = {
+    next: 0,
+    handle: 1,
+    free: [] as number[],
+    live: new Set<number>(),
+  };
 
   private allocateClosure(floor: number): number {
     const index = this.closures.free.pop() ?? Math.max(floor, this.closures.next);
@@ -1187,6 +1210,52 @@ export class WasmProcess {
     if (!this.closures.live.delete(index)) throw new KernelError('EINVAL');
     this.closures.free.push(index);
     this.dlLog.push({ kind: 'closure-free', index });
+  }
+
+  private readonly dlLock = {
+    owner: 0,
+    depth: 0,
+    waiters: new Set<{ owner: number; wake: (gone: boolean) => void }>(),
+  };
+
+  private async lockDl(owner: number): Promise<void> {
+    while (this.dlLock.depth > 0 && this.dlLock.owner !== owner) {
+      if (this.dying) throw new KernelError('EINTR');
+      const interrupt = this.interrupt.signal;
+      const gone = await new Promise<boolean>((resolve) => {
+        const waiter = {
+          owner,
+          wake: (ended: boolean) => {
+            this.dlLock.waiters.delete(waiter);
+            interrupt.removeEventListener('abort', recheck);
+            resolve(ended);
+          },
+        };
+        const recheck = () => waiter.wake(false);
+        this.dlLock.waiters.add(waiter);
+        interrupt.addEventListener('abort', recheck, { once: true });
+      });
+      if (gone) throw new KernelError('EINTR');
+    }
+    this.dlLock.owner = owner;
+    this.dlLock.depth++;
+  }
+
+  threadEnded(tid: number): void {
+    for (const waiter of [...this.dlLock.waiters]) if (waiter.owner === tid) waiter.wake(true);
+    if (this.dlLock.depth === 0 || this.dlLock.owner !== tid) return;
+    this.dlLock.depth = 0;
+    this.wakeDl();
+  }
+
+  private unlockDl(owner: number): void {
+    if (this.dlLock.depth === 0 || this.dlLock.owner !== owner) throw new KernelError('EPERM');
+    this.dlLock.depth--;
+    if (this.dlLock.depth === 0) this.wakeDl();
+  }
+
+  private wakeDl(): void {
+    for (const waiter of [...this.dlLock.waiters]) waiter.wake(false);
   }
 
   private reserveSlots(floor: number, size: number): number {

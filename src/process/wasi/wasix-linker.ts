@@ -15,7 +15,14 @@ function expandOrigin(entry: string, dir: string): string {
 }
 
 export type LinkRecord =
-  | { kind: 'load'; handle: number; path: string; memoryBase: number; tableBase: number }
+  | {
+      kind: 'load';
+      handle: number;
+      path: string;
+      memoryBase: number;
+      tableBase: number;
+      needed?: number[];
+    }
   | { kind: 'slot'; index: number; handle: number; name: string }
   | { kind: 'closure'; index: number }
   | { kind: 'closure-free'; index: number }
@@ -71,6 +78,9 @@ export class WasixLinker {
   indices:
     | {
         reserve(floor: number, size: number): number;
+        load(floor: number, size: number): { base: number; handle: number };
+        lock(): void;
+        unlock(): void;
         allocate(floor: number): number;
         free(index: number): void;
       }
@@ -164,13 +174,23 @@ export class WasixLinker {
     if (this.mainPath === undefined) return false;
     if (path === this.mainPath) return true;
     const real = this.host.real;
-    return real !== undefined && real(path) === real(this.mainPath);
+    if (real === undefined) return false;
+    try {
+      return real(path) === real(this.mainPath);
+    } catch {
+      return false;
+    }
   }
 
   open(name: string, cwd: string, ldPath: readonly string[]): number {
     const path = this.locate(name, cwd, ldPath);
     if (this.isMain(path)) return 0;
-    return this.load(path, cwd, ldPath).handle;
+    this.indices?.lock();
+    try {
+      return this.load(path, cwd, ldPath).handle;
+    } finally {
+      this.indices?.unlock();
+    }
   }
 
   symbol(handle: number, name: string): number {
@@ -198,17 +218,20 @@ export class WasixLinker {
   allocateClosure(): number {
     const index = (this.indices as NonNullable<WasixLinker['indices']>).allocate(this.table.length);
     growTable(this.table, index + 1);
+    this.live.add(index);
     return index;
   }
 
   freeClosure(index: number): void {
     this.indices?.free(index);
+    this.live.delete(index);
     this.table.set(index, null);
   }
 
+  private readonly live = new Set<number>();
+
   prepareClosure(record: Omit<Extract<LinkRecord, { kind: 'closure-prepare' }>, 'kind'>): void {
-    if (record.index >= this.table.length)
-      throw new DlError(`closure ${record.index}: no such slot`);
+    if (!this.live.has(record.index)) throw new DlError(`closure ${record.index}: not allocated`);
     const full: LinkRecord = { kind: 'closure-prepare', ...record };
     this.install(full);
     this.publisher?.(full);
@@ -227,6 +250,15 @@ export class WasixLinker {
     this.types.set(fn, sig);
   }
 
+  private reserveLoad(size: number): { base: number; handle: number } {
+    return (
+      this.indices?.load(this.table.length, size) ?? {
+        base: this.table.length,
+        handle: this.nextHandle++,
+      }
+    );
+  }
+
   private reserve(size: number): number {
     return this.indices?.reserve(this.table.length, size) ?? this.table.length;
   }
@@ -234,9 +266,11 @@ export class WasixLinker {
   replay(record: LinkRecord): void {
     if (record.kind === 'closure') {
       growTable(this.table, record.index + 1);
+      this.live.add(record.index);
       return;
     }
     if (record.kind === 'closure-free') {
+      this.live.delete(record.index);
       if (record.index < this.table.length) this.table.set(record.index, null);
       return;
     }
@@ -246,7 +280,8 @@ export class WasixLinker {
     }
     if (record.kind === 'load') {
       if (this.modules.has(record.handle)) return;
-      this.instantiate(record.path, this.moduleAt(record.path), record, false);
+      const linked = this.instantiate(record.path, this.moduleAt(record.path), record, false);
+      linked.needed.push(...(record.needed ?? []));
       this.nextHandle = Math.max(this.nextHandle, record.handle + 1);
       return;
     }
@@ -304,13 +339,14 @@ export class WasixLinker {
       (n) => this.load(this.locate(n, cwd, search), cwd, ldPath).handle
     );
     const memoryBase = this.allocate(info.memorySize, 2 ** info.memoryAlign);
-    const tableBase = this.reserve(info.tableSize);
+    const { base: tableBase, handle } = this.reserveLoad(info.tableSize);
     const record: LinkRecord = {
       kind: 'load',
-      handle: this.nextHandle++,
+      handle,
       path,
       memoryBase,
       tableBase,
+      ...(needed.length > 0 ? { needed } : {}),
     };
     const linked = this.instantiate(path, module, record, true);
     linked.needed.push(...needed);
@@ -375,7 +411,8 @@ export class WasixLinker {
     linked.instance = new WebAssembly.Instance(module, imports);
     this.types.register(() => this.host.read(path), linked.instance, this.table, at.tableBase);
     this.modules.set(at.handle, linked);
-    this.byPath.set(path, linked);
+    const first = this.byPath.get(path);
+    if (!first || at.handle < first.handle) this.byPath.set(path, linked);
     for (const resolve of pending) resolve();
     if (init) {
       call(linked.instance, '__wasm_apply_data_relocs');
