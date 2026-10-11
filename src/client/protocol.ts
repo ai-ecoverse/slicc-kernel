@@ -106,6 +106,7 @@ export interface ProcessEntry {
   started: number;
   state: 'S' | 'Z';
   memory: number;
+  rss?: number;
   uid?: number;
   gid?: number;
 }
