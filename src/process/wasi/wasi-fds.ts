@@ -622,8 +622,28 @@ export class WasiFds {
     }
     if (!s && !(oflags & OFLAGS.CREAT)) throw new WasiError('ENOENT');
     refuseWrite(s, oflags, rights);
-    if (this.shared) return this.kernelFile(path, s, oflags, rights, fdflags);
+    return this.regular(path, s, oflags, rights, fdflags);
+  }
+
+  private regular(
+    path: string,
+    s: SyncFsBridgeStat | undefined,
+    oflags: number,
+    rights: bigint,
+    fdflags: number
+  ): number {
+    if (this.shared || this.kernelHolds(path, s)) {
+      return this.kernelFile(path, s, oflags, rights, fdflags);
+    }
     return this.install({ type: 'file', file: this.file(path, s, oflags, rights, fdflags) });
+  }
+
+  private kernelHolds(path: string, st: SyncFsBridgeStat | undefined): boolean {
+    for (const e of this.table.values()) {
+      if (e.type !== 'kernel' || e.kind !== 'file') continue;
+      if (e.path === path || (st?.ino !== undefined && e.ino === st.ino)) return true;
+    }
+    return false;
   }
 
   private file(
