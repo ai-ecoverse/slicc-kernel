@@ -26,6 +26,7 @@ export interface Owner {
 
 export interface NewOwner extends Owner {
   mode?: number;
+  parents?: number;
 }
 
 export interface OwnerChange {

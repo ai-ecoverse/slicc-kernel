@@ -85,7 +85,9 @@ function ownerFor(entry: SyncFsTokenEntry, mode?: number): NewOwner | undefined 
 
 function mkdirOptions(entry: SyncFsTokenEntry, mode = 0o777) {
   const owner = ownerFor(entry, mode);
-  return owner ? { recursive: true, owner } : { recursive: true };
+  if (!owner) return { recursive: true };
+  const parents = (0o777 & ~(entry.umask?.() ?? 0o022)) | 0o300;
+  return { recursive: true, owner: { ...owner, parents } };
 }
 
 async function chown(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest) {

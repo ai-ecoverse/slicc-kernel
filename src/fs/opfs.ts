@@ -685,7 +685,12 @@ export class OpfsFs implements KernelFs {
     if (entry?.link !== undefined) throw fsError('EEXIST', path);
     const { owner } = options;
     if (options.recursive) {
-      const above = owner && { uid: owner.uid, gid: owner.gid };
+      const mode = owner?.parents;
+      const above = owner && {
+        uid: owner.uid,
+        gid: owner.gid,
+        ...(mode ? { mode, parents: mode } : {}),
+      };
       await this.mkdir(parentOf(path), { recursive: true, ...(above ? { owner: above } : {}) });
     }
     const parent = await this.locate(parentOf(path), true);
