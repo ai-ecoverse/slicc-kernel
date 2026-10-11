@@ -35,7 +35,7 @@ export interface HostfsTransport {
   readonly maxIo: number;
   readonly gone?: boolean;
   retire?(why: string): void;
-  cleanup?(fh: number): Promise<void>;
+  cleanup?(op: string, body: Record<string, unknown>): Promise<void>;
   call<T>(op: string, body?: Record<string, unknown>, handle?: boolean): Promise<T>;
   read(fh: number, offset: number, size: number, ifMatch?: string): Promise<Uint8Array>;
   write(fh: number, offset: number, bytes: Uint8Array): Promise<void>;
@@ -150,13 +150,13 @@ export class HostfsClient implements HostfsTransport {
     return (await response.json()) as T;
   }
 
-  async cleanup(fh: number): Promise<void> {
+  async cleanup(op: string, body: Record<string, unknown>): Promise<void> {
     const response = await this.send(
       '/api/hostfs',
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ op: 'release', fh }),
+        body: JSON.stringify({ op, ...body }),
       },
       true,
       false,
@@ -247,6 +247,11 @@ export function hostfsHandlers(current: () => HostfsTransport): MediumHandlers {
     return fresh(remote);
   };
   const call = <T>(op: string, body: Record<string, unknown> = {}) => current().call<T>(op, body);
+  const settle = (client: HostfsTransport, restore: { path: string; mode: number }) =>
+    client.call('setattr', restore).catch(async (err: unknown) => {
+      if (!client.gone || !client.cleanup) throw err;
+      await client.cleanup('setattr', restore);
+    });
   async function writable(client: HostfsTransport, path: string, flags: OpenFlags) {
     const { ifMatch: _, ...asked } = flags;
     const opening = () =>
@@ -258,11 +263,13 @@ export function hostfsHandlers(current: () => HostfsTransport): MediumHandlers {
       const mode = (await client.call<DriverAttr>('stat', { path: rel(path) })).mode ?? 0;
       if (mode & 0o200) throw err;
       const restore = { path: rel(path), mode };
-      await client.call('setattr', { path: rel(path), mode: mode | 0o200 });
-      const opened = await opening().catch(async (again: unknown) => {
-        await client.call('setattr', restore);
-        throw again;
-      });
+      const opened = await client
+        .call('setattr', { path: rel(path), mode: mode | 0o200 })
+        .then(opening)
+        .catch(async (again: unknown) => {
+          await settle(client, restore).catch(() => {});
+          throw again;
+        });
       return { opened, restore };
     }
   }
@@ -315,7 +322,7 @@ export function hostfsHandlers(current: () => HostfsTransport): MediumHandlers {
       try {
         await fresh(remote).client.call('release', { fh: remote.fh }, true);
       } finally {
-        if (remote.restore) await current().call('setattr', remote.restore);
+        if (remote.restore) await settle(current(), remote.restore);
       }
     },
     mkdir: async (path) => void (await call('mkdir', { path: rel(path) })),
@@ -511,7 +518,7 @@ export function timed(transport: HostfsTransport, ms: number): HostfsTransport {
     });
   const release = (opened: unknown) => {
     const fh = (opened as { fh?: unknown } | null)?.fh;
-    if (typeof fh === 'number') void transport.cleanup?.(fh).catch(() => {});
+    if (typeof fh === 'number') void transport.cleanup?.('release', { fh }).catch(() => {});
   };
   return {
     get capabilities() {
