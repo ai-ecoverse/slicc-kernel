@@ -5,6 +5,7 @@ import {
   fetchTransport,
   localProxyTransport,
   probeLocalProxy,
+  serveHostfsPort,
 } from '/dist/index.js';
 
 const packages = {
@@ -244,6 +245,85 @@ function withTracking(kernel) {
 }
 
 window.pendingMedia = [];
+window.hostfsPorts = [];
+window.hostfsStall = false;
+window.dropHostfsPort = () => {
+  const last = window.hostfsPorts.at(-1);
+  last.port.onmessage = null;
+  last.stop();
+};
+
+function pageHostfs(grant) {
+  const send = async (path, init) => {
+    const response = await fetch(`${grant.url}${path}`, {
+      ...init,
+      headers: { ...init.headers, 'X-Hostfs-Token': grant.token },
+    });
+    if (response.ok) return response;
+    const body = await response.json().catch(() => ({}));
+    throw Object.assign(new Error(body.message ?? 'EIO'), {
+      code: response.headers.get('X-Hostfs-Errno') ?? 'EIO',
+    });
+  };
+  const json = { 'Content-Type': 'application/json' };
+  const stall = () => (window.hostfsStall ? new Promise(() => {}) : null);
+  return {
+    capabilities: grant.capabilities ?? {},
+    token: grant.token,
+    maxIo: grant.capabilities?.maxIo ?? 16 * 1024 * 1024,
+    async call(op, body = {}) {
+      await stall();
+      const r = await send('/api/hostfs', {
+        method: 'POST',
+        headers: json,
+        body: JSON.stringify({ op, ...body }),
+      });
+      return r.json();
+    },
+    async read(fh, offset, size, ifMatch) {
+      await stall();
+      const body = JSON.stringify({
+        op: 'read',
+        fh,
+        offset,
+        size,
+        ...(ifMatch ? { ifMatch } : {}),
+      });
+      const r = await send('/api/hostfs', { method: 'POST', headers: json, body });
+      return new Uint8Array(await r.arrayBuffer());
+    },
+    async write(fh, offset, bytes) {
+      await stall();
+      await send('/api/hostfs/write', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'X-Hostfs-Request': JSON.stringify({ fh, offset }),
+        },
+        body: bytes,
+      });
+    },
+    async watch(signal, onEvent, onOpen) {
+      const r = await send('/api/hostfs/watch', { method: 'POST', headers: {}, signal });
+      onOpen?.();
+      const reader = r.body.getReader();
+      const decoder = new TextDecoder();
+      let buffered = '';
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) return;
+          buffered += decoder.decode(value, { stream: true });
+          const lines = buffered.split('\n');
+          buffered = lines.pop();
+          for (const line of lines) if (line.trim()) onEvent(JSON.parse(line));
+        }
+      } catch (err) {
+        if (!signal.aborted) throw Object.assign(err, { code: 'ENOTCONN' });
+      }
+    },
+  };
+}
 
 const media = {
   requestDirectory: () => walk('picked', true),
@@ -256,7 +336,15 @@ const media = {
       body: JSON.stringify({ mount: source, readonly }),
     });
     if (!response.ok) throw new Error(`grant refused: ${response.status}`);
-    return { url, ...(await response.json()) };
+    const grant = { url, ...(await response.json()) };
+    if (!window.hostfsOverPort) return grant;
+    const { port1, port2 } = new MessageChannel();
+    window.hostfsPorts.push({ port: port2, stop: serveHostfsPort(port2, pageHostfs(grant)) });
+    return {
+      port: port1,
+      token: `page-${window.hostfsPorts.length}`,
+      capabilities: grant.capabilities,
+    };
   },
 };
 

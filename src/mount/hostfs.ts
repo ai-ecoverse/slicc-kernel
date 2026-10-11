@@ -34,6 +34,8 @@ export interface HostfsTransport {
   readonly token: string;
   readonly maxIo: number;
   readonly gone?: boolean;
+  retire?(why: string): void;
+  cleanup?(op: string, body: Record<string, unknown>): Promise<void>;
   call<T>(op: string, body?: Record<string, unknown>, handle?: boolean): Promise<T>;
   read(fh: number, offset: number, size: number, ifMatch?: string): Promise<Uint8Array>;
   write(fh: number, offset: number, bytes: Uint8Array): Promise<void>;
@@ -82,16 +84,34 @@ export class HostfsClient implements HostfsTransport {
     return this.capabilities.maxIo ?? HOSTFS_IO;
   }
 
+  private retired: string | undefined;
+  private readonly stop = new AbortController();
+
+  get gone(): boolean {
+    return this.retired !== undefined;
+  }
+
+  retire(why: string): void {
+    this.retired ??= why;
+    this.stop.abort();
+  }
+
   private async send(
     path: string,
     init: RequestInit,
     handle = false,
-    retried = false
+    retried = false,
+    cleanup = false
   ): Promise<Response> {
+    if (this.retired && !cleanup) throw fsError('ENOTCONN', this.retired);
+    const stop = cleanup ? undefined : this.stop.signal;
+    const signal =
+      init.signal && stop ? AbortSignal.any([init.signal, stop]) : (init.signal ?? stop);
     let response: Response;
     try {
       response = await this.fetch(`${this.grant.url}${path}`, {
         ...init,
+        ...(signal ? { signal } : {}),
         credentials: 'omit',
         headers: {
           ...(init.headers as Record<string, string>),
@@ -128,6 +148,21 @@ export class HostfsClient implements HostfsTransport {
       handle
     );
     return (await response.json()) as T;
+  }
+
+  async cleanup(op: string, body: Record<string, unknown>): Promise<void> {
+    const response = await this.send(
+      '/api/hostfs',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ op, ...body }),
+      },
+      true,
+      false,
+      true
+    );
+    await response.body?.cancel();
   }
 
   async read(fh: number, offset: number, size: number, ifMatch?: string): Promise<Uint8Array> {
@@ -212,6 +247,11 @@ export function hostfsHandlers(current: () => HostfsTransport): MediumHandlers {
     return fresh(remote);
   };
   const call = <T>(op: string, body: Record<string, unknown> = {}) => current().call<T>(op, body);
+  const settle = (client: HostfsTransport, restore: { path: string; mode: number }) =>
+    client.call('setattr', restore).catch((err: unknown) => {
+      if (!client.gone || !client.cleanup) throw err;
+      void client.cleanup('setattr', restore).catch(() => {});
+    });
   async function writable(client: HostfsTransport, path: string, flags: OpenFlags) {
     const { ifMatch: _, ...asked } = flags;
     const opening = () =>
@@ -223,11 +263,13 @@ export function hostfsHandlers(current: () => HostfsTransport): MediumHandlers {
       const mode = (await client.call<DriverAttr>('stat', { path: rel(path) })).mode ?? 0;
       if (mode & 0o200) throw err;
       const restore = { path: rel(path), mode };
-      await client.call('setattr', { path: rel(path), mode: mode | 0o200 });
-      const opened = await opening().catch(async (again: unknown) => {
-        await client.call('setattr', restore);
-        throw again;
-      });
+      const opened = await client
+        .call('setattr', { path: rel(path), mode: mode | 0o200 })
+        .then(opening)
+        .catch(async (again: unknown) => {
+          await settle(client, restore).catch(() => {});
+          throw again;
+        });
       return { opened, restore };
     }
   }
@@ -280,7 +322,7 @@ export function hostfsHandlers(current: () => HostfsTransport): MediumHandlers {
       try {
         await fresh(remote).client.call('release', { fh: remote.fh }, true);
       } finally {
-        if (remote.restore) await current().call('setattr', remote.restore);
+        if (remote.restore) await settle(current(), remote.restore);
       }
     },
     mkdir: async (path) => void (await call('mkdir', { path: rel(path) })),
@@ -436,15 +478,102 @@ export interface HostfsTiming {
   backoffMs?: [number, number];
   connectMs?: number;
   requestMs?: number;
+  callMs?: number;
+  beatMs?: number;
+  deadMs?: number;
 }
 
 export const PORT_REQUEST_MS = 60_000;
+export const HOSTFS_CALL_MS = 20_000;
+export const PORT_BEAT_MS = 1000;
+export const PORT_DEAD_MS = 10_000;
+export const PORT_LINGER_MS = 1000;
+
+export interface PortLiveness {
+  requestMs?: number;
+  beatMs?: number;
+  deadMs?: number;
+  lingerMs?: number;
+}
+
+export function timed(transport: HostfsTransport, ms: number): HostfsTransport {
+  const inflight = new Set<Promise<unknown>>();
+  const guard = <T>(
+    name: string,
+    run: () => Promise<T>,
+    late?: (value: T) => void,
+    expire?: (running: Promise<T>) => void
+  ) =>
+    new Promise<T>((resolve, reject) => {
+      let expired = false;
+      const running = run();
+      inflight.add(running);
+      const done = () => inflight.delete(running);
+      running.then(done, done);
+      const timer = setTimeout(() => {
+        expired = true;
+        const why = `the host folder did not answer ${name} within ${ms} ms`;
+        transport.retire?.(why);
+        expire?.(running);
+        reject(fsError('ENOTCONN', why));
+      }, ms);
+      running.then(
+        (value) => {
+          clearTimeout(timer);
+          if (expired) late?.(value);
+          resolve(value);
+        },
+        (err) => {
+          clearTimeout(timer);
+          reject(err);
+        }
+      );
+    });
+  const cleanup = async (op: string, body: Record<string, unknown>, skip?: Promise<unknown>) => {
+    await Promise.allSettled([...inflight].filter((work) => work !== skip));
+    await transport.cleanup?.(op, body);
+  };
+  const release = (opened: unknown) => {
+    const fh = (opened as { fh?: unknown } | null)?.fh;
+    if (typeof fh === 'number') void cleanup('release', { fh }).catch(() => {});
+  };
+  return {
+    get capabilities() {
+      return transport.capabilities;
+    },
+    get token() {
+      return transport.token;
+    },
+    get maxIo() {
+      return transport.maxIo;
+    },
+    get gone() {
+      return transport.gone;
+    },
+    retire: (why) => transport.retire?.(why),
+    ...(transport.cleanup ? { cleanup } : {}),
+    call: (op, body, handle) =>
+      guard(
+        op,
+        () => transport.call(op, body, handle),
+        op === 'open' ? release : undefined,
+        op === 'release'
+          ? (running) => void cleanup('release', body ?? {}, running).catch(() => {})
+          : undefined
+      ),
+    read: (fh, offset, size, ifMatch) =>
+      guard('read', () => transport.read(fh, offset, size, ifMatch)),
+    write: (fh, offset, bytes) => guard('write', () => transport.write(fh, offset, bytes)),
+    watch: (signal, onEvent, onOpen) => transport.watch(signal, onEvent, onOpen),
+  };
+}
 const PORT_MS_PER_MIB = 1000;
 
 let nextPortToken = 0;
 
 type PortReply = {
   id: number;
+  pong?: boolean;
   result?: unknown;
   bytes?: Uint8Array;
   event?: HostfsEvent;
@@ -461,14 +590,26 @@ export class PortTransport implements HostfsTransport {
   private readonly waiting = new Map<number, (reply: PortReply) => void>();
   private next = 0;
   private dead: string | undefined;
+  private readonly beatMs: number;
+  private readonly deadMs: number;
+  private readonly lingerMs: number;
+  private beat: ReturnType<typeof setInterval> | undefined;
+  private answers = false;
+  private pinged: number | undefined;
 
-  constructor(grant: HostfsPortGrant, requestMs = PORT_REQUEST_MS) {
+  constructor(grant: HostfsPortGrant, liveness: PortLiveness = {}) {
     this.port = grant.port;
-    this.requestMs = requestMs;
+    this.requestMs = liveness.requestMs ?? PORT_REQUEST_MS;
+    this.beatMs = liveness.beatMs ?? PORT_BEAT_MS;
+    this.deadMs = liveness.deadMs ?? PORT_DEAD_MS;
+    this.lingerMs = liveness.lingerMs ?? PORT_LINGER_MS;
     this.capabilities = grant.capabilities ?? {};
     this.token = grant.token ?? `port-${++nextPortToken}`;
     this.port.addEventListener('message', (event: MessageEvent<PortReply>) => {
-      this.waiting.get(event.data?.id)?.(event.data);
+      if (event.data?.pong) {
+        this.answers = true;
+        this.pinged = undefined;
+      } else this.waiting.get(event.data?.id)?.(event.data);
     });
     this.port.addEventListener('close', () => this.fail("the folder's port closed"));
     this.port.start();
@@ -482,8 +623,54 @@ export class PortTransport implements HostfsTransport {
     return this.dead !== undefined;
   }
 
+  retire(why: string): void {
+    this.fail(why);
+  }
+
+  private ping(): void {
+    if (this.pinged !== undefined) return;
+    this.pinged = Date.now();
+    try {
+      this.port.postMessage({ id: 0, op: 'ping' });
+    } catch {}
+  }
+
+  private watchBeat(): void {
+    if (this.beat || this.dead) return;
+    this.ping();
+    this.beat = setInterval(() => {
+      if (this.waiting.size === 0) {
+        clearInterval(this.beat);
+        this.beat = undefined;
+        return;
+      }
+      if (this.answers && this.pinged !== undefined && Date.now() - this.pinged > this.deadMs) {
+        this.fail("the folder's port stopped answering");
+        return;
+      }
+      this.ping();
+    }, this.beatMs);
+  }
+
+  async cleanup(op: string, body: Record<string, unknown>): Promise<void> {
+    if (this.closed) throw fsError('ENOTCONN', "the folder's port is closed");
+    this.port.postMessage({ id: 0, op: 'cleanup', name: op, body });
+  }
+
+  private closed = false;
+
   fail(why: string): void {
-    if (this.dead === undefined) this.port.close();
+    if (this.dead === undefined) {
+      setTimeout(() => {
+        try {
+          this.port.postMessage({ id: 0, op: 'bye' });
+        } catch {}
+        this.closed = true;
+        this.port.close();
+      }, this.lingerMs);
+    }
+    clearInterval(this.beat);
+    this.beat = undefined;
     this.dead ??= why;
     for (const settle of [...this.waiting.values()])
       settle({ id: 0, error: { code: 'ENOTCONN', message: why } });
@@ -505,6 +692,7 @@ export class PortTransport implements HostfsTransport {
         },
         this.requestMs + Math.ceil(bytes / 1_048_576) * PORT_MS_PER_MIB
       );
+      this.watchBeat();
       this.waiting.set(id, (reply) => {
         clearTimeout(timer);
         this.waiting.delete(id);
@@ -558,6 +746,7 @@ export class PortTransport implements HostfsTransport {
         } catch {}
         resolve();
       };
+      this.watchBeat();
       this.waiting.set(id, (reply) => {
         if (reply.open) return onOpen();
         if (reply.event) return onEvent(reply.event);
@@ -583,12 +772,39 @@ const errorOf = (err: unknown) => ({
 
 export function serveHostfsPort(port: MessagePort, transport: HostfsTransport): () => void {
   const watches = new Map<number, AbortController>();
+  const handles = new Set<number>();
+  let stopped = false;
+  const closeHandles = () => {
+    for (const fh of handles) void transport.call('release', { fh }, true).catch(() => {});
+    handles.clear();
+  };
   const send = (reply: PortReply, transfer: Transferable[] = []) =>
     port.postMessage(reply, transfer);
+  const pending = new Set<Promise<unknown>>();
+  const track = <T>(work: Promise<T>) => {
+    pending.add(work);
+    const done = () => pending.delete(work);
+    work.then(done, done);
+    return work;
+  };
+  const answer = async (name: string, body: Record<string, unknown>) => {
+    const result = await track(transport.call(name, body));
+    const opened = (result as { fh?: unknown } | null)?.fh;
+    if (name === 'open' && typeof opened === 'number') handles.add(opened);
+    if (name === 'release') handles.delete(body?.fh as number);
+    if (stopped) closeHandles();
+    return result;
+  };
   const listener = async ({
     data,
   }: MessageEvent<Record<string, unknown> & { id: number; op: string }>) => {
     const { id, op } = data;
+    if (op === 'ping') return send({ id, pong: true });
+    if (op === 'bye') return stop();
+    if (op === 'cleanup')
+      return void Promise.allSettled([...pending])
+        .then(() => answer(data.name as string, data.body as Record<string, unknown>))
+        .catch(() => {});
     if (op === 'unwatch') return watches.get(id)?.abort();
     if (op === 'watch') {
       const stop = new AbortController();
@@ -609,32 +825,35 @@ export function serveHostfsPort(port: MessagePort, transport: HostfsTransport): 
     }
     try {
       if (op === 'read') {
-        const read = await transport.read(
-          data.fh as number,
-          data.offset as number,
-          data.size as number,
-          data.ifMatch as string | undefined
+        const read = await track(
+          transport.read(
+            data.fh as number,
+            data.offset as number,
+            data.size as number,
+            data.ifMatch as string | undefined
+          )
         );
         const bytes = read.slice();
         return send({ id, bytes }, [bytes.buffer as ArrayBuffer]);
       }
       if (op === 'write') {
-        await transport.write(data.fh as number, data.offset as number, data.bytes as Uint8Array);
+        await track(
+          transport.write(data.fh as number, data.offset as number, data.bytes as Uint8Array)
+        );
         return send({ id });
       }
       if (op !== 'call') throw fsError('EINVAL', `unknown hostfs port op ${op}`);
-      send({
-        id,
-        result: await transport.call(data.name as string, data.body as Record<string, unknown>),
-      });
+      send({ id, result: await answer(data.name as string, data.body as Record<string, unknown>) });
     } catch (err) {
       send({ id, error: errorOf(err) });
     }
   };
   const stop = () => {
+    stopped = true;
     port.removeEventListener('message', listener as (event: MessageEvent) => void);
     port.removeEventListener('close', stop);
     for (const watch of watches.values()) watch.abort();
+    closeHandles();
     port.close();
   };
   port.addEventListener('message', listener as (event: MessageEvent) => void);
@@ -646,11 +865,11 @@ export function serveHostfsPort(port: MessagePort, transport: HostfsTransport): 
 export function grantConnect(
   hook: HostfsGrantHook,
   fetch: FetchLike,
-  requestMs?: number
+  liveness: PortLiveness = {}
 ): HostfsConnect {
   return async (source, options) => {
     const first = await hook(source, options);
-    if ('port' in first) return new PortTransport(first, requestMs);
+    if ('port' in first) return new PortTransport(first, liveness);
     const grant = async () => {
       const again = await hook(source, options);
       if ('port' in again)
@@ -675,7 +894,10 @@ export async function openHostfs(
   const stop = new AbortController();
   let active: HostfsTransport | undefined;
   const handlers = hostfsHandlers(() => active as HostfsTransport);
-  const ranged = () => (active?.capabilities.ranges === true ? { ranges: true } : {});
+  const ranged = () => ({
+    ...(active?.capabilities.ranges === true ? { ranges: true } : {}),
+    ...(active ? { maxIo: Math.min(active.maxIo, HOSTFS_IO) } : {}),
+  });
   const served = serveFilesystem(
     port2,
     { ...slot.handlers, mount: ranged },
@@ -691,7 +913,7 @@ export async function openHostfs(
     {
       connect: () => connect(spec.source, { readonly }),
       up(client) {
-        active = client;
+        active = timed(client, timing.callMs ?? HOSTFS_CALL_MS);
         slot.insert(client, handlers);
         served.invalidate(true);
       },
