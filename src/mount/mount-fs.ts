@@ -8,6 +8,7 @@ import {
   type OwnerChange,
 } from '../fs/types.ts';
 import type { KeptFile, UnlinkHolder } from '../fs/unlinked.ts';
+import { joinName, realDir, realTarget } from '../fs/walk.ts';
 import { DriverConnection, type DriverPortLike, errnoError } from './connection.ts';
 import type { DriverAttr, DriverCapabilities, DriverEntry, DriverStatfs } from './protocol.ts';
 
@@ -1015,8 +1016,14 @@ class MountFs implements KernelFs {
     }
   }
 
-  async link(source: string, to: string, follow = false): Promise<void> {
-    const from = follow ? await this.follow(source) : source;
+  private async named(path: string): Promise<string> {
+    const at = normalizePath(path);
+    return joinName(await realDir(this, parentOf(at)), at.slice(at.lastIndexOf('/') + 1));
+  }
+
+  async link(source: string, target: string, follow = false): Promise<void> {
+    const from = follow ? await realTarget(this, normalizePath(source)) : await this.named(source);
+    const to = await this.named(target);
     const a = this.at(from);
     const b = this.at(to);
     if (!a && !b) return this.base.link(from, to);
