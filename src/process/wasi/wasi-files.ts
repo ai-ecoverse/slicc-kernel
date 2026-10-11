@@ -514,7 +514,10 @@ export function cachingBridge(
     } finally {
       const st = bridge.identified?.() ?? null;
       if (!st) cache.mutated([]);
-      else if (cache.mutated([p, ...also], st.ino) === before + 1 + also.length) {
+      else if (
+        cache.mutated([p, ...also], st.ino) === before + 1 + also.length &&
+        !st.isSymbolicLink
+      ) {
         cache.put(stats, p, st);
       }
     }
