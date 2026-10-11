@@ -459,7 +459,7 @@ export interface HostfsTiming {
 export const PORT_REQUEST_MS = 60_000;
 export const HOSTFS_CALL_MS = 20_000;
 export const PORT_BEAT_MS = 1000;
-export const PORT_DEAD_MS = 4000;
+export const PORT_DEAD_MS = 10_000;
 
 export interface PortLiveness {
   requestMs?: number;
