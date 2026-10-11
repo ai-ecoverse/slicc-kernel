@@ -72,6 +72,7 @@ export class WasixLinker {
     | {
         reserve(floor: number, size: number): number;
         load(floor: number, size: number): { base: number; handle: number };
+        sync?(): void;
         allocate(floor: number): number;
         free(index: number): void;
       }
@@ -325,6 +326,9 @@ export class WasixLinker {
     );
     const memoryBase = this.allocate(info.memorySize, 2 ** info.memoryAlign);
     const { base: tableBase, handle } = this.reserveLoad(info.tableSize);
+    this.indices?.sync?.();
+    const earlier = this.byPath.get(path);
+    if (earlier && earlier.handle < handle) return earlier;
     const record: LinkRecord = {
       kind: 'load',
       handle,
@@ -395,7 +399,8 @@ export class WasixLinker {
     linked.instance = new WebAssembly.Instance(module, imports);
     this.types.register(() => this.host.read(path), linked.instance, this.table, at.tableBase);
     this.modules.set(at.handle, linked);
-    if (!this.byPath.has(path)) this.byPath.set(path, linked);
+    const first = this.byPath.get(path);
+    if (!first || at.handle < first.handle) this.byPath.set(path, linked);
     for (const resolve of pending) resolve();
     if (init) {
       call(linked.instance, '__wasm_apply_data_relocs');

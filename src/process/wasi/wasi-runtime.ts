@@ -425,6 +425,7 @@ export class LinkSync {
       reserve: (floor, size) => this.call({ op: 'dl-reserve', floor, size }) as number,
       load: (floor, size) =>
         this.call({ op: 'dl-load-reserve', floor, size }) as { base: number; handle: number },
+      sync: () => this.catchUp(),
       allocate: (floor) => {
         const index = this.call({ op: 'dl-closure', floor }) as number;
         this.catchUp();
