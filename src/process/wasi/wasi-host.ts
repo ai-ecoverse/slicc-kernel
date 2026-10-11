@@ -531,9 +531,13 @@ export class WasiHost {
         l2: number
       ) => {
         const from = at(fd, p, l);
+        const to = at(fd2, p2, l2);
         const follow = (lookup & LOOKUP_SYMLINK_FOLLOW) !== 0;
-        fds.flushPath(follow ? physicalPath(o.fs, from) : from);
-        o.fs.link(from, at(fd2, p2, l2), follow);
+        const source = follow ? physicalPath(o.fs, from) : from;
+        fds.flushPath(from);
+        if (source !== from) fds.flushPath(source);
+        o.fs.link(from, to, follow);
+        fds.linked(source, to);
       },
     };
   }
