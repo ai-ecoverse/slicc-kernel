@@ -316,7 +316,7 @@ export class OpfsFs implements KernelFs {
     for (let hops = 0; todo.length > 0; ) {
       const part = todo.shift() as string;
       if (part === '..') done.pop();
-      else if (todo.find((next) => next !== '.') !== '..') done.push(part);
+      else if (!todo.includes('..')) done.push(part);
       else {
         const at = `/${[...done, part].join('/')}`;
         const st = await this.lstat(at);

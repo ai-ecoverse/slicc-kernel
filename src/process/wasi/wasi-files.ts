@@ -283,7 +283,7 @@ export function physical(fs: Pick<SyncFsPosixBridge, 'lstat' | 'readlink'>, path
       done.pop();
       continue;
     }
-    if (todo.find((next) => next !== '.') !== '..') {
+    if (!todo.includes('..')) {
       done.push(part);
       continue;
     }
