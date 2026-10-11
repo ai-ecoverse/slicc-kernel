@@ -20,8 +20,6 @@ interface PollEvent {
 
 export type ClockNow = (id: number) => bigint;
 
-const CLOCK_SLACK_MS = 0.5;
-
 function readSubscriptions(mem: WasiMemory, ptr: number, n: number, now: ClockNow): Subscription[] {
   const v = mem.view();
   const at = performance.now();
@@ -115,7 +113,7 @@ export function pollOneoff(
   const { events, read, write } = classify(deps.fds, subs);
   let interrupted = false;
   const earliest = subs.reduce((min, s) => Math.min(min, s.deadline), Infinity);
-  const expired = () => performance.now() + CLOCK_SLACK_MS >= earliest;
+  const expired = () => performance.now() >= earliest;
   if (read.length > 0 || write.length > 0 || events.length === 0) {
     do {
       let timeoutMs = -1;
@@ -138,7 +136,7 @@ export function pollOneoff(
   const after = performance.now();
 
   for (const s of subs) {
-    if (s.type === EVENTTYPE.CLOCK && (interrupted || s.deadline <= after + CLOCK_SLACK_MS)) {
+    if (s.type === EVENTTYPE.CLOCK && (interrupted || s.deadline <= after)) {
       events.push({ userdata: s.userdata, error: E.SUCCESS, type: s.type });
     }
   }
