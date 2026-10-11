@@ -117,6 +117,7 @@ export function nodeTransport(): NetworkTransport {
 }
 
 const TERMINATED = 'the kernel is terminated';
+const EXIT_GRACE_MS = 50;
 
 function nodeWorker(file: string | URL, live: Set<() => void>, closed: boolean): WasmWorkerLike {
   const errors = new Set<(event: MessageEvent) => void>();
@@ -137,7 +138,9 @@ function nodeWorker(file: string | URL, live: Set<() => void>, closed: boolean):
     live.add(kill);
     worker.once('exit', (code) => {
       live.delete(kill);
-      if (!ending) fail(`the process worker exited with ${code}`);
+      setTimeout(() => {
+        if (!ending) fail(`the process worker exited with ${code}`);
+      }, EXIT_GRACE_MS);
     });
     worker.on('error', (err) => fail(String(err)));
   } else {

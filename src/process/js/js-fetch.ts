@@ -177,7 +177,11 @@ function dataResponse(request: Request): Response {
   if (type.startsWith(';')) type = `text/plain${type}`;
   const response = new Response(
     request.method === 'HEAD' ? null : (body as Uint8Array<ArrayBuffer>),
-    { status: 200, headers: { 'content-type': mimeType(type) ?? 'text/plain;charset=US-ASCII' } }
+    {
+      status: 200,
+      statusText: 'OK',
+      headers: { 'content-type': mimeType(type) ?? 'text/plain;charset=US-ASCII' },
+    }
   );
   return withMeta(response, url, false);
 }
