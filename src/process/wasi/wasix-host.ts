@@ -507,6 +507,7 @@ export class WasixHost {
 
   private ttyGet(ptr: number): void {
     const { host, mem } = this;
+    host.interrupted?.();
     const v = mem.view();
     mem.bytes(ptr, 24).fill(0);
     const fd = this.ttyFd();

@@ -35,9 +35,15 @@ export function readTermios(mem: WasiMemory, ptr: number): Termios {
   };
 }
 
-export function sliccTty(mem: WasiMemory, fds: WasiFds, kernel: WasiKernel) {
+export function sliccTty(
+  mem: WasiMemory,
+  fds: WasiFds,
+  kernel: WasiKernel,
+  interrupted: () => void = () => undefined
+) {
   const { sys } = kernel;
   const terminal = (fd: number): number => {
+    interrupted();
     const e = fds.find(fd);
     if (!e) throw new WasiError('EBADF');
     if (e.type !== 'kernel' || fds.kind(fd, e) !== 'tty') throw new WasiError('ENOTTY');

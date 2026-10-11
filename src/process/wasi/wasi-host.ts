@@ -180,7 +180,7 @@ export class WasiHost {
   }
 
   sliccTtyImports(): Record<string, WasiFunction> {
-    return wrap(sliccTty(this.mem, this.fds, this.o.kernel));
+    return wrap(sliccTty(this.mem, this.fds, this.o.kernel, () => this.interrupted?.()));
   }
 
   sliccFsImports(): Record<string, WasiFunction> {
@@ -634,8 +634,8 @@ export class WasiHost {
       }
     }
     if (e.type === 'device') {
-      if (e.access === 'read') throw new WasiError('EBADF');
       this.interrupted?.();
+      if (e.access === 'read') throw new WasiError('EBADF');
       if (e.device === 'full' && data.length > 0) throw new WasiError('ENOSPC');
       return data.length;
     }
@@ -648,8 +648,8 @@ export class WasiHost {
       return this.o.kernel.sys.read(fd, Math.min(max, MAX_READ), { nonblock: e.nonblock });
     }
     if (e.type === 'device') {
-      if (e.access === 'write') throw new WasiError('EBADF');
       this.interrupted?.();
+      if (e.access === 'write') throw new WasiError('EBADF');
       if (e.device === 'null') return new Uint8Array(0);
       const out = new Uint8Array(Math.min(max, 65536));
       return e.device === 'urandom' ? crypto.getRandomValues(out) : out;
@@ -657,15 +657,20 @@ export class WasiHost {
     return this.file(fd, 'read').read(max);
   }
 
+  private local<T>(answer: T): T {
+    this.interrupted?.();
+    return answer;
+  }
+
   private seek(fd: number, offset: number, whence: number): number {
     const e = this.fds.get(fd);
     if (e.type === 'kernel') {
       const kind = this.fds.kind(fd, e);
-      if (kind === 'device') return 0;
+      if (kind === 'device') return this.local(0);
       if (kind !== 'file') throw new WasiError('ESPIPE');
       return this.o.kernel.sys.seek(fd, offset, whence);
     }
-    if (e.type === 'device') return 0;
+    if (e.type === 'device') return this.local(0);
     const file = this.file(fd);
     const base = whence === WHENCE.SET ? 0 : whence === WHENCE.CUR ? file.offset : file.size();
     if (whence > WHENCE.END || base + offset < 0) throw new WasiError('EINVAL');
@@ -681,6 +686,7 @@ export class WasiHost {
 
   private fdstat(fd: number, out: number): void {
     const e = this.fds.get(fd);
+    if (e.type === 'device') this.interrupted?.();
     let filetype: number = FILETYPE.CHARACTER_DEVICE;
     let seeks = true;
     let flags = 0;
@@ -723,7 +729,7 @@ export class WasiHost {
       if (vfs.path) return this.statOrphanable(vfs.path, vfs.size, vfs.orphan);
     }
     const filetype = kind ? kernelFiletype(kind).filetype : FILETYPE.CHARACTER_DEVICE;
-    return { filetype, size: 0n, ino: BigInt(fd + 1), mtimeNs: 0n };
+    return this.local({ filetype, size: 0n, ino: BigInt(fd + 1), mtimeNs: 0n });
   }
 
   private statOrphanable(path: string, size: number, orphan = false): Filestat {
