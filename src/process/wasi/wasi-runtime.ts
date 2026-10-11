@@ -384,7 +384,7 @@ async function instantiate(
     sliccFs,
     sliccTty
   );
-  deliverAll(hostImports, host, driver, sync && (() => sync.current()));
+  deliverAll(hostImports, host, driver, sync && (() => host.quietly(() => sync.current())));
   const imports: WebAssembly.Imports = sync
     ? merge(hostImports, sync.linker.mainImports(module))
     : hostImports;
@@ -634,6 +634,7 @@ export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike
   if (fork?.signals) signals.restore(fork.signals);
   host.signals = signals;
   host.interrupted = () => gate.interrupt();
+  host.quietly = (fn) => gate.quiet(fn);
   host.onRaise = (sig) => signals.raised(sig);
   host.muted = (fd, data) => signals.muted(fd, data);
   const exports = instance.exports as { _start: () => void };
@@ -740,6 +741,7 @@ export async function runWasiThread(init: WasmThreadInitMsg, port: SabPostLike):
   signals.bind(instance.exports);
   signals.register(SIGNAL_CALLBACK);
   host.interrupted = () => gate.interrupt();
+  host.quietly = (fn) => gate.quiet(fn);
   host.onRaise = (sig) => signals.raised(sig);
   const start = instance.exports.wasi_thread_start as (tid: number, arg: number) => void;
   try {

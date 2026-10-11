@@ -142,6 +142,8 @@ export class WasiHost {
 
   interrupted: (() => boolean) | undefined;
 
+  quietly: (fn: () => void) => void = (fn) => fn();
+
   private readonly listening: number[];
 
   readonly o: WasiHostOptions;
