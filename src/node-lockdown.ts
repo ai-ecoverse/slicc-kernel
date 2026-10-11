@@ -20,6 +20,16 @@ export const NODE_SLOTS: readonly string[] = [
   'clearImmediate',
 ];
 
+export function zeroedBuffers(buffer: typeof Buffer): void {
+  const alloc = buffer.alloc.bind(buffer);
+  const fixed = (value: unknown) => ({ value, writable: false, configurable: false });
+  Object.defineProperties(buffer, {
+    allocUnsafe: fixed((size: number) => alloc(size)),
+    allocUnsafeSlow: fixed((size: number) => alloc(size)),
+    poolSize: fixed(0),
+  });
+}
+
 function refused(specifier: string): Error {
   return Object.assign(new Error(`slicc-kernel: a JS program cannot import ${specifier}`), {
     code: 'ERR_ACCESS_DENIED',
@@ -38,6 +48,7 @@ export function refuseModules(): void {
 }
 
 export function nodeLockdown(scope: object = globalThis): void {
+  zeroedBuffers(Buffer);
   lockdown(scope);
   hide(scope, NODE_GLOBALS);
   vacate(scope, NODE_SLOTS);
