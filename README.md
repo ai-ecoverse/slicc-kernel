@@ -186,6 +186,8 @@ That's for programs that walk to the root, such as Go's (`GOOS=wasip1`) and esbu
 
 A descriptor a program inherits at one of those numbers (from bash's `3<file`, or a `posix_spawn` file action) moves to the first free number above them. One above the range keeps its number. A command that takes descriptors by number from its caller should leave `preopenRoot` off, which keeps the shorter range.
 
+**Paths with `..`.** A `..` after a symlinked directory goes to the parent of the link's target, as on Linux: with `/a/link -> /x/y`, `/a/link/../f` is `/x/f`, for a WASI program as for bash. A `..` after a file or a missing name fails with `ENOTDIR` or `ENOENT`. Paths without `..` are joined as they are.
+
 On top of preview1 a WASI program gets:
 
 - **Threads**: `wasi.thread-spawn` (wasm32-wasip1-threads) and WASIX `thread_spawn_v2` start a worker per thread on the process's shared memory, sized from the module's own import (a 2 GiB maximum when the engine cannot reserve more). The threads share one descriptor table; `exit` or a trap in any thread ends the process. At most 64 threads per process; `SLICC_WASM_THREADS` sets another cap, up to 256.
