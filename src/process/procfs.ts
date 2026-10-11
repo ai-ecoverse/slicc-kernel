@@ -219,6 +219,12 @@ interface ProcStream {
   node: ProcNode;
   position: number;
   sliccProc?: Uint8Array;
+  getdents?: string[];
+}
+
+interface DirStreamOps {
+  open?: (stream: ProcStream) => void;
+  close?: (stream: ProcStream) => void;
 }
 
 export interface ProcFs {
@@ -247,30 +253,7 @@ function attr(node: ProcNode): object {
   };
 }
 
-export const LISTED_TTL_MS = 1000;
-
-function listing(clock: () => number = Date.now) {
-  let pids = new Set<number>();
-  let until = 0;
-  return {
-    set(next: readonly number[]): void {
-      pids = new Set(next);
-      until = clock() + LISTED_TTL_MS;
-    },
-    take(target: number): boolean {
-      if (clock() > until) pids.clear();
-      return pids.delete(target);
-    },
-  };
-}
-
-export function useProcfs(
-  Fs: ProcFs,
-  sys: ProcSys,
-  pid: number,
-  memory = memorySource(),
-  clock: () => number = Date.now
-): void {
+export function useProcfs(Fs: ProcFs, sys: ProcSys, pid: number, memory = memorySource()): void {
   const { lookupPath, createNode, hashRemoveNode } = Fs;
   const procList = sys.procList?.bind(sys);
   if (!lookupPath || !createNode || !hashRemoveNode || !procList) return;
@@ -346,15 +329,22 @@ export function useProcfs(
     dir.node_ops.readdir = () => ['.', '..', ...PID_FILES];
     return dir;
   };
-  const listed = listing(clock);
+  const scans = new Map<ProcStream, Set<number>>();
+  const listed = (target: number) => [...scans.values()].some((pids) => pids.has(target));
   const procOps = proc.node_ops;
   const lookup = procOps.lookup?.bind(procOps);
   const readdir = procOps.readdir?.bind(procOps);
+  const listAll = (node: ProcNode) => {
+    const names = new Set(readdir ? readdir(node) : ['.', '..']);
+    for (const name of [...SYSTEM_FILES, 'mounts']) names.add(name);
+    for (const p of procList().processes) names.add(String(p.pid));
+    return [...names];
+  };
   proc.node_ops = {
     ...procOps,
     lookup: (parent, name) => {
       if (/^[1-9]\d*$/.test(name)) {
-        if (!infoOf(Number(name)) && !listed.take(Number(name))) throw error();
+        if (!infoOf(Number(name)) && !listed(Number(name))) throw error();
         return pidDir(name, Number(name));
       }
       if (name === 'mounts') return file(parent, name, () => mountTable(sys.mountList?.() ?? []));
@@ -366,13 +356,20 @@ export function useProcfs(
       if (!lookup) throw error();
       return lookup(parent, name);
     },
-    readdir: (node) => {
-      const names = new Set(readdir ? readdir(node) : ['.', '..']);
-      for (const name of [...SYSTEM_FILES, 'mounts']) names.add(name);
-      const pids = procList().processes.map((p) => p.pid);
-      listed.set(pids);
-      for (const p of pids) names.add(String(p));
-      return [...names];
+    readdir: (node) => listAll(node),
+  };
+  const dirOps = (proc.stream_ops ?? {}) as DirStreamOps;
+  proc.stream_ops = {
+    ...dirOps,
+    open: (stream: ProcStream) => {
+      dirOps.open?.(stream);
+      const names = listAll(proc);
+      stream.getdents = names;
+      scans.set(stream, new Set(names.filter((n) => /^[1-9]\d*$/.test(n)).map(Number)));
+    },
+    close: (stream: ProcStream) => {
+      scans.delete(stream);
+      dirOps.close?.(stream);
     },
   };
   hashRemoveNode.call(Fs, self);
