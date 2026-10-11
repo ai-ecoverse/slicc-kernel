@@ -723,6 +723,8 @@ export class WasmProcess {
     const alias = req.orphan
       ? undefined
       : await procAlias(this.options.fs, req.path, !req.exclusive);
+    if (typeof alias === 'object')
+      throw Object.assign(new Error(alias.refused), { code: alias.refused });
     if (alias !== undefined) return this.openProc(req, alias);
     await refuseReadonly(this.options.fs, req.path, req.flags, req);
     const fd = this.fds.install(heldFile(), 3);
