@@ -370,12 +370,15 @@ export async function dispatchSyncFs(req: SyncFsRequest): Promise<SyncFsResult> 
     const own = held ? { ...entry, fs: { ...fs, writeFile: held.writeFile } } : entry;
     const result = await dispatchOne(own, req);
     if (!result.ok) return result;
-    if (held && (await held.moved())) return json(null);
-    const st = await fs.stat(path).catch(() => undefined);
+    if (held && !held.direct) return json(null);
+    const look = req.op === 'lchown' ? fs.lstat : fs.stat;
+    const st = await look.call(fs, path).catch(() => undefined);
     return json(st ? statJson(st) : null);
   };
   try {
-    return await (fs.exclusive ? fs.exclusive(path, identified) : identified());
+    return await (fs.exclusive
+      ? fs.exclusive(path, identified, req.op !== 'lchown')
+      : identified());
   } catch (err) {
     return toErrno(err);
   }

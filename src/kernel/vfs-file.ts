@@ -628,14 +628,14 @@ export async function refuseReadonly(
 export function keepingOpen(fs: KernelFs, nodes: VfsNodes): KernelFs {
   return {
     ...fs,
-    async exclusive(path, run) {
+    async exclusive(path, run, follow = true) {
       const at = fs.resolvePath('/', path);
-      const target = () => nodes.targetKey(at).catch(() => at);
-      const locked = await target();
+      const key = follow ? nodes.targetKey(at) : nodes.entryKey(at);
+      const locked = await key.catch(() => at);
       return nodes.onEntry(locked, () =>
         run({
           writeFile: (p, content, owner) => fs.writeFile(p, content, owner),
-          moved: async () => (await target()) !== locked,
+          direct: locked === at,
         })
       );
     },

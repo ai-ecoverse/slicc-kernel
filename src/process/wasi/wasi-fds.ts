@@ -662,10 +662,14 @@ export class WasiFds {
     if (e.path !== undefined || this.learned.has(e)) return;
     this.learned.add(e);
     try {
-      const vfs = this.kernel.call({ op: 'fd-vfs-stat', fd }) as { path?: string; orphan?: true };
+      const vfs = this.kernel.call({ op: 'fd-vfs-stat', fd, identity: true }) as {
+        path?: string;
+        orphan?: true;
+        ino?: number;
+      };
       if (vfs.orphan || vfs.path === undefined) return;
       e.path = vfs.path;
-      e.ino = this.inoOf(vfs.path);
+      e.ino = vfs.ino ?? this.inoOf(vfs.path);
     } catch {}
   }
 
