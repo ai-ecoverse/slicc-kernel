@@ -190,6 +190,7 @@ export async function readable(g: Guard, op: string, path: string): Promise<void
 
 export async function writable(g: Guard, op: string, path: string): Promise<void> {
   const st = await g.fs.stat(path).catch(() => undefined);
-  if (st) await need(g, op, path, W_OK, { directory: st.isDirectory });
-  else await inParent(g, op, path);
+  if (st) return void (await need(g, op, path, W_OK, { directory: st.isDirectory }));
+  const target = await need(g, op, path, 0);
+  if (target.denied === undefined) await need(g, op, parentOf(target.path), W_OK | X_OK, {}, path);
 }
