@@ -31,7 +31,7 @@ test('a worker attaches, its sleep shows in a terminal, the terminal kills it, a
   );
 
   await page.evaluate(() => window.terminal(['bash', '-i'], { cwd: '/home' }));
-  await page.until(() => window.screen.screen.includes('$ '));
+  await page.until(() => /[$#] /.test(window.screen.screen));
   await page.evaluate(() =>
     window.term.write('for d in /proc/[0-9]*; do echo "pid ${d#/proc/} $(cat $d/comm)"; done\r')
   );
@@ -54,7 +54,7 @@ test('a worker spawns into its own process group, and kill -- -pgid from a termi
     .map((p) => p.pgid);
   assert.deepEqual(groups, [leader.pid, leader.pid]);
   await page.evaluate(() => window.terminal(['bash', '-i'], { cwd: '/home' }));
-  await page.until(() => window.screen.screen.includes('$ '));
+  await page.until(() => /[$#] /.test(window.screen.screen));
   await page.evaluate((g) => window.term.write(`kill -- -${g}\r`), leader.pid);
   await page.until(
     (pids) => pids.every((p) => window.a.events.some((e) => e.event === 'exited' && e.pid === p)),
