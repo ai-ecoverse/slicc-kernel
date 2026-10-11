@@ -79,7 +79,8 @@ export class AsyncifyDriver {
   }
 
   get idle(): boolean {
-    return (this.exports.asyncify_get_state?.() ?? 0) === 0;
+    const state = this.exports.asyncify_get_state;
+    return !this.supported || typeof state !== 'function' || state() === 0;
   }
 
   resume(): boolean {
