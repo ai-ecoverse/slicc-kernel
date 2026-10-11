@@ -583,7 +583,8 @@ export class Launcher {
   }
 
   private async scriptCommand(file: string, cwd: string, scope: string) {
-    const at = file.includes('/') && !COMMAND.test(file) ? this.fs.resolvePath(cwd, file) : file;
+    const direct = !file.includes('/') || COMMAND.test(file);
+    const at = direct ? file : await followLinks(this.base, this.fs.resolvePath(cwd, file));
     const command = await this.commandAt(at, scope);
     return command?.script ? command : undefined;
   }
