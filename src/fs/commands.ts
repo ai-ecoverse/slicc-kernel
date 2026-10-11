@@ -47,7 +47,7 @@ export function withCommandDirs(
     if (path === '/usr') return ['bin'];
     if (path === '/bin' || path === '/usr/bin') return [...(await names())];
     const own = await userDir(path);
-    return own && [...own];
+    return own?.size ? [...own] : undefined;
   }
 
   async function virtual(path: string): Promise<FsStat | undefined> {
