@@ -319,11 +319,11 @@ export class UserDb {
         if (more.some((g) => g.gid === found.gid)) {
           throw fsError('EINVAL', `a user is no member of its own group ${name}`);
         }
-        if (joined(name, more)) await this.fs.writeFile(GROUP, formatGroup(group));
         if (found.uid >= FIRST_UID && found.uid <= LAST_UID) {
           await this.provision(found);
           await this.stampHome(found, shared, homeMode);
         }
+        if (joined(name, more)) await this.fs.writeFile(GROUP, formatGroup(group));
         remember();
         return this.account(found, groups);
       }
