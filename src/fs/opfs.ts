@@ -8,6 +8,7 @@ import {
   type NewOwner,
   type Owner,
   type OwnerChange,
+  type Perm,
   resolvePath,
 } from './types.ts';
 
@@ -232,6 +233,15 @@ export class OpfsFs implements KernelFs {
 
   trackOwners(): void {
     this.owners = true;
+  }
+
+  async ancestry(path: string): Promise<Perm[]> {
+    const entries = await this.meta.get(chain(path));
+    return entries.map((entry, i) => ({
+      ...(ownOf(entry) ?? (i === 0 ? ROOT_OWNER : inherit(entries.slice(0, i)))),
+      ...(entry?.mode !== undefined ? { mode: entry.mode } : {}),
+      ...(entry?.link !== undefined ? { link: entry.link } : {}),
+    }));
   }
 
   private async handedTo(dir: string): Promise<Owner> {

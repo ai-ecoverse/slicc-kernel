@@ -1,3 +1,4 @@
+import type { Dac } from '../fs/dac.ts';
 import type { KernelFs } from '../fs/types.ts';
 import type { KeptFile } from '../fs/unlinked.ts';
 import type { Cred } from '../kernel/cred.ts';
@@ -21,6 +22,8 @@ export interface SyncFsTokenEntry {
   renamed?: (from: string, to: string) => void;
   cred?: () => Readonly<Cred>;
   umask?: () => number;
+  dac?: Dac;
+  pid?: number;
 }
 
 const registry = new Map<string, SyncFsTokenEntry>();

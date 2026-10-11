@@ -1,3 +1,5 @@
+import { ancestryOf, permOf } from '../fs/access.ts';
+import { chain } from '../fs/owners.ts';
 import {
   type FsStat,
   inodeOf,
@@ -7,6 +9,7 @@ import {
   type NewOwner,
   normalizePath,
   type OwnerChange,
+  type Perm,
 } from '../fs/types.ts';
 import type { KeptFile, UnlinkHolder } from '../fs/unlinked.ts';
 import { joinName, realDir, realTarget } from '../fs/walk.ts';
@@ -1141,6 +1144,21 @@ class MountFs implements KernelFs {
     const real = await this.base.realpath(path, follow);
     if (this.at(real)) throw errnoError('ENOSYS', path);
     return real;
+  }
+
+  async ancestry(path: string): Promise<Array<Perm | undefined>> {
+    const names = chain(normalizePath(path));
+    const first = names.findIndex((name) => this.at(name));
+    if (first < 0) return ancestryOf(this.base, path);
+    const out = first === 0 ? [] : await ancestryOf(this.base, names[first - 1] as string);
+    if (out.length < first || out.some((perm) => perm?.link !== undefined)) return out;
+    for (const name of names.slice(first)) {
+      const st = await this.lstat(name).catch(() => undefined);
+      if (!st) break;
+      out.push(permOf(st, st.isSymbolicLink ? await this.readlink(name) : undefined));
+      if (st.isSymbolicLink) break;
+    }
+    return out;
   }
 
   async readlink(path: string): Promise<string> {

@@ -1,3 +1,15 @@
+import {
+  chmodMode,
+  type Guard,
+  inParent,
+  linkable,
+  listable,
+  makeIn,
+  removable,
+  renamable,
+  retimable,
+  searchable,
+} from '../fs/dac.ts';
 import { chownAs, ownerOf } from '../fs/owners.ts';
 import {
   type FsStat,
@@ -185,9 +197,11 @@ async function run(
       return done;
     case 'readlink':
       return json(await fs.readlink(path));
-    case 'chmod':
-      await fs.chmod(path, req.mode ?? 0);
+    case 'chmod': {
+      const g = guardOf(entry);
+      await fs.chmod(path, g ? await chmodMode(g, path, req.mode ?? 0) : (req.mode ?? 0));
       return done;
+    }
     case 'utimes':
       await fs.utimes(path, new Date(req.atimeMs ?? 0), new Date(req.mtimeMs ?? 0));
       return done;
@@ -203,6 +217,57 @@ async function run(
       return ranged(fs, path, req);
     default:
       return { ok: false, errno: 'EINVAL', message: `sync-fs: unknown op '${req.op as string}'` };
+  }
+}
+
+export function guardOf(entry: SyncFsTokenEntry): Guard | undefined {
+  const cred = entry.dac && entry.cred?.();
+  if (!cred || !entry.dac) return undefined;
+  return { fs: entry.fs, cred, pid: entry.pid ?? 0, dac: entry.dac };
+}
+
+const FOLLOWING = new Set<SyncFsOp>(['exists', 'stat', 'chown', 'statfs']);
+const NOT_FOLLOWING = new Set<SyncFsOp>(['lstat', 'readlink', 'lchown']);
+
+async function guard(g: Guard, path: string, req: SyncFsRequest, cwd: string): Promise<void> {
+  const { op } = req;
+  if (FOLLOWING.has(op) || NOT_FOLLOWING.has(op)) return searchable(g, op, path, FOLLOWING.has(op));
+  const other = () => g.fs.resolvePath(cwd, req.arg2 ?? '');
+  switch (op) {
+    case 'readdir':
+    case 'readdir-stat':
+      return listable(g, op, path);
+    case 'mkdir':
+      return makeIn(g, op, path);
+    case 'create':
+    case 'symlink':
+      return inParent(g, op, path);
+    case 'unlink':
+    case 'rmdir':
+      return inParent(g, op, path, true);
+    case 'rm':
+      return removable(g, op, path);
+    case 'rename':
+      return renamable(g, path, other());
+    case 'link':
+      return linkable(g, path, other(), req.mode === 1);
+    case 'utimes':
+    case 'lutimes':
+      return retimable(g, op, path);
+    default:
+      return undefined;
+  }
+}
+
+async function guarded(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest) {
+  const g = guardOf(entry);
+  if (!g) return undefined;
+  try {
+    await guard(g, path, req, entry.cwd);
+    return undefined;
+  } catch (err) {
+    const refusal = (err as { code?: unknown }).code === 'EACCES';
+    return req.op === 'exists' && refusal ? json(false) : toErrno(err);
   }
 }
 
@@ -273,6 +338,17 @@ async function owned(
   return own(target, () => run(entry, path, req));
 }
 
+async function holdOp(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest) {
+  const mode = req.mode ?? 0;
+  const [on, open] = [(mode & 1) === 1, (mode & 2) === 2];
+  if (on && open) {
+    const real = await entry.fs.realpath?.(path, true).catch(() => path);
+    return json(entry.hold?.(path, on, open, real) ?? null);
+  }
+  entry.hold?.(path, on, open, undefined, req.handle);
+  return done;
+}
+
 export async function dispatchSyncFs(req: SyncFsRequest): Promise<SyncFsResult> {
   const entry = resolveSyncFsToken(req.token);
   if (!entry) return { ok: false, errno: 'EACCES', message: 'sync-fs: unknown or revoked token' };
@@ -281,16 +357,10 @@ export async function dispatchSyncFs(req: SyncFsRequest): Promise<SyncFsResult> 
     const path = fs.resolvePath(cwd, req.path);
     if (req.op === 'kept') return json(entry.keptFor?.(req.handle ?? -1) !== undefined);
     if (req.op === 'stat' && req.handle !== undefined) return await keptStat(entry, req);
+    if (req.op === 'hold') return holdOp(entry, path, req);
+    const refused = await guarded(entry, path, req);
+    if (refused) return refused;
     if (req.op === 'statfs') return json((await entry.statfs?.(path)) ?? (await storageUsage()));
-    if (req.op === 'hold') {
-      const [on, open] = [((req.mode ?? 0) & 1) === 1, ((req.mode ?? 0) & 2) === 2];
-      if (on && open) {
-        const real = await fs.realpath?.(path, true).catch(() => path);
-        return json(entry.hold?.(path, on, open, real) ?? null);
-      }
-      entry.hold?.(path, on, open, undefined, req.handle);
-      return done;
-    }
     if (entry.revoked?.(path)) return { ok: false, errno: 'EIO', message: `${path} was unmounted` };
     if ((req.op === 'write' && req.mode === 1) || UNLINKED_OPS.has(req.op)) {
       const serve = async () => run(entry, await keptOr(entry, path, req.handle), req);

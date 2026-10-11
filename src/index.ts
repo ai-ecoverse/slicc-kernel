@@ -8,6 +8,7 @@ import {
   errorWithCode,
 } from './client/dial-stream.ts';
 import { type LoopbackFetchOptions, loopbackFetch } from './client/loopback-fetch.ts';
+import type { Denial, DenialHook } from './fs/dac.ts';
 import type { UsersMode } from './fs/types.ts';
 import { isHostname } from './kernel/net/loopback-names.ts';
 import type { TransportCall } from './kernel/net/remote-transport.ts';
@@ -42,6 +43,7 @@ export {
 } from './client/attach.ts';
 export type { DialledSocket, DialOptions } from './client/dial-stream.ts';
 export type { LoopbackFetchOptions } from './client/loopback-fetch.ts';
+export type { Denial, DenialHook } from './fs/dac.ts';
 export type { RouteTable } from './kernel/net/routes.ts';
 export type {
   NetworkUplink,
@@ -128,6 +130,7 @@ export interface KernelOptions {
   cdp?: CdpHook;
   hostname?: string;
   users?: UsersMode;
+  onDenial?: DenialHook;
 }
 
 interface HostfsRequest {
@@ -288,6 +291,7 @@ function initCall(options: KernelOptions, transport: NetworkTransport | undefine
     ...(options.cdp ? { cdp: true } : {}),
     ...(options.hostname !== undefined ? { hostname: options.hostname } : {}),
     ...(options.users !== undefined ? { users: options.users } : {}),
+    ...(options.onDenial ? { denials: true } : {}),
     ...(options.processMounts !== undefined
       ? {
           processMounts:
@@ -351,6 +355,19 @@ function kernelUsers(
   };
 }
 
+async function mountPolicy(
+  options: KernelOptions,
+  worker: Worker,
+  { id, req }: { id: number; req: ProcessMountRequest }
+): Promise<void> {
+  const decide = options.processMounts;
+  let allowed = false;
+  try {
+    allowed = typeof decide === 'function' ? await decide(req) : decide !== false;
+  } catch {}
+  worker.postMessage({ mountAllowed: { id, allowed } });
+}
+
 export async function createKernel(options: KernelOptions = {}): Promise<Kernel> {
   if (!globalThis.crossOriginIsolated) throw new Error(ISOLATION);
   if (options.hostname !== undefined && !isHostname(options.hostname)) {
@@ -395,14 +412,8 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
       worker.postMessage({ hostfsGrant: { id, error: (err as Error).message ?? String(err) } });
     }
   }
-  async function policy({ id, req }: { id: number; req: ProcessMountRequest }): Promise<void> {
-    const decide = options.processMounts;
-    let allowed = false;
-    try {
-      allowed = typeof decide === 'function' ? await decide(req) : decide !== false;
-    } catch {}
-    worker.postMessage({ mountAllowed: { id, allowed } });
-  }
+  const policy = (asked: { id: number; req: ProcessMountRequest }) =>
+    mountPolicy(options, worker, asked);
   const pendingMedium = ({ target, source, handle }: PendingMedium) =>
     options.onMountPending?.({
       target,
@@ -422,7 +433,9 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
       | { hostfs: HostfsRequest }
       | { mountPolicy: { id: number; req: ProcessMountRequest } }
       | CdpOpen
+      | { denial: Denial }
     >) => {
+      if ('denial' in data) return void options.onDenial?.(data.denial);
       if ('net' in data) return bridge?.answer(data);
       if ('uplink' in data) return uplinks?.answer(data);
       if ('cdpOpen' in data) return cdp.open(data);

@@ -26,6 +26,13 @@ export interface Owner {
   gid: number;
 }
 
+export interface Perm {
+  uid: number;
+  gid: number;
+  mode?: number;
+  link?: string;
+}
+
 export interface NewOwner extends Owner {
   mode?: number;
   parents?: number;
@@ -60,6 +67,7 @@ export interface KernelFs {
   createExclusive?(path: string, owner?: NewOwner): Promise<void>;
   chown?(path: string, change: OwnerChange): Promise<void>;
   trackOwners?(): void;
+  ancestry?(path: string): Promise<Array<Perm | undefined>>;
   chmod(path: string, mode: number): Promise<void>;
   utimes(path: string, atime: Date, mtime: Date): Promise<void>;
   lutimes?(path: string, atime: Date, mtime: Date): Promise<void>;

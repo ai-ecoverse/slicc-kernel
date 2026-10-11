@@ -38,7 +38,7 @@ export function ownerOf(cred: Readonly<Cred>, mode?: number): NewOwner {
   return { uid: cred.euid, gid: cred.egid, ...(mode !== undefined ? { mode } : {}) };
 }
 
-function inGroup(cred: Readonly<Cred>, gid: number): boolean {
+export function inGroup(cred: Readonly<Cred>, gid: number): boolean {
   return cred.egid === gid || cred.groups.includes(gid);
 }
 

@@ -2,6 +2,7 @@ import { portCdpHook } from './cdp/port.ts';
 import type { CdpHook } from './cdp/types.ts';
 import { type LockManagerLike, locksOf } from './client/protocol.ts';
 import { type ServedClient, serveClient } from './client/serve-client.ts';
+import type { Denial, DenialHook } from './fs/dac.ts';
 import { META_DB, type MetaStore } from './fs/meta.ts';
 import { OpfsFs } from './fs/opfs.ts';
 import { fsError, type UsersMode } from './fs/types.ts';
@@ -45,6 +46,7 @@ export interface InitRequest {
   hostfs?: boolean;
   hostname?: string;
   users?: UsersMode;
+  denials?: boolean;
   processMounts?: boolean | 'ask';
   cdp?: boolean;
 }
@@ -242,10 +244,14 @@ function usersOp(l: Launcher, req: UsersRequest): Promise<unknown> {
   return l.users.list();
 }
 
-function hostOptions(req: InitRequest): { hostname?: string; users?: UsersMode } {
+function hostOptions(
+  req: InitRequest,
+  port: KernelPort
+): { hostname?: string; users?: UsersMode; onDenial?: DenialHook } {
   return {
     ...(req.hostname !== undefined ? { hostname: req.hostname } : {}),
     ...(req.users !== undefined ? { users: req.users } : {}),
+    ...(req.denials ? { onDenial: (denial: Denial) => port.postMessage({ denial }) } : {}),
   };
 }
 
@@ -330,7 +336,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
         ...(deps.createDriverWorker ? { createDriverWorker: deps.createDriverWorker } : {}),
         ...(req.modules ? { modules: req.modules } : {}),
         ...(req.env ? { env: req.env } : {}),
-        ...hostOptions(req),
+        ...hostOptions(req, port),
         ...net,
         ...(media ? { media } : {}),
         onMountPending: (medium) => port.postMessage({ medium }),

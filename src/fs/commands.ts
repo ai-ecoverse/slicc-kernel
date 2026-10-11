@@ -147,6 +147,7 @@ export function withCommandDirs(
     readlink: (path) => fs.readlink(path),
     ...(fs.realpath ? { realpath: fs.realpath.bind(fs) } : {}),
     ...(fs.chown ? { chown: fs.chown.bind(fs) } : {}),
+    ...(fs.ancestry ? { ancestry: fs.ancestry.bind(fs) } : {}),
     chmod: (path, mode) => fs.chmod(path, mode),
     utimes: (path, atime, mtime) => fs.utimes(path, atime, mtime),
     lutimes: (path, atime, mtime) => lutimesOf(fs, path, atime, mtime),
