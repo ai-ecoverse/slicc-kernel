@@ -34,6 +34,10 @@ function fingerprint(headers: HeaderList): string {
   return JSON.stringify([...fields, header(headers, 'authorization') !== undefined]);
 }
 
+function unauthorized(print: string): string {
+  return JSON.stringify([...(JSON.parse(print) as unknown[]).slice(0, -1), false]);
+}
+
 function followedWith(status: number, method: string): string {
   if (status === 303 && method !== 'GET' && method !== 'HEAD') return 'GET';
   if ((status === 301 || status === 302) && method === 'POST') return 'GET';
@@ -76,9 +80,17 @@ export function replayingHops(inner: RealmTransport, heldMs = HELD_MS): RealmTra
     const [hop, ...rest] = chain.hops;
     const location = hop && header(hop.headers, 'location');
     if (!hop || location === undefined) return chain.final;
-    const next = new URL(location, hop.url).href;
+    const target = new URL(location, hop.url);
+    target.hash = '';
     const method = followedWith(hop.status, chain.method);
-    hold(keyOf(chain.owner, method, next), { ...chain, method, hops: rest });
+    const away = target.origin !== new URL(hop.url).origin;
+    const print = away ? unauthorized(chain.fingerprint) : chain.fingerprint;
+    hold(keyOf(chain.owner, method, target.href), {
+      ...chain,
+      method,
+      fingerprint: print,
+      hops: rest,
+    });
     return bodiless(hop);
   };
 
