@@ -42,10 +42,42 @@ const ERRNO_BY_DOM_ERROR: Readonly<Record<string, string>> = {
   NotAllowedError: 'EACCES',
 };
 
-function translate(err: unknown, path: string): Error {
+export type OpfsOp = 'lookup' | 'read' | 'write' | 'commit' | 'sidecar';
+
+const reported = new Set<string>();
+
+export function translate(err: unknown, path: string, op: OpfsOp = 'lookup', mapped = true): Error {
   if (typeof (err as { code?: unknown })?.code === 'string') return err as Error;
-  const name = (err as { name?: unknown })?.name;
-  return fsError((typeof name === 'string' && ERRNO_BY_DOM_ERROR[name]) || 'EIO', path);
+  const raw = (err as { name?: unknown })?.name;
+  const name = typeof raw === 'string' ? raw : 'Error';
+  const code = (mapped && ERRNO_BY_DOM_ERROR[name]) || 'EIO';
+  const error = Object.assign(fsError(code, path), { domName: name, op, cause: err });
+  if (code !== 'EIO') return error;
+  const detail = (err as { message?: unknown })?.message;
+  error.message += ` (OPFS ${op}: ${name}${typeof detail === 'string' && detail ? `: ${detail}` : ''})`;
+  if (!reported.has(`${name}/${op}`)) {
+    reported.add(`${name}/${op}`);
+    console.warn(
+      `slicc-kernel: ${error.message}, reported as EIO; logged once per error and operation`
+    );
+  }
+  return error;
+}
+
+const META_OPS = ['get', 'update', 'move', 'remove', 'links', 'under', 'all'] as const;
+
+function sidecar(meta: MetaStore): MetaStore {
+  const pathOf = ([first]: unknown[]) =>
+    [first, '/'].flat().find((p): p is string => typeof p === 'string') as string;
+  const guarded =
+    (op: (typeof META_OPS)[number]) =>
+    (...args: unknown[]) =>
+      (meta[op] as (...args: unknown[]) => Promise<unknown>)
+        .apply(meta, args)
+        .catch((err: unknown) => {
+          throw translate(err, pathOf(args), 'sidecar', false);
+        });
+  return Object.fromEntries(META_OPS.map((op) => [op, guarded(op)])) as unknown as MetaStore;
 }
 
 function missing(err: unknown): boolean {
@@ -178,7 +210,7 @@ export class OpfsFs implements KernelFs {
     options: { ranged?: boolean } = {}
   ) {
     this.root = root;
-    this.meta = meta;
+    this.meta = sidecar(meta);
     this.ranged = options.ranged === true;
     this.channel = channel === undefined ? undefined : new BroadcastChannel(channel);
     if (this.channel) {
@@ -538,7 +570,8 @@ export class OpfsFs implements KernelFs {
       } catch (err) {
         const name = (err as { name?: unknown })?.name;
         const again = name === 'NotReadableError' || (locks && LOCKED.has(name as string));
-        if (!again || attempt >= READ_ATTEMPTS) throw translate(err, path);
+        if (!again || attempt >= READ_ATTEMPTS)
+          throw translate(err, path, locks ? 'write' : 'read');
         await new Promise((resolve) => setTimeout(resolve, attempt * 10));
       }
     }
@@ -588,9 +621,19 @@ export class OpfsFs implements KernelFs {
     );
     return {
       write: (at, bytes) =>
-        writable.write({ type: 'write', position: at, data: bytes as Uint8Array<ArrayBuffer> }),
-      truncate: (size) => writable.truncate(size),
-      close: () => writable.close(),
+        writable
+          .write({ type: 'write', position: at, data: bytes as Uint8Array<ArrayBuffer> })
+          .catch((err: unknown) => {
+            throw translate(err, path, 'write', false);
+          }),
+      truncate: (size) =>
+        writable.truncate(size).catch((err: unknown) => {
+          throw translate(err, path, 'write', false);
+        }),
+      close: () =>
+        writable.close().catch((err: unknown) => {
+          throw translate(err, path, 'commit', false);
+        }),
     };
   }
 
@@ -628,9 +671,13 @@ export class OpfsFs implements KernelFs {
     const [file, existed, target] = await this.fileFor(path);
     if (!existed) await this.stampNew(target, owner, false);
     if (!existed && content.length === 0) return;
-    const writable = await file.createWritable();
-    await writable.write(content as FileSystemWriteChunkType);
-    await writable.close();
+    try {
+      const writable = await file.createWritable();
+      await writable.write(content as FileSystemWriteChunkType);
+      await writable.close();
+    } catch (err) {
+      throw translate(err, path, 'commit', false);
+    }
   }
 
   private async listing(path: string): Promise<[string, Array<[string, Handle | MetaEntry]>]> {
