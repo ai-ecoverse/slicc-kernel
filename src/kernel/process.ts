@@ -453,7 +453,7 @@ export class WasmProcess {
 
   private stops = 0;
   private owed = false;
-  private waits = 0;
+  private readonly waiting = new Set<AbortSignal>();
   private resumed: Promise<void> = Promise.resolve();
   private wake: (() => void) | undefined;
   private readonly stateListeners: StateListener[] = [];
@@ -528,7 +528,8 @@ export class WasmProcess {
       return 'terminate';
     }
     this.options.onPending?.(sig);
-    if (this.options.jobs?.keyboard && KEYBOARD.has(sig)) this.owed = true;
+    if (this.options.jobs?.keyboard && KEYBOARD.has(sig) && this.waiting.size === 0)
+      this.owed = true;
     const blocked = this.interrupt;
     this.interrupt = new AbortController();
     blocked.abort();
@@ -579,10 +580,15 @@ export class WasmProcess {
       await this.resumed;
       if (this.dying) return DYING;
       const stops = this.stops;
-      const waits = this.waits;
-      const result = await this.dispatch(req, cancelled);
+      const scope = new AbortController();
+      const forward = () => scope.abort();
+      if (cancelled?.aborted) scope.abort();
+      cancelled?.addEventListener('abort', forward, { once: true });
+      const result = await this.dispatch(req, scope.signal).finally(() => {
+        cancelled?.removeEventListener('abort', forward);
+        this.waiting.delete(scope.signal);
+      });
       if (this.dying) return DYING;
-      if (!result.ok && result.errno === 'EINTR' && this.waits !== waits) this.owed = false;
 
       const restart = !result.ok && result.errno === 'EINTR' && this.stops !== stops;
       if (restart && !this.options.hasPending?.()) continue;
@@ -605,7 +611,7 @@ export class WasmProcess {
     this.wake?.();
   }
 
-  private async dispatch(req: WasmSyscall, cancelled?: AbortSignal): Promise<SyncFsResult> {
+  private async dispatch(req: WasmSyscall, cancelled: AbortSignal): Promise<SyncFsResult> {
     try {
       if (isFdSyscall(req)) return await this.fdSyscall(req, cancelled);
       if (isTtySyscall(req)) return this.ttySyscall(req);
@@ -642,17 +648,41 @@ export class WasmProcess {
     if (restart && this.options.hasPending?.()) throw new KernelError('EINTR');
   }
 
-  private blockingSignal(cancelled?: AbortSignal, owing = true): AbortSignal {
-    if (owing) this.waits++;
-    if (this.options.hasPending?.() || cancelled?.aborted || (owing && this.owed)) {
+  private async procWait(
+    req: Extract<WasmSyscall, { op: 'proc-wait' }>,
+    cancelled: AbortSignal
+  ): Promise<[number, number]> {
+    const flags = {
+      untraced: req.untraced,
+      continued: req.continued,
+      inGroup: this.waitGroup(req.pid),
+    };
+    if (this.owed && !req.nohang) {
+      const now = await this.children.wait(req.pid, true, this.interrupt.signal, flags);
+      if (now[0] !== 0) return now;
+    }
+    const signal = req.nohang ? this.interrupt.signal : this.blockingSignal(cancelled);
+    const waited = await this.children.wait(req.pid, req.nohang, signal, flags);
+    return waited;
+  }
+
+  private blockingSignal(cancelled: AbortSignal, owing = true): AbortSignal {
+    if (owing && this.owed) {
+      this.owed = false;
       throw new KernelError('EINTR');
     }
-    return cancelled ? AbortSignal.any([this.interrupt.signal, cancelled]) : this.interrupt.signal;
+    if (this.options.hasPending?.() || cancelled.aborted) throw new KernelError('EINTR');
+    if (owing) this.waiting.add(cancelled);
+    return this.cancelSignal(cancelled);
+  }
+
+  private cancelSignal(cancelled: AbortSignal): AbortSignal {
+    return AbortSignal.any([this.interrupt.signal, cancelled]);
   }
 
   private async read(
     req: Extract<WasmSyscall, { op: 'fd-read' }>,
-    cancelled?: AbortSignal
+    cancelled: AbortSignal
   ): Promise<Uint8Array> {
     const file = this.fds.get(req.fd).file;
     const read = req.peek ? file.peek : file.read;
@@ -671,7 +701,7 @@ export class WasmProcess {
     fd: number,
     body: Uint8Array,
     nonblock = false,
-    cancelled?: AbortSignal
+    cancelled: AbortSignal
   ): Promise<number> {
     const file = this.fds.get(fd).file;
     if (!file.write) throw new KernelError('EBADF');
@@ -684,7 +714,7 @@ export class WasmProcess {
 
     return file.write(
       body,
-      this.options.hasPending?.() ? AbortSignal.abort() : this.interrupt.signal
+      this.options.hasPending?.() ? AbortSignal.abort() : this.cancelSignal(cancelled)
     );
   }
 
@@ -772,7 +802,7 @@ export class WasmProcess {
     );
   }
 
-  private async fdSyscall(req: FdSyscall, cancelled?: AbortSignal): Promise<SyncFsResult> {
+  private async fdSyscall(req: FdSyscall, cancelled: AbortSignal): Promise<SyncFsResult> {
     if (isVfsSyscall(req)) return this.vfsSyscall(req);
     switch (req.op) {
       case 'fd-read':
@@ -850,6 +880,11 @@ export class WasmProcess {
         return { ok: true, kind: 'json', json: this.options.jobs?.terminalNames() ?? [] };
       case 'fd-select': {
         const { read, write, timeoutMs } = req;
+        if (this.owed && timeoutMs !== 0) {
+          const ready = await selectFds(this.fds, read, write, 0, this.interrupt.signal);
+          if (ready.read.length + ready.write.length > 0)
+            return { ok: true, kind: 'json', json: ready };
+        }
         const signal = this.blockingSignal(cancelled, timeoutMs !== 0);
         const selected = await selectFds(this.fds, read, write, timeoutMs, signal);
         return { ok: true, kind: 'json', json: selected };
@@ -1041,7 +1076,7 @@ export class WasmProcess {
     return http.syscall(req);
   }
 
-  private socketSyscall(req: SocketSyscall, cancelled?: AbortSignal): Promise<SyncFsResult> {
+  private socketSyscall(req: SocketSyscall, cancelled: AbortSignal): Promise<SyncFsResult> {
     this.net ??= this.options.net ?? new LoopbackNet();
     const resolver = this.options.resolver ?? HOSTS_ONLY;
     return socketSyscall(req, {
@@ -1065,7 +1100,7 @@ export class WasmProcess {
       WasmSyscall,
       FdSyscall | TtySyscall | JobSyscall | SocketSyscall | HttpSyscall | PtySyscall | HostSyscall
     >,
-    cancelled?: AbortSignal
+    cancelled: AbortSignal
   ): Promise<SyncFsResult> {
     switch (req.op) {
       case 'proc-fork':
@@ -1074,16 +1109,8 @@ export class WasmProcess {
       case 'proc-spawn':
         this.refuseIfPending(req.restart);
         return { ok: true, kind: 'json', json: await this.spawn(req) };
-      case 'proc-wait': {
-        const signal = req.nohang ? this.interrupt.signal : this.blockingSignal(cancelled);
-        const flags = {
-          untraced: req.untraced,
-          continued: req.continued,
-          inGroup: this.waitGroup(req.pid),
-        };
-        const waited = await this.children.wait(req.pid, req.nohang, signal, flags);
-        return { ok: true, kind: 'json', json: waited };
-      }
+      case 'proc-wait':
+        return { ok: true, kind: 'json', json: await this.procWait(req, cancelled) };
       case 'proc-identity':
         return { ok: true, kind: 'json', json: (await this.options.identity?.()) ?? null };
       case 'proc-exec': {
@@ -1117,7 +1144,7 @@ export class WasmProcess {
         return { ok: true, kind: 'json', json: this.options.mounts?.() ?? [] };
       case 'mount':
       case 'umount':
-        return this.mountSyscall(req);
+        return this.mountSyscall(req, cancelled);
       case 'proc-alarm':
         this.setAlarm(req.sig, req.firstMs ?? req.ms, req.repeat ? req.ms : 0, req.timer);
         return { ok: true, kind: 'void' };
@@ -1166,7 +1193,8 @@ export class WasmProcess {
   }
 
   private async mountSyscall(
-    req: Extract<WasmSyscall, { op: 'mount' | 'umount' }>
+    req: Extract<WasmSyscall, { op: 'mount' | 'umount' }>,
+    cancelled: AbortSignal
   ): Promise<SyncFsResult> {
     const { mount, umount } = this.options;
     if (!mount || !umount) throw new KernelError('ENOSYS');
@@ -1174,7 +1202,7 @@ export class WasmProcess {
       if (req.op === 'umount') await umount(req.target, req.flags);
       else {
         const { source, target, type, flags, data } = req;
-        const signal = this.blockingSignal();
+        const signal = this.blockingSignal(cancelled);
         await Promise.race([mount({ source, target, type, flags, data }, signal), aborted(signal)]);
       }
     } catch (err) {
@@ -1185,7 +1213,7 @@ export class WasmProcess {
     return { ok: true, kind: 'void' };
   }
 
-  private pause(cancelled?: AbortSignal): Promise<never> {
+  private pause(cancelled: AbortSignal): Promise<never> {
     return aborted(this.blockingSignal(cancelled));
   }
 
