@@ -34,6 +34,7 @@ export interface HostfsTransport {
   readonly token: string;
   readonly maxIo: number;
   readonly gone?: boolean;
+  retire?(why: string): void;
   call<T>(op: string, body?: Record<string, unknown>, handle?: boolean): Promise<T>;
   read(fh: number, offset: number, size: number, ifMatch?: string): Promise<Uint8Array>;
   write(fh: number, offset: number, bytes: Uint8Array): Promise<void>;
@@ -82,16 +83,30 @@ export class HostfsClient implements HostfsTransport {
     return this.capabilities.maxIo ?? HOSTFS_IO;
   }
 
+  private retired: string | undefined;
+  private readonly stop = new AbortController();
+
+  get gone(): boolean {
+    return this.retired !== undefined;
+  }
+
+  retire(why: string): void {
+    this.retired ??= why;
+    this.stop.abort();
+  }
+
   private async send(
     path: string,
     init: RequestInit,
     handle = false,
     retried = false
   ): Promise<Response> {
+    if (this.retired) throw fsError('ENOTCONN', this.retired);
     let response: Response;
     try {
       response = await this.fetch(`${this.grant.url}${path}`, {
         ...init,
+        signal: init.signal ? AbortSignal.any([init.signal, this.stop.signal]) : this.stop.signal,
         credentials: 'omit',
         headers: {
           ...(init.headers as Record<string, string>),
@@ -452,19 +467,26 @@ export interface PortLiveness {
   deadMs?: number;
 }
 
-export function bounded(handlers: MediumHandlers, ms: number): MediumHandlers {
+export function bounded(
+  handlers: MediumHandlers,
+  ms: number,
+  transport?: Pick<HostfsTransport, 'retire'>
+): MediumHandlers {
   const out: Record<string, unknown> = {};
   for (const [name, fn] of Object.entries(handlers)) {
     out[name] = (...args: unknown[]) =>
       new Promise((resolve, reject) => {
-        const timer = setTimeout(
-          () =>
-            reject(fsError('ENOTCONN', `the host folder did not answer ${name} within ${ms} ms`)),
-          ms
-        );
+        let late = false;
+        const timer = setTimeout(() => {
+          late = true;
+          const why = `the host folder did not answer ${name} within ${ms} ms`;
+          transport?.retire?.(why);
+          reject(fsError('ENOTCONN', why));
+        }, ms);
         (fn as (...a: unknown[]) => Promise<unknown>)(...args).then(
           (value) => {
             clearTimeout(timer);
+            if (late && name === 'open') void handlers.release(value as number).catch(() => {});
             resolve(value);
           },
           (err) => {
@@ -528,6 +550,10 @@ export class PortTransport implements HostfsTransport {
 
   get gone(): boolean {
     return this.dead !== undefined;
+  }
+
+  retire(why: string): void {
+    this.fail(why);
   }
 
   private ping(): void {
@@ -770,7 +796,7 @@ export async function openHostfs(
       connect: () => connect(spec.source, { readonly }),
       up(client) {
         active = client;
-        slot.insert(client, bounded(handlers, timing.callMs ?? HOSTFS_CALL_MS));
+        slot.insert(client, bounded(handlers, timing.callMs ?? HOSTFS_CALL_MS, client));
         served.invalidate(true);
       },
       event: (event) => served.invalidate(invalidation(event)),
