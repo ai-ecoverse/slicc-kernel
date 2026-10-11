@@ -636,6 +636,7 @@ export class WasiHost {
     if (e.type === 'device') {
       if (e.access === 'read') throw new WasiError('EBADF');
       if (e.device === 'full' && data.length > 0) throw new WasiError('ENOSPC');
+      this.interrupted?.();
       return data.length;
     }
     return this.file(fd, 'write').write(data);
@@ -648,6 +649,7 @@ export class WasiHost {
     }
     if (e.type === 'device') {
       if (e.access === 'write') throw new WasiError('EBADF');
+      this.interrupted?.();
       if (e.device === 'null') return new Uint8Array(0);
       const out = new Uint8Array(Math.min(max, 65536));
       return e.device === 'urandom' ? crypto.getRandomValues(out) : out;
