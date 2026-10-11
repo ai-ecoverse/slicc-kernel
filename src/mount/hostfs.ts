@@ -35,7 +35,7 @@ export interface HostfsTransport {
   readonly maxIo: number;
   readonly gone?: boolean;
   retire?(why: string): void;
-  cleanup?(op: string, body: Record<string, unknown>): Promise<void>;
+  cleanup?(op: string, body: Record<string, unknown>): Promise<unknown>;
   call<T>(op: string, body?: Record<string, unknown>, handle?: boolean): Promise<T>;
   read(fh: number, offset: number, size: number, ifMatch?: string): Promise<Uint8Array>;
   write(fh: number, offset: number, bytes: Uint8Array): Promise<void>;
@@ -150,7 +150,7 @@ export class HostfsClient implements HostfsTransport {
     return (await response.json()) as T;
   }
 
-  async cleanup(op: string, body: Record<string, unknown>): Promise<void> {
+  async cleanup(op: string, body: Record<string, unknown>): Promise<unknown> {
     const response = await this.send(
       '/api/hostfs',
       {
@@ -162,7 +162,7 @@ export class HostfsClient implements HostfsTransport {
       false,
       true
     );
-    await response.body?.cancel();
+    return response.json().catch(() => null);
   }
 
   async read(fh: number, offset: number, size: number, ifMatch?: string): Promise<Uint8Array> {
@@ -231,10 +231,17 @@ interface Remote {
   token: string;
   fh: number;
   etag: string | undefined;
-  restore: { path: string; mode: number } | undefined;
+  restore: Restore | undefined;
 }
 
-export function hostfsHandlers(current: () => HostfsTransport): MediumHandlers {
+type Restore = { path: string; mode: number; was: DriverAttr };
+
+export const RESTORE_AGAIN_MS = 30_000;
+
+export function hostfsHandlers(
+  current: () => HostfsTransport,
+  againMs = RESTORE_AGAIN_MS
+): MediumHandlers {
   const handles = new Map<number, Remote>();
   let nextFh = 0;
   const fresh = (remote: Remote): Remote => {
@@ -247,10 +254,23 @@ export function hostfsHandlers(current: () => HostfsTransport): MediumHandlers {
     return fresh(remote);
   };
   const call = <T>(op: string, body: Record<string, unknown> = {}) => current().call<T>(op, body);
-  const settle = (client: HostfsTransport, restore: { path: string; mode: number }) =>
+  const same = (was: DriverAttr, mode: number, seen: DriverAttr | null) =>
+    seen?.mode === (mode | 0o200) &&
+    (was.ino !== undefined && seen.ino !== undefined
+      ? seen.ino === was.ino
+      : seen.size === was.size && seen.mtime === was.mtime);
+  const settle = (client: HostfsTransport, { was, ...restore }: Restore) =>
     client.call('setattr', restore).catch((err: unknown) => {
       if (!client.gone || !client.cleanup) throw err;
       void client.cleanup('setattr', restore).catch(() => {});
+      const timer = setTimeout(async () => {
+        const seen = (await client
+          .cleanup?.('stat', { path: restore.path })
+          .catch(() => null)) as DriverAttr | null;
+        if (same(was, restore.mode, seen))
+          void client.cleanup?.('setattr', restore).catch(() => {});
+      }, againMs) as { unref?: () => void };
+      timer.unref?.();
     });
   async function writable(client: HostfsTransport, path: string, flags: OpenFlags) {
     const { ifMatch: _, ...asked } = flags;
@@ -260,9 +280,10 @@ export function hostfsHandlers(current: () => HostfsTransport): MediumHandlers {
       return { opened: await opening(), restore: undefined };
     } catch (err) {
       if (!flags.write || codeOf(err) !== 'EACCES') throw err;
-      const mode = (await client.call<DriverAttr>('stat', { path: rel(path) })).mode ?? 0;
+      const was = await client.call<DriverAttr>('stat', { path: rel(path) });
+      const mode = was.mode ?? 0;
       if (mode & 0o200) throw err;
-      const restore = { path: rel(path), mode };
+      const restore = { path: rel(path), mode, was };
       const opened = await client
         .call('setattr', { path: rel(path), mode: mode | 0o200 })
         .then(opening)
@@ -531,7 +552,7 @@ export function timed(transport: HostfsTransport, ms: number): HostfsTransport {
     });
   const cleanup = async (op: string, body: Record<string, unknown>, skip?: Promise<unknown>) => {
     await Promise.allSettled([...inflight].filter((work) => work !== skip));
-    await transport.cleanup?.(op, body);
+    return await transport.cleanup?.(op, body);
   };
   const release = (opened: unknown) => {
     const fh = (opened as { fh?: unknown } | null)?.fh;
