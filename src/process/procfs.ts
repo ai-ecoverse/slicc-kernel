@@ -7,7 +7,6 @@ const DIR_MODE = 0o40555;
 const FILE_MODE = 0o100444;
 const LINK_MODE = 0o120777;
 const ENOENT = 44;
-const ESRCH = 71;
 const EINVAL = 28;
 const UID = 1000;
 const KIB = 1024;
@@ -248,7 +247,30 @@ function attr(node: ProcNode): object {
   };
 }
 
-export function useProcfs(Fs: ProcFs, sys: ProcSys, pid: number, memory = memorySource()): void {
+export const LISTED_TTL_MS = 1000;
+
+function listing(clock: () => number = Date.now) {
+  let pids = new Set<number>();
+  let until = 0;
+  return {
+    set(next: readonly number[]): void {
+      pids = new Set(next);
+      until = clock() + LISTED_TTL_MS;
+    },
+    take(target: number): boolean {
+      if (clock() > until) pids.clear();
+      return pids.delete(target);
+    },
+  };
+}
+
+export function useProcfs(
+  Fs: ProcFs,
+  sys: ProcSys,
+  pid: number,
+  memory = memorySource(),
+  clock: () => number = Date.now
+): void {
   const { lookupPath, createNode, hashRemoveNode } = Fs;
   const procList = sys.procList?.bind(sys);
   if (!lookupPath || !createNode || !hashRemoveNode || !procList) return;
@@ -311,7 +333,7 @@ export function useProcfs(Fs: ProcFs, sys: ProcSys, pid: number, memory = memory
     () => {
       const listing = procList();
       const info = find(listing.processes, target, own);
-      if (!info) throw error(ESRCH);
+      if (!info) throw error();
       return pidFile(name, info, listing.boot);
     };
   const pidNames = (names: string[]) => [...new Set([...names, ...PID_FILES])];
@@ -324,6 +346,7 @@ export function useProcfs(Fs: ProcFs, sys: ProcSys, pid: number, memory = memory
     dir.node_ops.readdir = () => ['.', '..', ...PID_FILES];
     return dir;
   };
+  const listed = listing(clock);
   const procOps = proc.node_ops;
   const lookup = procOps.lookup?.bind(procOps);
   const readdir = procOps.readdir?.bind(procOps);
@@ -331,7 +354,7 @@ export function useProcfs(Fs: ProcFs, sys: ProcSys, pid: number, memory = memory
     ...procOps,
     lookup: (parent, name) => {
       if (/^[1-9]\d*$/.test(name)) {
-        if (!infoOf(Number(name))) throw error();
+        if (!infoOf(Number(name)) && !listed.take(Number(name))) throw error();
         return pidDir(name, Number(name));
       }
       if (name === 'mounts') return file(parent, name, () => mountTable(sys.mountList?.() ?? []));
@@ -346,7 +369,9 @@ export function useProcfs(Fs: ProcFs, sys: ProcSys, pid: number, memory = memory
     readdir: (node) => {
       const names = new Set(readdir ? readdir(node) : ['.', '..']);
       for (const name of [...SYSTEM_FILES, 'mounts']) names.add(name);
-      for (const p of procList().processes) names.add(String(p.pid));
+      const pids = procList().processes.map((p) => p.pid);
+      listed.set(pids);
+      for (const p of pids) names.add(String(p));
       return [...names];
     },
   };
