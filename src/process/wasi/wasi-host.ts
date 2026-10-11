@@ -95,11 +95,18 @@ interface Filestat {
   mtimeNs: bigint;
 }
 
-function linkedElsewhere(fs: Pick<SyncFsPosixBridge, 'lstat'>, path: string): boolean {
+function linkedOf(st: SyncFsBridgeStat): SyncFsBridgeStat | undefined {
+  return (st.nlink ?? 1) > 1 ? st : undefined;
+}
+
+function linkedElsewhere(
+  fs: Pick<SyncFsPosixBridge, 'lstat'>,
+  path: string
+): SyncFsBridgeStat | undefined {
   try {
-    return (fs.lstat(path).nlink ?? 1) > 1;
+    return linkedOf(fs.lstat(path));
   } catch {
-    return false;
+    return undefined;
   }
 }
 
@@ -492,7 +499,7 @@ export class WasiHost {
         const path = at(dirfd, p, l);
         const st = o.fs.lstat(path);
         if (st.isDirectory) throw new WasiError('EISDIR');
-        const linked = (st.nlink ?? 1) > 1;
+        const linked = linkedOf(st);
         fds.unlinking(path, linked);
         o.fs.unlink(path);
         fds.unlinked(path, linked);
@@ -501,7 +508,7 @@ export class WasiHost {
         const from = at(fd, p, l);
         const to = at(fd2, p2, l2);
         fds.flushPath(from);
-        const replaced = fds.holdsUnder(to) && linkedElsewhere(o.fs, to);
+        const replaced = fds.holdsUnder(to) ? linkedElsewhere(o.fs, to) : undefined;
         o.fs.rename(from, to);
         fds.renamed(from, to, replaced);
       },

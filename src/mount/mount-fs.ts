@@ -289,6 +289,7 @@ function statOf(attr: DriverAttr, path: string, mount: Mount): FsStat {
     ...(readonly(mount) ? { readonly: true } : {}),
     ...(mount.maxFile > 0 ? { maxFile: mount.maxFile } : {}),
     ...(mount.caps.ranges ? { ranged: true } : {}),
+    ...(mount.caps.links ? { linkable: true } : {}),
     ...(attr.etag !== undefined ? { version: attr.etag } : {}),
   };
 }

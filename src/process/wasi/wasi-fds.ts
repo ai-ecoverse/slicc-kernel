@@ -465,17 +465,21 @@ export class WasiFds {
   }
 
   private sharing(path: string, st: SyncFsBridgeStat | undefined): FileBuffer | undefined {
-    const id = this.identity(st);
-    if (id === undefined) return undefined;
+    if (st?.ino === undefined) return undefined;
+    const id = `${st.dev ?? 0}:${st.ino}`;
+    if (!this.byId.has(id) && this.identity(st) !== undefined) this.learn();
+    const buffer = this.byId.get(id);
+    if (!buffer) return undefined;
+    this.buffers.set(path, buffer);
+    return buffer;
+  }
+
+  private learn(): void {
     for (const [p, buffer] of this.buffers) {
       if (this.ids.has(buffer) || buffer.isOrphan()) continue;
       const known = this.identity(this.statOrMissing(p));
       if (known !== undefined) this.know(buffer, known);
     }
-    const buffer = this.byId.get(id);
-    if (!buffer) return undefined;
-    this.buffers.set(path, buffer);
-    return buffer;
   }
 
   linked(from: string, to: string): void {
@@ -525,14 +529,14 @@ export class WasiFds {
     return false;
   }
 
-  unlinking(path: string, linked = false): void {
+  unlinking(path: string, linked?: SyncFsBridgeStat): void {
     const buffer = this.buffers.get(path);
     if (buffer && this.survives(buffer, linked)) buffer.flush();
     else buffer?.keep();
     if (this.shared) this.kernel.call({ op: 'fd-path-unlinking', path });
   }
 
-  unlinked(path: string, linked = false): void {
+  unlinked(path: string, linked?: SyncFsBridgeStat): void {
     if (this.shared) this.kernel.call({ op: 'fd-path-unlinked', path });
     const buffer = this.buffers.get(path);
     if (!buffer) return;
@@ -548,17 +552,21 @@ export class WasiFds {
     }
   }
 
-  private survives(buffer: FileBuffer, linked: boolean): boolean {
-    return linked && buffer.handle !== undefined;
+  private survives(buffer: FileBuffer, linked: SyncFsBridgeStat | undefined): boolean {
+    return linked !== undefined && buffer.handle !== undefined;
   }
 
-  private detach(buffer: FileBuffer, linked: boolean): void {
-    if (this.survives(buffer, linked)) return;
+  private detach(buffer: FileBuffer, linked: SyncFsBridgeStat | undefined): void {
+    if (this.survives(buffer, linked)) {
+      const id = this.identity(linked);
+      if (id !== undefined) this.know(buffer, id);
+      return;
+    }
     buffer.orphan();
     this.forget(buffer);
   }
 
-  renamed(from: string, to: string, replacedLinked = false): void {
+  renamed(from: string, to: string, replacedLinked?: SyncFsBridgeStat): void {
     if (from === to) return;
     if (this.shared) this.kernel.call({ op: 'fd-path-renamed', from, to });
     for (const e of this.table.values()) {

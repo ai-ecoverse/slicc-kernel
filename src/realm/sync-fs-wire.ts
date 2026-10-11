@@ -70,6 +70,7 @@ export interface SyncFsBridgeStat {
   readonly?: boolean;
   maxFile?: number;
   ranged?: boolean;
+  linkable?: boolean;
   version?: string;
   uid?: number;
   gid?: number;
@@ -151,6 +152,7 @@ export function parseSyncFsStat(json: unknown): SyncFsBridgeStat | null {
     ...(s.readonly === true ? { readonly: true } : {}),
     ...(typeof s.maxFile === 'number' ? { maxFile: s.maxFile } : {}),
     ...(s.ranged === true ? { ranged: true } : {}),
+    ...(s.linkable === true ? { linkable: true } : {}),
     ...(typeof s.version === 'string' ? { version: s.version } : {}),
     ...(typeof s.uid === 'number' ? { uid: s.uid } : {}),
     ...(typeof s.gid === 'number' ? { gid: s.gid } : {}),

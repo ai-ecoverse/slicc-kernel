@@ -40,6 +40,7 @@ export interface SyncFsStatJson {
   readonly?: boolean;
   maxFile?: number;
   ranged?: boolean;
+  linkable?: boolean;
   version?: string;
   uid?: number;
   gid?: number;
@@ -61,6 +62,7 @@ function statJson(s: FsStat): SyncFsStatJson {
     ...(s.readonly ? { readonly: true } : {}),
     ...(s.maxFile ? { maxFile: s.maxFile } : {}),
     ...(s.ranged ? { ranged: true } : {}),
+    ...(s.linkable ? { linkable: true } : {}),
     ...(s.version !== undefined ? { version: s.version } : {}),
     ...(s.uid !== undefined ? { uid: s.uid } : {}),
     ...(s.gid !== undefined ? { gid: s.gid } : {}),

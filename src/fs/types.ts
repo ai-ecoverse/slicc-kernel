@@ -13,6 +13,7 @@ export interface FsStat {
   readonly?: boolean;
   maxFile?: number;
   ranged?: boolean;
+  linkable?: boolean;
   version?: string;
   uid?: number;
   gid?: number;
