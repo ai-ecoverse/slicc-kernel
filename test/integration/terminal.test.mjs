@@ -10,8 +10,16 @@ async function terminal(chrome, t, argv, options) {
   const { page } = await booted(chrome, t);
   await page.evaluate((a, o) => window.terminal(a, o), argv, options);
   const screen = () => page.evaluate(() => window.screen.screen);
-  const until = async (text, from = 0) => {
-    await page.until((s, f) => window.screen.screen.slice(f).includes(s), text, from);
+  const until = async (text, from = 0, ms = undefined) => {
+    const shows = (s, f) => window.screen.screen.slice(f).includes(s);
+    try {
+      await (ms === undefined ? page.until(shows, text, from) : page.within(ms, shows, text, from));
+    } catch (err) {
+      const tail = JSON.stringify((await screen()).slice(-1500));
+      throw new Error(
+        `${err.message}\nwaiting for ${JSON.stringify(text)}; the screen ends with ${tail}`
+      );
+    }
   };
   const type = async (input, expected) => {
     const from = (await screen()).length;
@@ -22,7 +30,7 @@ async function terminal(chrome, t, argv, options) {
 }
 
 test('an interactive bash runs commands and reports its size, also after a resize', async (t) => {
-  const { page, until, type } = await terminal(chrome, t, ['bash', '-i'], {
+  const { page, screen, until, type } = await terminal(chrome, t, ['bash', '-i'], {
     cwd: '/home',
     cols: 80,
     rows: 24,
@@ -31,6 +39,16 @@ test('an interactive bash runs commands and reports its size, also after a resiz
   await type('echo "hi from $PWD"\r', 'hi from /home');
   await type('stty size\r', '24 80');
   await page.evaluate(() => window.term.resize(100, 30));
+  for (let tries = 1; ; tries++) {
+    const from = (await screen()).length;
+    await page.evaluate(() => window.term.write('echo "cols $COLUMNS"\r'));
+    try {
+      await until('cols 100', from, 2000);
+      break;
+    } catch (err) {
+      if (tries >= 20) throw err;
+    }
+  }
   await type('stty size; echo "cols $COLUMNS"\r', 'cols 100');
   assert.match(await page.evaluate(() => window.screen.screen), /30 100\r\ncols 100/);
   assert.deepEqual(page.errors, []);
@@ -86,7 +104,7 @@ test('closing a terminal hangs up its shell', async (t) => {
 });
 
 test('every terminal of a kernel gives its programs a working stdout, also after the first closes', async (t) => {
-  const { page, until, type } = await terminal(chrome, t, ['bash', '-i'], { cwd: '/home' });
+  const { page, screen, until, type } = await terminal(chrome, t, ['bash', '-i'], { cwd: '/home' });
   await until('$ ');
   await type('echo one > a.txt; cat a.txt; tty\r', 'one\r\n/dev/tty1');
   for (const name of ['/dev/tty2', '/dev/tty3']) {
