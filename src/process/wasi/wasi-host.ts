@@ -74,6 +74,7 @@ const NS_PER_MS = 1_000_000n;
 const AT_SYMLINK_NOFOLLOW = 1;
 
 const ROOT_IDS = Object.freeze({ uid: 0, gid: 0 });
+const GONE: ReadonlySet<string> = new Set(['ENOENT', 'ENOTDIR']);
 
 function idOf(value: number): number | undefined {
   return value >>> 0 === 0xffffffff ? undefined : value >>> 0;
@@ -250,7 +251,8 @@ export class WasiHost {
       if (e.type === 'kernel' && fds.kind(fd, e) !== 'file') return undefined;
       try {
         return this.o.fs.stat(pathOf(fd));
-      } catch {
+      } catch (err) {
+        if (!GONE.has((err as { code?: unknown })?.code as string)) throw err;
         return undefined;
       }
     };
