@@ -639,11 +639,25 @@ export class WasiFds {
   }
 
   private kernelHolds(path: string, st: SyncFsBridgeStat | undefined): boolean {
-    for (const e of this.table.values()) {
-      if (e.type !== 'kernel' || e.kind !== 'file') continue;
+    for (const [fd, e] of this.table) {
+      if (e.type !== 'kernel' || this.kind(fd, e) !== 'file') continue;
+      this.named(fd, e);
       if (e.path === path || (st?.ino !== undefined && e.ino === st.ino)) return true;
     }
     return false;
+  }
+
+  private readonly learned = new WeakSet<object>();
+
+  private named(fd: number, e: { path?: string; ino?: number }): void {
+    if (e.path !== undefined || this.learned.has(e)) return;
+    this.learned.add(e);
+    try {
+      const vfs = this.kernel.call({ op: 'fd-vfs-stat', fd }) as { path?: string; orphan?: true };
+      if (vfs.orphan || vfs.path === undefined) return;
+      e.path = vfs.path;
+      e.ino = this.inoOf(vfs.path);
+    } catch {}
   }
 
   private file(
