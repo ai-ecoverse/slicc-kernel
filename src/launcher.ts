@@ -101,7 +101,15 @@ import {
   type ImportedMemory,
   importedMemory,
 } from './process/wasi/wasi-module.ts';
-import { type Account, credOf, SYSTEM_PNPM_HOME, UserDb, userEnv } from './users.ts';
+import {
+  type Account,
+  credOf,
+  PASSWD,
+  pnpmHomeOf,
+  SYSTEM_PNPM_HOME,
+  UserDb,
+  userEnv,
+} from './users.ts';
 
 export interface LauncherOptions {
   unlinkOwner?: UnlinkOwner;
@@ -188,6 +196,11 @@ interface Compiled {
   module: WebAssembly.Module;
   memory?: ImportedMemory;
   foreign?: ForeignResults | undefined;
+}
+
+interface UserScopes {
+  byUid: Map<number, string>;
+  byBin: Map<string, string>;
 }
 
 interface Planned {
@@ -323,8 +336,11 @@ export class Launcher {
   private readonly createWorker: () => WasmWorkerLike;
   private readonly modulesDir: string;
   private readonly env: Record<string, string>;
-  private catalog: Promise<Map<string, Command>> | undefined;
-  private binfmts: Promise<Map<string, string>> | undefined;
+  private readonly catalogs = new Map<string, Promise<Map<string, Command>>>();
+  private readonly ownCatalogs = new Map<string, Promise<ReadonlySet<string>>>();
+  private readonly binfmts = new Map<string, Promise<Map<string, string>>>();
+  private scopes: Promise<UserScopes> | undefined;
+  private unwatchScopes: () => void = () => undefined;
   private readonly warned = new Set<string>();
   private readonly compiled = new Map<string, Promise<Compiled>>();
   private readonly processes = new Map<number, WasmProcessHandle>();
@@ -406,7 +422,11 @@ export class Launcher {
       ca: this.ca,
     });
     enableCdp(this.net, this.cdp);
-    const fs = withCommandDirs(this.base, async () => new Set((await this.commands()).keys()));
+    const fs = withCommandDirs(
+      this.base,
+      async () => new Set((await this.commands()).keys()),
+      (dir) => this.userCommandDir(dir)
+    );
     this.nodes = new VfsNodes(fs, (path) => this.released(path));
     this.nodes.keepsOnDisk = true;
     this.openFiles.add(this.nodes);
@@ -424,9 +444,12 @@ export class Launcher {
     this.fs = this.unlinked.wrap(keepingOpen(fs, this.nodes));
     this.users = new UserDb(this.fs);
     void this.unlinked.sweep('/');
-    this.watchers.watch([this.modulesDir, this.pnpmHome], { recursive: true }, () => {
-      this.catalog = undefined;
-      this.binfmts = undefined;
+    this.watchers.watch([this.modulesDir, this.pnpmHome], { recursive: true }, () =>
+      this.resetCatalogs()
+    );
+    this.watchers.watch([PASSWD], { recursive: false }, () => {
+      this.scopes = undefined;
+      this.resetCatalogs();
     });
   }
 
@@ -434,30 +457,95 @@ export class Launcher {
     this.routes.set(table);
   }
 
-  commands(): Promise<Map<string, Command>> {
-    this.catalog ??= this.roots().then((roots) => scanCommands(this.base, roots));
-    return this.catalog;
+  commands(scope = ''): Promise<Map<string, Command>> {
+    let found = this.catalogs.get(scope);
+    if (!found) {
+      found = this.roots(scope).then((roots) => scanCommands(this.base, roots));
+      this.catalogs.set(scope, found);
+    }
+    return found;
   }
 
-  private interpreters(): Promise<Map<string, string>> {
-    this.binfmts ??= this.roots().then((roots) =>
-      scanBinfmts(this.base, roots, (message) => {
-        if (this.warned.has(message)) return;
-        this.warned.add(message);
-        console.warn(message);
-      })
+  private ownCommands(scope: string): Promise<ReadonlySet<string>> {
+    let found = this.ownCatalogs.get(scope);
+    if (!found) {
+      found = pnpmGlobalRoots(this.base, scope)
+        .then((roots) => scanCommands(this.base, roots))
+        .then((commands) => new Set(commands.keys()));
+      this.ownCatalogs.set(scope, found);
+    }
+    return found;
+  }
+
+  private interpreters(scope = ''): Promise<Map<string, string>> {
+    let found = this.binfmts.get(scope);
+    if (!found) {
+      found = this.roots(scope).then((roots) =>
+        scanBinfmts(this.base, roots, (message) => {
+          if (this.warned.has(message)) return;
+          this.warned.add(message);
+          console.warn(message);
+        })
+      );
+      this.binfmts.set(scope, found);
+    }
+    return found;
+  }
+
+  private async roots(scope = ''): Promise<string[]> {
+    const system = [this.modulesDir, ...(await pnpmGlobalRoots(this.base, this.pnpmHome))];
+    return scope ? [...(await pnpmGlobalRoots(this.base, scope)), ...system] : system;
+  }
+
+  private resetCatalogs(): void {
+    this.catalogs.clear();
+    this.ownCatalogs.clear();
+    this.binfmts.clear();
+  }
+
+  private userScopes(): Promise<UserScopes> {
+    this.scopes ??= this.users.list().then(
+      (accounts) => {
+        const users = accounts.filter((account) => account.uid !== 0);
+        const homes = users.map((account) => pnpmHomeOf(account, this.pnpmHome));
+        this.unwatchScopes();
+        this.unwatchScopes = this.watchers.watch(homes, { recursive: true }, () =>
+          this.resetCatalogs()
+        );
+        return {
+          byUid: new Map(users.map((account, i) => [account.uid, homes[i] as string])),
+          byBin: new Map(homes.map((home) => [`${home}/bin`, home])),
+        };
+      },
+      () => ({ byUid: new Map(), byBin: new Map() })
     );
-    return this.binfmts;
+    return this.scopes;
   }
 
-  private async roots(): Promise<string[]> {
-    return [this.modulesDir, ...(await pnpmGlobalRoots(this.base, this.pnpmHome))];
+  private async userCommandDir(dir: string): Promise<ReadonlySet<string> | undefined> {
+    const scope = (await this.userScopes()).byBin.get(dir);
+    return scope === undefined ? undefined : this.ownCommands(scope);
   }
 
-  async resolve(file: string, argv0: string, cwd: string): Promise<Target | undefined> {
-    const name = COMMAND.exec(file)?.[1] ?? (file.includes('/') ? undefined : file);
-    if (name !== undefined) {
-      const command = (await this.commands()).get(name);
+  private async scopeOf(uid: number): Promise<string> {
+    return (await this.userScopes()).byUid.get(uid) ?? '';
+  }
+
+  private async commandAt(file: string, scope: string): Promise<Command | undefined> {
+    const system = COMMAND.exec(file)?.[1];
+    if (system !== undefined) return (await this.commands()).get(system);
+    if (!file.includes('/')) return (await this.commands(scope)).get(file);
+    const slash = file.lastIndexOf('/');
+    const owner = (await this.userScopes()).byBin.get(file.slice(0, slash));
+    if (owner === undefined || !(await this.ownCommands(owner)).has(file.slice(slash + 1))) {
+      return undefined;
+    }
+    return (await this.commands(owner)).get(file.slice(slash + 1));
+  }
+
+  async resolve(file: string, argv0: string, cwd: string, scope = ''): Promise<Target | undefined> {
+    if (!file.includes('/') || COMMAND.test(file)) {
+      const command = await this.commandAt(file, scope);
       return command && !command.script ? targetOf(command) : undefined;
     }
     const path = this.fs.resolvePath(cwd, file);
@@ -468,6 +556,8 @@ export class Launcher {
       const byPath = !COMMAND.test(path) && (await this.commands()).get(linked)?.argv0Path === true;
       return target && byPath ? { ...target, argv0: path } : target;
     }
+    const own = await this.commandAt(glue, scope);
+    if (own) return own.script ? undefined : targetOf(own);
     const head = await this.head(glue);
     if (!head) return undefined;
     if (isWasm(head)) {
@@ -492,10 +582,9 @@ export class Launcher {
     }
   }
 
-  private async scriptCommand(file: string): Promise<Command | undefined> {
-    const name = COMMAND.exec(file)?.[1] ?? (file.includes('/') ? undefined : file);
-    if (name === undefined) return undefined;
-    const command = (await this.commands()).get(name);
+  private async scriptCommand(file: string, cwd: string, scope: string) {
+    const at = file.includes('/') && !COMMAND.test(file) ? this.fs.resolvePath(cwd, file) : file;
+    const command = await this.commandAt(at, scope);
     return command?.script ? command : undefined;
   }
 
@@ -503,42 +592,52 @@ export class Launcher {
     file: string,
     argv: string[],
     cwd: string,
+    scope: string,
     depth = 0
   ): Promise<Planned | undefined> {
-    const command = await this.scriptCommand(file);
+    const command = await this.scriptCommand(file, cwd, scope);
     const script = command?.script ?? this.fs.resolvePath(cwd, file);
     const head = await this.head(script);
     if (!head) return undefined;
-    const binfmt = isWasm(head) ? undefined : binfmtOf(await this.interpreters(), script);
+    const binfmt = isWasm(head) ? undefined : binfmtOf(await this.interpreters(scope), script);
     const words = shebang(head) ?? (binfmt ? [binfmt] : undefined);
     if (!words) return undefined;
     if (baseName(words[0]) === 'env') words.shift();
     const [interp, ...rest] = words;
     const arg = rest.join(' ');
     const passed = [...(arg ? [arg] : []), command ? script : file, ...argv.slice(1)];
-    const found = interp ? await this.resolve(interp, interp, cwd) : undefined;
+    const found = interp ? await this.resolve(interp, interp, cwd, scope) : undefined;
     if (!found) {
-      if (!interp || depth >= MAX_INTERPRETERS || !(await this.scriptCommand(interp))) {
+      if (!interp || depth >= MAX_INTERPRETERS || !(await this.scriptCommand(interp, cwd, scope))) {
         return undefined;
       }
-      const inner = await this.interpreted(interp, [interp, ...passed], cwd, depth + 1);
+      const inner = await this.interpreted(interp, [interp, ...passed], cwd, scope, depth + 1);
       return inner && { ...inner, target: withScriptEnv(inner.target, command) };
     }
     const target = withScriptEnv(found, command);
     return { target, args: [...(target.prefix ?? []), ...passed] };
   }
 
-  private async plan(file: string, argv: string[], cwd: string): Promise<Planned | undefined> {
-    const direct = await this.resolve(file, argv[0] ?? file, cwd);
+  private async plan(
+    file: string,
+    argv: string[],
+    cwd: string,
+    scope: string
+  ): Promise<Planned | undefined> {
+    const direct = await this.resolve(file, argv[0] ?? file, cwd, scope);
     if (direct) return { target: direct, args: [...(direct.prefix ?? []), ...argv.slice(1)] };
-    return this.interpreted(file, argv, cwd);
+    return this.interpreted(file, argv, cwd, scope);
   }
 
-  private async unrunnable(file: string, cwd: string): Promise<'ENOEXEC' | 'ENOENT'> {
+  private async unrunnable(
+    file: string,
+    cwd: string,
+    scope: string
+  ): Promise<'ENOEXEC' | 'ENOENT'> {
     const path = this.fs.resolvePath(cwd, file);
     const head = await this.base.readFileBuffer(path).catch(() => null);
     if (!head || (head[0] === 0x23 && head[1] === 0x21)) return 'ENOENT';
-    return binfmtOf(await this.interpreters(), path) ? 'ENOENT' : 'ENOEXEC';
+    return binfmtOf(await this.interpreters(scope), path) ? 'ENOENT' : 'ENOEXEC';
   }
 
   private module(path: string): Promise<Compiled> {
@@ -763,10 +862,11 @@ export class Launcher {
 
   private spawner(ppid: number, report: (message: string) => void): ChildSpawner {
     return async (req, fds) => {
-      const planned = await this.plan(req.file, req.argv, req.cwd);
+      const scope = await this.scopeOf(this.credOf(ppid).euid);
+      const planned = await this.plan(req.file, req.argv, req.cwd, scope);
       if (!planned) {
         await fds.closeAll();
-        throw new SpawnError(await this.unrunnable(req.file, req.cwd));
+        throw new SpawnError(await this.unrunnable(req.file, req.cwd, scope));
       }
       const exec = req.exec ? { exec: true } : {};
       const deciding = req.exec ? undefined : this.undecided(ppid);
@@ -1112,19 +1212,19 @@ export class Launcher {
     };
   }
 
-  private async starting(argv: string[], dir: string | undefined) {
-    this.catalog = undefined;
-    this.binfmts = undefined;
+  private async starting(argv: string[], dir: string | undefined, account: Account) {
+    this.resetCatalogs();
+    const scope = account.uid === 0 ? '' : pnpmHomeOf(account, this.pnpmHome);
     const start = dir ?? '/';
     const cwd = await physicalPathAsync(this.base, start.startsWith('/') ? start : `/${start}`);
     const [file = ''] = argv;
     await this.base.mkdir(cwd, { recursive: true });
-    return { cwd, file, planned: await this.plan(file, argv, cwd) };
+    return { cwd, file, planned: await this.plan(file, argv, cwd, scope) };
   }
 
   async openTerminal(argv: string[], options: TerminalOptions): Promise<TerminalSession> {
     const account = await this.account(options.user);
-    const { cwd, file, planned } = await this.starting(argv, options.cwd);
+    const { cwd, file, planned } = await this.starting(argv, options.cwd, account);
     if (!planned) throw new Error(`${file}: command not found`);
     let leader = 0;
     const tty: KernelTty = new KernelTty(
@@ -1167,7 +1267,7 @@ export class Launcher {
 
   async run(argv: string[], options: RunOptions = {}): Promise<RunResult> {
     const account = await this.account(options.user);
-    const { cwd, file, planned } = await this.starting(argv, options.cwd);
+    const { cwd, file, planned } = await this.starting(argv, options.cwd, account);
     const env = this.environment(cwd, options.env, account);
     const out: Uint8Array[] = [];
     const err: Uint8Array[] = [];

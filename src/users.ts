@@ -16,6 +16,7 @@ const LAST_UID = 60000;
 const USERS_GROUP = 'users';
 const HOME_DIR = /^\/home\/[^/]+$/;
 export const SYSTEM_PNPM_HOME = '/usr/local/share/pnpm';
+export const PNPM_CONFIG = 'minimumReleaseAge: 1440\n';
 
 export interface Account {
   name: string;
@@ -119,6 +120,7 @@ export function userEnv(account: Account, system?: string): Record<string, strin
     USER: account.name,
     LOGNAME: account.name,
     PNPM_HOME: pnpm,
+    NPM_CONFIG_PREFIX: account.uid === 0 ? '/usr/local' : `${account.home}/.local`,
     PATH: `${pnpm}/bin:/usr/local/bin:/usr/bin:/bin`,
   };
 }
@@ -146,6 +148,19 @@ export class UserDb {
       passwd: parsePasswd(await this.read(PASSWD, DEFAULT_PASSWD)),
       group: parseGroup(await this.read(GROUP, DEFAULT_GROUP)),
     };
+  }
+
+  private async provision(row: PasswdRow): Promise<void> {
+    const pnpm = `${row.home}/.local/share/pnpm`;
+    if (!(await this.fs.exists(pnpm))) {
+      await this.fs.mkdir(pnpm, { recursive: true });
+      await this.fs.chmod(pnpm, row.name.startsWith('scoop-') ? 0o750 : 0o700);
+    }
+    const config = `${row.home}/.config/pnpm/config.yaml`;
+    if (!(await this.fs.exists(config))) {
+      await this.fs.mkdir(`${row.home}/.config/pnpm`, { recursive: true });
+      await this.fs.writeFile(config, PNPM_CONFIG);
+    }
   }
 
   private async commit(passwd: string, group: string, then?: () => Promise<void>): Promise<void> {
@@ -227,6 +242,7 @@ export class UserDb {
       const groups = parsed(group);
       const found = users.find((r) => r.name === name);
       if (found) {
+        if (found.uid >= FIRST_UID && found.uid <= LAST_UID) await this.provision(found);
         remember();
         return this.account(found, groups);
       }
@@ -245,6 +261,7 @@ export class UserDb {
       const fresh = !(await this.fs.exists(home));
       await this.fs.mkdir(home, { recursive: true });
       try {
+        await this.provision(row);
         await this.fs.mkdir('/etc', { recursive: true });
         await this.commit(formatPasswd(passwd), formatGroup(group));
       } catch (err) {

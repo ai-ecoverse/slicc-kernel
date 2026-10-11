@@ -35,18 +35,29 @@ export async function followLinks(fs: KernelFs, path: string): Promise<string> {
   return current;
 }
 
-export function withCommandDirs(fs: KernelFs, names: () => Promise<ReadonlySet<string>>): KernelFs {
+export type UserCommandDir = (dir: string) => Promise<ReadonlySet<string> | undefined>;
+
+export function withCommandDirs(
+  fs: KernelFs,
+  names: () => Promise<ReadonlySet<string>>,
+  userDir: UserCommandDir = async () => undefined
+): KernelFs {
   async function children(path: string): Promise<string[] | undefined> {
     if (path === '/') return ['bin', 'usr'];
     if (path === '/usr') return ['bin'];
     if (path === '/bin' || path === '/usr/bin') return [...(await names())];
-    return undefined;
+    const own = await userDir(path);
+    return own && [...own];
   }
 
   async function virtual(path: string): Promise<FsStat | undefined> {
     if (path === '/usr' || path === '/bin' || path === '/usr/bin') return synthetic(true, path);
     const name = COMMAND.exec(path)?.[1];
-    return name !== undefined && (await names()).has(name) ? synthetic(false, path) : undefined;
+    if (name !== undefined) return (await names()).has(name) ? synthetic(false, path) : undefined;
+    if ((await userDir(path))?.size) return synthetic(true, path);
+    const slash = path.lastIndexOf('/');
+    const own = await userDir(path.slice(0, slash));
+    return own?.has(path.slice(slash + 1)) ? synthetic(false, path) : undefined;
   }
 
   async function linked(path: string): Promise<FsStat | undefined> {
