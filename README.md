@@ -228,7 +228,8 @@ A WASI command can name an ES module of its package that provides imports of its
 - `spawn({ argv, env, cwd, stdin, stdout, stderr })` starts a command (resolved like `kernel.run`) as a child and returns `{ pid, stdin, stdout, stderr }`. `env` is the child's whole environment (the program's own by default), `cwd` the program's by default. Each stdio is `'inherit'` (the default: the program's own), `'null'`, or `'pipe'`: a kernel pipe whose end the result holds as a descriptor, read and written with `fd-read` (`{ op: 'fd-read', fd, max }`, an empty read at the end), `fd-write` (`{ op: 'fd-write', fd, body }`) and `fd-close`, through `syscall` or `async.submit`; the child's ends are closed in the program. A command that does not exist throws `ENOENT`;
 - `wait(pid)` blocks until a child ends and returns `{ status }`, or `{ status: 128 + signal, signal }` when a signal ended it; `kill(pid, sig)` signals it;
 - `async`: operations of the process that any of its threads can wait for: `submit(req)` runs a kernel syscall without blocking the caller, `resolve(value)` completes at once, `hold()` never completes, and each returns an id; `wait(timeoutMs?)` returns the id of a completed one (0 after the timeout, -1 once `close()` was called), `take(id)` its `{ value }` or `{ error }` (`undefined` while it is pending), and `cancel(id)` drops one;
-- `errno(err)`: the WASI errno of an error.
+- `errno(err)`: the WASI errno of an error;
+- `uid` and `gid`, with `users: 'report'` or `'enforce'`: the process's effective uid and gid, read again at each use, so they follow a `setresuid`. `fstat` then shows a file's real owner, and the process's ids for a descriptor with no path. With `users: 'off'`, `ctx` has no `uid` or `gid`, and `fstat` answers 1000 for both, as before.
 
 ### JS programs
 
