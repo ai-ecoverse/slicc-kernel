@@ -372,25 +372,35 @@ class StatCache {
   }
 
   changed(path: string | undefined, ino = 0): void {
+    const key = (ino % 4294967296) | 0;
     if (this.shared) {
-      const g = this.publish(
-        this.shared,
-        path === undefined ? 0 : pathHash(path),
-        (ino % 4294967296) | 0
-      );
+      const g = this.publish(this.shared, path === undefined ? 0 : pathHash(path), key);
       this.replay(g - 1);
       this.seen = g;
+      if (path !== undefined) this.drop(pathHash(path), key);
     }
     if (path === undefined) return;
     this.stats.delete(path);
     this.lstats.delete(path);
   }
 
-  mutated(paths: readonly string[]): void {
+  mutated(paths: readonly string[], ino = 0): void {
     this.clear();
     if (!this.shared) return;
-    for (const hash of paths.length > 0 ? paths.map(pathHash) : [0]) {
-      this.seen = this.publish(this.shared, hash, 0);
+    const key = (ino % 4294967296) | 0;
+    for (const [i, hash] of (paths.length > 0 ? paths.map(pathHash) : [0]).entries()) {
+      this.seen = this.publish(this.shared, hash, i === 0 ? key : 0);
+    }
+  }
+
+  inoOf(path: string, look: () => SyncFsBridgeStat): number {
+    if (!this.shared) return 0;
+    const hit = this.stats.get(path);
+    if (hit && 'ino' in hit && typeof hit.ino === 'number') return hit.ino;
+    try {
+      return look().ino ?? 0;
+    } catch {
+      return 0;
     }
   }
 
@@ -479,6 +489,14 @@ export function cachingBridge(
       cache.mutated(paths);
     }
   };
+  const rewriting = <T>(p: string, op: () => T, ...also: string[]): T => {
+    const ino = cache.inoOf(p, () => bridge.stat(p));
+    try {
+      return op();
+    } finally {
+      cache.mutated([p, ...also], ino);
+    }
+  };
   const entry = (p: string) => [p, p.slice(0, p.lastIndexOf('/')) || '/'];
   const isDir = (p: string) => {
     try {
@@ -512,7 +530,8 @@ export function cachingBridge(
         return false;
       }
     },
-    writeFile: (p, bytes, open) => mutating(() => bridge.writeFile(p, bytes, open), ...entry(p)),
+    writeFile: (p, bytes, open) =>
+      rewriting(p, () => bridge.writeFile(p, bytes, open), ...entry(p).slice(1)),
     mkdir: (p) => mutating(() => bridge.mkdir(p), ...entry(p)),
     rm: (p) => {
       const tree = isDir(p);
@@ -528,12 +547,12 @@ export function cachingBridge(
     unlink: (p) => mutating(() => bridge.unlink(p), ...entry(p)),
     rmdir: (p) => mutating(() => bridge.rmdir(p), ...entry(p)),
     symlink: (target, link) => mutating(() => bridge.symlink(target, link), ...entry(link)),
-    chmod: (p, mode) => mutating(() => bridge.chmod(p, mode), p),
-    utimes: (p, a, m) => mutating(() => bridge.utimes(p, a, m), p),
+    chmod: (p, mode) => rewriting(p, () => bridge.chmod(p, mode)),
+    utimes: (p, a, m) => rewriting(p, () => bridge.utimes(p, a, m)),
     lutimes: (p, a, m) => mutating(() => bridge.lutimes(p, a, m), p),
     ...(bridge.hold ? { hold: bridge.hold.bind(bridge) } : {}),
     ...(bridge.kept ? { kept: bridge.kept.bind(bridge) } : {}),
-    ...(bridge.pinned ? { pinned: (handle: number) => pinnedIo(bridge, handle, mutating) } : {}),
+    ...(bridge.pinned ? { pinned: (handle: number) => pinnedIo(bridge, handle, rewriting) } : {}),
     ...(bridge.create
       ? { create: (p: string) => mutating(() => bridge.create?.(p), ...entry(p)) }
       : {}),
@@ -541,8 +560,8 @@ export function cachingBridge(
       ? {
           pread: bridge.pread.bind(bridge),
           pwrite: (p: string, at: number, bytes: Uint8Array, transfer?: boolean) =>
-            mutating(() => bridge.pwrite?.(p, at, bytes, transfer), p),
-          truncate: (p: string, size: number) => mutating(() => bridge.truncate?.(p, size), p),
+            rewriting(p, () => bridge.pwrite?.(p, at, bytes, transfer)),
+          truncate: (p: string, size: number) => rewriting(p, () => bridge.truncate?.(p, size)),
         }
       : {}),
     invalidate,
@@ -553,15 +572,15 @@ export function cachingBridge(
 function pinnedIo(
   bridge: SyncFsPosixBridge,
   handle: number,
-  mutating: <T>(op: () => T, ...paths: string[]) => T
+  rewriting: <T>(p: string, op: () => T) => T
 ): SyncFsFileIo {
   const io = (bridge.pinned as NonNullable<SyncFsPosixBridge['pinned']>)(handle);
   const { pread, pwrite, truncate } = io as Required<SyncFsFileIo>;
   return {
     readFile: (p) => io.readFile(p),
-    writeFile: (p, bytes, open) => mutating(() => io.writeFile(p, bytes, open), p),
+    writeFile: (p, bytes, open) => rewriting(p, () => io.writeFile(p, bytes, open)),
     pread: (p, at, n, version) => pread(p, at, n, version),
-    pwrite: (p, at, bytes, transfer) => mutating(() => pwrite(p, at, bytes, transfer), p),
-    truncate: (p, size) => mutating(() => truncate(p, size), p),
+    pwrite: (p, at, bytes, transfer) => rewriting(p, () => pwrite(p, at, bytes, transfer)),
+    truncate: (p, size) => rewriting(p, () => truncate(p, size)),
   };
 }
