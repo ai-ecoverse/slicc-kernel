@@ -31,6 +31,10 @@ interface LiveNodeState {
 
   orphan?: boolean;
 
+  kept?: boolean;
+
+  id?: string;
+
   listed?: Map<string, SyncFsBridgeStat>;
 
   maxFile?: number;
@@ -191,11 +195,58 @@ interface LiveOpsTables {
 
 const EARLY_WHOLE_FILE = 64 * 1024;
 
+const stale = (s: LiveNodeState): boolean => !!s.orphan && !s.kept;
+
+function linkedStates(bridgeOf: (node: LiveFsNode) => SyncFsPosixBridge) {
+  const opens = new Map<LiveNodeState, LiveFsNode>();
+  const byId = new Map<string, LiveNodeState>();
+  const idOf = (st: SyncFsBridgeStat | undefined): string | undefined =>
+    st?.ino === undefined || (st.nlink ?? 1) < 2 ? undefined : `${st.dev}:${st.ino}`;
+
+  function know(s: LiveNodeState, id: string): void {
+    s.id = id;
+    if (!byId.has(id)) byId.set(id, s);
+  }
+
+  function opening(node: LiveFsNode, on: boolean): void {
+    const s = node.live;
+    if (!on) {
+      opens.delete(s);
+      if (s.id !== undefined && byId.get(s.id) === s) byId.delete(s.id);
+      s.id = undefined;
+      return;
+    }
+    opens.set(s, node);
+    const id = idOf(s.stat);
+    if (id !== undefined) know(s, id);
+  }
+
+  function sharedWith(node: LiveFsNode): LiveNodeState | undefined {
+    const id = idOf(node.live.stat);
+    if (id === undefined) return undefined;
+    if (!byId.has(id)) {
+      for (const [s, other] of opens) {
+        if (s.id !== undefined || s.orphan) continue;
+        let st: SyncFsBridgeStat | undefined;
+        try {
+          st = bridgeOf(other).lstat(liveNodePath(other));
+        } catch {}
+        const known = idOf(st);
+        if (known !== undefined) know(s, known);
+      }
+    }
+    const s = byId.get(id);
+    return s && s !== node.live && !s.orphan ? s : undefined;
+  }
+  return { opening, sharedWith };
+}
+
 function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
   const bridgeOf = (node: LiveFsNode): SyncFsPosixBridge => node.mount.opts.bridge;
   const fileIo = (node: LiveFsNode): SyncFsFileIo => pinnedIo(bridgeOf(node), node.live.handle);
   const dirty = new Set<LiveFsNode>();
   const handled = new Set<LiveFsNode>();
+  const { opening, sharedWith } = linkedStates(bridgeOf);
 
   function markDirty(node: LiveFsNode): void {
     node.live.dirty = true;
@@ -205,7 +256,7 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
   function flushDirty(): void {
     for (const node of [...dirty]) {
       const s = node.live;
-      if (!s.dirty || s.orphan) {
+      if (!s.dirty || stale(s)) {
         dirty.delete(node);
         continue;
       }
@@ -302,7 +353,7 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
 
   function flushNode(node: LiveFsNode): void {
     const s = node.live;
-    if (!s.dirty || s.orphan || !(s.data || s.ranged)) return;
+    if (!s.dirty || stale(s) || !(s.data || s.ranged)) return;
     if (s.ranged) call(() => s.ranged?.flush());
     else {
       const bytes = (s.data as Uint8Array).slice(0, s.len);
@@ -357,6 +408,8 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
     Fs,
     bridgeOf,
     handled,
+    opening,
+    sharedWith,
     call,
     metadataCall,
     makeNode,
@@ -377,6 +430,18 @@ type LiveHelpers = ReturnType<typeof createHelpers>;
 function createNodeOps(h: LiveHelpers): LiveNodeOps {
   const { Fs, bridgeOf, call, metadataCall, makeNode, statOf, childPath, flushNode, truncate } = h;
   const { ensureLoaded } = h;
+  const orphaned = (node: LiveFsNode, st: SyncFsBridgeStat): void => {
+    const s = node.live;
+    s.orphan = true;
+    const nlink = st.nlink ?? 1;
+    if (nlink < 2 || s.handle === undefined) return;
+    let kept = false;
+    try {
+      kept = bridgeOf(node).kept?.(s.handle) === true;
+    } catch {}
+    s.kept = kept;
+    s.stat = { ...st, nlink: nlink - 1 };
+  };
   const setTimes = (node: LiveFsNode, path: string, atime: number, mtime: number): void => {
     if (Fs.isLink(node.mode)) {
       metadataCall(() => bridgeOf(node).lutimes(path, atime, mtime));
@@ -500,14 +565,14 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
         const node = Fs.lookupNode?.(parent, name);
         if (node && node.live?.openCount > 0 && Fs.isFile(node.mode)) open = node;
       } catch {}
+      const st = open && statOf(open);
       if (open) {
-        statOf(open);
         const ranged = h.rangedOf(open);
         if (ranged) ranged.pin();
         else ensureLoaded(open);
       }
       call(() => bridgeOf(parent).unlink(childPath(parent, name)));
-      if (open) open.live.orphan = true;
+      if (open && st) orphaned(open, st);
     },
     rmdir(parent, name) {
       parent.live.listed = undefined;
@@ -555,6 +620,7 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
     try {
       const handle = bridgeOf(node).hold?.(liveNodePath(node), on, true, s.handle);
       s.handle = on ? handle : undefined;
+      h.opening(node, on);
       if (s.handle === undefined) h.handled.delete(node);
       else h.handled.add(node);
     } catch {}
@@ -571,7 +637,9 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
           bridge.truncate &&
           statOf(stream.node).ranged
         );
-        rangedOf(stream.node);
+        const shared = h.sharedWith(stream.node);
+        if (shared) stream.node.live = shared;
+        else rangedOf(stream.node);
       }
       if ((stream.flags & 3) !== 0) {
         try {

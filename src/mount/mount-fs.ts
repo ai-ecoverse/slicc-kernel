@@ -264,6 +264,12 @@ const parentOf = (path: string) => path.slice(0, path.lastIndexOf('/')) || '/';
 const readonly = (mount: Mount): boolean =>
   mount.caps.readonly === true || mount.options.ro !== undefined;
 
+function inodeless(mount: Mount, attr: DriverAttr): boolean {
+  if (attr.ino !== undefined) return false;
+  if (mount.caps.links) mount.caps = { ...mount.caps, links: false };
+  return true;
+}
+
 function statOf(attr: DriverAttr, path: string, mount: Mount): FsStat {
   const mtime = new Date(attr.mtime);
   const fallback =
@@ -278,7 +284,7 @@ function statOf(attr: DriverAttr, path: string, mount: Mount): FsStat {
     atime: mtime,
     ctime: mtime,
     ino: attr.ino ?? inodeOf(path),
-    ...(attr.nlink !== undefined ? { nlink: attr.nlink } : {}),
+    ...(!inodeless(mount, attr) && attr.nlink !== undefined ? { nlink: attr.nlink } : {}),
     dev: mount.dev,
     ...(readonly(mount) ? { readonly: true } : {}),
     ...(mount.maxFile > 0 ? { maxFile: mount.maxFile } : {}),
@@ -1035,6 +1041,7 @@ class MountFs implements KernelFs {
     if (!a && !b) return this.base.link(from, to);
     if (!a || !b || a.mount !== b.mount) throw errnoError('EXDEV', `${from} -> ${to}`);
     this.writable(a.mount, normalizePath(to));
+    if (a.mount.caps.links) await this.lstat(from);
     if (!a.mount.caps.links) {
       throw errnoError('EPERM', `${from}: this file system has no hard links`);
     }
