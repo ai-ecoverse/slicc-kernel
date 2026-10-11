@@ -248,9 +248,9 @@ export function hostfsHandlers(current: () => HostfsTransport): MediumHandlers {
   };
   const call = <T>(op: string, body: Record<string, unknown> = {}) => current().call<T>(op, body);
   const settle = (client: HostfsTransport, restore: { path: string; mode: number }) =>
-    client.call('setattr', restore).catch(async (err: unknown) => {
+    client.call('setattr', restore).catch((err: unknown) => {
       if (!client.gone || !client.cleanup) throw err;
-      await client.cleanup('setattr', restore);
+      void client.cleanup('setattr', restore).catch(() => {});
     });
   async function writable(client: HostfsTransport, path: string, flags: OpenFlags) {
     const { ifMatch: _, ...asked } = flags;
@@ -497,16 +497,21 @@ export interface PortLiveness {
 }
 
 export function timed(transport: HostfsTransport, ms: number): HostfsTransport {
+  const inflight = new Set<Promise<unknown>>();
   const guard = <T>(name: string, run: () => Promise<T>, late?: (value: T) => void) =>
     new Promise<T>((resolve, reject) => {
       let expired = false;
+      const running = run();
+      inflight.add(running);
+      const done = () => inflight.delete(running);
+      running.then(done, done);
       const timer = setTimeout(() => {
         expired = true;
         const why = `the host folder did not answer ${name} within ${ms} ms`;
         transport.retire?.(why);
         reject(fsError('ENOTCONN', why));
       }, ms);
-      run().then(
+      running.then(
         (value) => {
           clearTimeout(timer);
           if (expired) late?.(value);
@@ -518,9 +523,13 @@ export function timed(transport: HostfsTransport, ms: number): HostfsTransport {
         }
       );
     });
+  const cleanup = async (op: string, body: Record<string, unknown>) => {
+    await Promise.allSettled([...inflight]);
+    await transport.cleanup?.(op, body);
+  };
   const release = (opened: unknown) => {
     const fh = (opened as { fh?: unknown } | null)?.fh;
-    if (typeof fh === 'number') void transport.cleanup?.('release', { fh }).catch(() => {});
+    if (typeof fh === 'number') void cleanup('release', { fh }).catch(() => {});
   };
   return {
     get capabilities() {
@@ -536,12 +545,7 @@ export function timed(transport: HostfsTransport, ms: number): HostfsTransport {
       return transport.gone;
     },
     retire: (why) => transport.retire?.(why),
-    ...(transport.cleanup
-      ? {
-          cleanup: (op: string, body: Record<string, unknown>) =>
-            transport.cleanup?.(op, body) as Promise<void>,
-        }
-      : {}),
+    ...(transport.cleanup ? { cleanup } : {}),
     call: (op, body, handle) =>
       guard(op, () => transport.call(op, body, handle), op === 'open' ? release : undefined),
     read: (fh, offset, size, ifMatch) =>
