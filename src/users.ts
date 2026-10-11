@@ -157,8 +157,13 @@ export class UserDb {
   }
 
   private async realDir(path: string): Promise<boolean> {
-    if ((await this.fs.realpath?.(path, false).catch(() => undefined)) !== path) return false;
-    return (await this.fs.lstat(path)).isDirectory;
+    const parts = path.split('/').filter(Boolean);
+    for (let n = 1; n <= parts.length; n++) {
+      const at = `/${parts.slice(0, n).join('/')}`;
+      const st = await this.fs.lstat(at).catch(() => undefined);
+      if (!st?.isDirectory) return false;
+    }
+    return true;
   }
 
   private async read(path: string, fallback: string): Promise<string> {
@@ -178,15 +183,17 @@ export class UserDb {
   }
 
   private async provision(row: PasswdRow): Promise<void> {
+    const owner = this.owners ? { uid: row.uid, gid: row.gid } : undefined;
+    const made = owner ? { recursive: true, owner } : { recursive: true };
     const pnpm = `${row.home}/.local/share/pnpm`;
     if (!(await this.fs.exists(pnpm))) {
-      await this.fs.mkdir(pnpm, { recursive: true });
+      await this.fs.mkdir(pnpm, made);
       await this.fs.chmod(pnpm, row.name.startsWith('scoop-') ? 0o750 : 0o700);
     }
     const config = `${row.home}/.config/pnpm/config.yaml`;
     if (!(await this.fs.exists(config))) {
-      await this.fs.mkdir(`${row.home}/.config/pnpm`, { recursive: true });
-      await this.fs.writeFile(config, PNPM_CONFIG);
+      await this.fs.mkdir(`${row.home}/.config/pnpm`, made);
+      await this.fs.writeFile(config, PNPM_CONFIG, owner);
     }
   }
 

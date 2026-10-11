@@ -160,7 +160,7 @@ export class ProcTree {
 }
 
 const FOLLOWING = ['writeFile', 'chmod', 'utimes', 'pwrite', 'truncate'] as const;
-const NOT_FOLLOWING = ['mkdir', 'rm', 'unlink', 'rmdir', 'lutimes', 'create', 'chown'] as const;
+const NOT_FOLLOWING = ['mkdir', 'rm', 'unlink', 'rmdir', 'lutimes', 'create'] as const;
 const MAX_HOPS = 40;
 
 type ProcRefusal = { refused: string };
@@ -424,6 +424,11 @@ export function procfsBridge<T extends SyncFsPosixBridge>(fs: T, tree: ProcTree)
       over[name] = (p: string, ...rest: unknown[]) =>
         readOnly([[p, follow]], () => fn.call(fs, p, ...rest));
     }
+  }
+  const { chown } = fs;
+  if (chown) {
+    over.chown = (p: string, uid?: number, gid?: number, follow?: boolean) =>
+      readOnly([[p, follow === true]], () => chown.call(fs, p, uid, gid, follow));
   }
   return new Proxy(fs, {
     get: (target, key, receiver) =>

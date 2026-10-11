@@ -67,7 +67,8 @@ interface Mount extends MountEntry {
 }
 
 const S_ISGID = 0o2000;
-const ID = /^\d+$/;
+const ID = /^\d{1,10}$/;
+const MAX_ID = 0xfffffffe;
 
 function idOption(value: string | undefined): number {
   return value === undefined ? 0 : Number(value);
@@ -76,7 +77,8 @@ function idOption(value: string | undefined): number {
 function checkIds(options: Record<string, string>): void {
   for (const key of ['uid', 'gid']) {
     const value = options[key];
-    if (value !== undefined && !ID.test(value)) throw errnoError('EINVAL', `${key}=${value}`);
+    if (value === undefined) continue;
+    if (!ID.test(value) || Number(value) > MAX_ID) throw errnoError('EINVAL', `${key}=${value}`);
   }
 }
 
