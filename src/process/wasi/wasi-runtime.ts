@@ -621,7 +621,7 @@ export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike
     parent: () => identify(transport, init).ppid,
     kernel: { sys: traced(stats, 'kernel', sys), call },
     fs: procfsBridge(
-      cachingBridge(traced(stats, 'fs', createSyncFsSabBridge(transport))),
+      cachingBridge(traced(stats, 'fs', createSyncFsSabBridge(transport)), undefined, threads?.ids),
       procTree(call, id.pid)
     ),
     ...descriptors(init, fork, threads),
@@ -739,7 +739,10 @@ export async function runWasiThread(init: WasmThreadInitMsg, port: SabPostLike):
     ppid: id.ppid,
     parent: () => identify(transport, init).ppid,
     kernel: { sys, call },
-    fs: procfsBridge(cachingBridge(createSyncFsSabBridge(transport)), procTree(call, id.pid)),
+    fs: procfsBridge(
+      cachingBridge(createSyncFsSabBridge(transport), undefined, threads.ids),
+      procTree(call, id.pid)
+    ),
     shared: threads.ids,
   });
 

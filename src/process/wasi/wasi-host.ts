@@ -50,7 +50,7 @@ export interface WasiHostOptions {
   parent?: () => number;
   kernel: WasiKernel;
 
-  fs: SyncFsPosixBridge & { invalidate?(): void };
+  fs: SyncFsPosixBridge & { invalidate?(): void; touched?(path?: string): void };
 
   inherited?: ReadonlyArray<{
     fd: number;
@@ -612,10 +612,16 @@ export class WasiHost {
         if (!kernel.sys.pread) throw new WasiError('ESPIPE');
         return kernel.sys.pread(fd, Math.min(max, MAX_READ), at);
       },
-      pwrite: (body, at) => kernel.call({ op: 'fd-pwrite', fd, offset: at, body }) as number,
+      pwrite: (body, at) =>
+        this.changed(e, kernel.call({ op: 'fd-pwrite', fd, offset: at, body }) as number),
       size: () => this.kernelStat(fd).size,
-      truncate: (size) => void kernel.call({ op: 'fd-resize', fd, size }),
+      truncate: (size) => this.changed(e, void kernel.call({ op: 'fd-resize', fd, size })),
     };
+  }
+
+  private changed<T>(e: { path?: string }, result: T): T {
+    this.o.fs.touched?.(e.path);
+    return result;
   }
 
   private kernelStat(fd: number): { path?: string; size: number; orphan?: true } {
@@ -631,7 +637,8 @@ export class WasiHost {
     const e = this.fds.get(fd);
     if (e.type === 'kernel') {
       try {
-        return this.o.kernel.sys.write(fd, data, { nonblock: e.nonblock });
+        const n = this.o.kernel.sys.write(fd, data, { nonblock: e.nonblock });
+        return this.fds.kind(fd, e) === 'file' ? this.changed(e, n) : n;
       } catch (err) {
         const broken = (err as { code?: string }).code === 'EPIPE';
         if (broken && this.fds.kind(fd, e) !== 'socket') throw new WasiExit(SIGPIPE_EXIT);

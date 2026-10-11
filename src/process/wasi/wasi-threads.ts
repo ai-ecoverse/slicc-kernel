@@ -5,6 +5,7 @@ import {
   WASM_THREAD_SPAWN,
 } from '../../kernel/protocol.ts';
 import type { SabPostLike } from '../../realm/sync-sab-bridge.ts';
+import { SHARED_IDS_BYTES } from './wasi-files.ts';
 
 const LAST_TID = 0;
 const RUNNING = 1;
@@ -47,7 +48,7 @@ export class WasiThreads {
     this.memory = memory;
     this.cap = cap;
     this.tid = tid;
-    this.ids = new Int32Array(ids ?? new SharedArrayBuffer(16));
+    this.ids = new Int32Array(ids ?? new SharedArrayBuffer(SHARED_IDS_BYTES));
     if (!ids) Atomics.store(this.ids, LAST_TID, MAIN_TID);
   }
 

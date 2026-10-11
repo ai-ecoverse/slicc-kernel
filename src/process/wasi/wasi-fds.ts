@@ -346,7 +346,13 @@ export class WasiFds {
         handed.add(e.file.buffer);
         promoted.set(e.file, fd);
       }
-      this.table.set(fd, { type: 'kernel', kind: 'file', nonblock: false, append: e.file.append });
+      this.table.set(fd, {
+        type: 'kernel',
+        kind: 'file',
+        nonblock: false,
+        append: e.file.append,
+        path: e.file.path,
+      });
     }
     for (const file of promoted.keys()) {
       if (--file.buffer.opens <= 0) {
@@ -581,7 +587,7 @@ export class WasiFds {
 
     const truncate = made || (oflags & OFLAGS.TRUNC) !== 0;
     const fd = this.kernel.sys.openVfs(path, flags, 0, truncate ? { truncate } : {});
-    this.table.set(fd, { type: 'kernel', kind: 'file', nonblock: false, append });
+    this.table.set(fd, { type: 'kernel', kind: 'file', nonblock: false, append, path });
     if (append) this.publishFlags(fd, { nonblock: false, append });
     this.bump();
     return fd;
