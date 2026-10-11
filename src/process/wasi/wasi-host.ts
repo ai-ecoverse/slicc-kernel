@@ -1,3 +1,4 @@
+import { physicalPath } from '../../fs/physical-path.ts';
 import { type Cred, type CredChange, MAX_GROUPS } from '../../kernel/cred.ts';
 import type { DeviceMeta, KernelFdKind } from '../../kernel/fd-table.ts';
 import type { SyncFsBridgeStat, SyncFsPosixBridge } from '../../realm/sync-fs-wire.ts';
@@ -90,7 +91,23 @@ interface Filestat {
   filetype: number;
   size: bigint;
   ino: bigint;
+  nlink?: bigint;
   mtimeNs: bigint;
+}
+
+function linkedOf(st: SyncFsBridgeStat): SyncFsBridgeStat | undefined {
+  return (st.nlink ?? 1) > 1 ? st : undefined;
+}
+
+function linkedElsewhere(
+  fs: Pick<SyncFsPosixBridge, 'lstat'>,
+  path: string
+): SyncFsBridgeStat | undefined {
+  try {
+    return linkedOf(fs.lstat(path));
+  } catch {
+    return undefined;
+  }
 }
 
 function filetypeOf(s: SyncFsBridgeStat | null | undefined): number {
@@ -105,6 +122,7 @@ function filestatOf(path: string, s: SyncFsBridgeStat): Filestat {
     filetype: filetypeOf(s),
     size: BigInt(s.size),
     ino: s.ino !== undefined ? BigInt(s.ino) : pathInode(path),
+    ...(s.nlink !== undefined ? { nlink: BigInt(s.nlink) } : {}),
     mtimeNs: BigInt(Math.round(s.mtimeMs ?? 0)) * NS_PER_MS,
   };
 }
@@ -479,17 +497,20 @@ export class WasiHost {
         void o.fs.rmdir(at(dirfd, p, l)),
       path_unlink_file: (dirfd: number, p: number, l: number) => {
         const path = at(dirfd, p, l);
-        if (o.fs.lstat(path).isDirectory) throw new WasiError('EISDIR');
-        fds.unlinking(path);
+        const st = o.fs.lstat(path);
+        if (st.isDirectory) throw new WasiError('EISDIR');
+        const linked = linkedOf(st);
+        fds.unlinking(path, linked);
         o.fs.unlink(path);
-        fds.unlinked(path);
+        fds.unlinked(path, linked);
       },
       path_rename: (fd: number, p: number, l: number, fd2: number, p2: number, l2: number) => {
         const from = at(fd, p, l);
         const to = at(fd2, p2, l2);
         fds.flushPath(from);
+        const replaced = fds.holdsUnder(to) ? linkedElsewhere(o.fs, to) : undefined;
         o.fs.rename(from, to);
-        fds.renamed(from, to);
+        fds.renamed(from, to, replaced);
       },
       path_symlink: (tp: number, tl: number, dirfd: number, p: number, l: number) =>
         void o.fs.symlink(mem.string(tp, tl), at(dirfd, p, l)),
@@ -507,7 +528,25 @@ export class WasiHost {
         mem.view().setUint32(used, n, true);
       },
 
-      path_link: () => E.NOTSUP,
+      path_link: (
+        fd: number,
+        lookup: number,
+        p: number,
+        l: number,
+        fd2: number,
+        p2: number,
+        l2: number
+      ) => {
+        const from = at(fd, p, l);
+        const to = at(fd2, p2, l2);
+        const follow = (lookup & LOOKUP_SYMLINK_FOLLOW) !== 0;
+        const source = follow ? physicalPath(o.fs, from) : from;
+        fds.flushPath(from);
+        if (source !== from) fds.flushPath(source);
+        o.fs.link(from, to, follow);
+        fds.linked(from, to);
+        if (source !== from) fds.linked(source, to);
+      },
     };
   }
 
@@ -747,7 +786,7 @@ export class WasiHost {
     v.setBigUint64(ptr, 1n, true);
     v.setBigUint64(ptr + 8, f.ino, true);
     v.setUint8(ptr + 16, f.filetype);
-    v.setBigUint64(ptr + 24, 1n, true);
+    v.setBigUint64(ptr + 24, f.nlink ?? 1n, true);
     v.setBigUint64(ptr + 32, f.size, true);
     v.setBigUint64(ptr + 40, f.mtimeNs, true);
     v.setBigUint64(ptr + 48, f.mtimeNs, true);

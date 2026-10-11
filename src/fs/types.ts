@@ -8,10 +8,12 @@ export interface FsStat {
   atime: Date;
   ctime: Date;
   ino: number;
+  nlink?: number;
   dev?: number;
   readonly?: boolean;
   maxFile?: number;
   ranged?: boolean;
+  linkable?: boolean;
   version?: string;
   uid?: number;
   gid?: number;
@@ -50,6 +52,8 @@ export interface KernelFs {
   mkdir(path: string, options?: { recursive?: boolean; owner?: NewOwner }): Promise<void>;
   rm(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
   rename(from: string, to: string): Promise<void>;
+  link(from: string, to: string, follow?: boolean): Promise<void>;
+  links?(path: string): boolean;
   symlink(target: string, path: string, owner?: NewOwner): Promise<void>;
   readlink(path: string): Promise<string>;
   realpath?(path: string, follow: boolean): Promise<string>;
@@ -81,6 +85,10 @@ export async function lutimesOf(
   if (fs.lutimes) return fs.lutimes(path, atime, mtime);
   if ((await fs.lstat(path)).isSymbolicLink) throw fsError('EOPNOTSUPP', path);
   return fs.utimes(path, atime, mtime);
+}
+
+export function mayLink(fs: { links?(path: string): boolean }, path: string): boolean {
+  return fs.links?.(path) ?? true;
 }
 
 export function fsError(code: string, path: string): Error & { code: string } {

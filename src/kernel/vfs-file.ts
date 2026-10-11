@@ -1,6 +1,14 @@
 import { AsyncRangedFile, type AsyncRangedIo } from '../fs/ranged.ts';
-import { fsError, type KernelFs, type NewOwner, type OwnerChange, rangedOps } from '../fs/types.ts';
+import {
+  fsError,
+  type KernelFs,
+  mayLink,
+  type NewOwner,
+  type OwnerChange,
+  rangedOps,
+} from '../fs/types.ts';
 import type { KeptFile, UnlinkHolder } from '../fs/unlinked.ts';
+import { joinName, parentOf, realDir, realTarget } from '../fs/walk.ts';
 import { KernelError, OpenFile } from './fd-table.ts';
 
 export interface VfsFileFs extends Partial<AsyncRangedIo> {
@@ -12,11 +20,15 @@ export interface VfsFileFs extends Partial<AsyncRangedIo> {
     size?: number;
     ranged?: boolean;
     version?: string;
+    ino?: number;
+    dev?: number;
+    nlink?: number;
   }>;
   readlink?(path: string): Promise<string>;
   lstat?(path: string): Promise<unknown>;
   realpath?(path: string, follow: boolean): Promise<string>;
   chown?(path: string, change: OwnerChange): Promise<void>;
+  links?(path: string): boolean;
 }
 
 const O_ACCMODE = 0o3;
@@ -46,6 +58,8 @@ export interface VfsFileOptions {
   truncate?: boolean;
 
   create?: boolean;
+
+  id?: string;
 }
 
 export interface VersionPin {
@@ -91,6 +105,8 @@ export class VfsNode {
   path: string;
 
   orphaned: boolean;
+
+  id: string | undefined;
 
   constructor(
     fs: VfsFileFs,
@@ -300,6 +316,8 @@ export class VfsNodes implements UnlinkHolder {
 
   private readonly kept = new Map<VfsNode, KeptFile>();
 
+  private readonly byId = new Map<string, VfsNode>();
+
   keepsOnDisk = false;
 
   private readonly fs: VfsFileFs;
@@ -354,22 +372,85 @@ export class VfsNodes implements UnlinkHolder {
     });
   }
 
-  open(path: string, pin?: VersionPin, writable = false): VfsNode {
-    let node = this.byPath.get(path);
-    if (!node) {
-      node = new VfsNode(this.fs, path, undefined, false, false, pin);
-      this.byPath.set(path, node);
-    }
+  private async identity(path: string): Promise<string | undefined> {
+    const st = await this.fs.stat?.(path).catch(() => undefined);
+    if (!st || st.ino === undefined || (st.nlink ?? 1) < 2) return undefined;
+    return `${st.dev ?? 0}:${st.ino}`;
+  }
+
+  async identify(path: string): Promise<string | undefined> {
+    return this.byPath.has(path) || !mayLink(this.fs, path) ? undefined : this.identity(path);
+  }
+
+  async linked(from: string, to: string): Promise<void> {
+    const node = this.byPath.get(from);
+    if (!node || node.orphaned) return;
+    const id = node.id ?? (await this.identity(to));
+    if (id === undefined || node.orphaned) return;
+    this.know(node, id);
+    if (!this.byPath.has(to)) this.byPath.set(to, node);
+  }
+
+  private know(node: VfsNode, id: string): void {
+    node.id = id;
+    if (!this.byId.has(id)) this.byId.set(id, node);
+  }
+
+  private namesOf(node: VfsNode): string[] {
+    const out: string[] = [];
+    for (const [p, n] of this.byPath) if (n === node) out.push(p);
+    return out;
+  }
+
+  private forget(node: VfsNode): void {
+    for (const p of this.namesOf(node)) this.byPath.delete(p);
+    if (node.id !== undefined && this.byId.get(node.id) === node) this.byId.delete(node.id);
+  }
+
+  private orphan(node: VfsNode): void {
+    node.orphaned = true;
+    this.forget(node);
+  }
+
+  private dropName(path: string, node: VfsNode): boolean {
+    const others = this.namesOf(node).filter((p) => p !== path);
+    if (others.length === 0) return false;
+    this.byPath.delete(path);
+    if (node.path === path) node.renamedTo(others[0] as string);
+    return true;
+  }
+
+  private named(path: string, id: string | undefined): VfsNode | undefined {
+    const node = this.byPath.get(path) ?? (id === undefined ? undefined : this.byId.get(id));
+    if (node && !this.byPath.has(path)) this.byPath.set(path, node);
+    return node;
+  }
+
+  private create(path: string, id: string | undefined, node: VfsNode): VfsNode {
+    this.byPath.set(path, node);
+    if (id !== undefined) this.know(node, id);
+    return node;
+  }
+
+  open(path: string, pin?: VersionPin, writable = false, id?: string): VfsNode {
+    const node =
+      this.named(path, id) ??
+      this.create(path, id, new VfsNode(this.fs, path, undefined, false, false, pin));
     node.opens++;
     if (writable) node.writers++;
     return node;
   }
 
-  adopt(path: string, contents: Uint8Array, dirty: boolean, writable = false): VfsNode {
-    let node = this.byPath.get(path);
+  adopt(
+    path: string,
+    contents: Uint8Array,
+    dirty: boolean,
+    writable = false,
+    id?: string
+  ): VfsNode {
+    let node = this.named(path, id);
     if (!node) {
-      node = new VfsNode(this.fs, path, contents, false, dirty);
-      this.byPath.set(path, node);
+      node = this.create(path, id, new VfsNode(this.fs, path, contents, false, dirty));
     } else if (dirty) {
       node.replace(contents);
     }
@@ -396,7 +477,7 @@ export class VfsNodes implements UnlinkHolder {
       if (writable && node.writers === 0) this.onClosed?.(node.path);
       return;
     }
-    if (this.byPath.get(node.path) === node) this.byPath.delete(node.path);
+    this.forget(node);
     this.kept.get(node)?.release();
     this.kept.delete(node);
     this.onClosed?.(node.path);
@@ -416,7 +497,7 @@ export class VfsNodes implements UnlinkHolder {
 
   keep(path: string, file: KeptFile): void {
     const node = this.byPath.get(path);
-    if (!node) {
+    if (!node || this.dropName(path, node)) {
       file.release();
       return;
     }
@@ -449,35 +530,34 @@ export class VfsNodes implements UnlinkHolder {
   }
 
   revoke(prefix: string): void {
-    for (const [path, node] of this.byPath) {
+    for (const [path, node] of [...this.byPath]) {
       if (!within(path, prefix)) continue;
       node.revoke();
-      this.byPath.delete(path);
+      this.forget(node);
     }
   }
 
   unlinked(path: string): void {
     for (const [held, node] of [...this.byPath]) {
-      if (!within(held, path)) continue;
-      node.orphaned = true;
-      this.byPath.delete(held);
+      if (!within(held, path) || this.byPath.get(held) !== node) continue;
+      if (!this.dropName(held, node)) this.orphan(node);
     }
   }
 
   renamed(from: string, to: string): void {
     if (from === to) return;
-    const moved: VfsNode[] = [];
-    for (const [p, node] of this.byPath) {
-      if (within(p, from)) moved.push(node);
-      else if (within(p, to)) {
-        node.orphaned = true;
-        this.byPath.delete(p);
+    const moved: Array<[string, VfsNode]> = [];
+    for (const [p, node] of [...this.byPath]) {
+      if (within(p, from)) moved.push([p, node]);
+      else if (within(p, to) && this.byPath.get(p) === node && !this.dropName(p, node)) {
+        this.orphan(node);
       }
     }
-    for (const node of moved) {
-      this.byPath.delete(node.path);
-      node.renamedTo(to + node.path.slice(from.length));
-      this.byPath.set(node.path, node);
+    for (const [p] of moved) this.byPath.delete(p);
+    for (const [p, node] of moved) {
+      const next = to + p.slice(from.length);
+      if (node.path === p) node.renamedTo(next);
+      this.byPath.set(next, node);
     }
   }
 }
@@ -493,73 +573,8 @@ export async function present(fs: VfsFileFs, path: string, follow = false): Prom
   }
 }
 
-const MAX_LINKS = 40;
-
-function parentOf(path: string): string {
-  return path.slice(0, path.lastIndexOf('/')) || '/';
-}
-
-async function mustBeDir(fs: VfsFileFs, path: string): Promise<void> {
-  if (!fs.lstat) return;
-  const st = await fs.lstat(path);
-  if ((st as { isDirectory?: boolean }).isDirectory !== true) throw fsError('ENOTDIR', path);
-}
-
-async function linkOf(fs: VfsFileFs, path: string): Promise<string | undefined> {
-  return fs.readlink?.(path).catch(() => undefined);
-}
-
-interface Budget {
-  hops: number;
-}
-
-async function realDir(fs: VfsFileFs, dir: string, budget: Budget = { hops: 0 }): Promise<string> {
-  const queue = dir.split('/').filter(Boolean);
-  let at = '/';
-  while (queue.length > 0) {
-    const part = queue.shift() as string;
-    if (part === '.') continue;
-    if (part === '..') {
-      at = parentOf(at);
-      continue;
-    }
-    const next = at === '/' ? `/${part}` : `${at}/${part}`;
-    const link = await linkOf(fs, next);
-    if (link === undefined) {
-      if (queue.find((p) => p !== '.') === '..') await mustBeDir(fs, next);
-      at = next;
-      continue;
-    }
-    if (budget.hops >= MAX_LINKS) throw fsError('ELOOP', dir);
-    budget.hops++;
-    queue.unshift(...link.split('/').filter(Boolean));
-    if (link.startsWith('/')) at = '/';
-  }
-  return at;
-}
-
 function errCode(err: unknown): unknown {
   return (err as { code?: unknown } | null)?.code;
-}
-
-function joinName(dir: string, name: string): string {
-  return dir === '/' ? `/${name}` : `${dir}/${name}`;
-}
-
-async function realTarget(fs: VfsFileFs, path: string): Promise<string> {
-  const budget: Budget = { hops: 0 };
-  let dir = await realDir(fs, parentOf(path), budget);
-  let name = path.slice(path.lastIndexOf('/') + 1);
-  for (;;) {
-    const link = await linkOf(fs, joinName(dir, name));
-    if (link === undefined) break;
-    if (budget.hops >= MAX_LINKS) throw fsError('ELOOP', path);
-    budget.hops++;
-    const target = link.startsWith('/') ? link : joinName(dir, link);
-    dir = await realDir(fs, parentOf(target), budget);
-    name = target.slice(target.lastIndexOf('/') + 1);
-  }
-  return joinName(dir, name);
 }
 
 async function targetDir(fs: VfsFileFs, path: string): Promise<string> {
@@ -610,6 +625,15 @@ export function keepingOpen(fs: KernelFs, nodes: VfsNodes): KernelFs {
       nodes.createExclusive(await nodes.entryKey(fs.resolvePath('/', path)), owner),
     symlink: (target, path, owner) =>
       nodes.onEntry(fs.resolvePath('/', path), () => fs.symlink(target, path, owner)),
+    links: (path) => mayLink(fs, path),
+    link: async (from, to, follow) => {
+      const source = fs.resolvePath('/', from);
+      const at = await (follow ? nodes.targetKey(source) : nodes.entryKey(source));
+      await nodes.flush(at);
+      const key = await nodes.entryKey(fs.resolvePath('/', to));
+      await nodes.onEntry(key, () => fs.link(from, to, follow));
+      await nodes.linked(at, key);
+    },
     mkdir: (path, options) =>
       nodes.onEntry(fs.resolvePath('/', path), () => fs.mkdir(path, options)),
   };
@@ -624,8 +648,8 @@ export function vfsFile(fs: VfsFileFs, opts: VfsFileOptions, nodes?: VfsNodes): 
     !nodes || opts.orphan
       ? new VfsNode(fs, opts.path, opts.contents, opts.orphan === true, opts.dirty === true)
       : opts.contents !== undefined
-        ? nodes.adopt(opts.path, opts.contents, opts.dirty === true, writable)
-        : nodes.open(opts.path, opts.pin, writable);
+        ? nodes.adopt(opts.path, opts.contents, opts.dirty === true, writable, opts.id)
+        : nodes.open(opts.path, opts.pin, writable, opts.id);
 
   let openError: { err: unknown } | undefined;
   const atOpen = (op: () => Promise<void>): void => {

@@ -1,5 +1,12 @@
 import { chownAs, ownerOf } from '../fs/owners.ts';
-import { type FsStat, type KernelFs, lutimesOf, type NewOwner, rangedOps } from '../fs/types.ts';
+import {
+  type FsStat,
+  type KernelFs,
+  lutimesOf,
+  mayLink,
+  type NewOwner,
+  rangedOps,
+} from '../fs/types.ts';
 import { resolveSyncFsToken, type SyncFsTokenEntry } from './sync-fs-token-registry.ts';
 import {
   type SyncFsOp,
@@ -28,10 +35,12 @@ export interface SyncFsStatJson {
   atimeMs: number;
   ctimeMs: number;
   ino: number;
+  nlink?: number;
   dev?: number;
   readonly?: boolean;
   maxFile?: number;
   ranged?: boolean;
+  linkable?: boolean;
   version?: string;
   uid?: number;
   gid?: number;
@@ -48,10 +57,12 @@ function statJson(s: FsStat): SyncFsStatJson {
     atimeMs: s.atime.getTime(),
     ctimeMs: s.ctime.getTime(),
     ino: s.ino,
+    ...(s.nlink !== undefined ? { nlink: s.nlink } : {}),
     ...(s.dev !== undefined ? { dev: s.dev } : {}),
     ...(s.readonly ? { readonly: true } : {}),
     ...(s.maxFile ? { maxFile: s.maxFile } : {}),
     ...(s.ranged ? { ranged: true } : {}),
+    ...(s.linkable ? { linkable: true } : {}),
     ...(s.version !== undefined ? { version: s.version } : {}),
     ...(s.uid !== undefined ? { uid: s.uid } : {}),
     ...(s.gid !== undefined ? { gid: s.gid } : {}),
@@ -135,6 +146,9 @@ async function run(
       entry.renamed?.(path, to);
       return done;
     }
+    case 'link':
+      await fs.link(path, fs.resolvePath(cwd, req.arg2 ?? ''), req.mode === 1);
+      return done;
     case 'unlink':
       if ((await fs.lstat(path)).isDirectory) throw syncError('EISDIR', path);
       await fs.rm(path);
@@ -201,12 +215,36 @@ async function ranged(fs: KernelFs, path: string, req: SyncFsRequest): Promise<S
 }
 
 const UNLINKED_OPS = new Set<SyncFsOp>(['read', 'pread', 'pwrite', 'truncate']);
-const OWN_OPS = new Set<SyncFsOp>(['rm', 'unlink', 'rmdir', 'rename']);
+const OWN_OPS = new Set<SyncFsOp>(['rm', 'unlink', 'rmdir', 'rename', 'link']);
+const TWO_PATHS = new Set<SyncFsOp>(['rename', 'link']);
+const UNLINKING_OPS = new Set<SyncFsOp>(['rm', 'unlink', 'rename']);
+
+async function linkedElsewhere(fs: KernelFs, path: string, from?: string): Promise<boolean> {
+  if (!mayLink(fs, path)) return false;
+  const st = await fs.lstat(path).catch(() => undefined);
+  if (!st || (st.nlink ?? 1) < 2) return false;
+  const source = from === undefined ? undefined : await fs.lstat(from).catch(() => undefined);
+  return !(source && source.ino === st.ino && source.dev === st.dev);
+}
 
 async function keptOr(entry: SyncFsTokenEntry, path: string, handle?: number): Promise<string> {
   if (handle !== undefined) return entry.keptFor?.(handle)?.hidden ?? path;
   const kept = entry.unlinked?.(path);
   return kept && !(await entry.fs.exists(path)) ? kept.hidden : path;
+}
+
+async function owned(
+  entry: SyncFsTokenEntry,
+  own: NonNullable<SyncFsTokenEntry['own']>,
+  req: SyncFsRequest,
+  path: string,
+  target: string
+): Promise<SyncFsResult> {
+  const source = target === path ? undefined : path;
+  if (UNLINKING_OPS.has(req.op) && (await linkedElsewhere(entry.fs, target, source))) {
+    return run(entry, path, req);
+  }
+  return own(target, () => run(entry, path, req));
 }
 
 export async function dispatchSyncFs(req: SyncFsRequest): Promise<SyncFsResult> {
@@ -232,8 +270,8 @@ export async function dispatchSyncFs(req: SyncFsRequest): Promise<SyncFsResult> 
       return await (entry.gate ? entry.gate(path, serve) : serve());
     }
     if (!entry.own || !OWN_OPS.has(req.op)) return await run(entry, path, req);
-    const target = req.op === 'rename' ? fs.resolvePath(cwd, req.arg2 ?? '') : path;
-    return await entry.own(target, () => run(entry, path, req));
+    const target = TWO_PATHS.has(req.op) ? fs.resolvePath(cwd, req.arg2 ?? '') : path;
+    return await owned(entry, entry.own, req, path, target);
   } catch (err) {
     return toErrno(err);
   }

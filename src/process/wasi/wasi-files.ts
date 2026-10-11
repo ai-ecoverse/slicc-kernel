@@ -530,6 +530,7 @@ export function cachingBridge(
     mkdir: (p) => mutating(() => bridge.mkdir(p), ...entry(p)),
     rm: (p) => mutating(() => bridge.rm(p)),
     rename: (from, to) => mutating(() => bridge.rename(from, to)),
+    link: (from, to, follow) => mutating(() => bridge.link(from, to, follow)),
     unlink: (p) => mutating(() => bridge.unlink(p)),
     rmdir: (p) => mutating(() => bridge.rmdir(p)),
     symlink: (target, link) => mutating(() => bridge.symlink(target, link), ...entry(link)),

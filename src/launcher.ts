@@ -1033,7 +1033,7 @@ export class Launcher {
       serveFilesystem(
         port2,
         tmpfs(),
-        { symlinks: true, chmod: true, linkTimes: true, ranges: true, attrTtl: 0 },
+        { symlinks: true, links: true, chmod: true, linkTimes: true, ranges: true, attrTtl: 0 },
         { owned: true }
       );
       return {
