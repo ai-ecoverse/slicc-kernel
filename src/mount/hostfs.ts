@@ -99,14 +99,18 @@ export class HostfsClient implements HostfsTransport {
     path: string,
     init: RequestInit,
     handle = false,
-    retried = false
+    retried = false,
+    cleanup = false
   ): Promise<Response> {
-    if (this.retired) throw fsError('ENOTCONN', this.retired);
+    if (this.retired && !cleanup) throw fsError('ENOTCONN', this.retired);
+    const stop = cleanup ? undefined : this.stop.signal;
+    const signal =
+      init.signal && stop ? AbortSignal.any([init.signal, stop]) : (init.signal ?? stop);
     let response: Response;
     try {
       response = await this.fetch(`${this.grant.url}${path}`, {
         ...init,
-        signal: init.signal ? AbortSignal.any([init.signal, this.stop.signal]) : this.stop.signal,
+        ...(signal ? { signal } : {}),
         credentials: 'omit',
         headers: {
           ...(init.headers as Record<string, string>),
@@ -140,7 +144,9 @@ export class HostfsClient implements HostfsTransport {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ op, ...body }),
       },
-      handle
+      handle,
+      false,
+      op === 'release'
     );
     return (await response.json()) as T;
   }
@@ -467,36 +473,53 @@ export interface PortLiveness {
   deadMs?: number;
 }
 
-export function bounded(
-  handlers: MediumHandlers,
-  ms: number,
-  transport?: Pick<HostfsTransport, 'retire'>
-): MediumHandlers {
-  const out: Record<string, unknown> = {};
-  for (const [name, fn] of Object.entries(handlers)) {
-    out[name] = (...args: unknown[]) =>
-      new Promise((resolve, reject) => {
-        let late = false;
-        const timer = setTimeout(() => {
-          late = true;
-          const why = `the host folder did not answer ${name} within ${ms} ms`;
-          transport?.retire?.(why);
-          reject(fsError('ENOTCONN', why));
-        }, ms);
-        (fn as (...a: unknown[]) => Promise<unknown>)(...args).then(
-          (value) => {
-            clearTimeout(timer);
-            if (late && name === 'open') void handlers.release(value as number).catch(() => {});
-            resolve(value);
-          },
-          (err) => {
-            clearTimeout(timer);
-            reject(err);
-          }
-        );
-      });
-  }
-  return out as unknown as MediumHandlers;
+export function timed(transport: HostfsTransport, ms: number): HostfsTransport {
+  const guard = <T>(name: string, run: () => Promise<T>, late?: (value: T) => void) =>
+    new Promise<T>((resolve, reject) => {
+      let expired = false;
+      const timer = setTimeout(() => {
+        expired = true;
+        const why = `the host folder did not answer ${name} within ${ms} ms`;
+        transport.retire?.(why);
+        reject(fsError('ENOTCONN', why));
+      }, ms);
+      run().then(
+        (value) => {
+          clearTimeout(timer);
+          if (expired) late?.(value);
+          resolve(value);
+        },
+        (err) => {
+          clearTimeout(timer);
+          reject(err);
+        }
+      );
+    });
+  const release = (opened: unknown) => {
+    const fh = (opened as { fh?: unknown } | null)?.fh;
+    if (typeof fh === 'number') void transport.call('release', { fh }, true).catch(() => {});
+  };
+  return {
+    get capabilities() {
+      return transport.capabilities;
+    },
+    get token() {
+      return transport.token;
+    },
+    get maxIo() {
+      return transport.maxIo;
+    },
+    get gone() {
+      return transport.gone;
+    },
+    retire: (why) => transport.retire?.(why),
+    call: (op, body, handle) =>
+      guard(op, () => transport.call(op, body, handle), op === 'open' ? release : undefined),
+    read: (fh, offset, size, ifMatch) =>
+      guard('read', () => transport.read(fh, offset, size, ifMatch)),
+    write: (fh, offset, bytes) => guard('write', () => transport.write(fh, offset, bytes)),
+    watch: (signal, onEvent, onOpen) => transport.watch(signal, onEvent, onOpen),
+  };
 }
 const PORT_MS_PER_MIB = 1000;
 
@@ -779,7 +802,10 @@ export async function openHostfs(
   const stop = new AbortController();
   let active: HostfsTransport | undefined;
   const handlers = hostfsHandlers(() => active as HostfsTransport);
-  const ranged = () => (active?.capabilities.ranges === true ? { ranges: true } : {});
+  const ranged = () => ({
+    ...(active?.capabilities.ranges === true ? { ranges: true } : {}),
+    ...(active ? { maxIo: Math.min(active.maxIo, HOSTFS_IO) } : {}),
+  });
   const served = serveFilesystem(
     port2,
     { ...slot.handlers, mount: ranged },
@@ -795,8 +821,8 @@ export async function openHostfs(
     {
       connect: () => connect(spec.source, { readonly }),
       up(client) {
-        active = client;
-        slot.insert(client, bounded(handlers, timing.callMs ?? HOSTFS_CALL_MS, client));
+        active = timed(client, timing.callMs ?? HOSTFS_CALL_MS);
+        slot.insert(client, handlers);
         served.invalidate(true);
       },
       event: (event) => served.invalidate(invalidation(event)),
