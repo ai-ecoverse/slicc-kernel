@@ -72,6 +72,8 @@ const IDS = ['ruid', 'euid', 'suid', 'rgid', 'egid', 'sgid'] as const;
 const NS_PER_MS = 1_000_000n;
 const AT_SYMLINK_NOFOLLOW = 1;
 
+const ROOT_IDS = Object.freeze({ uid: 0, gid: 0 });
+
 function idOf(value: number): number | undefined {
   return value >>> 0 === 0xffffffff ? undefined : value >>> 0;
 }
@@ -235,6 +237,32 @@ export class WasiHost {
       fd_owner: (fd: number, out: number) => {
         if (!this.o.fs.owners) throw new WasiError('ENOTSUP');
         owner(streamed(fd) ? undefined : this.o.fs.stat(pathOf(fd)), out);
+      },
+      fd_filestat_owner: (fd: number, statOut: number, out: number) => {
+        if (!this.o.fs.owners) throw new WasiError('ENOTSUP');
+        this.writeFilestat(statOut, this.fdFilestat(fd));
+        const e = fds.get(fd);
+        const named = e.type !== 'device' && (e.type !== 'kernel' || fds.kind(fd, e) === 'file');
+        owner(e.type === 'device' ? ROOT_IDS : named ? this.o.fs.stat(pathOf(fd)) : undefined, out);
+      },
+      path_filestat_owner: (
+        dirfd: number,
+        lookup: number,
+        p: number,
+        l: number,
+        statOut: number,
+        out: number
+      ) => {
+        if (!this.o.fs.owners) throw new WasiError('ENOTSUP');
+        const path = at(dirfd, p, l);
+        this.writeFilestat(statOut, this.pathFilestat(path, lookup));
+        const follow = (lookup & LOOKUP_SYMLINK_FOLLOW) !== 0;
+        const st = deviceOf(path)
+          ? ROOT_IDS
+          : follow
+            ? this.o.fs.stat(path)
+            : this.o.fs.lstat(path);
+        owner(st, out);
       },
       path_owner: (dirfd: number, p: number, l: number, flags: number, out: number) => {
         if (!this.o.fs.owners) throw new WasiError('ENOTSUP');

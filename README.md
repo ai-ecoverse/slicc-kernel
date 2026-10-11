@@ -481,8 +481,10 @@ WASI and WASIX have no call for file modes, so the kernel adds the import module
 | `path_chown(dirfd, path, path_len, uid, gid, flags)` | `fchownat`, of the link itself with `flags & 1` |
 | `fd_owner(fd, out)` | writes the owner of an open file as `u32` uid, then `u32` gid |
 | `path_owner(dirfd, path, path_len, flags, out)` | those of a path, of the link itself with `flags & 1` |
+| `fd_filestat_owner(fd, filestat_out, out)` | `fd_filestat_get` and `fd_owner` in one call |
+| `path_filestat_owner(dirfd, lookupflags, path, path_len, filestat_out, out)` | `path_filestat_get` (with its preview1 lookup flags: `1` follows a symlink) and the owner of the same path, in one call, so a libc's `stat` costs one call either way |
 
-The owner calls follow [File owners](#file-owners): with `users: 'off'`, `fd_chown` and `path_chown` succeed and change nothing, and `fd_owner` and `path_owner` answer the caller's effective uid and gid for every file, as an Emscripten program built against the credential calls sees them. A pipe's owner is the caller.
+The owner calls follow [File owners](#file-owners): with `users: 'off'`, `fd_chown` and `path_chown` succeed and change nothing, and the four owner calls answer `ENOTSUP`, "owners not tracked", before looking at anything, so a libc can remember that once and take its own `getuid()` and `getgid()` as every file's owner, which is what an Emscripten program built against the credential calls sees. Devices are root's. A pipe's owner is the caller.
 
 WASIX's own terminal calls carry only echo and line buffering (`tty_set`) and answer for "the" terminal whatever the descriptor (`tty_get`), so a WASIX program's `cfmakeraw` would leave `^C` a signal and its output post-processed. The kernel adds the import module `slicc_tty`, with the full Linux `struct termios` (musl's 60-byte layout: four `u32` flag words, `c_line`, `c_cc[32]`, then input and output speed; speeds read as `B38400` and are ignored when set) and answers per descriptor, again as a preview1 errno (`ENOTTY` for a descriptor that is no terminal, `EBADF` for one that isn't open, `ENOSYS` from kernels without them):
 
