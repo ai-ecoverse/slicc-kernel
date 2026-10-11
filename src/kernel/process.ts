@@ -444,8 +444,7 @@ export class WasmProcess {
 
   private stops = 0;
   private owed = false;
-  private waits = 0;
-  private inWait = 0;
+  private readonly waiting = new Set<AbortSignal>();
   private resumed: Promise<void> = Promise.resolve();
   private wake: (() => void) | undefined;
   private readonly stateListeners: StateListener[] = [];
@@ -520,7 +519,8 @@ export class WasmProcess {
       return 'terminate';
     }
     this.options.onPending?.(sig);
-    if (this.options.jobs?.keyboard && KEYBOARD.has(sig) && this.inWait === 0) this.owed = true;
+    if (this.options.jobs?.keyboard && KEYBOARD.has(sig) && this.waiting.size === 0)
+      this.owed = true;
     const blocked = this.interrupt;
     this.interrupt = new AbortController();
     blocked.abort();
@@ -571,9 +571,13 @@ export class WasmProcess {
       await this.resumed;
       if (this.dying) return DYING;
       const stops = this.stops;
-      const waits = this.waits;
-      const result = await this.dispatch(req, cancelled).finally(() => {
-        this.inWait -= this.waits - waits;
+      const scope = new AbortController();
+      const forward = () => scope.abort();
+      if (cancelled?.aborted) scope.abort();
+      cancelled?.addEventListener('abort', forward, { once: true });
+      const result = await this.dispatch(req, scope.signal).finally(() => {
+        cancelled?.removeEventListener('abort', forward);
+        this.waiting.delete(scope.signal);
       });
       if (this.dying) return DYING;
 
@@ -659,10 +663,7 @@ export class WasmProcess {
       throw new KernelError('EINTR');
     }
     if (this.options.hasPending?.() || cancelled?.aborted) throw new KernelError('EINTR');
-    if (owing) {
-      this.waits++;
-      this.inWait++;
-    }
+    if (owing && cancelled) this.waiting.add(cancelled);
     return this.cancelSignal(cancelled);
   }
 
@@ -1101,7 +1102,7 @@ export class WasmProcess {
         return { ok: true, kind: 'json', json: this.options.mounts?.() ?? [] };
       case 'mount':
       case 'umount':
-        return this.mountSyscall(req);
+        return this.mountSyscall(req, cancelled);
       case 'proc-alarm':
         this.setAlarm(req.sig, req.firstMs ?? req.ms, req.repeat ? req.ms : 0, req.timer);
         return { ok: true, kind: 'void' };
@@ -1138,7 +1139,8 @@ export class WasmProcess {
   }
 
   private async mountSyscall(
-    req: Extract<WasmSyscall, { op: 'mount' | 'umount' }>
+    req: Extract<WasmSyscall, { op: 'mount' | 'umount' }>,
+    cancelled?: AbortSignal
   ): Promise<SyncFsResult> {
     const { mount, umount } = this.options;
     if (!mount || !umount) throw new KernelError('ENOSYS');
@@ -1146,7 +1148,7 @@ export class WasmProcess {
       if (req.op === 'umount') await umount(req.target, req.flags);
       else {
         const { source, target, type, flags, data } = req;
-        const signal = this.blockingSignal();
+        const signal = this.blockingSignal(cancelled);
         await Promise.race([mount({ source, target, type, flags, data }, signal), aborted(signal)]);
       }
     } catch (err) {
