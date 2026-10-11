@@ -1,3 +1,4 @@
+import type { Cred } from '../../kernel/cred.ts';
 import type { SyncFsPosixBridge, SyncFsResult } from '../../realm/sync-fs-wire.ts';
 import { E, FDFLAGS, OFLAGS, RIGHTS, wasiErrnoOf } from './wasi-abi.ts';
 import { WasiError } from './wasi-files.ts';
@@ -90,6 +91,8 @@ export interface ImportsContext {
     close(): void;
   };
   errno(err: unknown): number;
+  readonly uid?: number;
+  readonly gid?: number;
 }
 
 export type ProgramImports = Record<string, Record<string, WebAssembly.ImportValue>>;
@@ -163,6 +166,12 @@ export function importsContext({
     if (path === undefined) throw new WasiError('EBADF');
     return path;
   };
+  const owners = fs.owners === true;
+  const live = (): { uid: number; gid: number } => {
+    if (!owners) return { uid: UID, gid: UID };
+    const cred = call({ op: 'proc-cred' }) as Cred;
+    return { uid: cred.euid, gid: cred.egid };
+  };
   const fds: ImportsContext['fds'] = {
     open(path, o = {}) {
       const abs = host.fds.resolve(3, path);
@@ -187,7 +196,7 @@ export function importsContext({
       const path = pathOf(fd);
       if (path === undefined) {
         const kind = e.type === 'device' ? 'device' : 'stream';
-        return { kind, mode: kind === 'device' ? 0o20666 : 0o10600, uid: UID, gid: UID, size: 0 };
+        return { kind, mode: kind === 'device' ? 0o20666 : 0o10600, ...live(), size: 0 };
       }
       host.fds.flushPath(path);
       const s = fs.stat(path);
@@ -195,8 +204,7 @@ export function importsContext({
         kind: s.isDirectory ? 'dir' : 'file',
         path,
         mode: s.mode ?? (s.isDirectory ? 0o40755 : 0o100644),
-        uid: UID,
-        gid: UID,
+        ...(s.uid !== undefined && s.gid !== undefined ? { uid: s.uid, gid: s.gid } : live()),
         size: s.size,
         ...(s.ino !== undefined ? { ino: s.ino } : {}),
         ...(s.mtimeMs !== undefined ? { mtimeMs: s.mtimeMs } : {}),
@@ -219,7 +227,7 @@ export function importsContext({
       call({ op: 'unlock', path: requirePath(fd) });
     },
   };
-  return {
+  const ctx: ImportsContext = {
     memory,
     instance,
     tid,
@@ -258,6 +266,11 @@ export function importsContext({
     },
     errno: (err) => wasiErrnoOf(code(err)),
   };
+  if (!owners) return ctx;
+  return Object.defineProperties(ctx, {
+    uid: { get: () => live().uid, enumerable: true },
+    gid: { get: () => live().gid, enumerable: true },
+  });
 }
 
 type ChildSlot = { fd: number } | { none: true };
