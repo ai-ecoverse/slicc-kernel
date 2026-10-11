@@ -429,7 +429,12 @@ export class LinkSync {
         this.call({ op: 'dl-load-reserve', floor, size }) as { base: number; handle: number },
       lock: () => {
         this.call({ op: 'dl-lock', owner: this.owner });
-        this.catchUp();
+        try {
+          this.catchUp();
+        } catch (e) {
+          this.call({ op: 'dl-unlock', owner: this.owner });
+          throw e;
+        }
       },
       unlock: () => this.call({ op: 'dl-unlock', owner: this.owner }),
       allocate: (floor) => {
