@@ -346,7 +346,14 @@ export class WasiFds {
         handed.add(e.file.buffer);
         promoted.set(e.file, fd);
       }
-      this.table.set(fd, { type: 'kernel', kind: 'file', nonblock: false, append: e.file.append });
+      this.table.set(fd, {
+        type: 'kernel',
+        kind: 'file',
+        nonblock: false,
+        append: e.file.append,
+        path: e.file.path,
+        ino: this.inoOf(e.file.path),
+      });
     }
     for (const file of promoted.keys()) {
       if (--file.buffer.opens <= 0) {
@@ -481,9 +488,22 @@ export class WasiFds {
     this.buffers.delete(path);
   }
 
+  private inoOf(path: string): number | undefined {
+    try {
+      return this.fs.stat(path).ino;
+    } catch {
+      return undefined;
+    }
+  }
+
   renamed(from: string, to: string): void {
     if (from === to) return;
     if (this.shared) this.kernel.call({ op: 'fd-path-renamed', from, to });
+    for (const e of this.table.values()) {
+      if (e.type === 'kernel' && e.path !== undefined && within(e.path, from)) {
+        e.path = to + e.path.slice(from.length);
+      }
+    }
     const moved: Array<[string, FileBuffer]> = [];
     for (const [p, buffer] of this.buffers) {
       if (within(p, from)) moved.push([p, buffer]);
@@ -581,7 +601,10 @@ export class WasiFds {
 
     const truncate = made || (oflags & OFLAGS.TRUNC) !== 0;
     const fd = this.kernel.sys.openVfs(path, flags, 0, truncate ? { truncate } : {});
-    this.table.set(fd, { type: 'kernel', kind: 'file', nonblock: false, append });
+    const was = existing && this.inoOf(path);
+    if (truncate) (this.fs as { touched?(path?: string, ino?: number): void }).touched?.(path, was);
+    const ino = existing ? was : this.inoOf(path);
+    this.table.set(fd, { type: 'kernel', kind: 'file', nonblock: false, append, path, ino });
     if (append) this.publishFlags(fd, { nonblock: false, append });
     this.bump();
     return fd;

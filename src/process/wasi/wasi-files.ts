@@ -244,6 +244,8 @@ export type WasiEntry =
       kind?: KernelFdKind;
       nonblock: boolean;
       append: boolean;
+      path?: string;
+      ino?: number;
     }
   | { type: 'file'; file: LocalFile }
   | {
@@ -323,13 +325,150 @@ interface Miss {
   until: number;
 }
 
+export const FS_GEN = 4;
+const RING = 8;
+const RING_SIZE = 64;
+const SLOT = 3;
+export const SHARED_IDS_BYTES = (RING + RING_SIZE * SLOT) * 4;
+
+type Cached = SyncFsBridgeStat | Miss;
+
+function inoKey(st: Cached): number {
+  return 'ino' in st && typeof st.ino === 'number' ? (st.ino % 4294967296) | 0 : 0;
+}
+
+function pathHash(path: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < path.length; i++) h = Math.imul(h ^ path.charCodeAt(i), 0x01000193);
+  return h === 0 ? 1 : h;
+}
+
+class StatCache {
+  readonly stats = new Map<string, Cached>();
+  readonly lstats = new Map<string, Cached>();
+  private readonly byHash = new Map<number, Set<string>>();
+  private readonly byIno = new Map<number, Set<string>>();
+  private readonly shared: Int32Array | undefined;
+  private seen: number;
+  constructor(shared: Int32Array | undefined) {
+    this.shared = shared;
+    this.seen = shared ? Atomics.load(shared, FS_GEN) : 0;
+  }
+
+  put(map: Map<string, Cached>, path: string, entry: Cached): void {
+    map.set(path, entry);
+    if (!this.shared) return;
+    index(this.byHash, pathHash(path), path);
+    const ino = inoKey(entry);
+    if (ino !== 0) index(this.byIno, ino, path);
+  }
+
+  fresh(): void {
+    if (!this.shared) return;
+    const now = Atomics.load(this.shared, FS_GEN);
+    if (now === this.seen) return;
+    this.replay(now);
+    this.seen = now;
+  }
+
+  changed(path: string | undefined, ino = 0): void {
+    const key = (ino % 4294967296) | 0;
+    if (this.shared) {
+      const g = this.publish(this.shared, path === undefined ? 0 : pathHash(path), key);
+      this.replay(g - 1);
+      this.seen = g;
+      if (path === undefined) this.clear();
+      else this.drop(pathHash(path), key);
+    }
+    if (path === undefined) return;
+    this.stats.delete(path);
+    this.lstats.delete(path);
+  }
+
+  mutated(paths: readonly string[], ino = 0): void {
+    this.clear();
+    if (!this.shared) return;
+    const key = (ino % 4294967296) | 0;
+    for (const [i, hash] of (paths.length > 0 ? paths.map(pathHash) : [0]).entries()) {
+      this.seen = this.publish(this.shared, hash, i === 0 ? key : 0);
+    }
+  }
+
+  inoOf(path: string, look: () => SyncFsBridgeStat): number {
+    if (!this.shared) return 0;
+    this.fresh();
+    const hit = this.stats.get(path);
+    if (hit && 'ino' in hit && typeof hit.ino === 'number') return hit.ino;
+    try {
+      return look().ino ?? 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  private publish(shared: Int32Array, hash: number, ino: number): number {
+    const g = Atomics.add(shared, FS_GEN, 1) + 1;
+    const at = RING + (g % RING_SIZE) * SLOT;
+    Atomics.store(shared, at, 0);
+    Atomics.store(shared, at + 1, hash);
+    Atomics.store(shared, at + 2, ino);
+    Atomics.store(shared, at, g);
+    return g;
+  }
+
+  private replay(upTo: number): void {
+    const shared = this.shared as Int32Array;
+    const missed: Array<[number, number]> = [];
+    for (let g = this.seen + 1; g <= upTo && upTo - this.seen <= RING_SIZE; g++) {
+      const at = RING + (g % RING_SIZE) * SLOT;
+      const tag = Atomics.load(shared, at);
+      const hash = Atomics.load(shared, at + 1);
+      const ino = Atomics.load(shared, at + 2);
+      if (tag !== g || hash === 0 || Atomics.load(shared, at) !== g) break;
+      missed.push([hash, ino]);
+    }
+    if (missed.length < upTo - this.seen) this.clear();
+    else for (const [hash, ino] of missed) this.drop(hash, ino);
+  }
+
+  private drop(hash: number, ino: number): void {
+    const paths = [
+      ...(this.byHash.get(hash) ?? []),
+      ...(ino === 0 ? [] : (this.byIno.get(ino) ?? [])),
+    ];
+    for (const path of paths) {
+      this.stats.delete(path);
+      this.lstats.delete(path);
+    }
+    this.byHash.delete(hash);
+    if (ino !== 0) this.byIno.delete(ino);
+  }
+
+  private clear(): void {
+    this.stats.clear();
+    this.lstats.clear();
+    this.byHash.clear();
+    this.byIno.clear();
+  }
+}
+
+function index(map: Map<number, Set<string>>, key: number, path: string): void {
+  const paths = map.get(key) ?? new Set<string>();
+  paths.add(path);
+  map.set(key, paths);
+}
+
 export function cachingBridge(
   bridge: SyncFsPosixBridge,
-  now: () => number = () => performance.now()
-): SyncFsPosixBridge & { invalidate(): void } {
-  const stats = new Map<string, SyncFsBridgeStat | Miss>();
-  const lstats = new Map<string, SyncFsBridgeStat | Miss>();
+  now: () => number = () => performance.now(),
+  shared?: Int32Array
+): SyncFsPosixBridge & { invalidate(): void; touched(path?: string, ino?: number): void } {
+  const blind = shared !== undefined && shared.length * 4 < SHARED_IDS_BYTES;
+  const cache = new StatCache(blind ? undefined : shared);
+  const { stats, lstats } = cache;
   const cached = (map: typeof stats, path: string, get: () => SyncFsBridgeStat) => {
+    if (blind) return get();
+    cache.fresh();
     let hit = map.get(path);
     if (hit === undefined || ('until' in hit && hit.until <= now())) {
       try {
@@ -337,23 +476,30 @@ export function cachingBridge(
       } catch (e) {
         hit = { error: e as Error, until: now() + MISS_TTL_MS };
       }
-      map.set(path, hit);
+      cache.put(map, path, hit);
     }
     if ('until' in hit) throw hit.error;
     return hit;
   };
-  const invalidate = () => {
-    stats.clear();
-    lstats.clear();
-  };
+  const invalidate = () => cache.mutated([]);
+  const touched = (path?: string, ino?: number) => cache.changed(path, ino);
 
-  const mutating = <T>(op: () => T): T => {
+  const mutating = <T>(op: () => T, ...paths: string[]): T => {
     try {
       return op();
     } finally {
-      invalidate();
+      cache.mutated(paths);
     }
   };
+  const rewriting = <T>(p: string, op: () => T, ...also: string[]): T => {
+    const ino = cache.inoOf(p, () => bridge.stat(p));
+    try {
+      return op();
+    } finally {
+      cache.mutated([p, ...also], ino);
+    }
+  };
+  const entry = (p: string) => [p, p.slice(0, p.lastIndexOf('/')) || '/'];
   return {
     readFile: (p) => bridge.readFile(p),
     readdir: (p) => bridge.readdir(p),
@@ -362,9 +508,9 @@ export function cachingBridge(
       const list = bridge.readdirStat(p);
       const base = p === '/' ? '' : p;
       for (const [name, st] of list) {
-        if (!st) continue;
-        lstats.set(`${base}/${name}`, st);
-        if (!st.isSymbolicLink) stats.set(`${base}/${name}`, st);
+        if (!st || blind) continue;
+        cache.put(lstats, `${base}/${name}`, st);
+        if (!st.isSymbolicLink) cache.put(stats, `${base}/${name}`, st);
       }
       return list;
     },
@@ -379,44 +525,48 @@ export function cachingBridge(
         return false;
       }
     },
-    writeFile: (p, bytes, open) => mutating(() => bridge.writeFile(p, bytes, open)),
-    mkdir: (p) => mutating(() => bridge.mkdir(p)),
+    writeFile: (p, bytes, open) =>
+      rewriting(p, () => bridge.writeFile(p, bytes, open), ...entry(p).slice(1)),
+    mkdir: (p) => mutating(() => bridge.mkdir(p), ...entry(p)),
     rm: (p) => mutating(() => bridge.rm(p)),
     rename: (from, to) => mutating(() => bridge.rename(from, to)),
     unlink: (p) => mutating(() => bridge.unlink(p)),
     rmdir: (p) => mutating(() => bridge.rmdir(p)),
-    symlink: (target, link) => mutating(() => bridge.symlink(target, link)),
-    chmod: (p, mode) => mutating(() => bridge.chmod(p, mode)),
-    utimes: (p, a, m) => mutating(() => bridge.utimes(p, a, m)),
-    lutimes: (p, a, m) => mutating(() => bridge.lutimes(p, a, m)),
+    symlink: (target, link) => mutating(() => bridge.symlink(target, link), ...entry(link)),
+    chmod: (p, mode) => rewriting(p, () => bridge.chmod(p, mode)),
+    utimes: (p, a, m) => rewriting(p, () => bridge.utimes(p, a, m)),
+    lutimes: (p, a, m) => mutating(() => bridge.lutimes(p, a, m), p),
     ...(bridge.hold ? { hold: bridge.hold.bind(bridge) } : {}),
     ...(bridge.kept ? { kept: bridge.kept.bind(bridge) } : {}),
-    ...(bridge.pinned ? { pinned: (handle: number) => pinnedIo(bridge, handle, mutating) } : {}),
-    ...(bridge.create ? { create: (p: string) => mutating(() => bridge.create?.(p)) } : {}),
+    ...(bridge.pinned ? { pinned: (handle: number) => pinnedIo(bridge, handle, rewriting) } : {}),
+    ...(bridge.create
+      ? { create: (p: string) => mutating(() => bridge.create?.(p), ...entry(p)) }
+      : {}),
     ...(bridge.pread && bridge.pwrite && bridge.truncate
       ? {
           pread: bridge.pread.bind(bridge),
           pwrite: (p: string, at: number, bytes: Uint8Array, transfer?: boolean) =>
-            mutating(() => bridge.pwrite?.(p, at, bytes, transfer)),
-          truncate: (p: string, size: number) => mutating(() => bridge.truncate?.(p, size)),
+            rewriting(p, () => bridge.pwrite?.(p, at, bytes, transfer)),
+          truncate: (p: string, size: number) => rewriting(p, () => bridge.truncate?.(p, size)),
         }
       : {}),
     invalidate,
+    touched,
   };
 }
 
 function pinnedIo(
   bridge: SyncFsPosixBridge,
   handle: number,
-  mutating: <T>(op: () => T) => T
+  rewriting: <T>(p: string, op: () => T) => T
 ): SyncFsFileIo {
   const io = (bridge.pinned as NonNullable<SyncFsPosixBridge['pinned']>)(handle);
   const { pread, pwrite, truncate } = io as Required<SyncFsFileIo>;
   return {
     readFile: (p) => io.readFile(p),
-    writeFile: (p, bytes, open) => mutating(() => io.writeFile(p, bytes, open)),
+    writeFile: (p, bytes, open) => rewriting(p, () => io.writeFile(p, bytes, open)),
     pread: (p, at, n, version) => pread(p, at, n, version),
-    pwrite: (p, at, bytes, transfer) => mutating(() => pwrite(p, at, bytes, transfer)),
-    truncate: (p, size) => mutating(() => truncate(p, size)),
+    pwrite: (p, at, bytes, transfer) => rewriting(p, () => pwrite(p, at, bytes, transfer)),
+    truncate: (p, size) => rewriting(p, () => truncate(p, size)),
   };
 }
