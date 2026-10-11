@@ -65,10 +65,15 @@ export const UNDELIVERED: Readonly<Record<string, readonly string[]>> = {
 
 const DELIVERED = [PREVIEW1, WASIX, SLICC, SLICC_FS, SLICC_TTY];
 
-function deliverAll(imports: WebAssembly.Imports, host: WasiHost, driver: AsyncifyDriver): void {
+function deliverAll(
+  imports: WebAssembly.Imports,
+  host: WasiHost,
+  driver: AsyncifyDriver,
+  before?: () => void
+): void {
   for (const ns of DELIVERED) {
     const table = imports[ns];
-    if (table) imports[ns] = delivering(ns, table, host, driver);
+    if (table) imports[ns] = delivering(ns, table, host, driver, before);
   }
 }
 
@@ -76,7 +81,8 @@ export function delivering(
   ns: string,
   table: WebAssembly.ModuleImports,
   host: WasiHost,
-  driver: AsyncifyDriver
+  driver: AsyncifyDriver,
+  before?: () => void
 ): WebAssembly.ModuleImports {
   const exempt = new Set(UNDELIVERED[ns]);
   const out: WebAssembly.ModuleImports = {};
@@ -87,7 +93,10 @@ export function delivering(
     }
     const fn = value as (...args: unknown[]) => unknown;
     out[name] = (...args: unknown[]) => {
-      if (driver.idle) host.interrupted?.();
+      if (driver.idle) {
+        before?.();
+        host.interrupted?.();
+      }
       return fn(...args);
     };
   }
@@ -375,7 +384,7 @@ async function instantiate(
     sliccFs,
     sliccTty
   );
-  deliverAll(hostImports, host, driver);
+  deliverAll(hostImports, host, driver, sync && (() => sync.current()));
   const imports: WebAssembly.Imports = sync
     ? merge(hostImports, sync.linker.mainImports(module))
     : hostImports;
@@ -501,6 +510,10 @@ export class LinkSync {
     this.catchUp();
   }
 
+  current(): void {
+    if (this.ids && Atomics.load(this.ids, DL_GEN) !== this.gen) this.catchUp();
+  }
+
   catchUp(): void {
     for (;;) {
       const gen = this.ids ? Atomics.load(this.ids, DL_GEN) : 0;
@@ -525,10 +538,9 @@ export class LinkSync {
         Object.entries(table).map(([name, fn]) => [
           name,
           ((...args: never[]) => {
-            if (Atomics.load(ids, DL_GEN) !== this.gen) this.catchUp();
-
+            this.current();
             const result = fn(...args);
-            if (Atomics.load(ids, DL_GEN) !== this.gen) this.catchUp();
+            this.current();
             return result;
           }) as WasiFunction,
         ])
