@@ -1,4 +1,5 @@
 import { portCdpHook } from '../cdp/port.ts';
+import { access, R_OK, X_OK } from '../fs/access.ts';
 import {
   type Guard,
   inParent,
@@ -11,6 +12,8 @@ import {
   writable,
 } from '../fs/dac.ts';
 import { fsError, type KernelFs, type NewOwner, type Owner } from '../fs/types.ts';
+import { parentOf } from '../fs/walk.ts';
+import type { WatchChange } from '../fs/watch.ts';
 import { dialSocket, serveSocket } from '../kernel/dial.ts';
 import type { TransportCall } from '../kernel/net/remote-transport.ts';
 import type { RealmTransport } from '../kernel/net/transport.ts';
@@ -283,20 +286,37 @@ function cdpRegistry(
   };
 }
 
-function watchOp(
+function visibleTo(g: Guard | undefined, notify: (change: WatchChange) => void) {
+  if (!g?.dac.enforcing) return notify;
+  let queue = Promise.resolve();
+  const seen = async (path: string) =>
+    (await access(g.fs, g.cred, parentOf(path), R_OK | X_OK, { directory: true })).denied ===
+    undefined;
+  return (change: WatchChange) => {
+    queue = queue.then(async () => {
+      if (!('paths' in change)) return notify(change);
+      const paths: string[] = [];
+      for (const path of change.paths) if (await seen(path)) paths.push(path);
+      if (paths.length > 0) notify({ paths });
+    });
+  };
+}
+
+async function watchOp(
   l: Launcher,
   req: Extract<ClientRequest, { op: 'watch' | 'unwatch' }>,
   watches: Map<number, () => void>,
-  send: (message: object) => void
-): Answer {
+  send: (message: object) => void,
+  g?: Guard
+): Promise<Answer> {
   if (req.op === 'unwatch') {
     watches.get(req.watch)?.();
     watches.delete(req.watch);
     return { result: true };
   }
-  const unwatch = l.watchers.watch(req.paths, { recursive: req.recursive }, (change) =>
-    send({ watch: req.id, change })
-  );
+  if (g) for (const path of req.paths) await readable(g, 'watch', l.fs.resolvePath('/', path));
+  const notify = visibleTo(g, (change) => send({ watch: req.id, change }));
+  const unwatch = l.watchers.watch(req.paths, { recursive: req.recursive }, notify);
   watches.set(req.id, unwatch);
   return { result: req.id };
 }
@@ -422,7 +442,7 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
         return fsCall(l.fs, req.method, req.args, ownerFor(l, self), guardFor(l, self));
       case 'watch':
       case 'unwatch':
-        return watchOp(l, req, watches, send);
+        return watchOp(l, req, watches, send, guardFor(l, self));
       case 'mount':
         return { result: await l.mount(req.spec) };
       case 'umount':

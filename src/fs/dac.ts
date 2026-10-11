@@ -141,6 +141,7 @@ export async function removable(g: Guard, op: string, path: string): Promise<voi
 }
 
 export async function renamable(g: Guard, from: string, to: string): Promise<void> {
+  if (from === to) return void (await need(g, 'rename', from, 0, { follow: false }));
   await inParent(g, 'rename', from, true);
   await inParent(g, 'rename', to, true);
   if (g.cred.euid === 0 || parentOf(from) === parentOf(to)) return;
