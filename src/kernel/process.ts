@@ -445,6 +445,7 @@ export class WasmProcess {
   private stops = 0;
   private owed = false;
   private waits = 0;
+  private inWait = 0;
   private resumed: Promise<void> = Promise.resolve();
   private wake: (() => void) | undefined;
   private readonly stateListeners: StateListener[] = [];
@@ -519,7 +520,7 @@ export class WasmProcess {
       return 'terminate';
     }
     this.options.onPending?.(sig);
-    if (this.options.jobs?.keyboard && KEYBOARD.has(sig)) this.owed = true;
+    if (this.options.jobs?.keyboard && KEYBOARD.has(sig) && this.inWait === 0) this.owed = true;
     const blocked = this.interrupt;
     this.interrupt = new AbortController();
     blocked.abort();
@@ -571,9 +572,10 @@ export class WasmProcess {
       if (this.dying) return DYING;
       const stops = this.stops;
       const waits = this.waits;
-      const result = await this.dispatch(req, cancelled);
+      const result = await this.dispatch(req, cancelled).finally(() => {
+        this.inWait -= this.waits - waits;
+      });
       if (this.dying) return DYING;
-      if (!result.ok && result.errno === 'EINTR' && this.waits !== waits) this.owed = false;
 
       const restart = !result.ok && result.errno === 'EINTR' && this.stops !== stops;
       if (restart && !this.options.hasPending?.()) continue;
@@ -633,11 +635,38 @@ export class WasmProcess {
     if (restart && this.options.hasPending?.()) throw new KernelError('EINTR');
   }
 
+  private async procWait(
+    req: Extract<WasmSyscall, { op: 'proc-wait' }>,
+    cancelled?: AbortSignal
+  ): Promise<[number, number]> {
+    const flags = {
+      untraced: req.untraced,
+      continued: req.continued,
+      inGroup: this.waitGroup(req.pid),
+    };
+    if (this.owed && !req.nohang) {
+      const now = await this.children.wait(req.pid, true, this.interrupt.signal, flags);
+      if (now[0] !== 0) return now;
+    }
+    const signal = req.nohang ? this.interrupt.signal : this.blockingSignal(cancelled);
+    const waited = await this.children.wait(req.pid, req.nohang, signal, flags);
+    return waited;
+  }
+
   private blockingSignal(cancelled?: AbortSignal, owing = true): AbortSignal {
-    if (owing) this.waits++;
-    if (this.options.hasPending?.() || cancelled?.aborted || (owing && this.owed)) {
+    if (owing && this.owed) {
+      this.owed = false;
       throw new KernelError('EINTR');
     }
+    if (this.options.hasPending?.() || cancelled?.aborted) throw new KernelError('EINTR');
+    if (owing) {
+      this.waits++;
+      this.inWait++;
+    }
+    return this.cancelSignal(cancelled);
+  }
+
+  private cancelSignal(cancelled?: AbortSignal): AbortSignal {
     return cancelled ? AbortSignal.any([this.interrupt.signal, cancelled]) : this.interrupt.signal;
   }
 
@@ -675,7 +704,7 @@ export class WasmProcess {
 
     return file.write(
       body,
-      this.options.hasPending?.() ? AbortSignal.abort() : this.interrupt.signal
+      this.options.hasPending?.() ? AbortSignal.abort() : this.cancelSignal(cancelled)
     );
   }
 
@@ -808,6 +837,11 @@ export class WasmProcess {
         return { ok: true, kind: 'json', json: this.options.jobs?.terminalNames() ?? [] };
       case 'fd-select': {
         const { read, write, timeoutMs } = req;
+        if (this.owed && timeoutMs !== 0) {
+          const ready = await selectFds(this.fds, read, write, 0, this.interrupt.signal);
+          if (ready.read.length + ready.write.length > 0)
+            return { ok: true, kind: 'json', json: ready };
+        }
         const signal = this.blockingSignal(cancelled, timeoutMs !== 0);
         const selected = await selectFds(this.fds, read, write, timeoutMs, signal);
         return { ok: true, kind: 'json', json: selected };
@@ -1032,16 +1066,8 @@ export class WasmProcess {
       case 'proc-spawn':
         this.refuseIfPending(req.restart);
         return { ok: true, kind: 'json', json: await this.spawn(req) };
-      case 'proc-wait': {
-        const signal = req.nohang ? this.interrupt.signal : this.blockingSignal(cancelled);
-        const flags = {
-          untraced: req.untraced,
-          continued: req.continued,
-          inGroup: this.waitGroup(req.pid),
-        };
-        const waited = await this.children.wait(req.pid, req.nohang, signal, flags);
-        return { ok: true, kind: 'json', json: waited };
-      }
+      case 'proc-wait':
+        return { ok: true, kind: 'json', json: await this.procWait(req, cancelled) };
       case 'proc-identity':
         return { ok: true, kind: 'json', json: (await this.options.identity?.()) ?? null };
       case 'proc-exec': {
