@@ -35,7 +35,7 @@ export interface HostfsTransport {
   readonly maxIo: number;
   readonly gone?: boolean;
   retire?(why: string): void;
-  cleanup?(op: string, body: Record<string, unknown>): Promise<void>;
+  cleanup?(op: string, body: Record<string, unknown>): Promise<unknown>;
   call<T>(op: string, body?: Record<string, unknown>, handle?: boolean): Promise<T>;
   read(fh: number, offset: number, size: number, ifMatch?: string): Promise<Uint8Array>;
   write(fh: number, offset: number, bytes: Uint8Array): Promise<void>;
@@ -150,7 +150,7 @@ export class HostfsClient implements HostfsTransport {
     return (await response.json()) as T;
   }
 
-  async cleanup(op: string, body: Record<string, unknown>): Promise<void> {
+  async cleanup(op: string, body: Record<string, unknown>): Promise<unknown> {
     const response = await this.send(
       '/api/hostfs',
       {
@@ -162,7 +162,7 @@ export class HostfsClient implements HostfsTransport {
       false,
       true
     );
-    await response.body?.cancel();
+    return response.json().catch(() => null);
   }
 
   async read(fh: number, offset: number, size: number, ifMatch?: string): Promise<Uint8Array> {
@@ -234,7 +234,12 @@ interface Remote {
   restore: { path: string; mode: number } | undefined;
 }
 
-export function hostfsHandlers(current: () => HostfsTransport): MediumHandlers {
+export const RESTORE_AGAIN_MS = 30_000;
+
+export function hostfsHandlers(
+  current: () => HostfsTransport,
+  againMs = RESTORE_AGAIN_MS
+): MediumHandlers {
   const handles = new Map<number, Remote>();
   let nextFh = 0;
   const fresh = (remote: Remote): Remote => {
@@ -251,6 +256,13 @@ export function hostfsHandlers(current: () => HostfsTransport): MediumHandlers {
     client.call('setattr', restore).catch((err: unknown) => {
       if (!client.gone || !client.cleanup) throw err;
       void client.cleanup('setattr', restore).catch(() => {});
+      setTimeout(async () => {
+        const seen = (await client.cleanup?.('stat', { path: restore.path }).catch(() => null)) as {
+          mode?: number;
+        } | null;
+        if (seen?.mode === (restore.mode | 0o200))
+          void client.cleanup?.('setattr', restore).catch(() => {});
+      }, againMs);
     });
   async function writable(client: HostfsTransport, path: string, flags: OpenFlags) {
     const { ifMatch: _, ...asked } = flags;
