@@ -610,6 +610,7 @@ export function keepingOpen(fs: KernelFs, nodes: VfsNodes): KernelFs {
       nodes.createExclusive(await nodes.entryKey(fs.resolvePath('/', path)), owner),
     symlink: (target, path, owner) =>
       nodes.onEntry(fs.resolvePath('/', path), () => fs.symlink(target, path, owner)),
+    link: (from, to) => nodes.onEntry(fs.resolvePath('/', to), () => fs.link(from, to)),
     mkdir: (path, options) =>
       nodes.onEntry(fs.resolvePath('/', path), () => fs.mkdir(path, options)),
   };

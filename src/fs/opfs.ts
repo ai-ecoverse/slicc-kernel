@@ -725,6 +725,10 @@ export class OpfsFs implements KernelFs {
     this.touch(parentOf(found.path));
   }
 
+  async link(from: string): Promise<void> {
+    throw fsError('EPERM', `${from}: this file system has no hard links`);
+  }
+
   async rename(from: string, to: string): Promise<void> {
     if (from === to) return;
     const source = await this.locate(from, false);

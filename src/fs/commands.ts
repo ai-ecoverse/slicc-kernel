@@ -86,6 +86,7 @@ export function withCommandDirs(
       }
     },
     writeFile: (path, content, owner) => fs.writeFile(path, content, owner),
+    link: (from, to) => fs.link(from, to),
     async exists(path) {
       return (await fs.exists(path)) || (await linked(path)) !== undefined;
     },

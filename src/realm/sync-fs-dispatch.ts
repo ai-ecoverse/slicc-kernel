@@ -28,6 +28,7 @@ export interface SyncFsStatJson {
   atimeMs: number;
   ctimeMs: number;
   ino: number;
+  nlink?: number;
   dev?: number;
   readonly?: boolean;
   maxFile?: number;
@@ -48,6 +49,7 @@ function statJson(s: FsStat): SyncFsStatJson {
     atimeMs: s.atime.getTime(),
     ctimeMs: s.ctime.getTime(),
     ino: s.ino,
+    ...(s.nlink !== undefined ? { nlink: s.nlink } : {}),
     ...(s.dev !== undefined ? { dev: s.dev } : {}),
     ...(s.readonly ? { readonly: true } : {}),
     ...(s.maxFile ? { maxFile: s.maxFile } : {}),
@@ -135,6 +137,9 @@ async function run(
       entry.renamed?.(path, to);
       return done;
     }
+    case 'link':
+      await fs.link(path, fs.resolvePath(cwd, req.arg2 ?? ''));
+      return done;
     case 'unlink':
       if ((await fs.lstat(path)).isDirectory) throw syncError('EISDIR', path);
       await fs.rm(path);
@@ -201,7 +206,8 @@ async function ranged(fs: KernelFs, path: string, req: SyncFsRequest): Promise<S
 }
 
 const UNLINKED_OPS = new Set<SyncFsOp>(['read', 'pread', 'pwrite', 'truncate']);
-const OWN_OPS = new Set<SyncFsOp>(['rm', 'unlink', 'rmdir', 'rename']);
+const OWN_OPS = new Set<SyncFsOp>(['rm', 'unlink', 'rmdir', 'rename', 'link']);
+const TWO_PATHS = new Set<SyncFsOp>(['rename', 'link']);
 
 async function keptOr(entry: SyncFsTokenEntry, path: string, handle?: number): Promise<string> {
   if (handle !== undefined) return entry.keptFor?.(handle)?.hidden ?? path;
@@ -232,7 +238,7 @@ export async function dispatchSyncFs(req: SyncFsRequest): Promise<SyncFsResult> 
       return await (entry.gate ? entry.gate(path, serve) : serve());
     }
     if (!entry.own || !OWN_OPS.has(req.op)) return await run(entry, path, req);
-    const target = req.op === 'rename' ? fs.resolvePath(cwd, req.arg2 ?? '') : path;
+    const target = TWO_PATHS.has(req.op) ? fs.resolvePath(cwd, req.arg2 ?? '') : path;
     return await entry.own(target, () => run(entry, path, req));
   } catch (err) {
     return toErrno(err);

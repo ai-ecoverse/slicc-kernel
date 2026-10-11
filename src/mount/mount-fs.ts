@@ -276,6 +276,7 @@ function statOf(attr: DriverAttr, path: string, mount: Mount): FsStat {
     atime: mtime,
     ctime: mtime,
     ino: attr.ino ?? inodeOf(path),
+    ...(attr.nlink !== undefined ? { nlink: attr.nlink } : {}),
     dev: mount.dev,
     ...(readonly(mount) ? { readonly: true } : {}),
     ...(mount.maxFile > 0 ? { maxFile: mount.maxFile } : {}),
@@ -1008,6 +1009,24 @@ class MountFs implements KernelFs {
     this.table.forget(a.mount, normalizePath(to));
     try {
       await a.mount.conn.call({ op: 'rename', from: a.rel, to: b.rel });
+    } finally {
+      this.table.forget(a.mount, normalizePath(from));
+      this.table.forget(a.mount, normalizePath(to));
+    }
+  }
+
+  async link(from: string, to: string): Promise<void> {
+    const a = this.at(from);
+    const b = this.at(to);
+    if (!a && !b) return this.base.link(from, to);
+    if (!a || !b || a.mount !== b.mount) throw errnoError('EXDEV', `${from} -> ${to}`);
+    this.writable(a.mount, normalizePath(to));
+    if (!a.mount.caps.links) {
+      throw errnoError('EPERM', `${from}: this file system has no hard links`);
+    }
+    await this.table.commitUnder(from);
+    try {
+      await a.mount.conn.call({ op: 'link', from: a.rel, to: b.rel });
     } finally {
       this.table.forget(a.mount, normalizePath(from));
       this.table.forget(a.mount, normalizePath(to));

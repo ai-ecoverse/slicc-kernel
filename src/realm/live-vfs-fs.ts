@@ -404,7 +404,7 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
         dev: st.dev ?? 1,
         ino: st.ino ?? inodeOf(liveNodePath(node)),
         mode: node.mode,
-        nlink: 1,
+        nlink: st.nlink ?? 1,
         uid: owned ? (st.uid ?? 0) : 0,
         gid: owned ? (st.gid ?? 0) : 0,
         rdev: 0,

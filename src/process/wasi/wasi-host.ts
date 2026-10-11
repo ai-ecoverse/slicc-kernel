@@ -90,6 +90,7 @@ interface Filestat {
   filetype: number;
   size: bigint;
   ino: bigint;
+  nlink?: bigint;
   mtimeNs: bigint;
 }
 
@@ -105,6 +106,7 @@ function filestatOf(path: string, s: SyncFsBridgeStat): Filestat {
     filetype: filetypeOf(s),
     size: BigInt(s.size),
     ino: s.ino !== undefined ? BigInt(s.ino) : pathInode(path),
+    ...(s.nlink !== undefined ? { nlink: BigInt(s.nlink) } : {}),
     mtimeNs: BigInt(Math.round(s.mtimeMs ?? 0)) * NS_PER_MS,
   };
 }
@@ -507,7 +509,19 @@ export class WasiHost {
         mem.view().setUint32(used, n, true);
       },
 
-      path_link: () => E.NOTSUP,
+      path_link: (
+        fd: number,
+        _flags: number,
+        p: number,
+        l: number,
+        fd2: number,
+        p2: number,
+        l2: number
+      ) => {
+        const from = at(fd, p, l);
+        fds.flushPath(from);
+        o.fs.link(from, at(fd2, p2, l2));
+      },
     };
   }
 
@@ -747,7 +761,7 @@ export class WasiHost {
     v.setBigUint64(ptr, 1n, true);
     v.setBigUint64(ptr + 8, f.ino, true);
     v.setUint8(ptr + 16, f.filetype);
-    v.setBigUint64(ptr + 24, 1n, true);
+    v.setBigUint64(ptr + 24, f.nlink ?? 1n, true);
     v.setBigUint64(ptr + 32, f.size, true);
     v.setBigUint64(ptr + 40, f.mtimeNs, true);
     v.setBigUint64(ptr + 48, f.mtimeNs, true);
