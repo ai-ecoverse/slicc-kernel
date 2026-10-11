@@ -1,4 +1,12 @@
-import { type FsStat, inodeOf, type KernelFs, lutimesOf, normalizePath } from '../fs/types.ts';
+import {
+  type FsStat,
+  inodeOf,
+  type KernelFs,
+  lutimesOf,
+  type NewOwner,
+  normalizePath,
+  type OwnerChange,
+} from '../fs/types.ts';
 import type { KeptFile, UnlinkHolder } from '../fs/unlinked.ts';
 import { DriverConnection, type DriverPortLike, errnoError } from './connection.ts';
 import type { DriverAttr, DriverCapabilities, DriverEntry, DriverStatfs } from './protocol.ts';
@@ -706,10 +714,10 @@ class MountFs implements KernelFs {
     return concat(chunks, total);
   }
 
-  async writeFile(path: string, content: Uint8Array | string): Promise<void> {
+  async writeFile(path: string, content: Uint8Array | string, owner?: NewOwner): Promise<void> {
     const real = await this.follow(path, 0, true);
     const found = this.at(real);
-    if (!found) return this.base.writeFile(real, content);
+    if (!found) return this.base.writeFile(real, content, owner);
     const { mount, rel } = found;
     this.writable(mount, real);
     const bytes = typeof content === 'string' ? new TextEncoder().encode(content) : content;
@@ -935,7 +943,10 @@ class MountFs implements KernelFs {
     );
   }
 
-  async mkdir(path: string, options: { recursive?: boolean } = {}): Promise<void> {
+  async mkdir(
+    path: string,
+    options: { recursive?: boolean; owner?: NewOwner } = {}
+  ): Promise<void> {
     const found = this.at(path);
     if (!found) return this.base.mkdir(path, options);
     const { mount, rel } = found;
@@ -1003,9 +1014,9 @@ class MountFs implements KernelFs {
     }
   }
 
-  async symlink(target: string, path: string): Promise<void> {
+  async symlink(target: string, path: string, owner?: NewOwner): Promise<void> {
     const found = this.at(path);
-    if (!found) return this.base.symlink(target, path);
+    if (!found) return this.base.symlink(target, path, owner);
     this.writable(found.mount, normalizePath(path));
     if (!found.mount.caps.symlinks)
       throw errnoError('EPERM', `${path}: this file system has no symlinks`);
@@ -1024,6 +1035,16 @@ class MountFs implements KernelFs {
     const found = this.at(path);
     if (!found) return this.base.readlink(path);
     return (await found.mount.conn.call({ op: 'readlink', path: found.rel })) as string;
+  }
+
+  async chown(path: string, change: OwnerChange): Promise<void> {
+    const real = change.follow === false || change.kind === 'new' ? path : await this.follow(path);
+    if (this.at(real)) {
+      if (change.kind === 'new') return;
+      throw errnoError('EPERM', `${path}: this file system keeps no owners`);
+    }
+    if (!this.base.chown) throw errnoError('EPERM', path);
+    return this.base.chown(real, change);
   }
 
   async chmod(path: string, mode: number): Promise<void> {

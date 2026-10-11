@@ -1,11 +1,11 @@
 import { AsyncRangedFile, type AsyncRangedIo } from '../fs/ranged.ts';
-import { fsError, type KernelFs, rangedOps } from '../fs/types.ts';
+import { fsError, type KernelFs, type NewOwner, type OwnerChange, rangedOps } from '../fs/types.ts';
 import type { KeptFile, UnlinkHolder } from '../fs/unlinked.ts';
 import { KernelError, OpenFile } from './fd-table.ts';
 
 export interface VfsFileFs extends Partial<AsyncRangedIo> {
   readFileBuffer(path: string): Promise<Uint8Array>;
-  writeFile(path: string, content: Uint8Array): Promise<void>;
+  writeFile(path: string, content: Uint8Array, owner?: NewOwner): Promise<void>;
   stat?(path: string): Promise<{
     readonly?: boolean;
     maxFile?: number;
@@ -16,6 +16,7 @@ export interface VfsFileFs extends Partial<AsyncRangedIo> {
   readlink?(path: string): Promise<string>;
   lstat?(path: string): Promise<unknown>;
   realpath?(path: string, follow: boolean): Promise<string>;
+  chown?(path: string, change: OwnerChange): Promise<void>;
 }
 
 const O_ACCMODE = 0o3;
@@ -344,12 +345,12 @@ export class VfsNodes implements UnlinkHolder {
     return walk();
   }
 
-  createExclusive(path: string): Promise<void> {
+  createExclusive(path: string, owner?: NewOwner): Promise<void> {
     return this.onEntry(path, async () => {
       const node = this.byPath.get(path);
       const held = node ? await node.serial(async () => node.holds()) : false;
       if (held || (await present(this.fs, path))) throw fsError('EEXIST', path);
-      await this.fs.writeFile(path, new Uint8Array(0));
+      await this.fs.writeFile(path, new Uint8Array(0), owner);
     });
   }
 
@@ -603,12 +604,12 @@ export function keepingOpen(fs: KernelFs, nodes: VfsNodes): KernelFs {
         nodes.renamed(a, b);
       });
     },
-    writeFile: (path, content) =>
-      nodes.onEntry(fs.resolvePath('/', path), () => fs.writeFile(path, content)),
-    createExclusive: async (path) =>
-      nodes.createExclusive(await nodes.entryKey(fs.resolvePath('/', path))),
-    symlink: (target, path) =>
-      nodes.onEntry(fs.resolvePath('/', path), () => fs.symlink(target, path)),
+    writeFile: (path, content, owner) =>
+      nodes.onEntry(fs.resolvePath('/', path), () => fs.writeFile(path, content, owner)),
+    createExclusive: async (path, owner) =>
+      nodes.createExclusive(await nodes.entryKey(fs.resolvePath('/', path)), owner),
+    symlink: (target, path, owner) =>
+      nodes.onEntry(fs.resolvePath('/', path), () => fs.symlink(target, path, owner)),
     mkdir: (path, options) =>
       nodes.onEntry(fs.resolvePath('/', path), () => fs.mkdir(path, options)),
   };

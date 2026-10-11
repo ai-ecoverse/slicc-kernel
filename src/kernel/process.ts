@@ -1,3 +1,4 @@
+import type { NewOwner } from '../fs/types.ts';
 import type { MountCall } from '../mount/syscall.ts';
 import { inProc, ProcTree, procAlias } from '../process/wasi/wasi-procfs.ts';
 import type { LinkRecord } from '../process/wasi/wasix-linker.ts';
@@ -365,6 +366,8 @@ export interface WasmProcessOptions {
   umask?: number;
 
   cred?: Cred;
+
+  owners?: boolean;
 
   identity?: () => Promise<{ pid: number; ppid: number }>;
 
@@ -743,12 +746,14 @@ export class WasmProcess {
       }
       const open = { ...req, path };
       if (req.exclusive) {
-        await nodes.createExclusive(path);
+        await nodes.createExclusive(path, this.newOwner());
         this.fds.installAt(fd, this.openVfsFile(open));
       } else if (req.create) {
         await nodes.onEntry(path, async () => {
+          const fresh = this.options.owners && !(await present(this.options.fs, path, true));
           this.fds.installAt(fd, this.openVfsFile(open));
           await this.fds.get(fd).file.stat?.();
+          if (fresh) await this.options.fs.chown?.(path, { ...this.newOwner(), kind: 'new' });
         });
       } else {
         this.fds.installAt(fd, this.openVfsFile(open));
@@ -761,6 +766,11 @@ export class WasmProcess {
       throw err;
     }
     return fd;
+  }
+
+  private newOwner(): NewOwner | undefined {
+    if (!this.options.owners) return undefined;
+    return { uid: this.cred.euid, gid: this.cred.egid, mode: 0o666 & ~this.umask };
   }
 
   private async openProc(

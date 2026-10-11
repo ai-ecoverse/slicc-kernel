@@ -8,6 +8,9 @@ export interface MetaEntry {
   ino?: number;
   link?: string;
   dir?: string;
+  uid?: number;
+  gid?: number;
+  heir?: [number, number];
 }
 
 export type MetaChange = (entry: MetaEntry | undefined) => MetaEntry | undefined;

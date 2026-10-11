@@ -33,6 +33,7 @@ export interface AddUser {
   home?: string;
   groups?: string[];
   umask?: number;
+  homeGroup?: string;
 }
 
 export interface RemoveUser {
@@ -125,13 +126,33 @@ export function userEnv(account: Account, system?: string): Record<string, strin
   };
 }
 
+function homeGroupOf(groups: GroupRow[], name: string | undefined): GroupRow | undefined {
+  if (name === undefined) return undefined;
+  const found = groups.find((g) => g.name === name);
+  if (!found) throw fsError('ENOENT', `no group ${name}`);
+  return found;
+}
+
 export class UserDb {
   private readonly fs: KernelFs;
+  private readonly owners: boolean;
   private readonly umasks = new Map<string, number>();
   private writing: Promise<unknown> = Promise.resolve();
 
-  constructor(fs: KernelFs) {
+  constructor(fs: KernelFs, owners = false) {
     this.fs = fs;
+    this.owners = owners;
+  }
+
+  private async stampHome(row: PasswdRow, shared: GroupRow | undefined): Promise<void> {
+    const home = this.fs.resolvePath('/', row.home);
+    if (!this.owners || !this.fs.chown || !HOME_DIR.test(home)) return;
+    if ((await this.fs.realpath?.(home, false).catch(() => undefined)) !== home) return;
+    if (!(await this.fs.lstat(home)).isDirectory) return;
+    const gid = shared?.gid ?? row.gid;
+    await this.fs.chown(home, { uid: row.uid, gid, follow: false, kind: 'adopt' });
+    const mode = shared ? 0o2750 : row.name.startsWith('scoop-') ? 0o750 : 0o700;
+    await this.fs.chmod(home, mode);
   }
 
   private async read(path: string, fallback: string): Promise<string> {
@@ -241,8 +262,12 @@ export class UserDb {
       const users = parsed(passwd);
       const groups = parsed(group);
       const found = users.find((r) => r.name === name);
+      const shared = homeGroupOf(groups, options.homeGroup);
       if (found) {
-        if (found.uid >= FIRST_UID && found.uid <= LAST_UID) await this.provision(found);
+        if (found.uid >= FIRST_UID && found.uid <= LAST_UID) {
+          await this.provision(found);
+          await this.stampHome(found, shared);
+        }
         remember();
         return this.account(found, groups);
       }
@@ -262,6 +287,7 @@ export class UserDb {
       await this.fs.mkdir(home, { recursive: true });
       try {
         await this.provision(row);
+        await this.stampHome(row, shared);
         await this.fs.mkdir('/etc', { recursive: true });
         await this.commit(formatPasswd(passwd), formatGroup(group));
       } catch (err) {

@@ -134,7 +134,7 @@ function errnoError(code: string, path: string): Error & { code: string } {
 
 export function createSyncFsSabBridge(
   transport: SyncSabTransport,
-  opts: { timeoutMs?: number } = {}
+  opts: { timeoutMs?: number; owners?: boolean } = {}
 ): SyncFsPosixBridge {
   const timeoutMs = opts.timeoutMs ?? SYNC_FS_REQUEST_TIMEOUT_MS;
 
@@ -210,8 +210,8 @@ export function createSyncFsSabBridge(
       if (typeof v !== 'boolean') throw errnoError('EIO', path);
       return v;
     },
-    mkdir: (path) => {
-      run({ op: 'mkdir', path }, path);
+    mkdir: (path, mode) => {
+      run({ op: 'mkdir', path, ...(mode !== undefined ? { mode } : {}) }, path);
     },
     rm: (path) => {
       run({ op: 'rm', path }, path);
@@ -242,9 +242,14 @@ export function createSyncFsSabBridge(
     lutimes: (path, atimeMs, mtimeMs) => {
       run({ op: 'lutimes', path, atimeMs, mtimeMs }, path);
     },
-    create: (path) => {
-      run({ op: 'create', path }, path);
+    create: (path, mode) => {
+      run({ op: 'create', path, ...(mode !== undefined ? { mode } : {}) }, path);
     },
+    chown: (path, uid, gid) => {
+      const ids = { ...(uid !== undefined ? { uid } : {}), ...(gid !== undefined ? { gid } : {}) };
+      run({ op: 'lchown', path, ...ids }, path);
+    },
+    ...(opts.owners ? { owners: true } : {}),
     hold: (path, held, open, handle) => {
       const mode = (held ? 1 : 0) | (open ? 2 : 0);
       if (mode === 3) return json({ op: 'hold', path, mode }, path) as number;

@@ -1,5 +1,5 @@
 import { portCdpHook } from '../cdp/port.ts';
-import { fsError, type KernelFs } from '../fs/types.ts';
+import { fsError, type KernelFs, type Owner } from '../fs/types.ts';
 import { dialSocket, serveSocket } from '../kernel/dial.ts';
 import type { TransportCall } from '../kernel/net/remote-transport.ts';
 import type { RealmTransport } from '../kernel/net/transport.ts';
@@ -68,7 +68,12 @@ async function realpath(fs: KernelFs, path: string): Promise<string> {
   return resolved || '/';
 }
 
-async function fsCall(fs: KernelFs, method: string, args: unknown[]): Promise<Answer> {
+async function fsCall(
+  fs: KernelFs,
+  method: string,
+  args: unknown[],
+  owner?: Owner
+): Promise<Answer> {
   const path = (i: number) => fs.resolvePath('/', String(args[i]));
   switch (method) {
     case 'readFile': {
@@ -76,7 +81,7 @@ async function fsCall(fs: KernelFs, method: string, args: unknown[]): Promise<An
       return { result: bytes, transfer: [bytes.buffer] };
     }
     case 'writeFile':
-      await fs.writeFile(path(0), args[1] as Uint8Array | string);
+      await fs.writeFile(path(0), args[1] as Uint8Array | string, owner);
       return { result: true };
     case 'stat':
       return { result: await fs.stat(path(0)) };
@@ -85,7 +90,7 @@ async function fsCall(fs: KernelFs, method: string, args: unknown[]): Promise<An
     case 'readdir':
       return { result: await fs.readdir(path(0)) };
     case 'mkdir':
-      await fs.mkdir(path(0), { recursive: true });
+      await fs.mkdir(path(0), owner ? { recursive: true, owner } : { recursive: true });
       return { result: true };
     case 'rm':
       await fs.rm(path(0), { recursive: true, force: args[1] === true });
@@ -96,7 +101,7 @@ async function fsCall(fs: KernelFs, method: string, args: unknown[]): Promise<An
     case 'realpath':
       return { result: await realpath(fs, String(args[0])) };
     case 'symlink':
-      await fs.symlink(String(args[0]), path(1));
+      await fs.symlink(String(args[0]), path(1), owner);
       return { result: true };
     case 'readlink':
       return { result: await fs.readlink(path(0)) };
@@ -126,6 +131,10 @@ function dialFor(
     serveSocket(socket, port1, () => open.delete(req.id))
   );
   return { result: port2, transfer: [port2] };
+}
+
+function ownerFor(l: Launcher, self: Account | undefined): Owner | undefined {
+  return l.owners && self ? { uid: self.uid, gid: self.gid } : undefined;
 }
 
 async function accountOf(l: Launcher, user: string | number): Promise<Account> {
@@ -283,6 +292,7 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
       hello: {
         protocol: PROTOCOL,
         traits: transport.traits,
+        ...(launcher.usersMode ? { users: launcher.usersMode } : {}),
         ...(host.lock ? { lock: host.lock } : {}),
       },
     });
@@ -351,7 +361,7 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
         if (!(FS_METHODS as readonly string[]).includes(req.method)) {
           throw new Error(`unknown file system call ${req.method}`);
         }
-        return fsCall(l.fs, req.method, req.args);
+        return fsCall(l.fs, req.method, req.args, ownerFor(l, self));
       case 'watch':
       case 'unwatch':
         return watchOp(l, req, watches, send);

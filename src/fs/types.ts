@@ -13,25 +13,49 @@ export interface FsStat {
   maxFile?: number;
   ranged?: boolean;
   version?: string;
+  uid?: number;
+  gid?: number;
+}
+
+export type UsersMode = 'off' | 'report' | 'enforce';
+
+export interface Owner {
+  uid: number;
+  gid: number;
+}
+
+export interface NewOwner extends Owner {
+  mode?: number;
+  parents?: number;
+}
+
+export interface OwnerChange {
+  uid?: number;
+  gid?: number;
+  follow?: boolean;
+  kind?: 'chown' | 'adopt' | 'new';
+  mode?: number;
 }
 
 export interface KernelFs {
   resolvePath(base: string, path: string): string;
   readFile(path: string): Promise<string>;
   readFileBuffer(path: string): Promise<Uint8Array>;
-  writeFile(path: string, content: Uint8Array | string): Promise<void>;
+  writeFile(path: string, content: Uint8Array | string, owner?: NewOwner): Promise<void>;
   exists(path: string): Promise<boolean>;
   stat(path: string): Promise<FsStat>;
   lstat(path: string): Promise<FsStat>;
   readdir(path: string): Promise<string[]>;
   readdirStat(path: string): Promise<Array<[string, FsStat | null]>>;
-  mkdir(path: string, options?: { recursive?: boolean }): Promise<void>;
+  mkdir(path: string, options?: { recursive?: boolean; owner?: NewOwner }): Promise<void>;
   rm(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
   rename(from: string, to: string): Promise<void>;
-  symlink(target: string, path: string): Promise<void>;
+  symlink(target: string, path: string, owner?: NewOwner): Promise<void>;
   readlink(path: string): Promise<string>;
   realpath?(path: string, follow: boolean): Promise<string>;
-  createExclusive?(path: string): Promise<void>;
+  createExclusive?(path: string, owner?: NewOwner): Promise<void>;
+  chown?(path: string, change: OwnerChange): Promise<void>;
+  trackOwners?(): void;
   chmod(path: string, mode: number): Promise<void>;
   utimes(path: string, atime: Date, mtime: Date): Promise<void>;
   lutimes?(path: string, atime: Date, mtime: Date): Promise<void>;

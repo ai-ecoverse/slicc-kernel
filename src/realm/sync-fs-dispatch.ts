@@ -1,4 +1,5 @@
-import { type FsStat, type KernelFs, lutimesOf, rangedOps } from '../fs/types.ts';
+import { chownAs, ownerOf } from '../fs/owners.ts';
+import { type FsStat, type KernelFs, lutimesOf, type NewOwner, rangedOps } from '../fs/types.ts';
 import { resolveSyncFsToken, type SyncFsTokenEntry } from './sync-fs-token-registry.ts';
 import {
   type SyncFsOp,
@@ -32,6 +33,8 @@ export interface SyncFsStatJson {
   maxFile?: number;
   ranged?: boolean;
   version?: string;
+  uid?: number;
+  gid?: number;
 }
 
 function statJson(s: FsStat): SyncFsStatJson {
@@ -50,6 +53,8 @@ function statJson(s: FsStat): SyncFsStatJson {
     ...(s.maxFile ? { maxFile: s.maxFile } : {}),
     ...(s.ranged ? { ranged: true } : {}),
     ...(s.version !== undefined ? { version: s.version } : {}),
+    ...(s.uid !== undefined ? { uid: s.uid } : {}),
+    ...(s.gid !== undefined ? { gid: s.gid } : {}),
   };
 }
 
@@ -72,6 +77,30 @@ function json(value: unknown): SyncFsResult {
   return { ok: true, kind: 'json', json: value };
 }
 
+function ownerFor(entry: SyncFsTokenEntry, mode?: number): NewOwner | undefined {
+  const cred = entry.cred?.();
+  if (!cred) return undefined;
+  return ownerOf(cred, mode === undefined ? undefined : mode & ~(entry.umask?.() ?? 0o022));
+}
+
+function mkdirOptions(entry: SyncFsTokenEntry, mode = 0o777) {
+  const owner = ownerFor(entry, mode);
+  if (!owner) return { recursive: true };
+  const parents = (0o777 & ~(entry.umask?.() ?? 0o022)) | 0o300;
+  return { recursive: true, owner: { ...owner, parents } };
+}
+
+async function chown(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest) {
+  const cred = entry.cred?.();
+  if (!cred) return done;
+  await chownAs(entry.fs, cred, path, {
+    ...(req.uid !== undefined ? { uid: req.uid } : {}),
+    ...(req.gid !== undefined ? { gid: req.gid } : {}),
+    follow: req.op === 'chown',
+  });
+  return done;
+}
+
 async function run(
   entry: SyncFsTokenEntry,
   path: string,
@@ -82,7 +111,7 @@ async function run(
     case 'read':
       return { ok: true, kind: 'bytes', bytes: await fs.readFileBuffer(path) };
     case 'write':
-      await fs.writeFile(path, req.body ?? new Uint8Array(0));
+      await fs.writeFile(path, req.body ?? new Uint8Array(0), ownerFor(entry, 0o666));
       return done;
     case 'exists':
       return json(await fs.exists(path));
@@ -95,7 +124,7 @@ async function run(
     case 'readdir-stat':
       return json(await readdirStat(fs, path));
     case 'mkdir':
-      await fs.mkdir(path, { recursive: true });
+      await fs.mkdir(path, mkdirOptions(entry, req.mode));
       return done;
     case 'rm':
       await fs.rm(path, { recursive: true });
@@ -116,10 +145,10 @@ async function run(
       await fs.rm(path, { recursive: true });
       return done;
     case 'symlink':
-      await fs.symlink(req.arg2 ?? '', path);
+      await fs.symlink(req.arg2 ?? '', path, ownerFor(entry));
       return done;
     case 'create':
-      await createExclusive(fs, path);
+      await createExclusive(fs, path, ownerFor(entry, req.mode ?? 0o666));
       return done;
     case 'readlink':
       return json(await fs.readlink(path));
@@ -132,6 +161,9 @@ async function run(
     case 'lutimes':
       await lutimesOf(fs, path, new Date(req.atimeMs ?? 0), new Date(req.mtimeMs ?? 0));
       return done;
+    case 'chown':
+    case 'lchown':
+      return chown(entry, path, req);
     case 'pread':
     case 'pwrite':
     case 'truncate':
@@ -141,8 +173,8 @@ async function run(
   }
 }
 
-async function createExclusive(fs: KernelFs, path: string): Promise<void> {
-  if (fs.createExclusive) return fs.createExclusive(path);
+async function createExclusive(fs: KernelFs, path: string, owner?: NewOwner): Promise<void> {
+  if (fs.createExclusive) return fs.createExclusive(path, owner);
   if (
     await fs.lstat(path).then(
       () => true,
@@ -150,7 +182,7 @@ async function createExclusive(fs: KernelFs, path: string): Promise<void> {
     )
   )
     throw syncError('EEXIST', path);
-  await fs.writeFile(path, new Uint8Array(0));
+  await fs.writeFile(path, new Uint8Array(0), owner);
 }
 
 async function ranged(fs: KernelFs, path: string, req: SyncFsRequest): Promise<SyncFsResult> {

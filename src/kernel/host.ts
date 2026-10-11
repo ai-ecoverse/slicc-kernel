@@ -70,6 +70,7 @@ export interface SpawnWasmOptions {
   ignored?: number;
   umask?: number;
   cred?: Cred;
+  owners?: boolean;
   identity?: () => Promise<{ pid: number; ppid: number }>;
   onSyscall?: (req: WasmSyscall) => void;
 
@@ -286,6 +287,7 @@ function processInit(
     sab,
     umask,
     cred,
+    ...(opts.owners ? { owners: true } : {}),
     ...(opts.ppid !== undefined ? { ppid: opts.ppid } : {}),
   } as const;
   if (opts.program.abi === 'js') {
@@ -311,8 +313,13 @@ function inherited(opts: SpawnWasmOptions): { ignored?: number; umask?: number; 
   };
 }
 
-function holdingToken(opts: SpawnWasmOptions, holds: HeldPaths): string {
+function holdingToken(
+  opts: SpawnWasmOptions,
+  holds: HeldPaths,
+  caller: { cred: () => Cred; umask: () => number }
+): string {
   return mintSyncFsToken({
+    ...(opts.owners ? caller : {}),
     fs: opts.fs,
     cwd: opts.cwd,
     ...(opts.statfs ? { statfs: opts.statfs } : {}),
@@ -334,6 +341,7 @@ function processOptions(
 ): WasmProcessOptions {
   return {
     ...inherited(opts),
+    ...(opts.owners ? { owners: true } : {}),
     ...(opts.identity ? { identity: opts.identity } : {}),
     ...(opts.onSyscall ? { onSyscall: opts.onSyscall } : {}),
     ...(opts.settling ? { settling: opts.settling } : {}),
@@ -383,7 +391,10 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
   publishStops(process, header);
   const holds = new HeldPaths();
   opts.held?.add(holds);
-  const token = holdingToken(opts, holds);
+  const token = holdingToken(opts, holds, {
+    cred: () => process.cred,
+    umask: () => process.umask,
+  });
   process.keptPath = (path) => holds.keptAt(path)?.hidden;
   process.keptHandle = (handle) => holds.keptFor(handle)?.hidden;
   const worker = opts.createWorker();

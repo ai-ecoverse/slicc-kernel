@@ -1,6 +1,6 @@
 import { type CdpOpen, serveCdpPort } from '../cdp/port.ts';
 import type { CdpHook } from '../cdp/types.ts';
-import type { FsStat } from '../fs/types.ts';
+import type { FsStat, UsersMode } from '../fs/types.ts';
 import type { WatchChange } from '../fs/watch.ts';
 import { RemoteTransport, type TransportReply } from '../kernel/net/remote-transport.ts';
 import type {
@@ -129,6 +129,7 @@ export type ClientFetchRequest = Omit<RealmTransportRequest, 'signal'> & { signa
 export interface KernelClient {
   readonly protocol: readonly [number, number];
   readonly transport: RealmTransport;
+  readonly users: UsersMode;
   readonly closed: Promise<Error>;
   spawn(argv: string[], options?: SpawnOptions): Promise<SpawnedProcess>;
   run(argv: string[], options?: ClientRunOptions): Promise<ClientRunResult>;
@@ -529,6 +530,7 @@ export async function attachKernel(
   return {
     protocol: hello.protocol,
     transport,
+    users: hello.users ?? 'off',
     closed: channel.ended.promise,
     spawn: (argv, opts = {}) => spawnOn(channel, argv, opts),
     run: (argv, opts = {}) => runOn(channel, argv, opts),

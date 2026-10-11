@@ -14,7 +14,7 @@ import {
 
 import { followLinks, withCommandDirs } from './fs/commands.ts';
 import { physicalPathAsync } from './fs/physical-path.ts';
-import type { KernelFs } from './fs/types.ts';
+import type { KernelFs, UsersMode } from './fs/types.ts';
 import { fsError, normalizePath } from './fs/types.ts';
 import { UnlinkedKeeper, type UnlinkOwner, webLocks } from './fs/unlinked.ts';
 import { FsWatchers } from './fs/watch.ts';
@@ -130,6 +130,7 @@ export interface LauncherOptions {
   cdp?: CdpHook;
   uplink?: NetworkUplink;
   hostname?: string;
+  users?: UsersMode;
 }
 
 export interface PendingMedium {
@@ -237,6 +238,13 @@ const DECIDE_MS = 100;
 const INIT_PID = 1;
 const SHARED_DIRS = ['/tmp', '/home'];
 const encoder = new TextEncoder();
+
+const USERS_MODES: readonly UsersMode[] = ['off', 'report', 'enforce'];
+
+function usersMode(mode: unknown = 'off'): UsersMode {
+  if (USERS_MODES.includes(mode as UsersMode)) return mode as UsersMode;
+  throw new Error(`users must be 'off', 'report' or 'enforce', not ${String(mode)}`);
+}
 
 function baseName(path: string): string {
   return path.slice(path.lastIndexOf('/') + 1);
@@ -383,11 +391,14 @@ export class Launcher {
   private readonly processMounts: ProcessMountPolicy;
   private readonly booting = new AbortController();
   fstab: Promise<FstabResult[]> = Promise.resolve([]);
+  readonly usersMode: UsersMode;
   private nextPid = 1000;
   readonly boot = Date.now();
   private terminals = 0;
 
   constructor(options: LauncherOptions) {
+    this.usersMode = usersMode(options.users);
+    if (this.owners) options.fs.trackOwners?.();
     this.mounts = new MountTable({
       open: (type, spec) => this.driver(type, spec),
       busy: (target) =>
@@ -442,7 +453,7 @@ export class Launcher {
       }
     );
     this.fs = this.unlinked.wrap(keepingOpen(fs, this.nodes));
-    this.users = new UserDb(this.fs);
+    this.users = new UserDb(this.fs, this.owners);
     void this.unlinked.sweep('/');
     this.watchers.watch([this.modulesDir, this.pnpmHome], { recursive: true }, () =>
       this.resetCatalogs()
@@ -451,6 +462,10 @@ export class Launcher {
       this.scopes = undefined;
       this.resetCatalogs();
     });
+  }
+
+  get owners(): boolean {
+    return this.usersMode !== 'off';
   }
 
   setRoutes(table: RouteTable): void {
@@ -751,6 +766,7 @@ export class Launcher {
       ...(req.ignored ? { ignored: req.ignored } : {}),
       ...(req.umask !== undefined ? { umask: req.umask } : {}),
       cred: req.cred,
+      ...(this.owners ? { owners: true } : {}),
       program: req.program,
       argv0: req.argv0,
       args: req.args,

@@ -8,6 +8,7 @@ import {
   errorWithCode,
 } from './client/dial-stream.ts';
 import { type LoopbackFetchOptions, loopbackFetch } from './client/loopback-fetch.ts';
+import type { UsersMode } from './fs/types.ts';
 import { isHostname } from './kernel/net/loopback-names.ts';
 import type { TransportCall } from './kernel/net/remote-transport.ts';
 import type { RouteTable } from './kernel/net/routes.ts';
@@ -126,6 +127,7 @@ export interface KernelOptions {
   processMounts?: ProcessMountPolicy;
   cdp?: CdpHook;
   hostname?: string;
+  users?: UsersMode;
 }
 
 interface HostfsRequest {
@@ -160,6 +162,7 @@ export interface ConnectOptions {
 }
 
 export interface KernelUsers {
+  readonly mode: UsersMode;
   add(user: AddUser): Promise<Account>;
   remove(name: string, options?: RemoveUser): Promise<boolean>;
   list(): Promise<Account[]>;
@@ -277,6 +280,7 @@ function initCall(options: KernelOptions, transport: NetworkTransport | undefine
     ...(options.hostfs ? { hostfs: true } : {}),
     ...(options.cdp ? { cdp: true } : {}),
     ...(options.hostname !== undefined ? { hostname: options.hostname } : {}),
+    ...(options.users !== undefined ? { users: options.users } : {}),
     ...(options.processMounts !== undefined
       ? {
           processMounts:
@@ -309,8 +313,12 @@ function failed(message: string, code: string | undefined): Error {
   return Object.assign(new Error(message), code === undefined ? {} : { code });
 }
 
-function kernelUsers(call: (req: KernelCall) => Promise<unknown>): KernelUsers {
+function kernelUsers(
+  call: (req: KernelCall) => Promise<unknown>,
+  mode: UsersMode = 'off'
+): KernelUsers {
   return {
+    mode,
     add: async (user) => (await call({ op: 'users-add', user })) as Account,
     remove: async (name, options) =>
       (await call({ op: 'users-remove', name, ...(options ? { options } : {}) })) as boolean,
@@ -485,7 +493,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     openTerminal,
     connect: async (connectOptions = {}) =>
       (await call({ op: 'connect', ...connectOptions })) as MessagePort,
-    users: kernelUsers(call),
+    users: kernelUsers(call, options.users),
     setRoutes: async (routes) => void (await call({ op: 'routes', routes })),
     dial,
     loopbackFetch: (input, fetchOptions) => loopbackFetch(dial, input, fetchOptions),
