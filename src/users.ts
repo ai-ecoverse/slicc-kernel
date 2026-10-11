@@ -147,7 +147,10 @@ export class UserDb {
   private async stampHome(row: PasswdRow, shared: GroupRow | undefined): Promise<void> {
     const home = this.fs.resolvePath('/', row.home);
     if (!this.owners || !this.fs.chown || !HOME_DIR.test(home)) return;
-    await this.fs.chown(home, { uid: row.uid, gid: shared?.gid ?? row.gid, kind: 'adopt' });
+    if ((await this.fs.realpath?.(home, false).catch(() => undefined)) !== home) return;
+    if (!(await this.fs.lstat(home)).isDirectory) return;
+    const gid = shared?.gid ?? row.gid;
+    await this.fs.chown(home, { uid: row.uid, gid, follow: false, kind: 'adopt' });
     const mode = shared ? 0o2750 : row.name.startsWith('scoop-') ? 0o750 : 0o700;
     await this.fs.chmod(home, mode);
   }
