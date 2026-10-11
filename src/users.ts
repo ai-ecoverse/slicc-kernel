@@ -34,6 +34,13 @@ export interface AddUser {
   groups?: string[];
   umask?: number;
   homeGroup?: string;
+  homeMode?: number;
+}
+
+export interface Group {
+  name: string;
+  gid: number;
+  members: string[];
 }
 
 export interface RemoveUser {
@@ -126,6 +133,32 @@ export function userEnv(account: Account, system?: string): Record<string, strin
   };
 }
 
+function groupsOf(groups: GroupRow[], names: string[]): GroupRow[] {
+  return names.map((g) => {
+    const row = groups.find((r) => r.name === g);
+    if (!row) throw fsError('ENOENT', `no group ${g}`);
+    return row;
+  });
+}
+
+function homeModeOf(mode: unknown): number | undefined {
+  if (mode === undefined) return undefined;
+  if (!Number.isInteger(mode) || (mode as number) < 0 || (mode as number) > 0o7777) {
+    throw fsError('EINVAL', `not a mode: ${String(mode)}`);
+  }
+  return mode as number;
+}
+
+function joined(name: string, rows: GroupRow[]): boolean {
+  let changed = false;
+  for (const g of rows) {
+    if (g.members.includes(name)) continue;
+    g.members.push(name);
+    changed = true;
+  }
+  return changed;
+}
+
 function homeGroupOf(groups: GroupRow[], name: string | undefined): GroupRow | undefined {
   if (name === undefined) return undefined;
   const found = groups.find((g) => g.name === name);
@@ -144,14 +177,18 @@ export class UserDb {
     this.owners = owners;
   }
 
-  private async stampHome(row: PasswdRow, shared: GroupRow | undefined): Promise<void> {
+  private async stampHome(
+    row: PasswdRow,
+    shared: GroupRow | undefined,
+    homeMode: number | undefined
+  ): Promise<void> {
     const home = this.fs.resolvePath('/', row.home);
     if (!this.owners || !this.fs.chown || !HOME_DIR.test(home)) return;
     if (!(await this.realDir(home))) return;
     const gid = shared?.gid ?? row.gid;
     await this.fs.chown(home, { uid: row.uid, gid, follow: false, kind: 'adopt' });
     const scoop = row.name.startsWith('scoop-');
-    await this.fs.chmod(home, shared ? 0o2750 : scoop ? 0o750 : 0o700);
+    await this.fs.chmod(home, homeMode ?? (shared ? 0o2750 : scoop ? 0o750 : 0o700));
     const pnpm = `${home}/.local/share/pnpm`;
     if (await this.realDir(pnpm)) await this.fs.chmod(pnpm, scoop ? 0o750 : 0o700);
   }
@@ -276,31 +313,30 @@ export class UserDb {
       const groups = parsed(group);
       const found = users.find((r) => r.name === name);
       const shared = homeGroupOf(groups, options.homeGroup);
+      const homeMode = homeModeOf(options.homeMode);
       if (found) {
+        const more = groupsOf(groups, options.groups ?? []);
+        if (joined(name, more)) await this.fs.writeFile(GROUP, formatGroup(group));
         if (found.uid >= FIRST_UID && found.uid <= LAST_UID) {
           await this.provision(found);
-          await this.stampHome(found, shared);
+          await this.stampHome(found, shared, homeMode);
         }
         remember();
         return this.account(found, groups);
       }
       const home = homeOf(options.home ?? `/home/${name}`);
-      const extra = [USERS_GROUP, ...(options.groups ?? [])].map((g) => {
-        const row = groups.find((r) => r.name === g);
-        if (!row) throw fsError('ENOENT', `no group ${g}`);
-        return row;
-      });
+      const extra = groupsOf(groups, [USERS_GROUP, ...(options.groups ?? [])]);
       if (groups.some((r) => r.name === name)) throw fsError('EEXIST', `group ${name} exists`);
       const uid = freeId(users, groups);
       const row = { name, uid, gid: uid, gecos: name, home, shell: '/bin/bash' };
-      for (const g of extra) if (!g.members.includes(name)) g.members.push(name);
+      joined(name, extra);
       group.push({ name, gid: uid, members: [] });
       passwd.push(row);
       const fresh = !(await this.fs.exists(home));
       await this.fs.mkdir(home, { recursive: true });
       try {
         await this.provision(row);
-        await this.stampHome(row, shared);
+        await this.stampHome(row, shared, homeMode);
         await this.fs.mkdir('/etc', { recursive: true });
         await this.commit(formatPasswd(passwd), formatGroup(group));
       } catch (err) {
@@ -309,6 +345,35 @@ export class UserDb {
       }
       remember();
       return this.account(row, parsed(group));
+    });
+  }
+
+  async groups(): Promise<Group[]> {
+    const { group } = await this.tables();
+    return parsed(group).map(({ name, gid, members }) => ({ name, gid, members: [...members] }));
+  }
+
+  addMember(group: string, user: string): Promise<Group> {
+    return this.member(group, user, true);
+  }
+
+  removeMember(group: string, user: string): Promise<Group> {
+    return this.member(group, user, false);
+  }
+
+  private member(name: string, user: string, on: boolean): Promise<Group> {
+    return this.serial(async () => {
+      const { passwd, group } = await this.tables();
+      const row = parsed(group).find((g) => g.name === name);
+      if (!row) throw fsError('ENOENT', `no group ${String(name)}`);
+      const who = parsed(passwd).find((u) => u.name === user);
+      if (!who) throw fsError('ENOENT', `no user ${String(user)}`);
+      if (who.gid === row.gid) throw fsError('EINVAL', `${name} is the own group of ${user}`);
+      if (row.members.includes(user) !== on) {
+        row.members = on ? [...row.members, user] : row.members.filter((m) => m !== user);
+        await this.fs.writeFile(GROUP, formatGroup(group));
+      }
+      return { name: row.name, gid: row.gid, members: [...row.members] };
     });
   }
 
