@@ -520,6 +520,11 @@ export class WasiFds {
     if (this.shared) this.kernel.call({ op: 'fd-path-flush', path });
   }
 
+  holdsUnder(path: string): boolean {
+    for (const p of this.buffers.keys()) if (within(p, path)) return true;
+    return false;
+  }
+
   unlinking(path: string, linked = false): void {
     const buffer = this.buffers.get(path);
     if (buffer && this.survives(buffer, linked)) buffer.flush();

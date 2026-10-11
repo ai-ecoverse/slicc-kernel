@@ -1,4 +1,4 @@
-import { type FsStat, inodeOf, type KernelFs, lutimesOf, rangedOps } from './types.ts';
+import { type FsStat, inodeOf, type KernelFs, lutimesOf, mayLink, rangedOps } from './types.ts';
 
 const S_IFDIR = 0o040000;
 const S_IFREG = 0o100000;
@@ -87,6 +87,7 @@ export function withCommandDirs(
     },
     writeFile: (path, content, owner) => fs.writeFile(path, content, owner),
     link: (from, to, follow) => fs.link(from, to, follow),
+    links: (path) => mayLink(fs, path),
     async exists(path) {
       return (await fs.exists(path)) || (await linked(path)) !== undefined;
     },

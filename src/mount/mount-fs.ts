@@ -3,6 +3,7 @@ import {
   inodeOf,
   type KernelFs,
   lutimesOf,
+  mayLink,
   type NewOwner,
   normalizePath,
   type OwnerChange,
@@ -1014,6 +1015,11 @@ class MountFs implements KernelFs {
       this.table.forget(a.mount, normalizePath(from));
       this.table.forget(a.mount, normalizePath(to));
     }
+  }
+
+  links(path: string): boolean {
+    const found = this.at(path);
+    return found ? found.mount.caps.links === true : mayLink(this.base, path);
   }
 
   private async named(path: string): Promise<string> {

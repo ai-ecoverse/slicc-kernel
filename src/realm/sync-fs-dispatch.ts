@@ -1,5 +1,12 @@
 import { chownAs, ownerOf } from '../fs/owners.ts';
-import { type FsStat, type KernelFs, lutimesOf, type NewOwner, rangedOps } from '../fs/types.ts';
+import {
+  type FsStat,
+  type KernelFs,
+  lutimesOf,
+  mayLink,
+  type NewOwner,
+  rangedOps,
+} from '../fs/types.ts';
 import { resolveSyncFsToken, type SyncFsTokenEntry } from './sync-fs-token-registry.ts';
 import {
   type SyncFsOp,
@@ -211,6 +218,7 @@ const TWO_PATHS = new Set<SyncFsOp>(['rename', 'link']);
 const UNLINKING_OPS = new Set<SyncFsOp>(['rm', 'unlink', 'rename']);
 
 async function linkedElsewhere(fs: KernelFs, path: string, from?: string): Promise<boolean> {
+  if (!mayLink(fs, path)) return false;
   const st = await fs.lstat(path).catch(() => undefined);
   if (!st || (st.nlink ?? 1) < 2) return false;
   const source = from === undefined ? undefined : await fs.lstat(from).catch(() => undefined);

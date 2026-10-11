@@ -1,4 +1,4 @@
-import type { FsStat, KernelFs } from './types.ts';
+import { type FsStat, type KernelFs, mayLink } from './types.ts';
 
 export const UNLINKED_DIR = '.slicc-unlinked';
 
@@ -141,6 +141,7 @@ export class UnlinkedKeeper {
     };
     return {
       ...fs,
+      links: (path) => mayLink(fs, path),
       stat: async (path) => counted(await fs.stat(path)),
       lstat: async (path) => counted(await fs.lstat(path)),
       async rm(path, options) {
@@ -260,6 +261,7 @@ export class UnlinkedKeeper {
   }
 
   private async linkedName(hidden: string): Promise<void> {
+    if (!mayLink(this.fs, hidden)) return;
     const st = await this.fs.lstat(hidden).catch(() => undefined);
     if (!st || (st.nlink ?? 1) < 2) return;
     const id = `${st.dev ?? 0}:${st.ino}`;

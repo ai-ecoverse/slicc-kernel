@@ -501,7 +501,7 @@ export class WasiHost {
         const from = at(fd, p, l);
         const to = at(fd2, p2, l2);
         fds.flushPath(from);
-        const replaced = linkedElsewhere(o.fs, to);
+        const replaced = fds.holdsUnder(to) && linkedElsewhere(o.fs, to);
         o.fs.rename(from, to);
         fds.renamed(from, to, replaced);
       },

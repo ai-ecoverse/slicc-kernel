@@ -1,5 +1,12 @@
 import { AsyncRangedFile, type AsyncRangedIo } from '../fs/ranged.ts';
-import { fsError, type KernelFs, type NewOwner, type OwnerChange, rangedOps } from '../fs/types.ts';
+import {
+  fsError,
+  type KernelFs,
+  mayLink,
+  type NewOwner,
+  type OwnerChange,
+  rangedOps,
+} from '../fs/types.ts';
 import type { KeptFile, UnlinkHolder } from '../fs/unlinked.ts';
 import { joinName, parentOf, realDir, realTarget } from '../fs/walk.ts';
 import { KernelError, OpenFile } from './fd-table.ts';
@@ -21,6 +28,7 @@ export interface VfsFileFs extends Partial<AsyncRangedIo> {
   lstat?(path: string): Promise<unknown>;
   realpath?(path: string, follow: boolean): Promise<string>;
   chown?(path: string, change: OwnerChange): Promise<void>;
+  links?(path: string): boolean;
 }
 
 const O_ACCMODE = 0o3;
@@ -371,7 +379,7 @@ export class VfsNodes implements UnlinkHolder {
   }
 
   async identify(path: string): Promise<string | undefined> {
-    return this.byPath.has(path) ? undefined : this.identity(path);
+    return this.byPath.has(path) || !mayLink(this.fs, path) ? undefined : this.identity(path);
   }
 
   async linked(from: string, to: string): Promise<void> {
@@ -617,6 +625,7 @@ export function keepingOpen(fs: KernelFs, nodes: VfsNodes): KernelFs {
       nodes.createExclusive(await nodes.entryKey(fs.resolvePath('/', path)), owner),
     symlink: (target, path, owner) =>
       nodes.onEntry(fs.resolvePath('/', path), () => fs.symlink(target, path, owner)),
+    links: (path) => mayLink(fs, path),
     link: async (from, to, follow) => {
       const source = fs.resolvePath('/', from);
       const at = await (follow ? nodes.targetKey(source) : nodes.entryKey(source));
