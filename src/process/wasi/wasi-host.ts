@@ -50,7 +50,7 @@ export interface WasiHostOptions {
   parent?: () => number;
   kernel: WasiKernel;
 
-  fs: SyncFsPosixBridge & { invalidate?(): void; touched?(path?: string): void };
+  fs: SyncFsPosixBridge & { invalidate?(): void; touched?(path?: string, ino?: number): void };
 
   inherited?: ReadonlyArray<{
     fd: number;
@@ -619,8 +619,8 @@ export class WasiHost {
     };
   }
 
-  private changed<T>(e: { path?: string }, result: T): T {
-    this.o.fs.touched?.(e.path);
+  private changed<T>(e: { path?: string; ino?: number }, result: T): T {
+    this.o.fs.touched?.(e.path, e.ino);
     return result;
   }
 

@@ -245,6 +245,7 @@ export type WasiEntry =
       nonblock: boolean;
       append: boolean;
       path?: string;
+      ino?: number;
     }
   | { type: 'file'; file: LocalFile }
   | {
@@ -327,9 +328,14 @@ interface Miss {
 export const FS_GEN = 4;
 const RING = 8;
 const RING_SIZE = 64;
-export const SHARED_IDS_BYTES = (RING + RING_SIZE * 2) * 4;
+const SLOT = 3;
+export const SHARED_IDS_BYTES = (RING + RING_SIZE * SLOT) * 4;
 
 type Cached = SyncFsBridgeStat | Miss;
+
+function inoKey(st: Cached): number {
+  return 'ino' in st && typeof st.ino === 'number' ? (st.ino % 4294967296) | 0 : 0;
+}
 
 function pathHash(path: string): number {
   let h = 0x811c9dc5;
@@ -341,6 +347,7 @@ class StatCache {
   readonly stats = new Map<string, Cached>();
   readonly lstats = new Map<string, Cached>();
   private readonly byHash = new Map<number, Set<string>>();
+  private readonly byIno = new Map<number, Set<string>>();
   private readonly shared: Int32Array | undefined;
   private seen: number;
   constructor(shared: Int32Array | undefined) {
@@ -351,10 +358,9 @@ class StatCache {
   put(map: Map<string, Cached>, path: string, entry: Cached): void {
     map.set(path, entry);
     if (!this.shared) return;
-    const h = pathHash(path);
-    const paths = this.byHash.get(h) ?? new Set<string>();
-    paths.add(path);
-    this.byHash.set(h, paths);
+    index(this.byHash, pathHash(path), path);
+    const ino = inoKey(entry);
+    if (ino !== 0) index(this.byIno, ino, path);
   }
 
   fresh(): void {
@@ -365,9 +371,13 @@ class StatCache {
     this.seen = now;
   }
 
-  changed(path: string | undefined): void {
+  changed(path: string | undefined, ino = 0): void {
     if (this.shared) {
-      const g = this.publish(this.shared, path === undefined ? 0 : pathHash(path));
+      const g = this.publish(
+        this.shared,
+        path === undefined ? 0 : pathHash(path),
+        (ino % 4294967296) | 0
+      );
       this.replay(g - 1);
       this.seen = g;
     }
@@ -380,53 +390,67 @@ class StatCache {
     this.clear();
     if (!this.shared) return;
     for (const hash of paths.length > 0 ? paths.map(pathHash) : [0]) {
-      this.seen = this.publish(this.shared, hash);
+      this.seen = this.publish(this.shared, hash, 0);
     }
   }
 
-  private publish(shared: Int32Array, hash: number): number {
+  private publish(shared: Int32Array, hash: number, ino: number): number {
     const g = Atomics.add(shared, FS_GEN, 1) + 1;
-    const at = RING + (g % RING_SIZE) * 2;
+    const at = RING + (g % RING_SIZE) * SLOT;
     Atomics.store(shared, at, 0);
     Atomics.store(shared, at + 1, hash);
+    Atomics.store(shared, at + 2, ino);
     Atomics.store(shared, at, g);
     return g;
   }
 
   private replay(upTo: number): void {
     const shared = this.shared as Int32Array;
-    const missed: number[] = [];
+    const missed: Array<[number, number]> = [];
     for (let g = this.seen + 1; g <= upTo && upTo - this.seen <= RING_SIZE; g++) {
-      const at = RING + (g % RING_SIZE) * 2;
+      const at = RING + (g % RING_SIZE) * SLOT;
       const tag = Atomics.load(shared, at);
       const hash = Atomics.load(shared, at + 1);
+      const ino = Atomics.load(shared, at + 2);
       if (tag !== g || hash === 0 || Atomics.load(shared, at) !== g) break;
-      missed.push(hash);
+      missed.push([hash, ino]);
     }
     if (missed.length < upTo - this.seen) this.clear();
-    else for (const hash of missed) this.drop(hash);
+    else for (const [hash, ino] of missed) this.drop(hash, ino);
   }
 
-  private drop(hash: number): void {
-    for (const path of this.byHash.get(hash) ?? []) {
+  private drop(hash: number, ino: number): void {
+    const paths = [
+      ...(this.byHash.get(hash) ?? []),
+      ...(ino === 0 ? [] : (this.byIno.get(ino) ?? [])),
+    ];
+    for (const path of paths) {
       this.stats.delete(path);
       this.lstats.delete(path);
     }
     this.byHash.delete(hash);
+    if (ino !== 0) this.byIno.delete(ino);
   }
 
   private clear(): void {
     this.stats.clear();
     this.lstats.clear();
     this.byHash.clear();
+    this.byIno.clear();
   }
+}
+
+function index(map: Map<number, Set<string>>, key: number, path: string): void {
+  const paths = map.get(key) ?? new Set<string>();
+  paths.add(path);
+  map.set(key, paths);
 }
 
 export function cachingBridge(
   bridge: SyncFsPosixBridge,
   now: () => number = () => performance.now(),
   shared?: Int32Array
-): SyncFsPosixBridge & { invalidate(): void; touched(path?: string): void } {
+): SyncFsPosixBridge & { invalidate(): void; touched(path?: string, ino?: number): void } {
   const blind = shared !== undefined && shared.length * 4 < SHARED_IDS_BYTES;
   const cache = new StatCache(blind ? undefined : shared);
   const { stats, lstats } = cache;
@@ -446,7 +470,7 @@ export function cachingBridge(
     return hit;
   };
   const invalidate = () => cache.mutated([]);
-  const touched = (path?: string) => cache.changed(path);
+  const touched = (path?: string, ino?: number) => cache.changed(path, ino);
 
   const mutating = <T>(op: () => T, ...paths: string[]): T => {
     try {
