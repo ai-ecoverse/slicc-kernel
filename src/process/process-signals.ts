@@ -104,6 +104,7 @@ export class SignalGate {
   }
 
   interrupt(): boolean {
+    this.report();
     const header = this.header;
     const pending =
       Atomics.load(header, SAB_I_SIGNALS) |
