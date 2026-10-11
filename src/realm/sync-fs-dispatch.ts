@@ -210,17 +210,31 @@ const OWN_OPS = new Set<SyncFsOp>(['rm', 'unlink', 'rmdir', 'rename', 'link']);
 const TWO_PATHS = new Set<SyncFsOp>(['rename', 'link']);
 const UNLINKING_OPS = new Set<SyncFsOp>(['rm', 'unlink', 'rename']);
 
-async function linkedElsewhere(fs: KernelFs, path: string): Promise<boolean> {
-  return fs.lstat(path).then(
-    (st) => (st.nlink ?? 1) > 1,
-    () => false
-  );
+async function linkedElsewhere(fs: KernelFs, path: string, from?: string): Promise<boolean> {
+  const st = await fs.lstat(path).catch(() => undefined);
+  if (!st || (st.nlink ?? 1) < 2) return false;
+  const source = from === undefined ? undefined : await fs.lstat(from).catch(() => undefined);
+  return !(source && source.ino === st.ino && source.dev === st.dev);
 }
 
 async function keptOr(entry: SyncFsTokenEntry, path: string, handle?: number): Promise<string> {
   if (handle !== undefined) return entry.keptFor?.(handle)?.hidden ?? path;
   const kept = entry.unlinked?.(path);
   return kept && !(await entry.fs.exists(path)) ? kept.hidden : path;
+}
+
+async function owned(
+  entry: SyncFsTokenEntry,
+  own: NonNullable<SyncFsTokenEntry['own']>,
+  req: SyncFsRequest,
+  path: string,
+  target: string
+): Promise<SyncFsResult> {
+  const source = target === path ? undefined : path;
+  if (UNLINKING_OPS.has(req.op) && (await linkedElsewhere(entry.fs, target, source))) {
+    return run(entry, path, req);
+  }
+  return own(target, () => run(entry, path, req));
 }
 
 export async function dispatchSyncFs(req: SyncFsRequest): Promise<SyncFsResult> {
@@ -247,10 +261,7 @@ export async function dispatchSyncFs(req: SyncFsRequest): Promise<SyncFsResult> 
     }
     if (!entry.own || !OWN_OPS.has(req.op)) return await run(entry, path, req);
     const target = TWO_PATHS.has(req.op) ? fs.resolvePath(cwd, req.arg2 ?? '') : path;
-    if (UNLINKING_OPS.has(req.op) && (await linkedElsewhere(fs, target))) {
-      return await run(entry, path, req);
-    }
-    return await entry.own(target, () => run(entry, path, req));
+    return await owned(entry, entry.own, req, path, target);
   } catch (err) {
     return toErrno(err);
   }
