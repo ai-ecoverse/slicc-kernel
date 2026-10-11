@@ -316,6 +316,13 @@ async function keptOr(entry: SyncFsTokenEntry, path: string, handle?: number): P
   return kept && !(await entry.fs.exists(path)) ? kept.hidden : path;
 }
 
+async function keptStat(entry: SyncFsTokenEntry, req: SyncFsRequest): Promise<SyncFsResult> {
+  const hidden = entry.keptFor?.(req.handle ?? -1)?.hidden;
+  if (hidden === undefined)
+    return { ok: false, errno: 'ENOENT', message: 'the handle keeps no file' };
+  return json(statJson(await entry.fs.stat(hidden)));
+}
+
 async function owned(
   entry: SyncFsTokenEntry,
   own: NonNullable<SyncFsTokenEntry['own']>,
@@ -337,6 +344,7 @@ export async function dispatchSyncFs(req: SyncFsRequest): Promise<SyncFsResult> 
   try {
     const path = fs.resolvePath(cwd, req.path);
     if (req.op === 'kept') return json(entry.keptFor?.(req.handle ?? -1) !== undefined);
+    if (req.op === 'stat' && req.handle !== undefined) return await keptStat(entry, req);
     if (req.op === 'statfs') return json((await entry.statfs?.(path)) ?? (await storageUsage()));
     if (req.op === 'hold') {
       const [on, open] = [((req.mode ?? 0) & 1) === 1, ((req.mode ?? 0) & 2) === 2];

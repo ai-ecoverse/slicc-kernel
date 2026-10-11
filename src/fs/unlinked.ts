@@ -263,7 +263,7 @@ export class UnlinkedKeeper {
   private async linkedName(hidden: string): Promise<void> {
     if (!mayLink(this.fs, hidden)) return;
     const st = await this.fs.lstat(hidden).catch(() => undefined);
-    if (!st || (st.nlink ?? 1) < 2) return;
+    if (st?.nlink === undefined) return;
     const id = `${st.dev ?? 0}:${st.ino}`;
     this.linked.set(hidden, id);
     this.links.set(id, (this.links.get(id) ?? 0) + 1);

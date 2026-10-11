@@ -176,6 +176,11 @@ export function createSyncFsSabBridge(
     ...io({}),
     pinned: (handle) => io({ handle }),
     kept: (handle) => json({ op: 'kept', path: '/', handle }, '/') === true,
+    keptStat: (handle) => {
+      const s = parseSyncFsStat(json({ op: 'stat', path: '/', handle }, '/'));
+      if (!s) throw errnoError('EIO', '/');
+      return s;
+    },
     stat: (path) => {
       const s = parseSyncFsStat(json({ op: 'stat', path }, path));
       if (!s) throw errnoError('EIO', path);
