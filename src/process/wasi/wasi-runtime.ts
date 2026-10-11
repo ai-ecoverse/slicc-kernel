@@ -57,6 +57,65 @@ const SLICC_TTY = 'slicc_tty';
 
 const RESERVED = RESERVED_NAMESPACES;
 
+export const UNDELIVERED: Readonly<Record<string, readonly string[]>> = {
+  [PREVIEW1]: ['proc_exit', 'clock_time_get'],
+  [WASIX]: ['proc_exit2', 'thread_exit', 'thread_spawn_v2', 'callback_signal'],
+  [SLICC]: ['sigaction_set'],
+  wasi: ['thread-spawn'],
+};
+
+const DELIVERED = [PREVIEW1, WASIX, SLICC, SLICC_FS, SLICC_TTY];
+
+export function wireSignals(host: WasiHost, gate: SignalGate): void {
+  host.interrupted = () => gate.interrupt();
+  host.quietly = (fn) => gate.quiet(fn);
+}
+
+export function catchUpFirst(
+  host: WasiHost,
+  sync: { current(): void } | undefined
+): (() => void) | undefined {
+  return sync && (() => host.quietly(() => sync.current()));
+}
+
+function deliverAll(
+  imports: WebAssembly.Imports,
+  host: WasiHost,
+  driver: AsyncifyDriver,
+  before?: () => void
+): void {
+  for (const ns of DELIVERED) {
+    const table = imports[ns];
+    if (table) imports[ns] = delivering(ns, table, host, driver, before);
+  }
+}
+
+export function delivering(
+  ns: string,
+  table: WebAssembly.ModuleImports,
+  host: WasiHost,
+  driver: AsyncifyDriver,
+  before?: () => void
+): WebAssembly.ModuleImports {
+  const exempt = new Set(UNDELIVERED[ns]);
+  const out: WebAssembly.ModuleImports = {};
+  for (const [name, value] of Object.entries(table)) {
+    if (exempt.has(name) || typeof value !== 'function') {
+      out[name] = value;
+      continue;
+    }
+    const fn = value as (...args: unknown[]) => unknown;
+    out[name] = (...args: unknown[]) => {
+      if (driver.idle) {
+        before?.();
+        host.interrupted?.();
+      }
+      return fn(...args);
+    };
+  }
+  return out;
+}
+
 const importsSigactionHook = (module: WebAssembly.Module): boolean =>
   WebAssembly.Module.imports(module).some((i) => i.module === SLICC && i.name === 'sigaction_set');
 
@@ -338,6 +397,7 @@ async function instantiate(
     sliccFs,
     sliccTty
   );
+  deliverAll(hostImports, host, driver, catchUpFirst(host, sync));
   const imports: WebAssembly.Imports = sync
     ? merge(hostImports, sync.linker.mainImports(module))
     : hostImports;
@@ -463,6 +523,10 @@ export class LinkSync {
     this.catchUp();
   }
 
+  current(): void {
+    if (this.ids && Atomics.load(this.ids, DL_GEN) !== this.gen) this.catchUp();
+  }
+
   catchUp(): void {
     for (;;) {
       const gen = this.ids ? Atomics.load(this.ids, DL_GEN) : 0;
@@ -487,10 +551,9 @@ export class LinkSync {
         Object.entries(table).map(([name, fn]) => [
           name,
           ((...args: never[]) => {
-            if (Atomics.load(ids, DL_GEN) !== this.gen) this.catchUp();
-
+            this.current();
             const result = fn(...args);
-            if (Atomics.load(ids, DL_GEN) !== this.gen) this.catchUp();
+            this.current();
             return result;
           }) as WasiFunction,
         ])
@@ -583,7 +646,7 @@ export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike
   if (importsSigactionHook(module)) signals.useHook();
   if (fork?.signals) signals.restore(fork.signals);
   host.signals = signals;
-  host.interrupted = () => gate.interrupt();
+  wireSignals(host, gate);
   host.onRaise = (sig) => signals.raised(sig);
   host.muted = (fd, data) => signals.muted(fd, data);
   const exports = instance.exports as { _start: () => void };
@@ -689,7 +752,7 @@ export async function runWasiThread(init: WasmThreadInitMsg, port: SabPostLike):
   });
   signals.bind(instance.exports);
   signals.register(SIGNAL_CALLBACK);
-  host.interrupted = () => gate.interrupt();
+  wireSignals(host, gate);
   host.onRaise = (sig) => signals.raised(sig);
   const start = instance.exports.wasi_thread_start as (tid: number, arg: number) => void;
   try {
