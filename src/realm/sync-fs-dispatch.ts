@@ -138,7 +138,7 @@ async function run(
       return done;
     }
     case 'link':
-      await fs.link(path, fs.resolvePath(cwd, req.arg2 ?? ''));
+      await fs.link(path, fs.resolvePath(cwd, req.arg2 ?? ''), req.mode === 1);
       return done;
     case 'unlink':
       if ((await fs.lstat(path)).isDirectory) throw syncError('EISDIR', path);

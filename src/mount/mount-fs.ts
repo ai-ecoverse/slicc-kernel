@@ -1015,7 +1015,8 @@ class MountFs implements KernelFs {
     }
   }
 
-  async link(from: string, to: string): Promise<void> {
+  async link(source: string, to: string, follow = false): Promise<void> {
+    const from = follow ? await this.follow(source) : source;
     const a = this.at(from);
     const b = this.at(to);
     if (!a && !b) return this.base.link(from, to);

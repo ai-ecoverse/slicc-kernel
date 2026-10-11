@@ -98,7 +98,7 @@ export class FsWatchers {
       rm: after(fs.rm.bind(fs), (path) => [path]),
       rename: after(fs.rename.bind(fs), (from, to) => [from, to]),
       link: after(
-        (from: string, to: string) => fs.link(from, to),
+        (from: string, to: string, follow?: boolean) => fs.link(from, to, follow),
         (_from, to) => [to]
       ),
       symlink: after(fs.symlink.bind(fs), (_target, path) => [path]),

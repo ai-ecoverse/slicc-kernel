@@ -511,7 +511,7 @@ export class WasiHost {
 
       path_link: (
         fd: number,
-        _flags: number,
+        lookup: number,
         p: number,
         l: number,
         fd2: number,
@@ -520,7 +520,7 @@ export class WasiHost {
       ) => {
         const from = at(fd, p, l);
         fds.flushPath(from);
-        o.fs.link(from, at(fd2, p2, l2));
+        o.fs.link(from, at(fd2, p2, l2), (lookup & LOOKUP_SYMLINK_FOLLOW) !== 0);
       },
     };
   }

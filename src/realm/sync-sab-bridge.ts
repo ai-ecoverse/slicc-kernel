@@ -219,8 +219,8 @@ export function createSyncFsSabBridge(
     rename: (from, to) => {
       run({ op: 'rename', path: from, arg2: to }, from);
     },
-    link: (from, to) => {
-      run({ op: 'link', path: from, arg2: to }, from);
+    link: (from, to, follow) => {
+      run({ op: 'link', path: from, arg2: to, ...(follow ? { mode: 1 } : {}) }, from);
     },
     unlink: (path) => {
       run({ op: 'unlink', path }, path);

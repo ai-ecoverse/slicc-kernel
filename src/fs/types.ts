@@ -51,7 +51,7 @@ export interface KernelFs {
   mkdir(path: string, options?: { recursive?: boolean; owner?: NewOwner }): Promise<void>;
   rm(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
   rename(from: string, to: string): Promise<void>;
-  link(from: string, to: string): Promise<void>;
+  link(from: string, to: string, follow?: boolean): Promise<void>;
   symlink(target: string, path: string, owner?: NewOwner): Promise<void>;
   readlink(path: string): Promise<string>;
   realpath?(path: string, follow: boolean): Promise<string>;
