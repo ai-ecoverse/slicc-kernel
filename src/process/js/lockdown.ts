@@ -12,6 +12,10 @@ export const BLOCKED_GLOBALS: readonly string[] = [
   'BroadcastChannel',
   'postMessage',
   'close',
+  'webkitRequestFileSystem',
+  'webkitRequestFileSystemSync',
+  'webkitResolveLocalFileSystemURL',
+  'webkitResolveLocalFileSystemSyncURL',
 ];
 
 export const BLOCKED_NAVIGATOR: readonly string[] = ['storage', 'locks', 'serviceWorker'];
