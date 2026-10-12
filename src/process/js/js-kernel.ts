@@ -89,12 +89,32 @@ export class JsKernel {
     track?: (id: number) => void
   ): Promise<SyncFsResult> {
     for (;;) {
-      const id = (await this.json({ op: 'async-submit', req })) as number;
-      track?.(id);
+      const id = await this.submit(req, track);
       const result = await this.settled(id, signal);
       if (result.ok) return result;
       if (result.errno !== 'EINTR') throw new JsCallError(result.errno, req.op);
     }
+  }
+
+  private acks: number[] = [];
+
+  ack(id: number): void {
+    this.acks.push(id);
+  }
+
+  private async submit(req: WasmSyscall, track?: (id: number) => void): Promise<number> {
+    const ack = this.acks;
+    this.acks = [];
+    const r = await this.transport.call({
+      op: 'async-submit',
+      req,
+      ...(ack.length > 0 ? { ack } : {}),
+    });
+    const id = r.ok && r.kind === 'json' ? (r.json as number) : undefined;
+    if (id !== undefined) track?.(id);
+    this.deliver();
+    if (id === undefined) throw new JsCallError(r.ok ? 'EIO' : r.errno, 'async-submit');
+    return id;
   }
 
   private async settled(id: number, signal?: AbortSignal): Promise<SyncFsResult> {

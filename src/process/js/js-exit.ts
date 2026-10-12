@@ -23,9 +23,17 @@ function writeOut(lane: SyncCall, fd: number, data: Uint8Array): boolean {
     const r = lane({ op: 'fd-write', fd, body });
     if (!r.ok && r.errno === 'EINTR') continue;
     if (!r.ok) return false;
-    at += written(r, body.length);
+    const n = written(r, body.length);
+    if (n <= 0) return false;
+    at += n;
   }
   return true;
+}
+
+function progress(result: SyncFsResult | null | undefined, len: number): number {
+  if (!result) return len;
+  if (result.ok) return written(result, len);
+  return result.errno === 'EINTR' ? 0 : -1;
 }
 
 function settled(lane: SyncCall, writes: readonly PendingWrite[]): Map<PendingWrite, number> {
@@ -36,7 +44,7 @@ function settled(lane: SyncCall, writes: readonly PendingWrite[]): Map<PendingWr
   const results = (r.ok && r.kind === 'json' ? r.json : []) as Array<SyncFsResult | null>;
   inFlight.forEach((w, i) => {
     const result = results[i];
-    out.set(w, result && !result.ok ? -1 : result ? written(result, w.len) : w.len);
+    out.set(w, progress(result, w.len));
   });
   return out;
 }

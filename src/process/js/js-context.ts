@@ -191,9 +191,13 @@ function writer(kernel: JsKernel, info: (fd: number) => Promise<FdInfo>, pid: nu
         w.at += signal
           ? await sendSome(kernel, fd, body, signal)
           : written(
-              await kernel.blocking({ op: 'fd-write', fd, body }, undefined, (id) => (w.op = id)),
+              await kernel.blocking({ op: 'fd-write', fd, body }, undefined, (id) => {
+                if (w.op !== undefined) kernel.ack(w.op);
+                w.op = id;
+              }),
               body.length
             );
+        if (w.op !== undefined) kernel.ack(w.op);
         w.op = undefined;
       } catch (err) {
         if (brokenPipe(err, i)) await kernel.call({ op: 'proc-kill', pid, sig: SIG.PIPE });

@@ -4,7 +4,7 @@ import { KernelError } from './fd-table.ts';
 export type HostSyscall =
   | { op: 'lock'; path: string; exclusive: boolean; fd: number }
   | { op: 'unlock'; path: string }
-  | { op: 'async-submit'; req: { op: string } }
+  | { op: 'async-submit'; req: { op: string }; ack?: number[] }
   | { op: 'async-wait'; timeoutMs?: number }
   | { op: 'async-take'; id: number }
   | { op: 'async-resolve'; value: unknown }
@@ -68,7 +68,9 @@ export class LockTable {
 
 type Run = (req: { op: string }, cancelled: AbortSignal) => Promise<SyncFsResult>;
 
-const TAKEN_KEPT = 64;
+const KEPT_OPS = new Set(['fd-write']);
+
+let unknownSettled = false;
 
 export class AsyncOps {
   private next = 1;
@@ -77,6 +79,7 @@ export class AsyncOps {
   private readonly running = new Map<number, AbortController>();
   private readonly waiters = new Set<() => void>();
   private readonly taken = new Map<number, SyncFsResult>();
+  private readonly kept = new Set<number>();
   private closed = false;
   private readonly run: Run;
   private readonly onReady: (() => void) | undefined;
@@ -88,6 +91,7 @@ export class AsyncOps {
 
   submit(req: { op: string }): number {
     const id = this.hold();
+    if (KEPT_OPS.has(req.op)) this.kept.add(id);
     const running = new AbortController();
     this.running.set(id, running);
     this.run(req, running.signal).then(
@@ -114,18 +118,29 @@ export class AsyncOps {
     const result = this.results.get(id);
     if (!result) throw new KernelError('EAGAIN');
     this.forget(id);
-    this.taken.set(id, result);
-    if (this.taken.size > TAKEN_KEPT) this.taken.delete(this.taken.keys().next().value as number);
+    if (this.kept.delete(id)) this.taken.set(id, result);
     return result;
+  }
+
+  ack(ids: readonly number[]): void {
+    for (const id of ids) this.taken.delete(id);
   }
 
   async settle(ids: readonly number[]): Promise<Array<SyncFsResult | null>> {
     const never = new AbortController().signal;
     while (ids.some((id) => this.running.has(id))) await this.sleep(undefined, never);
-    return ids.map((id) => this.results.get(id) ?? this.taken.get(id) ?? null);
+    return ids.map((id) => {
+      const result = this.results.get(id) ?? this.taken.get(id) ?? null;
+      if (!result && !unknownSettled) {
+        unknownSettled = true;
+        console.warn(`async-settle: no result for op ${id}; its write counts as made`);
+      }
+      return result;
+    });
   }
 
   cancel(id: number): void {
+    this.kept.delete(id);
     this.running.get(id)?.abort();
     this.forget(id);
   }
@@ -216,6 +231,7 @@ export async function hostSyscall(req: HostSyscall, ctx: HostOpsContext): Promis
       return done;
     case 'async-submit':
       if (!ctx.valid(req.req)) throw new KernelError('EINVAL');
+      if (req.ack) ctx.ops.ack(req.ack);
       return json(ctx.ops.submit(req.req));
     case 'async-wait':
       return json(await ctx.ops.wait(req.timeoutMs, ctx.blocking));
