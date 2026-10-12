@@ -144,6 +144,7 @@ export interface ProcessSys {
 
   openTty?(name?: string): number;
   ttyNames?(): string[];
+  ttyOwner?(name: string): TtyOwner | null;
 
   tcgets?(fd: number): Termios;
   tcsets?(fd: number, termios: Termios, flush?: boolean): void;
@@ -238,6 +239,13 @@ export interface KernelStreamOptions {
   sigpipe?: () => boolean;
 
   restartable?: () => boolean;
+  owners?: boolean;
+}
+
+export interface TtyOwner {
+  uid: number;
+  gid: number;
+  mode?: number;
 }
 
 function nonblocking(stream: ProcessStream): { nonblock: true } | undefined {
@@ -531,11 +539,28 @@ export class KernelStreams {
       const original = fs[name];
       if (typeof original !== 'function') continue;
       fs[name] = (path: string, ...rest: unknown[]) => {
-        if (!isPtyPath(path)) return original.call(fs, path, ...rest);
+        const owned = this.ownedTty(path);
+        if (owned && isPtyPath(path)) return this.owned(path, ptyStat(path));
+        if (!isPtyPath(path)) {
+          const st = original.call(fs, path, ...rest);
+          return owned && TTY_PATH.test(path) ? this.owned(path, st as object) : st;
+        }
         this.existingPty(path);
         return ptyStat(path);
       };
     }
+  }
+
+  private ownedTty(path: string): boolean {
+    return this.options.owners === true && this.sys.ttyOwner !== undefined && path !== '/dev/ptmx';
+  }
+
+  private owned(path: string, st: object): object {
+    const ask = this.sys.ttyOwner as (name: string) => TtyOwner | null;
+    const owner = this.call(() => ask.call(this.sys, path));
+    if (!owner) return st;
+    const mode = ((st as { mode: number }).mode & ~0o7777) | (owner.mode ?? 0o620);
+    return { ...st, uid: owner.uid, gid: owner.gid, mode };
   }
 
   private existingPty(path: string): void {

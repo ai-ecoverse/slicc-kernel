@@ -1,3 +1,5 @@
+import { type Guard, TTY_MODE, ttyOpenable } from '../fs/dac.ts';
+import type { Perm } from '../fs/types.ts';
 import type { SyncFsResult } from '../realm/sync-fs-wire.ts';
 import { type FdTable, KernelError, OpenFile, type PollState } from './fd-table.ts';
 import type { JobTable } from './jobs.ts';
@@ -156,10 +158,11 @@ export class PtyTable {
     this.onRead = onRead;
   }
 
-  open(): { pair: PtyPair; master: OpenFile } {
+  open(owner?: Perm): { pair: PtyPair; master: OpenFile } {
     let index = 0;
     while (this.pairs.has(index)) index += 1;
     const pair = new PtyPair(index, this.signal, (p) => this.pairs.delete(p.index), this.onRead);
+    if (owner) pair.slave.owner = { uid: owner.uid, gid: owner.gid, mode: TTY_MODE };
     this.pairs.set(index, pair);
     return { pair, master: pair.master() };
   }
@@ -206,6 +209,8 @@ export interface PtyContext {
   fds: FdTable;
   ptys?: PtyTable;
   jobs?: JobTable;
+  guard?: Guard;
+  owner?: Perm;
 }
 
 function masterOf(ctx: PtyContext, fd: number): PtyPair {
@@ -228,11 +233,12 @@ export function ptySyscall(req: PtySyscall, ctx: PtyContext): SyncFsResult {
   switch (req.op) {
     case 'pty-open': {
       if (!ctx.ptys) throw new KernelError('ENOENT');
-      return json(ctx.fds.install(ctx.ptys.open().master, 3));
+      return json(ctx.fds.install(ctx.ptys.open(ctx.owner).master, 3));
     }
     case 'pty-slave-open': {
       if (!ctx.ptys) throw new KernelError('ENOENT');
       const pair = ctx.ptys.get(req.n);
+      ttyOpenable(ctx.guard, pair.slave);
       const fd = ctx.fds.install(pair.openSlave(), 3);
 
       if (!req.noctty) ctx.jobs?.acquireTerminal(ctx.pid, pair.slave);

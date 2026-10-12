@@ -287,10 +287,18 @@ export class UserDb {
   }
 
   async lookup(user: string | number): Promise<Account | undefined> {
+    return (await this.lookupTerminal(user))?.account;
+  }
+
+  async lookupTerminal(
+    user: string | number
+  ): Promise<{ account: Account; tty: number | undefined } | undefined> {
     const { passwd, group } = await this.tables();
     const key = typeof user === 'number' ? 'uid' : 'name';
     const row = parsed(passwd).find((r) => r[key] === user);
-    return row && this.account(row, parsed(group));
+    const groups = parsed(group);
+    const tty = groups.find((g) => g.name === 'tty')?.gid;
+    return row && { account: this.account(row, groups), tty };
   }
 
   async list(): Promise<Account[]> {

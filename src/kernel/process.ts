@@ -1,6 +1,14 @@
 import { R_OK, W_OK } from '../fs/access.ts';
-import { type Created, type Dac, inParent, openable } from '../fs/dac.ts';
-import type { KernelFs, NewOwner } from '../fs/types.ts';
+import {
+  type Created,
+  type Dac,
+  type Guard,
+  inParent,
+  openable,
+  TTY_MODE,
+  ttyOpenable,
+} from '../fs/dac.ts';
+import type { KernelFs, NewOwner, Perm } from '../fs/types.ts';
 import type { MountCall } from '../mount/syscall.ts';
 import { inProc, ProcTree, procAlias } from '../process/wasi/wasi-procfs.ts';
 import type { LinkRecord } from '../process/wasi/wasix-linker.ts';
@@ -35,7 +43,7 @@ import { Resolver } from './net/resolver.ts';
 import { Routes } from './net/routes.ts';
 import type { MountLine, ProcessListing } from './proc-info.ts';
 import type { ForkState } from './protocol.ts';
-import { PTY_OPS, type PtySyscall, type PtyTable, ptySyscall } from './pty.ts';
+import { PTY_OPS, type PtySyscall, type PtyTable, ptsNumber, ptySyscall } from './pty.ts';
 import { selectFds } from './select.ts';
 import { type DefaultAction, defaultAction, isSignal, SIG, sigbit } from './signals.ts';
 import { KernelSocket, LoopbackNet } from './socket.ts';
@@ -149,6 +157,7 @@ export type WasmSyscall =
     }
   | { op: 'fd-open-tty'; name?: string }
   | { op: 'fd-tty-names' }
+  | { op: 'fd-tty-owner'; name: string }
   | { op: 'tty-get'; fd: number }
   | { op: 'tty-set'; fd: number; termios: Termios; flush?: boolean }
   | { op: 'tty-winsz'; fd: number }
@@ -317,6 +326,7 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'fd-promote',
   'fd-open-tty',
   'fd-tty-names',
+  'fd-tty-owner',
   'tty-get',
   'tty-set',
   'tty-winsz',
@@ -638,7 +648,9 @@ export class WasmProcess {
       }
       if (isPtySyscall(req)) {
         const { ptys, jobs } = this.options;
-        return ptySyscall(req, { pid: this.pid, fds: this.fds, ptys, jobs });
+        const owner = this.options.owners ? this.ttyOwner() : undefined;
+        const guard = this.guarded();
+        return ptySyscall(req, { pid: this.pid, fds: this.fds, ptys, jobs, guard, owner });
       }
       return await this.procSyscall(req, cancelled);
     } catch (e) {
@@ -805,6 +817,31 @@ export class WasmProcess {
     await openable(g, 'open', req.path, want, req.create === true);
   }
 
+  private openTty(name: string | undefined): number {
+    const tty =
+      name === undefined ? this.controllingTerminal() : this.options.jobs?.terminalNamed(name);
+    if (!tty) throw new KernelError('ENXIO');
+    if (name !== undefined) ttyOpenable(this.guarded(), tty);
+    return this.fds.install(tty.file(), 3);
+  }
+
+  private guarded(): Guard | undefined {
+    const { guard } = this.options;
+    return guard && { fs: guard.fs, dac: guard.dac, cred: this.cred, pid: this.pid };
+  }
+
+  private ttyOwner(): Perm {
+    return { uid: this.cred.euid, gid: this.cred.egid, mode: TTY_MODE };
+  }
+
+  private terminalByName(name: string): KernelTty {
+    const n = ptsNumber(name);
+    const tty =
+      n === undefined ? this.options.jobs?.terminalNamed(name) : this.options.ptys?.get(n).slave;
+    if (!tty) throw new KernelError('ENOENT');
+    return tty;
+  }
+
   private newOwner(): NewOwner | undefined {
     if (!this.options.owners) return undefined;
     return { uid: this.cred.euid, gid: this.cred.egid, mode: 0o666 & ~this.umask };
@@ -918,16 +955,12 @@ export class WasmProcess {
           if (!req.keep) await Promise.resolve(this.fds.close(req.from));
         }
         return { ok: true, kind: 'void' };
-      case 'fd-open-tty': {
-        const tty =
-          req.name === undefined
-            ? this.controllingTerminal()
-            : this.options.jobs?.terminalNamed(req.name);
-        if (!tty) throw new KernelError('ENXIO');
-        return { ok: true, kind: 'json', json: this.fds.install(tty.file(), 3) };
-      }
+      case 'fd-open-tty':
+        return { ok: true, kind: 'json', json: this.openTty(req.name) };
       case 'fd-tty-names':
         return { ok: true, kind: 'json', json: this.options.jobs?.terminalNames() ?? [] };
+      case 'fd-tty-owner':
+        return { ok: true, kind: 'json', json: this.terminalByName(req.name).owner ?? null };
       case 'fd-select': {
         const { read, write, timeoutMs } = req;
         if (this.owed && timeoutMs !== 0) {

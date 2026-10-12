@@ -13,7 +13,7 @@ import {
 } from './commands.ts';
 import { R_OK, X_OK } from './fs/access.ts';
 import { followLinks, withCommandDirs } from './fs/commands.ts';
-import { Dac, type DenialHook, need } from './fs/dac.ts';
+import { Dac, type DenialHook, need, TTY_MODE } from './fs/dac.ts';
 import { physicalPathAsync } from './fs/physical-path.ts';
 import type { KernelFs, UsersMode } from './fs/types.ts';
 import { fsError, normalizePath } from './fs/types.ts';
@@ -1306,8 +1306,14 @@ export class Launcher {
   }
 
   private async account(user: string | number | Account | undefined): Promise<Account> {
-    if (typeof user === 'object') return user;
-    const found = await this.users.lookup(user ?? 0);
+    return (await this.terminalAccount(user)).account;
+  }
+
+  private async terminalAccount(
+    user: string | number | Account | undefined
+  ): Promise<{ account: Account; tty: number | undefined }> {
+    if (typeof user === 'object') return { account: user, tty: undefined };
+    const found = await this.users.lookupTerminal(user ?? 0);
     if (!found) throw fsError('ENOENT', `no user ${String(user)}`);
     return found;
   }
@@ -1332,7 +1338,7 @@ export class Launcher {
   }
 
   async openTerminal(argv: string[], options: TerminalOptions): Promise<TerminalSession> {
-    const account = await this.account(options.user);
+    const { account, tty: ttyGroup } = await this.terminalAccount(options.user);
     const { cwd, file, planned } = await this.starting(argv, options.cwd, account);
     if (!planned) throw new Error(`${file}: command not found`);
     let leader = 0;
@@ -1342,6 +1348,7 @@ export class Launcher {
     );
     tty.onRead = () => this.settling.reading(this.jobs.tcgetpgrp(tty, leader));
     tty.name = `/dev/tty${++this.terminals}`;
+    if (this.owners) tty.owner = { uid: account.uid, gid: ttyGroup ?? account.gid, mode: TTY_MODE };
     tty.setSize(options.cols ?? 80, options.rows ?? 24);
     const fds = new FdTable();
     const stdio = tty.file();
