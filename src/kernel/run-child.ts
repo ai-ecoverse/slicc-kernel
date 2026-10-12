@@ -1,5 +1,6 @@
 import { type ChildStdio, type ChildTable, SpawnError } from './children.ts';
 import { KernelError } from './fd-table.ts';
+import { isSignal } from './signals.ts';
 
 export type RunStdio = 'pipe' | 'ignore' | 'inherit';
 
@@ -37,9 +38,9 @@ export interface RunDeps {
   dying(): boolean;
 }
 
-function capLimit(maxBuffer: number | undefined): number {
-  const asked = maxBuffer === undefined ? RUN_MAX_BUFFER : maxBuffer;
-  return Math.max(0, Math.min(asked, RUN_CAPTURE_CAP));
+function capLimit(maxBuffer: unknown): number {
+  const asked = typeof maxBuffer === 'number' && maxBuffer >= 0 ? maxBuffer : RUN_MAX_BUFFER;
+  return Math.min(asked, RUN_CAPTURE_CAP);
 }
 
 function slot(how: RunStdio, n: number, extra: ChildStdio): ChildStdio {
@@ -69,6 +70,7 @@ async function reaped(deps: RunDeps, pid: number): Promise<number> {
 }
 
 export async function runChild(req: RunRequest, deps: RunDeps): Promise<Uint8Array> {
+  if (!isSignal(req.killSignal)) throw new KernelError('EINVAL');
   const max = capLimit(req.maxBuffer);
   let failure: string | undefined;
   let pid = 0;
