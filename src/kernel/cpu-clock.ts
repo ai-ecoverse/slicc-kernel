@@ -17,10 +17,7 @@ export const IDLE_OPS: ReadonlySet<string> = new Set([
 export const SYS_CAP_US = 20_000;
 
 const LOCAL = SAB_CLOCK_OFFSET;
-const SEQ_TRIES = 64;
-const SEQ = 0;
 const IDLE = 1;
-const SINCE = 2;
 
 export function epochMicros(): number {
   return Math.floor((performance.timeOrigin + performance.now()) * 1000);
@@ -50,31 +47,21 @@ export function useLocalClock(sab: SharedArrayBuffer | undefined): void {
 export function localWait<T>(wait: () => T): T {
   const clock = local;
   if (!clock) return wait();
-  const start = epochMicros();
-  Atomics.store(clock, SINCE, BigInt(start));
+  const start = BigInt(epochMicros());
+  const idle = Atomics.load(clock, IDLE);
+  Atomics.store(clock, IDLE, idle - start);
   try {
     return wait();
   } finally {
-    Atomics.add(clock, SEQ, 1n);
-    Atomics.add(clock, IDLE, BigInt(Math.max(0, epochMicros() - start)));
-    Atomics.store(clock, SINCE, 0n);
-    Atomics.add(clock, SEQ, 1n);
+    const end = BigInt(epochMicros());
+    Atomics.store(clock, IDLE, idle + (end > start ? end - start : 0n));
   }
 }
 
 export function localIdle(sab: SharedArrayBuffer, now: number): { idle: number; waiting: boolean } {
-  const clock = slots(sab);
-  let idle = 0;
-  let since = 0;
-  for (let tries = 0; tries < SEQ_TRIES; tries++) {
-    const seq = Atomics.load(clock, SEQ);
-    idle = Number(Atomics.load(clock, IDLE));
-    since = Number(Atomics.load(clock, SINCE));
-    if (seq % 2n === 0n && Atomics.load(clock, SEQ) === seq) {
-      return { idle: idle + (since > 0 ? Math.max(0, now - since) : 0), waiting: since > 0 };
-    }
-  }
-  return { idle, waiting: false };
+  const state = Number(Atomics.load(slots(sab), IDLE));
+  if (state >= 0) return { idle: state, waiting: false };
+  return { idle: Math.max(0, now + state), waiting: true };
 }
 
 export interface CpuTimes {
