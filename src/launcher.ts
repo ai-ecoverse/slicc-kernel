@@ -17,7 +17,7 @@ import { Dac, type DenialHook, need } from './fs/dac.ts';
 import { physicalPathAsync } from './fs/physical-path.ts';
 import type { KernelFs, UsersMode } from './fs/types.ts';
 import { fsError, normalizePath } from './fs/types.ts';
-import { UnlinkedKeeper, type UnlinkOwner, webLocks } from './fs/unlinked.ts';
+import { UNLINKED_DIR, UnlinkedKeeper, type UnlinkOwner, webLocks } from './fs/unlinked.ts';
 import { FsWatchers } from './fs/watch.ts';
 import {
   type ChildForker,
@@ -105,6 +105,7 @@ import {
 import {
   type Account,
   credOf,
+  GROUP,
   PASSWD,
   pnpmHomeOf,
   SYSTEM_PNPM_HOME,
@@ -241,6 +242,16 @@ const NOT_FOUND = 127;
 const DECIDE_MS = 100;
 const INIT_PID = 1;
 const SHARED_DIRS = ['/tmp', '/home'];
+const LAYOUT: ReadonlyArray<[string, number]> = [
+  ['/', 0o755],
+  ['/root', 0o700],
+  ['/home', 0o755],
+  ['/etc', 0o755],
+  [PASSWD, 0o644],
+  [GROUP, 0o644],
+  ['/usr', 0o755],
+  ['/usr/local', 0o755],
+];
 const encoder = new TextEncoder();
 
 const USERS_MODES: readonly UsersMode[] = ['off', 'report', 'enforce'];
@@ -458,6 +469,7 @@ export class Launcher {
         locks: webLocks(),
         busy: (path) => [...this.openFiles].some((nodes) => nodes.holds(path)),
         owner: options.unlinkOwner,
+        ...(this.owners ? { dirOwner: { uid: 0, gid: 0, mode: 0o700 } } : {}),
       }
     );
     this.fs = this.unlinked.wrap(keepingOpen(fs, this.nodes));
@@ -1159,6 +1171,19 @@ export class Launcher {
     return entry;
   }
 
+  private async stampLayout(): Promise<void> {
+    const layout: Array<[string, number]> = [
+      ...LAYOUT,
+      [this.modulesDir, 0o755],
+      [this.pnpmHome, 0o755],
+      [`/${UNLINKED_DIR}`, 0o700],
+    ];
+    for (const [path, mode] of layout) {
+      const fresh = !(await this.base.hasOwner?.(path)) && (await this.base.exists(path));
+      if (fresh) await this.base.chown?.(path, { uid: 0, gid: 0, mode, follow: false });
+    }
+  }
+
   private async provisionPnpmHome(): Promise<void> {
     await this.base.mkdir(this.pnpmHome, { recursive: true }).catch(() => undefined);
   }
@@ -1241,6 +1266,7 @@ export class Launcher {
     if (this.owners) await this.base.chmod('/tmp', 0o1777);
     await this.provisionPnpmHome();
     await this.users.ensure();
+    if (this.owners) await this.stampLayout();
     await writeCaFile(this.base, this.ca).catch(() => undefined);
     this.fstab = this.mountFstab();
   }

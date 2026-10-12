@@ -1146,6 +1146,11 @@ class MountFs implements KernelFs {
     return real;
   }
 
+  async hasOwner(path: string): Promise<boolean> {
+    if (this.at(path)) return true;
+    return (await this.base.hasOwner?.(path)) ?? true;
+  }
+
   async ancestry(path: string): Promise<Array<Perm | undefined>> {
     const names = chain(normalizePath(path));
     const first = names.findIndex((name) => this.at(name));

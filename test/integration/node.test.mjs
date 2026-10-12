@@ -269,6 +269,13 @@ test('pnpm installs globally as root and as a user with users off, report and en
           const shown = users === 'off' ? '' : `${owner}\n`;
           assert.equal(r.stdout, `rc=0\ntool ran\n${shown}`, `${users} ${owner}: ${r.stderr}`);
         }
+        if (users !== 'off') {
+          const layout = await kernel.run(
+            ['stat', '-c', '%n %a %U', '/node_modules', '/usr/local/share/pnpm'],
+            { cwd: '/' }
+          );
+          assert.equal(layout.stdout, '/node_modules 755 root\n/usr/local/share/pnpm 755 root\n');
+        }
       } finally {
         kernel.terminate();
       }
