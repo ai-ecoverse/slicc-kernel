@@ -385,18 +385,13 @@ class StatCache {
     this.lstats.delete(path);
   }
 
-  mutated(paths: readonly string[], ino = 0): number {
+  mutated(paths: readonly string[], ino = 0): void {
     this.clear();
-    if (!this.shared) return 0;
+    if (!this.shared) return;
     const key = (ino % 4294967296) | 0;
     for (const [i, hash] of (paths.length > 0 ? paths.map(pathHash) : [0]).entries()) {
       this.seen = this.publish(this.shared, hash, i === 0 ? key : 0);
     }
-    return this.seen;
-  }
-
-  generation(): number {
-    return this.shared ? Atomics.load(this.shared, FS_GEN) : 0;
   }
 
   inoOf(path: string, look: () => SyncFsBridgeStat): number {
@@ -508,18 +503,12 @@ export function cachingBridge(
     bridge.identify();
   };
   const identified = <T>(p: string, op: () => T, also: string[]): T => {
-    const before = cache.generation();
     try {
       return op();
     } finally {
       const st = bridge.identified?.() ?? null;
-      if (!st) cache.mutated([]);
-      else if (
-        cache.mutated([p, ...also], st.ino) === before + 1 + also.length &&
-        !st.isSymbolicLink
-      ) {
-        cache.put(stats, p, st);
-      }
+      if (st) cache.mutated([p, ...also], st.ino);
+      else cache.mutated([]);
     }
   };
   const rewriting = <T>(p: string, op: () => T, ...also: string[]): T => {
