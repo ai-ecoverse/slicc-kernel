@@ -73,6 +73,7 @@ export type WasiFunction = (...args: never[]) => number | undefined;
 const IDS = ['ruid', 'euid', 'suid', 'rgid', 'egid', 'sgid'] as const;
 const NS_PER_MS = 1_000_000n;
 const AT_SYMLINK_NOFOLLOW = 1;
+const AT_EACCESS = 2;
 
 const ROOT_IDS = Object.freeze({ uid: 0, gid: 0 });
 const GONE: ReadonlySet<string> = new Set(['ENOENT', 'ENOTDIR']);
@@ -291,6 +292,18 @@ export class WasiHost {
         if (!this.o.fs.owners) throw new WasiError('ENOTSUP');
         const path = at(dirfd, p, l);
         owner(pathOwned(path, (flags & AT_SYMLINK_NOFOLLOW) === 0), out);
+      },
+      path_access: (dirfd: number, p: number, l: number, amode: number, flags: number) => {
+        const path = at(dirfd, p, l);
+        const nofollow = (flags & AT_SYMLINK_NOFOLLOW) !== 0;
+        if (deviceOf(path)) {
+          if (this.o.fs.owners && amode & 1) throw new WasiError('EACCES');
+          return;
+        }
+        pathOwned(path, !nofollow);
+        if (!this.o.fs.owners) return;
+        const kind = flags & AT_EACCESS ? 'eaccess' : 'access';
+        this.o.fs.access?.(path, amode & 7, kind, nofollow);
       },
       fd_chmod: (fd: number, mode: number) => void this.o.fs.chmod(pathOf(fd), mode & 0o7777),
       path_chmod: (dirfd: number, p: number, l: number, mode: number, flags: number) =>
@@ -934,6 +947,8 @@ export class WasiHost {
   }
 
   private setTimes(path: string, atim: bigint, mtim: bigint, flags: number, follow = true): void {
+    const asked = FSTFLAGS.ATIM | FSTFLAGS.ATIM_NOW | FSTFLAGS.MTIM | FSTFLAGS.MTIM_NOW;
+    if (this.o.fs.owners && (flags & asked) === 0) return;
     const now = Date.now();
     let current: SyncFsBridgeStat | undefined;
     const statOf = follow ? this.o.fs.stat.bind(this.o.fs) : this.o.fs.lstat.bind(this.o.fs);
@@ -951,7 +966,8 @@ export class WasiHost {
       this.o.fs,
       path,
       pick(FSTFLAGS.ATIM, FSTFLAGS.ATIM_NOW, atim, 'atimeMs'),
-      pick(FSTFLAGS.MTIM, FSTFLAGS.MTIM_NOW, mtim, 'mtimeMs')
+      pick(FSTFLAGS.MTIM, FSTFLAGS.MTIM_NOW, mtim, 'mtimeMs'),
+      (flags & (FSTFLAGS.ATIM | FSTFLAGS.MTIM)) === 0
     );
   }
 

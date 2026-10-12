@@ -1,4 +1,4 @@
-import type { Dac } from '../fs/dac.ts';
+import { Created, type Dac } from '../fs/dac.ts';
 import type { PathGate } from '../fs/unlinked.ts';
 import { HeldPaths } from '../mount/mount-fs.ts';
 import { dispatchSyncFs } from '../realm/sync-fs-dispatch.ts';
@@ -318,11 +318,11 @@ function inherited(opts: SpawnWasmOptions): { ignored?: number; umask?: number; 
 function holdingToken(
   opts: SpawnWasmOptions,
   holds: HeldPaths,
-  caller: { cred: () => Cred; umask: () => number }
+  caller: { cred: () => Cred; umask: () => number; created: Created }
 ): string {
   return mintSyncFsToken({
     ...(opts.owners ? caller : {}),
-    ...(opts.dac ? { dac: opts.dac, pid: opts.pid } : {}),
+    ...(opts.dac ? { dac: opts.dac, pid: opts.pid, created: caller.created } : {}),
     fs: opts.fs,
     cwd: opts.cwd,
     ...(opts.statfs ? { statfs: opts.statfs } : {}),
@@ -340,11 +340,13 @@ function holdingToken(
 function processOptions(
   opts: SpawnWasmOptions,
   header: Int32Array,
-  hooks: Pick<WasmProcessOptions, 'raise' | 'threadKill'>
+  hooks: Pick<WasmProcessOptions, 'raise' | 'threadKill'>,
+  created: Created
 ): WasmProcessOptions {
   return {
     ...inherited(opts),
     ...(opts.owners ? { owners: true } : {}),
+    ...(opts.dac ? { guard: { dac: opts.dac, fs: opts.fs, created } } : {}),
     ...(opts.identity ? { identity: opts.identity } : {}),
     ...(opts.onSyscall ? { onSyscall: opts.onSyscall } : {}),
     ...(opts.settling ? { settling: opts.settling } : {}),
@@ -382,14 +384,20 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
   const sab = new SharedArrayBuffer(SAB_HEADER_BYTES + SAB_DEFAULT_WINDOW_BYTES);
   const header = new Int32Array(sab, 0, SAB_HEADER_I32);
   const threadSignals = new Map<number, ThreadSignals>();
+  const created = new Created();
   const process: WasmProcess = new WasmProcess(
     opts.pid,
     opts.fds,
-    processOptions(opts, header, {
-      raise: (sig) => signal(sig),
-      threadKill: (tid, sig) =>
-        killThread(threadSignals.get(tid), process.signalMasks().caught, sig),
-    })
+    processOptions(
+      opts,
+      header,
+      {
+        raise: (sig) => signal(sig),
+        threadKill: (tid, sig) =>
+          killThread(threadSignals.get(tid), process.signalMasks().caught, sig),
+      },
+      created
+    )
   );
   publishStops(process, header);
   const holds = new HeldPaths();
@@ -397,6 +405,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
   const token = holdingToken(opts, holds, {
     cred: () => process.cred,
     umask: () => process.umask,
+    created,
   });
   process.keptPath = (path) => holds.keptAt(path)?.hidden;
   process.keptHandle = (handle) => holds.keptFor(handle)?.hidden;

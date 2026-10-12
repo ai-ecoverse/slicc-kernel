@@ -11,9 +11,9 @@ import {
   scanCommands,
   scanFilesystems,
 } from './commands.ts';
-
+import { R_OK, X_OK } from './fs/access.ts';
 import { followLinks, withCommandDirs } from './fs/commands.ts';
-import { Dac, type DenialHook } from './fs/dac.ts';
+import { Dac, type DenialHook, need } from './fs/dac.ts';
 import { physicalPathAsync } from './fs/physical-path.ts';
 import type { KernelFs, UsersMode } from './fs/types.ts';
 import { fsError, normalizePath } from './fs/types.ts';
@@ -209,6 +209,8 @@ interface UserScopes {
 interface Planned {
   target: Target;
   args: string[];
+  script?: true;
+  via?: string[];
 }
 
 interface StartRequest {
@@ -634,10 +636,11 @@ export class Launcher {
         return undefined;
       }
       const inner = await this.interpreted(interp, [interp, ...passed], cwd, scope, depth + 1);
-      return inner && { ...inner, target: withScriptEnv(inner.target, command) };
+      const via = [interp, ...(inner?.via ?? [])];
+      return inner && { ...inner, target: withScriptEnv(inner.target, command), via };
     }
     const target = withScriptEnv(found, command);
-    return { target, args: [...(target.prefix ?? []), ...passed] };
+    return { target, args: [...(target.prefix ?? []), ...passed], via: [interp] };
   }
 
   private async plan(
@@ -648,7 +651,29 @@ export class Launcher {
   ): Promise<Planned | undefined> {
     const direct = await this.resolve(file, argv[0] ?? file, cwd, scope);
     if (direct) return { target: direct, args: [...(direct.prefix ?? []), ...argv.slice(1)] };
-    return this.interpreted(file, argv, cwd, scope);
+    const script = await this.interpreted(file, argv, cwd, scope);
+    return script && { ...script, script: true };
+  }
+
+  private async mayExec(
+    cred: Readonly<Cred>,
+    req: { file: string; cwd: string; pid: number },
+    planned: Planned | undefined
+  ): Promise<void> {
+    const { dac } = this;
+    if (!dac) return;
+    const g = { fs: this.fs, cred, pid: req.pid, dac };
+    const byPath = (file: string) => file.includes('/') && !COMMAND.test(file);
+    if (byPath(req.file)) {
+      const path = this.fs.resolvePath(req.cwd, req.file);
+      await need(g, 'exec', path, planned?.script ? R_OK | X_OK : X_OK);
+    }
+    const via = planned?.via ?? [];
+    for (const [i, file] of via.entries()) {
+      if (!byPath(file)) continue;
+      const want = i < via.length - 1 ? R_OK | X_OK : X_OK;
+      await need(g, 'exec', this.fs.resolvePath(req.cwd, file), want);
+    }
   }
 
   private async unrunnable(
@@ -888,6 +913,12 @@ export class Launcher {
     return async (req, fds) => {
       const scope = await this.scopeOf(this.credOf(ppid).euid);
       const planned = await this.plan(req.file, req.argv, req.cwd, scope);
+      try {
+        await this.mayExec(this.credOf(ppid), { ...req, pid: ppid }, planned);
+      } catch (err) {
+        await fds.closeAll();
+        throw (err as { code?: unknown }).code === 'EACCES' ? new SpawnError('EACCES') : err;
+      }
       if (!planned) {
         await fds.closeAll();
         throw new SpawnError(await this.unrunnable(req.file, req.cwd, scope));
@@ -1207,6 +1238,7 @@ export class Launcher {
 
   async prepare(): Promise<void> {
     for (const dir of SHARED_DIRS) await this.base.mkdir(dir, { recursive: true });
+    if (this.owners) await this.base.chmod('/tmp', 0o1777);
     await this.provisionPnpmHome();
     await this.users.ensure();
     await writeCaFile(this.base, this.ca).catch(() => undefined);
@@ -1260,7 +1292,9 @@ export class Launcher {
     const cwd = await physicalPathAsync(this.base, start.startsWith('/') ? start : `/${start}`);
     const [file = ''] = argv;
     await this.base.mkdir(cwd, { recursive: true });
-    return { cwd, file, planned: await this.plan(file, argv, cwd, scope) };
+    const planned = await this.plan(file, argv, cwd, scope);
+    await this.mayExec(credOf(account), { file, cwd, pid: 0 }, planned);
+    return { cwd, file, planned };
   }
 
   async openTerminal(argv: string[], options: TerminalOptions): Promise<TerminalSession> {

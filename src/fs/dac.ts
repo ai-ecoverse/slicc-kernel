@@ -14,7 +14,7 @@ import {
   X_OK,
 } from './access.ts';
 import { inGroup } from './owners.ts';
-import type { KernelFs, Perm } from './types.ts';
+import { type KernelFs, normalizePath, type Perm } from './types.ts';
 import { joinName, parentOf } from './walk.ts';
 
 export interface Denial {
@@ -30,6 +30,7 @@ export type DenialHook = (denial: Denial) => void;
 export const MAX_DENIAL_KEYS = 10_000;
 
 const S_ISGID = 0o2000;
+const DIR = { directory: true } as const;
 
 export class Dac {
   readonly mode: 'report' | 'enforce';
@@ -75,6 +76,21 @@ export class Dac {
   }
 }
 
+const MAX_CREATED = 1024;
+
+export class Created {
+  private readonly paths = new Set<string>();
+
+  add(path: string): void {
+    if (this.paths.size >= MAX_CREATED) this.paths.clear();
+    this.paths.add(normalizePath(path));
+  }
+
+  take(path: string): boolean {
+    return this.paths.delete(normalizePath(path));
+  }
+}
+
 export interface Guard {
   fs: KernelFs;
   cred: Readonly<Cred>;
@@ -99,22 +115,38 @@ export async function need(
   return walked;
 }
 
+function entryIn(dir: Walked, path: string): string {
+  return joinName(dir.path, path.slice(path.lastIndexOf('/') + 1));
+}
+
 async function stickyEntry(g: Guard, op: string, path: string, dir: Walked): Promise<void> {
   const perm = dir.perm;
   if (!perm || sticky(g.cred, perm, perm)) return;
-  const entry = joinName(dir.path, path.slice(path.lastIndexOf('/') + 1));
+  const entry = entryIn(dir, path);
   if (sticky(g.cred, perm, (await ancestryOf(g.fs, entry)).at(-1))) return;
   if (await present(g.fs, entry, false)) deny(g, op, path, 'EPERM');
 }
 
-export async function inParent(g: Guard, op: string, path: string, old = false): Promise<void> {
-  const dir = await need(g, op, parentOf(path), W_OK | X_OK, {}, path);
-  if (old && dir.denied === undefined) await stickyEntry(g, op, path, dir);
+export async function inParent(
+  g: Guard,
+  op: string,
+  path: string,
+  old: boolean | 'replaced' = false
+): Promise<void> {
+  if (old === 'replaced') {
+    const dir = await need(g, op, parentOf(path), W_OK | X_OK, DIR, path);
+    return dir.denied === undefined ? stickyEntry(g, op, path, dir) : undefined;
+  }
+  if (!old) return void (await need(g, op, parentOf(path), W_OK | X_OK, DIR, path));
+  const dir = await access(g.fs, g.cred, parentOf(path), W_OK | X_OK, DIR);
+  if (dir.denied === undefined) return stickyEntry(g, op, path, dir);
+  const lookup = dir.denied === dir.path && dir.perm && permits(g.cred, dir.perm, X_OK);
+  if (!lookup || (await present(g.fs, entryIn(dir, path), false))) deny(g, op, path);
 }
 
 export async function makeIn(g: Guard, op: string, path: string): Promise<void> {
   for (let dir = parentOf(path); ; dir = parentOf(dir)) {
-    const walked = await access(g.fs, g.cred, dir, W_OK | X_OK);
+    const walked = await access(g.fs, g.cred, dir, W_OK | X_OK, DIR);
     if (walked.denied !== undefined) {
       if (!(await present(g.fs, path, true))) deny(g, op, path);
       return;
@@ -143,7 +175,7 @@ export async function removable(g: Guard, op: string, path: string): Promise<voi
 export async function renamable(g: Guard, from: string, to: string): Promise<void> {
   if (from === to) return void (await need(g, 'rename', from, 0, { follow: false }));
   await inParent(g, 'rename', from, true);
-  await inParent(g, 'rename', to, true);
+  await inParent(g, 'rename', to, 'replaced');
   if (g.cred.euid === 0 || parentOf(from) === parentOf(to)) return;
   const st = await g.fs.lstat(from).catch(() => undefined);
   if (st?.isDirectory && !permits(g.cred, permOf(st), W_OK)) deny(g, 'rename', from);
@@ -173,8 +205,22 @@ export async function chmodMode(g: Guard, path: string, mode: number): Promise<n
   return mode & ~S_ISGID;
 }
 
-export async function retimable(g: Guard, op: string, path: string): Promise<void> {
-  await ownerOnly(g, op, path, op !== 'lutimes');
+export async function retimable(g: Guard, op: string, path: string, now = false) {
+  const follow = op !== 'lutimes';
+  if (!now) return void (await ownerOnly(g, op, path, follow));
+  const walked = await need(g, op, path, 0, { follow });
+  const perm = walked.perm;
+  if (!perm || g.cred.euid === 0 || perm.uid === g.cred.euid) return;
+  if (permits(g.cred, perm, W_OK, false)) return;
+  if (await present(g.fs, walked.path, false)) deny(g, op, path);
+}
+
+export async function fileWritable(g: Guard, op: string, path: string): Promise<void> {
+  await need(g, op, path, W_OK, { directory: false });
+}
+
+export function realIds(cred: Readonly<Cred>): Cred {
+  return { ...cred, groups: [...cred.groups], euid: cred.ruid, egid: cred.rgid };
 }
 
 export async function listable(g: Guard, op: string, path: string): Promise<void> {
@@ -190,8 +236,22 @@ export async function readable(g: Guard, op: string, path: string): Promise<void
 }
 
 export async function writable(g: Guard, op: string, path: string): Promise<void> {
-  const st = await g.fs.stat(path).catch(() => undefined);
-  if (st) return void (await need(g, op, path, W_OK, { directory: st.isDirectory }));
+  await openable(g, op, path, W_OK, true);
+}
+
+export async function creatable(g: Guard, op: string, path: string): Promise<void> {
   const target = await need(g, op, path, 0);
-  if (target.denied === undefined) await need(g, op, parentOf(target.path), W_OK | X_OK, {}, path);
+  if (target.denied === undefined) await need(g, op, parentOf(target.path), W_OK | X_OK, DIR, path);
+}
+
+export async function openable(
+  g: Guard,
+  op: string,
+  path: string,
+  want: number,
+  create: boolean
+): Promise<void> {
+  const st = create ? await g.fs.stat(path).catch(() => undefined) : undefined;
+  if (create && !st) return creatable(g, op, path);
+  await need(g, op, path, want, { directory: st?.isDirectory ?? false });
 }

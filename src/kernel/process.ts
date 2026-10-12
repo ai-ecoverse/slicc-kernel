@@ -1,4 +1,6 @@
-import type { NewOwner } from '../fs/types.ts';
+import { R_OK, W_OK } from '../fs/access.ts';
+import { type Created, type Dac, inParent, openable } from '../fs/dac.ts';
+import type { KernelFs, NewOwner } from '../fs/types.ts';
 import type { MountCall } from '../mount/syscall.ts';
 import { inProc, ProcTree, procAlias } from '../process/wasi/wasi-procfs.ts';
 import type { LinkRecord } from '../process/wasi/wasix-linker.ts';
@@ -83,6 +85,8 @@ export type WasmSyscall =
       create?: boolean;
 
       exclusive?: boolean;
+
+      created?: boolean;
 
       existing?: boolean;
 
@@ -368,6 +372,8 @@ export interface WasmProcessOptions {
   cred?: Cred;
 
   owners?: boolean;
+
+  guard?: { dac: Dac; fs: KernelFs; created?: Created };
 
   identity?: () => Promise<{ pid: number; ppid: number }>;
 
@@ -730,6 +736,7 @@ export class WasmProcess {
       throw Object.assign(new Error(alias.refused), { code: alias.refused });
     if (alias !== undefined) return this.openProc(req, alias);
     await refuseReadonly(this.options.fs, req.path, req.flags, req);
+    await this.mayOpen(req);
     const fd = this.fds.install(heldFile(), 3);
     try {
       const nodes = this.nodes;
@@ -784,6 +791,18 @@ export class WasmProcess {
       return st?.ino === undefined ? now : { ...now, ino: st.ino };
     };
     return fs.exclusive ? fs.exclusive(first.path, look) : look();
+  }
+
+  private async mayOpen(req: Extract<FdSyscall, { op: 'fd-open-vfs' }>): Promise<void> {
+    const { guard } = this.options;
+    const inherited = req.orphan || req.contents !== undefined || req.handle !== undefined;
+    if (!guard || inherited || req.pin !== undefined) return;
+    const g = { fs: guard.fs, dac: guard.dac, cred: this.cred, pid: this.pid };
+    if (req.exclusive) return inParent(g, 'open', req.path);
+    if (req.created && guard.created?.take(req.path)) return;
+    const access = req.flags & WRITE_ACCESS;
+    const want = (access === 1 ? 0 : R_OK) | (access !== 0 || req.truncate ? W_OK : 0);
+    await openable(g, 'open', req.path, want, req.create === true);
   }
 
   private newOwner(): NewOwner | undefined {

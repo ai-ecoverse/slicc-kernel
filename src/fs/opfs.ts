@@ -237,11 +237,16 @@ export class OpfsFs implements KernelFs {
 
   async ancestry(path: string): Promise<Perm[]> {
     const entries = await this.meta.get(chain(path));
-    return entries.map((entry, i) => ({
-      ...(ownOf(entry) ?? (i === 0 ? ROOT_OWNER : inherit(entries.slice(0, i)))),
-      ...(entry?.mode !== undefined ? { mode: entry.mode } : {}),
-      ...(entry?.link !== undefined ? { link: entry.link } : {}),
-    }));
+    const out: Perm[] = [];
+    for (const [i, entry] of entries.entries()) {
+      const link = entry?.link !== undefined && !(await this.real(entry.path));
+      out.push({
+        ...(ownOf(entry) ?? (i === 0 ? ROOT_OWNER : inherit(entries.slice(0, i)))),
+        ...(entry?.mode !== undefined ? { mode: entry.mode } : {}),
+        ...(link ? { link: entry.link } : {}),
+      });
+    }
+    return out;
   }
 
   private async handedTo(dir: string): Promise<Owner> {

@@ -26,7 +26,9 @@ import { createProcessKernel, type ProcessKernel } from './process-children.ts';
 import {
   type FdImports,
   type GlueSyscalls,
+  kernelAccess,
   kernelUmask,
+  linuxDevices,
   type Memalign,
   noFollowUtimes,
   pathOpensLinks,
@@ -110,6 +112,7 @@ export function kernelSys(transport: SyncSabTransport): ProcessSys & PtyKernel {
             ...(opts?.orphan ? { orphan: true } : {}),
             ...(opts?.truncate ? { truncate: true } : {}),
             ...(opts?.create ? { create: true } : {}),
+            ...(opts?.created ? { created: true } : {}),
             ...(opts?.pin ? { pin: opts.pin } : {}),
             ...(opts?.handle !== undefined ? { handle: opts.handle } : {}),
           },
@@ -406,6 +409,10 @@ function callerOwner(Fs: ProcessFs, init: WasmProcessInitMsg): { owner?: Owner }
   return init.owners ? {} : { owner: ownByCaller(Fs, init.cred, credAbi(init.program.glue)) };
 }
 
+function utimensatOf(module: object): unknown {
+  return ownValue<{ utimensat?: unknown }>(module, 'sliccSyscalls')?.utimensat;
+}
+
 export async function runWasmProcess(
   init: WasmProcessInitMsg,
   port: SabPostLike,
@@ -482,11 +489,9 @@ export async function runWasmProcess(
             set: (mask) =>
               void transport.call({ op: 'proc-umask', mask }, Number.POSITIVE_INFINITY, 'umask'),
           });
-          noFollowUtimes(
-            imports,
-            () => ownValue<ProcessFs>(module, 'FS'),
-            ownValue<{ utimensat?: unknown }>(module, 'sliccSyscalls')?.utimensat
-          );
+          const fsOf = () => ownValue<ProcessFs>(module, 'FS');
+          noFollowUtimes(imports, fsOf, utimensatOf(module), () => memory);
+          kernelAccess(imports, fsOf, () => memory);
           const glue = ownValue<FdImports>(module, 'sliccFdImports');
           syncFsync(imports, () => ownValue<ProcessFs>(module, 'FS'), glue);
           positionalIo(imports, {
@@ -526,6 +531,7 @@ export async function runWasmProcess(
   await initialized;
   const running = module as unknown as RunningModule;
   if (!hasStreams(running)) return runStdioOnly(running, init);
+  if (init.owners) linuxDevices(running.FS);
   const vfs = mountVfsIntoEmscripten(running.FS, {
     bridge: createSyncFsSabBridge(transport, init.owners ? { owners: true } : {}),
     cwd: init.cwd,
