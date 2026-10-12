@@ -57,17 +57,21 @@ function errorReply(code: string, message: string): object {
   return { v: 1, error: { code, message } };
 }
 
-function withoutVersion(reply: object): object {
-  const { v: _, ...rest } = reply as { v?: unknown };
-  return rest;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function serialized(reply: object): string {
+  let plain: unknown;
   try {
-    return JSON.stringify(reply);
+    const text = JSON.stringify(reply);
+    plain = text === undefined ? undefined : JSON.parse(text);
   } catch (err) {
     return JSON.stringify(errorReply('EIO', lineOf(err)));
   }
+  if (!isRecord(plain)) return JSON.stringify(errorReply('EIO', 'the vault gave no reply'));
+  const { v: _, ...rest } = plain;
+  return JSON.stringify({ v: 1, ...rest });
 }
 
 function lineOf(err: unknown): string {
@@ -124,10 +128,7 @@ class SealedChannel {
     const asked = Promise.resolve()
       .then(() => hook(req, { signal }))
       .then(
-        (reply) =>
-          typeof reply === 'object' && reply !== null && !Array.isArray(reply)
-            ? { v: 1, ...withoutVersion(reply) }
-            : errorReply('EIO', 'the vault gave no reply'),
+        (reply) => (isRecord(reply) ? reply : errorReply('EIO', 'the vault gave no reply')),
         (err: unknown) => errorReply('EIO', lineOf(err))
       );
     const reply = await Promise.race([asked, stopped]);
@@ -189,11 +190,18 @@ export class SealedBroker {
   readonly hook: SealedHook | undefined;
   readonly users: UsersMode;
   readonly timeoutMs: number;
+  readonly tagOf: (pid: number) => string | undefined;
 
-  constructor(hook: SealedHook | undefined, users: UsersMode, timeoutMs = SEALED_TIMEOUT_MS) {
+  constructor(
+    hook: SealedHook | undefined,
+    users: UsersMode,
+    timeoutMs = SEALED_TIMEOUT_MS,
+    tagOf: (pid: number) => string | undefined = () => undefined
+  ) {
     this.hook = hook;
     this.users = users;
     this.timeoutMs = timeoutMs;
+    this.tagOf = tagOf;
   }
 
   open(): OpenFile {

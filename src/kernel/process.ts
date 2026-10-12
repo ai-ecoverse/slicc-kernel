@@ -869,12 +869,15 @@ export class WasmProcess {
 
   private async sealedCaller(): Promise<SealedCaller> {
     const shown = await this.options.identity?.();
+    const broker = this.options.sealed as SealedBroker;
+    const tag = broker.tagOf(this.pid);
     return {
       pid: shown?.pid ?? this.pid,
       ppid: shown?.ppid ?? 0,
       uid: this.cred.euid,
       gid: this.cred.egid,
-      users: (this.options.sealed as SealedBroker).users,
+      ...(tag !== undefined ? { tag } : {}),
+      users: broker.users,
     };
   }
 

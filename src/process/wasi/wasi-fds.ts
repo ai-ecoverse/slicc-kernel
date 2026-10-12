@@ -613,11 +613,13 @@ export class WasiFds {
     return joined.split('/').includes('..') ? physical(this.fs, joined) : normalize(joined);
   }
 
-  private openKernelDevice(path: string, nonblock: boolean): number | undefined {
+  private openKernelDevice(path: string, oflags: number, fdflags: number): number | undefined {
     const { openSealed, openTty } = this.kernel.sys;
+    const nonblock = (fdflags & FDFLAGS.NONBLOCK) !== 0;
     let fd: number | undefined;
     let kind: KernelFdKind;
     if (path === SEALED_PATH && openSealed) {
+      if (oflags & OFLAGS.DIRECTORY) throw new WasiError('ENOTDIR');
       fd = openSealed.call(this.kernel.sys);
       kind = 'sealed';
     } else if (path === '/dev/tty' || /^\/dev\/tty\d+$/.test(path)) {
@@ -634,7 +636,7 @@ export class WasiFds {
     const device = deviceOf(path);
     if (device) return this.install({ type: 'device', device });
 
-    const kernelDevice = this.openKernelDevice(path, (fdflags & FDFLAGS.NONBLOCK) !== 0);
+    const kernelDevice = this.openKernelDevice(path, oflags, fdflags);
     if (kernelDevice !== undefined) return kernelDevice;
     const alias = stdioAlias(path);
     if (alias !== undefined) return this.reopen(alias);

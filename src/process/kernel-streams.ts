@@ -353,6 +353,15 @@ export class KernelStreams {
     stream.stream_ops = { ...stream.stream_ops, getattr: () => this.Fs.stat?.(name) ?? {} };
   }
 
+  private listSealed(): void {
+    const { analyzePath, mkdev, makedev } = this.Fs as unknown as TtyNodeFs;
+    if (!this.sys.openSealed || !analyzePath || !mkdev || !makedev) return;
+    if (analyzePath.call(this.Fs, SEALED_PATH).exists) return;
+    try {
+      mkdev.call(this.Fs, SEALED_PATH, makedev.call(this.Fs, 10, 250));
+    } catch {}
+  }
+
   private creatingTerminal = false;
 
   private useTerminalNodes(): void {
@@ -457,6 +466,7 @@ export class KernelStreams {
     if (typeof this.Fs.open !== 'function') return;
     this.usePtyPaths();
     this.useTerminalNodes();
+    this.listSealed();
     const open = this.Fs.open.bind(this.Fs);
     this.Fs.open = (path, flags, mode) => {
       const device = typeof path === 'string' ? this.devicePath(path) : undefined;
