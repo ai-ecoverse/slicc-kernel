@@ -1,3 +1,4 @@
+import { access, X_OK } from './fs/access.ts';
 import type { KernelFs, UsersMode } from './fs/types.ts';
 import { normalizePath } from './fs/types.ts';
 import type { Cred } from './kernel/cred.ts';
@@ -88,6 +89,7 @@ export interface SudoOptions {
   hostname: string;
   env: () => Record<string, string>;
   pnpmHome: string;
+  backing?: (path: string, cwd: string) => Promise<string[]>;
   approve?: ApproveHook | undefined;
   timeoutMs?: number | undefined;
   warn?: (message: string) => void;
@@ -269,6 +271,18 @@ export class Sudo {
     return this.o.users.lookup(key);
   }
 
+  private async reachable(cred: Cred, cwd: string): Promise<boolean> {
+    const walked = await access(this.o.fs, cred, cwd, X_OK, { directory: true });
+    if (walked.denied !== undefined || walked.missing) return false;
+    return (await this.o.fs.stat(cwd).catch(() => undefined))?.isDirectory === true;
+  }
+
+  private async untrusted(path: string, cwd: string): Promise<string | undefined> {
+    const files = (await this.o.backing?.(path, cwd)) ?? [];
+    for (const file of [path, ...files]) if (!(await this.trusted(file))) return file;
+    return undefined;
+  }
+
   private async locate(word: string, cwd: string): Promise<string | undefined> {
     const { fs } = this.o;
     const candidates = word.includes('/')
@@ -300,10 +314,14 @@ export class Sudo {
     if (parsed.list) return this.listed(self, root, rules.filter(applies));
     const [word = '', ...args] = parsed.command;
     const cwd = normalizePath(call.cwd);
+    if (!(await this.reachable(cred, cwd))) {
+      return failed('EACCES', `sudo: cannot run in ${cwd}: it isn't a directory you can enter`);
+    }
     const path = await this.locate(word, cwd);
     if (!path) return failed('ENOENT', `sudo: ${word}: command not found`);
-    if (!(await this.trusted(path))) {
-      return failed('EPERM', `sudo: ${path} must be root's, and writable by root only`);
+    const untrusted = await this.untrusted(path, cwd);
+    if (untrusted) {
+      return failed('EPERM', `sudo: ${untrusted} must be root's, and writable by root only`);
     }
     const argv = [path, ...args];
     const matching = rules.filter(

@@ -496,6 +496,7 @@ export class Launcher {
       hostname,
       env: () => this.env,
       pnpmHome: this.pnpmHome,
+      backing: (path, cwd) => this.backing(path, cwd),
       approve: options.approve,
       timeoutMs: options.sudoTimeoutMs,
     });
@@ -713,6 +714,19 @@ export class Launcher {
       const want = i < via.length - 1 ? R_OK | X_OK : X_OK;
       await need(g, 'exec', this.fs.resolvePath(req.cwd, file), want);
     }
+  }
+
+  private async backing(file: string, cwd: string): Promise<string[]> {
+    const planned = await this.plan(file, [file], cwd, '');
+    if (!planned) return [];
+    const { glue, wasm, imports } = planned.target;
+    const files = [glue, wasm, ...(imports ? [imports] : [])];
+    for (const name of [file, ...(planned.via ?? [])]) {
+      if (name.includes('/') && !COMMAND.test(name)) files.push(this.fs.resolvePath(cwd, name));
+      const script = (await this.scriptCommand(name, cwd, ''))?.script;
+      if (script) files.push(script);
+    }
+    return [...new Set(files)].filter((path) => path !== '' && path !== SUDO_PATH);
   }
 
   private async unrunnable(
