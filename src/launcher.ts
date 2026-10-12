@@ -1035,9 +1035,9 @@ export class Launcher {
   private sampling(): void {
     if (this.sampler) return;
     if (this.idleSince !== undefined) {
-      const steps = Math.floor((Date.now() - this.idleSince) / LOAD_SAMPLE_MS);
+      const empty = Math.max(0, Date.now() - this.idleSince);
       this.load = this.load.map(
-        (avg, i) => avg * Math.exp(-LOAD_SAMPLE_MS / LOAD_WINDOWS_MS[i as 0 | 1 | 2]) ** steps
+        (avg, i) => avg * Math.exp(-empty / LOAD_WINDOWS_MS[i as 0 | 1 | 2])
       ) as [number, number, number];
     }
     this.sampledAt = Date.now();
