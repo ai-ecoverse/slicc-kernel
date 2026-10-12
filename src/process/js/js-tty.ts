@@ -55,7 +55,7 @@ export function rawOf(termios: JsTermios): JsTermios {
 export function ttyOps(kernel: JsKernel): {
   tty: JsTty;
   restore(): Promise<void>;
-  modes(): Array<{ fd: number; termios: JsTermios }>;
+  modes(): Array<{ terminal: string; fd: number; termios: JsTermios }>;
 } {
   const saved = new Map<string, { fd: number; termios: JsTermios }>();
   const terminalOf = async (fd: number): Promise<string> =>
@@ -114,6 +114,7 @@ export function ttyOps(kernel: JsKernel): {
     }
   };
 
-  const modes = () => [...saved.values()].reverse().map(({ fd, termios }) => ({ fd, termios }));
+  const modes = () =>
+    [...saved].reverse().map(([terminal, { fd, termios }]) => ({ terminal, fd, termios }));
   return { tty, restore, modes };
 }

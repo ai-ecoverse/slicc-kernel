@@ -12,8 +12,27 @@ export interface PendingWrite {
 }
 
 export interface SavedMode {
+  terminal: string;
   fd: number;
   termios: unknown;
+}
+
+function json(r: SyncFsResult): unknown {
+  return r.ok && r.kind === 'json' ? r.json : undefined;
+}
+
+function restoreMode(lane: SyncCall, { terminal, fd, termios }: SavedMode): void {
+  const open = (json(lane({ op: 'fd-list' })) ?? []) as Array<{ fd: number; terminal?: string }>;
+  const on = open.filter((entry) => entry.terminal === terminal);
+  const at = (on.find((entry) => entry.fd === fd) ?? on[0])?.fd;
+  if (at !== undefined) {
+    lane({ op: 'tty-set', fd: at, termios } as SyncSabRequestBody);
+    return;
+  }
+  const opened = json(lane({ op: 'fd-open-tty', name: terminal }));
+  if (typeof opened !== 'number') return;
+  lane({ op: 'tty-set', fd: opened, termios } as SyncSabRequestBody);
+  lane({ op: 'fd-close', fd: opened });
 }
 
 function writeOut(lane: SyncCall, fd: number, data: Uint8Array): boolean {
@@ -63,7 +82,7 @@ export function exitAtOnce(
     if (broken.has(w.fd)) continue;
     if (!writeOut(lane, w.fd, w.data.subarray(w.at + (sent ?? 0)))) broken.add(w.fd);
   }
-  for (const { fd, termios } of modes) lane({ op: 'tty-set', fd, termios } as SyncSabRequestBody);
+  for (const mode of modes) restoreMode(lane, mode);
   lane({ op: 'proc-exit', status: status & 0xff });
   const parked = new Int32Array(new SharedArrayBuffer(4));
   for (;;) Atomics.wait(parked, 0, 0);
