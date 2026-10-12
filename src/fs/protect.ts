@@ -24,27 +24,48 @@ export function holdsProtected(prefixes: readonly string[], path: string): boole
   return prefixes.some((prefix) => within(prefix, path));
 }
 
-function parentOf(path: string): string {
-  return path.slice(0, path.lastIndexOf('/')) || '/';
+const MAX_LINKS = 40;
+
+function partsOf(path: string): string[] {
+  return path.split('/').filter((p) => p !== '' && p !== '.');
+}
+
+function missing(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  return code === 'ENOENT' || code === 'ENOTDIR';
 }
 
 async function resolved(fs: KernelFs, path: string, follow: boolean): Promise<string> {
-  const realpath = fs.realpath?.bind(fs);
-  if (!realpath) return path;
-  let dir = path;
-  const rest: string[] = [];
-  if (!follow) {
-    if (path === '/') return path;
-    rest.unshift(path.slice(path.lastIndexOf('/') + 1));
-    dir = parentOf(path);
+  let done: string[] = [];
+  let todo = partsOf(path);
+  for (let hops = 0; todo.length > 0; ) {
+    const part = todo.shift() as string;
+    if (part === '..') {
+      done.pop();
+      continue;
+    }
+    if (todo.length === 0 && !follow) {
+      done.push(part);
+      break;
+    }
+    const at = `/${[...done, part].join('/')}`;
+    const st = await fs.lstat(at).catch((err: unknown) => {
+      if (missing(err)) return undefined;
+      throw err;
+    });
+    if (!st) {
+      return normalizePath([...done, part, ...todo].join('/'));
+    }
+    if (!st.isSymbolicLink) {
+      done.push(part);
+      continue;
+    }
+    if (++hops > MAX_LINKS) throw fsError('ELOOP', path);
+    const link = await fs.readlink(at);
+    if (link.startsWith('/')) done = [];
+    todo = [...partsOf(link), ...todo];
   }
-  for (;;) {
-    const real = await realpath(dir, true).catch(() => undefined);
-    if (real !== undefined) return normalizePath([real, ...rest].join('/'));
-    if (dir === '/') return path;
-    rest.unshift(dir.slice(dir.lastIndexOf('/') + 1));
-    dir = parentOf(dir);
-  }
+  return `/${done.join('/')}`;
 }
 
 export class ProtectedFs {
