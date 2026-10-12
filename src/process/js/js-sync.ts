@@ -25,6 +25,7 @@ import {
   written,
 } from './js-io.ts';
 import { JsCallError, type JsKernel } from './js-kernel.ts';
+import type { JsRunOptions, JsRunResult } from './js-run.ts';
 
 export type SyncCall = (req: SyncSabRequestBody) => SyncFsResult;
 
@@ -40,6 +41,8 @@ export interface JsSyncFile {
 }
 
 export interface JsSyncContext {
+  run(options: JsRunOptions): JsRunResult;
+  exit(status?: number): never;
   read(fd: number, max?: number): Uint8Array;
   write(fd: number, data: Uint8Array | string): void;
   close(fd: number): void;
@@ -121,7 +124,10 @@ export class JsSyncKernel {
   }
 }
 
-export function syncOps(kernel: JsSyncKernel, shared: SyncShared): JsSyncContext {
+export function syncOps(
+  kernel: JsSyncKernel,
+  shared: SyncShared
+): Omit<JsSyncContext, 'run' | 'exit'> {
   const { infos, handles, resolve } = shared;
 
   const info = (fd: number): FdInfo => {
