@@ -183,6 +183,9 @@ export function kernelSys(transport: SyncSabTransport): ProcessSys & PtyKernel {
     openPts(n, noctty) {
       return json(call({ op: 'pty-slave-open', n, noctty }, `pty-slave-open ${n}`)) as number;
     },
+    openSealed() {
+      return json(call({ op: 'fd-open-sealed' }, 'fd-open-sealed')) as number;
+    },
     ptyNumbers() {
       return json(call({ op: 'pty-list' }, 'pty-list')) as number[];
     },

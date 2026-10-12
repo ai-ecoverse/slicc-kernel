@@ -19,7 +19,7 @@ import {
   WHENCE,
   wasiErrnoOf,
 } from './wasi-abi.ts';
-import { deviceOf, WasiFds, type WasiForkFd, type WasiKernel } from './wasi-fds.ts';
+import { deviceOf, SEALED_PATH, WasiFds, type WasiForkFd, type WasiKernel } from './wasi-fds.ts';
 import {
   type DirListing,
   type LocalFile,
@@ -139,6 +139,7 @@ function filestatOf(path: string, s: SyncFsBridgeStat): Filestat {
 function kernelFiletype(kind: string): { filetype: number; seeks: boolean } {
   switch (kind) {
     case 'tty':
+    case 'sealed':
       return { filetype: FILETYPE.CHARACTER_DEVICE, seeks: false };
     case 'device':
       return { filetype: FILETYPE.CHARACTER_DEVICE, seeks: true };
@@ -933,7 +934,7 @@ export class WasiHost {
   }
 
   private pathFilestat(path: string, lookup: number): Filestat {
-    if (deviceOf(path)) {
+    if (deviceOf(path) || (path === SEALED_PATH && this.o.kernel.sys.openSealed)) {
       return this.local({
         filetype: FILETYPE.CHARACTER_DEVICE,
         size: 0n,

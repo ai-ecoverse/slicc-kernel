@@ -13,6 +13,7 @@ import { RemoteTransport, type TransportReply } from './kernel/net/remote-transp
 import type { RouteTable } from './kernel/net/routes.ts';
 import type { RealmTransportTraits } from './kernel/net/transport.ts';
 import { RemoteUplink, type UplinkReply, type UplinkTraits } from './kernel/net/uplink.ts';
+import type { SealedHook } from './kernel/sealed.ts';
 import { SIG } from './kernel/signals.ts';
 import {
   Launcher,
@@ -25,6 +26,7 @@ import type { HostfsGrant, HostfsGrantHook, HostfsPortGrant } from './mount/host
 import type { MediaStore } from './mount/media.ts';
 import type { MountSpec } from './mount/mount-fs.ts';
 import type { ProcessMountRequest } from './mount/syscall.ts';
+import { type SealedReply, sealedAsker } from './sealed-relay.ts';
 import type { AddUser, RemoveUser } from './users.ts';
 
 export interface KernelPort {
@@ -47,6 +49,7 @@ export interface InitRequest {
   hostname?: string;
   users?: UsersMode;
   denials?: boolean;
+  sealed?: boolean;
   processMounts?: boolean | 'ask';
   cdp?: boolean;
 }
@@ -246,12 +249,36 @@ function usersOp(l: Launcher, req: UsersRequest): Promise<unknown> {
 
 function hostOptions(
   req: InitRequest,
-  port: KernelPort
-): { hostname?: string; users?: UsersMode; onDenial?: DenialHook } {
+  port: KernelPort,
+  sealed: SealedHook
+): { hostname?: string; users?: UsersMode; onDenial?: DenialHook; sealed?: SealedHook } {
   return {
     ...(req.hostname !== undefined ? { hostname: req.hostname } : {}),
     ...(req.users !== undefined ? { users: req.users } : {}),
     ...(req.denials ? { onDenial: (denial: Denial) => port.postMessage({ denial }) } : {}),
+    ...(req.sealed ? { sealed } : {}),
+  };
+}
+
+function policyAsker(port: KernelPort) {
+  const policies = new Map<number, (allowed: boolean) => void>();
+  let nextPolicy = 0;
+  const askPolicy = (req: ProcessMountRequest) =>
+    new Promise<boolean>((resolve) => {
+      const id = ++nextPolicy;
+      policies.set(id, resolve);
+      port.postMessage({ mountPolicy: { id, req } });
+    });
+  return {
+    mountPolicy: (policy: InitRequest['processMounts']) =>
+      policy === undefined ? {} : { processMounts: policy === 'ask' ? askPolicy : policy },
+    allowed(data: unknown): boolean {
+      const answer = (data as { mountAllowed?: { id: number; allowed: boolean } }).mountAllowed;
+      if (!answer) return false;
+      policies.get(answer.id)?.(answer.allowed);
+      policies.delete(answer.id);
+      return true;
+    },
   };
 }
 
@@ -263,6 +290,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
   const reply = (id: number, body: object, transfer?: Transferable[]) =>
     port.postMessage({ id, ...body }, transfer);
   const clients = new Set<ServedClient>();
+  const sealed = sealedAsker(port);
 
   const locks = deps.locks === null ? undefined : (deps.locks ?? locksOf());
   let holding: Promise<string> | undefined;
@@ -336,7 +364,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
         ...(deps.createDriverWorker ? { createDriverWorker: deps.createDriverWorker } : {}),
         ...(req.modules ? { modules: req.modules } : {}),
         ...(req.env ? { env: req.env } : {}),
-        ...hostOptions(req, port),
+        ...hostOptions(req, port, sealed.hook),
         ...net,
         ...(media ? { media } : {}),
         onMountPending: (medium) => port.postMessage({ medium }),
@@ -402,27 +430,14 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
     else waiting.reject(Object.assign(new Error(error ?? 'no grant'), { code: 'EACCES' }));
   }
 
-  const policies = new Map<number, (allowed: boolean) => void>();
-  let nextPolicy = 0;
-  const askPolicy = (req: ProcessMountRequest) =>
-    new Promise<boolean>((resolve) => {
-      const id = ++nextPolicy;
-      policies.set(id, resolve);
-      port.postMessage({ mountPolicy: { id, req } });
-    });
-
-  const mountPolicy = (policy: InitRequest['processMounts']) =>
-    policy === undefined ? {} : { processMounts: policy === 'ask' ? askPolicy : policy };
+  const { mountPolicy, allowed } = policyAsker(port);
 
   port.addEventListener('message', (event) => {
+    const sealedReply = (event.data as { sealedReply?: SealedReply }).sealedReply;
+    if (sealedReply) return sealed.answer(sealedReply);
     const grant = (event.data as { hostfsGrant?: GrantReply }).hostfsGrant;
     if (grant) return granted(grant);
-    const answer = (event.data as { mountAllowed?: { id: number; allowed: boolean } }).mountAllowed;
-    if (answer) {
-      policies.get(answer.id)?.(answer.allowed);
-      policies.delete(answer.id);
-      return;
-    }
+    if (allowed(event.data)) return;
     if (answered(event.data, remote, uplink)) return;
     const req = event.data as KernelRequest;
     handle(req).then(

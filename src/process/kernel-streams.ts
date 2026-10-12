@@ -68,6 +68,27 @@ function ptyStat(path: string): object {
   };
 }
 
+const SEALED_PATH = '/dev/sealed';
+
+function sealedStat(): object {
+  const now = new Date();
+  return {
+    dev: 0x16,
+    ino: 1,
+    mode: 0o20666,
+    nlink: 1,
+    uid: 0,
+    gid: 0,
+    rdev: (10 << 8) | 250,
+    size: 0,
+    blksize: 4096,
+    blocks: 0,
+    atime: now,
+    mtime: now,
+    ctime: now,
+  };
+}
+
 const O_CREAT = 0o100;
 const O_EXCL = 0o200;
 const O_NOCTTY = 0o400;
@@ -154,6 +175,8 @@ export interface ProcessSys {
   openPts?(n: number, noctty: boolean): number;
 
   ptyNumbers?(): number[];
+
+  openSealed?(): number;
   procList?(): ProcessListing;
   mountList?(): MountLine[];
 }
@@ -440,7 +463,7 @@ export class KernelStreams {
       if (device !== undefined && TTY_PATH.test(device) && !this.terminalExists(device)) {
         throw new this.Fs.ErrnoError(wasiErrno('ENOENT'));
       }
-      const pty = this.openPty(open, path, flags, mode);
+      const pty = this.openPty(open, path, flags, mode) ?? this.openSealed(open, path, flags, mode);
       if (pty) return pty;
       this.refuseExclusiveLink(path, flags);
       const stream = this.openRacing(open, path, flags, mode);
@@ -513,17 +536,38 @@ export class KernelStreams {
     const kfd = this.call(() =>
       pts ? openPts(Number(pts[1]), (flags & O_NOCTTY) !== 0) : openPty()
     ) as number;
+    return this.vessel(open, kfd, { path, flags, mode }, true);
+  }
+
+  private openSealed(
+    open: NonNullable<ProcessFs['open']>,
+    path: string,
+    flags: number,
+    mode?: number
+  ): ProcessStream | undefined {
+    const { openSealed } = this.sys;
+    if (path !== SEALED_PATH || !openSealed) return undefined;
+    const kfd = this.call(() => openSealed.call(this.sys));
+    return this.vessel(open, kfd, { path, flags, mode }, false);
+  }
+
+  private vessel(
+    open: NonNullable<ProcessFs['open']>,
+    kfd: number,
+    at: { path: string; flags: number; mode: number | undefined },
+    terminal: boolean
+  ): ProcessStream {
     let stream: ProcessStream;
     try {
-      stream = open('/dev/null', flags & ~(O_CREAT | O_EXCL | O_TRUNC), mode);
+      stream = open('/dev/null', at.flags & ~(O_CREAT | O_EXCL | O_TRUNC), at.mode);
     } catch (e) {
       this.sys.close(kfd);
       throw e;
     }
 
-    this.attach(stream, kfd, true);
+    this.attach(stream, kfd, terminal);
 
-    this.nameStream(stream, path);
+    this.nameStream(stream, at.path);
     return stream;
   }
 
@@ -539,6 +583,7 @@ export class KernelStreams {
       const original = fs[name];
       if (typeof original !== 'function') continue;
       fs[name] = (path: string, ...rest: unknown[]) => {
+        if (path === SEALED_PATH && this.sys.openSealed) return sealedStat();
         const owned = this.ownedTty(path);
         if (owned && isPtyPath(path)) return this.owned(path, ptyStat(path));
         if (!isPtyPath(path)) {

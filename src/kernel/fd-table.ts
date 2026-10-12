@@ -1,5 +1,6 @@
 import { KernelPipe, type PipeError } from './pipe.ts';
 import type { PtyPair } from './pty.ts';
+import type { SealedChannel } from './sealed.ts';
 import type { KernelTty } from './tty.ts';
 
 export type KernelErrno =
@@ -39,7 +40,8 @@ export type KernelErrno =
   | 'ETIMEDOUT'
   | 'ECONNABORTED'
   | 'EHOSTUNREACH'
-  | 'ECONNRESET';
+  | 'ECONNRESET'
+  | 'EMSGSIZE';
 
 export class KernelError extends Error {
   readonly code: KernelErrno;
@@ -87,6 +89,8 @@ export interface KernelFile {
   tty?: KernelTty;
 
   pty?: PtyPair;
+
+  sealed?: SealedChannel;
 
   stat?(): Promise<{ size: number; path: string; orphan?: true }>;
   held?: true;
@@ -246,12 +250,13 @@ export function heldFile(meta?: HeldMeta): OpenFile {
   return new OpenFile({ held: true, ...(meta ? { heldMeta: meta } : {}), close: () => {} });
 }
 
-export type KernelFdKind = 'tty' | 'stream' | 'file' | 'socket' | 'held' | 'device';
+export type KernelFdKind = 'tty' | 'stream' | 'file' | 'socket' | 'held' | 'device' | 'sealed';
 
 export function kernelFdKind(file: KernelFile): Exclude<KernelFdKind, 'socket'> {
   if (file.held) return 'held';
   if (file.heldMeta && 'device' in file.heldMeta) return 'device';
   if (file.tty) return 'tty';
+  if (file.sealed) return 'sealed';
   return file.seek ? 'file' : 'stream';
 }
 

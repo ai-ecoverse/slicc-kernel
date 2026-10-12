@@ -40,6 +40,7 @@ const { status, stdout, stderr } = await kernel.run(['bash', '-c', 'echo hi > he
 | `hostname` | `'slicc'` | the kernel's node name (see [Node name](#node-name)) |
 | `users` | `'off'` | `'off'`, `'report'` or `'enforce'`: whether files have owners and their modes are checked (see [File owners](#file-owners) and [Permissions](#permissions)). `'off'` behaves exactly as kernels before owners did; any other value rejects. `createNodeKernel` takes it too |
 | `onDenial` | none | `({ pid, uid, op, path, errno }) => void`: called for every permission check that fails, under `'report'` and `'enforce'` (see [Permissions](#permissions)). `createNodeKernel` takes it too |
+| `sealed` | none | `(req, { signal }) => Promise<object>`: answers requests written to [`/dev/sealed`](#devsealed). `createNodeKernel` takes it too |
 | `cdp` | none | `({ runtime }) => Promise<CdpConnection>`: a browser-level DevTools connection for programs that drive a browser (see [Browser automation](#browser-automation-cdp)) |
 
 ### `kernel.run(argv, options?) → Promise<{ status, stdout, stderr }>`
@@ -565,6 +566,15 @@ With `users: 'enforce'` the kernel checks every file call that reaches it agains
 - **A client's `fs`:** checked as the client's user; a page's client (root) passes.
 
 With `users: 'enforce'` not yet the default, no release turns it on before `sudo` exists.
+
+### `/dev/sealed`
+
+A character device (`0666`, major 10, minor 250) through which a program talks to the embedder's `sealed` hook (`createKernel({ sealed })`), the secrets vault on the page. Emscripten and WASI programs can open it; JS programs can't yet.
+- **State per open:** each `open()` is independent; `dup` and fork share one, as on Linux.
+- **One write is one request:** a single UTF-8 JSON object of at most 64 KiB with `v` 1 and a known `op` (`seal`, `placeholder`, `list`, `test`, `request`, `status`, `cancel`, `materialize`). The write takes all the bytes or fails: `EMSGSIZE` over 64 KiB, `EINVAL` for anything else that isn't such an object. These are the only errnos; every other outcome is a JSON reply. The kernel zeroes the bytes it was given once it has parsed them.
+- **The stamp:** the hook gets the request with `caller: { pid, ppid, uid, gid, users }`, from the process that writes (effective ids, at the write; not the one that opened it), and `users` the kernel's `users` mode, since a uid means more under `'enforce'`. A `caller` in the request is replaced.
+- **Reading:** the reply comes from the same descriptor, as JSON (`{ v: 1, … }`). A read waits for it, drains it, then returns end-of-file; with no request outstanding it returns end-of-file at once. A signal ends the wait with `EINTR` and the request stays outstanding, `O_NONBLOCK` gives `EAGAIN`, and `poll`/`select` report the descriptor readable once the reply is there. A new write drops an unread reply.
+- **The hook:** `signal` aborts with `'timeout'` after 10 s (the reply is then `{ v: 1, error: { code: 'ETIMEDOUT' } }`), `'replaced'` when a new write on the descriptor comes first, and `'withdrawn'` when the writer exits or the descriptor is closed. A throw or a reply that isn't an object becomes an `EIO` error reply, with the first line of the message; no hook is `ENOTCONN`. On the page, `createKernel` relays the request from the kernel worker and back, and the abort too.
 
 ### `/proc`
 
