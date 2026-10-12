@@ -1186,7 +1186,8 @@ export class Launcher {
     }
   }
 
-  private async realLayoutPath(path: string): Promise<string | undefined> {
+  private async realLayoutPath(given: string): Promise<string | undefined> {
+    const path = normalizePath(given);
     if (!(await this.base.exists(path))) return undefined;
     if (path === '/') return path;
     return joinName(await realDir(this.base, parentOf(path)), baseName(path));
