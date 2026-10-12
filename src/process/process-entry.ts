@@ -32,6 +32,8 @@ const loadWasi: WasiLoader = () => import('./wasi/wasi-runtime.ts');
 
 const loadJs: JsLoader = () => import('./js/js-runtime.ts');
 
+const NOT_RUNNABLE = 126;
+
 function started(
   init: ProcessInitMsg,
   port: SabPostLike,
@@ -52,22 +54,39 @@ export function processEntry(
   port: SabPostLike,
   run: ProcessRunner = runWasmProcess,
   wasi: WasiLoader = loadWasi,
-  js: JsLoader = loadJs
+  js: JsLoader = loadJs,
+  seal: () => void = () => {}
 ): (data: unknown) => void {
-  const failed = (err: unknown): void =>
+  const failed = (err: unknown, code?: number): void =>
     port.postMessage({
       type: WASM_PROCESS_ERROR,
       message: err instanceof Error ? (err.stack ?? err.message) : String(err),
+      ...(code === undefined ? {} : { code }),
     } satisfies WasmProcessErrorMsg);
+  let refused: { error: unknown } | null | undefined;
+  const sealOnce = (): { error: unknown } | null => {
+    if (refused === undefined) {
+      try {
+        seal();
+        refused = null;
+      } catch (error) {
+        refused = { error };
+      }
+    }
+    return refused;
+  };
   return (data) => {
     const type = (data as { type?: string } | undefined)?.type;
+    if (type !== WASM_THREAD_INIT && type !== WASM_PROCESS_INIT) return;
+    const refusal = sealOnce();
     if (type === WASM_THREAD_INIT) {
+      if (refusal) return failed(refusal.error);
       wasi()
         .then((m) => m.runWasiThread(data as WasmThreadInitMsg, port))
         .catch(failed);
       return;
     }
-    if (type !== WASM_PROCESS_INIT) return;
+    if (refusal) return failed(refusal.error, NOT_RUNNABLE);
     started(data as ProcessInitMsg, port, run, wasi, js).then(
       (code) => port.postMessage({ type: WASM_PROCESS_EXIT, code } satisfies WasmProcessExitMsg),
       failed

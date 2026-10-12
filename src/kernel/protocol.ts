@@ -100,6 +100,7 @@ export interface WasmProcessExitMsg {
 export interface WasmProcessErrorMsg {
   type: typeof WASM_PROCESS_ERROR;
   message: string;
+  code?: number;
 }
 
 export interface WasmThread {

@@ -12,9 +12,21 @@ export const BLOCKED_GLOBALS: readonly string[] = [
   'BroadcastChannel',
   'postMessage',
   'close',
+  'webkitRequestFileSystem',
+  'webkitRequestFileSystemSync',
+  'webkitResolveLocalFileSystemURL',
+  'webkitResolveLocalFileSystemSyncURL',
 ];
 
-export const BLOCKED_NAVIGATOR: readonly string[] = ['storage', 'locks', 'serviceWorker'];
+export const BLOCKED_NAVIGATOR: readonly string[] = [
+  'storage',
+  'storageBuckets',
+  'locks',
+  'serviceWorker',
+  'usb',
+  'hid',
+  'serial',
+];
 
 export const OPEN_SLOTS: readonly string[] = ['fetch', 'WebSocket'];
 

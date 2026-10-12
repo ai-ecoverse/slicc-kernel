@@ -447,7 +447,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
       finish(...dying.status(data.code));
     } else if (data?.type === WASM_PROCESS_ERROR) {
       if (!dying.ending) opts.onError?.(String(data.message));
-      finish(...dying.status(CRASHED));
+      finish(...dying.status(data.code));
     } else if (data?.type === WASM_THREAD_SPAWN && data.thread) {
       spawnThread(data.thread);
     }
