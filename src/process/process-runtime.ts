@@ -21,6 +21,7 @@ import {
   type ProcessStream,
   type ProcessSys,
   SyscallError,
+  type TtyOwner,
 } from './kernel-streams.ts';
 import { createProcessKernel, type ProcessKernel } from './process-children.ts';
 import {
@@ -158,6 +159,9 @@ export function kernelSys(transport: SyncSabTransport): ProcessSys & PtyKernel {
     },
     ttyNames() {
       return json(call({ op: 'fd-tty-names' }, 'fd-tty-names')) as string[];
+    },
+    ttyOwner(name) {
+      return json(call({ op: 'fd-tty-owner', name }, `fd-tty-owner ${name}`)) as TtyOwner | null;
     },
     openTty(name) {
       const req =
@@ -540,7 +544,8 @@ export async function runWasmProcess(
   early = () => signals.quiet(() => vfs.flushDirty());
   const sigpipe = (): boolean => running.sliccSigpipe?.() === 1;
   const restartable = (): boolean => signals.restartable();
-  const streams = new KernelStreams(running.FS, sys, { sigpipe, restartable });
+  const owners = init.owners ? { owners: true } : {};
+  const streams = new KernelStreams(running.FS, sys, { sigpipe, restartable, ...owners });
   trackCloseOnExec(running.FS);
   quietQuit(running.FS as unknown as QuitFs);
   useMounts(running.FS, init.env, true);

@@ -587,6 +587,10 @@ async function globals(ctx) {
     'caches',
     'postMessage',
     'importScripts',
+    'webkitRequestFileSystem',
+    'webkitRequestFileSystemSync',
+    'webkitResolveLocalFileSystemURL',
+    'webkitResolveLocalFileSystemSyncURL',
   ];
   const seen = names.map((n) => `${n}=${typeof globalThis[n]}`);
   seen.push(`storage=${typeof globalThis.navigator?.storage}`);

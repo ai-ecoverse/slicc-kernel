@@ -102,6 +102,13 @@ export function deny(g: Guard, op: string, path: string, errno = 'EACCES'): void
   g.dac.denied({ pid: g.pid, uid: g.cred.euid, op, path, errno });
 }
 
+export const TTY_MODE = 0o620;
+
+export function ttyOpenable(g: Guard | undefined, tty: { name?: string; owner?: Perm }): void {
+  if (!g || !tty.owner || permits(g.cred, tty.owner, R_OK | W_OK, false)) return;
+  deny(g, 'open', tty.name ?? '/dev/tty');
+}
+
 export async function need(
   g: Guard,
   op: string,
