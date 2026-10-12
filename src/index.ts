@@ -22,6 +22,7 @@ import type { MountEntry, MountSpec } from './mount/mount-fs.ts';
 import type { ProcessMountPolicy, ProcessMountRequest } from './mount/syscall.ts';
 import { sealedAnswerer } from './sealed-relay.ts';
 import type { InitRequest, KernelCall, TerminalAction } from './serve.ts';
+import type { ApproveHook, SudoRequest } from './sudo.ts';
 import { type NetworkTransport, serveTransport } from './transport.ts';
 import type { Account, AddUser, Group, RemoveUser } from './users.ts';
 
@@ -87,6 +88,7 @@ export type {
   JsOpenOptions,
   JsProgramContext,
   JsSignal,
+  JsSudoAnswer,
 } from './process/js/js-context.ts';
 export type {
   JsAddress,
@@ -105,6 +107,7 @@ export type {
   JsWebSocketMessage,
   JsWebSocketOptions,
 } from './process/js/js-websocket.ts';
+export type { ApproveHook, SudoAnswer, SudoRequest } from './sudo.ts';
 export {
   type FetchTransportOptions,
   fetchTransport,
@@ -141,6 +144,7 @@ export interface KernelOptions {
   users?: UsersMode;
   onDenial?: DenialHook;
   sealed?: SealedHook;
+  approve?: ApproveHook;
 }
 
 interface HostfsRequest {
@@ -158,6 +162,7 @@ export interface MountPending {
 export interface RunOptions {
   cwd?: string;
   user?: string | number;
+  tag?: string;
   env?: Record<string, string>;
   stdin?: string | Uint8Array;
   onStdout?: (text: string) => void;
@@ -172,6 +177,7 @@ export interface RunResult {
 
 export interface ConnectOptions {
   user?: string | number;
+  tag?: string;
 }
 
 export interface KernelGroups {
@@ -206,6 +212,7 @@ export interface Kernel {
 export interface TerminalOptions {
   cwd?: string;
   user?: string | number;
+  tag?: string;
   env?: Record<string, string>;
   cols?: number;
   rows?: number;
@@ -303,6 +310,7 @@ function initCall(options: KernelOptions, transport: NetworkTransport | undefine
     ...(options.users !== undefined ? { users: options.users } : {}),
     ...(options.onDenial ? { denials: true } : {}),
     ...(options.sealed ? { sealed: true } : {}),
+    ...(options.approve ? { approve: true } : {}),
     ...(options.processMounts !== undefined
       ? {
           processMounts:
@@ -379,6 +387,51 @@ async function mountPolicy(
   worker.postMessage({ mountAllowed: { id, allowed } });
 }
 
+type SudoMessage = { sudoAsk: SudoRequest } | { sudoAbort: { id: string; reason: string } };
+
+type WorkerMessage =
+  | Reply
+  | TransportCall
+  | UplinkCall
+  | { medium: PendingMedium }
+  | { hostfs: HostfsRequest }
+  | { mountPolicy: { id: number; req: ProcessMountRequest } }
+  | CdpOpen
+  | { denial: Denial }
+  | SudoMessage;
+
+function approver(approve: ApproveHook | undefined, worker: Worker) {
+  const asked = new Map<string, AbortController>();
+  const handlers = {
+    handle(data: WorkerMessage): data is SudoMessage {
+      if ('sudoAsk' in data) void handlers.ask(data.sudoAsk);
+      else if ('sudoAbort' in data) handlers.abort(data.sudoAbort);
+      else return false;
+      return true;
+    },
+    async ask(req: SudoRequest): Promise<void> {
+      const control = new AbortController();
+      asked.set(req.id, control);
+      let answer: unknown = 'deny';
+      try {
+        answer = await approve?.(req, { signal: control.signal });
+      } catch {}
+      asked.delete(req.id);
+      if (control.signal.aborted) return;
+      worker.postMessage({ sudoAnswer: { id: req.id, answer } });
+    },
+    abort({ id, reason }: { id: string; reason: string }): void {
+      asked.get(id)?.abort(reason);
+      asked.delete(id);
+    },
+    close(): void {
+      for (const control of asked.values()) control.abort('withdrawn');
+      asked.clear();
+    },
+  };
+  return handlers;
+}
+
 function checkOptions(options: KernelOptions): void {
   if (!globalThis.crossOriginIsolated) throw new Error(ISOLATION);
   if (options.hostname !== undefined && !isHostname(options.hostname)) {
@@ -397,10 +450,12 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
   const dials = dialer((req) => call(req));
   const cdp = cdpBridge(options.cdp);
   const sealed = sealedAnswerer(worker, options.sealed);
+  const approvals = approver(options.approve, worker);
   const fail = (error: Error) => {
     dials.reset();
     cdp.close();
     sealed.close();
+    approvals.close();
     failure = error;
     bridge?.close();
     uplinks?.close();
@@ -438,37 +493,28 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
       insert: async () =>
         void (await call({ op: 'insert', target, source, handle: await chosen(handle) })),
     });
-  worker.addEventListener(
-    'message',
-    ({
-      data,
-    }: MessageEvent<
-      | Reply
-      | TransportCall
-      | UplinkCall
-      | { medium: PendingMedium }
-      | { hostfs: HostfsRequest }
-      | { mountPolicy: { id: number; req: ProcessMountRequest } }
-      | CdpOpen
-      | { denial: Denial }
-    >) => {
-      if ('denial' in data) return void options.onDenial?.(data.denial);
-      if (sealed.handle(data)) return;
-      if ('net' in data) return bridge?.answer(data);
-      if ('uplink' in data) return uplinks?.answer(data);
-      if ('cdpOpen' in data) return cdp.open(data);
-      if ('mountPolicy' in data) return void policy(data.mountPolicy);
-      if ('medium' in data) return pendingMedium(data.medium);
-      if ('hostfs' in data) return void grantHostfs(data.hostfs);
-      const call = pending.get(data.id);
-      if (!call) return;
-      if (data.fd !== undefined) return call.output?.(data.fd, data.bytes as Uint8Array);
-      if (data.started !== undefined) return call.started?.(data.started);
-      pending.delete(data.id);
-      if (data.error !== undefined) call.reject(failed(data.error, data.code));
-      else call.resolve(data.result);
-    }
-  );
+  const aside = (data: WorkerMessage): data is { denial: Denial } => {
+    if (!('denial' in data)) return sealed.handle(data);
+    options.onDenial?.(data.denial);
+    return true;
+  };
+  worker.addEventListener('message', ({ data }: MessageEvent<WorkerMessage>) => {
+    if (aside(data)) return;
+    if (approvals.handle(data)) return;
+    if ('net' in data) return bridge?.answer(data);
+    if ('uplink' in data) return uplinks?.answer(data);
+    if ('cdpOpen' in data) return cdp.open(data);
+    if ('mountPolicy' in data) return void policy(data.mountPolicy);
+    if ('medium' in data) return pendingMedium(data.medium);
+    if ('hostfs' in data) return void grantHostfs(data.hostfs);
+    const call = pending.get(data.id);
+    if (!call) return;
+    if (data.fd !== undefined) return call.output?.(data.fd, data.bytes as Uint8Array);
+    if (data.started !== undefined) return call.started?.(data.started);
+    pending.delete(data.id);
+    if (data.error !== undefined) call.reject(failed(data.error, data.code));
+    else call.resolve(data.result);
+  });
   worker.addEventListener('error', (event) => {
     event.preventDefault();
     fail(new Error(`slicc-kernel worker failed: ${event.message}`));

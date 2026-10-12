@@ -5,6 +5,7 @@ import { serveClient } from './client/serve-client.ts';
 import {
   type Abi,
   binfmtOf,
+  binfmtSuffix,
   type Command,
   pnpmGlobalRoots,
   scanBinfmts,
@@ -104,6 +105,8 @@ import {
   type ImportedMemory,
   importedMemory,
 } from './process/wasi/wasi-module.ts';
+import { type ApproveHook, Sudo, type SudoCall, type SudoResult } from './sudo.ts';
+import { SUDO_COMMAND, SUDO_PATH, SUDO_SOURCE } from './sudo-command.ts';
 import {
   type Account,
   credOf,
@@ -137,6 +140,8 @@ export interface LauncherOptions {
   users?: UsersMode;
   onDenial?: DenialHook;
   sealed?: SealedHook;
+  approve?: ApproveHook;
+  sudoTimeoutMs?: number;
 }
 
 export interface PendingMedium {
@@ -161,6 +166,7 @@ export interface RunOptions {
   collect?: boolean;
   pgid?: number;
   user?: string | number | Account;
+  tag?: string;
 }
 
 export interface TerminalOptions {
@@ -169,6 +175,7 @@ export interface TerminalOptions {
   cols?: number;
   rows?: number;
   user?: string | number | Account;
+  tag?: string;
   onData: (bytes: Uint8Array) => void;
 }
 
@@ -232,6 +239,7 @@ interface StartRequest {
   ignored?: number;
   umask?: number;
   cred: Cred;
+  tag?: string | undefined;
   decided?: Promise<boolean>;
 }
 
@@ -264,8 +272,24 @@ function usersMode(mode: unknown = 'off'): UsersMode {
   throw new Error(`users must be 'off', 'report' or 'enforce', not ${String(mode)}`);
 }
 
+export function tagOption(tag: unknown): void {
+  if (tag !== undefined && typeof tag !== 'string') throw new TypeError('a tag must be a string');
+}
+
 function baseName(path: string): string {
   return path.slice(path.lastIndexOf('/') + 1);
+}
+
+function packageRootOf(path: string, roots: readonly string[]): string | undefined {
+  for (const root of roots) {
+    const base = normalizePath(root);
+    if (!path.startsWith(`${base}/`)) continue;
+    const [first = '', second] = path.slice(base.length + 1).split('/');
+    return first.startsWith('@') && second !== undefined
+      ? `${base}/${first}/${second}`
+      : `${base}/${first}`;
+  }
+  return undefined;
 }
 
 function modulePath(glue: string): string {
@@ -374,7 +398,10 @@ export class Launcher {
   private readonly orphans = new Set<number>();
   private readonly described = new Map<number, Pick<ProcessInfo, 'argv' | 'tty' | 'started'>>();
   private readonly creds = new Map<number, () => Cred>();
+  private readonly tags = new Map<number, string>();
+  private readonly granted = new Map<number, number>();
   readonly users: UserDb;
+  private readonly sudoer: Sudo;
   private readonly jobs = new JobTable();
   private readonly locks = new LockTable();
   private readonly settling = new SettlingChildren((pid) => this.jobs.pgidOf(pid));
@@ -479,6 +506,17 @@ export class Launcher {
     );
     this.fs = this.unlinked.wrap(keepingOpen(fs, this.nodes));
     this.users = new UserDb(this.fs, this.owners);
+    this.sudoer = new Sudo({
+      fs: this.fs,
+      users: this.users,
+      mode: this.usersMode,
+      hostname,
+      env: () => this.env,
+      pnpmHome: this.pnpmHome,
+      backing: (path, cwd) => this.backing(path, cwd),
+      approve: options.approve,
+      timeoutMs: options.sudoTimeoutMs,
+    });
     void this.unlinked.sweep('/');
     this.watchers.watch([this.modulesDir, this.pnpmHome], { recursive: true }, () =>
       this.resetCatalogs()
@@ -500,7 +538,9 @@ export class Launcher {
   commands(scope = ''): Promise<Map<string, Command>> {
     let found = this.catalogs.get(scope);
     if (!found) {
-      found = this.roots(scope).then((roots) => scanCommands(this.base, roots));
+      found = this.roots(scope)
+        .then((roots) => scanCommands(this.base, roots))
+        .then((commands) => commands.set(SUDO_COMMAND.name, SUDO_COMMAND));
       this.catalogs.set(scope, found);
     }
     return found;
@@ -693,6 +733,44 @@ export class Launcher {
     }
   }
 
+  private async grantedCwd(caller: Cred, cwd: string): Promise<boolean> {
+    const real = await physicalPathAsync(this.base, cwd).catch(() => undefined);
+    return real === cwd && (await this.sudoer.reachable(caller, cwd));
+  }
+
+  private async binfmtManifests(scripts: string[]): Promise<string[]> {
+    const sources = new Map<string, string>();
+    const binfmts = await scanBinfmts(this.base, await this.roots(), undefined, sources);
+    const manifests: string[] = [];
+    for (const script of scripts) {
+      const head = await this.head(script);
+      if (!head || isWasm(head) || shebang(head)) continue;
+      const pkg = sources.get(binfmtSuffix(binfmts, script) ?? '');
+      if (pkg !== undefined) manifests.push(`${pkg}/package.json`);
+    }
+    return manifests;
+  }
+
+  private async backing(file: string, cwd: string): Promise<string[]> {
+    const planned = await this.plan(file, [file], cwd, '');
+    if (!planned) return [];
+    const { glue, wasm, imports } = planned.target;
+    const files = [glue, wasm, ...(imports ? [imports] : [])];
+    const scripts: string[] = [];
+    for (const name of [file, ...(planned.via ?? [])]) {
+      if (name.includes('/') && !COMMAND.test(name)) scripts.push(this.fs.resolvePath(cwd, name));
+      const script = (await this.scriptCommand(name, cwd, ''))?.script;
+      if (script) scripts.push(script);
+    }
+    files.push(...scripts, ...(await this.binfmtManifests(scripts)));
+    const roots = await this.roots();
+    for (const at of [...files]) {
+      const root = packageRootOf(at, roots) ?? PACKAGE_ROOT.exec(at)?.[1];
+      if (root !== undefined) files.push(`${root}/package.json`);
+    }
+    return [...new Set(files)].filter((path) => path !== '' && path !== SUDO_PATH);
+  }
+
   private async unrunnable(
     file: string,
     cwd: string,
@@ -737,6 +815,9 @@ export class Launcher {
   }
 
   private async program(target: Target, env: Record<string, string>): Promise<Program> {
+    if (target.abi === 'js' && target.wasm === SUDO_PATH) {
+      return { abi: 'js', glue: SUDO_SOURCE, path: SUDO_PATH };
+    }
     if (target.abi === 'js') {
       return { abi: 'js', glue: await this.base.readFile(target.wasm), path: target.wasm };
     }
@@ -831,6 +912,7 @@ export class Launcher {
       kill: (target, sig) => this.kill(target, sig, this.credOf(pid), pid),
       writesBack: (target) => this.processes.get(target)?.writesBack() === true,
       processes: () => ({ boot: this.boot, processes: this.list(this.credOf(pid)) }),
+      sudo: (call, signal) => this.sudo(pid, call, signal),
       openFiles: this.openFiles,
       nodes: this.nodes,
       held: this.held,
@@ -852,6 +934,7 @@ export class Launcher {
     this.processes.set(pid, handle);
     const { cred } = req;
     this.creds.set(pid, () => handle.cred?.() ?? copyCred(cred));
+    if (req.tag !== undefined) this.tags.set(pid, req.tag);
     if (req.ppid !== undefined && this.controlsJobs(req.ppid)) this.settling.started(pid, req.ppid);
     this.jobs.add(pid, req.ppid, (sig) => handle.signal(sig), terminal);
     if (req.exec && req.ppid !== undefined) this.jobs.exec(req.ppid, pid, true);
@@ -881,6 +964,8 @@ export class Launcher {
     this.jobs.remove(pid);
     this.described.delete(pid);
     this.creds.delete(pid);
+    this.tags.delete(pid);
+    this.granted.delete(pid);
   }
 
   private reaped(pid: number): void {
@@ -927,12 +1012,27 @@ export class Launcher {
     return listed;
   }
 
+  private sudo(pid: number, call: SudoCall, signal: AbortSignal): Promise<SudoResult> {
+    const caller = {
+      cred: this.credOf(pid),
+      pid: this.jobs.shown(pid),
+      tag: this.tagOf(pid),
+      tty: this.described.get(pid)?.tty,
+    };
+    return this.sudoer.request(caller, call, signal);
+  }
+
   private spawner(ppid: number, report: (message: string) => void): ChildSpawner {
-    return async (req, fds) => {
-      const scope = await this.scopeOf(this.credOf(ppid).euid);
+    return async (req, fds, grant) => {
+      if (grant && !(await this.grantedCwd(grant.caller, req.cwd))) {
+        await fds.closeAll();
+        throw new SpawnError('EACCES');
+      }
+      const cred = grant ? grant.cred : this.credOf(ppid);
+      const scope = grant ? '' : await this.scopeOf(cred.euid);
       const planned = await this.plan(req.file, req.argv, req.cwd, scope);
       try {
-        await this.mayExec(this.credOf(ppid), { ...req, pid: ppid }, planned);
+        await this.mayExec(cred, { ...req, pid: ppid }, planned);
       } catch (err) {
         await fds.closeAll();
         throw (err as { code?: unknown }).code === 'EACCES' ? new SpawnError('EACCES') : err;
@@ -952,10 +1052,12 @@ export class Launcher {
         ppid,
         ignored: this.ignoredBy(ppid),
         umask: this.umaskOf(ppid),
-        cred: this.credOf(ppid),
+        cred,
+        tag: this.tagOf(ppid),
         ...exec,
       });
       deciding?.attach();
+      if (grant) this.granted.set(handle.pid, ppid);
       return childHandle(handle);
     };
   }
@@ -1008,6 +1110,7 @@ export class Launcher {
           ignored: this.ignoredBy(ppid, true),
           umask: this.umaskOf(ppid),
           cred: this.credOf(ppid),
+          tag: this.tagOf(ppid),
         })
       );
   }
@@ -1037,6 +1140,10 @@ export class Launcher {
     return this.creds.get(pid)?.() ?? copyCred(ROOT);
   }
 
+  tagOf(pid: number): string | undefined {
+    return this.tags.get(pid);
+  }
+
   private released(path: string): void {
     const at = normalizePath(path);
     this.unlinked.closed(at);
@@ -1063,7 +1170,8 @@ export class Launcher {
       !sender ||
       maySignal(sender, this.credOf(target)) ||
       (sig === SIG.CONT && session !== undefined && this.jobs.sidOf(target) === session) ||
-      (from !== undefined && this.imageOf(from) === this.imageOf(target));
+      (from !== undefined && this.imageOf(from) === this.imageOf(target)) ||
+      (from !== undefined && this.granted.get(this.jobs.shown(target)) === from);
     if (pid < 0) return this.jobs.killGroup(-pid, sig, (member) => may(this.imageOf(member)));
     const handle = this.processes.get(pid);
     if (!handle) return false;
@@ -1191,7 +1299,8 @@ export class Launcher {
     }
   }
 
-  private async realLayoutPath(path: string): Promise<string | undefined> {
+  private async realLayoutPath(given: string): Promise<string | undefined> {
+    const path = normalizePath(given);
     if (!(await this.base.exists(path))) return undefined;
     if (path === '/') return path;
     return joinName(await realDir(this.base, parentOf(path)), baseName(path));
@@ -1204,7 +1313,8 @@ export class Launcher {
   private mountedBy(spec: MountSpec, cred: Cred): MountSpec {
     if (!this.owners || (cred.euid === 0 && cred.egid === 0)) return spec;
     const ids = { uid: String(cred.euid), gid: String(cred.egid) };
-    return { ...spec, options: { ...ids, ...spec.options } };
+    const options = cred.euid === 0 ? { ...ids, ...spec.options } : { ...spec.options, ...ids };
+    return { ...spec, options };
   }
 
   private mountRoot(path: string): string {
@@ -1255,14 +1365,40 @@ export class Launcher {
   private async processMount(pid: number, call: MountCall, signal: AbortSignal): Promise<void> {
     const spec = mountCall(call);
     await this.permit({ op: 'mount', pid, ...spec, options: { ...spec.options } });
+    await this.mountsOwn(
+      this.credOf(pid),
+      spec.target,
+      async () => (await this.fs.stat(spec.target)).uid
+    );
     const entry = await this.mount(this.mountedBy(spec, this.credOf(pid)));
     if (signal.aborted) this.umount(entry.target, true);
   }
 
+  async mountAs(cred: Cred, spec: MountSpec): Promise<MountEntry> {
+    const target = normalizePath(spec.target);
+    await this.mountsOwn(cred, target, async () => (await this.fs.stat(target)).uid);
+    return this.mount(this.mountedBy(spec, cred));
+  }
+
+  async umountAs(cred: Cred, target: string): Promise<void> {
+    const at = normalizePath(target);
+    await this.mountsOwn(cred, at, async () => Number(this.mounts.mounted(at)?.options.uid));
+    this.umount(at);
+  }
+
+  private async mountsOwn(cred: Cred, target: string, owner: () => Promise<unknown>) {
+    const { euid } = cred;
+    if (this.usersMode !== 'enforce' || euid === 0) return;
+    if ((await owner().catch(() => undefined)) !== euid) {
+      throw fsError('EPERM', `${target} is not the caller's to mount or unmount`);
+    }
+  }
+
   private async processUmount(pid: number, target: string, flags: number): Promise<void> {
     const call = umountCall(target, flags);
+    let mounted: MountEntry | undefined;
     for (;;) {
-      const mounted = this.mounts.mounted(call.target);
+      mounted = this.mounts.mounted(call.target);
       await this.permit({
         op: 'umount',
         pid,
@@ -1271,6 +1407,7 @@ export class Launcher {
       });
       if (this.mounts.mounted(call.target) === mounted) break;
     }
+    await this.mountsOwn(this.credOf(pid), call.target, async () => Number(mounted?.options.uid));
     this.umount(call.target, call.detach);
   }
 
@@ -1280,6 +1417,7 @@ export class Launcher {
     await this.provisionPnpmHome();
     await this.users.ensure();
     if (this.owners) await this.stampLayout();
+    if (this.owners) await this.sudoer.provision();
     await writeCaFile(this.base, this.ca).catch(() => undefined);
     this.fstab = this.mountFstab();
   }
@@ -1325,8 +1463,9 @@ export class Launcher {
     return found;
   }
 
-  private identity(account: Account): Pick<StartRequest, 'cred' | 'umask'> {
+  private identity(account: Account, tag?: string): Pick<StartRequest, 'cred' | 'umask' | 'tag'> {
     return {
+      tag,
       cred: credOf(account),
       ...(account.umask !== undefined ? { umask: account.umask } : {}),
     };
@@ -1345,6 +1484,7 @@ export class Launcher {
   }
 
   async openTerminal(argv: string[], options: TerminalOptions): Promise<TerminalSession> {
+    tagOption(options.tag);
     const { account, tty: ttyGroup } = await this.terminalAccount(options.user);
     const { cwd, file, planned } = await this.starting(argv, options.cwd, account);
     if (!planned) throw new Error(`${file}: command not found`);
@@ -1372,7 +1512,13 @@ export class Launcher {
       account
     );
     const report = (message: string) => options.onData(encoder.encode(`${message}\r\n`));
-    const handle = await this.launch(planned, { env, cwd, fds, report, ...this.identity(account) });
+    const handle = await this.launch(planned, {
+      env,
+      cwd,
+      fds,
+      report,
+      ...this.identity(account, options.tag),
+    });
     leader = handle.pid;
     void handle.exited.then(() => tty.hangup());
     return {
@@ -1389,6 +1535,7 @@ export class Launcher {
   }
 
   async run(argv: string[], options: RunOptions = {}): Promise<RunResult> {
+    tagOption(options.tag);
     const account = await this.account(options.user);
     const { cwd, file, planned } = await this.starting(argv, options.cwd, account);
     const env = this.environment(cwd, options.env, account);
@@ -1418,7 +1565,7 @@ export class Launcher {
       fds,
       report,
       ...group,
-      ...this.identity(account),
+      ...this.identity(account, options.tag),
     });
     options.onStarted?.(handle.pid);
     const status = await handle.exited;

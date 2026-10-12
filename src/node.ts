@@ -19,13 +19,14 @@ import type { WasmWorkerLike } from './kernel/host.ts';
 import type { RouteTable } from './kernel/net/routes.ts';
 import type { NetworkUplink } from './kernel/net/uplink.ts';
 import type { SealedHook } from './kernel/sealed.ts';
-import { Launcher } from './launcher.ts';
+import { Launcher, tagOption } from './launcher.ts';
 import type { FetchLike, HostfsGrantHook } from './mount/hostfs.ts';
 import type { MountEntry, MountSpec } from './mount/mount-fs.ts';
 import type { ProcessMountPolicy } from './mount/syscall.ts';
 import { isMemoryRoot, memoryRoot } from './node/memory-root.ts';
 import { diagnosing } from './node/ws-diagnose.ts';
 import { signalNumber } from './serve.ts';
+import type { ApproveHook } from './sudo.ts';
 import { fetchTransport, type NetworkTransport } from './transport.ts';
 
 export type { CdpConnection, CdpHook, CdpRequest } from './cdp/types.ts';
@@ -76,6 +77,7 @@ export type {
 } from './mount/hostfs.ts';
 export { serveHostfsPort } from './mount/hostfs.ts';
 export type { MountEntry, MountSpec } from './mount/mount-fs.ts';
+export type { ApproveHook, SudoAnswer, SudoRequest } from './sudo.ts';
 export { fetchTransport, type NetworkTransport } from './transport.ts';
 export { memoryRoot };
 
@@ -96,6 +98,7 @@ export interface NodeKernelOptions {
   users?: UsersMode;
   onDenial?: DenialHook;
   sealed?: SealedHook;
+  approve?: ApproveHook;
 }
 
 export interface NodeKernel {
@@ -224,6 +227,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     ...(options.users !== undefined ? { users: options.users } : {}),
     ...(options.onDenial ? { onDenial: options.onDenial } : {}),
     ...(options.sealed ? { sealed: options.sealed } : {}),
+    ...(options.approve ? { approve: options.approve } : {}),
   });
   await launcher.prepare();
   const guard = <T>(work: () => Promise<T>): Promise<T> =>
@@ -305,8 +309,9 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
       addMember: (group, user) => guard(() => launcher.users.addMember(group, user)),
       removeMember: (group, user) => guard(() => launcher.users.removeMember(group, user)),
     },
-    async connect({ user } = {}) {
+    async connect({ user, tag } = {}) {
       if (terminated) throw new Error(TERMINATED);
+      tagOption(tag);
       if (user !== undefined && !(await launcher.users.lookup(user))) {
         throw fsError('ENOENT', `no user ${String(user)}`);
       }
@@ -315,6 +320,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
         launcher: async () => launcher,
         signal: signalNumber,
         ...(user !== undefined ? { user } : {}),
+        ...(tag !== undefined ? { tag } : {}),
       });
       clients.add(served);
       void served.closed.then(() => clients.delete(served));

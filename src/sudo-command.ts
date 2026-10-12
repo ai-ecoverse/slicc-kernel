@@ -1,0 +1,53 @@
+import type { Command } from './commands.ts';
+
+export const SUDO_PATH = '/usr/bin/sudo';
+
+export const SUDO_COMMAND: Command = {
+  name: 'sudo',
+  abi: 'js',
+  glue: SUDO_PATH,
+  wasm: SUDO_PATH,
+  argv0: 'sudo',
+};
+
+export const SUDO_SOURCE = [
+  'export default async function sudo(ctx) {',
+  '  const say = (fd, text) => ctx.write(fd, text).catch(() => undefined);',
+  '  let pid;',
+  '  let held;',
+  '  const relay = (sig) => {',
+  '    if (pid === undefined) held = sig;',
+  '    else return ctx.kill(pid, sig).catch(() => undefined);',
+  '  };',
+  '  for (const sig of ["SIGTERM", "SIGHUP"]) await ctx.signals.on(sig, relay);',
+  '  const failed = () => (held === undefined ? 1 : 128 + held);',
+  '  let answer;',
+  '  try {',
+  '    answer = await ctx.sudo(ctx.argv.slice(1));',
+  '  } catch (err) {',
+  '    await say(2, "sudo: " + (err && err.code ? err.code : String(err)) + "\\n");',
+  '    return failed();',
+  '  }',
+  '  if (answer.error !== undefined) {',
+  '    await say(2, answer.error + "\\n");',
+  '    return failed();',
+  '  }',
+  '  if (answer.list !== undefined) {',
+  '    await say(1, answer.list);',
+  '    return 0;',
+  '  }',
+  '  for (const sig of ["SIGINT", "SIGQUIT"]) await ctx.signals.on(sig, () => undefined);',
+  '  if (answer.run !== undefined) {',
+  '    try {',
+  '      pid = (await ctx.spawn({ argv: answer.run })).pid;',
+  '    } catch (err) {',
+  '      const why = err && err.code === "ENOENT" ? "command not found" : String(err && err.code);',
+  '      await say(2, "sudo: " + answer.run[0] + ": " + why + "\\n");',
+  '      return failed();',
+  '    }',
+  '  } else pid = answer.pid;',
+  '  if (held !== undefined) await relay(held);',
+  '  return (await ctx.wait(pid)).status;',
+  '}',
+  '',
+].join('\n');

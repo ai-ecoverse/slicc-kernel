@@ -14,6 +14,7 @@ import {
 import { fsError, type KernelFs, type NewOwner, type Owner } from '../fs/types.ts';
 import { parentOf } from '../fs/walk.ts';
 import type { WatchChange } from '../fs/watch.ts';
+import { type Cred, copyCred, ROOT } from '../kernel/cred.ts';
 import { dialSocket, serveSocket } from '../kernel/dial.ts';
 import type { TransportCall } from '../kernel/net/remote-transport.ts';
 import type { RealmTransport } from '../kernel/net/transport.ts';
@@ -41,6 +42,7 @@ export interface ClientHost {
   lock?: string;
   signal?: (name: string) => number;
   user?: string | number;
+  tag?: string;
 }
 
 export interface ServedClient {
@@ -212,6 +214,19 @@ async function runAs(l: Launcher, self: Account, requested?: string | number): P
   return target;
 }
 
+function clientCred(self: Account | undefined): Cred {
+  return self ? credOf(self) : copyCred(ROOT);
+}
+
+async function runTagged(
+  l: Launcher,
+  self: Account,
+  requested: string | number | undefined,
+  tag: string | undefined
+): Promise<{ user: Account; tag: string | undefined }> {
+  return { user: await runAs(l, self, requested), tag };
+}
+
 function processes(l: Launcher, self: Account): ProcessEntry[] {
   const viewer = credOf(self);
   return l.list(viewer).map(({ tid: _, cred = viewer, umask: _umask, ...entry }) => ({
@@ -379,7 +394,7 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
   async function terminal(req: Extract<ClientRequest, { op: 'open-terminal' }>, l: Launcher) {
     const session = await l.openTerminal(req.argv, {
       ...req.options,
-      user: await runAs(l, self as Account, req.options.user),
+      ...(await runTagged(l, self as Account, req.options.user, host.tag)),
       onData: (bytes) => reply(req.id, { fd: 1, bytes: bytes.slice() }),
     });
     if (state === 'closed') {
@@ -402,7 +417,7 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
     let leader: number | undefined;
     const result = await l.run(req.argv, {
       ...req.options,
-      user: await runAs(l, self as Account, req.options.user),
+      ...(await runTagged(l, self as Account, req.options.user, host.tag)),
       collect: false,
       onStdout: out(1),
       onStderr: out(2),
@@ -444,9 +459,9 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
       case 'unwatch':
         return watchOp(l, req, watches, send, guardFor(l, self));
       case 'mount':
-        return { result: await l.mount(req.spec) };
+        return { result: await l.mountAs(clientCred(self), req.spec) };
       case 'umount':
-        l.umount(req.target);
+        await l.umountAs(clientCred(self), req.target);
         return { result: true };
       case 'mounts':
         return { result: l.mounts.list() };
