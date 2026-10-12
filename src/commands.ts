@@ -252,10 +252,10 @@ const SUFFIX = /^\.[A-Za-z0-9_+-][A-Za-z0-9._+-]*$/;
 export async function scanBinfmts(
   fs: KernelFs,
   modules: string | string[],
-  warn: (message: string) => void = () => {}
+  warn: (message: string) => void = () => {},
+  owners = new Map<string, string>()
 ): Promise<Map<string, string>> {
   const found = new Map<string, string>();
-  const owners = new Map<string, string>();
   for (const pkg of await packagesIn(fs, modules)) {
     let manifest: Manifest;
     try {
@@ -281,7 +281,10 @@ export async function scanBinfmts(
   return found;
 }
 
-export function binfmtOf(binfmts: ReadonlyMap<string, string>, path: string): string | undefined {
+export function binfmtSuffix(
+  binfmts: ReadonlyMap<string, string>,
+  path: string
+): string | undefined {
   const name = path.slice(path.lastIndexOf('/') + 1);
   let best: string | undefined;
   for (const suffix of binfmts.keys()) {
@@ -289,5 +292,10 @@ export function binfmtOf(binfmts: ReadonlyMap<string, string>, path: string): st
       if (best === undefined || suffix.length > best.length) best = suffix;
     }
   }
+  return best;
+}
+
+export function binfmtOf(binfmts: ReadonlyMap<string, string>, path: string): string | undefined {
+  const best = binfmtSuffix(binfmts, path);
   return best === undefined ? undefined : binfmts.get(best);
 }
