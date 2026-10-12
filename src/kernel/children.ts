@@ -7,7 +7,7 @@ import {
   heldFile,
   type KernelErrno,
   KernelError,
-  type OpenFile,
+  OpenFile,
   sinkFile,
 } from './fd-table.ts';
 import type { ForkState } from './protocol.ts';
@@ -15,10 +15,16 @@ import type { ForkState } from './protocol.ts';
 export type ChildStdio =
   | { fd: number }
   | { input: Uint8Array }
-  | { capture: true; max?: number; overflow?: () => void }
+  | { capture: true; max?: number; overflow?: () => void; control?: CaptureControl }
   | { none: true }
   | { dir: string }
   | DeviceMeta;
+
+export interface CaptureControl {
+  shut: boolean;
+  opened?: boolean;
+  ended(): void;
+}
 
 export type InheritedSlot =
   | { fd: number; kernel: number; flags?: number }
@@ -132,6 +138,19 @@ function capturing(
     chunks.push(bytes);
     size += bytes.length;
   };
+}
+
+function captureFile(onData: (bytes: Uint8Array) => void, control?: CaptureControl): OpenFile {
+  if (!control) return sinkFile(onData);
+  control.opened = true;
+  return new OpenFile({
+    write: async (bytes) => {
+      if (control.shut) throw new KernelError('EPIPE');
+      onData(bytes.slice());
+      return bytes.length;
+    },
+    close: () => control.ended(),
+  });
 }
 
 function concat(chunks: Uint8Array[]): Uint8Array {
@@ -259,7 +278,7 @@ export class ChildTable {
     if ('capture' in slot) {
       const chunks: Uint8Array[] = [];
       captured.set(n, chunks);
-      return sinkFile(capturing(chunks, slot.max, slot.overflow));
+      return captureFile(capturing(chunks, slot.max, slot.overflow), slot.control);
     }
     return deviceFile('null');
   }
