@@ -74,6 +74,7 @@ export interface KernelFs {
   chown?(path: string, change: OwnerChange): Promise<void>;
   trackOwners?(): void;
   ancestry?(path: string): Promise<Array<Perm | undefined>>;
+  hasOwner?(path: string): Promise<boolean>;
   chmod(path: string, mode: number): Promise<void>;
   utimes(path: string, atime: Date, mtime: Date): Promise<void>;
   lutimes?(path: string, atime: Date, mtime: Date): Promise<void>;

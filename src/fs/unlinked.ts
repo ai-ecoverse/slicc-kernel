@@ -1,4 +1,4 @@
-import { type FsStat, type KernelFs, mayLink } from './types.ts';
+import { type FsStat, type KernelFs, mayLink, type NewOwner } from './types.ts';
 
 export const UNLINKED_DIR = '.slicc-unlinked';
 
@@ -103,6 +103,8 @@ export class UnlinkedKeeper {
 
   private readonly linked = new Map<string, string>();
 
+  private readonly dirOwner: NewOwner | undefined;
+
   constructor(
     fs: KernelFs,
     holders: Iterable<UnlinkHolder>,
@@ -111,9 +113,11 @@ export class UnlinkedKeeper {
       locks?: UnlinkLocks | undefined;
       busy?: (path: string) => boolean;
       owner?: UnlinkOwner | undefined;
+      dirOwner?: NewOwner;
     } = {}
   ) {
     const { locks, owner } = options;
+    this.dirOwner = options.dirOwner;
     this.fs = fs;
     this.holders = holders;
     this.rootOf = rootOf;
@@ -235,7 +239,8 @@ export class UnlinkedKeeper {
       const dir = dirOf(this.rootOf(path));
       const hidden = `${dir}/${this.instance}.${++this.count}`;
       try {
-        await this.fs.mkdir(dir, { recursive: true });
+        const owner = this.dirOwner;
+        await this.fs.mkdir(dir, { recursive: true, ...(owner ? { owner } : {}) });
         await this.fs.rename(path, hidden);
         await this.linkedName(hidden);
         return hidden;

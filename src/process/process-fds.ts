@@ -833,6 +833,7 @@ export function kernelAccess(
 }
 
 const DEVICE_MODES: ReadonlyArray<[string, number]> = [
+  ['/', 0o755],
   ['/dev', 0o755],
   ['/dev/null', 0o666],
   ['/dev/zero', 0o666],

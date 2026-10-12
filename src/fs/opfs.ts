@@ -235,6 +235,10 @@ export class OpfsFs implements KernelFs {
     this.owners = true;
   }
 
+  async hasOwner(path: string): Promise<boolean> {
+    return ownOf((await this.meta.get([path]))[0]) !== undefined;
+  }
+
   async ancestry(path: string): Promise<Perm[]> {
     const entries = await this.meta.get(chain(path));
     const out: Perm[] = [];
