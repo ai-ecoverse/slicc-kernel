@@ -413,6 +413,10 @@ function approver(approve: ApproveHook | undefined, worker: Worker) {
       asked.get(id)?.abort(reason);
       asked.delete(id);
     },
+    close(): void {
+      for (const control of asked.values()) control.abort('withdrawn');
+      asked.clear();
+    },
   };
   return handlers;
 }
@@ -430,9 +434,11 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
 
   const dials = dialer((req) => call(req));
   const cdp = cdpBridge(options.cdp);
+  const approvals = approver(options.approve, worker);
   const fail = (error: Error) => {
     dials.reset();
     cdp.close();
+    approvals.close();
     failure = error;
     bridge?.close();
     uplinks?.close();
@@ -461,7 +467,6 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
       worker.postMessage({ hostfsGrant: { id, error: (err as Error).message ?? String(err) } });
     }
   }
-  const approvals = approver(options.approve, worker);
   const policy = (asked: { id: number; req: ProcessMountRequest }) =>
     mountPolicy(options, worker, asked);
   const pendingMedium = ({ target, source, handle }: PendingMedium) =>

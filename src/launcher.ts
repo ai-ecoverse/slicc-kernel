@@ -1266,7 +1266,8 @@ export class Launcher {
   private mountedBy(spec: MountSpec, cred: Cred): MountSpec {
     if (!this.owners || (cred.euid === 0 && cred.egid === 0)) return spec;
     const ids = { uid: String(cred.euid), gid: String(cred.egid) };
-    return { ...spec, options: { ...ids, ...spec.options } };
+    const options = cred.euid === 0 ? { ...ids, ...spec.options } : { ...spec.options, ...ids };
+    return { ...spec, options };
   }
 
   private mountRoot(path: string): string {
