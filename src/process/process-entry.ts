@@ -1,3 +1,4 @@
+import { useLocalClock } from '../kernel/cpu-clock.ts';
 import {
   type JsProcessInitMsg,
   type ProcessInitMsg,
@@ -79,6 +80,8 @@ export function processEntry(
     const type = (data as { type?: string } | undefined)?.type;
     if (type !== WASM_THREAD_INIT && type !== WASM_PROCESS_INIT) return;
     const refusal = sealOnce();
+    const init = data as { sab?: SharedArrayBuffer; program?: { abi?: string } } | undefined;
+    if (type === WASM_THREAD_INIT || init?.program?.abi !== 'js') useLocalClock(init?.sab);
     if (type === WASM_THREAD_INIT) {
       if (refusal) return failed(refusal.error);
       wasi()

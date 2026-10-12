@@ -107,6 +107,8 @@ export interface ProcessEntry {
   state: 'S' | 'Z';
   memory: number;
   rss?: number;
+  utime?: number;
+  stime?: number;
   uid?: number;
   gid?: number;
 }
