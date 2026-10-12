@@ -183,7 +183,7 @@ export function syncOps(
   };
 
   const openDev = (abs: string, options: JsOpenOptions): JsSyncFile => {
-    const { fd, file } = devSync(kernel, devOpen(abs, options));
+    const { fd, file, ...access } = devSync(kernel, devOpen(abs, options));
     const forget = () => {
       infos.delete(fd);
       handles.delete(fd);
@@ -195,7 +195,7 @@ export function syncOps(
     };
     const handle = file
       ? syncFile(kernel, fd, abs, options.append === true, forget)
-      : streamSyncFile(fd, abs, { read: (n, max) => read(n, max), write, close });
+      : streamSyncFile(fd, abs, { read: (n, max) => read(n, max), write, close }, access);
     handles.set(fd, handle.invalidate);
     return handle.file;
   };

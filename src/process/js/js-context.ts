@@ -422,7 +422,7 @@ async function openDev(
   options: JsOpenOptions,
   state: DevState
 ): Promise<JsFile> {
-  const { fd, file } = await devAsync(kernel, devOpen(abs, options));
+  const { fd, file, ...access } = await devAsync(kernel, devOpen(abs, options));
   const forget = () => {
     state.infos.delete(fd);
     state.handles.delete(fd);
@@ -434,7 +434,12 @@ async function openDev(
   };
   const handle = file
     ? fileHandle(kernel, fd, abs, options.append === true, forget)
-    : streamFile(fd, abs, { read: (n, max) => state.read(n, max), write: state.write, close });
+    : streamFile(
+        fd,
+        abs,
+        { read: (n, max) => state.read(n, max), write: state.write, close },
+        access
+      );
   state.handles.set(fd, handle.invalidate);
   return handle.file;
 }

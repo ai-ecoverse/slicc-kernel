@@ -185,23 +185,35 @@ export function* devReaddir(abs: string): DevStep<string[]> {
 export interface DevOpened {
   fd: number;
   file: boolean;
+  read: boolean;
+  write: boolean;
 }
 
-function* dupOf(fd: number, abs: string, o: JsOpenOptions): DevStep<DevOpened> {
-  let copy: number;
-  try {
-    copy = (yield { op: 'fd-dup', fd, min: 3 }) as number;
-  } catch (err) {
-    if (err instanceof JsCallError && err.code === 'EBADF') return missing(abs);
-    throw err;
-  }
-  const info = (yield { op: 'fd-info', fd: copy }) as FdInfo;
+function* aliasOf(
+  fd: number,
+  abs: string,
+  o: JsOpenOptions
+): DevStep<Omit<DevOpened, 'read' | 'write'>> {
+  const info = yield* fdInfo(fd, abs);
   const file = info.kind === 'file';
-  if (file && o.truncate) yield { op: 'fd-resize', fd: copy, size: 0 };
+  if (file) {
+    const at = (yield { op: 'fd-vfs-stat', fd }) as { path: string; orphan?: true };
+    if (!at.orphan)
+      return { fd: (yield openRequest(at.path, { ...o, create: false })) as number, file };
+  }
+  const copy = (yield { op: 'fd-dup', fd, min: 3 }) as number;
+  if (file && o.truncate) {
+    try {
+      yield { op: 'fd-resize', fd: copy, size: 0 };
+    } catch (err) {
+      yield { op: 'fd-close', fd: copy };
+      throw err;
+    }
+  }
   return { fd: copy, file };
 }
 
-export function* devOpen(abs: string, o: JsOpenOptions): DevStep<DevOpened> {
+function* opened(abs: string, o: JsOpenOptions): DevStep<Omit<DevOpened, 'read' | 'write'>> {
   const node = yield* lookup(abs);
   if (isExclusive(o)) throw new JsCallError('EEXIST', abs);
   switch (node.kind) {
@@ -217,13 +229,18 @@ export function* devOpen(abs: string, o: JsOpenOptions): DevStep<DevOpened> {
       return { fd: (yield req) as number, file: false };
     }
     case 'fd':
-      return yield* dupOf(node.fd, abs, o);
+      return yield* aliasOf(node.fd, abs, o);
     case 'link':
-      if (node.fd !== undefined) return yield* dupOf(node.fd, abs, o);
+      if (node.fd !== undefined) return yield* aliasOf(node.fd, abs, o);
       throw new JsCallError('EISDIR', abs);
     case 'dir':
       throw new JsCallError('EISDIR', abs);
   }
+}
+
+export function* devOpen(abs: string, o: JsOpenOptions): DevStep<DevOpened> {
+  const write = o.write === true || o.append === true || o.truncate === true;
+  return { ...(yield* opened(abs, o)), read: o.read === true || !write, write };
 }
 
 export async function devAsync<T>(
@@ -288,10 +305,20 @@ function liveness(path: string) {
   };
 }
 
+export interface StreamAccess {
+  read: boolean;
+  write: boolean;
+}
+
+function allowed(may: boolean, what: string): void {
+  if (!may) throw new JsCallError('EBADF', what);
+}
+
 export function streamFile(
   fd: number,
   path: string,
-  io: StreamIo
+  io: StreamIo,
+  access: StreamAccess
 ): { file: JsFile; invalidate: () => void } {
   const { live, end } = liveness(path);
   const file: JsFile = {
@@ -305,11 +332,13 @@ export function streamFile(
       index(position, 'read');
       index(length, 'read');
       live();
+      allowed(access.read, 'read');
       return length === 0 ? new Uint8Array(0) : io.read(fd, Math.min(length, MAX_IO));
     },
     async write(position, data) {
       index(position, 'write');
       live();
+      allowed(access.write, 'write');
       await io.write(fd, data);
       return data.length;
     },
@@ -331,7 +360,8 @@ export function streamFile(
 export function streamSyncFile(
   fd: number,
   path: string,
-  io: StreamSyncIo
+  io: StreamSyncIo,
+  access: StreamAccess
 ): { file: JsSyncFile; invalidate: () => void } {
   const { live, end } = liveness(path);
   const file: JsSyncFile = {
@@ -345,11 +375,13 @@ export function streamSyncFile(
       index(position, 'read');
       index(length, 'read');
       live();
+      allowed(access.read, 'read');
       return length === 0 ? new Uint8Array(0) : io.read(fd, Math.min(length, MAX_IO));
     },
     write(position, data) {
       index(position, 'write');
       live();
+      allowed(access.write, 'write');
       io.write(fd, data);
       return data.length;
     },
