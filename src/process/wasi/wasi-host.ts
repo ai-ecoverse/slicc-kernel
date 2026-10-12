@@ -260,7 +260,7 @@ export class WasiHost {
       }
     };
     const pathOwned = (path: string, follow: boolean) => {
-      if (deviceOf(path)) return ROOT_IDS;
+      if (this.synthetic(path)) return ROOT_IDS;
       return follow ? this.o.fs.stat(path) : this.o.fs.lstat(path);
     };
     return wrap({
@@ -297,7 +297,7 @@ export class WasiHost {
       path_access: (dirfd: number, p: number, l: number, amode: number, flags: number) => {
         const path = at(dirfd, p, l);
         const nofollow = (flags & AT_SYMLINK_NOFOLLOW) !== 0;
-        if (deviceOf(path)) {
+        if (this.synthetic(path)) {
           if (this.o.fs.owners && amode & 1) throw new WasiError('EACCES');
           return;
         }
@@ -551,7 +551,7 @@ export class WasiHost {
       ) => {
         const path = at(dirfd, p, l);
         if (deviceOf(path)) this.interrupted?.();
-        const fresh = (oflags & OFLAGS.CREAT) !== 0 && !o.fs.exists(path);
+        const fresh = (oflags & OFLAGS.CREAT) !== 0 && !this.synthetic(path) && !o.fs.exists(path);
         mem.view().setUint32(out, fds.open(path, oflags, rights, fdflags), true);
         if (fresh) this.created(path, 0o666);
       },
@@ -933,8 +933,12 @@ export class WasiHost {
     return gone ? { ...out, nlink: 0n } : out;
   }
 
+  private synthetic(path: string): boolean {
+    return deviceOf(path) !== undefined || (path === SEALED_PATH && !!this.o.kernel.sys.openSealed);
+  }
+
   private pathFilestat(path: string, lookup: number): Filestat {
-    if (deviceOf(path) || (path === SEALED_PATH && this.o.kernel.sys.openSealed)) {
+    if (this.synthetic(path)) {
       return this.local({
         filetype: FILETYPE.CHARACTER_DEVICE,
         size: 0n,

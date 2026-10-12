@@ -57,6 +57,14 @@ function errorReply(code: string, message: string): object {
   return { v: 1, error: { code, message } };
 }
 
+function serialized(reply: object): string {
+  try {
+    return JSON.stringify(reply);
+  } catch (err) {
+    return JSON.stringify(errorReply('EIO', lineOf(err)));
+  }
+}
+
 function lineOf(err: unknown): string {
   const text = err instanceof Error ? err.message : String(err);
   return (text.split('\n')[0] ?? '').slice(0, 200);
@@ -95,7 +103,7 @@ class SealedChannel {
       gone.removeEventListener('abort', withdraw);
       if (this.inflight !== flight) return;
       this.inflight = undefined;
-      if (reply) this.reply = encoder.encode(JSON.stringify(reply));
+      if (reply) this.reply = encoder.encode(serialized(reply));
     });
     this.inflight = flight;
     return length;
