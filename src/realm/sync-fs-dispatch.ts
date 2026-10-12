@@ -124,17 +124,8 @@ function mkdirOptions(entry: SyncFsTokenEntry, mode = 0o777) {
 }
 
 async function mkdirExclusive(entry: SyncFsTokenEntry, path: string, mode?: number) {
-  const { fs } = entry;
-  const { owner } = mkdirOptions(entry, mode);
-  const own = owner ? { owner } : {};
-  try {
-    await fs.mkdir(path, own);
-  } catch (err) {
-    if ((err as { code?: unknown } | null)?.code !== 'ENOENT') throw err;
-    const above = owner ? { owner: { ...owner, mode: owner.parents } } : {};
-    await fs.mkdir(path.slice(0, path.lastIndexOf('/')) || '/', { recursive: true, ...above });
-    await fs.mkdir(path, own);
-  }
+  const owner = ownerFor(entry, mode ?? 0o777);
+  await entry.fs.mkdir(path, owner ? { owner } : {});
 }
 
 async function chown(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest) {
