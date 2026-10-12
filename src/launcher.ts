@@ -1123,7 +1123,13 @@ export class Launcher {
       this.fs
     );
     void this.unlinked.sweep(entry.target);
+    if (this.pnpmHome.startsWith(`${entry.target.replace(/\/$/, '')}/`))
+      await this.provisionPnpmHome();
     return entry;
+  }
+
+  private async provisionPnpmHome(): Promise<void> {
+    await this.base.mkdir(this.pnpmHome, { recursive: true }).catch(() => undefined);
   }
 
   private mountedBy(spec: MountSpec, cred: Cred): MountSpec {
@@ -1201,6 +1207,7 @@ export class Launcher {
 
   async prepare(): Promise<void> {
     for (const dir of SHARED_DIRS) await this.base.mkdir(dir, { recursive: true });
+    await this.provisionPnpmHome();
     await this.users.ensure();
     await writeCaFile(this.base, this.ca).catch(() => undefined);
     this.fstab = this.mountFstab();
