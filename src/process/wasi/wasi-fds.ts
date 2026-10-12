@@ -613,7 +613,7 @@ export class WasiFds {
     return joined.split('/').includes('..') ? physical(this.fs, joined) : normalize(joined);
   }
 
-  private openKernelDevice(path: string): number | undefined {
+  private openKernelDevice(path: string, nonblock: boolean): number | undefined {
     const { openSealed, openTty } = this.kernel.sys;
     let fd: number | undefined;
     let kind: KernelFdKind;
@@ -625,7 +625,7 @@ export class WasiFds {
       if (fd === undefined) throw new WasiError('ENXIO');
       kind = 'tty';
     } else return undefined;
-    this.table.set(fd, { ...kernelEntry(), kind });
+    this.adopt(fd, kind, nonblock);
     this.bump();
     return fd;
   }
@@ -634,7 +634,7 @@ export class WasiFds {
     const device = deviceOf(path);
     if (device) return this.install({ type: 'device', device });
 
-    const kernelDevice = this.openKernelDevice(path);
+    const kernelDevice = this.openKernelDevice(path, (fdflags & FDFLAGS.NONBLOCK) !== 0);
     if (kernelDevice !== undefined) return kernelDevice;
     const alias = stdioAlias(path);
     if (alias !== undefined) return this.reopen(alias);
