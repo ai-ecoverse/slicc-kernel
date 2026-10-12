@@ -70,9 +70,11 @@ export function localIdle(sab: SharedArrayBuffer, now: number): { idle: number; 
     const seq = Atomics.load(clock, SEQ);
     idle = Number(Atomics.load(clock, IDLE));
     since = Number(Atomics.load(clock, SINCE));
-    if (seq % 2n === 0n && Atomics.load(clock, SEQ) === seq) break;
+    if (seq % 2n === 0n && Atomics.load(clock, SEQ) === seq) {
+      return { idle: idle + (since > 0 ? Math.max(0, now - since) : 0), waiting: since > 0 };
+    }
   }
-  return { idle: idle + (since > 0 ? Math.max(0, now - since) : 0), waiting: since > 0 };
+  return { idle, waiting: false };
 }
 
 export interface CpuTimes {

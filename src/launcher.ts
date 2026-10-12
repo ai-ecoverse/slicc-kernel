@@ -1016,12 +1016,17 @@ export class Launcher {
     return this.load;
   }
 
-  sampleLoad(): void {
+  private sampledAt = Date.now();
+
+  sampleLoad(now = Date.now()): void {
     let running = 0;
     for (const handle of this.processes.values()) running += handle.running?.() ?? 0;
+    const elapsed = Math.max(LOAD_SAMPLE_MS, now - this.sampledAt);
+    this.sampledAt = Math.max(this.sampledAt, now);
     this.load = this.load.map((avg, i) => {
-      const decay = Math.exp(-LOAD_SAMPLE_MS / LOAD_WINDOWS_MS[i as 0 | 1 | 2]);
-      return avg * decay + running * (1 - decay);
+      const window = LOAD_WINDOWS_MS[i as 0 | 1 | 2];
+      const fresh = 1 - Math.exp(-LOAD_SAMPLE_MS / window);
+      return avg * Math.exp(-elapsed / window) + running * fresh;
     }) as [number, number, number];
   }
 
