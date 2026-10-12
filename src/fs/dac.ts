@@ -127,7 +127,16 @@ async function stickyEntry(g: Guard, op: string, path: string, dir: Walked): Pro
   if (await present(g.fs, entry, false)) deny(g, op, path, 'EPERM');
 }
 
-export async function inParent(g: Guard, op: string, path: string, old = false): Promise<void> {
+export async function inParent(
+  g: Guard,
+  op: string,
+  path: string,
+  old: boolean | 'replaced' = false
+): Promise<void> {
+  if (old === 'replaced') {
+    const dir = await need(g, op, parentOf(path), W_OK | X_OK, DIR, path);
+    return dir.denied === undefined ? stickyEntry(g, op, path, dir) : undefined;
+  }
   if (!old) return void (await need(g, op, parentOf(path), W_OK | X_OK, DIR, path));
   const dir = await access(g.fs, g.cred, parentOf(path), W_OK | X_OK, DIR);
   if (dir.denied === undefined) return stickyEntry(g, op, path, dir);
@@ -166,7 +175,7 @@ export async function removable(g: Guard, op: string, path: string): Promise<voi
 export async function renamable(g: Guard, from: string, to: string): Promise<void> {
   if (from === to) return void (await need(g, 'rename', from, 0, { follow: false }));
   await inParent(g, 'rename', from, true);
-  await inParent(g, 'rename', to, true);
+  await inParent(g, 'rename', to, 'replaced');
   if (g.cred.euid === 0 || parentOf(from) === parentOf(to)) return;
   const st = await g.fs.lstat(from).catch(() => undefined);
   if (st?.isDirectory && !permits(g.cred, permOf(st), W_OK)) deny(g, 'rename', from);
