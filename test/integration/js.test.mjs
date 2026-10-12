@@ -260,7 +260,15 @@ test('on a terminal: isatty, ^C to a handler or by default, ^Z and fg, ^Z then k
   const screen = () => page.evaluate(() => window.screen.screen);
   const until = async (text, from = 0) => {
     try {
-      await page.within(20_000, (s, f) => window.screen.screen.slice(f).includes(s), text, from);
+      await page.within(
+        20_000,
+        (s, f) =>
+          s === '[$#] '
+            ? /[$#] /.test(window.screen.screen.slice(f))
+            : window.screen.screen.slice(f).includes(s),
+        text,
+        from
+      );
     } catch (err) {
       throw new Error(`waiting for ${JSON.stringify(text)} on:\n${(await screen()).slice(from)}`, {
         cause: err,
@@ -272,7 +280,7 @@ test('on a terminal: isatty, ^C to a handler or by default, ^Z and fg, ^Z then k
     await page.evaluate((i) => window.term.write(i), input);
     if (expected) await until(expected, from);
   };
-  await until('$ ');
+  await until('[$#] ');
   await type('jstest fds\r', '0:tty:true:false:true 1:tty:true:false:true 2:tty:true:false:true');
   await type('jstest trap SIGINT 130\r', 'ready');
   await type('\u0003', 'caught 2');

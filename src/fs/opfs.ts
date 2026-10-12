@@ -574,7 +574,10 @@ export class OpfsFs implements KernelFs {
   async exists(path: string): Promise<boolean> {
     return this.locate(path, true).then(
       () => true,
-      () => false
+      (err: unknown) => {
+        if (missing(err)) return false;
+        throw err;
+      }
     );
   }
 

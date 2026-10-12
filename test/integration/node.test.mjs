@@ -203,12 +203,13 @@ test('a command pnpm installs globally runs in the same shell, and is gone once 
     screen += new TextDecoder().decode(bytes);
   };
   const until = async (text) => {
-    for (let i = 0; i < 1200 && !screen.includes(text); i++) {
+    const shows = () => (text instanceof RegExp ? text.test(screen) : screen.includes(text));
+    for (let i = 0; i < 1200 && !shows(); i++) {
       await new Promise((r) => setTimeout(r, 100));
     }
-    assert.ok(screen.includes(text), screen);
+    assert.ok(shows(), screen);
   };
-  await until('$ ');
+  await until(/[$#] /);
   term.write('echo "home $PNPM_HOME"; rg --version 2>/dev/null; echo "before $((100+27))"\r');
   await until('before 127');
   assert.match(screen, /home \/usr\/local\/share\/pnpm/);
