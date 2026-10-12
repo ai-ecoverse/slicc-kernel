@@ -1,3 +1,4 @@
+import { rawWait } from '../kernel/cpu-clock.ts';
 import {
   parseSyncFsStat,
   parseSyncFsUsage,
@@ -61,7 +62,7 @@ export function createSyncSabTransport(
 ): SyncSabTransport {
   const views: SabViews = sabViews(sab);
   const { header, window } = views;
-  const wait: AtomicsWaitLike = deps.wait ?? ((a, i, v, t) => Atomics.wait(a, i, v, t));
+  const wait: AtomicsWaitLike = deps.wait ?? ((a, i, v, t) => rawWait(a, i, v, t));
   const now = deps.now ?? (() => performance.now());
   let seq = 0;
 

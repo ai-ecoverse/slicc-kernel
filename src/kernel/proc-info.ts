@@ -11,6 +11,8 @@ export interface ProcessInfo {
   started: number;
   state: 'S' | 'Z';
   memory: number;
+  utime?: number;
+  stime?: number;
   umask?: number;
   cred?: Cred;
   sigIgn?: number;
@@ -28,4 +30,5 @@ export interface MountLine {
 export interface ProcessListing {
   boot: number;
   processes: ProcessInfo[];
+  load?: readonly [number, number, number];
 }

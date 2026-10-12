@@ -24,6 +24,7 @@ import {
   SAB_I_TIMERS,
 } from '../realm/sync-sab-wire.ts';
 import type { ChildForker, ChildSpawner } from './children.ts';
+import { type CpuTimes, ProcessClocks } from './cpu-clock.ts';
 import { type Cred, copyCred } from './cred.ts';
 import { type FdTable, kernelFdKind, type OpenFile } from './fd-table.ts';
 import type { LockTable } from './host-ops.ts';
@@ -128,6 +129,8 @@ export interface WasmProcessHandle {
   umask?(): number;
   cred?(): Cred;
   writesBack(): boolean;
+  times?(): CpuTimes | undefined;
+  running?(): number;
 }
 
 const CRASHED = 70;
@@ -417,7 +420,12 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
   const dying = new Dying();
   const dispatch = (req: SyncSabDispatchRequest): Promise<SyncFsResult> =>
     dying.serving(() => (isWasmSyscall(req) ? process.syscall(req) : dispatchSyncFs(req)));
-  const responder = attachSyncSabResponder(worker, sab, token, { dispatch });
+  const timed = opts.program.abi !== 'js';
+  const clocks = new ProcessClocks(sab);
+  process.onState((state) => clocks.stop(state === 'stopped'));
+  const responder = attachSyncSabResponder(worker, sab, token, {
+    dispatch: timed ? clocks.timed(undefined, dispatch) : dispatch,
+  });
   const lane = opts.program.abi === 'js' ? openLane(token, dispatch) : undefined;
 
   const { promise: exited, resolve: settle } = Promise.withResolvers<number>();
@@ -470,6 +478,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
   const endThread = (tid: number): void => {
     const end = threads.get(tid);
     threads.delete(tid);
+    clocks.threadEnded(tid);
     process.threadEnded(tid);
     end?.();
   };
@@ -492,7 +501,9 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
       dying.serving(() =>
         isWasmSyscall(req) ? process.syscall(req, threadCancel(tsignals)) : dispatchSyncFs(req)
       );
-    const tresponder = attachSyncSabResponder(tw, tsab, token, { dispatch: tdispatch });
+    const tresponder = attachSyncSabResponder(tw, tsab, token, {
+      dispatch: clocks.timed(clocks.thread(thread.tid, tsab), tdispatch),
+    });
     const onThreadMessage = (event: MessageEvent): void => {
       const data = event.data as WorkerSays | undefined;
       if (data?.type === WASM_THREAD_EXIT) endThread(thread.tid);
@@ -550,5 +561,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     umask: () => process.umask,
     cred: () => copyCred(process.cred),
     writesBack: () => opts.program.abi === 'wasi' && !done,
+    times: () => (timed ? clocks.times() : undefined),
+    running: () => clocks.running(),
   };
 }

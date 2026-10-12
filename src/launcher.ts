@@ -27,6 +27,7 @@ import {
   type ChildSpawner,
   SpawnError,
 } from './kernel/children.ts';
+import type { CpuTimes } from './kernel/cpu-clock.ts';
 import { type Cred, copyCred, maySee, maySignal, ROOT } from './kernel/cred.ts';
 import { bytesSource, deviceFile, FdTable, sinkFile } from './kernel/fd-table.ts';
 import { spawnWasmProcess, type WasmProcessHandle, type WasmWorkerLike } from './kernel/host.ts';
@@ -261,6 +262,8 @@ const LAYOUT: ReadonlyArray<[string, number]> = [
   ['/usr', 0o755],
   ['/usr/local', 0o755],
 ];
+const LOAD_SAMPLE_MS = 5000;
+const LOAD_WINDOWS_MS = [60_000, 300_000, 900_000] as const;
 const encoder = new TextEncoder();
 
 const USERS_MODES: readonly UsersMode[] = ['off', 'report', 'enforce'];
@@ -906,7 +909,11 @@ export class Launcher {
       forker: this.forker(pid, req),
       kill: (target, sig) => this.kill(target, sig, this.credOf(pid), pid),
       writesBack: (target) => this.processes.get(target)?.writesBack() === true,
-      processes: () => ({ boot: this.boot, processes: this.list(this.credOf(pid)) }),
+      processes: () => ({
+        boot: this.boot,
+        processes: this.list(this.credOf(pid)),
+        load: this.loadAverage(),
+      }),
       sudo: (call, signal) => this.sudo(pid, call, signal),
       openFiles: this.openFiles,
       nodes: this.nodes,
@@ -940,6 +947,8 @@ export class Launcher {
       started: Date.now(),
     });
     void handle.exited.then(() => {
+      const spent = handle.times?.();
+      if (spent) this.spent.set(pid, spent);
       this.processes.delete(pid);
       this.settling.settled(pid);
       if (req.ppid === undefined || this.orphans.delete(pid)) this.forget(pid);
@@ -958,6 +967,7 @@ export class Launcher {
   private forget(pid: number): void {
     this.jobs.remove(pid);
     this.described.delete(pid);
+    this.spent.delete(pid);
     this.creds.delete(pid);
     this.tags.delete(pid);
     this.granted.delete(pid);
@@ -966,6 +976,43 @@ export class Launcher {
   private reaped(pid: number): void {
     if (this.zombies.delete(pid)) this.forget(pid);
     else this.orphans.add(pid);
+  }
+
+  private load: [number, number, number] = [0, 0, 0];
+  private loadAt = Date.now();
+
+  loadAverage(now = Date.now()): readonly [number, number, number] {
+    const steps = Math.min(Math.floor((now - this.loadAt) / LOAD_SAMPLE_MS), 360);
+    if (steps <= 0) return this.load;
+    this.loadAt += steps * LOAD_SAMPLE_MS;
+    let running = 0;
+    for (const handle of this.processes.values()) running += handle.running?.() ?? 0;
+    this.load = this.load.map((avg, i) => {
+      const decay = Math.exp(-LOAD_SAMPLE_MS / LOAD_WINDOWS_MS[i as 0 | 1 | 2]) ** steps;
+      return avg * decay + running * (1 - decay);
+    }) as [number, number, number];
+    return this.load;
+  }
+
+  private readonly spent = new Map<number, CpuTimes>();
+
+  private timesAt(pid: number): CpuTimes | undefined {
+    return this.processes.get(pid)?.times?.() ?? this.spent.get(pid);
+  }
+
+  private timesOf(
+    member: JobMember,
+    members: Map<number, JobMember>
+  ): { utime?: number; stime?: number } {
+    const own = this.timesAt(member.pid);
+    if (!own) return {};
+    let { utime, stime } = own;
+    for (let at = members.get(member.execParent ?? -1); at; at = members.get(at.execParent ?? -1)) {
+      const t = this.timesAt(at.pid);
+      utime += t?.utime ?? 0;
+      stime += t?.stime ?? 0;
+    }
+    return { utime, stime };
   }
 
   list(viewer: Readonly<Cred> = ROOT): ProcessInfo[] {
@@ -999,6 +1046,7 @@ export class Launcher {
         started: (this.described.get(root.pid) ?? described).started,
         state: this.processes.has(member.pid) ? 'S' : 'Z',
         memory: this.processes.get(member.pid)?.memory() ?? 0,
+        ...this.timesOf(member, members),
         umask: this.umaskOf(member.pid),
         cred,
         ...this.signalMasksOf(member.pid),
