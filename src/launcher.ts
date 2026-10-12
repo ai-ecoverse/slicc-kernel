@@ -18,6 +18,7 @@ import { physicalPathAsync } from './fs/physical-path.ts';
 import type { KernelFs, UsersMode } from './fs/types.ts';
 import { fsError, normalizePath } from './fs/types.ts';
 import { UNLINKED_DIR, UnlinkedKeeper, type UnlinkOwner, webLocks } from './fs/unlinked.ts';
+import { joinName, parentOf, realDir } from './fs/walk.ts';
 import { FsWatchers } from './fs/watch.ts';
 import {
   type ChildForker,
@@ -1179,9 +1180,16 @@ export class Launcher {
       [`/${UNLINKED_DIR}`, 0o700],
     ];
     for (const [path, mode] of layout) {
-      const fresh = !(await this.base.hasOwner?.(path)) && (await this.base.exists(path));
-      if (fresh) await this.base.chown?.(path, { uid: 0, gid: 0, mode, follow: false });
+      const real = await this.realLayoutPath(path);
+      const fresh = real !== undefined && !(await this.base.hasOwner?.(real));
+      if (fresh) await this.base.chown?.(real, { uid: 0, gid: 0, mode, follow: false });
     }
+  }
+
+  private async realLayoutPath(path: string): Promise<string | undefined> {
+    if (!(await this.base.exists(path))) return undefined;
+    if (path === '/') return path;
+    return joinName(await realDir(this.base, parentOf(path)), baseName(path));
   }
 
   private async provisionPnpmHome(): Promise<void> {
