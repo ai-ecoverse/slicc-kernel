@@ -278,6 +278,18 @@ function baseName(path: string): string {
   return path.slice(path.lastIndexOf('/') + 1);
 }
 
+function packageRootOf(path: string, roots: readonly string[]): string | undefined {
+  for (const root of roots) {
+    const base = normalizePath(root);
+    if (!path.startsWith(`${base}/`)) continue;
+    const [first = '', second] = path.slice(base.length + 1).split('/');
+    return first.startsWith('@') && second !== undefined
+      ? `${base}/${first}/${second}`
+      : `${base}/${first}`;
+  }
+  return undefined;
+}
+
 function modulePath(glue: string): string {
   return glue.endsWith('.js') ? `${glue.slice(0, -3)}.wasm` : `${glue}.wasm`;
 }
@@ -747,8 +759,9 @@ export class Launcher {
       if (script) scripts.push(script);
     }
     files.push(...scripts, ...(await this.binfmtManifests(scripts)));
+    const roots = await this.roots();
     for (const at of [...files]) {
-      const root = PACKAGE_ROOT.exec(at)?.[1];
+      const root = packageRootOf(at, roots) ?? PACKAGE_ROOT.exec(at)?.[1];
       if (root !== undefined) files.push(`${root}/package.json`);
     }
     return [...new Set(files)].filter((path) => path !== '' && path !== SUDO_PATH);
