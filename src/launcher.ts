@@ -1123,7 +1123,8 @@ export class Launcher {
       this.fs
     );
     void this.unlinked.sweep(entry.target);
-    if (this.pnpmHome.startsWith(`${entry.target}/`)) await this.provisionPnpmHome();
+    if (this.pnpmHome.startsWith(`${entry.target.replace(/\/$/, '')}/`))
+      await this.provisionPnpmHome();
     return entry;
   }
 
