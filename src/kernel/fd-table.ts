@@ -222,6 +222,18 @@ function written(device: KernelDevice, bytes: Uint8Array): number {
   return bytes.length;
 }
 
+const DEVICE_PATHS: ReadonlyMap<string, KernelDevice> = new Map([
+  ['/dev/null', 'null'],
+  ['/dev/zero', 'zero'],
+  ['/dev/full', 'full'],
+  ['/dev/urandom', 'urandom'],
+  ['/dev/random', 'urandom'],
+]);
+
+export function deviceAt(path: string): KernelDevice | undefined {
+  return DEVICE_PATHS.get(path);
+}
+
 export function deviceFile(device: KernelDevice, access?: DeviceAccess): OpenFile {
   const read = async (max: number): Promise<Uint8Array> => {
     if (device === 'null') return new Uint8Array(0);

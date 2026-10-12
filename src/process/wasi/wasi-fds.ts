@@ -1,4 +1,10 @@
-import type { DeviceAccess, DeviceMeta, HeldMeta, KernelFdKind } from '../../kernel/fd-table.ts';
+import {
+  type DeviceAccess,
+  type DeviceMeta,
+  deviceAt,
+  type HeldMeta,
+  type KernelFdKind,
+} from '../../kernel/fd-table.ts';
 import type { FdInfo, WasmSyscall } from '../../kernel/process.ts';
 import {
   HOLD_CREATED,
@@ -38,14 +44,6 @@ export type WasiForkFd =
   | { fd: number; type: 'dir'; path: string; preopen?: string; twin?: number }
   | { fd: number; type: 'device'; device: Device; access?: DeviceAccess };
 
-const DEVICES: Readonly<Record<string, Device>> = {
-  '/dev/null': 'null',
-  '/dev/zero': 'zero',
-  '/dev/full': 'full',
-  '/dev/urandom': 'urandom',
-  '/dev/random': 'urandom',
-};
-
 function stdioAlias(path: string): number | undefined {
   const m = /^\/dev\/(?:(stdin)|(stdout)|(stderr)|fd\/(\d+))$/.exec(path);
   if (!m) return undefined;
@@ -53,7 +51,7 @@ function stdioAlias(path: string): number | undefined {
 }
 
 export function deviceOf(path: string): Device | undefined {
-  return DEVICES[path];
+  return deviceAt(path);
 }
 
 function within(path: string, root: string): boolean {
