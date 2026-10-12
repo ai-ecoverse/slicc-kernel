@@ -1049,15 +1049,17 @@ export class Launcher {
     member: JobMember,
     members: Map<number, JobMember>
   ): { utime?: number; stime?: number } {
-    const own = this.timesAt(member.pid);
-    if (!own) return {};
-    let { utime, stime } = own;
-    for (let at = members.get(member.execParent ?? -1); at; at = members.get(at.execParent ?? -1)) {
+    let utime = 0;
+    let stime = 0;
+    let timed = false;
+    for (let at: JobMember | undefined = member; at; at = members.get(at.execParent ?? -1)) {
       const t = this.timesAt(at.pid);
-      utime += t?.utime ?? 0;
-      stime += t?.stime ?? 0;
+      if (!t) continue;
+      timed = true;
+      utime += t.utime;
+      stime += t.stime;
     }
-    return { utime, stime };
+    return timed ? { utime, stime } : {};
   }
 
   list(viewer: Readonly<Cred> = ROOT): ProcessInfo[] {

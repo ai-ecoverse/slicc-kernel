@@ -17,6 +17,7 @@ export const IDLE_OPS: ReadonlySet<string> = new Set([
 export const SYS_CAP_US = 20_000;
 
 const LOCAL = SAB_CLOCK_OFFSET;
+const SEQ_TRIES = 64;
 const SEQ = 0;
 const IDLE = 1;
 const SINCE = 2;
@@ -63,13 +64,15 @@ export function localWait<T>(wait: () => T): T {
 
 export function localIdle(sab: SharedArrayBuffer, now: number): { idle: number; waiting: boolean } {
   const clock = slots(sab);
-  for (;;) {
+  let idle = 0;
+  let since = 0;
+  for (let tries = 0; tries < SEQ_TRIES; tries++) {
     const seq = Atomics.load(clock, SEQ);
-    const idle = Number(Atomics.load(clock, IDLE));
-    const since = Number(Atomics.load(clock, SINCE));
-    if (seq % 2n !== 0n || Atomics.load(clock, SEQ) !== seq) continue;
-    return { idle: idle + (since > 0 ? Math.max(0, now - since) : 0), waiting: since > 0 };
+    idle = Number(Atomics.load(clock, IDLE));
+    since = Number(Atomics.load(clock, SINCE));
+    if (seq % 2n === 0n && Atomics.load(clock, SEQ) === seq) break;
   }
+  return { idle: idle + (since > 0 ? Math.max(0, now - since) : 0), waiting: since > 0 };
 }
 
 export interface CpuTimes {
