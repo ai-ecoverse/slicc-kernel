@@ -1,3 +1,4 @@
+import { fresh } from '../bytes.ts';
 import { portCdpHook } from '../cdp/port.ts';
 import { access, R_OK, X_OK } from '../fs/access.ts';
 import {
@@ -121,7 +122,7 @@ async function fsCall(
   }
   switch (method) {
     case 'readFile': {
-      const bytes = (await fs.readFileBuffer(path(0))).slice();
+      const bytes = fresh(await fs.readFileBuffer(path(0)));
       return { result: bytes, transfer: [bytes.buffer] };
     }
     case 'writeFile':
