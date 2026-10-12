@@ -9,11 +9,11 @@ export const PROTECT_WRITER =
   'slicc-kernel: protect.writer needs the process tag (#405), which this kernel does not have yet';
 
 export function protectedPrefixes(paths: readonly string[]): string[] {
-  return [...new Set(paths.map((p) => normalizePath(p)))].filter((p) => p !== '/');
+  return [...new Set(paths.map((p) => normalizePath(p)))];
 }
 
 function within(path: string, prefix: string): boolean {
-  return path === prefix || path.startsWith(`${prefix}/`);
+  return prefix === '/' || path === prefix || path.startsWith(`${prefix}/`);
 }
 
 export function isProtected(prefixes: readonly string[], path: string): boolean {
@@ -182,12 +182,18 @@ export class ProtectedFs {
           }
         : {}),
     };
-    return new Proxy(fs, {
-      get(target, prop) {
-        if (Object.hasOwn(own, prop)) return own[prop as keyof KernelFs];
-        const value = Reflect.get(target, prop);
-        return typeof value === 'function' ? value.bind(target) : value;
-      },
-    });
+    const view: Record<string, unknown> = {};
+    for (
+      let at: object | null = fs;
+      at && at !== Object.prototype;
+      at = Object.getPrototypeOf(at)
+    ) {
+      for (const name of Object.getOwnPropertyNames(at)) {
+        if (name === 'constructor' || Object.hasOwn(view, name)) continue;
+        const value = (fs as unknown as Record<string, unknown>)[name];
+        view[name] = typeof value === 'function' ? value.bind(fs) : value;
+      }
+    }
+    return Object.assign(view, own) as unknown as KernelFs;
   }
 }

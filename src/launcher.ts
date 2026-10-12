@@ -1607,7 +1607,7 @@ export class Launcher {
     const start = dir ?? '/';
     const cwd = await physicalPathAsync(this.base, start.startsWith('/') ? start : `/${start}`);
     const [file = ''] = argv;
-    await this.base.mkdir(cwd, { recursive: true });
+    if (!(await this.base.exists(cwd))) await this.processFs.mkdir(cwd, { recursive: true });
     const planned = await this.plan(file, argv, cwd, scope);
     await this.mayExec(credOf(account), { file, cwd, pid: 0 }, planned);
     return { cwd, file, planned };

@@ -604,7 +604,7 @@ A character device (`0666`, major 10, minor 250) through which a program talks t
 ### Protected paths
 
 `createKernel({ protect: { paths: ['/node_modules', '/os'] } })` makes those directories read-only for every process, root included, in every `users` mode. They hold code every later process runs, which only the embedder writes, straight to OPFS.
-- **What fails:** any change under a path fails with `EROFS` ("Read-only file system"): a write, a create, a truncate, `mkdir`, removing or renaming (from or to), a hard or symbolic link created there, `chmod`, `chown` and setting times. So does removing or renaming a directory that holds one (`rm -rf /`), and a `mount(2)` or `umount2(2)` at, under or above one. Reads are unaffected.
+- **What fails:** any change under a path fails with `EROFS` ("Read-only file system"): a write, a create, a truncate, `mkdir`, removing or renaming (from or to), a hard or symbolic link created there, `chmod`, `chown` and setting times. So does removing or renaming a directory that holds one (`rm -rf /`), and a `mount(2)` or `umount2(2)` at, under or above one. A missing working directory for `run` or `openTerminal` isn't created there either. Reads are unaffected. `'/'` protects the whole file system.
 - **Stats and symlinks:** files under a path show as on a read-only mount, so opens for writing fail at once. A write through a symlink, or through a symlinked directory, that leads into a path fails too.
 - **Clients:** a client's (`kernel.connect`) file calls see the paths read-only, as its processes do.
 - **Not affected:** the page's own writes to OPFS.
