@@ -83,9 +83,14 @@ export class JsKernel {
     return result.ok && result.kind === 'bytes' ? result.bytes : new Uint8Array(0);
   }
 
-  async blocking(req: WasmSyscall, signal?: AbortSignal): Promise<SyncFsResult> {
+  async blocking(
+    req: WasmSyscall,
+    signal?: AbortSignal,
+    track?: (id: number) => void
+  ): Promise<SyncFsResult> {
     for (;;) {
       const id = (await this.json({ op: 'async-submit', req })) as number;
+      track?.(id);
       const result = await this.settled(id, signal);
       if (result.ok) return result;
       if (result.errno !== 'EINTR') throw new JsCallError(result.errno, req.op);

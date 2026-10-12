@@ -1,6 +1,7 @@
 import { SIG } from '../../kernel/signals.ts';
 import { parseSyncFsStat, type SyncFsBridgeStat } from '../../realm/sync-fs-wire.ts';
 import { childOps, type JsChild, type JsExited, type JsSpawnOptions } from './js-children.ts';
+import { exitAtOnce, type PendingWrite } from './js-exit.ts';
 import { fetchOp } from './js-fetch.ts';
 import {
   absent,
@@ -23,6 +24,7 @@ import {
 } from './js-io.ts';
 import { JsCallError, type JsKernel } from './js-kernel.ts';
 import { type JsNet, netOps } from './js-net.ts';
+import { runSync } from './js-run.ts';
 import { type JsSyncContext, JsSyncKernel, laneOf, type SyncCall, syncOps } from './js-sync.ts';
 import { type JsTty, ttyOps } from './js-tty.ts';
 import { type JsWebSocket, type JsWebSocketOptions, websocketOp } from './js-websocket.ts';
@@ -173,6 +175,47 @@ export interface CreatedContext {
   drain(): Promise<unknown>;
 }
 
+function writer(kernel: JsKernel, info: (fd: number) => Promise<FdInfo>, pid: number) {
+  const writes = new Set<PendingWrite>();
+  const sendAll = async (
+    fd: number,
+    data: Uint8Array,
+    i: FdInfo,
+    w: PendingWrite,
+    signal?: AbortSignal
+  ): Promise<void> => {
+    while (w.at < data.length) {
+      const body = data.subarray(w.at, w.at + MAX_IO);
+      w.len = body.length;
+      try {
+        w.at += signal
+          ? await sendSome(kernel, fd, body, signal)
+          : written(
+              await kernel.blocking({ op: 'fd-write', fd, body }, undefined, (id) => (w.op = id)),
+              body.length
+            );
+        w.op = undefined;
+      } catch (err) {
+        if (brokenPipe(err, i)) await kernel.call({ op: 'proc-kill', pid, sig: SIG.PIPE });
+        throw err;
+      }
+    }
+  };
+  const writeAll = async (fd: number, data: Uint8Array, signal?: AbortSignal): Promise<void> => {
+    const w: PendingWrite = { fd, data, at: 0, len: 0 };
+    if (!signal) writes.add(w);
+    try {
+      const i = await info(fd);
+      if (writeDevice(i)) return;
+      await sendAll(fd, data, i, w, signal);
+    } finally {
+      writes.delete(w);
+    }
+  };
+
+  return { writes, writeAll };
+}
+
 export function createContext(o: ContextOptions): CreatedContext {
   const { kernel } = o;
   const infos = new Map<number, FdInfo>();
@@ -207,22 +250,7 @@ export function createContext(o: ContextOptions): CreatedContext {
     return readPipe(kernel, fd, Math.min(max, MAX_IO), signal);
   };
 
-  const writeAll = async (fd: number, data: Uint8Array, signal?: AbortSignal): Promise<void> => {
-    const i = await info(fd);
-    if (writeDevice(i)) return;
-    let at = 0;
-    while (at < data.length) {
-      const body = data.subarray(at, at + MAX_IO);
-      try {
-        at += signal
-          ? await sendSome(kernel, fd, body, signal)
-          : written(await kernel.blocking({ op: 'fd-write', fd, body }), body.length);
-      } catch (err) {
-        if (brokenPipe(err, i)) await kernel.call({ op: 'proc-kill', pid: o.pid, sig: SIG.PIPE });
-        throw err;
-      }
-    }
-  };
+  const { writes, writeAll } = writer(kernel, info, o.pid);
 
   const write = (fd: number, data: Uint8Array | string): Promise<void> => {
     const bytes = typeof data === 'string' ? encoder.encode(data) : data;
@@ -271,15 +299,19 @@ export function createContext(o: ContextOptions): CreatedContext {
   };
 
   const fs = pathOps(kernel, resolve, statOf, open);
-  const sync = syncOps(new JsSyncKernel(o.lane ?? laneOf(undefined), kernel, unwind), {
-    pid: o.pid,
-    resolve,
-    random,
-    infos,
-    handles,
-  });
-
+  const lane = o.lane ?? laneOf(undefined);
+  const syncKernel = new JsSyncKernel(lane, kernel, unwind);
   const terminal = ttyOps(kernel);
+  const sync: JsSyncContext = {
+    ...syncOps(syncKernel, { pid: o.pid, resolve, random, infos, handles }),
+    run: (options) =>
+      runSync(syncKernel, { env: o.env, cwd: o.cwd, resolve, signal: signalNumber }, options),
+    exit: (status = 0): never => {
+      exiting ??= status & 0xff;
+      return exitAtOnce(lane, [...writes], terminal.modes(), exiting);
+    },
+  };
+
   const io = { read, send: writeAll, close: (fd: number) => ctx.close(fd) };
   const children = childOps(kernel, io, { env: o.env, cwd: o.cwd, signal: signalNumber });
 

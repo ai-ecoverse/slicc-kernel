@@ -10,6 +10,7 @@ export type HostSyscall =
   | { op: 'async-resolve'; value: unknown }
   | { op: 'async-hold' }
   | { op: 'async-cancel'; id: number }
+  | { op: 'async-settle'; ids: number[] }
   | { op: 'async-close' };
 
 export const HOST_OPS: readonly HostSyscall['op'][] = [
@@ -21,6 +22,7 @@ export const HOST_OPS: readonly HostSyscall['op'][] = [
   'async-resolve',
   'async-hold',
   'async-cancel',
+  'async-settle',
   'async-close',
 ];
 
@@ -66,12 +68,15 @@ export class LockTable {
 
 type Run = (req: { op: string }, cancelled: AbortSignal) => Promise<SyncFsResult>;
 
+const TAKEN_KEPT = 64;
+
 export class AsyncOps {
   private next = 1;
   private readonly results = new Map<number, SyncFsResult | undefined>();
   private readonly ready: number[] = [];
   private readonly running = new Map<number, AbortController>();
   private readonly waiters = new Set<() => void>();
+  private readonly taken = new Map<number, SyncFsResult>();
   private closed = false;
   private readonly run: Run;
   private readonly onReady: (() => void) | undefined;
@@ -109,7 +114,15 @@ export class AsyncOps {
     const result = this.results.get(id);
     if (!result) throw new KernelError('EAGAIN');
     this.forget(id);
+    this.taken.set(id, result);
+    if (this.taken.size > TAKEN_KEPT) this.taken.delete(this.taken.keys().next().value as number);
     return result;
+  }
+
+  async settle(ids: readonly number[]): Promise<Array<SyncFsResult | null>> {
+    const never = new AbortController().signal;
+    while (ids.some((id) => this.running.has(id))) await this.sleep(undefined, never);
+    return ids.map((id) => this.results.get(id) ?? this.taken.get(id) ?? null);
   }
 
   cancel(id: number): void {
@@ -215,6 +228,8 @@ export async function hostSyscall(req: HostSyscall, ctx: HostOpsContext): Promis
     case 'async-cancel':
       ctx.ops.cancel(req.id);
       return done;
+    case 'async-settle':
+      return json(await ctx.ops.settle(req.ids));
     case 'async-close':
       ctx.ops.close();
       return done;
