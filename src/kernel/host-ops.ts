@@ -4,12 +4,13 @@ import { KernelError } from './fd-table.ts';
 export type HostSyscall =
   | { op: 'lock'; path: string; exclusive: boolean; fd: number }
   | { op: 'unlock'; path: string }
-  | { op: 'async-submit'; req: { op: string } }
+  | { op: 'async-submit'; req: { op: string }; ack?: number[] }
   | { op: 'async-wait'; timeoutMs?: number }
   | { op: 'async-take'; id: number }
   | { op: 'async-resolve'; value: unknown }
   | { op: 'async-hold' }
   | { op: 'async-cancel'; id: number }
+  | { op: 'async-settle'; ids: number[] }
   | { op: 'async-close' };
 
 export const HOST_OPS: readonly HostSyscall['op'][] = [
@@ -21,6 +22,7 @@ export const HOST_OPS: readonly HostSyscall['op'][] = [
   'async-resolve',
   'async-hold',
   'async-cancel',
+  'async-settle',
   'async-close',
 ];
 
@@ -66,12 +68,18 @@ export class LockTable {
 
 type Run = (req: { op: string }, cancelled: AbortSignal) => Promise<SyncFsResult>;
 
+const KEPT_OPS = new Set(['fd-write']);
+
+let unknownSettled = false;
+
 export class AsyncOps {
   private next = 1;
   private readonly results = new Map<number, SyncFsResult | undefined>();
   private readonly ready: number[] = [];
   private readonly running = new Map<number, AbortController>();
   private readonly waiters = new Set<() => void>();
+  private readonly taken = new Map<number, SyncFsResult>();
+  private readonly kept = new Set<number>();
   private closed = false;
   private readonly run: Run;
   private readonly onReady: (() => void) | undefined;
@@ -83,6 +91,7 @@ export class AsyncOps {
 
   submit(req: { op: string }): number {
     const id = this.hold();
+    if (KEPT_OPS.has(req.op)) this.kept.add(id);
     const running = new AbortController();
     this.running.set(id, running);
     this.run(req, running.signal).then(
@@ -109,10 +118,29 @@ export class AsyncOps {
     const result = this.results.get(id);
     if (!result) throw new KernelError('EAGAIN');
     this.forget(id);
+    if (this.kept.delete(id)) this.taken.set(id, result);
     return result;
   }
 
+  ack(ids: readonly number[]): void {
+    for (const id of ids) this.taken.delete(id);
+  }
+
+  async settle(ids: readonly number[]): Promise<Array<SyncFsResult | null>> {
+    const never = new AbortController().signal;
+    while (ids.some((id) => this.running.has(id))) await this.sleep(undefined, never);
+    return ids.map((id) => {
+      const result = this.results.get(id) ?? this.taken.get(id) ?? null;
+      if (!result && !unknownSettled) {
+        unknownSettled = true;
+        console.warn(`async-settle: no result for op ${id}; its write counts as made`);
+      }
+      return result;
+    });
+  }
+
   cancel(id: number): void {
+    this.kept.delete(id);
     this.running.get(id)?.abort();
     this.forget(id);
   }
@@ -203,6 +231,7 @@ export async function hostSyscall(req: HostSyscall, ctx: HostOpsContext): Promis
       return done;
     case 'async-submit':
       if (!ctx.valid(req.req)) throw new KernelError('EINVAL');
+      if (req.ack) ctx.ops.ack(req.ack);
       return json(ctx.ops.submit(req.req));
     case 'async-wait':
       return json(await ctx.ops.wait(req.timeoutMs, ctx.blocking));
@@ -215,6 +244,8 @@ export async function hostSyscall(req: HostSyscall, ctx: HostOpsContext): Promis
     case 'async-cancel':
       ctx.ops.cancel(req.id);
       return done;
+    case 'async-settle':
+      return json(await ctx.ops.settle(req.ids));
     case 'async-close':
       ctx.ops.close();
       return done;
