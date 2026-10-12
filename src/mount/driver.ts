@@ -20,6 +20,8 @@ export type {
   MountRequestInfo,
 } from './protocol.ts';
 
+import { fresh } from '../bytes.ts';
+
 export interface OpenFlags {
   write: boolean;
   create: boolean;
@@ -188,7 +190,7 @@ export function serveFilesystem(
       (result) => {
         if (result instanceof Uint8Array) {
           const whole = result.byteOffset === 0 && result.byteLength === result.buffer.byteLength;
-          const bytes = options.owned && whole ? result : result.slice();
+          const bytes = options.owned && whole ? result : fresh(result);
           reply({ id: data.id, result: bytes }, [bytes.buffer]);
         } else reply({ id: data.id, result: result ?? null });
       },

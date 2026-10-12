@@ -1,4 +1,5 @@
 import { BODY_IDLE_MS, readWithin } from './body-idle.ts';
+import { fresh } from './bytes.ts';
 import type { TransportCall, TransportReply } from './kernel/net/remote-transport.ts';
 import type {
   HeaderList,
@@ -257,7 +258,7 @@ export function serveTransport(
         }
         if (typeof data === 'string') peer.postMessage({ net: 'ws-message', nid, data });
         else {
-          const bytes = data.slice();
+          const bytes = fresh(data);
           peer.postMessage({ net: 'ws-message', nid, data: bytes }, [bytes.buffer]);
         }
         flow.inflight += payloadSize(data);
@@ -297,7 +298,7 @@ export function serveTransport(
         open.delete(nid);
         peer.postMessage({ net: 'end', nid });
       } else {
-        const bytes = next.value.slice();
+        const bytes = fresh(next.value);
         peer.postMessage({ net: 'chunk', nid, bytes }, [bytes.buffer]);
       }
     } catch (e) {

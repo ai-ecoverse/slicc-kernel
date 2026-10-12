@@ -1,3 +1,4 @@
+import { fresh } from '../bytes.ts';
 import { ancestryOf, permOf } from '../fs/access.ts';
 import { chain } from '../fs/owners.ts';
 import {
@@ -821,7 +822,7 @@ class MountFs implements KernelFs {
     const chunk = mount.caps.maxIo ?? DEFAULT_IO;
     try {
       for (let offset = 0; offset < bytes.length; offset += chunk) {
-        const part = bytes.slice(offset, offset + chunk);
+        const part = fresh(bytes, offset, offset + chunk);
         await mount.conn.call({ op: 'write', fh, offset, bytes: part }, [part.buffer]);
       }
     } finally {
@@ -930,7 +931,7 @@ class MountFs implements KernelFs {
   ): Promise<void> {
     const chunk = mount.caps.maxIo ?? DEFAULT_IO;
     for (let at = 0; at < bytes.length; at += chunk) {
-      const part = handed(bytes, transfer, chunk) ? bytes : bytes.slice(at, at + chunk);
+      const part = handed(bytes, transfer, chunk) ? bytes : fresh(bytes, at, at + chunk);
       await mount.conn.call({ op: 'write', fh, offset: offset + at, bytes: part }, [part.buffer]);
     }
   }
