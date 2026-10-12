@@ -159,6 +159,7 @@ export class WasiFds {
       this.cloexec.clear();
     }
     this.shared = ids;
+    (this.fs as { threaded?(): void }).threaded?.();
     this.seen = Atomics.load(ids, GEN);
   }
 
@@ -544,6 +545,15 @@ export class WasiFds {
     this.buffers.delete(path);
   }
 
+  private openedIno(fd: number): number | undefined {
+    try {
+      return (this.kernel.call({ op: 'fd-vfs-stat', fd, identity: true }) as { ino?: number }).ino;
+    } catch (err) {
+      this.kernel.sys.close(fd);
+      throw err;
+    }
+  }
+
   private inoOf(path: string): number | undefined {
     try {
       return this.fs.stat(path).ino;
@@ -653,10 +663,14 @@ export class WasiFds {
     if (e.path !== undefined || this.learned.has(e)) return;
     this.learned.add(e);
     try {
-      const vfs = this.kernel.call({ op: 'fd-vfs-stat', fd }) as { path?: string; orphan?: true };
+      const vfs = this.kernel.call({ op: 'fd-vfs-stat', fd, identity: true }) as {
+        path?: string;
+        orphan?: true;
+        ino?: number;
+      };
       if (vfs.orphan || vfs.path === undefined) return;
       e.path = vfs.path;
-      e.ino = this.inoOf(vfs.path);
+      e.ino = vfs.ino ?? this.inoOf(vfs.path);
     } catch {}
   }
 
@@ -709,9 +723,8 @@ export class WasiFds {
 
     const truncate = made || (oflags & OFLAGS.TRUNC) !== 0;
     const fd = this.kernel.sys.openVfs(path, flags, 0, truncate ? { truncate } : {});
-    const was = existing && this.inoOf(path);
-    if (truncate) (this.fs as { touched?(path?: string, ino?: number): void }).touched?.(path, was);
-    const ino = existing ? was : this.inoOf(path);
+    const ino = writable ? (this.openedIno(fd) ?? this.inoOf(path)) : undefined;
+    if (truncate) (this.fs as { touched?(path?: string, ino?: number): void }).touched?.(path, ino);
     this.table.set(fd, { type: 'kernel', kind: 'file', nonblock: false, append, path, ino });
     if (append) this.publishFlags(fd, { nonblock: false, append });
     this.bump();

@@ -13,6 +13,7 @@ import {
 import { chownAs, ownerOf } from '../fs/owners.ts';
 import {
   type FsStat,
+  type HeldEntry,
   type KernelFs,
   lutimesOf,
   mayLink,
@@ -349,9 +350,41 @@ async function holdOp(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest)
   return done;
 }
 
+const IDENTITY_OPS = new Set<SyncFsOp>([
+  'write',
+  'pwrite',
+  'truncate',
+  'chmod',
+  'utimes',
+  'chown',
+  'lchown',
+]);
+
 export async function dispatchSyncFs(req: SyncFsRequest): Promise<SyncFsResult> {
   const entry = resolveSyncFsToken(req.token);
   if (!entry) return { ok: false, errno: 'EACCES', message: 'sync-fs: unknown or revoked token' };
+  if (!req.identity || !IDENTITY_OPS.has(req.op)) return dispatchOne(entry, req);
+  const { fs, cwd } = entry;
+  const path = fs.resolvePath(cwd, req.path);
+  const identified = async (held?: HeldEntry): Promise<SyncFsResult> => {
+    const own = held ? { ...entry, fs: { ...fs, writeFile: held.writeFile } } : entry;
+    const result = await dispatchOne(own, req);
+    if (!result.ok) return result;
+    if (held && !held.direct) return json(null);
+    const look = req.op === 'lchown' ? fs.lstat : fs.stat;
+    const st = await look.call(fs, path).catch(() => undefined);
+    return json(st ? statJson(st) : null);
+  };
+  try {
+    return await (fs.exclusive
+      ? fs.exclusive(path, identified, req.op !== 'lchown')
+      : identified());
+  } catch (err) {
+    return toErrno(err);
+  }
+}
+
+async function dispatchOne(entry: SyncFsTokenEntry, req: SyncFsRequest): Promise<SyncFsResult> {
   const { fs, cwd } = entry;
   try {
     const path = fs.resolvePath(cwd, req.path);

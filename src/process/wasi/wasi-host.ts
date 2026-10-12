@@ -739,9 +739,13 @@ export class WasiHost {
     this.unnamed.add(e);
     let path: string | undefined;
     try {
-      const st = this.kernelStat(fd);
+      const st = this.o.kernel.call({ op: 'fd-vfs-stat', fd, identity: true }) as {
+        path?: string;
+        orphan?: true;
+        ino?: number;
+      };
       path = st.orphan ? undefined : st.path;
-      if (path !== undefined) e.ino = this.o.fs.stat(path).ino;
+      if (path !== undefined) e.ino = st.ino ?? this.o.fs.stat(path).ino;
     } catch {
       return;
     }

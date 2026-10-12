@@ -385,13 +385,18 @@ class StatCache {
     this.lstats.delete(path);
   }
 
-  mutated(paths: readonly string[], ino = 0): void {
+  mutated(paths: readonly string[], ino = 0): number {
     this.clear();
-    if (!this.shared) return;
+    if (!this.shared) return 0;
     const key = (ino % 4294967296) | 0;
     for (const [i, hash] of (paths.length > 0 ? paths.map(pathHash) : [0]).entries()) {
       this.seen = this.publish(this.shared, hash, i === 0 ? key : 0);
     }
+    return this.seen;
+  }
+
+  generation(): number {
+    return this.shared ? Atomics.load(this.shared, FS_GEN) : 0;
   }
 
   inoOf(path: string, look: () => SyncFsBridgeStat): number {
@@ -462,7 +467,11 @@ export function cachingBridge(
   bridge: SyncFsPosixBridge,
   now: () => number = () => performance.now(),
   shared?: Int32Array
-): SyncFsPosixBridge & { invalidate(): void; touched(path?: string, ino?: number): void } {
+): SyncFsPosixBridge & {
+  invalidate(): void;
+  touched(path?: string, ino?: number): void;
+  threaded(): void;
+} {
   const blind = shared !== undefined && shared.length * 4 < SHARED_IDS_BYTES;
   const cache = new StatCache(blind ? undefined : shared);
   const { stats, lstats } = cache;
@@ -492,7 +501,29 @@ export function cachingBridge(
       cache.mutated(paths);
     }
   };
+  let exact = false;
+  const threaded = () => {
+    if (blind || shared === undefined || !bridge.identify) return;
+    exact = true;
+    bridge.identify();
+  };
+  const identified = <T>(p: string, op: () => T, also: string[]): T => {
+    const before = cache.generation();
+    try {
+      return op();
+    } finally {
+      const st = bridge.identified?.() ?? null;
+      if (!st) cache.mutated([]);
+      else if (
+        cache.mutated([p, ...also], st.ino) === before + 1 + also.length &&
+        !st.isSymbolicLink
+      ) {
+        cache.put(stats, p, st);
+      }
+    }
+  };
   const rewriting = <T>(p: string, op: () => T, ...also: string[]): T => {
+    if (exact) return identified(p, op, also);
     const ino = cache.inoOf(p, () => bridge.stat(p));
     try {
       return op();
@@ -562,6 +593,7 @@ export function cachingBridge(
     ...(bridge.owners ? { owners: true } : {}),
     invalidate,
     touched,
+    threaded,
   };
 }
 

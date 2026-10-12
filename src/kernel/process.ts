@@ -93,7 +93,7 @@ export type WasmSyscall =
   | { op: 'fd-pread'; fd: number; offset: number; max: number }
   | { op: 'fd-pwrite'; fd: number; offset: number; body: Uint8Array }
   | { op: 'fd-resize'; fd: number; size: number }
-  | { op: 'fd-vfs-stat'; fd: number }
+  | { op: 'fd-vfs-stat'; fd: number; identity?: boolean }
   | { op: 'fd-path-flush'; path: string }
   | { op: 'fd-path-unlinking'; path: string }
   | { op: 'fd-path-unlinked'; path: string }
@@ -768,6 +768,24 @@ export class WasmProcess {
     return fd;
   }
 
+  private async identified(
+    stat: () => Promise<{ path: string; size: number; orphan?: true }>,
+    known?: () => number | undefined
+  ): Promise<{ path: string; size: number; orphan?: true; ino?: number }> {
+    const first = await stat();
+    if (first.orphan) return first;
+    const ino = known?.();
+    if (ino !== undefined) return { ...first, ino };
+    const { fs } = this.options;
+    const look = async () => {
+      const now = await stat();
+      if (now.path !== first.path || now.orphan) return now;
+      const st = await fs.stat?.(now.path).catch(() => undefined);
+      return st?.ino === undefined ? now : { ...now, ino: st.ino };
+    };
+    return fs.exclusive ? fs.exclusive(first.path, look) : look();
+  }
+
   private newOwner(): NewOwner | undefined {
     if (!this.options.owners) return undefined;
     return { uid: this.cred.euid, gid: this.cred.egid, mode: 0o666 & ~this.umask };
@@ -943,7 +961,13 @@ export class WasmProcess {
         await file.resize(req.size);
         return { ok: true, kind: 'void' };
       case 'fd-vfs-stat':
-        return { ok: true, kind: 'json', json: await file.stat() };
+        return {
+          ok: true,
+          kind: 'json',
+          json: req.identity
+            ? await this.identified(file.stat.bind(file), file.known?.bind(file))
+            : await file.stat(),
+        };
     }
   }
 
