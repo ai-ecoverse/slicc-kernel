@@ -401,6 +401,7 @@ window.boot = async (options = {}) => {
       ...policy,
       ...handles,
       ...(options.cdp ? { cdp: cdpHook } : {}),
+      ...(options.protect ? { protect: options.protect } : {}),
     })
   );
   return true;

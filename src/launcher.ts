@@ -16,6 +16,14 @@ import { R_OK, X_OK } from './fs/access.ts';
 import { followLinks, withCommandDirs } from './fs/commands.ts';
 import { Dac, type DenialHook, need, TTY_MODE } from './fs/dac.ts';
 import { physicalPathAsync } from './fs/physical-path.ts';
+import {
+  holdsProtected,
+  isProtected,
+  PROTECT_WRITER,
+  ProtectedFs,
+  type Protection,
+  protectedPrefixes,
+} from './fs/protect.ts';
 import type { KernelFs, UsersMode } from './fs/types.ts';
 import { fsError, normalizePath } from './fs/types.ts';
 import { UNLINKED_DIR, UnlinkedKeeper, type UnlinkOwner, webLocks } from './fs/unlinked.ts';
@@ -143,6 +151,7 @@ export interface LauncherOptions {
   sealed?: SealedHook;
   approve?: ApproveHook;
   sudoTimeoutMs?: number;
+  protect?: Protection;
 }
 
 export interface PendingMedium {
@@ -385,6 +394,8 @@ function concat(chunks: Uint8Array[]): Uint8Array {
 
 export class Launcher {
   readonly fs: KernelFs;
+  readonly processFs: KernelFs;
+  private readonly prefixes: readonly string[];
   private readonly base: KernelFs;
   private readonly createWorker: () => WasmWorkerLike;
   private readonly modulesDir: string;
@@ -510,6 +521,10 @@ export class Launcher {
       }
     );
     this.fs = this.unlinked.wrap(keepingOpen(fs, this.nodes));
+    if (options.protect?.writer) throw new Error(PROTECT_WRITER);
+    this.prefixes = protectedPrefixes(options.protect?.paths ?? []);
+    this.processFs =
+      this.prefixes.length > 0 ? new ProtectedFs(this.prefixes).view(this.fs) : this.fs;
     this.users = new UserDb(this.fs, this.owners);
     this.sudoer = new Sudo({
       fs: this.fs,
@@ -910,7 +925,10 @@ export class Launcher {
       env: req.env,
       cwd: req.cwd,
       fds: req.fds,
-      fs: this.fs,
+      fs: this.processFs,
+      ...(this.prefixes.length > 0
+        ? { readonlyAt: (path: string) => isProtected(this.prefixes, path) }
+        : {}),
       createWorker: this.createWorker,
       onError: req.report,
       spawner: this.spawner(pid, req.report),
@@ -1225,6 +1243,13 @@ export class Launcher {
     this.settling.deliver(sig, pgid, keyed, tty.reading ? undefined : foreground);
   }
 
+  private guardMount(target: string): void {
+    const at = normalizePath(target);
+    if (isProtected(this.prefixes, at) || holdsProtected(this.prefixes, at)) {
+      throw fsError('EROFS', at);
+    }
+  }
+
   private umaskOf(pid: number): number {
     return this.processes.get(pid)?.umask?.() ?? DEFAULT_UMASK;
   }
@@ -1467,6 +1492,7 @@ export class Launcher {
 
   private async processMount(pid: number, call: MountCall, signal: AbortSignal): Promise<void> {
     const spec = mountCall(call);
+    this.guardMount(spec.target);
     await this.permit({ op: 'mount', pid, ...spec, options: { ...spec.options } });
     await this.mountsOwn(
       this.credOf(pid),
@@ -1500,6 +1526,7 @@ export class Launcher {
   private async processUmount(pid: number, target: string, flags: number): Promise<void> {
     const call = umountCall(target, flags);
     let mounted: MountEntry | undefined;
+    this.guardMount(call.target);
     for (;;) {
       mounted = this.mounts.mounted(call.target);
       await this.permit({
