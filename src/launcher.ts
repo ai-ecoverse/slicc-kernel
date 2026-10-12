@@ -914,7 +914,7 @@ export class Launcher {
         boot: this.boot,
         processes: this.list(this.credOf(pid)),
         load: this.loadAverage(),
-        reaped: { ...this.reapedTimes },
+        cpu: this.cpuTotal(),
       }),
       sudo: (call, signal) => this.sudo(pid, call, signal),
       openFiles: this.openFiles,
@@ -955,6 +955,7 @@ export class Launcher {
       if (this.processes.size === 0) {
         clearInterval(this.sampler);
         this.sampler = undefined;
+        this.idleSince = Date.now();
       }
       this.settling.settled(pid);
       if (req.ppid === undefined || this.orphans.delete(pid)) this.forget(pid);
@@ -993,6 +994,17 @@ export class Launcher {
   private sampler: ReturnType<typeof setInterval> | undefined;
   private readonly reapedTimes: CpuTimes = { utime: 0, stime: 0 };
 
+  cpuTotal(): CpuTimes {
+    const total = { ...this.reapedTimes };
+    const add = (t: CpuTimes | undefined) => {
+      total.utime += t?.utime ?? 0;
+      total.stime += t?.stime ?? 0;
+    };
+    for (const handle of this.processes.values()) add(handle.times?.());
+    for (const t of this.spent.values()) add(t);
+    return total;
+  }
+
   loadAverage(): readonly [number, number, number] {
     return this.load;
   }
@@ -1006,8 +1018,16 @@ export class Launcher {
     }) as [number, number, number];
   }
 
+  private idleSince: number | undefined;
+
   private sampling(): void {
     if (this.sampler) return;
+    if (this.idleSince !== undefined) {
+      const steps = Math.floor((Date.now() - this.idleSince) / LOAD_SAMPLE_MS);
+      this.load = this.load.map(
+        (avg, i) => avg * Math.exp(-LOAD_SAMPLE_MS / LOAD_WINDOWS_MS[i as 0 | 1 | 2]) ** steps
+      ) as [number, number, number];
+    }
     this.sampler = setInterval(() => this.sampleLoad(), LOAD_SAMPLE_MS);
     (this.sampler as { unref?: () => void }).unref?.();
   }

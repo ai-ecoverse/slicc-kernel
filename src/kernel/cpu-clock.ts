@@ -14,6 +14,8 @@ export const IDLE_OPS: ReadonlySet<string> = new Set([
   'sock-recvmsg',
 ]);
 
+export const SYS_CAP_US = 20_000;
+
 const LOCAL = SAB_CLOCK_OFFSET;
 const SEQ = 0;
 const IDLE = 1;
@@ -120,8 +122,9 @@ export class CpuClock {
   times(): CpuTimes {
     const now = this.now();
     const open = this.since === 0 ? 0 : Math.max(0, now - this.since);
-    const sys = this.sys + (this.kind === 'sys' ? open : 0);
-    const idle = this.idle + (this.kind === 'idle' ? open : 0) + localIdle(this.sab, now).idle;
+    const busy = this.kind === 'sys' ? Math.min(open, SYS_CAP_US) : 0;
+    const sys = this.sys + busy;
+    const idle = this.idle + (open - busy) + localIdle(this.sab, now).idle;
     const user = Math.max(0, now - this.start - sys - idle);
     this.last = {
       utime: Math.max(this.last.utime, Math.floor(user / 1000)),
@@ -131,8 +134,10 @@ export class CpuClock {
   }
 
   private add(micros: number): void {
-    if (this.kind === 'sys') this.sys += Math.max(0, micros);
-    else this.idle += Math.max(0, micros);
+    const spent = Math.max(0, micros);
+    const busy = this.kind === 'sys' ? Math.min(spent, SYS_CAP_US) : 0;
+    this.sys += busy;
+    this.idle += spent - busy;
   }
 }
 
