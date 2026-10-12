@@ -42,7 +42,7 @@ export class PathMap<V> {
     for (let path = stack.pop(); path !== undefined; path = stack.pop()) {
       if (this.values.has(path)) out.push(path);
       const below = this.children.get(path);
-      if (below) stack.push(...below);
+      if (below) for (const child of below) stack.push(child);
     }
     return out;
   }
@@ -56,7 +56,7 @@ export class PathMap<V> {
     for (let path = stack.pop(); path !== undefined; path = stack.pop()) {
       this.values.delete(path);
       const below = this.children.get(path);
-      if (below) stack.push(...below);
+      if (below) for (const child of below) stack.push(child);
       this.children.delete(path);
     }
     this.prune(root);
