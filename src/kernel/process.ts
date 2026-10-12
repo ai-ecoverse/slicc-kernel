@@ -1276,9 +1276,11 @@ export class WasmProcess {
     const answer = await sudo(call, this.blockingSignal(cancelled));
     if (!('grant' in answer)) return answer;
     if (this.dying) throw new KernelError('EINTR');
-    const { file, argv, env, cwd, cred } = answer.grant;
+    const { file, argv, env, cwd, cred, caller } = answer.grant;
     const stdio = [{ fd: 0 }, { fd: 1 }, { fd: 2 }];
-    return { pid: await this.children.spawn({ file, argv, env, cwd }, stdio, [], { cred }) };
+    return {
+      pid: await this.children.spawn({ file, argv, env, cwd }, stdio, [], { cred, caller }),
+    };
   }
 
   private async mountSyscall(

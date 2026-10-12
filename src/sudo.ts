@@ -53,6 +53,7 @@ export interface SudoGrant {
   env: Record<string, string>;
   cwd: string;
   cred: Cred;
+  caller: Cred;
 }
 
 export type SudoResult =
@@ -271,7 +272,13 @@ export class Sudo {
     return this.o.users.lookup(key);
   }
 
-  private async reachable(cred: Cred, cwd: string): Promise<boolean> {
+  private async canonical(cwd: string): Promise<string | undefined> {
+    const { fs } = this.o;
+    const path = normalizePath(cwd);
+    return fs.realpath ? fs.realpath(path, true).catch(() => undefined) : path;
+  }
+
+  async reachable(cred: Cred, cwd: string): Promise<boolean> {
     const walked = await access(this.o.fs, cred, cwd, X_OK, { directory: true });
     if (walked.denied !== undefined || walked.missing) return false;
     return (await this.o.fs.stat(cwd).catch(() => undefined))?.isDirectory === true;
@@ -314,9 +321,12 @@ export class Sudo {
     const applies = await this.applies(self, cred);
     if (parsed.list) return this.listed(self, root, rules.filter(applies));
     const [word = '', ...args] = parsed.command;
-    const cwd = normalizePath(call.cwd);
-    if (!(await this.reachable(cred, cwd))) {
-      return failed('EACCES', `sudo: cannot run in ${cwd}: it isn't a directory you can enter`);
+    const cwd = await this.canonical(call.cwd);
+    if (cwd === undefined || !(await this.reachable(cred, cwd))) {
+      return failed(
+        'EACCES',
+        `sudo: cannot run in ${call.cwd}: it isn't a directory you can enter`
+      );
     }
     const path = await this.locate(word, cwd);
     if (!path) return failed('ENOENT', `sudo: ${word}: command not found`);
@@ -347,6 +357,9 @@ export class Sudo {
     try {
       const answer = await this.ask(caller, self, target, parsed.command, path, cwd, signal);
       if (typeof answer !== 'string') return answer;
+      if ((await this.canonical(call.cwd)) !== cwd || !(await this.reachable(cred, cwd))) {
+        return failed('EACCES', `sudo: ${call.cwd} changed while the request waited`);
+      }
       const changed = await this.untrusted(path, cwd);
       if (changed) {
         return failed('EPERM', `sudo: ${changed} must be root's, and writable by root only`);
@@ -470,6 +483,6 @@ export class Sudo {
       SUDO_GID: String(cred.rgid),
       SUDO_COMMAND: [file, ...argv.slice(1)].join(' '),
     };
-    return { grant: { file, argv: [...argv], env, cwd, cred: credOf(target) } };
+    return { grant: { file, argv: [...argv], env, cwd, cred: credOf(target), caller: cred } };
   }
 }

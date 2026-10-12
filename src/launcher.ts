@@ -716,6 +716,11 @@ export class Launcher {
     }
   }
 
+  private async grantedCwd(caller: Cred, cwd: string): Promise<boolean> {
+    const real = await physicalPathAsync(this.base, cwd).catch(() => undefined);
+    return real === cwd && (await this.sudoer.reachable(caller, cwd));
+  }
+
   private async backing(file: string, cwd: string): Promise<string[]> {
     const planned = await this.plan(file, [file], cwd, '');
     if (!planned) return [];
@@ -725,6 +730,10 @@ export class Launcher {
       if (name.includes('/') && !COMMAND.test(name)) files.push(this.fs.resolvePath(cwd, name));
       const script = (await this.scriptCommand(name, cwd, ''))?.script;
       if (script) files.push(script);
+    }
+    for (const at of [...files]) {
+      const root = PACKAGE_ROOT.exec(at)?.[1];
+      if (root !== undefined) files.push(`${root}/package.json`);
     }
     return [...new Set(files)].filter((path) => path !== '' && path !== SUDO_PATH);
   }
@@ -981,6 +990,10 @@ export class Launcher {
 
   private spawner(ppid: number, report: (message: string) => void): ChildSpawner {
     return async (req, fds, grant) => {
+      if (grant && !(await this.grantedCwd(grant.caller, req.cwd))) {
+        await fds.closeAll();
+        throw new SpawnError('EACCES');
+      }
       const cred = grant ? grant.cred : this.credOf(ppid);
       const scope = grant ? '' : await this.scopeOf(cred.euid);
       const planned = await this.plan(req.file, req.argv, req.cwd, scope);

@@ -65,6 +65,7 @@ export class SpawnError extends Error {
 
 export interface SpawnGrant {
   cred: Cred;
+  caller: Cred;
 }
 
 export type ChildSpawner = (
