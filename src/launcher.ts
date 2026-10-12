@@ -994,7 +994,9 @@ export class Launcher {
   private sampler: ReturnType<typeof setInterval> | undefined;
   private readonly reapedTimes: CpuTimes = { utime: 0, stime: 0 };
 
-  cpuTotal(): CpuTimes {
+  private readonly idleAt = { wall: this.boot, busy: 0, idle: 0 };
+
+  cpuTotal(now = Date.now()): CpuTimes & { idle: number } {
     const total = { ...this.reapedTimes };
     const add = (t: CpuTimes | undefined) => {
       total.utime += t?.utime ?? 0;
@@ -1002,7 +1004,12 @@ export class Launcher {
     };
     for (const handle of this.processes.values()) add(handle.times?.());
     for (const t of this.spent.values()) add(t);
-    return total;
+    const busy = total.utime + total.stime;
+    const at = this.idleAt;
+    at.idle += Math.max(0, now - at.wall - (busy - at.busy));
+    at.wall = Math.max(at.wall, now);
+    at.busy = Math.max(at.busy, busy);
+    return { ...total, idle: at.idle };
   }
 
   loadAverage(): readonly [number, number, number] {

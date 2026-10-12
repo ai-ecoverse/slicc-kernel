@@ -31,5 +31,5 @@ export interface ProcessListing {
   boot: number;
   processes: ProcessInfo[];
   load?: readonly [number, number, number];
-  cpu?: { utime: number; stime: number };
+  cpu?: { utime: number; stime: number; idle: number };
 }

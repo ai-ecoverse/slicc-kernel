@@ -228,6 +228,10 @@ function killThread(thread: ThreadSignals | undefined, caught: number, sig: numb
   return true;
 }
 
+function threadSignalsOf(sab: SharedArrayBuffer): ThreadSignals {
+  return { header: new Int32Array(sab, 0, SAB_HEADER_I32), interrupt: new AbortController() };
+}
+
 function threadCancel(thread: ThreadSignals): AbortSignal {
   return Atomics.load(thread.header, SAB_I_SIGNALS) !== 0
     ? AbortSignal.abort()
@@ -433,6 +437,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
   const finish = (code: number, sig?: number): void => {
     if (done) return;
     done = true;
+    clocks.freeze();
     dying.clear();
     endedBy = sig ?? process.execTermsig;
     worker.removeEventListener('message', onMessage);
@@ -490,10 +495,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     }
     const tsab = new SharedArrayBuffer(SAB_HEADER_BYTES + SAB_DEFAULT_WINDOW_BYTES);
     const tw = opts.createWorker();
-    const tsignals = {
-      header: new Int32Array(tsab, 0, SAB_HEADER_I32),
-      interrupt: new AbortController(),
-    };
+    const tsignals = threadSignalsOf(tsab);
     threadSignals.set(thread.tid, tsignals);
     const tdispatch = (req: SyncSabDispatchRequest): Promise<SyncFsResult> =>
       dying.serving(() =>

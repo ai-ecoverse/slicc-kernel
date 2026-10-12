@@ -115,12 +115,19 @@ export class CpuClock {
     this.kind = 'idle';
   }
 
+  private frozen: number | undefined;
+
+  freeze(): void {
+    this.frozen ??= this.now();
+  }
+
   running(): boolean {
+    if (this.frozen !== undefined) return false;
     return this.since === 0 && !localIdle(this.sab, this.now()).waiting;
   }
 
   times(): CpuTimes {
-    const now = this.now();
+    const now = this.frozen ?? this.now();
     const open = this.since === 0 ? 0 : Math.max(0, now - this.since);
     const busy = this.kind === 'sys' ? Math.min(open, SYS_CAP_US) : 0;
     const sys = this.sys + busy;
@@ -173,6 +180,10 @@ export class ProcessClocks {
 
   stop(stopped: boolean): void {
     for (const c of this.all()) c.stop(stopped);
+  }
+
+  freeze(): void {
+    for (const c of this.all()) c.freeze();
   }
 
   times(): CpuTimes | undefined {

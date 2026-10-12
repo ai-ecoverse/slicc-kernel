@@ -180,7 +180,9 @@ export function systemFile(
     listing.cpu?.[key] ?? listing.processes.reduce((n, p) => n + (p[key] ?? 0), 0);
   const user = ticks(sum('utime'));
   const system = ticks(sum('stime'));
-  const idle = Math.max(0, ticks(now - listing.boot) - user - system);
+  const idle = listing.cpu
+    ? ticks(listing.cpu.idle)
+    : Math.max(0, ticks(now - listing.boot) - user - system);
   return [
     `cpu  ${user} 0 ${system} ${idle} 0 0 0 0 0 0`,
     `cpu0 ${user} 0 ${system} ${idle} 0 0 0 0 0 0`,
