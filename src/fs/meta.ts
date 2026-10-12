@@ -1,3 +1,4 @@
+import { PathMap } from './path-map.ts';
 export interface MetaEntry {
   path: string;
   mode?: number;
@@ -42,7 +43,7 @@ function under(path: string, root: string): boolean {
 }
 
 export class MemoryMeta implements MetaStore {
-  private readonly entries = new Map<string, MetaEntry>();
+  private readonly entries = new PathMap<MetaEntry>();
 
   async get(paths: readonly string[]): Promise<Array<MetaEntry | undefined>> {
     return paths.map((path) => this.entries.get(path));
@@ -59,7 +60,7 @@ export class MemoryMeta implements MetaStore {
 
   async move(from: string, to: string, root: (entry: MetaEntry | undefined) => MetaEntry) {
     await this.remove([to]);
-    const carried = [...this.entries.values()].filter((entry) => under(entry.path, from));
+    const carried = this.entries.subtree(from).map((path) => this.entries.get(path) as MetaEntry);
     for (const entry of carried) this.entries.delete(entry.path);
     for (const entry of carried) {
       const path = to + entry.path.slice(from.length);
@@ -69,21 +70,19 @@ export class MemoryMeta implements MetaStore {
   }
 
   async remove(paths: readonly string[]): Promise<void> {
-    for (const key of [...this.entries.keys()]) {
-      if (paths.some((path) => under(key, path))) this.entries.delete(key);
-    }
+    for (const path of paths) this.entries.deleteTree(path);
   }
 
   async links(dir: string): Promise<MetaEntry[]> {
-    return [...this.entries.values()].filter((entry) => entry.dir === dir);
+    return [...this.entries.entries()].map(([, e]) => e).filter((entry) => entry.dir === dir);
   }
 
   async under(path: string): Promise<MetaEntry[]> {
-    return [...this.entries.values()].filter((entry) => under(entry.path, path));
+    return [...this.entries.entries()].map(([, e]) => e).filter((entry) => under(entry.path, path));
   }
 
   async all(): Promise<MetaEntry[]> {
-    return [...this.entries.values()];
+    return [...this.entries.entries()].map(([, e]) => e);
   }
 }
 
@@ -106,7 +105,7 @@ interface Invalidation {
 
 export class IndexedDbMeta implements MetaStore {
   private readonly db: IDBDatabase;
-  private readonly cache = new Map<string, MetaEntry | null>();
+  private readonly cache = new PathMap<MetaEntry | null>();
   private readonly channel: BroadcastChannel;
   private generation = 0;
 
@@ -121,9 +120,7 @@ export class IndexedDbMeta implements MetaStore {
   private drop({ paths = [], trees = [] }: Invalidation): void {
     this.generation++;
     for (const path of paths) this.cache.delete(path);
-    for (const key of [...this.cache.keys()]) {
-      if (trees.some((tree) => under(key, tree))) this.cache.delete(key);
-    }
+    for (const tree of trees) this.cache.deleteTree(tree);
   }
 
   private changed(invalidation: Invalidation): void {
