@@ -1,4 +1,6 @@
+import { lockdown } from './process/js/lockdown.ts';
 import { processEntry } from './process/process-entry.ts';
+import { pinRootKind } from './process/process-fds.ts';
 
 interface WorkerScope {
   postMessage(message: unknown): void;
@@ -7,5 +9,14 @@ interface WorkerScope {
 
 const scope = globalThis as unknown as WorkerScope;
 const post = scope.postMessage.bind(scope);
-const onMessage = processEntry({ postMessage: (message) => post(message) });
+const onMessage = processEntry(
+  { postMessage: (message) => post(message) },
+  undefined,
+  undefined,
+  undefined,
+  () => {
+    pinRootKind();
+    lockdown();
+  }
+);
 scope.addEventListener('message', (event) => onMessage(event.data));

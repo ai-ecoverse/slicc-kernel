@@ -716,8 +716,16 @@ const O_CREAT = 0o100;
 const field = (text: string) =>
   (text || 'none').replace(/[\s\\]/g, (c) => `\\${c.charCodeAt(0).toString(8).padStart(3, '0')}`);
 
+let pinnedRoot: string | undefined;
+
+const rootKind = (): string => (globalThis.navigator?.storage ? 'opfs' : 'memory');
+
+export function pinRootKind(): void {
+  pinnedRoot = rootKind();
+}
+
 export function mountTable(mounts: MountLine[] = []): string {
-  const root = globalThis.navigator?.storage ? 'opfs' : 'memory';
+  const root = pinnedRoot ?? rootKind();
   const lines = [`${root} / ${root} rw 0 0`, 'devfs /dev devfs rw 0 0', 'proc /proc proc rw 0 0'];
   for (const m of mounts) {
     const options = Object.entries(m.options).map(([k, v]) => (v === '' ? k : `${k}=${v}`));

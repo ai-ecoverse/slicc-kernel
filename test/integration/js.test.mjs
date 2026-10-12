@@ -241,7 +241,7 @@ test('a JS program gets WebCodecs in its process worker, and no network or stora
   const g = await run(['jstest', 'globals']);
   assert.match(
     g.stdout,
-    /fetch=undefined XMLHttpRequest=undefined WebSocket=undefined Worker=undefined indexedDB=undefined caches=undefined postMessage=undefined importScripts=undefined storage=undefined locks=undefined/
+    /fetch=undefined XMLHttpRequest=undefined WebSocket=undefined Worker=undefined indexedDB=undefined caches=undefined postMessage=undefined importScripts=undefined webkitRequestFileSystem=undefined webkitRequestFileSystemSync=undefined webkitResolveLocalFileSystemURL=undefined webkitResolveLocalFileSystemSyncURL=undefined storage=undefined locks=undefined/
   );
   assert.match(
     g.stdout,
