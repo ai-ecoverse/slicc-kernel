@@ -195,9 +195,9 @@ function ownerFor(l: Launcher, self: Account | undefined): (Owner & { umask: num
   return { uid: self.uid, gid: self.gid, umask: self.umask ?? 0o022 };
 }
 
-function guardFor(l: Launcher, self: Account | undefined): Guard | undefined {
+function guardFor(l: Launcher, self: Account | undefined, tag?: string): Guard | undefined {
   if (!l.dac || !self) return undefined;
-  return { fs: l.fs, cred: credOf(self), pid: 0, dac: l.dac };
+  return { fs: l.fs, cred: credOf(self), pid: 0, dac: l.dac, tag };
 }
 
 async function accountOf(l: Launcher, user: string | number): Promise<Account> {
@@ -455,10 +455,10 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
         if (!(FS_METHODS as readonly string[]).includes(req.method)) {
           throw new Error(`unknown file system call ${req.method}`);
         }
-        return fsCall(l.fs, req.method, req.args, ownerFor(l, self), guardFor(l, self));
+        return fsCall(l.fs, req.method, req.args, ownerFor(l, self), guardFor(l, self, host.tag));
       case 'watch':
       case 'unwatch':
-        return watchOp(l, req, watches, send, guardFor(l, self));
+        return watchOp(l, req, watches, send, guardFor(l, self, host.tag));
       case 'mount':
         return { result: await l.mountAs(clientCred(self), req.spec) };
       case 'umount':

@@ -446,6 +446,7 @@ export class Launcher {
   constructor(options: LauncherOptions) {
     this.usersMode = usersMode(options.users);
     this.dac = this.usersMode === 'off' ? undefined : new Dac(this.usersMode, options.onDenial);
+    if (this.dac) this.dac.tagOf = (pid) => this.tagOf(pid);
     if (this.owners) options.fs.trackOwners?.();
     this.mounts = new MountTable({
       open: (type, spec) => this.driver(type, spec),
