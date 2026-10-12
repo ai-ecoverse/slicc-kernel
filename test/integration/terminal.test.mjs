@@ -13,7 +13,7 @@ async function terminal(chrome, t, argv, options) {
   const screen = () => page.evaluate(() => window.screen.screen);
   const until = async (text, from = 0, ms = undefined) => {
     const shows = (s, f) =>
-      s === PROMPT
+      s === '[$#] '
         ? /[$#] /.test(window.screen.screen.slice(f))
         : window.screen.screen.slice(f).includes(s);
     try {
