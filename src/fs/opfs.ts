@@ -52,15 +52,16 @@ export function translate(err: unknown, path: string, op: OpfsOp = 'lookup', map
   if (typeof (err as { code?: unknown })?.code === 'string') return err as Error;
   const raw = (err as { name?: unknown })?.name;
   const name = typeof raw === 'string' ? raw : 'Error';
-  const code = (mapped && ERRNO_BY_DOM_ERROR[name]) || 'EIO';
+  const code =
+    name === 'QuotaExceededError' ? 'ENOSPC' : (mapped && ERRNO_BY_DOM_ERROR[name]) || 'EIO';
   const error = Object.assign(fsError(code, path), { domName: name, op, cause: err });
-  if (code !== 'EIO') return error;
+  if (code !== 'EIO' && code !== 'ENOSPC') return error;
   const detail = (err as { message?: unknown })?.message;
   error.message += ` (OPFS ${op}: ${name}${typeof detail === 'string' && detail ? `: ${detail}` : ''})`;
   if (!reported.has(`${name}/${op}`)) {
     reported.add(`${name}/${op}`);
     console.warn(
-      `slicc-kernel: ${error.message}, reported as EIO; logged once per error and operation`
+      `slicc-kernel: ${error.message}, reported as ${code}; logged once per error and operation`
     );
   }
   return error;
@@ -694,11 +695,13 @@ export class OpfsFs implements KernelFs {
     const [file, existed, target] = await this.fileFor(path);
     if (!existed) await this.stampNew(target, owner, false);
     if (!existed && content.length === 0) return;
+    let writable: FileSystemWritableFileStream | undefined;
     try {
-      const writable = await file.createWritable();
+      writable = await file.createWritable();
       await writable.write(content as FileSystemWriteChunkType);
       await writable.close();
     } catch (err) {
+      await writable?.abort().catch(() => undefined);
       throw translate(err, path, 'commit', false);
     }
   }
