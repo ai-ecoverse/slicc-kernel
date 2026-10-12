@@ -390,6 +390,29 @@ function processOptions(
   };
 }
 
+function threadInit(
+  opts: SpawnWasmOptions,
+  program: WasmThreadInitMsg['program'],
+  sab: SharedArrayBuffer,
+  cred: WasmProcess['cred'],
+  thread: WasmThread
+): WasmThreadInitMsg {
+  return {
+    type: WASM_THREAD_INIT,
+    pid: opts.shownPid ?? opts.pid,
+    program,
+    argv0: opts.argv0,
+    args: opts.args,
+    env: opts.env,
+    cwd: opts.cwd,
+    sab,
+    cred: copyCred(cred),
+    owners: opts.owners === true,
+    ...(opts.ppid !== undefined ? { ppid: opts.ppid } : {}),
+    thread,
+  };
+}
+
 export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
   const sab = new SharedArrayBuffer(SAB_HEADER_BYTES + SAB_DEFAULT_WINDOW_BYTES);
   const header = new Int32Array(sab, 0, SAB_HEADER_I32);
@@ -518,21 +541,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
       tresponder.dispose();
       tw.terminate();
     });
-    const tinit: WasmThreadInitMsg = {
-      type: WASM_THREAD_INIT,
-      pid: opts.shownPid ?? opts.pid,
-      program,
-      argv0: opts.argv0,
-      args: opts.args,
-      env: opts.env,
-      cwd: opts.cwd,
-      sab: tsab,
-      cred: copyCred(process.cred),
-      owners: opts.owners === true,
-      ...(opts.ppid !== undefined ? { ppid: opts.ppid } : {}),
-      thread,
-    };
-    tw.postMessage(tinit);
+    tw.postMessage(threadInit(opts, program, tsab, process.cred, thread));
   };
 
   worker.postMessage(
