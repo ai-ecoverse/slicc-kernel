@@ -620,6 +620,7 @@ export class WasiFds {
     let kind: KernelFdKind;
     if (path === SEALED_PATH && openSealed) {
       if (oflags & OFLAGS.DIRECTORY) throw new WasiError('ENOTDIR');
+      if (oflags & OFLAGS.CREAT && oflags & OFLAGS.EXCL) throw new WasiError('EEXIST');
       fd = openSealed.call(this.kernel.sys);
       kind = 'sealed';
     } else if (path === '/dev/tty' || /^\/dev\/tty\d+$/.test(path)) {

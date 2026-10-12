@@ -253,7 +253,9 @@ export class WasiHost {
     const fdOwned = (fd: number): { uid?: number; gid?: number } | undefined => {
       const e = fds.get(fd);
       if (e.type === 'device') return ROOT_IDS;
-      if (e.type === 'kernel' && fds.kind(fd, e) !== 'file') return undefined;
+      const kind = e.type === 'kernel' ? fds.kind(fd, e) : 'file';
+      if (kind === 'sealed') return ROOT_IDS;
+      if (kind !== 'file') return undefined;
       try {
         return this.o.fs.stat(pathOf(fd));
       } catch (err) {
