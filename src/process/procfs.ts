@@ -63,8 +63,8 @@ export function pidStat(info: ProcessInfo, boot: number): string {
     0,
     0,
     0,
-    0,
-    0,
+    ticks(info.utime ?? 0),
+    ticks(info.stime ?? 0),
     0,
     0,
     20,
@@ -173,12 +173,19 @@ export function systemFile(
   const live = listing.processes.filter((p) => p.state !== 'Z');
   if (name === 'loadavg') {
     const last = Math.max(0, ...listing.processes.map((p) => p.pid));
-    return `0.00 0.00 0.00 1/${live.length} ${last}\n`;
+    const [one, five, fifteen] = (listing.load ?? [0, 0, 0]).map((n) => n.toFixed(2));
+    return `${one} ${five} ${fifteen} 1/${live.length} ${last}\n`;
   }
-  const idle = ticks(now - listing.boot);
+  const sum = (key: 'utime' | 'stime') =>
+    listing.cpu?.[key] ?? listing.processes.reduce((n, p) => n + (p[key] ?? 0), 0);
+  const user = ticks(sum('utime'));
+  const system = ticks(sum('stime'));
+  const idle = listing.cpu
+    ? ticks(listing.cpu.idle)
+    : Math.max(0, ticks(now - listing.boot) - user - system);
   return [
-    `cpu  0 0 0 ${idle} 0 0 0 0 0 0`,
-    `cpu0 0 0 0 ${idle} 0 0 0 0 0 0`,
+    `cpu  ${user} 0 ${system} ${idle} 0 0 0 0 0 0`,
+    `cpu0 ${user} 0 ${system} ${idle} 0 0 0 0 0 0`,
     'intr 0',
     'ctxt 0',
     `btime ${Math.floor(listing.boot / 1000)}`,

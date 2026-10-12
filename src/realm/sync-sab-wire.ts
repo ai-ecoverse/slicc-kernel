@@ -2,7 +2,9 @@ import type { WasmSyscall } from '../kernel/process.ts';
 import type { SyncFsRequest, SyncFsResult } from './sync-fs-wire.ts';
 
 export const SAB_HEADER_I32 = 16;
-export const SAB_HEADER_BYTES = SAB_HEADER_I32 * 4;
+export const SAB_CLOCK_OFFSET = SAB_HEADER_I32 * 4;
+export const SAB_CLOCK_I64 = 3;
+export const SAB_HEADER_BYTES = SAB_CLOCK_OFFSET + SAB_CLOCK_I64 * 8;
 
 export const SAB_I_STATE = 0;
 export const SAB_I_SEQ = 1;
