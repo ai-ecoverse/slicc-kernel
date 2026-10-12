@@ -123,7 +123,9 @@ export class CpuClock {
 
   running(): boolean {
     if (this.frozen !== undefined) return false;
-    return this.since === 0 && !localIdle(this.sab, this.now()).waiting;
+    const now = this.now();
+    const busy = this.since === 0 || (this.kind === 'sys' && now - this.since < SYS_CAP_US);
+    return busy && !localIdle(this.sab, now).waiting;
   }
 
   times(): CpuTimes {
