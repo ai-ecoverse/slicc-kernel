@@ -57,6 +57,11 @@ function errorReply(code: string, message: string): object {
   return { v: 1, error: { code, message } };
 }
 
+function withoutVersion(reply: object): object {
+  const { v: _, ...rest } = reply as { v?: unknown };
+  return rest;
+}
+
 function serialized(reply: object): string {
   try {
     return JSON.stringify(reply);
@@ -121,7 +126,7 @@ class SealedChannel {
       .then(
         (reply) =>
           typeof reply === 'object' && reply !== null && !Array.isArray(reply)
-            ? { v: 1, ...reply }
+            ? { v: 1, ...withoutVersion(reply) }
             : errorReply('EIO', 'the vault gave no reply'),
         (err: unknown) => errorReply('EIO', lineOf(err))
       );

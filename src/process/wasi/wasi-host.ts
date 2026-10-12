@@ -136,6 +136,8 @@ function filestatOf(path: string, s: SyncFsBridgeStat): Filestat {
   };
 }
 
+const SEALED_MODE = 0o20666;
+
 function kernelFiletype(kind: string): { filetype: number; seeks: boolean } {
   switch (kind) {
     case 'tty':
@@ -315,12 +317,19 @@ export class WasiHost {
       },
       fd_mode: (fd: number, out: number) => {
         const e = fds.get(fd);
-        const pipe = e.type === 'kernel' && fds.kind(fd, e) === 'stream';
-        const mode = pipe ? S_IFIFO | 0o600 : modeOf(this.o.fs.stat(pathOf(fd)));
+        const kind = e.type === 'kernel' ? fds.kind(fd, e) : undefined;
+        const mode =
+          kind === 'stream'
+            ? S_IFIFO | 0o600
+            : kind === 'sealed'
+              ? SEALED_MODE
+              : modeOf(this.o.fs.stat(pathOf(fd)));
         mem.view().setUint32(out, mode, true);
       },
       path_mode: (dirfd: number, p: number, l: number, flags: number, out: number) => {
         const path = at(dirfd, p, l);
+        if (path === SEALED_PATH && this.o.kernel.sys.openSealed)
+          return void mem.view().setUint32(out, SEALED_MODE, true);
         const st = flags & AT_SYMLINK_NOFOLLOW ? this.o.fs.lstat(path) : this.o.fs.stat(path);
         mem.view().setUint32(out, modeOf(st), true);
       },
