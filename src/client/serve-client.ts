@@ -41,6 +41,7 @@ export interface ClientHost {
   lock?: string;
   signal?: (name: string) => number;
   user?: string | number;
+  tag?: string;
 }
 
 export interface ServedClient {
@@ -212,6 +213,15 @@ async function runAs(l: Launcher, self: Account, requested?: string | number): P
   return target;
 }
 
+async function runTagged(
+  l: Launcher,
+  self: Account,
+  requested: string | number | undefined,
+  tag: string | undefined
+): Promise<{ user: Account; tag: string | undefined }> {
+  return { user: await runAs(l, self, requested), tag };
+}
+
 function processes(l: Launcher, self: Account): ProcessEntry[] {
   const viewer = credOf(self);
   return l.list(viewer).map(({ tid: _, cred = viewer, umask: _umask, ...entry }) => ({
@@ -379,7 +389,7 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
   async function terminal(req: Extract<ClientRequest, { op: 'open-terminal' }>, l: Launcher) {
     const session = await l.openTerminal(req.argv, {
       ...req.options,
-      user: await runAs(l, self as Account, req.options.user),
+      ...(await runTagged(l, self as Account, req.options.user, host.tag)),
       onData: (bytes) => reply(req.id, { fd: 1, bytes: bytes.slice() }),
     });
     if (state === 'closed') {
@@ -402,7 +412,7 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
     let leader: number | undefined;
     const result = await l.run(req.argv, {
       ...req.options,
-      user: await runAs(l, self as Account, req.options.user),
+      ...(await runTagged(l, self as Account, req.options.user, host.tag)),
       collect: false,
       onStdout: out(1),
       onStderr: out(2),

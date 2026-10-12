@@ -5,6 +5,7 @@ import type { MountCall } from '../mount/syscall.ts';
 import { inProc, ProcTree, procAlias } from '../process/wasi/wasi-procfs.ts';
 import type { LinkRecord } from '../process/wasi/wasix-linker.ts';
 import type { SyncFsResult } from '../realm/sync-fs-wire.ts';
+import type { SudoCall, SudoResult } from '../sudo.ts';
 import {
   type ChildForker,
   type ChildSpawner,
@@ -176,6 +177,7 @@ export type WasmSyscall =
       continued?: boolean;
     }
   | { op: 'proc-captured'; pid: number; slot: number }
+  | SudoCall
   | { op: 'proc-fork'; state: ForkState; restart?: true }
   | { op: 'proc-kill'; pid: number; sig: number }
   | { op: 'thread-kill'; tid: number; sig: number }
@@ -324,6 +326,7 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'proc-spawn',
   'proc-wait',
   'proc-captured',
+  'proc-sudo',
   'proc-fork',
   'proc-kill',
   'thread-kill',
@@ -360,6 +363,13 @@ const KEYBOARD: ReadonlySet<number> = new Set([SIG.INT, SIG.QUIT, SIG.TSTP]);
 
 export const DEFAULT_UMASK = 0o022;
 
+function words(value: unknown): string[] {
+  if (!Array.isArray(value) || !value.every((w) => typeof w === 'string')) {
+    throw new KernelError('EINVAL');
+  }
+  return [...value];
+}
+
 const DYING: SyncFsResult = { ok: false, errno: 'EINTR', message: 'the process is being killed' };
 
 const HOSTS_ONLY = new Resolver({ routes: new Routes() });
@@ -390,6 +400,8 @@ export interface WasmProcessOptions {
   writesBack?: (pid: number) => boolean;
 
   processes?: () => ProcessListing;
+
+  sudo?: (call: SudoCall, signal: AbortSignal) => Promise<SudoResult>;
 
   openFiles?: Set<VfsNodes>;
 
@@ -1247,7 +1259,26 @@ export class WasmProcess {
         return { ok: true, kind: 'void' };
       case 'proc-captured':
         return { ok: true, kind: 'bytes', bytes: this.children.captured(req.pid, req.slot) };
+      case 'proc-sudo':
+        return { ok: true, kind: 'json', json: await this.sudo(req, cancelled) };
     }
+  }
+
+  private async sudo(req: SudoCall, cancelled: AbortSignal): Promise<unknown> {
+    const { sudo } = this.options;
+    if (!sudo) throw new KernelError('ENOSYS');
+    const call: SudoCall = {
+      op: 'proc-sudo',
+      args: words(req.args),
+      cwd: typeof req.cwd === 'string' && req.cwd.startsWith('/') ? req.cwd : '/',
+      ...(typeof req.term === 'string' ? { term: req.term } : {}),
+    };
+    const answer = await sudo(call, this.blockingSignal(cancelled));
+    if (!('grant' in answer)) return answer;
+    if (this.dying) throw new KernelError('EINTR');
+    const { file, argv, env, cwd, cred } = answer.grant;
+    const stdio = [{ fd: 0 }, { fd: 1 }, { fd: 2 }];
+    return { pid: await this.children.spawn({ file, argv, env, cwd }, stdio, [], { cred }) };
   }
 
   private async mountSyscall(

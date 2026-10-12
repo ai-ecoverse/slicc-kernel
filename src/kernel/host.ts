@@ -95,6 +95,7 @@ export interface SpawnWasmOptions {
   kill?: (pid: number, sig: number) => boolean | Promise<boolean>;
   writesBack?: (pid: number) => boolean;
   processes?: () => ProcessListing;
+  sudo?: WasmProcessOptions['sudo'];
   openFiles?: Set<VfsNodes>;
   nodes?: VfsNodes;
   statfs?: (path: string) => Promise<{ quota: number; usage: number } | undefined>;
@@ -356,6 +357,7 @@ function processOptions(
     kill: opts.kill,
     ...(opts.writesBack ? { writesBack: opts.writesBack } : {}),
     processes: opts.processes,
+    ...(opts.sudo ? { sudo: opts.sudo } : {}),
     openFiles: opts.openFiles,
     ...(opts.nodes ? { nodes: opts.nodes } : {}),
     mounts: opts.mounts,

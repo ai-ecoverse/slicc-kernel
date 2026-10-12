@@ -19,12 +19,14 @@ import {
   type RunOptions,
   type TerminalOptions,
   type TerminalSession,
+  tagOption,
 } from './launcher.ts';
 import type { MediumHandle } from './mount/fsa.ts';
 import type { HostfsGrant, HostfsGrantHook, HostfsPortGrant } from './mount/hostfs.ts';
 import type { MediaStore } from './mount/media.ts';
 import type { MountSpec } from './mount/mount-fs.ts';
 import type { ProcessMountRequest } from './mount/syscall.ts';
+import type { ApproveHook, SudoAnswer } from './sudo.ts';
 import type { AddUser, RemoveUser } from './users.ts';
 
 export interface KernelPort {
@@ -47,6 +49,7 @@ export interface InitRequest {
   hostname?: string;
   users?: UsersMode;
   denials?: boolean;
+  approve?: boolean;
   processMounts?: boolean | 'ask';
   cdp?: boolean;
 }
@@ -77,6 +80,7 @@ export interface ConnectRequest {
   id: number;
   op: 'connect';
   user?: string | number;
+  tag?: string;
 }
 
 export type UsersRequest =
@@ -197,12 +201,54 @@ function remotes(
   };
 }
 
+function dial(l: Launcher, req: DialRequest): MessagePort {
+  const socket = dialSocket(l.net, req.port, req.host);
+  const { port1, port2 } = new MessageChannel();
+  serveSocket(socket, port1);
+  return port2;
+}
+
+interface SudoApprovals {
+  ask: ApproveHook;
+  answer(reply: { id: string; answer: SudoAnswer }): void;
+}
+
+function sudoApprovals(port: KernelPort): SudoApprovals {
+  const waiting = new Map<string, (answer: SudoAnswer) => void>();
+  return {
+    ask: (req, { signal }) =>
+      new Promise<SudoAnswer>((resolve) => {
+        waiting.set(req.id, resolve);
+        signal.addEventListener(
+          'abort',
+          () => {
+            waiting.delete(req.id);
+            port.postMessage({ sudoAbort: { id: req.id, reason: String(signal.reason) } });
+            resolve('deny');
+          },
+          { once: true }
+        );
+        port.postMessage({ sudoAsk: req });
+      }),
+    answer({ id, answer }) {
+      waiting.get(id)?.(answer);
+      waiting.delete(id);
+    },
+  };
+}
+
 function answered(
-  data: { net?: unknown; uplink?: unknown },
+  data: {
+    net?: unknown;
+    uplink?: unknown;
+    sudoAnswer?: { id: string; answer: SudoAnswer };
+  },
   remote: RemoteTransport | undefined,
-  uplink: RemoteUplink | undefined
+  uplink: RemoteUplink | undefined,
+  approvals: SudoApprovals
 ): boolean {
-  if (data.net !== undefined) remote?.receive(data as TransportReply);
+  if (data.sudoAnswer) approvals.answer(data.sudoAnswer);
+  else if (data.net !== undefined) remote?.receive(data as TransportReply);
   else if (typeof data.uplink === 'string') uplink?.receive(data as UplinkReply);
   else return false;
   return true;
@@ -263,7 +309,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
   const reply = (id: number, body: object, transfer?: Transferable[]) =>
     port.postMessage({ id, ...body }, transfer);
   const clients = new Set<ServedClient>();
-
+  const approvals = sudoApprovals(port);
   const locks = deps.locks === null ? undefined : (deps.locks ?? locksOf());
   let holding: Promise<string> | undefined;
 
@@ -278,8 +324,9 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
     return holding;
   }
 
-  async function connect(user: string | number | undefined): Promise<MessagePort> {
+  async function connect(user: string | number | undefined, tag?: string): Promise<MessagePort> {
     const l = await ready();
+    tagOption(tag);
     if (user !== undefined && !(await l.users.lookup(user))) {
       throw fsError('ENOENT', `no user ${String(user)}`);
     }
@@ -289,18 +336,12 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
       launcher: ready,
       signal: signalNumber,
       ...(user !== undefined ? { user } : {}),
+      ...(tag !== undefined ? { tag } : {}),
       ...(locks ? { locks } : {}),
       ...(held ? { lock: held } : {}),
     });
     clients.add(served);
     void served.closed.then(() => clients.delete(served));
-    return port2;
-  }
-
-  async function dial(req: DialRequest): Promise<MessagePort> {
-    const socket = dialSocket((await ready()).net, req.port, req.host);
-    const { port1, port2 } = new MessageChannel();
-    serveSocket(socket, port1);
     return port2;
   }
 
@@ -337,6 +378,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
         ...(req.modules ? { modules: req.modules } : {}),
         ...(req.env ? { env: req.env } : {}),
         ...hostOptions(req, port),
+        ...(req.approve ? { approve: approvals.ask } : {}),
         ...net,
         ...(media ? { media } : {}),
         onMountPending: (medium) => port.postMessage({ medium }),
@@ -363,13 +405,13 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
   async function handle(req: KernelRequest): Promise<unknown> {
     if (req.op === 'init') return init(req);
     if (req.op === 'open-terminal') return terminal(req);
-    if (req.op === 'connect') return connect(req.user);
+    if (req.op === 'connect') return connect(req.user, req.tag);
     if (isUsersRequest(req)) return usersOp(await ready(), req);
     if (req.op === 'routes') {
       (await ready()).setRoutes(req.routes);
       return true;
     }
-    if (req.op === 'dial') return dial(req);
+    if (req.op === 'dial') return dial(await ready(), req);
     if (req.op === 'mount' || req.op === 'umount' || req.op === 'mounts' || req.op === 'insert')
       return mountOp(req);
     if (req.op === 'terminal') {
@@ -423,7 +465,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
       policies.delete(answer.id);
       return;
     }
-    if (answered(event.data, remote, uplink)) return;
+    if (answered(event.data, remote, uplink, approvals)) return;
     const req = event.data as KernelRequest;
     handle(req).then(
       (result) => reply(req.id, { result }, result instanceof MessagePort ? [result] : undefined),

@@ -88,6 +88,7 @@ export interface JsProgramContext {
   spawn(options: JsSpawnOptions): Promise<JsChild>;
   wait(pid: number): Promise<JsExited>;
   kill(pid: number, signal?: JsSignal): Promise<void>;
+  sudo(args: readonly string[]): Promise<JsSudoAnswer>;
   net: JsNet;
   websocket(url: string | URL, options?: JsWebSocketOptions): Promise<JsWebSocket>;
   tty: JsTty;
@@ -96,6 +97,12 @@ export interface JsProgramContext {
   onUncaught(listener: JsStrayListener): () => void;
   onUnhandledRejection(listener: JsStrayListener): () => void;
 }
+
+export type JsSudoAnswer =
+  | { error: string; errno: string }
+  | { list: string }
+  | { run: string[] }
+  | { pid: number };
 
 export type JsStrayListener = (error: unknown, promise?: Promise<unknown>) => void;
 
@@ -327,6 +334,13 @@ export function createContext(o: ContextOptions): CreatedContext {
     },
     sync,
     fetch: fetchOp(kernel),
+    sudo: async (args) =>
+      (await kernel.json({
+        op: 'proc-sudo',
+        args: [...args],
+        cwd: o.cwd,
+        ...(o.env.TERM !== undefined ? { term: o.env.TERM } : {}),
+      })) as JsSudoAnswer,
     ...children,
     net: netOps(kernel, io),
     websocket: websocketOp(kernel),

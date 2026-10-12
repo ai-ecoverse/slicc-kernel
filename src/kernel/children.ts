@@ -1,3 +1,4 @@
+import type { Cred } from './cred.ts';
 import {
   bytesSource,
   type DeviceMeta,
@@ -62,7 +63,15 @@ export class SpawnError extends Error {
   }
 }
 
-export type ChildSpawner = (req: ChildSpawnRequest, fds: FdTable) => Promise<ChildHandle>;
+export interface SpawnGrant {
+  cred: Cred;
+}
+
+export type ChildSpawner = (
+  req: ChildSpawnRequest,
+  fds: FdTable,
+  grant?: SpawnGrant
+) => Promise<ChildHandle>;
 
 export type ChildForker = (state: ForkState, fds: FdTable) => Promise<ChildHandle>;
 
@@ -153,9 +162,11 @@ export class ChildTable {
   async spawn(
     req: ChildSpawnRequest,
     stdio: readonly ChildStdio[],
-    inherit: readonly InheritedSlot[] = []
+    inherit: readonly InheritedSlot[] = [],
+    grant?: SpawnGrant
   ): Promise<number> {
-    if (!this.spawner) throw new SpawnError('ENOSYS');
+    const { spawner } = this;
+    if (!spawner) throw new SpawnError('ENOSYS');
     const fds = new FdTable();
     const captured = new Map<number, Uint8Array[]>();
     try {
@@ -174,7 +185,7 @@ export class ChildTable {
       await fds.closeAll();
       throw e;
     }
-    return this.track(req, fds, captured, this.spawner);
+    return this.track(req, fds, captured, (r, f) => spawner(r, f, grant));
   }
 
   private async track<R>(
