@@ -1,5 +1,6 @@
 import { hostnameOf, hostsFile } from '../kernel/net/loopback-names.ts';
 import type { MountLine } from '../kernel/proc-info.ts';
+import { type LiveFsNode, liveNodePath } from '../realm/live-vfs-fs.ts';
 import type { ProcessFs, ProcessStream, ProcessSys } from './kernel-streams.ts';
 import { type PtyKernel, ptyIoctl } from './process-pty.ts';
 import { wasiErrno } from './wasi-errno.ts';
@@ -279,10 +280,36 @@ export function kernelUmask(imports: WebAssembly.Imports, deps: UmaskDeps): void
   }
 }
 
+const UTIME_NOW = 0x3fffffff;
+const UTIME_OMIT = 0x3ffffffe;
+
+function touching(times: number, memory: WebAssembly.Memory | undefined): boolean {
+  if (times === 0) return true;
+  if (!memory) return false;
+  const heap = new Int32Array(memory.buffer);
+  const nsec = [heap[(times + 8) >> 2], heap[(times + 24) >> 2]];
+  return nsec.every((n) => n === UTIME_NOW || n === UTIME_OMIT);
+}
+
+function touch<T>(Fs: TouchFs | undefined, on: boolean, run: () => T): T {
+  if (!Fs || !on) return run();
+  Fs.sliccTouch = true;
+  try {
+    return run();
+  } finally {
+    Fs.sliccTouch = undefined;
+  }
+}
+
+interface TouchFs {
+  sliccTouch?: boolean;
+}
+
 export function noFollowUtimes(
   imports: WebAssembly.Imports,
   fs: () => ProcessFs | undefined,
-  glue?: unknown
+  glue?: unknown,
+  memory: () => WebAssembly.Memory | undefined = () => undefined
 ): void {
   for (const namespace of namespaces(imports)) {
     const key = Object.keys(namespace).find(
@@ -291,10 +318,11 @@ export function noFollowUtimes(
     const utimensat = key === undefined ? undefined : namespace[key];
     if (key === undefined || typeof utimensat !== 'function') continue;
     namespace[key] = (dirfd: number, path: number, times: number, flags: number) => {
-      const Fs = fs() as UtimeFs | undefined;
+      const Fs = fs() as (UtimeFs & TouchFs) | undefined;
+      const on = touching(times, memory());
       const { utime, lookupPath, ErrnoError } = Fs ?? {};
       if (!Fs || !(flags & AT_SYMLINK_NOFOLLOW) || !utime || !lookupPath || !ErrnoError) {
-        return utimensat(dirfd, path, times, flags);
+        return touch(Fs, on, () => utimensat(dirfd, path, times, flags));
       }
       Fs.utime = (at, atime, mtime) => {
         const { node } = lookupPath.call(Fs, at, { follow: false });
@@ -302,7 +330,7 @@ export function noFollowUtimes(
         node.node_ops.setattr(node, { atime, mtime });
       };
       try {
-        return utimensat(dirfd, path, times, flags);
+        return touch(Fs, on, () => utimensat(dirfd, path, times, flags));
       } finally {
         Fs.utime = utime;
       }
@@ -746,4 +774,85 @@ export function useMounts(Fs: ProcessFs, env: Record<string, string> = {}, live 
       return open(instead, flags, mode);
     }
   };
+}
+
+const AT_FDCWD = -100;
+const AT_EACCESS = 0x200;
+
+interface AccessFs {
+  lookupPath?(path: string, opts: { follow: boolean }): { node: LiveFsNode };
+  cwd?(): string;
+  getStream?(fd: number): { path?: string } | null | undefined;
+}
+
+function cString(memory: WebAssembly.Memory, at: number): string {
+  const bytes = new Uint8Array(memory.buffer, at);
+  return new TextDecoder().decode(bytes.subarray(0, bytes.indexOf(0)));
+}
+
+function baseOf(Fs: AccessFs, dirfd: number): string {
+  return dirfd === AT_FDCWD ? (Fs.cwd?.() ?? '/') : (Fs.getStream?.(dirfd)?.path ?? '/');
+}
+
+function kernelChecks(
+  Fs: AccessFs,
+  memory: WebAssembly.Memory,
+  call: { dirfd: number; path: number; amode: number; flags: number }
+): number {
+  const name = cString(memory, call.path);
+  const abs = name.startsWith('/') ? name : `${baseOf(Fs, call.dirfd)}/${name}`;
+  const lookupPath = Fs.lookupPath as NonNullable<AccessFs['lookupPath']>;
+  const { node } = lookupPath.call(Fs, abs, { follow: (call.flags & AT_SYMLINK_NOFOLLOW) === 0 });
+  const bridge = node.live ? node.mount.opts.bridge : undefined;
+  if (!bridge?.owners || !bridge.access) return 0;
+  const kind = call.flags & AT_EACCESS ? 'eaccess' : 'access';
+  bridge.access(liveNodePath(node), call.amode, kind, (call.flags & AT_SYMLINK_NOFOLLOW) !== 0);
+  return 0;
+}
+
+export function kernelAccess(
+  imports: WebAssembly.Imports,
+  fs: () => ProcessFs | undefined,
+  memory: () => WebAssembly.Memory | undefined
+): void {
+  for (const ns of namespaces(imports)) {
+    const own = ns.__syscall_faccessat as Syscall | undefined;
+    if (typeof own !== 'function') continue;
+    ns.__syscall_faccessat = (dirfd: number, path: number, amode: number, flags: number) => {
+      const rc = own(dirfd, path, amode, flags);
+      const Fs = fs() as AccessFs | undefined;
+      const heap = memory();
+      if (rc !== 0 || (amode & 7) === 0 || !Fs?.lookupPath || !heap) return rc;
+      try {
+        return kernelChecks(Fs, heap, { dirfd, path, amode: amode & 7, flags });
+      } catch (err) {
+        return -errnoOf(err);
+      }
+    };
+  }
+}
+
+const DEVICE_MODES: ReadonlyArray<[string, number]> = [
+  ['/dev', 0o755],
+  ['/dev/null', 0o666],
+  ['/dev/zero', 0o666],
+  ['/dev/full', 0o666],
+  ['/dev/random', 0o666],
+  ['/dev/urandom', 0o666],
+  ['/dev/tty', 0o666],
+  ['/dev/shm', 0o1777],
+];
+
+interface ChmodFs {
+  chmod?(path: string, mode: number): void;
+}
+
+export function linuxDevices(Fs: ProcessFs): void {
+  const { chmod } = Fs as unknown as ChmodFs;
+  if (!chmod) return;
+  for (const [path, mode] of DEVICE_MODES) {
+    try {
+      chmod.call(Fs, path, mode);
+    } catch {}
+  }
 }

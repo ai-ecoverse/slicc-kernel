@@ -252,15 +252,15 @@ export function createSyncFsSabBridge(
     chmod: (path, mode) => {
       changing({ op: 'chmod', path, mode }, path);
     },
-    utimes: (path, atimeMs, mtimeMs) => {
-      changing({ op: 'utimes', path, atimeMs, mtimeMs }, path);
+    utimes: (path, atimeMs, mtimeMs, now) => {
+      changing({ op: 'utimes', path, atimeMs, mtimeMs, ...(now ? { now } : {}) }, path);
     },
     identify: () => {
       identity = { identity: true };
     },
     identified: () => last,
-    lutimes: (path, atimeMs, mtimeMs) => {
-      run({ op: 'lutimes', path, atimeMs, mtimeMs }, path);
+    lutimes: (path, atimeMs, mtimeMs, now) => {
+      run({ op: 'lutimes', path, atimeMs, mtimeMs, ...(now ? { now } : {}) }, path);
     },
     create: (path, mode) => {
       run({ op: 'create', path, ...(mode !== undefined ? { mode } : {}) }, path);
@@ -270,9 +270,12 @@ export function createSyncFsSabBridge(
       changing({ op: follow ? 'chown' : 'lchown', path, ...ids }, path);
     },
     ...(opts.owners ? { owners: true } : {}),
-    hold: (path, held, open, handle) => {
+    access: (path, mode, kind = 'access', nofollow) => {
+      run({ op: 'access', path, mode, arg2: kind, ...(nofollow ? { nofollow } : {}) }, path);
+    },
+    hold: (path, held, open, handle, want = 0) => {
       const mode = (held ? 1 : 0) | (open ? 2 : 0);
-      if (mode === 3) return json({ op: 'hold', path, mode }, path) as number;
+      if (mode === 3) return json({ op: 'hold', path, mode: mode | want }, path) as number;
       run({ op: 'hold', path, mode, ...(handle !== undefined ? { handle } : {}) }, path);
       return undefined;
     },

@@ -26,7 +26,14 @@ export const SYNC_FS_OPS = [
   'truncate',
   'chown',
   'lchown',
+  'access',
 ] as const;
+
+export type AccessKind = 'open' | 'access' | 'eaccess';
+
+export const HOLD_READ = 4;
+export const HOLD_WRITE = 8;
+export const HOLD_CREATED = 16;
 
 export type SyncFsOp = (typeof SYNC_FS_OPS)[number];
 
@@ -47,6 +54,8 @@ export interface SyncFsRequest {
   gid?: number;
   exclusive?: boolean;
   identity?: boolean;
+  now?: boolean;
+  nofollow?: boolean;
 }
 
 export type SyncFsResult =
@@ -113,9 +122,16 @@ export interface SyncFsPosixBridge {
   symlink(target: string, linkPath: string): void;
   readlink(path: string): string;
   chmod(path: string, mode: number): void;
-  utimes(path: string, atimeMs: number, mtimeMs: number): void;
-  lutimes(path: string, atimeMs: number, mtimeMs: number): void;
-  hold?(path: string, held: boolean, open?: boolean, handle?: number): number | undefined;
+  utimes(path: string, atimeMs: number, mtimeMs: number, now?: boolean): void;
+  lutimes(path: string, atimeMs: number, mtimeMs: number, now?: boolean): void;
+  hold?(
+    path: string,
+    held: boolean,
+    open?: boolean,
+    handle?: number,
+    want?: number
+  ): number | undefined;
+  access?(path: string, mode: number, kind?: AccessKind, nofollow?: boolean): void;
   create?(path: string, mode?: number): void;
   chown?(path: string, uid: number | undefined, gid: number | undefined, follow?: boolean): void;
   owners?: boolean;

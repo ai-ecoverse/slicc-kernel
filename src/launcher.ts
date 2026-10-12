@@ -11,9 +11,9 @@ import {
   scanCommands,
   scanFilesystems,
 } from './commands.ts';
-
+import { R_OK, X_OK } from './fs/access.ts';
 import { followLinks, withCommandDirs } from './fs/commands.ts';
-import { Dac, type DenialHook } from './fs/dac.ts';
+import { Dac, type DenialHook, need } from './fs/dac.ts';
 import { physicalPathAsync } from './fs/physical-path.ts';
 import type { KernelFs, UsersMode } from './fs/types.ts';
 import { fsError, normalizePath } from './fs/types.ts';
@@ -209,6 +209,7 @@ interface UserScopes {
 interface Planned {
   target: Target;
   args: string[];
+  script?: true;
 }
 
 interface StartRequest {
@@ -648,7 +649,20 @@ export class Launcher {
   ): Promise<Planned | undefined> {
     const direct = await this.resolve(file, argv[0] ?? file, cwd, scope);
     if (direct) return { target: direct, args: [...(direct.prefix ?? []), ...argv.slice(1)] };
-    return this.interpreted(file, argv, cwd, scope);
+    const script = await this.interpreted(file, argv, cwd, scope);
+    return script && { ...script, script: true };
+  }
+
+  private async mayExec(
+    cred: Readonly<Cred>,
+    req: { file: string; cwd: string; pid: number },
+    planned: Planned | undefined
+  ): Promise<void> {
+    const { dac } = this;
+    if (!dac || !req.file.includes('/') || COMMAND.test(req.file)) return;
+    const g = { fs: this.fs, cred, pid: req.pid, dac };
+    const path = this.fs.resolvePath(req.cwd, req.file);
+    await need(g, 'exec', path, planned?.script ? R_OK | X_OK : X_OK);
   }
 
   private async unrunnable(
@@ -888,6 +902,12 @@ export class Launcher {
     return async (req, fds) => {
       const scope = await this.scopeOf(this.credOf(ppid).euid);
       const planned = await this.plan(req.file, req.argv, req.cwd, scope);
+      try {
+        await this.mayExec(this.credOf(ppid), { ...req, pid: ppid }, planned);
+      } catch (err) {
+        await fds.closeAll();
+        throw (err as { code?: unknown }).code === 'EACCES' ? new SpawnError('EACCES') : err;
+      }
       if (!planned) {
         await fds.closeAll();
         throw new SpawnError(await this.unrunnable(req.file, req.cwd, scope));
@@ -1201,6 +1221,7 @@ export class Launcher {
 
   async prepare(): Promise<void> {
     for (const dir of SHARED_DIRS) await this.base.mkdir(dir, { recursive: true });
+    if (this.owners) await this.base.chmod('/tmp', 0o1777);
     await this.users.ensure();
     await writeCaFile(this.base, this.ca).catch(() => undefined);
     this.fstab = this.mountFstab();
@@ -1253,7 +1274,9 @@ export class Launcher {
     const cwd = await physicalPathAsync(this.base, start.startsWith('/') ? start : `/${start}`);
     const [file = ''] = argv;
     await this.base.mkdir(cwd, { recursive: true });
-    return { cwd, file, planned: await this.plan(file, argv, cwd, scope) };
+    const planned = await this.plan(file, argv, cwd, scope);
+    await this.mayExec(credOf(account), { file, cwd, pid: 0 }, planned);
+    return { cwd, file, planned };
   }
 
   async openTerminal(argv: string[], options: TerminalOptions): Promise<TerminalSession> {

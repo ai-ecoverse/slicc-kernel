@@ -1,11 +1,14 @@
 import { RangedFile } from '../fs/ranged.ts';
 import { inodeOf } from '../fs/types.ts';
 import { wasiErrno } from '../process/wasi-errno.ts';
-import type {
-  SyncFsBridgeStat,
-  SyncFsFileIo,
-  SyncFsPosixBridge,
-  SyncFsUsage,
+import {
+  HOLD_CREATED,
+  HOLD_READ,
+  HOLD_WRITE,
+  type SyncFsBridgeStat,
+  type SyncFsFileIo,
+  type SyncFsPosixBridge,
+  type SyncFsUsage,
 } from './sync-fs-wire.ts';
 
 const S_IFDIR = 0o040000;
@@ -42,6 +45,7 @@ interface LiveNodeState {
   ranges?: boolean;
   ranged?: RangedFile;
   handle?: number;
+  created?: boolean;
 }
 
 export interface LiveFsNode {
@@ -141,6 +145,7 @@ export interface LiveFsApi {
   isLink(mode: number): boolean;
   ErrnoError: new (errno: number) => Error & { errno: number };
   closeStream?(fd: number): void;
+  sliccTouch?: boolean;
 
   nameTable?: (LiveFsNode | null)[] | null;
   hashRemoveNode?(node: LiveFsNode): void;
@@ -194,6 +199,25 @@ interface LiveOpsTables {
 }
 
 const EARLY_WHOLE_FILE = 64 * 1024;
+
+const O_ACCMODE = 3;
+const O_TRUNC = 0o1000;
+
+function wantOf(flags: number): number {
+  const mode = flags & O_ACCMODE;
+  const read = mode === 1 ? 0 : HOLD_READ;
+  const write = mode !== 0 || (flags & O_TRUNC) !== 0 ? HOLD_WRITE : 0;
+  return read | write;
+}
+
+function accessOf(want: number): number {
+  return (want & HOLD_READ ? 4 : 0) | (want & HOLD_WRITE ? 2 : 0);
+}
+
+function refusal(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  return code === 'EACCES' || code === 'EPERM';
+}
 
 const stale = (s: LiveNodeState): boolean => !!s.orphan && !s.kept;
 
@@ -460,12 +484,13 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
   const { Fs, bridgeOf, call, metadataCall, makeNode, statOf, childPath, flushNode, truncate } = h;
   const { ensureLoaded } = h;
   const setTimes = (node: LiveFsNode, path: string, atime: number, mtime: number): void => {
+    const now = Fs.sliccTouch === true;
     if (Fs.isLink(node.mode)) {
-      metadataCall(() => bridgeOf(node).lutimes(path, atime, mtime));
+      metadataCall(() => bridgeOf(node).lutimes(path, atime, mtime, now));
       return;
     }
     flushNode(node);
-    metadataCall(() => bridgeOf(node).utimes(path, atime, mtime));
+    metadataCall(() => bridgeOf(node).utimes(path, atime, mtime, now));
   };
   const timesOf = (node: LiveFsNode, attr: LiveSetAttr): [number, number] | undefined => {
     const mtime = toMs(attr.mtime) ?? attr.timestamp;
@@ -557,6 +582,7 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
       });
 
       node.live.stat = undefined;
+      if (Fs.isFile(mode)) node.live.created = true;
       return node;
     },
     rename(oldNode, newDir, newName) {
@@ -632,20 +658,34 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
       } catch {}
     }
   };
-  const opened = (node: LiveFsNode, on: boolean) => {
+  const opened = (node: LiveFsNode, on: boolean, want = 0) => {
     const s = node.live;
     try {
-      const handle = bridgeOf(node).hold?.(liveNodePath(node), on, true, s.handle);
+      const handle = bridgeOf(node).hold?.(liveNodePath(node), on, true, s.handle, want);
       s.handle = on ? handle : undefined;
       h.linked.opening(node, on);
       if (s.handle === undefined) h.handled.delete(node);
       else h.handled.add(node);
-    } catch {}
+    } catch (err) {
+      if (refusal(err)) throw new Fs.ErrnoError(wasiErrno((err as { code: string }).code));
+    }
+  };
+  const permitted = (stream: LiveFsStream, created: boolean): number => {
+    const s = stream.node.live;
+    const bridge = bridgeOf(stream.node);
+    if (!bridge.owners || s.orphan) return 0;
+    const want = wantOf(stream.flags) | (created ? HOLD_CREATED : 0);
+    if (s.openCount > 0 && !created) {
+      h.call(() => bridge.access?.(liveNodePath(stream.node), accessOf(want), 'open'));
+    }
+    return want;
   };
   return {
     open(stream) {
       if (!Fs.isFile(stream.node.mode)) return;
       const s = stream.node.live;
+      const created = s.created === true;
+      s.created = undefined;
       if (s.openCount === 0 && !s.orphan) {
         const bridge = bridgeOf(stream.node);
         s.ranges = !!(
@@ -668,8 +708,18 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
           throw err;
         }
       }
-      stream.node.live.openCount++;
-      if (stream.node.live.openCount === 1) opened(stream.node, true);
+      const live = stream.node.live;
+      let counted = false;
+      try {
+        const want = permitted(stream, created);
+        live.openCount++;
+        counted = true;
+        if (live.openCount === 1) opened(stream.node, true, want);
+      } catch (err) {
+        if (counted) live.openCount--;
+        if (stream.fd !== undefined) Fs.closeStream?.(stream.fd);
+        throw err;
+      }
       held(stream, 1);
     },
 

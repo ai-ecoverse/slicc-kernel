@@ -1,14 +1,20 @@
+import { R_OK, W_OK } from '../fs/access.ts';
 import {
   chmodMode,
+  fileWritable,
   type Guard,
   inParent,
   linkable,
   listable,
   makeIn,
+  need,
+  readable,
+  realIds,
   removable,
   renamable,
   retimable,
   searchable,
+  writable,
 } from '../fs/dac.ts';
 import { chownAs, ownerOf } from '../fs/owners.ts';
 import {
@@ -22,6 +28,9 @@ import {
 } from '../fs/types.ts';
 import { resolveSyncFsToken, type SyncFsTokenEntry } from './sync-fs-token-registry.ts';
 import {
+  HOLD_CREATED,
+  HOLD_READ,
+  HOLD_WRITE,
   type SyncFsOp,
   type SyncFsRequest,
   type SyncFsResult,
@@ -254,10 +263,48 @@ async function guard(g: Guard, path: string, req: SyncFsRequest, cwd: string): P
       return linkable(g, path, other(), req.mode === 1);
     case 'utimes':
     case 'lutimes':
-      return retimable(g, op, path);
+      return retimable(g, op, path, req.now === true);
+    case 'read':
+    case 'pread':
+      return req.handle === undefined ? readable(g, op, path) : undefined;
+    case 'pwrite':
+    case 'truncate':
+      return req.handle === undefined ? fileWritable(g, op, path) : undefined;
+    case 'write':
+      return req.handle === undefined && req.mode !== 1 ? writable(g, op, path) : undefined;
     default:
       return undefined;
   }
+}
+
+async function opening(entry: SyncFsTokenEntry, path: string, mode: number): Promise<void> {
+  const g = guardOf(entry);
+  const want = (mode & HOLD_READ ? R_OK : 0) | (mode & HOLD_WRITE ? W_OK : 0);
+  if (g && want !== 0 && (mode & HOLD_CREATED) === 0) {
+    await need(g, 'open', path, want, { directory: false });
+  }
+}
+
+async function holdOp(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest) {
+  const mode = req.mode ?? 0;
+  const [on, open] = [(mode & 1) === 1, (mode & 2) === 2];
+  if (on && open) {
+    await opening(entry, path, mode);
+    const real = await entry.fs.realpath?.(path, true).catch(() => path);
+    return json(entry.hold?.(path, on, open, real) ?? null);
+  }
+  entry.hold?.(path, on, open, undefined, req.handle);
+  return done;
+}
+
+async function accessOp(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest) {
+  const g = guardOf(entry);
+  if (!g) return done;
+  const open = req.arg2 === 'open';
+  const cred = open || req.arg2 === 'eaccess' ? g.cred : realIds(g.cred);
+  const options = { follow: req.nofollow !== true, ...(open ? { directory: false } : {}) };
+  await need({ ...g, cred }, open ? 'open' : 'access', path, req.mode ?? 0, options);
+  return done;
 }
 
 async function guarded(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest) {
@@ -339,17 +386,6 @@ async function owned(
   return own(target, () => run(entry, path, req));
 }
 
-async function holdOp(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest) {
-  const mode = req.mode ?? 0;
-  const [on, open] = [(mode & 1) === 1, (mode & 2) === 2];
-  if (on && open) {
-    const real = await entry.fs.realpath?.(path, true).catch(() => path);
-    return json(entry.hold?.(path, on, open, real) ?? null);
-  }
-  entry.hold?.(path, on, open, undefined, req.handle);
-  return done;
-}
-
 const IDENTITY_OPS = new Set<SyncFsOp>([
   'write',
   'pwrite',
@@ -390,7 +426,8 @@ async function dispatchOne(entry: SyncFsTokenEntry, req: SyncFsRequest): Promise
     const path = fs.resolvePath(cwd, req.path);
     if (req.op === 'kept') return json(entry.keptFor?.(req.handle ?? -1) !== undefined);
     if (req.op === 'stat' && req.handle !== undefined) return await keptStat(entry, req);
-    if (req.op === 'hold') return holdOp(entry, path, req);
+    if (req.op === 'access') return await accessOp(entry, path, req);
+    if (req.op === 'hold') return await holdOp(entry, path, req);
     const refused = await guarded(entry, path, req);
     if (refused) return refused;
     if (req.op === 'statfs') return json((await entry.statfs?.(path)) ?? (await storageUsage()));

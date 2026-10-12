@@ -1,6 +1,12 @@
 import type { DeviceAccess, DeviceMeta, HeldMeta, KernelFdKind } from '../../kernel/fd-table.ts';
 import type { FdInfo, WasmSyscall } from '../../kernel/process.ts';
-import type { SyncFsBridgeStat, SyncFsPosixBridge } from '../../realm/sync-fs-wire.ts';
+import {
+  HOLD_CREATED,
+  HOLD_READ,
+  HOLD_WRITE,
+  type SyncFsBridgeStat,
+  type SyncFsPosixBridge,
+} from '../../realm/sync-fs-wire.ts';
 import type { ProcessSys } from '../kernel-streams.ts';
 import { FDFLAGS, OFLAGS, RIGHTS } from './wasi-abi.ts';
 import {
@@ -688,24 +694,38 @@ export class WasiFds {
       buffer = undefined;
     }
     buffer ??= this.sharing(path, existing);
+    const want = wantOf(oflags, rights);
     if (buffer) {
+      if (this.fs.owners) this.fs.access?.(path, want, 'open');
       if (oflags & OFLAGS.TRUNC) buffer.truncate(0);
     } else {
-      const made = !existing && this.createNew(path, oflags);
-      const empty = made || (oflags & OFLAGS.TRUNC) !== 0;
-      if (existing?.ranged) (this.fs as { invalidate?(): void }).invalidate?.();
-      const st = existing?.ranged || !existing ? this.fs.stat(path) : existing;
-      const ranged = st.ranged ? st.size : undefined;
-      const handle = this.fs.hold?.(path, true, true);
-      const io = handle !== undefined && this.fs.pinned ? this.fs.pinned(handle) : this.fs;
-      buffer = new FileBuffer(io, path, empty, st.maxFile, ranged, st.version);
-      buffer.handle = handle;
-      this.buffers.set(path, buffer);
-      const id = this.identity(st);
-      if (id !== undefined) this.know(buffer, id);
+      buffer = this.freshBuffer(path, existing, oflags, want);
     }
     buffer.opens++;
     return new LocalFile(buffer, readable, writable, (fdflags & FDFLAGS.APPEND) !== 0);
+  }
+
+  private freshBuffer(
+    path: string,
+    existing: SyncFsBridgeStat | undefined,
+    oflags: number,
+    want: number
+  ): FileBuffer {
+    const made = !existing && this.createNew(path, oflags);
+    const empty = made || (oflags & OFLAGS.TRUNC) !== 0;
+    if (existing?.ranged) (this.fs as { invalidate?(): void }).invalidate?.();
+    const st = existing?.ranged || !existing ? this.fs.stat(path) : existing;
+    const ranged = st.ranged ? st.size : undefined;
+    const asked =
+      (want & 4 ? HOLD_READ : 0) | (want & 2 ? HOLD_WRITE : 0) | (made ? HOLD_CREATED : 0);
+    const handle = this.fs.hold?.(path, true, true, undefined, this.fs.owners ? asked : 0);
+    const io = handle !== undefined && this.fs.pinned ? this.fs.pinned(handle) : this.fs;
+    const buffer = new FileBuffer(io, path, empty, st.maxFile, ranged, st.version);
+    buffer.handle = handle;
+    this.buffers.set(path, buffer);
+    const id = this.identity(st);
+    if (id !== undefined) this.know(buffer, id);
+    return buffer;
   }
 
   private kernelFile(
@@ -815,6 +835,12 @@ function entryOf(info: FdInfo): WasiEntry | undefined {
     nonblock: ((info.flags ?? 0) & O_NONBLOCK) !== 0,
     append: ((info.flags ?? 0) & O_APPEND) !== 0,
   };
+}
+
+function wantOf(oflags: number, rights: bigint): number {
+  const write = (rights & RIGHTS.FD_WRITE) !== 0n || (oflags & OFLAGS.TRUNC) !== 0;
+  const read = (rights & RIGHTS.FD_READ) !== 0n || !write;
+  return (read ? 4 : 0) | (write ? 2 : 0);
 }
 
 function openAccess(

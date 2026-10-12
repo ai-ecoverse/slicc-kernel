@@ -124,6 +124,20 @@ export interface AccessOptions {
   directory?: boolean;
 }
 
+async function finalOf(
+  fs: KernelFs,
+  walked: Walked,
+  want: number,
+  options: AccessOptions
+): Promise<[Perm, boolean]> {
+  const perm = walked.perm as Perm;
+  if ((want & X_OK) === 0 || options.directory !== undefined) {
+    return [perm, options.directory !== false];
+  }
+  const st = await fs.stat(walked.path).catch(() => undefined);
+  return st ? [permOf(st), st.isDirectory] : [perm, false];
+}
+
 export async function access(
   fs: KernelFs,
   cred: Readonly<Cred>,
@@ -136,9 +150,9 @@ export async function access(
     if (await present(fs, walked.denied, true)) return walked;
     return { path, perm: undefined, missing: true };
   }
-  const { perm } = walked;
-  if (!perm) return { ...walked, missing: true };
-  if (want === 0 || permits(cred, perm, want, options.directory !== false)) return walked;
+  if (!walked.perm) return { ...walked, missing: true };
+  const [perm, directory] = await finalOf(fs, walked, want, options);
+  if (want === 0 || permits(cred, perm, want, directory)) return walked;
   if (await present(fs, walked.path, false)) return { ...walked, denied: walked.path };
   return { ...walked, missing: true };
 }

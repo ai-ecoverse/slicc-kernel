@@ -345,6 +345,7 @@ function processOptions(
   return {
     ...inherited(opts),
     ...(opts.owners ? { owners: true } : {}),
+    ...(opts.dac ? { guard: { dac: opts.dac, fs: opts.fs } } : {}),
     ...(opts.identity ? { identity: opts.identity } : {}),
     ...(opts.onSyscall ? { onSyscall: opts.onSyscall } : {}),
     ...(opts.settling ? { settling: opts.settling } : {}),

@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
-import { readdir, readFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
+import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -221,6 +223,56 @@ test('a command pnpm installs globally runs in the same shell, and is gone once 
   await until('removed 127');
   term.close();
   assert.equal(await term.exited, 129);
+});
+
+async function localPackage() {
+  const dir = await mkdtemp(join(tmpdir(), 'slicc-pkg-'));
+  await mkdir(join(dir, 'package', 'bin'), { recursive: true });
+  const manifest = {
+    name: 'k3-tool',
+    version: '1.0.0',
+    slicc: { abi: 'js', commands: { k3tool: { module: 'bin/tool.mjs' } } },
+  };
+  await writeFile(join(dir, 'package', 'package.json'), JSON.stringify(manifest));
+  await writeFile(
+    join(dir, 'package', 'bin', 'tool.mjs'),
+    'export default async function main(ctx) { await ctx.write(1, "tool ran\\n"); return 0; }\n'
+  );
+  execFileSync('tar', ['czf', join(dir, 'k3-tool.tgz'), '-C', dir, 'package']);
+  const bytes = await readFile(join(dir, 'k3-tool.tgz'));
+  await rm(dir, { recursive: true, force: true });
+  return bytes;
+}
+
+test('pnpm installs globally as root and as a user with users off, report and enforce', async (t) => {
+  const tarball = await localPackage();
+  for (const users of ['off', 'report', 'enforce']) {
+    await t.test(users, async () => {
+      const kernel = await createNodeKernel({ users, network: { transport: nodeTransport() } });
+      try {
+        for (const name of ['wasm-bash', 'wasm-coreutils', 'wasm-tls-engine', 'wasi-pnpm']) {
+          await install(kernel, name);
+        }
+        await kernel.writeFile('/tmp/pk/k3-tool.tgz', tarball);
+        await kernel.users.add({ name: 'cone' });
+        const owned = users === 'off' ? '' : '; stat -c "%U" "$PNPM_HOME"';
+        const script = `pnpm add -g /tmp/pk/k3-tool.tgz >/dev/null 2>&1; echo "rc=$?"; k3tool${owned}`;
+        for (const [user, owner] of [
+          [undefined, 'root'],
+          ['cone', 'cone'],
+        ]) {
+          const r = await kernel.run(
+            ['bash', '-c', script],
+            user ? { user, cwd: '/home/cone' } : { cwd: '/root' }
+          );
+          const shown = users === 'off' ? '' : `${owner}\n`;
+          assert.equal(r.stdout, `rc=0\ntool ran\n${shown}`, `${users} ${owner}: ${r.stderr}`);
+        }
+      } finally {
+        kernel.terminate();
+      }
+    });
+  }
 });
 
 test('a WASI process killed by SIGKILL keeps the bytes it wrote but never fsynced', async () => {
