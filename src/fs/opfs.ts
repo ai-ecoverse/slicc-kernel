@@ -1,5 +1,6 @@
 import { MemoryMeta, type MetaEntry, type MetaStore } from './meta.ts';
 import { chain, inherit, ownOf, ROOT_OWNER, sameOwner } from './owners.ts';
+import { PathMap } from './path-map.ts';
 import {
   type FsStat,
   fsError,
@@ -197,7 +198,7 @@ function isHandle(child: Handle | MetaEntry): child is Handle {
 export class OpfsFs implements KernelFs {
   private readonly root: FileSystemDirectoryHandle;
   private readonly meta: MetaStore;
-  private readonly dirs = new Map<string, FileSystemDirectoryHandle>();
+  private readonly dirs = new PathMap<FileSystemDirectoryHandle>();
   private readonly checked = new WeakMap<FileSystemDirectoryHandle, number>();
 
   private readonly channel: BroadcastChannel | undefined;
@@ -371,7 +372,7 @@ export class OpfsFs implements KernelFs {
   }
 
   private forget(path: string): void {
-    for (const key of [...this.dirs.keys()]) if (within(key, path)) this.dirs.delete(key);
+    this.dirs.deleteTree(path);
   }
 
   private async inDir<T>(path: string, op: (dir: FileSystemDirectoryHandle) => Promise<T>) {
