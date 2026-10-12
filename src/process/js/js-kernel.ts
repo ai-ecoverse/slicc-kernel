@@ -41,6 +41,12 @@ export interface JsKernelOptions {
   onError: (err: unknown) => void;
 }
 
+function caughtOf(handlers: Map<number, SignalHandler>): number {
+  let caught = 0;
+  for (const sig of handlers.keys()) caught |= sigbit(sig);
+  return caught;
+}
+
 export class JsKernel {
   private readonly header: Int32Array;
   private readonly transport: AsyncSabTransport;
@@ -53,6 +59,7 @@ export class JsKernel {
   private reported = { caught: 0, ignored: 0 };
   private watching = false;
   faulted = false;
+  syncLane: ((req: SyncSabRequestBody) => SyncFsResult) | undefined;
 
   constructor(o: JsKernelOptions) {
     this.header = new Int32Array(o.sab, 0, SAB_HEADER_I32);
@@ -175,17 +182,51 @@ export class JsKernel {
     if (sig === SIG.KILL || sig === SIG.STOP) {
       return Promise.reject(new JsCallError('EINVAL', 'signal'));
     }
+    if (this.syncLane) {
+      try {
+        this.changeNow(this.syncLane, sig, handler);
+        return Promise.resolve();
+      } catch (err) {
+        return Promise.reject(err);
+      }
+    }
     const run = this.changing.then(() => this.change(sig, handler));
     this.changing = run.catch(() => undefined);
     return run;
   }
 
-  private async change(sig: number, handler: SignalHandler | 'ignore' | 'default'): Promise<void> {
+  private changeNow(
+    lane: (req: SyncSabRequestBody) => SyncFsResult,
+    sig: number,
+    handler: SignalHandler | 'ignore' | 'default'
+  ): void {
+    const { handlers, ignored } = this.disposed(sig, handler);
+    const defaults = handler === 'default' ? sigbit(sig) : 0;
+    const caught = caughtOf(handlers);
+    if (caught !== this.reported.caught || ignored !== this.reported.ignored || defaults !== 0) {
+      const r = lane({ op: 'sig-mask', caught, ignored, ...(defaults ? { defaults } : {}) });
+      if (!r.ok) throw new JsCallError(r.errno, 'sig-mask');
+      this.reported = { caught, ignored };
+    }
+    this.handlers = handlers;
+    this.ignored = ignored;
+    if (handlers.size > 0) void this.watch();
+  }
+
+  private disposed(
+    sig: number,
+    handler: SignalHandler | 'ignore' | 'default'
+  ): { handlers: Map<number, SignalHandler>; ignored: number } {
     const handlers = new Map(this.handlers);
     handlers.delete(sig);
     let ignored = this.ignored & ~sigbit(sig);
     if (handler === 'ignore') ignored |= sigbit(sig);
     else if (handler !== 'default') handlers.set(sig, handler);
+    return { handlers, ignored };
+  }
+
+  private async change(sig: number, handler: SignalHandler | 'ignore' | 'default'): Promise<void> {
+    const { handlers, ignored } = this.disposed(sig, handler);
     await this.report(handlers, ignored, handler === 'default' ? sigbit(sig) : 0);
     this.handlers = handlers;
     this.ignored = ignored;
@@ -201,8 +242,7 @@ export class JsKernel {
     ignored: number,
     defaults: number
   ): Promise<void> {
-    let caught = 0;
-    for (const sig of handlers.keys()) caught |= sigbit(sig);
+    const caught = caughtOf(handlers);
     const same = caught === this.reported.caught && ignored === this.reported.ignored;
     if (same && defaults === 0) return;
     this.reported = { caught, ignored };
