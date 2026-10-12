@@ -210,6 +210,7 @@ interface Planned {
   target: Target;
   args: string[];
   script?: true;
+  via?: string[];
 }
 
 interface StartRequest {
@@ -635,10 +636,11 @@ export class Launcher {
         return undefined;
       }
       const inner = await this.interpreted(interp, [interp, ...passed], cwd, scope, depth + 1);
-      return inner && { ...inner, target: withScriptEnv(inner.target, command) };
+      const via = [interp, ...(inner?.via ?? [])];
+      return inner && { ...inner, target: withScriptEnv(inner.target, command), via };
     }
     const target = withScriptEnv(found, command);
-    return { target, args: [...(target.prefix ?? []), ...passed] };
+    return { target, args: [...(target.prefix ?? []), ...passed], via: [interp] };
   }
 
   private async plan(
@@ -659,10 +661,19 @@ export class Launcher {
     planned: Planned | undefined
   ): Promise<void> {
     const { dac } = this;
-    if (!dac || !req.file.includes('/') || COMMAND.test(req.file)) return;
+    if (!dac) return;
     const g = { fs: this.fs, cred, pid: req.pid, dac };
-    const path = this.fs.resolvePath(req.cwd, req.file);
-    await need(g, 'exec', path, planned?.script ? R_OK | X_OK : X_OK);
+    const byPath = (file: string) => file.includes('/') && !COMMAND.test(file);
+    if (byPath(req.file)) {
+      const path = this.fs.resolvePath(req.cwd, req.file);
+      await need(g, 'exec', path, planned?.script ? R_OK | X_OK : X_OK);
+    }
+    const via = planned?.via ?? [];
+    for (const [i, file] of via.entries()) {
+      if (!byPath(file)) continue;
+      const want = i < via.length - 1 ? R_OK | X_OK : X_OK;
+      await need(g, 'exec', this.fs.resolvePath(req.cwd, file), want);
+    }
   }
 
   private async unrunnable(

@@ -296,7 +296,10 @@ export class WasiHost {
       path_access: (dirfd: number, p: number, l: number, amode: number, flags: number) => {
         const path = at(dirfd, p, l);
         const nofollow = (flags & AT_SYMLINK_NOFOLLOW) !== 0;
-        if (deviceOf(path)) return;
+        if (deviceOf(path)) {
+          if (this.o.fs.owners && amode & 1) throw new WasiError('EACCES');
+          return;
+        }
         pathOwned(path, !nofollow);
         if (!this.o.fs.owners) return;
         const kind = flags & AT_EACCESS ? 'eaccess' : 'access';
@@ -944,6 +947,8 @@ export class WasiHost {
   }
 
   private setTimes(path: string, atim: bigint, mtim: bigint, flags: number, follow = true): void {
+    const asked = FSTFLAGS.ATIM | FSTFLAGS.ATIM_NOW | FSTFLAGS.MTIM | FSTFLAGS.MTIM_NOW;
+    if (this.o.fs.owners && (flags & asked) === 0) return;
     const now = Date.now();
     let current: SyncFsBridgeStat | undefined;
     const statOf = follow ? this.o.fs.stat.bind(this.o.fs) : this.o.fs.lstat.bind(this.o.fs);
