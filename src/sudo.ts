@@ -347,6 +347,10 @@ export class Sudo {
     try {
       const answer = await this.ask(caller, self, target, parsed.command, path, cwd, signal);
       if (typeof answer !== 'string') return answer;
+      const changed = await this.untrusted(path, cwd);
+      if (changed) {
+        return failed('EPERM', `sudo: ${changed} must be root's, and writable by root only`);
+      }
       if (answer === 'always' && !(await this.remember(self, target, argv))) {
         return failed('EIO', 'sudo: the rule could not be recorded');
       }

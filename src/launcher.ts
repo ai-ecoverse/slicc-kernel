@@ -1318,14 +1318,24 @@ export class Launcher {
   private async processMount(pid: number, call: MountCall, signal: AbortSignal): Promise<void> {
     const spec = mountCall(call);
     await this.permit({ op: 'mount', pid, ...spec, options: { ...spec.options } });
+    await this.mountsOwn(pid, spec.target, async () => (await this.fs.stat(spec.target)).uid);
     const entry = await this.mount(this.mountedBy(spec, this.credOf(pid)));
     if (signal.aborted) this.umount(entry.target, true);
   }
 
+  private async mountsOwn(pid: number, target: string, owner: () => Promise<unknown>) {
+    const { euid } = this.credOf(pid);
+    if (this.usersMode !== 'enforce' || euid === 0) return;
+    if ((await owner().catch(() => undefined)) !== euid) {
+      throw fsError('EPERM', `${target} is not the caller's to mount or unmount`);
+    }
+  }
+
   private async processUmount(pid: number, target: string, flags: number): Promise<void> {
     const call = umountCall(target, flags);
+    let mounted: MountEntry | undefined;
     for (;;) {
-      const mounted = this.mounts.mounted(call.target);
+      mounted = this.mounts.mounted(call.target);
       await this.permit({
         op: 'umount',
         pid,
@@ -1334,6 +1344,7 @@ export class Launcher {
       });
       if (this.mounts.mounted(call.target) === mounted) break;
     }
+    await this.mountsOwn(pid, call.target, async () => Number(mounted?.options.uid));
     this.umount(call.target, call.detach);
   }
 
