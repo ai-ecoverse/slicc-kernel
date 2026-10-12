@@ -1,7 +1,6 @@
 import { SAB_CLOCK_I64, SAB_CLOCK_OFFSET } from '../realm/sync-sab-wire.ts';
 
 export const IDLE_OPS: ReadonlySet<string> = new Set([
-  'fd-poll',
   'fd-select',
   'proc-wait',
   'proc-exec',
@@ -89,14 +88,14 @@ export class CpuClock {
 
   leave(): void {
     if (this.since === 0) return;
-    this.add(this.now() - this.since);
+    this.add((this.frozen ?? this.now()) - this.since);
     this.since = 0;
   }
 
   stop(stopped: boolean): void {
     if (stopped === this.stopped) return;
     this.stopped = stopped;
-    if (this.since === 0 || !stopped) return;
+    if (this.since === 0 || !stopped || this.frozen !== undefined) return;
     const now = this.now();
     this.add(now - this.since);
     this.since = now;
