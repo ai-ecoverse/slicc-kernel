@@ -1,3 +1,4 @@
+import type { Perm } from '../fs/types.ts';
 import { KernelError, OpenFile, type PollState } from './fd-table.ts';
 import { SIG } from './signals.ts';
 
@@ -65,6 +66,8 @@ export class KernelTty {
   private hungUp = false;
 
   name?: string;
+
+  owner?: Perm;
 
   onRead?: () => void;
 
