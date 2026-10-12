@@ -299,8 +299,9 @@ export class Sudo {
   async request(caller: SudoCaller, call: SudoCall, signal: AbortSignal): Promise<SudoResult> {
     const parsed = parseArgs(call.args);
     if (typeof parsed === 'string') return failed('EINVAL', parsed);
-    if (this.o.mode === 'off') {
-      if (parsed.list) return { list: "sudo: users are 'off': commands run as the caller\n" };
+    if (this.o.mode !== 'enforce') {
+      const mode = this.o.mode;
+      if (parsed.list) return { list: `sudo: users are '${mode}': commands run as the caller\n` };
       return { run: parsed.command };
     }
     const { cred } = caller;
