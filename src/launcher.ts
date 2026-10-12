@@ -1040,6 +1040,7 @@ export class Launcher {
         (avg, i) => avg * Math.exp(-LOAD_SAMPLE_MS / LOAD_WINDOWS_MS[i as 0 | 1 | 2]) ** steps
       ) as [number, number, number];
     }
+    this.sampledAt = Date.now();
     this.sampler = setInterval(() => this.sampleLoad(), LOAD_SAMPLE_MS);
     (this.sampler as { unref?: () => void }).unref?.();
   }
