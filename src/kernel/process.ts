@@ -46,6 +46,7 @@ import type { MountLine, ProcessListing } from './proc-info.ts';
 import type { ForkState } from './protocol.ts';
 import { PTY_OPS, type PtySyscall, type PtyTable, ptsNumber, ptySyscall } from './pty.ts';
 import { type RunRequest, runChild } from './run-child.ts';
+import type { SealedBroker, SealedCaller } from './sealed.ts';
 import { selectFds } from './select.ts';
 import { type DefaultAction, defaultAction, isSignal, SIG, sigbit } from './signals.ts';
 import { KernelSocket, LoopbackNet } from './socket.ts';
@@ -160,6 +161,7 @@ export type WasmSyscall =
   | { op: 'fd-open-tty'; name?: string }
   | { op: 'fd-tty-names' }
   | { op: 'fd-tty-owner'; name: string }
+  | { op: 'fd-open-sealed' }
   | { op: 'tty-get'; fd: number }
   | { op: 'tty-set'; fd: number; termios: Termios; flush?: boolean }
   | { op: 'tty-winsz'; fd: number }
@@ -332,6 +334,7 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'fd-open-tty',
   'fd-tty-names',
   'fd-tty-owner',
+  'fd-open-sealed',
   'tty-get',
   'tty-set',
   'tty-winsz',
@@ -397,6 +400,8 @@ export interface WasmProcessOptions {
   cred?: Cred;
 
   owners?: boolean;
+
+  sealed?: SealedBroker;
 
   guard?: { dac: Dac; fs: KernelFs; created?: Created };
 
@@ -474,6 +479,8 @@ export class WasmProcess {
   private inherited = 0;
 
   private interrupt = new AbortController();
+
+  private readonly gone = new AbortController();
 
   private dying = false;
 
@@ -753,6 +760,7 @@ export class WasmProcess {
     cancelled: AbortSignal
   ): Promise<number> {
     const file = this.fds.get(fd).file;
+    if (file.sealed) return file.sealed.send(body, await this.sealedCaller(), this.gone.signal);
     if (!file.write) throw new KernelError('EBADF');
     if (!pollFile(file).writable) {
       if (nonblock) throw new KernelError('EAGAIN');
@@ -851,6 +859,26 @@ export class WasmProcess {
     if (!tty) throw new KernelError('ENXIO');
     if (name !== undefined) ttyOpenable(this.guarded(), tty);
     return this.fds.install(tty.file(), 3);
+  }
+
+  private openSealed(): number {
+    const broker = this.options.sealed;
+    if (!broker) throw new KernelError('ENOENT');
+    return this.fds.install(broker.open(), 3);
+  }
+
+  private async sealedCaller(): Promise<SealedCaller> {
+    const shown = await this.options.identity?.();
+    const broker = this.options.sealed as SealedBroker;
+    const tag = broker.tagOf(this.pid);
+    return {
+      pid: shown?.pid ?? this.pid,
+      ppid: shown?.ppid ?? 0,
+      uid: this.cred.euid,
+      gid: this.cred.egid,
+      ...(tag !== undefined ? { tag } : {}),
+      users: broker.users,
+    };
   }
 
   private guarded(): Guard | undefined {
@@ -987,6 +1015,8 @@ export class WasmProcess {
         return { ok: true, kind: 'json', json: this.openTty(req.name) };
       case 'fd-tty-names':
         return { ok: true, kind: 'json', json: this.options.jobs?.terminalNames() ?? [] };
+      case 'fd-open-sealed':
+        return { ok: true, kind: 'json', json: this.openSealed() };
       case 'fd-tty-owner':
         return { ok: true, kind: 'json', json: this.terminalByName(req.name).owner ?? null };
       case 'fd-select': {
@@ -1473,6 +1503,7 @@ export class WasmProcess {
   async exit(): Promise<void> {
     if (this.exited) return;
     this.exited = true;
+    this.gone.abort();
     this.die();
     this.clearAlarm();
     this.interrupt.abort();

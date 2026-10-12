@@ -55,6 +55,7 @@ import type { ProcessInfo } from './kernel/proc-info.ts';
 import { DEFAULT_UMASK } from './kernel/process.ts';
 import type { ForkState, Program } from './kernel/protocol.ts';
 import { PtyTable } from './kernel/pty.ts';
+import { SealedBroker, type SealedHook } from './kernel/sealed.ts';
 import { SettlingChildren } from './kernel/settling.ts';
 import { SIG, sigbit } from './kernel/signals.ts';
 import { LoopbackNet } from './kernel/socket.ts';
@@ -139,6 +140,7 @@ export interface LauncherOptions {
   hostname?: string;
   users?: UsersMode;
   onDenial?: DenialHook;
+  sealed?: SealedHook;
   approve?: ApproveHook;
   sudoTimeoutMs?: number;
 }
@@ -439,6 +441,7 @@ export class Launcher {
   fstab: Promise<FstabResult[]> = Promise.resolve([]);
   readonly usersMode: UsersMode;
   readonly dac: Dac | undefined;
+  private readonly sealed: SealedBroker;
   private nextPid = 1000;
   readonly boot = Date.now();
   private terminals = 0;
@@ -446,6 +449,9 @@ export class Launcher {
   constructor(options: LauncherOptions) {
     this.usersMode = usersMode(options.users);
     this.dac = this.usersMode === 'off' ? undefined : new Dac(this.usersMode, options.onDenial);
+    this.sealed = new SealedBroker(options.sealed, this.usersMode, undefined, (pid) =>
+      this.tagOf(pid)
+    );
     if (this.owners) options.fs.trackOwners?.();
     this.mounts = new MountTable({
       open: (type, spec) => this.driver(type, spec),
@@ -896,6 +902,7 @@ export class Launcher {
       ...(req.umask !== undefined ? { umask: req.umask } : {}),
       cred: req.cred,
       ...(this.owners ? { owners: true } : {}),
+      sealed: this.sealed,
       ...(this.dac ? { dac: this.dac } : {}),
       program: req.program,
       argv0: req.argv0,

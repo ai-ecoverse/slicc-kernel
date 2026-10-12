@@ -52,6 +52,8 @@ function stdioAlias(path: string): number | undefined {
   return m[1] ? 0 : m[2] ? 1 : m[3] ? 2 : Number(m[4]);
 }
 
+export const SEALED_PATH = '/dev/sealed';
+
 export function deviceOf(path: string): Device | undefined {
   return DEVICES[path];
 }
@@ -611,17 +613,32 @@ export class WasiFds {
     return joined.split('/').includes('..') ? physical(this.fs, joined) : normalize(joined);
   }
 
+  private openKernelDevice(path: string, oflags: number, fdflags: number): number | undefined {
+    const { openSealed, openTty } = this.kernel.sys;
+    const nonblock = (fdflags & FDFLAGS.NONBLOCK) !== 0;
+    let fd: number | undefined;
+    let kind: KernelFdKind;
+    if (path === SEALED_PATH && openSealed) {
+      if (oflags & OFLAGS.DIRECTORY) throw new WasiError('ENOTDIR');
+      if (oflags & OFLAGS.CREAT && oflags & OFLAGS.EXCL) throw new WasiError('EEXIST');
+      fd = openSealed.call(this.kernel.sys);
+      kind = 'sealed';
+    } else if (path === '/dev/tty' || /^\/dev\/tty\d+$/.test(path)) {
+      fd = openTty?.call(this.kernel.sys, path === '/dev/tty' ? undefined : path);
+      if (fd === undefined) throw new WasiError('ENXIO');
+      kind = 'tty';
+    } else return undefined;
+    this.adopt(fd, kind, nonblock);
+    this.bump();
+    return fd;
+  }
+
   open(path: string, oflags: number, rights: bigint, fdflags: number): number {
     const device = deviceOf(path);
     if (device) return this.install({ type: 'device', device });
 
-    if (path === '/dev/tty' || /^\/dev\/tty\d+$/.test(path)) {
-      const fd = this.kernel.sys.openTty?.(path === '/dev/tty' ? undefined : path);
-      if (fd === undefined) throw new WasiError('ENXIO');
-      this.table.set(fd, { ...kernelEntry(), kind: 'tty' });
-      this.bump();
-      return fd;
-    }
+    const kernelDevice = this.openKernelDevice(path, oflags, fdflags);
+    if (kernelDevice !== undefined) return kernelDevice;
     const alias = stdioAlias(path);
     if (alias !== undefined) return this.reopen(alias);
     const exclusive = (oflags & OFLAGS.CREAT) !== 0 && (oflags & OFLAGS.EXCL) !== 0;
