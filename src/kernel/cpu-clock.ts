@@ -140,9 +140,16 @@ export class ProcessClocks {
   private readonly main: CpuClock;
   private readonly threads = new Map<number, CpuClock>();
   private readonly ended: CpuTimes = { utime: 0, stime: 0 };
+  private readonly enabled: boolean;
 
-  constructor(sab: SharedArrayBuffer) {
+  constructor(
+    sab: SharedArrayBuffer,
+    enabled = true,
+    states?: { onState(listener: (state: string) => void): void }
+  ) {
     this.main = new CpuClock(sab);
+    this.enabled = enabled;
+    states?.onState((state) => this.stop(state === 'stopped'));
   }
 
   thread(tid: number, sab: SharedArrayBuffer): CpuClock {
@@ -163,7 +170,8 @@ export class ProcessClocks {
     for (const c of this.all()) c.stop(stopped);
   }
 
-  times(): CpuTimes {
+  times(): CpuTimes | undefined {
+    if (!this.enabled) return undefined;
     const sum = { ...this.ended };
     for (const c of this.all()) {
       const t = c.times();
@@ -174,7 +182,7 @@ export class ProcessClocks {
   }
 
   running(): number {
-    return this.all().filter((c) => c.running()).length;
+    return this.enabled ? this.all().filter((c) => c.running()).length : 0;
   }
 
   timed<R extends { op: string }, T>(

@@ -176,8 +176,9 @@ export function systemFile(
     const [one, five, fifteen] = (listing.load ?? [0, 0, 0]).map((n) => n.toFixed(2));
     return `${one} ${five} ${fifteen} 1/${live.length} ${last}\n`;
   }
-  const user = ticks(listing.processes.reduce((sum, p) => sum + (p.utime ?? 0), 0));
-  const system = ticks(listing.processes.reduce((sum, p) => sum + (p.stime ?? 0), 0));
+  const gone = listing.reaped ?? { utime: 0, stime: 0 };
+  const user = ticks(listing.processes.reduce((sum, p) => sum + (p.utime ?? 0), gone.utime));
+  const system = ticks(listing.processes.reduce((sum, p) => sum + (p.stime ?? 0), gone.stime));
   const idle = Math.max(0, ticks(now - listing.boot) - user - system);
   return [
     `cpu  ${user} 0 ${system} ${idle} 0 0 0 0 0 0`,

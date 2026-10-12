@@ -869,6 +869,7 @@ export class Launcher {
   }
 
   private start(req: StartRequest): WasmProcessHandle {
+    this.sampling();
     if (req.pgid !== undefined && this.jobs.sessionOf(req.pgid) === undefined) {
       throw fsError('ESRCH', `no process group ${req.pgid}`);
     }
@@ -913,6 +914,7 @@ export class Launcher {
         boot: this.boot,
         processes: this.list(this.credOf(pid)),
         load: this.loadAverage(),
+        reaped: { ...this.reapedTimes },
       }),
       sudo: (call, signal) => this.sudo(pid, call, signal),
       openFiles: this.openFiles,
@@ -950,6 +952,10 @@ export class Launcher {
       const spent = handle.times?.();
       if (spent) this.spent.set(pid, spent);
       this.processes.delete(pid);
+      if (this.processes.size === 0) {
+        clearInterval(this.sampler);
+        this.sampler = undefined;
+      }
       this.settling.settled(pid);
       if (req.ppid === undefined || this.orphans.delete(pid)) this.forget(pid);
       else this.zombies.add(pid);
@@ -967,6 +973,11 @@ export class Launcher {
   private forget(pid: number): void {
     this.jobs.remove(pid);
     this.described.delete(pid);
+    const spent = this.spent.get(pid);
+    if (spent) {
+      this.reapedTimes.utime += spent.utime;
+      this.reapedTimes.stime += spent.stime;
+    }
     this.spent.delete(pid);
     this.creds.delete(pid);
     this.tags.delete(pid);
@@ -979,19 +990,26 @@ export class Launcher {
   }
 
   private load: [number, number, number] = [0, 0, 0];
-  private loadAt = Date.now();
+  private sampler: ReturnType<typeof setInterval> | undefined;
+  private readonly reapedTimes: CpuTimes = { utime: 0, stime: 0 };
 
-  loadAverage(now = Date.now()): readonly [number, number, number] {
-    const steps = Math.min(Math.floor((now - this.loadAt) / LOAD_SAMPLE_MS), 360);
-    if (steps <= 0) return this.load;
-    this.loadAt += steps * LOAD_SAMPLE_MS;
+  loadAverage(): readonly [number, number, number] {
+    return this.load;
+  }
+
+  sampleLoad(): void {
     let running = 0;
     for (const handle of this.processes.values()) running += handle.running?.() ?? 0;
     this.load = this.load.map((avg, i) => {
-      const decay = Math.exp(-LOAD_SAMPLE_MS / LOAD_WINDOWS_MS[i as 0 | 1 | 2]) ** steps;
+      const decay = Math.exp(-LOAD_SAMPLE_MS / LOAD_WINDOWS_MS[i as 0 | 1 | 2]);
       return avg * decay + running * (1 - decay);
     }) as [number, number, number];
-    return this.load;
+  }
+
+  private sampling(): void {
+    if (this.sampler) return;
+    this.sampler = setInterval(() => this.sampleLoad(), LOAD_SAMPLE_MS);
+    (this.sampler as { unref?: () => void }).unref?.();
   }
 
   private readonly spent = new Map<number, CpuTimes>();

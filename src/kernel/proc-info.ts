@@ -31,4 +31,5 @@ export interface ProcessListing {
   boot: number;
   processes: ProcessInfo[];
   load?: readonly [number, number, number];
+  reaped?: { utime: number; stime: number };
 }

@@ -420,11 +420,9 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
   const dying = new Dying();
   const dispatch = (req: SyncSabDispatchRequest): Promise<SyncFsResult> =>
     dying.serving(() => (isWasmSyscall(req) ? process.syscall(req) : dispatchSyncFs(req)));
-  const timed = opts.program.abi !== 'js';
-  const clocks = new ProcessClocks(sab);
-  process.onState((state) => clocks.stop(state === 'stopped'));
+  const clocks = new ProcessClocks(sab, opts.program.abi !== 'js', process);
   const responder = attachSyncSabResponder(worker, sab, token, {
-    dispatch: timed ? clocks.timed(undefined, dispatch) : dispatch,
+    dispatch: clocks.timed(undefined, dispatch),
   });
   const lane = opts.program.abi === 'js' ? openLane(token, dispatch) : undefined;
 
@@ -561,7 +559,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     umask: () => process.umask,
     cred: () => copyCred(process.cred),
     writesBack: () => opts.program.abi === 'wasi' && !done,
-    times: () => (timed ? clocks.times() : undefined),
+    times: () => clocks.times(),
     running: () => clocks.running(),
   };
 }
