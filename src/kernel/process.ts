@@ -45,6 +45,7 @@ import { Routes } from './net/routes.ts';
 import type { MountLine, ProcessListing } from './proc-info.ts';
 import type { ForkState } from './protocol.ts';
 import { PTY_OPS, type PtySyscall, type PtyTable, ptsNumber, ptySyscall } from './pty.ts';
+import { type RunRequest, runChild } from './run-child.ts';
 import { selectFds } from './select.ts';
 import { type DefaultAction, defaultAction, isSignal, SIG, sigbit } from './signals.ts';
 import { KernelSocket, LoopbackNet } from './socket.ts';
@@ -187,6 +188,8 @@ export type WasmSyscall =
     }
   | { op: 'proc-captured'; pid: number; slot: number }
   | SudoCall
+  | RunRequest
+  | { op: 'proc-exit'; status: number }
   | { op: 'proc-fork'; state: ForkState; restart?: true }
   | { op: 'proc-kill'; pid: number; sig: number }
   | { op: 'thread-kill'; tid: number; sig: number }
@@ -337,6 +340,8 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'proc-wait',
   'proc-captured',
   'proc-sudo',
+  'proc-run',
+  'proc-exit',
   'proc-fork',
   'proc-kill',
   'thread-kill',
@@ -438,6 +443,8 @@ export interface WasmProcessOptions {
   pendingBits?: () => number;
 
   raise?: (sig: number) => void;
+
+  exitNow?: (status: number) => void;
 
   onReap?: (pid: number) => void;
 
@@ -575,6 +582,15 @@ export class WasmProcess {
     if (this.killed) void Promise.allSettled([this.options.kill?.(pid, SIG.KILL)]);
     else this.adoptExec(pid);
     return pid;
+  }
+
+  private run(req: RunRequest): Promise<Uint8Array> {
+    return runChild(req, {
+      children: this.children,
+      kill: (pid, sig) => this.options.kill?.(pid, sig),
+      interrupt: () => this.interrupt.signal,
+      dying: () => this.dying,
+    });
   }
 
   private adoptExec(pid: number): void {
@@ -1214,6 +1230,12 @@ export class WasmProcess {
         return { ok: true, kind: 'json', json: await this.spawn(req) };
       case 'proc-wait':
         return { ok: true, kind: 'json', json: await this.procWait(req, cancelled) };
+      case 'proc-run':
+        return { ok: true, kind: 'bytes', bytes: await this.run(req) };
+      case 'proc-exit':
+        if (!this.options.exitNow) throw new KernelError('ENOSYS');
+        this.options.exitNow(req.status & 0xff);
+        return DYING;
       case 'proc-identity':
         return { ok: true, kind: 'json', json: (await this.options.identity?.()) ?? null };
       case 'proc-exec': {

@@ -90,6 +90,7 @@ export type {
   JsListenOptions,
   JsNet,
 } from './process/js/js-net.ts';
+export type { JsRunOptions, JsRunResult, JsRunStdio } from './process/js/js-run.ts';
 export type { JsSyncContext, JsSyncFile } from './process/js/js-sync.ts';
 export type { JsTermios, JsTty, JsTtySize } from './process/js/js-tty.ts';
 export type {

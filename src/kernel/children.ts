@@ -15,7 +15,7 @@ import type { ForkState } from './protocol.ts';
 export type ChildStdio =
   | { fd: number }
   | { input: Uint8Array }
-  | { capture: true }
+  | { capture: true; max?: number; overflow?: () => void }
   | { none: true }
   | { dir: string }
   | DeviceMeta;
@@ -110,6 +110,28 @@ export const CONTINUED_STATUS = 0xffff;
 
 export function waitStatus(code: number, termsig?: number): number {
   return termsig ? termsig & 0x7f : (code & 0xff) << 8;
+}
+
+function capturing(
+  chunks: Uint8Array[],
+  max = Number.POSITIVE_INFINITY,
+  overflow?: () => void
+): (bytes: Uint8Array) => void {
+  let size = 0;
+  let over = false;
+  return (bytes) => {
+    if (over) return;
+    const room = max - size;
+    if (bytes.length > room) {
+      over = true;
+      if (room > 0) chunks.push(bytes.slice(0, room));
+      size = max;
+      overflow?.();
+      return;
+    }
+    chunks.push(bytes);
+    size += bytes.length;
+  };
 }
 
 function concat(chunks: Uint8Array[]): Uint8Array {
@@ -237,7 +259,7 @@ export class ChildTable {
     if ('capture' in slot) {
       const chunks: Uint8Array[] = [];
       captured.set(n, chunks);
-      return sinkFile((bytes) => chunks.push(bytes));
+      return sinkFile(capturing(chunks, slot.max, slot.overflow));
     }
     return deviceFile('null');
   }
