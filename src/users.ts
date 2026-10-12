@@ -290,6 +290,11 @@ export class UserDb {
     return (await this.lookupTerminal(user))?.account;
   }
 
+  async ttyGroup(): Promise<number | undefined> {
+    return parsed(parseGroup(await this.read(GROUP, DEFAULT_GROUP))).find((g) => g.name === 'tty')
+      ?.gid;
+  }
+
   async lookupTerminal(
     user: string | number
   ): Promise<{ account: Account; tty: number | undefined } | undefined> {

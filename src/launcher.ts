@@ -1306,13 +1306,15 @@ export class Launcher {
   }
 
   private async account(user: string | number | Account | undefined): Promise<Account> {
+    if (typeof user === 'object') return user;
     return (await this.terminalAccount(user)).account;
   }
 
   private async terminalAccount(
     user: string | number | Account | undefined
   ): Promise<{ account: Account; tty: number | undefined }> {
-    if (typeof user === 'object') return { account: user, tty: undefined };
+    if (typeof user === 'object')
+      return { account: user, tty: this.owners ? await this.users.ttyGroup() : undefined };
     const found = await this.users.lookupTerminal(user ?? 0);
     if (!found) throw fsError('ENOENT', `no user ${String(user)}`);
     return found;
