@@ -1,6 +1,7 @@
 import { MemoryMeta, type MetaEntry, type MetaStore } from './meta.ts';
 import { chain, inherit, ownOf, ROOT_OWNER, sameOwner } from './owners.ts';
 import { PathMap } from './path-map.ts';
+import { holdsProtected, isProtected } from './protect.ts';
 import {
   type FsStat,
   fsError,
@@ -297,14 +298,28 @@ export class OpfsFs implements KernelFs {
     if (fields) await this.meta.update(path, (entry) => ({ ...entry, path, ...fields }));
   }
 
+  private guarded: readonly string[] = [];
+
+  protect(prefixes: readonly string[]): void {
+    this.guarded = prefixes;
+  }
+
+  private refuse(path: string, holding = false): void {
+    if (isProtected(this.guarded, path) || (holding && holdsProtected(this.guarded, path))) {
+      throw fsError('EROFS', path);
+    }
+  }
+
   async chown(path: string, change: OwnerChange): Promise<void> {
     if (!this.owners) return;
     if (change.kind === 'new') {
       const at = resolvePath((await this.locate(parentOf(path), true)).path, baseOf(path));
+      this.refuse(at);
       const { uid = 0, gid = 0, mode } = change;
       return this.stampNew(at, { uid, gid, ...(mode !== undefined ? { mode } : {}) }, false);
     }
     const found = await this.locate(path, change.follow !== false);
+    this.refuse(found.path);
     const [stored] = found.link ? [found.link] : await this.meta.get([found.path]);
     const current = await this.ownerAt(found.path, stored);
     const next = { uid: change.uid ?? current.uid, gid: change.gid ?? current.gid };
@@ -601,8 +616,10 @@ export class OpfsFs implements KernelFs {
     }
   }
 
-  private async existing(path: string): Promise<FileSystemFileHandle> {
-    const handle = (await this.locate(path, true)).handle as Handle;
+  private async existing(path: string, writing = false): Promise<FileSystemFileHandle> {
+    const found = await this.locate(path, true);
+    if (writing) this.refuse(found.path);
+    const handle = found.handle as Handle;
     if (handle.kind === 'directory') throw fsError('EISDIR', path);
     return handle;
   }
@@ -632,7 +649,7 @@ export class OpfsFs implements KernelFs {
   }
 
   async truncate(path: string, size: number): Promise<void> {
-    const handle = await this.existing(path);
+    const handle = await this.existing(path, true);
     await this.retrying(path, () => positioned(handle, (io) => io.truncate(size)), true);
   }
 
@@ -666,6 +683,12 @@ export class OpfsFs implements KernelFs {
   }
 
   private async writeTarget(path: string): Promise<[string, boolean]> {
+    const [target, existed] = await this.locateWrite(path);
+    this.refuse(target);
+    return [target, existed];
+  }
+
+  private async locateWrite(path: string): Promise<[string, boolean]> {
     try {
       return [(await this.locate(path, true)).path, true];
     } catch (err) {
@@ -768,6 +791,7 @@ export class OpfsFs implements KernelFs {
     }
     const parent = await this.locate(parentOf(path), true);
     if (parent.handle?.kind !== 'directory') throw fsError('ENOTDIR', path);
+    this.refuse(resolvePath(parent.path, baseOf(path)));
     await parent.handle.getDirectoryHandle(baseOf(path), { create: true });
     const made = `${parent.path === '/' ? '' : parent.path}/${baseOf(path)}`;
     await this.stampNew(made, owner, true);
@@ -783,6 +807,7 @@ export class OpfsFs implements KernelFs {
       if (options.force && error.code === 'ENOENT') return;
       throw error;
     }
+    this.refuse(found.path, true);
     if (found.handle) {
       const [dir, name] = await this.parent(found.path);
       try {
@@ -809,9 +834,11 @@ export class OpfsFs implements KernelFs {
   async rename(from: string, to: string): Promise<void> {
     if (from === to) return;
     const source = await this.locate(from, false);
+    this.refuse(source.path, true);
     this.forget(source.path);
     const parent = await this.locate(parentOf(to), true);
     const destination = resolvePath(parent.path, baseOf(to));
+    this.refuse(destination, true);
     const sourceStat = await this.describe(source);
     if (sourceStat.isDirectory && within(destination, source.path)) throw fsError('EINVAL', to);
     const target = await this.locate(destination, false).catch((err) => {
@@ -915,6 +942,7 @@ export class OpfsFs implements KernelFs {
     const parent = await this.locate(parentOf(path), true);
     if (parent.handle?.kind !== 'directory') throw fsError('ENOTDIR', path);
     const at = resolvePath(parent.path, baseOf(path));
+    this.refuse(at);
     if (
       await this.locate(at, false).then(
         () => true,
@@ -949,6 +977,7 @@ export class OpfsFs implements KernelFs {
 
   async chmod(path: string, mode: number): Promise<void> {
     const found = await this.locate(path, true);
+    this.refuse(found.path);
     const ctimeMs = Date.now();
     await this.meta.update(found.path, (entry) => ({
       ...entry,
@@ -967,6 +996,7 @@ export class OpfsFs implements KernelFs {
   }
 
   private async setTimes(found: Located, atime: Date, mtime: Date): Promise<void> {
+    this.refuse(found.path);
     const { link } = found;
     if (link) {
       const ctimeMs = Date.now();

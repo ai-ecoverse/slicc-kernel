@@ -395,6 +395,7 @@ function concat(chunks: Uint8Array[]): Uint8Array {
 export class Launcher {
   readonly fs: KernelFs;
   readonly processFs: KernelFs;
+  private readonly root: KernelFs;
   private readonly prefixes: readonly string[];
   private readonly base: KernelFs;
   private readonly createWorker: () => WasmWorkerLike;
@@ -471,6 +472,7 @@ export class Launcher {
       changed: this.watchers.changed.bind(this.watchers),
       owners: this.owners,
     });
+    this.root = options.fs;
     this.base = this.watchers.wrap(this.mounts.wrap(options.fs));
     this.createWorker = options.createWorker;
     this.createDriverWorker = options.createDriverWorker;
@@ -1549,6 +1551,7 @@ export class Launcher {
     if (this.owners) await this.stampLayout();
     if (this.owners) await this.sudoer.provision();
     await writeCaFile(this.base, this.ca).catch(() => undefined);
+    this.root.protect?.(this.prefixes);
     this.fstab = this.mountFstab();
   }
 
