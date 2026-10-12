@@ -14,6 +14,7 @@ import {
 import { fsError, type KernelFs, type NewOwner, type Owner } from '../fs/types.ts';
 import { parentOf } from '../fs/walk.ts';
 import type { WatchChange } from '../fs/watch.ts';
+import { type Cred, copyCred, ROOT } from '../kernel/cred.ts';
 import { dialSocket, serveSocket } from '../kernel/dial.ts';
 import type { TransportCall } from '../kernel/net/remote-transport.ts';
 import type { RealmTransport } from '../kernel/net/transport.ts';
@@ -211,6 +212,10 @@ async function runAs(l: Launcher, self: Account, requested?: string | number): P
     throw fsError('EPERM', `${self.name} may not run as ${target.name}`);
   }
   return target;
+}
+
+function clientCred(self: Account | undefined): Cred {
+  return self ? credOf(self) : copyCred(ROOT);
 }
 
 async function runTagged(
@@ -454,9 +459,9 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
       case 'unwatch':
         return watchOp(l, req, watches, send, guardFor(l, self));
       case 'mount':
-        return { result: await l.mount(req.spec) };
+        return { result: await l.mountAs(clientCred(self), req.spec) };
       case 'umount':
-        l.umount(req.target);
+        await l.umountAs(clientCred(self), req.target);
         return { result: true };
       case 'mounts':
         return { result: l.mounts.list() };

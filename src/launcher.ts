@@ -5,6 +5,7 @@ import { serveClient } from './client/serve-client.ts';
 import {
   type Abi,
   binfmtOf,
+  binfmtSuffix,
   type Command,
   pnpmGlobalRoots,
   scanBinfmts,
@@ -721,16 +722,31 @@ export class Launcher {
     return real === cwd && (await this.sudoer.reachable(caller, cwd));
   }
 
+  private async binfmtManifests(scripts: string[]): Promise<string[]> {
+    const sources = new Map<string, string>();
+    const binfmts = await scanBinfmts(this.base, await this.roots(), undefined, sources);
+    const manifests: string[] = [];
+    for (const script of scripts) {
+      const head = await this.head(script);
+      if (!head || isWasm(head) || shebang(head)) continue;
+      const pkg = sources.get(binfmtSuffix(binfmts, script) ?? '');
+      if (pkg !== undefined) manifests.push(`${pkg}/package.json`);
+    }
+    return manifests;
+  }
+
   private async backing(file: string, cwd: string): Promise<string[]> {
     const planned = await this.plan(file, [file], cwd, '');
     if (!planned) return [];
     const { glue, wasm, imports } = planned.target;
     const files = [glue, wasm, ...(imports ? [imports] : [])];
+    const scripts: string[] = [];
     for (const name of [file, ...(planned.via ?? [])]) {
-      if (name.includes('/') && !COMMAND.test(name)) files.push(this.fs.resolvePath(cwd, name));
+      if (name.includes('/') && !COMMAND.test(name)) scripts.push(this.fs.resolvePath(cwd, name));
       const script = (await this.scriptCommand(name, cwd, ''))?.script;
-      if (script) files.push(script);
+      if (script) scripts.push(script);
     }
+    files.push(...scripts, ...(await this.binfmtManifests(scripts)));
     for (const at of [...files]) {
       const root = PACKAGE_ROOT.exec(at)?.[1];
       if (root !== undefined) files.push(`${root}/package.json`);
@@ -1331,13 +1347,29 @@ export class Launcher {
   private async processMount(pid: number, call: MountCall, signal: AbortSignal): Promise<void> {
     const spec = mountCall(call);
     await this.permit({ op: 'mount', pid, ...spec, options: { ...spec.options } });
-    await this.mountsOwn(pid, spec.target, async () => (await this.fs.stat(spec.target)).uid);
+    await this.mountsOwn(
+      this.credOf(pid),
+      spec.target,
+      async () => (await this.fs.stat(spec.target)).uid
+    );
     const entry = await this.mount(this.mountedBy(spec, this.credOf(pid)));
     if (signal.aborted) this.umount(entry.target, true);
   }
 
-  private async mountsOwn(pid: number, target: string, owner: () => Promise<unknown>) {
-    const { euid } = this.credOf(pid);
+  async mountAs(cred: Cred, spec: MountSpec): Promise<MountEntry> {
+    const target = normalizePath(spec.target);
+    await this.mountsOwn(cred, target, async () => (await this.fs.stat(target)).uid);
+    return this.mount(this.mountedBy(spec, cred));
+  }
+
+  async umountAs(cred: Cred, target: string): Promise<void> {
+    const at = normalizePath(target);
+    await this.mountsOwn(cred, at, async () => Number(this.mounts.mounted(at)?.options.uid));
+    this.umount(at);
+  }
+
+  private async mountsOwn(cred: Cred, target: string, owner: () => Promise<unknown>) {
+    const { euid } = cred;
     if (this.usersMode !== 'enforce' || euid === 0) return;
     if ((await owner().catch(() => undefined)) !== euid) {
       throw fsError('EPERM', `${target} is not the caller's to mount or unmount`);
@@ -1357,7 +1389,7 @@ export class Launcher {
       });
       if (this.mounts.mounted(call.target) === mounted) break;
     }
-    await this.mountsOwn(pid, call.target, async () => Number(mounted?.options.uid));
+    await this.mountsOwn(this.credOf(pid), call.target, async () => Number(mounted?.options.uid));
     this.umount(call.target, call.detach);
   }
 
