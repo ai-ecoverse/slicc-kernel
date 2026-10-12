@@ -4,7 +4,7 @@ import type { MessagePortLike } from './client/protocol.ts';
 import { type ServedClient, serveClient } from './client/serve-client.ts';
 import type { DenialHook } from './fs/dac.ts';
 import { OpfsFs } from './fs/opfs.ts';
-import { fsError, type UsersMode } from './fs/types.ts';
+import { DEFAULT_USERS, fsError, type UsersMode } from './fs/types.ts';
 import { pidOwner } from './fs/unlinked.ts';
 import type {
   ConnectOptions,
@@ -216,7 +216,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     ...hostfsFetchOf(options),
     ...(options.cdp ? { cdp: options.cdp } : {}),
     ...(options.hostname !== undefined ? { hostname: options.hostname } : {}),
-    ...(options.users !== undefined ? { users: options.users } : {}),
+    users: options.users ?? DEFAULT_USERS,
     ...(options.onDenial ? { onDenial: options.onDenial } : {}),
     ...(options.approve ? { approve: options.approve } : {}),
   });

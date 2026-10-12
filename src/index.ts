@@ -9,7 +9,7 @@ import {
 } from './client/dial-stream.ts';
 import { type LoopbackFetchOptions, loopbackFetch } from './client/loopback-fetch.ts';
 import type { Denial, DenialHook } from './fs/dac.ts';
-import type { UsersMode } from './fs/types.ts';
+import { DEFAULT_USERS, type UsersMode } from './fs/types.ts';
 import { isHostname } from './kernel/net/loopback-names.ts';
 import type { TransportCall } from './kernel/net/remote-transport.ts';
 import type { RouteTable } from './kernel/net/routes.ts';
@@ -298,7 +298,7 @@ function initCall(options: KernelOptions, transport: NetworkTransport | undefine
     ...(options.hostfs ? { hostfs: true } : {}),
     ...(options.cdp ? { cdp: true } : {}),
     ...(options.hostname !== undefined ? { hostname: options.hostname } : {}),
-    ...(options.users !== undefined ? { users: options.users } : {}),
+    users: options.users ?? DEFAULT_USERS,
     ...(options.onDenial ? { denials: true } : {}),
     ...(options.approve ? { approve: true } : {}),
     ...(options.processMounts !== undefined
@@ -353,7 +353,7 @@ function accounts(
 
 function kernelUsers(
   call: (req: KernelCall) => Promise<unknown>,
-  mode: UsersMode = 'off'
+  mode: UsersMode = DEFAULT_USERS
 ): KernelUsers {
   return {
     mode,
