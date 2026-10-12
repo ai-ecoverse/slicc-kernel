@@ -1,7 +1,6 @@
 import { SAB_CLOCK_I64, SAB_CLOCK_OFFSET } from '../realm/sync-sab-wire.ts';
 
 export const IDLE_OPS: ReadonlySet<string> = new Set([
-  'fd-read',
   'fd-poll',
   'fd-select',
   'proc-wait',
@@ -9,9 +8,6 @@ export const IDLE_OPS: ReadonlySet<string> = new Set([
   'sig-pause',
   'sock-accept',
   'sock-connect',
-  'sock-recv',
-  'sock-recvfrom',
-  'sock-recvmsg',
 ]);
 
 export const SYS_CAP_US = 20_000;
