@@ -298,7 +298,7 @@ export class WasiHost {
         const nofollow = (flags & AT_SYMLINK_NOFOLLOW) !== 0;
         if (deviceOf(path)) return;
         pathOwned(path, !nofollow);
-        if (!this.o.fs.owners || (amode & 7) === 0) return;
+        if (!this.o.fs.owners) return;
         const kind = flags & AT_EACCESS ? 'eaccess' : 'access';
         this.o.fs.access?.(path, amode & 7, kind, nofollow);
       },

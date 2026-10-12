@@ -1,5 +1,5 @@
 import { R_OK, W_OK } from '../fs/access.ts';
-import { type Dac, inParent, openable } from '../fs/dac.ts';
+import { type Created, type Dac, inParent, openable } from '../fs/dac.ts';
 import type { KernelFs, NewOwner } from '../fs/types.ts';
 import type { MountCall } from '../mount/syscall.ts';
 import { inProc, ProcTree, procAlias } from '../process/wasi/wasi-procfs.ts';
@@ -85,6 +85,8 @@ export type WasmSyscall =
       create?: boolean;
 
       exclusive?: boolean;
+
+      created?: boolean;
 
       existing?: boolean;
 
@@ -371,7 +373,7 @@ export interface WasmProcessOptions {
 
   owners?: boolean;
 
-  guard?: { dac: Dac; fs: KernelFs };
+  guard?: { dac: Dac; fs: KernelFs; created?: Created };
 
   identity?: () => Promise<{ pid: number; ppid: number }>;
 
@@ -795,8 +797,9 @@ export class WasmProcess {
     const { guard } = this.options;
     const inherited = req.orphan || req.contents !== undefined || req.handle !== undefined;
     if (!guard || inherited || req.pin !== undefined) return;
-    const g = { ...guard, cred: this.cred, pid: this.pid };
+    const g = { fs: guard.fs, dac: guard.dac, cred: this.cred, pid: this.pid };
     if (req.exclusive) return inParent(g, 'open', req.path);
+    if (req.created && guard.created?.take(req.path)) return;
     const access = req.flags & WRITE_ACCESS;
     const want = (access === 1 ? 0 : R_OK) | (access !== 0 || req.truncate ? W_OK : 0);
     await openable(g, 'open', req.path, want, req.create === true);

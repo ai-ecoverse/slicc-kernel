@@ -116,6 +116,7 @@ export interface ProcessSys {
       orphan?: boolean;
       truncate?: boolean;
       create?: boolean;
+      created?: boolean;
       pin?: { version: string; size: number };
       handle?: number;
     }

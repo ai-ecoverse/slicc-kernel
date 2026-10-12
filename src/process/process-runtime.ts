@@ -112,6 +112,7 @@ export function kernelSys(transport: SyncSabTransport): ProcessSys & PtyKernel {
             ...(opts?.orphan ? { orphan: true } : {}),
             ...(opts?.truncate ? { truncate: true } : {}),
             ...(opts?.create ? { create: true } : {}),
+            ...(opts?.created ? { created: true } : {}),
             ...(opts?.pin ? { pin: opts.pin } : {}),
             ...(opts?.handle !== undefined ? { handle: opts.handle } : {}),
           },

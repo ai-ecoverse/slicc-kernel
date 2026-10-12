@@ -822,7 +822,7 @@ export function kernelAccess(
       const rc = own(dirfd, path, amode, flags);
       const Fs = fs() as AccessFs | undefined;
       const heap = memory();
-      if (rc !== 0 || (amode & 7) === 0 || !Fs?.lookupPath || !heap) return rc;
+      if (rc !== 0 || !Fs?.lookupPath || !heap) return rc;
       try {
         return kernelChecks(Fs, heap, { dirfd, path, amode: amode & 7, flags });
       } catch (err) {

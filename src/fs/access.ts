@@ -134,7 +134,8 @@ async function finalOf(
   if ((want & X_OK) === 0 || options.directory !== undefined) {
     return [perm, options.directory !== false];
   }
-  const st = await fs.stat(walked.path).catch(() => undefined);
+  const look = options.follow === false ? fs.lstat : fs.stat;
+  const st = await look.call(fs, walked.path).catch(() => undefined);
   return st ? [permOf(st), st.isDirectory] : [perm, false];
 }
 

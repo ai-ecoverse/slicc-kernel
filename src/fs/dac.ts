@@ -14,7 +14,7 @@ import {
   X_OK,
 } from './access.ts';
 import { inGroup } from './owners.ts';
-import type { KernelFs, Perm } from './types.ts';
+import { type KernelFs, normalizePath, type Perm } from './types.ts';
 import { joinName, parentOf } from './walk.ts';
 
 export interface Denial {
@@ -73,6 +73,21 @@ export class Dac {
     this.log(
       `slicc-kernel users report: ${d.errno} ${d.op} ${d.path} (uid ${d.uid}, pid ${d.pid})`
     );
+  }
+}
+
+const MAX_CREATED = 1024;
+
+export class Created {
+  private readonly paths = new Set<string>();
+
+  add(path: string): void {
+    if (this.paths.size >= MAX_CREATED) this.paths.clear();
+    this.paths.add(normalizePath(path));
+  }
+
+  take(path: string): boolean {
+    return this.paths.delete(normalizePath(path));
   }
 }
 

@@ -204,6 +204,7 @@ async function run(
       return done;
     case 'create':
       await createExclusive(fs, path, ownerFor(entry, req.mode ?? 0o666));
+      entry.created?.add(path);
       return done;
     case 'readlink':
       return json(await fs.readlink(path));
@@ -280,7 +281,8 @@ async function guard(g: Guard, path: string, req: SyncFsRequest, cwd: string): P
 async function opening(entry: SyncFsTokenEntry, path: string, mode: number): Promise<void> {
   const g = guardOf(entry);
   const want = (mode & HOLD_READ ? R_OK : 0) | (mode & HOLD_WRITE ? W_OK : 0);
-  if (g && want !== 0 && (mode & HOLD_CREATED) === 0) {
+  const created = (mode & HOLD_CREATED) !== 0 && entry.created?.take(path) === true;
+  if (g && want !== 0 && !created) {
     await need(g, 'open', path, want, { directory: false });
   }
 }
