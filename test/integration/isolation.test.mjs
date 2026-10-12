@@ -34,7 +34,7 @@ const PROBE = `(() => {
     }
   };
   const seen = names.map((n) => n + '=' + typeof globalThis[n] + '/' + typeof inherited(globalThis, n));
-  for (const n of ['storage', 'locks', 'serviceWorker']) {
+  for (const n of ['storage', 'storageBuckets', 'locks', 'serviceWorker', 'usb', 'hid', 'serial']) {
     seen.push(n + '=' + typeof navigator[n] + '/' + typeof inherited(navigator, n));
   }
   return seen;
@@ -57,8 +57,12 @@ const WITHHELD = [
   'webkitResolveLocalFileSystemURL',
   'webkitResolveLocalFileSystemSyncURL',
   'storage',
+  'storageBuckets',
   'locks',
   'serviceWorker',
+  'usb',
+  'hid',
+  'serial',
 ].map((n) => `${n}=undefined/undefined`);
 
 const wabt = await wabtInit();
@@ -75,13 +79,17 @@ test("a user's own Emscripten glue, a WASI imports module and a package driver g
   const { page, bash } = await booted(chrome, t);
   const typed = await page.evaluate(() => {
     const worker = new Worker(
-      URL.createObjectURL(new Blob(['postMessage(typeof webkitRequestFileSystemSync)']))
+      URL.createObjectURL(
+        new Blob([
+          'postMessage(typeof webkitRequestFileSystemSync + " " + typeof navigator.storageBuckets)',
+        ])
+      )
     );
     return new Promise((resolve) => {
       worker.onmessage = ({ data }) => resolve(data);
     });
   });
-  assert.equal(typed, 'function');
+  assert.equal(typed, 'function object');
   await page.evaluate(() => window.kernel.users.add({ name: 'cone' }));
   const files = {
     'tmp/lock/probe': `Module.print(${PROBE}.join(' '));\nthrow new Error('probed');\n`,
