@@ -527,32 +527,57 @@ export class OpfsFs implements KernelFs {
     return (directory ? S_IFDIR : S_IFREG) | (meta?.mode ?? fallback);
   }
 
+  private readonly id = crypto.randomUUID();
   private readonly dirTimes = new Map<string, number>();
   private readonly dirDirty = new Set<string>();
-  private readonly filesTouched = new Set<string>();
+  private readonly fileTimes = new Map<string, number>();
 
   private written(target: string): void {
     this.committed(target);
     if (!this.ranged) return;
-    this.dirTimes.set(target, Date.now());
-    this.filesTouched.add(target);
-    this.flushing.file ??= setTimeout(() => {
-      this.flushing.file = undefined;
-      void this.flushFileTimes().catch(() => undefined);
+    this.fileTimes.set(target, Date.now());
+    this.scheduleFileTimes();
+  }
+
+  private scheduleFileTimes(): void {
+    if (this.flushing.file || this.fileTimes.size === 0) return;
+    this.flushing.file = setTimeout(() => {
+      void this.flushFileTimes()
+        .catch(() => undefined)
+        .finally(() => {
+          this.flushing.file = undefined;
+          this.scheduleFileTimes();
+        });
     }, FILE_TIMES_MS);
     (this.flushing.file as { unref?: () => void }).unref?.();
   }
 
   private async flushFileTimes(): Promise<void> {
-    for (const path of this.filesTouched) {
-      this.filesTouched.delete(path);
-      const ms = this.dirTimes.get(path);
-      if (ms === undefined) continue;
+    for (const [path, ms] of [...this.fileTimes]) {
       const mtimeFor = await this.modified(path).catch(() => 0);
       await this.meta.update(path, (entry) =>
-        (entry?.timesAt ?? -1) > ms ? entry : { ...entry, path, mtimeMs: ms, mtimeFor, ctimeMs: ms }
+        this.fileTimes.get(path) !== ms || this.explicitWins(entry, ms)
+          ? entry
+          : { ...entry, path, mtimeMs: ms, mtimeFor, ctimeMs: ms }
       );
-      if (this.dirTimes.get(path) === ms) this.dirTimes.delete(path);
+      if (this.fileTimes.get(path) === ms) this.fileTimes.delete(path);
+    }
+  }
+
+  private timesOf(path: string): number | undefined {
+    return this.dirTimes.get(path) ?? this.fileTimes.get(path);
+  }
+
+  private explicitWins(entry: MetaEntry | undefined, ms: number): boolean {
+    if (entry?.timesAt === undefined || entry.timesBy === this.id) return false;
+    return entry.timesAt >= ms;
+  }
+
+  private movePending(from: string, to?: string): void {
+    for (const [path, ms] of [...this.fileTimes]) {
+      if (!within(path, from)) continue;
+      this.fileTimes.delete(path);
+      if (to !== undefined) this.fileTimes.set(to + path.slice(from.length), ms);
     }
   }
 
@@ -632,7 +657,7 @@ export class OpfsFs implements KernelFs {
 
   private async describe(found: Located): Promise<FsStat> {
     if (found.link) return this.owned(this.linkStat(found.link), found.path, found.link);
-    const touched = this.dirTimes.get(found.path);
+    const touched = this.timesOf(found.path);
     if (!this.owners) {
       const [meta] = await this.meta.get([found.path]);
       return this.statOf(found.path, found.handle as Handle, meta, touched);
@@ -815,7 +840,7 @@ export class OpfsFs implements KernelFs {
   async readdirStat(path: string): Promise<Array<[string, FsStat | null]>> {
     const [dir, children] = await this.listing(path);
     const base = dir === '/' ? '' : dir;
-    const touched = children.map(([name]) => this.dirTimes.get(`${base}/${name}`));
+    const touched = children.map(([name]) => this.timesOf(`${base}/${name}`));
     const metas = await this.meta.get(children.map(([name]) => `${base}/${name}`));
     const handed = this.owners ? await this.handedTo(dir) : undefined;
     const owned = (stat: FsStat, entry: MetaEntry | undefined): FsStat =>
@@ -887,6 +912,7 @@ export class OpfsFs implements KernelFs {
         throw translate(err, path);
       }
       this.changed(found.path);
+      this.movePending(found.path);
     }
     await this.meta.remove([found.path]);
     this.touch(parentOf(found.path));
@@ -955,6 +981,7 @@ export class OpfsFs implements KernelFs {
     const moved = await this.place(source.handle as Handle, dir, staging);
     if (swap) await this.rm(destination, { recursive: true });
     await this.meta.move(source.path, destination, carry);
+    this.movePending(source.path, destination);
     if (!moved) await this.rm(source.path, { recursive: true });
     let copied = !moved;
     if (swap) {
@@ -1090,6 +1117,7 @@ export class OpfsFs implements KernelFs {
     const handle = found.handle as Handle;
     const file = handle.kind === 'file' ? await handle.getFile() : undefined;
     this.dirTimes.delete(found.path);
+    this.fileTimes.delete(found.path);
     const ctimeMs = Date.now();
     await this.meta.update(found.path, (entry) => ({
       ...entry,
@@ -1099,6 +1127,7 @@ export class OpfsFs implements KernelFs {
       mtimeFor: file?.lastModified ?? 0,
       ctimeMs,
       timesAt: ctimeMs,
+      timesBy: this.id,
     }));
   }
 
