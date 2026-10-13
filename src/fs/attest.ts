@@ -135,7 +135,7 @@ export const WATCH_DEBOUNCE_MS = 50;
 
 export interface RemoteFs {
   remoteChanges?(listener: (change: RemoteChange) => void): () => void;
-  announceWatch?(paths: readonly string[]): void;
+  announceWatch?(paths: readonly string[]): Promise<void>;
 }
 
 export class FileWatches {
@@ -148,11 +148,11 @@ export class FileWatches {
     this.remote = remote;
   }
 
-  private announce(): void {
-    this.remote.announceWatch?.([...new Set([...this.live].flat())]);
+  private announce(): Promise<void> {
+    return this.remote.announceWatch?.([...new Set([...this.live].flat())]) ?? Promise.resolve();
   }
 
-  watch(paths: readonly string[], notify: (path: string) => void): () => void {
+  async watch(paths: readonly string[], notify: (path: string) => void): Promise<() => void> {
     const files = paths.map(normalizePath);
     const timers = new Map<string, ReturnType<typeof setTimeout>>();
     let active = true;
@@ -175,7 +175,7 @@ export class FileWatches {
     );
     const unlisten = this.remote.remoteChanges?.((change) => fire(change.paths, change.trees));
     this.live.add(files);
-    this.announce();
+    await this.announce();
     return () => {
       if (!active) return;
       active = false;
@@ -183,7 +183,7 @@ export class FileWatches {
       unwatch();
       unlisten?.();
       this.live.delete(files);
-      this.announce();
+      void this.announce();
     };
   }
 }

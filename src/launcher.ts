@@ -1420,7 +1420,7 @@ export class Launcher {
     });
   }
 
-  watchFiles(paths: readonly string[], notify: (path: string) => void): () => void {
+  watchFiles(paths: readonly string[], notify: (path: string) => void): Promise<() => void> {
     this.fileWatches ??= new FileWatches(this.watchers, this.rootFs as RemoteFs);
     return this.fileWatches.watch(paths, notify);
   }

@@ -242,8 +242,8 @@ export class OpfsFs implements KernelFs {
     return this.remote?.listen(listener) ?? (() => {});
   }
 
-  announceWatch(paths: readonly string[]): void {
-    this.remote?.announce(paths);
+  announceWatch(paths: readonly string[]): Promise<void> {
+    return this.remote?.announce(paths) ?? Promise.resolve();
   }
 
   private committed(target: string): void {

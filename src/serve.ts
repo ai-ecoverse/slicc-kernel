@@ -309,7 +309,7 @@ function attestOps(port: KernelPort) {
       return watches.delete(req.watch);
     }
     const notify = (path: string) => port.postMessage({ fileChanged: { watch: req.id, path } });
-    watches.set(req.id, l.watchFiles(req.paths, notify));
+    watches.set(req.id, await l.watchFiles(req.paths, notify));
     return req.id;
   };
 }
