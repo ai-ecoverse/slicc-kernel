@@ -51,6 +51,7 @@ function stdioAlias(path: string): number | undefined {
 }
 
 export const SEALED_PATH = '/dev/sealed';
+export const CLIPBOARD_PATH = '/dev/clipboard';
 
 export function deviceOf(path: string): Device | undefined {
   return deviceAt(path);
@@ -420,9 +421,12 @@ export class WasiFds {
     const e = this.get(fd);
     this.table.delete(fd);
     this.cloexec.delete(fd);
-    this.kernel.sys.close(fd);
-    this.release(e);
-    this.bump();
+    try {
+      this.kernel.sys.close(fd);
+    } finally {
+      this.release(e);
+      this.bump();
+    }
   }
 
   renumber(from: number, to: number, keep = false): void {
@@ -612,8 +616,13 @@ export class WasiFds {
     return joined.split('/').includes('..') ? physical(this.fs, joined) : normalize(joined);
   }
 
-  private openKernelDevice(path: string, oflags: number, fdflags: number): number | undefined {
-    const { openSealed, openTty } = this.kernel.sys;
+  private openKernelDevice(
+    path: string,
+    oflags: number,
+    fdflags: number,
+    rights: bigint
+  ): number | undefined {
+    const { openSealed, openClipboard, openTty } = this.kernel.sys;
     const nonblock = (fdflags & FDFLAGS.NONBLOCK) !== 0;
     let fd: number | undefined;
     let kind: KernelFdKind;
@@ -622,6 +631,9 @@ export class WasiFds {
       if (oflags & OFLAGS.CREAT && oflags & OFLAGS.EXCL) throw new WasiError('EEXIST');
       fd = openSealed.call(this.kernel.sys);
       kind = 'sealed';
+    } else if (path === CLIPBOARD_PATH && openClipboard) {
+      fd = this.openClipboard(openClipboard, oflags, rights);
+      kind = 'clipboard';
     } else if (path === '/dev/tty' || /^\/dev\/tty\d+$/.test(path)) {
       fd = openTty?.call(this.kernel.sys, path === '/dev/tty' ? undefined : path);
       if (fd === undefined) throw new WasiError('ENXIO');
@@ -632,11 +644,23 @@ export class WasiFds {
     return fd;
   }
 
+  private openClipboard(
+    openClipboard: (flags: number) => number,
+    oflags: number,
+    rights: bigint
+  ): number {
+    if (oflags & OFLAGS.DIRECTORY) throw new WasiError('ENOTDIR');
+    if (oflags & OFLAGS.CREAT && oflags & OFLAGS.EXCL) throw new WasiError('EEXIST');
+    const want = wantOf(oflags, rights);
+    const flags = want === 6 ? O_RDWR : want === 2 ? O_WRONLY : 0;
+    return openClipboard.call(this.kernel.sys, flags);
+  }
+
   open(path: string, oflags: number, rights: bigint, fdflags: number): number {
     const device = deviceOf(path);
     if (device) return this.install({ type: 'device', device });
 
-    const kernelDevice = this.openKernelDevice(path, oflags, fdflags);
+    const kernelDevice = this.openKernelDevice(path, oflags, fdflags, rights);
     if (kernelDevice !== undefined) return kernelDevice;
     const alias = stdioAlias(path);
     if (alias !== undefined) return this.reopen(alias);

@@ -35,7 +35,7 @@ import {
   writeDevice,
   written,
 } from './js-io.ts';
-import { JsCallError, type JsKernel } from './js-kernel.ts';
+import { callError, JsCallError, type JsKernel } from './js-kernel.ts';
 import type { JsRunOptions, JsRunResult } from './js-run.ts';
 
 export type SyncCall = (req: SyncSabRequestBody) => SyncFsResult;
@@ -115,7 +115,7 @@ export class JsSyncKernel {
 
   call(req: SyncSabRequestBody): SyncFsResult {
     const result = this.raw(req);
-    if (!result.ok) throw new JsCallError(result.errno, req.op);
+    if (!result.ok) throw callError(result, req.op);
     return result;
   }
 
@@ -133,7 +133,7 @@ export class JsSyncKernel {
     for (;;) {
       const result = this.raw(req);
       if (result.ok) return result;
-      if (result.errno !== 'EINTR') throw new JsCallError(result.errno, req.op);
+      if (result.errno !== 'EINTR') throw callError(result, req.op);
     }
   }
 }

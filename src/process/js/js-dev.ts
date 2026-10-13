@@ -31,6 +31,7 @@ type DevNode =
   | { kind: 'dir'; mode: number }
   | { kind: 'device' }
   | { kind: 'tty' }
+  | { kind: 'clipboard' }
   | { kind: 'terminal'; name: string; pts?: number }
   | { kind: 'link'; target: string; fd?: number }
   | { kind: 'fd'; fd: number };
@@ -70,6 +71,7 @@ function* lookup(abs: string): DevStep<DevNode> {
   const name = abs.slice('/dev/'.length);
   if (DEVICES.includes(name)) return { kind: 'device' };
   if (name === 'tty') return { kind: 'tty' };
+  if (name === 'clipboard') return { kind: 'clipboard' };
   const std = STDIO.indexOf(name);
   if (std >= 0) return { kind: 'link', target: `${SELF_FD}/${std}`, fd: std };
   if (name === 'fd') return { kind: 'link', target: SELF_FD };
@@ -117,7 +119,8 @@ function* fdStat(fd: number, path: string): DevStep<SyncFsBridgeStat> {
     return yield* pathStat(file.path);
   }
   if (info.terminal) return yield* terminalStat(info.terminal);
-  if (info.kind === 'device' || info.kind === 'tty') return nodeStat(CHAR | 0o666);
+  if (info.kind === 'device' || info.kind === 'tty' || info.kind === 'clipboard')
+    return nodeStat(CHAR | 0o666);
   if (info.kind === 'socket') return nodeStat(0o140777);
   return nodeStat(0o010600);
 }
@@ -128,6 +131,7 @@ function* fdTarget(fd: number, path: string): DevStep<string> {
   if (info.kind === 'file') return ((yield { op: 'fd-vfs-stat', fd }) as { path: string }).path;
   if (info.terminal) return info.terminal;
   if (info.meta && 'device' in info.meta) return `/dev/${(info.meta as DeviceMeta).device}`;
+  if (info.kind === 'clipboard') return '/dev/clipboard';
   return `${info.kind === 'socket' ? 'socket' : 'pipe'}:[${fd}]`;
 }
 
@@ -142,6 +146,7 @@ export function* devStat(abs: string, follow: boolean): DevStep<SyncFsBridgeStat
       return nodeStat(node.mode);
     case 'device':
     case 'tty':
+    case 'clipboard':
       return nodeStat(CHAR | 0o666);
     case 'terminal':
       return yield* terminalStat(node.name);
@@ -179,7 +184,7 @@ export function* devReaddir(abs: string): DevStep<string[]> {
   if (node.kind !== 'dir') throw new JsCallError('ENOTDIR', abs);
   const names = (yield { op: 'fd-tty-names' }) as string[];
   const ttys = names.filter((n) => /^\/dev\/tty\d+$/.test(n)).map((n) => n.slice(5));
-  return [...DEVICES, 'tty', 'fd', ...STDIO, ...ttys].sort();
+  return [...DEVICES, 'clipboard', 'tty', 'fd', ...STDIO, ...ttys].sort();
 }
 
 export interface DevOpened {
@@ -221,6 +226,11 @@ function* opened(abs: string, o: JsOpenOptions): DevStep<Omit<DevOpened, 'read' 
       return { fd: (yield openRequest(abs, { ...o, create: false })) as number, file: false };
     case 'tty':
       return { fd: (yield { op: 'fd-open-tty' }) as number, file: false };
+    case 'clipboard': {
+      const write = o.write === true || o.append === true || o.truncate === true;
+      const flags = write ? (o.read === true ? 2 : 1) : 0;
+      return { fd: (yield { op: 'fd-open-clipboard', flags }) as number, file: false };
+    }
     case 'terminal': {
       const req =
         node.pts === undefined

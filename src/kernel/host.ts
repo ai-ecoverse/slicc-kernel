@@ -24,6 +24,7 @@ import {
   SAB_I_TIMERS,
 } from '../realm/sync-sab-wire.ts';
 import type { ChildForker, ChildSpawner } from './children.ts';
+import type { ClipboardBroker } from './clipboard.ts';
 import { type CpuTimes, ProcessClocks } from './cpu-clock.ts';
 import { type Cred, copyCred } from './cred.ts';
 import { type FdTable, kernelFdKind, type OpenFile } from './fd-table.ts';
@@ -76,6 +77,7 @@ export interface SpawnWasmOptions {
   owners?: boolean;
   sealed?: SealedBroker;
   ttyFilter?: (file: OpenFile) => OpenFile;
+  clipboard?: ClipboardBroker;
   readonlyAt?: (path: string) => boolean;
   dac?: Dac;
   identity?: () => Promise<{ pid: number; ppid: number }>;
@@ -365,6 +367,7 @@ function processOptions(
     ...(opts.owners ? { owners: true } : {}),
     ...(opts.sealed ? { sealed: opts.sealed } : {}),
     ...(opts.ttyFilter ? { ttyFilter: opts.ttyFilter } : {}),
+    ...(opts.clipboard ? { clipboard: opts.clipboard } : {}),
     ...(opts.readonlyAt ? { readonlyAt: opts.readonlyAt } : {}),
     ...(opts.dac ? { guard: { dac: opts.dac, fs: opts.fs, created } } : {}),
     ...(opts.identity ? { identity: opts.identity } : {}),

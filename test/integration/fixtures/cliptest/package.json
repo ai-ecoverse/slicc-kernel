@@ -1,0 +1,16 @@
+{
+  "name": "cliptest",
+  "private": true,
+  "slicc": {
+    "commands": {
+      "cliptest": {
+        "abi": "wasi",
+        "wasm": "bin/cliptest.wasm"
+      },
+      "clipjs": {
+        "abi": "js",
+        "module": "bin/clipjs.mjs"
+      }
+    }
+  }
+}

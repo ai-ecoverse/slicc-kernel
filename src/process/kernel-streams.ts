@@ -70,7 +70,18 @@ function ptyStat(path: string): object {
 
 const SEALED_PATH = '/dev/sealed';
 
-function sealedStat(): object {
+const STRERROR: Readonly<Record<string, string>> = {
+  EACCES: 'Permission denied',
+  EIO: 'I/O error',
+  ENOTSUP: 'Not supported',
+  EOPNOTSUPP: 'Not supported',
+  EFBIG: 'File too large',
+  EILSEQ: 'Illegal byte sequence',
+  EINTR: 'Interrupted system call',
+};
+const CLIPBOARD_PATH = '/dev/clipboard';
+
+function sealedStat(minor = 250): object {
   const now = new Date();
   return {
     dev: 0x16,
@@ -79,7 +90,7 @@ function sealedStat(): object {
     nlink: 1,
     uid: 0,
     gid: 0,
-    rdev: (10 << 8) | 250,
+    rdev: (10 << 8) | minor,
     size: 0,
     blksize: 4096,
     blocks: 0,
@@ -177,6 +188,7 @@ export interface ProcessSys {
   ptyNumbers?(): number[];
 
   openSealed?(): number;
+  openClipboard?(flags: number): number;
   procList?(): ProcessListing;
   mountList?(): MountLine[];
 }
@@ -263,6 +275,7 @@ export interface KernelStreamOptions {
 
   restartable?: () => boolean;
   owners?: boolean;
+  program?: string;
 }
 
 export interface TtyOwner {
@@ -355,10 +368,73 @@ export class KernelStreams {
 
   private listSealed(): void {
     const { analyzePath, mkdev, makedev } = this.Fs as unknown as TtyNodeFs;
-    if (!this.sys.openSealed || !analyzePath || !mkdev || !makedev) return;
-    if (analyzePath.call(this.Fs, SEALED_PATH).exists) return;
+    if (!analyzePath || !mkdev || !makedev) return;
+    const nodes: Array<[string, number, unknown]> = [
+      [SEALED_PATH, 250, this.sys.openSealed],
+      [CLIPBOARD_PATH, 251, this.sys.openClipboard],
+    ];
+    for (const [path, minor, present] of nodes) {
+      if (!present || analyzePath.call(this.Fs, path).exists) continue;
+      try {
+        mkdev.call(this.Fs, path, makedev.call(this.Fs, 10, minor));
+      } catch {}
+    }
+  }
+
+  private readonly reporting = new Set<number>();
+
+  reportClose(kfd: number): void {
+    this.reporting.add(kfd);
+  }
+
+  quitting = false;
+
+  private atExit = false;
+
+  private failedAtExit = false;
+
+  private readonly committed = new Set<number>();
+
+  exiting(): () => void {
+    this.atExit = true;
+    return () => {
+      this.atExit = false;
+    };
+  }
+
+  private commitStdout(): void {
+    const kfd = this.Fs.getStream(1)?.sliccKernelFd;
+    if (kfd === undefined || !this.reporting.delete(kfd)) return;
+    this.committed.add(kfd);
     try {
-      mkdev.call(this.Fs, SEALED_PATH, makedev.call(this.Fs, 10, 250));
+      this.sys.close(kfd);
+    } catch (e) {
+      if (e instanceof SyscallError) this.stdoutFailed(e.code);
+    }
+  }
+
+  exitStatus(status: number): number {
+    return this.failedAtExit && status === 0 ? 1 : status;
+  }
+
+  private reportedClose(stream: ProcessStream, kfd: number): void {
+    try {
+      this.sys.close(kfd);
+    } catch (e) {
+      if (this.quitting && stream.fd === 1 && e instanceof SyscallError) this.stdoutFailed(e.code);
+      this.call(() => {
+        throw e;
+      });
+    }
+  }
+
+  private stdoutFailed(code: string): void {
+    this.failedAtExit = true;
+    const stderr = this.Fs.getStream(2)?.sliccKernelFd;
+    if (stderr === undefined) return;
+    const line = `${this.options.program ?? 'program'}: write error: ${STRERROR[code] ?? code}\n`;
+    try {
+      this.sys.write(stderr, new TextEncoder().encode(line));
     } catch {}
   }
 
@@ -473,7 +549,10 @@ export class KernelStreams {
       if (device !== undefined && TTY_PATH.test(device) && !this.terminalExists(device)) {
         throw new this.Fs.ErrnoError(wasiErrno('ENOENT'));
       }
-      const pty = this.openPty(open, path, flags, mode) ?? this.openSealed(open, path, flags, mode);
+      const pty =
+        this.openPty(open, path, flags, mode) ??
+        this.openSealed(open, path, flags, mode) ??
+        this.openClipboard(open, path, flags, mode);
       if (pty) return pty;
       this.refuseExclusiveLink(path, flags);
       const stream = this.openRacing(open, path, flags, mode);
@@ -561,6 +640,20 @@ export class KernelStreams {
     return this.vessel(open, kfd, { path, flags, mode }, false);
   }
 
+  private openClipboard(
+    open: NonNullable<ProcessFs['open']>,
+    path: string,
+    flags: number,
+    mode?: number
+  ): ProcessStream | undefined {
+    const { openClipboard } = this.sys;
+    if (path !== CLIPBOARD_PATH || !openClipboard) return undefined;
+    const kfd = this.call(() => openClipboard.call(this.sys, flags & 3));
+    const stream = this.vessel(open, kfd, { path, flags, mode }, false);
+    this.reportClose(kfd);
+    return stream;
+  }
+
   private vessel(
     open: NonNullable<ProcessFs['open']>,
     kfd: number,
@@ -594,6 +687,7 @@ export class KernelStreams {
       if (typeof original !== 'function') continue;
       fs[name] = (path: string, ...rest: unknown[]) => {
         if (path === SEALED_PATH && this.sys.openSealed) return sealedStat();
+        if (path === CLIPBOARD_PATH && this.sys.openClipboard) return sealedStat(251);
         const owned = this.ownedTty(path);
         if (owned && isPtyPath(path)) return this.owned(path, ptyStat(path));
         if (!isPtyPath(path)) {
@@ -752,6 +846,7 @@ export class KernelStreams {
         this.refs.set(kfd, (this.refs.get(kfd) ?? 0) + 1);
       },
       close: (stream) => {
+        if (this.atExit && stream.fd === 2 && this.reporting.size > 0) this.commitStdout();
         try {
           base.close?.(stream);
         } catch {}
@@ -761,6 +856,11 @@ export class KernelStreams {
           return;
         }
         this.refs.delete(kfd);
+        if (this.committed.size > 0 && this.committed.delete(kfd)) return;
+        if (this.reporting.size > 0 && this.reporting.delete(kfd)) {
+          this.reportedClose(stream, kfd);
+          return;
+        }
         try {
           this.sys.close(kfd);
         } catch {}

@@ -6,6 +6,8 @@ export interface JsSpawnOptions {
   argv: readonly string[];
   env?: Readonly<Record<string, string>>;
   cwd?: string;
+  pgid?: number;
+  session?: boolean;
   stdin?: JsStdio;
   stdout?: JsStdio;
   stderr?: JsStdio;
@@ -106,6 +108,7 @@ export function childOps(kernel: JsKernel, io: ChildIo, defaults: ChildDefaults)
   const spawn = async (o: JsSpawnOptions): Promise<JsChild> => {
     const [file] = o.argv;
     if (file === undefined) throw new JsCallError('EINVAL', 'spawn');
+    const group = groupOf(o, 'spawn');
     const mine: Array<number | undefined> = [];
     const theirs: number[] = [];
     try {
@@ -117,6 +120,7 @@ export function childOps(kernel: JsKernel, io: ChildIo, defaults: ChildDefaults)
         env: { ...(o.env ?? defaults.env) },
         cwd: o.cwd ?? defaults.cwd,
         stdio,
+        ...group,
       })) as number;
       return childOf(pid, mine);
     } catch (err) {
@@ -128,6 +132,19 @@ export function childOps(kernel: JsKernel, io: ChildIo, defaults: ChildDefaults)
   };
 
   return { spawn, wait, kill };
+}
+
+export function groupOf(
+  o: { pgid?: number; session?: boolean },
+  call: string
+): { pgid?: number; session?: true } {
+  const { pgid, session } = o;
+  const valid = pgid === undefined || (Number.isInteger(pgid) && pgid >= 0);
+  if (!valid || (session !== undefined && typeof session !== 'boolean')) {
+    throw new JsCallError('EINVAL', call);
+  }
+  if (session && pgid !== undefined) throw new JsCallError('EINVAL', call);
+  return session ? { session: true } : pgid !== undefined ? { pgid } : {};
 }
 
 async function closeAll(io: ChildIo, fds: ReadonlyArray<number | undefined>): Promise<void> {
