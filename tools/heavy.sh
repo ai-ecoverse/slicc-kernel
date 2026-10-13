@@ -3,6 +3,30 @@ slot="${HOME:-}/.bb/coord-bin/slicc-heavy"
 if [ "${SLICC_HEAVY_SLOT:-}" = 1 ] && [ -z "${SLICC_HEAVY_SLOTTED:-}" ] && [ -x "$slot" ]; then
   SLICC_HEAVY_SLOTTED=1 exec "$slot" "$0" "$@"
 fi
+if [ "${SLICC_UNIT_SLOT:-1}" != 0 ] && [ -z "${SLICC_UNIT_HELD:-}" ] && [ -z "${SLICC_HEAVY_SLOTTED:-}" ] &&
+  command -v lockf > /dev/null 2>&1; then
+  slots=${SLICC_UNIT_SLOTS:-2}
+  said=
+  while :; do
+    n=1
+    while [ "$n" -le "$slots" ]; do
+      mark=$(mktemp "${TMPDIR:-/tmp}/slicc-unit-mark.XXXXXX")
+      SLICC_UNIT_HELD=1 lockf -k -t 0 "/tmp/slicc-unit-$n.lock" \
+        /bin/sh -c 'rm -f "$0"; exec "$@" 2>&3' "$mark" "$0" "$@" 3>&2 2> /dev/null
+      status=$?
+      if [ ! -e "$mark" ]; then
+        exit "$status"
+      fi
+      rm -f "$mark"
+      n=$((n + 1))
+    done
+    if [ -z "$said" ]; then
+      echo "heavy.sh: waiting for a unit slot" >&2
+      said=1
+    fi
+    sleep 5
+  done
+fi
 tree_kb=${SLICC_HEAVY_TREE_KB:-3000000}
 proc_kb=${SLICC_HEAVY_PROC_KB:-2000000}
 limit_s=${SLICC_HEAVY_TIMEOUT:-900}
