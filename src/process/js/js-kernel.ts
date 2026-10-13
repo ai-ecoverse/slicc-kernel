@@ -20,6 +20,19 @@ export class JsCallError extends Error {
   }
 }
 
+const DETAILED: ReadonlySet<string> = new Set([
+  'fd-read',
+  'fd-write',
+  'fd-close',
+  'fd-open-clipboard',
+]);
+
+export function callError(result: { errno: string; message: string }, op: string): JsCallError {
+  const { errno, message } = result;
+  const detailed = typeof message === 'string' && message !== errno && DETAILED.has(op);
+  return new JsCallError(errno, detailed ? `${op}: ${message}` : op);
+}
+
 function untilAborted(work: Promise<void>, signal: AbortSignal | undefined): Promise<void> {
   if (!signal) return work;
   return new Promise<void>((resolve) => {
@@ -76,7 +89,7 @@ export class JsKernel {
 
   async call(req: SyncSabRequestBody): Promise<SyncFsResult> {
     const result = await this.raw(req);
-    if (!result.ok) throw new JsCallError(result.errno, req.op);
+    if (!result.ok) throw callError(result, req.op);
     return result;
   }
 
@@ -99,7 +112,7 @@ export class JsKernel {
       const id = await this.submit(req, track);
       const result = await this.settled(id, signal);
       if (result.ok) return result;
-      if (result.errno !== 'EINTR') throw new JsCallError(result.errno, req.op);
+      if (result.errno !== 'EINTR') throw callError(result, req.op);
     }
   }
 
