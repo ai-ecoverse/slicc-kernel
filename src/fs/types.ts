@@ -21,6 +21,8 @@ export interface FsStat {
 
 export type UsersMode = 'off' | 'report' | 'enforce';
 
+export const DEFAULT_USERS: UsersMode = 'enforce';
+
 export interface Owner {
   uid: number;
   gid: number;

@@ -12,7 +12,7 @@ import { clipboardAnswerer } from './clipboard-relay.ts';
 import type { Attestation } from './fs/attest.ts';
 import type { Denial, DenialHook } from './fs/dac.ts';
 import { type Protection, protectInit, writerTags } from './fs/protect.ts';
-import type { UsersMode } from './fs/types.ts';
+import { DEFAULT_USERS, type UsersMode } from './fs/types.ts';
 import type { ClipboardHook } from './kernel/clipboard.ts';
 import { isHostname } from './kernel/net/loopback-names.ts';
 import type { TransportCall } from './kernel/net/remote-transport.ts';
@@ -326,7 +326,7 @@ function initCall(options: KernelOptions, transport: NetworkTransport | undefine
     ...(options.hostfs ? { hostfs: true } : {}),
     ...(options.cdp ? { cdp: true } : {}),
     ...(options.hostname !== undefined ? { hostname: options.hostname } : {}),
-    ...(options.users !== undefined ? { users: options.users } : {}),
+    users: options.users === undefined ? DEFAULT_USERS : options.users,
     ...(options.onDenial ? { denials: true } : {}),
     ...(options.sealed ? { sealed: true } : {}),
     ...(options.clipboard ? { clipboard: true } : {}),
@@ -384,7 +384,7 @@ function accounts(
 
 function kernelUsers(
   call: (req: KernelCall) => Promise<unknown>,
-  mode: UsersMode = 'off'
+  mode: UsersMode = DEFAULT_USERS
 ): KernelUsers {
   return {
     mode,
@@ -679,7 +679,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     openTerminal,
     connect: async (connectOptions = {}) =>
       (await call({ op: 'connect', ...connectOptions })) as MessagePort,
-    ...accounts(call, options.users),
+    ...accounts(call, options.users === undefined ? DEFAULT_USERS : options.users),
     setRoutes: async (routes) => void (await call({ op: 'routes', routes })),
     dial,
     loopbackFetch: (input, fetchOptions) => loopbackFetch(dial, input, fetchOptions),
