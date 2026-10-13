@@ -6,6 +6,7 @@ import type { Attestation } from './fs/attest.ts';
 import type { Denial, DenialHook } from './fs/dac.ts';
 import { META_DB, type MetaStore } from './fs/meta.ts';
 import { OpfsFs } from './fs/opfs.ts';
+import { protectInit } from './fs/protect.ts';
 import { fsError, type UsersMode } from './fs/types.ts';
 import { dialSocket, serveSocket } from './kernel/dial.ts';
 import type { WasmWorkerLike } from './kernel/host.ts';
@@ -51,7 +52,7 @@ export interface InitRequest {
   hostfs?: boolean;
   hostname?: string;
   users?: UsersMode;
-  protect?: { paths: string[] };
+  protect?: { paths: string[]; writers?: string[] };
   denials?: boolean;
   sealed?: boolean;
   approve?: boolean;
@@ -340,13 +341,13 @@ function hostOptions(
   users?: UsersMode;
   onDenial?: DenialHook;
   sealed?: SealedHook;
-  protect?: { paths: string[] };
+  protect?: { paths: string[]; writers?: string[] };
 } {
   return {
     ...(req.hostname !== undefined ? { hostname: req.hostname } : {}),
     ...(req.users !== undefined ? { users: req.users } : {}),
     ...(req.denials ? { onDenial: (denial: Denial) => port.postMessage({ denial }) } : {}),
-    ...(req.protect ? { protect: { paths: [...req.protect.paths] } } : {}),
+    ...(req.protect ? { protect: protectInit(req.protect) } : {}),
     ...(req.sealed ? { sealed } : {}),
   };
 }
