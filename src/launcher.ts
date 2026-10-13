@@ -1507,12 +1507,14 @@ export class Launcher {
 
   async mountAs(cred: Cred, spec: MountSpec): Promise<MountEntry> {
     const target = normalizePath(spec.target);
+    this.guardMount(target);
     await this.mountsOwn(cred, target, async () => (await this.fs.stat(target)).uid);
     return this.mount(this.mountedBy(spec, cred));
   }
 
   async umountAs(cred: Cred, target: string): Promise<void> {
     const at = normalizePath(target);
+    this.guardMount(at);
     await this.mountsOwn(cred, at, async () => Number(this.mounts.mounted(at)?.options.uid));
     this.umount(at);
   }
