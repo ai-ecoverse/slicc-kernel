@@ -5,6 +5,7 @@ export interface MetaEntry {
   atimeMs?: number;
   mtimeMs?: number;
   mtimeFor?: number;
+  timesAt?: number;
   ctimeMs?: number;
   ino?: number;
   link?: string;

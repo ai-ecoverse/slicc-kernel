@@ -10,6 +10,7 @@ import {
   type SyncFsPosixBridge,
   type SyncFsUsage,
 } from './sync-fs-wire.ts';
+import { syncCallCount } from './sync-sab-bridge.ts';
 
 const S_IFDIR = 0o040000;
 const S_IFREG = 0o100000;
@@ -24,6 +25,7 @@ const SEEK_END = 2;
 
 interface LiveNodeState {
   stat?: SyncFsBridgeStat;
+  statAt?: number;
 
   data?: Uint8Array;
   len: number;
@@ -219,6 +221,10 @@ function refusal(err: unknown): boolean {
   return code === 'EACCES' || code === 'EPERM';
 }
 
+function cachedStat(s: LiveNodeState, dir: boolean): boolean {
+  return s.stat !== undefined && (!dir || s.statAt === syncCallCount());
+}
+
 const stale = (s: LiveNodeState): boolean => !!s.orphan && !s.kept;
 
 function linkedStates(bridgeOf: (node: LiveFsNode) => SyncFsPosixBridge) {
@@ -311,7 +317,8 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
   }
 
   function freshState(stat?: SyncFsBridgeStat): LiveNodeState {
-    return { ...(stat ? { stat } : {}), len: 0, loaded: false, dirty: false, openCount: 0 };
+    const statAt = syncCallCount();
+    return { ...(stat ? { stat, statAt } : {}), len: 0, loaded: false, dirty: false, openCount: 0 };
   }
 
   function makeNode(parent: LiveFsNode | null, name: string, st: SyncFsBridgeStat): LiveFsNode {
@@ -327,12 +334,12 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
       const size = node.live.ranged?.size() ?? node.live.len;
       return { ...(node.live.stat as SyncFsBridgeStat), size };
     }
-    if (!node.live.stat) {
+    if (!cachedStat(node.live, Fs.isDir(node.mode))) {
       const st = call(() => bridgeOf(node).lstat(liveNodePath(linked.holder(node))));
-      node.live.stat = st;
+      Object.assign(node.live, { stat: st, statAt: syncCallCount() });
       node.mode = modeFromStat(st);
     }
-    return node.live.stat;
+    return node.live.stat as SyncFsBridgeStat;
   }
 
   function childPath(parent: LiveFsNode, name: string): string {
@@ -492,8 +499,9 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
     flushNode(node);
     metadataCall(() => bridgeOf(node).utimes(path, atime, mtime, now));
   };
+  const stamped = typeof (Fs as { doSetAttr?: unknown }).doSetAttr !== 'function';
   const timesOf = (node: LiveFsNode, attr: LiveSetAttr): [number, number] | undefined => {
-    const mtime = toMs(attr.mtime) ?? attr.timestamp;
+    const mtime = toMs(attr.mtime) ?? (stamped ? attr.timestamp : undefined);
     const atime = toMs(attr.atime);
     if (mtime !== undefined && attr.atime !== null) return [atime ?? mtime, mtime];
     if (atime === undefined && mtime === undefined) return undefined;
@@ -502,8 +510,10 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
   };
   return {
     getattr(node) {
-      const st = statOf(node);
       const owned = bridgeOf(node).owners === true;
+      if (owned && Fs.isLink(node.mode) && statOf(node).uid === undefined)
+        node.live.stat = undefined;
+      const st = statOf(node);
       const s = node.live;
       const size = Fs.isDir(node.mode) ? 4096 : (s.ranged?.size() ?? (s.loaded ? s.len : st.size));
       const mtime = new Date(st.mtimeMs ?? 0);
