@@ -69,15 +69,26 @@ export function scrubbed(inner: OpenFile, scrubber: Scrubber, idleMs = SCRUB_IDL
   });
 }
 
+export function scrubbedAll(file: OpenFile, scrubbers: readonly Scrubber[]): OpenFile {
+  return scrubbers.reduce((inner, scrubber) => scrubbed(inner, scrubber), file);
+}
+
+function stdioFiles(fds: FdTable): Set<OpenFile> {
+  const files = new Set<OpenFile>();
+  for (const fd of [1, 2]) {
+    try {
+      files.add(fds.get(fd));
+    } catch {}
+  }
+  return files;
+}
+
 export function scrubStdio(fds: FdTable, scrubber: Scrubber): void {
   const wrapped = new Map<OpenFile, OpenFile>();
-  for (const fd of [1, 2]) {
-    let original: OpenFile;
-    try {
-      original = fds.get(fd);
-    } catch {
-      continue;
-    }
+  const stdio = stdioFiles(fds);
+  for (const fd of fds.numbers()) {
+    const original = fds.get(fd);
+    if (!stdio.has(original) && !original.file.tty) continue;
     const known = wrapped.get(original);
     const flags = fds.statusFlags(fd);
     const wrapper = known ? known.retain() : scrubbed(original.retain(), scrubber);

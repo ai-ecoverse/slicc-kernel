@@ -68,7 +68,7 @@ import type { ProcessInfo } from './kernel/proc-info.ts';
 import { DEFAULT_UMASK } from './kernel/process.ts';
 import type { ForkState, Program } from './kernel/protocol.ts';
 import { PtyTable } from './kernel/pty.ts';
-import { type ScrubSecret, scrubbed, scrubberOf, scrubStdio } from './kernel/scrub-file.ts';
+import { type ScrubSecret, scrubbedAll, scrubberOf, scrubStdio } from './kernel/scrub-file.ts';
 import { SealedBroker, type SealedHook } from './kernel/sealed.ts';
 import { SettlingChildren } from './kernel/settling.ts';
 import { SIG, sigbit } from './kernel/signals.ts';
@@ -506,7 +506,7 @@ export class Launcher {
   readonly usersMode: UsersMode;
   readonly dac: Dac | undefined;
   private readonly sealed: SealedBroker;
-  private readonly scrubs = new Map<number, Scrubber>();
+  private readonly scrubs = new Map<number, Scrubber[]>();
   private readonly rootFs: KernelFs;
   private fileWatches: FileWatches | undefined;
   private nextPid = 1000;
@@ -1056,8 +1056,9 @@ export class Launcher {
       throw fsError('ESRCH', `no process group ${req.pgid}`);
     }
     const pid = req.pid ?? this.nextPid++;
-    const scrub = req.scrub ?? (req.ppid !== undefined ? this.scrubs.get(req.ppid) : undefined);
-    if (scrub) this.scrubs.set(pid, scrub);
+    const inherited = req.ppid !== undefined ? this.scrubs.get(req.ppid) : undefined;
+    const scrubs = req.scrub ? [...(inherited ?? []), req.scrub] : inherited;
+    if (scrubs) this.scrubs.set(pid, scrubs);
     const stack = this.stackFor(req.tag);
     const terminal = req.fds.stdioTerminal();
     const decided = req.decided ?? Promise.resolve(true);
@@ -1082,7 +1083,7 @@ export class Launcher {
       cred: req.cred,
       ...(this.owners ? { owners: true } : {}),
       sealed: this.sealed,
-      ...(scrub ? { ttyFilter: (file: OpenFile) => scrubbed(file, scrub) } : {}),
+      ...(scrubs ? { ttyFilter: (file: OpenFile) => scrubbedAll(file, scrubs) } : {}),
       ...(this.dac ? { dac: this.dac } : {}),
       program: req.program,
       argv0: req.argv0,
@@ -1387,7 +1388,7 @@ export class Launcher {
   }
 
   private forker(ppid: number, parent: StartRequest): ChildForker {
-    const { exec: _exec, pid: _pid, ...image } = parent;
+    const { exec: _exec, pid: _pid, scrub: _scrub, ...image } = parent;
     return async (state, fds) =>
       childHandle(
         this.start({
