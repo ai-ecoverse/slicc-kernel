@@ -1,7 +1,7 @@
 import { type KernelFs, normalizePath, rangedOps } from './types.ts';
 
 const MAGIC = [0x00, 0x61, 0x73, 0x6d];
-const MAX_FRESH = 1024;
+const MAX_FRESH = 65_536;
 
 interface Fresh {
   umask: number;
@@ -17,8 +17,11 @@ export class FreshModules {
   private readonly fresh = new Map<string, Fresh>();
 
   add(path: string, umask: number, pid: number): void {
-    if (this.fresh.size >= MAX_FRESH) this.fresh.clear();
-    this.fresh.set(normalizePath(path), { umask: umask & 0o777, pid, added: 0 });
+    const key = normalizePath(path);
+    this.fresh.delete(key);
+    const oldest = this.fresh.size >= MAX_FRESH ? this.fresh.keys().next().value : undefined;
+    if (oldest !== undefined) this.fresh.delete(oldest);
+    this.fresh.set(key, { umask: umask & 0o777, pid, added: 0 });
   }
 
   forget(pid: number): void {
