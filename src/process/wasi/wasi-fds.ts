@@ -607,6 +607,7 @@ export class WasiFds {
   }
 
   resolve(dirfd: number, path: string): string {
+    if (path === '') throw new WasiError('ENOENT');
     const joined = path.startsWith('/') ? path : `${this.dir(dirfd).path}/${path}`;
     return joined.split('/').includes('..') ? physical(this.fs, joined) : normalize(joined);
   }

@@ -75,6 +75,7 @@ export interface SpawnWasmOptions {
   cred?: Cred;
   owners?: boolean;
   sealed?: SealedBroker;
+  readonlyAt?: (path: string) => boolean;
   dac?: Dac;
   identity?: () => Promise<{ pid: number; ppid: number }>;
   onSyscall?: (req: WasmSyscall) => void;
@@ -355,13 +356,14 @@ function holdingToken(
 function processOptions(
   opts: SpawnWasmOptions,
   header: Int32Array,
-  hooks: Pick<WasmProcessOptions, 'raise' | 'threadKill' | 'exitNow'>,
+  hooks: Pick<WasmProcessOptions, 'raise' | 'threadKill' | 'exitNow' | 'exitSignal'>,
   created: Created
 ): WasmProcessOptions {
   return {
     ...inherited(opts),
     ...(opts.owners ? { owners: true } : {}),
     ...(opts.sealed ? { sealed: opts.sealed } : {}),
+    ...(opts.readonlyAt ? { readonlyAt: opts.readonlyAt } : {}),
     ...(opts.dac ? { guard: { dac: opts.dac, fs: opts.fs, created } } : {}),
     ...(opts.identity ? { identity: opts.identity } : {}),
     ...(opts.onSyscall ? { onSyscall: opts.onSyscall } : {}),
@@ -392,6 +394,7 @@ function processOptions(
     raise: hooks.raise,
     threadKill: hooks.threadKill,
     ...(hooks.exitNow ? { exitNow: hooks.exitNow } : {}),
+    ...(hooks.exitSignal ? { exitSignal: hooks.exitSignal } : {}),
     ...(opts.program.abi === 'wasi' || opts.program.abi === 'js'
       ? { pendingBits: () => Atomics.load(header, SAB_I_SIGNALS) }
       : {}),
@@ -436,7 +439,12 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
         raise: (sig) => signal(sig),
         threadKill: (tid, sig) =>
           killThread(threadSignals.get(tid), process.signalMasks().caught, sig),
-        ...(opts.program.abi === 'js' ? { exitNow: (code: number) => exitNow(code) } : {}),
+        ...(opts.program.abi === 'js'
+          ? {
+              exitNow: (code: number) => exitNow(code),
+              exitSignal: (sig: number) => queueMicrotask(() => finish(128 + sig, sig)),
+            }
+          : {}),
       },
       created
     )

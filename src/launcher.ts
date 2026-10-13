@@ -13,9 +13,18 @@ import {
   scanFilesystems,
 } from './commands.ts';
 import { R_OK, X_OK } from './fs/access.ts';
+import { type Attestation, attest, FileWatches, type RemoteFs } from './fs/attest.ts';
 import { followLinks, withCommandDirs } from './fs/commands.ts';
 import { Dac, type DenialHook, need, TTY_MODE } from './fs/dac.ts';
 import { physicalPathAsync } from './fs/physical-path.ts';
+import {
+  holdsProtected,
+  isProtected,
+  PROTECT_WRITER,
+  ProtectedFs,
+  type Protection,
+  protectedPrefixes,
+} from './fs/protect.ts';
 import type { KernelFs, UsersMode } from './fs/types.ts';
 import { fsError, normalizePath } from './fs/types.ts';
 import { UNLINKED_DIR, UnlinkedKeeper, type UnlinkOwner, webLocks } from './fs/unlinked.ts';
@@ -143,6 +152,7 @@ export interface LauncherOptions {
   sealed?: SealedHook;
   approve?: ApproveHook;
   sudoTimeoutMs?: number;
+  protect?: Protection;
 }
 
 export interface PendingMedium {
@@ -385,6 +395,8 @@ function concat(chunks: Uint8Array[]): Uint8Array {
 
 export class Launcher {
   readonly fs: KernelFs;
+  readonly processFs: KernelFs;
+  private readonly prefixes: string[];
   private readonly base: KernelFs;
   private readonly createWorker: () => WasmWorkerLike;
   private readonly modulesDir: string;
@@ -442,13 +454,17 @@ export class Launcher {
   readonly usersMode: UsersMode;
   readonly dac: Dac | undefined;
   private readonly sealed: SealedBroker;
+  private readonly rootFs: KernelFs;
+  private fileWatches: FileWatches | undefined;
   private nextPid = 1000;
   readonly boot = Date.now();
   private terminals = 0;
 
   constructor(options: LauncherOptions) {
     this.usersMode = usersMode(options.users);
+    this.rootFs = options.fs;
     this.dac = this.usersMode === 'off' ? undefined : new Dac(this.usersMode, options.onDenial);
+    if (this.dac) this.dac.tagOf = (pid) => this.tagOf(pid);
     this.sealed = new SealedBroker(options.sealed, this.usersMode, undefined, (pid) =>
       this.tagOf(pid)
     );
@@ -510,6 +526,11 @@ export class Launcher {
       }
     );
     this.fs = this.unlinked.wrap(keepingOpen(fs, this.nodes));
+    if (options.protect?.writer) throw new Error(PROTECT_WRITER);
+    this.prefixes = protectedPrefixes(options.protect?.paths ?? []);
+    this.processFs =
+      this.prefixes.length > 0 ? new ProtectedFs(this.prefixes).view(this.fs) : this.fs;
+    options.fs.protect?.(this.prefixes);
     this.users = new UserDb(this.fs, this.owners);
     this.sudoer = new Sudo({
       fs: this.fs,
@@ -719,12 +740,12 @@ export class Launcher {
 
   private async mayExec(
     cred: Readonly<Cred>,
-    req: { file: string; cwd: string; pid: number },
+    req: { file: string; cwd: string; pid: number; tag?: string | undefined },
     planned: Planned | undefined
   ): Promise<void> {
     const { dac } = this;
     if (!dac) return;
-    const g = { fs: this.fs, cred, pid: req.pid, dac };
+    const g = { fs: this.fs, cred, pid: req.pid, dac, tag: req.tag };
     const byPath = (file: string) => file.includes('/') && !COMMAND.test(file);
     if (byPath(req.file)) {
       const path = this.fs.resolvePath(req.cwd, req.file);
@@ -910,7 +931,10 @@ export class Launcher {
       env: req.env,
       cwd: req.cwd,
       fds: req.fds,
-      fs: this.fs,
+      fs: this.processFs,
+      ...(this.prefixes.length > 0
+        ? { readonlyAt: (path: string) => isProtected(this.prefixes, path) }
+        : {}),
       createWorker: this.createWorker,
       onError: req.report,
       spawner: this.spawner(pid, req.report),
@@ -1225,6 +1249,20 @@ export class Launcher {
     this.settling.deliver(sig, pgid, keyed, tty.reading ? undefined : foreground);
   }
 
+  private async resolvePrefixes(): Promise<void> {
+    for (const prefix of [...this.prefixes]) {
+      const real = await this.base.realpath?.(prefix, true).catch(() => undefined);
+      if (real !== undefined && !this.prefixes.includes(real)) this.prefixes.push(real);
+    }
+  }
+
+  private guardMount(target: string): void {
+    const at = normalizePath(target);
+    if (isProtected(this.prefixes, at) || holdsProtected(this.prefixes, at)) {
+      throw fsError('EROFS', at);
+    }
+  }
+
   private umaskOf(pid: number): number {
     return this.processes.get(pid)?.umask?.() ?? DEFAULT_UMASK;
   }
@@ -1275,12 +1313,29 @@ export class Launcher {
       (sig === SIG.CONT && session !== undefined && this.jobs.sidOf(target) === session) ||
       (from !== undefined && this.imageOf(from) === this.imageOf(target)) ||
       (from !== undefined && this.granted.get(this.jobs.shown(target)) === from);
+    if (pid === -1) {
+      const sender = from === undefined ? undefined : this.imageOf(from);
+      return this.killAll(
+        sig,
+        (member) => this.imageOf(member) !== sender && may(this.imageOf(member))
+      );
+    }
     if (pid < 0) return this.jobs.killGroup(-pid, sig, (member) => may(this.imageOf(member)));
     const handle = this.processes.get(pid);
     if (!handle) return false;
     if (!may(this.imageOf(pid))) throw fsError('EPERM', `pid ${pid}`);
     if (sig !== 0) handle.signal(sig);
     return true;
+  }
+
+  private killAll(sig: number, may: (pid: number) => boolean): boolean {
+    let any = false;
+    for (const [pid, handle] of [...this.processes]) {
+      if (pid === 1 || !may(pid)) continue;
+      any = true;
+      if (sig !== 0) handle.signal(sig);
+    }
+    return any;
   }
 
   private async driver(type: string, spec: MountSpec): Promise<OpenedDriver> {
@@ -1376,7 +1431,23 @@ export class Launcher {
     };
   }
 
+  attest(path: string): Promise<Attestation> {
+    return attest(this.rootFs, path, {
+      users: this.usersMode,
+      mounts: this.mounts
+        .list()
+        .map((entry) => entry.target)
+        .filter((target) => this.mounts.mounted(target) !== undefined),
+    });
+  }
+
+  watchFiles(paths: readonly string[], notify: (path: string) => void): Promise<() => void> {
+    this.fileWatches ??= new FileWatches(this.watchers, this.rootFs as RemoteFs);
+    return this.fileWatches.watch(paths, notify);
+  }
+
   async mount(spec: MountSpec): Promise<MountEntry> {
+    this.guardMount(spec.target);
     const fsa = spec.type === 'fsa' && !spec.source.startsWith('fsa:');
     const entry = await this.mounts.mount(
       fsa ? { ...spec, source: `fsa:${crypto.randomUUID()}` } : spec,
@@ -1424,6 +1495,7 @@ export class Launcher {
       [`/${UNLINKED_DIR}`, 0o700],
     ];
     for (const [path, mode] of layout) {
+      if (isProtected(this.prefixes, normalizePath(path))) continue;
       const real = await this.realLayoutPath(path);
       const fresh = real !== undefined && !(await this.base.hasOwner?.(real));
       if (fresh) await this.base.chown?.(real, { uid: 0, gid: 0, mode, follow: false });
@@ -1495,6 +1567,7 @@ export class Launcher {
 
   private async processMount(pid: number, call: MountCall, signal: AbortSignal): Promise<void> {
     const spec = mountCall(call);
+    this.guardMount(spec.target);
     await this.permit({ op: 'mount', pid, ...spec, options: { ...spec.options } });
     await this.mountsOwn(
       this.credOf(pid),
@@ -1513,6 +1586,7 @@ export class Launcher {
 
   async umountAs(cred: Cred, target: string): Promise<void> {
     const at = normalizePath(target);
+    this.guardMount(at);
     await this.mountsOwn(cred, at, async () => Number(this.mounts.mounted(at)?.options.uid));
     this.umount(at);
   }
@@ -1528,6 +1602,7 @@ export class Launcher {
   private async processUmount(pid: number, target: string, flags: number): Promise<void> {
     const call = umountCall(target, flags);
     let mounted: MountEntry | undefined;
+    this.guardMount(call.target);
     for (;;) {
       mounted = this.mounts.mounted(call.target);
       await this.permit({
@@ -1543,6 +1618,7 @@ export class Launcher {
   }
 
   async prepare(): Promise<void> {
+    await this.resolvePrefixes();
     for (const dir of SHARED_DIRS) await this.base.mkdir(dir, { recursive: true });
     if (this.owners) await this.ownTmp();
     await this.provisionPnpmHome();
@@ -1602,22 +1678,22 @@ export class Launcher {
     };
   }
 
-  private async starting(argv: string[], dir: string | undefined, account: Account) {
+  private async starting(argv: string[], dir: string | undefined, account: Account, tag?: string) {
     this.resetCatalogs();
     const scope = account.uid === 0 ? '' : pnpmHomeOf(account, this.pnpmHome);
     const start = dir ?? '/';
     const cwd = await physicalPathAsync(this.base, start.startsWith('/') ? start : `/${start}`);
     const [file = ''] = argv;
-    await this.base.mkdir(cwd, { recursive: true });
+    if (!(await this.base.exists(cwd))) await this.processFs.mkdir(cwd, { recursive: true });
     const planned = await this.plan(file, argv, cwd, scope);
-    await this.mayExec(credOf(account), { file, cwd, pid: 0 }, planned);
+    await this.mayExec(credOf(account), { file, cwd, pid: 0, tag }, planned);
     return { cwd, file, planned };
   }
 
   async openTerminal(argv: string[], options: TerminalOptions): Promise<TerminalSession> {
     tagOption(options.tag);
     const { account, tty: ttyGroup } = await this.terminalAccount(options.user);
-    const { cwd, file, planned } = await this.starting(argv, options.cwd, account);
+    const { cwd, file, planned } = await this.starting(argv, options.cwd, account, options.tag);
     if (!planned) throw new Error(`${file}: command not found`);
     let leader = 0;
     const tty: KernelTty = new KernelTty(
@@ -1668,7 +1744,7 @@ export class Launcher {
   async run(argv: string[], options: RunOptions = {}): Promise<RunResult> {
     tagOption(options.tag);
     const account = await this.account(options.user);
-    const { cwd, file, planned } = await this.starting(argv, options.cwd, account);
+    const { cwd, file, planned } = await this.starting(argv, options.cwd, account, options.tag);
     const env = this.environment(cwd, options.env, account);
     const out: Uint8Array[] = [];
     const err: Uint8Array[] = [];
