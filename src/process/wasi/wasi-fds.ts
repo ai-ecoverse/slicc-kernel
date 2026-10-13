@@ -76,6 +76,14 @@ export class WasiFds {
     this.fs = fs;
   }
 
+  private readonly made = new WeakSet<object>();
+
+  onMade?: (path: string) => void;
+
+  private settle(made: object, path: string): void {
+    if (this.made.delete(made)) this.onMade?.(path);
+  }
+
   setup(
     cwd: string,
     inherited: ReadonlyArray<{
@@ -421,6 +429,7 @@ export class WasiFds {
     this.table.delete(fd);
     this.cloexec.delete(fd);
     this.kernel.sys.close(fd);
+    if (e.type === 'kernel' && e.path !== undefined) this.settle(e, e.path);
     this.release(e);
     this.bump();
   }
@@ -499,6 +508,7 @@ export class WasiFds {
   }
 
   private letGo(buffer: FileBuffer): void {
+    this.settle(buffer, buffer.path);
     this.fs.hold?.(buffer.path, false, true, buffer.handle);
   }
 
@@ -738,6 +748,7 @@ export class WasiFds {
     const io = handle !== undefined && this.fs.pinned ? this.fs.pinned(handle) : this.fs;
     const buffer = new FileBuffer(io, path, empty, st.maxFile, ranged, st.version);
     buffer.handle = handle;
+    if (made) this.made.add(buffer);
     this.buffers.set(path, buffer);
     const id = this.identity(st);
     if (id !== undefined) this.know(buffer, id);
@@ -764,7 +775,16 @@ export class WasiFds {
     });
     const ino = writable ? (this.openedIno(fd) ?? this.inoOf(path)) : undefined;
     if (truncate) (this.fs as { touched?(path?: string, ino?: number): void }).touched?.(path, ino);
-    this.table.set(fd, { type: 'kernel', kind: 'file', nonblock: false, append, path, ino });
+    const entry = {
+      type: 'kernel' as const,
+      kind: 'file' as const,
+      nonblock: false,
+      append,
+      path,
+      ino,
+    };
+    this.table.set(fd, entry);
+    if (made) this.made.add(entry);
     if (append) this.publishFlags(fd, { nonblock: false, append });
     this.bump();
     return fd;

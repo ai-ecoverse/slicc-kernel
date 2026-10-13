@@ -83,6 +83,7 @@ function idOf(value: number): number | undefined {
 }
 const S_IFIFO = 0o010000;
 const DEFAULT_UMASK = 0o022;
+const WASM_MAGIC = [0x00, 0x61, 0x73, 0x6d];
 
 const MONOTONIC_BASE = BigInt(Math.round(performance.timeOrigin)) * NS_PER_MS;
 
@@ -196,6 +197,7 @@ export class WasiHost {
     this.o = { ...o, kernel: { sys, call } };
     this.startCwd = o.cwd;
     this.fds = new WasiFds(this.o.kernel, o.fs);
+    if (o.fs.owners) this.fds.onMade = (path) => this.madeModule(path);
     if (o.shared) this.fds.share(o.shared, true);
     else if (o.forked) this.fds.restore(o.forked.fds, o.forked.cloexec);
     else this.fds.setup(o.cwd, o.inherited ?? [], o.preopenRoot === true);
@@ -204,6 +206,17 @@ export class WasiHost {
 
   get cwd(): string {
     return this.fds.cwd() ?? this.startCwd;
+  }
+
+  private madeModule(path: string): void {
+    try {
+      const head = this.o.fs.pread ? this.o.fs.pread(path, 0, 4) : this.o.fs.readFile(path);
+      if (!WASM_MAGIC.every((b, i) => head[i] === b)) return;
+      const umask = this.o.kernel.call({ op: 'proc-umask' }) as number;
+      const mode = (this.o.fs.stat(path).mode ?? 0o644) & 0o7777;
+      const exec = mode | (0o111 & ~umask);
+      if (exec !== mode) this.o.fs.chmod(path, exec);
+    } catch {}
   }
 
   private created(path: string, mode: number): void {
