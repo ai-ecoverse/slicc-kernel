@@ -460,6 +460,7 @@ export class Launcher {
   constructor(options: LauncherOptions) {
     this.usersMode = usersMode(options.users);
     this.dac = this.usersMode === 'off' ? undefined : new Dac(this.usersMode, options.onDenial);
+    if (this.dac) this.dac.tagOf = (pid) => this.tagOf(pid);
     this.sealed = new SealedBroker(options.sealed, this.usersMode, undefined, (pid) =>
       this.tagOf(pid)
     );
@@ -735,12 +736,12 @@ export class Launcher {
 
   private async mayExec(
     cred: Readonly<Cred>,
-    req: { file: string; cwd: string; pid: number },
+    req: { file: string; cwd: string; pid: number; tag?: string | undefined },
     planned: Planned | undefined
   ): Promise<void> {
     const { dac } = this;
     if (!dac) return;
-    const g = { fs: this.fs, cred, pid: req.pid, dac };
+    const g = { fs: this.fs, cred, pid: req.pid, dac, tag: req.tag };
     const byPath = (file: string) => file.includes('/') && !COMMAND.test(file);
     if (byPath(req.file)) {
       const path = this.fs.resolvePath(req.cwd, req.file);
@@ -1613,7 +1614,7 @@ export class Launcher {
     };
   }
 
-  private async starting(argv: string[], dir: string | undefined, account: Account) {
+  private async starting(argv: string[], dir: string | undefined, account: Account, tag?: string) {
     this.resetCatalogs();
     const scope = account.uid === 0 ? '' : pnpmHomeOf(account, this.pnpmHome);
     const start = dir ?? '/';
@@ -1621,14 +1622,14 @@ export class Launcher {
     const [file = ''] = argv;
     if (!(await this.base.exists(cwd))) await this.processFs.mkdir(cwd, { recursive: true });
     const planned = await this.plan(file, argv, cwd, scope);
-    await this.mayExec(credOf(account), { file, cwd, pid: 0 }, planned);
+    await this.mayExec(credOf(account), { file, cwd, pid: 0, tag }, planned);
     return { cwd, file, planned };
   }
 
   async openTerminal(argv: string[], options: TerminalOptions): Promise<TerminalSession> {
     tagOption(options.tag);
     const { account, tty: ttyGroup } = await this.terminalAccount(options.user);
-    const { cwd, file, planned } = await this.starting(argv, options.cwd, account);
+    const { cwd, file, planned } = await this.starting(argv, options.cwd, account, options.tag);
     if (!planned) throw new Error(`${file}: command not found`);
     let leader = 0;
     const tty: KernelTty = new KernelTty(
@@ -1679,7 +1680,7 @@ export class Launcher {
   async run(argv: string[], options: RunOptions = {}): Promise<RunResult> {
     tagOption(options.tag);
     const account = await this.account(options.user);
-    const { cwd, file, planned } = await this.starting(argv, options.cwd, account);
+    const { cwd, file, planned } = await this.starting(argv, options.cwd, account, options.tag);
     const env = this.environment(cwd, options.env, account);
     const out: Uint8Array[] = [];
     const err: Uint8Array[] = [];
