@@ -38,6 +38,10 @@ export interface ChildSpawnRequest {
   env: Record<string, string>;
   cwd: string;
 
+  pgid?: number;
+
+  session?: true;
+
   exec?: boolean;
 }
 
