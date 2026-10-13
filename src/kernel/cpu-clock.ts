@@ -12,6 +12,7 @@ export const IDLE_OPS: ReadonlySet<string> = new Set([
 export const SYS_CAP_US = 20_000;
 
 const LOCAL = SAB_CLOCK_OFFSET;
+const BLOCKED = 0;
 const IDLE = 1;
 
 export function epochMicros(): number {
@@ -23,6 +24,8 @@ function slots(sab: SharedArrayBuffer): BigInt64Array {
 }
 
 let local: BigInt64Array | undefined;
+let localSab: SharedArrayBuffer | undefined;
+let localStart = 0;
 
 export const rawWait: (
   typed: Int32Array,
@@ -34,6 +37,8 @@ export const rawWait: (
 export function useLocalClock(sab: SharedArrayBuffer | undefined): void {
   local = sab && sab.byteLength >= LOCAL + SAB_CLOCK_I64 * 8 ? slots(sab) : undefined;
   if (!local) return;
+  localSab = sab;
+  localStart = epochMicros();
   const wait = (typed: Int32Array, index: number, value: number, timeout?: number) =>
     localWait(() => rawWait(typed, index, value, timeout));
   (Atomics as unknown as { wait: typeof wait }).wait = wait;
@@ -51,6 +56,13 @@ export function localWait<T>(wait: () => T): T {
     const end = BigInt(epochMicros());
     Atomics.store(clock, IDLE, idle + (end > start ? end - start : 0n));
   }
+}
+
+export function localCpuNanos(): bigint | undefined {
+  if (!local || !localSab) return undefined;
+  const now = epochMicros();
+  const blocked = Number(Atomics.load(local, BLOCKED)) + localIdle(localSab, now).idle;
+  return BigInt(Math.max(0, now - localStart - blocked)) * 1000n;
 }
 
 export function localIdle(sab: SharedArrayBuffer, now: number): { idle: number; waiting: boolean } {
@@ -134,6 +146,7 @@ export class CpuClock {
     const busy = this.kind === 'sys' ? Math.min(spent, SYS_CAP_US) : 0;
     this.sys += busy;
     this.idle += spent - busy;
+    Atomics.store(slots(this.sab), BLOCKED, BigInt(this.idle));
   }
 }
 
