@@ -36,6 +36,7 @@ import {
   type ChildSpawner,
   SpawnError,
 } from './kernel/children.ts';
+import { ClipboardBroker, type ClipboardHook } from './kernel/clipboard.ts';
 import type { CpuTimes } from './kernel/cpu-clock.ts';
 import { type Cred, copyCred, maySee, maySignal, ROOT } from './kernel/cred.ts';
 import { bytesSource, deviceFile, FdTable, sinkFile } from './kernel/fd-table.ts';
@@ -150,6 +151,7 @@ export interface LauncherOptions {
   users?: UsersMode;
   onDenial?: DenialHook;
   sealed?: SealedHook;
+  clipboard?: ClipboardHook;
   approve?: ApproveHook;
   sudoTimeoutMs?: number;
   protect?: Protection;
@@ -466,6 +468,7 @@ export class Launcher {
   readonly usersMode: UsersMode;
   readonly dac: Dac | undefined;
   private readonly sealed: SealedBroker;
+  private readonly clipboard: ClipboardBroker;
   private readonly rootFs: KernelFs;
   private fileWatches: FileWatches | undefined;
   private nextPid = 1000;
@@ -477,6 +480,9 @@ export class Launcher {
     this.rootFs = options.fs;
     this.dac = this.usersMode === 'off' ? undefined : new Dac(this.usersMode, options.onDenial);
     if (this.dac) this.dac.tagOf = (pid) => this.tagOf(pid);
+    this.clipboard = new ClipboardBroker(options.clipboard, this.usersMode, undefined, (pid) =>
+      this.tagOf(pid)
+    );
     this.sealed = new SealedBroker(options.sealed, this.usersMode, undefined, (pid) =>
       this.tagOf(pid)
     );
@@ -942,6 +948,7 @@ export class Launcher {
       cred: req.cred,
       ...(this.owners ? { owners: true } : {}),
       sealed: this.sealed,
+      clipboard: this.clipboard,
       ...(this.dac ? { dac: this.dac } : {}),
       program: req.program,
       argv0: req.argv0,
