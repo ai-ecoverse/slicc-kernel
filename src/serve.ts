@@ -105,6 +105,12 @@ export interface RoutesRequest {
   routes: RouteTable;
 }
 
+export interface TraitsRequest {
+  id: number;
+  op: 'transport-traits';
+  traits: RealmTransportTraits;
+}
+
 export type MountRequest =
   | { id: number; op: 'mount'; spec: MountSpec }
   | { id: number; op: 'umount'; target: string }
@@ -137,11 +143,25 @@ export type KernelRequest =
   | UsersRequest
   | MountRequest
   | DialRequest
-  | RoutesRequest;
+  | RoutesRequest
+  | TraitsRequest;
 
 type WithoutId<T> = T extends unknown ? Omit<T, 'id'> : never;
 
 export type KernelCall = WithoutId<KernelRequest>;
+
+function networkOp(
+  l: Launcher,
+  req: RoutesRequest | TraitsRequest,
+  remote: RemoteTransport | undefined
+): boolean {
+  if (req.op === 'routes') {
+    l.setRoutes(req.routes);
+    return true;
+  }
+  if (remote) remote.traits = req.traits;
+  return l.updateTransportTraits();
+}
 
 export async function inOpfs(deps: ServeDeps, root: FileSystemDirectoryHandle): Promise<boolean> {
   if (deps.syncAccess !== true) return false;
@@ -495,9 +515,8 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
     if (req.op === 'open-terminal') return terminal(req);
     if (req.op === 'connect') return connect(req.user, req.tag);
     if (isUsersRequest(req)) return usersOp(await ready(), req);
-    if (req.op === 'routes') {
-      (await ready()).setRoutes(req.routes);
-      return true;
+    if (req.op === 'routes' || req.op === 'transport-traits') {
+      return networkOp(await ready(), req, remote);
     }
     if (req.op === 'dial') return dial(await ready(), req);
     if (req.op === 'mount' || req.op === 'umount' || req.op === 'mounts' || req.op === 'insert')
