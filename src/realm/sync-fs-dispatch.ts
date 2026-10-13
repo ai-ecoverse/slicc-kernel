@@ -312,14 +312,31 @@ const CHANGING = new Set<SyncFsOp>([
   'link',
   'utimes',
   'lutimes',
+  'chmod',
+  'chown',
+  'lchown',
 ]);
+
+const CONTENT = new Set<SyncFsOp>(['write', 'pwrite', 'truncate']);
+
+async function mayChange(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest) {
+  const { mayChange } = entry.fs;
+  if (!mayChange) return;
+  const { op } = req;
+  if (CONTENT.has(op) && req.handle === undefined) return mayChange.call(entry.fs, path, true);
+  if (!CHANGING.has(op)) return;
+  await mayChange.call(entry.fs, path, op === 'utimes' || op === 'chmod' || op === 'chown');
+  if (op === 'rename' || op === 'link') {
+    await mayChange.call(entry.fs, entry.fs.resolvePath(entry.cwd, req.arg2 ?? ''), false);
+  }
+}
 
 async function guarded(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest) {
   const g = guardOf(entry);
   if (!g) return undefined;
   if (LOOKS.has(req.op) && (await entry.holdsKept?.(path))) return undefined;
   try {
-    if (CHANGING.has(req.op)) await entry.fs.mayChange?.(path, req.op === 'utimes');
+    await mayChange(entry, path, req);
     await guard(g, path, req, entry.cwd);
     return undefined;
   } catch (err) {

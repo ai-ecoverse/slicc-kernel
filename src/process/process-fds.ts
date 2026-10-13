@@ -855,6 +855,27 @@ function baseOf(Fs: AccessFs, dirfd: number): string {
 
 const W_ACCESS = 2;
 
+function readonlyRefusal(
+  Fs: AccessFs,
+  memory: WebAssembly.Memory,
+  call: { dirfd: number; path: number; amode: number; flags: number }
+): number {
+  if (!(call.amode & W_ACCESS)) return 0;
+  try {
+    const name = cString(memory, call.path);
+    const abs = name.startsWith('/') ? name : `${baseOf(Fs, call.dirfd)}/${name}`;
+    const follow = (call.flags & AT_SYMLINK_NOFOLLOW) === 0;
+    const { node } = (Fs.lookupPath as NonNullable<AccessFs['lookupPath']>).call(Fs, abs, {
+      follow,
+    });
+    const bridge = node.live ? node.mount.opts.bridge : undefined;
+    const stat = (bridge as { stat?: (path: string) => { readonly?: boolean } } | undefined)?.stat;
+    return stat?.(liveNodePath(node)).readonly ? -wasiErrno('EROFS') : 0;
+  } catch {
+    return 0;
+  }
+}
+
 function kernelChecks(
   Fs: AccessFs,
   memory: WebAssembly.Memory,
@@ -865,10 +886,6 @@ function kernelChecks(
   const lookupPath = Fs.lookupPath as NonNullable<AccessFs['lookupPath']>;
   const { node } = lookupPath.call(Fs, abs, { follow: (call.flags & AT_SYMLINK_NOFOLLOW) === 0 });
   const bridge = node.live ? node.mount.opts.bridge : undefined;
-  const stat = (bridge as { stat?: (path: string) => { readonly?: boolean } } | undefined)?.stat;
-  if (stat && call.amode & W_ACCESS && stat(liveNodePath(node)).readonly) {
-    return -wasiErrno('EROFS');
-  }
   if (!bridge?.owners || !bridge.access) return 0;
   const kind = call.flags & AT_EACCESS ? 'eaccess' : 'access';
   bridge.access(liveNodePath(node), call.amode, kind, (call.flags & AT_SYMLINK_NOFOLLOW) !== 0);
@@ -882,9 +899,12 @@ export function kernelAccess(
   glue?: KernelImports
 ): void {
   wrapImport(imports, 'faccessat', glue, (own) => (dirfd, path, amode, flags) => {
-    const rc = own(dirfd, path, amode, flags);
     const Fs = fs() as AccessFs | undefined;
     const heap = memory();
+    const call = { dirfd, path, amode: amode & 7, flags };
+    const refused = Fs?.lookupPath && heap ? readonlyRefusal(Fs, heap, call) : 0;
+    if (refused !== 0) return refused;
+    const rc = own(dirfd, path, amode, flags);
     if (rc !== 0 || !Fs?.lookupPath || !heap) return rc;
     try {
       return kernelChecks(Fs, heap, { dirfd, path, amode: amode & 7, flags });
