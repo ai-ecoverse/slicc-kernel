@@ -1409,7 +1409,7 @@ export class Launcher {
       }
       await this.base.chown?.(real, { uid: 0, gid: 0, mode: 0o1777, follow: false });
     }
-    await this.base.chmod('/tmp', 0o1777);
+    if (st?.isDirectory) await this.base.chmod(real as string, 0o1777);
   }
 
   private inUse(path: string): boolean {
