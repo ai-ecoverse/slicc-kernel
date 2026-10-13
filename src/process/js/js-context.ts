@@ -217,17 +217,21 @@ function killer(d: KillerDeps): JsSyncContext['kill'] {
       d.syncKernel.call({ op: 'proc-kill', pid, sig });
       return;
     }
+    const target = pid === d.self ? {} : { target: pid };
+    const r = d.lane({ op: 'proc-kill-self', sig, ...target, probe: true });
+    if (!r.ok) throw new JsCallError(r.errno, 'kill');
+    if (r.kind === 'void') return;
     exitAtOnce(d.lane, [...d.writes], d.modes(), 128 + sig, {
       op: 'proc-kill-self',
       sig,
-      ...(pid === d.self ? {} : { target: pid }),
+      ...target,
     });
   };
 }
 
 function includesSelf(kernel: JsSyncKernel, self: number, pid: number): boolean {
-  if (pid === self || pid === 0 || pid === -1) return true;
-  if (pid > 0) return false;
+  if (pid === self || pid === 0) return true;
+  if (pid > 0 || pid === -1) return false;
   return kernel.json({ op: 'proc-getpgid', pid: 0 }) === -pid;
 }
 

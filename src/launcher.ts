@@ -1308,12 +1308,29 @@ export class Launcher {
       (sig === SIG.CONT && session !== undefined && this.jobs.sidOf(target) === session) ||
       (from !== undefined && this.imageOf(from) === this.imageOf(target)) ||
       (from !== undefined && this.granted.get(this.jobs.shown(target)) === from);
+    if (pid === -1) {
+      const sender = from === undefined ? undefined : this.imageOf(from);
+      return this.killAll(
+        sig,
+        (member) => this.imageOf(member) !== sender && may(this.imageOf(member))
+      );
+    }
     if (pid < 0) return this.jobs.killGroup(-pid, sig, (member) => may(this.imageOf(member)));
     const handle = this.processes.get(pid);
     if (!handle) return false;
     if (!may(this.imageOf(pid))) throw fsError('EPERM', `pid ${pid}`);
     if (sig !== 0) handle.signal(sig);
     return true;
+  }
+
+  private killAll(sig: number, may: (pid: number) => boolean): boolean {
+    let any = false;
+    for (const [pid, handle] of [...this.processes]) {
+      if (pid === 1 || !may(pid)) continue;
+      any = true;
+      if (sig !== 0) handle.signal(sig);
+    }
+    return any;
   }
 
   private async driver(type: string, spec: MountSpec): Promise<OpenedDriver> {
