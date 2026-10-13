@@ -240,6 +240,7 @@ interface Planned {
   args: string[];
   script?: true;
   via?: string[];
+  sources?: string[];
 }
 
 interface WriterStack {
@@ -782,10 +783,16 @@ export class Launcher {
       }
       const inner = await this.interpreted(interp, [interp, ...passed], cwd, scope, depth + 1);
       const via = [interp, ...(inner?.via ?? [])];
-      return inner && { ...inner, target: withScriptEnv(inner.target, command), via };
+      const sources = [script, ...(inner?.sources ?? [])];
+      return inner && { ...inner, target: withScriptEnv(inner.target, command), via, sources };
     }
     const target = withScriptEnv(found, command);
-    return { target, args: [...(target.prefix ?? []), ...passed], via: [interp] };
+    return {
+      target,
+      args: [...(target.prefix ?? []), ...passed],
+      via: [interp],
+      sources: [script],
+    };
   }
 
   private async plan(
@@ -981,6 +988,8 @@ export class Launcher {
     let program: Program;
     try {
       const caller = { pid: req.ppid ?? 0, uid: req.cred.euid, tag: req.tag };
+      if (this.integrity)
+        for (const source of planned.sources ?? []) await this.text(source, caller);
       program = await this.program(target, env, caller);
     } catch (err) {
       await req.fds.closeAll();
