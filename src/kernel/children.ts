@@ -16,6 +16,7 @@ export type ChildStdio =
   | { fd: number }
   | { input: Uint8Array }
   | { capture: true; max?: number; overflow?: () => void; control?: CaptureControl }
+  | { sameAs: number }
   | { none: true }
   | { dir: string }
   | DeviceMeta;
@@ -212,7 +213,12 @@ export class ChildTable {
     const fds = new FdTable();
     const captured = new Map<number, Uint8Array[]>();
     try {
-      for (const [n, slot] of stdio.entries()) fds.installAt(n, this.openSlot(slot, n, captured));
+      for (const [n, slot] of stdio.entries()) {
+        fds.installAt(
+          n,
+          'sameAs' in slot ? fds.get(slot.sameAs).retain() : this.openSlot(slot, n, captured)
+        );
+      }
 
       for (const slot of inherit) {
         if (slot.fd <= 2) continue;

@@ -2,7 +2,9 @@ import { type CaptureControl, type ChildStdio, type ChildTable, SpawnError } fro
 import { KernelError } from './fd-table.ts';
 import { isSignal } from './signals.ts';
 
-export type RunStdio = 'pipe' | 'ignore' | 'inherit';
+export type RunStdio = 'pipe' | 'ignore' | 'inherit' | number;
+
+export type RunStderr = RunStdio | 'stdout';
 
 export interface RunRequest {
   op: 'proc-run';
@@ -13,7 +15,7 @@ export interface RunRequest {
   stdin: RunStdio;
   input?: Uint8Array;
   stdout: RunStdio;
-  stderr: RunStdio;
+  stderr: RunStderr;
   maxBuffer?: number;
   timeoutMs?: number;
   killSignal: number;
@@ -43,7 +45,9 @@ function capLimit(maxBuffer: unknown): number {
   return Math.min(asked, RUN_CAPTURE_CAP);
 }
 
-function slot(how: RunStdio, n: number, extra: () => ChildStdio): ChildStdio {
+function slot(how: RunStderr, n: number, extra: () => ChildStdio): ChildStdio {
+  if (how === 'stdout') return { sameAs: 1 };
+  if (typeof how === 'number') return { fd: how };
   if (how === 'inherit') return { fd: n };
   if (how === 'ignore') return { none: true };
   return extra();
