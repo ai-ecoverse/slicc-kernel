@@ -1409,10 +1409,7 @@ export class Launcher {
       (from !== undefined && this.granted.get(this.jobs.shown(target)) === from);
     if (pid === -1) {
       const sender = from === undefined ? undefined : this.imageOf(from);
-      return this.killAll(
-        sig,
-        (member) => this.imageOf(member) !== sender && may(this.imageOf(member))
-      );
+      return this.killAll(sig, (member) => this.imageOf(member) !== sender, may);
     }
     if (pid < 0) return this.jobs.killGroup(-pid, sig, (member) => may(this.imageOf(member)));
     const handle = this.processes.get(pid);
@@ -1422,14 +1419,21 @@ export class Launcher {
     return true;
   }
 
-  private killAll(sig: number, may: (pid: number) => boolean): boolean {
-    let any = false;
-    for (const [pid, handle] of [...this.processes]) {
-      if (pid === 1 || !may(pid)) continue;
-      any = true;
-      if (sig !== 0) handle.signal(sig);
+  private killAll(
+    sig: number,
+    other: (pid: number) => boolean,
+    may: (pid: number) => boolean
+  ): boolean {
+    const candidates = [...this.processes].filter(([pid]) => pid !== 1 && other(pid));
+    const targets = candidates.filter(([pid]) => may(this.imageOf(pid)));
+    if (targets.length === 0 && candidates.length > 0) throw fsError('EPERM', 'kill -1');
+    const pids = new Set(targets.map(([pid]) => pid));
+    const parents = new Map(this.jobs.list().map((m) => [m.pid, m.execParent]));
+    for (const [pid, handle] of targets) {
+      const parent = parents.get(pid);
+      if (sig !== 0 && (parent === undefined || !pids.has(parent))) handle.signal(sig);
     }
-    return any;
+    return targets.length > 0;
   }
 
   private async driver(type: string, spec: MountSpec): Promise<OpenedDriver> {
