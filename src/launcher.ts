@@ -539,6 +539,9 @@ export class Launcher {
     this.fs = this.unlinked.wrap(keepingOpen(fs, this.nodes));
     this.writerTags = writerTags(options.protect);
     this.unlinkOwnerOption = options.unlinkOwner;
+    if (this.writerTags.size > 0 && options.fs.protect && !options.fs.unguarded) {
+      throw new TypeError('protect.writers needs a root file system with an unguarded view');
+    }
     this.unguardedRoot = options.fs.unguarded?.() ?? options.fs;
     this.prefixes = protectedPrefixes(options.protect?.paths ?? []);
     this.processFs =
@@ -1302,6 +1305,7 @@ export class Launcher {
   private released(path: string): void {
     const at = normalizePath(path);
     this.unlinked.closed(at);
+    this.writers?.unlinked.closed(at);
     const open = [...this.openFiles].some((nodes) => nodes.writes(at)) || heldUnder(this.held, at);
     if (!open) void this.mounts.commit(at).catch(() => undefined);
   }
