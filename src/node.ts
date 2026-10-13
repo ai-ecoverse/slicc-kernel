@@ -18,6 +18,7 @@ import type {
 import type { WasmWorkerLike } from './kernel/host.ts';
 import type { RouteTable } from './kernel/net/routes.ts';
 import type { NetworkUplink } from './kernel/net/uplink.ts';
+import type { SealedHook } from './kernel/sealed.ts';
 import { Launcher, tagOption } from './launcher.ts';
 import type { FetchLike, HostfsGrantHook } from './mount/hostfs.ts';
 import type { MountEntry, MountSpec } from './mount/mount-fs.ts';
@@ -62,6 +63,12 @@ export type {
   TerminalSignal,
 } from './index.ts';
 export type {
+  SealedAbortReason,
+  SealedCaller,
+  SealedHook,
+  SealedRequest,
+} from './kernel/sealed.ts';
+export type {
   HostfsEvent,
   HostfsGrant,
   HostfsGrantHook,
@@ -90,6 +97,7 @@ export interface NodeKernelOptions {
   hostname?: string;
   users?: UsersMode;
   onDenial?: DenialHook;
+  sealed?: SealedHook;
   approve?: ApproveHook;
 }
 
@@ -218,6 +226,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     ...(options.hostname !== undefined ? { hostname: options.hostname } : {}),
     ...(options.users !== undefined ? { users: options.users } : {}),
     ...(options.onDenial ? { onDenial: options.onDenial } : {}),
+    ...(options.sealed ? { sealed: options.sealed } : {}),
     ...(options.approve ? { approve: options.approve } : {}),
   });
   await launcher.prepare();

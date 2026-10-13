@@ -1,6 +1,17 @@
 import { SIG } from '../../kernel/signals.ts';
 import { parseSyncFsStat, type SyncFsBridgeStat } from '../../realm/sync-fs-wire.ts';
 import { childOps, type JsChild, type JsExited, type JsSpawnOptions } from './js-children.ts';
+import {
+  devAsync,
+  devExists,
+  devOpen,
+  devReaddir,
+  devReadlink,
+  devStat,
+  inDev,
+  readWhole,
+  streamFile,
+} from './js-dev.ts';
 import { exitAtOnce, type PendingWrite } from './js-exit.ts';
 import { fetchOp } from './js-fetch.ts';
 import {
@@ -283,6 +294,7 @@ export function createContext(o: ContextOptions): CreatedContext {
 
   const statOf = async (op: 'stat' | 'lstat', path: string): Promise<SyncFsBridgeStat> => {
     const abs = resolve(path);
+    if (inDev(abs)) return devAsync(kernel, devStat(abs, op === 'stat'));
     await kernel.call({ op: 'fd-path-flush', path: abs });
     const s = parseSyncFsStat(await kernel.json({ op, path: abs }));
     if (!s) throw new JsCallError('EIO', op);
@@ -291,6 +303,7 @@ export function createContext(o: ContextOptions): CreatedContext {
 
   const open = async (path: string, options: JsOpenOptions = {}): Promise<JsFile> => {
     const abs = resolve(path);
+    if (inDev(abs)) return openDev(kernel, abs, options, { infos, handles, read, write: writeAll });
     const existing = await statOf(isExclusive(options) ? 'lstat' : 'stat', abs).catch(absent);
     checkOpen(abs, options, existing);
     const fd = (await kernel.json(openRequest(abs, options))) as number;
@@ -311,6 +324,7 @@ export function createContext(o: ContextOptions): CreatedContext {
 
   const fs = pathOps(kernel, resolve, statOf, open);
   const lane = o.lane ?? laneOf(undefined);
+  if (o.lane) kernel.syncLane = o.lane;
   const syncKernel = new JsSyncKernel(lane, kernel, unwind);
   const terminal = ttyOps(kernel);
   const sync: JsSyncContext = {
@@ -394,6 +408,41 @@ export function createContext(o: ContextOptions): CreatedContext {
     await terminal.restore();
   };
   return { ctx, drain };
+}
+
+interface DevState {
+  infos: Map<number, FdInfo>;
+  handles: Map<number, () => void>;
+  read(fd: number, max: number): Promise<Uint8Array>;
+  write(fd: number, data: Uint8Array): Promise<void>;
+}
+
+async function openDev(
+  kernel: JsKernel,
+  abs: string,
+  options: JsOpenOptions,
+  state: DevState
+): Promise<JsFile> {
+  const { fd, file, ...access } = await devAsync(kernel, devOpen(abs, options));
+  const forget = () => {
+    state.infos.delete(fd);
+    state.handles.delete(fd);
+  };
+  if (file) state.infos.set(fd, { kind: 'file' });
+  const close = async (n: number) => {
+    forget();
+    await kernel.call({ op: 'fd-close', fd: n });
+  };
+  const handle = file
+    ? fileHandle(kernel, fd, abs, options.append === true, forget)
+    : streamFile(
+        fd,
+        abs,
+        { read: (n, max) => state.read(n, max), write: state.write, close },
+        access
+      );
+  state.handles.set(fd, handle.invalidate);
+  return handle.file;
 }
 
 function fileHandle(
@@ -518,9 +567,16 @@ function pathOps(
   return {
     stat: (path) => statOf('stat', path),
     lstat: (path) => statOf('lstat', path),
-    exists: async (path) => (await kernel.json({ op: 'exists', path: resolve(path) })) === true,
-    readdir: async (path) =>
-      (await kernel.json({ op: 'readdir', path: resolve(path) })) as string[],
+    async exists(path) {
+      const abs = resolve(path);
+      if (inDev(abs)) return devAsync(kernel, devExists(abs));
+      return (await kernel.json({ op: 'exists', path: abs })) === true;
+    },
+    async readdir(path) {
+      const abs = resolve(path);
+      if (inDev(abs)) return devAsync(kernel, devReaddir(abs));
+      return (await kernel.json({ op: 'readdir', path: abs })) as string[];
+    },
     mkdir: async (path) => void (await kernel.call({ op: 'mkdir', path: resolve(path) })),
     rm: async (path) => void (await kernel.call({ op: 'rm', path: resolve(path) })),
     unlink: async (path) => void (await kernel.call({ op: 'unlink', path: resolve(path) })),
@@ -530,9 +586,14 @@ function pathOps(
       void (await kernel.call({ op: 'link', path: resolve(from), arg2: resolve(to) })),
     symlink: async (target, path) =>
       void (await kernel.call({ op: 'symlink', path: resolve(path), arg2: target })),
-    readlink: async (path) => String(await kernel.json({ op: 'readlink', path: resolve(path) })),
+    async readlink(path) {
+      const abs = resolve(path);
+      if (inDev(abs)) return devAsync(kernel, devReadlink(abs));
+      return String(await kernel.json({ op: 'readlink', path: abs }));
+    },
     async readFile(path) {
       const abs = resolve(path);
+      if (inDev(abs)) return readWhole(await open(abs));
       await kernel.call({ op: 'fd-path-flush', path: abs });
       return kernel.bytes({ op: 'read', path: abs });
     },

@@ -14,11 +14,13 @@ import { isHostname } from './kernel/net/loopback-names.ts';
 import type { TransportCall } from './kernel/net/remote-transport.ts';
 import type { RouteTable } from './kernel/net/routes.ts';
 import { type NetworkUplink, serveUplink, type UplinkCall } from './kernel/net/uplink.ts';
+import type { SealedHook } from './kernel/sealed.ts';
 import type { PendingMedium } from './launcher.ts';
 import type { MediumHandle } from './mount/fsa.ts';
 import type { HostfsGrantHook } from './mount/hostfs.ts';
 import type { MountEntry, MountSpec } from './mount/mount-fs.ts';
 import type { ProcessMountPolicy, ProcessMountRequest } from './mount/syscall.ts';
+import { sealedAnswerer } from './sealed-relay.ts';
 import type { InitRequest, KernelCall, TerminalAction } from './serve.ts';
 import type { ApproveHook, SudoRequest } from './sudo.ts';
 import { type NetworkTransport, serveTransport } from './transport.ts';
@@ -52,6 +54,12 @@ export type {
   ResolveFamily,
   UplinkTraits,
 } from './kernel/net/uplink.ts';
+export type {
+  SealedAbortReason,
+  SealedCaller,
+  SealedHook,
+  SealedRequest,
+} from './kernel/sealed.ts';
 export {
   checkLocalProxy,
   type LocalProxyCheckOptions,
@@ -135,6 +143,7 @@ export interface KernelOptions {
   hostname?: string;
   users?: UsersMode;
   onDenial?: DenialHook;
+  sealed?: SealedHook;
   approve?: ApproveHook;
 }
 
@@ -300,6 +309,7 @@ function initCall(options: KernelOptions, transport: NetworkTransport | undefine
     ...(options.hostname !== undefined ? { hostname: options.hostname } : {}),
     ...(options.users !== undefined ? { users: options.users } : {}),
     ...(options.onDenial ? { denials: true } : {}),
+    ...(options.sealed ? { sealed: true } : {}),
     ...(options.approve ? { approve: true } : {}),
     ...(options.processMounts !== undefined
       ? {
@@ -422,11 +432,15 @@ function approver(approve: ApproveHook | undefined, worker: Worker) {
   return handlers;
 }
 
-export async function createKernel(options: KernelOptions = {}): Promise<Kernel> {
+function checkOptions(options: KernelOptions): void {
   if (!globalThis.crossOriginIsolated) throw new Error(ISOLATION);
   if (options.hostname !== undefined && !isHostname(options.hostname)) {
     throw new Error(`not a host name: ${String(options.hostname)}`);
   }
+}
+
+export async function createKernel(options: KernelOptions = {}): Promise<Kernel> {
+  checkOptions(options);
   const url = options.worker ?? new URL('./kernel-worker.js', import.meta.url);
   const worker = new Worker(url, { type: 'module', name: 'slicc-kernel' });
   const pending = new Map<number, Pending>();
@@ -435,10 +449,12 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
 
   const dials = dialer((req) => call(req));
   const cdp = cdpBridge(options.cdp);
+  const sealed = sealedAnswerer(worker, options.sealed);
   const approvals = approver(options.approve, worker);
   const fail = (error: Error) => {
     dials.reset();
     cdp.close();
+    sealed.close();
     approvals.close();
     failure = error;
     bridge?.close();
@@ -477,8 +493,13 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
       insert: async () =>
         void (await call({ op: 'insert', target, source, handle: await chosen(handle) })),
     });
+  const aside = (data: WorkerMessage): data is { denial: Denial } => {
+    if (!('denial' in data)) return sealed.handle(data);
+    options.onDenial?.(data.denial);
+    return true;
+  };
   worker.addEventListener('message', ({ data }: MessageEvent<WorkerMessage>) => {
-    if ('denial' in data) return void options.onDenial?.(data.denial);
+    if (aside(data)) return;
     if (approvals.handle(data)) return;
     if ('net' in data) return bridge?.answer(data);
     if ('uplink' in data) return uplinks?.answer(data);

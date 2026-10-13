@@ -1,7 +1,7 @@
 import { JsCallError } from './js-kernel.ts';
 import type { JsSyncKernel } from './js-sync.ts';
 
-export type JsRunStdio = 'pipe' | 'ignore' | 'inherit';
+export type JsRunStdio = 'pipe' | 'ignore' | 'inherit' | number;
 
 export interface JsRunOptions {
   argv: readonly string[];
@@ -10,7 +10,7 @@ export interface JsRunOptions {
   input?: Uint8Array | string;
   stdin?: JsRunStdio;
   stdout?: JsRunStdio;
-  stderr?: JsRunStdio;
+  stderr?: JsRunStdio | 'stdout';
   maxBuffer?: number;
   timeout?: number;
   killSignal?: number | `SIG${string}`;
@@ -43,12 +43,17 @@ interface Outcome {
 
 const encoder = new TextEncoder();
 
-const STDIO = new Set<JsRunStdio>(['pipe', 'ignore', 'inherit']);
+const STDIO = new Set<unknown>(['pipe', 'ignore', 'inherit']);
 
 function stdioOf(how: JsRunStdio | undefined): JsRunStdio {
   if (how === undefined) return 'pipe';
+  if (typeof how === 'number' && Number.isInteger(how) && how >= 0) return how;
   if (!STDIO.has(how)) throw new JsCallError('EINVAL', 'run');
   return how;
+}
+
+function stderrOf(how: JsRunStdio | 'stdout' | undefined): JsRunStdio | 'stdout' {
+  return how === 'stdout' ? how : stdioOf(how);
 }
 
 function limit(value: number | undefined): number | undefined {
@@ -57,7 +62,11 @@ function limit(value: number | undefined): number | undefined {
   return value;
 }
 
-export function decodeRun(bytes: Uint8Array, stdout: JsRunStdio, stderr: JsRunStdio): JsRunResult {
+export function decodeRun(
+  bytes: Uint8Array,
+  stdout: JsRunStdio,
+  stderr: JsRunStdio | 'stdout'
+): JsRunResult {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const size = view.getUint32(0, true);
   const outcome = JSON.parse(new TextDecoder().decode(bytes.subarray(4, 4 + size))) as Outcome;
@@ -77,7 +86,7 @@ export function runSync(kernel: JsSyncKernel, d: RunDefaults, o: JsRunOptions): 
   const [file] = o.argv;
   if (file === undefined) throw new JsCallError('EINVAL', 'run');
   const stdout = stdioOf(o.stdout);
-  const stderr = stdioOf(o.stderr);
+  const stderr = stderrOf(o.stderr);
   const input = typeof o.input === 'string' ? encoder.encode(o.input) : o.input;
   const maxBuffer = limit(o.maxBuffer);
   const timeout = limit(o.timeout);
