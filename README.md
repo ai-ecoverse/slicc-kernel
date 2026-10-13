@@ -43,6 +43,7 @@ const { status, stdout, stderr } = await kernel.run(['bash', '-c', 'echo hi > he
 | `sealed` | none | `(req, { signal }) => Promise<object>`: answers requests written to [`/dev/sealed`](#devsealed). `createNodeKernel` takes it too |
 | `approve` | none | `(req, { signal }) => 'once' \| 'always' \| 'deny'` (or a promise of one): decides a `sudo` request that needs approval (see [Sudo](#sudo)); without it, such a request is denied. `createNodeKernel` takes it too |
 | `cdp` | none | `({ runtime }) => Promise<CdpConnection>`: a browser-level DevTools connection for programs that drive a browser (see [Browser automation](#browser-automation-cdp)) |
+| `protect` | none | `{ paths }`: directories no process may change, root included, in every `users` mode (see [Protected paths](#protected-paths)). `createNodeKernel` takes it too |
 
 ### `kernel.run(argv, options?) → Promise<{ status, stdout, stderr }>`
 
@@ -612,6 +613,26 @@ The kernel then asks the hook `{ v: 1, op: 'materializeConsume', ticket, stamp, 
 - `path` and `cwd` are the ones the `materialize` named, and `resolved` the file that runs, symlinks resolved;
 - `interpreters` is the chain of `#!` and `binfmt` interpreters the kernel will really run, outermost first, each absolute with its symlinks resolved, and empty for a program of the catalog (Emscripten, WASI or JS) and the `/usr/bin/<name>` entries for one. A plain `#!/usr/bin/env X` (or `env -S X …`) is reported as `X`: a command of the catalog as `/usr/bin/X`, a script command by its file. `env` with any other option or a `NAME=value` assignment is run and reported as `/usr/bin/env` itself;
 - `trusted` is true when the program and every interpreter are regular files owned by root and not writable by group or others, under directories that are all the same, up to `/` (for a command of the catalog, its package files). It's false with `users: 'off'`, where files have no owners. The reply must be `{ values, placeholders }` (string maps) within 10 s; anything else is `EACCES`. Each variable of the child's environment whose value is exactly `placeholders[NAME]` gets `values[NAME]`; nothing else changes. The kernel keeps no copy and logs nothing of either. Like any environment, the values are inherited by whatever the child itself spawns or execs, as on Linux.
+
+### Protected paths
+
+`createKernel({ protect: { paths: ['/node_modules', '/os'] } })` makes those directories read-only for every process, root included, in every `users` mode. They hold code every later process runs, which only the embedder writes, straight to OPFS.
+- **What fails:** any change under a path fails with `EROFS` ("Read-only file system"): a write, a create, a truncate, `mkdir`, removing or renaming (from or to), a hard or symbolic link created there, `chmod`, `chown` and setting times. So does removing or renaming a directory that holds one (`rm -rf /`). A missing working directory for `run` or `openTerminal` isn't created there either. Reads are unaffected. `'/'` protects the whole file system.
+- **Stats and symlinks:** files under a path show as on a read-only mount, so opens for writing fail at once. A write through a symlink, or through a symlinked directory, that leads into a path fails too.
+- **Where it's checked:** the root file system itself checks every change, from the moment the kernel is constructed, inside the change and against the path it really lands on. So a symlink swapped mid-way can't redirect a write. The kernel's own writes there are refused too, so don't protect what the kernel writes after it starts:
+  - `/etc` (`passwd`, `group` and the proxy's CA);
+  - `/home` and `/root` (new users' homes);
+  - `/tmp`;
+  - the system `PNPM_HOME` (`/usr/local/share/pnpm`);
+  - `/.slicc-unlinked` (files removed while open);
+  - `/` itself, which holds all of these.
+  Paths in the layout the kernel stamps with root's owner at boot are skipped when protected.
+- **Symlinks as paths:** a path that is itself a symlink protects the directory it names too, by its real path, once the kernel has prepared.
+- **Mounts:** nothing can be mounted at, under or above a path, not even by the embedder (`kernel.mount`, `/etc/fstab`). So a path always lies on the root file system, where that check holds.
+- **Clients:** a client's (`kernel.connect`) file calls, mounts and unmounts see the paths read-only, as its processes do.
+- **Not affected:** the page's own writes to OPFS.
+- **Writers:** a `writer` that lets chosen processes change the paths needs the kernel-side process tag ([#405](https://github.com/ai-ecoverse/slicc-kernel/pull/405)). Until then, `protect.writer` is refused.
+- **Where it is a boundary:** it's one in a browser, where programs' own code can't reach OPFS around the kernel (see [JS programs](#js-programs)). Under the Node entry it isn't, until [#407](https://github.com/ai-ecoverse/slicc-kernel/issues/407), and there `kernel.writeFile` under a path fails too, so write those files into `root` before creating the kernel.
 
 ### `/proc`
 
