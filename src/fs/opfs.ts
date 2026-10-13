@@ -406,6 +406,7 @@ export class OpfsFs implements KernelFs {
   }
 
   private async current(path: string, dir: FileSystemDirectoryHandle): Promise<boolean> {
+    if (dir === this.root) return path === '/';
     if (performance.now() - (this.checked.get(dir) ?? -CHECK_MS) < CHECK_MS) return true;
     const where = await this.root.resolve(dir).catch(() => null);
     if (where === null || `/${where.join('/')}` !== path) return false;
