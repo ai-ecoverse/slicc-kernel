@@ -92,6 +92,10 @@ export class JobTable {
     member.sid = sid;
   }
 
+  lead(pid: number): void {
+    this.member(pid).pgid = this.idOf(pid);
+  }
+
   pgidOf(pid: number): number | undefined {
     return this.members.get(pid)?.pgid;
   }

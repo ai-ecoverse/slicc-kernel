@@ -33,7 +33,7 @@ import {
   writeDevice,
   written,
 } from './js-io.ts';
-import { JsCallError, type JsKernel } from './js-kernel.ts';
+import { callError, JsCallError, type JsKernel } from './js-kernel.ts';
 import { type JsNet, netOps } from './js-net.ts';
 import { runSync } from './js-run.ts';
 import {
@@ -581,7 +581,7 @@ async function receiveSome(
     signal.throwIfAborted();
     const r = await kernel.raw({ op: 'fd-read', fd, max, nonblock: true });
     if (r.ok) return r.kind === 'bytes' ? r.bytes : new Uint8Array(0);
-    if (r.errno !== 'EAGAIN') throw new JsCallError(r.errno, 'fd-read');
+    if (r.errno !== 'EAGAIN') throw callError(r, 'fd-read');
     await kernel.blocking({ op: 'fd-select', read: [fd], write: [], timeoutMs: -1 }, signal);
   }
 }
@@ -596,7 +596,7 @@ async function sendSome(
     signal.throwIfAborted();
     const r = await kernel.raw({ op: 'fd-write', fd, body, nonblock: true });
     if (r.ok) return written(r, body.length);
-    if (r.errno !== 'EAGAIN') throw new JsCallError(r.errno, 'fd-write');
+    if (r.errno !== 'EAGAIN') throw callError(r, 'fd-write');
     await kernel.blocking({ op: 'fd-select', read: [], write: [fd], timeoutMs: -1 }, signal);
   }
 }
