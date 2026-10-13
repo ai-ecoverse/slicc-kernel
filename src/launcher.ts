@@ -405,6 +405,11 @@ function concat(chunks: Uint8Array[]): Uint8Array {
   return out;
 }
 
+function addTimes(into: Map<number, CpuTimes>, pid: number, t: CpuTimes): void {
+  const at = into.get(pid) ?? { utime: 0, stime: 0 };
+  into.set(pid, { utime: at.utime + t.utime, stime: at.stime + t.stime });
+}
+
 export class Launcher {
   readonly fs: KernelFs;
   readonly processFs: KernelFs;
@@ -992,7 +997,7 @@ export class Launcher {
       http: new HttpHandles(this.transport, pid),
       locks: this.locks,
       resolver: this.resolver,
-      onReap: (child) => this.reaped(child),
+      onReap: (child) => this.reaped(child, pid),
       ...(req.fork ? { fork: req.fork } : {}),
       ...this.shownIds(req),
     });
@@ -1011,9 +1016,14 @@ export class Launcher {
       tty: terminal?.name ?? null,
       started: Date.now(),
     });
+    handle.onState((state) =>
+      state === 'stopped' ? this.stopped.add(pid) : this.stopped.delete(pid)
+    );
     void handle.exited.then(() => {
       const spent = handle.times?.();
       if (spent) this.spent.set(pid, spent);
+      if (spent) addTimes(this.imageTimes, this.jobs.shown(pid), spent);
+      this.stopped.delete(pid);
       this.processes.delete(pid);
       if (this.processes.size === 0) {
         clearInterval(this.sampler);
@@ -1043,12 +1053,21 @@ export class Launcher {
       this.reapedTimes.stime += spent.stime;
     }
     this.spent.delete(pid);
+    this.imageTimes.delete(pid);
+    this.childTimes.delete(pid);
     this.creds.delete(pid);
     this.tags.delete(pid);
     this.granted.delete(pid);
   }
 
-  private reaped(pid: number): void {
+  private reaped(pid: number, parent: number): void {
+    const own = this.imageTimes.get(pid);
+    const theirs = this.childTimes.get(pid);
+    const into = this.jobs.shown(parent);
+    if (own) addTimes(this.childTimes, into, own);
+    if (theirs) addTimes(this.childTimes, into, theirs);
+    this.imageTimes.delete(pid);
+    this.childTimes.delete(pid);
     if (this.zombies.delete(pid)) this.forget(pid);
     else this.orphans.add(pid);
   }
@@ -1109,6 +1128,19 @@ export class Launcher {
   }
 
   private readonly spent = new Map<number, CpuTimes>();
+  private readonly imageTimes = new Map<number, CpuTimes>();
+  private readonly childTimes = new Map<number, CpuTimes>();
+  private readonly stopped = new Set<number>();
+
+  private stateOf(pid: number): ProcessInfo['state'] {
+    if (!this.processes.has(pid)) return 'Z';
+    return this.stopped.has(pid) ? 'T' : 'S';
+  }
+
+  private childrenOf(pid: number): { cutime?: number; cstime?: number } {
+    const t = this.childTimes.get(pid);
+    return t ? { cutime: t.utime, cstime: t.stime } : {};
+  }
 
   private timesAt(pid: number): CpuTimes | undefined {
     return this.processes.get(pid)?.times?.() ?? this.spent.get(pid);
@@ -1160,9 +1192,10 @@ export class Launcher {
         sid: member.sid,
         ...described,
         started: (this.described.get(root.pid) ?? described).started,
-        state: this.processes.has(member.pid) ? 'S' : 'Z',
+        state: this.stateOf(member.pid),
         memory: this.processes.get(member.pid)?.memory() ?? 0,
         ...this.timesOf(member, members),
+        ...this.childrenOf(root.pid),
         umask: this.umaskOf(member.pid),
         cred,
         ...this.signalMasksOf(member.pid),

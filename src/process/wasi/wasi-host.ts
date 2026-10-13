@@ -1,4 +1,5 @@
 import { physicalPath } from '../../fs/physical-path.ts';
+import { localCpuNanos } from '../../kernel/cpu-clock.ts';
 import { type Cred, type CredChange, MAX_GROUPS } from '../../kernel/cred.ts';
 import type { DeviceMeta, KernelFdKind } from '../../kernel/fd-table.ts';
 import type { SyncFsBridgeStat, SyncFsPosixBridge } from '../../realm/sync-fs-wire.ts';
@@ -444,7 +445,7 @@ export class WasiHost {
     if (id === CLOCK.MONOTONIC) {
       return MONOTONIC_BASE + BigInt(Math.round(performance.now() * 1e6));
     }
-    return BigInt(Math.round((performance.now() - this.started) * 1e6)) + 1n;
+    return (localCpuNanos() ?? BigInt(Math.round((performance.now() - this.started) * 1e6))) + 1n;
   }
 
   private environ(): string[] {
