@@ -113,7 +113,10 @@ export async function attest(fs: KernelFs, asked: string, o: AttestContext): Pro
     refuse('EINVAL', String(asked), 'not an absolute path');
   }
   const path = normalizePath(asked);
-  const mount = o.mounts.find((target) => target !== '/' && under(path, normalizePath(target)));
+  const mount = o.mounts.find((target) => {
+    const at = normalizePath(target);
+    return at === '/' || under(path, at);
+  });
   if (mount !== undefined) refuse('EACCES', path, `under the mount ${mount}`);
   const parents = await trustedParents(fs, path, o);
   for (let tries = 0; ; tries++) {

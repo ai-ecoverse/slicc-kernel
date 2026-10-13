@@ -1416,7 +1416,10 @@ export class Launcher {
   attest(path: string): Promise<Attestation> {
     return attest(this.rootFs, path, {
       users: this.usersMode,
-      mounts: this.mounts.list().map((entry) => entry.target),
+      mounts: this.mounts
+        .list()
+        .map((entry) => entry.target)
+        .filter((target) => this.mounts.mounted(target) !== undefined),
     });
   }
 
