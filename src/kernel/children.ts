@@ -35,6 +35,7 @@ export interface ChildSpawnRequest {
   file: string;
 
   argv: string[];
+  argv0?: string;
   env: Record<string, string>;
   cwd: string;
 

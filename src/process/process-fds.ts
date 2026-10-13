@@ -249,6 +249,9 @@ export interface KernelImports {
   utimensat?: unknown;
   getppid?: unknown;
   resizeHeap?: unknown;
+  fdWrite?: unknown;
+  fdRead?: unknown;
+  sleepMs?: unknown;
 }
 
 const LITERALS: Record<keyof KernelImports, string> = {
@@ -260,6 +263,9 @@ const LITERALS: Record<keyof KernelImports, string> = {
   utimensat: '__syscall_utimensat',
   getppid: 'slicc_getppid_js',
   resizeHeap: 'emscripten_resize_heap',
+  fdWrite: 'fd_write',
+  fdRead: 'fd_read',
+  sleepMs: 'slicc_sleep_ms',
 };
 
 export function importKey(
@@ -853,6 +859,29 @@ function baseOf(Fs: AccessFs, dirfd: number): string {
   return dirfd === AT_FDCWD ? (Fs.cwd?.() ?? '/') : (Fs.getStream?.(dirfd)?.path ?? '/');
 }
 
+const W_ACCESS = 2;
+
+function readonlyRefusal(
+  Fs: AccessFs,
+  memory: WebAssembly.Memory,
+  call: { dirfd: number; path: number; amode: number; flags: number }
+): number {
+  if (!(call.amode & W_ACCESS)) return 0;
+  try {
+    const name = cString(memory, call.path);
+    const abs = name.startsWith('/') ? name : `${baseOf(Fs, call.dirfd)}/${name}`;
+    const follow = (call.flags & AT_SYMLINK_NOFOLLOW) === 0;
+    const { node } = (Fs.lookupPath as NonNullable<AccessFs['lookupPath']>).call(Fs, abs, {
+      follow,
+    });
+    const bridge = node.live ? node.mount.opts.bridge : undefined;
+    const stat = (bridge as { stat?: (path: string) => { readonly?: boolean } } | undefined)?.stat;
+    return stat?.(liveNodePath(node)).readonly ? -wasiErrno('EROFS') : 0;
+  } catch {
+    return 0;
+  }
+}
+
 function kernelChecks(
   Fs: AccessFs,
   memory: WebAssembly.Memory,
@@ -876,9 +905,12 @@ export function kernelAccess(
   glue?: KernelImports
 ): void {
   wrapImport(imports, 'faccessat', glue, (own) => (dirfd, path, amode, flags) => {
-    const rc = own(dirfd, path, amode, flags);
     const Fs = fs() as AccessFs | undefined;
     const heap = memory();
+    const call = { dirfd, path, amode: amode & 7, flags };
+    const refused = Fs?.lookupPath && heap ? readonlyRefusal(Fs, heap, call) : 0;
+    if (refused !== 0) return refused;
+    const rc = own(dirfd, path, amode, flags);
     if (rc !== 0 || !Fs?.lookupPath || !heap) return rc;
     try {
       return kernelChecks(Fs, heap, { dirfd, path, amode: amode & 7, flags });

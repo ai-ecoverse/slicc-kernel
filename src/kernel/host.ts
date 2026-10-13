@@ -75,6 +75,7 @@ export interface SpawnWasmOptions {
   umask?: number;
   cred?: Cred;
   owners?: boolean;
+  fresh?: (path: string, umask: number) => void;
   sealed?: SealedBroker;
   clipboard?: ClipboardBroker;
   readonlyAt?: (path: string) => boolean;
@@ -341,6 +342,7 @@ function holdingToken(
   return mintSyncFsToken({
     ...(opts.owners ? caller : {}),
     ...(opts.dac ? { dac: opts.dac, pid: opts.pid, created: caller.created } : {}),
+    ...(opts.fresh ? { fresh: (path: string) => opts.fresh?.(path, caller.umask()) } : {}),
     fs: opts.fs,
     cwd: opts.cwd,
     ...(opts.statfs ? { statfs: opts.statfs } : {}),
@@ -355,6 +357,10 @@ function holdingToken(
   });
 }
 
+function clipboardName(opts: SpawnWasmOptions): { clipboardName?: string } {
+  return opts.program.abi === 'js' ? {} : { clipboardName: opts.argv0 };
+}
+
 function processOptions(
   opts: SpawnWasmOptions,
   header: Int32Array,
@@ -365,7 +371,7 @@ function processOptions(
     ...inherited(opts),
     ...(opts.owners ? { owners: true } : {}),
     ...(opts.sealed ? { sealed: opts.sealed } : {}),
-    ...(opts.clipboard ? { clipboard: opts.clipboard } : {}),
+    ...(opts.clipboard ? { clipboard: opts.clipboard, ...clipboardName(opts) } : {}),
     ...(opts.readonlyAt ? { readonlyAt: opts.readonlyAt } : {}),
     ...(opts.dac ? { guard: { dac: opts.dac, fs: opts.fs, created } } : {}),
     ...(opts.identity ? { identity: opts.identity } : {}),

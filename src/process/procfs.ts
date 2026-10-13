@@ -65,8 +65,8 @@ export function pidStat(info: ProcessInfo, boot: number): string {
     0,
     ticks(info.utime ?? 0),
     ticks(info.stime ?? 0),
-    0,
-    0,
+    ticks(info.cutime ?? 0),
+    ticks(info.cstime ?? 0),
     20,
     0,
     1,
@@ -91,8 +91,10 @@ export function pidStat(info: ProcessInfo, boot: number): string {
 
 const sigMask = (mask = 0): string => (mask >>> 1).toString(16).padStart(16, '0');
 
+const STATES = { S: 'S (sleeping)', T: 'T (stopped)', Z: 'Z (zombie)' } as const;
+
 export function pidStatus(info: ProcessInfo): string {
-  const state = info.state === 'Z' ? 'Z (zombie)' : 'S (sleeping)';
+  const state = STATES[info.state];
   const c = info.cred ?? ROOT;
   const ids = (r: number, e: number, s: number) => `${r}\t${e}\t${s}\t${e}`;
   return [

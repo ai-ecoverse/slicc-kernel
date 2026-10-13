@@ -9,6 +9,7 @@ export interface Command {
   wasm: string;
   argv0: string;
   argv0Path?: boolean;
+  argv0Fixed?: true;
   preopenRoot?: boolean;
   args?: string[];
   env?: Record<string, string>;
@@ -102,7 +103,8 @@ function commandOf(
     return { name, abi: packageAbi, glue: script, wasm: script, argv0: name, script, ...withEnv };
   }
   const abi = abiOf(raw.abi, packageAbi);
-  const argv0 = typeof raw.argv0 === 'string' && raw.argv0 ? raw.argv0 : name;
+  const fixed = typeof raw.argv0 === 'string' && raw.argv0 !== '';
+  const argv0 = fixed ? (raw.argv0 as string) : name;
   const args = argsOf(pkg, raw.args);
   if (abi === 'js') {
     const module = inside(pkg, raw.module);
@@ -113,6 +115,7 @@ function commandOf(
       glue: module,
       wasm: module,
       argv0,
+      ...(fixed ? { argv0Fixed: true as const } : {}),
       ...(raw.argv0Path === true ? { argv0Path: true } : {}),
       ...(args ? { args } : {}),
       ...withEnv,
@@ -128,6 +131,7 @@ function commandOf(
     glue,
     wasm,
     argv0,
+    ...(fixed ? { argv0Fixed: true as const } : {}),
     ...(raw.argv0Path === true ? { argv0Path: true } : {}),
     ...(abi === 'wasi' && raw.preopenRoot === true ? { preopenRoot: true } : {}),
     ...(args ? { args } : {}),

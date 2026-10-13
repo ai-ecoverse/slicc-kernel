@@ -406,6 +406,7 @@ export class OpfsFs implements KernelFs {
   }
 
   private async current(path: string, dir: FileSystemDirectoryHandle): Promise<boolean> {
+    if (dir === this.root) return path === '/';
     if (performance.now() - (this.checked.get(dir) ?? -CHECK_MS) < CHECK_MS) return true;
     const where = await this.root.resolve(dir).catch(() => null);
     if (where === null || `/${where.join('/')}` !== path) return false;
@@ -656,6 +657,11 @@ export class OpfsFs implements KernelFs {
   }
 
   private async describe(found: Located): Promise<FsStat> {
+    const stat = await this.described(found);
+    return isProtected(this.guarded, found.path) ? { ...stat, readonly: true } : stat;
+  }
+
+  private async described(found: Located): Promise<FsStat> {
     if (found.link) return this.owned(this.linkStat(found.link), found.path, found.link);
     const touched = this.timesOf(found.path);
     if (!this.owners) {

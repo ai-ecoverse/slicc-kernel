@@ -10,6 +10,7 @@ export interface RunRequest {
   op: 'proc-run';
   file: string;
   argv: string[];
+  argv0?: string;
   env: Record<string, string>;
   cwd: string;
   pgid?: number;
@@ -105,6 +106,7 @@ export async function runChild(req: RunRequest, deps: RunDeps): Promise<Uint8Arr
       {
         file: req.file,
         argv: req.argv,
+        ...(req.argv0 !== undefined ? { argv0: req.argv0 } : {}),
         env: req.env,
         cwd: req.cwd,
         ...(req.pgid !== undefined ? { pgid: req.pgid } : {}),

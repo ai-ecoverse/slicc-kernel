@@ -19,6 +19,9 @@ export function writerTags(protection: Protection | undefined): ReadonlySet<stri
 }
 
 export function protectedPrefixes(paths: readonly string[]): string[] {
+  if (!Array.isArray(paths) || paths.some((p) => typeof p !== 'string' || !p.startsWith('/'))) {
+    throw new TypeError('protect.paths must be a list of absolute paths');
+  }
   return [...new Set(paths.map((p) => normalizePath(p)))];
 }
 
@@ -136,6 +139,9 @@ export class ProtectedFs {
       async utimes(path: string, atime: Date, mtime: Date) {
         await check(path, true);
         return fs.utimes(path, atime, mtime);
+      },
+      async mayChange(path: string, follow: boolean) {
+        await check(path, follow);
       },
       async stat(path: string) {
         return marked(path, await fs.stat(path));

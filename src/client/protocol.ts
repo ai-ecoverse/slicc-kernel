@@ -104,7 +104,7 @@ export interface ProcessEntry {
   argv: string[];
   tty: string | null;
   started: number;
-  state: 'S' | 'Z';
+  state: 'S' | 'T' | 'Z';
   memory: number;
   rss?: number;
   utime?: number;
