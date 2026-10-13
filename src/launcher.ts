@@ -254,6 +254,7 @@ interface StartRequest {
   fork?: ForkState;
   exec?: boolean;
   pgid?: number;
+  group?: 'lead' | 'session';
   ignored?: number;
   umask?: number;
   cred: Cred;
@@ -991,6 +992,8 @@ export class Launcher {
     this.jobs.add(pid, req.ppid, (sig) => handle.signal(sig), terminal);
     if (req.exec && req.ppid !== undefined) this.jobs.exec(req.ppid, pid, true);
     if (req.pgid !== undefined) this.jobs.join(pid, req.pgid);
+    if (req.group === 'lead') this.jobs.lead(pid);
+    if (req.group === 'session') this.jobs.setsid(pid);
     this.described.set(pid, {
       argv: [req.argv0, ...req.args],
       tty: terminal?.name ?? null,
@@ -1172,6 +1175,11 @@ export class Launcher {
         await fds.closeAll();
         throw new SpawnError('EACCES');
       }
+      const group = this.childGroup(ppid, req);
+      if (typeof group === 'string') {
+        await fds.closeAll();
+        throw new SpawnError(group);
+      }
       const cred = grant ? grant.cred : this.credOf(ppid);
       const scope = grant ? '' : await this.scopeOf(cred.euid);
       const planned = await this.plan(req.file, req.argv, req.cwd, scope);
@@ -1198,12 +1206,28 @@ export class Launcher {
         umask: this.umaskOf(ppid),
         cred,
         tag: this.tagOf(ppid),
+        ...group,
         ...exec,
       });
       deciding?.attach();
       if (grant) this.granted.set(handle.pid, ppid);
       return childHandle(handle);
     };
+  }
+
+  private childGroup(
+    ppid: number,
+    req: { pgid?: unknown; session?: unknown; exec?: boolean }
+  ): { pgid?: number; group?: 'lead' | 'session' } | 'EINVAL' | 'ESRCH' | 'EPERM' {
+    const { pgid, session } = req;
+    if (pgid === undefined && session === undefined) return {};
+    const valid = pgid === undefined || (Number.isInteger(pgid) && (pgid as number) >= 0);
+    if (req.exec || !valid || (session !== undefined && session !== true)) return 'EINVAL';
+    if (session) return pgid === undefined ? { group: 'session' } : 'EINVAL';
+    if (pgid === 0) return { group: 'lead' };
+    const sid = this.jobs.sessionOf(pgid as number);
+    if (sid === undefined) return 'ESRCH';
+    return sid === this.jobs.sidOf(ppid) ? { pgid: pgid as number } : 'EPERM';
   }
 
   private undecided(ppid: number) {
@@ -1242,7 +1266,7 @@ export class Launcher {
   }
 
   private forker(ppid: number, parent: StartRequest): ChildForker {
-    const { exec: _exec, ...image } = parent;
+    const { exec: _exec, pgid: _pgid, group: _group, ...image } = parent;
     return async (state, fds) =>
       childHandle(
         this.start({
