@@ -25,6 +25,7 @@ export interface SyncFsTokenEntry {
   dac?: Dac;
   pid?: number;
   created?: Created;
+  holdsKept?: (path: string) => Promise<boolean>;
 }
 
 const registry = new Map<string, SyncFsTokenEntry>();

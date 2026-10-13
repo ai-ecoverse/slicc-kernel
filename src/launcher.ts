@@ -1390,15 +1390,30 @@ export class Launcher {
 
   private async ownTmp(): Promise<void> {
     const real = await this.realLayoutPath('/tmp');
-    if (real !== undefined && this.base.hasOwner && !(await this.base.hasOwner(real))) {
+    const st = real === undefined ? undefined : await this.base.lstat(real).catch(() => undefined);
+    if (
+      real !== undefined &&
+      st?.isDirectory &&
+      this.base.hasOwner &&
+      !(await this.base.hasOwner(real))
+    ) {
+      let removed = 0;
       for (const name of await this.base.readdir(real).catch(() => [] as string[])) {
         const path = joinName(real, name);
-        if (await this.base.hasOwner(path)) continue;
-        await this.base.rm(path, { recursive: true, force: true }).catch(() => undefined);
+        if ((await this.base.hasOwner(path)) || this.inUse(path)) continue;
+        const failed = await this.base.rm(path, { recursive: true, force: true }).catch(String);
+        if (failed === undefined) removed++;
+      }
+      if (removed > 0) {
+        console.warn(`slicc-kernel users: removed ${removed} entries from /tmp that had no owner`);
       }
       await this.base.chown?.(real, { uid: 0, gid: 0, mode: 0o1777, follow: false });
     }
     await this.base.chmod('/tmp', 0o1777);
+  }
+
+  private inUse(path: string): boolean {
+    return [...this.openFiles].some((nodes) => nodes.holds(path)) || heldUnder(this.held, path);
   }
 
   private async stampLayout(): Promise<void> {
