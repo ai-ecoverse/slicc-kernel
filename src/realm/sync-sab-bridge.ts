@@ -2,6 +2,7 @@ import { rawWait } from '../kernel/cpu-clock.ts';
 import {
   parseSyncFsStat,
   parseSyncFsUsage,
+  SYNC_FS_OPS,
   SYNC_FS_REQUEST_TIMEOUT_MS,
   type SyncFsBridgeStat,
   type SyncFsFileIo,
@@ -55,6 +56,13 @@ export type AtomicsWaitLike = (
   timeout?: number
 ) => 'ok' | 'not-equal' | 'timed-out';
 
+const PATH_OPS: ReadonlySet<string> = new Set(SYNC_FS_OPS);
+let calls = 0;
+
+export function syncCallCount(): number {
+  return calls;
+}
+
 export function createSyncSabTransport(
   sab: SharedArrayBuffer,
   port: SabPostLike,
@@ -85,6 +93,7 @@ export function createSyncSabTransport(
     call(req, timeoutMs, label, transfer = []): SyncFsResult {
       if (deps.memory) publishMemory(sab, deps.memory());
       const id = ++seq;
+      calls += Number(!PATH_OPS.has(req.op));
       const deadline = now() + timeoutMs;
       let out: Uint8Array | null = null;
       let status = 0;

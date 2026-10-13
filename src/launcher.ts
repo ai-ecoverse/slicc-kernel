@@ -818,6 +818,12 @@ export class Launcher {
     }
   }
 
+  private async ticketFile(req: ChildSpawnRequest, fds: FdTable): Promise<string> {
+    if (req.file.startsWith('/')) return physicalPathAsync(this.base, req.file);
+    await fds.closeAll();
+    throw new SpawnError('EACCES');
+  }
+
   private takeTicket(req: ChildSpawnRequest): Booked | null | undefined {
     if (!(TICKET_ENV in req.env)) return undefined;
     return this.sealed.tickets.take(req.env[TICKET_ENV] ?? '') ?? null;
@@ -850,8 +856,7 @@ export class Launcher {
     const { argv } = req;
     const exact =
       booked?.pid === caller &&
-      req.file.startsWith('/') &&
-      (await physicalPathAsync(this.base, req.file)) === booked.path &&
+      req.file === booked.path &&
       (await physicalPathAsync(this.base, req.cwd)) === booked.cwd &&
       (await argvDigest(argv)) === booked.argv;
     if (!exact) throw new SpawnError('EACCES');
@@ -860,7 +865,7 @@ export class Launcher {
     const ids = { pid: req.exec ? caller : pid, ppid: caller };
     const stamp = await this.sealed.stamp(ids, cred, this.tagOf(ppid));
     const interpreters = await this.interpreterChain(planned, req.cwd, scope);
-    const trusted = this.owners && (await this.trustedFiles(req.file, req.cwd, scope));
+    const trusted = this.owners && (await this.trustedFiles(planned, req.file, req.cwd, scope));
     const swap = await this.sealed.consume({
       ticket,
       stamp,
@@ -905,9 +910,13 @@ export class Launcher {
     return scoped.glue;
   }
 
-  private async trustedFiles(file: string, cwd: string, scope: string): Promise<boolean> {
-    const files = (await this.backing(file, cwd, scope)) ?? [];
-    if (files.length === 0) return false;
+  private async trustedFiles(
+    planned: Planned,
+    file: string,
+    cwd: string,
+    scope: string
+  ): Promise<boolean> {
+    const files = await this.backingOf(planned, file, cwd, scope);
     for (const at of files) {
       if (!(await rootOnly(this.base, await physicalPathAsync(this.base, at)))) return false;
     }
@@ -932,9 +941,17 @@ export class Launcher {
     return manifests;
   }
 
-  private async backing(file: string, cwd: string, scope = ''): Promise<string[] | undefined> {
-    const planned = await this.plan(file, [file], cwd, scope);
-    if (!planned) return undefined;
+  private async backing(file: string, cwd: string): Promise<string[] | undefined> {
+    const planned = await this.plan(file, [file], cwd, '');
+    return planned && this.backingOf(planned, file, cwd, '');
+  }
+
+  private async backingOf(
+    planned: Planned,
+    file: string,
+    cwd: string,
+    scope: string
+  ): Promise<string[]> {
     const { glue, wasm, imports } = planned.target;
     const files = [glue, wasm, ...(imports ? [imports] : [])];
     const scripts: string[] = [];
@@ -1319,9 +1336,10 @@ export class Launcher {
       }
       const cred = grant ? grant.cred : this.credOf(ppid);
       const scope = grant ? '' : await this.scopeOf(cred.euid);
-      const planned = await this.plan(req.file, req.argv, req.cwd, scope);
+      const file = booked === undefined ? req.file : await this.ticketFile(req, fds);
+      const planned = await this.plan(file, req.argv, req.cwd, scope);
       try {
-        await this.mayExec(cred, { ...req, pid: ppid }, planned);
+        await this.mayExec(cred, { ...req, file, pid: ppid }, planned);
       } catch (err) {
         await fds.closeAll();
         throw (err as { code?: unknown }).code === 'EACCES' ? new SpawnError('EACCES') : err;
@@ -1330,7 +1348,12 @@ export class Launcher {
         await fds.closeAll();
         throw new SpawnError(await this.unrunnable(req.file, req.cwd, scope));
       }
-      const redeemed = await this.redeemed(req, { ppid, cred, scope, booked }, planned, fds);
+      const redeemed = await this.redeemed(
+        { ...req, file },
+        { ppid, cred, scope, booked },
+        planned,
+        fds
+      );
       const exec = req.exec ? { exec: true } : {};
       const deciding = req.exec ? undefined : this.undecided(ppid);
       const handle = await this.launch(planned, {

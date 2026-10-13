@@ -548,13 +548,11 @@ export class OpfsFs implements KernelFs {
       this.dirDirty.delete(path);
       const ms = this.dirTimes.get(path);
       if (ms === undefined) continue;
-      await this.meta.update(path, (entry) => ({
-        ...entry,
-        path,
-        mtimeMs: ms,
-        mtimeFor: 0,
-        ctimeMs: ms,
-      }));
+      await this.meta.update(path, (entry) =>
+        (entry?.timesAt ?? -1) >= ms
+          ? entry
+          : { ...entry, path, mtimeMs: ms, mtimeFor: 0, ctimeMs: ms }
+      );
       if (this.dirTimes.get(path) === ms) this.dirTimes.delete(path);
     }
   }
@@ -1059,6 +1057,7 @@ export class OpfsFs implements KernelFs {
       mtimeMs: mtime.getTime(),
       mtimeFor: file?.lastModified ?? 0,
       ctimeMs,
+      timesAt: ctimeMs,
     }));
   }
 
