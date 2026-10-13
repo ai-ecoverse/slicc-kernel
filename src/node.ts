@@ -4,6 +4,7 @@ import type { MessagePortLike } from './client/protocol.ts';
 import { type ServedClient, serveClient } from './client/serve-client.ts';
 import type { DenialHook } from './fs/dac.ts';
 import { OpfsFs } from './fs/opfs.ts';
+import type { Protection } from './fs/protect.ts';
 import { fsError, type UsersMode } from './fs/types.ts';
 import { pidOwner } from './fs/unlinked.ts';
 import type {
@@ -99,6 +100,7 @@ export interface NodeKernelOptions {
   onDenial?: DenialHook;
   sealed?: SealedHook;
   approve?: ApproveHook;
+  protect?: Protection;
 }
 
 export interface NodeKernel {
@@ -226,6 +228,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     ...(options.hostname !== undefined ? { hostname: options.hostname } : {}),
     ...(options.users !== undefined ? { users: options.users } : {}),
     ...(options.onDenial ? { onDenial: options.onDenial } : {}),
+    ...(options.protect ? { protect: options.protect } : {}),
     ...(options.sealed ? { sealed: options.sealed } : {}),
     ...(options.approve ? { approve: options.approve } : {}),
   });

@@ -76,6 +76,7 @@ export interface SpawnWasmOptions {
   owners?: boolean;
   sealed?: SealedBroker;
   ttyFilter?: (file: OpenFile) => OpenFile;
+  readonlyAt?: (path: string) => boolean;
   dac?: Dac;
   identity?: () => Promise<{ pid: number; ppid: number }>;
   onSyscall?: (req: WasmSyscall) => void;
@@ -359,6 +360,7 @@ function processOptions(
     ...(opts.owners ? { owners: true } : {}),
     ...(opts.sealed ? { sealed: opts.sealed } : {}),
     ...(opts.ttyFilter ? { ttyFilter: opts.ttyFilter } : {}),
+    ...(opts.readonlyAt ? { readonlyAt: opts.readonlyAt } : {}),
     ...(opts.dac ? { guard: { dac: opts.dac, fs: opts.fs, created } } : {}),
     ...(opts.identity ? { identity: opts.identity } : {}),
     ...(opts.onSyscall ? { onSyscall: opts.onSyscall } : {}),

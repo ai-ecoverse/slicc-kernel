@@ -407,6 +407,8 @@ export interface WasmProcessOptions {
 
   ttyFilter?: (file: OpenFile) => OpenFile;
 
+  readonlyAt?: (path: string) => boolean;
+
   guard?: { dac: Dac; fs: KernelFs; created?: Created };
 
   identity?: () => Promise<{ pid: number; ppid: number }>;
@@ -805,6 +807,7 @@ export class WasmProcess {
         this.fds.installAt(fd, await this.procFile(req, path));
         return fd;
       }
+      if (this.writesAt(req) && this.options.readonlyAt?.(path)) throw new KernelError('EROFS');
       const open = { ...req, path };
       if (req.exclusive) {
         await nodes.createExclusive(path, this.newOwner());
@@ -857,6 +860,15 @@ export class WasmProcess {
       return st?.ino === undefined ? now : { ...now, ino: st.ino };
     };
     return fs.exclusive ? fs.exclusive(first.path, look) : look();
+  }
+
+  private writesAt(req: Extract<FdSyscall, { op: 'fd-open-vfs' }>): boolean {
+    return (
+      (req.flags & WRITE_ACCESS) !== 0 ||
+      req.truncate === true ||
+      req.create === true ||
+      req.exclusive === true
+    );
   }
 
   private async mayOpen(req: Extract<FdSyscall, { op: 'fd-open-vfs' }>): Promise<void> {
