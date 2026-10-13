@@ -1,8 +1,10 @@
-import { type ChildStdio, type ChildTable, SpawnError } from './children.ts';
+import { type CaptureControl, type ChildStdio, type ChildTable, SpawnError } from './children.ts';
 import { KernelError } from './fd-table.ts';
 import { isSignal } from './signals.ts';
 
-export type RunStdio = 'pipe' | 'ignore' | 'inherit';
+export type RunStdio = 'pipe' | 'ignore' | 'inherit' | number;
+
+export type RunStderr = RunStdio | 'stdout';
 
 export interface RunRequest {
   op: 'proc-run';
@@ -13,7 +15,7 @@ export interface RunRequest {
   stdin: RunStdio;
   input?: Uint8Array;
   stdout: RunStdio;
-  stderr: RunStdio;
+  stderr: RunStderr;
   maxBuffer?: number;
   timeoutMs?: number;
   killSignal: number;
@@ -43,10 +45,12 @@ function capLimit(maxBuffer: unknown): number {
   return Math.min(asked, RUN_CAPTURE_CAP);
 }
 
-function slot(how: RunStdio, n: number, extra: ChildStdio): ChildStdio {
+function slot(how: RunStderr, n: number, extra: () => ChildStdio): ChildStdio {
+  if (how === 'stdout') return { sameAs: 1 };
+  if (typeof how === 'number') return { fd: how };
   if (how === 'inherit') return { fd: n };
   if (how === 'ignore') return { none: true };
-  return extra;
+  return extra();
 }
 
 function frame(outcome: RunOutcome, out: Uint8Array, err: Uint8Array): Uint8Array {
@@ -79,12 +83,20 @@ export async function runChild(req: RunRequest, deps: RunDeps): Promise<Uint8Arr
     if (failure !== undefined) return;
     failure = code;
     if (pid !== 0) kill();
+    decided.resolve();
   };
-  const capture = (): ChildStdio => ({ capture: true, max, overflow: () => stop('ENOBUFS') });
+  const controls: Array<CaptureControl & { eof: Promise<void> }> = [];
+  const capture = (): ChildStdio => {
+    const { promise, resolve } = Promise.withResolvers<void>();
+    const control = { shut: false, ended: resolve, eof: promise };
+    controls.push(control);
+    return { capture: true, max, overflow: () => stop('ENOBUFS'), control };
+  };
+  const decided = Promise.withResolvers<void>();
   const stdio: ChildStdio[] = [
-    slot(req.stdin, 0, { input: req.input ?? new Uint8Array(0) }),
-    slot(req.stdout, 1, capture()),
-    slot(req.stderr, 2, capture()),
+    slot(req.stdin, 0, () => ({ input: req.input ?? new Uint8Array(0) })),
+    slot(req.stdout, 1, capture),
+    slot(req.stderr, 2, capture),
   ];
   try {
     pid = await deps.children.spawn(
@@ -104,8 +116,11 @@ export async function runChild(req: RunRequest, deps: RunDeps): Promise<Uint8Arr
   let status: number;
   try {
     status = await reaped(deps, pid);
+    const open = controls.filter((c) => c.opened);
+    await Promise.race([Promise.all(open.map((c) => c.eof)), decided.promise]);
   } finally {
     clearTimeout(timer);
+    for (const control of controls) control.shut = true;
   }
   const out = deps.children.captured(pid, 1);
   const err = deps.children.captured(pid, 2);
