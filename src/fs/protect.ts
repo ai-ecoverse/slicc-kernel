@@ -2,11 +2,21 @@ import { type FsStat, fsError, type HeldEntry, type KernelFs, normalizePath } fr
 
 export interface Protection {
   readonly paths: readonly string[];
-  readonly writer?: (proc: { pid: number; uid: number; tag?: string }) => boolean;
+  readonly writers?: readonly string[];
 }
 
-export const PROTECT_WRITER =
-  'slicc-kernel: protect.writer needs the process tag (#405), which this kernel does not have yet';
+export function protectInit(protection: Protection): { paths: string[]; writers?: string[] } {
+  const writers = [...writerTags(protection)];
+  return { paths: [...protection.paths], ...(writers.length > 0 ? { writers } : {}) };
+}
+
+export function writerTags(protection: Protection | undefined): ReadonlySet<string> {
+  const writers = protection?.writers ?? [];
+  if (!Array.isArray(writers) || writers.some((tag) => typeof tag !== 'string' || tag === '')) {
+    throw new TypeError('protect.writers must be a list of process tags');
+  }
+  return new Set(writers);
+}
 
 export function protectedPrefixes(paths: readonly string[]): string[] {
   return [...new Set(paths.map((p) => normalizePath(p)))];

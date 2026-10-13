@@ -20,10 +20,10 @@ import { physicalPathAsync } from './fs/physical-path.ts';
 import {
   holdsProtected,
   isProtected,
-  PROTECT_WRITER,
   ProtectedFs,
   type Protection,
   protectedPrefixes,
+  writerTags,
 } from './fs/protect.ts';
 import type { KernelFs, UsersMode } from './fs/types.ts';
 import { fsError, normalizePath } from './fs/types.ts';
@@ -235,6 +235,13 @@ interface Planned {
   via?: string[];
 }
 
+interface WriterStack {
+  fs: KernelFs;
+  nodes: VfsNodes;
+  unlinked: UnlinkedKeeper;
+  writer: boolean;
+}
+
 interface StartRequest {
   program: Program;
   argv0: string;
@@ -397,6 +404,10 @@ export class Launcher {
   readonly fs: KernelFs;
   readonly processFs: KernelFs;
   private readonly prefixes: string[];
+  private readonly writerTags: ReadonlySet<string>;
+  private readonly unguardedRoot: KernelFs;
+  private writers: WriterStack | undefined;
+  private readonly unlinkOwnerOption: UnlinkOwner | undefined;
   private readonly base: KernelFs;
   private readonly createWorker: () => WasmWorkerLike;
   private readonly modulesDir: string;
@@ -513,7 +524,7 @@ export class Launcher {
     this.nodes = new VfsNodes(fs, (path) => this.released(path));
     this.nodes.keepsOnDisk = true;
     this.openFiles.add(this.nodes);
-    const holders = [this.held, [this.nodes]];
+    const holders = [this.held, this.openFiles];
     this.unlinked = new UnlinkedKeeper(
       fs,
       { [Symbol.iterator]: () => holders.flatMap((set) => [...set]).values() },
@@ -526,7 +537,9 @@ export class Launcher {
       }
     );
     this.fs = this.unlinked.wrap(keepingOpen(fs, this.nodes));
-    if (options.protect?.writer) throw new Error(PROTECT_WRITER);
+    this.writerTags = writerTags(options.protect);
+    this.unlinkOwnerOption = options.unlinkOwner;
+    this.unguardedRoot = options.fs.unguarded?.() ?? options.fs;
     this.prefixes = protectedPrefixes(options.protect?.paths ?? []);
     this.processFs =
       this.prefixes.length > 0 ? new ProtectedFs(this.prefixes).view(this.fs) : this.fs;
@@ -901,6 +914,7 @@ export class Launcher {
       throw fsError('ESRCH', `no process group ${req.pgid}`);
     }
     const pid = this.nextPid++;
+    const stack = this.stackFor(req.tag);
     const terminal = req.fds.stdioTerminal();
     const decided = req.decided ?? Promise.resolve(true);
     const count = (byParent: boolean) => {
@@ -931,8 +945,8 @@ export class Launcher {
       env: req.env,
       cwd: req.cwd,
       fds: req.fds,
-      fs: this.processFs,
-      ...(this.prefixes.length > 0
+      fs: stack.fs,
+      ...(this.prefixes.length > 0 && !stack.writer
         ? { readonlyAt: (path: string) => isProtected(this.prefixes, path) }
         : {}),
       createWorker: this.createWorker,
@@ -949,9 +963,9 @@ export class Launcher {
       }),
       sudo: (call, signal) => this.sudo(pid, call, signal),
       openFiles: this.openFiles,
-      nodes: this.nodes,
+      nodes: stack.nodes,
       held: this.held,
-      unlinkGate: this.unlinked.gate,
+      unlinkGate: stack.unlinked.gate,
       statfs: (path) => this.mounts.statfs(path),
       mounts: () => this.mounts.list(),
       mount: (call, signal) => this.processMount(pid, call, signal),
@@ -1650,13 +1664,53 @@ export class Launcher {
     };
   }
 
+  fsFor(tag: string | undefined): KernelFs {
+    return this.stackFor(tag).fs;
+  }
+
+  isWriter(tag: string | undefined): boolean {
+    return tag !== undefined && this.prefixes.length > 0 && this.writerTags.has(tag);
+  }
+
+  private stackFor(tag: string | undefined): WriterStack {
+    if (!this.isWriter(tag)) {
+      return { fs: this.processFs, nodes: this.nodes, unlinked: this.unlinked, writer: false };
+    }
+    this.writers ??= this.writerStack();
+    return this.writers;
+  }
+
+  private writerStack(): WriterStack {
+    const fs = withCommandDirs(
+      this.watchers.wrap(this.mounts.wrap(this.unguardedRoot)),
+      async () => new Set((await this.commands()).keys()),
+      (dir) => this.userCommandDir(dir),
+      this.owners
+    );
+    const nodes = new VfsNodes(fs, (path) => this.released(path));
+    nodes.keepsOnDisk = true;
+    this.openFiles.add(nodes);
+    const unlinked = new UnlinkedKeeper(
+      fs,
+      { [Symbol.iterator]: () => [this.held, this.openFiles].flatMap((set) => [...set]).values() },
+      (path) => this.mountRoot(path),
+      {
+        locks: webLocks(),
+        busy: (path) => [...this.openFiles].some((open) => open.holds(path)),
+        owner: this.unlinkOwnerOption,
+        ...(this.owners ? { dirOwner: { uid: 0, gid: 0, mode: 0o700 } } : {}),
+      }
+    );
+    return { fs: unlinked.wrap(keepingOpen(fs, nodes)), nodes, unlinked, writer: true };
+  }
+
   private async starting(argv: string[], dir: string | undefined, account: Account, tag?: string) {
     this.resetCatalogs();
     const scope = account.uid === 0 ? '' : pnpmHomeOf(account, this.pnpmHome);
     const start = dir ?? '/';
     const cwd = await physicalPathAsync(this.base, start.startsWith('/') ? start : `/${start}`);
     const [file = ''] = argv;
-    if (!(await this.base.exists(cwd))) await this.processFs.mkdir(cwd, { recursive: true });
+    if (!(await this.base.exists(cwd))) await this.stackFor(tag).fs.mkdir(cwd, { recursive: true });
     const planned = await this.plan(file, argv, cwd, scope);
     await this.mayExec(credOf(account), { file, cwd, pid: 0, tag }, planned);
     return { cwd, file, planned };

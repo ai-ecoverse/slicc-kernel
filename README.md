@@ -43,7 +43,7 @@ const { status, stdout, stderr } = await kernel.run(['bash', '-c', 'echo hi > he
 | `sealed` | none | `(req, { signal }) => Promise<object>`: answers requests written to [`/dev/sealed`](#devsealed). `createNodeKernel` takes it too |
 | `approve` | none | `(req, { signal }) => 'once' \| 'always' \| 'deny'` (or a promise of one): decides a `sudo` request that needs approval (see [Sudo](#sudo)); without it, such a request is denied. `createNodeKernel` takes it too |
 | `cdp` | none | `({ runtime }) => Promise<CdpConnection>`: a browser-level DevTools connection for programs that drive a browser (see [Browser automation](#browser-automation-cdp)) |
-| `protect` | none | `{ paths }`: directories no process may change, root included, in every `users` mode (see [Protected paths](#protected-paths)). `createNodeKernel` takes it too |
+| `protect` | none | `{ paths, writers? }`: directories no process may change, root included, in every `users` mode, except processes with one of the `writers` tags (see [Protected paths](#protected-paths)). `createNodeKernel` takes it too |
 
 ### `kernel.run(argv, options?) → Promise<{ status, stdout, stderr }>`
 
@@ -632,10 +632,10 @@ A character device (`0666`, major 10, minor 250) through which a program talks t
   - `/` itself, which holds all of these.
   Paths in the layout the kernel stamps with root's owner at boot are skipped when protected.
 - **Symlinks as paths:** a path that is itself a symlink protects the directory it names too, by its real path, once the kernel has prepared.
-- **Mounts:** nothing can be mounted at, under or above a path, not even by the embedder (`kernel.mount`, `/etc/fstab`). So a path always lies on the root file system, where that check holds.
+- **Mounts:** nothing can be mounted at, under or above a path, not even by the embedder (`kernel.mount`, `/etc/fstab`), and not by a writer. Above includes `/`: with any path protected, nothing can be mounted on `/`. So a path always lies on the root file system, where that check holds.
 - **Clients:** a client's (`kernel.connect`) file calls, mounts and unmounts see the paths read-only, as its processes do.
 - **Not affected:** the page's own writes to OPFS.
-- **Writers:** a `writer` that lets chosen processes change the paths needs the kernel-side process tag ([#405](https://github.com/ai-ecoverse/slicc-kernel/pull/405)). Until then, `protect.writer` is refused.
+- **Writers:** `protect: { paths, writers: ['bios-installer'] }` names process tags whose processes may change the paths, such as the embedder's own installs (`kernel.run(['pnpm', 'install'], { tag: 'bios-installer' })`). A tag matches exactly, with no prefix or case folding. A process gets its tag only from the embedder, through `kernel.run`, `kernel.openTerminal` or `kernel.connect({ tag })`, and passes it to its children, forks and `exec`s; a program or a client can't choose one. Writers work on their own view of the root file system, so a file a writer changes is seen by other processes as between two tabs: close-to-open, at their next open after the writer closes it.
 - **Where it is a boundary:** it's one in a browser, where programs' own code can't reach OPFS around the kernel (see [JS programs](#js-programs)). Under the Node entry it isn't, until [#407](https://github.com/ai-ecoverse/slicc-kernel/issues/407), and there `kernel.writeFile` under a path fails too, so write those files into `root` before creating the kernel.
 
 ### `/proc`

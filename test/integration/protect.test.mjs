@@ -23,7 +23,9 @@ const ATTEMPTS = [
 ];
 
 test('a protected prefix is read-only for every process, root included, and for a client, through symlinks too', async (t) => {
-  const { page, bash, run } = await booted(chrome, t, { protect: { paths: ['/opt/agent'] } });
+  const { page, bash, run } = await booted(chrome, t, {
+    protect: { paths: ['/opt/agent'], writers: ['bios-installer'] },
+  });
   await page.evaluate(() => window.opfs.write('opt/agent/a.txt', 'kept\n'));
   await bash('echo x > /tmp/x.txt', { cwd: '/' });
   for (const script of ATTEMPTS) {
@@ -60,10 +62,21 @@ test('a protected prefix is read-only for every process, root included, and for 
   );
   await page.evaluate(() => window.opfs.write('opt/agent/page.txt', 'the page writes\n'));
   assert.deepEqual(await bash('cat /opt/agent/page.txt', { cwd: '/' }), ok('the page writes\n'));
-  const refused = await page.evaluate(() =>
-    window
-      .secondKernel({ protect: { paths: ['/opt'], writer: () => true } }, 'third')
-      .catch((e) => e.message)
+  assert.deepEqual(
+    await bash(
+      'echo w > /opt/agent/a.txt && bash -c "mkdir /opt/agent/d" && cat /opt/agent/a.txt',
+      {
+        cwd: '/',
+        tag: 'bios-installer',
+      }
+    ),
+    ok('w\n')
   );
-  assert.match(refused, /protect\.writer needs the process tag \(#405\)/);
+  assert.equal(await page.evaluate(() => window.opfs.read('opt/agent/a.txt')), 'w\n');
+  assert.deepEqual(
+    await bash('cat /opt/agent/a.txt; ls /opt/agent', { cwd: '/' }),
+    ok('w\na.txt\nd\npage.txt\n')
+  );
+  const other = await bash('rm -r /opt/agent/d; echo "rc=$?"', { cwd: '/', tag: 'Bios-Installer' });
+  assert.equal(other.stdout.trim(), 'rc=1');
 });
