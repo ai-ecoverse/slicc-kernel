@@ -13,7 +13,12 @@ import {
   type SabPostLike,
   type SyncSabTransport,
 } from '../realm/sync-sab-bridge.ts';
-import { publishMemory, SAB_HEADER_I32, type SyncSabRequestBody } from '../realm/sync-sab-wire.ts';
+import {
+  publishMemory,
+  SAB_HEADER_I32,
+  SAB_I_STOP,
+  type SyncSabRequestBody,
+} from '../realm/sync-sab-wire.ts';
 import {
   KernelStreams,
   type ProcessFs,
@@ -342,6 +347,9 @@ const GLUE_TRAILER = [
   "  utimensat: typeof ___syscall_utimensat === 'function' ? ___syscall_utimensat : undefined,",
   "  getppid: typeof _slicc_getppid_js === 'function' ? _slicc_getppid_js : undefined,",
   "  resizeHeap: typeof _emscripten_resize_heap === 'function' ? _emscripten_resize_heap : undefined,",
+  "  fdWrite: typeof _fd_write === 'function' ? _fd_write : undefined,",
+  "  fdRead: typeof _fd_read === 'function' ? _fd_read : undefined,",
+  "  sleepMs: typeof slicc_sleep_ms === 'function' ? slicc_sleep_ms : undefined,",
   '};',
   'Module.sliccFdImports ??= {',
   "  fd_sync: typeof _fd_sync === 'function' ? _fd_sync : undefined,",
@@ -431,6 +439,24 @@ export function reportGrowth(
   });
 }
 
+export function holdWhileStopped(
+  imports: WebAssembly.Imports,
+  header: Int32Array,
+  glue?: KernelImports
+): void {
+  const hold = () => {
+    while (Atomics.load(header, SAB_I_STOP) === 1) Atomics.wait(header, SAB_I_STOP, 1);
+  };
+  for (const name of ['fdWrite', 'fdRead', 'sleepMs'] as const) {
+    wrapImport(imports, name, glue, (original) => (...args) => {
+      hold();
+      const done = original(...args);
+      hold();
+      return done;
+    });
+  }
+}
+
 function callerOwner(Fs: ProcessFs, init: WasmProcessInitMsg): { owner?: Owner } {
   return init.owners ? {} : { owner: ownByCaller(Fs, init.cred, credAbi(init.program.glue)) };
 }
@@ -466,6 +492,7 @@ function kernelWrappers(imports: WebAssembly.Imports, module: object, deps: Wrap
   positionalIo(imports, { glue, fs: fsOf, sys, memory });
   const grown = () => publishMemory(init.sab, memory()?.buffer.byteLength ?? 0);
   reportGrowth(imports, grown, kernelGlue);
+  holdWhileStopped(imports, new Int32Array(init.sab, 0, SAB_HEADER_I32), kernelGlue);
 }
 
 export async function runWasmProcess(
