@@ -311,6 +311,7 @@ export function createContext(o: ContextOptions): CreatedContext {
 
   const fs = pathOps(kernel, resolve, statOf, open);
   const lane = o.lane ?? laneOf(undefined);
+  if (o.lane) kernel.syncLane = o.lane;
   const syncKernel = new JsSyncKernel(lane, kernel, unwind);
   const terminal = ttyOps(kernel);
   const sync: JsSyncContext = {
