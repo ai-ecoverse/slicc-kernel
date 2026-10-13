@@ -530,13 +530,12 @@ function uplinkServer(
 }
 
 function traitsUpdater(
-  options: KernelOptions,
+  transport: NetworkTransport | undefined,
   call: (req: KernelCall) => Promise<unknown>
 ): () => Promise<boolean> {
   return async () => {
-    const traits = options.network?.transport?.traits;
-    if (!traits) return false;
-    return (await call({ op: 'transport-traits', traits: { ...traits } })) === true;
+    const traits = transport ? { traits: { ...transport.traits } } : {};
+    return (await call({ op: 'transport-traits', ...traits })) === true;
   };
 }
 
@@ -699,7 +698,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
       (await call({ op: 'connect', ...connectOptions })) as MessagePort,
     ...accounts(call, options.users === undefined ? DEFAULT_USERS : options.users),
     setRoutes: async (routes) => void (await call({ op: 'routes', routes })),
-    updateTransportTraits: traitsUpdater(options, call),
+    updateTransportTraits: traitsUpdater(transport, call),
     dial,
     loopbackFetch: (input, fetchOptions) => loopbackFetch(dial, input, fetchOptions),
     mount: async (spec) => (await call({ op: 'mount', spec })) as MountEntry,

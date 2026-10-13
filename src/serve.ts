@@ -108,7 +108,7 @@ export interface RoutesRequest {
 export interface TraitsRequest {
   id: number;
   op: 'transport-traits';
-  traits: RealmTransportTraits;
+  traits?: RealmTransportTraits;
 }
 
 export type MountRequest =
@@ -159,7 +159,7 @@ function networkOp(
     l.setRoutes(req.routes);
     return true;
   }
-  if (remote) remote.traits = req.traits;
+  if (remote && req.traits) remote.traits = req.traits;
   return l.updateTransportTraits();
 }
 
