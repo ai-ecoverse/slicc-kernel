@@ -43,6 +43,7 @@ const { status, stdout, stderr } = await kernel.run(['bash', '-c', 'echo hi > he
 | `sealed` | none | `(req, { signal }) => Promise<object>`: answers requests written to [`/dev/sealed`](#devsealed). `createNodeKernel` takes it too |
 | `approve` | none | `(req, { signal }) => 'once' \| 'always' \| 'deny'` (or a promise of one): decides a `sudo` request that needs approval (see [Sudo](#sudo)); without it, such a request is denied. `createNodeKernel` takes it too |
 | `cdp` | none | `({ runtime }) => Promise<CdpConnection>`: a browser-level DevTools connection for programs that drive a browser (see [Browser automation](#browser-automation-cdp)) |
+| `protect` | none | `{ paths }`: directories no process may change, root included, in every `users` mode (see [Protected paths](#protected-paths)). `createNodeKernel` takes it too |
 
 ### `kernel.run(argv, options?) → Promise<{ status, stdout, stderr }>`
 
@@ -599,6 +600,26 @@ A character device (`0666`, major 10, minor 250) through which a program talks t
 - **The stamp:** the hook gets the request with `caller: { pid, ppid, uid, gid, tag?, users }`, from the process that writes (effective ids, at the write; not the one that opened it), `tag` the process's tag (see `kernel.run`) when it has one, and `users` the kernel's `users` mode, since a uid means more under `'enforce'`. A `caller` in the request is replaced.
 - **Reading:** the reply comes from the same descriptor, as JSON (`{ v: 1, … }`). A read waits for it, drains it, then returns end-of-file; with no request outstanding it returns end-of-file at once. A signal ends the wait with `EINTR` and the request stays outstanding, `O_NONBLOCK` gives `EAGAIN`, and `poll`/`select` report the descriptor readable once the reply is there. A new write drops an unread reply.
 - **The hook:** `signal` aborts with `'timeout'` after 10 s (the reply is then `{ v: 1, error: { code: 'ETIMEDOUT' } }`), `'replaced'` when a new write on the descriptor comes first, and `'withdrawn'` when the writer exits or the descriptor is closed. A throw or a reply that isn't an object becomes an `EIO` error reply, with the first line of the message; no hook is `ENOTCONN`. On the page, `createKernel` relays the request from the kernel worker and back, and the abort too.
+
+### Protected paths
+
+`createKernel({ protect: { paths: ['/node_modules', '/os'] } })` makes those directories read-only for every process, root included, in every `users` mode. They hold code every later process runs, which only the embedder writes, straight to OPFS.
+- **What fails:** any change under a path fails with `EROFS` ("Read-only file system"): a write, a create, a truncate, `mkdir`, removing or renaming (from or to), a hard or symbolic link created there, `chmod`, `chown` and setting times. So does removing or renaming a directory that holds one (`rm -rf /`). A missing working directory for `run` or `openTerminal` isn't created there either. Reads are unaffected. `'/'` protects the whole file system.
+- **Stats and symlinks:** files under a path show as on a read-only mount, so opens for writing fail at once. A write through a symlink, or through a symlinked directory, that leads into a path fails too.
+- **Where it's checked:** the root file system itself checks every change, from the moment the kernel is constructed, inside the change and against the path it really lands on. So a symlink swapped mid-way can't redirect a write. The kernel's own writes there are refused too, so don't protect what the kernel writes after it starts:
+  - `/etc` (`passwd`, `group` and the proxy's CA);
+  - `/home` and `/root` (new users' homes);
+  - `/tmp`;
+  - the system `PNPM_HOME` (`/usr/local/share/pnpm`);
+  - `/.slicc-unlinked` (files removed while open);
+  - `/` itself, which holds all of these.
+  Paths in the layout the kernel stamps with root's owner at boot are skipped when protected.
+- **Symlinks as paths:** a path that is itself a symlink protects the directory it names too, by its real path, once the kernel has prepared.
+- **Mounts:** nothing can be mounted at, under or above a path, not even by the embedder (`kernel.mount`, `/etc/fstab`). So a path always lies on the root file system, where that check holds.
+- **Clients:** a client's (`kernel.connect`) file calls, mounts and unmounts see the paths read-only, as its processes do.
+- **Not affected:** the page's own writes to OPFS.
+- **Writers:** a `writer` that lets chosen processes change the paths needs the kernel-side process tag ([#405](https://github.com/ai-ecoverse/slicc-kernel/pull/405)). Until then, `protect.writer` is refused.
+- **Where it is a boundary:** it's one in a browser, where programs' own code can't reach OPFS around the kernel (see [JS programs](#js-programs)). Under the Node entry it isn't, until [#407](https://github.com/ai-ecoverse/slicc-kernel/issues/407), and there `kernel.writeFile` under a path fails too, so write those files into `root` before creating the kernel.
 
 ### `/proc`
 

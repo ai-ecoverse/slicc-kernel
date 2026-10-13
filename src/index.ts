@@ -9,6 +9,7 @@ import {
 } from './client/dial-stream.ts';
 import { type LoopbackFetchOptions, loopbackFetch } from './client/loopback-fetch.ts';
 import type { Denial, DenialHook } from './fs/dac.ts';
+import { PROTECT_WRITER, type Protection } from './fs/protect.ts';
 import type { UsersMode } from './fs/types.ts';
 import { isHostname } from './kernel/net/loopback-names.ts';
 import type { TransportCall } from './kernel/net/remote-transport.ts';
@@ -145,6 +146,7 @@ export interface KernelOptions {
   onDenial?: DenialHook;
   sealed?: SealedHook;
   approve?: ApproveHook;
+  protect?: Protection;
 }
 
 interface HostfsRequest {
@@ -311,6 +313,7 @@ function initCall(options: KernelOptions, transport: NetworkTransport | undefine
     ...(options.onDenial ? { denials: true } : {}),
     ...(options.sealed ? { sealed: true } : {}),
     ...(options.approve ? { approve: true } : {}),
+    ...(options.protect ? { protect: { paths: [...options.protect.paths] } } : {}),
     ...(options.processMounts !== undefined
       ? {
           processMounts:
@@ -441,6 +444,7 @@ function checkOptions(options: KernelOptions): void {
 
 export async function createKernel(options: KernelOptions = {}): Promise<Kernel> {
   checkOptions(options);
+  if (options.protect?.writer) throw new Error(PROTECT_WRITER);
   const url = options.worker ?? new URL('./kernel-worker.js', import.meta.url);
   const worker = new Worker(url, { type: 'module', name: 'slicc-kernel' });
   const pending = new Map<number, Pending>();

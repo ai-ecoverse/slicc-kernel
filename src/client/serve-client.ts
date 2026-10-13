@@ -455,7 +455,7 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
         if (!(FS_METHODS as readonly string[]).includes(req.method)) {
           throw new Error(`unknown file system call ${req.method}`);
         }
-        return fsCall(l.fs, req.method, req.args, ownerFor(l, self), guardFor(l, self));
+        return fsCall(l.processFs, req.method, req.args, ownerFor(l, self), guardFor(l, self));
       case 'watch':
       case 'unwatch':
         return watchOp(l, req, watches, send, guardFor(l, self));

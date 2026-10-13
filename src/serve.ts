@@ -50,6 +50,7 @@ export interface InitRequest {
   hostfs?: boolean;
   hostname?: string;
   users?: UsersMode;
+  protect?: { paths: string[] };
   denials?: boolean;
   sealed?: boolean;
   approve?: boolean;
@@ -297,11 +298,18 @@ function hostOptions(
   req: InitRequest,
   port: KernelPort,
   sealed: SealedHook
-): { hostname?: string; users?: UsersMode; onDenial?: DenialHook; sealed?: SealedHook } {
+): {
+  hostname?: string;
+  users?: UsersMode;
+  onDenial?: DenialHook;
+  sealed?: SealedHook;
+  protect?: { paths: string[] };
+} {
   return {
     ...(req.hostname !== undefined ? { hostname: req.hostname } : {}),
     ...(req.users !== undefined ? { users: req.users } : {}),
     ...(req.denials ? { onDenial: (denial: Denial) => port.postMessage({ denial }) } : {}),
+    ...(req.protect ? { protect: { paths: [...req.protect.paths] } } : {}),
     ...(req.sealed ? { sealed } : {}),
   };
 }
