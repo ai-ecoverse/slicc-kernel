@@ -405,6 +405,8 @@ export interface WasmProcessOptions {
 
   sealed?: SealedBroker;
 
+  ttyFilter?: (file: OpenFile) => OpenFile;
+
   guard?: { dac: Dac; fs: KernelFs; created?: Created };
 
   identity?: () => Promise<{ pid: number; ppid: number }>;
@@ -874,7 +876,8 @@ export class WasmProcess {
       name === undefined ? this.controllingTerminal() : this.options.jobs?.terminalNamed(name);
     if (!tty) throw new KernelError('ENXIO');
     if (name !== undefined) ttyOpenable(this.guarded(), tty);
-    return this.fds.install(tty.file(), 3);
+    const file = tty.file();
+    return this.fds.install(this.options.ttyFilter?.(file) ?? file, 3);
   }
 
   private openSealed(): number {

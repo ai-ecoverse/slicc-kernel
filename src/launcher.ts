@@ -1,3 +1,4 @@
+import type { Scrubber } from '@ai-ecoverse/slicc-scrub';
 import { enableCdp } from './cdp/facade.ts';
 import { CdpHosts } from './cdp/hosts.ts';
 import type { CdpHook } from './cdp/types.ts';
@@ -32,7 +33,7 @@ import {
 import type { CpuTimes } from './kernel/cpu-clock.ts';
 import { type Cred, copyCred, maySee, maySignal, ROOT } from './kernel/cred.ts';
 import { argvDigest, TICKET_ENV } from './kernel/exec-ticket.ts';
-import { bytesSource, deviceFile, FdTable, sinkFile } from './kernel/fd-table.ts';
+import { bytesSource, deviceFile, FdTable, type OpenFile, sinkFile } from './kernel/fd-table.ts';
 import { spawnWasmProcess, type WasmProcessHandle, type WasmWorkerLike } from './kernel/host.ts';
 import { LockTable } from './kernel/host-ops.ts';
 import { type JobMember, JobTable } from './kernel/jobs.ts';
@@ -58,6 +59,7 @@ import type { ProcessInfo } from './kernel/proc-info.ts';
 import { DEFAULT_UMASK } from './kernel/process.ts';
 import type { ForkState, Program } from './kernel/protocol.ts';
 import { PtyTable } from './kernel/pty.ts';
+import { type ScrubSecret, scrubbed, scrubberOf, scrubStdio } from './kernel/scrub-file.ts';
 import { SealedBroker, type SealedHook } from './kernel/sealed.ts';
 import { SettlingChildren } from './kernel/settling.ts';
 import { SIG, sigbit } from './kernel/signals.ts';
@@ -246,6 +248,7 @@ interface StartRequest {
   tag?: string | undefined;
   decided?: Promise<boolean>;
   pid?: number;
+  scrub?: Scrubber;
 }
 
 const COMMAND = /^\/(?:usr\/)?bin\/([^/]+)$/;
@@ -473,6 +476,7 @@ export class Launcher {
   readonly usersMode: UsersMode;
   readonly dac: Dac | undefined;
   private readonly sealed: SealedBroker;
+  private readonly scrubs = new Map<number, Scrubber>();
   private nextPid = 1000;
   readonly boot = Date.now();
   private terminals = 0;
@@ -776,10 +780,13 @@ export class Launcher {
     cred: Readonly<Cred>,
     planned: Planned,
     fds: FdTable
-  ): Promise<{ env: Record<string, string>; pid?: number }> {
+  ): Promise<{ env: Record<string, string>; pid?: number; scrub?: Scrubber }> {
     if (!(TICKET_ENV in req.env)) return { env: req.env };
     try {
-      return await this.redeem(req, ppid, { cred, scope: await this.scopeOf(cred.euid) }, planned);
+      const scope = await this.scopeOf(cred.euid);
+      const redeemed = await this.redeem(req, ppid, { cred, scope }, planned);
+      if (redeemed.scrub) scrubStdio(fds, redeemed.scrub);
+      return redeemed;
     } catch {
       await fds.closeAll();
       throw new SpawnError('EACCES');
@@ -791,7 +798,7 @@ export class Launcher {
     ppid: number,
     { cred, scope }: { cred: Readonly<Cred>; scope: string },
     planned: Planned
-  ): Promise<{ env: Record<string, string>; pid: number }> {
+  ): Promise<{ env: Record<string, string>; pid: number; scrub?: Scrubber }> {
     const { [TICKET_ENV]: ticket = '', ...env } = req.env;
     const booked = this.sealed.tickets.take(ticket);
     const caller = this.jobs.shown(ppid);
@@ -821,11 +828,15 @@ export class Launcher {
       trusted,
     });
     if (!swap) throw new SpawnError('EACCES');
+    const secrets: ScrubSecret[] = [];
     for (const [name, placeholder] of Object.entries(swap.placeholders)) {
       const value = swap.values[name];
-      if (value !== undefined && env[name] === placeholder) env[name] = value;
+      if (value === undefined || env[name] !== placeholder) continue;
+      env[name] = value;
+      secrets.push({ name, value, placeholder });
     }
-    return { env, pid };
+    const scrub = scrubberOf(secrets);
+    return { env, pid, ...(scrub ? { scrub } : {}) };
   }
 
   private async interpreterChain(planned: Planned, cwd: string, scope: string): Promise<string[]> {
@@ -1004,6 +1015,8 @@ export class Launcher {
       throw fsError('ESRCH', `no process group ${req.pgid}`);
     }
     const pid = req.pid ?? this.nextPid++;
+    const scrub = req.scrub ?? (req.ppid !== undefined ? this.scrubs.get(req.ppid) : undefined);
+    if (scrub) this.scrubs.set(pid, scrub);
     const terminal = req.fds.stdioTerminal();
     const decided = req.decided ?? Promise.resolve(true);
     const count = (byParent: boolean) => {
@@ -1027,6 +1040,7 @@ export class Launcher {
       cred: req.cred,
       ...(this.owners ? { owners: true } : {}),
       sealed: this.sealed,
+      ...(scrub ? { ttyFilter: (file: OpenFile) => scrubbed(file, scrub) } : {}),
       ...(this.dac ? { dac: this.dac } : {}),
       program: req.program,
       argv0: req.argv0,
@@ -1083,6 +1097,7 @@ export class Launcher {
       const spent = handle.times?.();
       if (spent) this.spent.set(pid, spent);
       this.processes.delete(pid);
+      this.scrubs.delete(pid);
       if (this.processes.size === 0) {
         clearInterval(this.sampler);
         this.sampler = undefined;

@@ -75,6 +75,7 @@ export interface SpawnWasmOptions {
   cred?: Cred;
   owners?: boolean;
   sealed?: SealedBroker;
+  ttyFilter?: (file: OpenFile) => OpenFile;
   dac?: Dac;
   identity?: () => Promise<{ pid: number; ppid: number }>;
   onSyscall?: (req: WasmSyscall) => void;
@@ -357,6 +358,7 @@ function processOptions(
     ...inherited(opts),
     ...(opts.owners ? { owners: true } : {}),
     ...(opts.sealed ? { sealed: opts.sealed } : {}),
+    ...(opts.ttyFilter ? { ttyFilter: opts.ttyFilter } : {}),
     ...(opts.dac ? { guard: { dac: opts.dac, fs: opts.fs, created } } : {}),
     ...(opts.identity ? { identity: opts.identity } : {}),
     ...(opts.onSyscall ? { onSyscall: opts.onSyscall } : {}),
