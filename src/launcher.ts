@@ -13,6 +13,7 @@ import {
   scanFilesystems,
 } from './commands.ts';
 import { R_OK, X_OK } from './fs/access.ts';
+import { type Attestation, attest, FileWatches, type RemoteFs } from './fs/attest.ts';
 import { followLinks, withCommandDirs } from './fs/commands.ts';
 import { Dac, type DenialHook, need, TTY_MODE } from './fs/dac.ts';
 import { chain } from './fs/owners.ts';
@@ -491,13 +492,17 @@ export class Launcher {
   readonly usersMode: UsersMode;
   readonly dac: Dac | undefined;
   private readonly sealed: SealedBroker;
+  private readonly rootFs: KernelFs;
+  private fileWatches: FileWatches | undefined;
   private nextPid = 1000;
   readonly boot = Date.now();
   private terminals = 0;
 
   constructor(options: LauncherOptions) {
     this.usersMode = usersMode(options.users);
+    this.rootFs = options.fs;
     this.dac = this.usersMode === 'off' ? undefined : new Dac(this.usersMode, options.onDenial);
+    if (this.dac) this.dac.tagOf = (pid) => this.tagOf(pid);
     this.sealed = new SealedBroker(options.sealed, this.usersMode, undefined, (pid) =>
       this.tagOf(pid)
     );
@@ -774,12 +779,12 @@ export class Launcher {
 
   private async mayExec(
     cred: Readonly<Cred>,
-    req: { file: string; cwd: string; pid: number },
+    req: { file: string; cwd: string; pid: number; tag?: string | undefined },
     planned: Planned | undefined
   ): Promise<void> {
     const { dac } = this;
     if (!dac) return;
-    const g = { fs: this.fs, cred, pid: req.pid, dac };
+    const g = { fs: this.fs, cred, pid: req.pid, dac, tag: req.tag };
     const byPath = (file: string) => file.includes('/') && !COMMAND.test(file);
     if (byPath(req.file)) {
       const path = this.fs.resolvePath(req.cwd, req.file);
@@ -1439,12 +1444,29 @@ export class Launcher {
       (sig === SIG.CONT && session !== undefined && this.jobs.sidOf(target) === session) ||
       (from !== undefined && this.imageOf(from) === this.imageOf(target)) ||
       (from !== undefined && this.granted.get(this.jobs.shown(target)) === from);
+    if (pid === -1) {
+      const sender = from === undefined ? undefined : this.imageOf(from);
+      return this.killAll(
+        sig,
+        (member) => this.imageOf(member) !== sender && may(this.imageOf(member))
+      );
+    }
     if (pid < 0) return this.jobs.killGroup(-pid, sig, (member) => may(this.imageOf(member)));
     const handle = this.processes.get(pid);
     if (!handle) return false;
     if (!may(this.imageOf(pid))) throw fsError('EPERM', `pid ${pid}`);
     if (sig !== 0) handle.signal(sig);
     return true;
+  }
+
+  private killAll(sig: number, may: (pid: number) => boolean): boolean {
+    let any = false;
+    for (const [pid, handle] of [...this.processes]) {
+      if (pid === 1 || !may(pid)) continue;
+      any = true;
+      if (sig !== 0) handle.signal(sig);
+    }
+    return any;
   }
 
   private async driver(type: string, spec: MountSpec): Promise<OpenedDriver> {
@@ -1538,6 +1560,21 @@ export class Launcher {
         port2.close();
       },
     };
+  }
+
+  attest(path: string): Promise<Attestation> {
+    return attest(this.rootFs, path, {
+      users: this.usersMode,
+      mounts: this.mounts
+        .list()
+        .map((entry) => entry.target)
+        .filter((target) => this.mounts.mounted(target) !== undefined),
+    });
+  }
+
+  watchFiles(paths: readonly string[], notify: (path: string) => void): Promise<() => void> {
+    this.fileWatches ??= new FileWatches(this.watchers, this.rootFs as RemoteFs);
+    return this.fileWatches.watch(paths, notify);
   }
 
   async mount(spec: MountSpec): Promise<MountEntry> {
@@ -1751,7 +1788,7 @@ export class Launcher {
     };
   }
 
-  private async starting(argv: string[], dir: string | undefined, account: Account) {
+  private async starting(argv: string[], dir: string | undefined, account: Account, tag?: string) {
     this.resetCatalogs();
     const scope = account.uid === 0 ? '' : pnpmHomeOf(account, this.pnpmHome);
     const start = dir ?? '/';
@@ -1759,14 +1796,14 @@ export class Launcher {
     const [file = ''] = argv;
     if (!(await this.base.exists(cwd))) await this.processFs.mkdir(cwd, { recursive: true });
     const planned = await this.plan(file, argv, cwd, scope);
-    await this.mayExec(credOf(account), { file, cwd, pid: 0 }, planned);
+    await this.mayExec(credOf(account), { file, cwd, pid: 0, tag }, planned);
     return { cwd, file, planned };
   }
 
   async openTerminal(argv: string[], options: TerminalOptions): Promise<TerminalSession> {
     tagOption(options.tag);
     const { account, tty: ttyGroup } = await this.terminalAccount(options.user);
-    const { cwd, file, planned } = await this.starting(argv, options.cwd, account);
+    const { cwd, file, planned } = await this.starting(argv, options.cwd, account, options.tag);
     if (!planned) throw new Error(`${file}: command not found`);
     let leader = 0;
     const tty: KernelTty = new KernelTty(
@@ -1817,7 +1854,7 @@ export class Launcher {
   async run(argv: string[], options: RunOptions = {}): Promise<RunResult> {
     tagOption(options.tag);
     const account = await this.account(options.user);
-    const { cwd, file, planned } = await this.starting(argv, options.cwd, account);
+    const { cwd, file, planned } = await this.starting(argv, options.cwd, account, options.tag);
     const env = this.environment(cwd, options.env, account);
     const out: Uint8Array[] = [];
     const err: Uint8Array[] = [];

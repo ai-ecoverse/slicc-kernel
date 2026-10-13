@@ -351,7 +351,7 @@ function holdingToken(
 function processOptions(
   opts: SpawnWasmOptions,
   header: Int32Array,
-  hooks: Pick<WasmProcessOptions, 'raise' | 'threadKill' | 'exitNow'>,
+  hooks: Pick<WasmProcessOptions, 'raise' | 'threadKill' | 'exitNow' | 'exitSignal'>,
   created: Created
 ): WasmProcessOptions {
   return {
@@ -389,6 +389,7 @@ function processOptions(
     raise: hooks.raise,
     threadKill: hooks.threadKill,
     ...(hooks.exitNow ? { exitNow: hooks.exitNow } : {}),
+    ...(hooks.exitSignal ? { exitSignal: hooks.exitSignal } : {}),
     ...(opts.program.abi === 'wasi' || opts.program.abi === 'js'
       ? { pendingBits: () => Atomics.load(header, SAB_I_SIGNALS) }
       : {}),
@@ -433,7 +434,12 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
         raise: (sig) => signal(sig),
         threadKill: (tid, sig) =>
           killThread(threadSignals.get(tid), process.signalMasks().caught, sig),
-        ...(opts.program.abi === 'js' ? { exitNow: (code: number) => exitNow(code) } : {}),
+        ...(opts.program.abi === 'js'
+          ? {
+              exitNow: (code: number) => exitNow(code),
+              exitSignal: (sig: number) => queueMicrotask(() => finish(128 + sig, sig)),
+            }
+          : {}),
       },
       created
     )

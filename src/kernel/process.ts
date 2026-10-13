@@ -194,6 +194,7 @@ export type WasmSyscall =
   | SudoCall
   | RunRequest
   | { op: 'proc-exit'; status: number }
+  | { op: 'proc-kill-self'; sig: number; target?: number; probe?: boolean }
   | { op: 'proc-fork'; state: ForkState; restart?: true }
   | { op: 'proc-kill'; pid: number; sig: number }
   | { op: 'thread-kill'; tid: number; sig: number }
@@ -347,6 +348,7 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'proc-sudo',
   'proc-run',
   'proc-exit',
+  'proc-kill-self',
   'proc-fork',
   'proc-kill',
   'thread-kill',
@@ -454,6 +456,8 @@ export interface WasmProcessOptions {
   raise?: (sig: number) => void;
 
   exitNow?: (status: number) => void;
+
+  exitSignal?: (sig: number) => void;
 
   onReap?: (pid: number) => void;
 
@@ -593,6 +597,21 @@ export class WasmProcess {
     if (this.killed) void Promise.allSettled([this.options.kill?.(pid, SIG.KILL)]);
     else this.adoptExec(pid);
     return pid;
+  }
+
+  private async killSelf(sig: number, target?: number, probe?: boolean): Promise<SyncFsResult> {
+    if (!this.options.exitSignal) throw new KernelError('ENOSYS');
+    if (!isSignal(sig) || defaultAction(sig) !== 'terminate') throw new KernelError('EINVAL');
+    const { caught, ignored } = this.signalMasks();
+    const to = target === 0 ? -this.pgid() : (target ?? this.pid);
+    if (sig !== SIG.KILL && (caught | ignored) & sigbit(sig)) {
+      if (!(await this.options.kill?.(to, sig))) throw new KernelError('ESRCH');
+      return { ok: true, kind: 'void' };
+    }
+    if (probe) return { ok: true, kind: 'json', json: 'terminate' };
+    if (to !== this.pid) await this.options.kill?.(to, sig);
+    this.options.exitSignal(sig);
+    return DYING;
   }
 
   private run(req: RunRequest): Promise<Uint8Array> {
@@ -1287,6 +1306,8 @@ export class WasmProcess {
         if (!this.options.exitNow) throw new KernelError('ENOSYS');
         this.options.exitNow(req.status & 0xff);
         return DYING;
+      case 'proc-kill-self':
+        return this.killSelf(req.sig, req.target, req.probe);
       case 'proc-identity':
         return { ok: true, kind: 'json', json: (await this.options.identity?.()) ?? null };
       case 'proc-exec': {
