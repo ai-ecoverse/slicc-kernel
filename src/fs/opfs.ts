@@ -595,6 +595,11 @@ export class OpfsFs implements KernelFs {
   }
 
   private async describe(found: Located): Promise<FsStat> {
+    const stat = await this.described(found);
+    return isProtected(this.guarded, found.path) ? { ...stat, readonly: true } : stat;
+  }
+
+  private async described(found: Located): Promise<FsStat> {
     if (found.link) return this.owned(this.linkStat(found.link), found.path, found.link);
     if (!this.owners) {
       const [meta] = await this.meta.get([found.path]);

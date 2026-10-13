@@ -313,7 +313,8 @@ export class WasiHost {
           if (this.o.fs.owners && amode & 1) throw new WasiError('EACCES');
           return;
         }
-        pathOwned(path, !nofollow);
+        const st = pathOwned(path, !nofollow);
+        if (amode & 2 && (st as { readonly?: boolean }).readonly) throw new WasiError('EROFS');
         if (!this.o.fs.owners) return;
         const kind = flags & AT_EACCESS ? 'eaccess' : 'access';
         this.o.fs.access?.(path, amode & 7, kind, nofollow);

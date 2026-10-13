@@ -853,6 +853,8 @@ function baseOf(Fs: AccessFs, dirfd: number): string {
   return dirfd === AT_FDCWD ? (Fs.cwd?.() ?? '/') : (Fs.getStream?.(dirfd)?.path ?? '/');
 }
 
+const W_ACCESS = 2;
+
 function kernelChecks(
   Fs: AccessFs,
   memory: WebAssembly.Memory,
@@ -863,6 +865,10 @@ function kernelChecks(
   const lookupPath = Fs.lookupPath as NonNullable<AccessFs['lookupPath']>;
   const { node } = lookupPath.call(Fs, abs, { follow: (call.flags & AT_SYMLINK_NOFOLLOW) === 0 });
   const bridge = node.live ? node.mount.opts.bridge : undefined;
+  const stat = (bridge as { stat?: (path: string) => { readonly?: boolean } } | undefined)?.stat;
+  if (stat && call.amode & W_ACCESS && stat(liveNodePath(node)).readonly) {
+    return -wasiErrno('EROFS');
+  }
   if (!bridge?.owners || !bridge.access) return 0;
   const kind = call.flags & AT_EACCESS ? 'eaccess' : 'access';
   bridge.access(liveNodePath(node), call.amode, kind, (call.flags & AT_SYMLINK_NOFOLLOW) !== 0);

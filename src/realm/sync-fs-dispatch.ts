@@ -301,11 +301,25 @@ async function accessOp(entry: SyncFsTokenEntry, path: string, req: SyncFsReques
   return done;
 }
 
+const CHANGING = new Set<SyncFsOp>([
+  'mkdir',
+  'create',
+  'symlink',
+  'unlink',
+  'rmdir',
+  'rm',
+  'rename',
+  'link',
+  'utimes',
+  'lutimes',
+]);
+
 async function guarded(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest) {
   const g = guardOf(entry);
   if (!g) return undefined;
   if (LOOKS.has(req.op) && (await entry.holdsKept?.(path))) return undefined;
   try {
+    if (CHANGING.has(req.op)) await entry.fs.mayChange?.(path, req.op === 'utimes');
     await guard(g, path, req, entry.cwd);
     return undefined;
   } catch (err) {
