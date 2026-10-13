@@ -340,6 +340,7 @@ async function watchOp(
 export function serveClient(port: MessagePortLike, host: ClientHost): ServedClient {
   let state: 'new' | 'open' | 'closed' = 'new';
   let self: Account | undefined;
+  const guard = (l: Launcher) => guardFor(l, self, host.tag);
   const terminals = new Map<number, TerminalSession>();
   const groups = new Set<number>();
   const sessions = new Set<number>();
@@ -455,10 +456,10 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
         if (!(FS_METHODS as readonly string[]).includes(req.method)) {
           throw new Error(`unknown file system call ${req.method}`);
         }
-        return fsCall(l.fs, req.method, req.args, ownerFor(l, self), guardFor(l, self, host.tag));
+        return fsCall(l.processFs, req.method, req.args, ownerFor(l, self), guard(l));
       case 'watch':
       case 'unwatch':
-        return watchOp(l, req, watches, send, guardFor(l, self, host.tag));
+        return watchOp(l, req, watches, send, guard(l));
       case 'mount':
         return { result: await l.mountAs(clientCred(self), req.spec) };
       case 'umount':

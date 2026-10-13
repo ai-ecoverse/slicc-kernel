@@ -56,6 +56,7 @@ import {
   type WasmThreadInitMsg,
 } from './protocol.ts';
 import type { PtyTable } from './pty.ts';
+import type { SealedBroker } from './sealed.ts';
 import { SIG, sigbit } from './signals.ts';
 import { KernelSocket, type LoopbackNet } from './socket.ts';
 import type { VfsNodes } from './vfs-file.ts';
@@ -73,6 +74,8 @@ export interface SpawnWasmOptions {
   umask?: number;
   cred?: Cred;
   owners?: boolean;
+  sealed?: SealedBroker;
+  readonlyAt?: (path: string) => boolean;
   dac?: Dac;
   identity?: () => Promise<{ pid: number; ppid: number }>;
   onSyscall?: (req: WasmSyscall) => void;
@@ -354,6 +357,8 @@ function processOptions(
   return {
     ...inherited(opts),
     ...(opts.owners ? { owners: true } : {}),
+    ...(opts.sealed ? { sealed: opts.sealed } : {}),
+    ...(opts.readonlyAt ? { readonlyAt: opts.readonlyAt } : {}),
     ...(opts.dac ? { guard: { dac: opts.dac, fs: opts.fs, created } } : {}),
     ...(opts.identity ? { identity: opts.identity } : {}),
     ...(opts.onSyscall ? { onSyscall: opts.onSyscall } : {}),
