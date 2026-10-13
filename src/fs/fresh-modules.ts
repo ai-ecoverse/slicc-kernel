@@ -73,11 +73,18 @@ export class FreshModules {
         if (head) await decide(path, head);
       };
     }
+    const bound = new WeakMap<object, unknown>();
     return new Proxy(fs, {
       get(target, key, receiver) {
         if (Object.hasOwn(overrides, key)) return overrides[key as keyof KernelFs];
         const value = Reflect.get(target, key, receiver);
-        return typeof value === 'function' ? value.bind(target) : value;
+        if (typeof value !== 'function') return value;
+        let method = bound.get(value);
+        if (method === undefined) {
+          method = value.bind(target);
+          bound.set(value, method);
+        }
+        return method;
       },
     });
   }

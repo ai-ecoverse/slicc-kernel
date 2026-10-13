@@ -1751,8 +1751,9 @@ export class Launcher {
   }
 
   private writerStack(): WriterStack {
+    const watched = this.watchers.wrap(this.mounts.wrap(this.unguardedRoot));
     const fs = withCommandDirs(
-      this.watchers.wrap(this.mounts.wrap(this.unguardedRoot)),
+      this.owners ? this.freshModules.wrap(watched) : watched,
       async () => new Set((await this.commands()).keys()),
       (dir) => this.userCommandDir(dir),
       this.owners
