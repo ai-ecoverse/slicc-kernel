@@ -1373,7 +1373,7 @@ export class Launcher {
   }
 
   private forker(ppid: number, parent: StartRequest): ChildForker {
-    const { exec: _exec, ...image } = parent;
+    const { exec: _exec, pid: _pid, ...image } = parent;
     return async (state, fds) =>
       childHandle(
         this.start({
