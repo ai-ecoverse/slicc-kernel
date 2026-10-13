@@ -723,7 +723,9 @@ export class WasmProcess {
         const { ptys, jobs } = this.options;
         const owner = this.options.owners ? this.ttyOwner() : undefined;
         const guard = this.guarded();
-        return ptySyscall(req, { pid: this.pid, fds: this.fds, ptys, jobs, guard, owner });
+        const { ttyFilter } = this.options;
+        const ctx = { pid: this.pid, fds: this.fds, ptys, jobs, guard, owner, ttyFilter };
+        return ptySyscall(req, ctx);
       }
       return await this.procSyscall(req, cancelled);
     } catch (e) {
