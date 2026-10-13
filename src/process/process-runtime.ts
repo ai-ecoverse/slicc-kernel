@@ -313,6 +313,7 @@ export function glueBody(glue: string): string {
 
 const GLUE_TRAILER = [
   "if (typeof ENV !== 'undefined') Object.assign(ENV, Module.sliccEnv);",
+  "if (typeof thisProgram !== 'undefined' && Module.thisProgram === '') thisProgram = '';",
   'const __sliccTake = (name, value) => {',
   '  const own = Object.getOwnPropertyDescriptor(Module, name);',
   "  if (own && 'value' in own && own.value != null) return;",

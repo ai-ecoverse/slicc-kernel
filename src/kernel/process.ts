@@ -179,6 +179,7 @@ export type WasmSyscall =
       op: 'proc-spawn';
       file: string;
       argv: string[];
+      argv0?: string;
       env: Record<string, string>;
       cwd: string;
       stdio: ChildStdio[];
@@ -602,9 +603,10 @@ export class WasmProcess {
   }
 
   private async spawn(req: Extract<WasmSyscall, { op: 'proc-spawn' }>): Promise<number> {
-    const { file, argv, env, cwd, stdio, inherit, exec, pgid, session } = req;
+    const { file, argv, argv0, env, cwd, stdio, inherit, exec, pgid, session } = req;
     const group = { ...(pgid !== undefined ? { pgid } : {}), ...(session ? { session } : {}) };
-    const spawned = { file, argv, env, cwd, ...group, ...(exec ? { exec } : {}) };
+    const named = argv0 !== undefined ? { argv0 } : {};
+    const spawned = { file, argv, ...named, env, cwd, ...group, ...(exec ? { exec } : {}) };
     const pid = await this.children.spawn(spawned, stdio, inherit);
     if (!exec) return pid;
     if (this.killed) void Promise.allSettled([this.options.kill?.(pid, SIG.KILL)]);

@@ -212,6 +212,7 @@ interface Target {
   glue: string;
   wasm: string;
   argv0: string;
+  fixed?: true;
   prefix?: string[];
   env?: Record<string, string>;
   unset?: string[];
@@ -364,6 +365,7 @@ function targetOf(command: Command): Target {
     glue: command.glue,
     wasm: command.wasm,
     argv0: command.argv0,
+    ...(command.argv0Fixed ? { fixed: true as const } : {}),
     ...(command.args ? { prefix: command.args } : {}),
     ...(command.env ? { env: command.env } : {}),
     ...(command.unset ? { unset: command.unset } : {}),
@@ -753,9 +755,12 @@ export class Launcher {
     file: string,
     argv: string[],
     cwd: string,
-    scope: string
+    scope: string,
+    argv0?: unknown
   ): Promise<Planned | undefined> {
-    const direct = await this.resolve(file, argv[0] ?? file, cwd, scope);
+    const found = await this.resolve(file, argv[0] ?? file, cwd, scope);
+    const named = typeof argv0 === 'string' && found && !found.fixed;
+    const direct = named ? { ...found, argv0 } : found;
     if (direct) return { target: direct, args: [...(direct.prefix ?? []), ...argv.slice(1)] };
     const script = await this.interpreted(file, argv, cwd, scope);
     return script && { ...script, script: true };
@@ -1189,7 +1194,7 @@ export class Launcher {
       }
       const cred = grant ? grant.cred : this.credOf(ppid);
       const scope = grant ? '' : await this.scopeOf(cred.euid);
-      const planned = await this.plan(req.file, req.argv, req.cwd, scope);
+      const planned = await this.plan(req.file, req.argv, req.cwd, scope, req.argv0);
       try {
         await this.mayExec(cred, { ...req, pid: ppid }, planned);
       } catch (err) {

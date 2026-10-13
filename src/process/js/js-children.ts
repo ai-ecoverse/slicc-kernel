@@ -4,6 +4,7 @@ export type JsStdio = 'inherit' | 'pipe' | 'null' | number;
 
 export interface JsSpawnOptions {
   argv: readonly string[];
+  argv0?: string;
   env?: Readonly<Record<string, string>>;
   cwd?: string;
   pgid?: number;
@@ -109,6 +110,7 @@ export function childOps(kernel: JsKernel, io: ChildIo, defaults: ChildDefaults)
     const [file] = o.argv;
     if (file === undefined) throw new JsCallError('EINVAL', 'spawn');
     const group = groupOf(o, 'spawn');
+    const named = argv0Of(o.argv0, 'spawn');
     const mine: Array<number | undefined> = [];
     const theirs: number[] = [];
     try {
@@ -117,6 +119,7 @@ export function childOps(kernel: JsKernel, io: ChildIo, defaults: ChildDefaults)
         op: 'proc-spawn',
         file,
         argv: [...o.argv],
+        ...named,
         env: { ...(o.env ?? defaults.env) },
         cwd: o.cwd ?? defaults.cwd,
         stdio,
@@ -145,6 +148,12 @@ export function groupOf(
   }
   if (session && pgid !== undefined) throw new JsCallError('EINVAL', call);
   return session ? { session: true } : pgid !== undefined ? { pgid } : {};
+}
+
+export function argv0Of(argv0: unknown, call: string): { argv0?: string } {
+  if (argv0 === undefined) return {};
+  if (typeof argv0 !== 'string') throw new JsCallError('EINVAL', call);
+  return { argv0 };
 }
 
 async function closeAll(io: ChildIo, fds: ReadonlyArray<number | undefined>): Promise<void> {
