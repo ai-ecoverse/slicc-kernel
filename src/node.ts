@@ -21,6 +21,7 @@ import type { WasmWorkerLike } from './kernel/host.ts';
 import type { RouteTable } from './kernel/net/routes.ts';
 import type { NetworkUplink } from './kernel/net/uplink.ts';
 import type { SealedHook } from './kernel/sealed.ts';
+import { quiet, signalField } from './kernel/signals.ts';
 import { Launcher, tagOption } from './launcher.ts';
 import type { FetchLike, HostfsGrantHook } from './mount/hostfs.ts';
 import type { MountEntry, MountSpec } from './mount/mount-fs.ts';
@@ -35,6 +36,7 @@ export type { CdpConnection, CdpHook, CdpRequest } from './cdp/types.ts';
 export {
   type AttachOptions,
   attachKernel,
+  type ClientEnded,
   type ClientFetchRequest,
   type ClientFs,
   type ClientRunOptions,
@@ -52,6 +54,7 @@ export {
 export type { Denial, DenialHook } from './fs/dac.ts';
 export type {
   ConnectOptions,
+  Ended,
   KernelGroups,
   KernelUsers,
   NetworkUplink,
@@ -264,6 +267,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
       );
       return {
         status: result.status,
+        ...signalField(result.signal),
         stdout: decoder.decode(result.stdout),
         stderr: decoder.decode(result.stderr),
       };
@@ -280,7 +284,10 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
       );
       return {
         pid: session.pid,
-        exited: guard(() => session.exited),
+        exited: quiet(guard(() => session.exited)),
+        ended: quiet(
+          guard(async () => ({ status: await session.exited, ...signalField(session.termsig()) }))
+        ),
         get onData() {
           return listener;
         },

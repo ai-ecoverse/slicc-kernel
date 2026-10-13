@@ -196,6 +196,7 @@ export interface TerminalOptions {
 export interface TerminalSession {
   pid: number;
   exited: Promise<number>;
+  termsig(): number | undefined;
   write(bytes: Uint8Array): void;
   resize(cols: number, rows: number): void;
   signal(sig: number): void;
@@ -204,6 +205,7 @@ export interface TerminalSession {
 
 export interface RunResult {
   status: number;
+  signal?: number;
   stdout: Uint8Array;
   stderr: Uint8Array;
 }
@@ -1866,6 +1868,7 @@ export class Launcher {
     return {
       pid: handle.pid,
       exited: handle.exited,
+      termsig: () => handle.termsig(),
       write: (bytes) => tty.receive(bytes),
       resize: (cols, rows) => tty.resize(cols, rows),
       signal: (sig) => this.jobs.signalForeground(tty, leader, sig),
@@ -1911,7 +1914,8 @@ export class Launcher {
     });
     options.onStarted?.(handle.pid);
     const status = await handle.exited;
-    return { status, stdout: concat(out), stderr: concat(err) };
+    const signal = handle.termsig();
+    return { status, ...(signal ? { signal } : {}), stdout: concat(out), stderr: concat(err) };
   }
 }
 

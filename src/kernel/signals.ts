@@ -57,6 +57,21 @@ export function signalsIn(mask: number): number[] {
   return out;
 }
 
+export function signalName(sig: number | undefined): string | undefined {
+  const name = Object.entries(SIG).find(([, n]) => n === sig)?.[0];
+  return name === undefined ? undefined : `SIG${name}`;
+}
+
+export function quiet<T>(p: Promise<T>): Promise<T> {
+  p.catch(() => undefined);
+  return p;
+}
+
+export function signalField(sig: number | undefined): { signal?: string } {
+  const name = signalName(sig);
+  return name ? { signal: name } : {};
+}
+
 export const SIGNAL_BY_NAME: Readonly<
   Record<'SIGINT' | 'SIGTERM' | 'SIGKILL' | 'SIGSTOP' | 'SIGCONT', number>
 > = {

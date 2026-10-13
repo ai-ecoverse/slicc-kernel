@@ -8,6 +8,7 @@ import type {
   RealmTransportRequest,
   RealmTransportResponse,
 } from '../kernel/net/transport.ts';
+import { quiet } from '../kernel/signals.ts';
 import type { MountEntry, MountSpec } from '../mount/mount-fs.ts';
 import { type DialledSocket, type DialOptions, dialStream } from './dial-stream.ts';
 import { type LoopbackFetchOptions, loopbackFetch } from './loopback-fetch.ts';
@@ -61,10 +62,16 @@ export interface SpawnOptions {
   onStderr?: (bytes: Uint8Array) => void;
 }
 
+export interface ClientEnded {
+  status: number;
+  signal?: string;
+}
+
 export interface SpawnedProcess {
   readonly pid: number;
   readonly pgid: number;
   readonly exited: Promise<number>;
+  readonly ended: Promise<ClientEnded>;
   signal(name?: string): Promise<void>;
 }
 
@@ -80,6 +87,7 @@ export interface ClientRunOptions {
 export interface ClientRunResult {
   pid: number;
   status: number;
+  signal?: string;
   stdout: string;
   stderr: string;
 }
@@ -96,6 +104,7 @@ export interface ClientTerminalOptions {
 export interface ClientTerminal {
   readonly pid: number;
   readonly exited: Promise<number>;
+  readonly ended: Promise<ClientEnded>;
   onData: ((bytes: Uint8Array) => void) | null;
   write(data: string | Uint8Array): void;
   resize(cols: number, rows: number): void;
@@ -152,6 +161,7 @@ interface Pending {
   reject: (error: Error) => void;
   output?: (fd: 1 | 2, bytes: Uint8Array) => void;
   started?: (pid: number) => void;
+  ended?: (signal: string | undefined) => void;
 }
 
 type Handlers = Omit<Pending, 'resolve' | 'reject'>;
@@ -289,6 +299,7 @@ class Channel {
       return;
     }
     this.pending.delete(reply.id);
+    call.ended?.(reply.signal);
     if (reply.error !== undefined) call.reject(new KernelCallError(reply.error, reply.code));
     else call.resolve(reply.result);
   }
@@ -346,12 +357,14 @@ async function spawnOn(
     await since(channel, 3, 'spawn into a process group', async () => {});
   if (opts.user !== undefined) await since(channel, 8, 'spawn as a user', async () => {});
   const started = Promise.withResolvers<number>();
+  let endedBy: string | undefined;
   const options = { ...rest, ...(stdin !== undefined ? { stdin: bytesOf(stdin) } : {}) };
   const { done } = channel.request(
     { op: 'spawn', argv, options },
     {
       output: (fd, bytes) => (fd === 1 ? onStdout : onStderr)?.(bytes),
       started: started.resolve,
+      ended: (signal) => (endedBy = signal),
     }
   );
   done.catch(started.reject);
@@ -361,9 +374,19 @@ async function spawnOn(
     pid,
     pgid,
     exited: done as Promise<number>,
+    ended: endedOf(done, () => endedBy),
     signal: async (name = 'SIGTERM') =>
       void (await channel.call({ op: 'kill', pid: -pgid, signal: name })),
   };
+}
+
+function endedOf(done: Promise<unknown>, signal: () => string | undefined): Promise<ClientEnded> {
+  return quiet(
+    done.then((status) => {
+      const by = signal();
+      return { status: status as number, ...(by ? { signal: by } : {}) };
+    })
+  );
 }
 
 async function runOn(
@@ -383,9 +406,15 @@ async function runOn(
     onStdout: tee(1, onStdout),
     onStderr: tee(2, onStderr),
   });
-  const status = await child.exited;
+  const { status, signal } = await child.ended;
   const text = (fd: 1 | 2) => new TextDecoder().decode(concat(chunks[fd]));
-  return { pid: child.pid, status, stdout: text(1), stderr: text(2) };
+  return {
+    pid: child.pid,
+    status,
+    ...(signal ? { signal } : {}),
+    stdout: text(1),
+    stderr: text(2),
+  };
 }
 
 async function terminalOn(
@@ -398,11 +427,13 @@ async function terminalOn(
   let listener = onData ?? null;
   const backlog: Uint8Array[] = [];
   const started = Promise.withResolvers<number>();
+  let endedBy: string | undefined;
   const { id, done } = channel.request(
     { op: 'open-terminal', argv, options },
     {
       output: (_fd, bytes) => (listener ? listener(bytes) : backlog.push(bytes)),
       started: started.resolve,
+      ended: (signal) => (endedBy = signal),
     }
   );
   done.catch(started.reject);
@@ -412,6 +443,7 @@ async function terminalOn(
   return {
     pid,
     exited: done as Promise<number>,
+    ended: endedOf(done, () => endedBy),
     get onData() {
       return listener;
     },
