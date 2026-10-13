@@ -313,7 +313,7 @@ function initCall(options: KernelOptions, transport: NetworkTransport | undefine
     ...(options.hostfs ? { hostfs: true } : {}),
     ...(options.cdp ? { cdp: true } : {}),
     ...(options.hostname !== undefined ? { hostname: options.hostname } : {}),
-    users: options.users ?? DEFAULT_USERS,
+    users: options.users === undefined ? DEFAULT_USERS : options.users,
     ...(options.onDenial ? { denials: true } : {}),
     ...(options.sealed ? { sealed: true } : {}),
     ...(options.approve ? { approve: true } : {}),
@@ -634,7 +634,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     openTerminal,
     connect: async (connectOptions = {}) =>
       (await call({ op: 'connect', ...connectOptions })) as MessagePort,
-    ...accounts(call, options.users),
+    ...accounts(call, options.users === undefined ? DEFAULT_USERS : options.users),
     setRoutes: async (routes) => void (await call({ op: 'routes', routes })),
     dial,
     loopbackFetch: (input, fetchOptions) => loopbackFetch(dial, input, fetchOptions),

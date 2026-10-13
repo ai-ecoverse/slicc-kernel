@@ -226,7 +226,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     ...hostfsFetchOf(options),
     ...(options.cdp ? { cdp: options.cdp } : {}),
     ...(options.hostname !== undefined ? { hostname: options.hostname } : {}),
-    users: options.users ?? DEFAULT_USERS,
+    users: options.users === undefined ? DEFAULT_USERS : options.users,
     ...(options.onDenial ? { onDenial: options.onDenial } : {}),
     ...(options.protect ? { protect: options.protect } : {}),
     ...(options.sealed ? { sealed: options.sealed } : {}),
