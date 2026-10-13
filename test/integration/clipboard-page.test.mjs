@@ -27,8 +27,12 @@ test('the page relays /dev/clipboard to its clipboard hook, refusals included', 
   assert.deepEqual(refused, {
     status: 0,
     stdout: 'rc=1\n',
-    stderr: 'cat: write error: Permission denied\n',
+    stderr:
+      'cat: /dev/clipboard: The clipboard needs the tab in front\ncat: write error: Permission denied\n',
   });
   const unread = await bash('cat /dev/clipboard', { cwd: '/tmp' });
-  assert.equal(unread.stderr, 'cat: /dev/clipboard: Permission denied\n');
+  assert.equal(
+    unread.stderr,
+    'cat: /dev/clipboard: The clipboard needs the tab in front\ncat: /dev/clipboard: Permission denied\n'
+  );
 });
