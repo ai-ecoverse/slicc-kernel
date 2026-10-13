@@ -383,6 +383,25 @@ const cdpHook = async (request) => {
   return conn;
 };
 
+window.clipboard = { text: '', refuse: false, calls: [] };
+
+const clipboardHook = {
+  read: async (stamp) => {
+    window.clipboard.calls.push({ op: 'read', stamp });
+    if (window.clipboard.refuse) {
+      throw new DOMException('The clipboard needs the tab in front', 'NotAllowedError');
+    }
+    return window.clipboard.text;
+  },
+  write: async (text, stamp) => {
+    window.clipboard.calls.push({ op: 'write', text, stamp });
+    if (window.clipboard.refuse) {
+      throw new DOMException('The clipboard needs the tab in front', 'NotAllowedError');
+    }
+    window.clipboard.text = text;
+  },
+};
+
 window.boot = async (options = {}) => {
   await install();
   const base = options.proxy
@@ -402,6 +421,7 @@ window.boot = async (options = {}) => {
       ...handles,
       ...(options.cdp ? { cdp: cdpHook } : {}),
       ...(options.protect ? { protect: options.protect } : {}),
+      ...(options.clipboard ? { clipboard: clipboardHook } : {}),
     })
   );
   return true;

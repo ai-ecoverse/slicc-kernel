@@ -249,6 +249,9 @@ export interface KernelImports {
   utimensat?: unknown;
   getppid?: unknown;
   resizeHeap?: unknown;
+  fdWrite?: unknown;
+  fdRead?: unknown;
+  sleepMs?: unknown;
 }
 
 const LITERALS: Record<keyof KernelImports, string> = {
@@ -260,6 +263,9 @@ const LITERALS: Record<keyof KernelImports, string> = {
   utimensat: '__syscall_utimensat',
   getppid: 'slicc_getppid_js',
   resizeHeap: 'emscripten_resize_heap',
+  fdWrite: 'fd_write',
+  fdRead: 'fd_read',
+  sleepMs: 'slicc_sleep_ms',
 };
 
 export function importKey(

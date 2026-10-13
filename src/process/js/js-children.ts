@@ -4,8 +4,11 @@ export type JsStdio = 'inherit' | 'pipe' | 'null' | number;
 
 export interface JsSpawnOptions {
   argv: readonly string[];
+  argv0?: string;
   env?: Readonly<Record<string, string>>;
   cwd?: string;
+  pgid?: number;
+  session?: boolean;
   stdin?: JsStdio;
   stdout?: JsStdio;
   stderr?: JsStdio;
@@ -106,6 +109,8 @@ export function childOps(kernel: JsKernel, io: ChildIo, defaults: ChildDefaults)
   const spawn = async (o: JsSpawnOptions): Promise<JsChild> => {
     const [file] = o.argv;
     if (file === undefined) throw new JsCallError('EINVAL', 'spawn');
+    const group = groupOf(o, 'spawn');
+    const named = argv0Of(o.argv0, 'spawn');
     const mine: Array<number | undefined> = [];
     const theirs: number[] = [];
     try {
@@ -114,9 +119,11 @@ export function childOps(kernel: JsKernel, io: ChildIo, defaults: ChildDefaults)
         op: 'proc-spawn',
         file,
         argv: [...o.argv],
+        ...named,
         env: { ...(o.env ?? defaults.env) },
         cwd: o.cwd ?? defaults.cwd,
         stdio,
+        ...group,
       })) as number;
       return childOf(pid, mine);
     } catch (err) {
@@ -128,6 +135,25 @@ export function childOps(kernel: JsKernel, io: ChildIo, defaults: ChildDefaults)
   };
 
   return { spawn, wait, kill };
+}
+
+export function groupOf(
+  o: { pgid?: number; session?: boolean },
+  call: string
+): { pgid?: number; session?: true } {
+  const { pgid, session } = o;
+  const valid = pgid === undefined || (Number.isInteger(pgid) && pgid >= 0);
+  if (!valid || (session !== undefined && typeof session !== 'boolean')) {
+    throw new JsCallError('EINVAL', call);
+  }
+  if (session && pgid !== undefined) throw new JsCallError('EINVAL', call);
+  return session ? { session: true } : pgid !== undefined ? { pgid } : {};
+}
+
+export function argv0Of(argv0: unknown, call: string): { argv0?: string } {
+  if (argv0 === undefined) return {};
+  if (typeof argv0 !== 'string') throw new JsCallError('EINVAL', call);
+  return { argv0 };
 }
 
 async function closeAll(io: ChildIo, fds: ReadonlyArray<number | undefined>): Promise<void> {

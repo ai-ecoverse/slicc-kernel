@@ -1,3 +1,4 @@
+import { argv0Of, groupOf } from './js-children.ts';
 import { JsCallError } from './js-kernel.ts';
 import type { JsSyncKernel } from './js-sync.ts';
 
@@ -5,8 +6,11 @@ export type JsRunStdio = 'pipe' | 'ignore' | 'inherit' | number;
 
 export interface JsRunOptions {
   argv: readonly string[];
+  argv0?: string;
   env?: Readonly<Record<string, string>>;
   cwd?: string;
+  pgid?: number;
+  session?: boolean;
   input?: Uint8Array | string;
   stdin?: JsRunStdio;
   stdout?: JsRunStdio;
@@ -85,6 +89,8 @@ export function decodeRun(
 export function runSync(kernel: JsSyncKernel, d: RunDefaults, o: JsRunOptions): JsRunResult {
   const [file] = o.argv;
   if (file === undefined) throw new JsCallError('EINVAL', 'run');
+  const group = groupOf(o, 'run');
+  const named = argv0Of(o.argv0, 'run');
   const stdout = stdioOf(o.stdout);
   const stderr = stderrOf(o.stderr);
   const input = typeof o.input === 'string' ? encoder.encode(o.input) : o.input;
@@ -94,8 +100,10 @@ export function runSync(kernel: JsSyncKernel, d: RunDefaults, o: JsRunOptions): 
     op: 'proc-run',
     file,
     argv: [...o.argv],
+    ...named,
     env: { ...(o.env ?? d.env) },
     cwd: o.cwd === undefined ? d.cwd : d.resolve(o.cwd),
+    ...group,
     stdin: stdioOf(o.stdin),
     ...(input ? { input } : {}),
     stdout,

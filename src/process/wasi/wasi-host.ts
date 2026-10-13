@@ -1,4 +1,5 @@
 import { physicalPath } from '../../fs/physical-path.ts';
+import { localCpuNanos } from '../../kernel/cpu-clock.ts';
 import { type Cred, type CredChange, MAX_GROUPS } from '../../kernel/cred.ts';
 import type { DeviceMeta, KernelFdKind } from '../../kernel/fd-table.ts';
 import type { SyncFsBridgeStat, SyncFsPosixBridge } from '../../realm/sync-fs-wire.ts';
@@ -19,7 +20,14 @@ import {
   WHENCE,
   wasiErrnoOf,
 } from './wasi-abi.ts';
-import { deviceOf, SEALED_PATH, WasiFds, type WasiForkFd, type WasiKernel } from './wasi-fds.ts';
+import {
+  CLIPBOARD_PATH,
+  deviceOf,
+  SEALED_PATH,
+  WasiFds,
+  type WasiForkFd,
+  type WasiKernel,
+} from './wasi-fds.ts';
 import {
   type DirListing,
   type LocalFile,
@@ -142,6 +150,7 @@ function kernelFiletype(kind: string): { filetype: number; seeks: boolean } {
   switch (kind) {
     case 'tty':
     case 'sealed':
+    case 'clipboard':
       return { filetype: FILETYPE.CHARACTER_DEVICE, seeks: false };
     case 'device':
       return { filetype: FILETYPE.CHARACTER_DEVICE, seeks: true };
@@ -254,7 +263,7 @@ export class WasiHost {
       const e = fds.get(fd);
       if (e.type === 'device') return ROOT_IDS;
       const kind = e.type === 'kernel' ? fds.kind(fd, e) : 'file';
-      if (kind === 'sealed') return ROOT_IDS;
+      if (kind === 'sealed' || kind === 'clipboard') return ROOT_IDS;
       if (kind !== 'file') return undefined;
       try {
         return this.o.fs.stat(pathOf(fd));
@@ -323,14 +332,14 @@ export class WasiHost {
         const mode =
           kind === 'stream'
             ? S_IFIFO | 0o600
-            : kind === 'sealed'
+            : kind === 'sealed' || kind === 'clipboard'
               ? SEALED_MODE
               : modeOf(this.o.fs.stat(pathOf(fd)));
         mem.view().setUint32(out, mode, true);
       },
       path_mode: (dirfd: number, p: number, l: number, flags: number, out: number) => {
         const path = at(dirfd, p, l);
-        if (path === SEALED_PATH && this.o.kernel.sys.openSealed)
+        if (this.synthetic(path) && deviceOf(path) === undefined)
           return void mem.view().setUint32(out, SEALED_MODE, true);
         const st = flags & AT_SYMLINK_NOFOLLOW ? this.o.fs.lstat(path) : this.o.fs.stat(path);
         mem.view().setUint32(out, modeOf(st), true);
@@ -436,7 +445,7 @@ export class WasiHost {
     if (id === CLOCK.MONOTONIC) {
       return MONOTONIC_BASE + BigInt(Math.round(performance.now() * 1e6));
     }
-    return BigInt(Math.round((performance.now() - this.started) * 1e6)) + 1n;
+    return (localCpuNanos() ?? BigInt(Math.round((performance.now() - this.started) * 1e6))) + 1n;
   }
 
   private environ(): string[] {
@@ -948,7 +957,11 @@ export class WasiHost {
   }
 
   private synthetic(path: string): boolean {
-    return deviceOf(path) !== undefined || (path === SEALED_PATH && !!this.o.kernel.sys.openSealed);
+    return (
+      deviceOf(path) !== undefined ||
+      (path === SEALED_PATH && !!this.o.kernel.sys.openSealed) ||
+      (path === CLIPBOARD_PATH && !!this.o.kernel.sys.openClipboard)
+    );
   }
 
   private pathFilestat(path: string, lookup: number): Filestat {

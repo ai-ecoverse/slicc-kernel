@@ -16,6 +16,7 @@ import type {
   Terminal,
   TerminalOptions,
 } from './index.ts';
+import type { ClipboardHook } from './kernel/clipboard.ts';
 import type { WasmWorkerLike } from './kernel/host.ts';
 import type { RouteTable } from './kernel/net/routes.ts';
 import type { NetworkUplink } from './kernel/net/uplink.ts';
@@ -63,6 +64,7 @@ export type {
   TerminalOptions,
   TerminalSignal,
 } from './index.ts';
+export type { ClipboardHook, ClipboardStamp } from './kernel/clipboard.ts';
 export type {
   SealedAbortReason,
   SealedCaller,
@@ -99,6 +101,7 @@ export interface NodeKernelOptions {
   users?: UsersMode;
   onDenial?: DenialHook;
   sealed?: SealedHook;
+  clipboard?: ClipboardHook;
   approve?: ApproveHook;
   protect?: Protection;
 }
@@ -230,6 +233,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     ...(options.onDenial ? { onDenial: options.onDenial } : {}),
     ...(options.protect ? { protect: options.protect } : {}),
     ...(options.sealed ? { sealed: options.sealed } : {}),
+    ...(options.clipboard ? { clipboard: options.clipboard } : {}),
     ...(options.approve ? { approve: options.approve } : {}),
   });
   await launcher.prepare();

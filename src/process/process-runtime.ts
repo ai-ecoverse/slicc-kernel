@@ -13,7 +13,12 @@ import {
   type SabPostLike,
   type SyncSabTransport,
 } from '../realm/sync-sab-bridge.ts';
-import { publishMemory, SAB_HEADER_I32, type SyncSabRequestBody } from '../realm/sync-sab-wire.ts';
+import {
+  publishMemory,
+  SAB_HEADER_I32,
+  SAB_I_STOP,
+  type SyncSabRequestBody,
+} from '../realm/sync-sab-wire.ts';
 import {
   KernelStreams,
   type ProcessFs,
@@ -188,6 +193,9 @@ export function kernelSys(transport: SyncSabTransport): ProcessSys & PtyKernel {
     openSealed() {
       return json(call({ op: 'fd-open-sealed' }, 'fd-open-sealed')) as number;
     },
+    openClipboard(flags) {
+      return json(call({ op: 'fd-open-clipboard', flags }, 'fd-open-clipboard')) as number;
+    },
     ptyNumbers() {
       return json(call({ op: 'pty-list' }, 'pty-list')) as number[];
     },
@@ -259,7 +267,7 @@ function openAt(Fs: ProcessFs, fd: number, path: string, flags: number): boolean
   return true;
 }
 
-const PLACED: ReadonlySet<string> = new Set(['stream', 'file', 'socket']);
+const PLACED: ReadonlySet<string> = new Set(['stream', 'file', 'socket', 'clipboard']);
 
 export function wireKernelStdio(Fs: ProcessFs, streams: KernelStreams, sys?: ProcessSys): void {
   for (const fd of [0, 1, 2]) {
@@ -310,6 +318,7 @@ export function glueBody(glue: string): string {
 
 const GLUE_TRAILER = [
   "if (typeof ENV !== 'undefined') Object.assign(ENV, Module.sliccEnv);",
+  "if (typeof thisProgram !== 'undefined' && Module.thisProgram === '') thisProgram = '';",
   'const __sliccTake = (name, value) => {',
   '  const own = Object.getOwnPropertyDescriptor(Module, name);',
   "  if (own && 'value' in own && own.value != null) return;",
@@ -339,6 +348,9 @@ const GLUE_TRAILER = [
   "  utimensat: typeof ___syscall_utimensat === 'function' ? ___syscall_utimensat : undefined,",
   "  getppid: typeof _slicc_getppid_js === 'function' ? _slicc_getppid_js : undefined,",
   "  resizeHeap: typeof _emscripten_resize_heap === 'function' ? _emscripten_resize_heap : undefined,",
+  "  fdWrite: typeof _fd_write === 'function' ? _fd_write : undefined,",
+  "  fdRead: typeof _fd_read === 'function' ? _fd_read : undefined,",
+  "  sleepMs: typeof slicc_sleep_ms === 'function' ? slicc_sleep_ms : undefined,",
   '};',
   'Module.sliccFdImports ??= {',
   "  fd_sync: typeof _fd_sync === 'function' ? _fd_sync : undefined,",
@@ -428,6 +440,24 @@ export function reportGrowth(
   });
 }
 
+export function holdWhileStopped(
+  imports: WebAssembly.Imports,
+  header: Int32Array,
+  glue?: KernelImports
+): void {
+  const hold = () => {
+    while (Atomics.load(header, SAB_I_STOP) === 1) Atomics.wait(header, SAB_I_STOP, 1);
+  };
+  for (const name of ['fdWrite', 'fdRead', 'sleepMs'] as const) {
+    wrapImport(imports, name, glue, (original) => (...args) => {
+      hold();
+      const done = original(...args);
+      hold();
+      return done;
+    });
+  }
+}
+
 function callerOwner(Fs: ProcessFs, init: WasmProcessInitMsg): { owner?: Owner } {
   return init.owners ? {} : { owner: ownByCaller(Fs, init.cred, credAbi(init.program.glue)) };
 }
@@ -463,6 +493,7 @@ function kernelWrappers(imports: WebAssembly.Imports, module: object, deps: Wrap
   positionalIo(imports, { glue, fs: fsOf, sys, memory });
   const grown = () => publishMemory(init.sab, memory()?.buffer.byteLength ?? 0);
   reportGrowth(imports, grown, kernelGlue);
+  holdWhileStopped(imports, new Int32Array(init.sab, 0, SAB_HEADER_I32), kernelGlue);
 }
 
 export async function runWasmProcess(
@@ -500,6 +531,7 @@ export async function runWasmProcess(
   let failed!: (error: unknown) => void;
   let memory: WebAssembly.Memory | undefined;
   let exports: WebAssembly.Exports | undefined;
+  let atExit: () => () => void = () => () => {};
   const initialized = new Promise<void>((resolve, reject) => {
     ready = resolve;
     failed = reject;
@@ -547,7 +579,10 @@ export async function runWasmProcess(
           memory = wasmMemory(instance, imports);
           exports = instance.exports;
           publishMemory(init.sab, memory?.buffer.byteLength ?? 0);
-          done(instance, init.program.module);
+          done(
+            withExitHook(instance, () => atExit()),
+            init.program.module
+          );
         }, failed);
       return {};
     },
@@ -581,9 +616,17 @@ export async function runWasmProcess(
   const sigpipe = (): boolean => running.sliccSigpipe?.() === 1;
   const restartable = (): boolean => signals.restartable();
   const owners = init.owners ? { owners: true } : {};
-  const streams = new KernelStreams(running.FS, sys, { sigpipe, restartable, ...owners });
+  const streams = new KernelStreams(running.FS, sys, {
+    sigpipe,
+    restartable,
+    ...owners,
+    program: init.argv0,
+  });
   trackCloseOnExec(running.FS);
-  quietQuit(running.FS as unknown as QuitFs);
+  quietQuit(running.FS as unknown as QuitFs, (on) => {
+    streams.quitting = on;
+  });
+  atExit = () => streams.exiting();
   useMounts(running.FS, init.env, true);
   useZeroDevices(running.FS);
   useProcfs(running.FS as unknown as ProcFs, sys, init.pid);
@@ -629,7 +672,7 @@ export async function runWasmProcess(
     restartable,
   });
   try {
-    return runMain(running, init);
+    return streams.exitStatus(runMain(running, init));
   } finally {
     try {
       vfs.flush();
@@ -642,10 +685,31 @@ interface QuitFs {
   close: (stream: unknown) => void;
 }
 
-export function quietQuit(Fs: QuitFs): void {
+function withExitHook(
+  instance: WebAssembly.Instance,
+  begin: () => () => void
+): WebAssembly.Instance {
+  const funcs = instance.exports.__funcs_on_exit;
+  if (typeof funcs !== 'function') return instance;
+  const run = funcs as () => void;
+  const exported = Object.assign(Object.create(null), instance.exports, {
+    __funcs_on_exit: () => {
+      const end = begin();
+      try {
+        run();
+      } finally {
+        end();
+      }
+    },
+  });
+  return { exports: exported } as WebAssembly.Instance;
+}
+
+export function quietQuit(Fs: QuitFs, quitting?: (on: boolean) => void): void {
   const { quit, close } = Fs;
   if (!quit) return;
   Fs.quit = () => {
+    quitting?.(true);
     Fs.close = (stream) => {
       try {
         close.call(Fs, stream);
@@ -654,6 +718,7 @@ export function quietQuit(Fs: QuitFs): void {
     try {
       quit.call(Fs);
     } finally {
+      quitting?.(false);
       Fs.close = close;
     }
   };

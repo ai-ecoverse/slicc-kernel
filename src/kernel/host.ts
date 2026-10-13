@@ -24,6 +24,7 @@ import {
   SAB_I_TIMERS,
 } from '../realm/sync-sab-wire.ts';
 import type { ChildForker, ChildSpawner } from './children.ts';
+import type { ClipboardBroker } from './clipboard.ts';
 import { type CpuTimes, ProcessClocks } from './cpu-clock.ts';
 import { type Cred, copyCred } from './cred.ts';
 import { type FdTable, kernelFdKind, type OpenFile } from './fd-table.ts';
@@ -74,7 +75,9 @@ export interface SpawnWasmOptions {
   umask?: number;
   cred?: Cred;
   owners?: boolean;
+  fresh?: (path: string, umask: number) => void;
   sealed?: SealedBroker;
+  clipboard?: ClipboardBroker;
   readonlyAt?: (path: string) => boolean;
   dac?: Dac;
   identity?: () => Promise<{ pid: number; ppid: number }>;
@@ -339,6 +342,7 @@ function holdingToken(
   return mintSyncFsToken({
     ...(opts.owners ? caller : {}),
     ...(opts.dac ? { dac: opts.dac, pid: opts.pid, created: caller.created } : {}),
+    ...(opts.fresh ? { fresh: (path: string) => opts.fresh?.(path, caller.umask()) } : {}),
     fs: opts.fs,
     cwd: opts.cwd,
     ...(opts.statfs ? { statfs: opts.statfs } : {}),
@@ -353,6 +357,10 @@ function holdingToken(
   });
 }
 
+function clipboardName(opts: SpawnWasmOptions): { clipboardName?: string } {
+  return opts.program.abi === 'js' ? {} : { clipboardName: opts.argv0 };
+}
+
 function processOptions(
   opts: SpawnWasmOptions,
   header: Int32Array,
@@ -363,6 +371,7 @@ function processOptions(
     ...inherited(opts),
     ...(opts.owners ? { owners: true } : {}),
     ...(opts.sealed ? { sealed: opts.sealed } : {}),
+    ...(opts.clipboard ? { clipboard: opts.clipboard, ...clipboardName(opts) } : {}),
     ...(opts.readonlyAt ? { readonlyAt: opts.readonlyAt } : {}),
     ...(opts.dac ? { guard: { dac: opts.dac, fs: opts.fs, created } } : {}),
     ...(opts.identity ? { identity: opts.identity } : {}),

@@ -10,8 +10,11 @@ export interface RunRequest {
   op: 'proc-run';
   file: string;
   argv: string[];
+  argv0?: string;
   env: Record<string, string>;
   cwd: string;
+  pgid?: number;
+  session?: true;
   stdin: RunStdio;
   input?: Uint8Array;
   stdout: RunStdio;
@@ -100,7 +103,15 @@ export async function runChild(req: RunRequest, deps: RunDeps): Promise<Uint8Arr
   ];
   try {
     pid = await deps.children.spawn(
-      { file: req.file, argv: req.argv, env: req.env, cwd: req.cwd },
+      {
+        file: req.file,
+        argv: req.argv,
+        ...(req.argv0 !== undefined ? { argv0: req.argv0 } : {}),
+        env: req.env,
+        cwd: req.cwd,
+        ...(req.pgid !== undefined ? { pgid: req.pgid } : {}),
+        ...(req.session ? { session: req.session } : {}),
+      },
       stdio
     );
   } catch (e) {

@@ -16,6 +16,7 @@ import { R_OK, X_OK } from './fs/access.ts';
 import { type Attestation, attest, FileWatches, type RemoteFs } from './fs/attest.ts';
 import { followLinks, withCommandDirs } from './fs/commands.ts';
 import { Dac, type DenialHook, need, TTY_MODE } from './fs/dac.ts';
+import { FreshModules } from './fs/fresh-modules.ts';
 import { physicalPathAsync } from './fs/physical-path.ts';
 import {
   holdsProtected,
@@ -36,6 +37,7 @@ import {
   type ChildSpawner,
   SpawnError,
 } from './kernel/children.ts';
+import { ClipboardBroker, type ClipboardHook } from './kernel/clipboard.ts';
 import type { CpuTimes } from './kernel/cpu-clock.ts';
 import { type Cred, copyCred, maySee, maySignal, ROOT } from './kernel/cred.ts';
 import { bytesSource, deviceFile, FdTable, sinkFile } from './kernel/fd-table.ts';
@@ -150,6 +152,7 @@ export interface LauncherOptions {
   users?: UsersMode;
   onDenial?: DenialHook;
   sealed?: SealedHook;
+  clipboard?: ClipboardHook;
   approve?: ApproveHook;
   sudoTimeoutMs?: number;
   protect?: Protection;
@@ -210,6 +213,7 @@ interface Target {
   glue: string;
   wasm: string;
   argv0: string;
+  fixed?: true;
   prefix?: string[];
   env?: Record<string, string>;
   unset?: string[];
@@ -254,6 +258,7 @@ interface StartRequest {
   fork?: ForkState;
   exec?: boolean;
   pgid?: number;
+  group?: 'lead' | 'session';
   ignored?: number;
   umask?: number;
   cred: Cred;
@@ -361,6 +366,7 @@ function targetOf(command: Command): Target {
     glue: command.glue,
     wasm: command.wasm,
     argv0: command.argv0,
+    ...(command.argv0Fixed ? { fixed: true as const } : {}),
     ...(command.args ? { prefix: command.args } : {}),
     ...(command.env ? { env: command.env } : {}),
     ...(command.unset ? { unset: command.unset } : {}),
@@ -400,6 +406,11 @@ function concat(chunks: Uint8Array[]): Uint8Array {
   return out;
 }
 
+function addTimes(into: Map<number, CpuTimes>, pid: number, t: CpuTimes): void {
+  const at = into.get(pid) ?? { utime: 0, stime: 0 };
+  into.set(pid, { utime: at.utime + t.utime, stime: at.stime + t.stime });
+}
+
 export class Launcher {
   readonly fs: KernelFs;
   readonly processFs: KernelFs;
@@ -425,6 +436,7 @@ export class Launcher {
   private readonly described = new Map<number, Pick<ProcessInfo, 'argv' | 'tty' | 'started'>>();
   private readonly creds = new Map<number, () => Cred>();
   private readonly tags = new Map<number, string>();
+  private readonly freshModules = new FreshModules();
   private readonly granted = new Map<number, number>();
   readonly users: UserDb;
   private readonly sudoer: Sudo;
@@ -465,6 +477,7 @@ export class Launcher {
   readonly usersMode: UsersMode;
   readonly dac: Dac | undefined;
   private readonly sealed: SealedBroker;
+  private readonly clipboard: ClipboardBroker;
   private readonly rootFs: KernelFs;
   private fileWatches: FileWatches | undefined;
   private nextPid = 1000;
@@ -476,6 +489,9 @@ export class Launcher {
     this.rootFs = options.fs;
     this.dac = this.usersMode === 'off' ? undefined : new Dac(this.usersMode, options.onDenial);
     if (this.dac) this.dac.tagOf = (pid) => this.tagOf(pid);
+    this.clipboard = new ClipboardBroker(options.clipboard, this.usersMode, undefined, (pid) =>
+      this.tagOf(pid)
+    );
     this.sealed = new SealedBroker(options.sealed, this.usersMode, undefined, (pid) =>
       this.tagOf(pid)
     );
@@ -487,7 +503,8 @@ export class Launcher {
       changed: this.watchers.changed.bind(this.watchers),
       owners: this.owners,
     });
-    this.base = this.watchers.wrap(this.mounts.wrap(options.fs));
+    const watched = this.watchers.wrap(this.mounts.wrap(options.fs));
+    this.base = this.owners ? this.freshModules.wrap(watched) : watched;
     this.createWorker = options.createWorker;
     this.createDriverWorker = options.createDriverWorker;
     this.media = options.media ?? memoryMedia();
@@ -746,9 +763,12 @@ export class Launcher {
     file: string,
     argv: string[],
     cwd: string,
-    scope: string
+    scope: string,
+    argv0?: unknown
   ): Promise<Planned | undefined> {
-    const direct = await this.resolve(file, argv[0] ?? file, cwd, scope);
+    const found = await this.resolve(file, argv[0] ?? file, cwd, scope);
+    const named = typeof argv0 === 'string' && found && !found.fixed;
+    const direct = named ? { ...found, argv0 } : found;
     if (direct) return { target: direct, args: [...(direct.prefix ?? []), ...argv.slice(1)] };
     const script = await this.interpreted(file, argv, cwd, scope);
     return script && { ...script, script: true };
@@ -914,7 +934,7 @@ export class Launcher {
   private start(req: StartRequest): WasmProcessHandle {
     this.sampling();
     if (req.pgid !== undefined && this.jobs.sessionOf(req.pgid) === undefined) {
-      throw fsError('ESRCH', `no process group ${req.pgid}`);
+      throw new SpawnError('ESRCH');
     }
     const pid = this.nextPid++;
     const stack = this.stackFor(req.tag);
@@ -939,8 +959,12 @@ export class Launcher {
       ...(req.ignored ? { ignored: req.ignored } : {}),
       ...(req.umask !== undefined ? { umask: req.umask } : {}),
       cred: req.cred,
+      ...(this.owners && req.program.abi === 'wasi'
+        ? { fresh: (path: string, umask: number) => this.freshModules.add(path, umask, pid) }
+        : {}),
       ...(this.owners ? { owners: true } : {}),
       sealed: this.sealed,
+      clipboard: this.clipboard,
       ...(this.dac ? { dac: this.dac } : {}),
       program: req.program,
       argv0: req.argv0,
@@ -979,7 +1003,7 @@ export class Launcher {
       http: new HttpHandles(this.transport, pid),
       locks: this.locks,
       resolver: this.resolver,
-      onReap: (child) => this.reaped(child),
+      onReap: (child) => this.reaped(child, pid),
       ...(req.fork ? { fork: req.fork } : {}),
       ...this.shownIds(req),
     });
@@ -991,14 +1015,22 @@ export class Launcher {
     this.jobs.add(pid, req.ppid, (sig) => handle.signal(sig), terminal);
     if (req.exec && req.ppid !== undefined) this.jobs.exec(req.ppid, pid, true);
     if (req.pgid !== undefined) this.jobs.join(pid, req.pgid);
+    if (req.group === 'lead') this.jobs.lead(pid);
+    if (req.group === 'session') this.jobs.setsid(pid);
     this.described.set(pid, {
       argv: [req.argv0, ...req.args],
       tty: terminal?.name ?? null,
       started: Date.now(),
     });
+    handle.onState((state) =>
+      state === 'stopped' ? this.stopped.add(pid) : this.stopped.delete(pid)
+    );
     void handle.exited.then(() => {
+      this.freshModules.forget(pid);
       const spent = handle.times?.();
       if (spent) this.spent.set(pid, spent);
+      if (spent) addTimes(this.imageTimes, this.jobs.shown(pid), spent);
+      this.stopped.delete(pid);
       this.processes.delete(pid);
       if (this.processes.size === 0) {
         clearInterval(this.sampler);
@@ -1028,12 +1060,21 @@ export class Launcher {
       this.reapedTimes.stime += spent.stime;
     }
     this.spent.delete(pid);
+    this.imageTimes.delete(pid);
+    this.childTimes.delete(pid);
     this.creds.delete(pid);
     this.tags.delete(pid);
     this.granted.delete(pid);
   }
 
-  private reaped(pid: number): void {
+  private reaped(pid: number, parent: number): void {
+    const own = this.imageTimes.get(pid);
+    const theirs = this.childTimes.get(pid);
+    const into = this.jobs.shown(parent);
+    if (own) addTimes(this.childTimes, into, own);
+    if (theirs) addTimes(this.childTimes, into, theirs);
+    this.imageTimes.delete(pid);
+    this.childTimes.delete(pid);
     if (this.zombies.delete(pid)) this.forget(pid);
     else this.orphans.add(pid);
   }
@@ -1094,6 +1135,19 @@ export class Launcher {
   }
 
   private readonly spent = new Map<number, CpuTimes>();
+  private readonly imageTimes = new Map<number, CpuTimes>();
+  private readonly childTimes = new Map<number, CpuTimes>();
+  private readonly stopped = new Set<number>();
+
+  private stateOf(pid: number): ProcessInfo['state'] {
+    if (!this.processes.has(pid)) return 'Z';
+    return this.stopped.has(pid) ? 'T' : 'S';
+  }
+
+  private childrenOf(pid: number): { cutime?: number; cstime?: number } {
+    const t = this.childTimes.get(pid);
+    return t ? { cutime: t.utime, cstime: t.stime } : {};
+  }
 
   private timesAt(pid: number): CpuTimes | undefined {
     return this.processes.get(pid)?.times?.() ?? this.spent.get(pid);
@@ -1145,9 +1199,10 @@ export class Launcher {
         sid: member.sid,
         ...described,
         started: (this.described.get(root.pid) ?? described).started,
-        state: this.processes.has(member.pid) ? 'S' : 'Z',
+        state: this.stateOf(member.pid),
         memory: this.processes.get(member.pid)?.memory() ?? 0,
         ...this.timesOf(member, members),
+        ...this.childrenOf(root.pid),
         umask: this.umaskOf(member.pid),
         cred,
         ...this.signalMasksOf(member.pid),
@@ -1172,9 +1227,14 @@ export class Launcher {
         await fds.closeAll();
         throw new SpawnError('EACCES');
       }
+      const group = this.childGroup(ppid, req);
+      if (typeof group === 'string') {
+        await fds.closeAll();
+        throw new SpawnError(group);
+      }
       const cred = grant ? grant.cred : this.credOf(ppid);
       const scope = grant ? '' : await this.scopeOf(cred.euid);
-      const planned = await this.plan(req.file, req.argv, req.cwd, scope);
+      const planned = await this.plan(req.file, req.argv, req.cwd, scope, req.argv0);
       try {
         await this.mayExec(cred, { ...req, pid: ppid }, planned);
       } catch (err) {
@@ -1198,12 +1258,28 @@ export class Launcher {
         umask: this.umaskOf(ppid),
         cred,
         tag: this.tagOf(ppid),
+        ...group,
         ...exec,
       });
       deciding?.attach();
       if (grant) this.granted.set(handle.pid, ppid);
       return childHandle(handle);
     };
+  }
+
+  private childGroup(
+    ppid: number,
+    req: { pgid?: unknown; session?: unknown; exec?: boolean }
+  ): { pgid?: number; group?: 'lead' | 'session' } | 'EINVAL' | 'ESRCH' | 'EPERM' {
+    const { pgid, session } = req;
+    if (pgid === undefined && session === undefined) return {};
+    const valid = pgid === undefined || (Number.isInteger(pgid) && (pgid as number) >= 0);
+    if (req.exec || !valid || (session !== undefined && session !== true)) return 'EINVAL';
+    if (session) return pgid === undefined ? { group: 'session' } : 'EINVAL';
+    if (pgid === 0) return { group: 'lead' };
+    const sid = this.jobs.sessionOf(pgid as number);
+    if (sid === undefined) return 'ESRCH';
+    return sid === this.jobs.sidOf(ppid) ? { pgid: pgid as number } : 'EPERM';
   }
 
   private undecided(ppid: number) {
@@ -1242,7 +1318,7 @@ export class Launcher {
   }
 
   private forker(ppid: number, parent: StartRequest): ChildForker {
-    const { exec: _exec, ...image } = parent;
+    const { exec: _exec, pgid: _pgid, group: _group, ...image } = parent;
     return async (state, fds) =>
       childHandle(
         this.start({
@@ -1713,8 +1789,9 @@ export class Launcher {
   }
 
   private writerStack(): WriterStack {
+    const watched = this.watchers.wrap(this.mounts.wrap(this.unguardedRoot));
     const fs = withCommandDirs(
-      this.watchers.wrap(this.mounts.wrap(this.unguardedRoot)),
+      this.owners ? this.freshModules.wrap(watched) : watched,
       async () => new Set((await this.commands()).keys()),
       (dir) => this.userCommandDir(dir),
       this.owners

@@ -22,6 +22,12 @@ import {
   type InheritedSlot,
   SpawnError,
 } from './children.ts';
+import type {
+  ClipboardAccess,
+  ClipboardBroker,
+  ClipboardChannel,
+  ClipboardStamp,
+} from './clipboard.ts';
 import { type Cred, type CredChange, changeCred, copyCred, ROOT } from './cred.ts';
 import {
   type DeviceAccess,
@@ -164,6 +170,7 @@ export type WasmSyscall =
   | { op: 'fd-tty-names' }
   | { op: 'fd-tty-owner'; name: string }
   | { op: 'fd-open-sealed' }
+  | { op: 'fd-open-clipboard'; flags: number }
   | { op: 'tty-get'; fd: number }
   | { op: 'tty-set'; fd: number; termios: Termios; flush?: boolean }
   | { op: 'tty-winsz'; fd: number }
@@ -172,9 +179,12 @@ export type WasmSyscall =
       op: 'proc-spawn';
       file: string;
       argv: string[];
+      argv0?: string;
       env: Record<string, string>;
       cwd: string;
       stdio: ChildStdio[];
+      pgid?: number;
+      session?: true;
 
       inherit?: InheritedSlot[];
 
@@ -338,6 +348,7 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'fd-tty-names',
   'fd-tty-owner',
   'fd-open-sealed',
+  'fd-open-clipboard',
   'tty-get',
   'tty-set',
   'tty-winsz',
@@ -392,6 +403,18 @@ function words(value: unknown): string[] {
   return [...value];
 }
 
+const ESCAPES: Readonly<Record<string, string>> = { '\t': '\\t', '\n': '\\n', '\r': '\\r' };
+
+function clipboardLine(text: string): string {
+  let out = '';
+  for (const c of text) {
+    const code = c.charCodeAt(0);
+    const control = code < 0x20 || code === 0x7f;
+    out += control ? (ESCAPES[c] ?? `\\x${code.toString(16).padStart(2, '0')}`) : c;
+  }
+  return out.length > 200 ? `${out.slice(0, 200)}…` : out;
+}
+
 const DYING: SyncFsResult = { ok: false, errno: 'EINTR', message: 'the process is being killed' };
 
 const HOSTS_ONLY = new Resolver({ routes: new Routes() });
@@ -406,6 +429,10 @@ export interface WasmProcessOptions {
   owners?: boolean;
 
   sealed?: SealedBroker;
+
+  clipboard?: ClipboardBroker;
+
+  clipboardName?: string;
 
   readonlyAt?: (path: string) => boolean;
 
@@ -590,8 +617,10 @@ export class WasmProcess {
   }
 
   private async spawn(req: Extract<WasmSyscall, { op: 'proc-spawn' }>): Promise<number> {
-    const { file, argv, env, cwd, stdio, inherit, exec } = req;
-    const spawned = { file, argv, env, cwd, ...(exec ? { exec } : {}) };
+    const { file, argv, argv0, env, cwd, stdio, inherit, exec, pgid, session } = req;
+    const group = { ...(pgid !== undefined ? { pgid } : {}), ...(session ? { session } : {}) };
+    const named = argv0 !== undefined ? { argv0 } : {};
+    const spawned = { file, argv, ...named, env, cwd, ...group, ...(exec ? { exec } : {}) };
     const pid = await this.children.spawn(spawned, stdio, inherit);
     if (!exec) return pid;
     if (this.killed) void Promise.allSettled([this.options.kill?.(pid, SIG.KILL)]);
@@ -713,7 +742,7 @@ export class WasmProcess {
       return await this.procSyscall(req, cancelled);
     } catch (e) {
       if (e instanceof KernelError || e instanceof SpawnError) {
-        return { ok: false, errno: e.code, message: e.code };
+        return { ok: false, errno: e.code, message: (e as KernelError).detail ?? e.code };
       }
       const code = (e as { code?: unknown } | null)?.code;
       if (typeof code === 'string' && /^E[A-Z]+$/.test(code)) {
@@ -767,6 +796,7 @@ export class WasmProcess {
     const read = req.peek ? file.peek : file.read;
     if (!read) throw new KernelError(req.peek && file.read ? 'EOPNOTSUPP' : 'EBADF');
     if (file.tty) this.checkForeground(file.tty);
+    if (file.clipboard) return this.readClipboard(file.clipboard, req, cancelled);
 
     if (req.max <= 0) return new Uint8Array(0);
     if (file instanceof KernelSocket && file.unconnected) throw new KernelError('ENOTCONN');
@@ -774,6 +804,33 @@ export class WasmProcess {
     if (!ready && req.nonblock) throw new KernelError('EAGAIN');
     const signal = ready ? this.interrupt.signal : this.blockingSignal(cancelled);
     return read.call(file, Math.max(0, Math.min(req.max, MAX_READ)), signal);
+  }
+
+  private async readClipboard(
+    channel: ClipboardChannel,
+    req: Extract<WasmSyscall, { op: 'fd-read' }>,
+    cancelled: AbortSignal
+  ): Promise<Uint8Array> {
+    if (channel.access === 'write') throw new KernelError('EBADF');
+    if (req.max <= 0) return new Uint8Array(0);
+    if (channel.unread) channel.stamp = await this.clipboardStamp();
+    const signal = channel.settled ? this.interrupt.signal : this.blockingSignal(cancelled);
+    try {
+      return await channel.read(Math.min(req.max, MAX_READ), signal);
+    } catch (err) {
+      await this.clipboardComplaint(err);
+      throw err;
+    }
+  }
+
+  private async clipboardComplaint(err: unknown): Promise<void> {
+    const name = this.options.clipboardName;
+    if (name === undefined || !(err instanceof KernelError) || err.detail === undefined) return;
+    if (err.code !== 'EACCES' && err.code !== 'EIO') return;
+    const stderr = this.fds.has(2) ? this.fds.get(2).file : undefined;
+    if (!stderr?.write || stderr.clipboard) return;
+    const line = `${name}: /dev/clipboard: ${clipboardLine(err.detail)}\n`;
+    await stderr.write(new TextEncoder().encode(line), AbortSignal.timeout(1000)).catch(() => 0);
   }
 
   private async write(
@@ -914,6 +971,39 @@ export class WasmProcess {
     return this.fds.install(broker.open(), 3);
   }
 
+  private async openClipboard(flags: number): Promise<number> {
+    const broker = this.options.clipboard;
+    if (!broker) throw new KernelError('ENOENT');
+    const mode = flags & WRITE_ACCESS;
+    const access: ClipboardAccess = mode === 0 ? 'read' : mode === 1 ? 'write' : 'both';
+    return this.fds.install(broker.open(access, await this.clipboardStamp()), 3);
+  }
+
+  private async clipboardStamp(): Promise<ClipboardStamp> {
+    const shown = await this.options.identity?.();
+    const broker = this.options.clipboard as ClipboardBroker;
+    const tag = broker.tagOf(this.pid);
+    return {
+      pid: shown?.pid ?? this.pid,
+      uid: this.cred.euid,
+      gid: this.cred.egid,
+      users: broker.users,
+      ...(tag !== undefined ? { tag } : {}),
+    };
+  }
+
+  private async stampClipboards(): Promise<void> {
+    if (!this.options.clipboard) return;
+    const open = this.fds.numbers().filter((fd) => this.fds.get(fd).file.clipboard);
+    if (open.length === 0) return;
+    const stamp = await this.clipboardStamp().catch(() => undefined);
+    if (!stamp) return;
+    for (const fd of open) {
+      const channel = this.fds.get(fd).file.clipboard;
+      if (channel) channel.stamp = stamp;
+    }
+  }
+
   private async sealedCaller(): Promise<SealedCaller> {
     const shown = await this.options.identity?.();
     const broker = this.options.sealed as SealedBroker;
@@ -1003,10 +1093,16 @@ export class WasmProcess {
           kind: 'json',
           json: await this.write(req.fd, req.body, req.nonblock, cancelled),
         };
-      case 'fd-close':
+      case 'fd-close': {
         this.options.locks?.closed(this.pid, req.fd);
-        await Promise.resolve(this.fds.close(req.fd));
+        const channel = this.fds.get(req.fd).file.clipboard;
+        if (channel) channel.stamp = await this.clipboardStamp();
+        await Promise.resolve(this.fds.close(req.fd)).catch(async (err: unknown) => {
+          if (channel) await this.clipboardComplaint(err);
+          throw err;
+        });
         return { ok: true, kind: 'void' };
+      }
       case 'fd-pipe': {
         const pipe = openPipe();
         const read = this.fds.install(pipe.read, 3);
@@ -1064,6 +1160,8 @@ export class WasmProcess {
         return { ok: true, kind: 'json', json: this.options.jobs?.terminalNames() ?? [] };
       case 'fd-open-sealed':
         return { ok: true, kind: 'json', json: this.openSealed() };
+      case 'fd-open-clipboard':
+        return { ok: true, kind: 'json', json: await this.openClipboard(req.flags) };
       case 'fd-tty-owner':
         return { ok: true, kind: 'json', json: this.terminalByName(req.name).owner ?? null };
       case 'fd-select': {
@@ -1567,6 +1665,7 @@ export class WasmProcess {
     this.options.locks?.release(this.pid);
     this.asyncOps.close();
     for (const pid of this.children.pids()) this.options.onReap?.(pid);
+    await this.stampClipboards();
     await this.fds.closeAll();
     if (!this.options.nodes) this.options.openFiles?.delete(this.nodes);
     await this.options.http?.closeAll();

@@ -9,10 +9,12 @@ export interface ProcessInfo {
   argv: string[];
   tty: string | null;
   started: number;
-  state: 'S' | 'Z';
+  state: 'S' | 'T' | 'Z';
   memory: number;
   utime?: number;
   stime?: number;
+  cutime?: number;
+  cstime?: number;
   umask?: number;
   cred?: Cred;
   sigIgn?: number;

@@ -2,12 +2,14 @@ import { portCdpHook } from './cdp/port.ts';
 import type { CdpHook } from './cdp/types.ts';
 import { type LockManagerLike, locksOf } from './client/protocol.ts';
 import { type ServedClient, serveClient } from './client/serve-client.ts';
+import { type ClipboardReply, clipboardAsker } from './clipboard-relay.ts';
 import type { Attestation } from './fs/attest.ts';
 import type { Denial, DenialHook } from './fs/dac.ts';
 import { META_DB, type MetaStore } from './fs/meta.ts';
 import { OpfsFs } from './fs/opfs.ts';
 import { protectInit } from './fs/protect.ts';
 import { fsError, type UsersMode } from './fs/types.ts';
+import type { ClipboardHook } from './kernel/clipboard.ts';
 import { dialSocket, serveSocket } from './kernel/dial.ts';
 import type { WasmWorkerLike } from './kernel/host.ts';
 import { CA_DB, caStore } from './kernel/net/network.ts';
@@ -55,6 +57,7 @@ export interface InitRequest {
   protect?: { paths: string[]; writers?: string[] };
   denials?: boolean;
   sealed?: boolean;
+  clipboard?: boolean;
   approve?: boolean;
   processMounts?: boolean | 'ask';
   cdp?: boolean;
@@ -335,12 +338,14 @@ function usersOp(l: Launcher, req: UsersRequest): Promise<unknown> {
 function hostOptions(
   req: InitRequest,
   port: KernelPort,
-  sealed: SealedHook
+  sealed: SealedHook,
+  clipboard: ClipboardHook
 ): {
   hostname?: string;
   users?: UsersMode;
   onDenial?: DenialHook;
   sealed?: SealedHook;
+  clipboard?: ClipboardHook;
   protect?: { paths: string[]; writers?: string[] };
 } {
   return {
@@ -349,6 +354,7 @@ function hostOptions(
     ...(req.denials ? { onDenial: (denial: Denial) => port.postMessage({ denial }) } : {}),
     ...(req.protect ? { protect: protectInit(req.protect) } : {}),
     ...(req.sealed ? { sealed } : {}),
+    ...(req.clipboard ? { clipboard } : {}),
   };
 }
 
@@ -383,6 +389,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
     port.postMessage({ id, ...body }, transfer);
   const clients = new Set<ServedClient>();
   const sealed = sealedAsker(port);
+  const clipboard = clipboardAsker(port);
   const approvals = sudoApprovals(port);
   const locks = deps.locks === null ? undefined : (deps.locks ?? locksOf());
   let holding: Promise<string> | undefined;
@@ -451,7 +458,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
         ...(deps.createDriverWorker ? { createDriverWorker: deps.createDriverWorker } : {}),
         ...(req.modules ? { modules: req.modules } : {}),
         ...(req.env ? { env: req.env } : {}),
-        ...hostOptions(req, port, sealed.hook),
+        ...hostOptions(req, port, sealed.hook, clipboard.hook),
         ...(req.approve ? { approve: approvals.ask } : {}),
         ...net,
         ...(media ? { media } : {}),
@@ -526,6 +533,8 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
   port.addEventListener('message', (event) => {
     const sealedReply = (event.data as { sealedReply?: SealedReply }).sealedReply;
     if (sealedReply) return sealed.answer(sealedReply);
+    const clipboardReply = (event.data as { clipboardReply?: ClipboardReply }).clipboardReply;
+    if (clipboardReply) return clipboard.answer(clipboardReply);
     const grant = (event.data as { hostfsGrant?: GrantReply }).hostfsGrant;
     if (grant) return granted(grant);
     if (allowed(event.data)) return;

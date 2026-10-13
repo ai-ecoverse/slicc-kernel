@@ -102,3 +102,37 @@ test('a WASIX program that signals itself with a handler runs it before kill ret
     stderr: '',
   });
 });
+
+test('bash that stops itself stays stopped until SIGCONT (#422)', async (t) => {
+  if ((await bashBuild()) < 18) {
+    t.skip('needs @ai-ecoverse/wasm-bash 5.3.0-18 or later (or SLICC_WASM_BASH)');
+    return;
+  }
+  const kernel = await kernelWithBash();
+  await kernel.writeFile(
+    '/node_modules/selfkill/stop.mjs',
+    `export default async function main(ctx) {
+  const child = await ctx.spawn({ argv: ['bash', '-c', 'kill -STOP $$; echo after'], stdout: 'pipe' });
+  const out = new Response(child.stdout).text();
+  const early = await Promise.race([out.then(() => 'ended'), new Promise((r) => setTimeout(() => r('held'), 1000))]);
+  await ctx.kill(child.pid, 'SIGCONT');
+  const waited = await child.wait();
+  await ctx.write(1, JSON.stringify([early, await out, waited.status]));
+  return 0;
+}
+`
+  );
+  await kernel.writeFile(
+    '/node_modules/selfkill/package.json',
+    JSON.stringify({
+      name: 'selfkill',
+      slicc: {
+        commands: {
+          selfkill: { abi: 'js', module: 'main.mjs' },
+          selfstop: { abi: 'js', module: 'stop.mjs' },
+        },
+      },
+    })
+  );
+  assert.deepEqual(JSON.parse((await kernel.run(['selfstop'])).stdout), ['held', 'after\n', 0]);
+});

@@ -1,3 +1,4 @@
+import type { ClipboardChannel } from './clipboard.ts';
 import { KernelPipe, type PipeError } from './pipe.ts';
 import type { PtyPair } from './pty.ts';
 import type { SealedChannel } from './sealed.ts';
@@ -41,14 +42,19 @@ export type KernelErrno =
   | 'ECONNABORTED'
   | 'EHOSTUNREACH'
   | 'ECONNRESET'
-  | 'EMSGSIZE';
+  | 'EMSGSIZE'
+  | 'ENOTSUP'
+  | 'EILSEQ';
 
 export class KernelError extends Error {
   readonly code: KernelErrno;
 
-  constructor(code: KernelErrno) {
+  readonly detail?: string;
+
+  constructor(code: KernelErrno, detail?: string) {
     super(code);
     this.code = code;
+    if (detail !== undefined) this.detail = detail;
   }
 }
 
@@ -91,6 +97,8 @@ export interface KernelFile {
   pty?: PtyPair;
 
   sealed?: SealedChannel;
+
+  clipboard?: ClipboardChannel;
 
   stat?(): Promise<{ size: number; path: string; orphan?: true }>;
   held?: true;
@@ -262,13 +270,22 @@ export function heldFile(meta?: HeldMeta): OpenFile {
   return new OpenFile({ held: true, ...(meta ? { heldMeta: meta } : {}), close: () => {} });
 }
 
-export type KernelFdKind = 'tty' | 'stream' | 'file' | 'socket' | 'held' | 'device' | 'sealed';
+export type KernelFdKind =
+  | 'tty'
+  | 'stream'
+  | 'file'
+  | 'socket'
+  | 'held'
+  | 'device'
+  | 'sealed'
+  | 'clipboard';
 
 export function kernelFdKind(file: KernelFile): Exclude<KernelFdKind, 'socket'> {
   if (file.held) return 'held';
   if (file.heldMeta && 'device' in file.heldMeta) return 'device';
   if (file.tty) return 'tty';
   if (file.sealed) return 'sealed';
+  if (file.clipboard) return 'clipboard';
   return file.seek ? 'file' : 'stream';
 }
 

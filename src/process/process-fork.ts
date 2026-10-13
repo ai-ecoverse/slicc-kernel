@@ -173,7 +173,7 @@ function placeholder(
 ): ProcessStream {
   if (entry.kind === 'socket') return streams.socketStream(entry.flags ?? O_RDWR);
   if (entry.kind === 'tty') return Fs.open('/dev/tty', O_RDWR);
-  if (entry.kind === 'stream') return Fs.open('/dev/null', O_RDWR);
+  if (entry.kind === 'stream' || entry.kind === 'clipboard') return Fs.open('/dev/null', O_RDWR);
   Fs.mkdirTree(PLACEHOLDER_DIR);
   return Fs.open(`${PLACEHOLDER_DIR}/${entry.fd}`, O_RDWR | O_CREAT);
 }
@@ -209,6 +209,7 @@ export function placeKernelStream(
     streams.sizeFromKernel(stream, entry.kernel);
   } else if (entry.kind === 'socket') streams.attachSocket(stream, entry.kernel);
   else streams.attach(stream, entry.kernel, entry.kind === 'tty');
+  if (entry.kind === 'clipboard') streams.reportClose(entry.kernel);
   if (entry.kind === 'tty') streams.nameTerminal(stream);
   if (entry.kind === 'stream') {
     asFifo(stream, streams, entry.desc !== undefined ? `d${entry.desc}` : `k${entry.kernel}`);

@@ -8,10 +8,12 @@ import {
   errorWithCode,
 } from './client/dial-stream.ts';
 import { type LoopbackFetchOptions, loopbackFetch } from './client/loopback-fetch.ts';
+import { clipboardAnswerer } from './clipboard-relay.ts';
 import type { Attestation } from './fs/attest.ts';
 import type { Denial, DenialHook } from './fs/dac.ts';
 import { type Protection, protectInit, writerTags } from './fs/protect.ts';
 import { DEFAULT_USERS, type UsersMode } from './fs/types.ts';
+import type { ClipboardHook } from './kernel/clipboard.ts';
 import { isHostname } from './kernel/net/loopback-names.ts';
 import type { TransportCall } from './kernel/net/remote-transport.ts';
 import type { RouteTable } from './kernel/net/routes.ts';
@@ -50,6 +52,7 @@ export type { DialledSocket, DialOptions } from './client/dial-stream.ts';
 export type { LoopbackFetchOptions } from './client/loopback-fetch.ts';
 export type { Attestation, AttestedDir } from './fs/attest.ts';
 export type { Denial, DenialHook } from './fs/dac.ts';
+export type { ClipboardHook, ClipboardStamp } from './kernel/clipboard.ts';
 export type { RouteTable } from './kernel/net/routes.ts';
 export type {
   NetworkUplink,
@@ -147,6 +150,7 @@ export interface KernelOptions {
   users?: UsersMode;
   onDenial?: DenialHook;
   sealed?: SealedHook;
+  clipboard?: ClipboardHook;
   approve?: ApproveHook;
   protect?: Protection;
 }
@@ -316,6 +320,7 @@ function initCall(options: KernelOptions, transport: NetworkTransport | undefine
     users: options.users === undefined ? DEFAULT_USERS : options.users,
     ...(options.onDenial ? { denials: true } : {}),
     ...(options.sealed ? { sealed: true } : {}),
+    ...(options.clipboard ? { clipboard: true } : {}),
     ...(options.approve ? { approve: true } : {}),
     ...(options.protect ? { protect: protectInit(options.protect) } : {}),
     ...(options.processMounts !== undefined
@@ -472,6 +477,18 @@ function checkOptions(options: KernelOptions): void {
   }
 }
 
+function hookRelays(
+  worker: Worker,
+  options: KernelOptions
+): { handle(data: unknown): boolean; close(): void } {
+  const sealed = sealedAnswerer(worker, options.sealed);
+  const clipboard = clipboardAnswerer(worker, options.clipboard);
+  return {
+    handle: (data) => sealed.handle(data) || clipboard.handle(data),
+    close: () => sealed.close(),
+  };
+}
+
 export async function createKernel(options: KernelOptions = {}): Promise<Kernel> {
   checkOptions(options);
   writerTags(options.protect);
@@ -487,7 +504,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     (req) => call(req)
   );
   const cdp = cdpBridge(options.cdp);
-  const sealed = sealedAnswerer(worker, options.sealed);
+  const sealed = hookRelays(worker, options);
   const approvals = approver(options.approve, worker);
   const fail = (error: Error) => {
     dials.reset();
