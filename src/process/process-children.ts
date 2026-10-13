@@ -2,6 +2,7 @@ import type { ChildStdio, InheritedSlot } from '../kernel/children.ts';
 import type { Cred, CredChange } from '../kernel/cred.ts';
 import type { WasmSyscall } from '../kernel/process.ts';
 import type { ForkState, ForkStream } from '../kernel/protocol.ts';
+import { defaultAction } from '../kernel/signals.ts';
 import type { SyncFsResult } from '../realm/sync-fs-wire.ts';
 import type { SyncSabTransport } from '../realm/sync-sab-bridge.ts';
 import type { ProcessFs, ProcessStream } from './kernel-streams.ts';
@@ -36,6 +37,12 @@ function credOf(r: SyncFsResult): Cred | number {
 function number(r: SyncFsResult): number {
   if (!r.ok) return -wasiErrno(r.errno);
   return r.kind === 'json' && typeof r.json === 'number' ? r.json : -wasiErrno('EIO');
+}
+
+function throughKernel(sig: number): boolean {
+  if (sig === 0) return false;
+  const action = defaultAction(sig);
+  return action === 'terminate' || action === 'stop';
 }
 
 export interface ProcessKernel {
@@ -386,7 +393,7 @@ export function createProcessKernel(deps: ProcessKernelDeps): ProcessKernel {
       return status(call({ op: 'umount', target: at(target), flags }, `umount ${target}`));
     },
     kill(pid, sig) {
-      if (pid === deps.pid) {
+      if (pid === deps.pid && !throughKernel(sig)) {
         if (sig !== 0) deps.raise?.(sig);
         return 0;
       }
