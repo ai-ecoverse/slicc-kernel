@@ -25,10 +25,12 @@ import {
   type ChildForker,
   type ChildHandle,
   type ChildSpawner,
+  type ChildSpawnRequest,
   SpawnError,
 } from './kernel/children.ts';
 import type { CpuTimes } from './kernel/cpu-clock.ts';
 import { type Cred, copyCred, maySee, maySignal, ROOT } from './kernel/cred.ts';
+import { argvDigest, TICKET_ENV } from './kernel/exec-ticket.ts';
 import { bytesSource, deviceFile, FdTable, sinkFile } from './kernel/fd-table.ts';
 import { spawnWasmProcess, type WasmProcessHandle, type WasmWorkerLike } from './kernel/host.ts';
 import { LockTable } from './kernel/host-ops.ts';
@@ -242,6 +244,7 @@ interface StartRequest {
   cred: Cred;
   tag?: string | undefined;
   decided?: Promise<boolean>;
+  pid?: number;
 }
 
 const COMMAND = /^\/(?:usr\/)?bin\/([^/]+)$/;
@@ -738,6 +741,73 @@ export class Launcher {
     }
   }
 
+  private async redeemed(
+    req: ChildSpawnRequest,
+    ppid: number,
+    cred: Readonly<Cred>,
+    planned: Planned,
+    fds: FdTable
+  ): Promise<{ env: Record<string, string>; pid?: number }> {
+    if (!(TICKET_ENV in req.env)) return { env: req.env };
+    try {
+      return await this.redeem(req, ppid, cred, planned);
+    } catch {
+      await fds.closeAll();
+      throw new SpawnError('EACCES');
+    }
+  }
+
+  private async redeem(
+    req: ChildSpawnRequest,
+    ppid: number,
+    cred: Readonly<Cred>,
+    planned: Planned
+  ): Promise<{ env: Record<string, string>; pid: number }> {
+    const { [TICKET_ENV]: ticket = '', ...env } = req.env;
+    const booked = this.sealed.tickets.take(ticket);
+    const caller = this.jobs.shown(ppid);
+    const { file: path, argv } = req;
+    const cwd = await physicalPathAsync(this.base, req.cwd);
+    const exact =
+      booked?.pid === caller &&
+      path.startsWith('/') &&
+      path === booked.path &&
+      cwd === booked.cwd &&
+      (await physicalPathAsync(this.base, path)) === path &&
+      (await argvDigest(argv)) === booked.argv;
+    if (!exact) throw new SpawnError('EACCES');
+    const pid = this.nextPid++;
+    const tag = this.tagOf(ppid);
+    const stamp = {
+      pid: req.exec ? caller : pid,
+      ppid: caller,
+      uid: cred.euid,
+      gid: cred.egid,
+      ...(tag !== undefined ? { tag } : {}),
+      users: this.usersMode,
+    };
+    const interpreters = await this.interpreterChain(planned, req.cwd);
+    const swap = await this.sealed.consume({ ticket, stamp, path, argv, cwd, interpreters });
+    if (!swap) throw new SpawnError('EACCES');
+    for (const [name, placeholder] of Object.entries(swap.placeholders)) {
+      const value = swap.values[name];
+      if (value !== undefined && env[name] === placeholder) env[name] = value;
+    }
+    return { env, pid };
+  }
+
+  private async interpreterChain(planned: Planned, cwd: string): Promise<string[]> {
+    const chain: string[] = [];
+    for (const entry of planned.via ?? []) {
+      chain.push(
+        entry.includes('/')
+          ? await physicalPathAsync(this.base, this.fs.resolvePath(cwd, entry))
+          : `/usr/bin/${entry}`
+      );
+    }
+    return chain;
+  }
+
   private async grantedCwd(caller: Cred, cwd: string): Promise<boolean> {
     const real = await physicalPathAsync(this.base, cwd).catch(() => undefined);
     return real === cwd && (await this.sudoer.reachable(caller, cwd));
@@ -879,7 +949,7 @@ export class Launcher {
     if (req.pgid !== undefined && this.jobs.sessionOf(req.pgid) === undefined) {
       throw fsError('ESRCH', `no process group ${req.pgid}`);
     }
-    const pid = this.nextPid++;
+    const pid = req.pid ?? this.nextPid++;
     const terminal = req.fds.stdioTerminal();
     const decided = req.decided ?? Promise.resolve(true);
     const count = (byParent: boolean) => {
@@ -1144,11 +1214,12 @@ export class Launcher {
         await fds.closeAll();
         throw new SpawnError(await this.unrunnable(req.file, req.cwd, scope));
       }
+      const redeemed = await this.redeemed(req, ppid, cred, planned, fds);
       const exec = req.exec ? { exec: true } : {};
       const deciding = req.exec ? undefined : this.undecided(ppid);
       const handle = await this.launch(planned, {
         ...(deciding ? { decided: deciding.promise } : {}),
-        env: req.env,
+        ...redeemed,
         cwd: req.cwd,
         fds,
         report,
@@ -1548,7 +1619,14 @@ export class Launcher {
   }
 
   private environment(cwd: string, extra: Record<string, string> | undefined, account: Account) {
-    return { ...this.env, ...userEnv(account, this.pnpmHome), PWD: cwd, ...extra };
+    const env: Record<string, string> = {
+      ...this.env,
+      ...userEnv(account, this.pnpmHome),
+      PWD: cwd,
+      ...extra,
+    };
+    delete env[TICKET_ENV];
+    return env;
   }
 
   private async account(user: string | number | Account | undefined): Promise<Account> {

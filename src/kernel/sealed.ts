@@ -1,4 +1,5 @@
 import type { UsersMode } from '../fs/types.ts';
+import { isStrings, stringRecord, TicketBook } from './exec-ticket.ts';
 import { KernelError, OpenFile, type PollState } from './fd-table.ts';
 
 export const SEALED_PATH = '/dev/sealed';
@@ -47,10 +48,16 @@ export function parseSealed(bytes: Uint8Array): Record<string, unknown> {
     const req = parsed as Record<string, unknown>;
     if (req.v !== 1 || typeof req.op !== 'string' || !SEALED_OPS.has(req.op))
       throw new KernelError('EINVAL');
+    if (req.op === 'materialize' && !materializable(req)) throw new KernelError('EINVAL');
     return req;
   } finally {
     bytes.fill(0);
   }
+}
+
+function materializable(req: Record<string, unknown>): boolean {
+  if (req.shellGrants !== true && !isStrings(req.names)) return false;
+  return isStrings(req.argv) && typeof req.path === 'string' && typeof req.cwd === 'string';
 }
 
 function errorReply(code: string, message: string): object {
@@ -107,9 +114,11 @@ class SealedChannel {
     const timer = setTimeout(() => control.abort('timeout'), this.broker.timeoutMs);
     const req = { ...fields, v: 1, op: fields.op as string, caller } as SealedRequest;
     const flight: Inflight = { control, done: Promise.resolve() };
-    flight.done = this.answer(req, control.signal).then((reply) => {
+    flight.done = this.answer(req, control.signal).then(async (reply) => {
       clearTimeout(timer);
       gone.removeEventListener('abort', withdraw);
+      if (reply && req.op === 'materialize')
+        await this.broker.tickets.record(req, reply, caller.pid);
       if (this.inflight !== flight) return;
       this.inflight = undefined;
       if (reply) this.reply = encoder.encode(serialized(reply));
@@ -186,11 +195,33 @@ class SealedChannel {
   }
 }
 
+export interface ConsumeFields {
+  ticket: string;
+  stamp: SealedCaller;
+  path: string;
+  argv: string[];
+  cwd: string;
+  interpreters: string[];
+}
+
+export interface Swap {
+  values: Record<string, string>;
+  placeholders: Record<string, string>;
+}
+
+function swapOf(reply: unknown): Swap | undefined {
+  if (!isRecord(reply) || reply.error !== undefined) return undefined;
+  const values = stringRecord(reply.values);
+  const placeholders = stringRecord(reply.placeholders);
+  return values && placeholders ? { values, placeholders } : undefined;
+}
+
 export class SealedBroker {
   readonly hook: SealedHook | undefined;
   readonly users: UsersMode;
   readonly timeoutMs: number;
   readonly tagOf: (pid: number) => string | undefined;
+  readonly tickets = new TicketBook();
 
   constructor(
     hook: SealedHook | undefined,
@@ -202,6 +233,26 @@ export class SealedBroker {
     this.users = users;
     this.timeoutMs = timeoutMs;
     this.tagOf = tagOf;
+  }
+
+  async consume(fields: ConsumeFields): Promise<Swap | undefined> {
+    const { hook } = this;
+    if (!hook) return undefined;
+    const control = new AbortController();
+    const timer = setTimeout(() => control.abort('timeout'), this.timeoutMs);
+    const stopped = new Promise<undefined>((resolve) => {
+      control.signal.addEventListener('abort', () => resolve(undefined), { once: true });
+    });
+    const req = { ...fields, v: 1, op: 'materializeConsume' } as unknown as SealedRequest;
+    try {
+      const asked = Promise.resolve()
+        .then(() => hook(req, { signal: control.signal }))
+        .then(swapOf, () => undefined);
+      return await Promise.race([asked, stopped]);
+    } finally {
+      clearTimeout(timer);
+      control.abort('done');
+    }
   }
 
   open(): OpenFile {
