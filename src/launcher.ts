@@ -918,6 +918,20 @@ export class Launcher {
     return module;
   }
 
+  private async checkedSources(planned: Planned, caller: IntegrityCaller): Promise<void> {
+    const { target } = planned;
+    const files = [target.wasm, target.glue, target.imports, ...(planned.sources ?? [])];
+    const manifests = new Set<string>();
+    for (const file of files) {
+      const root = file === undefined ? undefined : PACKAGE_ROOT.exec(file)?.[1];
+      if (root !== undefined) manifests.add(`${root}/package.json`);
+    }
+    for (const source of planned.sources ?? []) await this.text(source, caller);
+    for (const manifest of manifests) {
+      if (await this.base.exists(manifest)) await this.text(manifest, caller);
+    }
+  }
+
   private async text(path: string, caller: IntegrityCaller): Promise<string> {
     if (!this.integrity) return this.base.readFile(path);
     const key = await this.cacheKey(path);
@@ -988,8 +1002,7 @@ export class Launcher {
     let program: Program;
     try {
       const caller = { pid: req.ppid ?? 0, uid: req.cred.euid, tag: req.tag };
-      if (this.integrity)
-        for (const source of planned.sources ?? []) await this.text(source, caller);
+      if (this.integrity) await this.checkedSources(planned, caller);
       program = await this.program(target, env, caller);
     } catch (err) {
       await req.fds.closeAll();
@@ -1549,6 +1562,9 @@ export class Launcher {
     if (!module) throw fsError('ENODEV', `unknown file system type ${type}`);
     if (!this.createDriverWorker)
       throw fsError('ENODEV', `this kernel cannot start ${type} drivers`);
+    const root = PACKAGE_ROOT.exec(module)?.[1];
+    if (this.integrity && root !== undefined)
+      await this.text(`${root}/package.json`, KERNEL_CALLER);
     const code = new TextDecoder().decode(await this.verified(module, KERNEL_CALLER));
     const worker = this.createDriverWorker();
     const driver = new MessageChannel();

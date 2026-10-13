@@ -92,7 +92,10 @@ test('a program whose files differ from the hashes the page knows does not run, 
   });
   assert.equal((await run(['jsecho', 'a'])).status, 0);
   assert.equal((await run(['jsecho', 'b'])).status, 0);
-  assert.deepEqual(await page.evaluate(() => window.integrityAsked), [echo]);
+  assert.deepEqual((await page.evaluate(() => window.integrityAsked)).sort(), [
+    echo,
+    '/node_modules/jstest/package.json',
+  ]);
   await page.evaluate(() =>
     window.opfs.write('node_modules/jstest/bin/echo.mjs', 'export default () => 7;\n')
   );
