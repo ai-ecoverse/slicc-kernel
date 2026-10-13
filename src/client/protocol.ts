@@ -112,6 +112,7 @@ export interface ProcessEntry {
   stime?: number;
   uid?: number;
   gid?: number;
+  tag?: string;
 }
 
 export interface MessagePortLike {
