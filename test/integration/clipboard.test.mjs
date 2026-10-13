@@ -271,3 +271,35 @@ test('the stamp carries the inherited tag of terminals and clients (users: off)'
   );
   assert.equal(clip.calls[0].stamp.users, 'off');
 });
+
+test('the exit hook is inert when stdout is a file, a pipe or a failing device, not the clipboard', async (t) => {
+  const clip = fakeClipboard();
+  clip.state.mode = 'refuse';
+  const { bash } = await booted(t, { clipboard: clip.hook });
+  assert.deepEqual(
+    await bash('printf a > /tmp/in; cat /tmp/in > /tmp/out; echo "rc=$? $(cat /tmp/out)"'),
+    { status: 0, stdout: 'rc=0 a\n', stderr: '' }
+  );
+  assert.deepEqual(await bash('cat /tmp/in | cat; echo " rc=$?"'), {
+    status: 0,
+    stdout: 'a rc=0\n',
+    stderr: '',
+  });
+  assert.deepEqual(await bash('/bin/echo x > /dev/full; echo "rc=$?"'), {
+    status: 0,
+    stdout: 'rc=1\n',
+    stderr: 'echo: write error\n',
+  });
+  assert.deepEqual(await bash('bash -c "exec 1>/dev/full; /bin/echo x; exit 0"; echo "rc=$?"'), {
+    status: 0,
+    stdout: 'rc=0\n',
+    stderr: 'echo: write error\n',
+  });
+  assert.deepEqual(
+    await bash(
+      'exec 3>/dev/clipboard; bash -c "/bin/echo x; exit 0" > /tmp/o; echo "rc=$?"; exec 3>&-'
+    ),
+    { status: 0, stdout: 'rc=0\n', stderr: '' }
+  );
+  assert.equal(clip.writes().length, 1);
+});
