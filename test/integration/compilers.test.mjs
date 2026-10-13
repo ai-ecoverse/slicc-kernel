@@ -20,7 +20,7 @@ async function install(kernel, name) {
 }
 
 async function kernelWith(...names) {
-  const kernel = await createNodeKernel();
+  const kernel = await createNodeKernel({ users: 'enforce' });
   for (const name of ['wasm-bash', 'wasm-coreutils', ...names]) await install(kernel, name);
   return kernel;
 }

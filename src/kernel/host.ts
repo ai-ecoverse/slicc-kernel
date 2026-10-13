@@ -75,6 +75,7 @@ export interface SpawnWasmOptions {
   umask?: number;
   cred?: Cred;
   owners?: boolean;
+  fresh?: (path: string, umask: number) => void;
   sealed?: SealedBroker;
   clipboard?: ClipboardBroker;
   readonlyAt?: (path: string) => boolean;
@@ -341,6 +342,7 @@ function holdingToken(
   return mintSyncFsToken({
     ...(opts.owners ? caller : {}),
     ...(opts.dac ? { dac: opts.dac, pid: opts.pid, created: caller.created } : {}),
+    ...(opts.fresh ? { fresh: (path: string) => opts.fresh?.(path, caller.umask()) } : {}),
     fs: opts.fs,
     cwd: opts.cwd,
     ...(opts.statfs ? { statfs: opts.statfs } : {}),
