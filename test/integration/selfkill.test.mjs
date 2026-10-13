@@ -68,8 +68,37 @@ test('bash that signals itself ends by the signal, for ctx.spawn and ctx.sync.ru
     wait: [0, null, 't\nafter\n'],
     run: [0, null, 't\nafter\n'],
   });
+  assert.deepEqual(await outcome('trap "echo u" USR1; kill -USR1 $$; echo after'), {
+    wait: [0, null, 'u\nafter\n'],
+    run: [0, null, 'u\nafter\n'],
+  });
   assert.deepEqual(await outcome('exit 143'), {
     wait: [143, null, ''],
     run: [143, null, ''],
+  });
+});
+
+test('a WASIX program that signals itself with a handler runs it before kill returns', async () => {
+  const kernel = await createNodeKernel();
+  const base = new URL('../../node_modules/@ai-ecoverse/wasix-python/', import.meta.url).pathname;
+  const entries = await readdir(base, { recursive: true, withFileTypes: true });
+  for (const entry of entries.filter((e) => e.isFile())) {
+    const file = join(entry.parentPath, entry.name);
+    await kernel.writeFile(
+      `/node_modules/@ai-ecoverse/wasix-python/${relative(base, file)}`,
+      await readFile(file)
+    );
+  }
+  const program = [
+    'import os, signal',
+    'flag = []',
+    'signal.signal(signal.SIGUSR1, lambda s, f: flag.append(s))',
+    'os.kill(os.getpid(), signal.SIGUSR1)',
+    'print(flag == [signal.SIGUSR1])',
+  ].join('\n');
+  assert.deepEqual(await kernel.run(['python3', '-c', program]), {
+    status: 0,
+    stdout: 'True\n',
+    stderr: '',
   });
 });
