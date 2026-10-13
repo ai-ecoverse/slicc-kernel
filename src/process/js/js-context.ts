@@ -12,7 +12,7 @@ import {
   readWhole,
   streamFile,
 } from './js-dev.ts';
-import { exitAtOnce, type PendingWrite } from './js-exit.ts';
+import { exitAtOnce, type PendingWrite, type SavedMode } from './js-exit.ts';
 import { fetchOp } from './js-fetch.ts';
 import {
   absent,
@@ -36,7 +36,14 @@ import {
 import { JsCallError, type JsKernel } from './js-kernel.ts';
 import { type JsNet, netOps } from './js-net.ts';
 import { runSync } from './js-run.ts';
-import { type JsSyncContext, JsSyncKernel, laneOf, type SyncCall, syncOps } from './js-sync.ts';
+import {
+  type JsSyncContext,
+  JsSyncKernel,
+  laneOf,
+  noLane,
+  type SyncCall,
+  syncOps,
+} from './js-sync.ts';
 import { type JsTty, ttyOps } from './js-tty.ts';
 import { type JsWebSocket, type JsWebSocketOptions, websocketOp } from './js-websocket.ts';
 
@@ -193,6 +200,37 @@ export interface CreatedContext {
   drain(): Promise<unknown>;
 }
 
+interface KillerDeps {
+  self: number;
+  kernel: JsKernel;
+  syncKernel: JsSyncKernel;
+  lane: SyncCall;
+  writes: Set<PendingWrite>;
+  modes: () => SavedMode[];
+}
+
+function killer(d: KillerDeps): JsSyncContext['kill'] {
+  return (pid, signal = 'SIGTERM') => {
+    const sig = signal === 0 ? 0 : signalNumber(signal);
+    const self = sig !== 0 && includesSelf(d.syncKernel, d.self, pid);
+    if (!self || d.kernel.disposition(sig) !== 'terminate') {
+      d.syncKernel.call({ op: 'proc-kill', pid, sig });
+      return;
+    }
+    exitAtOnce(d.lane, [...d.writes], d.modes(), 128 + sig, {
+      op: 'proc-kill-self',
+      sig,
+      ...(pid === d.self ? {} : { target: pid }),
+    });
+  };
+}
+
+function includesSelf(kernel: JsSyncKernel, self: number, pid: number): boolean {
+  if (pid === self || pid === 0 || pid === -1) return true;
+  if (pid > 0) return false;
+  return kernel.json({ op: 'proc-getpgid', pid: 0 }) === -pid;
+}
+
 function writer(kernel: JsKernel, info: (fd: number) => Promise<FdInfo>, pid: number) {
   const writes = new Set<PendingWrite>();
   const sendAll = async (
@@ -324,7 +362,7 @@ export function createContext(o: ContextOptions): CreatedContext {
 
   const fs = pathOps(kernel, resolve, statOf, open);
   const lane = o.lane ?? laneOf(undefined);
-  if (o.lane) kernel.syncLane = o.lane;
+  if (o.lane && o.lane !== noLane) kernel.syncLane = o.lane;
   const syncKernel = new JsSyncKernel(lane, kernel, unwind);
   const terminal = ttyOps(kernel);
   const sync: JsSyncContext = {
@@ -335,6 +373,7 @@ export function createContext(o: ContextOptions): CreatedContext {
       exiting ??= status & 0xff;
       return exitAtOnce(lane, [...writes], terminal.modes(), exiting);
     },
+    kill: killer({ self: o.pid, kernel, syncKernel, lane, writes, modes: terminal.modes }),
   };
 
   const io = { read, send: writeAll, close: (fd: number) => ctx.close(fd) };
