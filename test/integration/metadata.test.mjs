@@ -24,7 +24,7 @@ test('modes, times and symlinks survive a fresh kernel on the same OPFS', async 
   assert.deepEqual(
     before,
     ok(
-      "-rwxr-x--- 981173106 hello.sh\nlrwxrwxrwx 'link' -> 'hello.sh'\nhello.sh\nhello from ./link\ndrwx------ dir/sub\n"
+      '-rwxr-x--- 981173106 hello.sh\nlrwxrwxrwx link -> hello.sh\nhello.sh\nhello from ./link\ndrwx------ dir/sub\n'
     )
   );
 

@@ -606,8 +606,11 @@ export class WasiHost {
         o.fs.rename(from, to);
         fds.renamed(from, to, replaced);
       },
-      path_symlink: (tp: number, tl: number, dirfd: number, p: number, l: number) =>
-        void o.fs.symlink(mem.string(tp, tl), at(dirfd, p, l)),
+      path_symlink: (tp: number, tl: number, dirfd: number, p: number, l: number) => {
+        const path = at(dirfd, p, l);
+        if (tl === 0) throw new WasiError('ENOENT');
+        o.fs.symlink(mem.string(tp, tl), path);
+      },
       path_readlink: (
         dirfd: number,
         p: number,

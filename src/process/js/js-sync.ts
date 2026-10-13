@@ -54,6 +54,7 @@ export interface JsSyncFile {
 export interface JsSyncContext {
   run(options: JsRunOptions): JsRunResult;
   exit(status?: number): never;
+  kill(pid: number, signal?: number | `SIG${string}`): void;
   read(fd: number, max?: number): Uint8Array;
   write(fd: number, data: Uint8Array | string): void;
   close(fd: number): void;
@@ -85,8 +86,10 @@ export interface SyncShared {
 
 const encoder = new TextEncoder();
 
+export const noLane: SyncCall = () => ({ ok: false, errno: 'ENOSYS', message: 'no sync lane' });
+
 export function laneOf(lane: JsLane | undefined): SyncCall {
-  if (!lane) return () => ({ ok: false, errno: 'ENOSYS', message: 'no sync lane' });
+  if (!lane) return noLane;
   const transport = createSyncSabTransport(lane.sab, lane.port);
   return (req) => transport.call(req, Number.POSITIVE_INFINITY, req.op);
 }
@@ -138,7 +141,7 @@ export class JsSyncKernel {
 export function syncOps(
   kernel: JsSyncKernel,
   shared: SyncShared
-): Omit<JsSyncContext, 'run' | 'exit'> {
+): Omit<JsSyncContext, 'run' | 'exit' | 'kill'> {
   const { infos, handles, resolve } = shared;
 
   const info = (fd: number): FdInfo => {

@@ -108,12 +108,20 @@ export class IndexedDbMeta implements MetaStore {
   private readonly cache = new PathMap<MetaEntry | null>();
   private readonly channel: BroadcastChannel;
   private generation = 0;
+  private readonly listeners = new Set<(change: Invalidation) => void>();
+
+  listen(listener: (change: Invalidation) => void): void {
+    this.listeners.add(listener);
+  }
 
   constructor(db: IDBDatabase) {
     this.db = db;
     db.onversionchange = () => db.close();
     this.channel = new BroadcastChannel(`slicc-kernel-meta:${db.name}`);
-    this.channel.onmessage = ({ data }) => this.drop(data as Invalidation);
+    this.channel.onmessage = ({ data }) => {
+      this.drop(data as Invalidation);
+      for (const listener of this.listeners) listener(data as Invalidation);
+    };
     (this.channel as BroadcastChannel & { unref?: () => void }).unref?.();
   }
 

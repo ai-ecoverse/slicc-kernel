@@ -2,9 +2,11 @@ import { portCdpHook } from './cdp/port.ts';
 import type { CdpHook } from './cdp/types.ts';
 import { type LockManagerLike, locksOf } from './client/protocol.ts';
 import { type ServedClient, serveClient } from './client/serve-client.ts';
+import type { Attestation } from './fs/attest.ts';
 import type { Denial, DenialHook } from './fs/dac.ts';
 import { META_DB, type MetaStore } from './fs/meta.ts';
 import { OpfsFs } from './fs/opfs.ts';
+import { protectInit } from './fs/protect.ts';
 import { fsError, type UsersMode } from './fs/types.ts';
 import { dialSocket, serveSocket } from './kernel/dial.ts';
 import type { WasmWorkerLike } from './kernel/host.ts';
@@ -50,7 +52,7 @@ export interface InitRequest {
   hostfs?: boolean;
   hostname?: string;
   users?: UsersMode;
-  protect?: { paths: string[] };
+  protect?: { paths: string[]; writers?: string[] };
   denials?: boolean;
   sealed?: boolean;
   approve?: boolean;
@@ -113,7 +115,17 @@ export interface DialRequest {
   host?: string;
 }
 
+export type AttestRequest =
+  | { id: number; op: 'attest'; path: string }
+  | { id: number; op: 'watch-files'; paths: string[] }
+  | { id: number; op: 'unwatch-files'; watch: number };
+
+export interface FileChanged {
+  fileChanged: { watch: number; path: string };
+}
+
 export type KernelRequest =
+  | AttestRequest
   | InitRequest
   | RunRequest
   | OpenTerminalRequest
@@ -273,8 +285,34 @@ const USERS_OPS: ReadonlySet<string> = new Set([
   'groups-remove-member',
 ]);
 
+const ATTEST_OPS: ReadonlySet<string> = new Set(['attest', 'watch-files', 'unwatch-files']);
+
+function isAttestRequest(req: KernelRequest): req is AttestRequest {
+  return ATTEST_OPS.has(req.op);
+}
+
 function isUsersRequest(req: KernelRequest): req is UsersRequest {
   return USERS_OPS.has(req.op);
+}
+
+function transferOf(req: KernelRequest, result: unknown): Transferable[] | undefined {
+  if (result instanceof MessagePort) return [result];
+  if (req.op === 'attest') return [(result as Attestation).bytes.buffer as ArrayBuffer];
+  return undefined;
+}
+
+function attestOps(port: KernelPort) {
+  const watches = new Map<number, () => void>();
+  return async (l: Launcher, req: AttestRequest): Promise<unknown> => {
+    if (req.op === 'attest') return l.attest(req.path);
+    if (req.op === 'unwatch-files') {
+      watches.get(req.watch)?.();
+      return watches.delete(req.watch);
+    }
+    const notify = (path: string) => port.postMessage({ fileChanged: { watch: req.id, path } });
+    watches.set(req.id, await l.watchFiles(req.paths, notify));
+    return req.id;
+  };
 }
 
 function failure(err: unknown): { error: string; code?: string } {
@@ -303,13 +341,13 @@ function hostOptions(
   users?: UsersMode;
   onDenial?: DenialHook;
   sealed?: SealedHook;
-  protect?: { paths: string[] };
+  protect?: { paths: string[]; writers?: string[] };
 } {
   return {
     ...(req.hostname !== undefined ? { hostname: req.hostname } : {}),
     ...(req.users !== undefined ? { users: req.users } : {}),
     ...(req.denials ? { onDenial: (denial: Denial) => port.postMessage({ denial }) } : {}),
-    ...(req.protect ? { protect: { paths: [...req.protect.paths] } } : {}),
+    ...(req.protect ? { protect: protectInit(req.protect) } : {}),
     ...(req.sealed ? { sealed } : {}),
   };
 }
@@ -438,8 +476,11 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
     return l.mounts.list();
   }
 
+  const attestOp = attestOps(port);
+
   async function handle(req: KernelRequest): Promise<unknown> {
     if (req.op === 'init') return init(req);
+    if (isAttestRequest(req)) return attestOp(await ready(), req);
     if (req.op === 'open-terminal') return terminal(req);
     if (req.op === 'connect') return connect(req.user, req.tag);
     if (isUsersRequest(req)) return usersOp(await ready(), req);
@@ -491,7 +532,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
     if (answered(event.data, remote, uplink, approvals)) return;
     const req = event.data as KernelRequest;
     handle(req).then(
-      (result) => reply(req.id, { result }, result instanceof MessagePort ? [result] : undefined),
+      (result) => reply(req.id, { result }, transferOf(req, result)),
       (err) => reply(req.id, failure(err))
     );
   });

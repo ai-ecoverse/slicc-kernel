@@ -72,7 +72,8 @@ export function exitAtOnce(
   lane: SyncCall,
   writes: readonly PendingWrite[],
   modes: readonly SavedMode[],
-  status: number
+  status: number,
+  last: SyncSabRequestBody = { op: 'proc-exit', status: status & 0xff }
 ): never {
   const done = settled(lane, writes);
   const broken = new Set<number>();
@@ -83,7 +84,7 @@ export function exitAtOnce(
     if (!writeOut(lane, w.fd, w.data.subarray(w.at + (sent ?? 0)))) broken.add(w.fd);
   }
   for (const mode of modes) restoreMode(lane, mode);
-  lane({ op: 'proc-exit', status: status & 0xff });
+  lane(last);
   const parked = new Int32Array(new SharedArrayBuffer(4));
   for (;;) Atomics.wait(parked, 0, 0);
 }

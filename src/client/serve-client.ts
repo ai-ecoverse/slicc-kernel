@@ -102,6 +102,18 @@ const CLIENT_CHECKS: Readonly<Record<string, ClientCheck>> = {
   exists: (g, at) => searchable(g, 'exists', at(0), true),
 };
 
+function clientFs(
+  l: Launcher,
+  tag: string | undefined,
+  self: Parameters<typeof ownerFor>[1] & Parameters<typeof guardFor>[1],
+  req: Extract<ClientRequest, { op: 'fs' }>
+): Promise<Answer> {
+  if (!(FS_METHODS as readonly string[]).includes(req.method)) {
+    throw new Error(`unknown file system call ${req.method}`);
+  }
+  return fsCall(l.fsFor(tag), req.method, req.args, ownerFor(l, self), guardFor(l, self, tag));
+}
+
 async function fsCall(
   fs: KernelFs,
   method: string,
@@ -195,9 +207,9 @@ function ownerFor(l: Launcher, self: Account | undefined): (Owner & { umask: num
   return { uid: self.uid, gid: self.gid, umask: self.umask ?? 0o022 };
 }
 
-function guardFor(l: Launcher, self: Account | undefined): Guard | undefined {
+function guardFor(l: Launcher, self: Account | undefined, tag?: string): Guard | undefined {
   if (!l.dac || !self) return undefined;
-  return { fs: l.fs, cred: credOf(self), pid: 0, dac: l.dac };
+  return { fs: l.fs, cred: credOf(self), pid: 0, dac: l.dac, tag };
 }
 
 async function accountOf(l: Launcher, user: string | number): Promise<Account> {
@@ -340,6 +352,7 @@ async function watchOp(
 export function serveClient(port: MessagePortLike, host: ClientHost): ServedClient {
   let state: 'new' | 'open' | 'closed' = 'new';
   let self: Account | undefined;
+  const guard = (l: Launcher) => guardFor(l, self, host.tag);
   const terminals = new Map<number, TerminalSession>();
   const groups = new Set<number>();
   const sessions = new Set<number>();
@@ -452,13 +465,10 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
       case 'ps':
         return { result: processes(l, self as Account) };
       case 'fs':
-        if (!(FS_METHODS as readonly string[]).includes(req.method)) {
-          throw new Error(`unknown file system call ${req.method}`);
-        }
-        return fsCall(l.processFs, req.method, req.args, ownerFor(l, self), guardFor(l, self));
+        return clientFs(l, host.tag, self, req);
       case 'watch':
       case 'unwatch':
-        return watchOp(l, req, watches, send, guardFor(l, self));
+        return watchOp(l, req, watches, send, guard(l));
       case 'mount':
         return { result: await l.mountAs(clientCred(self), req.spec) };
       case 'umount':

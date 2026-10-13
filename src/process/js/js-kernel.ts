@@ -1,5 +1,5 @@
 import type { WasmSyscall } from '../../kernel/process.ts';
-import { SIG, sigbit, signalsIn } from '../../kernel/signals.ts';
+import { type DefaultAction, defaultAction, SIG, sigbit, signalsIn } from '../../kernel/signals.ts';
 import type { SyncFsResult } from '../../realm/sync-fs-wire.ts';
 import {
   SAB_HEADER_I32,
@@ -176,6 +176,12 @@ export class JsKernel {
 
   freeze(): void {
     while (Atomics.load(this.header, SAB_I_STOP) === 1) Atomics.wait(this.header, SAB_I_STOP, 1);
+  }
+
+  disposition(sig: number): 'caught' | 'ignored' | DefaultAction {
+    if (this.handlers.has(sig)) return 'caught';
+    if (this.ignored & sigbit(sig)) return 'ignored';
+    return defaultAction(sig);
   }
 
   setHandler(sig: number, handler: SignalHandler | 'ignore' | 'default'): Promise<void> {
