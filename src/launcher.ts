@@ -15,6 +15,7 @@ import {
 import { R_OK, X_OK } from './fs/access.ts';
 import { followLinks, withCommandDirs } from './fs/commands.ts';
 import { Dac, type DenialHook, need, TTY_MODE } from './fs/dac.ts';
+import { chain } from './fs/owners.ts';
 import { physicalPathAsync } from './fs/physical-path.ts';
 import type { KernelFs, UsersMode } from './fs/types.ts';
 import { fsError, normalizePath } from './fs/types.ts';
@@ -316,6 +317,33 @@ function shebang(head: Uint8Array): string[] | undefined {
     .split(/[ \t]+/);
 }
 
+async function rootOnly(fs: KernelFs, path: string): Promise<boolean> {
+  const names = chain(path);
+  for (const [i, at] of names.entries()) {
+    const st = await fs.lstat(at).catch(() => undefined);
+    const kind = i === names.length - 1 ? st?.isFile : st?.isDirectory;
+    if (!kind || st?.uid !== 0 || (st.mode & 0o022) !== 0) return false;
+  }
+  return true;
+}
+
+function plainEnv(words: string[]): boolean {
+  const next = words[1];
+  if (baseName(words[0] ?? '') !== 'env' || next === undefined) return false;
+  return next === '-S' || (!next.startsWith('-') && !next.includes('='));
+}
+
+function shebangCommand(words: string[]): { interp: string | undefined; args: string[] } {
+  if (!plainEnv(words)) {
+    const arg = words.slice(1).join(' ');
+    return { interp: words[0], args: arg ? [arg] : [] };
+  }
+  const split = words[1] === '-S';
+  const [interp, ...rest] = words.slice(split ? 2 : 1);
+  const arg = rest.join(' ');
+  return { interp, args: split ? rest : arg ? [arg] : [] };
+}
+
 function interpreter(head: Uint8Array): string {
   const words = shebang(head);
   if (!words) return 'node';
@@ -455,6 +483,8 @@ export class Launcher {
     this.sealed = new SealedBroker(options.sealed, this.usersMode, undefined, (pid) =>
       this.tagOf(pid)
     );
+    this.sealed.tickets.normalise = (path) => physicalPathAsync(this.base, path);
+    this.sealed.userOf = async (uid) => (await this.users.lookup(uid))?.name;
     if (this.owners) options.fs.trackOwners?.();
     this.mounts = new MountTable({
       open: (type, spec) => this.driver(type, spec),
@@ -691,13 +721,12 @@ export class Launcher {
     const binfmt = isWasm(head) ? undefined : binfmtOf(await this.interpreters(scope), script);
     const words = shebang(head) ?? (binfmt ? [binfmt] : undefined);
     if (!words) return undefined;
-    if (baseName(words[0]) === 'env') words.shift();
-    const [interp, ...rest] = words;
-    const arg = rest.join(' ');
-    const passed = [...(arg ? [arg] : []), command ? script : file, ...argv.slice(1)];
-    const found = interp ? await this.resolve(interp, interp, cwd, scope) : undefined;
+    const { interp, args } = shebangCommand(words);
+    const passed = [...args, command ? script : file, ...argv.slice(1)];
+    if (!interp) return undefined;
+    const found = await this.resolve(interp, interp, cwd, scope);
     if (!found) {
-      if (!interp || depth >= MAX_INTERPRETERS || !(await this.scriptCommand(interp, cwd, scope))) {
+      if (depth >= MAX_INTERPRETERS || !(await this.scriptCommand(interp, cwd, scope))) {
         return undefined;
       }
       const inner = await this.interpreted(interp, [interp, ...passed], cwd, scope, depth + 1);
@@ -750,7 +779,7 @@ export class Launcher {
   ): Promise<{ env: Record<string, string>; pid?: number }> {
     if (!(TICKET_ENV in req.env)) return { env: req.env };
     try {
-      return await this.redeem(req, ppid, cred, planned);
+      return await this.redeem(req, ppid, { cred, scope: await this.scopeOf(cred.euid) }, planned);
     } catch {
       await fds.closeAll();
       throw new SpawnError('EACCES');
@@ -760,34 +789,37 @@ export class Launcher {
   private async redeem(
     req: ChildSpawnRequest,
     ppid: number,
-    cred: Readonly<Cred>,
+    { cred, scope }: { cred: Readonly<Cred>; scope: string },
     planned: Planned
   ): Promise<{ env: Record<string, string>; pid: number }> {
     const { [TICKET_ENV]: ticket = '', ...env } = req.env;
     const booked = this.sealed.tickets.take(ticket);
     const caller = this.jobs.shown(ppid);
-    const { file: path, argv } = req;
-    const cwd = await physicalPathAsync(this.base, req.cwd);
+    const { argv } = req;
     const exact =
       booked?.pid === caller &&
-      path.startsWith('/') &&
-      path === booked.path &&
-      cwd === booked.cwd &&
-      (await physicalPathAsync(this.base, path)) === path &&
+      req.file.startsWith('/') &&
+      (await physicalPathAsync(this.base, req.file)) === booked.path &&
+      (await physicalPathAsync(this.base, req.cwd)) === booked.cwd &&
       (await argvDigest(argv)) === booked.argv;
     if (!exact) throw new SpawnError('EACCES');
+    const { requested: path, requestedCwd: cwd, path: resolved } = booked;
     const pid = this.nextPid++;
-    const tag = this.tagOf(ppid);
-    const stamp = {
-      pid: req.exec ? caller : pid,
-      ppid: caller,
-      uid: cred.euid,
-      gid: cred.egid,
-      ...(tag !== undefined ? { tag } : {}),
-      users: this.usersMode,
-    };
-    const interpreters = await this.interpreterChain(planned, req.cwd);
-    const swap = await this.sealed.consume({ ticket, stamp, path, argv, cwd, interpreters });
+    const ids = { pid: req.exec ? caller : pid, ppid: caller };
+    const stamp = await this.sealed.stamp(ids, cred, this.tagOf(ppid));
+    const interpreters = await this.interpreterChain(planned, req.cwd, scope);
+    const programs = [req.file, ...(planned.via ?? [])];
+    const trusted = this.owners && (await this.trustedChain(programs, req.cwd, scope));
+    const swap = await this.sealed.consume({
+      ticket,
+      stamp,
+      path,
+      resolved,
+      argv,
+      cwd,
+      interpreters,
+      trusted,
+    });
     if (!swap) throw new SpawnError('EACCES');
     for (const [name, placeholder] of Object.entries(swap.placeholders)) {
       const value = swap.values[name];
@@ -796,16 +828,38 @@ export class Launcher {
     return { env, pid };
   }
 
-  private async interpreterChain(planned: Planned, cwd: string): Promise<string[]> {
-    const chain: string[] = [];
+  private async interpreterChain(planned: Planned, cwd: string, scope: string): Promise<string[]> {
+    const out: string[] = [];
     for (const entry of planned.via ?? []) {
-      chain.push(
-        entry.includes('/')
-          ? await physicalPathAsync(this.base, this.fs.resolvePath(cwd, entry))
-          : `/usr/bin/${entry}`
-      );
+      if (entry.includes('/')) {
+        out.push(await physicalPathAsync(this.base, this.fs.resolvePath(cwd, entry)));
+        continue;
+      }
+      const script = (await this.scriptCommand(entry, cwd, scope))?.script;
+      out.push(script ? await physicalPathAsync(this.base, script) : `/usr/bin/${entry}`);
     }
-    return chain;
+    return out;
+  }
+
+  private async trustedChain(names: string[], cwd: string, scope: string): Promise<boolean> {
+    for (const name of names) {
+      if (!(await this.trustedProgram(name, cwd, scope))) return false;
+    }
+    return true;
+  }
+
+  private async trustedProgram(name: string, cwd: string, scope: string): Promise<boolean> {
+    const byPath = name.includes('/') && !COMMAND.test(name);
+    const at = byPath ? await physicalPathAsync(this.base, this.fs.resolvePath(cwd, name)) : '';
+    const script = byPath ? undefined : (await this.scriptCommand(name, cwd, scope))?.script;
+    let files = [at || script || ''].filter(Boolean);
+    if (files.length === 0) {
+      const target = await this.resolve(name, name, cwd, scope);
+      files = target ? [target.glue, target.wasm, target.imports ?? ''].filter(Boolean) : [];
+    }
+    if (files.length === 0) return false;
+    for (const file of files) if (!(await rootOnly(this.base, file))) return false;
+    return true;
   }
 
   private async grantedCwd(caller: Cred, cwd: string): Promise<boolean> {

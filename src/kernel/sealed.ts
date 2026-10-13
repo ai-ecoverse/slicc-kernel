@@ -1,4 +1,5 @@
 import type { UsersMode } from '../fs/types.ts';
+import type { Cred } from './cred.ts';
 import { isStrings, stringRecord, TicketBook } from './exec-ticket.ts';
 import { KernelError, OpenFile, type PollState } from './fd-table.ts';
 
@@ -21,8 +22,10 @@ export interface SealedCaller {
   ppid: number;
   uid: number;
   gid: number;
-  tag?: string;
+  user?: string;
+  groups: number[];
   users: UsersMode;
+  tag?: string;
 }
 
 export type SealedRequest = { v: 1; op: string; caller: SealedCaller } & Record<string, unknown>;
@@ -199,9 +202,11 @@ export interface ConsumeFields {
   ticket: string;
   stamp: SealedCaller;
   path: string;
+  resolved: string;
   argv: string[];
   cwd: string;
   interpreters: string[];
+  trusted: boolean;
 }
 
 export interface Swap {
@@ -222,6 +227,7 @@ export class SealedBroker {
   readonly timeoutMs: number;
   readonly tagOf: (pid: number) => string | undefined;
   readonly tickets = new TicketBook();
+  userOf: (uid: number) => Promise<string | undefined> = async () => undefined;
 
   constructor(
     hook: SealedHook | undefined,
@@ -233,6 +239,24 @@ export class SealedBroker {
     this.users = users;
     this.timeoutMs = timeoutMs;
     this.tagOf = tagOf;
+  }
+
+  async stamp(
+    ids: { pid: number; ppid: number },
+    cred: Readonly<Cred>,
+    tag: string | undefined
+  ): Promise<SealedCaller> {
+    const user = await this.userOf(cred.euid).catch(() => undefined);
+    return {
+      pid: ids.pid,
+      ppid: ids.ppid,
+      uid: cred.euid,
+      gid: cred.egid,
+      ...(user !== undefined ? { user } : {}),
+      groups: [...cred.groups],
+      users: this.users,
+      ...(tag !== undefined ? { tag } : {}),
+    };
   }
 
   async consume(fields: ConsumeFields): Promise<Swap | undefined> {

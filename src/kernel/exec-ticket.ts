@@ -7,6 +7,8 @@ const TICKET = /^[0-9a-f]{32}$/;
 export interface Booked {
   pid: number;
   path: string;
+  requested: string;
+  requestedCwd: string;
   argv: string;
   cwd: string;
   at: number;
@@ -33,6 +35,7 @@ export function stringRecord(value: unknown): Record<string, string> | undefined
 export class TicketBook {
   private readonly booked = new Map<string, Booked>();
   private readonly now: () => number;
+  normalise: (path: string) => Promise<string> = async (path) => path;
 
   constructor(now: () => number = Date.now) {
     this.now = now;
@@ -46,7 +49,15 @@ export class TicketBook {
     const { ticket, error } = reply as { ticket?: unknown; error?: unknown };
     if (error !== undefined || typeof ticket !== 'string' || !TICKET.test(ticket)) return;
     const { path, argv, cwd } = req as { path: string; argv: string[]; cwd: string };
-    const entry = { pid, path, argv: await argvDigest(argv), cwd, at: this.now() };
+    const entry = {
+      pid,
+      path: await this.normalise(path),
+      requested: path,
+      requestedCwd: cwd,
+      argv: await argvDigest(argv),
+      cwd: await this.normalise(cwd),
+      at: this.now(),
+    };
     this.prune();
     while (this.booked.size >= MAX_TICKETS)
       this.booked.delete(this.booked.keys().next().value as string);
