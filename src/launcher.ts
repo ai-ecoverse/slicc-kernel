@@ -750,9 +750,9 @@ export class Launcher {
     return manifests;
   }
 
-  private async backing(file: string, cwd: string): Promise<string[]> {
+  private async backing(file: string, cwd: string): Promise<string[] | undefined> {
     const planned = await this.plan(file, [file], cwd, '');
-    if (!planned) return [];
+    if (!planned) return undefined;
     const { glue, wasm, imports } = planned.target;
     const files = [glue, wasm, ...(imports ? [imports] : [])];
     const scripts: string[] = [];
@@ -1381,6 +1381,19 @@ export class Launcher {
     return entry;
   }
 
+  private async ownTmp(): Promise<void> {
+    const real = await this.realLayoutPath('/tmp');
+    if (real !== undefined && this.base.hasOwner && !(await this.base.hasOwner(real))) {
+      for (const name of await this.base.readdir(real).catch(() => [] as string[])) {
+        const path = joinName(real, name);
+        if (await this.base.hasOwner(path)) continue;
+        await this.base.rm(path, { recursive: true, force: true }).catch(() => undefined);
+      }
+      await this.base.chown?.(real, { uid: 0, gid: 0, mode: 0o1777, follow: false });
+    }
+    await this.base.chmod('/tmp', 0o1777);
+  }
+
   private async stampLayout(): Promise<void> {
     const layout: Array<[string, number]> = [
       ...LAYOUT,
@@ -1509,7 +1522,7 @@ export class Launcher {
 
   async prepare(): Promise<void> {
     for (const dir of SHARED_DIRS) await this.base.mkdir(dir, { recursive: true });
-    if (this.owners) await this.base.chmod('/tmp', 0o1777);
+    if (this.owners) await this.ownTmp();
     await this.provisionPnpmHome();
     await this.users.ensure();
     if (this.owners) await this.stampLayout();

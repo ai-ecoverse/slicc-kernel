@@ -27,6 +27,7 @@ import { createProcessKernel, type ProcessKernel } from './process-children.ts';
 import {
   type FdImports,
   type GlueSyscalls,
+  type KernelImports,
   kernelAccess,
   kernelUmask,
   linuxDevices,
@@ -42,6 +43,7 @@ import {
   useZeroDevices,
   wasmMemory,
   wrapCloexecSyscalls,
+  wrapImport,
 } from './process-fds.ts';
 import {
   describeForFork,
@@ -325,6 +327,16 @@ const GLUE_TRAILER = [
   "  ioctl: typeof ___syscall_ioctl === 'function' ? ___syscall_ioctl : undefined,",
   "  setitimer: typeof __setitimer_js === 'function' ? __setitimer_js : undefined,",
   '};',
+  'Module.sliccKernelImports ??= {',
+  "  openat: typeof ___syscall_openat === 'function' ? ___syscall_openat : undefined,",
+  "  mkdirat: typeof ___syscall_mkdirat === 'function' ? ___syscall_mkdirat : undefined,",
+  "  mknodat: typeof ___syscall_mknodat === 'function' ? ___syscall_mknodat : undefined,",
+  "  umask: typeof ___syscall_umask === 'function' ? ___syscall_umask : undefined,",
+  "  faccessat: typeof ___syscall_faccessat === 'function' ? ___syscall_faccessat : undefined,",
+  "  utimensat: typeof ___syscall_utimensat === 'function' ? ___syscall_utimensat : undefined,",
+  "  getppid: typeof _slicc_getppid_js === 'function' ? _slicc_getppid_js : undefined,",
+  "  resizeHeap: typeof _emscripten_resize_heap === 'function' ? _emscripten_resize_heap : undefined,",
+  '};',
   'Module.sliccFdImports ??= {',
   "  fd_sync: typeof _fd_sync === 'function' ? _fd_sync : undefined,",
   "  fd_pread: typeof _fd_pread === 'function' ? _fd_pread : undefined,",
@@ -384,9 +396,12 @@ export function identify(
   return id ?? { pid: init.pid, ppid: init.ppid ?? 1 };
 }
 
-export function liveParent(imports: WebAssembly.Imports, parent: () => number): void {
-  const env = imports.env as Record<string, unknown> | undefined;
-  if (env && typeof env.slicc_getppid_js === 'function') env.slicc_getppid_js = parent;
+export function liveParent(
+  imports: WebAssembly.Imports,
+  parent: () => number,
+  glue?: KernelImports
+): void {
+  wrapImport(imports, 'getppid', glue, () => parent);
 }
 
 export function signalMasks(
@@ -398,15 +413,16 @@ export function signalMasks(
   return { caught, ignored: mask(1), restart: mask(2) };
 }
 
-export function reportGrowth(imports: WebAssembly.Imports, publish: () => void): void {
-  const env = imports.env as Record<string, unknown> | undefined;
-  const resize = env?.emscripten_resize_heap;
-  if (!env || typeof resize !== 'function') return;
-  env.emscripten_resize_heap = (...args: unknown[]) => {
+export function reportGrowth(
+  imports: WebAssembly.Imports,
+  publish: () => void,
+  glue?: KernelImports
+): void {
+  wrapImport(imports, 'resizeHeap', glue, (resize) => (...args) => {
     const grown = resize(...args);
     publish();
     return grown;
-  };
+  });
 }
 
 function callerOwner(Fs: ProcessFs, init: WasmProcessInitMsg): { owner?: Owner } {
@@ -415,6 +431,35 @@ function callerOwner(Fs: ProcessFs, init: WasmProcessInitMsg): { owner?: Owner }
 
 function utimensatOf(module: object): unknown {
   return ownValue<{ utimensat?: unknown }>(module, 'sliccSyscalls')?.utimensat;
+}
+
+interface WrapperDeps {
+  init: WasmProcessInitMsg;
+  transport: SyncSabTransport;
+  sys: ProcessSys;
+  memory: () => WebAssembly.Memory | undefined;
+  ppid: () => number;
+}
+
+function kernelWrappers(imports: WebAssembly.Imports, module: object, deps: WrapperDeps): void {
+  const { init, transport, sys, memory } = deps;
+  const kernelGlue = ownValue<KernelImports>(module, 'sliccKernelImports');
+  liveParent(imports, deps.ppid, kernelGlue);
+  kernelUmask(imports, {
+    glue: kernelGlue,
+    initial: init.umask ?? 0o022,
+    memory,
+    set: (mask) =>
+      void transport.call({ op: 'proc-umask', mask }, Number.POSITIVE_INFINITY, 'umask'),
+  });
+  const fsOf = () => ownValue<ProcessFs>(module, 'FS');
+  noFollowUtimes(imports, fsOf, kernelGlue?.utimensat ?? utimensatOf(module), memory);
+  kernelAccess(imports, fsOf, memory, kernelGlue);
+  const glue = ownValue<FdImports>(module, 'sliccFdImports');
+  syncFsync(imports, fsOf, glue);
+  positionalIo(imports, { glue, fs: fsOf, sys, memory });
+  const grown = () => publishMemory(init.sab, memory()?.buffer.byteLength ?? 0);
+  reportGrowth(imports, grown, kernelGlue);
 }
 
 export async function runWasmProcess(
@@ -486,25 +531,13 @@ export async function runWasmProcess(
               },
             },
           });
-          liveParent(imports, () => identify(transport, init).ppid);
-          kernelUmask(imports, {
-            initial: init.umask ?? 0o022,
-            memory: () => memory,
-            set: (mask) =>
-              void transport.call({ op: 'proc-umask', mask }, Number.POSITIVE_INFINITY, 'umask'),
-          });
-          const fsOf = () => ownValue<ProcessFs>(module, 'FS');
-          noFollowUtimes(imports, fsOf, utimensatOf(module), () => memory);
-          kernelAccess(imports, fsOf, () => memory);
-          const glue = ownValue<FdImports>(module, 'sliccFdImports');
-          syncFsync(imports, () => ownValue<ProcessFs>(module, 'FS'), glue);
-          positionalIo(imports, {
-            glue,
-            fs: () => ownValue<ProcessFs>(module, 'FS'),
+          kernelWrappers(imports, module, {
+            init,
+            transport,
             sys,
             memory: () => memory,
+            ppid: () => identify(transport, init).ppid,
           });
-          reportGrowth(imports, () => publishMemory(init.sab, memory?.buffer.byteLength ?? 0));
           return WebAssembly.instantiate(init.program.module, imports);
         })
         .then((instance) => {
