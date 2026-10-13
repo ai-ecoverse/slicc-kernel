@@ -25,6 +25,8 @@ import {
 import { type Cred, type CredChange, changeCred, copyCred, ROOT } from './cred.ts';
 import {
   type DeviceAccess,
+  deviceAt,
+  deviceFile,
   type FdTable,
   type HeldMeta,
   heldFile,
@@ -46,6 +48,7 @@ import type { MountLine, ProcessListing } from './proc-info.ts';
 import type { ForkState } from './protocol.ts';
 import { PTY_OPS, type PtySyscall, type PtyTable, ptsNumber, ptySyscall } from './pty.ts';
 import { type RunRequest, runChild } from './run-child.ts';
+import type { SealedBroker, SealedCaller } from './sealed.ts';
 import { selectFds } from './select.ts';
 import { type DefaultAction, defaultAction, isSignal, SIG, sigbit } from './signals.ts';
 import { KernelSocket, LoopbackNet } from './socket.ts';
@@ -160,6 +163,7 @@ export type WasmSyscall =
   | { op: 'fd-open-tty'; name?: string }
   | { op: 'fd-tty-names' }
   | { op: 'fd-tty-owner'; name: string }
+  | { op: 'fd-open-sealed' }
   | { op: 'tty-get'; fd: number }
   | { op: 'tty-set'; fd: number; termios: Termios; flush?: boolean }
   | { op: 'tty-winsz'; fd: number }
@@ -190,6 +194,7 @@ export type WasmSyscall =
   | SudoCall
   | RunRequest
   | { op: 'proc-exit'; status: number }
+  | { op: 'proc-kill-self'; sig: number; target?: number; probe?: boolean }
   | { op: 'proc-fork'; state: ForkState; restart?: true }
   | { op: 'proc-kill'; pid: number; sig: number }
   | { op: 'thread-kill'; tid: number; sig: number }
@@ -332,6 +337,7 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'fd-open-tty',
   'fd-tty-names',
   'fd-tty-owner',
+  'fd-open-sealed',
   'tty-get',
   'tty-set',
   'tty-winsz',
@@ -342,6 +348,7 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'proc-sudo',
   'proc-run',
   'proc-exit',
+  'proc-kill-self',
   'proc-fork',
   'proc-kill',
   'thread-kill',
@@ -398,6 +405,10 @@ export interface WasmProcessOptions {
 
   owners?: boolean;
 
+  sealed?: SealedBroker;
+
+  readonlyAt?: (path: string) => boolean;
+
   guard?: { dac: Dac; fs: KernelFs; created?: Created };
 
   identity?: () => Promise<{ pid: number; ppid: number }>;
@@ -446,6 +457,8 @@ export interface WasmProcessOptions {
 
   exitNow?: (status: number) => void;
 
+  exitSignal?: (sig: number) => void;
+
   onReap?: (pid: number) => void;
 
   jobs?: JobTable;
@@ -474,6 +487,8 @@ export class WasmProcess {
   private inherited = 0;
 
   private interrupt = new AbortController();
+
+  private readonly gone = new AbortController();
 
   private dying = false;
 
@@ -582,6 +597,21 @@ export class WasmProcess {
     if (this.killed) void Promise.allSettled([this.options.kill?.(pid, SIG.KILL)]);
     else this.adoptExec(pid);
     return pid;
+  }
+
+  private async killSelf(sig: number, target?: number, probe?: boolean): Promise<SyncFsResult> {
+    if (!this.options.exitSignal) throw new KernelError('ENOSYS');
+    if (!isSignal(sig) || defaultAction(sig) !== 'terminate') throw new KernelError('EINVAL');
+    const { caught, ignored } = this.signalMasks();
+    const to = target === 0 ? -this.pgid() : (target ?? this.pid);
+    if (sig !== SIG.KILL && (caught | ignored) & sigbit(sig)) {
+      if (!(await this.options.kill?.(to, sig))) throw new KernelError('ESRCH');
+      return { ok: true, kind: 'void' };
+    }
+    if (probe) return { ok: true, kind: 'json', json: 'terminate' };
+    if (to !== this.pid) await this.options.kill?.(to, sig);
+    this.options.exitSignal(sig);
+    return DYING;
   }
 
   private run(req: RunRequest): Promise<Uint8Array> {
@@ -753,6 +783,7 @@ export class WasmProcess {
     cancelled: AbortSignal
   ): Promise<number> {
     const file = this.fds.get(fd).file;
+    if (file.sealed) return file.sealed.send(body, await this.sealedCaller(), this.gone.signal);
     if (!file.write) throw new KernelError('EBADF');
     if (!pollFile(file).writable) {
       if (nonblock) throw new KernelError('EAGAIN');
@@ -769,6 +800,8 @@ export class WasmProcess {
 
   private async openVfs(req: Extract<FdSyscall, { op: 'fd-open-vfs' }>): Promise<number> {
     if (inProc(req.path)) return this.openProc(req, req.path);
+    const device = req.orphan ? undefined : deviceAt(req.path);
+    if (device) return this.openDevice(req, device);
     const alias = req.orphan
       ? undefined
       : await procAlias(this.options.fs, req.path, !req.exclusive);
@@ -791,6 +824,7 @@ export class WasmProcess {
         this.fds.installAt(fd, await this.procFile(req, path));
         return fd;
       }
+      if (this.writesAt(req) && this.options.readonlyAt?.(path)) throw new KernelError('EROFS');
       const open = { ...req, path };
       if (req.exclusive) {
         await nodes.createExclusive(path, this.newOwner());
@@ -815,6 +849,18 @@ export class WasmProcess {
     return fd;
   }
 
+  private openDevice(
+    req: Extract<FdSyscall, { op: 'fd-open-vfs' }>,
+    device: NonNullable<ReturnType<typeof deviceAt>>
+  ): number {
+    if (req.exclusive) throw Object.assign(new Error(req.path), { code: 'EEXIST' });
+    const access = req.flags & WRITE_ACCESS;
+    return this.fds.install(
+      deviceFile(device, access === 0 ? 'read' : access === 1 ? 'write' : undefined),
+      3
+    );
+  }
+
   private async identified(
     stat: () => Promise<{ path: string; size: number; orphan?: true }>,
     known?: () => number | undefined
@@ -831,6 +877,15 @@ export class WasmProcess {
       return st?.ino === undefined ? now : { ...now, ino: st.ino };
     };
     return fs.exclusive ? fs.exclusive(first.path, look) : look();
+  }
+
+  private writesAt(req: Extract<FdSyscall, { op: 'fd-open-vfs' }>): boolean {
+    return (
+      (req.flags & WRITE_ACCESS) !== 0 ||
+      req.truncate === true ||
+      req.create === true ||
+      req.exclusive === true
+    );
   }
 
   private async mayOpen(req: Extract<FdSyscall, { op: 'fd-open-vfs' }>): Promise<void> {
@@ -851,6 +906,26 @@ export class WasmProcess {
     if (!tty) throw new KernelError('ENXIO');
     if (name !== undefined) ttyOpenable(this.guarded(), tty);
     return this.fds.install(tty.file(), 3);
+  }
+
+  private openSealed(): number {
+    const broker = this.options.sealed;
+    if (!broker) throw new KernelError('ENOENT');
+    return this.fds.install(broker.open(), 3);
+  }
+
+  private async sealedCaller(): Promise<SealedCaller> {
+    const shown = await this.options.identity?.();
+    const broker = this.options.sealed as SealedBroker;
+    const tag = broker.tagOf(this.pid);
+    return {
+      pid: shown?.pid ?? this.pid,
+      ppid: shown?.ppid ?? 0,
+      uid: this.cred.euid,
+      gid: this.cred.egid,
+      ...(tag !== undefined ? { tag } : {}),
+      users: broker.users,
+    };
   }
 
   private guarded(): Guard | undefined {
@@ -987,6 +1062,8 @@ export class WasmProcess {
         return { ok: true, kind: 'json', json: this.openTty(req.name) };
       case 'fd-tty-names':
         return { ok: true, kind: 'json', json: this.options.jobs?.terminalNames() ?? [] };
+      case 'fd-open-sealed':
+        return { ok: true, kind: 'json', json: this.openSealed() };
       case 'fd-tty-owner':
         return { ok: true, kind: 'json', json: this.terminalByName(req.name).owner ?? null };
       case 'fd-select': {
@@ -1052,6 +1129,14 @@ export class WasmProcess {
   }
 
   keptPath?: (path: string) => string | undefined;
+
+  async holds(path: string): Promise<boolean> {
+    for (const fd of this.fds.numbers()) {
+      const { file } = this.fds.get(fd);
+      if ((await file.stat?.().catch(() => undefined))?.path === path) return true;
+    }
+    return false;
+  }
 
   keptHandle?: (handle: number) => string | undefined;
 
@@ -1236,6 +1321,8 @@ export class WasmProcess {
         if (!this.options.exitNow) throw new KernelError('ENOSYS');
         this.options.exitNow(req.status & 0xff);
         return DYING;
+      case 'proc-kill-self':
+        return this.killSelf(req.sig, req.target, req.probe);
       case 'proc-identity':
         return { ok: true, kind: 'json', json: (await this.options.identity?.()) ?? null };
       case 'proc-exec': {
@@ -1473,6 +1560,7 @@ export class WasmProcess {
   async exit(): Promise<void> {
     if (this.exited) return;
     this.exited = true;
+    this.gone.abort();
     this.die();
     this.clearAlarm();
     this.interrupt.abort();

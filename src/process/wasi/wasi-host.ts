@@ -19,7 +19,7 @@ import {
   WHENCE,
   wasiErrnoOf,
 } from './wasi-abi.ts';
-import { deviceOf, WasiFds, type WasiForkFd, type WasiKernel } from './wasi-fds.ts';
+import { deviceOf, SEALED_PATH, WasiFds, type WasiForkFd, type WasiKernel } from './wasi-fds.ts';
 import {
   type DirListing,
   type LocalFile,
@@ -136,9 +136,12 @@ function filestatOf(path: string, s: SyncFsBridgeStat): Filestat {
   };
 }
 
+const SEALED_MODE = 0o20666;
+
 function kernelFiletype(kind: string): { filetype: number; seeks: boolean } {
   switch (kind) {
     case 'tty':
+    case 'sealed':
       return { filetype: FILETYPE.CHARACTER_DEVICE, seeks: false };
     case 'device':
       return { filetype: FILETYPE.CHARACTER_DEVICE, seeks: true };
@@ -250,7 +253,9 @@ export class WasiHost {
     const fdOwned = (fd: number): { uid?: number; gid?: number } | undefined => {
       const e = fds.get(fd);
       if (e.type === 'device') return ROOT_IDS;
-      if (e.type === 'kernel' && fds.kind(fd, e) !== 'file') return undefined;
+      const kind = e.type === 'kernel' ? fds.kind(fd, e) : 'file';
+      if (kind === 'sealed') return ROOT_IDS;
+      if (kind !== 'file') return undefined;
       try {
         return this.o.fs.stat(pathOf(fd));
       } catch (err) {
@@ -259,7 +264,7 @@ export class WasiHost {
       }
     };
     const pathOwned = (path: string, follow: boolean) => {
-      if (deviceOf(path)) return ROOT_IDS;
+      if (this.synthetic(path)) return ROOT_IDS;
       return follow ? this.o.fs.stat(path) : this.o.fs.lstat(path);
     };
     return wrap({
@@ -296,7 +301,7 @@ export class WasiHost {
       path_access: (dirfd: number, p: number, l: number, amode: number, flags: number) => {
         const path = at(dirfd, p, l);
         const nofollow = (flags & AT_SYMLINK_NOFOLLOW) !== 0;
-        if (deviceOf(path)) {
+        if (this.synthetic(path)) {
           if (this.o.fs.owners && amode & 1) throw new WasiError('EACCES');
           return;
         }
@@ -314,12 +319,19 @@ export class WasiHost {
       },
       fd_mode: (fd: number, out: number) => {
         const e = fds.get(fd);
-        const pipe = e.type === 'kernel' && fds.kind(fd, e) === 'stream';
-        const mode = pipe ? S_IFIFO | 0o600 : modeOf(this.o.fs.stat(pathOf(fd)));
+        const kind = e.type === 'kernel' ? fds.kind(fd, e) : undefined;
+        const mode =
+          kind === 'stream'
+            ? S_IFIFO | 0o600
+            : kind === 'sealed'
+              ? SEALED_MODE
+              : modeOf(this.o.fs.stat(pathOf(fd)));
         mem.view().setUint32(out, mode, true);
       },
       path_mode: (dirfd: number, p: number, l: number, flags: number, out: number) => {
         const path = at(dirfd, p, l);
+        if (path === SEALED_PATH && this.o.kernel.sys.openSealed)
+          return void mem.view().setUint32(out, SEALED_MODE, true);
         const st = flags & AT_SYMLINK_NOFOLLOW ? this.o.fs.lstat(path) : this.o.fs.stat(path);
         mem.view().setUint32(out, modeOf(st), true);
       },
@@ -550,7 +562,7 @@ export class WasiHost {
       ) => {
         const path = at(dirfd, p, l);
         if (deviceOf(path)) this.interrupted?.();
-        const fresh = (oflags & OFLAGS.CREAT) !== 0 && !o.fs.exists(path);
+        const fresh = (oflags & OFLAGS.CREAT) !== 0 && !this.synthetic(path) && !o.fs.exists(path);
         mem.view().setUint32(out, fds.open(path, oflags, rights, fdflags), true);
         if (fresh) this.created(path, 0o666);
       },
@@ -594,8 +606,11 @@ export class WasiHost {
         o.fs.rename(from, to);
         fds.renamed(from, to, replaced);
       },
-      path_symlink: (tp: number, tl: number, dirfd: number, p: number, l: number) =>
-        void o.fs.symlink(mem.string(tp, tl), at(dirfd, p, l)),
+      path_symlink: (tp: number, tl: number, dirfd: number, p: number, l: number) => {
+        const path = at(dirfd, p, l);
+        if (tl === 0) throw new WasiError('ENOENT');
+        o.fs.symlink(mem.string(tp, tl), path);
+      },
       path_readlink: (
         dirfd: number,
         p: number,
@@ -932,8 +947,12 @@ export class WasiHost {
     return gone ? { ...out, nlink: 0n } : out;
   }
 
+  private synthetic(path: string): boolean {
+    return deviceOf(path) !== undefined || (path === SEALED_PATH && !!this.o.kernel.sys.openSealed);
+  }
+
   private pathFilestat(path: string, lookup: number): Filestat {
-    if (deviceOf(path)) {
+    if (this.synthetic(path)) {
       return this.local({
         filetype: FILETYPE.CHARACTER_DEVICE,
         size: 0n,

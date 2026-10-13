@@ -83,6 +83,8 @@ export interface KernelFs {
   pread?(path: string, offset: number, length: number, version?: string): Promise<Uint8Array>;
   pwrite?(path: string, offset: number, bytes: Uint8Array, transfer?: boolean): Promise<void>;
   truncate?(path: string, size: number): Promise<void>;
+  protect?(prefixes: readonly string[]): void;
+  unguarded?(): KernelFs;
 }
 
 export type RangedOps = Required<Pick<KernelFs, 'pread' | 'pwrite' | 'truncate'>>;

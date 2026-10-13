@@ -1,5 +1,6 @@
 import { KernelPipe, type PipeError } from './pipe.ts';
 import type { PtyPair } from './pty.ts';
+import type { SealedChannel } from './sealed.ts';
 import type { KernelTty } from './tty.ts';
 
 export type KernelErrno =
@@ -39,7 +40,8 @@ export type KernelErrno =
   | 'ETIMEDOUT'
   | 'ECONNABORTED'
   | 'EHOSTUNREACH'
-  | 'ECONNRESET';
+  | 'ECONNRESET'
+  | 'EMSGSIZE';
 
 export class KernelError extends Error {
   readonly code: KernelErrno;
@@ -87,6 +89,8 @@ export interface KernelFile {
   tty?: KernelTty;
 
   pty?: PtyPair;
+
+  sealed?: SealedChannel;
 
   stat?(): Promise<{ size: number; path: string; orphan?: true }>;
   held?: true;
@@ -222,6 +226,18 @@ function written(device: KernelDevice, bytes: Uint8Array): number {
   return bytes.length;
 }
 
+const DEVICE_PATHS: ReadonlyMap<string, KernelDevice> = new Map([
+  ['/dev/null', 'null'],
+  ['/dev/zero', 'zero'],
+  ['/dev/full', 'full'],
+  ['/dev/urandom', 'urandom'],
+  ['/dev/random', 'urandom'],
+]);
+
+export function deviceAt(path: string): KernelDevice | undefined {
+  return DEVICE_PATHS.get(path);
+}
+
 export function deviceFile(device: KernelDevice, access?: DeviceAccess): OpenFile {
   const read = async (max: number): Promise<Uint8Array> => {
     if (device === 'null') return new Uint8Array(0);
@@ -246,12 +262,13 @@ export function heldFile(meta?: HeldMeta): OpenFile {
   return new OpenFile({ held: true, ...(meta ? { heldMeta: meta } : {}), close: () => {} });
 }
 
-export type KernelFdKind = 'tty' | 'stream' | 'file' | 'socket' | 'held' | 'device';
+export type KernelFdKind = 'tty' | 'stream' | 'file' | 'socket' | 'held' | 'device' | 'sealed';
 
 export function kernelFdKind(file: KernelFile): Exclude<KernelFdKind, 'socket'> {
   if (file.held) return 'held';
   if (file.heldMeta && 'device' in file.heldMeta) return 'device';
   if (file.tty) return 'tty';
+  if (file.sealed) return 'sealed';
   return file.seek ? 'file' : 'stream';
 }
 

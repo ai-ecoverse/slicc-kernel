@@ -226,6 +226,29 @@ test('a command pnpm installs globally runs in the same shell, and is gone once 
   assert.equal(await term.exited, 129);
 });
 
+test('a cone runs pnpm add and pnpm add -g under users: enforce, with no denial for its lock files', async (t) => {
+  const denials = [];
+  const kernel = await createNodeKernel({ users: 'enforce', onDenial: (d) => denials.push(d) });
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils', 'wasm-tls-engine', 'wasi-pnpm']) {
+    await install(kernel, name);
+  }
+  await kernel.users.add({ name: 'cone', groups: ['sudo'], homeMode: 0o710, umask: 0o077 });
+  await kernel.writeFile('/srv/tool.tgz', await localPackage());
+  const script = [
+    'mkdir app && cd app && echo \'{"name":"a","version":"1.0.0"}\' > package.json',
+    'pnpm add file:/srv/tool.tgz > /dev/null 2>&1; echo "add $?"',
+    'stat -c "%U %a" /tmp/pnpm-store-operation-locks-1000',
+    'pnpm add -g file:/srv/tool.tgz > /dev/null 2>&1; echo "global $?"',
+  ].join('\n');
+  const r = await kernel.run(['bash', '-c', script], { cwd: '/home/cone', user: 'cone' });
+  assert.equal(r.stdout, 'add 0\ncone 700\nglobal 0\n', r.stderr);
+  assert.deepEqual(
+    denials.filter((d) => d.path.includes('.slicc-unlinked') || d.path.startsWith('/tmp/pnpm')),
+    []
+  );
+});
+
 async function localPackage() {
   const dir = await mkdtemp(join(tmpdir(), 'slicc-pkg-'));
   await mkdir(join(dir, 'package', 'bin'), { recursive: true });

@@ -8,6 +8,17 @@ import {
 import { createSyncSabTransport } from '../../realm/sync-sab-bridge.ts';
 import type { SyncSabRequestBody } from '../../realm/sync-sab-wire.ts';
 import {
+  devExists,
+  devOpen,
+  devReaddir,
+  devReadlink,
+  devStat,
+  devSync,
+  inDev,
+  readWholeSync,
+  streamSyncFile,
+} from './js-dev.ts';
+import {
   absent,
   brokenPipe,
   CHUNK,
@@ -43,6 +54,7 @@ export interface JsSyncFile {
 export interface JsSyncContext {
   run(options: JsRunOptions): JsRunResult;
   exit(status?: number): never;
+  kill(pid: number, signal?: number | `SIG${string}`): void;
   read(fd: number, max?: number): Uint8Array;
   write(fd: number, data: Uint8Array | string): void;
   close(fd: number): void;
@@ -74,8 +86,10 @@ export interface SyncShared {
 
 const encoder = new TextEncoder();
 
+export const noLane: SyncCall = () => ({ ok: false, errno: 'ENOSYS', message: 'no sync lane' });
+
 export function laneOf(lane: JsLane | undefined): SyncCall {
-  if (!lane) return () => ({ ok: false, errno: 'ENOSYS', message: 'no sync lane' });
+  if (!lane) return noLane;
   const transport = createSyncSabTransport(lane.sab, lane.port);
   return (req) => transport.call(req, Number.POSITIVE_INFINITY, req.op);
 }
@@ -127,7 +141,7 @@ export class JsSyncKernel {
 export function syncOps(
   kernel: JsSyncKernel,
   shared: SyncShared
-): Omit<JsSyncContext, 'run' | 'exit'> {
+): Omit<JsSyncContext, 'run' | 'exit' | 'kill'> {
   const { infos, handles, resolve } = shared;
 
   const info = (fd: number): FdInfo => {
@@ -164,14 +178,34 @@ export function syncOps(
 
   const statOf = (op: 'stat' | 'lstat', path: string): SyncFsBridgeStat => {
     const abs = resolve(path);
+    if (inDev(abs)) return devSync(kernel, devStat(abs, op === 'stat'));
     kernel.call({ op: 'fd-path-flush', path: abs });
     const s = parseSyncFsStat(kernel.json({ op, path: abs }));
     if (!s) throw new JsCallError('EIO', op);
     return s;
   };
 
+  const openDev = (abs: string, options: JsOpenOptions): JsSyncFile => {
+    const { fd, file, ...access } = devSync(kernel, devOpen(abs, options));
+    const forget = () => {
+      infos.delete(fd);
+      handles.delete(fd);
+    };
+    if (file) infos.set(fd, { kind: 'file' });
+    const close = (n: number) => {
+      forget();
+      kernel.call({ op: 'fd-close', fd: n });
+    };
+    const handle = file
+      ? syncFile(kernel, fd, abs, options.append === true, forget)
+      : streamSyncFile(fd, abs, { read: (n, max) => read(n, max), write, close }, access);
+    handles.set(fd, handle.invalidate);
+    return handle.file;
+  };
+
   const open = (path: string, options: JsOpenOptions = {}): JsSyncFile => {
     const abs = resolve(path);
+    if (inDev(abs)) return openDev(abs, options);
     let existing: SyncFsBridgeStat | undefined;
     try {
       existing = statOf(isExclusive(options) ? 'lstat' : 'stat', abs);
@@ -289,8 +323,16 @@ function syncPathOps(
   return {
     stat: (path) => statOf('stat', path),
     lstat: (path) => statOf('lstat', path),
-    exists: (path) => kernel.json({ op: 'exists', path: resolve(path) }) === true,
-    readdir: (path) => kernel.json({ op: 'readdir', path: resolve(path) }) as string[],
+    exists(path) {
+      const abs = resolve(path);
+      if (inDev(abs)) return devSync(kernel, devExists(abs));
+      return kernel.json({ op: 'exists', path: abs }) === true;
+    },
+    readdir(path) {
+      const abs = resolve(path);
+      if (inDev(abs)) return devSync(kernel, devReaddir(abs));
+      return kernel.json({ op: 'readdir', path: abs }) as string[];
+    },
     mkdir: (path) => void kernel.call({ op: 'mkdir', path: resolve(path) }),
     rm: (path) => void kernel.call({ op: 'rm', path: resolve(path) }),
     unlink: (path) => void kernel.call({ op: 'unlink', path: resolve(path) }),
@@ -299,9 +341,14 @@ function syncPathOps(
     link: (from, to) => void kernel.call({ op: 'link', path: resolve(from), arg2: resolve(to) }),
     symlink: (target, path) =>
       void kernel.call({ op: 'symlink', path: resolve(path), arg2: target }),
-    readlink: (path) => String(kernel.json({ op: 'readlink', path: resolve(path) })),
+    readlink(path) {
+      const abs = resolve(path);
+      if (inDev(abs)) return devSync(kernel, devReadlink(abs));
+      return String(kernel.json({ op: 'readlink', path: abs }));
+    },
     readFile(path) {
       const abs = resolve(path);
+      if (inDev(abs)) return readWholeSync(open(abs));
       kernel.call({ op: 'fd-path-flush', path: abs });
       return kernel.bytes({ op: 'read', path: abs });
     },

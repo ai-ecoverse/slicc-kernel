@@ -2,9 +2,11 @@ import { portCdpHook } from './cdp/port.ts';
 import type { CdpHook } from './cdp/types.ts';
 import { type LockManagerLike, locksOf } from './client/protocol.ts';
 import { type ServedClient, serveClient } from './client/serve-client.ts';
+import type { Attestation } from './fs/attest.ts';
 import type { Denial, DenialHook } from './fs/dac.ts';
 import { META_DB, type MetaStore } from './fs/meta.ts';
 import { OpfsFs } from './fs/opfs.ts';
+import { protectInit } from './fs/protect.ts';
 import { fsError, type UsersMode } from './fs/types.ts';
 import { dialSocket, serveSocket } from './kernel/dial.ts';
 import type { WasmWorkerLike } from './kernel/host.ts';
@@ -13,6 +15,7 @@ import { RemoteTransport, type TransportReply } from './kernel/net/remote-transp
 import type { RouteTable } from './kernel/net/routes.ts';
 import type { RealmTransportTraits } from './kernel/net/transport.ts';
 import { RemoteUplink, type UplinkReply, type UplinkTraits } from './kernel/net/uplink.ts';
+import type { SealedHook } from './kernel/sealed.ts';
 import { SIG } from './kernel/signals.ts';
 import {
   Launcher,
@@ -26,6 +29,7 @@ import type { HostfsGrant, HostfsGrantHook, HostfsPortGrant } from './mount/host
 import type { MediaStore } from './mount/media.ts';
 import type { MountSpec } from './mount/mount-fs.ts';
 import type { ProcessMountRequest } from './mount/syscall.ts';
+import { type SealedReply, sealedAsker } from './sealed-relay.ts';
 import type { ApproveHook, SudoAnswer } from './sudo.ts';
 import type { AddUser, RemoveUser } from './users.ts';
 
@@ -48,7 +52,9 @@ export interface InitRequest {
   hostfs?: boolean;
   hostname?: string;
   users?: UsersMode;
+  protect?: { paths: string[]; writers?: string[] };
   denials?: boolean;
+  sealed?: boolean;
   approve?: boolean;
   processMounts?: boolean | 'ask';
   cdp?: boolean;
@@ -109,7 +115,17 @@ export interface DialRequest {
   host?: string;
 }
 
+export type AttestRequest =
+  | { id: number; op: 'attest'; path: string }
+  | { id: number; op: 'watch-files'; paths: string[] }
+  | { id: number; op: 'unwatch-files'; watch: number };
+
+export interface FileChanged {
+  fileChanged: { watch: number; path: string };
+}
+
 export type KernelRequest =
+  | AttestRequest
   | InitRequest
   | RunRequest
   | OpenTerminalRequest
@@ -269,8 +285,34 @@ const USERS_OPS: ReadonlySet<string> = new Set([
   'groups-remove-member',
 ]);
 
+const ATTEST_OPS: ReadonlySet<string> = new Set(['attest', 'watch-files', 'unwatch-files']);
+
+function isAttestRequest(req: KernelRequest): req is AttestRequest {
+  return ATTEST_OPS.has(req.op);
+}
+
 function isUsersRequest(req: KernelRequest): req is UsersRequest {
   return USERS_OPS.has(req.op);
+}
+
+function transferOf(req: KernelRequest, result: unknown): Transferable[] | undefined {
+  if (result instanceof MessagePort) return [result];
+  if (req.op === 'attest') return [(result as Attestation).bytes.buffer as ArrayBuffer];
+  return undefined;
+}
+
+function attestOps(port: KernelPort) {
+  const watches = new Map<number, () => void>();
+  return async (l: Launcher, req: AttestRequest): Promise<unknown> => {
+    if (req.op === 'attest') return l.attest(req.path);
+    if (req.op === 'unwatch-files') {
+      watches.get(req.watch)?.();
+      return watches.delete(req.watch);
+    }
+    const notify = (path: string) => port.postMessage({ fileChanged: { watch: req.id, path } });
+    watches.set(req.id, await l.watchFiles(req.paths, notify));
+    return req.id;
+  };
 }
 
 function failure(err: unknown): { error: string; code?: string } {
@@ -292,12 +334,43 @@ function usersOp(l: Launcher, req: UsersRequest): Promise<unknown> {
 
 function hostOptions(
   req: InitRequest,
-  port: KernelPort
-): { hostname?: string; users?: UsersMode; onDenial?: DenialHook } {
+  port: KernelPort,
+  sealed: SealedHook
+): {
+  hostname?: string;
+  users?: UsersMode;
+  onDenial?: DenialHook;
+  sealed?: SealedHook;
+  protect?: { paths: string[]; writers?: string[] };
+} {
   return {
     ...(req.hostname !== undefined ? { hostname: req.hostname } : {}),
     ...(req.users !== undefined ? { users: req.users } : {}),
     ...(req.denials ? { onDenial: (denial: Denial) => port.postMessage({ denial }) } : {}),
+    ...(req.protect ? { protect: protectInit(req.protect) } : {}),
+    ...(req.sealed ? { sealed } : {}),
+  };
+}
+
+function policyAsker(port: KernelPort) {
+  const policies = new Map<number, (allowed: boolean) => void>();
+  let nextPolicy = 0;
+  const askPolicy = (req: ProcessMountRequest) =>
+    new Promise<boolean>((resolve) => {
+      const id = ++nextPolicy;
+      policies.set(id, resolve);
+      port.postMessage({ mountPolicy: { id, req } });
+    });
+  return {
+    mountPolicy: (policy: InitRequest['processMounts']) =>
+      policy === undefined ? {} : { processMounts: policy === 'ask' ? askPolicy : policy },
+    allowed(data: unknown): boolean {
+      const answer = (data as { mountAllowed?: { id: number; allowed: boolean } }).mountAllowed;
+      if (!answer) return false;
+      policies.get(answer.id)?.(answer.allowed);
+      policies.delete(answer.id);
+      return true;
+    },
   };
 }
 
@@ -309,6 +382,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
   const reply = (id: number, body: object, transfer?: Transferable[]) =>
     port.postMessage({ id, ...body }, transfer);
   const clients = new Set<ServedClient>();
+  const sealed = sealedAsker(port);
   const approvals = sudoApprovals(port);
   const locks = deps.locks === null ? undefined : (deps.locks ?? locksOf());
   let holding: Promise<string> | undefined;
@@ -377,7 +451,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
         ...(deps.createDriverWorker ? { createDriverWorker: deps.createDriverWorker } : {}),
         ...(req.modules ? { modules: req.modules } : {}),
         ...(req.env ? { env: req.env } : {}),
-        ...hostOptions(req, port),
+        ...hostOptions(req, port, sealed.hook),
         ...(req.approve ? { approve: approvals.ask } : {}),
         ...net,
         ...(media ? { media } : {}),
@@ -402,8 +476,11 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
     return l.mounts.list();
   }
 
+  const attestOp = attestOps(port);
+
   async function handle(req: KernelRequest): Promise<unknown> {
     if (req.op === 'init') return init(req);
+    if (isAttestRequest(req)) return attestOp(await ready(), req);
     if (req.op === 'open-terminal') return terminal(req);
     if (req.op === 'connect') return connect(req.user, req.tag);
     if (isUsersRequest(req)) return usersOp(await ready(), req);
@@ -444,31 +521,18 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
     else waiting.reject(Object.assign(new Error(error ?? 'no grant'), { code: 'EACCES' }));
   }
 
-  const policies = new Map<number, (allowed: boolean) => void>();
-  let nextPolicy = 0;
-  const askPolicy = (req: ProcessMountRequest) =>
-    new Promise<boolean>((resolve) => {
-      const id = ++nextPolicy;
-      policies.set(id, resolve);
-      port.postMessage({ mountPolicy: { id, req } });
-    });
-
-  const mountPolicy = (policy: InitRequest['processMounts']) =>
-    policy === undefined ? {} : { processMounts: policy === 'ask' ? askPolicy : policy };
+  const { mountPolicy, allowed } = policyAsker(port);
 
   port.addEventListener('message', (event) => {
+    const sealedReply = (event.data as { sealedReply?: SealedReply }).sealedReply;
+    if (sealedReply) return sealed.answer(sealedReply);
     const grant = (event.data as { hostfsGrant?: GrantReply }).hostfsGrant;
     if (grant) return granted(grant);
-    const answer = (event.data as { mountAllowed?: { id: number; allowed: boolean } }).mountAllowed;
-    if (answer) {
-      policies.get(answer.id)?.(answer.allowed);
-      policies.delete(answer.id);
-      return;
-    }
+    if (allowed(event.data)) return;
     if (answered(event.data, remote, uplink, approvals)) return;
     const req = event.data as KernelRequest;
     handle(req).then(
-      (result) => reply(req.id, { result }, result instanceof MessagePort ? [result] : undefined),
+      (result) => reply(req.id, { result }, transferOf(req, result)),
       (err) => reply(req.id, failure(err))
     );
   });

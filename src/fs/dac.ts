@@ -23,6 +23,7 @@ export interface Denial {
   op: string;
   path: string;
   errno: string;
+  tag?: string;
 }
 
 export type DenialHook = (denial: Denial) => void;
@@ -38,6 +39,7 @@ export class Dac {
   private readonly log: (line: string) => void;
   private readonly seen = new Set<string>();
   private suppressed = false;
+  tagOf: (pid: number) => string | undefined = () => undefined;
 
   constructor(
     mode: 'report' | 'enforce',
@@ -53,7 +55,9 @@ export class Dac {
     return this.mode === 'enforce';
   }
 
-  denied(denial: Denial): void {
+  denied(given: Denial): void {
+    const tag = given.tag ?? (given.pid ? this.tagOf(given.pid) : undefined);
+    const denial = tag === undefined ? given : { ...given, tag };
     try {
       this.hook?.({ ...denial });
     } catch {}
@@ -71,7 +75,7 @@ export class Dac {
     }
     this.seen.add(key);
     this.log(
-      `slicc-kernel users report: ${d.errno} ${d.op} ${d.path} (uid ${d.uid}, pid ${d.pid})`
+      `slicc-kernel users report: ${d.errno} ${d.op} ${d.path} (uid ${d.uid}, pid ${d.pid}${d.tag === undefined ? '' : `, tag ${d.tag}`})`
     );
   }
 }
@@ -96,10 +100,12 @@ export interface Guard {
   cred: Readonly<Cred>;
   pid: number;
   dac: Dac;
+  tag?: string | undefined;
 }
 
 export function deny(g: Guard, op: string, path: string, errno = 'EACCES'): void {
-  g.dac.denied({ pid: g.pid, uid: g.cred.euid, op, path, errno });
+  const tag = g.tag === undefined ? {} : { tag: g.tag };
+  g.dac.denied({ pid: g.pid, uid: g.cred.euid, op, path, errno, ...tag });
 }
 
 export const TTY_MODE = 0o620;

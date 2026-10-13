@@ -1,3 +1,5 @@
+import { fresh } from '../bytes.ts';
+
 export interface DialledSocket {
   readable: ReadableStream<Uint8Array>;
   writable: WritableStream<Uint8Array>;
@@ -75,7 +77,7 @@ export function dialStream(port: StreamPort, onClose?: () => void): DialHandle {
   const writable = new WritableStream<Uint8Array>({
     write(chunk) {
       if (closed) throw errorWithCode('EPIPE: the connection is closed');
-      const copy = chunk.slice();
+      const copy = fresh(chunk);
       const acked = new Promise<void>((resolve, reject) => acks.push({ resolve, reject }));
       port.postMessage(copy, [copy.buffer]);
       return acked;
