@@ -29,6 +29,7 @@ const SYNTHETIC_DIRS = ['usr', 'bin'];
 interface Made {
   umask: number;
   refs: number;
+  ino: number | undefined;
 }
 
 export interface WasiKernel {
@@ -84,12 +85,12 @@ export class WasiFds {
 
   private readonly made = new WeakMap<object, Made>();
 
-  onMade?: (path: string, umask: number) => void;
+  onMade?: (path: string, umask: number, ino: number | undefined) => void;
 
   umask?: () => number;
 
-  private mark(holder: object): void {
-    if (this.onMade) this.made.set(holder, { umask: this.umask?.() ?? 0o022, refs: 1 });
+  private mark(holder: object, ino: number | undefined): void {
+    if (this.onMade) this.made.set(holder, { umask: this.umask?.() ?? 0o022, refs: 1, ino });
   }
 
   private shareMade(from: object, to: object): void {
@@ -99,20 +100,34 @@ export class WasiFds {
     this.made.set(to, made);
   }
 
-  private settle(holder: object, path: string): void {
+  private settle(holder: object, path: string, gone = false): void {
     const made = this.made.get(holder);
     if (!made) return;
     this.made.delete(holder);
-    if (--made.refs === 0) this.onMade?.(path, made.umask);
+    if (--made.refs === 0 && !gone) this.onMade?.(path, made.umask, made.ino);
+  }
+
+  private gone(buffer: FileBuffer): boolean {
+    if (!this.made.has(buffer)) return false;
+    return (
+      buffer.isOrphan() || (buffer.handle !== undefined && this.fs.kept?.(buffer.handle) === true)
+    );
+  }
+
+  private orphaned(fd: number, e: { path?: string }): boolean {
+    if (this.made.get(e)?.refs !== 1) return false;
+    const vfs = this.kernel.call({ op: 'fd-vfs-stat', fd }) as { orphan?: true; path?: string };
+    return vfs.orphan === true || vfs.path !== e.path;
   }
 
   settleAll(): void {
     for (const [fd, e] of this.table) {
       if (e.type === 'kernel' && e.path !== undefined && this.made.has(e)) {
         this.kernel.call({ op: 'fd-flush', fd });
-        this.settle(e, e.path);
+        this.settle(e, e.path, this.orphaned(fd, e));
       }
-      if (e.type === 'file') this.settle(e.file.buffer, e.file.buffer.path);
+      if (e.type === 'file')
+        this.settle(e.file.buffer, e.file.buffer.path, this.gone(e.file.buffer));
     }
   }
 
@@ -468,10 +483,11 @@ export class WasiFds {
     const e = this.get(fd);
     this.table.delete(fd);
     this.cloexec.delete(fd);
+    const gone = e.type === 'kernel' && this.made.has(e) && this.orphaned(fd, e);
     try {
       this.kernel.sys.close(fd);
     } finally {
-      if (e.type === 'kernel' && e.path !== undefined) this.settle(e, e.path);
+      if (e.type === 'kernel' && e.path !== undefined) this.settle(e, e.path, gone);
       this.release(e);
       this.bump();
     }
@@ -552,7 +568,7 @@ export class WasiFds {
   }
 
   private letGo(buffer: FileBuffer): void {
-    this.settle(buffer, buffer.path);
+    this.settle(buffer, buffer.path, this.gone(buffer));
     this.fs.hold?.(buffer.path, false, true, buffer.handle);
   }
 
@@ -812,7 +828,7 @@ export class WasiFds {
     const io = handle !== undefined && this.fs.pinned ? this.fs.pinned(handle) : this.fs;
     const buffer = new FileBuffer(io, path, empty, st.maxFile, ranged, st.version);
     buffer.handle = handle;
-    if (made) this.mark(buffer);
+    if (made) this.mark(buffer, st.ino);
     this.buffers.set(path, buffer);
     const id = this.identity(st);
     if (id !== undefined) this.know(buffer, id);
@@ -848,7 +864,7 @@ export class WasiFds {
       ino,
     };
     this.table.set(fd, entry);
-    if (made) this.mark(entry);
+    if (made) this.mark(entry, ino ?? this.inoOf(path));
     if (append) this.publishFlags(fd, { nonblock: false, append });
     this.bump();
     return fd;

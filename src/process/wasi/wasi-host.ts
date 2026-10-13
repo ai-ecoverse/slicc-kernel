@@ -206,7 +206,7 @@ export class WasiHost {
     this.startCwd = o.cwd;
     this.fds = new WasiFds(this.o.kernel, o.fs);
     if (o.fs.owners) {
-      this.fds.onMade = (path, umask) => this.madeModule(path, umask);
+      this.fds.onMade = (path, umask, ino) => this.madeModule(path, umask, ino);
       this.fds.umask = () => this.currentUmask();
     }
     if (o.shared) this.fds.share(o.shared, true);
@@ -223,11 +223,13 @@ export class WasiHost {
     return this.o.kernel.call({ op: 'proc-umask' }) as number;
   }
 
-  private madeModule(path: string, umask: number): void {
+  private madeModule(path: string, umask: number, ino: number | undefined): void {
     try {
+      const st = this.o.fs.stat(path);
+      if (ino !== undefined && st.ino !== ino) return;
       const head = this.o.fs.pread ? this.o.fs.pread(path, 0, 4) : this.o.fs.readFile(path);
       if (!WASM_MAGIC.every((b, i) => head[i] === b)) return;
-      const mode = (this.o.fs.stat(path).mode ?? 0o644) & 0o7777;
+      const mode = (st.mode ?? 0o644) & 0o7777;
       const exec = mode | (0o111 & ~umask);
       if (exec !== mode) this.o.fs.chmod(path, exec);
     } catch {}
