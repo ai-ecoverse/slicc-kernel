@@ -436,6 +436,12 @@ export class Launcher {
   private readonly compiled = new Map<string, Promise<Compiled>>();
   private readonly texts = new Map<string, Promise<string>>();
   private integrity: Integrity | undefined;
+  private scannedFs: KernelFs | undefined;
+
+  private get scanned(): KernelFs {
+    this.scannedFs ??= this.verifiedFs(this.base);
+    return this.scannedFs;
+  }
   private readonly processes = new Map<number, WasmProcessHandle>();
   private readonly zombies = new Set<number>();
   private readonly orphans = new Set<number>();
@@ -628,7 +634,7 @@ export class Launcher {
     let found = this.catalogs.get(scope);
     if (!found) {
       found = this.roots(scope)
-        .then((roots) => scanCommands(this.base, roots))
+        .then((roots) => scanCommands(this.scanned, roots))
         .then((commands) => commands.set(SUDO_COMMAND.name, SUDO_COMMAND));
       this.catalogs.set(scope, found);
     }
@@ -639,7 +645,7 @@ export class Launcher {
     let found = this.ownCatalogs.get(scope);
     if (!found) {
       found = pnpmGlobalRoots(this.base, scope)
-        .then((roots) => scanCommands(this.base, roots))
+        .then((roots) => scanCommands(this.scanned, roots))
         .then((commands) => new Set(commands.keys()));
       this.ownCatalogs.set(scope, found);
     }
@@ -650,7 +656,7 @@ export class Launcher {
     let found = this.binfmts.get(scope);
     if (!found) {
       found = this.roots(scope).then((roots) =>
-        scanBinfmts(this.base, roots, (message) => {
+        scanBinfmts(this.scanned, roots, (message) => {
           if (this.warned.has(message)) return;
           this.warned.add(message);
           console.warn(message);
@@ -838,7 +844,7 @@ export class Launcher {
 
   private async binfmtManifests(scripts: string[]): Promise<string[]> {
     const sources = new Map<string, string>();
-    const binfmts = await scanBinfmts(this.base, await this.roots(), undefined, sources);
+    const binfmts = await scanBinfmts(this.scanned, await this.roots(), undefined, sources);
     const manifests: string[] = [];
     for (const script of scripts) {
       const head = await this.head(script);
@@ -881,8 +887,11 @@ export class Launcher {
   }
 
   verifiedFs(fs: KernelFs): KernelFs {
+    const read = (path: string) => this.verified(path, KERNEL_CALLER, fs);
     return Object.assign(Object.create(fs) as KernelFs, {
-      readFileBuffer: (path: string) => this.verified(path, KERNEL_CALLER, fs),
+      readFileBuffer: read,
+      readFile: (path: string) =>
+        this.integrity ? this.text(path, KERNEL_CALLER) : fs.readFile(path),
     });
   }
 
@@ -1558,7 +1567,7 @@ export class Launcher {
         },
       };
     }
-    const module = (await scanFilesystems(this.base, await this.roots())).get(type);
+    const module = (await scanFilesystems(this.scanned, await this.roots())).get(type);
     if (!module) throw fsError('ENODEV', `unknown file system type ${type}`);
     if (!this.createDriverWorker)
       throw fsError('ENODEV', `this kernel cannot start ${type} drivers`);
