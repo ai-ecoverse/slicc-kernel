@@ -25,6 +25,8 @@ import {
 import { type Cred, type CredChange, changeCred, copyCred, ROOT } from './cred.ts';
 import {
   type DeviceAccess,
+  deviceAt,
+  deviceFile,
   type FdTable,
   type HeldMeta,
   heldFile,
@@ -777,6 +779,8 @@ export class WasmProcess {
 
   private async openVfs(req: Extract<FdSyscall, { op: 'fd-open-vfs' }>): Promise<number> {
     if (inProc(req.path)) return this.openProc(req, req.path);
+    const device = req.orphan ? undefined : deviceAt(req.path);
+    if (device) return this.openDevice(req, device);
     const alias = req.orphan
       ? undefined
       : await procAlias(this.options.fs, req.path, !req.exclusive);
@@ -821,6 +825,18 @@ export class WasmProcess {
       throw err;
     }
     return fd;
+  }
+
+  private openDevice(
+    req: Extract<FdSyscall, { op: 'fd-open-vfs' }>,
+    device: NonNullable<ReturnType<typeof deviceAt>>
+  ): number {
+    if (req.exclusive) throw Object.assign(new Error(req.path), { code: 'EEXIST' });
+    const access = req.flags & WRITE_ACCESS;
+    return this.fds.install(
+      deviceFile(device, access === 0 ? 'read' : access === 1 ? 'write' : undefined),
+      3
+    );
   }
 
   private async identified(
