@@ -66,6 +66,8 @@ export class WasiFds {
 
   private readonly buffers = new Map<string, FileBuffer>();
 
+  private readonly reported = new WeakSet<FileBuffer>();
+
   private readonly byId = new Map<string, FileBuffer>();
 
   private readonly ids = new Map<FileBuffer, string>();
@@ -451,7 +453,17 @@ export class WasiFds {
   private release(e: WasiEntry): void {
     if (e.type !== 'file' || --e.file.refs > 0) return;
     const { buffer } = e.file;
-    buffer.flush();
+    try {
+      buffer.flush();
+    } catch (err) {
+      this.reported.add(buffer);
+      this.drop(buffer);
+      throw err;
+    }
+    this.drop(buffer);
+  }
+
+  private drop(buffer: FileBuffer): void {
     if (--buffer.opens > 0) return;
     this.forget(buffer);
     this.letGo(buffer);
@@ -518,7 +530,13 @@ export class WasiFds {
   }
 
   flushAll(): void {
-    for (const buffer of this.buffers.values()) buffer.flush();
+    for (const buffer of this.buffers.values()) {
+      try {
+        buffer.flush();
+      } catch (err) {
+        if (!this.reported.has(buffer)) throw err;
+      }
+    }
   }
 
   flushEarly(): void {
