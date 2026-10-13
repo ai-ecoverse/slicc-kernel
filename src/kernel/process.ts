@@ -402,6 +402,18 @@ function words(value: unknown): string[] {
   return [...value];
 }
 
+const ESCAPES: Readonly<Record<string, string>> = { '\t': '\\t', '\n': '\\n', '\r': '\\r' };
+
+function clipboardLine(text: string): string {
+  let out = '';
+  for (const c of text) {
+    const code = c.charCodeAt(0);
+    const control = code < 0x20 || code === 0x7f;
+    out += control ? (ESCAPES[c] ?? `\\x${code.toString(16).padStart(2, '0')}`) : c;
+  }
+  return out.length > 200 ? `${out.slice(0, 200)}…` : out;
+}
+
 const DYING: SyncFsResult = { ok: false, errno: 'EINTR', message: 'the process is being killed' };
 
 const HOSTS_ONLY = new Resolver({ routes: new Routes() });
@@ -418,6 +430,8 @@ export interface WasmProcessOptions {
   sealed?: SealedBroker;
 
   clipboard?: ClipboardBroker;
+
+  clipboardName?: string;
 
   readonlyAt?: (path: string) => boolean;
 
@@ -799,7 +813,22 @@ export class WasmProcess {
     if (req.max <= 0) return new Uint8Array(0);
     if (channel.unread) channel.stamp = await this.clipboardStamp();
     const signal = channel.settled ? this.interrupt.signal : this.blockingSignal(cancelled);
-    return channel.read(Math.min(req.max, MAX_READ), signal);
+    try {
+      return await channel.read(Math.min(req.max, MAX_READ), signal);
+    } catch (err) {
+      await this.clipboardComplaint(err);
+      throw err;
+    }
+  }
+
+  private async clipboardComplaint(err: unknown): Promise<void> {
+    const name = this.options.clipboardName;
+    if (name === undefined || !(err instanceof KernelError) || err.detail === undefined) return;
+    if (err.code !== 'EACCES' && err.code !== 'EIO') return;
+    const stderr = this.fds.has(2) ? this.fds.get(2).file : undefined;
+    if (!stderr?.write || stderr.clipboard) return;
+    const line = `${name}: /dev/clipboard: ${clipboardLine(err.detail)}\n`;
+    await stderr.write(new TextEncoder().encode(line), AbortSignal.timeout(1000)).catch(() => 0);
   }
 
   private async write(
@@ -1066,7 +1095,10 @@ export class WasmProcess {
         this.options.locks?.closed(this.pid, req.fd);
         const channel = this.fds.get(req.fd).file.clipboard;
         if (channel) channel.stamp = await this.clipboardStamp();
-        await Promise.resolve(this.fds.close(req.fd));
+        await Promise.resolve(this.fds.close(req.fd)).catch(async (err: unknown) => {
+          if (channel) await this.clipboardComplaint(err);
+          throw err;
+        });
         return { ok: true, kind: 'void' };
       }
       case 'fd-pipe': {
