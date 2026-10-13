@@ -11,6 +11,7 @@ import { type LoopbackFetchOptions, loopbackFetch } from './client/loopback-fetc
 import { clipboardAnswerer } from './clipboard-relay.ts';
 import type { Attestation } from './fs/attest.ts';
 import type { Denial, DenialHook } from './fs/dac.ts';
+import { integrityOptions } from './fs/integrity.ts';
 import { type Protection, protectInit } from './fs/protect.ts';
 import { DEFAULT_USERS, type UsersMode } from './fs/types.ts';
 import { integrityAnswerer } from './integrity-relay.ts';
@@ -487,6 +488,7 @@ function checkOptions(options: KernelOptions): void {
     throw new Error(`not a host name: ${String(options.hostname)}`);
   }
   if (options.protect) protectInit(options.protect);
+  integrityOptions(options.protect?.integrity);
 }
 
 function hookRelays(

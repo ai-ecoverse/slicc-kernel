@@ -17,7 +17,12 @@ import { type Attestation, attest, FileWatches, type RemoteFs } from './fs/attes
 import { followLinks, withCommandDirs } from './fs/commands.ts';
 import { Dac, type DenialHook, need, TTY_MODE } from './fs/dac.ts';
 import { FreshModules } from './fs/fresh-modules.ts';
-import { Integrity, type IntegrityCaller, KERNEL_CALLER } from './fs/integrity.ts';
+import {
+  Integrity,
+  type IntegrityCaller,
+  integrityOptions,
+  KERNEL_CALLER,
+} from './fs/integrity.ts';
 import { physicalPathAsync } from './fs/physical-path.ts';
 import {
   holdsProtected,
@@ -578,6 +583,7 @@ export class Launcher {
       this.prefixes.length > 0 ? new ProtectedFs(this.prefixes).view(this.fs) : this.fs;
     options.fs.protect?.(this.prefixes);
     const integrity = options.protect?.integrity;
+    integrityOptions(integrity);
     if (integrity && this.prefixes.length > 0) {
       this.integrity = new Integrity(this.prefixes, options.fs, integrity, (event) =>
         options.onDenial?.(event)
@@ -907,24 +913,46 @@ export class Launcher {
     return this.integrity ? this.integrity.read(path, caller, plain) : plain();
   }
 
+  private keyed(
+    path: string,
+    caller: IntegrityCaller
+  ): Promise<{ bytes: Uint8Array; key?: string | undefined }> {
+    const plain = async () => this.base.readFileBuffer(path);
+    return this.integrity
+      ? this.integrity.readKeyed(path, caller, plain)
+      : plain().then((bytes) => ({ bytes }));
+  }
+
+  private cached<T>(
+    cache: Map<string, Promise<T>>,
+    key: string,
+    load: () => Promise<{ value: T; key?: string | undefined }>
+  ): Promise<T> {
+    const hit = cache.get(key);
+    if (hit !== undefined) return hit;
+    const loading = load();
+    const found = loading.then(({ value }) => value);
+    cache.set(key, found);
+    loading.then(
+      (done) => {
+        if (done.key === undefined || done.key === key) return;
+        if (cache.get(key) === found) cache.delete(key);
+        cache.set(done.key, found);
+      },
+      () => cache.delete(key)
+    );
+    return found;
+  }
+
   private async module(path: string, caller: IntegrityCaller): Promise<Compiled> {
     const key = await this.cacheKey(path);
-    let module = this.compiled.get(key);
-    if (!module) {
-      module = this.verified(path, caller).then(async (bytes) => {
-        const memory = importedMemory(bytes);
-        const foreign = foreignImports(bytes);
-        const compiled = await WebAssembly.compile(bytes as BufferSource);
-        return {
-          module: compiled,
-          ...(memory ? { memory } : {}),
-          foreign,
-        };
-      });
-      this.compiled.set(key, module);
-      module.catch(() => this.compiled.delete(key));
-    }
-    return module;
+    return this.cached(this.compiled, key, async () => {
+      const { bytes, key: read } = await this.keyed(path, caller);
+      const memory = importedMemory(bytes);
+      const foreign = foreignImports(bytes);
+      const compiled = await WebAssembly.compile(bytes as BufferSource);
+      return { value: { module: compiled, ...(memory ? { memory } : {}), foreign }, key: read };
+    });
   }
 
   private async checkedSources(planned: Planned, caller: IntegrityCaller): Promise<void> {
@@ -944,13 +972,10 @@ export class Launcher {
   private async text(path: string, caller: IntegrityCaller): Promise<string> {
     if (!this.integrity) return this.base.readFile(path);
     const key = await this.cacheKey(path);
-    let text = this.texts.get(key);
-    if (!text) {
-      text = this.verified(path, caller).then((bytes) => new TextDecoder().decode(bytes));
-      this.texts.set(key, text);
-      text.catch(() => this.texts.delete(key));
-    }
-    return text;
+    return this.cached(this.texts, key, async () => {
+      const { bytes, key: read } = await this.keyed(path, caller);
+      return { value: new TextDecoder().decode(bytes), key: read };
+    });
   }
 
   private async names(path: string, module: WebAssembly.Module): Promise<string | undefined> {

@@ -17,6 +17,13 @@ export interface IntegrityCaller {
 
 export const KERNEL_CALLER: IntegrityCaller = { pid: 0, uid: 0 };
 
+export function integrityOptions(options: IntegrityOptions | undefined): void {
+  if (options && typeof options.lookup !== 'function') {
+    throw new TypeError('protect.integrity.lookup must be a function');
+  }
+  integrityUnknown(options);
+}
+
 export function integrityUnknown(options: { unknown?: string } | undefined): 'allow' | 'deny' {
   const unknown = options?.unknown ?? 'allow';
   if (unknown !== 'allow' && unknown !== 'deny') {
@@ -71,11 +78,22 @@ export class Integrity {
     caller: IntegrityCaller,
     plain: () => Promise<Uint8Array>
   ): Promise<Uint8Array> {
+    return (await this.readKeyed(path, caller, plain)).bytes;
+  }
+
+  async readKeyed(
+    path: string,
+    caller: IntegrityCaller,
+    plain: () => Promise<Uint8Array>
+  ): Promise<{ bytes: Uint8Array; key?: string }> {
     const real = await this.real(path);
-    if (real === undefined) return plain();
-    const { bytes } = this.root.readVersioned
+    if (real === undefined) return { bytes: await plain() };
+    const read = this.root.readVersioned
       ? await this.root.readVersioned(real)
-      : { bytes: await this.root.readFileBuffer(real) };
+      : { bytes: await this.root.readFileBuffer(real), version: undefined };
+    const { bytes } = read;
+    const keyed =
+      read.version === undefined ? { bytes } : { bytes, key: `${real}\0${read.version}` };
     const actual = await sha256(bytes);
     const denial = { pid: caller.pid, uid: caller.uid, path: real, actual };
     const tagged = caller.tag !== undefined ? { tag: caller.tag } : {};
@@ -92,10 +110,10 @@ export class Integrity {
           this.unverified.add(real);
           this.say({ ...denial, ...tagged, op: 'exec-unverified', errno: 'ENODATA' });
         }
-        return bytes;
+        return keyed;
       }
     } else if (expected === actual) {
-      return bytes;
+      return keyed;
     }
     const known = expected !== undefined ? { expected } : {};
     this.say({ ...denial, ...tagged, ...known, op: 'exec-integrity', errno: 'EACCES' });
