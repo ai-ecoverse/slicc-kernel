@@ -16,6 +16,7 @@ import { R_OK, X_OK } from './fs/access.ts';
 import { type Attestation, attest, FileWatches, type RemoteFs } from './fs/attest.ts';
 import { followLinks, withCommandDirs } from './fs/commands.ts';
 import { Dac, type DenialHook, need, TTY_MODE } from './fs/dac.ts';
+import { FreshModules } from './fs/fresh-modules.ts';
 import { physicalPathAsync } from './fs/physical-path.ts';
 import {
   holdsProtected,
@@ -428,6 +429,7 @@ export class Launcher {
   private readonly described = new Map<number, Pick<ProcessInfo, 'argv' | 'tty' | 'started'>>();
   private readonly creds = new Map<number, () => Cred>();
   private readonly tags = new Map<number, string>();
+  private readonly freshModules = new FreshModules();
   private readonly granted = new Map<number, number>();
   readonly users: UserDb;
   private readonly sudoer: Sudo;
@@ -494,7 +496,8 @@ export class Launcher {
       changed: this.watchers.changed.bind(this.watchers),
       owners: this.owners,
     });
-    this.base = this.watchers.wrap(this.mounts.wrap(options.fs));
+    const watched = this.watchers.wrap(this.mounts.wrap(options.fs));
+    this.base = this.owners ? this.freshModules.wrap(watched) : watched;
     this.createWorker = options.createWorker;
     this.createDriverWorker = options.createDriverWorker;
     this.media = options.media ?? memoryMedia();
@@ -946,6 +949,9 @@ export class Launcher {
       ...(req.ignored ? { ignored: req.ignored } : {}),
       ...(req.umask !== undefined ? { umask: req.umask } : {}),
       cred: req.cred,
+      ...(this.owners && req.program.abi === 'wasi'
+        ? { fresh: (path: string, umask: number) => this.freshModules.add(path, umask, pid) }
+        : {}),
       ...(this.owners ? { owners: true } : {}),
       sealed: this.sealed,
       clipboard: this.clipboard,
@@ -1007,6 +1013,7 @@ export class Launcher {
       started: Date.now(),
     });
     void handle.exited.then(() => {
+      this.freshModules.forget(pid);
       const spent = handle.times?.();
       if (spent) this.spent.set(pid, spent);
       this.processes.delete(pid);

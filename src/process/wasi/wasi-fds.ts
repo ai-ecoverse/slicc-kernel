@@ -26,12 +26,6 @@ import {
 
 const SYNTHETIC_DIRS = ['usr', 'bin'];
 
-interface Made {
-  umask: number;
-  refs: number;
-  ino: number | undefined;
-}
-
 export interface WasiKernel {
   sys: ProcessSys;
 
@@ -81,60 +75,6 @@ export class WasiFds {
   constructor(kernel: WasiKernel, fs: SyncFsPosixBridge) {
     this.kernel = kernel;
     this.fs = fs;
-  }
-
-  private readonly made = new WeakMap<object, Made>();
-
-  onMade?: (path: string, umask: number, ino: number | undefined) => void;
-
-  umask?: () => number;
-
-  private mark(holder: object, ino: number | undefined): void {
-    if (this.onMade) this.made.set(holder, { umask: this.umask?.() ?? 0o022, refs: 1, ino });
-  }
-
-  private shareMade(from: object, to: object): void {
-    const made = this.made.get(from);
-    if (!made) return;
-    made.refs++;
-    this.made.set(to, made);
-  }
-
-  private settle(holder: object, path: string, gone = false): void {
-    const made = this.made.get(holder);
-    if (!made) return;
-    this.made.delete(holder);
-    if (--made.refs === 0 && !gone) this.onMade?.(path, made.umask, made.ino);
-  }
-
-  private gone(buffer: FileBuffer): boolean {
-    if (!this.made.has(buffer)) return false;
-    return (
-      buffer.isOrphan() || (buffer.handle !== undefined && this.fs.kept?.(buffer.handle) === true)
-    );
-  }
-
-  private orphaned(fd: number, e: { path?: string }): boolean {
-    if (this.made.get(e)?.refs !== 1) return false;
-    const vfs = this.kernel.call({ op: 'fd-vfs-stat', fd }) as { orphan?: true; path?: string };
-    return vfs.orphan === true || vfs.path !== e.path;
-  }
-
-  settleAll(): void {
-    for (const [fd, e] of this.table) {
-      if (e.type === 'kernel' && e.path !== undefined && this.made.has(e)) {
-        this.kernel.call({ op: 'fd-flush', fd });
-        this.settle(e, e.path, this.orphaned(fd, e));
-      }
-      if (e.type === 'file')
-        this.settle(e.file.buffer, e.file.buffer.path, this.gone(e.file.buffer));
-    }
-  }
-
-  private copy<T extends object>(e: T): T {
-    const twin = { ...e };
-    this.shareMade(e, twin);
-    return twin;
   }
 
   setup(
@@ -373,10 +313,10 @@ export class WasiFds {
     let at: number;
     if (e.type === 'kernel') {
       at = this.kernel.call({ op: 'fd-dup', fd, min: Math.max(3, min) }) as number;
-      this.table.set(at, this.copy(e));
+      this.table.set(at, { ...e });
     } else {
       if (e.type === 'file') e.file.refs++;
-      at = this.install(e.type === 'file' ? e : this.copy(e), min);
+      at = this.install(e.type === 'file' ? e : { ...e }, min);
     }
     if (cloexec) this.setCloexec(at, true);
     this.bump();
@@ -418,16 +358,14 @@ export class WasiFds {
         handed.add(e.file.buffer);
         promoted.set(e.file, fd);
       }
-      const promotedEntry = {
-        type: 'kernel' as const,
-        kind: 'file' as const,
+      this.table.set(fd, {
+        type: 'kernel',
+        kind: 'file',
         nonblock: false,
         append: e.file.append,
         path: e.file.path,
         ino: this.inoOf(e.file.path),
-      };
-      this.shareMade(e.file.buffer, promotedEntry);
-      this.table.set(fd, promotedEntry);
+      });
     }
     for (const file of promoted.keys()) {
       if (--file.buffer.opens <= 0) {
@@ -483,11 +421,9 @@ export class WasiFds {
     const e = this.get(fd);
     this.table.delete(fd);
     this.cloexec.delete(fd);
-    const gone = e.type === 'kernel' && this.made.has(e) && this.orphaned(fd, e);
     try {
       this.kernel.sys.close(fd);
     } finally {
-      if (e.type === 'kernel' && e.path !== undefined) this.settle(e, e.path, gone);
       this.release(e);
       this.bump();
     }
@@ -502,13 +438,12 @@ export class WasiFds {
     this.cloexec.delete(to);
     if (keep) {
       if (e.type === 'file') e.file.refs++;
-      this.table.set(to, e.type === 'file' ? e : this.copy(e));
+      this.table.set(to, e.type === 'file' ? e : { ...e });
     } else {
       this.table.delete(from);
       this.table.set(to, e);
       if (this.cloexec.delete(from)) this.cloexec.add(to);
     }
-    if (old?.type === 'kernel' && old.path !== undefined) this.settle(old, old.path);
     if (old) this.release(old);
     this.bump();
   }
@@ -568,7 +503,6 @@ export class WasiFds {
   }
 
   private letGo(buffer: FileBuffer): void {
-    this.settle(buffer, buffer.path, this.gone(buffer));
     this.fs.hold?.(buffer.path, false, true, buffer.handle);
   }
 
@@ -828,7 +762,6 @@ export class WasiFds {
     const io = handle !== undefined && this.fs.pinned ? this.fs.pinned(handle) : this.fs;
     const buffer = new FileBuffer(io, path, empty, st.maxFile, ranged, st.version);
     buffer.handle = handle;
-    if (made) this.mark(buffer, st.ino);
     this.buffers.set(path, buffer);
     const id = this.identity(st);
     if (id !== undefined) this.know(buffer, id);
@@ -855,16 +788,7 @@ export class WasiFds {
     });
     const ino = writable ? (this.openedIno(fd) ?? this.inoOf(path)) : undefined;
     if (truncate) (this.fs as { touched?(path?: string, ino?: number): void }).touched?.(path, ino);
-    const entry = {
-      type: 'kernel' as const,
-      kind: 'file' as const,
-      nonblock: false,
-      append,
-      path,
-      ino,
-    };
-    this.table.set(fd, entry);
-    if (made) this.mark(entry, ino ?? this.inoOf(path));
+    this.table.set(fd, { type: 'kernel', kind: 'file', nonblock: false, append, path, ino });
     if (append) this.publishFlags(fd, { nonblock: false, append });
     this.bump();
     return fd;
@@ -905,12 +829,12 @@ export class WasiFds {
     const e = this.get(fd);
     if (e.type === 'kernel') {
       const at = this.kernel.call({ op: 'fd-dup', fd }) as number;
-      this.table.set(at, this.copy(e));
+      this.table.set(at, { ...e });
       this.bump();
       return at;
     }
     if (e.type === 'file') e.file.refs++;
-    return this.install(e.type === 'file' ? e : this.copy(e));
+    return this.install(e.type === 'file' ? e : { ...e });
   }
 }
 
