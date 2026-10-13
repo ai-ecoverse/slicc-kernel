@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { after, test } from 'node:test';
 import { launch } from './chrome.mjs';
 import { booted, ok } from './kernel.mjs';
@@ -79,4 +81,27 @@ test('a protected prefix is read-only for every process, root included, and for 
   );
   const other = await bash('rm -r /opt/agent/d; echo "rc=$?"', { cwd: '/', tag: 'Bios-Installer' });
   assert.equal(other.stdout.trim(), 'rc=1');
+});
+
+test('a program whose files differ from the hashes the page knows does not run, and one that matches does, asked once', async (t) => {
+  const fixture = await readFile(new URL('./fixtures/jstest/bin/echo.mjs', import.meta.url));
+  const digest = createHash('sha256').update(fixture).digest('hex');
+  const echo = '/node_modules/jstest/bin/echo.mjs';
+  const { page, bash, run } = await booted(chrome, t, {
+    protect: { paths: ['/node_modules/jstest'], hashes: { [echo]: digest } },
+  });
+  assert.equal((await run(['jsecho', 'a'])).status, 0);
+  assert.equal((await run(['jsecho', 'b'])).status, 0);
+  assert.deepEqual(await page.evaluate(() => window.integrityAsked), [echo]);
+  await page.evaluate(() =>
+    window.opfs.write('node_modules/jstest/bin/echo.mjs', 'export default () => 7;\n')
+  );
+  const refused = await bash('jsecho c; echo "rc=$?"', { cwd: '/' });
+  assert.equal(refused.stdout, 'rc=126\n');
+  assert.match(refused.stderr, /Permission denied/);
+  const denied = await run(['jsecho', 'd']).then(
+    () => 'ran',
+    (e) => e.message
+  );
+  assert.match(denied, /integrity check failed: \/node_modules\/jstest\/bin\/echo\.mjs/);
 });

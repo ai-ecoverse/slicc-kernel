@@ -723,6 +723,31 @@ export class OpfsFs implements KernelFs {
     );
   }
 
+  async readVersioned(path: string): Promise<{ bytes: Uint8Array; version: string }> {
+    const handle = await this.existing(path);
+    return this.retrying(
+      path,
+      async () => {
+        const file = await handle.getFile();
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        return { bytes, version: `${file.lastModified}:${file.size}` };
+      },
+      false
+    );
+  }
+
+  async version(path: string): Promise<string> {
+    const handle = await this.existing(path);
+    return this.retrying(
+      path,
+      async () => {
+        const file = await handle.getFile();
+        return `${file.lastModified}:${file.size}`;
+      },
+      false
+    );
+  }
+
   async pread(path: string, offset: number, length: number): Promise<Uint8Array> {
     const handle = await this.existing(path);
     return this.retrying(

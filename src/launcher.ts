@@ -17,6 +17,7 @@ import { type Attestation, attest, FileWatches, type RemoteFs } from './fs/attes
 import { followLinks, withCommandDirs } from './fs/commands.ts';
 import { Dac, type DenialHook, need, TTY_MODE } from './fs/dac.ts';
 import { FreshModules } from './fs/fresh-modules.ts';
+import { Integrity, type IntegrityCaller, KERNEL_CALLER } from './fs/integrity.ts';
 import { physicalPathAsync } from './fs/physical-path.ts';
 import {
   holdsProtected,
@@ -432,6 +433,8 @@ export class Launcher {
   private unwatchScopes: () => void = () => undefined;
   private readonly warned = new Set<string>();
   private readonly compiled = new Map<string, Promise<Compiled>>();
+  private readonly texts = new Map<string, Promise<string>>();
+  private integrity: Integrity | undefined;
   private readonly processes = new Map<number, WasmProcessHandle>();
   private readonly zombies = new Set<number>();
   private readonly orphans = new Set<number>();
@@ -531,7 +534,7 @@ export class Launcher {
     if (options.uplink) this.net.useUplink({ uplink: options.uplink, routes: this.routes });
     enableNetwork(this.net, {
       transport: this.transport,
-      engine: kernelTlsEngine(packageTlsEngine(options.fs, this.modulesDir)),
+      engine: kernelTlsEngine(packageTlsEngine(this.verifiedFs(options.fs), this.modulesDir)),
       ca: this.ca,
     });
     enableCdp(this.net, this.cdp);
@@ -567,6 +570,12 @@ export class Launcher {
     this.processFs =
       this.prefixes.length > 0 ? new ProtectedFs(this.prefixes).view(this.fs) : this.fs;
     options.fs.protect?.(this.prefixes);
+    const integrity = options.protect?.integrity;
+    if (integrity && this.prefixes.length > 0) {
+      this.integrity = new Integrity(this.prefixes, options.fs, integrity, (event) =>
+        options.onDenial?.(event)
+      );
+    }
     this.users = new UserDb(this.fs, this.owners);
     this.sudoer = new Sudo({
       fs: this.fs,
@@ -864,26 +873,54 @@ export class Launcher {
     return binfmtOf(await this.interpreters(scope), path) ? 'ENOENT' : 'ENOEXEC';
   }
 
-  private module(path: string): Promise<Compiled> {
-    return this.base.stat(path).then((st) => {
-      const key = `${path}:${st.size}:${st.mtime.getTime()}`;
-      let module = this.compiled.get(key);
-      if (!module) {
-        module = this.base.readFileBuffer(path).then(async (bytes) => {
-          const memory = importedMemory(bytes);
-          const foreign = foreignImports(bytes);
-          const compiled = await WebAssembly.compile(bytes as BufferSource);
-          return {
-            module: compiled,
-            ...(memory ? { memory } : {}),
-            foreign,
-          };
-        });
-        this.compiled.set(key, module);
-        module.catch(() => this.compiled.delete(key));
-      }
-      return module;
+  verifiedFs(fs: KernelFs): KernelFs {
+    return Object.assign(Object.create(fs) as KernelFs, {
+      readFileBuffer: (path: string) => this.verified(path, KERNEL_CALLER, fs),
     });
+  }
+
+  private async cacheKey(path: string): Promise<string> {
+    const verified = await this.integrity?.key(path);
+    if (verified !== undefined) return verified;
+    const st = await this.base.stat(path);
+    return `${path}:${st.size}:${st.mtime.getTime()}`;
+  }
+
+  private verified(path: string, caller: IntegrityCaller, fs = this.base): Promise<Uint8Array> {
+    const plain = () => fs.readFileBuffer(path);
+    return this.integrity ? this.integrity.read(path, caller, plain) : plain();
+  }
+
+  private async module(path: string, caller: IntegrityCaller): Promise<Compiled> {
+    const key = await this.cacheKey(path);
+    let module = this.compiled.get(key);
+    if (!module) {
+      module = this.verified(path, caller).then(async (bytes) => {
+        const memory = importedMemory(bytes);
+        const foreign = foreignImports(bytes);
+        const compiled = await WebAssembly.compile(bytes as BufferSource);
+        return {
+          module: compiled,
+          ...(memory ? { memory } : {}),
+          foreign,
+        };
+      });
+      this.compiled.set(key, module);
+      module.catch(() => this.compiled.delete(key));
+    }
+    return module;
+  }
+
+  private async text(path: string, caller: IntegrityCaller): Promise<string> {
+    if (!this.integrity) return this.base.readFile(path);
+    const key = await this.cacheKey(path);
+    let text = this.texts.get(key);
+    if (!text) {
+      text = this.verified(path, caller).then((bytes) => new TextDecoder().decode(bytes));
+      this.texts.set(key, text);
+      text.catch(() => this.texts.delete(key));
+    }
+    return text;
   }
 
   private async names(path: string, module: WebAssembly.Module): Promise<string | undefined> {
@@ -896,24 +933,28 @@ export class Launcher {
     return (await this.base.exists(optional)) ? optional : undefined;
   }
 
-  private async program(target: Target, env: Record<string, string>): Promise<Program> {
+  private async program(
+    target: Target,
+    env: Record<string, string>,
+    caller: IntegrityCaller
+  ): Promise<Program> {
     if (target.abi === 'js' && target.wasm === SUDO_PATH) {
       return { abi: 'js', glue: SUDO_SOURCE, path: SUDO_PATH };
     }
     if (target.abi === 'js') {
-      return { abi: 'js', glue: await this.base.readFile(target.wasm), path: target.wasm };
+      return { abi: 'js', glue: await this.text(target.wasm, caller), path: target.wasm };
     }
     if (target.abi !== 'wasi') {
       const [glue, { module }] = await Promise.all([
-        this.base.readFile(target.glue),
-        this.module(target.wasm),
+        this.text(target.glue, caller),
+        this.module(target.wasm, caller),
       ]);
       return { glue, module };
     }
-    const { module, memory, foreign } = await this.module(target.wasm);
+    const { module, memory, foreign } = await this.module(target.wasm, caller);
     const names =
       env.SLICC_WASM_BACKTRACE === '1' ? await this.names(target.wasm, module) : undefined;
-    const imports = target.imports ? await this.base.readFile(target.imports) : undefined;
+    const imports = target.imports ? await this.text(target.imports, caller) : undefined;
     return {
       abi: 'wasi',
       glue: '',
@@ -939,7 +980,8 @@ export class Launcher {
     env.HOSTNAME = this.hostname;
     let program: Program;
     try {
-      program = await this.program(target, env);
+      const caller = { pid: req.ppid ?? 0, uid: req.cred.euid, tag: req.tag };
+      program = await this.program(target, env, caller);
     } catch (err) {
       await req.fds.closeAll();
       throw err;
@@ -1498,7 +1540,7 @@ export class Launcher {
     if (!module) throw fsError('ENODEV', `unknown file system type ${type}`);
     if (!this.createDriverWorker)
       throw fsError('ENODEV', `this kernel cannot start ${type} drivers`);
-    const code = await this.base.readFile(module);
+    const code = new TextDecoder().decode(await this.verified(module, KERNEL_CALLER));
     const worker = this.createDriverWorker();
     const driver = new MessageChannel();
     const client = new MessageChannel();
