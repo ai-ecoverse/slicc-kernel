@@ -37,6 +37,7 @@ import { callError, JsCallError, type JsKernel } from './js-kernel.ts';
 import { type JsNet, netOps } from './js-net.ts';
 import { runSync } from './js-run.ts';
 import {
+  type JsCred,
   type JsSyncContext,
   JsSyncKernel,
   laneOf,
@@ -378,6 +379,11 @@ export function createContext(o: ContextOptions): CreatedContext {
       return exitAtOnce(lane, [...writes], terminal.modes(), exiting);
     },
     kill: killer({ self: o.pid, kernel, syncKernel, lane, writes, modes: terminal.modes }),
+    cred: () => syncKernel.json({ op: 'proc-cred' }) as JsCred,
+    setcred(change) {
+      if (typeof change !== 'object' || change === null) throw new JsCallError('EINVAL', 'setcred');
+      return syncKernel.json({ op: 'proc-setcred', change: { ...change } }) as JsCred;
+    },
   };
 
   const io = { read, send: writeAll, close: (fd: number) => ctx.close(fd) };
