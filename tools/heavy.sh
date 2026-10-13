@@ -1,6 +1,7 @@
 #!/bin/sh
-if [ -z "${SLICC_HEAVY_LOCKED:-}" ] && command -v lockf > /dev/null 2>&1; then
-  SLICC_HEAVY_LOCKED=1 exec lockf -k "${SLICC_HEAVY_LOCK:-/tmp/slicc-heavy.lock}" "$0" "$@"
+slot="${HOME:-}/.bb/coord-bin/slicc-heavy"
+if [ "${SLICC_HEAVY_SLOT:-}" = 1 ] && [ -z "${SLICC_HEAVY_SLOTTED:-}" ] && [ -x "$slot" ]; then
+  SLICC_HEAVY_SLOTTED=1 exec "$slot" "$0" "$@"
 fi
 tree_kb=${SLICC_HEAVY_TREE_KB:-3000000}
 proc_kb=${SLICC_HEAVY_PROC_KB:-2000000}
