@@ -240,44 +240,97 @@ export function pathOpensLinks(Fs: ProcessFs): void {
 
 type Syscall = (...args: number[]) => number;
 
+export interface KernelImports {
+  openat?: unknown;
+  mkdirat?: unknown;
+  mknodat?: unknown;
+  umask?: unknown;
+  faccessat?: unknown;
+  utimensat?: unknown;
+  getppid?: unknown;
+  resizeHeap?: unknown;
+}
+
+const LITERALS: Record<keyof KernelImports, string> = {
+  openat: '__syscall_openat',
+  mkdirat: '__syscall_mkdirat',
+  mknodat: '__syscall_mknodat',
+  umask: '__syscall_umask',
+  faccessat: '__syscall_faccessat',
+  utimensat: '__syscall_utimensat',
+  getppid: 'slicc_getppid_js',
+  resizeHeap: 'emscripten_resize_heap',
+};
+
+export function importKey(
+  namespace: WebAssembly.ModuleImports,
+  name: keyof KernelImports,
+  glue: KernelImports | undefined
+): string | undefined {
+  const own = glue?.[name];
+  if (typeof own === 'function') {
+    const found = Object.keys(namespace).find((k) => namespace[k] === own);
+    if (found !== undefined) return found;
+  }
+  const literal = LITERALS[name];
+  return typeof namespace[literal] === 'function' ? literal : undefined;
+}
+
+export function wrapImport(
+  imports: WebAssembly.Imports,
+  name: keyof KernelImports,
+  glue: KernelImports | undefined,
+  wrap: (original: Syscall) => Syscall
+): void {
+  let wrapped = false;
+  for (const ns of namespaces(imports)) {
+    const key = importKey(ns, name, glue);
+    if (key === undefined) continue;
+    ns[key] = wrap(ns[key] as Syscall);
+    wrapped = true;
+  }
+  if (!wrapped && typeof glue?.[name] === 'function') {
+    throw new Error(`slicc-kernel cannot find the glue's ${LITERALS[name]} among its imports`);
+  }
+}
+
 export interface UmaskDeps {
   initial: number;
   memory(): WebAssembly.Memory | undefined;
   set(mask: number): void;
+  glue?: KernelImports | undefined;
 }
 
 export function kernelUmask(imports: WebAssembly.Imports, deps: UmaskDeps): void {
   let umask = deps.initial & 0o777;
-  for (const ns of namespaces(imports)) {
-    const { __syscall_openat: openat, __syscall_mkdirat: mkdirat } = ns as Record<string, Syscall>;
-    const { __syscall_mknodat: mknodat, __syscall_umask: own } = ns as Record<string, Syscall>;
-    if (typeof openat === 'function') {
-      ns.__syscall_openat = (dirfd: number, path: number, flags: number, varargs: number) => {
-        const memory = deps.memory();
-        if (flags & O_CREAT && varargs && memory)
-          new Int32Array(memory.buffer)[varargs >> 2] &= ~umask;
-        return openat(dirfd, path, flags, varargs);
-      };
-    }
-    if (typeof mkdirat === 'function') {
-      ns.__syscall_mkdirat = (dirfd: number, path: number, mode: number) =>
-        mkdirat(dirfd, path, mode & ~umask);
-    }
-    if (typeof mknodat === 'function') {
-      ns.__syscall_mknodat = (dirfd: number, path: number, mode: number, dev: number) =>
-        mknodat(dirfd, path, mode & ~umask, dev);
-    }
-    if (typeof own === 'function') {
+  const { glue } = deps;
+  wrapImport(imports, 'openat', glue, (openat) => (dirfd, path, flags, varargs) => {
+    const memory = deps.memory();
+    if (flags & O_CREAT && varargs && memory) new Int32Array(memory.buffer)[varargs >> 2] &= ~umask;
+    return openat(dirfd, path, flags, varargs);
+  });
+  wrapImport(
+    imports,
+    'mkdirat',
+    glue,
+    (mkdirat) => (dirfd, path, mode) => mkdirat(dirfd, path, mode & ~umask)
+  );
+  wrapImport(
+    imports,
+    'mknodat',
+    glue,
+    (mknodat) => (dirfd, path, mode, dev) => mknodat(dirfd, path, mode & ~umask, dev)
+  );
+  wrapImport(imports, 'umask', glue, (own) => {
+    own(umask);
+    return (mask) => {
+      const old = umask;
+      umask = mask & 0o777;
       own(umask);
-      ns.__syscall_umask = (mask: number) => {
-        const old = umask;
-        umask = mask & 0o777;
-        own(umask);
-        deps.set(umask);
-        return old;
-      };
-    }
-  }
+      deps.set(umask);
+      return old;
+    };
+  });
 }
 
 const UTIME_NOW = 0x3fffffff;
@@ -311,13 +364,11 @@ export function noFollowUtimes(
   glue?: unknown,
   memory: () => WebAssembly.Memory | undefined = () => undefined
 ): void {
-  for (const namespace of namespaces(imports)) {
-    const key = Object.keys(namespace).find(
-      (name) => (glue !== undefined && namespace[name] === glue) || name === '__syscall_utimensat'
-    );
-    const utimensat = key === undefined ? undefined : namespace[key];
-    if (key === undefined || typeof utimensat !== 'function') continue;
-    namespace[key] = (dirfd: number, path: number, times: number, flags: number) => {
+  wrapImport(
+    imports,
+    'utimensat',
+    { utimensat: glue },
+    (utimensat) => (dirfd, path, times, flags) => {
       const Fs = fs() as (UtimeFs & TouchFs) | undefined;
       const on = touching(times, memory());
       const { utime, lookupPath, ErrnoError } = Fs ?? {};
@@ -334,8 +385,8 @@ export function noFollowUtimes(
       } finally {
         Fs.utime = utime;
       }
-    };
-  }
+    }
+  );
 }
 
 type AsyncImport = ((...args: number[]) => unknown) & { isAsync?: boolean };
@@ -821,23 +872,20 @@ function kernelChecks(
 export function kernelAccess(
   imports: WebAssembly.Imports,
   fs: () => ProcessFs | undefined,
-  memory: () => WebAssembly.Memory | undefined
+  memory: () => WebAssembly.Memory | undefined,
+  glue?: KernelImports
 ): void {
-  for (const ns of namespaces(imports)) {
-    const own = ns.__syscall_faccessat as Syscall | undefined;
-    if (typeof own !== 'function') continue;
-    ns.__syscall_faccessat = (dirfd: number, path: number, amode: number, flags: number) => {
-      const rc = own(dirfd, path, amode, flags);
-      const Fs = fs() as AccessFs | undefined;
-      const heap = memory();
-      if (rc !== 0 || !Fs?.lookupPath || !heap) return rc;
-      try {
-        return kernelChecks(Fs, heap, { dirfd, path, amode: amode & 7, flags });
-      } catch (err) {
-        return -errnoOf(err);
-      }
-    };
-  }
+  wrapImport(imports, 'faccessat', glue, (own) => (dirfd, path, amode, flags) => {
+    const rc = own(dirfd, path, amode, flags);
+    const Fs = fs() as AccessFs | undefined;
+    const heap = memory();
+    if (rc !== 0 || !Fs?.lookupPath || !heap) return rc;
+    try {
+      return kernelChecks(Fs, heap, { dirfd, path, amode: amode & 7, flags });
+    } catch (err) {
+      return -errnoOf(err);
+    }
+  });
 }
 
 const DEVICE_MODES: ReadonlyArray<[string, number]> = [

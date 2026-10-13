@@ -193,6 +193,10 @@ export class UserDb {
     if (await this.realDir(pnpm)) await this.fs.chmod(pnpm, scoop ? 0o750 : 0o700);
   }
 
+  private umaskFor(options: AddUser): number {
+    return (options.umask ?? this.umasks.get(options.name) ?? 0o022) & 0o777;
+  }
+
   private async realDir(path: string): Promise<boolean> {
     const parts = path.split('/').filter(Boolean);
     for (let n = 1; n <= parts.length; n++) {
@@ -219,9 +223,13 @@ export class UserDb {
     };
   }
 
-  private async provision(row: PasswdRow): Promise<void> {
-    const owner = this.owners ? { uid: row.uid, gid: row.gid } : undefined;
-    const made = owner ? { recursive: true, owner } : { recursive: true };
+  private async provision(row: PasswdRow, umask: number, shared?: GroupRow): Promise<void> {
+    const dirs = (0o777 & ~umask) | (shared ? 0o2000 : 0);
+    const gid = shared?.gid ?? row.gid;
+    const owner = this.owners ? { uid: row.uid, gid } : undefined;
+    const made = owner
+      ? { recursive: true, owner: { ...owner, mode: dirs, parents: dirs } }
+      : { recursive: true };
     const pnpm = `${row.home}/.local/share/pnpm`;
     if (!(await this.fs.exists(pnpm))) {
       await this.fs.mkdir(pnpm, made);
@@ -230,7 +238,7 @@ export class UserDb {
     const config = `${row.home}/.config/pnpm/config.yaml`;
     if (!(await this.fs.exists(config))) {
       await this.fs.mkdir(`${row.home}/.config/pnpm`, made);
-      await this.fs.writeFile(config, PNPM_CONFIG, owner);
+      await this.fs.writeFile(config, PNPM_CONFIG, owner && { ...owner, mode: 0o666 & ~umask });
     }
   }
 
@@ -333,7 +341,7 @@ export class UserDb {
           throw fsError('EINVAL', `a user is no member of its own group ${name}`);
         }
         if (found.uid >= FIRST_UID && found.uid <= LAST_UID) {
-          await this.provision(found);
+          await this.provision(found, this.umaskFor(options), shared);
           await this.stampHome(found, shared, homeMode);
         }
         if (joined(name, more)) await this.fs.writeFile(GROUP, formatGroup(group));
@@ -351,7 +359,7 @@ export class UserDb {
       const fresh = !(await this.fs.exists(home));
       await this.fs.mkdir(home, { recursive: true });
       try {
-        await this.provision(row);
+        await this.provision(row, this.umaskFor(options), shared);
         await this.stampHome(row, shared, homeMode);
         await this.fs.mkdir('/etc', { recursive: true });
         await this.commit(formatPasswd(passwd), formatGroup(group));

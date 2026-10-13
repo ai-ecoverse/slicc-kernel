@@ -21,10 +21,10 @@ import { physicalPathAsync } from './fs/physical-path.ts';
 import {
   holdsProtected,
   isProtected,
-  PROTECT_WRITER,
   ProtectedFs,
   type Protection,
   protectedPrefixes,
+  writerTags,
 } from './fs/protect.ts';
 import type { KernelFs, UsersMode } from './fs/types.ts';
 import { fsError, normalizePath } from './fs/types.ts';
@@ -245,6 +245,13 @@ interface Redeemer {
   booked: Booked | null | undefined;
 }
 
+interface WriterStack {
+  fs: KernelFs;
+  nodes: VfsNodes;
+  unlinked: UnlinkedKeeper;
+  writer: boolean;
+}
+
 interface StartRequest {
   program: Program;
   argv0: string;
@@ -435,6 +442,10 @@ export class Launcher {
   readonly fs: KernelFs;
   readonly processFs: KernelFs;
   private readonly prefixes: string[];
+  private readonly writerTags: ReadonlySet<string>;
+  private readonly unguardedRoot: KernelFs;
+  private writers: WriterStack | undefined;
+  private readonly unlinkOwnerOption: UnlinkOwner | undefined;
   private readonly base: KernelFs;
   private readonly createWorker: () => WasmWorkerLike;
   private readonly modulesDir: string;
@@ -553,7 +564,7 @@ export class Launcher {
     this.nodes = new VfsNodes(fs, (path) => this.released(path));
     this.nodes.keepsOnDisk = true;
     this.openFiles.add(this.nodes);
-    const holders = [this.held, [this.nodes]];
+    const holders = [this.held, this.openFiles];
     this.unlinked = new UnlinkedKeeper(
       fs,
       { [Symbol.iterator]: () => holders.flatMap((set) => [...set]).values() },
@@ -566,7 +577,12 @@ export class Launcher {
       }
     );
     this.fs = this.unlinked.wrap(keepingOpen(fs, this.nodes));
-    if (options.protect?.writer) throw new Error(PROTECT_WRITER);
+    this.writerTags = writerTags(options.protect);
+    this.unlinkOwnerOption = options.unlinkOwner;
+    if (this.writerTags.size > 0 && options.fs.protect && !options.fs.unguarded) {
+      throw new TypeError('protect.writers needs a root file system with an unguarded view');
+    }
+    this.unguardedRoot = options.fs.unguarded?.() ?? options.fs;
     this.prefixes = protectedPrefixes(options.protect?.paths ?? []);
     this.processFs =
       this.prefixes.length > 0 ? new ProtectedFs(this.prefixes).view(this.fs) : this.fs;
@@ -880,7 +896,7 @@ export class Launcher {
   }
 
   private async trustedFiles(file: string, cwd: string, scope: string): Promise<boolean> {
-    const files = await this.backing(file, cwd, scope);
+    const files = (await this.backing(file, cwd, scope)) ?? [];
     if (files.length === 0) return false;
     for (const at of files) {
       if (!(await rootOnly(this.base, await physicalPathAsync(this.base, at)))) return false;
@@ -906,9 +922,9 @@ export class Launcher {
     return manifests;
   }
 
-  private async backing(file: string, cwd: string, scope = ''): Promise<string[]> {
+  private async backing(file: string, cwd: string, scope = ''): Promise<string[] | undefined> {
     const planned = await this.plan(file, [file], cwd, scope);
-    if (!planned) return [];
+    if (!planned) return undefined;
     const { glue, wasm, imports } = planned.target;
     const files = [glue, wasm, ...(imports ? [imports] : [])];
     const scripts: string[] = [];
@@ -1030,6 +1046,7 @@ export class Launcher {
       throw fsError('ESRCH', `no process group ${req.pgid}`);
     }
     const pid = req.pid ?? this.nextPid++;
+    const stack = this.stackFor(req.tag);
     const terminal = req.fds.stdioTerminal();
     const decided = req.decided ?? Promise.resolve(true);
     const count = (byParent: boolean) => {
@@ -1060,8 +1077,8 @@ export class Launcher {
       env: req.env,
       cwd: req.cwd,
       fds: req.fds,
-      fs: this.processFs,
-      ...(this.prefixes.length > 0
+      fs: stack.fs,
+      ...(this.prefixes.length > 0 && !stack.writer
         ? { readonlyAt: (path: string) => isProtected(this.prefixes, path) }
         : {}),
       createWorker: this.createWorker,
@@ -1078,9 +1095,9 @@ export class Launcher {
       }),
       sudo: (call, signal) => this.sudo(pid, call, signal),
       openFiles: this.openFiles,
-      nodes: this.nodes,
+      nodes: stack.nodes,
       held: this.held,
-      unlinkGate: this.unlinked.gate,
+      unlinkGate: stack.unlinked.gate,
       statfs: (path) => this.mounts.statfs(path),
       mounts: () => this.mounts.list(),
       mount: (call, signal) => this.processMount(pid, call, signal),
@@ -1419,6 +1436,7 @@ export class Launcher {
   private released(path: string): void {
     const at = normalizePath(path);
     this.unlinked.closed(at);
+    this.writers?.unlinked.closed(at);
     const open = [...this.openFiles].some((nodes) => nodes.writes(at)) || heldUnder(this.held, at);
     if (!open) void this.mounts.commit(at).catch(() => undefined);
   }
@@ -1590,6 +1608,34 @@ export class Launcher {
     return entry;
   }
 
+  private async ownTmp(): Promise<void> {
+    const real = await this.realLayoutPath('/tmp');
+    const st = real === undefined ? undefined : await this.base.lstat(real).catch(() => undefined);
+    if (
+      real !== undefined &&
+      st?.isDirectory &&
+      this.base.hasOwner &&
+      !(await this.base.hasOwner(real))
+    ) {
+      let removed = 0;
+      for (const name of await this.base.readdir(real).catch(() => [] as string[])) {
+        const path = joinName(real, name);
+        if ((await this.base.hasOwner(path)) || this.inUse(path)) continue;
+        const failed = await this.base.rm(path, { recursive: true, force: true }).catch(String);
+        if (failed === undefined) removed++;
+      }
+      if (removed > 0) {
+        console.warn(`slicc-kernel users: removed ${removed} entries from /tmp that had no owner`);
+      }
+      await this.base.chown?.(real, { uid: 0, gid: 0, mode: 0o1777, follow: false });
+    }
+    if (st?.isDirectory) await this.base.chmod(real as string, 0o1777);
+  }
+
+  private inUse(path: string): boolean {
+    return [...this.openFiles].some((nodes) => nodes.holds(path)) || heldUnder(this.held, path);
+  }
+
   private async stampLayout(): Promise<void> {
     const layout: Array<[string, number]> = [
       ...LAYOUT,
@@ -1723,7 +1769,7 @@ export class Launcher {
   async prepare(): Promise<void> {
     await this.resolvePrefixes();
     for (const dir of SHARED_DIRS) await this.base.mkdir(dir, { recursive: true });
-    if (this.owners) await this.base.chmod('/tmp', 0o1777);
+    if (this.owners) await this.ownTmp();
     await this.provisionPnpmHome();
     await this.users.ensure();
     if (this.owners) await this.stampLayout();
@@ -1788,13 +1834,53 @@ export class Launcher {
     };
   }
 
+  fsFor(tag: string | undefined): KernelFs {
+    return this.stackFor(tag).fs;
+  }
+
+  isWriter(tag: string | undefined): boolean {
+    return tag !== undefined && this.prefixes.length > 0 && this.writerTags.has(tag);
+  }
+
+  private stackFor(tag: string | undefined): WriterStack {
+    if (!this.isWriter(tag)) {
+      return { fs: this.processFs, nodes: this.nodes, unlinked: this.unlinked, writer: false };
+    }
+    this.writers ??= this.writerStack();
+    return this.writers;
+  }
+
+  private writerStack(): WriterStack {
+    const fs = withCommandDirs(
+      this.watchers.wrap(this.mounts.wrap(this.unguardedRoot)),
+      async () => new Set((await this.commands()).keys()),
+      (dir) => this.userCommandDir(dir),
+      this.owners
+    );
+    const nodes = new VfsNodes(fs, (path) => this.released(path));
+    nodes.keepsOnDisk = true;
+    this.openFiles.add(nodes);
+    const unlinked = new UnlinkedKeeper(
+      fs,
+      { [Symbol.iterator]: () => [this.held, this.openFiles].flatMap((set) => [...set]).values() },
+      (path) => this.mountRoot(path),
+      {
+        locks: webLocks(),
+        busy: (path) => [...this.openFiles].some((open) => open.holds(path)),
+        owner: this.unlinkOwnerOption,
+        ...(this.owners ? { dirOwner: { uid: 0, gid: 0, mode: 0o700 } } : {}),
+      }
+    );
+    return { fs: unlinked.wrap(keepingOpen(fs, nodes)), nodes, unlinked, writer: true };
+  }
+
   private async starting(argv: string[], dir: string | undefined, account: Account, tag?: string) {
     this.resetCatalogs();
     const scope = account.uid === 0 ? '' : pnpmHomeOf(account, this.pnpmHome);
     const start = dir ?? '/';
     const cwd = await physicalPathAsync(this.base, start.startsWith('/') ? start : `/${start}`);
     const [file = ''] = argv;
-    if (!(await this.base.exists(cwd))) await this.processFs.mkdir(cwd, { recursive: true });
+    if (!(await this.base.exists(cwd))) await this.stackFor(tag).fs.mkdir(cwd, { recursive: true });
     const planned = await this.plan(file, argv, cwd, scope);
     await this.mayExec(credOf(account), { file, cwd, pid: 0, tag }, planned);
     return { cwd, file, planned };

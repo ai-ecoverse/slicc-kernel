@@ -324,6 +324,10 @@ export class OpfsFs implements KernelFs {
     this.guarded = prefixes;
   }
 
+  unguarded(): KernelFs {
+    return Object.create(this, { guarded: { value: [] } }) as KernelFs;
+  }
+
   private refuse(path: string, holding = false): void {
     if (isProtected(this.guarded, path) || (holding && holdsProtected(this.guarded, path))) {
       throw fsError('EROFS', path);
@@ -523,7 +527,7 @@ export class OpfsFs implements KernelFs {
 
   private readonly dirTimes = new Map<string, number>();
   private readonly dirDirty = new Set<string>();
-  private dirFlush: Promise<void> | undefined;
+  private readonly flushing: { dir?: Promise<void> | undefined } = {};
 
   private touch(...dirs: string[]): void {
     const now = Date.now();
@@ -531,11 +535,11 @@ export class OpfsFs implements KernelFs {
       this.dirTimes.set(dir, now);
       this.dirDirty.add(dir);
     }
-    this.dirFlush ??= Promise.resolve()
+    this.flushing.dir ??= Promise.resolve()
       .then(() => this.flushDirTimes())
       .catch(() => undefined)
       .finally(() => {
-        this.dirFlush = undefined;
+        this.flushing.dir = undefined;
       });
   }
 
@@ -811,7 +815,7 @@ export class OpfsFs implements KernelFs {
       const above = owner && {
         uid: owner.uid,
         gid: owner.gid,
-        ...(mode ? { mode, parents: mode } : {}),
+        ...(mode !== undefined ? { mode, parents: mode } : {}),
       };
       await this.mkdir(parentOf(path), { recursive: true, ...(above ? { owner: above } : {}) });
     }

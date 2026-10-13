@@ -90,7 +90,7 @@ export interface SudoOptions {
   hostname: string;
   env: () => Record<string, string>;
   pnpmHome: string;
-  backing?: (path: string, cwd: string) => Promise<string[]>;
+  backing?: (path: string, cwd: string) => Promise<string[] | undefined>;
   approve?: ApproveHook | undefined;
   timeoutMs?: number | undefined;
   warn?: (message: string) => void;
@@ -284,9 +284,18 @@ export class Sudo {
     return (await this.o.fs.stat(cwd).catch(() => undefined))?.isDirectory === true;
   }
 
-  private async untrusted(path: string, cwd: string): Promise<string | undefined> {
-    const files = (await this.o.backing?.(path, cwd)) ?? [];
-    for (const file of [path, ...files]) if (!(await this.trusted(file))) return file;
+  private async untrusted(
+    path: string,
+    cwd: string,
+    word: string
+  ): Promise<SudoResult | undefined> {
+    const files = this.o.backing ? await this.o.backing(path, cwd) : [];
+    if (!files) return failed('ENOENT', `sudo: ${word}: command not found`);
+    for (const file of [path, ...files]) {
+      if (!(await this.trusted(file))) {
+        return failed('EPERM', `sudo: ${file} must be root's, and writable by root only`);
+      }
+    }
     return undefined;
   }
 
@@ -330,10 +339,8 @@ export class Sudo {
     }
     const path = await this.locate(word, cwd);
     if (!path) return failed('ENOENT', `sudo: ${word}: command not found`);
-    const untrusted = await this.untrusted(path, cwd);
-    if (untrusted) {
-      return failed('EPERM', `sudo: ${untrusted} must be root's, and writable by root only`);
-    }
+    const untrusted = await this.untrusted(path, cwd, word);
+    if (untrusted) return untrusted;
     const argv = [path, ...args];
     const matching = rules.filter(
       (rule) =>
@@ -360,10 +367,8 @@ export class Sudo {
       if ((await this.canonical(call.cwd)) !== cwd || !(await this.reachable(cred, cwd))) {
         return failed('EACCES', `sudo: ${call.cwd} changed while the request waited`);
       }
-      const changed = await this.untrusted(path, cwd);
-      if (changed) {
-        return failed('EPERM', `sudo: ${changed} must be root's, and writable by root only`);
-      }
+      const changed = await this.untrusted(path, cwd, word);
+      if (changed) return changed;
       if (answer === 'always' && !(await this.remember(self, target, argv))) {
         return failed('EIO', 'sudo: the rule could not be recorded');
       }

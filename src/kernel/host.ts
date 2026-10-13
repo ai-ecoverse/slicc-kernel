@@ -1,5 +1,5 @@
 import { Created, type Dac } from '../fs/dac.ts';
-import type { PathGate } from '../fs/unlinked.ts';
+import { type PathGate, UNLINKED_DIR } from '../fs/unlinked.ts';
 import { HeldPaths } from '../mount/mount-fs.ts';
 import { dispatchSyncFs } from '../realm/sync-fs-dispatch.ts';
 import {
@@ -329,7 +329,12 @@ function inherited(opts: SpawnWasmOptions): { ignored?: number; umask?: number; 
 function holdingToken(
   opts: SpawnWasmOptions,
   holds: HeldPaths,
-  caller: { cred: () => Cred; umask: () => number; created: Created }
+  caller: {
+    cred: () => Cred;
+    umask: () => number;
+    created: Created;
+    holdsKept: (path: string) => Promise<boolean>;
+  }
 ): string {
   return mintSyncFsToken({
     ...(opts.owners ? caller : {}),
@@ -451,6 +456,8 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     cred: () => process.cred,
     umask: () => process.umask,
     created,
+    holdsKept: async (path) =>
+      path.includes(`/${UNLINKED_DIR}/`) && (holds.keeps(path) || (await process.holds(path))),
   });
   process.keptPath = (path) => holds.keptAt(path)?.hidden;
   process.keptHandle = (handle) => holds.keptFor(handle)?.hidden;
