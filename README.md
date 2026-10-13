@@ -604,9 +604,17 @@ A character device (`0666`, major 10, minor 250) through which a program talks t
 ### Protected paths
 
 `createKernel({ protect: { paths: ['/node_modules', '/os'] } })` makes those directories read-only for every process, root included, in every `users` mode. They hold code every later process runs, which only the embedder writes, straight to OPFS.
-- **What fails:** any change under a path fails with `EROFS` ("Read-only file system"): a write, a create, a truncate, `mkdir`, removing or renaming (from or to), a hard or symbolic link created there, `chmod`, `chown` and setting times. So does removing or renaming a directory that holds one (`rm -rf /`), and a `mount(2)` or `umount2(2)` at, under or above one. A missing working directory for `run` or `openTerminal` isn't created there either. Reads are unaffected. `'/'` protects the whole file system.
+- **What fails:** any change under a path fails with `EROFS` ("Read-only file system"): a write, a create, a truncate, `mkdir`, removing or renaming (from or to), a hard or symbolic link created there, `chmod`, `chown` and setting times. So does removing or renaming a directory that holds one (`rm -rf /`). A missing working directory for `run` or `openTerminal` isn't created there either. Reads are unaffected. `'/'` protects the whole file system.
 - **Stats and symlinks:** files under a path show as on a read-only mount, so opens for writing fail at once. A write through a symlink, or through a symlinked directory, that leads into a path fails too.
-- **Where it's checked:** the root file system checks every change, inside the change, against the path it really lands on. So a symlink swapped mid-way can't redirect a write, and the kernel's own writes there are refused too once it has booted, which is why `'/'` leaves no room even for new users. That check covers what lies on the root file system. Processes and clients also see a mount the embedder makes under a path as read-only, because their view refuses by path.
+- **Where it's checked:** the root file system itself checks every change, from the moment the kernel is constructed, inside the change and against the path it really lands on. So a symlink swapped mid-way can't redirect a write. The kernel's own writes there are refused too, so don't protect what the kernel writes after it starts:
+  - `/etc` (`passwd`, `group` and the proxy's CA);
+  - `/home` and `/root` (new users' homes);
+  - `/tmp`;
+  - the system `PNPM_HOME` (`/usr/local/share/pnpm`);
+  - `/.slicc-unlinked` (files removed while open);
+  - `/` itself, which holds all of these.
+  Paths in the layout the kernel stamps with root's owner at boot are skipped when protected.
+- **Mounts:** nothing can be mounted at, under or above a path, not even by the embedder (`kernel.mount`, `/etc/fstab`). So a path always lies on the root file system, where that check holds.
 - **Clients:** a client's (`kernel.connect`) file calls, mounts and unmounts see the paths read-only, as its processes do.
 - **Not affected:** the page's own writes to OPFS.
 - **Writers:** a `writer` that lets chosen processes change the paths needs the kernel-side process tag ([#405](https://github.com/ai-ecoverse/slicc-kernel/pull/405)). Until then, `protect.writer` is refused.

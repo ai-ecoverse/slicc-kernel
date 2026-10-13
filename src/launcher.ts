@@ -395,7 +395,6 @@ function concat(chunks: Uint8Array[]): Uint8Array {
 export class Launcher {
   readonly fs: KernelFs;
   readonly processFs: KernelFs;
-  private readonly root: KernelFs;
   private readonly prefixes: readonly string[];
   private readonly base: KernelFs;
   private readonly createWorker: () => WasmWorkerLike;
@@ -472,7 +471,6 @@ export class Launcher {
       changed: this.watchers.changed.bind(this.watchers),
       owners: this.owners,
     });
-    this.root = options.fs;
     this.base = this.watchers.wrap(this.mounts.wrap(options.fs));
     this.createWorker = options.createWorker;
     this.createDriverWorker = options.createDriverWorker;
@@ -527,6 +525,7 @@ export class Launcher {
     this.prefixes = protectedPrefixes(options.protect?.paths ?? []);
     this.processFs =
       this.prefixes.length > 0 ? new ProtectedFs(this.prefixes).view(this.fs) : this.fs;
+    options.fs.protect?.(this.prefixes);
     this.users = new UserDb(this.fs, this.owners);
     this.sudoer = new Sudo({
       fs: this.fs,
@@ -1404,6 +1403,7 @@ export class Launcher {
   }
 
   async mount(spec: MountSpec): Promise<MountEntry> {
+    this.guardMount(spec.target);
     const fsa = spec.type === 'fsa' && !spec.source.startsWith('fsa:');
     const entry = await this.mounts.mount(
       fsa ? { ...spec, source: `fsa:${crypto.randomUUID()}` } : spec,
@@ -1423,6 +1423,7 @@ export class Launcher {
       [`/${UNLINKED_DIR}`, 0o700],
     ];
     for (const [path, mode] of layout) {
+      if (isProtected(this.prefixes, normalizePath(path))) continue;
       const real = await this.realLayoutPath(path);
       const fresh = real !== undefined && !(await this.base.hasOwner?.(real));
       if (fresh) await this.base.chown?.(real, { uid: 0, gid: 0, mode, follow: false });
@@ -1507,7 +1508,6 @@ export class Launcher {
 
   async mountAs(cred: Cred, spec: MountSpec): Promise<MountEntry> {
     const target = normalizePath(spec.target);
-    this.guardMount(target);
     await this.mountsOwn(cred, target, async () => (await this.fs.stat(target)).uid);
     return this.mount(this.mountedBy(spec, cred));
   }
@@ -1553,7 +1553,6 @@ export class Launcher {
     if (this.owners) await this.stampLayout();
     if (this.owners) await this.sudoer.provision();
     await writeCaFile(this.base, this.ca).catch(() => undefined);
-    this.root.protect?.(this.prefixes);
     this.fstab = this.mountFstab();
   }
 
