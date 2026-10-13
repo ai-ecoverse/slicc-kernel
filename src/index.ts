@@ -8,6 +8,7 @@ import {
   errorWithCode,
 } from './client/dial-stream.ts';
 import { type LoopbackFetchOptions, loopbackFetch } from './client/loopback-fetch.ts';
+import type { Attestation } from './fs/attest.ts';
 import type { Denial, DenialHook } from './fs/dac.ts';
 import { PROTECT_WRITER, type Protection } from './fs/protect.ts';
 import type { UsersMode } from './fs/types.ts';
@@ -22,7 +23,7 @@ import type { HostfsGrantHook } from './mount/hostfs.ts';
 import type { MountEntry, MountSpec } from './mount/mount-fs.ts';
 import type { ProcessMountPolicy, ProcessMountRequest } from './mount/syscall.ts';
 import { sealedAnswerer } from './sealed-relay.ts';
-import type { InitRequest, KernelCall, TerminalAction } from './serve.ts';
+import type { FileChanged, InitRequest, KernelCall, TerminalAction } from './serve.ts';
 import type { ApproveHook, SudoRequest } from './sudo.ts';
 import { type NetworkTransport, serveTransport } from './transport.ts';
 import type { Account, AddUser, Group, RemoveUser } from './users.ts';
@@ -47,6 +48,7 @@ export {
 } from './client/attach.ts';
 export type { DialledSocket, DialOptions } from './client/dial-stream.ts';
 export type { LoopbackFetchOptions } from './client/loopback-fetch.ts';
+export type { Attestation, AttestedDir } from './fs/attest.ts';
 export type { Denial, DenialHook } from './fs/dac.ts';
 export type { RouteTable } from './kernel/net/routes.ts';
 export type {
@@ -208,6 +210,8 @@ export interface Kernel {
   umount(target: string): Promise<void>;
   mounts(): Promise<MountEntry[]>;
   insert(target: string, handle: FileSystemDirectoryHandle): Promise<void>;
+  attest(path: string): Promise<Attestation>;
+  watch(paths: string[], onChange: (path: string) => void): Promise<() => void>;
   terminate(): void;
 }
 
@@ -401,7 +405,33 @@ type WorkerMessage =
   | { mountPolicy: { id: number; req: ProcessMountRequest } }
   | CdpOpen
   | { denial: Denial }
+  | FileChanged
   | SudoMessage;
+
+type Requester = (req: KernelCall) => { id: number; done: Promise<unknown> };
+
+function fileWatches(request: Requester, call: (req: KernelCall) => Promise<unknown>) {
+  const watching = new Map<number, (path: string) => void>();
+  return {
+    event(data: WorkerMessage): data is FileChanged {
+      if (!('fileChanged' in data)) return false;
+      watching.get(data.fileChanged.watch)?.(data.fileChanged.path);
+      return true;
+    },
+    async watch(paths: string[], onChange: (path: string) => void): Promise<() => void> {
+      const { id, done } = request({ op: 'watch-files', paths });
+      watching.set(id, onChange);
+      await done.catch((err: unknown) => {
+        watching.delete(id);
+        throw err;
+      });
+      return () => {
+        if (!watching.delete(id)) return;
+        void call({ op: 'unwatch-files', watch: id }).catch(() => undefined);
+      };
+    },
+  };
+}
 
 function approver(approve: ApproveHook | undefined, worker: Worker) {
   const asked = new Map<string, AbortController>();
@@ -452,6 +482,10 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
   let failure: Error | undefined;
 
   const dials = dialer((req) => call(req));
+  const files = fileWatches(
+    (req) => request(req),
+    (req) => call(req)
+  );
   const cdp = cdpBridge(options.cdp);
   const sealed = sealedAnswerer(worker, options.sealed);
   const approvals = approver(options.approve, worker);
@@ -497,7 +531,8 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
       insert: async () =>
         void (await call({ op: 'insert', target, source, handle: await chosen(handle) })),
     });
-  const aside = (data: WorkerMessage): data is { denial: Denial } => {
+  const aside = (data: WorkerMessage): data is { denial: Denial } | FileChanged => {
+    if (files.event(data)) return true;
     if (!('denial' in data)) return sealed.handle(data);
     options.onDenial?.(data.denial);
     return true;
@@ -607,6 +642,8 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     umount: async (target) => void (await call({ op: 'umount', target })),
     mounts: async () => (await call({ op: 'mounts' })) as MountEntry[],
     insert: async (target, handle) => void (await call({ op: 'insert', target, handle })),
+    attest: async (path) => (await call({ op: 'attest', path })) as Attestation,
+    watch: files.watch,
     terminate() {
       fail(new Error('slicc-kernel terminated'));
       worker.terminate();

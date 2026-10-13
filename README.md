@@ -131,6 +131,20 @@ Reach a server a program runs on the kernel's loopback (a dev server, `python -m
 - **Errors** reject with an `Error` whose `code` is the errno: `ECONNREFUSED` when nothing listens on the port or the port is kernel-only (`9222`, the [CDP facade](#browser-automation-cdp)), `ENETUNREACH` for a host that is not the loopback, `EINVAL` for a port outside 1–65535.
 - **Names**: a page reaches the kernel's loopback as `<port>.kernel.localhost`, which is the loopback and a secure context, so a request no service worker routes lands on port 80 of the real machine instead of a real server on that port; the service worker routes the name to `loopbackFetch` with that port. Programs find the name in `SLICC_PAGE_LOOPBACK` (`kernel.localhost`) and `SLICC_PAGE_LOOPBACK_URL` (`http://{port}.kernel.localhost`), to print or inject the right URL.
 
+### `kernel.attest(path)` and `kernel.watch(paths, onChange)`
+
+Page-only: neither is on an attached client (`attachKernel`, `connect()`), so no process or client can ask for them. They are for a page that has to trust a root-owned file, such as a policy file that only `sudo` may change.
+
+- **`attest(path)`** resolves with exactly `{ path, bytes, uid, gid, mode, ino, mtimeMs, sha256, users, onRootFs, parents }`.
+  - `path` is the canonical absolute path. `bytes` is a `Uint8Array` of its own, holding the file's contents. `sha256` is the lowercase hex digest of exactly those bytes. `mode` includes the type bits. `users` is the kernel's `users` mode. `onRootFs` is always `true`. `parents` lists `{ path, uid, gid, mode }` for every directory from `/` down to the file's own.
+  - The kernel answers it itself, over the root file system without permission checks, and lstats every component. It reads the file between two lstats and accepts the read only when the inode, the modification time and the size are unchanged and the bytes match the size. Otherwise it reads once more, then fails with `EAGAIN`.
+  - It refuses with an `Error` whose `code` is: `EACCES` for a symlink at the path or in any parent, for a path at or under a mount, and for a parent that isn't owned by uid 0 or that group or others may write; `EISDIR` for a directory; `EINVAL` for another kind of file or a path that isn't absolute; `ENOTDIR` for a parent that isn't a directory; `ENOENT` for a missing one; and `EFBIG` for a file over 1 MiB.
+  - Under `users: 'off'` there are no owners, so the parent check is skipped and the answer shows what the file system shows (uid and gid 1000, as processes see them). A consumer should accept only `users: 'enforce'`.
+- **`watch(paths, onChange)`** resolves with an unsubscribe function. `onChange(path)` is called once per burst of changes, 50 ms after the last one, for each watched file that changed.
+  - A change is a write, a truncate, a rename, a removal, or a change of mode, owner or times of the file or of any directory above it. A change to a parent directory's own metadata counts too, and creating or removing a sibling changes it when the change comes from another kernel.
+  - It sees changes made through any slicc kernel on the origin, in this tab or another one: the kernels tell each other which files are watched and report writes to those. It doesn't see writes made with the OPFS API outside a kernel, such as a page script or an installer writing the root directly. After such a write the page should attest again itself (and may also attest on tab focus, as a safety net).
+  - The cost when no kernel on the origin watches anything is one empty-set check per write.
+
 ### `attachKernel(port, options?) → Promise<KernelClient>`
 
 Attaches to a kernel over a port from `kernel.connect()`, in any realm: a worker, another tab, or Node. `options.timeoutMs` (10 s by default) bounds the handshake: a port with no kernel behind it rejects with `KernelGoneError`.

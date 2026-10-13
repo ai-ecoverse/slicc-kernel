@@ -2,6 +2,7 @@ import { MemoryMeta, type MetaEntry, type MetaStore } from './meta.ts';
 import { chain, inherit, ownOf, ROOT_OWNER, sameOwner } from './owners.ts';
 import { PathMap } from './path-map.ts';
 import { holdsProtected, isProtected } from './protect.ts';
+import { type RemoteChange, type RemoteListener, RemoteWatch } from './remote.ts';
 import {
   type FsStat,
   fsError,
@@ -204,6 +205,7 @@ export class OpfsFs implements KernelFs {
   private readonly checked = new WeakMap<FileSystemDirectoryHandle, number>();
 
   private readonly channel: BroadcastChannel | undefined;
+  private readonly remote: RemoteWatch | undefined;
   private readonly ranged: boolean;
   private owners = false;
 
@@ -217,9 +219,15 @@ export class OpfsFs implements KernelFs {
     this.meta = sidecar(meta);
     this.ranged = options.ranged === true;
     this.channel = channel === undefined ? undefined : new BroadcastChannel(channel);
+    this.remote = channel === undefined ? undefined : new RemoteWatch(`${channel}:watch`);
     if (this.channel) {
+      const remote = this.remote;
+      (meta as { listen?: (l: (c: Partial<RemoteChange>) => void) => void }).listen?.((c) =>
+        remote?.emit({ paths: c.paths ?? [], trees: c.trees ?? [] })
+      );
       this.channel.onmessage = ({ data }) => {
         for (const path of data as string[]) this.forget(path);
+        remote?.emit({ paths: data as string[], trees: [] });
       };
       (this.channel as BroadcastChannel & { unref?: () => void }).unref?.();
     }
@@ -228,6 +236,18 @@ export class OpfsFs implements KernelFs {
   private changed(...paths: string[]): void {
     for (const path of paths) this.forget(path);
     this.channel?.postMessage(paths);
+  }
+
+  remoteChanges(listener: RemoteListener): () => void {
+    return this.remote?.listen(listener) ?? (() => {});
+  }
+
+  announceWatch(paths: readonly string[]): void {
+    this.remote?.announce(paths);
+  }
+
+  private committed(target: string): void {
+    if (this.remote?.watched()) this.remote.wrote(target);
   }
 
   resolvePath(base: string, path: string): string {
@@ -644,17 +664,20 @@ export class OpfsFs implements KernelFs {
   }
 
   async pwrite(path: string, offset: number, bytes: Uint8Array): Promise<void> {
-    const handle = (await this.fileFor(path))[0];
+    const [handle, , target] = await this.fileFor(path);
     await this.retrying(path, () => positioned(handle, (io) => io.write(offset, bytes)), true);
+    this.committed(target);
   }
 
   async truncate(path: string, size: number): Promise<void> {
     const handle = await this.existing(path, true);
+    const target = this.remote?.watched() ? (await this.locate(path, true)).path : path;
     await this.retrying(path, () => positioned(handle, (io) => io.truncate(size)), true);
+    this.committed(target);
   }
 
   async writeSession(path: string, truncate: boolean): Promise<WriteSession> {
-    const handle = (await this.fileFor(path))[0];
+    const [handle, , target] = await this.fileFor(path);
     const writable = await this.retrying(
       path,
       () => handle.createWritable({ keepExistingData: !truncate }),
@@ -671,10 +694,12 @@ export class OpfsFs implements KernelFs {
         writable.truncate(size).catch((err: unknown) => {
           throw translate(err, path, 'write', false);
         }),
-      close: () =>
-        writable.close().catch((err: unknown) => {
+      close: async () => {
+        await writable.close().catch((err: unknown) => {
           throw translate(err, path, 'commit', false);
-        }),
+        });
+        this.committed(target);
+      },
     };
   }
 
@@ -727,6 +752,7 @@ export class OpfsFs implements KernelFs {
       await writable?.abort().catch(() => undefined);
       throw translate(err, path, 'commit', false);
     }
+    this.committed(target);
   }
 
   private async listing(path: string): Promise<[string, Array<[string, Handle | MetaEntry]>]> {

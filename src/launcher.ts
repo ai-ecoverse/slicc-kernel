@@ -13,6 +13,7 @@ import {
   scanFilesystems,
 } from './commands.ts';
 import { R_OK, X_OK } from './fs/access.ts';
+import { type Attestation, attest, FileWatches, type RemoteFs } from './fs/attest.ts';
 import { followLinks, withCommandDirs } from './fs/commands.ts';
 import { Dac, type DenialHook, need, TTY_MODE } from './fs/dac.ts';
 import { physicalPathAsync } from './fs/physical-path.ts';
@@ -453,12 +454,15 @@ export class Launcher {
   readonly usersMode: UsersMode;
   readonly dac: Dac | undefined;
   private readonly sealed: SealedBroker;
+  private readonly rootFs: KernelFs;
+  private fileWatches: FileWatches | undefined;
   private nextPid = 1000;
   readonly boot = Date.now();
   private terminals = 0;
 
   constructor(options: LauncherOptions) {
     this.usersMode = usersMode(options.users);
+    this.rootFs = options.fs;
     this.dac = this.usersMode === 'off' ? undefined : new Dac(this.usersMode, options.onDenial);
     this.sealed = new SealedBroker(options.sealed, this.usersMode, undefined, (pid) =>
       this.tagOf(pid)
@@ -1407,6 +1411,18 @@ export class Launcher {
         port2.close();
       },
     };
+  }
+
+  attest(path: string): Promise<Attestation> {
+    return attest(this.rootFs, path, {
+      users: this.usersMode,
+      mounts: this.mounts.list().map((entry) => entry.target),
+    });
+  }
+
+  watchFiles(paths: readonly string[], notify: (path: string) => void): () => void {
+    this.fileWatches ??= new FileWatches(this.watchers, this.rootFs as RemoteFs);
+    return this.fileWatches.watch(paths, notify);
   }
 
   async mount(spec: MountSpec): Promise<MountEntry> {
