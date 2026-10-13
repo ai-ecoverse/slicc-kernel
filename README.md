@@ -46,9 +46,9 @@ const { status, stdout, stderr } = await kernel.run(['bash', '-c', 'echo hi > he
 | `cdp` | none | `({ runtime }) => Promise<CdpConnection>`: a browser-level DevTools connection for programs that drive a browser (see [Browser automation](#browser-automation-cdp)) |
 | `protect` | none | `{ paths, writers? }`: directories no process may change, root included, in every `users` mode, except processes with one of the `writers` tags (see [Protected paths](#protected-paths)). `createNodeKernel` takes it too |
 
-### `kernel.run(argv, options?) → Promise<{ status, stdout, stderr }>`
+### `kernel.run(argv, options?) → Promise<{ status, signal, stdout, stderr }>`
 
-Runs `argv[0]` with `argv` as its arguments and resolves when it exits. `stdout` and `stderr` are decoded as UTF-8; `status` is the exit status, `128 + n` for a process killed by signal `n`, and `127` when `argv[0]` cannot be found.
+Runs `argv[0]` with `argv` as its arguments and resolves when it exits. `stdout` and `stderr` are decoded as UTF-8; `status` is the exit status, `128 + n` for a process killed by signal `n`, and `127` when `argv[0]` cannot be found. `signal` is there only when a signal ended the process, named as `'SIGKILL'`, so a `kill -9` (`status: 137, signal: 'SIGKILL'`) can be told from an `exit 137` (`status: 137`, no `signal`).
 
 | option | |
 | --- | --- |
@@ -77,6 +77,7 @@ Starts `argv` as the session leader on a new terminal and resolves once it is ru
 | `resize(cols, rows)` | sets the window size (`TIOCGWINSZ`) and sends `SIGWINCH` to the foreground process group |
 | `signal(name)` | sends a signal (`'SIGINT'`, `'SIGTSTP'`, `'SIGQUIT'`, `'SIGHUP'`, …) to the foreground process group, regardless of termios |
 | `exited` | resolves with the session leader's exit status (`128 + n` if killed by signal `n`) |
+| `ended` | resolves with `{ status, signal }` at the same time: `status` as `exited`, and `signal` named (`'SIGKILL'`) only when a signal ended it |
 | `close()` | hangs up: `SIGHUP` to the foreground process group, and reads from the terminal return end-of-file |
 
 ### `kernel.terminate()`
@@ -152,9 +153,9 @@ Attaches to a kernel over a port from `kernel.connect()`, in any realm: a worker
 
 | Client | |
 |---|---|
-| `spawn(argv, { cwd, user, env, stdin, pgid, onStdout, onStderr })` | runs over pipes and resolves with `{ pid, pgid, exited, signal(name) }` once the process has started; output arrives in chunks, as bytes, and the kernel keeps no copy; every spawn leads its own process group, which `signal` (default `SIGTERM`) signals, unless `pgid` names an existing group to join (protocol 1.3): the process then joins that group and that group's session, as `setpgid` would (a client has no session of its own: each of its spawns and terminals leads one, and `setpgid` cannot cross sessions), and `signal` signals the whole group. The group must have been started by this client (a spawn or a terminal it opened), even if its leader has exited; an unknown group rejects with `code: 'ESRCH'`, another session's with `code: 'EPERM'`, and against a 1.2 kernel the client rejects with `code: 'ENOSYS'` before sending anything, as an older kernel would ignore the option; a program that cannot start rejects with `code: 'ENOENT'`. `user` runs it as another user, which only a root client may (see `kernel.connect`); against a 1.7 kernel the client rejects with `code: 'ENOSYS'` |
-| `run(argv, options?)` | `spawn` and wait: `{ pid, status, stdout, stderr }` as text, with `onStdout`/`onStderr` streaming text |
-| `openTerminal(argv, options?)` | a pty session, as `kernel.openTerminal` |
+| `spawn(argv, { cwd, user, env, stdin, pgid, onStdout, onStderr })` | runs over pipes and resolves with `{ pid, pgid, exited, ended, signal(name) }` once the process has started; `ended` resolves with `{ status, signal }`, `signal` named only when a signal ended the process, as for `kernel.run` (an older kernel never names one); output arrives in chunks, as bytes, and the kernel keeps no copy; every spawn leads its own process group, which `signal` (default `SIGTERM`) signals, unless `pgid` names an existing group to join (protocol 1.3): the process then joins that group and that group's session, as `setpgid` would (a client has no session of its own: each of its spawns and terminals leads one, and `setpgid` cannot cross sessions), and `signal` signals the whole group. The group must have been started by this client (a spawn or a terminal it opened), even if its leader has exited; an unknown group rejects with `code: 'ESRCH'`, another session's with `code: 'EPERM'`, and against a 1.2 kernel the client rejects with `code: 'ENOSYS'` before sending anything, as an older kernel would ignore the option; a program that cannot start rejects with `code: 'ENOENT'`. `user` runs it as another user, which only a root client may (see `kernel.connect`); against a 1.7 kernel the client rejects with `code: 'ENOSYS'` |
+| `run(argv, options?)` | `spawn` and wait: `{ pid, status, signal, stdout, stderr }` as text, with `onStdout`/`onStderr` streaming text; `signal` as for `kernel.run` |
+| `openTerminal(argv, options?)` | a pty session, as `kernel.openTerminal`, `ended` included |
 | `ps()` | the kernel's processes: `{ pid, ppid, pgid, sid, argv, tty, started, state, rss, utime, stime, uid, gid }`, `state` being `'S'`, `'T'` (stopped) or `'Z'`, `rss` the process's resident memory in bytes (the size of its wasm memory, what `/proc/<pid>/status` shows as `VmRSS`; absent from kernels before 1.61), `utime`/`stime` the CPU time it has used, in milliseconds, in its program and in the kernel's calls (see [`/proc`](#proc); absent for a JS program and from kernels before 1.63) and `uid`/`gid` the effective ids (absent from a 1.7 kernel). A client bound to a user sees only that user's processes |
 | `kill(pid, signal?)` | a process, or a process group with a negative pid; no such process rejects with `code: 'ESRCH'`, and one the client's user may not signal with `code: 'EPERM'` |
 | `fs` | `readFile`, `readText`, `writeFile(path, string \| bytes)`, `stat`, `lstat`, `readdir`, `mkdir` (with parents), `rm(path, { force })` (recursive), `rename`, `realpath`, `symlink(target, path)`, `readlink`, `exists`, on the processes' file system, mounts included (a path under a `tmpfs`, `fsa` or `hostfs` mount reads and writes the mounted file system, as `cat` in a process would); failures reject with `KernelCallError` and a POSIX `code` |

@@ -19,6 +19,7 @@ import type { TransportCall } from './kernel/net/remote-transport.ts';
 import type { RouteTable } from './kernel/net/routes.ts';
 import { type NetworkUplink, serveUplink, type UplinkCall } from './kernel/net/uplink.ts';
 import type { SealedHook } from './kernel/sealed.ts';
+import { quiet, signalField } from './kernel/signals.ts';
 import type { PendingMedium } from './launcher.ts';
 import type { MediumHandle } from './mount/fsa.ts';
 import type { HostfsGrantHook } from './mount/hostfs.ts';
@@ -34,6 +35,7 @@ export type { CdpConnection, CdpHook, CdpRequest } from './cdp/types.ts';
 export {
   type AttachOptions,
   attachKernel,
+  type ClientEnded,
   type ClientFetchRequest,
   type ClientFs,
   type ClientRunOptions,
@@ -179,6 +181,7 @@ export interface RunOptions {
 
 export interface RunResult {
   status: number;
+  signal?: string;
   stdout: string;
   stderr: string;
 }
@@ -238,9 +241,15 @@ export type TerminalSignal =
   | 'SIGKILL'
   | 'SIGCONT';
 
+export interface Ended {
+  status: number;
+  signal?: string;
+}
+
 export interface Terminal {
   readonly pid: number;
   readonly exited: Promise<number>;
+  readonly ended: Promise<Ended>;
   onData: ((bytes: Uint8Array) => void) | null;
   write(data: string | Uint8Array): void;
   resize(cols: number, rows: number): void;
@@ -489,6 +498,29 @@ function hookRelays(
   };
 }
 
+interface RawRun {
+  status: number;
+  signal?: number;
+  stdout: Uint8Array;
+  stderr: Uint8Array;
+}
+
+function decodedRun(result: RawRun): RunResult {
+  const decoder = new TextDecoder();
+  return {
+    status: result.status,
+    ...signalField(result.signal),
+    stdout: decoder.decode(result.stdout),
+    stderr: decoder.decode(result.stderr),
+  };
+}
+
+function endedOf(r: unknown): Ended {
+  if (typeof r === 'number') return { status: r };
+  const { status, signal } = r as { status: number; signal?: number };
+  return { status, ...signalField(signal) };
+}
+
 export async function createKernel(options: KernelOptions = {}): Promise<Kernel> {
   checkOptions(options);
   writerTags(options.protect);
@@ -609,7 +641,8 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
       void call({ op: 'terminal', terminal: id, ...action }).catch(() => undefined);
     return {
       pid,
-      exited: done as Promise<number>,
+      exited: quiet(done.then((r) => endedOf(r).status)),
+      ended: quiet(done.then(endedOf)),
       get onData() {
         return listener;
       },
@@ -640,13 +673,8 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
       const result = (await call(
         { op: 'run', argv, options: { ...rest, ...(input ? { stdin: input } : {}) } },
         { output: (fd, bytes) => streams[fd](bytes) }
-      )) as { status: number; stdout: Uint8Array; stderr: Uint8Array };
-      const decoder = new TextDecoder();
-      return {
-        status: result.status,
-        stdout: decoder.decode(result.stdout),
-        stderr: decoder.decode(result.stderr),
-      };
+      )) as RawRun;
+      return decodedRun(result);
     },
     openTerminal,
     connect: async (connectOptions = {}) =>

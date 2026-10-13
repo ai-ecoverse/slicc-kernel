@@ -431,13 +431,17 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
     return launcher;
   }
 
-  async function terminal(req: OpenTerminalRequest): Promise<number> {
+  async function terminal(
+    req: OpenTerminalRequest
+  ): Promise<number | { status: number; signal: number }> {
     const onData = (bytes: Uint8Array) => reply(req.id, { fd: 1, bytes });
     const session = await (await ready()).openTerminal(req.argv, { ...req.options, onData });
     terminals.set(req.id, session);
     reply(req.id, { started: session.pid });
     try {
-      return await session.exited;
+      const status = await session.exited;
+      const signal = session.termsig();
+      return signal ? { status, signal } : status;
     } finally {
       terminals.delete(req.id);
     }
