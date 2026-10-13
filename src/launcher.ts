@@ -915,7 +915,7 @@ export class Launcher {
   private start(req: StartRequest): WasmProcessHandle {
     this.sampling();
     if (req.pgid !== undefined && this.jobs.sessionOf(req.pgid) === undefined) {
-      throw fsError('ESRCH', `no process group ${req.pgid}`);
+      throw new SpawnError('ESRCH');
     }
     const pid = this.nextPid++;
     const stack = this.stackFor(req.tag);
