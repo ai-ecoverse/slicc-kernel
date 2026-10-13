@@ -815,7 +815,7 @@ export class OpfsFs implements KernelFs {
       const above = owner && {
         uid: owner.uid,
         gid: owner.gid,
-        ...(mode ? { mode, parents: mode } : {}),
+        ...(mode !== undefined ? { mode, parents: mode } : {}),
       };
       await this.mkdir(parentOf(path), { recursive: true, ...(above ? { owner: above } : {}) });
     }

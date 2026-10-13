@@ -229,6 +229,7 @@ export function guardOf(entry: SyncFsTokenEntry): Guard | undefined {
 }
 
 const FOLLOWING = new Set<SyncFsOp>(['exists', 'stat', 'chown', 'statfs']);
+const LOOKS = new Set<SyncFsOp>(['exists', 'stat', 'lstat']);
 const NOT_FOLLOWING = new Set<SyncFsOp>(['lstat', 'readlink', 'lchown']);
 
 async function guard(g: Guard, path: string, req: SyncFsRequest, cwd: string): Promise<void> {
@@ -303,6 +304,7 @@ async function accessOp(entry: SyncFsTokenEntry, path: string, req: SyncFsReques
 async function guarded(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest) {
   const g = guardOf(entry);
   if (!g) return undefined;
+  if (LOOKS.has(req.op) && (await entry.holdsKept?.(path))) return undefined;
   try {
     await guard(g, path, req, entry.cwd);
     return undefined;

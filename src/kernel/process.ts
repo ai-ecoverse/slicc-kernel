@@ -1130,6 +1130,14 @@ export class WasmProcess {
 
   keptPath?: (path: string) => string | undefined;
 
+  async holds(path: string): Promise<boolean> {
+    for (const fd of this.fds.numbers()) {
+      const { file } = this.fds.get(fd);
+      if ((await file.stat?.().catch(() => undefined))?.path === path) return true;
+    }
+    return false;
+  }
+
   keptHandle?: (handle: number) => string | undefined;
 
   private async keptOr(path: string, handle?: number): Promise<string> {
