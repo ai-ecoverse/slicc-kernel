@@ -14,6 +14,7 @@ import { KernelError, OpenFile } from './fd-table.ts';
 export interface VfsFileFs extends Partial<AsyncRangedIo> {
   readFileBuffer(path: string): Promise<Uint8Array>;
   writeFile(path: string, content: Uint8Array, owner?: NewOwner): Promise<void>;
+  mayChange?(path: string, follow: boolean): Promise<void>;
   stat?(path: string): Promise<{
     readonly?: boolean;
     maxFile?: number;

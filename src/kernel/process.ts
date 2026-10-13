@@ -866,6 +866,7 @@ export class WasmProcess {
       throw Object.assign(new Error(alias.refused), { code: alias.refused });
     if (alias !== undefined) return this.openProc(req, alias);
     await refuseReadonly(this.options.fs, req.path, req.flags, req);
+    if (this.writesAt(req)) await this.options.fs.mayChange?.(req.path, !req.exclusive);
     await this.mayOpen(req);
     const fd = this.fds.install(heldFile(), 3);
     try {

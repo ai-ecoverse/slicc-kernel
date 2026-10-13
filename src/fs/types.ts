@@ -83,6 +83,7 @@ export interface KernelFs {
   truncate?(path: string, size: number): Promise<void>;
   protect?(prefixes: readonly string[]): void;
   unguarded?(): KernelFs;
+  mayChange?(path: string, follow: boolean): Promise<void>;
 }
 
 export type RangedOps = Required<Pick<KernelFs, 'pread' | 'pwrite' | 'truncate'>>;
