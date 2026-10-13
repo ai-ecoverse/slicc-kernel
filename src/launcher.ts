@@ -395,7 +395,7 @@ function concat(chunks: Uint8Array[]): Uint8Array {
 export class Launcher {
   readonly fs: KernelFs;
   readonly processFs: KernelFs;
-  private readonly prefixes: readonly string[];
+  private readonly prefixes: string[];
   private readonly base: KernelFs;
   private readonly createWorker: () => WasmWorkerLike;
   private readonly modulesDir: string;
@@ -1244,6 +1244,13 @@ export class Launcher {
     this.settling.deliver(sig, pgid, keyed, tty.reading ? undefined : foreground);
   }
 
+  private async resolvePrefixes(): Promise<void> {
+    for (const prefix of [...this.prefixes]) {
+      const real = await this.base.realpath?.(prefix, true).catch(() => undefined);
+      if (real !== undefined && !this.prefixes.includes(real)) this.prefixes.push(real);
+    }
+  }
+
   private guardMount(target: string): void {
     const at = normalizePath(target);
     if (isProtected(this.prefixes, at) || holdsProtected(this.prefixes, at)) {
@@ -1546,6 +1553,7 @@ export class Launcher {
   }
 
   async prepare(): Promise<void> {
+    await this.resolvePrefixes();
     for (const dir of SHARED_DIRS) await this.base.mkdir(dir, { recursive: true });
     if (this.owners) await this.base.chmod('/tmp', 0o1777);
     await this.provisionPnpmHome();
