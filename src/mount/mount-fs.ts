@@ -1074,11 +1074,7 @@ class MountFs implements KernelFs {
     if (!found) return this.base.rm(path, options);
     const { mount, rel } = found;
     const real = normalizePath(path);
-    if (rel === '/' && options.recursive) {
-      for (const entry of await this.table.readdir(mount, real, rel)) {
-        await this.rm(joinName(real, entry.name), options);
-      }
-    }
+    if (rel === '/' && options.recursive) await this.rmEach(real, mount, rel, options);
     if (rel === '/') throw errnoError('EBUSY', `${real} is a mount point`);
     this.writable(mount, real);
     await this.table.commitUnder(real);
@@ -1092,13 +1088,26 @@ class MountFs implements KernelFs {
     if (options.file && attr.kind === 'directory') throw errnoError('EISDIR', real);
     this.table.forget(mount, real);
     if (attr.kind === 'directory' && options.recursive) {
-      for (const entry of await this.table.readdir(mount, real, rel)) {
-        await this.rm(`${real}/${entry.name}`, { recursive: true, force: options.force ?? false });
-      }
+      await this.rmEach(real, mount, rel, { recursive: true, force: options.force ?? false });
       this.table.forget(mount, real);
     }
     await mount.conn.call({ op: attr.kind === 'directory' ? 'rmdir' : 'unlink', path: rel });
     this.table.forget(mount, real);
+  }
+
+  private async rmEach(
+    real: string,
+    mount: Mount,
+    rel: string,
+    options: { recursive?: boolean; force?: boolean }
+  ): Promise<void> {
+    let first: unknown;
+    for (const entry of await this.table.readdir(mount, real, rel)) {
+      await this.rm(joinName(real, entry.name), options).catch((err: unknown) => {
+        first ??= err;
+      });
+    }
+    if (first) throw first;
   }
 
   private async rmAround(

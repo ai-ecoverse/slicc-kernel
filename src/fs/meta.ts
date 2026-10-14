@@ -27,6 +27,7 @@ export interface MetaStore {
   under(path: string): Promise<MetaEntry[]>;
   all(): Promise<MetaEntry[]>;
   absent?(path: string): boolean;
+  removeFile?(path: string): Promise<void>;
 }
 
 export const META_DB = 'slicc-kernel';
@@ -210,39 +211,56 @@ export class IndexedDbMeta implements MetaStore {
     return this.cache.has(path) && this.cache.get(path) === null;
   }
 
-  private removing: string[] = [];
+  private removing = new Map<string, string>();
   private removeTimer: ReturnType<typeof setTimeout> | undefined;
 
   async remove(paths: readonly string[]): Promise<void> {
+    this.settleRemoves();
+    return this.removeNow(paths);
+  }
+
+  async removeFile(path: string): Promise<void> {
+    const known = this.cache.get(path);
+    if (!known) return this.remove([path]);
     this.generation++;
-    for (const path of paths) {
-      this.cache.deleteTree(path);
-      this.cache.set(path, null);
-    }
-    this.removing.push(...paths);
-    if (this.removing.length >= REMOVE_BATCH) return this.flushRemoves();
+    this.cache.set(path, null);
+    this.removing.set(path, JSON.stringify(known));
+    if (this.removing.size >= REMOVE_BATCH) return this.flushRemoves();
     this.removeTimer ??= setTimeout(
       () => void this.flushRemoves().catch(() => undefined),
       REMOVE_WAIT_MS
     );
   }
 
-  private settleRemoves(): void {
-    if (this.removing.length > 0) void this.flushRemoves().catch(() => undefined);
-  }
-
-  private flushRemoves(): Promise<void> {
-    clearTimeout(this.removeTimer);
-    this.removeTimer = undefined;
-    const paths = this.removing;
-    if (paths.length === 0) return Promise.resolve();
-    this.removing = [];
+  private async removeNow(paths: readonly string[]): Promise<void> {
     const [transaction, store] = this.transaction('readwrite');
     for (const path of paths) {
       store.delete(path);
       store.delete(descendants(path));
     }
-    return settle(transaction, () => void this.channel.postMessage({ trees: paths }));
+    await settle(transaction, () => undefined);
+    this.changed({ trees: paths });
+  }
+
+  private settleRemoves(): void {
+    if (this.removing.size > 0) void this.flushRemoves().catch(() => undefined);
+  }
+
+  private flushRemoves(): Promise<void> {
+    clearTimeout(this.removeTimer);
+    this.removeTimer = undefined;
+    const batch = this.removing;
+    if (batch.size === 0) return Promise.resolve();
+    this.removing = new Map();
+    const [transaction, store] = this.transaction('readwrite');
+    for (const [path, seen] of batch) {
+      const request = store.get(path);
+      request.onsuccess = () => {
+        if (request.result && JSON.stringify(request.result) === seen) store.delete(path);
+      };
+    }
+    const paths = [...batch.keys()];
+    return settle(transaction, () => void this.channel.postMessage({ paths }));
   }
 
   async links(dir: string): Promise<MetaEntry[]> {

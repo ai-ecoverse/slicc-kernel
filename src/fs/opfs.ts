@@ -84,6 +84,12 @@ function sidecar(meta: MetaStore): MetaStore {
         });
   const ops = Object.fromEntries(META_OPS.map((op) => [op, guarded(op)])) as unknown as MetaStore;
   if (meta.absent) ops.absent = meta.absent.bind(meta);
+  const { removeFile } = meta;
+  if (removeFile)
+    ops.removeFile = (path: string) =>
+      removeFile.call(meta, path).catch((err: unknown) => {
+        throw translate(err, path, 'sidecar', false);
+      });
   return ops;
 }
 
@@ -953,6 +959,11 @@ export class OpfsFs implements KernelFs {
       else this.forget(found.path);
       this.movePending(found.path);
       if (file && this.meta.absent?.(found.path)) {
+        this.touch(parentOf(found.path));
+        return;
+      }
+      if (file && this.meta.removeFile) {
+        await this.meta.removeFile(found.path);
         this.touch(parentOf(found.path));
         return;
       }
