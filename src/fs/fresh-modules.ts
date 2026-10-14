@@ -2,11 +2,13 @@ import { type KernelFs, normalizePath, rangedOps } from './types.ts';
 
 const MAGIC = [0x00, 0x61, 0x73, 0x6d];
 const MAX_FRESH = 65_536;
+const DEFAULT_UMASK = 0o022;
 
 interface Fresh {
   umask: number;
   pid: number;
   added: number;
+  setup: boolean;
 }
 
 function isModule(bytes: Uint8Array): boolean {
@@ -25,16 +27,22 @@ export class FreshModules {
     this.fresh.delete(key);
     const oldest = this.fresh.size >= MAX_FRESH ? this.fresh.keys().next().value : undefined;
     if (oldest !== undefined) this.fresh.delete(oldest);
-    this.fresh.set(key, { umask: umask & 0o777, pid, added: 0 });
+    const mask = umask & 0o777;
+    this.fresh.set(key, { umask: mask, pid, added: 0, setup: mask !== DEFAULT_UMASK });
   }
 
   forget(pid: number): void {
     for (const [path, fresh] of this.fresh) if (fresh.pid === pid) this.fresh.delete(path);
   }
 
+  private drop(fresh: Fresh): void {
+    for (const [key, note] of [...this.fresh]) if (note === fresh) this.fresh.delete(key);
+  }
+
   private moved(from: string, to: string): void {
     const source = normalizePath(from);
     const target = normalizePath(to);
+    if (source === target) return;
     for (const key of [...this.fresh.keys()]) {
       if (key === target || within(key, target)) this.fresh.delete(key);
     }
@@ -56,6 +64,7 @@ export class FreshModules {
       if (!fresh) return;
       const bytes = known && known.length >= MAGIC.length ? known : await head(path);
       const want = isModule(bytes) ? 0o111 & ~fresh.umask : 0;
+      fresh.setup = false;
       if (want === fresh.added) return;
       const mode = (await fs.stat(path)).mode & 0o7777;
       await fs.chmod(path, (mode & ~fresh.added) | want);
@@ -72,7 +81,9 @@ export class FreshModules {
         }
       },
       chmod: async (path: string, mode: number) => {
-        this.fresh.delete(normalizePath(path));
+        const fresh = this.fresh.get(normalizePath(path));
+        if (fresh?.setup && (mode & 0o7777) === (0o666 & ~fresh.umask)) fresh.setup = false;
+        else if (fresh) this.drop(fresh);
         await fs.chmod(path, mode);
       },
       rm: async (path: string, options?: { recursive?: boolean; force?: boolean }) => {
