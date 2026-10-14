@@ -46,8 +46,13 @@ interface Manifest {
 }
 
 const NAME = /^[A-Za-z0-9._+-]+$/;
+const COMMAND_NAME = /^[^/\s\p{Cc}]+$/u;
 const ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const PACKAGE = /\$\{package\}/g;
+
+function commandName(name: string): boolean {
+  return COMMAND_NAME.test(name) && name.isWellFormed() && name !== '.' && name !== '..';
+}
 
 function inside(pkg: string, rel: unknown): string | undefined {
   if (typeof rel !== 'string' || rel === '') return undefined;
@@ -152,7 +157,7 @@ export function commandsOf(pkg: string, manifest: Manifest): Command[] {
   const shared = envOf(pkg, slicc.env);
   const out: Command[] = [];
   for (const [name, raw] of Object.entries(entries as Record<string, CommandEntry>)) {
-    if (!NAME.test(name) || name === '.' || name === '..' || !raw || typeof raw !== 'object') {
+    if (!commandName(name) || !raw || typeof raw !== 'object') {
       continue;
     }
     const command = commandOf(pkg, name, raw, packageAbi, shared);
@@ -269,7 +274,7 @@ async function binCommandsOf(
   const home = (await physical(pkg))?.path;
   const out: Command[] = [];
   for (const [name, rel] of entries) {
-    if (taken.has(name) || !NAME.test(name) || name === '.' || name === '..') continue;
+    if (taken.has(name) || !commandName(name)) continue;
     const script = inside(pkg, rel);
     if (!script) continue;
     const real = await physical(script);
