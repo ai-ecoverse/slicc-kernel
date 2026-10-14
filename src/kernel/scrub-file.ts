@@ -109,7 +109,7 @@ export function scrubStdio(fds: FdTable, scrubber: Scrubber): void {
   const stdio = stdioFiles(fds);
   for (const fd of fds.numbers()) {
     const original = fds.get(fd);
-    if (!stdio.has(original) && !original.file.tty) continue;
+    if (!stdio.has(original) && !original.file.tty && !original.file.clipboard) continue;
     const known = wrapped.get(original);
     const flags = fds.statusFlags(fd);
     const wrapper = known ? known.retain() : scrubbed(original.retain(), scrubber);
