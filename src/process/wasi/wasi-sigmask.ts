@@ -47,6 +47,10 @@ export class WasiSigmask {
     return E.SUCCESS;
   }
 
+  discard(sig: number): void {
+    Atomics.and(this.header, SAB_I_SIGNALS, ~sigbit(sig));
+  }
+
   pending(): number {
     const own = Atomics.load(this.header, SAB_I_SIGNALS);
     return libcBits(own | (this.process ? Atomics.load(this.process, SAB_I_SIGNALS) : 0));

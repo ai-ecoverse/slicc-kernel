@@ -98,6 +98,8 @@ const MONOTONIC_BASE = BigInt(Math.round(performance.timeOrigin)) * NS_PER_MS;
 const MAX_READ = 1024 * 1024;
 const SIGPIPE_EXIT = 141;
 
+const SIG_IGN = 1;
+
 interface Positional {
   pread(max: number, at: number): Uint8Array;
   pwrite(bytes: Uint8Array, at: number): number;
@@ -408,8 +410,12 @@ export class WasiHost {
         const groups = Array.from({ length: n }, (_, i) => view.getUint32(buf + i * 4, true));
         void this.o.kernel.call({ op: 'proc-setcred', change: { groups } });
       },
-      sigaction_set: (sig: number, disposition: number, flags: number) =>
-        this.signals ? this.signals.disposition(sig, disposition, flags) : E.NOSYS,
+      sigaction_set: (sig: number, disposition: number, flags: number) => {
+        if (!this.signals) return E.NOSYS;
+        const errno = this.signals.disposition(sig, disposition, flags);
+        if (errno === E.SUCCESS && disposition === SIG_IGN) this.sigmask?.discard(sig);
+        return errno;
+      },
       sigmask_set: (how: number, lo: number, hi: number, old: number) =>
         this.sigmask
           ? this.sigmask.set(how, lo, hi, (oldLo, oldHi) => {
