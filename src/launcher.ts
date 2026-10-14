@@ -1874,9 +1874,10 @@ export class Launcher {
       this.base.hasOwner &&
       !(await this.base.hasOwner(real))
     ) {
+      const names = await this.base.readdir(real).catch(() => undefined);
       let removed = 0;
-      let left = 0;
-      for (const name of await this.base.readdir(real).catch(() => [] as string[])) {
+      let left = names === undefined ? 1 : 0;
+      for (const name of names ?? []) {
         const path = joinName(real, name);
         if (await this.base.hasOwner(path)) continue;
         const failed = this.inUse(path)
