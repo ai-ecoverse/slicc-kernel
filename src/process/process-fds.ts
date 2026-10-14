@@ -861,6 +861,7 @@ function baseOf(Fs: AccessFs, dirfd: number): string {
 }
 
 const W_ACCESS = 2;
+const X_ACCESS = 1;
 
 function readonlyRefusal(
   Fs: AccessFs,
@@ -937,8 +938,29 @@ interface ChmodFs {
   chmod?(path: string, mode: number): void;
 }
 
+interface ChdirFs extends AccessFs {
+  chdir?(path: string): void;
+  ErrnoError?: new (errno: number) => Error;
+}
+
+function kernelChdir(Fs: ChdirFs): void {
+  const { chdir, lookupPath, ErrnoError } = Fs;
+  if (!chdir || !lookupPath || !ErrnoError) return;
+  Fs.chdir = (path: string) => {
+    const { node } = lookupPath.call(Fs, path, { follow: true });
+    const bridge = node.live ? node.mount.opts.bridge : undefined;
+    try {
+      bridge?.access?.(liveNodePath(node), X_ACCESS, 'eaccess', false);
+    } catch (err) {
+      throw new ErrnoError(errnoOf(err));
+    }
+    chdir.call(Fs, path);
+  };
+}
+
 export function linuxDevices(Fs: ProcessFs): void {
   (Fs as { ignorePermissions?: boolean }).ignorePermissions = true;
+  kernelChdir(Fs as unknown as ChdirFs);
   const { chmod } = Fs as unknown as ChmodFs;
   if (!chmod) return;
   for (const [path, mode] of DEVICE_MODES) {
