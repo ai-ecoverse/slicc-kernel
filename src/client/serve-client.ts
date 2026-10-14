@@ -19,7 +19,7 @@ import { type Cred, copyCred, ROOT } from '../kernel/cred.ts';
 import { dialSocket, serveSocket } from '../kernel/dial.ts';
 import type { TransportCall } from '../kernel/net/remote-transport.ts';
 import type { RealmTransport } from '../kernel/net/transport.ts';
-import { SIG } from '../kernel/signals.ts';
+import { SIG, signalField } from '../kernel/signals.ts';
 import type { Launcher, TerminalSession } from '../launcher.ts';
 import { serveTransport, type TransportServer } from '../transport.ts';
 import { type Account, credOf } from '../users.ts';
@@ -53,6 +53,7 @@ export interface ServedClient {
 
 interface Answer {
   result: unknown;
+  signal?: string;
   transfer?: Transferable[];
 }
 
@@ -349,6 +350,16 @@ async function watchOp(
   return { result: req.id };
 }
 
+const TRAITS_WATCH = -1;
+
+function traitsWatch(
+  launcher: Launcher,
+  transport: RealmTransport,
+  send: (message: object) => void
+): () => void {
+  return launcher.onTraits(() => send({ traits: transport.traits }));
+}
+
 export function serveClient(port: MessagePortLike, host: ClientHost): ServedClient {
   let state: 'new' | 'open' | 'closed' = 'new';
   let self: Account | undefined;
@@ -403,6 +414,7 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
         ...(host.lock ? { lock: host.lock } : {}),
       },
     });
+    watches.set(TRAITS_WATCH, traitsWatch(launcher, transport, send));
   }
 
   async function terminal(req: Extract<ClientRequest, { op: 'open-terminal' }>, l: Launcher) {
@@ -419,7 +431,8 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
       reply(req.id, { started: session.pid });
     }
     try {
-      return { result: await session.exited };
+      const status = await session.exited;
+      return { result: status, ...signalField(session.termsig()) };
     } finally {
       terminals.delete(req.id);
     }
@@ -445,7 +458,7 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
     });
     if (leader === undefined) throw fsError('ENOENT', `${req.argv[0] ?? ''}: command not found`);
     if (!l.list().some((p) => p.pgid === leader)) groups.delete(leader);
-    return { result: result.status };
+    return { result: result.status, ...signalField(result.signal) };
   }
 
   async function handle(req: ClientRequest): Promise<Answer> {
@@ -508,8 +521,8 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
     }
     const req = data as ClientRequest;
     handle(req).then(
-      ({ result, transfer }) => {
-        reply(req.id, { result }, transfer);
+      ({ result, signal, transfer }) => {
+        reply(req.id, { result, ...(signal ? { signal } : {}) }, transfer);
         if (req.op === 'detach') detach(req.kill === true);
       },
       (err: unknown) => {

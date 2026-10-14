@@ -65,8 +65,8 @@ export function pidStat(info: ProcessInfo, boot: number): string {
     0,
     ticks(info.utime ?? 0),
     ticks(info.stime ?? 0),
-    0,
-    0,
+    ticks(info.cutime ?? 0),
+    ticks(info.cstime ?? 0),
     20,
     0,
     1,
@@ -91,8 +91,13 @@ export function pidStat(info: ProcessInfo, boot: number): string {
 
 const sigMask = (mask = 0): string => (mask >>> 1).toString(16).padStart(16, '0');
 
+const STATES = { S: 'S (sleeping)', T: 'T (stopped)', Z: 'Z (zombie)' } as const;
+
+const tagLine = (tag: string): string =>
+  `Tag:\t${tag.replaceAll('\n', '\\n').replaceAll('\t', '\\t').replaceAll('\r', '\\r')}`;
+
 export function pidStatus(info: ProcessInfo): string {
-  const state = info.state === 'Z' ? 'Z (zombie)' : 'S (sleeping)';
+  const state = STATES[info.state];
   const c = info.cred ?? ROOT;
   const ids = (r: number, e: number, s: number) => `${r}\t${e}\t${s}\t${e}`;
   return [
@@ -106,6 +111,7 @@ export function pidStatus(info: ProcessInfo): string {
     'TracerPid:\t0',
     `Uid:\t${ids(c.ruid, c.euid, c.suid)}`,
     `Gid:\t${ids(c.rgid, c.egid, c.sgid)}`,
+    ...(info.tag !== undefined ? [tagLine(info.tag)] : []),
     'FDSize:\t64',
     `VmSize:\t${Math.ceil(info.memory / KIB)} kB`,
     `VmRSS:\t${Math.ceil(info.memory / KIB)} kB`,

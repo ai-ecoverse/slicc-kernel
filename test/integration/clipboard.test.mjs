@@ -101,14 +101,23 @@ test('the hook refusing, failing or missing reaches cat as EACCES, EIO and ENOTS
   clip.state.mode = 'refuse';
   const copy = await bash('printf x | cat > /dev/clipboard; echo "rc=$?"');
   assert.equal(copy.stdout, 'rc=1\n');
-  assert.equal(copy.stderr, 'cat: write error: Permission denied\n');
+  assert.equal(
+    copy.stderr,
+    `cat: /dev/clipboard: The clipboard needs seven's tab to be in front\ncat: write error: Permission denied\n`
+  );
   const paste = await bash('cat /dev/clipboard; echo "rc=$?"');
   assert.equal(paste.stdout, 'rc=1\n');
-  assert.equal(paste.stderr, 'cat: /dev/clipboard: Permission denied\n');
+  assert.equal(
+    paste.stderr,
+    `cat: /dev/clipboard: The clipboard needs seven's tab to be in front\ncat: /dev/clipboard: Permission denied\n`
+  );
   clip.state.mode = 'fail';
   const broken = await bash('printf x | cat > /dev/clipboard; echo "rc=$?"');
   assert.equal(broken.stdout, 'rc=1\n');
-  assert.equal(broken.stderr, 'cat: write error: I/O error\n');
+  assert.equal(
+    broken.stderr,
+    'cat: /dev/clipboard: the clipboard broke\ncat: write error: I/O error\n'
+  );
 
   const bare = await booted(t);
   const none = await bare.bash(
@@ -158,7 +167,10 @@ test('a hook that never answers times out with EIO after 10 s', async (t) => {
   const began = Date.now();
   const r = await bash('cat /dev/clipboard; echo "rc=$?"');
   assert.equal(r.stdout, 'rc=1\n');
-  assert.equal(r.stderr, 'cat: /dev/clipboard: I/O error\n');
+  assert.equal(
+    r.stderr,
+    'cat: /dev/clipboard: clipboard timed out\ncat: /dev/clipboard: I/O error\n'
+  );
   assert.ok(Date.now() - began >= 9500);
 });
 
@@ -187,7 +199,15 @@ test('WASI programs read and write /dev/clipboard through std::fs, and an exit w
   clip.state.mode = 'refuse';
   const refused = await kernel.run(['cliptest', 'copy', 'no']);
   assert.equal(refused.status, 1);
-  assert.match(refused.stderr, /cliptest: close: .*(Permission denied|EACCES|denied)/i);
+  assert.match(
+    refused.stderr,
+    /^cliptest: \/dev\/clipboard: The clipboard needs seven's tab to be in front\ncliptest: close: .*Permission denied/
+  );
+  const unread = await kernel.run(['cliptest', 'paste']);
+  assert.match(
+    unread.stderr,
+    /^cliptest: \/dev\/clipboard: The clipboard needs seven's tab to be in front\ncliptest: read: .*Permission denied/
+  );
   clip.state.mode = 'ok';
 
   const before = clip.writes().length;
@@ -224,6 +244,7 @@ test('JS programs use /dev/clipboard through ctx.fs and ctx.open, with the hook 
   const refused = await kernel.run(['clipjs', 'copy', 'no']);
   assert.equal(refused.status, 1);
   assert.match(refused.stderr, /EACCES .*The clipboard needs seven's tab to be in front/);
+  assert.equal(refused.stderr.split('\n').length, 2);
   const unread = await kernel.run(['clipjs', 'paste']);
   assert.match(unread.stderr, /EACCES .*The clipboard needs seven's tab to be in front/);
 });
@@ -250,7 +271,7 @@ test('the stamp carries the effective ids, the users mode and the tag (users: en
 
 test('the stamp carries the inherited tag of terminals and clients (users: off)', async (t) => {
   const clip = fakeClipboard('t');
-  const { kernel, bash } = await booted(t, { clipboard: clip.hook });
+  const { kernel, bash } = await booted(t, { clipboard: clip.hook, users: 'off' });
   const term = await kernel.openTerminal(
     ['bash', '-c', 'printf u | cat > /dev/clipboard; (cat /dev/clipboard > /dev/null)'],
     { tag: 'user', cwd: '/tmp' }
@@ -299,7 +320,28 @@ test('the exit hook is inert when stdout is a file, a pipe or a failing device, 
     await bash(
       'exec 3>/dev/clipboard; bash -c "/bin/echo x; exit 0" > /tmp/o; echo "rc=$?"; exec 3>&-'
     ),
-    { status: 0, stdout: 'rc=0\n', stderr: '' }
+    {
+      status: 0,
+      stdout: 'rc=0\n',
+      stderr: "bash: /dev/clipboard: The clipboard needs seven's tab to be in front\n",
+    }
   );
   assert.equal(clip.writes().length, 1);
+});
+
+test("the hook message line is one sanitized line of at most 200 characters, before the program's own", async (t) => {
+  const message = `a\tb\u001bc${'x'.repeat(300)}\nsecond line`;
+  const hook = {
+    read: async () => {
+      throw Object.assign(new Error(message), { name: 'NotAllowedError' });
+    },
+    write: async () => {},
+  };
+  const { bash } = await booted(t, { clipboard: hook });
+  const r = await bash('cat /dev/clipboard');
+  const shown = `a\\tb\\x1bc${'x'.repeat(195)}`;
+  assert.equal(
+    r.stderr,
+    `cat: /dev/clipboard: ${shown.slice(0, 200)}…\ncat: /dev/clipboard: Permission denied\n`
+  );
 });

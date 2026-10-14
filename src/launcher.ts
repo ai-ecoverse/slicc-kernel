@@ -17,6 +17,7 @@ import { R_OK, X_OK } from './fs/access.ts';
 import { type Attestation, attest, FileWatches, type RemoteFs } from './fs/attest.ts';
 import { followLinks, withCommandDirs } from './fs/commands.ts';
 import { Dac, type DenialHook, need, TTY_MODE } from './fs/dac.ts';
+import { FreshModules } from './fs/fresh-modules.ts';
 import { chain } from './fs/owners.ts';
 import { physicalPathAsync } from './fs/physical-path.ts';
 import {
@@ -200,6 +201,7 @@ export interface TerminalOptions {
 export interface TerminalSession {
   pid: number;
   exited: Promise<number>;
+  termsig(): number | undefined;
   write(bytes: Uint8Array): void;
   resize(cols: number, rows: number): void;
   signal(sig: number): void;
@@ -208,6 +210,7 @@ export interface TerminalSession {
 
 export interface RunResult {
   status: number;
+  signal?: number;
   stdout: Uint8Array;
   stderr: Uint8Array;
 }
@@ -217,6 +220,7 @@ interface Target {
   glue: string;
   wasm: string;
   argv0: string;
+  fixed?: true;
   prefix?: string[];
   env?: Record<string, string>;
   unset?: string[];
@@ -405,6 +409,7 @@ function targetOf(command: Command): Target {
     glue: command.glue,
     wasm: command.wasm,
     argv0: command.argv0,
+    ...(command.argv0Fixed ? { fixed: true as const } : {}),
     ...(command.args ? { prefix: command.args } : {}),
     ...(command.env ? { env: command.env } : {}),
     ...(command.unset ? { unset: command.unset } : {}),
@@ -444,6 +449,11 @@ function concat(chunks: Uint8Array[]): Uint8Array {
   return out;
 }
 
+function addTimes(into: Map<number, CpuTimes>, pid: number, t: CpuTimes): void {
+  const at = into.get(pid) ?? { utime: 0, stime: 0 };
+  into.set(pid, { utime: at.utime + t.utime, stime: at.stime + t.stime });
+}
+
 export class Launcher {
   readonly fs: KernelFs;
   readonly processFs: KernelFs;
@@ -469,6 +479,7 @@ export class Launcher {
   private readonly described = new Map<number, Pick<ProcessInfo, 'argv' | 'tty' | 'started'>>();
   private readonly creds = new Map<number, () => Cred>();
   private readonly tags = new Map<number, string>();
+  private readonly freshModules = new FreshModules();
   private readonly granted = new Map<number, number>();
   readonly users: UserDb;
   private readonly sudoer: Sudo;
@@ -538,7 +549,8 @@ export class Launcher {
       changed: this.watchers.changed.bind(this.watchers),
       owners: this.owners,
     });
-    this.base = this.watchers.wrap(this.mounts.wrap(options.fs));
+    const watched = this.watchers.wrap(this.mounts.wrap(options.fs));
+    this.base = this.owners ? this.freshModules.wrap(watched) : watched;
     this.createWorker = options.createWorker;
     this.createDriverWorker = options.createDriverWorker;
     this.media = options.media ?? memoryMedia();
@@ -555,6 +567,7 @@ export class Launcher {
     this.env = { ...networkEnv(hostname), SLICC_CDP_URL: this.cdp.url, ...options.env };
     this.ca = kernelCa(options.caStore ?? memoryCaStore());
     this.transport = replayingHops(options.transport ?? missingTransport());
+    this.announcedTraits = JSON.stringify(this.transport.traits);
     this.uplink = options.uplink;
     this.routes = new Routes(options.uplink?.traits.ipv6 === true);
     if (options.uplink?.routes) this.routes.set(options.uplink.routes);
@@ -626,6 +639,23 @@ export class Launcher {
 
   setRoutes(table: RouteTable): void {
     this.routes.set(table);
+  }
+
+  private readonly traitsListeners = new Set<() => void>();
+
+  private announcedTraits = '';
+
+  onTraits(listener: () => void): () => void {
+    this.traitsListeners.add(listener);
+    return () => this.traitsListeners.delete(listener);
+  }
+
+  updateTransportTraits(): boolean {
+    const now = JSON.stringify(this.transport.traits);
+    if (now === this.announcedTraits) return false;
+    this.announcedTraits = now;
+    for (const listener of [...this.traitsListeners]) listener();
+    return true;
   }
 
   commands(scope = ''): Promise<Map<string, Command>> {
@@ -796,9 +826,12 @@ export class Launcher {
     file: string,
     argv: string[],
     cwd: string,
-    scope: string
+    scope: string,
+    argv0?: unknown
   ): Promise<Planned | undefined> {
-    const direct = await this.resolve(file, argv[0] ?? file, cwd, scope);
+    const found = await this.resolve(file, argv[0] ?? file, cwd, scope);
+    const named = typeof argv0 === 'string' && found && !found.fixed;
+    const direct = named ? { ...found, argv0 } : found;
     if (direct) return { target: direct, args: [...(direct.prefix ?? []), ...argv.slice(1)] };
     const script = await this.interpreted(file, argv, cwd, scope);
     return script && { ...script, script: true };
@@ -830,7 +863,7 @@ export class Launcher {
     { ppid, cred, scope }: { ppid: number; cred: Readonly<Cred>; scope: string },
     fds: FdTable
   ): Promise<Planned> {
-    const planned = await this.plan(req.file, req.argv, req.cwd, scope);
+    const planned = await this.plan(req.file, req.argv, req.cwd, scope, req.argv0);
     try {
       await this.mayExec(cred, { ...req, pid: ppid }, planned);
     } catch (err) {
@@ -858,7 +891,7 @@ export class Launcher {
     who: Redeemer,
     planned: Planned,
     fds: FdTable
-  ): Promise<{ env: Record<string, string>; pid?: number; scrub?: Scrubber }> {
+  ): Promise<{ env: Record<string, string>; pid?: number; cwd?: string; scrub?: Scrubber }> {
     if (who.booked === undefined) return { env: req.env };
     try {
       const redeemed = await this.redeem(req, who, planned);
@@ -874,10 +907,11 @@ export class Launcher {
     req: ChildSpawnRequest,
     { ppid, cred, scope, booked }: Redeemer,
     planned: Planned
-  ): Promise<{ env: Record<string, string>; pid: number; scrub?: Scrubber }> {
+  ): Promise<{ env: Record<string, string>; pid: number; cwd: string; scrub?: Scrubber }> {
     const { [TICKET_ENV]: ticket = '', ...env } = req.env;
     const caller = this.jobs.shown(ppid);
-    const { argv } = req;
+    const named = typeof req.argv0 === 'string' && !planned.target.fixed;
+    const argv = named ? [req.argv0 as string, ...req.argv.slice(1)] : req.argv;
     const exact =
       booked?.pid === caller &&
       req.file === booked.path &&
@@ -888,8 +922,8 @@ export class Launcher {
     const pid = this.nextPid++;
     const ids = { pid: req.exec ? caller : pid, ppid: caller };
     const stamp = await this.sealed.stamp(ids, cred, this.tagOf(ppid));
-    const interpreters = await this.interpreterChain(planned, req.cwd, scope);
-    const trusted = this.owners && (await this.trustedFiles(planned, req.file, req.cwd, scope));
+    const interpreters = await this.interpreterChain(planned, booked.cwd, scope);
+    const trusted = this.owners && (await this.trustedFiles(planned, req.file, booked.cwd, scope));
     const swap = await this.sealed.consume({
       ticket,
       stamp,
@@ -909,7 +943,7 @@ export class Launcher {
       secrets.push({ name, value, placeholder });
     }
     const scrub = scrubberOf(secrets);
-    return { env, pid, ...(scrub ? { scrub } : {}) };
+    return { env, pid, cwd: booked.cwd, ...(scrub ? { scrub } : {}) };
   }
 
   private async interpreterChain(planned: Planned, cwd: string, scope: string): Promise<string[]> {
@@ -1091,15 +1125,20 @@ export class Launcher {
     return this.jobs.sessionOf(pgid);
   }
 
+  private treeScrubs(pid: number, req: StartRequest): Scrubber[] | undefined {
+    const inherited = req.ppid !== undefined ? this.scrubs.get(req.ppid) : undefined;
+    const scrubs = req.scrub ? [...(inherited ?? []), req.scrub] : inherited;
+    if (scrubs) this.scrubs.set(pid, scrubs);
+    return scrubs;
+  }
+
   private start(req: StartRequest): WasmProcessHandle {
     this.sampling();
     if (req.pgid !== undefined && this.jobs.sessionOf(req.pgid) === undefined) {
       throw new SpawnError('ESRCH');
     }
     const pid = req.pid ?? this.nextPid++;
-    const inherited = req.ppid !== undefined ? this.scrubs.get(req.ppid) : undefined;
-    const scrubs = req.scrub ? [...(inherited ?? []), req.scrub] : inherited;
-    if (scrubs) this.scrubs.set(pid, scrubs);
+    const scrubs = this.treeScrubs(pid, req);
     const stack = this.stackFor(req.tag);
     const terminal = req.fds.stdioTerminal();
     const decided = req.decided ?? Promise.resolve(true);
@@ -1122,6 +1161,9 @@ export class Launcher {
       ...(req.ignored ? { ignored: req.ignored } : {}),
       ...(req.umask !== undefined ? { umask: req.umask } : {}),
       cred: req.cred,
+      ...(this.owners && req.program.abi === 'wasi'
+        ? { fresh: (path: string, umask: number) => this.freshModules.add(path, umask, pid) }
+        : {}),
       ...(this.owners ? { owners: true } : {}),
       sealed: this.sealed,
       ...(scrubs ? { ttyFilter: (file: OpenFile) => scrubbedAll(file, scrubs) } : {}),
@@ -1164,7 +1206,7 @@ export class Launcher {
       http: new HttpHandles(this.transport, pid),
       locks: this.locks,
       resolver: this.resolver,
-      onReap: (child) => this.reaped(child),
+      onReap: (child) => this.reaped(child, pid),
       ...(req.fork ? { fork: req.fork } : {}),
       ...this.shownIds(req),
     });
@@ -1183,9 +1225,15 @@ export class Launcher {
       tty: terminal?.name ?? null,
       started: Date.now(),
     });
+    handle.onState((state) =>
+      state === 'stopped' ? this.stopped.add(pid) : this.stopped.delete(pid)
+    );
     void handle.exited.then(() => {
+      this.freshModules.forget(pid);
       const spent = handle.times?.();
       if (spent) this.spent.set(pid, spent);
+      if (spent) addTimes(this.imageTimes, this.jobs.shown(pid), spent);
+      this.stopped.delete(pid);
       this.processes.delete(pid);
       this.scrubs.delete(pid);
       if (this.processes.size === 0) {
@@ -1216,12 +1264,21 @@ export class Launcher {
       this.reapedTimes.stime += spent.stime;
     }
     this.spent.delete(pid);
+    this.imageTimes.delete(pid);
+    this.childTimes.delete(pid);
     this.creds.delete(pid);
     this.tags.delete(pid);
     this.granted.delete(pid);
   }
 
-  private reaped(pid: number): void {
+  private reaped(pid: number, parent: number): void {
+    const own = this.imageTimes.get(pid);
+    const theirs = this.childTimes.get(pid);
+    const into = this.jobs.shown(parent);
+    if (own) addTimes(this.childTimes, into, own);
+    if (theirs) addTimes(this.childTimes, into, theirs);
+    this.imageTimes.delete(pid);
+    this.childTimes.delete(pid);
     if (this.zombies.delete(pid)) this.forget(pid);
     else this.orphans.add(pid);
   }
@@ -1282,6 +1339,19 @@ export class Launcher {
   }
 
   private readonly spent = new Map<number, CpuTimes>();
+  private readonly imageTimes = new Map<number, CpuTimes>();
+  private readonly childTimes = new Map<number, CpuTimes>();
+  private readonly stopped = new Set<number>();
+
+  private stateOf(pid: number): ProcessInfo['state'] {
+    if (!this.processes.has(pid)) return 'Z';
+    return this.stopped.has(pid) ? 'T' : 'S';
+  }
+
+  private childrenOf(pid: number): { cutime?: number; cstime?: number } {
+    const t = this.childTimes.get(pid);
+    return t ? { cutime: t.utime, cstime: t.stime } : {};
+  }
 
   private timesAt(pid: number): CpuTimes | undefined {
     return this.processes.get(pid)?.times?.() ?? this.spent.get(pid);
@@ -1325,6 +1395,7 @@ export class Launcher {
       const cred = this.credOf(member.pid);
       if (!maySee(viewer, cred)) continue;
       const root = rootOf(member);
+      const tag = this.tagOf(member.pid) ?? this.tagOf(root.pid);
       listed.push({
         pid: root.pid,
         tid: member.pid,
@@ -1333,12 +1404,14 @@ export class Launcher {
         sid: member.sid,
         ...described,
         started: (this.described.get(root.pid) ?? described).started,
-        state: this.processes.has(member.pid) ? 'S' : 'Z',
+        state: this.stateOf(member.pid),
         memory: this.processes.get(member.pid)?.memory() ?? 0,
         ...this.timesOf(member, members),
+        ...this.childrenOf(root.pid),
         umask: this.umaskOf(member.pid),
         cred,
         ...this.signalMasksOf(member.pid),
+        ...(tag !== undefined && maySee(viewer, cred) ? { tag } : {}),
       });
     }
     return listed;
@@ -1380,8 +1453,8 @@ export class Launcher {
       const deciding = req.exec ? undefined : this.undecided(ppid);
       const handle = await this.launch(planned, {
         ...(deciding ? { decided: deciding.promise } : {}),
-        ...redeemed,
         cwd: req.cwd,
+        ...redeemed,
         fds,
         report,
         ppid,
@@ -1540,10 +1613,7 @@ export class Launcher {
       (from !== undefined && this.granted.get(this.jobs.shown(target)) === from);
     if (pid === -1) {
       const sender = from === undefined ? undefined : this.imageOf(from);
-      return this.killAll(
-        sig,
-        (member) => this.imageOf(member) !== sender && may(this.imageOf(member))
-      );
+      return this.killAll(sig, (member) => this.imageOf(member) !== sender, may);
     }
     if (pid < 0) return this.jobs.killGroup(-pid, sig, (member) => may(this.imageOf(member)));
     const handle = this.processes.get(pid);
@@ -1553,14 +1623,21 @@ export class Launcher {
     return true;
   }
 
-  private killAll(sig: number, may: (pid: number) => boolean): boolean {
-    let any = false;
-    for (const [pid, handle] of [...this.processes]) {
-      if (pid === 1 || !may(pid)) continue;
-      any = true;
-      if (sig !== 0) handle.signal(sig);
+  private killAll(
+    sig: number,
+    other: (pid: number) => boolean,
+    may: (pid: number) => boolean
+  ): boolean {
+    const candidates = [...this.processes].filter(([pid]) => pid !== 1 && other(pid));
+    const targets = candidates.filter(([pid]) => may(this.imageOf(pid)));
+    if (targets.length === 0 && candidates.length > 0) throw fsError('EPERM', 'kill -1');
+    const pids = new Set(targets.map(([pid]) => pid));
+    const parents = new Map(this.jobs.list().map((m) => [m.pid, m.execParent]));
+    for (const [pid, handle] of targets) {
+      const parent = parents.get(pid);
+      if (sig !== 0 && (parent === undefined || !pids.has(parent))) handle.signal(sig);
     }
-    return any;
+    return targets.length > 0;
   }
 
   private async driver(type: string, spec: MountSpec): Promise<OpenedDriver> {
@@ -1927,8 +2004,9 @@ export class Launcher {
   }
 
   private writerStack(): WriterStack {
+    const watched = this.watchers.wrap(this.mounts.wrap(this.unguardedRoot));
     const fs = withCommandDirs(
-      this.watchers.wrap(this.mounts.wrap(this.unguardedRoot)),
+      this.owners ? this.freshModules.wrap(watched) : watched,
       async () => new Set((await this.commands()).keys()),
       (dir) => this.userCommandDir(dir),
       this.owners
@@ -2003,6 +2081,7 @@ export class Launcher {
     return {
       pid: handle.pid,
       exited: handle.exited,
+      termsig: () => handle.termsig(),
       write: (bytes) => tty.receive(bytes),
       resize: (cols, rows) => tty.resize(cols, rows),
       signal: (sig) => this.jobs.signalForeground(tty, leader, sig),
@@ -2048,7 +2127,8 @@ export class Launcher {
     });
     options.onStarted?.(handle.pid);
     const status = await handle.exited;
-    return { status, stdout: concat(out), stderr: concat(err) };
+    const signal = handle.termsig();
+    return { status, ...(signal ? { signal } : {}), stdout: concat(out), stderr: concat(err) };
   }
 }
 

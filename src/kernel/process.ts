@@ -179,6 +179,7 @@ export type WasmSyscall =
       op: 'proc-spawn';
       file: string;
       argv: string[];
+      argv0?: string;
       env: Record<string, string>;
       cwd: string;
       stdio: ChildStdio[];
@@ -402,6 +403,18 @@ function words(value: unknown): string[] {
   return [...value];
 }
 
+const ESCAPES: Readonly<Record<string, string>> = { '\t': '\\t', '\n': '\\n', '\r': '\\r' };
+
+function clipboardLine(text: string): string {
+  let out = '';
+  for (const c of text) {
+    const code = c.charCodeAt(0);
+    const control = code < 0x20 || code === 0x7f;
+    out += control ? (ESCAPES[c] ?? `\\x${code.toString(16).padStart(2, '0')}`) : c;
+  }
+  return out.length > 200 ? `${out.slice(0, 200)}…` : out;
+}
+
 const DYING: SyncFsResult = { ok: false, errno: 'EINTR', message: 'the process is being killed' };
 
 const HOSTS_ONLY = new Resolver({ routes: new Routes() });
@@ -420,6 +433,8 @@ export interface WasmProcessOptions {
   ttyFilter?: (file: OpenFile) => OpenFile;
 
   clipboard?: ClipboardBroker;
+
+  clipboardName?: string;
 
   readonlyAt?: (path: string) => boolean;
 
@@ -604,9 +619,10 @@ export class WasmProcess {
   }
 
   private async spawn(req: Extract<WasmSyscall, { op: 'proc-spawn' }>): Promise<number> {
-    const { file, argv, env, cwd, stdio, inherit, exec, pgid, session } = req;
+    const { file, argv, argv0, env, cwd, stdio, inherit, exec, pgid, session } = req;
     const group = { ...(pgid !== undefined ? { pgid } : {}), ...(session ? { session } : {}) };
-    const spawned = { file, argv, env, cwd, ...group, ...(exec ? { exec } : {}) };
+    const named = argv0 !== undefined ? { argv0 } : {};
+    const spawned = { file, argv, ...named, env, cwd, ...group, ...(exec ? { exec } : {}) };
     const pid = await this.children.spawn(spawned, stdio, inherit);
     if (!exec) return pid;
     if (this.killed) void Promise.allSettled([this.options.kill?.(pid, SIG.KILL)]);
@@ -803,7 +819,22 @@ export class WasmProcess {
     if (req.max <= 0) return new Uint8Array(0);
     if (channel.unread) channel.stamp = await this.clipboardStamp();
     const signal = channel.settled ? this.interrupt.signal : this.blockingSignal(cancelled);
-    return channel.read(Math.min(req.max, MAX_READ), signal);
+    try {
+      return await channel.read(Math.min(req.max, MAX_READ), signal);
+    } catch (err) {
+      await this.clipboardComplaint(err);
+      throw err;
+    }
+  }
+
+  private async clipboardComplaint(err: unknown): Promise<void> {
+    const name = this.options.clipboardName;
+    if (name === undefined || !(err instanceof KernelError) || err.detail === undefined) return;
+    if (err.code !== 'EACCES' && err.code !== 'EIO') return;
+    const stderr = this.fds.has(2) ? this.fds.get(2).file : undefined;
+    if (!stderr?.write || stderr.clipboard) return;
+    const line = `${name}: /dev/clipboard: ${clipboardLine(err.detail)}\n`;
+    await stderr.write(new TextEncoder().encode(line), AbortSignal.timeout(1000)).catch(() => 0);
   }
 
   private async write(
@@ -839,6 +870,7 @@ export class WasmProcess {
       throw Object.assign(new Error(alias.refused), { code: alias.refused });
     if (alias !== undefined) return this.openProc(req, alias);
     await refuseReadonly(this.options.fs, req.path, req.flags, req);
+    if (this.writesAt(req)) await this.options.fs.mayChange?.(req.path, !req.exclusive);
     await this.mayOpen(req);
     const fd = this.fds.install(heldFile(), 3);
     try {
@@ -1064,7 +1096,10 @@ export class WasmProcess {
         this.options.locks?.closed(this.pid, req.fd);
         const channel = this.fds.get(req.fd).file.clipboard;
         if (channel) channel.stamp = await this.clipboardStamp();
-        await Promise.resolve(this.fds.close(req.fd));
+        await Promise.resolve(this.fds.close(req.fd)).catch(async (err: unknown) => {
+          if (channel) await this.clipboardComplaint(err);
+          throw err;
+        });
         return { ok: true, kind: 'void' };
       }
       case 'fd-pipe': {

@@ -44,6 +44,7 @@ function id(value: unknown): number | undefined {
 }
 
 export function changeCred(cur: Readonly<Cred>, change: CredChange): Cred {
+  if (typeof change !== 'object' || change === null) throw fsError('EINVAL', 'not a change');
   const privileged = cur.euid === 0;
   const next = copyCred(cur);
   for (const keys of [UIDS, GIDS]) {

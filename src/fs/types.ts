@@ -21,6 +21,8 @@ export interface FsStat {
 
 export type UsersMode = 'off' | 'report' | 'enforce';
 
+export const DEFAULT_USERS: UsersMode = 'enforce';
+
 export interface Owner {
   uid: number;
   gid: number;
@@ -83,6 +85,7 @@ export interface KernelFs {
   truncate?(path: string, size: number): Promise<void>;
   protect?(prefixes: readonly string[]): void;
   unguarded?(): KernelFs;
+  mayChange?(path: string, follow: boolean): Promise<void>;
 }
 
 export type RangedOps = Required<Pick<KernelFs, 'pread' | 'pwrite' | 'truncate'>>;
