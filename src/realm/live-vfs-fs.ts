@@ -184,10 +184,15 @@ export function liveNodePath(node: LiveFsNode): string {
   return parts.length === 0 ? root || '/' : `${root}/${parts.reverse().join('/')}`;
 }
 
-function modeFromStat(st: SyncFsBridgeStat): number {
+function exactIn(node: LiveFsNode | null): boolean {
+  return node?.mount.opts.bridge.owners === true;
+}
+
+function modeFromStat(st: SyncFsBridgeStat, exact = false): number {
   const type = st.isSymbolicLink ? S_IFLNK : st.isDirectory ? S_IFDIR : S_IFREG;
   const fallback = st.isDirectory || st.isSymbolicLink ? 0o777 : 0o666;
-  return type | ((st.mode ?? fallback) & PERM_MASK || fallback);
+  const perm = (st.mode ?? fallback) & PERM_MASK;
+  return type | (exact ? perm : perm || fallback);
 }
 
 function toMs(v: number | Date | null | undefined): number | undefined {
@@ -322,7 +327,7 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
   }
 
   function makeNode(parent: LiveFsNode | null, name: string, st: SyncFsBridgeStat): LiveFsNode {
-    const node = Fs.createNode(parent, name, modeFromStat(st), 0);
+    const node = Fs.createNode(parent, name, modeFromStat(st, exactIn(parent)), 0);
     node.node_ops = ops.node as LiveNodeOps;
     node.stream_ops = ops.stream as LiveStreamOps;
     node.live = freshState(st);
@@ -337,7 +342,7 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
     if (!cachedStat(node.live, Fs.isDir(node.mode))) {
       const st = call(() => bridgeOf(node).lstat(liveNodePath(linked.holder(node))));
       Object.assign(node.live, { stat: st, statAt: syncCallCount() });
-      node.mode = modeFromStat(st);
+      node.mode = modeFromStat(st, exactIn(node));
     }
     return node.live.stat as SyncFsBridgeStat;
   }

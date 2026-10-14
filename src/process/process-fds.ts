@@ -938,6 +938,7 @@ interface ChmodFs {
 }
 
 export function linuxDevices(Fs: ProcessFs): void {
+  (Fs as { ignorePermissions?: boolean }).ignorePermissions = true;
   const { chmod } = Fs as unknown as ChmodFs;
   if (!chmod) return;
   for (const [path, mode] of DEVICE_MODES) {
