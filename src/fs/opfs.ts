@@ -71,18 +71,21 @@ export function translate(err: unknown, path: string, op: OpfsOp = 'lookup', map
 
 const META_OPS = ['get', 'update', 'move', 'remove', 'links', 'under', 'all'] as const;
 
+type MetaOp = (typeof META_OPS)[number] | 'fresh';
+
 function sidecar(meta: MetaStore): MetaStore {
   const pathOf = ([first]: unknown[]) =>
     [first, '/'].flat().find((p): p is string => typeof p === 'string') as string;
   const guarded =
-    (op: (typeof META_OPS)[number]) =>
+    (op: MetaOp) =>
     (...args: unknown[]) =>
       (meta[op] as (...args: unknown[]) => Promise<unknown>)
         .apply(meta, args)
         .catch((err: unknown) => {
           throw translate(err, pathOf(args), 'sidecar', false);
         });
-  const ops = Object.fromEntries(META_OPS.map((op) => [op, guarded(op)])) as unknown as MetaStore;
+  const names = meta.fresh ? [...META_OPS, 'fresh' as const] : META_OPS;
+  const ops = Object.fromEntries(names.map((op) => [op, guarded(op)])) as unknown as MetaStore;
   if (meta.absent) ops.absent = meta.absent.bind(meta);
   const { removeFile } = meta;
   if (removeFile)
@@ -260,6 +263,28 @@ export class OpfsFs implements KernelFs {
     if (this.remote?.watched()) this.remote.wrote(target);
   }
 
+  private counted: readonly string[] = [];
+
+  private async stamp(path: string): Promise<string> {
+    const entry = this.meta.fresh ? await this.meta.fresh(path) : (await this.meta.get([path]))[0];
+    return String(entry?.writes ?? 0);
+  }
+
+  private async counting(target: string): Promise<void> {
+    if (!isProtected(this.counted, target)) return;
+    await this.meta.update(target, (entry) => ({
+      ...entry,
+      path: target,
+      writes: (entry?.writes ?? 0) + 1,
+    }));
+  }
+
+  private async recounting(handle: FileSystemFileHandle, target: string): Promise<void> {
+    if (this.counted.length === 0) return;
+    const where = await this.root.resolve(handle).catch(() => null);
+    await this.counting(where ? `/${where.join('/')}` : target);
+  }
+
   resolvePath(base: string, path: string): string {
     return resolvePath(base, path);
   }
@@ -332,6 +357,7 @@ export class OpfsFs implements KernelFs {
 
   protect(prefixes: readonly string[]): void {
     this.guarded = prefixes;
+    this.counted = prefixes;
   }
 
   unguarded(): KernelFs {
@@ -736,9 +762,10 @@ export class OpfsFs implements KernelFs {
     return this.retrying(
       path,
       async () => {
+        const stamp = await this.stamp(path);
         const file = await handle.getFile();
         const bytes = new Uint8Array(await file.arrayBuffer());
-        return { bytes, version: `${file.lastModified}:${file.size}` };
+        return { bytes, version: `${file.lastModified}:${file.size}:${stamp}` };
       },
       false
     );
@@ -749,8 +776,9 @@ export class OpfsFs implements KernelFs {
     return this.retrying(
       path,
       async () => {
+        const stamp = await this.stamp(path);
         const file = await handle.getFile();
-        return `${file.lastModified}:${file.size}`;
+        return `${file.lastModified}:${file.size}:${stamp}`;
       },
       false
     );
@@ -768,15 +796,25 @@ export class OpfsFs implements KernelFs {
 
   async pwrite(path: string, offset: number, bytes: Uint8Array): Promise<void> {
     const [handle, , target] = await this.fileFor(path);
-    await this.retrying(path, () => positioned(handle, (io) => io.write(offset, bytes)), true);
+    await this.counting(target);
+    try {
+      await this.retrying(path, () => positioned(handle, (io) => io.write(offset, bytes)), true);
+    } finally {
+      await this.recounting(handle, target);
+    }
     this.written(target);
   }
 
   async truncate(path: string, size: number): Promise<void> {
     const handle = await this.existing(path, true);
     const resolve = this.ranged || this.remote?.watched();
-    const target = resolve ? (await this.locate(path, true)).path : path;
-    await this.retrying(path, () => positioned(handle, (io) => io.truncate(size)), true);
+    const target = resolve || this.counted.length > 0 ? (await this.locate(path, true)).path : path;
+    await this.counting(target);
+    try {
+      await this.retrying(path, () => positioned(handle, (io) => io.truncate(size)), true);
+    } finally {
+      await this.recounting(handle, target);
+    }
     this.written(target);
   }
 
