@@ -1193,6 +1193,7 @@ export class Launcher {
       const cred = this.credOf(member.pid);
       if (!maySee(viewer, cred)) continue;
       const root = rootOf(member);
+      const tag = this.tagOf(member.pid) ?? this.tagOf(root.pid);
       listed.push({
         pid: root.pid,
         tid: member.pid,
@@ -1208,6 +1209,7 @@ export class Launcher {
         umask: this.umaskOf(member.pid),
         cred,
         ...this.signalMasksOf(member.pid),
+        ...(tag !== undefined && maySee(viewer, cred) ? { tag } : {}),
       });
     }
     return listed;
