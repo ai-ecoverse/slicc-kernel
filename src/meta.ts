@@ -63,7 +63,10 @@ export async function writeMetadata(
   entries: readonly MetadataEntry[],
   options: WriteMetadataOptions = {}
 ): Promise<void> {
-  const wanted = entries.map(checked);
+  const merged = new Map<string, MetadataEntry>();
+  for (const want of entries.map(checked))
+    merged.set(want.path, { ...merged.get(want.path), ...want });
+  const wanted = [...merged.values()];
   for (const { path } of wanted) {
     if (!(await present(root, path))) throw fsError('ENOENT', path);
   }
