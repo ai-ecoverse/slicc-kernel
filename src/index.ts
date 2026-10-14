@@ -11,8 +11,10 @@ import { type LoopbackFetchOptions, loopbackFetch } from './client/loopback-fetc
 import { clipboardAnswerer } from './clipboard-relay.ts';
 import type { Attestation } from './fs/attest.ts';
 import type { Denial, DenialHook } from './fs/dac.ts';
-import { type Protection, protectInit, writerTags } from './fs/protect.ts';
+import { integrityOptions } from './fs/integrity.ts';
+import { type Protection, protectInit } from './fs/protect.ts';
 import { DEFAULT_USERS, type UsersMode } from './fs/types.ts';
+import { integrityAnswerer } from './integrity-relay.ts';
 import type { ClipboardHook } from './kernel/clipboard.ts';
 import { isHostname } from './kernel/net/loopback-names.ts';
 import type { TransportCall } from './kernel/net/remote-transport.ts';
@@ -107,7 +109,7 @@ export type {
   JsNet,
 } from './process/js/js-net.ts';
 export type { JsRunOptions, JsRunResult, JsRunStdio } from './process/js/js-run.ts';
-export type { JsSyncContext, JsSyncFile } from './process/js/js-sync.ts';
+export type { JsCred, JsSyncContext, JsSyncFile } from './process/js/js-sync.ts';
 export type { JsTermios, JsTty, JsTtySize } from './process/js/js-tty.ts';
 export type {
   JsWebSocket,
@@ -211,6 +213,7 @@ export interface Kernel {
   readonly users: KernelUsers;
   readonly groups: KernelGroups;
   setRoutes(routes: RouteTable): Promise<void>;
+  updateTransportTraits(): Promise<boolean>;
   dial(options: DialOptions): Promise<DialledSocket>;
   loopbackFetch(input: RequestInfo | URL, options: LoopbackFetchOptions): Promise<Response>;
   mount(spec: MountSpec): Promise<MountEntry>;
@@ -484,6 +487,8 @@ function checkOptions(options: KernelOptions): void {
   if (options.hostname !== undefined && !isHostname(options.hostname)) {
     throw new Error(`not a host name: ${String(options.hostname)}`);
   }
+  if (options.protect) protectInit(options.protect);
+  integrityOptions(options.protect?.integrity);
 }
 
 function hookRelays(
@@ -492,8 +497,9 @@ function hookRelays(
 ): { handle(data: unknown): boolean; close(): void } {
   const sealed = sealedAnswerer(worker, options.sealed);
   const clipboard = clipboardAnswerer(worker, options.clipboard);
+  const integrity = integrityAnswerer(worker, options.protect?.integrity?.lookup);
   return {
-    handle: (data) => sealed.handle(data) || clipboard.handle(data),
+    handle: (data) => sealed.handle(data) || clipboard.handle(data) || integrity(data),
     close: () => sealed.close(),
   };
 }
@@ -521,9 +527,25 @@ function endedOf(r: unknown): Ended {
   return { status, ...signalField(signal) };
 }
 
+function uplinkServer(
+  worker: Worker,
+  uplink: NetworkUplink | undefined
+): ReturnType<typeof serveUplink> | undefined {
+  return uplink ? serveUplink(worker, uplink) : undefined;
+}
+
+function traitsUpdater(
+  transport: NetworkTransport | undefined,
+  call: (req: KernelCall) => Promise<unknown>
+): () => Promise<boolean> {
+  return async () => {
+    const traits = transport ? { traits: { ...transport.traits } } : {};
+    return (await call({ op: 'transport-traits', ...traits })) === true;
+  };
+}
+
 export async function createKernel(options: KernelOptions = {}): Promise<Kernel> {
   checkOptions(options);
-  writerTags(options.protect);
   const url = options.worker ?? new URL('./kernel-worker.js', import.meta.url);
   const worker = new Worker(url, { type: 'module', name: 'slicc-kernel' });
   const pending = new Map<number, Pending>();
@@ -551,8 +573,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
   };
   const transport = options.network?.transport;
   const bridge = transport ? serveTransport(worker, transport) : undefined;
-  const uplink = options.network?.uplink;
-  const uplinks = uplink ? serveUplink(worker, uplink) : undefined;
+  const uplinks = uplinkServer(worker, options.network?.uplink);
   async function chosen(handle: MediumHandle | undefined): Promise<FileSystemDirectoryHandle> {
     if (handle) {
       const state = await handle.requestPermission?.({ mode: 'readwrite' });
@@ -681,6 +702,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
       (await call({ op: 'connect', ...connectOptions })) as MessagePort,
     ...accounts(call, options.users === undefined ? DEFAULT_USERS : options.users),
     setRoutes: async (routes) => void (await call({ op: 'routes', routes })),
+    updateTransportTraits: traitsUpdater(transport, call),
     dial,
     loopbackFetch: (input, fetchOptions) => loopbackFetch(dial, input, fetchOptions),
     mount: async (spec) => (await call({ op: 'mount', spec })) as MountEntry,

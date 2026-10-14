@@ -51,6 +51,9 @@ export function diagnosing(transport: RealmTransport, check: Diagnose = diagnose
   if (!open) return transport;
   return {
     ...transport,
+    get traits() {
+      return transport.traits;
+    },
     websocket: async (request) => {
       try {
         return await open(request);

@@ -402,12 +402,34 @@ const clipboardHook = {
   },
 };
 
+window.extraTraits = {};
+
+const liveTraits = (inner) => ({
+  fetch: (...args) => inner.fetch(...args),
+  ...(inner.websocket ? { websocket: (...args) => inner.websocket(...args) } : {}),
+  get traits() {
+    return { ...inner.traits, ...window.extraTraits };
+  },
+});
+
+window.integrityAsked = [];
+
+function protection({ hashes, unknown, ...rest }) {
+  if (!hashes) return rest;
+  const lookup = async (path) => {
+    window.integrityAsked.push(path);
+    return hashes[path];
+  };
+  return { ...rest, integrity: { lookup, ...(unknown ? { unknown } : {}) } };
+}
+
 window.boot = async (options = {}) => {
   await install();
   const base = options.proxy
     ? localProxyTransport(options.proxy)
     : fetchTransport(options.hint ? { hint: options.hint } : {});
-  const transport = options.store ? storeTransport(base) : base;
+  const stored = options.store ? storeTransport(base) : base;
+  const transport = options.liveTraits ? liveTraits(stored) : stored;
   const network = options.network === false ? {} : { network: { transport } };
   const policy =
     options.processMounts === undefined ? {} : { processMounts: options.processMounts };
@@ -420,7 +442,7 @@ window.boot = async (options = {}) => {
       ...policy,
       ...handles,
       ...(options.cdp ? { cdp: cdpHook } : {}),
-      ...(options.protect ? { protect: options.protect } : {}),
+      ...(options.protect ? { protect: protection(options.protect) } : {}),
       ...(options.clipboard ? { clipboard: clipboardHook } : {}),
     })
   );
