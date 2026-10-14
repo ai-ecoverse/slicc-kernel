@@ -1924,17 +1924,23 @@ export class Launcher {
       this.base.hasOwner &&
       !(await this.base.hasOwner(real))
     ) {
+      const names = await this.base.readdir(real).catch(() => undefined);
       let removed = 0;
-      for (const name of await this.base.readdir(real).catch(() => [] as string[])) {
+      let left = names === undefined ? 1 : 0;
+      for (const name of names ?? []) {
         const path = joinName(real, name);
-        if ((await this.base.hasOwner(path)) || this.inUse(path)) continue;
-        const failed = await this.base.rm(path, { recursive: true, force: true }).catch(String);
+        if (await this.base.hasOwner(path)) continue;
+        const failed = this.inUse(path)
+          ? 'busy'
+          : await this.base.rm(path, { recursive: true, force: true }).catch(String);
         if (failed === undefined) removed++;
+        else left++;
       }
       if (removed > 0) {
         console.warn(`slicc-kernel users: removed ${removed} entries from /tmp that had no owner`);
       }
-      await this.base.chown?.(real, { uid: 0, gid: 0, mode: 0o1777, follow: false });
+      if (left === 0)
+        await this.base.chown?.(real, { uid: 0, gid: 0, mode: 0o1777, follow: false });
     }
     if (st?.isDirectory) await this.base.chmod(real as string, 0o1777);
   }

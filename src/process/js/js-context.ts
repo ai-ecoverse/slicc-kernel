@@ -92,7 +92,7 @@ export interface JsProgramContext {
     lstat(path: string): Promise<SyncFsBridgeStat>;
     exists(path: string): Promise<boolean>;
     readdir(path: string): Promise<string[]>;
-    mkdir(path: string): Promise<void>;
+    mkdir(path: string, options?: { recursive?: boolean }): Promise<void>;
     rm(path: string): Promise<void>;
     unlink(path: string): Promise<void>;
     rename(from: string, to: string): Promise<void>;
@@ -384,7 +384,9 @@ export function createContext(o: ContextOptions): CreatedContext {
     kill: killer({ self: o.pid, kernel, syncKernel, lane, writes, modes: terminal.modes }),
     cred: () => syncKernel.json({ op: 'proc-cred' }) as JsCred,
     setcred(change) {
-      if (typeof change !== 'object' || change === null) throw new JsCallError('EINVAL', 'setcred');
+      if (typeof change !== 'object' || change === null || Array.isArray(change)) {
+        throw new JsCallError('EINVAL', 'setcred');
+      }
       return syncKernel.json({ op: 'proc-setcred', change: { ...change } }) as JsCred;
     },
   };
@@ -629,7 +631,12 @@ function pathOps(
       if (inDev(abs)) return devAsync(kernel, devReaddir(abs));
       return (await kernel.json({ op: 'readdir', path: abs })) as string[];
     },
-    mkdir: async (path) => void (await kernel.call({ op: 'mkdir', path: resolve(path) })),
+    mkdir: async (path, options) =>
+      void (await kernel.call({
+        op: 'mkdir',
+        path: resolve(path),
+        ...(options?.recursive === false ? { exclusive: true } : {}),
+      })),
     rm: async (path) => void (await kernel.call({ op: 'rm', path: resolve(path) })),
     unlink: async (path) => void (await kernel.call({ op: 'unlink', path: resolve(path) })),
     rename: async (from, to) =>

@@ -184,10 +184,15 @@ export function liveNodePath(node: LiveFsNode): string {
   return parts.length === 0 ? root || '/' : `${root}/${parts.reverse().join('/')}`;
 }
 
-function modeFromStat(st: SyncFsBridgeStat): number {
+function exactIn(node: LiveFsNode | null): boolean {
+  return node?.mount.opts.bridge.owners === true;
+}
+
+function modeFromStat(st: SyncFsBridgeStat, exact = false): number {
   const type = st.isSymbolicLink ? S_IFLNK : st.isDirectory ? S_IFDIR : S_IFREG;
   const fallback = st.isDirectory || st.isSymbolicLink ? 0o777 : 0o666;
-  return type | ((st.mode ?? fallback) & PERM_MASK || fallback);
+  const perm = (st.mode ?? fallback) & PERM_MASK;
+  return type | (exact ? perm : perm || fallback);
 }
 
 function toMs(v: number | Date | null | undefined): number | undefined {
@@ -204,6 +209,7 @@ const EARLY_WHOLE_FILE = 64 * 1024;
 
 const O_ACCMODE = 3;
 const O_TRUNC = 0o1000;
+const O_PATH = 0o10000000;
 
 function wantOf(flags: number): number {
   const mode = flags & O_ACCMODE;
@@ -322,7 +328,7 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
   }
 
   function makeNode(parent: LiveFsNode | null, name: string, st: SyncFsBridgeStat): LiveFsNode {
-    const node = Fs.createNode(parent, name, modeFromStat(st), 0);
+    const node = Fs.createNode(parent, name, modeFromStat(st, exactIn(parent)), 0);
     node.node_ops = ops.node as LiveNodeOps;
     node.stream_ops = ops.stream as LiveStreamOps;
     node.live = freshState(st);
@@ -337,7 +343,7 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
     if (!cachedStat(node.live, Fs.isDir(node.mode))) {
       const st = call(() => bridgeOf(node).lstat(liveNodePath(linked.holder(node))));
       Object.assign(node.live, { stat: st, statAt: syncCallCount() });
-      node.mode = modeFromStat(st);
+      node.mode = modeFromStat(st, exactIn(node));
     }
     return node.live.stat as SyncFsBridgeStat;
   }
@@ -690,9 +696,21 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
     }
     return want;
   };
+  const directory = (stream: LiveFsStream) => {
+    const bridge = bridgeOf(stream.node);
+    if (!bridge.owners || !Fs.isDir(stream.node.mode) || stream.flags & O_PATH) return;
+    try {
+      h.call(() =>
+        bridge.access?.(liveNodePath(stream.node), accessOf(wantOf(stream.flags)), 'open')
+      );
+    } catch (err) {
+      if (stream.fd !== undefined) Fs.closeStream?.(stream.fd);
+      throw err;
+    }
+  };
   return {
     open(stream) {
-      if (!Fs.isFile(stream.node.mode)) return;
+      if (!Fs.isFile(stream.node.mode)) return directory(stream);
       const s = stream.node.live;
       const created = s.created === true;
       s.created = undefined;
@@ -831,6 +849,7 @@ export function createLiveVfsPlugin(Fs: LiveFsApi): LiveVfsPlugin {
       const st = h.call(() => mount.opts.bridge.stat(mount.opts.root));
       if (!st.isDirectory) throw new Fs.ErrnoError(wasiErrno('ENOTDIR'));
       const root = h.makeNode(null, '/', st);
+      root.mode = modeFromStat(st, mount.opts.bridge.owners === true);
       mounts.add(mount);
       return root;
     },
