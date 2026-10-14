@@ -71,7 +71,15 @@ test("nodeTransport refuses the host's loopback and link-local by default, befor
     await k.curl(host.port),
     /refuses the host's loopback 127\.0\.0\.1:\d+ \(see nodeTransport\({ hostLoopback }\)\)\n 403$/
   );
-  for (const name of ['127.0.0.1', 'localhost', 'app.localhost', '[::1]', '127.1.2.3']) {
+  for (const name of [
+    '127.0.0.1',
+    'localhost',
+    'app.localhost',
+    '[::1]',
+    '127.1.2.3',
+    '[::ffff:127.0.0.1]',
+    '2130706433',
+  ]) {
     const got = await k.fetch(`http://${name}:${host.port}/`);
     assert.doesNotMatch(got, /host secret/, `${name}: ${got}`);
   }

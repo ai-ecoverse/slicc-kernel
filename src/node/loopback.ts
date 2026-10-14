@@ -25,11 +25,33 @@ export function placeOf(address: string): Place | undefined {
   const kind = isIP(plain);
   if (kind === 4) return ipv4Place(plain);
   if (kind !== 6) return undefined;
-  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(plain)?.[1];
-  if (mapped) return ipv4Place(mapped);
-  if (plain === '::1' || plain === '::') return 'loopback';
-  if (/^fe[89ab]/.test(plain)) return 'link-local';
+  const words = hextets(plain);
+  const embedded =
+    words.slice(0, 5).every((w) => w === 0) && (words[5] === 0xffff || words[5] === 0);
+  if (embedded && (words[5] === 0xffff || words[6] !== 0)) return ipv4Place(ipv4Of(words));
+  if (words.slice(0, 7).every((w) => w === 0) && (words[7] ?? 0) <= 1) return 'loopback';
+  if (((words[0] ?? 0) & 0xffc0) === 0xfe80) return 'link-local';
   return undefined;
+}
+
+function ipv4Of(words: number[]): string {
+  const [high = 0, low = 0] = words.slice(6);
+  return [high >> 8, high & 0xff, low >> 8, low & 0xff].join('.');
+}
+
+function hextets(address: string): number[] {
+  const dotted = /(\d+\.\d+\.\d+\.\d+)$/.exec(address)?.[1];
+  let text = address;
+  if (dotted) {
+    const [a, b, c, d] = dotted.split('.').map(Number) as [number, number, number, number];
+    text = `${address.slice(0, -dotted.length)}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
+  }
+  const [head = '', tail] = text.split('::');
+  const part = (side: string) => (side ? side.split(':').map((w) => Number.parseInt(w, 16)) : []);
+  const left = part(head);
+  const right = tail === undefined ? [] : part(tail);
+  const gap = Array<number>(8 - left.length - right.length).fill(0);
+  return [...left, ...gap, ...right];
 }
 
 function loopbackName(host: string): boolean {
