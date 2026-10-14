@@ -75,8 +75,15 @@ export function scrubbed(inner: OpenFile, scrubber: Scrubber, idleMs = SCRUB_IDL
     },
     close: async () => {
       if (timer !== undefined) clearTimeout(timer);
-      await enqueue(stream.end()).catch(() => undefined);
+      let failure: { err: unknown } | undefined;
+      try {
+        await enqueue(stream.end());
+        raise();
+      } catch (err) {
+        failure = { err };
+      }
       await inner.release();
+      if (failure) throw failure.err;
     },
   });
 }
