@@ -71,18 +71,21 @@ export function translate(err: unknown, path: string, op: OpfsOp = 'lookup', map
 
 const META_OPS = ['get', 'update', 'move', 'remove', 'links', 'under', 'all'] as const;
 
+type MetaOp = (typeof META_OPS)[number] | 'fresh';
+
 function sidecar(meta: MetaStore): MetaStore {
   const pathOf = ([first]: unknown[]) =>
     [first, '/'].flat().find((p): p is string => typeof p === 'string') as string;
   const guarded =
-    (op: (typeof META_OPS)[number]) =>
+    (op: MetaOp) =>
     (...args: unknown[]) =>
       (meta[op] as (...args: unknown[]) => Promise<unknown>)
         .apply(meta, args)
         .catch((err: unknown) => {
           throw translate(err, pathOf(args), 'sidecar', false);
         });
-  const ops = Object.fromEntries(META_OPS.map((op) => [op, guarded(op)])) as unknown as MetaStore;
+  const names = meta.fresh ? [...META_OPS, 'fresh' as const] : META_OPS;
+  const ops = Object.fromEntries(names.map((op) => [op, guarded(op)])) as unknown as MetaStore;
   if (meta.absent) ops.absent = meta.absent.bind(meta);
   const { removeFile } = meta;
   if (removeFile)
@@ -263,8 +266,8 @@ export class OpfsFs implements KernelFs {
   private counted: readonly string[] = [];
 
   private async stamp(path: string): Promise<string> {
-    const [meta] = await this.meta.get([path]);
-    return String(meta?.writes ?? 0);
+    const entry = this.meta.fresh ? await this.meta.fresh(path) : (await this.meta.get([path]))[0];
+    return String(entry?.writes ?? 0);
   }
 
   private async counting(target: string): Promise<void> {
