@@ -425,12 +425,59 @@ export class WasiHost {
               view.setUint32(old + 4, oldHi, true);
             })
           : E.NOSYS,
+      sigmask_poll: (
+        lo: number,
+        hi: number,
+        inPtr: number,
+        outPtr: number,
+        n: number,
+        nevents: number
+      ) =>
+        this.sigmask
+          ? this.maskedPoll(this.sigmask, [lo, hi], [inPtr, outPtr, n, nevents])
+          : E.NOSYS,
       sigpending_get: (out: number) => {
         if (!this.sigmask) return E.NOSYS;
         mem.view().setBigUint64(out, BigInt(this.sigmask.pending()), true);
         return E.SUCCESS;
       },
     });
+  }
+
+  private poll(inPtr: number, outPtr: number, n: number, nevents: number): number {
+    try {
+      return pollOneoff(
+        {
+          mem: this.mem,
+          fds: this.fds,
+          kernel: this.o.kernel,
+          now: (id) => this.now(id),
+          interruptWakes: this.interruptWakes,
+        },
+        inPtr,
+        outPtr,
+        n,
+        nevents
+      );
+    } finally {
+      this.o.fs.invalidate?.();
+    }
+  }
+
+  private maskedPoll(
+    mask: WasiSigmask,
+    set: [number, number],
+    [inPtr, outPtr, n, nevents]: number[]
+  ): number {
+    const old = mask.swap(set[0], set[1]);
+    try {
+      this.mem.view().setUint32(nevents, 0, true);
+      if (mask.deliverUnblocked()) return E.INTR;
+      if (n > 0) return this.poll(inPtr, outPtr, n, nevents);
+      for (;;) this.o.kernel.call({ op: 'fd-select', read: [], write: [], timeoutMs: -1 });
+    } finally {
+      mask.restore(old);
+    }
   }
 
   imports(): Record<string, WasiFunction> {
@@ -440,25 +487,8 @@ export class WasiHost {
       ...this.statImports(),
       ...this.pathImports(),
       ...this.socketImports(),
-      poll_oneoff: (inPtr: number, outPtr: number, n: number, nevents: number) => {
-        try {
-          return pollOneoff(
-            {
-              mem: this.mem,
-              fds: this.fds,
-              kernel: this.o.kernel,
-              now: (id) => this.now(id),
-              interruptWakes: this.interruptWakes,
-            },
-            inPtr,
-            outPtr,
-            n,
-            nevents
-          );
-        } finally {
-          this.o.fs.invalidate?.();
-        }
-      },
+      poll_oneoff: (inPtr: number, outPtr: number, n: number, nevents: number) =>
+        this.poll(inPtr, outPtr, n, nevents),
     });
     return this.cache;
   }
