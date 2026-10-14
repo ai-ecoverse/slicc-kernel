@@ -935,9 +935,9 @@ export class Launcher {
     cache.set(key, found);
     loading.then(
       (done) => {
-        if (done.key === undefined || done.key === key) return;
+        if (done.key === key || (done.key === undefined && !key.includes('\0'))) return;
         if (cache.get(key) === found) cache.delete(key);
-        cache.set(done.key, found);
+        if (done.key !== undefined) cache.set(done.key, found);
       },
       () => cache.delete(key)
     );
