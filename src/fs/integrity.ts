@@ -1,5 +1,5 @@
 import type { DenialHook } from './dac.ts';
-import { isProtected } from './protect.ts';
+import { isProtected, namesOf } from './protect.ts';
 import { fsError, type KernelFs, normalizePath } from './types.ts';
 
 export type IntegrityLookup = (path: string) => string | undefined | Promise<string | undefined>;
@@ -13,6 +13,11 @@ export interface IntegrityCaller {
   pid: number;
   uid: number;
   tag?: string | undefined;
+}
+
+interface Checked {
+  real: string;
+  name: string;
 }
 
 export const KERNEL_CALLER: IntegrityCaller = { pid: 0, uid: 0 };
@@ -61,53 +66,66 @@ export class Integrity {
     this.report = report;
   }
 
-  private async real(path: string): Promise<string | undefined> {
+  private async real(path: string, asked?: string): Promise<Checked | undefined> {
     const at = normalizePath(path);
     const real = (await this.root.realpath?.(at, true).catch(() => undefined)) ?? at;
-    return isProtected(this.prefixes, real) ? real : undefined;
+    if (isProtected(this.prefixes, real)) return { real, name: real };
+    const names = asked === undefined ? [] : await namesOf(this.root, asked);
+    if (real !== at) names.push(...(await namesOf(this.root, at)));
+    const name = names.findLast((p) => isProtected(this.prefixes, p));
+    return name === undefined ? undefined : { real, name };
   }
 
-  async key(path: string): Promise<string | undefined> {
-    const real = await this.real(path);
-    if (real === undefined || !this.root.version) return undefined;
+  async key(path: string, asked?: string): Promise<string | undefined> {
+    const found = await this.real(path, asked);
+    if (found === undefined) return undefined;
+    const { real, name } = found;
+    if (name !== real) return `${name}\0${real}\0`;
+    if (!this.root.version) return undefined;
     return `${real}\0${await this.root.version(real)}`;
   }
 
   async read(
     path: string,
     caller: IntegrityCaller,
-    plain: () => Promise<Uint8Array>
+    plain: () => Promise<Uint8Array>,
+    asked?: string
   ): Promise<Uint8Array> {
-    return (await this.readKeyed(path, caller, plain)).bytes;
+    return (await this.readKeyed(path, caller, plain, asked)).bytes;
   }
 
   async readKeyed(
     path: string,
     caller: IntegrityCaller,
-    plain: () => Promise<Uint8Array>
+    plain: () => Promise<Uint8Array>,
+    asked?: string
   ): Promise<{ bytes: Uint8Array; key?: string }> {
-    const real = await this.real(path);
-    if (real === undefined) return { bytes: await plain() };
-    const read = this.root.readVersioned
-      ? await this.root.readVersioned(real)
-      : { bytes: await this.root.readFileBuffer(real), version: undefined };
+    const found = await this.real(path, asked);
+    if (found === undefined) return { bytes: await plain() };
+    const { real, name } = found;
+    const read =
+      name !== real
+        ? { bytes: await plain(), version: undefined }
+        : this.root.readVersioned
+          ? await this.root.readVersioned(real)
+          : { bytes: await this.root.readFileBuffer(real), version: undefined };
     const { bytes } = read;
     const keyed =
       read.version === undefined ? { bytes } : { bytes, key: `${real}\0${read.version}` };
     const actual = await sha256(bytes);
-    const denial = { pid: caller.pid, uid: caller.uid, path: real, actual };
+    const denial = { pid: caller.pid, uid: caller.uid, path: name, actual };
     const tagged = caller.tag !== undefined ? { tag: caller.tag } : {};
     let expected: string | undefined;
     try {
-      expected = await this.expected(real);
+      expected = await this.expected(name);
     } catch {
       this.say({ ...denial, ...tagged, op: 'exec-integrity', errno: 'EACCES' });
-      throw fsError('EACCES', `integrity lookup failed: ${real}`);
+      throw fsError('EACCES', `integrity lookup failed: ${name}`);
     }
     if (expected === undefined) {
       if (this.unknown === 'allow') {
-        if (!this.unverified.has(real)) {
-          this.unverified.add(real);
+        if (!this.unverified.has(name)) {
+          this.unverified.add(name);
           this.say({ ...denial, ...tagged, op: 'exec-unverified', errno: 'ENODATA' });
         }
         return keyed;
@@ -117,7 +135,7 @@ export class Integrity {
     }
     const known = expected !== undefined ? { expected } : {};
     this.say({ ...denial, ...tagged, ...known, op: 'exec-integrity', errno: 'EACCES' });
-    throw fsError('EACCES', `integrity check failed: ${real}`);
+    throw fsError('EACCES', `integrity check failed: ${name}`);
   }
 
   private async expected(path: string): Promise<string | undefined> {
