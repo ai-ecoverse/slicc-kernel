@@ -177,6 +177,25 @@ export class IndexedDbMeta implements MetaStore {
     this.cache.set(path, next ?? null);
   }
 
+  async updateMany(changes: ReadonlyArray<{ path: string; change: MetaChange }>): Promise<void> {
+    const [transaction, store] = this.transaction('readwrite');
+    for (const { path, change } of changes) {
+      const request = store.get(path);
+      request.onsuccess = () => {
+        const next = change(request.result);
+        if (next) store.put(next);
+        else store.delete(path);
+      };
+    }
+    await settle(transaction, () => undefined);
+    this.changed({ paths: changes.map(({ path }) => path) });
+  }
+
+  close(): void {
+    this.channel.close();
+    this.db.close();
+  }
+
   async move(from: string, to: string, root: (entry: MetaEntry | undefined) => MetaEntry) {
     const [transaction, store] = this.transaction('readwrite');
     store.delete(to);

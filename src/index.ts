@@ -214,6 +214,7 @@ export interface Kernel {
   readonly users: KernelUsers;
   readonly groups: KernelGroups;
   setRoutes(routes: RouteTable): Promise<void>;
+  chmod(path: string, mode: number): Promise<void>;
   updateTransportTraits(): Promise<boolean>;
   dial(options: DialOptions): Promise<DialledSocket>;
   loopbackFetch(input: RequestInfo | URL, options: LoopbackFetchOptions): Promise<Response>;
@@ -703,6 +704,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
       (await call({ op: 'connect', ...connectOptions })) as MessagePort,
     ...accounts(call, options.users === undefined ? DEFAULT_USERS : options.users),
     setRoutes: async (routes) => void (await call({ op: 'routes', routes })),
+    chmod: async (path, mode) => void (await call({ op: 'chmod', path, mode })),
     updateTransportTraits: traitsUpdater(transport, call),
     dial,
     loopbackFetch: (input, fetchOptions) => loopbackFetch(dial, input, fetchOptions),

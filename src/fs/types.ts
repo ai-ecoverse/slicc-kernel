@@ -113,6 +113,13 @@ export function mayLink(fs: { links?(path: string): boolean }, path: string): bo
   return fs.links?.(path) ?? true;
 }
 
+export function modeOption(mode: unknown): number {
+  if (!Number.isInteger(mode) || (mode as number) < 0 || (mode as number) > 0o7777) {
+    throw fsError('EINVAL', `not a mode: ${String(mode)}`);
+  }
+  return mode as number;
+}
+
 export function fsError(code: string, path: string): Error & { code: string } {
   return Object.assign(new Error(`${code}: ${path}`), { code });
 }

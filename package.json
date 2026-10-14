@@ -25,7 +25,8 @@
     ".": "./dist/index.js",
     "./node": "./dist/node.js",
     "./driver": "./dist/driver.js",
-    "./testing": "./dist/testing.js"
+    "./testing": "./dist/testing.js",
+    "./meta": "./dist/meta.js"
   },
   "files": [
     "dist"

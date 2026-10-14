@@ -37,7 +37,7 @@ import {
   writeDevice,
   written,
 } from './js-io.ts';
-import { callError, JsCallError, type JsKernel } from './js-kernel.ts';
+import { callError, JsCallError, type JsKernel, modeOf } from './js-kernel.ts';
 import type { JsRunOptions, JsRunResult } from './js-run.ts';
 
 export type SyncCall = (req: SyncSabRequestBody) => SyncFsResult;
@@ -82,6 +82,7 @@ export interface JsSyncContext {
     rm(path: string): void;
     unlink(path: string): void;
     rename(from: string, to: string): void;
+    chmod(path: string, mode: number): void;
     link(from: string, to: string): void;
     symlink(target: string, path: string): void;
     readlink(path: string): string;
@@ -353,6 +354,8 @@ function syncPathOps(
     unlink: (path) => void kernel.call({ op: 'unlink', path: resolve(path) }),
     rename: (from, to) =>
       void kernel.call({ op: 'rename', path: resolve(from), arg2: resolve(to) }),
+    chmod: (path, mode) =>
+      void kernel.call({ op: 'chmod', path: resolve(path), mode: modeOf(mode) }),
     link: (from, to) => void kernel.call({ op: 'link', path: resolve(from), arg2: resolve(to) }),
     symlink: (target, path) =>
       void kernel.call({ op: 'symlink', path: resolve(path), arg2: target }),

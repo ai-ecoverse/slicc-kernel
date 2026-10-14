@@ -27,6 +27,13 @@ const DETAILED: ReadonlySet<string> = new Set([
   'fd-open-clipboard',
 ]);
 
+export function modeOf(mode: unknown): number {
+  if (!Number.isInteger(mode) || (mode as number) < 0 || (mode as number) > 0o7777) {
+    throw new JsCallError('EINVAL', 'chmod');
+  }
+  return mode as number;
+}
+
 export function callError(result: { errno: string; message: string }, op: string): JsCallError {
   const { errno, message } = result;
   const detailed = typeof message === 'string' && message !== errno && DETAILED.has(op);
