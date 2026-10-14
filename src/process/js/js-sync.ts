@@ -28,10 +28,12 @@ import {
   index,
   isExclusive,
   type JsOpenOptions,
+  type JsStatFs,
   joined,
   MAX_IO,
   openRequest,
   readDevice,
+  statFsOf,
   writeDevice,
   written,
 } from './js-io.ts';
@@ -83,6 +85,7 @@ export interface JsSyncContext {
     link(from: string, to: string): void;
     symlink(target: string, path: string): void;
     readlink(path: string): string;
+    statfs(path: string): JsStatFs;
     readFile(path: string): Uint8Array;
     writeFile(path: string, data: Uint8Array | string): void;
   };
@@ -357,6 +360,11 @@ function syncPathOps(
       const abs = resolve(path);
       if (inDev(abs)) return devSync(kernel, devReadlink(abs));
       return String(kernel.json({ op: 'readlink', path: abs }));
+    },
+    statfs(path) {
+      const abs = resolve(path);
+      statOf('stat', abs);
+      return statFsOf(kernel.json({ op: 'statfs', path: abs }));
     },
     readFile(path) {
       const abs = resolve(path);

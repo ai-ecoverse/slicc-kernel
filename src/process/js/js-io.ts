@@ -1,5 +1,9 @@
 import type { DeviceMeta, KernelFdKind } from '../../kernel/fd-table.ts';
-import type { SyncFsBridgeStat, SyncFsResult } from '../../realm/sync-fs-wire.ts';
+import {
+  parseSyncFsUsage,
+  type SyncFsBridgeStat,
+  type SyncFsResult,
+} from '../../realm/sync-fs-wire.ts';
 import { JsCallError } from './js-kernel.ts';
 
 export interface JsOpenOptions {
@@ -68,6 +72,28 @@ export function brokenPipe(err: unknown, info: FdInfo): boolean {
 
 export function written(r: SyncFsResult, fallback: number): number {
   return r.ok && r.kind === 'json' && typeof r.json === 'number' ? r.json : fallback;
+}
+
+export interface JsStatFs {
+  type: number;
+  bsize: number;
+  blocks: number;
+  bfree: number;
+  bavail: number;
+  files: number;
+  ffree: number;
+  quota: number;
+  usage: number;
+}
+
+const BLOCK = 4096;
+
+export function statFsOf(json: unknown): JsStatFs {
+  const usage = parseSyncFsUsage(json);
+  const blocks = usage ? Math.ceil(usage.quota / BLOCK) : 0;
+  const free = usage ? Math.max(0, Math.floor((usage.quota - usage.usage) / BLOCK)) : 0;
+  const bytes = { quota: usage?.quota ?? 0, usage: usage?.usage ?? 0 };
+  return { type: 0, bsize: BLOCK, blocks, bfree: free, bavail: free, files: 0, ffree: 0, ...bytes };
 }
 
 export function joined(parts: Uint8Array[], length: number): Uint8Array {
