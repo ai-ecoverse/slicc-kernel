@@ -77,6 +77,7 @@ export interface SpawnWasmOptions {
   owners?: boolean;
   fresh?: (path: string, umask: number) => void;
   sealed?: SealedBroker;
+  ttyFilter?: (file: OpenFile) => OpenFile;
   clipboard?: ClipboardBroker;
   readonlyAt?: (path: string) => boolean;
   dac?: Dac;
@@ -371,6 +372,7 @@ function processOptions(
     ...inherited(opts),
     ...(opts.owners ? { owners: true } : {}),
     ...(opts.sealed ? { sealed: opts.sealed } : {}),
+    ...(opts.ttyFilter ? { ttyFilter: opts.ttyFilter } : {}),
     ...(opts.clipboard ? { clipboard: opts.clipboard, ...clipboardName(opts) } : {}),
     ...(opts.readonlyAt ? { readonlyAt: opts.readonlyAt } : {}),
     ...(opts.dac ? { guard: { dac: opts.dac, fs: opts.fs, created } } : {}),

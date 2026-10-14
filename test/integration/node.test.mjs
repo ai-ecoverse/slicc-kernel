@@ -155,7 +155,8 @@ test('a package driver mounts a mock S3; programs and git work on it, unmounting
   const { objects, server } = objectStore();
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const endpoint = `http://127.0.0.1:${server.address().port}/bucket`;
-  const kernel = await createNodeKernel({ network: { transport: nodeTransport() } });
+  const transport = nodeTransport({ hostLoopback: [server.address().port] });
+  const kernel = await createNodeKernel({ network: { transport } });
   t.after(() => {
     kernel.terminate();
     server.close();

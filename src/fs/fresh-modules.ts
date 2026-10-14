@@ -2,15 +2,21 @@ import { type KernelFs, normalizePath, rangedOps } from './types.ts';
 
 const MAGIC = [0x00, 0x61, 0x73, 0x6d];
 const MAX_FRESH = 65_536;
+const DEFAULT_UMASK = 0o022;
 
 interface Fresh {
   umask: number;
   pid: number;
   added: number;
+  setup: boolean;
 }
 
 function isModule(bytes: Uint8Array): boolean {
   return MAGIC.every((b, i) => bytes[i] === b);
+}
+
+function within(path: string, dir: string): boolean {
+  return path.startsWith(dir === '/' ? '/' : `${dir}/`);
 }
 
 export class FreshModules {
@@ -21,19 +27,44 @@ export class FreshModules {
     this.fresh.delete(key);
     const oldest = this.fresh.size >= MAX_FRESH ? this.fresh.keys().next().value : undefined;
     if (oldest !== undefined) this.fresh.delete(oldest);
-    this.fresh.set(key, { umask: umask & 0o777, pid, added: 0 });
+    const mask = umask & 0o777;
+    this.fresh.set(key, { umask: mask, pid, added: 0, setup: mask !== DEFAULT_UMASK });
   }
 
   forget(pid: number): void {
     for (const [path, fresh] of this.fresh) if (fresh.pid === pid) this.fresh.delete(path);
   }
 
+  private drop(fresh: Fresh): void {
+    for (const [key, note] of [...this.fresh]) if (note === fresh) this.fresh.delete(key);
+  }
+
+  private moved(from: string, to: string): void {
+    const source = normalizePath(from);
+    const target = normalizePath(to);
+    if (source === target) return;
+    for (const key of [...this.fresh.keys()]) {
+      if (key === target || within(key, target)) this.fresh.delete(key);
+    }
+    for (const [key, fresh] of [...this.fresh]) {
+      if (key !== source && !within(key, source)) continue;
+      this.fresh.delete(key);
+      this.fresh.set(target + key.slice(source.length), fresh);
+    }
+  }
+
   wrap(fs: KernelFs): KernelFs {
-    const decide = async (given: string, bytes: Uint8Array | string) => {
+    const head = async (path: string): Promise<Uint8Array> => {
+      if (fs.pread) return fs.pread(path, 0, MAGIC.length);
+      return (await fs.readFileBuffer(path)).subarray(0, MAGIC.length);
+    };
+    const decide = async (given: string, known?: Uint8Array) => {
       const path = normalizePath(given);
       const fresh = this.fresh.get(path);
-      if (!fresh || typeof bytes === 'string' || bytes.length < MAGIC.length) return;
+      if (!fresh) return;
+      const bytes = known && known.length >= MAGIC.length ? known : await head(path);
       const want = isModule(bytes) ? 0o111 & ~fresh.umask : 0;
+      fresh.setup = false;
       if (want === fresh.added) return;
       const mode = (await fs.stat(path)).mode & 0o7777;
       await fs.chmod(path, (mode & ~fresh.added) | want);
@@ -42,23 +73,34 @@ export class FreshModules {
     const overrides: Partial<Record<keyof KernelFs, unknown>> = {
       writeFile: async (path: string, content: Uint8Array | string, owner?: unknown) => {
         await fs.writeFile(path, content, owner as never);
-        await decide(path, content);
+        if (this.fresh.has(normalizePath(path))) {
+          await decide(
+            path,
+            typeof content === 'string' ? new TextEncoder().encode(content) : content
+          );
+        }
       },
       chmod: async (path: string, mode: number) => {
         const fresh = this.fresh.get(normalizePath(path));
-        const creating = fresh?.added === 0 && (mode & 0o7777) === (0o666 & ~fresh.umask);
-        if (!creating) this.fresh.delete(normalizePath(path));
+        if (fresh?.setup && (mode & 0o7777) === (0o666 & ~fresh.umask)) fresh.setup = false;
+        else if (fresh) this.drop(fresh);
         await fs.chmod(path, mode);
       },
       rm: async (path: string, options?: { recursive?: boolean; force?: boolean }) => {
-        this.fresh.delete(normalizePath(path));
         await fs.rm(path, options);
+        const at = normalizePath(path);
+        for (const key of [...this.fresh.keys()]) {
+          if (key === at || within(key, at)) this.fresh.delete(key);
+        }
       },
       rename: async (from: string, to: string) => {
         await fs.rename(from, to);
-        const fresh = this.fresh.get(normalizePath(from));
-        this.fresh.delete(normalizePath(from));
-        this.fresh.delete(normalizePath(to));
+        this.moved(from, to);
+      },
+      link: async (from: string, to: string, follow?: boolean) => {
+        await fs.link(from, to, follow);
+        const source = follow && fs.realpath ? await fs.realpath(from, true) : from;
+        const fresh = this.fresh.get(normalizePath(source));
         if (fresh) this.fresh.set(normalizePath(to), fresh);
       },
     };
@@ -70,10 +112,13 @@ export class FreshModules {
         bytes: Uint8Array,
         transfer?: boolean
       ) => {
-        const head =
-          at === 0 && this.fresh.has(normalizePath(path)) ? bytes.slice(0, 4) : undefined;
+        const touches = at < MAGIC.length && this.fresh.has(normalizePath(path));
         await ranged.pwrite(path, at, bytes, transfer);
-        if (head) await decide(path, head);
+        if (touches) await decide(path);
+      };
+      overrides.truncate = async (path: string, size: number) => {
+        await ranged.truncate(path, size);
+        if (size < MAGIC.length && this.fresh.has(normalizePath(path))) await decide(path);
       };
     }
     const bound = new WeakMap<object, unknown>();
