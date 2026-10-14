@@ -254,6 +254,7 @@ interface Planned {
   via?: string[];
   sources?: string[];
   bins?: string[];
+  asked?: Record<string, string>;
 }
 
 interface Redeemer {
@@ -826,17 +827,18 @@ export class Launcher {
     }
     const path = this.fs.resolvePath(cwd, file);
     const glue = await followLinks(this.base, path);
+    const asked = glue === path ? {} : { asked: path };
     const linked = COMMAND.exec(glue)?.[1];
     if (linked !== undefined) {
-      const target = await this.resolve(`/bin/${linked}`, argv0, cwd);
+      const found = await this.resolve(`/bin/${linked}`, argv0, cwd);
+      const target = found && { ...found, ...asked };
       const byPath = !COMMAND.test(path) && (await this.commands()).get(linked)?.argv0Path === true;
       return target && byPath ? { ...target, argv0: path } : target;
     }
     const own = await this.commandAt(glue, scope);
-    if (own) return own.script ? undefined : targetOf(own);
+    if (own) return own.script ? undefined : { ...targetOf(own), ...asked };
     const head = await this.head(glue);
     if (!head) return undefined;
-    const asked = glue === path ? {} : { asked: path };
     if (isWasm(head)) {
       return {
         abi: 'wasi',
@@ -876,6 +878,8 @@ export class Launcher {
   ): Promise<Planned | undefined> {
     const command = await this.scriptCommand(file, cwd, scope);
     const script = command?.script ?? this.fs.resolvePath(cwd, file);
+    const byPath = command && file.includes('/') && !COMMAND.test(file);
+    const named = byPath ? { [script]: this.fs.resolvePath(cwd, file) } : {};
     const head = await this.head(script);
     if (!head) return undefined;
     const binfmt = isWasm(head) ? undefined : binfmtOf(await this.interpreters(scope), script);
@@ -900,6 +904,7 @@ export class Launcher {
           via,
           sources,
           ...(bins.length > 0 ? { bins } : {}),
+          asked: { ...inner.asked, ...named },
         }
       );
     }
@@ -910,6 +915,7 @@ export class Launcher {
       via: [interp],
       sources: [script],
       ...(command?.bin ? { bins: [script] } : {}),
+      asked: named,
     };
   }
 
@@ -1210,7 +1216,9 @@ export class Launcher {
       const root = file === undefined ? undefined : PACKAGE_ROOT.exec(file)?.[1];
       if (root !== undefined) manifests.add(`${root}/package.json`);
     }
-    for (const source of planned.sources ?? []) await this.text(source, caller);
+    for (const source of planned.sources ?? []) {
+      await this.text(source, caller, planned.asked?.[source]);
+    }
     for (const manifest of manifests) {
       if (await this.base.exists(manifest)) await this.text(manifest, caller);
     }
@@ -1243,10 +1251,10 @@ export class Launcher {
     if (target.abi === 'js' && target.wasm === SUDO_PATH) {
       return { abi: 'js', glue: SUDO_SOURCE, path: SUDO_PATH };
     }
-    if (target.abi === 'js') {
-      return { abi: 'js', glue: await this.text(target.wasm, caller), path: target.wasm };
-    }
     const { asked } = target;
+    if (target.abi === 'js') {
+      return { abi: 'js', glue: await this.text(target.wasm, caller, asked), path: target.wasm };
+    }
     if (target.abi !== 'wasi') {
       const [glue, { module }] = await Promise.all([
         this.text(target.glue, caller, asked),
