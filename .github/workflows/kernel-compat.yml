@@ -67,12 +67,12 @@ jobs:
 
   pr:
     needs: pack
-    uses: ai-ecoverse/homescoop/.github/workflows/kernel-compat.yml@7579b505c725361cd6c8ffb5fce71b5cc0b95eb5
+    uses: ai-ecoverse/homescoop/.github/workflows/kernel-compat.yml@f11eabb9d696ecf22233d2f8936357729193f6c3
     permissions:
       contents: read
       actions: read
     with:
-      homescoop-ref: 7579b505c725361cd6c8ffb5fce71b5cc0b95eb5
+      homescoop-ref: f11eabb9d696ecf22233d2f8936357729193f6c3
       kernel: kernel-tgz
       set: base,ci-certified
       fail-on-regression: false
@@ -145,12 +145,12 @@ jobs:
   release:
     needs: published
     if: needs.published.outputs.version != ''
-    uses: ai-ecoverse/homescoop/.github/workflows/kernel-compat.yml@7579b505c725361cd6c8ffb5fce71b5cc0b95eb5
+    uses: ai-ecoverse/homescoop/.github/workflows/kernel-compat.yml@f11eabb9d696ecf22233d2f8936357729193f6c3
     permissions:
       contents: read
       actions: read
     with:
-      homescoop-ref: 7579b505c725361cd6c8ffb5fce71b5cc0b95eb5
+      homescoop-ref: f11eabb9d696ecf22233d2f8936357729193f6c3
       kernel: ${{ needs.published.outputs.version }}
       set: ${{ inputs.set || 'base,catalog,all' }}
 
