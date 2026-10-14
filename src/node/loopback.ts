@@ -10,6 +10,8 @@ export type Resolve = (host: string) => Promise<string[]>;
 
 type Place = 'loopback' | 'link-local';
 
+const METADATA_V6 = [0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254].join(':');
+
 export const resolveHost: Resolve = async (host) =>
   (await lookup(host, { all: true, verbatim: true })).map((a) => a.address);
 
@@ -31,6 +33,7 @@ export function placeOf(address: string): Place | undefined {
   if (embedded && (words[5] === 0xffff || words[6] !== 0)) return ipv4Place(ipv4Of(words));
   if (words.slice(0, 7).every((w) => w === 0) && (words[7] ?? 0) <= 1) return 'loopback';
   if (((words[0] ?? 0) & 0xffc0) === 0xfe80) return 'link-local';
+  if (words.join(':') === METADATA_V6) return 'link-local';
   return undefined;
 }
 
