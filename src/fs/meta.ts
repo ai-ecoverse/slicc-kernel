@@ -14,12 +14,14 @@ export interface MetaEntry {
   uid?: number;
   gid?: number;
   heir?: [number, number];
+  writes?: number;
 }
 
 export type MetaChange = (entry: MetaEntry | undefined) => MetaEntry | undefined;
 
 export interface MetaStore {
   get(paths: readonly string[]): Promise<Array<MetaEntry | undefined>>;
+  fresh?(path: string): Promise<MetaEntry | undefined>;
   update(path: string, change: MetaChange): Promise<void>;
   move(from: string, to: string, root: (entry: MetaEntry | undefined) => MetaEntry): Promise<void>;
   remove(paths: readonly string[]): Promise<void>;
@@ -51,6 +53,10 @@ export class MemoryMeta implements MetaStore {
 
   async get(paths: readonly string[]): Promise<Array<MetaEntry | undefined>> {
     return paths.map((path) => this.entries.get(path));
+  }
+
+  async fresh(path: string): Promise<MetaEntry | undefined> {
+    return this.entries.get(path);
   }
 
   async update(path: string, change: MetaChange): Promise<void> {
@@ -171,6 +177,17 @@ export class IndexedDbMeta implements MetaStore {
       );
     }
     return paths.map((path) => this.cache.get(path) ?? undefined);
+  }
+
+  async fresh(path: string): Promise<MetaEntry | undefined> {
+    const [transaction, store] = this.transaction('readonly');
+    const request = store.get(path);
+    let entry: MetaEntry | undefined;
+    request.onsuccess = () => {
+      entry = (request.result as MetaEntry | undefined) ?? undefined;
+    };
+    await settle(transaction, () => undefined);
+    return entry;
   }
 
   async update(path: string, change: MetaChange): Promise<void> {

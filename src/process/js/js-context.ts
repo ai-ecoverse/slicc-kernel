@@ -385,7 +385,9 @@ export function createContext(o: ContextOptions): CreatedContext {
     kill: killer({ self: o.pid, kernel, syncKernel, lane, writes, modes: terminal.modes }),
     cred: () => syncKernel.json({ op: 'proc-cred' }) as JsCred,
     setcred(change) {
-      if (typeof change !== 'object' || change === null) throw new JsCallError('EINVAL', 'setcred');
+      if (typeof change !== 'object' || change === null || Array.isArray(change)) {
+        throw new JsCallError('EINVAL', 'setcred');
+      }
       return syncKernel.json({ op: 'proc-setcred', change: { ...change } }) as JsCred;
     },
   };
