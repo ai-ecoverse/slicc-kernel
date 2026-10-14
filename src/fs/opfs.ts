@@ -256,17 +256,24 @@ export class OpfsFs implements KernelFs {
     return this.remote?.announce(paths) ?? Promise.resolve();
   }
 
-  private readonly generations = new Map<string, number>();
-
   private committed(target: string): void {
-    this.generations.set(target, (this.generations.get(target) ?? 0) + 1);
     if (this.remote?.watched()) this.remote.wrote(target);
   }
 
+  private counted: readonly string[] = [];
+
   private async stamp(path: string): Promise<string> {
-    const local = this.generations.get(path) ?? 0;
     const [meta] = await this.meta.get([path]);
-    return `${local}:${meta?.writes ?? 0}`;
+    return String(meta?.writes ?? 0);
+  }
+
+  private async counting(target: string): Promise<void> {
+    if (!isProtected(this.counted, target)) return;
+    await this.meta.update(target, (entry) => ({
+      ...entry,
+      path: target,
+      writes: (entry?.writes ?? 0) + 1,
+    }));
   }
 
   resolvePath(base: string, path: string): string {
@@ -341,6 +348,7 @@ export class OpfsFs implements KernelFs {
 
   protect(prefixes: readonly string[]): void {
     this.guarded = prefixes;
+    this.counted = prefixes;
   }
 
   unguarded(): KernelFs {
@@ -550,18 +558,16 @@ export class OpfsFs implements KernelFs {
   private readonly dirDirty = new Set<string>();
   private readonly fileTimes = new Map<string, number>();
 
-  private readonly pendingWrites = new Map<string, number>();
-
-  private written(target: string): void {
+  private async written(target: string): Promise<void> {
     this.committed(target);
+    await this.counting(target);
     if (!this.ranged) return;
     this.fileTimes.set(target, Date.now());
-    this.pendingWrites.set(target, (this.pendingWrites.get(target) ?? 0) + 1);
     this.scheduleFileTimes();
   }
 
   private scheduleFileTimes(): void {
-    if (this.flushing.file || (this.fileTimes.size === 0 && this.pendingWrites.size === 0)) return;
+    if (this.flushing.file || this.fileTimes.size === 0) return;
     this.flushing.file = setTimeout(() => {
       void this.flushFileTimes()
         .catch(() => undefined)
@@ -574,14 +580,6 @@ export class OpfsFs implements KernelFs {
   }
 
   private async flushFileTimes(): Promise<void> {
-    for (const [path, n] of [...this.pendingWrites]) {
-      this.pendingWrites.delete(path);
-      await this.meta.update(path, (entry) => ({
-        ...entry,
-        path,
-        writes: (entry?.writes ?? 0) + n,
-      }));
-    }
     for (const [path, ms] of [...this.fileTimes]) {
       const mtimeFor = await this.modified(path).catch(() => 0);
       await this.meta.update(path, (entry) =>
@@ -791,7 +789,7 @@ export class OpfsFs implements KernelFs {
   async pwrite(path: string, offset: number, bytes: Uint8Array): Promise<void> {
     const [handle, , target] = await this.fileFor(path);
     await this.retrying(path, () => positioned(handle, (io) => io.write(offset, bytes)), true);
-    this.written(target);
+    await this.written(target);
   }
 
   async truncate(path: string, size: number): Promise<void> {
@@ -799,7 +797,7 @@ export class OpfsFs implements KernelFs {
     const resolve = this.ranged || this.remote?.watched();
     const target = resolve ? (await this.locate(path, true)).path : path;
     await this.retrying(path, () => positioned(handle, (io) => io.truncate(size)), true);
-    this.written(target);
+    await this.written(target);
   }
 
   async writeSession(path: string, truncate: boolean): Promise<WriteSession> {
