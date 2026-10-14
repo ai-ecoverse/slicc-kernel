@@ -1933,10 +1933,10 @@ export class Launcher {
       throw new TypeError('integrity.revoke takes an absolute path');
     }
     if (!this.integrity) return;
-    this.revocations++;
     const at = path === undefined ? undefined : normalizePath(path);
     const real = at && (await this.base.realpath?.(at, true).catch(() => undefined));
     const roots = [at, real].filter((p): p is string => p !== undefined);
+    this.revocations++;
     const hit = (key: string) =>
       key.includes('\0') &&
       (at === undefined ||
