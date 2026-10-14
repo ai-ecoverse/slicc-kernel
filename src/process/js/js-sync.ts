@@ -7,6 +7,7 @@ import {
 } from '../../realm/sync-fs-wire.ts';
 import { createSyncSabTransport } from '../../realm/sync-sab-bridge.ts';
 import type { SyncSabRequestBody } from '../../realm/sync-sab-wire.ts';
+import type { JsChild, JsSpawnOptions } from './js-children.ts';
 import {
   devExists,
   devOpen,
@@ -65,6 +66,7 @@ export interface JsCred {
 
 export interface JsSyncContext {
   run(options: JsRunOptions): JsRunResult;
+  spawn(options: JsSpawnOptions): JsChild;
   exit(status?: number): never;
   kill(pid: number, signal?: number | `SIG${string}`): void;
   cred(): JsCred;
@@ -157,7 +159,7 @@ export class JsSyncKernel {
 export function syncOps(
   kernel: JsSyncKernel,
   shared: SyncShared
-): Omit<JsSyncContext, 'run' | 'exit' | 'kill' | 'cred' | 'setcred'> {
+): Omit<JsSyncContext, 'run' | 'spawn' | 'exit' | 'kill' | 'cred' | 'setcred'> {
   const { infos, handles, resolve } = shared;
 
   const info = (fd: number): FdInfo => {
