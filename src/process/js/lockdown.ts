@@ -9,7 +9,6 @@ export const BLOCKED_GLOBALS: readonly string[] = [
   'cookieStore',
   'Worker',
   'SharedWorker',
-  'BroadcastChannel',
   'postMessage',
   'close',
   'webkitRequestFileSystem',
@@ -28,7 +27,7 @@ export const BLOCKED_NAVIGATOR: readonly string[] = [
   'serial',
 ];
 
-export const OPEN_SLOTS: readonly string[] = ['fetch', 'WebSocket'];
+export const OPEN_SLOTS: readonly string[] = ['fetch', 'WebSocket', 'BroadcastChannel'];
 
 function chain(target: object): object[] {
   const out: object[] = [];
@@ -62,17 +61,20 @@ export function hide(target: object, names: readonly string[]): void {
 
 export function vacate(target: object, names: readonly string[]): void {
   for (const name of names) {
-    for (let at: object | null = target; at && at !== Object.prototype; ) {
-      if (Object.getOwnPropertyDescriptor(at, name)?.configurable) Reflect.deleteProperty(at, name);
-      at = Object.getPrototypeOf(at);
+    const holders = chain(target);
+    for (const holder of holders) {
+      if (Object.getOwnPropertyDescriptor(holder, name)?.configurable) {
+        Reflect.deleteProperty(holder, name);
+      }
     }
+    const kept = holders.slice(1).some((holder) => Object.hasOwn(holder, name));
     Reflect.defineProperty(target, name, {
       value: undefined,
       writable: true,
       enumerable: false,
       configurable: true,
     });
-    if (Reflect.get(target, name) !== undefined) {
+    if (kept || Reflect.get(target, name) !== undefined) {
       throw new Error(`slicc-kernel: cannot withhold ${name} from a JS program`);
     }
   }
