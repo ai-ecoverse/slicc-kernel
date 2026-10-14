@@ -1,6 +1,8 @@
-import { rm } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
 import { build } from 'esbuild';
 
+const { version } = JSON.parse(await readFile(new URL('./package.json', import.meta.url), 'utf8'));
+const define = { SLICC_VERSION: JSON.stringify(version) };
 await rm(new URL('./dist/', import.meta.url), { recursive: true, force: true });
 await build({
   entryPoints: [
@@ -18,6 +20,7 @@ await build({
   platform: 'browser',
   target: 'es2024',
   sourcemap: 'linked',
+  define,
   logLevel: 'warning',
 });
 await build({
@@ -28,5 +31,6 @@ await build({
   platform: 'node',
   target: 'node22',
   sourcemap: 'linked',
+  define,
   logLevel: 'warning',
 });
