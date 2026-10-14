@@ -281,6 +281,7 @@ interface StartRequest {
   pgid?: number;
   group?: 'lead' | 'session';
   ignored?: number;
+  blocked?: number;
   umask?: number;
   cred: Cred;
   tag?: string | undefined;
@@ -1260,6 +1261,7 @@ export class Launcher {
       },
       settling: () => this.settling.isSettling(pid),
       ...(req.ignored ? { ignored: req.ignored } : {}),
+      ...(req.blocked ? { blocked: req.blocked } : {}),
       ...(req.umask !== undefined ? { umask: req.umask } : {}),
       cred: req.cred,
       ...(this.owners && req.program.abi === 'wasi'
@@ -1560,6 +1562,7 @@ export class Launcher {
         report,
         ppid,
         ignored: this.ignoredBy(ppid),
+        blocked: this.blockedBy(ppid),
         umask: this.umaskOf(ppid),
         cred,
         tag: this.tagOf(ppid),
@@ -1633,6 +1636,7 @@ export class Launcher {
           ppid,
           fork: state,
           ignored: this.ignoredBy(ppid, true),
+          blocked: this.blockedBy(ppid),
           umask: this.umaskOf(ppid),
           cred: this.credOf(ppid),
           tag: this.tagOf(ppid),
@@ -1691,13 +1695,19 @@ export class Launcher {
     if (!open) void this.mounts.commit(at).catch(() => undefined);
   }
 
-  private signalMasksOf(pid: number): { sigIgn?: number; sigCgt?: number } {
+  private signalMasksOf(pid: number): { sigIgn?: number; sigCgt?: number; sigBlk?: number } {
     const masks = this.processes.get(pid)?.signalMasks?.();
-    return masks ? { sigIgn: masks.ignored, sigCgt: masks.caught } : {};
+    const blocked = this.blockedBy(pid);
+    const sigBlk = blocked ? { sigBlk: blocked } : {};
+    return masks ? { sigIgn: masks.ignored, sigCgt: masks.caught, ...sigBlk } : sigBlk;
   }
 
   private controlsJobs(pid: number): boolean {
     return this.settling.isSettling(pid) || (this.ignoredBy(pid) & sigbit(SIG.TTOU)) !== 0;
+  }
+
+  private blockedBy(pid: number): number {
+    return this.processes.get(pid)?.blockedSignals?.() ?? 0;
   }
 
   private ignoredBy(pid: number, fork = false): number {

@@ -14,7 +14,7 @@ import {
   createSyncSabTransport,
   type SabPostLike,
 } from '../../realm/sync-sab-bridge.ts';
-import { publishMemory, SAB_HEADER_I32 } from '../../realm/sync-sab-wire.ts';
+import { publishMemory, SAB_HEADER_I32, SAB_I_BLOCKED } from '../../realm/sync-sab-wire.ts';
 import { SyscallError } from '../kernel-streams.ts';
 import { identify, kernelSys } from '../process-runtime.ts';
 import { SignalGate, type SignalHooks } from '../process-signals.ts';
@@ -24,6 +24,7 @@ import { WasiExit, type WasiFunction, WasiHost, type WasiHostOptions } from './w
 import { importsContext, loadImports, type ProgramImports, type Raw } from './wasi-imports.ts';
 import { type ForeignResults, type ImportedMemory, RESERVED_NAMESPACES } from './wasi-module.ts';
 import { ProcTree, procfsBridge } from './wasi-procfs.ts';
+import { WasiSigmask } from './wasi-sigmask.ts';
 import { WasiSignals } from './wasi-signals.ts';
 import { WasiStats } from './wasi-stats.ts';
 import { MAIN_TID, ThreadExit, threadCap, WasiThreads } from './wasi-threads.ts';
@@ -116,8 +117,28 @@ export function delivering(
   return out;
 }
 
+const importsSlicc = (module: WebAssembly.Module, name: string): boolean =>
+  WebAssembly.Module.imports(module).some((i) => i.module === SLICC && i.name === name);
+
 const importsSigactionHook = (module: WebAssembly.Module): boolean =>
-  WebAssembly.Module.imports(module).some((i) => i.module === SLICC && i.name === 'sigaction_set');
+  importsSlicc(module, 'sigaction_set');
+
+export function sigmaskOf(
+  module: WebAssembly.Module,
+  sab: SharedArrayBuffer,
+  gate: Pick<SignalGate, 'deliver'>,
+  threads: WasiThreads | undefined,
+  process?: SharedArrayBuffer
+): WasiSigmask | undefined {
+  const header = new Int32Array(sab, 0, SAB_HEADER_I32);
+  if (!importsSlicc(module, 'sigmask_set')) {
+    WasiSigmask.unsupported(header);
+    return undefined;
+  }
+  if (threads) threads.blocked = () => Atomics.load(header, SAB_I_BLOCKED);
+  const shared = process && new Int32Array(process, 0, SAB_HEADER_I32);
+  return new WasiSigmask(header, () => gate.deliver(), shared);
+}
 
 const noErrno = (key: string) =>
   `imports ${key}: its result cannot carry ENOSYS, and this host does not provide it`;
@@ -634,6 +655,7 @@ export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike
     ),
     ...descriptors(init, fork, threads),
   });
+  host.sigmask = sigmaskOf(module, init.sab, gate, threads);
   if (threads) {
     threads.beforeSpawn = () => {
       if (!host.fds.isShared) host.fds.share(threads.ids, false);
@@ -753,6 +775,7 @@ export async function runWasiThread(init: WasmThreadInitMsg, port: SabPostLike):
     ),
     shared: threads.ids,
   });
+  host.sigmask = sigmaskOf(init.program.module, init.sab, gate, threads, init.signals);
 
   const program = await programImports(init.program, host, transport, thread.tid);
   const { instance } = await instantiate(host, init.program.module, thread.memory, threads, {

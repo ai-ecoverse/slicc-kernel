@@ -123,7 +123,7 @@ export function pidStatus(info: ProcessInfo): string {
     'SigQ:\t0/0',
     'SigPnd:\t0000000000000000',
     'ShdPnd:\t0000000000000000',
-    'SigBlk:\t0000000000000000',
+    `SigBlk:\t${sigMask(info.sigBlk)}`,
     `SigIgn:\t${sigMask(info.sigIgn)}`,
     `SigCgt:\t${sigMask(info.sigCgt)}`,
     '',

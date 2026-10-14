@@ -482,6 +482,8 @@ export interface WasmProcessOptions {
 
   pendingBits?: () => number;
 
+  blockedBits?: () => number;
+
   raise?: (sig: number) => void;
 
   exitNow?: (status: number) => void;
@@ -602,6 +604,10 @@ export class WasmProcess {
     if (sig === SIG.STOP) return this.stop(sig);
     const bit = sigbit(sig);
     if (this.ignores(bit)) return 'ignore';
+    if (((this.options.blockedBits?.() ?? 0) & bit) !== 0) {
+      this.options.onPending?.(sig);
+      return 'deliver';
+    }
     if (!(this.caught & bit)) {
       const action = defaultAction(sig);
       return action === 'stop' ? this.stop(sig) : action;

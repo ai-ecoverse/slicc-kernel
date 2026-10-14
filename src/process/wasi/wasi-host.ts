@@ -39,6 +39,7 @@ import {
 } from './wasi-files.ts';
 import { WasiMemory } from './wasi-memory.ts';
 import { pollOneoff } from './wasi-poll.ts';
+import type { WasiSigmask } from './wasi-sigmask.ts';
 import type { WasiSignals } from './wasi-signals.ts';
 import { sliccTty } from './wasi-termios.ts';
 
@@ -178,6 +179,8 @@ export class WasiHost {
   muted: ((fd: number, data: Uint8Array) => boolean) | undefined;
 
   signals: WasiSignals | undefined;
+
+  sigmask: WasiSigmask | undefined;
 
   interrupted: (() => boolean) | undefined;
 
@@ -407,6 +410,20 @@ export class WasiHost {
       },
       sigaction_set: (sig: number, disposition: number, flags: number) =>
         this.signals ? this.signals.disposition(sig, disposition, flags) : E.NOSYS,
+      sigmask_set: (how: number, lo: number, hi: number, old: number) =>
+        this.sigmask
+          ? this.sigmask.set(how, lo, hi, (oldLo, oldHi) => {
+              if (old === 0) return;
+              const view = mem.view();
+              view.setUint32(old, oldLo, true);
+              view.setUint32(old + 4, oldHi, true);
+            })
+          : E.NOSYS,
+      sigpending_get: (out: number) => {
+        if (!this.sigmask) return E.NOSYS;
+        mem.view().setBigUint64(out, BigInt(this.sigmask.pending()), true);
+        return E.SUCCESS;
+      },
     });
   }
 
