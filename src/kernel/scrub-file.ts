@@ -18,7 +18,9 @@ export function scrubberOf(secrets: ScrubSecret[]): Scrubber | undefined {
 
 async function writeAll(file: KernelFile, bytes: Uint8Array, signal?: AbortSignal): Promise<void> {
   const write = file.write as NonNullable<KernelFile['write']>;
-  for (let at = 0; at < bytes.length; ) at += await write.call(file, bytes.subarray(at), signal);
+  for (let at = 0; at < bytes.length; ) {
+    at += await write.call(file, bytes.subarray(at), at === 0 ? signal : undefined);
+  }
 }
 
 function bound<K extends keyof KernelFile>(file: KernelFile, key: K): Partial<KernelFile> {
