@@ -382,6 +382,9 @@ function facadesInit(specs: FacadeSpecs | undefined) {
   if (!specs) return {};
   const facades: Record<string, { port: number; hook?: boolean }> = {};
   for (const [name, spec] of Object.entries(specs)) {
+    if (spec?.hook !== undefined && typeof spec.hook !== 'function') {
+      throw new TypeError(`facades.${name}: hook must be a function`);
+    }
     facades[name] = { port: spec?.port, ...(spec?.hook ? { hook: true } : {}) };
   }
   return { facades };
@@ -554,6 +557,7 @@ function checkOptions(options: KernelOptions): void {
   }
   if (options.protect) protectInit(options.protect);
   integrityOptions(options.protect?.integrity);
+  facadesInit(options.facades);
 }
 
 function hookRelays(

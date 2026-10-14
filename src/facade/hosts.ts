@@ -119,7 +119,7 @@ async function relay(socket: KernelSocket, conn: FacadeConnection): Promise<void
     });
   };
   conn.onclose = () => {
-    void writes.finally(end);
+    writes.then(end, end);
   };
   try {
     for (;;) {

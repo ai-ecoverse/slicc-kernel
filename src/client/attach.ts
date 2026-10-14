@@ -355,6 +355,7 @@ async function serveFacadeOn(
   name: string,
   hook: FacadeHook
 ): Promise<{ close(): void }> {
+  if (typeof hook !== 'function') throw new TypeError('serveFacade: hook must be a function');
   await since(channel, 11, 'facade serving', async () => {});
   const { id, done } = channel.request({ op: 'serve-facade' as const, name });
   channel.facadeHooks.set(id, hook);
