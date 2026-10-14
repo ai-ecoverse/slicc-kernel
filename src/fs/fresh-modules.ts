@@ -86,7 +86,7 @@ export class FreshModules {
         else if (fresh) this.drop(fresh);
         await fs.chmod(path, mode);
       },
-      rm: async (path: string, options?: { recursive?: boolean; force?: boolean }) => {
+      rm: async (path: string, options?: Parameters<KernelFs['rm']>[1]) => {
         await fs.rm(path, options);
         const at = normalizePath(path);
         for (const key of [...this.fresh.keys()]) {

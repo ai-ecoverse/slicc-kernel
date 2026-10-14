@@ -26,6 +26,7 @@ export interface MetaStore {
   links(dir: string): Promise<MetaEntry[]>;
   under(path: string): Promise<MetaEntry[]>;
   all(): Promise<MetaEntry[]>;
+  absent?(path: string): boolean;
 }
 
 export const META_DB = 'slicc-kernel';
@@ -75,6 +76,10 @@ export class MemoryMeta implements MetaStore {
     for (const path of paths) this.entries.deleteTree(path);
   }
 
+  absent(path: string): boolean {
+    return !this.entries.has(path);
+  }
+
   async links(dir: string): Promise<MetaEntry[]> {
     return [...this.entries.entries()].map(([, e]) => e).filter((entry) => entry.dir === dir);
   }
@@ -104,6 +109,9 @@ interface Invalidation {
   paths?: readonly string[];
   trees?: readonly string[];
 }
+
+const REMOVE_BATCH = 256;
+const REMOVE_WAIT_MS = 5;
 
 export class IndexedDbMeta implements MetaStore {
   private readonly db: IDBDatabase;
@@ -146,6 +154,7 @@ export class IndexedDbMeta implements MetaStore {
   async get(paths: readonly string[]): Promise<Array<MetaEntry | undefined>> {
     const missing = paths.filter((path) => !this.cache.has(path));
     if (missing.length > 0) {
+      this.settleRemoves();
       const generation = this.generation;
       const [transaction, store] = this.transaction('readonly');
       const found = new Map<string, MetaEntry | null>();
@@ -164,6 +173,7 @@ export class IndexedDbMeta implements MetaStore {
   }
 
   async update(path: string, change: MetaChange): Promise<void> {
+    this.settleRemoves();
     const [transaction, store] = this.transaction('readwrite');
     const request = store.get(path);
     let next: MetaEntry | undefined;
@@ -178,6 +188,7 @@ export class IndexedDbMeta implements MetaStore {
   }
 
   async move(from: string, to: string, root: (entry: MetaEntry | undefined) => MetaEntry) {
+    this.settleRemoves();
     const [transaction, store] = this.transaction('readwrite');
     store.delete(to);
     store.delete(descendants(to));
@@ -195,23 +206,54 @@ export class IndexedDbMeta implements MetaStore {
     this.changed({ trees: [from, to] });
   }
 
+  absent(path: string): boolean {
+    return this.cache.has(path) && this.cache.get(path) === null;
+  }
+
+  private removing: string[] = [];
+  private removeTimer: ReturnType<typeof setTimeout> | undefined;
+
   async remove(paths: readonly string[]): Promise<void> {
+    this.generation++;
+    for (const path of paths) {
+      this.cache.deleteTree(path);
+      this.cache.set(path, null);
+    }
+    this.removing.push(...paths);
+    if (this.removing.length >= REMOVE_BATCH) return this.flushRemoves();
+    this.removeTimer ??= setTimeout(
+      () => void this.flushRemoves().catch(() => undefined),
+      REMOVE_WAIT_MS
+    );
+  }
+
+  private settleRemoves(): void {
+    if (this.removing.length > 0) void this.flushRemoves().catch(() => undefined);
+  }
+
+  private flushRemoves(): Promise<void> {
+    clearTimeout(this.removeTimer);
+    this.removeTimer = undefined;
+    const paths = this.removing;
+    if (paths.length === 0) return Promise.resolve();
+    this.removing = [];
     const [transaction, store] = this.transaction('readwrite');
     for (const path of paths) {
       store.delete(path);
       store.delete(descendants(path));
     }
-    await settle(transaction, () => undefined);
-    this.changed({ trees: paths });
+    return settle(transaction, () => void this.channel.postMessage({ trees: paths }));
   }
 
   async links(dir: string): Promise<MetaEntry[]> {
+    this.settleRemoves();
     const [transaction, store] = this.transaction('readonly');
     const request = store.index('dir').getAll(dir);
     return settle(transaction, () => request.result as MetaEntry[]);
   }
 
   async under(path: string): Promise<MetaEntry[]> {
+    this.settleRemoves();
     const [transaction, store] = this.transaction('readonly');
     const self = store.get(path);
     const below = store.getAll(descendants(path));
@@ -223,6 +265,7 @@ export class IndexedDbMeta implements MetaStore {
   }
 
   async all(): Promise<MetaEntry[]> {
+    this.settleRemoves();
     const [transaction, store] = this.transaction('readonly');
     const request = store.getAll();
     return settle(transaction, () => request.result as MetaEntry[]);

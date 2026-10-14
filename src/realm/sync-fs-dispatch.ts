@@ -26,7 +26,7 @@ import {
   type NewOwner,
   rangedOps,
 } from '../fs/types.ts';
-import { realTarget } from '../fs/walk.ts';
+import { joinName, realTarget } from '../fs/walk.ts';
 import { resolveSyncFsToken, type SyncFsTokenEntry } from './sync-fs-token-registry.ts';
 import {
   HOLD_CREATED,
@@ -189,8 +189,7 @@ async function run(
       await fs.link(path, fs.resolvePath(cwd, req.arg2 ?? ''), req.mode === 1);
       return done;
     case 'unlink':
-      if ((await fs.lstat(path)).isDirectory) throw syncError('EISDIR', path);
-      await fs.rm(path);
+      await fs.rm(path, { file: true });
       return done;
     case 'rmdir':
       if (!(await fs.lstat(path)).isDirectory) throw syncError('ENOTDIR', path);
@@ -454,6 +453,33 @@ export async function dispatchSyncFs(req: SyncFsRequest): Promise<SyncFsResult> 
   }
 }
 
+const DENIED: ReadonlySet<string> = new Set(['EACCES', 'EPERM']);
+
+async function rmPermitted(
+  entry: SyncFsTokenEntry,
+  path: string,
+  req: SyncFsRequest,
+  refused: SyncFsResult
+): Promise<SyncFsResult> {
+  const st = await entry.fs.lstat(path).catch(() => undefined);
+  if (!st?.isDirectory) return refused;
+  const unlisted = await guarded(entry, path, { ...req, op: 'readdir' });
+  if (unlisted) return unlisted;
+  const names = await entry.fs.readdir(path).catch(() => undefined);
+  if (!names) return refused;
+  let first: SyncFsResult | undefined;
+  for (const name of names) {
+    const child = await dispatchOne(entry, {
+      ...req,
+      path: joinName(path, name),
+    });
+    if (!child.ok) first ??= child;
+  }
+  if (first) return first;
+  const again = await guarded(entry, path, req);
+  return again ?? (await run(entry, path, req));
+}
+
 async function dispatchOne(entry: SyncFsTokenEntry, req: SyncFsRequest): Promise<SyncFsResult> {
   const { fs, cwd } = entry;
   try {
@@ -463,6 +489,9 @@ async function dispatchOne(entry: SyncFsTokenEntry, req: SyncFsRequest): Promise
     if (req.op === 'access') return await accessOp(entry, path, req);
     if (req.op === 'hold') return await holdOp(entry, path, req);
     const refused = await guarded(entry, path, req);
+    if (refused && req.op === 'rm' && !refused.ok && DENIED.has(refused.errno)) {
+      return await rmPermitted(entry, path, req, refused);
+    }
     if (refused) return refused;
     if (req.op === 'statfs') return json((await usageAt(entry, path)) ?? (await storageUsage()));
     if (entry.revoked?.(path)) return { ok: false, errno: 'EIO', message: `${path} was unmounted` };

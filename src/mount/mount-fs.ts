@@ -414,6 +414,11 @@ export class MountTable {
     });
   }
 
+  under(path: string): boolean {
+    for (const mount of this.mounts.values()) if (within(mount.target, path)) return true;
+    return false;
+  }
+
   locate(path: string): { mount: Mount; rel: string } | undefined {
     let best: Mount | undefined;
     for (const mount of this.mounts.values()) {
@@ -1059,11 +1064,21 @@ class MountFs implements KernelFs {
     }
   }
 
-  async rm(path: string, options: { recursive?: boolean; force?: boolean } = {}): Promise<void> {
+  async rm(
+    path: string,
+    options: { recursive?: boolean; force?: boolean; file?: boolean } = {}
+  ): Promise<void> {
     const found = this.at(path);
+    if (!found && options.recursive && this.table.under(normalizePath(path)))
+      return this.rmAround(normalizePath(path), options);
     if (!found) return this.base.rm(path, options);
     const { mount, rel } = found;
     const real = normalizePath(path);
+    if (rel === '/' && options.recursive) {
+      for (const entry of await this.table.readdir(mount, real, rel)) {
+        await this.rm(joinName(real, entry.name), options);
+      }
+    }
     if (rel === '/') throw errnoError('EBUSY', `${real} is a mount point`);
     this.writable(mount, real);
     await this.table.commitUnder(real);
@@ -1074,6 +1089,7 @@ class MountFs implements KernelFs {
       if (options.force && (err as { code?: unknown }).code === 'ENOENT') return;
       throw err;
     }
+    if (options.file && attr.kind === 'directory') throw errnoError('EISDIR', real);
     this.table.forget(mount, real);
     if (attr.kind === 'directory' && options.recursive) {
       for (const entry of await this.table.readdir(mount, real, rel)) {
@@ -1083,6 +1099,19 @@ class MountFs implements KernelFs {
     }
     await mount.conn.call({ op: attr.kind === 'directory' ? 'rmdir' : 'unlink', path: rel });
     this.table.forget(mount, real);
+  }
+
+  private async rmAround(
+    path: string,
+    options: { recursive?: boolean; force?: boolean }
+  ): Promise<void> {
+    let first: unknown;
+    for (const name of await this.base.readdir(path)) {
+      await this.rm(joinName(path, name), options).catch((err: unknown) => {
+        first ??= err;
+      });
+    }
+    throw first ?? errnoError('EBUSY', `${path} holds a mount point`);
   }
 
   async rename(from: string, to: string): Promise<void> {
