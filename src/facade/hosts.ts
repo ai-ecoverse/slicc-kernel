@@ -13,6 +13,8 @@ import {
 
 const TAKEN_PORTS = new Set([CDP_PORT, REALM_PROXY_PORT]);
 const READ_CHUNK = 64 * 1024;
+export const FACADE_MAX_PENDING = 16 * 1024 * 1024;
+export const FACADE_FLOODED = `slicc-kernel: more than ${FACADE_MAX_PENDING} bytes are waiting for the program to read`;
 
 interface Declared {
   port: number;
@@ -99,6 +101,7 @@ async function acceptAll(
 
 async function relay(socket: KernelSocket, conn: FacadeConnection): Promise<void> {
   let ended = false;
+  let pending = 0;
   let writes = Promise.resolve();
   const end = () => {
     if (ended) return;
@@ -108,10 +111,17 @@ async function relay(socket: KernelSocket, conn: FacadeConnection): Promise<void
   conn.onmessage = (bytes) => {
     if (ended) return;
     const chunk = bytes.slice();
+    pending += chunk.length;
+    if (pending > FACADE_MAX_PENDING) {
+      end();
+      conn.close(FACADE_FLOODED);
+      return;
+    }
     writes = writes.then(async () => {
       if (ended) return;
       let at = 0;
       while (at < chunk.length) at += await socket.write(chunk.subarray(at));
+      pending -= chunk.length;
     });
     writes.catch(() => {
       end();

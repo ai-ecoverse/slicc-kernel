@@ -8,7 +8,7 @@ export interface FacadePortLike {
   close(): void;
 }
 
-type FacadeWire = { open: true } | { error: string } | { b: Uint8Array } | { close: true };
+type FacadeWire = { open: true } | { error: string } | { b: Uint8Array } | { close: true | string };
 
 export interface FacadeOpen {
   facadeOpen: FacadeOpenRequest & { registration?: number };
@@ -35,13 +35,16 @@ export function serveFacadePort(
     port.postMessage({ close: true });
     end();
   };
-  port.addEventListener('message', ({ data }: MessageEvent<{ b?: Uint8Array; close?: true }>) => {
-    if (data.b !== undefined) conn?.send(data.b);
-    else if (data.close && !done) {
-      end();
-      conn?.close();
+  port.addEventListener(
+    'message',
+    ({ data }: MessageEvent<{ b?: Uint8Array; close?: true | string }>) => {
+      if (data.b !== undefined) conn?.send(data.b);
+      else if (data.close && !done) {
+        end();
+        conn?.close(typeof data.close === 'string' ? data.close : undefined);
+      }
     }
-  });
+  );
   port.start?.();
   new Promise<FacadeConnection>((resolve) => resolve(hook(stamp, { name }))).then(
     (opened) => {
@@ -88,9 +91,9 @@ export function portFacadeHook(
         },
         onmessage: null,
         onclose: null,
-        close: () => {
+        close: (reason) => {
           if (closed) return;
-          port1.postMessage({ close: true });
+          port1.postMessage({ close: reason ?? true });
           shut();
         },
       };

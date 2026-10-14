@@ -4,7 +4,7 @@ export interface FacadeConnection {
   send(bytes: Uint8Array): void;
   onmessage: ((bytes: Uint8Array) => void) | null;
   onclose: ((reason?: string) => void) | null;
-  close(): void;
+  close(reason?: string): void;
 }
 
 export interface FacadeInfo {
