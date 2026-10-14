@@ -1267,7 +1267,7 @@ export class Launcher {
         : {}),
       ...(this.owners ? { owners: true } : {}),
       sealed: this.sealed,
-      ...(scrubs ? { ttyFilter: (file: OpenFile) => scrubbedAll(file, scrubs) } : {}),
+      ...(scrubs ? { outputFilter: (file: OpenFile) => scrubbedAll(file, scrubs) } : {}),
       clipboard: this.clipboard,
       ...(this.dac ? { dac: this.dac } : {}),
       program: req.program,

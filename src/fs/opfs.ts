@@ -82,7 +82,15 @@ function sidecar(meta: MetaStore): MetaStore {
         .catch((err: unknown) => {
           throw translate(err, pathOf(args), 'sidecar', false);
         });
-  return Object.fromEntries(META_OPS.map((op) => [op, guarded(op)])) as unknown as MetaStore;
+  const ops = Object.fromEntries(META_OPS.map((op) => [op, guarded(op)])) as unknown as MetaStore;
+  if (meta.absent) ops.absent = meta.absent.bind(meta);
+  const { removeFile } = meta;
+  if (removeFile)
+    ops.removeFile = (path: string) =>
+      removeFile.call(meta, path).catch((err: unknown) => {
+        throw translate(err, path, 'sidecar', false);
+      });
+  return ops;
 }
 
 function missing(err: unknown): boolean {
@@ -923,7 +931,10 @@ export class OpfsFs implements KernelFs {
     this.touch(parent.path, made);
   }
 
-  async rm(path: string, options: { recursive?: boolean; force?: boolean } = {}): Promise<void> {
+  async rm(
+    path: string,
+    options: { recursive?: boolean; force?: boolean; file?: boolean } = {}
+  ): Promise<void> {
     let found: Located;
     try {
       found = await this.locate(path, false);
@@ -933,6 +944,7 @@ export class OpfsFs implements KernelFs {
       throw error;
     }
     this.refuse(found.path, true);
+    if (options.file && found.handle?.kind === 'directory') throw fsError('EISDIR', path);
     if (found.handle) {
       const [dir, name] = await this.parent(found.path);
       try {
@@ -942,8 +954,19 @@ export class OpfsFs implements KernelFs {
       } catch (err) {
         throw translate(err, path);
       }
-      this.changed(found.path);
+      const file = found.handle.kind === 'file';
+      if (!file || this.remote?.watched()) this.changed(found.path);
+      else this.forget(found.path);
       this.movePending(found.path);
+      if (file && this.meta.absent?.(found.path)) {
+        this.touch(parentOf(found.path));
+        return;
+      }
+      if (file && this.meta.removeFile) {
+        await this.meta.removeFile(found.path);
+        this.touch(parentOf(found.path));
+        return;
+      }
     }
     await this.meta.remove([found.path]);
     this.touch(parentOf(found.path));
