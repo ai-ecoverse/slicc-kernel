@@ -110,6 +110,7 @@ export interface WasmThread {
   memory: WebAssembly.Memory;
   ids: SharedArrayBuffer;
   modules?: Record<string, WebAssembly.Module>;
+  blocked?: number;
 }
 
 export interface WasmThreadSpawnMsg {
@@ -120,6 +121,7 @@ export interface WasmThreadSpawnMsg {
 export interface WasmThreadInitMsg extends Omit<WasmProcessInitMsg, 'type' | 'fork' | 'fds'> {
   type: typeof WASM_THREAD_INIT;
   thread: WasmThread;
+  signals?: SharedArrayBuffer;
 }
 
 export interface WasmThreadExitMsg {

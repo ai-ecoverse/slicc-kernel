@@ -12,6 +12,7 @@ import {
   PID_FILES,
   pidFile,
   SYSTEM_FILES,
+  sysEntry,
   systemFile,
 } from '../procfs.ts';
 import { normalize } from './wasi-files.ts';
@@ -64,10 +65,16 @@ export class ProcTree {
         names: () => [
           ...SYSTEM_NAMES,
           'mounts',
+          'sys',
           'self',
           ...this.listing().processes.map((p) => String(p.pid)),
         ],
       };
+    }
+    if (top === 'sys') {
+      const entry = sysEntry(parts.slice(1));
+      if (typeof entry === 'string') return { kind: 'file', content: () => entry };
+      return entry && { kind: 'dir', names: () => Object.keys(entry) };
     }
     if (top === 'self') {
       return leaf === undefined ? { kind: 'link', target: String(this.pid) } : undefined;

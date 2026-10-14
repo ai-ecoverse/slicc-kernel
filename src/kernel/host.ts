@@ -17,6 +17,7 @@ import {
   SAB_HEADER_BYTES,
   SAB_HEADER_I32,
   SAB_I_ASYNC,
+  SAB_I_BLOCKED,
   SAB_I_KILLED,
   SAB_I_MEMORY,
   SAB_I_SIGNALS,
@@ -72,6 +73,7 @@ export interface WasmWorkerLike {
 export interface SpawnWasmOptions {
   pid: number;
   ignored?: number;
+  blocked?: number;
   umask?: number;
   cred?: Cred;
   owners?: boolean;
@@ -133,6 +135,7 @@ export interface WasmProcessHandle {
   onState(listener: StateListener): void;
   memory(): number;
   ignoredSignals(fork?: boolean): number;
+  blockedSignals?(): number;
   signalMasks?(): { ignored: number; caught: number };
   umask?(): number;
   cred?(): Cred;
@@ -227,8 +230,11 @@ interface ThreadSignals {
 }
 
 function killThread(thread: ThreadSignals | undefined, caught: number, sig: number): boolean {
-  if (!thread || (caught & sigbit(sig)) === 0) return false;
+  if (!thread) return false;
+  const held = (Atomics.load(thread.header, SAB_I_BLOCKED) & sigbit(sig)) !== 0;
+  if (!held && (caught & sigbit(sig)) === 0) return false;
   Atomics.or(thread.header, SAB_I_SIGNALS, sigbit(sig));
+  if (held) return true;
   Atomics.notify(thread.header, SAB_I_SIGNALS);
   const blocked = thread.interrupt;
   thread.interrupt = new AbortController();
@@ -236,14 +242,16 @@ function killThread(thread: ThreadSignals | undefined, caught: number, sig: numb
   return true;
 }
 
+function unblocked(header: Int32Array): number {
+  return Atomics.load(header, SAB_I_SIGNALS) & ~Atomics.load(header, SAB_I_BLOCKED);
+}
+
 function threadSignalsOf(sab: SharedArrayBuffer): ThreadSignals {
   return { header: new Int32Array(sab, 0, SAB_HEADER_I32), interrupt: new AbortController() };
 }
 
 function threadCancel(thread: ThreadSignals): AbortSignal {
-  return Atomics.load(thread.header, SAB_I_SIGNALS) !== 0
-    ? AbortSignal.abort()
-    : thread.interrupt.signal;
+  return unblocked(thread.header) !== 0 ? AbortSignal.abort() : thread.interrupt.signal;
 }
 
 function notifiers(header: Int32Array): { onPending(sig: number): void; onAsync(): void } {
@@ -407,14 +415,16 @@ function processOptions(
     resolver: opts.resolver,
     ...notifiers(header),
     onTimer: (which) => void Atomics.or(header, SAB_I_TIMERS, 1 << which),
-    hasPending: () =>
-      Atomics.load(header, SAB_I_SIGNALS) !== 0 || Atomics.load(header, SAB_I_TIMERS) !== 0,
+    hasPending: () => unblocked(header) !== 0 || Atomics.load(header, SAB_I_TIMERS) !== 0,
     raise: hooks.raise,
     threadKill: hooks.threadKill,
     ...(hooks.exitNow ? { exitNow: hooks.exitNow } : {}),
     ...(hooks.exitSignal ? { exitSignal: hooks.exitSignal } : {}),
     ...(opts.program.abi === 'wasi' || opts.program.abi === 'js'
       ? { pendingBits: () => Atomics.load(header, SAB_I_SIGNALS) }
+      : {}),
+    ...(opts.program.abi === 'wasi'
+      ? { blockedBits: () => Atomics.load(header, SAB_I_BLOCKED) }
       : {}),
   };
 }
@@ -424,7 +434,8 @@ function threadInit(
   program: WasmThreadInitMsg['program'],
   sab: SharedArrayBuffer,
   cred: WasmProcess['cred'],
-  thread: WasmThread
+  thread: WasmThread,
+  main: SharedArrayBuffer
 ): WasmThreadInitMsg {
   return {
     type: WASM_THREAD_INIT,
@@ -440,12 +451,15 @@ function threadInit(
     ...(opts.links !== undefined ? { links: true } : {}),
     ...(opts.ppid !== undefined ? { ppid: opts.ppid } : {}),
     thread,
+    signals: main,
   };
 }
 
 export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
   const sab = new SharedArrayBuffer(SAB_HEADER_BYTES + SAB_DEFAULT_WINDOW_BYTES);
   const header = new Int32Array(sab, 0, SAB_HEADER_I32);
+  if (opts.blocked && opts.program.abi === 'wasi')
+    Atomics.store(header, SAB_I_BLOCKED, opts.blocked);
   const threadSignals = new Map<number, ThreadSignals>();
   const created = new Created();
   const process: WasmProcess = new WasmProcess(
@@ -556,6 +570,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     const tsab = new SharedArrayBuffer(SAB_HEADER_BYTES + SAB_DEFAULT_WINDOW_BYTES);
     const tw = opts.createWorker();
     const tsignals = threadSignalsOf(tsab);
+    if (thread.blocked) Atomics.store(tsignals.header, SAB_I_BLOCKED, thread.blocked);
     threadSignals.set(thread.tid, tsignals);
     const tdispatch = (req: SyncSabDispatchRequest): Promise<SyncFsResult> =>
       dying.serving(() =>
@@ -578,7 +593,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
       tresponder.dispose();
       tw.terminate();
     });
-    tw.postMessage(threadInit(opts, program, tsab, process.cred, thread));
+    tw.postMessage(threadInit(opts, program, tsab, process.cred, thread, sab));
   };
 
   worker.postMessage(
@@ -603,6 +618,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     onState: (listener) => process.onState(listener),
     memory: () => Atomics.load(header, SAB_I_MEMORY) * 65536,
     ignoredSignals: (fork) => process.inheritable(fork),
+    blockedSignals: () => (opts.program.abi === 'wasi' ? Atomics.load(header, SAB_I_BLOCKED) : 0),
     signalMasks: () => process.signalMasks(),
     umask: () => process.umask,
     cred: () => copyCred(process.cred),

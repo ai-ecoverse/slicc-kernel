@@ -100,7 +100,10 @@ test('/proc lists every process of the kernel in the formats procps reads', asyn
     { cwd: '/home' }
   );
   assert.equal(r.stderr, '');
-  assert.match(r.stdout, /^1000\n(?:\d+\n)*loadavg\nmeminfo\nmounts\nself\nstat\nuptime\n/);
+  assert.match(
+    r.stdout,
+    /^1000\n(?:\d+\n)*loadavg\nmeminfo\nmounts\nself\nstat\nsys\nuptime\nversion\n/
+  );
   assert.match(
     r.stdout,
     /\n(\d+) \(sleep\) S 1000\nsleep\nName:\thead\nUmask:\t0022\nState:\tS \(sleeping\)\n/

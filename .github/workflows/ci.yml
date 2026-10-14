@@ -2,8 +2,7 @@ name: CI
 
 on:
   pull_request:
-  push:
-    branches: [main]
+  merge_group:
 
 permissions:
   contents: read
@@ -14,4 +13,4 @@ concurrency:
 
 jobs:
   ci:
-    uses: ai-ecoverse/slicc-shared-web/.github/workflows/node-ci.yml@v1.13.1
+    uses: ai-ecoverse/slicc-shared-web/.github/workflows/node-ci.yml@v1.13.2

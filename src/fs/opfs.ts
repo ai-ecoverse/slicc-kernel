@@ -266,8 +266,29 @@ export class OpfsFs implements KernelFs {
   private counted: readonly string[] = [];
 
   private async stamp(path: string): Promise<string> {
-    const entry = this.meta.fresh ? await this.meta.fresh(path) : (await this.meta.get([path]))[0];
-    return String(entry?.writes ?? 0);
+    const paths = [path, '/'];
+    const [entry, root] = this.meta.fresh
+      ? await this.meta.fresh(paths)
+      : await this.meta.get(paths);
+    return `${entry?.writes ?? 0}:${root?.epoch ?? 0}`;
+  }
+
+  private async epoch(): Promise<void> {
+    await this.meta.update('/', (entry) => ({
+      ...entry,
+      path: '/',
+      epoch: (entry?.epoch ?? 0) + 1,
+    }));
+  }
+
+  private async entering(path: string, change: () => Promise<void>): Promise<void> {
+    if (!isProtected(this.counted, path) && !holdsProtected(this.counted, path)) return change();
+    await this.epoch();
+    try {
+      await change();
+    } finally {
+      await this.epoch();
+    }
   }
 
   private async counting(target: string): Promise<void> {
@@ -355,9 +376,9 @@ export class OpfsFs implements KernelFs {
 
   private guarded: readonly string[] = [];
 
-  protect(prefixes: readonly string[]): void {
+  protect(prefixes: readonly string[], versions = false): void {
     this.guarded = prefixes;
-    this.counted = prefixes;
+    this.counted = versions ? prefixes : [];
   }
 
   unguarded(): KernelFs {
@@ -1035,6 +1056,10 @@ export class OpfsFs implements KernelFs {
     const parent = await this.locate(parentOf(to), true);
     const destination = resolvePath(parent.path, baseOf(to));
     this.refuse(destination, true);
+    await this.entering(destination, () => this.moveTo(source, parent, destination, to));
+  }
+
+  private async moveTo(source: Located, parent: Located, destination: string, to: string) {
     const sourceStat = await this.describe(source);
     if (sourceStat.isDirectory && within(destination, source.path)) throw fsError('EINVAL', to);
     const target = await this.locate(destination, false).catch((err) => {
@@ -1150,15 +1175,17 @@ export class OpfsFs implements KernelFs {
     }
     const now = Date.now();
     const fields = await this.newFields(at, owner && { uid: owner.uid, gid: owner.gid }, false);
-    await this.meta.update(at, () => ({
-      path: at,
-      link: target,
-      dir: parent.path,
-      ino: inodeOf(at),
-      mtimeMs: now,
-      ctimeMs: now,
-      ...fields,
-    }));
+    await this.entering(at, () =>
+      this.meta.update(at, () => ({
+        path: at,
+        link: target,
+        dir: parent.path,
+        ino: inodeOf(at),
+        mtimeMs: now,
+        ctimeMs: now,
+        ...fields,
+      }))
+    );
     this.touch(parent.path);
   }
 
