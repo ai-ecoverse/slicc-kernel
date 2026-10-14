@@ -233,6 +233,7 @@ interface Target {
   unset?: string[];
   imports?: string;
   preopenRoot?: boolean;
+  asked?: string;
 }
 
 interface Compiled {
@@ -835,18 +836,20 @@ export class Launcher {
     if (own) return own.script ? undefined : targetOf(own);
     const head = await this.head(glue);
     if (!head) return undefined;
+    const asked = glue === path ? {} : { asked: path };
     if (isWasm(head)) {
       return {
         abi: 'wasi',
         glue,
         wasm: glue,
         argv0: baseName(argv0 || file).replace(/\.wasm$/, ''),
+        ...asked,
       };
     }
     if (interpreter(head) !== 'node') return undefined;
     const wasm = modulePath(glue);
     if (!(await this.base.exists(wasm))) return undefined;
-    return { abi: 'emscripten', glue, wasm, argv0: baseName(argv0 || file) };
+    return { abi: 'emscripten', glue, wasm, argv0: baseName(argv0 || file), ...asked };
   }
 
   private async head(path: string): Promise<Uint8Array | undefined> {
@@ -1138,8 +1141,8 @@ export class Launcher {
     });
   }
 
-  private async cacheKey(path: string): Promise<string> {
-    const verified = await this.integrity?.key(path);
+  private async cacheKey(path: string, asked?: string): Promise<string> {
+    const verified = await this.integrity?.key(path, asked);
     if (verified !== undefined) return verified;
     const st = await this.base.stat(path);
     return `${path}:${st.size}:${st.mtime.getTime()}`;
@@ -1152,11 +1155,12 @@ export class Launcher {
 
   private keyed(
     path: string,
-    caller: IntegrityCaller
+    caller: IntegrityCaller,
+    asked?: string
   ): Promise<{ bytes: Uint8Array; key?: string | undefined }> {
     const plain = async () => this.base.readFileBuffer(path);
     return this.integrity
-      ? this.integrity.readKeyed(path, caller, plain)
+      ? this.integrity.readKeyed(path, caller, plain, asked)
       : plain().then((bytes) => ({ bytes }));
   }
 
@@ -1181,10 +1185,10 @@ export class Launcher {
     return found;
   }
 
-  private async module(path: string, caller: IntegrityCaller): Promise<Compiled> {
-    const key = await this.cacheKey(path);
+  private async module(path: string, caller: IntegrityCaller, asked?: string): Promise<Compiled> {
+    const key = await this.cacheKey(path, asked);
     return this.cached(this.compiled, key, async () => {
-      const { bytes, key: read } = await this.keyed(path, caller);
+      const { bytes, key: read } = await this.keyed(path, caller, asked);
       const memory = importedMemory(bytes);
       const foreign = foreignImports(bytes);
       const compiled = await WebAssembly.compile(bytes as BufferSource);
@@ -1194,7 +1198,13 @@ export class Launcher {
 
   private async checkedSources(planned: Planned, caller: IntegrityCaller): Promise<void> {
     const { target } = planned;
-    const files = [target.wasm, target.glue, target.imports, ...(planned.sources ?? [])];
+    const files = [
+      target.wasm,
+      target.glue,
+      target.imports,
+      target.asked,
+      ...(planned.sources ?? []),
+    ];
     const manifests = new Set<string>();
     for (const file of files) {
       const root = file === undefined ? undefined : PACKAGE_ROOT.exec(file)?.[1];
@@ -1206,11 +1216,11 @@ export class Launcher {
     }
   }
 
-  private async text(path: string, caller: IntegrityCaller): Promise<string> {
+  private async text(path: string, caller: IntegrityCaller, asked?: string): Promise<string> {
     if (!this.integrity) return this.base.readFile(path);
-    const key = await this.cacheKey(path);
+    const key = await this.cacheKey(path, asked);
     return this.cached(this.texts, key, async () => {
-      const { bytes, key: read } = await this.keyed(path, caller);
+      const { bytes, key: read } = await this.keyed(path, caller, asked);
       return { value: new TextDecoder().decode(bytes), key: read };
     });
   }
@@ -1236,14 +1246,15 @@ export class Launcher {
     if (target.abi === 'js') {
       return { abi: 'js', glue: await this.text(target.wasm, caller), path: target.wasm };
     }
+    const { asked } = target;
     if (target.abi !== 'wasi') {
       const [glue, { module }] = await Promise.all([
-        this.text(target.glue, caller),
-        this.module(target.wasm, caller),
+        this.text(target.glue, caller, asked),
+        this.module(target.wasm, caller, asked && modulePath(asked)),
       ]);
       return { glue, module };
     }
-    const { module, memory, foreign } = await this.module(target.wasm, caller);
+    const { module, memory, foreign } = await this.module(target.wasm, caller, asked);
     const names =
       env.SLICC_WASM_BACKTRACE === '1' ? await this.names(target.wasm, module) : undefined;
     const imports = target.imports ? await this.text(target.imports, caller) : undefined;

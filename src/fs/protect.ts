@@ -61,10 +61,15 @@ function missing(err: unknown): boolean {
   return code === 'ENOENT' || code === 'ENOTDIR';
 }
 
-async function resolved(fs: KernelFs, path: string, follow: boolean): Promise<string> {
+async function resolved(
+  fs: KernelFs,
+  path: string,
+  follow: boolean,
+  hops: string[] = []
+): Promise<string> {
   let done: string[] = [];
   let todo = partsOf(path);
-  for (let hops = 0; todo.length > 0; ) {
+  for (let links = 0; todo.length > 0; ) {
     const part = todo.shift() as string;
     if (part === '..') {
       done.pop();
@@ -86,12 +91,20 @@ async function resolved(fs: KernelFs, path: string, follow: boolean): Promise<st
       done.push(part);
       continue;
     }
-    if (++hops > MAX_LINKS) throw fsError('ELOOP', path);
+    if (++links > MAX_LINKS) throw fsError('ELOOP', path);
+    hops.push(normalizePath([at, ...todo].join('/')));
     const link = await fs.readlink(at);
     if (link.startsWith('/')) done = [];
     todo = [...partsOf(link), ...todo];
   }
   return `/${done.join('/')}`;
+}
+
+export async function namesOf(fs: KernelFs, path: string): Promise<string[]> {
+  const lexical = normalizePath(path);
+  const hops: string[] = [];
+  await resolved(fs, lexical, true, hops).catch(() => undefined);
+  return [lexical, ...hops];
 }
 
 export class ProtectedFs {
