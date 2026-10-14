@@ -31,7 +31,7 @@ concurrency:
 jobs:
   pack:
     if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    runs-on: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (contains(fromJSON('["schedule","workflow_dispatch","workflow_run","release"]'), github.event_name) && github.ref == 'refs/heads/main')) && vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 20
     env:
       LEFTHOOK: '0'
@@ -75,12 +75,13 @@ jobs:
       homescoop-ref: f11eabb9d696ecf22233d2f8936357729193f6c3
       kernel: kernel-tgz
       set: base,ci-certified
+      runner: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (contains(fromJSON('["schedule","workflow_dispatch","workflow_run","release"]'), github.event_name) && github.ref == 'refs/heads/main')) && vars.CERT_RUNNER || 'ubuntu-latest' }}
       fail-on-regression: false
 
   pr-summary:
     needs: [pack, pr]
     if: ${{ !cancelled() && needs.pack.result == 'success' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (contains(fromJSON('["schedule","workflow_dispatch","workflow_run","release"]'), github.event_name) && github.ref == 'refs/heads/main')) && vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -88,6 +89,7 @@ jobs:
     steps:
       - env:
           GH_TOKEN: ${{ github.token }}
+          API: ${{ github.api_url }}
           REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           RUN_ID: ${{ github.run_id }}
@@ -99,7 +101,15 @@ jobs:
           set -euo pipefail
           id=""
           if [ -n "$ARTIFACT" ]; then
-            id=$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts?per_page=100" --jq ".artifacts[] | select(.name == \"$ARTIFACT\") | .id" | head -1)
+            id=$(node --input-type=module - <<'JS' || true
+          const { API, REPO, RUN_ID, ARTIFACT, GH_TOKEN } = process.env;
+          const r = await fetch(`${API}/repos/${REPO}/actions/runs/${RUN_ID}/artifacts?per_page=100`, {
+            headers: { authorization: `Bearer ${GH_TOKEN}`, accept: 'application/vnd.github+json' },
+          });
+          const j = await r.json();
+          console.log((j.artifacts || []).find((a) => a.name === ARTIFACT)?.id ?? '');
+          JS
+          )
           fi
           case "$VERDICT" in
             pass) mark="✅" ;;
@@ -153,6 +163,7 @@ jobs:
       homescoop-ref: f11eabb9d696ecf22233d2f8936357729193f6c3
       kernel: ${{ needs.published.outputs.version }}
       set: ${{ inputs.set || 'base,catalog,all' }}
+      runner: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (contains(fromJSON('["schedule","workflow_dispatch","workflow_run","release"]'), github.event_name) && github.ref == 'refs/heads/main')) && vars.CERT_RUNNER || 'ubuntu-latest' }}
 
   attach:
     needs: [published, release]
