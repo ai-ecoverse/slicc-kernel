@@ -237,6 +237,10 @@ function cdpOption(req: InitRequest, port: KernelPort): { cdp?: CdpHook } {
   };
 }
 
+function pageHooks(req: InitRequest, port: KernelPort) {
+  return { ...cdpOption(req, port), ...facadesOption(req, port) };
+}
+
 function facadesOption(
   req: InitRequest,
   port: KernelPort
@@ -524,8 +528,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
         ...(media ? { media } : {}),
         onMountPending: (medium) => port.postMessage({ medium }),
         ...(req.hostfs ? { hostfs: askGrant } : {}),
-        ...cdpOption(req, port),
-        ...facadesOption(req, port),
+        ...pageHooks(req, port),
         ...mountPolicy(req.processMounts),
         caStore: caStore(deps.metadata ? caDb(req) : false),
       });

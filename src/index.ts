@@ -360,6 +360,24 @@ function initCall(options: KernelOptions, transport: NetworkTransport | undefine
   };
 }
 
+interface PageHosts {
+  cdp: { open(data: CdpOpen): void };
+  facades: { open(data: FacadeOpen): void };
+  policy(data: { id: number; req: ProcessMountRequest }): Promise<void>;
+  medium(medium: PendingMedium): void;
+  hostfs(req: HostfsRequest): Promise<void>;
+}
+
+function hostedMessage(data: WorkerMessage, on: PageHosts): data is Exclude<WorkerMessage, Reply> {
+  if ('cdpOpen' in data) on.cdp.open(data);
+  else if ('facadeOpen' in data) on.facades.open(data);
+  else if ('mountPolicy' in data) void on.policy(data.mountPolicy);
+  else if ('medium' in data) on.medium(data.medium);
+  else if ('hostfs' in data) void on.hostfs(data.hostfs);
+  else return false;
+  return true;
+}
+
 function facadesInit(specs: FacadeSpecs | undefined) {
   if (!specs) return {};
   const facades: Record<string, { port: number; hook?: boolean }> = {};
@@ -656,16 +674,13 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     options.onDenial?.(data.denial);
     return true;
   };
+  const hosts = { cdp, facades, policy, medium: pendingMedium, hostfs: grantHostfs };
   worker.addEventListener('message', ({ data }: MessageEvent<WorkerMessage>) => {
     if (aside(data)) return;
     if (approvals.handle(data)) return;
     if ('net' in data) return bridge?.answer(data);
     if ('uplink' in data) return uplinks?.answer(data);
-    if ('cdpOpen' in data) return cdp.open(data);
-    if ('facadeOpen' in data) return facades.open(data);
-    if ('mountPolicy' in data) return void policy(data.mountPolicy);
-    if ('medium' in data) return pendingMedium(data.medium);
-    if ('hostfs' in data) return void grantHostfs(data.hostfs);
+    if (hostedMessage(data, hosts)) return;
     const call = pending.get(data.id);
     if (!call) return;
     if (data.fd !== undefined) return call.output?.(data.fd, data.bytes as Uint8Array);

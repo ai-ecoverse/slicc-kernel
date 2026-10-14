@@ -344,6 +344,31 @@ function facadeRegistry(
   };
 }
 
+type HostOp = Extract<
+  ClientRequest,
+  { op: 'serve-cdp' | 'unserve-cdp' | 'serve-facade' | 'unserve-facade' }
+>;
+
+function hostRegistries(
+  send: (message: object, transfer: Transferable[]) => void,
+  gone: Promise<void>
+) {
+  const cdps = cdpRegistry(send, gone);
+  const facades = facadeRegistry(send, gone);
+  return {
+    answer(l: Launcher, req: HostOp): number | boolean {
+      if (req.op === 'serve-cdp') return cdps.serve(l, req);
+      if (req.op === 'unserve-cdp') return cdps.drop(req.registration);
+      if (req.op === 'serve-facade') return facades.serve(l, req);
+      return facades.drop(req.registration);
+    },
+    close(): void {
+      cdps.close();
+      facades.close();
+    },
+  };
+}
+
 function visibleTo(g: Guard | undefined, notify: (change: WatchChange) => void) {
   if (!g?.dac.enforcing) return notify;
   let queue = Promise.resolve();
@@ -404,8 +429,7 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
   };
   const reply = (id: number, body: object, transfer?: Transferable[]) =>
     send({ id, ...body }, transfer);
-  const cdps = cdpRegistry(send, ended.promise);
-  const facades = facadeRegistry(send, ended.promise);
+  const hosts = hostRegistries(send, ended.promise);
 
   function detach(kill = false, bye = 'the slicc-kernel detached this client'): void {
     if (state === 'closed') return;
@@ -414,8 +438,7 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
     net?.close();
     for (const unwatch of watches.values()) unwatch();
     watches.clear();
-    cdps.close();
-    facades.close();
+    hosts.close();
     for (const session of terminals.values()) session.close();
     terminals.clear();
     if (kill) killGroups(host, [...groups]);
@@ -516,20 +539,16 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
       case 'mount':
         return { result: await l.mountAs(clientCred(self), req.spec) };
       case 'umount':
-        await l.umountAs(clientCred(self), req.target);
-        return { result: true };
+        return { result: await l.umountAs(clientCred(self), req.target).then(() => true) };
       case 'mounts':
         return { result: l.mounts.list() };
       case 'dial':
         return dialFor(l, req, watches);
       case 'serve-cdp':
-        return { result: cdps.serve(l, req) };
       case 'unserve-cdp':
-        return { result: cdps.drop(req.registration) };
       case 'serve-facade':
-        return { result: facades.serve(l, req) };
       case 'unserve-facade':
-        return { result: facades.drop(req.registration) };
+        return { result: hosts.answer(l, req) };
       case 'detach':
         return { result: true };
       default:
