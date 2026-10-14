@@ -2,6 +2,8 @@ name: Kernel compat
 
 on:
   pull_request:
+    paths-ignore:
+      - '**.md'
   workflow_run:
     workflows: [Release]
     types: [completed]
@@ -20,8 +22,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: kernel-compat-${{ github.event.pull_request.number || github.event.workflow_run.head_sha || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: kernel-compat-${{ github.ref }}-${{ github.event.workflow_run.head_sha || inputs.version }}
+  cancel-in-progress: true
 
 jobs:
   pack:
@@ -70,6 +72,45 @@ jobs:
       kernel: kernel-tgz
       set: base,ci-certified
       fail-on-regression: false
+
+  pr-summary:
+    needs: [pack, pr]
+    if: ${{ !cancelled() && needs.pack.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_ID: ${{ github.run_id }}
+          RESULT: ${{ needs.pr.result }}
+          ARTIFACT: ${{ needs.pr.outputs.artifact }}
+          VERDICT: ${{ needs.pr.outputs.verdict }}
+          REGRESSIONS: ${{ needs.pr.outputs.regressions }}
+        run: |
+          set -euo pipefail
+          id=""
+          if [ -n "$ARTIFACT" ]; then
+            id=$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts?per_page=100" --jq ".artifacts[] | select(.name == \"$ARTIFACT\") | .id" | head -1)
+          fi
+          case "$VERDICT" in
+            pass) mark="✅" ;;
+            regression) mark="❌" ;;
+            *) mark="⚠️" ;;
+          esac
+          {
+            echo "## $mark Kernel compat (non-blocking): ${VERDICT:-no verdict}"
+            echo
+            echo "- job result: $RESULT, regressions: ${REGRESSIONS:-unknown}"
+            echo "- set: base,ci-certified, regressions are reported and do not fail this PR"
+            if [ -n "$id" ]; then echo "- report: $RUN_URL/artifacts/$id"; fi
+            echo "- run: $RUN_URL"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$VERDICT" = "regression" ]; then echo "::warning::kernel-compat found ${REGRESSIONS} regression(s): $RUN_URL"; fi
 
   published:
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
