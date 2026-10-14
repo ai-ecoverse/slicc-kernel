@@ -87,11 +87,11 @@ export class FreshModules {
         await fs.chmod(path, mode);
       },
       rm: async (path: string, options?: { recursive?: boolean; force?: boolean }) => {
+        await fs.rm(path, options);
         const at = normalizePath(path);
         for (const key of [...this.fresh.keys()]) {
           if (key === at || within(key, at)) this.fresh.delete(key);
         }
-        await fs.rm(path, options);
       },
       rename: async (from: string, to: string) => {
         await fs.rename(from, to);
@@ -99,7 +99,8 @@ export class FreshModules {
       },
       link: async (from: string, to: string, follow?: boolean) => {
         await fs.link(from, to, follow);
-        const fresh = this.fresh.get(normalizePath(from));
+        const source = follow && fs.realpath ? await fs.realpath(from, true) : from;
+        const fresh = this.fresh.get(normalizePath(source));
         if (fresh) this.fresh.set(normalizePath(to), fresh);
       },
     };
