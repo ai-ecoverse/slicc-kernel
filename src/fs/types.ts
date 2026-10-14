@@ -86,7 +86,7 @@ export interface KernelFs {
   pread?(path: string, offset: number, length: number, version?: string): Promise<Uint8Array>;
   pwrite?(path: string, offset: number, bytes: Uint8Array, transfer?: boolean): Promise<void>;
   truncate?(path: string, size: number): Promise<void>;
-  protect?(prefixes: readonly string[]): void;
+  protect?(prefixes: readonly string[], versions?: boolean): void;
   unguarded?(): KernelFs;
   mayChange?(path: string, follow: boolean): Promise<void>;
   readVersioned?(path: string): Promise<{ bytes: Uint8Array; version: string }>;

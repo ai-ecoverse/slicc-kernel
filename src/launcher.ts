@@ -642,9 +642,9 @@ export class Launcher {
     this.prefixes = protectedPrefixes(options.protect?.paths ?? []);
     this.processFs =
       this.prefixes.length > 0 ? new ProtectedFs(this.prefixes).view(this.fs) : this.fs;
-    options.fs.protect?.(this.prefixes);
     const integrity = options.protect?.integrity;
     integrityOptions(integrity);
+    options.fs.protect?.(this.prefixes, Boolean(integrity));
     if (integrity && this.prefixes.length > 0) {
       this.integrity = new Integrity(this.prefixes, options.fs, integrity, (event) =>
         options.onDenial?.(event)
