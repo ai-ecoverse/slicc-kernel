@@ -47,6 +47,7 @@ export interface InitRequest {
   op: 'init';
   root?: FileSystemDirectoryHandle;
   modules?: string;
+  commands?: { append?: readonly string[] };
   env?: Record<string, string>;
   metadata?: string | false;
   media?: string | false;
@@ -490,6 +491,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
         createWorker: deps.createWorker,
         ...(deps.createDriverWorker ? { createDriverWorker: deps.createDriverWorker } : {}),
         ...(req.modules ? { modules: req.modules } : {}),
+        ...(req.commands ? { commands: req.commands } : {}),
         ...(req.env ? { env: req.env } : {}),
         ...hostOptions(req, port, sealed.hook, clipboard.hook, integrity.lookup),
         ...(req.approve ? { approve: approvals.ask } : {}),

@@ -140,6 +140,7 @@ export interface NetworkOptions {
 export interface KernelOptions {
   root?: FileSystemDirectoryHandle;
   modules?: string;
+  commands?: { append?: readonly string[] };
   env?: Record<string, string>;
   metadata?: string | false;
   media?: string | false;
@@ -321,6 +322,7 @@ function initCall(options: KernelOptions, transport: NetworkTransport | undefine
     op: 'init',
     ...(options.root ? { root: options.root } : {}),
     ...(options.modules ? { modules: options.modules } : {}),
+    ...(options.commands ? { commands: options.commands } : {}),
     ...(options.env ? { env: options.env } : {}),
     ...(options.metadata !== undefined ? { metadata: options.metadata } : {}),
     ...(options.media !== undefined ? { media: options.media } : {}),
