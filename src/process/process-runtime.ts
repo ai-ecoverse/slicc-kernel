@@ -16,7 +16,10 @@ import {
 import {
   publishMemory,
   SAB_HEADER_I32,
+  SAB_I_KILLED,
+  SAB_I_SIGNALS,
   SAB_I_STOP,
+  SAB_I_TIMERS,
   type SyncSabRequestBody,
 } from '../realm/sync-sab-wire.ts';
 import {
@@ -443,10 +446,16 @@ export function reportGrowth(
 export function holdWhileStopped(
   imports: WebAssembly.Imports,
   header: Int32Array,
-  glue?: KernelImports
+  glue?: KernelImports,
+  poll: () => void = () => undefined
 ): void {
   const hold = () => {
     while (Atomics.load(header, SAB_I_STOP) === 1) Atomics.wait(header, SAB_I_STOP, 1);
+    const due =
+      Atomics.load(header, SAB_I_SIGNALS) |
+      Atomics.load(header, SAB_I_TIMERS) |
+      Atomics.load(header, SAB_I_KILLED);
+    if (due !== 0) poll();
   };
   for (const name of ['fdWrite', 'fdRead', 'sleepMs'] as const) {
     wrapImport(
@@ -455,7 +464,7 @@ export function holdWhileStopped(
       glue,
       (original) =>
         (...args) => {
-          hold();
+          while (Atomics.load(header, SAB_I_STOP) === 1) Atomics.wait(header, SAB_I_STOP, 1);
           const done = original(...args);
           hold();
           return done;
@@ -479,6 +488,7 @@ interface WrapperDeps {
   sys: ProcessSys;
   memory: () => WebAssembly.Memory | undefined;
   ppid: () => number;
+  poll: () => void;
 }
 
 function kernelWrappers(imports: WebAssembly.Imports, module: object, deps: WrapperDeps): void {
@@ -500,7 +510,7 @@ function kernelWrappers(imports: WebAssembly.Imports, module: object, deps: Wrap
   positionalIo(imports, { glue, fs: fsOf, sys, memory });
   const grown = () => publishMemory(init.sab, memory()?.buffer.byteLength ?? 0);
   reportGrowth(imports, grown, kernelGlue);
-  holdWhileStopped(imports, new Int32Array(init.sab, 0, SAB_HEADER_I32), kernelGlue);
+  holdWhileStopped(imports, new Int32Array(init.sab, 0, SAB_HEADER_I32), kernelGlue, deps.poll);
 }
 
 export async function runWasmProcess(
@@ -579,6 +589,7 @@ export async function runWasmProcess(
             sys,
             memory: () => memory,
             ppid: () => identify(transport, init).ppid,
+            poll: () => void signals.interrupt(),
           });
           return WebAssembly.instantiate(init.program.module, imports);
         })
