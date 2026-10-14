@@ -11,7 +11,10 @@ export const DEFAULT_SUDOERS = '%sudo Cmnd *\n';
 export const SUDO_TIMEOUT_MS = 300_000;
 
 const NAME = /^[a-z_][a-z0-9_.-]*$/;
-const RULE = /^(NOPASSWD\s+)?(\S+)\s+(?:\(([^()\s]+)\)\s+)?Cmnd(?:\s+(.*))?$/;
+const WORD = String.raw`(?:'[^']*'|"(?:[^"\\]|\\[\s\S])*"|\\[\s\S]|[^\s'"\\])+`;
+const RULE = new RegExp(
+  String.raw`^(NOPASSWD\s+)?(\S+)\s+(?:\(([^()\s]+)\)\s+)?(?:Cwd\s+(${WORD})\s+)?Cmnd(?:\s+(.*))?$`
+);
 const TERM = /^[A-Za-z0-9._+-]+$/;
 const PLAIN = /^[A-Za-z0-9_@%+=:,./-]+$/;
 const USAGE = 'usage: sudo [-n] [-u user] [--] command [args...]\n       sudo -l';
@@ -73,6 +76,7 @@ interface Rule {
   nopasswd: boolean;
   who: string;
   target: string;
+  cwd?: string;
   cmnd: string[] | '*';
 }
 
@@ -133,17 +137,26 @@ function validWho(who: string): boolean {
   return NAME.test(who.startsWith('%') ? who.slice(1) : who);
 }
 
+function cwdOf(word: string): string {
+  const words = splitWords(word);
+  const path = words?.length === 1 ? (words[0] as string) : '';
+  return path.startsWith('/') ? normalizePath(path) : '';
+}
+
 export function parseRule(line: string): Rule | null | undefined {
   const text = line.trim();
   if (text === '' || text.startsWith('#')) return null;
   const m = RULE.exec(text);
   if (!m) return undefined;
-  const [, nopasswd, who = '', target = 'root', rest = ''] = m;
+  const [, nopasswd, who = '', target = 'root', dir, rest = ''] = m;
   if (!validWho(who) || (target !== 'ALL' && !NAME.test(target))) return undefined;
-  if (rest.trim() === '*') return { nopasswd: !!nopasswd, who, target, cmnd: '*' };
+  const cwd = dir === undefined ? undefined : cwdOf(dir);
+  if (cwd === '') return undefined;
+  const rule = { nopasswd: !!nopasswd, who, target, ...(cwd !== undefined ? { cwd } : {}) };
+  if (rest.trim() === '*') return { ...rule, cmnd: '*' };
   const cmnd = splitWords(rest);
   if (!cmnd?.[0]?.startsWith('/')) return undefined;
-  return { nopasswd: !!nopasswd, who, target, cmnd };
+  return { ...rule, cmnd };
 }
 
 function flags(parsed: Parsed, arg: string, next: string | undefined): number | string {
@@ -183,7 +196,8 @@ function parseArgs(args: readonly string[]): Parsed | string {
 
 function described(rule: Rule): string {
   const cmnd = rule.cmnd === '*' ? 'ALL' : rule.cmnd.map(quoteWord).join(' ');
-  return `    (${rule.target}) ${rule.nopasswd ? 'NOPASSWD: ' : ''}${cmnd}`;
+  const cwd = rule.cwd === undefined ? '' : `CWD=${quoteWord(rule.cwd)} `;
+  return `    (${rule.target}) ${cwd}${rule.nopasswd ? 'NOPASSWD: ' : ''}${cmnd}`;
 }
 
 export class Sudo {
@@ -346,6 +360,7 @@ export class Sudo {
       (rule) =>
         applies(rule) &&
         (rule.target === 'ALL' || rule.target === target.name) &&
+        (rule.cwd === undefined || rule.cwd === cwd) &&
         (rule.cmnd === '*' ||
           (rule.cmnd.length === argv.length && rule.cmnd.every((w, i) => w === argv[i])))
     );
@@ -369,7 +384,7 @@ export class Sudo {
       }
       const changed = await this.untrusted(path, cwd, word);
       if (changed) return changed;
-      if (answer === 'always' && !(await this.remember(self, target, argv))) {
+      if (answer === 'always' && !(await this.remember(self, target, cwd, argv))) {
         return failed('EIO', 'sudo: the rule could not be recorded');
       }
       return grant();
@@ -447,7 +462,12 @@ export class Sudo {
     }
   }
 
-  private async remember(self: Account, target: Account, argv: string[]): Promise<boolean> {
+  private async remember(
+    self: Account,
+    target: Account,
+    cwd: string,
+    argv: string[]
+  ): Promise<boolean> {
     const { fs } = this.o;
     const path = `${SUDOERS_D}/${self.name}`;
     if (!NAME.test(self.name)) return false;
@@ -457,7 +477,8 @@ export class Sudo {
       const st = await fs.lstat(path).catch(() => undefined);
       if (st && !(await this.trusted(path))) return false;
       const old = st ? await fs.readFile(path) : '';
-      const line = `NOPASSWD ${self.name} (${target.name}) Cmnd ${argv.map(quoteWord).join(' ')}\n`;
+      const words = argv.map(quoteWord).join(' ');
+      const line = `NOPASSWD ${self.name} (${target.name}) Cwd ${quoteWord(cwd)} Cmnd ${words}\n`;
       const text = old === '' || old.endsWith('\n') ? `${old}${line}` : `${old}\n${line}`;
       await fs.writeFile(path, text);
       await fs.chown?.(path, { uid: 0, gid: 0, mode: 0o440, follow: false });
