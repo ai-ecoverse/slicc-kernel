@@ -26,6 +26,7 @@ import { Launcher, tagOption } from './launcher.ts';
 import type { FetchLike, HostfsGrantHook } from './mount/hostfs.ts';
 import type { MountEntry, MountSpec } from './mount/mount-fs.ts';
 import type { ProcessMountPolicy } from './mount/syscall.ts';
+import { guardedLoopback, type HostLoopback } from './node/loopback.ts';
 import { isMemoryRoot, memoryRoot } from './node/memory-root.ts';
 import { diagnosing } from './node/ws-diagnose.ts';
 import { signalNumber } from './serve.ts';
@@ -139,9 +140,14 @@ function hostfsFetchOf(options: NodeKernelOptions): { hostfsFetch?: FetchLike } 
   };
 }
 
-export function nodeTransport(): NetworkTransport {
+export interface NodeTransportOptions {
+  hostLoopback?: HostLoopback;
+}
+
+export function nodeTransport(options: NodeTransportOptions = {}): NetworkTransport {
   const transport = fetchTransport({ webSocket: true, webSocketHeaders: true, redirect: 'manual' });
-  return diagnosing({ ...transport, traits: { ...transport.traits, crossOrigin: 'any' } });
+  const open = { ...transport, traits: { ...transport.traits, crossOrigin: 'any' as const } };
+  return diagnosing(guardedLoopback(open, options.hostLoopback ?? false));
 }
 
 const TERMINATED = 'the kernel is terminated';
