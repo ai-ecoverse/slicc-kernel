@@ -267,7 +267,12 @@ export class SealedBroker {
     const stopped = new Promise<undefined>((resolve) => {
       control.signal.addEventListener('abort', () => resolve(undefined), { once: true });
     });
-    const req = { ...fields, v: 1, op: 'materializeConsume' } as unknown as SealedRequest;
+    const req = {
+      ...fields,
+      v: 1,
+      op: 'materializeConsume',
+      caller: fields.stamp,
+    } as SealedRequest;
     try {
       const asked = Promise.resolve()
         .then(() => hook(req, { signal: control.signal }))

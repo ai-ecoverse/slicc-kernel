@@ -18,6 +18,12 @@ import { type Attestation, attest, FileWatches, type RemoteFs } from './fs/attes
 import { followLinks, withCommandDirs } from './fs/commands.ts';
 import { Dac, type DenialHook, need, TTY_MODE } from './fs/dac.ts';
 import { FreshModules } from './fs/fresh-modules.ts';
+import {
+  Integrity,
+  type IntegrityCaller,
+  integrityOptions,
+  KERNEL_CALLER,
+} from './fs/integrity.ts';
 import { chain } from './fs/owners.ts';
 import { physicalPathAsync } from './fs/physical-path.ts';
 import {
@@ -244,6 +250,7 @@ interface Planned {
   args: string[];
   script?: true;
   via?: string[];
+  sources?: string[];
 }
 
 interface Redeemer {
@@ -473,6 +480,14 @@ export class Launcher {
   private unwatchScopes: () => void = () => undefined;
   private readonly warned = new Set<string>();
   private readonly compiled = new Map<string, Promise<Compiled>>();
+  private readonly texts = new Map<string, Promise<string>>();
+  private integrity: Integrity | undefined;
+  private scannedFs: KernelFs | undefined;
+
+  private get scanned(): KernelFs {
+    this.scannedFs ??= this.verifiedFs(this.base);
+    return this.scannedFs;
+  }
   private readonly processes = new Map<number, WasmProcessHandle>();
   private readonly zombies = new Set<number>();
   private readonly orphans = new Set<number>();
@@ -575,7 +590,7 @@ export class Launcher {
     if (options.uplink) this.net.useUplink({ uplink: options.uplink, routes: this.routes });
     enableNetwork(this.net, {
       transport: this.transport,
-      engine: kernelTlsEngine(packageTlsEngine(options.fs, this.modulesDir)),
+      engine: kernelTlsEngine(packageTlsEngine(this.verifiedFs(options.fs), this.modulesDir)),
       ca: this.ca,
     });
     enableCdp(this.net, this.cdp);
@@ -611,6 +626,13 @@ export class Launcher {
     this.processFs =
       this.prefixes.length > 0 ? new ProtectedFs(this.prefixes).view(this.fs) : this.fs;
     options.fs.protect?.(this.prefixes);
+    const integrity = options.protect?.integrity;
+    integrityOptions(integrity);
+    if (integrity && this.prefixes.length > 0) {
+      this.integrity = new Integrity(this.prefixes, options.fs, integrity, (event) =>
+        options.onDenial?.(event)
+      );
+    }
     this.users = new UserDb(this.fs, this.owners);
     this.sudoer = new Sudo({
       fs: this.fs,
@@ -662,7 +684,7 @@ export class Launcher {
     let found = this.catalogs.get(scope);
     if (!found) {
       found = this.roots(scope)
-        .then((roots) => scanCommands(this.base, roots))
+        .then((roots) => scanCommands(this.scanned, roots))
         .then((commands) => commands.set(SUDO_COMMAND.name, SUDO_COMMAND));
       this.catalogs.set(scope, found);
     }
@@ -673,7 +695,7 @@ export class Launcher {
     let found = this.ownCatalogs.get(scope);
     if (!found) {
       found = pnpmGlobalRoots(this.base, scope)
-        .then((roots) => scanCommands(this.base, roots))
+        .then((roots) => scanCommands(this.scanned, roots))
         .then((commands) => new Set(commands.keys()));
       this.ownCatalogs.set(scope, found);
     }
@@ -684,7 +706,7 @@ export class Launcher {
     let found = this.binfmts.get(scope);
     if (!found) {
       found = this.roots(scope).then((roots) =>
-        scanBinfmts(this.base, roots, (message) => {
+        scanBinfmts(this.scanned, roots, (message) => {
           if (this.warned.has(message)) return;
           this.warned.add(message);
           console.warn(message);
@@ -816,10 +838,16 @@ export class Launcher {
       }
       const inner = await this.interpreted(interp, [interp, ...passed], cwd, scope, depth + 1);
       const via = [interp, ...(inner?.via ?? [])];
-      return inner && { ...inner, target: withScriptEnv(inner.target, command), via };
+      const sources = [script, ...(inner?.sources ?? [])];
+      return inner && { ...inner, target: withScriptEnv(inner.target, command), via, sources };
     }
     const target = withScriptEnv(found, command);
-    return { target, args: [...(target.prefix ?? []), ...passed], via: [interp] };
+    return {
+      target,
+      args: [...(target.prefix ?? []), ...passed],
+      via: [interp],
+      sources: [script],
+    };
   }
 
   private async plan(
@@ -990,7 +1018,7 @@ export class Launcher {
 
   private async binfmtManifests(scripts: string[]): Promise<string[]> {
     const sources = new Map<string, string>();
-    const binfmts = await scanBinfmts(this.base, await this.roots(), undefined, sources);
+    const binfmts = await scanBinfmts(this.scanned, await this.roots(), undefined, sources);
     const manifests: string[] = [];
     for (const script of scripts) {
       const head = await this.head(script);
@@ -1040,25 +1068,89 @@ export class Launcher {
     return binfmtOf(await this.interpreters(scope), path) ? 'ENOENT' : 'ENOEXEC';
   }
 
-  private module(path: string): Promise<Compiled> {
-    return this.base.stat(path).then((st) => {
-      const key = `${path}:${st.size}:${st.mtime.getTime()}`;
-      let module = this.compiled.get(key);
-      if (!module) {
-        module = this.base.readFileBuffer(path).then(async (bytes) => {
-          const memory = importedMemory(bytes);
-          const foreign = foreignImports(bytes);
-          const compiled = await WebAssembly.compile(bytes as BufferSource);
-          return {
-            module: compiled,
-            ...(memory ? { memory } : {}),
-            foreign,
-          };
-        });
-        this.compiled.set(key, module);
-        module.catch(() => this.compiled.delete(key));
-      }
-      return module;
+  verifiedFs(fs: KernelFs): KernelFs {
+    const read = (path: string) => this.verified(path, KERNEL_CALLER, fs);
+    return Object.assign(Object.create(fs) as KernelFs, {
+      readFileBuffer: read,
+      readFile: (path: string) =>
+        this.integrity ? this.text(path, KERNEL_CALLER) : fs.readFile(path),
+    });
+  }
+
+  private async cacheKey(path: string): Promise<string> {
+    const verified = await this.integrity?.key(path);
+    if (verified !== undefined) return verified;
+    const st = await this.base.stat(path);
+    return `${path}:${st.size}:${st.mtime.getTime()}`;
+  }
+
+  private verified(path: string, caller: IntegrityCaller, fs = this.base): Promise<Uint8Array> {
+    const plain = () => fs.readFileBuffer(path);
+    return this.integrity ? this.integrity.read(path, caller, plain) : plain();
+  }
+
+  private keyed(
+    path: string,
+    caller: IntegrityCaller
+  ): Promise<{ bytes: Uint8Array; key?: string | undefined }> {
+    const plain = async () => this.base.readFileBuffer(path);
+    return this.integrity
+      ? this.integrity.readKeyed(path, caller, plain)
+      : plain().then((bytes) => ({ bytes }));
+  }
+
+  private cached<T>(
+    cache: Map<string, Promise<T>>,
+    key: string,
+    load: () => Promise<{ value: T; key?: string | undefined }>
+  ): Promise<T> {
+    const hit = cache.get(key);
+    if (hit !== undefined) return hit;
+    const loading = load();
+    const found = loading.then(({ value }) => value);
+    cache.set(key, found);
+    loading.then(
+      (done) => {
+        if (done.key === key || (done.key === undefined && !key.includes('\0'))) return;
+        if (cache.get(key) === found) cache.delete(key);
+        if (done.key !== undefined) cache.set(done.key, found);
+      },
+      () => cache.delete(key)
+    );
+    return found;
+  }
+
+  private async module(path: string, caller: IntegrityCaller): Promise<Compiled> {
+    const key = await this.cacheKey(path);
+    return this.cached(this.compiled, key, async () => {
+      const { bytes, key: read } = await this.keyed(path, caller);
+      const memory = importedMemory(bytes);
+      const foreign = foreignImports(bytes);
+      const compiled = await WebAssembly.compile(bytes as BufferSource);
+      return { value: { module: compiled, ...(memory ? { memory } : {}), foreign }, key: read };
+    });
+  }
+
+  private async checkedSources(planned: Planned, caller: IntegrityCaller): Promise<void> {
+    const { target } = planned;
+    const files = [target.wasm, target.glue, target.imports, ...(planned.sources ?? [])];
+    const manifests = new Set<string>();
+    for (const file of files) {
+      const root = file === undefined ? undefined : PACKAGE_ROOT.exec(file)?.[1];
+      if (root !== undefined) manifests.add(`${root}/package.json`);
+    }
+    for (const source of planned.sources ?? []) await this.text(source, caller);
+    for (const manifest of manifests) {
+      if (await this.base.exists(manifest)) await this.text(manifest, caller);
+    }
+  }
+
+  private async text(path: string, caller: IntegrityCaller): Promise<string> {
+    if (!this.integrity) return this.base.readFile(path);
+    const key = await this.cacheKey(path);
+    return this.cached(this.texts, key, async () => {
+      const { bytes, key: read } = await this.keyed(path, caller);
+      return { value: new TextDecoder().decode(bytes), key: read };
     });
   }
 
@@ -1072,24 +1164,28 @@ export class Launcher {
     return (await this.base.exists(optional)) ? optional : undefined;
   }
 
-  private async program(target: Target, env: Record<string, string>): Promise<Program> {
+  private async program(
+    target: Target,
+    env: Record<string, string>,
+    caller: IntegrityCaller
+  ): Promise<Program> {
     if (target.abi === 'js' && target.wasm === SUDO_PATH) {
       return { abi: 'js', glue: SUDO_SOURCE, path: SUDO_PATH };
     }
     if (target.abi === 'js') {
-      return { abi: 'js', glue: await this.base.readFile(target.wasm), path: target.wasm };
+      return { abi: 'js', glue: await this.text(target.wasm, caller), path: target.wasm };
     }
     if (target.abi !== 'wasi') {
       const [glue, { module }] = await Promise.all([
-        this.base.readFile(target.glue),
-        this.module(target.wasm),
+        this.text(target.glue, caller),
+        this.module(target.wasm, caller),
       ]);
       return { glue, module };
     }
-    const { module, memory, foreign } = await this.module(target.wasm);
+    const { module, memory, foreign } = await this.module(target.wasm, caller);
     const names =
       env.SLICC_WASM_BACKTRACE === '1' ? await this.names(target.wasm, module) : undefined;
-    const imports = target.imports ? await this.base.readFile(target.imports) : undefined;
+    const imports = target.imports ? await this.text(target.imports, caller) : undefined;
     return {
       abi: 'wasi',
       glue: '',
@@ -1116,7 +1212,9 @@ export class Launcher {
     env.HOSTNAME = this.hostname;
     let program: Program;
     try {
-      program = await this.program(target, env);
+      const caller = { pid: req.ppid ?? 0, uid: req.cred.euid, tag: req.tag };
+      if (this.integrity) await this.checkedSources(planned, caller);
+      program = await this.program(target, env, caller);
     } catch (err) {
       await req.fds.closeAll();
       throw err;
@@ -1679,11 +1777,14 @@ export class Launcher {
         },
       };
     }
-    const module = (await scanFilesystems(this.base, await this.roots())).get(type);
+    const module = (await scanFilesystems(this.scanned, await this.roots())).get(type);
     if (!module) throw fsError('ENODEV', `unknown file system type ${type}`);
     if (!this.createDriverWorker)
       throw fsError('ENODEV', `this kernel cannot start ${type} drivers`);
-    const code = await this.base.readFile(module);
+    const root = PACKAGE_ROOT.exec(module)?.[1];
+    if (this.integrity && root !== undefined)
+      await this.text(`${root}/package.json`, KERNEL_CALLER);
+    const code = new TextDecoder().decode(await this.verified(module, KERNEL_CALLER));
     const worker = this.createDriverWorker();
     const driver = new MessageChannel();
     const client = new MessageChannel();
