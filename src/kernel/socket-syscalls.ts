@@ -2,6 +2,7 @@ import type { SyncFsResult } from '../realm/sync-fs-wire.ts';
 import { type FdTable, KernelError, OpenFile, pollFile } from './fd-table.ts';
 import type { ResolveFamily } from './net/uplink.ts';
 import {
+  type ConnectorStamp,
   KernelSocket,
   type LoopbackNet,
   type PeerCred,
@@ -85,6 +86,7 @@ export interface SocketProcess {
   blocking(): AbortSignal;
   resolve(name: string, family: ResolveFamily, blocking: () => AbortSignal): Promise<string[]>;
   cred?(): PeerCred;
+  stamp?(): Promise<ConnectorStamp>;
 }
 function socketAt(fds: FdTable, fd: number): KernelSocket {
   const file = fds.get(fd).file;
@@ -120,7 +122,9 @@ export async function socketSyscall(
     case 'sock-accept':
       return ok(await accept(proc, req.fd, req.nonblock));
     case 'sock-connect': {
-      const dialing = socketAt(fds, req.fd).connect(req.addr, true, proc.cred?.());
+      const socket = socketAt(fds, req.fd);
+      const stamp = net.facadeAt(req.addr) && (await proc.stamp?.());
+      const dialing = socket.connect(req.addr, true, proc.cred?.(), stamp || undefined);
       if (req.nonblock) {
         dialing?.catch(() => undefined);
         throw new KernelError('EINPROGRESS');

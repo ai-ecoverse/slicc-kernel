@@ -9,6 +9,8 @@ import {
 } from './client/dial-stream.ts';
 import { type LoopbackFetchOptions, loopbackFetch } from './client/loopback-fetch.ts';
 import { clipboardAnswerer } from './clipboard-relay.ts';
+import { type FacadeOpen, serveFacadePort } from './facade/port.ts';
+import type { FacadeSpecs } from './facade/types.ts';
 import type { Attestation } from './fs/attest.ts';
 import type { Denial, DenialHook } from './fs/dac.ts';
 import { integrityOptions } from './fs/integrity.ts';
@@ -54,6 +56,13 @@ export {
 } from './client/attach.ts';
 export type { DialledSocket, DialOptions } from './client/dial-stream.ts';
 export type { LoopbackFetchOptions } from './client/loopback-fetch.ts';
+export type {
+  FacadeConnection,
+  FacadeHook,
+  FacadeInfo,
+  FacadeSpec,
+  FacadeSpecs,
+} from './facade/types.ts';
 export type { Attestation, AttestedDir } from './fs/attest.ts';
 export type { Denial, DenialHook } from './fs/dac.ts';
 export type { ClipboardHook, ClipboardStamp } from './kernel/clipboard.ts';
@@ -70,6 +79,7 @@ export type {
   SealedHook,
   SealedRequest,
 } from './kernel/sealed.ts';
+export type { ConnectorStamp } from './kernel/socket.ts';
 export {
   checkLocalProxy,
   type LocalProxyCheckOptions,
@@ -152,6 +162,7 @@ export interface KernelOptions {
   hostfs?: HostfsGrantHook;
   processMounts?: ProcessMountPolicy;
   cdp?: CdpHook;
+  facades?: FacadeSpecs;
   hostname?: string;
   users?: UsersMode;
   onDenial?: DenialHook;
@@ -332,6 +343,7 @@ function initCall(options: KernelOptions, transport: NetworkTransport | undefine
     ...uplinkInit(options.network?.uplink),
     ...(options.hostfs ? { hostfs: true } : {}),
     ...(options.cdp ? { cdp: true } : {}),
+    ...facadesInit(options.facades),
     ...(options.hostname !== undefined ? { hostname: options.hostname } : {}),
     users: options.users === undefined ? DEFAULT_USERS : options.users,
     ...(options.onDenial ? { denials: true } : {}),
@@ -345,6 +357,36 @@ function initCall(options: KernelOptions, transport: NetworkTransport | undefine
             typeof options.processMounts === 'function' ? 'ask' : options.processMounts,
         }
       : {}),
+  };
+}
+
+function facadesInit(specs: FacadeSpecs | undefined) {
+  if (!specs) return {};
+  const facades: Record<string, { port: number; hook?: boolean }> = {};
+  for (const [name, spec] of Object.entries(specs)) {
+    facades[name] = { port: spec?.port, ...(spec?.hook ? { hook: true } : {}) };
+  }
+  return { facades };
+}
+
+function facadeBridge(specs: FacadeSpecs | undefined) {
+  const open = new Set<() => void>();
+  let closed = false;
+  return {
+    open({ facadeOpen, port }: FacadeOpen): void {
+      const hook = specs?.[facadeOpen.name]?.hook;
+      if (!hook || closed) {
+        port.postMessage({ error: 'no facade host' });
+        port.close();
+        return;
+      }
+      const close = serveFacadePort(port, hook, facadeOpen, () => open.delete(close));
+      open.add(close);
+    },
+    close(): void {
+      closed = true;
+      for (const close of [...open]) close();
+    },
   };
 }
 
@@ -425,6 +467,7 @@ type WorkerMessage =
   | { hostfs: HostfsRequest }
   | { mountPolicy: { id: number; req: ProcessMountRequest } }
   | CdpOpen
+  | FacadeOpen
   | { denial: Denial }
   | FileChanged
   | SudoMessage;
@@ -562,11 +605,13 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     (req) => call(req)
   );
   const cdp = cdpBridge(options.cdp);
+  const facades = facadeBridge(options.facades);
   const sealed = hookRelays(worker, options);
   const approvals = approver(options.approve, worker);
   const fail = (error: Error) => {
     dials.reset();
     cdp.close();
+    facades.close();
     sealed.close();
     approvals.close();
     failure = error;
@@ -617,6 +662,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     if ('net' in data) return bridge?.answer(data);
     if ('uplink' in data) return uplinks?.answer(data);
     if ('cdpOpen' in data) return cdp.open(data);
+    if ('facadeOpen' in data) return facades.open(data);
     if ('mountPolicy' in data) return void policy(data.mountPolicy);
     if ('medium' in data) return pendingMedium(data.medium);
     if ('hostfs' in data) return void grantHostfs(data.hostfs);

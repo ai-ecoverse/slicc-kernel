@@ -13,6 +13,8 @@ import {
   scanCommands,
   scanFilesystems,
 } from './commands.ts';
+import { FacadeHosts } from './facade/hosts.ts';
+import type { FacadeSpecs } from './facade/types.ts';
 import { R_OK, X_OK } from './fs/access.ts';
 import { type Attestation, attest, FileWatches, type RemoteFs } from './fs/attest.ts';
 import { followLinks, withCommandDirs } from './fs/commands.ts';
@@ -77,7 +79,7 @@ import { DEFAULT_UMASK } from './kernel/process.ts';
 import type { ForkState, Program } from './kernel/protocol.ts';
 import { PtyTable } from './kernel/pty.ts';
 import { type ScrubSecret, scrubbedAll, scrubberOf, scrubStdio } from './kernel/scrub-file.ts';
-import { SealedBroker, type SealedHook } from './kernel/sealed.ts';
+import { SealedBroker, type SealedCaller, type SealedHook } from './kernel/sealed.ts';
 import { SettlingChildren } from './kernel/settling.ts';
 import { SIG, sigbit } from './kernel/signals.ts';
 import { LoopbackNet } from './kernel/socket.ts';
@@ -159,6 +161,7 @@ export interface LauncherOptions {
   processMounts?: ProcessMountPolicy;
   fstabRetries?: readonly number[];
   cdp?: CdpHook;
+  facades?: FacadeSpecs;
   uplink?: NetworkUplink;
   hostname?: string;
   users?: UsersMode;
@@ -523,6 +526,7 @@ export class Launcher {
   );
   readonly net = new LoopbackNet();
   readonly cdp: CdpHosts;
+  readonly facades: FacadeHosts;
   private readonly ca: () => Promise<RealmCa>;
   readonly transport: RealmTransport;
   readonly uplink: NetworkUplink | undefined;
@@ -593,10 +597,16 @@ export class Launcher {
     this.modulesDir = options.modules ?? '/node_modules';
     this.appended = appendedRoots(options.commands);
     this.cdp = new CdpHosts(options.cdp);
+    this.facades = new FacadeHosts(options.facades);
     const hostname = options.hostname ?? DEFAULT_HOSTNAME;
     if (!isHostname(hostname)) throw new Error(`not a host name: ${String(hostname)}`);
     this.hostname = hostname;
-    this.env = { ...networkEnv(hostname), SLICC_CDP_URL: this.cdp.url, ...options.env };
+    this.env = {
+      ...networkEnv(hostname),
+      SLICC_CDP_URL: this.cdp.url,
+      ...this.facades.env(),
+      ...options.env,
+    };
     this.ca = kernelCa(options.caStore ?? memoryCaStore());
     this.transport = replayingHops(options.transport ?? missingTransport());
     this.announcedTraits = JSON.stringify(this.transport.traits);
@@ -611,6 +621,7 @@ export class Launcher {
       ca: this.ca,
     });
     enableCdp(this.net, this.cdp);
+    this.facades.enable(this.net);
     const fs = withCommandDirs(
       this.base,
       async () => new Set((await this.commands()).keys()),
@@ -1663,6 +1674,10 @@ export class Launcher {
         this.deciding.set(ppid, waiting);
       },
     };
+  }
+
+  connectorStamp(pid: number): Promise<SealedCaller> {
+    return this.sealed.stamp(this.identityOf(pid), this.credOf(pid), this.tagOf(pid));
   }
 
   private identityOf(pid: number): { pid: number; ppid: number } {

@@ -3,6 +3,8 @@ import type { CdpHook } from './cdp/types.ts';
 import { type LockManagerLike, locksOf } from './client/protocol.ts';
 import { type ServedClient, serveClient } from './client/serve-client.ts';
 import { type ClipboardReply, clipboardAsker } from './clipboard-relay.ts';
+import { portFacadeHook } from './facade/port.ts';
+import type { FacadeSpec } from './facade/types.ts';
 import type { Attestation } from './fs/attest.ts';
 import type { Denial, DenialHook } from './fs/dac.ts';
 import type { IntegrityLookup } from './fs/integrity.ts';
@@ -64,6 +66,7 @@ export interface InitRequest {
   approve?: boolean;
   processMounts?: boolean | 'ask';
   cdp?: boolean;
+  facades?: Record<string, { port: number; hook?: boolean }>;
 }
 
 export interface RunRequest {
@@ -232,6 +235,21 @@ function cdpOption(req: InitRequest, port: KernelPort): { cdp?: CdpHook } {
       port.postMessage({ cdpOpen: request, port: cdp }, [cdp as unknown as MessagePort])
     ),
   };
+}
+
+function facadesOption(
+  req: InitRequest,
+  port: KernelPort
+): { facades?: Record<string, FacadeSpec> } {
+  if (!req.facades) return {};
+  const hook = portFacadeHook((request, facade) =>
+    port.postMessage({ facadeOpen: request, port: facade }, [facade as unknown as MessagePort])
+  );
+  const facades: Record<string, FacadeSpec> = {};
+  for (const [name, spec] of Object.entries(req.facades)) {
+    facades[name] = { port: spec.port, ...(spec.hook ? { hook } : {}) };
+  }
+  return { facades };
 }
 
 function remotes(
@@ -507,6 +525,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
         onMountPending: (medium) => port.postMessage({ medium }),
         ...(req.hostfs ? { hostfs: askGrant } : {}),
         ...cdpOption(req, port),
+        ...facadesOption(req, port),
         ...mountPolicy(req.processMounts),
         caStore: caStore(deps.metadata ? caDb(req) : false),
       });

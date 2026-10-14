@@ -1,5 +1,7 @@
 import { type CdpOpen, serveCdpPort } from '../cdp/port.ts';
 import type { CdpHook } from '../cdp/types.ts';
+import { type FacadeOpen, serveFacadePort } from '../facade/port.ts';
+import type { FacadeHook } from '../facade/types.ts';
 import type { FsStat, UsersMode } from '../fs/types.ts';
 import type { WatchChange } from '../fs/watch.ts';
 import { RemoteTransport, type TransportReply } from '../kernel/net/remote-transport.ts';
@@ -154,6 +156,7 @@ export interface KernelClient {
   loopbackFetch(input: RequestInfo | URL, options: LoopbackFetchOptions): Promise<Response>;
   readonly fs: ClientFs;
   serveCdp(hook: CdpHook, options?: { runtime?: string }): Promise<{ close(): void }>;
+  serveFacade(name: string, hook: FacadeHook): Promise<{ close(): void }>;
   onTraits(listener: (traits: RealmTransportTraits) => void): () => void;
   close(options?: { kill?: boolean }): Promise<void>;
 }
@@ -215,6 +218,8 @@ class Channel {
   readonly watching = new Map<number, (change: WatchChange) => void>();
   readonly cdpHooks = new Map<number, CdpHook>();
   private readonly cdpOpen = new Set<() => void>();
+  readonly facadeHooks = new Map<number, FacadeHook>();
+  private readonly facadeOpen = new Set<() => void>();
   protocol: readonly [number, number] = PROTOCOL;
   private nextId = 0;
   private readonly port: MessagePortLike;
@@ -240,6 +245,8 @@ class Channel {
     this.remote?.fail(error);
     for (const close of [...this.cdpOpen]) close();
     this.cdpOpen.clear();
+    for (const close of [...this.facadeOpen]) close();
+    this.facadeOpen.clear();
     for (const call of this.pending.values()) call.reject(error);
     this.pending.clear();
     this.release();
@@ -269,6 +276,7 @@ class Channel {
     watch?: number;
     change?: WatchChange;
     cdpOpen?: CdpOpen['cdpOpen'];
+    facadeOpen?: FacadeOpen['facadeOpen'];
     port?: CdpOpen['port'];
     traits?: RealmTransportTraits;
     id?: number;
@@ -280,6 +288,10 @@ class Channel {
     }
     if (data.cdpOpen && data.port) {
       this.openCdp(data as CdpOpen);
+      return;
+    }
+    if (data.facadeOpen && data.port) {
+      this.openFacade(data as FacadeOpen);
       return;
     }
     if (data.watch !== undefined) {
@@ -325,6 +337,39 @@ class Channel {
     const close = serveCdpPort(port, hook, request, () => this.cdpOpen.delete(close));
     this.cdpOpen.add(close);
   }
+
+  private openFacade({ facadeOpen: { registration, ...request }, port }: FacadeOpen): void {
+    const hook = registration === undefined ? undefined : this.facadeHooks.get(registration);
+    if (!hook || this.failure) {
+      port.postMessage({ error: 'this client no longer serves the facade' });
+      port.close();
+      return;
+    }
+    const close = serveFacadePort(port, hook, request, () => this.facadeOpen.delete(close));
+    this.facadeOpen.add(close);
+  }
+}
+
+async function serveFacadeOn(
+  channel: Channel,
+  name: string,
+  hook: FacadeHook
+): Promise<{ close(): void }> {
+  await since(channel, 11, 'facade serving', async () => {});
+  const { id, done } = channel.request({ op: 'serve-facade' as const, name });
+  channel.facadeHooks.set(id, hook);
+  try {
+    await done;
+  } catch (error) {
+    channel.facadeHooks.delete(id);
+    throw error;
+  }
+  return {
+    close: () => {
+      if (!channel.facadeHooks.delete(id)) return;
+      void channel.call({ op: 'unserve-facade', registration: id }).catch(() => undefined);
+    },
+  };
 }
 
 async function serveCdpOn(
@@ -594,6 +639,7 @@ export async function attachKernel(
     loopbackFetch: (input, options) => loopbackFetch((o) => dialOn(channel, o), input, options),
     fs: fsOn(channel),
     serveCdp: (hook, options = {}) => serveCdpOn(channel, hook, options),
+    serveFacade: (name, hook) => serveFacadeOn(channel, name, hook),
     onTraits(listener) {
       channel.traitsListeners.add(listener);
       return () => channel.traitsListeners.delete(listener);

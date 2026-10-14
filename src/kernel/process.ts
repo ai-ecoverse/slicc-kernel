@@ -1030,6 +1030,10 @@ export class WasmProcess {
     }
   }
 
+  connectorStamp(): Promise<SealedCaller> {
+    return this.sealedCaller();
+  }
+
   private async sealedCaller(): Promise<SealedCaller> {
     const shown = await this.options.identity?.();
     const broker = this.options.sealed as SealedBroker;
@@ -1406,6 +1410,7 @@ export class WasmProcess {
       blocking: () => this.blockingSignal(cancelled),
       resolve: (name, family, blocking) => resolver.resolve(name, family, blocking),
       cred: () => ({ pid: this.pid, uid: this.cred.euid, gid: this.cred.egid }),
+      stamp: () => this.connectorStamp(),
     });
   }
 

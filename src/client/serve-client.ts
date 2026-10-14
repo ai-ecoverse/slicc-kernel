@@ -1,5 +1,6 @@
 import { fresh } from '../bytes.ts';
 import { portCdpHook } from '../cdp/port.ts';
+import { portFacadeHook } from '../facade/port.ts';
 import { access, R_OK, X_OK } from '../fs/access.ts';
 import {
   type Guard,
@@ -315,6 +316,34 @@ function cdpRegistry(
   };
 }
 
+function facadeRegistry(
+  send: (message: object, transfer: Transferable[]) => void,
+  gone: Promise<void>
+) {
+  const registered = new Map<number, () => void>();
+  const drop = (id: number) => {
+    registered.get(id)?.();
+    return registered.delete(id);
+  };
+  return {
+    serve(l: Launcher, req: Extract<ClientRequest, { op: 'serve-facade' }>): number {
+      const hook = portFacadeHook(
+        (request, facade) =>
+          send({ facadeOpen: { ...request, registration: req.id }, port: facade }, [
+            facade as unknown as Transferable,
+          ]),
+        gone
+      );
+      registered.set(req.id, l.facades.register(req.name, hook));
+      return req.id;
+    },
+    drop,
+    close: () => {
+      for (const id of [...registered.keys()]) drop(id);
+    },
+  };
+}
+
 function visibleTo(g: Guard | undefined, notify: (change: WatchChange) => void) {
   if (!g?.dac.enforcing) return notify;
   let queue = Promise.resolve();
@@ -376,6 +405,7 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
   const reply = (id: number, body: object, transfer?: Transferable[]) =>
     send({ id, ...body }, transfer);
   const cdps = cdpRegistry(send, ended.promise);
+  const facades = facadeRegistry(send, ended.promise);
 
   function detach(kill = false, bye = 'the slicc-kernel detached this client'): void {
     if (state === 'closed') return;
@@ -385,6 +415,7 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
     for (const unwatch of watches.values()) unwatch();
     watches.clear();
     cdps.close();
+    facades.close();
     for (const session of terminals.values()) session.close();
     terminals.clear();
     if (kill) killGroups(host, [...groups]);
@@ -495,6 +526,10 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
         return { result: cdps.serve(l, req) };
       case 'unserve-cdp':
         return { result: cdps.drop(req.registration) };
+      case 'serve-facade':
+        return { result: facades.serve(l, req) };
+      case 'unserve-facade':
+        return { result: facades.drop(req.registration) };
       case 'detach':
         return { result: true };
       default:
