@@ -2,8 +2,11 @@ name: Kernel compat
 
 on:
   pull_request:
-    paths-ignore:
-      - '**.md'
+    paths:
+      - 'src/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'build.mjs'
   workflow_run:
     workflows: [Release]
     types: [completed]
@@ -64,11 +67,12 @@ jobs:
 
   pr:
     needs: pack
-    uses: ai-ecoverse/homescoop/.github/workflows/kernel-compat.yml@main
+    uses: ai-ecoverse/homescoop/.github/workflows/kernel-compat.yml@7579b505c725361cd6c8ffb5fce71b5cc0b95eb5
     permissions:
       contents: read
       actions: read
     with:
+      homescoop-ref: 7579b505c725361cd6c8ffb5fce71b5cc0b95eb5
       kernel: kernel-tgz
       set: base,ci-certified
       fail-on-regression: false
@@ -141,11 +145,12 @@ jobs:
   release:
     needs: published
     if: needs.published.outputs.version != ''
-    uses: ai-ecoverse/homescoop/.github/workflows/kernel-compat.yml@main
+    uses: ai-ecoverse/homescoop/.github/workflows/kernel-compat.yml@7579b505c725361cd6c8ffb5fce71b5cc0b95eb5
     permissions:
       contents: read
       actions: read
     with:
+      homescoop-ref: 7579b505c725361cd6c8ffb5fce71b5cc0b95eb5
       kernel: ${{ needs.published.outputs.version }}
       set: ${{ inputs.set || 'base,catalog,all' }}
 
