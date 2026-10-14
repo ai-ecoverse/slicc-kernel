@@ -434,7 +434,7 @@ export interface WasmProcessOptions {
 
   readonlyAt?: (path: string) => boolean;
 
-  guard?: { dac: Dac; fs: KernelFs; created?: Created };
+  guard?: { dac: Dac; fs: KernelFs; created?: Created; links?: number };
 
   identity?: () => Promise<{ pid: number; ppid: number }>;
 
@@ -950,7 +950,7 @@ export class WasmProcess {
     const { guard } = this.options;
     const inherited = req.orphan || req.contents !== undefined || req.handle !== undefined;
     if (!guard || inherited || req.pin !== undefined) return;
-    const g = { fs: guard.fs, dac: guard.dac, cred: this.cred, pid: this.pid };
+    const g = { fs: guard.fs, dac: guard.dac, cred: this.cred, pid: this.pid, links: guard.links };
     if (req.exclusive) return inParent(g, 'open', req.path);
     if (req.created && guard.created?.take(req.path)) return;
     const access = req.flags & WRITE_ACCESS;
@@ -1014,7 +1014,9 @@ export class WasmProcess {
 
   private guarded(): Guard | undefined {
     const { guard } = this.options;
-    return guard && { fs: guard.fs, dac: guard.dac, cred: this.cred, pid: this.pid };
+    return (
+      guard && { fs: guard.fs, dac: guard.dac, cred: this.cred, pid: this.pid, links: guard.links }
+    );
   }
 
   private ttyOwner(): Perm {

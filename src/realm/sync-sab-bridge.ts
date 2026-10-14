@@ -144,7 +144,7 @@ function errnoError(code: string, path: string): Error & { code: string } {
 
 export function createSyncFsSabBridge(
   transport: SyncSabTransport,
-  opts: { timeoutMs?: number; owners?: boolean } = {}
+  opts: { timeoutMs?: number; owners?: boolean; links?: boolean } = {}
 ): SyncFsPosixBridge {
   const timeoutMs = opts.timeoutMs ?? SYNC_FS_REQUEST_TIMEOUT_MS;
   let identity: { identity: true } | Record<string, never> = {};
@@ -280,6 +280,7 @@ export function createSyncFsSabBridge(
       changing({ op: follow ? 'chown' : 'lchown', path, ...ids }, path);
     },
     ...(opts.owners ? { owners: true } : {}),
+    ...(opts.links ? { links: true } : {}),
     access: (path, mode, kind = 'access', nofollow) => {
       run({ op: 'access', path, mode, arg2: kind, ...(nofollow ? { nofollow } : {}) }, path);
     },

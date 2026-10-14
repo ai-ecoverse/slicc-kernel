@@ -148,6 +148,7 @@ export interface LiveFsApi {
   ErrnoError: new (errno: number) => Error & { errno: number };
   closeStream?(fd: number): void;
   sliccTouch?: boolean;
+  sliccReading?: LiveFsNode | undefined;
 
   nameTable?: (LiveFsNode | null)[] | null;
   hashRemoveNode?(node: LiveFsNode): void;
@@ -656,7 +657,12 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
     },
     readlink(node) {
       if (!Fs.isLink(node.mode)) throw new Fs.ErrnoError(wasiErrno('EINVAL'));
-      return call(() => bridgeOf(node).readlink(liveNodePath(node)));
+      const bridge = bridgeOf(node);
+      const path = liveNodePath(node);
+      if (bridge.links && Fs.sliccReading !== node) {
+        call(() => bridge.access?.(path, 0, 'follow', true));
+      }
+      return call(() => bridge.readlink(path));
     },
   };
 }
@@ -1103,5 +1109,24 @@ export function useLiveChown(Fs: LiveChownFs): void {
     const live = (stream.node as LiveFsNode).live !== undefined;
     const target = live || stream.path === undefined ? stream.node : stream.path;
     (Fs.chown as NonNullable<LiveChownFs['chown']>)(target, uid, gid);
+  };
+}
+
+export interface LiveReadlinkFs extends LiveFsApi {
+  lookupPath(path: string, opts?: { follow?: boolean }): { node: object };
+  readlink?(path: string): string;
+}
+
+export function readingLinks(Fs: LiveReadlinkFs): void {
+  const readlink = Fs.readlink?.bind(Fs);
+  if (!readlink) return;
+  Fs.readlink = (path) => {
+    const was = Fs.sliccReading;
+    Fs.sliccReading = Fs.lookupPath(path).node as LiveFsNode;
+    try {
+      return readlink(path);
+    } finally {
+      Fs.sliccReading = was;
+    }
   };
 }

@@ -29,7 +29,7 @@ export const SYNC_FS_OPS = [
   'access',
 ] as const;
 
-export type AccessKind = 'open' | 'access' | 'eaccess';
+export type AccessKind = 'open' | 'access' | 'eaccess' | 'follow';
 
 export const HOLD_READ = 4;
 export const HOLD_WRITE = 8;
@@ -135,6 +135,7 @@ export interface SyncFsPosixBridge {
   create?(path: string, mode?: number): void;
   chown?(path: string, uid: number | undefined, gid: number | undefined, follow?: boolean): void;
   owners?: boolean;
+  links?: boolean;
   readdirStat(path: string): Array<[string, SyncFsBridgeStat | null]>;
   statfs?(path?: string): SyncFsUsage | null;
   pread?(path: string, offset: number, length: number, version?: string): Uint8Array;
