@@ -504,6 +504,7 @@ export class Launcher {
   private readonly warned = new Set<string>();
   private readonly compiled = new Map<string, Promise<Compiled>>();
   private readonly texts = new Map<string, Promise<string>>();
+  private revocations = 0;
   private integrity: Integrity | undefined;
   private scannedFs: KernelFs | undefined;
 
@@ -1191,17 +1192,18 @@ export class Launcher {
   ): Promise<T> {
     const hit = cache.get(key);
     if (hit !== undefined) return hit;
+    const revocations = this.revocations;
     const loading = load();
     const found = loading.then(({ value }) => value);
     cache.set(key, found);
-    loading.then(
-      (done) => {
-        if (done.key === key || (done.key === undefined && !key.includes('\0'))) return;
-        if (cache.get(key) === found) cache.delete(key);
-        if (done.key !== undefined) cache.set(done.key, found);
-      },
-      () => cache.delete(key)
-    );
+    const drop = () => {
+      if (cache.get(key) === found) cache.delete(key);
+    };
+    loading.then((done) => {
+      if (done.key === key || (done.key === undefined && !key.includes('\0'))) return;
+      drop();
+      if (done.key !== undefined && revocations === this.revocations) cache.set(done.key, found);
+    }, drop);
     return found;
   }
 
@@ -1946,6 +1948,30 @@ export class Launcher {
         port2.close();
       },
     };
+  }
+
+  async revokeIntegrity(path?: string): Promise<void> {
+    if (path !== undefined && (typeof path !== 'string' || !path.startsWith('/'))) {
+      throw new TypeError('integrity.revoke takes an absolute path');
+    }
+    if (!this.integrity) return;
+    const at = path === undefined ? undefined : normalizePath(path);
+    const real = at && (await this.base.realpath?.(at, true).catch(() => undefined));
+    const roots = [at, real].filter((p): p is string => p !== undefined);
+    this.revocations++;
+    const hit = (key: string) =>
+      key.includes('\0') &&
+      (at === undefined ||
+        key
+          .split('\0')
+          .slice(0, 2)
+          .some((part) => isProtected(roots, part)));
+    for (const cache of [this.compiled, this.texts] as Map<string, unknown>[]) {
+      for (const key of [...cache.keys()]) if (hit(key)) cache.delete(key);
+    }
+    if (at === undefined) this.integrity.forget();
+    for (const root of roots) this.integrity.forget(root);
+    this.resetCatalogs();
   }
 
   attest(path: string): Promise<Attestation> {
