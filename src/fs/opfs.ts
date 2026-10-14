@@ -561,9 +561,8 @@ export class OpfsFs implements KernelFs {
   private readonly dirDirty = new Set<string>();
   private readonly fileTimes = new Map<string, number>();
 
-  private async written(target: string): Promise<void> {
+  private written(target: string): void {
     this.committed(target);
-    await this.counting(target);
     if (!this.ranged) return;
     this.fileTimes.set(target, Date.now());
     this.scheduleFileTimes();
@@ -791,16 +790,18 @@ export class OpfsFs implements KernelFs {
 
   async pwrite(path: string, offset: number, bytes: Uint8Array): Promise<void> {
     const [handle, , target] = await this.fileFor(path);
+    await this.counting(target);
     await this.retrying(path, () => positioned(handle, (io) => io.write(offset, bytes)), true);
-    await this.written(target);
+    this.written(target);
   }
 
   async truncate(path: string, size: number): Promise<void> {
     const handle = await this.existing(path, true);
     const resolve = this.ranged || this.remote?.watched();
-    const target = resolve ? (await this.locate(path, true)).path : path;
+    const target = resolve || this.counted.length > 0 ? (await this.locate(path, true)).path : path;
+    await this.counting(target);
     await this.retrying(path, () => positioned(handle, (io) => io.truncate(size)), true);
-    await this.written(target);
+    this.written(target);
   }
 
   async writeSession(path: string, truncate: boolean): Promise<WriteSession> {
