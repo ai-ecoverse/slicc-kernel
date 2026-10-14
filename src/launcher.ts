@@ -904,7 +904,7 @@ export class Launcher {
   ): Promise<{ env: Record<string, string>; pid: number; cwd: string }> {
     const { [TICKET_ENV]: ticket = '', ...env } = req.env;
     const caller = this.jobs.shown(ppid);
-    const named = typeof req.argv0 === 'string' && !planned.target.fixed;
+    const named = typeof req.argv0 === 'string' && !planned.script && !planned.target.fixed;
     const argv = named ? [req.argv0 as string, ...req.argv.slice(1)] : req.argv;
     const exact =
       booked?.pid === caller &&
@@ -917,7 +917,9 @@ export class Launcher {
     const ids = { pid: req.exec ? caller : pid, ppid: caller };
     const stamp = await this.sealed.stamp(ids, cred, this.tagOf(ppid));
     const interpreters = await this.interpreterChain(planned, booked.cwd, scope);
-    const trusted = this.owners && (await this.trustedFiles(planned, req.file, booked.cwd, scope));
+    const trusted =
+      this.usersMode === 'enforce' &&
+      (await this.trustedFiles(planned, req.file, booked.cwd, scope));
     const swap = await this.sealed.consume({
       ticket,
       stamp,
@@ -1100,6 +1102,7 @@ export class Launcher {
     const seen = { ...req.env, HOSTNAME: this.hostname, cwd };
     const env = { ...expandDefaults(target.env, seen), ...req.env };
     for (const key of target.unset ?? []) delete env[key];
+    delete env[TICKET_ENV];
     env.HOSTNAME = this.hostname;
     let program: Program;
     try {
