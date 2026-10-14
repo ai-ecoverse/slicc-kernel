@@ -430,6 +430,8 @@ export interface WasmProcessOptions {
 
   sealed?: SealedBroker;
 
+  ttyFilter?: (file: OpenFile) => OpenFile;
+
   clipboard?: ClipboardBroker;
 
   clipboardName?: string;
@@ -737,7 +739,9 @@ export class WasmProcess {
         const { ptys, jobs } = this.options;
         const owner = this.options.owners ? this.ttyOwner() : undefined;
         const guard = this.guarded();
-        return ptySyscall(req, { pid: this.pid, fds: this.fds, ptys, jobs, guard, owner });
+        const { ttyFilter } = this.options;
+        const ctx = { pid: this.pid, fds: this.fds, ptys, jobs, guard, owner, ttyFilter };
+        return ptySyscall(req, ctx);
       }
       return await this.procSyscall(req, cancelled);
     } catch (e) {
@@ -963,7 +967,8 @@ export class WasmProcess {
       name === undefined ? this.controllingTerminal() : this.options.jobs?.terminalNamed(name);
     if (!tty) throw new KernelError('ENXIO');
     if (name !== undefined) ttyOpenable(this.guarded(), tty);
-    return this.fds.install(tty.file(), 3);
+    const file = tty.file();
+    return this.fds.install(this.options.ttyFilter?.(file) ?? file, 3);
   }
 
   private openSealed(): number {

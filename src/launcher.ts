@@ -1,3 +1,4 @@
+import type { Scrubber } from '@ai-ecoverse/slicc-scrub';
 import { enableCdp } from './cdp/facade.ts';
 import { CdpHosts } from './cdp/hosts.ts';
 import type { CdpHook } from './cdp/types.ts';
@@ -49,7 +50,7 @@ import { ClipboardBroker, type ClipboardHook } from './kernel/clipboard.ts';
 import type { CpuTimes } from './kernel/cpu-clock.ts';
 import { type Cred, copyCred, maySee, maySignal, ROOT } from './kernel/cred.ts';
 import { argvDigest, type Booked, TICKET_ENV } from './kernel/exec-ticket.ts';
-import { bytesSource, deviceFile, FdTable, sinkFile } from './kernel/fd-table.ts';
+import { bytesSource, deviceFile, FdTable, type OpenFile, sinkFile } from './kernel/fd-table.ts';
 import { spawnWasmProcess, type WasmProcessHandle, type WasmWorkerLike } from './kernel/host.ts';
 import { LockTable } from './kernel/host-ops.ts';
 import { type JobMember, JobTable } from './kernel/jobs.ts';
@@ -75,6 +76,7 @@ import type { ProcessInfo } from './kernel/proc-info.ts';
 import { DEFAULT_UMASK } from './kernel/process.ts';
 import type { ForkState, Program } from './kernel/protocol.ts';
 import { PtyTable } from './kernel/pty.ts';
+import { type ScrubSecret, scrubbedAll, scrubberOf, scrubStdio } from './kernel/scrub-file.ts';
 import { SealedBroker, type SealedHook } from './kernel/sealed.ts';
 import { SettlingChildren } from './kernel/settling.ts';
 import { SIG, sigbit } from './kernel/signals.ts';
@@ -284,6 +286,7 @@ interface StartRequest {
   tag?: string | undefined;
   decided?: Promise<boolean>;
   pid?: number;
+  scrub?: Scrubber;
 }
 
 const COMMAND = /^\/(?:usr\/)?bin\/([^/]+)$/;
@@ -532,6 +535,7 @@ export class Launcher {
   readonly usersMode: UsersMode;
   readonly dac: Dac | undefined;
   private readonly sealed: SealedBroker;
+  private readonly scrubs = new Map<number, Scrubber[]>();
   private readonly clipboard: ClipboardBroker;
   private readonly rootFs: KernelFs;
   private fileWatches: FileWatches | undefined;
@@ -915,10 +919,12 @@ export class Launcher {
     who: Redeemer,
     planned: Planned,
     fds: FdTable
-  ): Promise<{ env: Record<string, string>; pid?: number; cwd?: string }> {
+  ): Promise<{ env: Record<string, string>; pid?: number; cwd?: string; scrub?: Scrubber }> {
     if (who.booked === undefined) return { env: req.env };
     try {
-      return await this.redeem(req, who, planned);
+      const redeemed = await this.redeem(req, who, planned);
+      if (redeemed.scrub) scrubStdio(fds, redeemed.scrub);
+      return redeemed;
     } catch {
       await fds.closeAll();
       throw new SpawnError('EACCES');
@@ -929,7 +935,7 @@ export class Launcher {
     req: ChildSpawnRequest,
     { ppid, cred, scope, booked }: Redeemer,
     planned: Planned
-  ): Promise<{ env: Record<string, string>; pid: number; cwd: string }> {
+  ): Promise<{ env: Record<string, string>; pid: number; cwd: string; scrub?: Scrubber }> {
     const { [TICKET_ENV]: ticket = '', ...env } = req.env;
     const caller = this.jobs.shown(ppid);
     const named = typeof req.argv0 === 'string' && !planned.script && !planned.target.fixed;
@@ -959,11 +965,15 @@ export class Launcher {
       trusted,
     });
     if (!swap) throw new SpawnError('EACCES');
+    const secrets: ScrubSecret[] = [];
     for (const [name, placeholder] of Object.entries(swap.placeholders)) {
       const value = swap.values[name];
-      if (value !== undefined && env[name] === placeholder) env[name] = value;
+      if (value === undefined || env[name] !== placeholder) continue;
+      env[name] = value;
+      secrets.push({ name, value, placeholder });
     }
-    return { env, pid, cwd: booked.cwd };
+    const scrub = scrubberOf(secrets);
+    return { env, pid, cwd: booked.cwd, ...(scrub ? { scrub } : {}) };
   }
 
   private async interpreterChain(planned: Planned, cwd: string, scope: string): Promise<string[]> {
@@ -1216,12 +1226,20 @@ export class Launcher {
     return this.jobs.sessionOf(pgid);
   }
 
+  private treeScrubs(pid: number, req: StartRequest): Scrubber[] | undefined {
+    const inherited = req.ppid !== undefined ? this.scrubs.get(req.ppid) : undefined;
+    const scrubs = req.scrub ? [...(inherited ?? []), req.scrub] : inherited;
+    if (scrubs) this.scrubs.set(pid, scrubs);
+    return scrubs;
+  }
+
   private start(req: StartRequest): WasmProcessHandle {
     this.sampling();
     if (req.pgid !== undefined && this.jobs.sessionOf(req.pgid) === undefined) {
       throw new SpawnError('ESRCH');
     }
     const pid = req.pid ?? this.nextPid++;
+    const scrubs = this.treeScrubs(pid, req);
     const stack = this.stackFor(req.tag);
     const terminal = req.fds.stdioTerminal();
     const decided = req.decided ?? Promise.resolve(true);
@@ -1249,6 +1267,7 @@ export class Launcher {
         : {}),
       ...(this.owners ? { owners: true } : {}),
       sealed: this.sealed,
+      ...(scrubs ? { ttyFilter: (file: OpenFile) => scrubbedAll(file, scrubs) } : {}),
       clipboard: this.clipboard,
       ...(this.dac ? { dac: this.dac } : {}),
       program: req.program,
@@ -1317,6 +1336,7 @@ export class Launcher {
       if (spent) addTimes(this.imageTimes, this.jobs.shown(pid), spent);
       this.stopped.delete(pid);
       this.processes.delete(pid);
+      this.scrubs.delete(pid);
       if (this.processes.size === 0) {
         clearInterval(this.sampler);
         this.sampler = undefined;
@@ -1603,7 +1623,7 @@ export class Launcher {
   }
 
   private forker(ppid: number, parent: StartRequest): ChildForker {
-    const { exec: _exec, pgid: _pgid, group: _group, pid: _pid, ...image } = parent;
+    const { exec: _exec, pgid: _pgid, group: _group, pid: _pid, scrub: _scrub, ...image } = parent;
     return async (state, fds) =>
       childHandle(
         this.start({

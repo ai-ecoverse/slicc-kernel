@@ -211,6 +211,7 @@ export interface PtyContext {
   jobs?: JobTable;
   guard?: Guard;
   owner?: Perm;
+  ttyFilter?: (file: OpenFile) => OpenFile;
 }
 
 function masterOf(ctx: PtyContext, fd: number): PtyPair {
@@ -239,7 +240,8 @@ export function ptySyscall(req: PtySyscall, ctx: PtyContext): SyncFsResult {
       if (!ctx.ptys) throw new KernelError('ENOENT');
       const pair = ctx.ptys.get(req.n);
       ttyOpenable(ctx.guard, pair.slave);
-      const fd = ctx.fds.install(pair.openSlave(), 3);
+      const slave = pair.openSlave();
+      const fd = ctx.fds.install(ctx.ttyFilter?.(slave) ?? slave, 3);
 
       if (!req.noctty) ctx.jobs?.acquireTerminal(ctx.pid, pair.slave);
       return json(fd);
