@@ -1,13 +1,26 @@
+import { type IntegrityOptions, integrityUnknown } from './integrity.ts';
 import { type FsStat, fsError, type HeldEntry, type KernelFs, normalizePath } from './types.ts';
 
 export interface Protection {
   readonly paths: readonly string[];
   readonly writers?: readonly string[];
+  readonly integrity?: IntegrityOptions;
 }
 
-export function protectInit(protection: Protection): { paths: string[]; writers?: string[] } {
-  const writers = [...writerTags(protection)];
-  return { paths: [...protection.paths], ...(writers.length > 0 ? { writers } : {}) };
+export interface ProtectInit {
+  paths: string[];
+  writers?: string[];
+  integrity?: { unknown: 'allow' | 'deny' };
+}
+
+export function protectInit(protection: ProtectInit | Protection): ProtectInit {
+  const writers = [...writerTags(protection as Protection)];
+  const { integrity } = protection;
+  return {
+    paths: [...protection.paths],
+    ...(writers.length > 0 ? { writers } : {}),
+    ...(integrity ? { integrity: { unknown: integrityUnknown(integrity) } } : {}),
+  };
 }
 
 export function writerTags(protection: Protection | undefined): ReadonlySet<string> {

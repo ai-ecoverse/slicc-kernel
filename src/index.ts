@@ -11,8 +11,10 @@ import { type LoopbackFetchOptions, loopbackFetch } from './client/loopback-fetc
 import { clipboardAnswerer } from './clipboard-relay.ts';
 import type { Attestation } from './fs/attest.ts';
 import type { Denial, DenialHook } from './fs/dac.ts';
-import { type Protection, protectInit, writerTags } from './fs/protect.ts';
+import { integrityOptions } from './fs/integrity.ts';
+import { type Protection, protectInit } from './fs/protect.ts';
 import { DEFAULT_USERS, type UsersMode } from './fs/types.ts';
+import { integrityAnswerer } from './integrity-relay.ts';
 import type { ClipboardHook } from './kernel/clipboard.ts';
 import { isHostname } from './kernel/net/loopback-names.ts';
 import type { TransportCall } from './kernel/net/remote-transport.ts';
@@ -485,6 +487,8 @@ function checkOptions(options: KernelOptions): void {
   if (options.hostname !== undefined && !isHostname(options.hostname)) {
     throw new Error(`not a host name: ${String(options.hostname)}`);
   }
+  if (options.protect) protectInit(options.protect);
+  integrityOptions(options.protect?.integrity);
 }
 
 function hookRelays(
@@ -493,8 +497,9 @@ function hookRelays(
 ): { handle(data: unknown): boolean; close(): void } {
   const sealed = sealedAnswerer(worker, options.sealed);
   const clipboard = clipboardAnswerer(worker, options.clipboard);
+  const integrity = integrityAnswerer(worker, options.protect?.integrity?.lookup);
   return {
-    handle: (data) => sealed.handle(data) || clipboard.handle(data),
+    handle: (data) => sealed.handle(data) || clipboard.handle(data) || integrity(data),
     close: () => sealed.close(),
   };
 }
@@ -541,7 +546,6 @@ function traitsUpdater(
 
 export async function createKernel(options: KernelOptions = {}): Promise<Kernel> {
   checkOptions(options);
-  writerTags(options.protect);
   const url = options.worker ?? new URL('./kernel-worker.js', import.meta.url);
   const worker = new Worker(url, { type: 'module', name: 'slicc-kernel' });
   const pending = new Map<number, Pending>();
