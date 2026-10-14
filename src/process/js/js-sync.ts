@@ -64,6 +64,7 @@ export interface JsCred {
 }
 
 export interface JsSyncContext {
+  readonly kernel: { readonly version: string };
   run(options: JsRunOptions): JsRunResult;
   exit(status?: number): never;
   kill(pid: number, signal?: number | `SIG${string}`): void;
@@ -156,7 +157,7 @@ export class JsSyncKernel {
 export function syncOps(
   kernel: JsSyncKernel,
   shared: SyncShared
-): Omit<JsSyncContext, 'run' | 'exit' | 'kill' | 'cred' | 'setcred'> {
+): Omit<JsSyncContext, 'run' | 'exit' | 'kill' | 'cred' | 'setcred' | 'kernel'> {
   const { infos, handles, resolve } = shared;
 
   const info = (fd: number): FdInfo => {

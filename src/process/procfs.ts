@@ -1,5 +1,6 @@
 import { ROOT } from '../kernel/cred.ts';
 import type { MountLine, ProcessInfo, ProcessListing } from '../kernel/proc-info.ts';
+import { OS_RELEASE, procVersion } from '../version.ts';
 import { mountTable } from './process-fds.ts';
 
 const HZ = 100;
@@ -13,7 +14,24 @@ const KIB = 1024;
 const FALLBACK_MEMORY = 4 * KIB * KIB * KIB;
 
 export const PID_FILES = ['cmdline', 'comm', 'stat', 'statm', 'status'] as const;
-export const SYSTEM_FILES = ['loadavg', 'meminfo', 'stat', 'uptime'] as const;
+export const SYSTEM_FILES = ['loadavg', 'meminfo', 'stat', 'uptime', 'version'] as const;
+
+export interface ProcSysTree {
+  readonly [name: string]: string | ProcSysTree;
+}
+
+export const SYS_TREE: ProcSysTree = {
+  kernel: { osrelease: `${OS_RELEASE}\n`, ostype: 'Linux\n' },
+};
+
+export function sysEntry(parts: readonly string[]): string | ProcSysTree | undefined {
+  let at: string | ProcSysTree | undefined = SYS_TREE;
+  for (const part of parts) {
+    if (typeof at !== 'object' || !Object.hasOwn(at, part)) return undefined;
+    at = at[part];
+  }
+  return at;
+}
 
 type PidFile = (typeof PID_FILES)[number];
 type SystemFile = (typeof SYSTEM_FILES)[number];
@@ -168,6 +186,7 @@ export function systemFile(
   now: number,
   memory: MemorySource
 ): string {
+  if (name === 'version') return procVersion();
   const up = Math.max(0, now - listing.boot) / 1000;
   if (name === 'uptime') return `${up.toFixed(2)} ${up.toFixed(2)}\n`;
   if (name === 'meminfo') {
@@ -335,6 +354,16 @@ export function useProcfs(Fs: ProcFs, sys: ProcSys, pid: number, memory = memory
       if (!info) throw error();
       return pidFile(name, info, listing.boot);
     };
+  const sysDir = (parent: ProcNode, name: string, tree: ProcSysTree): ProcNode => {
+    const dir = fresh(parent, name, DIR_MODE);
+    dir.node_ops.lookup = (at, child) => {
+      if (!Object.hasOwn(tree, child)) throw error();
+      const next = tree[child] as string | ProcSysTree;
+      return typeof next === 'string' ? file(at, child, () => next) : sysDir(at, child, next);
+    };
+    dir.node_ops.readdir = () => ['.', '..', ...Object.keys(tree)];
+    return dir;
+  };
   const pidNames = (names: string[]) => [...new Set([...names, ...PID_FILES])];
   const pidDir = (name: string, target: number): ProcNode => {
     const dir = fresh(proc, name, DIR_MODE);
@@ -359,7 +388,7 @@ export function useProcfs(Fs: ProcFs, sys: ProcSys, pid: number, memory = memory
   const readdir = procOps.readdir?.bind(procOps);
   const listAll = (node: ProcNode) => {
     const names = new Set(readdir ? readdir(node) : ['.', '..']);
-    for (const name of [...SYSTEM_FILES, 'mounts']) names.add(name);
+    for (const name of [...SYSTEM_FILES, 'mounts', 'sys']) names.add(name);
     for (const p of procList().processes) names.add(String(p.pid));
     return [...names];
   };
@@ -371,6 +400,7 @@ export function useProcfs(Fs: ProcFs, sys: ProcSys, pid: number, memory = memory
         return pidDir(name, Number(name));
       }
       if (name === 'mounts') return file(parent, name, () => mountTable(sys.mountList?.() ?? []));
+      if (name === 'sys') return sysDir(parent, name, SYS_TREE);
       if ((SYSTEM_FILES as readonly string[]).includes(name)) {
         return file(parent, name, () =>
           systemFile(name as SystemFile, procList(), Date.now(), memory)

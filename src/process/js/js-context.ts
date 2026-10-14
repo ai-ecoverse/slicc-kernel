@@ -1,5 +1,6 @@
 import { SIG } from '../../kernel/signals.ts';
 import { parseSyncFsStat, type SyncFsBridgeStat } from '../../realm/sync-fs-wire.ts';
+import { KERNEL_VERSION } from '../../version.ts';
 import { childOps, type JsChild, type JsExited, type JsSpawnOptions } from './js-children.ts';
 import {
   devAsync,
@@ -71,7 +72,14 @@ export interface JsFdStatus {
 
 export type JsSignal = number | `SIG${string}`;
 
+export interface JsKernelInfo {
+  readonly version: string;
+}
+
+export const KERNEL_INFO: JsKernelInfo = Object.freeze({ version: KERNEL_VERSION });
+
 export interface JsProgramContext {
+  readonly kernel: JsKernelInfo;
   readonly argv: readonly string[];
   readonly env: Readonly<Record<string, string>>;
   readonly pid: number;
@@ -374,6 +382,7 @@ export function createContext(o: ContextOptions): CreatedContext {
   const syncKernel = new JsSyncKernel(lane, kernel, unwind);
   const terminal = ttyOps(kernel);
   const sync: JsSyncContext = {
+    kernel: KERNEL_INFO,
     ...syncOps(syncKernel, { pid: o.pid, resolve, random, infos, handles }),
     run: (options) =>
       runSync(syncKernel, { env: o.env, cwd: o.cwd, resolve, signal: signalNumber }, options),
@@ -396,6 +405,7 @@ export function createContext(o: ContextOptions): CreatedContext {
 
   const strays = o.strays ?? { exception: new Set(), rejection: new Set() };
   const ctx: JsProgramContext = {
+    kernel: KERNEL_INFO,
     argv: o.argv,
     env: o.env,
     pid: o.pid,
