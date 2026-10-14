@@ -270,7 +270,7 @@ function openAt(Fs: ProcessFs, fd: number, path: string, flags: number): boolean
   return true;
 }
 
-const PLACED: ReadonlySet<string> = new Set(['stream', 'file', 'socket', 'clipboard']);
+const PLACED: ReadonlySet<string> = new Set(['stream', 'file', 'socket', 'clipboard', 'sealed']);
 
 export function wireKernelStdio(Fs: ProcessFs, streams: KernelStreams, sys?: ProcessSys): void {
   for (const fd of [0, 1, 2]) {
