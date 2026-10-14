@@ -271,7 +271,7 @@ test('the stamp carries the effective ids, the users mode and the tag (users: en
 
 test('the stamp carries the inherited tag of terminals and clients (users: off)', async (t) => {
   const clip = fakeClipboard('t');
-  const { kernel, bash } = await booted(t, { clipboard: clip.hook });
+  const { kernel, bash } = await booted(t, { clipboard: clip.hook, users: 'off' });
   const term = await kernel.openTerminal(
     ['bash', '-c', 'printf u | cat > /dev/clipboard; (cat /dev/clipboard > /dev/null)'],
     { tag: 'user', cwd: '/tmp' }

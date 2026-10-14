@@ -85,6 +85,7 @@ export interface ClientReply {
   fd?: 1 | 2;
   bytes?: Uint8Array;
   started?: number;
+  signal?: string;
 }
 
 export type ClientMessage = { hello: ClientHello } | ClientRequest | TransportCall;
