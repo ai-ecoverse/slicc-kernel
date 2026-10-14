@@ -263,10 +263,10 @@ export class OpfsFs implements KernelFs {
     if (this.remote?.watched()) this.remote.wrote(target);
   }
 
-  private async stamped(path: string, file: File): Promise<string> {
+  private async stamp(path: string): Promise<string> {
+    const local = this.generations.get(path) ?? 0;
     const [meta] = await this.meta.get([path]);
-    const written = meta?.mtimeMs ?? 0;
-    return `${file.lastModified}:${file.size}:${this.generations.get(path) ?? 0}:${written}`;
+    return `${local}:${meta?.writes ?? 0}`;
   }
 
   resolvePath(base: string, path: string): string {
@@ -550,15 +550,18 @@ export class OpfsFs implements KernelFs {
   private readonly dirDirty = new Set<string>();
   private readonly fileTimes = new Map<string, number>();
 
+  private readonly pendingWrites = new Map<string, number>();
+
   private written(target: string): void {
     this.committed(target);
     if (!this.ranged) return;
     this.fileTimes.set(target, Date.now());
+    this.pendingWrites.set(target, (this.pendingWrites.get(target) ?? 0) + 1);
     this.scheduleFileTimes();
   }
 
   private scheduleFileTimes(): void {
-    if (this.flushing.file || this.fileTimes.size === 0) return;
+    if (this.flushing.file || (this.fileTimes.size === 0 && this.pendingWrites.size === 0)) return;
     this.flushing.file = setTimeout(() => {
       void this.flushFileTimes()
         .catch(() => undefined)
@@ -571,6 +574,14 @@ export class OpfsFs implements KernelFs {
   }
 
   private async flushFileTimes(): Promise<void> {
+    for (const [path, n] of [...this.pendingWrites]) {
+      this.pendingWrites.delete(path);
+      await this.meta.update(path, (entry) => ({
+        ...entry,
+        path,
+        writes: (entry?.writes ?? 0) + n,
+      }));
+    }
     for (const [path, ms] of [...this.fileTimes]) {
       const mtimeFor = await this.modified(path).catch(() => 0);
       await this.meta.update(path, (entry) =>
@@ -745,9 +756,10 @@ export class OpfsFs implements KernelFs {
     return this.retrying(
       path,
       async () => {
+        const stamp = await this.stamp(path);
         const file = await handle.getFile();
         const bytes = new Uint8Array(await file.arrayBuffer());
-        return { bytes, version: await this.stamped(path, file) };
+        return { bytes, version: `${file.lastModified}:${file.size}:${stamp}` };
       },
       false
     );
@@ -755,7 +767,15 @@ export class OpfsFs implements KernelFs {
 
   async version(path: string): Promise<string> {
     const handle = await this.existing(path);
-    return this.retrying(path, async () => this.stamped(path, await handle.getFile()), false);
+    return this.retrying(
+      path,
+      async () => {
+        const stamp = await this.stamp(path);
+        const file = await handle.getFile();
+        return `${file.lastModified}:${file.size}:${stamp}`;
+      },
+      false
+    );
   }
 
   async pread(path: string, offset: number, length: number): Promise<Uint8Array> {

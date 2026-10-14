@@ -14,6 +14,7 @@ export interface MetaEntry {
   uid?: number;
   gid?: number;
   heir?: [number, number];
+  writes?: number;
 }
 
 export type MetaChange = (entry: MetaEntry | undefined) => MetaEntry | undefined;
