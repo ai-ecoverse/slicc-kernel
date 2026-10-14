@@ -229,9 +229,11 @@ interface ThreadSignals {
 }
 
 function killThread(thread: ThreadSignals | undefined, caught: number, sig: number): boolean {
-  if (!thread || (caught & sigbit(sig)) === 0) return false;
+  if (!thread) return false;
+  const held = (Atomics.load(thread.header, SAB_I_BLOCKED) & sigbit(sig)) !== 0;
+  if (!held && (caught & sigbit(sig)) === 0) return false;
   Atomics.or(thread.header, SAB_I_SIGNALS, sigbit(sig));
-  if ((Atomics.load(thread.header, SAB_I_BLOCKED) & sigbit(sig)) !== 0) return true;
+  if (held) return true;
   Atomics.notify(thread.header, SAB_I_SIGNALS);
   const blocked = thread.interrupt;
   thread.interrupt = new AbortController();
