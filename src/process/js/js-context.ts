@@ -185,9 +185,11 @@ export function signalNumber(signal: JsSignal): number {
     if (Number.isInteger(signal) && signal >= 1 && signal <= 31) return signal;
     throw new JsCallError('EINVAL', `signal ${signal}`);
   }
-  const n = (SIG as Record<string, number>)[signal.slice(3)];
-  if (n === undefined) throw new JsCallError('EINVAL', `signal ${signal}`);
-  return n;
+  const name = signal.slice(3);
+  if (!signal.startsWith('SIG') || !Object.hasOwn(SIG, name)) {
+    throw new JsCallError('EINVAL', `signal ${signal}`);
+  }
+  return (SIG as Record<string, number>)[name] as number;
 }
 
 export function resolvePath(cwd: string, path: string): string {

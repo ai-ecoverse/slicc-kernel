@@ -16,6 +16,7 @@ export interface JsSpawnOptions {
   cwd?: string;
   pgid?: number;
   session?: boolean;
+  parentDeathSignal?: number | `SIG${string}`;
   stdin?: JsStdio;
   stdout?: JsStdio;
   stderr?: JsStdio;
@@ -123,6 +124,7 @@ export function childOps(
     if (file === undefined) throw new JsCallError('EINVAL', 'spawn');
     const group = groupOf(o, 'spawn');
     const named = argv0Of(o.argv0, 'spawn');
+    const death = deathOf(o.parentDeathSignal, defaults);
     return (stdio: Slot[]): SyncSabRequestBody => ({
       op: 'proc-spawn',
       file,
@@ -132,6 +134,7 @@ export function childOps(
       cwd: o.cwd ?? defaults.cwd,
       stdio,
       ...group,
+      ...death,
     });
   };
 
@@ -180,6 +183,14 @@ export function groupOf(
   }
   if (session && pgid !== undefined) throw new JsCallError('EINVAL', call);
   return session ? { session: true } : pgid !== undefined ? { pgid } : {};
+}
+
+function deathOf(signal: unknown, defaults: ChildDefaults): { deathSignal?: number } {
+  if (signal === undefined) return {};
+  if (typeof signal !== 'number' && typeof signal !== 'string') {
+    throw new JsCallError('EINVAL', 'spawn');
+  }
+  return { deathSignal: defaults.signal(signal as number | `SIG${string}`) };
 }
 
 export function argv0Of(argv0: unknown, call: string): { argv0?: string } {

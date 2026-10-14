@@ -181,6 +181,7 @@ export type WasmSyscall =
       stdio: ChildStdio[];
       pgid?: number;
       session?: true;
+      deathSignal?: number;
 
       inherit?: InheritedSlot[];
 
@@ -509,6 +510,8 @@ export class WasmProcess {
   private exited = false;
   private readonly children: ChildTable;
 
+  private readonly deathSignals = new Map<number, number>();
+
   private caught = 0;
   private ignored = 0;
   private inherited = 0;
@@ -567,7 +570,10 @@ export class WasmProcess {
     this.nodes = options.nodes ?? new VfsNodes(options.fs);
     if (!options.nodes) options.openFiles?.add(this.nodes);
     this.children.onChildState = () => this.signal(SIG.CHLD);
-    this.children.onReap = options.onReap;
+    this.children.onReap = (pid) => {
+      this.deathSignals.delete(pid);
+      options.onReap?.(pid);
+    };
   }
 
   private ignores(bit: number): boolean {
@@ -621,15 +627,28 @@ export class WasmProcess {
   }
 
   private async spawn(req: Extract<WasmSyscall, { op: 'proc-spawn' }>): Promise<number> {
-    const { file, argv, argv0, env, cwd, stdio, inherit, exec, pgid, session } = req;
+    const { file, argv, argv0, env, cwd, stdio, inherit, exec, pgid, session, deathSignal } = req;
+    if (deathSignal !== undefined && (exec || !isSignal(deathSignal))) {
+      throw new KernelError('EINVAL');
+    }
     const group = { ...(pgid !== undefined ? { pgid } : {}), ...(session ? { session } : {}) };
     const named = argv0 !== undefined ? { argv0 } : {};
     const spawned = { file, argv, ...named, env, cwd, ...group, ...(exec ? { exec } : {}) };
     const pid = await this.children.spawn(spawned, stdio, inherit);
+    if (deathSignal !== undefined) this.onDeath(pgid === 0 || session ? -pid : pid, deathSignal);
     if (!exec) return pid;
     if (this.killed) void Promise.allSettled([this.options.kill?.(pid, SIG.KILL)]);
     else this.adoptExec(pid);
     return pid;
+  }
+
+  private onDeath(target: number, sig: number): void {
+    if (this.exited) this.sendDeath(target, sig);
+    else this.deathSignals.set(target, sig);
+  }
+
+  private sendDeath(target: number, sig: number): void {
+    void Promise.resolve(this.options.kill?.(target, sig)).catch(() => undefined);
   }
 
   private async killSelf(sig: number, target?: number, probe?: boolean): Promise<SyncFsResult> {
@@ -1664,6 +1683,8 @@ export class WasmProcess {
     this.interrupt.abort();
     this.options.locks?.release(this.pid);
     this.asyncOps.close();
+    for (const [target, sig] of this.deathSignals) this.sendDeath(target, sig);
+    this.deathSignals.clear();
     for (const pid of this.children.pids()) this.options.onReap?.(pid);
     await this.stampClipboards();
     await this.fds.closeAll();
