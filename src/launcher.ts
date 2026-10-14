@@ -56,6 +56,7 @@ import { LockTable } from './kernel/host-ops.ts';
 import { type JobMember, JobTable } from './kernel/jobs.ts';
 import { HttpHandles } from './kernel/net/http-syscalls.ts';
 import { DEFAULT_HOSTNAME, isHostname } from './kernel/net/loopback-names.ts';
+import { KernelLoopback } from './kernel/net/loopback-transport.ts';
 import {
   enableNetwork,
   kernelCa,
@@ -1288,6 +1289,13 @@ export class Launcher {
     return this.jobs.sessionOf(pgid);
   }
 
+  private loopbackFor(pid: number): KernelLoopback {
+    return new KernelLoopback(this.net, () => {
+      const cred = this.credOf(pid);
+      return { pid, uid: cred.euid, gid: cred.egid };
+    });
+  }
+
   private treeScrubs(req: StartRequest): Scrubber[] | undefined {
     const inherited = req.ppid !== undefined ? this.scrubs.get(req.ppid) : undefined;
     return req.scrub ? [...(inherited ?? []), req.scrub] : inherited;
@@ -1365,7 +1373,7 @@ export class Launcher {
       jobs: this.jobs,
       ptys: this.ptys,
       net: this.net,
-      http: new HttpHandles(this.transport, pid),
+      http: new HttpHandles(this.transport, pid, this.loopbackFor(pid)),
       locks: this.locks,
       resolver: this.resolver,
       onReap: (child) => this.reaped(child, pid),

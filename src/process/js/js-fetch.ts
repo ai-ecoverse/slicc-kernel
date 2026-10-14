@@ -1,4 +1,5 @@
 import type { HttpHead } from '../../kernel/net/http-syscalls.ts';
+import { isKernelLoopbackHost } from '../../kernel/net/loopback-names.ts';
 import type { HeaderList } from '../../kernel/net/transport.ts';
 import { JsCallError, type JsKernel } from './js-kernel.ts';
 
@@ -45,10 +46,20 @@ function plain(status: number, text: string): Response {
   });
 }
 
+function local(url: string): boolean {
+  return isKernelLoopbackHost(new URL(url).hostname);
+}
+
 function rewrite(hop: Hop, status: number, location: string): Hop {
   const next = new URL(location, hop.url);
   if (next.protocol !== 'http:' && next.protocol !== 'https:') {
     throw failed(new JsCallError('EPROTONOSUPPORT', next.protocol));
+  }
+  if (local(next.href) && !local(hop.url)) {
+    const from = new URL(hop.url).origin;
+    throw failed(
+      new JsCallError('EACCES', `a redirect from ${from} into the kernel's loopback: ${next.href}`)
+    );
   }
   const toGet =
     ((status === 301 || status === 302) && hop.method === 'POST') ||
@@ -244,13 +255,16 @@ async function bodyOf(
 }
 
 export function fetchOp(kernel: JsKernel) {
-  let traits: Promise<FetchTraits> | undefined;
-  const traitsOf = (): Promise<FetchTraits> => {
-    traits ??= kernel.json({ op: 'net-traits' }) as Promise<FetchTraits>;
-    traits.catch(() => {
-      traits = undefined;
+  const traits = new Map<boolean, Promise<FetchTraits>>();
+  const traitsOf = (url: string): Promise<FetchTraits> => {
+    const own = local(url);
+    const known =
+      traits.get(own) ?? (kernel.json({ op: 'net-traits', url }) as Promise<FetchTraits>);
+    traits.set(own, known);
+    known.catch(() => {
+      traits.delete(own);
     });
-    return traits;
+    return known;
   };
 
   const close = (handle: number): Promise<unknown> => kernel.raw({ op: 'net-close', handle });
@@ -357,7 +371,7 @@ export function fetchOp(kernel: JsKernel) {
     if (protocol !== 'http:' && protocol !== 'https:') {
       throw failed(new JsCallError('EPROTONOSUPPORT', protocol));
     }
-    const known = await traitsOf().catch((err: unknown) => {
+    const known = await traitsOf(request.url).catch((err: unknown) => {
       throw failed(err);
     });
     if (!known.manualRedirects && request.redirect !== 'follow') {
