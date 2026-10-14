@@ -940,6 +940,7 @@ interface ChmodFs {
 
 interface ChdirFs extends AccessFs {
   chdir?(path: string): void;
+  isDir?(mode: number): boolean;
   ErrnoError?: new (errno: number) => Error;
 }
 
@@ -948,7 +949,8 @@ function kernelChdir(Fs: ChdirFs): void {
   if (!chdir || !lookupPath || !ErrnoError) return;
   Fs.chdir = (path: string) => {
     const { node } = lookupPath.call(Fs, path, { follow: true });
-    const bridge = node.live ? node.mount.opts.bridge : undefined;
+    const directory = Fs.isDir?.(node.mode) === true;
+    const bridge = node.live && directory ? node.mount.opts.bridge : undefined;
     try {
       bridge?.access?.(liveNodePath(node), X_ACCESS, 'eaccess', false);
     } catch (err) {
