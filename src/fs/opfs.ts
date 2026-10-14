@@ -256,8 +256,17 @@ export class OpfsFs implements KernelFs {
     return this.remote?.announce(paths) ?? Promise.resolve();
   }
 
+  private readonly generations = new Map<string, number>();
+
   private committed(target: string): void {
+    this.generations.set(target, (this.generations.get(target) ?? 0) + 1);
     if (this.remote?.watched()) this.remote.wrote(target);
+  }
+
+  private async stamped(path: string, file: File): Promise<string> {
+    const [meta] = await this.meta.get([path]);
+    const written = meta?.mtimeMs ?? 0;
+    return `${file.lastModified}:${file.size}:${this.generations.get(path) ?? 0}:${written}`;
   }
 
   resolvePath(base: string, path: string): string {
@@ -738,7 +747,7 @@ export class OpfsFs implements KernelFs {
       async () => {
         const file = await handle.getFile();
         const bytes = new Uint8Array(await file.arrayBuffer());
-        return { bytes, version: `${file.lastModified}:${file.size}` };
+        return { bytes, version: await this.stamped(path, file) };
       },
       false
     );
@@ -746,14 +755,7 @@ export class OpfsFs implements KernelFs {
 
   async version(path: string): Promise<string> {
     const handle = await this.existing(path);
-    return this.retrying(
-      path,
-      async () => {
-        const file = await handle.getFile();
-        return `${file.lastModified}:${file.size}`;
-      },
-      false
-    );
+    return this.retrying(path, async () => this.stamped(path, await handle.getFile()), false);
   }
 
   async pread(path: string, offset: number, length: number): Promise<Uint8Array> {
