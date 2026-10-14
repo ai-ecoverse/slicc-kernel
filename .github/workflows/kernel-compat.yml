@@ -1,0 +1,189 @@
+name: Kernel compat
+
+on:
+  pull_request:
+    paths-ignore:
+      - '**.md'
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Published kernel version to check, e.g. 1.86.0'
+        type: string
+        required: true
+      set:
+        description: 'kernel-compat set'
+        type: string
+        default: 'base,catalog,all'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kernel-compat-${{ github.ref }}-${{ github.event.workflow_run.head_sha || inputs.version }}
+  cancel-in-progress: true
+
+jobs:
+  pack:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      LEFTHOOK: '0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - env:
+          PR: ${{ github.event.pull_request.number }}
+          RUN: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          latest=$(npm view @ai-ecoverse/slicc-kernel version)
+          IFS=. read -r major minor patch <<< "$latest"
+          version="$major.$minor.$((patch + 1))-pr.$PR.$RUN"
+          npm version "$version" --no-git-tag-version
+          mkdir -p "$RUNNER_TEMP/kernel"
+          npm pack --pack-destination "$RUNNER_TEMP/kernel"
+          echo "packed @ai-ecoverse/slicc-kernel@$version from ${GITHUB_SHA}" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: kernel-tgz
+          path: ${{ runner.temp }}/kernel/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  pr:
+    needs: pack
+    uses: ai-ecoverse/homescoop/.github/workflows/kernel-compat.yml@main
+    permissions:
+      contents: read
+      actions: read
+    with:
+      kernel: kernel-tgz
+      set: base,ci-certified
+      fail-on-regression: false
+
+  pr-summary:
+    needs: [pack, pr]
+    if: ${{ !cancelled() && needs.pack.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_ID: ${{ github.run_id }}
+          RESULT: ${{ needs.pr.result }}
+          ARTIFACT: ${{ needs.pr.outputs.artifact }}
+          VERDICT: ${{ needs.pr.outputs.verdict }}
+          REGRESSIONS: ${{ needs.pr.outputs.regressions }}
+        run: |
+          set -euo pipefail
+          id=""
+          if [ -n "$ARTIFACT" ]; then
+            id=$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts?per_page=100" --jq ".artifacts[] | select(.name == \"$ARTIFACT\") | .id" | head -1)
+          fi
+          case "$VERDICT" in
+            pass) mark="✅" ;;
+            regression) mark="❌" ;;
+            *) mark="⚠️" ;;
+          esac
+          {
+            echo "## $mark Kernel compat (non-blocking): ${VERDICT:-no verdict}"
+            echo
+            echo "- job result: $RESULT, regressions: ${REGRESSIONS:-unknown}"
+            echo "- set: base,ci-certified, regressions are reported and do not fail this PR"
+            if [ -n "$id" ]; then echo "- report: $RUN_URL/artifacts/$id"; fi
+            echo "- run: $RUN_URL"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$VERDICT" = "regression" ]; then echo "::warning::kernel-compat found ${REGRESSIONS} regression(s): $RUN_URL"; fi
+
+  published:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - id: version
+        env:
+          INPUT: ${{ inputs.version }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          REPO: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ -n "$INPUT" ]; then
+            version="${INPUT#v}"
+          else
+            version=$(git ls-remote --tags "$REPO" 'v*' | awk -v sha="$SHA" '$1 == sha { sub("refs/tags/v", "", $2); sub("\\^\\{\\}$", "", $2); print $2 }' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)
+          fi
+          if [ -z "$version" ]; then
+            echo "no release tag at $SHA, nothing to check" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          npm view "@ai-ecoverse/slicc-kernel@$version" version --prefer-online
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: published
+    if: needs.published.outputs.version != ''
+    uses: ai-ecoverse/homescoop/.github/workflows/kernel-compat.yml@main
+    permissions:
+      contents: read
+      actions: read
+    with:
+      kernel: ${{ needs.published.outputs.version }}
+      set: ${{ inputs.set || 'base,catalog,all' }}
+
+  attach:
+    needs: [published, release]
+    if: ${{ !cancelled() && needs.published.outputs.version != '' && needs.release.outputs.artifact != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: ${{ needs.release.outputs.artifact }}
+          path: ${{ runner.temp }}/report
+
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_ID: ${{ github.run_id }}
+          ARTIFACT: ${{ needs.release.outputs.artifact }}
+          VERSION: ${{ needs.published.outputs.version }}
+          VERDICT: ${{ needs.release.outputs.verdict }}
+          REGRESSIONS: ${{ needs.release.outputs.regressions }}
+        run: |
+          set -euo pipefail
+          id=$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts?per_page=100" --jq ".artifacts[] | select(.name == \"$ARTIFACT\") | .id" | head -1)
+          out="$RUNNER_TEMP/kernel-compat-v$VERSION.md"
+          {
+            echo "# Kernel compat: @ai-ecoverse/slicc-kernel@$VERSION"
+            echo
+            echo "- verdict: ${VERDICT:-unknown}, regressions: ${REGRESSIONS:-unknown}"
+            echo "- run: $RUN_URL"
+            echo "- report: $RUN_URL/artifacts/$id"
+            echo
+            if [ -f "$RUNNER_TEMP/report/summary.md" ]; then cat "$RUNNER_TEMP/report/summary.md"; fi
+          } > "$out"
+          cat "$out" >> "$GITHUB_STEP_SUMMARY"
+          gh release upload "v$VERSION" "$out" --clobber -R "$REPO"
