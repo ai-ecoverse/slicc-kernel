@@ -36,7 +36,7 @@ import {
   writeDevice,
   written,
 } from './js-io.ts';
-import { callError, JsCallError, type JsKernel, modeOf } from './js-kernel.ts';
+import { callError, JsCallError, type JsKernel, modeOf, umaskRequest } from './js-kernel.ts';
 import { type JsNet, netOps } from './js-net.ts';
 import { procFsAsync, procOpenAsync } from './js-proc.ts';
 import { runSync } from './js-run.ts';
@@ -101,7 +101,7 @@ export interface JsProgramContext {
     lstat(path: string): Promise<SyncFsBridgeStat>;
     exists(path: string): Promise<boolean>;
     readdir(path: string): Promise<string[]>;
-    mkdir(path: string, options?: { recursive?: boolean }): Promise<void>;
+    mkdir(path: string, options?: { recursive?: boolean; mode?: number }): Promise<void>;
     rm(path: string): Promise<void>;
     unlink(path: string): Promise<void>;
     rename(from: string, to: string): Promise<void>;
@@ -111,7 +111,7 @@ export interface JsProgramContext {
     readlink(path: string): Promise<string>;
     statfs(path: string): Promise<JsStatFs>;
     readFile(path: string): Promise<Uint8Array>;
-    writeFile(path: string, data: Uint8Array | string): Promise<void>;
+    writeFile(path: string, data: Uint8Array | string, options?: { mode?: number }): Promise<void>;
   };
   signals: {
     on(signal: JsSignal, handler: (signal: number) => void): Promise<void>;
@@ -123,6 +123,7 @@ export interface JsProgramContext {
   wait(pid: number): Promise<JsExited>;
   kill(pid: number, signal?: JsSignal): Promise<void>;
   sudo(args: readonly string[]): Promise<JsSudoAnswer>;
+  umask(mask?: number): Promise<number>;
   net: JsNet;
   websocket(url: string | URL, options?: JsWebSocketOptions): Promise<JsWebSocket>;
   tty: JsTty;
@@ -410,6 +411,7 @@ export function createContext(o: ContextOptions): CreatedContext {
     },
     kill: killer({ self: o.pid, kernel, syncKernel, lane, writes, modes: terminal.modes }),
     cred: () => syncKernel.json({ op: 'proc-cred' }) as JsCred,
+    umask: (mask) => syncKernel.json(umaskRequest(mask)) as number,
     setcred(change) {
       if (typeof change !== 'object' || change === null || Array.isArray(change)) {
         throw new JsCallError('EINVAL', 'setcred');
@@ -458,6 +460,7 @@ export function createContext(o: ContextOptions): CreatedContext {
     },
     sync,
     fetch: fetchOp(kernel),
+    umask: async (mask) => (await kernel.json(umaskRequest(mask))) as number,
     sudo: async (args) =>
       (await kernel.json({
         op: 'proc-sudo',
@@ -656,6 +659,7 @@ function pathOps(
         op: 'mkdir',
         path: resolve(path),
         ...(options?.recursive === false ? { exclusive: true } : {}),
+        mode: options?.mode === undefined ? 0o777 : modeOf(options.mode),
       })),
     rm: async (path) => void (await kernel.call({ op: 'rm', path: resolve(path) })),
     unlink: async (path) => void (await kernel.call({ op: 'unlink', path: resolve(path) })),
@@ -683,8 +687,14 @@ function pathOps(
       await kernel.call({ op: 'fd-path-flush', path: abs });
       return kernel.bytes({ op: 'read', path: abs });
     },
-    async writeFile(path, data) {
-      const file = await open(path, { write: true, create: true, truncate: true });
+    async writeFile(path, data, options) {
+      const mode = options?.mode;
+      const file = await open(path, {
+        write: true,
+        create: true,
+        truncate: true,
+        ...(mode !== undefined ? { mode } : {}),
+      });
       try {
         await file.write(0, typeof data === 'string' ? encoder.encode(data) : data);
       } finally {

@@ -90,6 +90,7 @@ export type WasmSyscall =
       path: string;
       flags: number;
       position: number;
+      mode?: number;
 
       contents?: Uint8Array;
 
@@ -231,6 +232,7 @@ type JobSyscall = Extract<
   { op: 'proc-setpgid' | 'proc-getpgid' | 'proc-getsid' | 'proc-setsid' }
 >;
 
+const PLAIN_FILE_MODE = 0o644;
 const JOB_OPS: ReadonlySet<string> = new Set([
   'proc-setpgid',
   'proc-getpgid',
@@ -909,15 +911,21 @@ export class WasmProcess {
       }
       if (this.writesAt(req) && this.options.readonlyAt?.(path)) throw new KernelError('EROFS');
       const open = { ...req, path };
+      const plain = this.plainMode(req.mode);
       if (req.exclusive) {
-        await nodes.createExclusive(path, this.newOwner());
+        await nodes.createExclusive(path, this.newOwner(req.mode));
+        if (plain !== undefined) await this.options.fs.chmod?.(path, plain);
         this.fds.installAt(fd, this.openVfsFile(open));
       } else if (req.create) {
         await nodes.onEntry(path, async () => {
-          const fresh = this.options.owners && !(await present(this.options.fs, path, true));
+          const marks = this.options.owners || plain !== undefined;
+          const fresh = marks && !(await present(this.options.fs, path, true));
           this.fds.installAt(fd, this.openVfsFile(open, await nodes.identify(path)));
           await this.fds.get(fd).file.stat?.();
-          if (fresh) await this.options.fs.chown?.(path, { ...this.newOwner(), kind: 'new' });
+          if (fresh && plain !== undefined) await this.options.fs.chmod?.(path, plain);
+          else if (fresh) {
+            await this.options.fs.chown?.(path, { ...this.newOwner(req.mode), kind: 'new' });
+          }
         });
       } else {
         this.fds.installAt(fd, this.openVfsFile(open, await nodes.identify(path)));
@@ -1056,9 +1064,15 @@ export class WasmProcess {
     return tty;
   }
 
-  private newOwner(): NewOwner | undefined {
+  private plainMode(mode: number | undefined): number | undefined {
+    if (this.options.owners || mode === undefined) return undefined;
+    const wanted = mode & 0o7777 & ~this.umask;
+    return wanted === PLAIN_FILE_MODE ? undefined : wanted;
+  }
+
+  private newOwner(mode = 0o666): NewOwner | undefined {
     if (!this.options.owners) return undefined;
-    return { uid: this.cred.euid, gid: this.cred.egid, mode: 0o666 & ~this.umask };
+    return { uid: this.cred.euid, gid: this.cred.egid, mode: mode & 0o7777 & ~this.umask };
   }
 
   private async openProc(
