@@ -107,9 +107,10 @@ export function delivering(
     }
     const fn = value as (...args: unknown[]) => unknown;
     out[name] = (...args: unknown[]) => {
+      host.entered = false;
       if (driver.idle) {
         before?.();
-        host.interrupted?.();
+        host.entered = host.interrupted?.() === true;
       }
       return fn(...args);
     };

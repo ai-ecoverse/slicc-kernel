@@ -481,10 +481,9 @@ export class WasixHost {
         const ms = timed
           ? Number(v.getBigUint64(timeoutPtr + 8, true)) / 1e6
           : Number.POSITIVE_INFINITY;
-        v.setUint8(
-          wokenPtr,
-          futexWait(i32(), ptr >> 2, expected | 0, ms, host.interrupted) ? 1 : 0
-        );
+        const woken =
+          host.entered || futexWait(i32(), ptr >> 2, expected | 0, ms, host.interrupted);
+        v.setUint8(wokenPtr, woken ? 1 : 0);
       },
 
       futex_wake: (ptr: number, wokenPtr: number) => {
