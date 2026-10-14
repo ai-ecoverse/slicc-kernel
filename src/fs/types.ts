@@ -65,7 +65,10 @@ export interface KernelFs {
   readdir(path: string): Promise<string[]>;
   readdirStat(path: string): Promise<Array<[string, FsStat | null]>>;
   mkdir(path: string, options?: { recursive?: boolean; owner?: NewOwner }): Promise<void>;
-  rm(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
+  rm(
+    path: string,
+    options?: { recursive?: boolean; force?: boolean; file?: boolean }
+  ): Promise<void>;
   rename(from: string, to: string): Promise<void>;
   link(from: string, to: string, follow?: boolean): Promise<void>;
   links?(path: string): boolean;
