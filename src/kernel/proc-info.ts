@@ -19,6 +19,7 @@ export interface ProcessInfo {
   cred?: Cred;
   sigIgn?: number;
   sigCgt?: number;
+  tag?: string;
 }
 
 export interface MountLine {

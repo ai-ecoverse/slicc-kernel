@@ -67,7 +67,7 @@ interface Waiter {
 }
 
 export class RemoteTransport implements RealmTransport {
-  readonly traits: RealmTransportTraits;
+  traits: RealmTransportTraits;
 
   private readonly port: TransportPort;
 

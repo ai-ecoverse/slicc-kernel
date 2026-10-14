@@ -7,6 +7,7 @@ import type {
   RealmTransport,
   RealmTransportRequest,
   RealmTransportResponse,
+  RealmTransportTraits,
 } from '../kernel/net/transport.ts';
 import { quiet } from '../kernel/signals.ts';
 import type { MountEntry, MountSpec } from '../mount/mount-fs.ts';
@@ -153,6 +154,7 @@ export interface KernelClient {
   loopbackFetch(input: RequestInfo | URL, options: LoopbackFetchOptions): Promise<Response>;
   readonly fs: ClientFs;
   serveCdp(hook: CdpHook, options?: { runtime?: string }): Promise<{ close(): void }>;
+  onTraits(listener: (traits: RealmTransportTraits) => void): () => void;
   close(options?: { kill?: boolean }): Promise<void>;
 }
 
@@ -206,6 +208,8 @@ class Channel {
   readonly greeted = Promise.withResolvers<KernelHello>();
   readonly ended = Promise.withResolvers<Error>();
   remote: RemoteTransport | undefined;
+
+  readonly traitsListeners = new Set<(traits: RealmTransportTraits) => void>();
   failure: Error | undefined;
   private readonly pending = new Map<number, Pending>();
   readonly watching = new Map<number, (change: WatchChange) => void>();
@@ -266,7 +270,14 @@ class Channel {
     change?: WatchChange;
     cdpOpen?: CdpOpen['cdpOpen'];
     port?: CdpOpen['port'];
+    traits?: RealmTransportTraits;
+    id?: number;
   }): void {
+    if (data.traits && data.id === undefined) {
+      if (this.remote) this.remote.traits = data.traits;
+      for (const listener of [...this.traitsListeners]) listener(data.traits);
+      return;
+    }
     if (data.cdpOpen && data.port) {
       this.openCdp(data as CdpOpen);
       return;
@@ -583,6 +594,10 @@ export async function attachKernel(
     loopbackFetch: (input, options) => loopbackFetch((o) => dialOn(channel, o), input, options),
     fs: fsOn(channel),
     serveCdp: (hook, options = {}) => serveCdpOn(channel, hook, options),
+    onTraits(listener) {
+      channel.traitsListeners.add(listener);
+      return () => channel.traitsListeners.delete(listener);
+    },
     async close(o = {}) {
       if (channel.failure) return;
       await channel

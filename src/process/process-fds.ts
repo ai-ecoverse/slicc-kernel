@@ -286,7 +286,8 @@ export function wrapImport(
   imports: WebAssembly.Imports,
   name: keyof KernelImports,
   glue: KernelImports | undefined,
-  wrap: (original: Syscall) => Syscall
+  wrap: (original: Syscall) => Syscall,
+  optional = false
 ): void {
   let wrapped = false;
   for (const ns of namespaces(imports)) {
@@ -295,7 +296,7 @@ export function wrapImport(
     ns[key] = wrap(ns[key] as Syscall);
     wrapped = true;
   }
-  if (!wrapped && typeof glue?.[name] === 'function') {
+  if (!wrapped && !optional && typeof glue?.[name] === 'function') {
     throw new Error(`slicc-kernel cannot find the glue's ${LITERALS[name]} among its imports`);
   }
 }

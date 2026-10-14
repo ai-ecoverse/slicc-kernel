@@ -350,6 +350,16 @@ async function watchOp(
   return { result: req.id };
 }
 
+const TRAITS_WATCH = -1;
+
+function traitsWatch(
+  launcher: Launcher,
+  transport: RealmTransport,
+  send: (message: object) => void
+): () => void {
+  return launcher.onTraits(() => send({ traits: transport.traits }));
+}
+
 export function serveClient(port: MessagePortLike, host: ClientHost): ServedClient {
   let state: 'new' | 'open' | 'closed' = 'new';
   let self: Account | undefined;
@@ -404,6 +414,7 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
         ...(host.lock ? { lock: host.lock } : {}),
       },
     });
+    watches.set(TRAITS_WATCH, traitsWatch(launcher, transport, send));
   }
 
   async function terminal(req: Extract<ClientRequest, { op: 'open-terminal' }>, l: Launcher) {

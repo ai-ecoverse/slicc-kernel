@@ -51,10 +51,22 @@ export interface JsSyncFile {
   close(): void;
 }
 
+export interface JsCred {
+  ruid: number;
+  euid: number;
+  suid: number;
+  rgid: number;
+  egid: number;
+  sgid: number;
+  groups: number[];
+}
+
 export interface JsSyncContext {
   run(options: JsRunOptions): JsRunResult;
   exit(status?: number): never;
   kill(pid: number, signal?: number | `SIG${string}`): void;
+  cred(): JsCred;
+  setcred(change: Partial<JsCred>): JsCred;
   read(fd: number, max?: number): Uint8Array;
   write(fd: number, data: Uint8Array | string): void;
   close(fd: number): void;
@@ -141,7 +153,7 @@ export class JsSyncKernel {
 export function syncOps(
   kernel: JsSyncKernel,
   shared: SyncShared
-): Omit<JsSyncContext, 'run' | 'exit' | 'kill'> {
+): Omit<JsSyncContext, 'run' | 'exit' | 'kill' | 'cred' | 'setcred'> {
   const { infos, handles, resolve } = shared;
 
   const info = (fd: number): FdInfo => {

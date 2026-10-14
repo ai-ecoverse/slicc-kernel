@@ -449,12 +449,19 @@ export function holdWhileStopped(
     while (Atomics.load(header, SAB_I_STOP) === 1) Atomics.wait(header, SAB_I_STOP, 1);
   };
   for (const name of ['fdWrite', 'fdRead', 'sleepMs'] as const) {
-    wrapImport(imports, name, glue, (original) => (...args) => {
-      hold();
-      const done = original(...args);
-      hold();
-      return done;
-    });
+    wrapImport(
+      imports,
+      name,
+      glue,
+      (original) =>
+        (...args) => {
+          hold();
+          const done = original(...args);
+          hold();
+          return done;
+        },
+      true
+    );
   }
 }
 

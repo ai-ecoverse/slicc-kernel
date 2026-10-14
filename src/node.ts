@@ -119,6 +119,7 @@ export interface NodeKernel {
   readonly users: KernelUsers;
   readonly groups: KernelGroups;
   setRoutes(routes: RouteTable): Promise<void>;
+  updateTransportTraits(): Promise<boolean>;
   mount(spec: MountSpec): Promise<MountEntry>;
   umount(target: string): Promise<void>;
   mounts(): Promise<MountEntry[]>;
@@ -312,6 +313,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     umount: (target) => guard(async () => launcher.umount(target)),
     mounts: async () => launcher.mounts.list(),
     setRoutes: (routes) => guard(async () => launcher.setRoutes(routes)),
+    updateTransportTraits: () => guard(async () => launcher.updateTransportTraits()),
     users: {
       mode: launcher.usersMode,
       add: (user) => guard(() => launcher.users.add(user)),

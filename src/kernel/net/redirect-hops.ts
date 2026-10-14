@@ -95,7 +95,9 @@ export function replayingHops(inner: RealmTransport, heldMs = HELD_MS): RealmTra
   };
 
   return {
-    traits: { ...inner.traits, manualRedirects: true },
+    get traits() {
+      return { ...inner.traits, manualRedirects: true };
+    },
     ...(inner.websocket ? { websocket: inner.websocket.bind(inner) } : {}),
     async fetch(request: RealmTransportRequest, owner = KERNEL): Promise<RealmTransportResponse> {
       const key = keyOf(owner, request.method, request.url);

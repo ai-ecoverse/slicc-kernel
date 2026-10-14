@@ -563,6 +563,7 @@ export class Launcher {
     this.env = { ...networkEnv(hostname), SLICC_CDP_URL: this.cdp.url, ...options.env };
     this.ca = kernelCa(options.caStore ?? memoryCaStore());
     this.transport = replayingHops(options.transport ?? missingTransport());
+    this.announcedTraits = JSON.stringify(this.transport.traits);
     this.uplink = options.uplink;
     this.routes = new Routes(options.uplink?.traits.ipv6 === true);
     if (options.uplink?.routes) this.routes.set(options.uplink.routes);
@@ -634,6 +635,23 @@ export class Launcher {
 
   setRoutes(table: RouteTable): void {
     this.routes.set(table);
+  }
+
+  private readonly traitsListeners = new Set<() => void>();
+
+  private announcedTraits = '';
+
+  onTraits(listener: () => void): () => void {
+    this.traitsListeners.add(listener);
+    return () => this.traitsListeners.delete(listener);
+  }
+
+  updateTransportTraits(): boolean {
+    const now = JSON.stringify(this.transport.traits);
+    if (now === this.announcedTraits) return false;
+    this.announcedTraits = now;
+    for (const listener of [...this.traitsListeners]) listener();
+    return true;
   }
 
   commands(scope = ''): Promise<Map<string, Command>> {
@@ -1357,6 +1375,7 @@ export class Launcher {
       const cred = this.credOf(member.pid);
       if (!maySee(viewer, cred)) continue;
       const root = rootOf(member);
+      const tag = this.tagOf(member.pid) ?? this.tagOf(root.pid);
       listed.push({
         pid: root.pid,
         tid: member.pid,
@@ -1372,6 +1391,7 @@ export class Launcher {
         umask: this.umaskOf(member.pid),
         cred,
         ...this.signalMasksOf(member.pid),
+        ...(tag !== undefined && maySee(viewer, cred) ? { tag } : {}),
       });
     }
     return listed;
