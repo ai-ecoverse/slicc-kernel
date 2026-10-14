@@ -35,7 +35,7 @@ import {
   writeDevice,
   written,
 } from './js-io.ts';
-import { callError, JsCallError, type JsKernel } from './js-kernel.ts';
+import { callError, JsCallError, type JsKernel, modeOf } from './js-kernel.ts';
 import { type JsNet, netOps } from './js-net.ts';
 import { runSync } from './js-run.ts';
 import {
@@ -96,6 +96,7 @@ export interface JsProgramContext {
     rm(path: string): Promise<void>;
     unlink(path: string): Promise<void>;
     rename(from: string, to: string): Promise<void>;
+    chmod(path: string, mode: number): Promise<void>;
     link(from: string, to: string): Promise<void>;
     symlink(target: string, path: string): Promise<void>;
     readlink(path: string): Promise<string>;
@@ -641,6 +642,8 @@ function pathOps(
     unlink: async (path) => void (await kernel.call({ op: 'unlink', path: resolve(path) })),
     rename: async (from, to) =>
       void (await kernel.call({ op: 'rename', path: resolve(from), arg2: resolve(to) })),
+    chmod: async (path, mode) =>
+      void (await kernel.call({ op: 'chmod', path: resolve(path), mode: modeOf(mode) })),
     link: async (from, to) =>
       void (await kernel.call({ op: 'link', path: resolve(from), arg2: resolve(to) })),
     symlink: async (target, path) =>
