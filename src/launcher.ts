@@ -701,10 +701,11 @@ export class Launcher {
   commands(scope = ''): Promise<Map<string, Command>> {
     let found = this.catalogs.get(scope);
     if (!found) {
-      found = Promise.all([this.roots(scope), this.trustedAppended()])
-        .then(([roots, appended]) =>
-          scanCommands(this.scanned, roots, roots.length - appended.length)
-        )
+      found = this.trustedAppended()
+        .then(async (appended) => {
+          const roots = await this.roots(scope, appended);
+          return scanCommands(this.scanned, roots, roots.length - appended.length);
+        })
         .then((commands) => commands.set(SUDO_COMMAND.name, SUDO_COMMAND));
       this.catalogs.set(scope, found);
     }
@@ -737,11 +738,11 @@ export class Launcher {
     return found;
   }
 
-  private async roots(scope = ''): Promise<string[]> {
+  private async roots(scope = '', appended?: readonly string[]): Promise<string[]> {
     const system = [
       this.modulesDir,
       ...(await pnpmGlobalRoots(this.base, this.pnpmHome)),
-      ...(await this.trustedAppended()),
+      ...(appended ?? (await this.trustedAppended())),
     ];
     return scope ? [...(await pnpmGlobalRoots(this.base, scope)), ...system] : system;
   }
