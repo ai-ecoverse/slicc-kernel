@@ -290,11 +290,11 @@ async function binCommandsOf(
 export async function scanCommands(
   fs: KernelFs,
   modules: string | string[],
-  binRoots: ReadonlySet<string> = new Set()
+  binsFrom = Number.POSITIVE_INFINITY
 ): Promise<Map<string, Command>> {
   const found = new Map<string, Command>();
   const physical = physicalResolver(fs);
-  for (const root of typeof modules === 'string' ? [modules] : modules) {
+  for (const [index, root] of (typeof modules === 'string' ? [modules] : modules).entries()) {
     for (const pkg of await packages(fs, root)) {
       let manifest: Manifest;
       try {
@@ -304,7 +304,7 @@ export async function scanCommands(
       }
       const own = commandsOf(pkg, manifest);
       const named = new Set(own.map((command) => command.name));
-      const bins = binRoots.has(root) ? await binCommandsOf(physical, pkg, manifest, named) : [];
+      const bins = index >= binsFrom ? await binCommandsOf(physical, pkg, manifest, named) : [];
       for (const command of [...own, ...bins]) {
         if (!found.has(command.name))
           found.set(command.name, await withPackagePaths(fs, pkg, command));

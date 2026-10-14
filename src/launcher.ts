@@ -702,7 +702,9 @@ export class Launcher {
     let found = this.catalogs.get(scope);
     if (!found) {
       found = Promise.all([this.roots(scope), this.trustedAppended()])
-        .then(([roots, appended]) => scanCommands(this.scanned, roots, new Set(appended)))
+        .then(([roots, appended]) =>
+          scanCommands(this.scanned, roots, roots.length - appended.length)
+        )
         .then((commands) => commands.set(SUDO_COMMAND.name, SUDO_COMMAND));
       this.catalogs.set(scope, found);
     }
@@ -744,12 +746,20 @@ export class Launcher {
     return scope ? [...(await pnpmGlobalRoots(this.base, scope)), ...system] : system;
   }
 
+  private async rootOnlyPath(root: string): Promise<boolean> {
+    for (const at of chain(root)) {
+      const real = await physicalPathAsync(this.base, at);
+      if (!(await rootOnly(this.base, real, true))) return false;
+    }
+    return true;
+  }
+
   private async trustedAppended(): Promise<string[]> {
     if (this.appended.length === 0 || this.usersMode === 'off') return this.appended;
     const trusted: string[] = [];
     for (const root of this.appended) {
       const real = await physicalPathAsync(this.base, root);
-      if (await rootOnly(this.base, real, true)) trusted.push(root);
+      if (await this.rootOnlyPath(root)) trusted.push(root);
       else if (this.usersMode === 'report' && (await this.base.exists(real))) {
         if (!this.reportedRoots.has(root)) {
           this.reportedRoots.add(root);
