@@ -340,13 +340,18 @@ export class VfsNodes implements UnlinkHolder {
 
   private readonly fs: VfsFileFs;
 
-  private readonly entries = new Map<string, Promise<unknown>>();
+  readonly entries: Map<string, Promise<unknown>>;
 
   private readonly onClosed: ((path: string) => void) | undefined;
 
-  constructor(fs: VfsFileFs, onClosed?: (path: string) => void) {
+  constructor(
+    fs: VfsFileFs,
+    onClosed?: (path: string) => void,
+    entries = new Map<string, Promise<unknown>>()
+  ) {
     this.fs = fs;
     this.onClosed = onClosed;
+    this.entries = entries;
   }
 
   async onEntry<T>(path: string, op: () => Promise<T>): Promise<T> {

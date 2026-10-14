@@ -2192,7 +2192,7 @@ export class Launcher {
       (dir) => this.userCommandDir(dir),
       this.owners
     );
-    const nodes = new VfsNodes(fs, (path) => this.released(path));
+    const nodes = new VfsNodes(fs, (path) => this.released(path), this.nodes.entries);
     nodes.keepsOnDisk = true;
     this.openFiles.add(nodes);
     const unlinked = new UnlinkedKeeper(
