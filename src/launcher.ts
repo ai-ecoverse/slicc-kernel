@@ -293,6 +293,10 @@ interface StartRequest {
   scrub?: Scrubber;
 }
 
+function linksOf(req: StartRequest): { links?: number } {
+  return req.links === undefined ? {} : { links: req.links };
+}
+
 const COMMAND = /^\/(?:usr\/)?bin\/([^/]+)$/;
 const PACKAGE_ROOT = /^(.*\/node_modules\/(?:@[^/]+\/)?[^/]+)\//;
 const ENV_REFERENCE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
@@ -1304,6 +1308,11 @@ export class Launcher {
     return scrubs;
   }
 
+  private marks(pid: number, req: StartRequest): void {
+    if (req.tag !== undefined) this.tags.set(pid, req.tag);
+    if (req.links !== undefined) this.links.set(pid, req.links);
+  }
+
   private start(req: StartRequest): WasmProcessHandle {
     this.sampling();
     if (req.pgid !== undefined && this.jobs.sessionOf(req.pgid) === undefined) {
@@ -1338,7 +1347,7 @@ export class Launcher {
         ? { fresh: (path: string, umask: number) => this.freshModules.add(path, umask, pid) }
         : {}),
       ...(this.owners ? { owners: true } : {}),
-      ...(req.links !== undefined ? { links: req.links } : {}),
+      ...linksOf(req),
       sealed: this.sealed,
       ...(scrubs ? { outputFilter: (file: OpenFile) => scrubbedAll(file, scrubs) } : {}),
       clipboard: this.clipboard,
@@ -1387,8 +1396,7 @@ export class Launcher {
     this.processes.set(pid, handle);
     const { cred } = req;
     this.creds.set(pid, () => handle.cred?.() ?? copyCred(cred));
-    if (req.tag !== undefined) this.tags.set(pid, req.tag);
-    if (req.links !== undefined) this.links.set(pid, req.links);
+    this.marks(pid, req);
     if (req.ppid !== undefined && this.controlsJobs(req.ppid)) this.settling.started(pid, req.ppid);
     this.jobs.add(pid, req.ppid, (sig) => handle.signal(sig), terminal);
     if (req.exec && req.ppid !== undefined) this.jobs.exec(req.ppid, pid, true);
