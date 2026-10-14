@@ -1,3 +1,4 @@
+import type { Scrubber } from '@ai-ecoverse/slicc-scrub';
 import { enableCdp } from './cdp/facade.ts';
 import { CdpHosts } from './cdp/hosts.ts';
 import type { CdpHook } from './cdp/types.ts';
@@ -23,6 +24,7 @@ import {
   integrityOptions,
   KERNEL_CALLER,
 } from './fs/integrity.ts';
+import { chain } from './fs/owners.ts';
 import { physicalPathAsync } from './fs/physical-path.ts';
 import {
   holdsProtected,
@@ -41,12 +43,14 @@ import {
   type ChildForker,
   type ChildHandle,
   type ChildSpawner,
+  type ChildSpawnRequest,
   SpawnError,
 } from './kernel/children.ts';
 import { ClipboardBroker, type ClipboardHook } from './kernel/clipboard.ts';
 import type { CpuTimes } from './kernel/cpu-clock.ts';
 import { type Cred, copyCred, maySee, maySignal, ROOT } from './kernel/cred.ts';
-import { bytesSource, deviceFile, FdTable, sinkFile } from './kernel/fd-table.ts';
+import { argvDigest, type Booked, TICKET_ENV } from './kernel/exec-ticket.ts';
+import { bytesSource, deviceFile, FdTable, type OpenFile, sinkFile } from './kernel/fd-table.ts';
 import { spawnWasmProcess, type WasmProcessHandle, type WasmWorkerLike } from './kernel/host.ts';
 import { LockTable } from './kernel/host-ops.ts';
 import { type JobMember, JobTable } from './kernel/jobs.ts';
@@ -72,6 +76,7 @@ import type { ProcessInfo } from './kernel/proc-info.ts';
 import { DEFAULT_UMASK } from './kernel/process.ts';
 import type { ForkState, Program } from './kernel/protocol.ts';
 import { PtyTable } from './kernel/pty.ts';
+import { type ScrubSecret, scrubbedAll, scrubberOf, scrubStdio } from './kernel/scrub-file.ts';
 import { SealedBroker, type SealedHook } from './kernel/sealed.ts';
 import { SettlingChildren } from './kernel/settling.ts';
 import { SIG, sigbit } from './kernel/signals.ts';
@@ -248,6 +253,13 @@ interface Planned {
   sources?: string[];
 }
 
+interface Redeemer {
+  ppid: number;
+  cred: Readonly<Cred>;
+  scope: string;
+  booked: Booked | null | undefined;
+}
+
 interface WriterStack {
   fs: KernelFs;
   nodes: VfsNodes;
@@ -273,6 +285,8 @@ interface StartRequest {
   cred: Cred;
   tag?: string | undefined;
   decided?: Promise<boolean>;
+  pid?: number;
+  scrub?: Scrubber;
 }
 
 const COMMAND = /^\/(?:usr\/)?bin\/([^/]+)$/;
@@ -342,6 +356,33 @@ function shebang(head: Uint8Array): string[] | undefined {
     .split('\n')[0]
     .trim()
     .split(/[ \t]+/);
+}
+
+async function rootOnly(fs: KernelFs, path: string): Promise<boolean> {
+  const names = chain(path);
+  for (const [i, at] of names.entries()) {
+    const st = await fs.lstat(at).catch(() => undefined);
+    const kind = i === names.length - 1 ? st?.isFile : st?.isDirectory;
+    if (!kind || st?.uid !== 0 || (st.mode & 0o022) !== 0) return false;
+  }
+  return true;
+}
+
+function plainEnv(words: string[]): boolean {
+  const next = words[1];
+  if (baseName(words[0] ?? '') !== 'env' || next === undefined) return false;
+  return next === '-S' || (!next.startsWith('-') && !next.includes('='));
+}
+
+function shebangCommand(words: string[]): { interp: string | undefined; args: string[] } {
+  if (!plainEnv(words)) {
+    const arg = words.slice(1).join(' ');
+    return { interp: words[0], args: arg ? [arg] : [] };
+  }
+  const split = words[1] === '-S';
+  const [interp, ...rest] = words.slice(split ? 2 : 1);
+  const arg = rest.join(' ');
+  return { interp, args: split ? rest : arg ? [arg] : [] };
 }
 
 function interpreter(head: Uint8Array): string {
@@ -494,6 +535,7 @@ export class Launcher {
   readonly usersMode: UsersMode;
   readonly dac: Dac | undefined;
   private readonly sealed: SealedBroker;
+  private readonly scrubs = new Map<number, Scrubber[]>();
   private readonly clipboard: ClipboardBroker;
   private readonly rootFs: KernelFs;
   private fileWatches: FileWatches | undefined;
@@ -512,6 +554,8 @@ export class Launcher {
     this.sealed = new SealedBroker(options.sealed, this.usersMode, undefined, (pid) =>
       this.tagOf(pid)
     );
+    this.sealed.tickets.normalise = (path) => physicalPathAsync(this.base, path);
+    this.sealed.userOf = async (uid) => (await this.users.lookup(uid))?.name;
     if (this.owners) options.fs.trackOwners?.();
     this.mounts = new MountTable({
       open: (type, spec) => this.driver(type, spec),
@@ -784,13 +828,12 @@ export class Launcher {
     const binfmt = isWasm(head) ? undefined : binfmtOf(await this.interpreters(scope), script);
     const words = shebang(head) ?? (binfmt ? [binfmt] : undefined);
     if (!words) return undefined;
-    if (baseName(words[0]) === 'env') words.shift();
-    const [interp, ...rest] = words;
-    const arg = rest.join(' ');
-    const passed = [...(arg ? [arg] : []), command ? script : file, ...argv.slice(1)];
-    const found = interp ? await this.resolve(interp, interp, cwd, scope) : undefined;
+    const { interp, args } = shebangCommand(words);
+    const passed = [...args, command ? script : file, ...argv.slice(1)];
+    if (!interp) return undefined;
+    const found = await this.resolve(interp, interp, cwd, scope);
     if (!found) {
-      if (!interp || depth >= MAX_INTERPRETERS || !(await this.scriptCommand(interp, cwd, scope))) {
+      if (depth >= MAX_INTERPRETERS || !(await this.scriptCommand(interp, cwd, scope))) {
         return undefined;
       }
       const inner = await this.interpreted(interp, [interp, ...passed], cwd, scope, depth + 1);
@@ -843,6 +886,131 @@ export class Launcher {
     }
   }
 
+  private async checkedPlan(
+    req: ChildSpawnRequest,
+    { ppid, cred, scope }: { ppid: number; cred: Readonly<Cred>; scope: string },
+    fds: FdTable
+  ): Promise<Planned> {
+    const planned = await this.plan(req.file, req.argv, req.cwd, scope, req.argv0);
+    try {
+      await this.mayExec(cred, { ...req, pid: ppid }, planned);
+    } catch (err) {
+      await fds.closeAll();
+      throw (err as { code?: unknown }).code === 'EACCES' ? new SpawnError('EACCES') : err;
+    }
+    if (planned) return planned;
+    await fds.closeAll();
+    throw new SpawnError(await this.unrunnable(req.file, req.cwd, scope));
+  }
+
+  private async ticketFile(req: ChildSpawnRequest, fds: FdTable): Promise<string> {
+    if (req.file.startsWith('/')) return physicalPathAsync(this.base, req.file);
+    await fds.closeAll();
+    throw new SpawnError('EACCES');
+  }
+
+  private takeTicket(req: ChildSpawnRequest): Booked | null | undefined {
+    if (!(TICKET_ENV in req.env)) return undefined;
+    return this.sealed.tickets.take(req.env[TICKET_ENV] ?? '') ?? null;
+  }
+
+  private async redeemed(
+    req: ChildSpawnRequest,
+    who: Redeemer,
+    planned: Planned,
+    fds: FdTable
+  ): Promise<{ env: Record<string, string>; pid?: number; cwd?: string; scrub?: Scrubber }> {
+    if (who.booked === undefined) return { env: req.env };
+    try {
+      const redeemed = await this.redeem(req, who, planned);
+      if (redeemed.scrub) scrubStdio(fds, redeemed.scrub);
+      return redeemed;
+    } catch {
+      await fds.closeAll();
+      throw new SpawnError('EACCES');
+    }
+  }
+
+  private async redeem(
+    req: ChildSpawnRequest,
+    { ppid, cred, scope, booked }: Redeemer,
+    planned: Planned
+  ): Promise<{ env: Record<string, string>; pid: number; cwd: string; scrub?: Scrubber }> {
+    const { [TICKET_ENV]: ticket = '', ...env } = req.env;
+    const caller = this.jobs.shown(ppid);
+    const named = typeof req.argv0 === 'string' && !planned.script && !planned.target.fixed;
+    const argv = named ? [req.argv0 as string, ...req.argv.slice(1)] : req.argv;
+    const exact =
+      booked?.pid === caller &&
+      req.file === booked.path &&
+      (await physicalPathAsync(this.base, req.cwd)) === booked.cwd &&
+      (await argvDigest(argv)) === booked.argv;
+    if (!exact) throw new SpawnError('EACCES');
+    const { requested: path, requestedCwd: cwd, path: resolved } = booked;
+    const pid = this.nextPid++;
+    const ids = { pid: req.exec ? caller : pid, ppid: caller };
+    const stamp = await this.sealed.stamp(ids, cred, this.tagOf(ppid));
+    const interpreters = await this.interpreterChain(planned, booked.cwd, scope);
+    const trusted =
+      this.usersMode === 'enforce' &&
+      (await this.trustedFiles(planned, req.file, booked.cwd, scope));
+    const swap = await this.sealed.consume({
+      ticket,
+      stamp,
+      path,
+      resolved,
+      argv,
+      cwd,
+      interpreters,
+      trusted,
+    });
+    if (!swap) throw new SpawnError('EACCES');
+    const secrets: ScrubSecret[] = [];
+    for (const [name, placeholder] of Object.entries(swap.placeholders)) {
+      const value = swap.values[name];
+      if (value === undefined || env[name] !== placeholder) continue;
+      env[name] = value;
+      secrets.push({ name, value, placeholder });
+    }
+    const scrub = scrubberOf(secrets);
+    return { env, pid, cwd: booked.cwd, ...(scrub ? { scrub } : {}) };
+  }
+
+  private async interpreterChain(planned: Planned, cwd: string, scope: string): Promise<string[]> {
+    const out: string[] = [];
+    for (const entry of planned.via ?? []) {
+      if (entry.includes('/')) {
+        out.push(await physicalPathAsync(this.base, this.fs.resolvePath(cwd, entry)));
+        continue;
+      }
+      const script = (await this.scriptCommand(entry, cwd, scope))?.script;
+      out.push(
+        await physicalPathAsync(this.base, script ?? (await this.commandFile(entry, cwd, scope)))
+      );
+    }
+    return out;
+  }
+
+  private async commandFile(name: string, cwd: string, scope: string): Promise<string> {
+    const scoped = await this.resolve(name, name, cwd, scope);
+    const system = scope === '' ? scoped : await this.resolve(name, name, cwd, '');
+    if (!scoped || system?.glue === scoped.glue) return `/usr/bin/${name}`;
+    return scoped.glue;
+  }
+
+  private async trustedFiles(
+    planned: Planned,
+    file: string,
+    cwd: string,
+    scope: string
+  ): Promise<boolean> {
+    const files = await this.backingOf(planned, file, cwd, scope);
+    for (const at of files) {
+      if (!(await rootOnly(this.base, await physicalPathAsync(this.base, at)))) return false;
+    }
+    return true;
+  }
+
   private async grantedCwd(caller: Cred, cwd: string): Promise<boolean> {
     const real = await physicalPathAsync(this.base, cwd).catch(() => undefined);
     return real === cwd && (await this.sudoer.reachable(caller, cwd));
@@ -863,13 +1031,21 @@ export class Launcher {
 
   private async backing(file: string, cwd: string): Promise<string[] | undefined> {
     const planned = await this.plan(file, [file], cwd, '');
-    if (!planned) return undefined;
+    return planned && this.backingOf(planned, file, cwd, '');
+  }
+
+  private async backingOf(
+    planned: Planned,
+    file: string,
+    cwd: string,
+    scope: string
+  ): Promise<string[]> {
     const { glue, wasm, imports } = planned.target;
     const files = [glue, wasm, ...(imports ? [imports] : [])];
     const scripts: string[] = [];
     for (const name of [file, ...(planned.via ?? [])]) {
       if (name.includes('/') && !COMMAND.test(name)) scripts.push(this.fs.resolvePath(cwd, name));
-      const script = (await this.scriptCommand(name, cwd, ''))?.script;
+      const script = (await this.scriptCommand(name, cwd, scope))?.script;
       if (script) scripts.push(script);
     }
     files.push(...scripts, ...(await this.binfmtManifests(scripts)));
@@ -1032,6 +1208,7 @@ export class Launcher {
     const seen = { ...req.env, HOSTNAME: this.hostname, cwd };
     const env = { ...expandDefaults(target.env, seen), ...req.env };
     for (const key of target.unset ?? []) delete env[key];
+    delete env[TICKET_ENV];
     env.HOSTNAME = this.hostname;
     let program: Program;
     try {
@@ -1049,12 +1226,20 @@ export class Launcher {
     return this.jobs.sessionOf(pgid);
   }
 
+  private treeScrubs(pid: number, req: StartRequest): Scrubber[] | undefined {
+    const inherited = req.ppid !== undefined ? this.scrubs.get(req.ppid) : undefined;
+    const scrubs = req.scrub ? [...(inherited ?? []), req.scrub] : inherited;
+    if (scrubs) this.scrubs.set(pid, scrubs);
+    return scrubs;
+  }
+
   private start(req: StartRequest): WasmProcessHandle {
     this.sampling();
     if (req.pgid !== undefined && this.jobs.sessionOf(req.pgid) === undefined) {
       throw new SpawnError('ESRCH');
     }
-    const pid = this.nextPid++;
+    const pid = req.pid ?? this.nextPid++;
+    const scrubs = this.treeScrubs(pid, req);
     const stack = this.stackFor(req.tag);
     const terminal = req.fds.stdioTerminal();
     const decided = req.decided ?? Promise.resolve(true);
@@ -1082,6 +1267,7 @@ export class Launcher {
         : {}),
       ...(this.owners ? { owners: true } : {}),
       sealed: this.sealed,
+      ...(scrubs ? { ttyFilter: (file: OpenFile) => scrubbedAll(file, scrubs) } : {}),
       clipboard: this.clipboard,
       ...(this.dac ? { dac: this.dac } : {}),
       program: req.program,
@@ -1150,6 +1336,7 @@ export class Launcher {
       if (spent) addTimes(this.imageTimes, this.jobs.shown(pid), spent);
       this.stopped.delete(pid);
       this.processes.delete(pid);
+      this.scrubs.delete(pid);
       if (this.processes.size === 0) {
         clearInterval(this.sampler);
         this.sampler = undefined;
@@ -1343,6 +1530,7 @@ export class Launcher {
 
   private spawner(ppid: number, report: (message: string) => void): ChildSpawner {
     return async (req, fds, grant) => {
+      const booked = this.takeTicket(req);
       if (grant && !(await this.grantedCwd(grant.caller, req.cwd))) {
         await fds.closeAll();
         throw new SpawnError('EACCES');
@@ -1354,23 +1542,20 @@ export class Launcher {
       }
       const cred = grant ? grant.cred : this.credOf(ppid);
       const scope = grant ? '' : await this.scopeOf(cred.euid);
-      const planned = await this.plan(req.file, req.argv, req.cwd, scope, req.argv0);
-      try {
-        await this.mayExec(cred, { ...req, pid: ppid }, planned);
-      } catch (err) {
-        await fds.closeAll();
-        throw (err as { code?: unknown }).code === 'EACCES' ? new SpawnError('EACCES') : err;
-      }
-      if (!planned) {
-        await fds.closeAll();
-        throw new SpawnError(await this.unrunnable(req.file, req.cwd, scope));
-      }
+      const file = booked === undefined ? req.file : await this.ticketFile(req, fds);
+      const planned = await this.checkedPlan({ ...req, file }, { ppid, cred, scope }, fds);
+      const redeemed = await this.redeemed(
+        { ...req, file },
+        { ppid, cred, scope, booked },
+        planned,
+        fds
+      );
       const exec = req.exec ? { exec: true } : {};
       const deciding = req.exec ? undefined : this.undecided(ppid);
       const handle = await this.launch(planned, {
         ...(deciding ? { decided: deciding.promise } : {}),
-        env: req.env,
         cwd: req.cwd,
+        ...redeemed,
         fds,
         report,
         ppid,
@@ -1438,7 +1623,7 @@ export class Launcher {
   }
 
   private forker(ppid: number, parent: StartRequest): ChildForker {
-    const { exec: _exec, pgid: _pgid, group: _group, ...image } = parent;
+    const { exec: _exec, pgid: _pgid, group: _group, pid: _pid, scrub: _scrub, ...image } = parent;
     return async (state, fds) =>
       childHandle(
         this.start({
@@ -1873,7 +2058,14 @@ export class Launcher {
   }
 
   private environment(cwd: string, extra: Record<string, string> | undefined, account: Account) {
-    return { ...this.env, ...userEnv(account, this.pnpmHome), PWD: cwd, ...extra };
+    const env: Record<string, string> = {
+      ...this.env,
+      ...userEnv(account, this.pnpmHome),
+      PWD: cwd,
+      ...extra,
+    };
+    delete env[TICKET_ENV];
+    return env;
   }
 
   private async account(user: string | number | Account | undefined): Promise<Account> {
