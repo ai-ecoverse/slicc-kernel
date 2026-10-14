@@ -279,6 +279,12 @@ export class OpfsFs implements KernelFs {
     }));
   }
 
+  private async recounting(handle: FileSystemFileHandle, target: string): Promise<void> {
+    if (this.counted.length === 0) return;
+    const where = await this.root.resolve(handle).catch(() => null);
+    await this.counting(where ? `/${where.join('/')}` : target);
+  }
+
   resolvePath(base: string, path: string): string {
     return resolvePath(base, path);
   }
@@ -792,7 +798,7 @@ export class OpfsFs implements KernelFs {
     const [handle, , target] = await this.fileFor(path);
     await this.counting(target);
     await this.retrying(path, () => positioned(handle, (io) => io.write(offset, bytes)), true);
-    await this.counting(target);
+    await this.recounting(handle, target);
     this.written(target);
   }
 
@@ -802,7 +808,7 @@ export class OpfsFs implements KernelFs {
     const target = resolve || this.counted.length > 0 ? (await this.locate(path, true)).path : path;
     await this.counting(target);
     await this.retrying(path, () => positioned(handle, (io) => io.truncate(size)), true);
-    await this.counting(target);
+    await this.recounting(handle, target);
     this.written(target);
   }
 
