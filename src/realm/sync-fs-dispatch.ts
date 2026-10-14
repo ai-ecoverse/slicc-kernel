@@ -1,6 +1,7 @@
-import { R_OK, W_OK } from '../fs/access.ts';
+import { permOf, R_OK, trustedLink, W_OK } from '../fs/access.ts';
 import {
   chmodMode,
+  deny,
   fileWritable,
   type Guard,
   inParent,
@@ -232,7 +233,8 @@ async function run(
 export function guardOf(entry: SyncFsTokenEntry): Guard | undefined {
   const cred = entry.dac && entry.cred?.();
   if (!cred || !entry.dac) return undefined;
-  return { fs: entry.fs, cred, pid: entry.pid ?? 0, dac: entry.dac };
+  const links = entry.links === undefined ? {} : { links: entry.links };
+  return { fs: entry.fs, cred, pid: entry.pid ?? 0, dac: entry.dac, ...links };
 }
 
 const FOLLOWING = new Set<SyncFsOp>(['exists', 'stat', 'chown', 'statfs']);
@@ -298,9 +300,16 @@ async function holdOp(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest)
   return done;
 }
 
+async function followed(g: Guard, path: string) {
+  const st = await g.fs.lstat(path).catch(() => undefined);
+  if (st?.isSymbolicLink && !trustedLink(permOf(st), g.links)) deny(g, 'follow', path);
+  return done;
+}
+
 async function accessOp(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest) {
   const g = guardOf(entry);
   if (!g) return done;
+  if (req.arg2 === 'follow') return followed(g, path);
   const open = req.arg2 === 'open';
   const cred = open || req.arg2 === 'eaccess' ? g.cred : realIds(g.cred);
   const options = { follow: req.nofollow !== true, ...(open ? { directory: false } : {}) };

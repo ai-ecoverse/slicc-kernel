@@ -24,6 +24,7 @@ export interface SyncFsTokenEntry {
   umask?: () => number;
   dac?: Dac;
   pid?: number;
+  links?: number;
   created?: Created;
   holdsKept?: (path: string) => Promise<boolean>;
   fresh?: (path: string) => void;

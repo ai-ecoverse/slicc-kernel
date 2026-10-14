@@ -18,6 +18,7 @@ export interface Walked {
   perm: Perm | undefined;
   denied?: string;
   missing?: boolean;
+  link?: true;
 }
 
 export function permOf(st: FsStat, link?: string): Perm {
@@ -80,11 +81,16 @@ function parts(path: string): string[] {
   return path.split('/').filter((part) => part !== '' && part !== '.');
 }
 
+export function trustedLink(perm: Perm, links: number | undefined): boolean {
+  return links === undefined || perm.uid === 0 || perm.uid === links;
+}
+
 export async function walk(
   fs: KernelFs,
   cred: Readonly<Cred>,
   path: string,
-  follow: boolean
+  follow: boolean,
+  links?: number
 ): Promise<Walked> {
   const perms = new Perms(fs);
   await perms.learn(path);
@@ -103,6 +109,7 @@ export async function walk(
     const perm = await perms.at(next);
     const last = queue.length === 0;
     if (perm?.link !== undefined && (!last || follow)) {
+      if (!trustedLink(perm, links)) return { path, perm: undefined, denied: next, link: true };
       if (++hops > MAX_LINKS) return { path: next, perm: undefined };
       queue.unshift(...parts(perm.link));
       if (perm.link.startsWith('/')) at = '/';
@@ -122,6 +129,7 @@ export async function present(fs: KernelFs, path: string, directory: boolean): P
 export interface AccessOptions {
   follow?: boolean;
   directory?: boolean;
+  links?: number | undefined;
 }
 
 async function finalOf(
@@ -146,9 +154,9 @@ export async function access(
   want: number,
   options: AccessOptions = {}
 ): Promise<Walked> {
-  const walked = await walk(fs, cred, path, options.follow !== false);
+  const walked = await walk(fs, cred, path, options.follow !== false, options.links);
   if (walked.denied !== undefined) {
-    if (await present(fs, walked.denied, true)) return walked;
+    if (walked.link || (await present(fs, walked.denied, true))) return walked;
     return { path, perm: undefined, missing: true };
   }
   if (!walked.perm) return { ...walked, missing: true };

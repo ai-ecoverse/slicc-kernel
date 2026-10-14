@@ -103,6 +103,11 @@ export interface Guard {
   pid: number;
   dac: Dac;
   tag?: string | undefined;
+  links?: number | undefined;
+}
+
+function linked(g: Guard, options: AccessOptions): AccessOptions {
+  return g.links === undefined ? options : { ...options, links: g.links };
 }
 
 export function deny(g: Guard, op: string, path: string, errno = 'EACCES'): void {
@@ -125,8 +130,8 @@ export async function need(
   options: AccessOptions = {},
   shown = path
 ): Promise<Walked> {
-  const walked = await access(g.fs, g.cred, path, want, options);
-  if (walked.denied !== undefined) deny(g, op, shown);
+  const walked = await access(g.fs, g.cred, path, want, linked(g, options));
+  if (walked.denied !== undefined) deny(g, op, walked.link ? walked.denied : shown);
   return walked;
 }
 
@@ -153,15 +158,17 @@ export async function inParent(
     return dir.denied === undefined ? stickyEntry(g, op, path, dir) : undefined;
   }
   if (!old) return void (await need(g, op, parentOf(path), W_OK | X_OK, DIR, path));
-  const dir = await access(g.fs, g.cred, parentOf(path), W_OK | X_OK, DIR);
+  const dir = await access(g.fs, g.cred, parentOf(path), W_OK | X_OK, linked(g, DIR));
   if (dir.denied === undefined) return stickyEntry(g, op, path, dir);
+  if (dir.link) return deny(g, op, dir.denied);
   const lookup = dir.denied === dir.path && dir.perm && permits(g.cred, dir.perm, X_OK);
   if (!lookup || (await present(g.fs, entryIn(dir, path), false))) deny(g, op, path);
 }
 
 export async function makeIn(g: Guard, op: string, path: string): Promise<void> {
   for (let dir = parentOf(path); ; dir = parentOf(dir)) {
-    const walked = await access(g.fs, g.cred, dir, W_OK | X_OK, DIR);
+    const walked = await access(g.fs, g.cred, dir, W_OK | X_OK, linked(g, DIR));
+    if (walked.link) return deny(g, op, walked.denied as string);
     if (walked.denied !== undefined) {
       if (!(await present(g.fs, path, true))) deny(g, op, path);
       return;
