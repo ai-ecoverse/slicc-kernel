@@ -120,6 +120,12 @@ export class Integrity {
     throw fsError('EACCES', `integrity check failed: ${real}`);
   }
 
+  forget(path?: string): void {
+    for (const name of [...this.unverified]) {
+      if (path === undefined || isProtected([path], name)) this.unverified.delete(name);
+    }
+  }
+
   private async expected(path: string): Promise<string | undefined> {
     const answer = await this.lookup(path);
     return typeof answer === 'string' ? answer.toLowerCase() : undefined;
