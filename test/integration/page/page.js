@@ -13,6 +13,7 @@ const packages = {
   'node_modules/mounttest/': ['package.json', 'bin/mounttest.wasm'],
   'node_modules/httptest/': ['package.json', 'bin/httptest.wasm'],
   'node_modules/ttytest/': ['package.json', 'bin/ttytest.wasm'],
+  'node_modules/statfstest/': ['package.json', 'bin/statfstest.mjs'],
   'node_modules/jstest/': [
     'package.json',
     'bin/jstest.mjs',

@@ -1,0 +1,12 @@
+{
+  "name": "statfstest",
+  "private": true,
+  "slicc": {
+    "commands": {
+      "statfstest": {
+        "abi": "js",
+        "module": "bin/statfstest.mjs"
+      }
+    }
+  }
+}

@@ -25,10 +25,12 @@ import {
   isExclusive,
   type JsFdType,
   type JsOpenOptions,
+  type JsStatFs,
   joined,
   MAX_IO,
   openRequest,
   readDevice,
+  statFsOf,
   typeOf,
   writeDevice,
   written,
@@ -97,6 +99,7 @@ export interface JsProgramContext {
     link(from: string, to: string): Promise<void>;
     symlink(target: string, path: string): Promise<void>;
     readlink(path: string): Promise<string>;
+    statfs(path: string): Promise<JsStatFs>;
     readFile(path: string): Promise<Uint8Array>;
     writeFile(path: string, data: Uint8Array | string): Promise<void>;
   };
@@ -639,6 +642,11 @@ function pathOps(
       const abs = resolve(path);
       if (inDev(abs)) return devAsync(kernel, devReadlink(abs));
       return String(await kernel.json({ op: 'readlink', path: abs }));
+    },
+    async statfs(path) {
+      const abs = resolve(path);
+      await statOf('stat', abs);
+      return statFsOf(await kernel.json({ op: 'statfs', path: abs }));
     },
     async readFile(path) {
       const abs = resolve(path);

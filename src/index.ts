@@ -98,6 +98,7 @@ export type {
   JsSignal,
   JsSudoAnswer,
 } from './process/js/js-context.ts';
+export type { JsStatFs } from './process/js/js-io.ts';
 export type {
   JsAddress,
   JsConnection,
