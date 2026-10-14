@@ -216,6 +216,7 @@ export class WasiHost {
   }
 
   private created(path: string, mode: number): void {
+    if (this.o.fs.owners) return;
     const umask = this.o.kernel.call({ op: 'proc-umask' }) as number;
     if (umask !== DEFAULT_UMASK) this.o.fs.chmod(path, mode & ~umask);
   }
