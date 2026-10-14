@@ -1245,11 +1245,12 @@ class MountFs implements KernelFs {
   }
 
   async chmod(path: string, mode: number): Promise<void> {
-    const found = this.at(path);
-    if (!found) return this.base.chmod(path, mode);
-    this.writable(found.mount, normalizePath(path));
+    const real = await this.follow(path);
+    const found = this.at(real);
+    if (!found) return this.base.chmod(real, mode);
+    this.writable(found.mount, real);
     if (!found.mount.caps.chmod) return;
-    this.table.forget(found.mount, normalizePath(path));
+    this.table.forget(found.mount, real);
     await found.mount.conn.call({ op: 'setattr', path: found.rel, mode });
   }
 
