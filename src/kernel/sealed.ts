@@ -1,7 +1,7 @@
 import type { UsersMode } from '../fs/types.ts';
 import type { Cred } from './cred.ts';
 import { isStrings, stringRecord, TicketBook } from './exec-ticket.ts';
-import { KernelError, OpenFile, type PollState } from './fd-table.ts';
+import { KernelError, type OpenAccess, OpenFile, type PollState } from './fd-table.ts';
 
 export const SEALED_PATH = '/dev/sealed';
 export const SEALED_MAX_BYTES = 64 * 1024;
@@ -99,16 +99,21 @@ class SealedChannel {
   private offset = 0;
   private inflight: Inflight | undefined;
   private readonly broker: SealedBroker;
+  readonly access: OpenAccess;
 
-  constructor(broker: SealedBroker) {
+  constructor(broker: SealedBroker, access: OpenAccess) {
     this.broker = broker;
+    this.access = access;
   }
 
   send(bytes: Uint8Array, caller: SealedCaller, gone: AbortSignal): number {
+    if (this.access === 'read') {
+      bytes.fill(0);
+      throw new KernelError('EBADF');
+    }
     const length = bytes.length;
     const fields = parseSealed(bytes);
-    this.reply = undefined;
-    this.offset = 0;
+    this.drop();
     this.inflight?.control.abort('replaced');
     const control = new AbortController();
     const withdraw = () => control.abort('withdrawn');
@@ -150,15 +155,19 @@ class SealedChannel {
       : undefined;
   }
 
+  private drop(): void {
+    this.reply?.fill(0);
+    this.reply = undefined;
+    this.offset = 0;
+  }
+
   async read(max: number, signal?: AbortSignal): Promise<Uint8Array> {
+    if (this.access === 'write') throw new KernelError('EBADF');
     for (;;) {
       if (this.reply) {
         const out = this.reply.slice(this.offset, this.offset + max);
         this.offset += out.length;
-        if (this.offset >= this.reply.length) {
-          this.reply = undefined;
-          this.offset = 0;
-        }
+        if (this.offset >= this.reply.length) this.drop();
         return out;
       }
       const flight = this.inflight;
@@ -194,7 +203,7 @@ class SealedChannel {
   close(): void {
     this.inflight?.control.abort('withdrawn');
     this.inflight = undefined;
-    this.reply = undefined;
+    this.drop();
   }
 }
 
@@ -284,13 +293,17 @@ export class SealedBroker {
     }
   }
 
-  open(): OpenFile {
-    const channel = new SealedChannel(this);
+  open(access: OpenAccess = 'both'): OpenFile {
+    const channel = new SealedChannel(this, access);
     return new OpenFile({
-      read: (max, signal) => channel.read(max, signal),
-      write: async () => {
-        throw new KernelError('EINVAL');
-      },
+      ...(access === 'write' ? {} : { read: (max, signal) => channel.read(max, signal) }),
+      ...(access === 'read'
+        ? {}
+        : {
+            write: async () => {
+              throw new KernelError('EINVAL');
+            },
+          }),
       poll: () => channel.poll(),
       changed: (signal) => channel.changed(signal),
       close: () => channel.close(),

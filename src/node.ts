@@ -5,7 +5,7 @@ import { type ServedClient, serveClient } from './client/serve-client.ts';
 import type { DenialHook } from './fs/dac.ts';
 import { OpfsFs } from './fs/opfs.ts';
 import type { Protection } from './fs/protect.ts';
-import { DEFAULT_USERS, fsError, type UsersMode } from './fs/types.ts';
+import { DEFAULT_USERS, fsError, modeOption, type UsersMode } from './fs/types.ts';
 import { pidOwner } from './fs/unlinked.ts';
 import type {
   ConnectOptions,
@@ -114,8 +114,9 @@ export interface NodeKernel {
   readonly root: FileSystemDirectoryHandle;
   run(argv: string[], options?: RunOptions): Promise<RunResult>;
   openTerminal(argv: string[], options?: TerminalOptions): Promise<Terminal>;
-  writeFile(path: string, data: string | Uint8Array): Promise<void>;
+  writeFile(path: string, data: string | Uint8Array, options?: { mode?: number }): Promise<void>;
   readFile(path: string): Promise<Uint8Array>;
+  chmod(path: string, mode: number): Promise<void>;
   connect(options?: ConnectOptions): Promise<MessagePort>;
   readonly users: KernelUsers;
   readonly groups: KernelGroups;
@@ -309,11 +310,17 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
         close: () => session.close(),
       };
     },
-    async writeFile(path, data) {
+    async writeFile(path, data, options = {}) {
+      const mode = options.mode === undefined ? undefined : modeOption(options.mode);
       const parent = path.slice(0, path.lastIndexOf('/')) || '/';
       await launcher.fs.mkdir(parent, { recursive: true });
+      if (mode !== undefined) {
+        await launcher.fs.writeFile(path, '');
+        await launcher.fs.chmod(path, mode);
+      }
       await launcher.fs.writeFile(path, data);
     },
+    chmod: async (path, mode) => launcher.fs.chmod(path, modeOption(mode)),
     readFile: async (path) => launcher.fs.readFileBuffer(path),
     mount: (spec) => guard(() => launcher.mount(spec)),
     umount: (target) => guard(async () => launcher.umount(target)),

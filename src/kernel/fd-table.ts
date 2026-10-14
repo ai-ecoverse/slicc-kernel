@@ -115,6 +115,13 @@ export interface DeviceMeta {
 
 export type DeviceAccess = 'read' | 'write';
 
+export type OpenAccess = 'read' | 'write' | 'both';
+
+export function openAccess(flags: number): OpenAccess {
+  const mode = flags & 0o3;
+  return mode === 0 ? 'read' : mode === 1 ? 'write' : 'both';
+}
+
 export type KernelDevice = 'null' | 'zero' | 'full' | 'urandom';
 
 export function pollFile(file: KernelFile): PollState {

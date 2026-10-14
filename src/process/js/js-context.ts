@@ -36,7 +36,7 @@ import {
   writeDevice,
   written,
 } from './js-io.ts';
-import { callError, JsCallError, type JsKernel } from './js-kernel.ts';
+import { callError, JsCallError, type JsKernel, modeOf } from './js-kernel.ts';
 import { type JsNet, netOps } from './js-net.ts';
 import { runSync } from './js-run.ts';
 import {
@@ -104,6 +104,7 @@ export interface JsProgramContext {
     rm(path: string): Promise<void>;
     unlink(path: string): Promise<void>;
     rename(from: string, to: string): Promise<void>;
+    chmod(path: string, mode: number): Promise<void>;
     link(from: string, to: string): Promise<void>;
     symlink(target: string, path: string): Promise<void>;
     readlink(path: string): Promise<string>;
@@ -386,6 +387,7 @@ export function createContext(o: ContextOptions): CreatedContext {
     ...syncOps(syncKernel, { pid: o.pid, resolve, random, infos, handles }),
     run: (options) =>
       runSync(syncKernel, { env: o.env, cwd: o.cwd, resolve, signal: signalNumber }, options),
+    spawn: (options) => spawnSync(options),
     exit: (status = 0): never => {
       exiting ??= status & 0xff;
       return exitAtOnce(lane, [...writes], terminal.modes(), exiting);
@@ -401,7 +403,8 @@ export function createContext(o: ContextOptions): CreatedContext {
   };
 
   const io = { read, send: writeAll, close: (fd: number) => ctx.close(fd) };
-  const children = childOps(kernel, io, { env: o.env, cwd: o.cwd, signal: signalNumber });
+  const defaults = { env: o.env, cwd: o.cwd, signal: signalNumber };
+  const { spawnSync, ...children } = childOps(kernel, io, defaults, syncKernel);
 
   const strays = o.strays ?? { exception: new Set(), rejection: new Set() };
   const ctx: JsProgramContext = {
@@ -651,6 +654,8 @@ function pathOps(
     unlink: async (path) => void (await kernel.call({ op: 'unlink', path: resolve(path) })),
     rename: async (from, to) =>
       void (await kernel.call({ op: 'rename', path: resolve(from), arg2: resolve(to) })),
+    chmod: async (path, mode) =>
+      void (await kernel.call({ op: 'chmod', path: resolve(path), mode: modeOf(mode) })),
     link: async (from, to) =>
       void (await kernel.call({ op: 'link', path: resolve(from), arg2: resolve(to) })),
     symlink: async (target, path) =>

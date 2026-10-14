@@ -7,6 +7,7 @@ import {
 } from '../../realm/sync-fs-wire.ts';
 import { createSyncSabTransport } from '../../realm/sync-sab-bridge.ts';
 import type { SyncSabRequestBody } from '../../realm/sync-sab-wire.ts';
+import type { JsChild, JsSpawnOptions } from './js-children.ts';
 import {
   devExists,
   devOpen,
@@ -37,7 +38,7 @@ import {
   writeDevice,
   written,
 } from './js-io.ts';
-import { callError, JsCallError, type JsKernel } from './js-kernel.ts';
+import { callError, JsCallError, type JsKernel, modeOf } from './js-kernel.ts';
 import type { JsRunOptions, JsRunResult } from './js-run.ts';
 
 export type SyncCall = (req: SyncSabRequestBody) => SyncFsResult;
@@ -66,6 +67,7 @@ export interface JsCred {
 export interface JsSyncContext {
   readonly kernel: { readonly version: string };
   run(options: JsRunOptions): JsRunResult;
+  spawn(options: JsSpawnOptions): JsChild;
   exit(status?: number): never;
   kill(pid: number, signal?: number | `SIG${string}`): void;
   cred(): JsCred;
@@ -83,6 +85,7 @@ export interface JsSyncContext {
     rm(path: string): void;
     unlink(path: string): void;
     rename(from: string, to: string): void;
+    chmod(path: string, mode: number): void;
     link(from: string, to: string): void;
     symlink(target: string, path: string): void;
     readlink(path: string): string;
@@ -157,7 +160,7 @@ export class JsSyncKernel {
 export function syncOps(
   kernel: JsSyncKernel,
   shared: SyncShared
-): Omit<JsSyncContext, 'run' | 'exit' | 'kill' | 'cred' | 'setcred' | 'kernel'> {
+): Omit<JsSyncContext, 'run' | 'spawn' | 'exit' | 'kill' | 'cred' | 'setcred' | 'kernel'> {
   const { infos, handles, resolve } = shared;
 
   const info = (fd: number): FdInfo => {
@@ -359,6 +362,8 @@ function syncPathOps(
     unlink: (path) => void kernel.call({ op: 'unlink', path: resolve(path) }),
     rename: (from, to) =>
       void kernel.call({ op: 'rename', path: resolve(from), arg2: resolve(to) }),
+    chmod: (path, mode) =>
+      void kernel.call({ op: 'chmod', path: resolve(path), mode: modeOf(mode) }),
     link: (from, to) => void kernel.call({ op: 'link', path: resolve(from), arg2: resolve(to) }),
     symlink: (target, path) =>
       void kernel.call({ op: 'symlink', path: resolve(path), arg2: target }),
