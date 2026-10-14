@@ -31,6 +31,13 @@ export function scrubbed(inner: OpenFile, scrubber: Scrubber, idleMs = SCRUB_IDL
   const stream = scrubber.stream();
   let queue: Promise<void> = Promise.resolve();
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let failed: unknown;
+  const raise = () => {
+    if (failed === undefined) return;
+    const err = failed;
+    failed = undefined;
+    throw err;
+  };
   const enqueue = (bytes: Uint8Array, signal?: AbortSignal): Promise<void> => {
     const next = queue.then(() => (bytes.length > 0 ? writeAll(file, bytes, signal) : undefined));
     queue = next.catch(() => undefined);
@@ -38,7 +45,9 @@ export function scrubbed(inner: OpenFile, scrubber: Scrubber, idleMs = SCRUB_IDL
   };
   const release = () => {
     timer = undefined;
-    void enqueue(stream.idle()).catch(() => undefined);
+    enqueue(stream.idle()).catch((err: unknown) => {
+      failed = err;
+    });
   };
   return new OpenFile({
     ...bound(file, 'read'),
@@ -47,10 +56,12 @@ export function scrubbed(inner: OpenFile, scrubber: Scrubber, idleMs = SCRUB_IDL
     ...bound(file, 'changed'),
     ...bound(file, 'stat'),
     ...(file.tty ? { tty: file.tty } : {}),
+    ...(file.clipboard ? { clipboard: file.clipboard } : {}),
     ...(file.write
       ? {
           write: async (bytes: Uint8Array, signal?: AbortSignal) => {
             if (timer !== undefined) clearTimeout(timer);
+            raise();
             await enqueue(stream.push(bytes), signal);
             timer = setTimeout(release, idleMs);
             return bytes.length;
@@ -59,6 +70,7 @@ export function scrubbed(inner: OpenFile, scrubber: Scrubber, idleMs = SCRUB_IDL
       : {}),
     flush: async () => {
       await queue;
+      raise();
       await file.flush?.();
     },
     close: async () => {
