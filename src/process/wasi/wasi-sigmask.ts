@@ -49,6 +49,7 @@ export class WasiSigmask {
 
   discard(sig: number): void {
     Atomics.and(this.header, SAB_I_SIGNALS, ~sigbit(sig));
+    if (this.process) Atomics.and(this.process, SAB_I_SIGNALS, ~sigbit(sig));
   }
 
   pending(): number {
