@@ -430,7 +430,7 @@ export interface WasmProcessOptions {
 
   sealed?: SealedBroker;
 
-  ttyFilter?: (file: OpenFile) => OpenFile;
+  outputFilter?: (file: OpenFile) => OpenFile;
 
   clipboard?: ClipboardBroker;
 
@@ -739,8 +739,8 @@ export class WasmProcess {
         const { ptys, jobs } = this.options;
         const owner = this.options.owners ? this.ttyOwner() : undefined;
         const guard = this.guarded();
-        const { ttyFilter } = this.options;
-        const ctx = { pid: this.pid, fds: this.fds, ptys, jobs, guard, owner, ttyFilter };
+        const { outputFilter } = this.options;
+        const ctx = { pid: this.pid, fds: this.fds, ptys, jobs, guard, owner, outputFilter };
         return ptySyscall(req, ctx);
       }
       return await this.procSyscall(req, cancelled);
@@ -968,7 +968,7 @@ export class WasmProcess {
     if (!tty) throw new KernelError('ENXIO');
     if (name !== undefined) ttyOpenable(this.guarded(), tty);
     const file = tty.file();
-    return this.fds.install(this.options.ttyFilter?.(file) ?? file, 3);
+    return this.fds.install(this.options.outputFilter?.(file) ?? file, 3);
   }
 
   private openSealed(): number {
@@ -982,7 +982,8 @@ export class WasmProcess {
     if (!broker) throw new KernelError('ENOENT');
     const mode = flags & WRITE_ACCESS;
     const access: ClipboardAccess = mode === 0 ? 'read' : mode === 1 ? 'write' : 'both';
-    return this.fds.install(broker.open(access, await this.clipboardStamp()), 3);
+    const file = broker.open(access, await this.clipboardStamp());
+    return this.fds.install(this.options.outputFilter?.(file) ?? file, 3);
   }
 
   private async clipboardStamp(): Promise<ClipboardStamp> {
