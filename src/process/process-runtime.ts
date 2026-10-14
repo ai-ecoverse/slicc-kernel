@@ -270,7 +270,7 @@ function openAt(Fs: ProcessFs, fd: number, path: string, flags: number): boolean
   return true;
 }
 
-const PLACED: ReadonlySet<string> = new Set(['stream', 'file', 'socket', 'clipboard']);
+const PLACED: ReadonlySet<string> = new Set(['stream', 'file', 'socket', 'clipboard', 'sealed']);
 
 export function wireKernelStdio(Fs: ProcessFs, streams: KernelStreams, sys?: ProcessSys): void {
   for (const fd of [0, 1, 2]) {
@@ -513,6 +513,10 @@ function kernelWrappers(imports: WebAssembly.Imports, module: object, deps: Wrap
   holdWhileStopped(imports, new Int32Array(init.sab, 0, SAB_HEADER_I32), kernelGlue, deps.poll);
 }
 
+function bridgeFlags(init: WasmProcessInitMsg): { owners?: boolean; links?: boolean } {
+  return { ...(init.owners ? { owners: true } : {}), ...(init.links ? { links: true } : {}) };
+}
+
 export async function runWasmProcess(
   init: WasmProcessInitMsg,
   port: SabPostLike,
@@ -626,7 +630,7 @@ export async function runWasmProcess(
   if (!hasStreams(running)) return runStdioOnly(running, init);
   if (init.owners) linuxDevices(running.FS);
   const vfs = mountVfsIntoEmscripten(running.FS, {
-    bridge: createSyncFsSabBridge(transport, init.owners ? { owners: true } : {}),
+    bridge: createSyncFsSabBridge(transport, bridgeFlags(init)),
     cwd: init.cwd,
     warn: deps.warn ?? say(2),
   });

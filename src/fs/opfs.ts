@@ -12,6 +12,7 @@ import {
   type Owner,
   type OwnerChange,
   type Perm,
+  redirected,
   resolvePath,
 } from './types.ts';
 
@@ -221,6 +222,7 @@ export class OpfsFs implements KernelFs {
   private readonly remote: RemoteWatch | undefined;
   private readonly ranged: boolean;
   private owners = false;
+  private readonly mounts: { mounted?: (path: string) => boolean } = {};
 
   constructor(
     root: FileSystemDirectoryHandle,
@@ -312,6 +314,14 @@ export class OpfsFs implements KernelFs {
 
   trackOwners(): void {
     this.owners = true;
+  }
+
+  crossings(mounted: (path: string) => boolean): void {
+    this.mounts.mounted = mounted;
+  }
+
+  private crossing(of: string, to: string): void {
+    if (this.mounts.mounted?.(to)) throw redirected(of, to);
   }
 
   async hasOwner(path: string): Promise<boolean> {
@@ -546,14 +556,15 @@ export class OpfsFs implements KernelFs {
         if (link.path === current && !follow) return { path: current, link };
         const target = `${link.link}${current.slice(link.path.length)}`;
         current = target.split('/').includes('..')
-          ? await this.physical(parentOf(link.path), target, hops + 1)
+          ? await this.physical(parentOf(link.path), target, hops + 1, path)
           : resolvePath(parentOf(link.path), target);
+        this.crossing(path, current);
       }
     }
     throw fsError('ELOOP', path);
   }
 
-  private async physical(base: string, path: string, used: number): Promise<string> {
+  private async physical(base: string, path: string, used: number, of: string): Promise<string> {
     let done: string[] = [];
     let todo = (path.startsWith('/') ? path : `${base}/${path}`)
       .split('/')
@@ -564,6 +575,7 @@ export class OpfsFs implements KernelFs {
       else if (!todo.includes('..')) done.push(part);
       else {
         const at = `/${[...done, part].join('/')}`;
+        this.crossing(of, [at, ...todo].join('/'));
         const st = await this.lstat(at);
         if (!st.isSymbolicLink && !st.isDirectory) throw fsError('ENOTDIR', at);
         if (!st.isSymbolicLink) done.push(part);

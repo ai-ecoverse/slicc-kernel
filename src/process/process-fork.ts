@@ -93,12 +93,18 @@ export function describeForFork(
   return out;
 }
 
+const NAMED_DEVICES: Readonly<Record<string, 'sealed' | 'clipboard'>> = {
+  '/dev/sealed': 'sealed',
+  '/dev/clipboard': 'clipboard',
+};
+
 function kernelEntry(stream: ProcessStream, kernel: number): ForkStream {
   const cloexec = closesOnExec(stream) ? { cloexec: true } : {};
   if (stream.sliccKernelSocket) {
     return { fd: stream.fd, kernel, kind: 'socket', flags: stream.flags, ...cloexec };
   }
-  const kind = stream.sliccKernelFile ? 'file' : stream.tty ? 'tty' : 'stream';
+  const device = stream.path === undefined ? undefined : NAMED_DEVICES[stream.path];
+  const kind = stream.sliccKernelFile ? 'file' : stream.tty ? 'tty' : (device ?? 'stream');
   return { fd: stream.fd, kernel, kind, ...cloexec };
 }
 
@@ -173,7 +179,8 @@ function placeholder(
 ): ProcessStream {
   if (entry.kind === 'socket') return streams.socketStream(entry.flags ?? O_RDWR);
   if (entry.kind === 'tty') return Fs.open('/dev/tty', O_RDWR);
-  if (entry.kind === 'stream' || entry.kind === 'clipboard') return Fs.open('/dev/null', O_RDWR);
+  if (entry.kind === 'stream' || entry.kind === 'clipboard' || entry.kind === 'sealed')
+    return Fs.open('/dev/null', O_RDWR);
   Fs.mkdirTree(PLACEHOLDER_DIR);
   return Fs.open(`${PLACEHOLDER_DIR}/${entry.fd}`, O_RDWR | O_CREAT);
 }
@@ -210,6 +217,7 @@ export function placeKernelStream(
   } else if (entry.kind === 'socket') streams.attachSocket(stream, entry.kernel);
   else streams.attach(stream, entry.kernel, entry.kind === 'tty');
   if (entry.kind === 'clipboard') streams.reportClose(entry.kernel);
+  if (entry.kind === 'sealed' || entry.kind === 'clipboard') streams.nameDevice(stream, entry.kind);
   if (entry.kind === 'tty') streams.nameTerminal(stream);
   if (entry.kind === 'stream') {
     asFifo(stream, streams, entry.desc !== undefined ? `d${entry.desc}` : `k${entry.kernel}`);

@@ -275,7 +275,10 @@ export function normalize(path: string): string {
 
 const MAX_LINKS = 40;
 
-export function physical(fs: Pick<SyncFsPosixBridge, 'lstat' | 'readlink'>, path: string): string {
+export function physical(
+  fs: Pick<SyncFsPosixBridge, 'lstat' | 'readlink' | 'access' | 'links'>,
+  path: string
+): string {
   let done: string[] = [];
   let todo = path.split('/').filter((part) => part !== '' && part !== '.');
   let hops = 0;
@@ -293,6 +296,7 @@ export function physical(fs: Pick<SyncFsPosixBridge, 'lstat' | 'readlink'>, path
     const st = fs.lstat(at);
     if (st.isSymbolicLink) {
       if (++hops > MAX_LINKS) throw new WasiError('ELOOP');
+      if (fs.links) fs.access?.(at, 0, 'follow', true);
       const target = fs.readlink(at);
       if (target.startsWith('/')) done = [];
       todo = [...target.split('/').filter((p) => p !== '' && p !== '.'), ...todo];
@@ -581,6 +585,7 @@ export function cachingBridge(
         }
       : {}),
     ...(bridge.owners ? { owners: true } : {}),
+    ...(bridge.links ? { links: true } : {}),
     invalidate,
     touched,
     threaded,

@@ -133,6 +133,7 @@ export interface DialRequest {
 export type AttestRequest =
   | { id: number; op: 'attest'; path: string }
   | { id: number; op: 'chmod'; path: string; mode: number }
+  | { id: number; op: 'integrity-revoke'; path?: string }
   | { id: number; op: 'watch-files'; paths: string[] }
   | { id: number; op: 'unwatch-files'; watch: number };
 
@@ -339,6 +340,7 @@ const ATTEST_OPS: ReadonlySet<string> = new Set([
   'watch-files',
   'unwatch-files',
   'chmod',
+  'integrity-revoke',
 ]);
 
 function isAttestRequest(req: KernelRequest): req is AttestRequest {
@@ -360,6 +362,7 @@ function attestOps(port: KernelPort) {
   return async (l: Launcher, req: AttestRequest): Promise<unknown> => {
     if (req.op === 'attest') return l.attest(req.path);
     if (req.op === 'chmod') return l.fs.chmod(req.path, modeOption(req.mode)).then(() => true);
+    if (req.op === 'integrity-revoke') return l.revokeIntegrity(req.path).then(() => true);
     if (req.op === 'unwatch-files') {
       watches.get(req.watch)?.();
       return watches.delete(req.watch);

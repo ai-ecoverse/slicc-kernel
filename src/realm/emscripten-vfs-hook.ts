@@ -4,6 +4,7 @@ import {
   type LiveMountFsApi,
   liveRoot,
   mountLiveVfsDirs,
+  readingLinks,
   useLiveChown,
 } from './live-vfs-fs.ts';
 import type { SyncFsPosixBridge } from './sync-fs-wire.ts';
@@ -63,6 +64,7 @@ export function mountVfsIntoEmscripten(
   const { plugin, mounted } = mountLiveVfsDirs(Fs, bridge, dirs ?? [], warn);
   if (dirs) liveRoot(Fs, bridge);
   if (bridge.owners && Fs.lookupPath) useLiveChown(Fs as Parameters<typeof useLiveChown>[0]);
+  if (bridge.links && Fs.lookupPath) readingLinks(Fs as Parameters<typeof readingLinks>[0]);
   try {
     Fs.chdir(deps.cwd);
   } catch (err) {

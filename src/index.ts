@@ -219,6 +219,10 @@ export interface KernelUsers {
   list(): Promise<Account[]>;
 }
 
+export interface KernelIntegrity {
+  revoke(path?: string): Promise<void>;
+}
+
 export interface Kernel {
   run(argv: string[], options?: RunOptions): Promise<RunResult>;
   openTerminal(argv: string[], options?: TerminalOptions): Promise<Terminal>;
@@ -227,6 +231,7 @@ export interface Kernel {
   readonly groups: KernelGroups;
   setRoutes(routes: RouteTable): Promise<void>;
   chmod(path: string, mode: number): Promise<void>;
+  readonly integrity: KernelIntegrity;
   updateTransportTraits(): Promise<boolean>;
   dial(options: DialOptions): Promise<DialledSocket>;
   loopbackFetch(input: RequestInfo | URL, options: LoopbackFetchOptions): Promise<Response>;
@@ -772,6 +777,10 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     ...accounts(call, options.users === undefined ? DEFAULT_USERS : options.users),
     setRoutes: async (routes) => void (await call({ op: 'routes', routes })),
     chmod: async (path, mode) => void (await call({ op: 'chmod', path, mode })),
+    integrity: {
+      revoke: async (path) =>
+        void (await call({ op: 'integrity-revoke', ...(path !== undefined ? { path } : {}) })),
+    },
     updateTransportTraits: traitsUpdater(transport, call),
     dial,
     loopbackFetch: (input, fetchOptions) => loopbackFetch(dial, input, fetchOptions),

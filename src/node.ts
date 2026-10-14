@@ -11,6 +11,7 @@ import { pidOwner } from './fs/unlinked.ts';
 import type {
   ConnectOptions,
   KernelGroups,
+  KernelIntegrity,
   KernelUsers,
   RunOptions,
   RunResult,
@@ -65,6 +66,7 @@ export type {
   ConnectOptions,
   Ended,
   KernelGroups,
+  KernelIntegrity,
   KernelUsers,
   NetworkUplink,
   ResolveAnswer,
@@ -128,6 +130,7 @@ export interface NodeKernel {
   writeFile(path: string, data: string | Uint8Array, options?: { mode?: number }): Promise<void>;
   readFile(path: string): Promise<Uint8Array>;
   chmod(path: string, mode: number): Promise<void>;
+  readonly integrity: KernelIntegrity;
   connect(options?: ConnectOptions): Promise<MessagePort>;
   readonly users: KernelUsers;
   readonly groups: KernelGroups;
@@ -334,6 +337,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
       await launcher.fs.writeFile(path, data);
     },
     chmod: async (path, mode) => launcher.fs.chmod(path, modeOption(mode)),
+    integrity: { revoke: (path) => guard(() => launcher.revokeIntegrity(path)) },
     readFile: async (path) => launcher.fs.readFileBuffer(path),
     mount: (spec) => guard(() => launcher.mount(spec)),
     umount: (target) => guard(async () => launcher.umount(target)),

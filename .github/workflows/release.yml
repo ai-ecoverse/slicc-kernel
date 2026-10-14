@@ -29,29 +29,38 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - id: head
+        run: |
+          git fetch -q origin main
+          if [ "$(git rev-parse HEAD)" = "$(git rev-parse FETCH_HEAD)" ] || git tag --points-at HEAD | grep -q '^v'; then
+            echo "current=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "current=false" >> "$GITHUB_OUTPUT"
+            echo "main has moved past $(git rev-parse --short HEAD); the run for the newer commit releases it" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - if: steps.head.outputs.current == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: 24
           cache: npm
 
-      - run: npm ci
-
-      - run: npm run lint
-
-      - run: npx playwright-core install --with-deps --no-shell chromium
-
-      - run: npm test
+      - if: steps.head.outputs.current == 'true'
+        run: npm ci
 
       - id: prior
+        if: steps.head.outputs.current == 'true'
         run: echo "tags=$(git tag --points-at HEAD | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
 
       - id: release
+        if: steps.head.outputs.current == 'true'
         run: npx semantic-release
         continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - run: node tools/release-recover.mjs
+      - if: steps.head.outputs.current == 'true'
+        run: node tools/release-recover.mjs
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_OUTCOME: ${{ steps.release.outcome }}

@@ -236,6 +236,7 @@ interface Target {
   unset?: string[];
   imports?: string;
   preopenRoot?: boolean;
+  asked?: string;
 }
 
 interface Compiled {
@@ -256,6 +257,7 @@ interface Planned {
   via?: string[];
   sources?: string[];
   bins?: string[];
+  asked?: Record<string, string>;
 }
 
 interface Redeemer {
@@ -290,9 +292,14 @@ interface StartRequest {
   umask?: number;
   cred: Cred;
   tag?: string | undefined;
+  links?: number | undefined;
   decided?: Promise<boolean>;
   pid?: number;
   scrub?: Scrubber;
+}
+
+function linksOf(req: StartRequest): { links?: number } {
+  return req.links === undefined ? {} : { links: req.links };
 }
 
 const COMMAND = /^\/(?:usr\/)?bin\/([^/]+)$/;
@@ -500,6 +507,7 @@ export class Launcher {
   private readonly warned = new Set<string>();
   private readonly compiled = new Map<string, Promise<Compiled>>();
   private readonly texts = new Map<string, Promise<string>>();
+  private revocations = 0;
   private integrity: Integrity | undefined;
   private scannedFs: KernelFs | undefined;
 
@@ -513,6 +521,7 @@ export class Launcher {
   private readonly described = new Map<number, Pick<ProcessInfo, 'argv' | 'tty' | 'started'>>();
   private readonly creds = new Map<number, () => Cred>();
   private readonly tags = new Map<number, string>();
+  private readonly links = new Map<number, number>();
   private readonly freshModules = new FreshModules();
   private readonly granted = new Map<number, number>();
   readonly users: UserDb;
@@ -837,14 +846,16 @@ export class Launcher {
     }
     const path = this.fs.resolvePath(cwd, file);
     const glue = await followLinks(this.base, path);
+    const asked = glue === path ? {} : { asked: path };
     const linked = COMMAND.exec(glue)?.[1];
     if (linked !== undefined) {
-      const target = await this.resolve(`/bin/${linked}`, argv0, cwd);
+      const found = await this.resolve(`/bin/${linked}`, argv0, cwd);
+      const target = found && { ...found, ...asked };
       const byPath = !COMMAND.test(path) && (await this.commands()).get(linked)?.argv0Path === true;
       return target && byPath ? { ...target, argv0: path } : target;
     }
     const own = await this.commandAt(glue, scope);
-    if (own) return own.script ? undefined : targetOf(own);
+    if (own) return own.script ? undefined : { ...targetOf(own), ...asked };
     const head = await this.head(glue);
     if (!head) return undefined;
     if (isWasm(head)) {
@@ -853,12 +864,13 @@ export class Launcher {
         glue,
         wasm: glue,
         argv0: baseName(argv0 || file).replace(/\.wasm$/, ''),
+        ...asked,
       };
     }
     if (interpreter(head) !== 'node') return undefined;
     const wasm = modulePath(glue);
     if (!(await this.base.exists(wasm))) return undefined;
-    return { abi: 'emscripten', glue, wasm, argv0: baseName(argv0 || file) };
+    return { abi: 'emscripten', glue, wasm, argv0: baseName(argv0 || file), ...asked };
   }
 
   private async head(path: string): Promise<Uint8Array | undefined> {
@@ -885,6 +897,8 @@ export class Launcher {
   ): Promise<Planned | undefined> {
     const command = await this.scriptCommand(file, cwd, scope);
     const script = command?.script ?? this.fs.resolvePath(cwd, file);
+    const byPath = command && file.includes('/') && !COMMAND.test(file);
+    const named = byPath ? { [script]: this.fs.resolvePath(cwd, file) } : {};
     const head = await this.head(script);
     if (!head) return undefined;
     const binfmt = isWasm(head) ? undefined : binfmtOf(await this.interpreters(scope), script);
@@ -909,6 +923,7 @@ export class Launcher {
           via,
           sources,
           ...(bins.length > 0 ? { bins } : {}),
+          asked: { ...inner.asked, ...named },
         }
       );
     }
@@ -919,6 +934,7 @@ export class Launcher {
       via: [interp],
       sources: [script],
       ...(command?.bin ? { bins: [script] } : {}),
+      asked: named,
     };
   }
 
@@ -944,7 +960,14 @@ export class Launcher {
   ): Promise<void> {
     const { dac } = this;
     if (!dac) return;
-    const g = { fs: this.fs, cred, pid: req.pid, dac, tag: req.tag };
+    const g = {
+      fs: this.fs,
+      cred,
+      pid: req.pid,
+      dac,
+      tag: req.tag,
+      links: this.links.get(req.pid),
+    };
     const byPath = (file: string) => file.includes('/') && !COMMAND.test(file);
     if (byPath(req.file)) {
       const path = this.fs.resolvePath(req.cwd, req.file);
@@ -1150,8 +1173,8 @@ export class Launcher {
     });
   }
 
-  private async cacheKey(path: string): Promise<string> {
-    const verified = await this.integrity?.key(path);
+  private async cacheKey(path: string, asked?: string): Promise<string> {
+    const verified = await this.integrity?.key(path, asked);
     if (verified !== undefined) return verified;
     const st = await this.base.stat(path);
     return `${path}:${st.size}:${st.mtime.getTime()}`;
@@ -1164,11 +1187,12 @@ export class Launcher {
 
   private keyed(
     path: string,
-    caller: IntegrityCaller
+    caller: IntegrityCaller,
+    asked?: string
   ): Promise<{ bytes: Uint8Array; key?: string | undefined }> {
     const plain = async () => this.base.readFileBuffer(path);
     return this.integrity
-      ? this.integrity.readKeyed(path, caller, plain)
+      ? this.integrity.readKeyed(path, caller, plain, asked)
       : plain().then((bytes) => ({ bytes }));
   }
 
@@ -1179,24 +1203,25 @@ export class Launcher {
   ): Promise<T> {
     const hit = cache.get(key);
     if (hit !== undefined) return hit;
+    const revocations = this.revocations;
     const loading = load();
     const found = loading.then(({ value }) => value);
     cache.set(key, found);
-    loading.then(
-      (done) => {
-        if (done.key === key || (done.key === undefined && !key.includes('\0'))) return;
-        if (cache.get(key) === found) cache.delete(key);
-        if (done.key !== undefined) cache.set(done.key, found);
-      },
-      () => cache.delete(key)
-    );
+    const drop = () => {
+      if (cache.get(key) === found) cache.delete(key);
+    };
+    loading.then((done) => {
+      if (done.key === key || (done.key === undefined && !key.includes('\0'))) return;
+      drop();
+      if (done.key !== undefined && revocations === this.revocations) cache.set(done.key, found);
+    }, drop);
     return found;
   }
 
-  private async module(path: string, caller: IntegrityCaller): Promise<Compiled> {
-    const key = await this.cacheKey(path);
+  private async module(path: string, caller: IntegrityCaller, asked?: string): Promise<Compiled> {
+    const key = await this.cacheKey(path, asked);
     return this.cached(this.compiled, key, async () => {
-      const { bytes, key: read } = await this.keyed(path, caller);
+      const { bytes, key: read } = await this.keyed(path, caller, asked);
       const memory = importedMemory(bytes);
       const foreign = foreignImports(bytes);
       const compiled = await WebAssembly.compile(bytes as BufferSource);
@@ -1206,23 +1231,31 @@ export class Launcher {
 
   private async checkedSources(planned: Planned, caller: IntegrityCaller): Promise<void> {
     const { target } = planned;
-    const files = [target.wasm, target.glue, target.imports, ...(planned.sources ?? [])];
+    const files = [
+      target.wasm,
+      target.glue,
+      target.imports,
+      target.asked,
+      ...(planned.sources ?? []),
+    ];
     const manifests = new Set<string>();
     for (const file of files) {
       const root = file === undefined ? undefined : PACKAGE_ROOT.exec(file)?.[1];
       if (root !== undefined) manifests.add(`${root}/package.json`);
     }
-    for (const source of planned.sources ?? []) await this.text(source, caller);
+    for (const source of planned.sources ?? []) {
+      await this.text(source, caller, planned.asked?.[source]);
+    }
     for (const manifest of manifests) {
       if (await this.base.exists(manifest)) await this.text(manifest, caller);
     }
   }
 
-  private async text(path: string, caller: IntegrityCaller): Promise<string> {
+  private async text(path: string, caller: IntegrityCaller, asked?: string): Promise<string> {
     if (!this.integrity) return this.base.readFile(path);
-    const key = await this.cacheKey(path);
+    const key = await this.cacheKey(path, asked);
     return this.cached(this.texts, key, async () => {
-      const { bytes, key: read } = await this.keyed(path, caller);
+      const { bytes, key: read } = await this.keyed(path, caller, asked);
       return { value: new TextDecoder().decode(bytes), key: read };
     });
   }
@@ -1245,17 +1278,18 @@ export class Launcher {
     if (target.abi === 'js' && target.wasm === SUDO_PATH) {
       return { abi: 'js', glue: SUDO_SOURCE, path: SUDO_PATH };
     }
+    const { asked } = target;
     if (target.abi === 'js') {
-      return { abi: 'js', glue: await this.text(target.wasm, caller), path: target.wasm };
+      return { abi: 'js', glue: await this.text(target.wasm, caller, asked), path: target.wasm };
     }
     if (target.abi !== 'wasi') {
       const [glue, { module }] = await Promise.all([
-        this.text(target.glue, caller),
-        this.module(target.wasm, caller),
+        this.text(target.glue, caller, asked),
+        this.module(target.wasm, caller, asked && modulePath(asked)),
       ]);
       return { glue, module };
     }
-    const { module, memory, foreign } = await this.module(target.wasm, caller);
+    const { module, memory, foreign } = await this.module(target.wasm, caller, asked);
     const names =
       env.SLICC_WASM_BACKTRACE === '1' ? await this.names(target.wasm, module) : undefined;
     const imports = target.imports ? await this.text(target.imports, caller) : undefined;
@@ -1299,11 +1333,14 @@ export class Launcher {
     return this.jobs.sessionOf(pgid);
   }
 
-  private treeScrubs(pid: number, req: StartRequest): Scrubber[] | undefined {
+  private treeScrubs(req: StartRequest): Scrubber[] | undefined {
     const inherited = req.ppid !== undefined ? this.scrubs.get(req.ppid) : undefined;
-    const scrubs = req.scrub ? [...(inherited ?? []), req.scrub] : inherited;
-    if (scrubs) this.scrubs.set(pid, scrubs);
-    return scrubs;
+    return req.scrub ? [...(inherited ?? []), req.scrub] : inherited;
+  }
+
+  private marks(pid: number, req: StartRequest): void {
+    if (req.tag !== undefined) this.tags.set(pid, req.tag);
+    if (req.links !== undefined) this.links.set(pid, req.links);
   }
 
   private start(req: StartRequest): WasmProcessHandle {
@@ -1312,7 +1349,7 @@ export class Launcher {
       throw new SpawnError('ESRCH');
     }
     const pid = req.pid ?? this.nextPid++;
-    const scrubs = this.treeScrubs(pid, req);
+    const scrubs = this.treeScrubs(req);
     const stack = this.stackFor(req.tag);
     const terminal = req.fds.stdioTerminal();
     const decided = req.decided ?? Promise.resolve(true);
@@ -1340,6 +1377,7 @@ export class Launcher {
         ? { fresh: (path: string, umask: number) => this.freshModules.add(path, umask, pid) }
         : {}),
       ...(this.owners ? { owners: true } : {}),
+      ...linksOf(req),
       sealed: this.sealed,
       ...(scrubs ? { outputFilter: (file: OpenFile) => scrubbedAll(file, scrubs) } : {}),
       clipboard: this.clipboard,
@@ -1386,9 +1424,10 @@ export class Launcher {
       ...this.shownIds(req),
     });
     this.processes.set(pid, handle);
+    if (scrubs) this.scrubs.set(pid, scrubs);
     const { cred } = req;
     this.creds.set(pid, () => handle.cred?.() ?? copyCred(cred));
-    if (req.tag !== undefined) this.tags.set(pid, req.tag);
+    this.marks(pid, req);
     if (req.ppid !== undefined && this.controlsJobs(req.ppid)) this.settling.started(pid, req.ppid);
     this.jobs.add(pid, req.ppid, (sig) => handle.signal(sig), terminal);
     if (req.exec && req.ppid !== undefined) this.jobs.exec(req.ppid, pid, true);
@@ -1443,6 +1482,7 @@ export class Launcher {
     this.childTimes.delete(pid);
     this.creds.delete(pid);
     this.tags.delete(pid);
+    this.links.delete(pid);
     this.granted.delete(pid);
   }
 
@@ -1638,6 +1678,7 @@ export class Launcher {
         umask: this.umaskOf(ppid),
         cred,
         tag: this.tagOf(ppid),
+        links: grant ? grant.cred.euid : this.links.get(ppid),
         ...group,
         ...exec,
       });
@@ -1716,6 +1757,7 @@ export class Launcher {
           umask: this.umaskOf(ppid),
           cred: this.credOf(ppid),
           tag: this.tagOf(ppid),
+          links: this.links.get(ppid),
         })
       );
   }
@@ -1921,6 +1963,30 @@ export class Launcher {
         port2.close();
       },
     };
+  }
+
+  async revokeIntegrity(path?: string): Promise<void> {
+    if (path !== undefined && (typeof path !== 'string' || !path.startsWith('/'))) {
+      throw new TypeError('integrity.revoke takes an absolute path');
+    }
+    if (!this.integrity) return;
+    const at = path === undefined ? undefined : normalizePath(path);
+    const real = at && (await this.base.realpath?.(at, true).catch(() => undefined));
+    const roots = [at, real].filter((p): p is string => p !== undefined);
+    this.revocations++;
+    const hit = (key: string) =>
+      key.includes('\0') &&
+      (at === undefined ||
+        key
+          .split('\0')
+          .slice(0, 2)
+          .some((part) => isProtected(roots, part)));
+    for (const cache of [this.compiled, this.texts] as Map<string, unknown>[]) {
+      for (const key of [...cache.keys()]) if (hit(key)) cache.delete(key);
+    }
+    if (at === undefined) this.integrity.forget();
+    for (const root of roots) this.integrity.forget(root);
+    this.resetCatalogs();
   }
 
   attest(path: string): Promise<Attestation> {

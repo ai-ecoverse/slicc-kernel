@@ -32,6 +32,7 @@ interface TtyNodeFs {
   analyzePath?: (path: string) => { exists: boolean };
   mkdev?: (path: string, dev: number) => unknown;
   makedev?: (major: number, minor: number) => number;
+  registerDevice?: (dev: number, ops: object) => void;
 }
 
 interface DevDirFs extends TtyNodeFs {
@@ -366,19 +367,46 @@ export class KernelStreams {
     stream.stream_ops = { ...stream.stream_ops, getattr: () => this.Fs.stat?.(name) ?? {} };
   }
 
+  nameDevice(stream: ProcessStream, kind: 'sealed' | 'clipboard'): void {
+    this.nameStream(stream, kind === 'sealed' ? SEALED_PATH : CLIPBOARD_PATH);
+  }
+
   private listSealed(): void {
-    const { analyzePath, mkdev, makedev } = this.Fs as unknown as TtyNodeFs;
+    const fs = this.Fs as unknown as TtyNodeFs;
+    const { analyzePath, mkdev, makedev, registerDevice } = fs;
     if (!analyzePath || !mkdev || !makedev) return;
-    const nodes: Array<[string, number, unknown]> = [
+    const nodes: Array<[string, number, ((flags: number) => number) | undefined]> = [
       [SEALED_PATH, 250, this.sys.openSealed],
       [CLIPBOARD_PATH, 251, this.sys.openClipboard],
     ];
-    for (const [path, minor, present] of nodes) {
-      if (!present || analyzePath.call(this.Fs, path).exists) continue;
+    for (const [path, minor, opener] of nodes) {
+      if (!opener) continue;
+      const dev = makedev.call(fs, 10, minor);
+      registerDevice?.call(fs, dev, {
+        open: (stream: ProcessStream) => this.openNode(stream, path, opener),
+      });
+      if (analyzePath.call(fs, path).exists) continue;
       try {
-        mkdev.call(this.Fs, path, makedev.call(this.Fs, 10, minor));
+        const node = mkdev.call(fs, path, dev);
+        if (typeof node === 'object' && node !== null) {
+          const made = node as { node_ops?: object };
+          made.node_ops = { ...made.node_ops, getattr: () => sealedStat(minor) };
+        }
       } catch {}
     }
+  }
+
+  private openNode(stream: ProcessStream, path: string, opener: (flags: number) => number): void {
+    let kfd: number;
+    try {
+      kfd = this.call(() => opener.call(this.sys, stream.flags & 3));
+    } catch (e) {
+      this.Fs.closeStream(stream.fd);
+      throw e;
+    }
+    this.attach(stream, kfd, false);
+    this.nameStream(stream, path);
+    if (path === CLIPBOARD_PATH) this.reportClose(kfd);
   }
 
   private readonly reporting = new Set<number>();

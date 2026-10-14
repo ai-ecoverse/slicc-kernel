@@ -78,6 +78,7 @@ export interface KernelFs {
   createExclusive?(path: string, owner?: NewOwner): Promise<void>;
   chown?(path: string, change: OwnerChange): Promise<void>;
   trackOwners?(): void;
+  crossings?(mounted: (path: string) => boolean): void;
   ancestry?(path: string): Promise<Array<Perm | undefined>>;
   hasOwner?(path: string): Promise<boolean>;
   chmod(path: string, mode: number): Promise<void>;
@@ -88,7 +89,7 @@ export interface KernelFs {
   truncate?(path: string, size: number): Promise<void>;
   protect?(prefixes: readonly string[], versions?: boolean): void;
   unguarded?(): KernelFs;
-  mayChange?(path: string, follow: boolean): Promise<void>;
+  mayChange?(path: string, follow: boolean, whole?: boolean): Promise<void>;
   readVersioned?(path: string): Promise<{ bytes: Uint8Array; version: string }>;
   version?(path: string): Promise<string>;
 }
@@ -152,4 +153,19 @@ export function inodeOf(path: string): number {
   h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
   h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
   return 4294967296 * (2097151 & h2) + (h1 >>> 0) || 1;
+}
+
+export interface Redirect {
+  of: string;
+  to: string;
+}
+
+export function redirected(of: string, to: string): Error {
+  return Object.assign(fsError('EXDEV', `${of} leads to the mount at ${to}`), {
+    redirect: { of: normalizePath(of), to: normalizePath(to) },
+  });
+}
+
+export function redirectOf(err: unknown): Redirect | undefined {
+  return (err as { redirect?: Redirect } | null)?.redirect;
 }

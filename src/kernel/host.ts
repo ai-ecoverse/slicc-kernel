@@ -77,6 +77,7 @@ export interface SpawnWasmOptions {
   umask?: number;
   cred?: Cred;
   owners?: boolean;
+  links?: number;
   fresh?: (path: string, umask: number) => void;
   sealed?: SealedBroker;
   outputFilter?: (file: OpenFile) => OpenFile;
@@ -313,6 +314,7 @@ function processInit(
     umask,
     cred,
     ...(opts.owners ? { owners: true } : {}),
+    ...(opts.links !== undefined ? { links: true } : {}),
     ...(opts.ppid !== undefined ? { ppid: opts.ppid } : {}),
   } as const;
   if (opts.program.abi === 'js') {
@@ -351,6 +353,7 @@ function holdingToken(
   return mintSyncFsToken({
     ...(opts.owners ? caller : {}),
     ...(opts.dac ? { dac: opts.dac, pid: opts.pid, created: caller.created } : {}),
+    ...(opts.links !== undefined ? { links: opts.links } : {}),
     ...(opts.fresh ? { fresh: (path: string) => opts.fresh?.(path, caller.umask()) } : {}),
     fs: opts.fs,
     cwd: opts.cwd,
@@ -364,6 +367,10 @@ function holdingToken(
     revoked: (path) => holds.isRevoked(path),
     renamed: (from, to) => holds.renamed(from, to),
   });
+}
+
+function linksOf(opts: SpawnWasmOptions): { links?: number } {
+  return opts.links === undefined ? {} : { links: opts.links };
 }
 
 function clipboardName(opts: SpawnWasmOptions): { clipboardName?: string } {
@@ -383,7 +390,7 @@ function processOptions(
     ...(opts.outputFilter ? { outputFilter: opts.outputFilter } : {}),
     ...(opts.clipboard ? { clipboard: opts.clipboard, ...clipboardName(opts) } : {}),
     ...(opts.readonlyAt ? { readonlyAt: opts.readonlyAt } : {}),
-    ...(opts.dac ? { guard: { dac: opts.dac, fs: opts.fs, created } } : {}),
+    ...(opts.dac ? { guard: { dac: opts.dac, fs: opts.fs, created, ...linksOf(opts) } } : {}),
     ...(opts.identity ? { identity: opts.identity } : {}),
     ...(opts.onSyscall ? { onSyscall: opts.onSyscall } : {}),
     ...(opts.settling ? { settling: opts.settling } : {}),
@@ -441,6 +448,7 @@ function threadInit(
     sab,
     cred: copyCred(cred),
     owners: opts.owners === true,
+    ...(opts.links !== undefined ? { links: true } : {}),
     ...(opts.ppid !== undefined ? { ppid: opts.ppid } : {}),
     thread,
     signals: main,
