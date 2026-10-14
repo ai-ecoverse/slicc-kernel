@@ -99,6 +99,17 @@ export async function checkDestination(
   }
 }
 
+function guarded(check: Promise<void>, signal: AbortSignal | undefined): Promise<void> {
+  if (!signal) return check;
+  signal.throwIfAborted();
+  let stop = (): void => {};
+  const aborted = new Promise<never>((_, reject) => {
+    stop = () => reject(signal.reason);
+    signal.addEventListener('abort', stop, { once: true });
+  });
+  return Promise.race([check, aborted]).finally(() => signal.removeEventListener('abort', stop));
+}
+
 export function guardedLoopback(
   transport: RealmTransport,
   policy: HostLoopback,
@@ -110,13 +121,13 @@ export function guardedLoopback(
       return transport.traits;
     },
     fetch: async (request, owner) => {
-      await checkDestination(request.url, policy, resolve);
+      await guarded(checkDestination(request.url, policy, resolve), request.signal);
       return transport.fetch(request, owner);
     },
     ...(open
       ? {
           websocket: async (request) => {
-            await checkDestination(request.url, policy, resolve);
+            await guarded(checkDestination(request.url, policy, resolve), request.signal);
             return open(request);
           },
         }
