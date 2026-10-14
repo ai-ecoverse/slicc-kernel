@@ -474,9 +474,21 @@ export class WasiHost {
       this.mem.view().setUint32(nevents, 0, true);
       if (mask.deliverUnblocked()) return E.INTR;
       if (n > 0) return this.poll(inPtr, outPtr, n, nevents);
-      for (;;) this.o.kernel.call({ op: 'fd-select', read: [], write: [], timeoutMs: -1 });
+      return this.suspend();
     } finally {
+      mask.deliverUnblocked();
       mask.restore(old);
+    }
+  }
+
+  private suspend(): number {
+    for (;;) {
+      try {
+        this.o.kernel.call({ op: 'fd-select', read: [], write: [], timeoutMs: -1 });
+      } catch (e) {
+        if ((e as { code?: unknown }).code === 'EINTR') return E.INTR;
+        throw e;
+      }
     }
   }
 
