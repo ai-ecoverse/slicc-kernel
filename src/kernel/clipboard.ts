@@ -1,5 +1,5 @@
 import type { UsersMode } from '../fs/types.ts';
-import { KernelError, OpenFile, type PollState } from './fd-table.ts';
+import { KernelError, type OpenAccess, OpenFile, type PollState } from './fd-table.ts';
 
 export const CLIPBOARD_PATH = '/dev/clipboard';
 export const CLIPBOARD_MINOR = 251;
@@ -18,8 +18,6 @@ export interface ClipboardHook {
   read(stamp: ClipboardStamp): Promise<string>;
   write(text: string, stamp: ClipboardStamp): Promise<void>;
 }
-
-export type ClipboardAccess = 'read' | 'write' | 'both';
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8', { fatal: true });
@@ -64,7 +62,7 @@ async function interruptible<T>(work: Promise<T>, signal: AbortSignal | undefine
 
 class ClipboardChannel {
   stamp: ClipboardStamp;
-  readonly access: ClipboardAccess;
+  readonly access: OpenAccess;
   private readonly broker: ClipboardBroker;
   private snapshot: Promise<Uint8Array> | undefined;
   private taken: Uint8Array | undefined;
@@ -74,7 +72,7 @@ class ClipboardChannel {
   private wrote = false;
   private failed = false;
 
-  constructor(broker: ClipboardBroker, access: ClipboardAccess, stamp: ClipboardStamp) {
+  constructor(broker: ClipboardBroker, access: OpenAccess, stamp: ClipboardStamp) {
     this.broker = broker;
     this.access = access;
     this.stamp = stamp;
@@ -195,7 +193,7 @@ export class ClipboardBroker {
     }
   }
 
-  open(access: ClipboardAccess, stamp: ClipboardStamp): OpenFile {
+  open(access: OpenAccess, stamp: ClipboardStamp): OpenFile {
     const channel = new ClipboardChannel(this, access, stamp);
     return new OpenFile({
       read: (max, signal) => channel.read(max, signal),

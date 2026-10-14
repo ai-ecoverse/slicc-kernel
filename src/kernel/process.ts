@@ -22,12 +22,7 @@ import {
   type InheritedSlot,
   SpawnError,
 } from './children.ts';
-import type {
-  ClipboardAccess,
-  ClipboardBroker,
-  ClipboardChannel,
-  ClipboardStamp,
-} from './clipboard.ts';
+import type { ClipboardBroker, ClipboardChannel, ClipboardStamp } from './clipboard.ts';
 import { type Cred, type CredChange, changeCred, copyCred, ROOT } from './cred.ts';
 import {
   type DeviceAccess,
@@ -41,6 +36,7 @@ import {
   kernelFdKind,
   memoryFile,
   type OpenFile,
+  openAccess,
   openPipe,
   pollFile,
 } from './fd-table.ts';
@@ -169,7 +165,7 @@ export type WasmSyscall =
   | { op: 'fd-open-tty'; name?: string }
   | { op: 'fd-tty-names' }
   | { op: 'fd-tty-owner'; name: string }
-  | { op: 'fd-open-sealed' }
+  | { op: 'fd-open-sealed'; flags: number }
   | { op: 'fd-open-clipboard'; flags: number }
   | { op: 'tty-get'; fd: number }
   | { op: 'tty-set'; fd: number; termios: Termios; flush?: boolean }
@@ -971,18 +967,16 @@ export class WasmProcess {
     return this.fds.install(this.options.outputFilter?.(file) ?? file, 3);
   }
 
-  private openSealed(): number {
+  private openSealed(flags: number): number {
     const broker = this.options.sealed;
     if (!broker) throw new KernelError('ENOENT');
-    return this.fds.install(broker.open(), 3);
+    return this.fds.install(broker.open(openAccess(flags)), 3);
   }
 
   private async openClipboard(flags: number): Promise<number> {
     const broker = this.options.clipboard;
     if (!broker) throw new KernelError('ENOENT');
-    const mode = flags & WRITE_ACCESS;
-    const access: ClipboardAccess = mode === 0 ? 'read' : mode === 1 ? 'write' : 'both';
-    const file = broker.open(access, await this.clipboardStamp());
+    const file = broker.open(openAccess(flags), await this.clipboardStamp());
     return this.fds.install(this.options.outputFilter?.(file) ?? file, 3);
   }
 
@@ -1159,7 +1153,7 @@ export class WasmProcess {
       case 'fd-tty-names':
         return { ok: true, kind: 'json', json: this.options.jobs?.terminalNames() ?? [] };
       case 'fd-open-sealed':
-        return { ok: true, kind: 'json', json: this.openSealed() };
+        return { ok: true, kind: 'json', json: this.openSealed(req.flags) };
       case 'fd-open-clipboard':
         return { ok: true, kind: 'json', json: await this.openClipboard(req.flags) };
       case 'fd-tty-owner':

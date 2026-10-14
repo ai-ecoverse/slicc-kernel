@@ -187,7 +187,7 @@ export interface ProcessSys {
 
   ptyNumbers?(): number[];
 
-  openSealed?(): number;
+  openSealed?(flags: number): number;
   openClipboard?(flags: number): number;
   procList?(): ProcessListing;
   mountList?(): MountLine[];
@@ -636,7 +636,7 @@ export class KernelStreams {
   ): ProcessStream | undefined {
     const { openSealed } = this.sys;
     if (path !== SEALED_PATH || !openSealed) return undefined;
-    const kfd = this.call(() => openSealed.call(this.sys));
+    const kfd = this.call(() => openSealed.call(this.sys, flags & 3));
     return this.vessel(open, kfd, { path, flags, mode }, false);
   }
 

@@ -645,12 +645,10 @@ export class WasiFds {
     let fd: number | undefined;
     let kind: KernelFdKind;
     if (path === SEALED_PATH && openSealed) {
-      if (oflags & OFLAGS.DIRECTORY) throw new WasiError('ENOTDIR');
-      if (oflags & OFLAGS.CREAT && oflags & OFLAGS.EXCL) throw new WasiError('EEXIST');
-      fd = openSealed.call(this.kernel.sys);
+      fd = this.openCharDevice(openSealed, oflags, rights);
       kind = 'sealed';
     } else if (path === CLIPBOARD_PATH && openClipboard) {
-      fd = this.openClipboard(openClipboard, oflags, rights);
+      fd = this.openCharDevice(openClipboard, oflags, rights);
       kind = 'clipboard';
     } else if (path === '/dev/tty' || /^\/dev\/tty\d+$/.test(path)) {
       fd = openTty?.call(this.kernel.sys, path === '/dev/tty' ? undefined : path);
@@ -662,8 +660,8 @@ export class WasiFds {
     return fd;
   }
 
-  private openClipboard(
-    openClipboard: (flags: number) => number,
+  private openCharDevice(
+    openDevice: (flags: number) => number,
     oflags: number,
     rights: bigint
   ): number {
@@ -671,7 +669,7 @@ export class WasiFds {
     if (oflags & OFLAGS.CREAT && oflags & OFLAGS.EXCL) throw new WasiError('EEXIST');
     const want = wantOf(oflags, rights);
     const flags = want === 6 ? O_RDWR : want === 2 ? O_WRONLY : 0;
-    return openClipboard.call(this.kernel.sys, flags);
+    return openDevice.call(this.kernel.sys, flags);
   }
 
   open(path: string, oflags: number, rights: bigint, fdflags: number): number {
