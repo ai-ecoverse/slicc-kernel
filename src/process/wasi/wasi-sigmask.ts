@@ -47,6 +47,25 @@ export class WasiSigmask {
     return E.SUCCESS;
   }
 
+  swap(setLo: number, setHi: number): [number, number] {
+    const old: [number, number] = [this.lo, this.hi];
+    this.lo = setLo & ~LIBC_UNBLOCKABLE;
+    this.hi = setHi | 0;
+    Atomics.store(this.header, SAB_I_BLOCKED, kernelBits(this.lo));
+    return old;
+  }
+
+  deliverUnblocked(): boolean {
+    const now = Atomics.load(this.header, SAB_I_BLOCKED);
+    if ((Atomics.load(this.header, SAB_I_SIGNALS) & ~now) === 0) return false;
+    this.deliver();
+    return true;
+  }
+
+  restore([lo, hi]: [number, number]): void {
+    this.set(SIG_SETMASK, lo, hi, () => {});
+  }
+
   discard(sig: number): void {
     Atomics.and(this.header, SAB_I_SIGNALS, ~sigbit(sig));
     if (this.process) Atomics.and(this.process, SAB_I_SIGNALS, ~sigbit(sig));
