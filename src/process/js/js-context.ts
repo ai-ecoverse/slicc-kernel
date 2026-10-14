@@ -293,6 +293,19 @@ function writer(kernel: JsKernel, info: (fd: number) => Promise<FdInfo>, pid: nu
   return { writes, writeAll };
 }
 
+function readable(read: (fd: number) => Promise<Uint8Array>): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>(
+    {
+      async pull(controller) {
+        const chunk = await read(0);
+        if (chunk.length === 0) controller.close();
+        else controller.enqueue(chunk);
+      },
+    },
+    { highWaterMark: 0 }
+  );
+}
+
 export function createContext(o: ContextOptions): CreatedContext {
   const { kernel } = o;
   const infos = new Map<number, FdInfo>();
@@ -416,16 +429,7 @@ export function createContext(o: ContextOptions): CreatedContext {
       return identityOf(await kernel.json({ op: 'proc-identity' }), o).ppid;
     },
     cwd: o.cwd,
-    stdin: new ReadableStream<Uint8Array>(
-      {
-        async pull(controller) {
-          const chunk = await read(0);
-          if (chunk.length === 0) controller.close();
-          else controller.enqueue(chunk);
-        },
-      },
-      { highWaterMark: 0 }
-    ),
+    stdin: readable(read),
     stdout: writable(1),
     stderr: writable(2),
     read,
