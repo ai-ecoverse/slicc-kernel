@@ -695,9 +695,21 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
     }
     return want;
   };
+  const directory = (stream: LiveFsStream) => {
+    const bridge = bridgeOf(stream.node);
+    if (!bridge.owners || !Fs.isDir(stream.node.mode)) return;
+    try {
+      h.call(() =>
+        bridge.access?.(liveNodePath(stream.node), accessOf(wantOf(stream.flags)), 'open')
+      );
+    } catch (err) {
+      if (stream.fd !== undefined) Fs.closeStream?.(stream.fd);
+      throw err;
+    }
+  };
   return {
     open(stream) {
-      if (!Fs.isFile(stream.node.mode)) return;
+      if (!Fs.isFile(stream.node.mode)) return directory(stream);
       const s = stream.node.live;
       const created = s.created === true;
       s.created = undefined;
