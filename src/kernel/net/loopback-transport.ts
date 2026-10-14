@@ -48,6 +48,7 @@ const OP_PONG = 10;
 const TOKEN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 const SAFE_VALUE = /^[^\r\n\0]*$/;
 const CLOSE_WAIT_MS = 5000;
+const MAX_UNREAD = 16 * 1024 * 1024;
 
 function errno(code: string, message: string): Error & { code: string } {
   return Object.assign(new Error(`${code}: ${message}`), { code });
@@ -59,6 +60,7 @@ function requestHead(
   headers: HeaderList,
   extra: ReadonlyArray<readonly [string, string]>
 ): Uint8Array {
+  if (!TOKEN.test(method)) throw errno('EINVAL', `method ${method}`);
   const lines = [`${method} ${url.pathname}${url.search} HTTP/1.1`, `Host: ${url.host}`];
   for (const [name, value] of headers) {
     if (OWN_HEADERS.has(name.toLowerCase())) continue;
@@ -283,6 +285,8 @@ class LoopbackWebSocket implements RealmWebSocket {
   private readonly stop = new AbortController();
   private readonly socket: KernelSocket;
   private settle!: (close: RealmWebSocketClose) => void;
+  private unread = 0;
+  private room: (() => void) | undefined;
 
   constructor(socket: KernelSocket, incoming: Incoming, protocol: string) {
     this.socket = socket;
@@ -290,21 +294,30 @@ class LoopbackWebSocket implements RealmWebSocket {
     this.closed = new Promise((resolve) => {
       this.settle = resolve;
     });
+    this.stop.signal.addEventListener('abort', () => this.room?.(), { once: true });
     const queue: RealmWebSocketMessage[] = [];
     let wake: (() => void) | undefined;
     let ended = false;
     void this.pump(new WsReader(incoming, undefined, true, true), (message) => {
       queue.push(message);
+      this.unread += message.length;
       wake?.();
     }).finally(() => {
       ended = true;
       wake?.();
     });
+    const taken = (message: RealmWebSocketMessage): void => {
+      this.unread -= message.length;
+      const room = this.room;
+      this.room = undefined;
+      room?.();
+    };
     this.messages = {
       [Symbol.asyncIterator]: async function* () {
         for (;;) {
           const next = queue.shift();
           if (next !== undefined) {
+            taken(next);
             yield next;
             continue;
           }
@@ -316,6 +329,14 @@ class LoopbackWebSocket implements RealmWebSocket {
         }
       },
     };
+  }
+
+  private async space(): Promise<void> {
+    while (this.unread > MAX_UNREAD && !this.stop.signal.aborted) {
+      await new Promise<void>((resolve) => {
+        this.room = resolve;
+      });
+    }
   }
 
   get buffered(): number {
@@ -343,6 +364,7 @@ class LoopbackWebSocket implements RealmWebSocket {
     let close: RealmWebSocketClose = { code: 1006, reason: '' };
     try {
       for (;;) {
+        await this.space();
         const event = await reader.next(this.stop.signal);
         if (!event) break;
         if (event.kind === 'text') deliver(event.text);
