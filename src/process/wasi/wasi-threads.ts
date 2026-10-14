@@ -32,6 +32,8 @@ export class WasiThreads {
 
   received: Readonly<Record<string, WebAssembly.Module>> | undefined;
 
+  blocked: (() => number) | undefined;
+
   private readonly port: SabPostLike;
   private readonly memory: WebAssembly.Memory;
   private readonly cap: number;
@@ -60,6 +62,7 @@ export class WasiThreads {
     this.beforeSpawn?.();
     const tid = Atomics.add(this.ids, LAST_TID, 1) + 1;
     const modules = this.modules?.();
+    const blocked = this.blocked?.() ?? 0;
     this.port.postMessage({
       type: WASM_THREAD_SPAWN,
       thread: {
@@ -68,6 +71,7 @@ export class WasiThreads {
         memory: this.memory,
         ids: this.ids.buffer as SharedArrayBuffer,
         ...(modules ? { modules } : {}),
+        ...(blocked ? { blocked } : {}),
       },
     });
     return tid;

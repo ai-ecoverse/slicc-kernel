@@ -1,7 +1,12 @@
 import { SIG, sigbit, signalsIn } from '../kernel/signals.ts';
 import type { SyncFsResult } from '../realm/sync-fs-wire.ts';
 import type { SyncSabTransport } from '../realm/sync-sab-bridge.ts';
-import { SAB_I_KILLED, SAB_I_SIGNALS, SAB_I_TIMERS } from '../realm/sync-sab-wire.ts';
+import {
+  SAB_I_BLOCKED,
+  SAB_I_KILLED,
+  SAB_I_SIGNALS,
+  SAB_I_TIMERS,
+} from '../realm/sync-sab-wire.ts';
 
 export interface SignalHooks {
   masks(): { caught: number; ignored: number; restart: number; defaults?: number } | null;
@@ -107,7 +112,7 @@ export class SignalGate {
     this.report();
     const header = this.header;
     const pending =
-      Atomics.load(header, SAB_I_SIGNALS) |
+      (Atomics.load(header, SAB_I_SIGNALS) & ~Atomics.load(header, SAB_I_BLOCKED)) |
       Atomics.load(header, SAB_I_TIMERS) |
       Atomics.load(header, SAB_I_KILLED);
     if (pending === 0) return false;
@@ -123,7 +128,11 @@ export class SignalGate {
       this.hooks.killed(killed);
     }
     const timers = Atomics.exchange(this.header, SAB_I_TIMERS, 0);
-    const pending = Atomics.exchange(this.header, SAB_I_SIGNALS, 0);
+    const blocked = Atomics.load(this.header, SAB_I_BLOCKED);
+    const pending =
+      blocked === 0
+        ? Atomics.exchange(this.header, SAB_I_SIGNALS, 0)
+        : Atomics.and(this.header, SAB_I_SIGNALS, blocked) & ~blocked;
 
     if (this.depth <= 1) this.lastDelivered = pending | (timers & 1 ? sigbit(SIG.ALRM) : 0);
     if (pending !== 0 || timers !== 0) this.delivered++;
