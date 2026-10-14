@@ -209,6 +209,7 @@ const EARLY_WHOLE_FILE = 64 * 1024;
 
 const O_ACCMODE = 3;
 const O_TRUNC = 0o1000;
+const O_PATH = 0o10000000;
 
 function wantOf(flags: number): number {
   const mode = flags & O_ACCMODE;
@@ -697,7 +698,7 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
   };
   const directory = (stream: LiveFsStream) => {
     const bridge = bridgeOf(stream.node);
-    if (!bridge.owners || !Fs.isDir(stream.node.mode)) return;
+    if (!bridge.owners || !Fs.isDir(stream.node.mode) || stream.flags & O_PATH) return;
     try {
       h.call(() =>
         bridge.access?.(liveNodePath(stream.node), accessOf(wantOf(stream.flags)), 'open')
