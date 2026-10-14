@@ -2,6 +2,7 @@ import { MessageChannel, type MessagePort, Worker } from 'node:worker_threads';
 import type { CdpHook } from './cdp/types.ts';
 import type { MessagePortLike } from './client/protocol.ts';
 import { type ServedClient, serveClient } from './client/serve-client.ts';
+import type { FacadeSpecs } from './facade/types.ts';
 import type { DenialHook } from './fs/dac.ts';
 import { OpfsFs } from './fs/opfs.ts';
 import type { Protection } from './fs/protect.ts';
@@ -53,6 +54,13 @@ export {
   type SpawnOptions,
   type WatchChange,
 } from './client/attach.ts';
+export type {
+  FacadeConnection,
+  FacadeHook,
+  FacadeInfo,
+  FacadeSpec,
+  FacadeSpecs,
+} from './facade/types.ts';
 export type { Denial, DenialHook } from './fs/dac.ts';
 export type {
   ConnectOptions,
@@ -77,6 +85,7 @@ export type {
   SealedHook,
   SealedRequest,
 } from './kernel/sealed.ts';
+export type { ConnectorStamp } from './kernel/socket.ts';
 export type {
   HostfsEvent,
   HostfsGrant,
@@ -104,6 +113,7 @@ export interface NodeKernelOptions {
   hostfsFetch?: FetchLike;
   hostfsOrigin?: string;
   cdp?: CdpHook;
+  facades?: FacadeSpecs;
   hostname?: string;
   users?: UsersMode;
   onDenial?: DenialHook;
@@ -244,6 +254,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     ...(options.hostfs ? { hostfs: options.hostfs } : {}),
     ...hostfsFetchOf(options),
     ...(options.cdp ? { cdp: options.cdp } : {}),
+    ...(options.facades ? { facades: options.facades } : {}),
     ...(options.hostname !== undefined ? { hostname: options.hostname } : {}),
     users: options.users === undefined ? DEFAULT_USERS : options.users,
     ...(options.onDenial ? { onDenial: options.onDenial } : {}),

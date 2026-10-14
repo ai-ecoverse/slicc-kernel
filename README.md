@@ -45,6 +45,7 @@ const { status, stdout, stderr } = await kernel.run(['bash', '-c', 'echo hi > he
 | `clipboard` | none | `{ read(stamp) => Promise<string>, write(text, stamp) => Promise<void> }`: the clipboard behind [`/dev/clipboard`](#devclipboard). `createNodeKernel` takes it too |
 | `approve` | none | `(req, { signal }) => 'once' \| 'always' \| 'deny'` (or a promise of one): decides a `sudo` request that needs approval (see [Sudo](#sudo)); without it, such a request is denied. `createNodeKernel` takes it too |
 | `cdp` | none | `({ runtime }) => Promise<CdpConnection>`: a browser-level DevTools connection for programs that drive a browser (see [Browser automation](#browser-automation-cdp)) |
+| `facades` | none | `{ link: { port, hook? } }`: kernel-only loopback ports whose connections a hook on the page serves, with the connecting program's identity (see [Page facades](#page-facades)) |
 | `protect` | none | `{ paths, writers? }`: directories no process may change, root included, in every `users` mode, except processes with one of the `writers` tags (see [Protected paths](#protected-paths)). `createNodeKernel` takes it too |
 
 ### `kernel.run(argv, options?) → Promise<{ status, signal, stdout, stderr }>`
@@ -176,6 +177,7 @@ Attaches to a kernel over a port from `kernel.connect()`, in any realm: a worker
 | `fetch({ url, method, headers, body, signal })` | through the kernel's network transport (the one the page passed to `createKernel`), with a streaming body; `transport` is the same as a `NetworkTransport` |
 | `fs.watch(paths, { recursive }, onChange)` | resolves with `{ close() }`; `onChange` gets `{ paths }`, the changed paths at, below (or, without `recursive`, directly in) the watched ones, batched per task, or `{ overflow: true }` when there were too many to list, to rescan; it covers every change made through this kernel, by its processes and its clients |
 | `serveCdp(hook, { runtime })` | offers this client's browser to the kernel's programs (protocol 1.5): `hook` is the `cdp` hook of `createKernel`, asked once per program connection; resolves with `{ close() }`, and closing or detaching takes the offer back and closes its connections (see [Browser automation](#browser-automation-cdp)) |
+| `serveFacade(name, hook) → { close() }` | serves a facade that `createKernel({ facades })` declared, the same way as its `hook` (protocol 1.11); the latest registration wins, over the embedder's hook too, and `close()` hands it back. An undeclared name is `EINVAL` |
 | `onTraits(listener) → () => void` | calls `listener(traits)` each time the kernel announces new transport traits (`kernel.updateTransportTraits()`, protocol 1.10), after `client.transport.traits` has been updated; the function it returns removes the listener |
 | `close({ kill })` | detaches: the client's processes keep running unless `kill` is set, which ends their process groups with `SIGKILL`; its terminals are hung up |
 | `closed` | resolves with the error that ended the client |
@@ -196,7 +198,7 @@ const { status, stdout } = await kernel.run(['bash', '-c', 'echo hi'], { cwd: '/
 kernel.terminate();
 ```
 
-`createNodeKernel({ root, modules, commands, env, network, worker, processMounts, fstabRetries, cdp, hostfs, hostfsOrigin, hostfsFetch, users, onDenial, approve })` takes the options of `createKernel` except `metadata`, and `fstabRetries`, the delays in ms between tries of a failing `/etc/fstab` line (default `[1000, 4000, 16000]`). `root` is an in-memory directory by default (`memoryRoot()` makes another), which keeps each file in 1 MiB chunks, and POSIX metadata stays in memory. Processes and threads run on `worker_threads`. The kernel has `run`, `openTerminal`, `users`, `setRoutes`, `updateTransportTraits` and `terminate` as above, plus `integrity.revoke(path?)`, `root`, `writeFile(path, data, { mode }?)` (creating the parent directories; `mode` sets the permission bits, `0` to `0o7777`, before the data is written), `chmod(path, mode)` and `readFile(path)` to put files in place and read results; like the `fs` of an attached client, they go through the mounts, as the processes see them. `nodeTransport()` is `fetchTransport()` with Node's `fetch`, which no CORS binds (`crossOrigin: 'any'`). `connect({ user })` and `attachKernel` work as in the browser: the port is a `worker_threads` `MessagePort`, which a worker thread can attach with, and `terminate()` ends every attached client.
+`createNodeKernel({ root, modules, commands, env, network, worker, facades, processMounts, fstabRetries, cdp, hostfs, hostfsOrigin, hostfsFetch, users, onDenial, approve })` takes the options of `createKernel` except `metadata`, and `fstabRetries`, the delays in ms between tries of a failing `/etc/fstab` line (default `[1000, 4000, 16000]`). `root` is an in-memory directory by default (`memoryRoot()` makes another), which keeps each file in 1 MiB chunks, and POSIX metadata stays in memory. Processes and threads run on `worker_threads`. The kernel has `run`, `openTerminal`, `users`, `setRoutes`, `updateTransportTraits` and `terminate` as above, plus `integrity.revoke(path?)`, `root`, `writeFile(path, data, { mode }?)` (creating the parent directories; `mode` sets the permission bits, `0` to `0o7777`, before the data is written), `chmod(path, mode)` and `readFile(path)` to put files in place and read results; like the `fs` of an attached client, they go through the mounts, as the processes see them. `nodeTransport()` is `fetchTransport()` with Node's `fetch`, which no CORS binds (`crossOrigin: 'any'`). `connect({ user })` and `attachKernel` work as in the browser: the port is a `worker_threads` `MessagePort`, which a worker thread can attach with, and `terminate()` ends every attached client.
 
 By default `nodeTransport()` refuses destinations on the host itself, because Node can reach them and a page can't: local DevTools on 9222–9229, dev servers, local admin APIs, and the cloud metadata address.
 - **What it refuses:** loopback (`127.0.0.0/8`, `::1`, and their IPv4-mapped forms), unspecified addresses (`0.0.0.0/8`, `::`), `localhost` and `*.localhost`, and link-local addresses (`169.254.0.0/16`, `fe80::/10`), plus AWS's IPv6 metadata address `fd00:ec2::254`.
@@ -416,7 +418,7 @@ Programs drive a browser with the Chrome DevTools Protocol over a WebSocket, whi
 - **Sessions** are Chrome's flattened ones: `Target.attachToTarget` with `flatten: true`, then commands with a top-level `sessionId`. Messages pass unchanged, as text frames up to 256 MiB (a larger one closes the socket with `1009`). Each program WebSocket gets a host connection of its own: closing the socket (or exiting) closes it, which detaches its sessions, and a host that closes is passed on as a close frame (`1011` with its reason). The kernel then waits up to a second for the program's close frame before it hangs up, as RFC 6455 has it, so a program that answers the close can still report the code. `terminate()` closes them all.
 - **Runtime**: a program adds `runtime=<name>` to the query of the URL it opens, and the kernel gives it to the host; the kernel does not interpret it.
 - **No host**: `/json/*` and the WebSocket handshake answer `503` with `slicc-kernel: no CDP host is attached (createKernel({ cdp }) or client.serveCdp)`, and a host that refuses (an unknown runtime, say) gives `502` with its message.
-- **Kernel-only**: port `9222` takes connections only from programs in the kernel. `kernel.dial`, a client's `dial` and `loopbackFetch` (and so `9222.kernel.localhost` and slicc-node's tunnel) are refused with `ECONNREFUSED`, since the facade drives the user's real browser.
+- **Kernel-only**: port `9222` is reserved (a program's `bind()` to it fails with `EADDRINUSE`, so none can squat it) and takes connections only from programs in the kernel. `kernel.dial`, a client's `dial` and `loopbackFetch` (and so `9222.kernel.localhost` and slicc-node's tunnel) are refused with `ECONNREFUSED`, since the facade drives the user's real browser.
 
 An embedder offers a browser with the `cdp` option of `createKernel` or `createNodeKernel`, or from an attached client with `client.serveCdp(hook, { runtime })`:
 
@@ -433,6 +435,31 @@ type CdpHook = (request: { runtime?: string }) => Promise<CdpConnection>;
 A connection is one browser-level CDP session; a host with only per-tab debugging emulates the `Target` domain behind it. A connection asking for a `runtime` goes to the newest client that offered that name; any other goes to the `cdp` option, or else to the newest client offer. In the browser the hook runs on the page, with a `MessagePort` per connection to the kernel worker.
 
 Process workers can also use the transport directly, without a socket: the `net-request`, `net-read` and `net-close` syscalls (`Module.sliccKernel.http` in a process) open a request and read its body in pieces. `net-open` starts a request and answers its handle at once, and `net-head` waits for its response head, so `net-close` can abort a request whose head has not come yet. Requests are per process and closed when it exits, and a request body has no size limit of its own (the transport's `maxRequestBody` applies to the proxy). `net-traits` answers the transport's `traits` with `crossOrigin`: `'cors'` when it is bound by CORS like `fetchTransport()`, `'any'` (the default for a transport that does not say) when it is not; without a transport it fails with `ENETUNREACH`.
+
+### Page facades
+
+A facade is a loopback port that only programs in the kernel can reach, whose connections the embedder serves, much like the CDP facade, but as a plain duplex byte stream with no protocol of the kernel's. slicc's link layer is the first user.
+
+```ts
+createKernel({ facades: { link: { port: 7400, hook } } });
+
+type FacadeHook = (stamp: ConnectorStamp, info: { name: string }) => FacadeConnection | Promise<FacadeConnection>;
+
+interface FacadeConnection {
+  send(bytes: Uint8Array): void;
+  onmessage: ((bytes: Uint8Array) => void) | null;
+  onclose: ((reason?: string) => void) | null;
+  close(reason?: string): void;
+}
+
+interface ConnectorStamp { pid: number; ppid: number; uid: number; gid: number; user?: string; groups: number[]; users: 'off' | 'report' | 'enforce'; tag?: string }
+```
+
+- **Declared at boot:** `facades` names each facade (`[a-z][a-z0-9-]*`) and its port, from 1 to 65535. A port may not be 9222 (the CDP facade), 3128 (the realm proxy) or another facade's; anything else throws a `TypeError`. `createNodeKernel` takes `facades` too. The hook may be left out and supplied later by an attached client's `client.serveFacade(name, hook)`, which works only for a declared name.
+- **Programs** find each facade in their environment as `SLICC_<NAME>_URL`, upper-cased with `-` as `_`, e.g. `SLICC_LINK_URL=tcp://127.0.0.1:7400`, and connect to it with an ordinary TCP `connect()`: a JS program's `ctx.net.connect`, an Emscripten program's socket, or a WASIX program's `sock_connect`. Every ABI ends in the same kernel call.
+- **The stamp** is the connecting process's identity, taken by the kernel at `connect()` from its credentials, as Linux's `SO_PEERCRED` is: its pid and parent pid as `ps` shows them, effective uid and gid, user name, groups, the `users` mode and the process's tag (see `kernel.run`), the same fields as a `/dev/sealed` request's `caller`. A program cannot forge it. The hook gets it and `{ name }`, so one function can serve several facades, and decides: it resolves with a connection, whose bytes then pass both ways until either side closes, or it rejects, and the program's connection is closed. A connection while no hook is attached is closed at once, the same as a refusal. Bytes from the hook wait in the kernel until the program reads them, up to 16 MiB per connection: past that, the connection is closed and the hook's `close(reason)` gets `slicc-kernel: more than 16777216 bytes are waiting for the program to read`. A program that connects to anything else pays nothing for this: the stamp is built only for a facade's port.
+- **Handing a connection on hands over the identity:** a facade connection that a process passes to another (a fork, an exec, an inherited descriptor) still speaks as the process that connected, as on Linux. So a privileged process should not pass one to a less trusted one.
+- **Reserved:** a facade's port is reserved from the start. A program's `bind()` to it fails with `EADDRINUSE`, so no program can squat it and impersonate the page, and ephemeral ports skip it. Port 9222 is reserved the same way. Like 9222, a facade's port is kernel-only: the page's `kernel.dial`, a client's `dial` and `loopbackFetch` (and so `<port>.kernel.localhost`) are refused with `ECONNREFUSED`.
 
 ### Local proxy protocol
 
