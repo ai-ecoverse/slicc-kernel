@@ -1,4 +1,4 @@
-import type { KernelFs } from './fs/types.ts';
+import { type KernelFs, resolvePath } from './fs/types.ts';
 
 export type Abi = 'emscripten' | 'wasi' | 'js';
 
@@ -15,6 +15,7 @@ export interface Command {
   env?: Record<string, string>;
   unset?: string[];
   script?: string;
+  bin?: true;
   imports?: string;
 }
 
@@ -33,6 +34,8 @@ interface CommandEntry {
 }
 
 interface Manifest {
+  name?: unknown;
+  bin?: unknown;
   slicc?: {
     abi?: unknown;
     commands?: unknown;
@@ -206,21 +209,106 @@ async function packagesIn(fs: KernelFs, roots: string | string[]): Promise<strin
   return dirs;
 }
 
+function binEntries(manifest: Manifest): [string, unknown][] {
+  const { bin, name } = manifest;
+  if (typeof bin === 'string') {
+    return typeof name === 'string' ? [[name.slice(name.lastIndexOf('/') + 1), bin]] : [];
+  }
+  return bin && typeof bin === 'object' ? Object.entries(bin) : [];
+}
+
+interface Found {
+  path: string;
+  file: boolean;
+}
+
+type Physical = (path: string) => Promise<Found | undefined>;
+
+const MAX_HOPS = 40;
+
+function physicalResolver(fs: KernelFs): Physical {
+  const known = new Map<string, Promise<Found | undefined>>();
+  const pending = new Set<string>();
+  let hops = 0;
+  const step = async (path: string): Promise<Found | undefined> => {
+    if (path === '/') return { path, file: false };
+    const slash = path.lastIndexOf('/');
+    const parent = await resolve(path.slice(0, slash) || '/');
+    if (parent === undefined) return undefined;
+    const at = resolvePath(parent.path, path.slice(slash + 1));
+    const st = await fs.lstat(at).catch(() => undefined);
+    if (!st?.isSymbolicLink) return st ? { path: at, file: st.isFile === true } : undefined;
+    const target = await fs.readlink(at).catch(() => undefined);
+    if (target === undefined || ++hops > MAX_HOPS) return undefined;
+    return resolve(resolvePath(parent.path, target));
+  };
+  const resolve = (path: string): Promise<Found | undefined> => {
+    if (pending.has(path)) return Promise.resolve(undefined);
+    let found = known.get(path);
+    if (!found) {
+      pending.add(path);
+      found = step(path).finally(() => pending.delete(path));
+      known.set(path, found);
+    }
+    return found;
+  };
+  return (path) => {
+    hops = 0;
+    return resolve(path);
+  };
+}
+
+async function binCommandsOf(
+  physical: Physical,
+  pkg: string,
+  manifest: Manifest,
+  taken: ReadonlySet<string>
+): Promise<Command[]> {
+  const entries = binEntries(manifest);
+  if (entries.length === 0) return [];
+  const home = (await physical(pkg))?.path;
+  const out: Command[] = [];
+  for (const [name, rel] of entries) {
+    if (taken.has(name) || !NAME.test(name) || name === '.' || name === '..') continue;
+    const script = inside(pkg, rel);
+    if (!script) continue;
+    const real = await physical(script);
+    if (!real?.file || !real.path.startsWith(`${home}/`)) continue;
+    out.push({
+      name,
+      abi: 'emscripten',
+      glue: script,
+      wasm: script,
+      argv0: name,
+      script,
+      bin: true,
+    });
+  }
+  return out;
+}
+
 export async function scanCommands(
   fs: KernelFs,
-  modules: string | string[]
+  modules: string | string[],
+  binsFrom = Number.POSITIVE_INFINITY
 ): Promise<Map<string, Command>> {
   const found = new Map<string, Command>();
-  for (const pkg of await packagesIn(fs, modules)) {
-    let manifest: Manifest;
-    try {
-      manifest = JSON.parse(await fs.readFile(`${pkg}/package.json`));
-    } catch {
-      continue;
-    }
-    for (const command of commandsOf(pkg, manifest)) {
-      if (!found.has(command.name))
-        found.set(command.name, await withPackagePaths(fs, pkg, command));
+  const physical = physicalResolver(fs);
+  for (const [index, root] of (typeof modules === 'string' ? [modules] : modules).entries()) {
+    for (const pkg of await packages(fs, root)) {
+      let manifest: Manifest;
+      try {
+        manifest = JSON.parse(await fs.readFile(`${pkg}/package.json`));
+      } catch {
+        continue;
+      }
+      const own = commandsOf(pkg, manifest);
+      const named = new Set(own.map((command) => command.name));
+      const bins = index >= binsFrom ? await binCommandsOf(physical, pkg, manifest, named) : [];
+      for (const command of [...own, ...bins]) {
+        if (!found.has(command.name))
+          found.set(command.name, await withPackagePaths(fs, pkg, command));
+      }
     }
   }
   if (!found.has('sh') && found.has('bash')) {

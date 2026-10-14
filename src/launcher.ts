@@ -146,6 +146,7 @@ export interface LauncherOptions {
   fs: KernelFs;
   createWorker: () => WasmWorkerLike;
   modules?: string;
+  commands?: { append?: readonly string[] };
   env?: Record<string, string>;
   transport?: RealmTransport;
   caStore?: CaStore;
@@ -251,6 +252,7 @@ interface Planned {
   script?: true;
   via?: string[];
   sources?: string[];
+  bins?: string[];
 }
 
 interface Redeemer {
@@ -358,14 +360,25 @@ function shebang(head: Uint8Array): string[] | undefined {
     .split(/[ \t]+/);
 }
 
-async function rootOnly(fs: KernelFs, path: string): Promise<boolean> {
+async function rootOnly(fs: KernelFs, path: string, dir = false): Promise<boolean> {
   const names = chain(path);
   for (const [i, at] of names.entries()) {
     const st = await fs.lstat(at).catch(() => undefined);
-    const kind = i === names.length - 1 ? st?.isFile : st?.isDirectory;
+    const kind = i === names.length - 1 && !dir ? st?.isFile : st?.isDirectory;
     if (!kind || st?.uid !== 0 || (st.mode & 0o022) !== 0) return false;
   }
   return true;
+}
+
+function appendedRoots(given: { append?: readonly string[] } | undefined): string[] {
+  const roots = given?.append ?? [];
+  if (!Array.isArray(roots)) throw new TypeError('commands.append must be an array of paths');
+  for (const root of roots) {
+    if (typeof root !== 'string' || !root.startsWith('/') || normalizePath(root) !== root) {
+      throw new TypeError(`commands.append: not an absolute, normalised path: ${String(root)}`);
+    }
+  }
+  return [...roots];
 }
 
 function plainEnv(words: string[]): boolean {
@@ -472,6 +485,8 @@ export class Launcher {
   private readonly base: KernelFs;
   private readonly createWorker: () => WasmWorkerLike;
   private readonly modulesDir: string;
+  private readonly appended: string[];
+  private readonly reportedRoots = new Set<string>();
   private readonly env: Record<string, string>;
   private readonly catalogs = new Map<string, Promise<Map<string, Command>>>();
   private readonly ownCatalogs = new Map<string, Promise<ReadonlySet<string>>>();
@@ -575,6 +590,7 @@ export class Launcher {
     this.processMounts = options.processMounts ?? true;
     this.pnpmHome = options.env?.PNPM_HOME ?? SYSTEM_PNPM_HOME;
     this.modulesDir = options.modules ?? '/node_modules';
+    this.appended = appendedRoots(options.commands);
     this.cdp = new CdpHosts(options.cdp);
     const hostname = options.hostname ?? DEFAULT_HOSTNAME;
     if (!isHostname(hostname)) throw new Error(`not a host name: ${String(hostname)}`);
@@ -646,8 +662,10 @@ export class Launcher {
       timeoutMs: options.sudoTimeoutMs,
     });
     void this.unlinked.sweep('/');
-    this.watchers.watch([this.modulesDir, this.pnpmHome], { recursive: true }, () =>
-      this.resetCatalogs()
+    this.watchers.watch(
+      [this.modulesDir, this.pnpmHome, ...this.appended],
+      { recursive: true },
+      () => this.resetCatalogs()
     );
     this.watchers.watch([PASSWD], { recursive: false }, () => {
       this.scopes = undefined;
@@ -683,8 +701,11 @@ export class Launcher {
   commands(scope = ''): Promise<Map<string, Command>> {
     let found = this.catalogs.get(scope);
     if (!found) {
-      found = this.roots(scope)
-        .then((roots) => scanCommands(this.scanned, roots))
+      found = this.trustedAppended()
+        .then(async (appended) => {
+          const roots = await this.roots(scope, appended);
+          return scanCommands(this.scanned, roots, roots.length - appended.length);
+        })
         .then((commands) => commands.set(SUDO_COMMAND.name, SUDO_COMMAND));
       this.catalogs.set(scope, found);
     }
@@ -717,9 +738,38 @@ export class Launcher {
     return found;
   }
 
-  private async roots(scope = ''): Promise<string[]> {
-    const system = [this.modulesDir, ...(await pnpmGlobalRoots(this.base, this.pnpmHome))];
+  private async roots(scope = '', appended?: readonly string[]): Promise<string[]> {
+    const system = [
+      this.modulesDir,
+      ...(await pnpmGlobalRoots(this.base, this.pnpmHome)),
+      ...(appended ?? (await this.trustedAppended())),
+    ];
     return scope ? [...(await pnpmGlobalRoots(this.base, scope)), ...system] : system;
+  }
+
+  private async rootOnlyPath(root: string): Promise<boolean> {
+    for (const at of chain(root)) {
+      const real = await physicalPathAsync(this.base, at);
+      if (!(await rootOnly(this.base, real, true))) return false;
+    }
+    return true;
+  }
+
+  private async trustedAppended(): Promise<string[]> {
+    if (this.appended.length === 0 || this.usersMode === 'off') return this.appended;
+    const trusted: string[] = [];
+    for (const root of this.appended) {
+      const real = await physicalPathAsync(this.base, root);
+      if (await this.rootOnlyPath(root)) trusted.push(root);
+      else if (this.usersMode === 'report' && (await this.base.exists(real))) {
+        if (!this.reportedRoots.has(root)) {
+          this.reportedRoots.add(root);
+          this.dac?.denied({ pid: 0, uid: 0, op: 'commands', path: root, errno: 'EACCES' });
+        }
+        trusted.push(root);
+      }
+    }
+    return trusted;
   }
 
   private resetCatalogs(): void {
@@ -839,7 +889,16 @@ export class Launcher {
       const inner = await this.interpreted(interp, [interp, ...passed], cwd, scope, depth + 1);
       const via = [interp, ...(inner?.via ?? [])];
       const sources = [script, ...(inner?.sources ?? [])];
-      return inner && { ...inner, target: withScriptEnv(inner.target, command), via, sources };
+      const bins = [...(command?.bin ? [script] : []), ...(inner?.bins ?? [])];
+      return (
+        inner && {
+          ...inner,
+          target: withScriptEnv(inner.target, command),
+          via,
+          sources,
+          ...(bins.length > 0 ? { bins } : {}),
+        }
+      );
     }
     const target = withScriptEnv(found, command);
     return {
@@ -847,6 +906,7 @@ export class Launcher {
       args: [...(target.prefix ?? []), ...passed],
       via: [interp],
       sources: [script],
+      ...(command?.bin ? { bins: [script] } : {}),
     };
   }
 
@@ -884,6 +944,7 @@ export class Launcher {
       const want = i < via.length - 1 ? R_OK | X_OK : X_OK;
       await need(g, 'exec', this.fs.resolvePath(req.cwd, file), want);
     }
+    for (const bin of planned?.bins ?? []) await need(g, 'exec', bin, R_OK | X_OK);
   }
 
   private async checkedPlan(

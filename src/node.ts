@@ -91,6 +91,7 @@ export { memoryRoot };
 export interface NodeKernelOptions {
   root?: FileSystemDirectoryHandle;
   modules?: string;
+  commands?: { append?: readonly string[] };
   env?: Record<string, string>;
   network?: { transport?: NetworkTransport; uplink?: NetworkUplink };
   worker?: string | URL;
@@ -231,6 +232,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
         terminated
       ),
     ...(options.modules ? { modules: options.modules } : {}),
+    ...(options.commands ? { commands: options.commands } : {}),
     ...(options.env ? { env: options.env } : {}),
     ...(transport ? { transport } : {}),
     ...(options.network?.uplink ? { uplink: options.network.uplink } : {}),
