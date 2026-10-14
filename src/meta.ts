@@ -23,8 +23,9 @@ function id(value: unknown, what: string): number {
 }
 
 function checked(entry: MetadataEntry): MetadataEntry {
+  if (!String(entry.path).startsWith('/'))
+    throw fsError('EINVAL', `not an absolute path: ${entry.path}`);
   const path = normalizePath(String(entry.path));
-  if (!path.startsWith('/')) throw fsError('EINVAL', `not an absolute path: ${entry.path}`);
   if ((entry.uid === undefined) !== (entry.gid === undefined)) {
     throw fsError('EINVAL', `${path}: give both uid and gid, or neither`);
   }
@@ -68,6 +69,7 @@ export async function writeMetadata(
   }
   const factory = options.indexedDB ?? globalThis.indexedDB;
   const store = await openMeta(options.metadata ?? META_DB, factory);
+  const ctimeMs = Date.now();
   try {
     await store.updateMany(
       wanted.map((want) => ({
@@ -77,6 +79,7 @@ export async function writeMetadata(
           path: want.path,
           ...(want.mode !== undefined ? { mode: want.mode } : {}),
           ...(want.uid !== undefined ? { uid: want.uid, gid: want.gid as number } : {}),
+          ctimeMs,
         }),
       }))
     );

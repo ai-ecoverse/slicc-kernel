@@ -314,8 +314,11 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
       const mode = options.mode === undefined ? undefined : modeOption(options.mode);
       const parent = path.slice(0, path.lastIndexOf('/')) || '/';
       await launcher.fs.mkdir(parent, { recursive: true });
+      if (mode !== undefined) {
+        await launcher.fs.writeFile(path, '');
+        await launcher.fs.chmod(path, mode);
+      }
       await launcher.fs.writeFile(path, data);
-      if (mode !== undefined) await launcher.fs.chmod(path, mode);
     },
     chmod: async (path, mode) => launcher.fs.chmod(path, modeOption(mode)),
     readFile: async (path) => launcher.fs.readFileBuffer(path),
