@@ -1226,11 +1226,9 @@ export class Launcher {
     return this.jobs.sessionOf(pgid);
   }
 
-  private treeScrubs(pid: number, req: StartRequest): Scrubber[] | undefined {
+  private treeScrubs(req: StartRequest): Scrubber[] | undefined {
     const inherited = req.ppid !== undefined ? this.scrubs.get(req.ppid) : undefined;
-    const scrubs = req.scrub ? [...(inherited ?? []), req.scrub] : inherited;
-    if (scrubs) this.scrubs.set(pid, scrubs);
-    return scrubs;
+    return req.scrub ? [...(inherited ?? []), req.scrub] : inherited;
   }
 
   private start(req: StartRequest): WasmProcessHandle {
@@ -1239,7 +1237,7 @@ export class Launcher {
       throw new SpawnError('ESRCH');
     }
     const pid = req.pid ?? this.nextPid++;
-    const scrubs = this.treeScrubs(pid, req);
+    const scrubs = this.treeScrubs(req);
     const stack = this.stackFor(req.tag);
     const terminal = req.fds.stdioTerminal();
     const decided = req.decided ?? Promise.resolve(true);
@@ -1312,6 +1310,7 @@ export class Launcher {
       ...this.shownIds(req),
     });
     this.processes.set(pid, handle);
+    if (scrubs) this.scrubs.set(pid, scrubs);
     const { cred } = req;
     this.creds.set(pid, () => handle.cred?.() ?? copyCred(cred));
     if (req.tag !== undefined) this.tags.set(pid, req.tag);
