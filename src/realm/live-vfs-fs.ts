@@ -848,6 +848,7 @@ export function createLiveVfsPlugin(Fs: LiveFsApi): LiveVfsPlugin {
       const st = h.call(() => mount.opts.bridge.stat(mount.opts.root));
       if (!st.isDirectory) throw new Fs.ErrnoError(wasiErrno('ENOTDIR'));
       const root = h.makeNode(null, '/', st);
+      root.mode = modeFromStat(st, mount.opts.bridge.owners === true);
       mounts.add(mount);
       return root;
     },
