@@ -226,6 +226,11 @@ function* aliasOf(
   return { fd: copy, file };
 }
 
+function accessFlags(o: JsOpenOptions): number {
+  const write = o.write === true || o.append === true || o.truncate === true;
+  return write ? (o.read === true ? 2 : 1) : 0;
+}
+
 function* opened(abs: string, o: JsOpenOptions): DevStep<Omit<DevOpened, 'read' | 'write'>> {
   const node = yield* lookup(abs);
   if (isExclusive(o)) throw new JsCallError('EEXIST', abs);
@@ -234,13 +239,13 @@ function* opened(abs: string, o: JsOpenOptions): DevStep<Omit<DevOpened, 'read' 
       return { fd: (yield openRequest(abs, { ...o, create: false })) as number, file: false };
     case 'tty':
       return { fd: (yield { op: 'fd-open-tty' }) as number, file: false };
-    case 'clipboard': {
-      const write = o.write === true || o.append === true || o.truncate === true;
-      const flags = write ? (o.read === true ? 2 : 1) : 0;
-      return { fd: (yield { op: 'fd-open-clipboard', flags }) as number, file: false };
-    }
+    case 'clipboard':
+      return {
+        fd: (yield { op: 'fd-open-clipboard', flags: accessFlags(o) }) as number,
+        file: false,
+      };
     case 'sealed':
-      return { fd: (yield { op: 'fd-open-sealed' }) as number, file: false };
+      return { fd: (yield { op: 'fd-open-sealed', flags: accessFlags(o) }) as number, file: false };
     case 'terminal': {
       const req =
         node.pts === undefined

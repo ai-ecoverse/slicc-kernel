@@ -193,8 +193,8 @@ export function kernelSys(transport: SyncSabTransport): ProcessSys & PtyKernel {
     openPts(n, noctty) {
       return json(call({ op: 'pty-slave-open', n, noctty }, `pty-slave-open ${n}`)) as number;
     },
-    openSealed() {
-      return json(call({ op: 'fd-open-sealed' }, 'fd-open-sealed')) as number;
+    openSealed(flags) {
+      return json(call({ op: 'fd-open-sealed', flags }, 'fd-open-sealed')) as number;
     },
     openClipboard(flags) {
       return json(call({ op: 'fd-open-clipboard', flags }, 'fd-open-clipboard')) as number;
