@@ -78,7 +78,7 @@ export interface JsSyncContext {
     lstat(path: string): SyncFsBridgeStat;
     exists(path: string): boolean;
     readdir(path: string): string[];
-    mkdir(path: string): void;
+    mkdir(path: string, options?: { recursive?: boolean }): void;
     rm(path: string): void;
     unlink(path: string): void;
     rename(from: string, to: string): void;
@@ -349,7 +349,12 @@ function syncPathOps(
       if (inDev(abs)) return devSync(kernel, devReaddir(abs));
       return kernel.json({ op: 'readdir', path: abs }) as string[];
     },
-    mkdir: (path) => void kernel.call({ op: 'mkdir', path: resolve(path) }),
+    mkdir: (path, options) =>
+      void kernel.call({
+        op: 'mkdir',
+        path: resolve(path),
+        ...(options?.recursive === false ? { exclusive: true } : {}),
+      }),
     rm: (path) => void kernel.call({ op: 'rm', path: resolve(path) }),
     unlink: (path) => void kernel.call({ op: 'unlink', path: resolve(path) }),
     rename: (from, to) =>
