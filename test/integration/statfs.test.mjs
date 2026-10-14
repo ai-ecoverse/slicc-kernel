@@ -33,7 +33,13 @@ test('JS programs get statfs from the kernel: the root, a tmpfs mount, and ENOEN
   await kernel.writeFile('/mnt/t/.keep', '');
   await kernel.mount({ type: 'tmpfs', source: 'tmpfs', target: '/mnt/t' });
   await kernel.writeFile('/mnt/t/f', 'x'.repeat(10000));
-  const r = await kernel.run(['statfstest', '/', '/mnt/t', '/mnt/t/f', '/nope'], { cwd: '/' });
+  await kernel.run(['bash', '-c', 'ln -s /mnt/t /linkt; ln -s / /mnt/t/up'], { cwd: '/' });
+  const r = await kernel.run(
+    ['statfstest', '/', '/mnt/t', '/mnt/t/f', '/nope', '/linkt', '/mnt/t/up'],
+    {
+      cwd: '/',
+    }
+  );
   assert.equal(r.status, 0, r.stderr);
   const got = JSON.parse(r.stdout);
   const counts = { type: 0, bsize: 4096, files: 0, ffree: 0 };
@@ -44,6 +50,8 @@ test('JS programs get statfs from the kernel: the root, a tmpfs mount, and ENOEN
   assert.deepEqual(got['/mnt/t'], { async: tmpfs, sync: tmpfs });
   assert.deepEqual(got['/mnt/t/f'], { async: tmpfs, sync: tmpfs });
   assert.deepEqual(got['/nope'], { error: 'ENOENT' });
+  assert.deepEqual(got['/linkt'], { async: tmpfs, sync: tmpfs });
+  assert.deepEqual(got['/mnt/t/up'], { async: zero, sync: zero });
   const df = await kernel.run(['bash', '-c', "stat -f -c '%S %b %f' /mnt/t"], { cwd: '/' });
   assert.equal(df.stdout, '4096 262144 262144\n', df.stderr);
 });

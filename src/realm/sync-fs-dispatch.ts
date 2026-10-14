@@ -26,6 +26,7 @@ import {
   type NewOwner,
   rangedOps,
 } from '../fs/types.ts';
+import { realTarget } from '../fs/walk.ts';
 import { resolveSyncFsToken, type SyncFsTokenEntry } from './sync-fs-token-registry.ts';
 import {
   HOLD_CREATED,
@@ -96,6 +97,12 @@ async function readdirStat(
   dir: string
 ): Promise<Array<[string, SyncFsStatJson | null]>> {
   return (await fs.readdirStat(dir)).map(([name, stat]) => [name, stat && statJson(stat)]);
+}
+
+async function usageAt(entry: SyncFsTokenEntry, path: string): Promise<SyncFsUsage | undefined> {
+  if (!entry.statfs) return undefined;
+  const real = await realTarget(entry.fs, path).catch(() => path);
+  return entry.statfs(real);
 }
 
 async function storageUsage(): Promise<SyncFsUsage | null> {
@@ -457,7 +464,7 @@ async function dispatchOne(entry: SyncFsTokenEntry, req: SyncFsRequest): Promise
     if (req.op === 'hold') return await holdOp(entry, path, req);
     const refused = await guarded(entry, path, req);
     if (refused) return refused;
-    if (req.op === 'statfs') return json((await entry.statfs?.(path)) ?? (await storageUsage()));
+    if (req.op === 'statfs') return json((await usageAt(entry, path)) ?? (await storageUsage()));
     if (entry.revoked?.(path)) return { ok: false, errno: 'EIO', message: `${path} was unmounted` };
     if ((req.op === 'write' && req.mode === 1) || UNLINKED_OPS.has(req.op)) {
       const serve = async () => run(entry, await keptOr(entry, path, req.handle), req);
