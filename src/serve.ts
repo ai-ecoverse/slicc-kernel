@@ -9,7 +9,7 @@ import type { IntegrityLookup } from './fs/integrity.ts';
 import { META_DB, type MetaStore } from './fs/meta.ts';
 import { OpfsFs } from './fs/opfs.ts';
 import { type ProtectInit, type Protection, protectInit } from './fs/protect.ts';
-import { fsError, type UsersMode } from './fs/types.ts';
+import { fsError, modeOption, type UsersMode } from './fs/types.ts';
 import { type IntegrityReply, integrityAsker } from './integrity-relay.ts';
 import type { ClipboardHook } from './kernel/clipboard.ts';
 import { dialSocket, serveSocket } from './kernel/dial.ts';
@@ -129,6 +129,7 @@ export interface DialRequest {
 
 export type AttestRequest =
   | { id: number; op: 'attest'; path: string }
+  | { id: number; op: 'chmod'; path: string; mode: number }
   | { id: number; op: 'watch-files'; paths: string[] }
   | { id: number; op: 'unwatch-files'; watch: number };
 
@@ -311,7 +312,12 @@ const USERS_OPS: ReadonlySet<string> = new Set([
   'groups-remove-member',
 ]);
 
-const ATTEST_OPS: ReadonlySet<string> = new Set(['attest', 'watch-files', 'unwatch-files']);
+const ATTEST_OPS: ReadonlySet<string> = new Set([
+  'attest',
+  'watch-files',
+  'unwatch-files',
+  'chmod',
+]);
 
 function isAttestRequest(req: KernelRequest): req is AttestRequest {
   return ATTEST_OPS.has(req.op);
@@ -331,6 +337,7 @@ function attestOps(port: KernelPort) {
   const watches = new Map<number, () => void>();
   return async (l: Launcher, req: AttestRequest): Promise<unknown> => {
     if (req.op === 'attest') return l.attest(req.path);
+    if (req.op === 'chmod') return l.fs.chmod(req.path, modeOption(req.mode)).then(() => true);
     if (req.op === 'unwatch-files') {
       watches.get(req.watch)?.();
       return watches.delete(req.watch);

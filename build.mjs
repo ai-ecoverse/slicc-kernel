@@ -10,6 +10,7 @@ await build({
     'src/driver-worker.ts',
     'src/driver.ts',
     'src/testing.ts',
+    'src/meta.ts',
   ],
   outdir: 'dist',
   bundle: true,
