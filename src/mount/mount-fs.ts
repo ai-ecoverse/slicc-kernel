@@ -11,6 +11,7 @@ import {
   normalizePath,
   type OwnerChange,
   type Perm,
+  redirectOf,
 } from '../fs/types.ts';
 import type { KeptFile, UnlinkHolder } from '../fs/unlinked.ts';
 import { joinName, realDir, realTarget } from '../fs/walk.ts';
@@ -660,6 +661,7 @@ export class MountTable {
   }
 
   wrap(base: KernelFs): KernelFs {
+    base.crossings?.((path) => this.locate(normalizePath(path)) !== undefined);
     return new MountFs(this, base);
   }
 }
@@ -689,6 +691,47 @@ class MountFs implements KernelFs {
 
   private writable(mount: Mount, path: string): void {
     if (readonly(mount)) throw errnoError('EROFS', path);
+  }
+
+  private async through(path: string): Promise<string> {
+    const real = normalizePath(path);
+    if (this.at(real)) return real;
+    try {
+      await this.base.stat(parentOf(real));
+      return real;
+    } catch (err) {
+      const moved = redirectOf(err);
+      return moved ? normalizePath(moved.to + real.slice(moved.of.length)) : real;
+    }
+  }
+
+  private async across(from: string, to: string, redirects: number): Promise<[string, string]> {
+    const moved: [string, string] = [await this.through(from), await this.through(to)];
+    const same = moved[0] === normalizePath(from) && moved[1] === normalizePath(to);
+    if (same || redirects >= MAX_LINKS) throw errnoError('EXDEV', `${from} -> ${to}`);
+    return moved;
+  }
+
+  private async based<T>(
+    paths: string[],
+    redirects: number,
+    run: () => Promise<T>,
+    again: (moved: string[], redirects: number) => Promise<T>
+  ): Promise<T> {
+    try {
+      return await run();
+    } catch (err) {
+      const moved = redirectOf(err);
+      if (!moved) throw err;
+      if (redirects >= MAX_LINKS) throw errnoError('ELOOP', paths[0] as string);
+      const at = paths.map((path) => {
+        const real = normalizePath(path);
+        return within(real, moved.of)
+          ? normalizePath(moved.to + real.slice(moved.of.length))
+          : real;
+      });
+      return again(at, redirects + 1);
+    }
   }
 
   private async follow(path: string, hops = 0, create = false): Promise<string> {
@@ -753,10 +796,17 @@ class MountFs implements KernelFs {
     return new TextDecoder().decode(await this.readFileBuffer(path));
   }
 
-  async readFileBuffer(path: string): Promise<Uint8Array> {
+  async readFileBuffer(path: string, redirects = 0): Promise<Uint8Array> {
     const real = await this.follow(path);
     const found = this.at(real);
-    if (!found) return this.base.readFileBuffer(real);
+    if (!found) {
+      return this.based(
+        [real],
+        redirects,
+        () => this.base.readFileBuffer(real),
+        ([to], n) => this.readFileBuffer(to as string, n)
+      );
+    }
     for (let attempt = 1; ; attempt++) {
       try {
         return await this.readWhole(found.mount, real, found.rel);
@@ -797,10 +847,20 @@ class MountFs implements KernelFs {
     return concat(chunks, total);
   }
 
-  async writeFile(path: string, content: Uint8Array | string, owner?: NewOwner): Promise<void> {
+  async writeFile(
+    path: string,
+    content: Uint8Array | string,
+    owner?: NewOwner,
+    redirects = 0
+  ): Promise<void> {
     const real = await this.follow(path, 0, true);
     const found = this.at(real);
-    if (!found) return this.base.writeFile(real, content, owner);
+    if (!found) {
+      const write = () => this.base.writeFile(real, content, owner);
+      return this.based([real], redirects, write, ([to], n) =>
+        this.writeFile(to as string, content, owner, n)
+      );
+    }
     const { mount, rel } = found;
     this.writable(mount, real);
     const bytes = typeof content === 'string' ? new TextEncoder().encode(content) : content;
@@ -842,10 +902,24 @@ class MountFs implements KernelFs {
     }
   }
 
-  async pread(path: string, offset: number, length: number, version?: string): Promise<Uint8Array> {
+  async pread(
+    path: string,
+    offset: number,
+    length: number,
+    version?: string,
+    redirects = 0
+  ): Promise<Uint8Array> {
     const real = await this.follow(path);
     const found = this.at(real);
-    if (!found && this.base.pread) return this.base.pread(real, offset, length);
+    const { pread } = this.base;
+    if (!found && pread) {
+      return this.based(
+        [real],
+        redirects,
+        () => pread.call(this.base, real, offset, length),
+        ([to], n) => this.pread(to as string, offset, length, version, n)
+      );
+    }
     if (!found) return (await this.base.readFileBuffer(real)).slice(offset, offset + length);
     const { mount, rel } = found;
     if ((await this.table.getattr(mount, real, rel)).kind === 'directory') {
@@ -896,10 +970,24 @@ class MountFs implements KernelFs {
     }
   }
 
-  async pwrite(path: string, offset: number, bytes: Uint8Array, transfer = false): Promise<void> {
+  async pwrite(
+    path: string,
+    offset: number,
+    bytes: Uint8Array,
+    transfer = false,
+    redirects = 0
+  ): Promise<void> {
     const real = await this.follow(path, 0, true);
     const found = this.at(real);
-    if (!found && this.base.pwrite) return this.base.pwrite(real, offset, bytes);
+    const { pwrite } = this.base;
+    if (!found && pwrite) {
+      return this.based(
+        [real],
+        redirects,
+        () => pwrite.call(this.base, real, offset, bytes),
+        ([to], n) => this.pwrite(to as string, offset, bytes, transfer, n)
+      );
+    }
     if (!found)
       return this.base.writeFile(
         real,
@@ -947,10 +1035,18 @@ class MountFs implements KernelFs {
     }
   }
 
-  async truncate(path: string, size: number): Promise<void> {
+  async truncate(path: string, size: number, redirects = 0): Promise<void> {
     const real = await this.follow(path);
     const found = this.at(real);
-    if (!found && this.base.truncate) return this.base.truncate(real, size);
+    const { truncate } = this.base;
+    if (!found && truncate) {
+      return this.based(
+        [real],
+        redirects,
+        () => truncate.call(this.base, real, size),
+        ([to], n) => this.truncate(to as string, size, n)
+      );
+    }
     if (!found?.mount.caps.ranges) {
       return this.writeFile(real, resized(await this.readFileBuffer(real), size));
     }
@@ -967,8 +1063,15 @@ class MountFs implements KernelFs {
     }
   }
 
-  async exists(path: string): Promise<boolean> {
-    if (!this.at(path)) return this.base.exists(path);
+  async exists(path: string, redirects = 0): Promise<boolean> {
+    if (!this.at(path)) {
+      return this.based(
+        [path],
+        redirects,
+        () => this.base.exists(path),
+        ([to], n) => this.exists(to as string, n)
+      );
+    }
     try {
       await this.stat(path);
       return true;
@@ -979,9 +1082,16 @@ class MountFs implements KernelFs {
     }
   }
 
-  async lstat(path: string): Promise<FsStat> {
+  async lstat(path: string, redirects = 0): Promise<FsStat> {
     const found = this.at(path);
-    if (!found) return this.base.lstat(path);
+    if (!found) {
+      return this.based(
+        [path],
+        redirects,
+        () => this.base.lstat(path),
+        ([to], n) => this.lstat(to as string, n)
+      );
+    }
     const real = normalizePath(path);
     if (this.table.writing(real)?.truncated) await this.table.commit(real);
     return this.statWriting(
@@ -996,9 +1106,15 @@ class MountFs implements KernelFs {
     return statOf({ ...attr, size: Math.max(attr.size, ...ends) }, real, mount);
   }
 
-  async stat(path: string): Promise<FsStat> {
+  async stat(path: string, redirects = 0): Promise<FsStat> {
     const real = await this.follow(path);
-    return this.at(real) ? this.lstat(real) : this.base.stat(real);
+    if (this.at(real)) return this.lstat(real);
+    return this.based(
+      [real],
+      redirects,
+      () => this.base.stat(real),
+      ([to], n) => this.stat(to as string, n)
+    );
   }
 
   private async entries(
@@ -1014,13 +1130,27 @@ class MountFs implements KernelFs {
     };
   }
 
-  async readdir(path: string): Promise<string[]> {
-    if (!this.at(path)) return this.base.readdir(path);
+  async readdir(path: string, redirects = 0): Promise<string[]> {
+    if (!this.at(path)) {
+      return this.based(
+        [path],
+        redirects,
+        () => this.base.readdir(path),
+        ([to], n) => this.readdir(to as string, n)
+      );
+    }
     return (await this.entries(path)).list.map((e) => e.name);
   }
 
-  async readdirStat(path: string): Promise<Array<[string, FsStat | null]>> {
-    if (!this.at(path)) return this.base.readdirStat(path);
+  async readdirStat(path: string, redirects = 0): Promise<Array<[string, FsStat | null]>> {
+    if (!this.at(path)) {
+      return this.based(
+        [path],
+        redirects,
+        () => this.base.readdirStat(path),
+        ([to], n) => this.readdirStat(to as string, n)
+      );
+    }
     const { real, mount, list } = await this.entries(path);
     return Promise.all(
       list.map(async (entry): Promise<[string, FsStat | null]> => {
@@ -1035,10 +1165,18 @@ class MountFs implements KernelFs {
 
   async mkdir(
     path: string,
-    options: { recursive?: boolean; owner?: NewOwner } = {}
+    options: { recursive?: boolean; owner?: NewOwner } = {},
+    redirects = 0
   ): Promise<void> {
     const found = this.at(path);
-    if (!found) return this.base.mkdir(path, options);
+    if (!found) {
+      return this.based(
+        [path],
+        redirects,
+        () => this.base.mkdir(path, options),
+        ([to], n) => this.mkdir(to as string, options, n)
+      );
+    }
     const { mount, rel } = found;
     const real = normalizePath(path);
     this.writable(mount, real);
@@ -1066,12 +1204,20 @@ class MountFs implements KernelFs {
 
   async rm(
     path: string,
-    options: { recursive?: boolean; force?: boolean; file?: boolean } = {}
+    options: { recursive?: boolean; force?: boolean; file?: boolean } = {},
+    redirects = 0
   ): Promise<void> {
     const found = this.at(path);
     if (!found && options.recursive && this.table.under(normalizePath(path)))
       return this.rmAround(normalizePath(path), options);
-    if (!found) return this.base.rm(path, options);
+    if (!found) {
+      return this.based(
+        [path],
+        redirects,
+        () => this.base.rm(path, options),
+        ([to], n) => this.rm(to as string, options, n)
+      );
+    }
     const { mount, rel } = found;
     const real = normalizePath(path);
     if (rel === '/' && options.recursive) await this.rmEach(real, mount, rel, options);
@@ -1123,11 +1269,22 @@ class MountFs implements KernelFs {
     throw first ?? errnoError('EBUSY', `${path} holds a mount point`);
   }
 
-  async rename(from: string, to: string): Promise<void> {
+  async rename(from: string, to: string, redirects = 0): Promise<void> {
     const a = this.at(from);
     const b = this.at(to);
-    if (!a && !b) return this.base.rename(from, to);
-    if (!a || !b || a.mount !== b.mount) throw errnoError('EXDEV', `${from} -> ${to}`);
+    if (!a && !b) {
+      return this.based(
+        [from, to],
+        redirects,
+        () => this.base.rename(from, to),
+        ([f, t], n) => this.rename(f as string, t as string, n)
+      );
+    }
+    if (!a || !b) {
+      const [f, t] = await this.across(from, to, redirects);
+      return this.rename(f, t, redirects + 1);
+    }
+    if (a.mount !== b.mount) throw errnoError('EXDEV', `${from} -> ${to}`);
     this.writable(a.mount, normalizePath(to));
     await this.table.commitUnder(from);
     await this.table.commitUnder(to);
@@ -1172,9 +1329,14 @@ class MountFs implements KernelFs {
     }
   }
 
-  async symlink(target: string, path: string, owner?: NewOwner): Promise<void> {
+  async symlink(target: string, path: string, owner?: NewOwner, redirects = 0): Promise<void> {
     const found = this.at(path);
-    if (!found) return this.base.symlink(target, path, owner);
+    if (!found) {
+      const make = () => this.base.symlink(target, path, owner);
+      return this.based([path], redirects, make, ([to], n) =>
+        this.symlink(target, to as string, owner, n)
+      );
+    }
     this.writable(found.mount, normalizePath(path));
     if (!found.mount.caps.symlinks)
       throw errnoError('EPERM', `${path}: this file system has no symlinks`);
@@ -1185,8 +1347,11 @@ class MountFs implements KernelFs {
   }
 
   async realpath(path: string, follow: boolean): Promise<string> {
-    if (this.at(path) || !this.base.realpath) throw errnoError('ENOSYS', path);
-    const real = await this.base.realpath(path, follow);
+    const { realpath } = this.base;
+    if (this.at(path) || !realpath) throw errnoError('ENOSYS', path);
+    const real = await realpath.call(this.base, path, follow).catch((err: unknown) => {
+      throw redirectOf(err) ? errnoError('ENOSYS', path) : err;
+    });
     if (this.at(real)) throw errnoError('ENOSYS', path);
     return real;
   }
@@ -1211,18 +1376,31 @@ class MountFs implements KernelFs {
     return out;
   }
 
-  async readlink(path: string): Promise<string> {
+  async readlink(path: string, redirects = 0): Promise<string> {
     const found = this.at(path);
-    if (!found) return this.base.readlink(path);
+    if (!found) {
+      return this.based(
+        [path],
+        redirects,
+        () => this.base.readlink(path),
+        ([to], n) => this.readlink(to as string, n)
+      );
+    }
     return (await found.mount.conn.call({ op: 'readlink', path: found.rel })) as string;
   }
 
-  async chown(path: string, change: OwnerChange): Promise<void> {
+  async chown(path: string, change: OwnerChange, redirects = 0): Promise<void> {
     const real = change.follow === false || change.kind === 'new' ? path : await this.follow(path);
     const found = this.at(real);
     if (found) return this.chownMounted(found, normalizePath(real), change);
-    if (!this.base.chown) throw errnoError('EPERM', path);
-    return this.base.chown(real, change);
+    const { chown } = this.base;
+    if (!chown) throw errnoError('EPERM', path);
+    return this.based(
+      [real],
+      redirects,
+      () => chown.call(this.base, real, change),
+      ([to], n) => this.chown(to as string, change, n)
+    );
   }
 
   private async chownMounted(found: Located, real: string, change: OwnerChange): Promise<void> {
@@ -1244,26 +1422,43 @@ class MountFs implements KernelFs {
     });
   }
 
-  async chmod(path: string, mode: number): Promise<void> {
+  async chmod(path: string, mode: number, redirects = 0): Promise<void> {
     const real = await this.follow(path);
     const found = this.at(real);
-    if (!found) return this.base.chmod(real, mode);
+    if (!found) {
+      return this.based(
+        [real],
+        redirects,
+        () => this.base.chmod(real, mode),
+        ([to], n) => this.chmod(to as string, mode, n)
+      );
+    }
     this.writable(found.mount, real);
     if (!found.mount.caps.chmod) return;
     this.table.forget(found.mount, real);
     await found.mount.conn.call({ op: 'setattr', path: found.rel, mode });
   }
 
-  async utimes(path: string, atime: Date, mtime: Date): Promise<void> {
+  async utimes(path: string, atime: Date, mtime: Date, redirects = 0): Promise<void> {
     const real = await this.follow(path);
     const found = this.at(real);
-    if (!found) return this.base.utimes(real, atime, mtime);
+    if (!found) {
+      const set = () => this.base.utimes(real, atime, mtime);
+      return this.based([real], redirects, set, ([to], n) =>
+        this.utimes(to as string, atime, mtime, n)
+      );
+    }
     await this.setMtime(found, real, mtime);
   }
 
-  async lutimes(path: string, atime: Date, mtime: Date): Promise<void> {
+  async lutimes(path: string, atime: Date, mtime: Date, redirects = 0): Promise<void> {
     const found = this.at(path);
-    if (!found) return lutimesOf(this.base, path, atime, mtime);
+    if (!found) {
+      const set = () => lutimesOf(this.base, path, atime, mtime);
+      return this.based([path], redirects, set, ([to], n) =>
+        this.lutimes(to as string, atime, mtime, n)
+      );
+    }
     const real = normalizePath(path);
     if (!found.mount.caps.linkTimes && (await this.lstat(real)).isSymbolicLink) {
       throw errnoError('EOPNOTSUPP', path);

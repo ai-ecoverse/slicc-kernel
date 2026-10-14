@@ -12,6 +12,7 @@ import {
   type Owner,
   type OwnerChange,
   type Perm,
+  redirected,
   resolvePath,
 } from './types.ts';
 
@@ -221,6 +222,7 @@ export class OpfsFs implements KernelFs {
   private readonly remote: RemoteWatch | undefined;
   private readonly ranged: boolean;
   private owners = false;
+  private readonly mounts: { mounted?: (path: string) => boolean } = {};
 
   constructor(
     root: FileSystemDirectoryHandle,
@@ -312,6 +314,14 @@ export class OpfsFs implements KernelFs {
 
   trackOwners(): void {
     this.owners = true;
+  }
+
+  crossings(mounted: (path: string) => boolean): void {
+    this.mounts.mounted = mounted;
+  }
+
+  private crossing(of: string, to: string): void {
+    if (this.mounts.mounted?.(to)) throw redirected(of, to);
   }
 
   async hasOwner(path: string): Promise<boolean> {
@@ -548,6 +558,7 @@ export class OpfsFs implements KernelFs {
         current = target.split('/').includes('..')
           ? await this.physical(parentOf(link.path), target, hops + 1)
           : resolvePath(parentOf(link.path), target);
+        this.crossing(path, current);
       }
     }
     throw fsError('ELOOP', path);
