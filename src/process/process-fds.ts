@@ -877,8 +877,10 @@ function readonlyRefusal(
       follow,
     });
     const bridge = node.live ? node.mount.opts.bridge : undefined;
-    const stat = (bridge as { stat?: (path: string) => { readonly?: boolean } } | undefined)?.stat;
-    return stat?.(liveNodePath(node)).readonly ? -wasiErrno('EROFS') : 0;
+    type Stat = (path: string) => { readonly?: boolean };
+    const stats = bridge as { stat?: Stat; lstat?: Stat } | undefined;
+    const stat = follow ? stats?.stat : stats?.lstat;
+    return stat?.call(stats, liveNodePath(node)).readonly ? -wasiErrno('EROFS') : 0;
   } catch {
     return 0;
   }

@@ -326,15 +326,19 @@ const CHANGING = new Set<SyncFsOp>([
 
 const CONTENT = new Set<SyncFsOp>(['write', 'pwrite', 'truncate']);
 
+const REMOVING = new Set<SyncFsOp>(['unlink', 'rmdir', 'rm', 'rename']);
+
 async function mayChange(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest) {
   const { mayChange } = entry.fs;
   if (!mayChange) return;
   const { op } = req;
   if (CONTENT.has(op) && req.handle === undefined) return mayChange.call(entry.fs, path, true);
   if (!CHANGING.has(op)) return;
-  await mayChange.call(entry.fs, path, op === 'utimes' || op === 'chmod' || op === 'chown');
+  const follow = op === 'utimes' || op === 'chmod' || op === 'chown';
+  await mayChange.call(entry.fs, path, follow, REMOVING.has(op));
   if (op === 'rename' || op === 'link') {
-    await mayChange.call(entry.fs, entry.fs.resolvePath(entry.cwd, req.arg2 ?? ''), false);
+    const to = entry.fs.resolvePath(entry.cwd, req.arg2 ?? '');
+    await mayChange.call(entry.fs, to, false, op === 'rename');
   }
 }
 

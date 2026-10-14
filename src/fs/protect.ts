@@ -153,8 +153,8 @@ export class ProtectedFs {
         await check(path, true);
         return fs.utimes(path, atime, mtime);
       },
-      async mayChange(path: string, follow: boolean) {
-        await check(path, follow);
+      async mayChange(path: string, follow: boolean, whole = false) {
+        await check(path, follow, whole);
       },
       async stat(path: string) {
         return marked(path, await fs.stat(path));
