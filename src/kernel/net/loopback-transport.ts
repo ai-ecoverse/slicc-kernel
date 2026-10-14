@@ -328,7 +328,7 @@ class LoopbackWebSocket implements RealmWebSocket {
     this.writes = (async () => {
       await previous;
       try {
-        await writeAll(this.socket, bytes);
+        await writeAll(this.socket, bytes, this.stop.signal);
       } catch {
         this.stop.abort();
       }
@@ -358,7 +358,9 @@ class LoopbackWebSocket implements RealmWebSocket {
       if (err instanceof WsError) this.sendClose(err.code, err.message);
       close = { code: err instanceof WsError ? err.code : 1006, reason: '' };
     } finally {
+      const late = setTimeout(() => this.stop.abort(), CLOSE_WAIT_MS);
       await this.writes;
+      clearTimeout(late);
       this.socket.close();
       this.settle(close);
     }

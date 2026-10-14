@@ -362,6 +362,21 @@ export function fetchOp(kernel: JsKernel) {
     return withMeta(response, head.url, redirected);
   };
 
+  const traitsAt = (at: string): Promise<FetchTraits> =>
+    traitsOf(at).catch((err: unknown) => {
+      throw failed(err);
+    });
+
+  const redirect = async (
+    hop: Hop,
+    status: number,
+    location: string,
+    known: FetchTraits
+  ): Promise<[Hop, FetchTraits]> => {
+    const next = rewrite(hop, status, location);
+    return [next, local(next.url) === local(hop.url) ? known : await traitsAt(next.url)];
+  };
+
   return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const request = new Request(input, init);
     const { signal } = request;
@@ -371,9 +386,7 @@ export function fetchOp(kernel: JsKernel) {
     if (protocol !== 'http:' && protocol !== 'https:') {
       throw failed(new JsCallError('EPROTONOSUPPORT', protocol));
     }
-    const known = await traitsOf(request.url).catch((err: unknown) => {
-      throw failed(err);
-    });
+    let known = await traitsAt(request.url);
     if (!known.manualRedirects && request.redirect !== 'follow') {
       throw failed(new JsCallError('ENOTSUP', `redirect: ${request.redirect}`));
     }
@@ -403,7 +416,7 @@ export function fetchOp(kernel: JsKernel) {
       await close(head.handle);
       if (request.redirect === 'error') throw failed(new JsCallError('EREDIRECT', hop.url));
       if (hops >= MAX_REDIRECTS) throw failed(new JsCallError('ELOOP', hop.url));
-      hop = rewrite(hop, head.status, location);
+      [hop, known] = await redirect(hop, head.status, location, known);
     }
   };
 }
