@@ -51,7 +51,7 @@ const ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const PACKAGE = /\$\{package\}/g;
 
 function commandName(name: string): boolean {
-  return COMMAND_NAME.test(name) && name !== '.' && name !== '..';
+  return COMMAND_NAME.test(name) && name.isWellFormed() && name !== '.' && name !== '..';
 }
 
 function inside(pkg: string, rel: unknown): string | undefined {
