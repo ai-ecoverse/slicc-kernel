@@ -869,7 +869,7 @@ export class Launcher {
     who: Redeemer,
     planned: Planned,
     fds: FdTable
-  ): Promise<{ env: Record<string, string>; pid?: number }> {
+  ): Promise<{ env: Record<string, string>; pid?: number; cwd?: string }> {
     if (who.booked === undefined) return { env: req.env };
     try {
       return await this.redeem(req, who, planned);
@@ -883,10 +883,11 @@ export class Launcher {
     req: ChildSpawnRequest,
     { ppid, cred, scope, booked }: Redeemer,
     planned: Planned
-  ): Promise<{ env: Record<string, string>; pid: number }> {
+  ): Promise<{ env: Record<string, string>; pid: number; cwd: string }> {
     const { [TICKET_ENV]: ticket = '', ...env } = req.env;
     const caller = this.jobs.shown(ppid);
-    const { argv } = req;
+    const named = typeof req.argv0 === 'string' && !planned.target.fixed;
+    const argv = named ? [req.argv0 as string, ...req.argv.slice(1)] : req.argv;
     const exact =
       booked?.pid === caller &&
       req.file === booked.path &&
@@ -897,8 +898,8 @@ export class Launcher {
     const pid = this.nextPid++;
     const ids = { pid: req.exec ? caller : pid, ppid: caller };
     const stamp = await this.sealed.stamp(ids, cred, this.tagOf(ppid));
-    const interpreters = await this.interpreterChain(planned, req.cwd, scope);
-    const trusted = this.owners && (await this.trustedFiles(planned, req.file, req.cwd, scope));
+    const interpreters = await this.interpreterChain(planned, booked.cwd, scope);
+    const trusted = this.owners && (await this.trustedFiles(planned, req.file, booked.cwd, scope));
     const swap = await this.sealed.consume({
       ticket,
       stamp,
@@ -914,7 +915,7 @@ export class Launcher {
       const value = swap.values[name];
       if (value !== undefined && env[name] === placeholder) env[name] = value;
     }
-    return { env, pid };
+    return { env, pid, cwd: booked.cwd };
   }
 
   private async interpreterChain(planned: Planned, cwd: string, scope: string): Promise<string[]> {
@@ -1412,8 +1413,8 @@ export class Launcher {
       const deciding = req.exec ? undefined : this.undecided(ppid);
       const handle = await this.launch(planned, {
         ...(deciding ? { decided: deciding.promise } : {}),
-        ...redeemed,
         cwd: req.cwd,
+        ...redeemed,
         fds,
         report,
         ppid,

@@ -626,8 +626,8 @@ A character device (`0666`, major 10, minor 250) through which a program talks t
 - the ticket is booked and under 30 s old;
 - the process spawning or exec'ing is the one that sent the `materialize`;
 - the program's file is absolute and, with its symlinks resolved, the same file as `path` resolved the same way when the ticket was booked (so fnox sends the path it would exec, from a `PATH` lookup or not; bash hands over the file it found, with `argv[0]` as typed);
-- the sha256 of the child's whole `argv`, `argv[0]` included, is the booked one;
-- the child's directory, symlinks resolved, is `cwd`.
+- the sha256 of the child's whole `argv`, with the `argv[0]` it really gets (a spawn's `argv0`, unless the command's manifest fixes its own), is the booked one;
+- the child's directory, symlinks resolved, is `cwd`, and the child starts in that resolved directory.
 
 The kernel then asks the hook `{ v: 1, op: 'materializeConsume', ticket, stamp, path, resolved, argv, cwd, interpreters, trusted }` (slicc-vault#10):
 - `stamp` is the child's caller stamp, as above (`pid` the child's, the same as `ppid` for an exec);
