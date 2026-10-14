@@ -377,6 +377,7 @@ export function createContext(o: ContextOptions): CreatedContext {
     ...syncOps(syncKernel, { pid: o.pid, resolve, random, infos, handles }),
     run: (options) =>
       runSync(syncKernel, { env: o.env, cwd: o.cwd, resolve, signal: signalNumber }, options),
+    spawn: (options) => spawnSync(options),
     exit: (status = 0): never => {
       exiting ??= status & 0xff;
       return exitAtOnce(lane, [...writes], terminal.modes(), exiting);
@@ -390,7 +391,8 @@ export function createContext(o: ContextOptions): CreatedContext {
   };
 
   const io = { read, send: writeAll, close: (fd: number) => ctx.close(fd) };
-  const children = childOps(kernel, io, { env: o.env, cwd: o.cwd, signal: signalNumber });
+  const defaults = { env: o.env, cwd: o.cwd, signal: signalNumber };
+  const { spawnSync, ...children } = childOps(kernel, io, defaults, syncKernel);
 
   const strays = o.strays ?? { exception: new Set(), rejection: new Set() };
   const ctx: JsProgramContext = {
