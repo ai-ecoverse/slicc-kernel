@@ -24,6 +24,8 @@ export interface Denial {
   path: string;
   errno: string;
   tag?: string;
+  expected?: string;
+  actual?: string;
 }
 
 export type DenialHook = (denial: Denial) => void;

@@ -5,10 +5,12 @@ import { type ServedClient, serveClient } from './client/serve-client.ts';
 import { type ClipboardReply, clipboardAsker } from './clipboard-relay.ts';
 import type { Attestation } from './fs/attest.ts';
 import type { Denial, DenialHook } from './fs/dac.ts';
+import type { IntegrityLookup } from './fs/integrity.ts';
 import { META_DB, type MetaStore } from './fs/meta.ts';
 import { OpfsFs } from './fs/opfs.ts';
-import { protectInit } from './fs/protect.ts';
+import { type ProtectInit, type Protection, protectInit } from './fs/protect.ts';
 import { fsError, type UsersMode } from './fs/types.ts';
+import { type IntegrityReply, integrityAsker } from './integrity-relay.ts';
 import type { ClipboardHook } from './kernel/clipboard.ts';
 import { dialSocket, serveSocket } from './kernel/dial.ts';
 import type { WasmWorkerLike } from './kernel/host.ts';
@@ -54,7 +56,7 @@ export interface InitRequest {
   hostfs?: boolean;
   hostname?: string;
   users?: UsersMode;
-  protect?: { paths: string[]; writers?: string[] };
+  protect?: ProtectInit;
   denials?: boolean;
   sealed?: boolean;
   clipboard?: boolean;
@@ -359,23 +361,29 @@ function hostOptions(
   req: InitRequest,
   port: KernelPort,
   sealed: SealedHook,
-  clipboard: ClipboardHook
+  clipboard: ClipboardHook,
+  lookup: IntegrityLookup
 ): {
   hostname?: string;
   users?: UsersMode;
   onDenial?: DenialHook;
   sealed?: SealedHook;
   clipboard?: ClipboardHook;
-  protect?: { paths: string[]; writers?: string[] };
+  protect?: Protection;
 } {
   return {
     ...(req.hostname !== undefined ? { hostname: req.hostname } : {}),
     ...(req.users !== undefined ? { users: req.users } : {}),
     ...(req.denials ? { onDenial: (denial: Denial) => port.postMessage({ denial }) } : {}),
-    ...(req.protect ? { protect: protectInit(req.protect) } : {}),
+    ...(req.protect ? { protect: hostProtect(req.protect, lookup) } : {}),
     ...(req.sealed ? { sealed } : {}),
     ...(req.clipboard ? { clipboard } : {}),
   };
+}
+
+function hostProtect(init: ProtectInit, lookup: IntegrityLookup): Protection {
+  const { integrity, ...rest } = protectInit(init);
+  return { ...rest, ...(integrity ? { integrity: { ...integrity, lookup } } : {}) };
 }
 
 function policyAsker(port: KernelPort) {
@@ -410,6 +418,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
   const clients = new Set<ServedClient>();
   const sealed = sealedAsker(port);
   const clipboard = clipboardAsker(port);
+  const integrity = integrityAsker(port);
   const approvals = sudoApprovals(port);
   const locks = deps.locks === null ? undefined : (deps.locks ?? locksOf());
   let holding: Promise<string> | undefined;
@@ -482,7 +491,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
         ...(deps.createDriverWorker ? { createDriverWorker: deps.createDriverWorker } : {}),
         ...(req.modules ? { modules: req.modules } : {}),
         ...(req.env ? { env: req.env } : {}),
-        ...hostOptions(req, port, sealed.hook, clipboard.hook),
+        ...hostOptions(req, port, sealed.hook, clipboard.hook, integrity.lookup),
         ...(req.approve ? { approve: approvals.ask } : {}),
         ...net,
         ...(media ? { media } : {}),
@@ -558,6 +567,8 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
     if (sealedReply) return sealed.answer(sealedReply);
     const clipboardReply = (event.data as { clipboardReply?: ClipboardReply }).clipboardReply;
     if (clipboardReply) return clipboard.answer(clipboardReply);
+    const integrityReply = (event.data as { integrityReply?: IntegrityReply }).integrityReply;
+    if (integrityReply) return integrity.answer(integrityReply);
     const grant = (event.data as { hostfsGrant?: GrantReply }).hostfsGrant;
     if (grant) return granted(grant);
     if (allowed(event.data)) return;

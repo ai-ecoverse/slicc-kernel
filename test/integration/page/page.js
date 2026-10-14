@@ -412,6 +412,17 @@ const liveTraits = (inner) => ({
   },
 });
 
+window.integrityAsked = [];
+
+function protection({ hashes, unknown, ...rest }) {
+  if (!hashes) return rest;
+  const lookup = async (path) => {
+    window.integrityAsked.push(path);
+    return hashes[path];
+  };
+  return { ...rest, integrity: { lookup, ...(unknown ? { unknown } : {}) } };
+}
+
 window.boot = async (options = {}) => {
   await install();
   const base = options.proxy
@@ -431,7 +442,7 @@ window.boot = async (options = {}) => {
       ...policy,
       ...handles,
       ...(options.cdp ? { cdp: cdpHook } : {}),
-      ...(options.protect ? { protect: options.protect } : {}),
+      ...(options.protect ? { protect: protection(options.protect) } : {}),
       ...(options.clipboard ? { clipboard: clipboardHook } : {}),
     })
   );
