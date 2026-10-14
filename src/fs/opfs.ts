@@ -797,8 +797,11 @@ export class OpfsFs implements KernelFs {
   async pwrite(path: string, offset: number, bytes: Uint8Array): Promise<void> {
     const [handle, , target] = await this.fileFor(path);
     await this.counting(target);
-    await this.retrying(path, () => positioned(handle, (io) => io.write(offset, bytes)), true);
-    await this.recounting(handle, target);
+    try {
+      await this.retrying(path, () => positioned(handle, (io) => io.write(offset, bytes)), true);
+    } finally {
+      await this.recounting(handle, target);
+    }
     this.written(target);
   }
 
@@ -807,8 +810,11 @@ export class OpfsFs implements KernelFs {
     const resolve = this.ranged || this.remote?.watched();
     const target = resolve || this.counted.length > 0 ? (await this.locate(path, true)).path : path;
     await this.counting(target);
-    await this.retrying(path, () => positioned(handle, (io) => io.truncate(size)), true);
-    await this.recounting(handle, target);
+    try {
+      await this.retrying(path, () => positioned(handle, (io) => io.truncate(size)), true);
+    } finally {
+      await this.recounting(handle, target);
+    }
     this.written(target);
   }
 
