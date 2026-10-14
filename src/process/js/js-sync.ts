@@ -39,6 +39,7 @@ import {
   written,
 } from './js-io.ts';
 import { callError, JsCallError, type JsKernel, modeOf } from './js-kernel.ts';
+import { procFsSync, procOpenSync } from './js-proc.ts';
 import type { JsRunOptions, JsRunResult } from './js-run.ts';
 
 export type SyncCall = (req: SyncSabRequestBody) => SyncFsResult;
@@ -257,8 +258,11 @@ export function syncOps(
       infos.delete(fd);
       kernel.call({ op: 'fd-close', fd });
     },
-    open,
-    fs: syncPathOps(kernel, resolve, statOf, open),
+    open: procOpenSync(open, kernel, { resolve, pid: shared.pid }),
+    fs: procFsSync(syncPathOps(kernel, resolve, statOf, open), kernel, {
+      resolve,
+      pid: shared.pid,
+    }),
   };
 }
 

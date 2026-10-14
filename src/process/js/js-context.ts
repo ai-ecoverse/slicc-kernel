@@ -38,6 +38,7 @@ import {
 } from './js-io.ts';
 import { callError, JsCallError, type JsKernel, modeOf } from './js-kernel.ts';
 import { type JsNet, netOps } from './js-net.ts';
+import { procFsAsync, procOpenAsync } from './js-proc.ts';
 import { runSync } from './js-run.ts';
 import {
   type JsCred,
@@ -392,7 +393,7 @@ export function createContext(o: ContextOptions): CreatedContext {
     return handle.file;
   };
 
-  const fs = pathOps(kernel, resolve, statOf, open);
+  const fs = procFsAsync(pathOps(kernel, resolve, statOf, open), kernel, { resolve, pid: o.pid });
   const lane = o.lane ?? laneOf(undefined);
   if (o.lane && o.lane !== noLane) kernel.syncLane = o.lane;
   const syncKernel = new JsSyncKernel(lane, kernel, unwind);
@@ -447,7 +448,7 @@ export function createContext(o: ContextOptions): CreatedContext {
       return { type, tty: type === 'tty', seekable: type === 'file' };
     },
     isatty: async (fd) => typeOf(await info(fd)) === 'tty',
-    open,
+    open: procOpenAsync(open, kernel, { resolve, pid: o.pid }),
     resolve,
     fs,
     signals: {
