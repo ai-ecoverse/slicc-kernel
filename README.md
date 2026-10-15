@@ -915,7 +915,7 @@ WASIX_SYSROOT_28=/path/to/wasix-sysroot ./build.sh
 
 - `WASIX_SYSROOT_28` is the unpacked sysroot package.
 - `wasixcc` (0.4.7, WASIX clang 21.1.2) comes from `PATH`, or is installed by `install-wasixcc.sh` as for `dlfork`.
-- The build is reproducible: `bin/epolltest.wasm` is 78,672 bytes, sha256 `f1ff262e2d90080c37c968187ade45c7d3adf81b49dd0dc0109428ef9c7e1df8`.
+- The build is reproducible: `bin/epolltest.wasm` is 78,799 bytes, sha256 `9ff8d336a261ebb9076b5b9c760e9ba50fa17053b1d66ab89cfe05395c8e1deb`.
 
 ## License
 

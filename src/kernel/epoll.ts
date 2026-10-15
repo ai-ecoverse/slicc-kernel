@@ -168,10 +168,10 @@ export class EpollFile implements KernelFile {
     timeoutMs: number,
     signal: AbortSignal
   ): Promise<EpollEvent[]> {
-    const deadline = timeoutMs < 0 ? Number.POSITIVE_INFINITY : Date.now() + timeoutMs;
+    const deadline = timeoutMs < 0 ? Number.POSITIVE_INFINITY : performance.now() + timeoutMs;
     for (;;) {
       const events = this.collect(fds, max);
-      if (events.length > 0 || Date.now() >= deadline) return events;
+      if (events.length > 0 || performance.now() >= deadline) return events;
       const round = new AbortController();
       const woken = this.changes.wait(AbortSignal.any([round.signal, signal]));
       woken.catch(() => undefined);
@@ -179,7 +179,11 @@ export class EpollFile implements KernelFile {
       const expiry =
         deadline === Number.POSITIVE_INFINITY
           ? []
-          : [new Promise<void>((resolve) => (timer = setTimeout(resolve, deadline - Date.now())))];
+          : [
+              new Promise<void>(
+                (resolve) => (timer = setTimeout(resolve, deadline - performance.now()))
+              ),
+            ];
       try {
         await Promise.race([woken, ...expiry]);
       } finally {

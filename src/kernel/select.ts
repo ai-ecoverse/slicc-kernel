@@ -35,7 +35,7 @@ export async function selectFds(
   timeoutMs: number,
   interrupt: AbortSignal
 ): Promise<SelectResult> {
-  const deadline = timeoutMs < 0 ? Number.POSITIVE_INFINITY : Date.now() + timeoutMs;
+  const deadline = timeoutMs < 0 ? Number.POSITIVE_INFINITY : performance.now() + timeoutMs;
   const interrupted = interruption(interrupt);
   interrupted.promise.catch(() => {});
   try {
@@ -54,7 +54,7 @@ async function waitReady(
 ): Promise<SelectResult> {
   for (;;) {
     const now = ready(fds, read, write);
-    if (now.read.length > 0 || now.write.length > 0 || Date.now() >= deadline) return now;
+    if (now.read.length > 0 || now.write.length > 0 || performance.now() >= deadline) return now;
 
     const round = new AbortController();
     const changes = [...new Set([...read, ...write])].flatMap((fd) => {
@@ -65,7 +65,11 @@ async function waitReady(
     const expiry =
       deadline === Number.POSITIVE_INFINITY
         ? []
-        : [new Promise<void>((resolve) => (timer = setTimeout(resolve, deadline - Date.now())))];
+        : [
+            new Promise<void>(
+              (resolve) => (timer = setTimeout(resolve, deadline - performance.now()))
+            ),
+          ];
     try {
       await Promise.race([...changes, ...expiry, interrupted]);
     } finally {

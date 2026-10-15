@@ -140,7 +140,7 @@ test('a signal handler interrupts epoll_wait with EINTR, and timeouts are kept (
   );
   assert.deepEqual(
     await kernel.run(['epolltest', 'timeout']),
-    ok('zero 0 prompt, timed 0 not early\nmaxevents Invalid argument\n')
+    ok('zero 0 prompt, timed 0 not early\nmaxevents Invalid argument\nshort waits early 0 of 200\n')
   );
 });
 
