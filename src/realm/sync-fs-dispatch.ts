@@ -643,11 +643,12 @@ async function guardAndResolve(
 ): Promise<SyncFsResult | Resolved> {
   const result = await guarded(entry, path, req);
   if ('refused' in result) return result.refused;
-  const noLinks = entry.links === undefined ? undefined : (entry.noLinks ?? entry.fs.noLinks?.());
-  if (!noLinks) return { path, entry };
+  const { noLinks } = entry;
+  const { paths } = result;
+  if (entry.links === undefined || !noLinks || !paths) return { path, entry };
   return {
-    path: result.paths?.path ?? path,
-    ...(result.paths?.arg2 ? { arg2: result.paths.arg2 } : {}),
+    path: paths.path,
+    ...(paths.arg2 ? { arg2: paths.arg2 } : {}),
     entry: { ...entry, fs: noLinks },
   };
 }
