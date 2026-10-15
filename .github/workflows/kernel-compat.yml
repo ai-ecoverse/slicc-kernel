@@ -25,8 +25,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: kernel-compat-${{ github.ref }}-${{ github.event.workflow_run.head_sha || inputs.version }}
-  cancel-in-progress: true
+  group: kernel-compat-${{ github.event_name == 'pull_request' && github.ref || github.event_name == 'workflow_dispatch' && format('dispatch-{0}', inputs.version) || 'release' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   pack:
