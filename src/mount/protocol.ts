@@ -22,6 +22,7 @@ export interface DriverAttr {
   kind: 'file' | 'directory' | 'symlink';
   size: number;
   mtime: number;
+  atime?: number;
   mode?: number;
   ino?: number;
   nlink?: number;
@@ -80,6 +81,7 @@ export type DriverCall =
       path: string;
       mode?: number;
       mtime?: number;
+      atime?: number;
       size?: number;
       uid?: number;
       gid?: number;
