@@ -16,13 +16,6 @@
 #include <time.h>
 #include <unistd.h>
 
-#undef EPOLL_CTL_ADD
-#undef EPOLL_CTL_MOD
-#undef EPOLL_CTL_DEL
-#define EPOLL_CTL_ADD 0
-#define EPOLL_CTL_MOD 1
-#define EPOLL_CTL_DEL 2
-
 static int ctl(int ep, int op, int fd, struct epoll_event *ev) {
   int r = epoll_ctl(ep, op, fd, ev);
   if (r > 0) {
@@ -205,6 +198,7 @@ static int errors(void) {
 #define TRY(label, call) printf("%s %s\n", label, (call) < 0 ? strerror(errno) : "ok")
   TRY("add", ctl(ep, EPOLL_CTL_ADD, p[0], &ev));
   TRY("add twice", ctl(ep, EPOLL_CTL_ADD, p[0], &ev));
+  TRY("wasix add twice", ctl(ep, 0, p[0], &ev));
   TRY("mod missing", ctl(ep, EPOLL_CTL_MOD, p[1], &ev));
   TRY("del missing", ctl(ep, EPOLL_CTL_DEL, p[1], &ev));
   TRY("del", ctl(ep, EPOLL_CTL_DEL, p[0], &ev));

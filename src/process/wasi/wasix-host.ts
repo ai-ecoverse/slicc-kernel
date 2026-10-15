@@ -4,6 +4,7 @@ import { WasiExit, type WasiFunction, type WasiHost, wrap } from './wasi-host.ts
 import { libcVersion } from './wasi-module.ts';
 import type { WasiSignals } from './wasi-signals.ts';
 import { MAIN_TID, ThreadExit, type WasiThreads } from './wasi-threads.ts';
+import { wasixEpollImports } from './wasix-epoll.ts';
 import { callDynamic } from './wasix-ffi.ts';
 import type { AsyncifyDriver } from './wasix-fork.ts';
 import { DlError, type WasixLinker } from './wasix-linker.ts';
@@ -187,6 +188,7 @@ export class WasixHost {
           ...(a as [number, number, number, number, number, number])
         ),
       ...wasixSocketImports(this.host, this.host.imports()),
+      ...wasixEpollImports(this.host),
     });
   }
 

@@ -28,6 +28,8 @@ import {
 } from './children.ts';
 import type { ClipboardBroker, ClipboardChannel, ClipboardStamp } from './clipboard.ts';
 import { type Cred, type CredChange, changeCred, copyCred, ROOT } from './cred.ts';
+import { EPOLL_OPS, type EpollSyscall, epollSyscall } from './epoll.ts';
+import { EventFd } from './eventfd.ts';
 import {
   type DeviceAccess,
   deviceAt,
@@ -229,6 +231,7 @@ export type WasmSyscall =
   | { op: 'sig-mask'; caught: number; ignored: number; defaults?: number }
   | { op: 'sig-pause' }
   | SocketSyscall
+  | EpollSyscall
   | HttpSyscall
   | PtySyscall
   | HostSyscall;
@@ -258,6 +261,10 @@ function isHttpSyscall(req: WasmSyscall): req is HttpSyscall {
 
 function isSocketSyscall(req: WasmSyscall): req is SocketSyscall {
   return req.op.startsWith('sock-');
+}
+
+function isEpollSyscall(req: WasmSyscall): req is EpollSyscall {
+  return (EPOLL_OPS as readonly string[]).includes(req.op);
 }
 
 function isHostSyscall(req: { op: string }): req is HostSyscall {
@@ -395,6 +402,7 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'sig-mask',
   'sig-pause',
   ...SOCKET_OPS,
+  ...EPOLL_OPS,
   ...HTTP_OPS,
   ...PTY_OPS,
   ...HOST_OPS,
@@ -780,6 +788,13 @@ export class WasmProcess {
       if (isTtySyscall(req)) return this.ttySyscall(req);
       if (isJobSyscall(req)) return this.jobSyscall(req);
       if (isSocketSyscall(req)) return await this.socketSyscall(req, cancelled);
+      if (isEpollSyscall(req)) {
+        return await epollSyscall(req, {
+          fds: this.fds,
+          blocking: () => this.blockingSignal(cancelled),
+          owed: () => this.owed,
+        });
+      }
       if (isHttpSyscall(req)) return await this.httpSyscall(req);
       if (isHostSyscall(req)) {
         return await hostSyscall(req, {
@@ -858,6 +873,7 @@ export class WasmProcess {
     if (file.tty) this.checkForeground(file.tty);
     if (file.clipboard) return this.readClipboard(file.clipboard, req, cancelled);
 
+    if (file instanceof EventFd && req.max < EventFd.SIZE) throw new KernelError('EINVAL');
     if (req.max <= 0) return new Uint8Array(0);
     if (file instanceof KernelSocket && file.unconnected) throw new KernelError('ENOTCONN');
     const ready = pollFile(file).readable;
@@ -1569,7 +1585,14 @@ export class WasmProcess {
   private async procSyscall(
     req: Exclude<
       WasmSyscall,
-      FdSyscall | TtySyscall | JobSyscall | SocketSyscall | HttpSyscall | PtySyscall | HostSyscall
+      | FdSyscall
+      | TtySyscall
+      | JobSyscall
+      | SocketSyscall
+      | EpollSyscall
+      | HttpSyscall
+      | PtySyscall
+      | HostSyscall
     >,
     cancelled: AbortSignal
   ): Promise<SyncFsResult> {

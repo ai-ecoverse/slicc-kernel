@@ -144,14 +144,15 @@ test('a signal handler interrupts epoll_wait with EINTR, and timeouts are kept (
   );
 });
 
-test('epoll_ctl answers as Linux does: EEXIST, ENOENT, EINVAL, EBADF, and EPERM for files and directories (#674)', async (t) => {
+test('epoll_ctl answers as Linux does: EEXIST, ENOENT, EINVAL, EBADF, and EPERM for files and directories, and takes the operation numbers the C library passes (#674)', async (t) => {
   const kernel = await booted(t);
   assert.deepEqual(
     await kernel.run(['epolltest', 'errors']),
     ok(
       [
         'add ok',
-        'add twice File exists',
+        'add twice ok',
+        'wasix add twice File exists',
         'mod missing No such file or directory',
         'del missing No such file or directory',
         'del ok',
