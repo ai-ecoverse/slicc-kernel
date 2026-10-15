@@ -154,3 +154,21 @@ test('fcntl locks: a fork child does not get them, exec keeps them under the pid
     'lock ok',
   ]);
 });
+
+test('a lock stays on the open file: after another file is renamed over its name, and after its name is removed (#680)', async (t) => {
+  const bash = await booted(t, []);
+  const r = await bash(`
+    printf a > f; printf b > g
+    locktest open f rw lock w 0 0 touch held until moved lock w 0 1 touch relocked until go > a.out &
+    until [ -e held ]; do sleep 0.05; done
+    mv g f; locktest open f rw lock w 0 0 touch moved until relocked; touch go; wait; cat a.out
+    printf c > h
+    locktest open h rw exec inherit touch execd until gone lock w 0 0 touch locked until go2 > b.out &
+    until [ -e execd ]; do sleep 0.05; done
+    rm h; touch gone; until [ -e locked ]; do sleep 0.05; done; touch go2; wait; cat b.out`);
+  assert.deepEqual(r, {
+    status: 0,
+    stdout: 'lock ok\nlock ok\nlock ok\nlock ok\n',
+    stderr: '',
+  });
+});
