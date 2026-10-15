@@ -51,7 +51,7 @@ async function appear(path) {
   throw new Error(`${path} never appeared`);
 }
 
-const WAIT = ': > ready; while [ ! -e go ]; do sleep 0.05; done';
+const WAIT = ': > ready$N; while [ ! -e go$N ]; do sleep 0.05; done';
 
 test('hostfs through the Node entry: a host edit mid-read is ESTALE on an inherited or an opened descriptor, a write in the kernel is not', async (t) => {
   const dir = await folder(t, 'slicc-hostfs-');
@@ -62,6 +62,9 @@ test('hostfs through the Node entry: a host edit mid-read is ESTALE on an inheri
   });
   t.after(() => proxy.close());
   await writeFile(join(dir, 'v'), Buffer.alloc(3 * 1024 * 1024, 65));
+  for (const name of ['v1', 'v2', 'v3']) {
+    await writeFile(join(dir, name), Buffer.alloc(3 * 1024 * 1024, 65));
+  }
   const kernel = await mounted(t, {
     hostfs: async (source, { readonly }) => proxy.grant(source, readonly),
   });
@@ -74,32 +77,37 @@ test('hostfs through the Node entry: a host edit mid-read is ESTALE on an inheri
   assert.equal(await readFile(join(dir, 'api'), 'utf8'), 'from the API');
   assert.equal((await kernel.readFile('/mnt/h/v')).length, 3 * 1024 * 1024);
   await run('rm api');
-  assert.equal((await run('head -c 3 v; echo; ls')).stdout, 'AAA\nv\n');
+  assert.equal((await run('head -c 3 v; echo; ls')).stdout, 'AAA\nv\nv1\nv2\nv3\n');
+  let n = 0;
   const hostEdit = async (script, edit) => {
-    await rm(join(dir, 'ready'), { force: true });
-    await rm(join(dir, 'go'), { force: true });
-    const done = run(script);
-    await appear(join(dir, 'ready'));
+    n += 1;
+    const done = run(`N=${n}; ${script}`);
+    await appear(join(dir, `ready${n}`));
+    proxy.mute(true);
     await edit();
-    await writeFile(join(dir, 'go'), '');
-    return done;
+    await writeFile(join(dir, `go${n}`), '');
+    try {
+      return await done;
+    } finally {
+      proxy.mute(false);
+    }
   };
-  const append = () => appendFile(join(dir, 'v'), 'x\n');
+  const append = (name) => () => appendFile(join(dir, name), 'x\n');
   const inherited = await hostEdit(
-    `exec 3< v; head -c 1 <&3 >/dev/null; ${WAIT}; dd bs=1048576 skip=2 count=1 <&3 of=/dev/null; echo "rc $?"`,
-    append
+    `exec 3< v1; head -c 1 <&3 >/dev/null; ${WAIT}; dd bs=1048576 skip=2 count=1 <&3 of=/dev/null; echo "rc $?"`,
+    append('v1')
   );
   assert.equal(inherited.stdout, 'rc 1\n');
   assert.match(inherited.stderr, /Stale file handle/);
   const opened = await hostEdit(
-    `exec 3< v; read -r -N 2 -u 3 a; ${WAIT}; read -r -N 2000000 -u 3 b; echo "rc $? \${#a}"`,
-    append
+    `exec 3< v2; read -r -N 2 -u 3 a; ${WAIT}; read -r -N 2000000 -u 3 b; echo "rc $? \${#a}"`,
+    append('v2')
   );
   assert.equal(opened.stdout, 'rc 1 2\n');
   assert.match(opened.stderr, /Stale file handle/);
   const shrunk = await hostEdit(
-    `exec 3< v; read -r -N 1 -u 3 a; ${WAIT}; dd bs=1048576 count=1 <&3 of=/dev/null; echo "rc $?"`,
-    () => writeFile(join(dir, 'v'), '')
+    `exec 3< v3; read -r -N 1 -u 3 a; ${WAIT}; dd bs=1048576 count=1 <&3 of=/dev/null; echo "rc $?"`,
+    () => writeFile(join(dir, 'v3'), '')
   );
   assert.equal(shrunk.stdout, 'rc 1\n');
   assert.match(shrunk.stderr, /Stale file handle/);

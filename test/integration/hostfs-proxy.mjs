@@ -82,6 +82,7 @@ export async function hostfsProxy({
   const handles = new Map();
   const sockets = new Set();
   const counts = { grants: 0, watches: 0 };
+  let muted = false;
   let nextFh = 0;
 
   function inside(root, rel) {
@@ -238,6 +239,7 @@ export async function hostfsProxy({
       if (paths.length) res.write(`${JSON.stringify({ paths })}\n`);
     };
     const watcher = watch(grant.root, { recursive: true }, (_event, name) => {
+      if (muted) return;
       if (!name) {
         res.write(`${JSON.stringify({ all: true })}\n`);
         return;
@@ -336,6 +338,9 @@ export async function hostfsProxy({
     counts,
     grant: grantFor,
     revoke: () => tokens.clear(),
+    mute(on) {
+      muted = on;
+    },
     async stop() {
       for (const socket of sockets) socket.destroy();
       await new Promise((done) => server.close(done));
