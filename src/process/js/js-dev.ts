@@ -89,6 +89,7 @@ function* lookup(abs: string): DevStep<DevNode> {
     const names = (yield { op: 'fd-tty-names' }) as string[];
     if (names.includes(abs)) return { kind: 'terminal', name: abs };
   }
+  if (name === 'pts') return { kind: 'dir', mode: DIR | 0o555 };
   const pts = /^pts\/(\d+)$/.exec(name)?.[1];
   if (pts !== undefined) {
     const open = (yield { op: 'pty-list' }) as number[];
@@ -124,7 +125,8 @@ function* fdStat(fd: number, path: string): DevStep<SyncFsBridgeStat> {
   if (info.kind === 'file') {
     const file = (yield { op: 'fd-vfs-stat', fd }) as { path: string; size: number; orphan?: true };
     if (file.orphan) return { ...nodeStat(0o100600, file.size), isFile: true };
-    return yield* pathStat(file.path);
+    const st = yield* pathStat(file.path);
+    return { ...st, size: file.size };
   }
   if (info.terminal) return yield* terminalStat(info.terminal);
   if (CHAR_KINDS.has(info.kind)) return nodeStat(CHAR | 0o666);
@@ -188,11 +190,15 @@ export function* devReaddir(abs: string): DevStep<string[]> {
     const fds = (yield { op: 'fd-list' }) as Array<{ fd: number }>;
     return fds.map(({ fd }) => String(fd));
   }
+  if (abs === '/dev/pts') {
+    const open = (yield { op: 'pty-list' }) as number[];
+    return open.map(String).sort();
+  }
   const node = yield* lookup(abs);
   if (node.kind !== 'dir') throw new JsCallError('ENOTDIR', abs);
   const names = (yield { op: 'fd-tty-names' }) as string[];
   const ttys = names.filter((n) => /^\/dev\/tty\d+$/.test(n)).map((n) => n.slice(5));
-  return [...DEVICES, 'clipboard', 'sealed', 'tty', 'fd', ...STDIO, ...ttys].sort();
+  return [...DEVICES, 'clipboard', 'sealed', 'tty', 'fd', 'pts', ...STDIO, ...ttys].sort();
 }
 
 export interface DevOpened {
