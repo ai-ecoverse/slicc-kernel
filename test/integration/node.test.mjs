@@ -485,6 +485,30 @@ test('sudo runs from a cwd on a tmpfs mount the caller can enter, and refuses on
   assert.match(r.stderr, /sudo: cannot run in \/mnt\/m\/gone: it isn't a directory you can enter/);
 });
 
+test('a sudo process crossing an untrusted link inside a tmpfs mount is refused as off mounts', async (t) => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
+  await kernel.users.add({ name: 'cone', groups: ['sudo'] });
+  await kernel.run(['mkdir', '-p', '/home/cone/m'], { cwd: '/' });
+  await kernel.mount({ type: 'tmpfs', source: 'none', target: '/home/cone/m' });
+  const setup = [
+    "printf '%s\\n' 'NOPASSWD cone Cmnd *' > /etc/sudoers.d/cone && chmod 440 /etc/sudoers.d/cone",
+    'mkdir -p /srv/d && echo secret > /srv/d/f && chmod 600 /srv/d/f',
+    'chown cone /home/cone/m && chmod 755 /home/cone/m',
+  ].join('\n');
+  assert.equal((await kernel.run(['bash', '-c', setup], { cwd: '/' })).status, 0);
+  const cone = [
+    'mkdir -p /home/cone/m/d && echo mine > /home/cone/m/d/f',
+    'ln -s /srv/d /home/cone/off && ln -s /srv/d /home/cone/m/on',
+    'sudo cat /home/cone/off/f > /dev/null 2>&1; echo "off $?"',
+    'sudo cat /home/cone/m/on/f > /dev/null 2>&1; echo "on $?"',
+    'sudo cat /home/cone/m/d/../d/f',
+  ].join('\n');
+  const r = await kernel.run(['bash', '-c', cone], { cwd: '/home/cone', user: 'cone' });
+  assert.equal(r.stdout, 'off 1\non 1\nmine\n', r.stderr);
+});
+
 test('a WASI process killed by SIGKILL keeps the bytes it wrote but never fsynced', async () => {
   const kernel = await createNodeKernel();
   for (const pkg of ['wasm-bash', 'wasm-coreutils', 'wasix-python']) await install(kernel, pkg);

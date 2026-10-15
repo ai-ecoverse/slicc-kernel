@@ -1433,6 +1433,7 @@ class MountFs implements KernelFs {
       if (real !== undefined && !this.at(real)) return real;
     }
     const real = follow ? await realTarget(this, normalizePath(path)) : await this.named(path);
+    if (this.rejectLinks && real !== normalizePath(path)) throw errnoError('ELOOP', path);
     await this.lstat(real);
     return real;
   }
