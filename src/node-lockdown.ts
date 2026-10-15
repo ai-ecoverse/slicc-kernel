@@ -47,7 +47,18 @@ export function refuseModules(): void {
   });
 }
 
+const locked = new WeakSet<object>();
+
+const nodeProcess =
+  typeof globalThis.process === 'object' && globalThis.process !== null
+    ? globalThis.process
+    : undefined;
+
+export { nodeProcess };
+
 export function nodeLockdown(scope: object = globalThis): void {
+  if (locked.has(scope)) return;
+  locked.add(scope);
   zeroedBuffers(Buffer);
   lockdown(scope);
   hide(scope, NODE_GLOBALS);
