@@ -1478,6 +1478,11 @@ export class Launcher {
   }
 
   private forget(pid: number): void {
+    const image = this.jobs.list().find((m) => m.pid === pid)?.execParent;
+    const described = this.described.get(pid);
+    if (image !== undefined && described && this.described.has(image)) {
+      this.described.set(image, described);
+    }
     this.jobs.remove(pid);
     this.described.delete(pid);
     const spent = this.spent.get(pid);
@@ -1611,10 +1616,11 @@ export class Launcher {
       const root = member && rootOf(member).pid;
       return root !== undefined && this.running(root) ? root : INIT_PID;
     };
+    const superseded = new Set([...members.values()].map((m) => m.execParent));
     const listed: ProcessInfo[] = [];
     for (const member of members.values()) {
       const described = this.described.get(member.pid);
-      if (member.execed || !described) continue;
+      if ((member.execed && superseded.has(member.pid)) || !described) continue;
       const cred = this.credOf(member.pid);
       if (!maySee(viewer, cred)) continue;
       const root = rootOf(member);
