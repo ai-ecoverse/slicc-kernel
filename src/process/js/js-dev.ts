@@ -183,6 +183,13 @@ export function* devReadlink(abs: string): DevStep<string> {
   throw new JsCallError('EINVAL', abs);
 }
 
+export function* devResolveTarget(abs: string): DevStep<string | undefined> {
+  const node = yield* lookup(abs);
+  if (node.kind === 'fd') return yield* fdTarget(node.fd, abs);
+  if (node.kind === 'link' && node.fd !== undefined) return yield* fdTarget(node.fd, abs);
+  return undefined;
+}
+
 export function* devReaddir(abs: string): DevStep<string[]> {
   if (abs === '/dev/fd') {
     const fds = (yield { op: 'fd-list' }) as Array<{ fd: number }>;
