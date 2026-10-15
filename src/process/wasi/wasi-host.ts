@@ -976,7 +976,12 @@ export class WasiHost {
     v.setUint8(out, filetype);
     v.setUint16(out + 2, flags, true);
 
-    const rights = seeks ? RIGHTS.ALL : RIGHTS.ALL & ~(RIGHTS.FD_SEEK | RIGHTS.FD_TELL);
+    let rights = seeks ? RIGHTS.ALL : RIGHTS.ALL & ~(RIGHTS.FD_SEEK | RIGHTS.FD_TELL);
+    if (e.type === 'kernel') {
+      const access = this.o.kernel.sys.access?.(fd);
+      if (access === 'read') rights &= ~RIGHTS.FD_WRITE;
+      else if (access === 'write') rights &= ~RIGHTS.FD_READ;
+    }
     v.setBigUint64(out + 8, rights, true);
     v.setBigUint64(out + 16, RIGHTS.ALL, true);
   }
