@@ -47,8 +47,9 @@ import {
   openPipe,
   pollFile,
 } from './fd-table.ts';
-import { AsyncOps, HOST_OPS, type HostSyscall, hostSyscall, type LockTable } from './host-ops.ts';
+import { AsyncOps, HOST_OPS, type HostSyscall, hostSyscall, type LockTarget } from './host-ops.ts';
 import type { JobTable } from './jobs.ts';
+import type { LockKind, LockTable } from './locks.ts';
 import { HTTP_OPS, type HttpHandles, type HttpSyscall } from './net/http-syscalls.ts';
 import { NO_TRANSPORT } from './net/network.ts';
 import { Resolver } from './net/resolver.ts';
@@ -801,6 +802,8 @@ export class WasmProcess {
       if (isHostSyscall(req)) {
         return await hostSyscall(req, {
           pid: this.pid,
+          owner: () => this.lockOwner(),
+          fileKey: (target, kind) => this.lockKey(target, kind),
           locks: this.options.locks,
           ops: this.asyncOps,
           blocking: () => this.blockingSignal(cancelled),
@@ -826,6 +829,50 @@ export class WasmProcess {
       }
       throw e;
     }
+  }
+
+  private readonly lockOwners = new Set<number>();
+
+  private readonly lockChecked = new Set<string>();
+
+  private lockOwner(): number {
+    const owner = this.options.jobs?.shown(this.pid) ?? this.pid;
+    this.lockOwners.add(owner);
+    return owner;
+  }
+
+  private async lockPath(target: LockTarget, want: number): Promise<string> {
+    if (target.fd !== undefined) {
+      const st = await this.fds.get(target.fd).file.stat?.();
+      if (!st || st.orphan) throw new KernelError('EBADF');
+      return st.path;
+    }
+    if (target.path === undefined) throw new KernelError('EINVAL');
+    if (!target.path.startsWith('/')) throw new KernelError('EINVAL');
+    const path = target.path;
+    const g = this.guarded();
+    const checked = `${want}:${path}`;
+    if (g && want !== 0 && !this.lockChecked.has(checked)) {
+      await openable(g, 'lock', path, want, false);
+      this.lockChecked.add(checked);
+    }
+    return path;
+  }
+
+  private async lockKey(target: LockTarget, kind: LockKind | 'unlock' | 'close'): Promise<string> {
+    const want = kind === 'read' ? R_OK : kind === 'write' ? W_OK : 0;
+    const path = await this.lockPath(target, want);
+    const st = await this.options.fs.stat?.(path);
+    if (!st) throw new KernelError('ENOENT');
+    return st.ino === undefined ? path : `${st.dev ?? 0}:${st.ino}`;
+  }
+
+  private async dropRecordLocks(fd: number): Promise<void> {
+    const { locks } = this.options;
+    const owner = this.options.jobs?.shown(this.pid) ?? this.pid;
+    if (!locks?.holds(owner) || !this.fds.has(fd)) return;
+    const key = await this.lockKey({ fd }, 'close').catch(() => undefined);
+    if (key !== undefined) locks.dropFile(key, owner);
   }
 
   private refuseIfPending(restart: true | undefined): void {
@@ -1219,6 +1266,7 @@ export class WasmProcess {
         };
       case 'fd-close': {
         this.options.locks?.closed(this.pid, req.fd);
+        await this.dropRecordLocks(req.fd);
         const channel = this.fds.get(req.fd).file.clipboard;
         if (channel) channel.stamp = await this.clipboardStamp();
         await Promise.resolve(this.fds.close(req.fd)).catch(async (err: unknown) => {
@@ -1879,6 +1927,7 @@ export class WasmProcess {
     this.clearAlarm();
     this.interrupt.abort();
     this.options.locks?.release(this.pid);
+    for (const owner of this.lockOwners) this.options.locks?.release(owner);
     this.asyncOps.close();
     for (const [target, sig] of this.deathSignals) this.sendDeath(target, sig);
     this.deathSignals.clear();

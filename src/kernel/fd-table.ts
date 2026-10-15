@@ -6,6 +6,8 @@ import type { KernelTty } from './tty.ts';
 
 export type KernelErrno =
   | 'EBADF'
+  | 'EDEADLK'
+  | 'ENOLCK'
   | 'EEXIST'
   | 'ELOOP'
   | 'EPIPE'

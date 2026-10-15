@@ -1,0 +1,13 @@
+{
+  "name": "locktest",
+  "private": true,
+  "slicc": {
+    "abi": "emscripten",
+    "commands": {
+      "locktest": {
+        "glue": "bin/locktest",
+        "wasm": "bin/locktest.wasm"
+      }
+    }
+  }
+}

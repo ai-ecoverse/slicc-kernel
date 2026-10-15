@@ -1,9 +1,24 @@
 import type { SyncFsResult } from '../realm/sync-fs-wire.ts';
 import { KernelError } from './fd-table.ts';
+import { type LockKind, type LockTable, lockRange } from './locks.ts';
+
+export interface LockTarget {
+  path?: string;
+  fd?: number;
+}
 
 export type HostSyscall =
   | { op: 'lock'; path: string; exclusive: boolean; fd: number }
   | { op: 'unlock'; path: string }
+  | ({
+      op: 'lk-set';
+      kind: LockKind | 'unlock';
+      start: number;
+      len: number;
+      wait?: boolean;
+    } & LockTarget)
+  | ({ op: 'lk-get'; kind: LockKind; start: number; len: number } & LockTarget)
+  | ({ op: 'lk-close' } & LockTarget)
   | { op: 'async-submit'; req: { op: string }; ack?: number[] }
   | { op: 'async-wait'; timeoutMs?: number }
   | { op: 'async-take'; id: number }
@@ -16,6 +31,9 @@ export type HostSyscall =
 export const HOST_OPS: readonly HostSyscall['op'][] = [
   'lock',
   'unlock',
+  'lk-set',
+  'lk-get',
+  'lk-close',
   'async-submit',
   'async-wait',
   'async-take',
@@ -28,43 +46,6 @@ export const HOST_OPS: readonly HostSyscall['op'][] = [
 
 const json = (value: unknown): SyncFsResult => ({ ok: true, kind: 'json', json: value });
 const done: SyncFsResult = { ok: true, kind: 'void' };
-
-interface Holder {
-  exclusive: boolean;
-  fds: Set<number>;
-}
-
-export class LockTable {
-  private readonly held = new Map<string, Map<number, Holder>>();
-
-  lock(pid: number, path: string, exclusive: boolean, fd: number): boolean {
-    const holders = this.held.get(path) ?? new Map<number, Holder>();
-    for (const [other, h] of holders) if (other !== pid && (exclusive || h.exclusive)) return false;
-    const mine = holders.get(pid) ?? { exclusive, fds: new Set<number>() };
-    mine.exclusive = exclusive;
-    mine.fds.add(fd);
-    holders.set(pid, mine);
-    this.held.set(path, holders);
-    return true;
-  }
-
-  unlock(pid: number, path: string): void {
-    const holders = this.held.get(path);
-    holders?.delete(pid);
-    if (holders?.size === 0) this.held.delete(path);
-  }
-
-  closed(pid: number, fd: number): void {
-    for (const [path, holders] of [...this.held]) {
-      const mine = holders.get(pid);
-      if (mine?.fds.delete(fd) && mine.fds.size === 0) this.unlock(pid, path);
-    }
-  }
-
-  release(pid: number): void {
-    for (const path of [...this.held.keys()]) this.unlock(pid, path);
-  }
-}
 
 type Run = (req: { op: string }, cancelled: AbortSignal) => Promise<SyncFsResult>;
 
@@ -213,6 +194,8 @@ export class AsyncOps {
 
 export interface HostOpsContext {
   pid: number;
+  owner?: () => number;
+  fileKey?: (target: LockTarget, kind: LockKind | 'unlock' | 'close') => Promise<string>;
   locks: LockTable | undefined;
   ops: AsyncOps;
   blocking: () => AbortSignal;
@@ -229,6 +212,10 @@ export async function hostSyscall(req: HostSyscall, ctx: HostOpsContext): Promis
     case 'unlock':
       ctx.locks?.unlock(ctx.pid, req.path);
       return done;
+    case 'lk-set':
+    case 'lk-get':
+    case 'lk-close':
+      return recordLock(req, ctx);
     case 'async-submit':
       if (!ctx.valid(req.req)) throw new KernelError('EINVAL');
       if (req.ack) ctx.ops.ack(req.ack);
@@ -250,4 +237,35 @@ export async function hostSyscall(req: HostSyscall, ctx: HostOpsContext): Promis
       ctx.ops.close();
       return done;
   }
+}
+
+async function recordLock(
+  req: Extract<HostSyscall, { op: 'lk-set' | 'lk-get' | 'lk-close' }>,
+  ctx: HostOpsContext
+): Promise<SyncFsResult> {
+  const { locks, fileKey } = ctx;
+  if (!locks || !fileKey) throw new KernelError('ENOLCK');
+  const owner = ctx.owner?.() ?? ctx.pid;
+  const target = {
+    ...(req.path !== undefined ? { path: req.path } : {}),
+    ...(req.fd !== undefined ? { fd: req.fd } : {}),
+  };
+  if (req.op === 'lk-close') {
+    locks.dropFile(await fileKey(target, 'close'), owner);
+    return done;
+  }
+  const range = lockRange(req.start, req.len);
+  const key = await fileKey(target, req.kind);
+  if (req.op === 'lk-get') {
+    const held = locks.holder(key, owner, { key, kind: req.kind, ...range });
+    if (!held) return json(null);
+    const len = held.end === Number.POSITIVE_INFINITY ? 0 : held.end - held.start;
+    return json({ kind: held.kind, pid: held.owner, start: held.start, len });
+  }
+  if (req.kind !== 'unlock' && req.wait) {
+    await locks.wait(key, owner, req.kind, range, ctx.blocking);
+    return done;
+  }
+  if (!locks.set(key, owner, req.kind, range.start, range.end)) throw new KernelError('EAGAIN');
+  return done;
 }
