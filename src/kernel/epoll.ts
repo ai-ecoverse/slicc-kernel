@@ -119,6 +119,7 @@ export class EpollFile implements KernelFile {
     if (how === 'add' || (how === 'set' && !current)) {
       if (current) throw new KernelError('EEXIST');
       if (UNPOLLABLE.has(kernelFdKind(open.file))) throw new KernelError('EPERM');
+      if (open.file instanceof EpollFile && open.file.reaches(this)) throw new KernelError('ELOOP');
       if (known) this.drop(known);
       this.register(fd, open, events, data);
     } else if (!current) {
@@ -132,6 +133,13 @@ export class EpollFile implements KernelFile {
       current.gen++;
     }
     this.changes.wake();
+  }
+
+  reaches(target: EpollFile): boolean {
+    if (this === target) return true;
+    return [...this.regs.values()].some(
+      (reg) => reg.open.file instanceof EpollFile && reg.open.file.reaches(target)
+    );
   }
 
   collect(fds: FdTable, max: number): EpollEvent[] {
