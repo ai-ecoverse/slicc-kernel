@@ -575,21 +575,31 @@ export class OpfsFs implements KernelFs {
         if (!link) throw err;
         if (link.path === current && !follow) return { path: current, link };
         const target = `${link.link}${current.slice(link.path.length)}`;
-        current = target.split('/').includes('..')
-          ? await this.physical(parentOf(link.path), target, hops + 1, path)
-          : resolvePath(parentOf(link.path), target);
+        if (target.split('/').includes('..')) {
+          const resolved = await this.physical(parentOf(link.path), target, hops + 1, path);
+          current = resolved.path;
+          hops = resolved.hops;
+        } else {
+          current = resolvePath(parentOf(link.path), target);
+        }
         this.crossing(path, current);
       }
     }
     throw fsError('ELOOP', path);
   }
 
-  private async physical(base: string, path: string, used: number, of: string): Promise<string> {
+  private async physical(
+    base: string,
+    path: string,
+    used: number,
+    of: string
+  ): Promise<{ path: string; hops: number }> {
     let done: string[] = [];
     let todo = (path.startsWith('/') ? path : `${base}/${path}`)
       .split('/')
       .filter((p) => p !== '' && p !== '.');
-    for (let hops = used; todo.length > 0; ) {
+    let hops = used;
+    while (todo.length > 0) {
       const part = todo.shift() as string;
       if (part === '..') done.pop();
       else if (!todo.includes('..')) done.push(part);
@@ -607,7 +617,7 @@ export class OpfsFs implements KernelFs {
         }
       }
     }
-    return `/${done.join('/')}`;
+    return { path: `/${done.join('/')}`, hops };
   }
 
   private mode(path: string, directory: boolean, meta: MetaEntry | undefined): number {
