@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { subscribe } from 'node:diagnostics_channel';
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import type { RealmTransport } from '../kernel/net/transport.ts';
@@ -81,6 +83,15 @@ function refusal(url: URL, address: string, place: Place): Error {
   return Object.assign(new Error(why), { status: 403, code: 'EACCES' });
 }
 
+function connectRefusal(address: string, port: number, place: Place): Error {
+  const where = `${address}:${port}`;
+  const why =
+    place === 'link-local'
+      ? `nodeTransport refuses link-local ${where}`
+      : `nodeTransport refuses the host's loopback ${where} (see nodeTransport({ hostLoopback }))`;
+  return Object.assign(new Error(why), { status: 403, code: 'EACCES' });
+}
+
 async function addressesOf(host: string, resolve: Resolve): Promise<string[]> {
   const plain = host.replace(/^\[(.*)\]$/, '$1');
   if (isIP(plain)) return [plain];
@@ -113,11 +124,84 @@ function guarded(check: Promise<void>, signal: AbortSignal | undefined): Promise
   return Promise.race([check, aborted]).finally(() => signal.removeEventListener('abort', stop));
 }
 
+interface LoopbackEntry {
+  policy: HostLoopback;
+  refused?: Error;
+}
+
+const loopbackStore = new AsyncLocalStorage<LoopbackEntry>();
+
+let subscribed = false;
+
+function envProxyEnabled(): boolean {
+  if (process.env.NODE_USE_ENV_PROXY === '1') return true;
+  const opts = process.env.NODE_OPTIONS ?? '';
+  const args = process.execArgv ?? [];
+  return args.includes('--use-env-proxy') || opts.includes('--use-env-proxy');
+}
+
+function normaliseProxyUrl(url: string): string | undefined {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.replace(/^\[(.*)\]$/, '$1');
+    const port = parsed.port || (parsed.protocol === 'https:' ? '443' : '80');
+    return `${host}:${port}`;
+  } catch {
+    return undefined;
+  }
+}
+
+function proxyAddresses(): Set<string> {
+  if (!envProxyEnabled()) return new Set();
+  const out = new Set<string>();
+  for (const key of ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy']) {
+    const val = process.env[key];
+    if (val) {
+      const addr = normaliseProxyUrl(val);
+      if (addr) out.add(addr);
+    }
+  }
+  return out;
+}
+
+function ensureSubscribed(): void {
+  if (subscribed) return;
+  subscribed = true;
+  subscribe('undici:client:connected', (message: unknown) => {
+    const entry = loopbackStore.getStore();
+    if (!entry) return;
+    const { socket, connectParams } = message as {
+      socket: { remoteAddress?: string; remotePort?: number; destroy(err: Error): void };
+      connectParams: { hostname?: string; port?: string; protocol?: string };
+    };
+    const address = socket.remoteAddress;
+    if (!address) {
+      const err = connectRefusal('unknown', 0, 'loopback');
+      entry.refused = err;
+      socket.destroy(err);
+      return;
+    }
+    const proxies = proxyAddresses();
+    if (proxies.size > 0 && connectParams.hostname) {
+      const cpPort = connectParams.port || (connectParams.protocol === 'https:' ? '443' : '80');
+      if (proxies.has(`${connectParams.hostname}:${cpPort}`)) return;
+    }
+    const place = placeOf(address);
+    if (!place) return;
+    const port = socket.remotePort ?? 0;
+    if (place === 'loopback' && allows(entry.policy, port)) return;
+    const err = connectRefusal(address, port, place);
+    entry.refused = err;
+    socket.destroy(err);
+  });
+}
+
 export function guardedLoopback(
   transport: RealmTransport,
   policy: HostLoopback,
   resolve?: Resolve
 ): RealmTransport {
+  ensureSubscribed();
   const open = transport.websocket?.bind(transport);
   return {
     get traits() {
@@ -125,13 +209,23 @@ export function guardedLoopback(
     },
     fetch: async (request, owner) => {
       await guarded(checkDestination(request.url, policy, resolve), request.signal);
-      return transport.fetch(request, owner);
+      const entry: LoopbackEntry = { policy };
+      try {
+        return await loopbackStore.run(entry, () => transport.fetch(request, owner));
+      } catch (err) {
+        throw entry.refused ?? err;
+      }
     },
     ...(open
       ? {
           websocket: async (request) => {
             await guarded(checkDestination(request.url, policy, resolve), request.signal);
-            return open(request);
+            const entry: LoopbackEntry = { policy };
+            try {
+              return await loopbackStore.run(entry, () => open(request));
+            } catch (err) {
+              throw entry.refused ?? err;
+            }
           },
         }
       : {}),
