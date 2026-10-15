@@ -112,6 +112,7 @@ async function storageUsage(): Promise<SyncFsUsage | null> {
   return { quota: estimate.quota, usage: estimate.usage ?? 0 };
 }
 
+const PLAIN_DIR_MODE = 0o755;
 const done: SyncFsResult = { ok: true, kind: 'void' };
 
 function json(value: unknown): SyncFsResult {
@@ -122,6 +123,12 @@ function ownerFor(entry: SyncFsTokenEntry, mode?: number): NewOwner | undefined 
   const cred = entry.cred?.();
   if (!cred) return undefined;
   return ownerOf(cred, mode === undefined ? undefined : mode & ~(entry.umask?.() ?? 0o022));
+}
+
+function plainDirMode(entry: SyncFsTokenEntry, mode: number | undefined): number | undefined {
+  if (entry.cred || mode === undefined) return undefined;
+  const wanted = mode & 0o7777 & ~(entry.umask?.() ?? 0o022);
+  return wanted === PLAIN_DIR_MODE ? undefined : wanted;
 }
 
 function mkdirOptions(entry: SyncFsTokenEntry, mode = 0o777) {
@@ -172,11 +179,15 @@ async function run(
       return json(await fs.readdir(path));
     case 'readdir-stat':
       return json(await readdirStat(fs, path));
-    case 'mkdir':
+    case 'mkdir': {
+      const plain = plainDirMode(entry, req.mode);
+      const fresh = plain !== undefined && !(await fs.exists(path));
       await (req.exclusive
         ? mkdirExclusive(entry, path, req.mode)
         : fs.mkdir(path, mkdirOptions(entry, req.mode)));
+      if (fresh) await fs.chmod(path, plain);
       return done;
+    }
     case 'rm':
       await fs.rm(path, { recursive: true });
       return done;

@@ -4,7 +4,7 @@ import {
   type SyncFsBridgeStat,
   type SyncFsResult,
 } from '../../realm/sync-fs-wire.ts';
-import { JsCallError } from './js-kernel.ts';
+import { JsCallError, modeOf } from './js-kernel.ts';
 
 export interface JsOpenOptions {
   read?: boolean;
@@ -13,6 +13,7 @@ export interface JsOpenOptions {
   create?: boolean;
   exclusive?: boolean;
   truncate?: boolean;
+  mode?: number;
 }
 
 export type JsFdType = 'file' | 'pipe' | 'tty' | 'socket' | 'device' | 'directory';
@@ -142,6 +143,7 @@ export function openRequest(abs: string, o: JsOpenOptions) {
     position: 0,
     ...(isExclusive(o) ? { exclusive: true } : o.create ? { create: true } : { existing: true }),
     ...(o.truncate ? { truncate: true } : {}),
+    ...(o.create || isExclusive(o) ? { mode: o.mode === undefined ? 0o666 : modeOf(o.mode) } : {}),
   };
 }
 

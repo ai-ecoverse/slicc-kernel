@@ -72,6 +72,7 @@ export interface JsSyncContext {
   exit(status?: number): never;
   kill(pid: number, signal?: number | `SIG${string}`): void;
   cred(): JsCred;
+  umask(mask?: number): number;
   setcred(change: Partial<JsCred>): JsCred;
   read(fd: number, max?: number): Uint8Array;
   write(fd: number, data: Uint8Array | string): void;
@@ -82,7 +83,7 @@ export interface JsSyncContext {
     lstat(path: string): SyncFsBridgeStat;
     exists(path: string): boolean;
     readdir(path: string): string[];
-    mkdir(path: string, options?: { recursive?: boolean }): void;
+    mkdir(path: string, options?: { recursive?: boolean; mode?: number }): void;
     rm(path: string): void;
     unlink(path: string): void;
     rename(from: string, to: string): void;
@@ -92,7 +93,7 @@ export interface JsSyncContext {
     readlink(path: string): string;
     statfs(path: string): JsStatFs;
     readFile(path: string): Uint8Array;
-    writeFile(path: string, data: Uint8Array | string): void;
+    writeFile(path: string, data: Uint8Array | string, options?: { mode?: number }): void;
   };
 }
 
@@ -161,7 +162,10 @@ export class JsSyncKernel {
 export function syncOps(
   kernel: JsSyncKernel,
   shared: SyncShared
-): Omit<JsSyncContext, 'run' | 'spawn' | 'exit' | 'kill' | 'cred' | 'setcred' | 'kernel'> {
+): Omit<
+  JsSyncContext,
+  'run' | 'spawn' | 'exit' | 'kill' | 'cred' | 'setcred' | 'kernel' | 'umask'
+> {
   const { infos, handles, resolve } = shared;
 
   const info = (fd: number): FdInfo => {
@@ -361,6 +365,7 @@ function syncPathOps(
         op: 'mkdir',
         path: resolve(path),
         ...(options?.recursive === false ? { exclusive: true } : {}),
+        mode: options?.mode === undefined ? 0o777 : modeOf(options.mode),
       }),
     rm: (path) => void kernel.call({ op: 'rm', path: resolve(path) }),
     unlink: (path) => void kernel.call({ op: 'unlink', path: resolve(path) }),
@@ -387,8 +392,14 @@ function syncPathOps(
       kernel.call({ op: 'fd-path-flush', path: abs });
       return kernel.bytes({ op: 'read', path: abs });
     },
-    writeFile(path, data) {
-      const file = open(path, { write: true, create: true, truncate: true });
+    writeFile(path, data, options) {
+      const mode = options?.mode;
+      const file = open(path, {
+        write: true,
+        create: true,
+        truncate: true,
+        ...(mode !== undefined ? { mode } : {}),
+      });
       try {
         file.write(0, typeof data === 'string' ? encoder.encode(data) : data);
       } finally {

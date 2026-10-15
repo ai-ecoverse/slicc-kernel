@@ -351,7 +351,7 @@ function holdingToken(
   }
 ): string {
   return mintSyncFsToken({
-    ...(opts.owners ? caller : {}),
+    ...(opts.owners ? caller : { umask: caller.umask }),
     ...(opts.dac ? { dac: opts.dac, pid: opts.pid, created: caller.created } : {}),
     ...(opts.links !== undefined ? { links: opts.links } : {}),
     ...(opts.fresh ? { fresh: (path: string) => opts.fresh?.(path, caller.umask()) } : {}),
