@@ -91,7 +91,8 @@ test('hostLoopback: true reaches it, but not 9222-9229; a port list allows only 
   const host = await hostServer(t);
   const open = await kernelWith(t, nodeTransport({ hostLoopback: true }));
   assert.equal(await open.curl(host.port), 'host secret\n 200');
-  assert.equal(await open.fetch(`http://127.0.0.1:${host.port}/`), '200 host secret\n');
+  assert.equal(await open.fetch(`http://host.slicc.internal:${host.port}/`), '200 host secret\n');
+  assert.equal(await open.fetch(`http://127.0.0.1:${host.port}/`), 'error ECONNREFUSED');
   for (const port of [9222, 9229]) assert.match(await open.curl(port), / 403$/, `${port}`);
   const listed = await kernelWith(t, nodeTransport({ hostLoopback: [host.port] }));
   assert.equal(await listed.curl(host.port), 'host secret\n 200');

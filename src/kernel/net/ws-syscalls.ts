@@ -1,5 +1,6 @@
 import type { SyncFsResult } from '../../realm/sync-fs-wire.ts';
 import { toHostLoopback } from './loopback-names.ts';
+import type { KernelLoopback } from './loopback-transport.ts';
 import { NO_WEBSOCKET } from './proxy-service.ts';
 import type { HeaderList, RealmTransport, RealmWebSocket } from './transport.ts';
 
@@ -49,10 +50,12 @@ export class WsHandles {
   private readonly transport: RealmTransport;
   private readonly open = new Map<number, OpenSocket>();
   private readonly next: () => number;
+  private readonly local: KernelLoopback | undefined;
 
-  constructor(transport: RealmTransport, next: () => number) {
+  constructor(transport: RealmTransport, next: () => number, local?: KernelLoopback) {
     this.transport = transport;
     this.next = next;
+    this.local = local;
   }
 
   owns(handle: number): boolean {
@@ -89,16 +92,21 @@ export class WsHandles {
     req: Extract<WsSyscall, { op: 'net-ws-open' }>,
     entry: OpenSocket
   ): Promise<SyncFsResult> {
-    const { transport } = this;
-    if (!transport.traits.websocket || !transport.websocket) return fail('ENOTSUP', NO_WEBSOCKET);
+    const { transport, local } = this;
+    const port = local?.port(req.url);
+    const open = { protocols: req.protocols, headers: req.headers, signal: entry.abort.signal };
+    if (port === undefined && (!transport.traits.websocket || !transport.websocket)) {
+      return fail('ENOTSUP', NO_WEBSOCKET);
+    }
     let socket: RealmWebSocket;
     try {
-      socket = await transport.websocket({
-        url: toHostLoopback(req.url),
-        protocols: req.protocols,
-        headers: req.headers,
-        signal: entry.abort.signal,
-      });
+      socket =
+        port === undefined
+          ? await (transport.websocket as NonNullable<RealmTransport['websocket']>)({
+              url: toHostLoopback(req.url),
+              ...open,
+            })
+          : await (local as KernelLoopback).websocket({ url: req.url, ...open }, port);
     } catch (e) {
       return fail(errnoOf(e), message(e));
     }
