@@ -1,3 +1,4 @@
+import { physicalPathAsync } from '../../fs/physical-path.ts';
 import { SIG } from '../../kernel/signals.ts';
 import { parseSyncFsStat, type SyncFsBridgeStat } from '../../realm/sync-fs-wire.ts';
 import { KERNEL_VERSION } from '../../version.ts';
@@ -8,6 +9,7 @@ import {
   devOpen,
   devReaddir,
   devReadlink,
+  devResolveTarget,
   devStat,
   inDev,
   readWhole,
@@ -36,7 +38,7 @@ import {
   writeDevice,
   written,
 } from './js-io.ts';
-import { callError, JsCallError, type JsKernel, modeOf } from './js-kernel.ts';
+import { callError, JsCallError, type JsKernel, modeOf, umaskRequest } from './js-kernel.ts';
 import { type JsNet, netOps } from './js-net.ts';
 import { procFsAsync, procOpenAsync } from './js-proc.ts';
 import { runSync } from './js-run.ts';
@@ -101,7 +103,7 @@ export interface JsProgramContext {
     lstat(path: string): Promise<SyncFsBridgeStat>;
     exists(path: string): Promise<boolean>;
     readdir(path: string): Promise<string[]>;
-    mkdir(path: string, options?: { recursive?: boolean }): Promise<void>;
+    mkdir(path: string, options?: { recursive?: boolean; mode?: number }): Promise<void>;
     rm(path: string): Promise<void>;
     unlink(path: string): Promise<void>;
     rename(from: string, to: string): Promise<void>;
@@ -111,7 +113,7 @@ export interface JsProgramContext {
     readlink(path: string): Promise<string>;
     statfs(path: string): Promise<JsStatFs>;
     readFile(path: string): Promise<Uint8Array>;
-    writeFile(path: string, data: Uint8Array | string): Promise<void>;
+    writeFile(path: string, data: Uint8Array | string, options?: { mode?: number }): Promise<void>;
   };
   signals: {
     on(signal: JsSignal, handler: (signal: number) => void): Promise<void>;
@@ -123,6 +125,7 @@ export interface JsProgramContext {
   wait(pid: number): Promise<JsExited>;
   kill(pid: number, signal?: JsSignal): Promise<void>;
   sudo(args: readonly string[]): Promise<JsSudoAnswer>;
+  umask(mask?: number): Promise<number>;
   net: JsNet;
   websocket(url: string | URL, options?: JsWebSocketOptions): Promise<JsWebSocket>;
   tty: JsTty;
@@ -309,6 +312,70 @@ function readable(read: (fd: number) => Promise<Uint8Array>): ReadableStream<Uin
   );
 }
 
+async function resolveDevAsync(kernel: JsKernel, abs: string): Promise<string | undefined> {
+  try {
+    const resolved = await physicalPathAsync(
+      {
+        async lstat(p) {
+          return parseSyncFsStat(await kernel.json({ op: 'lstat', path: p })) ?? {};
+        },
+        async readlink(p) {
+          return String(await kernel.json({ op: 'readlink', path: p }));
+        },
+      },
+      abs
+    );
+    return resolved !== abs && inDev(resolved) ? resolved : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function vfsStat(
+  kernel: JsKernel,
+  abs: string,
+  op: 'stat' | 'lstat',
+  tryDev: (abs: string) => Promise<string | undefined>
+): Promise<SyncFsBridgeStat> {
+  try {
+    await kernel.call({ op: 'fd-path-flush', path: abs });
+    const s = parseSyncFsStat(await kernel.json({ op, path: abs }));
+    if (!s) throw new JsCallError('EIO', op);
+    return s;
+  } catch (err) {
+    if (!(err instanceof JsCallError) || err.code !== 'ENOENT') throw err;
+    const devPath = await tryDev(abs);
+    if (!devPath) throw err;
+    return devAsync(kernel, devStat(devPath, op === 'stat'));
+  }
+}
+
+async function vfsOpen(
+  kernel: JsKernel,
+  abs: string,
+  options: JsOpenOptions,
+  statOf: (op: 'stat' | 'lstat', path: string) => Promise<SyncFsBridgeStat>,
+  infos: Map<number, FdInfo>,
+  handles: Map<number, () => void>
+): Promise<JsFile> {
+  const existing = await statOf(isExclusive(options) ? 'lstat' : 'stat', abs).catch(absent);
+  checkOpen(abs, options, existing);
+  const fd = (await kernel.json(openRequest(abs, options))) as number;
+  try {
+    await kernel.call({ op: 'fd-vfs-stat', fd });
+  } catch (err) {
+    await kernel.raw({ op: 'fd-close', fd });
+    throw err;
+  }
+  infos.set(fd, { kind: 'file' });
+  const handle = fileHandle(kernel, fd, abs, options.append === true, () => {
+    infos.delete(fd);
+    handles.delete(fd);
+  });
+  handles.set(fd, handle.invalidate);
+  return handle.file;
+}
+
 export function createContext(o: ContextOptions): CreatedContext {
   const { kernel } = o;
   const infos = new Map<number, FdInfo>();
@@ -318,6 +385,7 @@ export function createContext(o: ContextOptions): CreatedContext {
     o.random ??
     ((bytes: Uint8Array) => void crypto.getRandomValues(bytes as Uint8Array<ArrayBuffer>));
   const resolve = (path: string) => resolvePath(o.cwd, path);
+  const tryDev = (abs: string) => resolveDevAsync(kernel, abs);
   let exiting: number | undefined;
   const exit = (code = 0): never => {
     exiting ??= code;
@@ -366,34 +434,28 @@ export function createContext(o: ContextOptions): CreatedContext {
   const statOf = async (op: 'stat' | 'lstat', path: string): Promise<SyncFsBridgeStat> => {
     const abs = resolve(path);
     if (inDev(abs)) return devAsync(kernel, devStat(abs, op === 'stat'));
-    await kernel.call({ op: 'fd-path-flush', path: abs });
-    const s = parseSyncFsStat(await kernel.json({ op, path: abs }));
-    if (!s) throw new JsCallError('EIO', op);
-    return s;
+    return vfsStat(kernel, abs, op, tryDev);
   };
+
+  const devIo = { infos, handles, read, write: writeAll };
 
   const open = async (path: string, options: JsOpenOptions = {}): Promise<JsFile> => {
     const abs = resolve(path);
-    if (inDev(abs)) return openDev(kernel, abs, options, { infos, handles, read, write: writeAll });
-    const existing = await statOf(isExclusive(options) ? 'lstat' : 'stat', abs).catch(absent);
-    checkOpen(abs, options, existing);
-    const fd = (await kernel.json(openRequest(abs, options))) as number;
+    if (inDev(abs)) return openDev(kernel, abs, options, devIo);
     try {
-      await kernel.call({ op: 'fd-vfs-stat', fd });
+      return await vfsOpen(kernel, abs, options, statOf, infos, handles);
     } catch (err) {
-      await kernel.raw({ op: 'fd-close', fd });
-      throw err;
+      if (!(err instanceof JsCallError) || err.code !== 'ENOENT') throw err;
+      const devPath = await tryDev(abs);
+      if (!devPath) throw err;
+      return openDev(kernel, devPath, options, devIo);
     }
-    infos.set(fd, { kind: 'file' });
-    const handle = fileHandle(kernel, fd, abs, options.append === true, () => {
-      infos.delete(fd);
-      handles.delete(fd);
-    });
-    handles.set(fd, handle.invalidate);
-    return handle.file;
   };
 
-  const fs = procFsAsync(pathOps(kernel, resolve, statOf, open), kernel, { resolve, pid: o.pid });
+  const fs = procFsAsync(pathOps(kernel, resolve, statOf, open, tryDev), kernel, {
+    resolve,
+    pid: o.pid,
+  });
   const lane = o.lane ?? laneOf(undefined);
   if (o.lane && o.lane !== noLane) kernel.syncLane = o.lane;
   const syncKernel = new JsSyncKernel(lane, kernel, unwind);
@@ -410,6 +472,7 @@ export function createContext(o: ContextOptions): CreatedContext {
     },
     kill: killer({ self: o.pid, kernel, syncKernel, lane, writes, modes: terminal.modes }),
     cred: () => syncKernel.json({ op: 'proc-cred' }) as JsCred,
+    umask: (mask) => syncKernel.json(umaskRequest(mask)) as number,
     setcred(change) {
       if (typeof change !== 'object' || change === null || Array.isArray(change)) {
         throw new JsCallError('EINVAL', 'setcred');
@@ -458,6 +521,7 @@ export function createContext(o: ContextOptions): CreatedContext {
     },
     sync,
     fetch: fetchOp(kernel),
+    umask: async (mask) => (await kernel.json(umaskRequest(mask))) as number,
     sudo: async (args) =>
       (await kernel.json({
         op: 'proc-sudo',
@@ -636,7 +700,8 @@ function pathOps(
   kernel: JsKernel,
   resolve: (path: string) => string,
   statOf: (op: 'stat' | 'lstat', path: string) => Promise<SyncFsBridgeStat>,
-  open: (path: string, options?: JsOpenOptions) => Promise<JsFile>
+  open: (path: string, options?: JsOpenOptions) => Promise<JsFile>,
+  tryDev: (abs: string) => Promise<string | undefined>
 ): JsProgramContext['fs'] {
   return {
     stat: (path) => statOf('stat', path),
@@ -644,7 +709,9 @@ function pathOps(
     async exists(path) {
       const abs = resolve(path);
       if (inDev(abs)) return devAsync(kernel, devExists(abs));
-      return (await kernel.json({ op: 'exists', path: abs })) === true;
+      if ((await kernel.json({ op: 'exists', path: abs })) === true) return true;
+      const devPath = await tryDev(abs);
+      return devPath ? devAsync(kernel, devExists(devPath)) : false;
     },
     async readdir(path) {
       const abs = resolve(path);
@@ -656,6 +723,7 @@ function pathOps(
         op: 'mkdir',
         path: resolve(path),
         ...(options?.recursive === false ? { exclusive: true } : {}),
+        mode: options?.mode === undefined ? 0o777 : modeOf(options.mode),
       })),
     rm: async (path) => void (await kernel.call({ op: 'rm', path: resolve(path) })),
     unlink: async (path) => void (await kernel.call({ op: 'unlink', path: resolve(path) })),
@@ -673,18 +741,35 @@ function pathOps(
       return String(await kernel.json({ op: 'readlink', path: abs }));
     },
     async statfs(path) {
-      const abs = resolve(path);
+      let abs = resolve(path);
+      if (inDev(abs)) {
+        const target = await devAsync(kernel, devResolveTarget(abs)).catch(() => undefined);
+        if (target?.startsWith('/')) abs = target;
+      }
       await statOf('stat', abs);
       return statFsOf(await kernel.json({ op: 'statfs', path: abs }));
     },
     async readFile(path) {
       const abs = resolve(path);
       if (inDev(abs)) return readWhole(await open(abs));
-      await kernel.call({ op: 'fd-path-flush', path: abs });
-      return kernel.bytes({ op: 'read', path: abs });
+      try {
+        await kernel.call({ op: 'fd-path-flush', path: abs });
+        return await kernel.bytes({ op: 'read', path: abs });
+      } catch (err) {
+        if (!(err instanceof JsCallError) || err.code !== 'ENOENT') throw err;
+        const devPath = await tryDev(abs);
+        if (!devPath) throw err;
+        return readWhole(await open(devPath));
+      }
     },
-    async writeFile(path, data) {
-      const file = await open(path, { write: true, create: true, truncate: true });
+    async writeFile(path, data, options) {
+      const mode = options?.mode;
+      const file = await open(path, {
+        write: true,
+        create: true,
+        truncate: true,
+        ...(mode !== undefined ? { mode } : {}),
+      });
       try {
         await file.write(0, typeof data === 'string' ? encoder.encode(data) : data);
       } finally {

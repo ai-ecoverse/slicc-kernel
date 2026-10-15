@@ -292,6 +292,7 @@ class Relay {
 export function enableCdp(net: LoopbackNet, hosts: CdpHosts): () => CdpFacade | undefined {
   let facade: CdpFacade | undefined;
   net.kernelOnly(CDP_PORT, true);
+  net.reserve(CDP_PORT);
   net.activate({ family: 'inet', host: '127.0.0.1', port: CDP_PORT }, () => {
     const started = new CdpFacade({ net, hosts });
     facade = started;

@@ -14,6 +14,7 @@ import {
   redirectOf,
 } from '../fs/types.ts';
 import type { KeptFile, UnlinkHolder } from '../fs/unlinked.ts';
+import { view } from '../fs/view.ts';
 import { joinName, realDir, realTarget } from '../fs/walk.ts';
 import { DriverConnection, type DriverPortLike, errnoError } from './connection.ts';
 import type {
@@ -1223,6 +1224,7 @@ class MountFs implements KernelFs {
     }
     const { mount, rel } = found;
     const real = normalizePath(path);
+    if (options.file && rel === '/') throw errnoError('EISDIR', real);
     if (rel === '/' && options.recursive) await this.rmEach(real, mount, rel, options);
     if (rel === '/') throw errnoError('EBUSY', `${real} is a mount point`);
     this.writable(mount, real);
@@ -1477,9 +1479,6 @@ class MountFs implements KernelFs {
 
   noLinks(): KernelFs {
     const noLinkBase = this.base.noLinks?.() ?? this.base;
-    return Object.create(this, {
-      rejectLinks: { value: true },
-      base: { value: noLinkBase },
-    }) as KernelFs;
+    return view(this, { rejectLinks: true, base: noLinkBase }) as unknown as KernelFs;
   }
 }

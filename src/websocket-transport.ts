@@ -111,10 +111,13 @@ export function openWebSocket(
         socket.close();
       } catch {}
     });
-    socket.addEventListener('close', (event: { code: number; reason: string }) => {
-      queue.end({ code: event.code, reason: event.reason });
-      if (open) return;
-      fail(unopened(url, event.code));
-    });
+    socket.addEventListener(
+      'close',
+      (event: { code: number; reason: string; wasClean?: boolean }) => {
+        queue.end({ code: event.code, reason: event.reason, wasClean: event.wasClean === true });
+        if (open) return;
+        fail(unopened(url, event.code));
+      }
+    );
   });
 }

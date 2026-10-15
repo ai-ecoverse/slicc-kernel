@@ -65,6 +65,10 @@ export async function acceptKey(headers: HeaderList): Promise<string> {
   }
   const key = field(headers, 'sec-websocket-key') ?? '';
   if (!/^[A-Za-z0-9+/]{22}==$/.test(key)) throw new HttpError(400, 'bad Sec-WebSocket-Key');
+  return acceptFor(key);
+}
+
+export async function acceptFor(key: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(key + GUID));
   return btoa(String.fromCharCode(...new Uint8Array(digest)));
 }
@@ -88,6 +92,20 @@ export function frame(opcode: number, payload: Uint8Array): Uint8Array {
     view.setBigUint64(2, BigInt(n));
   }
   out.set(payload, size);
+  return out;
+}
+
+export function clientFrame(opcode: number, payload: Uint8Array): Uint8Array {
+  const plain = frame(opcode, payload);
+  const head = plain.length - payload.length;
+  const mask = crypto.getRandomValues(new Uint8Array(4));
+  const out = new Uint8Array(plain.length + 4);
+  out.set(plain.subarray(0, head));
+  out[1] = (out[1] as number) | 0x80;
+  out.set(mask, head);
+  for (let i = 0; i < payload.length; i++) {
+    out[head + 4 + i] = (payload[i] as number) ^ (mask[i & 3] as number);
+  }
   return out;
 }
 
@@ -135,11 +153,13 @@ export class WsReader<Binary extends boolean = false> {
   private continuing = false;
   private binaryMessage = false;
   private readonly binary: Binary | undefined;
+  private readonly fromServer: boolean;
 
-  constructor(incoming: Incoming, max = MAX_MESSAGE, binary?: Binary) {
+  constructor(incoming: Incoming, max = MAX_MESSAGE, binary?: Binary, fromServer = false) {
     this.incoming = incoming;
     this.max = max;
     this.binary = binary;
+    this.fromServer = fromServer;
   }
 
   async next(
@@ -154,7 +174,7 @@ export class WsReader<Binary extends boolean = false> {
       const fin = (head[0] & 0x80) !== 0;
       const opcode = head[0] & 0x0f;
       if ((head[0] & 0x70) !== 0) throw new WsError(CLOSE.protocol, 'reserved bits are set');
-      if ((head[1] & 0x80) === 0) throw new WsError(CLOSE.protocol, 'client frames must be masked');
+      const masked = this.masking(head[1]);
       const length = await this.length(head[1] & 0x7f, signal);
       const control = opcode >= 8;
       if (control && (length > 125 || !fin)) {
@@ -163,14 +183,19 @@ export class WsReader<Binary extends boolean = false> {
       if (!control && this.size + length > this.max) {
         throw new WsError(CLOSE.tooBig, `a message is over ${this.max} bytes`);
       }
-      const mask = new Uint8Array(4);
-      await fill(this.incoming, mask, signal);
-      const payload = new Uint8Array(length);
-      await fill(this.incoming, payload, signal);
-      for (let i = 0; i < length; i++) payload[i] ^= mask[i & 3];
+      const payload = await this.payload(length, masked, signal);
       const event = this.take(opcode, fin, payload);
       if (event) return event as WsEvent | (Binary extends true ? WsBinaryEvent : never);
     }
+  }
+
+  private masking(second: number): boolean {
+    const masked = (second & 0x80) !== 0;
+    if (masked !== this.fromServer) return masked;
+    throw new WsError(
+      CLOSE.protocol,
+      this.fromServer ? 'server frames must not be masked' : 'client frames must be masked'
+    );
   }
 
   private data(
@@ -192,6 +217,15 @@ export class WsReader<Binary extends boolean = false> {
     return this.binaryMessage
       ? { kind: 'binary', bytes: whole }
       : { kind: 'text', text: decode(whole) };
+  }
+
+  private async payload(length: number, masked: boolean, signal?: AbortSignal) {
+    const mask = new Uint8Array(4);
+    if (masked) await fill(this.incoming, mask, signal);
+    const payload = new Uint8Array(length);
+    await fill(this.incoming, payload, signal);
+    if (masked) for (let i = 0; i < length; i++) payload[i] ^= mask[i & 3];
+    return payload;
   }
 
   private async length(short: number, signal?: AbortSignal): Promise<number> {

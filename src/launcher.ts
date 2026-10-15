@@ -13,6 +13,8 @@ import {
   scanCommands,
   scanFilesystems,
 } from './commands.ts';
+import { FacadeHosts } from './facade/hosts.ts';
+import type { FacadeSpecs } from './facade/types.ts';
 import { R_OK, X_OK } from './fs/access.ts';
 import { type Attestation, attest, FileWatches, type RemoteFs } from './fs/attest.ts';
 import { followLinks, withCommandDirs } from './fs/commands.ts';
@@ -56,6 +58,7 @@ import { LockTable } from './kernel/host-ops.ts';
 import { type JobMember, JobTable } from './kernel/jobs.ts';
 import { HttpHandles } from './kernel/net/http-syscalls.ts';
 import { DEFAULT_HOSTNAME, isHostname } from './kernel/net/loopback-names.ts';
+import { KernelLoopback } from './kernel/net/loopback-transport.ts';
 import {
   enableNetwork,
   kernelCa,
@@ -77,7 +80,7 @@ import { DEFAULT_UMASK } from './kernel/process.ts';
 import type { ForkState, Program } from './kernel/protocol.ts';
 import { PtyTable } from './kernel/pty.ts';
 import { type ScrubSecret, scrubbedAll, scrubberOf, scrubStdio } from './kernel/scrub-file.ts';
-import { SealedBroker, type SealedHook } from './kernel/sealed.ts';
+import { SealedBroker, type SealedCaller, type SealedHook } from './kernel/sealed.ts';
 import { SettlingChildren } from './kernel/settling.ts';
 import { SIG, sigbit } from './kernel/signals.ts';
 import { LoopbackNet } from './kernel/socket.ts';
@@ -128,6 +131,7 @@ import {
   type ImportedMemory,
   importedMemory,
 } from './process/wasi/wasi-module.ts';
+import { anyBlocked, type BlockedMask } from './realm/sync-sab-wire.ts';
 import { type ApproveHook, Sudo, type SudoCall, type SudoResult } from './sudo.ts';
 import { SUDO_COMMAND, SUDO_PATH, SUDO_SOURCE } from './sudo-command.ts';
 import {
@@ -159,6 +163,7 @@ export interface LauncherOptions {
   processMounts?: ProcessMountPolicy;
   fstabRetries?: readonly number[];
   cdp?: CdpHook;
+  facades?: FacadeSpecs;
   uplink?: NetworkUplink;
   hostname?: string;
   users?: UsersMode;
@@ -285,7 +290,7 @@ interface StartRequest {
   pgid?: number;
   group?: 'lead' | 'session';
   ignored?: number;
-  blocked?: number;
+  blocked?: BlockedMask;
   umask?: number;
   cred: Cred;
   tag?: string | undefined;
@@ -532,6 +537,7 @@ export class Launcher {
   );
   readonly net = new LoopbackNet();
   readonly cdp: CdpHosts;
+  readonly facades: FacadeHosts;
   private readonly ca: () => Promise<RealmCa>;
   readonly transport: RealmTransport;
   readonly uplink: NetworkUplink | undefined;
@@ -602,10 +608,16 @@ export class Launcher {
     this.modulesDir = options.modules ?? '/node_modules';
     this.appended = appendedRoots(options.commands);
     this.cdp = new CdpHosts(options.cdp);
+    this.facades = new FacadeHosts(options.facades);
     const hostname = options.hostname ?? DEFAULT_HOSTNAME;
     if (!isHostname(hostname)) throw new Error(`not a host name: ${String(hostname)}`);
     this.hostname = hostname;
-    this.env = { ...networkEnv(hostname), SLICC_CDP_URL: this.cdp.url, ...options.env };
+    this.env = {
+      ...networkEnv(hostname),
+      SLICC_CDP_URL: this.cdp.url,
+      ...this.facades.env(),
+      ...options.env,
+    };
     this.ca = kernelCa(options.caStore ?? memoryCaStore());
     this.transport = replayingHops(options.transport ?? missingTransport());
     this.announcedTraits = JSON.stringify(this.transport.traits);
@@ -620,6 +632,7 @@ export class Launcher {
       ca: this.ca,
     });
     enableCdp(this.net, this.cdp);
+    this.facades.enable(this.net);
     const fs = withCommandDirs(
       this.base,
       async () => new Set((await this.commands()).keys()),
@@ -1322,6 +1335,17 @@ export class Launcher {
     return this.jobs.sessionOf(pgid);
   }
 
+  private loopbackFor(pid: number): KernelLoopback {
+    return new KernelLoopback(
+      this.net,
+      () => {
+        const cred = this.credOf(pid);
+        return { pid, uid: cred.euid, gid: cred.egid };
+      },
+      () => this.connectorStamp(pid)
+    );
+  }
+
   private treeScrubs(req: StartRequest): Scrubber[] | undefined {
     const inherited = req.ppid !== undefined ? this.scrubs.get(req.ppid) : undefined;
     return req.scrub ? [...(inherited ?? []), req.scrub] : inherited;
@@ -1359,7 +1383,7 @@ export class Launcher {
       },
       settling: () => this.settling.isSettling(pid),
       ...(req.ignored ? { ignored: req.ignored } : {}),
-      ...(req.blocked ? { blocked: req.blocked } : {}),
+      ...(anyBlocked(req.blocked) ? { blocked: req.blocked } : {}),
       ...(req.umask !== undefined ? { umask: req.umask } : {}),
       cred: req.cred,
       ...(this.owners && req.program.abi === 'wasi'
@@ -1405,7 +1429,7 @@ export class Launcher {
       jobs: this.jobs,
       ptys: this.ptys,
       net: this.net,
-      http: new HttpHandles(this.transport, pid),
+      http: new HttpHandles(this.transport, pid, this.loopbackFor(pid)),
       locks: this.locks,
       resolver: this.resolver,
       onReap: (child) => this.reaped(child, pid),
@@ -1459,6 +1483,11 @@ export class Launcher {
   }
 
   private forget(pid: number): void {
+    const image = this.jobs.list().find((m) => m.pid === pid)?.execParent;
+    const described = this.described.get(pid);
+    if (image !== undefined && described && this.described.has(image)) {
+      this.described.set(image, described);
+    }
     this.jobs.remove(pid);
     this.described.delete(pid);
     const spent = this.spent.get(pid);
@@ -1592,10 +1621,11 @@ export class Launcher {
       const root = member && rootOf(member).pid;
       return root !== undefined && this.running(root) ? root : INIT_PID;
     };
+    const superseded = new Set([...members.values()].map((m) => m.execParent));
     const listed: ProcessInfo[] = [];
     for (const member of members.values()) {
       const described = this.described.get(member.pid);
-      if (member.execed || !described) continue;
+      if ((member.execed && superseded.has(member.pid)) || !described) continue;
       const cred = this.credOf(member.pid);
       if (!maySee(viewer, cred)) continue;
       const root = rootOf(member);
@@ -1706,6 +1736,10 @@ export class Launcher {
     };
   }
 
+  connectorStamp(pid: number): Promise<SealedCaller> {
+    return this.sealed.stamp(this.identityOf(pid), this.credOf(pid), this.tagOf(pid));
+  }
+
   private identityOf(pid: number): { pid: number; ppid: number } {
     const parent = this.jobs.shownParent(pid);
     const alive = parent !== undefined && this.running(parent);
@@ -1800,7 +1834,7 @@ export class Launcher {
 
   private signalMasksOf(pid: number): { sigIgn?: number; sigCgt?: number; sigBlk?: number } {
     const masks = this.processes.get(pid)?.signalMasks?.();
-    const blocked = this.blockedBy(pid);
+    const [blocked] = this.blockedBy(pid);
     const sigBlk = blocked ? { sigBlk: blocked } : {};
     return masks ? { sigIgn: masks.ignored, sigCgt: masks.caught, ...sigBlk } : sigBlk;
   }
@@ -1809,8 +1843,8 @@ export class Launcher {
     return this.settling.isSettling(pid) || (this.ignoredBy(pid) & sigbit(SIG.TTOU)) !== 0;
   }
 
-  private blockedBy(pid: number): number {
-    return this.processes.get(pid)?.blockedSignals?.() ?? 0;
+  private blockedBy(pid: number): BlockedMask {
+    return this.processes.get(pid)?.blockedSignals?.() ?? [0, 0];
   }
 
   private ignoredBy(pid: number, fork = false): number {

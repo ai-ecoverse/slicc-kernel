@@ -1,4 +1,5 @@
 import type { HttpHead } from '../../kernel/net/http-syscalls.ts';
+import { isKernelLoopbackHost } from '../../kernel/net/loopback-names.ts';
 import type { HeaderList } from '../../kernel/net/transport.ts';
 import { JsCallError, type JsKernel } from './js-kernel.ts';
 
@@ -45,10 +46,36 @@ function plain(status: number, text: string): Response {
   });
 }
 
+function local(url: string): boolean {
+  return isKernelLoopbackHost(new URL(url).hostname);
+}
+
+const BAD_PORTS = new Set([
+  1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79, 87, 95, 101, 102,
+  103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137, 139, 143, 161, 179, 389, 427, 465,
+  512, 513, 514, 515, 526, 530, 531, 532, 540, 548, 554, 556, 563, 587, 601, 636, 989, 990, 993,
+  995, 1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668,
+  6669, 6697, 10080,
+]);
+
+function badPort(url: URL): boolean {
+  const port = url.port ? Number(url.port) : 0;
+  return port !== 0 && BAD_PORTS.has(port);
+}
+
 function rewrite(hop: Hop, status: number, location: string): Hop {
   const next = new URL(location, hop.url);
   if (next.protocol !== 'http:' && next.protocol !== 'https:') {
     throw failed(new JsCallError('EPROTONOSUPPORT', next.protocol));
+  }
+  if (badPort(next)) {
+    throw failed(new JsCallError('EACCES', `bad port: ${next.href}`));
+  }
+  if (local(next.href) && !local(hop.url)) {
+    const from = new URL(hop.url).origin;
+    throw failed(
+      new JsCallError('EACCES', `a redirect from ${from} into the kernel's loopback: ${next.href}`)
+    );
   }
   const toGet =
     ((status === 301 || status === 302) && hop.method === 'POST') ||
@@ -244,13 +271,16 @@ async function bodyOf(
 }
 
 export function fetchOp(kernel: JsKernel) {
-  let traits: Promise<FetchTraits> | undefined;
-  const traitsOf = (): Promise<FetchTraits> => {
-    traits ??= kernel.json({ op: 'net-traits' }) as Promise<FetchTraits>;
-    traits.catch(() => {
-      traits = undefined;
+  const traits = new Map<boolean, Promise<FetchTraits>>();
+  const traitsOf = (url: string): Promise<FetchTraits> => {
+    const own = local(url);
+    const known =
+      traits.get(own) ?? (kernel.json({ op: 'net-traits', url }) as Promise<FetchTraits>);
+    traits.set(own, known);
+    known.catch(() => {
+      traits.delete(own);
     });
-    return traits;
+    return known;
   };
 
   const close = (handle: number): Promise<unknown> => kernel.raw({ op: 'net-close', handle });
@@ -348,6 +378,21 @@ export function fetchOp(kernel: JsKernel) {
     return withMeta(response, head.url, redirected);
   };
 
+  const traitsAt = (at: string): Promise<FetchTraits> =>
+    traitsOf(at).catch((err: unknown) => {
+      throw failed(err);
+    });
+
+  const redirect = async (
+    hop: Hop,
+    status: number,
+    location: string,
+    known: FetchTraits
+  ): Promise<[Hop, FetchTraits]> => {
+    const next = rewrite(hop, status, location);
+    return [next, local(next.url) === local(hop.url) ? known : await traitsAt(next.url)];
+  };
+
   return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const request = new Request(input, init);
     const { signal } = request;
@@ -357,9 +402,10 @@ export function fetchOp(kernel: JsKernel) {
     if (protocol !== 'http:' && protocol !== 'https:') {
       throw failed(new JsCallError('EPROTONOSUPPORT', protocol));
     }
-    const known = await traitsOf().catch((err: unknown) => {
-      throw failed(err);
-    });
+    if (badPort(new URL(request.url))) {
+      throw failed(new JsCallError('EACCES', `bad port: ${request.url}`));
+    }
+    let known = await traitsAt(request.url);
     if (!known.manualRedirects && request.redirect !== 'follow') {
       throw failed(new JsCallError('ENOTSUP', `redirect: ${request.redirect}`));
     }
@@ -389,7 +435,7 @@ export function fetchOp(kernel: JsKernel) {
       await close(head.handle);
       if (request.redirect === 'error') throw failed(new JsCallError('EREDIRECT', hop.url));
       if (hops >= MAX_REDIRECTS) throw failed(new JsCallError('ELOOP', hop.url));
-      hop = rewrite(hop, head.status, location);
+      [hop, known] = await redirect(hop, head.status, location, known);
     }
   };
 }

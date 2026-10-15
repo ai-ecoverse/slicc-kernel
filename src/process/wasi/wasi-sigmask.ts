@@ -1,5 +1,11 @@
 import { SIG, sigbit } from '../../kernel/signals.ts';
-import { SAB_I_BLOCKED, SAB_I_SIGNALS } from '../../realm/sync-sab-wire.ts';
+import {
+  type BlockedMask,
+  SAB_I_BLOCKED,
+  SAB_I_BLOCKED_HI,
+  SAB_I_SIGNALS,
+  storeBlocked,
+} from '../../realm/sync-sab-wire.ts';
 import { E } from './wasi-abi.ts';
 
 const UNBLOCKABLE = sigbit(SIG.KILL) | sigbit(SIG.STOP);
@@ -21,7 +27,7 @@ const apply = (how: number, mask: number, set: number): number => {
 
 export class WasiSigmask {
   private lo: number;
-  private hi = 0;
+  private hi: number;
   private readonly header: Int32Array;
   private readonly deliver: () => void;
   private readonly process: Int32Array | undefined;
@@ -30,10 +36,11 @@ export class WasiSigmask {
     this.deliver = deliver;
     this.process = process;
     this.lo = libcBits(Atomics.load(header, SAB_I_BLOCKED));
+    this.hi = Atomics.load(header, SAB_I_BLOCKED_HI);
   }
 
   static unsupported(header: Int32Array): void {
-    Atomics.store(header, SAB_I_BLOCKED, 0);
+    storeBlocked(header, [0, 0]);
   }
 
   set(how: number, setLo: number, setHi: number, old: (lo: number, hi: number) => void): number {
@@ -42,9 +49,32 @@ export class WasiSigmask {
     this.lo = apply(how, this.lo, setLo | 0) & ~LIBC_UNBLOCKABLE;
     this.hi = apply(how, this.hi, setHi | 0);
     const now = kernelBits(this.lo);
-    Atomics.store(this.header, SAB_I_BLOCKED, now);
+    storeBlocked(this.header, [now, this.hi]);
     if ((Atomics.load(this.header, SAB_I_SIGNALS) & ~now) !== 0) this.deliver();
     return E.SUCCESS;
+  }
+
+  swap(setLo: number, setHi: number): [number, number] {
+    const old: [number, number] = [this.lo, this.hi];
+    this.lo = setLo & ~LIBC_UNBLOCKABLE;
+    this.hi = setHi | 0;
+    storeBlocked(this.header, [kernelBits(this.lo), this.hi]);
+    return old;
+  }
+
+  deliverUnblocked(): boolean {
+    const now = Atomics.load(this.header, SAB_I_BLOCKED);
+    if ((Atomics.load(this.header, SAB_I_SIGNALS) & ~now) === 0) return false;
+    this.deliver();
+    return true;
+  }
+
+  restore([lo, hi]: [number, number]): void {
+    this.set(SIG_SETMASK, lo, hi, () => {});
+  }
+
+  inherited(): BlockedMask {
+    return [kernelBits(this.lo), this.hi];
   }
 
   discard(sig: number): void {

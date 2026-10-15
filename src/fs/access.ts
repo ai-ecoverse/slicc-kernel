@@ -139,6 +139,9 @@ async function finalOf(
   options: AccessOptions
 ): Promise<[Perm, boolean]> {
   const perm = walked.perm as Perm;
+  if (options.follow === false && perm.link !== undefined) {
+    return [{ ...perm, mode: 0o777 }, false];
+  }
   if ((want & X_OK) === 0 || options.directory !== undefined) {
     return [perm, options.directory !== false];
   }

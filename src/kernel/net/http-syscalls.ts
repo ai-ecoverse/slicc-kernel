@@ -1,4 +1,6 @@
 import type { SyncFsResult } from '../../realm/sync-fs-wire.ts';
+import { toHostLoopback } from './loopback-names.ts';
+import { type KernelLoopback, LOOPBACK_TRAITS } from './loopback-transport.ts';
 import { NO_TRANSPORT } from './network.ts';
 import type { HeaderList, RealmTransport } from './transport.ts';
 import { WS_OPS, WsHandles, type WsSyscall } from './ws-syscalls.ts';
@@ -16,7 +18,7 @@ export type HttpSyscall =
   | { op: 'net-head'; handle: number }
   | { op: 'net-read'; handle: number; max: number }
   | { op: 'net-close'; handle: number }
-  | { op: 'net-traits' }
+  | { op: 'net-traits'; url?: string }
   | WsSyscall;
 
 export const HTTP_OPS: readonly string[] = [
@@ -54,6 +56,11 @@ function message(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+function codeOf(e: unknown): string {
+  const code = (e as { code?: unknown } | null)?.code;
+  return typeof code === 'string' && /^E[A-Z]+$|^EAI_[A-Z]+$/.test(code) ? code : 'EIO';
+}
+
 async function* once(bytes: Uint8Array): AsyncGenerator<Uint8Array> {
   yield bytes;
 }
@@ -69,10 +76,13 @@ export class HttpHandles {
 
   private readonly owner: number | undefined;
 
-  constructor(transport: RealmTransport, owner?: number) {
+  private readonly local: KernelLoopback | undefined;
+
+  constructor(transport: RealmTransport, owner?: number, local?: KernelLoopback) {
     this.transport = transport;
     this.owner = owner;
-    this.ws = new WsHandles(transport, () => ++this.nextHandle);
+    this.local = local;
+    this.ws = new WsHandles(transport, () => ++this.nextHandle, local);
   }
 
   syscall(req: HttpSyscall): Promise<SyncFsResult> {
@@ -81,11 +91,14 @@ export class HttpHandles {
     if (req.op === 'net-open') return Promise.resolve(this.opened(req));
     if (req.op === 'net-head') return this.head(req.handle);
     if (req.op === 'net-read') return this.read(req.handle, req.max);
-    if (req.op === 'net-traits') return Promise.resolve(this.traits());
+    if (req.op === 'net-traits') return Promise.resolve(this.traits(req.url));
     return this.close((req as { handle: number }).handle);
   }
 
-  private traits(): SyncFsResult {
+  private traits(url: string | undefined): SyncFsResult {
+    if (url !== undefined && this.local?.port(url) !== undefined) {
+      return { ok: true, kind: 'json', json: LOOPBACK_TRAITS };
+    }
     const { unavailable, crossOrigin = 'any', ...rest } = this.transport.traits;
     if (unavailable) return { ok: false, errno: 'ENETUNREACH', message: NO_TRANSPORT };
     return { ok: true, kind: 'json', json: { ...rest, crossOrigin } };
@@ -120,27 +133,34 @@ export class HttpHandles {
   }
 
   private async respond(handle: number, req: HttpRequestBody, entry: Open): Promise<SyncFsResult> {
+    const port = this.local?.port(req.url);
     try {
-      const response = await this.transport.fetch(
-        {
-          url: req.url,
-          method: req.method,
-          headers: req.headers,
-          ...(req.body ? { body: req.body } : {}),
-          signal: entry.abort.signal,
-        },
-        this.owner
-      );
+      const target = port === undefined ? toHostLoopback(req.url) : req.url;
+      const request = {
+        url: target,
+        method: req.method,
+        headers: req.headers,
+        ...(req.body ? { body: req.body } : {}),
+        signal: entry.abort.signal,
+      };
+      const response =
+        port === undefined
+          ? await this.transport.fetch(request, this.owner)
+          : await (this.local as KernelLoopback).fetch(request, port);
       entry.body = response.body[Symbol.asyncIterator]();
       entry.cancel = () => response.cancel();
       if (!this.open.has(handle)) await entry.cancel().catch(() => undefined);
-      const head = this.headOf(handle, response.url ?? req.url, response);
+      const shown = response.url && response.url !== target ? response.url : req.url;
+      const head = this.headOf(handle, shown, response);
       return response.redirected ? { ...head, json: { ...head.json, redirected: true } } : head;
     } catch (e) {
       const text = message(e);
+      if (port !== undefined) return { ok: false, errno: codeOf(e), message: text };
       const status = (e as { status?: unknown }).status;
       if (text === NO_TRANSPORT || typeof status !== 'number' || status === 502) {
-        const errno = text === NO_TRANSPORT ? 'ENETUNREACH' : 'ECONNREFUSED';
+        const code = codeOf(e);
+        const errno =
+          text === NO_TRANSPORT ? 'ENETUNREACH' : code !== 'EIO' ? code : 'ECONNREFUSED';
         return { ok: false, errno, message: text };
       }
       entry.body = once(new TextEncoder().encode(text))[Symbol.asyncIterator]();

@@ -1121,6 +1121,31 @@ function idOf(value: number): number | undefined {
   return value === -1 || value === 0xffffffff ? undefined : value >>> 0;
 }
 
+function chownHeld(
+  Fs: LiveChownFs,
+  node: LiveFsNode,
+  s: LiveNodeState,
+  uid: number,
+  gid: number
+): void {
+  const bridge = node.mount.opts.bridge as SyncFsPosixBridge;
+  const handle = s.handle as number;
+  try {
+    bridge.chown?.(liveNodePath(node), idOf(uid), idOf(gid), false, handle);
+  } catch (err) {
+    throw toErrno(Fs, err);
+  }
+  if (node.parent?.live) node.parent.live.listed = undefined;
+  if (!s.orphan) {
+    s.stat = undefined;
+    return;
+  }
+  try {
+    const st = bridge.keptStat?.(handle);
+    if (st && s.stat) s.stat = { ...s.stat, uid: st.uid, gid: st.gid, mode: st.mode };
+  } catch {}
+}
+
 export function useLiveChown(Fs: LiveChownFs): void {
   const chown = Fs.chown?.bind(Fs);
   if (!chown) return;
@@ -1141,10 +1166,63 @@ export function useLiveChown(Fs: LiveChownFs): void {
   if (!Fs.fchown || !getStreamChecked) return;
   Fs.fchown = (fd, uid, gid) => {
     const stream = getStreamChecked.call(Fs, fd);
-    const live = (stream.node as LiveFsNode).live !== undefined;
-    const target = live || stream.path === undefined ? stream.node : stream.path;
+    const node = stream.node as LiveFsNode;
+    const s = node.live;
+    if (s?.handle !== undefined && (!s.orphan || s.kept)) return chownHeld(Fs, node, s, uid, gid);
+    const target = s !== undefined || stream.path === undefined ? stream.node : stream.path;
     (Fs.chown as NonNullable<LiveChownFs['chown']>)(target, uid, gid);
   };
+}
+
+export interface LiveLinkFs extends LiveFsApi {
+  lookupPath(path: string, opts?: { follow?: boolean }): { node: object };
+}
+
+function flushOne(Fs: LiveFsApi, node: LiveFsNode): void {
+  const s = node.live;
+  if (!s.dirty || s.orphan || !(s.data || s.ranged)) return;
+  try {
+    if (s.ranged) s.ranged.flush();
+    else {
+      const bytes = (s.data as Uint8Array).slice(0, s.len);
+      pinnedIo(node.mount.opts.bridge, s.handle).writeFile(liveNodePath(node), bytes, true);
+    }
+  } catch (err) {
+    throw toErrno(Fs, err);
+  }
+  s.dirty = false;
+  s.stat = undefined;
+}
+
+function linkable(bridge: SyncFsPosixBridge, path: string): boolean {
+  try {
+    return bridge.lstat(path).linkable === true;
+  } catch {
+    return false;
+  }
+}
+
+export function linkLive(Fs: LiveLinkFs, from: string, to: string, follow: boolean): boolean {
+  const target = to.replace(/\/+$/, '');
+  const slash = target.lastIndexOf('/');
+  const name = target.slice(slash + 1);
+  const source = Fs.lookupPath(from, { follow }).node as LiveFsNode;
+  const parent = Fs.lookupPath(target.slice(0, slash) || '/', { follow: true }).node as LiveFsNode;
+  if (!source.live || !parent.live) return false;
+  flushOne(Fs, source);
+  const base = liveNodePath(parent);
+  const bridge = source.mount.opts.bridge;
+  const path = liveNodePath(source);
+  try {
+    bridge.link(path, base === '/' ? `/${name}` : `${base}/${name}`);
+  } catch (err) {
+    const refused = toErrno(Fs, err) as Error & { errno: number };
+    if (refused.errno !== wasiErrno('EPERM') || linkable(bridge, path)) throw refused;
+    throw new Fs.ErrnoError(wasiErrno('EMLINK'));
+  }
+  source.live.stat = undefined;
+  parent.live.listed = undefined;
+  return true;
 }
 
 export interface LiveReadlinkFs extends LiveFsApi {

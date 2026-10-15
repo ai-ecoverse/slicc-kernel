@@ -111,6 +111,7 @@ async function storageUsage(): Promise<SyncFsUsage | null> {
   return { quota: estimate.quota, usage: estimate.usage ?? 0 };
 }
 
+const PLAIN_DIR_MODE = 0o755;
 const done: SyncFsResult = { ok: true, kind: 'void' };
 
 function json(value: unknown): SyncFsResult {
@@ -121,6 +122,34 @@ function ownerFor(entry: SyncFsTokenEntry, mode?: number): NewOwner | undefined 
   const cred = entry.cred?.();
   if (!cred) return undefined;
   return ownerOf(cred, mode === undefined ? undefined : mode & ~(entry.umask?.() ?? 0o022));
+}
+
+function plainDirMode(entry: SyncFsTokenEntry, mode: number | undefined): number | undefined {
+  if (entry.cred || mode === undefined) return undefined;
+  const wanted = mode & 0o7777 & ~(entry.umask?.() ?? 0o022);
+  return wanted === PLAIN_DIR_MODE ? undefined : wanted;
+}
+
+function plainParentsMode(entry: SyncFsTokenEntry): number | undefined {
+  if (entry.cred) return undefined;
+  const wanted = (0o777 & ~(entry.umask?.() ?? 0o022)) | 0o300;
+  return wanted === PLAIN_DIR_MODE ? undefined : wanted;
+}
+
+async function missingParents(
+  fs: KernelFs,
+  path: string,
+  mode: number
+): Promise<() => Promise<void>> {
+  const parts = path.split('/').filter(Boolean);
+  const dirs: string[] = [];
+  for (let i = 1; i < parts.length; i++) {
+    const p = `/${parts.slice(0, i).join('/')}`;
+    if (!(await fs.exists(p))) dirs.push(p);
+  }
+  return async () => {
+    for (const p of dirs) await fs.chmod(p, mode);
+  };
 }
 
 function mkdirOptions(entry: SyncFsTokenEntry, mode = 0o777) {
@@ -136,16 +165,36 @@ async function mkdirExclusive(entry: SyncFsTokenEntry, path: string, mode?: numb
 }
 
 async function chown(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest) {
+  const real = req.handle !== undefined ? await keptOr(entry, path, req.handle) : path;
   const cred = entry.cred?.();
   if (!cred) {
-    await (req.op === 'chown' ? entry.fs.stat(path) : entry.fs.lstat(path));
+    await (req.op === 'chown' ? entry.fs.stat(real) : entry.fs.lstat(real));
     return done;
   }
-  await chownAs(entry.fs, cred, path, {
+  await chownAs(entry.fs, cred, real, {
     ...(req.uid !== undefined ? { uid: req.uid } : {}),
     ...(req.gid !== undefined ? { gid: req.gid } : {}),
     follow: req.op === 'chown',
   });
+  return done;
+}
+
+async function runMkdir(
+  entry: SyncFsTokenEntry,
+  path: string,
+  req: SyncFsRequest
+): Promise<SyncFsResult> {
+  const { fs } = entry;
+  const plain = plainDirMode(entry, req.mode);
+  const parentsMode = !req.exclusive ? plainParentsMode(entry) : undefined;
+  const fixParents =
+    parentsMode !== undefined ? await missingParents(fs, path, parentsMode) : undefined;
+  const fresh = plain !== undefined && !(await fs.exists(path));
+  await (req.exclusive
+    ? mkdirExclusive(entry, path, req.mode)
+    : fs.mkdir(path, mkdirOptions(entry, req.mode)));
+  await fixParents?.();
+  if (fresh) await fs.chmod(path, plain);
   return done;
 }
 
@@ -154,6 +203,7 @@ async function run(
   path: string,
   req: SyncFsRequest
 ): Promise<SyncFsResult> {
+  if (req.op !== 'create') entry.created?.take(path);
   const { fs, cwd } = entry;
   switch (req.op) {
     case 'read':
@@ -172,10 +222,7 @@ async function run(
     case 'readdir-stat':
       return json(await readdirStat(fs, path));
     case 'mkdir':
-      await (req.exclusive
-        ? mkdirExclusive(entry, path, req.mode)
-        : fs.mkdir(path, mkdirOptions(entry, req.mode)));
-      return done;
+      return runMkdir(entry, path, req);
     case 'rm':
       await fs.rm(path, { recursive: true });
       return done;
@@ -448,6 +495,7 @@ async function ranged(fs: KernelFs, path: string, req: SyncFsRequest): Promise<S
   return done;
 }
 
+const CHOWN_OPS = new Set<SyncFsOp>(['chown', 'lchown']);
 const UNLINKED_OPS = new Set<SyncFsOp>(['read', 'pread', 'pwrite', 'truncate']);
 const OWN_OPS = new Set<SyncFsOp>(['rm', 'unlink', 'rmdir', 'rename', 'link']);
 const TWO_PATHS = new Set<SyncFsOp>(['rename', 'link']);
@@ -545,9 +593,26 @@ async function rmPermitted(
     if (!child.ok) first ??= child;
   }
   if (first) return first;
-  const again = await guarded(entry, path, req);
-  if ('refused' in again) return again.refused;
+  const g = guardOf(entry);
+  if (g) {
+    try {
+      await inParent(g, 'rm', path, true);
+    } catch (err) {
+      return toErrno(err);
+    }
+  }
   return await run(entry, path, req);
+}
+
+async function byHandle(
+  entry: SyncFsTokenEntry,
+  path: string,
+  req: SyncFsRequest
+): Promise<SyncFsResult | undefined> {
+  if (req.op === 'kept') return json(entry.keptFor?.(req.handle ?? -1) !== undefined);
+  if (req.op === 'stat' && req.handle !== undefined) return keptStat(entry, req);
+  if (CHOWN_OPS.has(req.op) && entry.keptFor?.(req.handle ?? -1)) return chown(entry, path, req);
+  return undefined;
 }
 
 interface Resolved {
@@ -576,8 +641,8 @@ async function dispatchOne(entry: SyncFsTokenEntry, req: SyncFsRequest): Promise
   const { fs, cwd } = entry;
   try {
     const path = fs.resolvePath(cwd, req.path);
-    if (req.op === 'kept') return json(entry.keptFor?.(req.handle ?? -1) !== undefined);
-    if (req.op === 'stat' && req.handle !== undefined) return await keptStat(entry, req);
+    const held = await byHandle(entry, path, req);
+    if (held) return held;
     if (req.op === 'access') return await accessOp(entry, path, req);
     if (req.op === 'hold') return await holdOp(entry, path, req);
     const resolved = await guardAndResolve(entry, path, req);

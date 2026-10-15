@@ -29,6 +29,7 @@ export interface VfsFileFs extends Partial<AsyncRangedIo> {
   lstat?(path: string): Promise<unknown>;
   realpath?(path: string, follow: boolean): Promise<string>;
   chown?(path: string, change: OwnerChange): Promise<void>;
+  chmod?(path: string, mode: number): Promise<void>;
   links?(path: string): boolean;
   exclusive?<T>(path: string, run: () => Promise<T>): Promise<T>;
 }

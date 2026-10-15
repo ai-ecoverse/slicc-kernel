@@ -253,6 +253,7 @@ export class WasixProcess {
       ...(fds.isShared ? { shared: true as const } : {}),
       setjmps: this.driver.setjmps(),
       ...(this.host.signals ? { signals: this.host.signals.snapshot() } : {}),
+      ...(this.host.sigmask ? { blocked: this.host.sigmask.inherited() } : {}),
     };
     return this.call({
       op: 'proc-fork',

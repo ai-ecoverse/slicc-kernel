@@ -38,6 +38,7 @@ import {
   type GlueSyscalls,
   type KernelImports,
   kernelAccess,
+  kernelLink,
   kernelUmask,
   linuxDevices,
   type Memalign,
@@ -167,6 +168,22 @@ export function kernelSys(transport: SyncSabTransport): ProcessSys & PtyKernel {
     },
     size(fd) {
       return (json(call({ op: 'fd-vfs-stat', fd }, `fd-vfs-stat ${fd}`)) as { size: number }).size;
+    },
+    fdStat(fd) {
+      const r = json(call({ op: 'fd-vfs-stat', fd, full: true }, `fd-vfs-stat ${fd}`)) as
+        | { stat?: object }
+        | undefined;
+      return r?.stat;
+    },
+    fdChmod(fd, mode) {
+      call({ op: 'fd-chmod', fd, mode }, `fd-chmod ${fd}`);
+    },
+    fdChown(fd, uid, gid) {
+      const ids = { ...(uid !== undefined ? { uid } : {}), ...(gid !== undefined ? { gid } : {}) };
+      call({ op: 'fd-chown', fd, ...ids }, `fd-chown ${fd}`);
+    },
+    fdUtimes(fd, atimeMs, mtimeMs, now) {
+      call({ op: 'fd-utimes', fd, atimeMs, mtimeMs, now }, `fd-utimes ${fd}`);
     },
     ttyNames() {
       return json(call({ op: 'fd-tty-names' }, 'fd-tty-names')) as string[];
@@ -349,6 +366,7 @@ const GLUE_TRAILER = [
   "  mknodat: typeof ___syscall_mknodat === 'function' ? ___syscall_mknodat : undefined,",
   "  umask: typeof ___syscall_umask === 'function' ? ___syscall_umask : undefined,",
   "  faccessat: typeof ___syscall_faccessat === 'function' ? ___syscall_faccessat : undefined,",
+  "  linkat: typeof ___syscall_linkat === 'function' ? ___syscall_linkat : undefined,",
   "  utimensat: typeof ___syscall_utimensat === 'function' ? ___syscall_utimensat : undefined,",
   "  getppid: typeof _slicc_getppid_js === 'function' ? _slicc_getppid_js : undefined,",
   "  resizeHeap: typeof _emscripten_resize_heap === 'function' ? _emscripten_resize_heap : undefined,",
@@ -506,6 +524,7 @@ function kernelWrappers(imports: WebAssembly.Imports, module: object, deps: Wrap
   const fsOf = () => ownValue<ProcessFs>(module, 'FS');
   noFollowUtimes(imports, fsOf, kernelGlue?.utimensat ?? utimensatOf(module), memory);
   kernelAccess(imports, fsOf, memory, kernelGlue);
+  kernelLink(imports, fsOf, memory, kernelGlue);
   const glue = ownValue<FdImports>(module, 'sliccFdImports');
   syncFsync(imports, fsOf, glue);
   positionalIo(imports, { glue, fs: fsOf, sys, memory });
@@ -673,6 +692,7 @@ export async function runWasmProcess(
   const pipefs = ownValue<ProcessPipeFs>(running, 'PIPEFS');
   if (pipefs) streams.usePipes(pipefs);
   streams.useControllingTerminal();
+  streams.useKernelFdMetadata();
   useDevFd(running.FS);
   useFileMmap(running.FS, {
     sys,

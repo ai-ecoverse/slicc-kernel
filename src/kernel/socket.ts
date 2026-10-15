@@ -4,6 +4,7 @@ import type { Routes } from './net/routes.ts';
 import type { NetworkUplink, UplinkConn } from './net/uplink.ts';
 import { hostPort, uplinkLink } from './net/uplink-socket.ts';
 import { KernelPipe, PIPE_CAPACITY, PipeError } from './pipe.ts';
+import type { SealedCaller } from './sealed.ts';
 export type SockAddr =
   | {
       family: 'inet';
@@ -104,6 +105,7 @@ export interface PeerCred {
   uid: number;
   gid: number;
 }
+export type ConnectorStamp = SealedCaller;
 export class KernelSocket implements KernelFile {
   private readonly net: LoopbackNet;
   readonly domain: SocketDomain;
@@ -114,6 +116,7 @@ export class KernelSocket implements KernelFile {
   local: SockAddr | undefined;
   peer: SockAddr | undefined;
   peerCred: PeerCred | undefined;
+  peerStamp: ConnectorStamp | undefined;
   private listenerCred: PeerCred | undefined;
   private link: Link | undefined;
   private readShut = false;
@@ -184,10 +187,10 @@ export class KernelSocket implements KernelFile {
     for (const wait of waits) wait.catch(() => undefined);
     return pipeCall(() => Promise.race(waits));
   }
-  bind(addr: SockAddr): void {
+  bind(addr: SockAddr, kernel = false): void {
     if (this.state !== 'open' || this.local) throw new KernelError('EINVAL');
     if (addr.family !== this.domain) throw new KernelError('EAFNOSUPPORT');
-    this.local = this.net.bind(this, addr);
+    this.local = this.net.bind(this, addr, kernel);
     this.boundAt = this.local;
   }
   listen(backlog: number, cred?: PeerCred): void {
@@ -216,7 +219,12 @@ export class KernelSocket implements KernelFile {
     this.changes.wake();
     return true;
   }
-  connect(addr: SockAddr, viaUplink = true, cred?: PeerCred): Promise<void> | undefined {
+  connect(
+    addr: SockAddr,
+    viaUplink = true,
+    cred?: PeerCred,
+    stamp?: ConnectorStamp
+  ): Promise<void> | undefined {
     if (this.state === 'connected') throw new KernelError('EISCONN');
     if (this.state === 'connecting') throw new KernelError('EALREADY');
     if (this.state !== 'open') throw new KernelError('EINVAL');
@@ -235,6 +243,7 @@ export class KernelSocket implements KernelFile {
     server.local = addr.family === 'inet' ? { ...addr, host: canonicalHost(addr.host) } : addr;
     server.peer = this.local;
     server.peerCred = cred;
+    server.peerStamp = stamp;
     this.peer = server.local;
     this.peerCred = target.listenerCred;
     link(this, server);
@@ -384,6 +393,8 @@ export class LoopbackNet {
   private readonly bound = new Map<string, KernelSocket>();
   private readonly activators = new Map<string, () => void>();
   private readonly internal = new Set<number>();
+  private readonly reserved = new Set<number>();
+  private readonly facades = new Map<number, string>();
   private nextEphemeral = EPHEMERAL_FIRST;
   private route: UplinkRoute | undefined;
   useUplink(route: UplinkRoute): void {
@@ -398,6 +409,18 @@ export class LoopbackNet {
     if (reserve) this.internal.add(port);
     return this.internal.has(port);
   }
+  reserve(port: number): void {
+    this.reserved.add(port);
+  }
+  facade(port: number, name: string): void {
+    this.reserve(port);
+    this.kernelOnly(port, true);
+    this.facades.set(port, name);
+  }
+  facadeAt(addr: SockAddr): string | undefined {
+    if (addr.family !== 'inet' || !isLoopback(canonicalHost(addr.host))) return undefined;
+    return this.facades.get(addr.port);
+  }
   activate(addr: SockAddr, start: () => void): void {
     this.activators.set(keyOf(addr), start);
   }
@@ -406,7 +429,7 @@ export class LoopbackNet {
   }
   listen(addr: SockAddr, backlog = 128): KernelSocket {
     const socket = this.socket(addr.family);
-    socket.bind(addr);
+    socket.bind(addr, true);
     socket.listen(backlog);
     return socket;
   }
@@ -415,11 +438,13 @@ export class LoopbackNet {
     void socket.connect(addr, false);
     return socket;
   }
-  bind(socket: KernelSocket, addr: SockAddr): SockAddr {
+  bind(socket: KernelSocket, addr: SockAddr, kernel = false): SockAddr {
     if (addr.family === 'unix') {
       if (addr.path === '') throw new KernelError('EINVAL');
     } else if (addr.host !== '0.0.0.0' && !isLoopback(addr.host)) {
       throw new KernelError('EADDRNOTAVAIL');
+    } else if (!kernel && this.reserved.has(addr.port)) {
+      throw new KernelError('EADDRINUSE');
     }
     const named =
       addr.family === 'inet' && addr.port === 0 ? { ...addr, port: this.ephemeral() } : addr;
@@ -447,7 +472,7 @@ export class LoopbackNet {
     for (let i = 0; i < span; i++) {
       const port = this.nextEphemeral;
       this.nextEphemeral = port === EPHEMERAL_LAST ? EPHEMERAL_FIRST : port + 1;
-      if (!this.bound.has(`inet:${port}`)) return port;
+      if (!this.bound.has(`inet:${port}`) && !this.reserved.has(port)) return port;
     }
     throw new KernelError('EADDRINUSE');
   }

@@ -1,3 +1,4 @@
+import { physicalPath } from '../../fs/physical-path.ts';
 import type { JsLane } from '../../kernel/protocol.ts';
 import { SIG } from '../../kernel/signals.ts';
 import {
@@ -13,6 +14,7 @@ import {
   devOpen,
   devReaddir,
   devReadlink,
+  devResolveTarget,
   devStat,
   devSync,
   inDev,
@@ -72,6 +74,7 @@ export interface JsSyncContext {
   exit(status?: number): never;
   kill(pid: number, signal?: number | `SIG${string}`): void;
   cred(): JsCred;
+  umask(mask?: number): number;
   setcred(change: Partial<JsCred>): JsCred;
   read(fd: number, max?: number): Uint8Array;
   write(fd: number, data: Uint8Array | string): void;
@@ -82,7 +85,7 @@ export interface JsSyncContext {
     lstat(path: string): SyncFsBridgeStat;
     exists(path: string): boolean;
     readdir(path: string): string[];
-    mkdir(path: string, options?: { recursive?: boolean }): void;
+    mkdir(path: string, options?: { recursive?: boolean; mode?: number }): void;
     rm(path: string): void;
     unlink(path: string): void;
     rename(from: string, to: string): void;
@@ -92,7 +95,7 @@ export interface JsSyncContext {
     readlink(path: string): string;
     statfs(path: string): JsStatFs;
     readFile(path: string): Uint8Array;
-    writeFile(path: string, data: Uint8Array | string): void;
+    writeFile(path: string, data: Uint8Array | string, options?: { mode?: number }): void;
   };
 }
 
@@ -161,8 +164,30 @@ export class JsSyncKernel {
 export function syncOps(
   kernel: JsSyncKernel,
   shared: SyncShared
-): Omit<JsSyncContext, 'run' | 'spawn' | 'exit' | 'kill' | 'cred' | 'setcred' | 'kernel'> {
+): Omit<
+  JsSyncContext,
+  'run' | 'spawn' | 'exit' | 'kill' | 'cred' | 'setcred' | 'kernel' | 'umask'
+> {
   const { infos, handles, resolve } = shared;
+
+  const tryDevSync = (abs: string): string | undefined => {
+    try {
+      const resolved = physicalPath(
+        {
+          lstat(p) {
+            return parseSyncFsStat(kernel.json({ op: 'lstat', path: p })) ?? {};
+          },
+          readlink(p) {
+            return String(kernel.json({ op: 'readlink', path: p }));
+          },
+        },
+        abs
+      );
+      return resolved !== abs && inDev(resolved) ? resolved : undefined;
+    } catch {
+      return undefined;
+    }
+  };
 
   const info = (fd: number): FdInfo => {
     const known = infos.get(fd);
@@ -199,10 +224,17 @@ export function syncOps(
   const statOf = (op: 'stat' | 'lstat', path: string): SyncFsBridgeStat => {
     const abs = resolve(path);
     if (inDev(abs)) return devSync(kernel, devStat(abs, op === 'stat'));
-    kernel.call({ op: 'fd-path-flush', path: abs });
-    const s = parseSyncFsStat(kernel.json({ op, path: abs }));
-    if (!s) throw new JsCallError('EIO', op);
-    return s;
+    try {
+      kernel.call({ op: 'fd-path-flush', path: abs });
+      const s = parseSyncFsStat(kernel.json({ op, path: abs }));
+      if (!s) throw new JsCallError('EIO', op);
+      return s;
+    } catch (err) {
+      if (!(err instanceof JsCallError) || err.code !== 'ENOENT') throw err;
+      const devPath = tryDevSync(abs);
+      if (!devPath) throw err;
+      return devSync(kernel, devStat(devPath, op === 'stat'));
+    }
   };
 
   const openDev = (abs: string, options: JsOpenOptions): JsSyncFile => {
@@ -226,27 +258,34 @@ export function syncOps(
   const open = (path: string, options: JsOpenOptions = {}): JsSyncFile => {
     const abs = resolve(path);
     if (inDev(abs)) return openDev(abs, options);
-    let existing: SyncFsBridgeStat | undefined;
     try {
-      existing = statOf(isExclusive(options) ? 'lstat' : 'stat', abs);
+      let existing: SyncFsBridgeStat | undefined;
+      try {
+        existing = statOf(isExclusive(options) ? 'lstat' : 'stat', abs);
+      } catch (err) {
+        existing = absent(err);
+      }
+      checkOpen(abs, options, existing);
+      const fd = kernel.json(openRequest(abs, options)) as number;
+      try {
+        kernel.call({ op: 'fd-vfs-stat', fd });
+      } catch (err) {
+        kernel.raw({ op: 'fd-close', fd });
+        throw err;
+      }
+      infos.set(fd, { kind: 'file' });
+      const handle = syncFile(kernel, fd, abs, options.append === true, () => {
+        infos.delete(fd);
+        handles.delete(fd);
+      });
+      handles.set(fd, handle.invalidate);
+      return handle.file;
     } catch (err) {
-      existing = absent(err);
+      if (!(err instanceof JsCallError) || err.code !== 'ENOENT') throw err;
+      const devPath = tryDevSync(abs);
+      if (!devPath) throw err;
+      return openDev(devPath, options);
     }
-    checkOpen(abs, options, existing);
-    const fd = kernel.json(openRequest(abs, options)) as number;
-    try {
-      kernel.call({ op: 'fd-vfs-stat', fd });
-    } catch (err) {
-      kernel.raw({ op: 'fd-close', fd });
-      throw err;
-    }
-    infos.set(fd, { kind: 'file' });
-    const handle = syncFile(kernel, fd, abs, options.append === true, () => {
-      infos.delete(fd);
-      handles.delete(fd);
-    });
-    handles.set(fd, handle.invalidate);
-    return handle.file;
   };
 
   return {
@@ -259,7 +298,7 @@ export function syncOps(
       kernel.call({ op: 'fd-close', fd });
     },
     open: procOpenSync(open, kernel, { resolve, pid: shared.pid }),
-    fs: procFsSync(syncPathOps(kernel, resolve, statOf, open), kernel, {
+    fs: procFsSync(syncPathOps(kernel, resolve, statOf, open, tryDevSync), kernel, {
       resolve,
       pid: shared.pid,
     }),
@@ -341,7 +380,8 @@ function syncPathOps(
   kernel: JsSyncKernel,
   resolve: (path: string) => string,
   statOf: (op: 'stat' | 'lstat', path: string) => SyncFsBridgeStat,
-  open: (path: string, options?: JsOpenOptions) => JsSyncFile
+  open: (path: string, options?: JsOpenOptions) => JsSyncFile,
+  tryDev: (abs: string) => string | undefined
 ): JsSyncContext['fs'] {
   return {
     stat: (path) => statOf('stat', path),
@@ -349,7 +389,9 @@ function syncPathOps(
     exists(path) {
       const abs = resolve(path);
       if (inDev(abs)) return devSync(kernel, devExists(abs));
-      return kernel.json({ op: 'exists', path: abs }) === true;
+      if (kernel.json({ op: 'exists', path: abs }) === true) return true;
+      const devPath = tryDev(abs);
+      return devPath ? devSync(kernel, devExists(devPath)) : false;
     },
     readdir(path) {
       const abs = resolve(path);
@@ -361,6 +403,7 @@ function syncPathOps(
         op: 'mkdir',
         path: resolve(path),
         ...(options?.recursive === false ? { exclusive: true } : {}),
+        mode: options?.mode === undefined ? 0o777 : modeOf(options.mode),
       }),
     rm: (path) => void kernel.call({ op: 'rm', path: resolve(path) }),
     unlink: (path) => void kernel.call({ op: 'unlink', path: resolve(path) }),
@@ -377,18 +420,37 @@ function syncPathOps(
       return String(kernel.json({ op: 'readlink', path: abs }));
     },
     statfs(path) {
-      const abs = resolve(path);
+      let abs = resolve(path);
+      if (inDev(abs)) {
+        try {
+          const target = devSync(kernel, devResolveTarget(abs)) as string | undefined;
+          if (target?.startsWith('/')) abs = target;
+        } catch {}
+      }
       statOf('stat', abs);
       return statFsOf(kernel.json({ op: 'statfs', path: abs }));
     },
     readFile(path) {
       const abs = resolve(path);
       if (inDev(abs)) return readWholeSync(open(abs));
-      kernel.call({ op: 'fd-path-flush', path: abs });
-      return kernel.bytes({ op: 'read', path: abs });
+      try {
+        kernel.call({ op: 'fd-path-flush', path: abs });
+        return kernel.bytes({ op: 'read', path: abs });
+      } catch (err) {
+        if (!(err instanceof JsCallError) || err.code !== 'ENOENT') throw err;
+        const devPath = tryDev(abs);
+        if (!devPath) throw err;
+        return readWholeSync(open(devPath));
+      }
     },
-    writeFile(path, data) {
-      const file = open(path, { write: true, create: true, truncate: true });
+    writeFile(path, data, options) {
+      const mode = options?.mode;
+      const file = open(path, {
+        write: true,
+        create: true,
+        truncate: true,
+        ...(mode !== undefined ? { mode } : {}),
+      });
       try {
         file.write(0, typeof data === 'string' ? encoder.encode(data) : data);
       } finally {

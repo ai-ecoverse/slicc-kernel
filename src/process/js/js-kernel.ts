@@ -27,6 +27,14 @@ const DETAILED: ReadonlySet<string> = new Set([
   'fd-open-clipboard',
 ]);
 
+export function umaskRequest(mask: unknown): { op: 'proc-umask'; mask?: number } {
+  if (mask === undefined) return { op: 'proc-umask' };
+  if (!Number.isInteger(mask) || (mask as number) < 0 || (mask as number) > 0o777) {
+    throw new JsCallError('EINVAL', 'umask');
+  }
+  return { op: 'proc-umask', mask: mask as number };
+}
+
 export function modeOf(mode: unknown): number {
   if (!Number.isInteger(mode) || (mode as number) < 0 || (mode as number) > 0o7777) {
     throw new JsCallError('EINVAL', 'chmod');
