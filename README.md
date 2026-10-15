@@ -492,7 +492,7 @@ Directories are renamed with `FileSystemHandle.move()` where available, else by 
 - **Package drivers:** a package declares a type in `"slicc": { "filesystems": { "<type>": { "module": "<file>" } } }`, and the kernel starts that module in a worker of its own for each mount. The module is a single self-contained file: it can't import bare specifiers.
   - Its default export receives `{ fetch }`, the kernel's network transport. It returns `{ handlers, capabilities }`.
   - Its worker gets a JS program's lockdown before the module loads: its own `fetch`, `WebSocket`, storage and workers are `undefined`, and a worker where one cannot be removed does not start the driver.
-  - The handlers are path-based: `getattr`, `readdir`, `open`/`read`/`write`/`release` on handles, `mkdir`, `rmdir`, `unlink`, `rename`, and optionally `symlink`, `readlink`, `setattr` (`mode`, `mtime`, `size` to truncate, and `uid`/`gid`) and `statfs`.
+  - The handlers are path-based: `getattr`, `readdir`, `open`/`read`/`write`/`release` on handles, `mkdir`, `rmdir`, `unlink`, `rename`, and optionally `symlink`, `readlink`, `setattr` (`mode`, `mtime`, `atime`, `size` to truncate, and `uid`/`gid`) and `statfs`. An attribute may carry `atime`; a driver that leaves it out reports its `mtime` as the access time, and ignores the `atime` of a `setattr` (hostfs and fsa do). tmpfs keeps both: `touch -a` and `utimensat` set its access time, and reading a file leaves it, as with `noatime`.
   - An optional `mount({ source, options })` handler validates the source.
   - Errors carry a POSIX `code`.
   - `@ai-ecoverse/slicc-kernel/driver` exports the types and `fsError`.

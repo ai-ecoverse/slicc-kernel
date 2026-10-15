@@ -7,6 +7,7 @@ interface Node {
   ino: number;
   mode: number;
   mtime: number;
+  atime: number;
   data: ChunkedBytes;
   target: string;
   children: Map<string, Node>;
@@ -26,11 +27,13 @@ function created(
   from?: Node,
   owner?: DriverOwner
 ): Node {
+  const now = Date.now();
   return {
     kind,
     ino,
     mode: owner?.mode === undefined ? mode : (mode & ~0o7777) | (owner.mode & 0o7777),
-    mtime: Date.now(),
+    mtime: now,
+    atime: now,
     data: new ChunkedBytes(),
     target: '',
     children: new Map(),
@@ -51,6 +54,7 @@ function attr(node: Node): DriverAttr {
     size:
       node.kind === 'file' ? node.data.size : node.kind === 'symlink' ? node.target.length : 4096,
     mtime: node.mtime,
+    atime: node.atime,
     mode: node.mode,
     ino: node.ino,
     ...(node.kind === 'directory' ? {} : { nlink: node.links }),
@@ -225,6 +229,7 @@ export function tmpfs(): FilesystemHandlers {
         node.mtime = Date.now();
       }
       if (change.mtime !== undefined) node.mtime = change.mtime;
+      if (change.atime !== undefined) node.atime = change.atime;
       owned(node, change);
     },
     async statfs() {

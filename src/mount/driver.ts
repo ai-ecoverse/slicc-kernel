@@ -55,6 +55,7 @@ export interface FilesystemHandlers {
 export interface DriverSetAttr {
   mode?: number;
   mtime?: number;
+  atime?: number;
   size?: number;
   uid?: number;
   gid?: number;
@@ -85,6 +86,14 @@ export interface ServedFilesystem {
 
 export function fsError(code: string, message = code): Error & { code: string } {
   return Object.assign(new Error(message), { code });
+}
+
+const SET_ATTRS = ['mode', 'mtime', 'atime', 'size', 'uid', 'gid'] as const;
+
+function setAttrOf(req: DriverSetAttr): DriverSetAttr {
+  const attr: DriverSetAttr = {};
+  for (const key of SET_ATTRS) if (req[key] !== undefined) attr[key] = req[key];
+  return attr;
 }
 
 async function dispatch(h: FilesystemHandlers, req: DriverRequest): Promise<unknown> {
@@ -133,13 +142,7 @@ async function dispatch(h: FilesystemHandlers, req: DriverRequest): Promise<unkn
       if (!h.readlink) throw fsError('EINVAL', `${req.path} is not a symlink`);
       return h.readlink(req.path);
     case 'setattr':
-      return h.setattr?.(req.path, {
-        ...(req.mode !== undefined ? { mode: req.mode } : {}),
-        ...(req.mtime !== undefined ? { mtime: req.mtime } : {}),
-        ...(req.size !== undefined ? { size: req.size } : {}),
-        ...(req.uid !== undefined ? { uid: req.uid } : {}),
-        ...(req.gid !== undefined ? { gid: req.gid } : {}),
-      });
+      return h.setattr?.(req.path, setAttrOf(req));
     case 'statfs':
       return h.statfs?.() ?? null;
     default:

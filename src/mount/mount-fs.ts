@@ -327,7 +327,7 @@ function statOf(attr: DriverAttr, path: string, mount: Mount): FsStat {
     size: attr.size,
     mode: attr.mode ?? fallback,
     mtime,
-    atime: mtime,
+    atime: attr.atime === undefined ? mtime : new Date(attr.atime),
     ctime: mtime,
     ino: attr.ino ?? inodeOf(path),
     ...(!inodeless(mount, attr) && attr.nlink !== undefined ? { nlink: attr.nlink } : {}),
@@ -1525,7 +1525,7 @@ class MountFs implements KernelFs {
         this.utimes(to as string, atime, mtime, n)
       );
     }
-    await this.setMtime(found, real, mtime);
+    await this.setTimes(found, real, atime, mtime);
   }
 
   async lutimes(path: string, atime: Date, mtime: Date, redirects = 0): Promise<void> {
@@ -1540,13 +1540,14 @@ class MountFs implements KernelFs {
     if (!found.mount.caps.linkTimes && (await this.lstat(real)).isSymbolicLink) {
       throw errnoError('EOPNOTSUPP', path);
     }
-    await this.setMtime(found, real, mtime);
+    await this.setTimes(found, real, atime, mtime);
   }
 
-  private async setMtime(found: Located, real: string, mtime: Date): Promise<void> {
+  private async setTimes(found: Located, real: string, atime: Date, mtime: Date): Promise<void> {
     this.writable(found.mount, real);
     this.table.forget(found.mount, real);
-    await found.mount.conn.call({ op: 'setattr', path: found.rel, mtime: mtime.getTime() });
+    const times = { mtime: mtime.getTime(), atime: atime.getTime() };
+    await found.mount.conn.call({ op: 'setattr', path: found.rel, ...times });
   }
 
   noLinks(): KernelFs {
