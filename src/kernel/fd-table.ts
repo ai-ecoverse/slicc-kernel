@@ -43,6 +43,8 @@ export type KernelErrno =
   | 'EHOSTUNREACH'
   | 'ECONNRESET'
   | 'EMSGSIZE'
+  | 'EDESTADDRREQ'
+  | 'ENOPROTOOPT'
   | 'ENOTSUP'
   | 'EILSEQ';
 

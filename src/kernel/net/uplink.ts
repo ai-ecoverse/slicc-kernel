@@ -2,7 +2,7 @@ import { Routes, type RouteTable } from './routes.ts';
 
 export interface UplinkTraits {
   tcp: true;
-  udp: false;
+  udp: boolean;
   ipv6: boolean;
 }
 
@@ -29,6 +29,32 @@ export interface UplinkDial {
   signal: AbortSignal;
 }
 
+export interface UplinkDatagram {
+  bytes: Uint8Array;
+  host: string;
+  port: number;
+}
+
+export interface UplinkUnreachable {
+  error: string;
+  host: string;
+  port: number;
+}
+
+export type UplinkMessage = UplinkDatagram | UplinkUnreachable;
+
+export interface UplinkUdpOpen {
+  family: 4 | 6;
+  signal: AbortSignal;
+}
+
+export interface UplinkUdp {
+  readonly localAddr: string;
+  send(bytes: Uint8Array, host: string, port: number): Promise<void>;
+  readonly messages: AsyncIterable<UplinkMessage>;
+  close(): void;
+}
+
 export interface NetworkUplink {
   readonly traits: UplinkTraits;
   readonly routes?: RouteTable;
@@ -38,6 +64,11 @@ export interface NetworkUplink {
     signal?: AbortSignal
   ): Promise<string[] | ResolveAnswer>;
   dial(req: UplinkDial): Promise<UplinkConn>;
+  udp?(req: UplinkUdpOpen): Promise<UplinkUdp>;
+}
+
+export function carriesUdp(uplink: NetworkUplink): boolean {
+  return uplink.traits.udp === true && typeof uplink.udp === 'function';
 }
 
 export type UplinkCall =
@@ -47,13 +78,20 @@ export type UplinkCall =
   | { uplink: 'read'; uid: number; cid: number }
   | { uplink: 'write'; uid: number; cid: number; bytes: Uint8Array }
   | { uplink: 'close-write'; cid: number }
-  | { uplink: 'close'; cid: number };
+  | { uplink: 'close'; cid: number }
+  | { uplink: 'udp-open'; uid: number; family: 4 | 6 }
+  | { uplink: 'udp-send'; uid: number; cid: number; bytes: Uint8Array; host: string; port: number }
+  | { uplink: 'udp-recv'; uid: number; cid: number }
+  | { uplink: 'udp-close'; cid: number };
 
 export type UplinkReply =
   | { uplink: 'resolved'; uid: number; addresses: string[]; ttl?: number }
   | { uplink: 'dialled'; uid: number; cid: number; localAddr: string; remoteAddr: string }
   | { uplink: 'data'; uid: number; bytes: Uint8Array | null }
   | { uplink: 'written'; uid: number; n: number }
+  | { uplink: 'udp-opened'; uid: number; cid: number; localAddr: string }
+  | { uplink: 'udp-sent'; uid: number }
+  | { uplink: 'udp-message'; uid: number; message: UplinkMessage | null }
   | { uplink: 'error'; uid: number; message: string; code?: string };
 
 export interface UplinkPeer {
@@ -113,12 +151,7 @@ export function serveUplink(peer: UplinkPeer, uplink: NetworkUplink): UplinkServ
     return found;
   };
   const dial = async (call: Extract<UplinkCall, { uplink: 'dial' }>, signal: AbortSignal) => {
-    const kind = NEVER.classify(call.host);
-    if (kind === 'loopback' || kind === 'host' || kind === 'reserved') {
-      throw Object.assign(new Error(`the uplink does not carry ${call.host}`), {
-        code: 'ENETUNREACH',
-      });
-    }
+    refuseLocal(call.host);
     const { host, port } = call;
     const opened = await uplink.dial({ network: 'tcp', host, port, signal });
     if (signal.aborted || closed) {
@@ -135,6 +168,7 @@ export function serveUplink(peer: UplinkPeer, uplink: NetworkUplink): UplinkServ
     conns.delete(cid);
     found?.close();
   };
+  const udp = new UdpServer(uplink, () => closed);
   return {
     answer(call) {
       switch (call.uplink) {
@@ -162,19 +196,96 @@ export function serveUplink(peer: UplinkPeer, uplink: NetworkUplink): UplinkServ
           }));
         case 'close-write':
           return conns.get(call.cid)?.closeWrite();
-        default:
+        case 'close':
           return drop(call.cid);
+        case 'udp-close':
+          return udp.drop(call.cid);
+        default:
+          return run(call.uid, (signal) => udp.answer(call, signal));
       }
     },
     close() {
       closed = true;
       for (const abort of pending.values()) abort.abort();
       for (const cid of [...conns.keys()]) drop(cid);
+      udp.close();
     },
   };
 }
 
+function copied(message: UplinkMessage): UplinkMessage {
+  if ('bytes' in message) return { ...message, bytes: message.bytes.slice() };
+  return { error: String(message.error), host: message.host, port: message.port };
+}
+
+function refuseLocal(host: string): void {
+  const kind = NEVER.classify(host);
+  if (kind === 'loopback' || kind === 'host' || kind === 'reserved') {
+    throw Object.assign(new Error(`the uplink does not carry ${host}`), { code: 'ENETUNREACH' });
+  }
+}
+
+type UdpCall = Extract<UplinkCall, { uplink: 'udp-open' | 'udp-send' | 'udp-recv' }>;
+
+class UdpServer {
+  private readonly sockets = new Map<
+    number,
+    { udp: UplinkUdp; messages: AsyncIterator<UplinkMessage> }
+  >();
+  private next = 0;
+  private readonly uplink: NetworkUplink;
+  private readonly closed: () => boolean;
+
+  constructor(uplink: NetworkUplink, closed: () => boolean) {
+    this.uplink = uplink;
+    this.closed = closed;
+  }
+
+  private socket(cid: number) {
+    const found = this.sockets.get(cid);
+    if (!found) throw Object.assign(new Error('no such uplink socket'), { code: 'EBADF' });
+    return found;
+  }
+
+  async answer(call: UdpCall, signal: AbortSignal): Promise<UplinkReply | undefined> {
+    if (call.uplink === 'udp-open') {
+      if (!this.uplink.udp || this.uplink.traits.udp !== true) {
+        throw Object.assign(new Error('the uplink carries no datagrams'), { code: 'ENETUNREACH' });
+      }
+      const opened = await this.uplink.udp({ family: call.family, signal });
+      if (signal.aborted || this.closed()) {
+        opened.close();
+        return undefined;
+      }
+      const cid = ++this.next;
+      this.sockets.set(cid, { udp: opened, messages: opened.messages[Symbol.asyncIterator]() });
+      return { uplink: 'udp-opened', uid: call.uid, cid, localAddr: opened.localAddr };
+    }
+    if (call.uplink === 'udp-send') {
+      refuseLocal(call.host);
+      await this.socket(call.cid).udp.send(call.bytes, call.host, call.port);
+      return { uplink: 'udp-sent', uid: call.uid };
+    }
+    const next = await this.socket(call.cid).messages.next();
+    const message = next.done ? null : copied(next.value);
+    return { uplink: 'udp-message', uid: call.uid, message };
+  }
+
+  drop(cid: number): void {
+    const found = this.sockets.get(cid);
+    this.sockets.delete(cid);
+    found?.udp.close();
+  }
+
+  close(): void {
+    for (const cid of [...this.sockets.keys()]) this.drop(cid);
+  }
+}
+
 function transferOf(reply: UplinkReply): Transferable[] | undefined {
+  if (reply.uplink === 'udp-message' && reply.message && 'bytes' in reply.message) {
+    return [reply.message.bytes.buffer as ArrayBuffer];
+  }
   if (reply.uplink !== 'data' || !reply.bytes) return undefined;
   return [reply.bytes.buffer as ArrayBuffer];
 }
@@ -259,6 +370,46 @@ export class RemoteUplink implements NetworkUplink {
       },
       closeWrite: () => this.port.postMessage({ uplink: 'close-write', cid }),
       close: () => this.port.postMessage({ uplink: 'close', cid }),
+    };
+  }
+
+  async udp(req: UplinkUdpOpen): Promise<UplinkUdp> {
+    req.signal.throwIfAborted();
+    const opened = await this.ask<Extract<Answer, { uplink: 'udp-opened' }>>(
+      { uplink: 'udp-open', uid: ++this.nextId, family: req.family },
+      req.signal
+    );
+    const { cid, localAddr } = opened;
+    const recv = () =>
+      this.ask<Extract<Answer, { uplink: 'udp-message' }>>({
+        uplink: 'udp-recv',
+        uid: ++this.nextId,
+        cid,
+      });
+    return {
+      localAddr,
+      send: async (bytes, host, port) => {
+        const copy = bytes.slice();
+        const call = {
+          uplink: 'udp-send' as const,
+          uid: ++this.nextId,
+          cid,
+          bytes: copy,
+          host,
+          port,
+        };
+        await this.ask(call, undefined, [copy.buffer]);
+      },
+      messages: {
+        [Symbol.asyncIterator]: async function* () {
+          for (;;) {
+            const got = await recv();
+            if (!got.message) return;
+            yield got.message;
+          }
+        },
+      },
+      close: () => this.port.postMessage({ uplink: 'udp-close', cid }),
     };
   }
 }

@@ -1,6 +1,7 @@
 import { wasiErrno } from '../process/wasi-errno.ts';
+import type { Datagram, InetAddr, KernelDgram } from './dgram.ts';
 import { type KernelErrno, KernelError, type KernelFile, type PollState } from './fd-table.ts';
-import type { Routes } from './net/routes.ts';
+import { type Destination, Routes } from './net/routes.ts';
 import type { NetworkUplink, UplinkConn } from './net/uplink.ts';
 import { hostPort, uplinkLink } from './net/uplink-socket.ts';
 import { KernelPipe, PIPE_CAPACITY, PipeError } from './pipe.ts';
@@ -52,7 +53,7 @@ function dialError(e: unknown, timedOut: boolean, closed: boolean): KernelError 
   const known = DIAL_ERRORS.find((errno) => errno === code);
   return new KernelError(known ?? 'EHOSTUNREACH');
 }
-function isLoopback(host: string): boolean {
+export function isLoopback(host: string): boolean {
   return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
 }
 async function pipeCall<T>(op: () => Promise<T>): Promise<T> {
@@ -63,7 +64,7 @@ async function pipeCall<T>(op: () => Promise<T>): Promise<T> {
     throw e;
   }
 }
-class Changes {
+export class Changes {
   private waiters: Array<() => void> = [];
   wait(signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) return Promise.reject(new KernelError('EINTR'));
@@ -383,14 +384,16 @@ export class KernelSocket implements KernelFile {
     return [a, b];
   }
 }
-function canonicalHost(host: string): string {
+export function canonicalHost(host: string): string {
   return host === '0.0.0.0' ? '127.0.0.1' : host;
 }
 function keyOf(addr: SockAddr): string {
   return addr.family === 'inet' ? `inet:${addr.port}` : `unix:${addr.path}`;
 }
+const LOCAL_ONLY = new Routes();
 export class LoopbackNet {
   private readonly bound = new Map<string, KernelSocket>();
+  private readonly dgrams = new Map<number, KernelDgram>();
   private readonly activators = new Map<string, () => void>();
   private readonly internal = new Set<number>();
   private readonly reserved = new Set<number>();
@@ -403,7 +406,31 @@ export class LoopbackNet {
   uplinkFor(host: string): UplinkRoute | undefined {
     const route = this.route;
     if (!route) return undefined;
-    return route.routes.classify(host) === 'uplink' ? route : undefined;
+    return this.destination(host) === 'uplink' ? route : undefined;
+  }
+  destination(host: string): Destination {
+    return (this.route?.routes ?? LOCAL_ONLY).classify(host);
+  }
+  bindDgram(socket: KernelDgram, addr: SockAddr, kernel = false): InetAddr {
+    if (addr.family !== 'inet') throw new KernelError('EAFNOSUPPORT');
+    this.bindable(addr, kernel);
+    const port = addr.port === 0 ? this.ephemeral() : addr.port;
+    if (this.dgrams.has(port)) throw new KernelError('EADDRINUSE');
+    this.dgrams.set(port, socket);
+    return { ...addr, port };
+  }
+  releaseDgram(addr: InetAddr, socket: KernelDgram): void {
+    if (this.dgrams.get(addr.port) === socket) this.dgrams.delete(addr.port);
+  }
+  deliverDgram(port: number, datagram: Datagram): boolean {
+    const target = this.dgrams.get(port);
+    return target ? target.deliver(datagram) : false;
+  }
+  private bindable(addr: Extract<SockAddr, { family: 'inet' }>, kernel: boolean): void {
+    if (addr.host !== '0.0.0.0' && !isLoopback(addr.host)) {
+      throw new KernelError('EADDRNOTAVAIL');
+    }
+    if (!kernel && this.reserved.has(addr.port)) throw new KernelError('EADDRINUSE');
   }
   kernelOnly(port: number, reserve = false): boolean {
     if (reserve) this.internal.add(port);
@@ -441,11 +468,7 @@ export class LoopbackNet {
   bind(socket: KernelSocket, addr: SockAddr, kernel = false): SockAddr {
     if (addr.family === 'unix') {
       if (addr.path === '') throw new KernelError('EINVAL');
-    } else if (addr.host !== '0.0.0.0' && !isLoopback(addr.host)) {
-      throw new KernelError('EADDRNOTAVAIL');
-    } else if (!kernel && this.reserved.has(addr.port)) {
-      throw new KernelError('EADDRINUSE');
-    }
+    } else this.bindable(addr, kernel);
     const named =
       addr.family === 'inet' && addr.port === 0 ? { ...addr, port: this.ephemeral() } : addr;
     const key = keyOf(named);
@@ -472,7 +495,8 @@ export class LoopbackNet {
     for (let i = 0; i < span; i++) {
       const port = this.nextEphemeral;
       this.nextEphemeral = port === EPHEMERAL_LAST ? EPHEMERAL_FIRST : port + 1;
-      if (!this.bound.has(`inet:${port}`) && !this.reserved.has(port)) return port;
+      const taken = this.bound.has(`inet:${port}`) || this.dgrams.has(port);
+      if (!taken && !this.reserved.has(port)) return port;
     }
     throw new KernelError('EADDRINUSE');
   }

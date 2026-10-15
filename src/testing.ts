@@ -5,10 +5,31 @@ import {
   type ResolveAnswer,
   type ResolveFamily,
   type UplinkConn,
+  type UplinkDatagram,
   type UplinkDial,
+  type UplinkMessage,
+  type UplinkUdp,
+  type UplinkUdpOpen,
+  type UplinkUnreachable,
 } from './kernel/net/uplink.ts';
 
-export type { NetworkUplink, ResolveAnswer, ResolveFamily, RouteTable, UplinkConn, UplinkDial };
+export type {
+  NetworkUplink,
+  ResolveAnswer,
+  ResolveFamily,
+  RouteTable,
+  UplinkConn,
+  UplinkDatagram,
+  UplinkDial,
+  UplinkMessage,
+  UplinkUdp,
+  UplinkUdpOpen,
+  UplinkUnreachable,
+};
+
+export type FakeDatagramPeer = (
+  bytes: Uint8Array
+) => Uint8Array | readonly Uint8Array[] | { error: string } | undefined;
 
 export interface FakePeerSocket {
   read(): Promise<Uint8Array | null>;
@@ -27,12 +48,15 @@ export interface FakeUplinkOptions {
   routes?: RouteTable;
   ipv6?: boolean;
   peers?: Readonly<Record<string, FakePeer>>;
+  datagrams?: Readonly<Record<string, FakeDatagramPeer>>;
   address?: string;
 }
 
 export interface FakeUplink extends NetworkUplink {
   readonly asked: Array<{ name: string; family: ResolveFamily }>;
   readonly dialled: Array<{ host: string; port: number }>;
+  readonly sent: Array<{ host: string; port: number; bytes: Uint8Array }>;
+  udp(req: UplinkUdpOpen): Promise<UplinkUdp>;
 }
 
 const failure = (code: string, message: string) => Object.assign(new Error(message), { code });
@@ -98,6 +122,56 @@ function named(host: string, port: number): string {
   return `${host.includes(':') ? `[${host}]` : host}:${port}`;
 }
 
+class Inbox {
+  private readonly queue: UplinkMessage[] = [];
+  private ended = false;
+  private wake: (() => void) | undefined;
+
+  push(message: UplinkMessage): void {
+    if (this.ended) return;
+    this.queue.push(message);
+    this.wake?.();
+  }
+
+  end(): void {
+    this.ended = true;
+    this.wake?.();
+  }
+
+  async *[Symbol.asyncIterator](): AsyncGenerator<UplinkMessage> {
+    for (;;) {
+      const next = this.queue.shift();
+      if (next) yield next;
+      else if (this.ended) return;
+      else await new Promise<void>((resolve) => (this.wake = resolve));
+    }
+  }
+}
+
+function fakeUdp(
+  options: FakeUplinkOptions,
+  sent: FakeUplink['sent'],
+  local: string
+): Promise<UplinkUdp> {
+  const inbox = new Inbox();
+  return Promise.resolve({
+    localAddr: local,
+    messages: inbox,
+    send: async (bytes, host, port) => {
+      sent.push({ host, port, bytes: bytes.slice() });
+      const answer = options.datagrams?.[named(host, port)]?.(bytes.slice());
+      if (!answer) return;
+      if ('error' in answer) {
+        inbox.push({ error: answer.error, host, port });
+        return;
+      }
+      const replies = answer instanceof Uint8Array ? [answer] : answer;
+      for (const reply of replies) inbox.push({ bytes: reply.slice(), host, port });
+    },
+    close: () => inbox.end(),
+  });
+}
+
 function hang(signal: AbortSignal): Promise<never> {
   return new Promise((_, reject) => {
     signal.addEventListener('abort', () => reject(failure('ECONNABORTED', 'dial aborted')), {
@@ -109,12 +183,15 @@ function hang(signal: AbortSignal): Promise<never> {
 export function fakeUplink(options: FakeUplinkOptions = {}): FakeUplink {
   const asked: FakeUplink['asked'] = [];
   const dialled: FakeUplink['dialled'] = [];
+  const sent: FakeUplink['sent'] = [];
   let nextPort = 40000;
   return {
-    traits: { tcp: true, udp: false, ipv6: options.ipv6 === true },
+    traits: { tcp: true, udp: options.datagrams !== undefined, ipv6: options.ipv6 === true },
     ...(options.routes ? { routes: options.routes } : {}),
     asked,
     dialled,
+    sent,
+    udp: () => fakeUdp(options, sent, named(options.address ?? '100.100.100.100', nextPort++)),
     resolve: async (name, family) => {
       asked.push({ name, family });
       return answerOf(options.names?.[name] ?? []);

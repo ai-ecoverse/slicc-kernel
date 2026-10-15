@@ -28,6 +28,7 @@ import {
 } from './children.ts';
 import type { ClipboardBroker, ClipboardChannel, ClipboardStamp } from './clipboard.ts';
 import { type Cred, type CredChange, changeCred, copyCred, ROOT } from './cred.ts';
+import { KernelDgram } from './dgram.ts';
 import {
   type DeviceAccess,
   deviceAt,
@@ -310,6 +311,7 @@ function isTtySyscall(req: WasmSyscall): req is TtySyscall {
 export interface FdInfo {
   tty: boolean;
   kind: KernelFdKind;
+  dgram?: true;
   meta?: HeldMeta;
   flags?: number;
   cloexec?: true;
@@ -1455,7 +1457,9 @@ export class WasmProcess {
     const terminal = (file.tty ?? file.pty?.slave)?.name;
     return {
       tty: file.tty !== undefined,
-      kind: file instanceof KernelSocket ? 'socket' : kernelFdKind(file),
+      kind:
+        file instanceof KernelSocket || file instanceof KernelDgram ? 'socket' : kernelFdKind(file),
+      ...(file instanceof KernelDgram ? { dgram: true as const } : {}),
       ...(file.heldMeta ? { meta: file.heldMeta } : {}),
       ...(flags !== undefined ? { flags } : {}),
       ...(this.fds.closesOnExec(fd) ? { cloexec: true } : {}),
