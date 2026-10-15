@@ -308,6 +308,53 @@ test('pnpm installs globally as root and as a user with users off, report and en
   }
 });
 
+async function toolPackage(name, said, replaces) {
+  const dir = await mkdtemp(join(tmpdir(), 'slicc-pkg-'));
+  await mkdir(join(dir, 'package'), { recursive: true });
+  const slicc = { abi: 'js', commands: { k5tool: { module: 'tool.mjs' } } };
+  const manifest = { name, version: '1.0.0', slicc: replaces ? { ...slicc, replaces } : slicc };
+  await writeFile(join(dir, 'package', 'package.json'), JSON.stringify(manifest));
+  await writeFile(
+    join(dir, 'package', 'tool.mjs'),
+    `export default async function main(ctx) { await ctx.write(1, "${said}\\n"); return 0; }\n`
+  );
+  execFileSync('tar', ['czf', join(dir, 'p.tgz'), '-C', dir, 'package']);
+  const bytes = await readFile(join(dir, 'p.tgz'));
+  await rm(dir, { recursive: true, force: true });
+  return bytes;
+}
+
+test('a package that names another in slicc.replaces wins their shared commands while installed', async (t) => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils', 'wasm-tls-engine', 'wasi-pnpm']) {
+    await install(kernel, name);
+  }
+  await kernel.users.add({ name: 'cone' });
+  await kernel.writeFile('/srv/plain.tgz', await toolPackage('k5-tool', 'plain'));
+  await kernel.writeFile('/srv/heif.tgz', await toolPackage('k5-tool-heif', 'heif', ['k5-tool']));
+  await kernel.writeFile('/srv/bad.tgz', await toolPackage('k5-tool-bad', 'bad', 'k5-tool'));
+  const script = [
+    'cd /tmp && mkdir app && cd app && echo \'{"name":"a","version":"1.0.0"}\' > package.json',
+    'pnpm add /srv/plain.tgz /srv/heif.tgz /srv/bad.tgz > /dev/null 2>&1; echo "add $?"',
+    'cp -rL node_modules/k5-tool node_modules/k5-tool-heif /node_modules/',
+    'k5tool',
+    'rm -r /node_modules/k5-tool-heif && cp -rL node_modules/k5-tool-bad /node_modules/ && k5tool',
+    'pnpm add -g /srv/heif.tgz > /dev/null 2>&1; echo "global $?"; k5tool',
+  ].join('\n');
+  const local = await kernel.run(['bash', '-c', script], { cwd: '/' });
+  assert.equal(local.stdout, 'add 0\nheif\nplain\nglobal 0\nplain\n', local.stderr);
+  const user = [
+    'pnpm add -g /srv/plain.tgz > /dev/null 2>&1; echo "plain $?"',
+    'pnpm add -g /srv/heif.tgz > /dev/null 2>&1; echo "heif $?"',
+    'k5tool',
+    'pnpm remove -g k5-tool-heif > /dev/null 2>&1; echo "removed $?"',
+    'k5tool',
+  ].join('\n');
+  const r = await kernel.run(['bash', '-c', user], { cwd: '/home/cone', user: 'cone' });
+  assert.equal(r.stdout, 'plain 0\nheif 0\nheif\nremoved 0\nplain\n', r.stderr);
+});
+
 test('a user with a non-canonical home runs a command from its global packages', async (t) => {
   const kernel = await createNodeKernel({ users: 'enforce' });
   t.after(() => kernel.terminate());

@@ -741,8 +741,8 @@ export class Launcher {
     if (!found) {
       found = this.trustedAppended()
         .then(async (appended) => {
-          const roots = await this.roots(scope, appended);
-          return scanCommands(this.scanned, roots, roots.length - appended.length);
+          const tiers = await this.tiers(scope, appended);
+          return scanCommands(this.scanned, tiers, tiers.length - appended.length);
         })
         .then((commands) => commands.set(SUDO_COMMAND.name, SUDO_COMMAND));
       this.catalogs.set(scope, found);
@@ -776,13 +776,17 @@ export class Launcher {
     return found;
   }
 
-  private async roots(scope = '', appended?: readonly string[]): Promise<string[]> {
+  private async tiers(scope = '', appended?: readonly string[]): Promise<string[][]> {
     const system = [
-      this.modulesDir,
-      ...(await pnpmGlobalRoots(this.base, this.pnpmHome)),
-      ...(appended ?? (await this.trustedAppended())),
+      [this.modulesDir],
+      await pnpmGlobalRoots(this.base, this.pnpmHome),
+      ...(appended ?? (await this.trustedAppended())).map((root) => [root]),
     ];
-    return scope ? [...(await pnpmGlobalRoots(this.base, scope)), ...system] : system;
+    return scope ? [await pnpmGlobalRoots(this.base, scope), ...system] : system;
+  }
+
+  private async roots(scope = ''): Promise<string[]> {
+    return (await this.tiers(scope)).flat();
   }
 
   private async rootOnlyPath(root: string): Promise<boolean> {
