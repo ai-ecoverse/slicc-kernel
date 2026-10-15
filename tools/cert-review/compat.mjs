@@ -36,6 +36,8 @@ async function api(path, init = {}) {
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 const USABLE = new Set(['success', 'failure']);
 
+let dispatchedAt = '';
+
 async function candidates() {
   const own = await api(
     `repos/${repo}/actions/workflows/${WORKFLOW}/runs?head_sha=${commit}&event=workflow_run&per_page=20`
@@ -44,7 +46,7 @@ async function candidates() {
     `repos/${repo}/actions/workflows/${WORKFLOW}/runs?event=workflow_dispatch&per_page=50`
   );
   const named = dispatched.workflow_runs.filter(
-    (r) => r.display_title === TITLE || r.name === TITLE
+    (r) => r.display_title === TITLE || (dispatchedAt !== '' && r.created_at >= dispatchedAt)
   );
   return [...own.workflow_runs, ...named].sort((a, b) => b.created_at.localeCompare(a.created_at));
 }
@@ -93,12 +95,15 @@ for (;;) {
   }
   if (result) break;
   if (!pending && !dispatched && values.dispatch) {
+    dispatchedAt = new Date(Date.now() - 5000).toISOString().replace(/\.\d+Z$/, 'Z');
     await api(`repos/${repo}/actions/workflows/${WORKFLOW}/dispatches`, {
       method: 'POST',
       body: JSON.stringify({ ref: 'main', inputs: { version } }),
     });
     dispatched = true;
     console.log(`compat: no usable kernel-compat run for v${version}; dispatched one`);
+    await sleep(15_000);
+    continue;
   } else if (!pending && !values.dispatch) {
     break;
   }
