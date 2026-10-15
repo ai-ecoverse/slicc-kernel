@@ -14,6 +14,7 @@ import {
   redirectOf,
 } from '../fs/types.ts';
 import type { KeptFile, UnlinkHolder } from '../fs/unlinked.ts';
+import { view } from '../fs/view.ts';
 import { joinName, realDir, realTarget } from '../fs/walk.ts';
 import { DriverConnection, type DriverPortLike, errnoError } from './connection.ts';
 import type {
@@ -689,6 +690,8 @@ function noteExtent(extents: Array<[number, number]>, from: number, to: number):
   } else extents.push([from, to]);
 }
 
+type Relinkable = (...args: unknown[]) => Promise<unknown>;
+
 const RELINKED: ReadonlyArray<readonly [string, readonly number[]]> = [
   ['readFileBuffer', [0]],
   ['writeFile', [0]],
@@ -713,21 +716,25 @@ const RELINKED: ReadonlyArray<readonly [string, readonly number[]]> = [
 class MountFs implements KernelFs {
   private readonly table: MountTable;
   private readonly base: KernelFs;
+  private readonly rejectLinks: boolean;
 
-  constructor(table: MountTable, base: KernelFs) {
+  constructor(table: MountTable, base: KernelFs, rejectLinks = false) {
     this.table = table;
     this.base = base;
-    const self = this as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
+    this.rejectLinks = rejectLinks;
+  }
+
+  static {
+    const proto = MountFs.prototype as unknown as Record<string, Relinkable>;
     for (const [name, at] of RELINKED) {
-      const run = self[name]?.bind(this);
-      if (!run) continue;
-      self[name] = async (...args: unknown[]) => {
+      const run = proto[name] as Relinkable;
+      proto[name] = async function (this: MountFs, ...args: unknown[]) {
         try {
-          return await run(...args);
+          return await run.apply(this, args);
         } catch (err) {
           const moved = await this.relinked(err, args, at);
           if (!moved) throw err;
-          return (self[name] as (...args: unknown[]) => Promise<unknown>)(...moved);
+          return ((this as unknown as Record<string, Relinkable>)[name] as Relinkable)(...moved);
         }
       };
     }
@@ -746,6 +753,7 @@ class MountFs implements KernelFs {
       if (typeof path !== 'string' || !this.at(path)) continue;
       const named = await this.named(path).catch(() => undefined);
       if (named === undefined || named === normalizePath(path)) continue;
+      if (this.rejectLinks) throw errnoError('ELOOP', path);
       moved[i] = named;
       changed = true;
     }
@@ -813,6 +821,7 @@ class MountFs implements KernelFs {
       throw err;
     }
     if (attr.kind !== 'symlink') return real;
+    if (this.rejectLinks) throw errnoError('ELOOP', path);
     if (hops >= MAX_LINKS) throw errnoError('ELOOP', path);
     const target = (await found.mount.conn.call({ op: 'readlink', path: found.rel })) as string;
     return this.follow(this.base.resolvePath(parentOf(real), target), hops + 1, create);
@@ -1538,5 +1547,10 @@ class MountFs implements KernelFs {
     this.writable(found.mount, real);
     this.table.forget(found.mount, real);
     await found.mount.conn.call({ op: 'setattr', path: found.rel, mtime: mtime.getTime() });
+  }
+
+  noLinks(): KernelFs {
+    const noLinkBase = this.base.noLinks?.() ?? this.base;
+    return view(this, { rejectLinks: true, base: noLinkBase }) as unknown as KernelFs;
   }
 }
