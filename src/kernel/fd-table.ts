@@ -100,7 +100,6 @@ export interface KernelFile {
 
   clipboard?: ClipboardChannel;
 
-  stat?(): Promise<{ size: number; path: string; orphan?: true }>;
   held?: true;
 
   heldMeta?: HeldMeta;
