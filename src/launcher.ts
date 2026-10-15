@@ -1872,7 +1872,8 @@ export class Launcher {
       maySignal(sender, this.credOf(target)) ||
       (sig === SIG.CONT && session !== undefined && this.jobs.sidOf(target) === session) ||
       (from !== undefined && this.imageOf(from) === this.imageOf(target)) ||
-      (from !== undefined && this.granted.get(this.jobs.shown(target)) === from);
+      (from !== undefined && this.granted.get(this.jobs.shown(target)) === from) ||
+      (from !== undefined && this.granted.get(this.jobs.pgidOf(target) ?? 0) === from);
     if (pid === -1) {
       const sender = from === undefined ? undefined : this.imageOf(from);
       return this.killAll(sig, (member) => this.imageOf(member) !== sender, may);

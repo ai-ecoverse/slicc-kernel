@@ -1666,7 +1666,10 @@ export class WasmProcess {
     const { file, argv, env, cwd, cred, caller } = answer.grant;
     const stdio = [{ fd: 0 }, { fd: 1 }, { fd: 2 }];
     return {
-      pid: await this.children.spawn({ file, argv, env, cwd }, stdio, [], { cred, caller }),
+      pid: await this.children.spawn({ file, argv, env, cwd, pgid: 0 }, stdio, [], {
+        cred,
+        caller,
+      }),
     };
   }
 

@@ -25,6 +25,11 @@ export interface JsSpawnOptions {
 export interface JsExited {
   status: number;
   signal?: number;
+  stopped?: true;
+}
+
+export interface JsWaitOptions {
+  untraced?: boolean;
 }
 
 export interface JsChild {
@@ -32,7 +37,7 @@ export interface JsChild {
   readonly stdin?: WritableStream<Uint8Array>;
   readonly stdout?: ReadableStream<Uint8Array>;
   readonly stderr?: ReadableStream<Uint8Array>;
-  wait(): Promise<JsExited>;
+  wait(options?: JsWaitOptions): Promise<JsExited>;
   kill(signal?: number | `SIG${string}`): Promise<void>;
 }
 
@@ -54,6 +59,8 @@ const SIGTERM = 15;
 type Slot = { fd: number } | { none: true };
 
 export function exitedOf(status: number): JsExited {
+  if ((status & 0xff) === 0x7f)
+    return { status: 128 + ((status >> 8) & 0xff), signal: (status >> 8) & 0xff, stopped: true };
   const signal = status & 0x7f;
   return signal ? { status: 128 + signal, signal } : { status: (status >> 8) & 0xff };
 }
@@ -98,8 +105,10 @@ export function childOps(
   defaults: ChildDefaults,
   sync: SyncSpawnKernel
 ) {
-  const wait = async (pid: number): Promise<JsExited> => {
-    const r = await kernel.blocking({ op: 'proc-wait', pid, nohang: false });
+  const wait = async (pid: number, options: JsWaitOptions = {}): Promise<JsExited> => {
+    if (typeof options !== 'object' || options === null) throw new JsCallError('EINVAL', 'wait');
+    const untraced = options.untraced === true ? { untraced: true } : {};
+    const r = await kernel.blocking({ op: 'proc-wait', pid, nohang: false, ...untraced });
     const [, status] = (r.ok && r.kind === 'json' ? r.json : [0, 0]) as [number, number];
     return exitedOf(status);
   };
@@ -114,7 +123,7 @@ export function childOps(
       ...(stdin !== undefined ? { stdin: writable(io, stdin) } : {}),
       ...(stdout !== undefined ? { stdout: readable(io, stdout) } : {}),
       ...(stderr !== undefined ? { stderr: readable(io, stderr) } : {}),
-      wait: () => wait(pid),
+      wait: (options?: JsWaitOptions) => wait(pid, options),
       kill: (signal?: number | `SIG${string}`) => kill(pid, signal),
     };
   };
