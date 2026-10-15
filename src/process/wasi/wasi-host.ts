@@ -250,10 +250,10 @@ export class WasiHost {
       return path;
     };
     const modeOf = (st: { mode?: number }) => (st.mode ?? 0) & 0o7777;
-    const chown = (path: string, uid: number, gid: number, follow: boolean) => {
+    const chown = (path: string, uid: number, gid: number, follow: boolean, handle?: number) => {
       const { chown: own } = this.o.fs;
       if (!own) throw new WasiError('ENOSYS');
-      own.call(this.o.fs, path, idOf(uid), idOf(gid), follow);
+      own.call(this.o.fs, path, idOf(uid), idOf(gid), follow, handle);
     };
     const caller = (): [number, number] => {
       const cred = this.o.kernel.call({ op: 'proc-cred' }) as Cred;
@@ -284,7 +284,11 @@ export class WasiHost {
       return follow ? this.o.fs.stat(path) : this.o.fs.lstat(path);
     };
     return wrap({
-      fd_chown: (fd: number, uid: number, gid: number) => void chown(pathOf(fd), uid, gid, true),
+      fd_chown: (fd: number, uid: number, gid: number) => {
+        const e = fds.get(fd);
+        const handle = e.type === 'file' ? e.file.buffer.handle : undefined;
+        void chown(pathOf(fd), uid, gid, true, handle);
+      },
       path_chown: (dirfd: number, p: number, l: number, uid: number, gid: number, flags: number) =>
         void chown(at(dirfd, p, l), uid, gid, (flags & AT_SYMLINK_NOFOLLOW) === 0),
       fd_owner: (fd: number, out: number) => {

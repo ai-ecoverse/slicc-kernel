@@ -21,6 +21,7 @@ import {
   redirected,
   resolvePath,
 } from './types.ts';
+import { view } from './view.ts';
 
 const S_IFDIR = 0o040000;
 const S_IFREG = 0o100000;
@@ -272,6 +273,7 @@ export class OpfsFs implements KernelFs {
   }
 
   private committed(target: string): void {
+    this.fileTimes.delete(target);
     if (this.remote?.watched()) this.remote.wrote(target);
   }
 
@@ -402,7 +404,7 @@ export class OpfsFs implements KernelFs {
   }
 
   unguarded(): KernelFs {
-    return Object.create(this, { guarded: { value: [] } }) as KernelFs;
+    return view(this, { guarded: [] }) as unknown as KernelFs;
   }
 
   private refuse(path: string, holding = false): void {
@@ -672,6 +674,11 @@ export class OpfsFs implements KernelFs {
   }
 
   private movePending(from: string, to?: string): void {
+    if (to !== undefined) {
+      for (const path of [...this.fileTimes.keys()]) {
+        if (within(path, to)) this.fileTimes.delete(path);
+      }
+    }
     for (const [path, ms] of [...this.fileTimes]) {
       if (!within(path, from)) continue;
       this.fileTimes.delete(path);

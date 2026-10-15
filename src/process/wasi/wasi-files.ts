@@ -1,6 +1,7 @@
 import { RangedFile } from '../../fs/ranged.ts';
 import type { DeviceAccess, KernelFdKind } from '../../kernel/fd-table.ts';
 import type {
+  ChownArgs,
   SyncFsBridgeStat,
   SyncFsFileIo,
   SyncFsPosixBridge,
@@ -572,8 +573,8 @@ export function cachingBridge(
       : {}),
     ...(chown
       ? {
-          chown: (p: string, uid?: number, gid?: number, follow?: boolean) =>
-            rewriting(p, () => chown.call(bridge, p, uid, gid, follow)),
+          chown: (p: string, ...rest: ChownArgs) =>
+            rewriting(p, () => chown.call(bridge, p, ...rest)),
         }
       : {}),
     ...(bridge.pread && bridge.pwrite && bridge.truncate

@@ -275,9 +275,17 @@ export function createSyncFsSabBridge(
     create: (path, mode) => {
       run({ op: 'create', path, ...(mode !== undefined ? { mode } : {}) }, path);
     },
-    chown: (path, uid, gid, follow) => {
+    chown: (path, uid, gid, follow, handle) => {
       const ids = { ...(uid !== undefined ? { uid } : {}), ...(gid !== undefined ? { gid } : {}) };
-      changing({ op: follow ? 'chown' : 'lchown', path, ...ids }, path);
+      changing(
+        {
+          op: follow ? 'chown' : 'lchown',
+          path,
+          ...ids,
+          ...(handle !== undefined ? { handle } : {}),
+        },
+        path
+      );
     },
     ...(opts.owners ? { owners: true } : {}),
     ...(opts.links ? { links: true } : {}),

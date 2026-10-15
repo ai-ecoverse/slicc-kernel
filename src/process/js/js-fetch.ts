@@ -50,10 +50,26 @@ function local(url: string): boolean {
   return isKernelLoopbackHost(new URL(url).hostname);
 }
 
+const BAD_PORTS = new Set([
+  1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79, 87, 95, 101, 102,
+  103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137, 139, 143, 161, 179, 389, 427, 465,
+  512, 513, 514, 515, 526, 530, 531, 532, 540, 548, 554, 556, 563, 587, 601, 636, 989, 990, 993,
+  995, 1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668,
+  6669, 6697, 10080,
+]);
+
+function badPort(url: URL): boolean {
+  const port = url.port ? Number(url.port) : 0;
+  return port !== 0 && BAD_PORTS.has(port);
+}
+
 function rewrite(hop: Hop, status: number, location: string): Hop {
   const next = new URL(location, hop.url);
   if (next.protocol !== 'http:' && next.protocol !== 'https:') {
     throw failed(new JsCallError('EPROTONOSUPPORT', next.protocol));
+  }
+  if (badPort(next)) {
+    throw failed(new JsCallError('EACCES', `bad port: ${next.href}`));
   }
   if (local(next.href) && !local(hop.url)) {
     const from = new URL(hop.url).origin;
@@ -385,6 +401,9 @@ export function fetchOp(kernel: JsKernel) {
     if (protocol === 'data:') return dataResponse(request);
     if (protocol !== 'http:' && protocol !== 'https:') {
       throw failed(new JsCallError('EPROTONOSUPPORT', protocol));
+    }
+    if (badPort(new URL(request.url))) {
+      throw failed(new JsCallError('EACCES', `bad port: ${request.url}`));
     }
     let known = await traitsAt(request.url);
     if (!known.manualRedirects && request.redirect !== 'follow') {

@@ -1121,6 +1121,31 @@ function idOf(value: number): number | undefined {
   return value === -1 || value === 0xffffffff ? undefined : value >>> 0;
 }
 
+function chownHeld(
+  Fs: LiveChownFs,
+  node: LiveFsNode,
+  s: LiveNodeState,
+  uid: number,
+  gid: number
+): void {
+  const bridge = node.mount.opts.bridge as SyncFsPosixBridge;
+  const handle = s.handle as number;
+  try {
+    bridge.chown?.(liveNodePath(node), idOf(uid), idOf(gid), false, handle);
+  } catch (err) {
+    throw toErrno(Fs, err);
+  }
+  if (node.parent?.live) node.parent.live.listed = undefined;
+  if (!s.orphan) {
+    s.stat = undefined;
+    return;
+  }
+  try {
+    const st = bridge.keptStat?.(handle);
+    if (st && s.stat) s.stat = { ...s.stat, uid: st.uid, gid: st.gid, mode: st.mode };
+  } catch {}
+}
+
 export function useLiveChown(Fs: LiveChownFs): void {
   const chown = Fs.chown?.bind(Fs);
   if (!chown) return;
@@ -1141,8 +1166,10 @@ export function useLiveChown(Fs: LiveChownFs): void {
   if (!Fs.fchown || !getStreamChecked) return;
   Fs.fchown = (fd, uid, gid) => {
     const stream = getStreamChecked.call(Fs, fd);
-    const live = (stream.node as LiveFsNode).live !== undefined;
-    const target = live || stream.path === undefined ? stream.node : stream.path;
+    const node = stream.node as LiveFsNode;
+    const s = node.live;
+    if (s?.handle !== undefined && (!s.orphan || s.kept)) return chownHeld(Fs, node, s, uid, gid);
+    const target = s !== undefined || stream.path === undefined ? stream.node : stream.path;
     (Fs.chown as NonNullable<LiveChownFs['chown']>)(target, uid, gid);
   };
 }
