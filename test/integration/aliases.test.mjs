@@ -181,3 +181,41 @@ test('python writing through a symlinked directory reaches a file the kernel hol
   const after = await run(kernel, 'cat real/held');
   assert.deepEqual([r.stdout, after.stdout], ['BBBBBBBB\n', 'CBBBBBBB']);
 });
+
+for (const writer of ['put /tmp/link/f new!', `python3 -c "open('link/f', 'w').write('new!')"`]) {
+  test(`python with a file open by its real path sees a write made through a symlinked directory (${writer.split(' ')[0]}, #669)`, async (t) => {
+    const kernel = await booted(t, ['wasix-python']);
+    await program(kernel, 'put', PUT);
+    const py = [
+      'import os, time',
+      "f = open('real/f', 'rb', buffering=0)",
+      "print('P1', f.read().decode())",
+      "open('ready', 'w').close()",
+      "while not os.path.exists('go'): time.sleep(0.02)",
+      'f.seek(0)',
+      "print('P2', f.read().decode())",
+    ].join('\n');
+    const r = await run(
+      kernel,
+      `mkdir real && ln -s real link && printf old! > real/f
+      python3 -c "${py}" & until [ -e ready ]; do sleep 0.05; done
+      ${writer}; touch go; wait`
+    );
+    assert.deepEqual(r, { status: 0, stdout: 'P1 old!\nP2 new!\n', stderr: '' });
+  });
+}
+
+test('python writing through a hard link reaches the file the kernel holds under the other name (#669)', async (t) => {
+  const kernel = await booted(t, ['wasix-python']);
+  await program(kernel, 'holder', HOLDER);
+  await run(kernel, 'printf AAAA > a && ln a b', '/mnt/t');
+  const holder = kernel.run(['holder', '/mnt/t/a'], { cwd: '/' });
+  const r = await run(
+    kernel,
+    `until [ -e /tmp/opened ]; do sleep 0.05; done; python3 -c "open('b', 'w').write('BBBBBBBB')"; cat a; echo; touch /tmp/go`,
+    '/mnt/t'
+  );
+  await holder;
+  const after = await run(kernel, 'cat a', '/mnt/t');
+  assert.deepEqual([r.stdout, after.stdout], ['BBBBBBBB\n', 'CBBBBBBB']);
+});

@@ -460,6 +460,15 @@ export class VfsNodes implements UnlinkHolder {
     return this.byPath.size > 0;
   }
 
+  holdsLinked(): boolean {
+    return this.byId.size > 0;
+  }
+
+  holdingId(id: string): VfsNode | undefined {
+    const node = this.byId.get(id);
+    return node && !node.orphaned ? node : undefined;
+  }
+
   holding(path: string): VfsNode | undefined {
     if (this.byPath.size === 0) return undefined;
     const node = this.byPath.get(path);
@@ -650,9 +659,13 @@ export async function refuseReadonly(
 
 async function heldAt(fs: KernelFs, nodes: VfsNodes, at: string): Promise<VfsNode | undefined> {
   const held = nodes.holding(at);
-  if (held || !nodes.holdsAny() || !fs.realpath) return held;
-  const real = await fs.realpath(at, true).catch(() => undefined);
-  return real === undefined || real === at ? undefined : nodes.holding(real);
+  if (held || !nodes.holdsAny()) return held;
+  const real = await fs.realpath?.(at, true).catch(() => undefined);
+  const named = real === undefined || real === at ? undefined : nodes.holding(real);
+  if (named || !nodes.holdsLinked()) return named;
+  const st = await fs.stat(real ?? at).catch(() => undefined);
+  if (!st || st.ino === undefined || (st.nlink ?? 1) < 2) return undefined;
+  return nodes.holdingId(`${st.dev ?? 0}:${st.ino}`);
 }
 
 function heldIo(fs: KernelFs, nodes: VfsNodes, changed: (path: string) => void): Partial<KernelFs> {

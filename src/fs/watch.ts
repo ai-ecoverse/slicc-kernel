@@ -28,9 +28,12 @@ function touches(watcher: Watcher, changed: string): boolean {
   );
 }
 
+const REALS_KEPT = 4096;
+
 export class FsWatchers {
   private readonly watchers = new Set<Watcher>();
   private readonly taps: Array<(paths: string[]) => void> = [];
+  private readonly reals = new Map<string, string>();
 
   tap(listener: (paths: string[]) => void): void {
     this.taps.push(listener);
@@ -84,8 +87,39 @@ export class FsWatchers {
           this.changed(...changed(...args));
         }
       };
+    const reals = this.reals;
+    const realOf = async (path: string): Promise<string> => {
+      const at = normalizePath(path);
+      const known = reals.get(at);
+      if (known !== undefined) return known;
+      const real = (await fs.realpath?.(at, true).catch(() => at)) ?? at;
+      if (reals.size >= REALS_KEPT) reals.clear();
+      reals.set(at, real);
+      return real;
+    };
+    const content =
+      <A extends [string, ...unknown[]]>(run: (...args: A) => Promise<void>) =>
+      async (...args: A) => {
+        try {
+          await run(...args);
+        } finally {
+          const at = normalizePath(args[0]);
+          const real = await realOf(at);
+          this.changed(...(real === at ? [at] : [at, real]));
+        }
+      };
+    const reshaping =
+      <A extends unknown[]>(run: (...args: A) => Promise<void>) =>
+      async (...args: A) => {
+        reals.clear();
+        try {
+          await run(...args);
+        } finally {
+          reals.clear();
+        }
+      };
     const overrides: Partial<Record<keyof KernelFs, unknown>> = {
-      writeFile: after(fs.writeFile.bind(fs), (path) => [path]),
+      writeFile: content(fs.writeFile.bind(fs)),
       mkdir: async (path: string, options?: { recursive?: boolean; owner?: NewOwner }) => {
         const created: string[] = [];
         if (options?.recursive) {
@@ -101,13 +135,13 @@ export class FsWatchers {
           this.changed(...created, path);
         }
       },
-      rm: after(fs.rm.bind(fs), (path) => [path]),
-      rename: after(fs.rename.bind(fs), (from, to) => [from, to]),
+      rm: reshaping(after(fs.rm.bind(fs), (path) => [path])),
+      rename: reshaping(after(fs.rename.bind(fs), (from, to) => [from, to])),
       link: after(
         (from: string, to: string, follow?: boolean) => fs.link(from, to, follow),
         (_from, to) => [to]
       ),
-      symlink: after(fs.symlink.bind(fs), (_target, path) => [path]),
+      symlink: reshaping(after(fs.symlink.bind(fs), (_target, path) => [path])),
       chmod: after(fs.chmod.bind(fs), (path) => [path]),
       ...(fs.chown ? { chown: after(fs.chown.bind(fs), (path) => [path]) } : {}),
       utimes: after(fs.utimes.bind(fs), (path) => [path]),
@@ -118,8 +152,8 @@ export class FsWatchers {
     };
     const ranged = rangedOps(fs);
     if (ranged) {
-      overrides.pwrite = after(ranged.pwrite, (path) => [path]);
-      overrides.truncate = after(ranged.truncate, (path) => [path]);
+      overrides.pwrite = content(ranged.pwrite);
+      overrides.truncate = content(ranged.truncate);
     }
     return new Proxy(fs, {
       get(target, key, receiver) {
