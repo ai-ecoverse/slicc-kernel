@@ -2,6 +2,7 @@ import type { HeldMeta, PollState } from '../kernel/fd-table.ts';
 import type { MountLine, ProcessListing } from '../kernel/proc-info.ts';
 import type { Termios } from '../kernel/tty.ts';
 import type { EmscriptenFsForHook } from '../realm/emscripten-vfs-hook.ts';
+import { useKernelFdMetadata } from './fd-metadata.ts';
 import { wasiErrno } from './wasi-errno.ts';
 
 const POLLIN = 0x001;
@@ -174,6 +175,10 @@ export interface ProcessSys {
   access?(fd: number): 'read' | 'write' | undefined;
 
   size?(fd: number): number;
+  fdStat?(fd: number): object | undefined;
+  fdChmod?(fd: number, mode: number): void;
+  fdChown?(fd: number, uid: number | undefined, gid: number | undefined): void;
+  fdUtimes?(fd: number, atimeMs: number | null, mtimeMs: number | null, now: boolean): void;
 
   openTty?(name?: string): number;
   ttyNames?(): string[];
@@ -287,6 +292,14 @@ export interface TtyOwner {
 
 function nonblocking(stream: ProcessStream): { nonblock: true } | undefined {
   return (stream.flags & O_NONBLOCK) !== 0 ? { nonblock: true } : undefined;
+}
+
+function datesOf(real: object | undefined): Record<string, Date> {
+  const dates: Record<string, Date> = {};
+  for (const [key, value] of Object.entries(real ?? {}))
+    if (/^[amc]time$/.test(key) && (typeof value === 'string' || typeof value === 'number'))
+      dates[key] = new Date(value);
+  return dates;
 }
 
 export class KernelStreams {
@@ -538,13 +551,15 @@ export class KernelStreams {
   }
 
   sizeFromKernel(stream: ProcessStream, kfd: number): void {
-    const { size } = this.sys;
+    const { size, fdStat } = this.sys;
     if (!size) return;
     const node = stream.node;
-    this.describe(stream, `${stream.path ?? ''}:${++this.described}`, () => ({
-      ...node.node_ops?.getattr?.(node),
-      size: this.call(() => size.call(this.sys, kfd)),
-    }));
+    this.describe(stream, `${stream.path ?? ''}:${++this.described}`, () => {
+      const base = node.node_ops?.getattr?.(node);
+      const live = this.call(() => size.call(this.sys, kfd));
+      const real = fdStat && this.call(() => fdStat.call(this.sys, kfd));
+      return { ...base, ...real, ...datesOf(real), size: live };
+    });
   }
 
   describe(stream: ProcessStream, name: string, getattr: () => object): void {
@@ -564,6 +579,10 @@ export class KernelStreams {
         return getattr ? getattr() : original.call(fs, path, ...rest);
       };
     }
+  }
+
+  useKernelFdMetadata(): void {
+    useKernelFdMetadata(this.Fs, this.sys, this.call.bind(this));
   }
 
   useControllingTerminal(): void {

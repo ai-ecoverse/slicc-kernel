@@ -169,6 +169,22 @@ export function kernelSys(transport: SyncSabTransport): ProcessSys & PtyKernel {
     size(fd) {
       return (json(call({ op: 'fd-vfs-stat', fd }, `fd-vfs-stat ${fd}`)) as { size: number }).size;
     },
+    fdStat(fd) {
+      const r = json(call({ op: 'fd-vfs-stat', fd, full: true }, `fd-vfs-stat ${fd}`)) as
+        | { stat?: object }
+        | undefined;
+      return r?.stat;
+    },
+    fdChmod(fd, mode) {
+      call({ op: 'fd-chmod', fd, mode }, `fd-chmod ${fd}`);
+    },
+    fdChown(fd, uid, gid) {
+      const ids = { ...(uid !== undefined ? { uid } : {}), ...(gid !== undefined ? { gid } : {}) };
+      call({ op: 'fd-chown', fd, ...ids }, `fd-chown ${fd}`);
+    },
+    fdUtimes(fd, atimeMs, mtimeMs, now) {
+      call({ op: 'fd-utimes', fd, atimeMs, mtimeMs, now }, `fd-utimes ${fd}`);
+    },
     ttyNames() {
       return json(call({ op: 'fd-tty-names' }, 'fd-tty-names')) as string[];
     },
@@ -676,6 +692,7 @@ export async function runWasmProcess(
   const pipefs = ownValue<ProcessPipeFs>(running, 'PIPEFS');
   if (pipefs) streams.usePipes(pipefs);
   streams.useControllingTerminal();
+  streams.useKernelFdMetadata();
   useDevFd(running.FS);
   useFileMmap(running.FS, {
     sys,
