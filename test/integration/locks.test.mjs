@@ -88,7 +88,7 @@ test('a second sqlite3 writer gets "database is locked" while the first holds it
 test('two git commits at once in one repository both land, and no index.lock is left (#665)', async (t) => {
   const bash = await booted(t, ['wasm-git']);
   const commit = (name) =>
-    `( echo ${name} > ${name}; until git cat-file -e HEAD:${name} 2>/dev/null; do git add ${name} 2>/dev/null && git commit -qm ${name} 2>/dev/null; sleep 0.05; done )`;
+    `( echo ${name} > ${name}; until git cat-file -e HEAD:${name} 2>/dev/null; do { git add ${name} && git commit -qm ${name}; } > /dev/null 2>&1; sleep 0.05; done )`;
   const r = await bash(`
     git config --global user.name kernel && git config --global user.email kernel@example.com
     git init -q r && cd r && echo base > base && git add base && git commit -qm base
