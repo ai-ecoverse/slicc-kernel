@@ -219,7 +219,7 @@ export class ChildTable {
     const captured = new Map<number, Uint8Array[]>();
     try {
       for (const [n, slot] of stdio.entries()) {
-        void fds.installAt(
+        fds.installAt(
           n,
           'sameAs' in slot ? fds.get(slot.sameAs).retain() : this.openSlot(slot, n, captured)
         );
@@ -228,10 +228,10 @@ export class ChildTable {
       for (const slot of inherit) {
         if (slot.fd <= 2) continue;
         if ('device' in slot) {
-          void fds.installAt(slot.fd, deviceFile(slot.device, slot.access));
+          fds.installAt(slot.fd, deviceFile(slot.device, slot.access));
           continue;
         }
-        void fds.installAt(slot.fd, this.parentFds.get(slot.kernel).retain());
+        fds.installAt(slot.fd, this.parentFds.get(slot.kernel).retain());
         if (slot.flags !== undefined) fds.setStatusFlags(slot.fd, slot.flags);
       }
     } catch (e) {

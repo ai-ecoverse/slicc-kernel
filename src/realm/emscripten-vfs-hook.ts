@@ -1,6 +1,7 @@
 import {
   flushLiveVfs,
   invalidateLiveVfs,
+  type LiveCred,
   type LiveMountFsApi,
   liveRoot,
   mountLiveVfsDirs,
@@ -29,6 +30,7 @@ export interface EmscriptenVfsHookDeps {
   bridge: SyncFsPosixBridge;
   cwd: string;
   warn: (message: string) => void;
+  cred?: LiveCred;
 }
 
 function topLevelDirs(
@@ -88,6 +90,7 @@ export function mountVfsIntoEmscripten(
   if (bridge.owners && Fs.lookupPath) useLiveChown(Fs as Parameters<typeof useLiveChown>[0]);
   if (bridge.links && Fs.lookupPath) readingLinks(Fs as Parameters<typeof readingLinks>[0]);
   linuxRmdir(Fs);
+  if (deps.cred) Fs.sliccCred = deps.cred;
   try {
     Fs.chdir(deps.cwd);
   } catch (err) {

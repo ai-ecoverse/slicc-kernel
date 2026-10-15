@@ -1220,6 +1220,7 @@ class MountFs implements KernelFs {
     }
     const { mount, rel } = found;
     const real = normalizePath(path);
+    if (options.file && rel === '/') throw errnoError('EISDIR', real);
     if (rel === '/' && options.recursive) await this.rmEach(real, mount, rel, options);
     if (rel === '/') throw errnoError('EBUSY', `${real} is a mount point`);
     this.writable(mount, real);

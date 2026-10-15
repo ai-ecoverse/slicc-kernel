@@ -912,7 +912,7 @@ export class WasmProcess {
             ? await nodes.targetKey(req.path)
             : await this.keptOr(await nodes.targetKey(req.path), req.handle);
       if (inProc(path)) {
-        await this.fds.installAt(fd, await this.procFile(req, path));
+        this.fds.installAt(fd, await this.procFile(req, path));
         return fd;
       }
       if (this.writesAt(req) && this.options.readonlyAt?.(path)) throw new KernelError('EROFS');
@@ -921,12 +921,12 @@ export class WasmProcess {
       if (req.exclusive) {
         await nodes.createExclusive(path, this.newOwner(req.mode));
         if (plain !== undefined) await this.options.fs.chmod?.(path, plain);
-        await this.fds.installAt(fd, this.openVfsFile(open));
+        this.fds.installAt(fd, this.openVfsFile(open));
       } else if (req.create) {
         await nodes.onEntry(path, async () => {
           const marks = this.options.owners || plain !== undefined;
           const fresh = marks && !(await present(this.options.fs, path, true));
-          await this.fds.installAt(fd, this.openVfsFile(open, await nodes.identify(path)));
+          this.fds.installAt(fd, this.openVfsFile(open, await nodes.identify(path)));
           await this.fds.get(fd).file.stat?.();
           if (fresh && plain !== undefined) await this.options.fs.chmod?.(path, plain);
           else if (fresh) {
@@ -934,7 +934,7 @@ export class WasmProcess {
           }
         });
       } else {
-        await this.fds.installAt(fd, this.openVfsFile(open, await nodes.identify(path)));
+        this.fds.installAt(fd, this.openVfsFile(open, await nodes.identify(path)));
       }
       if (req.existing && !(await present(this.options.fs, path, true))) {
         throw new KernelError('ENOENT');
@@ -1175,7 +1175,7 @@ export class WasmProcess {
       case 'fd-meta': {
         if (!this.fds.get(req.fd).file.held) throw new KernelError('EBADF');
         const cloexec = this.fds.closesOnExec(req.fd);
-        await this.fds.installAt(req.fd, heldFile(req.meta));
+        this.fds.installAt(req.fd, heldFile(req.meta));
         if (cloexec) this.fds.setCloseOnExec(req.fd);
         return { ok: true, kind: 'void' };
       }
@@ -1195,7 +1195,7 @@ export class WasmProcess {
         return { ok: true, kind: 'void' };
       case 'fd-renumber':
         if (req.from !== req.to) {
-          await this.fds.dup2(req.from, req.to);
+          await this.fds.dup2Clipboard(req.from, req.to);
           if (!req.keep) await Promise.resolve(this.fds.close(req.from));
         }
         return { ok: true, kind: 'void' };
@@ -1298,7 +1298,7 @@ export class WasmProcess {
   private async promote(req: Extract<WasmSyscall, { op: 'fd-promote' }>): Promise<void> {
     if (!this.fds.get(req.fd).file.held) throw new KernelError('EBADF');
     if (req.share !== undefined) {
-      await this.fds.dup2(req.share, req.fd);
+      await this.fds.dup2Clipboard(req.share, req.fd);
       return;
     }
     if (req.path === undefined) throw new KernelError('EINVAL');
@@ -1321,13 +1321,13 @@ export class WasmProcess {
       },
       this.nodes
     );
-    await this.fds.installAt(req.fd, file);
+    this.fds.installAt(req.fd, file);
   }
 
   private reserve(fd: number | undefined, min = 3, meta?: HeldMeta): number {
     if (fd === undefined) return this.fds.install(heldFile(meta), Math.max(3, min));
     if (this.fds.has(fd)) throw new KernelError('EBADF');
-    void this.fds.installAt(fd, heldFile(meta));
+    this.fds.installAt(fd, heldFile(meta));
     return fd;
   }
 

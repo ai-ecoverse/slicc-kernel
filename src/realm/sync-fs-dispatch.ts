@@ -534,8 +534,15 @@ async function rmPermitted(
     if (!child.ok) first ??= child;
   }
   if (first) return first;
-  const again = await guarded(entry, path, req);
-  return again ?? (await run(entry, path, req));
+  const g = guardOf(entry);
+  if (g) {
+    try {
+      await inParent(g, 'rm', path, true);
+    } catch (err) {
+      return toErrno(err);
+    }
+  }
+  return await run(entry, path, req);
 }
 
 async function dispatchOne(entry: SyncFsTokenEntry, req: SyncFsRequest): Promise<SyncFsResult> {

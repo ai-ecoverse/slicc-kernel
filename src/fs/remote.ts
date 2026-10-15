@@ -20,12 +20,12 @@ interface WatchMessage {
   changed?: string[];
 }
 
-interface LockManagerLike {
+export interface LockManagerLike {
   request(name: string, callback: () => Promise<void>): Promise<unknown>;
   query(): Promise<{ held?: Array<{ name?: string }> }>;
 }
 
-function lockManager(): LockManagerLike | undefined {
+export function lockManager(): LockManagerLike | undefined {
   return (globalThis.navigator as { locks?: LockManagerLike } | undefined)?.locks;
 }
 

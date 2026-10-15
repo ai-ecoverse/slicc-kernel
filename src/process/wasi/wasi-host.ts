@@ -629,7 +629,7 @@ export class WasiHost {
     return {
       path_open: (
         dirfd: number,
-        _lookup: number,
+        lookup: number,
         p: number,
         l: number,
         oflags: number,
@@ -638,14 +638,35 @@ export class WasiHost {
         fdflags: number,
         out: number
       ) => {
-        const path = at(dirfd, p, l);
-        if (deviceOf(path)) this.interrupted?.();
-        const fresh = (oflags & OFLAGS.CREAT) !== 0 && !this.synthetic(path) && !o.fs.exists(path);
-        mem.view().setUint32(out, fds.open(path, oflags, rights, fdflags), true);
-        if (fresh) this.created(path, 0o666);
+        const follow = (lookup & LOOKUP_SYMLINK_FOLLOW) !== 0;
+        try {
+          const path = at(dirfd, p, l);
+          if (deviceOf(path)) this.interrupted?.();
+          const fresh =
+            (oflags & OFLAGS.CREAT) !== 0 && !this.synthetic(path) && !o.fs.exists(path);
+          mem.view().setUint32(out, fds.open(path, oflags, rights, fdflags), true);
+          if (fresh) this.created(path, 0o666);
+        } catch (err) {
+          if ((err as { code?: string }).code !== 'ENOENT') throw err;
+          const raw = mem.string(p, l);
+          const joined = raw.startsWith('/') ? raw : `${fds.dir(dirfd).path}/${raw}`;
+          const resolved = this.resolveForDev(joined, follow);
+          if (!resolved) throw err;
+          mem.view().setUint32(out, fds.open(resolved, oflags, rights, fdflags), true);
+        }
       },
-      path_filestat_get: (dirfd: number, lookup: number, p: number, l: number, out: number) =>
-        void this.writeFilestat(out, this.pathFilestat(at(dirfd, p, l), lookup)),
+      path_filestat_get: (dirfd: number, lookup: number, p: number, l: number, out: number) => {
+        try {
+          this.writeFilestat(out, this.pathFilestat(at(dirfd, p, l), lookup));
+        } catch (err) {
+          if ((err as { code?: string }).code !== 'ENOENT') throw err;
+          const raw = mem.string(p, l);
+          const joined = raw.startsWith('/') ? raw : `${fds.dir(dirfd).path}/${raw}`;
+          const resolved = this.resolveForDev(joined, (lookup & LOOKUP_SYMLINK_FOLLOW) !== 0);
+          if (!resolved) throw err;
+          this.writeFilestat(out, this.pathFilestat(resolved, lookup));
+        }
+      },
       path_filestat_set_times: (
         dirfd: number,
         lookup: number,
@@ -955,7 +976,12 @@ export class WasiHost {
     v.setUint8(out, filetype);
     v.setUint16(out + 2, flags, true);
 
-    const rights = seeks ? RIGHTS.ALL : RIGHTS.ALL & ~(RIGHTS.FD_SEEK | RIGHTS.FD_TELL);
+    let rights = seeks ? RIGHTS.ALL : RIGHTS.ALL & ~(RIGHTS.FD_SEEK | RIGHTS.FD_TELL);
+    if (e.type === 'kernel') {
+      const access = this.o.kernel.sys.access?.(fd);
+      if (access === 'read') rights &= ~RIGHTS.FD_WRITE;
+      else if (access === 'write') rights &= ~RIGHTS.FD_READ;
+    }
     v.setBigUint64(out + 8, rights, true);
     v.setBigUint64(out + 16, RIGHTS.ALL, true);
   }
@@ -1033,6 +1059,22 @@ export class WasiHost {
     );
   }
 
+  private resolveForDev(path: string, follow = true): string | undefined {
+    try {
+      if (!follow) {
+        const slash = path.lastIndexOf('/');
+        if (slash <= 0) return undefined;
+        const parent = physicalPath(this.o.fs, path.slice(0, slash));
+        const resolved = `${parent}/${path.slice(slash + 1)}`;
+        return resolved !== path && this.synthetic(resolved) ? resolved : undefined;
+      }
+      const resolved = physicalPath(this.o.fs, path);
+      return resolved !== path && this.synthetic(resolved) ? resolved : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   private pathFilestat(path: string, lookup: number): Filestat {
     if (this.synthetic(path)) {
       return this.local({
@@ -1044,7 +1086,19 @@ export class WasiHost {
     }
     this.fds.flushPath(path);
     const follow = (lookup & LOOKUP_SYMLINK_FOLLOW) !== 0;
-    return filestatOf(path, follow ? this.o.fs.stat(path) : this.o.fs.lstat(path));
+    try {
+      return filestatOf(path, follow ? this.o.fs.stat(path) : this.o.fs.lstat(path));
+    } catch (err) {
+      if ((err as { code?: string }).code !== 'ENOENT') throw err;
+      const resolved = this.resolveForDev(path, follow);
+      if (!resolved) throw err;
+      return this.local({
+        filetype: FILETYPE.CHARACTER_DEVICE,
+        size: 0n,
+        ino: pathInode(resolved),
+        mtimeNs: 0n,
+      });
+    }
   }
 
   private setTimes(path: string, atim: bigint, mtim: bigint, flags: number, follow = true): void {
