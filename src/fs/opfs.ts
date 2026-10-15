@@ -280,11 +280,10 @@ export class OpfsFs implements KernelFs {
 
   private counted: readonly string[] = [];
 
-  private async stamp(path: string): Promise<string> {
+  private async stamp(path: string, cached = false): Promise<string> {
     const paths = [path, '/'];
-    const [entry, root] = this.meta.fresh
-      ? await this.meta.fresh(paths)
-      : await this.meta.get(paths);
+    const [entry, root] =
+      this.meta.fresh && !cached ? await this.meta.fresh(paths) : await this.meta.get(paths);
     return `${entry?.writes ?? 0}:${root?.epoch ?? 0}`;
   }
 
@@ -833,12 +832,15 @@ export class OpfsFs implements KernelFs {
     );
   }
 
-  async readVersioned(path: string): Promise<{ bytes: Uint8Array; version: string }> {
+  async readVersioned(
+    path: string,
+    cached = false
+  ): Promise<{ bytes: Uint8Array; version: string }> {
     const handle = await this.existing(path);
     return this.retrying(
       path,
       async () => {
-        const stamp = await this.stamp(path);
+        const stamp = await this.stamp(path, cached);
         const file = await handle.getFile();
         const bytes = new Uint8Array(await file.arrayBuffer());
         return { bytes, version: `${file.lastModified}:${file.size}:${stamp}` };
@@ -847,12 +849,12 @@ export class OpfsFs implements KernelFs {
     );
   }
 
-  async version(path: string): Promise<string> {
+  async version(path: string, cached = false): Promise<string> {
     const handle = await this.existing(path);
     return this.retrying(
       path,
       async () => {
-        const stamp = await this.stamp(path);
+        const stamp = await this.stamp(path, cached);
         const file = await handle.getFile();
         return `${file.lastModified}:${file.size}:${stamp}`;
       },

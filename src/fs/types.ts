@@ -91,8 +91,8 @@ export interface KernelFs {
   unguarded?(): KernelFs;
   noLinks?(): KernelFs;
   mayChange?(path: string, follow: boolean, whole?: boolean): Promise<void>;
-  readVersioned?(path: string): Promise<{ bytes: Uint8Array; version: string }>;
-  version?(path: string): Promise<string>;
+  readVersioned?(path: string, cached?: boolean): Promise<{ bytes: Uint8Array; version: string }>;
+  version?(path: string, cached?: boolean): Promise<string>;
 }
 
 export type RangedOps = Required<Pick<KernelFs, 'pread' | 'pwrite' | 'truncate'>>;
