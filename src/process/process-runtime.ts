@@ -48,6 +48,7 @@ import {
   syncFsync,
   trackCloseOnExec,
   useDevFd,
+  useDevRemoval,
   useFileMmap,
   useMounts,
   useZeroDevices,
@@ -686,6 +687,7 @@ export async function runWasmProcess(
   atExit = () => streams.exiting();
   useMounts(running.FS, init.env, true);
   useZeroDevices(running.FS);
+  useDevRemoval(running.FS);
   useProcfs(running.FS as unknown as ProcFs, sys, init.pid);
   if (init.fork) restoreForkedStreams(running.FS, streams, init.fork.streams ?? []);
   else {
