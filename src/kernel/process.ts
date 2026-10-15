@@ -443,6 +443,14 @@ function clipboardLine(text: string): string {
   return out.length > 200 ? `${out.slice(0, 200)}…` : out;
 }
 
+let nextOpenKey = 1;
+
+const fileKeys = new WeakMap<object, string>();
+
+function identityKey(st: { ino?: number; dev?: number }, path: string): string {
+  return st.ino === undefined ? path : `${st.dev ?? 0}:${st.ino}`;
+}
+
 const DYING: SyncFsResult = { ok: false, errno: 'EINTR', message: 'the process is being killed' };
 
 const HOSTS_ONLY = new Resolver({ routes: new Routes() });
@@ -841,10 +849,12 @@ export class WasmProcess {
     return owner;
   }
 
+  private readonly pathKeys = new Map<string, string>();
+
   private async lockPath(target: LockTarget, want: number): Promise<string> {
     if (target.fd !== undefined) {
       const st = await this.fds.get(target.fd).file.stat?.();
-      if (!st || st.orphan) throw new KernelError('EBADF');
+      if (!st) throw new KernelError('EBADF');
       return st.path;
     }
     if (target.path === undefined) throw new KernelError('EINVAL');
@@ -860,11 +870,22 @@ export class WasmProcess {
   }
 
   private async lockKey(target: LockTarget, kind: LockKind | 'unlock' | 'close'): Promise<string> {
+    const file = target.fd === undefined ? undefined : this.fds.get(target.fd);
+    const known = file ? fileKeys.get(file) : this.pathKeys.get(target.path ?? '');
+    if (kind === 'close' && !file && target.path !== undefined) this.pathKeys.delete(target.path);
     const want = kind === 'read' ? R_OK : kind === 'write' ? W_OK : 0;
     const path = await this.lockPath(target, want);
-    const st = await this.options.fs.stat?.(path);
-    if (!st) throw new KernelError('ENOENT');
-    return st.ino === undefined ? path : `${st.dev ?? 0}:${st.ino}`;
+    if (known !== undefined) return known;
+    const st = await this.options.fs.stat?.(path).catch((err: unknown) => {
+      if (!file) throw err;
+      return undefined;
+    });
+    if (!st && !file) throw new KernelError('ENOENT');
+    const key = st ? identityKey(st, path) : `open:${nextOpenKey++}`;
+    if (kind === 'close') return key;
+    if (file) fileKeys.set(file, key);
+    else if (this.pathKeys.size < 4096) this.pathKeys.set(path, key);
+    return key;
   }
 
   private async dropRecordLocks(fd: number): Promise<void> {
