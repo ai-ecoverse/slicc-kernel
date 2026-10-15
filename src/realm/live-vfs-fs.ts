@@ -1,5 +1,6 @@
 import { permits, X_OK } from '../fs/access.ts';
-import { RangedFile } from '../fs/ranged.ts';
+import type { ChangeView } from '../fs/changes.ts';
+import { RangedFile, type RangedIo } from '../fs/ranged.ts';
 import { inodeOf } from '../fs/types.ts';
 import type { Cred } from '../kernel/cred.ts';
 import { wasiErrno } from '../process/wasi-errno.ts';
@@ -50,6 +51,7 @@ interface LiveNodeState {
 
   ranges?: boolean;
   ranged?: RangedFile;
+  seen?: number | undefined;
   handle?: number;
   created?: boolean;
 }
@@ -158,6 +160,7 @@ export interface LiveFsApi {
   nameTable?: (LiveFsNode | null)[] | null;
   hashRemoveNode?(node: LiveFsNode): void;
   lookupNode?(parent: LiveFsNode, name: string): LiveFsNode;
+  open?(...args: unknown[]): unknown;
 }
 
 export interface LiveVfsPlugin {
@@ -212,6 +215,43 @@ interface LiveOpsTables {
 }
 
 const EARLY_WHOLE_FILE = 64 * 1024;
+
+function needsLoad(s: LiveNodeState, view: ChangeView | undefined, path: () => string): boolean {
+  if (s.loaded && view && !s.dirty) {
+    const { now, changed } = view.changedSince(s.seen ?? 0, path());
+    s.seen = now;
+    if (changed) {
+      s.loaded = false;
+      s.stat = undefined;
+    }
+  }
+  if (s.loaded) return false;
+  s.seen = view?.now();
+  return true;
+}
+
+function rangedFileOf(
+  bridge: SyncFsPosixBridge,
+  call: <T>(fn: () => T) => T,
+  path: () => string,
+  io: RangedIo
+): RangedFile {
+  const seen = bridge.changes?.now();
+  const stat = () => call(() => bridge.stat(path()));
+  const st = stat();
+  const watch = bridge.changes && { view: bridge.changes, ino: st.ino, seen, stat };
+  return new RangedFile(io, path(), st.size, st.version, watch);
+}
+const O_APPEND = 0o2000;
+
+function unlessIo<T>(op: () => T): T | undefined {
+  try {
+    return op();
+  } catch (err) {
+    if ((err as { errno?: unknown }).errno === wasiErrno('EIO')) return undefined;
+    throw err;
+  }
+}
 
 const O_ACCMODE = 3;
 const O_TRUNC = 0o1000;
@@ -389,7 +429,7 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
 
   function ensureLoaded(node: LiveFsNode): void {
     const s = node.live;
-    if (s.loaded) return;
+    if (!needsLoad(s, bridgeOf(node).changes, () => liveNodePath(linked.holder(node)))) return;
     const bytes = call(() => fileIo(node).readFile(liveNodePath(linked.holder(node))));
     s.data = bytes;
     s.len = bytes.length;
@@ -409,8 +449,7 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
         file().pwrite(path(), at, bytes, transfer),
       truncate: (_: string, size: number) => file().truncate(path(), size),
     };
-    const st = call(() => bridge.stat(path()));
-    s.ranged = new RangedFile(io, path(), st.size, st.version);
+    s.ranged = rangedFileOf(bridge, call, path, io);
     return s.ranged;
   }
 
@@ -619,7 +658,9 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
         if (masked !== DEFAULT_DIR_PERM) metadataCall(() => bridge.chmod(path, masked));
       } else if (Fs.isFile(mode)) {
         call(() =>
-          bridge.create ? bridge.create(path, perm) : bridge.writeFile(path, new Uint8Array(0))
+          bridge.create
+            ? bridge.create(path, perm, (opening.get(h.Fs) as number) > 0)
+            : bridge.writeFile(path, new Uint8Array(0))
         );
       } else {
         throw new Fs.ErrnoError(wasiErrno('EPERM'));
@@ -700,6 +741,28 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
       return call(() => bridge.readlink(path));
     },
   };
+}
+
+function appendThrough(h: LiveHelpers, stream: LiveFsStream, bytes: () => Uint8Array): boolean {
+  const node = stream.node;
+  const s = node.live;
+  const append = pinnedIo(h.bridgeOf(node), s.handle).append;
+  if (!append) return false;
+  const body = bytes();
+  const at = liveNodePath(h.linked.holder(node));
+  const after = unlessIo(() => {
+    h.flushNode(node);
+    return h.call(() => append(at, body));
+  });
+  if (after === undefined) return false;
+  if (!s.ranged) {
+    s.data = undefined;
+    s.loaded = false;
+    s.len = 0;
+  }
+  s.stat = undefined;
+  stream.position = after - body.length;
+  return true;
 }
 
 function createStreamOps(h: LiveHelpers): LiveStreamOps {
@@ -841,6 +904,8 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
       const s = node.live;
       const end = position + length;
       if (s.maxFile !== undefined && end > s.maxFile) throw new Fs.ErrnoError(wasiErrno('EFBIG'));
+      const bytes = () => new Uint8Array(buffer.buffer, buffer.byteOffset + offset, length).slice();
+      if (stream.flags & O_APPEND && appendThrough(h, stream, bytes)) return length;
       const ranged = rangedOf(node);
       if (ranged) {
         const bytes = new Uint8Array(buffer.buffer, buffer.byteOffset + offset, length);
@@ -872,10 +937,27 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
   };
 }
 
+const opening = new WeakMap<LiveFsApi, number>();
+
+function countOpens(Fs: LiveFsApi): void {
+  const { open } = Fs;
+  if (typeof open !== 'function' || opening.has(Fs)) return;
+  opening.set(Fs, 0);
+  Fs.open = function (this: unknown, ...args: unknown[]) {
+    opening.set(Fs, (opening.get(Fs) ?? 0) + 1);
+    try {
+      return open.apply(this, args);
+    } finally {
+      opening.set(Fs, (opening.get(Fs) ?? 1) - 1);
+    }
+  };
+}
+
 export function createLiveVfsPlugin(Fs: LiveFsApi): LiveVfsPlugin {
   const mounts = new Set<LiveFsMount>();
   const ops: LiveOpsTables = {};
   const h = createHelpers(Fs, ops);
+  countOpens(Fs);
   const nodeOps = createNodeOps(h);
   const streamOps = createStreamOps(h);
   ops.node = nodeOps;
@@ -1121,6 +1203,31 @@ function idOf(value: number): number | undefined {
   return value === -1 || value === 0xffffffff ? undefined : value >>> 0;
 }
 
+function chownHeld(
+  Fs: LiveChownFs,
+  node: LiveFsNode,
+  s: LiveNodeState,
+  uid: number,
+  gid: number
+): void {
+  const bridge = node.mount.opts.bridge as SyncFsPosixBridge;
+  const handle = s.handle as number;
+  try {
+    bridge.chown?.(liveNodePath(node), idOf(uid), idOf(gid), false, handle);
+  } catch (err) {
+    throw toErrno(Fs, err);
+  }
+  if (node.parent?.live) node.parent.live.listed = undefined;
+  if (!s.orphan) {
+    s.stat = undefined;
+    return;
+  }
+  try {
+    const st = bridge.keptStat?.(handle);
+    if (st && s.stat) s.stat = { ...s.stat, uid: st.uid, gid: st.gid, mode: st.mode };
+  } catch {}
+}
+
 export function useLiveChown(Fs: LiveChownFs): void {
   const chown = Fs.chown?.bind(Fs);
   if (!chown) return;
@@ -1141,8 +1248,10 @@ export function useLiveChown(Fs: LiveChownFs): void {
   if (!Fs.fchown || !getStreamChecked) return;
   Fs.fchown = (fd, uid, gid) => {
     const stream = getStreamChecked.call(Fs, fd);
-    const live = (stream.node as LiveFsNode).live !== undefined;
-    const target = live || stream.path === undefined ? stream.node : stream.path;
+    const node = stream.node as LiveFsNode;
+    const s = node.live;
+    if (s?.handle !== undefined && (!s.orphan || s.kept)) return chownHeld(Fs, node, s, uid, gid);
+    const target = s !== undefined || stream.path === undefined ? stream.node : stream.path;
     (Fs.chown as NonNullable<LiveChownFs['chown']>)(target, uid, gid);
   };
 }

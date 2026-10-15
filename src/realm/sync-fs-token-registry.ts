@@ -5,6 +5,7 @@ import type { Cred } from '../kernel/cred.ts';
 
 export interface SyncFsTokenEntry {
   fs: KernelFs;
+  noLinks?: KernelFs;
   cwd: string;
   statfs?: (path: string) => Promise<{ quota: number; usage: number } | undefined>;
   hold?: (
@@ -28,6 +29,12 @@ export interface SyncFsTokenEntry {
   created?: Created;
   holdsKept?: (path: string) => Promise<boolean>;
   fresh?: (path: string) => void;
+  source?: SourceCheck;
+}
+
+export interface SourceCheck {
+  read(path: string, plain: () => Promise<Uint8Array>): Promise<Uint8Array>;
+  open(path: string, real?: string): Promise<void>;
 }
 
 const registry = new Map<string, SyncFsTokenEntry>();

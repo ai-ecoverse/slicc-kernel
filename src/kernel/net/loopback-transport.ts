@@ -251,6 +251,9 @@ export class KernelLoopback {
       if (!upgraded || accept !== (await acceptFor(key))) {
         throw errno('EPROTO', 'the server did not accept the WebSocket key');
       }
+      if (fieldValues(head.headers, 'sec-websocket-extensions').length > 0) {
+        throw errno('EPROTO', 'the server offered an unsolicited extension');
+      }
       const protocol = fieldValues(head.headers, 'sec-websocket-protocol')[0] ?? '';
       return new LoopbackWebSocket(socket, incoming, protocol);
     } catch (err) {
@@ -368,7 +371,7 @@ class LoopbackWebSocket implements RealmWebSocket {
     reader: WsReader<true>,
     deliver: (message: RealmWebSocketMessage) => void
   ): Promise<void> {
-    let close: RealmWebSocketClose = { code: 1006, reason: '' };
+    let close: RealmWebSocketClose = { code: 1006, reason: '', wasClean: false };
     try {
       for (;;) {
         await this.space();
@@ -378,14 +381,14 @@ class LoopbackWebSocket implements RealmWebSocket {
         else if (event.kind === 'binary') deliver(event.bytes);
         else if (event.kind === 'ping') this.write(clientFrame(OP_PONG, event.payload));
         else {
-          close = { code: event.code, reason: event.reason };
+          close = { code: event.code, reason: event.reason, wasClean: true };
           if (!this.sentClose) this.sendClose(event.code === 1005 ? 1000 : event.code, '');
           break;
         }
       }
     } catch (err) {
       if (err instanceof WsError) this.sendClose(err.code, err.message);
-      close = { code: err instanceof WsError ? err.code : 1006, reason: '' };
+      close = { code: 1006, reason: '', wasClean: false };
     } finally {
       const late = setTimeout(() => this.stop.abort(), CLOSE_WAIT_MS);
       await this.writes;

@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createNodeKernel, nodeTransport } from '../../dist/node.js';
+import { hostfsProxy } from './hostfs-proxy.mjs';
 
 const modules = new URL('../../node_modules/@ai-ecoverse/', import.meta.url);
 
@@ -304,6 +305,131 @@ test('pnpm installs globally as root and as a user with users off, report and en
         kernel.terminate();
       }
     });
+  }
+});
+
+async function toolPackage(name, said, replaces) {
+  const dir = await mkdtemp(join(tmpdir(), 'slicc-pkg-'));
+  await mkdir(join(dir, 'package'), { recursive: true });
+  const slicc = { abi: 'js', commands: { k5tool: { module: 'tool.mjs' } } };
+  const manifest = { name, version: '1.0.0', slicc: replaces ? { ...slicc, replaces } : slicc };
+  await writeFile(join(dir, 'package', 'package.json'), JSON.stringify(manifest));
+  await writeFile(
+    join(dir, 'package', 'tool.mjs'),
+    `export default async function main(ctx) { await ctx.write(1, "${said}\\n"); return 0; }\n`
+  );
+  execFileSync('tar', ['czf', join(dir, 'p.tgz'), '-C', dir, 'package']);
+  const bytes = await readFile(join(dir, 'p.tgz'));
+  await rm(dir, { recursive: true, force: true });
+  return bytes;
+}
+
+test('a package that names another in slicc.replaces wins their shared commands while installed', async (t) => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils', 'wasm-tls-engine', 'wasi-pnpm']) {
+    await install(kernel, name);
+  }
+  await kernel.users.add({ name: 'cone' });
+  await kernel.writeFile('/srv/plain.tgz', await toolPackage('k5-tool', 'plain'));
+  await kernel.writeFile('/srv/heif.tgz', await toolPackage('k5-tool-heif', 'heif', ['k5-tool']));
+  await kernel.writeFile('/srv/bad.tgz', await toolPackage('k5-tool-bad', 'bad', 'k5-tool'));
+  const script = [
+    'cd /tmp && mkdir app && cd app && echo \'{"name":"a","version":"1.0.0"}\' > package.json',
+    'pnpm add /srv/plain.tgz /srv/heif.tgz /srv/bad.tgz > /dev/null 2>&1; echo "add $?"',
+    'cp -rL node_modules/k5-tool node_modules/k5-tool-heif /node_modules/',
+    'k5tool',
+    'rm -r /node_modules/k5-tool-heif && cp -rL node_modules/k5-tool-bad /node_modules/ && k5tool',
+    'pnpm add -g /srv/heif.tgz > /dev/null 2>&1; echo "global $?"; k5tool',
+  ].join('\n');
+  const local = await kernel.run(['bash', '-c', script], { cwd: '/' });
+  assert.equal(local.stdout, 'add 0\nheif\nplain\nglobal 0\nplain\n', local.stderr);
+  const user = [
+    'pnpm add -g /srv/plain.tgz > /dev/null 2>&1; echo "plain $?"',
+    'pnpm add -g /srv/heif.tgz > /dev/null 2>&1; echo "heif $?"',
+    'k5tool',
+    'pnpm remove -g k5-tool-heif > /dev/null 2>&1; echo "removed $?"',
+    'k5tool',
+  ].join('\n');
+  const r = await kernel.run(['bash', '-c', user], { cwd: '/home/cone', user: 'cone' });
+  assert.equal(r.stdout, 'plain 0\nheif 0\nheif\nremoved 0\nplain\n', r.stderr);
+});
+
+test('a user with a non-canonical home runs a command from its global packages', async (t) => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
+  await kernel.users.add({ name: 'cone', home: '/srv/../srv/cone/' });
+  const pkg = '/srv/cone/.local/share/pnpm/global/5/g1/node_modules/k3-tool';
+  await kernel.writeFile(
+    `${pkg}/package.json`,
+    JSON.stringify({
+      name: 'k3-tool',
+      version: '1.0.0',
+      slicc: { abi: 'js', commands: { k3tool: { module: 'bin/tool.mjs' } } },
+    })
+  );
+  await kernel.writeFile(
+    `${pkg}/bin/tool.mjs`,
+    'export default async function main(ctx) { await ctx.write(1, "tool ran\\n"); return 0; }\n'
+  );
+  const r = await kernel.run(['bash', '-c', 'k3tool; command -v k3tool'], {
+    cwd: '/srv/cone',
+    user: 'cone',
+  });
+  assert.equal(r.stdout, 'tool ran\n/srv/cone/.local/share/pnpm/bin/k3tool\n', r.stderr);
+});
+
+test('a new process finds PNPM_HOME after nested mounts over its ancestors', async (t) => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
+  await kernel.mount({ type: 'tmpfs', source: 'none', target: '/usr/local' });
+  await kernel.mount({ type: 'tmpfs', source: 'none', target: '/usr' });
+  await kernel.run(['true'], { cwd: '/' });
+  await kernel.umount('/usr/local');
+  const r = await kernel.run(['stat', '-c', '%a %U', '/usr/local/share/pnpm'], { cwd: '/' });
+  assert.equal(r.stdout, '755 root\n', r.stderr);
+});
+
+test('a new process finds PNPM_HOME on a hostfs /usr whose host came up after the mount, or removed it', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'slicc-usr-'));
+  const proxy = await hostfsProxy({ folders: { usr: dir } });
+  let up = false;
+  const kernel = await createNodeKernel({
+    hostfs: async (source, { readonly }) => {
+      if (!up) throw Object.assign(new Error('link down'), { code: 'ENOTCONN' });
+      const response = await fetch(`${proxy.url}/api/hostfs/grant`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Bridge-Token': proxy.key },
+        body: JSON.stringify({ mount: source, readonly }),
+      });
+      return { url: proxy.url, ...(await response.json()) };
+    },
+  });
+  t.after(async () => {
+    kernel.terminate();
+    await proxy.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+  for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
+  const entry = await kernel.mount({ type: 'hostfs', source: 'usr', target: '/usr' });
+  assert.equal(entry.state, 'nomedium');
+  up = true;
+  while ((await kernel.mounts()).find((m) => m.target === '/usr')?.state !== 'ok') {
+    await new Promise((done) => setTimeout(done, 50));
+  }
+  const r = await kernel.run(['bash', '-c', 'test -d /usr/local/share/pnpm && echo there'], {
+    cwd: '/',
+  });
+  assert.equal(r.stdout, 'there\n', r.stderr);
+  assert.ok((await stat(join(dir, 'local/share/pnpm'))).isDirectory());
+  await rm(join(dir, 'local'), { recursive: true });
+  const until = Date.now() + 5000;
+  while (!(await stat(join(dir, 'local/share/pnpm')).catch(() => undefined))) {
+    assert.ok(Date.now() < until, 'PNPM_HOME is made again after the host removed it');
+    await kernel.run(['true'], { cwd: '/' });
+    await new Promise((done) => setTimeout(done, 50));
   }
 });
 

@@ -5,6 +5,7 @@ import { dispatchSyncFs } from '../realm/sync-fs-dispatch.ts';
 import {
   mintSyncFsToken,
   revokeSyncFsToken,
+  type SourceCheck,
   type SyncFsTokenEntry,
 } from '../realm/sync-fs-token-registry.ts';
 import type { SyncFsResult } from '../realm/sync-fs-wire.ts';
@@ -13,6 +14,9 @@ import {
   type SyncSabDispatchRequest,
 } from '../realm/sync-sab-responder.ts';
 import {
+  anyBlocked,
+  type BlockedMask,
+  loadBlocked,
   SAB_DEFAULT_WINDOW_BYTES,
   SAB_HEADER_BYTES,
   SAB_HEADER_I32,
@@ -23,6 +27,7 @@ import {
   SAB_I_SIGNALS,
   SAB_I_STOP,
   SAB_I_TIMERS,
+  storeBlocked,
 } from '../realm/sync-sab-wire.ts';
 import type { ChildForker, ChildSpawner } from './children.ts';
 import type { ClipboardBroker } from './clipboard.ts';
@@ -72,13 +77,15 @@ export interface WasmWorkerLike {
 
 export interface SpawnWasmOptions {
   pid: number;
+  changes?: SharedArrayBuffer;
   ignored?: number;
-  blocked?: number;
+  blocked?: BlockedMask;
   umask?: number;
   cred?: Cred;
   owners?: boolean;
   links?: number;
   fresh?: (path: string, umask: number) => void;
+  source?: SourceCheck;
   sealed?: SealedBroker;
   outputFilter?: (file: OpenFile) => OpenFile;
   clipboard?: ClipboardBroker;
@@ -95,6 +102,7 @@ export interface SpawnWasmOptions {
   cwd: string;
   fds: FdTable;
   fs: SyncFsTokenEntry['fs'];
+  noLinks: SyncFsTokenEntry['fs'];
   createWorker: () => WasmWorkerLike;
   onError?: (message: string) => void;
   spawner?: ChildSpawner;
@@ -135,7 +143,7 @@ export interface WasmProcessHandle {
   onState(listener: StateListener): void;
   memory(): number;
   ignoredSignals(fork?: boolean): number;
-  blockedSignals?(): number;
+  blockedSignals?(): BlockedMask;
   signalMasks?(): { ignored: number; caught: number };
   umask?(): number;
   cred?(): Cred;
@@ -246,6 +254,15 @@ function unblocked(header: Int32Array): number {
   return Atomics.load(header, SAB_I_SIGNALS) & ~Atomics.load(header, SAB_I_BLOCKED);
 }
 
+function threadCall(
+  process: WasmProcess,
+  req: SyncSabDispatchRequest,
+  cancelled: AbortSignal,
+  block: () => void
+): Promise<SyncFsResult> {
+  return isWasmSyscall(req) ? process.syscall(req, cancelled, block) : dispatchSyncFs(req);
+}
+
 function threadSignalsOf(sab: SharedArrayBuffer): ThreadSignals {
   return { header: new Int32Array(sab, 0, SAB_HEADER_I32), interrupt: new AbortController() };
 }
@@ -313,6 +330,7 @@ function processInit(
     sab,
     umask,
     cred,
+    ...(opts.changes ? { changes: opts.changes } : {}),
     ...(opts.owners ? { owners: true } : {}),
     ...(opts.links !== undefined ? { links: true } : {}),
     ...(opts.ppid !== undefined ? { ppid: opts.ppid } : {}),
@@ -355,7 +373,9 @@ function holdingToken(
     ...(opts.dac ? { dac: opts.dac, pid: opts.pid, created: caller.created } : {}),
     ...(opts.links !== undefined ? { links: opts.links } : {}),
     ...(opts.fresh ? { fresh: (path: string) => opts.fresh?.(path, caller.umask()) } : {}),
+    ...(opts.source ? { source: opts.source } : {}),
     fs: opts.fs,
+    noLinks: opts.noLinks,
     cwd: opts.cwd,
     ...(opts.statfs ? { statfs: opts.statfs } : {}),
     hold: (path, on, open, real, handle) => holds.hold(path, on, open, real, handle),
@@ -390,12 +410,15 @@ function processOptions(
     ...(opts.outputFilter ? { outputFilter: opts.outputFilter } : {}),
     ...(opts.clipboard ? { clipboard: opts.clipboard, ...clipboardName(opts) } : {}),
     ...(opts.readonlyAt ? { readonlyAt: opts.readonlyAt } : {}),
+    ...(opts.source ? { source: opts.source } : {}),
+    noLinks: opts.noLinks,
     ...(opts.dac ? { guard: { dac: opts.dac, fs: opts.fs, created, ...linksOf(opts) } } : {}),
     ...(opts.identity ? { identity: opts.identity } : {}),
     ...(opts.onSyscall ? { onSyscall: opts.onSyscall } : {}),
     ...(opts.settling ? { settling: opts.settling } : {}),
     spawner: opts.spawner,
     forker: opts.forker,
+    ...(opts.fork?.dl ? { dl: opts.fork.dl } : {}),
     fs: opts.fs,
     kill: opts.kill,
     ...(opts.writesBack ? { writesBack: opts.writesBack } : {}),
@@ -458,8 +481,8 @@ function threadInit(
 export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
   const sab = new SharedArrayBuffer(SAB_HEADER_BYTES + SAB_DEFAULT_WINDOW_BYTES);
   const header = new Int32Array(sab, 0, SAB_HEADER_I32);
-  if (opts.blocked && opts.program.abi === 'wasi')
-    Atomics.store(header, SAB_I_BLOCKED, opts.blocked);
+  const blocked = opts.fork?.wasi?.blocked ?? opts.blocked;
+  if (blocked && anyBlocked(blocked) && opts.program.abi === 'wasi') storeBlocked(header, blocked);
   const threadSignals = new Map<number, ThreadSignals>();
   const created = new Created();
   const process: WasmProcess = new WasmProcess(
@@ -477,7 +500,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
               exitNow: (code: number) => exitNow(code),
               exitSignal: (sig: number) => queueMicrotask(() => finish(128 + sig, sig)),
             }
-          : {}),
+          : { exitSignal: (sig: number) => terminate(128 + sig, sig) }),
       },
       created
     )
@@ -496,8 +519,10 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
   process.keptHandle = (handle) => holds.keptFor(handle)?.hidden;
   const worker = opts.createWorker();
   const dying = new Dying();
-  const dispatch = (req: SyncSabDispatchRequest): Promise<SyncFsResult> =>
-    dying.serving(() => (isWasmSyscall(req) ? process.syscall(req) : dispatchSyncFs(req)));
+  const dispatch = (req: SyncSabDispatchRequest, block?: () => void): Promise<SyncFsResult> =>
+    dying.serving(() =>
+      isWasmSyscall(req) ? process.syscall(req, undefined, block) : dispatchSyncFs(req)
+    );
   const clocks = new ProcessClocks(sab, opts.program.abi !== 'js', process);
   const responder = attachSyncSabResponder(worker, sab, token, {
     dispatch: clocks.timed(undefined, dispatch),
@@ -570,12 +595,10 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     const tsab = new SharedArrayBuffer(SAB_HEADER_BYTES + SAB_DEFAULT_WINDOW_BYTES);
     const tw = opts.createWorker();
     const tsignals = threadSignalsOf(tsab);
-    if (thread.blocked) Atomics.store(tsignals.header, SAB_I_BLOCKED, thread.blocked);
+    if (thread.blocked) storeBlocked(tsignals.header, thread.blocked);
     threadSignals.set(thread.tid, tsignals);
-    const tdispatch = (req: SyncSabDispatchRequest): Promise<SyncFsResult> =>
-      dying.serving(() =>
-        isWasmSyscall(req) ? process.syscall(req, threadCancel(tsignals)) : dispatchSyncFs(req)
-      );
+    const tdispatch = (req: SyncSabDispatchRequest, block: () => void) =>
+      dying.serving(() => threadCall(process, req, threadCancel(tsignals), block));
     const tresponder = attachSyncSabResponder(tw, tsab, token, {
       dispatch: clocks.timed(clocks.thread(thread.tid, tsab), tdispatch),
     });
@@ -601,11 +624,12 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     transferOf(opts, lane?.lane)
   );
 
-  const signal = (sig: number): void => {
-    if (process.signal(sig) !== 'terminate') return;
-    const code = sig === SIG.KILL ? 137 : 128 + sig;
+  const terminate = (code: number, sig: number): void => {
     if (opts.program.abi !== 'wasi' || done) finish(code, sig);
     else dying.start(code, sig, header, process, () => finish(code, sig));
+  };
+  const signal = (sig: number): void => {
+    if (process.signal(sig) === 'terminate') terminate(sig === SIG.KILL ? 137 : 128 + sig, sig);
   };
   const kill = (code = 137): void =>
     finish(code, code > 128 && code < 160 ? code - 128 : undefined);
@@ -618,7 +642,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     onState: (listener) => process.onState(listener),
     memory: () => Atomics.load(header, SAB_I_MEMORY) * 65536,
     ignoredSignals: (fork) => process.inheritable(fork),
-    blockedSignals: () => (opts.program.abi === 'wasi' ? Atomics.load(header, SAB_I_BLOCKED) : 0),
+    blockedSignals: () => (opts.program.abi === 'wasi' ? loadBlocked(header) : [0, 0]),
     signalMasks: () => process.signalMasks(),
     umask: () => process.umask,
     cred: () => copyCred(process.cred),

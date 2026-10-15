@@ -1,4 +1,4 @@
-import { permOf, R_OK, trustedLink, W_OK } from '../fs/access.ts';
+import { permOf, R_OK, trustedLink, W_OK, walk } from '../fs/access.ts';
 import {
   chmodMode,
   deny,
@@ -14,9 +14,9 @@ import {
   removable,
   renamable,
   retimable,
-  searchable,
   writable,
 } from '../fs/dac.ts';
+import { devRemoval } from '../fs/dev-removal.ts';
 import { chownAs, ownerOf } from '../fs/owners.ts';
 import {
   type FsStat,
@@ -166,12 +166,13 @@ async function mkdirExclusive(entry: SyncFsTokenEntry, path: string, mode?: numb
 }
 
 async function chown(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest) {
+  const real = req.handle !== undefined ? await keptOr(entry, path, req.handle) : path;
   const cred = entry.cred?.();
   if (!cred) {
-    await (req.op === 'chown' ? entry.fs.stat(path) : entry.fs.lstat(path));
+    await (req.op === 'chown' ? entry.fs.stat(real) : entry.fs.lstat(real));
     return done;
   }
-  await chownAs(entry.fs, cred, path, {
+  await chownAs(entry.fs, cred, real, {
     ...(req.uid !== undefined ? { uid: req.uid } : {}),
     ...(req.gid !== undefined ? { gid: req.gid } : {}),
     follow: req.op === 'chown',
@@ -198,6 +199,11 @@ async function runMkdir(
   return done;
 }
 
+function readSource(entry: SyncFsTokenEntry, path: string): Promise<Uint8Array> {
+  const plain = () => entry.fs.readFileBuffer(path);
+  return entry.source ? entry.source.read(path, plain) : plain();
+}
+
 async function run(
   entry: SyncFsTokenEntry,
   path: string,
@@ -206,7 +212,7 @@ async function run(
   const { fs, cwd } = entry;
   switch (req.op) {
     case 'read':
-      return { ok: true, kind: 'bytes', bytes: await fs.readFileBuffer(path) };
+      return { ok: true, kind: 'bytes', bytes: await readSource(entry, path) };
     case 'write':
       await fs.writeFile(path, req.body ?? new Uint8Array(0), ownerFor(entry, 0o666));
       return done;
@@ -247,7 +253,7 @@ async function run(
       return done;
     case 'create':
       await createExclusive(fs, path, ownerFor(entry, req.mode ?? 0o666));
-      entry.created?.add(path);
+      if (req.opening) entry.created?.add(path);
       entry.fresh?.(path);
       return done;
     case 'readlink':
@@ -258,10 +264,10 @@ async function run(
       return done;
     }
     case 'utimes':
-      await fs.utimes(path, new Date(req.atimeMs ?? 0), new Date(req.mtimeMs ?? 0));
+      await fs.utimes(path, ...(await timesOf(entry, path, req)));
       return done;
     case 'lutimes':
-      await lutimesOf(fs, path, new Date(req.atimeMs ?? 0), new Date(req.mtimeMs ?? 0));
+      await lutimesOf(fs, path, ...(await timesOf(entry, path, req)));
       return done;
     case 'chown':
     case 'lchown':
@@ -270,9 +276,27 @@ async function run(
     case 'pwrite':
     case 'truncate':
       return ranged(fs, path, req);
+    case 'append':
+      return json(await appended(fs, path, req.body ?? new Uint8Array(0)));
     default:
       return { ok: false, errno: 'EINVAL', message: `sync-fs: unknown op '${req.op as string}'` };
   }
+}
+
+async function timesOf(
+  entry: SyncFsTokenEntry,
+  path: string,
+  req: SyncFsRequest
+): Promise<[Date, Date]> {
+  const given: [Date, Date] = [new Date(req.atimeMs ?? 0), new Date(req.mtimeMs ?? 0)];
+  const g = req.now === true ? guardOf(entry) : undefined;
+  if (!g || g.cred.euid === 0) return given;
+  const look = req.op === 'lutimes' ? entry.fs.lstat : entry.fs.stat;
+  const st = await look.call(entry.fs, path).catch(() => undefined);
+  if (!st || (st.uid ?? 0) === g.cred.euid) return given;
+  const now = new Date();
+  const kept = (ms: number | undefined, stored: Date) => (ms === stored.getTime() ? stored : now);
+  return [kept(req.atimeMs, st.atime), kept(req.mtimeMs, st.mtime)];
 }
 
 export function guardOf(entry: SyncFsTokenEntry): Guard | undefined {
@@ -286,41 +310,94 @@ const FOLLOWING = new Set<SyncFsOp>(['exists', 'stat', 'chown', 'statfs']);
 const LOOKS = new Set<SyncFsOp>(['exists', 'stat', 'lstat']);
 const NOT_FOLLOWING = new Set<SyncFsOp>(['lstat', 'readlink', 'lchown']);
 
-async function guard(g: Guard, path: string, req: SyncFsRequest, cwd: string): Promise<void> {
+async function walkSafe(g: Guard, path: string, follow: boolean): Promise<string> {
+  try {
+    const walked = await walk(g.fs, g.cred, path, follow, g.links);
+    return walked.path;
+  } catch {
+    return path;
+  }
+}
+
+interface GuardPaths {
+  path: string;
+  arg2?: string;
+}
+
+async function guard(
+  g: Guard,
+  path: string,
+  req: SyncFsRequest,
+  cwd: string
+): Promise<GuardPaths | undefined> {
   const { op } = req;
-  if (FOLLOWING.has(op) || NOT_FOLLOWING.has(op)) return searchable(g, op, path, FOLLOWING.has(op));
+  if (FOLLOWING.has(op) || NOT_FOLLOWING.has(op)) {
+    const walked = await need(g, op, path, 0, { follow: FOLLOWING.has(op) });
+    return { path: walked.path };
+  }
   const other = () => g.fs.resolvePath(cwd, req.arg2 ?? '');
   switch (op) {
     case 'readdir':
-    case 'readdir-stat':
-      return listable(g, op, path);
-    case 'mkdir':
-      return makeIn(g, op, path);
+    case 'readdir-stat': {
+      await listable(g, op, path);
+      const w = await walkSafe(g, path, true);
+      return { path: w };
+    }
+    case 'mkdir': {
+      await makeIn(g, op, path);
+      return { path: await walkSafe(g, path, false) };
+    }
     case 'create':
     case 'symlink':
-      return inParent(g, op, path);
+      await inParent(g, op, path);
+      return { path: await walkSafe(g, path, op === 'create') };
     case 'unlink':
-    case 'rmdir':
-      return inParent(g, op, path, true);
-    case 'rm':
-      return removable(g, op, path);
-    case 'rename':
-      return renamable(g, path, other());
-    case 'link':
-      return linkable(g, path, other(), req.mode === 1);
+    case 'rmdir': {
+      await inParent(g, op, path, true);
+      const w = await walkSafe(g, path, false);
+      return { path: w };
+    }
+    case 'rm': {
+      await removable(g, op, path);
+      const w = await walkSafe(g, path, false);
+      return { path: w };
+    }
+    case 'rename': {
+      const to = other();
+      await renamable(g, path, to);
+      const fromWalked = await walkSafe(g, path, false);
+      const toWalked = await walkSafe(g, to, false);
+      return { path: fromWalked, arg2: toWalked };
+    }
+    case 'link': {
+      const to = other();
+      const follow = req.mode === 1;
+      await linkable(g, path, to, follow);
+      const fromWalked = await walkSafe(g, path, follow);
+      const toWalked = await walkSafe(g, to, false);
+      return { path: fromWalked, arg2: toWalked };
+    }
     case 'utimes':
-    case 'lutimes':
-      return retimable(g, op, path, req.now === true);
+    case 'lutimes': {
+      await retimable(g, op, path, req.now === true);
+      const follow = op === 'utimes';
+      const w = await walkSafe(g, path, follow);
+      return { path: w };
+    }
     case 'read':
     case 'pread':
-      return req.handle === undefined ? readable(g, op, path) : undefined;
+      if (req.handle === undefined) await readable(g, op, path);
+      return { path: await walkSafe(g, path, true) };
     case 'pwrite':
+    case 'append':
     case 'truncate':
-      return req.handle === undefined ? fileWritable(g, op, path) : undefined;
+      if (req.handle === undefined) await fileWritable(g, op, path);
+      return { path: await walkSafe(g, path, true) };
     case 'write':
-      return req.handle === undefined && req.mode !== 1 ? writable(g, op, path) : undefined;
+      if (req.handle === undefined && req.mode !== 1) await writable(g, op, path);
+      return { path: await walkSafe(g, path, true) };
     default:
-      return undefined;
+      return { path: await walkSafe(g, path, true) };
   }
 }
 
@@ -339,6 +416,7 @@ async function holdOp(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest)
   if (on && open) {
     await opening(entry, path, mode);
     const real = await entry.fs.realpath?.(path, true).catch(() => path);
+    await entry.source?.open(path, real);
     return json(entry.hold?.(path, on, open, real) ?? null);
   }
   entry.hold?.(path, on, open, undefined, req.handle);
@@ -378,7 +456,7 @@ const CHANGING = new Set<SyncFsOp>([
   'lchown',
 ]);
 
-const CONTENT = new Set<SyncFsOp>(['write', 'pwrite', 'truncate']);
+const CONTENT = new Set<SyncFsOp>(['write', 'pwrite', 'append', 'truncate']);
 
 const REMOVING = new Set<SyncFsOp>(['unlink', 'rmdir', 'rm', 'rename']);
 
@@ -396,17 +474,22 @@ async function mayChange(entry: SyncFsTokenEntry, path: string, req: SyncFsReque
   }
 }
 
-async function guarded(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest) {
+async function guarded(
+  entry: SyncFsTokenEntry,
+  path: string,
+  req: SyncFsRequest
+): Promise<{ refused: SyncFsResult } | { paths?: GuardPaths }> {
   const g = guardOf(entry);
-  if (!g) return undefined;
-  if (LOOKS.has(req.op) && (await entry.holdsKept?.(path))) return undefined;
+  if (!g) return {};
+  if (LOOKS.has(req.op) && (await entry.holdsKept?.(path))) return {};
   try {
     await mayChange(entry, path, req);
-    await guard(g, path, req, entry.cwd);
-    return undefined;
+    const paths = await guard(g, path, req, entry.cwd);
+    return { paths };
   } catch (err) {
     const refusal = (err as { code?: unknown }).code === 'EACCES';
-    return req.op === 'exists' && refusal ? json(false) : toErrno(err);
+    const refused = req.op === 'exists' && refusal ? json(false) : toErrno(err);
+    return { refused };
   }
 }
 
@@ -420,6 +503,32 @@ async function createExclusive(fs: KernelFs, path: string, owner?: NewOwner): Pr
   )
     throw syncError('EEXIST', path);
   await fs.writeFile(path, new Uint8Array(0), owner);
+}
+
+const appending = new Map<string, Promise<unknown>>();
+
+async function appended(fs: KernelFs, path: string, body: Uint8Array): Promise<number> {
+  const key = (await fs.realpath?.(path, true).catch(() => undefined)) ?? path;
+  const before = appending.get(key) ?? Promise.resolve();
+  const run = before.then(async () => {
+    if (fs.append) return fs.append(path, body);
+    const size = (await fs.stat(path)).size;
+    const ops = rangedOps(fs);
+    if (ops) await ops.pwrite(path, size, body, true);
+    else {
+      const whole = new Uint8Array(size + body.length);
+      whole.set(await fs.readFileBuffer(path));
+      whole.set(body, size);
+      await fs.writeFile(path, whole);
+    }
+    return size + body.length;
+  });
+  const settled = run.catch(() => undefined);
+  appending.set(key, settled);
+  void settled.then(() => {
+    if (appending.get(key) === settled) appending.delete(key);
+  });
+  return run;
 }
 
 async function ranged(fs: KernelFs, path: string, req: SyncFsRequest): Promise<SyncFsResult> {
@@ -437,7 +546,8 @@ async function ranged(fs: KernelFs, path: string, req: SyncFsRequest): Promise<S
   return done;
 }
 
-const UNLINKED_OPS = new Set<SyncFsOp>(['read', 'pread', 'pwrite', 'truncate']);
+const CHOWN_OPS = new Set<SyncFsOp>(['chown', 'lchown']);
+const UNLINKED_OPS = new Set<SyncFsOp>(['read', 'pread', 'pwrite', 'append', 'truncate']);
 const OWN_OPS = new Set<SyncFsOp>(['rm', 'unlink', 'rmdir', 'rename', 'link']);
 const TWO_PATHS = new Set<SyncFsOp>(['rename', 'link']);
 const UNLINKING_OPS = new Set<SyncFsOp>(['rm', 'unlink', 'rename']);
@@ -522,7 +632,7 @@ async function rmPermitted(
   const st = await entry.fs.lstat(path).catch(() => undefined);
   if (!st?.isDirectory) return refused;
   const unlisted = await guarded(entry, path, { ...req, op: 'readdir' });
-  if (unlisted) return unlisted;
+  if ('refused' in unlisted) return unlisted.refused;
   const names = await entry.fs.readdir(path).catch(() => undefined);
   if (!names) return refused;
   let first: SyncFsResult | undefined;
@@ -545,28 +655,73 @@ async function rmPermitted(
   return await run(entry, path, req);
 }
 
+async function byHandle(
+  entry: SyncFsTokenEntry,
+  path: string,
+  req: SyncFsRequest
+): Promise<SyncFsResult | undefined> {
+  if (req.op === 'kept') return json(entry.keptFor?.(req.handle ?? -1) !== undefined);
+  if (req.op === 'stat' && req.handle !== undefined) return keptStat(entry, req);
+  if (CHOWN_OPS.has(req.op) && entry.keptFor?.(req.handle ?? -1)) return chown(entry, path, req);
+  return undefined;
+}
+
+interface Resolved {
+  path: string;
+  arg2?: string;
+  entry: SyncFsTokenEntry;
+}
+
+async function guardAndResolve(
+  entry: SyncFsTokenEntry,
+  path: string,
+  req: SyncFsRequest
+): Promise<SyncFsResult | Resolved> {
+  const result = await guarded(entry, path, req);
+  if ('refused' in result) return result.refused;
+  const { noLinks } = entry;
+  const { paths } = result;
+  if (entry.links === undefined || !noLinks || !paths) return { path, entry };
+  return {
+    path: paths.path,
+    ...(paths.arg2 ? { arg2: paths.arg2 } : {}),
+    entry: { ...entry, fs: noLinks },
+  };
+}
+
+const REMOVALS: ReadonlySet<SyncFsOp> = new Set<SyncFsOp>(['unlink', 'rmdir', 'rm']);
+
 async function dispatchOne(entry: SyncFsTokenEntry, req: SyncFsRequest): Promise<SyncFsResult> {
   const { fs, cwd } = entry;
   try {
     const path = fs.resolvePath(cwd, req.path);
-    if (req.op === 'kept') return json(entry.keptFor?.(req.handle ?? -1) !== undefined);
-    if (req.op === 'stat' && req.handle !== undefined) return await keptStat(entry, req);
+    const device = REMOVALS.has(req.op) ? devRemoval(path, entry.cred?.()) : undefined;
+    if (device) return { ok: false, errno: device, message: `${path}: a device entry stays` };
+    const held = await byHandle(entry, path, req);
+    if (held) return held;
     if (req.op === 'access') return await accessOp(entry, path, req);
     if (req.op === 'hold') return await holdOp(entry, path, req);
-    const refused = await guarded(entry, path, req);
-    if (refused && req.op === 'rm' && !refused.ok && DENIED.has(refused.errno)) {
-      return await rmPermitted(entry, path, req, refused);
+    const resolved = await guardAndResolve(entry, path, req);
+    if (!('entry' in resolved)) {
+      if (req.op === 'rm' && !resolved.ok && DENIED.has(resolved.errno))
+        return await rmPermitted(entry, path, req, resolved);
+      return resolved;
     }
-    if (refused) return refused;
-    if (req.op === 'statfs') return json((await usageAt(entry, path)) ?? (await storageUsage()));
-    if (entry.revoked?.(path)) return { ok: false, errno: 'EIO', message: `${path} was unmounted` };
+    const { path: resolvedPath, arg2: resolvedArg2, entry: opEntry } = resolved;
+    const opReq = resolvedArg2 ? { ...req, arg2: resolvedArg2 } : req;
+    if (req.op === 'statfs')
+      return json((await usageAt(entry, resolvedPath)) ?? (await storageUsage()));
+    if (entry.revoked?.(resolvedPath))
+      return { ok: false, errno: 'EIO', message: `${resolvedPath} was unmounted` };
     if ((req.op === 'write' && req.mode === 1) || UNLINKED_OPS.has(req.op)) {
-      const serve = async () => run(entry, await keptOr(entry, path, req.handle), req);
-      return await (entry.gate ? entry.gate(path, serve) : serve());
+      const serve = async () =>
+        run(opEntry, await keptOr(opEntry, resolvedPath, req.handle), opReq);
+      return await (entry.gate ? entry.gate(resolvedPath, serve) : serve());
     }
-    if (!entry.own || !OWN_OPS.has(req.op)) return await run(entry, path, req);
-    const target = TWO_PATHS.has(req.op) ? fs.resolvePath(cwd, req.arg2 ?? '') : path;
-    return await owned(entry, entry.own, req, path, target);
+    if (!entry.own || !OWN_OPS.has(req.op)) return await run(opEntry, resolvedPath, opReq);
+    const target =
+      resolvedArg2 ?? (TWO_PATHS.has(req.op) ? fs.resolvePath(cwd, req.arg2 ?? '') : resolvedPath);
+    return await owned(opEntry, entry.own, opReq, resolvedPath, target);
   } catch (err) {
     return toErrno(err);
   }

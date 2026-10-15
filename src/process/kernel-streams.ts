@@ -2,6 +2,7 @@ import type { HeldMeta, PollState } from '../kernel/fd-table.ts';
 import type { MountLine, ProcessListing } from '../kernel/proc-info.ts';
 import type { Termios } from '../kernel/tty.ts';
 import type { EmscriptenFsForHook } from '../realm/emscripten-vfs-hook.ts';
+import { useKernelFdMetadata } from './fd-metadata.ts';
 import { wasiErrno } from './wasi-errno.ts';
 
 const POLLIN = 0x001;
@@ -86,7 +87,7 @@ function sealedStat(minor = 250): object {
   const now = new Date();
   return {
     dev: 0x16,
-    ino: 1,
+    ino: minor === 251 ? 2 : 1,
     mode: 0o20666,
     nlink: 1,
     uid: 0,
@@ -105,6 +106,7 @@ const O_CREAT = 0o100;
 const O_EXCL = 0o200;
 const O_NOCTTY = 0o400;
 const O_TRUNC = 0o1000;
+const O_DIRECTORY = 0o200000;
 
 const KILLED_BY_SIGPIPE = 128 + 13;
 
@@ -174,6 +176,10 @@ export interface ProcessSys {
   access?(fd: number): 'read' | 'write' | undefined;
 
   size?(fd: number): number;
+  fdStat?(fd: number): object | undefined;
+  fdChmod?(fd: number, mode: number): void;
+  fdChown?(fd: number, uid: number | undefined, gid: number | undefined): void;
+  fdUtimes?(fd: number, atimeMs: number | null, mtimeMs: number | null, now: boolean): void;
 
   openTty?(name?: string): number;
   ttyNames?(): string[];
@@ -190,6 +196,7 @@ export interface ProcessSys {
 
   openSealed?(flags: number): number;
   openClipboard?(flags: number): number;
+  clipboardAbort?(fd: number): void;
   procList?(): ProcessListing;
   mountList?(): MountLine[];
 }
@@ -287,6 +294,14 @@ export interface TtyOwner {
 
 function nonblocking(stream: ProcessStream): { nonblock: true } | undefined {
   return (stream.flags & O_NONBLOCK) !== 0 ? { nonblock: true } : undefined;
+}
+
+function datesOf(real: object | undefined): Record<string, Date> {
+  const dates: Record<string, Date> = {};
+  for (const [key, value] of Object.entries(real ?? {}))
+    if (/^[amc]time$/.test(key) && (typeof value === 'string' || typeof value === 'number'))
+      dates[key] = new Date(value);
+  return dates;
 }
 
 export class KernelStreams {
@@ -538,13 +553,15 @@ export class KernelStreams {
   }
 
   sizeFromKernel(stream: ProcessStream, kfd: number): void {
-    const { size } = this.sys;
+    const { size, fdStat } = this.sys;
     if (!size) return;
     const node = stream.node;
-    this.describe(stream, `${stream.path ?? ''}:${++this.described}`, () => ({
-      ...node.node_ops?.getattr?.(node),
-      size: this.call(() => size.call(this.sys, kfd)),
-    }));
+    this.describe(stream, `${stream.path ?? ''}:${++this.described}`, () => {
+      const base = node.node_ops?.getattr?.(node);
+      const live = this.call(() => size.call(this.sys, kfd));
+      const real = fdStat && this.call(() => fdStat.call(this.sys, kfd));
+      return { ...base, ...real, ...datesOf(real), size: live };
+    });
   }
 
   describe(stream: ProcessStream, name: string, getattr: () => object): void {
@@ -564,6 +581,10 @@ export class KernelStreams {
         return getattr ? getattr() : original.call(fs, path, ...rest);
       };
     }
+  }
+
+  useKernelFdMetadata(): void {
+    useKernelFdMetadata(this.Fs, this.sys, this.call.bind(this));
   }
 
   useControllingTerminal(): void {
@@ -676,10 +697,17 @@ export class KernelStreams {
   ): ProcessStream | undefined {
     const { openClipboard } = this.sys;
     if (path !== CLIPBOARD_PATH || !openClipboard) return undefined;
+    if (flags & O_DIRECTORY) throw new this.Fs.ErrnoError(wasiErrno('ENOTDIR'));
     const kfd = this.call(() => openClipboard.call(this.sys, flags & 3));
-    const stream = this.vessel(open, kfd, { path, flags, mode }, false);
-    this.reportClose(kfd);
-    return stream;
+    try {
+      const stream = this.vessel(open, kfd, { path, flags, mode }, false);
+      this.reportClose(kfd);
+      return stream;
+    } catch (e) {
+      this.sys.clipboardAbort?.(kfd);
+      this.sys.close(kfd);
+      throw e;
+    }
   }
 
   private vessel(

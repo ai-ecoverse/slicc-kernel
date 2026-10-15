@@ -455,6 +455,7 @@ export class WasiFds {
     const { buffer } = e.file;
     try {
       buffer.flush();
+      this.reported.delete(buffer);
     } catch (err) {
       this.reported.add(buffer);
       this.drop(buffer);
@@ -533,6 +534,7 @@ export class WasiFds {
     for (const buffer of this.buffers.values()) {
       try {
         buffer.flush();
+        this.reported.delete(buffer);
       } catch (err) {
         if (!this.reported.has(buffer)) throw err;
       }
@@ -770,13 +772,24 @@ export class WasiFds {
     const made = !existing && this.createNew(path, oflags);
     const empty = made || (oflags & OFLAGS.TRUNC) !== 0;
     if (existing?.ranged) (this.fs as { invalidate?(): void }).invalidate?.();
+    const seen = this.fs.changes?.now();
     const st = existing?.ranged || !existing ? this.fs.stat(path) : existing;
     const ranged = st.ranged ? st.size : undefined;
     const asked =
       (want & 4 ? HOLD_READ : 0) | (want & 2 ? HOLD_WRITE : 0) | (made ? HOLD_CREATED : 0);
     const handle = this.fs.hold?.(path, true, true, undefined, this.fs.owners ? asked : 0);
     const io = handle !== undefined && this.fs.pinned ? this.fs.pinned(handle) : this.fs;
-    const buffer = new FileBuffer(io, path, empty, st.maxFile, ranged, st.version);
+    const view = this.fs.changes;
+    const watch = view && {
+      view,
+      ino: st.ino,
+      seen,
+      stat: (at: string) => {
+        (this.fs as { invalidate?(): void }).invalidate?.();
+        return this.fs.stat(at);
+      },
+    };
+    const buffer = new FileBuffer(io, path, empty, st.maxFile, ranged, st.version, watch);
     buffer.handle = handle;
     this.buffers.set(path, buffer);
     const id = this.identity(st);
@@ -816,7 +829,7 @@ export class WasiFds {
       return true;
     }
     try {
-      this.fs.create(path);
+      this.fs.create(path, undefined, true);
       return true;
     } catch (err) {
       if (oflags & OFLAGS.EXCL || (err as { code?: string }).code !== 'EEXIST') throw err;

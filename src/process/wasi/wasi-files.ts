@@ -1,6 +1,7 @@
-import { RangedFile } from '../../fs/ranged.ts';
+import { RangedFile, type RangedWatch } from '../../fs/ranged.ts';
 import type { DeviceAccess, KernelFdKind } from '../../kernel/fd-table.ts';
 import type {
+  ChownArgs,
   SyncFsBridgeStat,
   SyncFsFileIo,
   SyncFsPosixBridge,
@@ -30,6 +31,8 @@ export class FileBuffer {
   private readonly fs: SyncFsFileIo;
   private where: string;
   private readonly ranged: RangedFile | undefined;
+  private readonly watch: RangedWatch | undefined;
+  private seen = 0;
 
   maxFile: number | undefined;
   handle: number | undefined;
@@ -41,15 +44,18 @@ export class FileBuffer {
     empty: boolean,
     maxFile?: number,
     size?: number,
-    version?: string
+    version?: string,
+    watch?: RangedWatch
   ) {
     this.fs = fs;
     this.where = path;
     this.maxFile = maxFile;
     const { pread, pwrite, truncate } = fs;
+    this.watch = watch;
+    this.seen = watch?.seen ?? watch?.view.now() ?? 0;
     if (size !== undefined && pread && pwrite && truncate) {
       const io = { pread: pread.bind(fs), pwrite: pwrite.bind(fs), truncate: truncate.bind(fs) };
-      this.ranged = new RangedFile(io, path, size, version);
+      this.ranged = new RangedFile(io, path, size, version, watch);
       if (empty) this.truncate(0);
     } else if (empty) {
       this.data = new Uint8Array(0);
@@ -81,7 +87,14 @@ export class FileBuffer {
   }
 
   load(): Uint8Array {
+    const view = this.watch?.view;
+    if (this.data && view && !this.dirty) {
+      const { now, changed } = view.changedSince(this.seen, this.path);
+      this.seen = now;
+      if (changed) this.data = undefined;
+    }
     if (!this.data) {
+      this.seen = view?.now() ?? 0;
       this.data = this.fs.readFile(this.path);
       this.length = this.data.length;
     }
@@ -101,7 +114,7 @@ export class FileBuffer {
     return bytes.subarray(at, at + n);
   }
 
-  private fits(end: number): void {
+  fits(end: number): void {
     if (this.maxFile !== undefined && end > this.maxFile) throw new WasiError('EFBIG');
   }
 
@@ -123,6 +136,18 @@ export class FileBuffer {
     buf.set(bytes, at);
     this.length = Math.max(this.length, end);
     return bytes.length;
+  }
+
+  append(bytes: Uint8Array): number | undefined {
+    const { append } = this.fs;
+    if (!append || this.orphaned) return undefined;
+    this.flush();
+    const end = append.call(this.fs, this.path, bytes);
+    if (!this.ranged) {
+      this.data = undefined;
+      this.length = 0;
+    }
+    return end;
   }
 
   truncate(size: number): void {
@@ -217,6 +242,14 @@ export class LocalFile {
   }
 
   write(bytes: Uint8Array): number {
+    if (this.append && bytes.length > 0) {
+      this.buffer.fits(this.buffer.size() + bytes.length);
+      const end = this.buffer.append(bytes);
+      if (end !== undefined) {
+        this.offset = end;
+        return bytes.length;
+      }
+    }
     if (this.append) this.offset = this.buffer.size();
     const n = this.buffer.pwrite(bytes, this.offset);
     this.offset += n;
@@ -526,6 +559,7 @@ export function cachingBridge(
   };
   const entry = (p: string) => [p, p.slice(0, p.lastIndexOf('/')) || '/'];
   return {
+    ...(bridge.changes ? { changes: bridge.changes } : {}),
     readFile: (p) => bridge.readFile(p),
     readdir: (p) => bridge.readdir(p),
 
@@ -568,12 +602,15 @@ export function cachingBridge(
     ...(bridge.keptStat ? { keptStat: bridge.keptStat.bind(bridge) } : {}),
     ...(bridge.pinned ? { pinned: (handle: number) => pinnedIo(bridge, handle, rewriting) } : {}),
     ...(bridge.create
-      ? { create: (p: string) => mutating(() => bridge.create?.(p), ...entry(p)) }
+      ? {
+          create: (p: string, mode?: number, opening?: boolean) =>
+            mutating(() => bridge.create?.(p, mode, opening), ...entry(p)),
+        }
       : {}),
     ...(chown
       ? {
-          chown: (p: string, uid?: number, gid?: number, follow?: boolean) =>
-            rewriting(p, () => chown.call(bridge, p, uid, gid, follow)),
+          chown: (p: string, ...rest: ChownArgs) =>
+            rewriting(p, () => chown.call(bridge, p, ...rest)),
         }
       : {}),
     ...(bridge.pread && bridge.pwrite && bridge.truncate
@@ -582,6 +619,12 @@ export function cachingBridge(
           pwrite: (p: string, at: number, bytes: Uint8Array, transfer?: boolean) =>
             rewriting(p, () => bridge.pwrite?.(p, at, bytes, transfer)),
           truncate: (p: string, size: number) => rewriting(p, () => bridge.truncate?.(p, size)),
+        }
+      : {}),
+    ...(bridge.append
+      ? {
+          append: (p: string, bytes: Uint8Array) =>
+            rewriting(p, () => (bridge.append as NonNullable<typeof bridge.append>)(p, bytes)),
         }
       : {}),
     ...(bridge.owners ? { owners: true } : {}),
@@ -605,5 +648,11 @@ function pinnedIo(
     pread: (p, at, n, version) => pread(p, at, n, version),
     pwrite: (p, at, bytes, transfer) => rewriting(p, () => pwrite(p, at, bytes, transfer)),
     truncate: (p, size) => rewriting(p, () => truncate(p, size)),
+    ...(io.append
+      ? {
+          append: (p: string, bytes: Uint8Array) =>
+            rewriting(p, () => (io.append as NonNullable<typeof io.append>)(p, bytes)),
+        }
+      : {}),
   };
 }

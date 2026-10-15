@@ -100,7 +100,6 @@ export interface KernelFile {
 
   clipboard?: ClipboardChannel;
 
-  stat?(): Promise<{ size: number; path: string; orphan?: true }>;
   held?: true;
 
   heldMeta?: HeldMeta;
@@ -371,6 +370,18 @@ export class FdTable {
     void Promise.resolve(previous?.release()).catch(() => undefined);
   }
 
+  async replaceAt(fd: number, file: OpenFile): Promise<void> {
+    if (fd < 0 || fd >= FdTable.MAX_FDS) {
+      void Promise.resolve(file.release()).catch(() => undefined);
+      throw new KernelError('EBADF');
+    }
+    const previous = this.fds.get(fd);
+    this.fds.set(fd, file);
+    this.cloexec.delete(fd);
+    this.status.delete(fd);
+    await Promise.resolve(previous?.release()).catch(() => undefined);
+  }
+
   dup(fd: number, min = 0): number {
     return this.install(this.get(fd).retain(), min);
   }
@@ -378,6 +389,12 @@ export class FdTable {
   dup2(oldFd: number, newFd: number): number {
     const file = this.get(oldFd);
     if (oldFd !== newFd) this.installAt(newFd, file.retain());
+    return newFd;
+  }
+
+  async dup2Clipboard(oldFd: number, newFd: number): Promise<number> {
+    const file = this.get(oldFd);
+    if (oldFd !== newFd) await this.replaceAt(newFd, file.retain());
     return newFd;
   }
 

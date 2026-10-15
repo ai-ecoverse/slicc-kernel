@@ -14,6 +14,7 @@ import {
   redirectOf,
 } from '../fs/types.ts';
 import type { KeptFile, UnlinkHolder } from '../fs/unlinked.ts';
+import { view } from '../fs/view.ts';
 import { joinName, realDir, realTarget } from '../fs/walk.ts';
 import { DriverConnection, type DriverPortLike, errnoError } from './connection.ts';
 import type {
@@ -99,6 +100,16 @@ export function parseSize(text: string): number {
   const match = /^(\d+(?:\.\d+)?)\s*([kmgt]?)i?b?$/i.exec(text.trim());
   if (!match) throw errnoError('EINVAL', `not a size: ${text}`);
   return Math.floor(Number(match[1]) * (UNITS[(match[2] as string).toLowerCase()] as number));
+}
+
+function linkedTo(mount: Mount, path: string): (attr: DriverAttr | undefined) => boolean {
+  const own = mount.attrs.get(path)?.value;
+  const ino = own?.kind === 'directory' ? undefined : own?.ino;
+  return (attr) => {
+    if (!attr || attr.kind === 'directory') return false;
+    if (ino !== undefined) return attr.ino === ino;
+    return own?.kind !== 'directory' && (attr.nlink ?? 1) > 1;
+  };
 }
 
 const within = (path: string, target: string) =>
@@ -316,7 +327,7 @@ function statOf(attr: DriverAttr, path: string, mount: Mount): FsStat {
     size: attr.size,
     mode: attr.mode ?? fallback,
     mtime,
-    atime: mtime,
+    atime: attr.atime === undefined ? mtime : new Date(attr.atime),
     ctime: mtime,
     ino: attr.ino ?? inodeOf(path),
     ...(!inodeless(mount, attr) && attr.nlink !== undefined ? { nlink: attr.nlink } : {}),
@@ -616,10 +627,13 @@ export class MountTable {
 
   forget(mount: Mount, path: string): void {
     mount.epoch++;
-    for (const key of [...mount.attrs.keys()]) if (within(key, path)) mount.attrs.delete(key);
+    const linked = mount.caps.links ? linkedTo(mount, path) : () => false;
+    for (const [key, cached] of [...mount.attrs])
+      if (within(key, path) || linked(cached.value)) mount.attrs.delete(key);
     mount.lists.delete(path);
     mount.lists.delete(parentOf(path));
-    for (const key of [...mount.lists.keys()]) if (within(key, path)) mount.lists.delete(key);
+    for (const [key, cached] of [...mount.lists])
+      if (within(key, path) || cached.value.some((e) => linked(e.attr))) mount.lists.delete(key);
   }
 
   async getattr(mount: Mount, path: string, rel: string, settled = false): Promise<DriverAttr> {
@@ -676,13 +690,74 @@ function noteExtent(extents: Array<[number, number]>, from: number, to: number):
   } else extents.push([from, to]);
 }
 
+type Relinkable = (...args: unknown[]) => Promise<unknown>;
+
+const RELINKED: ReadonlyArray<readonly [string, readonly number[]]> = [
+  ['readFileBuffer', [0]],
+  ['writeFile', [0]],
+  ['pread', [0]],
+  ['pwrite', [0]],
+  ['truncate', [0]],
+  ['lstat', [0]],
+  ['stat', [0]],
+  ['readdir', [0]],
+  ['readdirStat', [0]],
+  ['mkdir', [0]],
+  ['rm', [0]],
+  ['rename', [0, 1]],
+  ['symlink', [1]],
+  ['readlink', [0]],
+  ['chown', [0]],
+  ['chmod', [0]],
+  ['utimes', [0]],
+  ['lutimes', [0]],
+];
+
 class MountFs implements KernelFs {
   private readonly table: MountTable;
   private readonly base: KernelFs;
+  private readonly rejectLinks: boolean;
 
-  constructor(table: MountTable, base: KernelFs) {
+  constructor(table: MountTable, base: KernelFs, rejectLinks = false) {
     this.table = table;
     this.base = base;
+    this.rejectLinks = rejectLinks;
+  }
+
+  static {
+    const proto = MountFs.prototype as unknown as Record<string, Relinkable>;
+    for (const [name, at] of RELINKED) {
+      const run = proto[name] as Relinkable;
+      proto[name] = async function (this: MountFs, ...args: unknown[]) {
+        try {
+          return await run.apply(this, args);
+        } catch (err) {
+          const moved = await this.relinked(err, args, at);
+          if (!moved) throw err;
+          return ((this as unknown as Record<string, Relinkable>)[name] as Relinkable)(...moved);
+        }
+      };
+    }
+  }
+
+  private async relinked(
+    err: unknown,
+    args: unknown[],
+    at: readonly number[]
+  ): Promise<unknown[] | undefined> {
+    if ((err as { code?: unknown } | null)?.code !== 'ENOTDIR') return undefined;
+    const moved = [...args];
+    let changed = false;
+    for (const i of at) {
+      const path = args[i];
+      if (typeof path !== 'string' || !this.at(path)) continue;
+      const named = await this.named(path).catch(() => undefined);
+      if (named === undefined || named === normalizePath(path)) continue;
+      if (this.rejectLinks) throw errnoError('ELOOP', path);
+      moved[i] = named;
+      changed = true;
+    }
+    return changed ? moved : undefined;
   }
 
   private at(path: string): Located | undefined {
@@ -746,6 +821,7 @@ class MountFs implements KernelFs {
       throw err;
     }
     if (attr.kind !== 'symlink') return real;
+    if (this.rejectLinks) throw errnoError('ELOOP', path);
     if (hops >= MAX_LINKS) throw errnoError('ELOOP', path);
     const target = (await found.mount.conn.call({ op: 'readlink', path: found.rel })) as string;
     return this.follow(this.base.resolvePath(parentOf(real), target), hops + 1, create);
@@ -1449,7 +1525,7 @@ class MountFs implements KernelFs {
         this.utimes(to as string, atime, mtime, n)
       );
     }
-    await this.setMtime(found, real, mtime);
+    await this.setTimes(found, real, atime, mtime);
   }
 
   async lutimes(path: string, atime: Date, mtime: Date, redirects = 0): Promise<void> {
@@ -1464,12 +1540,18 @@ class MountFs implements KernelFs {
     if (!found.mount.caps.linkTimes && (await this.lstat(real)).isSymbolicLink) {
       throw errnoError('EOPNOTSUPP', path);
     }
-    await this.setMtime(found, real, mtime);
+    await this.setTimes(found, real, atime, mtime);
   }
 
-  private async setMtime(found: Located, real: string, mtime: Date): Promise<void> {
+  private async setTimes(found: Located, real: string, atime: Date, mtime: Date): Promise<void> {
     this.writable(found.mount, real);
     this.table.forget(found.mount, real);
-    await found.mount.conn.call({ op: 'setattr', path: found.rel, mtime: mtime.getTime() });
+    const times = { mtime: mtime.getTime(), atime: atime.getTime() };
+    await found.mount.conn.call({ op: 'setattr', path: found.rel, ...times });
+  }
+
+  noLinks(): KernelFs {
+    const noLinkBase = (this.base.noLinks as () => KernelFs).call(this.base);
+    return view(this, { rejectLinks: true, base: noLinkBase }) as unknown as KernelFs;
   }
 }

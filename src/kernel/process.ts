@@ -1,17 +1,21 @@
-import { R_OK, W_OK } from '../fs/access.ts';
+import { R_OK, W_OK, walk } from '../fs/access.ts';
 import {
   type Created,
   type Dac,
   type Guard,
+  heldChmodMode,
+  heldRetimable,
   inParent,
   openable,
   TTY_MODE,
   ttyOpenable,
 } from '../fs/dac.ts';
-import type { KernelFs, NewOwner, Perm } from '../fs/types.ts';
+import { chownAs } from '../fs/owners.ts';
+import type { FsStat, KernelFs, NewOwner, Perm } from '../fs/types.ts';
 import type { MountCall } from '../mount/syscall.ts';
 import { inProc, ProcTree, procAlias } from '../process/wasi/wasi-procfs.ts';
 import type { LinkRecord } from '../process/wasi/wasix-linker.ts';
+import type { SourceCheck } from '../realm/sync-fs-token-registry.ts';
 import type { SyncFsResult } from '../realm/sync-fs-wire.ts';
 import type { SudoCall, SudoResult } from '../sudo.ts';
 import {
@@ -47,7 +51,7 @@ import { NO_TRANSPORT } from './net/network.ts';
 import { Resolver } from './net/resolver.ts';
 import { Routes } from './net/routes.ts';
 import type { MountLine, ProcessListing } from './proc-info.ts';
-import type { ForkState } from './protocol.ts';
+import type { DlState, ForkState } from './protocol.ts';
 import { PTY_OPS, type PtySyscall, type PtyTable, ptsNumber, ptySyscall } from './pty.ts';
 import { type RunRequest, runChild } from './run-child.ts';
 import type { SealedBroker, SealedCaller } from './sealed.ts';
@@ -113,7 +117,10 @@ export type WasmSyscall =
   | { op: 'fd-pread'; fd: number; offset: number; max: number }
   | { op: 'fd-pwrite'; fd: number; offset: number; body: Uint8Array }
   | { op: 'fd-resize'; fd: number; size: number }
-  | { op: 'fd-vfs-stat'; fd: number; identity?: boolean }
+  | { op: 'fd-vfs-stat'; fd: number; identity?: boolean; full?: boolean }
+  | { op: 'fd-chmod'; fd: number; mode: number }
+  | { op: 'fd-chown'; fd: number; uid?: number; gid?: number }
+  | { op: 'fd-utimes'; fd: number; atimeMs: number | null; mtimeMs: number | null; now?: boolean }
   | { op: 'fd-path-flush'; path: string }
   | { op: 'fd-path-unlinking'; path: string }
   | { op: 'fd-path-unlinked'; path: string }
@@ -168,6 +175,7 @@ export type WasmSyscall =
   | { op: 'fd-tty-owner'; name: string }
   | { op: 'fd-open-sealed'; flags: number }
   | { op: 'fd-open-clipboard'; flags: number }
+  | { op: 'fd-clipboard-abort'; fd: number }
   | { op: 'tty-get'; fd: number }
   | { op: 'tty-set'; fd: number; termios: Termios; flush?: boolean }
   | { op: 'tty-winsz'; fd: number }
@@ -268,6 +276,9 @@ type VfsSyscall = Extract<
       | 'fd-pwrite'
       | 'fd-resize'
       | 'fd-vfs-stat'
+      | 'fd-chmod'
+      | 'fd-chown'
+      | 'fd-utimes'
       | 'fd-path-flush'
       | 'fd-path-unlinking'
       | 'fd-path-unlinked'
@@ -281,7 +292,10 @@ function isVfsSyscall(req: FdSyscall): req is VfsSyscall {
     req.op === 'fd-pread' ||
     req.op === 'fd-pwrite' ||
     req.op === 'fd-resize' ||
-    req.op === 'fd-vfs-stat'
+    req.op === 'fd-vfs-stat' ||
+    req.op === 'fd-chmod' ||
+    req.op === 'fd-chown' ||
+    req.op === 'fd-utimes'
   );
 }
 
@@ -318,6 +332,9 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'fd-pwrite',
   'fd-resize',
   'fd-vfs-stat',
+  'fd-chmod',
+  'fd-chown',
+  'fd-utimes',
   'fd-path-flush',
   'fd-path-unlinking',
   'fd-path-unlinked',
@@ -348,6 +365,7 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'fd-tty-owner',
   'fd-open-sealed',
   'fd-open-clipboard',
+  'fd-clipboard-abort',
   'tty-get',
   'tty-set',
   'tty-winsz',
@@ -421,6 +439,8 @@ const HOSTS_ONLY = new Resolver({ routes: new Routes() });
 export interface WasmProcessOptions {
   ignored?: number;
 
+  source?: SourceCheck;
+
   umask?: number;
 
   cred?: Cred;
@@ -438,6 +458,8 @@ export interface WasmProcessOptions {
   readonlyAt?: (path: string) => boolean;
 
   guard?: { dac: Dac; fs: KernelFs; created?: Created; links?: number };
+
+  noLinks?: KernelFs;
 
   identity?: () => Promise<{ pid: number; ppid: number }>;
 
@@ -482,6 +504,8 @@ export interface WasmProcessOptions {
   pendingBits?: () => number;
 
   blockedBits?: () => number;
+
+  dl?: DlState;
 
   raise?: (sig: number) => void;
 
@@ -572,6 +596,7 @@ export class WasmProcess {
     this.nodes = options.nodes ?? new VfsNodes(options.fs);
     if (!options.nodes) options.openFiles?.add(this.nodes);
     this.children.onChildState = () => this.signal(SIG.CHLD);
+    this.seedDl(options.dl);
     this.children.onReap = (pid) => {
       this.deathSignals.delete(pid);
       options.onReap?.(pid);
@@ -705,7 +730,13 @@ export class WasmProcess {
     for (const listener of this.stateListeners) listener('continued', SIG.CONT);
   }
 
-  async syscall(req: WasmSyscall, cancelled?: AbortSignal): Promise<SyncFsResult> {
+  private readonly blocks = new WeakMap<AbortSignal, () => void>();
+
+  async syscall(
+    req: WasmSyscall,
+    cancelled?: AbortSignal,
+    block?: () => void
+  ): Promise<SyncFsResult> {
     this.options.onSyscall?.(req);
     for (;;) {
       await this.resumed;
@@ -715,6 +746,7 @@ export class WasmProcess {
       const forward = () => scope.abort();
       if (cancelled?.aborted) scope.abort();
       cancelled?.addEventListener('abort', forward, { once: true });
+      if (block) this.blocks.set(scope.signal, block);
       const result = await this.dispatch(req, scope.signal).finally(() => {
         cancelled?.removeEventListener('abort', forward);
         this.waiting.delete(scope.signal);
@@ -808,6 +840,7 @@ export class WasmProcess {
     }
     if (this.options.hasPending?.() || cancelled.aborted) throw new KernelError('EINTR');
     if (owing) this.waiting.add(cancelled);
+    if (owing) this.blocks.get(cancelled)?.();
     return this.cancelSignal(cancelled);
   }
 
@@ -857,7 +890,11 @@ export class WasmProcess {
     const stderr = this.fds.has(2) ? this.fds.get(2).file : undefined;
     if (!stderr?.write || stderr.clipboard) return;
     const line = `${name}: /dev/clipboard: ${clipboardLine(err.detail)}\n`;
-    await stderr.write(new TextEncoder().encode(line), AbortSignal.timeout(1000)).catch(() => 0);
+    const timeout = new Promise<0>((r) => setTimeout(() => r(0), 1000));
+    await Promise.race([
+      stderr.write(new TextEncoder().encode(line), AbortSignal.timeout(1000)).catch(() => 0),
+      timeout,
+    ]);
   }
 
   private async write(
@@ -895,16 +932,13 @@ export class WasmProcess {
     await refuseReadonly(this.options.fs, req.path, req.flags, req);
     if (this.writesAt(req)) await this.options.fs.mayChange?.(req.path, !req.exclusive);
     await this.mayOpen(req);
+    const marked = await this.markedPath(req);
+    await this.sourceOpen(marked === undefined ? req : { ...req, path: marked });
+    const fs = marked === undefined ? this.options.fs : (this.options.noLinks as KernelFs);
     const fd = this.fds.install(heldFile(), 3);
     try {
       const nodes = this.nodes;
-      const path = req.orphan
-        ? req.path
-        : req.exclusive
-          ? await nodes.entryKey(req.path)
-          : req.create
-            ? await nodes.targetKey(req.path)
-            : await this.keptOr(await nodes.targetKey(req.path), req.handle);
+      const path = await this.openPath(req, marked);
       if (inProc(path)) {
         this.fds.installAt(fd, await this.procFile(req, path));
         return fd;
@@ -914,23 +948,23 @@ export class WasmProcess {
       const plain = this.plainMode(req.mode);
       if (req.exclusive) {
         await nodes.createExclusive(path, this.newOwner(req.mode));
-        if (plain !== undefined) await this.options.fs.chmod?.(path, plain);
-        this.fds.installAt(fd, this.openVfsFile(open));
+        if (plain !== undefined) await fs.chmod?.(path, plain);
+        this.fds.installAt(fd, this.openVfsFile(open, undefined, fs));
       } else if (req.create) {
         await nodes.onEntry(path, async () => {
           const marks = this.options.owners || plain !== undefined;
-          const fresh = marks && !(await present(this.options.fs, path, true));
-          this.fds.installAt(fd, this.openVfsFile(open, await nodes.identify(path)));
+          const fresh = marks && !(await present(fs, path, true));
+          this.fds.installAt(fd, this.openVfsFile(open, await nodes.identify(path), fs));
           await this.fds.get(fd).file.stat?.();
-          if (fresh && plain !== undefined) await this.options.fs.chmod?.(path, plain);
+          if (fresh && plain !== undefined) await fs.chmod?.(path, plain);
           else if (fresh) {
-            await this.options.fs.chown?.(path, { ...this.newOwner(req.mode), kind: 'new' });
+            await fs.chown?.(path, { ...this.newOwner(req.mode), kind: 'new' });
           }
         });
       } else {
-        this.fds.installAt(fd, this.openVfsFile(open, await nodes.identify(path)));
+        this.fds.installAt(fd, this.openVfsFile(open, await nodes.identify(path), fs));
       }
-      if (req.existing && !(await present(this.options.fs, path, true))) {
+      if (req.existing && !(await present(fs, path, true))) {
         throw new KernelError('ENOENT');
       }
     } catch (err) {
@@ -977,6 +1011,35 @@ export class WasmProcess {
       req.create === true ||
       req.exclusive === true
     );
+  }
+
+  private async sourceOpen(req: Extract<FdSyscall, { op: 'fd-open-vfs' }>): Promise<void> {
+    const { source } = this.options;
+    const inherited = req.orphan || req.contents !== undefined || req.handle !== undefined;
+    if (!source || inherited || req.pin !== undefined || req.exclusive) return;
+    await source.open(req.path);
+  }
+
+  private async markedPath(
+    req: Extract<FdSyscall, { op: 'fd-open-vfs' }>
+  ): Promise<string | undefined> {
+    const { guard, noLinks } = this.options;
+    const inherited = req.orphan || req.contents !== undefined || req.handle !== undefined;
+    if (guard?.links === undefined || !noLinks || inherited || req.pin !== undefined)
+      return undefined;
+    return (await walk(guard.fs, this.cred, req.path, !req.exclusive, guard.links)).path;
+  }
+
+  private async openPath(
+    req: Extract<FdSyscall, { op: 'fd-open-vfs' }>,
+    marked: string | undefined
+  ): Promise<string> {
+    const nodes = this.nodes;
+    if (req.orphan) return req.path;
+    if (req.exclusive) return nodes.entryKey(marked ?? req.path);
+    if (marked !== undefined) return marked;
+    if (req.create) return nodes.targetKey(req.path);
+    return this.keptOr(await nodes.targetKey(req.path), req.handle);
   }
 
   private async mayOpen(req: Extract<FdSyscall, { op: 'fd-open-vfs' }>): Promise<void> {
@@ -1103,9 +1166,13 @@ export class WasmProcess {
     return memoryFile(tree.read(path), path, req.position);
   }
 
-  private openVfsFile(req: Extract<FdSyscall, { op: 'fd-open-vfs' }>, id?: string): OpenFile {
+  private openVfsFile(
+    req: Extract<FdSyscall, { op: 'fd-open-vfs' }>,
+    id?: string,
+    fs = this.options.fs
+  ): OpenFile {
     return vfsFile(
-      this.options.fs,
+      fs,
       {
         path: req.path,
         flags: req.flags,
@@ -1189,7 +1256,7 @@ export class WasmProcess {
         return { ok: true, kind: 'void' };
       case 'fd-renumber':
         if (req.from !== req.to) {
-          this.fds.dup2(req.from, req.to);
+          await this.fds.dup2Clipboard(req.from, req.to);
           if (!req.keep) await Promise.resolve(this.fds.close(req.from));
         }
         return { ok: true, kind: 'void' };
@@ -1201,6 +1268,11 @@ export class WasmProcess {
         return { ok: true, kind: 'json', json: this.openSealed(req.flags) };
       case 'fd-open-clipboard':
         return { ok: true, kind: 'json', json: await this.openClipboard(req.flags) };
+      case 'fd-clipboard-abort': {
+        const file = this.fds.get(req.fd);
+        file.file.clipboard?.abort();
+        return { ok: true, kind: 'void' };
+      }
       case 'fd-tty-owner':
         return { ok: true, kind: 'json', json: this.terminalByName(req.name).owner ?? null };
       case 'fd-select': {
@@ -1254,14 +1326,23 @@ export class WasmProcess {
       case 'fd-resize':
         await file.resize(req.size);
         return { ok: true, kind: 'void' };
-      case 'fd-vfs-stat':
-        return {
-          ok: true,
-          kind: 'json',
-          json: req.identity
-            ? await this.identified(file.stat.bind(file), file.known?.bind(file))
-            : await file.stat(),
-        };
+      case 'fd-vfs-stat': {
+        if (req.identity) {
+          return {
+            ok: true,
+            kind: 'json',
+            json: await this.identified(file.stat.bind(file), file.known?.bind(file)),
+          };
+        }
+        const vfs = await file.stat();
+        if (!req.full) return { ok: true, kind: 'json', json: vfs };
+        const st = await this.heldStat(vfs).catch(() => undefined);
+        return { ok: true, kind: 'json', json: { ...vfs, ...(st ? { stat: st } : {}) } };
+      }
+      case 'fd-chmod':
+      case 'fd-chown':
+      case 'fd-utimes':
+        return this.fdMetadata(await file.stat(), req);
     }
   }
 
@@ -1287,7 +1368,7 @@ export class WasmProcess {
   private async promote(req: Extract<WasmSyscall, { op: 'fd-promote' }>): Promise<void> {
     if (!this.fds.get(req.fd).file.held) throw new KernelError('EBADF');
     if (req.share !== undefined) {
-      this.fds.dup2(req.share, req.fd);
+      await this.fds.dup2Clipboard(req.share, req.fd);
       return;
     }
     if (req.path === undefined) throw new KernelError('EINVAL');
@@ -1318,6 +1399,54 @@ export class WasmProcess {
     if (this.fds.has(fd)) throw new KernelError('EBADF');
     this.fds.installAt(fd, heldFile(meta));
     return fd;
+  }
+
+  private heldPath(vfs: { path?: string; orphan?: boolean }): string {
+    if (!vfs.path) throw new KernelError('EBADF');
+    if (vfs.orphan) throw new KernelError('EOPNOTSUPP');
+    return vfs.path;
+  }
+
+  private heldFs(): Partial<KernelFs> {
+    return this.options.guard?.fs ?? (this.options.fs as Partial<KernelFs>);
+  }
+
+  private async heldStat(vfs: { path?: string; orphan?: boolean }): Promise<FsStat> {
+    const stat = this.heldFs().stat;
+    if (!stat) throw new KernelError('ENOSYS');
+    return stat.call(this.heldFs(), this.heldPath(vfs));
+  }
+
+  private async fdMetadata(
+    vfs: { path?: string; orphan?: boolean },
+    req: Extract<VfsSyscall, { op: 'fd-chmod' | 'fd-chown' | 'fd-utimes' }>
+  ): Promise<SyncFsResult> {
+    const path = this.heldPath(vfs);
+    const fs = this.heldFs();
+    const g = this.guarded();
+    if (req.op === 'fd-chown') {
+      const ids = {
+        ...(req.uid !== undefined ? { uid: req.uid } : {}),
+        ...(req.gid !== undefined ? { gid: req.gid } : {}),
+      };
+      if (!this.options.owners || !fs.chown || !fs.stat) await this.heldStat(vfs);
+      else await chownAs(fs as KernelFs, this.cred, path, { ...ids, follow: true });
+      return { ok: true, kind: 'void' };
+    }
+    const st = await this.heldStat(vfs);
+    if (req.op === 'fd-chmod') {
+      if (!fs.chmod) throw new KernelError('ENOSYS');
+      await fs.chmod(path, g ? heldChmodMode(g, path, st, req.mode) : req.mode);
+      return { ok: true, kind: 'void' };
+    }
+    if (!fs.utimes) throw new KernelError('ENOSYS');
+    if (g) heldRetimable(g, path, st, req.now === true);
+    const at = (ms: number | null, kept: Date) =>
+      ms === null ? kept : req.now ? new Date() : new Date(ms);
+    const atime = at(req.atimeMs, st.atime);
+    const mtime = at(req.mtimeMs, st.mtime);
+    await fs.utimes(path, atime, mtime);
+    return { ok: true, kind: 'void' };
   }
 
   private fdInfo(fd: number): FdInfo {
@@ -1447,7 +1576,7 @@ export class WasmProcess {
     switch (req.op) {
       case 'proc-fork':
         this.refuseIfPending(req.restart);
-        return { ok: true, kind: 'json', json: await this.children.fork(req.state) };
+        return { ok: true, kind: 'json', json: await this.children.fork(this.withDl(req.state)) };
       case 'proc-spawn':
         this.refuseIfPending(req.restart);
         return { ok: true, kind: 'json', json: await this.spawn(req) };
@@ -1464,6 +1593,7 @@ export class WasmProcess {
       case 'proc-identity':
         return { ok: true, kind: 'json', json: (await this.options.identity?.()) ?? null };
       case 'proc-exec': {
+        this.blocks.get(cancelled)?.();
         this.adoptExec(req.pid);
         this.options.jobs?.exec(this.pid, req.pid);
 
@@ -1559,7 +1689,10 @@ export class WasmProcess {
     const { file, argv, env, cwd, cred, caller } = answer.grant;
     const stdio = [{ fd: 0 }, { fd: 1 }, { fd: 2 }];
     return {
-      pid: await this.children.spawn({ file, argv, env, cwd }, stdio, [], { cred, caller }),
+      pid: await this.children.spawn({ file, argv, env, cwd, pgid: 0 }, stdio, [], {
+        cred,
+        caller,
+      }),
     };
   }
 
@@ -1596,6 +1729,22 @@ export class WasmProcess {
     free: [] as number[],
     live: new Set<number>(),
   };
+
+  private withDl(state: ForkState): ForkState {
+    if (this.dlLog.length === 0) return state;
+    const { next, handle, free, live } = this.closures;
+    const dl = { log: [...this.dlLog], next, handle, free: [...free], live: [...live] };
+    return { ...state, dl };
+  }
+
+  private seedDl(dl: DlState | undefined): void {
+    if (!dl) return;
+    this.dlLog.push(...dl.log);
+    this.closures.next = dl.next;
+    this.closures.handle = dl.handle;
+    this.closures.free.push(...dl.free);
+    for (const index of dl.live) this.closures.live.add(index);
+  }
 
   private allocateClosure(floor: number): number {
     const index = this.closures.free.pop() ?? Math.max(floor, this.closures.next);

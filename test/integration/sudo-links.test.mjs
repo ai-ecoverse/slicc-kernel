@@ -1,0 +1,157 @@
+import assert from 'node:assert/strict';
+import { readdir, readFile } from 'node:fs/promises';
+import { join, relative } from 'node:path';
+import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
+import { createNodeKernel } from '../../dist/node.js';
+
+const modules = new URL('../../node_modules/@ai-ecoverse/', import.meta.url);
+
+async function install(kernel, name) {
+  const base = new URL(`${name}/`, modules);
+  const entries = await readdir(base, { recursive: true, withFileTypes: true });
+  for (const entry of entries.filter((e) => e.isFile())) {
+    const file = join(entry.parentPath, entry.name);
+    await kernel.writeFile(
+      `/node_modules/@ai-ecoverse/${name}/${relative(fileURLToPath(base), file)}`,
+      await readFile(file)
+    );
+  }
+}
+
+const DRIVER = `
+const errno = (code) => Object.assign(new Error(code), { code });
+export default function () {
+  const modes = new Map([['/safe', 0o666], ['/target', 0o644]]);
+  const data = new Map([['/safe', new Uint8Array()], ['/target', new TextEncoder().encode('secret')]]);
+  const open = new Map();
+  let fh = 0;
+  let looked = 0;
+  let after = Infinity;
+  const swapped = () => looked >= after;
+  return {
+    capabilities: { attrTtl: 0, owners: true, chmod: true, symlinks: true, ranges: true },
+    handlers: {
+      async mount({ source }) {
+        after = Number(source);
+        return {};
+      },
+      async getattr(p) {
+        if (p === '/') return { kind: 'directory', size: 0, mtime: 0, mode: 0o755, uid: 0, gid: 0 };
+        if (p === '/l') {
+          const owner = swapped() ? 4242 : 0;
+          return { kind: 'symlink', size: 1, mtime: 0, mode: 0o777, uid: owner, gid: owner };
+        }
+        if (!modes.has(p)) throw errno('ENOENT');
+        if (p === '/safe') looked++;
+        return { kind: 'file', size: data.get(p).length, mtime: 0, mode: modes.get(p), uid: 0, gid: 0 };
+      },
+      async readdir() {
+        return [{ name: 'l', kind: 'symlink' }, { name: 'safe', kind: 'file' }, { name: 'target', kind: 'file' }];
+      },
+      async readlink(p) {
+        if (p !== '/l') throw errno('EINVAL');
+        return swapped() ? '/home/cone/h/target' : '/home/cone/h/safe';
+      },
+      async setattr(p, attr) {
+        if (!modes.has(p)) throw errno('ENOENT');
+        if (attr.mode !== undefined) modes.set(p, attr.mode & 0o7777);
+        if (attr.size !== undefined) data.set(p, data.get(p).slice(0, attr.size));
+      },
+      async open(p, flags) {
+        if (!data.has(p)) throw errno('ENOENT');
+        open.set(++fh, { p, bytes: flags.truncate ? new Uint8Array() : data.get(p) });
+        return fh;
+      },
+      async read(h, o, n) { return open.get(h).bytes.slice(o, o + n); },
+      async write(h, o, b) {
+        const e = open.get(h);
+        const next = new Uint8Array(Math.max(e.bytes.length, o + b.length));
+        next.set(e.bytes);
+        next.set(b, o);
+        e.bytes = next;
+      },
+      async release(h) {
+        const e = open.get(h);
+        data.set(e.p, e.bytes);
+        open.delete(h);
+      },
+    },
+  };
+}
+`;
+
+const CHMOD = `export default async function main(ctx) {
+  try {
+    if (ctx.argv[2] === 'write') await ctx.fs.writeFile(ctx.argv[1], 'pwned');
+    else ctx.sync.fs.chmod(ctx.argv[1], 0o777);
+    await ctx.write(1, 'changed\\n');
+  } catch (e) {
+    await ctx.write(1, (e.code ?? String(e)) + '\\n');
+  }
+}
+`;
+
+test('a sudo process cannot be led through a trusted link swapped for an untrusted one at any point between its checks and its operation (#542)', async (t) => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
+  await kernel.writeFile(
+    '/node_modules/chm/package.json',
+    JSON.stringify({ slicc: { commands: { chm: { abi: 'js', module: 'main.mjs' } } } })
+  );
+  await kernel.writeFile('/node_modules/chm/main.mjs', CHMOD);
+  await kernel.writeFile(
+    '/node_modules/hostile/package.json',
+    JSON.stringify({ slicc: { filesystems: { hostile: { module: 'd.mjs' } } } })
+  );
+  await kernel.writeFile('/node_modules/hostile/d.mjs', DRIVER);
+  await kernel.users.add({ name: 'cone', groups: ['sudo'] });
+  const root = (script) => kernel.run(['bash', '-c', script], { cwd: '/' });
+  await root(
+    "mkdir -p /home/cone/h && printf '%s\\n' 'NOPASSWD cone Cmnd *' > /etc/sudoers.d/cone && chmod 440 /etc/sudoers.d/cone"
+  );
+  const outcomes = [];
+  for (const how of ['chmod', 'write']) {
+    for (let after = 0; after <= 12; after++) {
+      const spec = { type: 'hostile', source: String(after), target: '/home/cone/h' };
+      assert.equal((await kernel.mount(spec)).state, 'ok');
+      const r = await kernel.run(['bash', '-c', `sudo chm h/l ${how}`], {
+        cwd: '/home/cone',
+        user: 'cone',
+      });
+      const target = await root('stat -c %a /home/cone/h/target; cat /home/cone/h/target');
+      const [mode, data] = String(target.stdout).trim().split('\n');
+      outcomes.push(`${how} ${after} ${String(r.stdout).trim()} ${mode} ${data}`);
+      await kernel.umount('/home/cone/h');
+    }
+  }
+  assert.deepEqual(
+    outcomes.filter((o) => !o.endsWith(' 644 secret')),
+    [],
+    outcomes.join('; ')
+  );
+});
+
+test('a sudo process shares the open and removed files of the others: its writes reach their descriptors, and what it removes stays readable to them', async (t) => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
+  await kernel.users.add({ name: 'cone', groups: ['sudo'] });
+  await kernel.run(
+    [
+      'bash',
+      '-c',
+      "printf '%s\\n' 'NOPASSWD cone Cmnd *' > /etc/sudoers.d/cone && chmod 440 /etc/sudoers.d/cone",
+    ],
+    { cwd: '/' }
+  );
+  const script = [
+    'printf old > a && printf kept > b',
+    'exec 3<a 4<b',
+    'printf new | sudo tee a > /dev/null && sudo rm b',
+    'cat <&3; echo; cat <&4; echo; ls',
+  ].join('\n');
+  const r = await kernel.run(['bash', '-c', script], { cwd: '/home/cone', user: 'cone' });
+  assert.deepEqual([String(r.stdout), String(r.stderr)], ['new\nkept\na\n', '']);
+});

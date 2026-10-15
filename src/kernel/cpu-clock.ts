@@ -1,14 +1,5 @@
 import { SAB_CLOCK_I64, SAB_CLOCK_OFFSET } from '../realm/sync-sab-wire.ts';
 
-export const IDLE_OPS: ReadonlySet<string> = new Set([
-  'fd-select',
-  'proc-wait',
-  'proc-exec',
-  'sig-pause',
-  'sock-accept',
-  'sock-connect',
-]);
-
 export const SYS_CAP_US = 20_000;
 
 const LOCAL = SAB_CLOCK_OFFSET;
@@ -40,13 +31,16 @@ export function useLocalClock(sab: SharedArrayBuffer | undefined): void {
   localSab = sab;
   localStart = epochMicros();
   const wait = (typed: Int32Array, index: number, value: number, timeout?: number) =>
-    localWait(() => rawWait(typed, index, value, timeout));
+    localWait(
+      () => rawWait(typed, index, value, timeout),
+      timeout !== 0 && Atomics.load(typed, index) === value
+    );
   (Atomics as unknown as { wait: typeof wait }).wait = wait;
 }
 
-export function localWait<T>(wait: () => T): T {
+export function localWait<T>(wait: () => T, blocks = true): T {
   const clock = local;
-  if (!clock) return wait();
+  if (!clock || !blocks) return wait();
   const start = BigInt(epochMicros());
   const idle = Atomics.load(clock, IDLE);
   Atomics.store(clock, IDLE, idle - start);
@@ -93,9 +87,17 @@ export class CpuClock {
     this.start = now();
   }
 
-  enter(op: string): void {
+  enter(): void {
     this.since = this.now();
-    this.kind = this.stopped || IDLE_OPS.has(op) ? 'idle' : 'sys';
+    this.kind = this.stopped ? 'idle' : 'sys';
+  }
+
+  block(): void {
+    if (this.since === 0 || this.kind === 'idle' || this.frozen !== undefined) return;
+    const now = this.now();
+    this.add(now - this.since);
+    this.since = now;
+    this.kind = 'idle';
   }
 
   leave(): void {
@@ -203,14 +205,12 @@ export class ProcessClocks {
     return this.enabled ? this.all().filter((c) => c.running()).length : 0;
   }
 
-  timed<R extends { op: string }, T>(
-    clock: CpuClock | undefined,
-    dispatch: (req: R) => Promise<T>
-  ) {
+  timed<R, T>(clock: CpuClock | undefined, dispatch: (req: R, block: () => void) => Promise<T>) {
     const c = clock ?? this.main;
+    const block = () => c.block();
     return (req: R): Promise<T> => {
-      c.enter(req.op);
-      return dispatch(req).finally(() => c.leave());
+      c.enter();
+      return dispatch(req, block).finally(() => c.leave());
     };
   }
 

@@ -1,3 +1,4 @@
+import type { ChangeView } from '../fs/changes.ts';
 export const SYNC_FS_OPS = [
   'read',
   'write',
@@ -23,6 +24,7 @@ export const SYNC_FS_OPS = [
   'kept',
   'pread',
   'pwrite',
+  'append',
   'truncate',
   'chown',
   'lchown',
@@ -56,6 +58,7 @@ export interface SyncFsRequest {
   identity?: boolean;
   now?: boolean;
   nofollow?: boolean;
+  opening?: boolean;
 }
 
 export type SyncFsResult =
@@ -100,10 +103,18 @@ export function parseSyncFsUsage(json: unknown): SyncFsUsage | null {
 
 export type SyncFsFileIo = Pick<
   SyncFsPosixBridge,
-  'readFile' | 'writeFile' | 'pread' | 'pwrite' | 'truncate'
+  'readFile' | 'writeFile' | 'pread' | 'pwrite' | 'truncate' | 'append'
 >;
 
+export type ChownArgs = [
+  uid: number | undefined,
+  gid: number | undefined,
+  follow?: boolean,
+  handle?: number,
+];
+
 export interface SyncFsPosixBridge {
+  changes?: ChangeView;
   pinned?(handle: number): SyncFsFileIo;
   kept?(handle: number): boolean;
   keptStat?(handle: number): SyncFsBridgeStat;
@@ -132,8 +143,8 @@ export interface SyncFsPosixBridge {
     want?: number
   ): number | undefined;
   access?(path: string, mode: number, kind?: AccessKind, nofollow?: boolean): void;
-  create?(path: string, mode?: number): void;
-  chown?(path: string, uid: number | undefined, gid: number | undefined, follow?: boolean): void;
+  create?(path: string, mode?: number, opening?: boolean): void;
+  chown?(path: string, ...rest: ChownArgs): void;
   owners?: boolean;
   links?: boolean;
   readdirStat(path: string): Array<[string, SyncFsBridgeStat | null]>;
@@ -141,6 +152,7 @@ export interface SyncFsPosixBridge {
   pread?(path: string, offset: number, length: number, version?: string): Uint8Array;
   pwrite?(path: string, offset: number, bytes: Uint8Array, transfer?: boolean): void;
   truncate?(path: string, size: number): void;
+  append?(path: string, bytes: Uint8Array): number;
   identify?(): void;
   identified?(): SyncFsBridgeStat | null;
 }

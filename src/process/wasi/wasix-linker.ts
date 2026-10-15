@@ -67,6 +67,8 @@ export class WasixLinker {
   private readonly cppException: WebAssembly.Tag;
   private main: WebAssembly.Instance | undefined;
   private readonly modules = new Map<number, Linked>();
+
+  forkedTls: Map<number, number> | undefined;
   private readonly byPath = new Map<string, Linked>();
 
   private mainGot: Array<() => void> = [];
@@ -263,6 +265,23 @@ export class WasixLinker {
     return this.indices?.reserve(this.table.length, size) ?? this.table.length;
   }
 
+  tlsBases(): Array<[number, number]> {
+    const bases: Array<[number, number]> = [];
+    for (const [handle, linked] of this.modules) {
+      const base = linked.instance.exports.__tls_base;
+      if (base instanceof WebAssembly.Global) bases.push([handle, base.value as number]);
+    }
+    return bases;
+  }
+
+  private carryTls(linked: Linked): boolean {
+    const base = this.forkedTls?.get(linked.handle);
+    const global = linked.instance.exports.__tls_base;
+    if (base === undefined || !(global instanceof WebAssembly.Global)) return false;
+    global.value = base;
+    return true;
+  }
+
   replay(record: LinkRecord): void {
     if (record.kind === 'closure') {
       growTable(this.table, record.index + 1);
@@ -417,7 +436,7 @@ export class WasixLinker {
     if (init) {
       call(linked.instance, '__wasm_apply_data_relocs');
       call(linked.instance, '__wasm_call_ctors');
-    } else {
+    } else if (!this.carryTls(linked)) {
       call(linked.instance, '__wasix_init_tls');
     }
     return linked;

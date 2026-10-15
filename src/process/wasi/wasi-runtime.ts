@@ -14,7 +14,7 @@ import {
   createSyncSabTransport,
   type SabPostLike,
 } from '../../realm/sync-sab-bridge.ts';
-import { publishMemory, SAB_HEADER_I32, SAB_I_BLOCKED } from '../../realm/sync-sab-wire.ts';
+import { loadBlocked, publishMemory, SAB_HEADER_I32 } from '../../realm/sync-sab-wire.ts';
 import { SyscallError } from '../kernel-streams.ts';
 import { identify, kernelSys } from '../process-runtime.ts';
 import { SignalGate, type SignalHooks } from '../process-signals.ts';
@@ -51,6 +51,19 @@ const takeDefault =
   (sig: number): void => {
     call({ op: 'proc-kill', pid, sig });
     if (defaultAction(sig) === 'terminate') throw new WasiExit(128 + sig);
+  };
+
+export const takeThreadDefault =
+  (call: (req: WasmSyscall) => unknown, pid: number) =>
+  (sig: number): void => {
+    if (defaultAction(sig) !== 'terminate') {
+      call({ op: 'proc-kill', pid, sig });
+      return;
+    }
+    try {
+      call({ op: 'proc-kill-self', sig });
+    } catch {}
+    throw new WasiExit(128 + sig);
   };
 
 const SLICC_FS = 'slicc_fs';
@@ -136,7 +149,7 @@ export function sigmaskOf(
     WasiSigmask.unsupported(header);
     return undefined;
   }
-  if (threads) threads.blocked = () => Atomics.load(header, SAB_I_BLOCKED);
+  if (threads) threads.blocked = () => loadBlocked(header);
   const shared = process && new Int32Array(process, 0, SAB_HEADER_I32);
   return new WasiSigmask(header, () => gate.deliver(), shared);
 }
@@ -345,6 +358,7 @@ async function instantiate(
   threads: WasiThreads | undefined,
   {
     thread = false,
+    forked,
     stats,
     signals,
     program,
@@ -352,6 +366,7 @@ async function instantiate(
     path,
   }: {
     thread?: boolean;
+    forked?: Pick<WasiForkState, 'tls' | 'modules'>;
     stats?: WasiStats;
     signals?: WasiSignals;
     program?: ProgramOption;
@@ -435,15 +450,30 @@ async function instantiate(
       wasixHost.types.register(() => read(path), instance, table, sync ? TABLE_BASE : 0);
     }
   }
-  if (sync) {
-    sync.linker.bindMain(instance, !thread);
-    if (path !== undefined) sync.linker.mainPath = path;
-
-    if (thread) sync.catchUp();
-
-    sync.linker.bindMainGot();
-  }
+  if (sync) bindLinker(host, sync, instance, { thread, forked, path });
   return { instance, driver };
+}
+
+function bindLinker(
+  host: WasiHost,
+  sync: LinkSync,
+  instance: WebAssembly.Instance,
+  at: {
+    thread: boolean;
+    forked: Pick<WasiForkState, 'tls' | 'modules'> | undefined;
+    path: string | undefined;
+  }
+): void {
+  sync.linker.bindMain(instance, !at.thread);
+  if (at.path !== undefined) sync.linker.mainPath = at.path;
+  host.linkedTls = () => sync.linker.tlsBases();
+  host.linkedModules = () => sync.linker.compiled();
+  if (at.forked) {
+    sync.linker.forkedTls = new Map(at.forked.tls ?? []);
+    sync.linker.cache = at.forked.modules;
+  }
+  if (at.thread || at.forked) sync.catchUp();
+  sync.linker.bindMainGot();
 }
 
 function procTree(call: (req: WasmSyscall) => unknown, pid: number): ProcTree {
@@ -596,11 +626,16 @@ function descriptors(
   return { inherited: init.fds ?? [], ...(init.program.preopenRoot ? { preopenRoot: true } : {}) };
 }
 
-function ownersOf(init: { owners?: boolean; links?: boolean }): {
+function ownersOf(init: { owners?: boolean; links?: boolean; changes?: SharedArrayBuffer }): {
   owners?: boolean;
   links?: boolean;
+  changes?: SharedArrayBuffer;
 } {
-  return { ...(init.owners ? { owners: true } : {}), ...(init.links ? { links: true } : {}) };
+  return {
+    ...(init.owners ? { owners: true } : {}),
+    ...(init.links ? { links: true } : {}),
+    ...(init.changes ? { changes: init.changes } : {}),
+  };
 }
 
 export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike): Promise<number> {
@@ -667,6 +702,7 @@ export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike
   }
   const program = await programImports(init.program, host, transport, MAIN_TID);
   const { instance, driver } = await instantiate(host, module, memory, threads, {
+    ...(fork ? { forked: fork } : {}),
     stats,
     signals,
     foreign: init.program.foreign,
@@ -761,7 +797,7 @@ export async function runWasiThread(init: WasmThreadInitMsg, port: SabPostLike):
     masks: () => null,
     raise: (sig) => signals.raise(sig),
   });
-  const signals = new WasiSignals(takeDefault(call, init.pid));
+  const signals = new WasiSignals(takeThreadDefault(call, init.pid));
   const threads = new WasiThreads(port, thread.memory, threadCap(init.env), thread.tid, thread.ids);
   threads.received = thread.modules;
   const id = identify(transport, init);

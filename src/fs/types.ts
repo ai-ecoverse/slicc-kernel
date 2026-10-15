@@ -82,6 +82,7 @@ export interface KernelFs {
   ancestry?(path: string): Promise<Array<Perm | undefined>>;
   hasOwner?(path: string): Promise<boolean>;
   chmod(path: string, mode: number): Promise<void>;
+  append?(path: string, bytes: Uint8Array): Promise<number>;
   utimes(path: string, atime: Date, mtime: Date): Promise<void>;
   lutimes?(path: string, atime: Date, mtime: Date): Promise<void>;
   pread?(path: string, offset: number, length: number, version?: string): Promise<Uint8Array>;
@@ -89,9 +90,10 @@ export interface KernelFs {
   truncate?(path: string, size: number): Promise<void>;
   protect?(prefixes: readonly string[], versions?: boolean): void;
   unguarded?(): KernelFs;
+  noLinks?(): KernelFs;
   mayChange?(path: string, follow: boolean, whole?: boolean): Promise<void>;
-  readVersioned?(path: string): Promise<{ bytes: Uint8Array; version: string }>;
-  version?(path: string): Promise<string>;
+  readVersioned?(path: string, cached?: boolean): Promise<{ bytes: Uint8Array; version: string }>;
+  version?(path: string, cached?: boolean): Promise<string>;
 }
 
 export type RangedOps = Required<Pick<KernelFs, 'pread' | 'pwrite' | 'truncate'>>;

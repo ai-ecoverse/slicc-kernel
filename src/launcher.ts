@@ -17,6 +17,7 @@ import { FacadeHosts } from './facade/hosts.ts';
 import type { FacadeSpecs } from './facade/types.ts';
 import { R_OK, X_OK } from './fs/access.ts';
 import { type Attestation, attest, FileWatches, type RemoteFs } from './fs/attest.ts';
+import { FileChanges } from './fs/changes.ts';
 import { followLinks, withCommandDirs } from './fs/commands.ts';
 import { Dac, type DenialHook, need, TTY_MODE } from './fs/dac.ts';
 import { FreshModules } from './fs/fresh-modules.ts';
@@ -131,6 +132,8 @@ import {
   type ImportedMemory,
   importedMemory,
 } from './process/wasi/wasi-module.ts';
+import type { SourceCheck } from './realm/sync-fs-token-registry.ts';
+import { anyBlocked, type BlockedMask } from './realm/sync-sab-wire.ts';
 import { type ApproveHook, Sudo, type SudoCall, type SudoResult } from './sudo.ts';
 import { SUDO_COMMAND, SUDO_PATH, SUDO_SOURCE } from './sudo-command.ts';
 import {
@@ -270,6 +273,7 @@ interface Redeemer {
 
 interface WriterStack {
   fs: KernelFs;
+  noLinks: KernelFs;
   nodes: VfsNodes;
   unlinked: UnlinkedKeeper;
   writer: boolean;
@@ -289,7 +293,7 @@ interface StartRequest {
   pgid?: number;
   group?: 'lead' | 'session';
   ignored?: number;
-  blocked?: number;
+  blocked?: BlockedMask;
   umask?: number;
   cred: Cred;
   tag?: string | undefined;
@@ -310,6 +314,7 @@ const WASM_MAGIC = [0x00, 0x61, 0x73, 0x6d];
 const SHEBANG_MAX = 256;
 const MAX_INTERPRETERS = 4;
 const NOT_FOUND = 127;
+const NOT_EXECUTABLE = 126;
 const DECIDE_MS = 100;
 const INIT_PID = 1;
 const SHARED_DIRS = ['/tmp', '/home'];
@@ -489,6 +494,9 @@ function addTimes(into: Map<number, CpuTimes>, pid: number, t: CpuTimes): void {
 export class Launcher {
   readonly fs: KernelFs;
   readonly processFs: KernelFs;
+  private readonly noLinksFs: KernelFs;
+  private readonly mounted: KernelFs;
+  private protection: ProtectedFs | undefined;
   private readonly prefixes: string[];
   private readonly writerTags: ReadonlySet<string>;
   private readonly unguardedRoot: KernelFs;
@@ -544,7 +552,11 @@ export class Launcher {
   readonly resolver: Resolver;
   readonly hostname: string;
   readonly watchers = new FsWatchers();
+  private readonly changes = new FileChanges();
   private readonly pnpmHome: string;
+  private readonly pnpmChain: ReadonlySet<string>;
+  private pnpmMade: Promise<void> | undefined;
+  private pnpmEpoch = 0;
   readonly mounts: MountTable;
   private readonly createDriverWorker: (() => WasmWorkerLike) | undefined;
   private readonly media: MediaStore;
@@ -587,15 +599,19 @@ export class Launcher {
     this.sealed.tickets.normalise = (path) => physicalPathAsync(this.base, path);
     this.sealed.userOf = async (uid) => (await this.users.lookup(uid))?.name;
     if (this.owners) options.fs.trackOwners?.();
+    this.watchers.tap((paths) => this.changes.publish(...paths));
     this.mounts = new MountTable({
       open: (type, spec) => this.driver(type, spec),
       busy: (target) =>
         [...this.openFiles].some((nodes) => nodes.holds(target)) || heldUnder(this.held, target),
-      changed: this.watchers.changed.bind(this.watchers),
+      changed: (...paths) => {
+        if (paths.some((path) => this.pnpmChain.has(path))) this.pnpmStale();
+        this.watchers.changed(...paths);
+      },
       owners: this.owners,
     });
-    const watched = this.watchers.wrap(this.mounts.wrap(options.fs));
-    this.base = this.owners ? this.freshModules.wrap(watched) : watched;
+    this.mounted = this.mounts.wrap(options.fs);
+    this.base = this.rooted(this.mounted);
     this.createWorker = options.createWorker;
     this.createDriverWorker = options.createDriverWorker;
     this.media = options.media ?? memoryMedia();
@@ -604,6 +620,7 @@ export class Launcher {
     this.fstabRetries = options.fstabRetries ?? FSTAB_RETRIES;
     this.processMounts = options.processMounts ?? true;
     this.pnpmHome = options.env?.PNPM_HOME ?? SYSTEM_PNPM_HOME;
+    this.pnpmChain = new Set(chain(normalizePath(this.pnpmHome)));
     this.modulesDir = options.modules ?? '/node_modules';
     this.appended = appendedRoots(options.commands);
     this.cdp = new CdpHosts(options.cdp);
@@ -632,12 +649,7 @@ export class Launcher {
     });
     enableCdp(this.net, this.cdp);
     this.facades.enable(this.net);
-    const fs = withCommandDirs(
-      this.base,
-      async () => new Set((await this.commands()).keys()),
-      (dir) => this.userCommandDir(dir),
-      this.owners
-    );
+    const fs = this.commandFs(this.base);
     this.nodes = new VfsNodes(fs, (path) => this.released(path));
     this.nodes.keepsOnDisk = true;
     this.openFiles.add(this.nodes);
@@ -653,16 +665,23 @@ export class Launcher {
         ...(this.owners ? { dirOwner: { uid: 0, gid: 0, mode: 0o700 } } : {}),
       }
     );
-    this.fs = this.unlinked.wrap(keepingOpen(fs, this.nodes));
+    this.fs = this.processChain(fs, this.nodes, this.unlinked);
     this.writerTags = writerTags(options.protect);
     this.unlinkOwnerOption = options.unlinkOwner;
     if (this.writerTags.size > 0 && options.fs.protect && !options.fs.unguarded) {
       throw new TypeError('protect.writers needs a root file system with an unguarded view');
     }
+    if (!options.fs.noLinks) throw new TypeError('the root file system needs a noLinks view');
     this.unguardedRoot = options.fs.unguarded?.() ?? options.fs;
     this.prefixes = protectedPrefixes(options.protect?.paths ?? []);
-    this.processFs =
-      this.prefixes.length > 0 ? new ProtectedFs(this.prefixes).view(this.fs) : this.fs;
+    this.protection = this.prefixes.length > 0 ? new ProtectedFs(this.prefixes) : undefined;
+    this.processFs = this.protection?.view(this.fs) ?? this.fs;
+    const noLinks = this.processChain(
+      this.commandFs(this.rooted(this.noLinksOf(this.mounted))),
+      this.nodes,
+      this.unlinked
+    );
+    this.noLinksFs = this.protection?.view(noLinks) ?? noLinks;
     const integrity = options.protect?.integrity;
     integrityOptions(integrity);
     options.fs.protect?.(this.prefixes, Boolean(integrity));
@@ -725,8 +744,8 @@ export class Launcher {
     if (!found) {
       found = this.trustedAppended()
         .then(async (appended) => {
-          const roots = await this.roots(scope, appended);
-          return scanCommands(this.scanned, roots, roots.length - appended.length);
+          const tiers = await this.tiers(scope, appended);
+          return scanCommands(this.scanned, tiers, tiers.length - appended.length);
         })
         .then((commands) => commands.set(SUDO_COMMAND.name, SUDO_COMMAND));
       this.catalogs.set(scope, found);
@@ -760,13 +779,17 @@ export class Launcher {
     return found;
   }
 
-  private async roots(scope = '', appended?: readonly string[]): Promise<string[]> {
+  private async tiers(scope = '', appended?: readonly string[]): Promise<string[][]> {
     const system = [
-      this.modulesDir,
-      ...(await pnpmGlobalRoots(this.base, this.pnpmHome)),
-      ...(appended ?? (await this.trustedAppended())),
+      [this.modulesDir],
+      await pnpmGlobalRoots(this.base, this.pnpmHome),
+      ...(appended ?? (await this.trustedAppended())).map((root) => [root]),
     ];
-    return scope ? [...(await pnpmGlobalRoots(this.base, scope)), ...system] : system;
+    return scope ? [await pnpmGlobalRoots(this.base, scope), ...system] : system;
+  }
+
+  private async roots(scope = ''): Promise<string[]> {
+    return (await this.tiers(scope)).flat();
   }
 
   private async rootOnlyPath(root: string): Promise<boolean> {
@@ -870,8 +893,18 @@ export class Launcher {
     }
     if (interpreter(head) !== 'node') return undefined;
     const wasm = modulePath(glue);
-    if (!(await this.base.exists(wasm))) return undefined;
-    return { abi: 'emscripten', glue, wasm, argv0: baseName(argv0 || file), ...asked };
+    if (await this.base.exists(wasm)) {
+      return { abi: 'emscripten', glue, wasm, argv0: baseName(argv0 || file), ...asked };
+    }
+    const owner = await this.glueOwner(glue, baseName(file), scope);
+    return owner && { ...targetOf(owner), ...asked };
+  }
+
+  private async glueOwner(glue: string, name: string, scope: string): Promise<Command | undefined> {
+    const owners = [...(await this.commands(scope)).values()].filter(
+      (c) => c.abi === 'emscripten' && !c.script && c.glue === glue
+    );
+    return owners.find((c) => c.name === name) ?? owners[0];
   }
 
   private async head(path: string): Promise<Uint8Array | undefined> {
@@ -1158,11 +1191,17 @@ export class Launcher {
     file: string,
     cwd: string,
     scope: string
-  ): Promise<'ENOEXEC' | 'ENOENT'> {
+  ): Promise<'ENOEXEC' | 'ENOENT' | 'EACCES'> {
     const path = this.fs.resolvePath(cwd, file);
+    if (await this.directory(file, path)) return 'EACCES';
     const head = await this.base.readFileBuffer(path).catch(() => null);
     if (!head || (head[0] === 0x23 && head[1] === 0x21)) return 'ENOENT';
     return binfmtOf(await this.interpreters(scope), path) ? 'ENOENT' : 'ENOEXEC';
+  }
+
+  private async directory(file: string, path: string): Promise<boolean> {
+    if (!file.includes('/') || COMMAND.test(file)) return false;
+    return (await this.base.stat(path).catch(() => undefined))?.isDirectory === true;
   }
 
   verifiedFs(fs: KernelFs): KernelFs {
@@ -1319,6 +1358,7 @@ export class Launcher {
     delete env[TICKET_ENV];
     env.HOSTNAME = this.hostname;
     let program: Program;
+    await this.pnpmReady();
     try {
       const caller = { pid: req.ppid ?? 0, uid: req.cred.euid, tag: req.tag };
       if (this.integrity) await this.checkedSources(planned, caller);
@@ -1343,6 +1383,22 @@ export class Launcher {
       },
       () => this.connectorStamp(pid)
     );
+  }
+
+  private sourceCheck(pid: number, writer: boolean): { source?: SourceCheck } {
+    const { integrity } = this;
+    if (!integrity?.readsChecked || writer) return {};
+    const caller = (): IntegrityCaller => ({
+      pid,
+      uid: this.credOf(pid).euid,
+      tag: this.tagOf(pid),
+    });
+    return {
+      source: {
+        read: (path, plain) => integrity.readSource(path, caller(), plain),
+        open: (path, real) => integrity.openSource(path, caller(), real),
+      },
+    };
   }
 
   private treeScrubs(req: StartRequest): Scrubber[] | undefined {
@@ -1382,25 +1438,28 @@ export class Launcher {
       },
       settling: () => this.settling.isSettling(pid),
       ...(req.ignored ? { ignored: req.ignored } : {}),
-      ...(req.blocked ? { blocked: req.blocked } : {}),
+      ...(anyBlocked(req.blocked) ? { blocked: req.blocked } : {}),
       ...(req.umask !== undefined ? { umask: req.umask } : {}),
       cred: req.cred,
       ...(this.owners && req.program.abi === 'wasi'
         ? { fresh: (path: string, umask: number) => this.freshModules.add(path, umask, pid) }
         : {}),
       ...(this.owners ? { owners: true } : {}),
+      ...this.sourceCheck(pid, stack.writer),
       ...linksOf(req),
       sealed: this.sealed,
       ...(scrubs ? { outputFilter: (file: OpenFile) => scrubbedAll(file, scrubs) } : {}),
       clipboard: this.clipboard,
       ...(this.dac ? { dac: this.dac } : {}),
       program: req.program,
+      changes: this.changes.sab,
       argv0: req.argv0,
       args: req.args,
       env: req.env,
       cwd: req.cwd,
       fds: req.fds,
       fs: stack.fs,
+      noLinks: stack.noLinks,
       ...(this.prefixes.length > 0 && !stack.writer
         ? { readonlyAt: (path: string) => isProtected(this.prefixes, path) }
         : {}),
@@ -1482,6 +1541,11 @@ export class Launcher {
   }
 
   private forget(pid: number): void {
+    const image = this.jobs.list().find((m) => m.pid === pid)?.execParent;
+    const described = this.described.get(pid);
+    if (image !== undefined && described && this.described.has(image)) {
+      this.described.set(image, described);
+    }
     this.jobs.remove(pid);
     this.described.delete(pid);
     const spent = this.spent.get(pid);
@@ -1615,10 +1679,11 @@ export class Launcher {
       const root = member && rootOf(member).pid;
       return root !== undefined && this.running(root) ? root : INIT_PID;
     };
+    const superseded = new Set([...members.values()].map((m) => m.execParent));
     const listed: ProcessInfo[] = [];
     for (const member of members.values()) {
       const described = this.described.get(member.pid);
-      if (member.execed || !described) continue;
+      if ((member.execed && superseded.has(member.pid)) || !described) continue;
       const cred = this.credOf(member.pid);
       if (!maySee(viewer, cred)) continue;
       const root = rootOf(member);
@@ -1827,7 +1892,7 @@ export class Launcher {
 
   private signalMasksOf(pid: number): { sigIgn?: number; sigCgt?: number; sigBlk?: number } {
     const masks = this.processes.get(pid)?.signalMasks?.();
-    const blocked = this.blockedBy(pid);
+    const [blocked] = this.blockedBy(pid);
     const sigBlk = blocked ? { sigBlk: blocked } : {};
     return masks ? { sigIgn: masks.ignored, sigCgt: masks.caught, ...sigBlk } : sigBlk;
   }
@@ -1836,8 +1901,8 @@ export class Launcher {
     return this.settling.isSettling(pid) || (this.ignoredBy(pid) & sigbit(SIG.TTOU)) !== 0;
   }
 
-  private blockedBy(pid: number): number {
-    return this.processes.get(pid)?.blockedSignals?.() ?? 0;
+  private blockedBy(pid: number): BlockedMask {
+    return this.processes.get(pid)?.blockedSignals?.() ?? [0, 0];
   }
 
   private ignoredBy(pid: number, fork = false): number {
@@ -1851,7 +1916,8 @@ export class Launcher {
       maySignal(sender, this.credOf(target)) ||
       (sig === SIG.CONT && session !== undefined && this.jobs.sidOf(target) === session) ||
       (from !== undefined && this.imageOf(from) === this.imageOf(target)) ||
-      (from !== undefined && this.granted.get(this.jobs.shown(target)) === from);
+      (from !== undefined && this.granted.get(this.jobs.shown(target)) === from) ||
+      (from !== undefined && this.granted.get(this.jobs.pgidOf(target) ?? 0) === from);
     if (pid === -1) {
       const sender = from === undefined ? undefined : this.imageOf(from);
       return this.killAll(sig, (member) => this.imageOf(member) !== sender, may);
@@ -2024,8 +2090,7 @@ export class Launcher {
       this.fs
     );
     void this.unlinked.sweep(entry.target);
-    if (this.pnpmHome.startsWith(`${entry.target.replace(/\/$/, '')}/`))
-      await this.provisionPnpmHome();
+    this.pnpmStale();
     return entry;
   }
 
@@ -2085,8 +2150,22 @@ export class Launcher {
     return joinName(await realDir(this.base, parentOf(path)), baseName(path));
   }
 
-  private async provisionPnpmHome(): Promise<void> {
-    await this.base.mkdir(this.pnpmHome, { recursive: true }).catch(() => undefined);
+  private pnpmReady(): Promise<void> {
+    if (this.pnpmMade !== undefined) return this.pnpmMade;
+    const epoch = this.pnpmEpoch;
+    const made = this.base
+      .mkdir(this.pnpmHome, { recursive: true })
+      .then(() => (this.owners ? this.stampLayout() : undefined))
+      .catch(() => {
+        if (this.pnpmEpoch === epoch) this.pnpmMade = undefined;
+      });
+    this.pnpmMade = made;
+    return made;
+  }
+
+  private pnpmStale(): void {
+    this.pnpmEpoch++;
+    this.pnpmMade = undefined;
   }
 
   private mountedBy(spec: MountSpec, cred: Cred): MountSpec {
@@ -2124,6 +2203,7 @@ export class Launcher {
   umount(target: string, detach = false): void {
     const at = normalizePath(target);
     this.mounts.umount(at, detach);
+    this.pnpmStale();
     if (!detach) return;
     for (const nodes of this.openFiles) nodes.revoke(at);
     for (const holds of this.held) holds.revoke(at);
@@ -2197,7 +2277,7 @@ export class Launcher {
     await this.resolvePrefixes();
     for (const dir of SHARED_DIRS) await this.base.mkdir(dir, { recursive: true });
     if (this.owners) await this.ownTmp();
-    await this.provisionPnpmHome();
+    await this.pnpmReady();
     await this.users.ensure();
     if (this.owners) await this.stampLayout();
     if (this.owners) await this.sudoer.provision();
@@ -2271,20 +2351,21 @@ export class Launcher {
 
   private stackFor(tag: string | undefined): WriterStack {
     if (!this.isWriter(tag)) {
-      return { fs: this.processFs, nodes: this.nodes, unlinked: this.unlinked, writer: false };
+      return {
+        fs: this.processFs,
+        noLinks: this.noLinksFs,
+        nodes: this.nodes,
+        unlinked: this.unlinked,
+        writer: false,
+      };
     }
     this.writers ??= this.writerStack();
     return this.writers;
   }
 
   private writerStack(): WriterStack {
-    const watched = this.watchers.wrap(this.mounts.wrap(this.unguardedRoot));
-    const fs = withCommandDirs(
-      this.owners ? this.freshModules.wrap(watched) : watched,
-      async () => new Set((await this.commands()).keys()),
-      (dir) => this.userCommandDir(dir),
-      this.owners
-    );
+    const mounted = this.mounts.wrap(this.unguardedRoot);
+    const fs = this.commandFs(this.rooted(mounted));
     const nodes = new VfsNodes(fs, (path) => this.released(path), this.nodes.entries);
     nodes.keepsOnDisk = true;
     this.openFiles.add(nodes);
@@ -2299,7 +2380,37 @@ export class Launcher {
         ...(this.owners ? { dirOwner: { uid: 0, gid: 0, mode: 0o700 } } : {}),
       }
     );
-    return { fs: unlinked.wrap(keepingOpen(fs, nodes)), nodes, unlinked, writer: true };
+    const noLinks = this.commandFs(this.rooted(this.noLinksOf(mounted)));
+    return {
+      fs: this.processChain(fs, nodes, unlinked),
+      noLinks: this.processChain(noLinks, nodes, unlinked),
+      nodes,
+      unlinked,
+      writer: true,
+    };
+  }
+
+  private noLinksOf(mounted: KernelFs): KernelFs {
+    return (mounted.noLinks as () => KernelFs).call(mounted);
+  }
+
+  private rooted(mounted: KernelFs): KernelFs {
+    const watched = this.watchers.wrap(mounted);
+    return this.owners ? this.freshModules.wrap(watched) : watched;
+  }
+
+  private commandFs(root: KernelFs): KernelFs {
+    return withCommandDirs(
+      root,
+      async () => new Set((await this.commands()).keys()),
+      (dir) => this.userCommandDir(dir),
+      this.owners
+    );
+  }
+
+  private processChain(fs: KernelFs, nodes: VfsNodes, unlinked: UnlinkedKeeper): KernelFs {
+    nodes.changed = (path) => this.changes.publish(path);
+    return unlinked.wrap(keepingOpen(fs, nodes, (path) => this.changes.publish(path)));
   }
 
   private async starting(argv: string[], dir: string | undefined, account: Account, tag?: string) {
@@ -2383,8 +2494,10 @@ export class Launcher {
     const stderr = collect(err, options.onStderr);
     const report = (message: string) => stderr(encoder.encode(`${message}\n`));
     if (!planned) {
-      report(`${file}: command not found`);
-      return { status: NOT_FOUND, stdout: concat(out), stderr: concat(err) };
+      const directory = await this.directory(file, this.fs.resolvePath(cwd, file));
+      report(`${file}: ${directory ? 'Is a directory' : 'command not found'}`);
+      const status = directory ? NOT_EXECUTABLE : NOT_FOUND;
+      return { status, stdout: concat(out), stderr: concat(err) };
     }
     const fds = new FdTable();
     fds.installAt(0, options.stdin ? bytesSource(options.stdin) : deviceFile('null'));

@@ -138,15 +138,23 @@ export class WsHandles {
           : { ok: true, kind: 'bytes', bytes: next.value };
       }
       const closed = await socket.closed;
-      return { ok: true, kind: 'json', json: { code: closed.code, reason: closed.reason } };
+      return {
+        ok: true,
+        kind: 'json',
+        json: { code: closed.code, reason: closed.reason, wasClean: closed.wasClean === true },
+      };
     } catch (e) {
       return fail('ECONNRESET', message(e));
     }
   }
 
   private async closed(socket: RealmWebSocket): Promise<SyncFsResult> {
-    const { code, reason } = await socket.closed;
-    return { ok: true, kind: 'json', json: { code, reason } };
+    const closed = await socket.closed;
+    return {
+      ok: true,
+      kind: 'json',
+      json: { code: closed.code, reason: closed.reason, wasClean: closed.wasClean === true },
+    };
   }
 
   private send(

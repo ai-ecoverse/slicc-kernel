@@ -1,3 +1,4 @@
+import { ChangeView } from '../fs/changes.ts';
 import { rawWait } from '../kernel/cpu-clock.ts';
 import {
   parseSyncFsStat,
@@ -144,7 +145,7 @@ function errnoError(code: string, path: string): Error & { code: string } {
 
 export function createSyncFsSabBridge(
   transport: SyncSabTransport,
-  opts: { timeoutMs?: number; owners?: boolean; links?: boolean } = {}
+  opts: { timeoutMs?: number; owners?: boolean; links?: boolean; changes?: SharedArrayBuffer } = {}
 ): SyncFsPosixBridge {
   const timeoutMs = opts.timeoutMs ?? SYNC_FS_REQUEST_TIMEOUT_MS;
   let identity: { identity: true } | Record<string, never> = {};
@@ -188,6 +189,7 @@ export function createSyncFsSabBridge(
     truncate: (path, length) => {
       changing({ op: 'truncate', path, length, ...id }, path);
     },
+    append: (path, body) => json({ op: 'append', path, body, ...id }, path) as number,
   });
 
   return {
@@ -272,15 +274,25 @@ export function createSyncFsSabBridge(
     lutimes: (path, atimeMs, mtimeMs, now) => {
       run({ op: 'lutimes', path, atimeMs, mtimeMs, ...(now ? { now } : {}) }, path);
     },
-    create: (path, mode) => {
-      run({ op: 'create', path, ...(mode !== undefined ? { mode } : {}) }, path);
+    create: (path, mode, opening) => {
+      const flags = { ...(mode !== undefined ? { mode } : {}), ...(opening ? { opening } : {}) };
+      run({ op: 'create', path, ...flags }, path);
     },
-    chown: (path, uid, gid, follow) => {
+    chown: (path, uid, gid, follow, handle) => {
       const ids = { ...(uid !== undefined ? { uid } : {}), ...(gid !== undefined ? { gid } : {}) };
-      changing({ op: follow ? 'chown' : 'lchown', path, ...ids }, path);
+      changing(
+        {
+          op: follow ? 'chown' : 'lchown',
+          path,
+          ...ids,
+          ...(handle !== undefined ? { handle } : {}),
+        },
+        path
+      );
     },
     ...(opts.owners ? { owners: true } : {}),
     ...(opts.links ? { links: true } : {}),
+    ...(opts.changes ? { changes: new ChangeView(opts.changes) } : {}),
     access: (path, mode, kind = 'access', nofollow) => {
       run({ op: 'access', path, mode, arg2: kind, ...(nofollow ? { nofollow } : {}) }, path);
     },

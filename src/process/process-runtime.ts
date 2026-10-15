@@ -48,6 +48,7 @@ import {
   syncFsync,
   trackCloseOnExec,
   useDevFd,
+  useDevRemoval,
   useFileMmap,
   useMounts,
   useZeroDevices,
@@ -169,6 +170,22 @@ export function kernelSys(transport: SyncSabTransport): ProcessSys & PtyKernel {
     size(fd) {
       return (json(call({ op: 'fd-vfs-stat', fd }, `fd-vfs-stat ${fd}`)) as { size: number }).size;
     },
+    fdStat(fd) {
+      const r = json(call({ op: 'fd-vfs-stat', fd, full: true }, `fd-vfs-stat ${fd}`)) as
+        | { stat?: object }
+        | undefined;
+      return r?.stat;
+    },
+    fdChmod(fd, mode) {
+      call({ op: 'fd-chmod', fd, mode }, `fd-chmod ${fd}`);
+    },
+    fdChown(fd, uid, gid) {
+      const ids = { ...(uid !== undefined ? { uid } : {}), ...(gid !== undefined ? { gid } : {}) };
+      call({ op: 'fd-chown', fd, ...ids }, `fd-chown ${fd}`);
+    },
+    fdUtimes(fd, atimeMs, mtimeMs, now) {
+      call({ op: 'fd-utimes', fd, atimeMs, mtimeMs, now }, `fd-utimes ${fd}`);
+    },
     ttyNames() {
       return json(call({ op: 'fd-tty-names' }, 'fd-tty-names')) as string[];
     },
@@ -200,6 +217,9 @@ export function kernelSys(transport: SyncSabTransport): ProcessSys & PtyKernel {
     },
     openClipboard(flags) {
       return json(call({ op: 'fd-open-clipboard', flags }, 'fd-open-clipboard')) as number;
+    },
+    clipboardAbort(fd) {
+      call({ op: 'fd-clipboard-abort', fd }, 'fd-clipboard-abort');
     },
     ptyNumbers() {
       return json(call({ op: 'pty-list' }, 'pty-list')) as number[];
@@ -517,8 +537,16 @@ function kernelWrappers(imports: WebAssembly.Imports, module: object, deps: Wrap
   holdWhileStopped(imports, new Int32Array(init.sab, 0, SAB_HEADER_I32), kernelGlue, deps.poll);
 }
 
-function bridgeFlags(init: WasmProcessInitMsg): { owners?: boolean; links?: boolean } {
-  return { ...(init.owners ? { owners: true } : {}), ...(init.links ? { links: true } : {}) };
+function bridgeFlags(init: WasmProcessInitMsg): {
+  owners?: boolean;
+  links?: boolean;
+  changes?: SharedArrayBuffer;
+} {
+  return {
+    ...(init.owners ? { owners: true } : {}),
+    ...(init.links ? { links: true } : {}),
+    ...(init.changes ? { changes: init.changes } : {}),
+  };
 }
 
 function credSyncTransport(
@@ -667,6 +695,7 @@ export async function runWasmProcess(
   atExit = () => streams.exiting();
   useMounts(running.FS, init.env, true);
   useZeroDevices(running.FS);
+  useDevRemoval(running.FS);
   useProcfs(running.FS as unknown as ProcFs, sys, init.pid);
   if (init.fork) restoreForkedStreams(running.FS, streams, init.fork.streams ?? []);
   else {
@@ -676,6 +705,7 @@ export async function runWasmProcess(
   const pipefs = ownValue<ProcessPipeFs>(running, 'PIPEFS');
   if (pipefs) streams.usePipes(pipefs);
   streams.useControllingTerminal();
+  streams.useKernelFdMetadata();
   useDevFd(running.FS);
   useFileMmap(running.FS, {
     sys,
