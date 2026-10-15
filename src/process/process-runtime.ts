@@ -64,6 +64,7 @@ import {
   vfsPromoter,
 } from './process-fork.ts';
 import { createHttpKernel } from './process-http.ts';
+import { closeDropsLocks, type LockHeld, type LockKernel } from './process-locks.ts';
 import type { PtyKernel } from './process-pty.ts';
 import { SignalGate } from './process-signals.ts';
 import { createSocketKernel } from './process-sockets.ts';
@@ -79,7 +80,7 @@ export {
 
 const FS_OPS: ReadonlySet<string> = new Set(SYNC_FS_OPS);
 
-export function kernelSys(transport: SyncSabTransport): ProcessSys & PtyKernel {
+export function kernelSys(transport: SyncSabTransport): ProcessSys & PtyKernel & LockKernel {
   const call = (req: SyncSabRequestBody, label: string): SyncFsResult => {
     const r = transport.call(req, Number.POSITIVE_INFINITY, label);
     if (!r.ok) throw new SyscallError(r.errno);
@@ -229,6 +230,16 @@ export function kernelSys(transport: SyncSabTransport): ProcessSys & PtyKernel {
     },
     mountList() {
       return json(call({ op: 'mount-list' }, 'mount-list')) as MountLine[];
+    },
+    setLock(target, kind, start, len, wait) {
+      const req = { op: 'lk-set' as const, ...target, kind, start, len, ...(wait ? { wait } : {}) };
+      call(req, 'lk-set');
+    },
+    getLock(target, kind, start, len) {
+      return json(call({ op: 'lk-get', ...target, kind, start, len }, 'lk-get')) as LockHeld | null;
+    },
+    closeLocks(target) {
+      call({ op: 'lk-close', ...target }, 'lk-close');
     },
     ptyNumber(fd) {
       return json(call({ op: 'pty-number', fd }, `pty-number ${fd}`)) as number;
@@ -619,6 +630,7 @@ export async function runWasmProcess(
             fs: () => ownValue<ProcessFs>(module, 'FS'),
             heap: () => (memory ? new Int32Array(memory.buffer) : undefined),
             pty: sys,
+            locks: { kernel: sys, memory: () => memory?.buffer, flush: () => early() },
 
             timer: {
               arm: (ms) => {
@@ -679,6 +691,7 @@ export async function runWasmProcess(
     cred: init.owners ? init.cred : undefined,
   });
   early = () => signals.quiet(() => vfs.flushDirty());
+  closeDropsLocks(running.FS, sys);
   const sigpipe = (): boolean => running.sliccSigpipe?.() === 1;
   const restartable = (): boolean => signals.restartable();
   const owners = init.owners ? { owners: true } : {};

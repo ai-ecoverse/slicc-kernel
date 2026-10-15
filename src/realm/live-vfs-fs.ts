@@ -29,6 +29,7 @@ const SEEK_CUR = 1;
 const SEEK_END = 2;
 
 interface LiveNodeState {
+  named?: number | undefined;
   stat?: SyncFsBridgeStat;
   statAt?: number;
 
@@ -1038,6 +1039,7 @@ export interface LiveMountFsApi extends LiveFsApi {
   lookupPath?(path: string, opts?: { follow?: boolean; parent?: boolean }): { node: object };
   sliccRename?: true;
   sliccKept?: true;
+  sliccStale?: true;
   open?(path: string, flags: number, mode?: number): unknown;
   statfsNode?(node: LiveFsNode): Record<string, number>;
   sliccStatfs?: true;
@@ -1099,6 +1101,7 @@ export function liveRoot(Fs: LiveMountFsApi, bridge: SyncFsPosixBridge): void {
   invalidateLiveVfs(Fs, plugin);
   guardRenames(Fs);
   guardKeptNodes(Fs, plugin.handled);
+  guardStaleNodes(Fs, plugin);
   guardStatfs(Fs);
   const memfs = root.memfs ?? root.node_ops;
   const live = plugin.node_ops;
@@ -1179,6 +1182,35 @@ function guardKeptNodes(Fs: LiveMountFsApi, handled: Set<LiveFsNode> | undefined
     const handle = node?.live?.openCount ? node.live.handle : undefined;
     if (node && handle !== undefined && node.mount.opts.bridge.kept?.(handle)) forget(node);
     return open(path, flags, mode);
+  };
+}
+
+function outdated(node: LiveFsNode, view: ChangeView, before: number): boolean {
+  const s = node.live;
+  if (s.named === undefined) {
+    s.named = before;
+    return false;
+  }
+  if (s.named === before) return false;
+  const { now, changed } = view.changedSince(s.named, liveNodePath(node));
+  s.named = now;
+  return changed && s.openCount === 0 && !s.dirty && node !== node.mount.root && !node.mounted;
+}
+
+function guardStaleNodes(Fs: LiveMountFsApi, plugin: LiveVfsPlugin): void {
+  const lookupNode = Fs.lookupNode?.bind(Fs);
+  const forget = Fs.hashRemoveNode?.bind(Fs);
+  if (!lookupNode || !forget || Fs.sliccStale) return;
+  Fs.sliccStale = true;
+  Fs.lookupNode = (parent, name) => {
+    const view = parent.live ? parent.mount.opts.bridge.changes : undefined;
+    const before = view?.now() ?? 0;
+    const node = lookupNode(parent, name);
+    if (!view || !ownedBy(plugin, node) || !outdated(node, view, before)) return node;
+    forget(node);
+    const fresh = lookupNode(parent, name);
+    if (fresh.live) fresh.live.named = before;
+    return fresh;
   };
 }
 

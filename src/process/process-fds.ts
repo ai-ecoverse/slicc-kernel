@@ -3,6 +3,7 @@ import { hostnameOf, hostsFile } from '../kernel/net/loopback-names.ts';
 import type { MountLine } from '../kernel/proc-info.ts';
 import { type LiveFsNode, type LiveLinkFs, linkLive, liveNodePath } from '../realm/live-vfs-fs.ts';
 import type { ProcessFs, ProcessStream, ProcessSys } from './kernel-streams.ts';
+import { type LockDeps, recordLock } from './process-locks.ts';
 import { type PtyKernel, ptyIoctl } from './process-pty.ts';
 import { wasiErrno } from './wasi-errno.ts';
 
@@ -72,6 +73,8 @@ export interface CloexecDeps {
   pty?: PtyKernel;
 
   timer?: { arm(ms: number): void };
+
+  locks?: Omit<LockDeps, 'fs'>;
 }
 
 function marker(deps: CloexecDeps): (fd: number, on: boolean) => void {
@@ -159,7 +162,8 @@ function wrapperFactories(
   const { pty, timer } = deps;
   return {
     ...(timer ? { setitimer: (f: GlueSyscall) => kernelTimer(f, timer) } : {}),
-    fcntl: (f) => cloexecFcntl(f, deps),
+    fcntl: (f) =>
+      cloexecFcntl(deps.locks ? recordLock(f, { ...deps.locks, fs: deps.fs }) : f, deps),
     pipe2: (f) => cloexecPipe2(f, deps),
 
     dup3: (f) => cloexecByFlag(quietTarget(f, deps), 2, deps),
