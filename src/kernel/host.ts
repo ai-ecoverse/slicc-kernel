@@ -403,6 +403,7 @@ function processOptions(
     ...(opts.settling ? { settling: opts.settling } : {}),
     spawner: opts.spawner,
     forker: opts.forker,
+    ...(opts.fork?.dl ? { dl: opts.fork.dl } : {}),
     fs: opts.fs,
     kill: opts.kill,
     ...(opts.writesBack ? { writesBack: opts.writesBack } : {}),

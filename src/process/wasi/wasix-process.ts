@@ -254,6 +254,7 @@ export class WasixProcess {
       setjmps: this.driver.setjmps(),
       ...(this.host.signals ? { signals: this.host.signals.snapshot() } : {}),
       ...(this.host.sigmask ? { blocked: this.host.sigmask.inherited() } : {}),
+      ...(this.host.linkedTls ? { tls: this.host.linkedTls() } : {}),
     };
     return this.call({
       op: 'proc-fork',

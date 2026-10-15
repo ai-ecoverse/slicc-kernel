@@ -186,6 +186,8 @@ export class WasiHost {
 
   sigmask: WasiSigmask | undefined;
 
+  linkedTls: (() => Array<[number, number]>) | undefined;
+
   interrupted: (() => boolean) | undefined;
 
   quietly: (fn: () => void) => void = (fn) => fn();

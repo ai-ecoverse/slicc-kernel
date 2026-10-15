@@ -19,6 +19,8 @@ export interface WasiForkState {
   signals?: WasiSignalState;
 
   blocked?: BlockedMask;
+
+  tls?: Array<[number, number]>;
 }
 
 export interface WasiSetjmps {
