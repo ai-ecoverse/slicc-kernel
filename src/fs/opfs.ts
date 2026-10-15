@@ -586,7 +586,7 @@ export class OpfsFs implements KernelFs {
         if (target.split('/').includes('..')) {
           const resolved = await this.physical(parentOf(link.path), target, hops + 1, path);
           current = resolved.path;
-          hops = resolved.hops;
+          hops = resolved.hops - 1;
         } else {
           current = resolvePath(parentOf(link.path), target);
         }

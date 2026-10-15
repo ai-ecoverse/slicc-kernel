@@ -708,7 +708,6 @@ export async function runWasmProcess(
   atExit = () => streams.exiting();
   useMounts(running.FS, init.env, true);
   useZeroDevices(running.FS);
-  useDevRemoval(running.FS);
   useProcfs(running.FS as unknown as ProcFs, sys, init.pid);
   if (init.fork) restoreForkedStreams(running.FS, streams, init.fork.streams ?? []);
   else {
@@ -720,6 +719,7 @@ export async function runWasmProcess(
   streams.useControllingTerminal();
   streams.useKernelFdMetadata();
   useDevFd(running.FS);
+  useDevRemoval(running.FS);
   useFileMmap(running.FS, {
     sys,
     memory: () => memory,

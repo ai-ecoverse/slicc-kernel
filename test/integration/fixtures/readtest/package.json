@@ -1,0 +1,12 @@
+{
+  "name": "readtest",
+  "private": true,
+  "slicc": {
+    "commands": {
+      "readtest": {
+        "abi": "js",
+        "module": "bin/readtest.mjs"
+      }
+    }
+  }
+}
