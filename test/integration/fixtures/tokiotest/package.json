@@ -1,0 +1,12 @@
+{
+  "name": "tokiotest",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "tokiotest": {
+        "wasm": "bin/tokiotest.wasm"
+      }
+    }
+  }
+}

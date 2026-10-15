@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
@@ -203,6 +204,32 @@ static int unreached(const char *host, int port) {
   return 0;
 }
 
+static int epollerr(void) {
+  int probe = dgram();
+  struct sockaddr_in any = at("127.0.0.1", 0);
+  bind(probe, (struct sockaddr *)&any, sizeof any);
+  struct sockaddr_in gone;
+  socklen_t gl = sizeof gone;
+  getsockname(probe, (struct sockaddr *)&gone, &gl);
+  close(probe);
+  int s = dgram();
+  connect(s, (struct sockaddr *)&gone, gl);
+  int ep = epoll_create1(0);
+  struct epoll_event want = {.events = EPOLLIN, .data.fd = s};
+  epoll_ctl(ep, EPOLL_CTL_ADD, s, &want);
+  struct epoll_event got[2];
+  printf("before %d\n", epoll_wait(ep, got, 2, 0));
+  send(s, "x", 1, 0);
+  int n = epoll_wait(ep, got, 2, 1000);
+  printf("after %d%s%s\n", n, n > 0 && (got[0].events & EPOLLERR) ? " EPOLLERR" : "", n > 0 && (got[0].events & EPOLLIN) ? " EPOLLIN" : "");
+  int err = 0;
+  socklen_t el = sizeof err;
+  getsockopt(s, SOL_SOCKET, SO_ERROR, &err, &el);
+  printf("so_error %s\n", name(err));
+  printf("cleared %d\n", epoll_wait(ep, got, 2, 0));
+  return 0;
+}
+
 int main(int argc, char **argv) {
   setvbuf(stdout, NULL, _IONBF, 0);
   const char *mode = argc > 1 ? argv[1] : "";
@@ -211,6 +238,7 @@ int main(int argc, char **argv) {
   if (!strcmp(mode, "datagrams")) return datagrams();
   if (!strcmp(mode, "refused")) return refused();
   if (!strcmp(mode, "unreachable")) return unreachable();
+  if (!strcmp(mode, "epollerr")) return epollerr();
   if (!strcmp(mode, "unreached") && argc > 3) return unreached(argv[2], atoi(argv[3]));
   fprintf(stderr, "usage: udptest serve|client|datagrams|refused|unreachable\n");
   return 2;

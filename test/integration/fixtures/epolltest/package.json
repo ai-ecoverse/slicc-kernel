@@ -1,0 +1,12 @@
+{
+  "name": "epolltest",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "epolltest": {
+        "wasm": "bin/epolltest.wasm"
+      }
+    }
+  }
+}

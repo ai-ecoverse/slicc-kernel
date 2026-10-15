@@ -241,6 +241,7 @@ export class KernelDgram implements KernelFile {
       readable: this.queue.length > 0 || this.pending !== undefined || this.closed,
       writable: this.sending < DGRAM_SEND_ROOM,
       hangup: this.closed,
+      ...(this.pending !== undefined ? { error: true } : {}),
     };
   }
 
