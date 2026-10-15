@@ -21,6 +21,11 @@ export interface RealmTransportResponse {
   body: AsyncIterable<Uint8Array>;
   cancel(): Promise<void>;
 }
+export interface RealmTransportExit {
+  kind: 'local' | 'remote' | 'tailnet' | (string & {});
+  caps: readonly string[];
+  [detail: string]: unknown;
+}
 export interface RealmTransportTraits {
   manualRedirects: boolean;
   encodedBodies: boolean;
@@ -29,6 +34,8 @@ export interface RealmTransportTraits {
   unavailable?: true;
   websocket?: true;
   redirectHops?: true;
+  exit?: RealmTransportExit;
+  [trait: string]: unknown;
 }
 export interface RealmWebSocketRequest {
   url: string;

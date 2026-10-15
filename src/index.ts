@@ -133,6 +133,7 @@ export {
   type FetchTransportOptions,
   fetchTransport,
   type HeaderList,
+  type NetworkExit,
   type NetworkRequest,
   type NetworkResponse,
   type NetworkTraits,
