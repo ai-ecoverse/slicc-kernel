@@ -272,8 +272,9 @@ export function createSyncFsSabBridge(
     lutimes: (path, atimeMs, mtimeMs, now) => {
       run({ op: 'lutimes', path, atimeMs, mtimeMs, ...(now ? { now } : {}) }, path);
     },
-    create: (path, mode) => {
-      run({ op: 'create', path, ...(mode !== undefined ? { mode } : {}) }, path);
+    create: (path, mode, opening) => {
+      const flags = { ...(mode !== undefined ? { mode } : {}), ...(opening ? { opening } : {}) };
+      run({ op: 'create', path, ...flags }, path);
     },
     chown: (path, uid, gid, follow, handle) => {
       const ids = { ...(uid !== undefined ? { uid } : {}), ...(gid !== undefined ? { gid } : {}) };

@@ -818,7 +818,7 @@ export class WasiFds {
       return true;
     }
     try {
-      this.fs.create(path);
+      this.fs.create(path, undefined, true);
       return true;
     } catch (err) {
       if (oflags & OFLAGS.EXCL || (err as { code?: string }).code !== 'EEXIST') throw err;
