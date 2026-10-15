@@ -778,7 +778,16 @@ export class WasiFds {
       (want & 4 ? HOLD_READ : 0) | (want & 2 ? HOLD_WRITE : 0) | (made ? HOLD_CREATED : 0);
     const handle = this.fs.hold?.(path, true, true, undefined, this.fs.owners ? asked : 0);
     const io = handle !== undefined && this.fs.pinned ? this.fs.pinned(handle) : this.fs;
-    const buffer = new FileBuffer(io, path, empty, st.maxFile, ranged, st.version);
+    const view = this.fs.changes;
+    const watch = view && {
+      view,
+      ino: st.ino,
+      stat: (at: string) => {
+        (this.fs as { invalidate?(): void }).invalidate?.();
+        return this.fs.stat(at);
+      },
+    };
+    const buffer = new FileBuffer(io, path, empty, st.maxFile, ranged, st.version, watch);
     buffer.handle = handle;
     this.buffers.set(path, buffer);
     const id = this.identity(st);

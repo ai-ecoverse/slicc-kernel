@@ -1,4 +1,11 @@
+import type { ChangeView } from './changes.ts';
 import { Pages, WRITEBACK } from './pages.ts';
+
+export interface RangedWatch {
+  view: ChangeView;
+  ino?: number | undefined;
+  stat(path: string): { size: number; version?: string | undefined; ino?: number | undefined };
+}
 
 export interface RangedIo {
   pread(path: string, offset: number, length: number, version?: string): Uint8Array;
@@ -17,13 +24,34 @@ export class RangedFile {
   private readonly io: RangedIo;
   private pinned = false;
   private version: string | undefined;
+  private readonly watch: RangedWatch | undefined;
+  private seen = 0;
   path: string;
 
-  constructor(io: RangedIo, path: string, size: number, version?: string) {
+  constructor(io: RangedIo, path: string, size: number, version?: string, watch?: RangedWatch) {
     this.io = io;
     this.path = path;
     this.version = version;
     this.pages = new Pages(size);
+    this.watch = watch;
+    if (watch) this.seen = watch.view.now();
+  }
+
+  private fresh(): void {
+    const watch = this.watch;
+    if (!watch || this.pinned) return;
+    const { now, changed } = watch.view.changedSince(this.seen, this.path);
+    this.seen = now;
+    if (!changed) return;
+    let st: ReturnType<RangedWatch['stat']>;
+    try {
+      st = watch.stat(this.path);
+    } catch {
+      return;
+    }
+    if (watch.ino !== undefined && st.ino !== watch.ino) return;
+    this.version = st.version;
+    this.pages.refresh(st.size);
   }
 
   get changed(): boolean {
@@ -39,6 +67,7 @@ export class RangedFile {
   }
 
   size(): number {
+    this.fresh();
     return this.pages.length;
   }
 
@@ -49,16 +78,19 @@ export class RangedFile {
   }
 
   read(at: number, length: number): Uint8Array {
+    this.fresh();
     this.fetch(this.pages.missing(at, length));
     return this.pages.read(at, length);
   }
 
   readInto(at: number, out: Uint8Array): number {
+    this.fresh();
     this.fetch(this.pages.missing(at, out.length));
     return this.pages.readInto(at, out);
   }
 
   write(at: number, bytes: Uint8Array): void {
+    this.fresh();
     this.fetch(this.pages.partial(at, bytes.length));
     this.pages.write(at, bytes);
     if (!this.pinned && this.pages.dirtyBytes >= WRITEBACK) this.flush();

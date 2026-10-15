@@ -626,11 +626,16 @@ function descriptors(
   return { inherited: init.fds ?? [], ...(init.program.preopenRoot ? { preopenRoot: true } : {}) };
 }
 
-function ownersOf(init: { owners?: boolean; links?: boolean }): {
+function ownersOf(init: { owners?: boolean; links?: boolean; changes?: SharedArrayBuffer }): {
   owners?: boolean;
   links?: boolean;
+  changes?: SharedArrayBuffer;
 } {
-  return { ...(init.owners ? { owners: true } : {}), ...(init.links ? { links: true } : {}) };
+  return {
+    ...(init.owners ? { owners: true } : {}),
+    ...(init.links ? { links: true } : {}),
+    ...(init.changes ? { changes: init.changes } : {}),
+  };
 }
 
 export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike): Promise<number> {

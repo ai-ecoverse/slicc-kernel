@@ -276,6 +276,8 @@ async function run(
     case 'pwrite':
     case 'truncate':
       return ranged(fs, path, req);
+    case 'append':
+      return json(await appended(fs, path, req.body ?? new Uint8Array(0)));
     default:
       return { ok: false, errno: 'EINVAL', message: `sync-fs: unknown op '${req.op as string}'` };
   }
@@ -387,6 +389,7 @@ async function guard(
       if (req.handle === undefined) await readable(g, op, path);
       return { path: await walkSafe(g, path, true) };
     case 'pwrite':
+    case 'append':
     case 'truncate':
       if (req.handle === undefined) await fileWritable(g, op, path);
       return { path: await walkSafe(g, path, true) };
@@ -453,7 +456,7 @@ const CHANGING = new Set<SyncFsOp>([
   'lchown',
 ]);
 
-const CONTENT = new Set<SyncFsOp>(['write', 'pwrite', 'truncate']);
+const CONTENT = new Set<SyncFsOp>(['write', 'pwrite', 'append', 'truncate']);
 
 const REMOVING = new Set<SyncFsOp>(['unlink', 'rmdir', 'rm', 'rename']);
 
@@ -502,6 +505,30 @@ async function createExclusive(fs: KernelFs, path: string, owner?: NewOwner): Pr
   await fs.writeFile(path, new Uint8Array(0), owner);
 }
 
+const appending = new Map<string, Promise<unknown>>();
+
+async function appended(fs: KernelFs, path: string, body: Uint8Array): Promise<number> {
+  const before = appending.get(path) ?? Promise.resolve();
+  const run = before.then(async () => {
+    const size = (await fs.stat(path)).size;
+    const ops = rangedOps(fs);
+    if (ops) await ops.pwrite(path, size, body, true);
+    else {
+      const whole = new Uint8Array(size + body.length);
+      whole.set(await fs.readFileBuffer(path));
+      whole.set(body, size);
+      await fs.writeFile(path, whole);
+    }
+    return size + body.length;
+  });
+  const settled = run.catch(() => undefined);
+  appending.set(path, settled);
+  void settled.then(() => {
+    if (appending.get(path) === settled) appending.delete(path);
+  });
+  return run;
+}
+
 async function ranged(fs: KernelFs, path: string, req: SyncFsRequest): Promise<SyncFsResult> {
   const ops = rangedOps(fs);
   if (!ops) throw syncError('ENOSYS', path);
@@ -518,7 +545,7 @@ async function ranged(fs: KernelFs, path: string, req: SyncFsRequest): Promise<S
 }
 
 const CHOWN_OPS = new Set<SyncFsOp>(['chown', 'lchown']);
-const UNLINKED_OPS = new Set<SyncFsOp>(['read', 'pread', 'pwrite', 'truncate']);
+const UNLINKED_OPS = new Set<SyncFsOp>(['read', 'pread', 'pwrite', 'append', 'truncate']);
 const OWN_OPS = new Set<SyncFsOp>(['rm', 'unlink', 'rmdir', 'rename', 'link']);
 const TWO_PATHS = new Set<SyncFsOp>(['rename', 'link']);
 const UNLINKING_OPS = new Set<SyncFsOp>(['rm', 'unlink', 'rename']);

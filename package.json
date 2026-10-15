@@ -64,6 +64,7 @@
     "@ai-ecoverse/wasm-git": "2.55.0-15",
     "@ai-ecoverse/wasm-git-pre-h1": "npm:@ai-ecoverse/wasm-git@2.55.0-15",
     "@ai-ecoverse/wasm-procps": "4.0.5-3",
+    "@ai-ecoverse/wasm-sqlite3": "3.54.0-2",
     "@ai-ecoverse/wasm-tar": "1.35.0-6",
     "@ai-ecoverse/wasm-tls-engine": "3.6.5-1",
     "@ai-ecoverse/wasm-util-linux": "2.42.4-1",

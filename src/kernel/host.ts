@@ -77,6 +77,7 @@ export interface WasmWorkerLike {
 
 export interface SpawnWasmOptions {
   pid: number;
+  changes?: SharedArrayBuffer;
   ignored?: number;
   blocked?: BlockedMask;
   umask?: number;
@@ -329,6 +330,7 @@ function processInit(
     sab,
     umask,
     cred,
+    ...(opts.changes ? { changes: opts.changes } : {}),
     ...(opts.owners ? { owners: true } : {}),
     ...(opts.links !== undefined ? { links: true } : {}),
     ...(opts.ppid !== undefined ? { ppid: opts.ppid } : {}),

@@ -1,5 +1,6 @@
 import { permits, X_OK } from '../fs/access.ts';
-import { RangedFile } from '../fs/ranged.ts';
+import type { ChangeView } from '../fs/changes.ts';
+import { RangedFile, type RangedWatch } from '../fs/ranged.ts';
 import { inodeOf } from '../fs/types.ts';
 import type { Cred } from '../kernel/cred.ts';
 import { wasiErrno } from '../process/wasi-errno.ts';
@@ -50,6 +51,7 @@ interface LiveNodeState {
 
   ranges?: boolean;
   ranged?: RangedFile;
+  seen?: number | undefined;
   handle?: number;
   created?: boolean;
 }
@@ -213,6 +215,27 @@ interface LiveOpsTables {
 }
 
 const EARLY_WHOLE_FILE = 64 * 1024;
+
+function needsLoad(s: LiveNodeState, view: ChangeView | undefined, path: () => string): boolean {
+  if (s.loaded && view && !s.dirty && view.changedSince(s.seen ?? 0, path()).changed) {
+    s.loaded = false;
+    s.stat = undefined;
+  }
+  if (s.loaded) return false;
+  s.seen = view?.now();
+  return true;
+}
+
+function watchOf(
+  bridge: SyncFsPosixBridge,
+  call: <T>(fn: () => T) => T,
+  path: () => string,
+  ino: number | undefined
+): RangedWatch | undefined {
+  const stat = () => call(() => bridge.stat(path()));
+  return bridge.changes && { view: bridge.changes, ino, stat };
+}
+const O_APPEND = 0o2000;
 
 const O_ACCMODE = 3;
 const O_TRUNC = 0o1000;
@@ -390,7 +413,7 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
 
   function ensureLoaded(node: LiveFsNode): void {
     const s = node.live;
-    if (s.loaded) return;
+    if (!needsLoad(s, bridgeOf(node).changes, () => liveNodePath(linked.holder(node)))) return;
     const bytes = call(() => fileIo(node).readFile(liveNodePath(linked.holder(node))));
     s.data = bytes;
     s.len = bytes.length;
@@ -411,7 +434,7 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
       truncate: (_: string, size: number) => file().truncate(path(), size),
     };
     const st = call(() => bridge.stat(path()));
-    s.ranged = new RangedFile(io, path(), st.size, st.version);
+    s.ranged = new RangedFile(io, path(), st.size, st.version, watchOf(bridge, call, path, st.ino));
     return s.ranged;
   }
 
@@ -844,6 +867,22 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
       const s = node.live;
       const end = position + length;
       if (s.maxFile !== undefined && end > s.maxFile) throw new Fs.ErrnoError(wasiErrno('EFBIG'));
+      const io = pinnedIo(h.bridgeOf(node), s.handle);
+      const append = (stream.flags & O_APPEND) !== 0 ? io.append : undefined;
+      if (append) {
+        flushNode(node);
+        const bytes = new Uint8Array(buffer.buffer, buffer.byteOffset + offset, length).slice();
+        const at = liveNodePath(h.linked.holder(node));
+        const after = h.call(() => append(at, bytes));
+        if (!s.ranged) {
+          s.data = undefined;
+          s.loaded = false;
+          s.len = 0;
+        }
+        s.stat = undefined;
+        stream.position = after - length;
+        return length;
+      }
       const ranged = rangedOf(node);
       if (ranged) {
         const bytes = new Uint8Array(buffer.buffer, buffer.byteOffset + offset, length);

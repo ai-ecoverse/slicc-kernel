@@ -17,6 +17,7 @@ import { FacadeHosts } from './facade/hosts.ts';
 import type { FacadeSpecs } from './facade/types.ts';
 import { R_OK, X_OK } from './fs/access.ts';
 import { type Attestation, attest, FileWatches, type RemoteFs } from './fs/attest.ts';
+import { FileChanges } from './fs/changes.ts';
 import { followLinks, withCommandDirs } from './fs/commands.ts';
 import { Dac, type DenialHook, need, TTY_MODE } from './fs/dac.ts';
 import { FreshModules } from './fs/fresh-modules.ts';
@@ -551,6 +552,7 @@ export class Launcher {
   readonly resolver: Resolver;
   readonly hostname: string;
   readonly watchers = new FsWatchers();
+  private readonly changes = new FileChanges();
   private readonly pnpmHome: string;
   private readonly pnpmChain: ReadonlySet<string>;
   private pnpmMade: Promise<void> | undefined;
@@ -597,6 +599,7 @@ export class Launcher {
     this.sealed.tickets.normalise = (path) => physicalPathAsync(this.base, path);
     this.sealed.userOf = async (uid) => (await this.users.lookup(uid))?.name;
     if (this.owners) options.fs.trackOwners?.();
+    this.watchers.tap((paths) => this.changes.publish(...paths));
     this.mounts = new MountTable({
       open: (type, spec) => this.driver(type, spec),
       busy: (target) =>
@@ -1449,6 +1452,7 @@ export class Launcher {
       clipboard: this.clipboard,
       ...(this.dac ? { dac: this.dac } : {}),
       program: req.program,
+      changes: this.changes.sab,
       argv0: req.argv0,
       args: req.args,
       env: req.env,
@@ -2405,7 +2409,7 @@ export class Launcher {
   }
 
   private processChain(fs: KernelFs, nodes: VfsNodes, unlinked: UnlinkedKeeper): KernelFs {
-    return unlinked.wrap(keepingOpen(fs, nodes));
+    return unlinked.wrap(keepingOpen(fs, nodes, (path) => this.changes.publish(path)));
   }
 
   private async starting(argv: string[], dir: string | undefined, account: Account, tag?: string) {

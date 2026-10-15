@@ -30,6 +30,11 @@ function touches(watcher: Watcher, changed: string): boolean {
 
 export class FsWatchers {
   private readonly watchers = new Set<Watcher>();
+  private readonly taps: Array<(paths: string[]) => void> = [];
+
+  tap(listener: (paths: string[]) => void): void {
+    this.taps.push(listener);
+  }
 
   watch(paths: string[], options: WatchOptions, notify: (change: WatchChange) => void): () => void {
     const watcher: Watcher = {
@@ -46,6 +51,7 @@ export class FsWatchers {
   }
 
   changed(...paths: string[]): void {
+    for (const tap of this.taps) tap(paths);
     for (const watcher of this.watchers) {
       for (const path of paths) {
         const changed = normalizePath(path);

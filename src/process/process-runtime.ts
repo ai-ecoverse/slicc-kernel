@@ -537,8 +537,16 @@ function kernelWrappers(imports: WebAssembly.Imports, module: object, deps: Wrap
   holdWhileStopped(imports, new Int32Array(init.sab, 0, SAB_HEADER_I32), kernelGlue, deps.poll);
 }
 
-function bridgeFlags(init: WasmProcessInitMsg): { owners?: boolean; links?: boolean } {
-  return { ...(init.owners ? { owners: true } : {}), ...(init.links ? { links: true } : {}) };
+function bridgeFlags(init: WasmProcessInitMsg): {
+  owners?: boolean;
+  links?: boolean;
+  changes?: SharedArrayBuffer;
+} {
+  return {
+    ...(init.owners ? { owners: true } : {}),
+    ...(init.links ? { links: true } : {}),
+    ...(init.changes ? { changes: init.changes } : {}),
+  };
 }
 
 function credSyncTransport(
