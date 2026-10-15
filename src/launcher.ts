@@ -886,8 +886,18 @@ export class Launcher {
     }
     if (interpreter(head) !== 'node') return undefined;
     const wasm = modulePath(glue);
-    if (!(await this.base.exists(wasm))) return undefined;
-    return { abi: 'emscripten', glue, wasm, argv0: baseName(argv0 || file), ...asked };
+    if (await this.base.exists(wasm)) {
+      return { abi: 'emscripten', glue, wasm, argv0: baseName(argv0 || file), ...asked };
+    }
+    const owner = await this.glueOwner(glue, baseName(file), scope);
+    return owner && { ...targetOf(owner), ...asked };
+  }
+
+  private async glueOwner(glue: string, name: string, scope: string): Promise<Command | undefined> {
+    const owners = [...(await this.commands(scope)).values()].filter(
+      (c) => c.abi === 'emscripten' && !c.script && c.glue === glue
+    );
+    return owners.find((c) => c.name === name) ?? owners[0];
   }
 
   private async head(path: string): Promise<Uint8Array | undefined> {
