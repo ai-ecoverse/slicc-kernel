@@ -88,12 +88,12 @@ test('a second sqlite3 writer gets "database is locked" while the first holds it
 test('two git commits at once in one repository both land, and no index.lock is left (#665)', async (t) => {
   const bash = await booted(t, ['wasm-git']);
   const commit = (name) =>
-    `( echo ${name} > ${name}; until git add ${name} 2>/dev/null && git commit -qm ${name} 2>/dev/null; do sleep 0.05; done )`;
+    `( echo ${name} > ${name}; until git cat-file -e HEAD:${name} 2>/dev/null; do git add ${name} 2>/dev/null && git commit -qm ${name} 2>/dev/null; sleep 0.05; done )`;
   const r = await bash(`
     git config --global user.name kernel && git config --global user.email kernel@example.com
     git init -q r && cd r && echo base > base && git add base && git commit -qm base
     ${commit('one')} & ${commit('two')} & wait
-    git log --format=%s | sort; git status --porcelain; [ -e .git/index.lock ]; echo "lock $?"; git fsck 2>&1 | wc -l`);
+    git ls-files; git status --porcelain; [ -e .git/index.lock ]; echo "lock $?"; git fsck --no-dangling 2>&1 | wc -l`);
   assert.deepEqual(r, { status: 0, stdout: 'base\none\ntwo\nlock 1\n0\n', stderr: '' });
 });
 
