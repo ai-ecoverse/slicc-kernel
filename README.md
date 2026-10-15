@@ -205,7 +205,7 @@ By default `nodeTransport()` refuses destinations on the host itself, because No
 - **How it checks:** it matches on the addresses the name resolves to, so a public name that resolves to `127.0.0.1` is refused too. It checks every request and WebSocket open, `host.slicc.internal` and each redirect hop included.
 - **What a refusal looks like:** a `403` whose body names the option, and `EACCES` for a WebSocket, before any connection is made.
 - **The opt-in:** `nodeTransport({ hostLoopback: true })` allows the host's loopback except ports 9222–9229. `nodeTransport({ hostLoopback: [8080, 9222] })` allows exactly the listed ports, so DevTools ports are reachable only when named. Link-local stays refused either way.
-- **Where it's weak:** the check resolves the name itself, just before Node's `fetch` resolves it again, so a name whose DNS answer changes in between can still get through. Until [#407](https://github.com/ai-ecoverse/slicc-kernel/issues/407) the Node entry isn't a boundary anyway.
+- **Connect-time enforcement:** the kernel also checks the address each connection actually reaches, before anything is sent, so a name whose DNS answer changes after the check is still refused. A keep-alive connection opened outside this kernel's policy (by the host application, or by another kernel in the same process whose `hostLoopback` allows it) to the same origin could be reused without a new check. When a proxy is in use (`HTTP_PROXY`/`HTTPS_PROXY` with `--use-env-proxy`), the connected socket is the proxy's, so only the pre-check applies; a proxy that resolves names itself closes the rebinding window on its side.
 
 ## Commands
 
