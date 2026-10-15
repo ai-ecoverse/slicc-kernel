@@ -28,14 +28,20 @@ async function boot(t, ...packages) {
     kernel.run(['bash', '-c', script], { cwd: '/', ...(user ? { user } : {}) });
 }
 
-const LEGACY = 'find /tmp / -maxdepth 0 -printf "%U %G\\n"';
+const LEGACY =
+  'for d in /tmp /; do tree -d -L 1 -u -g --noreport -i "$d" | head -1 | tr -s " "; done';
 const PROBE = 'stat -c "%u %g" /tmp; ls -ln / | tail -1 | tr -s " " | cut -d" " -f3,4';
 const REPO =
   'git init -q "$HOME/r" && cd "$HOME/r" && git status --short && echo "ok $(git rev-parse --is-inside-work-tree)"';
 
-test('an Emscripten program without the credential ABI (findutils) sees every file as 1000:1000, as root and as a user', async (t) => {
-  const bash = await boot(t, 'wasm-findutils');
-  const owners = { status: 0, stdout: '1000 1000\n1000 1000\n', stderr: '' };
+test('an Emscripten program without the credential ABI (tree) sees every file as 1000:1000, as root and as a user', async (t) => {
+  const glue = await readFile(new URL('wasm-tree/bin/tree', modules), 'utf8');
+  assert.ok(
+    !glue.includes('slicc_cred_js'),
+    'this build now carries the credential library: pick another library-less build, or if none remain, drop the legacy 1000:1000 path (homescoop#459)'
+  );
+  const bash = await boot(t, 'wasm-tree');
+  const owners = { status: 0, stdout: '[1000 1000 ] /tmp\n[1000 1000 ] /\n', stderr: '' };
   assert.deepEqual(await bash(LEGACY), owners);
   assert.deepEqual(await bash(LEGACY, 'cone'), owners);
 });
