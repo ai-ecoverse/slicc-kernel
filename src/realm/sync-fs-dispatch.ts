@@ -260,10 +260,10 @@ async function run(
       return done;
     }
     case 'utimes':
-      await fs.utimes(path, new Date(req.atimeMs ?? 0), new Date(req.mtimeMs ?? 0));
+      await fs.utimes(path, ...(await timesOf(entry, path, req)));
       return done;
     case 'lutimes':
-      await lutimesOf(fs, path, new Date(req.atimeMs ?? 0), new Date(req.mtimeMs ?? 0));
+      await lutimesOf(fs, path, ...(await timesOf(entry, path, req)));
       return done;
     case 'chown':
     case 'lchown':
@@ -275,6 +275,22 @@ async function run(
     default:
       return { ok: false, errno: 'EINVAL', message: `sync-fs: unknown op '${req.op as string}'` };
   }
+}
+
+async function timesOf(
+  entry: SyncFsTokenEntry,
+  path: string,
+  req: SyncFsRequest
+): Promise<[Date, Date]> {
+  const given: [Date, Date] = [new Date(req.atimeMs ?? 0), new Date(req.mtimeMs ?? 0)];
+  const g = req.now === true ? guardOf(entry) : undefined;
+  if (!g || g.cred.euid === 0) return given;
+  const look = req.op === 'lutimes' ? entry.fs.lstat : entry.fs.stat;
+  const st = await look.call(entry.fs, path).catch(() => undefined);
+  if (!st || (st.uid ?? 0) === g.cred.euid) return given;
+  const now = new Date();
+  const kept = (ms: number | undefined, stored: Date) => (ms === stored.getTime() ? stored : now);
+  return [kept(req.atimeMs, st.atime), kept(req.mtimeMs, st.mtime)];
 }
 
 export function guardOf(entry: SyncFsTokenEntry): Guard | undefined {
