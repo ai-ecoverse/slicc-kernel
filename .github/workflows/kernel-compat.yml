@@ -67,12 +67,12 @@ jobs:
 
   pr:
     needs: pack
-    uses: ai-ecoverse/homescoop/.github/workflows/kernel-compat.yml@d4e0ff1615a3974c41613e48d08ac2904b3d354b
+    uses: ai-ecoverse/homescoop/.github/workflows/kernel-compat.yml@870a75677311c4c9c7e3c3aa9235a8b192297b5b
     permissions:
       contents: read
       actions: read
     with:
-      homescoop-ref: d4e0ff1615a3974c41613e48d08ac2904b3d354b
+      homescoop-ref: 870a75677311c4c9c7e3c3aa9235a8b192297b5b
       kernel: kernel-tgz
       set: base,ci-certified
       runner: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (contains(fromJSON('["schedule","workflow_dispatch","workflow_run","release"]'), github.event_name) && github.ref == 'refs/heads/main')) && vars.CERT_RUNNER || 'ubuntu-latest' }}
@@ -184,12 +184,12 @@ jobs:
   release:
     needs: published
     if: needs.published.outputs.version != ''
-    uses: ai-ecoverse/homescoop/.github/workflows/kernel-compat.yml@d4e0ff1615a3974c41613e48d08ac2904b3d354b
+    uses: ai-ecoverse/homescoop/.github/workflows/kernel-compat.yml@870a75677311c4c9c7e3c3aa9235a8b192297b5b
     permissions:
       contents: read
       actions: read
     with:
-      homescoop-ref: d4e0ff1615a3974c41613e48d08ac2904b3d354b
+      homescoop-ref: 870a75677311c4c9c7e3c3aa9235a8b192297b5b
       kernel: '@ai-ecoverse/slicc-kernel@${{ needs.published.outputs.version }}'
       set: ${{ inputs.set || 'base,catalog,all' }}
       runner: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (contains(fromJSON('["schedule","workflow_dispatch","workflow_run","release"]'), github.event_name) && github.ref == 'refs/heads/main')) && vars.CERT_RUNNER || 'ubuntu-latest' }}
