@@ -1491,7 +1491,7 @@ class MountFs implements KernelFs {
   }
 
   noLinks(): KernelFs {
-    const noLinkBase = this.base.noLinks?.() ?? this.base;
+    const noLinkBase = (this.base.noLinks as () => KernelFs).call(this.base);
     return view(this, { rejectLinks: true, base: noLinkBase }) as unknown as KernelFs;
   }
 }

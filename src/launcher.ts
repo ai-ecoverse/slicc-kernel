@@ -493,7 +493,7 @@ export class Launcher {
   readonly fs: KernelFs;
   readonly processFs: KernelFs;
   private readonly noLinksFs: KernelFs;
-  private readonly baseNoLinks: KernelFs;
+  private readonly mounted: KernelFs;
   private protection: ProtectedFs | undefined;
   private readonly prefixes: string[];
   private readonly writerTags: ReadonlySet<string>;
@@ -600,9 +600,8 @@ export class Launcher {
       changed: this.watchers.changed.bind(this.watchers),
       owners: this.owners,
     });
-    const mounted = this.mounts.wrap(options.fs);
-    this.base = this.rooted(mounted);
-    this.baseNoLinks = this.rooted(mounted.noLinks?.() ?? mounted);
+    this.mounted = this.mounts.wrap(options.fs);
+    this.base = this.rooted(this.mounted);
     this.createWorker = options.createWorker;
     this.createDriverWorker = options.createDriverWorker;
     this.media = options.media ?? memoryMedia();
@@ -661,11 +660,16 @@ export class Launcher {
     if (this.writerTags.size > 0 && options.fs.protect && !options.fs.unguarded) {
       throw new TypeError('protect.writers needs a root file system with an unguarded view');
     }
+    if (!options.fs.noLinks) throw new TypeError('the root file system needs a noLinks view');
     this.unguardedRoot = options.fs.unguarded?.() ?? options.fs;
     this.prefixes = protectedPrefixes(options.protect?.paths ?? []);
     this.protection = this.prefixes.length > 0 ? new ProtectedFs(this.prefixes) : undefined;
     this.processFs = this.protection?.view(this.fs) ?? this.fs;
-    const noLinks = this.processChain(this.commandFs(this.baseNoLinks), this.nodes, this.unlinked);
+    const noLinks = this.processChain(
+      this.commandFs(this.rooted(this.noLinksOf(this.mounted))),
+      this.nodes,
+      this.unlinked
+    );
     this.noLinksFs = this.protection?.view(noLinks) ?? noLinks;
     const integrity = options.protect?.integrity;
     integrityOptions(integrity);
@@ -2317,7 +2321,7 @@ export class Launcher {
         ...(this.owners ? { dirOwner: { uid: 0, gid: 0, mode: 0o700 } } : {}),
       }
     );
-    const noLinks = this.commandFs(this.rooted(mounted.noLinks?.() ?? mounted));
+    const noLinks = this.commandFs(this.rooted(this.noLinksOf(mounted)));
     return {
       fs: this.processChain(fs, nodes, unlinked),
       noLinks: this.processChain(noLinks, nodes, unlinked),
@@ -2325,6 +2329,10 @@ export class Launcher {
       unlinked,
       writer: true,
     };
+  }
+
+  private noLinksOf(mounted: KernelFs): KernelFs {
+    return (mounted.noLinks as () => KernelFs).call(mounted);
   }
 
   private rooted(mounted: KernelFs): KernelFs {

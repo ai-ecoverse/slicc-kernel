@@ -396,6 +396,7 @@ function processOptions(
     ...(opts.outputFilter ? { outputFilter: opts.outputFilter } : {}),
     ...(opts.clipboard ? { clipboard: opts.clipboard, ...clipboardName(opts) } : {}),
     ...(opts.readonlyAt ? { readonlyAt: opts.readonlyAt } : {}),
+    noLinks: opts.noLinks,
     ...(opts.dac ? { guard: { dac: opts.dac, fs: opts.fs, created, ...linksOf(opts) } } : {}),
     ...(opts.identity ? { identity: opts.identity } : {}),
     ...(opts.onSyscall ? { onSyscall: opts.onSyscall } : {}),
