@@ -101,6 +101,16 @@ export function parseSize(text: string): number {
   return Math.floor(Number(match[1]) * (UNITS[(match[2] as string).toLowerCase()] as number));
 }
 
+function linkedTo(mount: Mount, path: string): (attr: DriverAttr | undefined) => boolean {
+  const own = mount.attrs.get(path)?.value;
+  const ino = own?.kind === 'directory' ? undefined : own?.ino;
+  return (attr) => {
+    if (!attr || attr.kind === 'directory') return false;
+    if (ino !== undefined) return attr.ino === ino;
+    return own?.kind !== 'directory' && (attr.nlink ?? 1) > 1;
+  };
+}
+
 const within = (path: string, target: string) =>
   path === target || target === '/' || path.startsWith(`${target}/`);
 export class HeldSet extends Set<HeldPaths> {
@@ -616,10 +626,13 @@ export class MountTable {
 
   forget(mount: Mount, path: string): void {
     mount.epoch++;
-    for (const key of [...mount.attrs.keys()]) if (within(key, path)) mount.attrs.delete(key);
+    const linked = mount.caps.links ? linkedTo(mount, path) : () => false;
+    for (const [key, cached] of [...mount.attrs])
+      if (within(key, path) || linked(cached.value)) mount.attrs.delete(key);
     mount.lists.delete(path);
     mount.lists.delete(parentOf(path));
-    for (const key of [...mount.lists.keys()]) if (within(key, path)) mount.lists.delete(key);
+    for (const [key, cached] of [...mount.lists])
+      if (within(key, path) || cached.value.some((e) => linked(e.attr))) mount.lists.delete(key);
   }
 
   async getattr(mount: Mount, path: string, rel: string, settled = false): Promise<DriverAttr> {
