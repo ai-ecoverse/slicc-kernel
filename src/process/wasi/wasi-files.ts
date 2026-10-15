@@ -52,6 +52,7 @@ export class FileBuffer {
     this.maxFile = maxFile;
     const { pread, pwrite, truncate } = fs;
     this.watch = watch;
+    this.seen = watch?.seen ?? watch?.view.now() ?? 0;
     if (size !== undefined && pread && pwrite && truncate) {
       const io = { pread: pread.bind(fs), pwrite: pwrite.bind(fs), truncate: truncate.bind(fs) };
       this.ranged = new RangedFile(io, path, size, version, watch);
@@ -87,8 +88,10 @@ export class FileBuffer {
 
   load(): Uint8Array {
     const view = this.watch?.view;
-    if (this.data && view && !this.dirty && view.changedSince(this.seen, this.path).changed) {
-      this.data = undefined;
+    if (this.data && view && !this.dirty) {
+      const { now, changed } = view.changedSince(this.seen, this.path);
+      this.seen = now;
+      if (changed) this.data = undefined;
     }
     if (!this.data) {
       this.seen = view?.now() ?? 0;

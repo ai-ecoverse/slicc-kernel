@@ -648,11 +648,35 @@ function heldIo(fs: KernelFs, nodes: VfsNodes, changed: (path: string) => void):
   ) => {
     const held = node(path);
     if (!held) return fallback();
-    const out = await held.serial(() => op(held));
+    const out = await held.serial(async () => {
+      const done = await op(held);
+      await held.flush();
+      return done;
+    });
     changed(fs.resolvePath('/', path));
     return out;
   };
   return {
+    append: (path: string, bytes: Uint8Array) =>
+      write(
+        path,
+        async (held) => {
+          const at = await held.size();
+          await held.pwrite(bytes, at);
+          return at + bytes.length;
+        },
+        async () => {
+          const at = (await fs.stat(path)).size;
+          if (ranged) await ranged.pwrite(path, at, bytes, true);
+          else {
+            const whole = new Uint8Array(at + bytes.length);
+            whole.set(await fs.readFileBuffer(path));
+            whole.set(bytes, at);
+            await fs.writeFile(path, whole);
+          }
+          return at + bytes.length;
+        }
+      ),
     async stat(path) {
       const st = await fs.stat(path);
       const held = st.isFile ? node(path) : undefined;
@@ -728,6 +752,7 @@ export function keepingOpen(
       return held.serial(async () => {
         await held.truncate(0);
         await held.pwrite(bytes, 0);
+        await held.flush();
         changed(at);
       });
     },

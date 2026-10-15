@@ -4,6 +4,7 @@ import { Pages, WRITEBACK } from './pages.ts';
 export interface RangedWatch {
   view: ChangeView;
   ino?: number | undefined;
+  seen?: number | undefined;
   stat(path: string): { size: number; version?: string | undefined; ino?: number | undefined };
 }
 
@@ -34,7 +35,7 @@ export class RangedFile {
     this.version = version;
     this.pages = new Pages(size);
     this.watch = watch;
-    if (watch) this.seen = watch.view.now();
+    if (watch) this.seen = watch.seen ?? watch.view.now();
   }
 
   private fresh(): void {

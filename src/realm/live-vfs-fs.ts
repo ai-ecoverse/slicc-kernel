@@ -1,6 +1,6 @@
 import { permits, X_OK } from '../fs/access.ts';
 import type { ChangeView } from '../fs/changes.ts';
-import { RangedFile, type RangedWatch } from '../fs/ranged.ts';
+import { RangedFile, type RangedIo } from '../fs/ranged.ts';
 import { inodeOf } from '../fs/types.ts';
 import type { Cred } from '../kernel/cred.ts';
 import { wasiErrno } from '../process/wasi-errno.ts';
@@ -217,23 +217,30 @@ interface LiveOpsTables {
 const EARLY_WHOLE_FILE = 64 * 1024;
 
 function needsLoad(s: LiveNodeState, view: ChangeView | undefined, path: () => string): boolean {
-  if (s.loaded && view && !s.dirty && view.changedSince(s.seen ?? 0, path()).changed) {
-    s.loaded = false;
-    s.stat = undefined;
+  if (s.loaded && view && !s.dirty) {
+    const { now, changed } = view.changedSince(s.seen ?? 0, path());
+    s.seen = now;
+    if (changed) {
+      s.loaded = false;
+      s.stat = undefined;
+    }
   }
   if (s.loaded) return false;
   s.seen = view?.now();
   return true;
 }
 
-function watchOf(
+function rangedFileOf(
   bridge: SyncFsPosixBridge,
   call: <T>(fn: () => T) => T,
   path: () => string,
-  ino: number | undefined
-): RangedWatch | undefined {
+  io: RangedIo
+): RangedFile {
+  const seen = bridge.changes?.now();
   const stat = () => call(() => bridge.stat(path()));
-  return bridge.changes && { view: bridge.changes, ino, stat };
+  const st = stat();
+  const watch = bridge.changes && { view: bridge.changes, ino: st.ino, seen, stat };
+  return new RangedFile(io, path(), st.size, st.version, watch);
 }
 const O_APPEND = 0o2000;
 
@@ -433,8 +440,7 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
         file().pwrite(path(), at, bytes, transfer),
       truncate: (_: string, size: number) => file().truncate(path(), size),
     };
-    const st = call(() => bridge.stat(path()));
-    s.ranged = new RangedFile(io, path(), st.size, st.version, watchOf(bridge, call, path, st.ino));
+    s.ranged = rangedFileOf(bridge, call, path, io);
     return s.ranged;
   }
 

@@ -35,8 +35,8 @@ export class FileChanges {
 
   publish(...paths: string[]): void {
     for (const path of paths) {
-      const g = Atomics.add(this.view, GEN, 1) + 1;
-      const at = RING + (g % RING_SIZE) * SLOT;
+      const g = (Atomics.add(this.view, GEN, 1) + 1) | 0;
+      const at = RING + (g & (RING_SIZE - 1)) * SLOT;
       Atomics.store(this.view, at, 0);
       Atomics.store(this.view, at + 1, changeHash(normal(path)));
       Atomics.store(this.view, at, g);
@@ -57,13 +57,14 @@ export class ChangeView {
 
   changedSince(seen: number, path: string): { now: number; changed: boolean } {
     const now = Atomics.load(this.view, GEN);
-    if (now === seen) return { now, changed: false };
-    if (now - seen > RING_SIZE) return { now, changed: true };
+    const distance = (now - seen) >>> 0;
+    if (distance === 0) return { now, changed: false };
+    if (distance > RING_SIZE) return { now, changed: true };
     const hash = changeHash(normal(path));
-    for (let g = seen + 1; g <= now; g++) {
-      const at = RING + (g % RING_SIZE) * SLOT;
-      const tag = Atomics.load(this.view, at);
-      if (tag !== g) return { now, changed: true };
+    for (let i = 1; i <= distance; i++) {
+      const g = (seen + i) | 0;
+      const at = RING + (g & (RING_SIZE - 1)) * SLOT;
+      if (Atomics.load(this.view, at) !== g) return { now, changed: true };
       const hit = Atomics.load(this.view, at + 1) === hash;
       if (Atomics.load(this.view, at) !== g) return { now, changed: true };
       if (hit) return { now, changed: true };

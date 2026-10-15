@@ -508,8 +508,10 @@ async function createExclusive(fs: KernelFs, path: string, owner?: NewOwner): Pr
 const appending = new Map<string, Promise<unknown>>();
 
 async function appended(fs: KernelFs, path: string, body: Uint8Array): Promise<number> {
-  const before = appending.get(path) ?? Promise.resolve();
+  const key = (await fs.realpath?.(path, true).catch(() => undefined)) ?? path;
+  const before = appending.get(key) ?? Promise.resolve();
   const run = before.then(async () => {
+    if (fs.append) return fs.append(path, body);
     const size = (await fs.stat(path)).size;
     const ops = rangedOps(fs);
     if (ops) await ops.pwrite(path, size, body, true);
@@ -522,9 +524,9 @@ async function appended(fs: KernelFs, path: string, body: Uint8Array): Promise<n
     return size + body.length;
   });
   const settled = run.catch(() => undefined);
-  appending.set(path, settled);
+  appending.set(key, settled);
   void settled.then(() => {
-    if (appending.get(path) === settled) appending.delete(path);
+    if (appending.get(key) === settled) appending.delete(key);
   });
   return run;
 }

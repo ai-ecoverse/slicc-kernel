@@ -772,6 +772,7 @@ export class WasiFds {
     const made = !existing && this.createNew(path, oflags);
     const empty = made || (oflags & OFLAGS.TRUNC) !== 0;
     if (existing?.ranged) (this.fs as { invalidate?(): void }).invalidate?.();
+    const seen = this.fs.changes?.now();
     const st = existing?.ranged || !existing ? this.fs.stat(path) : existing;
     const ranged = st.ranged ? st.size : undefined;
     const asked =
@@ -782,6 +783,7 @@ export class WasiFds {
     const watch = view && {
       view,
       ino: st.ino,
+      seen,
       stat: (at: string) => {
         (this.fs as { invalidate?(): void }).invalidate?.();
         return this.fs.stat(at);
