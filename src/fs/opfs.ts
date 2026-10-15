@@ -1053,9 +1053,10 @@ export class OpfsFs implements KernelFs {
       this.forget(physical);
       this.refuse(physical);
       await dir.getDirectoryHandle(name, { create: true });
+      const now = Date.now();
       const made = `${parent.path === '/' ? '' : parent.path}/${name}`;
       await this.stampNew(made, owner, true);
-      this.touch(parent.path, made);
+      this.touch(now, parent.path, made);
     });
   }
 
@@ -1074,9 +1075,10 @@ export class OpfsFs implements KernelFs {
       this.forget(physical);
       this.refuse(physical);
       await dir.getFileHandle(name, { create: true });
+      const now = Date.now();
       const made = `${parent.path === '/' ? '' : parent.path}/${name}`;
       await this.stampNew(made, owner, false);
-      this.touch(parent.path, made);
+      this.touch(now, parent.path, made);
     });
   }
 
