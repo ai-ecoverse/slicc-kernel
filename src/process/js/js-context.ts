@@ -1,7 +1,13 @@
 import { SIG } from '../../kernel/signals.ts';
 import { parseSyncFsStat, type SyncFsBridgeStat } from '../../realm/sync-fs-wire.ts';
 import { KERNEL_VERSION } from '../../version.ts';
-import { childOps, type JsChild, type JsExited, type JsSpawnOptions } from './js-children.ts';
+import {
+  childOps,
+  type JsChild,
+  type JsExited,
+  type JsSpawnOptions,
+  type JsWaitOptions,
+} from './js-children.ts';
 import {
   devAsync,
   devExists,
@@ -120,7 +126,7 @@ export interface JsProgramContext {
   };
   sync: JsSyncContext;
   spawn(options: JsSpawnOptions): Promise<JsChild>;
-  wait(pid: number): Promise<JsExited>;
+  wait(pid: number, options?: JsWaitOptions): Promise<JsExited>;
   kill(pid: number, signal?: JsSignal): Promise<void>;
   sudo(args: readonly string[]): Promise<JsSudoAnswer>;
   umask(mask?: number): Promise<number>;
