@@ -51,7 +51,7 @@ import { NO_TRANSPORT } from './net/network.ts';
 import { Resolver } from './net/resolver.ts';
 import { Routes } from './net/routes.ts';
 import type { MountLine, ProcessListing } from './proc-info.ts';
-import type { ForkState } from './protocol.ts';
+import type { DlState, ForkState } from './protocol.ts';
 import { PTY_OPS, type PtySyscall, type PtyTable, ptsNumber, ptySyscall } from './pty.ts';
 import { type RunRequest, runChild } from './run-child.ts';
 import type { SealedBroker, SealedCaller } from './sealed.ts';
@@ -505,6 +505,8 @@ export interface WasmProcessOptions {
 
   blockedBits?: () => number;
 
+  dl?: DlState;
+
   raise?: (sig: number) => void;
 
   exitNow?: (status: number) => void;
@@ -594,6 +596,7 @@ export class WasmProcess {
     this.nodes = options.nodes ?? new VfsNodes(options.fs);
     if (!options.nodes) options.openFiles?.add(this.nodes);
     this.children.onChildState = () => this.signal(SIG.CHLD);
+    this.seedDl(options.dl);
     this.children.onReap = (pid) => {
       this.deathSignals.delete(pid);
       options.onReap?.(pid);
@@ -1565,7 +1568,7 @@ export class WasmProcess {
     switch (req.op) {
       case 'proc-fork':
         this.refuseIfPending(req.restart);
-        return { ok: true, kind: 'json', json: await this.children.fork(req.state) };
+        return { ok: true, kind: 'json', json: await this.children.fork(this.withDl(req.state)) };
       case 'proc-spawn':
         this.refuseIfPending(req.restart);
         return { ok: true, kind: 'json', json: await this.spawn(req) };
@@ -1717,6 +1720,22 @@ export class WasmProcess {
     free: [] as number[],
     live: new Set<number>(),
   };
+
+  private withDl(state: ForkState): ForkState {
+    if (this.dlLog.length === 0) return state;
+    const { next, handle, free, live } = this.closures;
+    const dl = { log: [...this.dlLog], next, handle, free: [...free], live: [...live] };
+    return { ...state, dl };
+  }
+
+  private seedDl(dl: DlState | undefined): void {
+    if (!dl) return;
+    this.dlLog.push(...dl.log);
+    this.closures.next = dl.next;
+    this.closures.handle = dl.handle;
+    this.closures.free.push(...dl.free);
+    for (const index of dl.live) this.closures.live.add(index);
+  }
 
   private allocateClosure(floor: number): number {
     const index = this.closures.free.pop() ?? Math.max(floor, this.closures.next);

@@ -358,6 +358,7 @@ async function instantiate(
   threads: WasiThreads | undefined,
   {
     thread = false,
+    forked,
     stats,
     signals,
     program,
@@ -365,6 +366,7 @@ async function instantiate(
     path,
   }: {
     thread?: boolean;
+    forked?: Pick<WasiForkState, 'tls' | 'modules'>;
     stats?: WasiStats;
     signals?: WasiSignals;
     program?: ProgramOption;
@@ -448,15 +450,30 @@ async function instantiate(
       wasixHost.types.register(() => read(path), instance, table, sync ? TABLE_BASE : 0);
     }
   }
-  if (sync) {
-    sync.linker.bindMain(instance, !thread);
-    if (path !== undefined) sync.linker.mainPath = path;
-
-    if (thread) sync.catchUp();
-
-    sync.linker.bindMainGot();
-  }
+  if (sync) bindLinker(host, sync, instance, { thread, forked, path });
   return { instance, driver };
+}
+
+function bindLinker(
+  host: WasiHost,
+  sync: LinkSync,
+  instance: WebAssembly.Instance,
+  at: {
+    thread: boolean;
+    forked: Pick<WasiForkState, 'tls' | 'modules'> | undefined;
+    path: string | undefined;
+  }
+): void {
+  sync.linker.bindMain(instance, !at.thread);
+  if (at.path !== undefined) sync.linker.mainPath = at.path;
+  host.linkedTls = () => sync.linker.tlsBases();
+  host.linkedModules = () => sync.linker.compiled();
+  if (at.forked) {
+    sync.linker.forkedTls = new Map(at.forked.tls ?? []);
+    sync.linker.cache = at.forked.modules;
+  }
+  if (at.thread || at.forked) sync.catchUp();
+  sync.linker.bindMainGot();
 }
 
 function procTree(call: (req: WasmSyscall) => unknown, pid: number): ProcTree {
@@ -680,6 +697,7 @@ export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike
   }
   const program = await programImports(init.program, host, transport, MAIN_TID);
   const { instance, driver } = await instantiate(host, module, memory, threads, {
+    ...(fork ? { forked: fork } : {}),
     stats,
     signals,
     foreign: init.program.foreign,

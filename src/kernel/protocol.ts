@@ -1,5 +1,6 @@
 import type { ForeignResults, ImportedMemory } from '../process/wasi/wasi-module.ts';
 import type { WasiForkState } from '../process/wasi/wasix-fork.ts';
+import type { LinkRecord } from '../process/wasi/wasix-linker.ts';
 import type { BlockedMask } from '../realm/sync-sab-wire.ts';
 import type { Cred } from './cred.ts';
 import type { DeviceMeta, KernelFdKind } from './fd-table.ts';
@@ -42,6 +43,15 @@ export interface ForkState {
   streams?: ForkStream[];
   cwd?: string;
   wasi?: WasiForkState;
+  dl?: DlState;
+}
+
+export interface DlState {
+  log: LinkRecord[];
+  next: number;
+  handle: number;
+  free: number[];
+  live: number[];
 }
 
 export interface KernelStreamEntry {

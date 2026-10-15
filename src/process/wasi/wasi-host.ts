@@ -187,6 +187,10 @@ export class WasiHost {
 
   sigmask: WasiSigmask | undefined;
 
+  linkedTls: (() => Array<[number, number]>) | undefined;
+
+  linkedModules: (() => Record<string, WebAssembly.Module>) | undefined;
+
   interrupted: (() => boolean) | undefined;
 
   quietly: (fn: () => void) => void = (fn) => fn();
