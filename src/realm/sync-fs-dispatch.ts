@@ -180,11 +180,12 @@ async function run(
     case 'readdir-stat':
       return json(await readdirStat(fs, path));
     case 'mkdir': {
+      const plain = plainDirMode(entry, req.mode);
+      const fresh = plain !== undefined && !(await fs.exists(path));
       await (req.exclusive
         ? mkdirExclusive(entry, path, req.mode)
         : fs.mkdir(path, mkdirOptions(entry, req.mode)));
-      const plain = plainDirMode(entry, req.mode);
-      if (plain !== undefined) await fs.chmod(path, plain);
+      if (fresh) await fs.chmod(path, plain);
       return done;
     }
     case 'rm':
