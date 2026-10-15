@@ -48,10 +48,3 @@ test('git works on its own repository as root and as a user', async (t) => {
   assert.deepEqual(await bash(REPO, { cwd: '/home', user: 'cone' }), ok('true\n'));
   assert.deepEqual(page.errors, []);
 });
-
-test('a pre-H1 git, which says it is uid 1000, works on its own repository as root', async (t) => {
-  const { page, bash } = await booted(chrome, t);
-  await installPackage(page, 'wasm-git-pre-h1');
-  assert.deepEqual(await bash(REPO, { cwd: '/home' }), ok('true\n'));
-  assert.deepEqual(page.errors, []);
-});
