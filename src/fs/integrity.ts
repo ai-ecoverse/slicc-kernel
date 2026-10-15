@@ -7,7 +7,27 @@ export type IntegrityLookup = (path: string) => string | undefined | Promise<str
 export interface IntegrityOptions {
   readonly lookup: IntegrityLookup;
   readonly unknown?: 'allow' | 'deny';
+  readonly sources?: readonly string[];
 }
+
+export const SOURCE_SUFFIXES: readonly string[] = [
+  '.js',
+  '.mjs',
+  '.cjs',
+  '.json',
+  '.py',
+  '.pyc',
+  '.pth',
+  '.zip',
+  '.so',
+  '.wasm',
+  '.sh',
+];
+
+const EXEC_OPS = { failed: 'exec-integrity', unknown: 'exec-unverified' } as const;
+const READ_OPS = { failed: 'read-integrity', unknown: 'read-unverified' } as const;
+
+type Ops = typeof EXEC_OPS | typeof READ_OPS;
 
 export interface IntegrityCaller {
   pid: number;
@@ -27,6 +47,16 @@ export function integrityOptions(options: IntegrityOptions | undefined): void {
     throw new TypeError('protect.integrity.lookup must be a function');
   }
   integrityUnknown(options);
+  integritySources(options);
+}
+
+export function integritySources(options: { sources?: unknown } | undefined): readonly string[] {
+  const sources = options?.sources ?? SOURCE_SUFFIXES;
+  const suffix = (s: unknown) => typeof s === 'string' && /^\.[^/]+$/.test(s);
+  if (!Array.isArray(sources) || !sources.every(suffix)) {
+    throw new TypeError('protect.integrity.sources must be a list of suffixes such as .js');
+  }
+  return [...sources];
 }
 
 export function integrityUnknown(options: { unknown?: string } | undefined): 'allow' | 'deny' {
@@ -52,6 +82,10 @@ export class Integrity {
   private readonly unknown: 'allow' | 'deny';
   private readonly report: DenialHook;
   private readonly unverified = new Set<string>();
+  private readonly unread = new Set<string>();
+  private readonly sources: readonly string[];
+  private readonly passed = new Set<string>();
+  private generation = 0;
 
   constructor(
     prefixes: readonly string[],
@@ -63,12 +97,13 @@ export class Integrity {
     this.root = root;
     this.lookup = options.lookup;
     this.unknown = integrityUnknown(options);
+    this.sources = integritySources(options);
     this.report = report;
   }
 
-  private async real(path: string, asked?: string): Promise<Checked | undefined> {
+  private async real(path: string, asked?: string, known?: string): Promise<Checked | undefined> {
     const at = normalizePath(path);
-    const real = (await this.root.realpath?.(at, true).catch(() => undefined)) ?? at;
+    const real = known ?? (await this.root.realpath?.(at, true).catch(() => undefined)) ?? at;
     if (isProtected(this.prefixes, real)) return { real, name: real };
     const names = asked === undefined ? [] : await namesOf(this.root, asked);
     if (real !== at) names.push(...(await namesOf(this.root, at)));
@@ -112,6 +147,71 @@ export class Integrity {
     const { bytes } = read;
     const keyed =
       read.version === undefined ? { bytes } : { bytes, key: `${real}\0${read.version}` };
+    await this.verify(name, bytes, caller, EXEC_OPS);
+    return keyed;
+  }
+
+  get readsChecked(): boolean {
+    return this.sources.length > 0;
+  }
+
+  async readSource(
+    path: string,
+    caller: IntegrityCaller,
+    plain: () => Promise<Uint8Array>
+  ): Promise<Uint8Array> {
+    const found = await this.source(path);
+    return found === undefined ? plain() : this.checked(found, caller, plain);
+  }
+
+  async openSource(path: string, caller: IntegrityCaller, real?: string): Promise<void> {
+    const found = await this.source(path, real);
+    if (found === undefined) return;
+    if (found.name === found.real && this.root.version) {
+      if (this.passed.has(`${found.real}\0${await this.root.version(found.real)}`)) return;
+    }
+    await this.checked(found, caller, () => this.root.readFileBuffer(found.real));
+  }
+
+  private async checked(
+    found: Checked,
+    caller: IntegrityCaller,
+    plain: () => Promise<Uint8Array>
+  ): Promise<Uint8Array> {
+    const { real, name } = found;
+    if (name !== real || !this.root.readVersioned) {
+      const bytes = await plain();
+      await this.verify(name, bytes, caller, READ_OPS);
+      return bytes;
+    }
+    const { bytes, version } = await this.root.readVersioned(real);
+    await this.pass(`${real}\0${version}`, () => this.verify(name, bytes, caller, READ_OPS));
+    return bytes;
+  }
+
+  private async pass(key: string, check: () => Promise<void>): Promise<void> {
+    if (this.passed.has(key)) return;
+    const generation = this.generation;
+    await check();
+    if (generation === this.generation) this.passed.add(key);
+  }
+
+  private async source(path: string, known?: string): Promise<Checked | undefined> {
+    if (this.sources.length === 0) return undefined;
+    const found = await this.real(path, undefined, known);
+    if (found === undefined) return undefined;
+    const suffixed = (p: string) => this.sources.some((s) => p.endsWith(s));
+    if (suffixed(found.real) || suffixed(found.name) || suffixed(normalizePath(path))) return found;
+    const st = await this.root.stat(found.real).catch(() => undefined);
+    return st?.isFile && ((st.mode ?? 0) & 0o111) !== 0 ? found : undefined;
+  }
+
+  private async verify(
+    name: string,
+    bytes: Uint8Array,
+    caller: IntegrityCaller,
+    ops: Ops
+  ): Promise<void> {
     const actual = await sha256(bytes);
     const denial = { pid: caller.pid, uid: caller.uid, path: name, actual };
     const tagged = caller.tag !== undefined ? { tag: caller.tag } : {};
@@ -119,28 +219,34 @@ export class Integrity {
     try {
       expected = await this.expected(name);
     } catch {
-      this.say({ ...denial, ...tagged, op: 'exec-integrity', errno: 'EACCES' });
+      this.say({ ...denial, ...tagged, op: ops.failed, errno: 'EACCES' });
       throw fsError('EACCES', `integrity lookup failed: ${name}`);
     }
-    if (expected === undefined) {
-      if (this.unknown === 'allow') {
-        if (!this.unverified.has(name)) {
-          this.unverified.add(name);
-          this.say({ ...denial, ...tagged, op: 'exec-unverified', errno: 'ENODATA' });
-        }
-        return keyed;
+    if (expected === actual) return;
+    if (expected === undefined && this.unknown === 'allow') {
+      const seen = ops === EXEC_OPS ? this.unverified : this.unread;
+      if (!seen.has(name)) {
+        seen.add(name);
+        this.say({ ...denial, ...tagged, op: ops.unknown, errno: 'ENODATA' });
       }
-    } else if (expected === actual) {
-      return keyed;
+      return;
     }
     const known = expected !== undefined ? { expected } : {};
-    this.say({ ...denial, ...tagged, ...known, op: 'exec-integrity', errno: 'EACCES' });
+    this.say({ ...denial, ...tagged, ...known, op: ops.failed, errno: 'EACCES' });
     throw fsError('EACCES', `integrity check failed: ${name}`);
   }
 
   forget(path?: string): void {
-    for (const name of [...this.unverified]) {
-      if (path === undefined || isProtected([path], name)) this.unverified.delete(name);
+    this.generation++;
+    for (const seen of [this.unverified, this.unread]) {
+      for (const name of [...seen]) {
+        if (path === undefined || isProtected([path], name)) seen.delete(name);
+      }
+    }
+    for (const key of [...this.passed]) {
+      if (path === undefined || isProtected([path], key.slice(0, key.indexOf('\0')))) {
+        this.passed.delete(key);
+      }
     }
   }
 

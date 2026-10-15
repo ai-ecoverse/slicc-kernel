@@ -5,6 +5,7 @@ import { dispatchSyncFs } from '../realm/sync-fs-dispatch.ts';
 import {
   mintSyncFsToken,
   revokeSyncFsToken,
+  type SourceCheck,
   type SyncFsTokenEntry,
 } from '../realm/sync-fs-token-registry.ts';
 import type { SyncFsResult } from '../realm/sync-fs-wire.ts';
@@ -83,6 +84,7 @@ export interface SpawnWasmOptions {
   owners?: boolean;
   links?: number;
   fresh?: (path: string, umask: number) => void;
+  source?: SourceCheck;
   sealed?: SealedBroker;
   outputFilter?: (file: OpenFile) => OpenFile;
   clipboard?: ClipboardBroker;
@@ -359,6 +361,7 @@ function holdingToken(
     ...(opts.dac ? { dac: opts.dac, pid: opts.pid, created: caller.created } : {}),
     ...(opts.links !== undefined ? { links: opts.links } : {}),
     ...(opts.fresh ? { fresh: (path: string) => opts.fresh?.(path, caller.umask()) } : {}),
+    ...(opts.source ? { source: opts.source } : {}),
     fs: opts.fs,
     cwd: opts.cwd,
     ...(opts.statfs ? { statfs: opts.statfs } : {}),
@@ -394,6 +397,7 @@ function processOptions(
     ...(opts.outputFilter ? { outputFilter: opts.outputFilter } : {}),
     ...(opts.clipboard ? { clipboard: opts.clipboard, ...clipboardName(opts) } : {}),
     ...(opts.readonlyAt ? { readonlyAt: opts.readonlyAt } : {}),
+    ...(opts.source ? { source: opts.source } : {}),
     ...(opts.dac ? { guard: { dac: opts.dac, fs: opts.fs, created, ...linksOf(opts) } } : {}),
     ...(opts.identity ? { identity: opts.identity } : {}),
     ...(opts.onSyscall ? { onSyscall: opts.onSyscall } : {}),

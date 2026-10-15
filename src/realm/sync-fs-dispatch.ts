@@ -199,6 +199,11 @@ async function runMkdir(
   return done;
 }
 
+function readSource(entry: SyncFsTokenEntry, path: string): Promise<Uint8Array> {
+  const plain = () => entry.fs.readFileBuffer(path);
+  return entry.source ? entry.source.read(path, plain) : plain();
+}
+
 async function run(
   entry: SyncFsTokenEntry,
   path: string,
@@ -208,7 +213,7 @@ async function run(
   const { fs, cwd } = entry;
   switch (req.op) {
     case 'read':
-      return { ok: true, kind: 'bytes', bytes: await fs.readFileBuffer(path) };
+      return { ok: true, kind: 'bytes', bytes: await readSource(entry, path) };
     case 'write':
       await fs.writeFile(path, req.body ?? new Uint8Array(0), ownerFor(entry, 0o666));
       return done;
@@ -341,6 +346,7 @@ async function holdOp(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest)
   if (on && open) {
     await opening(entry, path, mode);
     const real = await entry.fs.realpath?.(path, true).catch(() => path);
+    await entry.source?.open(path, real);
     return json(entry.hold?.(path, on, open, real) ?? null);
   }
   entry.hold?.(path, on, open, undefined, req.handle);

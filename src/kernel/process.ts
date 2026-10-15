@@ -12,6 +12,7 @@ import type { KernelFs, NewOwner, Perm } from '../fs/types.ts';
 import type { MountCall } from '../mount/syscall.ts';
 import { inProc, ProcTree, procAlias } from '../process/wasi/wasi-procfs.ts';
 import type { LinkRecord } from '../process/wasi/wasix-linker.ts';
+import type { SourceCheck } from '../realm/sync-fs-token-registry.ts';
 import type { SyncFsResult } from '../realm/sync-fs-wire.ts';
 import type { SudoCall, SudoResult } from '../sudo.ts';
 import {
@@ -420,6 +421,8 @@ const HOSTS_ONLY = new Resolver({ routes: new Routes() });
 
 export interface WasmProcessOptions {
   ignored?: number;
+
+  source?: SourceCheck;
 
   umask?: number;
 
@@ -895,6 +898,7 @@ export class WasmProcess {
     await refuseReadonly(this.options.fs, req.path, req.flags, req);
     if (this.writesAt(req)) await this.options.fs.mayChange?.(req.path, !req.exclusive);
     await this.mayOpen(req);
+    await this.sourceOpen(req);
     const fd = this.fds.install(heldFile(), 3);
     try {
       const nodes = this.nodes;
@@ -977,6 +981,13 @@ export class WasmProcess {
       req.create === true ||
       req.exclusive === true
     );
+  }
+
+  private async sourceOpen(req: Extract<FdSyscall, { op: 'fd-open-vfs' }>): Promise<void> {
+    const { source } = this.options;
+    const inherited = req.orphan || req.contents !== undefined || req.handle !== undefined;
+    if (!source || inherited || req.pin !== undefined || req.exclusive) return;
+    await source.open(req.path);
   }
 
   private async mayOpen(req: Extract<FdSyscall, { op: 'fd-open-vfs' }>): Promise<void> {
