@@ -187,6 +187,14 @@ static int timeouts(void) {
   double t2 = now_ms();
   printf("zero %d %s, timed %d %s\n", n, t1 - t0 < 50 ? "prompt" : "slow", m, t2 - t1 >= 120 ? "not early" : "early");
   printf("maxevents %s\n", epoll_wait(ep, &ev, 0, 0) < 0 ? strerror(errno) : "accepted");
+  int early = 0;
+  for (int i = 0; i < 200; i++) {
+    int ms = 1 + i % 5;
+    double a = now_ms();
+    epoll_wait(ep, &ev, 1, ms);
+    if (now_ms() - a < ms) early++;
+  }
+  printf("short waits early %d of 200\n", early);
   return 0;
 }
 
