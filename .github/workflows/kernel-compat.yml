@@ -197,7 +197,7 @@ jobs:
   attach:
     needs: [published, release]
     if: ${{ !cancelled() && needs.published.outputs.version != '' && needs.release.outputs.artifact != '' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.ref == 'refs/heads/main' && vars.CERT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
       contents: write
