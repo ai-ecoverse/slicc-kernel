@@ -1,0 +1,59 @@
+name: Release branch
+
+on:
+  schedule:
+    - cron: '17 */2 * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'publish, or dry-run (the Release run shows the next version and publishes nothing)'
+        type: choice
+        options: [publish, dry-run]
+        default: publish
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-branch
+  cancel-in-progress: false
+
+jobs:
+  advance:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: write
+      checks: read
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          MODE: ${{ inputs.mode || 'publish' }}
+        run: |
+          set -euo pipefail
+          say() { echo "$1" | tee -a "$GITHUB_STEP_SUMMARY"; }
+          main=$(gh api "repos/$REPO/git/ref/heads/main" --jq .object.sha)
+          release=$(gh api "repos/$REPO/git/ref/heads/release" --jq .object.sha)
+          if [ "$main" != "$release" ]; then
+            status=$(gh api "repos/$REPO/compare/$release...$main" --jq .status)
+            if [ "$status" != ahead ]; then
+              say "release ($release) is not an ancestor of main ($main): compare says $status; not moving it"
+              exit 1
+            fi
+            green=$(gh api "repos/$REPO/commits/$main/check-runs?check_name=ci%20%2F%20test&per_page=100" \
+              --jq '[.check_runs[] | select(.status == "completed" and .conclusion == "success")] | length')
+            if [ "$green" -eq 0 ]; then
+              say "ci / test is not green at main ($main); release stays at $release"
+              exit 0
+            fi
+            gh api -X PATCH "repos/$REPO/git/refs/heads/release" -f sha="$main" -F force=false > /dev/null
+            say "release: $release -> $main (fast-forward, ci / test green)"
+          elif [ "$MODE" = publish ]; then
+            say "release is already at main ($main); nothing to release"
+            exit 0
+          fi
+          gh workflow run release.yml -R "$REPO" --ref release -f mode="$MODE"
+          say "dispatched Release on release ($MODE)"

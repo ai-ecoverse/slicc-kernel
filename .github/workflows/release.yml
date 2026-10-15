@@ -1,9 +1,13 @@
 name: Release
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
+    inputs:
+      mode:
+        description: 'publish, or dry-run (semantic-release --dry-run: shows the next version, publishes nothing)'
+        type: choice
+        options: [publish, dry-run]
+        default: publish
 
 permissions:
   contents: read
@@ -14,7 +18,7 @@ concurrency:
 
 jobs:
   release:
-    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/release'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -31,12 +35,12 @@ jobs:
 
       - id: head
         run: |
-          git fetch -q origin main
+          git fetch -q origin release
           if [ "$(git rev-parse HEAD)" = "$(git rev-parse FETCH_HEAD)" ] || git tag --points-at HEAD | grep -q '^v'; then
             echo "current=true" >> "$GITHUB_OUTPUT"
           else
             echo "current=false" >> "$GITHUB_OUTPUT"
-            echo "main has moved past $(git rev-parse --short HEAD); the run for the newer commit releases it" >> "$GITHUB_STEP_SUMMARY"
+            echo "release has moved past $(git rev-parse --short HEAD); the run dispatched for the newer commit releases it" >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - if: steps.head.outputs.current == 'true'
@@ -52,14 +56,19 @@ jobs:
         if: steps.head.outputs.current == 'true'
         run: echo "tags=$(git tag --points-at HEAD | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
 
+      - if: steps.head.outputs.current == 'true' && inputs.mode == 'dry-run'
+        run: npx semantic-release --dry-run
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - id: release
-        if: steps.head.outputs.current == 'true'
+        if: steps.head.outputs.current == 'true' && inputs.mode != 'dry-run'
         run: npx semantic-release
         continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - if: steps.head.outputs.current == 'true'
+      - if: steps.head.outputs.current == 'true' && inputs.mode != 'dry-run'
         run: node tools/release-recover.mjs
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
