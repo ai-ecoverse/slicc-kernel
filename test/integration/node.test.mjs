@@ -354,6 +354,31 @@ test('a package that names another in slicc.replaces wins their shared commands 
   assert.equal(r.stdout, 'plain 0\nheif 0\nheif\nremoved 0\nplain\n', r.stderr);
 });
 
+test('a user with a non-canonical home runs a command from its global packages', async (t) => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
+  await kernel.users.add({ name: 'cone', home: '/srv/../srv/cone/' });
+  const pkg = '/srv/cone/.local/share/pnpm/global/5/g1/node_modules/k3-tool';
+  await kernel.writeFile(
+    `${pkg}/package.json`,
+    JSON.stringify({
+      name: 'k3-tool',
+      version: '1.0.0',
+      slicc: { abi: 'js', commands: { k3tool: { module: 'bin/tool.mjs' } } },
+    })
+  );
+  await kernel.writeFile(
+    `${pkg}/bin/tool.mjs`,
+    'export default async function main(ctx) { await ctx.write(1, "tool ran\\n"); return 0; }\n'
+  );
+  const r = await kernel.run(['bash', '-c', 'k3tool; command -v k3tool'], {
+    cwd: '/srv/cone',
+    user: 'cone',
+  });
+  assert.equal(r.stdout, 'tool ran\n/srv/cone/.local/share/pnpm/bin/k3tool\n', r.stderr);
+});
+
 test('a WASI process killed by SIGKILL keeps the bytes it wrote but never fsynced', async () => {
   const kernel = await createNodeKernel();
   for (const pkg of ['wasm-bash', 'wasm-coreutils', 'wasix-python']) await install(kernel, pkg);

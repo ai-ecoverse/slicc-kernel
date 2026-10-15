@@ -1,4 +1,4 @@
-import { type IntegrityOptions, integrityUnknown } from './integrity.ts';
+import { type IntegrityOptions, integritySources, integrityUnknown } from './integrity.ts';
 import { type FsStat, fsError, type HeldEntry, type KernelFs, normalizePath } from './types.ts';
 
 export interface Protection {
@@ -10,7 +10,7 @@ export interface Protection {
 export interface ProtectInit {
   paths: string[];
   writers?: string[];
-  integrity?: { unknown: 'allow' | 'deny' };
+  integrity?: { unknown: 'allow' | 'deny'; sources?: readonly string[] };
 }
 
 export function protectInit(protection: ProtectInit | Protection): ProtectInit {
@@ -19,8 +19,18 @@ export function protectInit(protection: ProtectInit | Protection): ProtectInit {
   return {
     paths: [...protection.paths],
     ...(writers.length > 0 ? { writers } : {}),
-    ...(integrity ? { integrity: { unknown: integrityUnknown(integrity) } } : {}),
+    ...(integrity ? { integrity: integrityInit(integrity) } : {}),
   };
+}
+
+function integrityInit(integrity: {
+  unknown?: string;
+  sources?: readonly string[];
+}): NonNullable<ProtectInit['integrity']> {
+  const unknown = integrityUnknown(integrity);
+  return integrity.sources === undefined
+    ? { unknown }
+    : { unknown, sources: integritySources(integrity) };
 }
 
 export function writerTags(protection: Protection | undefined): ReadonlySet<string> {

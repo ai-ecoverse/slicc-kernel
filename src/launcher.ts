@@ -131,6 +131,7 @@ import {
   type ImportedMemory,
   importedMemory,
 } from './process/wasi/wasi-module.ts';
+import type { SourceCheck } from './realm/sync-fs-token-registry.ts';
 import { anyBlocked, type BlockedMask } from './realm/sync-sab-wire.ts';
 import { type ApproveHook, Sudo, type SudoCall, type SudoResult } from './sudo.ts';
 import { SUDO_COMMAND, SUDO_PATH, SUDO_SOURCE } from './sudo-command.ts';
@@ -1363,6 +1364,22 @@ export class Launcher {
     );
   }
 
+  private sourceCheck(pid: number, writer: boolean): { source?: SourceCheck } {
+    const { integrity } = this;
+    if (!integrity?.readsChecked || writer) return {};
+    const caller = (): IntegrityCaller => ({
+      pid,
+      uid: this.credOf(pid).euid,
+      tag: this.tagOf(pid),
+    });
+    return {
+      source: {
+        read: (path, plain) => integrity.readSource(path, caller(), plain),
+        open: (path, real) => integrity.openSource(path, caller(), real),
+      },
+    };
+  }
+
   private treeScrubs(req: StartRequest): Scrubber[] | undefined {
     const inherited = req.ppid !== undefined ? this.scrubs.get(req.ppid) : undefined;
     return req.scrub ? [...(inherited ?? []), req.scrub] : inherited;
@@ -1407,6 +1424,7 @@ export class Launcher {
         ? { fresh: (path: string, umask: number) => this.freshModules.add(path, umask, pid) }
         : {}),
       ...(this.owners ? { owners: true } : {}),
+      ...this.sourceCheck(pid, stack.writer),
       ...linksOf(req),
       sealed: this.sealed,
       ...(scrubs ? { outputFilter: (file: OpenFile) => scrubbedAll(file, scrubs) } : {}),
@@ -1876,7 +1894,8 @@ export class Launcher {
       maySignal(sender, this.credOf(target)) ||
       (sig === SIG.CONT && session !== undefined && this.jobs.sidOf(target) === session) ||
       (from !== undefined && this.imageOf(from) === this.imageOf(target)) ||
-      (from !== undefined && this.granted.get(this.jobs.shown(target)) === from);
+      (from !== undefined && this.granted.get(this.jobs.shown(target)) === from) ||
+      (from !== undefined && this.granted.get(this.jobs.pgidOf(target) ?? 0) === from);
     if (pid === -1) {
       const sender = from === undefined ? undefined : this.imageOf(from);
       return this.killAll(sig, (member) => this.imageOf(member) !== sender, may);

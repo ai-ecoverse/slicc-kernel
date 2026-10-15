@@ -15,6 +15,7 @@ import type { FsStat, KernelFs, NewOwner, Perm } from '../fs/types.ts';
 import type { MountCall } from '../mount/syscall.ts';
 import { inProc, ProcTree, procAlias } from '../process/wasi/wasi-procfs.ts';
 import type { LinkRecord } from '../process/wasi/wasix-linker.ts';
+import type { SourceCheck } from '../realm/sync-fs-token-registry.ts';
 import type { SyncFsResult } from '../realm/sync-fs-wire.ts';
 import type { SudoCall, SudoResult } from '../sudo.ts';
 import {
@@ -437,6 +438,8 @@ const HOSTS_ONLY = new Resolver({ routes: new Routes() });
 
 export interface WasmProcessOptions {
   ignored?: number;
+
+  source?: SourceCheck;
 
   umask?: number;
 
@@ -919,6 +922,7 @@ export class WasmProcess {
     if (this.writesAt(req)) await this.options.fs.mayChange?.(req.path, !req.exclusive);
     await this.mayOpen(req);
     const marked = await this.markedPath(req);
+    await this.sourceOpen(marked === undefined ? req : { ...req, path: marked });
     const fs = marked === undefined ? this.options.fs : (this.options.noLinks as KernelFs);
     const fd = this.fds.install(heldFile(), 3);
     try {
@@ -996,6 +1000,13 @@ export class WasmProcess {
       req.create === true ||
       req.exclusive === true
     );
+  }
+
+  private async sourceOpen(req: Extract<FdSyscall, { op: 'fd-open-vfs' }>): Promise<void> {
+    const { source } = this.options;
+    const inherited = req.orphan || req.contents !== undefined || req.handle !== undefined;
+    if (!source || inherited || req.pin !== undefined || req.exclusive) return;
+    await source.open(req.path);
   }
 
   private async markedPath(
@@ -1666,7 +1677,10 @@ export class WasmProcess {
     const { file, argv, env, cwd, cred, caller } = answer.grant;
     const stdio = [{ fd: 0 }, { fd: 1 }, { fd: 2 }];
     return {
-      pid: await this.children.spawn({ file, argv, env, cwd }, stdio, [], { cred, caller }),
+      pid: await this.children.spawn({ file, argv, env, cwd, pgid: 0 }, stdio, [], {
+        cred,
+        caller,
+      }),
     };
   }
 

@@ -1,3 +1,4 @@
+import { inDevTree } from '../../fs/dev-removal.ts';
 import { physicalPath } from '../../fs/physical-path.ts';
 import { localCpuNanos } from '../../kernel/cpu-clock.ts';
 import { type Cred, type CredChange, MAX_GROUPS } from '../../kernel/cred.ts';
@@ -694,6 +695,7 @@ export class WasiHost {
         void o.fs.rmdir(at(dirfd, p, l)),
       path_unlink_file: (dirfd: number, p: number, l: number) => {
         const path = at(dirfd, p, l);
+        if (inDevTree(path)) return void o.fs.unlink(path);
         const st = o.fs.lstat(path);
         if (st.isDirectory) throw new WasiError('EISDIR');
         const linked = linkedOf(st);
