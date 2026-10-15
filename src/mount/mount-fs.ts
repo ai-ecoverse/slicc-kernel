@@ -52,6 +52,7 @@ export interface MountDeps {
   open(type: string, spec: MountSpec): Promise<OpenedDriver>;
   busy(target: string): boolean;
   changed?(...paths: string[]): void;
+  reshaped?(): void;
   timeoutMs?: number;
   owners?: boolean;
 }
@@ -511,6 +512,7 @@ export class MountTable {
     };
     mounted = mount;
     this.mounts.set(target, mount);
+    this.deps.reshaped?.();
     this.notes.delete(target);
     return this.list().find((m) => m.target === target) as MountEntry;
   }
@@ -527,6 +529,7 @@ export class MountTable {
     if (!detach && this.deps.busy(at)) throw errnoError('EBUSY', `${at} has open files`);
     this.notes.delete(at);
     this.mounts.delete(at);
+    this.deps.reshaped?.();
     const waits = [...this.sessions]
       .filter(([, s]) => s.mount === mount)
       .map(([real]) => this.commit(real));

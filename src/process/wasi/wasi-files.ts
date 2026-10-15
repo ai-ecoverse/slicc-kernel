@@ -1,4 +1,4 @@
-import { RangedFile, type RangedWatch } from '../../fs/ranged.ts';
+import { RangedFile, type RangedWatch, watchedChange } from '../../fs/ranged.ts';
 import type { DeviceAccess, KernelFdKind } from '../../kernel/fd-table.ts';
 import type {
   ChownArgs,
@@ -88,8 +88,8 @@ export class FileBuffer {
 
   load(): Uint8Array {
     const view = this.watch?.view;
-    if (this.data && view && !this.dirty) {
-      const { now, changed } = view.changedSince(this.seen, this.path);
+    if (this.data && view && this.watch && !this.dirty) {
+      const { now, changed } = watchedChange(this.watch, this.seen, this.path);
       this.seen = now;
       if (changed) this.data = undefined;
     }
@@ -339,6 +339,29 @@ export function physical(
     } else {
       done.push(part);
     }
+  }
+  return `/${done.join('/')}`;
+}
+
+export function realOf(fs: Pick<SyncFsPosixBridge, 'lstat' | 'readlink'>, path: string): string {
+  let done: string[] = [];
+  let todo = path.split('/').filter((part) => part !== '' && part !== '.');
+  let hops = 0;
+  while (todo.length > 0) {
+    const part = todo.shift() as string;
+    if (part === '..') {
+      done.pop();
+      continue;
+    }
+    const at = `/${[...done, part].join('/')}`;
+    if (!fs.lstat(at).isSymbolicLink) {
+      done.push(part);
+      continue;
+    }
+    if (++hops > MAX_LINKS) throw new WasiError('ELOOP');
+    const target = fs.readlink(at);
+    if (target.startsWith('/')) done = [];
+    todo = [...target.split('/').filter((p) => p !== '' && p !== '.'), ...todo];
   }
   return `/${done.join('/')}`;
 }

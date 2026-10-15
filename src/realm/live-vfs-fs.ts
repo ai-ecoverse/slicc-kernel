@@ -1,6 +1,12 @@
 import { permits, X_OK } from '../fs/access.ts';
 import type { ChangeView } from '../fs/changes.ts';
-import { RangedFile, type RangedIo } from '../fs/ranged.ts';
+import {
+  linkedWatch,
+  RangedFile,
+  type RangedIo,
+  type RangedWatch,
+  watchedChange,
+} from '../fs/ranged.ts';
 import { inodeOf } from '../fs/types.ts';
 import type { Cred } from '../kernel/cred.ts';
 import { wasiErrno } from '../process/wasi-errno.ts';
@@ -30,6 +36,7 @@ const SEEK_END = 2;
 
 interface LiveNodeState {
   named?: number | undefined;
+  watch?: RangedWatch | undefined;
   stat?: SyncFsBridgeStat;
   statAt?: number;
 
@@ -219,7 +226,8 @@ const EARLY_WHOLE_FILE = 64 * 1024;
 
 function needsLoad(s: LiveNodeState, view: ChangeView | undefined, path: () => string): boolean {
   if (s.loaded && view && !s.dirty) {
-    const { now, changed } = view.changedSince(s.seen ?? 0, path());
+    const watch = s.watch ?? { view, stat: () => ({ size: s.len }) };
+    const { now, changed } = watchedChange(watch, s.seen ?? 0, path());
     s.seen = now;
     if (changed) {
       s.loaded = false;
@@ -231,6 +239,16 @@ function needsLoad(s: LiveNodeState, view: ChangeView | undefined, path: () => s
   return true;
 }
 
+function loadedWatch(
+  bridge: SyncFsPosixBridge,
+  call: <T>(fn: () => T) => T,
+  path: () => string,
+  st: SyncFsBridgeStat | { size: number }
+): RangedWatch | undefined {
+  const view = bridge.changes;
+  return view && linkedWatch({ view, stat: () => call(() => bridge.stat(path())) }, st);
+}
+
 function rangedFileOf(
   bridge: SyncFsPosixBridge,
   call: <T>(fn: () => T) => T,
@@ -240,7 +258,8 @@ function rangedFileOf(
   const seen = bridge.changes?.now();
   const stat = () => call(() => bridge.stat(path()));
   const st = stat();
-  const watch = bridge.changes && { view: bridge.changes, ino: st.ino, seen, stat };
+  const watch =
+    bridge.changes && linkedWatch({ view: bridge.changes, ino: st.ino, seen, stat }, st);
   return new RangedFile(io, path(), st.size, st.version, watch);
 }
 const O_APPEND = 0o2000;
@@ -431,10 +450,10 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
   function ensureLoaded(node: LiveFsNode): void {
     const s = node.live;
     if (!needsLoad(s, bridgeOf(node).changes, () => liveNodePath(linked.holder(node)))) return;
-    const bytes = call(() => fileIo(node).readFile(liveNodePath(linked.holder(node))));
-    s.data = bytes;
-    s.len = bytes.length;
-    s.loaded = true;
+    const path = () => liveNodePath(linked.holder(node));
+    const bytes = call(() => fileIo(node).readFile(path()));
+    Object.assign(s, { data: bytes, len: bytes.length, loaded: true });
+    s.watch = loadedWatch(bridgeOf(node), call, path, s.stat ?? { size: bytes.length });
   }
 
   function rangedOf(node: LiveFsNode): RangedFile | undefined {

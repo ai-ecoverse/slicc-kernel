@@ -428,6 +428,7 @@ export class VfsNodes implements UnlinkHolder {
   }
 
   private know(node: VfsNode, id: string): void {
+    this.reshaped();
     node.id = id;
     if (!this.byId.has(id)) this.byId.set(id, node);
   }
@@ -439,6 +440,7 @@ export class VfsNodes implements UnlinkHolder {
   }
 
   private forget(node: VfsNode): void {
+    this.reshaped();
     for (const p of this.namesOf(node)) this.byPath.delete(p);
     if (node.id !== undefined && this.byId.get(node.id) === node) this.byId.delete(node.id);
   }
@@ -456,6 +458,48 @@ export class VfsNodes implements UnlinkHolder {
     return true;
   }
 
+  holdsAny(): boolean {
+    return this.byPath.size > 0;
+  }
+
+  private epoch = 0;
+
+  private readonly plain = new Map<string, number>();
+
+  reshaped(): void {
+    this.epoch++;
+    this.plain.clear();
+  }
+
+  plainAt(path: string): boolean {
+    return this.plain.get(path) === this.epoch;
+  }
+
+  get shape(): number {
+    return this.epoch;
+  }
+
+  notePlain(path: string, shape: number): void {
+    if (shape !== this.epoch) return;
+    if (this.plain.size >= 4096) this.plain.clear();
+    this.plain.set(path, shape);
+  }
+
+  holdsName(name: string): boolean {
+    for (const path of this.byPath.keys())
+      if (path.slice(path.lastIndexOf('/') + 1) === name) return true;
+    return false;
+  }
+
+  holdsLinked(): boolean {
+    return this.byId.size > 0;
+  }
+
+  holdingId(id: string): VfsNode | undefined {
+    const node = this.byId.get(id);
+    return node && !node.orphaned ? node : undefined;
+  }
+
   holding(path: string): VfsNode | undefined {
     if (this.byPath.size === 0) return undefined;
     const node = this.byPath.get(path);
@@ -469,6 +513,7 @@ export class VfsNodes implements UnlinkHolder {
   }
 
   private create(path: string, id: string | undefined, node: VfsNode): VfsNode {
+    this.reshaped();
     node.onDirty = () => this.changed?.(node.path);
     this.byPath.set(path, node);
     if (id !== undefined) this.know(node, id);
@@ -644,15 +689,43 @@ export async function refuseReadonly(
   if (st?.readonly) throw new KernelError('EROFS');
 }
 
+const baseName = (path: string) => path.slice(path.lastIndexOf('/') + 1);
+
+async function byRealPath(fs: KernelFs, nodes: VfsNodes, at: string) {
+  const real = await fs.realpath?.(at, true).catch(() => undefined);
+  return real === undefined || real === at ? undefined : nodes.holding(real);
+}
+
+async function aliasOf(fs: KernelFs, nodes: VfsNodes, at: string): Promise<VfsNode | undefined> {
+  if (nodes.holdsName(baseName(at))) {
+    const named = await byRealPath(fs, nodes, at);
+    if (named) return named;
+  }
+  const st = await fs.lstat(at).catch(() => undefined);
+  if (!st) return undefined;
+  if (st.isSymbolicLink) return byRealPath(fs, nodes, at);
+  if (st.ino === undefined || (st.nlink ?? 1) < 2 || !nodes.holdsLinked()) return undefined;
+  return nodes.holdingId(`${st.dev ?? 0}:${st.ino}`);
+}
+
+async function heldAt(fs: KernelFs, nodes: VfsNodes, at: string): Promise<VfsNode | undefined> {
+  const held = nodes.holding(at);
+  if (held || !nodes.holdsAny() || nodes.plainAt(at)) return held;
+  const shape = nodes.shape;
+  const found = await aliasOf(fs, nodes, at);
+  if (!found) nodes.notePlain(at, shape);
+  return found;
+}
+
 function heldIo(fs: KernelFs, nodes: VfsNodes, changed: (path: string) => void): Partial<KernelFs> {
   const ranged = rangedOps(fs);
-  const node = (path: string) => nodes.holding(fs.resolvePath('/', path));
+  const node = (path: string) => heldAt(fs, nodes, fs.resolvePath('/', path));
   const write = async <T>(
     path: string,
     op: (held: VfsNode) => Promise<T>,
     fallback: () => Promise<T>
   ) => {
-    const held = node(path);
+    const held = await node(path);
     if (!held) return fallback();
     const out = await held.serial(async () => {
       const done = await op(held);
@@ -660,6 +733,7 @@ function heldIo(fs: KernelFs, nodes: VfsNodes, changed: (path: string) => void):
       return done;
     });
     changed(fs.resolvePath('/', path));
+    if (held.path !== fs.resolvePath('/', path)) changed(held.path);
     return out;
   };
   return {
@@ -685,18 +759,18 @@ function heldIo(fs: KernelFs, nodes: VfsNodes, changed: (path: string) => void):
       ),
     async stat(path) {
       const st = await fs.stat(path);
-      const held = st.isFile ? node(path) : undefined;
+      const held = st.isFile ? await node(path) : undefined;
       return held ? { ...st, size: await held.serial(() => held.size()) } : st;
     },
     async readFileBuffer(path) {
-      const held = node(path);
+      const held = await node(path);
       if (!held) return fs.readFileBuffer(path);
       return held.serial(async () => held.pread(await held.size(), 0));
     },
     ...(ranged
       ? {
-          pread: (path: string, at: number, n: number, version?: string) => {
-            const held = node(path);
+          pread: async (path: string, at: number, n: number, version?: string) => {
+            const held = await node(path);
             return held ? held.serial(() => held.pread(n, at)) : ranged.pread(path, at, n, version);
           },
           pwrite: (path: string, at: number, bytes: Uint8Array, transfer?: boolean) =>
@@ -750,9 +824,9 @@ export function keepingOpen(
         nodes.renamed(a, b);
       });
     },
-    writeFile: (path, content, owner) => {
+    writeFile: async (path, content, owner) => {
       const at = fs.resolvePath('/', path);
-      const held = nodes.holding(at);
+      const held = await heldAt(fs, nodes, at);
       if (!held) return nodes.onEntry(at, () => fs.writeFile(path, content, owner));
       const bytes = typeof content === 'string' ? new TextEncoder().encode(content) : content;
       return held.serial(async () => {
@@ -760,6 +834,7 @@ export function keepingOpen(
         await held.pwrite(bytes, 0);
         await held.flush();
         changed(at);
+        if (held.path !== at) changed(held.path);
       });
     },
     createExclusive: async (path, owner) =>
