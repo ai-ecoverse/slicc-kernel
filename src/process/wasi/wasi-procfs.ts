@@ -1,5 +1,6 @@
 import type { MountLine, ProcessListing } from '../../kernel/proc-info.ts';
 import {
+  type ChownArgs,
   type SyncFsBridgeStat,
   type SyncFsFileIo,
   type SyncFsPosixBridge,
@@ -442,8 +443,8 @@ export function procfsBridge<T extends SyncFsPosixBridge>(fs: T, tree: ProcTree)
   }
   const { chown } = fs;
   if (chown) {
-    over.chown = (p: string, uid?: number, gid?: number, follow?: boolean) =>
-      readOnly([[p, follow === true]], () => chown.call(fs, p, uid, gid, follow));
+    over.chown = (p: string, ...rest: ChownArgs) =>
+      readOnly([[p, rest[2] === true]], () => chown.call(fs, p, ...rest));
   }
   return new Proxy(fs, {
     get: (target, key, receiver) =>

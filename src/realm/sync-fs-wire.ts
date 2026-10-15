@@ -103,6 +103,13 @@ export type SyncFsFileIo = Pick<
   'readFile' | 'writeFile' | 'pread' | 'pwrite' | 'truncate'
 >;
 
+export type ChownArgs = [
+  uid: number | undefined,
+  gid: number | undefined,
+  follow?: boolean,
+  handle?: number,
+];
+
 export interface SyncFsPosixBridge {
   pinned?(handle: number): SyncFsFileIo;
   kept?(handle: number): boolean;
@@ -133,13 +140,7 @@ export interface SyncFsPosixBridge {
   ): number | undefined;
   access?(path: string, mode: number, kind?: AccessKind, nofollow?: boolean): void;
   create?(path: string, mode?: number): void;
-  chown?(
-    path: string,
-    uid: number | undefined,
-    gid: number | undefined,
-    follow?: boolean,
-    handle?: number
-  ): void;
+  chown?(path: string, ...rest: ChownArgs): void;
   owners?: boolean;
   links?: boolean;
   readdirStat(path: string): Array<[string, SyncFsBridgeStat | null]>;
