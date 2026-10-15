@@ -101,6 +101,7 @@ export interface SpawnWasmOptions {
   cwd: string;
   fds: FdTable;
   fs: SyncFsTokenEntry['fs'];
+  noLinks: SyncFsTokenEntry['fs'];
   createWorker: () => WasmWorkerLike;
   onError?: (message: string) => void;
   spawner?: ChildSpawner;
@@ -363,6 +364,7 @@ function holdingToken(
     ...(opts.fresh ? { fresh: (path: string) => opts.fresh?.(path, caller.umask()) } : {}),
     ...(opts.source ? { source: opts.source } : {}),
     fs: opts.fs,
+    noLinks: opts.noLinks,
     cwd: opts.cwd,
     ...(opts.statfs ? { statfs: opts.statfs } : {}),
     hold: (path, on, open, real, handle) => holds.hold(path, on, open, real, handle),

@@ -229,6 +229,7 @@ export class OpfsFs implements KernelFs {
   private readonly remote: RemoteWatch | undefined;
   private readonly ranged: boolean;
   private owners = false;
+  private rejectLinks = false;
   private readonly mounts: { mounted?: (path: string) => boolean } = {};
   private readonly locks: LockManagerLike | undefined;
   private readonly lockPrefix: string;
@@ -406,6 +407,10 @@ export class OpfsFs implements KernelFs {
     return view(this, { guarded: [] }) as unknown as KernelFs;
   }
 
+  noLinks(): KernelFs {
+    return view(this, { rejectLinks: true }) as unknown as KernelFs;
+  }
+
   private refuse(path: string, holding = false): void {
     if (isProtected(this.guarded, path) || (holding && holdsProtected(this.guarded, path))) {
       throw fsError('EROFS', path);
@@ -575,6 +580,7 @@ export class OpfsFs implements KernelFs {
         const link = await this.linkAlong(current);
         if (!link) throw err;
         if (link.path === current && !follow) return { path: current, link };
+        if (this.rejectLinks) throw fsError('ELOOP', path);
         const target = `${link.link}${current.slice(link.path.length)}`;
         if (target.split('/').includes('..')) {
           const resolved = await this.physical(parentOf(link.path), target, hops + 1, path);
@@ -610,6 +616,7 @@ export class OpfsFs implements KernelFs {
         const st = await this.lstat(at);
         if (!st.isSymbolicLink && !st.isDirectory) throw fsError('ENOTDIR', at);
         if (!st.isSymbolicLink) done.push(part);
+        else if (this.rejectLinks) throw fsError('ELOOP', of);
         else if (++hops > MAX_LINKS) throw fsError('ELOOP', path);
         else {
           const link = await this.readlink(at);
@@ -690,8 +697,7 @@ export class OpfsFs implements KernelFs {
     file?: ReturnType<typeof setTimeout> | undefined;
   } = {};
 
-  private touch(...dirs: string[]): void {
-    const now = Date.now();
+  private touch(now: number, ...dirs: string[]): void {
     for (const dir of dirs) {
       this.dirTimes.set(dir, now);
       this.dirDirty.add(dir);
@@ -945,7 +951,7 @@ export class OpfsFs implements KernelFs {
       const handle = await this.inDir(dir, (parent) =>
         parent.getFileHandle(name, { create: true })
       );
-      if (!existed) this.touch(parentOf(target));
+      if (!existed) this.touch(Date.now(), parentOf(target));
       return [handle, existed, target];
     } catch (err) {
       const code = (err as { name?: unknown })?.name === 'TypeMismatchError' ? 'EISDIR' : null;
@@ -1035,9 +1041,10 @@ export class OpfsFs implements KernelFs {
     if (parent.handle?.kind !== 'directory') throw fsError('ENOTDIR', path);
     this.refuse(resolvePath(parent.path, baseOf(path)));
     await parent.handle.getDirectoryHandle(baseOf(path), { create: true });
+    const now = Date.now();
     const made = `${parent.path === '/' ? '' : parent.path}/${baseOf(path)}`;
     await this.stampNew(made, owner, true);
-    this.touch(parent.path, made);
+    this.touch(now, parent.path, made);
   }
 
   private async mkdirExcl(path: string, owner?: NewOwner): Promise<void> {
@@ -1055,9 +1062,10 @@ export class OpfsFs implements KernelFs {
       this.forget(physical);
       this.refuse(physical);
       await dir.getDirectoryHandle(name, { create: true });
+      const now = Date.now();
       const made = `${parent.path === '/' ? '' : parent.path}/${name}`;
       await this.stampNew(made, owner, true);
-      this.touch(parent.path, made);
+      this.touch(now, parent.path, made);
     });
   }
 
@@ -1076,9 +1084,10 @@ export class OpfsFs implements KernelFs {
       this.forget(physical);
       this.refuse(physical);
       await dir.getFileHandle(name, { create: true });
+      const now = Date.now();
       const made = `${parent.path === '/' ? '' : parent.path}/${name}`;
       await this.stampNew(made, owner, false);
-      this.touch(parent.path, made);
+      this.touch(now, parent.path, made);
     });
   }
 
@@ -1116,22 +1125,23 @@ export class OpfsFs implements KernelFs {
       } catch (err) {
         throw translate(err, path);
       }
+      const now = Date.now();
       const file = found.handle.kind === 'file';
       if (!file || this.remote?.watched()) this.changed(found.path);
       else this.forget(found.path);
       this.movePending(found.path);
       if (file && this.meta.absent?.(found.path)) {
-        this.touch(parentOf(found.path));
+        this.touch(now, parentOf(found.path));
         return;
       }
       if (file && this.meta.removeFile) {
         await this.meta.removeFile(found.path);
-        this.touch(parentOf(found.path));
+        this.touch(now, parentOf(found.path));
         return;
       }
     }
     await this.meta.remove([found.path]);
-    this.touch(parentOf(found.path));
+    this.touch(Date.now(), parentOf(found.path));
   }
 
   links(): boolean {
@@ -1141,13 +1151,14 @@ export class OpfsFs implements KernelFs {
   async link(from: string, to: string, follow?: boolean): Promise<void> {
     await (follow ? this.stat(from) : this.lstat(from));
     if (!(await this.stat(parentOf(to))).isDirectory) throw fsError('ENOTDIR', to);
-    if (
-      await this.lstat(to).then(
-        () => true,
-        () => false
-      )
-    )
-      throw fsError('EEXIST', to);
+    const taken = await this.lstat(to).then(
+      () => true,
+      (err) => {
+        if (missing(err)) return false;
+        throw err;
+      }
+    );
+    if (taken) throw fsError('EEXIST', to);
     throw fsError('EPERM', `${from}: this file system has no hard links`);
   }
 
@@ -1189,7 +1200,7 @@ export class OpfsFs implements KernelFs {
     if (source.link) {
       if (target?.handle) await this.rm(destination);
       await this.meta.move(source.path, destination, carry);
-      this.touch(parentOf(source.path), parent.path);
+      this.touch(Date.now(), parentOf(source.path), parent.path);
       return;
     }
     const dir = parent.handle as FileSystemDirectoryHandle;
@@ -1212,7 +1223,7 @@ export class OpfsFs implements KernelFs {
     }
     if (copied) await this.restamp(destination, timed);
     this.changed(source.path, destination);
-    this.touch(parentOf(source.path), parent.path);
+    this.touch(Date.now(), parentOf(source.path), parent.path);
   }
 
   private async modified(path: string): Promise<number> {
@@ -1289,7 +1300,7 @@ export class OpfsFs implements KernelFs {
         ...fields,
       }))
     );
-    this.touch(parent.path);
+    this.touch(Date.now(), parent.path);
   }
 
   async realpath(path: string, follow: boolean): Promise<string> {

@@ -14,7 +14,7 @@ import {
   X_OK,
 } from './access.ts';
 import { inGroup } from './owners.ts';
-import { type KernelFs, normalizePath, type Perm } from './types.ts';
+import { type FsStat, type KernelFs, normalizePath, type Perm } from './types.ts';
 import { joinName, parentOf } from './walk.ts';
 
 export interface Denial {
@@ -225,6 +225,20 @@ export async function chmodMode(g: Guard, path: string, mode: number): Promise<n
   const perm = (await ownerOnly(g, 'chmod', path, true)).perm;
   if (!g.dac.enforcing || !perm || g.cred.euid === 0 || inGroup(g.cred, perm.gid)) return mode;
   return mode & ~S_ISGID;
+}
+
+export function heldChmodMode(g: Guard, path: string, st: FsStat, mode: number): number {
+  const perm = permOf(st);
+  if (g.cred.euid !== 0 && perm.uid !== g.cred.euid) deny(g, 'fchmod', path, 'EPERM');
+  if (!g.dac.enforcing || g.cred.euid === 0 || inGroup(g.cred, perm.gid)) return mode;
+  return mode & ~S_ISGID;
+}
+
+export function heldRetimable(g: Guard, path: string, st: FsStat, now: boolean): void {
+  const perm = permOf(st);
+  if (g.cred.euid === 0 || perm.uid === g.cred.euid) return;
+  if (!now) deny(g, 'futimens', path, 'EPERM');
+  else if (!permits(g.cred, perm, W_OK, false)) deny(g, 'futimens', path);
 }
 
 export async function retimable(g: Guard, op: string, path: string, now = false) {
