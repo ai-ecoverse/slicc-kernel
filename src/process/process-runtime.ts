@@ -1,3 +1,4 @@
+import type { Cred } from '../kernel/cred.ts';
 import type { DeviceMeta, HeldMeta, PollState } from '../kernel/fd-table.ts';
 import { hostnameOf } from '../kernel/net/loopback-names.ts';
 import type { MountLine, ProcessListing } from '../kernel/proc-info.ts';
@@ -520,6 +521,22 @@ function bridgeFlags(init: WasmProcessInitMsg): { owners?: boolean; links?: bool
   return { ...(init.owners ? { owners: true } : {}), ...(init.links ? { links: true } : {}) };
 }
 
+function credSyncTransport(
+  gated: SyncSabTransport,
+  early: () => void,
+  cred: Cred | undefined
+): SyncSabTransport {
+  return {
+    call: (req, timeoutMs, label) => {
+      if (!FS_OPS.has(req.op)) early();
+      const r = gated.call(req, timeoutMs, label);
+      if (cred && req.op === 'proc-setcred' && r.ok && r.kind === 'json')
+        Object.assign(cred, r.json);
+      return r;
+    },
+  };
+}
+
 export async function runWasmProcess(
   init: WasmProcessInitMsg,
   port: SabPostLike,
@@ -542,12 +559,7 @@ export async function runWasmProcess(
   );
   const gated = signals.transport();
   let early = (): void => {};
-  const transport: SyncSabTransport = {
-    call: (req, timeoutMs, label) => {
-      if (!FS_OPS.has(req.op)) early();
-      return gated.call(req, timeoutMs, label);
-    },
-  };
+  const transport = credSyncTransport(gated, () => early(), init.cred);
   const sys = kernelSys(transport);
   const encoder = new TextEncoder();
   const say = (fd: number) => (text: string) => sys.write(fd, encoder.encode(`${text}\n`));
@@ -636,6 +648,7 @@ export async function runWasmProcess(
     bridge: createSyncFsSabBridge(transport, bridgeFlags(init)),
     cwd: init.cwd,
     warn: deps.warn ?? say(2),
+    cred: init.owners ? init.cred : undefined,
   });
   early = () => signals.quiet(() => vfs.flushDirty());
   const sigpipe = (): boolean => running.sliccSigpipe?.() === 1;
@@ -674,9 +687,9 @@ export async function runWasmProcess(
     transport,
     Fs: running.FS,
     env: init.env,
+    pid: init.pid,
     beforeSpawn: () => vfs.flush(),
     afterChild: () => vfs.invalidate(),
-    pid: init.pid,
     raise: (sig) => running.sliccRaise?.(sig),
     restartable,
     memory: () => memory,
@@ -696,6 +709,15 @@ export async function runWasmProcess(
     sigpipe,
     restartable,
   });
+  return runWithFlush(running, init, streams, vfs);
+}
+
+function runWithFlush(
+  running: RunningModule,
+  init: WasmProcessInitMsg,
+  streams: KernelStreams,
+  vfs: { flush(): void }
+): number {
   try {
     return streams.exitStatus(runMain(running, init));
   } finally {
