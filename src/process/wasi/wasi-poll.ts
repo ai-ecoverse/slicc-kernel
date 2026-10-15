@@ -93,47 +93,69 @@ function readyEvents(
     }));
 }
 
-export function pollOneoff(
-  deps: {
-    mem: WasiMemory;
-    fds: WasiFds;
-    kernel: WasiKernel;
-    now: ClockNow;
+interface PollDeps {
+  mem: WasiMemory;
+  fds: WasiFds;
+  kernel: WasiKernel;
+  now: ClockNow;
 
-    interruptWakes?: boolean;
-  },
+  interruptWakes?: boolean;
+
+  entered?: boolean;
+}
+
+function selectOnce(
+  deps: PollDeps,
+  read: number[],
+  write: number[],
+  timeoutMs: number
+): { ready: { read: number[]; write: number[]; hangup?: number[] }; interrupted: boolean } {
+  try {
+    const ready = deps.kernel.call({ op: 'fd-select', read, write, timeoutMs });
+    return { ready: ready as { read: number[]; write: number[] }, interrupted: false };
+  } catch (e) {
+    if (!deps.interruptWakes || (e as { code?: unknown }).code !== 'EINTR') throw e;
+    return { ready: { read: [], write: [] }, interrupted: true };
+  }
+}
+
+function waitEvents(
+  deps: PollDeps,
+  subs: readonly Subscription[],
+  { events, read, write }: { events: PollEvent[]; read: number[]; write: number[] },
+  entered: boolean
+): boolean {
+  const earliest = subs.reduce((min, s) => Math.min(min, s.deadline), Infinity);
+  const timeout = (): number => {
+    if (events.length > 0 || entered) return 0;
+    return earliest === Infinity ? -1 : Math.max(0, Math.ceil(earliest - performance.now()));
+  };
+  for (;;) {
+    const { ready, interrupted } = selectOnce(deps, read, write, timeout());
+    events.push(...readyEvents(subs, ready));
+    if (interrupted) return true;
+    if (events.length > 0 || entered || earliest === Infinity) return false;
+    if (performance.now() >= earliest) return false;
+  }
+}
+
+export function pollOneoff(
+  deps: PollDeps,
   inPtr: number,
   outPtr: number,
   nsubs: number,
   neventsPtr: number
 ): number {
   if (nsubs === 0) return E.INVAL;
-  const { mem, kernel } = deps;
+  const { mem } = deps;
   const subs = readSubscriptions(mem, inPtr, nsubs, deps.now);
-  const { events, read, write } = classify(deps.fds, subs);
-  let interrupted = false;
-  const earliest = subs.reduce((min, s) => Math.min(min, s.deadline), Infinity);
-  const expired = () => performance.now() >= earliest;
-  if (read.length > 0 || write.length > 0 || events.length === 0) {
-    do {
-      let timeoutMs = -1;
-      if (events.length > 0) timeoutMs = 0;
-      else if (earliest !== Infinity)
-        timeoutMs = Math.max(0, Math.ceil(earliest - performance.now()));
-      let ready: unknown;
-      try {
-        ready = kernel.call({ op: 'fd-select', read, write, timeoutMs });
-      } catch (e) {
-        if (!deps.interruptWakes || (e as { code?: unknown }).code !== 'EINTR') throw e;
-        interrupted = true;
-        ready = { read: [], write: [] };
-      }
-      events.push(
-        ...readyEvents(subs, ready as { read: number[]; write: number[]; hangup?: number[] })
-      );
-    } while (events.length === 0 && !interrupted && earliest !== Infinity && !expired());
-  }
+  const found = classify(deps.fds, subs);
+  const { events, read, write } = found;
+  const entered = deps.entered === true && deps.interruptWakes !== true;
+  const waits = read.length > 0 || write.length > 0 || events.length === 0;
+  const interrupted = waits && waitEvents(deps, subs, found, entered);
   const after = performance.now();
+  if (entered && events.length === 0 && !subs.some((s) => s.deadline <= after)) return E.INTR;
 
   for (const s of subs) {
     if (s.type === EVENTTYPE.CLOCK && (interrupted || s.deadline <= after)) {

@@ -176,6 +176,8 @@ export class WasiHost {
 
   interruptWakes = false;
 
+  entered = false;
+
   onRaise: ((sig: number) => boolean) | undefined;
 
   muted: ((fd: number, data: Uint8Array) => boolean) | undefined;
@@ -453,6 +455,7 @@ export class WasiHost {
           kernel: this.o.kernel,
           now: (id) => this.now(id),
           interruptWakes: this.interruptWakes,
+          entered: this.entered,
         },
         inPtr,
         outPtr,
@@ -474,7 +477,7 @@ export class WasiHost {
       this.mem.view().setUint32(nevents, 0, true);
       if (mask.deliverUnblocked()) return E.INTR;
       if (n > 0) return this.poll(inPtr, outPtr, n, nevents);
-      return this.suspend();
+      return this.entered ? E.INTR : this.suspend();
     } finally {
       mask.deliverUnblocked();
       mask.restore(old);
