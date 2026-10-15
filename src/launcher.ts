@@ -312,6 +312,7 @@ const WASM_MAGIC = [0x00, 0x61, 0x73, 0x6d];
 const SHEBANG_MAX = 256;
 const MAX_INTERPRETERS = 4;
 const NOT_FOUND = 127;
+const NOT_EXECUTABLE = 126;
 const DECIDE_MS = 100;
 const INIT_PID = 1;
 const SHARED_DIRS = ['/tmp', '/home'];
@@ -1161,11 +1162,17 @@ export class Launcher {
     file: string,
     cwd: string,
     scope: string
-  ): Promise<'ENOEXEC' | 'ENOENT'> {
+  ): Promise<'ENOEXEC' | 'ENOENT' | 'EACCES'> {
     const path = this.fs.resolvePath(cwd, file);
+    if (await this.directory(file, path)) return 'EACCES';
     const head = await this.base.readFileBuffer(path).catch(() => null);
     if (!head || (head[0] === 0x23 && head[1] === 0x21)) return 'ENOENT';
     return binfmtOf(await this.interpreters(scope), path) ? 'ENOENT' : 'ENOEXEC';
+  }
+
+  private async directory(file: string, path: string): Promise<boolean> {
+    if (!file.includes('/') || COMMAND.test(file)) return false;
+    return (await this.base.stat(path).catch(() => undefined))?.isDirectory === true;
   }
 
   verifiedFs(fs: KernelFs): KernelFs {
@@ -2419,8 +2426,10 @@ export class Launcher {
     const stderr = collect(err, options.onStderr);
     const report = (message: string) => stderr(encoder.encode(`${message}\n`));
     if (!planned) {
-      report(`${file}: command not found`);
-      return { status: NOT_FOUND, stdout: concat(out), stderr: concat(err) };
+      const directory = await this.directory(file, this.fs.resolvePath(cwd, file));
+      report(`${file}: ${directory ? 'Is a directory' : 'command not found'}`);
+      const status = directory ? NOT_EXECUTABLE : NOT_FOUND;
+      return { status, stdout: concat(out), stderr: concat(err) };
     }
     const fds = new FdTable();
     fds.installAt(0, options.stdin ? bytesSource(options.stdin) : deviceFile('null'));
