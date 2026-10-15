@@ -1,4 +1,11 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["github>ai-ecoverse/slicc-shared-web"]
+  "extends": ["github>ai-ecoverse/slicc-shared-web"],
+  "packageRules": [
+    {
+      "description": "Old builds kept on purpose for the tests of programs without the credential ABI",
+      "matchDepNames": ["@ai-ecoverse/wasm-coreutils-pre-h1", "@ai-ecoverse/wasm-git-pre-h1"],
+      "enabled": false
+    }
+  ]
 }
