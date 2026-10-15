@@ -16,6 +16,7 @@ import {
   retimable,
   writable,
 } from '../fs/dac.ts';
+import { devRemoval } from '../fs/dev-removal.ts';
 import { chownAs, ownerOf } from '../fs/owners.ts';
 import {
   type FsStat,
@@ -659,10 +660,14 @@ async function guardAndResolve(
   };
 }
 
+const REMOVALS: ReadonlySet<SyncFsOp> = new Set<SyncFsOp>(['unlink', 'rmdir', 'rm']);
+
 async function dispatchOne(entry: SyncFsTokenEntry, req: SyncFsRequest): Promise<SyncFsResult> {
   const { fs, cwd } = entry;
   try {
     const path = fs.resolvePath(cwd, req.path);
+    const device = REMOVALS.has(req.op) ? devRemoval(path, entry.cred?.()) : undefined;
+    if (device) return { ok: false, errno: device, message: `${path}: a device entry stays` };
     const held = await byHandle(entry, path, req);
     if (held) return held;
     if (req.op === 'access') return await accessOp(entry, path, req);

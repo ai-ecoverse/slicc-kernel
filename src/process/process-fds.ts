@@ -1,3 +1,4 @@
+import { devRemoval } from '../fs/dev-removal.ts';
 import { hostnameOf, hostsFile } from '../kernel/net/loopback-names.ts';
 import type { MountLine } from '../kernel/proc-info.ts';
 import { type LiveFsNode, type LiveLinkFs, linkLive, liveNodePath } from '../realm/live-vfs-fs.ts';
@@ -622,14 +623,18 @@ export function wasmMemory(
   return undefined;
 }
 
-export function fdOfPath(path: string, cwd: string): number | undefined {
+function absoluteOf(path: string, cwd: string): string {
   const parts: string[] = [];
   for (const part of `${path.startsWith('/') ? '' : cwd}/${path}`.split('/')) {
     if (part === '' || part === '.') continue;
     if (part === '..') parts.pop();
     else parts.push(part);
   }
-  const abs = `/${parts.join('/')}`;
+  return `/${parts.join('/')}`;
+}
+
+export function fdOfPath(path: string, cwd: string): number | undefined {
+  const abs = absoluteOf(path, cwd);
   const std = ['/dev/stdin', '/dev/stdout', '/dev/stderr'].indexOf(abs);
   if (std >= 0) return std;
   const m = /^\/(?:dev|proc\/self)\/fd\/(\d+)$/.exec(abs);
@@ -722,6 +727,25 @@ export function useZeroDevices(Fs: ProcessFs): void {
     const dev = makedev.call(Fs, 1, minor);
     registerDevice.call(Fs, dev, { read: zeros, write, llseek: () => 0 });
     mkdev.call(Fs, path, CHAR_DEVICE, dev);
+  }
+}
+
+interface RemovalFs {
+  unlink?(path: string): void;
+  rmdir?(path: string): void;
+  sliccCred?: { euid: number };
+}
+
+export function useDevRemoval(Fs: ProcessFs): void {
+  const fs = Fs as unknown as RemovalFs;
+  for (const name of ['unlink', 'rmdir'] as const) {
+    const remove = fs[name];
+    if (typeof remove !== 'function') continue;
+    fs[name] = (path: string) => {
+      const refused = devRemoval(absoluteOf(path, Fs.cwd()), fs.sliccCred);
+      if (refused) throw new Fs.ErrnoError(wasiErrno(refused));
+      remove.call(Fs, path);
+    };
   }
 }
 
