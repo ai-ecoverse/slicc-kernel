@@ -40,6 +40,7 @@ import {
   kernelAccess,
   kernelLink,
   kernelUmask,
+  kernelUname,
   linuxDevices,
   type Memalign,
   noFollowUtimes,
@@ -382,6 +383,7 @@ const GLUE_TRAILER = [
   "  umask: typeof ___syscall_umask === 'function' ? ___syscall_umask : undefined,",
   "  faccessat: typeof ___syscall_faccessat === 'function' ? ___syscall_faccessat : undefined,",
   "  linkat: typeof ___syscall_linkat === 'function' ? ___syscall_linkat : undefined,",
+  "  uname: typeof ___syscall_uname === 'function' ? ___syscall_uname : undefined,",
   "  utimensat: typeof ___syscall_utimensat === 'function' ? ___syscall_utimensat : undefined,",
   "  getppid: typeof _slicc_getppid_js === 'function' ? _slicc_getppid_js : undefined,",
   "  resizeHeap: typeof _emscripten_resize_heap === 'function' ? _emscripten_resize_heap : undefined,",
@@ -540,6 +542,7 @@ function kernelWrappers(imports: WebAssembly.Imports, module: object, deps: Wrap
   noFollowUtimes(imports, fsOf, kernelGlue?.utimensat ?? utimensatOf(module), memory);
   kernelAccess(imports, fsOf, memory, kernelGlue);
   kernelLink(imports, fsOf, memory, kernelGlue);
+  kernelUname(imports, hostnameOf(init.env), memory, kernelGlue);
   const glue = ownValue<FdImports>(module, 'sliccFdImports');
   syncFsync(imports, fsOf, glue);
   positionalIo(imports, { glue, fs: fsOf, sys, memory });

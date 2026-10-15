@@ -2,6 +2,7 @@ import { devRemoval } from '../fs/dev-removal.ts';
 import { hostnameOf, hostsFile } from '../kernel/net/loopback-names.ts';
 import type { MountLine } from '../kernel/proc-info.ts';
 import { type LiveFsNode, type LiveLinkFs, linkLive, liveNodePath } from '../realm/live-vfs-fs.ts';
+import { OS_RELEASE } from '../version.ts';
 import type { ProcessFs, ProcessStream, ProcessSys } from './kernel-streams.ts';
 import { type LockDeps, recordLock } from './process-locks.ts';
 import { type PtyKernel, ptyIoctl } from './process-pty.ts';
@@ -252,6 +253,7 @@ export interface KernelImports {
   umask?: unknown;
   faccessat?: unknown;
   linkat?: unknown;
+  uname?: unknown;
   utimensat?: unknown;
   getppid?: unknown;
   resizeHeap?: unknown;
@@ -267,6 +269,7 @@ const LITERALS: Record<keyof KernelImports, string> = {
   umask: '__syscall_umask',
   faccessat: '__syscall_faccessat',
   linkat: '__syscall_linkat',
+  uname: '__syscall_uname',
   utimensat: '__syscall_utimensat',
   getppid: 'slicc_getppid_js',
   resizeHeap: 'emscripten_resize_heap',
@@ -983,6 +986,34 @@ export function kernelLink(
         return -errnoOf(err);
       }
       return own(olddirfd, oldpath, newdirfd, newpath, flags);
+    },
+    true
+  );
+}
+
+const UTS_FIELD = 65;
+
+export function kernelUname(
+  imports: WebAssembly.Imports,
+  hostname: string,
+  memory: () => WebAssembly.Memory | undefined,
+  glue?: KernelImports
+): void {
+  const fields = ['Linux', hostname, OS_RELEASE, '#1 SMP PREEMPT_DYNAMIC', 'wasm32', '(none)'];
+  const encoded = fields.map((f) => new TextEncoder().encode(f).subarray(0, UTS_FIELD - 1));
+  wrapImport(
+    imports,
+    'uname',
+    glue,
+    (own) => (buf) => {
+      const heap = memory();
+      if (!buf || !heap) return own(buf);
+      const bytes = new Uint8Array(heap.buffer, buf, UTS_FIELD * fields.length);
+      bytes.fill(0);
+      encoded.forEach((field, i) => {
+        bytes.set(field, i * UTS_FIELD);
+      });
+      return 0;
     },
     true
   );
