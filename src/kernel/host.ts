@@ -253,6 +253,15 @@ function unblocked(header: Int32Array): number {
   return Atomics.load(header, SAB_I_SIGNALS) & ~Atomics.load(header, SAB_I_BLOCKED);
 }
 
+function threadCall(
+  process: WasmProcess,
+  req: SyncSabDispatchRequest,
+  cancelled: AbortSignal,
+  block: () => void
+): Promise<SyncFsResult> {
+  return isWasmSyscall(req) ? process.syscall(req, cancelled, block) : dispatchSyncFs(req);
+}
+
 function threadSignalsOf(sab: SharedArrayBuffer): ThreadSignals {
   return { header: new Int32Array(sab, 0, SAB_HEADER_I32), interrupt: new AbortController() };
 }
@@ -507,8 +516,10 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
   process.keptHandle = (handle) => holds.keptFor(handle)?.hidden;
   const worker = opts.createWorker();
   const dying = new Dying();
-  const dispatch = (req: SyncSabDispatchRequest): Promise<SyncFsResult> =>
-    dying.serving(() => (isWasmSyscall(req) ? process.syscall(req) : dispatchSyncFs(req)));
+  const dispatch = (req: SyncSabDispatchRequest, block?: () => void): Promise<SyncFsResult> =>
+    dying.serving(() =>
+      isWasmSyscall(req) ? process.syscall(req, undefined, block) : dispatchSyncFs(req)
+    );
   const clocks = new ProcessClocks(sab, opts.program.abi !== 'js', process);
   const responder = attachSyncSabResponder(worker, sab, token, {
     dispatch: clocks.timed(undefined, dispatch),
@@ -583,10 +594,8 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     const tsignals = threadSignalsOf(tsab);
     if (thread.blocked) storeBlocked(tsignals.header, thread.blocked);
     threadSignals.set(thread.tid, tsignals);
-    const tdispatch = (req: SyncSabDispatchRequest): Promise<SyncFsResult> =>
-      dying.serving(() =>
-        isWasmSyscall(req) ? process.syscall(req, threadCancel(tsignals)) : dispatchSyncFs(req)
-      );
+    const tdispatch = (req: SyncSabDispatchRequest, block: () => void) =>
+      dying.serving(() => threadCall(process, req, threadCancel(tsignals), block));
     const tresponder = attachSyncSabResponder(tw, tsab, token, {
       dispatch: clocks.timed(clocks.thread(thread.tid, tsab), tdispatch),
     });

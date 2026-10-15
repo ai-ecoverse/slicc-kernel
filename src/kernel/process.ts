@@ -727,7 +727,13 @@ export class WasmProcess {
     for (const listener of this.stateListeners) listener('continued', SIG.CONT);
   }
 
-  async syscall(req: WasmSyscall, cancelled?: AbortSignal): Promise<SyncFsResult> {
+  private readonly blocks = new WeakMap<AbortSignal, () => void>();
+
+  async syscall(
+    req: WasmSyscall,
+    cancelled?: AbortSignal,
+    block?: () => void
+  ): Promise<SyncFsResult> {
     this.options.onSyscall?.(req);
     for (;;) {
       await this.resumed;
@@ -737,6 +743,7 @@ export class WasmProcess {
       const forward = () => scope.abort();
       if (cancelled?.aborted) scope.abort();
       cancelled?.addEventListener('abort', forward, { once: true });
+      if (block) this.blocks.set(scope.signal, block);
       const result = await this.dispatch(req, scope.signal).finally(() => {
         cancelled?.removeEventListener('abort', forward);
         this.waiting.delete(scope.signal);
@@ -830,6 +837,7 @@ export class WasmProcess {
     }
     if (this.options.hasPending?.() || cancelled.aborted) throw new KernelError('EINTR');
     if (owing) this.waiting.add(cancelled);
+    if (owing) this.blocks.get(cancelled)?.();
     return this.cancelSignal(cancelled);
   }
 
@@ -1582,6 +1590,7 @@ export class WasmProcess {
       case 'proc-identity':
         return { ok: true, kind: 'json', json: (await this.options.identity?.()) ?? null };
       case 'proc-exec': {
+        this.blocks.get(cancelled)?.();
         this.adoptExec(req.pid);
         this.options.jobs?.exec(this.pid, req.pid);
 
