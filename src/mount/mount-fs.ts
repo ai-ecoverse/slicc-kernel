@@ -14,6 +14,7 @@ import {
   redirectOf,
 } from '../fs/types.ts';
 import type { KeptFile, UnlinkHolder } from '../fs/unlinked.ts';
+import { view } from '../fs/view.ts';
 import { joinName, realDir, realTarget } from '../fs/walk.ts';
 import { DriverConnection, type DriverPortLike, errnoError } from './connection.ts';
 import type {
@@ -692,10 +693,12 @@ function noteExtent(extents: Array<[number, number]>, from: number, to: number):
 class MountFs implements KernelFs {
   private readonly table: MountTable;
   private readonly base: KernelFs;
+  private readonly rejectLinks: boolean;
 
-  constructor(table: MountTable, base: KernelFs) {
+  constructor(table: MountTable, base: KernelFs, rejectLinks = false) {
     this.table = table;
     this.base = base;
+    this.rejectLinks = rejectLinks;
   }
 
   private at(path: string): Located | undefined {
@@ -759,6 +762,7 @@ class MountFs implements KernelFs {
       throw err;
     }
     if (attr.kind !== 'symlink') return real;
+    if (this.rejectLinks) throw errnoError('ELOOP', path);
     if (hops >= MAX_LINKS) throw errnoError('ELOOP', path);
     const target = (await found.mount.conn.call({ op: 'readlink', path: found.rel })) as string;
     return this.follow(this.base.resolvePath(parentOf(real), target), hops + 1, create);
@@ -1484,5 +1488,10 @@ class MountFs implements KernelFs {
     this.writable(found.mount, real);
     this.table.forget(found.mount, real);
     await found.mount.conn.call({ op: 'setattr', path: found.rel, mtime: mtime.getTime() });
+  }
+
+  noLinks(): KernelFs {
+    const noLinkBase = this.base.noLinks?.() ?? this.base;
+    return view(this, { rejectLinks: true, base: noLinkBase }) as unknown as KernelFs;
   }
 }

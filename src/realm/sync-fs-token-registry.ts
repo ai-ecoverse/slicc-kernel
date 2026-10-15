@@ -5,6 +5,7 @@ import type { Cred } from '../kernel/cred.ts';
 
 export interface SyncFsTokenEntry {
   fs: KernelFs;
+  noLinks?: KernelFs;
   cwd: string;
   statfs?: (path: string) => Promise<{ quota: number; usage: number } | undefined>;
   hold?: (
