@@ -40,6 +40,12 @@ export type Taken = { value: unknown } | { error: string };
 
 export type Stdio = 'pipe' | 'inherit' | 'null';
 
+export interface ConnectOptions {
+  host: string;
+  port: number;
+  nonblock?: boolean;
+}
+
 export interface SpawnOptions {
   argv: string[];
   env?: Record<string, string>;
@@ -78,6 +84,10 @@ export interface ImportsContext {
     unlock(fd: number): void;
   };
   syscall(req: Request): unknown;
+  net: {
+    connect(options: ConnectOptions): number;
+    ready(fd: number): number;
+  };
   spawn(options: SpawnOptions): Spawned;
   wait(pid: number): Waited;
   kill(pid: number, sig: number): void;
@@ -237,6 +247,7 @@ export function importsContext({
     fs,
     fds,
     syscall: call,
+    net: network(raw, call),
     ...processes(host, call, tid !== MAIN_TID),
     async: {
       submit: (req) => call({ op: 'async-submit', req }) as number,
@@ -271,6 +282,38 @@ export function importsContext({
     uid: { get: () => live().uid, enumerable: true },
     gid: { get: () => live().gid, enumerable: true },
   });
+}
+
+const LOOPBACK = /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/;
+const SOL_SOCKET = 1;
+const SO_ERROR = 4;
+
+function loopbackHost(host: unknown): string {
+  if (host === 'localhost') return '127.0.0.1';
+  if (typeof host === 'string' && LOOPBACK.test(host)) return host;
+  throw new WasiError('EINVAL');
+}
+
+function network(raw: Raw, call: (req: Request) => unknown): ImportsContext['net'] {
+  return {
+    connect({ host, port, nonblock = false }) {
+      const to = loopbackHost(host);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) throw new WasiError('EINVAL');
+      const fd = call({ op: 'sock-open', domain: 'inet' }) as number;
+      const addr = { family: 'inet', host: to, port };
+      const r = raw({ op: 'sock-connect', fd, addr, ...(nonblock ? { nonblock: true } : {}) });
+      if (r.ok || (nonblock && r.errno === 'EINPROGRESS')) return fd;
+      raw({ op: 'fd-close', fd });
+      throw new WasiError(r.errno);
+    },
+    ready(fd) {
+      const sel = call({ op: 'fd-select', read: [], write: [fd], timeoutMs: 0 }) as {
+        write: number[];
+      };
+      if (!sel.write.includes(fd)) return E.INPROGRESS;
+      return call({ op: 'sock-getopt', fd, level: SOL_SOCKET, name: SO_ERROR }) as number;
+    },
+  };
 }
 
 type ChildSlot = { fd: number } | { none: true };
