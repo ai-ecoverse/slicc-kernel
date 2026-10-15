@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   runner:
-    runs-on: ${{ vars.CERT_LIGHT_RUNNER || vars.CERT_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.CERT_LIGHT_RUNNER || vars.CERT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions:
       contents: read
@@ -21,6 +21,12 @@ jobs:
     outputs:
       runner: ${{ steps.pick.outputs.runner }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          sparse-checkout: .github/runner.mjs
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
       - id: pick
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
         env:
@@ -28,36 +34,17 @@ jobs:
           POOL: ${{ vars.CERT_RUNNER || 'cloud-run-bench' }}
         with:
           script: |
-            const hosted = 'ubuntu-latest';
-            const pick = async (runner, why) => {
-              core.setOutput('runner', runner);
-              await core.summary.addRaw(`runner: ${runner} (${why})\n`).write();
-            };
-            if (process.env.FORCED) return await pick(process.env.FORCED, 'vars.CI_RUNNER');
-            const pool = process.env.POOL;
-            const { owner, repo } = context.repo;
-            if (context.eventName === 'pull_request') {
-              const head = context.payload.pull_request.head.repo;
-              const same = head && head.full_name === `${owner}/${repo}`;
-              return same ? await pick(pool, 'same-repo PR') : await pick(hosted, 'fork PR');
-            }
-            if (context.eventName === 'merge_group') {
-              const base = context.payload.merge_group.base_ref.replace('refs/heads/', '');
-              const q = await github.graphql(
-                `query($o:String!,$n:String!,$b:String!){repository(owner:$o,name:$n){mergeQueue(branch:$b){entries(first:100){nodes{pullRequest{number isCrossRepository}}}}}}`,
-                { o: owner, n: repo, b: base }
-              );
-              const entries = q.repository.mergeQueue?.entries?.nodes ?? [];
-              const forks = entries.filter((e) => e.pullRequest?.isCrossRepository !== false);
-              return forks.length === 0
-                ? await pick(pool, `merge group, ${entries.length} same-repo entries`)
-                : await pick(hosted, `merge group with a fork or unknown PR: ${forks.map((e) => e.pullRequest?.number).join(', ')}`);
-            }
-            await pick(hosted, context.eventName);
+            const { decide } = await import(`${process.env.GITHUB_WORKSPACE}/.github/runner.mjs`);
+            const { runner, why } = await decide({ context, github, env: process.env }).catch(
+              (error) => ({ runner: 'ubuntu-latest', why: `the decider failed: ${error.message}` })
+            );
+            core.setOutput('runner', runner);
+            await core.summary.addRaw(`runner: ${runner} (${why})\n`).write();
 
   ci:
     needs: runner
-    uses: ai-ecoverse/slicc-shared-web/.github/workflows/node-ci.yml@v1.17.0
+    if: ${{ !cancelled() }}
+    uses: ai-ecoverse/slicc-shared-web/.github/workflows/node-ci.yml@v1.18.1
     with:
-      runs-on: ${{ needs.runner.outputs.runner }}
+      runs-on: ${{ needs.runner.outputs.runner || 'ubuntu-latest' }}
       timeout-minutes: 35
