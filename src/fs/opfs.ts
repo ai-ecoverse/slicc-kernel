@@ -2,7 +2,13 @@ import { MemoryMeta, type MetaEntry, type MetaStore } from './meta.ts';
 import { chain, inherit, ownOf, ROOT_OWNER, sameOwner } from './owners.ts';
 import { PathMap } from './path-map.ts';
 import { holdsProtected, isProtected } from './protect.ts';
-import { type RemoteChange, type RemoteListener, RemoteWatch } from './remote.ts';
+import {
+  type LockManagerLike,
+  lockManager,
+  type RemoteChange,
+  type RemoteListener,
+  RemoteWatch,
+} from './remote.ts';
 import {
   type FsStat,
   fsError,
@@ -223,16 +229,20 @@ export class OpfsFs implements KernelFs {
   private readonly ranged: boolean;
   private owners = false;
   private readonly mounts: { mounted?: (path: string) => boolean } = {};
+  private readonly locks: LockManagerLike | undefined;
+  private readonly lockPrefix: string;
 
   constructor(
     root: FileSystemDirectoryHandle,
     meta: MetaStore = new MemoryMeta(),
     channel?: string,
-    options: { ranged?: boolean } = {}
+    options: { ranged?: boolean; locks?: LockManagerLike | null } = {}
   ) {
     this.root = root;
     this.meta = sidecar(meta);
     this.ranged = options.ranged === true;
+    this.locks = options.locks === undefined ? lockManager() : (options.locks ?? undefined);
+    this.lockPrefix = `slicc-excl:${channel ?? ''}:`;
     this.channel = channel === undefined ? undefined : new BroadcastChannel(channel);
     this.remote = channel === undefined ? undefined : new RemoteWatch(`${channel}:watch`);
     if (this.channel) {
@@ -399,6 +409,16 @@ export class OpfsFs implements KernelFs {
     if (isProtected(this.guarded, path) || (holding && holdsProtected(this.guarded, path))) {
       throw fsError('EROFS', path);
     }
+  }
+
+  private async locked<T>(physicalPath: string, op: () => Promise<T>): Promise<T> {
+    if (!this.locks) return op();
+    const key = `${this.lockPrefix}${physicalPath}`;
+    let result!: T;
+    await this.locks.request(key, async () => {
+      result = await op();
+    });
+    return result;
   }
 
   async chown(path: string, change: OwnerChange): Promise<void> {
@@ -970,6 +990,7 @@ export class OpfsFs implements KernelFs {
     path: string,
     options: { recursive?: boolean; owner?: NewOwner } = {}
   ): Promise<void> {
+    if (!options.recursive) return this.mkdirExcl(path, options.owner);
     let found: Located | undefined;
     try {
       found = await this.locate(path, true);
@@ -978,21 +999,19 @@ export class OpfsFs implements KernelFs {
     }
     if (found) {
       const directory = found.handle?.kind === 'directory';
-      if (options.recursive && directory) return;
-      throw fsError(options.recursive ? 'ENOTDIR' : 'EEXIST', path);
+      if (directory) return;
+      throw fsError('ENOTDIR', path);
     }
     const [entry] = await this.meta.get([path]);
     if (entry?.link !== undefined) throw fsError('EEXIST', path);
     const { owner } = options;
-    if (options.recursive) {
-      const mode = owner?.parents;
-      const above = owner && {
-        uid: owner.uid,
-        gid: owner.gid,
-        ...(mode !== undefined ? { mode, parents: mode } : {}),
-      };
-      await this.mkdir(parentOf(path), { recursive: true, ...(above ? { owner: above } : {}) });
-    }
+    const mode = owner?.parents;
+    const above = owner && {
+      uid: owner.uid,
+      gid: owner.gid,
+      ...(mode !== undefined ? { mode, parents: mode } : {}),
+    };
+    await this.mkdir(parentOf(path), { recursive: true, ...(above ? { owner: above } : {}) });
     const parent = await this.locate(parentOf(path), true);
     if (parent.handle?.kind !== 'directory') throw fsError('ENOTDIR', path);
     this.refuse(resolvePath(parent.path, baseOf(path)));
@@ -1000,6 +1019,59 @@ export class OpfsFs implements KernelFs {
     const made = `${parent.path === '/' ? '' : parent.path}/${baseOf(path)}`;
     await this.stampNew(made, owner, true);
     this.touch(parent.path, made);
+  }
+
+  private async mkdirExcl(path: string, owner?: NewOwner): Promise<void> {
+    const parent = await this.locate(parentOf(path), true);
+    if (parent.handle?.kind !== 'directory') throw fsError('ENOTDIR', path);
+    const dir = parent.handle;
+    const name = baseOf(path);
+    const physical = resolvePath(parent.path, name);
+    await this.locked(physical, async () => {
+      if (await this.handleExists(dir, name)) throw fsError('EEXIST', path);
+      const freshMeta = this.meta.fresh
+        ? await this.meta.fresh([path])
+        : await this.meta.get([path]);
+      if (freshMeta[0]?.link !== undefined) throw fsError('EEXIST', path);
+      this.forget(physical);
+      this.refuse(physical);
+      await dir.getDirectoryHandle(name, { create: true });
+      const made = `${parent.path === '/' ? '' : parent.path}/${name}`;
+      await this.stampNew(made, owner, true);
+      this.touch(parent.path, made);
+    });
+  }
+
+  async createExclusive(path: string, owner?: NewOwner): Promise<void> {
+    const parent = await this.locate(parentOf(path), true);
+    if (parent.handle?.kind !== 'directory') throw fsError('ENOTDIR', path);
+    const dir = parent.handle;
+    const name = baseOf(path);
+    const physical = resolvePath(parent.path, name);
+    await this.locked(physical, async () => {
+      if (await this.handleExists(dir, name)) throw fsError('EEXIST', path);
+      const freshMeta = this.meta.fresh
+        ? await this.meta.fresh([path])
+        : await this.meta.get([path]);
+      if (freshMeta[0] !== undefined) throw fsError('EEXIST', path);
+      this.forget(physical);
+      this.refuse(physical);
+      await dir.getFileHandle(name, { create: true });
+      const made = `${parent.path === '/' ? '' : parent.path}/${name}`;
+      await this.stampNew(made, owner, false);
+      this.touch(parent.path, made);
+    });
+  }
+
+  private async handleExists(dir: FileSystemDirectoryHandle, name: string): Promise<boolean> {
+    try {
+      await dir.getDirectoryHandle(name);
+      return true;
+    } catch (err) {
+      if ((err as { name?: unknown })?.name === 'TypeMismatchError') return true;
+      if ((err as { name?: unknown })?.name === 'NotFoundError') return false;
+      throw err;
+    }
   }
 
   async rm(
