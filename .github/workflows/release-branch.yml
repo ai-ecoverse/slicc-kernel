@@ -53,10 +53,10 @@ jobs:
             say "release ($release) is not an ancestor of main ($main): compare says $status; not moving it"
             exit 1
           fi
-          green=$(gh api "repos/$REPO/commits/$main/check-runs?check_name=ci%20%2F%20test&per_page=100" \
-            --jq '[.check_runs[] | select(.status == "completed" and .conclusion == "success")] | length')
+          green=$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$main&status=success&per_page=50" \
+            --jq '[.workflow_runs[] | select(.path == ".github/workflows/ci.yml" and (.event == "merge_group" or .event == "push") and .conclusion == "success")] | length')
           if [ "$green" -eq 0 ]; then
-            say "ci / test is not green at main ($main); release stays at $release"
+            say "no successful CI run (ci.yml, merge_group) at main ($main); release stays at $release"
             exit 0
           fi
           work=$(mktemp -d)
@@ -72,4 +72,4 @@ jobs:
           fi
           GIT_SSH_COMMAND="ssh -i $work/key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$work/known_hosts" \
             git -C "$work/repo" push -q "git@github.com:$REPO.git" "$main:refs/heads/release"
-          say "release: $release -> $main (fast-forward, ci / test green); the push starts the Release run"
+          say "release: $release -> $main (fast-forward, CI green); the push starts the Release run"
