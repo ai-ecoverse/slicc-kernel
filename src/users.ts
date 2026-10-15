@@ -1,5 +1,5 @@
 import type { KernelFs } from './fs/types.ts';
-import { fsError } from './fs/types.ts';
+import { fsError, normalizePath } from './fs/types.ts';
 import { type Cred, userCred } from './kernel/cred.ts';
 
 export const PASSWD = '/etc/passwd';
@@ -102,7 +102,7 @@ function homeOf(home: unknown): string {
   if (typeof home !== 'string' || !home.startsWith('/') || /[:\r\n]/.test(home)) {
     throw fsError('EINVAL', `not a home directory: ${String(home)}`);
   }
-  return home;
+  return normalizePath(home);
 }
 
 function freeId(users: PasswdRow[], groups: GroupRow[]): number {
