@@ -690,6 +690,29 @@ function noteExtent(extents: Array<[number, number]>, from: number, to: number):
   } else extents.push([from, to]);
 }
 
+type Relinkable = (...args: unknown[]) => Promise<unknown>;
+
+const RELINKED: ReadonlyArray<readonly [string, readonly number[]]> = [
+  ['readFileBuffer', [0]],
+  ['writeFile', [0]],
+  ['pread', [0]],
+  ['pwrite', [0]],
+  ['truncate', [0]],
+  ['lstat', [0]],
+  ['stat', [0]],
+  ['readdir', [0]],
+  ['readdirStat', [0]],
+  ['mkdir', [0]],
+  ['rm', [0]],
+  ['rename', [0, 1]],
+  ['symlink', [1]],
+  ['readlink', [0]],
+  ['chown', [0]],
+  ['chmod', [0]],
+  ['utimes', [0]],
+  ['lutimes', [0]],
+];
+
 class MountFs implements KernelFs {
   private readonly table: MountTable;
   private readonly base: KernelFs;
@@ -699,6 +722,42 @@ class MountFs implements KernelFs {
     this.table = table;
     this.base = base;
     this.rejectLinks = rejectLinks;
+  }
+
+  static {
+    const proto = MountFs.prototype as unknown as Record<string, Relinkable>;
+    for (const [name, at] of RELINKED) {
+      const run = proto[name] as Relinkable;
+      proto[name] = async function (this: MountFs, ...args: unknown[]) {
+        try {
+          return await run.apply(this, args);
+        } catch (err) {
+          const moved = await this.relinked(err, args, at);
+          if (!moved) throw err;
+          return ((this as unknown as Record<string, Relinkable>)[name] as Relinkable)(...moved);
+        }
+      };
+    }
+  }
+
+  private async relinked(
+    err: unknown,
+    args: unknown[],
+    at: readonly number[]
+  ): Promise<unknown[] | undefined> {
+    if ((err as { code?: unknown } | null)?.code !== 'ENOTDIR') return undefined;
+    const moved = [...args];
+    let changed = false;
+    for (const i of at) {
+      const path = args[i];
+      if (typeof path !== 'string' || !this.at(path)) continue;
+      const named = await this.named(path).catch(() => undefined);
+      if (named === undefined || named === normalizePath(path)) continue;
+      if (this.rejectLinks) throw errnoError('ELOOP', path);
+      moved[i] = named;
+      changed = true;
+    }
+    return changed ? moved : undefined;
   }
 
   private at(path: string): Located | undefined {
@@ -1491,7 +1550,7 @@ class MountFs implements KernelFs {
   }
 
   noLinks(): KernelFs {
-    const noLinkBase = this.base.noLinks?.() ?? this.base;
+    const noLinkBase = (this.base.noLinks as () => KernelFs).call(this.base);
     return view(this, { rejectLinks: true, base: noLinkBase }) as unknown as KernelFs;
   }
 }

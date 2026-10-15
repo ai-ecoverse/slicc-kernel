@@ -158,6 +158,7 @@ export interface LiveFsApi {
   nameTable?: (LiveFsNode | null)[] | null;
   hashRemoveNode?(node: LiveFsNode): void;
   lookupNode?(parent: LiveFsNode, name: string): LiveFsNode;
+  open?(...args: unknown[]): unknown;
 }
 
 export interface LiveVfsPlugin {
@@ -619,7 +620,9 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
         if (masked !== DEFAULT_DIR_PERM) metadataCall(() => bridge.chmod(path, masked));
       } else if (Fs.isFile(mode)) {
         call(() =>
-          bridge.create ? bridge.create(path, perm) : bridge.writeFile(path, new Uint8Array(0))
+          bridge.create
+            ? bridge.create(path, perm, (opening.get(h.Fs) as number) > 0)
+            : bridge.writeFile(path, new Uint8Array(0))
         );
       } else {
         throw new Fs.ErrnoError(wasiErrno('EPERM'));
@@ -872,10 +875,27 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
   };
 }
 
+const opening = new WeakMap<LiveFsApi, number>();
+
+function countOpens(Fs: LiveFsApi): void {
+  const { open } = Fs;
+  if (typeof open !== 'function' || opening.has(Fs)) return;
+  opening.set(Fs, 0);
+  Fs.open = function (this: unknown, ...args: unknown[]) {
+    opening.set(Fs, (opening.get(Fs) ?? 0) + 1);
+    try {
+      return open.apply(this, args);
+    } finally {
+      opening.set(Fs, (opening.get(Fs) ?? 1) - 1);
+    }
+  };
+}
+
 export function createLiveVfsPlugin(Fs: LiveFsApi): LiveVfsPlugin {
   const mounts = new Set<LiveFsMount>();
   const ops: LiveOpsTables = {};
   const h = createHelpers(Fs, ops);
+  countOpens(Fs);
   const nodeOps = createNodeOps(h);
   const streamOps = createStreamOps(h);
   ops.node = nodeOps;

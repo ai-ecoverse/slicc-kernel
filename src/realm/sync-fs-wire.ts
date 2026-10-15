@@ -56,6 +56,7 @@ export interface SyncFsRequest {
   identity?: boolean;
   now?: boolean;
   nofollow?: boolean;
+  opening?: boolean;
 }
 
 export type SyncFsResult =
@@ -139,7 +140,7 @@ export interface SyncFsPosixBridge {
     want?: number
   ): number | undefined;
   access?(path: string, mode: number, kind?: AccessKind, nofollow?: boolean): void;
-  create?(path: string, mode?: number): void;
+  create?(path: string, mode?: number, opening?: boolean): void;
   chown?(path: string, ...rest: ChownArgs): void;
   owners?: boolean;
   links?: boolean;

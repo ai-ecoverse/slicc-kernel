@@ -569,7 +569,10 @@ export function cachingBridge(
     ...(bridge.keptStat ? { keptStat: bridge.keptStat.bind(bridge) } : {}),
     ...(bridge.pinned ? { pinned: (handle: number) => pinnedIo(bridge, handle, rewriting) } : {}),
     ...(bridge.create
-      ? { create: (p: string) => mutating(() => bridge.create?.(p), ...entry(p)) }
+      ? {
+          create: (p: string, mode?: number, opening?: boolean) =>
+            mutating(() => bridge.create?.(p, mode, opening), ...entry(p)),
+        }
       : {}),
     ...(chown
       ? {

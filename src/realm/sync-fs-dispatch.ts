@@ -252,7 +252,7 @@ async function run(
       return done;
     case 'create':
       await createExclusive(fs, path, ownerFor(entry, req.mode ?? 0o666));
-      entry.created?.add(path);
+      if (req.opening) entry.created?.add(path);
       entry.fresh?.(path);
       return done;
     case 'readlink':

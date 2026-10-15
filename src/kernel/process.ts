@@ -1,4 +1,4 @@
-import { R_OK, W_OK } from '../fs/access.ts';
+import { R_OK, W_OK, walk } from '../fs/access.ts';
 import {
   type Created,
   type Dac,
@@ -458,6 +458,8 @@ export interface WasmProcessOptions {
   readonlyAt?: (path: string) => boolean;
 
   guard?: { dac: Dac; fs: KernelFs; created?: Created; links?: number };
+
+  noLinks?: KernelFs;
 
   identity?: () => Promise<{ pid: number; ppid: number }>;
 
@@ -919,17 +921,13 @@ export class WasmProcess {
     await refuseReadonly(this.options.fs, req.path, req.flags, req);
     if (this.writesAt(req)) await this.options.fs.mayChange?.(req.path, !req.exclusive);
     await this.mayOpen(req);
-    await this.sourceOpen(req);
+    const marked = await this.markedPath(req);
+    await this.sourceOpen(marked === undefined ? req : { ...req, path: marked });
+    const fs = marked === undefined ? this.options.fs : (this.options.noLinks as KernelFs);
     const fd = this.fds.install(heldFile(), 3);
     try {
       const nodes = this.nodes;
-      const path = req.orphan
-        ? req.path
-        : req.exclusive
-          ? await nodes.entryKey(req.path)
-          : req.create
-            ? await nodes.targetKey(req.path)
-            : await this.keptOr(await nodes.targetKey(req.path), req.handle);
+      const path = await this.openPath(req, marked);
       if (inProc(path)) {
         this.fds.installAt(fd, await this.procFile(req, path));
         return fd;
@@ -939,23 +937,23 @@ export class WasmProcess {
       const plain = this.plainMode(req.mode);
       if (req.exclusive) {
         await nodes.createExclusive(path, this.newOwner(req.mode));
-        if (plain !== undefined) await this.options.fs.chmod?.(path, plain);
-        this.fds.installAt(fd, this.openVfsFile(open));
+        if (plain !== undefined) await fs.chmod?.(path, plain);
+        this.fds.installAt(fd, this.openVfsFile(open, undefined, fs));
       } else if (req.create) {
         await nodes.onEntry(path, async () => {
           const marks = this.options.owners || plain !== undefined;
-          const fresh = marks && !(await present(this.options.fs, path, true));
-          this.fds.installAt(fd, this.openVfsFile(open, await nodes.identify(path)));
+          const fresh = marks && !(await present(fs, path, true));
+          this.fds.installAt(fd, this.openVfsFile(open, await nodes.identify(path), fs));
           await this.fds.get(fd).file.stat?.();
-          if (fresh && plain !== undefined) await this.options.fs.chmod?.(path, plain);
+          if (fresh && plain !== undefined) await fs.chmod?.(path, plain);
           else if (fresh) {
-            await this.options.fs.chown?.(path, { ...this.newOwner(req.mode), kind: 'new' });
+            await fs.chown?.(path, { ...this.newOwner(req.mode), kind: 'new' });
           }
         });
       } else {
-        this.fds.installAt(fd, this.openVfsFile(open, await nodes.identify(path)));
+        this.fds.installAt(fd, this.openVfsFile(open, await nodes.identify(path), fs));
       }
-      if (req.existing && !(await present(this.options.fs, path, true))) {
+      if (req.existing && !(await present(fs, path, true))) {
         throw new KernelError('ENOENT');
       }
     } catch (err) {
@@ -1009,6 +1007,28 @@ export class WasmProcess {
     const inherited = req.orphan || req.contents !== undefined || req.handle !== undefined;
     if (!source || inherited || req.pin !== undefined || req.exclusive) return;
     await source.open(req.path);
+  }
+
+  private async markedPath(
+    req: Extract<FdSyscall, { op: 'fd-open-vfs' }>
+  ): Promise<string | undefined> {
+    const { guard, noLinks } = this.options;
+    const inherited = req.orphan || req.contents !== undefined || req.handle !== undefined;
+    if (guard?.links === undefined || !noLinks || inherited || req.pin !== undefined)
+      return undefined;
+    return (await walk(guard.fs, this.cred, req.path, !req.exclusive, guard.links)).path;
+  }
+
+  private async openPath(
+    req: Extract<FdSyscall, { op: 'fd-open-vfs' }>,
+    marked: string | undefined
+  ): Promise<string> {
+    const nodes = this.nodes;
+    if (req.orphan) return req.path;
+    if (req.exclusive) return nodes.entryKey(marked ?? req.path);
+    if (marked !== undefined) return marked;
+    if (req.create) return nodes.targetKey(req.path);
+    return this.keptOr(await nodes.targetKey(req.path), req.handle);
   }
 
   private async mayOpen(req: Extract<FdSyscall, { op: 'fd-open-vfs' }>): Promise<void> {
@@ -1135,9 +1155,13 @@ export class WasmProcess {
     return memoryFile(tree.read(path), path, req.position);
   }
 
-  private openVfsFile(req: Extract<FdSyscall, { op: 'fd-open-vfs' }>, id?: string): OpenFile {
+  private openVfsFile(
+    req: Extract<FdSyscall, { op: 'fd-open-vfs' }>,
+    id?: string,
+    fs = this.options.fs
+  ): OpenFile {
     return vfsFile(
-      this.options.fs,
+      fs,
       {
         path: req.path,
         flags: req.flags,
