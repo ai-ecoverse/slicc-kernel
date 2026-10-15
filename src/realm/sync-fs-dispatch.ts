@@ -166,12 +166,13 @@ async function mkdirExclusive(entry: SyncFsTokenEntry, path: string, mode?: numb
 }
 
 async function chown(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest) {
+  const real = req.handle !== undefined ? await keptOr(entry, path, req.handle) : path;
   const cred = entry.cred?.();
   if (!cred) {
-    await (req.op === 'chown' ? entry.fs.stat(path) : entry.fs.lstat(path));
+    await (req.op === 'chown' ? entry.fs.stat(real) : entry.fs.lstat(real));
     return done;
   }
-  await chownAs(entry.fs, cred, path, {
+  await chownAs(entry.fs, cred, real, {
     ...(req.uid !== undefined ? { uid: req.uid } : {}),
     ...(req.gid !== undefined ? { gid: req.gid } : {}),
     follow: req.op === 'chown',
@@ -258,10 +259,10 @@ async function run(
       return done;
     }
     case 'utimes':
-      await fs.utimes(path, new Date(req.atimeMs ?? 0), new Date(req.mtimeMs ?? 0));
+      await fs.utimes(path, ...(await timesOf(entry, path, req)));
       return done;
     case 'lutimes':
-      await lutimesOf(fs, path, new Date(req.atimeMs ?? 0), new Date(req.mtimeMs ?? 0));
+      await lutimesOf(fs, path, ...(await timesOf(entry, path, req)));
       return done;
     case 'chown':
     case 'lchown':
@@ -273,6 +274,22 @@ async function run(
     default:
       return { ok: false, errno: 'EINVAL', message: `sync-fs: unknown op '${req.op as string}'` };
   }
+}
+
+async function timesOf(
+  entry: SyncFsTokenEntry,
+  path: string,
+  req: SyncFsRequest
+): Promise<[Date, Date]> {
+  const given: [Date, Date] = [new Date(req.atimeMs ?? 0), new Date(req.mtimeMs ?? 0)];
+  const g = req.now === true ? guardOf(entry) : undefined;
+  if (!g || g.cred.euid === 0) return given;
+  const look = req.op === 'lutimes' ? entry.fs.lstat : entry.fs.stat;
+  const st = await look.call(entry.fs, path).catch(() => undefined);
+  if (!st || (st.uid ?? 0) === g.cred.euid) return given;
+  const now = new Date();
+  const kept = (ms: number | undefined, stored: Date) => (ms === stored.getTime() ? stored : now);
+  return [kept(req.atimeMs, st.atime), kept(req.mtimeMs, st.mtime)];
 }
 
 export function guardOf(entry: SyncFsTokenEntry): Guard | undefined {
@@ -437,6 +454,7 @@ async function ranged(fs: KernelFs, path: string, req: SyncFsRequest): Promise<S
   return done;
 }
 
+const CHOWN_OPS = new Set<SyncFsOp>(['chown', 'lchown']);
 const UNLINKED_OPS = new Set<SyncFsOp>(['read', 'pread', 'pwrite', 'truncate']);
 const OWN_OPS = new Set<SyncFsOp>(['rm', 'unlink', 'rmdir', 'rename', 'link']);
 const TWO_PATHS = new Set<SyncFsOp>(['rename', 'link']);
@@ -534,16 +552,34 @@ async function rmPermitted(
     if (!child.ok) first ??= child;
   }
   if (first) return first;
-  const again = await guarded(entry, path, req);
-  return again ?? (await run(entry, path, req));
+  const g = guardOf(entry);
+  if (g) {
+    try {
+      await inParent(g, 'rm', path, true);
+    } catch (err) {
+      return toErrno(err);
+    }
+  }
+  return await run(entry, path, req);
+}
+
+async function byHandle(
+  entry: SyncFsTokenEntry,
+  path: string,
+  req: SyncFsRequest
+): Promise<SyncFsResult | undefined> {
+  if (req.op === 'kept') return json(entry.keptFor?.(req.handle ?? -1) !== undefined);
+  if (req.op === 'stat' && req.handle !== undefined) return keptStat(entry, req);
+  if (CHOWN_OPS.has(req.op) && entry.keptFor?.(req.handle ?? -1)) return chown(entry, path, req);
+  return undefined;
 }
 
 async function dispatchOne(entry: SyncFsTokenEntry, req: SyncFsRequest): Promise<SyncFsResult> {
   const { fs, cwd } = entry;
   try {
     const path = fs.resolvePath(cwd, req.path);
-    if (req.op === 'kept') return json(entry.keptFor?.(req.handle ?? -1) !== undefined);
-    if (req.op === 'stat' && req.handle !== undefined) return await keptStat(entry, req);
+    const held = await byHandle(entry, path, req);
+    if (held) return held;
     if (req.op === 'access') return await accessOp(entry, path, req);
     if (req.op === 'hold') return await holdOp(entry, path, req);
     const refused = await guarded(entry, path, req);

@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   runner:
-    runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ vars.CERT_LIGHT_RUNNER || vars.CERT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions:
       contents: read
@@ -57,7 +57,7 @@ jobs:
 
   ci:
     needs: runner
-    uses: ai-ecoverse/slicc-shared-web/.github/workflows/node-ci.yml@v1.14.0
+    uses: ai-ecoverse/slicc-shared-web/.github/workflows/node-ci.yml@v1.15.1
     with:
       runs-on: ${{ needs.runner.outputs.runner }}
       timeout-minutes: 35

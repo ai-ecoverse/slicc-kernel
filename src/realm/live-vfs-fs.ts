@@ -1,5 +1,7 @@
+import { permits, X_OK } from '../fs/access.ts';
 import { RangedFile } from '../fs/ranged.ts';
 import { inodeOf } from '../fs/types.ts';
+import type { Cred } from '../kernel/cred.ts';
 import { wasiErrno } from '../process/wasi-errno.ts';
 import {
   HOLD_CREATED,
@@ -11,6 +13,8 @@ import {
   type SyncFsUsage,
 } from './sync-fs-wire.ts';
 import { syncCallCount } from './sync-sab-bridge.ts';
+
+export type LiveCred = Cred;
 
 const S_IFDIR = 0o040000;
 const S_IFREG = 0o100000;
@@ -149,6 +153,7 @@ export interface LiveFsApi {
   closeStream?(fd: number): void;
   sliccTouch?: boolean;
   sliccReading?: LiveFsNode | undefined;
+  sliccCred?: LiveCred;
 
   nameTable?: (LiveFsNode | null)[] | null;
   hashRemoveNode?(node: LiveFsNode): void;
@@ -231,6 +236,33 @@ function refusal(err: unknown): boolean {
 
 function cachedStat(s: LiveNodeState, dir: boolean): boolean {
   return s.stat !== undefined && (!dir || s.statAt === syncCallCount());
+}
+
+function searchParents(
+  Fs: LiveFsApi,
+  node: LiveFsNode,
+  bridge: SyncFsPosixBridge,
+  call: <T>(fn: () => T) => T
+): void {
+  const cred = Fs.sliccCred;
+  if (!cred) return;
+  let cur = node.parent;
+  while (cur) {
+    const st = cur.live.stat;
+    if (st && st.uid !== undefined && st.mode !== undefined) {
+      const perm = { uid: st.uid, gid: st.gid ?? 0, mode: st.mode & 0o7777 };
+      if (!permits(cred, perm, X_OK, true)) {
+        call(() => bridge.access?.(liveNodePath(cur), X_OK, 'eaccess'));
+        cur.live.stat = undefined;
+        return;
+      }
+    } else {
+      call(() => bridge.access?.(liveNodePath(cur), X_OK, 'eaccess'));
+      return;
+    }
+    if (cur === cur.parent) break;
+    cur = cur.parent;
+  }
 }
 
 const stale = (s: LiveNodeState): boolean => !!s.orphan && !s.kept;
@@ -521,7 +553,9 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
       const owned = bridgeOf(node).owners === true;
       if (owned && Fs.isLink(node.mode) && statOf(node).uid === undefined)
         node.live.stat = undefined;
+      const cached = owned && cachedStat(node.live, Fs.isDir(node.mode));
       const st = statOf(node);
+      if (cached) searchParents(Fs, node, bridgeOf(node), call);
       const s = node.live;
       const size = Fs.isDir(node.mode) ? 4096 : (s.ranged?.size() ?? (s.loaded ? s.len : st.size));
       const mtime = new Date(st.mtimeMs ?? 0);
@@ -1087,6 +1121,31 @@ function idOf(value: number): number | undefined {
   return value === -1 || value === 0xffffffff ? undefined : value >>> 0;
 }
 
+function chownHeld(
+  Fs: LiveChownFs,
+  node: LiveFsNode,
+  s: LiveNodeState,
+  uid: number,
+  gid: number
+): void {
+  const bridge = node.mount.opts.bridge as SyncFsPosixBridge;
+  const handle = s.handle as number;
+  try {
+    bridge.chown?.(liveNodePath(node), idOf(uid), idOf(gid), false, handle);
+  } catch (err) {
+    throw toErrno(Fs, err);
+  }
+  if (node.parent?.live) node.parent.live.listed = undefined;
+  if (!s.orphan) {
+    s.stat = undefined;
+    return;
+  }
+  try {
+    const st = bridge.keptStat?.(handle);
+    if (st && s.stat) s.stat = { ...s.stat, uid: st.uid, gid: st.gid, mode: st.mode };
+  } catch {}
+}
+
 export function useLiveChown(Fs: LiveChownFs): void {
   const chown = Fs.chown?.bind(Fs);
   if (!chown) return;
@@ -1107,8 +1166,10 @@ export function useLiveChown(Fs: LiveChownFs): void {
   if (!Fs.fchown || !getStreamChecked) return;
   Fs.fchown = (fd, uid, gid) => {
     const stream = getStreamChecked.call(Fs, fd);
-    const live = (stream.node as LiveFsNode).live !== undefined;
-    const target = live || stream.path === undefined ? stream.node : stream.path;
+    const node = stream.node as LiveFsNode;
+    const s = node.live;
+    if (s?.handle !== undefined && (!s.orphan || s.kept)) return chownHeld(Fs, node, s, uid, gid);
+    const target = s !== undefined || stream.path === undefined ? stream.node : stream.path;
     (Fs.chown as NonNullable<LiveChownFs['chown']>)(target, uid, gid);
   };
 }

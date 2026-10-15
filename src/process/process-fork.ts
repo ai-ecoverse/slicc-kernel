@@ -105,7 +105,8 @@ function kernelEntry(stream: ProcessStream, kernel: number): ForkStream {
   }
   const device = stream.path === undefined ? undefined : NAMED_DEVICES[stream.path];
   const kind = stream.sliccKernelFile ? 'file' : stream.tty ? 'tty' : (device ?? 'stream');
-  return { fd: stream.fd, kernel, kind, ...cloexec };
+  const access = kind === 'tty' ? O_RDWR : (stream.flags ?? O_RDWR) & O_ACCMODE;
+  return { fd: stream.fd, kernel, kind, flags: access, ...cloexec };
 }
 
 const ACCESS: Readonly<Record<number, DeviceAccess>> = { 0: 'read', 1: 'write' };
@@ -177,12 +178,13 @@ function placeholder(
   streams: KernelStreams,
   entry: { fd: number; kind: string; flags?: number }
 ): ProcessStream {
-  if (entry.kind === 'socket') return streams.socketStream(entry.flags ?? O_RDWR);
+  const access = entry.flags ?? O_RDWR;
+  if (entry.kind === 'socket') return streams.socketStream(access);
   if (entry.kind === 'tty') return Fs.open('/dev/tty', O_RDWR);
   if (entry.kind === 'stream' || entry.kind === 'clipboard' || entry.kind === 'sealed')
-    return Fs.open('/dev/null', O_RDWR);
+    return Fs.open('/dev/null', access);
   Fs.mkdirTree(PLACEHOLDER_DIR);
-  return Fs.open(`${PLACEHOLDER_DIR}/${entry.fd}`, O_RDWR | O_CREAT);
+  return Fs.open(`${PLACEHOLDER_DIR}/${entry.fd}`, access | O_CREAT);
 }
 
 const FIFO_MODE = 0o010600;

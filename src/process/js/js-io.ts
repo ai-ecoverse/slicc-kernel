@@ -23,6 +23,7 @@ export interface FdInfo {
   kind?: KernelFdKind;
   meta?: DeviceMeta | { dir: string };
   terminal?: string;
+  access?: 'read' | 'write';
 }
 
 export const CHUNK = 64 * 1024;

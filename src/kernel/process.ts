@@ -3,12 +3,15 @@ import {
   type Created,
   type Dac,
   type Guard,
+  heldChmodMode,
+  heldRetimable,
   inParent,
   openable,
   TTY_MODE,
   ttyOpenable,
 } from '../fs/dac.ts';
-import type { KernelFs, NewOwner, Perm } from '../fs/types.ts';
+import { chownAs } from '../fs/owners.ts';
+import type { FsStat, KernelFs, NewOwner, Perm } from '../fs/types.ts';
 import type { MountCall } from '../mount/syscall.ts';
 import { inProc, ProcTree, procAlias } from '../process/wasi/wasi-procfs.ts';
 import type { LinkRecord } from '../process/wasi/wasix-linker.ts';
@@ -113,7 +116,10 @@ export type WasmSyscall =
   | { op: 'fd-pread'; fd: number; offset: number; max: number }
   | { op: 'fd-pwrite'; fd: number; offset: number; body: Uint8Array }
   | { op: 'fd-resize'; fd: number; size: number }
-  | { op: 'fd-vfs-stat'; fd: number; identity?: boolean }
+  | { op: 'fd-vfs-stat'; fd: number; identity?: boolean; full?: boolean }
+  | { op: 'fd-chmod'; fd: number; mode: number }
+  | { op: 'fd-chown'; fd: number; uid?: number; gid?: number }
+  | { op: 'fd-utimes'; fd: number; atimeMs: number | null; mtimeMs: number | null; now?: boolean }
   | { op: 'fd-path-flush'; path: string }
   | { op: 'fd-path-unlinking'; path: string }
   | { op: 'fd-path-unlinked'; path: string }
@@ -168,6 +174,7 @@ export type WasmSyscall =
   | { op: 'fd-tty-owner'; name: string }
   | { op: 'fd-open-sealed'; flags: number }
   | { op: 'fd-open-clipboard'; flags: number }
+  | { op: 'fd-clipboard-abort'; fd: number }
   | { op: 'tty-get'; fd: number }
   | { op: 'tty-set'; fd: number; termios: Termios; flush?: boolean }
   | { op: 'tty-winsz'; fd: number }
@@ -268,6 +275,9 @@ type VfsSyscall = Extract<
       | 'fd-pwrite'
       | 'fd-resize'
       | 'fd-vfs-stat'
+      | 'fd-chmod'
+      | 'fd-chown'
+      | 'fd-utimes'
       | 'fd-path-flush'
       | 'fd-path-unlinking'
       | 'fd-path-unlinked'
@@ -281,7 +291,10 @@ function isVfsSyscall(req: FdSyscall): req is VfsSyscall {
     req.op === 'fd-pread' ||
     req.op === 'fd-pwrite' ||
     req.op === 'fd-resize' ||
-    req.op === 'fd-vfs-stat'
+    req.op === 'fd-vfs-stat' ||
+    req.op === 'fd-chmod' ||
+    req.op === 'fd-chown' ||
+    req.op === 'fd-utimes'
   );
 }
 
@@ -318,6 +331,9 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'fd-pwrite',
   'fd-resize',
   'fd-vfs-stat',
+  'fd-chmod',
+  'fd-chown',
+  'fd-utimes',
   'fd-path-flush',
   'fd-path-unlinking',
   'fd-path-unlinked',
@@ -348,6 +364,7 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'fd-tty-owner',
   'fd-open-sealed',
   'fd-open-clipboard',
+  'fd-clipboard-abort',
   'tty-get',
   'tty-set',
   'tty-winsz',
@@ -857,7 +874,11 @@ export class WasmProcess {
     const stderr = this.fds.has(2) ? this.fds.get(2).file : undefined;
     if (!stderr?.write || stderr.clipboard) return;
     const line = `${name}: /dev/clipboard: ${clipboardLine(err.detail)}\n`;
-    await stderr.write(new TextEncoder().encode(line), AbortSignal.timeout(1000)).catch(() => 0);
+    const timeout = new Promise<0>((r) => setTimeout(() => r(0), 1000));
+    await Promise.race([
+      stderr.write(new TextEncoder().encode(line), AbortSignal.timeout(1000)).catch(() => 0),
+      timeout,
+    ]);
   }
 
   private async write(
@@ -1189,7 +1210,7 @@ export class WasmProcess {
         return { ok: true, kind: 'void' };
       case 'fd-renumber':
         if (req.from !== req.to) {
-          this.fds.dup2(req.from, req.to);
+          await this.fds.dup2Clipboard(req.from, req.to);
           if (!req.keep) await Promise.resolve(this.fds.close(req.from));
         }
         return { ok: true, kind: 'void' };
@@ -1201,6 +1222,11 @@ export class WasmProcess {
         return { ok: true, kind: 'json', json: this.openSealed(req.flags) };
       case 'fd-open-clipboard':
         return { ok: true, kind: 'json', json: await this.openClipboard(req.flags) };
+      case 'fd-clipboard-abort': {
+        const file = this.fds.get(req.fd);
+        file.file.clipboard?.abort();
+        return { ok: true, kind: 'void' };
+      }
       case 'fd-tty-owner':
         return { ok: true, kind: 'json', json: this.terminalByName(req.name).owner ?? null };
       case 'fd-select': {
@@ -1254,14 +1280,23 @@ export class WasmProcess {
       case 'fd-resize':
         await file.resize(req.size);
         return { ok: true, kind: 'void' };
-      case 'fd-vfs-stat':
-        return {
-          ok: true,
-          kind: 'json',
-          json: req.identity
-            ? await this.identified(file.stat.bind(file), file.known?.bind(file))
-            : await file.stat(),
-        };
+      case 'fd-vfs-stat': {
+        if (req.identity) {
+          return {
+            ok: true,
+            kind: 'json',
+            json: await this.identified(file.stat.bind(file), file.known?.bind(file)),
+          };
+        }
+        const vfs = await file.stat();
+        if (!req.full) return { ok: true, kind: 'json', json: vfs };
+        const st = await this.heldStat(vfs).catch(() => undefined);
+        return { ok: true, kind: 'json', json: { ...vfs, ...(st ? { stat: st } : {}) } };
+      }
+      case 'fd-chmod':
+      case 'fd-chown':
+      case 'fd-utimes':
+        return this.fdMetadata(await file.stat(), req);
     }
   }
 
@@ -1287,7 +1322,7 @@ export class WasmProcess {
   private async promote(req: Extract<WasmSyscall, { op: 'fd-promote' }>): Promise<void> {
     if (!this.fds.get(req.fd).file.held) throw new KernelError('EBADF');
     if (req.share !== undefined) {
-      this.fds.dup2(req.share, req.fd);
+      await this.fds.dup2Clipboard(req.share, req.fd);
       return;
     }
     if (req.path === undefined) throw new KernelError('EINVAL');
@@ -1318,6 +1353,54 @@ export class WasmProcess {
     if (this.fds.has(fd)) throw new KernelError('EBADF');
     this.fds.installAt(fd, heldFile(meta));
     return fd;
+  }
+
+  private heldPath(vfs: { path?: string; orphan?: boolean }): string {
+    if (!vfs.path) throw new KernelError('EBADF');
+    if (vfs.orphan) throw new KernelError('EOPNOTSUPP');
+    return vfs.path;
+  }
+
+  private heldFs(): Partial<KernelFs> {
+    return this.options.guard?.fs ?? (this.options.fs as Partial<KernelFs>);
+  }
+
+  private async heldStat(vfs: { path?: string; orphan?: boolean }): Promise<FsStat> {
+    const stat = this.heldFs().stat;
+    if (!stat) throw new KernelError('ENOSYS');
+    return stat.call(this.heldFs(), this.heldPath(vfs));
+  }
+
+  private async fdMetadata(
+    vfs: { path?: string; orphan?: boolean },
+    req: Extract<VfsSyscall, { op: 'fd-chmod' | 'fd-chown' | 'fd-utimes' }>
+  ): Promise<SyncFsResult> {
+    const path = this.heldPath(vfs);
+    const fs = this.heldFs();
+    const g = this.guarded();
+    if (req.op === 'fd-chown') {
+      const ids = {
+        ...(req.uid !== undefined ? { uid: req.uid } : {}),
+        ...(req.gid !== undefined ? { gid: req.gid } : {}),
+      };
+      if (!this.options.owners || !fs.chown || !fs.stat) await this.heldStat(vfs);
+      else await chownAs(fs as KernelFs, this.cred, path, { ...ids, follow: true });
+      return { ok: true, kind: 'void' };
+    }
+    const st = await this.heldStat(vfs);
+    if (req.op === 'fd-chmod') {
+      if (!fs.chmod) throw new KernelError('ENOSYS');
+      await fs.chmod(path, g ? heldChmodMode(g, path, st, req.mode) : req.mode);
+      return { ok: true, kind: 'void' };
+    }
+    if (!fs.utimes) throw new KernelError('ENOSYS');
+    if (g) heldRetimable(g, path, st, req.now === true);
+    const at = (ms: number | null, kept: Date) =>
+      ms === null ? kept : req.now ? new Date() : new Date(ms);
+    const atime = at(req.atimeMs, st.atime);
+    const mtime = at(req.mtimeMs, st.mtime);
+    await fs.utimes(path, atime, mtime);
+    return { ok: true, kind: 'void' };
   }
 
   private fdInfo(fd: number): FdInfo {

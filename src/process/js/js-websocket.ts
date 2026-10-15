@@ -5,6 +5,7 @@ export type JsWebSocketMessage = string | Uint8Array;
 export interface JsWebSocketClose {
   code: number;
   reason: string;
+  wasClean: boolean;
 }
 
 export interface JsWebSocketOptions {

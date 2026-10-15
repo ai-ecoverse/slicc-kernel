@@ -13,6 +13,9 @@ import {
   type SyncSabDispatchRequest,
 } from '../realm/sync-sab-responder.ts';
 import {
+  anyBlocked,
+  type BlockedMask,
+  loadBlocked,
   SAB_DEFAULT_WINDOW_BYTES,
   SAB_HEADER_BYTES,
   SAB_HEADER_I32,
@@ -23,6 +26,7 @@ import {
   SAB_I_SIGNALS,
   SAB_I_STOP,
   SAB_I_TIMERS,
+  storeBlocked,
 } from '../realm/sync-sab-wire.ts';
 import type { ChildForker, ChildSpawner } from './children.ts';
 import type { ClipboardBroker } from './clipboard.ts';
@@ -73,7 +77,7 @@ export interface WasmWorkerLike {
 export interface SpawnWasmOptions {
   pid: number;
   ignored?: number;
-  blocked?: number;
+  blocked?: BlockedMask;
   umask?: number;
   cred?: Cred;
   owners?: boolean;
@@ -135,7 +139,7 @@ export interface WasmProcessHandle {
   onState(listener: StateListener): void;
   memory(): number;
   ignoredSignals(fork?: boolean): number;
-  blockedSignals?(): number;
+  blockedSignals?(): BlockedMask;
   signalMasks?(): { ignored: number; caught: number };
   umask?(): number;
   cred?(): Cred;
@@ -458,8 +462,8 @@ function threadInit(
 export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
   const sab = new SharedArrayBuffer(SAB_HEADER_BYTES + SAB_DEFAULT_WINDOW_BYTES);
   const header = new Int32Array(sab, 0, SAB_HEADER_I32);
-  if (opts.blocked && opts.program.abi === 'wasi')
-    Atomics.store(header, SAB_I_BLOCKED, opts.blocked);
+  const blocked = opts.fork?.wasi?.blocked ?? opts.blocked;
+  if (blocked && anyBlocked(blocked) && opts.program.abi === 'wasi') storeBlocked(header, blocked);
   const threadSignals = new Map<number, ThreadSignals>();
   const created = new Created();
   const process: WasmProcess = new WasmProcess(
@@ -477,7 +481,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
               exitNow: (code: number) => exitNow(code),
               exitSignal: (sig: number) => queueMicrotask(() => finish(128 + sig, sig)),
             }
-          : {}),
+          : { exitSignal: (sig: number) => terminate(128 + sig, sig) }),
       },
       created
     )
@@ -570,7 +574,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     const tsab = new SharedArrayBuffer(SAB_HEADER_BYTES + SAB_DEFAULT_WINDOW_BYTES);
     const tw = opts.createWorker();
     const tsignals = threadSignalsOf(tsab);
-    if (thread.blocked) Atomics.store(tsignals.header, SAB_I_BLOCKED, thread.blocked);
+    if (thread.blocked) storeBlocked(tsignals.header, thread.blocked);
     threadSignals.set(thread.tid, tsignals);
     const tdispatch = (req: SyncSabDispatchRequest): Promise<SyncFsResult> =>
       dying.serving(() =>
@@ -601,11 +605,12 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     transferOf(opts, lane?.lane)
   );
 
-  const signal = (sig: number): void => {
-    if (process.signal(sig) !== 'terminate') return;
-    const code = sig === SIG.KILL ? 137 : 128 + sig;
+  const terminate = (code: number, sig: number): void => {
     if (opts.program.abi !== 'wasi' || done) finish(code, sig);
     else dying.start(code, sig, header, process, () => finish(code, sig));
+  };
+  const signal = (sig: number): void => {
+    if (process.signal(sig) === 'terminate') terminate(sig === SIG.KILL ? 137 : 128 + sig, sig);
   };
   const kill = (code = 137): void =>
     finish(code, code > 128 && code < 160 ? code - 128 : undefined);
@@ -618,7 +623,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     onState: (listener) => process.onState(listener),
     memory: () => Atomics.load(header, SAB_I_MEMORY) * 65536,
     ignoredSignals: (fork) => process.inheritable(fork),
-    blockedSignals: () => (opts.program.abi === 'wasi' ? Atomics.load(header, SAB_I_BLOCKED) : 0),
+    blockedSignals: () => (opts.program.abi === 'wasi' ? loadBlocked(header) : [0, 0]),
     signalMasks: () => process.signalMasks(),
     umask: () => process.umask,
     cred: () => copyCred(process.cred),

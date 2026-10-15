@@ -1,5 +1,6 @@
 import type { ForeignResults, ImportedMemory } from '../process/wasi/wasi-module.ts';
 import type { WasiForkState } from '../process/wasi/wasix-fork.ts';
+import type { BlockedMask } from '../realm/sync-sab-wire.ts';
 import type { Cred } from './cred.ts';
 import type { DeviceMeta, KernelFdKind } from './fd-table.ts';
 
@@ -110,7 +111,7 @@ export interface WasmThread {
   memory: WebAssembly.Memory;
   ids: SharedArrayBuffer;
   modules?: Record<string, WebAssembly.Module>;
-  blocked?: number;
+  blocked?: BlockedMask;
 }
 
 export interface WasmThreadSpawnMsg {

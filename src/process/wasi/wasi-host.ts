@@ -250,10 +250,10 @@ export class WasiHost {
       return path;
     };
     const modeOf = (st: { mode?: number }) => (st.mode ?? 0) & 0o7777;
-    const chown = (path: string, uid: number, gid: number, follow: boolean) => {
+    const chown = (path: string, uid: number, gid: number, follow: boolean, handle?: number) => {
       const { chown: own } = this.o.fs;
       if (!own) throw new WasiError('ENOSYS');
-      own.call(this.o.fs, path, idOf(uid), idOf(gid), follow);
+      own.call(this.o.fs, path, idOf(uid), idOf(gid), follow, handle);
     };
     const caller = (): [number, number] => {
       const cred = this.o.kernel.call({ op: 'proc-cred' }) as Cred;
@@ -284,7 +284,11 @@ export class WasiHost {
       return follow ? this.o.fs.stat(path) : this.o.fs.lstat(path);
     };
     return wrap({
-      fd_chown: (fd: number, uid: number, gid: number) => void chown(pathOf(fd), uid, gid, true),
+      fd_chown: (fd: number, uid: number, gid: number) => {
+        const e = fds.get(fd);
+        const handle = e.type === 'file' ? e.file.buffer.handle : undefined;
+        void chown(pathOf(fd), uid, gid, true, handle);
+      },
       path_chown: (dirfd: number, p: number, l: number, uid: number, gid: number, flags: number) =>
         void chown(at(dirfd, p, l), uid, gid, (flags & AT_SYMLINK_NOFOLLOW) === 0),
       fd_owner: (fd: number, out: number) => {
@@ -304,14 +308,14 @@ export class WasiHost {
         statOut: number,
         out: number
       ) => {
-        if (!this.o.fs.owners) throw new WasiError('ENOTSUP');
         const path = at(dirfd, p, l);
+        if (!this.o.fs.owners) throw new WasiError('ENOTSUP');
         this.writeFilestat(statOut, this.pathFilestat(path, lookup));
         owner(pathOwned(path, (lookup & LOOKUP_SYMLINK_FOLLOW) !== 0), out);
       },
       path_owner: (dirfd: number, p: number, l: number, flags: number, out: number) => {
-        if (!this.o.fs.owners) throw new WasiError('ENOTSUP');
         const path = at(dirfd, p, l);
+        if (!this.o.fs.owners) throw new WasiError('ENOTSUP');
         owner(pathOwned(path, (flags & AT_SYMLINK_NOFOLLOW) === 0), out);
       },
       path_access: (dirfd: number, p: number, l: number, amode: number, flags: number) => {
@@ -629,7 +633,7 @@ export class WasiHost {
     return {
       path_open: (
         dirfd: number,
-        _lookup: number,
+        lookup: number,
         p: number,
         l: number,
         oflags: number,
@@ -638,14 +642,35 @@ export class WasiHost {
         fdflags: number,
         out: number
       ) => {
-        const path = at(dirfd, p, l);
-        if (deviceOf(path)) this.interrupted?.();
-        const fresh = (oflags & OFLAGS.CREAT) !== 0 && !this.synthetic(path) && !o.fs.exists(path);
-        mem.view().setUint32(out, fds.open(path, oflags, rights, fdflags), true);
-        if (fresh) this.created(path, 0o666);
+        const follow = (lookup & LOOKUP_SYMLINK_FOLLOW) !== 0;
+        try {
+          const path = at(dirfd, p, l);
+          if (deviceOf(path)) this.interrupted?.();
+          const fresh =
+            (oflags & OFLAGS.CREAT) !== 0 && !this.synthetic(path) && !o.fs.exists(path);
+          mem.view().setUint32(out, fds.open(path, oflags, rights, fdflags), true);
+          if (fresh) this.created(path, 0o666);
+        } catch (err) {
+          if ((err as { code?: string }).code !== 'ENOENT') throw err;
+          const raw = mem.string(p, l);
+          const joined = raw.startsWith('/') ? raw : `${fds.dir(dirfd).path}/${raw}`;
+          const resolved = this.resolveForDev(joined, follow);
+          if (!resolved) throw err;
+          mem.view().setUint32(out, fds.open(resolved, oflags, rights, fdflags), true);
+        }
       },
-      path_filestat_get: (dirfd: number, lookup: number, p: number, l: number, out: number) =>
-        void this.writeFilestat(out, this.pathFilestat(at(dirfd, p, l), lookup)),
+      path_filestat_get: (dirfd: number, lookup: number, p: number, l: number, out: number) => {
+        try {
+          this.writeFilestat(out, this.pathFilestat(at(dirfd, p, l), lookup));
+        } catch (err) {
+          if ((err as { code?: string }).code !== 'ENOENT') throw err;
+          const raw = mem.string(p, l);
+          const joined = raw.startsWith('/') ? raw : `${fds.dir(dirfd).path}/${raw}`;
+          const resolved = this.resolveForDev(joined, (lookup & LOOKUP_SYMLINK_FOLLOW) !== 0);
+          if (!resolved) throw err;
+          this.writeFilestat(out, this.pathFilestat(resolved, lookup));
+        }
+      },
       path_filestat_set_times: (
         dirfd: number,
         lookup: number,
@@ -955,7 +980,12 @@ export class WasiHost {
     v.setUint8(out, filetype);
     v.setUint16(out + 2, flags, true);
 
-    const rights = seeks ? RIGHTS.ALL : RIGHTS.ALL & ~(RIGHTS.FD_SEEK | RIGHTS.FD_TELL);
+    let rights = seeks ? RIGHTS.ALL : RIGHTS.ALL & ~(RIGHTS.FD_SEEK | RIGHTS.FD_TELL);
+    if (e.type === 'kernel') {
+      const access = this.o.kernel.sys.access?.(fd);
+      if (access === 'read') rights &= ~RIGHTS.FD_WRITE;
+      else if (access === 'write') rights &= ~RIGHTS.FD_READ;
+    }
     v.setBigUint64(out + 8, rights, true);
     v.setBigUint64(out + 16, RIGHTS.ALL, true);
   }
@@ -1033,6 +1063,22 @@ export class WasiHost {
     );
   }
 
+  private resolveForDev(path: string, follow = true): string | undefined {
+    try {
+      if (!follow) {
+        const slash = path.lastIndexOf('/');
+        if (slash <= 0) return undefined;
+        const parent = physicalPath(this.o.fs, path.slice(0, slash));
+        const resolved = `${parent}/${path.slice(slash + 1)}`;
+        return resolved !== path && this.synthetic(resolved) ? resolved : undefined;
+      }
+      const resolved = physicalPath(this.o.fs, path);
+      return resolved !== path && this.synthetic(resolved) ? resolved : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   private pathFilestat(path: string, lookup: number): Filestat {
     if (this.synthetic(path)) {
       return this.local({
@@ -1044,7 +1090,19 @@ export class WasiHost {
     }
     this.fds.flushPath(path);
     const follow = (lookup & LOOKUP_SYMLINK_FOLLOW) !== 0;
-    return filestatOf(path, follow ? this.o.fs.stat(path) : this.o.fs.lstat(path));
+    try {
+      return filestatOf(path, follow ? this.o.fs.stat(path) : this.o.fs.lstat(path));
+    } catch (err) {
+      if ((err as { code?: string }).code !== 'ENOENT') throw err;
+      const resolved = this.resolveForDev(path, follow);
+      if (!resolved) throw err;
+      return this.local({
+        filetype: FILETYPE.CHARACTER_DEVICE,
+        size: 0n,
+        ino: pathInode(resolved),
+        mtimeNs: 0n,
+      });
+    }
   }
 
   private setTimes(path: string, atim: bigint, mtim: bigint, flags: number, follow = true): void {

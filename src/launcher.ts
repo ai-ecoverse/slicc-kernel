@@ -131,6 +131,7 @@ import {
   type ImportedMemory,
   importedMemory,
 } from './process/wasi/wasi-module.ts';
+import { anyBlocked, type BlockedMask } from './realm/sync-sab-wire.ts';
 import { type ApproveHook, Sudo, type SudoCall, type SudoResult } from './sudo.ts';
 import { SUDO_COMMAND, SUDO_PATH, SUDO_SOURCE } from './sudo-command.ts';
 import {
@@ -289,7 +290,7 @@ interface StartRequest {
   pgid?: number;
   group?: 'lead' | 'session';
   ignored?: number;
-  blocked?: number;
+  blocked?: BlockedMask;
   umask?: number;
   cred: Cred;
   tag?: string | undefined;
@@ -1382,7 +1383,7 @@ export class Launcher {
       },
       settling: () => this.settling.isSettling(pid),
       ...(req.ignored ? { ignored: req.ignored } : {}),
-      ...(req.blocked ? { blocked: req.blocked } : {}),
+      ...(anyBlocked(req.blocked) ? { blocked: req.blocked } : {}),
       ...(req.umask !== undefined ? { umask: req.umask } : {}),
       cred: req.cred,
       ...(this.owners && req.program.abi === 'wasi'
@@ -1482,6 +1483,11 @@ export class Launcher {
   }
 
   private forget(pid: number): void {
+    const image = this.jobs.list().find((m) => m.pid === pid)?.execParent;
+    const described = this.described.get(pid);
+    if (image !== undefined && described && this.described.has(image)) {
+      this.described.set(image, described);
+    }
     this.jobs.remove(pid);
     this.described.delete(pid);
     const spent = this.spent.get(pid);
@@ -1615,10 +1621,11 @@ export class Launcher {
       const root = member && rootOf(member).pid;
       return root !== undefined && this.running(root) ? root : INIT_PID;
     };
+    const superseded = new Set([...members.values()].map((m) => m.execParent));
     const listed: ProcessInfo[] = [];
     for (const member of members.values()) {
       const described = this.described.get(member.pid);
-      if (member.execed || !described) continue;
+      if ((member.execed && superseded.has(member.pid)) || !described) continue;
       const cred = this.credOf(member.pid);
       if (!maySee(viewer, cred)) continue;
       const root = rootOf(member);
@@ -1827,7 +1834,7 @@ export class Launcher {
 
   private signalMasksOf(pid: number): { sigIgn?: number; sigCgt?: number; sigBlk?: number } {
     const masks = this.processes.get(pid)?.signalMasks?.();
-    const blocked = this.blockedBy(pid);
+    const [blocked] = this.blockedBy(pid);
     const sigBlk = blocked ? { sigBlk: blocked } : {};
     return masks ? { sigIgn: masks.ignored, sigCgt: masks.caught, ...sigBlk } : sigBlk;
   }
@@ -1836,8 +1843,8 @@ export class Launcher {
     return this.settling.isSettling(pid) || (this.ignoredBy(pid) & sigbit(SIG.TTOU)) !== 0;
   }
 
-  private blockedBy(pid: number): number {
-    return this.processes.get(pid)?.blockedSignals?.() ?? 0;
+  private blockedBy(pid: number): BlockedMask {
+    return this.processes.get(pid)?.blockedSignals?.() ?? [0, 0];
   }
 
   private ignoredBy(pid: number, fork = false): number {
