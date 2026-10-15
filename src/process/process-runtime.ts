@@ -217,6 +217,9 @@ export function kernelSys(transport: SyncSabTransport): ProcessSys & PtyKernel {
     openClipboard(flags) {
       return json(call({ op: 'fd-open-clipboard', flags }, 'fd-open-clipboard')) as number;
     },
+    clipboardAbort(fd) {
+      call({ op: 'fd-clipboard-abort', fd }, 'fd-clipboard-abort');
+    },
     ptyNumbers() {
       return json(call({ op: 'pty-list' }, 'pty-list')) as number[];
     },

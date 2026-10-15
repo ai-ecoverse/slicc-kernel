@@ -174,6 +174,7 @@ export type WasmSyscall =
   | { op: 'fd-tty-owner'; name: string }
   | { op: 'fd-open-sealed'; flags: number }
   | { op: 'fd-open-clipboard'; flags: number }
+  | { op: 'fd-clipboard-abort'; fd: number }
   | { op: 'tty-get'; fd: number }
   | { op: 'tty-set'; fd: number; termios: Termios; flush?: boolean }
   | { op: 'tty-winsz'; fd: number }
@@ -363,6 +364,7 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'fd-tty-owner',
   'fd-open-sealed',
   'fd-open-clipboard',
+  'fd-clipboard-abort',
   'tty-get',
   'tty-set',
   'tty-winsz',
@@ -872,7 +874,11 @@ export class WasmProcess {
     const stderr = this.fds.has(2) ? this.fds.get(2).file : undefined;
     if (!stderr?.write || stderr.clipboard) return;
     const line = `${name}: /dev/clipboard: ${clipboardLine(err.detail)}\n`;
-    await stderr.write(new TextEncoder().encode(line), AbortSignal.timeout(1000)).catch(() => 0);
+    const timeout = new Promise<0>((r) => setTimeout(() => r(0), 1000));
+    await Promise.race([
+      stderr.write(new TextEncoder().encode(line), AbortSignal.timeout(1000)).catch(() => 0),
+      timeout,
+    ]);
   }
 
   private async write(
@@ -1204,7 +1210,7 @@ export class WasmProcess {
         return { ok: true, kind: 'void' };
       case 'fd-renumber':
         if (req.from !== req.to) {
-          this.fds.dup2(req.from, req.to);
+          await this.fds.dup2Clipboard(req.from, req.to);
           if (!req.keep) await Promise.resolve(this.fds.close(req.from));
         }
         return { ok: true, kind: 'void' };
@@ -1216,6 +1222,11 @@ export class WasmProcess {
         return { ok: true, kind: 'json', json: this.openSealed(req.flags) };
       case 'fd-open-clipboard':
         return { ok: true, kind: 'json', json: await this.openClipboard(req.flags) };
+      case 'fd-clipboard-abort': {
+        const file = this.fds.get(req.fd);
+        file.file.clipboard?.abort();
+        return { ok: true, kind: 'void' };
+      }
       case 'fd-tty-owner':
         return { ok: true, kind: 'json', json: this.terminalByName(req.name).owner ?? null };
       case 'fd-select': {
@@ -1311,7 +1322,7 @@ export class WasmProcess {
   private async promote(req: Extract<WasmSyscall, { op: 'fd-promote' }>): Promise<void> {
     if (!this.fds.get(req.fd).file.held) throw new KernelError('EBADF');
     if (req.share !== undefined) {
-      this.fds.dup2(req.share, req.fd);
+      await this.fds.dup2Clipboard(req.share, req.fd);
       return;
     }
     if (req.path === undefined) throw new KernelError('EINVAL');
