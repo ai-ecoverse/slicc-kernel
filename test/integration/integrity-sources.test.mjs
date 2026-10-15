@@ -64,6 +64,7 @@ async function kernelWith(onLookup = () => {}) {
     onDenial: (d) => denials.push(d),
     protect: {
       paths: ['/opt/agent', '/node_modules/agent'],
+      writers: ['bios-installer'],
       integrity: {
         lookup: async (path) => {
           await onLookup(path, root);
@@ -72,7 +73,7 @@ async function kernelWith(onLookup = () => {}) {
       },
     },
   });
-  return { kernel, root, denials };
+  return { kernel, root, denials, known };
 }
 
 test('a program reading a tampered source under a protected path is refused: a JS module, a python module and a #! script swapped after its exec check (#454)', async (t) => {
@@ -105,4 +106,22 @@ test('a program reading a tampered source under a protected path is refused: a J
     [...new Set(denials.filter((d) => d.op === 'read-integrity').map((d) => d.path))].sort(),
     ['/node_modules/agent/bin/run', '/opt/agent/m.mjs', '/opt/agent/mod.py']
   );
+});
+
+test('a writer reads a changed source unchecked, the next process is refused, and integrity.revoke with the new hash lets it pass (#454)', async (t) => {
+  const { kernel, root, known } = await kernelWith();
+  t.after(() => kernel.terminate());
+  const changed = 'export const a = 3;\n';
+  await put(root, '/opt/agent/m.mjs', changed);
+  const writer = await kernel.run(['reader', '/opt/agent/m.mjs'], {
+    cwd: '/',
+    tag: 'bios-installer',
+  });
+  assert.equal(writer.stdout, changed);
+  const other = await kernel.run(['reader', '/opt/agent/m.mjs'], { cwd: '/' });
+  assert.equal(other.stdout, 'EACCES\n');
+  known.set('/opt/agent/m.mjs', hash(changed));
+  await kernel.integrity.revoke('/opt/agent');
+  const revoked = await kernel.run(['reader', '/opt/agent/m.mjs'], { cwd: '/' });
+  assert.equal(revoked.stdout, changed);
 });
