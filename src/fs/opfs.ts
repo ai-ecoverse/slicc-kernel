@@ -1014,8 +1014,8 @@ export class OpfsFs implements KernelFs {
       if (options.force && error.code === 'ENOENT') return;
       throw error;
     }
-    this.refuse(found.path, true);
     if (options.file && found.handle?.kind === 'directory') throw fsError('EISDIR', path);
+    this.refuse(found.path, true);
     if (found.handle) {
       const [dir, name] = await this.parent(found.path);
       try {
