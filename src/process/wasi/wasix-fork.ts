@@ -1,3 +1,4 @@
+import type { BlockedMask } from '../../realm/sync-sab-wire.ts';
 import { E } from './wasi-abi.ts';
 import type { WasiForkFd } from './wasi-fds.ts';
 import type { WasiMemory } from './wasi-memory.ts';
@@ -16,6 +17,8 @@ export interface WasiForkState {
   setjmps?: WasiSetjmps;
 
   signals?: WasiSignalState;
+
+  blocked?: BlockedMask;
 }
 
 export interface WasiSetjmps {

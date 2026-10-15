@@ -5,6 +5,7 @@ import {
   WASM_THREAD_SPAWN,
 } from '../../kernel/protocol.ts';
 import type { SabPostLike } from '../../realm/sync-sab-bridge.ts';
+import { anyBlocked, type BlockedMask } from '../../realm/sync-sab-wire.ts';
 import { SHARED_IDS_BYTES } from './wasi-files.ts';
 
 const LAST_TID = 0;
@@ -32,7 +33,7 @@ export class WasiThreads {
 
   received: Readonly<Record<string, WebAssembly.Module>> | undefined;
 
-  blocked: (() => number) | undefined;
+  blocked: (() => BlockedMask) | undefined;
 
   private readonly port: SabPostLike;
   private readonly memory: WebAssembly.Memory;
@@ -62,7 +63,7 @@ export class WasiThreads {
     this.beforeSpawn?.();
     const tid = Atomics.add(this.ids, LAST_TID, 1) + 1;
     const modules = this.modules?.();
-    const blocked = this.blocked?.() ?? 0;
+    const blocked = this.blocked?.();
     this.port.postMessage({
       type: WASM_THREAD_SPAWN,
       thread: {
@@ -71,7 +72,7 @@ export class WasiThreads {
         memory: this.memory,
         ids: this.ids.buffer as SharedArrayBuffer,
         ...(modules ? { modules } : {}),
-        ...(blocked ? { blocked } : {}),
+        ...(anyBlocked(blocked) ? { blocked } : {}),
       },
     });
     return tid;
