@@ -1,6 +1,8 @@
 name: Release
 
 on:
+  push:
+    branches: [release]
   workflow_dispatch:
     inputs:
       mode:
@@ -20,6 +22,7 @@ jobs:
   release:
     if: github.ref == 'refs/heads/release'
     runs-on: ubuntu-latest
+    environment: npm-release
     timeout-minutes: 45
     env:
       LEFTHOOK: '0'
@@ -40,7 +43,7 @@ jobs:
             echo "current=true" >> "$GITHUB_OUTPUT"
           else
             echo "current=false" >> "$GITHUB_OUTPUT"
-            echo "release has moved past $(git rev-parse --short HEAD); the run dispatched for the newer commit releases it" >> "$GITHUB_STEP_SUMMARY"
+            echo "release has moved past $(git rev-parse --short HEAD); the run for the newer commit releases it" >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - if: steps.head.outputs.current == 'true'
