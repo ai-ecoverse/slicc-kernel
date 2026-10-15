@@ -308,14 +308,14 @@ export class WasiHost {
         statOut: number,
         out: number
       ) => {
-        if (!this.o.fs.owners) throw new WasiError('ENOTSUP');
         const path = at(dirfd, p, l);
+        if (!this.o.fs.owners) throw new WasiError('ENOTSUP');
         this.writeFilestat(statOut, this.pathFilestat(path, lookup));
         owner(pathOwned(path, (lookup & LOOKUP_SYMLINK_FOLLOW) !== 0), out);
       },
       path_owner: (dirfd: number, p: number, l: number, flags: number, out: number) => {
-        if (!this.o.fs.owners) throw new WasiError('ENOTSUP');
         const path = at(dirfd, p, l);
+        if (!this.o.fs.owners) throw new WasiError('ENOTSUP');
         owner(pathOwned(path, (flags & AT_SYMLINK_NOFOLLOW) === 0), out);
       },
       path_access: (dirfd: number, p: number, l: number, amode: number, flags: number) => {
