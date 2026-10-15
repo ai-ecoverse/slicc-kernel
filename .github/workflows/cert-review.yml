@@ -295,7 +295,7 @@ jobs:
           mv "$ev"/*.log "$ev/logs/" 2> /dev/null || true
           cp tools/cert-review/known.json "$ev/known.json"
           node tools/cert-review/findings.mjs --delta "$ev/delta.json" --prev "$ev/prev.json" \
-            --release "$ev/release.json" --base "$ev/base.json" --out "$ev/findings.json"
+            --release "$ev/release.json" --base "$ev/base.json" --compat "$ev/compat.json" --out "$ev/findings.json"
           {
             echo 'prompt<<CERT_PROMPT_END'
             EVIDENCE="$ev" OUT="$RUNNER_TEMP/cert-review" node tools/cert-review/prompt.mjs

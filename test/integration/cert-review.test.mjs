@@ -273,7 +273,7 @@ test('findings.mjs turns the runs into decisions, suite regressions and missing 
     ],
   });
   await write('base.json', { results: [res(file, 'old', 'pass')] });
-  const run = (base) =>
+  const run = (base, extra = []) =>
     execFileSync(process.execPath, [
       fileURLToPath(new URL('findings.mjs', tools)),
       '--delta',
@@ -286,6 +286,7 @@ test('findings.mjs turns the runs into decisions, suite regressions and missing 
       join(dir, base),
       '--out',
       join(dir, 'findings.json'),
+      ...extra,
     ]);
   run('base.json');
   const found = JSON.parse(await readFile(join(dir, 'findings.json'), 'utf8'));
@@ -303,4 +304,35 @@ test('findings.mjs turns the runs into decisions, suite regressions and missing 
   run('missing.json');
   const missing = JSON.parse(await readFile(join(dir, 'findings.json'), 'utf8'));
   assert.deepEqual(missing.findings[0], { kind: 'missing-evidence', what: 'the certified suite' });
+  const compat = async (value) => {
+    await write('compat.json', value);
+    run('base.json', ['--compat', join(dir, 'compat.json')]);
+    return JSON.parse(await readFile(join(dir, 'findings.json'), 'utf8')).findings.filter(
+      (f) => f.kind !== 'suite-regression'
+    );
+  };
+  assert.deepEqual(await compat({ found: false }), [
+    { kind: 'missing-evidence', what: 'kernel-compat' },
+  ]);
+  assert.deepEqual(
+    await compat({
+      found: true,
+      run: 'r',
+      conclusion: 'success',
+      report: { verdict: 'pass', regressions: '0' },
+    }),
+    []
+  );
+  assert.deepEqual(
+    await compat({
+      found: true,
+      run: 'r',
+      conclusion: 'failure',
+      report: { verdict: 'regression', regressions: '2', asset: 'a' },
+    }),
+    [{ kind: 'compat-regression', run: 'r', verdict: 'regression', regressions: '2', report: 'a' }]
+  );
+  assert.deepEqual(await compat({ found: true, run: 'r', conclusion: 'failure' }), [
+    { kind: 'compat-regression', run: 'r', verdict: 'failure', regressions: 'unknown', report: '' },
+  ]);
 });

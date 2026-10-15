@@ -9,6 +9,7 @@ const { values } = parseArgs({
     prev: { type: 'string' },
     release: { type: 'string' },
     base: { type: 'string' },
+    compat: { type: 'string', default: '' },
     out: { type: 'string' },
   },
 });
@@ -25,12 +26,29 @@ const delta = read(values.delta);
 const prev = read(values.prev);
 const release = read(values.release);
 const base = read(values.base);
+const compat = values.compat ? read(values.compat) : undefined;
 const missing = [
   ['delta', delta],
   ['the previous release run', prev],
   ['the release suite', release],
   ['the certified suite', base],
 ].filter(([, v]) => v === undefined);
+
+function compatFindings(c) {
+  if (!values.compat) return [];
+  if (!c?.found) return [{ kind: 'missing-evidence', what: 'kernel-compat' }];
+  const regression = c.report?.verdict === 'regression' || c.conclusion !== 'success';
+  if (!regression) return [];
+  return [
+    {
+      kind: 'compat-regression',
+      run: c.run,
+      verdict: c.report?.verdict ?? c.conclusion,
+      regressions: c.report?.regressions ?? 'unknown',
+      report: c.report?.asset ?? '',
+    },
+  ];
+}
 
 const nextMap = resultsMap(release?.results ?? []);
 const prevMap = resultsMap(prev?.results ?? []);
@@ -43,6 +61,7 @@ const findings = [
     .map((r) => ({ kind: r.decision, pr: r.pr, title: r.title })),
   ...suites.regressed.map((t) => ({ kind: 'suite-regression', test: t.test, error: t.error })),
   ...suites.newFailing.map((t) => ({ kind: 'suite-new-failure', test: t.test, error: t.error })),
+  ...compatFindings(compat),
 ];
 const result = {
   version: delta?.version,
@@ -57,6 +76,7 @@ const result = {
       v && { exit: v.exit, pass: v.pass, fail: v.fail, skip: v.skip, seconds: v.seconds },
     ])
   ),
+  compat: compat && { run: compat.run, conclusion: compat.conclusion, report: compat.report },
   rows,
   suites,
   findings,

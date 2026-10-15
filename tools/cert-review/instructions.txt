@@ -5,7 +5,7 @@ THE EVIDENCE ($EVIDENCE)
 - findings.json, computed in code from the runs below:
   - rows: one per pull request, with a decision. negative = a fix whose tests pass on v$VERSION and fail on v$PREV's dist (the NEGATIVE holds). passes = a feat or perf whose tests pass. no-negative = a fix whose tests also pass on v$PREV (a test gap). no-test = a behaviour change with no integration test. no-titles or not-run = tests whose titles the parser couldn't match or that didn't run. prev-not-run = the previous dist produced no result. fails-on-release = a test of this delta fails on v$VERSION. not-behaviour = CI, docs or dependency changes.
   - suites: v$VERSION's own test/integration suite on its published dist, compared test by test with v$BASE's suite on v$BASE's published dist (the certified release). regressed = passed on v$BASE, fails now. newFailing = a test new since v$BASE that fails. stillFailing = failed on both. fixed, removed, added and same are counts or lists.
-  - findings: the list of everything above that needs judgement, plus missing evidence.
+  - findings: the list of everything above that needs judgement, plus missing evidence, plus compat-regression when kernel-compat reported regressions (read its report: the asset URL in compat.json, or the run's report job).
 - release.json, prev.json, base.json: the raw per-test results (file, name, status, error), with logs in logs/.
 - compat.json: homescoop's kernel-compat run on v$VERSION (the base set and catalog packages on this kernel), with its conclusion and, when attached, its verdict and regression count. found false means no run finished in time.
 - known.json: issues every line carries while they are open.
@@ -18,7 +18,7 @@ WHAT TO DO
 
 SEVERITY (Lars, 2026-10-14: roll forward, don't reject over minor issues)
 FAIL only for: a security or secret exposure, data loss or corruption, a supply-chain integrity problem, a license violation, a crash or boot failure, or a regression that breaks a common workflow or a base-set command without a workaround. Everything else is a known issue with a repro and the integration test that would catch it.
-File every known issue that isn't filed yet. Search first, open and closed: gh issue list -R $REPO --state all --search "<words>". Cite a match as #<n> instead of filing again. Otherwise gh issue create -R $REPO with the title, the repro (the failing test, its error, the run), the version, and the test that would catch it. Open issues labelled known-issue in $REPO and the ones in known.json are known issues of this release too when they still apply.
+File every known issue that isn't filed yet, in the repository that owns the fix: $REPO for the kernel, ai-ecoverse/homescoop for a package build, ai-ecoverse/slicc-bios for a bios pin. Search first, open and closed: gh issue list -R $REPO --state all --search "<words>". Cite a match as #<n> instead of filing again. Otherwise gh issue create -R $REPO with the title, the repro (the failing test, its error, the run), the version, and the test that would catch it. Open issues labelled known-issue in $REPO and the ones in known.json are known issues of this release too when they still apply.
 
 YOUR ANSWER, in $OUT
 - verdict.json: { "verdict": "certified" | "fail", "known": ["#<n>" or "<owner>/<repo>#<n>", ...], "reason": "<one line, for a fail>" }. Every known issue is a filed issue. Don't write shas or versions: a later job computes the line from the registry, and adds known.json's open issues itself.
