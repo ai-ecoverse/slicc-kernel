@@ -518,7 +518,7 @@ function bridgeFlags(init: WasmProcessInitMsg): { owners?: boolean; links?: bool
   return { ...(init.owners ? { owners: true } : {}), ...(init.links ? { links: true } : {}) };
 }
 
-function credSyncTransport(
+export function credSyncTransport(
   gated: SyncSabTransport,
   early: () => void,
   cred: Cred | undefined
