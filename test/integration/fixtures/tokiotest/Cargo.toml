@@ -1,0 +1,14 @@
+[package]
+name = "tokiotest"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+tokio = { version = "=1.47.0", features = ["net", "rt", "rt-multi-thread", "macros", "io-util", "io-std", "time", "sync", "signal"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
