@@ -33,6 +33,7 @@ import type { ChildForker, ChildSpawner } from './children.ts';
 import type { ClipboardBroker } from './clipboard.ts';
 import { type CpuTimes, ProcessClocks } from './cpu-clock.ts';
 import { type Cred, copyCred } from './cred.ts';
+import { KernelDgram } from './dgram.ts';
 import { type FdTable, kernelFdKind, type OpenFile } from './fd-table.ts';
 import type { JobTable } from './jobs.ts';
 import type { LockTable } from './locks.ts';
@@ -171,7 +172,10 @@ export function inheritedFds(fds: FdTable): InheritedFd[] {
     .map((fd): InheritedFd => {
       const open = fds.get(fd);
       const flags = fds.statusFlags(fd);
-      const kind = open.file instanceof KernelSocket ? 'socket' : kernelFdKind(open.file);
+      const kind =
+        open.file instanceof KernelSocket || open.file instanceof KernelDgram
+          ? 'socket'
+          : kernelFdKind(open.file);
       const meta = open.file.heldMeta;
       return {
         fd,

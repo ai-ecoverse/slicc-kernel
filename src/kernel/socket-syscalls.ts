@@ -1,5 +1,7 @@
 import type { SyncFsResult } from '../realm/sync-fs-wire.ts';
+import { KernelDgram } from './dgram.ts';
 import { type FdTable, KernelError, OpenFile, pollFile } from './fd-table.ts';
+import { encodeReceived } from './net/datagram-wire.ts';
 import type { ResolveFamily } from './net/uplink.ts';
 import {
   type ConnectorStamp,
@@ -13,6 +15,7 @@ export type SocketSyscall =
   | {
       op: 'sock-open';
       domain: SocketDomain;
+      type?: 'stream' | 'dgram';
     }
   | {
       op: 'sock-pair';
@@ -66,6 +69,20 @@ export type SocketSyscall =
       op: 'sock-resolve';
       name: string;
       family: ResolveFamily;
+    }
+  | {
+      op: 'sock-sendto';
+      fd: number;
+      body: Uint8Array;
+      addr?: SockAddr;
+      nonblock: boolean;
+    }
+  | {
+      op: 'sock-recvfrom';
+      fd: number;
+      max: number;
+      peek: boolean;
+      nonblock: boolean;
     };
 export const SOCKET_OPS: readonly SocketSyscall['op'][] = [
   'sock-open',
@@ -79,6 +96,8 @@ export const SOCKET_OPS: readonly SocketSyscall['op'][] = [
   'sock-getopt',
   'sock-setopt',
   'sock-resolve',
+  'sock-sendto',
+  'sock-recvfrom',
 ];
 export interface SocketProcess {
   fds: FdTable;
@@ -89,8 +108,20 @@ export interface SocketProcess {
   stamp?(): Promise<ConnectorStamp>;
 }
 function socketAt(fds: FdTable, fd: number): KernelSocket {
+  const file = anySocketAt(fds, fd);
+  if (file instanceof KernelDgram) throw new KernelError('EOPNOTSUPP');
+  return file;
+}
+function anySocketAt(fds: FdTable, fd: number): KernelSocket | KernelDgram {
   const file = fds.get(fd).file;
-  if (!(file instanceof KernelSocket)) throw new KernelError('ENOTSOCK');
+  if (!(file instanceof KernelSocket) && !(file instanceof KernelDgram)) {
+    throw new KernelError('ENOTSOCK');
+  }
+  return file;
+}
+function dgramAt(fds: FdTable, fd: number): KernelDgram {
+  const file = anySocketAt(fds, fd);
+  if (!(file instanceof KernelDgram)) throw new KernelError('EOPNOTSUPP');
   return file;
 }
 const ok = (json?: unknown): SyncFsResult =>
@@ -101,8 +132,11 @@ export async function socketSyscall(
 ): Promise<SyncFsResult> {
   const { fds, net } = proc;
   switch (req.op) {
-    case 'sock-open':
-      return ok(fds.install(new OpenFile(net.socket(req.domain)), 3));
+    case 'sock-open': {
+      if (req.type === 'dgram' && req.domain !== 'inet') throw new KernelError('EPROTONOSUPPORT');
+      const file = req.type === 'dgram' ? new KernelDgram(net) : net.socket(req.domain);
+      return ok(fds.install(new OpenFile(file), 3));
+    }
     case 'sock-pair': {
       const [a, b] = KernelSocket.pair(net, req.domain, proc.cred?.());
       const first = fds.install(new OpenFile(a), 3);
@@ -114,44 +148,70 @@ export async function socketSyscall(
       }
     }
     case 'sock-bind':
-      socketAt(fds, req.fd).bind(req.addr);
+      anySocketAt(fds, req.fd).bind(req.addr);
       return ok();
     case 'sock-listen':
       socketAt(fds, req.fd).listen(req.backlog, proc.cred?.());
       return ok();
     case 'sock-accept':
       return ok(await accept(proc, req.fd, req.nonblock));
-    case 'sock-connect': {
-      const socket = socketAt(fds, req.fd);
-      const stamp = net.facadeAt(req.addr) && (await proc.stamp?.());
-      const dialing = socket.connect(req.addr, true, proc.cred?.(), stamp || undefined);
-      if (req.nonblock) {
-        dialing?.catch(() => undefined);
-        throw new KernelError('EINPROGRESS');
-      }
-      if (dialing !== undefined) await interruptible(dialing, proc.blocking());
-      return ok();
-    }
+    case 'sock-connect':
+      return connect(req, proc);
     case 'sock-shutdown':
-      socketAt(fds, req.fd).shutdown(req.how);
+      anySocketAt(fds, req.fd).shutdown(req.how);
       return ok();
     case 'sock-name': {
-      const socket = socketAt(fds, req.fd);
+      const socket = anySocketAt(fds, req.fd);
       const addr = req.peer ? socket.peer : socket.local;
       if (req.peer && !addr) throw new KernelError('ENOTCONN');
-      return ok(addr ?? unnamed(socket.domain));
+      return ok(addr ?? unnamed(socket instanceof KernelDgram ? 'inet' : socket.domain));
     }
     case 'sock-getopt':
-      return ok(socketAt(fds, req.fd).getOption(req.level, req.name));
+      return ok(anySocketAt(fds, req.fd).getOption(req.level, req.name));
     case 'sock-setopt':
-      socketAt(fds, req.fd).setOption(req.level, req.name, req.value);
+      anySocketAt(fds, req.fd).setOption(req.level, req.name, req.value);
       return ok();
     case 'sock-resolve': {
       const addresses = await proc.resolve(req.name, req.family, () => proc.blocking());
       if (addresses.length === 0) throw new KernelError('ENOENT');
       return ok(addresses);
     }
+    default:
+      return datagram(req, proc);
   }
+}
+async function connect(
+  req: Extract<SocketSyscall, { op: 'sock-connect' }>,
+  proc: SocketProcess
+): Promise<SyncFsResult> {
+  const target = anySocketAt(proc.fds, req.fd);
+  if (target instanceof KernelDgram) {
+    target.connectTo(req.addr);
+    return ok();
+  }
+  const stamp = proc.net.facadeAt(req.addr) && (await proc.stamp?.());
+  const dialing = target.connect(req.addr, true, proc.cred?.(), stamp || undefined);
+  if (req.nonblock) {
+    dialing?.catch(() => undefined);
+    throw new KernelError('EINPROGRESS');
+  }
+  if (dialing !== undefined) await interruptible(dialing, proc.blocking());
+  return ok();
+}
+async function datagram(
+  req: Extract<SocketSyscall, { op: 'sock-sendto' | 'sock-recvfrom' }>,
+  proc: SocketProcess
+): Promise<SyncFsResult> {
+  const dgram = dgramAt(proc.fds, req.fd);
+  if (req.op === 'sock-sendto') {
+    if (req.nonblock && !pollFile(dgram).writable) throw new KernelError('EAGAIN');
+    return ok(await dgram.send(req.body, req.addr));
+  }
+  const ready = pollFile(dgram).readable;
+  if (req.nonblock && !ready) throw new KernelError('EAGAIN');
+  const got = await dgram.receive(req.max, req.peek, ready ? undefined : proc.blocking());
+  const { bytes, from, truncated } = got;
+  return { ok: true, kind: 'bytes', bytes: encodeReceived({ bytes, truncated, ...from }) };
 }
 function interruptible(dialing: Promise<void>, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {

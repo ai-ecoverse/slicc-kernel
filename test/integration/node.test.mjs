@@ -433,6 +433,172 @@ test('a new process finds PNPM_HOME on a hostfs /usr whose host came up after th
   }
 });
 
+test('a path with .. after a symlink runs what the file system finds there, with its exec check', async (t) => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
+  const script = [
+    'mkdir -p /opt/store/pkg /opt/store/tools /opt/app',
+    'ln -s /opt/store/pkg /opt/app/pkg',
+    'cp /node_modules/@ai-ecoverse/wasm-bash/bin/bash* /opt/store/tools/',
+    'printf "#!/bin/sh\\necho script ran\\n" > /opt/store/tools/hello.sh',
+    'cp /opt/store/tools/hello.sh /opt/store/tools/closed.sh',
+    'chmod 755 /opt/store/tools/bash /opt/store/tools/hello.sh',
+    'chmod 644 /opt/store/tools/closed.sh',
+    'cd /opt/app',
+    'pkg/../tools/hello.sh',
+    '/opt/app/pkg/../tools/bash -c "echo by path"',
+    'pkg/../tools/closed.sh; echo "closed $?"',
+  ].join('\n');
+  await kernel.users.add({ name: 'cone' });
+  const r = await kernel.run(['bash', '-c', script], { cwd: '/' });
+  assert.equal(r.stdout, 'script ran\nby path\nclosed 126\n', r.stderr);
+  const user = await kernel.run(['bash', '-c', 'cd /opt/app && pkg/../tools/hello.sh'], {
+    cwd: '/home/cone',
+    user: 'cone',
+  });
+  assert.equal(user.stdout, 'script ran\n', user.stderr);
+});
+
+test('a path with .. needs search permission on the directories it goes through, and a sudo process follows no untrusted link there', async (t) => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
+  await kernel.users.add({ name: 'cone', groups: ['sudo'] });
+  const setup = [
+    'mkdir -p /usr/lib /srv/closed && ln -s /usr/lib /srv/closed/link && chmod 700 /srv/closed',
+    "printf '%s\\n' 'NOPASSWD cone Cmnd *' > /etc/sudoers.d/cone && chmod 440 /etc/sudoers.d/cone",
+    '/srv/closed/link/../bin/echo root ran',
+  ].join('\n');
+  const root = await kernel.run(['bash', '-c', setup], { cwd: '/' });
+  assert.equal(root.stdout, 'root ran\n', root.stderr);
+  const cone = [
+    '/srv/closed/link/../bin/echo cone ran; echo "closed $?"',
+    'ln -s /usr/lib /home/cone/mine && /home/cone/mine/../bin/echo own link',
+    'sudo bash -c \'/home/cone/mine/../bin/echo sudo ran; echo "sudo $?"\'',
+    "sudo bash -c '/usr/lib/../bin/echo sudo plain'",
+  ].join('\n');
+  const r = await kernel.run(['bash', '-c', cone], { cwd: '/home/cone', user: 'cone' });
+  assert.match(r.stderr, /\/srv\/closed\/link\/\.\.\/bin\/echo: Permission denied/);
+  assert.match(r.stderr, /\/home\/cone\/mine\/\.\.\/bin\/echo: Permission denied/);
+  assert.equal(r.stdout, 'closed 126\nown link\nsudo 126\nsudo plain\n');
+});
+
+test("a package command's WASI wasm run by path runs as that command, in the caller's catalog", async (t) => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
+  const rg = await readFile(new URL('wasi-ripgrep/bin/rg.wasm', modules));
+  const manifest = (name) =>
+    JSON.stringify({
+      name,
+      slicc: {
+        abi: 'wasi',
+        commands: { [name]: { wasm: 'bin/rg.wasm', env: { RIPGREP_CONFIG_PATH: './rgrc' } } },
+      },
+    });
+  const own = '/home/cone/.local/share/pnpm/global/5/g1/node_modules/rgcone';
+  await kernel.users.add({ name: 'cone' });
+  for (const [dir, name] of [
+    ['/node_modules/rgenv', 'rgenv'],
+    [own, 'rgcone'],
+  ]) {
+    await kernel.writeFile(`${dir}/package.json`, manifest(name));
+    await kernel.writeFile(`${dir}/bin/rg.wasm`, rg);
+    await kernel.writeFile(`${dir}/rgrc`, '--count\n');
+  }
+  const prep = `chmod 755 /node_modules/rgenv/bin/rg.wasm ${own}/bin/rg.wasm && chown -R cone ${own}`;
+  assert.equal((await kernel.run(['bash', '-c', prep], { cwd: '/' })).status, 0);
+  await kernel.writeFile('/srv/f', 'x\nx\n');
+  const root = [
+    '/node_modules/rgenv/bin/rg.wasm x /srv/f',
+    'cp /node_modules/rgenv/bin/rg.wasm /tmp/rg.wasm && chmod 755 /tmp/rg.wasm && /tmp/rg.wasm x /srv/f',
+  ].join('\n');
+  const r = await kernel.run(['bash', '-c', root], { cwd: '/' });
+  assert.equal(r.stdout, '2\nx\nx\n', r.stderr);
+  const mine = await kernel.run(['bash', '-c', `${own}/bin/rg.wasm x /srv/f`], {
+    cwd: '/home/cone',
+    user: 'cone',
+  });
+  assert.equal(mine.stdout, '2\n', mine.stderr);
+});
+
+test('connect({ user }) fails once the kernel is terminated during its lookup', async () => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  await kernel.users.add({ name: 'cone' });
+  const connecting = kernel.connect({ user: 'cone' });
+  kernel.terminate();
+  await assert.rejects(connecting, /terminated/);
+});
+
+test('an account read while a user is removed sees the tables before or after, never a mix', async (t) => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  t.after(() => kernel.terminate());
+  const seen = [];
+  for (let round = 0; round < 5; round++) {
+    await kernel.users.add({ name: 'cone', groups: ['sudo'] });
+    let done = false;
+    const removing = kernel.users.remove('cone').finally(() => {
+      done = true;
+    });
+    while (!done) {
+      const cone = (await kernel.users.list()).find((a) => a.name === 'cone');
+      if (cone) seen.push(cone.groups.length);
+    }
+    await removing;
+  }
+  assert.ok(seen.length > 0);
+  assert.deepEqual(new Set(seen), new Set([3]));
+});
+
+test('sudo runs from a cwd on a tmpfs mount the caller can enter, and refuses one it cannot', async (t) => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
+  await kernel.users.add({ name: 'cone', groups: ['sudo'] });
+  await kernel.run(['mkdir', '-p', '/mnt/m'], { cwd: '/' });
+  await kernel.mount({ type: 'tmpfs', source: 'none', target: '/mnt/m' });
+  const setup = [
+    'chmod 755 /mnt/m && mkdir -m 755 /mnt/m/sub /mnt/m/gone',
+    "printf '%s\\n' 'NOPASSWD cone Cmnd *' > /etc/sudoers.d/cone && chmod 440 /etc/sudoers.d/cone",
+    'cd /mnt/m && sudo -u cone pwd; echo "rc $?"',
+    'cd /mnt/m/sub && sudo -u cone pwd; echo "rc $?"',
+  ].join('\n');
+  const root = await kernel.run(['bash', '-c', setup], { cwd: '/' });
+  assert.equal(root.stdout, '/mnt/m\nrc 0\n/mnt/m/sub\nrc 0\n', root.stderr);
+  const cone = [
+    'cd /mnt/m/sub && sudo pwd; echo "rc $?"',
+    'cd /mnt/m/gone && sudo chmod 700 /mnt/m/gone && sudo pwd; echo "rc $?"',
+  ].join('\n');
+  const r = await kernel.run(['bash', '-c', cone], { cwd: '/home/cone', user: 'cone' });
+  assert.equal(r.stdout, '/mnt/m/sub\nrc 0\nrc 1\n', r.stderr);
+  assert.match(r.stderr, /sudo: cannot run in \/mnt\/m\/gone: it isn't a directory you can enter/);
+});
+
+test('a sudo process crossing an untrusted link inside a tmpfs mount is refused as off mounts', async (t) => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
+  await kernel.users.add({ name: 'cone', groups: ['sudo'] });
+  await kernel.run(['mkdir', '-p', '/home/cone/m'], { cwd: '/' });
+  await kernel.mount({ type: 'tmpfs', source: 'none', target: '/home/cone/m' });
+  const setup = [
+    "printf '%s\\n' 'NOPASSWD cone Cmnd *' > /etc/sudoers.d/cone && chmod 440 /etc/sudoers.d/cone",
+    'mkdir -p /srv/d && echo secret > /srv/d/f && chmod 600 /srv/d/f',
+    'chown cone /home/cone/m && chmod 755 /home/cone/m',
+  ].join('\n');
+  assert.equal((await kernel.run(['bash', '-c', setup], { cwd: '/' })).status, 0);
+  const cone = [
+    'mkdir -p /home/cone/m/d && echo mine > /home/cone/m/d/f',
+    'ln -s /srv/d /home/cone/off && ln -s /srv/d /home/cone/m/on',
+    'sudo cat /home/cone/off/f > /dev/null 2>&1; echo "off $?"',
+    'sudo cat /home/cone/m/on/f > /dev/null 2>&1; echo "on $?"',
+    'sudo cat /home/cone/m/d/../d/f',
+  ].join('\n');
+  const r = await kernel.run(['bash', '-c', cone], { cwd: '/home/cone', user: 'cone' });
+  assert.equal(r.stdout, 'off 1\non 1\nmine\n', r.stderr);
+});
+
 test('a WASI process killed by SIGKILL keeps the bytes it wrote but never fsynced', async () => {
   const kernel = await createNodeKernel();
   for (const pkg of ['wasm-bash', 'wasm-coreutils', 'wasix-python']) await install(kernel, pkg);

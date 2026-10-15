@@ -94,7 +94,7 @@ export function mountVfsIntoEmscripten(
   try {
     Fs.chdir(deps.cwd);
   } catch (err) {
-    warn(`cannot chdir to ${deps.cwd}: ${String(err)}`);
+    warn(`cannot chdir to ${deps.cwd}: errno ${(err as { errno?: unknown }).errno}`);
   }
   return {
     mounted,

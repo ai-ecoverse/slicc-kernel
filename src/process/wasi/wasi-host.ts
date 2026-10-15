@@ -43,6 +43,7 @@ import { pollOneoff } from './wasi-poll.ts';
 import type { WasiSigmask } from './wasi-sigmask.ts';
 import type { WasiSignals } from './wasi-signals.ts';
 import { sliccTty } from './wasi-termios.ts';
+import { datagramCalls } from './wasix-sockets.ts';
 
 export class WasiExit extends Error {
   readonly code: number;
@@ -160,6 +161,8 @@ function kernelFiletype(kind: string): { filetype: number; seeks: boolean } {
       return { filetype: FILETYPE.CHARACTER_DEVICE, seeks: true };
     case 'socket':
       return { filetype: FILETYPE.SOCKET_STREAM, seeks: false };
+    case 'dgram':
+      return { filetype: FILETYPE.SOCKET_DGRAM, seeks: false };
     case 'file':
       return { filetype: FILETYPE.REGULAR_FILE, seeks: true };
     default:
@@ -782,6 +785,18 @@ export class WasiHost {
         outFlags: number
       ) => {
         const e = this.socket(fd);
+        if (this.fds.datagram(fd, e)) {
+          return datagramCalls(this).recvFrom(
+            fd,
+            e.nonblock,
+            iovs,
+            n,
+            riflags,
+            outLen,
+            outFlags,
+            0
+          );
+        }
         const peek = (riflags & RIFLAGS.PEEK) !== 0;
         const want = mem.capacity(iovs, n);
         const data =
@@ -975,7 +990,7 @@ export class WasiHost {
     if (e.type === 'kernel') {
       const kind = this.fds.kind(fd, e);
       if (kind === 'device') this.interrupted?.();
-      ({ filetype, seeks } = kernelFiletype(kind));
+      ({ filetype, seeks } = kernelFiletype(this.fds.datagram(fd, e) ? 'dgram' : kind));
       if (e.nonblock) flags |= FDFLAGS.NONBLOCK;
       if (e.append) flags |= FDFLAGS.APPEND;
     } else if (e.type === 'file') {

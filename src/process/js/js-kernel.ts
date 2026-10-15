@@ -25,6 +25,7 @@ const DETAILED: ReadonlySet<string> = new Set([
   'fd-write',
   'fd-close',
   'fd-open-clipboard',
+  'net-ws-ready',
 ]);
 
 export function umaskRequest(mask: unknown): { op: 'proc-umask'; mask?: number } {

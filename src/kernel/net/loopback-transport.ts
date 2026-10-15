@@ -241,7 +241,7 @@ export class KernelLoopback {
       if (head.status !== 101) {
         throw errno(
           'EPROTO',
-          `the server answered ${head.status} ${head.statusText}, not an upgrade`
+          `the server answered the upgrade with ${head.status}${head.statusText ? ` ${head.statusText}` : ''}`
         );
       }
       const upgraded =

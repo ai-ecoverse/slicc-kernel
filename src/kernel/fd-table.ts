@@ -8,6 +8,8 @@ export type KernelErrno =
   | 'EBADF'
   | 'EDEADLK'
   | 'ENOLCK'
+  | 'EEXIST'
+  | 'ELOOP'
   | 'EPIPE'
   | 'EMFILE'
   | 'EINVAL'
@@ -45,6 +47,8 @@ export type KernelErrno =
   | 'EHOSTUNREACH'
   | 'ECONNRESET'
   | 'EMSGSIZE'
+  | 'EDESTADDRREQ'
+  | 'ENOPROTOOPT'
   | 'ENOTSUP'
   | 'EILSEQ';
 
@@ -66,6 +70,10 @@ export interface PollState {
   writable: boolean;
 
   hangup: boolean;
+
+  rdhup?: boolean;
+
+  error?: boolean;
 }
 
 export interface KernelFile {
@@ -132,6 +140,8 @@ export function pollFile(file: KernelFile): PollState {
 export class OpenFile {
   private refs = 1;
 
+  private closers: Set<() => void> | undefined;
+
   readonly file: KernelFile;
 
   constructor(file: KernelFile) {
@@ -143,9 +153,19 @@ export class OpenFile {
     return this;
   }
 
+  onClose(fn: () => void): () => void {
+    this.closers ??= new Set();
+    this.closers.add(fn);
+    return () => void this.closers?.delete(fn);
+  }
+
   release(): void | Promise<void> {
     this.refs -= 1;
-    if (this.refs === 0) return this.file.close();
+    if (this.refs !== 0) return;
+    const closers = this.closers;
+    this.closers = undefined;
+    for (const fn of closers ?? []) fn();
+    return this.file.close();
   }
 }
 
