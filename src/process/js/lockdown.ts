@@ -68,13 +68,13 @@ export function vacate(target: object, names: readonly string[]): void {
       }
     }
     const kept = holders.slice(1).some((holder) => Object.hasOwn(holder, name));
-    Reflect.defineProperty(target, name, {
+    const opened = Reflect.defineProperty(target, name, {
       value: undefined,
       writable: true,
       enumerable: false,
       configurable: true,
     });
-    if (kept || Reflect.get(target, name) !== undefined) {
+    if (kept || !opened || Reflect.get(target, name) !== undefined) {
       throw new Error(`slicc-kernel: cannot withhold ${name} from a JS program`);
     }
   }
