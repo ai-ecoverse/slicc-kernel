@@ -15,6 +15,7 @@ import {
   redirected,
   resolvePath,
 } from './types.ts';
+import { view } from './view.ts';
 
 const S_IFDIR = 0o040000;
 const S_IFREG = 0o100000;
@@ -392,7 +393,7 @@ export class OpfsFs implements KernelFs {
   }
 
   unguarded(): KernelFs {
-    return Object.create(this, { guarded: { value: [] } }) as KernelFs;
+    return view(this, { guarded: [] }) as unknown as KernelFs;
   }
 
   private refuse(path: string, holding = false): void {
