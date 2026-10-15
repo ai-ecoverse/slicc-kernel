@@ -99,7 +99,8 @@ export class FreshModules {
       },
       link: async (from: string, to: string, follow?: boolean) => {
         await fs.link(from, to, follow);
-        const source = follow && fs.realpath ? await fs.realpath(from, true) : from;
+        const source =
+          follow && fs.realpath ? await fs.realpath(from, true).catch(() => from) : from;
         const fresh = this.fresh.get(normalizePath(source));
         if (fresh) this.fresh.set(normalizePath(to), fresh);
       },

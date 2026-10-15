@@ -1,0 +1,12 @@
+{
+  "name": "linktest",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "linktest": {
+        "wasm": "bin/linktest.wasm"
+      }
+    }
+  }
+}
