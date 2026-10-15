@@ -1107,7 +1107,18 @@ export function useLiveChown(Fs: LiveChownFs): void {
   if (!Fs.fchown || !getStreamChecked) return;
   Fs.fchown = (fd, uid, gid) => {
     const stream = getStreamChecked.call(Fs, fd);
-    const live = (stream.node as LiveFsNode).live !== undefined;
+    const node = stream.node as LiveFsNode;
+    if (node.live?.orphan && node.live.handle !== undefined) {
+      const bridge = node.mount.opts.bridge as SyncFsPosixBridge;
+      try {
+        bridge.chown?.(liveNodePath(node), idOf(uid), idOf(gid), true, node.live.handle);
+      } catch (err) {
+        throw toErrno(Fs, err);
+      }
+      node.live.stat = undefined;
+      return;
+    }
+    const live = node.live !== undefined;
     const target = live || stream.path === undefined ? stream.node : stream.path;
     (Fs.chown as NonNullable<LiveChownFs['chown']>)(target, uid, gid);
   };

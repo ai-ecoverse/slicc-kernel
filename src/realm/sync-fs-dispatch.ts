@@ -166,12 +166,13 @@ async function mkdirExclusive(entry: SyncFsTokenEntry, path: string, mode?: numb
 }
 
 async function chown(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest) {
+  const real = req.handle !== undefined ? await keptOr(entry, path, req.handle) : path;
   const cred = entry.cred?.();
   if (!cred) {
-    await (req.op === 'chown' ? entry.fs.stat(path) : entry.fs.lstat(path));
+    await (req.op === 'chown' ? entry.fs.stat(real) : entry.fs.lstat(real));
     return done;
   }
-  await chownAs(entry.fs, cred, path, {
+  await chownAs(entry.fs, cred, real, {
     ...(req.uid !== undefined ? { uid: req.uid } : {}),
     ...(req.gid !== undefined ? { gid: req.gid } : {}),
     follow: req.op === 'chown',

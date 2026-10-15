@@ -133,7 +133,13 @@ export interface SyncFsPosixBridge {
   ): number | undefined;
   access?(path: string, mode: number, kind?: AccessKind, nofollow?: boolean): void;
   create?(path: string, mode?: number): void;
-  chown?(path: string, uid: number | undefined, gid: number | undefined, follow?: boolean): void;
+  chown?(
+    path: string,
+    uid: number | undefined,
+    gid: number | undefined,
+    follow?: boolean,
+    handle?: number
+  ): void;
   owners?: boolean;
   links?: boolean;
   readdirStat(path: string): Array<[string, SyncFsBridgeStat | null]>;
