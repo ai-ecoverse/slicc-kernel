@@ -322,12 +322,12 @@ async function guard(
     }
     case 'mkdir': {
       await makeIn(g, op, path);
-      return { path };
+      return { path: await walkSafe(g, path, false) };
     }
     case 'create':
     case 'symlink':
       await inParent(g, op, path);
-      return { path };
+      return { path: await walkSafe(g, path, op === 'create') };
     case 'unlink':
     case 'rmdir': {
       await inParent(g, op, path, true);
@@ -373,7 +373,7 @@ async function guard(
       if (req.handle === undefined && req.mode !== 1) await writable(g, op, path);
       return { path: await walkSafe(g, path, true) };
     default:
-      return { path };
+      return { path: await walkSafe(g, path, true) };
   }
 }
 
@@ -628,12 +628,12 @@ async function guardAndResolve(
 ): Promise<SyncFsResult | Resolved> {
   const result = await guarded(entry, path, req);
   if ('refused' in result) return result.refused;
-  const { fs } = entry;
-  const useNoLinks = entry.links !== undefined && fs.noLinks;
+  const noLinks = entry.links === undefined ? undefined : (entry.noLinks ?? entry.fs.noLinks?.());
+  if (!noLinks) return { path, entry };
   return {
-    path: useNoLinks && result.paths ? result.paths.path : path,
-    arg2: useNoLinks && result.paths?.arg2 ? result.paths.arg2 : undefined,
-    entry: useNoLinks ? { ...entry, fs: fs.noLinks!() } : entry,
+    path: result.paths?.path ?? path,
+    ...(result.paths?.arg2 ? { arg2: result.paths.arg2 } : {}),
+    entry: { ...entry, fs: noLinks },
   };
 }
 

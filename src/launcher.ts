@@ -271,6 +271,7 @@ interface Redeemer {
 
 interface WriterStack {
   fs: KernelFs;
+  noLinks: KernelFs;
   nodes: VfsNodes;
   unlinked: UnlinkedKeeper;
   writer: boolean;
@@ -490,6 +491,9 @@ function addTimes(into: Map<number, CpuTimes>, pid: number, t: CpuTimes): void {
 export class Launcher {
   readonly fs: KernelFs;
   readonly processFs: KernelFs;
+  private readonly noLinksFs: KernelFs;
+  private readonly baseNoLinks: KernelFs;
+  private protection: ProtectedFs | undefined;
   private readonly prefixes: string[];
   private readonly writerTags: ReadonlySet<string>;
   private readonly unguardedRoot: KernelFs;
@@ -595,8 +599,9 @@ export class Launcher {
       changed: this.watchers.changed.bind(this.watchers),
       owners: this.owners,
     });
-    const watched = this.watchers.wrap(this.mounts.wrap(options.fs));
-    this.base = this.owners ? this.freshModules.wrap(watched) : watched;
+    const mounted = this.mounts.wrap(options.fs);
+    this.base = this.rooted(mounted);
+    this.baseNoLinks = this.rooted(mounted.noLinks?.() ?? mounted);
     this.createWorker = options.createWorker;
     this.createDriverWorker = options.createDriverWorker;
     this.media = options.media ?? memoryMedia();
@@ -633,12 +638,7 @@ export class Launcher {
     });
     enableCdp(this.net, this.cdp);
     this.facades.enable(this.net);
-    const fs = withCommandDirs(
-      this.base,
-      async () => new Set((await this.commands()).keys()),
-      (dir) => this.userCommandDir(dir),
-      this.owners
-    );
+    const fs = this.commandFs(this.base);
     this.nodes = new VfsNodes(fs, (path) => this.released(path));
     this.nodes.keepsOnDisk = true;
     this.openFiles.add(this.nodes);
@@ -654,7 +654,7 @@ export class Launcher {
         ...(this.owners ? { dirOwner: { uid: 0, gid: 0, mode: 0o700 } } : {}),
       }
     );
-    this.fs = this.unlinked.wrap(keepingOpen(fs, this.nodes));
+    this.fs = this.processChain(fs, this.nodes, this.unlinked);
     this.writerTags = writerTags(options.protect);
     this.unlinkOwnerOption = options.unlinkOwner;
     if (this.writerTags.size > 0 && options.fs.protect && !options.fs.unguarded) {
@@ -662,8 +662,10 @@ export class Launcher {
     }
     this.unguardedRoot = options.fs.unguarded?.() ?? options.fs;
     this.prefixes = protectedPrefixes(options.protect?.paths ?? []);
-    this.processFs =
-      this.prefixes.length > 0 ? new ProtectedFs(this.prefixes).view(this.fs) : this.fs;
+    this.protection = this.prefixes.length > 0 ? new ProtectedFs(this.prefixes) : undefined;
+    this.processFs = this.protection?.view(this.fs) ?? this.fs;
+    const noLinks = this.processChain(this.commandFs(this.baseNoLinks), this.nodes, this.unlinked);
+    this.noLinksFs = this.protection?.view(noLinks) ?? noLinks;
     const integrity = options.protect?.integrity;
     integrityOptions(integrity);
     options.fs.protect?.(this.prefixes, Boolean(integrity));
@@ -1402,6 +1404,7 @@ export class Launcher {
       cwd: req.cwd,
       fds: req.fds,
       fs: stack.fs,
+      noLinks: stack.noLinks,
       ...(this.prefixes.length > 0 && !stack.writer
         ? { readonlyAt: (path: string) => isProtected(this.prefixes, path) }
         : {}),
@@ -2278,20 +2281,21 @@ export class Launcher {
 
   private stackFor(tag: string | undefined): WriterStack {
     if (!this.isWriter(tag)) {
-      return { fs: this.processFs, nodes: this.nodes, unlinked: this.unlinked, writer: false };
+      return {
+        fs: this.processFs,
+        noLinks: this.noLinksFs,
+        nodes: this.nodes,
+        unlinked: this.unlinked,
+        writer: false,
+      };
     }
     this.writers ??= this.writerStack();
     return this.writers;
   }
 
   private writerStack(): WriterStack {
-    const watched = this.watchers.wrap(this.mounts.wrap(this.unguardedRoot));
-    const fs = withCommandDirs(
-      this.owners ? this.freshModules.wrap(watched) : watched,
-      async () => new Set((await this.commands()).keys()),
-      (dir) => this.userCommandDir(dir),
-      this.owners
-    );
+    const mounted = this.mounts.wrap(this.unguardedRoot);
+    const fs = this.commandFs(this.rooted(mounted));
     const nodes = new VfsNodes(fs, (path) => this.released(path), this.nodes.entries);
     nodes.keepsOnDisk = true;
     this.openFiles.add(nodes);
@@ -2306,7 +2310,32 @@ export class Launcher {
         ...(this.owners ? { dirOwner: { uid: 0, gid: 0, mode: 0o700 } } : {}),
       }
     );
-    return { fs: unlinked.wrap(keepingOpen(fs, nodes)), nodes, unlinked, writer: true };
+    const noLinks = this.commandFs(this.rooted(mounted.noLinks?.() ?? mounted));
+    return {
+      fs: this.processChain(fs, nodes, unlinked),
+      noLinks: this.processChain(noLinks, nodes, unlinked),
+      nodes,
+      unlinked,
+      writer: true,
+    };
+  }
+
+  private rooted(mounted: KernelFs): KernelFs {
+    const watched = this.watchers.wrap(mounted);
+    return this.owners ? this.freshModules.wrap(watched) : watched;
+  }
+
+  private commandFs(root: KernelFs): KernelFs {
+    return withCommandDirs(
+      root,
+      async () => new Set((await this.commands()).keys()),
+      (dir) => this.userCommandDir(dir),
+      this.owners
+    );
+  }
+
+  private processChain(fs: KernelFs, nodes: VfsNodes, unlinked: UnlinkedKeeper): KernelFs {
+    return unlinked.wrap(keepingOpen(fs, nodes));
   }
 
   private async starting(argv: string[], dir: string | undefined, account: Account, tag?: string) {
