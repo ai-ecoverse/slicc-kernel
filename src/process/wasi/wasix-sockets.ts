@@ -1,3 +1,4 @@
+import { decodeReceived } from '../../kernel/net/datagram-wire.ts';
 import { ipv6Groups } from '../../kernel/net/routes.ts';
 import type { SockAddr } from '../../kernel/socket.ts';
 import { E, FDFLAGS } from './wasi-abi.ts';
@@ -8,6 +9,10 @@ const INET4 = 1;
 const INET6 = 2;
 const UNIX = 3;
 const STREAM = 1;
+const DGRAM = 2;
+const RECV_DATA_TRUNCATED = 1;
+const RIFLAG_PEEK = 1;
+const MAX_DATAGRAM = 65_536;
 const ADDR_IP_SIZE = 18;
 const LOOPBACK = '127.0.0.1';
 
@@ -92,6 +97,57 @@ function ipv4(host: string): number[] | undefined {
   return bytes.every((b) => b >= 0 && b <= 255) ? bytes : undefined;
 }
 
+function openRequest(af: number, type: number) {
+  if (af !== INET4 && af !== INET6 && af !== UNIX) throw new WasiError('EAFNOSUPPORT');
+  if (type !== STREAM && (type !== DGRAM || af === UNIX)) throw new WasiError('EPROTONOSUPPORT');
+  const domain = af === UNIX ? ('unix' as const) : ('inet' as const);
+  return {
+    op: 'sock-open' as const,
+    domain,
+    ...(type === DGRAM ? { type: 'dgram' as const } : {}),
+  };
+}
+
+function optionalAddr(view: DataView, ptr: number): SockAddr | undefined {
+  if (ptr === 0 || view.getUint8(ptr) === 0) return undefined;
+  return readAddr(view, ptr);
+}
+
+export function datagramCalls(host: WasiHost) {
+  const { mem, o } = host;
+  const call = (req: Parameters<typeof o.kernel.call>[0]) => o.kernel.call(req);
+  return {
+    recvFrom(
+      fd: number,
+      nonblock: boolean,
+      iovs: number,
+      n: number,
+      riflags: number,
+      outLen: number,
+      outFlags: number,
+      outAddr: number
+    ): number {
+      const max = Math.min(mem.capacity(iovs, n), MAX_DATAGRAM);
+      const peek = (riflags & RIFLAG_PEEK) !== 0;
+      const raw = call({ op: 'sock-recvfrom', fd, max, peek, nonblock });
+      const got = decodeReceived(raw as Uint8Array);
+      const view = mem.view();
+      view.setUint32(outLen, mem.scatter(iovs, n, got.bytes), true);
+      view.setUint16(outFlags, got.truncated ? RECV_DATA_TRUNCATED : 0, true);
+      if (outAddr)
+        writeAddr(mem.view(), outAddr, { family: 'inet', host: got.host, port: got.port });
+      return E.SUCCESS;
+    },
+    sendTo(fd: number, nonblock: boolean, iovs: number, n: number, addr: number, out: number) {
+      const to = optionalAddr(mem.view(), addr);
+      const body = mem.gather(iovs, n);
+      const sent = call({ op: 'sock-sendto', fd, body, ...(to ? { addr: to } : {}), nonblock });
+      mem.view().setUint32(out, sent as number, true);
+      return E.SUCCESS;
+    },
+  };
+}
+
 export function wasixSocketImports(
   host: WasiHost,
   preview1: Record<string, WasiFunction>
@@ -105,12 +161,20 @@ export function wasixSocketImports(
     return e;
   };
   const option = (opt: number): readonly [number, number] | undefined => OPTIONS[opt];
+  const datagrams = (fd: number): boolean => {
+    try {
+      const e = fds.get(fd);
+      return e.type === 'kernel' && fds.datagram(fd, e);
+    } catch {
+      return false;
+    }
+  };
+  const dgram = datagramCalls(host);
   return {
     sock_open: (af: number, type: number, _proto: number, out: number) => {
-      if (af !== INET4 && af !== INET6 && af !== UNIX) throw new WasiError('EAFNOSUPPORT');
-      if (type !== STREAM) throw new WasiError('EPROTONOSUPPORT');
-      const fd = call({ op: 'sock-open', domain: af === UNIX ? 'unix' : 'inet' }) as number;
-      fds.adopt(fd, 'socket', false);
+      const req = openRequest(af, type);
+      const fd = call(req) as number;
+      fds.adopt(fd, 'socket', false, 'type' in req);
       mem.view().setUint32(out, fd, true);
     },
     sock_pair: (af: number, type: number, _proto: number, out1: number, out2: number) => {
@@ -165,6 +229,10 @@ export function wasixSocketImports(
       outFlags: number,
       outAddr: number
     ) => {
+      if (datagrams(fd)) {
+        const e = socket(fd);
+        return dgram.recvFrom(fd, e.nonblock, iovs, n, riflags, outLen, outFlags, outAddr);
+      }
       const r = preview1.sock_recv(
         fd as never,
         iovs as never,
@@ -182,9 +250,18 @@ export function wasixSocketImports(
       iovs: number,
       n: number,
       flags: number,
-      _addr: number,
+      addr: number,
       out: number
-    ) => preview1.sock_send(fd as never, iovs as never, n as never, flags as never, out as never),
+    ) => {
+      if (datagrams(fd)) return dgram.sendTo(fd, socket(fd).nonblock, iovs, n, addr, out);
+      return preview1.sock_send(
+        fd as never,
+        iovs as never,
+        n as never,
+        flags as never,
+        out as never
+      );
+    },
     sock_status: (fd: number, out: number) => {
       socket(fd);
       mem.view().setUint8(out, 1);

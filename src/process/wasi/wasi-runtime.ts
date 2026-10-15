@@ -322,7 +322,7 @@ function kernelOf(
   const call = (req: WasmSyscall): unknown => {
     const r: SyncFsResult = transport.call(req, Number.POSITIVE_INFINITY, req.op);
     if (!r.ok) throw new SyscallError(r.errno);
-    return r.kind === 'json' ? r.json : undefined;
+    return r.kind === 'json' ? r.json : r.kind === 'bytes' ? r.bytes : undefined;
   };
   const say = (text: string) => sys.write(2, new TextEncoder().encode(`${init.argv0}: ${text}\n`));
   return { transport, sys, call, say, gate };

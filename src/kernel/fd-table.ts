@@ -45,6 +45,8 @@ export type KernelErrno =
   | 'EHOSTUNREACH'
   | 'ECONNRESET'
   | 'EMSGSIZE'
+  | 'EDESTADDRREQ'
+  | 'ENOPROTOOPT'
   | 'ENOTSUP'
   | 'EILSEQ';
 
@@ -68,6 +70,8 @@ export interface PollState {
   hangup: boolean;
 
   rdhup?: boolean;
+
+  error?: boolean;
 }
 
 export interface KernelFile {

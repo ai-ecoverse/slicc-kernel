@@ -275,6 +275,7 @@ export type WasiEntry =
       type: 'kernel';
 
       kind?: KernelFdKind;
+      dgram?: boolean;
       nonblock: boolean;
       append: boolean;
       path?: string;

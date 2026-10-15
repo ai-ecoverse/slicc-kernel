@@ -270,8 +270,8 @@ export class WasiFds {
       .sort((a, b) => a - b);
   }
 
-  adopt(fd: number, kind: KernelFdKind, nonblock: boolean): void {
-    this.table.set(fd, { type: 'kernel', kind, nonblock, append: false });
+  adopt(fd: number, kind: KernelFdKind, nonblock: boolean, dgram = false): void {
+    this.table.set(fd, { type: 'kernel', kind, dgram, nonblock, append: false });
     if (this.shared && nonblock) this.publishFlags(fd, { nonblock, append: false });
     this.bump();
   }
@@ -524,10 +524,20 @@ export class WasiFds {
       const info = this.kernel.call({ op: 'fd-info', fd }) as {
         tty?: boolean;
         kind?: KernelFdKind;
+        dgram?: true;
       };
       e.kind = info.kind ?? (info.tty ? 'tty' : 'stream');
+      e.dgram = info.dgram === true;
     }
     return e.kind;
+  }
+
+  datagram(fd: number, e: Extract<WasiEntry, { type: 'kernel' }>): boolean {
+    if (this.kind(fd, e) !== 'socket') return false;
+    if (e.dgram === undefined) {
+      e.dgram = (this.kernel.call({ op: 'fd-info', fd }) as { dgram?: true }).dgram === true;
+    }
+    return e.dgram;
   }
 
   flushAll(): void {
@@ -904,6 +914,7 @@ function entryOf(info: FdInfo): WasiEntry | undefined {
   return {
     type: 'kernel',
     kind: info.kind,
+    dgram: info.dgram === true,
     nonblock: ((info.flags ?? 0) & O_NONBLOCK) !== 0,
     append: ((info.flags ?? 0) & O_APPEND) !== 0,
   };

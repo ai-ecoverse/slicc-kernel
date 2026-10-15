@@ -1,0 +1,12 @@
+{
+  "name": "udptest",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "udptest": {
+        "wasm": "bin/udptest.wasm"
+      }
+    }
+  }
+}

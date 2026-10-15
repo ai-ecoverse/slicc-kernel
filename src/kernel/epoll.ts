@@ -59,6 +59,7 @@ export function levelOf(file: KernelFile): number {
   if (state.readable) bits |= EPOLL.IN;
   if (state.writable) bits |= EPOLL.OUT;
   if (state.rdhup) bits |= EPOLL.RDHUP;
+  if (state.error) bits |= EPOLL.ERR;
   if (state.hangup) bits |= file.read ? EPOLL.HUP : EPOLL.ERR;
   return bits;
 }

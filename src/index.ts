@@ -21,7 +21,12 @@ import type { ClipboardHook } from './kernel/clipboard.ts';
 import { isHostname } from './kernel/net/loopback-names.ts';
 import type { TransportCall } from './kernel/net/remote-transport.ts';
 import type { RouteTable } from './kernel/net/routes.ts';
-import { type NetworkUplink, serveUplink, type UplinkCall } from './kernel/net/uplink.ts';
+import {
+  carriesUdp,
+  type NetworkUplink,
+  serveUplink,
+  type UplinkCall,
+} from './kernel/net/uplink.ts';
 import type { SealedHook } from './kernel/sealed.ts';
 import { quiet, signalField } from './kernel/signals.ts';
 import type { PendingMedium } from './launcher.ts';
@@ -330,7 +335,7 @@ function dialer(call: (req: KernelCall) => Promise<unknown>) {
 
 function uplinkInit(uplink: NetworkUplink | undefined): Pick<InitRequest, 'uplink'> {
   if (!uplink) return {};
-  const traits = { tcp: true, udp: false, ipv6: uplink.traits.ipv6 === true } as const;
+  const traits = { tcp: true, udp: carriesUdp(uplink), ipv6: uplink.traits.ipv6 === true } as const;
   return { uplink: { traits, ...(uplink.routes ? { routes: uplink.routes } : {}) } };
 }
 
