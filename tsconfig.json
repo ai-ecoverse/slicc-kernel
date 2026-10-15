@@ -1,6 +1,6 @@
 {
   "extends": "@ai-ecoverse/slicc-shared-web/tsconfig.json",
-  "include": ["src/**/*.ts"],
+  "include": ["src/**/*.ts", "test/integration/types/**/*.ts"],
   "exclude": [
     "src/node.ts",
     "src/node-process-worker.ts",
