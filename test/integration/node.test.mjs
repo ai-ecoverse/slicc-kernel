@@ -461,6 +461,30 @@ test('an account read while a user is removed sees the tables before or after, n
   assert.deepEqual(new Set(seen), new Set([3]));
 });
 
+test('sudo runs from a cwd on a tmpfs mount the caller can enter, and refuses one it cannot', async (t) => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
+  await kernel.users.add({ name: 'cone', groups: ['sudo'] });
+  await kernel.run(['mkdir', '-p', '/mnt/m'], { cwd: '/' });
+  await kernel.mount({ type: 'tmpfs', source: 'none', target: '/mnt/m' });
+  const setup = [
+    'chmod 755 /mnt/m && mkdir -m 755 /mnt/m/sub /mnt/m/gone',
+    "printf '%s\\n' 'NOPASSWD cone Cmnd *' > /etc/sudoers.d/cone && chmod 440 /etc/sudoers.d/cone",
+    'cd /mnt/m && sudo -u cone pwd; echo "rc $?"',
+    'cd /mnt/m/sub && sudo -u cone pwd; echo "rc $?"',
+  ].join('\n');
+  const root = await kernel.run(['bash', '-c', setup], { cwd: '/' });
+  assert.equal(root.stdout, '/mnt/m\nrc 0\n/mnt/m/sub\nrc 0\n', root.stderr);
+  const cone = [
+    'cd /mnt/m/sub && sudo pwd; echo "rc $?"',
+    'cd /mnt/m/gone && sudo chmod 700 /mnt/m/gone && sudo pwd; echo "rc $?"',
+  ].join('\n');
+  const r = await kernel.run(['bash', '-c', cone], { cwd: '/home/cone', user: 'cone' });
+  assert.equal(r.stdout, '/mnt/m/sub\nrc 0\nrc 1\n', r.stderr);
+  assert.match(r.stderr, /sudo: cannot run in \/mnt\/m\/gone: it isn't a directory you can enter/);
+});
+
 test('a WASI process killed by SIGKILL keeps the bytes it wrote but never fsynced', async () => {
   const kernel = await createNodeKernel();
   for (const pkg of ['wasm-bash', 'wasm-coreutils', 'wasix-python']) await install(kernel, pkg);
