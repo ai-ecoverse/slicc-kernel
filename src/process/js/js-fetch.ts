@@ -70,7 +70,7 @@ function checkUrl(url: string): void {
     throw failed(new JsCallError('EPROTONOSUPPORT', protocol));
   }
   if (badPort(parsed) && !local(url)) {
-    throw failed(new JsCallError('EACCES', `bad port: ${url}`));
+    throw failed(Object.assign(new Error('bad port'), { code: 'EACCES' }));
   }
 }
 

@@ -34,7 +34,7 @@ export default async function main(ctx) {
     const r = await ctx.fetch(base + '/cut');
     await say(await r.text().then((t) => 'read ' + t, (err) => err.name + ' ' + err.message));
   } else if (mode === 'bad-port') {
-    await say(await ctx.fetch(base).then((r) => String(r.status), why));
+    await say(await ctx.fetch(base).then((r) => String(r.status), (err) => err.name + ' ' + err.message + ' / ' + why(err)));
   } else if (mode === 'redirect-error') {
     await say(await ctx.fetch(base + '/go', { redirect: 'error' }).then((r) => String(r.status), why));
   } else if (mode === 'local-bad-port') {
@@ -97,11 +97,11 @@ test('ctx.fetch refuses a bad port outside the kernel, a redirect to one, and sa
   const run = await kernelWith(t);
   assert.equal(
     await run('bad-port', 'http://host.slicc.internal:6000/'),
-    'EACCES bad port: http://host.slicc.internal:6000/: EACCES\n'
+    'TypeError fetch failed / EACCES bad port\n'
   );
   assert.equal(
     await run('bad-port', `${base}/to-bad`),
-    'EACCES bad port: http://host.slicc.internal:6000/: EACCES\n'
+    'TypeError fetch failed / EACCES bad port\n'
   );
   assert.equal(await run('redirect-error', base), 'EREDIRECT unexpected redirect: EREDIRECT\n');
 });
