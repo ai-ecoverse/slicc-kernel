@@ -204,7 +204,6 @@ async function run(
   path: string,
   req: SyncFsRequest
 ): Promise<SyncFsResult> {
-  if (req.op !== 'create') entry.created?.take(path);
   const { fs, cwd } = entry;
   switch (req.op) {
     case 'read':
