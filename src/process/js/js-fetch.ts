@@ -63,14 +63,20 @@ function badPort(url: URL): boolean {
   return port !== 0 && BAD_PORTS.has(port);
 }
 
+function checkUrl(url: string): void {
+  const parsed = new URL(url);
+  const { protocol } = parsed;
+  if (protocol !== 'http:' && protocol !== 'https:') {
+    throw failed(new JsCallError('EPROTONOSUPPORT', protocol));
+  }
+  if (badPort(parsed) && !local(url)) {
+    throw failed(new JsCallError('EACCES', `bad port: ${url}`));
+  }
+}
+
 function rewrite(hop: Hop, status: number, location: string): Hop {
   const next = new URL(location, hop.url);
-  if (next.protocol !== 'http:' && next.protocol !== 'https:') {
-    throw failed(new JsCallError('EPROTONOSUPPORT', next.protocol));
-  }
-  if (badPort(next)) {
-    throw failed(new JsCallError('EACCES', `bad port: ${next.href}`));
-  }
+  checkUrl(next.href);
   if (local(next.href) && !local(hop.url)) {
     const from = new URL(hop.url).origin;
     throw failed(
@@ -326,7 +332,7 @@ export function fetchOp(kernel: JsKernel) {
           } catch (err) {
             settle();
             await close(handle);
-            throw signal.aborted ? signal.reason : failed(err);
+            throw signal.aborted ? signal.reason : new TypeError('terminated', { cause: err });
           }
           const bytes = r.ok && r.kind === 'bytes' ? r.bytes : new Uint8Array(0);
           if (bytes.length > 0) {
@@ -367,7 +373,6 @@ export function fetchOp(kernel: JsKernel) {
       stream = stream.pipeThrough(
         new DecompressionStream(format) as unknown as TransformStream<Uint8Array, Uint8Array>
       );
-      headers.delete('content-encoding');
       headers.delete('content-length');
     }
     const response = new Response(stream, {
@@ -399,12 +404,7 @@ export function fetchOp(kernel: JsKernel) {
     signal.throwIfAborted();
     const { protocol } = new URL(request.url);
     if (protocol === 'data:') return dataResponse(request);
-    if (protocol !== 'http:' && protocol !== 'https:') {
-      throw failed(new JsCallError('EPROTONOSUPPORT', protocol));
-    }
-    if (badPort(new URL(request.url))) {
-      throw failed(new JsCallError('EACCES', `bad port: ${request.url}`));
-    }
+    checkUrl(request.url);
     let known = await traitsAt(request.url);
     if (!known.manualRedirects && request.redirect !== 'follow') {
       throw failed(new JsCallError('ENOTSUP', `redirect: ${request.redirect}`));
@@ -433,7 +433,8 @@ export function fetchOp(kernel: JsKernel) {
         return respond(head, hop.method, redirected, known.encodedBodies, signal);
       }
       await close(head.handle);
-      if (request.redirect === 'error') throw failed(new JsCallError('EREDIRECT', hop.url));
+      if (request.redirect === 'error')
+        throw failed(new JsCallError('EREDIRECT', 'unexpected redirect'));
       if (hops >= MAX_REDIRECTS) throw failed(new JsCallError('ELOOP', hop.url));
       [hop, known] = await redirect(hop, head.status, location, known);
     }
