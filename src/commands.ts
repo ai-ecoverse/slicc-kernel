@@ -42,6 +42,7 @@ interface Manifest {
     env?: unknown;
     filesystems?: unknown;
     binfmt?: unknown;
+    replaces?: unknown;
   };
 }
 
@@ -292,14 +293,31 @@ async function binCommandsOf(
   return out;
 }
 
-export async function scanCommands(
+const PACKAGE_NAME = /^(@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*$/;
+
+function replacesOf(manifest: Manifest): string[] {
+  const replaces = manifest.slicc?.replaces;
+  if (!Array.isArray(replaces)) return [];
+  return replaces.every((name) => typeof name === 'string' && PACKAGE_NAME.test(name))
+    ? replaces
+    : [];
+}
+
+interface Provided {
+  name: string;
+  pkg: string;
+  replaces: string[];
+  commands: Command[];
+}
+
+async function tierPackages(
   fs: KernelFs,
-  modules: string | string[],
-  binsFrom = Number.POSITIVE_INFINITY
-): Promise<Map<string, Command>> {
-  const found = new Map<string, Command>();
-  const physical = physicalResolver(fs);
-  for (const [index, root] of (typeof modules === 'string' ? [modules] : modules).entries()) {
+  physical: Physical,
+  roots: string[],
+  bins: boolean
+): Promise<Provided[]> {
+  const out: Provided[] = [];
+  for (const root of roots) {
     for (const pkg of await packages(fs, root)) {
       let manifest: Manifest;
       try {
@@ -309,11 +327,53 @@ export async function scanCommands(
       }
       const own = commandsOf(pkg, manifest);
       const named = new Set(own.map((command) => command.name));
-      const bins = index >= binsFrom ? await binCommandsOf(physical, pkg, manifest, named) : [];
-      for (const command of [...own, ...bins]) {
-        if (!found.has(command.name))
-          found.set(command.name, await withPackagePaths(fs, pkg, command));
-      }
+      const extra = bins ? await binCommandsOf(physical, pkg, manifest, named) : [];
+      out.push({
+        name: pkg.slice(root.length + 1),
+        pkg,
+        replaces: replacesOf(manifest),
+        commands: [...own, ...extra],
+      });
+    }
+  }
+  return out;
+}
+
+function winners(tier: Provided[]): Map<string, { pkg: string; command: Command }> {
+  const providers = new Map<string, Provided[]>();
+  for (const entry of tier) {
+    for (const command of entry.commands) {
+      const list = providers.get(command.name) ?? [];
+      if (!list.includes(entry)) list.push(entry);
+      providers.set(command.name, list);
+    }
+  }
+  const out = new Map<string, { pkg: string; command: Command }>();
+  for (const [name, list] of providers) {
+    const kept = list.filter(
+      (entry) => !list.some((other) => other !== entry && other.replaces.includes(entry.name))
+    );
+    const entry = kept[0] ?? (list[0] as Provided);
+    const command = entry.commands.find((c) => c.name === name) as Command;
+    out.set(name, { pkg: entry.pkg, command });
+  }
+  return out;
+}
+
+export async function scanCommands(
+  fs: KernelFs,
+  modules: string | (string | string[])[],
+  binsFrom = Number.POSITIVE_INFINITY
+): Promise<Map<string, Command>> {
+  const found = new Map<string, Command>();
+  const physical = physicalResolver(fs);
+  const tiers = (typeof modules === 'string' ? [modules] : modules).map((tier) =>
+    typeof tier === 'string' ? [tier] : tier
+  );
+  for (const [index, roots] of tiers.entries()) {
+    const tier = await tierPackages(fs, physical, roots, index >= binsFrom);
+    for (const [name, { pkg, command }] of winners(tier)) {
+      if (!found.has(name)) found.set(name, await withPackagePaths(fs, pkg, command));
     }
   }
   if (!found.has('sh') && found.has('bash')) {
