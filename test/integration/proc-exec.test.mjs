@@ -21,22 +21,29 @@ async function install(kernel, name) {
 
 const PROGRAM = `const text = (b) => new TextDecoder().decode(b);
 export default async function main(ctx) {
-  const c = await ctx.spawn({ argv: ['bash', '-c', 'sleep 0.3; exec sleep 0.3'], stdout: 'null' });
-  const seen = new Set();
-  const until = Date.now() + 1500;
-  while (Date.now() < until) {
+  const c = await ctx.spawn({ argv: ['bash', '-c', 'read -r go; exec sleep 0'], stdin: 'pipe', stdout: 'null' });
+  const read = () => {
     let line;
     try {
       line = text(ctx.sync.fs.readFile('/proc/' + c.pid + '/stat'));
     } catch (e) {
-      line = 'error ' + e.code;
+      return 'error ' + e.code;
     }
     const f = line.replace(/^.*\\) /, '').split(' ');
     const whole = line.startsWith(c.pid + ' (') && f.length > 40 && f[1] === String(ctx.pid);
-    seen.add(whole ? line.slice(line.indexOf('(') + 1, line.indexOf(')')) + ' ' + f[0] : line.slice(0, 40));
+    return whole ? line.slice(line.indexOf('(') + 1, line.indexOf(')')) + ' ' + f[0] : line.slice(0, 40);
+  };
+  const seen = [read()];
+  const w = c.stdin.getWriter();
+  await w.write(new TextEncoder().encode('go\\n'));
+  await w.close();
+  const until = Date.now() + 60000;
+  while (Date.now() < until && seen.at(-1) !== 'sleep Z') {
+    const now = read();
+    if (now !== seen.at(-1)) seen.push(now);
   }
   await c.wait();
-  await ctx.write(1, JSON.stringify([...seen]));
+  await ctx.write(1, JSON.stringify(seen.filter((s) => s !== 'sleep S' && s !== 'sleep R')));
 }
 `;
 
@@ -54,5 +61,5 @@ test('/proc/<pid>/stat of a child that exec\u2019d reads whole all its life, as 
   );
   await kernel.writeFile('/node_modules/pstat/main.mjs', PROGRAM);
   const r = await kernel.run(['pstat'], { cwd: '/' });
-  assert.deepEqual(JSON.parse(r.stdout), ['bash S', 'sleep S', 'sleep Z']);
+  assert.deepEqual(JSON.parse(r.stdout), ['bash S', 'sleep Z']);
 });
