@@ -358,7 +358,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     async connect({ user, tag } = {}) {
       if (terminated) throw new Error(TERMINATED);
       tagOption(tag);
-      if (user !== undefined && !(await launcher.users.lookup(user))) {
+      if (user !== undefined && !(await guard(() => launcher.users.lookup(user)))) {
         throw fsError('ENOENT', `no user ${String(user)}`);
       }
       const { port1, port2 } = new MessageChannel();

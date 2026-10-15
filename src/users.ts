@@ -171,6 +171,8 @@ export class UserDb {
   private readonly owners: boolean;
   private readonly umasks = new Map<string, number>();
   private writing: Promise<unknown> = Promise.resolve();
+  private stable: readonly [string, string] | undefined;
+  private commits = 0;
 
   constructor(fs: KernelFs, owners = false) {
     this.fs = fs;
@@ -216,11 +218,19 @@ export class UserDb {
     }
   }
 
+  private async texts(): Promise<readonly [string, string]> {
+    for (;;) {
+      if (this.stable) return this.stable;
+      const commits = this.commits;
+      const passwd = await this.read(PASSWD, DEFAULT_PASSWD);
+      const group = await this.read(GROUP, DEFAULT_GROUP);
+      if (this.commits === commits && !this.stable) return [passwd, group];
+    }
+  }
+
   private async tables(): Promise<{ passwd: Rows<PasswdRow>; group: Rows<GroupRow> }> {
-    return {
-      passwd: parsePasswd(await this.read(PASSWD, DEFAULT_PASSWD)),
-      group: parseGroup(await this.read(GROUP, DEFAULT_GROUP)),
-    };
+    const [passwd, group] = await this.texts();
+    return { passwd: parsePasswd(passwd), group: parseGroup(group) };
   }
 
   private async provision(row: PasswdRow, umask: number, shared?: GroupRow): Promise<void> {
@@ -243,15 +253,25 @@ export class UserDb {
   }
 
   private async commit(passwd: string, group: string, then?: () => Promise<void>): Promise<void> {
-    const before = [await this.read(PASSWD, DEFAULT_PASSWD), await this.read(GROUP, DEFAULT_GROUP)];
+    const before = [
+      await this.read(PASSWD, DEFAULT_PASSWD),
+      await this.read(GROUP, DEFAULT_GROUP),
+    ] as const;
+    this.stable = before;
+    this.commits++;
     try {
       await this.fs.writeFile(GROUP, group);
       await this.fs.writeFile(PASSWD, passwd);
+      this.stable = undefined;
       await then?.();
     } catch (err) {
-      await this.fs.writeFile(GROUP, before[1] as string);
-      await this.fs.writeFile(PASSWD, before[0] as string);
+      this.stable = before;
+      await this.fs.writeFile(GROUP, before[1]);
+      await this.fs.writeFile(PASSWD, before[0]);
       throw err;
+    } finally {
+      this.stable = undefined;
+      this.commits++;
     }
   }
 
