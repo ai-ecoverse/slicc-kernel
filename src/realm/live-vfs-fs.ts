@@ -244,6 +244,15 @@ function rangedFileOf(
 }
 const O_APPEND = 0o2000;
 
+function unlessIo<T>(op: () => T): T | undefined {
+  try {
+    return op();
+  } catch (err) {
+    if ((err as { errno?: unknown }).errno === wasiErrno('EIO')) return undefined;
+    throw err;
+  }
+}
+
 const O_ACCMODE = 3;
 const O_TRUNC = 0o1000;
 const O_PATH = 0o10000000;
@@ -734,6 +743,28 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
   };
 }
 
+function appendThrough(h: LiveHelpers, stream: LiveFsStream, bytes: () => Uint8Array): boolean {
+  const node = stream.node;
+  const s = node.live;
+  const append = pinnedIo(h.bridgeOf(node), s.handle).append;
+  if (!append) return false;
+  const body = bytes();
+  const at = liveNodePath(h.linked.holder(node));
+  const after = unlessIo(() => {
+    h.flushNode(node);
+    return h.call(() => append(at, body));
+  });
+  if (after === undefined) return false;
+  if (!s.ranged) {
+    s.data = undefined;
+    s.loaded = false;
+    s.len = 0;
+  }
+  s.stat = undefined;
+  stream.position = after - body.length;
+  return true;
+}
+
 function createStreamOps(h: LiveHelpers): LiveStreamOps {
   const { Fs, statOf, ensureLoaded, ensureCapacity, flushNode, bridgeOf, rangedOf } = h;
   const held = (stream: LiveFsStream, change: 1 | -1) => {
@@ -873,22 +904,8 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
       const s = node.live;
       const end = position + length;
       if (s.maxFile !== undefined && end > s.maxFile) throw new Fs.ErrnoError(wasiErrno('EFBIG'));
-      const io = pinnedIo(h.bridgeOf(node), s.handle);
-      const append = (stream.flags & O_APPEND) !== 0 ? io.append : undefined;
-      if (append) {
-        flushNode(node);
-        const bytes = new Uint8Array(buffer.buffer, buffer.byteOffset + offset, length).slice();
-        const at = liveNodePath(h.linked.holder(node));
-        const after = h.call(() => append(at, bytes));
-        if (!s.ranged) {
-          s.data = undefined;
-          s.loaded = false;
-          s.len = 0;
-        }
-        s.stat = undefined;
-        stream.position = after - length;
-        return length;
-      }
+      const bytes = () => new Uint8Array(buffer.buffer, buffer.byteOffset + offset, length).slice();
+      if (stream.flags & O_APPEND && appendThrough(h, stream, bytes)) return length;
       const ranged = rangedOf(node);
       if (ranged) {
         const bytes = new Uint8Array(buffer.buffer, buffer.byteOffset + offset, length);
