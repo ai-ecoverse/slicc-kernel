@@ -1425,11 +1425,16 @@ class MountFs implements KernelFs {
 
   async realpath(path: string, follow: boolean): Promise<string> {
     const { realpath } = this.base;
-    if (this.at(path) || !realpath) throw errnoError('ENOSYS', path);
-    const real = await realpath.call(this.base, path, follow).catch((err: unknown) => {
-      throw redirectOf(err) ? errnoError('ENOSYS', path) : err;
-    });
-    if (this.at(real)) throw errnoError('ENOSYS', path);
+    if (!this.at(path) && realpath) {
+      const real = await realpath.call(this.base, path, follow).catch((err: unknown) => {
+        if (redirectOf(err)) return undefined;
+        throw err;
+      });
+      if (real !== undefined && !this.at(real)) return real;
+    }
+    const real = follow ? await realTarget(this, normalizePath(path)) : await this.named(path);
+    if (this.rejectLinks && real !== normalizePath(path)) throw errnoError('ELOOP', path);
+    await this.lstat(real);
     return real;
   }
 
