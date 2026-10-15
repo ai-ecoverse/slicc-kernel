@@ -21,6 +21,8 @@ export interface WasiForkState {
   blocked?: BlockedMask;
 
   tls?: Array<[number, number]>;
+
+  modules?: Record<string, WebAssembly.Module>;
 }
 
 export interface WasiSetjmps {

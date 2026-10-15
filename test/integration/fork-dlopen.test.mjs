@@ -15,13 +15,24 @@ async function install(kernel, base, at) {
   }
 }
 
-test('a forked WASIX child keeps the side modules its parent loaded, their data and function pointers (#337)', async (t) => {
+test('a forked WASIX child keeps the side modules its parent loaded, their data and function pointers, even when the file was replaced meanwhile (#337)', async (t) => {
   const kernel = await createNodeKernel();
   t.after(() => kernel.terminate());
   await install(kernel, fixture, '/node_modules/dlfork');
   await kernel.writeFile(
     '/usr/lib/libdlside.so',
     await readFile(new URL('lib/libdlside.so', fixture))
+  );
+  const expected = {
+    status: 0,
+    stdout:
+      'parent: add=47 count=42 inits=1\nchild: add=48 count=42 bump=43 inits=1\nparent: child exit=7 count=42\n',
+    stderr: '',
+  };
+  await kernel.writeFile('/tmp/libcopy.so', await readFile(new URL('lib/libdlside.so', fixture)));
+  assert.deepEqual(
+    await kernel.run(['dlfork', '/tmp/libcopy.so', 'replace'], { cwd: '/' }),
+    expected
   );
   assert.deepEqual(await kernel.run(['dlfork'], { cwd: '/' }), {
     status: 0,

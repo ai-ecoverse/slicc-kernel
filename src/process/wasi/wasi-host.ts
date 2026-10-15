@@ -188,6 +188,8 @@ export class WasiHost {
 
   linkedTls: (() => Array<[number, number]>) | undefined;
 
+  linkedModules: (() => Record<string, WebAssembly.Module>) | undefined;
+
   interrupted: (() => boolean) | undefined;
 
   quietly: (fn: () => void) => void = (fn) => fn();

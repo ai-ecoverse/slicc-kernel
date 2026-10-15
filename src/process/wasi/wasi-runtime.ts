@@ -366,7 +366,7 @@ async function instantiate(
     path,
   }: {
     thread?: boolean;
-    forked?: Array<[number, number]>;
+    forked?: Pick<WasiForkState, 'tls' | 'modules'>;
     stats?: WasiStats;
     signals?: WasiSignals;
     program?: ProgramOption;
@@ -458,12 +458,20 @@ function bindLinker(
   host: WasiHost,
   sync: LinkSync,
   instance: WebAssembly.Instance,
-  at: { thread: boolean; forked: Array<[number, number]> | undefined; path: string | undefined }
+  at: {
+    thread: boolean;
+    forked: Pick<WasiForkState, 'tls' | 'modules'> | undefined;
+    path: string | undefined;
+  }
 ): void {
   sync.linker.bindMain(instance, !at.thread);
   if (at.path !== undefined) sync.linker.mainPath = at.path;
   host.linkedTls = () => sync.linker.tlsBases();
-  if (at.forked) sync.linker.forkedTls = new Map(at.forked);
+  host.linkedModules = () => sync.linker.compiled();
+  if (at.forked) {
+    sync.linker.forkedTls = new Map(at.forked.tls ?? []);
+    sync.linker.cache = at.forked.modules;
+  }
   if (at.thread || at.forked) sync.catchUp();
   sync.linker.bindMainGot();
 }
@@ -689,7 +697,7 @@ export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike
   }
   const program = await programImports(init.program, host, transport, MAIN_TID);
   const { instance, driver } = await instantiate(host, module, memory, threads, {
-    ...(fork ? { forked: fork.tls ?? [] } : {}),
+    ...(fork ? { forked: fork } : {}),
     stats,
     signals,
     foreign: init.program.foreign,

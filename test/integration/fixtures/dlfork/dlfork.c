@@ -16,6 +16,13 @@ int main(int argc, char **argv) {
   int *inits = (int *)dlsym(h, "side_inits");
   bump();
   bump();
+  if (argc > 2) {
+    FILE *f = fopen(argv[1], "w");
+    if (f) {
+      fputs("replaced", f);
+      fclose(f);
+    }
+  }
   printf("parent: add=%d count=%d inits=%d\n", add(2, 3), *count, *inits);
   pid_t p = fork();
   if (p < 0) {
