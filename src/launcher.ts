@@ -552,6 +552,9 @@ export class Launcher {
   readonly hostname: string;
   readonly watchers = new FsWatchers();
   private readonly pnpmHome: string;
+  private readonly pnpmChain: ReadonlySet<string>;
+  private pnpmMade: Promise<void> | undefined;
+  private pnpmEpoch = 0;
   readonly mounts: MountTable;
   private readonly createDriverWorker: (() => WasmWorkerLike) | undefined;
   private readonly media: MediaStore;
@@ -598,7 +601,10 @@ export class Launcher {
       open: (type, spec) => this.driver(type, spec),
       busy: (target) =>
         [...this.openFiles].some((nodes) => nodes.holds(target)) || heldUnder(this.held, target),
-      changed: this.watchers.changed.bind(this.watchers),
+      changed: (...paths) => {
+        if (paths.some((path) => this.pnpmChain.has(path))) this.pnpmStale();
+        this.watchers.changed(...paths);
+      },
       owners: this.owners,
     });
     this.mounted = this.mounts.wrap(options.fs);
@@ -611,6 +617,7 @@ export class Launcher {
     this.fstabRetries = options.fstabRetries ?? FSTAB_RETRIES;
     this.processMounts = options.processMounts ?? true;
     this.pnpmHome = options.env?.PNPM_HOME ?? SYSTEM_PNPM_HOME;
+    this.pnpmChain = new Set(chain(normalizePath(this.pnpmHome)));
     this.modulesDir = options.modules ?? '/node_modules';
     this.appended = appendedRoots(options.commands);
     this.cdp = new CdpHosts(options.cdp);
@@ -1334,6 +1341,7 @@ export class Launcher {
     delete env[TICKET_ENV];
     env.HOSTNAME = this.hostname;
     let program: Program;
+    await this.pnpmReady();
     try {
       const caller = { pid: req.ppid ?? 0, uid: req.cred.euid, tag: req.tag };
       if (this.integrity) await this.checkedSources(planned, caller);
@@ -2064,8 +2072,7 @@ export class Launcher {
       this.fs
     );
     void this.unlinked.sweep(entry.target);
-    if (this.pnpmHome.startsWith(`${entry.target.replace(/\/$/, '')}/`))
-      await this.provisionPnpmHome();
+    this.pnpmStale();
     return entry;
   }
 
@@ -2125,8 +2132,22 @@ export class Launcher {
     return joinName(await realDir(this.base, parentOf(path)), baseName(path));
   }
 
-  private async provisionPnpmHome(): Promise<void> {
-    await this.base.mkdir(this.pnpmHome, { recursive: true }).catch(() => undefined);
+  private pnpmReady(): Promise<void> {
+    if (this.pnpmMade !== undefined) return this.pnpmMade;
+    const epoch = this.pnpmEpoch;
+    const made = this.base
+      .mkdir(this.pnpmHome, { recursive: true })
+      .then(() => (this.owners ? this.stampLayout() : undefined))
+      .catch(() => {
+        if (this.pnpmEpoch === epoch) this.pnpmMade = undefined;
+      });
+    this.pnpmMade = made;
+    return made;
+  }
+
+  private pnpmStale(): void {
+    this.pnpmEpoch++;
+    this.pnpmMade = undefined;
   }
 
   private mountedBy(spec: MountSpec, cred: Cred): MountSpec {
@@ -2164,6 +2185,7 @@ export class Launcher {
   umount(target: string, detach = false): void {
     const at = normalizePath(target);
     this.mounts.umount(at, detach);
+    this.pnpmStale();
     if (!detach) return;
     for (const nodes of this.openFiles) nodes.revoke(at);
     for (const holds of this.held) holds.revoke(at);
@@ -2237,7 +2259,7 @@ export class Launcher {
     await this.resolvePrefixes();
     for (const dir of SHARED_DIRS) await this.base.mkdir(dir, { recursive: true });
     if (this.owners) await this.ownTmp();
-    await this.provisionPnpmHome();
+    await this.pnpmReady();
     await this.users.ensure();
     if (this.owners) await this.stampLayout();
     if (this.owners) await this.sudoer.provision();
