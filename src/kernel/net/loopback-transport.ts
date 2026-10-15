@@ -9,7 +9,7 @@ import {
   WsReader,
 } from '../../cdp/websocket.ts';
 import { KernelError } from '../fd-table.ts';
-import type { KernelSocket, LoopbackNet, PeerCred } from '../socket.ts';
+import type { ConnectorStamp, KernelSocket, LoopbackNet, PeerCred } from '../socket.ts';
 import { concat, fieldTokens, fieldValues, Incoming, latin1, latin1Bytes } from './http1.ts';
 import { kernelLoopbackPort } from './loopback-names.ts';
 import type {
@@ -162,24 +162,31 @@ function bodyOf(
 export class KernelLoopback {
   private readonly net: LoopbackNet;
   private readonly cred: () => PeerCred;
+  private readonly stamp?: () => Promise<ConnectorStamp>;
 
-  constructor(net: LoopbackNet, cred: () => PeerCred) {
+  constructor(net: LoopbackNet, cred: () => PeerCred, stamp?: () => Promise<ConnectorStamp>) {
     this.net = net;
     this.cred = cred;
+    this.stamp = stamp;
   }
 
   port(url: string): number | undefined {
     return kernelLoopbackPort(url);
   }
 
-  private connect(url: URL, port: number, signal: AbortSignal): KernelSocket {
+  private async connect(url: URL, port: number, signal: AbortSignal): Promise<KernelSocket> {
     if (url.protocol === 'https:' || url.protocol === 'wss:') {
       throw errno('ENOTSUP', `TLS to the kernel's loopback is not supported: ${url.origin}`);
     }
     signal.throwIfAborted();
     const socket = this.net.socket('inet');
     try {
-      void socket.connect({ family: 'inet', host: '127.0.0.1', port }, false, this.cred());
+      void socket.connect(
+        { family: 'inet', host: '127.0.0.1', port },
+        false,
+        this.cred(),
+        this.stamp ? await this.stamp() : undefined
+      );
     } catch (err) {
       socket.close();
       const refused = err instanceof KernelError && err.code === 'ECONNREFUSED';
@@ -195,7 +202,7 @@ export class KernelLoopback {
       req.body ?? (/^(POST|PUT|PATCH)$/i.test(req.method) ? new Uint8Array(0) : undefined);
     const length: Array<[string, string]> = body ? [['Content-Length', String(body.length)]] : [];
     const head = requestHead(req.method, url, req.headers, [...length, ['Connection', 'close']]);
-    const socket = this.connect(url, port, req.signal);
+    const socket = await this.connect(url, port, req.signal);
     try {
       await writeAll(socket, body ? concat([head, body]) : head, req.signal);
       const incoming = new Incoming(socket);
@@ -217,7 +224,7 @@ export class KernelLoopback {
 
   async websocket(req: RealmWebSocketRequest, port: number): Promise<RealmWebSocket> {
     const url = new URL(req.url);
-    const socket = this.connect(url, port, req.signal);
+    const socket = await this.connect(url, port, req.signal);
     try {
       const key = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16))));
       const extra: Array<[string, string]> = [
