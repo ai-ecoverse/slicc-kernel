@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createNodeKernel, nodeTransport } from '../../dist/node.js';
+import { hostfsProxy } from './hostfs-proxy.mjs';
 
 const modules = new URL('../../node_modules/@ai-ecoverse/', import.meta.url);
 
@@ -330,6 +331,59 @@ test('a user with a non-canonical home runs a command from its global packages',
     user: 'cone',
   });
   assert.equal(r.stdout, 'tool ran\n/srv/cone/.local/share/pnpm/bin/k3tool\n', r.stderr);
+});
+
+test('a new process finds PNPM_HOME after nested mounts over its ancestors', async (t) => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
+  await kernel.mount({ type: 'tmpfs', source: 'none', target: '/usr/local' });
+  await kernel.mount({ type: 'tmpfs', source: 'none', target: '/usr' });
+  await kernel.run(['true'], { cwd: '/' });
+  await kernel.umount('/usr/local');
+  const r = await kernel.run(['stat', '-c', '%a %U', '/usr/local/share/pnpm'], { cwd: '/' });
+  assert.equal(r.stdout, '755 root\n', r.stderr);
+});
+
+test('a new process finds PNPM_HOME on a hostfs /usr whose host came up after the mount, or removed it', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'slicc-usr-'));
+  const proxy = await hostfsProxy({ folders: { usr: dir } });
+  let up = false;
+  const kernel = await createNodeKernel({
+    hostfs: async (source, { readonly }) => {
+      if (!up) throw Object.assign(new Error('link down'), { code: 'ENOTCONN' });
+      const response = await fetch(`${proxy.url}/api/hostfs/grant`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Bridge-Token': proxy.key },
+        body: JSON.stringify({ mount: source, readonly }),
+      });
+      return { url: proxy.url, ...(await response.json()) };
+    },
+  });
+  t.after(async () => {
+    kernel.terminate();
+    await proxy.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+  for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
+  const entry = await kernel.mount({ type: 'hostfs', source: 'usr', target: '/usr' });
+  assert.equal(entry.state, 'nomedium');
+  up = true;
+  while ((await kernel.mounts()).find((m) => m.target === '/usr')?.state !== 'ok') {
+    await new Promise((done) => setTimeout(done, 50));
+  }
+  const r = await kernel.run(['bash', '-c', 'test -d /usr/local/share/pnpm && echo there'], {
+    cwd: '/',
+  });
+  assert.equal(r.stdout, 'there\n', r.stderr);
+  assert.ok((await stat(join(dir, 'local/share/pnpm'))).isDirectory());
+  await rm(join(dir, 'local'), { recursive: true });
+  const until = Date.now() + 5000;
+  while (!(await stat(join(dir, 'local/share/pnpm')).catch(() => undefined))) {
+    assert.ok(Date.now() < until, 'PNPM_HOME is made again after the host removed it');
+    await kernel.run(['true'], { cwd: '/' });
+    await new Promise((done) => setTimeout(done, 50));
+  }
 });
 
 test('a WASI process killed by SIGKILL keeps the bytes it wrote but never fsynced', async () => {
