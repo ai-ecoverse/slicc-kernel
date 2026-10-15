@@ -168,7 +168,7 @@ export class Integrity {
     const found = await this.source(path, real);
     if (found === undefined) return;
     if (found.name === found.real && this.root.version) {
-      if (this.passed.has(`${found.real}\0${await this.root.version(found.real)}`)) return;
+      if (this.passed.has(`${found.real}\0${await this.root.version(found.real, true)}`)) return;
     }
     await this.checked(found, caller, () => this.root.readFileBuffer(found.real));
   }
@@ -184,7 +184,7 @@ export class Integrity {
       await this.verify(name, bytes, caller, READ_OPS);
       return bytes;
     }
-    const { bytes, version } = await this.root.readVersioned(real);
+    const { bytes, version } = await this.root.readVersioned(real, true);
     await this.pass(`${real}\0${version}`, () => this.verify(name, bytes, caller, READ_OPS));
     return bytes;
   }
