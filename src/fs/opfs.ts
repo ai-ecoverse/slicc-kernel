@@ -1146,13 +1146,14 @@ export class OpfsFs implements KernelFs {
   async link(from: string, to: string, follow?: boolean): Promise<void> {
     await (follow ? this.stat(from) : this.lstat(from));
     if (!(await this.stat(parentOf(to))).isDirectory) throw fsError('ENOTDIR', to);
-    if (
-      await this.lstat(to).then(
-        () => true,
-        () => false
-      )
-    )
-      throw fsError('EEXIST', to);
+    const taken = await this.lstat(to).then(
+      () => true,
+      (err) => {
+        if (missing(err)) return false;
+        throw err;
+      }
+    );
+    if (taken) throw fsError('EEXIST', to);
     throw fsError('EPERM', `${from}: this file system has no hard links`);
   }
 

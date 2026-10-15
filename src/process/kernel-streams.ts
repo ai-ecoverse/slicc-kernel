@@ -87,7 +87,7 @@ function sealedStat(minor = 250): object {
   const now = new Date();
   return {
     dev: 0x16,
-    ino: 1,
+    ino: minor === 251 ? 2 : 1,
     mode: 0o20666,
     nlink: 1,
     uid: 0,
@@ -106,6 +106,7 @@ const O_CREAT = 0o100;
 const O_EXCL = 0o200;
 const O_NOCTTY = 0o400;
 const O_TRUNC = 0o1000;
+const O_DIRECTORY = 0o200000;
 
 const KILLED_BY_SIGPIPE = 128 + 13;
 
@@ -195,6 +196,7 @@ export interface ProcessSys {
 
   openSealed?(flags: number): number;
   openClipboard?(flags: number): number;
+  clipboardAbort?(fd: number): void;
   procList?(): ProcessListing;
   mountList?(): MountLine[];
 }
@@ -695,10 +697,17 @@ export class KernelStreams {
   ): ProcessStream | undefined {
     const { openClipboard } = this.sys;
     if (path !== CLIPBOARD_PATH || !openClipboard) return undefined;
+    if (flags & O_DIRECTORY) throw new this.Fs.ErrnoError(wasiErrno('ENOTDIR'));
     const kfd = this.call(() => openClipboard.call(this.sys, flags & 3));
-    const stream = this.vessel(open, kfd, { path, flags, mode }, false);
-    this.reportClose(kfd);
-    return stream;
+    try {
+      const stream = this.vessel(open, kfd, { path, flags, mode }, false);
+      this.reportClose(kfd);
+      return stream;
+    } catch (e) {
+      this.sys.clipboardAbort?.(kfd);
+      this.sys.close(kfd);
+      throw e;
+    }
   }
 
   private vessel(
