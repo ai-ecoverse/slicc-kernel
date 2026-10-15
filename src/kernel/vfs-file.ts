@@ -111,6 +111,8 @@ export class VfsNode {
 
   id: string | undefined;
 
+  onDirty: (() => void) | undefined;
+
   constructor(
     fs: VfsFileFs,
 
@@ -297,6 +299,7 @@ export class VfsNode {
 
   private markDirty(): void {
     this.dirty = true;
+    if (!this.orphaned) this.onDirty?.();
     if (this.writeBack !== undefined || this.orphaned) return;
     const delay = Math.max(WRITEBACK_MS, this.writeBackCost * WRITEBACK_COST_FACTOR);
     this.writeBack = setTimeout(() => {
@@ -338,6 +341,8 @@ export class VfsNodes implements UnlinkHolder {
   private readonly byId = new Map<string, VfsNode>();
 
   keepsOnDisk = false;
+
+  changed: ((path: string) => void) | undefined;
 
   private readonly fs: VfsFileFs;
 
@@ -464,6 +469,7 @@ export class VfsNodes implements UnlinkHolder {
   }
 
   private create(path: string, id: string | undefined, node: VfsNode): VfsNode {
+    node.onDirty = () => this.changed?.(node.path);
     this.byPath.set(path, node);
     if (id !== undefined) this.know(node, id);
     return node;

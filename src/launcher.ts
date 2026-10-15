@@ -2409,6 +2409,7 @@ export class Launcher {
   }
 
   private processChain(fs: KernelFs, nodes: VfsNodes, unlinked: UnlinkedKeeper): KernelFs {
+    nodes.changed = (path) => this.changes.publish(path);
     return unlinked.wrap(keepingOpen(fs, nodes, (path) => this.changes.publish(path)));
   }
 

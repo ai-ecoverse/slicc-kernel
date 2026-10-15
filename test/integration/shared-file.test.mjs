@@ -3,7 +3,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { createNodeKernel } from '../../dist/node.js';
+import { createNodeKernel, memoryRoot } from '../../dist/node.js';
 
 const modules = new URL('../../node_modules/@ai-ecoverse/', import.meta.url);
 
@@ -78,4 +78,111 @@ test('appenders in three processes keep every line of a shared log (#665)', asyn
     while read l; do case $l in a*) a=$((a+1));; b*) b=$((b+1));; p*) p=$((p+1));; esac; done < log
     echo $a $b $p`);
   assert.deepEqual(r, { status: 0, stdout: `${n} ${n} ${n}\n`, stderr: '' });
+});
+
+async function program(kernel, name, source) {
+  const base = `/node_modules/${name}`;
+  await kernel.writeFile(
+    `${base}/package.json`,
+    JSON.stringify({ name, slicc: { commands: { [name]: { abi: 'js', module: 'main.mjs' } } } })
+  );
+  await kernel.writeFile(`${base}/main.mjs`, source);
+}
+
+async function heldKernel(t, root = memoryRoot()) {
+  const kernel = await createNodeKernel({ users: 'enforce', root });
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils', 'wasm-sqlite3']) await install(kernel, name);
+  return kernel;
+}
+
+async function stored(root, path) {
+  let dir = root;
+  const names = path.split('/').filter(Boolean);
+  for (const name of names.slice(0, -1)) dir = await dir.getDirectoryHandle(name);
+  const file = await (await dir.getFileHandle(names.at(-1))).getFile();
+  return Buffer.from(await file.arrayBuffer());
+}
+
+const HOLDER = `export default async function main(ctx) {
+  const f = await ctx.open(ctx.argv[1], { read: true, write: true });
+  await ctx.fs.writeFile('/tmp/opened', '');
+  while (!(await ctx.fs.exists('/tmp/done'))) await new Promise((r) => setTimeout(r, 20));
+  await f.close();
+}
+`;
+
+test('a commit to a file the kernel holds open is in storage when the writer exits (#665)', async (t) => {
+  const root = memoryRoot();
+  const kernel = await heldKernel(t, root);
+  await program(kernel, 'holder', HOLDER);
+  const bash = (script) => kernel.run(['bash', '-c', script], { cwd: '/tmp' });
+  await bash(`sqlite3 c.db 'create table t(x);'`);
+  const holder = kernel.run(['holder', '/tmp/c.db'], { cwd: '/' });
+  const r = await bash(
+    `until [ -e opened ]; do sleep 0.05; done; sqlite3 c.db "insert into t values('committed-row');"`
+  );
+  assert.deepEqual(r, { status: 0, stdout: '', stderr: '' });
+  const kept = (await stored(root, '/tmp/c.db')).includes('committed-row');
+  const read = Buffer.from(await kernel.readFile('/tmp/c.db')).includes('committed-row');
+  await kernel.writeFile('/tmp/done', '');
+  await holder;
+  assert.deepEqual({ kept, read }, { kept: true, read: true });
+});
+
+const APPENDER = `export default async function main(ctx) {
+  const f = await ctx.open('/tmp/log', { write: true, append: true, create: true });
+  await ctx.fs.writeFile('/tmp/opened' + ctx.argv[1], '');
+  const lines = Array.from({ length: 100 }, (_, i) => new TextEncoder().encode('k' + ctx.argv[1] + '.' + i + '\\n'));
+  await Promise.all(lines.map((line) => f.write(0, line)));
+  await f.close();
+}
+`;
+
+test('an O_APPEND writer the kernel holds and a by-path appender keep every line (#665)', async (t) => {
+  const kernel = await heldKernel(t);
+  await program(kernel, 'appender', APPENDER);
+  const r = await kernel.run(
+    [
+      'bash',
+      '-c',
+      `for a in 1 2 3; do appender $a & done; until [ -e opened1 ] && [ -e opened2 ] && [ -e opened3 ]; do :; done
+      for p in 1 2 3; do ( for i in $(seq 100); do echo "b$p.$i" >> log; done ) & done; wait
+      k=0; b=0; while read l; do case $l in k*) k=$((k+1));; b*) b=$((b+1));; esac; done < log
+      echo $k $b; sort log | uniq -d | wc -l`,
+    ],
+    { cwd: '/tmp' }
+  );
+  assert.deepEqual(r, { status: 0, stdout: '300 300\n0\n', stderr: '' });
+});
+
+const WRITER = `export default async function main(ctx) {
+  while (!(await ctx.fs.exists('/tmp/ready'))) await new Promise((r) => setTimeout(r, 10));
+  const f = await ctx.open('/tmp/f', { read: true, write: true });
+  await f.write(0, new TextEncoder().encode('new!'));
+  await ctx.fs.writeFile('/tmp/wrote', '');
+  while (!(await ctx.fs.exists('/tmp/done'))) await new Promise((r) => setTimeout(r, 10));
+  await f.close();
+}
+`;
+
+test("a reader with the file open sees a kernel-held writer's write before it is written back (#665)", async (t) => {
+  const kernel = await heldKernel(t);
+  await install(kernel, 'wasix-python');
+  await program(kernel, 'writer', WRITER);
+  const py = [
+    'import os, time',
+    "f = open('f', 'rb', buffering=0)",
+    "print('P1', f.read().decode())",
+    "open('ready', 'w').close()",
+    "while not os.path.exists('wrote'): time.sleep(0.005)",
+    'f.seek(0)',
+    "print('P2', f.read().decode())",
+    "open('done', 'w').close()",
+  ].join('\n');
+  const r = await kernel.run(
+    ['bash', '-c', `printf 'old!' > f; writer & python3 -c "${py}"; wait`],
+    { cwd: '/tmp' }
+  );
+  assert.deepEqual(r, { status: 0, stdout: 'P1 old!\nP2 new!\n', stderr: '' });
 });
