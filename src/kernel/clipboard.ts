@@ -71,6 +71,7 @@ class ClipboardChannel {
   private size = 0;
   private wrote = false;
   private failed = false;
+  private aborted = false;
 
   constructor(broker: ClipboardBroker, access: OpenAccess, stamp: ClipboardStamp) {
     this.broker = broker;
@@ -132,11 +133,15 @@ class ClipboardChannel {
     return READY;
   }
 
+  abort(): void {
+    this.aborted = true;
+  }
+
   async close(): Promise<void> {
     this.snapshot = undefined;
     this.taken = undefined;
     const commits = this.access === 'write' || (this.access === 'both' && this.wrote);
-    if (!commits || this.failed) return;
+    if (!commits || this.failed || this.aborted) return;
     const bytes = joined(this.chunks, this.size);
     this.chunks = [];
     this.size = 0;

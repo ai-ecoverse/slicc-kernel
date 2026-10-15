@@ -359,7 +359,7 @@ export class FdTable {
     throw new KernelError('EMFILE');
   }
 
-  installAt(fd: number, file: OpenFile): void {
+  installAt(fd: number, file: OpenFile): void | Promise<void> {
     if (fd < 0 || fd >= FdTable.MAX_FDS) {
       void Promise.resolve(file.release()).catch(() => undefined);
       throw new KernelError('EBADF');
@@ -368,6 +368,7 @@ export class FdTable {
     this.fds.set(fd, file);
     this.cloexec.delete(fd);
     this.status.delete(fd);
+    if (previous?.file.clipboard) return Promise.resolve(previous.release()).catch(() => undefined);
     void Promise.resolve(previous?.release()).catch(() => undefined);
   }
 
@@ -375,10 +376,11 @@ export class FdTable {
     return this.install(this.get(fd).retain(), min);
   }
 
-  dup2(oldFd: number, newFd: number): number {
+  dup2(oldFd: number, newFd: number): number | Promise<number> {
     const file = this.get(oldFd);
-    if (oldFd !== newFd) this.installAt(newFd, file.retain());
-    return newFd;
+    if (oldFd === newFd) return newFd;
+    const result = this.installAt(newFd, file.retain());
+    return result instanceof Promise ? result.then(() => newFd) : newFd;
   }
 
   close(fd: number): void | Promise<void> {
