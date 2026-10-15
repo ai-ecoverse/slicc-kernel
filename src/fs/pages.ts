@@ -180,6 +180,14 @@ export class Pages {
     this.stored = size;
   }
 
+  refresh(size: number): void {
+    if (this.pinned) return;
+    for (const page of [...this.pages.keys()]) if (!this.dirty.has(page)) this.drop(page);
+    const resized = this.length !== this.stored || this.shrink !== undefined;
+    if (this.shrink === undefined) this.stored = size;
+    this.length = resized ? Math.max(this.length, this.stored) : size;
+  }
+
   private evict(): void {
     if (this.pinned) return;
     let clean = (this.pages.size - this.dirty.size) * PAGE;

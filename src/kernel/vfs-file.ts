@@ -111,6 +111,8 @@ export class VfsNode {
 
   id: string | undefined;
 
+  onDirty: (() => void) | undefined;
+
   constructor(
     fs: VfsFileFs,
 
@@ -297,6 +299,7 @@ export class VfsNode {
 
   private markDirty(): void {
     this.dirty = true;
+    if (!this.orphaned) this.onDirty?.();
     if (this.writeBack !== undefined || this.orphaned) return;
     const delay = Math.max(WRITEBACK_MS, this.writeBackCost * WRITEBACK_COST_FACTOR);
     this.writeBack = setTimeout(() => {
@@ -338,6 +341,8 @@ export class VfsNodes implements UnlinkHolder {
   private readonly byId = new Map<string, VfsNode>();
 
   keepsOnDisk = false;
+
+  changed: ((path: string) => void) | undefined;
 
   private readonly fs: VfsFileFs;
 
@@ -451,6 +456,12 @@ export class VfsNodes implements UnlinkHolder {
     return true;
   }
 
+  holding(path: string): VfsNode | undefined {
+    if (this.byPath.size === 0) return undefined;
+    const node = this.byPath.get(path);
+    return node && !node.orphaned ? node : undefined;
+  }
+
   private named(path: string, id: string | undefined): VfsNode | undefined {
     const node = this.byPath.get(path) ?? (id === undefined ? undefined : this.byId.get(id));
     if (node && !this.byPath.has(path)) this.byPath.set(path, node);
@@ -458,6 +469,7 @@ export class VfsNodes implements UnlinkHolder {
   }
 
   private create(path: string, id: string | undefined, node: VfsNode): VfsNode {
+    node.onDirty = () => this.changed?.(node.path);
     this.byPath.set(path, node);
     if (id !== undefined) this.know(node, id);
     return node;
@@ -632,9 +644,86 @@ export async function refuseReadonly(
   if (st?.readonly) throw new KernelError('EROFS');
 }
 
-export function keepingOpen(fs: KernelFs, nodes: VfsNodes): KernelFs {
+function heldIo(fs: KernelFs, nodes: VfsNodes, changed: (path: string) => void): Partial<KernelFs> {
+  const ranged = rangedOps(fs);
+  const node = (path: string) => nodes.holding(fs.resolvePath('/', path));
+  const write = async <T>(
+    path: string,
+    op: (held: VfsNode) => Promise<T>,
+    fallback: () => Promise<T>
+  ) => {
+    const held = node(path);
+    if (!held) return fallback();
+    const out = await held.serial(async () => {
+      const done = await op(held);
+      await held.flush();
+      return done;
+    });
+    changed(fs.resolvePath('/', path));
+    return out;
+  };
+  return {
+    append: (path: string, bytes: Uint8Array) =>
+      write(
+        path,
+        async (held) => {
+          const at = await held.size();
+          await held.pwrite(bytes, at);
+          return at + bytes.length;
+        },
+        async () => {
+          const at = (await fs.stat(path)).size;
+          if (ranged) await ranged.pwrite(path, at, bytes, true);
+          else {
+            const whole = new Uint8Array(at + bytes.length);
+            whole.set(await fs.readFileBuffer(path));
+            whole.set(bytes, at);
+            await fs.writeFile(path, whole);
+          }
+          return at + bytes.length;
+        }
+      ),
+    async stat(path) {
+      const st = await fs.stat(path);
+      const held = st.isFile ? node(path) : undefined;
+      return held ? { ...st, size: await held.serial(() => held.size()) } : st;
+    },
+    async readFileBuffer(path) {
+      const held = node(path);
+      if (!held) return fs.readFileBuffer(path);
+      return held.serial(async () => held.pread(await held.size(), 0));
+    },
+    ...(ranged
+      ? {
+          pread: (path: string, at: number, n: number, version?: string) => {
+            const held = node(path);
+            return held ? held.serial(() => held.pread(n, at)) : ranged.pread(path, at, n, version);
+          },
+          pwrite: (path: string, at: number, bytes: Uint8Array, transfer?: boolean) =>
+            write(
+              path,
+              async (held) => void (await held.pwrite(bytes, at)),
+              () => ranged.pwrite(path, at, bytes, transfer)
+            ),
+          truncate: (path: string, size: number) =>
+            write(
+              path,
+              (held) => held.truncate(size),
+              () => ranged.truncate(path, size)
+            ),
+        }
+      : {}),
+  };
+}
+
+export function keepingOpen(
+  fs: KernelFs,
+  nodes: VfsNodes,
+  changed: (path: string) => void = () => {}
+): KernelFs {
   return {
     ...fs,
+    ...heldIo(fs, nodes, changed),
     async exclusive(path, run, follow = true) {
       const at = fs.resolvePath('/', path);
       const key = follow ? nodes.targetKey(at) : nodes.entryKey(at);
@@ -661,8 +750,18 @@ export function keepingOpen(fs: KernelFs, nodes: VfsNodes): KernelFs {
         nodes.renamed(a, b);
       });
     },
-    writeFile: (path, content, owner) =>
-      nodes.onEntry(fs.resolvePath('/', path), () => fs.writeFile(path, content, owner)),
+    writeFile: (path, content, owner) => {
+      const at = fs.resolvePath('/', path);
+      const held = nodes.holding(at);
+      if (!held) return nodes.onEntry(at, () => fs.writeFile(path, content, owner));
+      const bytes = typeof content === 'string' ? new TextEncoder().encode(content) : content;
+      return held.serial(async () => {
+        await held.truncate(0);
+        await held.pwrite(bytes, 0);
+        await held.flush();
+        changed(at);
+      });
+    },
     createExclusive: async (path, owner) =>
       nodes.createExclusive(await nodes.entryKey(fs.resolvePath('/', path)), owner),
     symlink: (target, path, owner) =>

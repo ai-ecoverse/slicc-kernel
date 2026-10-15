@@ -82,6 +82,7 @@ export interface KernelFs {
   ancestry?(path: string): Promise<Array<Perm | undefined>>;
   hasOwner?(path: string): Promise<boolean>;
   chmod(path: string, mode: number): Promise<void>;
+  append?(path: string, bytes: Uint8Array): Promise<number>;
   utimes(path: string, atime: Date, mtime: Date): Promise<void>;
   lutimes?(path: string, atime: Date, mtime: Date): Promise<void>;
   pread?(path: string, offset: number, length: number, version?: string): Promise<Uint8Array>;

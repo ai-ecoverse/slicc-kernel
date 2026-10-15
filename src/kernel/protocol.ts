@@ -83,6 +83,7 @@ export interface WasmProcessInitMsg {
   env: Record<string, string>;
   cwd: string;
   sab: SharedArrayBuffer;
+  changes?: SharedArrayBuffer;
   ppid?: number;
   umask?: number;
   cred?: Cred;
