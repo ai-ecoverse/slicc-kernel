@@ -55,6 +55,28 @@ function topLevelDirs(
   return dirs;
 }
 
+interface MayDeleteFs {
+  mayDelete?(dir: object, name: string, isdir: boolean): number;
+  lookupNode?(parent: object, name: string): { parent?: object };
+}
+
+function linuxRmdir(Fs: EmscriptenFsForHook): void {
+  const raw = Fs as unknown as MayDeleteFs;
+  const { mayDelete, lookupNode } = raw;
+  if (!mayDelete || !lookupNode) return;
+  raw.mayDelete = (dir: object, name: string, isdir: boolean): number => {
+    const code = mayDelete.call(raw, dir, name, isdir);
+    if (code !== 10 || !isdir) return code;
+    try {
+      const node = lookupNode.call(raw, dir, name) as { parent?: object };
+      if (node === node.parent) return 10;
+    } catch {
+      return code;
+    }
+    return 0;
+  };
+}
+
 export function mountVfsIntoEmscripten(
   Fs: EmscriptenFsForHook,
   deps: EmscriptenVfsHookDeps
@@ -65,6 +87,7 @@ export function mountVfsIntoEmscripten(
   if (dirs) liveRoot(Fs, bridge);
   if (bridge.owners && Fs.lookupPath) useLiveChown(Fs as Parameters<typeof useLiveChown>[0]);
   if (bridge.links && Fs.lookupPath) readingLinks(Fs as Parameters<typeof readingLinks>[0]);
+  linuxRmdir(Fs);
   try {
     Fs.chdir(deps.cwd);
   } catch (err) {

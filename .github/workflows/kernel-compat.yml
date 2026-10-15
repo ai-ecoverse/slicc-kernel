@@ -197,7 +197,7 @@ jobs:
   attach:
     needs: [published, release]
     if: ${{ !cancelled() && needs.published.outputs.version != '' && needs.release.outputs.artifact != '' }}
-    runs-on: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (contains(fromJSON('["schedule","workflow_dispatch","workflow_run","release"]'), github.event_name) && github.ref == 'refs/heads/main')) && vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write

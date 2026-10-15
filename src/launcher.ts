@@ -1335,10 +1335,14 @@ export class Launcher {
   }
 
   private loopbackFor(pid: number): KernelLoopback {
-    return new KernelLoopback(this.net, () => {
-      const cred = this.credOf(pid);
-      return { pid, uid: cred.euid, gid: cred.egid };
-    });
+    return new KernelLoopback(
+      this.net,
+      () => {
+        const cred = this.credOf(pid);
+        return { pid, uid: cred.euid, gid: cred.egid };
+      },
+      () => this.connectorStamp(pid)
+    );
   }
 
   private treeScrubs(req: StartRequest): Scrubber[] | undefined {
