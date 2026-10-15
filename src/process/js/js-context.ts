@@ -8,6 +8,7 @@ import {
   devOpen,
   devReaddir,
   devReadlink,
+  devResolveTarget,
   devStat,
   inDev,
   readWhole,
@@ -677,7 +678,11 @@ function pathOps(
       return String(await kernel.json({ op: 'readlink', path: abs }));
     },
     async statfs(path) {
-      const abs = resolve(path);
+      let abs = resolve(path);
+      if (inDev(abs)) {
+        const target = await devAsync(kernel, devResolveTarget(abs)).catch(() => undefined);
+        if (target?.startsWith('/')) abs = target;
+      }
       await statOf('stat', abs);
       return statFsOf(await kernel.json({ op: 'statfs', path: abs }));
     },

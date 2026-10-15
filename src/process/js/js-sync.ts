@@ -13,6 +13,7 @@ import {
   devOpen,
   devReaddir,
   devReadlink,
+  devResolveTarget,
   devStat,
   devSync,
   inDev,
@@ -382,7 +383,13 @@ function syncPathOps(
       return String(kernel.json({ op: 'readlink', path: abs }));
     },
     statfs(path) {
-      const abs = resolve(path);
+      let abs = resolve(path);
+      if (inDev(abs)) {
+        try {
+          const target = devSync(kernel, devResolveTarget(abs)) as string | undefined;
+          if (target?.startsWith('/')) abs = target;
+        } catch {}
+      }
       statOf('stat', abs);
       return statFsOf(kernel.json({ op: 'statfs', path: abs }));
     },
