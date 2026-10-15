@@ -523,6 +523,34 @@ test("a package command's WASI wasm run by path runs as that command, in the cal
   assert.equal(mine.stdout, '2\n', mine.stderr);
 });
 
+test('connect({ user }) fails once the kernel is terminated during its lookup', async () => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  await kernel.users.add({ name: 'cone' });
+  const connecting = kernel.connect({ user: 'cone' });
+  kernel.terminate();
+  await assert.rejects(connecting, /terminated/);
+});
+
+test('an account read while a user is removed sees the tables before or after, never a mix', async (t) => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  t.after(() => kernel.terminate());
+  const seen = [];
+  for (let round = 0; round < 5; round++) {
+    await kernel.users.add({ name: 'cone', groups: ['sudo'] });
+    let done = false;
+    const removing = kernel.users.remove('cone').finally(() => {
+      done = true;
+    });
+    while (!done) {
+      const cone = (await kernel.users.list()).find((a) => a.name === 'cone');
+      if (cone) seen.push(cone.groups.length);
+    }
+    await removing;
+  }
+  assert.ok(seen.length > 0);
+  assert.deepEqual(new Set(seen), new Set([3]));
+});
+
 test('a WASI process killed by SIGKILL keeps the bytes it wrote but never fsynced', async () => {
   const kernel = await createNodeKernel();
   for (const pkg of ['wasm-bash', 'wasm-coreutils', 'wasix-python']) await install(kernel, pkg);
