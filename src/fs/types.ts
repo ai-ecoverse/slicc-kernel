@@ -89,6 +89,7 @@ export interface KernelFs {
   truncate?(path: string, size: number): Promise<void>;
   protect?(prefixes: readonly string[], versions?: boolean): void;
   unguarded?(): KernelFs;
+  noLinks?(): KernelFs;
   mayChange?(path: string, follow: boolean, whole?: boolean): Promise<void>;
   readVersioned?(path: string): Promise<{ bytes: Uint8Array; version: string }>;
   version?(path: string): Promise<string>;

@@ -222,6 +222,7 @@ export class OpfsFs implements KernelFs {
   private readonly remote: RemoteWatch | undefined;
   private readonly ranged: boolean;
   private owners = false;
+  private rejectLinks = false;
   private readonly mounts: { mounted?: (path: string) => boolean } = {};
 
   constructor(
@@ -395,6 +396,10 @@ export class OpfsFs implements KernelFs {
     return Object.create(this, { guarded: { value: [] } }) as KernelFs;
   }
 
+  noLinks(): KernelFs {
+    return Object.create(this, { rejectLinks: { value: true } }) as KernelFs;
+  }
+
   private refuse(path: string, holding = false): void {
     if (isProtected(this.guarded, path) || (holding && holdsProtected(this.guarded, path))) {
       throw fsError('EROFS', path);
@@ -554,6 +559,7 @@ export class OpfsFs implements KernelFs {
         const link = await this.linkAlong(current);
         if (!link) throw err;
         if (link.path === current && !follow) return { path: current, link };
+        if (this.rejectLinks) throw fsError('ELOOP', path);
         const target = `${link.link}${current.slice(link.path.length)}`;
         current = target.split('/').includes('..')
           ? await this.physical(parentOf(link.path), target, hops + 1, path)
@@ -579,6 +585,7 @@ export class OpfsFs implements KernelFs {
         const st = await this.lstat(at);
         if (!st.isSymbolicLink && !st.isDirectory) throw fsError('ENOTDIR', at);
         if (!st.isSymbolicLink) done.push(part);
+        else if (this.rejectLinks) throw fsError('ELOOP', of);
         else if (++hops > MAX_LINKS) throw fsError('ELOOP', path);
         else {
           const link = await this.readlink(at);
