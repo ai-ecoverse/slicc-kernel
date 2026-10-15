@@ -70,7 +70,7 @@ test('a second sqlite3 writer gets "database is locked" while the first holds it
   const bash = await booted(t, ['wasm-sqlite3']);
   const r = await bash(`
     sqlite3 c.db 'create table t(x);'
-    ( echo "begin immediate;"; echo "insert into t values(1);"; ${MARK}
+    ( echo ".timeout 20000"; echo "begin immediate;"; echo "insert into t values(1);"; ${MARK}
       until [ -e go ]; do sleep 0.05; done
       echo "commit;" ) | sqlite3 c.db > a.out 2>&1 &
     until [ -e ready ]; do sleep 0.05; done
