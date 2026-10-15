@@ -223,9 +223,12 @@ function* aliasOf(
   const info = yield* fdInfo(fd, abs);
   const file = info.kind === 'file';
   if (file) {
-    const at = (yield { op: 'fd-vfs-stat', fd }) as { path: string; orphan?: true };
+    const at = (yield { op: 'fd-vfs-stat', fd }) as { path: string; size: number; orphan?: true };
     if (!at.orphan)
       return { fd: (yield openRequest(at.path, { ...o, create: false })) as number, file };
+    const wantWrite = o.write === true || o.append === true || o.truncate === true;
+    if (wantWrite && info.access === 'read') throw new JsCallError('EBADF', abs);
+    if (!wantWrite && info.access === 'write') throw new JsCallError('EBADF', abs);
   }
   const copy = (yield { op: 'fd-dup', fd, min: 3 }) as number;
   if (file && o.truncate) {
