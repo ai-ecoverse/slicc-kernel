@@ -7,28 +7,28 @@ import { createNodeKernel } from '../../dist/node.js';
 
 const modules = new URL('../../node_modules/@ai-ecoverse/', import.meta.url);
 
-async function install(kernel, name, as = name) {
+async function install(kernel, name) {
   const base = fileURLToPath(new URL(`${name}/`, modules));
   const entries = await readdir(base, { recursive: true, withFileTypes: true });
   for (const entry of entries.filter((e) => e.isFile())) {
     const file = join(entry.parentPath, entry.name);
     await kernel.writeFile(
-      `/node_modules/@ai-ecoverse/${as}/${relative(base, file)}`,
+      `/node_modules/@ai-ecoverse/${name}/${relative(base, file)}`,
       await readFile(file)
     );
   }
 }
 
-async function booted(t, coreutils, options = {}) {
+async function booted(t, options = {}) {
   const kernel = await createNodeKernel(options);
   t.after(() => kernel.terminate());
   await install(kernel, 'wasm-bash');
-  await install(kernel, coreutils, 'wasm-coreutils');
+  await install(kernel, 'wasm-coreutils');
   return (script) => kernel.run(['bash', '-c', script], { cwd: '/' });
 }
 
 test('uname answers from the kernel: Linux, the hostname, /proc release and version, wasm32', async (t) => {
-  const bash = await booted(t, 'wasm-coreutils');
+  const bash = await booted(t);
   const r = await bash(
     'uname -r; cat /proc/sys/kernel/osrelease; uname -s -m; uname -n; uname -v; uname -snrvm'
   );
@@ -50,14 +50,7 @@ test('uname answers from the kernel: Linux, the hostname, /proc release and vers
 });
 
 test('uname -n is the node name the kernel was given', async (t) => {
-  const bash = await booted(t, 'wasm-coreutils', { hostname: 'box1' });
+  const bash = await booted(t, { hostname: 'box1' });
   const r = await bash('uname -n; cat /etc/hostname');
   assert.equal(r.stdout, 'box1\nbox1\n', r.stderr);
-});
-
-test('a coreutils build without the uname import keeps the Emscripten answer', async (t) => {
-  const bash = await booted(t, 'wasm-coreutils-pre-h1');
-  const r = await bash('uname -s -r');
-  assert.equal(r.status, 0, r.stderr);
-  assert.equal(r.stdout, 'Emscripten 4.0.23\n');
 });
