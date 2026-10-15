@@ -219,3 +219,34 @@ test('python writing through a hard link reaches the file the kernel holds under
   const after = await run(kernel, 'cat a', '/mnt/t');
   assert.deepEqual([r.stdout, after.stdout], ['BBBBBBBB\n', 'CBBBBBBB']);
 });
+
+test('after a sudo write through a symlinked directory, a normal write through it still reaches a reader on the real path (#669)', async (t) => {
+  const kernel = await booted(t, ['wasix-python']);
+  await program(kernel, 'put', PUT);
+  await kernel.users.add({ name: 'cone', groups: ['sudo'] });
+  await run(
+    kernel,
+    "printf '%s\\n' 'NOPASSWD cone Cmnd *' > /etc/sudoers.d/cone && chmod 440 /etc/sudoers.d/cone && mkdir -p /tmp/real && ln -s /tmp/real /tmp/link && printf old! > /tmp/real/f && chmod 666 /tmp/real/f",
+    '/'
+  );
+  const py = [
+    'import os, time',
+    "f = open('/tmp/real/f', 'rb', buffering=0)",
+    "print('P1', f.read().decode())",
+    "open('/tmp/ready', 'w').close()",
+    "while not os.path.exists('/tmp/go'): time.sleep(0.02)",
+    'f.seek(0)',
+    "print('P2', f.read().decode())",
+  ].join('\n');
+  const reader = run(kernel, `python3 -c "${py}"`, '/');
+  const r = await kernel.run(
+    [
+      'bash',
+      '-c',
+      'until [ -e /tmp/ready ]; do sleep 0.05; done; sudo put /tmp/link/f sud!; put /tmp/link/f new!; touch /tmp/go',
+    ],
+    { cwd: '/home/cone', user: 'cone' }
+  );
+  assert.deepEqual([r.status, r.stderr], [0, '']);
+  assert.deepEqual(await reader, { status: 0, stdout: 'P1 old!\nP2 new!\n', stderr: '' });
+});

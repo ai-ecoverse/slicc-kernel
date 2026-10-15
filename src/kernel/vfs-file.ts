@@ -428,6 +428,7 @@ export class VfsNodes implements UnlinkHolder {
   }
 
   private know(node: VfsNode, id: string): void {
+    this.reshaped();
     node.id = id;
     if (!this.byId.has(id)) this.byId.set(id, node);
   }
@@ -439,6 +440,7 @@ export class VfsNodes implements UnlinkHolder {
   }
 
   private forget(node: VfsNode): void {
+    this.reshaped();
     for (const p of this.namesOf(node)) this.byPath.delete(p);
     if (node.id !== undefined && this.byId.get(node.id) === node) this.byId.delete(node.id);
   }
@@ -458,6 +460,35 @@ export class VfsNodes implements UnlinkHolder {
 
   holdsAny(): boolean {
     return this.byPath.size > 0;
+  }
+
+  private epoch = 0;
+
+  private readonly plain = new Map<string, number>();
+
+  reshaped(): void {
+    this.epoch++;
+    this.plain.clear();
+  }
+
+  plainAt(path: string): boolean {
+    return this.plain.get(path) === this.epoch;
+  }
+
+  get shape(): number {
+    return this.epoch;
+  }
+
+  notePlain(path: string, shape: number): void {
+    if (shape !== this.epoch) return;
+    if (this.plain.size >= 4096) this.plain.clear();
+    this.plain.set(path, shape);
+  }
+
+  holdsName(name: string): boolean {
+    for (const path of this.byPath.keys())
+      if (path.slice(path.lastIndexOf('/') + 1) === name) return true;
+    return false;
   }
 
   holdsLinked(): boolean {
@@ -482,6 +513,7 @@ export class VfsNodes implements UnlinkHolder {
   }
 
   private create(path: string, id: string | undefined, node: VfsNode): VfsNode {
+    this.reshaped();
     node.onDirty = () => this.changed?.(node.path);
     this.byPath.set(path, node);
     if (id !== undefined) this.know(node, id);
@@ -657,15 +689,32 @@ export async function refuseReadonly(
   if (st?.readonly) throw new KernelError('EROFS');
 }
 
+const baseName = (path: string) => path.slice(path.lastIndexOf('/') + 1);
+
+async function byRealPath(fs: KernelFs, nodes: VfsNodes, at: string) {
+  const real = await fs.realpath?.(at, true).catch(() => undefined);
+  return real === undefined || real === at ? undefined : nodes.holding(real);
+}
+
+async function aliasOf(fs: KernelFs, nodes: VfsNodes, at: string): Promise<VfsNode | undefined> {
+  if (nodes.holdsName(baseName(at))) {
+    const named = await byRealPath(fs, nodes, at);
+    if (named) return named;
+  }
+  const st = await fs.lstat(at).catch(() => undefined);
+  if (!st) return undefined;
+  if (st.isSymbolicLink) return byRealPath(fs, nodes, at);
+  if (st.ino === undefined || (st.nlink ?? 1) < 2 || !nodes.holdsLinked()) return undefined;
+  return nodes.holdingId(`${st.dev ?? 0}:${st.ino}`);
+}
+
 async function heldAt(fs: KernelFs, nodes: VfsNodes, at: string): Promise<VfsNode | undefined> {
   const held = nodes.holding(at);
-  if (held || !nodes.holdsAny()) return held;
-  const real = await fs.realpath?.(at, true).catch(() => undefined);
-  const named = real === undefined || real === at ? undefined : nodes.holding(real);
-  if (named || !nodes.holdsLinked()) return named;
-  const st = await fs.stat(real ?? at).catch(() => undefined);
-  if (!st || st.ino === undefined || (st.nlink ?? 1) < 2) return undefined;
-  return nodes.holdingId(`${st.dev ?? 0}:${st.ino}`);
+  if (held || !nodes.holdsAny() || nodes.plainAt(at)) return held;
+  const shape = nodes.shape;
+  const found = await aliasOf(fs, nodes, at);
+  if (!found) nodes.notePlain(at, shape);
+  return found;
 }
 
 function heldIo(fs: KernelFs, nodes: VfsNodes, changed: (path: string) => void): Partial<KernelFs> {

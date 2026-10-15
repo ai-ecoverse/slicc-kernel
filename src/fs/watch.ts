@@ -35,6 +35,17 @@ export class FsWatchers {
   private readonly taps: Array<(paths: string[]) => void> = [];
   private readonly reals = new Map<string, string>();
 
+  private readonly reshapes: Array<() => void> = [];
+
+  onReshape(listener: () => void): void {
+    this.reshapes.push(listener);
+  }
+
+  reshaped(): void {
+    this.reals.clear();
+    for (const listener of this.reshapes) listener();
+  }
+
   tap(listener: (paths: string[]) => void): void {
     this.taps.push(listener);
   }
@@ -92,7 +103,13 @@ export class FsWatchers {
       const at = normalizePath(path);
       const known = reals.get(at);
       if (known !== undefined) return known;
-      const real = (await fs.realpath?.(at, true).catch(() => at)) ?? at;
+      if (!fs.realpath) return at;
+      let real: string;
+      try {
+        real = await fs.realpath(at, true);
+      } catch {
+        return at;
+      }
       if (reals.size >= REALS_KEPT) reals.clear();
       reals.set(at, real);
       return real;
@@ -111,11 +128,11 @@ export class FsWatchers {
     const reshaping =
       <A extends unknown[]>(run: (...args: A) => Promise<void>) =>
       async (...args: A) => {
-        reals.clear();
+        this.reshaped();
         try {
           await run(...args);
         } finally {
-          reals.clear();
+          this.reshaped();
         }
       };
     const overrides: Partial<Record<keyof KernelFs, unknown>> = {
@@ -137,9 +154,11 @@ export class FsWatchers {
       },
       rm: reshaping(after(fs.rm.bind(fs), (path) => [path])),
       rename: reshaping(after(fs.rename.bind(fs), (from, to) => [from, to])),
-      link: after(
-        (from: string, to: string, follow?: boolean) => fs.link(from, to, follow),
-        (_from, to) => [to]
+      link: reshaping(
+        after(
+          (from: string, to: string, follow?: boolean) => fs.link(from, to, follow),
+          (_from, to) => [to]
+        )
       ),
       symlink: reshaping(after(fs.symlink.bind(fs), (_target, path) => [path])),
       chmod: after(fs.chmod.bind(fs), (path) => [path]),

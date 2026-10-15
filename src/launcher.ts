@@ -600,6 +600,9 @@ export class Launcher {
     this.sealed.userOf = async (uid) => (await this.users.lookup(uid))?.name;
     if (this.owners) options.fs.trackOwners?.();
     this.watchers.tap((paths) => this.changes.publish(...paths));
+    this.watchers.onReshape(() => {
+      for (const nodes of this.openFiles) nodes.reshaped();
+    });
     this.mounts = new MountTable({
       open: (type, spec) => this.driver(type, spec),
       busy: (target) =>
@@ -608,6 +611,7 @@ export class Launcher {
         if (paths.some((path) => this.pnpmChain.has(path))) this.pnpmStale();
         this.watchers.changed(...paths);
       },
+      reshaped: () => this.watchers.reshaped(),
       owners: this.owners,
     });
     this.mounted = this.mounts.wrap(options.fs);
