@@ -1,11 +1,67 @@
 import type { ChangeView } from './changes.ts';
 import { Pages, WRITEBACK } from './pages.ts';
 
+type WatchStat = {
+  size: number;
+  version?: string | undefined;
+  ino?: number | undefined;
+  mtimeMs?: number | undefined;
+  nlink?: number | undefined;
+};
+
 export interface RangedWatch {
   view: ChangeView;
   ino?: number | undefined;
   seen?: number | undefined;
-  stat(path: string): { size: number; version?: string | undefined; ino?: number | undefined };
+  stat(path: string): WatchStat;
+  real?: () => string | undefined;
+  linked?: boolean;
+  resolved?: string | null;
+  sig?: string;
+}
+
+export const signatureOf = (st: WatchStat): string =>
+  `${st.version ?? ''}:${st.size}:${st.mtimeMs ?? ''}`;
+
+export function linkedWatch<T extends RangedWatch>(watch: T, st: WatchStat): T {
+  if ((st.nlink ?? 1) < 2) return watch;
+  watch.linked = true;
+  watch.sig = signatureOf(st);
+  return watch;
+}
+
+function viaAlias(watch: RangedWatch, seen: number, path: string): boolean {
+  if (watch.resolved === undefined) {
+    let real: string | undefined;
+    try {
+      real = watch.real?.();
+    } catch {}
+    watch.resolved = real && real !== path ? real : null;
+  }
+  return watch.resolved !== null && watch.view.changedSince(seen, watch.resolved).changed;
+}
+
+function viaLink(watch: RangedWatch, path: string): boolean {
+  if (!watch.linked) return false;
+  let sig: string;
+  try {
+    sig = signatureOf(watch.stat(path));
+  } catch {
+    return false;
+  }
+  if (sig === watch.sig) return false;
+  watch.sig = sig;
+  return true;
+}
+
+export function watchedChange(
+  watch: RangedWatch,
+  seen: number,
+  path: string
+): { now: number; changed: boolean } {
+  const said = watch.view.changedSince(seen, path);
+  if (said.changed || said.now === seen) return said;
+  return { now: said.now, changed: viaAlias(watch, seen, path) || viaLink(watch, path) };
 }
 
 export interface RangedIo {
@@ -41,7 +97,7 @@ export class RangedFile {
   private fresh(): void {
     const watch = this.watch;
     if (!watch || this.pinned) return;
-    const { now, changed } = watch.view.changedSince(this.seen, this.path);
+    const { now, changed } = watchedChange(watch, this.seen, this.path);
     this.seen = now;
     if (!changed) return;
     let st: ReturnType<RangedWatch['stat']>;

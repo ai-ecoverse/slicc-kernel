@@ -1,3 +1,4 @@
+import { linkedWatch } from '../../fs/ranged.ts';
 import {
   type DeviceAccess,
   type DeviceMeta,
@@ -20,6 +21,7 @@ import {
   LocalFile,
   normalize,
   physical,
+  realOf,
   type WasiEntry,
   WasiError,
 } from './wasi-files.ts';
@@ -790,15 +792,21 @@ export class WasiFds {
     const handle = this.fs.hold?.(path, true, true, undefined, this.fs.owners ? asked : 0);
     const io = handle !== undefined && this.fs.pinned ? this.fs.pinned(handle) : this.fs;
     const view = this.fs.changes;
-    const watch = view && {
-      view,
-      ino: st.ino,
-      seen,
-      stat: (at: string) => {
-        (this.fs as { invalidate?(): void }).invalidate?.();
-        return this.fs.stat(at);
-      },
-    };
+    const watch =
+      view &&
+      linkedWatch(
+        {
+          view,
+          ino: st.ino,
+          seen,
+          stat: (at: string) => {
+            (this.fs as { invalidate?(): void }).invalidate?.();
+            return this.fs.stat(at);
+          },
+          real: () => realOf(this.fs, path),
+        },
+        st
+      );
     const buffer = new FileBuffer(io, path, empty, st.maxFile, ranged, st.version, watch);
     buffer.handle = handle;
     this.buffers.set(path, buffer);
