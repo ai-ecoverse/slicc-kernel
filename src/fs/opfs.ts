@@ -262,6 +262,7 @@ export class OpfsFs implements KernelFs {
   }
 
   private committed(target: string): void {
+    this.fileTimes.delete(target);
     if (this.remote?.watched()) this.remote.wrote(target);
   }
 
@@ -642,6 +643,11 @@ export class OpfsFs implements KernelFs {
   }
 
   private movePending(from: string, to?: string): void {
+    if (to !== undefined) {
+      for (const path of [...this.fileTimes.keys()]) {
+        if (within(path, to)) this.fileTimes.delete(path);
+      }
+    }
     for (const [path, ms] of [...this.fileTimes]) {
       if (!within(path, from)) continue;
       this.fileTimes.delete(path);
