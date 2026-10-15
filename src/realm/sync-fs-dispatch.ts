@@ -131,6 +131,28 @@ function plainDirMode(entry: SyncFsTokenEntry, mode: number | undefined): number
   return wanted === PLAIN_DIR_MODE ? undefined : wanted;
 }
 
+function plainParentsMode(entry: SyncFsTokenEntry): number | undefined {
+  if (entry.cred) return undefined;
+  const wanted = (0o777 & ~(entry.umask?.() ?? 0o022)) | 0o300;
+  return wanted === PLAIN_DIR_MODE ? undefined : wanted;
+}
+
+async function missingParents(
+  fs: KernelFs,
+  path: string,
+  mode: number
+): Promise<() => Promise<void>> {
+  const parts = path.split('/').filter(Boolean);
+  const dirs: string[] = [];
+  for (let i = 1; i < parts.length; i++) {
+    const p = `/${parts.slice(0, i).join('/')}`;
+    if (!(await fs.exists(p))) dirs.push(p);
+  }
+  return async () => {
+    for (const p of dirs) await fs.chmod(p, mode);
+  };
+}
+
 function mkdirOptions(entry: SyncFsTokenEntry, mode = 0o777) {
   const owner = ownerFor(entry, mode);
   if (!owner) return { recursive: true };
@@ -157,6 +179,25 @@ async function chown(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest) 
   return done;
 }
 
+async function runMkdir(
+  entry: SyncFsTokenEntry,
+  path: string,
+  req: SyncFsRequest
+): Promise<SyncFsResult> {
+  const { fs } = entry;
+  const plain = plainDirMode(entry, req.mode);
+  const parentsMode = !req.exclusive ? plainParentsMode(entry) : undefined;
+  const fixParents =
+    parentsMode !== undefined ? await missingParents(fs, path, parentsMode) : undefined;
+  const fresh = plain !== undefined && !(await fs.exists(path));
+  await (req.exclusive
+    ? mkdirExclusive(entry, path, req.mode)
+    : fs.mkdir(path, mkdirOptions(entry, req.mode)));
+  await fixParents?.();
+  if (fresh) await fs.chmod(path, plain);
+  return done;
+}
+
 async function run(
   entry: SyncFsTokenEntry,
   path: string,
@@ -179,15 +220,8 @@ async function run(
       return json(await fs.readdir(path));
     case 'readdir-stat':
       return json(await readdirStat(fs, path));
-    case 'mkdir': {
-      const plain = plainDirMode(entry, req.mode);
-      const fresh = plain !== undefined && !(await fs.exists(path));
-      await (req.exclusive
-        ? mkdirExclusive(entry, path, req.mode)
-        : fs.mkdir(path, mkdirOptions(entry, req.mode)));
-      if (fresh) await fs.chmod(path, plain);
-      return done;
-    }
+    case 'mkdir':
+      return runMkdir(entry, path, req);
     case 'rm':
       await fs.rm(path, { recursive: true });
       return done;

@@ -58,7 +58,7 @@ function message(e: unknown): string {
 
 function codeOf(e: unknown): string {
   const code = (e as { code?: unknown } | null)?.code;
-  return typeof code === 'string' && /^E[A-Z]+$/.test(code) ? code : 'EIO';
+  return typeof code === 'string' && /^E[A-Z]+$|^EAI_[A-Z]+$/.test(code) ? code : 'EIO';
 }
 
 async function* once(bytes: Uint8Array): AsyncGenerator<Uint8Array> {
@@ -158,7 +158,9 @@ export class HttpHandles {
       if (port !== undefined) return { ok: false, errno: codeOf(e), message: text };
       const status = (e as { status?: unknown }).status;
       if (text === NO_TRANSPORT || typeof status !== 'number' || status === 502) {
-        const errno = text === NO_TRANSPORT ? 'ENETUNREACH' : 'ECONNREFUSED';
+        const code = codeOf(e);
+        const errno =
+          text === NO_TRANSPORT ? 'ENETUNREACH' : code !== 'EIO' ? code : 'ECONNREFUSED';
         return { ok: false, errno, message: text };
       }
       entry.body = once(new TextEncoder().encode(text))[Symbol.asyncIterator]();

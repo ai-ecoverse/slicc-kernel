@@ -37,6 +37,7 @@ export interface FetchTransportOptions {
 
 export const SEND_BUFFER = 1024 * 1024;
 const CLOSE_WAIT_MS = 5000;
+const DNS_CODES = new Set(['ENOTFOUND', 'EAI_AGAIN', 'EAI_NONAME', 'EAI_FAIL', 'ENODATA']);
 
 const NO_WEBSOCKET =
   'WebSocket not supported by this transport (fetchTransport needs { webSocket: true })';
@@ -103,11 +104,14 @@ export function fetchTransport(options: FetchTransportOptions = {}): RealmTransp
         });
       } catch (e) {
         if (request.signal.aborted) throw e;
+        const causeCode = (e as { cause?: { code?: unknown } })?.cause?.code;
+        const dns = typeof causeCode === 'string' && DNS_CODES.has(causeCode);
         throw Object.assign(
           new Error(
             `fetch ${request.url} failed (unreachable, or not allowed by CORS)${options.hint ? `: ${options.hint}` : ''}`
           ),
-          { status: 502 }
+          { status: 502 },
+          dns ? { code: causeCode } : {}
         );
       }
       const headers: Array<[string, string]> = [];
