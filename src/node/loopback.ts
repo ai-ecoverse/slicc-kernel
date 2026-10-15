@@ -164,6 +164,33 @@ function proxyAddresses(): Set<string> {
   return out;
 }
 
+interface ConnectedSocket {
+  localAddress?: string;
+  localPort?: number;
+  remoteAddress?: string;
+  remotePort?: number;
+  destroy(err: Error): void;
+  once(event: 'close', listener: () => void): unknown;
+}
+
+const proxied = new Set<string>();
+
+export function proxiedConnections(): number {
+  return proxied.size;
+}
+
+function tupleOf(socket: ConnectedSocket): string | undefined {
+  if (!socket.localPort || !socket.remotePort) return undefined;
+  return `${socket.localAddress}:${socket.localPort} ${socket.remoteAddress}:${socket.remotePort}`;
+}
+
+function toProxy(connectParams: { hostname?: string; port?: string; protocol?: string }): boolean {
+  const proxies = proxyAddresses();
+  if (proxies.size === 0 || !connectParams.hostname) return false;
+  const port = connectParams.port || (connectParams.protocol === 'https:' ? '443' : '80');
+  return proxies.has(`${connectParams.hostname}:${port}`);
+}
+
 function ensureSubscribed(): void {
   if (subscribed) return;
   subscribed = true;
@@ -171,7 +198,7 @@ function ensureSubscribed(): void {
     const entry = loopbackStore.getStore();
     if (!entry) return;
     const { socket, connectParams } = message as {
-      socket: { remoteAddress?: string; remotePort?: number; destroy(err: Error): void };
+      socket: ConnectedSocket;
       connectParams: { hostname?: string; port?: string; protocol?: string };
     };
     const address = socket.remoteAddress;
@@ -181,10 +208,14 @@ function ensureSubscribed(): void {
       socket.destroy(err);
       return;
     }
-    const proxies = proxyAddresses();
-    if (proxies.size > 0 && connectParams.hostname) {
-      const cpPort = connectParams.port || (connectParams.protocol === 'https:' ? '443' : '80');
-      if (proxies.has(`${connectParams.hostname}:${cpPort}`)) return;
+    const tuple = tupleOf(socket);
+    if (tuple && proxied.has(tuple)) return;
+    if (toProxy(connectParams)) {
+      if (tuple) {
+        proxied.add(tuple);
+        socket.once('close', () => proxied.delete(tuple));
+      }
+      return;
     }
     const place = placeOf(address);
     if (!place) return;
