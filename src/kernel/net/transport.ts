@@ -39,6 +39,7 @@ export interface RealmWebSocketRequest {
 export interface RealmWebSocketClose {
   code: number;
   reason: string;
+  wasClean?: boolean;
 }
 export type RealmWebSocketMessage = string | Uint8Array;
 export interface RealmWebSocket {
