@@ -460,6 +460,30 @@ test('a path with .. after a symlink runs what the file system finds there, with
   assert.equal(user.stdout, 'script ran\n', user.stderr);
 });
 
+test('a path with .. needs search permission on the directories it goes through, and a sudo process follows no untrusted link there', async (t) => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
+  await kernel.users.add({ name: 'cone', groups: ['sudo'] });
+  const setup = [
+    'mkdir -p /usr/lib /srv/closed && ln -s /usr/lib /srv/closed/link && chmod 700 /srv/closed',
+    "printf '%s\\n' 'NOPASSWD cone Cmnd *' > /etc/sudoers.d/cone && chmod 440 /etc/sudoers.d/cone",
+    '/srv/closed/link/../bin/echo root ran',
+  ].join('\n');
+  const root = await kernel.run(['bash', '-c', setup], { cwd: '/' });
+  assert.equal(root.stdout, 'root ran\n', root.stderr);
+  const cone = [
+    '/srv/closed/link/../bin/echo cone ran; echo "closed $?"',
+    'ln -s /usr/lib /home/cone/mine && /home/cone/mine/../bin/echo own link',
+    'sudo bash -c \'/home/cone/mine/../bin/echo sudo ran; echo "sudo $?"\'',
+    "sudo bash -c '/usr/lib/../bin/echo sudo plain'",
+  ].join('\n');
+  const r = await kernel.run(['bash', '-c', cone], { cwd: '/home/cone', user: 'cone' });
+  assert.match(r.stderr, /\/srv\/closed\/link\/\.\.\/bin\/echo: Permission denied/);
+  assert.match(r.stderr, /\/home\/cone\/mine\/\.\.\/bin\/echo: Permission denied/);
+  assert.equal(r.stdout, 'closed 126\nown link\nsudo 126\nsudo plain\n');
+});
+
 test("a package command's WASI wasm run by path runs as that command, in the caller's catalog", async (t) => {
   const kernel = await createNodeKernel({ users: 'enforce' });
   t.after(() => kernel.terminate());

@@ -19,7 +19,7 @@ import { R_OK, X_OK } from './fs/access.ts';
 import { type Attestation, attest, FileWatches, type RemoteFs } from './fs/attest.ts';
 import { FileChanges } from './fs/changes.ts';
 import { followLinks, withCommandDirs } from './fs/commands.ts';
-import { Dac, type DenialHook, need, TTY_MODE } from './fs/dac.ts';
+import { Dac, type DenialHook, type Guard, need, TTY_MODE } from './fs/dac.ts';
 import { FreshModules } from './fs/fresh-modules.ts';
 import {
   Integrity,
@@ -1035,27 +1035,32 @@ export class Launcher {
     { ppid, cred, scope }: { ppid: number; cred: Readonly<Cred>; scope: string },
     fds: FdTable
   ): Promise<Planned> {
-    const file = await this.execFile(req.file, req.cwd);
-    const planned = await this.plan(file, req.argv, req.cwd, scope, req.argv0);
-    try {
-      await this.mayExec(cred, { ...req, file, pid: ppid }, planned);
-    } catch (err) {
+    const refused = async (err: unknown): Promise<never> => {
       await fds.closeAll();
       throw (err as { code?: unknown }).code === 'EACCES' ? new SpawnError('EACCES') : err;
-    }
+    };
+    const file = await this.execFile(req.file, req.cwd, this.execGuard(cred, ppid)).catch(refused);
+    const planned = await this.plan(file, req.argv, req.cwd, scope, req.argv0);
+    await this.mayExec(cred, { ...req, file, pid: ppid }, planned).catch(refused);
     if (planned) return planned;
     await fds.closeAll();
     throw new SpawnError(await this.unrunnable(file, req.cwd, scope));
   }
 
-  private async execFile(file: string, cwd: string): Promise<string> {
+  private execGuard(cred: Readonly<Cred>, pid: number, tag?: string): Guard | undefined {
+    const { dac } = this;
+    return dac && { fs: this.fs, cred, pid, dac, tag, links: this.links.get(pid) };
+  }
+
+  private async execFile(file: string, cwd: string, g?: Guard): Promise<string> {
     if (!file.split('/').includes('..')) return file;
     const path = file.startsWith('/') ? file : `${cwd}/${file}`;
     const slash = path.lastIndexOf('/');
-    return joinName(
-      await physicalPathAsync(this.base, path.slice(0, slash)),
-      path.slice(slash + 1)
-    );
+    const dir = path.slice(0, slash);
+    const walked = g && (await need(g, 'exec', dir, X_OK, { directory: true }));
+    const real =
+      walked && walked.denied === undefined ? walked.path : await physicalPathAsync(this.base, dir);
+    return joinName(real, path.slice(slash + 1));
   }
 
   private async ticketFile(req: ChildSpawnRequest, fds: FdTable): Promise<string> {
@@ -2444,7 +2449,7 @@ export class Launcher {
     const scope = account.uid === 0 ? '' : pnpmHomeOf(account, this.pnpmHome);
     const start = dir ?? '/';
     const cwd = await physicalPathAsync(this.base, start.startsWith('/') ? start : `/${start}`);
-    const file = await this.execFile(argv[0] ?? '', cwd);
+    const file = await this.execFile(argv[0] ?? '', cwd, this.execGuard(credOf(account), 0, tag));
     if (!(await this.base.exists(cwd))) await this.stackFor(tag).fs.mkdir(cwd, { recursive: true });
     const planned = await this.plan(file, argv, cwd, scope);
     await this.mayExec(credOf(account), { file, cwd, pid: 0, tag }, planned);
