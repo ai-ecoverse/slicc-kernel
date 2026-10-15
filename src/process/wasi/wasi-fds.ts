@@ -455,6 +455,7 @@ export class WasiFds {
     const { buffer } = e.file;
     try {
       buffer.flush();
+      this.reported.delete(buffer);
     } catch (err) {
       this.reported.add(buffer);
       this.drop(buffer);
@@ -533,6 +534,7 @@ export class WasiFds {
     for (const buffer of this.buffers.values()) {
       try {
         buffer.flush();
+        this.reported.delete(buffer);
       } catch (err) {
         if (!this.reported.has(buffer)) throw err;
       }
