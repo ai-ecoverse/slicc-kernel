@@ -166,12 +166,13 @@ async function mkdirExclusive(entry: SyncFsTokenEntry, path: string, mode?: numb
 }
 
 async function chown(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest) {
+  const real = req.handle !== undefined ? await keptOr(entry, path, req.handle) : path;
   const cred = entry.cred?.();
   if (!cred) {
-    await (req.op === 'chown' ? entry.fs.stat(path) : entry.fs.lstat(path));
+    await (req.op === 'chown' ? entry.fs.stat(real) : entry.fs.lstat(real));
     return done;
   }
-  await chownAs(entry.fs, cred, path, {
+  await chownAs(entry.fs, cred, real, {
     ...(req.uid !== undefined ? { uid: req.uid } : {}),
     ...(req.gid !== undefined ? { gid: req.gid } : {}),
     follow: req.op === 'chown',
@@ -438,6 +439,7 @@ async function ranged(fs: KernelFs, path: string, req: SyncFsRequest): Promise<S
   return done;
 }
 
+const CHOWN_OPS = new Set<SyncFsOp>(['chown', 'lchown']);
 const UNLINKED_OPS = new Set<SyncFsOp>(['read', 'pread', 'pwrite', 'truncate']);
 const OWN_OPS = new Set<SyncFsOp>(['rm', 'unlink', 'rmdir', 'rename', 'link']);
 const TWO_PATHS = new Set<SyncFsOp>(['rename', 'link']);
@@ -546,12 +548,23 @@ async function rmPermitted(
   return await run(entry, path, req);
 }
 
+async function byHandle(
+  entry: SyncFsTokenEntry,
+  path: string,
+  req: SyncFsRequest
+): Promise<SyncFsResult | undefined> {
+  if (req.op === 'kept') return json(entry.keptFor?.(req.handle ?? -1) !== undefined);
+  if (req.op === 'stat' && req.handle !== undefined) return keptStat(entry, req);
+  if (CHOWN_OPS.has(req.op) && entry.keptFor?.(req.handle ?? -1)) return chown(entry, path, req);
+  return undefined;
+}
+
 async function dispatchOne(entry: SyncFsTokenEntry, req: SyncFsRequest): Promise<SyncFsResult> {
   const { fs, cwd } = entry;
   try {
     const path = fs.resolvePath(cwd, req.path);
-    if (req.op === 'kept') return json(entry.keptFor?.(req.handle ?? -1) !== undefined);
-    if (req.op === 'stat' && req.handle !== undefined) return await keptStat(entry, req);
+    const held = await byHandle(entry, path, req);
+    if (held) return held;
     if (req.op === 'access') return await accessOp(entry, path, req);
     if (req.op === 'hold') return await holdOp(entry, path, req);
     const refused = await guarded(entry, path, req);
