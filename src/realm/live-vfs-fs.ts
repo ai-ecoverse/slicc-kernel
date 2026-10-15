@@ -213,6 +213,7 @@ const O_TRUNC = 0o1000;
 const O_PATH = 0o10000000;
 
 function wantOf(flags: number): number {
+  if (flags & O_PATH) return 0;
   const mode = flags & O_ACCMODE;
   const read = mode === 1 ? 0 : HOLD_READ;
   const write = mode !== 0 || (flags & O_TRUNC) !== 0 ? HOLD_WRITE : 0;
