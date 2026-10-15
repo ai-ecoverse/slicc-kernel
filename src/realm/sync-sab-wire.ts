@@ -33,6 +33,22 @@ export const SAB_I_STOP = 15;
 
 export const SAB_I_BLOCKED = 16;
 
+export const SAB_I_BLOCKED_HI = 17;
+
+export type BlockedMask = readonly [number, number];
+
+export function loadBlocked(header: Int32Array): BlockedMask {
+  return [Atomics.load(header, SAB_I_BLOCKED), Atomics.load(header, SAB_I_BLOCKED_HI)];
+}
+
+export function storeBlocked(header: Int32Array, [low, high]: BlockedMask): void {
+  Atomics.store(header, SAB_I_BLOCKED_HI, high);
+  Atomics.store(header, SAB_I_BLOCKED, low);
+}
+
+export const anyBlocked = (mask: BlockedMask | undefined): boolean =>
+  mask !== undefined && (mask[0] !== 0 || mask[1] !== 0);
+
 const U32 = 2 ** 32;
 
 export function storeU53(header: Int32Array, lo: number, hi: number, value: number): void {

@@ -14,7 +14,7 @@ import {
   createSyncSabTransport,
   type SabPostLike,
 } from '../../realm/sync-sab-bridge.ts';
-import { publishMemory, SAB_HEADER_I32, SAB_I_BLOCKED } from '../../realm/sync-sab-wire.ts';
+import { loadBlocked, publishMemory, SAB_HEADER_I32 } from '../../realm/sync-sab-wire.ts';
 import { SyscallError } from '../kernel-streams.ts';
 import { identify, kernelSys } from '../process-runtime.ts';
 import { SignalGate, type SignalHooks } from '../process-signals.ts';
@@ -51,6 +51,19 @@ const takeDefault =
   (sig: number): void => {
     call({ op: 'proc-kill', pid, sig });
     if (defaultAction(sig) === 'terminate') throw new WasiExit(128 + sig);
+  };
+
+export const takeThreadDefault =
+  (call: (req: WasmSyscall) => unknown, pid: number) =>
+  (sig: number): void => {
+    if (defaultAction(sig) !== 'terminate') {
+      call({ op: 'proc-kill', pid, sig });
+      return;
+    }
+    try {
+      call({ op: 'proc-kill-self', sig });
+    } catch {}
+    throw new WasiExit(128 + sig);
   };
 
 const SLICC_FS = 'slicc_fs';
@@ -136,7 +149,7 @@ export function sigmaskOf(
     WasiSigmask.unsupported(header);
     return undefined;
   }
-  if (threads) threads.blocked = () => Atomics.load(header, SAB_I_BLOCKED);
+  if (threads) threads.blocked = () => loadBlocked(header);
   const shared = process && new Int32Array(process, 0, SAB_HEADER_I32);
   return new WasiSigmask(header, () => gate.deliver(), shared);
 }
@@ -761,7 +774,7 @@ export async function runWasiThread(init: WasmThreadInitMsg, port: SabPostLike):
     masks: () => null,
     raise: (sig) => signals.raise(sig),
   });
-  const signals = new WasiSignals(takeDefault(call, init.pid));
+  const signals = new WasiSignals(takeThreadDefault(call, init.pid));
   const threads = new WasiThreads(port, thread.memory, threadCap(init.env), thread.tid, thread.ids);
   threads.received = thread.modules;
   const id = identify(transport, init);
