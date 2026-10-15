@@ -1,6 +1,6 @@
 import { hostnameOf, hostsFile } from '../kernel/net/loopback-names.ts';
 import type { MountLine } from '../kernel/proc-info.ts';
-import { type LiveFsNode, liveNodePath } from '../realm/live-vfs-fs.ts';
+import { type LiveFsNode, type LiveLinkFs, linkLive, liveNodePath } from '../realm/live-vfs-fs.ts';
 import type { ProcessFs, ProcessStream, ProcessSys } from './kernel-streams.ts';
 import { type PtyKernel, ptyIoctl } from './process-pty.ts';
 import { wasiErrno } from './wasi-errno.ts';
@@ -246,6 +246,7 @@ export interface KernelImports {
   mknodat?: unknown;
   umask?: unknown;
   faccessat?: unknown;
+  linkat?: unknown;
   utimensat?: unknown;
   getppid?: unknown;
   resizeHeap?: unknown;
@@ -260,6 +261,7 @@ const LITERALS: Record<keyof KernelImports, string> = {
   mknodat: '__syscall_mknodat',
   umask: '__syscall_umask',
   faccessat: '__syscall_faccessat',
+  linkat: '__syscall_linkat',
   utimensat: '__syscall_utimensat',
   getppid: 'slicc_getppid_js',
   resizeHeap: 'emscripten_resize_heap',
@@ -922,6 +924,40 @@ export function kernelAccess(
       return -errnoOf(err);
     }
   });
+}
+
+const AT_SYMLINK_FOLLOW = 0x400;
+
+export function kernelLink(
+  imports: WebAssembly.Imports,
+  fs: () => ProcessFs | undefined,
+  memory: () => WebAssembly.Memory | undefined,
+  glue?: KernelImports
+): void {
+  wrapImport(
+    imports,
+    'linkat',
+    glue,
+    (own) => (olddirfd, oldpath, newdirfd, newpath, flags) => {
+      const Fs = fs() as (AccessFs & Partial<LiveLinkFs>) | undefined;
+      const heap = memory();
+      if (!Fs?.lookupPath || !heap) return own(olddirfd, oldpath, newdirfd, newpath, flags);
+      const at = (dirfd: number, ptr: number) => {
+        const name = cString(heap, ptr);
+        return name.startsWith('/') ? name : `${baseOf(Fs, dirfd)}/${name}`;
+      };
+      try {
+        const from = at(olddirfd, oldpath);
+        const to = at(newdirfd, newpath);
+        const follow = (flags & AT_SYMLINK_FOLLOW) !== 0;
+        if (linkLive(Fs as LiveLinkFs, from, to, follow)) return 0;
+      } catch (err) {
+        return -errnoOf(err);
+      }
+      return own(olddirfd, oldpath, newdirfd, newpath, flags);
+    },
+    true
+  );
 }
 
 const DEVICE_MODES: ReadonlyArray<[string, number]> = [

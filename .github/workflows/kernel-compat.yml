@@ -31,7 +31,7 @@ concurrency:
 jobs:
   pack:
     if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    runs-on: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (contains(fromJSON('["schedule","workflow_dispatch","workflow_run","release"]'), github.event_name) && github.ref == 'refs/heads/main')) && vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 20
     env:
       LEFTHOOK: '0'
@@ -67,20 +67,21 @@ jobs:
 
   pr:
     needs: pack
-    uses: ai-ecoverse/homescoop/.github/workflows/kernel-compat.yml@7579b505c725361cd6c8ffb5fce71b5cc0b95eb5
+    uses: ai-ecoverse/homescoop/.github/workflows/kernel-compat.yml@f11eabb9d696ecf22233d2f8936357729193f6c3
     permissions:
       contents: read
       actions: read
     with:
-      homescoop-ref: 7579b505c725361cd6c8ffb5fce71b5cc0b95eb5
+      homescoop-ref: f11eabb9d696ecf22233d2f8936357729193f6c3
       kernel: kernel-tgz
       set: base,ci-certified
+      runner: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (contains(fromJSON('["schedule","workflow_dispatch","workflow_run","release"]'), github.event_name) && github.ref == 'refs/heads/main')) && vars.CERT_RUNNER || 'ubuntu-latest' }}
       fail-on-regression: false
 
   pr-summary:
     needs: [pack, pr]
     if: ${{ !cancelled() && needs.pack.result == 'success' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (contains(fromJSON('["schedule","workflow_dispatch","workflow_run","release"]'), github.event_name) && github.ref == 'refs/heads/main')) && vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -88,6 +89,7 @@ jobs:
     steps:
       - env:
           GH_TOKEN: ${{ github.token }}
+          API: ${{ github.api_url }}
           REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           RUN_ID: ${{ github.run_id }}
@@ -99,7 +101,15 @@ jobs:
           set -euo pipefail
           id=""
           if [ -n "$ARTIFACT" ]; then
-            id=$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts?per_page=100" --jq ".artifacts[] | select(.name == \"$ARTIFACT\") | .id" | head -1)
+            id=$(node --input-type=module - <<'JS' || true
+          const { API, REPO, RUN_ID, ARTIFACT, GH_TOKEN } = process.env;
+          const r = await fetch(`${API}/repos/${REPO}/actions/runs/${RUN_ID}/artifacts?per_page=100`, {
+            headers: { authorization: `Bearer ${GH_TOKEN}`, accept: 'application/vnd.github+json' },
+          });
+          const j = await r.json();
+          console.log((j.artifacts || []).find((a) => a.name === ARTIFACT)?.id ?? '');
+          JS
+          )
           fi
           case "$VERDICT" in
             pass) mark="✅" ;;
@@ -118,51 +128,85 @@ jobs:
 
   published:
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
-    runs-on: ubuntu-latest
+    runs-on: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (contains(fromJSON('["schedule","workflow_dispatch","workflow_run","release"]'), github.event_name) && github.ref == 'refs/heads/main')) && vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+
       - id: version
         env:
           INPUT: ${{ inputs.version }}
           SHA: ${{ github.event.workflow_run.head_sha }}
-          REPO: ${{ github.server_url }}/${{ github.repository }}
+          API: ${{ github.api_url }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
-          if [ -n "$INPUT" ]; then
-            version="${INPUT#v}"
-          else
-            version=$(git ls-remote --tags "$REPO" 'v*' | awk -v sha="$SHA" '$1 == sha { sub("refs/tags/v", "", $2); sub("\\^\\{\\}$", "", $2); print $2 }' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)
-          fi
-          if [ -z "$version" ]; then
-            echo "no release tag at $SHA, nothing to check" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          npm view "@ai-ecoverse/slicc-kernel@$version" version --prefer-online
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          node --input-type=module - <<'JS'
+          import { appendFileSync } from 'node:fs';
+          const { INPUT, SHA, API, REPO, GH_TOKEN, GITHUB_OUTPUT, GITHUB_STEP_SUMMARY } = process.env;
+          const SEMVER = /^\d+\.\d+\.\d+$/;
+          const cmp = (a, b) => {
+            const x = a.split('.').map(Number);
+            const y = b.split('.').map(Number);
+            return x[0] - y[0] || x[1] - y[1] || x[2] - y[2];
+          };
+          let version = (INPUT || '').replace(/^v/, '');
+          if (!version) {
+            const r = await fetch(`${API}/repos/${REPO}/git/matching-refs/tags/v`, {
+              headers: { authorization: `Bearer ${GH_TOKEN}`, accept: 'application/vnd.github+json' },
+            });
+            if (!r.ok) throw new Error(`tags of ${REPO}: HTTP ${r.status}`);
+            const tags = (await r.json())
+              .filter((t) => t.object.type === 'commit' && t.object.sha === SHA)
+              .map((t) => t.ref.replace(/^refs\/tags\/v/, ''))
+              .filter((v) => SEMVER.test(v))
+              .sort(cmp);
+            version = tags.at(-1) || '';
+          }
+          if (!version) {
+            appendFileSync(GITHUB_STEP_SUMMARY, `no release tag at ${SHA}, nothing to check\n`);
+            process.exit(0);
+          }
+          if (!SEMVER.test(version)) throw new Error(`version ${version} is not x.y.z`);
+          const npm = await fetch(`https://registry.npmjs.org/@ai-ecoverse%2Fslicc-kernel/${version}`, {
+            headers: { accept: 'application/json', 'cache-control': 'no-cache' },
+          });
+          if (!npm.ok) throw new Error(`npm does not serve @ai-ecoverse/slicc-kernel@${version}: HTTP ${npm.status}`);
+          if ((await npm.json()).version !== version) throw new Error(`npm answered another version for ${version}`);
+          console.log(`@ai-ecoverse/slicc-kernel@${version}`);
+          appendFileSync(GITHUB_OUTPUT, `version=${version}\n`);
+          JS
 
   release:
     needs: published
     if: needs.published.outputs.version != ''
-    uses: ai-ecoverse/homescoop/.github/workflows/kernel-compat.yml@7579b505c725361cd6c8ffb5fce71b5cc0b95eb5
+    uses: ai-ecoverse/homescoop/.github/workflows/kernel-compat.yml@f11eabb9d696ecf22233d2f8936357729193f6c3
     permissions:
       contents: read
       actions: read
     with:
-      homescoop-ref: 7579b505c725361cd6c8ffb5fce71b5cc0b95eb5
+      homescoop-ref: f11eabb9d696ecf22233d2f8936357729193f6c3
       kernel: ${{ needs.published.outputs.version }}
       set: ${{ inputs.set || 'base,catalog,all' }}
+      runner: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (contains(fromJSON('["schedule","workflow_dispatch","workflow_run","release"]'), github.event_name) && github.ref == 'refs/heads/main')) && vars.CERT_RUNNER || 'ubuntu-latest' }}
 
   attach:
     needs: [published, release]
     if: ${{ !cancelled() && needs.published.outputs.version != '' && needs.release.outputs.artifact != '' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (contains(fromJSON('["schedule","workflow_dispatch","workflow_run","release"]'), github.event_name) && github.ref == 'refs/heads/main')) && vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
       contents: write
       actions: read
     steps:
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: ${{ needs.release.outputs.artifact }}
@@ -170,6 +214,7 @@ jobs:
 
       - env:
           GH_TOKEN: ${{ github.token }}
+          API: ${{ github.api_url }}
           REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           RUN_ID: ${{ github.run_id }}
@@ -178,17 +223,35 @@ jobs:
           VERDICT: ${{ needs.release.outputs.verdict }}
           REGRESSIONS: ${{ needs.release.outputs.regressions }}
         run: |
-          set -euo pipefail
-          id=$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts?per_page=100" --jq ".artifacts[] | select(.name == \"$ARTIFACT\") | .id" | head -1)
-          out="$RUNNER_TEMP/kernel-compat-v$VERSION.md"
-          {
-            echo "# Kernel compat: @ai-ecoverse/slicc-kernel@$VERSION"
-            echo
-            echo "- verdict: ${VERDICT:-unknown}, regressions: ${REGRESSIONS:-unknown}"
-            echo "- run: $RUN_URL"
-            echo "- report: $RUN_URL/artifacts/$id"
-            echo
-            if [ -f "$RUNNER_TEMP/report/summary.md" ]; then cat "$RUNNER_TEMP/report/summary.md"; fi
-          } > "$out"
-          cat "$out" >> "$GITHUB_STEP_SUMMARY"
-          gh release upload "v$VERSION" "$out" --clobber -R "$REPO"
+          node --input-type=module - <<'JS'
+          import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          const { GH_TOKEN, API, REPO, RUN_URL, RUN_ID, ARTIFACT, VERSION, VERDICT, REGRESSIONS, RUNNER_TEMP, GITHUB_STEP_SUMMARY } = process.env;
+          const headers = { authorization: `Bearer ${GH_TOKEN}`, accept: 'application/vnd.github+json' };
+          const api = async (url, init = {}) => {
+            const r = await fetch(url.startsWith('http') ? url : `${API}/${url}`, { ...init, headers: { ...headers, ...init.headers } });
+            if (!r.ok) throw new Error(`${init.method || 'GET'} ${url}: HTTP ${r.status} ${await r.text()}`);
+            return r.status === 204 ? null : r.json();
+          };
+          const artifacts = await api(`repos/${REPO}/actions/runs/${RUN_ID}/artifacts?per_page=100`);
+          const id = artifacts.artifacts.find((a) => a.name === ARTIFACT)?.id ?? '';
+          const summary = join(RUNNER_TEMP, 'report', 'summary.md');
+          const name = `kernel-compat-v${VERSION}.md`;
+          const body = [
+            `# Kernel compat: @ai-ecoverse/slicc-kernel@${VERSION}`,
+            '',
+            `- verdict: ${VERDICT || 'unknown'}, regressions: ${REGRESSIONS || 'unknown'}`,
+            `- run: ${RUN_URL}`,
+            `- report: ${RUN_URL}/artifacts/${id}`,
+            '',
+            existsSync(summary) ? readFileSync(summary, 'utf8') : '',
+          ].join('\n');
+          appendFileSync(GITHUB_STEP_SUMMARY, body);
+          const release = await api(`repos/${REPO}/releases/tags/v${VERSION}`);
+          for (const a of release.assets.filter((x) => x.name === name)) {
+            await api(`repos/${REPO}/releases/assets/${a.id}`, { method: 'DELETE' });
+          }
+          const upload = `${release.upload_url.replace(/\{.*\}$/, '')}?name=${encodeURIComponent(name)}`;
+          const asset = await api(upload, { method: 'POST', headers: { 'content-type': 'text/markdown' }, body: Buffer.from(body) });
+          console.log(`attached ${asset.browser_download_url}`);
+          JS
