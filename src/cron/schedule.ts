@@ -101,8 +101,8 @@ export function parseSchedule(expression: string): Schedule {
     days,
     months,
     weekdays,
-    anyDay: parts[2] === '*',
-    anyWeekday: parts[4] === '*',
+    anyDay: (parts[2] as string).startsWith('*'),
+    anyWeekday: (parts[4] as string).startsWith('*'),
   };
 }
 
@@ -153,8 +153,7 @@ const UTC: Calendar = {
 function dayMatches(schedule: Schedule, cal: Calendar, date: Date): boolean {
   const day = schedule.days.has(cal.date(date));
   const weekday = schedule.weekdays.has(cal.day(date));
-  if (schedule.anyDay) return weekday;
-  if (schedule.anyWeekday) return day;
+  if (schedule.anyDay || schedule.anyWeekday) return day && weekday;
   return day || weekday;
 }
 
