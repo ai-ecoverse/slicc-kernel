@@ -171,6 +171,26 @@ static int interrupted(void) {
   return 0;
 }
 
+static int stopped(void) {
+  unsigned h;
+  sopen("/stopped", CREAT, 0600, 0, &h);
+  pid_t p = fork();
+  if (p == 0) {
+    long long start = now_ns(CLOCK_MONOTONIC);
+    int e = k_wait(h, TIMED, 1, start + 300000000LL);
+    long long took = (now_ns(CLOCK_MONOTONIC) - start) / 1000000LL;
+    printf("wait %s, %s\n", err(e), took < 300 ? "early" : took < 450 ? "at the deadline" : "late");
+    _exit(0);
+  }
+  usleep(50000);
+  kill(p, SIGSTOP);
+  usleep(200000);
+  kill(p, SIGCONT);
+  int st;
+  waitpid(p, &st, 0);
+  return 0;
+}
+
 static unsigned shared;
 static int order[3], seen;
 static volatile int tids[3];
@@ -349,6 +369,7 @@ int main(int argc, char **argv) {
   if (!strcmp(mode, "try")) return trying();
   if (!strcmp(mode, "timed")) return timed();
   if (!strcmp(mode, "eintr")) return interrupted();
+  if (!strcmp(mode, "stopped")) return stopped();
   if (!strcmp(mode, "threads")) return threads();
   if (!strcmp(mode, "errors")) return errors();
   if (!strcmp(mode, "unlink")) return unlinked();

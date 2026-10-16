@@ -298,6 +298,7 @@ On top of preview1 a WASI program gets:
   - **Waiting:**
     - `how` 0 blocks; 1 tries (`EAGAIN`); 2 waits until `deadline_ns` on `clock` (0 `CLOCK_REALTIME`, as `sem_timedwait`; 1 `CLOCK_MONOTONIC`, as `sem_clockwait`).
     - A timed wait gives `ETIMEDOUT`, never early, also when the deadline has already passed. A negative deadline is `EINVAL`.
+    - A wait stopped by job control (`SIGSTOP`, `^Z`) goes on after `SIGCONT`, and a timed one still ends at its deadline: the time spent stopped counts, and the wait isn't restarted with the whole timeout.
     - A wait blocks only its own thread, and a signal handler ends it with `EINTR`.
   - **Posting:** `sem_post` gives the unit to the longest-waiting thread, or adds it to the value; at the maximum it's `EOVERFLOW`.
   - **Lifetime:**
@@ -1010,12 +1011,12 @@ Two builds of one C program (`forktls.c` with `tlsvars.c`), a position-independe
 
 A WASIX C program for `test/integration/semaphore.test.mjs` (#717). It calls the `slicc.sem_*` imports directly (`import_module("slicc")`), so the rows don't wait for the libc side. `semtest MODE` runs one of:
 - `handoff`, `inherit`, `spawn` (a spawned and an exec'd image open the semaphore by name; exec drops the handles);
-- `try`, `timed`, `eintr`;
+- `try`, `timed`, `eintr`, `stopped` (a forked child's 300 ms timed wait is stopped for 200 ms and continued, and reports whether it ended at the deadline);
 - `threads` (FIFO, one thread blocked at a time);
 - `errors`, `unlink`, `owners setup|user`;
 - `killed` (a waiter killed before posts loses no unit), `exited`, `cap`, `handles`.
 
-**Build:** `WASIX_SYSROOT_28=/path/to/wasix-sysroot ./build.sh`, with `wasixcc` 0.4.7 (legacy exceptions, `-pthread`) and binaryen's `wasm-opt` (version 132, `--asyncify` for `proc_fork`) on `PATH`. `bin/semtest.wasm` is 68,078 bytes, sha256 `44178ed41ec8499c3c562b559b961438db135ca0914cc38c12316b8ab2d4e3f1`.
+**Build:** `WASIX_SYSROOT_28=/path/to/wasix-sysroot ./build.sh`, with `wasixcc` 0.4.7 (legacy exceptions, `-pthread`) and binaryen's `wasm-opt` (version 132, `--asyncify` for `proc_fork`) on `PATH`. `bin/semtest.wasm` is 68,438 bytes, sha256 `af3d38d87b63fa219bae90b1225376882ba20ace423c5ce24ef57935e80e2fde`.
 
 ### `wlocktest`
 
