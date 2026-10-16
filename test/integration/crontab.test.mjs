@@ -258,3 +258,12 @@ test('a user whose name ends in .new has a table of their own that runs', async 
   }
   assert.deepEqual(both, ['cone\n', 'new\n']);
 });
+
+test('crontab - keeps a character that arrives split across two reads', async (t) => {
+  const { as } = await boot(t);
+  const piped = await as(
+    'cone',
+    "{ printf '@daily echo caf\\303'; sleep 0.3; printf '\\251\\n'; } | crontab - && crontab -l"
+  );
+  assert.deepEqual(result(piped), { status: 0, stdout: '@daily echo café\n', stderr: '' });
+});

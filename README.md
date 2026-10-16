@@ -895,6 +895,7 @@ The kernel is ported from SLICC's `packages/webapp/src/kernel/` with the browser
 - `src/launcher.ts`, `src/commands.ts`, `src/serve.ts`, `src/index.ts`, `src/users.ts`: command resolution, the kernel worker protocol, the page API and the user database; `src/node.ts`, `src/node-process-worker.ts` and `src/node/` the headless Node entry. An embedder that uses `Launcher` directly, without `createKernel`, calls `await launcher.prepare()` first: it creates `/tmp` and `/home` and writes the CA certificate.
 - `src/kernel/net/`: the proxy, HTTP/1.1, TLS termination and the local CA, and the bridge to the page's transport; `src/transport.ts` and `src/local-proxy-transport.ts` are the page side.
 - `src/cdp/`: the CDP facade on `127.0.0.1:9222`, its WebSocket framing, the registry of hosts and the `MessagePort` bridge to them.
+- `src/cron/`: the cron service (`service.ts`), the schedule and table parsers, the clock, and the `crontab` command with the kernel side of `ctx.crontab`. An embedder that uses `Launcher` directly passes `cron: { lock }` to share the firing lock among the kernels on one root; the default, `slicc-kernel-cron`, is one lock for the whole origin.
 
 
 ## Installing from git

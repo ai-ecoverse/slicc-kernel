@@ -250,7 +250,10 @@ export class CronService {
       const account = await this.host.lookup(job.user as string);
       if (account) out.push({ source: 'system', account, job });
     }
-    const names = await fs.readdir(SPOOL_DIR).catch(() => [] as string[]);
+    const names = await fs.readdir(SPOOL_DIR).catch((err: { code?: string }) => {
+      if (err?.code === 'ENOENT') return [] as string[];
+      throw err;
+    });
     for (const name of names.sort()) {
       if (name.startsWith('.') || name.endsWith('~')) continue;
       const path = `${SPOOL_DIR}/${name}`;

@@ -54,13 +54,14 @@ export const CRONTAB_SOURCE = `export default async function crontab(ctx) {
   let text;
   try {
     if (file === "-") {
+      const stream = new TextDecoder();
       const parts = [];
       for (;;) {
         const chunk = await ctx.read(0);
         if (chunk.length === 0) break;
-        parts.push(decode(chunk));
+        parts.push(stream.decode(chunk, { stream: true }));
       }
-      text = parts.join("");
+      text = parts.join("") + stream.decode();
     } else text = decode(await ctx.fs.readFile(ctx.resolve(file)));
   } catch (err) {
     await say(2, "crontab: " + file + ": " + (err && err.code ? err.code : String(err)) + "\\n");
