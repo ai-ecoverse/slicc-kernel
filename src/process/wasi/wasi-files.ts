@@ -381,6 +381,7 @@ export function pathInode(path: string): bigint {
 }
 
 export const MISS_TTL_MS = 20;
+const CACHE_CAP = 8192;
 
 interface Miss {
   error: Error;
@@ -412,6 +413,7 @@ class StatCache {
   readonly lstats = new Map<string, Cached>();
   private readonly byHash = new Map<number, Set<string>>();
   private readonly byIno = new Map<number, Set<string>>();
+  private readonly missed = new Map<Map<string, Cached>, Set<string>>();
   private readonly shared: Int32Array | undefined;
   private seen: number;
   constructor(shared: Int32Array | undefined) {
@@ -420,7 +422,13 @@ class StatCache {
   }
 
   put(map: Map<string, Cached>, path: string, entry: Cached): void {
+    if (this.stats.size + this.lstats.size >= CACHE_CAP) this.clear();
     map.set(path, entry);
+    if ('until' in entry) {
+      const paths = this.missed.get(map) ?? new Set<string>();
+      paths.add(path);
+      this.missed.set(map, paths);
+    }
     if (!this.shared) return;
     index(this.byHash, pathHash(path), path);
     const ino = inoKey(entry);
@@ -450,12 +458,21 @@ class StatCache {
   }
 
   mutated(paths: readonly string[], ino = 0): void {
-    this.clear();
-    if (!this.shared) return;
     const key = (ino % 4294967296) | 0;
+    if (paths.length === 0 || !this.shared) this.clear();
+    if (!this.shared) return;
     for (const [i, hash] of (paths.length > 0 ? paths.map(pathHash) : [0]).entries()) {
-      this.seen = this.publish(this.shared, hash, i === 0 ? key : 0);
+      const g = this.publish(this.shared, hash, i === 0 ? key : 0);
+      if (paths.length > 0) this.replay(g - 1);
+      this.seen = g;
     }
+    if (paths.length === 0) return;
+    for (const [i, path] of paths.entries()) {
+      this.stats.delete(path);
+      this.lstats.delete(path);
+      this.drop(pathHash(path), i === 0 ? key : 0);
+    }
+    this.forgetMisses();
   }
 
   inoOf(path: string, look: () => SyncFsBridgeStat): number {
@@ -508,7 +525,15 @@ class StatCache {
     if (ino !== 0) this.byIno.delete(ino);
   }
 
+  private forgetMisses(): void {
+    for (const [map, paths] of this.missed) {
+      for (const path of paths) if ('until' in (map.get(path) ?? {})) map.delete(path);
+    }
+    this.missed.clear();
+  }
+
   private clear(): void {
+    this.missed.clear();
     this.stats.clear();
     this.lstats.clear();
     this.byHash.clear();
