@@ -1389,6 +1389,9 @@ export class OpfsFs implements KernelFs {
   async chmod(path: string, mode: number): Promise<void> {
     const found = await this.locate(path, true);
     this.refuse(found.path);
+    const [known] = await this.meta.get([found.path]);
+    const directory = found.handle?.kind === 'directory';
+    if ((this.mode(found.path, directory, known) & PERM_MASK) === (mode & PERM_MASK)) return;
     const ctimeMs = Date.now();
     await this.meta.update(found.path, (entry) => ({
       ...entry,
