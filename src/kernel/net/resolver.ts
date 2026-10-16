@@ -1,4 +1,5 @@
 import { KernelError } from '../fd-table.ts';
+import type { HostsTable } from './hosts-file.ts';
 import {
   DEFAULT_HOSTNAME,
   HOST_LOOPBACK,
@@ -27,6 +28,7 @@ export interface ResolverOptions {
   timeoutMs?: number;
   log?: (message: string) => void;
   hostname?: string;
+  hosts?: () => Promise<HostsTable | undefined>;
 }
 
 function loopbackName(name: string, own: readonly string[]): boolean {
@@ -52,6 +54,7 @@ export class Resolver {
   private readonly own: readonly string[];
   private readonly cache = new Map<string, Cached>();
   private readonly pending = new Map<string, Lookup>();
+  private readonly hosts: (() => Promise<HostsTable | undefined>) | undefined;
 
   constructor(options: ResolverOptions) {
     this.uplink = options.uplink;
@@ -60,6 +63,15 @@ export class Resolver {
     this.timeoutMs = options.timeoutMs ?? RESOLVE_TIMEOUT_MS;
     this.log = options.log ?? ((message) => console.warn(message));
     this.own = ownNames(options.hostname ?? DEFAULT_HOSTNAME);
+    this.hosts = options.hosts;
+  }
+
+  private async fromFile(key: string, family: ResolveFamily): Promise<string[] | undefined> {
+    const listed = (await this.hosts?.().catch(() => undefined))?.get(key);
+    if (!listed) return undefined;
+    const v4 = listed.filter((a) => ipv4Bytes(a) !== undefined);
+    const v6 = listed.filter((a) => ipv4Bytes(a) === undefined);
+    return family === 4 ? v4 : family === 6 ? v6 : [...v4, ...v6];
   }
 
   async resolve(
@@ -73,6 +85,8 @@ export class Resolver {
       const v4 = family !== 6 && local ? [local] : [];
       return family === 4 ? v4 : [...v4, key];
     }
+    const listed = this.hosts ? await this.fromFile(key, family) : undefined;
+    if (listed) return listed;
     if (local) {
       const six = loopbackName(key, this.own) ? ['::1'] : [];
       return family === 6 ? six : family === 4 ? [local] : [local, ...six];
