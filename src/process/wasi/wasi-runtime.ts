@@ -451,6 +451,7 @@ async function instantiate(
     }
   }
   if (sync) bindLinker(host, sync, instance, { thread, forked, path });
+  if (sync && !thread) driver.useStack(sync.linker.stackPointer, sync.linker.stackLow);
   return { instance, driver };
 }
 
