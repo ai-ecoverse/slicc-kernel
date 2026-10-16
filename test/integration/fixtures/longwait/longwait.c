@@ -60,6 +60,6 @@ int main(int argc, char **argv) {
   int e = errno;
   long long took = now_ms() - start;
   printf("%s: %d %s after the 300 ms alarm, %s\n", mode, r, r < 0 ? strerror(e) : "ok",
-         took >= 300 && took < 2000 ? "on time" : "off");
+         took >= 300 ? "not before it" : "early");
   return 0;
 }

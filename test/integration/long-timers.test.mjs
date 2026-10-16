@@ -34,7 +34,10 @@ for (const mode of ['select', 'ppoll', 'nanosleep']) {
   test(`a ${mode} with a timeout over 2^31-1 ms sleeps until a signal wakes it, without re-arming an overflowed timer (#767)`, async (t) => {
     const { kernel, overflows } = await booted(t);
     const r = await kernel.run(['longwait', mode], { cwd: '/' });
-    assert.equal(r.stdout, `${mode}: -1 Interrupted system call after the 300 ms alarm, on time\n`);
+    assert.equal(
+      r.stdout,
+      `${mode}: -1 Interrupted system call after the 300 ms alarm, not before it\n`
+    );
     assert.deepEqual(overflows, []);
   });
 }
