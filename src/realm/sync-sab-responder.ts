@@ -38,7 +38,7 @@ export interface SyncSabResponderHandle {
 interface PendingPayload {
   status: number;
   payload: Uint8Array;
-  timer: ReturnType<typeof setTimeout>;
+  timer?: ReturnType<typeof setTimeout>;
 }
 
 const PENDING_TTL_MS = SYNC_FS_REQUEST_TIMEOUT_MS + 5_000;
@@ -93,12 +93,11 @@ export function attachSyncSabResponder(
     const { status, payload } = encodeSabResult(result);
 
     drop(id);
-    const entry: PendingPayload = {
-      status,
-      payload,
-      timer: setTimeout(() => drop(id), PENDING_TTL_MS),
-    };
-    pending.set(id, entry);
+    const entry: PendingPayload = { status, payload };
+    if (payload.byteLength > window.byteLength) {
+      entry.timer = setTimeout(() => drop(id), PENDING_TTL_MS);
+      pending.set(id, entry);
+    }
     publish(id, entry, 0);
   }
 
