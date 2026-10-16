@@ -2,14 +2,14 @@ name: cert-review-pr
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, labeled]
+    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
   merge_group:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.event.action == 'labeled' && github.event.label.name != 'merge-ok' && format('cert-review-pr-noop-{0}', github.run_id) || format('cert-review-pr-{0}', github.event.pull_request.number || github.event.merge_group.head_sha) }}
+  group: ${{ ((github.event.action == 'labeled' && github.event.label.name != 'merge-ok' && github.event.label.name != 'cert-review-approved') || (github.event.action == 'unlabeled' && github.event.label.name != 'cert-review-approved') || github.event.action == 'ready_for_review') && format('cert-review-pr-noop-{0}', github.run_id) || format('cert-review-pr-{0}', github.event.pull_request.number || github.event.merge_group.head_sha) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -17,9 +17,44 @@ env:
   CERT_CONTEXT: cert-review-pr
 
 jobs:
+  guard:
+    name: cert-review-pr / self-guard
+    if: github.event_name == 'merge_group' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      checks: read
+      pull-requests: write
+    outputs:
+      status: ${{ steps.guard.outputs.status }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+
+      - id: guard
+        continue-on-error: true
+        uses: ai-ecoverse/slicc-shared-web/.github/actions/cert-self-guard@64467c916d5c6936992da7fad0be74b653bc303d
+        with:
+          approval-label: cert-review-approved
+          paths: |
+            .github/workflows/cert*.yml
+            .github/workflows/cert*.yaml
+            scripts/cert/**
+            tools/cert-review/**
+            .github/actions/cert-self-guard/**
+            .github/runner.mjs
+
   plan:
     name: cert-review-pr / plan
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    needs: guard
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
@@ -56,9 +91,11 @@ jobs:
           ACTION: ${{ github.event.action }}
           LABEL: ${{ github.event.label.name }}
           LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          GUARD: ${{ needs.guard.outputs.status }}
         run: |
           node tools/cert-review/pr.mjs plan --repo "$GITHUB_REPOSITORY" --pr "$PR" --head "$HEAD_SHA" \
-            --action "$ACTION" --label "$LABEL" --labels "$LABELS" --run "$GITHUB_RUN_ID" --context "$CERT_CONTEXT"
+            --action "$ACTION" --label "$LABEL" --labels "$LABELS" --run "$GITHUB_RUN_ID" --context "$CERT_CONTEXT" \
+            --guard "$GUARD" --approval cert-review-approved
 
       - id: versions
         if: steps.plan.outputs.go == 'true'
@@ -535,7 +572,8 @@ jobs:
 
   group:
     name: cert-review-pr / merge group
-    if: github.event_name == 'merge_group'
+    needs: guard
+    if: ${{ !cancelled() && github.event_name == 'merge_group' }}
     runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
@@ -558,6 +596,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           BASE_SHA: ${{ github.event.merge_group.base_sha }}
           HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+          GUARD: ${{ needs.guard.outputs.status }}
         run: |
           node tools/cert-review/pr.mjs lookup --repo "$GITHUB_REPOSITORY" --base "$BASE_SHA" --head "$HEAD_SHA" \
-            --run "$GITHUB_RUN_ID" --context "$CERT_CONTEXT"
+            --run "$GITHUB_RUN_ID" --context "$CERT_CONTEXT" --guard "$GUARD" --approval cert-review-approved
