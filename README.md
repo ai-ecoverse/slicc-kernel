@@ -997,9 +997,9 @@ A WASIX C program for `test/integration/mask-entry.test.mjs` (#799). It calls `s
 
 ### `pipetest`
 
-A WASIX C program for `test/integration/sigpipe.test.mjs` (#810). `pipetest MODE` writes one byte to a pipe whose read end it has closed and prints the result, `errno`, how often its handler ran, and whether `SIGPIPE` is pending. `MODE` is `ignore` (`SIG_IGN`, and the `sigaction` read-back), `handler`, `thread` (a handler, and the write from a second thread, which reports whether the handler ran there), `blocked` (`sigprocmask`), `dfl` (an explicit `SIG_DFL`), or anything else to leave the disposition as inherited.
+A WASIX C program for `test/integration/sigpipe.test.mjs` (#810). `pipetest MODE` writes one byte to a pipe whose read end it has closed and prints the result, `errno`, how often its handler ran, and whether `SIGPIPE` is pending. `MODE` is `ignore` (`SIG_IGN`, and the `sigaction` read-back), `handler`, `thread` (a handler, and the write from a second thread, which reports whether the handler ran there), `blocked` (`sigprocmask`), `ignblocked` (`SIG_IGN` and blocked), `dfl` (an explicit `SIG_DFL`), or anything else to leave the disposition as inherited.
 
-**Build:** `WASIX_SYSROOT_29=/path/to/wasix-sysroot ./build.sh`, with `wasixcc` 0.4.7 on `PATH`. `bin/pipetest.wasm` is 57,360 bytes, sha256 `43b169344b3788446f1761b5e8c45abfe198105740de34bb6ba63ac77c0bc897`.
+**Build:** `WASIX_SYSROOT_29=/path/to/wasix-sysroot ./build.sh`, with `wasixcc` 0.4.7 on `PATH`. `bin/pipetest.wasm` is 57,441 bytes, sha256 `c1c8701cd4599b592d2775b23bd0b1f8e352f1fb189e753067aaa74bb4332a0b`.
 
 ### `epolltest`
 

@@ -61,6 +61,12 @@ int main(int argc, char **argv) {
     sigemptyset(&set);
     sigaddset(&set, SIGPIPE);
     sigprocmask(SIG_BLOCK, &set, NULL);
+  } else if (!strcmp(mode, "ignblocked")) {
+    signal(SIGPIPE, SIG_IGN);
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGPIPE);
+    sigprocmask(SIG_BLOCK, &set, NULL);
   } else if (!strcmp(mode, "dfl")) {
     signal(SIGPIPE, SIG_DFL);
   }

@@ -52,6 +52,11 @@ test('a WASIX write to a pipe with no reader follows SIGPIPE: ignored or blocked
     stdout: 'blocked: -1 Broken pipe, handled 0, pending\n',
     stderr: '',
   });
+  assert.deepEqual(await run(kernel, ['pipetest', 'ignblocked']), {
+    status: 0,
+    stdout: 'ignblocked: -1 Broken pipe, handled 0, not pending\n',
+    stderr: '',
+  });
   assert.deepEqual(await run(kernel, ['pipetest', 'default']), {
     status: 141,
     stdout: '',

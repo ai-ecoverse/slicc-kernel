@@ -748,8 +748,9 @@ export class WasmProcess {
 
   private spares(sig: number): SyncFsResult {
     const { caught, ignored } = this.signalMasks();
-    const spared = isSignal(sig) && ((caught | ignored) & sigbit(sig)) !== 0;
-    return { ok: true, kind: 'json', json: spared ? 'spare' : 'terminate' };
+    const bit = isSignal(sig) ? sigbit(sig) : 0;
+    const answer = (ignored & bit) !== 0 ? 'ignore' : (caught & bit) !== 0 ? 'spare' : 'terminate';
+    return { ok: true, kind: 'json', json: answer };
   }
 
   private async killSelf(sig: number, target?: number, probe?: boolean): Promise<SyncFsResult> {

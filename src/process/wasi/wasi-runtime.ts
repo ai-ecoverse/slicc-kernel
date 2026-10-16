@@ -871,6 +871,7 @@ export async function runWasiThread(init: WasmThreadInitMsg, port: SabPostLike):
     ),
     shared: threads.ids,
   });
+  host.tid = thread.tid;
   host.sigmask = sigmaskOf(init.program.module, init.sab, gate, threads, init.signals);
 
   const program = await programImports(init.program, host, transport, thread.tid);
