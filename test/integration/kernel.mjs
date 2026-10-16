@@ -47,7 +47,7 @@ export async function booted(chrome, t, options = {}) {
 
 const modules = new URL('../../node_modules/@ai-ecoverse/', import.meta.url);
 
-export async function installPackage(page, name) {
+export async function installPackage(page, name, { skip } = {}) {
   const files = await readdir(new URL(`${name}/`, modules), {
     recursive: true,
     withFileTypes: true,
@@ -55,7 +55,8 @@ export async function installPackage(page, name) {
   const base = new URL(`${name}/`, modules).pathname;
   const names = files
     .filter((entry) => entry.isFile())
-    .map((entry) => `${entry.parentPath}/${entry.name}`.slice(base.length));
+    .map((entry) => `${entry.parentPath}/${entry.name}`.slice(base.length))
+    .filter((path) => !skip?.test(path));
   try {
     return await page.evaluate(
       (d, n) => window.installTree(d, n),
