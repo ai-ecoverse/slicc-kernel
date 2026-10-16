@@ -281,8 +281,13 @@ async function bodyOf(
   return out;
 }
 
-function streams(known: FetchTraits, request: Request, url: string): boolean {
-  if (known.streamingBodies !== true || request.body === null) return false;
+function streams(
+  known: FetchTraits,
+  request: Request,
+  init: RequestInit | undefined,
+  url: string
+): boolean {
+  if (known.streamingBodies !== true || !(init?.body instanceof ReadableStream)) return false;
   return request.method !== 'GET' && request.method !== 'HEAD' && !local(url);
 }
 
@@ -293,6 +298,21 @@ async function pump(
   signal: AbortSignal
 ): Promise<void> {
   const reader = stream.getReader();
+  const stop = (): void => void reader.cancel(signal.reason).catch(() => undefined);
+  signal.addEventListener('abort', stop, { once: true });
+  try {
+    await pumpFrom(kernel, handle, reader, signal);
+  } finally {
+    signal.removeEventListener('abort', stop);
+  }
+}
+
+async function pumpFrom(
+  kernel: JsKernel,
+  handle: number,
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  signal: AbortSignal
+): Promise<void> {
   for (;;) {
     let bytes: Uint8Array;
     try {
@@ -452,7 +472,7 @@ export function fetchOp(kernel: JsKernel) {
       throw failed(new JsCallError('ENOTSUP', `redirect: ${request.redirect}`));
     }
     const url = withoutFragment(new URL(request.url));
-    const streamed = streams(known, request, url);
+    const streamed = streams(known, request, init, url);
     const bytes = streamed ? undefined : await bodyOf(request, known.maxRequestBody, signal);
     if (bytes === OVER) {
       return withMeta(plain(413, `request body over ${known.maxRequestBody} bytes`), url, false);

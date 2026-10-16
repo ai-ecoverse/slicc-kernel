@@ -28,6 +28,11 @@ const UPLOAD_PACKAGE = JSON.stringify({
 });
 
 const UPLOAD = `export default async function main(ctx) {
+  if (ctx.argv[2] === 'string') {
+    const r = await ctx.fetch(ctx.argv[1], { method: 'POST', body: 'whole body' });
+    await ctx.write(1, r.status + ' ' + (await r.text()));
+    return;
+  }
   const encoder = new TextEncoder();
   let step = 0;
   const body = new ReadableStream({
@@ -61,6 +66,12 @@ async function sink(t) {
     first = resolve;
   });
   const server = createServer((req, res) => {
+    if (req.url === '/again') {
+      req.resume();
+      res.writeHead(307, { location: '/' });
+      res.end();
+      return;
+    }
     const hash = createHash('sha256');
     let length = 0;
     let text = '';
@@ -130,6 +141,14 @@ test('ctx.fetch with a stream body and duplex half streams it to the server', as
   await kernel.writeFile('/tmp/go', '');
   const body = Buffer.from('first second');
   assert.equal((await running).stdout, `200 ${body.length} ${sha(body)} first second`);
+});
+
+test('ctx.fetch with a string body on a streaming transport sends it whole, so a 307 resends it', async (t) => {
+  const server = await sink(t);
+  const { kernel } = await kernelWith(t, nodeTransport({ hostLoopback: true }));
+  const r = await kernel.run(['streamup', `${server.url}again`, 'string'], { cwd: '/' });
+  const body = Buffer.from('whole body');
+  assert.equal(r.stdout, `200 ${body.length} ${sha(body)} whole body`);
 });
 
 test('a whole-body transport still answers 413 over its maxRequestBody, and streamingBodies lifts it', async (t) => {
