@@ -17,7 +17,7 @@ function distOf(version) {
     })
       .toString()
       .trim();
-    execFileSync('tar', ['-xzf', tgz, '-C', dir]);
+    execFileSync('tar', ['-xzf', tgz, '-C', dir], { cwd: dir });
   }
   return `${dir}/package/dist/`;
 }
