@@ -422,7 +422,8 @@ class StatCache {
   }
 
   put(map: Map<string, Cached>, path: string, entry: Cached): void {
-    if (this.stats.size + this.lstats.size >= CACHE_CAP) this.clear();
+    if (this.stats.size + this.lstats.size + this.byHash.size + this.byIno.size >= CACHE_CAP)
+      this.clear();
     map.set(path, entry);
     if ('until' in entry) {
       const paths = this.missed.get(map) ?? new Set<string>();
@@ -679,7 +680,7 @@ export function cachingBridge(
     symlink: (target, link) => mutating(() => bridge.symlink(target, link), ...entry(link)),
     chmod: (p, mode) => rewriting(p, () => bridge.chmod(p, mode)),
     utimes: (p, a, m, now) => rewriting(p, () => bridge.utimes(p, a, m, now)),
-    lutimes: (p, a, m, now) => mutating(() => bridge.lutimes(p, a, m, now), p),
+    lutimes: (p, a, m, now) => mutating(() => bridge.lutimes(p, a, m, now)),
     ...(bridge.hold ? { hold: bridge.hold.bind(bridge) } : {}),
     ...(bridge.access ? { access: bridge.access.bind(bridge) } : {}),
     ...(bridge.kept ? { kept: bridge.kept.bind(bridge) } : {}),
