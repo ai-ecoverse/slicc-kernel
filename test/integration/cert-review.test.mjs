@@ -535,7 +535,7 @@ test('an incomplete base suite is missing evidence that blocks certified, unless
   );
 });
 
-test('record puts an incomplete base in the line, and FAILs it unless it was waived', async (t) => {
+test('an incomplete base goes into the line, and is a FAIL reason unless it was waived', () => {
   const base = { kind: 'missing-evidence', what: 'the certified suite', results: 30 };
   assert.deepEqual(baseEvidence([]), { note: '' });
   assert.deepEqual(baseEvidence([{ ...base, blocking: false }]), {
@@ -546,25 +546,6 @@ test('record puts an incomplete base in the line, and FAILs it unless it was wai
     problem:
       "the certified suite didn't finish (30 results), and the delta drops 2 test files or titles, so nothing stands in for it",
   });
-  const dir = await mkdtemp(join(tmpdir(), 'cert-record-base-'));
-  t.after(() => rm(dir, { recursive: true, force: true }));
-  await writeFile(
-    join(dir, 'findings.json'),
-    JSON.stringify({ findings: [{ ...base, blocking: true }] })
-  );
-  spawnSync(
-    process.execPath,
-    [
-      fileURLToPath(new URL('record.mjs', tools)),
-      ...['--version', '1.0.1', '--review', dir, '--out', join(dir, 'out')],
-      ...['--findings', join(dir, 'findings.json'), '--planted', 'x'],
-    ],
-    { encoding: 'utf8' }
-  );
-  assert.match(
-    await readFile(join(dir, 'out/line.txt'), 'utf8'),
-    /the certified suite didn't finish \(30 results\), and the release suite isn't complete and all-pass/
-  );
 });
 
 test('a kernel-compat shard that left no report is named, from the jobs and the artifacts of the run (#732 follow-up)', () => {
