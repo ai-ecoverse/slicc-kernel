@@ -72,6 +72,19 @@ int main(void) {
   printf("SIGALRM with a handler during the wait: %s, took %u, alarm handled %d\n", e ? strerror(e) : "ok", got,
          (int)handled);
 
+  int before = handled;
+  struct itimerval soon = {.it_value = {.tv_usec = 50000}};
+  setitimer(ITIMER_REAL, &soon, NULL);
+  start = now_ms();
+  while (now_ms() - start < 150) {
+  }
+  start = now_ms();
+  got = 99;
+  e = k_sigwait(bit(SIGUSR2), 0, 1000000000LL, &got);
+  took = now_ms() - start;
+  printf("SIGALRM came while computing, handled on entry: %s, took %u, alarm handled %d, %s\n",
+         e ? strerror(e) : "ok", got, (int)handled - before, took < 500 ? "at once" : "after the timeout");
+
   pthread_t t;
   pthread_create(&t, NULL, waiter, NULL);
   while (!waiting) usleep(1000);

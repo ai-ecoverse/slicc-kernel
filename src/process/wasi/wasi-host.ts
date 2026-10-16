@@ -487,7 +487,8 @@ export class WasiHost {
           lo,
           timeout,
           (set) => void this.o.kernel.call({ op: 'sig-waiting', tid: mask.tid, set }),
-          (sig) => void mem.view().setUint32(out, sig, true)
+          (sig) => void mem.view().setUint32(out, sig, true),
+          this.entered
         );
       },
       sigpending_get: (out: number) => {

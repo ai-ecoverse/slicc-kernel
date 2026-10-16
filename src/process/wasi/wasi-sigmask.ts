@@ -94,7 +94,8 @@ export class WasiSigmask {
     setLo: number,
     timeoutNs: bigint,
     publish: (set: number) => void,
-    took: (sig: number) => void
+    took: (sig: number) => void,
+    entered = false
   ): number {
     const set = kernelBits(setLo | 0);
     const value = BigInt.asUintN(64, timeoutNs);
@@ -105,15 +106,15 @@ export class WasiSigmask {
     publish(set);
     try {
       for (;;) {
+        const seen = Atomics.load(this.header, SAB_I_SIGNALS);
         const sig = this.take(set);
         if (sig !== 0) {
           took(sig);
           return E.SUCCESS;
         }
-        if (this.deliverUnblocked() || this.interrupted()) return E.INTR;
+        if (entered || this.deliverUnblocked() || this.interrupted()) return E.INTR;
         const left = deadline - performance.now();
         if (left <= 0) return E.AGAIN;
-        const seen = Atomics.load(this.header, SAB_I_SIGNALS);
         Atomics.wait(this.header, SAB_I_SIGNALS, seen, Math.min(left, POLL_MS));
       }
     } finally {
