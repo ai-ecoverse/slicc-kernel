@@ -27,13 +27,6 @@ const say = (text) => {
   if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${text}\n`);
 };
 
-const tags = (await api(`repos/${repo}/git/matching-refs/tags/v`))
-  .filter((t) => t.object.type === 'commit' && t.object.sha === sha)
-  .map((t) => t.ref.replace('refs/tags/', ''));
-if (tags.length === 0) {
-  say(`Release run ${run} tagged nothing at ${sha}: nothing to retry`);
-  process.exit(0);
-}
 const statuses = await api(`repos/${repo}/commits/${sha}/statuses?per_page=100`);
 const state = statuses.find((s) => s.context === 'cert-review')?.state;
 let active = 0;
@@ -44,7 +37,7 @@ for (const status of ['queued', 'in_progress', 'waiting', 'requested', 'pending'
   active += r.workflow_runs.filter((x) => String(x.id) !== String(run)).length;
 }
 const d = retryDecision({ attempt, state, active });
-say(`${tags.join(' ')} (run ${run}, attempt ${attempt}): ${d.why}`);
+say(`${sha} (run ${run}, attempt ${attempt}): ${d.why}`);
 if (d.retry) {
   await api(`repos/${repo}/actions/runs/${run}/rerun-failed-jobs`, { method: 'POST' });
   say(`re-running the failed jobs of run ${run}`);

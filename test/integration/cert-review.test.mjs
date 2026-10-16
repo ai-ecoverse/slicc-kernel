@@ -1932,3 +1932,79 @@ test('an INCOMPLETE Release run gets exactly one automatic re-run of its failed 
   assert.match(tool, /rerun-failed-jobs/);
   assert.match(tool, /'queued', 'in_progress', 'waiting', 'requested', 'pending'/);
 });
+
+test('retry.mjs decides from the cert-review status on the run commit alone, so a tag it never listed still gets its retry', async (t) => {
+  const { createServer } = await import('node:http');
+  const seen = [];
+  let state = 'error';
+  let waiting = [];
+  const server = createServer((req, res) => {
+    seen.push(`${req.method} ${req.url}`);
+    res.setHeader('content-type', 'application/json');
+    if (req.url.includes('/statuses'))
+      return res.end(
+        JSON.stringify([
+          { context: 'ci / test', state: 'success' },
+          ...(state ? [{ context: 'cert-review', state }] : []),
+        ])
+      );
+    if (req.url.includes('/actions/workflows/release.yml/runs'))
+      return res.end(
+        JSON.stringify({ workflow_runs: req.url.includes('status=queued') ? waiting : [] })
+      );
+    if (req.method === 'POST' && req.url.endsWith('/rerun-failed-jobs')) {
+      res.statusCode = 201;
+      return res.end('{}');
+    }
+    res.statusCode = 404;
+    return res.end('{}');
+  });
+  await new Promise((done) => server.listen(0, '127.0.0.1', done));
+  t.after(() => server.close());
+  const api = `http://127.0.0.1:${server.address().port}`;
+  const retry = (attempt = '1') =>
+    new Promise((done) => {
+      const child = spawn(
+        process.execPath,
+        [
+          fileURLToPath(new URL('retry.mjs', tools)),
+          '--repo',
+          'o/r',
+          '--run',
+          '42',
+          '--attempt',
+          attempt,
+          '--sha',
+          'a'.repeat(40),
+        ],
+        { env: { ...process.env, GITHUB_API_URL: api, GH_TOKEN: 'x', GITHUB_STEP_SUMMARY: '' } }
+      );
+      let out = '';
+      child.stdout.on('data', (d) => {
+        out += d;
+      });
+      child.on('close', (code) => done({ code, out }));
+    });
+  const posts = () => seen.filter((x) => x.startsWith('POST'));
+  const first = await retry();
+  assert.equal(first.code, 0, first.out);
+  assert.deepEqual(posts(), ['POST /repos/o/r/actions/runs/42/rerun-failed-jobs']);
+  assert.ok(!seen.some((x) => x.includes('matching-refs')), 'no tag lookup');
+  seen.length = 0;
+  assert.equal((await retry('2')).code, 0);
+  assert.deepEqual(posts(), []);
+  state = 'failure';
+  seen.length = 0;
+  await retry();
+  assert.deepEqual(posts(), []);
+  state = undefined;
+  seen.length = 0;
+  await retry();
+  assert.deepEqual(posts(), []);
+  state = 'error';
+  waiting = [{ id: 43 }];
+  seen.length = 0;
+  const blocked = await retry();
+  assert.deepEqual(posts(), []);
+  assert.match(blocked.out, /1 newer Release run\(s\) waiting or running/);
+});
