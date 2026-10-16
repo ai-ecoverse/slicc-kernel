@@ -3,6 +3,7 @@
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -71,8 +72,21 @@ static void on_usr1(int sig) {
   handled = info;
 }
 
-int main(void) {
+static int as_user(uid_t uid) {
+  block(SIGCHLD);
+  pid_t child = fork();
+  if (child == 0) {
+    if (setuid(uid) != 0) _exit(99);
+    _exit(3);
+  }
+  report_as("a child that became a user exited", wait_for(SIGCHLD), child, uid);
+  waitpid(child, NULL, 0);
+  return 0;
+}
+
+int main(int argc, char **argv) {
   setvbuf(stdout, NULL, _IONBF, 0);
+  if (argc > 2 && !strcmp(argv[1], "setuid")) return as_user((uid_t)atoi(argv[2]));
   signal(SIGUSR1, on_usr1);
   block(SIGUSR1);
   block(SIGUSR2);

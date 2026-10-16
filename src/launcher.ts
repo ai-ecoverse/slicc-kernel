@@ -533,6 +533,7 @@ function childHandle(handle: WasmProcessHandle): ChildHandle {
     exited: handle.exited,
     termsig: handle.termsig,
     onState: (listener) => handle.onState(listener),
+    uid: () => handle.cred?.().ruid,
   };
 }
 

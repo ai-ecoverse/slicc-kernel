@@ -711,7 +711,7 @@ export class WasmProcess {
           : child.termsig
             ? CLD.KILLED
             : CLD.EXITED;
-    return { code, pid: child.pid, uid: this.cred.ruid, status: child.status };
+    return { code, pid: child.pid, uid: child.uid ?? this.cred.ruid, status: child.status };
   }
 
   private takeSigInfo(sig: number, tid: number): SigInfo {

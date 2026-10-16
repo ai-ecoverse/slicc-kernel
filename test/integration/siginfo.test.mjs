@@ -38,3 +38,23 @@ for (const user of ['root', 'cone']) {
     });
   });
 }
+
+test("SIGCHLD's si_uid is the child's real uid: root's child that became a user (#892)", {
+  timeout: 60_000,
+}, async (t) => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  t.after(() => kernel.terminate());
+  const { uid } = await kernel.users.add({ name: 'cone' });
+  for (const file of ['package.json', 'bin/siginfotest.wasm']) {
+    await kernel.writeFile(
+      `/node_modules/siginfotest/${file}`,
+      await readFile(new URL(file, fixture))
+    );
+  }
+  assert.deepEqual(await kernel.run(['siginfotest', 'setuid', String(uid)], { cwd: '/' }), {
+    status: 0,
+    stdout:
+      'a child that became a user exited: signo 17 code 1 pid matches uid matches status 3 size 24\n',
+    stderr: '',
+  });
+});
