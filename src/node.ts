@@ -160,7 +160,12 @@ export interface NodeTransportOptions {
 }
 
 export function nodeTransport(options: NodeTransportOptions = {}): NetworkTransport {
-  const transport = fetchTransport({ webSocket: true, webSocketHeaders: true, redirect: 'manual' });
+  const transport = fetchTransport({
+    webSocket: true,
+    webSocketHeaders: true,
+    redirect: 'manual',
+    streamingBodies: true,
+  });
   const open = { ...transport, traits: { ...transport.traits, crossOrigin: 'any' as const } };
   return diagnosing(guardedLoopback(open, options.hostLoopback ?? false));
 }

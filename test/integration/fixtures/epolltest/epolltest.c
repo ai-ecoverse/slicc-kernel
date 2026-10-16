@@ -25,6 +25,19 @@ static int ctl(int ep, int op, int fd, struct epoll_event *ev) {
   return r;
 }
 
+__attribute__((import_module("wasix_32v1"), import_name("epoll_ctl")))
+int32_t wasix_epoll_ctl(int32_t epfd, int32_t op, int32_t fd, const void *event);
+
+static int raw(int ep, int op, int fd) {
+  uint8_t event[32] = {EPOLLIN};
+  int e = wasix_epoll_ctl(ep, op, fd, event);
+  if (e) {
+    errno = e;
+    return -1;
+  }
+  return 0;
+}
+
 static int add(int ep, int fd, uint32_t events, uint64_t tag) {
   struct epoll_event ev = {.events = events, .data.u64 = tag};
   return ctl(ep, EPOLL_CTL_ADD, fd, &ev);
@@ -206,7 +219,7 @@ static int errors(void) {
 #define TRY(label, call) printf("%s %s\n", label, (call) < 0 ? strerror(errno) : "ok")
   TRY("add", ctl(ep, EPOLL_CTL_ADD, p[0], &ev));
   TRY("add twice", ctl(ep, EPOLL_CTL_ADD, p[0], &ev));
-  TRY("wasix add twice", ctl(ep, 0, p[0], &ev));
+  TRY("mod", ctl(ep, EPOLL_CTL_MOD, p[0], &ev));
   TRY("mod missing", ctl(ep, EPOLL_CTL_MOD, p[1], &ev));
   TRY("del missing", ctl(ep, EPOLL_CTL_DEL, p[1], &ev));
   TRY("del", ctl(ep, EPOLL_CTL_DEL, p[0], &ev));
@@ -217,6 +230,14 @@ static int errors(void) {
   TRY("file", ctl(ep, EPOLL_CTL_ADD, f, &ev));
   int d = open("/tmp", O_RDONLY | O_DIRECTORY);
   TRY("dir", ctl(ep, EPOLL_CTL_ADD, d, &ev));
+  TRY("op 4", ctl(ep, 4, p[0], &ev));
+  TRY("wasix add", raw(ep, 0, p[0]));
+  TRY("wasix add twice", raw(ep, 0, p[0]));
+  TRY("wasix mod", raw(ep, 1, p[0]));
+  TRY("wasix mod missing", raw(ep, 1, p[1]));
+  TRY("wasix del", raw(ep, 2, p[0]));
+  TRY("wasix del missing", raw(ep, 2, p[0]));
+  TRY("wasix op 3", raw(ep, 3, p[1]));
   return 0;
 }
 

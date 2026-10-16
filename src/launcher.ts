@@ -18,7 +18,7 @@ import type { FacadeSpecs } from './facade/types.ts';
 import { R_OK, X_OK } from './fs/access.ts';
 import { type Attestation, attest, FileWatches, type RemoteFs } from './fs/attest.ts';
 import { FileChanges } from './fs/changes.ts';
-import { followLinks, withCommandDirs } from './fs/commands.ts';
+import { type EntryTarget, followLinks, withCommandDirs } from './fs/commands.ts';
 import { Dac, type DenialHook, type Guard, need, TTY_MODE } from './fs/dac.ts';
 import { SHM } from './fs/dev-removal.ts';
 import { FreshModules } from './fs/fresh-modules.ts';
@@ -136,6 +136,7 @@ import {
 } from './process/wasi/wasi-module.ts';
 import type { SourceCheck } from './realm/sync-fs-token-registry.ts';
 import { anyBlocked, type BlockedMask } from './realm/sync-sab-wire.ts';
+import { REFUSED_PATH, REFUSED_SOURCE, refusing } from './refused-command.ts';
 import { type ApproveHook, Sudo, type SudoCall, type SudoResult } from './sudo.ts';
 import { SUDO_COMMAND, SUDO_PATH, SUDO_SOURCE } from './sudo-command.ts';
 import {
@@ -254,6 +255,7 @@ interface Compiled {
 interface UserScopes {
   byUid: Map<number, string>;
   byBin: Map<string, string>;
+  owners?: Map<string, Cred>;
 }
 
 interface Planned {
@@ -756,10 +758,21 @@ export class Launcher {
           const tiers = await this.tiers(scope, appended);
           return scanCommands(this.scanned, tiers, tiers.length - appended.length);
         })
-        .then((commands) => commands.set(SUDO_COMMAND.name, SUDO_COMMAND));
+        .then((commands) => this.refusals(commands).set(SUDO_COMMAND.name, SUDO_COMMAND));
       this.catalogs.set(scope, found);
     }
     return found;
+  }
+
+  private refusals(commands: Map<string, Command>): Map<string, Command> {
+    for (const [name, command] of commands) {
+      if (!command.refused) continue;
+      commands.set(name, refusing(command));
+      if (this.warned.has(command.refused)) continue;
+      this.warned.add(command.refused);
+      console.warn(`slicc-kernel: refusing the commands of ${command.refused}`);
+    }
+    return commands;
   }
 
   private ownCommands(scope: string): Promise<ReadonlySet<string>> {
@@ -844,6 +857,7 @@ export class Launcher {
         return {
           byUid: new Map(users.map((account, i) => [account.uid, homes[i] as string])),
           byBin: new Map(homes.map((home) => [`${home}/bin`, home])),
+          owners: new Map(homes.map((home, i) => [home, credOf(users[i] as Account)])),
         };
       },
       () => ({ byUid: new Map(), byBin: new Map() })
@@ -1367,6 +1381,9 @@ export class Launcher {
   ): Promise<Program> {
     if (target.abi === 'js' && target.wasm === SUDO_PATH) {
       return { abi: 'js', glue: SUDO_SOURCE, path: SUDO_PATH };
+    }
+    if (target.abi === 'js' && target.wasm === REFUSED_PATH) {
+      return { abi: 'js', glue: REFUSED_SOURCE, path: REFUSED_PATH };
     }
     const { asked } = target;
     if (target.abi === 'js') {
@@ -2475,10 +2492,34 @@ export class Launcher {
   private commandFs(root: KernelFs): KernelFs {
     return withCommandDirs(
       root,
-      async () => new Set((await this.commands()).keys()),
+      async () => this.commandNames(await this.commands()),
       (dir) => this.userCommandDir(dir),
-      this.owners
+      this.owners,
+      (path) => this.entryTarget(path)
     );
+  }
+
+  private readonly named = new WeakMap<Map<string, Command>, ReadonlySet<string>>();
+
+  private commandNames(commands: Map<string, Command>): ReadonlySet<string> {
+    let names = this.named.get(commands);
+    if (!names) {
+      names = new Set(commands.keys());
+      this.named.set(commands, names);
+    }
+    return names;
+  }
+
+  private async entryTarget(path: string): Promise<EntryTarget | undefined> {
+    const system = COMMAND.exec(path)?.[1];
+    const slash = path.lastIndexOf('/');
+    const scopes = await this.userScopes();
+    const scope = system === undefined ? scopes.byBin.get(path.slice(0, slash)) : '';
+    const name = system ?? path.slice(slash + 1);
+    const command = scope === undefined ? undefined : (await this.commands(scope)).get(name);
+    const owner = scope ? scopes.owners?.get(scope) : undefined;
+    const target = command && (command.shows ?? command.script ?? command.wasm);
+    return target === undefined ? undefined : { path: target, ...(owner ? { owner } : {}) };
   }
 
   private processChain(fs: KernelFs, nodes: VfsNodes, unlinked: UnlinkedKeeper): KernelFs {

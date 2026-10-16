@@ -132,7 +132,13 @@ export async function need(
 ): Promise<Walked> {
   const walked = await access(g.fs, g.cred, path, want, linked(g, options));
   if (walked.denied !== undefined) deny(g, op, walked.link ? walked.denied : shown);
+  else if (want & R_OK && g.fs.commandTarget) await readsAs(g, op, walked.path, shown);
   return walked;
+}
+
+async function readsAs(g: Guard, op: string, path: string, shown: string): Promise<void> {
+  const target = await g.fs.commandTarget?.(path);
+  if (target !== undefined) await need(g, op, target, R_OK, { directory: false }, shown);
 }
 
 function entryIn(dir: Walked, path: string): string {

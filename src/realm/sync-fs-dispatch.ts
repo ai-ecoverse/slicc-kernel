@@ -1,4 +1,5 @@
 import { permOf, R_OK, trustedLink, W_OK, walk } from '../fs/access.ts';
+import { callerStat } from '../fs/command-stat.ts';
 import {
   chmodMode,
   deny,
@@ -97,9 +98,13 @@ function statJson(s: FsStat): SyncFsStatJson {
 
 async function readdirStat(
   fs: KernelFs,
-  dir: string
+  dir: string,
+  g?: Guard
 ): Promise<Array<[string, SyncFsStatJson | null]>> {
-  return (await fs.readdirStat(dir)).map(([name, stat]) => [name, stat && statJson(stat)]);
+  const listed = await fs.readdirStat(dir);
+  const shown = async (name: string, stat: FsStat | null) =>
+    stat && statJson(await callerStat(g, joinName(dir, name), stat));
+  return Promise.all(listed.map(async ([name, stat]) => [name, await shown(name, stat)]));
 }
 
 async function usageAt(entry: SyncFsTokenEntry, path: string): Promise<SyncFsUsage | undefined> {
@@ -201,6 +206,11 @@ async function runMkdir(
   return done;
 }
 
+async function shownAs(entry: SyncFsTokenEntry, path: string, st: FsStat): Promise<FsStat> {
+  const real = st.isFile && st.size === 0 ? entry.fs.realpath?.(path, true) : undefined;
+  return callerStat(guardOf(entry), (await real?.catch(() => path)) ?? path, st);
+}
+
 function readSource(entry: SyncFsTokenEntry, path: string): Promise<Uint8Array> {
   const plain = () => entry.fs.readFileBuffer(path);
   return entry.source ? entry.source.read(path, plain) : plain();
@@ -221,13 +231,13 @@ async function run(
     case 'exists':
       return json(await fs.exists(path));
     case 'stat':
-      return json(statJson(await fs.stat(path)));
+      return json(statJson(await shownAs(entry, path, await fs.stat(path))));
     case 'lstat':
-      return json(statJson(await fs.lstat(path)));
+      return json(statJson(await shownAs(entry, path, await fs.lstat(path))));
     case 'readdir':
       return json(await fs.readdir(path));
     case 'readdir-stat':
-      return json(await readdirStat(fs, path));
+      return json(await readdirStat(fs, path, guardOf(entry)));
     case 'mkdir':
       return runMkdir(entry, path, req);
     case 'rm':
