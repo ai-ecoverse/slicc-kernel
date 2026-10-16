@@ -2,6 +2,7 @@ import { MessageChannel, type MessagePort, Worker } from 'node:worker_threads';
 import type { CdpHook } from './cdp/types.ts';
 import type { MessagePortLike } from './client/protocol.ts';
 import { type ServedClient, serveClient } from './client/serve-client.ts';
+import type { CronClock } from './cron/clock.ts';
 import type { FacadeSpecs } from './facade/types.ts';
 import type { DenialHook } from './fs/dac.ts';
 import { OpfsFs } from './fs/opfs.ts';
@@ -121,6 +122,7 @@ export interface NodeKernelOptions {
   clipboard?: ClipboardHook;
   approve?: ApproveHook;
   protect?: Protection;
+  cron?: { clock?: CronClock };
 }
 
 export interface NodeKernel {
@@ -229,6 +231,14 @@ function textOf(on: ((text: string) => void) | undefined) {
   return (bytes: Uint8Array) => on(decoder.decode(bytes, { stream: true }));
 }
 
+const cronLocks = new WeakMap<FileSystemDirectoryHandle, string>();
+
+function cronLock(root: FileSystemDirectoryHandle): string {
+  let lock = cronLocks.get(root);
+  if (!lock) cronLocks.set(root, (lock = `slicc-kernel-cron:${crypto.randomUUID()}`));
+  return lock;
+}
+
 export async function createNodeKernel(options: NodeKernelOptions = {}): Promise<NodeKernel> {
   const root = options.root ?? memoryRoot();
   const fs = new OpfsFs(root, undefined, undefined, { ranged: isMemoryRoot(root) });
@@ -267,6 +277,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     ...(options.sealed ? { sealed: options.sealed } : {}),
     ...(options.clipboard ? { clipboard: options.clipboard } : {}),
     ...(options.approve ? { approve: options.approve } : {}),
+    cron: { lock: cronLock(root), ...(options.cron?.clock ? { clock: options.cron.clock } : {}) },
   });
   await launcher.prepare();
   const guard = <T>(work: () => Promise<T>): Promise<T> =>
