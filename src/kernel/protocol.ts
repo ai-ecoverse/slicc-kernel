@@ -62,6 +62,7 @@ export interface KernelStreamEntry {
   flags?: number;
   cloexec?: boolean;
   desc?: number;
+  fifo?: string;
 }
 
 export type ForkStream = KernelStreamEntry | { fd: number; path: string; flags: number };
@@ -73,6 +74,7 @@ export interface InheritedFd {
   flags?: number;
   cloexec?: boolean;
   desc?: number;
+  fifo?: string;
 }
 
 export interface WasmProcessInitMsg {

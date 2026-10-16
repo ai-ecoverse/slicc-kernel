@@ -395,7 +395,7 @@ export class WasiHost {
         if (this.synthetic(path) && deviceOf(path) === undefined)
           return void mem.view().setUint32(out, SEALED_MODE, true);
         const st = flags & AT_SYMLINK_NOFOLLOW ? this.o.fs.lstat(path) : this.o.fs.stat(path);
-        mem.view().setUint32(out, modeOf(st), true);
+        mem.view().setUint32(out, (st.isFifo ? S_IFIFO : 0) | modeOf(st), true);
       },
     });
   }

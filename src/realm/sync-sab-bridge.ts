@@ -300,6 +300,9 @@ export function createSyncFsSabBridge(
     lutimes: (path, atimeMs, mtimeMs, now) => {
       run({ op: 'lutimes', path, atimeMs, mtimeMs, ...(now ? { now } : {}) }, path);
     },
+    mkfifo: (path, mode) => {
+      run({ op: 'mkfifo', path, mode }, path);
+    },
     create: (path, mode, opening) => {
       const flags = { ...(mode !== undefined ? { mode } : {}), ...(opening ? { opening } : {}) };
       run({ op: 'create', path, ...flags }, path);

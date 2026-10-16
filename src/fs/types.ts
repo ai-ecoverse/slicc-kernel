@@ -3,6 +3,7 @@ export interface FsStat {
   isDirectory: boolean;
   isSymbolicLink: boolean;
   isSocket?: boolean;
+  isFifo?: boolean;
   size: number;
   mode: number;
   mtime: Date;
@@ -40,6 +41,7 @@ export interface NewOwner extends Owner {
   mode?: number;
   parents?: number;
   socket?: boolean;
+  fifo?: boolean;
 }
 
 export interface OwnerChange {

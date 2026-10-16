@@ -745,6 +745,40 @@ interface RemovalFs {
   sliccCred?: { euid: number };
 }
 
+interface FifoOpenFs {
+  sliccOpenFifo?: (stream: ProcessStream, path: string) => void;
+  open?: (path: unknown, flags: unknown, ...rest: unknown[]) => unknown;
+  lookupPath?: (path: string, opts?: { follow?: boolean }) => { node: { mode: number } };
+}
+
+const O_TRUNC = 0o1000;
+const S_IFMT_BITS = 0o170000;
+const S_IFIFO_BITS = 0o010000;
+
+function namesFifo(fs: FifoOpenFs, path: string): boolean {
+  try {
+    const { node } = fs.lookupPath?.(path, { follow: true }) ?? { node: { mode: 0 } };
+    return (node.mode & S_IFMT_BITS) === S_IFIFO_BITS;
+  } catch {
+    return false;
+  }
+}
+
+export function useFifoOpens(
+  Fs: ProcessFs,
+  attach?: (stream: ProcessStream, path: string) => void
+): void {
+  const fs = Fs as unknown as FifoOpenFs;
+  if (attach) fs.sliccOpenFifo = attach;
+  const open = fs.open;
+  if (typeof open !== 'function' || typeof fs.lookupPath !== 'function') return;
+  fs.open = (path, flags, ...rest) => {
+    const truncates = typeof path === 'string' && typeof flags === 'number' && flags & O_TRUNC;
+    const kept = truncates && namesFifo(fs, path as string) ? (flags as number) & ~O_TRUNC : flags;
+    return open.call(Fs, path, kept, ...rest);
+  };
+}
+
 export function useDevRemoval(Fs: ProcessFs): void {
   const fs = Fs as unknown as RemovalFs;
   for (const name of ['unlink', 'rmdir'] as const) {

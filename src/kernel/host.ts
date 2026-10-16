@@ -35,6 +35,7 @@ import { type CpuTimes, ProcessClocks } from './cpu-clock.ts';
 import { type Cred, copyCred } from './cred.ts';
 import { KernelDgram } from './dgram.ts';
 import { type FdTable, kernelFdKind, type OpenFile } from './fd-table.ts';
+import type { FifoTable } from './fifo.ts';
 import type { JobTable } from './jobs.ts';
 import type { LockTable } from './locks.ts';
 import type { HttpHandles } from './net/http-syscalls.ts';
@@ -133,6 +134,7 @@ export interface SpawnWasmOptions {
 
   http?: HttpHandles;
   locks?: LockTable;
+  fifos?: FifoTable;
   sems?: SemTable;
   onReap?: (pid: number) => void;
   resolver?: Resolver;
@@ -189,6 +191,7 @@ export function inheritedFds(fds: FdTable): InheritedFd[] {
         ...(flags !== undefined ? { flags } : {}),
         ...(fds.closesOnExec(fd) ? { cloexec: true } : {}),
         ...(kind === 'stream' ? { desc: descId(open) } : {}),
+        ...(open.file.fifo ? { fifo: open.file.fifo } : {}),
       };
     });
 }
@@ -461,6 +464,7 @@ function processOptions(
     net: opts.net,
     http: opts.http,
     locks: opts.locks,
+    fifos: opts.fifos,
     ...(opts.sems ? { sems: opts.sems } : {}),
     onReap: opts.onReap,
     resolver: opts.resolver,
