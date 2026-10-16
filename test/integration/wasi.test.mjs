@@ -3,6 +3,9 @@ import { after, test } from 'node:test';
 import { launch } from './chrome.mjs';
 import { booted, installPackage, ok } from './kernel.mjs';
 
+const PYTHON_RUNTIME = { skip: /^lib\/libpython[^/]*\.a$/ };
+const NUMPY_RUNTIME = { skip: /\/tests\// };
+
 const chrome = await launch();
 after(() => chrome.close());
 
@@ -19,8 +22,8 @@ test('ripgrep, a WASI program, searches files bash wrote', async (t) => {
 
 test('WASIX python runs threads and imports numpy through the dynamic linker', async (t) => {
   const { page, run } = await booted(chrome, t);
-  await installPackage(page, 'wasix-python');
-  await installPackage(page, 'py-numpy');
+  await installPackage(page, 'wasix-python', PYTHON_RUNTIME);
+  await installPackage(page, 'py-numpy', NUMPY_RUNTIME);
 
   const threads =
     'import threading\nout=[]\nts=[threading.Thread(target=lambda i=i: out.append(i*i)) for i in range(4)]\n[t.start() for t in ts]\n[t.join() for t in ts]\nprint(sorted(out))';
@@ -37,7 +40,7 @@ test('WASIX python runs threads and imports numpy through the dynamic linker', a
 
 test('a WASI client (python urllib) fetches registry metadata through the realm proxy', async (t) => {
   const { page, run } = await booted(chrome, t);
-  await installPackage(page, 'wasix-python');
+  await installPackage(page, 'wasix-python', PYTHON_RUNTIME);
 
   const code =
     "import json, urllib.request\nwith urllib.request.urlopen('https://registry.npmjs.org/@ai-ecoverse/wasm-bash/latest') as r:\n    print(json.load(r)['name'])";
