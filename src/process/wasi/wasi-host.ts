@@ -3,7 +3,7 @@ import { physicalPath } from '../../fs/physical-path.ts';
 import { localCpuNanos } from '../../kernel/cpu-clock.ts';
 import { type Cred, type CredChange, MAX_GROUPS } from '../../kernel/cred.ts';
 import type { DeviceMeta, KernelFdKind } from '../../kernel/fd-table.ts';
-import { SIG, type SigInfo } from '../../kernel/signals.ts';
+import { KERNEL_SIGINFO, SIG, type SigInfo } from '../../kernel/signals.ts';
 import type { SyncFsBridgeStat, SyncFsPosixBridge } from '../../realm/sync-fs-wire.ts';
 import type { LockHeld } from '../process-locks.ts';
 import { type LockedFile, lockImports } from './slicc-lock.ts';
@@ -551,10 +551,8 @@ export class WasiHost {
         if (r === E.SUCCESS) this.writeSiginfo(info, took, mask.tid);
         return r;
       },
-      siginfo_take: (sig: number, info: number) => {
-        this.writeSiginfo(info, sig, this.sigmask?.tid ?? this.tid);
-        return E.SUCCESS;
-      },
+      siginfo_take: (sig: number, info: number) =>
+        this.writeSiginfo(info, sig, this.sigmask?.tid ?? this.tid, false) ? E.SUCCESS : E.NOENT,
       sigaction_inherited: (out: number) => {
         const bits = this.o.kernel.call({ op: 'sig-inherited' }) as number;
         mem.view().setBigUint64(out, BigInt(libcBits(bits) >>> 0), true);
@@ -1269,8 +1267,10 @@ export class WasiHost {
     }
   }
 
-  private writeSiginfo(at: number, sig: number, tid: number): void {
-    const info = this.o.kernel.call({ op: 'sig-info', sig, tid }) as SigInfo;
+  private writeSiginfo(at: number, sig: number, tid: number, waited = true): boolean {
+    const taken = this.o.kernel.call({ op: 'sig-info', sig, tid }) as SigInfo | null;
+    if (!taken && !waited) return false;
+    const info = taken ?? KERNEL_SIGINFO;
     const view = this.mem.view();
     const size = Math.min(view.getUint32(at, true), SIGINFO_BYTES);
     const fields = [sig, info.code, info.pid, info.uid, info.status];
@@ -1281,6 +1281,7 @@ export class WasiHost {
       filled = 4 + (i + 1) * 4;
     }
     view.setUint32(at, filled, true);
+    return true;
   }
 
   private pathFilestat(path: string, lookup: number): Filestat {

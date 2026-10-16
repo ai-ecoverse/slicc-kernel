@@ -138,7 +138,7 @@ int main(int argc, char **argv) {
   unblock(SIGUSR1);
   report("siginfo_take in a handler", handled, child);
   struct slicc_siginfo none = {.size = sizeof none};
-  k_siginfo_take(SIGUSR2, &none);
-  report_as("siginfo_take with nothing pending", none, 0, 0);
+  int e = k_siginfo_take(SIGUSR2, &none);
+  printf("siginfo_take with nothing recorded: %s, size %u\n", e ? strerror(e) : "ok", none.size);
   return 0;
 }

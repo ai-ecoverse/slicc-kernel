@@ -14,7 +14,7 @@ const EXPECTED = [
   'alarm: signo 14 code 128 pid matches uid matches status 0 size 24',
   'a 12-byte struct: size 12 signo 12 code 0 pid left -1',
   'siginfo_take in a handler: signo 10 code 0 pid matches uid matches status 0 size 24',
-  'siginfo_take with nothing pending: signo 12 code 128 pid matches uid matches status 0 size 24',
+  'siginfo_take with nothing recorded: No such file or directory, size 24',
   '',
 ].join('\n');
 

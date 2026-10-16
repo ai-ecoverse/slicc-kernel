@@ -714,7 +714,7 @@ export class WasmProcess {
     return { code, pid: child.pid, uid: child.uid ?? this.cred.ruid, status: child.status };
   }
 
-  private takeSigInfo(sig: number, tid: number): SigInfo {
+  private takeSigInfo(sig: number, tid: number): SigInfo | null {
     for (const key of [`${tid}:${sig}`, `0:${sig}`]) {
       const info = this.sigInfos.get(key);
       if (info) {
@@ -722,7 +722,7 @@ export class WasmProcess {
         return info;
       }
     }
-    return KERNEL_SIGINFO;
+    return null;
   }
 
   private signalOutcome(sig: number, info?: SigInfo): SignalOutcome {
