@@ -4,13 +4,13 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { compareVersions, covering, pickRelease, previousPublished } from './lib.mjs';
+import { compareVersions, covering, pickRelease } from './lib.mjs';
 
 const { values } = parseArgs({
   options: {
     repo: { type: 'string', default: 'ai-ecoverse/slicc-kernel' },
     version: { type: 'string' },
-    published: { type: 'boolean', default: false },
+    pending: { type: 'boolean', default: false },
     covers: { type: 'string', default: '' },
     limit: { type: 'string', default: '40' },
   },
@@ -28,26 +28,6 @@ const all = execFileSync('git', ['tag', '--list', 'v*'], { encoding: 'utf8' })
   .split('\n')
   .map((t) => t.replace(/^v/, ''))
   .filter((v) => SEMVER.test(v));
-if (values.published) {
-  const versions = JSON.parse(
-    execFileSync(
-      'npm',
-      ['view', '@ai-ecoverse/slicc-kernel', 'versions', '--json', '--prefer-online'],
-      {
-        encoding: 'utf8',
-        maxBuffer: 16 * 1024 * 1024,
-      }
-    )
-  );
-  const found = previousPublished(all, versions, values.version);
-  if (!found) {
-    console.error(`base: no tag before v${values.version} is on npm`);
-    process.exit(1);
-  }
-  console.error(`base: v${found} is the newest earlier tag on npm`);
-  console.log(found);
-  process.exit(0);
-}
 if (values.covers) {
   console.log(covering(all, values.covers, values.version).join(','));
   process.exit(0);
@@ -71,9 +51,11 @@ async function stateOf(tag) {
   return (await r.json()).find((s) => s.context === 'cert-review')?.state;
 }
 
-const found = await pickRelease(tags, values.version, stateOf);
+const found = await pickRelease(tags, values.version, stateOf, { pending: values.pending });
 if (found) {
-  console.error(`base: v${found} has a successful cert-review status`);
+  console.error(
+    `base: v${found} has a ${values.pending ? 'successful or pending' : 'successful'} cert-review status`
+  );
   console.log(found);
   process.exit(0);
 }
