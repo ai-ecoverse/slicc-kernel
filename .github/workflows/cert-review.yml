@@ -506,15 +506,13 @@ jobs:
 
       - name: Review
         id: review
-        uses: anthropics/claude-code-action@a26b07d8c778b0c43f64618e5fd29fd0f8af72e8
+        uses: anthropics/claude-code-action/base-action@a26b07d8c778b0c43f64618e5fd29fd0f8af72e8
         env:
           AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
           AWS_REGION: ${{ vars.CERT_AWS_REGION || 'us-west-2' }}
           GH_TOKEN: ${{ github.token }}
         with:
           use_bedrock: 'true'
-          allowed_bots: 'github-merge-queue,renovate[bot]'
-          github_token: ${{ github.token }}
           show_full_output: ${{ github.event_name == 'workflow_dispatch' }}
           claude_args: |
             --model ${{ vars.CERT_BEDROCK_MODEL || 'global.anthropic.claude-opus-5-5' }}

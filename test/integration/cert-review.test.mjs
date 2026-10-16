@@ -1512,16 +1512,21 @@ test('review, record, status and the gate never start once the run is cancelled:
   }
 });
 
-test('the review runs for releases the merge queue pushed: claude-code-action allows the github-merge-queue and Renovate bots', async () => {
+test('the review runs in a Release run (a push event, from the merge queue): the base action, with no event or actor check, runs Claude', async () => {
   const workflow = await readFile(
     new URL('../../.github/workflows/cert-review.yml', import.meta.url),
     'utf8'
   );
+  assert.doesNotMatch(workflow, /uses: anthropics\/claude-code-action@/);
   const step =
-    /uses: anthropics\/claude-code-action@[0-9a-f]{40}\n {8}env:[\s\S]*?\n {8}with:\n([\s\S]*?)\n {6}- /.exec(
+    /uses: anthropics\/claude-code-action\/base-action@([0-9a-f]{40})\n {8}env:\n([\s\S]*?)\n {8}with:\n([\s\S]*?)\n {6}- /.exec(
       workflow
-    )?.[1] ?? '';
-  assert.match(step, /^ {10}allowed_bots: 'github-merge-queue,renovate\[bot\]'$/m);
+    ) ?? [];
+  assert.ok(step[1], 'pinned base-action');
+  assert.match(step[2], /AWS_BEARER_TOKEN_BEDROCK: \$\{\{ secrets\.AWS_BEARER_TOKEN_BEDROCK \}\}/);
+  assert.match(step[3], /^ {10}use_bedrock: 'true'$/m);
+  assert.match(step[3], /^ {10}prompt: \$\{\{ steps\.findings\.outputs\.prompt \}\}$/m);
+  assert.doesNotMatch(step[3], /github_token|allowed_bots/);
 });
 
 test('a suite runner stopped with SIGTERM still writes its partial results, its summary and the log so far (#743)', async (t) => {
