@@ -6,12 +6,14 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
+  baseEvidence,
   baselineFiles,
   compatRegressions,
   covering,
   decide,
   deltaFiles,
   diffSuites,
+  droppedTests,
   gapsOf,
   knownAsOf,
   knownLine,
@@ -315,7 +317,12 @@ test('findings.mjs turns the runs into decisions, suite regressions and missing 
   ]);
   run('missing.json');
   const missing = JSON.parse(await readFile(join(dir, 'findings.json'), 'utf8'));
-  assert.deepEqual(missing.findings[0], { kind: 'missing-evidence', what: 'the certified suite' });
+  assert.deepEqual(missing.findings[0], {
+    kind: 'missing-evidence',
+    what: 'the certified suite',
+    blocking: true,
+    dropped: 1,
+  });
   const compat = async (value) => {
     await write('compat.json', value);
     run('base.json', ['--compat', join(dir, 'compat.json')]);
@@ -414,6 +421,105 @@ test('findings.mjs turns the runs into decisions, suite regressions and missing 
   assert.deepEqual(
     cut.filter((f) => f.kind === 'suite-incomplete'),
     [{ kind: 'suite-incomplete', what: 'the release suite', exit: 'signal SIGTERM', results: 1 }]
+  );
+});
+
+test('an incomplete base suite is missing evidence that blocks certified, unless the release suite is complete and all-pass and the delta drops no tests', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'cert-base-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const write = (name, value) => writeFile(join(dir, name), JSON.stringify(value));
+  const a = 'test/integration/a.test.mjs';
+  const plain = {
+    pr: 1,
+    title: 'feat: a',
+    kind: 'feat',
+    behaviour: true,
+    tests: [{ file: a, titles: ['t'] }],
+    dropped: [],
+  };
+  await write('prev.json', { exit: 0, files: [], results: [] });
+  await write('base.json', { exit: 'signal SIGINT', results: [res(a, 't', 'pass')] });
+  const findings = async (release, rowsOf) => {
+    await write('delta.json', { prev: '1.0.0', version: '1.0.1', rows: rowsOf });
+    await write('release.json', release);
+    execFileSync(process.execPath, [
+      fileURLToPath(new URL('findings.mjs', tools)),
+      ...['delta', 'prev', 'release', 'base'].flatMap((k) => [`--${k}`, join(dir, `${k}.json`)]),
+      '--out',
+      join(dir, 'findings.json'),
+    ]);
+    return JSON.parse(await readFile(join(dir, 'findings.json'), 'utf8')).findings.filter(
+      (f) => f.what === 'the certified suite'
+    );
+  };
+  const green = { exit: 0, results: [res(a, 't', 'pass')] };
+  const note = {
+    kind: 'missing-evidence',
+    what: 'the certified suite',
+    exit: 'signal SIGINT',
+    results: 1,
+  };
+  assert.deepEqual(await findings(green, [plain]), [{ ...note, blocking: false }]);
+  assert.deepEqual(await findings({ exit: 1, results: [res(a, 't', 'fail')] }, [plain]), [
+    { ...note, blocking: true },
+  ]);
+  assert.deepEqual(await findings(green, [{ ...plain, dropped: [{ file: a, title: 'old' }] }]), [
+    { ...note, blocking: true, dropped: 1 },
+  ]);
+  assert.deepEqual(
+    droppedTests([
+      {
+        filename: 'test/integration/n.test.mjs',
+        previous_filename: 'test/integration/o.test.mjs',
+        status: 'renamed',
+        patch: '',
+      },
+      { filename: 'test/integration/g.test.mjs', status: 'removed', patch: '' },
+      {
+        filename: 'test/integration/k.test.mjs',
+        status: 'modified',
+        patch:
+          "@@ -1 +1 @@\n-test('old one', () => {});\n+test('new one', () => {});\n-test('kept', () => {\n+test('kept', async () => {",
+      },
+      { filename: 'src/x.ts', status: 'removed', patch: '' },
+    ]),
+    [
+      { file: 'test/integration/o.test.mjs', to: 'test/integration/n.test.mjs' },
+      { file: 'test/integration/g.test.mjs' },
+      { file: 'test/integration/k.test.mjs', title: 'old one' },
+    ]
+  );
+});
+
+test('record puts an incomplete base in the line, and FAILs it unless it was waived', async (t) => {
+  const base = { kind: 'missing-evidence', what: 'the certified suite', results: 30 };
+  assert.deepEqual(baseEvidence([]), { note: '' });
+  assert.deepEqual(baseEvidence([{ ...base, blocking: false }]), {
+    note: 'base suite incomplete (30 results)',
+  });
+  assert.deepEqual(baseEvidence([{ ...base, blocking: true, dropped: 2 }]), {
+    note: 'base suite incomplete (30 results)',
+    problem:
+      "the certified suite didn't finish (30 results), and the delta drops 2 test files or titles, so nothing stands in for it",
+  });
+  const dir = await mkdtemp(join(tmpdir(), 'cert-record-base-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(
+    join(dir, 'findings.json'),
+    JSON.stringify({ findings: [{ ...base, blocking: true }] })
+  );
+  spawnSync(
+    process.execPath,
+    [
+      fileURLToPath(new URL('record.mjs', tools)),
+      ...['--version', '1.0.1', '--review', dir, '--out', join(dir, 'out')],
+      ...['--findings', join(dir, 'findings.json'), '--planted', 'x'],
+    ],
+    { encoding: 'utf8' }
+  );
+  assert.match(
+    await readFile(join(dir, 'out/line.txt'), 'utf8'),
+    /the certified suite didn't finish \(30 results\), and the release suite isn't complete and all-pass/
   );
 });
 
