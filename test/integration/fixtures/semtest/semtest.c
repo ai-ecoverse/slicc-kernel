@@ -11,6 +11,8 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#include <sched.h>
+#include <wasi/api_wasix.h>
 
 #define IMPORT(name) __attribute__((import_module("slicc"), import_name(name)))
 IMPORT("sem_open") int k_open(const char *name, int len, int oflag, int mode, int value, unsigned *out);
@@ -171,28 +173,47 @@ static int interrupted(void) {
 
 static unsigned shared;
 static int order[3], seen;
+static volatile int tids[3];
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 
 static void *waiter(void *arg) {
+  int i = (int)(intptr_t)arg;
+  __wasi_tid_t tid = 0;
+  if (__wasi_thread_id(&tid)) tid = 0;
+  __atomic_store_n(&tids[i], (int)tid, __ATOMIC_SEQ_CST);
   if (k_wait(shared, BLOCK, 0, 0) == 0) {
     pthread_mutex_lock(&lock);
-    order[seen++] = (int)(intptr_t)arg;
+    order[seen++] = i + 1;
     pthread_mutex_unlock(&lock);
   }
   return NULL;
+}
+
+static char state_of(int tid) {
+  char path[64], buf[256];
+  snprintf(path, sizeof path, "/proc/self/task/%d/stat", tid);
+  FILE *f = fopen(path, "r");
+  if (!f) return '?';
+  size_t n = fread(buf, 1, sizeof buf - 1, f);
+  fclose(f);
+  buf[n] = 0;
+  char *close = strrchr(buf, ')');
+  return close && close[1] == ' ' ? close[2] : '?';
 }
 
 static int threads(void) {
   sopen("/fifo", CREAT, 0600, 0, &shared);
   pthread_t t[3];
   for (int i = 0; i < 3; i++) {
-    pthread_create(&t[i], NULL, waiter, (void *)(intptr_t)(i + 1));
-    usleep(50000);
+    pthread_create(&t[i], NULL, waiter, (void *)(intptr_t)i);
+    int tid;
+    while ((tid = __atomic_load_n(&tids[i], __ATOMIC_SEQ_CST)) == 0) sched_yield();
+    while (state_of(tid) != 'S') sched_yield();
   }
   printf("main still runs while 3 wait, value %d\n", value_of(shared));
   for (int i = 0; i < 3; i++) {
     k_post(shared);
-    usleep(30000);
+    while (__atomic_load_n(&seen, __ATOMIC_SEQ_CST) <= i) sched_yield();
   }
   for (int i = 0; i < 3; i++) pthread_join(t[i], NULL);
   printf("woken in order %d %d %d\n", order[0], order[1], order[2]);

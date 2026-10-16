@@ -153,6 +153,7 @@ export interface WasmProcessHandle {
   writesBack(): boolean;
   times?(): CpuTimes | undefined;
   running?(): number;
+  threads?(): Array<{ tid: number; state: 'R' | 'S' }>;
 }
 
 const CRASHED = 70;
@@ -654,7 +655,16 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     umask: () => process.umask,
     cred: () => copyCred(process.cred),
     writesBack: () => opts.program.abi === 'wasi' && !done,
+    ...clockViews(clocks),
+  };
+}
+
+function clockViews(
+  clocks: ProcessClocks
+): Pick<WasmProcessHandle, 'times' | 'running' | 'threads'> {
+  return {
     times: () => clocks.times(),
     running: () => clocks.running(),
+    threads: () => clocks.states(),
   };
 }
