@@ -3,6 +3,13 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
 const TAG = /^v\d+\.\d+\.\d+$/;
+const SEMVER = /^\d+\.\d+\.\d+$/;
+
+export function olderThan(version, latest) {
+  const a = version.split('.').map(Number);
+  const b = latest.split('.').map(Number);
+  return (a[0] - b[0] || a[1] - b[1] || a[2] - b[2]) < 0;
+}
 const DELAYS = [15000, 30000, 60000];
 
 export function exec(cmd, args) {
@@ -70,6 +77,41 @@ async function serving(label, served, sleep, log) {
   log(`npm serves ${label}`);
 }
 
+async function latestOf(name, version, run) {
+  const view = await run('npm', ['view', name, 'dist-tags.latest', '--prefer-online']);
+  const latest = view.stdout.trim();
+  if (view.code !== 0)
+    throw new Error(
+      `npm view ${name} dist-tags.latest failed (${gist(view.stderr)}), so ${version} isn't published: re-run the job`
+    );
+  if (!SEMVER.test(latest))
+    throw new Error(
+      `npm's latest for ${name} reads as "${latest}", so ${version} isn't published: re-run the job`
+    );
+  return latest;
+}
+
+async function publishNewer({ name, version, run, published, sleep, log }) {
+  const latest = await latestOf(name, version, run);
+  if (olderThan(version, latest)) {
+    log(
+      `${name}@${version} is older than npm's latest ${latest}: not published, so latest doesn't move back (${latest} carries its changes)`
+    );
+    return false;
+  }
+  await run('npm', ['version', version, '--no-git-tag-version', '--allow-same-version']);
+  const ours = await retried({
+    label: `npm publish ${version}`,
+    attempt: () => run('npm', ['publish']),
+    done: () => published(version),
+    already: (r) => PUBLISHED.test(r.stderr),
+    sleep,
+    log,
+  });
+  if (!ours) log(`${name}@${version} was already on npm`);
+  return ours;
+}
+
 export async function recover({
   name,
   outcome,
@@ -129,19 +171,11 @@ export async function recover({
       else log(`git push ${notes} failed, leaving it: ${gist(r.stderr)}`);
     }
     if (!(await published(version))) {
-      await run('npm', ['version', version, '--no-git-tag-version', '--allow-same-version']);
-      const ours = await retried({
-        label: `npm publish ${version}`,
-        attempt: () => run('npm', ['publish']),
-        done: () => published(version),
-        already: (r) => PUBLISHED.test(r.stderr),
-        sleep,
-        log,
-      });
+      const ours = await publishNewer({ name, version, run, published, sleep, log });
       if (ours) {
         recovered.push(`${name}@${version} on npm`);
         fresh.push(tag);
-      } else log(`${name}@${version} was already on npm`);
+      }
     }
     if ((await run('gh', ['release', 'view', tag])).code !== 0) {
       const r = await run('gh', [
