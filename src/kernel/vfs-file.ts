@@ -782,6 +782,11 @@ function heldIo(fs: KernelFs, nodes: VfsNodes, changed: (path: string) => void):
       const held = st.isFile ? await node(path) : undefined;
       return held ? { ...st, size: await held.serial(() => held.size()) } : st;
     },
+    async lstat(path) {
+      const st = await fs.lstat(path);
+      const held = st.isFile && !st.isSymbolicLink ? await node(path) : undefined;
+      return held ? { ...st, size: await held.serial(() => held.size()) } : st;
+    },
     async readFileBuffer(path) {
       const held = await node(path);
       if (!held) return fs.readFileBuffer(path);
