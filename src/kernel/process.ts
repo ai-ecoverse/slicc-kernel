@@ -60,6 +60,7 @@ import { PTY_OPS, type PtySyscall, type PtyTable, ptsNumber, ptySyscall } from '
 import { type RunRequest, runChild } from './run-child.ts';
 import type { SealedBroker, SealedCaller } from './sealed.ts';
 import { selectFds } from './select.ts';
+import { SEM_OPS, SemHandles, type SemSyscall, type SemTable, semSyscall } from './sem.ts';
 import { type DefaultAction, defaultAction, isSignal, SIG, sigbit } from './signals.ts';
 import { KernelSocket, LoopbackNet } from './socket.ts';
 import { SOCKET_OPS, type SocketSyscall, socketSyscall } from './socket-syscalls.ts';
@@ -234,6 +235,7 @@ export type WasmSyscall =
   | { op: 'sig-pause' }
   | SocketSyscall
   | EpollSyscall
+  | SemSyscall
   | HttpSyscall
   | PtySyscall
   | HostSyscall;
@@ -263,6 +265,10 @@ function isHttpSyscall(req: WasmSyscall): req is HttpSyscall {
 
 function isSocketSyscall(req: WasmSyscall): req is SocketSyscall {
   return req.op.startsWith('sock-');
+}
+
+function isSemSyscall(req: WasmSyscall): req is SemSyscall {
+  return req.op.startsWith('sem-');
 }
 
 function isEpollSyscall(req: WasmSyscall): req is EpollSyscall {
@@ -406,6 +412,7 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'sig-pause',
   ...SOCKET_OPS,
   ...EPOLL_OPS,
+  ...SEM_OPS,
   ...HTTP_OPS,
   ...PTY_OPS,
   ...HOST_OPS,
@@ -543,6 +550,8 @@ export interface WasmProcessOptions {
   http?: HttpHandles;
 
   locks?: LockTable;
+
+  sems?: SemTable;
 
   resolver?: Resolver;
 }
@@ -799,6 +808,7 @@ export class WasmProcess {
       if (isTtySyscall(req)) return this.ttySyscall(req);
       if (isJobSyscall(req)) return this.jobSyscall(req);
       if (isSocketSyscall(req)) return await this.socketSyscall(req, cancelled);
+      if (isSemSyscall(req)) return await this.semSyscall(req, cancelled);
       if (isEpollSyscall(req)) {
         return await epollSyscall(req, {
           fds: this.fds,
@@ -1635,6 +1645,20 @@ export class WasmProcess {
     return http.syscall(req);
   }
 
+  private semSyscall(req: SemSyscall, cancelled: AbortSignal): Promise<SyncFsResult> {
+    const known = this.fds.handles;
+    const handles = known instanceof SemHandles ? known : new SemHandles();
+    this.fds.handles = handles;
+    return semSyscall(req, {
+      table: this.options.sems,
+      handles,
+      cred: this.cred,
+      owners: this.options.owners === true,
+      umask: this.umask,
+      blocking: () => this.blockingSignal(cancelled),
+    });
+  }
+
   private socketSyscall(req: SocketSyscall, cancelled: AbortSignal): Promise<SyncFsResult> {
     this.net ??= this.options.net ?? new LoopbackNet();
     const resolver = this.options.resolver ?? HOSTS_ONLY;
@@ -1663,6 +1687,7 @@ export class WasmProcess {
       | JobSyscall
       | SocketSyscall
       | EpollSyscall
+      | SemSyscall
       | HttpSyscall
       | PtySyscall
       | HostSyscall

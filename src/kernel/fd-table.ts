@@ -10,6 +10,8 @@ export type KernelErrno =
   | 'ENOLCK'
   | 'EEXIST'
   | 'ELOOP'
+  | 'EOVERFLOW'
+  | 'ENAMETOOLONG'
   | 'EPIPE'
   | 'EMFILE'
   | 'EINVAL'
@@ -317,8 +319,15 @@ export function kernelFdKind(file: KernelFile): Exclude<KernelFdKind, 'socket'> 
   return file.seek ? 'file' : 'stream';
 }
 
+export interface ForkedHandles {
+  fork(): ForkedHandles;
+  clear(): void;
+}
+
 export class FdTable {
   static readonly MAX_FDS = 1024;
+
+  handles: ForkedHandles | undefined;
   private fds = new Map<number, OpenFile>();
   private readonly cloexec = new Set<number>();
 
@@ -433,6 +442,7 @@ export class FdTable {
     for (const [fd, file] of this.fds) child.fds.set(fd, file.retain());
     for (const fd of this.cloexec) child.cloexec.add(fd);
     for (const [fd, flags] of this.status) child.status.set(fd, flags);
+    child.handles = this.handles?.fork();
     return child;
   }
 
@@ -441,6 +451,7 @@ export class FdTable {
     this.fds.clear();
     this.cloexec.clear();
     this.status.clear();
+    this.handles?.clear();
     await Promise.allSettled(files.map((file) => Promise.resolve().then(() => file.release())));
   }
 }
