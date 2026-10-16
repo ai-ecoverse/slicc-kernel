@@ -14,6 +14,8 @@ import {
   scanFilesystems,
 } from './commands.ts';
 import type { CronClock } from './cron/clock.ts';
+import { CRONTAB_COMMAND, CRONTAB_PATH, CRONTAB_SOURCE } from './cron/command.ts';
+import { type CrontabCall, type CrontabResult, Crontabs } from './cron/crontab.ts';
 import { type CronLocks, CronService } from './cron/service.ts';
 import { FacadeHosts } from './facade/hosts.ts';
 import type { FacadeSpecs } from './facade/types.ts';
@@ -372,6 +374,7 @@ const LAYOUT: ReadonlyArray<[string, number]> = [
   ['/usr', 0o755],
   ['/usr/local', 0o755],
 ];
+const IN_TREE: ReadonlySet<string> = new Set([SUDO_PATH, CRONTAB_PATH]);
 const LOAD_SAMPLE_MS = 5000;
 const LOAD_WINDOWS_MS = [60_000, 300_000, 900_000] as const;
 const encoder = new TextEncoder();
@@ -634,6 +637,7 @@ export class Launcher {
   readonly boot = Date.now();
   readonly bootId = crypto.randomUUID();
   readonly cron: CronService;
+  private crontabs: Crontabs | undefined;
   private terminals = 0;
 
   constructor(options: LauncherOptions) {
@@ -837,7 +841,11 @@ export class Launcher {
           const tiers = await this.tiers(scope, appended);
           return scanCommands(this.scanned, tiers, tiers.length - appended.length);
         })
-        .then((commands) => this.refusals(commands).set(SUDO_COMMAND.name, SUDO_COMMAND));
+        .then((commands) =>
+          this.refusals(commands)
+            .set(SUDO_COMMAND.name, SUDO_COMMAND)
+            .set(CRONTAB_COMMAND.name, CRONTAB_COMMAND)
+        );
       this.catalogs.set(scope, found);
     }
     return found;
@@ -1327,7 +1335,7 @@ export class Launcher {
       const root = packageRootOf(at, roots) ?? PACKAGE_ROOT.exec(at)?.[1];
       if (root !== undefined) files.push(`${root}/package.json`);
     }
-    return [...new Set(files)].filter((path) => path !== '' && path !== SUDO_PATH);
+    return [...new Set(files)].filter((path) => path !== '' && !IN_TREE.has(path));
   }
 
   private async unrunnable(
@@ -1500,6 +1508,9 @@ export class Launcher {
     if (target.abi === 'js' && target.wasm === SUDO_PATH) {
       return { abi: 'js', glue: SUDO_SOURCE, path: SUDO_PATH };
     }
+    if (target.abi === 'js' && target.wasm === CRONTAB_PATH) {
+      return { abi: 'js', glue: CRONTAB_SOURCE, path: CRONTAB_PATH };
+    }
     if (target.abi === 'js' && target.wasm === REFUSED_PATH) {
       return { abi: 'js', glue: REFUSED_SOURCE, path: REFUSED_PATH };
     }
@@ -1670,6 +1681,7 @@ export class Launcher {
         cpu: this.cpuTotal(),
       }),
       sudo: (call, signal) => this.sudo(pid, call, signal),
+      crontab: (call) => this.crontab(pid, call),
       openFiles: this.openFiles,
       nodes: stack.nodes,
       held: this.held,
@@ -1908,6 +1920,15 @@ export class Launcher {
   private threadsOf(pid: number): Pick<ProcessInfo, 'threads'> {
     const threads = this.stateOf(pid) === 'S' ? this.processes.get(pid)?.threads?.() : undefined;
     return threads ? { threads } : {};
+  }
+
+  private crontab(pid: number, call: CrontabCall): Promise<CrontabResult> {
+    this.crontabs ??= new Crontabs({
+      fs: this.fs,
+      owners: this.owners,
+      lookup: (user) => this.users.lookup(user),
+    });
+    return this.crontabs.request(this.credOf(pid), call);
   }
 
   private sudo(pid: number, call: SudoCall, signal: AbortSignal): Promise<SudoResult> {

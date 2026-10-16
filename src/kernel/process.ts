@@ -1,3 +1,4 @@
+import { type CrontabCall, type CrontabResult, crontabCall } from '../cron/crontab.ts';
 import { R_OK, W_OK, walk } from '../fs/access.ts';
 import {
   type Created,
@@ -217,6 +218,7 @@ export type WasmSyscall =
     }
   | { op: 'proc-captured'; pid: number; slot: number }
   | SudoCall
+  | CrontabCall
   | RunRequest
   | { op: 'proc-exit'; status: number }
   | { op: 'proc-kill-self'; sig: number; target?: number; probe?: boolean; dry?: boolean }
@@ -396,6 +398,7 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'proc-wait',
   'proc-captured',
   'proc-sudo',
+  'proc-crontab',
   'proc-run',
   'proc-exit',
   'proc-kill-self',
@@ -512,6 +515,8 @@ export interface WasmProcessOptions {
   processes?: () => ProcessListing;
 
   sudo?: (call: SudoCall, signal: AbortSignal) => Promise<SudoResult>;
+
+  crontab?: (call: CrontabCall) => Promise<CrontabResult>;
 
   openFiles?: Set<VfsNodes>;
 
@@ -1900,7 +1905,17 @@ export class WasmProcess {
         return { ok: true, kind: 'bytes', bytes: this.children.captured(req.pid, req.slot) };
       case 'proc-sudo':
         return { ok: true, kind: 'json', json: await this.sudo(req, cancelled) };
+      case 'proc-crontab':
+        return { ok: true, kind: 'json', json: await this.crontab(req) };
     }
+  }
+
+  private async crontab(req: CrontabCall): Promise<CrontabResult> {
+    const { crontab } = this.options;
+    if (!crontab) throw new KernelError('ENOSYS');
+    const call = crontabCall(req);
+    if (!call) throw new KernelError('EINVAL');
+    return crontab(call);
   }
 
   private signalSyscall(

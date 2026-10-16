@@ -117,6 +117,7 @@ export interface SpawnWasmOptions {
   writesBack?: (pid: number) => boolean;
   processes?: () => ProcessListing;
   sudo?: WasmProcessOptions['sudo'];
+  crontab?: WasmProcessOptions['crontab'];
   openFiles?: Set<VfsNodes>;
   nodes?: VfsNodes;
   statfs?: (path: string) => Promise<{ quota: number; usage: number } | undefined>;
@@ -449,6 +450,7 @@ function processOptions(
     ...(opts.writesBack ? { writesBack: opts.writesBack } : {}),
     processes: opts.processes,
     ...(opts.sudo ? { sudo: opts.sudo } : {}),
+    ...(opts.crontab ? { crontab: opts.crontab } : {}),
     openFiles: opts.openFiles,
     ...(opts.nodes ? { nodes: opts.nodes } : {}),
     mounts: opts.mounts,

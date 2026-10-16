@@ -252,7 +252,7 @@ export class CronService {
     }
     const names = await fs.readdir(SPOOL_DIR).catch(() => [] as string[]);
     for (const name of names.sort()) {
-      if (name.startsWith('.') || name.endsWith('~') || name.endsWith('.new')) continue;
+      if (name.startsWith('.') || name.endsWith('~')) continue;
       const path = `${SPOOL_DIR}/${name}`;
       const account = await this.host.lookup(name);
       if (!account) {
