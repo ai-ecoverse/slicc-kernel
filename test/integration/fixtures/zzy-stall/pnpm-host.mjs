@@ -1,4 +1,3 @@
-
 export const errno = {
   EACCES: 2,
   EAGAIN: 6,
