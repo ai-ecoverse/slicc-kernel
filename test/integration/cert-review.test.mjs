@@ -10,6 +10,7 @@ import {
   decide,
   deltaFiles,
   diffSuites,
+  gapsOf,
   knownAsOf,
   knownLine,
   mergedPrs,
@@ -534,4 +535,18 @@ test('test titles are read as JavaScript reads them, escapes included', () => {
   assert.deepEqual(titlesFromPatch("+test('the kernel exec\\u2019d it', () => {});"), [
     'the kernel exec\u2019d it',
   ]);
+});
+
+test('test gaps go into the line in code, so a fix without a NEGATIVE is never certified silently', () => {
+  assert.deepEqual(
+    gapsOf([
+      { kind: 'no-negative', pr: 712 },
+      { kind: 'no-test', pr: 714 },
+      { kind: 'suite-regression', test: 'x' },
+      { kind: 'missing-evidence', what: 'kernel-compat' },
+      { kind: 'prev-not-run', pr: 9 },
+    ]),
+    ['#712 no-negative', '#714 no-test', '#9 prev-not-run']
+  );
+  assert.deepEqual(gapsOf(undefined), []);
 });

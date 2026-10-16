@@ -304,3 +304,9 @@ export function knownAsOf(issue, { fixedBefore, releasedAt, version, fixedIn }) 
   if (fixes.length > 0) return !fixes.some((pr) => fixedBefore(pr.mergeCommit));
   return Boolean(releasedAt && issue.closedAt && releasedAt < issue.closedAt);
 }
+
+const GAPS = new Set(['no-test', 'no-negative', 'prev-not-run', 'no-titles', 'not-run']);
+
+export function gapsOf(findings) {
+  return (findings ?? []).filter((f) => GAPS.has(f.kind) && f.pr).map((f) => `#${f.pr} ${f.kind}`);
+}

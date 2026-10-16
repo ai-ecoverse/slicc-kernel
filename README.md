@@ -871,7 +871,7 @@ Releases are cut by semantic-release on every push to `main`, in two jobs, and o
 - **record** (`record.mjs`), in code, with read-only permissions:
   - It re-downloads the tarball and checks `dist.integrity` (sha512) and the sha256, the SLSA v1 provenance (the tarball is its subject; `release.yml`, `refs/heads/main`, a GitHub-hosted builder; commit = `gitHead` = the tag), `npm audit signatures`, and that the commit is on `main`. A problem there, a `compat-crash`, or a planted build is a FAIL whatever the review says.
   - It adds the **known issues as of the release**: every issue labelled `known-issue` (open or closed) and every one in `known.json`, unless it was fixed before the release. That holds when `known.json`'s `fixedIn` names an earlier or equal version, or the merged pull request that closed it is an ancestor of the tag, or it was closed (with no closing pull request) before the release commit. An issue closed as not planned or as a duplicate is dropped.
-  - The line is `certified @ai-ecoverse/slicc-kernel@<v> sha256=<…> (ci: <run>; known: …)`.
+  - The line is `certified @ai-ecoverse/slicc-kernel@<v> sha256=<…> (ci: <run>; known: …)`. Any test gaps from the findings (`no-test`, `no-negative`, `prev-not-run`, `no-titles`, `not-run`) are appended in code as `test gaps: #<pr> <kind>`, so a fix without a NEGATIVE is never certified silently.
 - **publish** runs only for a release on `main`, never for a dry run. It puts the line into a `cert-review` commit status on the tag's commit and into the GitHub release's notes, between `<!-- cert-review -->` markers.
 
 Moving the `certified` dist-tag stays manual. Automating it needs an npm token that may change dist-tags, in a step that re-hashes the tarball and tags only on a `certified` line.
