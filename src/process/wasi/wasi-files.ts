@@ -394,7 +394,9 @@ export const CRED_GEN = 5;
 const RING = 8;
 const RING_SIZE = 64;
 const SLOT = 3;
-export const SHARED_IDS_BYTES = (RING + RING_SIZE * SLOT) * 4;
+export const FD_RING = RING + RING_SIZE * SLOT;
+export const FD_RING_SIZE = 64;
+export const SHARED_IDS_BYTES = (FD_RING + FD_RING_SIZE * 2) * 4;
 
 type Cached = SyncFsBridgeStat | Miss;
 

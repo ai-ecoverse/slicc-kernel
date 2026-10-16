@@ -17,6 +17,8 @@ import {
 import type { ProcessSys } from '../kernel-streams.ts';
 import { FDFLAGS, OFLAGS, RIGHTS } from './wasi-abi.ts';
 import {
+  FD_RING,
+  FD_RING_SIZE,
   FileBuffer,
   LocalFile,
   normalize,
@@ -175,18 +177,46 @@ export class WasiFds {
   }
 
   private sync(): void {
-    const gen = Atomics.load(this.shared as Int32Array, GEN);
+    const shared = this.shared as Int32Array;
+    const gen = Atomics.load(shared, GEN);
     if (gen === this.seen) return;
-    this.table.clear();
-    this.cloexec.clear();
+    if (!this.replay(shared, gen)) {
+      this.table.clear();
+      this.cloexec.clear();
+    }
     this.seen = gen;
   }
 
-  private bump(): void {
-    if (!this.shared) return;
-    const gen = Atomics.add(this.shared, GEN, 1) + 1;
+  private replay(shared: Int32Array, upTo: number): boolean {
+    if (upTo - this.seen > FD_RING_SIZE || !ringed(shared)) return false;
+    const changed: number[] = [];
+    for (let g = this.seen + 1; g <= upTo; g++) {
+      const at = FD_RING + (g % FD_RING_SIZE) * 2;
+      if (Atomics.load(shared, at) !== g) return false;
+      const fd = Atomics.load(shared, at + 1);
+      if (fd < 0 || Atomics.load(shared, at) !== g) return false;
+      changed.push(fd);
+    }
+    for (const fd of changed) {
+      this.table.delete(fd);
+      this.cloexec.delete(fd);
+    }
+    return true;
+  }
 
-    if (gen - 1 === this.seen) this.seen = gen;
+  private bump(...fds: number[]): void {
+    if (!this.shared) return;
+    const shared = this.shared;
+    for (const fd of fds.length > 0 ? fds : [-1]) {
+      const gen = Atomics.add(shared, GEN, 1) + 1;
+      if (ringed(shared)) {
+        const at = FD_RING + (gen % FD_RING_SIZE) * 2;
+        Atomics.store(shared, at, 0);
+        Atomics.store(shared, at + 1, fd);
+        Atomics.store(shared, at, gen);
+      }
+      if (gen - 1 === this.seen) this.seen = gen;
+    }
   }
 
   private stdioEntry(fd: number): WasiEntry {
@@ -234,7 +264,7 @@ export class WasiFds {
       e.append = append;
       if (this.shared) {
         this.publishFlags(fd, e);
-        this.bump();
+        this.bump(fd);
       }
     } else if (e.type === 'file') e.file.append = append;
   }
@@ -245,7 +275,7 @@ export class WasiFds {
     else this.cloexec.delete(fd);
     if (this.shared) {
       this.kernel.call({ op: 'fd-cloexec', fd, on });
-      this.bump();
+      this.bump(fd);
     }
   }
 
@@ -275,7 +305,7 @@ export class WasiFds {
   adopt(fd: number, kind: KernelFdKind, nonblock: boolean, dgram = false): void {
     this.table.set(fd, { type: 'kernel', kind, dgram, nonblock, append: false });
     if (this.shared && nonblock) this.publishFlags(fd, { nonblock, append: false });
-    this.bump();
+    this.bump(fd);
   }
 
   get(fd: number): WasiEntry {
@@ -304,7 +334,7 @@ export class WasiFds {
       ...(meta ? { meta } : {}),
     }) as number;
     this.table.set(fd, e);
-    this.bump();
+    this.bump(fd);
     return fd;
   }
 
@@ -323,7 +353,7 @@ export class WasiFds {
       at = this.install(e.type === 'file' ? e : { ...e }, min);
     }
     if (cloexec) this.setCloexec(at, true);
-    this.bump();
+    this.bump(at);
     return at;
   }
 
@@ -331,7 +361,7 @@ export class WasiFds {
     const [r, w] = this.kernel.sys.pipe();
     this.table.set(r, { type: 'kernel', kind: 'stream', nonblock: false, append: false });
     this.table.set(w, { type: 'kernel', kind: 'stream', nonblock: false, append: false });
-    this.bump();
+    this.bump(r, w);
     return [r, w];
   }
 
@@ -443,7 +473,7 @@ export class WasiFds {
     } finally {
       this.release(e);
       this.dropLocks(e);
-      this.bump();
+      this.bump(fd);
     }
   }
 
@@ -464,7 +494,7 @@ export class WasiFds {
     }
     if (old) this.release(old);
     this.dropLocks(old);
-    this.bump();
+    this.bump(from, to);
   }
 
   private release(e: WasiEntry): void {
@@ -685,7 +715,6 @@ export class WasiFds {
       kind = 'tty';
     } else return undefined;
     this.adopt(fd, kind, nonblock);
-    this.bump();
     return fd;
   }
 
@@ -859,7 +888,7 @@ export class WasiFds {
     if (truncate) (this.fs as { touched?(path?: string, ino?: number): void }).touched?.(path, ino);
     this.table.set(fd, { type: 'kernel', kind: 'file', nonblock: false, append, path, ino });
     if (append) this.publishFlags(fd, { nonblock: false, append });
-    this.bump();
+    this.bump(fd);
     return fd;
   }
 
@@ -899,7 +928,7 @@ export class WasiFds {
     if (e.type === 'kernel') {
       const at = this.kernel.call({ op: 'fd-dup', fd }) as number;
       this.table.set(at, { ...e });
-      this.bump();
+      this.bump(at);
       return at;
     }
     if (e.type === 'file') e.file.refs++;
@@ -912,6 +941,10 @@ function kernelEntry(): Extract<WasiEntry, { type: 'kernel' }> {
 }
 
 const GEN = 2;
+
+function ringed(shared: Int32Array): boolean {
+  return shared.length >= FD_RING + FD_RING_SIZE * 2;
+}
 
 function deviceEntry(meta: DeviceMeta): Extract<WasiEntry, { type: 'device' }> {
   return { type: 'device', device: meta.device, ...(meta.access ? { access: meta.access } : {}) };
