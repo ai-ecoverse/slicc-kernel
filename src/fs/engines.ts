@@ -3,14 +3,19 @@ type Version = [number, number, number, string[]];
 const NUMBER = /^(0|[1-9]\d*)$/;
 const PART = /^(?:0|[1-9]\d*|[xX*])$/;
 
-function identifiers(pre: string | undefined): string[] {
-  return pre === undefined || pre === '' ? [] : pre.split('.');
+const IDENTIFIER = /^(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)$/;
+
+function identifiers(pre: string | undefined): string[] | undefined {
+  if (pre === undefined) return [];
+  const ids = pre.split('.');
+  return ids.every((id) => IDENTIFIER.test(id)) ? ids : undefined;
 }
 
 export function parseVersion(text: string): Version | undefined {
   const m = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/.exec(text.trim());
-  if (!m || ![m[1], m[2], m[3]].every((n) => NUMBER.test(n as string))) return undefined;
-  return [Number(m[1]), Number(m[2]), Number(m[3]), identifiers(m[4])];
+  const pre = identifiers(m?.[4]);
+  if (!m || !pre || ![m[1], m[2], m[3]].every((n) => NUMBER.test(n as string))) return undefined;
+  return [Number(m[1]), Number(m[2]), Number(m[3]), pre];
 }
 
 function comparePre(a: string[], b: string[]): number {
@@ -51,7 +56,8 @@ function partial(text: string): Partial | undefined {
     if (p === undefined || /^[xX*]$/.test(p) || parts.includes(undefined)) parts.push(undefined);
     else parts.push(Number(p));
   }
-  return { parts, pre: identifiers(m[4]) };
+  const pre = identifiers(m[4]);
+  return pre && { parts, pre };
 }
 
 function floor(p: Partial): Version {
@@ -135,8 +141,9 @@ function comparator(token: string): Comparator[] | undefined {
   const op = m?.[1] ?? '';
   const p = partial(m?.[2] ?? '');
   if (!p) return undefined;
-  if (op === '^') return caret(p);
-  if (op.startsWith('~')) return tilde(p);
+  const wild = p.parts[0] === undefined;
+  if (op === '^') return wild ? ANY : caret(p);
+  if (op.startsWith('~')) return wild ? ANY : tilde(p);
   return plain(op, p);
 }
 
