@@ -497,6 +497,10 @@ function threadInit(
   };
 }
 
+function settleExit(exit: Promise<unknown>, settle: (status: number) => void, code: number) {
+  void exit.catch(() => undefined).then(() => settle(code & 0xff));
+}
+
 export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
   const sab = new SharedArrayBuffer(SAB_HEADER_BYTES + SAB_DEFAULT_WINDOW_BYTES);
   const header = new Int32Array(sab, 0, SAB_HEADER_I32);
@@ -567,10 +571,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     revokeSyncFsToken(token);
     opts.held?.delete(holds);
     worker.terminate();
-    void process.exit().then(
-      () => settle(code),
-      () => settle(code)
-    );
+    settleExit(process.exit(), settle, code);
   };
 
   const exitNow = (code: number): void => {

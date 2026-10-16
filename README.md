@@ -50,7 +50,7 @@ TypeScript declarations ship in `dist/types/`, and each entry (`.`, `./node`, `.
 
 ### `kernel.run(argv, options?) → Promise<{ status, signal, stdout, stderr }>`
 
-Runs `argv[0]` with `argv` as its arguments and resolves when it exits. `stdout` and `stderr` are decoded as UTF-8; `status` is the exit status, `128 + n` for a process killed by signal `n`, and `127` when `argv[0]` cannot be found. `signal` is there only when a signal ended the process, named as `'SIGKILL'`, so a `kill -9` (`status: 137, signal: 'SIGKILL'`) can be told from an `exit 137` (`status: 137`, no `signal`).
+Runs `argv[0]` with `argv` as its arguments and resolves when it exits. `stdout` and `stderr` are decoded as UTF-8; `status` is the exit status, masked to 8 bits as on Linux (a program's `exit(-1)` is 255, `exit(263)` is 7, for `kernel.run`, `openTerminal`'s `exited` and `spawn` alike), `128 + n` for a process killed by signal `n`, and `127` when `argv[0]` cannot be found. `signal` is there only when a signal ended the process, named as `'SIGKILL'`, so a `kill -9` (`status: 137, signal: 'SIGKILL'`) can be told from an `exit 137` (`status: 137`, no `signal`).
 
 | option | |
 | --- | --- |
