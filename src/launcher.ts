@@ -2475,10 +2475,32 @@ export class Launcher {
   private commandFs(root: KernelFs): KernelFs {
     return withCommandDirs(
       root,
-      async () => new Set((await this.commands()).keys()),
+      async () => this.commandNames(await this.commands()),
       (dir) => this.userCommandDir(dir),
-      this.owners
+      this.owners,
+      (path) => this.entryTarget(path)
     );
+  }
+
+  private readonly named = new WeakMap<Map<string, Command>, ReadonlySet<string>>();
+
+  private commandNames(commands: Map<string, Command>): ReadonlySet<string> {
+    let names = this.named.get(commands);
+    if (!names) {
+      names = new Set(commands.keys());
+      this.named.set(commands, names);
+    }
+    return names;
+  }
+
+  private async entryTarget(path: string): Promise<string | undefined> {
+    const system = COMMAND.exec(path)?.[1];
+    const slash = path.lastIndexOf('/');
+    const scope =
+      system === undefined ? (await this.userScopes()).byBin.get(path.slice(0, slash)) : '';
+    const name = system ?? path.slice(slash + 1);
+    const command = scope === undefined ? undefined : (await this.commands(scope)).get(name);
+    return command && (command.script ?? command.wasm);
   }
 
   private processChain(fs: KernelFs, nodes: VfsNodes, unlinked: UnlinkedKeeper): KernelFs {
