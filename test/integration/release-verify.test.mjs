@@ -77,3 +77,23 @@ test('release.yml verifies each published tag on npm after publish, code only, a
   assert.match(verify, /certified \$\{NAME\}@\$\{version\} sha256=\$\{facts\.sha256\} \(covers /);
   assert.match(verify, /supply-chain alert: /);
 });
+
+test("release.yml's tag job is light work on the light runner, publish stays on a GitHub-hosted runner with id-token, and verify on the light runner", async () => {
+  const release = await readFile(
+    new URL('../../.github/workflows/release.yml', import.meta.url),
+    'utf8'
+  );
+  const job = (name) =>
+    new RegExp(`\\n {2}${name}:\\n([\\s\\S]*?)(?=\\n {2}[a-z-]+:\\n|$)`).exec(release)?.[1] ?? '';
+  assert.match(
+    job('tag'),
+    /\n {4}runs-on: \$\{\{ vars\.CERT_LIGHT_RUNNER \|\| 'ubuntu-latest' \}\}\n/
+  );
+  assert.match(job('publish'), /\n {4}runs-on: ubuntu-latest\n/);
+  assert.match(job('publish'), /\n {6}id-token: write\n/);
+  assert.match(
+    job('verify'),
+    /\n {4}runs-on: \$\{\{ vars\.CERT_LIGHT_RUNNER \|\| 'ubuntu-latest' \}\}\n/
+  );
+  assert.doesNotMatch(release, /CERT_RUNNER /);
+});
