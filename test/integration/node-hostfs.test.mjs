@@ -54,70 +54,70 @@ async function appear(path) {
 const WAIT = ': > ready$N; while [ ! -e go$N ]; do sleep 0.05; done';
 
 for (let round = 0; round < 40; round++) {
-test(`round ${round}: hostfs through the Node entry: a host edit mid-read is ESTALE on an inherited or an opened descriptor, a write in the kernel is not`, async (t) => {
-  const dir = await folder(t, 'slicc-hostfs-');
-  const proxy = await hostfsProxy({
-    folders: { project: dir },
-    pingMs: 100,
-    capabilities: { ranges: true },
-  });
-  t.after(() => proxy.close());
-  await writeFile(join(dir, 'v'), Buffer.alloc(3 * 1024 * 1024, 65));
-  for (const name of ['v1', 'v2', 'v3']) {
-    await writeFile(join(dir, name), Buffer.alloc(3 * 1024 * 1024, 65));
-  }
-  const kernel = await mounted(t, {
-    hostfs: async (source, { readonly }) => proxy.grant(source, readonly),
-  });
-  assert.deepEqual(
-    (await kernel.mounts()).map((m) => [m.type, m.target, m.state]),
-    [['hostfs', '/mnt/h', 'ok']]
-  );
-  const run = (script) => kernel.run(['bash', '-c', script], { cwd: '/mnt/h' });
-  await kernel.writeFile('/mnt/h/api', 'from the API');
-  assert.equal(await readFile(join(dir, 'api'), 'utf8'), 'from the API');
-  assert.equal((await kernel.readFile('/mnt/h/v')).length, 3 * 1024 * 1024);
-  await run('rm api');
-  assert.equal((await run('head -c 3 v; echo; ls')).stdout, 'AAA\nv\nv1\nv2\nv3\n');
-  let n = 0;
-  const hostEdit = async (script, edit) => {
-    n += 1;
-    const done = run(`N=${n}; ${script}`);
-    await appear(join(dir, `ready${n}`));
-    proxy.mute(true);
-    await edit();
-    await writeFile(join(dir, `go${n}`), '');
-    try {
-      return await done;
-    } finally {
-      proxy.mute(false);
+  test(`round ${round}: hostfs through the Node entry: a host edit mid-read is ESTALE on an inherited or an opened descriptor, a write in the kernel is not`, async (t) => {
+    const dir = await folder(t, 'slicc-hostfs-');
+    const proxy = await hostfsProxy({
+      folders: { project: dir },
+      pingMs: 100,
+      capabilities: { ranges: true },
+    });
+    t.after(() => proxy.close());
+    await writeFile(join(dir, 'v'), Buffer.alloc(3 * 1024 * 1024, 65));
+    for (const name of ['v1', 'v2', 'v3']) {
+      await writeFile(join(dir, name), Buffer.alloc(3 * 1024 * 1024, 65));
     }
-  };
-  const append = (name) => () => appendFile(join(dir, name), 'x\n');
-  const inherited = await hostEdit(
-    `exec 3< v1; head -c 1 <&3 >/dev/null; ${WAIT}; dd bs=1048576 skip=2 count=1 <&3 of=/dev/null; echo "rc $?"`,
-    append('v1')
-  );
-  assert.equal(inherited.stdout, 'rc 1\n');
-  assert.match(inherited.stderr, /Stale file handle/);
-  const opened = await hostEdit(
-    `exec 3< v2; read -r -N 2 -u 3 a; ${WAIT}; read -r -N 2000000 -u 3 b; echo "rc $? \${#a}"`,
-    append('v2')
-  );
-  assert.equal(opened.stdout, 'rc 1 2\n');
-  assert.match(opened.stderr, /Stale file handle/);
-  const shrunk = await hostEdit(
-    `exec 3< v3; read -r -N 1 -u 3 a; ${WAIT}; dd bs=1048576 count=1 <&3 of=/dev/null; echo "rc $?"`,
-    () => writeFile(join(dir, 'v3'), '')
-  );
-  assert.equal(shrunk.stdout, 'rc 1\n');
-  assert.match(shrunk.stderr, /Stale file handle/);
-  await writeFile(join(dir, 'w'), Buffer.alloc(3 * 1024 * 1024, 66));
-  const local = await run(
-    'exec 3< w; head -c 1 <&3 >/dev/null; echo x | tee -a w >/dev/null; dd bs=1048576 skip=2 count=2 <&3 2>/dev/null | wc -c; echo "rc $?"'
-  );
-  assert.equal(local.stdout, '1048577\nrc 0\n', local.stderr);
-});
+    const kernel = await mounted(t, {
+      hostfs: async (source, { readonly }) => proxy.grant(source, readonly),
+    });
+    assert.deepEqual(
+      (await kernel.mounts()).map((m) => [m.type, m.target, m.state]),
+      [['hostfs', '/mnt/h', 'ok']]
+    );
+    const run = (script) => kernel.run(['bash', '-c', script], { cwd: '/mnt/h' });
+    await kernel.writeFile('/mnt/h/api', 'from the API');
+    assert.equal(await readFile(join(dir, 'api'), 'utf8'), 'from the API');
+    assert.equal((await kernel.readFile('/mnt/h/v')).length, 3 * 1024 * 1024);
+    await run('rm api');
+    assert.equal((await run('head -c 3 v; echo; ls')).stdout, 'AAA\nv\nv1\nv2\nv3\n');
+    let n = 0;
+    const hostEdit = async (script, edit) => {
+      n += 1;
+      const done = run(`N=${n}; ${script}`);
+      await appear(join(dir, `ready${n}`));
+      proxy.mute(true);
+      await edit();
+      await writeFile(join(dir, `go${n}`), '');
+      try {
+        return await done;
+      } finally {
+        proxy.mute(false);
+      }
+    };
+    const append = (name) => () => appendFile(join(dir, name), 'x\n');
+    const inherited = await hostEdit(
+      `exec 3< v1; head -c 1 <&3 >/dev/null; ${WAIT}; dd bs=1048576 skip=2 count=1 <&3 of=/dev/null; echo "rc $?"`,
+      append('v1')
+    );
+    assert.equal(inherited.stdout, 'rc 1\n');
+    assert.match(inherited.stderr, /Stale file handle/);
+    const opened = await hostEdit(
+      `exec 3< v2; read -r -N 2 -u 3 a; ${WAIT}; read -r -N 2000000 -u 3 b; echo "rc $? \${#a}"`,
+      append('v2')
+    );
+    assert.equal(opened.stdout, 'rc 1 2\n');
+    assert.match(opened.stderr, /Stale file handle/);
+    const shrunk = await hostEdit(
+      `exec 3< v3; read -r -N 1 -u 3 a; ${WAIT}; dd bs=1048576 count=1 <&3 of=/dev/null; echo "rc $?"`,
+      () => writeFile(join(dir, 'v3'), '')
+    );
+    assert.equal(shrunk.stdout, 'rc 1\n');
+    assert.match(shrunk.stderr, /Stale file handle/);
+    await writeFile(join(dir, 'w'), Buffer.alloc(3 * 1024 * 1024, 66));
+    const local = await run(
+      'exec 3< w; head -c 1 <&3 >/dev/null; echo x | tee -a w >/dev/null; dd bs=1048576 skip=2 count=2 <&3 2>/dev/null | wc -c; echo "rc $?"'
+    );
+    assert.equal(local.stdout, '1048577\nrc 0\n', local.stderr);
+  });
 }
 
 const ORIGIN = 'http://localhost:8787';
