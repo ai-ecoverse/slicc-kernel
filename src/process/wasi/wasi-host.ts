@@ -45,7 +45,7 @@ import {
 } from './wasi-files.ts';
 import { WasiMemory } from './wasi-memory.ts';
 import { pollOneoff } from './wasi-poll.ts';
-import type { WasiSigmask } from './wasi-sigmask.ts';
+import { libcBits, type WasiSigmask } from './wasi-sigmask.ts';
 import type { WasiSignals } from './wasi-signals.ts';
 import { sliccTty } from './wasi-termios.ts';
 import { wasixEpollImports } from './wasix-epoll.ts';
@@ -531,6 +531,11 @@ export class WasiHost {
           (sig) => void mem.view().setUint32(out, sig, true),
           this.entered
         );
+      },
+      sigaction_inherited: (out: number) => {
+        const bits = this.o.kernel.call({ op: 'sig-inherited' }) as number;
+        mem.view().setBigUint64(out, BigInt(libcBits(bits) >>> 0), true);
+        return E.SUCCESS;
       },
       sigpending_get: (out: number) => {
         if (!this.sigmask) return E.NOSYS;

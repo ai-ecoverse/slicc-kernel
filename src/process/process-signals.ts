@@ -8,8 +8,16 @@ import {
   SAB_I_TIMERS,
 } from '../realm/sync-sab-wire.ts';
 
+export interface SignalMasks {
+  caught: number;
+  ignored: number;
+  restart: number;
+  defaults?: number;
+  nocldwait?: boolean;
+}
+
 export interface SignalHooks {
-  masks(): { caught: number; ignored: number; restart: number; defaults?: number } | null;
+  masks(): SignalMasks | null;
 
   raise(sig: number): void;
 
@@ -19,7 +27,7 @@ export interface SignalHooks {
 }
 
 export class SignalGate {
-  private reported = { caught: 0, ignored: 0 };
+  private reported = { caught: 0, ignored: 0, nocldwait: false };
   private restart = 0;
 
   private lastDelivered = 0;
@@ -96,10 +104,18 @@ export class SignalGate {
     if (!masks) return;
     this.restart = masks.restart;
     const { caught, ignored, defaults = 0 } = masks;
-    const same = caught === this.reported.caught && ignored === this.reported.ignored;
+    const nocldwait = masks.nocldwait === true;
+    const was = this.reported;
+    const same = caught === was.caught && ignored === was.ignored && nocldwait === was.nocldwait;
     if (same && defaults === 0) return;
-    this.reported = { caught, ignored };
-    const req = { op: 'sig-mask' as const, caught, ignored, ...(defaults ? { defaults } : {}) };
+    this.reported = { caught, ignored, nocldwait };
+    const req = {
+      op: 'sig-mask' as const,
+      caught,
+      ignored,
+      ...(defaults ? { defaults } : {}),
+      ...(nocldwait ? { nocldwait } : {}),
+    };
     this.raw.call(req, Number.POSITIVE_INFINITY, 'sig-mask');
   }
 

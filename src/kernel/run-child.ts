@@ -117,6 +117,7 @@ export async function runChild(req: RunRequest, deps: RunDeps): Promise<Uint8Arr
       },
       stdio
     );
+    deps.children.keep(pid);
   } catch (e) {
     if (!(e instanceof SpawnError)) throw e;
     const outcome = { pid: 0, status: null, error: { code: e.code }, out: 0, err: 0 };

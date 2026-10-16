@@ -235,7 +235,8 @@ export type WasmSyscall =
   | { op: 'proc-setsid' }
   | { op: 'tty-pgrp-get'; fd: number }
   | { op: 'tty-pgrp-set'; fd: number; pgrp: number }
-  | { op: 'sig-mask'; caught: number; ignored: number; defaults?: number }
+  | { op: 'sig-mask'; caught: number; ignored: number; defaults?: number; nocldwait?: boolean }
+  | { op: 'sig-inherited' }
   | { op: 'sig-waiting'; tid: number; set: number }
   | { op: 'sig-pause' }
   | SocketSyscall
@@ -414,6 +415,7 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'tty-pgrp-get',
   'tty-pgrp-set',
   'sig-mask',
+  'sig-inherited',
   'sig-waiting',
   'sig-pause',
   ...SOCKET_OPS,
@@ -583,6 +585,8 @@ export class WasmProcess {
   private ignored = 0;
   private inherited = 0;
 
+  private nocldwait = false;
+
   private interrupt = new AbortController();
 
   private readonly gone = new AbortController();
@@ -637,6 +641,7 @@ export class WasmProcess {
     this.nodes = options.nodes ?? new VfsNodes(options.fs);
     if (!options.nodes) options.openFiles?.add(this.nodes);
     this.children.onChildState = () => this.signal(SIG.CHLD);
+    this.children.autoReap = () => this.reapsChildren();
     this.seedDl(options.dl);
     this.children.onReap = (pid) => {
       this.deathSignals.delete(pid);
@@ -767,6 +772,7 @@ export class WasmProcess {
 
   private adoptExec(pid: number): void {
     this.execChild = pid;
+    this.children.keep(pid);
     this.children.watch(pid, (state, sig) => (state === 'stopped' ? this.stop(sig) : this.cont()));
   }
 
@@ -1871,10 +1877,8 @@ export class WasmProcess {
         this.setSigwaiter(req.tid, req.set);
         return { ok: true, kind: 'void' };
       case 'sig-mask':
-        this.caught = req.caught;
-        this.ignored = req.ignored;
-        this.inherited &= ~(req.defaults ?? 0);
-        return { ok: true, kind: 'void' };
+      case 'sig-inherited':
+        return this.signalSyscall(req);
       case 'sig-pause':
         return this.pause(cancelled);
       case 'thread-kill':
@@ -1885,6 +1889,23 @@ export class WasmProcess {
       case 'proc-sudo':
         return { ok: true, kind: 'json', json: await this.sudo(req, cancelled) };
     }
+  }
+
+  private signalSyscall(
+    req: Extract<WasmSyscall, { op: 'sig-mask' | 'sig-inherited' }>
+  ): SyncFsResult {
+    if (req.op === 'sig-inherited') {
+      return { ok: true, kind: 'json', json: this.inherited & ~this.caught };
+    }
+    this.caught = req.caught;
+    this.ignored = req.ignored;
+    this.inherited &= ~(req.defaults ?? 0);
+    this.nocldwait = req.nocldwait === true;
+    return { ok: true, kind: 'void' };
+  }
+
+  private reapsChildren(): boolean {
+    return this.nocldwait || this.ignores(sigbit(SIG.CHLD));
   }
 
   private async sudo(req: SudoCall, cancelled: AbortSignal): Promise<unknown> {
