@@ -1,0 +1,12 @@
+{
+  "name": "backlogtest",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "backlogtest": {
+        "wasm": "bin/backlogtest.wasm"
+      }
+    }
+  }
+}

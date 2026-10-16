@@ -126,6 +126,7 @@ export class KernelSocket implements KernelFile {
   private backlog = 0;
   private boundAt: SockAddr | undefined;
   private readonly changes = new Changes();
+  private readonly room = new Changes();
   private readonly options = new Map<string, number>();
   constructor(net: LoopbackNet, domain: SocketDomain) {
     this.net = net;
@@ -210,7 +211,10 @@ export class KernelSocket implements KernelFile {
     for (;;) {
       if (this.state !== 'listening') throw new KernelError('EINVAL');
       const next = this.queue.shift();
-      if (next) return next;
+      if (next) {
+        this.room.wake();
+        return next;
+      }
       if (nonblock) throw new KernelError('EAGAIN');
       await this.changes.wait(signal);
     }
@@ -221,11 +225,18 @@ export class KernelSocket implements KernelFile {
     this.changes.wake();
     return true;
   }
+  get full(): boolean {
+    return this.state === 'listening' && this.queue.length >= this.backlog;
+  }
+  waitRoom(signal: AbortSignal): Promise<void> {
+    return this.room.wait(signal);
+  }
   connect(
     addr: SockAddr,
     viaUplink = true,
     cred?: PeerCred,
-    stamp?: ConnectorStamp
+    stamp?: ConnectorStamp,
+    waits = true
   ): Promise<void> | undefined {
     if (this.state === 'connected') throw new KernelError('EISCONN');
     if (this.state === 'connecting') throw new KernelError('EALREADY');
@@ -241,6 +252,16 @@ export class KernelSocket implements KernelFile {
         this.boundAt = this.local;
       } else this.local = { family: 'unix', path: '' };
     }
+    if (waits && target.full) return this.queued(addr, target, cred, stamp);
+    this.join(addr, target, cred, stamp);
+    return undefined;
+  }
+  private join(
+    addr: SockAddr,
+    target: KernelSocket,
+    cred?: PeerCred,
+    stamp?: ConnectorStamp
+  ): void {
     const server = new KernelSocket(this.net, this.domain);
     server.local = addr.family === 'inet' ? { ...addr, host: canonicalHost(addr.host) } : addr;
     server.peer = this.local;
@@ -254,7 +275,39 @@ export class KernelSocket implements KernelFile {
       server.close();
       throw new KernelError('ECONNREFUSED');
     }
-    return undefined;
+  }
+  private async queued(
+    addr: SockAddr,
+    target: KernelSocket,
+    cred?: PeerCred,
+    stamp?: ConnectorStamp
+  ): Promise<void> {
+    this.state = 'connecting';
+    const abort = new AbortController();
+    this.dialing = abort;
+    const timer = setTimeout(
+      () => abort.abort(new KernelError('ETIMEDOUT')),
+      this.net.backlogWaitMs
+    );
+    try {
+      while (target.full) await target.waitRoom(abort.signal);
+      if (abort.signal.aborted) throw abort.signal.reason;
+      this.state = 'open';
+      this.join(addr, target, cred, stamp);
+      this.dialing = undefined;
+    } catch (e) {
+      const reason = abort.signal.aborted ? abort.signal.reason : e;
+      const error = reason instanceof KernelError ? reason : new KernelError('ECONNREFUSED');
+      if (this.dialing === abort) {
+        this.dialing = undefined;
+        this.failed = error.code;
+        if (this.state === 'connecting') this.state = 'open';
+        this.changes.wake();
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
   }
   private dial(addr: Extract<SockAddr, { family: 'inet' }>, route: UplinkRoute): Promise<void> {
     this.state = 'connecting';
@@ -357,6 +410,7 @@ export class KernelSocket implements KernelFile {
     this.dialing = undefined;
     if (was === 'listening') {
       for (const pending of this.queue.splice(0)) pending.close();
+      this.room.wake();
     }
     if (this.link) {
       if (!this.readShut) this.link.rx.closeRead();
@@ -461,9 +515,10 @@ export class LoopbackNet {
     socket.listen(backlog);
     return socket;
   }
+  backlogWaitMs = DIAL_TIMEOUT_MS;
   connect(addr: SockAddr): KernelSocket {
     const socket = this.socket(addr.family);
-    void socket.connect(addr, false);
+    void socket.connect(addr, false, undefined, undefined, false);
     return socket;
   }
   bind(socket: KernelSocket, addr: SockAddr, kernel = false): SockAddr {

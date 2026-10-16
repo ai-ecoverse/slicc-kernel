@@ -389,7 +389,7 @@ const kernel = await createKernel({ network: { transport: fetchTransport() } });
 await kernel.run(['curl', '-sS', 'https://registry.npmjs.org/@ai-ecoverse/wasm-bash/latest']);
 ```
 
-- **Sockets**: `AF_INET` stream sockets on `127.x` and `AF_UNIX` sockets are kernel descriptors on one loopback network per kernel, so processes can serve and connect to each other. They survive `dup`, `fork` and `exec` and work with `select`, `poll` and WASIX epoll, like pipe ends. A bind of an `AF_UNIX` socket creates its path in OPFS. Other addresses are unreachable (`ENETUNREACH`) unless the [uplink](#uplink) routes them: otherwise programs reach the outside world only through the proxy.
+- **Sockets**: `AF_INET` stream sockets on `127.x` and `AF_UNIX` sockets are kernel descriptors on one loopback network per kernel, so processes can serve and connect to each other. They survive `dup`, `fork` and `exec` and work with `select`, `poll` and WASIX epoll, like pipe ends. A bind of an `AF_UNIX` socket creates its path in OPFS. A program's `connect` to a listener whose accept queue is full waits for a slot, as on Linux, instead of failing. A blocking connect waits, and a nonblocking one answers `EINPROGRESS` and turns writable once it's queued. After 30 s it fails with `ETIMEDOUT`, and it's `ECONNREFUSED` if the listener closes. Other addresses are unreachable (`ENETUNREACH`) unless the [uplink](#uplink) routes them: otherwise programs reach the outside world only through the proxy.
 
 #### Datagram sockets (UDP)
 
