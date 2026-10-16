@@ -42,6 +42,8 @@ export function createImports (ctx) {
     wait (timeoutMs) { const t = Date.now(); const id = raw.wait(timeoutMs); const d = Date.now() - t; zput(`W ${t - zt0} ${d} ${id} ${ops.get(id) ?? '?'} ${timeoutMs ?? '-'}`); return id },
     take (id) { const r = raw.take(id); zput(`T ${Date.now() - zt0} ${id} ${ops.get(id) ?? '?'} ${r === undefined ? 'none' : 'got'}`); return r },
   } }
+  const zcounts = new Map()
+  let zsec = 0
   const timed = (ns, table) => {
     const out = {}
     for (const [name, fn] of Object.entries(table)) {
@@ -49,6 +51,12 @@ export function createImports (ctx) {
         const t = Date.now()
         try { return fn(...args) } finally {
           const d = Date.now() - t
+          const sec = Math.floor((t - zt0) / 1000)
+          if (sec !== zsec) { if (zcounts.size) zput(`N ${zsec} ${[...zcounts].map(([k, v]) => k + '=' + v[0] + '/' + v[1]).join(' ')}`); zcounts.clear(); zsec = sec }
+          const k = `${ns}.${name}`
+          const c = zcounts.get(k) ?? [0, 0]
+          c[0]++; c[1] += d
+          zcounts.set(k, c)
           if (d >= 500) zput(`C ${t - zt0} ${d} ${ns}.${name} ${name.startsWith('wait') ? String(args[2]) : ''}`)
         }
       }
