@@ -279,7 +279,8 @@ export class ChildTable {
     const child = this.children.get(pid);
     if (!child) return;
     this.watchers.set(pid, listener);
-    if (child.stoppedBy !== undefined) listener('stopped', child.stoppedBy);
+    if (child.stoppedBy !== undefined && child.code === undefined)
+      listener('stopped', child.stoppedBy);
   }
 
   private openSlot(slot: ChildStdio, n: number, captured: Map<number, Uint8Array[]>): OpenFile {
