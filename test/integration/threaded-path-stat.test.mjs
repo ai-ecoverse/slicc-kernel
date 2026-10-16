@@ -32,15 +32,16 @@ const PY = [
   "subprocess.run(['stat', '-c', 'process %s', '/tmp/w.txt'])",
   "subprocess.run(['cat', '/tmp/w.txt']); print(flush=True)",
   "f.write(' world'); f.flush()",
-  "print('again', os.stat('/tmp/w.txt').st_size, flush=True)",
   "subprocess.run(['stat', '-c', 'process %s', '/tmp/w.txt'])",
+  "subprocess.run(['bash', '-c', 'ls -l /tmp/w.txt | cut -d \" \" -f5'])",
+  "print('again', os.stat('/tmp/w.txt').st_size, flush=True)",
 ].join('\n');
 
-test('a threaded writer’s unflushed write is seen by a path stat in another thread and another process (#774)', async (t) => {
+test('a threaded writer’s unflushed write is seen by a path stat, lstat and ls -l in another thread and another process (#774, #780)', async (t) => {
   const kernel = await createNodeKernel({ users: 'enforce' });
   t.after(() => kernel.terminate());
   for (const name of ['wasm-bash', 'wasm-coreutils', 'wasix-python']) await install(kernel, name);
   const r = await kernel.run(['python3', '-c', PY], { cwd: '/tmp' });
   assert.equal(r.stderr, '');
-  assert.equal(r.stdout, 'thread 5 5\nprocess 5\nhello\nagain 11\nprocess 11\n');
+  assert.equal(r.stdout, 'thread 5 5\nprocess 5\nhello\nprocess 11\n11\nagain 11\n');
 });
