@@ -26,14 +26,25 @@ const env = { ...process.env };
 for (const k of ['NODE_AUTH_TOKEN', 'NPM_TOKEN', 'NPM_CONFIG_TOKEN']) delete env[k];
 const view = (field) => {
   try {
-    return execFileSync('npm', ['view', ...field, '--prefer-online'], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-      env,
-    }).trim();
-  } catch {
-    return '';
+    return {
+      ok: true,
+      out: execFileSync('npm', ['view', ...field, '--prefer-online'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env,
+      }).trim(),
+    };
+  } catch (error) {
+    const text = String(error.stderr || error.message);
+    if (/\bE404\b[\s\S]*No match found for version/.test(text)) return { ok: true, out: '' };
+    return { ok: false, out: '', why: text.trim().split('\n')[0] };
   }
+};
+const refuse = (why) => {
+  say(`refuse to publish ${NAME}: ${why}`);
+  output('refused');
+  console.log(`::error title=not published::${why}`);
+  process.exit(2);
 };
 
 const tarball = existsSync(values.tarball) ? values.tarball : '';
@@ -55,8 +66,17 @@ if (gate.why) {
   process.exit(2);
 }
 const { version } = record;
-const latest = view([NAME, 'dist-tags.latest']);
-const onNpm = view([`${NAME}@${version}`, 'dist.integrity']);
+const latestView = view([NAME, 'dist-tags.latest']);
+if (!latestView.ok)
+  refuse(
+    `npm view ${NAME} dist-tags.latest failed (${latestView.why}), so the latest check can't run`
+  );
+const latest = latestView.out;
+if (!/^\d+\.\d+\.\d+$/.test(latest))
+  refuse(`npm's latest reads as "${latest}", not x.y.z, so the latest check can't run`);
+const onNpmView = view([`${NAME}@${version}`, 'dist.integrity']);
+if (!onNpmView.ok) refuse(`npm view ${NAME}@${version} failed (${onNpmView.why})`);
+const onNpm = onNpmView.out;
 const ours = sri(tarball);
 const step = publishStep({ version, latest, onNpm, ours, dryRun });
 const head = `${dryRun ? 'dry run: ' : ''}${gate.subject} sha256=${gate.sha256} (npm latest ${latest || 'none'})\n${gate.line}`;
@@ -89,7 +109,7 @@ for (let attempt = 1; ; attempt++) {
     execFileSync('npm', args, { stdio: 'inherit', env });
     break;
   } catch (error) {
-    if (!dryRun && view([`${NAME}@${version}`, 'dist.integrity']) === ours) break;
+    if (!dryRun && view([`${NAME}@${version}`, 'dist.integrity']).out === ours) break;
     if (dryRun || attempt >= 4) throw error;
     console.log(`npm publish failed (attempt ${attempt}), retrying in ${15 * 2 ** attempt} s`);
     await new Promise((done) => setTimeout(done, 15_000 * 2 ** attempt));

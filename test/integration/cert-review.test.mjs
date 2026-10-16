@@ -1114,6 +1114,120 @@ test('the publish gate refuses anything but a certified record of exactly the pa
   assert.match(none.stdout, /no tarball/);
 });
 
+test('publish.mjs fails closed when npm cannot be read, publishes a newer certified version once, and skips an older one', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'cert-publish-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const bin = join(dir, 'bin');
+  await mkdir(bin);
+  await writeFile(
+    join(bin, 'npm'),
+    `#!/usr/bin/env node
+const fs = require('node:fs');
+const [cmd, ...rest] = process.argv.slice(2);
+const e = process.env;
+if (cmd === 'publish') { fs.appendFileSync(e.FAKE_LOG, rest.join(' ') + '\\n'); process.exit(0); }
+if (cmd !== 'view') process.exit(3);
+if (rest.includes('dist-tags.latest')) {
+  if (e.FAKE_LATEST_FAIL) { console.error('npm error code ETIMEDOUT'); process.exit(1); }
+  console.log(e.FAKE_LATEST ?? '');
+  process.exit(0);
+}
+if (e.FAKE_VERSION_FAIL) { console.error('npm error code ECONNRESET'); process.exit(1); }
+if (e.FAKE_ON_NPM) { console.log(e.FAKE_ON_NPM); process.exit(0); }
+console.error('npm error code E404\\nnpm error 404 No match found for version 1.2.3');
+process.exit(1);
+`,
+    { mode: 0o755 }
+  );
+  const name = '@ai-ecoverse/slicc-kernel';
+  const ok = await tarballOf(dir, { name, version: '1.2.3', gitHead: 'c'.repeat(40) });
+  const recordFile = join(dir, 'record.json');
+  await writeFile(
+    recordFile,
+    JSON.stringify({
+      version: '1.2.3',
+      certified: true,
+      sha256: ok.sha256,
+      line: `certified ${name}@1.2.3 sha256=${ok.sha256} (ci: x; known: none)`,
+    })
+  );
+  let n = 0;
+  const publish = async (env, dry = false) => {
+    const log = join(dir, `npm-${n++}.log`);
+    await writeFile(log, '');
+    const out = join(dir, `out-${n}`);
+    const run = spawnSync(
+      process.execPath,
+      [
+        fileURLToPath(new URL('publish.mjs', tools)),
+        ...(dry ? ['--dry-run'] : []),
+        '--tarball',
+        ok.file,
+        '--record',
+        recordFile,
+        '--sha256',
+        ok.sha256,
+      ],
+      {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          FAKE_LOG: log,
+          GITHUB_OUTPUT: out,
+          GITHUB_STEP_SUMMARY: '',
+          ...env,
+        },
+      }
+    );
+    const outcome = /outcome=(\w[\w-]*)/.exec(await readFile(out, 'utf8').catch(() => ''))?.[1];
+    return {
+      status: run.status,
+      stdout: run.stdout,
+      outcome,
+      published: await readFile(log, 'utf8'),
+    };
+  };
+  for (const dry of [false, true]) {
+    const down = await publish({ FAKE_LATEST_FAIL: '1' }, dry);
+    assert.equal(down.status, 2, down.stdout);
+    assert.match(
+      down.stdout,
+      /dist-tags\.latest failed \(npm error code ETIMEDOUT\), so the latest check can't run/
+    );
+    assert.equal(down.published, '');
+    const empty = await publish({ FAKE_LATEST: '' }, dry);
+    assert.equal(empty.status, 2);
+    assert.match(empty.stdout, /npm's latest reads as "", not x\.y\.z/);
+    assert.equal(empty.published, '');
+    const version = await publish({ FAKE_LATEST: '1.2.2', FAKE_VERSION_FAIL: '1' }, dry);
+    assert.equal(version.status, 2);
+    assert.match(
+      version.stdout,
+      /npm view @ai-ecoverse\/slicc-kernel@1\.2\.3 failed \(npm error code ECONNRESET\)/
+    );
+    assert.equal(version.published, '');
+  }
+  const fresh = await publish({ FAKE_LATEST: '1.2.2' });
+  assert.equal(fresh.status, 0, fresh.stdout);
+  assert.equal(fresh.outcome, 'published');
+  assert.equal(fresh.published, `${ok.file} --provenance --access public --tag latest\n`);
+  const older = await publish({ FAKE_LATEST: '1.3.0' });
+  assert.equal(older.status, 0);
+  assert.equal(older.outcome, 'skipped');
+  assert.match(
+    older.stdout,
+    /skip, not published to npm: v1\.2\.3 is older than npm's latest 1\.3\.0/
+  );
+  assert.equal(older.published, '');
+  const olderDry = await publish({ FAKE_LATEST: '1.3.0' }, true);
+  assert.equal(olderDry.outcome, 'skipped');
+  assert.equal(
+    olderDry.published,
+    `${ok.file} --provenance --access public --tag latest --dry-run --force\n`
+  );
+});
+
 test("npm's latest only moves forward: an older version is skipped, the same version is published once, with the same bytes", () => {
   const step = (over) =>
     publishStep({
@@ -1125,7 +1239,8 @@ test("npm's latest only moves forward: an older version is skipped, the same ver
       ...over,
     });
   assert.deepEqual(step(), { action: 'publish', force: false });
-  assert.equal(step({ latest: '' }).action, 'publish');
+  assert.equal(step({ latest: '' }).action, 'refuse');
+  assert.equal(step({ latest: undefined, dryRun: true }).action, 'refuse');
   assert.equal(step({ latest: '1.3.0' }).action, 'skip');
   assert.match(step({ latest: '1.2.10' }).why, /v1\.2\.3 is older than npm's latest 1\.2\.10/);
   assert.equal(step({ latest: '1.3.0', dryRun: true }).action, 'skip');

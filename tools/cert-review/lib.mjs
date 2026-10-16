@@ -522,7 +522,12 @@ export function gateOf({ record, sha256, packed, manifest }) {
 }
 
 export function publishStep({ version, latest, onNpm, ours, dryRun }) {
-  if (latest && SEMVER.test(latest) && compareVersions(version, latest) < 0)
+  if (!SEMVER.test(latest ?? ''))
+    return {
+      action: 'refuse',
+      why: `npm's latest reads as "${latest ?? ''}", so the latest check can't run`,
+    };
+  if (compareVersions(version, latest) < 0)
     return { action: 'skip', why: `v${version} is older than npm's latest ${latest}` };
   if (onNpm && dryRun)
     return {
