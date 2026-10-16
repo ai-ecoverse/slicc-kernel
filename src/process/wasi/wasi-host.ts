@@ -110,11 +110,21 @@ function idOf(value: number): number | undefined {
   return value >>> 0 === 0xffffffff ? undefined : value >>> 0;
 }
 const S_IFIFO = 0o010000;
+const S_IFLNK = 0o120000;
 const DEFAULT_UMASK = 0o022;
 
 const MONOTONIC_BASE = BigInt(Math.round(performance.timeOrigin)) * NS_PER_MS;
 
 const MAX_READ = 1024 * 1024;
+
+const FD_ALIAS =
+  /^\/(?:dev\/(stdin|stdout|stderr)|dev\/fd\/(\d+)|proc\/(self|[1-9]\d*)\/fd\/(\d+))$/;
+const STDIO_FDS: Readonly<Record<string, number>> = { stdin: 0, stdout: 1, stderr: 2 };
+
+interface FdAlias {
+  fd: number;
+  stdio: boolean;
+}
 const SIGPIPE_EXIT = 128 + SIG.PIPE;
 
 const SIG_IGN = 1;
@@ -320,7 +330,20 @@ export class WasiHost {
         return undefined;
       }
     };
+    const fdMode = (fd: number): number => {
+      const e = fds.get(fd);
+      const kind = e.type === 'kernel' ? fds.kind(fd, e) : undefined;
+      if (kind === 'stream') return S_IFIFO | 0o600;
+      if (kind === 'sealed' || kind === 'clipboard') return SEALED_MODE;
+      return modeOf(this.o.fs.stat(pathOf(fd)));
+    };
     const pathOwned = (path: string, follow: boolean) => {
+      const alias = this.fdAlias(path);
+      if (alias && !follow) return alias.stdio ? ROOT_IDS : undefined;
+      if (alias) {
+        this.openFd(alias.fd);
+        return fdOwned(alias.fd);
+      }
       if (this.synthetic(path)) return ROOT_IDS;
       return follow ? this.o.fs.stat(path) : this.o.fs.lstat(path);
     };
@@ -379,19 +402,18 @@ export class WasiHost {
         const old = this.o.kernel.call({ op: 'proc-umask', mask }) as number;
         mem.view().setUint32(out, old, true);
       },
-      fd_mode: (fd: number, out: number) => {
-        const e = fds.get(fd);
-        const kind = e.type === 'kernel' ? fds.kind(fd, e) : undefined;
-        const mode =
-          kind === 'stream'
-            ? S_IFIFO | 0o600
-            : kind === 'sealed' || kind === 'clipboard'
-              ? SEALED_MODE
-              : modeOf(this.o.fs.stat(pathOf(fd)));
-        mem.view().setUint32(out, mode, true);
-      },
+      fd_mode: (fd: number, out: number) => void mem.view().setUint32(out, fdMode(fd), true),
       path_mode: (dirfd: number, p: number, l: number, flags: number, out: number) => {
         const path = at(dirfd, p, l);
+        const alias = this.fdAlias(path);
+        if (alias && flags & AT_SYMLINK_NOFOLLOW) {
+          this.fdTarget(alias);
+          return void mem.view().setUint32(out, S_IFLNK | 0o777, true);
+        }
+        if (alias) {
+          this.openFd(alias.fd);
+          return void mem.view().setUint32(out, fdMode(alias.fd), true);
+        }
         if (this.synthetic(path) && deviceOf(path) === undefined)
           return void mem.view().setUint32(out, SEALED_MODE, true);
         const st = flags & AT_SYMLINK_NOFOLLOW ? this.o.fs.lstat(path) : this.o.fs.stat(path);
@@ -767,7 +789,10 @@ export class WasiHost {
       ) => {
         const follow = (lookup & LOOKUP_SYMLINK_FOLLOW) !== 0;
         try {
-          const path = at(dirfd, p, l);
+          const asked = at(dirfd, p, l);
+          const alias = this.fdAlias(asked);
+          if (alias && !alias.stdio) this.openFd(alias.fd);
+          const path = alias && !alias.stdio ? `/dev/fd/${alias.fd}` : asked;
           if (deviceOf(path)) this.interrupted?.();
           const fresh =
             (oflags & OFLAGS.CREAT) !== 0 && !this.synthetic(path) && !o.fs.exists(path);
@@ -846,7 +871,9 @@ export class WasiHost {
         len: number,
         used: number
       ) => {
-        const target = new TextEncoder().encode(o.fs.readlink(at(dirfd, p, l)));
+        const path = at(dirfd, p, l);
+        const alias = this.fdAlias(path);
+        const target = new TextEncoder().encode(alias ? this.fdTarget(alias) : o.fs.readlink(path));
         const n = Math.min(len, target.length);
         mem.bytes(buf, n).set(target.subarray(0, n));
         mem.view().setUint32(used, n, true);
@@ -1248,7 +1275,59 @@ export class WasiHost {
     }
   }
 
+  private fdAlias(path: string): FdAlias | undefined {
+    const m = FD_ALIAS.exec(path);
+    if (!m) return undefined;
+    if (m[1]) return { fd: STDIO_FDS[m[1]] as number, stdio: true };
+    if (m[3] !== undefined && m[3] !== 'self' && Number(m[3]) !== this.o.pid) return undefined;
+    return { fd: Number(m[2] ?? m[4]), stdio: false };
+  }
+
+  private openFd(fd: number): void {
+    try {
+      this.fds.get(fd);
+    } catch {
+      throw new WasiError('ENOENT');
+    }
+  }
+
+  private fdTarget(alias: FdAlias): string {
+    if (alias.stdio) return `/proc/self/fd/${alias.fd}`;
+    this.openFd(alias.fd);
+    const e = this.fds.get(alias.fd);
+    if (e.type === 'file') return e.file.path;
+    if (e.type === 'dir') return e.path;
+    if (e.type === 'device') return `/dev/${e.device}`;
+    const kind = e.type === 'kernel' ? this.fds.kind(alias.fd, e) : undefined;
+    if (kind === 'file') {
+      const vfs = this.kernelStat(alias.fd);
+      if (vfs.path) return vfs.path;
+    }
+    if (kind === 'tty') return '/dev/tty';
+    if (kind === 'device') return '/dev/null';
+    const ino = this.fdFilestat(alias.fd).ino;
+    if (kind === 'stream') return `pipe:[${ino}]`;
+    if (kind === 'socket') return `socket:[${ino}]`;
+    return `anon_inode:[${kind ?? 'fd'}]`;
+  }
+
+  private aliasFilestat(path: string, alias: FdAlias, lookup: number): Filestat {
+    if ((lookup & LOOKUP_SYMLINK_FOLLOW) === 0) {
+      const target = this.fdTarget(alias);
+      return this.local({
+        filetype: FILETYPE.SYMBOLIC_LINK,
+        size: BigInt(new TextEncoder().encode(target).length),
+        ino: pathInode(path),
+        mtimeNs: 0n,
+      });
+    }
+    this.openFd(alias.fd);
+    return this.fdFilestat(alias.fd);
+  }
+
   private pathFilestat(path: string, lookup: number): Filestat {
+    const alias = this.fdAlias(path);
+    if (alias) return this.aliasFilestat(path, alias, lookup);
     if (this.synthetic(path)) {
       return this.local({
         filetype: FILETYPE.CHARACTER_DEVICE,

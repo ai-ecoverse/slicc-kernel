@@ -1104,6 +1104,14 @@ A threaded WASIX C program for `test/integration/thread-signal.test.mjs` (#520).
 
 **Build:** `WASIX_SYSROOT_28=/path/to/wasix-sysroot ./build.sh`, with `wasixcc` 0.4.7 (`-pthread`) and binaryen's `wasm-opt` on `PATH`. `bin/sigthread.wasm` is 44,788 bytes, sha256 `5781fa39d0a0032cd9b214b71de1f15f589b40e4cecd6862362048dd27f0db56`.
 
+### `fdalias`
+
+A WASIX C program for `test/integration/fd-alias.test.mjs` (#894).
+- `fdalias PATH...` prints, for each path, what `stat`, `lstat` and `readlink` give: a file type (`fifo`, `chr`, `reg`, `lnk`, `dir`, `sock`) or the error. A `pipe:[N]`/`socket:[N]` link is cut after the `[`, so the inode number doesn't enter the expected output.
+- `fdalias cat PATH` opens the path and prints what one read returns.
+
+**Build:** `WASIX_SYSROOT_28=/path/to/wasix-sysroot ./build.sh`, with `wasixcc` 0.4.7 and binaryen's `wasm-opt` on `PATH`. `bin/fdalias.wasm` is 46,260 bytes, sha256 `70412137fb34d310f8ad200345557490d0441acce4e8f917a7ad37094efb70ec`.
+
 ### `spintest`
 
 A WASIX C program and a JS command for `test/integration/transport-spin.test.mjs`, which guards the sync transport's paths from #856 (#864).
