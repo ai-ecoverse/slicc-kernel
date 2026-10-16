@@ -1,7 +1,3 @@
-// pnpm's host imports (pnpm_atomic, pnpm_fs, pnpm_host) for slicc-kernel.
-// slicc-kernel loads this module for the pnpm command
-// (slicc.commands.<name>.imports) in every worker of the process and passes
-// a ctx for that process: memory, fs, fds, syscall and async.
 
 export const errno = {
   EACCES: 2,
@@ -363,8 +359,6 @@ export function programName(request) {
     .pop();
 }
 
-// A git argument that names a network remote: a URL other than file://, or
-// scp-like user@host:path. A git+file: dependency's commands name none.
 const NETWORK_REMOTE = /^(?!file:)[a-z][a-z0-9+.-]*:\/\/|^[^/@:\s]+@[^/:\s]+:/i;
 
 export function networkRemote(request) {
@@ -649,10 +643,6 @@ function createHost(ctx) {
     });
   }
 
-  // pnpm run: pnpm spawns `sh -c '<script>'` (process.spawn, program sh); run
-  // it through the kernel's sh. A shell.spawn with a script string gets the
-  // same. Install-time lifecycle scripts stay off (ignore-scripts=true in
-  // slicc.env), so only scripts the user runs get here.
   function spawnSh(request, argv) {
     const stdio = (name) =>
       request[name] === 'ignore' || request[name] === 'null'
