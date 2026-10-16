@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -290,6 +291,8 @@ test('the plan reviews only a behaviour change with merge-ok, records a skip as 
       'h'.repeat(40),
       '--run',
       '1',
+      '--guard',
+      'PASS',
       ...extra,
     ]);
   const go = await plan(['--action', 'labeled', '--label', 'merge-ok', '--labels', 'merge-ok']);
@@ -360,6 +363,8 @@ test("the merge group's cert-review is a lookup: each PR's status on the head be
       'f'.repeat(40),
       '--run',
       '2',
+      '--guard',
+      'PASS',
     ]);
   const green = await lookup();
   assert.equal(green.code, 0, green.out);
@@ -383,17 +388,18 @@ test("the merge group's cert-review is a lookup: each PR's status on the head be
 test("the workflow: same-repo PRs with merge-ok review the merge ref with main's own tools, the key only in the review step, merge groups only look up", () => {
   assert.match(
     workflow,
-    /^ {2}pull_request:\n {4}types: \[opened, synchronize, reopened, labeled\]\n {2}merge_group:\n/m
+    /^ {2}pull_request:\n {4}types: \[opened, synchronize, reopened, labeled, unlabeled, ready_for_review\]\n {2}merge_group:\n/m
   );
   assert.match(
     workflow,
-    /github\.event\.action == 'labeled' && github\.event\.label\.name != 'merge-ok' && format\('cert-review-pr-noop-\{0\}', github\.run_id\)/
+    /\(\(github\.event\.action == 'labeled' && github\.event\.label\.name != 'merge-ok' && github\.event\.label\.name != 'cert-review-approved'\) \|\| \(github\.event\.action == 'unlabeled' && github\.event\.label\.name != 'cert-review-approved'\) \|\| github\.event\.action == 'ready_for_review'\) && format\('cert-review-pr-noop-\{0\}', github\.run_id\)/
   );
   assert.match(
     jobs.plan,
-    /if: github\.event_name == 'pull_request' && github\.event\.pull_request\.head\.repo\.full_name == github\.repository/
+    /needs: guard\n {4}if: \$\{\{ !cancelled\(\) && github\.event_name == 'pull_request' && github\.event\.pull_request\.head\.repo\.full_name == github\.repository \}\}/
   );
   for (const [name, body] of Object.entries(jobs)) {
+    if (name === 'guard') continue;
     const checkouts =
       body.match(/uses: actions\/checkout@[0-9a-f]{40}\n {8}with:\n {10}ref: [^\n]+/g) ?? [];
     assert.equal(
@@ -423,7 +429,7 @@ test("the workflow: same-repo PRs with merge-ok review the merge ref with main's
   );
   assert.match(jobs.review, /FILING: 'off'/);
   assert.doesNotMatch(workflow, /id-token|issues: write|contents: write/);
-  assert.match(jobs.group, /if: github\.event_name == 'merge_group'/);
+  assert.match(jobs.group, /if: \$\{\{ !cancelled\(\) && github\.event_name == 'merge_group' \}\}/);
   assert.match(jobs.group, /pr\.mjs lookup /);
   assert.doesNotMatch(jobs.group, /secrets\.|claude|suite\.mjs|compat\.mjs/);
   assert.match(
@@ -458,4 +464,150 @@ test('a pull request review runs kernel-compat on ten shards, and kernel-compat 
   assert.match(compat, /\n {6}shards: \$\{\{ inputs\.shards \|\| 'auto' \}\}\n/);
   const tool = await readFile(new URL('compat.mjs', tools), 'utf8');
   assert.match(tool, /\.\.\.\(values\.shards \? \{ shards: values\.shards \} : \{\}\)/);
+});
+
+test('a change to the reviewer is reviewed only with cert-review-approved on its head, by the shared self-guard, and a push takes the approval away', async (t) => {
+  const files = [{ filename: 'tools/cert-review/record.mjs' }];
+  const api = await fakeApi(t, (method, url) => {
+    if (url.startsWith('/repos/o/r/pulls/9/files')) return files;
+    if (method === 'POST' && url.startsWith('/repos/o/r/statuses/')) return {};
+    return undefined;
+  });
+  const statuses = () => api.seen.filter((x) => x.method === 'POST').map((x) => x.body);
+  const plan = (guard, extra) =>
+    pr(api.url, [
+      'plan',
+      '--repo',
+      'o/r',
+      '--pr',
+      '9',
+      '--head',
+      'h'.repeat(40),
+      '--run',
+      '1',
+      '--guard',
+      guard,
+      ...extra,
+    ]);
+  const unapproved = await plan('FAIL', [
+    '--action',
+    'labeled',
+    '--label',
+    'merge-ok',
+    '--labels',
+    'merge-ok',
+  ]);
+  assert.match(unapproved.out, /go=false/);
+  assert.equal(statuses().at(-1).state, 'failure');
+  assert.equal(
+    statuses().at(-1).description,
+    'reviewer change: needs coordinator review (cert-review-approved on this head)'
+  );
+  const approved = await plan('PASS', [
+    '--action',
+    'labeled',
+    '--label',
+    'cert-review-approved',
+    '--labels',
+    'merge-ok,cert-review-approved',
+  ]);
+  assert.match(approved.out, /go=true/);
+  assert.equal(statuses().at(-1).state, 'pending');
+  const pushed = await plan('FAIL', ['--action', 'synchronize', '--labels', 'merge-ok']);
+  assert.match(pushed.out, /go=false/);
+  assert.equal(statuses().at(-1).state, 'failure');
+  assert.match(statuses().at(-1).description, /^reviewer change: needs coordinator review/);
+  const unfinished = await plan('', ['--action', 'synchronize', '--labels', 'merge-ok']);
+  assert.match(unfinished.out, /go=false/);
+  assert.equal(statuses().at(-1).state, 'error');
+  assert.equal(
+    statuses().at(-1).description,
+    'the certification self-guard did not finish: re-run the failed jobs'
+  );
+  const before = statuses().length;
+  for (const extra of [
+    ['--action', 'ready_for_review', '--labels', 'merge-ok'],
+    ['--action', 'unlabeled', '--label', 'bug', '--labels', 'merge-ok'],
+    ['--action', 'unlabeled', '--label', 'merge-ok', '--labels', ''],
+  ]) {
+    const quiet = await plan('PASS', extra);
+    assert.match(quiet.out, /go=false/);
+  }
+  assert.equal(statuses().length, before);
+  const removed = await plan('FAIL', [
+    '--action',
+    'unlabeled',
+    '--label',
+    'cert-review-approved',
+    '--labels',
+    'merge-ok',
+  ]);
+  assert.match(removed.out, /go=false/);
+  assert.equal(statuses().at(-1).state, 'failure');
+});
+
+test('a test(...) pull request that touches src is reviewed: the filter goes by paths, never by the title or the kind', () => {
+  assert.deepEqual(
+    behaviourFiles([
+      { filename: 'src/cron/cron.ts' },
+      { filename: 'test/integration/cron.test.mjs' },
+    ]),
+    ['src/cron/cron.ts']
+  );
+  const tool = workflow + readFileSync(fileURLToPath(new URL('pr.mjs', tools)), 'utf8');
+  assert.doesNotMatch(tool, /pull_request\.title|kindOf/);
+});
+
+test('a merge group with a reviewer change the self-guard did not pass is red, and the workflow runs the pinned shared guard on every pull request and group', async (t) => {
+  const api = await fakeApi(t, (method, url) => {
+    if (method === 'POST' && url.startsWith('/repos/o/r/statuses/')) return {};
+    return undefined;
+  });
+  const posted = () => api.seen.filter((x) => x.method === 'POST').map((x) => x.body);
+  const lookup = (guard) =>
+    pr(api.url, [
+      'lookup',
+      '--repo',
+      'o/r',
+      '--base',
+      'e'.repeat(40),
+      '--head',
+      'f'.repeat(40),
+      '--run',
+      '2',
+      '--guard',
+      guard,
+    ]);
+  const red = await lookup('FAIL');
+  assert.equal(red.code, 1);
+  assert.equal(posted().at(-1).state, 'failure');
+  assert.equal(
+    posted().at(-1).description,
+    'not certified: a pull request in the group changes the reviewer without cert-review-approved on its head'
+  );
+  const lost = await lookup('INCOMPLETE');
+  assert.equal(lost.code, 1);
+  assert.equal(posted().at(-1).state, 'error');
+  assert.match(
+    jobs.guard,
+    /uses: ai-ecoverse\/slicc-shared-web\/\.github\/actions\/cert-self-guard@64467c916d5c6936992da7fad0be74b653bc303d\n {8}with:\n {10}approval-label: cert-review-approved\n {10}paths: \|\n {12}\.github\/workflows\/cert\*\.yml\n {12}\.github\/workflows\/cert\*\.yaml\n {12}scripts\/cert\/\*\*\n {12}tools\/cert-review\/\*\*\n {12}\.github\/actions\/cert-self-guard\/\*\*\n {12}\.github\/runner\.mjs\n/
+  );
+  assert.match(jobs.guard, /continue-on-error: true/);
+  assert.match(jobs.guard, /fetch-depth: 0/);
+  assert.match(
+    jobs.guard,
+    /permissions:\n {6}contents: read\n {6}checks: read\n {6}pull-requests: write\n/
+  );
+  assert.match(
+    jobs.group,
+    /needs: guard\n {4}if: \$\{\{ !cancelled\(\) && github\.event_name == 'merge_group' \}\}/
+  );
+  assert.match(jobs.group, /--guard "\$GUARD" --approval cert-review-approved/);
+  assert.match(jobs.plan, /--guard "\$GUARD" --approval cert-review-approved/);
+  for (const name of ['pack', 'delta', 'suite', 'compat', 'review', 'record', 'report'])
+    assert.match(
+      jobs[name],
+      /needs\.plan\.outputs\.go == 'true'/,
+      `${name} runs only when plan says go`
+    );
 });

@@ -15,6 +15,8 @@ const { positionals, values } = parseArgs({
     base: { type: 'string', default: '' },
     run: { type: 'string', default: '' },
     context: { type: 'string', default: 'cert-review-pr' },
+    guard: { type: 'string', default: '' },
+    approval: { type: 'string', default: 'cert-review-approved' },
   },
 });
 const { repo, context } = values;
@@ -71,11 +73,40 @@ async function status(sha, state, description) {
   console.log(`${context} ${state} on ${sha}: ${description}`);
 }
 
+const GUARD_FAIL = (label) => `reviewer change: needs coordinator review (${label} on this head)`;
+const GUARD_INCOMPLETE = 'the certification self-guard did not finish: re-run the failed jobs';
+
 async function plan() {
+  const { action, label, approval } = values;
+  const starts =
+    action === 'labeled' ? ['merge-ok', approval] : action === 'unlabeled' ? [approval] : [];
+  if (
+    action === 'ready_for_review' ||
+    ((action === 'labeled' || action === 'unlabeled') && !starts.includes(label))
+  ) {
+    summary(`#${values.pr}: ${action} ${label} doesn't start or change a review`);
+    return output({ go: 'false', behaviour: '', self: 'false' });
+  }
   const files = await all(`repos/${repo}/pulls/${values.pr}/files`);
   const behaviour = behaviourFiles(files);
   const labelled = values.labels.split(',').includes('merge-ok');
   const self = reviewsItself(files);
+  if (values.guard !== 'PASS') {
+    const fail = values.guard === 'FAIL';
+    await status(
+      values.head,
+      fail ? 'failure' : 'error',
+      fail ? GUARD_FAIL(approval) : GUARD_INCOMPLETE
+    );
+    summary(
+      `#${values.pr}: the certification self-guard says ${values.guard || 'nothing'}: not reviewed`
+    );
+    return output({ go: 'false', behaviour: behaviour.join(','), self: String(self) });
+  }
+  if (label === approval && !self) {
+    summary(`#${values.pr} doesn't change the reviewer: ${action} ${label} changes nothing`);
+    return output({ go: 'false', behaviour: behaviour.join(','), self: 'false' });
+  }
   if (behaviour.length === 0) {
     await status(
       values.head,
@@ -84,10 +115,6 @@ async function plan() {
     );
     summary(`#${values.pr} changes no shipped behaviour: not reviewed, cert-review success`);
     return output({ go: 'false', behaviour: '', self: 'false' });
-  }
-  if (values.action === 'labeled' && values.label !== 'merge-ok') {
-    summary(`#${values.pr}: the label ${values.label} doesn't start a review`);
-    return output({ go: 'false', behaviour: behaviour.join(','), self: String(self) });
   }
   if (!labelled) {
     await status(
@@ -103,6 +130,15 @@ async function plan() {
 }
 
 async function lookup() {
+  if (values.guard !== 'PASS') {
+    const fail = values.guard === 'FAIL';
+    const line = fail
+      ? `not certified: a pull request in the group changes the reviewer without ${values.approval} on its head`
+      : GUARD_INCOMPLETE;
+    await status(values.head, fail ? 'failure' : 'error', line);
+    console.log(`::error title=not certified::${line}`);
+    process.exit(1);
+  }
   const commits = await all(`repos/${repo}/compare/${values.base}...${values.head}`);
   const prs = [];
   for (const n of mergedPrs(commits)) {
