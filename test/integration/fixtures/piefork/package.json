@@ -1,0 +1,12 @@
+{
+  "name": "piefork",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "piefork": {
+        "wasm": "bin/piefork.wasm"
+      }
+    }
+  }
+}
