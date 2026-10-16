@@ -6,12 +6,14 @@ import type { ResolveFamily } from './net/uplink.ts';
 import {
   type ConnectorStamp,
   KernelSocket,
+  keyOf,
   type LoopbackNet,
   type PeerCred,
   type SockAddr,
   type SocketDomain,
 } from './socket.ts';
 import { filePath, type SocketNames } from './socket-nodes.ts';
+import { type UnixAddr, UnixDgram } from './unix-dgram.ts';
 export type SocketSyscall =
   | {
       op: 'sock-open';
@@ -21,6 +23,7 @@ export type SocketSyscall =
   | {
       op: 'sock-pair';
       domain: SocketDomain;
+      type?: 'stream' | 'dgram';
     }
   | {
       op: 'sock-bind';
@@ -111,20 +114,30 @@ export interface SocketProcess {
 }
 function socketAt(fds: FdTable, fd: number): KernelSocket {
   const file = anySocketAt(fds, fd);
-  if (file instanceof KernelDgram) throw new KernelError('EOPNOTSUPP');
+  if (!(file instanceof KernelSocket)) throw new KernelError('EOPNOTSUPP');
   return file;
 }
-function anySocketAt(fds: FdTable, fd: number): KernelSocket | KernelDgram {
+function anySocketAt(fds: FdTable, fd: number): KernelSocket | KernelDgram | UnixDgram {
   const file = fds.get(fd).file;
-  if (!(file instanceof KernelSocket) && !(file instanceof KernelDgram)) {
+  if (
+    !(file instanceof KernelSocket) &&
+    !(file instanceof KernelDgram) &&
+    !(file instanceof UnixDgram)
+  ) {
     throw new KernelError('ENOTSOCK');
   }
   return file;
 }
-function dgramAt(fds: FdTable, fd: number): KernelDgram {
+function dgramAt(fds: FdTable, fd: number): KernelDgram | UnixDgram {
   const file = anySocketAt(fds, fd);
-  if (!(file instanceof KernelDgram)) throw new KernelError('EOPNOTSUPP');
+  if (file instanceof KernelSocket) throw new KernelError('EOPNOTSUPP');
   return file;
+}
+async function unixTarget(proc: SocketProcess, addr: SockAddr): Promise<UnixDgram> {
+  if (addr.family !== 'unix') throw new KernelError('EAFNOSUPPORT');
+  const path = filePath(addr);
+  const name = path !== undefined ? await proc.names?.find(path) : undefined;
+  return proc.net.unixDgramAt(keyOf(path !== undefined ? { family: 'unix', path } : addr, name));
 }
 const ok = (json?: unknown): SyncFsResult =>
   json === undefined ? { ok: true, kind: 'void' } : { ok: true, kind: 'json', json };
@@ -135,12 +148,19 @@ export async function socketSyscall(
   const { fds, net } = proc;
   switch (req.op) {
     case 'sock-open': {
-      if (req.type === 'dgram' && req.domain !== 'inet') throw new KernelError('EPROTONOSUPPORT');
-      const file = req.type === 'dgram' ? new KernelDgram(net) : net.socket(req.domain);
+      const file =
+        req.type !== 'dgram'
+          ? net.socket(req.domain)
+          : req.domain === 'unix'
+            ? new UnixDgram(net)
+            : new KernelDgram(net);
       return ok(fds.install(new OpenFile(file), 3));
     }
     case 'sock-pair': {
-      const [a, b] = KernelSocket.pair(net, req.domain, proc.cred?.());
+      const [a, b] =
+        req.type === 'dgram' && req.domain === 'unix'
+          ? UnixDgram.pair(net, proc.cred?.())
+          : KernelSocket.pair(net, req.domain, proc.cred?.());
       const first = fds.install(new OpenFile(a), 3);
       try {
         return ok([first, fds.install(new OpenFile(b), 3)]);
@@ -166,7 +186,7 @@ export async function socketSyscall(
       const socket = anySocketAt(fds, req.fd);
       const addr = req.peer ? socket.peer : socket.local;
       if (req.peer && !addr) throw new KernelError('ENOTCONN');
-      return ok(addr ?? unnamed(socket instanceof KernelDgram ? 'inet' : socket.domain));
+      return ok(addr ?? unnamed(socket instanceof KernelSocket ? socket.domain : domainOf(socket)));
     }
     case 'sock-getopt':
       return ok(anySocketAt(fds, req.fd).getOption(req.level, req.name));
@@ -191,6 +211,10 @@ async function connect(
     target.connectTo(req.addr);
     return ok();
   }
+  if (target instanceof UnixDgram) {
+    target.connectTo(req.addr as UnixAddr, await unixTarget(proc, req.addr));
+    return ok();
+  }
   const path = filePath(req.addr);
   const name = path !== undefined ? await proc.names?.find(path) : undefined;
   const stamp = proc.net.facadeAt(req.addr) && (await proc.stamp?.());
@@ -202,8 +226,27 @@ async function connect(
   if (dialing !== undefined) await interruptible(dialing, proc.blocking());
   return ok();
 }
+async function bindUnixDgram(
+  proc: SocketProcess,
+  socket: UnixDgram,
+  addr: SockAddr
+): Promise<void> {
+  const path = filePath(addr);
+  if (path === undefined || !proc.names) {
+    socket.bind(addr, keyOf(addr));
+    return;
+  }
+  const name = await proc.names.make(path);
+  try {
+    socket.bind({ family: 'unix', path }, keyOf({ family: 'unix', path }, name));
+  } catch (err) {
+    await name.remove();
+    throw err;
+  }
+}
 async function bind(proc: SocketProcess, fd: number, addr: SockAddr): Promise<void> {
   const socket = anySocketAt(proc.fds, fd);
+  if (socket instanceof UnixDgram) return bindUnixDgram(proc, socket, addr);
   const path = filePath(addr);
   if (!(socket instanceof KernelSocket) || path === undefined || !proc.names) {
     socket.bind(addr);
@@ -223,6 +266,7 @@ async function datagram(
   proc: SocketProcess
 ): Promise<SyncFsResult> {
   const dgram = dgramAt(proc.fds, req.fd);
+  if (dgram instanceof UnixDgram) return unixDatagram(req, dgram, proc);
   if (req.op === 'sock-sendto') {
     if (req.nonblock && !pollFile(dgram).writable) throw new KernelError('EAGAIN');
     return ok(await dgram.send(req.body, req.addr));
@@ -232,6 +276,28 @@ async function datagram(
   const got = await dgram.receive(req.max, req.peek, ready ? undefined : proc.blocking());
   const { bytes, from, truncated } = got;
   return { ok: true, kind: 'bytes', bytes: encodeReceived({ bytes, truncated, ...from }) };
+}
+async function unixDatagram(
+  req: Extract<SocketSyscall, { op: 'sock-sendto' | 'sock-recvfrom' }>,
+  dgram: UnixDgram,
+  proc: SocketProcess
+): Promise<SyncFsResult> {
+  if (req.op === 'sock-sendto') {
+    const to = req.addr ? await unixTarget(proc, req.addr) : dgram.destination();
+    return ok(await dgram.send(req.body, to, req.nonblock, proc.blocking()));
+  }
+  const ready = pollFile(dgram).readable;
+  if (req.nonblock && !ready) throw new KernelError('EAGAIN');
+  const got = await dgram.receive(req.max, req.peek, ready ? undefined : proc.blocking());
+  const { bytes, from, truncated } = got;
+  return {
+    ok: true,
+    kind: 'bytes',
+    bytes: encodeReceived({ bytes, truncated, host: from.path, port: 0, unix: true }),
+  };
+}
+function domainOf(socket: KernelDgram | UnixDgram): SocketDomain {
+  return socket instanceof UnixDgram ? 'unix' : 'inet';
 }
 function interruptible(dialing: Promise<void>, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {

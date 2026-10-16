@@ -99,11 +99,22 @@ function ipv4(host: string): number[] | undefined {
 
 function openRequest(af: number, type: number) {
   if (af !== INET4 && af !== INET6 && af !== UNIX) throw new WasiError('EAFNOSUPPORT');
-  if (type !== STREAM && (type !== DGRAM || af === UNIX)) throw new WasiError('EPROTONOSUPPORT');
+  if (type !== STREAM && type !== DGRAM) throw new WasiError('EPROTONOSUPPORT');
   const domain = af === UNIX ? ('unix' as const) : ('inet' as const);
   return {
     op: 'sock-open' as const,
     domain,
+    ...(type === DGRAM ? { type: 'dgram' as const } : {}),
+  };
+}
+
+function pairRequest(af: number, type: number) {
+  if (af !== UNIX)
+    throw new WasiError(af === INET4 || af === INET6 ? 'EOPNOTSUPP' : 'EAFNOSUPPORT');
+  if (type !== STREAM && type !== DGRAM) throw new WasiError('EPROTONOSUPPORT');
+  return {
+    op: 'sock-pair' as const,
+    domain: 'unix' as const,
     ...(type === DGRAM ? { type: 'dgram' as const } : {}),
   };
 }
@@ -139,12 +150,15 @@ export function datagramCalls(host: WasiHost) {
       const view = mem.view();
       view.setUint32(outLen, mem.scatter(iovs, n, got.bytes), true);
       view.setUint16(outFlags, got.truncated ? RECV_DATA_TRUNCATED : 0, true);
-      if (outAddr)
-        writeAddr(mem.view(), outAddr, { family: 'inet', host: got.host, port: got.port });
+      const from: SockAddr = got.unix
+        ? { family: 'unix', path: got.host }
+        : { family: 'inet', host: got.host, port: got.port };
+      if (outAddr) writeAddr(mem.view(), outAddr, from);
       return E.SUCCESS;
     },
     sendTo(fd: number, nonblock: boolean, iovs: number, n: number, addr: number, out: number) {
-      const to = optionalAddr(mem.view(), addr);
+      const named = optionalAddr(mem.view(), addr);
+      const to = named && absolute(host.cwd, named);
       const body = mem.gather(iovs, n);
       const sent = call({ op: 'sock-sendto', fd, body, ...(to ? { addr: to } : {}), nonblock });
       mem.view().setUint32(out, sent as number, true);
@@ -183,14 +197,12 @@ export function wasixSocketImports(
       mem.view().setUint32(out, fd, true);
     },
     sock_pair: (af: number, type: number, _proto: number, out1: number, out2: number) => {
-      if (af !== UNIX)
-        throw new WasiError(af === INET4 || af === INET6 ? 'EOPNOTSUPP' : 'EAFNOSUPPORT');
-      if (type !== STREAM) throw new WasiError('EPROTONOSUPPORT');
+      const req = pairRequest(af, type);
       mem.view().setUint32(out1, 0, true);
       mem.view().setUint32(out2, 0, true);
-      const [a, b] = call({ op: 'sock-pair', domain: 'unix' }) as [number, number];
-      fds.adopt(a, 'socket', false);
-      fds.adopt(b, 'socket', false);
+      const [a, b] = call(req) as [number, number];
+      fds.adopt(a, 'socket', false, 'type' in req);
+      fds.adopt(b, 'socket', false, 'type' in req);
       mem.view().setUint32(out1, a, true);
       mem.view().setUint32(out2, b, true);
     },
