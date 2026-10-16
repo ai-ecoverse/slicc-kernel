@@ -46,6 +46,7 @@ import { pollOneoff } from './wasi-poll.ts';
 import type { WasiSigmask } from './wasi-sigmask.ts';
 import type { WasiSignals } from './wasi-signals.ts';
 import { sliccTty } from './wasi-termios.ts';
+import type { ThreadEntry } from './wasix-fork.ts';
 import { datagramCalls } from './wasix-sockets.ts';
 
 export class WasiExit extends Error {
@@ -194,6 +195,8 @@ export class WasiHost {
   sigmask: WasiSigmask | undefined;
 
   linkedTls: (() => Array<[number, number]>) | undefined;
+
+  threadEntry: ThreadEntry | undefined;
 
   linkedModules: (() => Record<string, WebAssembly.Module>) | undefined;
 

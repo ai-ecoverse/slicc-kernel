@@ -343,6 +343,49 @@ function report(stats: WasiStats, sys: { write(fd: number, bytes: Uint8Array): u
   } catch {}
 }
 
+const START_STACK = 0;
+const START_STACK_SIZE = 56;
+
+function isWasix(module: WebAssembly.Module): boolean {
+  return WebAssembly.Module.imports(module).some((i) => i.module === WASIX);
+}
+
+const MIN_THREAD_STACK = 4096;
+const START_ARGS_SLACK = 64;
+
+export function threadStackLow(memory: DataView, start: number): number | undefined {
+  if (start < 0 || start + START_ARGS_SLACK > memory.byteLength) return undefined;
+  const stack = memory.getUint32(start + START_STACK, true);
+  const size = memory.getUint32(start + START_STACK_SIZE, true);
+  if (size < MIN_THREAD_STACK || size > memory.byteLength || size > stack) return undefined;
+  if (stack % 16 !== 0 || stack > start + START_ARGS_SLACK || stack + START_ARGS_SLACK < start) {
+    return undefined;
+  }
+  return stack - size;
+}
+
+function ownStack(
+  driver: AsyncifyDriver,
+  instance: WebAssembly.Instance,
+  linked: WebAssembly.Global | undefined,
+  low: number
+): boolean {
+  const own = instance.exports.__stack_pointer;
+  const pointer = own instanceof WebAssembly.Global ? own : linked;
+  if (!pointer) return false;
+  driver.useThreadStack(pointer, low);
+  return true;
+}
+
+function untilDone(run: () => void, driver: AsyncifyDriver): void {
+  do run();
+  while (driver.resume());
+}
+
+function threadStart(instance: WebAssembly.Instance): (tid: number, arg: number) => void {
+  return instance.exports.wasi_thread_start as (tid: number, arg: number) => void;
+}
+
 function spawnsThreads(module: WebAssembly.Module): boolean {
   return WebAssembly.Module.imports(module).some(
     (i) =>
@@ -373,7 +416,11 @@ async function instantiate(
     foreign?: ForeignResults | undefined;
     path?: string | undefined;
   } = {}
-): Promise<{ instance: WebAssembly.Instance; driver: AsyncifyDriver }> {
+): Promise<{
+  instance: WebAssembly.Instance;
+  driver: AsyncifyDriver;
+  linkedStack: WebAssembly.Global | undefined;
+}> {
   const driver = new AsyncifyDriver(host.mem);
   const wasixHost = WebAssembly.Module.imports(module).some((i) => i.module === WASIX)
     ? new WasixHost(host, driver, module)
@@ -452,7 +499,7 @@ async function instantiate(
   }
   if (sync) bindLinker(host, sync, instance, { thread, forked, path });
   if (sync && !thread) driver.useStack(sync.linker.stackPointer, sync.linker.stackLow);
-  return { instance, driver };
+  return { instance, driver, linkedStack: sync?.linker.stackPointer };
 }
 
 function bindLinker(
@@ -702,7 +749,7 @@ export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike
     };
   }
   const program = await programImports(init.program, host, transport, MAIN_TID);
-  const { instance, driver } = await instantiate(host, module, memory, threads, {
+  const { instance, driver, linkedStack } = await instantiate(host, module, memory, threads, {
     ...(fork ? { forked: fork } : {}),
     stats,
     signals,
@@ -722,11 +769,16 @@ export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike
   host.muted = (fd, data) => signals.muted(fd, data);
   const exports = instance.exports as { _start: () => void };
   driver.bind(instance.exports);
+  const entry = fork?.entry;
+  if (entry) {
+    ownStack(driver, instance, linkedStack, entry.low);
+    host.threadEntry = entry;
+  }
+  const run = entry ? () => threadStart(instance)(entry.tid, entry.arg) : () => exports._start();
   try {
     if (fork) driver.startChild(fork);
 
-    do exports._start();
-    while (driver.resume());
+    untilDone(run, driver);
     return 0;
   } catch (e) {
     if (e instanceof WasiExit) return e.code;
@@ -819,7 +871,9 @@ export async function runWasiThread(init: WasmThreadInitMsg, port: SabPostLike):
   host.sigmask = sigmaskOf(init.program.module, init.sab, gate, threads, init.signals);
 
   const program = await programImports(init.program, host, transport, thread.tid);
-  const { instance } = await instantiate(host, init.program.module, thread.memory, threads, {
+  const { module } = init.program;
+  const { memory } = thread;
+  const { instance, driver, linkedStack } = await instantiate(host, module, memory, threads, {
     thread: true,
     foreign: init.program.foreign,
     path: init.program.path,
@@ -829,9 +883,14 @@ export async function runWasiThread(init: WasmThreadInitMsg, port: SabPostLike):
   signals.register(SIGNAL_CALLBACK);
   wireSignals(host, gate);
   host.onRaise = (sig) => signals.raised(sig);
-  const start = instance.exports.wasi_thread_start as (tid: number, arg: number) => void;
+  const low = isWasix(module) ? threadStackLow(host.mem.view(), thread.arg) : undefined;
+  if (low !== undefined && ownStack(driver, instance, linkedStack, low)) {
+    driver.bind(instance.exports);
+    host.threadEntry = { tid: thread.tid, arg: thread.arg, low };
+  }
+  const start = threadStart(instance);
   try {
-    start(thread.tid, thread.arg);
+    untilDone(() => start(thread.tid, thread.arg), driver);
     threads.exited();
   } catch (e) {
     if (e instanceof ThreadExit) {

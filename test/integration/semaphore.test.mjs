@@ -59,6 +59,14 @@ test('a timed wait times out by either clock, never early, and an expired one is
   );
 });
 
+test('a timed wait stopped and continued by job control still ends at its deadline, not a full timeout later (#719)', async (t) => {
+  const kernel = await booted(t);
+  assert.deepEqual(
+    await run(kernel, 'stopped'),
+    ok('wait Operation timed out, at the deadline', 'stopped while blocked in the wait: yes')
+  );
+});
+
 test('a signal handler interrupts a blocked sem_wait with EINTR (#717)', async (t) => {
   const kernel = await booted(t);
   assert.deepEqual(

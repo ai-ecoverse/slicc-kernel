@@ -1,0 +1,15 @@
+{
+  "name": "threadjmp",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "threadjmp": {
+        "wasm": "bin/threadjmp.wasm"
+      },
+      "threadjmp-pie": {
+        "wasm": "bin/threadjmp-pie.wasm"
+      }
+    }
+  }
+}
