@@ -102,11 +102,12 @@ const runPick = async (workspace) => {
   return out;
 };
 
-test('CI loads the decider from the base commit, never from the code under test', () => {
+test('CI loads the decider from the protected branch for a merge group and the base commit for a PR, never from the code under test', () => {
   assert.match(
     ci,
-    /\n {10}ref: \$\{\{ github\.event\.merge_group\.base_sha \|\| github\.event\.pull_request\.base\.sha \|\| github\.sha \}\}\n {10}sparse-checkout: \.github\/runner\.mjs\n/
+    /\n {10}ref: \$\{\{ github\.event\.merge_group\.base_ref \|\| github\.event\.pull_request\.base\.sha \|\| github\.sha \}\}\n {10}sparse-checkout: \.github\/runner\.mjs\n/
   );
+  assert.doesNotMatch(ci, /merge_group\.base_sha/);
 });
 
 test('the pick step uses the decider and falls back to a hosted runner when it is missing or fails', async () => {
