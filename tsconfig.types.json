@@ -1,0 +1,13 @@
+{
+  "extends": "@ai-ecoverse/slicc-shared-web/tsconfig.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "noEmit": false,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "rewriteRelativeImportExtensions": true,
+    "rootDir": "src",
+    "outDir": "dist/types"
+  },
+  "files": ["src/index.ts", "src/node.ts", "src/driver.ts", "src/testing.ts", "src/meta.ts"]
+}
