@@ -53,6 +53,7 @@ export interface SyncFsStatJson {
   isDirectory: boolean;
   isFile: boolean;
   isSymbolicLink: boolean;
+  isSocket?: boolean;
   size: number;
   mode: number;
   mtimeMs: number;
@@ -75,6 +76,7 @@ function statJson(s: FsStat): SyncFsStatJson {
     isDirectory: s.isDirectory,
     isFile: s.isFile,
     isSymbolicLink: s.isSymbolicLink,
+    ...(s.isSocket ? { isSocket: true } : {}),
     size: s.size,
     mode: s.mode,
     mtimeMs: s.mtime.getTime(),

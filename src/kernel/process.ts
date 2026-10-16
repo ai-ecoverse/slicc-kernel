@@ -64,6 +64,7 @@ import { selectFds } from './select.ts';
 import { SEM_OPS, SemHandles, type SemSyscall, type SemTable, semSyscall } from './sem.ts';
 import { type DefaultAction, defaultAction, isSignal, SIG, sigbit } from './signals.ts';
 import { KernelSocket, LoopbackNet } from './socket.ts';
+import { socketNames } from './socket-nodes.ts';
 import { SOCKET_OPS, type SocketSyscall, socketSyscall } from './socket-syscalls.ts';
 import { repeating } from './timer.ts';
 import type { KernelTty, Termios } from './tty.ts';
@@ -1705,6 +1706,18 @@ export class WasmProcess {
       resolve: (name, family, blocking) => resolver.resolve(name, family, blocking),
       cred: () => ({ pid: this.pid, uid: this.cred.euid, gid: this.cred.egid }),
       stamp: () => this.connectorStamp(),
+      names: socketNames({
+        fs: this.heldFs() as KernelFs,
+        guard: () => this.guarded(),
+        create: (path, owner) => this.nodes.createExclusive(path, owner),
+        owner: () => ({
+          uid: this.cred.euid,
+          gid: this.cred.egid,
+          mode: 0o777 & ~this.umask,
+          socket: true,
+        }),
+        owners: this.options.owners === true,
+      }),
     });
   }
 

@@ -73,6 +73,7 @@ export interface SyncFsBridgeStat {
   isFile: boolean;
   isDirectory: boolean;
   isSymbolicLink?: boolean;
+  isSocket?: boolean;
   size: number;
   mode?: number;
   mtimeMs?: number;
@@ -175,6 +176,7 @@ export function parseSyncFsStat(json: unknown): SyncFsBridgeStat | null {
     isFile: s.isFile,
     isDirectory: s.isDirectory,
     isSymbolicLink: s.isSymbolicLink,
+    ...(s.isSocket === true ? { isSocket: true } : {}),
     size: s.size,
     ...(typeof s.mode === 'number' ? { mode: s.mode } : {}),
     ...(typeof s.mtimeMs === 'number' ? { mtimeMs: s.mtimeMs } : {}),

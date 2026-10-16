@@ -140,6 +140,7 @@ function filetypeOf(s: SyncFsBridgeStat | null | undefined): number {
   if (!s) return FILETYPE.UNKNOWN;
   if (s.isSymbolicLink) return FILETYPE.SYMBOLIC_LINK;
   if (s.isDirectory) return FILETYPE.DIRECTORY;
+  if (s.isSocket) return FILETYPE.SOCKET_STREAM;
   return s.isFile ? FILETYPE.REGULAR_FILE : FILETYPE.UNKNOWN;
 }
 
