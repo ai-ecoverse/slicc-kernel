@@ -605,3 +605,15 @@ test('review, record and publish never start once the run is cancelled: they use
     );
   }
 });
+
+test('the review runs for releases the merge queue pushed: claude-code-action allows the github-merge-queue and Renovate bots', async () => {
+  const workflow = await readFile(
+    new URL('../../.github/workflows/cert-review.yml', import.meta.url),
+    'utf8'
+  );
+  const step =
+    /uses: anthropics\/claude-code-action@[0-9a-f]{40}\n {8}env:[\s\S]*?\n {8}with:\n([\s\S]*?)\n {6}- /.exec(
+      workflow
+    )?.[1] ?? '';
+  assert.match(step, /^ {10}allowed_bots: 'github-merge-queue,renovate\[bot\]'$/m);
+});

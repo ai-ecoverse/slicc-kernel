@@ -379,6 +379,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         with:
           use_bedrock: 'true'
+          allowed_bots: 'github-merge-queue,renovate[bot]'
           github_token: ${{ github.token }}
           show_full_output: ${{ github.event_name == 'workflow_dispatch' }}
           claude_args: |
