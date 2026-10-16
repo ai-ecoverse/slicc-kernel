@@ -20,6 +20,7 @@ interface Hop {
 
 const CHUNK = 64 * 1024;
 const MAX_REDIRECTS = 20;
+const keptRequests = new WeakMap<ReadableStream<Uint8Array>, Request>();
 const NULL_BODY = new Set([101, 103, 204, 205, 304]);
 const REDIRECTS = new Set([301, 302, 303, 307, 308]);
 const BODY_HEADERS = new Set([
@@ -396,12 +397,13 @@ export function fetchOp(kernel: JsKernel) {
     }
   };
 
-  const body = (handle: number, signal: AbortSignal): ReadableStream<Uint8Array> => {
+  const body = (handle: number, request: Request): ReadableStream<Uint8Array> => {
+    const { signal } = request;
     let aborted: (() => void) | undefined;
     const settle = (): void => {
       if (aborted) signal.removeEventListener('abort', aborted);
     };
-    return new ReadableStream<Uint8Array>(
+    const stream = new ReadableStream<Uint8Array>(
       {
         start(controller) {
           aborted = () => {
@@ -436,6 +438,8 @@ export function fetchOp(kernel: JsKernel) {
       },
       { highWaterMark: 0 }
     );
+    keptRequests.set(stream, request);
+    return stream;
   };
 
   const respond = (
@@ -443,7 +447,7 @@ export function fetchOp(kernel: JsKernel) {
     method: string,
     redirected: boolean,
     encoded: boolean,
-    signal: AbortSignal
+    request: Request
   ): Response => {
     if (head.status < 200 || head.status > 599) {
       void close(head.handle);
@@ -452,7 +456,7 @@ export function fetchOp(kernel: JsKernel) {
     const empty = method === 'HEAD' || NULL_BODY.has(head.status);
     if (empty) void close(head.handle);
     const headers = new Headers(head.headers as HeaderList as [string, string][]);
-    let stream: ReadableStream<Uint8Array> | null = empty ? null : body(head.handle, signal);
+    let stream: ReadableStream<Uint8Array> | null = empty ? null : body(head.handle, request);
     const coding = headers.get('content-encoding')?.trim().toLowerCase();
     if (stream && encoded && coding && DECODED.has(coding)) {
       const format = coding === 'deflate' ? 'deflate' : 'gzip';
@@ -460,6 +464,7 @@ export function fetchOp(kernel: JsKernel) {
         new DecompressionStream(format) as unknown as TransformStream<Uint8Array, Uint8Array>
       );
       headers.delete('content-length');
+      keptRequests.set(stream, request);
     }
     const response = new Response(stream, {
       status: head.status,
@@ -518,7 +523,7 @@ export function fetchOp(kernel: JsKernel) {
         request.redirect !== 'manual';
       if (!follow) {
         const redirected = hops > 0 || head.redirected === true;
-        return respond(head, hop.method, redirected, known.encodedBodies, signal);
+        return respond(head, hop.method, redirected, known.encodedBodies, request);
       }
       await close(head.handle);
       if (request.redirect === 'error') throw failed(new Error('unexpected redirect'));
