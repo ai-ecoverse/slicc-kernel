@@ -264,3 +264,45 @@ test('a clock set back by more than two minutes runs nothing until the next due 
   }, 'the run after the jump');
   assert.equal(lines[1], '--- 2026-01-01T09:01:00.000Z exit=0 missed=0 ---');
 });
+
+test('a user cannot point their job log at a root file, and the service refuses a log it does not trust', async (t) => {
+  const { kernel, read, settle, until, minutes } = await boot(t);
+  await kernel.users.add({ name: 'cone' });
+  await kernel.writeFile(`${SPOOL}/cone`, '# name: x\n* * * * * echo pwned\n');
+  await settle();
+  await minutes(1);
+  const log = '/var/log/cron/cone/x.log';
+  await until(() => read(log), 'the first run');
+  const passwd = await read('/etc/passwd');
+  const as = (user, script) => kernel.run(['bash', '-c', script], { user, cwd: '/' });
+  for (const script of [
+    `ln -sf /etc/passwd ${log}`,
+    `rm -f ${log}`,
+    `mv ${log} /tmp/x`,
+    'ln -s /etc/passwd /var/log/cron/cone/y.log',
+  ]) {
+    assert.notEqual((await as('cone', script)).status, 0, script);
+  }
+  assert.equal((await as('root', "stat -c '%u %a' /var/log/cron/cone")).stdout, '0 755\n');
+  assert.equal((await as('root', `stat -c '%u %a' ${log}`)).stdout, '1000 600\n');
+  await as('root', `chown cone /var/log/cron/cone`);
+  assert.equal((await as('cone', `ln -sf /etc/passwd ${log}`)).status, 0);
+  await minutes(1);
+  const errors = await until(() => read('/var/log/cron/cron.err'), 'the refusal');
+  assert.match(
+    errors,
+    /\/var\/log\/cron\/cone\/x\.log not written: \/var\/log\/cron\/cone must be a directory of root\n/
+  );
+  assert.equal(await read('/etc/passwd'), passwd);
+  assert.equal((await as('root', 'stat -c %a /etc/passwd')).stdout, '644\n');
+  await as('root', `chown root /var/log/cron/cone`);
+  await minutes(1);
+  await until(
+    async () =>
+      /x\.log not written: it must be a file of uid 1000 or root\n$/.test(
+        await read('/var/log/cron/cron.err')
+      ),
+    'the file refusal'
+  );
+  assert.equal(await read('/etc/passwd'), passwd);
+});

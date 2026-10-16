@@ -740,7 +740,7 @@ export class Launcher {
     return new CronService({
       fs: this.fs,
       owners: this.owners,
-      lock: options.lock ?? `slicc-kernel-cron:${this.bootId}`,
+      lock: options.lock ?? 'slicc-kernel-cron',
       bootId: this.bootId,
       ...(options.clock ? { clock: options.clock } : {}),
       locks: cronLocks(),

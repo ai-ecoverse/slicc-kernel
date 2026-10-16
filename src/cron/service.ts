@@ -1,4 +1,4 @@
-import type { NewOwner } from '../fs/types.ts';
+import type { FsStat, NewOwner } from '../fs/types.ts';
 import { type KernelFs, normalizePath } from '../fs/types.ts';
 import { PathGate } from '../fs/unlinked.ts';
 import type { Account } from '../users.ts';
@@ -63,6 +63,8 @@ interface Due {
 }
 
 const encoder = new TextEncoder();
+
+const messageOf = (err: unknown) => (err as Error)?.message ?? String(err);
 
 const keyOf = ({ source, job }: Loaded) => `${source}\t${job.id}`;
 
@@ -142,7 +144,7 @@ export class CronService {
     const { locks } = this.host;
     const fire = () =>
       this.fire().catch((err: unknown) => {
-        console.warn(`slicc-kernel cron: stopped: ${(err as Error)?.message ?? String(err)}`);
+        console.warn(`slicc-kernel cron: stopped: ${messageOf(err)}`);
       });
     if (!locks) return fire();
     await locks
@@ -167,7 +169,7 @@ export class CronService {
     try {
       until = await this.tick();
     } catch (err) {
-      await this.error(`cron: ${(err as Error)?.message ?? String(err)}`);
+      await this.error(`cron: ${messageOf(err)}`);
       until = this.clock.now() + WAKE_MS;
     }
     if (this.stopping.signal.aborted) return;
@@ -301,18 +303,26 @@ export class CronService {
   private async append(path: string, bytes: Uint8Array, uid: number, gid: number) {
     const { fs, owners } = this.host;
     await this.gate.run(path, async () => {
-      const old = await fs.readFileBuffer(path).catch(() => undefined);
+      const dir = path.slice(0, path.lastIndexOf('/'));
+      if (!(await fs.lstat(dir).catch(() => undefined))) {
+        await fs.mkdir(dir, { recursive: true });
+        if (owners) await fs.chown?.(dir, { uid: 0, gid: 0, mode: 0o755, follow: false });
+      }
+      const st = await fs.lstat(path).catch(() => undefined);
+      if (owners) await this.trustLog(dir, path, st, uid);
+      const old = st ? await fs.readFileBuffer(path) : undefined;
       const next = tail(old ? concat([old, bytes]) : bytes);
       const owner: NewOwner | undefined = owners ? { uid, gid, mode: 0o600 } : undefined;
-      if (old === undefined) {
-        const dir = path.slice(0, path.lastIndexOf('/'));
-        if (!(await fs.exists(dir))) {
-          await fs.mkdir(dir, { recursive: true });
-          if (owners) await fs.chown?.(dir, { uid, gid, mode: 0o700, follow: false });
-        }
-      }
       await fs.writeFile(path, next, old === undefined ? owner : undefined);
     });
+  }
+
+  private async trustLog(dir: string, path: string, st: FsStat | undefined, uid: number) {
+    const parent = await this.host.fs.lstat(dir);
+    if (!parent.isDirectory || parent.isSymbolicLink || parent.uid !== 0)
+      throw new Error(`${path} not written: ${dir} must be a directory of root`);
+    if (st && (!st.isFile || st.isSymbolicLink || (st.uid !== uid && st.uid !== 0)))
+      throw new Error(`${path} not written: it must be a file of uid ${uid} or root`);
   }
 
   private logOf({ account, job }: Loaded): string {
@@ -331,7 +341,7 @@ export class CronService {
         encoder.encode(`--- ${iso} skipped: ${why} ---\n`),
         account.uid,
         account.gid
-      ).catch(() => undefined);
+      ).catch((err: unknown) => this.error(messageOf(err)));
       await this.error(`${account.name}/${job.id}: run due ${iso} skipped: ${why}`);
       return;
     }
@@ -356,7 +366,7 @@ export class CronService {
         output: (bytes) => output.push(bytes),
       });
     } catch (err) {
-      output.push(encoder.encode(`cron: ${(err as Error)?.message ?? String(err)}\n`));
+      output.push(encoder.encode(`cron: ${messageOf(err)}\n`));
       ended = { status: 127 };
     } finally {
       this.running.set(account.uid, (this.running.get(account.uid) ?? 1) - 1);
@@ -368,7 +378,7 @@ export class CronService {
     const newline =
       body.length > 0 && body[body.length - 1] !== 10 ? encoder.encode('\n') : new Uint8Array();
     await this.append(log, concat([header, body, newline]), account.uid, account.gid).catch(
-      () => undefined
+      (err: unknown) => this.error(messageOf(err))
     );
   }
 }
