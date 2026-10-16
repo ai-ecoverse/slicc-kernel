@@ -53,7 +53,8 @@ async function appear(path) {
 
 const WAIT = ': > ready$N; while [ ! -e go$N ]; do sleep 0.05; done';
 
-test('hostfs through the Node entry: a host edit mid-read is ESTALE on an inherited or an opened descriptor, a write in the kernel is not', async (t) => {
+for (let round = 0; round < 40; round++) {
+test(`round ${round}: hostfs through the Node entry: a host edit mid-read is ESTALE on an inherited or an opened descriptor, a write in the kernel is not`, async (t) => {
   const dir = await folder(t, 'slicc-hostfs-');
   const proxy = await hostfsProxy({
     folders: { project: dir },
@@ -117,6 +118,7 @@ test('hostfs through the Node entry: a host edit mid-read is ESTALE on an inheri
   );
   assert.equal(local.stdout, '1048577\nrc 0\n', local.stderr);
 });
+}
 
 const ORIGIN = 'http://localhost:8787';
 

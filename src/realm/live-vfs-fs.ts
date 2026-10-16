@@ -238,6 +238,7 @@ function needsLoad(s: LiveNodeState, view: ChangeView | undefined, path: () => s
     const { now, changed } = watchedChange(watch, s.seen ?? 0, path());
     s.seen = now;
     if (changed) {
+      console.error(`ZZY needsLoad changed ${path()}`);
       s.loaded = false;
       s.stat = undefined;
     }
@@ -266,6 +267,7 @@ function rangedFileOf(
   const seen = bridge.changes?.now();
   const stat = () => call(() => bridge.stat(path()));
   const st = stat();
+  console.error(`ZZY rangedFileOf ${path()} version=${st.version} size=${st.size}`);
   const watch =
     bridge.changes && linkedWatch({ view: bridge.changes, ino: st.ino, seen, stat }, st);
   return new RangedFile(io, path(), st.size, st.version, watch);
@@ -459,6 +461,7 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
     const s = node.live;
     if (!needsLoad(s, bridgeOf(node).changes, () => liveNodePath(linked.holder(node)))) return;
     const path = () => liveNodePath(linked.holder(node));
+    console.error(`ZZY ensureLoaded ${path()} ranges=${s.ranges} ranged=${!!s.ranged}`);
     const bytes = call(() => fileIo(node).readFile(path()));
     Object.assign(s, { data: bytes, len: bytes.length, loaded: true });
     s.watch = loadedWatch(bridgeOf(node), call, path, s.stat ?? { size: bytes.length });
@@ -1040,6 +1043,7 @@ function refresh(s: LiveNodeState): void {
     s.ranged.forget();
     return;
   }
+  console.error(`ZZY refresh drops ranged=${!!s.ranged} loaded=${s.loaded} ranges=${s.ranges}`);
   s.data = undefined;
   s.ranged = undefined;
   s.len = 0;

@@ -107,6 +107,7 @@ export class RangedFile {
       return;
     }
     if (watch.ino !== undefined && st.ino !== watch.ino) return;
+    console.error(`ZZY fresh adopts ${this.path} ${this.version} -> ${st.version}`);
     this.version = st.version;
     this.pages.refresh(st.size);
   }

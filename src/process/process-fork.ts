@@ -54,6 +54,7 @@ export function vfsPromoter(
       const ranged = (stream.node as LiveNodeBag).live?.ranged;
       const version = ranged?.pinnedVersion;
       const pin = ranged && version !== undefined ? { version, size: ranged.size() } : undefined;
+      console.error(`ZZY promote ${livePath(stream)} ranged=${!!ranged} version=${version}`);
       const handle = (stream.node as LiveNodeBag).live?.handle;
       const held = { ...(pin ? { pin } : {}), ...(handle !== undefined ? { handle } : {}) };
       kfd = sys.openVfs(

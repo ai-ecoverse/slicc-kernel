@@ -169,12 +169,14 @@ export class VfsNode {
     if (this.ranged || this.data) return this.ranged;
     const io = rangedOps(this.fs);
     if (io && this.pin && !this.orphaned) {
+      if (this.path.startsWith('/mnt/h/v')) console.error(`ZZY prepare pin ${this.path} ${this.pin.version}`);
       this.ranged = new AsyncRangedFile(io, this.path, this.pin.size, this.pin.version);
       return this.ranged;
     }
     const at = this.path;
     const st = io && !this.orphaned ? await this.fs.stat?.(at).catch(() => undefined) : undefined;
     this.note(at, st);
+    if (at.startsWith('/mnt/h/v')) console.error(`ZZY prepare stat ${at} ranged=${st?.ranged} version=${st?.version} size=${st?.size} pin=${!!this.pin} orphaned=${this.orphaned}`);
     if (io && st?.ranged) {
       this.ranged = new AsyncRangedFile(io, this.path, st.size ?? 0, st.version);
       return this.ranged;
@@ -190,6 +192,7 @@ export class VfsNode {
 
   async load(): Promise<Uint8Array> {
     if (this.revoked) throw new KernelError('EIO');
+    if (this.path.startsWith('/mnt/h/v')) console.error(`ZZY load whole ${this.path}`);
     if (!this.data) {
       try {
         this.data = await this.fs.readFileBuffer(this.path);

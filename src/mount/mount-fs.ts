@@ -1018,6 +1018,7 @@ class MountFs implements KernelFs {
       throw errnoError('EISDIR', real);
     }
     await this.table.commitOverlapping(real, offset, length);
+    if (real.startsWith('/mnt/h/v')) console.error(`ZZY pread ${real} ${offset}+${length} version=${version}`);
     const fh = (await mount.conn
       .call({
         op: 'open',
