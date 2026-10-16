@@ -330,7 +330,15 @@ incomplete = withMissing(
   jobsEvidence(`${values.jobs}${pr ? `,review=${values['review-result']}` : ''}`, incomplete),
   missing
 );
-const known = knownLine(repo, [...standing(), ...(review?.known ?? [])]);
+function stillOpen(entry) {
+  if (!/^[\w.-]+\/[\w.-]+#\d+$/.test(entry) || entry.startsWith(`${repo}#`)) return true;
+  try {
+    return issueOf(entry).state === 'OPEN';
+  } catch {
+    return true;
+  }
+}
+const known = knownLine(repo, [...standing(), ...(review?.known ?? [])]).filter(stillOpen);
 const covered = values.covers.split(',').filter(Boolean);
 const covers = covered.length > 1 ? `covers ${covered[0]}\u2013${covered.at(-1)}; ` : '';
 const ci = `${covers}${values.run ? `ci: ${values.run}` : 'ci: local'}`;
@@ -344,6 +352,7 @@ const { line, state } = verdictLine({
   problems,
   review,
   incomplete,
+  known,
   certified: pr
     ? `certified ${NAME} PR #${pr} at ${values.head.slice(0, 12)}, build ${version} sha256=${facts.sha256} (${ci}; known: ${known.length ? known.join(', ') : 'none'}${gap}${partial})`
     : `certified ${NAME}@${version} sha256=${facts.sha256} (${ci}; known: ${known.length ? known.join(', ') : 'none'}${gap}${partial})`,

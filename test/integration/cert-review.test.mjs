@@ -859,11 +859,11 @@ test('prev and base: the newest earlier release whose cert-review passed (prev a
 test("kernel-compat's reference for a cert review is the certified base: cert-review passes it, kernel-compat names it and hands it to homescoop", async () => {
   const read = (name) =>
     readFile(new URL(`../../.github/workflows/${name}`, import.meta.url), 'utf8');
-  const cert = await read('cert-review.yml');
+  const cert = await read('cert-review-pr.yml');
   const compat = await read('kernel-compat.yml');
   assert.match(
     cert,
-    /BASE: \$\{\{ needs\.plan\.outputs\.base \}\}\n {8}run: \|[\s\S]*?--reference "\$BASE"/
+    /LATEST: \$\{\{ needs\.plan\.outputs\.latest \}\}\n[\s\S]*?--reference "\$LATEST"/
   );
   assert.match(
     compat,
@@ -880,52 +880,6 @@ test("kernel-compat's reference for a cert review is the certified base: cert-re
   assert.match(tool, /jobs\.find\(\(j\) => j\.name === 'candidate'\)/);
   assert.match(compat, /^ {2}candidate:\n/m);
   assert.doesNotMatch(compat, /^ {2}workflow_run:/m);
-});
-
-test('every release run has its own concurrency group, so a newer release never cancels a pending one', async () => {
-  const workflow = await readFile(
-    new URL('../../.github/workflows/cert-review.yml', import.meta.url),
-    'utf8'
-  );
-  const group = /^concurrency:\n {2}group: (.+)\n {2}cancel-in-progress: false$/m.exec(
-    workflow
-  )?.[1];
-  assert.equal(
-    group,
-    "cert-review-${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || format('{0}{1}', inputs.version, inputs.planted) }}"
-  );
-});
-
-test('review, record and publish never start once the run is cancelled: they use !cancelled(), never always()', async () => {
-  const workflow = await readFile(
-    new URL('../../.github/workflows/cert-review.yml', import.meta.url),
-    'utf8'
-  );
-  const jobs = workflow.split(/^jobs:$/m)[1];
-  for (const name of ['review', 'record', 'publish']) {
-    const body =
-      new RegExp(`^  ${name}:\\n([\\s\\S]*?)(?=^  [a-z-]+:$|(?![\\s\\S]))`, 'm').exec(jobs)?.[1] ??
-      '';
-    assert.ok(body.length > 0, `${name} job`);
-    assert.doesNotMatch(body, /always\(\)/, `${name} uses always()`);
-    assert.match(
-      body,
-      /^ {4}if: (\$\{\{ |>-\n\s+)!cancelled\(\)/m,
-      `${name} starts with !cancelled()`
-    );
-  }
-});
-
-test('the review runs for releases the merge queue pushed: claude-code-action allows the github-merge-queue and Renovate bots', async () => {
-  const workflow = await readFile(
-    new URL('../../.github/workflows/cert-review.yml', import.meta.url),
-    'utf8'
-  );
-  const step =
-    /uses: anthropics\/claude-code-action@[0-9a-f]{40}\n {8}env:[\s\S]*?\n {8}with:\n([\s\S]*?)\n {6}- /.exec(
-      workflow
-    )?.[1] ?? '';
-  assert.match(step, /^ {10}allowed_bots: 'github-merge-queue,renovate\[bot\]'$/m);
 });
 
 test('a suite runner stopped with SIGTERM still writes its partial results, its summary and the log so far (#743)', async (t) => {
@@ -1125,10 +1079,23 @@ test('an incomplete release suite is INCOMPLETE with an error status, never cert
       }),
       {
         state: 'error',
-        line: 'cert-ci: INCOMPLETE @ai-ecoverse/slicc-kernel@1.2.3 (1 files without results: test/integration/a.test.mjs; re-run the failed jobs) (ci: run)',
+        line: 'cert-ci: INCOMPLETE @ai-ecoverse/slicc-kernel@1.2.3 (1 files without results: test/integration/a.test.mjs; re-run the failed jobs) (ci: run; known: none)',
       }
     );
   }
+  assert.equal(
+    verdictLine({
+      ...base,
+      problems: [],
+      review: { verdict: 'certified' },
+      incomplete: {
+        named: 'kernel-compat failure with no regression',
+        remedy: 're-run the failed jobs',
+      },
+      known: ['ai-ecoverse/homescoop#600'],
+    }).line,
+    'cert-ci: INCOMPLETE @ai-ecoverse/slicc-kernel@1.2.3 (kernel-compat failure with no regression; re-run the failed jobs) (ci: run; known: ai-ecoverse/homescoop#600)'
+  );
   const failed = verdictLine({
     ...base,
     problems: ['kernel-compat: x crashes again'],

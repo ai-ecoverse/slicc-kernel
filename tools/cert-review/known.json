@@ -1,5 +1,5 @@
 {
-  "always": ["ai-ecoverse/homescoop#407"],
+  "always": [],
   "fixedIn": {
     "ai-ecoverse/slicc-kernel#665": "1.97.1",
     "ai-ecoverse/slicc-kernel#669": "1.98.2"

@@ -1,3 +1,5 @@
+import { matchesGlob } from 'node:path';
+
 const MERGE = /^Merge pull request #(\d+) from /;
 const KIND = /^(\w+)(?:\([^)]*\))?(!)?:/;
 const BEHAVIOUR = new Set(['fix', 'feat', 'perf', 'revert']);
@@ -437,6 +439,7 @@ export function verdictLine({
   review,
   incomplete,
   certified,
+  known = [],
 }) {
   const tag = `${name}@${version}${planted ? ` (planted ${planted})` : ''}`;
   if (problems.length === 0 && !incomplete && review?.verdict === 'certified') {
@@ -445,7 +448,7 @@ export function verdictLine({
   if (incomplete && problems.length === 0) {
     return {
       state: 'error',
-      line: `cert-ci: INCOMPLETE ${tag} (${incomplete.named}; ${incomplete.remedy}) (${ci})`,
+      line: `cert-ci: INCOMPLETE ${tag} (${incomplete.named}; ${incomplete.remedy}) (${ci}; known: ${known.length ? known.join(', ') : 'none'})`,
     };
   }
   const why = [
@@ -504,24 +507,33 @@ const BEHAVIOUR_PATHS = [
   /^tsconfig[^/]*\.json$/,
   /^\.releaserc/,
   /^tools\/release-recover\.mjs$/,
-  /^tools\/cert-review\//,
-  /^\.github\/runner\.mjs$/,
-  /^\.github\/workflows\/(release|ci|cert-review[^/]*)\.yml$/,
+  /^\.github\/workflows\/(release|ci)\.yml$/,
 ];
 
+export const REVIEWER_GLOBS = [
+  '.github/workflows/cert*.yml',
+  '.github/workflows/cert*.yaml',
+  'scripts/cert/**',
+  'tools/cert-review/**',
+  '.github/actions/cert-self-guard/**',
+  '.github/runner.mjs',
+];
+
+const isReviewer = (name) => REVIEWER_GLOBS.some((glob) => matchesGlob(name, glob));
+const names = (files) =>
+  (files ?? []).flatMap((f) => [
+    f.filename ?? f,
+    ...(f.previous_filename ? [f.previous_filename] : []),
+  ]);
+
 export function behaviourFiles(files) {
-  return (files ?? [])
-    .flatMap((f) => [f.filename ?? f, ...(f.previous_filename ? [f.previous_filename] : [])])
-    .filter((name) => BEHAVIOUR_PATHS.some((re) => re.test(name)));
+  return names(files).filter(
+    (name) => isReviewer(name) || BEHAVIOUR_PATHS.some((re) => re.test(name))
+  );
 }
 
 export function reviewsItself(files) {
-  return behaviourFiles(files).some(
-    (name) =>
-      /^tools\/cert-review\//.test(name) ||
-      /^\.github\/runner\.mjs$/.test(name) ||
-      /^\.github\/workflows\/cert-review[^/]*\.yml$/.test(name)
-  );
+  return names(files).some(isReviewer);
 }
 
 export function withMissing(incomplete, reasons) {
@@ -563,4 +575,45 @@ export function groupVerdict(prs) {
         lines: [...lines, ...missing],
       }
     : { state: 'success', line: lines.join(', ') || 'no pull requests', lines };
+}
+
+export const NAME = '@ai-ecoverse/slicc-kernel';
+
+const SEMVER = /^(\d+)\.(\d+)\.(\d+)$/;
+const semver = (v) => SEMVER.exec(v)?.slice(1).map(Number);
+export const older = (a, b) => {
+  const [x, y] = [semver(a), semver(b)];
+  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] < y[i];
+  return false;
+};
+
+export function covers(version, tags, published) {
+  const released = (tags ?? []).map((t) => t.replace(/^v/, '')).filter((v) => semver(v));
+  const before = (published ?? []).filter((v) => semver(v) && older(v, version));
+  const since = before.reduce((a, v) => (a && !older(a, v) ? a : v), undefined);
+  const first = released
+    .filter((v) => older(v, version) && (!since || older(since, v)))
+    .reduce((a, v) => (a && older(a, v) ? a : v), undefined);
+  return first ? `${first}–${version}` : version;
+}
+
+export function releaseNotes(body, line, { version, sha256 }) {
+  const text = body ?? '';
+  const prefix = `certified ${NAME}@${version} sha256=`;
+  const found = [
+    ...text.matchAll(
+      new RegExp(`${prefix.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}([0-9a-f]{64})`, 'g')
+    ),
+  ].map((m) => m[1]);
+  if (found.some((sha) => sha !== sha256))
+    return {
+      conflict: `the release notes already certify sha256=${found.find((sha) => sha !== sha256)}`,
+    };
+  if (found.length) return { unchanged: true, body: text };
+  const kept = text
+    .replace(/\n*<!-- cert-verify -->[\s\S]*?<!-- \/cert-verify -->\n*/g, '')
+    .trimEnd();
+  return {
+    body: `${kept}${kept ? '\n\n' : ''}<!-- cert-verify -->\n${line}\n<!-- /cert-verify -->\n`,
+  };
 }
