@@ -1,0 +1,12 @@
+{
+  "name": "epollmask",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "epollmask": {
+        "wasm": "bin/epollmask.wasm"
+      }
+    }
+  }
+}

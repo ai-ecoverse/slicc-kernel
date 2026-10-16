@@ -47,6 +47,7 @@ import { pollOneoff } from './wasi-poll.ts';
 import type { WasiSigmask } from './wasi-sigmask.ts';
 import type { WasiSignals } from './wasi-signals.ts';
 import { sliccTty } from './wasi-termios.ts';
+import { wasixEpollImports } from './wasix-epoll.ts';
 import type { ThreadEntry } from './wasix-fork.ts';
 import { datagramCalls } from './wasix-sockets.ts';
 
@@ -87,6 +88,14 @@ export interface WasiHostOptions {
 }
 
 export type WasiFunction = (...args: never[]) => number | undefined;
+
+type EpollWait = (
+  epfd: number,
+  events: number,
+  max: number,
+  timeout: bigint,
+  nevents: number
+) => number | undefined;
 
 const IDS = ['ruid', 'euid', 'suid', 'rgid', 'egid', 'sgid'] as const;
 const NS_PER_MS = 1_000_000n;
@@ -490,6 +499,20 @@ export class WasiHost {
         this.sigmask
           ? this.maskedPoll(this.sigmask, [lo, hi], [inPtr, outPtr, n, nevents])
           : E.NOSYS,
+      sigmask_epoll_wait: (
+        lo: number,
+        hi: number,
+        epfd: number,
+        events: number,
+        max: number,
+        timeout: bigint,
+        nevents: number
+      ) =>
+        this.sigmask
+          ? this.maskedEpoll(this.sigmask, [lo, hi], nevents, (epoll) =>
+              epoll(epfd, events, max, timeout, nevents)
+            )
+          : E.NOSYS,
       sigwait: (lo: number, _hi: number, timeout: bigint, out: number) => {
         const mask = this.sigmask;
         if (!mask) return E.NOSYS;
@@ -542,6 +565,26 @@ export class WasiHost {
       if (mask.deliverUnblocked()) return E.INTR;
       if (n > 0) return this.poll(inPtr, outPtr, n, nevents);
       return this.entered ? E.INTR : this.suspend();
+    } finally {
+      mask.deliverUnblocked();
+      mask.restore(old);
+    }
+  }
+
+  private epollWait: EpollWait | undefined;
+
+  private maskedEpoll(
+    mask: WasiSigmask,
+    set: [number, number],
+    nevents: number,
+    wait: (epoll: EpollWait) => number | undefined
+  ): number {
+    const old = mask.swap(set[0], set[1]);
+    try {
+      this.mem.view().setUint32(nevents, 0, true);
+      if (mask.deliverUnblocked()) return E.INTR;
+      this.epollWait ??= wasixEpollImports(this).epoll_wait as unknown as EpollWait;
+      return wait(this.epollWait) ?? E.SUCCESS;
     } finally {
       mask.deliverUnblocked();
       mask.restore(old);
