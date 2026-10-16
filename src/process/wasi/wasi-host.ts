@@ -198,6 +198,8 @@ export class WasiHost {
 
   interruptWakes = false;
 
+  strictEpoll = false;
+
   entered = false;
 
   onRaise: ((sig: number) => boolean) | undefined;

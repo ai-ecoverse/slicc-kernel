@@ -276,7 +276,7 @@ On top of preview1 a WASI program gets:
     - **Not supported:** `EPOLLPRI`, `EPOLLEXCLUSIVE` and `EPOLLWAKEUP` are never reported.
     - **UDP:** datagram sockets come with UDP (#476).
   - **Toolchain problems:**
-    - **wasix-sysroot 2025.9.30-28's `epoll_ctl`:** it passes Linux's operation numbers (ADD 1, DEL 2, MOD 3) to WASIX untranslated, where WASIX numbers them ADD 0, MOD 1, DEL 2. The kernel takes both: 0 adds, 2 deletes, 3 modifies, and 1 adds a descriptor that isn't registered and modifies one that is. So a C program's second ADD of a descriptor modifies it rather than failing with `EEXIST`, and a WASIX MOD of an unregistered one adds it. That libc also returns the error number instead of -1, so its callers can't see a failure. Fixing the sysroot is [homescoop#443](https://github.com/ai-ecoverse/homescoop/issues/443); dropping the dual numbering once the fixed sysroot ships is [#684](https://github.com/ai-ecoverse/slicc-kernel/issues/684).
+    - **`epoll_ctl`'s operation numbers are per program, decided by the libc build (#684):** wasix-sysroot 2025.9.30-28 and older pass Linux's numbers (ADD 1, DEL 2, MOD 3) to WASIX untranslated, where WASIX numbers them ADD 0, MOD 1, DEL 2; -29 translates them ([homescoop#443](https://github.com/ai-ecoverse/homescoop/issues/443)). A program whose `slicc.libc` section says -29 or later gets WASIX's numbers only, as on Wasmer: 0 adds, 1 modifies, 2 deletes, anything else is `EINVAL`. Any other program (an older libc, or no section, as for Rust's WASIX crates, which pass WASIX's numbers) keeps the dual numbering: 0 adds, 2 deletes, 3 modifies, and 1 adds a descriptor that isn't registered and modifies one that is. So for those a C program's second ADD of a descriptor modifies it rather than failing with `EEXIST`, and a WASIX MOD of an unregistered one adds it. The older libc also returns the error number instead of -1, so its callers can't see a failure.
     - **The WASIX mio fork (1.0.3+wasix.1):** it opens its sockets blocking, unlike upstream mio's `SOCK_NONBLOCK`. On a socket whose send buffer is full, a tokio program blocks its runtime's thread, as it would on Wasmer.
 - **Named semaphores** (#717): `sem_open` and its family are kernel objects, so processes share them by name. Python's `multiprocessing` `Lock`, `Queue` and `Pool` use them; wasix-libc's `sem_*` calls these imports. Every import returns a WASI errno, and handles are u32 ≥ 1:
   - **The imports:**
@@ -988,7 +988,7 @@ The build is reproducible: `bin/tokiotest.wasm` is 258,642 bytes, sha256 `3b230f
 
 ### `epolltest`
 
-A C program built with wasixcc against `@ai-ecoverse/wasix-sysroot` 2025.9.30-28, the fixture for the epoll and eventfd rows of `test/integration/epoll.test.mjs` (#674) that tokio can't show:
+A C program built with wasixcc against `@ai-ecoverse/wasix-sysroot` 2025.9.30-29, the fixture for the epoll and eventfd rows of `test/integration/epoll.test.mjs` (#674) that tokio can't show:
 - level vs edge-triggered, and edge-triggered on ADD and on MOD;
 - ONESHOT (silent, hangups included, until MOD);
 - the eventfd counter and semaphore;
@@ -1004,19 +1004,19 @@ A C program built with wasixcc against `@ai-ecoverse/wasix-sysroot` 2025.9.30-28
 
 `epolltest MODE` runs one of them and prints what it saw.
 
-The -28 libc's `epoll_ctl` returns the WASI errno instead of -1 with `errno` set. `ctl()` turns a positive return into `errno`. The program uses the libc's own (Linux) operation numbers, as real C programs do, plus WASIX's ADD (0) for the `EEXIST` row.
+The program uses the libc's own (Linux) operation numbers, as real C programs do. The same source is built twice: `bin/epolltest.wasm` on -29, whose libc translates them to WASIX's, and `bin/epolltest-28.wasm` (command `epolltest28`) on -28, which passes them untranslated and returns the WASI errno instead of -1 with `errno` set; `ctl()` turns a positive return into `errno`. The ctl errors rows also call the `wasix_32v1.epoll_ctl` import directly with WASIX's numbers (ADD 0, MOD 1, DEL 2), and with 3, which WASIX doesn't define: strict for the -29 build, dual for the -28 one (#684).
 
 The libc does translate the event bits, both ways, and `epoll_create`, `epoll_wait` and `eventfd` work as on Linux.
 
 **Build:**
 
 ```sh
-WASIX_SYSROOT_28=/path/to/wasix-sysroot ./build.sh
+WASIX_SYSROOT_29=/path/to/wasix-sysroot-29 WASIX_SYSROOT_28=/path/to/wasix-sysroot-28 ./build.sh
 ```
 
-- `WASIX_SYSROOT_28` is the unpacked sysroot package.
+- `WASIX_SYSROOT_29` and `WASIX_SYSROOT_28` are the unpacked sysroot packages (sha256 of the -29 tarball `db5e737686da2f720cea32f3e8e681c4715cbacec2a3dd15566b4d605a399927`).
 - `wasixcc` (0.4.7, WASIX clang 21.1.2) comes from `PATH`, or is installed by `install-wasixcc.sh` as for `dlfork`.
-- The build is reproducible: `bin/epolltest.wasm` is 78,799 bytes, sha256 `9ff8d336a261ebb9076b5b9c760e9ba50fa17053b1d66ab89cfe05395c8e1deb`.
+- The build is reproducible: `bin/epolltest.wasm` is 79,724 bytes, sha256 `a76b37178783e93c246f2523b93e8842c12d60a48a9641d94349080156da0765`; `bin/epolltest-28.wasm` is 79,414 bytes, sha256 `03fc72abe571525f2e512f92794955502ddb226ed14a54fce694c58c65e4187c`.
 
 ### `piefork`
 
