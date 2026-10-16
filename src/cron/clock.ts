@@ -81,7 +81,7 @@ export function fakeCronClock(start = Date.UTC(2026, 0, 1), utc = true): FakeCro
     },
     set(ms) {
       now = ms;
-      wakeDue();
+      for (const sleeper of [...sleepers]) sleeper.ring();
     },
     advance(ms) {
       now += ms;

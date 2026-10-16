@@ -24,6 +24,7 @@ import { RemoteUplink, type UplinkReply, type UplinkTraits } from './kernel/net/
 import type { SealedHook } from './kernel/sealed.ts';
 import { SIG } from './kernel/signals.ts';
 import {
+  type CronOptions,
   Launcher,
   type RunOptions,
   type TerminalOptions,
@@ -403,8 +404,10 @@ function hostOptions(
   sealed?: SealedHook;
   clipboard?: ClipboardHook;
   protect?: Protection;
+  cron: CronOptions;
 } {
   return {
+    cron: { lock: `slicc-kernel-cron:${req.metadata ?? META_DB}` },
     ...(req.hostname !== undefined ? { hostname: req.hostname } : {}),
     ...(req.users !== undefined ? { users: req.users } : {}),
     ...(req.denials ? { onDenial: (denial: Denial) => port.postMessage({ denial }) } : {}),

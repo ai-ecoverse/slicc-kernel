@@ -13,6 +13,8 @@ import {
   scanCommands,
   scanFilesystems,
 } from './commands.ts';
+import type { CronClock } from './cron/clock.ts';
+import { type CronLocks, CronService } from './cron/service.ts';
 import { FacadeHosts } from './facade/hosts.ts';
 import type { FacadeSpecs } from './facade/types.ts';
 import { R_OK, X_OK } from './fs/access.ts';
@@ -85,7 +87,7 @@ import { type ScrubSecret, scrubbedAll, scrubberOf, scrubStdio } from './kernel/
 import { SealedBroker, type SealedCaller, type SealedHook } from './kernel/sealed.ts';
 import { SemTable } from './kernel/sem.ts';
 import { SettlingChildren } from './kernel/settling.ts';
-import { SIG, sigbit } from './kernel/signals.ts';
+import { SIG, sigbit, signalField } from './kernel/signals.ts';
 import { LoopbackNet } from './kernel/socket.ts';
 import { KernelTty } from './kernel/tty.ts';
 import { keepingOpen, VfsNodes } from './kernel/vfs-file.ts';
@@ -178,6 +180,12 @@ export interface LauncherOptions {
   approve?: ApproveHook;
   sudoTimeoutMs?: number;
   protect?: Protection;
+  cron?: CronOptions;
+}
+
+export interface CronOptions {
+  clock?: CronClock;
+  lock?: string;
 }
 
 export interface PendingMedium {
@@ -203,6 +211,7 @@ export interface RunOptions {
   pgid?: number;
   user?: string | number | Account;
   tag?: string;
+  login?: boolean;
 }
 
 export interface TerminalOptions {
@@ -590,6 +599,8 @@ export class Launcher {
   private fileWatches: FileWatches | undefined;
   private nextPid = 1000;
   readonly boot = Date.now();
+  readonly bootId = crypto.randomUUID();
+  readonly cron: CronService;
   private terminals = 0;
 
   constructor(options: LauncherOptions) {
@@ -713,6 +724,7 @@ export class Launcher {
       approve: options.approve,
       timeoutMs: options.sudoTimeoutMs,
     });
+    this.cron = this.cronService(options.cron);
     void this.unlinked.sweep('/');
     this.watchers.watch(
       [this.modulesDir, this.pnpmHome, ...this.appended],
@@ -722,6 +734,39 @@ export class Launcher {
     this.watchers.watch([PASSWD], { recursive: false }, () => {
       this.scopes = undefined;
       this.resetCatalogs();
+    });
+  }
+
+  private cronService(options: CronOptions = {}): CronService {
+    return new CronService({
+      fs: this.fs,
+      owners: this.owners,
+      lock: options.lock ?? 'slicc-kernel-cron',
+      bootId: this.bootId,
+      ...(options.clock ? { clock: options.clock } : {}),
+      locks: cronLocks(),
+      ready: () => this.fstab,
+      lookup: (name) => this.users.lookup(name),
+      watch: async (paths, notify) => {
+        const local = this.watchers.watch(paths, { recursive: true }, () => notify());
+        const remote = await this.watchFiles(paths, notify);
+        return () => {
+          local();
+          remote();
+        };
+      },
+      run: async ({ account, argv, cwd, env, output }) => {
+        const ended = await this.run(argv, {
+          user: account,
+          cwd,
+          env,
+          login: true,
+          collect: false,
+          onStdout: output,
+          onStderr: output,
+        });
+        return { status: ended.status, ...signalField(ended.signal) };
+      },
     });
   }
 
@@ -2299,6 +2344,7 @@ export class Launcher {
   }
 
   unmountAll(): void {
+    this.cron.stop();
     this.booting.abort();
     const targets = this.mounts.list().map((m) => m.target);
     for (const target of targets.sort((a, b) => b.length - a.length)) this.umount(target, true);
@@ -2372,7 +2418,9 @@ export class Launcher {
     if (this.owners) await this.stampLayout();
     if (this.owners) await this.sudoer.provision();
     await writeCaFile(this.base, this.ca).catch(() => undefined);
+    await this.cron.provision().catch(() => undefined);
     this.fstab = this.mountFstab();
+    void this.cron.start();
   }
 
   private async mountFstab(): Promise<FstabResult[]> {
@@ -2397,9 +2445,14 @@ export class Launcher {
     );
   }
 
-  private environment(cwd: string, extra: Record<string, string> | undefined, account: Account) {
+  private environment(
+    cwd: string,
+    extra: Record<string, string> | undefined,
+    account: Account,
+    login = false
+  ) {
     const env: Record<string, string> = {
-      ...this.env,
+      ...(login ? networkEnv(this.hostname) : this.env),
       ...userEnv(account, this.pnpmHome),
       PWD: cwd,
       ...extra,
@@ -2597,7 +2650,7 @@ export class Launcher {
     tagOption(options.tag);
     const account = await this.account(options.user);
     const { cwd, file, planned } = await this.starting(argv, options.cwd, account, options.tag);
-    const env = this.environment(cwd, options.env, account);
+    const env = this.environment(cwd, options.env, account, options.login);
     const out: Uint8Array[] = [];
     const err: Uint8Array[] = [];
     const keep = options.collect !== false;
@@ -2636,3 +2689,7 @@ export class Launcher {
 }
 
 export type { ProcessInfo, ProcessListing } from './kernel/proc-info.ts';
+
+function cronLocks(): CronLocks | undefined {
+  return (globalThis as { navigator?: { locks?: CronLocks } }).navigator?.locks;
+}
