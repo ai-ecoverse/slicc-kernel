@@ -1,0 +1,12 @@
+{
+  "name": "semtest",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "semtest": {
+        "wasm": "bin/semtest.wasm"
+      }
+    }
+  }
+}
