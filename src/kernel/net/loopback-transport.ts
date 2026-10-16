@@ -58,10 +58,12 @@ function requestHead(
   method: string,
   url: URL,
   headers: HeaderList,
-  extra: ReadonlyArray<readonly [string, string]>
+  extra: ReadonlyArray<readonly [string, string]>,
+  first: ReadonlyArray<readonly [string, string]> = []
 ): Uint8Array {
   if (!TOKEN.test(method)) throw errno('EINVAL', `method ${method}`);
-  const lines = [`${method} ${url.pathname}${url.search} HTTP/1.1`, `Host: ${url.host}`];
+  const lines = [`${method} ${url.pathname}${url.search} HTTP/1.1`, `host: ${url.host}`];
+  for (const [name, value] of first) lines.push(`${name}: ${value}`);
   for (const [name, value] of headers) {
     if (OWN_HEADERS.has(name.toLowerCase())) continue;
     if (!TOKEN.test(name) || !SAFE_VALUE.test(value)) throw errno('EINVAL', `header ${name}`);
@@ -201,8 +203,8 @@ export class KernelLoopback {
     const url = new URL(req.url);
     const body =
       req.body ?? (/^(POST|PUT|PATCH)$/i.test(req.method) ? new Uint8Array(0) : undefined);
-    const length: Array<[string, string]> = body ? [['Content-Length', String(body.length)]] : [];
-    const head = requestHead(req.method, url, req.headers, [...length, ['Connection', 'close']]);
+    const length: Array<[string, string]> = body ? [['content-length', String(body.length)]] : [];
+    const head = requestHead(req.method, url, req.headers, length, [['connection', 'close']]);
     const socket = await this.connect(url, port, req.signal);
     try {
       await writeAll(socket, body ? concat([head, body]) : head, req.signal);
@@ -309,7 +311,7 @@ class LoopbackWebSocket implements RealmWebSocket {
     const queue: RealmWebSocketMessage[] = [];
     let wake: (() => void) | undefined;
     let ended = false;
-    void this.pump(new WsReader(incoming, undefined, true, true), (message) => {
+    void this.pump(incoming, (message) => {
       queue.push(message);
       this.unread += message.length;
       wake?.();
@@ -369,9 +371,10 @@ class LoopbackWebSocket implements RealmWebSocket {
   }
 
   private async pump(
-    reader: WsReader<true>,
+    incoming: Incoming,
     deliver: (message: RealmWebSocketMessage) => void
   ): Promise<void> {
+    const reader = new WsReader(incoming, undefined, true, true);
     let close: RealmWebSocketClose = { code: 1006, reason: '', wasClean: false };
     try {
       for (;;) {
@@ -393,10 +396,17 @@ class LoopbackWebSocket implements RealmWebSocket {
     } finally {
       const late = setTimeout(() => this.stop.abort(), CLOSE_WAIT_MS);
       await this.writes;
+      if (close.wasClean) await this.serverEnd(incoming);
       clearTimeout(late);
       this.socket.close();
       this.settle(close);
     }
+  }
+
+  private async serverEnd(incoming: Incoming): Promise<void> {
+    try {
+      while ((await incoming.some(64 * 1024, this.stop.signal)).length > 0);
+    } catch {}
   }
 
   private sendClose(code: number, reason: string): void {

@@ -111,3 +111,53 @@ test('ctx.websocket holds an in-kernel server to RFC 6455, as undici does, and a
     ].join('\n')
   );
 });
+
+const LATE_PACKAGE = JSON.stringify({
+  name: 'latews',
+  slicc: { commands: { latews: { abi: 'js', module: 'bin/latews.mjs' } } },
+});
+
+const LATE = `const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+async function accept(key) {
+  const digest = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(key + GUID));
+  return btoa(String.fromCharCode(...new Uint8Array(digest)));
+}
+export default async function main(ctx) {
+  const listener = await ctx.net.listen({ port: 7301 });
+  const log = [];
+  const served = listener.accept().then(async (c) => {
+    const reader = c.readable.getReader();
+    const writer = c.writable.getWriter();
+    let head = '';
+    while (!head.includes('\\r\\n\\r\\n')) head += new TextDecoder('latin1').decode((await reader.read()).value);
+    const key = /sec-websocket-key: (.*)\\r\\n/i.exec(head)[1];
+    const lines = ['HTTP/1.1 101 Switching Protocols', 'Upgrade: websocket', 'Connection: Upgrade', 'Sec-WebSocket-Accept: ' + (await accept(key))];
+    await writer.write(new TextEncoder().encode(lines.join('\\r\\n') + '\\r\\n\\r\\n'));
+    await writer.write(Uint8Array.from([0x88, 5, 0x0f, 0xa1, 0x62, 0x79, 0x65]));
+    const next = await reader.read();
+    const f = next.value;
+    log.push('server got ' + (f[0] & 0x0f) + ':' + (((f[2] ^ f[6]) << 8) | (f[3] ^ f[7])));
+    await new Promise((r) => setTimeout(r, 100));
+    log.push('server end');
+    await c.close();
+  });
+  const ws = await ctx.websocket('ws://127.0.0.1:7301/');
+  const closed = await ws.closed;
+  log.push('close ' + closed.code + ' ' + closed.reason);
+  await served;
+  await listener.close();
+  await ctx.write(1, log.join(', ') + '\\n');
+}
+`;
+
+test("ctx.websocket's close comes after the server has read the echo and closed the connection, as undici's does", {
+  timeout: 60_000,
+}, async (t) => {
+  const kernel = await createNodeKernel({ users: 'off' });
+  t.after(() => kernel.terminate());
+  await kernel.writeFile('/node_modules/latews/package.json', LATE_PACKAGE);
+  await kernel.writeFile('/node_modules/latews/bin/latews.mjs', LATE);
+  const got = await kernel.run(['latews'], { cwd: '/' });
+  assert.equal(got.stderr, '');
+  assert.equal(got.stdout, 'server got 8:4001, server end, close 4001 bye\n');
+});

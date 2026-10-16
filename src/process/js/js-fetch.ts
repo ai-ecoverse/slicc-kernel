@@ -32,6 +32,32 @@ const BODY_HEADERS = new Set([
 const DECODED = new Set(['gzip', 'x-gzip', 'deflate']);
 const CREDENTIALS = new Set(['authorization', 'proxy-authorization', 'cookie', 'cookie2']);
 
+function cut(err: unknown): unknown {
+  if (!(err instanceof JsCallError) || err.code !== 'EIO') return err;
+  return Object.assign(new Error('other side closed'), {
+    name: 'SocketError',
+    code: 'UND_ERR_SOCKET',
+  });
+}
+
+function givenNames(given: HeadersInit | undefined): string[] {
+  if (given === undefined || given instanceof Headers) return [];
+  const pairs = Array.isArray(given) ? given : Object.entries(given);
+  return pairs.map((pair) => String(pair[0]).toLowerCase());
+}
+
+function inOrder(headers: Headers, given: HeadersInit | undefined): [string, string][] {
+  const all = new Map(headers);
+  const out: [string, string][] = [];
+  for (const name of [...givenNames(given), ...all.keys()]) {
+    const value = all.get(name);
+    if (value === undefined) continue;
+    all.delete(name);
+    out.push([name, value]);
+  }
+  return out;
+}
+
 function withoutFragment(url: URL): string {
   url.hash = '';
   return url.href;
@@ -71,9 +97,7 @@ function checkUrl(url: string): void {
   if (protocol !== 'http:' && protocol !== 'https:') {
     throw failed(new JsCallError('EPROTONOSUPPORT', protocol));
   }
-  if (badPort(parsed) && !local(url)) {
-    throw failed(Object.assign(new Error('bad port'), { code: 'EACCES' }));
-  }
+  if (badPort(parsed)) throw failed(new Error('bad port'));
 }
 
 function rewrite(hop: Hop, status: number, location: string): Hop {
@@ -394,7 +418,7 @@ export function fetchOp(kernel: JsKernel) {
           } catch (err) {
             settle();
             await close(handle);
-            throw signal.aborted ? signal.reason : new TypeError('terminated', { cause: err });
+            throw signal.aborted ? signal.reason : new TypeError('terminated', { cause: cut(err) });
           }
           const bytes = r.ok && r.kind === 'bytes' ? r.bytes : new Uint8Array(0);
           if (bytes.length > 0) {
@@ -480,7 +504,7 @@ export function fetchOp(kernel: JsKernel) {
     let hop: Hop = {
       url,
       method: request.method,
-      headers: [...request.headers],
+      headers: inOrder(request.headers, init?.headers),
       body: bytes,
       ...(streamed && request.body ? { stream: request.body } : {}),
     };
@@ -497,8 +521,7 @@ export function fetchOp(kernel: JsKernel) {
         return respond(head, hop.method, redirected, known.encodedBodies, signal);
       }
       await close(head.handle);
-      if (request.redirect === 'error')
-        throw failed(new JsCallError('EREDIRECT', 'unexpected redirect'));
+      if (request.redirect === 'error') throw failed(new Error('unexpected redirect'));
       if (hops >= MAX_REDIRECTS) throw failed(new JsCallError('ELOOP', hop.url));
       [hop, known] = await redirect(hop, head.status, location, known);
     }
