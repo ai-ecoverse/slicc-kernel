@@ -970,7 +970,7 @@ A WASIX C program for `test/integration/semaphore.test.mjs` (#717). It calls the
 - `try`, `timed`, `eintr`;
 - `threads` (FIFO, one thread blocked at a time);
 - `errors`, `unlink`, `owners setup|user`;
-- `killed` (a waiter killed before posts loses no unit), `exited`, `cap`.
+- `killed` (a waiter killed before posts loses no unit), `exited`, `cap`, `handles`.
 
 **Build:** `WASIX_SYSROOT_28=/path/to/wasix-sysroot ./build.sh`, with `wasixcc` 0.4.7 (legacy exceptions, `-pthread`) and binaryen's `wasm-opt` (version 132, `--asyncify` for `proc_fork`) on `PATH`. `bin/semtest.wasm` is 59,187 bytes, sha256 `c2091c18d799881721bb8e0e2fc7269732d52d6cd545f4f57266e8e8864c9ee6`.
 
