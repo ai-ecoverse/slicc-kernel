@@ -118,6 +118,14 @@ export function mountVfsIntoEmscripten(
     mounted,
     flush: () => flushLiveVfs(Fs, plugin),
     flushDirty: () => plugin.flushDirty(),
-    invalidate: () => invalidateLiveVfs(Fs, plugin),
+    invalidate: () => {
+      for (const head of Fs.nameTable ?? [])
+        for (let n = head; n; n = (n as { name_next?: typeof n }).name_next ?? null)
+          if ((n as { name?: string }).name?.match(/^v[123]$/))
+            console.error(
+              `ZZY invalidate sees ${(n as { name?: string }).name} ranged=${!!(n as { live?: { ranged?: unknown } }).live?.ranged} version=${(n as { live?: { ranged?: { pinnedVersion?: string } } }).live?.ranged?.pinnedVersion} open=${(n as { live?: { openCount?: number } }).live?.openCount} loaded=${(n as { live?: { loaded?: boolean } }).live?.loaded}`
+            );
+      invalidateLiveVfs(Fs, plugin);
+    },
   };
 }

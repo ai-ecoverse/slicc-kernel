@@ -1043,7 +1043,9 @@ function refresh(s: LiveNodeState): void {
     s.ranged.forget();
     return;
   }
-  console.error(`ZZY refresh drops ranged=${!!s.ranged} loaded=${s.loaded} ranges=${s.ranges}`);
+  console.error(
+    `ZZY refresh drops ${s.ranged?.path} ranged=${!!s.ranged} loaded=${s.loaded} ranges=${s.ranges} open=${s.openCount}`
+  );
   s.data = undefined;
   s.ranged = undefined;
   s.len = 0;

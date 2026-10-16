@@ -53,7 +53,7 @@ async function appear(path) {
 
 const WAIT = ': > ready$N; while [ ! -e go$N ]; do sleep 0.05; done';
 
-for (let round = 0; round < 40; round++) {
+for (let round = 0; round < 80; round++) {
   test(`round ${round}: hostfs through the Node entry: a host edit mid-read is ESTALE on an inherited or an opened descriptor, a write in the kernel is not`, async (t) => {
     const dir = await folder(t, 'slicc-hostfs-');
     const proxy = await hostfsProxy({
