@@ -1,0 +1,12 @@
+{
+  "name": "sigthread",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "sigthread": {
+        "wasm": "bin/sigthread.wasm"
+      }
+    }
+  }
+}

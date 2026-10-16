@@ -337,6 +337,7 @@ export function createProcessKernel(deps: ProcessKernelDeps): ProcessKernel {
       argv,
       env: env ?? deps.env,
       cwd: cwd ?? Fs.cwd(),
+      ...(cwd !== null ? { chdir: true as const } : {}),
       stdio,
       ...(inherit.length > 0 ? { inherit } : {}),
       ...(exec ? { exec } : {}),

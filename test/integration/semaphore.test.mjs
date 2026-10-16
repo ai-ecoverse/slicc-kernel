@@ -146,15 +146,10 @@ test('with users in report mode, a denied open is reported and goes ahead (#717)
   assert.equal(r.stdout.split('\n')[0], 'private ok');
 });
 
-test('a process out of semaphore handles gets EMFILE and leaves no name behind (#717)', async (t) => {
+test("a process opens 1,000 named semaphores: musl's 256 is no limit (#770)", async (t) => {
   const kernel = await booted(t);
-  assert.deepEqual(
-    await run(kernel, 'handles'),
-    ok(
-      'opened 256, then No file descriptors available',
-      'the refused name No such file or directory'
-    )
-  );
+  const r = await run(kernel, 'handles', '1000');
+  assert.equal(r.stdout.split('\n')[0], 'opened 1000, then ok');
 });
 
 test('a killed waiter loses no posted unit, and an exiting process undoes nothing (#717)', async (t) => {
@@ -163,10 +158,10 @@ test('a killed waiter loses no posted unit, and an exiting process undoes nothin
   assert.deepEqual(await run(kernel, 'exited'), ok('value after the child took one and exited 1'));
 });
 
-test('a kernel holds at most 4096 named semaphores (#717)', async (t) => {
+test('a kernel holds more than 4,096 named semaphores (#770)', async (t) => {
   const kernel = await booted(t);
   assert.deepEqual(
-    await run(kernel, 'cap'),
-    ok('created 4096, then No space left on device', 'after unlinking ok')
+    await run(kernel, 'cap', '5000'),
+    ok('created 5000, then ok', 'after unlinking ok')
   );
 });

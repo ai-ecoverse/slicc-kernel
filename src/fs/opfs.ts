@@ -27,6 +27,7 @@ import { view } from './view.ts';
 const S_IFDIR = 0o040000;
 const S_IFREG = 0o100000;
 const S_IFLNK = 0o120000;
+const S_IFSOCK = 0o140000;
 const PERM_MASK = 0o7777;
 const S_ISGID = 0o2000;
 const READ_ATTEMPTS = 3;
@@ -393,7 +394,8 @@ export class OpfsFs implements KernelFs {
   }
 
   private async stampNew(path: string, owner: NewOwner | undefined, directory: boolean) {
-    const fields = await this.newFields(path, owner, directory);
+    const owned = await this.newFields(path, owner, directory);
+    const fields = owner?.socket && !directory ? { ...owned, socket: true as const } : owned;
     if (fields) await this.meta.update(path, (entry) => ({ ...entry, path, ...fields }));
   }
 
@@ -631,7 +633,8 @@ export class OpfsFs implements KernelFs {
 
   private mode(path: string, directory: boolean, meta: MetaEntry | undefined): number {
     const fallback = directory || EXECUTABLE.test(path) ? 0o755 : 0o644;
-    return (directory ? S_IFDIR : S_IFREG) | (meta?.mode ?? fallback);
+    const type = directory ? S_IFDIR : meta?.socket ? S_IFSOCK : S_IFREG;
+    return type | (meta?.mode ?? fallback);
   }
 
   private readonly id = crypto.randomUUID();
@@ -737,10 +740,12 @@ export class OpfsFs implements KernelFs {
     const kept =
       meta?.mtimeMs !== undefined && meta.mtimeFor === modified ? meta.mtimeMs : modified;
     const mtime = touched ?? kept;
+    const socket = !directory && meta?.socket === true;
     return {
-      isFile: !directory,
+      isFile: !directory && !socket,
       isDirectory: directory,
       isSymbolicLink: false,
+      ...(socket ? { isSocket: true } : {}),
       size: file?.size ?? 0,
       mode: this.mode(path, directory, meta),
       mtime: new Date(mtime),

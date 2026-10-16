@@ -108,6 +108,11 @@ function openRequest(af: number, type: number) {
   };
 }
 
+function absolute(cwd: string, addr: SockAddr): SockAddr {
+  if (addr.family !== 'unix' || addr.path === '' || addr.path.startsWith('\0')) return addr;
+  return addr.path.startsWith('/') ? addr : { family: 'unix', path: `${cwd}/${addr.path}` };
+}
+
 function optionalAddr(view: DataView, ptr: number): SockAddr | undefined {
   if (ptr === 0 || view.getUint8(ptr) === 0) return undefined;
   return readAddr(view, ptr);
@@ -191,7 +196,7 @@ export function wasixSocketImports(
     },
     sock_bind: (fd: number, addr: number) => {
       socket(fd);
-      call({ op: 'sock-bind', fd, addr: readAddr(mem.view(), addr) });
+      call({ op: 'sock-bind', fd, addr: absolute(host.cwd, readAddr(mem.view(), addr)) });
     },
     sock_listen: (fd: number, backlog: number) => {
       socket(fd);
@@ -199,7 +204,8 @@ export function wasixSocketImports(
     },
     sock_connect: (fd: number, addr: number) => {
       const e = socket(fd);
-      call({ op: 'sock-connect', fd, addr: readAddr(mem.view(), addr), nonblock: e.nonblock });
+      const to = absolute(host.cwd, readAddr(mem.view(), addr));
+      call({ op: 'sock-connect', fd, addr: to, nonblock: e.nonblock });
     },
     sock_accept_v2: (fd: number, flags: number, outFd: number, outAddr: number) => {
       const e = socket(fd);

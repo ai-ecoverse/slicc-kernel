@@ -103,6 +103,7 @@ export function runSync(kernel: JsSyncKernel, d: RunDefaults, o: JsRunOptions): 
     ...named,
     env: { ...(o.env ?? d.env) },
     cwd: o.cwd === undefined ? d.cwd : d.resolve(o.cwd),
+    ...(o.cwd === undefined ? {} : { chdir: true as const }),
     ...group,
     stdin: stdioOf(o.stdin),
     ...(input ? { input } : {}),

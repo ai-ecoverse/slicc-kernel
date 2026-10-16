@@ -64,7 +64,9 @@ import { selectFds } from './select.ts';
 import { SEM_OPS, SemHandles, type SemSyscall, type SemTable, semSyscall } from './sem.ts';
 import { type DefaultAction, defaultAction, isSignal, SIG, sigbit } from './signals.ts';
 import { KernelSocket, LoopbackNet } from './socket.ts';
+import { socketNames } from './socket-nodes.ts';
 import { SOCKET_OPS, type SocketSyscall, socketSyscall } from './socket-syscalls.ts';
+import { repeating } from './timer.ts';
 import type { KernelTty, Termios } from './tty.ts';
 import {
   present,
@@ -193,6 +195,7 @@ export type WasmSyscall =
       argv0?: string;
       env: Record<string, string>;
       cwd: string;
+      chdir?: true;
       stdio: ChildStdio[];
       pgid?: number;
       session?: true;
@@ -526,6 +529,8 @@ export interface WasmProcessOptions {
 
   threadKill?: (tid: number, sig: number) => boolean;
 
+  unblockedThread?: (sig: number) => number | undefined;
+
   settling?: () => boolean;
 
   pendingBits?: () => number;
@@ -668,8 +673,15 @@ export class WasmProcess {
     const bit = sigbit(sig);
     if (this.ignores(bit)) return 'ignore';
     if (((this.options.blockedBits?.() ?? 0) & bit) !== 0) {
-      this.options.onPending?.(sig);
-      return 'deliver';
+      const tid = this.options.unblockedThread?.(sig);
+      if (tid === undefined) {
+        this.options.onPending?.(sig);
+        return 'deliver';
+      }
+      if (this.caught & bit) {
+        this.options.threadKill?.(tid, sig);
+        return 'deliver';
+      }
     }
     if (!(this.caught & bit)) {
       const action = defaultAction(sig);
@@ -688,13 +700,24 @@ export class WasmProcess {
   }
 
   private async spawn(req: Extract<WasmSyscall, { op: 'proc-spawn' }>): Promise<number> {
-    const { file, argv, argv0, env, cwd, stdio, inherit, exec, pgid, session, deathSignal } = req;
+    const { file, argv, argv0, env, cwd, chdir, stdio, inherit, exec, pgid, session, deathSignal } =
+      req;
     if (deathSignal !== undefined && (exec || !isSignal(deathSignal))) {
       throw new KernelError('EINVAL');
     }
     const group = { ...(pgid !== undefined ? { pgid } : {}), ...(session ? { session } : {}) };
     const named = argv0 !== undefined ? { argv0 } : {};
-    const spawned = { file, argv, ...named, env, cwd, ...group, ...(exec ? { exec } : {}) };
+    const moved = chdir ? { chdir } : {};
+    const spawned = {
+      file,
+      argv,
+      ...named,
+      env,
+      cwd,
+      ...moved,
+      ...group,
+      ...(exec ? { exec } : {}),
+    };
     const pid = await this.children.spawn(spawned, stdio, inherit);
     if (deathSignal !== undefined) this.onDeath(pgid === 0 || session ? -pid : pid, deathSignal);
     if (!exec) return pid;
@@ -1704,6 +1727,18 @@ export class WasmProcess {
       resolve: (name, family, blocking) => resolver.resolve(name, family, blocking),
       cred: () => ({ pid: this.pid, uid: this.cred.euid, gid: this.cred.egid }),
       stamp: () => this.connectorStamp(),
+      names: socketNames({
+        fs: this.heldFs() as KernelFs,
+        guard: () => this.guarded(),
+        create: (path, owner) => this.nodes.createExclusive(path, owner),
+        owner: () => ({
+          uid: this.cred.euid,
+          gid: this.cred.egid,
+          mode: 0o777 & ~this.umask,
+          socket: true,
+        }),
+        owners: this.options.owners === true,
+      }),
     });
   }
 
@@ -1877,7 +1912,7 @@ export class WasmProcess {
     return aborted(this.blockingSignal(cancelled));
   }
 
-  private alarm: ReturnType<typeof setTimeout> | undefined;
+  private alarm: (() => void) | undefined;
   private readonly dlLog: LinkRecord[] = [];
   private readonly closures = {
     next: 0,
@@ -1971,7 +2006,6 @@ export class WasmProcess {
     (req, cancelled) => this.syscall(req as WasmSyscall, cancelled),
     () => this.options.onAsync?.()
   );
-  private alarmEvery: ReturnType<typeof setInterval> | undefined;
 
   private setAlarm(sig: number, first: number, every: number, timer?: number): void {
     if (!isSignal(sig)) throw new KernelError('EINVAL');
@@ -1979,11 +2013,7 @@ export class WasmProcess {
     if (first <= 0) return;
     const fire =
       timer === undefined ? () => this.options.raise?.(sig) : () => this.timerExpired(timer);
-    this.alarm = setTimeout(() => {
-      this.alarm = undefined;
-      fire();
-      if (every > 0) this.alarmEvery = setInterval(fire, every);
-    }, first);
+    this.alarm = repeating(first, every, fire);
   }
 
   private timerExpired(which: number): void {
@@ -1994,10 +2024,8 @@ export class WasmProcess {
   }
 
   private clearAlarm(): void {
-    clearTimeout(this.alarm);
-    clearInterval(this.alarmEvery);
+    this.alarm?.();
     this.alarm = undefined;
-    this.alarmEvery = undefined;
   }
 
   async exit(): Promise<void> {

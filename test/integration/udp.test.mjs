@@ -90,6 +90,18 @@ test(
 );
 
 test(
+  'epoll reports EPOLLERR with EPOLLIN on a connected socket with a pending error, until SO_ERROR reads it',
+  TIMEOUT,
+  async (t) => {
+    const kernel = await kernelWith(t);
+    assert.equal(
+      await run(kernel, 'epollerr'),
+      'before 0\nafter 1 EPOLLERR EPOLLIN\nso_error ECONNREFUSED\ncleared 0\n'
+    );
+  }
+);
+
+test(
   'link-local, the host, unrouted, multicast and broadcast addresses are unreachable',
   TIMEOUT,
   async (t) => {

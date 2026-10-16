@@ -245,7 +245,7 @@ jobs:
             --out "$RUNNER_TEMP/evidence/$WHICH"
 
       - name: Each fix's tests on the dist of the release before it, the NEGATIVE (no secrets in this step)
-        if: matrix.which == 'release'
+        if: ${{ !cancelled() && matrix.which == 'release' }}
         run: |
           set -euo pipefail
           ev="$RUNNER_TEMP/evidence"
@@ -302,6 +302,7 @@ jobs:
           VERSION: ${{ needs.plan.outputs.version }}
           COMMIT: ${{ needs.plan.outputs.commit }}
           PLANTED: ${{ needs.plan.outputs.planted }}
+          BASE: ${{ needs.plan.outputs.base }}
         run: |
           mkdir -p "$RUNNER_TEMP/evidence"
           if [ -n "$PLANTED" ]; then
@@ -309,7 +310,7 @@ jobs:
             exit 0
           fi
           node tools/cert-review/compat.mjs --repo "$GITHUB_REPOSITORY" --version "$VERSION" --commit "$COMMIT" \
-            --dispatch --rerun --wait 150 --out "$RUNNER_TEMP/evidence/compat.json"
+            --dispatch --rerun --wait 150 --reference "$BASE" --out "$RUNNER_TEMP/evidence/compat.json"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
@@ -478,7 +479,8 @@ jobs:
             --findings "$findings" --covers "$COVERS" ${PLANTED:+--planted "$PLANTED"}; then
             echo "conclusion=success" >> "$GITHUB_OUTPUT"
           else
-            echo "conclusion=failure" >> "$GITHUB_OUTPUT"
+            state=$(node -p 'require(process.argv[1]).state || "failure"' "$RUNNER_TEMP/record/record.json" 2> /dev/null || echo failure)
+            echo "conclusion=$state" >> "$GITHUB_OUTPUT"
           fi
           commit=$(node -p 'require(process.argv[1]).commit || ""' "$RUNNER_TEMP/record/record.json")
           echo "commit=${commit:-$PLAN_COMMIT}" >> "$GITHUB_OUTPUT"

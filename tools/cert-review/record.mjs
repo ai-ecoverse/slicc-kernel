@@ -5,7 +5,15 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { gapsOf, knownAsOf, knownLine, provenanceProblems } from './lib.mjs';
+import {
+  baseEvidence,
+  gapsOf,
+  knownAsOf,
+  knownLine,
+  provenanceProblems,
+  releaseEvidence,
+  verdictLine,
+} from './lib.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const { values } = parseArgs({
@@ -237,11 +245,17 @@ function standing() {
 }
 
 let gaps = [];
+let baseNote = '';
+let incomplete;
 
 function codedFindings() {
   if (!values.findings || !existsSync(values.findings)) return;
   const found = JSON.parse(readFileSync(values.findings, 'utf8')).findings ?? [];
   gaps = gapsOf(found);
+  incomplete = releaseEvidence(found);
+  const partial = baseEvidence(found);
+  baseNote = partial.note;
+  if (partial.problem) problems.push(partial.problem);
   for (const f of found.filter((x) => x.kind === 'compat-crash')) {
     problems.push(
       `kernel-compat: ${f.package} ${f.spec} crashes again on the rerun and not on the reference kernel`
@@ -280,19 +294,19 @@ const known = knownLine(repo, [...standing(), ...(review?.known ?? [])]);
 const covered = values.covers.split(',').filter(Boolean);
 const covers = covered.length > 1 ? `covers ${covered[0]}\u2013${covered.at(-1)}; ` : '';
 const ci = `${covers}${values.run ? `ci: ${values.run}` : 'ci: local'}`;
-let line;
-if (problems.length === 0 && review?.verdict === 'certified') {
-  const gap = gaps.length ? `; test gaps: ${gaps.join(', ')}` : '';
-  line = `certified ${NAME}@${version} sha256=${facts.sha256} (${ci}; known: ${known.length ? known.join(', ') : 'none'}${gap})`;
-} else {
-  const why = [
-    ...(review?.verdict === 'fail' ? [`the reviewer: ${review.reason || 'no reason given'}`] : []),
-    ...(review?.verdict === 'certified' ? ['the reviewer certified it'] : []),
-    ...problems,
-  ];
-  line = `cert-ci: FAIL ${NAME}@${version}${planted ? ` (planted ${planted})` : ''}: ${why.join('; ')} (${ci})`;
-}
-const certified = line.startsWith('certified ');
+const gap = gaps.length ? `; test gaps: ${gaps.join(', ')}` : '';
+const partial = baseNote ? `; ${baseNote}` : '';
+const { line, state } = verdictLine({
+  name: NAME,
+  version,
+  planted,
+  ci,
+  problems,
+  review,
+  incomplete,
+  certified: `certified ${NAME}@${version} sha256=${facts.sha256} (${ci}; known: ${known.length ? known.join(', ') : 'none'}${gap}${partial})`,
+});
+const certified = state === 'success';
 const comment = existsSync(join(values.review, 'comment.md'))
   ? readFileSync(join(values.review, 'comment.md'), 'utf8').trim()
   : '**Cert review:** the reviewer wrote no comment.';
@@ -315,7 +329,7 @@ writeFileSync(join(values.out, 'line.txt'), `${line}\n`);
 writeFileSync(join(values.out, 'body.md'), body);
 writeFileSync(
   join(values.out, 'record.json'),
-  `${JSON.stringify({ name: NAME, version, certified, line, commit: facts.commit ?? null, facts, problems, review, known }, null, 2)}\n`
+  `${JSON.stringify({ name: NAME, version, certified, state, line, commit: facts.commit ?? null, facts, problems, review, known }, null, 2)}\n`
 );
 console.log(line);
 for (const p of problems) console.error(`problem: ${p}`);

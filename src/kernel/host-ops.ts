@@ -1,6 +1,7 @@
 import type { SyncFsResult } from '../realm/sync-fs-wire.ts';
 import { KernelError } from './fd-table.ts';
 import { type LockKind, type LockTable, lockRange } from './locks.ts';
+import { timerAfter } from './timer.ts';
 
 export interface LockTarget {
   path?: string;
@@ -153,9 +154,9 @@ export class AsyncOps {
 
   private sleep(timeoutMs: number | undefined, signal: AbortSignal): Promise<boolean> {
     return new Promise<boolean>((resolve, reject) => {
-      let timer: ReturnType<typeof setTimeout> | undefined;
+      let cancel = (): void => {};
       const cleanup = () => {
-        clearTimeout(timer);
+        cancel();
         this.waiters.delete(wake);
         signal.removeEventListener('abort', abort);
       };
@@ -170,10 +171,10 @@ export class AsyncOps {
       this.waiters.add(wake);
       signal.addEventListener('abort', abort, { once: true });
       if (timeoutMs !== undefined) {
-        timer = setTimeout(() => {
+        cancel = timerAfter(timeoutMs, () => {
           cleanup();
           resolve(false);
-        }, timeoutMs);
+        });
       }
     });
   }

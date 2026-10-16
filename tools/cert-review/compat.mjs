@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
-import { compatRegressions, missingShards } from './lib.mjs';
+import { compatRegressions, missingShards, rerunSet } from './lib.mjs';
 
 const { values } = parseArgs({
   options: {
@@ -15,12 +15,13 @@ const { values } = parseArgs({
     wait: { type: 'string', default: '150' },
     dispatch: { type: 'boolean', default: false },
     rerun: { type: 'boolean', default: false },
+    reference: { type: 'string', default: '' },
   },
 });
-const { repo, version, commit } = values;
+const { repo, version, commit, reference } = values;
 const API = process.env.GITHUB_API_URL ?? 'https://api.github.com';
 const WORKFLOW = 'kernel-compat.yml';
-const TITLE = `Kernel compat v${version}`;
+const TITLE = `Kernel compat v${version}${reference ? ` ref ${reference}` : ''}`;
 const headers = {
   authorization: `Bearer ${process.env.GH_TOKEN}`,
   accept: 'application/vnd.github+json',
@@ -81,7 +82,8 @@ async function candidates(after, own, strict) {
   return runs.sort((a, b) => b.created_at.localeCompare(a.created_at));
 }
 
-async function dispatch(inputs) {
+async function dispatch(given) {
+  const inputs = reference ? { ...given, reference } : given;
   const after = new Date(Date.now() - 5000).toISOString().replace(/\.\d+Z$/, 'Z');
   await api(`repos/${repo}/actions/workflows/${WORKFLOW}/dispatches`, {
     method: 'POST',
@@ -165,21 +167,27 @@ function report(run) {
 }
 
 const deadline = Date.now() + Number(values.wait) * 60_000;
-const first = await finished({ own: true, deadline });
-const out = { version, commit, dispatched: first.dispatched, found: Boolean(first.run) };
-if (first.run && first.run.conclusion !== 'success') {
-  let shards = missingShards(first.jobs, artifactsOf(first.run));
+async function whole(found) {
+  if (!found.run || found.run.conclusion === 'success') return { ...found, shards: [] };
+  let { run, jobs } = found;
+  let shards = missingShards(jobs, artifactsOf(run));
+  let shardRerun;
   if (shards.length > 0 && values.rerun) {
-    const again = await rerunShards(first.run);
-    out.shardRerun = { shards, conclusion: again?.conclusion ?? 'timed out' };
+    const again = await rerunShards(run);
+    shardRerun = { shards, conclusion: again?.conclusion ?? 'timed out' };
     if (again) {
-      first.run = again;
-      first.jobs = await jobsOf(again);
-      shards = missingShards(first.jobs, artifactsOf(again));
+      run = again;
+      jobs = await jobsOf(again);
+      shards = missingShards(jobs, artifactsOf(again));
     }
   }
-  out.missingShards = shards;
+  return { ...found, run, jobs, shards, ...(shardRerun ? { shardRerun } : {}) };
 }
+
+const first = await whole(await finished({ own: !reference, deadline }));
+const out = { version, commit, dispatched: first.dispatched, found: Boolean(first.run) };
+if (first.run && first.run.conclusion !== 'success') out.missingShards = first.shards;
+if (first.shardRerun) out.shardRerun = first.shardRerun;
 if (first.run) {
   const got = report(first.run);
   Object.assign(out, {
@@ -188,20 +196,26 @@ if (first.run) {
     conclusion: first.run.conclusion,
     jobs: first.jobs.map((j) => ({ name: j.name, conclusion: j.conclusion })),
     artifact: got?.name,
+    reference: got?.json.inputs?.reference || got?.json.reference?.version || null,
     verdict: got?.json.verdict,
     summary: got?.json.summary,
   });
   let regressions = compatRegressions(got?.json);
   if (regressions.length > 0 && values.rerun) {
-    const set = [...new Set(regressions.map((r) => r.recipe))].join(',');
-    const again = await finished({ own: false, set, deadline: Date.now() + 120 * 60_000 });
+    const set = rerunSet(regressions);
+    const again = await whole(
+      await finished({ own: false, set, deadline: Date.now() + 120 * 60_000 })
+    );
     const rerun = again.run ? report(again.run) : undefined;
     out.rerun = again.run
       ? {
           run: again.run.html_url,
           conclusion: again.run.conclusion,
           set,
+          ran: [...new Set((rerun?.json.results ?? []).map((r) => `${r.recipe}@${r.version}`))],
           verdict: rerun?.json.verdict,
+          ...(again.shards.length ? { missingShards: again.shards } : {}),
+          ...(again.shardRerun ? { shardRerun: again.shardRerun } : {}),
         }
       : { run: null, set };
     regressions = compatRegressions(

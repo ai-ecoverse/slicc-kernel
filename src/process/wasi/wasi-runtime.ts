@@ -512,7 +512,7 @@ function bindLinker(
     path: string | undefined;
   }
 ): void {
-  sync.linker.bindMain(instance, !at.thread);
+  sync.linker.bindMain(instance, !at.thread && !at.forked);
   if (at.path !== undefined) sync.linker.mainPath = at.path;
   host.linkedTls = () => sync.linker.tlsBases();
   host.linkedModules = () => sync.linker.compiled();

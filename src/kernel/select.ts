@@ -1,4 +1,5 @@
 import { type FdTable, KernelError, pollFile } from './fd-table.ts';
+import { timerAt } from './timer.ts';
 
 export interface SelectResult {
   read: number[];
@@ -61,20 +62,16 @@ async function waitReady(
       const file = fds.get(fd).file;
       return file.changed === undefined ? [] : [file.changed(round.signal).catch(() => undefined)];
     });
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    let cancel = (): void => {};
     const expiry =
       deadline === Number.POSITIVE_INFINITY
         ? []
-        : [
-            new Promise<void>(
-              (resolve) => (timer = setTimeout(resolve, deadline - performance.now()))
-            ),
-          ];
+        : [new Promise<void>((resolve) => (cancel = timerAt(deadline, resolve)))];
     try {
       await Promise.race([...changes, ...expiry, interrupted]);
     } finally {
       round.abort();
-      clearTimeout(timer);
+      cancel();
     }
   }
 }

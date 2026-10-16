@@ -1,8 +1,16 @@
 #!/usr/bin/env node
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { parseArgs } from 'node:util';
-import { compatFindingsOf, decide, diffSuites, FINDINGS, resultsMap } from './lib.mjs';
+import {
+  compatFindingsOf,
+  decide,
+  diffSuites,
+  FINDINGS,
+  parseResults,
+  resultsMap,
+  unfinishedFiles,
+} from './lib.mjs';
 
 const { values } = parseArgs({
   options: {
@@ -23,25 +31,37 @@ const read = (file) => {
   }
 };
 
+const readRun = (file) => {
+  const run = read(file);
+  if (run !== undefined) return run;
+  const partial = file.replace(/\.json$/, '.jsonl');
+  if (partial === file || !existsSync(partial)) return undefined;
+  try {
+    return {
+      exit: 'no summary',
+      partial: true,
+      results: parseResults(readFileSync(partial, 'utf8')),
+    };
+  } catch {
+    return undefined;
+  }
+};
+
 const delta = read(values.delta);
-const prev = read(values.prev);
+const prev = readRun(values.prev);
 const negatives = Object.keys(delta?.baselines ?? {})
   .filter((v) => v !== delta.prev)
-  .map((v) => [v, read(join(dirname(values.prev), `prev-${v}.json`))]);
-const release = read(values.release);
-const base = read(values.base);
+  .map((v) => [v, readRun(join(dirname(values.prev), `prev-${v}.json`))]);
+const release = readRun(values.release);
+const base = readRun(values.base);
 const compat = values.compat ? read(values.compat) : undefined;
 const missing = [
   ['delta', delta],
   ['the previous release run', prev],
-  ['the release suite', release],
-  ['the certified suite', base],
   ...negatives.map(([v, run]) => [`the v${v} run`, run]),
 ].filter(([, v]) => v === undefined);
 
 const incomplete = [
-  ['the release suite', release, true],
-  ['the certified suite', base, true],
   ['the previous release run', prev, false],
   ...negatives.map(([v, run]) => [`the v${v} run`, run, false]),
 ]
@@ -56,10 +76,55 @@ const incomplete = [
   }));
 
 function completed(exit, results, files, full) {
-  if (typeof exit !== 'number') return false;
+  if (typeof exit !== 'number' || exit >= 128) return false;
   if (results.length === 0) return !full && exit === 0 && files.length === 0;
   const failed = results.some((r) => r.status === 'fail' || r.status === 'cancelled');
   return exit === 0 || failed;
+}
+
+const releaseUnfinished =
+  release === undefined
+    ? []
+    : (release.unfinished ?? unfinishedFiles(release.expected ?? [], release.results ?? []));
+const releaseComplete =
+  release !== undefined &&
+  releaseUnfinished.length === 0 &&
+  completed(release.exit, release.results ?? [], release.files ?? [], true);
+
+function releaseFinding() {
+  if (releaseComplete) return [];
+  return [
+    {
+      kind: 'missing-evidence',
+      what: 'the release suite',
+      ...(release === undefined
+        ? {}
+        : { exit: release.exit, results: (release.results ?? []).length }),
+      ...(releaseUnfinished.length ? { files: releaseUnfinished } : {}),
+      blocking: true,
+      remedy: 're-run the failed jobs',
+    },
+  ];
+}
+
+function baseFinding() {
+  const results = base?.results ?? [];
+  if (base !== undefined && completed(base.exit, results, base.files ?? [], true)) return [];
+  const releaseDone =
+    releaseComplete &&
+    release.exit === 0 &&
+    !(release.results ?? []).some((r) => r.status === 'fail' || r.status === 'cancelled');
+  const dropped = (delta?.rows ?? []).flatMap((r) => r.dropped ?? []);
+  const waived = releaseDone && delta !== undefined && dropped.length === 0;
+  return [
+    {
+      kind: 'missing-evidence',
+      what: 'the certified suite',
+      ...(base === undefined ? {} : { exit: base.exit, results: results.length }),
+      blocking: !waived,
+      ...(dropped.length ? { dropped: dropped.length } : {}),
+    },
+  ];
 }
 
 function compatFindings(c) {
@@ -77,10 +142,12 @@ const rows = (delta?.rows ?? []).map((row) => ({
   ...decide(row, prevMaps.get(row.baseline ?? delta?.prev) ?? new Map(), nextMap),
   ...(row.baseline && row.baseline !== delta?.prev ? { baseline: row.baseline } : {}),
 }));
-const suites = diffSuites(resultsMap(base?.results ?? []), nextMap);
+const suites = diffSuites(resultsMap(base?.results ?? []), nextMap, { complete: releaseComplete });
 const findings = [
   ...missing.map(([what]) => ({ kind: 'missing-evidence', what })),
+  ...releaseFinding(),
   ...incomplete,
+  ...baseFinding(),
   ...rows
     .filter((r) => FINDINGS.has(r.decision))
     .map((r) => ({ kind: r.decision, pr: r.pr, title: r.title })),

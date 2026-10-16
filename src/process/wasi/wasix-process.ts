@@ -168,7 +168,9 @@ export class WasixProcess {
   }
 
   spawn(req: ChildRequest, exec = false): number {
-    const { stdio, inherit, cwd, opened } = this.childFds(req.ops ?? []);
+    const ops = req.ops ?? [];
+    const { stdio, inherit, cwd, opened } = this.childFds(ops);
+    const moved = ops.some((op) => op.cmd === 'chdir' || op.cmd === 'fchdir');
     try {
       const spawn = {
         op: 'proc-spawn' as const,
@@ -176,6 +178,7 @@ export class WasixProcess {
         argv: req.argv.length > 0 ? req.argv : [req.name],
         env: req.env ?? this.environment(),
         cwd,
+        ...(moved ? { chdir: true as const } : {}),
         stdio,
         inherit,
         ...(exec ? { exec } : {}),
