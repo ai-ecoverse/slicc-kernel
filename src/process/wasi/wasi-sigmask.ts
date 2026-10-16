@@ -81,6 +81,10 @@ export class WasiSigmask {
     this.set(SIG_SETMASK, lo, hi, () => {});
   }
 
+  blockedBits(): number {
+    return Atomics.load(this.header, SAB_I_BLOCKED);
+  }
+
   blocks(sig: number): boolean {
     return (Atomics.load(this.header, SAB_I_BLOCKED) & sigbit(sig)) !== 0;
   }

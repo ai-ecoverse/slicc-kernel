@@ -203,6 +203,10 @@ export class WasiHost {
 
   entered = false;
 
+  enteredSignals = 0;
+
+  raisedOnEntry: (() => number) | undefined;
+
   onRaise: ((sig: number) => boolean) | undefined;
 
   muted: ((fd: number, data: Uint8Array) => boolean) | undefined;
@@ -566,6 +570,7 @@ export class WasiHost {
     try {
       this.mem.view().setUint32(nevents, 0, true);
       if (mask.deliverUnblocked()) return E.INTR;
+      this.settleEntry(mask);
       if (n > 0) return this.poll(inPtr, outPtr, n, nevents);
       return this.entered ? E.INTR : this.suspend();
     } finally {
@@ -575,6 +580,10 @@ export class WasiHost {
   }
 
   private epollWait: EpollWait | undefined;
+
+  private settleEntry(mask: WasiSigmask): void {
+    if (this.entered && (this.enteredSignals & ~mask.blockedBits()) === 0) this.entered = false;
+  }
 
   private maskedEpoll(
     mask: WasiSigmask,
@@ -586,6 +595,7 @@ export class WasiHost {
     try {
       this.mem.view().setUint32(nevents, 0, true);
       if (mask.deliverUnblocked()) return E.INTR;
+      this.settleEntry(mask);
       this.epollWait ??= wasixEpollImports(this).epoll_wait as unknown as EpollWait;
       return wait(this.epollWait) ?? E.SUCCESS;
     } finally {
