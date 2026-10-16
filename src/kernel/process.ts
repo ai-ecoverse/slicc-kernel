@@ -822,7 +822,7 @@ export class WasmProcess {
         return await hostSyscall(req, {
           pid: this.pid,
           owner: () => this.lockOwner(),
-          fileKey: (target, kind) => this.lockKey(target, kind),
+          fileKey: (target, kind, setting) => this.lockKey(target, kind, setting),
           locks: this.options.locks,
           ops: this.asyncOps,
           blocking: () => this.blockingSignal(cancelled),
@@ -880,8 +880,15 @@ export class WasmProcess {
     return path;
   }
 
-  private async lockKey(target: LockTarget, kind: LockKind | 'unlock' | 'close'): Promise<string> {
+  private async lockKey(
+    target: LockTarget,
+    kind: LockKind | 'unlock' | 'close',
+    setting = false
+  ): Promise<string> {
     const file = target.fd === undefined ? undefined : this.fds.get(target.fd);
+    const access = file?.file;
+    if (setting && ((kind === 'read' && !access?.read) || (kind === 'write' && !access?.write)))
+      throw new KernelError('EBADF');
     const known = file ? fileKeys.get(file) : this.pathKeys.get(target.path ?? '');
     if (kind === 'close' && !file && target.path !== undefined) this.pathKeys.delete(target.path);
     const want = kind === 'read' ? R_OK : kind === 'write' ? W_OK : 0;

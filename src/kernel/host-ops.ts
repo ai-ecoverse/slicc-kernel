@@ -195,7 +195,11 @@ export class AsyncOps {
 export interface HostOpsContext {
   pid: number;
   owner?: () => number;
-  fileKey?: (target: LockTarget, kind: LockKind | 'unlock' | 'close') => Promise<string>;
+  fileKey?: (
+    target: LockTarget,
+    kind: LockKind | 'unlock' | 'close',
+    setting?: boolean
+  ) => Promise<string>;
   locks: LockTable | undefined;
   ops: AsyncOps;
   blocking: () => AbortSignal;
@@ -255,7 +259,7 @@ async function recordLock(
     return done;
   }
   const range = lockRange(req.start, req.len);
-  const key = await fileKey(target, req.kind);
+  const key = await fileKey(target, req.kind, req.op === 'lk-set' && req.fd !== undefined);
   if (req.op === 'lk-get') {
     const held = locks.holder(key, owner, { key, kind: req.kind, ...range });
     if (!held) return json(null);
