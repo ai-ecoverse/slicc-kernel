@@ -19,10 +19,10 @@ async function install(kernel, name) {
   }
 }
 
-async function boot(t) {
+async function boot(t, more = []) {
   const kernel = await createNodeKernel({ users: 'enforce' });
   t.after(() => kernel.terminate());
-  for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
+  for (const name of ['wasm-bash', 'wasm-coreutils', ...more]) await install(kernel, name);
   await kernel.users.add({ name: 'cone' });
   const sh = (script, user) =>
     kernel.run(['bash', '-c', script], { cwd: '/', ...(user ? { user } : {}) });
@@ -73,4 +73,23 @@ test('> /etc/hosts replaces the defaults as on Linux, and a user who may not wri
     stdout: '10.0.0.1 only\n',
     stderr: '',
   });
+});
+
+const lookup = (name) =>
+  `python3 -c "import socket\ntry: print(socket.gethostbyname('${name}'))\nexcept OSError as e: print('no', e.errno)"`;
+
+test('under umask 077 the seeded /etc/hosts is still 0644, so a user reads it, and a program that reads it resolves localhost and an added name (#895)', async (t) => {
+  const { sh } = await boot(t, ['wasix-python']);
+  assert.deepEqual(
+    await sh("umask 077 && echo '10.0.0.9 zzydb' >> /etc/hosts && stat -c '%a %U %G' /etc/hosts"),
+    { status: 0, stdout: '644 root root\n', stderr: '' }
+  );
+  assert.deepEqual(
+    await sh(`head -n 1 /etc/hosts && ${lookup('localhost')} && ${lookup('zzydb')}`, 'cone'),
+    {
+      status: 0,
+      stdout: '127.0.0.1 localhost localhost.localdomain\n127.0.0.1\n10.0.0.9\n',
+      stderr: '',
+    }
+  );
 });
