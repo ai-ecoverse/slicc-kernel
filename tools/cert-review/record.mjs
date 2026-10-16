@@ -14,6 +14,7 @@ import {
   packageProblems,
   releaseEvidence,
   verdictLine,
+  withMissing,
 } from './lib.mjs';
 import { manifestOf, sha, sri } from './tarball.mjs';
 
@@ -81,20 +82,20 @@ function readVerdict() {
   try {
     const v = JSON.parse(readFileSync(join(values.review, 'verdict.json'), 'utf8'));
     if (v?.verdict !== 'certified' && v?.verdict !== 'fail') {
-      problems.push(`verdict.json says "${one(v?.verdict)}", neither certified nor fail`);
+      missing.push(`verdict.json says "${one(v?.verdict)}", neither certified nor fail`);
       return undefined;
     }
     const known = Array.isArray(v.known) ? v.known : [];
     if (v.known !== undefined && !Array.isArray(v.known))
-      problems.push('verdict.json "known" is not a list');
+      missing.push('verdict.json "known" is not a list');
     return {
       elsewhere: elsewhereOf(v),
       verdict: v.verdict,
       known: known.map((k) => one(k).slice(0, 120)).filter(Boolean),
       reason: one(v.reason).slice(0, 300),
     };
-  } catch (error) {
-    problems.push(`no readable verdict.json (${one(error.message)})`);
+  } catch {
+    missing.push('no readable verdict.json');
     return undefined;
   }
 }
@@ -178,6 +179,7 @@ function standing() {
 }
 
 let gaps = [];
+const missing = [];
 let baseNote = '';
 let incomplete;
 
@@ -188,7 +190,7 @@ function codedFindings() {
   incomplete = releaseEvidence(found);
   const partial = baseEvidence(found);
   baseNote = partial.note;
-  if (partial.problem) problems.push(partial.problem);
+  if (partial.problem) missing.push(partial.problem);
   for (const f of found.filter((x) => x.kind === 'compat-crash')) {
     problems.push(
       `kernel-compat: ${f.package} ${f.spec} crashes again on the rerun and not on the reference kernel`
@@ -221,6 +223,7 @@ try {
 codedFindings();
 incomplete = jobsEvidence(`${values.jobs},review=${values['review-result']}`, incomplete);
 const review = readVerdict();
+incomplete = withMissing(incomplete, missing);
 const known = knownLine(repo, [...standing(), ...(review?.known ?? [])]);
 const covered = values.covers.split(',').filter(Boolean);
 const covers = covered.length > 1 ? `covers ${covered[0]}\u2013${covered.at(-1)}; ` : '';
@@ -235,6 +238,7 @@ const { line, state } = verdictLine({
   problems,
   review,
   incomplete,
+  attempt: process.env.GITHUB_RUN_ATTEMPT ?? 1,
   certified: `certified ${NAME}@${version} sha256=${facts.sha256} (${ci}; known: ${known.length ? known.join(', ') : 'none'}${gap}${partial})`,
 });
 const certified = state === 'success';
