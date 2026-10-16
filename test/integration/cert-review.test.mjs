@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import {
   baseEvidence,
   baselineFiles,
+  compatFindingsOf,
   compatRegressions,
   covering,
   decide,
@@ -23,6 +25,7 @@ import {
   pickRelease,
   provenanceProblems,
   releaseEvidence,
+  rerunSet,
   resultsMap,
   rowOf,
   testCommand,
@@ -1230,4 +1233,47 @@ test('the suite runner re-runs once the files that left no result and merges the
     [0, ['test/integration/a.test.mjs'], []]
   );
   assert.deepEqual(unfinishedFiles(negative.expected, negative.results), []);
+});
+
+test('a compat rerun tests exactly the package@version that regressed, and one that ran another version is a rerun-mismatch, reproduced, never a flake (#765)', () => {
+  const row = (version, spec, verdict) => ({
+    package: '@ai-ecoverse/wasix-python',
+    recipe: 'wasix-python',
+    version,
+    spec,
+    users: 'off',
+    verdict,
+    error: verdict === 'regression' ? 'epoll row failed' : '',
+    reference: { status: 'pass' },
+  });
+  const report = {
+    results: [row('3.14.2-18', 'epoll.mjs', 'regression'), row('3.14.2-18', 'ok.mjs', 'pass')],
+  };
+  const regressions = compatRegressions(report);
+  assert.equal(rerunSet(regressions), 'wasix-python@3.14.2-18');
+  assert.equal(
+    rerunSet([...regressions, { recipe: 'wasm-bash', version: '5.3-9' }, regressions[0]]),
+    'wasix-python@3.14.2-18,wasm-bash@5.3-9'
+  );
+  const other = compatRegressions(report, { results: [row('3.14.2-21', 'epoll.mjs', 'pass')] });
+  assert.deepEqual(
+    other.map(({ rerun, rerunVersion, reproduced }) => ({ rerun, rerunVersion, reproduced })),
+    [{ rerun: 'rerun-mismatch', rerunVersion: '3.14.2-21', reproduced: true }]
+  );
+  assert.deepEqual(
+    compatFindingsOf({ found: true, conclusion: 'failure', regressions: other }).map((f) => [
+      f.kind,
+      f.package,
+      f.rerun,
+    ]),
+    [['compat-regression', 'wasix-python@3.14.2-18', 'rerun-mismatch']]
+  );
+  const compatSource = readFileSync(fileURLToPath(new URL('compat.mjs', tools)), 'utf8');
+  assert.match(compatSource, /const set = rerunSet\(regressions\);/);
+  assert.match(compatSource, /ran: \[/);
+  const same = compatRegressions(report, { results: [row('3.14.2-18', 'epoll.mjs', 'pass')] });
+  assert.deepEqual(
+    same.map(({ rerun, reproduced }) => [rerun, reproduced]),
+    [['pass', false]]
+  );
 });

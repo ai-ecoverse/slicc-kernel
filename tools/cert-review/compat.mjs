@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
-import { compatRegressions, missingShards } from './lib.mjs';
+import { compatRegressions, missingShards, rerunSet } from './lib.mjs';
 
 const { values } = parseArgs({
   options: {
@@ -202,7 +202,7 @@ if (first.run) {
   });
   let regressions = compatRegressions(got?.json);
   if (regressions.length > 0 && values.rerun) {
-    const set = [...new Set(regressions.map((r) => r.recipe))].join(',');
+    const set = rerunSet(regressions);
     const again = await whole(
       await finished({ own: false, set, deadline: Date.now() + 120 * 60_000 })
     );
@@ -212,6 +212,7 @@ if (first.run) {
           run: again.run.html_url,
           conclusion: again.run.conclusion,
           set,
+          ran: [...new Set((rerun?.json.results ?? []).map((r) => `${r.recipe}@${r.version}`))],
           verdict: rerun?.json.verdict,
           ...(again.shards.length ? { missingShards: again.shards } : {}),
           ...(again.shardRerun ? { shardRerun: again.shardRerun } : {}),

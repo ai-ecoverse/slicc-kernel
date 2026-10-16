@@ -315,6 +315,10 @@ export function crashed(text) {
   return CRASH.test(text ?? '');
 }
 
+export function rerunSet(regressions) {
+  return [...new Set(regressions.map((r) => `${r.recipe}@${r.version}`))].join(',');
+}
+
 export function compatRegressions(report, rerun, referenceText = () => '') {
   const regressions = (report?.results ?? []).filter((r) => r.verdict === 'regression');
   return regressions.map((r) => {
@@ -332,6 +336,9 @@ export function compatRegressions(report, rerun, referenceText = () => '') {
     };
     if (!rerun) return { ...row, rerun: 'none', reproduced: true };
     if (!again) return { ...row, rerun: 'missing', reproduced: true };
+    if (again.version !== r.version) {
+      return { ...row, rerun: 'rerun-mismatch', rerunVersion: again.version, reproduced: true };
+    }
     const reproduced = again.verdict === 'regression';
     const referenceCrash = crashed(again.reference?.error) || crashed(referenceText(again));
     return {
