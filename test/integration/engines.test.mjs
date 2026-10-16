@@ -61,6 +61,11 @@ test('a package whose engines.slicc-kernel floor is above this kernel has its co
     }),
     { status: 0, stdout: 'rc=126\n/usr/bin/floored\nfits ran\nplain ran\n', stderr: message }
   );
+  assert.deepEqual(await kernel.run(['cat', '/usr/bin/floored'], { cwd: '/' }), {
+    status: 0,
+    stdout: '#!/bin/bash\necho floored ran "$@"\n',
+    stderr: '',
+  });
   await kernel.writeFile('/tmp/by-floored', '#!/usr/bin/floored\necho never\n');
   assert.deepEqual(
     await kernel.run(['bash', '-c', 'chmod +x /tmp/by-floored && /tmp/by-floored; echo rc=$?'], {
