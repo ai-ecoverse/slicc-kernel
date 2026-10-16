@@ -3,7 +3,14 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { parseArgs } from 'node:util';
-import { deltaFiles, mergedPrs, rowOf } from './lib.mjs';
+import {
+  baselineFiles,
+  compareVersions,
+  deltaFiles,
+  mergedPrs,
+  rowOf,
+  withBaselines,
+} from './lib.mjs';
 
 const { values } = parseArgs({
   options: {
@@ -35,13 +42,49 @@ for (const n of [...new Set([...mergedPrs(commits), ...extra])]) {
   const files = gh(`repos/${repo}/pulls/${n}/files?per_page=100`).flat();
   rows.push(rowOf(pr, files));
 }
-const delta = { repo, prev, version, head, commits: commits.length, rows, files: deltaFiles(rows) };
+function published() {
+  try {
+    return new Set(
+      JSON.parse(
+        execFileSync('npm', ['view', '@ai-ecoverse/slicc-kernel', 'versions', '--json'], {
+          encoding: 'utf8',
+        })
+      )
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+const onNpm = published();
+const tags = gh(`repos/${repo}/git/matching-refs/tags/v`)
+  .flat()
+  .filter((ref) => ref.object.type === 'commit')
+  .map((ref) => ({ version: ref.ref.replace(/^refs\/tags\/v/, ''), sha: ref.object.sha }))
+  .filter(
+    (t) =>
+      /^\d+\.\d+\.\d+$/.test(t.version) &&
+      onNpm.has(t.version) &&
+      compareVersions(t.version, prev) > 0 &&
+      compareVersions(t.version, version) < 0
+  );
+const placed = withBaselines(rows, { commits, tags, prev });
+const delta = {
+  repo,
+  prev,
+  version,
+  head,
+  commits: commits.length,
+  rows: placed,
+  files: deltaFiles(placed),
+  baselines: baselineFiles(placed, prev),
+};
 mkdirSync(dirname(values.out), { recursive: true });
 writeFileSync(values.out, `${JSON.stringify(delta, null, 2)}\n`);
 console.log(
   `delta v${prev}..v${version}: ${commits.length} commits, ${rows.length} pull requests, ${delta.files.length} integration test files`
 );
-for (const r of rows)
+for (const r of placed)
   console.log(
-    `#${r.pr} ${r.kind}${r.behaviour ? '' : ' (no behaviour)'}: ${r.title} [${r.tests.map((t) => `${t.file}: ${t.titles.length}`).join(', ')}]`
+    `#${r.pr} ${r.kind}${r.behaviour ? '' : ' (no behaviour)'}${r.kind === 'fix' && r.baseline !== prev ? ` (NEGATIVE on v${r.baseline})` : ''}: ${r.title} [${r.tests.map((t) => `${t.file}: ${t.titles.length}`).join(', ')}]`
   );

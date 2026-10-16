@@ -57,7 +57,7 @@ import { Resolver } from './net/resolver.ts';
 import { Routes } from './net/routes.ts';
 import type { MountLine, ProcessListing } from './proc-info.ts';
 import type { DlState, ForkState } from './protocol.ts';
-import { PTY_OPS, type PtySyscall, type PtyTable, ptsNumber, ptySyscall } from './pty.ts';
+import { PTY_OPS, type PtySyscall, type PtyTable, ptsNumber, ptySyscall, sizeKey } from './pty.ts';
 import { type RunRequest, runChild } from './run-child.ts';
 import type { SealedBroker, SealedCaller } from './sealed.ts';
 import { selectFds } from './select.ts';
@@ -557,6 +557,11 @@ export interface WasmProcessOptions {
   resolver?: Resolver;
 }
 
+function timeLeft(req: WasmSyscall, started: number): WasmSyscall {
+  if (!('timeoutMs' in req) || typeof req.timeoutMs !== 'number' || req.timeoutMs < 0) return req;
+  return { ...req, timeoutMs: Math.max(0, req.timeoutMs - (performance.now() - started)) };
+}
+
 export type StateListener = (state: 'stopped' | 'continued', sig: number) => void;
 
 export type SignalOutcome = DefaultAction | 'deliver' | 'forward';
@@ -761,29 +766,37 @@ export class WasmProcess {
 
   private readonly blocks = new WeakMap<AbortSignal, () => void>();
 
+  private readonly sizesRead = new WeakMap<KernelTty, string>();
+
   async syscall(
     req: WasmSyscall,
     cancelled?: AbortSignal,
     block?: () => void
   ): Promise<SyncFsResult> {
     this.options.onSyscall?.(req);
+    const started = performance.now();
+    let restarted = false;
     for (;;) {
       await this.resumed;
       if (this.dying) return DYING;
+      const current = restarted ? timeLeft(req, started) : req;
       const stops = this.stops;
       const scope = new AbortController();
       const forward = () => scope.abort();
       if (cancelled?.aborted) scope.abort();
       cancelled?.addEventListener('abort', forward, { once: true });
       if (block) this.blocks.set(scope.signal, block);
-      const result = await this.dispatch(req, scope.signal).finally(() => {
+      const result = await this.dispatch(current, scope.signal).finally(() => {
         cancelled?.removeEventListener('abort', forward);
         this.waiting.delete(scope.signal);
       });
       if (this.dying) return DYING;
 
       const restart = !result.ok && result.errno === 'EINTR' && this.stops !== stops;
-      if (restart && !this.options.hasPending?.()) continue;
+      if (restart && !this.options.hasPending?.() && req.op !== 'epoll-wait') {
+        restarted = true;
+        continue;
+      }
 
       await this.resumed;
       return result;
@@ -834,7 +847,17 @@ export class WasmProcess {
         const owner = this.options.owners ? this.ttyOwner() : undefined;
         const guard = this.guarded();
         const { outputFilter } = this.options;
-        const ctx = { pid: this.pid, fds: this.fds, ptys, jobs, guard, owner, outputFilter };
+        const sizesRead = this.sizesRead;
+        const ctx = {
+          pid: this.pid,
+          fds: this.fds,
+          ptys,
+          jobs,
+          guard,
+          owner,
+          outputFilter,
+          sizesRead,
+        };
         return ptySyscall(req, ctx);
       }
       return await this.procSyscall(req, cancelled);
@@ -1582,8 +1605,11 @@ export class WasmProcess {
       case 'tty-set':
         tty.tcsets(req.termios, req.flush === true);
         return { ok: true, kind: 'void' };
-      case 'tty-winsz':
-        return { ok: true, kind: 'json', json: tty.winsize() };
+      case 'tty-winsz': {
+        const size = tty.winsize();
+        this.sizesRead.set(tty, sizeKey(...size));
+        return { ok: true, kind: 'json', json: size };
+      }
       case 'tty-pgrp-get':
         return { ok: true, kind: 'json', json: jobs ? jobs.tcgetpgrp(tty, this.sid()) : this.pid };
       case 'tty-pgrp-set':

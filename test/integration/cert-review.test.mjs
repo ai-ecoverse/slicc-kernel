@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
+  baselineFiles,
   compatRegressions,
   covering,
   decide,
@@ -15,6 +16,7 @@ import {
   knownAsOf,
   knownLine,
   mergedPrs,
+  missingShards,
   parseResults,
   pickRelease,
   provenanceProblems,
@@ -23,6 +25,7 @@ import {
   testCommand,
   titlesFromPatch,
   unquote,
+  withBaselines,
 } from '../../tools/cert-review/lib.mjs';
 
 const fixtures = new URL('fixtures/cert-review/', import.meta.url);
@@ -421,13 +424,30 @@ test('findings.mjs turns the runs into decisions, suite regressions and missing 
   );
   assert.deepEqual(await compat({ found: true, conclusion: 'failure', regressions: [] }), [
     {
-      kind: 'compat-regression',
-      package: 'unknown',
-      spec: '',
-      rerun: 'none',
-      error: 'kernel-compat failure',
+      kind: 'compat-incomplete',
+      what: 'kernel-compat',
+      shards: [],
+      error: 'kernel-compat failure with no regression',
     },
   ]);
+  assert.deepEqual(
+    await compat({
+      found: true,
+      conclusion: 'failure',
+      regressions: [],
+      missingShards: [2],
+      shardRerun: { shards: [2], conclusion: 'failure' },
+    }),
+    [
+      {
+        kind: 'compat-incomplete',
+        what: 'kernel-compat',
+        shards: [2],
+        rerun: 'failure',
+        error: 'kernel-compat failure with no regression, no report from shard 2',
+      },
+    ]
+  );
   assert.deepEqual(await compat({ found: false, planted: true }), []);
   await write('release.json', {
     exit: 'signal SIGTERM',
@@ -439,6 +459,110 @@ test('findings.mjs turns the runs into decisions, suite regressions and missing 
     cut.filter((f) => f.kind === 'suite-incomplete'),
     [{ kind: 'suite-incomplete', what: 'the release suite', exit: 'signal SIGTERM', results: 1 }]
   );
+});
+
+test('a kernel-compat shard that left no report is named, from the jobs and the artifacts of the run (#732 follow-up)', () => {
+  const jobs = [
+    'release / plan',
+    'release / shard (0)',
+    'release / shard (2)',
+    'release / shard (1)',
+    'release / gate',
+  ].map((name) => ({ name }));
+  const artifacts = [
+    'kernel-compat-abc-shard-0',
+    'kernel-compat-abc-shard-1',
+    'kernel-compat-abc',
+    'kernel-compat-abc-plan',
+  ];
+  assert.deepEqual(missingShards(jobs, artifacts), [2]);
+  assert.deepEqual(missingShards(jobs, [...artifacts, 'kernel-compat-abc-shard-2']), []);
+});
+
+test('a fix whose bug shipped inside the delta gets its NEGATIVE from the release before the fix, not from prev (#732)', async (t) => {
+  const commits = ['a', 'b', 'c', 'd', 'e'].map((sha) => ({ sha }));
+  const tags = [
+    { version: '1.0.2', sha: 'd' },
+    { version: '1.0.1', sha: 'b' },
+    { version: '0.9.0', sha: 'z' },
+  ];
+  const row = (pr, kind, merged, file) => ({
+    pr,
+    title: `${kind}: ${pr}`,
+    kind,
+    behaviour: true,
+    tests: [{ file, titles: [`t${pr}`] }],
+    ...(merged ? { merged } : {}),
+  });
+  const placed = withBaselines(
+    [
+      row(1, 'fix', 'a', 'test/integration/a.test.mjs'),
+      row(2, 'fix', 'c', 'test/integration/c.test.mjs'),
+      row(3, 'fix', 'e', 'test/integration/e.test.mjs'),
+      row(4, 'fix', undefined, 'test/integration/x.test.mjs'),
+      row(5, 'feat', 'e', 'test/integration/f.test.mjs'),
+    ],
+    { commits, tags, prev: '1.0.0' }
+  );
+  assert.deepEqual(
+    placed.map((r) => [r.pr, r.baseline]),
+    [
+      [1, '1.0.0'],
+      [2, '1.0.1'],
+      [3, '1.0.2'],
+      [4, '1.0.0'],
+      [5, '1.0.2'],
+    ]
+  );
+  assert.deepEqual(baselineFiles(placed, '1.0.0'), {
+    '1.0.0': ['test/integration/a.test.mjs', 'test/integration/x.test.mjs'],
+    '1.0.1': ['test/integration/c.test.mjs'],
+    '1.0.2': ['test/integration/e.test.mjs'],
+  });
+  const dir = await mkdtemp(join(tmpdir(), 'cert-baseline-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const write = (name, value) => writeFile(join(dir, name), JSON.stringify(value));
+  const two = placed.filter((r) => r.pr === 1 || r.pr === 2);
+  await write('delta.json', {
+    prev: '1.0.0',
+    version: '1.0.3',
+    rows: two,
+    baselines: baselineFiles(two, '1.0.0'),
+  });
+  const a = 'test/integration/a.test.mjs';
+  const c = 'test/integration/c.test.mjs';
+  await write('prev.json', { exit: 1, files: [a], results: [res(a, 't1', 'fail')] });
+  await write('release.json', { exit: 0, results: [res(a, 't1', 'pass'), res(c, 't2', 'pass')] });
+  await write('base.json', { exit: 0, results: [res(a, 't1', 'pass')] });
+  const run = () => {
+    execFileSync(process.execPath, [
+      fileURLToPath(new URL('findings.mjs', tools)),
+      ...['--delta', 'delta.json', '--prev', 'prev.json', '--release', 'release.json'].map((x) =>
+        x.endsWith('.json') ? join(dir, x) : x
+      ),
+      '--base',
+      join(dir, 'base.json'),
+      '--out',
+      join(dir, 'findings.json'),
+    ]);
+    return JSON.parse(execFileSync('cat', [join(dir, 'findings.json')], { encoding: 'utf8' }));
+  };
+  const lost = run();
+  assert.deepEqual(
+    lost.findings.filter((f) => f.kind === 'missing-evidence'),
+    [{ kind: 'missing-evidence', what: 'the v1.0.1 run' }]
+  );
+  await write('prev-1.0.1.json', { exit: 1, files: [c], results: [res(c, 't2', 'fail')] });
+  const found = run();
+  assert.deepEqual(
+    found.rows.map((r) => [r.pr, r.decision, r.baseline]),
+    [
+      [1, 'negative', undefined],
+      [2, 'negative', '1.0.1'],
+    ]
+  );
+  assert.deepEqual(found.findings, []);
+  assert.deepEqual(Object.keys(found.runs), ['prev', 'prev-1.0.1', 'release', 'base']);
 });
 
 test('kernel-compat regressions are re-run in code: one that passes again is a flake, a crash that comes back is kept unless the reference crashes too', () => {

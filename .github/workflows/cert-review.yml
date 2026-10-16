@@ -230,7 +230,11 @@ jobs:
           else
             (cd "$RUNNER_TEMP/tgz" && npm pack "@ai-ecoverse/slicc-kernel@$tag" --silent)
           fi
-          if [ "$WHICH" = release ]; then (cd "$RUNNER_TEMP/tgz" && npm pack "@ai-ecoverse/slicc-kernel@$PREV" --silent); fi
+          if [ "$WHICH" = release ]; then
+            for v in $(node -e 'const d = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); console.log([...new Set([process.argv[2], ...Object.keys(d.baselines ?? {})])].join(" "))' "$RUNNER_TEMP/evidence/delta.json" "$PREV"); do
+              (cd "$RUNNER_TEMP/tgz" && npm pack "@ai-ecoverse/slicc-kernel@$v" --silent)
+            done
+          fi
           ls -l "$RUNNER_TEMP/tgz"
           echo "TREE=$tree" >> "$GITHUB_ENV"
           echo "TAG=$tag" >> "$GITHUB_ENV"
@@ -240,16 +244,24 @@ jobs:
           node tools/cert-review/suite.mjs --tree "$TREE" --tgz "$RUNNER_TEMP/tgz/ai-ecoverse-slicc-kernel-$TAG.tgz" \
             --out "$RUNNER_TEMP/evidence/$WHICH"
 
-      - name: The delta's tests on the previous release's dist, the NEGATIVE (no secrets in this step)
+      - name: Each fix's tests on the dist of the release before it, the NEGATIVE (no secrets in this step)
         if: matrix.which == 'release'
         run: |
-          files=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).files.join(","))' "$RUNNER_TEMP/evidence/delta.json")
-          if [ -n "$files" ]; then
-            node tools/cert-review/suite.mjs --tree "$TREE" --tgz "$RUNNER_TEMP/tgz/ai-ecoverse-slicc-kernel-$PREV.tgz" \
-              --files "$files" --out "$RUNNER_TEMP/evidence/prev"
-          else
-            printf '{"files":[],"exit":0,"pass":0,"fail":0,"skip":0,"results":[]}\n' > "$RUNNER_TEMP/evidence/prev.json"
-          fi
+          set -euo pipefail
+          ev="$RUNNER_TEMP/evidence"
+          node -e '
+            const d = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+            const groups = d.baselines ?? { [d.prev]: d.files };
+            for (const [v, files] of Object.entries(groups)) if (files.length) console.log(v + " " + files.join(","));
+          ' "$ev/delta.json" > "$RUNNER_TEMP/baselines.txt"
+          grep -q "^$PREV " "$RUNNER_TEMP/baselines.txt" || \
+            printf '{"files":[],"exit":0,"pass":0,"fail":0,"skip":0,"results":[]}\n' > "$ev/prev.json"
+          while read -r v files; do
+            out="$ev/prev-$v"
+            [ "$v" = "$PREV" ] && out="$ev/prev"
+            node tools/cert-review/suite.mjs --tree "$TREE" --tgz "$RUNNER_TEMP/tgz/ai-ecoverse-slicc-kernel-$v.tgz" \
+              --files "$files" --out "$out" || true
+          done < "$RUNNER_TEMP/baselines.txt"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
