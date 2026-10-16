@@ -1,10 +1,11 @@
 import { RangedFile, type RangedWatch, watchedChange } from '../../fs/ranged.ts';
 import type { DeviceAccess, KernelFdKind } from '../../kernel/fd-table.ts';
-import type {
-  ChownArgs,
-  SyncFsBridgeStat,
-  SyncFsFileIo,
-  SyncFsPosixBridge,
+import {
+  type ChownArgs,
+  type SyncFsBridgeStat,
+  type SyncFsFileIo,
+  type SyncFsPosixBridge,
+  syncError,
 } from '../../realm/sync-fs-wire.ts';
 
 export class WasiError extends Error {
@@ -384,6 +385,7 @@ export const MISS_TTL_MS = 20;
 interface Miss {
   error: Error;
   until: number;
+  gen?: number;
 }
 
 export const FS_GEN = 4;
@@ -531,15 +533,37 @@ export function cachingBridge(
   const blind = shared !== undefined && shared.length * 4 < SHARED_IDS_BYTES;
   const cache = new StatCache(blind ? undefined : shared);
   const { stats, lstats } = cache;
+  const view = bridge.changes;
+  const live = (miss: Miss, path: string) =>
+    miss.until > now() &&
+    (view === undefined || miss.gen === undefined || !view.changedSince(miss.gen, path).changed);
+  const gone = (path: string): Miss | undefined => {
+    for (let at = path.lastIndexOf('/'); at > 0; at = path.lastIndexOf('/', at - 1)) {
+      const up = path.slice(0, at);
+      for (const map of [lstats, stats]) {
+        const hit = map.get(up);
+        const code = hit && 'until' in hit ? (hit.error as { code?: string }).code : undefined;
+        if (hit && 'until' in hit && code === 'ENOENT' && live(hit, up)) return hit;
+      }
+    }
+    return undefined;
+  };
   const cached = (map: typeof stats, path: string, get: () => SyncFsBridgeStat) => {
     if (blind) return get();
     cache.fresh();
     let hit = map.get(path);
-    if (hit === undefined || ('until' in hit && hit.until <= now())) {
+    if (hit === undefined || ('until' in hit && !live(hit, path))) {
+      const missing = gone(path);
+      if (missing) throw missing.error;
+      const gen = view?.now();
       try {
         hit = get();
       } catch (e) {
-        hit = { error: e as Error, until: now() + MISS_TTL_MS };
+        hit = {
+          error: e as Error,
+          until: now() + MISS_TTL_MS,
+          ...(gen !== undefined ? { gen } : {}),
+        };
       }
       cache.put(map, path, hit);
     }
@@ -597,7 +621,13 @@ export function cachingBridge(
       }
       return list;
     },
-    readlink: (p) => bridge.readlink(p),
+    readlink: (p) => {
+      const known = blind ? undefined : (cache.fresh(), lstats.get(p));
+      if (known && !('until' in known) && !known.isSymbolicLink) {
+        throw syncError('EINVAL', `'${p}' is not a symbolic link`);
+      }
+      return bridge.readlink(p);
+    },
     stat: (p) => cached(stats, p, () => bridge.stat(p)),
     lstat: (p) => cached(lstats, p, () => bridge.lstat(p)),
     exists: (p) => {
