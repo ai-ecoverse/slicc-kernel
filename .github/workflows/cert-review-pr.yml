@@ -64,6 +64,7 @@ jobs:
     outputs:
       go: ${{ steps.plan.outputs.go }}
       self: ${{ steps.plan.outputs.self }}
+      manifest: ${{ steps.plan.outputs.manifest }}
       version: ${{ steps.versions.outputs.version }}
       prev: ${{ steps.versions.outputs.prev }}
       base: ${{ steps.versions.outputs.prev }}
@@ -173,6 +174,61 @@ jobs:
           if-no-files-found: error
           overwrite: true
 
+  same:
+    name: cert-review-pr / same dist
+    needs: [plan, pack]
+    if: ${{ !cancelled() && needs.plan.outputs.go == 'true' && needs.plan.outputs.manifest == 'true' && needs.pack.result == 'success' }}
+    runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      statuses: write
+    outputs:
+      identical: ${{ steps.same.outputs.identical }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          sparse-checkout: tools/cert-review
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          pattern: kernel-tgz-*
+          path: ${{ runner.temp }}/packs
+          merge-multiple: true
+
+      - id: same
+        name: Only package.json or its lock changed, so compare what ships, the packed candidate against the packed base
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          PREV: ${{ needs.plan.outputs.prev }}
+        run: |
+          node tools/cert-review/same.mjs --candidate "$RUNNER_TEMP/packs/ai-ecoverse-slicc-kernel-$VERSION.tgz" \
+            --base "$RUNNER_TEMP/packs/ai-ecoverse-slicc-kernel-$PREV.tgz" --candidate-version "$VERSION" --base-version "$PREV" \
+            --out "$RUNNER_TEMP/same/same.json"
+
+      - name: Identical dist is not behaviour, and the status says so with both builds' sha256
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          node tools/cert-review/pr.mjs same --repo "$GITHUB_REPOSITORY" --pr "$PR" --head "$HEAD_SHA" \
+            --run "$GITHUB_RUN_ID" --context "$CERT_CONTEXT" --evidence "$RUNNER_TEMP/same/same.json"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: ${{ !cancelled() }}
+        with:
+          name: cert-review-same-${{ needs.plan.outputs.version }}
+          path: ${{ runner.temp }}/same/same.json
+          if-no-files-found: ignore
+          overwrite: true
+
   delta:
     name: cert-review-pr / delta
     needs: plan
@@ -217,8 +273,8 @@ jobs:
 
   suite:
     name: cert-review-pr / suite ${{ matrix.which }}
-    needs: [plan, pack, delta]
-    if: ${{ !cancelled() && needs.plan.outputs.go == 'true' && needs.pack.result == 'success' && needs.delta.result == 'success' }}
+    needs: [plan, pack, delta, same]
+    if: ${{ !cancelled() && needs.plan.outputs.go == 'true' && needs.same.outputs.identical != 'true' && needs.pack.result == 'success' && needs.delta.result == 'success' }}
     runs-on: ${{ vars.CERT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 120
     strategy:
@@ -302,8 +358,8 @@ jobs:
 
   compat:
     name: cert-review-pr / kernel-compat
-    needs: [plan, pack]
-    if: ${{ !cancelled() && needs.plan.outputs.go == 'true' && needs.pack.result == 'success' }}
+    needs: [plan, pack, same]
+    if: ${{ !cancelled() && needs.plan.outputs.go == 'true' && needs.same.outputs.identical != 'true' && needs.pack.result == 'success' }}
     runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 300
     permissions:
@@ -346,8 +402,8 @@ jobs:
 
   review:
     name: cert-review-pr / review
-    needs: [plan, pack, delta, suite, compat]
-    if: ${{ !cancelled() && needs.plan.outputs.go == 'true' && needs.delta.result == 'success' }}
+    needs: [plan, pack, delta, same, suite, compat]
+    if: ${{ !cancelled() && needs.plan.outputs.go == 'true' && needs.same.outputs.identical != 'true' && needs.delta.result == 'success' }}
     runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 90
     permissions:
@@ -455,8 +511,8 @@ jobs:
 
   record:
     name: cert-review-pr / record
-    needs: [plan, pack, suite, compat, review]
-    if: ${{ !cancelled() && needs.plan.outputs.go == 'true' && needs.review.result != 'cancelled' }}
+    needs: [plan, pack, same, suite, compat, review]
+    if: ${{ !cancelled() && needs.plan.outputs.go == 'true' && needs.same.outputs.identical != 'true' && needs.review.result != 'cancelled' }}
     runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 20
     permissions:
@@ -538,8 +594,8 @@ jobs:
 
   report:
     name: cert-review-pr / report
-    needs: [plan, record]
-    if: ${{ !cancelled() && github.event_name == 'pull_request' && needs.plan.outputs.go == 'true' }}
+    needs: [plan, same, record]
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && needs.plan.outputs.go == 'true' && needs.same.outputs.identical != 'true' }}
     runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
