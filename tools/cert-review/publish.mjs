@@ -60,9 +60,14 @@ const onNpm = view([`${NAME}@${version}`, 'dist.integrity']);
 const ours = sri(tarball);
 const step = publishStep({ version, latest, onNpm, ours, dryRun });
 const head = `${dryRun ? 'dry run: ' : ''}${gate.subject} sha256=${gate.sha256} (npm latest ${latest || 'none'})\n${gate.line}`;
+const args = ['publish', tarball, '--provenance', '--access', 'public', '--tag', 'latest'];
 if (step.action === 'skip') {
   say(`${head}\nskip, not published to npm: ${step.why}`);
   output('skipped');
+  if (dryRun) {
+    console.log('the dry run still runs the publish command, as a check of the bytes:');
+    execFileSync('npm', [...args, '--dry-run', '--force'], { stdio: 'inherit', env });
+  }
   process.exit(0);
 }
 if (step.action === 'refuse') {
@@ -76,7 +81,6 @@ if (step.action === 'done') {
   output('published');
   process.exit(0);
 }
-const args = ['publish', tarball, '--provenance', '--access', 'public', '--tag', 'latest'];
 if (dryRun) args.push('--dry-run');
 if (step.force) args.push('--force');
 say(`${head}\n${step.why ? `${step.why}\n` : ''}npm ${args.join(' ')}`);
