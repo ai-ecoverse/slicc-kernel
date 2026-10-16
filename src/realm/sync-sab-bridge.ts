@@ -64,6 +64,11 @@ export function syncCallCount(): number {
   return calls;
 }
 
+const SPIN_MS = 0.06;
+const SPIN_STRIDE = 128;
+const SPIN_STRIDES = 256;
+const SPIN_CAP_MS = 1;
+
 export function createSyncSabTransport(
   sab: SharedArrayBuffer,
   port: SabPostLike,
@@ -74,14 +79,33 @@ export function createSyncSabTransport(
   const wait: AtomicsWaitLike = deps.wait ?? ((a, i, v, t) => rawWait(a, i, v, t));
   const now = deps.now ?? (() => performance.now());
   let seq = 0;
+  let typical = 0;
+
+  const ready = (id: number): boolean =>
+    Atomics.load(header, SAB_I_STATE) === SAB_STATE_READY && Atomics.load(header, SAB_I_SEQ) === id;
+
+  function spinUntil(id: number, until: number): boolean {
+    for (let stride = 0; stride < SPIN_STRIDES; stride++) {
+      for (let i = 0; i < SPIN_STRIDE; i++) if (ready(id)) return true;
+      if (now() >= until) return false;
+    }
+    return false;
+  }
+
+  function settled(start: number): void {
+    typical += (Math.min(now() - start, SPIN_CAP_MS) - typical) / 8;
+  }
 
   function awaitReady(id: number, deadline: number, label: string): void {
+    const start = now();
+    if (typical < SPIN_MS && spinUntil(id, start + SPIN_MS)) {
+      settled(start);
+      return;
+    }
     for (;;) {
       const published = Atomics.load(header, SAB_I_PUB);
-      if (
-        Atomics.load(header, SAB_I_STATE) === SAB_STATE_READY &&
-        Atomics.load(header, SAB_I_SEQ) === id
-      ) {
+      if (ready(id)) {
+        settled(start);
         return;
       }
       const remaining = deadline - now();
