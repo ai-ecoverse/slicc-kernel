@@ -23,6 +23,14 @@ export interface WasiForkState {
   tls?: Array<[number, number]>;
 
   modules?: Record<string, WebAssembly.Module>;
+
+  entry?: ThreadEntry;
+}
+
+export interface ThreadEntry {
+  tid: number;
+  arg: number;
+  low: number;
 }
 
 export interface WasiSetjmps {
@@ -101,6 +109,13 @@ export class AsyncifyDriver {
 
   useStack(pointer: WebAssembly.Global, low: number): void {
     this.linked = { pointer, low };
+  }
+
+  private threadStack = false;
+
+  useThreadStack(pointer: WebAssembly.Global, low: number): void {
+    this.useStack(pointer, low);
+    this.threadStack = true;
   }
 
   bind(exports: WebAssembly.Exports): void {
@@ -200,9 +215,8 @@ export class AsyncifyDriver {
   }
 
   private dataPointer(): number {
-    if (this.linked && !(this.exports[STACK_POINTER] instanceof WebAssembly.Global)) {
-      return (this.linked.low + 15) & ~15;
-    }
+    const own = this.exports[STACK_POINTER] instanceof WebAssembly.Global;
+    if (this.linked && (this.threadStack || !own)) return (this.linked.low + 15) & ~15;
     const g = this.exports.__data_end;
     const dataEnd = g instanceof WebAssembly.Global ? (g.value as number) : 0;
     return dataEnd < this.stackUpper ? (dataEnd + 15) & ~15 : 16;

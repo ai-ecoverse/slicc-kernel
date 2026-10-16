@@ -257,6 +257,7 @@ export class WasixProcess {
       ...(this.host.linkedTls ? { tls: this.host.linkedTls() } : {}),
       ...(this.host.linkedModules ? { modules: this.host.linkedModules() } : {}),
     };
+    if (this.host.threadEntry) wasi.entry = this.host.threadEntry;
     return this.call({
       op: 'proc-fork',
       state: { memory, currData: 0, forkSp, callStackNames: [], ppid: this.host.o.pid, wasi },
