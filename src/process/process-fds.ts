@@ -1098,6 +1098,7 @@ interface ChmodFs {
 
 interface ChdirFs extends AccessFs {
   chdir?(path: string): void;
+  sliccChdirAt?(path: string): void;
   isDir?(mode: number): boolean;
   ErrnoError?: new (errno: number) => Error;
 }
@@ -1105,6 +1106,7 @@ interface ChdirFs extends AccessFs {
 function kernelChdir(Fs: ChdirFs): void {
   const { chdir, lookupPath, ErrnoError } = Fs;
   if (!chdir || !lookupPath || !ErrnoError) return;
+  Fs.sliccChdirAt = chdir;
   Fs.chdir = (path: string) => {
     const { node } = lookupPath.call(Fs, path, { follow: true });
     const directory = Fs.isDir?.(node.mode) === true;

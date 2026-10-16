@@ -141,6 +141,7 @@ export function childOps(
       ...named,
       env: { ...(o.env ?? defaults.env) },
       cwd: o.cwd ?? defaults.cwd,
+      ...(o.cwd !== undefined ? { chdir: true as const } : {}),
       stdio,
       ...group,
       ...death,

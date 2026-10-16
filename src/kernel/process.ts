@@ -194,6 +194,7 @@ export type WasmSyscall =
       argv0?: string;
       env: Record<string, string>;
       cwd: string;
+      chdir?: true;
       stdio: ChildStdio[];
       pgid?: number;
       session?: true;
@@ -698,13 +699,24 @@ export class WasmProcess {
   }
 
   private async spawn(req: Extract<WasmSyscall, { op: 'proc-spawn' }>): Promise<number> {
-    const { file, argv, argv0, env, cwd, stdio, inherit, exec, pgid, session, deathSignal } = req;
+    const { file, argv, argv0, env, cwd, chdir, stdio, inherit, exec, pgid, session, deathSignal } =
+      req;
     if (deathSignal !== undefined && (exec || !isSignal(deathSignal))) {
       throw new KernelError('EINVAL');
     }
     const group = { ...(pgid !== undefined ? { pgid } : {}), ...(session ? { session } : {}) };
     const named = argv0 !== undefined ? { argv0 } : {};
-    const spawned = { file, argv, ...named, env, cwd, ...group, ...(exec ? { exec } : {}) };
+    const moved = chdir ? { chdir } : {};
+    const spawned = {
+      file,
+      argv,
+      ...named,
+      env,
+      cwd,
+      ...moved,
+      ...group,
+      ...(exec ? { exec } : {}),
+    };
     const pid = await this.children.spawn(spawned, stdio, inherit);
     if (deathSignal !== undefined) this.onDeath(pgid === 0 || session ? -pid : pid, deathSignal);
     if (!exec) return pid;

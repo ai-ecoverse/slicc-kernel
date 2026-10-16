@@ -54,7 +54,7 @@ Runs `argv[0]` with `argv` as its arguments and resolves when it exits. `stdout`
 
 | option | |
 | --- | --- |
-| `cwd` | working directory, default `/`; created in OPFS if missing |
+| `cwd` | working directory, default `/`; created in OPFS if missing. Under `users: 'enforce'`, a `cwd` the user can't search rejects with `code: 'EACCES'` (`cannot change to <cwd>: Permission denied`) and starts nothing, as a `chdir` there fails on Linux; `openTerminal` does the same. A program's spawn with its own `cwd` (`ctx.spawn`, `ctx.sync.run`, a WASIX `posix_spawn` chdir action) is checked the same way and fails with `EACCES`, while a child that inherits its parent's cwd keeps it unchecked, as on Linux |
 | `user` | the user to run as, by name or uid (see [Users](#users)); default `root`. An unknown user rejects with `code: 'ENOENT'` |
 | `tag` | a string the kernel keeps with the process and every process it starts (fork, spawn and exec), and hands to `approve` with a [`sudo`](#sudo) request, so the embedder knows which agent asks; nothing a program does changes it. Anything but a string rejects with a `TypeError` |
 | `env` | extra environment, over the user's defaults: `HOME`, `USER`, `LOGNAME`, `PNPM_HOME` and `PATH=$PNPM_HOME/bin:/usr/local/bin:/usr/bin:/bin` (see [Users](#users)), and `PWD=<cwd>` |
