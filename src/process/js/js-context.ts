@@ -131,6 +131,7 @@ export interface JsProgramContext {
   wait(pid: number, options?: JsWaitOptions): Promise<JsExited>;
   kill(pid: number, signal?: JsSignal): Promise<void>;
   sudo(args: readonly string[]): Promise<JsSudoAnswer>;
+  crontab(call: JsCrontabCall): Promise<JsCrontabAnswer>;
   umask(mask?: number): Promise<number>;
   net: JsNet;
   websocket(url: string | URL, options?: JsWebSocketOptions): Promise<JsWebSocket>;
@@ -140,6 +141,16 @@ export interface JsProgramContext {
   onUncaught(listener: JsStrayListener): () => void;
   onUnhandledRejection(listener: JsStrayListener): () => void;
 }
+
+export interface JsCrontabCall {
+  action: 'list' | 'remove' | 'install';
+  user?: string;
+  text?: string;
+}
+
+export type JsCrontabAnswer =
+  | { text: string; error?: undefined }
+  | { error: string; text?: undefined };
 
 export type JsSudoAnswer =
   | { error: string; errno: string }
@@ -535,6 +546,8 @@ export function createContext(o: ContextOptions): CreatedContext {
         cwd: o.cwd,
         ...(o.env.TERM !== undefined ? { term: o.env.TERM } : {}),
       })) as JsSudoAnswer,
+    crontab: async (call) =>
+      (await kernel.json({ ...call, op: 'proc-crontab' })) as JsCrontabAnswer,
     ...children,
     net: netOps(kernel, io),
     websocket: websocketOp(kernel),
