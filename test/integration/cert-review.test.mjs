@@ -585,3 +585,35 @@ test('every release run has its own concurrency group, so a newer release never 
     "cert-review-${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || format('{0}{1}', inputs.version, inputs.planted) }}"
   );
 });
+
+test('review, record and publish never start once the run is cancelled: they use !cancelled(), never always()', async () => {
+  const workflow = await readFile(
+    new URL('../../.github/workflows/cert-review.yml', import.meta.url),
+    'utf8'
+  );
+  const jobs = workflow.split(/^jobs:$/m)[1];
+  for (const name of ['review', 'record', 'publish']) {
+    const body =
+      new RegExp(`^  ${name}:\\n([\\s\\S]*?)(?=^  [a-z-]+:$|(?![\\s\\S]))`, 'm').exec(jobs)?.[1] ??
+      '';
+    assert.ok(body.length > 0, `${name} job`);
+    assert.doesNotMatch(body, /always\(\)/, `${name} uses always()`);
+    assert.match(
+      body,
+      /^ {4}if: (\$\{\{ |>-\n\s+)!cancelled\(\)/m,
+      `${name} starts with !cancelled()`
+    );
+  }
+});
+
+test('the review runs for releases the merge queue pushed: claude-code-action allows the github-merge-queue and Renovate bots', async () => {
+  const workflow = await readFile(
+    new URL('../../.github/workflows/cert-review.yml', import.meta.url),
+    'utf8'
+  );
+  const step =
+    /uses: anthropics\/claude-code-action@[0-9a-f]{40}\n {8}env:[\s\S]*?\n {8}with:\n([\s\S]*?)\n {6}- /.exec(
+      workflow
+    )?.[1] ?? '';
+  assert.match(step, /^ {10}allowed_bots: 'github-merge-queue,renovate\[bot\]'$/m);
+});
