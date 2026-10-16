@@ -553,3 +553,14 @@ export function previousPublished(tags, published, version) {
     .sort(compareVersions)
     .at(-1);
 }
+
+export function jobsEvidence(text, incomplete) {
+  const failed = String(text ?? '')
+    .split(',')
+    .map((x) => x.trim().split('='))
+    .filter(([job, result]) => job && result !== 'success')
+    .map(([job, result]) => `the ${job} job ended ${result || 'without a result'}`);
+  if (failed.length === 0) return incomplete;
+  const named = [incomplete?.named, ...failed].filter(Boolean).join('; ');
+  return { files: incomplete?.files ?? [], named, remedy: 're-run the failed jobs' };
+}

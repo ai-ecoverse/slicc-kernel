@@ -939,6 +939,10 @@ test('id-token: write is only on release / publish, a GitHub-hosted job that pub
   assert.doesNotMatch(jobs.pack, /id-token|secrets\./);
   assert.match(jobs.publish, /^ {4}needs: \[tag, pack, cert\]$/m);
   assert.match(jobs.publish, /!cancelled\(\) && github\.ref == 'refs\/heads\/main' &&/);
+  assert.match(
+    jobs.publish,
+    /needs\.pack\.result == 'success' && needs\.cert\.result == 'success' &&/
+  );
   assert.match(jobs.publish, /needs\.cert\.outputs\.conclusion == 'success' &&/);
   assert.match(jobs.publish, /needs\.cert\.outputs\.sha256 != '' &&/);
   assert.match(jobs.publish, /needs\.cert\.outputs\.sha256 == needs\.pack\.outputs\.sha256/);
@@ -995,6 +999,11 @@ test('a cert-review dispatch is a dry run: only a release run writes the status,
   assert.match(jobs.plan, /a release review runs only on main/);
   assert.match(jobs.record, /if: steps\.record\.outputs\.conclusion != 'success'\n[\s\S]*?exit 1/);
   assert.match(jobs.status, /needs\.record\.outputs\.conclusion != ''/);
+  assert.match(
+    jobs.record,
+    /JOBS: tarball=\$\{\{ needs\.tarball\.result \}\},suite=\$\{\{ needs\.suite\.result \}\},kernel-compat=\$\{\{ needs\.compat\.result \}\}/
+  );
+  assert.match(jobs.record, /--review-result "\$REVIEW" --jobs "\$JOBS"/);
   assert.match(jobs.gate, /needs\.record\.outputs\.conclusion != ''/);
 });
 
@@ -1213,7 +1222,34 @@ else process.exit(1);
     'failure',
   ]);
   assert.equal(held.status, 1);
-  assert.match(held.json.line, /the review job ended failure/);
+  assert.match(
+    held.json.line,
+    /^cert-ci: INCOMPLETE .*the review job ended failure; re-run the failed jobs/
+  );
+  assert.equal(held.json.state, 'error');
+  const lost = await record([
+    '--tarball',
+    ok.file,
+    '--sha256',
+    ok.sha256,
+    '--jobs',
+    'tarball=success,suite=failure,kernel-compat=failure',
+  ]);
+  assert.equal(lost.status, 1);
+  assert.equal(lost.json.certified, false);
+  assert.match(
+    lost.json.line,
+    /^cert-ci: INCOMPLETE @ai-ecoverse\/slicc-kernel@1\.2\.3 \(the suite job ended failure; the kernel-compat job ended failure; re-run the failed jobs\)/
+  );
+  const allGreen = await record([
+    '--tarball',
+    ok.file,
+    '--sha256',
+    ok.sha256,
+    '--jobs',
+    'tarball=success,suite=success,kernel-compat=success',
+  ]);
+  assert.equal(allGreen.status, 0);
   const missing = await record(['--tarball', join(dir, 'nope.tgz'), '--sha256', ok.sha256]);
   assert.equal(missing.status, 1);
   assert.match(missing.json.line, /no tarball artifact to review/);

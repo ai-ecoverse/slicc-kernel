@@ -138,7 +138,7 @@ jobs:
     needs: [tag, pack, cert]
     if: >-
       !cancelled() && github.ref == 'refs/heads/main' &&
-      needs.pack.result == 'success' &&
+      needs.pack.result == 'success' && needs.cert.result == 'success' &&
       needs.cert.outputs.conclusion == 'success' &&
       needs.cert.outputs.sha256 != '' &&
       needs.cert.outputs.sha256 == needs.pack.outputs.sha256

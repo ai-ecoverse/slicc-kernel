@@ -7,6 +7,7 @@ import { parseArgs } from 'node:util';
 import {
   baseEvidence,
   gapsOf,
+  jobsEvidence,
   knownAsOf,
   knownLine,
   NAME,
@@ -31,6 +32,7 @@ const { values } = parseArgs({
     tarball: { type: 'string', default: '' },
     sha256: { type: 'string', default: '' },
     'review-result': { type: 'string', default: 'success' },
+    jobs: { type: 'string', default: '' },
   },
 });
 
@@ -216,9 +218,8 @@ try {
 } catch (error) {
   problems.push(`the artifact check failed: ${one(error.stderr || error.message).slice(0, 300)}`);
 }
-if (values['review-result'] !== 'success')
-  problems.push(`the review job ended ${values['review-result']}`);
 codedFindings();
+incomplete = jobsEvidence(`${values.jobs},review=${values['review-result']}`, incomplete);
 const review = readVerdict();
 const known = knownLine(repo, [...standing(), ...(review?.known ?? [])]);
 const covered = values.covers.split(',').filter(Boolean);
