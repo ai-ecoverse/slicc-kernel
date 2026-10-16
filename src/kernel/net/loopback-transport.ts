@@ -185,7 +185,8 @@ export class KernelLoopback {
         { family: 'inet', host: '127.0.0.1', port },
         false,
         this.cred(),
-        this.stamp ? await this.stamp() : undefined
+        this.stamp ? await this.stamp() : undefined,
+        false
       );
     } catch (err) {
       socket.close();
