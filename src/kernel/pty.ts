@@ -212,6 +212,7 @@ export interface PtyContext {
   guard?: Guard;
   owner?: Perm;
   outputFilter?: (file: OpenFile) => OpenFile;
+  sizesRead?: WeakMap<KernelTty, string>;
 }
 
 function masterOf(ctx: PtyContext, fd: number): PtyPair {
@@ -229,6 +230,10 @@ function terminalOf(ctx: PtyContext, fd: number): KernelTty {
 
 const json = (value: unknown): SyncFsResult => ({ ok: true, kind: 'json', json: value });
 const done: SyncFsResult = { ok: true, kind: 'void' };
+
+export function sizeKey(rows: number, cols: number): string {
+  return `${rows}x${cols}`;
+}
 
 export function ptySyscall(req: PtySyscall, ctx: PtyContext): SyncFsResult {
   switch (req.op) {
@@ -264,8 +269,10 @@ export function ptySyscall(req: PtySyscall, ctx: PtyContext): SyncFsResult {
     case 'pty-packet':
       masterOf(ctx, req.fd).packet = req.on;
       return done;
-    case 'pty-winsz-set':
-      terminalOf(ctx, req.fd).resize(req.cols, req.rows);
+    case 'pty-winsz-set': {
+      const tty = terminalOf(ctx, req.fd);
+      if (ctx.sizesRead?.get(tty) !== sizeKey(req.rows, req.cols)) tty.resize(req.cols, req.rows);
       return done;
+    }
   }
 }

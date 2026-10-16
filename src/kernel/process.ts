@@ -57,7 +57,7 @@ import { Resolver } from './net/resolver.ts';
 import { Routes } from './net/routes.ts';
 import type { MountLine, ProcessListing } from './proc-info.ts';
 import type { DlState, ForkState } from './protocol.ts';
-import { PTY_OPS, type PtySyscall, type PtyTable, ptsNumber, ptySyscall } from './pty.ts';
+import { PTY_OPS, type PtySyscall, type PtyTable, ptsNumber, ptySyscall, sizeKey } from './pty.ts';
 import { type RunRequest, runChild } from './run-child.ts';
 import type { SealedBroker, SealedCaller } from './sealed.ts';
 import { selectFds } from './select.ts';
@@ -766,6 +766,8 @@ export class WasmProcess {
 
   private readonly blocks = new WeakMap<AbortSignal, () => void>();
 
+  private readonly sizesRead = new WeakMap<KernelTty, string>();
+
   async syscall(
     req: WasmSyscall,
     cancelled?: AbortSignal,
@@ -845,7 +847,17 @@ export class WasmProcess {
         const owner = this.options.owners ? this.ttyOwner() : undefined;
         const guard = this.guarded();
         const { outputFilter } = this.options;
-        const ctx = { pid: this.pid, fds: this.fds, ptys, jobs, guard, owner, outputFilter };
+        const sizesRead = this.sizesRead;
+        const ctx = {
+          pid: this.pid,
+          fds: this.fds,
+          ptys,
+          jobs,
+          guard,
+          owner,
+          outputFilter,
+          sizesRead,
+        };
         return ptySyscall(req, ctx);
       }
       return await this.procSyscall(req, cancelled);
@@ -1593,8 +1605,11 @@ export class WasmProcess {
       case 'tty-set':
         tty.tcsets(req.termios, req.flush === true);
         return { ok: true, kind: 'void' };
-      case 'tty-winsz':
-        return { ok: true, kind: 'json', json: tty.winsize() };
+      case 'tty-winsz': {
+        const size = tty.winsize();
+        this.sizesRead.set(tty, sizeKey(...size));
+        return { ok: true, kind: 'json', json: size };
+      }
       case 'tty-pgrp-get':
         return { ok: true, kind: 'json', json: jobs ? jobs.tcgetpgrp(tty, this.sid()) : this.pid };
       case 'tty-pgrp-set':
