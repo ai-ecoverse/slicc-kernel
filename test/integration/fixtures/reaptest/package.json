@@ -1,0 +1,12 @@
+{
+  "name": "reaptest",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "reaptest": {
+        "wasm": "bin/reaptest.wasm"
+      }
+    }
+  }
+}

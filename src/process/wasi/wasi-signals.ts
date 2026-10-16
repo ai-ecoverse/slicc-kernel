@@ -1,5 +1,5 @@
 import { defaultAction, SIG, sigbit } from '../../kernel/signals.ts';
-import type { SignalHooks } from '../process-signals.ts';
+import type { SignalHooks, SignalMasks } from '../process-signals.ts';
 import { E } from './wasi-abi.ts';
 import { WasiExit } from './wasi-host.ts';
 
@@ -14,6 +14,7 @@ const KERNEL_DEFAULTS = [SIG.TSTP, SIG.TTIN, SIG.TTOU, SIG.CHLD, SIG.CONT, SIG.U
 const LIBC_DEFAULT_EXIT = 127;
 
 const SA_RESTART = 0x10000000;
+const SA_NOCLDWAIT = 2;
 const DISPOSITION_IGNORE = 1;
 const DISPOSITION_HANDLER = 2;
 
@@ -24,6 +25,7 @@ export interface WasiSignalState {
   ignoring: number;
   restarting: number;
   uncaught: number;
+  nocldwait?: true;
 }
 
 const withBit = (mask: number, bit: number, on: boolean): number => (on ? mask | bit : mask & ~bit);
@@ -51,6 +53,8 @@ export class WasiSignals implements SignalHooks {
   private restarting = 0;
 
   private defaults = 0;
+
+  private nocldwait = false;
 
   private readonly fallBack: (sig: number) => void;
   private readonly onKilled: ((code: number) => void) | undefined;
@@ -82,6 +86,7 @@ export class WasiSignals implements SignalHooks {
     this.ignoring = withBit(this.ignoring, bit, disposition === DISPOSITION_IGNORE);
     this.restarting = withBit(this.restarting, bit, (flags & SA_RESTART) !== 0);
     this.defaults = withBit(this.defaults, bit, disposition === 0);
+    if (sig === SIG.CHLD) this.nocldwait = (flags & SA_NOCLDWAIT) !== 0;
     return E.SUCCESS;
   }
 
@@ -93,6 +98,7 @@ export class WasiSignals implements SignalHooks {
       ignoring: this.ignoring,
       restarting: this.restarting,
       uncaught: this.uncaught,
+      ...(this.nocldwait ? { nocldwait: true as const } : {}),
     };
   }
 
@@ -103,14 +109,16 @@ export class WasiSignals implements SignalHooks {
     this.ignoring = state.ignoring;
     this.restarting = state.restarting;
     this.uncaught = state.uncaught;
+    this.nocldwait = state.nocldwait === true;
   }
 
-  masks(): { caught: number; ignored: number; restart: number; defaults?: number } | null {
+  masks(): SignalMasks | null {
     if (this.hooked) {
       const caught = this.handler() ? this.handlers : 0;
       const defaults = this.defaults;
       this.defaults = 0;
-      return { caught, ignored: this.ignoring, restart: this.restarting, defaults };
+      const nocldwait = this.nocldwait ? { nocldwait: true } : {};
+      return { caught, ignored: this.ignoring, restart: this.restarting, defaults, ...nocldwait };
     }
     if (!this.handler()) return null;
     return { caught: DELIVERED_MASK & ~this.uncaught & ~KERNEL_DEFAULTS, ignored: 0, restart: 0 };

@@ -185,17 +185,19 @@ export function importsContext({
   const fds: ImportsContext['fds'] = {
     open(path, o = {}) {
       const abs = host.fds.resolve(3, path);
-      if (o.nofollow && fs.exists(abs) && fs.lstat(abs).isSymbolicLink)
+      const fresh = o.create === true && o.exclusive === true && owners && fs.create !== undefined;
+      if (!fresh && o.nofollow && fs.exists(abs) && fs.lstat(abs).isSymbolicLink)
         throw new WasiError('ELOOP');
-      const existed = fs.exists(abs);
+      const existed = !fresh && fs.exists(abs);
       const oflags =
         (o.create ? OFLAGS.CREAT : 0) |
         (o.exclusive ? OFLAGS.EXCL : 0) |
         (o.truncate ? OFLAGS.TRUNC : 0) |
         (o.directory ? OFLAGS.DIRECTORY : 0);
       const rights = (o.write ? RIGHTS.FD_WRITE : 0n) | (o.read || !o.write ? RIGHTS.FD_READ : 0n);
-      const fd = host.fds.open(abs, oflags, rights, o.append ? FDFLAGS.APPEND : 0);
-      if (o.mode !== undefined && !existed) fs.chmod(abs, o.mode);
+      const flags = o.append ? FDFLAGS.APPEND : 0;
+      const fd = host.fds.open(abs, oflags, rights, flags, fresh ? o.mode : undefined);
+      if (o.mode !== undefined && !existed && !fresh) fs.chmod(abs, o.mode);
       return fd;
     },
     close(fd) {

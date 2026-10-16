@@ -701,7 +701,7 @@ export class WasiFds {
     return openDevice.call(this.kernel.sys, flags);
   }
 
-  open(path: string, oflags: number, rights: bigint, fdflags: number): number {
+  open(path: string, oflags: number, rights: bigint, fdflags: number, mode?: number): number {
     const device = deviceOf(path);
     if (device) return this.install({ type: 'device', device });
 
@@ -723,7 +723,7 @@ export class WasiFds {
     }
     if (!s && !(oflags & OFLAGS.CREAT)) throw new WasiError('ENOENT');
     refuseWrite(s, oflags, rights);
-    return this.regular(path, s, oflags, rights, fdflags);
+    return this.regular(path, s, oflags, rights, fdflags, mode);
   }
 
   private regular(
@@ -731,12 +731,16 @@ export class WasiFds {
     s: SyncFsBridgeStat | undefined,
     oflags: number,
     rights: bigint,
-    fdflags: number
+    fdflags: number,
+    mode?: number
   ): number {
     if (this.shared || this.kernelHolds(path, s)) {
-      return this.kernelFile(path, s, oflags, rights, fdflags);
+      return this.kernelFile(path, s, oflags, rights, fdflags, mode);
     }
-    return this.install({ type: 'file', file: this.file(path, s, oflags, rights, fdflags) });
+    return this.install({
+      type: 'file',
+      file: this.file(path, s, oflags, rights, fdflags, mode),
+    });
   }
 
   private kernelHolds(path: string, st: SyncFsBridgeStat | undefined): boolean {
@@ -770,7 +774,8 @@ export class WasiFds {
     existing: SyncFsBridgeStat | undefined,
     oflags: number,
     rights: bigint,
-    fdflags: number
+    fdflags: number,
+    mode?: number
   ): LocalFile {
     const { readable, writable } = openAccess(existing, oflags, rights);
     let buffer = this.buffers.get(path);
@@ -784,7 +789,7 @@ export class WasiFds {
       if (this.fs.owners) this.fs.access?.(path, want, 'open');
       if (oflags & OFLAGS.TRUNC) buffer.truncate(0);
     } else {
-      buffer = this.freshBuffer(path, existing, oflags, want);
+      buffer = this.freshBuffer(path, existing, oflags, want, mode);
     }
     buffer.opens++;
     return new LocalFile(buffer, readable, writable, (fdflags & FDFLAGS.APPEND) !== 0);
@@ -794,9 +799,10 @@ export class WasiFds {
     path: string,
     existing: SyncFsBridgeStat | undefined,
     oflags: number,
-    want: number
+    want: number,
+    mode?: number
   ): FileBuffer {
-    const made = !existing && this.createNew(path, oflags);
+    const made = !existing && this.createNew(path, oflags, mode);
     const empty = made || (oflags & OFLAGS.TRUNC) !== 0;
     if (existing?.ranged) (this.fs as { invalidate?(): void }).invalidate?.();
     const seen = this.fs.changes?.now();
@@ -835,13 +841,14 @@ export class WasiFds {
     existing: SyncFsBridgeStat | undefined,
     oflags: number,
     rights: bigint,
-    fdflags: number
+    fdflags: number,
+    mode?: number
   ): number {
     const { readable, writable } = openAccess(existing, oflags, rights);
     const append = (fdflags & FDFLAGS.APPEND) !== 0;
     const flags = (writable ? (readable ? O_RDWR : O_WRONLY) : 0) | (append ? O_APPEND : 0);
 
-    const made = !existing && this.createNew(path, oflags);
+    const made = !existing && this.createNew(path, oflags, mode);
 
     const truncate = made || (oflags & OFLAGS.TRUNC) !== 0;
     const fd = this.kernel.sys.openVfs(path, flags, 0, {
@@ -856,13 +863,13 @@ export class WasiFds {
     return fd;
   }
 
-  private createNew(path: string, oflags: number): boolean {
+  private createNew(path: string, oflags: number, mode?: number): boolean {
     if (!this.fs.create) {
       this.fs.writeFile(path, new Uint8Array(0));
       return true;
     }
     try {
-      this.fs.create(path, undefined, true);
+      this.fs.create(path, mode, true);
       return true;
     } catch (err) {
       if (oflags & OFLAGS.EXCL || (err as { code?: string }).code !== 'EEXIST') throw err;
