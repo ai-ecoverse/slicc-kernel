@@ -286,7 +286,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/evidence"
           node tools/cert-review/compat.mjs --repo "$GITHUB_REPOSITORY" --version "$VERSION" --commit "$COMMIT" \
             --ref main --run "$GITHUB_RUN_ID" --artifact "kernel-tgz-$VERSION" --sha256 "$SHA256" \
-            --dispatch --rerun --wait 150 --reference "$LATEST" --out "$RUNNER_TEMP/evidence/compat.json"
+            --shards 10 --dispatch --rerun --wait 150 --reference "$LATEST" --out "$RUNNER_TEMP/evidence/compat.json"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
