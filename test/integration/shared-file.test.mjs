@@ -70,14 +70,21 @@ test('appenders in three processes keep every line of a shared log (#665)', asyn
   const n = 100;
   const py = `import time\nf = open('log', 'a')\nfor i in range(${n}):\n    f.write('p%d\\\\n' % i); f.flush(); time.sleep(0.01)`;
   const r = await bash(`
-    ( exec 3>>log; for i in $(seq ${n}); do echo "a$i" >&3; sleep 0.01; done ) &
-    ( exec 3>>log; for i in $(seq ${n}); do echo "b$i" >&3; sleep 0.01; done ) &
+    exec 4< <(sleep 120); tick=$!
     python3 -c "${py}" &
-    wait
-    a=0; b=0; p=0
-    while read l; do case $l in a*) a=$((a+1));; b*) b=$((b+1));; p*) p=$((p+1));; esac; done < log
-    echo $a $b $p`);
-  assert.deepEqual(r, { status: 0, stdout: `${n} ${n} ${n}\n`, stderr: '' });
+    until [ -s log ]; do read -t 0.01 -u 4; done
+    ( exec 3>>log; for i in $(seq ${n}); do echo "a$i" >&3; read -t 0.01 -u 4; done ) &
+    ( exec 3>>log; for i in $(seq ${n}); do echo "b$i" >&3; read -t 0.01 -u 4; done ) &
+    wait $(jobs -p)
+    kill $tick; exec 4<&-
+    a=0; b=0; p=0; at=0; lastp=0; firsta=0; firstb=0
+    while read l; do
+      at=$((at+1))
+      case $l in a*) a=$((a+1)); [ $firsta = 0 ] && firsta=$at;; b*) b=$((b+1)); [ $firstb = 0 ] && firstb=$at;; p*) p=$((p+1)); lastp=$at;; esac
+    done < log
+    echo $a $b $p
+    [ $firsta -lt $lastp ] && [ $firstb -lt $lastp ] && echo overlapped`);
+  assert.deepEqual(r, { status: 0, stdout: `${n} ${n} ${n}\noverlapped\n`, stderr: '' });
 });
 
 async function program(kernel, name, source) {
