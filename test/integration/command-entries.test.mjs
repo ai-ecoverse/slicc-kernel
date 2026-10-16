@@ -24,7 +24,7 @@ const HELLO = '#!/bin/bash\necho "hello $HELLO_FROM"\n';
 async function booted(t, users = 'enforce') {
   const kernel = await createNodeKernel({ users });
   t.after(() => kernel.terminate());
-  for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
+  for (const name of ['wasm-bash', 'wasm-coreutils', 'wasix-python']) await install(kernel, name);
   await kernel.writeFile(
     '/node_modules/hello/package.json',
     JSON.stringify({
@@ -84,8 +84,26 @@ test('under enforce, a user command entry is read as the user: a target the user
   await bash(
     `mkdir -p ${mine}/bin && printf 'echo mine\\n' > ${mine}/bin/mine && echo '{"name":"mine","slicc":{"commands":{"mine":{"script":"bin/mine"}}}}' > ${mine}/package.json && chown -R cone:cone /home/cone/.local`
   );
+  const own = '/home/cone/.local/share/pnpm/bin/mine';
   assert.deepEqual(
-    await bash('stat -c %s ~/.local/share/pnpm/bin/mine; cat ~/.local/share/pnpm/bin/mine', 'cone'),
-    ok('0\necho mine\n')
+    await bash(
+      `[ -s ${own} ] && echo s; stat -c %s ${own}; ls -l ${own} | cut -d" " -f5; cat ${own}`,
+      'cone'
+    ),
+    ok('s\n10\n10\necho mine\n')
   );
+  assert.deepEqual(await bash(`stat -c %s ${own}`), ok('10\n'));
+  const py = `python3 -c "import os, sys; print(os.stat(sys.argv[1]).st_size, os.path.getsize(sys.argv[1]))" ${own}`;
+  assert.deepEqual(await bash(py, 'cone'), ok('10 10\n'));
+  await kernel.users.add({ name: 'bob' });
+  const bob = await bash(`stat -c %s ${own}; echo rc=$?`, 'bob');
+  assert.equal(bob.stdout, 'rc=1\n');
+  assert.match(bob.stderr, /Permission denied/);
+  await bash('chmod 700 /node_modules/hello/bin/hello');
+  const shown =
+    'stat -c %s /usr/bin/hello; [ -s /usr/bin/hello ] || echo empty; cat /usr/bin/hello; echo rc=$?';
+  const cone = await bash(shown, 'cone');
+  assert.equal(cone.stdout, '0\nempty\nrc=1\n');
+  assert.match(cone.stderr, /Permission denied/);
+  assert.deepEqual(await bash(shown), ok(`${HELLO.length}\n${HELLO}rc=0\n`));
 });
