@@ -179,6 +179,10 @@ export class ChildTable {
 
   onReap?: (pid: number) => void;
 
+  autoReap?: () => boolean;
+
+  private readonly kept = new Set<number>();
+
   private stateChanged: Array<() => void> = [];
 
   private readonly watchers = new Map<number, ChildStateListener>();
@@ -259,6 +263,7 @@ export class ChildTable {
     void handle.exited.then((code) => {
       child.code = code;
       this.watchers.delete(handle.pid);
+      if (!this.kept.delete(handle.pid) && this.autoReap?.()) this.reap(handle.pid, code);
       this.onChildState?.();
     });
     handle.onState?.((state, sig) => {
@@ -368,6 +373,10 @@ export class ChildTable {
     this.onReap?.(pid);
     if (child && child.captured.size > 0) this.leftovers.set(pid, child.captured);
     return [pid, waitStatus(code, child?.termsig?.())];
+  }
+
+  keep(pid: number): void {
+    this.kept.add(pid);
   }
 
   pids(): number[] {
