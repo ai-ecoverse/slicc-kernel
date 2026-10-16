@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import {
   baseEvidence,
   baselineFiles,
+  compatFindingsOf,
   compatRegressions,
   covering,
   decide,
@@ -22,11 +24,15 @@ import {
   parseResults,
   pickRelease,
   provenanceProblems,
+  releaseEvidence,
+  rerunSet,
   resultsMap,
   rowOf,
   testCommand,
   titlesFromPatch,
+  unfinishedFiles,
   unquote,
+  verdictLine,
   withBaselines,
 } from '../../tools/cert-review/lib.mjs';
 
@@ -52,6 +58,7 @@ test('the delta parser takes merged pull requests once, in order, and reads the 
         'a new test',
         'a new subtest with "quotes"',
         'a template \u2026',
+        '\u2026 variable',
       ],
     },
   ]);
@@ -139,9 +146,15 @@ test('the suite diff compares two runs test by test and keeps a test failing if 
     fixed: [{ test: k('heals') }],
     stillFailing: [{ test: k('still'), error: '' }],
     removed: [{ test: k('gone') }],
+    unrun: [],
     added: 3,
     same: 1,
   });
+  const cut = diffSuites(base, resultsMap([res(f, 'stays', 'pass')]), { complete: false });
+  assert.deepEqual(
+    [cut.removed, cut.unrun.map((u) => u.test), cut.same],
+    [[], [k('breaks'), k('heals'), k('still'), k('gone')], 1]
+  );
 });
 
 test("the suite runner rewrites a release's own test script to add the reporter and, for the NEGATIVE, its files", () => {
@@ -463,8 +476,17 @@ test('findings.mjs turns the runs into decisions, suite regressions and missing 
   run('base.json');
   const cut = JSON.parse(await readFile(join(dir, 'findings.json'), 'utf8')).findings;
   assert.deepEqual(
-    cut.filter((f) => f.kind === 'suite-incomplete'),
-    [{ kind: 'suite-incomplete', what: 'the release suite', exit: 'signal SIGTERM', results: 1 }]
+    cut.filter((f) => f.what === 'the release suite'),
+    [
+      {
+        kind: 'missing-evidence',
+        what: 'the release suite',
+        exit: 'signal SIGTERM',
+        results: 1,
+        blocking: true,
+        remedy: 're-run the failed jobs',
+      },
+    ]
   );
 });
 
@@ -812,19 +834,49 @@ test('prev and base: the newest earlier release whose cert-review passed (prev a
   const states = {
     '1.98.4': undefined,
     '1.98.3': 'failure',
+    '1.98.5': 'error',
     '1.98.2': 'success',
     '1.98.1': 'success',
     '1.99.1': 'pending',
   };
-  const tags = ['1.98.1', '1.98.2', '1.98.3', '1.98.4', '1.99.0', '1.99.1', '1.99.2'];
+  const tags = ['1.98.1', '1.98.2', '1.98.3', '1.98.4', '1.98.5', '1.99.0', '1.99.1', '1.99.2'];
   const stateOf = async (t) => states[t];
   assert.equal(await pickRelease(tags, '1.99.0', stateOf), '1.98.2');
   assert.equal(await pickRelease(tags, '1.99.0', stateOf, { pending: true }), '1.98.2');
   assert.equal(await pickRelease(tags, '1.99.2', stateOf, { pending: true }), '1.99.1');
   assert.equal(await pickRelease(tags, '1.99.2', stateOf), '1.98.2');
   assert.equal(await pickRelease(tags, '1.98.1', stateOf), undefined);
-  assert.deepEqual(covering(tags, '1.98.2', '1.99.1'), ['1.98.3', '1.98.4', '1.99.0', '1.99.1']);
+  assert.deepEqual(covering(tags, '1.98.2', '1.99.1'), [
+    '1.98.3',
+    '1.98.4',
+    '1.98.5',
+    '1.99.0',
+    '1.99.1',
+  ]);
   assert.deepEqual(covering(tags, '1.99.0', '1.99.1'), ['1.99.1']);
+});
+
+test("kernel-compat's reference for a cert review is the certified base: cert-review passes it, kernel-compat names it and hands it to homescoop", async () => {
+  const read = (name) =>
+    readFile(new URL(`../../.github/workflows/${name}`, import.meta.url), 'utf8');
+  const cert = await read('cert-review.yml');
+  const compat = await read('kernel-compat.yml');
+  assert.match(
+    cert,
+    /BASE: \$\{\{ needs\.plan\.outputs\.base \}\}\n {8}run: \|[\s\S]*?--reference "\$BASE"/
+  );
+  assert.match(
+    compat,
+    /\n {6}reference:\n {8}description: [^\n]+\n {8}type: string\n {8}default: ''/
+  );
+  assert.match(compat, /inputs\.reference != '' && format\(' ref \{0\}', inputs\.reference\)/);
+  assert.match(compat, /\n {6}reference: \$\{\{ inputs\.reference \|\| '' \}\}\n/);
+  const tool = await readFile(new URL('compat.mjs', tools), 'utf8');
+  assert.match(
+    tool,
+    /`Kernel compat v\$\{version\}\$\{reference \? ` ref \$\{reference\}` : ''\}`/
+  );
+  assert.match(tool, /finished\(\{ own: !reference, deadline \}\)/);
 });
 
 test('every release run has its own concurrency group, so a newer release never cancels a pending one', async () => {
@@ -871,4 +923,357 @@ test('the review runs for releases the merge queue pushed: claude-code-action al
       workflow
     )?.[1] ?? '';
   assert.match(step, /^ {10}allowed_bots: 'github-merge-queue,renovate\[bot\]'$/m);
+});
+
+test('a suite runner stopped with SIGTERM still writes its partial results, its summary and the log so far (#743)', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'cert-term-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const tree = join(dir, 'tree');
+  await mkdir(join(tree, 'test/integration'), { recursive: true });
+  await mkdir(join(dir, 'package/dist'), { recursive: true });
+  await writeFile(join(dir, 'package/dist/node.js'), 'export {};\n');
+  execFileSync('tar', ['-czf', join(dir, 'k.tgz'), '-C', dir, 'package']);
+  await writeFile(
+    join(tree, 'package.json'),
+    JSON.stringify({ scripts: { test: "node --test 'test/integration/*.test.mjs'" } })
+  );
+  await writeFile(
+    join(tree, 'test/integration/a.test.mjs'),
+    "import { test } from 'node:test';\ntest('done first', () => { console.log('first ran'); });\ntest('still running', async () => { await new Promise((r) => setTimeout(r, 20000)); });\n"
+  );
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  const out = join(dir, 'out/release');
+  const suite = spawn(
+    process.execPath,
+    [
+      fileURLToPath(new URL('suite.mjs', tools)),
+      '--tree',
+      tree,
+      '--tgz',
+      join(dir, 'k.tgz'),
+      '--out',
+      out,
+    ],
+    { env, stdio: 'ignore' }
+  );
+  const exited = new Promise((r) => suite.once('exit', (c, s) => r([c, s])));
+  for (let i = 0; i < 200; i++) {
+    const partial = await readFile(`${out}.jsonl`, 'utf8').catch(() => '');
+    if (partial.includes('done first')) break;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  suite.kill('SIGTERM');
+  assert.deepEqual(await exited, [143, null]);
+  const summary = JSON.parse(await readFile(`${out}.json`, 'utf8'));
+  assert.equal(summary.exit, 'signal SIGTERM');
+  assert.deepEqual(
+    summary.results.filter((r) => r.status === 'pass').map((r) => r.name),
+    ['done first']
+  );
+  assert.match(await readFile(`${out}.log`, 'utf8'), /first ran/);
+});
+
+test('a release suite cut off partway is missing evidence that always blocks, and its unrun tests are not removed (#743)', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'cert-cut-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = 'test/integration/node.test.mjs';
+  const other = 'test/integration/wasi.test.mjs';
+  const write = (name, value) => writeFile(join(dir, name), JSON.stringify(value));
+  await write('delta.json', { prev: '1.2.2', version: '1.2.3', rows, files: deltaFiles(rows) });
+  await write('prev.json', { exit: 1, files: [file], results: [res(file, 'a new test', 'fail')] });
+  await writeFile(
+    join(dir, 'release.jsonl'),
+    [res(file, 'a new test', 'pass'), res(file, 'old', 'pass'), res(other, 'w1', 'cancelled')]
+      .map((r) => JSON.stringify(r))
+      .join('\n')
+  );
+  await write('base.json', {
+    exit: 0,
+    results: [res(file, 'old', 'pass'), res(other, 'w1', 'pass'), res(other, 'w2', 'pass')],
+  });
+  execFileSync(process.execPath, [
+    fileURLToPath(new URL('findings.mjs', tools)),
+    '--delta',
+    join(dir, 'delta.json'),
+    '--prev',
+    join(dir, 'prev.json'),
+    '--release',
+    join(dir, 'release.json'),
+    '--base',
+    join(dir, 'base.json'),
+    '--out',
+    join(dir, 'findings.json'),
+  ]);
+  const out = JSON.parse(await readFile(join(dir, 'findings.json'), 'utf8'));
+  const release = out.findings.filter((f) => f.what === 'the release suite');
+  assert.deepEqual(release, [
+    {
+      kind: 'missing-evidence',
+      what: 'the release suite',
+      exit: 'no summary',
+      results: 3,
+      files: [other],
+      blocking: true,
+      remedy: 're-run the failed jobs',
+    },
+  ]);
+  assert.deepEqual(out.suites.removed, []);
+  assert.deepEqual(
+    out.suites.unrun.map((u) => u.test),
+    [`${other} :: w2`]
+  );
+  assert.equal(out.suites.same, 1);
+  assert.deepEqual(releaseEvidence(out.findings), {
+    files: [other],
+    named: `1 files without results: ${other}`,
+    remedy: 're-run the failed jobs',
+  });
+  assert.equal(
+    releaseEvidence([{ kind: 'missing-evidence', what: 'the release suite', blocking: true }])
+      .named,
+    'no results'
+  );
+  assert.equal(
+    releaseEvidence([
+      {
+        kind: 'missing-evidence',
+        what: 'the release suite',
+        blocking: true,
+        results: 1,
+        exit: 'signal SIGTERM',
+      },
+    ]).named,
+    '1 results, exit signal SIGTERM'
+  );
+  assert.equal(releaseEvidence([]), undefined);
+});
+
+test("a test title built from a template literal matches the rows it ran as, so #731's fork-tls rows are judged, not not-run (#742)", async () => {
+  const forktls = await readFile(new URL('fork-tls.test.mjs', import.meta.url), 'utf8');
+  const patch = `@@ -0,0 +1,${forktls.split('\n').length} @@\n${forktls
+    .split('\n')
+    .map((l) => `+${l}`)
+    .join('\n')}`;
+  const row = rowOf({ number: 731, title: 'fix: a forked WASIX child reads errno (#728)' }, [
+    { filename: 'test/integration/fork-tls.test.mjs', status: 'added', patch },
+  ]);
+  const template =
+    'a forked child of a \u2026 WASIX program reads errno and its thread-locals, in both TLS models (#728)';
+  const side =
+    'a forked child of a WASIX program reads the thread-locals of a side module its parent loaded (#728)';
+  assert.deepEqual(row.tests[0].titles, [template, side]);
+  const f = 'test/integration/fork-tls.test.mjs';
+  const named = (kind) =>
+    `a forked child of a ${kind} WASIX program reads errno and its thread-locals, in both TLS models (#728)`;
+  const prev = resultsMap([
+    res(f, named('pie'), 'fail'),
+    res(f, named('static'), 'fail'),
+    res(f, side, 'pass'),
+  ]);
+  const next = resultsMap([
+    res(f, named('pie'), 'pass'),
+    res(f, named('static'), 'pass'),
+    res(f, side, 'pass'),
+  ]);
+  const decided = decide(row, prev, next);
+  assert.deepEqual(decided.checks, [
+    { file: f, title: template, next: 'pass', prev: 'fail' },
+    { file: f, title: side, next: 'pass', prev: 'pass' },
+  ]);
+  assert.equal(decided.decision, 'negative');
+  const onlySide = decide(
+    row,
+    resultsMap([res(f, side, 'fail')]),
+    resultsMap([res(f, side, 'pass')])
+  );
+  assert.deepEqual(onlySide.checks[0], {
+    file: f,
+    title: template,
+    next: 'missing',
+    prev: 'missing',
+  });
+  assert.deepEqual(titlesFromPatch('+test(`${a}${b}`, () => {});'), []);
+});
+
+test('an incomplete release suite is INCOMPLETE with an error status, never certified and not FAIL, unless code found a real defect', () => {
+  const base = {
+    name: '@ai-ecoverse/slicc-kernel',
+    version: '1.2.3',
+    ci: 'ci: run',
+    certified: 'certified x',
+  };
+  const incomplete = {
+    files: ['test/integration/a.test.mjs'],
+    named: '1 files without results: test/integration/a.test.mjs',
+    remedy: 're-run the failed jobs',
+  };
+  assert.deepEqual(verdictLine({ ...base, problems: [], review: { verdict: 'certified' } }), {
+    state: 'success',
+    line: 'certified x',
+  });
+  for (const verdict of ['certified', 'fail']) {
+    assert.deepEqual(
+      verdictLine({
+        ...base,
+        problems: [],
+        review: { verdict, reason: 'missing tests' },
+        incomplete,
+      }),
+      {
+        state: 'error',
+        line: 'cert-ci: INCOMPLETE @ai-ecoverse/slicc-kernel@1.2.3 (1 files without results: test/integration/a.test.mjs; re-run the failed jobs) (ci: run)',
+      }
+    );
+  }
+  const failed = verdictLine({
+    ...base,
+    problems: ['kernel-compat: x crashes again'],
+    review: { verdict: 'certified' },
+    incomplete,
+  });
+  assert.equal(failed.state, 'failure');
+  assert.match(
+    failed.line,
+    /^cert-ci: FAIL .*kernel-compat: x crashes again; the release suite is incomplete/
+  );
+  assert.deepEqual(
+    unfinishedFiles(
+      ['a', 'b', 'c'],
+      [res('a', 'x', 'pass'), res('b', 'b', 'fail'), res('d', 'y', 'cancelled')]
+    ),
+    ['b', 'c', 'd']
+  );
+});
+
+test('the suite runner re-runs once the files that left no result and merges them, for the release and for a NEGATIVE run (#748)', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'cert-retry-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const tree = join(dir, 'tree');
+  await mkdir(join(tree, 'test/integration'), { recursive: true });
+  await mkdir(join(dir, 'package/dist'), { recursive: true });
+  await writeFile(join(dir, 'package/dist/node.js'), 'export {};\n');
+  execFileSync('tar', ['-czf', join(dir, 'k.tgz'), '-C', dir, 'package']);
+  await writeFile(
+    join(tree, 'package.json'),
+    JSON.stringify({ scripts: { test: "node --test 'test/integration/*.test.mjs'" } })
+  );
+  const flaky = (marker) =>
+    `import { existsSync, writeFileSync } from 'node:fs';\nimport { test } from 'node:test';\ntest('before', () => {});\ntest('the runner is lost', () => { if (!existsSync(${JSON.stringify(marker)})) { writeFileSync(${JSON.stringify(marker)}, ''); process.kill(process.pid, 'SIGKILL'); } });\ntest('after', () => {});\n`;
+  await writeFile(join(tree, 'test/integration/a.test.mjs'), flaky(join(dir, 'a.marker')));
+  await writeFile(
+    join(tree, 'test/integration/b.test.mjs'),
+    "import { test } from 'node:test';\ntest('steady', () => {});\n"
+  );
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  const suite = (out, files = []) =>
+    execFileSync(
+      process.execPath,
+      [
+        fileURLToPath(new URL('suite.mjs', tools)),
+        '--tree',
+        tree,
+        '--tgz',
+        join(dir, 'k.tgz'),
+        '--out',
+        out,
+        ...(files.length ? ['--files', files.join(',')] : []),
+      ],
+      { env, stdio: 'ignore' }
+    );
+  suite(join(dir, 'out/release'));
+  const release = JSON.parse(await readFile(join(dir, 'out/release.json'), 'utf8'));
+  assert.deepEqual(
+    [release.exit, release.firstExit, release.retried, release.unfinished],
+    [0, 1, ['test/integration/a.test.mjs'], []]
+  );
+  assert.deepEqual(
+    release.results.map((r) => `${r.file.split('/').pop()} ${r.name} ${r.status}`).sort(),
+    [
+      'a.test.mjs after pass',
+      'a.test.mjs before pass',
+      'a.test.mjs the runner is lost pass',
+      'b.test.mjs steady pass',
+    ]
+  );
+  assert.match(
+    await readFile(join(dir, 'out/release.log'), 'utf8'),
+    /retrying 1 files without results/
+  );
+  await writeFile(
+    join(dir, 'delta.json'),
+    JSON.stringify({ prev: '1.2.2', version: '1.2.3', rows: [], files: [] })
+  );
+  await writeFile(join(dir, 'base.json'), JSON.stringify({ exit: 0, results: release.results }));
+  execFileSync(process.execPath, [
+    fileURLToPath(new URL('findings.mjs', tools)),
+    '--delta',
+    join(dir, 'delta.json'),
+    '--prev',
+    join(dir, 'out/none.json'),
+    '--release',
+    join(dir, 'out/release.json'),
+    '--base',
+    join(dir, 'base.json'),
+    '--out',
+    join(dir, 'findings.json'),
+  ]);
+  const found = JSON.parse(await readFile(join(dir, 'findings.json'), 'utf8')).findings;
+  assert.deepEqual(
+    found.filter((f) => f.what === 'the release suite'),
+    []
+  );
+  assert.equal(releaseEvidence(found), undefined);
+  await rm(join(dir, 'a.marker'));
+  suite(join(dir, 'out/prev'), ['test/integration/a.test.mjs']);
+  const negative = JSON.parse(await readFile(join(dir, 'out/prev.json'), 'utf8'));
+  assert.deepEqual(
+    [negative.exit, negative.retried, negative.unfinished],
+    [0, ['test/integration/a.test.mjs'], []]
+  );
+  assert.deepEqual(unfinishedFiles(negative.expected, negative.results), []);
+});
+
+test('a compat rerun tests exactly the package@version that regressed, and one that ran another version is a rerun-mismatch, reproduced, never a flake (#765)', () => {
+  const row = (version, spec, verdict) => ({
+    package: '@ai-ecoverse/wasix-python',
+    recipe: 'wasix-python',
+    version,
+    spec,
+    users: 'off',
+    verdict,
+    error: verdict === 'regression' ? 'epoll row failed' : '',
+    reference: { status: 'pass' },
+  });
+  const report = {
+    results: [row('3.14.2-18', 'epoll.mjs', 'regression'), row('3.14.2-18', 'ok.mjs', 'pass')],
+  };
+  const regressions = compatRegressions(report);
+  assert.equal(rerunSet(regressions), 'wasix-python@3.14.2-18');
+  assert.equal(
+    rerunSet([...regressions, { recipe: 'wasm-bash', version: '5.3-9' }, regressions[0]]),
+    'wasix-python@3.14.2-18,wasm-bash@5.3-9'
+  );
+  const other = compatRegressions(report, { results: [row('3.14.2-21', 'epoll.mjs', 'pass')] });
+  assert.deepEqual(
+    other.map(({ rerun, rerunVersion, reproduced }) => ({ rerun, rerunVersion, reproduced })),
+    [{ rerun: 'rerun-mismatch', rerunVersion: '3.14.2-21', reproduced: true }]
+  );
+  assert.deepEqual(
+    compatFindingsOf({ found: true, conclusion: 'failure', regressions: other }).map((f) => [
+      f.kind,
+      f.package,
+      f.rerun,
+    ]),
+    [['compat-regression', 'wasix-python@3.14.2-18', 'rerun-mismatch']]
+  );
+  const compatSource = readFileSync(fileURLToPath(new URL('compat.mjs', tools)), 'utf8');
+  assert.match(compatSource, /const set = rerunSet\(regressions\);/);
+  assert.match(compatSource, /ran: \[/);
+  const same = compatRegressions(report, { results: [row('3.14.2-18', 'epoll.mjs', 'pass')] });
+  assert.deepEqual(
+    same.map(({ rerun, reproduced }) => [rerun, reproduced]),
+    [['pass', false]]
+  );
 });

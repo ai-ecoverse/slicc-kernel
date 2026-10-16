@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
-import { compatRegressions, missingShards } from './lib.mjs';
+import { compatRegressions, missingShards, rerunSet } from './lib.mjs';
 
 const { values } = parseArgs({
   options: {
@@ -15,12 +15,13 @@ const { values } = parseArgs({
     wait: { type: 'string', default: '150' },
     dispatch: { type: 'boolean', default: false },
     rerun: { type: 'boolean', default: false },
+    reference: { type: 'string', default: '' },
   },
 });
-const { repo, version, commit } = values;
+const { repo, version, commit, reference } = values;
 const API = process.env.GITHUB_API_URL ?? 'https://api.github.com';
 const WORKFLOW = 'kernel-compat.yml';
-const TITLE = `Kernel compat v${version}`;
+const TITLE = `Kernel compat v${version}${reference ? ` ref ${reference}` : ''}`;
 const headers = {
   authorization: `Bearer ${process.env.GH_TOKEN}`,
   accept: 'application/vnd.github+json',
@@ -81,7 +82,8 @@ async function candidates(after, own, strict) {
   return runs.sort((a, b) => b.created_at.localeCompare(a.created_at));
 }
 
-async function dispatch(inputs) {
+async function dispatch(given) {
+  const inputs = reference ? { ...given, reference } : given;
   const after = new Date(Date.now() - 5000).toISOString().replace(/\.\d+Z$/, 'Z');
   await api(`repos/${repo}/actions/workflows/${WORKFLOW}/dispatches`, {
     method: 'POST',
@@ -182,7 +184,7 @@ async function whole(found) {
   return { ...found, run, jobs, shards, ...(shardRerun ? { shardRerun } : {}) };
 }
 
-const first = await whole(await finished({ own: true, deadline }));
+const first = await whole(await finished({ own: !reference, deadline }));
 const out = { version, commit, dispatched: first.dispatched, found: Boolean(first.run) };
 if (first.run && first.run.conclusion !== 'success') out.missingShards = first.shards;
 if (first.shardRerun) out.shardRerun = first.shardRerun;
@@ -194,12 +196,13 @@ if (first.run) {
     conclusion: first.run.conclusion,
     jobs: first.jobs.map((j) => ({ name: j.name, conclusion: j.conclusion })),
     artifact: got?.name,
+    reference: got?.json.inputs?.reference || got?.json.reference?.version || null,
     verdict: got?.json.verdict,
     summary: got?.json.summary,
   });
   let regressions = compatRegressions(got?.json);
   if (regressions.length > 0 && values.rerun) {
-    const set = [...new Set(regressions.map((r) => r.recipe))].join(',');
+    const set = rerunSet(regressions);
     const again = await whole(
       await finished({ own: false, set, deadline: Date.now() + 120 * 60_000 })
     );
@@ -209,6 +212,7 @@ if (first.run) {
           run: again.run.html_url,
           conclusion: again.run.conclusion,
           set,
+          ran: [...new Set((rerun?.json.results ?? []).map((r) => `${r.recipe}@${r.version}`))],
           verdict: rerun?.json.verdict,
           ...(again.shards.length ? { missingShards: again.shards } : {}),
           ...(again.shardRerun ? { shardRerun: again.shardRerun } : {}),
