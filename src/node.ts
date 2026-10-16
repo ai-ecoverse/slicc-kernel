@@ -282,9 +282,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
       const result = await guard(() =>
         launcher.run(argv, {
           ...rest,
-          ...(stdin !== undefined
-            ? { stdin: typeof stdin === 'string' ? new TextEncoder().encode(stdin) : stdin }
-            : {}),
+          ...(stdin !== undefined && typeof stdin !== 'string' ? { stdin } : {}),
           ...(onOut ? { onStdout: onOut } : {}),
           ...(onErr ? { onStderr: onErr } : {}),
         })
