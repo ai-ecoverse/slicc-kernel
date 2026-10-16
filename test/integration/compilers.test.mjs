@@ -4,6 +4,7 @@ import { join, relative } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createNodeKernel } from '../../dist/node.js';
+import { processTree, progressing } from './progress.mjs';
 
 const modules = new URL('../../node_modules/@ai-ecoverse/', import.meta.url);
 
@@ -25,16 +26,15 @@ async function kernelWith(...names) {
   return kernel;
 }
 
-test('zig builds and runs a program', async () => {
+test('zig builds and runs a program', { timeout: 400_000 }, async () => {
   const kernel = await kernelWith('wasi-zig');
   try {
-    const w = await kernel.run(
-      [
-        'bash',
-        '-c',
-        'mkdir -p /home/z && cd /home/z && printf \'const std = @import("std");\\npub fn main() void { std.debug.print("hello from zig\\\\n", .{}); }\\n\' > hello.zig && zig build-exe hello.zig && ./hello.wasm; echo "rc=$?"',
-      ],
-      { cwd: '/home' }
+    const bash = (script) => kernel.run(['bash', '-c', script], { cwd: '/home' });
+    const w = await progressing(
+      bash(
+        'mkdir -p /home/z && cd /home/z && printf \'const std = @import("std");\\npub fn main() void { std.debug.print("hello from zig\\\\n", .{}); }\\n\' > hello.zig && zig build-exe hello.zig && ./hello.wasm; echo "rc=$?"'
+      ),
+      { sample: processTree(bash), quietMs: 60_000, maxMs: 330_000, label: 'zig build-exe' }
     );
     assert.equal(w.stderr, 'hello from zig\n');
     assert.equal(w.stdout, 'rc=0\n');
