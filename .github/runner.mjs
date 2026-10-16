@@ -3,7 +3,7 @@ const QUEUE = `query($o:String!,$n:String!,$b:String!){repository(owner:$o,name:
 
 export async function decide({ context, github, env }) {
   if (env.FORCED) return { runner: env.FORCED, why: 'vars.CI_RUNNER' };
-  const pool = env.POOL;
+  const pool = env.POOL || HOSTED;
   const { owner, repo } = context.repo;
   if (context.eventName === 'pull_request') {
     const head = context.payload.pull_request.head.repo;

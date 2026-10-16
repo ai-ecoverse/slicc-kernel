@@ -7,7 +7,7 @@ import { decide } from '../../.github/runner.mjs';
 
 const ci = await readFile(new URL('../../.github/workflows/ci.yml', import.meta.url), 'utf8');
 const repo = { owner: 'ai-ecoverse', repo: 'slicc-kernel' };
-const env = { POOL: 'cloud-run-bench' };
+const env = { POOL: 'cloud-run-job' };
 const queued = (nodes) => ({
   graphql: async () => ({ repository: { mergeQueue: { entries: { nodes } } } }),
 });
@@ -28,14 +28,14 @@ const entry = (position, oid, isCrossRepository) => ({
 });
 
 test('the decider gives the pool to same-repo PRs and a hosted runner to forks', async () => {
-  assert.equal(await run(pr({ full_name: 'ai-ecoverse/slicc-kernel' })), 'cloud-run-bench');
+  assert.equal(await run(pr({ full_name: 'ai-ecoverse/slicc-kernel' })), 'cloud-run-job');
   assert.equal(await run(pr({ full_name: 'someone/slicc-kernel' })), 'ubuntu-latest');
   assert.equal(await run(pr(null)), 'ubuntu-latest');
 });
 
 test('a merge group gets the pool only when it and every entry ahead of it are same-repo', async () => {
-  assert.equal(await run(group, [entry(1, 'a', false), entry(2, 'b', false)]), 'cloud-run-bench');
-  assert.equal(await run(group, [entry(1, 'b', false), entry(2, 'c', true)]), 'cloud-run-bench');
+  assert.equal(await run(group, [entry(1, 'a', false), entry(2, 'b', false)]), 'cloud-run-job');
+  assert.equal(await run(group, [entry(1, 'b', false), entry(2, 'c', true)]), 'cloud-run-job');
   assert.equal(await run(group, [entry(1, 'a', true), entry(2, 'b', false)]), 'ubuntu-latest');
   assert.equal(await run(group, [entry(1, 'b', true)]), 'ubuntu-latest');
   assert.equal(
@@ -50,6 +50,19 @@ test('a merge group the queue does not list runs hosted', async () => {
   const missing = { graphql: async () => ({ repository: { mergeQueue: null } }) };
   const r = await decide({ context: { repo, ...group }, github: missing, env });
   assert.equal(r.runner, 'ubuntu-latest');
+});
+
+test('with no pool set (vars.CERT_RUNNER empty), same-repo PRs and merge groups run hosted', async () => {
+  for (const POOL of [undefined, '']) {
+    const decided = (context, nodes = []) =>
+      decide({ context: { repo, ...context }, github: queued(nodes), env: { POOL } });
+    const same = await decided(pr({ full_name: 'ai-ecoverse/slicc-kernel' }));
+    assert.equal(same.runner, 'ubuntu-latest');
+    const grouped = await decided(group, [entry(1, 'b', false)]);
+    assert.equal(grouped.runner, 'ubuntu-latest');
+  }
+  assert.doesNotMatch(ci, /cloud-run-bench/);
+  assert.match(ci, /\n {10}POOL: \$\{\{ vars\.CERT_RUNNER \}\}\n/);
 });
 
 test('other events run hosted, and vars.CI_RUNNER overrides the decision', async () => {
@@ -90,7 +103,7 @@ const runPick = async (workspace) => {
     write: async () => {},
   };
   const core = { setOutput: (k, v) => (out[k] = v), summary };
-  const process = { env: { GITHUB_WORKSPACE: workspace, POOL: 'cloud-run-bench' } };
+  const process = { env: { GITHUB_WORKSPACE: workspace, POOL: 'cloud-run-job' } };
   const context = { repo, ...pr({ full_name: 'ai-ecoverse/slicc-kernel' }) };
   const AsyncFunction = (async () => {}).constructor;
   await new AsyncFunction('context', 'github', 'core', 'process', pick)(
@@ -119,7 +132,7 @@ test('the pick step uses the decider and falls back to a hosted runner when it i
       join(good, '.github/runner.mjs'),
       await readFile(new URL('../../.github/runner.mjs', import.meta.url))
     );
-    assert.equal((await runPick(good)).runner, 'cloud-run-bench');
+    assert.equal((await runPick(good)).runner, 'cloud-run-job');
 
     const missing = await runPick(join(root, 'missing'));
     assert.equal(missing.runner, 'ubuntu-latest');
