@@ -1,0 +1,12 @@
+{
+  "name": "longwait",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "longwait": {
+        "wasm": "bin/longwait.wasm"
+      }
+    }
+  }
+}
