@@ -5,7 +5,14 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { baseEvidence, gapsOf, knownAsOf, knownLine, provenanceProblems } from './lib.mjs';
+import {
+  baseEvidence,
+  gapsOf,
+  knownAsOf,
+  knownLine,
+  provenanceProblems,
+  releaseEvidence,
+} from './lib.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const { values } = parseArgs({
@@ -243,6 +250,8 @@ function codedFindings() {
   if (!values.findings || !existsSync(values.findings)) return;
   const found = JSON.parse(readFileSync(values.findings, 'utf8')).findings ?? [];
   gaps = gapsOf(found);
+  const cut = releaseEvidence(found);
+  if (cut) problems.push(cut);
   const partial = baseEvidence(found);
   baseNote = partial.note;
   if (partial.problem) problems.push(partial.problem);

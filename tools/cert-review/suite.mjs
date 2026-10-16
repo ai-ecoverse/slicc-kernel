@@ -1,6 +1,16 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from 'node:child_process';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  cpSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+  writeSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -19,7 +29,7 @@ const { values } = parseArgs({
 });
 const tree = resolve(values.tree);
 const out = resolve(values.out);
-function inSession(command, { cwd, env, timeoutMs }) {
+function inSession(command, { cwd, env, timeoutMs, log, onTerm: terminated }) {
   return new Promise((done) => {
     const child = spawn('bash', ['-c', command], {
       cwd,
@@ -27,10 +37,9 @@ function inSession(command, { cwd, env, timeoutMs }) {
       detached: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-    const chunks = [];
     const ignored = [];
-    child.stdout.on('data', (b) => chunks.push(b));
-    child.stderr.on('data', (b) => chunks.push(b));
+    child.stdout.on('data', (b) => writeSync(log, b));
+    child.stderr.on('data', (b) => writeSync(log, b));
     const group = (signal) => {
       try {
         process.kill(-child.pid, signal);
@@ -44,13 +53,14 @@ function inSession(command, { cwd, env, timeoutMs }) {
     const onInt = () => ignored.push('SIGINT');
     const onTerm = () => {
       group('SIGTERM');
+      terminated(ignored);
       process.exit(143);
     };
     process.on('SIGINT', onInt);
     process.on('SIGTERM', onTerm);
     child.once('error', (error) => {
       clearTimeout(timer);
-      done({ status: null, error, output: '', ignored });
+      done({ status: null, error, ignored });
     });
     child.once('close', (status, signal) => {
       clearTimeout(timer);
@@ -60,7 +70,6 @@ function inSession(command, { cwd, env, timeoutMs }) {
         status,
         signal,
         error: timedOut ? { code: 'ETIMEDOUT' } : undefined,
-        output: Buffer.concat(chunks).toString('utf8'),
         ignored,
       });
     });
@@ -91,30 +100,40 @@ const started = Date.now();
 const env = { ...process.env, NODE_NO_WARNINGS: '1' };
 for (const k of ['AWS_BEARER_TOKEN_BEDROCK', 'GH_TOKEN', 'GITHUB_TOKEN', 'NODE_TEST_CONTEXT'])
   delete env[k];
+const log = openSync(`${out}.log`, 'w');
+function finish(exit, ignored) {
+  let rows = [];
+  try {
+    rows = parseResults(readFileSync(results, 'utf8'));
+  } catch {}
+  const count = (status) => rows.filter((r) => r.status === status).length;
+  const summary = {
+    tree,
+    tgz: resolve(values.tgz),
+    files,
+    exit,
+    ...(ignored.length ? { ignored } : {}),
+    seconds: Math.round((Date.now() - started) / 1000),
+    pass: count('pass'),
+    fail: count('fail') + count('cancelled'),
+    skip: count('skip') + count('todo'),
+    results: rows,
+  };
+  closeSync(log);
+  writeFileSync(`${out}.json`, `${JSON.stringify(summary, null, 2)}\n`);
+  return summary;
+}
 const run = await inSession(command, {
   cwd: tree,
   env,
   timeoutMs: Number(values.timeout) * 60_000,
+  log,
+  onTerm: (ignored) => finish('signal SIGTERM', ignored),
 });
-writeFileSync(`${out}.log`, run.output);
-let rows = [];
-try {
-  rows = parseResults(readFileSync(results, 'utf8'));
-} catch {}
-const count = (s) => rows.filter((r) => r.status === s).length;
-const summary = {
-  tree,
-  tgz: resolve(values.tgz),
-  files,
-  exit: run.error ? `error ${run.error.code}` : (run.status ?? `signal ${run.signal}`),
-  ...(run.ignored.length ? { ignored: run.ignored } : {}),
-  seconds: Math.round((Date.now() - started) / 1000),
-  pass: count('pass'),
-  fail: count('fail') + count('cancelled'),
-  skip: count('skip') + count('todo'),
-  results: rows,
-};
-writeFileSync(`${out}.json`, `${JSON.stringify(summary, null, 2)}\n`);
+const summary = finish(
+  run.error ? `error ${run.error.code}` : (run.status ?? `signal ${run.signal}`),
+  run.ignored
+);
 console.log(
   `suite: exit ${summary.exit}, pass ${summary.pass}, fail ${summary.fail}, skip ${summary.skip}, ${summary.seconds}s`
 );

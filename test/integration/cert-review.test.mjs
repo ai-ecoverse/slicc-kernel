@@ -22,6 +22,7 @@ import {
   parseResults,
   pickRelease,
   provenanceProblems,
+  releaseEvidence,
   resultsMap,
   rowOf,
   testCommand,
@@ -52,6 +53,7 @@ test('the delta parser takes merged pull requests once, in order, and reads the 
         'a new test',
         'a new subtest with "quotes"',
         'a template \u2026',
+        '\u2026 variable',
       ],
     },
   ]);
@@ -139,9 +141,15 @@ test('the suite diff compares two runs test by test and keeps a test failing if 
     fixed: [{ test: k('heals') }],
     stillFailing: [{ test: k('still'), error: '' }],
     removed: [{ test: k('gone') }],
+    unrun: [],
     added: 3,
     same: 1,
   });
+  const cut = diffSuites(base, resultsMap([res(f, 'stays', 'pass')]), { complete: false });
+  assert.deepEqual(
+    [cut.removed, cut.unrun.map((u) => u.test), cut.same],
+    [[], [k('breaks'), k('heals'), k('still'), k('gone')], 1]
+  );
 });
 
 test("the suite runner rewrites a release's own test script to add the reporter and, for the NEGATIVE, its files", () => {
@@ -463,8 +471,17 @@ test('findings.mjs turns the runs into decisions, suite regressions and missing 
   run('base.json');
   const cut = JSON.parse(await readFile(join(dir, 'findings.json'), 'utf8')).findings;
   assert.deepEqual(
-    cut.filter((f) => f.kind === 'suite-incomplete'),
-    [{ kind: 'suite-incomplete', what: 'the release suite', exit: 'signal SIGTERM', results: 1 }]
+    cut.filter((f) => f.what === 'the release suite'),
+    [
+      {
+        kind: 'missing-evidence',
+        what: 'the release suite',
+        exit: 'signal SIGTERM',
+        results: 1,
+        blocking: true,
+        remedy: 're-run the failed jobs',
+      },
+    ]
   );
 });
 
@@ -894,4 +911,160 @@ test('the review runs for releases the merge queue pushed: claude-code-action al
       workflow
     )?.[1] ?? '';
   assert.match(step, /^ {10}allowed_bots: 'github-merge-queue,renovate\[bot\]'$/m);
+});
+
+test('a suite runner stopped with SIGTERM still writes its partial results, its summary and the log so far (#743)', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'cert-term-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const tree = join(dir, 'tree');
+  await mkdir(join(tree, 'test/integration'), { recursive: true });
+  await mkdir(join(dir, 'package/dist'), { recursive: true });
+  await writeFile(join(dir, 'package/dist/node.js'), 'export {};\n');
+  execFileSync('tar', ['-czf', join(dir, 'k.tgz'), '-C', dir, 'package']);
+  await writeFile(
+    join(tree, 'package.json'),
+    JSON.stringify({ scripts: { test: "node --test 'test/integration/*.test.mjs'" } })
+  );
+  await writeFile(
+    join(tree, 'test/integration/a.test.mjs'),
+    "import { test } from 'node:test';\ntest('done first', () => { console.log('first ran'); });\ntest('still running', async () => { await new Promise((r) => setTimeout(r, 20000)); });\n"
+  );
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  const out = join(dir, 'out/release');
+  const suite = spawn(
+    process.execPath,
+    [
+      fileURLToPath(new URL('suite.mjs', tools)),
+      '--tree',
+      tree,
+      '--tgz',
+      join(dir, 'k.tgz'),
+      '--out',
+      out,
+    ],
+    { env, stdio: 'ignore' }
+  );
+  const exited = new Promise((r) => suite.once('exit', (c, s) => r([c, s])));
+  for (let i = 0; i < 200; i++) {
+    const partial = await readFile(`${out}.jsonl`, 'utf8').catch(() => '');
+    if (partial.includes('done first')) break;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  suite.kill('SIGTERM');
+  assert.deepEqual(await exited, [143, null]);
+  const summary = JSON.parse(await readFile(`${out}.json`, 'utf8'));
+  assert.equal(summary.exit, 'signal SIGTERM');
+  assert.deepEqual(
+    summary.results.filter((r) => r.status === 'pass').map((r) => r.name),
+    ['done first']
+  );
+  assert.match(await readFile(`${out}.log`, 'utf8'), /first ran/);
+});
+
+test('a release suite cut off partway is missing evidence that always blocks, and its unrun tests are not removed (#743)', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'cert-cut-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = 'test/integration/node.test.mjs';
+  const other = 'test/integration/wasi.test.mjs';
+  const write = (name, value) => writeFile(join(dir, name), JSON.stringify(value));
+  await write('delta.json', { prev: '1.2.2', version: '1.2.3', rows, files: deltaFiles(rows) });
+  await write('prev.json', { exit: 1, files: [file], results: [res(file, 'a new test', 'fail')] });
+  await writeFile(
+    join(dir, 'release.jsonl'),
+    [res(file, 'a new test', 'pass'), res(file, 'old', 'pass'), res(other, 'w1', 'cancelled')]
+      .map((r) => JSON.stringify(r))
+      .join('\n')
+  );
+  await write('base.json', {
+    exit: 0,
+    results: [res(file, 'old', 'pass'), res(other, 'w1', 'pass'), res(other, 'w2', 'pass')],
+  });
+  execFileSync(process.execPath, [
+    fileURLToPath(new URL('findings.mjs', tools)),
+    '--delta',
+    join(dir, 'delta.json'),
+    '--prev',
+    join(dir, 'prev.json'),
+    '--release',
+    join(dir, 'release.json'),
+    '--base',
+    join(dir, 'base.json'),
+    '--out',
+    join(dir, 'findings.json'),
+  ]);
+  const out = JSON.parse(await readFile(join(dir, 'findings.json'), 'utf8'));
+  const release = out.findings.filter((f) => f.what === 'the release suite');
+  assert.deepEqual(release, [
+    {
+      kind: 'missing-evidence',
+      what: 'the release suite',
+      exit: 'no summary',
+      results: 3,
+      blocking: true,
+      remedy: 're-run the failed jobs',
+    },
+  ]);
+  assert.deepEqual(out.suites.removed, []);
+  assert.deepEqual(
+    out.suites.unrun.map((u) => u.test),
+    [`${other} :: w2`]
+  );
+  assert.equal(out.suites.same, 1);
+  assert.equal(
+    releaseEvidence(out.findings),
+    "the release suite didn't finish (3 results, exit no summary): re-run the failed jobs"
+  );
+  assert.equal(
+    releaseEvidence([{ kind: 'missing-evidence', what: 'the release suite', blocking: true }]),
+    "the release suite didn't finish (no results): re-run the failed jobs"
+  );
+  assert.equal(releaseEvidence([]), undefined);
+});
+
+test("a test title built from a template literal matches the rows it ran as, so #731's fork-tls rows are judged, not not-run (#742)", async () => {
+  const forktls = await readFile(new URL('fork-tls.test.mjs', import.meta.url), 'utf8');
+  const patch = `@@ -0,0 +1,${forktls.split('\n').length} @@\n${forktls
+    .split('\n')
+    .map((l) => `+${l}`)
+    .join('\n')}`;
+  const row = rowOf({ number: 731, title: 'fix: a forked WASIX child reads errno (#728)' }, [
+    { filename: 'test/integration/fork-tls.test.mjs', status: 'added', patch },
+  ]);
+  const template =
+    'a forked child of a \u2026 WASIX program reads errno and its thread-locals, in both TLS models (#728)';
+  const side =
+    'a forked child of a WASIX program reads the thread-locals of a side module its parent loaded (#728)';
+  assert.deepEqual(row.tests[0].titles, [template, side]);
+  const f = 'test/integration/fork-tls.test.mjs';
+  const named = (kind) =>
+    `a forked child of a ${kind} WASIX program reads errno and its thread-locals, in both TLS models (#728)`;
+  const prev = resultsMap([
+    res(f, named('pie'), 'fail'),
+    res(f, named('static'), 'fail'),
+    res(f, side, 'pass'),
+  ]);
+  const next = resultsMap([
+    res(f, named('pie'), 'pass'),
+    res(f, named('static'), 'pass'),
+    res(f, side, 'pass'),
+  ]);
+  const decided = decide(row, prev, next);
+  assert.deepEqual(decided.checks, [
+    { file: f, title: template, next: 'pass', prev: 'fail' },
+    { file: f, title: side, next: 'pass', prev: 'pass' },
+  ]);
+  assert.equal(decided.decision, 'negative');
+  const onlySide = decide(
+    row,
+    resultsMap([res(f, side, 'fail')]),
+    resultsMap([res(f, side, 'pass')])
+  );
+  assert.deepEqual(onlySide.checks[0], {
+    file: f,
+    title: template,
+    next: 'missing',
+    prev: 'missing',
+  });
+  assert.deepEqual(titlesFromPatch('+test(`${a}${b}`, () => {});'), []);
 });

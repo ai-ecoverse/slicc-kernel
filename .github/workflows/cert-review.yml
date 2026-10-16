@@ -245,7 +245,7 @@ jobs:
             --out "$RUNNER_TEMP/evidence/$WHICH"
 
       - name: Each fix's tests on the dist of the release before it, the NEGATIVE (no secrets in this step)
-        if: matrix.which == 'release'
+        if: ${{ !cancelled() && matrix.which == 'release' }}
         run: |
           set -euo pipefail
           ev="$RUNNER_TEMP/evidence"
