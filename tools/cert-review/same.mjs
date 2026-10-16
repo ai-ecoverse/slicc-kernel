@@ -61,7 +61,7 @@ const evidence = {
   candidate: { version: candidate.version, sha256: candidate.sha256, files: candidate.files.size },
   base: { version: base.version, sha256: base.sha256, files: base.files.size },
   differences: differences.slice(0, 50),
-  rule: "identical dist: only package.json or its lock changed, and the packed candidate ships the same files, types, modes and bytes as the packed base, ignoring package.json devDependencies, scripts and version and each side's exact version string",
+  rule: "identical dist: only package.json or its lock changed, and the packed candidate ships the same files, types, modes and bytes as the packed base, ignoring package.json devDependencies, version and gitHead and each side's exact version string",
   line: identical
     ? `not behaviour (identical dist): ${candidate.sha256.slice(0, 12)} = ${base.sha256.slice(0, 12)} after normalising ${candidate.version}/${base.version}`
     : `the dist differs: ${differences.slice(0, 3).join('; ')}${differences.length > 3 ? ` and ${differences.length - 3} more` : ''}`,

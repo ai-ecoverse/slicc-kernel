@@ -85,7 +85,6 @@ async function compare(t, candidateChange, baseChange) {
 test('a devDependency bump whose build differs only in the baked version (and the source-map columns and gitHead it shifts) is not behaviour, and the evidence names the rule and both sha256', async (t) => {
   const r = await compare(t, ({ files }) => {
     files['package.json'].devDependencies['@types/node'] = '24.1.0';
-    files['package.json'].scripts.lint = 'biome check';
   });
   assert.equal(r.identical, true, JSON.stringify(r.differences));
   assert.match(r.candidate.sha256, /^[0-9a-f]{64}$/);
@@ -115,19 +114,27 @@ test('only the exact side version is normalised: a version in one more place, or
   assert.deepEqual(core.differences, ['dist/node.js differs']);
 });
 
-test('what ships decides: a runtime dependency, exports or bin, other dist bytes, a new file, a mode or a symlink for a file is behaviour', async (t) => {
+test('what ships decides: a script (postinstall, prepack), a runtime dependency, exports or bin, other dist bytes, a new file, a mode or a symlink for a file is behaviour', async (t) => {
   const cases = [
     [
       ({ files }) => (files['package.json'].dependencies = { tslib: '2.8.1' }),
-      'package.json differs beyond devDependencies, scripts, version and gitHead',
+      'package.json differs beyond devDependencies, version and gitHead',
     ],
     [
       ({ files }) => (files['package.json'].exports['./wasi'] = './dist/wasi.js'),
-      'package.json differs beyond devDependencies, scripts, version and gitHead',
+      'package.json differs beyond devDependencies, version and gitHead',
     ],
     [
       ({ files }) => (files['package.json'].bin.other = 'dist/cli.js'),
-      'package.json differs beyond devDependencies, scripts, version and gitHead',
+      'package.json differs beyond devDependencies, version and gitHead',
+    ],
+    [
+      ({ files }) => (files['package.json'].scripts.postinstall = 'node dist/cli.js'),
+      'package.json differs beyond devDependencies, version and gitHead',
+    ],
+    [
+      ({ files }) => (files['package.json'].scripts.prepack = 'node build.mjs --minify'),
+      'package.json differs beyond devDependencies, version and gitHead',
     ],
     [({ files }) => (files['dist/cli.js'] += '// bundled differently\n'), 'dist/cli.js differs'],
     [({ files }) => (files['dist/extra.js'] = 'x\n'), 'dist/extra.js only in the candidate'],

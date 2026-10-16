@@ -627,7 +627,7 @@ export function manifestOnly(files) {
   );
 }
 
-const SHIPPED_MANIFEST_IGNORES = ['devDependencies', 'scripts', 'version', 'gitHead'];
+const SHIPPED_MANIFEST_IGNORES = ['devDependencies', 'version', 'gitHead'];
 
 const placeholder = (buffer, version) => {
   const token = Buffer.from(version);
@@ -673,7 +673,7 @@ function fileDifference(name, a, b, candidate, base) {
   if (name === 'package.json')
     return parsedSame(a.bytes, b.bytes, manifestOf)
       ? undefined
-      : 'package.json differs beyond devDependencies, scripts, version and gitHead';
+      : 'package.json differs beyond devDependencies, version and gitHead';
   const x = placeholder(a.bytes, candidate.version);
   const y = placeholder(b.bytes, base.version);
   if (name.endsWith('.map'))
