@@ -178,7 +178,7 @@ jobs:
           import { join } from 'node:path';
           const { INPUT, ARTIFACT, RUN, SHA256, RUNNER_TEMP, GITHUB_OUTPUT } = process.env;
           const version = (INPUT || '').replace(/^v/, '');
-          if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error(`version ${version} is not x.y.z`);
+          if (!(ARTIFACT ? /^\d+\.\d+\.\d+(?:-pr\.\d+\.\d+)?$/ : /^\d+\.\d+\.\d+$/).test(version)) throw new Error(`version ${version} is not x.y.z${ARTIFACT ? ' or x.y.z-pr.N.M' : ''}`);
           if (ARTIFACT) {
             if (!/^\d+$/.test(RUN || '') || !/^[0-9a-f]{64}$/.test(SHA256 || '')) throw new Error('artifact needs run and sha256');
             const dir = join(RUNNER_TEMP, 'candidate');
@@ -229,7 +229,7 @@ jobs:
 
   attach:
     needs: [candidate, release]
-    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && needs.candidate.outputs.version != '' && needs.release.outputs.artifact != '' }}
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && needs.candidate.outputs.version != '' && !contains(needs.candidate.outputs.version, '-pr.') && needs.release.outputs.artifact != '' }}
     runs-on: ${{ github.ref == 'refs/heads/main' && vars.CERT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:

@@ -1,0 +1,12 @@
+{
+  "name": "pipetest",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "pipetest": {
+        "wasm": "bin/pipetest.wasm"
+      }
+    }
+  }
+}

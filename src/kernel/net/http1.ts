@@ -217,23 +217,58 @@ export async function readBody(
   const chunks: Uint8Array[] = [];
   let total = 0;
   for (;;) {
-    const sizeLine = await incoming.line(MAX_CHUNK_LINE, signal);
-    const size = /^([0-9A-Fa-f]{1,12})[ \t]*(;.*)?$/.exec(sizeLine);
-    if (!size) throw new HttpError(400, 'malformed chunk size');
-    const n = Number.parseInt(size[1], 16);
+    const n = await chunkSize(incoming, signal);
     if (n === 0) break;
     total += n;
     if (total > cap) throw new HttpError(413, `request body over ${cap} bytes`);
     chunks.push(await incoming.exactly(n, signal));
     if ((await incoming.line(2, signal)) !== '') throw new HttpError(400, 'malformed chunk');
   }
+  await skipTrailers(incoming, signal);
+  return concat(chunks, total);
+}
+async function chunkSize(incoming: Incoming, signal?: AbortSignal): Promise<number> {
+  const sizeLine = await incoming.line(MAX_CHUNK_LINE, signal);
+  const size = /^([0-9A-Fa-f]{1,12})[ \t]*(;.*)?$/.exec(sizeLine);
+  if (!size) throw new HttpError(400, 'malformed chunk size');
+  return Number.parseInt(size[1], 16);
+}
+async function skipTrailers(incoming: Incoming, signal?: AbortSignal): Promise<void> {
   let trailers = 0;
   for (let line = await incoming.line(MAX_TRAILERS, signal); line !== ''; ) {
     trailers += line.length;
     if (trailers > MAX_TRAILERS) throw new HttpError(431, 'trailers too large');
     line = await incoming.line(MAX_TRAILERS, signal);
   }
-  return concat(chunks, total);
+}
+const STREAM_PIECE = 64 * 1024;
+async function* pieces(
+  incoming: Incoming,
+  n: number,
+  signal?: AbortSignal
+): AsyncGenerator<Uint8Array> {
+  for (let left = n; left > 0; ) {
+    const piece = await incoming.some(Math.min(left, STREAM_PIECE), signal);
+    if (piece.length === 0) throw new HttpError(400, 'connection closed inside a body');
+    left -= piece.length;
+    yield piece;
+  }
+}
+export async function* streamBody(
+  incoming: Incoming,
+  framing: BodyFraming,
+  signal?: AbortSignal
+): AsyncGenerator<Uint8Array> {
+  if (framing.kind === 'none') return;
+  if (framing.kind === 'length') {
+    yield* pieces(incoming, framing.length, signal);
+    return;
+  }
+  for (let n = await chunkSize(incoming, signal); n !== 0; n = await chunkSize(incoming, signal)) {
+    yield* pieces(incoming, n, signal);
+    if ((await incoming.line(2, signal)) !== '') throw new HttpError(400, 'malformed chunk');
+  }
+  await skipTrailers(incoming, signal);
 }
 export function concat(chunks: Uint8Array[], total = chunks.reduce((n, c) => n + c.length, 0)) {
   const out = new Uint8Array(total);

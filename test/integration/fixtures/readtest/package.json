@@ -6,6 +6,10 @@
       "readtest": {
         "abi": "js",
         "module": "bin/readtest.mjs"
+      },
+      "linkall": {
+        "abi": "js",
+        "module": "bin/linkall.mjs"
       }
     }
   }

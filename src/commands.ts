@@ -1,4 +1,6 @@
+import { parseVersion, satisfies } from './fs/engines.ts';
 import { type KernelFs, resolvePath } from './fs/types.ts';
+import { KERNEL_VERSION } from './version.ts';
 
 export type Abi = 'emscripten' | 'wasi' | 'js';
 
@@ -17,6 +19,8 @@ export interface Command {
   script?: string;
   bin?: true;
   imports?: string;
+  refused?: string;
+  shows?: string;
 }
 
 interface CommandEntry {
@@ -35,6 +39,8 @@ interface CommandEntry {
 
 interface Manifest {
   name?: unknown;
+  version?: unknown;
+  engines?: unknown;
   bin?: unknown;
   slicc?: {
     abi?: unknown;
@@ -293,6 +299,21 @@ async function binCommandsOf(
   return out;
 }
 
+export function engineRefusal(manifest: Manifest, kernel: string): string | undefined {
+  const engines = manifest.engines as Record<string, unknown> | null | undefined;
+  const range = engines && typeof engines === 'object' ? engines['slicc-kernel'] : undefined;
+  const running = parseVersion(kernel);
+  if (typeof range !== 'string' || !running || running.slice(0, 3).every((n) => n === 0)) {
+    return undefined;
+  }
+  const fits = satisfies(kernel, range);
+  if (fits) return undefined;
+  const who = `${String(manifest.name ?? '?')}@${String(manifest.version ?? '?')}`;
+  return fits === false
+    ? `${who} needs slicc-kernel ${range}; this kernel is ${kernel}`
+    : `${who} has an engines.slicc-kernel range this kernel can't read: ${JSON.stringify(range)}`;
+}
+
 const PACKAGE_NAME = /^(@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*$/;
 
 function replacesOf(manifest: Manifest): string[] {
@@ -314,7 +335,8 @@ async function tierPackages(
   fs: KernelFs,
   physical: Physical,
   roots: string[],
-  bins: boolean
+  bins: boolean,
+  kernel: string
 ): Promise<Provided[]> {
   const out: Provided[] = [];
   for (const root of roots) {
@@ -328,11 +350,13 @@ async function tierPackages(
       const own = commandsOf(pkg, manifest);
       const named = new Set(own.map((command) => command.name));
       const extra = bins ? await binCommandsOf(physical, pkg, manifest, named) : [];
+      const refused = engineRefusal(manifest, kernel);
+      const commands = [...own, ...extra];
       out.push({
         name: pkg.slice(root.length + 1),
         pkg,
         replaces: replacesOf(manifest),
-        commands: [...own, ...extra],
+        commands: refused ? commands.map((command) => ({ ...command, refused })) : commands,
       });
     }
   }
@@ -363,7 +387,8 @@ function winners(tier: Provided[]): Map<string, { pkg: string; command: Command 
 export async function scanCommands(
   fs: KernelFs,
   modules: string | (string | string[])[],
-  binsFrom = Number.POSITIVE_INFINITY
+  binsFrom = Number.POSITIVE_INFINITY,
+  kernel = KERNEL_VERSION
 ): Promise<Map<string, Command>> {
   const found = new Map<string, Command>();
   const physical = physicalResolver(fs);
@@ -371,7 +396,7 @@ export async function scanCommands(
     typeof tier === 'string' ? [tier] : tier
   );
   for (const [index, roots] of tiers.entries()) {
-    const tier = await tierPackages(fs, physical, roots, index >= binsFrom);
+    const tier = await tierPackages(fs, physical, roots, index >= binsFrom, kernel);
     for (const [name, { pkg, command }] of winners(tier)) {
       if (!found.has(name)) found.set(name, await withPackagePaths(fs, pkg, command));
     }
