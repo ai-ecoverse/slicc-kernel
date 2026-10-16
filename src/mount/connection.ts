@@ -13,10 +13,13 @@ export interface DriverPortLike {
   addEventListener(type: 'message', handler: (event: MessageEvent) => void): void;
   start?(): void;
   close?(): void;
+  ref?(): void;
+  unref?(): void;
 }
 
 export interface ConnectionOptions {
   timeoutMs?: number;
+  idle?: boolean;
   onInvalidate?: (paths: string[] | true) => void;
   onFail?: (error: Error) => void;
 }
@@ -46,19 +49,26 @@ export class DriverConnection {
   private readonly timeoutMs: number;
   private nextId = 0;
   private readonly onFail: ((error: Error) => void) | undefined;
+  private readonly idle: boolean;
 
   private constructor(
     port: DriverPortLike,
     capabilities: DriverCapabilities,
     waiting: Map<number, Waiting>,
     timeoutMs: number,
-    onFail: ((error: Error) => void) | undefined
+    options: ConnectionOptions
   ) {
     this.port = port;
     this.capabilities = capabilities;
     this.waiting = waiting;
     this.timeoutMs = timeoutMs;
-    this.onFail = onFail;
+    this.onFail = options.onFail;
+    this.idle = options.idle === true;
+    if (this.idle) port.unref?.();
+  }
+
+  private settled(): void {
+    if (this.idle && this.waiting.size === 0) this.port.unref?.();
   }
 
   static async open(
@@ -82,6 +92,7 @@ export class DriverConnection {
       clearTimeout(call.timer);
       if (data.errno) call.reject(errnoError(data.errno, data.message ?? data.errno));
       else call.resolve(data.result);
+      if (options.idle && waiting.size === 0) port.unref?.();
     });
     port.start?.();
     port.postMessage({ hello: { protocol: DRIVER_PROTOCOL, mount } });
@@ -100,7 +111,7 @@ export class DriverConnection {
     const refused = driverVersionError(hello.protocol);
     if (refused) throw errnoError('EPROTO', refused);
     if (hello.error) throw errnoError(hello.errno ?? 'EIO', hello.error);
-    return new DriverConnection(port, hello.capabilities ?? {}, waiting, timeoutMs, options.onFail);
+    return new DriverConnection(port, hello.capabilities ?? {}, waiting, timeoutMs, options);
   }
 
   call(call: DriverCall, transfer: Transferable[] = []): Promise<unknown> {
@@ -110,6 +121,7 @@ export class DriverConnection {
       const timer = unref(
         setTimeout(() => {
           this.waiting.delete(id);
+          this.settled();
           const error = errnoError(
             'EIO',
             `the driver did not answer ${call.op} within ${this.timeoutMs} ms`
@@ -119,6 +131,7 @@ export class DriverConnection {
           this.onFail?.(error);
         }, this.timeoutMs)
       );
+      if (this.idle && this.waiting.size === 0) this.port.ref?.();
       this.waiting.set(id, { resolve, reject, timer });
       this.port.postMessage({ ...call, id }, transfer);
     });
@@ -132,6 +145,7 @@ export class DriverConnection {
       call.reject(error);
     }
     this.waiting.clear();
+    this.settled();
   }
 
   close(): void {

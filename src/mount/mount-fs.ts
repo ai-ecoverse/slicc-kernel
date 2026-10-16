@@ -46,6 +46,7 @@ export interface OpenedDriver {
   dispose(): void;
   onCrash?(listener: (error: Error) => void): void;
   present?(): boolean;
+  idle?: true;
 }
 
 export interface MountDeps {
@@ -490,6 +491,7 @@ export class MountTable {
           { source: spec.source, options },
           {
             ...(this.deps.timeoutMs ? { timeoutMs: this.deps.timeoutMs } : {}),
+            ...(opened.idle ? { idle: true } : {}),
             onInvalidate: (paths) => this.invalidated(target, paths),
             onFail: (error) => {
               if (mounted) this.crashed(mounted, error);
