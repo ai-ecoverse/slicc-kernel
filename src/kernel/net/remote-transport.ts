@@ -19,7 +19,11 @@ export type TransportCall =
       method: string;
       headers: HeaderList;
       body?: Uint8Array;
+      streamed?: true;
     }
+  | { net: 'body-chunk'; nid: number; bytes: Uint8Array }
+  | { net: 'body-end'; nid: number }
+  | { net: 'body-error'; nid: number; message: string }
   | { net: 'read'; nid: number }
   | { net: 'cancel'; nid: number }
   | { net: 'ws-open'; nid: number; url: string; protocols: string[]; headers: HeaderList }
@@ -39,6 +43,7 @@ export type TransportReply =
       redirects?: readonly RealmRedirectHop[];
     }
   | { net: 'chunk'; nid: number; bytes: Uint8Array }
+  | { net: 'body-pull'; nid: number }
   | { net: 'end'; nid: number }
   | { net: 'error'; nid: number; message: string; status?: number; code?: string }
   | { net: 'ws-opened'; nid: number; protocol: string }
@@ -77,6 +82,8 @@ export class RemoteTransport implements RealmTransport {
 
   private readonly sockets = new Map<number, { queue: MessageQueue; acked(n: number): void }>();
 
+  private readonly uploads = new Map<number, AsyncIterator<Uint8Array>>();
+
   private failure: Error | undefined;
 
   constructor(port: TransportPort, traits: RealmTransportTraits) {
@@ -85,6 +92,10 @@ export class RemoteTransport implements RealmTransport {
   }
 
   receive(reply: TransportReply): void {
+    if (reply.net === 'body-pull') {
+      void this.pull(reply.nid);
+      return;
+    }
     const socket = this.sockets.get(reply.nid);
     if (socket && this.toSocket(reply, socket)) return;
     const waiter = this.waiting.get(reply.nid);
@@ -108,8 +119,37 @@ export class RemoteTransport implements RealmTransport {
     return true;
   }
 
+  private async pull(nid: number): Promise<void> {
+    const upload = this.uploads.get(nid);
+    if (!upload) {
+      this.port.postMessage({ net: 'body-error', nid, message: 'the request body is gone' });
+      return;
+    }
+    try {
+      const next = await upload.next();
+      if (next.done) {
+        this.uploads.delete(nid);
+        this.port.postMessage({ net: 'body-end', nid });
+      } else this.port.postMessage({ net: 'body-chunk', nid, bytes: next.value });
+    } catch (e) {
+      this.uploads.delete(nid);
+      this.port.postMessage({
+        net: 'body-error',
+        nid,
+        message: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+
+  private dropUpload(nid: number): void {
+    const upload = this.uploads.get(nid);
+    this.uploads.delete(nid);
+    void upload?.return?.().catch(() => undefined);
+  }
+
   fail(error: Error): void {
     this.failure = error;
+    for (const nid of [...this.uploads.keys()]) this.dropUpload(nid);
     for (const waiter of this.waiting.values()) waiter.reject(error);
     this.waiting.clear();
     for (const socket of this.sockets.values())
@@ -139,14 +179,17 @@ export class RemoteTransport implements RealmTransport {
     let finished = false;
     const abort = () => {
       finished = true;
+      this.dropUpload(nid);
       this.cancel(nid);
     };
     signal.addEventListener('abort', abort, { once: true });
     const finish = () => {
+      this.dropUpload(nid);
       if (finished) return;
       finished = true;
       signal.removeEventListener('abort', abort);
     };
+    if (request.bodyStream) this.uploads.set(nid, request.bodyStream[Symbol.asyncIterator]());
     let head: TransportReply;
     try {
       head = await this.ask({
@@ -155,7 +198,11 @@ export class RemoteTransport implements RealmTransport {
         url: request.url,
         method: request.method,
         headers: request.headers,
-        ...(request.body ? { body: request.body } : {}),
+        ...(request.bodyStream
+          ? { streamed: true as const }
+          : request.body
+            ? { body: request.body }
+            : {}),
       });
     } catch (e) {
       finish();

@@ -4,6 +4,7 @@ export interface RealmTransportRequest {
   method: string;
   headers: HeaderList;
   body?: Uint8Array;
+  bodyStream?: AsyncIterable<Uint8Array>;
   signal: AbortSignal;
 }
 export interface RealmRedirectHop {
@@ -33,6 +34,7 @@ export interface RealmTransportTraits {
   crossOrigin?: 'cors' | 'any';
   unavailable?: true;
   websocket?: true;
+  streamingBodies?: true;
   redirectHops?: true;
   exit?: RealmTransportExit;
   [trait: string]: unknown;

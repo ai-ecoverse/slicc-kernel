@@ -7,6 +7,7 @@ interface FetchTraits {
   manualRedirects: boolean;
   encodedBodies: boolean;
   maxRequestBody: number;
+  streamingBodies?: boolean;
 }
 
 interface Hop {
@@ -14,6 +15,7 @@ interface Hop {
   method: string;
   headers: [string, string][];
   body: Uint8Array | undefined;
+  stream?: ReadableStream<Uint8Array>;
 }
 
 const CHUNK = 64 * 1024;
@@ -86,6 +88,9 @@ function rewrite(hop: Hop, status: number, location: string): Hop {
   const toGet =
     ((status === 301 || status === 302) && hop.method === 'POST') ||
     (status === 303 && hop.method !== 'GET' && hop.method !== 'HEAD');
+  if (hop.stream && !toGet) {
+    throw failed(new JsCallError('EIO', `a ${status} redirect would send a streamed body again`));
+  }
   const crossOrigin = next.origin !== new URL(hop.url).origin;
   const headers = hop.headers.filter(
     ([name]) =>
@@ -276,6 +281,32 @@ async function bodyOf(
   return out;
 }
 
+function streams(known: FetchTraits, request: Request, url: string): boolean {
+  if (known.streamingBodies !== true || request.body === null) return false;
+  return request.method !== 'GET' && request.method !== 'HEAD' && !local(url);
+}
+
+async function pump(
+  kernel: JsKernel,
+  handle: number,
+  stream: ReadableStream<Uint8Array>,
+  signal: AbortSignal
+): Promise<void> {
+  const reader = stream.getReader();
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      const bytes = bytesOf(next.value);
+      if (bytes.length > 0) await kernel.blocking({ op: 'net-write', handle, bytes }, signal);
+    }
+    await kernel.raw({ op: 'net-end', handle });
+  } catch (err) {
+    await reader.cancel(err).catch(() => undefined);
+    await kernel.raw({ op: 'net-close', handle });
+  }
+}
+
 export function fetchOp(kernel: JsKernel) {
   const traits = new Map<boolean, Promise<FetchTraits>>();
   const traitsOf = (url: string): Promise<FetchTraits> => {
@@ -298,8 +329,9 @@ export function fetchOp(kernel: JsKernel) {
       url: hop.url,
       method: hop.method,
       headers: hop.headers,
-      ...(hop.body ? { body: hop.body } : {}),
+      ...(hop.stream ? { stream: true } : hop.body ? { body: hop.body } : {}),
     })) as number;
+    if (hop.stream) void pump(kernel, handle, hop.stream, signal);
     try {
       const r = await kernel.blocking({ op: 'net-head', handle }, signal);
       signal.throwIfAborted();
@@ -410,7 +442,8 @@ export function fetchOp(kernel: JsKernel) {
       throw failed(new JsCallError('ENOTSUP', `redirect: ${request.redirect}`));
     }
     const url = withoutFragment(new URL(request.url));
-    const bytes = await bodyOf(request, known.maxRequestBody, signal);
+    const streamed = streams(known, request, url);
+    const bytes = streamed ? undefined : await bodyOf(request, known.maxRequestBody, signal);
     if (bytes === OVER) {
       return withMeta(plain(413, `request body over ${known.maxRequestBody} bytes`), url, false);
     }
@@ -419,6 +452,7 @@ export function fetchOp(kernel: JsKernel) {
       method: request.method,
       headers: [...request.headers],
       body: bytes,
+      ...(streamed && request.body ? { stream: request.body } : {}),
     };
     for (let hops = 0; ; hops++) {
       const head = await send(hop, signal);
