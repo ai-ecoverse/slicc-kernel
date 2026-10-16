@@ -58,3 +58,27 @@ test('a threaded program sees its own creates, chmods, writes, times and removal
     'before ENOENT ENOENT\ncreated 0 3\nmode 0o644\nchmod 0o600\nwritten 5 5\nutime 1000000000\nremoved ENOENT\n'
   );
 });
+
+const DIR = [
+  'import os, threading, time',
+  'warm = threading.Thread(target=lambda: None)',
+  'warm.start(); warm.join()',
+  "os.makedirs('/tmp/D')",
+  "both = lambda: (os.lstat('/tmp/D').st_mtime_ns, os.stat('/tmp/D').st_mtime_ns)",
+  'seen = [both()]',
+  "for make in (lambda: open('/tmp/D/f', 'w').close(), lambda: os.mkdir('/tmp/D/sub'), lambda: os.symlink('/tmp/D/f', '/tmp/D/l')):",
+  '    time.sleep(0.05)',
+  '    make()',
+  '    seen.append(both())',
+  'print([(b[0] > a[0], b[1] > a[1]) for a, b in zip(seen, seen[1:])])',
+].join('\n');
+
+test('a threaded program sees its directory’s mtime move after it creates a file, a directory and a symlink in it (#774)', async (t) => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils', 'wasix-python']) await install(kernel, name);
+  await kernel.writeFile('/tmp/dir.py', DIR);
+  const r = await kernel.run(['python3', '/tmp/dir.py'], { cwd: '/tmp' });
+  assert.equal(r.stderr, '');
+  assert.equal(r.stdout, '[(True, True), (True, True), (True, True)]\n');
+});
