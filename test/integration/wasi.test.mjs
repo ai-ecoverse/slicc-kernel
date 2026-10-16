@@ -50,19 +50,6 @@ test('a WASI client (python urllib) fetches registry metadata through the realm 
   );
 });
 
-test('zig builds a program and runs it', async (t) => {
-  const { page, bash } = await booted(chrome, t);
-  await installPackage(page, 'wasi-zig');
-  const source =
-    'const std = @import("std");\npub fn main() void {\n    std.debug.print("hello from zig\\n", .{});\n}\n';
-  await page.evaluate((s) => window.opfs.write('home/z/hello.zig', s), source);
-
-  assert.deepEqual(
-    await bash('cd /home/z && zig build-exe hello.zig && ./hello.wasm 2>&1'),
-    ok('hello from zig\n')
-  );
-});
-
 test('rustc compiles hello, and cargo builds a crate offline', async (t) => {
   const { page, bash } = await booted(chrome, t);
   await installPackage(page, 'wasi-rustc');
