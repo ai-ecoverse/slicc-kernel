@@ -599,6 +599,14 @@ test('a sudo process crossing an untrusted link inside a tmpfs mount is refused 
   assert.equal(r.stdout, 'off 1\non 1\nmine\n', r.stderr);
 });
 
+test('a planted fix: echo prints the word it is given', async () => {
+  const kernel = await createNodeKernel();
+  for (const pkg of ['wasm-bash', 'wasm-coreutils']) await install(kernel, pkg);
+  const r = await kernel.run(['bash', '-c', 'echo planted']);
+  assert.equal(r.stdout, 'planted\n');
+  kernel.terminate();
+});
+
 test('a WASI process killed by SIGKILL keeps the bytes it wrote but never fsynced', async () => {
   const kernel = await createNodeKernel();
   for (const pkg of ['wasm-bash', 'wasm-coreutils', 'wasix-python']) await install(kernel, pkg);
