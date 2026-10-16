@@ -32,13 +32,25 @@ const PY = [
   '    time.sleep(0.01)',
   "print('api', os.path.exists('/tmp/api'))",
   "try:\n    os.readlink('/tmp/nd/a/b')\nexcept OSError as e:\n    print('readlink', e.strerror)",
+  "os.lstat('/tmp/nd/a/b')",
+  "print('relink', flush=True)",
+  'for _ in range(400):',
+  "    if os.path.exists('/tmp/relinked'): break",
+  '    time.sleep(0.01)',
+  "try:\n    print('relinked', os.readlink('/tmp/nd/a/b'))\nexcept OSError as e:\n    print('relinked', e.strerror)",
 ].join('\n');
 
 test('a WASI program sees names another process or the kernel API creates under paths it found missing, at once (#774)', async (t) => {
   const kernel = await createNodeKernel({ users: 'enforce' });
   t.after(() => kernel.terminate());
   for (const name of ['wasm-bash', 'wasm-coreutils', 'wasix-python']) await install(kernel, name);
-  const run = kernel.run(['python3', '-c', PY], { cwd: '/tmp' });
+  const relink = Promise.withResolvers();
+  const run = kernel.run(['python3', '-c', PY], {
+    cwd: '/tmp',
+    onStdout: (text) => {
+      if (text.includes('relink\n')) relink.resolve();
+    },
+  });
   for (let i = 0; i < 600; i++) {
     const asked = await kernel.readFile('/tmp/asked').then(
       () => true,
@@ -48,6 +60,9 @@ test('a WASI program sees names another process or the kernel API creates under 
     await new Promise((r) => setTimeout(r, 25));
   }
   await kernel.writeFile('/tmp/api', 'k');
+  await relink.promise;
+  await kernel.run(['bash', '-c', 'rm /tmp/nd/a/b && ln -s l /tmp/nd/a/b'], { cwd: '/' });
+  await kernel.writeFile('/tmp/relinked', '');
   const r = await run;
   assert.equal(r.stderr, '');
   assert.equal(
@@ -58,6 +73,8 @@ test('a WASI program sees names another process or the kernel API creates under 
       'api False',
       'api True',
       'readlink Invalid argument',
+      'relink',
+      'relinked l',
       '',
     ].join('\n')
   );

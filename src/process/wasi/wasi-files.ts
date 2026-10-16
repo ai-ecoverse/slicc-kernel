@@ -537,6 +537,7 @@ export function cachingBridge(
   const live = (miss: Miss, path: string) =>
     miss.until > now() &&
     (view === undefined || miss.gen === undefined || !view.changedSince(miss.gen, path).changed);
+  const seenAt = new Map<string, number>();
   const gone = (path: string): Miss | undefined => {
     for (let at = path.lastIndexOf('/'); at > 0; at = path.lastIndexOf('/', at - 1)) {
       const up = path.slice(0, at);
@@ -558,6 +559,7 @@ export function cachingBridge(
       const gen = view?.now();
       try {
         hit = get();
+        if (gen !== undefined && map === lstats) seenAt.set(path, gen);
       } catch (e) {
         hit = {
           error: e as Error,
@@ -623,7 +625,9 @@ export function cachingBridge(
     },
     readlink: (p) => {
       const known = blind ? undefined : (cache.fresh(), lstats.get(p));
-      if (known && !('until' in known) && !known.isSymbolicLink) {
+      const gen = seenAt.get(p);
+      const current = view !== undefined && gen !== undefined && !view.changedSince(gen, p).changed;
+      if (known && current && !('until' in known) && !known.isSymbolicLink) {
         throw syncError('EINVAL', `'${p}' is not a symbolic link`);
       }
       return bridge.readlink(p);
