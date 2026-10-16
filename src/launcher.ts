@@ -192,7 +192,12 @@ export interface ModuleUrl {
 export type ModuleUrlMaker = (source: string) => ModuleUrl;
 
 const MODULE_URLS = 16;
-const MODULE_URL_GRACE_MS = 60_000;
+
+interface HeldUrl {
+  made: ModuleUrl;
+  users: number;
+  evicted: boolean;
+}
 
 export function dataModuleUrl(source: string): ModuleUrl {
   const bytes = new TextEncoder().encode(source);
@@ -544,7 +549,8 @@ export class Launcher {
   private readonly base: KernelFs;
   private readonly createWorker: () => WasmWorkerLike;
   private readonly moduleUrl: ModuleUrlMaker | undefined;
-  private readonly moduleUrls = new Map<string, ModuleUrl>();
+  private readonly moduleUrls = new Map<string, HeldUrl>();
+  private readonly urlsInUse = new Map<string, HeldUrl>();
   private readonly modulesDir: string;
   private readonly appended: string[];
   private readonly reportedRoots = new Set<string>();
@@ -1442,17 +1448,38 @@ export class Launcher {
     if (known) {
       this.moduleUrls.delete(source);
       this.moduleUrls.set(source, known);
-      return known.url;
+      known.users++;
+      return known.made.url;
     }
-    const made = (this.moduleUrl ?? dataModuleUrl)(source);
-    this.moduleUrls.set(source, made);
+    const held: HeldUrl = {
+      made: (this.moduleUrl ?? dataModuleUrl)(source),
+      users: 1,
+      evicted: false,
+    };
+    this.moduleUrls.set(source, held);
+    this.urlsInUse.set(held.made.url, held);
     for (const [old, entry] of this.moduleUrls) {
       if (this.moduleUrls.size <= MODULE_URLS) break;
       this.moduleUrls.delete(old);
-      const later = setTimeout(() => entry.revoke(), MODULE_URL_GRACE_MS);
-      (later as { unref?: () => void }).unref?.();
+      entry.evicted = true;
+      this.releaseUrl(entry);
     }
-    return made.url;
+    return held.made.url;
+  }
+
+  private heldUrl(program: Program): () => void {
+    const held = program.abi === 'js' && program.url ? this.urlsInUse.get(program.url) : undefined;
+    if (!held) return () => {};
+    return () => {
+      held.users--;
+      this.releaseUrl(held);
+    };
+  }
+
+  private releaseUrl(held: HeldUrl): void {
+    if (!held.evicted || held.users > 0) return;
+    if (this.urlsInUse.get(held.made.url) === held) this.urlsInUse.delete(held.made.url);
+    held.made.revoke();
   }
 
   private async names(path: string, module: WebAssembly.Module): Promise<string | undefined> {
@@ -1526,7 +1553,15 @@ export class Launcher {
       await req.fds.closeAll();
       throw err;
     }
-    return this.start({ ...req, cwd, program, argv0: target.argv0, args, env });
+    const done = this.heldUrl(program);
+    try {
+      const handle = this.start({ ...req, cwd, program, argv0: target.argv0, args, env });
+      void handle.exited.finally(done);
+      return handle;
+    } catch (err) {
+      done();
+      throw err;
+    }
   }
 
   groupSession(pgid: number): number | undefined {
