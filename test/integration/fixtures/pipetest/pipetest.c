@@ -1,13 +1,24 @@
 #include <errno.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 
 static volatile sig_atomic_t handled;
+static pthread_t handled_on;
 static void on_pipe(int sig) {
   (void)sig;
   handled++;
+  handled_on = pthread_self();
+}
+
+static void *writer(void *arg) {
+  int w = *(int *)arg;
+  ssize_t n = write(w, "x", 1);
+  printf("thread: %zd %s, handled %d, %s\n", n, n < 0 ? strerror(errno) : "written", (int)handled,
+         handled && pthread_equal(handled_on, pthread_self()) ? "on the writing thread" : "elsewhere");
+  return NULL;
 }
 
 static int broken(void) {
@@ -31,6 +42,13 @@ int main(int argc, char **argv) {
   setvbuf(stdout, NULL, _IONBF, 0);
   const char *mode = argc > 1 ? argv[1] : "default";
   int w = broken();
+  if (!strcmp(mode, "thread")) {
+    signal(SIGPIPE, on_pipe);
+    pthread_t t;
+    pthread_create(&t, NULL, writer, &w);
+    pthread_join(t, NULL);
+    return 0;
+  }
   if (!strcmp(mode, "ignore")) {
     signal(SIGPIPE, SIG_IGN);
     struct sigaction sa;
@@ -39,6 +57,12 @@ int main(int argc, char **argv) {
   } else if (!strcmp(mode, "handler")) {
     signal(SIGPIPE, on_pipe);
   } else if (!strcmp(mode, "blocked")) {
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGPIPE);
+    sigprocmask(SIG_BLOCK, &set, NULL);
+  } else if (!strcmp(mode, "ignblocked")) {
+    signal(SIGPIPE, SIG_IGN);
     sigset_t set;
     sigemptyset(&set);
     sigaddset(&set, SIGPIPE);

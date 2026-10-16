@@ -215,6 +215,8 @@ export class WasiHost {
 
   sigmask: WasiSigmask | undefined;
 
+  tid = 1;
+
   linkedTls: (() => Array<[number, number]>) | undefined;
 
   threadEntry: ThreadEntry | undefined;
@@ -1071,14 +1073,13 @@ export class WasiHost {
   private brokenPipe(): void {
     let action: unknown;
     try {
-      action = this.o.kernel.call({ op: 'proc-kill-self', sig: SIG.PIPE, probe: true });
+      action = this.o.kernel.call({ op: 'proc-kill-self', sig: SIG.PIPE, dry: true });
     } catch {
       action = 'terminate';
     }
-    if (action !== 'terminate') return;
-    const mask = this.sigmask;
-    if (!mask?.blocks(SIG.PIPE)) throw new WasiExit(SIGPIPE_EXIT);
-    this.o.kernel.call({ op: 'thread-kill', tid: mask.tid, sig: SIG.PIPE });
+    if (action === 'ignore') return;
+    if (action === 'terminate' && !this.sigmask?.blocks(SIG.PIPE)) throw new WasiExit(SIGPIPE_EXIT);
+    this.o.kernel.call({ op: 'thread-kill', tid: this.tid, sig: SIG.PIPE });
   }
 
   private read(fd: number, max: number): Uint8Array {

@@ -219,7 +219,7 @@ export type WasmSyscall =
   | SudoCall
   | RunRequest
   | { op: 'proc-exit'; status: number }
-  | { op: 'proc-kill-self'; sig: number; target?: number; probe?: boolean }
+  | { op: 'proc-kill-self'; sig: number; target?: number; probe?: boolean; dry?: boolean }
   | { op: 'proc-fork'; state: ForkState; restart?: true }
   | { op: 'proc-kill'; pid: number; sig: number }
   | { op: 'thread-kill'; tid: number; sig: number }
@@ -744,6 +744,18 @@ export class WasmProcess {
 
   private sendDeath(target: number, sig: number): void {
     void Promise.resolve(this.options.kill?.(target, sig)).catch(() => undefined);
+  }
+
+  private selfKill(req: Extract<WasmSyscall, { op: 'proc-kill-self' }>): Promise<SyncFsResult> {
+    if (req.dry) return Promise.resolve(this.spares(req.sig));
+    return this.killSelf(req.sig, req.target, req.probe);
+  }
+
+  private spares(sig: number): SyncFsResult {
+    const { caught, ignored } = this.signalMasks();
+    const bit = isSignal(sig) ? sigbit(sig) : 0;
+    const answer = (ignored & bit) !== 0 ? 'ignore' : (caught & bit) !== 0 ? 'spare' : 'terminate';
+    return { ok: true, kind: 'json', json: answer };
   }
 
   private async killSelf(sig: number, target?: number, probe?: boolean): Promise<SyncFsResult> {
@@ -1805,7 +1817,7 @@ export class WasmProcess {
         this.options.exitNow(req.status & 0xff);
         return DYING;
       case 'proc-kill-self':
-        return this.killSelf(req.sig, req.target, req.probe);
+        return this.selfKill(req);
       case 'proc-identity':
         return { ok: true, kind: 'json', json: (await this.options.identity?.()) ?? null };
       case 'proc-exec': {
