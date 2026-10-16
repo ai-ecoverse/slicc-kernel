@@ -36,8 +36,8 @@ async function wasmOf(wabt, text) {
   return bytes;
 }
 
-async function kernelWith(t, variants) {
-  const kernel = await createNodeKernel({ users: 'off' });
+async function kernelWith(t, variants, options = { users: 'off' }) {
+  const kernel = await createNodeKernel(options);
   t.after(() => kernel.terminate());
   for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
   const wabt = await wabtInit();
@@ -131,6 +131,10 @@ test('a malformed variants block is ignored with one warning per command, and th
   for (const variants of [
     { env: { PYTHON_FORK: 'true' }, wasm: 'bin/fork.wasm' },
     [{ env: { PYTHON_FORK: true }, wasm: 'bin/fork.wasm' }],
+    [
+      { env: { PYTHON_FORK: 'true' }, wasm: 'bin/fork.wasm' },
+      { env: { SECOND: 'yes' }, wasm: '../x.wasm' },
+    ],
   ]) {
     warned.length = 0;
     const { run } = await kernelWith(t, variants);
@@ -142,4 +146,25 @@ test('a malformed variants block is ignored with one warning per command, and th
       warned.join('\n')
     );
   }
+});
+
+test("under enforce, sudo's environment reset drops the caller's variable, so the default runs, and sudo env sets it for the variant", async (t) => {
+  const { kernel } = await kernelWith(t, VARIANTS, { users: 'enforce', approve: () => 'once' });
+  await kernel.users.add({ name: 'cone', groups: ['sudo'] });
+  const root = (script) => kernel.run(['bash', '-c', script], { cwd: '/' });
+  await root(
+    "printf 'NOPASSWD cone Cmnd *\\n' > /etc/sudoers.d/cone && chmod 440 /etc/sudoers.d/cone"
+  );
+  const cone = (script) =>
+    kernel.run(['bash', '-c', script], { cwd: '/', user: 'cone', env: { PATH: '/usr/bin:/bin' } });
+  assert.deepEqual(await cone('PYTHON_FORK=true pick; PYTHON_FORK=true sudo pick'), {
+    status: 0,
+    stdout: 'fork\nplain\n',
+    stderr: '',
+  });
+  assert.deepEqual(await root('PYTHON_FORK=true sudo pick; sudo env PYTHON_FORK=true pick'), {
+    status: 0,
+    stdout: 'plain\nfork\n',
+    stderr: '',
+  });
 });
