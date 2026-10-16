@@ -222,6 +222,7 @@ jobs:
           (cd "$tree" && npm ci --no-audit --no-fund && npx playwright-core install --no-shell chromium)
           mkdir -p "$RUNNER_TEMP/tgz"
           if [ "$ref" = "$COMMIT" ]; then
+            mkdir -p "$RUNNER_TEMP/planted"
             (cd "$tree" && npm pack --silent --pack-destination "$RUNNER_TEMP/planted")
             mv "$RUNNER_TEMP"/planted/*.tgz "$RUNNER_TEMP/tgz/ai-ecoverse-slicc-kernel-$tag.tgz"
           else
@@ -390,6 +391,8 @@ jobs:
           EXECUTION: ${{ steps.review.outputs.execution_file }}
         run: |
           cp "${EXECUTION:-/dev/null}" "$RUNNER_TEMP/evidence/claude-turns.json" 2> /dev/null || true
+          mkdir -p "$RUNNER_TEMP/cert-review"
+          cp "$RUNNER_TEMP/evidence/findings.json" "$RUNNER_TEMP/cert-review/findings.json" 2> /dev/null || true
           cp -r "$RUNNER_TEMP/cert-review" "$RUNNER_TEMP/evidence/" 2> /dev/null || true
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -399,7 +402,7 @@ jobs:
           path: |
             ${{ runner.temp }}/cert-review/verdict.json
             ${{ runner.temp }}/cert-review/comment.md
-            ${{ runner.temp }}/evidence/findings.json
+            ${{ runner.temp }}/cert-review/findings.json
           if-no-files-found: ignore
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -453,7 +456,7 @@ jobs:
         id: record
         run: |
           mkdir -p "$RUNNER_TEMP/cert-review"
-          findings=$(find "$RUNNER_TEMP/cert-review" -name findings.json | head -1)
+          findings="$RUNNER_TEMP/cert-review/findings.json"
           if node tools/cert-review/record.mjs --version "$VERSION" --review "$RUNNER_TEMP/cert-review" \
             --out "$RUNNER_TEMP/record" --run "$RUN_URL" --repo "$GH_REPO" --commit "$PLAN_COMMIT" \
             --findings "$findings" ${PLANTED:+--planted "$PLANTED"}; then
