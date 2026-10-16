@@ -33,6 +33,8 @@ const S_ISGID = 0o2000;
 const READ_ATTEMPTS = 3;
 const MAX_LINKS = 40;
 const CHECK_MS = 1000;
+const ABSENT_MS = 2;
+const ABSENT_NAMES = 4096;
 const FILE_HANDLES = 4096;
 const STALE: ReadonlySet<string> = new Set(['NotFoundError', 'TypeMismatchError']);
 const EXECUTABLE = /\/node_modules\/(?:@[^/]+\/)?[^/]+\/bin\//;
@@ -237,6 +239,7 @@ export class OpfsFs implements KernelFs {
   private readonly meta: MetaStore;
   private readonly dirs = new PathMap<FileSystemDirectoryHandle>();
   private readonly files = new PathMap<FileSystemFileHandle>();
+  private readonly absent = new PathMap<number>();
   private readonly snapshots = new WeakMap<FileSystemFileHandle, File>();
   private readonly found = new WeakMap<FileSystemFileHandle, number>();
   private readonly checked = new WeakMap<FileSystemDirectoryHandle, number>();
@@ -525,6 +528,12 @@ export class OpfsFs implements KernelFs {
   private forget(path: string): void {
     this.dirs.deleteTree(path);
     this.files.deleteTree(path);
+    this.absent.deleteTree(path);
+  }
+
+  private missed(path: string): void {
+    if (this.absent.size >= ABSENT_NAMES) this.absent.clear();
+    this.absent.set(path, performance.now());
   }
 
   private remember(path: string, handle: Handle, looked = false): Handle {
@@ -583,8 +592,14 @@ export class OpfsFs implements KernelFs {
         this.snapshots.delete(cached);
       }
     }
+    const kept = this.dirs.get(path);
+    if (kept && (await this.current(path, kept))) return kept;
+    const gone = this.absent.get(path);
+    if (gone !== undefined && performance.now() - gone < ABSENT_MS) {
+      throw translate({ name: 'NotFoundError' }, path);
+    }
     const [dir, name] = await this.parent(path);
-    const known = this.dirs.has(path);
+    const known = kept !== undefined;
     return this.inDir(dir, async (parent): Promise<Handle> => {
       const [first, second] = known
         ? (['directory', 'file'] as const)
@@ -596,7 +611,9 @@ export class OpfsFs implements KernelFs {
       }
       return this.remember(path, await this.child(parent, name, second), true);
     }).catch((err) => {
-      throw translate(err, path);
+      const error = translate(err, path) as Error & { code?: string };
+      if (error.code === 'ENOENT') this.missed(path);
+      throw error;
     });
   }
 
@@ -754,6 +771,7 @@ export class OpfsFs implements KernelFs {
 
   private touch(now: number, ...dirs: string[]): void {
     for (const dir of dirs) {
+      this.absent.deleteTree(dir);
       this.dirTimes.set(dir, now);
       this.dirDirty.add(dir);
     }
