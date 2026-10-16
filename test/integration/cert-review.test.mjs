@@ -585,3 +585,23 @@ test('every release run has its own concurrency group, so a newer release never 
     "cert-review-${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || format('{0}{1}', inputs.version, inputs.planted) }}"
   );
 });
+
+test('review, record and publish never start once the run is cancelled: they use !cancelled(), never always()', async () => {
+  const workflow = await readFile(
+    new URL('../../.github/workflows/cert-review.yml', import.meta.url),
+    'utf8'
+  );
+  const jobs = workflow.split(/^jobs:$/m)[1];
+  for (const name of ['review', 'record', 'publish']) {
+    const body =
+      new RegExp(`^  ${name}:\\n([\\s\\S]*?)(?=^  [a-z-]+:$|(?![\\s\\S]))`, 'm').exec(jobs)?.[1] ??
+      '';
+    assert.ok(body.length > 0, `${name} job`);
+    assert.doesNotMatch(body, /always\(\)/, `${name} uses always()`);
+    assert.match(
+      body,
+      /^ {4}if: (\$\{\{ |>-\n\s+)!cancelled\(\)/m,
+      `${name} starts with !cancelled()`
+    );
+  }
+});
