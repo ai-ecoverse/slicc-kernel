@@ -31,6 +31,13 @@ function failed(err: unknown): TypeError {
   return new TypeError('websocket failed', { cause: err });
 }
 
+function openError(err: unknown): unknown {
+  if (!(err instanceof JsCallError) || err.detail === undefined) return err;
+  const prefix = `${err.code}: `;
+  const message = err.detail.startsWith(prefix) ? err.detail.slice(prefix.length) : err.detail;
+  return Object.assign(new Error(message), { code: err.code });
+}
+
 function socketUrl(input: string | URL): string {
   const url = new URL(input);
   if (url.protocol === 'http:') url.protocol = 'ws:';
@@ -78,7 +85,7 @@ export function websocketOp(kernel: JsKernel) {
       protocol = ((r.ok && r.kind === 'json' ? r.json : {}) as { protocol: string }).protocol;
     } catch (err) {
       await free();
-      throw signal.aborted ? signal.reason : failed(err);
+      throw signal.aborted ? signal.reason : failed(openError(err));
     }
 
     let settle!: (close: JsWebSocketClose) => void;

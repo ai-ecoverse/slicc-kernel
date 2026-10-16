@@ -13,10 +13,13 @@ import { type AsyncSabTransport, changed, type WaitAsyncLike } from './async-sab
 export class JsCallError extends Error {
   readonly code: string;
 
-  constructor(code: string, what: string) {
+  readonly detail: string | undefined;
+
+  constructor(code: string, what: string, detail?: string) {
     super(`${what}: ${code}`);
     this.name = 'JsCallError';
     this.code = code;
+    this.detail = detail;
   }
 }
 
@@ -46,7 +49,11 @@ export function modeOf(mode: unknown): number {
 export function callError(result: { errno: string; message: string }, op: string): JsCallError {
   const { errno, message } = result;
   const detailed = typeof message === 'string' && message !== errno && DETAILED.has(op);
-  return new JsCallError(errno, detailed ? `${op}: ${message}` : op);
+  return new JsCallError(
+    errno,
+    detailed ? `${op}: ${message}` : op,
+    detailed ? message : undefined
+  );
 }
 
 function untilAborted(work: Promise<void>, signal: AbortSignal | undefined): Promise<void> {
