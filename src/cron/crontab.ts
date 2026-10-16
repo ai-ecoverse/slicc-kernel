@@ -74,11 +74,10 @@ export class Crontabs {
       await fs.mkdir(SPOOL_DIR, { recursive: true });
       if (owners) await fs.chown?.(SPOOL_DIR, { uid: 0, gid: 0, mode: 0o700, follow: false });
     }
-    const fresh = `${path}.new`;
+    const fresh = `${SPOOL_DIR}/.${target.name}.${crypto.randomUUID()}.new`;
     const owner: NewOwner | undefined = owners
       ? { uid: target.uid, gid: target.gid, mode: 0o600 }
       : undefined;
-    await fs.rm(fresh, { force: true });
     await fs.writeFile(fresh, text, owner);
     await fs.rename(fresh, path);
     return { text: '' };

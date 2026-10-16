@@ -224,3 +224,37 @@ test('crontab works the same with users off, and -u still needs root', async (t)
   );
   assert.equal((await as('root', 'crontab -u cone -l')).stdout, '@daily echo off\n');
 });
+
+test('a user whose name ends in .new has a table of their own that runs', async (t) => {
+  const { kernel, clock, as } = await boot(t);
+  await kernel.users.add({ name: 'cone.new' });
+  assert.equal(
+    (await as('cone', 'crontab -', { stdin: '* * * * * echo cone >> who\n' })).status,
+    0
+  );
+  assert.equal(
+    (await as('cone.new', 'crontab -', { stdin: '* * * * * echo new >> who\n' })).status,
+    0
+  );
+  assert.equal((await as('cone', 'crontab -l')).stdout, '* * * * * echo cone >> who\n');
+  assert.equal((await as('cone.new', 'crontab -l')).stdout, '* * * * * echo new >> who\n');
+  assert.equal(
+    (await as('root', 'ls -a /var/spool/cron/crontabs')).stdout,
+    '.\n..\ncone\ncone.new\n'
+  );
+  await delay(150);
+  await clock.flush();
+  clock.advance(60_000);
+  const read = (path) =>
+    kernel.readFile(path).then(
+      (b) => new TextDecoder().decode(b),
+      () => undefined
+    );
+  let both;
+  for (let i = 0; i < 100 && !both; i++) {
+    await delay(50);
+    const [a, b] = [await read('/home/cone/who'), await read('/home/cone.new/who')];
+    if (a && b) both = [a, b];
+  }
+  assert.deepEqual(both, ['cone\n', 'new\n']);
+});
