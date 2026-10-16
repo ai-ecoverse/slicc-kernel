@@ -24,6 +24,7 @@ import {
   WHENCE,
   wasiErrnoOf,
 } from './wasi-abi.ts';
+import { CredCache } from './wasi-cred.ts';
 import {
   CLIPBOARD_PATH,
   deviceOf,
@@ -78,6 +79,8 @@ export interface WasiHostOptions {
   }>;
 
   shared?: Int32Array;
+
+  credGen?: Int32Array;
 
   forked?: { fds: readonly WasiForkFd[]; cloexec: readonly number[] };
 
@@ -187,6 +190,7 @@ function kernelFiletype(kind: string): { filetype: number; seeks: boolean } {
 export class WasiHost {
   readonly mem = new WasiMemory();
   readonly fds: WasiFds;
+  private readonly creds: CredCache;
   private readonly started = performance.now();
   private cache: Record<string, WasiFunction> | undefined;
 
@@ -236,6 +240,10 @@ export class WasiHost {
     this.o = { ...o, kernel: { sys, call } };
     this.startCwd = o.cwd;
     this.fds = new WasiFds(this.o.kernel, o.fs);
+    this.creds = new CredCache(
+      () => this.o.kernel.call({ op: 'proc-cred' }) as Cred,
+      o.credGen ?? o.shared
+    );
     if (o.shared) this.fds.share(o.shared, true);
     else if (o.forked) this.fds.restore(o.forked.fds, o.forked.cloexec);
     else this.fds.setup(o.cwd, o.inherited ?? [], o.preopenRoot === true);
@@ -280,7 +288,7 @@ export class WasiHost {
       own.call(this.o.fs, path, idOf(uid), idOf(gid), follow, handle);
     };
     const caller = (): [number, number] => {
-      const cred = this.o.kernel.call({ op: 'proc-cred' }) as Cred;
+      const cred = this.creds.get();
       return [cred.euid, cred.egid];
     };
     const owner = (st: { uid?: number; gid?: number } | undefined, out: number): void => {
@@ -412,7 +420,7 @@ export class WasiHost {
       umount2: (tp: number, tl: number, flags: number) =>
         void this.o.kernel.call({ op: 'umount', target: path(tp, tl), flags }),
       cred_get: (out: number) => {
-        const cred = this.o.kernel.call({ op: 'proc-cred' }) as Cred;
+        const cred = this.creds.get();
         const view = mem.view();
         view.getUint32(out + 20, true);
         IDS.forEach((key, i) => void view.setUint32(out + i * 4, cred[key], true));
@@ -422,7 +430,7 @@ export class WasiHost {
         IDS.forEach((key, i) => {
           if (ids[i] !== -1) change[key] = (ids[i] as number) >>> 0;
         });
-        void this.o.kernel.call({ op: 'proc-setcred', change });
+        void this.creds.change(() => this.o.kernel.call({ op: 'proc-setcred', change }) as Cred);
       },
       ...semImports(this),
       ...lockImports({
@@ -448,7 +456,7 @@ export class WasiHost {
         },
       }),
       groups_get: (buf: number, cap: number, count: number) => {
-        const { groups } = this.o.kernel.call({ op: 'proc-cred' }) as Cred;
+        const { groups } = this.creds.get();
         if (cap !== 0 && cap < groups.length) throw new WasiError('EINVAL');
         const shown = cap === 0 ? [] : groups;
         const view = mem.view();
@@ -461,7 +469,9 @@ export class WasiHost {
         if (n < 0 || n > MAX_GROUPS) throw new WasiError('EINVAL');
         const view = mem.view();
         const groups = Array.from({ length: n }, (_, i) => view.getUint32(buf + i * 4, true));
-        void this.o.kernel.call({ op: 'proc-setcred', change: { groups } });
+        void this.creds.change(
+          () => this.o.kernel.call({ op: 'proc-setcred', change: { groups } }) as Cred
+        );
       },
       sigaction_set: (sig: number, disposition: number, flags: number) => {
         if (!this.signals) return E.NOSYS;
@@ -511,7 +521,8 @@ export class WasiHost {
           lo,
           timeout,
           (set) => void this.o.kernel.call({ op: 'sig-waiting', tid: mask.tid, set }),
-          (sig) => void mem.view().setUint32(out, sig, true)
+          (sig) => void mem.view().setUint32(out, sig, true),
+          this.entered
         );
       },
       sigpending_get: (out: number) => {
