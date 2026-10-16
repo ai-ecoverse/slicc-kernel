@@ -437,19 +437,12 @@ export function verdictLine({
   review,
   incomplete,
   certified,
-  attempt = 1,
 }) {
   const tag = `${name}@${version}${planted ? ` (planted ${planted})` : ''}`;
   if (problems.length === 0 && !incomplete && review?.verdict === 'certified') {
     return { state: 'success', line: certified };
   }
   if (incomplete && problems.length === 0) {
-    if (Number(attempt) > 1) {
-      return {
-        state: 'error',
-        line: `cert-ci: NOT REVIEWED ${tag}: still incomplete after a retry (${incomplete.named}); not published (${ci})`,
-      };
-    }
     return {
       state: 'error',
       line: `cert-ci: INCOMPLETE ${tag} (${incomplete.named}; ${incomplete.remedy}) (${ci})`,
@@ -566,31 +559,13 @@ export function previousPublished(tags, published, version) {
     .at(-1);
 }
 
-export function withMissing(incomplete, reasons) {
-  const more = (reasons ?? []).filter(Boolean);
-  if (more.length === 0) return incomplete;
-  const named = [incomplete?.named, ...more].filter(Boolean).join('; ');
-  return { files: incomplete?.files ?? [], named, remedy: 're-run the failed jobs' };
-}
-
 export function jobsEvidence(text, incomplete) {
   const failed = String(text ?? '')
     .split(',')
     .map((x) => x.trim().split('='))
     .filter(([job, result]) => job && result !== 'success')
     .map(([job, result]) => `the ${job} job ended ${result || 'without a result'}`);
-  return withMissing(incomplete, failed);
-}
-
-export function retryDecision({ attempt, state, active }) {
-  if (Number(attempt) !== 1)
-    return { retry: false, why: `attempt ${attempt}: only attempt 1 is retried` };
-  if (state !== 'error')
-    return { retry: false, why: `the cert-review status is ${state || 'missing'}, not error` };
-  if (active > 0)
-    return {
-      retry: false,
-      why: `${active} newer Release run(s) waiting or running; a re-run would cancel one`,
-    };
-  return { retry: true, why: 'INCOMPLETE on attempt 1: re-run the failed jobs once' };
+  if (failed.length === 0) return incomplete;
+  const named = [incomplete?.named, ...failed].filter(Boolean).join('; ');
+  return { files: incomplete?.files ?? [], named, remedy: 're-run the failed jobs' };
 }

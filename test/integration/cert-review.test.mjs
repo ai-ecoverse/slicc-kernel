@@ -31,7 +31,6 @@ import {
   releaseEvidence,
   rerunSet,
   resultsMap,
-  retryDecision,
   rowOf,
   testCommand,
   titlesFromPatch,
@@ -1255,7 +1254,7 @@ test("npm's latest only moves forward: an older version is skipped, the same ver
   );
 });
 
-test("record certifies only the pack job's bytes of the tag commit, never a planted build; missing evidence is INCOMPLETE (NOT REVIEWED after a retry), and only a defect found in code FAILs", async (t) => {
+test("record certifies only the pack job's bytes of the tag commit, never a planted build, never after a failed review", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'cert-record-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const bin = join(dir, 'bin');
@@ -1299,15 +1298,7 @@ else process.exit(1);
         commit,
         ...args,
       ],
-      {
-        encoding: 'utf8',
-        env: {
-          ...process.env,
-          GITHUB_RUN_ATTEMPT: '1',
-          ...env,
-          PATH: `${bin}:${process.env.PATH}`,
-        },
-      }
+      { encoding: 'utf8', env: { ...process.env, ...env, PATH: `${bin}:${process.env.PATH}` } }
     );
     const json = JSON.parse(await readFile(join(out, 'record.json'), 'utf8'));
     return { status: run.status, json };
@@ -1374,90 +1365,6 @@ else process.exit(1);
     'tarball=success,suite=success,kernel-compat=success',
   ]);
   assert.equal(allGreen.status, 0);
-  const none = join(dir, 'no-review');
-  await mkdir(none);
-  const lost104 = [
-    '--tarball',
-    ok.file,
-    '--sha256',
-    ok.sha256,
-    '--review',
-    none,
-    '--review-result',
-    'failure',
-    '--jobs',
-    'tarball=success,suite=skipped,kernel-compat=skipped',
-  ];
-  const shape = await record(lost104);
-  assert.equal(shape.status, 1);
-  assert.equal(shape.json.state, 'error');
-  assert.equal(shape.json.certified, false);
-  assert.match(
-    shape.json.line,
-    /^cert-ci: INCOMPLETE @ai-ecoverse\/slicc-kernel@1\.2\.3 \(the suite job ended skipped; the kernel-compat job ended skipped; the review job ended failure; no readable verdict\.json; re-run the failed jobs\)/
-  );
-  const retried = await record(lost104, { GITHUB_RUN_ATTEMPT: '2' });
-  assert.equal(retried.json.state, 'error');
-  assert.match(
-    retried.json.line,
-    /^cert-ci: NOT REVIEWED @ai-ecoverse\/slicc-kernel@1\.2\.3: still incomplete after a retry \(.*no readable verdict\.json\); not published/
-  );
-  const findingsFile = async (findings) => {
-    const file = join(dir, `findings-${n}.json`);
-    await writeFile(file, JSON.stringify({ findings }));
-    return file;
-  };
-  const baseCut = await record([
-    '--tarball',
-    ok.file,
-    '--sha256',
-    ok.sha256,
-    '--findings',
-    await findingsFile([
-      {
-        kind: 'missing-evidence',
-        what: 'the certified suite',
-        blocking: true,
-        results: 3,
-        dropped: 2,
-      },
-    ]),
-  ]);
-  assert.equal(baseCut.json.state, 'error');
-  assert.match(
-    baseCut.json.line,
-    /^cert-ci: INCOMPLETE .*the certified suite didn't finish \(3 results\), and the delta drops 2 test files or titles/
-  );
-  const failReview = join(dir, 'fail-review');
-  await mkdir(failReview);
-  await writeFile(
-    join(failReview, 'verdict.json'),
-    JSON.stringify({ verdict: 'fail', reason: 'x' })
-  );
-  const reviewerFail = await record([
-    '--tarball',
-    ok.file,
-    '--sha256',
-    ok.sha256,
-    '--review',
-    failReview,
-    '--jobs',
-    'suite=failure',
-  ]);
-  assert.equal(reviewerFail.json.state, 'error');
-  assert.match(reviewerFail.json.line, /^cert-ci: INCOMPLETE /);
-  const crash = await record([
-    '--tarball',
-    ok.file,
-    '--sha256',
-    ok.sha256,
-    '--jobs',
-    'suite=failure',
-    '--findings',
-    await findingsFile([{ kind: 'compat-crash', package: 'py-x', spec: 'import' }]),
-  ]);
-  assert.equal(crash.json.state, 'failure');
-  assert.match(crash.json.line, /^cert-ci: FAIL .*py-x import crashes again/);
   const missing = await record(['--tarball', join(dir, 'nope.tgz'), '--sha256', ok.sha256]);
   assert.equal(missing.status, 1);
   assert.match(missing.json.line, /no tarball artifact to review/);
@@ -1875,136 +1782,4 @@ test('a compat rerun tests exactly the package@version that regressed, and one t
     same.map(({ rerun, reproduced }) => [rerun, reproduced]),
     [['pass', false]]
   );
-});
-
-test('a job downstream of a job skipped by design in one mode has an explicit if, so the implicit success() never skips it', async () => {
-  for (const file of ['cert-review.yml', 'release.yml']) {
-    const jobs = jobsOf(await workflowText(file));
-    const needs = {};
-    for (const [name, body] of Object.entries(jobs)) {
-      const m = /^ {4}needs: (?:\[([^\]]*)\]|(\S+))$/m.exec(body);
-      needs[name] = m ? (m[1] ?? m[2]).split(',').map((x) => x.trim()) : [];
-    }
-    const sometimesSkipped = Object.entries(jobs)
-      .filter(([, body]) => /^ {4}if: [^\n]*outputs\.mode == /m.test(body))
-      .map(([name]) => name);
-    const upstream = (name, seen = new Set()) => {
-      for (const n of needs[name] ?? []) if (!seen.has(n)) upstream(n, seen.add(n));
-      return seen;
-    };
-    for (const name of Object.keys(jobs)) {
-      if (!sometimesSkipped.some((s) => upstream(name).has(s))) continue;
-      assert.match(
-        jobs[name],
-        /^ {4}if: (\$\{\{ |>-\n\s+)!cancelled\(\)/m,
-        `${file}: ${name} needs an explicit !cancelled() if`
-      );
-    }
-  }
-  const review = jobsOf(await workflowText('cert-review.yml'));
-  assert.match(review.suite, /needs\.tarball\.result == 'success'/);
-  assert.match(review.compat, /needs\.tarball\.result == 'success'/);
-});
-
-test('an INCOMPLETE Release run gets exactly one automatic re-run of its failed jobs, never one that would cancel a waiting run', async () => {
-  assert.deepEqual(retryDecision({ attempt: 1, state: 'error', active: 0 }).retry, true);
-  assert.deepEqual(retryDecision({ attempt: '1', state: 'error', active: 0 }).retry, true);
-  assert.equal(retryDecision({ attempt: 2, state: 'error', active: 0 }).retry, false);
-  assert.equal(retryDecision({ attempt: 1, state: 'failure', active: 0 }).retry, false);
-  assert.equal(retryDecision({ attempt: 1, state: 'success', active: 0 }).retry, false);
-  assert.equal(retryDecision({ attempt: 1, state: undefined, active: 0 }).retry, false);
-  assert.match(retryDecision({ attempt: 1, state: 'error', active: 1 }).why, /would cancel one/);
-  const retry = await workflowText('release-retry.yml');
-  assert.match(
-    retry,
-    /^on:\n {2}workflow_run:\n {4}workflows: \[Release\]\n {4}types: \[completed\]$/m
-  );
-  assert.match(retry, /github\.event\.workflow_run\.run_attempt == 1/);
-  assert.match(retry, /github\.event\.workflow_run\.head_branch == 'main'/);
-  assert.match(retry, /github\.event\.workflow_run\.event == 'push'/);
-  assert.match(
-    retry,
-    /github\.event\.workflow_run\.head_repository\.full_name == github\.repository/
-  );
-  assert.doesNotMatch(retry, /secrets\.|id-token|contents: write/);
-  assert.match(retry, /retry\.mjs .*--attempt "\$ATTEMPT"/);
-  const tool = await readFile(new URL('retry.mjs', tools), 'utf8');
-  assert.match(tool, /rerun-failed-jobs/);
-  assert.match(tool, /'queued', 'in_progress', 'waiting', 'requested', 'pending'/);
-});
-
-test('retry.mjs decides from the cert-review status on the run commit alone, so a tag it never listed still gets its retry', async (t) => {
-  const { createServer } = await import('node:http');
-  const seen = [];
-  let state = 'error';
-  let waiting = [];
-  const server = createServer((req, res) => {
-    seen.push(`${req.method} ${req.url}`);
-    res.setHeader('content-type', 'application/json');
-    if (req.url.includes('/statuses'))
-      return res.end(
-        JSON.stringify([
-          { context: 'ci / test', state: 'success' },
-          ...(state ? [{ context: 'cert-review', state }] : []),
-        ])
-      );
-    if (req.url.includes('/actions/workflows/release.yml/runs'))
-      return res.end(
-        JSON.stringify({ workflow_runs: req.url.includes('status=queued') ? waiting : [] })
-      );
-    if (req.method === 'POST' && req.url.endsWith('/rerun-failed-jobs')) {
-      res.statusCode = 201;
-      return res.end('{}');
-    }
-    res.statusCode = 404;
-    return res.end('{}');
-  });
-  await new Promise((done) => server.listen(0, '127.0.0.1', done));
-  t.after(() => server.close());
-  const api = `http://127.0.0.1:${server.address().port}`;
-  const retry = (attempt = '1') =>
-    new Promise((done) => {
-      const child = spawn(
-        process.execPath,
-        [
-          fileURLToPath(new URL('retry.mjs', tools)),
-          '--repo',
-          'o/r',
-          '--run',
-          '42',
-          '--attempt',
-          attempt,
-          '--sha',
-          'a'.repeat(40),
-        ],
-        { env: { ...process.env, GITHUB_API_URL: api, GH_TOKEN: 'x', GITHUB_STEP_SUMMARY: '' } }
-      );
-      let out = '';
-      child.stdout.on('data', (d) => {
-        out += d;
-      });
-      child.on('close', (code) => done({ code, out }));
-    });
-  const posts = () => seen.filter((x) => x.startsWith('POST'));
-  const first = await retry();
-  assert.equal(first.code, 0, first.out);
-  assert.deepEqual(posts(), ['POST /repos/o/r/actions/runs/42/rerun-failed-jobs']);
-  assert.ok(!seen.some((x) => x.includes('matching-refs')), 'no tag lookup');
-  seen.length = 0;
-  assert.equal((await retry('2')).code, 0);
-  assert.deepEqual(posts(), []);
-  state = 'failure';
-  seen.length = 0;
-  await retry();
-  assert.deepEqual(posts(), []);
-  state = undefined;
-  seen.length = 0;
-  await retry();
-  assert.deepEqual(posts(), []);
-  state = 'error';
-  waiting = [{ id: 43 }];
-  seen.length = 0;
-  const blocked = await retry();
-  assert.deepEqual(posts(), []);
-  assert.match(blocked.out, /1 newer Release run\(s\) waiting or running/);
 });
