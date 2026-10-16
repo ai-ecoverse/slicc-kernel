@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,12 +7,15 @@ import { parseArgs } from 'node:util';
 import {
   baseEvidence,
   gapsOf,
+  jobsEvidence,
   knownAsOf,
   knownLine,
-  provenanceProblems,
+  NAME,
+  packageProblems,
   releaseEvidence,
   verdictLine,
 } from './lib.mjs';
+import { manifestOf, sha, sri } from './tarball.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const { values } = parseArgs({
@@ -27,10 +29,13 @@ const { values } = parseArgs({
     commit: { type: 'string', default: '' },
     findings: { type: 'string', default: '' },
     covers: { type: 'string', default: '' },
+    tarball: { type: 'string', default: '' },
+    sha256: { type: 'string', default: '' },
+    'review-result': { type: 'string', default: 'success' },
+    jobs: { type: 'string', default: '' },
   },
 });
 
-const NAME = '@ai-ecoverse/slicc-kernel';
 const { version, repo, planted } = values;
 const problems = [];
 const facts = {};
@@ -47,100 +52,28 @@ const sh = (cmd, args) =>
   });
 const gh = (path) => JSON.parse(sh('gh', ['api', path]));
 
-async function download(meta) {
-  const url = new URL(meta.dist.tarball);
-  if (url.origin !== 'https://registry.npmjs.org')
-    return problems.push(`the tarball is at ${url.origin}`);
-  const res = await fetch(url);
-  if (!res.ok) return problems.push(`downloading ${url} answered ${res.status}`);
-  const bytes = Buffer.from(await res.arrayBuffer());
-  const sha512 = createHash('sha512').update(bytes);
-  facts.integrity = `sha512-${sha512.copy().digest('base64')}`;
-  facts.sha512 = sha512.digest('hex');
-  facts.sha256 = createHash('sha256').update(bytes).digest('hex');
-  facts.gitHead = meta.gitHead;
-  if (meta.dist.integrity !== facts.integrity) {
-    problems.push(`dist.integrity is ${meta.dist.integrity}, the tarball is ${facts.integrity}`);
-  }
-  return undefined;
-}
-
-async function provenance(meta) {
-  const url = meta.dist.attestations?.url;
-  if (!url) return problems.push('no attestations on npm');
-  const res = await fetch(url);
-  if (!res.ok) return problems.push(`attestations answered ${res.status}`);
-  const bundle = ((await res.json()).attestations ?? []).find(
-    (b) => b.predicateType === 'https://slsa.dev/provenance/v1'
-  );
-  if (!bundle) return problems.push('no SLSA provenance attestation');
-  const statement = JSON.parse(
-    Buffer.from(bundle.bundle.dsseEnvelope.payload, 'base64').toString('utf8')
-  );
-  const found = provenanceProblems(statement, {
-    repo,
-    version,
-    sha512: facts.sha512,
-    gitHead: meta.gitHead,
-  });
-  facts.provenance = found.facts;
-  problems.push(...found.problems);
-  return undefined;
-}
-
-function signatures() {
-  const dir = join(process.env.RUNNER_TEMP ?? '/tmp', 'cert-audit');
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, 'package.json'), '{"private":true}\n');
-  sh('npm', [
-    'install',
-    '--prefix',
-    dir,
-    '--ignore-scripts',
-    '--no-audit',
-    '--no-fund',
-    `${NAME}@${version}`,
-  ]);
-  let out;
-  try {
-    out = execFileSync('npm', ['audit', 'signatures'], {
-      cwd: dir,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-  } catch (error) {
-    out = `${error.stdout ?? ''}${error.stderr ?? ''}`;
-    problems.push(`npm audit signatures failed: ${one(out).slice(0, 300)}`);
-  }
-  facts.signatures = one(out);
-  if (!/verified attestation/.test(out))
-    problems.push('npm audit signatures verified no attestation');
-}
-
-function onMain() {
-  const commit = facts.provenance?.gitCommit;
-  if (!commit) return;
-  let ref = gh(`repos/${repo}/git/ref/tags/v${version}`).object;
-  if (ref.type === 'tag') ref = gh(`repos/${repo}/git/tags/${ref.sha}`).object;
-  facts.tagCommit = ref.sha;
-  if (ref.sha !== commit) problems.push(`tag v${version} is ${ref.sha}, provenance says ${commit}`);
+function onMain(commit) {
   const cmp = gh(`repos/${repo}/compare/main...${commit}`);
   facts.onMain = cmp.status;
   if (cmp.status !== 'identical' && cmp.status !== 'behind')
     problems.push(`${commit} is ${cmp.status} of main`);
-  facts.commit = commit;
 }
 
-async function supplyChain() {
-  const meta = JSON.parse(sh('npm', ['view', `${NAME}@${version}`, '--json']));
-  if (meta.name !== NAME || meta.version !== version) {
-    return problems.push(`npm view answered ${meta.name}@${meta.version}`);
-  }
-  await download(meta);
-  if (!facts.sha512) return undefined;
-  await provenance(meta);
-  signatures();
-  onMain();
+function artifact() {
+  const tgz = values.tarball;
+  if (!tgz || !existsSync(tgz)) return problems.push('no tarball artifact to review');
+  facts.sha256 = sha('sha256', tgz);
+  facts.integrity = sri(tgz);
+  const packed = values.sha256.trim();
+  if (facts.sha256 !== packed)
+    problems.push(
+      `the artifact's sha256 ${facts.sha256} is not the pack job's ${packed || '(none)'}`
+    );
+  const manifest = manifestOf(tgz);
+  facts.gitHead = manifest.gitHead;
+  problems.push(...packageProblems(manifest, { version, commit: values.commit }));
+  facts.commit = values.commit;
+  if (!planted) onMain(values.commit);
   return undefined;
 }
 
@@ -279,16 +212,14 @@ if (!/^\d+\.\d+\.\d+$/.test(version ?? '')) {
   console.error('record: --version must be x.y.z');
   process.exit(2);
 }
-if (planted) {
-  problems.push(`a planted build of ${planted}, not the npm package: never certified`);
-} else {
-  try {
-    await supplyChain();
-  } catch (error) {
-    problems.push(`supply-chain check failed: ${one(error.stderr || error.message).slice(0, 300)}`);
-  }
+if (planted) problems.push(`a planted build of ${planted}: never certified`);
+try {
+  artifact();
+} catch (error) {
+  problems.push(`the artifact check failed: ${one(error.stderr || error.message).slice(0, 300)}`);
 }
 codedFindings();
+incomplete = jobsEvidence(`${values.jobs},review=${values['review-result']}`, incomplete);
 const review = readVerdict();
 const known = knownLine(repo, [...standing(), ...(review?.known ?? [])]);
 const covered = values.covers.split(',').filter(Boolean);
@@ -310,12 +241,10 @@ const certified = state === 'success';
 const comment = existsSync(join(values.review, 'comment.md'))
   ? readFileSync(join(values.review, 'comment.md'), 'utf8').trim()
   : '**Cert review:** the reviewer wrote no comment.';
-const prov = facts.provenance;
 const checks = [
-  `- npm integrity: ${facts.integrity ?? '?'} (sha256 ${facts.sha256 ?? '?'}), computed here from the registry tarball`,
-  `- provenance: ${prov ? `${prov.workflow?.path}@${prov.workflow?.ref}, commit ${prov.gitCommit}, builder ${prov.builder}` : '?'}`,
-  `- gitHead ${facts.gitHead ?? '?'}, tag v${version} ${facts.tagCommit ?? '?'}, main...commit ${facts.onMain ?? '?'}`,
-  `- signatures: ${facts.signatures ?? '?'}`,
+  `- the reviewed tarball: sha256 ${facts.sha256 ?? '?'} (${facts.integrity ?? '?'}), re-hashed here from the artifact; the pack job said ${values.sha256 || '?'}`,
+  `- gitHead ${facts.gitHead ?? '?'}, tag v${version} ${values.commit || '?'}, main...commit ${facts.onMain ?? '?'}`,
+  '- provenance, npm integrity and signatures are checked after publishing, by the release workflow',
 ].join('\n');
 const elsewhere = review?.elsewhere?.length
   ? `\n\n**For the cert lane to file elsewhere:**\n${review.elsewhere.map((e) => `- ${e.repo}: ${e.title}\n\n${e.body.replace(/^/gm, '  > ')}`).join('\n')}`
@@ -329,7 +258,7 @@ writeFileSync(join(values.out, 'line.txt'), `${line}\n`);
 writeFileSync(join(values.out, 'body.md'), body);
 writeFileSync(
   join(values.out, 'record.json'),
-  `${JSON.stringify({ name: NAME, version, certified, state, line, commit: facts.commit ?? null, facts, problems, review, known }, null, 2)}\n`
+  `${JSON.stringify({ name: NAME, version, certified, state, line, sha256: facts.sha256 ?? null, planted: planted || null, commit: facts.commit ?? null, facts, problems, review, known }, null, 2)}\n`
 );
 console.log(line);
 for (const p of problems) console.error(`problem: ${p}`);

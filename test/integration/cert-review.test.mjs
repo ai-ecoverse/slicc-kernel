@@ -17,13 +17,17 @@ import {
   diffSuites,
   droppedTests,
   gapsOf,
+  gateOf,
   knownAsOf,
   knownLine,
   mergedPrs,
   missingShards,
+  packageProblems,
   parseResults,
   pickRelease,
+  previousPublished,
   provenanceProblems,
+  publishStep,
   releaseEvidence,
   rerunSet,
   resultsMap,
@@ -874,32 +878,534 @@ test("kernel-compat's reference for a cert review is the certified base: cert-re
   const tool = await readFile(new URL('compat.mjs', tools), 'utf8');
   assert.match(
     tool,
-    /`Kernel compat v\$\{version\}\$\{reference \? ` ref \$\{reference\}` : ''\}`/
+    /`Kernel compat v\$\{version\}\$\{sha256 \? ` \$\{sha256\}` : ''\}\$\{reference \? ` ref \$\{reference\}` : ''\}`/
   );
-  assert.match(tool, /finished\(\{ own: !reference, deadline \}\)/);
+  assert.match(
+    compat,
+    /format\('Kernel compat v\{0\}\{1\}\{2\}\{3\}', inputs\.version, inputs\.sha256 != '' && format\(' \{0\}', inputs\.sha256\)/
+  );
+  assert.match(cert, /--ref "\$REF" --run "\$RUN_ID" --artifact "\$ARTIFACT" --sha256 "\$SHA256"/);
 });
 
-test('every release run has its own concurrency group, so a newer release never cancels a pending one', async () => {
-  const workflow = await readFile(
-    new URL('../../.github/workflows/cert-review.yml', import.meta.url),
-    'utf8'
+const workflowText = (name) =>
+  readFile(new URL(`../../.github/workflows/${name}`, import.meta.url), 'utf8');
+
+const jobsOf = (workflow) => {
+  const body = workflow.split(/^jobs:$/m)[1] ?? '';
+  const out = {};
+  for (const m of body.matchAll(/^ {2}([a-z-]+):\n([\s\S]*?)(?=^ {2}[a-z-]+:$|(?![\s\S]))/gm))
+    out[m[1]] = m[2];
+  return out;
+};
+
+test('the whole Release run is serialized: one workflow-level group, never cancelled, push to main only', async () => {
+  const release = await workflowText('release.yml');
+  assert.match(release, /^concurrency:\n {2}group: release\n {2}cancel-in-progress: false$/m);
+  assert.doesNotMatch(release, /workflow_dispatch/);
+  assert.match(release, /^on:\n {2}push:\n {4}branches: \[main\]\n\n/m);
+  const jobs = jobsOf(release);
+  assert.deepEqual(Object.keys(jobs), [
+    'tag',
+    'pack',
+    'cert',
+    'publish',
+    'verify',
+    'not-published',
+  ]);
+  for (const [name, body] of Object.entries(jobs)) {
+    assert.match(
+      body,
+      /^ {4}if: [\s\S]*?github\.ref == 'refs\/heads\/main'/m,
+      `${name} is main-only`
+    );
+    assert.doesNotMatch(body, /^ {4}concurrency:/m, `${name} has no job-level group`);
+  }
+  const review = await workflowText('cert-review.yml');
+  assert.doesNotMatch(review, /workflow_run/);
+  assert.match(review, /^ {2}workflow_call:\n/m);
+});
+
+test('id-token: write is only on release / publish, a GitHub-hosted job that publishes the certified, same-sha artifact', async () => {
+  for (const name of ['cert-review.yml', 'kernel-compat.yml', 'ci.yml']) {
+    assert.doesNotMatch(await workflowText(name), /id-token/, `${name} has no id-token`);
+  }
+  const jobs = jobsOf(await workflowText('release.yml'));
+  const holders = Object.entries(jobs)
+    .filter(([, body]) => /id-token: write/.test(body))
+    .map(([name]) => name);
+  assert.deepEqual(holders, ['publish']);
+  assert.match(jobs.publish, /^ {4}runs-on: ubuntu-latest$/m);
+  assert.match(jobs.pack, /^ {4}runs-on: ubuntu-latest$/m);
+  assert.doesNotMatch(jobs.pack, /id-token|secrets\./);
+  assert.match(jobs.publish, /^ {4}needs: \[tag, pack, cert\]$/m);
+  assert.match(jobs.publish, /!cancelled\(\) && github\.ref == 'refs\/heads\/main' &&/);
+  assert.match(
+    jobs.publish,
+    /needs\.pack\.result == 'success' && needs\.cert\.result == 'success' &&/
   );
-  const group = /^concurrency:\n {2}group: (.+)\n {2}cancel-in-progress: false$/m.exec(
-    workflow
-  )?.[1];
+  assert.match(jobs.publish, /needs\.cert\.outputs\.conclusion == 'success' &&/);
+  assert.match(jobs.publish, /needs\.cert\.outputs\.sha256 != '' &&/);
+  assert.match(jobs.publish, /needs\.cert\.outputs\.sha256 == needs\.pack\.outputs\.sha256/);
+  assert.match(jobs.publish, /name: \$\{\{ needs\.pack\.outputs\.artifact \}\}/);
+  assert.match(
+    jobs.publish,
+    /publish\.mjs --tarball "\$TGZ" --record "\$RUNNER_TEMP\/record\/record\.json" --sha256 "\$SHA256"$/m
+  );
+  assert.doesNotMatch(jobs.publish, /--dry-run|secrets\./);
+  assert.match(jobs.cert, /uses: \.\/\.github\/workflows\/cert-review\.yml/);
+  assert.match(jobs.cert, /artifact: \$\{\{ needs\.pack\.outputs\.artifact \}\}/);
+  assert.match(jobs.cert, /sha256: \$\{\{ needs\.pack\.outputs\.sha256 \}\}/);
+  assert.doesNotMatch(await workflowText('release.yml'), /secrets: inherit/);
+  assert.match(
+    jobs.cert,
+    /^ {4}secrets:\n {6}AWS_BEARER_TOKEN_BEDROCK: \$\{\{ secrets\.AWS_BEARER_TOKEN_BEDROCK \}\}\n(?! {6})/m
+  );
+  const review = await workflowText('cert-review.yml');
+  assert.deepEqual(
+    [...review.matchAll(/secrets\.([A-Z_]+)/g)].map((m) => m[1]),
+    ['AWS_BEARER_TOKEN_BEDROCK']
+  );
+  assert.match(
+    review,
+    /^ {10}AWS_BEARER_TOKEN_BEDROCK: \$\{\{ secrets\.AWS_BEARER_TOKEN_BEDROCK \}\}$/m
+  );
+  assert.match(jobs.verify, /needs\.publish\.outputs\.outcome == 'published'/);
+  assert.match(jobs.verify, /published\.mjs .*--sha256 "\$SHA256"/);
+  assert.match(jobs['not-published'], /needs\.publish\.outputs\.outcome != 'published'/);
+});
+
+test('a cert-review dispatch is a dry run: only a release run writes the status, files issues or reaches npm', async () => {
+  const review = await workflowText('cert-review.yml');
+  const jobs = jobsOf(review);
+  assert.doesNotMatch(review, /dry_run/);
+  assert.match(jobs.status, /needs\.plan\.outputs\.mode == 'release'/);
+  assert.match(jobs.plan, /if: steps\.plan\.outputs\.mode == 'release'\n[\s\S]*state: "pending"/);
+  const writers = Object.entries(jobs)
+    .filter(([, body]) => /\/statuses\//.test(body))
+    .map(([name]) => name);
+  assert.deepEqual(writers, ['plan', 'status']);
+  assert.doesNotMatch(review, /always\(\)/);
+  assert.match(
+    jobs.review,
+    /FILING: \$\{\{ github\.ref == 'refs\/heads\/main' && needs\.plan\.outputs\.mode == 'release' && 'on' \|\| 'off' \}\}/
+  );
+  assert.match(
+    jobs.review,
+    /needs\.plan\.outputs\.mode == 'release' && ',Bash\(gh issue create:\*\)'/
+  );
+  assert.match(jobs.pack, /needs\.plan\.outputs\.mode == 'dispatch'/);
+  assert.match(jobs.gate, /needs\.plan\.outputs\.mode == 'dispatch'/);
+  assert.match(jobs.gate, /publish\.mjs --dry-run /);
+  assert.match(jobs.plan, /a release review runs only on main/);
+  assert.match(jobs.record, /if: steps\.record\.outputs\.conclusion != 'success'\n[\s\S]*?exit 1/);
+  assert.match(jobs.status, /needs\.record\.outputs\.conclusion != ''/);
+  assert.match(
+    jobs.record,
+    /JOBS: tarball=\$\{\{ needs\.tarball\.result \}\},suite=\$\{\{ needs\.suite\.result \}\},kernel-compat=\$\{\{ needs\.compat\.result \}\}/
+  );
+  assert.match(jobs.record, /--review-result "\$REVIEW" --jobs "\$JOBS"/);
+  assert.match(jobs.gate, /needs\.record\.outputs\.conclusion != ''/);
+});
+
+const tarballOf = async (dir, manifest) => {
+  const root = join(dir, `pkg-${Math.random().toString(36).slice(2)}`);
+  await mkdir(join(root, 'package'), { recursive: true });
+  await writeFile(join(root, 'package', 'package.json'), JSON.stringify(manifest));
+  const file = join(root, 'kernel.tgz');
+  execFileSync('tar', ['-czf', file, '-C', root, 'package']);
+  const { createHash } = await import('node:crypto');
+  return {
+    file,
+    sha256: createHash('sha256')
+      .update(await readFile(file))
+      .digest('hex'),
+  };
+};
+
+test('the publish gate refuses anything but a certified record of exactly the packed bytes', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'cert-gate-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const name = '@ai-ecoverse/slicc-kernel';
+  const ok = await tarballOf(dir, { name, version: '1.2.3', gitHead: 'c'.repeat(40) });
+  const other = await tarballOf(dir, { name, version: '1.2.3', gitHead: 'd'.repeat(40) });
+  const line = (sha) => `certified ${name}@1.2.3 sha256=${sha} (ci: x; known: none)`;
+  const record = (over = {}) => ({
+    version: '1.2.3',
+    certified: true,
+    sha256: ok.sha256,
+    line: line(ok.sha256),
+    ...over,
+  });
+  const manifest = { name, version: '1.2.3' };
+  const why = (r, sha256 = ok.sha256, packed = ok.sha256, m = manifest) =>
+    gateOf({ record: r, sha256, packed, manifest: m }).why;
+  assert.equal(why(record()), undefined);
+  assert.equal(why(undefined), 'no cert-review record');
   assert.equal(
-    group,
-    "cert-review-${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || format('{0}{1}', inputs.version, inputs.planted) }}"
+    why(record({ certified: false, line: `cert-ci: FAIL ${name}@1.2.3: x` })),
+    'the verdict is not certified'
+  );
+  assert.match(why(record({ planted: 'proof/x' })), /planted build of proof\/x/);
+  assert.match(
+    why(record(), other.sha256, other.sha256),
+    /the record's sha256 .* is not the tarball's/
+  );
+  assert.match(
+    why(record(), ok.sha256, other.sha256),
+    /the pack job's sha256 .* is not the tarball's/
+  );
+  assert.match(why(record(), ok.sha256, ''), /the pack job's sha256 \(none\)/);
+  assert.equal(
+    why(record({ line: line(other.sha256) })),
+    "the line doesn't name the tarball's sha256"
+  );
+  assert.equal(
+    why(record({ version: '1.2.4', line: line(ok.sha256).replace('1.2.3', '1.2.4') })),
+    `the tarball is ${name}@1.2.3`
+  );
+  assert.equal(why(record({ version: 'latest' })), 'the record\'s version is "latest"');
+
+  const publish = (args) =>
+    spawnSync(process.execPath, [fileURLToPath(new URL('publish.mjs', tools)), ...args], {
+      encoding: 'utf8',
+      env: { ...process.env, GITHUB_STEP_SUMMARY: '', GITHUB_OUTPUT: '' },
+    });
+  const write = async (r) => {
+    const file = join(dir, `record-${Math.random().toString(36).slice(2)}.json`);
+    await writeFile(file, JSON.stringify(r));
+    return file;
+  };
+  for (const [r, tgz, packed, refusal] of [
+    [
+      record({ certified: false, line: 'cert-ci: FAIL' }),
+      ok.file,
+      ok.sha256,
+      /the verdict is not certified/,
+    ],
+    [record(), other.file, other.sha256, /the record's sha256/],
+    [record(), ok.file, other.sha256, /the pack job's sha256/],
+    [record({ planted: 'proof/x' }), ok.file, ok.sha256, /planted build/],
+  ]) {
+    for (const dry of [[], ['--dry-run']]) {
+      const run = publish([
+        ...dry,
+        '--tarball',
+        tgz,
+        '--record',
+        await write(r),
+        '--sha256',
+        packed,
+      ]);
+      assert.equal(run.status, 2, run.stdout + run.stderr);
+      assert.match(run.stdout, refusal);
+      assert.match(run.stdout, /refuse to publish/);
+      assert.doesNotMatch(run.stdout + run.stderr, /npm (publish|notice)/);
+    }
+  }
+  const none = publish([
+    '--tarball',
+    join(dir, 'missing.tgz'),
+    '--record',
+    await write(record()),
+    '--sha256',
+    ok.sha256,
+  ]);
+  assert.equal(none.status, 2);
+  assert.match(none.stdout, /no tarball/);
+});
+
+test('publish.mjs fails closed when npm cannot be read, publishes a newer certified version once, and skips an older one', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'cert-publish-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const bin = join(dir, 'bin');
+  await mkdir(bin);
+  await writeFile(
+    join(bin, 'npm'),
+    `#!/usr/bin/env node
+const fs = require('node:fs');
+const [cmd, ...rest] = process.argv.slice(2);
+const e = process.env;
+if (cmd === 'publish') { fs.appendFileSync(e.FAKE_LOG, rest.join(' ') + '\\n'); process.exit(0); }
+if (cmd !== 'view') process.exit(3);
+if (rest.includes('dist-tags.latest')) {
+  if (e.FAKE_LATEST_FAIL) { console.error('npm error code ETIMEDOUT'); process.exit(1); }
+  console.log(e.FAKE_LATEST ?? '');
+  process.exit(0);
+}
+if (e.FAKE_VERSION_FAIL) { console.error('npm error code ECONNRESET'); process.exit(1); }
+if (e.FAKE_ON_NPM) { console.log(e.FAKE_ON_NPM); process.exit(0); }
+console.error('npm error code E404\\nnpm error 404 No match found for version 1.2.3');
+process.exit(1);
+`,
+    { mode: 0o755 }
+  );
+  const name = '@ai-ecoverse/slicc-kernel';
+  const ok = await tarballOf(dir, { name, version: '1.2.3', gitHead: 'c'.repeat(40) });
+  const recordFile = join(dir, 'record.json');
+  await writeFile(
+    recordFile,
+    JSON.stringify({
+      version: '1.2.3',
+      certified: true,
+      sha256: ok.sha256,
+      line: `certified ${name}@1.2.3 sha256=${ok.sha256} (ci: x; known: none)`,
+    })
+  );
+  let n = 0;
+  const publish = async (env, dry = false) => {
+    const log = join(dir, `npm-${n++}.log`);
+    await writeFile(log, '');
+    const out = join(dir, `out-${n}`);
+    const run = spawnSync(
+      process.execPath,
+      [
+        fileURLToPath(new URL('publish.mjs', tools)),
+        ...(dry ? ['--dry-run'] : []),
+        '--tarball',
+        ok.file,
+        '--record',
+        recordFile,
+        '--sha256',
+        ok.sha256,
+      ],
+      {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          FAKE_LOG: log,
+          GITHUB_OUTPUT: out,
+          GITHUB_STEP_SUMMARY: '',
+          ...env,
+        },
+      }
+    );
+    const outcome = /outcome=(\w[\w-]*)/.exec(await readFile(out, 'utf8').catch(() => ''))?.[1];
+    return {
+      status: run.status,
+      stdout: run.stdout,
+      outcome,
+      published: await readFile(log, 'utf8'),
+    };
+  };
+  for (const dry of [false, true]) {
+    const down = await publish({ FAKE_LATEST_FAIL: '1' }, dry);
+    assert.equal(down.status, 2, down.stdout);
+    assert.match(
+      down.stdout,
+      /dist-tags\.latest failed \(npm error code ETIMEDOUT\), so the latest check can't run/
+    );
+    assert.equal(down.published, '');
+    const empty = await publish({ FAKE_LATEST: '' }, dry);
+    assert.equal(empty.status, 2);
+    assert.match(empty.stdout, /npm's latest reads as "", not x\.y\.z/);
+    assert.equal(empty.published, '');
+    const version = await publish({ FAKE_LATEST: '1.2.2', FAKE_VERSION_FAIL: '1' }, dry);
+    assert.equal(version.status, 2);
+    assert.match(
+      version.stdout,
+      /npm view @ai-ecoverse\/slicc-kernel@1\.2\.3 failed \(npm error code ECONNRESET\)/
+    );
+    assert.equal(version.published, '');
+  }
+  const fresh = await publish({ FAKE_LATEST: '1.2.2' });
+  assert.equal(fresh.status, 0, fresh.stdout);
+  assert.equal(fresh.outcome, 'published');
+  assert.equal(fresh.published, `${ok.file} --provenance --access public --tag latest\n`);
+  const older = await publish({ FAKE_LATEST: '1.3.0' });
+  assert.equal(older.status, 0);
+  assert.equal(older.outcome, 'skipped');
+  assert.match(
+    older.stdout,
+    /skip, not published to npm: v1\.2\.3 is older than npm's latest 1\.3\.0/
+  );
+  assert.equal(older.published, '');
+  const olderDry = await publish({ FAKE_LATEST: '1.3.0' }, true);
+  assert.equal(olderDry.outcome, 'skipped');
+  assert.equal(
+    olderDry.published,
+    `${ok.file} --provenance --access public --tag latest --dry-run --force\n`
   );
 });
 
-test('review, record and publish never start once the run is cancelled: they use !cancelled(), never always()', async () => {
+test("npm's latest only moves forward: an older version is skipped, the same version is published once, with the same bytes", () => {
+  const step = (over) =>
+    publishStep({
+      version: '1.2.3',
+      latest: '1.2.2',
+      onNpm: '',
+      ours: 'sha512-a',
+      dryRun: false,
+      ...over,
+    });
+  assert.deepEqual(step(), { action: 'publish', force: false });
+  assert.equal(step({ latest: '' }).action, 'refuse');
+  assert.equal(step({ latest: undefined, dryRun: true }).action, 'refuse');
+  assert.equal(step({ latest: '1.3.0' }).action, 'skip');
+  assert.match(step({ latest: '1.2.10' }).why, /v1\.2\.3 is older than npm's latest 1\.2\.10/);
+  assert.equal(step({ latest: '1.3.0', dryRun: true }).action, 'skip');
+  assert.equal(step({ latest: '1.2.3', onNpm: 'sha512-a' }).action, 'done');
+  assert.equal(step({ latest: '1.2.3', onNpm: 'sha512-b' }).action, 'refuse');
+  assert.deepEqual(
+    (({ action, force }) => ({ action, force }))(
+      step({ latest: '1.2.3', onNpm: 'sha512-b', dryRun: true })
+    ),
+    { action: 'publish', force: true }
+  );
+});
+
+test("record certifies only the pack job's bytes of the tag commit, never a planted build, never after a failed review", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'cert-record-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const bin = join(dir, 'bin');
+  await mkdir(bin);
+  await writeFile(
+    join(bin, 'gh'),
+    `#!/usr/bin/env node
+const a = process.argv.slice(2).join(' ');
+if (a.includes('graphql')) console.log(JSON.stringify({ data: { repository: { issue: { state: 'OPEN', stateReason: null, closedAt: null, closedByPullRequestsReferences: { nodes: [] } } } } }));
+else if (a.includes('--slurp')) console.log('[[]]');
+else if (a.includes('/compare/')) console.log(JSON.stringify({ status: process.env.FAKE_COMPARE || 'identical' }));
+else if (a.includes('/commits/')) console.log(JSON.stringify({ commit: { committer: { date: '2026-01-01T00:00:00Z' } } }));
+else process.exit(1);
+`,
+    { mode: 0o755 }
+  );
+  const commit = 'c'.repeat(40);
+  const name = '@ai-ecoverse/slicc-kernel';
+  const ok = await tarballOf(dir, { name, version: '1.2.3', gitHead: commit });
+  const stale = await tarballOf(dir, { name, version: '1.2.3', gitHead: 'e'.repeat(40) });
+  const review = join(dir, 'review');
+  await mkdir(review);
+  await writeFile(
+    join(review, 'verdict.json'),
+    JSON.stringify({ verdict: 'certified', known: [] })
+  );
+  let n = 0;
+  const record = async (args, env = {}) => {
+    const out = join(dir, `out-${n++}`);
+    const run = spawnSync(
+      process.execPath,
+      [
+        fileURLToPath(new URL('record.mjs', tools)),
+        '--version',
+        '1.2.3',
+        '--review',
+        review,
+        '--out',
+        out,
+        '--commit',
+        commit,
+        ...args,
+      ],
+      { encoding: 'utf8', env: { ...process.env, ...env, PATH: `${bin}:${process.env.PATH}` } }
+    );
+    const json = JSON.parse(await readFile(join(out, 'record.json'), 'utf8'));
+    return { status: run.status, json };
+  };
+  const good = await record(['--tarball', ok.file, '--sha256', ok.sha256]);
+  assert.equal(good.status, 0, JSON.stringify(good.json.problems));
+  assert.equal(good.json.certified, true);
+  assert.equal(good.json.sha256, ok.sha256);
+  assert.match(good.json.line, new RegExp(`^certified ${name}@1\\.2\\.3 sha256=${ok.sha256} `));
+  const swapped = await record(['--tarball', ok.file, '--sha256', stale.sha256]);
+  assert.equal(swapped.status, 1);
+  assert.match(
+    swapped.json.line,
+    /^cert-ci: FAIL .*the artifact's sha256 .* is not the pack job's/
+  );
+  const head = await record(['--tarball', stale.file, '--sha256', stale.sha256]);
+  assert.equal(head.status, 1);
+  assert.match(head.json.line, /the tarball's gitHead is e{40}, the tag commit is c{40}/);
+  const planted = await record([
+    '--tarball',
+    ok.file,
+    '--sha256',
+    ok.sha256,
+    '--planted',
+    'proof/x',
+  ]);
+  assert.equal(planted.status, 1);
+  assert.equal(planted.json.planted, 'proof/x');
+  assert.match(planted.json.line, /planted build of proof\/x: never certified/);
+  const held = await record([
+    '--tarball',
+    ok.file,
+    '--sha256',
+    ok.sha256,
+    '--review-result',
+    'failure',
+  ]);
+  assert.equal(held.status, 1);
+  assert.match(
+    held.json.line,
+    /^cert-ci: INCOMPLETE .*the review job ended failure; re-run the failed jobs/
+  );
+  assert.equal(held.json.state, 'error');
+  const lost = await record([
+    '--tarball',
+    ok.file,
+    '--sha256',
+    ok.sha256,
+    '--jobs',
+    'tarball=success,suite=failure,kernel-compat=failure',
+  ]);
+  assert.equal(lost.status, 1);
+  assert.equal(lost.json.certified, false);
+  assert.match(
+    lost.json.line,
+    /^cert-ci: INCOMPLETE @ai-ecoverse\/slicc-kernel@1\.2\.3 \(the suite job ended failure; the kernel-compat job ended failure; re-run the failed jobs\)/
+  );
+  const allGreen = await record([
+    '--tarball',
+    ok.file,
+    '--sha256',
+    ok.sha256,
+    '--jobs',
+    'tarball=success,suite=success,kernel-compat=success',
+  ]);
+  assert.equal(allGreen.status, 0);
+  const missing = await record(['--tarball', join(dir, 'nope.tgz'), '--sha256', ok.sha256]);
+  assert.equal(missing.status, 1);
+  assert.match(missing.json.line, /no tarball artifact to review/);
+  const off = await record(['--tarball', ok.file, '--sha256', ok.sha256], {
+    FAKE_COMPARE: 'ahead',
+  });
+  assert.equal(off.status, 1);
+  assert.match(off.json.line, /c{40} is ahead of main/);
+});
+
+test('prev is the newest earlier tag npm serves, so a FAILed, never-published tag is never a baseline and the next line covers it', () => {
+  const tags = ['1.0.0', '1.0.1', '1.0.2', '1.1.0', '1.1.1'];
+  assert.equal(previousPublished(tags, ['1.0.0', '1.0.1', '1.1.0'], '1.1.1'), '1.1.0');
+  assert.equal(previousPublished(tags, ['1.0.0', '1.0.1'], '1.1.1'), '1.0.1');
+  assert.equal(previousPublished(tags, ['1.0.0', '1.0.1', '1.1.0'], '1.1.0'), '1.0.1');
+  assert.equal(previousPublished(tags, ['1.1.1'], '1.0.0'), undefined);
+  const failedBetween = previousPublished(tags, ['1.0.0', '1.0.1'], '1.1.1');
+  assert.deepEqual(covering(tags, failedBetween, '1.1.1'), ['1.0.2', '1.1.0', '1.1.1']);
+  assert.deepEqual(
+    packageProblems(
+      { name: '@ai-ecoverse/slicc-kernel', version: '1.2.3', gitHead: 'a' },
+      { version: '1.2.3', commit: 'a' }
+    ),
+    []
+  );
+  assert.equal(
+    packageProblems(
+      { name: 'x', version: '1.2.3', gitHead: 'b' },
+      { version: '1.2.3', commit: 'a' }
+    ).length,
+    2
+  );
+});
+
+test('review, record, status and the gate never start once the run is cancelled: they use !cancelled(), never always()', async () => {
   const workflow = await readFile(
     new URL('../../.github/workflows/cert-review.yml', import.meta.url),
     'utf8'
   );
   const jobs = workflow.split(/^jobs:$/m)[1];
-  for (const name of ['review', 'record', 'publish']) {
+  for (const name of ['tarball', 'review', 'record', 'status', 'gate']) {
     const body =
       new RegExp(`^  ${name}:\\n([\\s\\S]*?)(?=^  [a-z-]+:$|(?![\\s\\S]))`, 'm').exec(jobs)?.[1] ??
       '';
