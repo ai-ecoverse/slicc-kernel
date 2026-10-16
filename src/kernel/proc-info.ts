@@ -10,6 +10,8 @@ export interface ProcessInfo {
   tty: string | null;
   started: number;
   state: 'S' | 'T' | 'Z';
+
+  threads?: Array<{ tid: number; state: 'R' | 'S' }>;
   memory: number;
   utime?: number;
   stime?: number;

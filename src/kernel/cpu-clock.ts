@@ -205,6 +205,14 @@ export class ProcessClocks {
     return this.enabled ? this.all().filter((c) => c.running()).length : 0;
   }
 
+  states(): Array<{ tid: number; state: 'R' | 'S' }> {
+    const state = (c: CpuClock): 'R' | 'S' => (c.running() ? 'R' : 'S');
+    return [
+      { tid: 1, state: state(this.main) },
+      ...[...this.threads].map(([tid, c]) => ({ tid, state: state(c) })),
+    ];
+  }
+
   timed<R, T>(clock: CpuClock | undefined, dispatch: (req: R, block: () => void) => Promise<T>) {
     const c = clock ?? this.main;
     const block = () => c.block();

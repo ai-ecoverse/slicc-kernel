@@ -66,11 +66,11 @@ function ticks(ms: number): number {
   return Math.max(0, Math.floor((ms * HZ) / 1000));
 }
 
-export function pidStat(info: ProcessInfo, boot: number): string {
+export function pidStat(info: ProcessInfo, boot: number, state: string = info.state): string {
   const fields = [
     info.pid,
     `(${commOf(info)})`,
-    info.state,
+    state,
     info.ppid,
     info.pgid,
     info.sid,
@@ -109,10 +109,23 @@ export function pidStat(info: ProcessInfo, boot: number): string {
 
 const sigMask = (mask = 0): string => (mask >>> 1).toString(16).padStart(16, '0');
 
-const STATES = { S: 'S (sleeping)', T: 'T (stopped)', Z: 'Z (zombie)' } as const;
+const STATES = {
+  S: 'S (sleeping)',
+  T: 'T (stopped)',
+  Z: 'Z (zombie)',
+} as const;
 
 const tagLine = (tag: string): string =>
   `Tag:\t${tag.replaceAll('\n', '\\n').replaceAll('\t', '\\t').replaceAll('\r', '\\r')}`;
+
+export function taskStat(info: ProcessInfo, tid: number, boot: number): string | undefined {
+  const thread = (info.threads ?? [{ tid: 1, state: info.state }]).find((t) => t.tid === tid);
+  return thread && pidStat({ ...info, pid: tid }, boot, thread.state);
+}
+
+export function taskIds(info: ProcessInfo): number[] {
+  return (info.threads ?? [{ tid: 1 }]).map((t) => t.tid);
+}
 
 export function pidStatus(info: ProcessInfo): string {
   const state = STATES[info.state];

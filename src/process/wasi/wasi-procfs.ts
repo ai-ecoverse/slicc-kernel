@@ -1,4 +1,4 @@
-import type { MountLine, ProcessListing } from '../../kernel/proc-info.ts';
+import type { MountLine, ProcessInfo, ProcessListing } from '../../kernel/proc-info.ts';
 import {
   type ChownArgs,
   type SyncFsBridgeStat,
@@ -15,6 +15,8 @@ import {
   SYSTEM_FILES,
   sysEntry,
   systemFile,
+  taskIds,
+  taskStat,
 } from '../procfs.ts';
 import { normalize } from './wasi-files.ts';
 
@@ -90,8 +92,10 @@ export class ProcTree {
           systemFile(top as (typeof SYSTEM_FILES)[number], this.listing(), Date.now(), this.memory),
       };
     }
-    if (!/^[1-9]\d*$/.test(top) || rest.length > 0 || !this.alive(Number(top))) return undefined;
-    if (leaf === undefined) return { kind: 'dir', names: () => [...PID_NAMES] };
+    if (!/^[1-9]\d*$/.test(top) || !this.alive(Number(top))) return undefined;
+    if (leaf === 'task') return this.task(Number(top), rest);
+    if (rest.length > 0) return undefined;
+    if (leaf === undefined) return { kind: 'dir', names: () => [...PID_NAMES, 'task'] };
     if (!PID_NAMES.includes(leaf)) return undefined;
     return {
       kind: 'file',
@@ -100,6 +104,30 @@ export class ProcTree {
         const info = listing.processes.find((p) => p.pid === Number(top));
         if (!info) throw syncError('ENOENT', `/proc/${top}/${leaf}`);
         return pidFile(leaf as (typeof PID_FILES)[number], info, listing.boot);
+      },
+    };
+  }
+
+  private info(pid: number): ProcessInfo | undefined {
+    return this.listing().processes.find((p) => p.pid === pid);
+  }
+
+  private task(pid: number, rest: string[]): Node | undefined {
+    const [tid, leaf, ...more] = rest;
+    const tids = () => taskIds(this.info(pid) as ProcessInfo);
+    if (tid === undefined) return { kind: 'dir', names: () => tids().map(String) };
+    if (!/^[1-9]\d*$/.test(tid) || more.length > 0 || !tids().includes(Number(tid)))
+      return undefined;
+    if (leaf === undefined) return { kind: 'dir', names: () => ['stat'] };
+    if (leaf !== 'stat') return undefined;
+    return {
+      kind: 'file',
+      content: () => {
+        const listing = this.listing();
+        const info = listing.processes.find((p) => p.pid === pid);
+        const line = info && taskStat(info, Number(tid), listing.boot);
+        if (line === undefined) throw syncError('ENOENT', `/proc/${pid}/task/${tid}/stat`);
+        return line;
       },
     };
   }

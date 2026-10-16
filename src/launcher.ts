@@ -1738,6 +1738,7 @@ export class Launcher {
         ...described,
         started: (this.described.get(root.pid) ?? described).started,
         state: this.stateOf(member.pid),
+        ...this.threadsOf(member.pid),
         memory: this.processes.get(member.pid)?.memory() ?? 0,
         ...this.timesOf(member, members),
         ...this.childrenOf(root.pid),
@@ -1748,6 +1749,11 @@ export class Launcher {
       });
     }
     return listed;
+  }
+
+  private threadsOf(pid: number): Pick<ProcessInfo, 'threads'> {
+    const threads = this.stateOf(pid) === 'S' ? this.processes.get(pid)?.threads?.() : undefined;
+    return threads ? { threads } : {};
   }
 
   private sudo(pid: number, call: SudoCall, signal: AbortSignal): Promise<SudoResult> {
