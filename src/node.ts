@@ -341,7 +341,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     readFile: async (path) => launcher.fs.readFileBuffer(path),
     mount: (spec) => guard(() => launcher.mount(spec)),
     umount: (target) => guard(async () => launcher.umount(target)),
-    mounts: async () => launcher.mounts.list(),
+    mounts: async () => launcher.mounts.listed(),
     setRoutes: (routes) => guard(async () => launcher.setRoutes(routes)),
     updateTransportTraits: () => guard(async () => launcher.updateTransportTraits()),
     users: {

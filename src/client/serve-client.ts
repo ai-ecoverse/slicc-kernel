@@ -541,7 +541,7 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
       case 'umount':
         return { result: await l.umountAs(clientCred(self), req.target).then(() => true) };
       case 'mounts':
-        return { result: l.mounts.list() };
+        return { result: l.mounts.listed() };
       case 'dial':
         return dialFor(l, req, watches);
       case 'serve-cdp':

@@ -390,6 +390,7 @@ export class MountTable {
   private devices = 0;
   private readonly pending = new Set<string>();
   private readonly notes = new Map<string, MountEntry>();
+  private readonly system = new Set<string>();
   private readonly deps: MountDeps;
 
   constructor(deps: MountDeps) {
@@ -413,6 +414,15 @@ export class MountTable {
     );
     const noted = [...this.notes.values()].filter((note) => !this.mounts.has(note.target));
     return [...mounted, ...noted.map((note) => ({ ...note, options: { ...note.options } }))];
+  }
+
+  listed(): MountEntry[] {
+    return this.list().filter((entry) => !this.system.has(entry.target));
+  }
+
+  async mountSystem(spec: MountSpec, fs: KernelFs): Promise<void> {
+    await this.mount(spec, fs);
+    this.system.add(normalizePath(spec.target));
   }
 
   note(spec: MountSpec, state: 'pending' | 'failed', error?: string): void {
@@ -527,6 +537,7 @@ export class MountTable {
     if (!mount && this.notes.delete(at)) return;
     if (!mount) throw errnoError('EINVAL', `${at} is not mounted`);
     if (!detach && this.deps.busy(at)) throw errnoError('EBUSY', `${at} has open files`);
+    this.system.delete(at);
     this.notes.delete(at);
     this.mounts.delete(at);
     this.deps.reshaped?.();

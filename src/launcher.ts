@@ -20,6 +20,7 @@ import { type Attestation, attest, FileWatches, type RemoteFs } from './fs/attes
 import { FileChanges } from './fs/changes.ts';
 import { followLinks, withCommandDirs } from './fs/commands.ts';
 import { Dac, type DenialHook, type Guard, need, TTY_MODE } from './fs/dac.ts';
+import { SHM } from './fs/dev-removal.ts';
 import { FreshModules } from './fs/fresh-modules.ts';
 import {
   Integrity,
@@ -319,6 +320,10 @@ const NOT_EXECUTABLE = 126;
 const DECIDE_MS = 100;
 const INIT_PID = 1;
 const SHARED_DIRS = ['/tmp', '/home'];
+
+function unref(port: MessagePort): void {
+  (port as { unref?: () => void }).unref?.();
+}
 const LAYOUT: ReadonlyArray<[string, number]> = [
   ['/', 0o755],
   ['/root', 0o700],
@@ -561,6 +566,7 @@ export class Launcher {
   private pnpmMade: Promise<void> | undefined;
   private pnpmEpoch = 0;
   readonly mounts: MountTable;
+  private shmPorts: MessagePort[] = [];
   private readonly createDriverWorker: (() => WasmWorkerLike) | undefined;
   private readonly media: MediaStore;
   private readonly onMountPending: ((pending: PendingMedium) => void) | undefined;
@@ -2014,6 +2020,7 @@ export class Launcher {
         },
         { owned: true }
       );
+      if (spec.target === SHM) this.shmPorts = [port1, port2];
       return {
         port: port1,
         dispose: () => {
@@ -2131,6 +2138,13 @@ export class Launcher {
     void this.unlinked.sweep(entry.target);
     this.pnpmStale();
     return entry;
+  }
+
+  private async mountShm(): Promise<void> {
+    await this.base.mkdir(SHM, { recursive: true });
+    await this.mounts.mountSystem({ type: 'tmpfs', source: 'shm', target: SHM }, this.fs);
+    for (const port of this.shmPorts) unref(port);
+    await this.fs.chmod(SHM, 0o1777);
   }
 
   private async ownTmp(): Promise<void> {
@@ -2316,6 +2330,7 @@ export class Launcher {
     await this.resolvePrefixes();
     for (const dir of SHARED_DIRS) await this.base.mkdir(dir, { recursive: true });
     if (this.owners) await this.ownTmp();
+    await this.mountShm();
     await this.pnpmReady();
     await this.users.ensure();
     if (this.owners) await this.stampLayout();
