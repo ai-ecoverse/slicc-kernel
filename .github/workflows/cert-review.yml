@@ -15,6 +15,10 @@ on:
         description: "The pack job's sha256 of the tarball"
         required: true
         type: string
+    secrets:
+      AWS_BEARER_TOKEN_BEDROCK:
+        description: 'The Bedrock key, for the review step only'
+        required: true
     outputs:
       conclusion:
         description: 'success when record certified the tarball, else failure'

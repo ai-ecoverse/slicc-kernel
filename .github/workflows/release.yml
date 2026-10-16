@@ -130,7 +130,8 @@ jobs:
       version: ${{ needs.tag.outputs.version }}
       artifact: ${{ needs.pack.outputs.artifact }}
       sha256: ${{ needs.pack.outputs.sha256 }}
-    secrets: inherit
+    secrets:
+      AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
 
   publish:
     name: release / publish

@@ -951,6 +951,20 @@ test('id-token: write is only on release / publish, a GitHub-hosted job that pub
   assert.match(jobs.cert, /uses: \.\/\.github\/workflows\/cert-review\.yml/);
   assert.match(jobs.cert, /artifact: \$\{\{ needs\.pack\.outputs\.artifact \}\}/);
   assert.match(jobs.cert, /sha256: \$\{\{ needs\.pack\.outputs\.sha256 \}\}/);
+  assert.doesNotMatch(await workflowText('release.yml'), /secrets: inherit/);
+  assert.match(
+    jobs.cert,
+    /^ {4}secrets:\n {6}AWS_BEARER_TOKEN_BEDROCK: \$\{\{ secrets\.AWS_BEARER_TOKEN_BEDROCK \}\}\n(?! {6})/m
+  );
+  const review = await workflowText('cert-review.yml');
+  assert.deepEqual(
+    [...review.matchAll(/secrets\.([A-Z_]+)/g)].map((m) => m[1]),
+    ['AWS_BEARER_TOKEN_BEDROCK']
+  );
+  assert.match(
+    review,
+    /^ {10}AWS_BEARER_TOKEN_BEDROCK: \$\{\{ secrets\.AWS_BEARER_TOKEN_BEDROCK \}\}$/m
+  );
   assert.match(jobs.verify, /needs\.publish\.outputs\.outcome == 'published'/);
   assert.match(jobs.verify, /published\.mjs .*--sha256 "\$SHA256"/);
   assert.match(jobs['not-published'], /needs\.publish\.outputs\.outcome != 'published'/);
@@ -1210,12 +1224,14 @@ else process.exit(1);
   assert.match(off.json.line, /c{40} is ahead of main/);
 });
 
-test('prev is the newest earlier tag npm serves, so a FAILed, never-published tag is never a baseline', () => {
+test('prev is the newest earlier tag npm serves, so a FAILed, never-published tag is never a baseline and the next line covers it', () => {
   const tags = ['1.0.0', '1.0.1', '1.0.2', '1.1.0', '1.1.1'];
   assert.equal(previousPublished(tags, ['1.0.0', '1.0.1', '1.1.0'], '1.1.1'), '1.1.0');
   assert.equal(previousPublished(tags, ['1.0.0', '1.0.1'], '1.1.1'), '1.0.1');
   assert.equal(previousPublished(tags, ['1.0.0', '1.0.1', '1.1.0'], '1.1.0'), '1.0.1');
   assert.equal(previousPublished(tags, ['1.1.1'], '1.0.0'), undefined);
+  const failedBetween = previousPublished(tags, ['1.0.0', '1.0.1'], '1.1.1');
+  assert.deepEqual(covering(tags, failedBetween, '1.1.1'), ['1.0.2', '1.1.0', '1.1.1']);
   assert.deepEqual(
     packageProblems(
       { name: '@ai-ecoverse/slicc-kernel', version: '1.2.3', gitHead: 'a' },
