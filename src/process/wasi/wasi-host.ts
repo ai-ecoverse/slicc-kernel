@@ -479,6 +479,17 @@ export class WasiHost {
         this.sigmask
           ? this.maskedPoll(this.sigmask, [lo, hi], [inPtr, outPtr, n, nevents])
           : E.NOSYS,
+      sigwait: (lo: number, _hi: number, timeout: bigint, out: number) => {
+        const mask = this.sigmask;
+        if (!mask) return E.NOSYS;
+        mem.view().setUint32(out, 0, true);
+        return mask.sigwait(
+          lo,
+          timeout,
+          (set) => void this.o.kernel.call({ op: 'sig-waiting', tid: mask.tid, set }),
+          (sig) => void mem.view().setUint32(out, sig, true)
+        );
+      },
       sigpending_get: (out: number) => {
         if (!this.sigmask) return E.NOSYS;
         mem.view().setBigUint64(out, BigInt(this.sigmask.pending()), true);

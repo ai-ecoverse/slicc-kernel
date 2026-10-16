@@ -249,8 +249,8 @@ function killThread(thread: ThreadSignals | undefined, caught: number, sig: numb
   const held = (Atomics.load(thread.header, SAB_I_BLOCKED) & sigbit(sig)) !== 0;
   if (!held && (caught & sigbit(sig)) === 0) return false;
   Atomics.or(thread.header, SAB_I_SIGNALS, sigbit(sig));
-  if (held) return true;
   Atomics.notify(thread.header, SAB_I_SIGNALS);
+  if (held) return true;
   const blocked = thread.interrupt;
   thread.interrupt = new AbortController();
   blocked.abort();
