@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
   compatRegressions,
+  covering,
   decide,
   deltaFiles,
   diffSuites,
@@ -15,6 +16,7 @@ import {
   knownLine,
   mergedPrs,
   parseResults,
+  pickRelease,
   provenanceProblems,
   resultsMap,
   rowOf,
@@ -549,4 +551,37 @@ test('test gaps go into the line in code, so a fix without a NEGATIVE is never c
     ['#712 no-negative', '#714 no-test', '#9 prev-not-run']
   );
   assert.deepEqual(gapsOf(undefined), []);
+});
+
+test('prev and base: the newest earlier release whose cert-review passed (prev also takes a pending one), past failures and unreviewed releases', async () => {
+  const states = {
+    '1.98.4': undefined,
+    '1.98.3': 'failure',
+    '1.98.2': 'success',
+    '1.98.1': 'success',
+    '1.99.1': 'pending',
+  };
+  const tags = ['1.98.1', '1.98.2', '1.98.3', '1.98.4', '1.99.0', '1.99.1', '1.99.2'];
+  const stateOf = async (t) => states[t];
+  assert.equal(await pickRelease(tags, '1.99.0', stateOf), '1.98.2');
+  assert.equal(await pickRelease(tags, '1.99.0', stateOf, { pending: true }), '1.98.2');
+  assert.equal(await pickRelease(tags, '1.99.2', stateOf, { pending: true }), '1.99.1');
+  assert.equal(await pickRelease(tags, '1.99.2', stateOf), '1.98.2');
+  assert.equal(await pickRelease(tags, '1.98.1', stateOf), undefined);
+  assert.deepEqual(covering(tags, '1.98.2', '1.99.1'), ['1.98.3', '1.98.4', '1.99.0', '1.99.1']);
+  assert.deepEqual(covering(tags, '1.99.0', '1.99.1'), ['1.99.1']);
+});
+
+test('every release run has its own concurrency group, so a newer release never cancels a pending one', async () => {
+  const workflow = await readFile(
+    new URL('../../.github/workflows/cert-review.yml', import.meta.url),
+    'utf8'
+  );
+  const group = /^concurrency:\n {2}group: (.+)\n {2}cancel-in-progress: false$/m.exec(
+    workflow
+  )?.[1];
+  assert.equal(
+    group,
+    "cert-review-${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || format('{0}{1}', inputs.version, inputs.planted) }}"
+  );
 });

@@ -18,6 +18,7 @@ const { values } = parseArgs({
     planted: { type: 'string', default: '' },
     commit: { type: 'string', default: '' },
     findings: { type: 'string', default: '' },
+    covers: { type: 'string', default: '' },
   },
 });
 
@@ -276,7 +277,9 @@ if (planted) {
 codedFindings();
 const review = readVerdict();
 const known = knownLine(repo, [...standing(), ...(review?.known ?? [])]);
-const ci = values.run ? `ci: ${values.run}` : 'ci: local';
+const covered = values.covers.split(',').filter(Boolean);
+const covers = covered.length > 1 ? `covers ${covered[0]}\u2013${covered.at(-1)}; ` : '';
+const ci = `${covers}${values.run ? `ci: ${values.run}` : 'ci: local'}`;
 let line;
 if (problems.length === 0 && review?.verdict === 'certified') {
   const gap = gaps.length ? `; test gaps: ${gaps.join(', ')}` : '';

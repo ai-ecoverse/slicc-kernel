@@ -310,3 +310,21 @@ const GAPS = new Set(['no-test', 'no-negative', 'prev-not-run', 'no-titles', 'no
 export function gapsOf(findings) {
   return (findings ?? []).filter((f) => GAPS.has(f.kind) && f.pr).map((f) => `#${f.pr} ${f.kind}`);
 }
+
+export async function pickRelease(tags, version, stateOf, { pending = false } = {}) {
+  const earlier = tags
+    .filter((t) => compareVersions(t, version) < 0)
+    .sort(compareVersions)
+    .reverse();
+  for (const tag of earlier) {
+    const state = await stateOf(tag);
+    if (state === 'success' || (pending && state === 'pending')) return tag;
+  }
+  return undefined;
+}
+
+export function covering(tags, prev, version) {
+  return tags
+    .filter((t) => compareVersions(t, prev) > 0 && compareVersions(t, version) <= 0)
+    .sort(compareVersions);
+}

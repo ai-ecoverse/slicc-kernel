@@ -38,7 +38,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: cert-review-${{ github.event_name == 'workflow_dispatch' && format('{0}{1}', inputs.version, inputs.planted) || 'release' }}
+  group: cert-review-${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || format('{0}{1}', inputs.version, inputs.planted) }}
   cancel-in-progress: false
 
 env:
@@ -68,6 +68,7 @@ jobs:
       planted: ${{ steps.plan.outputs.planted }}
       pr: ${{ steps.plan.outputs.pr }}
       dry_run: ${{ steps.plan.outputs.dry_run }}
+      covers: ${{ steps.plan.outputs.covers }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -101,7 +102,7 @@ jobs:
           if [ "$EVENT" = workflow_run ]; then
             version=$(git tag --points-at "$RUN_SHA" 'v*' | sed 's/^v//' | grep -E "$semver" | sort -V | tail -1 || true)
             [ -n "$version" ] || skip "Release on $RUN_SHA tagged no version"
-            prev=$(before "$version")
+            prev=$(node tools/cert-review/base.mjs --repo "$GITHUB_REPOSITORY" --version "$version" --pending || before "$version")
             base=''
           else
             version=$IN_VERSION prev=$IN_PREV base=$IN_BASE dry_run=$IN_DRY_RUN planted=$IN_PLANTED pr=$IN_PR
@@ -137,6 +138,7 @@ jobs:
             echo "planted=$planted"
             echo "pr=$pr"
             echo "dry_run=$dry_run"
+            echo "covers=$(node tools/cert-review/base.mjs --version "$version" --covers "$prev")"
           } | tee -a "$GITHUB_OUTPUT"
 
   delta:
@@ -430,6 +432,7 @@ jobs:
       VERSION: ${{ needs.plan.outputs.version }}
       PLANTED: ${{ needs.plan.outputs.planted }}
       PLAN_COMMIT: ${{ needs.plan.outputs.commit }}
+      COVERS: ${{ needs.plan.outputs.covers }}
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -459,7 +462,7 @@ jobs:
           findings="$RUNNER_TEMP/cert-review/findings.json"
           if node tools/cert-review/record.mjs --version "$VERSION" --review "$RUNNER_TEMP/cert-review" \
             --out "$RUNNER_TEMP/record" --run "$RUN_URL" --repo "$GH_REPO" --commit "$PLAN_COMMIT" \
-            --findings "$findings" ${PLANTED:+--planted "$PLANTED"}; then
+            --findings "$findings" --covers "$COVERS" ${PLANTED:+--planted "$PLANTED"}; then
             echo "conclusion=success" >> "$GITHUB_OUTPUT"
           else
             echo "conclusion=failure" >> "$GITHUB_OUTPUT"
