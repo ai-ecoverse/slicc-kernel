@@ -1016,8 +1016,9 @@ export class WasiHost {
       action = 'terminate';
     }
     if (action !== 'terminate') return;
-    if (!this.sigmask?.blocks(SIG.PIPE)) throw new WasiExit(SIGPIPE_EXIT);
-    this.o.kernel.call({ op: 'proc-kill', pid: this.o.pid, sig: SIG.PIPE });
+    const mask = this.sigmask;
+    if (!mask?.blocks(SIG.PIPE)) throw new WasiExit(SIGPIPE_EXIT);
+    this.o.kernel.call({ op: 'thread-kill', tid: mask.tid, sig: SIG.PIPE });
   }
 
   private read(fd: number, max: number): Uint8Array {
