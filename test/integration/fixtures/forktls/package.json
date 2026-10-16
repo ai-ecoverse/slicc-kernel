@@ -1,0 +1,15 @@
+{
+  "name": "forktls",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "forktls-pie": {
+        "wasm": "bin/forktls-pie.wasm"
+      },
+      "forktls-static": {
+        "wasm": "bin/forktls-static.wasm"
+      }
+    }
+  }
+}

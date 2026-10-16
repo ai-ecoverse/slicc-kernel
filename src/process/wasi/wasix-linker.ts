@@ -1,5 +1,6 @@
 import { type DylinkInfo, dylinkInfo } from './dylink.ts';
 import { normalize } from './wasi-files.ts';
+import { reseatTls } from './wasix-fork.ts';
 import { type Scalar, Trampolines } from './wasix-trampoline.ts';
 import { FuncTypes } from './wasm-functypes.ts';
 
@@ -279,6 +280,10 @@ export class WasixLinker {
     const global = linked.instance.exports.__tls_base;
     if (base === undefined || !(global instanceof WebAssembly.Global)) return false;
     global.value = base;
+    reseatTls(
+      linked.instance.exports,
+      (at, length) => new Uint8Array(this.memory.buffer, at, length)
+    );
     return true;
   }
 

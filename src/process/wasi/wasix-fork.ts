@@ -61,6 +61,26 @@ function mutableGlobals(exports: WebAssembly.Exports): Array<[string, number]> {
   return out;
 }
 
+export function reseatTls(
+  exports: WebAssembly.Exports,
+  bytes: (at: number, length: number) => Uint8Array
+): void {
+  const init = exports.__wasm_init_tls;
+  const base = exports.__tls_base;
+  const size = exports.__tls_size;
+  if (
+    typeof init !== 'function' ||
+    !(base instanceof WebAssembly.Global) ||
+    !(size instanceof WebAssembly.Global)
+  ) {
+    return;
+  }
+  const at = base.value as number;
+  const block = bytes(at, size.value as number).slice();
+  init(at);
+  bytes(at, block.length).set(block);
+}
+
 export class AsyncifyDriver {
   private exports: WebAssembly.Exports & AsyncifyExports = {};
 
@@ -115,6 +135,7 @@ export class AsyncifyDriver {
     for (const [id, snap] of state.setjmps?.snapshots ?? []) this.snapshots.set(id, snap);
     this.nextSnapshot = Math.max(this.nextSnapshot, state.setjmps?.next ?? 1);
     this.restoreGlobals(state.globals);
+    reseatTls(this.exports, (at, length) => this.mem.bytes(at, length));
     this.answer = 0;
     this.exports.asyncify_start_rewind?.(state.asyncifyData);
   }
