@@ -4,6 +4,8 @@ on:
   workflow_run:
     workflows: [Release]
     types: [completed]
+  pull_request:
+    paths: [.github/cert-review-proof.json]
   workflow_dispatch:
     inputs:
       version:
@@ -38,7 +40,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: cert-review-${{ github.event_name == 'workflow_dispatch' && format('{0}{1}', inputs.version, inputs.planted) || 'release' }}
+  group: cert-review-${{ github.event_name == 'pull_request' && github.head_ref || github.event_name == 'workflow_dispatch' && format('{0}{1}', inputs.version, inputs.planted) || 'release' }}
   cancel-in-progress: false
 
 env:
@@ -48,7 +50,7 @@ jobs:
   plan:
     name: cert-review / plan
     if: >-
-      github.event_name == 'workflow_dispatch' || (
+      github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || (
         github.event.workflow_run.conclusion == 'success' &&
         github.event.workflow_run.head_branch == 'main' &&
         github.event.workflow_run.event == 'push' &&
@@ -98,6 +100,11 @@ jobs:
           releases() { git tag --list 'v*' | sed 's/^v//' | grep -E "$semver" | sort -V; }
           before() { releases | awk -v v="$1" '$0 == v { print last; exit } { last = $0 }'; }
           dry_run=false planted='' pr=''
+          if [ "$EVENT" = pull_request ]; then
+            proof() { node -p "require('./.github/cert-review-proof.json').$1 || ''"; }
+            IN_VERSION=$(proof version) IN_PREV=$(proof prev) IN_BASE=$(proof base) IN_PLANTED=$(proof planted) IN_PR=$(proof pr)
+            EVENT=workflow_dispatch
+          fi
           if [ "$EVENT" = workflow_run ]; then
             version=$(git tag --points-at "$RUN_SHA" 'v*' | sed 's/^v//' | grep -E "$semver" | sort -V | tail -1 || true)
             [ -n "$version" ] || skip "Release on $RUN_SHA tagged no version"
