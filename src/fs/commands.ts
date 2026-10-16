@@ -1,9 +1,20 @@
-import { type FsStat, inodeOf, type KernelFs, lutimesOf, mayLink, rangedOps } from './types.ts';
+import type { Cred } from '../kernel/cred.ts';
+import { access, R_OK } from './access.ts';
+import {
+  type FsStat,
+  fsError,
+  inodeOf,
+  type KernelFs,
+  lutimesOf,
+  mayLink,
+  rangedOps,
+} from './types.ts';
 
 const S_IFDIR = 0o040000;
 const S_IFREG = 0o100000;
 const COMMAND = /^\/(?:usr\/)?bin\/([^/]+)$/;
 const MAX_LINKS = 40;
+const BIN_ENTRY = /\/bin\/[^/]+$/;
 
 function missing(err: unknown): boolean {
   return (err as { code?: unknown })?.code === 'ENOENT';
@@ -37,11 +48,37 @@ export async function followLinks(fs: KernelFs, path: string): Promise<string> {
 
 export type UserCommandDir = (dir: string) => Promise<ReadonlySet<string> | undefined>;
 
+export interface EntryTarget {
+  path: string;
+  owner?: Cred;
+}
+
+export type CommandTarget = (path: string) => Promise<EntryTarget | undefined>;
+
+const NOBODY = { ruid: -1, euid: -1, suid: -1, rgid: -1, egid: -1, sgid: -1, groups: [] };
+
+const EMPTY = new Uint8Array(0);
+
+function quiet<T>(promise: Promise<T>): Promise<T | undefined> {
+  return promise.catch(() => undefined);
+}
+
+async function readsAs(fs: KernelFs, cred: Readonly<Cred>, target: string): Promise<boolean> {
+  const walked = await quiet(access(fs, cred, target, R_OK, { directory: false }));
+  return walked !== undefined && walked.denied === undefined && !walked.missing;
+}
+
+async function shownTarget(fs: KernelFs, target: string): Promise<FsStat | undefined> {
+  const st = await quiet(fs.stat(target));
+  return st?.isFile && (await readsAs(fs, NOBODY, target)) ? st : undefined;
+}
+
 export function withCommandDirs(
   fs: KernelFs,
   names: () => Promise<ReadonlySet<string>>,
   userDir: UserCommandDir = async () => undefined,
-  owners = false
+  owners = false,
+  targetOf: CommandTarget = async () => undefined
 ): KernelFs {
   async function nearest(path: string): Promise<Partial<FsStat>> {
     const st = await fs.stat(path).catch(() => undefined);
@@ -78,9 +115,63 @@ export function withCommandDirs(
     return own?.has(path.slice(slash + 1)) ? owned(synthetic(false, path), dir) : undefined;
   }
 
-  async function linked(path: string): Promise<FsStat | undefined> {
-    return (await virtual(path)) ?? virtual(await followLinks(fs, path));
+  let generation: unknown;
+  const targets = new Map<string, Promise<FsStat | undefined>>();
+  async function targetStat(target: string): Promise<FsStat | undefined> {
+    const now = await names();
+    if (now !== generation) {
+      generation = now;
+      targets.clear();
+    }
+    let found = targets.get(target);
+    if (!found) {
+      found = shownTarget(fs, target);
+      targets.set(target, found);
+    }
+    return found;
   }
+
+  async function shown(path: string): Promise<FsStat | undefined> {
+    const st = await virtual(path);
+    if (!st?.isFile) return st;
+    const target = await targetOf(path);
+    const real = target === undefined ? undefined : await targetStat(target.path);
+    return real
+      ? { ...st, size: real.size, mtime: real.mtime, ctime: real.mtime, atime: real.mtime }
+      : st;
+  }
+
+  async function linked(path: string): Promise<FsStat | undefined> {
+    return (await shown(path)) ?? shown(await followLinks(fs, path));
+  }
+
+  async function entryTarget(path: string): Promise<EntryTarget | undefined> {
+    if (!BIN_ENTRY.test(path) || !(await virtual(path))?.isFile) return undefined;
+    if (!(await fs.lstat(path).then(() => false, missing))) return undefined;
+    const target = await targetOf(path);
+    return target?.path === path ? undefined : target;
+  }
+
+  async function redirected(path: string): Promise<string | undefined> {
+    const target = (await entryTarget(path)) ?? (await entryTarget(await followLinks(fs, path)));
+    if (owners && target?.owner && !(await readsAs(fs, target.owner, target.path))) {
+      throw fsError('EACCES', path);
+    }
+    return target?.path;
+  }
+
+  const absent = (err: unknown): Uint8Array => {
+    if (missing(err)) return EMPTY;
+    throw err;
+  };
+
+  async function content(path: string, err: unknown): Promise<Uint8Array> {
+    if (!missing(err) || !(await linked(path))?.isFile) throw err;
+    const target = await redirected(path);
+    return target === undefined ? EMPTY : fs.readFileBuffer(target).catch(absent);
+  }
+
+  const ranged = rangedOps(fs);
 
   async function stat(path: string, real: (path: string) => Promise<FsStat>): Promise<FsStat> {
     try {
@@ -94,15 +185,13 @@ export function withCommandDirs(
 
   return {
     resolvePath: (base, path) => fs.resolvePath(base, path),
-    readFile: (path) => fs.readFile(path),
-    async readFileBuffer(path) {
-      try {
-        return await fs.readFileBuffer(path);
-      } catch (err) {
-        if (missing(err) && (await linked(path))?.isFile) return new Uint8Array(0);
-        throw err;
-      }
-    },
+    readFile: (path) =>
+      fs.readFile(path).catch(async (err) => {
+        if (!BIN_ENTRY.test(await followLinks(fs, path))) throw err;
+        return new TextDecoder().decode(await content(path, err));
+      }),
+    readFileBuffer: (path) => fs.readFileBuffer(path).catch((err) => content(path, err)),
+    commandTarget: async (path) => (await entryTarget(path))?.path,
     writeFile: (path, content, owner) => fs.writeFile(path, content, owner),
     link: (from, to, follow) => fs.link(from, to, follow),
     links: (path) => mayLink(fs, path),
@@ -134,7 +223,7 @@ export function withCommandDirs(
         added.map(
           async (name): Promise<[string, FsStat | null]> => [
             name,
-            (await virtual(`${base}/${name}`)) as FsStat,
+            (await shown(`${base}/${name}`)) as FsStat,
           ]
         )
       );
@@ -152,6 +241,16 @@ export function withCommandDirs(
     chmod: (path, mode) => fs.chmod(path, mode),
     utimes: (path, atime, mtime) => fs.utimes(path, atime, mtime),
     lutimes: (path, atime, mtime) => lutimesOf(fs, path, atime, mtime),
-    ...(rangedOps(fs) ?? {}),
+    ...(ranged
+      ? {
+          ...ranged,
+          pread: (path, offset, length, version) =>
+            ranged.pread(path, offset, length, version).catch(async (err) => {
+              const target = missing(err) ? await redirected(path) : undefined;
+              if (target === undefined) throw err;
+              return ranged.pread(target, offset, length).catch(absent);
+            }),
+        }
+      : {}),
   };
 }

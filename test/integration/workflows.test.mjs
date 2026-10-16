@@ -143,3 +143,72 @@ test('the pick step uses the decider and falls back to a hosted runner when it i
     await rm(root, { recursive: true, force: true });
   }
 });
+
+const compat = await readFile(
+  new URL('../../.github/workflows/kernel-compat.yml', import.meta.url),
+  'utf8'
+);
+
+const candidateScript = () => {
+  const at = compat.indexOf('  candidate:');
+  const start = compat.indexOf("node --input-type=module - <<'JS'\n", at);
+  const body = compat.slice(
+    compat.indexOf('\n', start) + 1,
+    compat.indexOf('\n          JS\n', start)
+  );
+  return body.replace(/^ {10}/gm, '');
+};
+
+const runCandidate = async (env) => {
+  const { execFile } = await import('node:child_process');
+  return new Promise((resolve) => {
+    const child = execFile(
+      process.execPath,
+      ['--input-type=module', '-'],
+      { env: { PATH: process.env.PATH, ...env } },
+      (error, stdout, stderr) => resolve({ ok: !error, stdout, stderr })
+    );
+    child.stdin.end(candidateScript());
+  });
+};
+
+test('kernel-compat takes a PR build x.y.z-pr.N.M from a named artifact run, for proofs of PR builds, and stays x.y.z for npm (#684)', async () => {
+  const { execFileSync } = await import('node:child_process');
+  const { createHash } = await import('node:crypto');
+  const root = await mkdtemp(join(tmpdir(), 'compat-candidate-'));
+  try {
+    const version = '1.2.3-pr.45.67';
+    await mkdir(join(root, 'pkg/package'), { recursive: true });
+    await writeFile(
+      join(root, 'pkg/package/package.json'),
+      JSON.stringify({ name: '@ai-ecoverse/slicc-kernel', version })
+    );
+    await mkdir(join(root, 'candidate'));
+    const tgz = join(root, 'candidate/kernel.tgz');
+    execFileSync('tar', ['-czf', tgz, '-C', join(root, 'pkg'), 'package']);
+    const sha = createHash('sha256')
+      .update(await readFile(tgz))
+      .digest('hex');
+    const output = join(root, 'output');
+    await writeFile(output, '');
+    const env = { RUNNER_TEMP: root, GITHUB_OUTPUT: output, RUN: '89', SHA256: sha };
+
+    const pr = await runCandidate({ ...env, INPUT: version, ARTIFACT: 'kernel-tgz' });
+    assert.equal(pr.ok, true, pr.stderr);
+    assert.equal(
+      await readFile(output, 'utf8'),
+      `version=${version}\nkernel=kernel-tgz-${version}-${sha.slice(0, 12)}\n`
+    );
+
+    const npm = await runCandidate({ ...env, INPUT: version, ARTIFACT: '' });
+    assert.equal(npm.ok, false);
+    assert.match(npm.stderr, /version 1\.2\.3-pr\.45\.67 is not x\.y\.z\n/);
+
+    const other = await runCandidate({ ...env, INPUT: '1.2.3-beta.1', ARTIFACT: 'kernel-tgz' });
+    assert.equal(other.ok, false);
+    assert.match(other.stderr, /is not x\.y\.z or x\.y\.z-pr\.N\.M/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+  assert.match(compat, /\n {4}if: .*!contains\(needs\.candidate\.outputs\.version, '-pr\.'\)/);
+});

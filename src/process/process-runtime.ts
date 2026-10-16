@@ -582,6 +582,12 @@ function credSyncTransport(
   };
 }
 
+function sigpipeSpared(transport: SyncSabTransport): boolean {
+  const req = { op: 'proc-kill-self' as const, sig: SIG.PIPE, probe: true };
+  const r = transport.call(req, Number.POSITIVE_INFINITY, 'proc-kill-self');
+  return r.ok && !(r.kind === 'json' && r.json === 'terminate');
+}
+
 export async function runWasmProcess(
   init: WasmProcessInitMsg,
   port: SabPostLike,
@@ -698,7 +704,7 @@ export async function runWasmProcess(
   });
   early = () => signals.quiet(() => vfs.flushDirty());
   closeDropsLocks(running.FS, sys);
-  const sigpipe = (): boolean => running.sliccSigpipe?.() === 1;
+  const sigpipe = (): boolean => running.sliccSigpipe?.() === 1 || sigpipeSpared(gated);
   const restartable = (): boolean => signals.restartable();
   const owners = init.owners ? { owners: true } : {};
   const streams = new KernelStreams(running.FS, sys, {

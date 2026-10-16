@@ -94,6 +94,7 @@ export interface KernelFs {
   unguarded?(): KernelFs;
   noLinks?(): KernelFs;
   mayChange?(path: string, follow: boolean, whole?: boolean): Promise<void>;
+  commandTarget?(path: string): Promise<string | undefined>;
   readVersioned?(path: string, cached?: boolean): Promise<{ bytes: Uint8Array; version: string }>;
   version?(path: string, cached?: boolean): Promise<string>;
 }

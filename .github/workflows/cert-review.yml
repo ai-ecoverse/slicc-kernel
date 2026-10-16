@@ -276,6 +276,7 @@ jobs:
   suite:
     name: cert-review / suite ${{ matrix.which }}
     needs: [plan, delta, tarball]
+    if: ${{ !cancelled() && needs.plan.outputs.go == 'true' && needs.delta.result == 'success' && needs.tarball.result == 'success' }}
     runs-on: ${{ vars.CERT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 120
     strategy:
@@ -377,6 +378,7 @@ jobs:
   compat:
     name: cert-review / kernel-compat
     needs: [plan, tarball]
+    if: ${{ !cancelled() && needs.plan.outputs.go == 'true' && needs.tarball.result == 'success' }}
     runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 300
     permissions:

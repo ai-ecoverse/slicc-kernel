@@ -3,6 +3,7 @@ import { physicalPath } from '../../fs/physical-path.ts';
 import { localCpuNanos } from '../../kernel/cpu-clock.ts';
 import { type Cred, type CredChange, MAX_GROUPS } from '../../kernel/cred.ts';
 import type { DeviceMeta, KernelFdKind } from '../../kernel/fd-table.ts';
+import { SIG } from '../../kernel/signals.ts';
 import type { SyncFsBridgeStat, SyncFsPosixBridge } from '../../realm/sync-fs-wire.ts';
 import type { LockHeld } from '../process-locks.ts';
 import { type LockedFile, lockImports } from './slicc-lock.ts';
@@ -47,6 +48,7 @@ import { pollOneoff } from './wasi-poll.ts';
 import type { WasiSigmask } from './wasi-sigmask.ts';
 import type { WasiSignals } from './wasi-signals.ts';
 import { sliccTty } from './wasi-termios.ts';
+import { wasixEpollImports } from './wasix-epoll.ts';
 import type { ThreadEntry } from './wasix-fork.ts';
 import { datagramCalls } from './wasix-sockets.ts';
 
@@ -88,6 +90,14 @@ export interface WasiHostOptions {
 
 export type WasiFunction = (...args: never[]) => number | undefined;
 
+type EpollWait = (
+  epfd: number,
+  events: number,
+  max: number,
+  timeout: bigint,
+  nevents: number
+) => number | undefined;
+
 const IDS = ['ruid', 'euid', 'suid', 'rgid', 'egid', 'sgid'] as const;
 const NS_PER_MS = 1_000_000n;
 const AT_SYMLINK_NOFOLLOW = 1;
@@ -105,7 +115,7 @@ const DEFAULT_UMASK = 0o022;
 const MONOTONIC_BASE = BigInt(Math.round(performance.timeOrigin)) * NS_PER_MS;
 
 const MAX_READ = 1024 * 1024;
-const SIGPIPE_EXIT = 141;
+const SIGPIPE_EXIT = 128 + SIG.PIPE;
 
 const SIG_IGN = 1;
 
@@ -189,7 +199,13 @@ export class WasiHost {
 
   interruptWakes = false;
 
+  strictEpoll = false;
+
   entered = false;
+
+  enteredSignals = 0;
+
+  raisedOnEntry: (() => number) | undefined;
 
   onRaise: ((sig: number) => boolean) | undefined;
 
@@ -490,6 +506,20 @@ export class WasiHost {
         this.sigmask
           ? this.maskedPoll(this.sigmask, [lo, hi], [inPtr, outPtr, n, nevents])
           : E.NOSYS,
+      sigmask_epoll_wait: (
+        lo: number,
+        hi: number,
+        epfd: number,
+        events: number,
+        max: number,
+        timeout: bigint,
+        nevents: number
+      ) =>
+        this.sigmask
+          ? this.maskedEpoll(this.sigmask, [lo, hi], nevents, (epoll) =>
+              epoll(epfd, events, max, timeout, nevents)
+            )
+          : E.NOSYS,
       sigwait: (lo: number, _hi: number, timeout: bigint, out: number) => {
         const mask = this.sigmask;
         if (!mask) return E.NOSYS;
@@ -540,8 +570,34 @@ export class WasiHost {
     try {
       this.mem.view().setUint32(nevents, 0, true);
       if (mask.deliverUnblocked()) return E.INTR;
+      this.settleEntry(mask);
       if (n > 0) return this.poll(inPtr, outPtr, n, nevents);
       return this.entered ? E.INTR : this.suspend();
+    } finally {
+      mask.deliverUnblocked();
+      mask.restore(old);
+    }
+  }
+
+  private epollWait: EpollWait | undefined;
+
+  private settleEntry(mask: WasiSigmask): void {
+    if (this.entered && (this.enteredSignals & ~mask.blockedBits()) === 0) this.entered = false;
+  }
+
+  private maskedEpoll(
+    mask: WasiSigmask,
+    set: [number, number],
+    nevents: number,
+    wait: (epoll: EpollWait) => number | undefined
+  ): number {
+    const old = mask.swap(set[0], set[1]);
+    try {
+      this.mem.view().setUint32(nevents, 0, true);
+      if (mask.deliverUnblocked()) return E.INTR;
+      this.settleEntry(mask);
+      this.epollWait ??= wasixEpollImports(this).epoll_wait as unknown as EpollWait;
+      return wait(this.epollWait) ?? E.SUCCESS;
     } finally {
       mask.deliverUnblocked();
       mask.restore(old);
@@ -994,7 +1050,7 @@ export class WasiHost {
         return this.fds.kind(fd, e) === 'file' ? this.changed(fd, e, n) : n;
       } catch (err) {
         const broken = (err as { code?: string }).code === 'EPIPE';
-        if (broken && this.fds.kind(fd, e) !== 'socket') throw new WasiExit(SIGPIPE_EXIT);
+        if (broken && this.fds.kind(fd, e) !== 'socket') this.brokenPipe();
         throw err;
       }
     }
@@ -1005,6 +1061,19 @@ export class WasiHost {
       return data.length;
     }
     return this.file(fd, 'write').write(data);
+  }
+
+  private brokenPipe(): void {
+    let action: unknown;
+    try {
+      action = this.o.kernel.call({ op: 'proc-kill-self', sig: SIG.PIPE, probe: true });
+    } catch {
+      action = 'terminate';
+    }
+    if (action !== 'terminate') return;
+    const mask = this.sigmask;
+    if (!mask?.blocks(SIG.PIPE)) throw new WasiExit(SIGPIPE_EXIT);
+    this.o.kernel.call({ op: 'thread-kill', tid: mask.tid, sig: SIG.PIPE });
   }
 
   private read(fd: number, max: number): Uint8Array {

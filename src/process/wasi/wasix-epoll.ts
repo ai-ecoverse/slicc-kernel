@@ -13,7 +13,8 @@ const NS_PER_MS = 1_000_000n;
 const EVENTFD_SEMAPHORE = 1;
 const EVENTFD_NONBLOCK = 4;
 const EVENTFD_MAX = 0xffff_ffff_ffff_fffen;
-const OPS: readonly EpollOp[] = ['add', 'set', 'del', 'mod'];
+const WASIX_OPS: readonly EpollOp[] = ['add', 'mod', 'del'];
+const DUAL_OPS: readonly EpollOp[] = ['add', 'set', 'del', 'mod'];
 
 export function timeoutMs(ns: bigint): number {
   const value = BigInt.asUintN(64, ns);
@@ -46,7 +47,7 @@ export function wasixEpollImports(host: WasiHost): Record<string, WasiFunction> 
       mem.view().setUint32(out, fd, true);
     },
     epoll_ctl: (epfd: number, op: number, fd: number, event: number) => {
-      const how = OPS[op];
+      const how = (host.strictEpoll ? WASIX_OPS : DUAL_OPS)[op];
       if (!how) throw new WasiError('EINVAL');
       kernelFd(epfd, 'EINVAL');
       kernelFd(fd, 'EPERM');

@@ -173,6 +173,45 @@ window.copyTree = async (from, to, names) => {
 
 window.objects = new Map();
 
+function uploadSink(inner, maxRequestBody) {
+  let seen;
+  window.firstPart = new Promise((resolve) => {
+    seen = resolve;
+  });
+  const hex = (buffer) =>
+    Array.from(new Uint8Array(buffer), (b) => b.toString(16).padStart(2, '0')).join('');
+  return {
+    traits: { ...inner.traits, maxRequestBody, streamingBodies: true },
+    async fetch(req) {
+      if (!req.url.startsWith('http://upload-sink.test/')) return inner.fetch(req);
+      const parts = [];
+      let length = 0;
+      for await (const part of req.bodyStream ?? (req.body ? [req.body] : [])) {
+        if (length === 0) seen(new TextDecoder().decode(part));
+        parts.push(part);
+        length += part.length;
+      }
+      const all = new Uint8Array(length);
+      let at = 0;
+      for (const part of parts) {
+        all.set(part, at);
+        at += part.length;
+      }
+      const digest = hex(await crypto.subtle.digest('SHA-256', all));
+      const text = `${req.bodyStream ? 'stream' : 'whole'} ${length} ${digest}`;
+      return {
+        status: 200,
+        statusText: 'OK',
+        headers: [['content-type', 'text/plain']],
+        body: (async function* () {
+          yield new TextEncoder().encode(text);
+        })(),
+        cancel: async () => {},
+      };
+    },
+  };
+}
+
 function storeTransport(inner) {
   const reply = (status, bytes = new Uint8Array(0)) => ({
     status,
@@ -429,7 +468,8 @@ window.boot = async (options = {}) => {
   const base = options.proxy
     ? localProxyTransport(options.proxy)
     : fetchTransport(options.hint ? { hint: options.hint } : {});
-  const stored = options.store ? storeTransport(base) : base;
+  const sunk = options.uploadSink ? uploadSink(base, options.uploadSink) : base;
+  const stored = options.store ? storeTransport(sunk) : sunk;
   const transport = options.liveTraits ? liveTraits(stored) : stored;
   const network = options.network === false ? {} : { network: { transport } };
   const policy =

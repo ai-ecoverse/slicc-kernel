@@ -1,0 +1,13 @@
+{
+  "name": "preh1stat",
+  "private": true,
+  "slicc": {
+    "abi": "emscripten",
+    "commands": {
+      "preh1stat": {
+        "glue": "bin/preh1stat",
+        "wasm": "bin/preh1stat.wasm"
+      }
+    }
+  }
+}
