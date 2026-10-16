@@ -56,3 +56,38 @@ test('tar extracts a read-only file with its content (users: enforce)', async (t
   );
   assert.deepEqual(r, { status: 0, stdout: '444\npacked', stderr: '' });
 });
+
+const CHMOD_AS_OTHER = `import os
+fd = os.open('/work/mine', os.O_RDONLY)
+for name, op in (('path', lambda m: os.chmod('/work/mine', m)), ('fd', lambda m: os.fchmod(fd, m))):
+    for m in (0o644, 0o600):
+        try:
+            op(m)
+            print(name, oct(m), 'ok')
+        except PermissionError:
+            print(name, oct(m), 'EPERM')
+`;
+
+test('chmod and fchmod by a user who does not own the file fail with EPERM, also to the mode it already has (users: enforce)', async (t) => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils', 'wasix-python']) await install(kernel, name);
+  await kernel.users.add({ name: 'cone' });
+  const made = await kernel.run(
+    [
+      'bash',
+      '-c',
+      'mkdir -p /work && chmod 777 /work && printf x > /work/mine && chmod 644 /work/mine',
+    ],
+    { cwd: '/' }
+  );
+  assert.equal(made.status, 0);
+  const r = await kernel.run(['python3', '-c', CHMOD_AS_OTHER], { cwd: '/', user: 'cone' });
+  assert.deepEqual(r, {
+    status: 0,
+    stdout: 'path 0o644 EPERM\npath 0o600 EPERM\nfd 0o644 EPERM\nfd 0o600 EPERM\n',
+    stderr: '',
+  });
+  const mode = await kernel.run(['bash', '-c', 'stat -c %a /work/mine'], { cwd: '/' });
+  assert.equal(mode.stdout, '644\n');
+});
