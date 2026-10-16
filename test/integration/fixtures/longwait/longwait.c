@@ -53,8 +53,8 @@ int main(int argc, char **argv) {
   int fds[2];
   pipe(fds);
   struct itimerval it = {.it_value = {.tv_usec = 300000}};
-  setitimer(ITIMER_REAL, &it, NULL);
   long long start = now_ms();
+  setitimer(ITIMER_REAL, &it, NULL);
   errno = 0;
   int r = wait_long(mode, fds[0]);
   int e = errno;
