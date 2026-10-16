@@ -1,0 +1,16 @@
+{
+  "name": "spintest",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "spintest": {
+        "wasm": "bin/spintest.wasm"
+      },
+      "spinread": {
+        "abi": "js",
+        "module": "bin/spinread.mjs"
+      }
+    }
+  }
+}
