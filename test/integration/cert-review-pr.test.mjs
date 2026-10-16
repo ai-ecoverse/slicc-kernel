@@ -380,7 +380,7 @@ test("the merge group's cert-review is a lookup: each PR's status on the head be
   );
 });
 
-test('the workflow: same-repo PRs with merge-ok review on the merge ref, the key only in the review step, merge groups only look up', () => {
+test("the workflow: same-repo PRs with merge-ok review the merge ref with main's own tools, the key only in the review step, merge groups only look up", () => {
   assert.match(
     workflow,
     /^ {2}pull_request:\n {4}types: \[opened, synchronize, reopened, labeled\]\n {2}merge_group:\n/m
@@ -393,8 +393,27 @@ test('the workflow: same-repo PRs with merge-ok review on the merge ref, the key
     jobs.plan,
     /if: github\.event_name == 'pull_request' && github\.event\.pull_request\.head\.repo\.full_name == github\.repository/
   );
-  assert.doesNotMatch(jobs.plan, /ref:/);
-  assert.match(jobs.plan, /echo "parent=\$\(git rev-parse HEAD\^1\)"/);
+  for (const [name, body] of Object.entries(jobs)) {
+    const checkouts =
+      body.match(/uses: actions\/checkout@[0-9a-f]{40}\n {8}with:\n {10}ref: [^\n]+/g) ?? [];
+    assert.equal(
+      checkouts.length,
+      (body.match(/uses: actions\/checkout@/g) ?? []).length,
+      `${name}: every checkout names its ref`
+    );
+    for (const c of checkouts)
+      assert.match(
+        c,
+        name === 'group'
+          ? /ref: \$\{\{ github\.event\.merge_group\.base_sha \}\}$/
+          : /ref: \$\{\{ github\.event\.pull_request\.base\.sha \}\}$/,
+        `${name} runs main's tools`
+      );
+  }
+  for (const name of ['plan', 'pack', 'suite'])
+    assert.match(jobs[name], /git fetch -q --no-tags --depth=2 origin "\$GITHUB_SHA"/);
+  assert.match(jobs.plan, /echo "commit=\$GITHUB_SHA"/);
+  assert.match(jobs.plan, /echo "parent=\$\(git rev-parse "\$GITHUB_SHA\^1"\)"/);
   assert.match(jobs.pack, /^ {4}runs-on: ubuntu-latest$/m);
   const secretSteps = workflow.match(/secrets\.[A-Z_]+/g) ?? [];
   assert.deepEqual(secretSteps, ['secrets.AWS_BEARER_TOKEN_BEDROCK']);

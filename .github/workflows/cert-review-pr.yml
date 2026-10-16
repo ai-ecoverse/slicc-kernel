@@ -38,8 +38,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          fetch-depth: 2
+          ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
+
+      - name: The trees under test, the pull request merged onto main and its first parent, with main's tools
+        run: git fetch -q --no-tags --depth=2 origin "$GITHUB_SHA"
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
@@ -70,8 +73,8 @@ jobs:
             echo "latest=$latest"
             echo "version=$major.$minor.$((patch + 1))-pr.$PR.$GITHUB_RUN_ID"
             echo "prev=$latest-base.$PR.$GITHUB_RUN_ID"
-            echo "commit=$(git rev-parse HEAD)"
-            echo "parent=$(git rev-parse HEAD^1)"
+            echo "commit=$GITHUB_SHA"
+            echo "parent=$(git rev-parse "$GITHUB_SHA^1")"
           } | tee -a "$GITHUB_OUTPUT"
 
   pack:
@@ -91,8 +94,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          fetch-depth: 2
+          ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
+
+      - name: The trees under test, the pull request merged onto main and its first parent, with main's tools
+        run: git fetch -q --no-tags --depth=2 origin "$GITHUB_SHA"
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
@@ -132,6 +138,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          ref: ${{ github.event.pull_request.base.sha }}
           sparse-checkout: tools/cert-review
           persist-credentials: false
 
@@ -180,8 +187,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          fetch-depth: 2
+          ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
+
+      - name: The trees under test, the pull request merged onto main and its first parent, with main's tools
+        run: git fetch -q --no-tags --depth=2 origin "$GITHUB_SHA"
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
@@ -253,6 +263,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          ref: ${{ github.event.pull_request.base.sha }}
           sparse-checkout: tools/cert-review
           persist-credentials: false
 
@@ -303,6 +314,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          ref: ${{ github.event.pull_request.base.sha }}
           sparse-checkout: tools/cert-review
           persist-credentials: false
 
@@ -421,6 +433,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          ref: ${{ github.event.pull_request.base.sha }}
           sparse-checkout: tools/cert-review
           persist-credentials: false
 
@@ -532,6 +545,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          ref: ${{ github.event.merge_group.base_sha }}
           sparse-checkout: tools/cert-review
           persist-credentials: false
 
