@@ -168,11 +168,18 @@ test('a changed crontab and /etc/crontab take effect without a restart', async (
   await minutes(1);
   await until(async () => (await read('/home/cone/out')) === 'a\n', 'the first table');
   await kernel.writeFile(`${SPOOL}/cone`, '* * * * * echo b >> out\n');
+  await settle();
+  await minutes(1);
+  await until(async () => (await read('/home/cone/out')) === 'a\nb\n', 'the rewritten table');
+  await kernel.writeFile('/tmp/next', '* * * * * echo c >> out\n');
+  await kernel.run(['mv', '/tmp/next', `${SPOOL}/cone`], { cwd: '/' });
+  await settle();
+  await minutes(1);
+  await until(async () => (await read('/home/cone/out')) === 'a\nb\nc\n', 'the table moved in');
   await kernel.writeFile('/etc/crontab', '* * * * * cone  echo "sys $USER" >> sys\n');
   await settle();
   await minutes(1);
   await until(async () => (await read('/home/cone/sys')) === 'sys cone\n', 'the system table');
-  await until(async () => (await read('/home/cone/out')) === 'a\nb\n', 'the changed table');
 });
 
 test('two kernels on one root run each due once, and the second takes over when the first ends', async (t) => {

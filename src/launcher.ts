@@ -746,7 +746,14 @@ export class Launcher {
       locks: cronLocks(),
       ready: () => this.fstab,
       lookup: (name) => this.users.lookup(name),
-      watch: (paths, notify) => this.watchFiles(paths, notify),
+      watch: async (paths, notify) => {
+        const local = this.watchers.watch(paths, { recursive: true }, () => notify());
+        const remote = await this.watchFiles(paths, notify);
+        return () => {
+          local();
+          remote();
+        };
+      },
       run: async ({ account, argv, cwd, env, output }) => {
         const ended = await this.run(argv, {
           user: account,
