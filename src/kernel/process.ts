@@ -557,6 +557,11 @@ export interface WasmProcessOptions {
   resolver?: Resolver;
 }
 
+function timeLeft(req: WasmSyscall, started: number): WasmSyscall {
+  if (!('timeoutMs' in req) || typeof req.timeoutMs !== 'number' || req.timeoutMs < 0) return req;
+  return { ...req, timeoutMs: Math.max(0, req.timeoutMs - (performance.now() - started)) };
+}
+
 export type StateListener = (state: 'stopped' | 'continued', sig: number) => void;
 
 export type SignalOutcome = DefaultAction | 'deliver' | 'forward';
@@ -767,23 +772,29 @@ export class WasmProcess {
     block?: () => void
   ): Promise<SyncFsResult> {
     this.options.onSyscall?.(req);
+    const started = performance.now();
+    let restarted = false;
     for (;;) {
       await this.resumed;
       if (this.dying) return DYING;
+      const current = restarted ? timeLeft(req, started) : req;
       const stops = this.stops;
       const scope = new AbortController();
       const forward = () => scope.abort();
       if (cancelled?.aborted) scope.abort();
       cancelled?.addEventListener('abort', forward, { once: true });
       if (block) this.blocks.set(scope.signal, block);
-      const result = await this.dispatch(req, scope.signal).finally(() => {
+      const result = await this.dispatch(current, scope.signal).finally(() => {
         cancelled?.removeEventListener('abort', forward);
         this.waiting.delete(scope.signal);
       });
       if (this.dying) return DYING;
 
       const restart = !result.ok && result.errno === 'EINTR' && this.stops !== stops;
-      if (restart && !this.options.hasPending?.()) continue;
+      if (restart && !this.options.hasPending?.() && req.op !== 'epoll-wait') {
+        restarted = true;
+        continue;
+      }
 
       await this.resumed;
       return result;
