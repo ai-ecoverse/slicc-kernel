@@ -59,6 +59,15 @@ test('a WASIX write to a pipe with no reader follows SIGPIPE: ignored or blocked
   });
 });
 
+test('a caught SIGPIPE from a write in a thread runs its handler on that thread, then the write is EPIPE (#820)', async (t) => {
+  const kernel = await booted(t);
+  assert.deepEqual(await run(kernel, ['pipetest', 'thread']), {
+    status: 0,
+    stdout: 'thread: -1 Broken pipe, handled 1, on the writing thread\n',
+    stderr: '',
+  });
+});
+
 test('an ignored SIGPIPE survives spawn and exec: a WASIX child of bash `trap "" PIPE` gets EPIPE, unless it sets SIG_DFL itself, and so does Emscripten yes (#810)', async (t) => {
   const kernel = await booted(t, ['wasm-bash', 'wasm-coreutils']);
   const bash = (script) => run(kernel, ['bash', '-c', script]);
