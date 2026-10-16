@@ -3,19 +3,20 @@ name: Release
 on:
   push:
     branches: [main]
-  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   tag:
+    name: release / tag
     if: github.ref == 'refs/heads/main'
     runs-on: ${{ vars.CERT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 30
-    concurrency:
-      group: release-tag
-      cancel-in-progress: false
     env:
       LEFTHOOK: '0'
     permissions:
@@ -23,7 +24,7 @@ jobs:
       issues: write
       pull-requests: write
     outputs:
-      tags: ${{ steps.tags.outputs.tags }}
+      version: ${{ steps.tags.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -56,36 +57,209 @@ jobs:
 
       - id: tags
         if: steps.head.outputs.current == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tags=$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | tr '\n' ' ' || true)
-          for tag in $tags; do
+          version=$(git tag --points-at HEAD 'v*' | sed 's/^v//' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)
+          if [ -n "$version" ]; then
+            tag="v$version"
             git ls-remote --exit-code origin "refs/tags/$tag" > /dev/null || git push origin "refs/tags/$tag"
-          done
-          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+            notes="refs/notes/semantic-release-$tag"
+            if git show-ref --verify --quiet "$notes" && ! git ls-remote --exit-code origin "$notes" > /dev/null; then
+              git push origin "$notes" || echo "::warning::git push $notes failed, leaving it"
+            fi
+            gh release view "$tag" > /dev/null 2>&1 || gh release create "$tag" --verify-tag --generate-notes --title "$tag"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "release tag: ${version:+v$version}${version:-none}"
 
-  publish:
+  pack:
+    name: release / pack
     needs: tag
-    if: github.ref == 'refs/heads/main' && needs.tag.outputs.tags != ''
+    if: github.ref == 'refs/heads/main' && needs.tag.outputs.version != ''
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 20
     env:
       LEFTHOOK: '0'
+      VERSION: ${{ needs.tag.outputs.version }}
     permissions:
-      contents: write
-      id-token: write
+      contents: read
+    outputs:
+      sha256: ${{ steps.pack.outputs.sha256 }}
+      file: ${{ steps.pack.outputs.file }}
+      commit: ${{ steps.pack.outputs.commit }}
+      artifact: kernel-tgz-${{ needs.tag.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: 24
           cache: npm
 
-      - run: npm ci
+      - name: Pack v${{ needs.tag.outputs.version }} from its tag, once
+        id: pack
+        run: node tools/cert-review/pack.mjs --version "$VERSION" --ref "v$VERSION" --out "$RUNNER_TEMP/pack"
 
-      - run: node tools/release-recover.mjs
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: kernel-tgz-${{ needs.tag.outputs.version }}
+          path: |
+            ${{ runner.temp }}/pack/*.tgz
+            ${{ runner.temp }}/pack/*.tgz.sha256
+            ${{ runner.temp }}/pack/pack.json
+          if-no-files-found: error
+
+  cert:
+    name: cert-review
+    needs: [tag, pack]
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      actions: write
+      contents: write
+      issues: write
+      pull-requests: read
+      statuses: write
+    uses: ./.github/workflows/cert-review.yml
+    with:
+      version: ${{ needs.tag.outputs.version }}
+      artifact: ${{ needs.pack.outputs.artifact }}
+      sha256: ${{ needs.pack.outputs.sha256 }}
+    secrets: inherit
+
+  publish:
+    name: release / publish
+    needs: [tag, pack, cert]
+    if: >-
+      !cancelled() && github.ref == 'refs/heads/main' &&
+      needs.pack.result == 'success' &&
+      needs.cert.outputs.conclusion == 'success' &&
+      needs.cert.outputs.sha256 != '' &&
+      needs.cert.outputs.sha256 == needs.pack.outputs.sha256
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      outcome: ${{ steps.publish.outputs.outcome }}
+      sha256: ${{ needs.cert.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          sparse-checkout: tools/cert-review
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: ${{ needs.pack.outputs.artifact }}
+          path: ${{ runner.temp }}/pack
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: cert-review-record-${{ needs.tag.outputs.version }}
+          path: ${{ runner.temp }}/record
+
+      - name: Publish the certified bytes, with provenance, if newer than npm's latest
+        id: publish
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TGZ: ${{ runner.temp }}/pack/${{ needs.pack.outputs.file }}
+          SHA256: ${{ needs.pack.outputs.sha256 }}
+        run: node tools/cert-review/publish.mjs --tarball "$TGZ" --record "$RUNNER_TEMP/record/record.json" --sha256 "$SHA256"
+
+  verify:
+    name: release / verify on npm
+    needs: [tag, publish]
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && needs.publish.result == 'success' && needs.publish.outputs.outcome == 'published' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.tag.outputs.version }}
+      SHA256: ${{ needs.publish.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          sparse-checkout: tools/cert-review
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+
+      - name: gh
+        run: tools/cert-review/gh.sh
+
+      - name: npm integrity, SLSA provenance and gitHead against the certified sha256
+        run: node tools/cert-review/published.mjs --repo "$GITHUB_REPOSITORY" --version "$VERSION" --sha256 "$SHA256"
+
+      - name: A release an earlier attempt marked not published is on npm now
+        run: |
+          set -euo pipefail
+          gh release view "v$VERSION" --json body --jq .body > "$RUNNER_TEMP/notes.md" 2> /dev/null || exit 0
+          grep -q '<!-- not-published -->' "$RUNNER_TEMP/notes.md" || exit 0
+          node -e '
+            const fs = require("node:fs");
+            const file = process.argv[1];
+            fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace(/\n*<!-- not-published -->[\s\S]*?<!-- \/not-published -->\n*/g, "").trimStart());
+          ' "$RUNNER_TEMP/notes.md"
+          gh release edit "v$VERSION" --prerelease=false --latest --notes-file "$RUNNER_TEMP/notes.md" > /dev/null
+          echo "v$VERSION: the not-published mark is gone"
+
+  not-published:
+    name: release / not published
+    needs: [tag, pack, cert, publish]
+    if: >-
+      !cancelled() && github.ref == 'refs/heads/main' && needs.tag.outputs.version != '' &&
+      needs.publish.outputs.outcome != 'published'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.tag.outputs.version }}
+      LINE: ${{ needs.cert.outputs.line }}
+      PACK: ${{ needs.pack.result }}
+      CERT: ${{ needs.cert.result }}
+      PUBLISH: ${{ needs.publish.result }}
+      OUTCOME: ${{ needs.publish.outputs.outcome }}
+    steps:
+      - name: v${{ needs.tag.outputs.version }} stays tagged and is not on npm
+        run: |
+          set -euo pipefail
+          line="${LINE:-cert-ci: FAIL @ai-ecoverse/slicc-kernel@$VERSION: no cert-review line (pack $PACK, cert-review $CERT)}"
+          why="not published to npm: $line"
+          if [ "$OUTCOME" = skipped ]; then why="not published to npm: v$VERSION is not newer than npm's latest; $line"; fi
+          if [ "$PUBLISH" = failure ]; then why="not published to npm: the publish job failed after: $line"; fi
+          { echo '```'; echo "$why"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          if gh release view "v$VERSION" > /dev/null 2>&1; then
+            gh release view "v$VERSION" --json body --jq .body > "$RUNNER_TEMP/notes.md"
+            node -e '
+              const fs = require("node:fs");
+              const [file, why] = process.argv.slice(1);
+              const kept = fs.readFileSync(file, "utf8").replace(/\n*<!-- not-published -->[\s\S]*?<!-- \/not-published -->\n*/g, "").trimEnd();
+              fs.writeFileSync(file, "<!-- not-published -->\n**" + why + "**\n<!-- /not-published -->\n\n" + kept + "\n");
+            ' "$RUNNER_TEMP/notes.md" "$why"
+            gh release edit "v$VERSION" --prerelease --latest=false --notes-file "$RUNNER_TEMP/notes.md" > /dev/null
+            echo "v$VERSION is a prerelease, not latest, marked not published to npm"
+          fi
+          if [ "$OUTCOME" = skipped ]; then
+            echo "::warning title=v$VERSION not published::$why"
+          else
+            echo "::error title=v$VERSION not published::$why"
+            exit 1
+          fi

@@ -496,3 +496,60 @@ export function covering(tags, prev, version) {
     .filter((t) => compareVersions(t, prev) > 0 && compareVersions(t, version) <= 0)
     .sort(compareVersions);
 }
+
+export const NAME = '@ai-ecoverse/slicc-kernel';
+const SEMVER = /^\d+\.\d+\.\d+$/;
+
+export function gateOf({ record, sha256, packed, manifest }) {
+  const version = String(record?.version ?? '');
+  const line = String(record?.line ?? '').split('\n')[0];
+  const subject = SEMVER.test(version) ? `${NAME}@${version}` : NAME;
+  const refuse = (why) => ({ subject, line, why });
+  if (!record) return refuse('no cert-review record');
+  if (!SEMVER.test(version)) return refuse(`the record's version is "${version}"`);
+  if (record.planted) return refuse(`the record is for a planted build of ${record.planted}`);
+  if (record.certified !== true || !line.startsWith(`certified ${subject} `))
+    return refuse('the verdict is not certified');
+  if (record.sha256 !== sha256)
+    return refuse(`the record's sha256 ${record.sha256} is not the tarball's ${sha256}`);
+  if (String(packed ?? '').trim() !== sha256)
+    return refuse(`the pack job's sha256 ${packed || '(none)'} is not the tarball's ${sha256}`);
+  if (!line.startsWith(`certified ${subject} sha256=${sha256} `))
+    return refuse("the line doesn't name the tarball's sha256");
+  if (manifest?.name !== NAME || manifest?.version !== version)
+    return refuse(`the tarball is ${manifest?.name}@${manifest?.version}`);
+  return { subject, line, sha256 };
+}
+
+export function publishStep({ version, latest, onNpm, ours, dryRun }) {
+  if (latest && SEMVER.test(latest) && compareVersions(version, latest) < 0)
+    return { action: 'skip', why: `v${version} is older than npm's latest ${latest}` };
+  if (onNpm && dryRun)
+    return {
+      action: 'publish',
+      force: true,
+      why: `${NAME}@${version} is already on npm (${onNpm === ours ? 'these bytes' : onNpm}), so the dry run adds --force`,
+    };
+  if (onNpm && onNpm !== ours)
+    return { action: 'refuse', why: `${NAME}@${version} is on npm as ${onNpm}, not ${ours}` };
+  if (onNpm)
+    return { action: 'done', why: `${NAME}@${version} is already on npm with these bytes` };
+  return { action: 'publish', force: false };
+}
+
+export function packageProblems(manifest, { version, commit }) {
+  const problems = [];
+  if (manifest?.name !== NAME || manifest?.version !== version)
+    problems.push(`the tarball is ${manifest?.name}@${manifest?.version}, not ${NAME}@${version}`);
+  if (manifest?.gitHead !== commit)
+    problems.push(`the tarball's gitHead is ${manifest?.gitHead}, the tag commit is ${commit}`);
+  return problems;
+}
+
+export function previousPublished(tags, published, version) {
+  const served = new Set(published);
+  return tags
+    .filter((t) => served.has(t) && compareVersions(t, version) < 0)
+    .sort(compareVersions)
+    .at(-1);
+}
