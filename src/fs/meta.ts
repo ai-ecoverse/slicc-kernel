@@ -21,10 +21,16 @@ export interface MetaEntry {
 
 export type MetaChange = (entry: MetaEntry | undefined) => MetaEntry | undefined;
 
+export interface MetaUpdate {
+  path: string;
+  change: MetaChange;
+}
+
 export interface MetaStore {
   get(paths: readonly string[]): Promise<Array<MetaEntry | undefined>>;
   fresh?(paths: readonly string[]): Promise<Array<MetaEntry | undefined>>;
   update(path: string, change: MetaChange): Promise<void>;
+  updateMany?(changes: ReadonlyArray<MetaUpdate>): Promise<void>;
   move(from: string, to: string, root: (entry: MetaEntry | undefined) => MetaEntry): Promise<void>;
   remove(paths: readonly string[]): Promise<void>;
   links(dir: string): Promise<MetaEntry[]>;
@@ -204,16 +210,23 @@ export class IndexedDbMeta implements MetaStore {
     this.cache.set(path, next ?? null);
   }
 
-  async updateMany(
-    changes: ReadonlyArray<{ path: string; change: (entry: MetaEntry | undefined) => MetaEntry }>
-  ): Promise<void> {
+  async updateMany(changes: ReadonlyArray<MetaUpdate>): Promise<void> {
+    if (changes.length === 0) return;
+    this.settleRemoves();
     const [transaction, store] = this.transaction('readwrite');
+    const next = new Map<string, MetaEntry | null>();
     for (const { path, change } of changes) {
       const request = store.get(path);
-      request.onsuccess = () => store.put(change(request.result));
+      request.onsuccess = () => {
+        const entry = change(request.result);
+        next.set(path, entry ?? null);
+        if (entry) store.put(entry);
+        else store.delete(path);
+      };
     }
     await settle(transaction, () => undefined);
     this.changed({ paths: changes.map(({ path }) => path) });
+    for (const [path, entry] of next) this.cache.set(path, entry);
   }
 
   close(): void {

@@ -1,4 +1,4 @@
-import { MemoryMeta, type MetaEntry, type MetaStore } from './meta.ts';
+import { MemoryMeta, type MetaEntry, type MetaStore, type MetaUpdate } from './meta.ts';
 import { chain, inherit, ownOf, ROOT_OWNER, sameOwner } from './owners.ts';
 import { PathMap } from './path-map.ts';
 import { holdsProtected, isProtected } from './protect.ts';
@@ -98,6 +98,15 @@ function sidecar(meta: MetaStore): MetaStore {
         });
   const names = meta.fresh ? [...META_OPS, 'fresh' as const] : META_OPS;
   const ops = Object.fromEntries(names.map((op) => [op, guarded(op)])) as unknown as MetaStore;
+  const { updateMany } = meta;
+  ops.updateMany = updateMany
+    ? (changes) =>
+        updateMany.call(meta, changes).catch((err: unknown) => {
+          throw translate(err, changes[0]?.path ?? '/', 'sidecar', false);
+        })
+    : async (changes) => {
+        for (const { path, change } of changes) await ops.update(path, change);
+      };
   if (meta.absent) ops.absent = meta.absent.bind(meta);
   const { removeFile } = meta;
   if (removeFile)
@@ -696,15 +705,24 @@ export class OpfsFs implements KernelFs {
   }
 
   private async flushFileTimes(): Promise<void> {
-    for (const [path, ms] of [...this.fileTimes]) {
-      const mtimeFor = await this.modified(path).catch(() => 0);
-      await this.meta.update(path, (entry) =>
-        this.fileTimes.get(path) !== ms || this.explicitWins(entry, ms)
-          ? entry
-          : { ...entry, path, mtimeMs: ms, mtimeFor, ctimeMs: ms }
-      );
+    const pending = [...this.fileTimes];
+    const stamps: number[] = [];
+    for (const [path] of pending) stamps.push(await this.modified(path).catch(() => 0));
+    await this.batched(
+      pending.map(([path, ms], i) => ({
+        path,
+        change: (entry: MetaEntry | undefined) =>
+          this.fileTimes.get(path) !== ms || this.explicitWins(entry, ms)
+            ? entry
+            : { ...entry, path, mtimeMs: ms, mtimeFor: stamps[i] as number, ctimeMs: ms },
+      }))
+    );
+    for (const [path, ms] of pending)
       if (this.fileTimes.get(path) === ms) this.fileTimes.delete(path);
-    }
+  }
+
+  private batched(changes: MetaUpdate[]): Promise<void> {
+    return (this.meta.updateMany as NonNullable<MetaStore['updateMany']>)(changes);
   }
 
   private timesOf(path: string): number | undefined {
@@ -748,16 +766,24 @@ export class OpfsFs implements KernelFs {
   }
 
   private async flushDirTimes(): Promise<void> {
-    for (const path of this.dirDirty) {
-      this.dirDirty.delete(path);
-      const ms = this.dirTimes.get(path);
-      if (ms === undefined) continue;
-      await this.meta.update(path, (entry) =>
-        (entry?.timesAt ?? -1) >= ms
-          ? entry
-          : { ...entry, path, mtimeMs: ms, mtimeFor: 0, ctimeMs: ms }
+    while (this.dirDirty.size > 0) {
+      const pending: Array<[string, number]> = [];
+      for (const path of this.dirDirty) {
+        const ms = this.dirTimes.get(path);
+        if (ms !== undefined) pending.push([path, ms]);
+      }
+      this.dirDirty.clear();
+      await this.batched(
+        pending.map(([path, ms]) => ({
+          path,
+          change: (entry: MetaEntry | undefined) =>
+            (entry?.timesAt ?? -1) >= ms
+              ? entry
+              : { ...entry, path, mtimeMs: ms, mtimeFor: 0, ctimeMs: ms },
+        }))
       );
-      if (this.dirTimes.get(path) === ms) this.dirTimes.delete(path);
+      for (const [path, ms] of pending)
+        if (this.dirTimes.get(path) === ms) this.dirTimes.delete(path);
     }
   }
 
