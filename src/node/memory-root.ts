@@ -106,6 +106,7 @@ class MemoryFile {
   }
 
   async getFile(): Promise<File> {
+    if (this.parent.removed || this.parent.children.get(this.name) !== this) fail('NotFoundError');
     return new File(this.data.blobs, this.name, { lastModified: this.lastModified });
   }
 
