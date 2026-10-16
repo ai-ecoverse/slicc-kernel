@@ -21,12 +21,28 @@
     "access": "public",
     "provenance": true
   },
+  "types": "./dist/types/index.d.ts",
   "exports": {
-    ".": "./dist/index.js",
-    "./node": "./dist/node.js",
-    "./driver": "./dist/driver.js",
-    "./testing": "./dist/testing.js",
-    "./meta": "./dist/meta.js"
+    ".": {
+      "types": "./dist/types/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./node": {
+      "types": "./dist/types/node.d.ts",
+      "default": "./dist/node.js"
+    },
+    "./driver": {
+      "types": "./dist/types/driver.d.ts",
+      "default": "./dist/driver.js"
+    },
+    "./testing": {
+      "types": "./dist/types/testing.d.ts",
+      "default": "./dist/testing.js"
+    },
+    "./meta": {
+      "types": "./dist/types/meta.d.ts",
+      "default": "./dist/meta.js"
+    }
   },
   "files": [
     "dist"
