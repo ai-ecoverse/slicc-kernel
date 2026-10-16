@@ -27,7 +27,7 @@ for (const [call, outcome] of rows) {
     }
     assert.deepEqual(await kernel.run(['stopwait', call], { cwd: '/' }), {
       status: 0,
-      stdout: `${call} ${outcome}\n`,
+      stdout: `${call} ${outcome}\nstopped while blocked: yes\n`,
       stderr: '',
     });
   });

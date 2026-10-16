@@ -68,13 +68,25 @@ int main(int argc, char **argv) {
     printf("%s %d %s, %s\n", mode, r, r < 0 ? strerror(e) : "ok", when);
     _exit(0);
   }
-  char c;
+  char c, pid[16], path[64], buf[256];
   read(ready[0], &c, 1);
-  usleep(50000);
+  snprintf(pid, sizeof pid, "%d", (int)p);
+  snprintf(path, sizeof path, "/proc/%s/task/1/stat", pid);
+  char state = '?';
+  long long until = now_ms() + 100;
+  while (state != 'S' && now_ms() < until) {
+    FILE *f = fopen(path, "r");
+    size_t n = f ? fread(buf, 1, sizeof buf - 1, f) : 0;
+    if (f) fclose(f);
+    buf[n] = 0;
+    char *close = strrchr(buf, ')');
+    state = close && close[1] == ' ' ? close[2] : '?';
+  }
   kill(p, SIGSTOP);
   usleep(200000);
   kill(p, SIGCONT);
   int st;
   waitpid(p, &st, 0);
+  printf("stopped while blocked: %s\n", state == 'S' ? "yes" : "no");
   return 0;
 }

@@ -1028,20 +1028,20 @@ A threaded WASIX C program for `test/integration/thread-asyncify.test.mjs` (#710
 
 ### `stopwait`
 
-A WASIX C program for `test/integration/stop-restart.test.mjs` (#738). `stopwait CALL` forks a child that waits 300 ms in `CALL` (`epoll`, `poll`, `ppoll`, `select`, `pselect`, `nanosleep` or `clock_nanosleep`) on a pipe that never gets data. The parent stops the child 50 ms after it's ready and continues it 200 ms later. The child prints the result, the error and whether the wait ended before the deadline, at it (300–450 ms) or late.
+A WASIX C program for `test/integration/stop-restart.test.mjs` (#738). `stopwait CALL` forks a child that waits 300 ms in `CALL` (`epoll`, `poll`, `ppoll`, `select`, `pselect`, `nanosleep` or `clock_nanosleep`) on a pipe that never gets data. The parent stops the child once `/proc/<pid>/task/1/stat` shows it blocked (`S`), or 100 ms after it's ready on a kernel without that state, continues it 200 ms later, and reports whether the stop found it blocked. The child prints the result, the error and whether the wait ended before the deadline, at it (300–450 ms) or late.
 
-**Build:** `WASIX_SYSROOT_28=/path/to/wasix-sysroot ./build.sh`, with `wasixcc` 0.4.7 (legacy exceptions) and binaryen's `wasm-opt` (`--asyncify` for `proc_fork`) on `PATH`. `bin/stopwait.wasm` is 50,567 bytes, sha256 `570cb3e29cfdc083bbdc0d20707f2c07b087fe23cef13a8861a4a42b02d20f5f`.
+**Build:** `WASIX_SYSROOT_28=/path/to/wasix-sysroot ./build.sh`, with `wasixcc` 0.4.7 (legacy exceptions) and binaryen's `wasm-opt` (`--asyncify` for `proc_fork`) on `PATH`. `bin/stopwait.wasm` is 59,958 bytes, sha256 `ce49e04baed13b7ccf04d8231da4a29567fde0dac19d5cc81f36c185e0eb4555`.
 
 ### `semtest`
 
 A WASIX C program for `test/integration/semaphore.test.mjs` (#717). It calls the `slicc.sem_*` imports directly (`import_module("slicc")`), so the rows don't wait for the libc side. `semtest MODE` runs one of:
 - `handoff`, `inherit`, `spawn` (a spawned and an exec'd image open the semaphore by name; exec drops the handles);
-- `try`, `timed`, `eintr`, `stopped` (a forked child's 300 ms timed wait is stopped for 200 ms and continued, and reports whether it ended at the deadline);
+- `try`, `timed`, `eintr`, `stopped` (a forked child's 300 ms timed wait is stopped for 200 ms and continued, and reports whether it ended at the deadline; the parent stops it only once `/proc/<pid>/task/1/stat` shows it blocked, `S`, or after 100 ms on a kernel without that state, and reports which);
 - `threads` (FIFO, one thread blocked at a time);
 - `errors`, `unlink`, `owners setup|user`;
 - `killed` (a waiter killed before posts loses no unit), `exited`, `cap`, `handles`.
 
-**Build:** `WASIX_SYSROOT_28=/path/to/wasix-sysroot ./build.sh`, with `wasixcc` 0.4.7 (legacy exceptions, `-pthread`) and binaryen's `wasm-opt` (version 132, `--asyncify` for `proc_fork`) on `PATH`. `bin/semtest.wasm` is 68,438 bytes, sha256 `af3d38d87b63fa219bae90b1225376882ba20ace423c5ce24ef57935e80e2fde`.
+**Build:** `WASIX_SYSROOT_28=/path/to/wasix-sysroot ./build.sh`, with `wasixcc` 0.4.7 (legacy exceptions, `-pthread`) and binaryen's `wasm-opt` (version 132, `--asyncify` for `proc_fork`) on `PATH`. `bin/semtest.wasm` is 69,237 bytes, sha256 `d1343eac18d6bdc793d48d6a6dedb9ed9f5f16a2446aa52bccbcecc641f3ca15`.
 
 ### `wlocktest`
 
