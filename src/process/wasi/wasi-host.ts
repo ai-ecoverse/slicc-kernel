@@ -3,6 +3,7 @@ import { physicalPath } from '../../fs/physical-path.ts';
 import { localCpuNanos } from '../../kernel/cpu-clock.ts';
 import { type Cred, type CredChange, MAX_GROUPS } from '../../kernel/cred.ts';
 import type { DeviceMeta, KernelFdKind } from '../../kernel/fd-table.ts';
+import { SIG } from '../../kernel/signals.ts';
 import type { SyncFsBridgeStat, SyncFsPosixBridge } from '../../realm/sync-fs-wire.ts';
 import type { LockHeld } from '../process-locks.ts';
 import { type LockedFile, lockImports } from './slicc-lock.ts';
@@ -114,7 +115,7 @@ const DEFAULT_UMASK = 0o022;
 const MONOTONIC_BASE = BigInt(Math.round(performance.timeOrigin)) * NS_PER_MS;
 
 const MAX_READ = 1024 * 1024;
-const SIGPIPE_EXIT = 141;
+const SIGPIPE_EXIT = 128 + SIG.PIPE;
 
 const SIG_IGN = 1;
 
@@ -1037,7 +1038,7 @@ export class WasiHost {
         return this.fds.kind(fd, e) === 'file' ? this.changed(fd, e, n) : n;
       } catch (err) {
         const broken = (err as { code?: string }).code === 'EPIPE';
-        if (broken && this.fds.kind(fd, e) !== 'socket') throw new WasiExit(SIGPIPE_EXIT);
+        if (broken && this.fds.kind(fd, e) !== 'socket') this.brokenPipe();
         throw err;
       }
     }
@@ -1048,6 +1049,19 @@ export class WasiHost {
       return data.length;
     }
     return this.file(fd, 'write').write(data);
+  }
+
+  private brokenPipe(): void {
+    let action: unknown;
+    try {
+      action = this.o.kernel.call({ op: 'proc-kill-self', sig: SIG.PIPE, probe: true });
+    } catch {
+      action = 'terminate';
+    }
+    if (action !== 'terminate') return;
+    const mask = this.sigmask;
+    if (!mask?.blocks(SIG.PIPE)) throw new WasiExit(SIGPIPE_EXIT);
+    this.o.kernel.call({ op: 'thread-kill', tid: mask.tid, sig: SIG.PIPE });
   }
 
   private read(fd: number, max: number): Uint8Array {
