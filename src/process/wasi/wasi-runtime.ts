@@ -151,7 +151,7 @@ export function sigmaskOf(
   }
   if (threads) threads.blocked = () => loadBlocked(header);
   const shared = process && new Int32Array(process, 0, SAB_HEADER_I32);
-  return new WasiSigmask(header, () => gate.deliver(), shared);
+  return new WasiSigmask(header, () => gate.deliver(), shared, threads?.tid ?? MAIN_TID);
 }
 
 const noErrno = (key: string) =>
@@ -512,7 +512,7 @@ function bindLinker(
     path: string | undefined;
   }
 ): void {
-  sync.linker.bindMain(instance, !at.thread);
+  sync.linker.bindMain(instance, !at.thread && !at.forked);
   if (at.path !== undefined) sync.linker.mainPath = at.path;
   host.linkedTls = () => sync.linker.tlsBases();
   host.linkedModules = () => sync.linker.compiled();

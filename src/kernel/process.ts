@@ -64,6 +64,7 @@ import { selectFds } from './select.ts';
 import { SEM_OPS, SemHandles, type SemSyscall, type SemTable, semSyscall } from './sem.ts';
 import { type DefaultAction, defaultAction, isSignal, SIG, sigbit } from './signals.ts';
 import { KernelSocket, LoopbackNet } from './socket.ts';
+import { socketNames } from './socket-nodes.ts';
 import { SOCKET_OPS, type SocketSyscall, socketSyscall } from './socket-syscalls.ts';
 import { repeating } from './timer.ts';
 import type { KernelTty, Termios } from './tty.ts';
@@ -194,6 +195,7 @@ export type WasmSyscall =
       argv0?: string;
       env: Record<string, string>;
       cwd: string;
+      chdir?: true;
       stdio: ChildStdio[];
       pgid?: number;
       session?: true;
@@ -234,6 +236,7 @@ export type WasmSyscall =
   | { op: 'tty-pgrp-get'; fd: number }
   | { op: 'tty-pgrp-set'; fd: number; pgrp: number }
   | { op: 'sig-mask'; caught: number; ignored: number; defaults?: number }
+  | { op: 'sig-waiting'; tid: number; set: number }
   | { op: 'sig-pause' }
   | SocketSyscall
   | EpollSyscall
@@ -411,6 +414,7 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'tty-pgrp-get',
   'tty-pgrp-set',
   'sig-mask',
+  'sig-waiting',
   'sig-pause',
   ...SOCKET_OPS,
   ...EPOLL_OPS,
@@ -526,6 +530,8 @@ export interface WasmProcessOptions {
   hasPending?: () => boolean;
 
   threadKill?: (tid: number, sig: number) => boolean;
+
+  unblockedThread?: (sig: number) => number | undefined;
 
   settling?: () => boolean;
 
@@ -668,8 +674,7 @@ export class WasmProcess {
     if (sig === SIG.STOP) return this.stop(sig);
     const bit = sigbit(sig);
     if (this.ignores(bit)) return 'ignore';
-    if (((this.options.blockedBits?.() ?? 0) & bit) !== 0) {
-      this.options.onPending?.(sig);
+    if (((this.options.blockedBits?.() ?? 0) & bit) !== 0 && this.routeBlocked(sig, bit)) {
       return 'deliver';
     }
     if (!(this.caught & bit)) {
@@ -688,14 +693,37 @@ export class WasmProcess {
     return 'deliver';
   }
 
+  private routeBlocked(sig: number, bit: number): boolean {
+    const waiter = this.waiterFor(bit);
+    const tid = waiter ?? this.options.unblockedThread?.(sig);
+    if (tid === undefined || tid === 1) {
+      this.options.onPending?.(sig);
+      return true;
+    }
+    if (waiter === undefined && !(this.caught & bit)) return false;
+    this.options.threadKill?.(tid, sig);
+    return true;
+  }
+
   private async spawn(req: Extract<WasmSyscall, { op: 'proc-spawn' }>): Promise<number> {
-    const { file, argv, argv0, env, cwd, stdio, inherit, exec, pgid, session, deathSignal } = req;
+    const { file, argv, argv0, env, cwd, chdir, stdio, inherit, exec, pgid, session, deathSignal } =
+      req;
     if (deathSignal !== undefined && (exec || !isSignal(deathSignal))) {
       throw new KernelError('EINVAL');
     }
     const group = { ...(pgid !== undefined ? { pgid } : {}), ...(session ? { session } : {}) };
     const named = argv0 !== undefined ? { argv0 } : {};
-    const spawned = { file, argv, ...named, env, cwd, ...group, ...(exec ? { exec } : {}) };
+    const moved = chdir ? { chdir } : {};
+    const spawned = {
+      file,
+      argv,
+      ...named,
+      env,
+      cwd,
+      ...moved,
+      ...group,
+      ...(exec ? { exec } : {}),
+    };
     const pid = await this.children.spawn(spawned, stdio, inherit);
     if (deathSignal !== undefined) this.onDeath(pgid === 0 || session ? -pid : pid, deathSignal);
     if (!exec) return pid;
@@ -768,6 +796,19 @@ export class WasmProcess {
   private readonly blocks = new WeakMap<AbortSignal, () => void>();
 
   private readonly sizesRead = new WeakMap<KernelTty, string>();
+
+  private readonly sigwaiters = new Map<number, number>();
+
+  private setSigwaiter(tid: number, set: number): void {
+    if (set === 0) this.sigwaiters.delete(tid);
+    else this.sigwaiters.set(tid, set);
+  }
+
+  private waiterFor(bit: number): number | undefined {
+    if (((this.sigwaiters.get(1) ?? 0) & bit) !== 0) return 1;
+    for (const [tid, set] of this.sigwaiters) if (set & bit) return tid;
+    return undefined;
+  }
 
   async syscall(
     req: WasmSyscall,
@@ -1705,6 +1746,18 @@ export class WasmProcess {
       resolve: (name, family, blocking) => resolver.resolve(name, family, blocking),
       cred: () => ({ pid: this.pid, uid: this.cred.euid, gid: this.cred.egid }),
       stamp: () => this.connectorStamp(),
+      names: socketNames({
+        fs: this.heldFs() as KernelFs,
+        guard: () => this.guarded(),
+        create: (path, owner) => this.nodes.createExclusive(path, owner),
+        owner: () => ({
+          uid: this.cred.euid,
+          gid: this.cred.egid,
+          mode: 0o777 & ~this.umask,
+          socket: true,
+        }),
+        owners: this.options.owners === true,
+      }),
     });
   }
 
@@ -1813,6 +1866,9 @@ export class WasmProcess {
         return { ok: true, kind: 'void' };
       case 'dl-unlock':
         this.unlockDl(req.owner);
+        return { ok: true, kind: 'void' };
+      case 'sig-waiting':
+        this.setSigwaiter(req.tid, req.set);
         return { ok: true, kind: 'void' };
       case 'sig-mask':
         this.caught = req.caught;

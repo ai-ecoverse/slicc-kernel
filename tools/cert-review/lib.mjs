@@ -46,14 +46,43 @@ export function titlesFromPatch(patch) {
     if (text === undefined) continue;
     const m = TITLE.exec(text);
     if (!m) continue;
-    const title = unquote(m[2]);
-    const cut = m[1] === '`' ? title.indexOf('${') : -1;
-    if (cut === 0) continue;
-    if (cut > 0) titles.add(`${title.slice(0, cut)}${PREFIX}`);
-    else if (m[3] === undefined) titles.add(`${title}${PREFIX}`);
-    else titles.add(title);
+    const raw = m[1] === '`' ? m[2].replace(/\$\{[^}]*\}?/g, PREFIX) : m[2];
+    const title = unquote(raw).replace(/\u2026+/g, PREFIX);
+    if (title.replaceAll(PREFIX, '').trim() === '') continue;
+    titles.add(m[3] === undefined && !title.endsWith(PREFIX) ? `${title}${PREFIX}` : title);
   }
   return [...titles];
+}
+
+export function droppedTitles(patch) {
+  const added = new Set(
+    titlesFromPatch(
+      (patch ?? '')
+        .split('\n')
+        .filter((l) => l.startsWith('+'))
+        .join('\n')
+    )
+  );
+  const removed = titlesFromPatch(
+    (patch ?? '')
+      .split('\n')
+      .filter((l) => l.startsWith('-'))
+      .map((l) => `+${l.slice(1)}`)
+      .join('\n')
+  );
+  return removed.filter((t) => !added.has(t));
+}
+
+export function droppedTests(files) {
+  const out = [];
+  for (const f of files) {
+    const was = f.previous_filename ?? f.filename;
+    if (!INTEGRATION.test(was) && !INTEGRATION.test(f.filename)) continue;
+    if (f.status === 'removed' || (f.status === 'renamed' && f.previous_filename !== f.filename))
+      out.push({ file: was, ...(f.status === 'renamed' ? { to: f.filename } : {}) });
+    else for (const title of droppedTitles(f.patch)) out.push({ file: f.filename, title });
+  }
+  return out;
 }
 
 export function rowOf(pr, files) {
@@ -69,6 +98,7 @@ export function rowOf(pr, files) {
     behaviour: BEHAVIOUR.has(kind),
     src: files.some((f) => f.filename.startsWith('src/')),
     tests,
+    dropped: droppedTests(files),
     ...(pr.merge_commit_sha ? { merged: pr.merge_commit_sha } : {}),
   };
 }
@@ -120,8 +150,20 @@ export function resultsMap(rows) {
   return map;
 }
 
+const patterns = new Map();
+
+function patternOf(title) {
+  let re = patterns.get(title);
+  if (!re) {
+    const parts = title.split(PREFIX).map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    re = new RegExp(`^${parts.join('[\\s\\S]*')}$`);
+    patterns.set(title, re);
+  }
+  return re;
+}
+
 function matches(segment, title) {
-  return title.endsWith(PREFIX) ? segment.startsWith(title.slice(0, -1)) : segment === title;
+  return title.includes(PREFIX) ? patternOf(title).test(segment) : segment === title;
 }
 
 function under(results, file, title) {
@@ -170,13 +212,14 @@ export const FINDINGS = new Set([
   'no-negative',
 ]);
 
-export function diffSuites(base, next) {
+export function diffSuites(base, next, { complete = true } = {}) {
   const out = {
     regressed: [],
     newFailing: [],
     fixed: [],
     stillFailing: [],
     removed: [],
+    unrun: [],
     added: 0,
     same: 0,
   };
@@ -195,7 +238,8 @@ export function diffSuites(base, next) {
     else if (wasFailing) out.fixed.push({ test: k });
     else out.same++;
   }
-  for (const k of base.keys()) if (!next.has(k)) out.removed.push({ test: k });
+  for (const k of base.keys())
+    if (!next.has(k)) (complete ? out.removed : out.unrun).push({ test: k });
   return out;
 }
 
@@ -271,6 +315,10 @@ export function crashed(text) {
   return CRASH.test(text ?? '');
 }
 
+export function rerunSet(regressions) {
+  return [...new Set(regressions.map((r) => `${r.recipe}@${r.version}`))].join(',');
+}
+
 export function compatRegressions(report, rerun, referenceText = () => '') {
   const regressions = (report?.results ?? []).filter((r) => r.verdict === 'regression');
   return regressions.map((r) => {
@@ -288,6 +336,9 @@ export function compatRegressions(report, rerun, referenceText = () => '') {
     };
     if (!rerun) return { ...row, rerun: 'none', reproduced: true };
     if (!again) return { ...row, rerun: 'missing', reproduced: true };
+    if (again.version !== r.version) {
+      return { ...row, rerun: 'rerun-mismatch', rerunVersion: again.version, reproduced: true };
+    }
     const reproduced = again.verdict === 'regression';
     const referenceCrash = crashed(again.reference?.error) || crashed(referenceText(again));
     return {
@@ -348,6 +399,82 @@ export function knownAsOf(issue, { fixedBefore, releasedAt, version, fixedIn }) 
 
 const GAPS = new Set(['no-test', 'no-negative', 'prev-not-run', 'no-titles', 'not-run']);
 
+export function unfinishedFiles(expected, rows) {
+  const seen = new Map();
+  for (const r of rows) {
+    const cut = r.status === 'cancelled' || (r.status === 'fail' && r.name === r.file);
+    seen.set(r.file, (seen.get(r.file) ?? false) || cut);
+  }
+  const files = new Set([...expected, ...seen.keys()]);
+  return [...files].filter((f) => f && (!seen.has(f) || seen.get(f))).sort();
+}
+
+export function mergeRetry(rows, retried, files) {
+  const again = new Set(files);
+  return [...rows.filter((r) => !again.has(r.file)), ...retried];
+}
+
+export function releaseEvidence(findings) {
+  const f = (findings ?? []).find(
+    (x) => x.kind === 'missing-evidence' && x.what === 'the release suite' && x.blocking
+  );
+  if (!f) return undefined;
+  const files = f.files ?? [];
+  const named = files.length
+    ? `${files.length} files without results: ${files.slice(0, 12).join(', ')}${files.length > 12 ? ', \u2026' : ''}`
+    : f.results === undefined
+      ? 'no results'
+      : `${f.results} results, exit ${f.exit}`;
+  return { files, named, remedy: f.remedy ?? 're-run the failed jobs' };
+}
+
+export function verdictLine({
+  name,
+  version,
+  planted,
+  ci,
+  problems,
+  review,
+  incomplete,
+  certified,
+}) {
+  const tag = `${name}@${version}${planted ? ` (planted ${planted})` : ''}`;
+  if (problems.length === 0 && !incomplete && review?.verdict === 'certified') {
+    return { state: 'success', line: certified };
+  }
+  if (incomplete && problems.length === 0) {
+    return {
+      state: 'error',
+      line: `cert-ci: INCOMPLETE ${tag} (${incomplete.named}; ${incomplete.remedy}) (${ci})`,
+    };
+  }
+  const why = [
+    ...(review?.verdict === 'fail' && !incomplete
+      ? [`the reviewer: ${review.reason || 'no reason given'}`]
+      : []),
+    ...(review?.verdict === 'certified' && !incomplete ? ['the reviewer certified it'] : []),
+    ...problems,
+    ...(incomplete ? [`the release suite is incomplete (${incomplete.named})`] : []),
+  ];
+  return { state: 'failure', line: `cert-ci: FAIL ${tag}: ${why.join('; ')} (${ci})` };
+}
+
+export function baseEvidence(findings) {
+  const f = (findings ?? []).find(
+    (x) => x.kind === 'missing-evidence' && x.what === 'the certified suite'
+  );
+  if (!f) return { note: '' };
+  const note = `base suite incomplete (${f.results ?? 0} results)`;
+  if (!f.blocking) return { note };
+  const why = f.dropped
+    ? `the delta drops ${f.dropped} test files or titles`
+    : "the release suite isn't complete and all-pass";
+  return {
+    note,
+    problem: `the certified suite didn't finish (${f.results ?? 0} results), and ${why}, so nothing stands in for it`,
+  };
+}
+
 export function gapsOf(findings) {
   return (findings ?? []).filter((f) => GAPS.has(f.kind) && f.pr).map((f) => `#${f.pr} ${f.kind}`);
 }
@@ -368,4 +495,77 @@ export function covering(tags, prev, version) {
   return tags
     .filter((t) => compareVersions(t, prev) > 0 && compareVersions(t, version) <= 0)
     .sort(compareVersions);
+}
+
+export const NAME = '@ai-ecoverse/slicc-kernel';
+const SEMVER = /^\d+\.\d+\.\d+$/;
+
+export function gateOf({ record, sha256, packed, manifest }) {
+  const version = String(record?.version ?? '');
+  const line = String(record?.line ?? '').split('\n')[0];
+  const subject = SEMVER.test(version) ? `${NAME}@${version}` : NAME;
+  const refuse = (why) => ({ subject, line, why });
+  if (!record) return refuse('no cert-review record');
+  if (!SEMVER.test(version)) return refuse(`the record's version is "${version}"`);
+  if (record.planted) return refuse(`the record is for a planted build of ${record.planted}`);
+  if (record.certified !== true || !line.startsWith(`certified ${subject} `))
+    return refuse('the verdict is not certified');
+  if (record.sha256 !== sha256)
+    return refuse(`the record's sha256 ${record.sha256} is not the tarball's ${sha256}`);
+  if (String(packed ?? '').trim() !== sha256)
+    return refuse(`the pack job's sha256 ${packed || '(none)'} is not the tarball's ${sha256}`);
+  if (!line.startsWith(`certified ${subject} sha256=${sha256} `))
+    return refuse("the line doesn't name the tarball's sha256");
+  if (manifest?.name !== NAME || manifest?.version !== version)
+    return refuse(`the tarball is ${manifest?.name}@${manifest?.version}`);
+  return { subject, line, sha256 };
+}
+
+export function publishStep({ version, latest, onNpm, ours, dryRun }) {
+  if (!SEMVER.test(latest ?? ''))
+    return {
+      action: 'refuse',
+      why: `npm's latest reads as "${latest ?? ''}", so the latest check can't run`,
+    };
+  if (compareVersions(version, latest) < 0)
+    return { action: 'skip', why: `v${version} is older than npm's latest ${latest}` };
+  if (onNpm && dryRun)
+    return {
+      action: 'publish',
+      force: true,
+      why: `${NAME}@${version} is already on npm (${onNpm === ours ? 'these bytes' : onNpm}), so the dry run adds --force`,
+    };
+  if (onNpm && onNpm !== ours)
+    return { action: 'refuse', why: `${NAME}@${version} is on npm as ${onNpm}, not ${ours}` };
+  if (onNpm)
+    return { action: 'done', why: `${NAME}@${version} is already on npm with these bytes` };
+  return { action: 'publish', force: false };
+}
+
+export function packageProblems(manifest, { version, commit }) {
+  const problems = [];
+  if (manifest?.name !== NAME || manifest?.version !== version)
+    problems.push(`the tarball is ${manifest?.name}@${manifest?.version}, not ${NAME}@${version}`);
+  if (manifest?.gitHead !== commit)
+    problems.push(`the tarball's gitHead is ${manifest?.gitHead}, the tag commit is ${commit}`);
+  return problems;
+}
+
+export function previousPublished(tags, published, version) {
+  const served = new Set(published);
+  return tags
+    .filter((t) => served.has(t) && compareVersions(t, version) < 0)
+    .sort(compareVersions)
+    .at(-1);
+}
+
+export function jobsEvidence(text, incomplete) {
+  const failed = String(text ?? '')
+    .split(',')
+    .map((x) => x.trim().split('='))
+    .filter(([job, result]) => job && result !== 'success')
+    .map(([job, result]) => `the ${job} job ended ${result || 'without a result'}`);
+  if (failed.length === 0) return incomplete;
+  const named = [incomplete?.named, ...failed].filter(Boolean).join('; ');
+  return { files: incomplete?.files ?? [], named, remedy: 're-run the failed jobs' };
 }

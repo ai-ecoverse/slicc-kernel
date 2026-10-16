@@ -579,7 +579,7 @@ export class WasiFds {
   flushPath(path: string): void {
     for (const [p, buffer] of this.buffers) if (within(p, path)) buffer.flush();
 
-    if (this.shared) this.kernel.call({ op: 'fd-path-flush', path });
+    if (this.shared && !this.fs.changes?.clean()) this.kernel.call({ op: 'fd-path-flush', path });
   }
 
   holdsUnder(path: string): boolean {

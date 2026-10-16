@@ -3,7 +3,9 @@ const RING = 1;
 const RING_SIZE = 4096;
 const SLOT = 2;
 
-export const CHANGES_BYTES = (RING + RING_SIZE * SLOT) * 4;
+const DIRTY = RING + RING_SIZE * SLOT;
+
+export const CHANGES_BYTES = (DIRTY + 1) * 4;
 
 export function changeHash(path: string): number {
   let h = 0x811c9dc5;
@@ -33,6 +35,10 @@ export class FileChanges {
     this.view = new Int32Array(sab);
   }
 
+  dirtied(delta: number): void {
+    Atomics.add(this.view, DIRTY, delta);
+  }
+
   publish(...paths: string[]): void {
     for (const path of paths) {
       const g = (Atomics.add(this.view, GEN, 1) + 1) | 0;
@@ -53,6 +59,10 @@ export class ChangeView {
 
   now(): number {
     return Atomics.load(this.view, GEN);
+  }
+
+  clean(): boolean {
+    return this.view.length > DIRTY && Atomics.load(this.view, DIRTY) === 0;
   }
 
   changedSince(seen: number, path: string): { now: number; changed: boolean } {

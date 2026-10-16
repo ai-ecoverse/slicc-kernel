@@ -1,0 +1,12 @@
+{
+  "name": "sigwaittest",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "sigwaittest": {
+        "wasm": "bin/sigwaittest.wasm"
+      }
+    }
+  }
+}

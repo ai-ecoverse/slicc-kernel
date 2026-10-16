@@ -347,6 +347,7 @@ function processes(
           argv: o.argv,
           env: o.env ?? { ...host.o.env },
           cwd: o.cwd ?? host.cwd,
+          ...(o.cwd !== undefined ? { chdir: true as const } : {}),
           stdio,
           ...(inThread ? {} : { restart: true as const }),
         };

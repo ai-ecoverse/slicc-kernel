@@ -16,6 +16,7 @@ const SYNTHETIC_DIRS = ['/usr', '/bin'];
 
 export interface EmscriptenFsForHook extends LiveMountFsApi {
   chdir(path: string): void;
+  sliccChdirAt?(path: string): void;
   chown?(path: string | object, uid: number, gid: number, dontFollow?: boolean): void;
 }
 
@@ -109,7 +110,7 @@ export function mountVfsIntoEmscripten(
   linuxRmdir(Fs);
   if (deps.cred) Fs.sliccCred = deps.cred;
   try {
-    Fs.chdir(deps.cwd);
+    (Fs.sliccChdirAt ?? Fs.chdir).call(Fs, deps.cwd);
   } catch (err) {
     warn(`cannot chdir to ${deps.cwd}: errno ${(err as { errno?: unknown }).errno}`);
   }

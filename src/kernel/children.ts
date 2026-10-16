@@ -38,6 +38,7 @@ export interface ChildSpawnRequest {
   argv0?: string;
   env: Record<string, string>;
   cwd: string;
+  chdir?: true;
 
   pgid?: number;
 

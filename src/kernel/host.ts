@@ -249,12 +249,19 @@ function killThread(thread: ThreadSignals | undefined, caught: number, sig: numb
   const held = (Atomics.load(thread.header, SAB_I_BLOCKED) & sigbit(sig)) !== 0;
   if (!held && (caught & sigbit(sig)) === 0) return false;
   Atomics.or(thread.header, SAB_I_SIGNALS, sigbit(sig));
-  if (held) return true;
   Atomics.notify(thread.header, SAB_I_SIGNALS);
+  if (held) return true;
   const blocked = thread.interrupt;
   thread.interrupt = new AbortController();
   blocked.abort();
   return true;
+}
+
+function unblockedThread(threads: Map<number, ThreadSignals>, sig: number): number | undefined {
+  for (const [tid, thread] of threads) {
+    if ((Atomics.load(thread.header, SAB_I_BLOCKED) & sigbit(sig)) === 0) return tid;
+  }
+  return undefined;
 }
 
 function unblocked(header: Int32Array): number {
@@ -407,7 +414,10 @@ function clipboardName(opts: SpawnWasmOptions): { clipboardName?: string } {
 function processOptions(
   opts: SpawnWasmOptions,
   header: Int32Array,
-  hooks: Pick<WasmProcessOptions, 'raise' | 'threadKill' | 'exitNow' | 'exitSignal'>,
+  hooks: Pick<
+    WasmProcessOptions,
+    'raise' | 'threadKill' | 'unblockedThread' | 'exitNow' | 'exitSignal'
+  >,
   created: Created
 ): WasmProcessOptions {
   return {
@@ -449,6 +459,7 @@ function processOptions(
     hasPending: () => unblocked(header) !== 0 || Atomics.load(header, SAB_I_TIMERS) !== 0,
     raise: hooks.raise,
     threadKill: hooks.threadKill,
+    unblockedThread: hooks.unblockedThread,
     ...(hooks.exitNow ? { exitNow: hooks.exitNow } : {}),
     ...(hooks.exitSignal ? { exitSignal: hooks.exitSignal } : {}),
     ...(opts.program.abi === 'wasi' || opts.program.abi === 'js'
@@ -486,6 +497,10 @@ function threadInit(
   };
 }
 
+function settleExit(exit: Promise<unknown>, settle: (status: number) => void, code: number) {
+  void exit.catch(() => undefined).then(() => settle(code & 0xff));
+}
+
 export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
   const sab = new SharedArrayBuffer(SAB_HEADER_BYTES + SAB_DEFAULT_WINDOW_BYTES);
   const header = new Int32Array(sab, 0, SAB_HEADER_I32);
@@ -503,6 +518,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
         raise: (sig) => signal(sig),
         threadKill: (tid, sig) =>
           killThread(threadSignals.get(tid), process.signalMasks().caught, sig),
+        unblockedThread: (sig) => unblockedThread(threadSignals, sig),
         ...(opts.program.abi === 'js'
           ? {
               exitNow: (code: number) => exitNow(code),
@@ -555,10 +571,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     revokeSyncFsToken(token);
     opts.held?.delete(holds);
     worker.terminate();
-    void process.exit().then(
-      () => settle(code),
-      () => settle(code)
-    );
+    settleExit(process.exit(), settle, code);
   };
 
   const exitNow = (code: number): void => {

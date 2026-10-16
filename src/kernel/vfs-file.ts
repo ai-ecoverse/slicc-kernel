@@ -113,6 +113,18 @@ export class VfsNode {
 
   onDirty: (() => void) | undefined;
 
+  onDirtyState: ((on: boolean) => void) | undefined;
+
+  private counted = false;
+
+  recount(): void {
+    if (!this.onDirtyState) return;
+    const on = this.dirty && !this.orphaned;
+    if (on === this.counted) return;
+    this.counted = on;
+    this.onDirtyState?.(on);
+  }
+
   constructor(
     fs: VfsFileFs,
 
@@ -299,6 +311,7 @@ export class VfsNode {
 
   private markDirty(): void {
     this.dirty = true;
+    this.recount();
     if (!this.orphaned) this.onDirty?.();
     if (this.writeBack !== undefined || this.orphaned) return;
     const delay = Math.max(WRITEBACK_MS, this.writeBackCost * WRITEBACK_COST_FACTOR);
@@ -328,6 +341,8 @@ export class VfsNode {
     } catch (err) {
       this.dirty = true;
       throw err;
+    } finally {
+      this.recount();
     }
     this.writeBackCost = performance.now() - started;
   }
@@ -343,6 +358,8 @@ export class VfsNodes implements UnlinkHolder {
   keepsOnDisk = false;
 
   changed: ((path: string) => void) | undefined;
+
+  dirtied: ((delta: number) => void) | undefined;
 
   private readonly fs: VfsFileFs;
 
@@ -447,6 +464,7 @@ export class VfsNodes implements UnlinkHolder {
 
   private orphan(node: VfsNode): void {
     node.orphaned = true;
+    node.recount();
     this.forget(node);
   }
 
@@ -515,6 +533,8 @@ export class VfsNodes implements UnlinkHolder {
   private create(path: string, id: string | undefined, node: VfsNode): VfsNode {
     this.reshaped();
     node.onDirty = () => this.changed?.(node.path);
+    node.onDirtyState = (on) => this.dirtied?.(on ? 1 : -1);
+    node.recount();
     this.byPath.set(path, node);
     if (id !== undefined) this.know(node, id);
     return node;
@@ -760,6 +780,11 @@ function heldIo(fs: KernelFs, nodes: VfsNodes, changed: (path: string) => void):
     async stat(path) {
       const st = await fs.stat(path);
       const held = st.isFile ? await node(path) : undefined;
+      return held ? { ...st, size: await held.serial(() => held.size()) } : st;
+    },
+    async lstat(path) {
+      const st = await fs.lstat(path);
+      const held = st.isFile && !st.isSymbolicLink ? await node(path) : undefined;
       return held ? { ...st, size: await held.serial(() => held.size()) } : st;
     },
     async readFileBuffer(path) {

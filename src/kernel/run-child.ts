@@ -14,6 +14,7 @@ export interface RunRequest {
   argv0?: string;
   env: Record<string, string>;
   cwd: string;
+  chdir?: true;
   pgid?: number;
   session?: true;
   stdin: RunStdio;
@@ -110,6 +111,7 @@ export async function runChild(req: RunRequest, deps: RunDeps): Promise<Uint8Arr
         ...(req.argv0 !== undefined ? { argv0: req.argv0 } : {}),
         env: req.env,
         cwd: req.cwd,
+        ...(req.chdir ? { chdir: req.chdir } : {}),
         ...(req.pgid !== undefined ? { pgid: req.pgid } : {}),
         ...(req.session ? { session: req.session } : {}),
       },

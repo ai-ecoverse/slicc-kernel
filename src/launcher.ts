@@ -1056,6 +1056,16 @@ export class Launcher {
     throw new SpawnError(await this.unrunnable(file, req.cwd, scope));
   }
 
+  private async enterable(g: Guard | undefined, cwd: string): Promise<void> {
+    if (!g) return;
+    const denied = new Error(`cannot change to ${cwd}: Permission denied`);
+    await need(g, 'chdir', cwd, X_OK, { directory: true }).catch((err: unknown) => {
+      throw (err as { code?: unknown }).code === 'EACCES'
+        ? Object.assign(denied, { code: 'EACCES' })
+        : err;
+    });
+  }
+
   private execGuard(cred: Readonly<Cred>, pid: number, tag?: string): Guard | undefined {
     const { dac } = this;
     return dac && { fs: this.fs, cred, pid, dac, tag, links: this.links.get(pid) };
@@ -1779,6 +1789,13 @@ export class Launcher {
         throw new SpawnError(group);
       }
       const cred = grant ? grant.cred : this.credOf(ppid);
+      if (req.chdir && !grant) {
+        const g = this.execGuard(cred, ppid);
+        await this.enterable(g, req.cwd).catch(async (err: { code?: unknown }) => {
+          await fds.closeAll();
+          throw err.code === 'EACCES' ? new SpawnError('EACCES') : err;
+        });
+      }
       const scope = grant ? '' : await this.scopeOf(cred.euid);
       const file = booked === undefined ? req.file : await this.ticketFile(req, fds);
       const planned = await this.checkedPlan({ ...req, file }, { ppid, cred, scope }, fds);
@@ -2466,6 +2483,7 @@ export class Launcher {
 
   private processChain(fs: KernelFs, nodes: VfsNodes, unlinked: UnlinkedKeeper): KernelFs {
     nodes.changed = (path) => this.changes.publish(path);
+    nodes.dirtied = (delta) => this.changes.dirtied(delta);
     return unlinked.wrap(keepingOpen(fs, nodes, (path) => this.changes.publish(path)));
   }
 
@@ -2474,6 +2492,7 @@ export class Launcher {
     const scope = account.uid === 0 ? '' : pnpmHomeOf(account, this.pnpmHome);
     const start = dir ?? '/';
     const cwd = await physicalPathAsync(this.base, start.startsWith('/') ? start : `/${start}`);
+    await this.enterable(this.execGuard(credOf(account), 0, tag), cwd);
     const file = await this.execFile(argv[0] ?? '', cwd, this.execGuard(credOf(account), 0, tag));
     if (!(await this.base.exists(cwd))) await this.stackFor(tag).fs.mkdir(cwd, { recursive: true });
     const planned = await this.plan(file, argv, cwd, scope);

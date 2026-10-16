@@ -11,6 +11,7 @@ import {
   type SockAddr,
   type SocketDomain,
 } from './socket.ts';
+import { filePath, type SocketNames } from './socket-nodes.ts';
 export type SocketSyscall =
   | {
       op: 'sock-open';
@@ -106,6 +107,7 @@ export interface SocketProcess {
   resolve(name: string, family: ResolveFamily, blocking: () => AbortSignal): Promise<string[]>;
   cred?(): PeerCred;
   stamp?(): Promise<ConnectorStamp>;
+  names?: SocketNames;
 }
 function socketAt(fds: FdTable, fd: number): KernelSocket {
   const file = anySocketAt(fds, fd);
@@ -148,7 +150,7 @@ export async function socketSyscall(
       }
     }
     case 'sock-bind':
-      anySocketAt(fds, req.fd).bind(req.addr);
+      await bind(proc, req.fd, req.addr);
       return ok();
     case 'sock-listen':
       socketAt(fds, req.fd).listen(req.backlog, proc.cred?.());
@@ -189,14 +191,32 @@ async function connect(
     target.connectTo(req.addr);
     return ok();
   }
+  const path = filePath(req.addr);
+  const name = path !== undefined ? await proc.names?.find(path) : undefined;
   const stamp = proc.net.facadeAt(req.addr) && (await proc.stamp?.());
-  const dialing = target.connect(req.addr, true, proc.cred?.(), stamp || undefined);
+  const dialing = target.connect(req.addr, true, proc.cred?.(), stamp || undefined, true, name);
   if (req.nonblock) {
     dialing?.catch(() => undefined);
     throw new KernelError('EINPROGRESS');
   }
   if (dialing !== undefined) await interruptible(dialing, proc.blocking());
   return ok();
+}
+async function bind(proc: SocketProcess, fd: number, addr: SockAddr): Promise<void> {
+  const socket = anySocketAt(proc.fds, fd);
+  const path = filePath(addr);
+  if (!(socket instanceof KernelSocket) || path === undefined || !proc.names) {
+    socket.bind(addr);
+    return;
+  }
+  socket.bindable(addr);
+  const name = await proc.names.make(path);
+  try {
+    socket.bind({ family: 'unix', path }, false, name);
+  } catch (err) {
+    await name.remove();
+    throw err;
+  }
 }
 async function datagram(
   req: Extract<SocketSyscall, { op: 'sock-sendto' | 'sock-recvfrom' }>,

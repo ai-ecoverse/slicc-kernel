@@ -149,6 +149,7 @@ function filetypeOf(s: SyncFsBridgeStat | null | undefined): number {
   if (!s) return FILETYPE.UNKNOWN;
   if (s.isSymbolicLink) return FILETYPE.SYMBOLIC_LINK;
   if (s.isDirectory) return FILETYPE.DIRECTORY;
+  if (s.isSocket) return FILETYPE.SOCKET_STREAM;
   return s.isFile ? FILETYPE.REGULAR_FILE : FILETYPE.UNKNOWN;
 }
 
@@ -502,6 +503,17 @@ export class WasiHost {
               epoll(epfd, events, max, timeout, nevents)
             )
           : E.NOSYS,
+      sigwait: (lo: number, _hi: number, timeout: bigint, out: number) => {
+        const mask = this.sigmask;
+        if (!mask) return E.NOSYS;
+        mem.view().setUint32(out, 0, true);
+        return mask.sigwait(
+          lo,
+          timeout,
+          (set) => void this.o.kernel.call({ op: 'sig-waiting', tid: mask.tid, set }),
+          (sig) => void mem.view().setUint32(out, sig, true)
+        );
+      },
       sigpending_get: (out: number) => {
         if (!this.sigmask) return E.NOSYS;
         mem.view().setBigUint64(out, BigInt(this.sigmask.pending()), true);
