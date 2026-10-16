@@ -50,6 +50,7 @@ export function futexWait(
 }
 
 const EINTR_LIBC = 22;
+const STRICT_EPOLL_LIBC = 29;
 const MAIN_HANDLE = 0x7fffffff;
 
 export class WasixHost {
@@ -76,6 +77,7 @@ export class WasixHost {
       () => (this.threads?.tid ?? MAIN_TID) !== MAIN_TID
     );
 
+    if (module) host.strictEpoll = (libcVersion(module) ?? 0) >= STRICT_EPOLL_LIBC;
     if (module && !WebAssembly.Module.imports(module).some((i) => i.name === 'fd_fdflags_set')) {
       host.fds.implicitCloexec = true;
 

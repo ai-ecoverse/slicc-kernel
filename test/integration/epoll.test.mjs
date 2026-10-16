@@ -7,9 +7,9 @@ import { createNodeKernel } from '../../dist/node.js';
 
 const fixtures = new URL('fixtures/', import.meta.url);
 
-async function install(kernel, name) {
+async function install(kernel, name, extra = []) {
   const base = fileURLToPath(new URL(`${name}/`, fixtures));
-  for (const file of ['package.json', `bin/${name}.wasm`]) {
+  for (const file of ['package.json', `bin/${name}.wasm`, ...extra]) {
     await kernel.writeFile(
       `/node_modules/${name}/${relative(base, join(base, file))}`,
       await readFile(join(base, file))
@@ -20,7 +20,7 @@ async function install(kernel, name) {
 async function booted(t) {
   const kernel = await createNodeKernel();
   t.after(() => kernel.terminate());
-  await install(kernel, 'epolltest');
+  await install(kernel, 'epolltest', ['bin/epolltest-28.wasm']);
   await install(kernel, 'tokiotest');
   return kernel;
 }
@@ -144,15 +144,15 @@ test('a signal handler interrupts epoll_wait with EINTR, and timeouts are kept (
   );
 });
 
-test('epoll_ctl answers as Linux does: EEXIST, ENOENT, EINVAL, EBADF, and EPERM for files and directories, and takes the operation numbers the C library passes (#674)', async (t) => {
+test('epoll_ctl answers as Linux does: EEXIST, ENOENT, EINVAL, EBADF, and EPERM for files and directories, and a program on wasix-sysroot -29 or later gets WASIX epoll_ctl ADD 0, MOD 1 and DEL 2 only (#674, #684)', async (t) => {
   const kernel = await booted(t);
   assert.deepEqual(
     await kernel.run(['epolltest', 'errors']),
     ok(
       [
         'add ok',
-        'add twice ok',
-        'wasix add twice File exists',
+        'add twice File exists',
+        'mod ok',
         'mod missing No such file or directory',
         'del missing No such file or directory',
         'del ok',
@@ -161,6 +161,45 @@ test('epoll_ctl answers as Linux does: EEXIST, ENOENT, EINVAL, EBADF, and EPERM 
         'bad fd Bad file descriptor',
         'file Operation not permitted',
         'dir Operation not permitted',
+        'op 4 Invalid argument',
+        'wasix add ok',
+        'wasix add twice File exists',
+        'wasix mod ok',
+        'wasix mod missing No such file or directory',
+        'wasix del ok',
+        'wasix del missing No such file or directory',
+        'wasix op 3 Invalid argument',
+        '',
+      ].join('\n')
+    )
+  );
+});
+
+test('a program on wasix-sysroot -28 or older keeps the dual epoll_ctl numbering: its libc passes Linux ADD 1 untranslated, which adds, and MOD 3 modifies (#684)', async (t) => {
+  const kernel = await booted(t);
+  assert.deepEqual(
+    await kernel.run(['epolltest28', 'errors']),
+    ok(
+      [
+        'add ok',
+        'add twice ok',
+        'mod ok',
+        'mod missing No such file or directory',
+        'del missing No such file or directory',
+        'del ok',
+        'self Invalid argument',
+        'not epoll Invalid argument',
+        'bad fd Bad file descriptor',
+        'file Operation not permitted',
+        'dir Operation not permitted',
+        'op 4 Invalid argument',
+        'wasix add ok',
+        'wasix add twice File exists',
+        'wasix mod ok',
+        'wasix mod missing ok',
+        'wasix del ok',
+        'wasix del missing No such file or directory',
+        'wasix op 3 ok',
         '',
       ].join('\n')
     )

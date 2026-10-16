@@ -6,6 +6,9 @@
     "commands": {
       "epolltest": {
         "wasm": "bin/epolltest.wasm"
+      },
+      "epolltest28": {
+        "wasm": "bin/epolltest-28.wasm"
       }
     }
   }
