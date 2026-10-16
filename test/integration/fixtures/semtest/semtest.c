@@ -171,6 +171,47 @@ static int interrupted(void) {
   return 0;
 }
 
+static char task_state(const char *pid, int tid) {
+  char path[64], buf[256];
+  snprintf(path, sizeof path, "/proc/%s/task/%d/stat", pid, tid);
+  FILE *f = fopen(path, "r");
+  if (!f) return '?';
+  size_t n = fread(buf, 1, sizeof buf - 1, f);
+  fclose(f);
+  buf[n] = 0;
+  char *close = strrchr(buf, ')');
+  return close && close[1] == ' ' ? close[2] : '?';
+}
+
+static int stopped(void) {
+  unsigned h;
+  sopen("/stopped", CREAT, 0600, 0, &h);
+  int ready[2];
+  pipe(ready);
+  pid_t p = fork();
+  if (p == 0) {
+    long long start = now_ns(CLOCK_MONOTONIC);
+    write(ready[1], "", 1);
+    int e = k_wait(h, TIMED, 1, start + 300000000LL);
+    long long took = (now_ns(CLOCK_MONOTONIC) - start) / 1000000LL;
+    printf("wait %s, %s\n", err(e), took < 300 ? "early" : took < 450 ? "at the deadline" : "late");
+    _exit(0);
+  }
+  char c, pid[16];
+  read(ready[0], &c, 1);
+  snprintf(pid, sizeof pid, "%d", (int)p);
+  char state = '?';
+  long long until = now_ns(CLOCK_MONOTONIC) + 100000000LL;
+  while ((state = task_state(pid, 1)) != 'S' && now_ns(CLOCK_MONOTONIC) < until) sched_yield();
+  kill(p, SIGSTOP);
+  usleep(200000);
+  kill(p, SIGCONT);
+  int st;
+  waitpid(p, &st, 0);
+  printf("stopped while blocked in the wait: %s\n", state == 'S' ? "yes" : "no");
+  return 0;
+}
+
 static unsigned shared;
 static int order[3], seen;
 static volatile int tids[3];
@@ -189,17 +230,7 @@ static void *waiter(void *arg) {
   return NULL;
 }
 
-static char state_of(int tid) {
-  char path[64], buf[256];
-  snprintf(path, sizeof path, "/proc/self/task/%d/stat", tid);
-  FILE *f = fopen(path, "r");
-  if (!f) return '?';
-  size_t n = fread(buf, 1, sizeof buf - 1, f);
-  fclose(f);
-  buf[n] = 0;
-  char *close = strrchr(buf, ')');
-  return close && close[1] == ' ' ? close[2] : '?';
-}
+static char state_of(int tid) { return task_state("self", tid); }
 
 static int threads(void) {
   sopen("/fifo", CREAT, 0600, 0, &shared);
@@ -349,6 +380,7 @@ int main(int argc, char **argv) {
   if (!strcmp(mode, "try")) return trying();
   if (!strcmp(mode, "timed")) return timed();
   if (!strcmp(mode, "eintr")) return interrupted();
+  if (!strcmp(mode, "stopped")) return stopped();
   if (!strcmp(mode, "threads")) return threads();
   if (!strcmp(mode, "errors")) return errors();
   if (!strcmp(mode, "unlink")) return unlinked();

@@ -93,6 +93,7 @@ export class KernelTty {
   }
 
   resize(cols: number, rows: number): void {
+    if (cols === this.cols && rows === this.rows) return;
     this.setSize(cols, rows);
     this.signal(SIG.WINCH);
   }
