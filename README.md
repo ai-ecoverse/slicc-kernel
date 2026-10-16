@@ -480,6 +480,8 @@ In the browser, the page serves the uplink to the kernel worker over the same po
   - `reset(code)` (default `ECONNRESET`) breaks the connection both ways: writes the peer has not read fail, the program's next read fails with `ECONNRESET`, and its writes with `EPIPE`.
   - `closed` resolves when the kernel closes the connection.
 
+`fakeCronClock(start?, utc?)` is a clock for the kernel's cron to run on in tests, so a test moves time instead of waiting for it. It starts at `start` (default 2026-01-01T00:00Z) and reads schedules in UTC unless `utc` is `false`. `now()` is the fake time. `sleep(until, signal)` resolves when `advance(ms)` or `set(ms)` moves time to `until` or past it, or when `signal` aborts. `sleepers` counts the sleeps still waiting. `flush()` resolves once every sleeper that a time move woke has gone back to sleep for a later time, which is the point where a scheduler has done what was due. It never resolves while nothing sleeps.
+
 ### Browser automation (CDP)
 
 Programs drive a browser with the Chrome DevTools Protocol over a WebSocket, whichever host actually has the browser: slicc-extension's `chrome.debugger`, slicc-node's or slicc-swift's CDP proxy, or a test harness. The kernel relays; it does not launch a browser.
