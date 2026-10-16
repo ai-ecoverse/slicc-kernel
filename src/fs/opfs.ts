@@ -33,6 +33,8 @@ const S_ISGID = 0o2000;
 const READ_ATTEMPTS = 3;
 const MAX_LINKS = 40;
 const CHECK_MS = 1000;
+const FILE_HANDLES = 4096;
+const STALE: ReadonlySet<string> = new Set(['NotFoundError', 'TypeMismatchError']);
 const EXECUTABLE = /\/node_modules\/(?:@[^/]+\/)?[^/]+\/bin\//;
 
 type Handle = FileSystemFileHandle | FileSystemDirectoryHandle;
@@ -225,6 +227,9 @@ export class OpfsFs implements KernelFs {
   private readonly root: FileSystemDirectoryHandle;
   private readonly meta: MetaStore;
   private readonly dirs = new PathMap<FileSystemDirectoryHandle>();
+  private readonly files = new PathMap<FileSystemFileHandle>();
+  private readonly snapshots = new WeakMap<FileSystemFileHandle, File>();
+  private readonly found = new WeakMap<FileSystemFileHandle, number>();
   private readonly checked = new WeakMap<FileSystemDirectoryHandle, number>();
 
   private readonly channel: BroadcastChannel | undefined;
@@ -510,6 +515,20 @@ export class OpfsFs implements KernelFs {
 
   private forget(path: string): void {
     this.dirs.deleteTree(path);
+    this.files.deleteTree(path);
+  }
+
+  private remember(path: string, handle: Handle, looked = false): Handle {
+    if (handle.kind !== 'file') return handle;
+    if (looked) {
+      this.found.set(handle as FileSystemFileHandle, performance.now());
+      this.snapshots.delete(handle as FileSystemFileHandle);
+    }
+    this.files.delete(path);
+    if (this.files.size >= FILE_HANDLES)
+      this.files.delete(this.files.keys().next().value as string);
+    this.files.set(path, handle as FileSystemFileHandle);
+    return handle;
   }
 
   private async inDir<T>(path: string, op: (dir: FileSystemDirectoryHandle) => Promise<T>) {
@@ -541,6 +560,20 @@ export class OpfsFs implements KernelFs {
 
   private async handle(path: string): Promise<Handle> {
     if (split(path).length === 0) return this.root;
+    const cached = this.files.get(path);
+    const fresh = cached && performance.now() - (this.found.get(cached) ?? -CHECK_MS) < CHECK_MS;
+    if (cached && !fresh) this.files.delete(path);
+    if (cached && fresh) {
+      try {
+        this.snapshots.set(cached, await cached.getFile());
+        return this.remember(path, cached);
+      } catch (err) {
+        if (!STALE.has((err as { name?: string })?.name as string))
+          throw translate(err, path, 'read');
+        this.files.delete(path);
+        this.snapshots.delete(cached);
+      }
+    }
     const [dir, name] = await this.parent(path);
     const known = this.dirs.has(path);
     return this.inDir(dir, async (parent): Promise<Handle> => {
@@ -548,11 +581,11 @@ export class OpfsFs implements KernelFs {
         ? (['directory', 'file'] as const)
         : (['file', 'directory'] as const);
       try {
-        return await this.child(parent, name, first);
+        return this.remember(path, await this.child(parent, name, first), true);
       } catch (err) {
         if ((err as { name?: unknown })?.name !== 'TypeMismatchError') throw err;
       }
-      return this.child(parent, name, second);
+      return this.remember(path, await this.child(parent, name, second), true);
     }).catch((err) => {
       throw translate(err, path);
     });
@@ -728,6 +761,13 @@ export class OpfsFs implements KernelFs {
     }
   }
 
+  private async snapshot(handle: FileSystemFileHandle): Promise<File> {
+    const taken = this.snapshots.get(handle);
+    if (!taken) return handle.getFile();
+    this.snapshots.delete(handle);
+    return taken;
+  }
+
   private async statOf(
     path: string,
     handle: Handle,
@@ -735,7 +775,7 @@ export class OpfsFs implements KernelFs {
     touched: number | undefined
   ): Promise<FsStat> {
     const directory = handle.kind === 'directory';
-    const file = directory ? undefined : await (handle as FileSystemFileHandle).getFile();
+    const file = directory ? undefined : await this.snapshot(handle as FileSystemFileHandle);
     const modified = file?.lastModified ?? 0;
     const kept =
       meta?.mtimeMs !== undefined && meta.mtimeFor === modified ? meta.mtimeMs : modified;
