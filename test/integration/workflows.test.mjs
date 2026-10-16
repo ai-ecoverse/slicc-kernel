@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { decide } from '../../.github/runner.mjs';
 
@@ -73,4 +75,71 @@ test('CI classifies a fork PR on a hosted runner and never skips the required ch
     ci,
     /\n {6}runs-on: \$\{\{ needs\.runner\.outputs\.runner \|\| 'ubuntu-latest' \}\}\n/
   );
+});
+
+const pick = ci
+  .match(/\n {6}- id: pick\n[\s\S]*?\n {10}script: \|\n((?: {12}.*\n)+)/)[1]
+  .replace(/^ {12}/gm, '');
+const runPick = async (workspace) => {
+  const out = {};
+  const summary = {
+    addRaw(s) {
+      out.why = s;
+      return summary;
+    },
+    write: async () => {},
+  };
+  const core = { setOutput: (k, v) => (out[k] = v), summary };
+  const process = { env: { GITHUB_WORKSPACE: workspace, POOL: 'cloud-run-bench' } };
+  const context = { repo, ...pr({ full_name: 'ai-ecoverse/slicc-kernel' }) };
+  const AsyncFunction = (async () => {}).constructor;
+  await new AsyncFunction('context', 'github', 'core', 'process', pick)(
+    context,
+    queued([]),
+    core,
+    process
+  );
+  return out;
+};
+
+test('CI loads the decider from the protected branch for a merge group and the base commit for a PR, never from the code under test', () => {
+  assert.match(
+    ci,
+    /\n {10}ref: \$\{\{ github\.event\.merge_group\.base_ref \|\| github\.event\.pull_request\.base\.sha \|\| github\.sha \}\}\n {10}sparse-checkout: \.github\/runner\.mjs\n/
+  );
+  assert.doesNotMatch(ci, /merge_group\.base_sha/);
+});
+
+test('the pick step uses the decider and falls back to a hosted runner when it is missing or fails', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'runner-pick-'));
+  try {
+    const good = join(root, 'good');
+    await mkdir(join(good, '.github'), { recursive: true });
+    await writeFile(
+      join(good, '.github/runner.mjs'),
+      await readFile(new URL('../../.github/runner.mjs', import.meta.url))
+    );
+    assert.equal((await runPick(good)).runner, 'cloud-run-bench');
+
+    const missing = await runPick(join(root, 'missing'));
+    assert.equal(missing.runner, 'ubuntu-latest');
+    assert.match(missing.why, /the decider failed/);
+
+    const bad = join(root, 'bad');
+    await mkdir(join(bad, '.github'), { recursive: true });
+    await writeFile(
+      join(bad, '.github/runner.mjs'),
+      'export async function decide() { throw new Error("boom"); }\n'
+    );
+    const failed = await runPick(bad);
+    assert.equal(failed.runner, 'ubuntu-latest');
+    assert.match(failed.why, /the decider failed: boom/);
+
+    const broken = join(root, 'broken');
+    await mkdir(join(broken, '.github'), { recursive: true });
+    await writeFile(join(broken, '.github/runner.mjs'), 'export const nothing = 1;\n');
+    assert.equal((await runPick(broken)).runner, 'ubuntu-latest');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
