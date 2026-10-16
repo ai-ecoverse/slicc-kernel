@@ -293,18 +293,28 @@ async function pump(
   signal: AbortSignal
 ): Promise<void> {
   const reader = stream.getReader();
-  try {
-    for (;;) {
+  for (;;) {
+    let bytes: Uint8Array;
+    try {
       const next = await reader.read();
       if (next.done) break;
-      const bytes = bytesOf(next.value);
-      if (bytes.length > 0) await kernel.blocking({ op: 'net-write', handle, bytes }, signal);
+      bytes = bytesOf(next.value);
+    } catch (err) {
+      await reader.cancel(err).catch(() => undefined);
+      await kernel.raw({ op: 'net-close', handle });
+      return;
     }
-    await kernel.raw({ op: 'net-end', handle });
-  } catch (err) {
-    await reader.cancel(err).catch(() => undefined);
-    await kernel.raw({ op: 'net-close', handle });
+    if (bytes.length === 0) continue;
+    const taken = await kernel.blocking({ op: 'net-write', handle, bytes }, signal).then(
+      () => true,
+      () => false
+    );
+    if (!taken) {
+      await reader.cancel().catch(() => undefined);
+      return;
+    }
   }
+  await kernel.raw({ op: 'net-end', handle });
 }
 
 export function fetchOp(kernel: JsKernel) {
