@@ -9,6 +9,7 @@ import {
   type PollState,
   pollFile,
 } from './fd-table.ts';
+import { timerAfter, timerAt } from './timer.ts';
 
 export const EPOLL = {
   IN: 1,
@@ -95,11 +96,11 @@ function lookup(fds: FdTable, fd: number): OpenFile | undefined {
 
 function pause(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
+    const cancel = timerAfter(ms, resolve);
     signal.addEventListener(
       'abort',
       () => {
-        clearTimeout(timer);
+        cancel();
         resolve();
       },
       { once: true }
@@ -175,20 +176,16 @@ export class EpollFile implements KernelFile {
       const round = new AbortController();
       const woken = this.changes.wait(AbortSignal.any([round.signal, signal]));
       woken.catch(() => undefined);
-      let timer: ReturnType<typeof setTimeout> | undefined;
+      let cancel = (): void => {};
       const expiry =
         deadline === Number.POSITIVE_INFINITY
           ? []
-          : [
-              new Promise<void>(
-                (resolve) => (timer = setTimeout(resolve, deadline - performance.now()))
-              ),
-            ];
+          : [new Promise<void>((resolve) => (cancel = timerAt(deadline, resolve)))];
       try {
         await Promise.race([woken, ...expiry]);
       } finally {
         round.abort();
-        clearTimeout(timer);
+        cancel();
       }
     }
   }
