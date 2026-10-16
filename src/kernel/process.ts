@@ -236,6 +236,7 @@ export type WasmSyscall =
   | { op: 'tty-pgrp-get'; fd: number }
   | { op: 'tty-pgrp-set'; fd: number; pgrp: number }
   | { op: 'sig-mask'; caught: number; ignored: number; defaults?: number }
+  | { op: 'sig-waiting'; tid: number; set: number }
   | { op: 'sig-pause' }
   | SocketSyscall
   | EpollSyscall
@@ -413,6 +414,7 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'tty-pgrp-get',
   'tty-pgrp-set',
   'sig-mask',
+  'sig-waiting',
   'sig-pause',
   ...SOCKET_OPS,
   ...EPOLL_OPS,
@@ -672,16 +674,8 @@ export class WasmProcess {
     if (sig === SIG.STOP) return this.stop(sig);
     const bit = sigbit(sig);
     if (this.ignores(bit)) return 'ignore';
-    if (((this.options.blockedBits?.() ?? 0) & bit) !== 0) {
-      const tid = this.options.unblockedThread?.(sig);
-      if (tid === undefined) {
-        this.options.onPending?.(sig);
-        return 'deliver';
-      }
-      if (this.caught & bit) {
-        this.options.threadKill?.(tid, sig);
-        return 'deliver';
-      }
+    if (((this.options.blockedBits?.() ?? 0) & bit) !== 0 && this.routeBlocked(sig, bit)) {
+      return 'deliver';
     }
     if (!(this.caught & bit)) {
       const action = defaultAction(sig);
@@ -697,6 +691,18 @@ export class WasmProcess {
     this.interrupt = new AbortController();
     blocked.abort();
     return 'deliver';
+  }
+
+  private routeBlocked(sig: number, bit: number): boolean {
+    const waiter = this.waiterFor(bit);
+    const tid = waiter ?? this.options.unblockedThread?.(sig);
+    if (tid === undefined || tid === 1) {
+      this.options.onPending?.(sig);
+      return true;
+    }
+    if (waiter === undefined && !(this.caught & bit)) return false;
+    this.options.threadKill?.(tid, sig);
+    return true;
   }
 
   private async spawn(req: Extract<WasmSyscall, { op: 'proc-spawn' }>): Promise<number> {
@@ -790,6 +796,19 @@ export class WasmProcess {
   private readonly blocks = new WeakMap<AbortSignal, () => void>();
 
   private readonly sizesRead = new WeakMap<KernelTty, string>();
+
+  private readonly sigwaiters = new Map<number, number>();
+
+  private setSigwaiter(tid: number, set: number): void {
+    if (set === 0) this.sigwaiters.delete(tid);
+    else this.sigwaiters.set(tid, set);
+  }
+
+  private waiterFor(bit: number): number | undefined {
+    if (((this.sigwaiters.get(1) ?? 0) & bit) !== 0) return 1;
+    for (const [tid, set] of this.sigwaiters) if (set & bit) return tid;
+    return undefined;
+  }
 
   async syscall(
     req: WasmSyscall,
@@ -1847,6 +1866,9 @@ export class WasmProcess {
         return { ok: true, kind: 'void' };
       case 'dl-unlock':
         this.unlockDl(req.owner);
+        return { ok: true, kind: 'void' };
+      case 'sig-waiting':
+        this.setSigwaiter(req.tid, req.set);
         return { ok: true, kind: 'void' };
       case 'sig-mask':
         this.caught = req.caught;

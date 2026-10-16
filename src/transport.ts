@@ -35,6 +35,7 @@ export interface FetchTransportOptions {
   webSocket?: boolean | WebSocketConstructor;
   webSocketHeaders?: boolean;
   redirect?: 'follow' | 'manual';
+  streamingBodies?: boolean;
 }
 
 export const SEND_BUFFER = 1024 * 1024;
@@ -75,6 +76,30 @@ async function* chunks(
   }
 }
 
+function streamOf(body: AsyncIterable<Uint8Array>): ReadableStream<Uint8Array> {
+  const it = body[Symbol.asyncIterator]();
+  return new ReadableStream<Uint8Array>(
+    {
+      async pull(controller) {
+        const next = await it.next();
+        if (next.done) controller.close();
+        else controller.enqueue(next.value);
+      },
+      async cancel(reason) {
+        await it.return?.(reason);
+      },
+    },
+    { highWaterMark: 0 }
+  );
+}
+
+function requestBody(request: RealmTransportRequest): RequestInit {
+  if (request.bodyStream) {
+    return { body: streamOf(request.bodyStream), duplex: 'half' } as RequestInit;
+  }
+  return request.body ? { body: request.body as BodyInit } : {};
+}
+
 export function fetchTransport(options: FetchTransportOptions = {}): RealmTransport {
   const send = options.fetch ?? globalThis.fetch.bind(globalThis);
   const Socket =
@@ -90,6 +115,7 @@ export function fetchTransport(options: FetchTransportOptions = {}): RealmTransp
       maxRequestBody: options.maxRequestBody ?? MAX_REQUEST_BODY,
       crossOrigin: 'cors',
       ...(Socket ? { websocket: true as const } : {}),
+      ...(options.streamingBodies ? { streamingBodies: true as const } : {}),
     },
     ...(Socket ? { websocket: (request) => openWebSocket(Socket, request, headers) } : {}),
     async fetch(request: RealmTransportRequest): Promise<RealmTransportResponse> {
@@ -98,7 +124,7 @@ export function fetchTransport(options: FetchTransportOptions = {}): RealmTransp
         response = await send(request.url, {
           method: request.method,
           headers: joinHeaders(request.headers),
-          ...(request.body ? { body: request.body as BodyInit } : {}),
+          ...requestBody(request),
           signal: request.signal,
           redirect,
           credentials: 'omit',
@@ -152,6 +178,30 @@ interface Flow {
   wake?: () => void;
 }
 
+function uploadsFor(peer: TransportPeer) {
+  const pulls = new Map<number, (call: TransportCall) => void>();
+  const of = (nid: number, signal: AbortSignal): AsyncIterable<Uint8Array> => ({
+    async *[Symbol.asyncIterator]() {
+      for (;;) {
+        signal.throwIfAborted();
+        const got = await new Promise<TransportCall>((resolve, reject) => {
+          const stop = () => reject(signal.reason);
+          signal.addEventListener('abort', stop, { once: true });
+          pulls.set(nid, (call) => {
+            signal.removeEventListener('abort', stop);
+            resolve(call);
+          });
+          peer.postMessage({ net: 'body-pull', nid });
+        }).finally(() => pulls.delete(nid));
+        if (got.net === 'body-end') return;
+        if (got.net === 'body-error') throw new Error(got.message);
+        if (got.net === 'body-chunk') yield got.bytes;
+      }
+    },
+  });
+  return { of, answer: (call: TransportCall) => pulls.get(call.nid)?.(call) };
+}
+
 export function serveTransport(
   peer: TransportPeer,
   transport: RealmTransport,
@@ -172,6 +222,7 @@ export function serveTransport(
       ...(typeof code === 'string' ? { code } : {}),
     });
   };
+  const uploads = uploadsFor(peer);
   const start = async (call: Extract<TransportCall, { net: 'fetch' }>) => {
     const abort = new AbortController();
     const entry: { abort: AbortController; body?: AsyncIterator<Uint8Array> } = { abort };
@@ -181,7 +232,11 @@ export function serveTransport(
         url: call.url,
         method: call.method,
         headers: call.headers,
-        ...(call.body ? { body: call.body } : {}),
+        ...(call.streamed
+          ? { bodyStream: uploads.of(call.nid, abort.signal) }
+          : call.body
+            ? { body: call.body }
+            : {}),
         signal: abort.signal,
       });
       if (!open.has(call.nid)) {
@@ -322,7 +377,9 @@ export function serveTransport(
   return {
     answer(call) {
       if (call.net === 'fetch') void start(call);
-      else if (call.net === 'read') void read(call.nid);
+      else if (call.net === 'body-chunk' || call.net === 'body-end' || call.net === 'body-error') {
+        uploads.answer(call);
+      } else if (call.net === 'read') void read(call.nid);
       else if (call.net === 'ws-open') void openSocket(call);
       else if (call.net === 'ws-send') void sendOn(call);
       else if (call.net === 'ws-close') {

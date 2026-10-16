@@ -4,7 +4,34 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 
-const { version } = JSON.parse(await readFile(new URL('./package.json', import.meta.url), 'utf8'));
+const { version: declared } = JSON.parse(
+  await readFile(new URL('./package.json', import.meta.url), 'utf8')
+);
+const git = (...args) =>
+  execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+const quiet = (run) => {
+  try {
+    return run();
+  } catch {
+    return '';
+  }
+};
+const RELEASE = /^v(\d+)\.(\d+)\.(\d+)$/;
+const newest = (tags) =>
+  tags
+    .map((tag) => RELEASE.exec(tag))
+    .filter(Boolean)
+    .sort((a, b) => b[1] - a[1] || b[2] - a[2] || b[3] - a[3])[0]?.[0];
+const releaseTag = () =>
+  newest(quiet(() => git('tag', '--list', 'v*')).split('\n')) ??
+  newest(
+    quiet(() => git('ls-remote', '--tags', '--refs', 'origin', 'v*'))
+      .split('\n')
+      .map((line) => line.split('refs/tags/')[1] ?? '')
+  );
+const dev = declared === '0.0.0' || declared.startsWith('0.0.0-');
+const tag = dev ? releaseTag() : undefined;
+const version = tag ? `${tag.slice(1)}+dev` : declared;
 const define = { SLICC_VERSION: JSON.stringify(version) };
 await rm(new URL('./dist/', import.meta.url), { recursive: true, force: true });
 await build({

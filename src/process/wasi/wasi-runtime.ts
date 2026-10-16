@@ -151,7 +151,7 @@ export function sigmaskOf(
   }
   if (threads) threads.blocked = () => loadBlocked(header);
   const shared = process && new Int32Array(process, 0, SAB_HEADER_I32);
-  return new WasiSigmask(header, () => gate.deliver(), shared);
+  return new WasiSigmask(header, () => gate.deliver(), shared, threads?.tid ?? MAIN_TID);
 }
 
 const noErrno = (key: string) =>
@@ -741,6 +741,7 @@ export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike
       procTree(call, id.pid)
     ),
     ...descriptors(init, fork, threads),
+    ...(threads ? { credGen: threads.ids } : {}),
   });
   host.sigmask = sigmaskOf(module, init.sab, gate, threads);
   if (threads) {

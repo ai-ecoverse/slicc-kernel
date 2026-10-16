@@ -136,6 +136,7 @@ import {
 } from './process/wasi/wasi-module.ts';
 import type { SourceCheck } from './realm/sync-fs-token-registry.ts';
 import { anyBlocked, type BlockedMask } from './realm/sync-sab-wire.ts';
+import { REFUSED_PATH, REFUSED_SOURCE, refusing } from './refused-command.ts';
 import { type ApproveHook, Sudo, type SudoCall, type SudoResult } from './sudo.ts';
 import { SUDO_COMMAND, SUDO_PATH, SUDO_SOURCE } from './sudo-command.ts';
 import {
@@ -757,10 +758,21 @@ export class Launcher {
           const tiers = await this.tiers(scope, appended);
           return scanCommands(this.scanned, tiers, tiers.length - appended.length);
         })
-        .then((commands) => commands.set(SUDO_COMMAND.name, SUDO_COMMAND));
+        .then((commands) => this.refusals(commands).set(SUDO_COMMAND.name, SUDO_COMMAND));
       this.catalogs.set(scope, found);
     }
     return found;
+  }
+
+  private refusals(commands: Map<string, Command>): Map<string, Command> {
+    for (const [name, command] of commands) {
+      if (!command.refused) continue;
+      commands.set(name, refusing(command));
+      if (this.warned.has(command.refused)) continue;
+      this.warned.add(command.refused);
+      console.warn(`slicc-kernel: refusing the commands of ${command.refused}`);
+    }
+    return commands;
   }
 
   private ownCommands(scope: string): Promise<ReadonlySet<string>> {
@@ -1369,6 +1381,9 @@ export class Launcher {
   ): Promise<Program> {
     if (target.abi === 'js' && target.wasm === SUDO_PATH) {
       return { abi: 'js', glue: SUDO_SOURCE, path: SUDO_PATH };
+    }
+    if (target.abi === 'js' && target.wasm === REFUSED_PATH) {
+      return { abi: 'js', glue: REFUSED_SOURCE, path: REFUSED_PATH };
     }
     const { asked } = target;
     if (target.abi === 'js') {
@@ -2503,7 +2518,8 @@ export class Launcher {
     const name = system ?? path.slice(slash + 1);
     const command = scope === undefined ? undefined : (await this.commands(scope)).get(name);
     const owner = scope ? scopes.owners?.get(scope) : undefined;
-    return command && { path: command.script ?? command.wasm, ...(owner ? { owner } : {}) };
+    const target = command && (command.shows ?? command.script ?? command.wasm);
+    return target === undefined ? undefined : { path: target, ...(owner ? { owner } : {}) };
   }
 
   private processChain(fs: KernelFs, nodes: VfsNodes, unlinked: UnlinkedKeeper): KernelFs {

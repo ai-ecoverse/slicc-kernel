@@ -3,6 +3,7 @@ import { physicalPath } from '../../fs/physical-path.ts';
 import { localCpuNanos } from '../../kernel/cpu-clock.ts';
 import { type Cred, type CredChange, MAX_GROUPS } from '../../kernel/cred.ts';
 import type { DeviceMeta, KernelFdKind } from '../../kernel/fd-table.ts';
+import { SIG } from '../../kernel/signals.ts';
 import type { SyncFsBridgeStat, SyncFsPosixBridge } from '../../realm/sync-fs-wire.ts';
 import type { LockHeld } from '../process-locks.ts';
 import { type LockedFile, lockImports } from './slicc-lock.ts';
@@ -24,6 +25,7 @@ import {
   WHENCE,
   wasiErrnoOf,
 } from './wasi-abi.ts';
+import { CredCache } from './wasi-cred.ts';
 import {
   CLIPBOARD_PATH,
   deviceOf,
@@ -46,6 +48,7 @@ import { pollOneoff } from './wasi-poll.ts';
 import type { WasiSigmask } from './wasi-sigmask.ts';
 import type { WasiSignals } from './wasi-signals.ts';
 import { sliccTty } from './wasi-termios.ts';
+import { wasixEpollImports } from './wasix-epoll.ts';
 import type { ThreadEntry } from './wasix-fork.ts';
 import { datagramCalls } from './wasix-sockets.ts';
 
@@ -78,12 +81,22 @@ export interface WasiHostOptions {
 
   shared?: Int32Array;
 
+  credGen?: Int32Array;
+
   forked?: { fds: readonly WasiForkFd[]; cloexec: readonly number[] };
 
   preopenRoot?: boolean;
 }
 
 export type WasiFunction = (...args: never[]) => number | undefined;
+
+type EpollWait = (
+  epfd: number,
+  events: number,
+  max: number,
+  timeout: bigint,
+  nevents: number
+) => number | undefined;
 
 const IDS = ['ruid', 'euid', 'suid', 'rgid', 'egid', 'sgid'] as const;
 const NS_PER_MS = 1_000_000n;
@@ -102,7 +115,7 @@ const DEFAULT_UMASK = 0o022;
 const MONOTONIC_BASE = BigInt(Math.round(performance.timeOrigin)) * NS_PER_MS;
 
 const MAX_READ = 1024 * 1024;
-const SIGPIPE_EXIT = 141;
+const SIGPIPE_EXIT = 128 + SIG.PIPE;
 
 const SIG_IGN = 1;
 
@@ -178,12 +191,15 @@ function kernelFiletype(kind: string): { filetype: number; seeks: boolean } {
 export class WasiHost {
   readonly mem = new WasiMemory();
   readonly fds: WasiFds;
+  private readonly creds: CredCache;
   private readonly started = performance.now();
   private cache: Record<string, WasiFunction> | undefined;
 
   private readonly startCwd: string;
 
   interruptWakes = false;
+
+  strictEpoll = false;
 
   entered = false;
 
@@ -227,6 +243,10 @@ export class WasiHost {
     this.o = { ...o, kernel: { sys, call } };
     this.startCwd = o.cwd;
     this.fds = new WasiFds(this.o.kernel, o.fs);
+    this.creds = new CredCache(
+      () => this.o.kernel.call({ op: 'proc-cred' }) as Cred,
+      o.credGen ?? o.shared
+    );
     if (o.shared) this.fds.share(o.shared, true);
     else if (o.forked) this.fds.restore(o.forked.fds, o.forked.cloexec);
     else this.fds.setup(o.cwd, o.inherited ?? [], o.preopenRoot === true);
@@ -271,7 +291,7 @@ export class WasiHost {
       own.call(this.o.fs, path, idOf(uid), idOf(gid), follow, handle);
     };
     const caller = (): [number, number] => {
-      const cred = this.o.kernel.call({ op: 'proc-cred' }) as Cred;
+      const cred = this.creds.get();
       return [cred.euid, cred.egid];
     };
     const owner = (st: { uid?: number; gid?: number } | undefined, out: number): void => {
@@ -403,7 +423,7 @@ export class WasiHost {
       umount2: (tp: number, tl: number, flags: number) =>
         void this.o.kernel.call({ op: 'umount', target: path(tp, tl), flags }),
       cred_get: (out: number) => {
-        const cred = this.o.kernel.call({ op: 'proc-cred' }) as Cred;
+        const cred = this.creds.get();
         const view = mem.view();
         view.getUint32(out + 20, true);
         IDS.forEach((key, i) => void view.setUint32(out + i * 4, cred[key], true));
@@ -413,7 +433,7 @@ export class WasiHost {
         IDS.forEach((key, i) => {
           if (ids[i] !== -1) change[key] = (ids[i] as number) >>> 0;
         });
-        void this.o.kernel.call({ op: 'proc-setcred', change });
+        void this.creds.change(() => this.o.kernel.call({ op: 'proc-setcred', change }) as Cred);
       },
       ...semImports(this),
       ...lockImports({
@@ -439,7 +459,7 @@ export class WasiHost {
         },
       }),
       groups_get: (buf: number, cap: number, count: number) => {
-        const { groups } = this.o.kernel.call({ op: 'proc-cred' }) as Cred;
+        const { groups } = this.creds.get();
         if (cap !== 0 && cap < groups.length) throw new WasiError('EINVAL');
         const shown = cap === 0 ? [] : groups;
         const view = mem.view();
@@ -452,7 +472,9 @@ export class WasiHost {
         if (n < 0 || n > MAX_GROUPS) throw new WasiError('EINVAL');
         const view = mem.view();
         const groups = Array.from({ length: n }, (_, i) => view.getUint32(buf + i * 4, true));
-        void this.o.kernel.call({ op: 'proc-setcred', change: { groups } });
+        void this.creds.change(
+          () => this.o.kernel.call({ op: 'proc-setcred', change: { groups } }) as Cred
+        );
       },
       sigaction_set: (sig: number, disposition: number, flags: number) => {
         if (!this.signals) return E.NOSYS;
@@ -480,6 +502,32 @@ export class WasiHost {
         this.sigmask
           ? this.maskedPoll(this.sigmask, [lo, hi], [inPtr, outPtr, n, nevents])
           : E.NOSYS,
+      sigmask_epoll_wait: (
+        lo: number,
+        hi: number,
+        epfd: number,
+        events: number,
+        max: number,
+        timeout: bigint,
+        nevents: number
+      ) =>
+        this.sigmask
+          ? this.maskedEpoll(this.sigmask, [lo, hi], nevents, (epoll) =>
+              epoll(epfd, events, max, timeout, nevents)
+            )
+          : E.NOSYS,
+      sigwait: (lo: number, _hi: number, timeout: bigint, out: number) => {
+        const mask = this.sigmask;
+        if (!mask) return E.NOSYS;
+        mem.view().setUint32(out, 0, true);
+        return mask.sigwait(
+          lo,
+          timeout,
+          (set) => void this.o.kernel.call({ op: 'sig-waiting', tid: mask.tid, set }),
+          (sig) => void mem.view().setUint32(out, sig, true),
+          this.entered
+        );
+      },
       sigpending_get: (out: number) => {
         if (!this.sigmask) return E.NOSYS;
         mem.view().setBigUint64(out, BigInt(this.sigmask.pending()), true);
@@ -520,6 +568,26 @@ export class WasiHost {
       if (mask.deliverUnblocked()) return E.INTR;
       if (n > 0) return this.poll(inPtr, outPtr, n, nevents);
       return this.entered ? E.INTR : this.suspend();
+    } finally {
+      mask.deliverUnblocked();
+      mask.restore(old);
+    }
+  }
+
+  private epollWait: EpollWait | undefined;
+
+  private maskedEpoll(
+    mask: WasiSigmask,
+    set: [number, number],
+    nevents: number,
+    wait: (epoll: EpollWait) => number | undefined
+  ): number {
+    const old = mask.swap(set[0], set[1]);
+    try {
+      this.mem.view().setUint32(nevents, 0, true);
+      if (mask.deliverUnblocked()) return E.INTR;
+      this.epollWait ??= wasixEpollImports(this).epoll_wait as unknown as EpollWait;
+      return wait(this.epollWait) ?? E.SUCCESS;
     } finally {
       mask.deliverUnblocked();
       mask.restore(old);
@@ -972,7 +1040,7 @@ export class WasiHost {
         return this.fds.kind(fd, e) === 'file' ? this.changed(fd, e, n) : n;
       } catch (err) {
         const broken = (err as { code?: string }).code === 'EPIPE';
-        if (broken && this.fds.kind(fd, e) !== 'socket') throw new WasiExit(SIGPIPE_EXIT);
+        if (broken && this.fds.kind(fd, e) !== 'socket') this.brokenPipe();
         throw err;
       }
     }
@@ -983,6 +1051,19 @@ export class WasiHost {
       return data.length;
     }
     return this.file(fd, 'write').write(data);
+  }
+
+  private brokenPipe(): void {
+    let action: unknown;
+    try {
+      action = this.o.kernel.call({ op: 'proc-kill-self', sig: SIG.PIPE, probe: true });
+    } catch {
+      action = 'terminate';
+    }
+    if (action !== 'terminate') return;
+    const mask = this.sigmask;
+    if (!mask?.blocks(SIG.PIPE)) throw new WasiExit(SIGPIPE_EXIT);
+    this.o.kernel.call({ op: 'thread-kill', tid: mask.tid, sig: SIG.PIPE });
   }
 
   private read(fd: number, max: number): Uint8Array {

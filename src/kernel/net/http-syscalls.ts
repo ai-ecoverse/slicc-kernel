@@ -10,6 +10,7 @@ export interface HttpRequestBody {
   method: string;
   headers: HeaderList;
   body?: Uint8Array;
+  stream?: boolean;
 }
 
 export type HttpSyscall =
@@ -17,6 +18,8 @@ export type HttpSyscall =
   | ({ op: 'net-open' } & HttpRequestBody)
   | { op: 'net-head'; handle: number }
   | { op: 'net-read'; handle: number; max: number }
+  | { op: 'net-write'; handle: number; bytes: Uint8Array }
+  | { op: 'net-end'; handle: number }
   | { op: 'net-close'; handle: number }
   | { op: 'net-traits'; url?: string }
   | WsSyscall;
@@ -26,6 +29,8 @@ export const HTTP_OPS: readonly string[] = [
   'net-open',
   'net-head',
   'net-read',
+  'net-write',
+  'net-end',
   'net-close',
   'net-traits',
   ...WS_OPS,
@@ -47,7 +52,49 @@ interface Open {
   left: Uint8Array;
   done: boolean;
   reading: Promise<void>;
+  upload?: Upload;
   cancel(): Promise<void>;
+}
+
+class Upload implements AsyncIterable<Uint8Array> {
+  private readonly queue: Array<{ bytes: Uint8Array; taken: (ok: boolean) => void }> = [];
+  private ended = false;
+  private wake: (() => void) | undefined;
+
+  write(bytes: Uint8Array): Promise<boolean> {
+    if (this.ended) return Promise.resolve(false);
+    return new Promise((taken) => {
+      this.queue.push({ bytes, taken });
+      this.wake?.();
+    });
+  }
+
+  end(): void {
+    this.ended = true;
+    this.wake?.();
+  }
+
+  cancel(): void {
+    this.ended = true;
+    for (const { taken } of this.queue.splice(0)) taken(false);
+    this.wake?.();
+  }
+
+  async *[Symbol.asyncIterator](): AsyncGenerator<Uint8Array> {
+    for (;;) {
+      const next = this.queue.shift();
+      if (next) {
+        next.taken(true);
+        yield next.bytes;
+        continue;
+      }
+      if (this.ended) return;
+      await new Promise<void>((resolve) => {
+        this.wake = resolve;
+      });
+      this.wake = undefined;
+    }
+  }
 }
 
 const EMPTY = new Uint8Array(0);
@@ -91,6 +138,8 @@ export class HttpHandles {
     if (req.op === 'net-open') return Promise.resolve(this.opened(req));
     if (req.op === 'net-head') return this.head(req.handle);
     if (req.op === 'net-read') return this.read(req.handle, req.max);
+    if (req.op === 'net-write') return this.write(req.handle, req.bytes);
+    if (req.op === 'net-end') return Promise.resolve(this.end(req.handle));
     if (req.op === 'net-traits') return Promise.resolve(this.traits(req.url));
     return this.close((req as { handle: number }).handle);
   }
@@ -112,7 +161,29 @@ export class HttpHandles {
   }
 
   private opened(req: HttpRequestBody): SyncFsResult {
+    if (
+      req.stream &&
+      (this.local?.port(req.url) !== undefined || !this.transport.traits.streamingBodies)
+    ) {
+      return { ok: false, errno: 'ENOTSUP', message: 'this transport takes whole request bodies' };
+    }
     return { ok: true, kind: 'json', json: this.start(req).handle };
+  }
+
+  private async write(handle: number, bytes: Uint8Array): Promise<SyncFsResult> {
+    const upload = this.open.get(handle)?.upload;
+    if (!upload) return { ok: false, errno: 'EBADF', message: `no upload ${handle}` };
+    if (!(await upload.write(bytes))) {
+      return { ok: false, errno: 'EPIPE', message: 'the request no longer takes a body' };
+    }
+    return { ok: true, kind: 'void' };
+  }
+
+  private end(handle: number): SyncFsResult {
+    const upload = this.open.get(handle)?.upload;
+    if (!upload) return { ok: false, errno: 'EBADF', message: `no upload ${handle}` };
+    upload.end();
+    return { ok: true, kind: 'void' };
   }
 
   private start(req: HttpRequestBody): { handle: number; head: Promise<SyncFsResult> } {
@@ -126,6 +197,7 @@ export class HttpHandles {
       done: false,
       reading: Promise.resolve(),
       cancel: async () => undefined,
+      ...(req.stream ? { upload: new Upload() } : {}),
     };
     this.open.set(handle, entry);
     entry.head = this.respond(handle, req, entry);
@@ -140,7 +212,7 @@ export class HttpHandles {
         url: target,
         method: req.method,
         headers: req.headers,
-        ...(req.body ? { body: req.body } : {}),
+        ...(entry.upload ? { bodyStream: entry.upload } : req.body ? { body: req.body } : {}),
         signal: entry.abort.signal,
       };
       const response =
@@ -154,6 +226,7 @@ export class HttpHandles {
       const head = this.headOf(handle, shown, response);
       return response.redirected ? { ...head, json: { ...head.json, redirected: true } } : head;
     } catch (e) {
+      entry.upload?.cancel();
       const text = message(e);
       if (port !== undefined) return { ok: false, errno: codeOf(e), message: text };
       const status = (e as { status?: unknown }).status;
@@ -221,6 +294,7 @@ export class HttpHandles {
     const entry = this.open.get(handle);
     if (!entry) return { ok: false, errno: 'EBADF', message: `no request ${handle}` };
     this.open.delete(handle);
+    entry.upload?.cancel();
     entry.abort.abort();
     await entry.cancel().catch(() => undefined);
     return { ok: true, kind: 'void' };

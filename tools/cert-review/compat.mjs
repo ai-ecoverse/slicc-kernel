@@ -16,12 +16,18 @@ const { values } = parseArgs({
     dispatch: { type: 'boolean', default: false },
     rerun: { type: 'boolean', default: false },
     reference: { type: 'string', default: '' },
+    ref: { type: 'string', default: 'main' },
+    run: { type: 'string', default: '' },
+    artifact: { type: 'string', default: '' },
+    sha256: { type: 'string', default: '' },
   },
 });
 const { repo, version, commit, reference } = values;
 const API = process.env.GITHUB_API_URL ?? 'https://api.github.com';
 const WORKFLOW = 'kernel-compat.yml';
-const TITLE = `Kernel compat v${version}${reference ? ` ref ${reference}` : ''}`;
+const { sha256 } = values;
+const TITLE = `Kernel compat v${version}${sha256 ? ` ${sha256}` : ''}${reference ? ` ref ${reference}` : ''}`;
+const CANDIDATE = sha256 ? { run: values.run, artifact: values.artifact, sha256 } : {};
 const headers = {
   authorization: `Bearer ${process.env.GH_TOKEN}`,
   accept: 'application/vnd.github+json',
@@ -53,24 +59,16 @@ async function jobsOf(run) {
 }
 
 async function forVersion(run, jobs) {
-  if (run.event === 'workflow_run' || run.display_title === TITLE) return true;
-  const published = jobs.find((j) => j.name === 'published');
-  if (!published) return false;
-  const log = await text(`repos/${repo}/actions/jobs/${published.id}/logs`);
-  return (
-    log.includes(`@ai-ecoverse/slicc-kernel@${version}\n`) ||
-    log.includes(`@ai-ecoverse/slicc-kernel@${version}\r`)
-  );
+  if (run.display_title === TITLE) return true;
+  const candidate = jobs.find((j) => j.name === 'candidate');
+  if (!candidate) return false;
+  const log = await text(`repos/${repo}/actions/jobs/${candidate.id}/logs`);
+  const line = `@ai-ecoverse/slicc-kernel@${version}${sha256 ? ` sha256=${sha256}` : ''}`;
+  return log.includes(`${line}\n`) || log.includes(`${line}\r`);
 }
 
-async function candidates(after, own, strict) {
+async function candidates(after, strict) {
   const runs = [];
-  if (own) {
-    const r = await api(
-      `repos/${repo}/actions/workflows/${WORKFLOW}/runs?head_sha=${commit}&event=workflow_run&per_page=20`
-    );
-    runs.push(...r.workflow_runs);
-  }
   const d = await api(
     `repos/${repo}/actions/workflows/${WORKFLOW}/runs?event=workflow_dispatch&per_page=50`
   );
@@ -87,18 +85,18 @@ async function dispatch(given) {
   const after = new Date(Date.now() - 5000).toISOString().replace(/\.\d+Z$/, 'Z');
   await api(`repos/${repo}/actions/workflows/${WORKFLOW}/dispatches`, {
     method: 'POST',
-    body: JSON.stringify({ ref: 'main', inputs }),
+    body: JSON.stringify({ ref: values.ref, inputs }),
   });
   console.log(`compat: dispatched kernel-compat ${JSON.stringify(inputs)}`);
   return after;
 }
 
-async function finished({ own, set, deadline }) {
-  let after = set ? await dispatch({ version, set }) : '';
+async function finished({ set, deadline }) {
+  let after = set ? await dispatch({ version, ...CANDIDATE, set }) : '';
   let dispatched = Boolean(set);
   for (;;) {
     let pending = false;
-    for (const run of await candidates(after, own, Boolean(set))) {
+    for (const run of await candidates(after, Boolean(set))) {
       if (run.status !== 'completed') {
         pending = true;
         continue;
@@ -110,7 +108,7 @@ async function finished({ own, set, deadline }) {
       return { run, jobs, dispatched };
     }
     if (!pending && !dispatched && values.dispatch) {
-      after = await dispatch({ version });
+      after = await dispatch({ version, ...CANDIDATE });
       dispatched = true;
       await sleep(15_000);
       continue;
@@ -184,8 +182,14 @@ async function whole(found) {
   return { ...found, run, jobs, shards, ...(shardRerun ? { shardRerun } : {}) };
 }
 
-const first = await whole(await finished({ own: !reference, deadline }));
-const out = { version, commit, dispatched: first.dispatched, found: Boolean(first.run) };
+const first = await whole(await finished({ deadline }));
+const out = {
+  version,
+  commit,
+  sha256: sha256 || undefined,
+  dispatched: first.dispatched,
+  found: Boolean(first.run),
+};
 if (first.run && first.run.conclusion !== 'success') out.missingShards = first.shards;
 if (first.shardRerun) out.shardRerun = first.shardRerun;
 if (first.run) {
@@ -203,9 +207,7 @@ if (first.run) {
   let regressions = compatRegressions(got?.json);
   if (regressions.length > 0 && values.rerun) {
     const set = rerunSet(regressions);
-    const again = await whole(
-      await finished({ own: false, set, deadline: Date.now() + 120 * 60_000 })
-    );
+    const again = await whole(await finished({ set, deadline: Date.now() + 120 * 60_000 }));
     const rerun = again.run ? report(again.run) : undefined;
     out.rerun = again.run
       ? {

@@ -437,12 +437,19 @@ export function verdictLine({
   review,
   incomplete,
   certified,
+  attempt = 1,
 }) {
   const tag = `${name}@${version}${planted ? ` (planted ${planted})` : ''}`;
   if (problems.length === 0 && !incomplete && review?.verdict === 'certified') {
     return { state: 'success', line: certified };
   }
   if (incomplete && problems.length === 0) {
+    if (Number(attempt) > 1) {
+      return {
+        state: 'error',
+        line: `cert-ci: NOT REVIEWED ${tag}: still incomplete after a retry (${incomplete.named}); not published (${ci})`,
+      };
+    }
     return {
       state: 'error',
       line: `cert-ci: INCOMPLETE ${tag} (${incomplete.named}; ${incomplete.remedy}) (${ci})`,
@@ -495,4 +502,95 @@ export function covering(tags, prev, version) {
   return tags
     .filter((t) => compareVersions(t, prev) > 0 && compareVersions(t, version) <= 0)
     .sort(compareVersions);
+}
+
+export const NAME = '@ai-ecoverse/slicc-kernel';
+const SEMVER = /^\d+\.\d+\.\d+$/;
+
+export function gateOf({ record, sha256, packed, manifest }) {
+  const version = String(record?.version ?? '');
+  const line = String(record?.line ?? '').split('\n')[0];
+  const subject = SEMVER.test(version) ? `${NAME}@${version}` : NAME;
+  const refuse = (why) => ({ subject, line, why });
+  if (!record) return refuse('no cert-review record');
+  if (!SEMVER.test(version)) return refuse(`the record's version is "${version}"`);
+  if (record.planted) return refuse(`the record is for a planted build of ${record.planted}`);
+  if (record.certified !== true || !line.startsWith(`certified ${subject} `))
+    return refuse('the verdict is not certified');
+  if (record.sha256 !== sha256)
+    return refuse(`the record's sha256 ${record.sha256} is not the tarball's ${sha256}`);
+  if (String(packed ?? '').trim() !== sha256)
+    return refuse(`the pack job's sha256 ${packed || '(none)'} is not the tarball's ${sha256}`);
+  if (!line.startsWith(`certified ${subject} sha256=${sha256} `))
+    return refuse("the line doesn't name the tarball's sha256");
+  if (manifest?.name !== NAME || manifest?.version !== version)
+    return refuse(`the tarball is ${manifest?.name}@${manifest?.version}`);
+  return { subject, line, sha256 };
+}
+
+export function publishStep({ version, latest, onNpm, ours, dryRun }) {
+  if (!SEMVER.test(latest ?? ''))
+    return {
+      action: 'refuse',
+      why: `npm's latest reads as "${latest ?? ''}", so the latest check can't run`,
+    };
+  if (compareVersions(version, latest) < 0)
+    return { action: 'skip', why: `v${version} is older than npm's latest ${latest}` };
+  if (onNpm && dryRun)
+    return {
+      action: 'publish',
+      force: true,
+      why: `${NAME}@${version} is already on npm (${onNpm === ours ? 'these bytes' : onNpm}), so the dry run adds --force`,
+    };
+  if (onNpm && onNpm !== ours)
+    return { action: 'refuse', why: `${NAME}@${version} is on npm as ${onNpm}, not ${ours}` };
+  if (onNpm)
+    return { action: 'done', why: `${NAME}@${version} is already on npm with these bytes` };
+  return { action: 'publish', force: false };
+}
+
+export function packageProblems(manifest, { version, commit }) {
+  const problems = [];
+  if (manifest?.name !== NAME || manifest?.version !== version)
+    problems.push(`the tarball is ${manifest?.name}@${manifest?.version}, not ${NAME}@${version}`);
+  if (manifest?.gitHead !== commit)
+    problems.push(`the tarball's gitHead is ${manifest?.gitHead}, the tag commit is ${commit}`);
+  return problems;
+}
+
+export function previousPublished(tags, published, version) {
+  const served = new Set(published);
+  return tags
+    .filter((t) => served.has(t) && compareVersions(t, version) < 0)
+    .sort(compareVersions)
+    .at(-1);
+}
+
+export function withMissing(incomplete, reasons) {
+  const more = (reasons ?? []).filter(Boolean);
+  if (more.length === 0) return incomplete;
+  const named = [incomplete?.named, ...more].filter(Boolean).join('; ');
+  return { files: incomplete?.files ?? [], named, remedy: 're-run the failed jobs' };
+}
+
+export function jobsEvidence(text, incomplete) {
+  const failed = String(text ?? '')
+    .split(',')
+    .map((x) => x.trim().split('='))
+    .filter(([job, result]) => job && result !== 'success')
+    .map(([job, result]) => `the ${job} job ended ${result || 'without a result'}`);
+  return withMissing(incomplete, failed);
+}
+
+export function retryDecision({ attempt, state, active }) {
+  if (Number(attempt) !== 1)
+    return { retry: false, why: `attempt ${attempt}: only attempt 1 is retried` };
+  if (state !== 'error')
+    return { retry: false, why: `the cert-review status is ${state || 'missing'}, not error` };
+  if (active > 0)
+    return {
+      retry: false,
+      why: `${active} newer Release run(s) waiting or running; a re-run would cancel one`,
+    };
+  return { retry: true, why: 'INCOMPLETE on attempt 1: re-run the failed jobs once' };
 }
