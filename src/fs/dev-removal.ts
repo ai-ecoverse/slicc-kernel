@@ -1,4 +1,11 @@
+export const SHM = '/dev/shm';
+
+export function inShm(path: string): boolean {
+  return path === SHM || path.startsWith(`${SHM}/`);
+}
+
 export function inDevTree(path: string): boolean {
+  if (path.startsWith(`${SHM}/`)) return false;
   return path === '/dev' || path.startsWith('/dev/');
 }
 

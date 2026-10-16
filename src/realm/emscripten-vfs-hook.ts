@@ -33,6 +33,18 @@ export interface EmscriptenVfsHookDeps {
   cred?: LiveCred;
 }
 
+const KERNEL_DEV_DIRS = ['/dev/shm'];
+
+function kernelDevDirs(bridge: SyncFsPosixBridge): string[] {
+  return KERNEL_DEV_DIRS.filter((dir) => {
+    try {
+      return bridge.stat(dir).isDirectory;
+    } catch {
+      return false;
+    }
+  });
+}
+
 function topLevelDirs(
   bridge: SyncFsPosixBridge,
   warn: (message: string) => void
@@ -85,7 +97,12 @@ export function mountVfsIntoEmscripten(
 ): EmscriptenVfsHandle {
   const { bridge, warn } = deps;
   const dirs = topLevelDirs(bridge, warn);
-  const { plugin, mounted } = mountLiveVfsDirs(Fs, bridge, dirs ?? [], warn);
+  const { plugin, mounted } = mountLiveVfsDirs(
+    Fs,
+    bridge,
+    [...(dirs ?? []), ...kernelDevDirs(bridge)],
+    warn
+  );
   if (dirs) liveRoot(Fs, bridge);
   if (bridge.owners && Fs.lookupPath) useLiveChown(Fs as Parameters<typeof useLiveChown>[0]);
   if (bridge.links && Fs.lookupPath) readingLinks(Fs as Parameters<typeof readingLinks>[0]);

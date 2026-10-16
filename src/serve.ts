@@ -547,7 +547,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
     if (req.op === 'mount') return l.mount(req.spec);
     if (req.op === 'umount') return l.umount(req.target);
     if (req.op === 'insert') return l.insert(req.target, req.handle, req.source);
-    return l.mounts.list();
+    return l.mounts.listed();
   }
 
   const attestOp = attestOps(port);

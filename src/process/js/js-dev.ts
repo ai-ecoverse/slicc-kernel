@@ -1,3 +1,4 @@
+import { inShm } from '../../fs/dev-removal.ts';
 import type { DeviceMeta } from '../../kernel/fd-table.ts';
 import { parseSyncFsStat, type SyncFsBridgeStat } from '../../realm/sync-fs-wire.ts';
 import type { SyncSabRequestBody } from '../../realm/sync-sab-wire.ts';
@@ -50,7 +51,7 @@ interface TtyOwner {
 }
 
 export function inDev(abs: string): boolean {
-  return abs.startsWith('/dev') && (abs.length === 4 || abs[4] === '/');
+  return abs.startsWith('/dev') && (abs.length === 4 || abs[4] === '/') && !inShm(abs);
 }
 
 function missing(path: string): never {
@@ -205,7 +206,7 @@ export function* devReaddir(abs: string): DevStep<string[]> {
   if (node.kind !== 'dir') throw new JsCallError('ENOTDIR', abs);
   const names = (yield { op: 'fd-tty-names' }) as string[];
   const ttys = names.filter((n) => /^\/dev\/tty\d+$/.test(n)).map((n) => n.slice(5));
-  return [...DEVICES, 'clipboard', 'sealed', 'tty', 'fd', 'pts', ...STDIO, ...ttys].sort();
+  return [...DEVICES, 'clipboard', 'sealed', 'tty', 'fd', 'pts', 'shm', ...STDIO, ...ttys].sort();
 }
 
 export interface DevOpened {
