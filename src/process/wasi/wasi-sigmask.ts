@@ -99,7 +99,9 @@ export class WasiSigmask {
     const set = kernelBits(setLo | 0);
     const value = BigInt.asUintN(64, timeoutNs);
     const deadline =
-      value === FOREVER ? Number.POSITIVE_INFINITY : performance.now() + Number(value / NS_PER_MS);
+      value === FOREVER
+        ? Number.POSITIVE_INFINITY
+        : performance.now() + Number((value + NS_PER_MS - 1n) / NS_PER_MS);
     publish(set);
     try {
       for (;;) {
