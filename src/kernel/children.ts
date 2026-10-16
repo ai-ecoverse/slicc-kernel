@@ -57,6 +57,13 @@ export interface ChildHandle {
   onState?: (listener: ChildStateListener) => void;
 }
 
+export interface ChildEvent {
+  pid: number;
+  state: 'exited' | 'stopped' | 'continued';
+  status: number;
+  termsig?: number | undefined;
+}
+
 export type ChildStateListener = (state: 'stopped' | 'continued', sig: number) => void;
 
 export interface WaitFlags {
@@ -175,7 +182,7 @@ export class ChildTable {
 
   private readonly leftovers = new Map<number, Map<number, Uint8Array[]>>();
 
-  onChildState?: () => void;
+  onChildState?: (child?: ChildEvent) => void;
 
   onReap?: (pid: number) => void;
 
@@ -263,8 +270,9 @@ export class ChildTable {
     void handle.exited.then((code) => {
       child.code = code;
       this.watchers.delete(handle.pid);
+      const termsig = handle.termsig?.();
       if (!this.kept.delete(handle.pid) && this.autoReap?.()) this.reap(handle.pid, code);
-      this.onChildState?.();
+      this.onChildState?.({ pid: handle.pid, state: 'exited', status: termsig ?? code, termsig });
     });
     handle.onState?.((state, sig) => {
       child.stopReport = state === 'stopped' ? sig : undefined;
@@ -274,7 +282,7 @@ export class ChildTable {
       const waiters = this.stateChanged;
       this.stateChanged = [];
       for (const wake of waiters) wake();
-      this.onChildState?.();
+      this.onChildState?.({ pid: handle.pid, state, status: sig });
     });
     this.children.set(handle.pid, child);
     return handle.pid;

@@ -1,4 +1,5 @@
 import { KernelError } from './fd-table.ts';
+import type { SigInfo } from './signals.ts';
 import type { KernelTty } from './tty.ts';
 
 export interface JobMember {
@@ -6,7 +7,7 @@ export interface JobMember {
   pgid: number;
   sid: number;
 
-  signal(sig: number): void;
+  signal(sig: number, info?: SigInfo): void;
 
   execParent?: number;
 
@@ -30,7 +31,7 @@ export class JobTable {
   add(
     pid: number,
     parentPid: number | undefined,
-    signal: (sig: number) => void,
+    signal: (sig: number, info?: SigInfo) => void,
     terminal?: KernelTty
   ): JobMember {
     const parent = parentPid === undefined ? undefined : this.members.get(parentPid);
@@ -193,14 +194,19 @@ export class JobTable {
     return true;
   }
 
-  killGroup(pgid: number, sig: number, may: (pid: number) => boolean = () => true): boolean {
+  killGroup(
+    pgid: number,
+    sig: number,
+    may: (pid: number) => boolean = () => true,
+    info?: SigInfo
+  ): boolean {
     const group = [...this.members.values()].filter((m) => m.pgid === pgid);
     const targets = group.filter((m) => may(m.pid));
     if (targets.length === 0 && group.length > 0) throw new KernelError('EPERM');
     const pids = new Set(targets.map((m) => m.pid));
     if (sig !== 0) {
       for (const m of targets)
-        if (m.execParent === undefined || !pids.has(m.execParent)) m.signal(sig);
+        if (m.execParent === undefined || !pids.has(m.execParent)) m.signal(sig, info);
     }
     return targets.length > 0;
   }

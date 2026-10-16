@@ -21,6 +21,7 @@ import type { SourceCheck } from '../realm/sync-fs-token-registry.ts';
 import type { SyncFsResult } from '../realm/sync-fs-wire.ts';
 import type { SudoCall, SudoResult } from '../sudo.ts';
 import {
+  type ChildEvent,
   type ChildForker,
   type ChildSpawner,
   type ChildStdio,
@@ -63,7 +64,17 @@ import { type RunRequest, runChild } from './run-child.ts';
 import type { SealedBroker, SealedCaller } from './sealed.ts';
 import { selectFds } from './select.ts';
 import { SEM_OPS, SemHandles, type SemSyscall, type SemTable, semSyscall } from './sem.ts';
-import { type DefaultAction, defaultAction, isSignal, SIG, sigbit } from './signals.ts';
+import {
+  CLD,
+  type DefaultAction,
+  defaultAction,
+  isSignal,
+  KERNEL_SIGINFO,
+  SI,
+  SIG,
+  type SigInfo,
+  sigbit,
+} from './signals.ts';
 import { KernelSocket, LoopbackNet } from './socket.ts';
 import { socketNames } from './socket-nodes.ts';
 import { SOCKET_OPS, type SocketSyscall, socketSyscall } from './socket-syscalls.ts';
@@ -240,6 +251,7 @@ export type WasmSyscall =
   | { op: 'sig-mask'; caught: number; ignored: number; defaults?: number; nocldwait?: boolean }
   | { op: 'sig-inherited' }
   | { op: 'sig-waiting'; tid: number; set: number }
+  | { op: 'sig-info'; sig: number; tid?: number }
   | { op: 'sig-pause' }
   | SocketSyscall
   | EpollSyscall
@@ -420,6 +432,7 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'sig-mask',
   'sig-inherited',
   'sig-waiting',
+  'sig-info',
   'sig-pause',
   ...SOCKET_OPS,
   ...EPOLL_OPS,
@@ -508,7 +521,7 @@ export interface WasmProcessOptions {
 
   fs: VfsFileFs;
 
-  kill?: (pid: number, sig: number) => boolean | Promise<boolean>;
+  kill?: (pid: number, sig: number, info?: SigInfo) => boolean | Promise<boolean>;
 
   writesBack?: (pid: number) => boolean;
 
@@ -548,7 +561,7 @@ export interface WasmProcessOptions {
 
   dl?: DlState;
 
-  raise?: (sig: number) => void;
+  raise?: (sig: number, info?: SigInfo) => void;
 
   exitNow?: (status: number) => void;
 
@@ -645,7 +658,7 @@ export class WasmProcess {
     this.children = new ChildTable(fds, options.spawner, options.forker);
     this.nodes = options.nodes ?? new VfsNodes(options.fs);
     if (!options.nodes) options.openFiles?.add(this.nodes);
-    this.children.onChildState = () => this.signal(SIG.CHLD);
+    this.children.onChildState = (child) => this.signal(SIG.CHLD, child && this.childInfo(child));
     this.children.autoReap = () => this.reapsChildren();
     this.seedDl(options.dl);
     this.children.onReap = (pid) => {
@@ -666,10 +679,56 @@ export class WasmProcess {
     return ((fork ? 0 : this.ignored) | this.inherited) & ~this.caught;
   }
 
-  signal(sig: number): SignalOutcome {
+  private readonly sigInfos = new Map<string, SigInfo>();
+
+  signal(sig: number, info?: SigInfo): SignalOutcome {
+    const pending = ((this.options.pendingBits?.() ?? 0) & sigbit(sig)) !== 0;
+    const outcome = this.signalOutcome(sig, info);
+    if (outcome === 'deliver' && !(pending && this.sigInfos.has(`0:${sig}`))) {
+      this.sigInfos.set(`0:${sig}`, info ?? KERNEL_SIGINFO);
+    }
+    return outcome;
+  }
+
+  private async threadKill(tid: number, sig: number): Promise<void> {
+    const info = await this.threadSender(sig);
+    if (this.options.threadKill?.(tid, sig)) this.sigInfos.set(`${tid}:${sig}`, info);
+    else this.options.raise?.(sig, info);
+  }
+
+  private async threadSender(sig: number): Promise<SigInfo> {
+    const pid = (await this.options.identity?.())?.pid ?? this.pid;
+    const code = sig === SIG.PIPE ? SI.USER : SI.TKILL;
+    return { code, pid, uid: this.cred.ruid, status: 0 };
+  }
+
+  private childInfo(child: ChildEvent): SigInfo {
+    const code =
+      child.state === 'stopped'
+        ? CLD.STOPPED
+        : child.state === 'continued'
+          ? CLD.CONTINUED
+          : child.termsig
+            ? CLD.KILLED
+            : CLD.EXITED;
+    return { code, pid: child.pid, uid: this.cred.ruid, status: child.status };
+  }
+
+  private takeSigInfo(sig: number, tid: number): SigInfo {
+    for (const key of [`${tid}:${sig}`, `0:${sig}`]) {
+      const info = this.sigInfos.get(key);
+      if (info) {
+        this.sigInfos.delete(key);
+        return info;
+      }
+    }
+    return KERNEL_SIGINFO;
+  }
+
+  private signalOutcome(sig: number, info?: SigInfo): SignalOutcome {
     if (this.execChild !== undefined) {
       if (sig === SIG.CONT) this.cont();
-      void Promise.resolve(this.options.kill?.(this.execChild, sig)).catch(() => undefined);
+      void Promise.resolve(this.options.kill?.(this.execChild, sig, info)).catch(() => undefined);
       if (sig !== SIG.KILL) return 'forward';
       if (!this.options.writesBack?.(this.execChild)) return 'terminate';
       this.wake?.();
@@ -1899,8 +1958,10 @@ export class WasmProcess {
       case 'sig-pause':
         return this.pause(cancelled);
       case 'thread-kill':
-        if (!this.options.threadKill?.(req.tid, req.sig)) this.options.raise?.(req.sig);
+        await this.threadKill(req.tid, req.sig);
         return { ok: true, kind: 'void' };
+      case 'sig-info':
+        return { ok: true, kind: 'json', json: this.takeSigInfo(req.sig, req.tid ?? 0) };
       case 'proc-captured':
         return { ok: true, kind: 'bytes', bytes: this.children.captured(req.pid, req.slot) };
       case 'proc-sudo':
