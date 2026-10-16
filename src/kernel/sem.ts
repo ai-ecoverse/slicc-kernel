@@ -4,8 +4,8 @@ import type { Cred } from './cred.ts';
 import { type ForkedHandles, KernelError } from './fd-table.ts';
 
 export const SEM_VALUE_MAX = 0x7fff_ffff;
-export const SEM_NAMES_MAX = 4096;
-export const SEM_HANDLES_MAX = 256;
+export const SEM_NAMES_MAX = 65_536;
+export const SEM_HANDLES_MAX = 65_536;
 const NAME_MAX = 251;
 const TIMER_MAX_MS = 0x7fff_ffff;
 
@@ -152,6 +152,11 @@ export class SemTable {
 export class SemHandles implements ForkedHandles {
   private readonly byHandle = new Map<number, Entry>();
   private next = 1;
+  private readonly limit: number;
+
+  constructor(limit = SEM_HANDLES_MAX) {
+    this.limit = limit;
+  }
 
   add(sem: Semaphore): number {
     for (const [handle, entry] of this.byHandle) {
@@ -160,7 +165,7 @@ export class SemHandles implements ForkedHandles {
         return handle;
       }
     }
-    if (this.byHandle.size >= SEM_HANDLES_MAX) throw new KernelError('EMFILE');
+    if (this.byHandle.size >= this.limit) throw new KernelError('EMFILE');
     const handle = this.next++;
     this.byHandle.set(handle, { sem, opens: 1 });
     return handle;
@@ -179,7 +184,7 @@ export class SemHandles implements ForkedHandles {
   }
 
   fork(): SemHandles {
-    const child = new SemHandles();
+    const child = new SemHandles(this.limit);
     child.next = this.next;
     for (const [handle, entry] of this.byHandle) child.byHandle.set(handle, { ...entry });
     return child;

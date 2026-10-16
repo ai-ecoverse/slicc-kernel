@@ -339,11 +339,11 @@ static int exited(void) {
   return 0;
 }
 
-static int capped(void) {
+static int capped(int max) {
   unsigned h;
   char name[32];
   int n = 0, e = 0;
-  for (; n < 10000; n++) {
+  for (; n < max; n++) {
     snprintf(name, sizeof name, "/cap%d", n);
     if ((e = sopen(name, CREAT, 0600, 0, &h))) break;
     k_close(h);
@@ -357,11 +357,11 @@ static int capped(void) {
   return 0;
 }
 
-static int handles(void) {
+static int handles(int max) {
   unsigned h;
   char name[32];
   int n = 0, e = 0;
-  for (; n < 300; n++) {
+  for (; n < max; n++) {
     snprintf(name, sizeof name, "/h%d", n);
     if ((e = sopen(name, CREAT, 0600, 0, &h))) break;
   }
@@ -387,8 +387,8 @@ int main(int argc, char **argv) {
   if (!strcmp(mode, "owners")) return owners(argc > 2 ? argv[2] : "");
   if (!strcmp(mode, "killed")) return killed();
   if (!strcmp(mode, "exited")) return exited();
-  if (!strcmp(mode, "cap")) return capped();
-  if (!strcmp(mode, "handles")) return handles();
+  if (!strcmp(mode, "cap")) return capped(argc > 2 ? atoi(argv[2]) : 10000);
+  if (!strcmp(mode, "handles")) return handles(argc > 2 ? atoi(argv[2]) : 300);
   fprintf(stderr, "usage: semtest MODE\n");
   return 2;
 }
