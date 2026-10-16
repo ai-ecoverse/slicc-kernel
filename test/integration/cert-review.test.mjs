@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -167,6 +167,50 @@ test("the suite runner rewrites a release's own test script to add the reporter 
     `npm run build && ${flags} test/ 'test/integration/a.test.mjs'`
   );
   assert.throws(() => testCommand('vitest', '/r.mjs', '/o.jsonl', []), /runs no node --test/);
+});
+
+test('the suite runner keeps its tests in a session of their own, so a SIGINT to its process group does not end the step', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'cert-session-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const tree = join(dir, 'tree');
+  await mkdir(join(tree, 'test/integration'), { recursive: true });
+  await mkdir(join(dir, 'package/dist'), { recursive: true });
+  await writeFile(join(dir, 'package/dist/node.js'), 'export {};\n');
+  execFileSync('tar', ['-czf', join(dir, 'k.tgz'), '-C', dir, 'package']);
+  await writeFile(
+    join(tree, 'package.json'),
+    JSON.stringify({ scripts: { test: "node --test 'test/integration/*.test.mjs'" } })
+  );
+  await writeFile(
+    join(tree, 'test/integration/a.test.mjs'),
+    "import { test } from 'node:test';\ntest('a stray group SIGINT', () => { process.kill(-Number(process.env.SUITE_PGID), 'SIGINT'); });\ntest('a later test', async () => { await new Promise((r) => setTimeout(r, 300)); });\n"
+  );
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  const out = join(dir, 'out/base');
+  const suite = spawn(
+    'bash',
+    [
+      '-c',
+      'export SUITE_PGID=$$; exec "$0" "$@"',
+      process.execPath,
+      fileURLToPath(new URL('suite.mjs', tools)),
+      '--tree',
+      tree,
+      '--tgz',
+      join(dir, 'k.tgz'),
+      '--out',
+      out,
+    ],
+    { env, detached: true, stdio: 'ignore' }
+  );
+  const [code, signal] = await new Promise((r) => suite.once('exit', (c, s) => r([c, s])));
+  assert.deepEqual([code, signal], [0, null]);
+  const summary = JSON.parse(await readFile(`${out}.json`, 'utf8'));
+  assert.deepEqual(
+    [summary.exit, summary.pass, summary.fail, summary.ignored],
+    [0, 2, 0, ['SIGINT']]
+  );
 });
 
 test('the reporter records every test and subtest of a real node --test run with its status and error', async (t) => {
@@ -814,4 +858,36 @@ test('every release run has its own concurrency group, so a newer release never 
     group,
     "cert-review-${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || format('{0}{1}', inputs.version, inputs.planted) }}"
   );
+});
+
+test('review, record and publish never start once the run is cancelled: they use !cancelled(), never always()', async () => {
+  const workflow = await readFile(
+    new URL('../../.github/workflows/cert-review.yml', import.meta.url),
+    'utf8'
+  );
+  const jobs = workflow.split(/^jobs:$/m)[1];
+  for (const name of ['review', 'record', 'publish']) {
+    const body =
+      new RegExp(`^  ${name}:\\n([\\s\\S]*?)(?=^  [a-z-]+:$|(?![\\s\\S]))`, 'm').exec(jobs)?.[1] ??
+      '';
+    assert.ok(body.length > 0, `${name} job`);
+    assert.doesNotMatch(body, /always\(\)/, `${name} uses always()`);
+    assert.match(
+      body,
+      /^ {4}if: (\$\{\{ |>-\n\s+)!cancelled\(\)/m,
+      `${name} starts with !cancelled()`
+    );
+  }
+});
+
+test('the review runs for releases the merge queue pushed: claude-code-action allows the github-merge-queue and Renovate bots', async () => {
+  const workflow = await readFile(
+    new URL('../../.github/workflows/cert-review.yml', import.meta.url),
+    'utf8'
+  );
+  const step =
+    /uses: anthropics\/claude-code-action@[0-9a-f]{40}\n {8}env:[\s\S]*?\n {8}with:\n([\s\S]*?)\n {6}- /.exec(
+      workflow
+    )?.[1] ?? '';
+  assert.match(step, /^ {10}allowed_bots: 'github-merge-queue,renovate\[bot\]'$/m);
 });

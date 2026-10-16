@@ -320,7 +320,7 @@ jobs:
   review:
     name: cert-review / review
     needs: [plan, delta, suite, compat]
-    if: always() && needs.plan.outputs.go == 'true' && needs.delta.result == 'success'
+    if: ${{ !cancelled() && needs.plan.outputs.go == 'true' && needs.delta.result == 'success' }}
     runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 90
     permissions:
@@ -391,6 +391,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         with:
           use_bedrock: 'true'
+          allowed_bots: 'github-merge-queue,renovate[bot]'
           github_token: ${{ github.token }}
           show_full_output: ${{ github.event_name == 'workflow_dispatch' }}
           claude_args: |
@@ -400,7 +401,7 @@ jobs:
           prompt: ${{ steps.findings.outputs.prompt }}
 
       - name: Evidence
-        if: always()
+        if: ${{ !cancelled() }}
         env:
           EXECUTION: ${{ steps.review.outputs.execution_file }}
         run: |
@@ -410,7 +411,7 @@ jobs:
           cp -r "$RUNNER_TEMP/cert-review" "$RUNNER_TEMP/evidence/" 2> /dev/null || true
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        if: always()
+        if: ${{ !cancelled() }}
         with:
           name: cert-review-verdict-${{ needs.plan.outputs.version }}
           path: |
@@ -420,7 +421,7 @@ jobs:
           if-no-files-found: ignore
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        if: always()
+        if: ${{ !cancelled() }}
         with:
           name: cert-review-evidence-${{ needs.plan.outputs.version }}
           path: ${{ runner.temp }}/evidence/
@@ -429,7 +430,7 @@ jobs:
   record:
     name: cert-review / record
     needs: [plan, review]
-    if: always() && needs.plan.outputs.go == 'true' && needs.review.result != 'cancelled'
+    if: ${{ !cancelled() && needs.plan.outputs.go == 'true' && needs.review.result != 'cancelled' }}
     runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 20
     permissions:
@@ -497,7 +498,7 @@ jobs:
     name: cert-review / publish
     needs: [plan, record]
     if: >-
-      always() && github.ref == 'refs/heads/main' && needs.record.result == 'success' &&
+      !cancelled() && github.ref == 'refs/heads/main' && needs.record.result == 'success' &&
       needs.plan.outputs.dry_run != 'true' && needs.plan.outputs.planted == ''
     runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
