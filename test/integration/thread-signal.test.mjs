@@ -39,3 +39,35 @@ test('a terminating signal sent to one thread of a WASIX program ends the whole 
   assert.equal(r.stdout, 'started\nrc 143\n');
   assert.match(r.stderr, /Terminated/);
 });
+
+async function sigthread(t) {
+  const kernel = await createNodeKernel();
+  t.after(() => kernel.terminate());
+  const fixture = new URL('fixtures/sigthread/', import.meta.url);
+  for (const file of ['package.json', 'bin/sigthread.wasm']) {
+    await kernel.writeFile(
+      `/node_modules/sigthread/${file}`,
+      await readFile(new URL(file, fixture))
+    );
+  }
+  return kernel;
+}
+
+test('a process-directed signal that the main thread blocks goes to a thread that does not, as on Linux (#520)', async (t) => {
+  const kernel = await sigthread(t);
+  assert.deepEqual(await kernel.run(['sigthread', 'handler'], { cwd: '/' }), {
+    status: 0,
+    stdout: "SIGUSR1 handled on the thread that doesn't block it\n",
+    stderr: '',
+  });
+});
+
+test('a terminating signal that the main thread blocks, but another thread does not, ends the process at once (#520)', async (t) => {
+  const kernel = await sigthread(t);
+  assert.deepEqual(await kernel.run(['sigthread', 'default'], { cwd: '/' }), {
+    status: 143,
+    signal: 'SIGTERM',
+    stdout: '',
+    stderr: '',
+  });
+});

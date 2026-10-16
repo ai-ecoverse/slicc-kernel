@@ -526,6 +526,8 @@ export interface WasmProcessOptions {
 
   threadKill?: (tid: number, sig: number) => boolean;
 
+  unblockedThread?: (sig: number) => number | undefined;
+
   settling?: () => boolean;
 
   pendingBits?: () => number;
@@ -668,8 +670,15 @@ export class WasmProcess {
     const bit = sigbit(sig);
     if (this.ignores(bit)) return 'ignore';
     if (((this.options.blockedBits?.() ?? 0) & bit) !== 0) {
-      this.options.onPending?.(sig);
-      return 'deliver';
+      const tid = this.options.unblockedThread?.(sig);
+      if (tid === undefined) {
+        this.options.onPending?.(sig);
+        return 'deliver';
+      }
+      if (this.caught & bit) {
+        this.options.threadKill?.(tid, sig);
+        return 'deliver';
+      }
     }
     if (!(this.caught & bit)) {
       const action = defaultAction(sig);
