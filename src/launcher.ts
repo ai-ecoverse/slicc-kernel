@@ -181,6 +181,31 @@ export interface LauncherOptions {
   sudoTimeoutMs?: number;
   protect?: Protection;
   cron?: CronOptions;
+  moduleUrl?: ModuleUrlMaker;
+}
+
+export interface ModuleUrl {
+  url: string;
+  revoke(): void;
+}
+
+export type ModuleUrlMaker = (source: string) => ModuleUrl;
+
+const MODULE_URLS = 16;
+const MODULE_URL_GRACE_MS = 60_000;
+
+export function dataModuleUrl(source: string): ModuleUrl {
+  const bytes = new TextEncoder().encode(source);
+  let binary = '';
+  for (let at = 0; at < bytes.length; at += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(at, at + 0x8000));
+  }
+  return { url: `data:text/javascript;base64,${btoa(binary)}`, revoke: () => {} };
+}
+
+export function blobModuleUrl(source: string): ModuleUrl {
+  const url = URL.createObjectURL(new Blob([source], { type: 'text/javascript' }));
+  return { url, revoke: () => URL.revokeObjectURL(url) };
 }
 
 export interface CronOptions {
@@ -518,6 +543,8 @@ export class Launcher {
   private readonly unlinkOwnerOption: UnlinkOwner | undefined;
   private readonly base: KernelFs;
   private readonly createWorker: () => WasmWorkerLike;
+  private readonly moduleUrl: ModuleUrlMaker | undefined;
+  private readonly moduleUrls = new Map<string, ModuleUrl>();
   private readonly modulesDir: string;
   private readonly appended: string[];
   private readonly reportedRoots = new Set<string>();
@@ -635,6 +662,7 @@ export class Launcher {
     this.mounted = this.mounts.wrap(options.fs);
     this.base = this.rooted(this.mounted);
     this.createWorker = options.createWorker;
+    this.moduleUrl = options.moduleUrl;
     this.createDriverWorker = options.createDriverWorker;
     this.media = options.media ?? memoryMedia();
     this.onMountPending = options.onMountPending;
@@ -1409,6 +1437,24 @@ export class Launcher {
     });
   }
 
+  private urlFor(source: string): string {
+    const known = this.moduleUrls.get(source);
+    if (known) {
+      this.moduleUrls.delete(source);
+      this.moduleUrls.set(source, known);
+      return known.url;
+    }
+    const made = (this.moduleUrl ?? dataModuleUrl)(source);
+    this.moduleUrls.set(source, made);
+    for (const [old, entry] of this.moduleUrls) {
+      if (this.moduleUrls.size <= MODULE_URLS) break;
+      this.moduleUrls.delete(old);
+      const later = setTimeout(() => entry.revoke(), MODULE_URL_GRACE_MS);
+      (later as { unref?: () => void }).unref?.();
+    }
+    return made.url;
+  }
+
   private async names(path: string, module: WebAssembly.Module): Promise<string | undefined> {
     if (WebAssembly.Module.customSections(module, 'name').length > 0) return undefined;
     const beside = `${path}.names`;
@@ -1432,7 +1478,8 @@ export class Launcher {
     }
     const { asked } = target;
     if (target.abi === 'js') {
-      return { abi: 'js', glue: await this.text(target.wasm, caller, asked), path: target.wasm };
+      const url = this.urlFor(await this.text(target.wasm, caller, asked));
+      return { abi: 'js', glue: '', url, path: target.wasm };
     }
     if (target.abi !== 'wasi') {
       const [glue, { module }] = await Promise.all([

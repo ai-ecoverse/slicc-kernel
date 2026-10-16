@@ -26,6 +26,8 @@ import { SIG } from './kernel/signals.ts';
 import {
   type CronOptions,
   Launcher,
+  type LauncherOptions,
+  type ModuleUrlMaker,
   type RunOptions,
   type TerminalOptions,
   type TerminalSession,
@@ -183,9 +185,20 @@ export interface ServeDeps {
   syncAccess?: boolean;
   createWorker: () => WasmWorkerLike;
   createDriverWorker?: () => WasmWorkerLike;
+  moduleUrl?: ModuleUrlMaker;
   metadata?: (name: string) => Promise<MetaStore>;
   media?: (name: string) => Promise<MediaStore>;
   locks?: LockManagerLike | null;
+}
+
+function workers(
+  deps: ServeDeps
+): Pick<LauncherOptions, 'createWorker' | 'createDriverWorker' | 'moduleUrl'> {
+  return {
+    createWorker: deps.createWorker,
+    ...(deps.createDriverWorker ? { createDriverWorker: deps.createDriverWorker } : {}),
+    ...(deps.moduleUrl ? { moduleUrl: deps.moduleUrl } : {}),
+  };
 }
 
 export function signalNumber(name: string): number {
@@ -523,8 +536,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
       await fs.reconcile();
       const started = new Launcher({
         fs,
-        createWorker: deps.createWorker,
-        ...(deps.createDriverWorker ? { createDriverWorker: deps.createDriverWorker } : {}),
+        ...workers(deps),
         ...(req.modules ? { modules: req.modules } : {}),
         ...(req.commands ? { commands: req.commands } : {}),
         ...(req.env ? { env: req.env } : {}),

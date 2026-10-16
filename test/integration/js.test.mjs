@@ -305,3 +305,23 @@ test('on a terminal: isatty, ^C to a handler or by default, ^Z and fg, ^Z then k
   await until('Terminated', stopped);
   assert.deepEqual(page.errors, []);
 });
+
+test('each spawn of a JS command gets fresh module state through the page, and a changed module is picked up', async (t) => {
+  const { page, run } = await booted(chrome, t);
+  const program = (tag) =>
+    `let calls = 0;\nexport default async function main(ctx) {\n  calls++;\n  await ctx.write(1, '${tag} ' + calls + '\\n');\n}\n`;
+  const put = (path, text) => page.evaluate((p, x) => window.opfs.write(p, x), path, text);
+  await put(
+    'node_modules/counted/package.json',
+    JSON.stringify({
+      name: 'counted',
+      slicc: { commands: { counted: { abi: 'js', module: 'bin/counted.mjs' } } },
+    })
+  );
+  await put('node_modules/counted/bin/counted.mjs', program('first'));
+  const once = async () => (await run(['counted'], { cwd: '/' })).stdout;
+  assert.equal(await once(), 'first 1\n');
+  assert.equal(await once(), 'first 1\n');
+  await put('node_modules/counted/bin/counted.mjs', program('second'));
+  assert.equal(await once(), 'second 1\n');
+});

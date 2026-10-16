@@ -1,6 +1,7 @@
 import { openMeta } from './fs/meta.ts';
 import { syncAccessHandles } from './fs/opfs.ts';
 import type { WasmWorkerLike } from './kernel/host.ts';
+import { blobModuleUrl } from './launcher.ts';
 import { openMedia } from './mount/media.ts';
 import { pinScript } from './pin.ts';
 import { type KernelPort, serveKernel } from './serve.ts';
@@ -13,6 +14,7 @@ serveKernel(globalThis as unknown as KernelPort, {
   syncAccess: syncAccessHandles(),
   createWorker: () => new Worker(processWorker, { type: 'module' }) as WasmWorkerLike,
   createDriverWorker: () => new Worker(driverWorker, { type: 'module' }) as WasmWorkerLike,
+  moduleUrl: blobModuleUrl,
   metadata: (name) => openMeta(name, indexedDB),
   media: (name) => openMedia(name, indexedDB),
 });
