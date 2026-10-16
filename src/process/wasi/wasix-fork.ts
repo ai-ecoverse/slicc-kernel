@@ -43,6 +43,8 @@ interface AsyncifyExports {
   asyncify_get_state?: () => number;
 }
 
+const STACK_POINTER = '__stack_pointer';
+
 const UNWINDING = 1;
 const REWINDING = 2;
 
@@ -64,6 +66,8 @@ export class AsyncifyDriver {
 
   private stackUpper = 0;
 
+  private linked: { pointer: WebAssembly.Global; low: number } | undefined;
+
   private pending: (() => number) | undefined;
 
   private answer = 0;
@@ -75,10 +79,13 @@ export class AsyncifyDriver {
     this.mem = mem;
   }
 
+  useStack(pointer: WebAssembly.Global, low: number): void {
+    this.linked = { pointer, low };
+  }
+
   bind(exports: WebAssembly.Exports): void {
     this.exports = exports as WebAssembly.Exports & AsyncifyExports;
-    const sp = this.exports.__stack_pointer;
-    this.stackUpper = sp instanceof WebAssembly.Global ? (sp.value as number) : 0;
+    this.stackUpper = this.stackPointer();
   }
 
   get supported(): boolean {
@@ -122,7 +129,7 @@ export class AsyncifyDriver {
     fork: (asyncifyData: number, globals: Array<[string, number]>, sp: number) => number
   ): number {
     const sp = this.stackPointer();
-    const globals = mutableGlobals(this.exports);
+    const globals = this.globals();
     return this.unwind((data) => {
       this.answer = fork(data, globals, sp);
     });
@@ -134,7 +141,7 @@ export class AsyncifyDriver {
     v.setBigUint64(snapPtr, BigInt(retPtr), true);
     v.setBigUint64(snapPtr + 8, BigInt(id), true);
     v.setBigUint64(snapPtr + 16, 0x51cc5117n, true);
-    const globals = mutableGlobals(this.exports);
+    const globals = this.globals();
     return this.unwind((data) => {
       const end = this.mem.view().getUint32(data, true);
       this.snapshots.set(id, { frames: this.mem.bytes(data + 8, end - data - 8).slice(), globals });
@@ -154,12 +161,27 @@ export class AsyncifyDriver {
     });
   }
 
+  private stackGlobal(): WebAssembly.Global | undefined {
+    const g = this.exports[STACK_POINTER];
+    return g instanceof WebAssembly.Global ? g : this.linked?.pointer;
+  }
+
   private stackPointer(): number {
-    const g = this.exports.__stack_pointer;
-    return g instanceof WebAssembly.Global ? (g.value as number) : 0;
+    return (this.stackGlobal()?.value as number | undefined) ?? 0;
+  }
+
+  private globals(): Array<[string, number]> {
+    const out = mutableGlobals(this.exports);
+    if (this.linked && !out.some(([name]) => name === STACK_POINTER)) {
+      out.push([STACK_POINTER, this.linked.pointer.value as number]);
+    }
+    return out;
   }
 
   private dataPointer(): number {
+    if (this.linked && !(this.exports[STACK_POINTER] instanceof WebAssembly.Global)) {
+      return (this.linked.low + 15) & ~15;
+    }
     const g = this.exports.__data_end;
     const dataEnd = g instanceof WebAssembly.Global ? (g.value as number) : 0;
     return dataEnd < this.stackUpper ? (dataEnd + 15) & ~15 : 16;
@@ -181,7 +203,7 @@ export class AsyncifyDriver {
 
   private restoreGlobals(globals: Array<[string, number]>): void {
     for (const [name, value] of globals) {
-      const g = this.exports[name];
+      const g = name === STACK_POINTER ? this.stackGlobal() : this.exports[name];
       if (g instanceof WebAssembly.Global) g.value = value;
     }
   }
