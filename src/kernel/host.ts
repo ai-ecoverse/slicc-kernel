@@ -158,6 +158,7 @@ export interface WasmProcessHandle {
 
 const CRASHED = 70;
 export const KILL_GRACE_MS = 2000;
+export const KILL_HARD_MS = 5000;
 
 const descIds = new WeakMap<OpenFile, number>();
 let nextDescId = 1;
@@ -201,6 +202,7 @@ interface WorkerSays {
 class Dying {
   ending: { code: number; sig: number } | undefined;
   private timer: ReturnType<typeof setTimeout> | undefined;
+  private hard: ReturnType<typeof setTimeout> | undefined;
   private busy = 0;
   private finish: (() => void) | undefined;
 
@@ -208,9 +210,14 @@ class Dying {
     if (this.ending) return;
     this.ending = { code, sig };
     this.finish = finish;
+    this.hard = setTimeout(finish, KILL_HARD_MS);
     this.arm();
     Atomics.store(header, SAB_I_KILLED, code);
     process.die();
+  }
+
+  serve<T>(req: SyncSabDispatchRequest, work: () => Promise<T>): Promise<T> {
+    return this.ending && isWasmSyscall(req) ? work() : this.serving(work);
   }
 
   async serving<T>(work: () => Promise<T>): Promise<T> {
@@ -231,6 +238,7 @@ class Dying {
 
   clear(): void {
     clearTimeout(this.timer);
+    clearTimeout(this.hard);
   }
 
   status(reported: unknown): [number, number | undefined] {
@@ -528,7 +536,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
   const worker = opts.createWorker();
   const dying = new Dying();
   const dispatch = (req: SyncSabDispatchRequest, block?: () => void): Promise<SyncFsResult> =>
-    dying.serving(() =>
+    dying.serve(req, () =>
       isWasmSyscall(req) ? process.syscall(req, undefined, block) : dispatchSyncFs(req)
     );
   const clocks = new ProcessClocks(sab, opts.program.abi !== 'js', process);
@@ -606,7 +614,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     if (thread.blocked) storeBlocked(tsignals.header, thread.blocked);
     threadSignals.set(thread.tid, tsignals);
     const tdispatch = (req: SyncSabDispatchRequest, block: () => void) =>
-      dying.serving(() => threadCall(process, req, threadCancel(tsignals), block));
+      dying.serve(req, () => threadCall(process, req, threadCancel(tsignals), block));
     const tresponder = attachSyncSabResponder(tw, tsab, token, {
       dispatch: clocks.timed(clocks.thread(thread.tid, tsab), tdispatch),
     });
