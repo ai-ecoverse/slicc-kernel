@@ -45,7 +45,13 @@ async function kernelWith(t, variants) {
     '/node_modules/pick/package.json',
     JSON.stringify({
       name: 'pick',
-      slicc: { abi: 'wasi', commands: { pick: { wasm: 'bin/plain.wasm', variants } } },
+      slicc: {
+        abi: 'wasi',
+        commands: {
+          pick: { wasm: 'bin/plain.wasm', variants },
+          pick3: { wasm: 'bin/plain.wasm', variants },
+        },
+      },
     })
   );
   await kernel.writeFile('/node_modules/pick/bin/plain.wasm', await wasmOf(wabt, 'plain'));
@@ -94,7 +100,28 @@ test('bash picks the variant for `VAR=value cmd` and exec, and a child inherits 
   );
 });
 
-test('a malformed variants block is ignored with one warning, and the command runs its wasm', async (t) => {
+test('the entry path, a symlink to it and a second command of the package choose the same way', async (t) => {
+  const { run } = await kernelWith(t, VARIANTS);
+  assert.equal(
+    await run(['bash', '-c', '/usr/bin/pick; PYTHON_FORK=true /usr/bin/pick']),
+    'plain\nfork\n'
+  );
+  assert.equal(
+    await run([
+      'bash',
+      '-c',
+      'mkdir -p /tmp/venv/bin && ln -s /usr/bin/pick /tmp/venv/bin/python && /tmp/venv/bin/python; PYTHON_FORK=true /tmp/venv/bin/python; PYTHON_FORK=true exec /tmp/venv/bin/python',
+    ]),
+    'plain\nfork\nfork\n'
+  );
+  assert.equal(await run(['pick3']), 'plain\n');
+  assert.equal(
+    await run(['bash', '-c', 'PYTHON_FORK=true pick3; PYTHON_FORK=true /usr/bin/pick3']),
+    'fork\nfork\n'
+  );
+});
+
+test('a malformed variants block is ignored with one warning per command, and the command runs its wasm', async (t) => {
   const warned = [];
   const warn = console.warn;
   console.warn = (...args) => warned.push(args.join(' '));
@@ -111,7 +138,7 @@ test('a malformed variants block is ignored with one warning, and the command ru
     assert.equal(await run(['pick'], { PYTHON_FORK: 'true' }), 'plain\n');
     assert.equal(
       warned.filter((w) => w.includes('malformed "variants"')).length,
-      1,
+      2,
       warned.join('\n')
     );
   }
