@@ -10,6 +10,7 @@ export interface MetaEntry {
   ctimeMs?: number;
   ino?: number;
   link?: string;
+  socket?: true;
   dir?: string;
   uid?: number;
   gid?: number;

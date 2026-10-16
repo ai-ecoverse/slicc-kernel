@@ -2,6 +2,7 @@ export interface FsStat {
   isFile: boolean;
   isDirectory: boolean;
   isSymbolicLink: boolean;
+  isSocket?: boolean;
   size: number;
   mode: number;
   mtime: Date;
@@ -38,6 +39,7 @@ export interface Perm {
 export interface NewOwner extends Owner {
   mode?: number;
   parents?: number;
+  socket?: boolean;
 }
 
 export interface OwnerChange {

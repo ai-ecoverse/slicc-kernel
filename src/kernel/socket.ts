@@ -107,6 +107,10 @@ export interface PeerCred {
   gid: number;
 }
 export type ConnectorStamp = SealedCaller;
+export interface SocketName {
+  key: string;
+  typed: boolean;
+}
 export class KernelSocket implements KernelFile {
   private readonly net: LoopbackNet;
   readonly domain: SocketDomain;
@@ -125,6 +129,7 @@ export class KernelSocket implements KernelFile {
   private readonly queue: KernelSocket[] = [];
   private backlog = 0;
   private boundAt: SockAddr | undefined;
+  named: SocketName | undefined;
   private readonly changes = new Changes();
   private readonly room = new Changes();
   private readonly options = new Map<string, number>();
@@ -190,10 +195,13 @@ export class KernelSocket implements KernelFile {
     for (const wait of waits) wait.catch(() => undefined);
     return pipeCall(() => Promise.race(waits));
   }
-  bind(addr: SockAddr, kernel = false): void {
+  bindable(addr: SockAddr): void {
     if (this.state !== 'open' || this.local) throw new KernelError('EINVAL');
     if (addr.family !== this.domain) throw new KernelError('EAFNOSUPPORT');
-    this.local = this.net.bind(this, addr, kernel);
+  }
+  bind(addr: SockAddr, kernel = false, name?: SocketName): void {
+    this.bindable(addr);
+    this.local = this.net.bind(this, addr, kernel, name);
     this.boundAt = this.local;
   }
   listen(backlog: number, cred?: PeerCred): void {
@@ -236,7 +244,8 @@ export class KernelSocket implements KernelFile {
     viaUplink = true,
     cred?: PeerCred,
     stamp?: ConnectorStamp,
-    waits = true
+    waits = true,
+    name?: SocketName
   ): Promise<void> | undefined {
     if (this.state === 'connected') throw new KernelError('EISCONN');
     if (this.state === 'connecting') throw new KernelError('EALREADY');
@@ -245,7 +254,7 @@ export class KernelSocket implements KernelFile {
     this.failed = undefined;
     const route = viaUplink && addr.family === 'inet' ? this.net.uplinkFor(addr.host) : undefined;
     if (route) return this.dial(addr as Extract<SockAddr, { family: 'inet' }>, route);
-    const target = this.net.target(addr);
+    const target = this.net.target(addr, name);
     if (!this.local) {
       if (addr.family === 'inet') {
         this.local = this.net.bind(this, { family: 'inet', host: '127.0.0.1', port: 0 });
@@ -418,7 +427,7 @@ export class KernelSocket implements KernelFile {
       this.readShut = true;
       this.writeShut = true;
     }
-    if (this.boundAt) this.net.release(this.boundAt, this);
+    if (this.boundAt) this.net.release(this.boundAt, this, this.named);
     this.boundAt = undefined;
     this.changes.wake();
   }
@@ -442,7 +451,8 @@ export class KernelSocket implements KernelFile {
 export function canonicalHost(host: string): string {
   return host === '0.0.0.0' ? '127.0.0.1' : host;
 }
-function keyOf(addr: SockAddr): string {
+function keyOf(addr: SockAddr, name?: SocketName): string {
+  if (name) return `node:${name.key}`;
   return addr.family === 'inet' ? `inet:${addr.port}` : `unix:${addr.path}`;
 }
 const LOCAL_ONLY = new Routes();
@@ -521,29 +531,31 @@ export class LoopbackNet {
     void socket.connect(addr, false, undefined, undefined, false);
     return socket;
   }
-  bind(socket: KernelSocket, addr: SockAddr, kernel = false): SockAddr {
+  bind(socket: KernelSocket, addr: SockAddr, kernel = false, name?: SocketName): SockAddr {
     if (addr.family === 'unix') {
       if (addr.path === '') throw new KernelError('EINVAL');
     } else this.bindable(addr, kernel);
     const named =
       addr.family === 'inet' && addr.port === 0 ? { ...addr, port: this.ephemeral() } : addr;
-    const key = keyOf(named);
-    if (this.bound.has(key)) throw new KernelError('EADDRINUSE');
+    const key = keyOf(named, name);
+    if (this.bound.has(key) && !name) throw new KernelError('EADDRINUSE');
     this.bound.set(key, socket);
+    socket.named = name;
     return named;
   }
-  release(addr: SockAddr, socket: KernelSocket): void {
-    const key = keyOf(addr);
+  release(addr: SockAddr, socket: KernelSocket, name?: SocketName): void {
+    const key = keyOf(addr, name);
     if (this.bound.get(key) === socket) this.bound.delete(key);
   }
-  target(addr: SockAddr): KernelSocket {
+  target(addr: SockAddr, name?: SocketName): KernelSocket {
     if (addr.family === 'inet' && !isLoopback(canonicalHost(addr.host))) {
       throw new KernelError('ENETUNREACH');
     }
-    const key = keyOf(addr);
+    const key = keyOf(addr, name);
     if (!this.bound.has(key)) this.activators.get(key)?.();
     const socket = this.bound.get(key);
     if (!socket?.listening) throw new KernelError('ECONNREFUSED');
+    if (name && socket.named?.typed && !name.typed) throw new KernelError('ECONNREFUSED');
     return socket;
   }
   private ephemeral(): number {

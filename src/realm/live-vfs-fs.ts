@@ -26,6 +26,8 @@ export type LiveCred = Cred;
 const S_IFDIR = 0o040000;
 const S_IFREG = 0o100000;
 const S_IFLNK = 0o120000;
+const S_IFSOCK = 0o140000;
+const S_IFMT = 0o170000;
 const PERM_MASK = 0o7777;
 
 const DEFAULT_DIR_PERM = 0o755;
@@ -206,7 +208,13 @@ function exactIn(node: LiveFsNode | null): boolean {
 }
 
 function modeFromStat(st: SyncFsBridgeStat, exact = false): number {
-  const type = st.isSymbolicLink ? S_IFLNK : st.isDirectory ? S_IFDIR : S_IFREG;
+  const type = st.isSymbolicLink
+    ? S_IFLNK
+    : st.isDirectory
+      ? S_IFDIR
+      : st.isSocket
+        ? S_IFSOCK
+        : S_IFREG;
   const fallback = st.isDirectory || st.isSymbolicLink ? 0o777 : 0o666;
   const perm = (st.mode ?? fallback) & PERM_MASK;
   return type | (exact ? perm : perm || fallback);
@@ -821,6 +829,10 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
     return want;
   };
   const directory = (stream: LiveFsStream) => {
+    if ((stream.node.mode & S_IFMT) === S_IFSOCK && !(stream.flags & O_PATH)) {
+      if (stream.fd !== undefined) Fs.closeStream?.(stream.fd);
+      throw new Fs.ErrnoError(wasiErrno('ENXIO'));
+    }
     const bridge = bridgeOf(stream.node);
     if (!bridge.owners || !Fs.isDir(stream.node.mode) || stream.flags & O_PATH) return;
     try {
