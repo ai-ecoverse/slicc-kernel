@@ -496,3 +496,71 @@ export function covering(tags, prev, version) {
     .filter((t) => compareVersions(t, prev) > 0 && compareVersions(t, version) <= 0)
     .sort(compareVersions);
 }
+
+const BEHAVIOUR_PATHS = [
+  /^src\//,
+  /^build\.mjs$/,
+  /^package(-lock)?\.json$/,
+  /^tsconfig[^/]*\.json$/,
+  /^\.releaserc/,
+  /^tools\/release-recover\.mjs$/,
+  /^tools\/cert-review\//,
+  /^\.github\/runner\.mjs$/,
+  /^\.github\/workflows\/(release|ci|cert-review[^/]*)\.yml$/,
+];
+
+export function behaviourFiles(files) {
+  return (files ?? [])
+    .flatMap((f) => [f.filename ?? f, ...(f.previous_filename ? [f.previous_filename] : [])])
+    .filter((name) => BEHAVIOUR_PATHS.some((re) => re.test(name)));
+}
+
+export function reviewsItself(files) {
+  return behaviourFiles(files).some(
+    (name) =>
+      /^tools\/cert-review\//.test(name) ||
+      /^\.github\/runner\.mjs$/.test(name) ||
+      /^\.github\/workflows\/cert-review[^/]*\.yml$/.test(name)
+  );
+}
+
+export function withMissing(incomplete, reasons) {
+  const more = (reasons ?? []).filter(Boolean);
+  if (more.length === 0) return incomplete;
+  const named = [incomplete?.named, ...more].filter(Boolean).join('; ');
+  return { files: incomplete?.files ?? [], named, remedy: 're-run the failed jobs' };
+}
+
+export function jobsEvidence(text, incomplete) {
+  const failed = String(text ?? '')
+    .split(',')
+    .map((x) => x.trim().split('='))
+    .filter(([job, result]) => job && result !== 'success')
+    .map(([job, result]) => `the ${job} job ended ${result || 'without a result'}`);
+  return withMissing(incomplete, failed);
+}
+
+export function groupVerdict(prs) {
+  const lines = [];
+  const missing = [];
+  for (const p of prs) {
+    if (p.behaviour.length === 0) {
+      lines.push(`#${p.pr} not behaviour`);
+      continue;
+    }
+    if (p.state === 'success') {
+      lines.push(`#${p.pr} certified at ${p.head.slice(0, 12)}`);
+      continue;
+    }
+    missing.push(
+      `#${p.pr} has ${p.state ? `a ${p.state} cert-review` : 'no cert-review'} on its head ${p.head.slice(0, 12)}${p.description ? ` (${p.description})` : ''}`
+    );
+  }
+  return missing.length
+    ? {
+        state: 'failure',
+        line: `not certified: ${missing.join('; ')}`,
+        lines: [...lines, ...missing],
+      }
+    : { state: 'success', line: lines.join(', ') || 'no pull requests', lines };
+}

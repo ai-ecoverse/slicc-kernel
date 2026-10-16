@@ -8,12 +8,15 @@ import { parseArgs } from 'node:util';
 import {
   baseEvidence,
   gapsOf,
+  jobsEvidence,
   knownAsOf,
   knownLine,
   provenanceProblems,
   releaseEvidence,
   verdictLine,
+  withMissing,
 } from './lib.mjs';
+import { manifestOf, sha, sri } from './tarball.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const { values } = parseArgs({
@@ -27,12 +30,19 @@ const { values } = parseArgs({
     commit: { type: 'string', default: '' },
     findings: { type: 'string', default: '' },
     covers: { type: 'string', default: '' },
+    pr: { type: 'string', default: '' },
+    head: { type: 'string', default: '' },
+    tarball: { type: 'string', default: '' },
+    sha256: { type: 'string', default: '' },
+    jobs: { type: 'string', default: '' },
+    'review-result': { type: 'string', default: 'success' },
   },
 });
 
 const NAME = '@ai-ecoverse/slicc-kernel';
 const { version, repo, planted } = values;
 const problems = [];
+const missing = [];
 const facts = {};
 const one = (text) =>
   String(text ?? '')
@@ -144,11 +154,30 @@ async function supplyChain() {
   return undefined;
 }
 
+function packed() {
+  const tgz = values.tarball;
+  if (!tgz || !existsSync(tgz)) {
+    missing.push('no build artifact to review');
+    return;
+  }
+  facts.sha256 = sha('sha256', tgz);
+  facts.integrity = sri(tgz);
+  const expected = values.sha256.trim();
+  if (facts.sha256 !== expected)
+    problems.push(
+      `the artifact's sha256 ${facts.sha256} is not the pack job's ${expected || '(none)'}`
+    );
+  const manifest = manifestOf(tgz);
+  if (manifest.name !== NAME || manifest.version !== version)
+    problems.push(`the artifact is ${manifest.name}@${manifest.version}, not ${NAME}@${version}`);
+  facts.commit = values.commit;
+}
+
 function readVerdict() {
   try {
     const v = JSON.parse(readFileSync(join(values.review, 'verdict.json'), 'utf8'));
     if (v?.verdict !== 'certified' && v?.verdict !== 'fail') {
-      problems.push(`verdict.json says "${one(v?.verdict)}", neither certified nor fail`);
+      missing.push(`verdict.json says "${one(v?.verdict)}", neither certified nor fail`);
       return undefined;
     }
     const known = Array.isArray(v.known) ? v.known : [];
@@ -161,7 +190,7 @@ function readVerdict() {
       reason: one(v.reason).slice(0, 300),
     };
   } catch (error) {
-    problems.push(`no readable verdict.json (${one(error.message)})`);
+    missing.push(`no readable verdict.json (${one(error.message)})`);
     return undefined;
   }
 }
@@ -255,7 +284,7 @@ function codedFindings() {
   incomplete = releaseEvidence(found);
   const partial = baseEvidence(found);
   baseNote = partial.note;
-  if (partial.problem) problems.push(partial.problem);
+  if (partial.problem) missing.push(partial.problem);
   for (const f of found.filter((x) => x.kind === 'compat-crash')) {
     problems.push(
       `kernel-compat: ${f.package} ${f.spec} crashes again on the rerun and not on the reference kernel`
@@ -275,11 +304,18 @@ function elsewhereOf(v) {
     }));
 }
 
-if (!/^\d+\.\d+\.\d+$/.test(version ?? '')) {
-  console.error('record: --version must be x.y.z');
+const pr = values.pr;
+if (!(pr ? /^\d+\.\d+\.\d+-pr\.\d+\.\d+$/ : /^\d+\.\d+\.\d+$/).test(version ?? '')) {
+  console.error(`record: --version must be ${pr ? 'x.y.z-pr.N.M' : 'x.y.z'}`);
   process.exit(2);
 }
-if (planted) {
+if (pr) {
+  try {
+    packed();
+  } catch (error) {
+    problems.push(`the build check failed: ${one(error.stderr || error.message).slice(0, 300)}`);
+  }
+} else if (planted) {
   problems.push(`a planted build of ${planted}, not the npm package: never certified`);
 } else {
   try {
@@ -290,6 +326,10 @@ if (planted) {
 }
 codedFindings();
 const review = readVerdict();
+incomplete = withMissing(
+  jobsEvidence(`${values.jobs}${pr ? `,review=${values['review-result']}` : ''}`, incomplete),
+  missing
+);
 const known = knownLine(repo, [...standing(), ...(review?.known ?? [])]);
 const covered = values.covers.split(',').filter(Boolean);
 const covers = covered.length > 1 ? `covers ${covered[0]}\u2013${covered.at(-1)}; ` : '';
@@ -304,19 +344,26 @@ const { line, state } = verdictLine({
   problems,
   review,
   incomplete,
-  certified: `certified ${NAME}@${version} sha256=${facts.sha256} (${ci}; known: ${known.length ? known.join(', ') : 'none'}${gap}${partial})`,
+  certified: pr
+    ? `certified ${NAME} PR #${pr} at ${values.head.slice(0, 12)}, build ${version} sha256=${facts.sha256} (${ci}; known: ${known.length ? known.join(', ') : 'none'}${gap}${partial})`
+    : `certified ${NAME}@${version} sha256=${facts.sha256} (${ci}; known: ${known.length ? known.join(', ') : 'none'}${gap}${partial})`,
 });
 const certified = state === 'success';
 const comment = existsSync(join(values.review, 'comment.md'))
   ? readFileSync(join(values.review, 'comment.md'), 'utf8').trim()
   : '**Cert review:** the reviewer wrote no comment.';
 const prov = facts.provenance;
-const checks = [
-  `- npm integrity: ${facts.integrity ?? '?'} (sha256 ${facts.sha256 ?? '?'}), computed here from the registry tarball`,
-  `- provenance: ${prov ? `${prov.workflow?.path}@${prov.workflow?.ref}, commit ${prov.gitCommit}, builder ${prov.builder}` : '?'}`,
-  `- gitHead ${facts.gitHead ?? '?'}, tag v${version} ${facts.tagCommit ?? '?'}, main...commit ${facts.onMain ?? '?'}`,
-  `- signatures: ${facts.signatures ?? '?'}`,
-].join('\n');
+const checks = pr
+  ? [
+      `- the reviewed build: ${version}, sha256 ${facts.sha256 ?? '?'} (${facts.integrity ?? '?'}), re-hashed here from the artifact; the pack job said ${values.sha256 || '?'}`,
+      `- pull request #${pr}, head ${values.head || '?'}, reviewed as merged onto main (${values.commit || '?'})`,
+    ].join('\n')
+  : [
+      `- npm integrity: ${facts.integrity ?? '?'} (sha256 ${facts.sha256 ?? '?'}), computed here from the registry tarball`,
+      `- provenance: ${prov ? `${prov.workflow?.path}@${prov.workflow?.ref}, commit ${prov.gitCommit}, builder ${prov.builder}` : '?'}`,
+      `- gitHead ${facts.gitHead ?? '?'}, tag v${version} ${facts.tagCommit ?? '?'}, main...commit ${facts.onMain ?? '?'}`,
+      `- signatures: ${facts.signatures ?? '?'}`,
+    ].join('\n');
 const elsewhere = review?.elsewhere?.length
   ? `\n\n**For the cert lane to file elsewhere:**\n${review.elsewhere.map((e) => `- ${e.repo}: ${e.title}\n\n${e.body.replace(/^/gm, '  > ')}`).join('\n')}`
   : '';
@@ -329,7 +376,7 @@ writeFileSync(join(values.out, 'line.txt'), `${line}\n`);
 writeFileSync(join(values.out, 'body.md'), body);
 writeFileSync(
   join(values.out, 'record.json'),
-  `${JSON.stringify({ name: NAME, version, certified, state, line, commit: facts.commit ?? null, facts, problems, review, known }, null, 2)}\n`
+  `${JSON.stringify({ name: NAME, version, pr: pr || null, head: values.head || null, sha256: facts.sha256 ?? null, certified, state, line, commit: facts.commit ?? null, facts, problems, review, known }, null, 2)}\n`
 );
 console.log(line);
 for (const p of problems) console.error(`problem: ${p}`);

@@ -1,0 +1,135 @@
+#!/usr/bin/env node
+import { appendFileSync } from 'node:fs';
+import { parseArgs } from 'node:util';
+import { behaviourFiles, groupVerdict, mergedPrs, reviewsItself } from './lib.mjs';
+
+const { positionals, values } = parseArgs({
+  allowPositionals: true,
+  options: {
+    repo: { type: 'string', default: 'ai-ecoverse/slicc-kernel' },
+    pr: { type: 'string', default: '' },
+    head: { type: 'string', default: '' },
+    action: { type: 'string', default: '' },
+    label: { type: 'string', default: '' },
+    labels: { type: 'string', default: '' },
+    base: { type: 'string', default: '' },
+    run: { type: 'string', default: '' },
+    context: { type: 'string', default: 'cert-review-pr' },
+  },
+});
+const { repo, context } = values;
+const API = process.env.GITHUB_API_URL ?? 'https://api.github.com';
+const headers = {
+  authorization: `Bearer ${process.env.GH_TOKEN}`,
+  accept: 'application/vnd.github+json',
+};
+const RUN_URL = `${process.env.GITHUB_SERVER_URL ?? 'https://github.com'}/${repo}/actions/runs/${values.run}`;
+
+async function request(url, init = {}) {
+  const r = await fetch(url.startsWith('http') ? url : `${API}/${url}`, {
+    ...init,
+    headers: { ...headers, ...init.headers },
+  });
+  if (!r.ok) throw new Error(`${init.method ?? 'GET'} ${url}: HTTP ${r.status}`);
+  return r;
+}
+
+async function all(path) {
+  const out = [];
+  let url = `${API}/${path}${path.includes('?') ? '&' : '?'}per_page=100`;
+  while (url) {
+    const r = await request(url);
+    const page = await r.json();
+    out.push(...(Array.isArray(page) ? page : (page.commits ?? [])));
+    url = /<([^>]+)>;\s*rel="next"/.exec(r.headers.get('link') ?? '')?.[1];
+  }
+  return out;
+}
+
+const output = (pairs) => {
+  const text = Object.entries(pairs)
+    .map(([k, v]) => `${k}=${v}`)
+    .join('\n');
+  console.log(text);
+  if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `${text}\n`);
+};
+const summary = (text) => {
+  console.log(text);
+  if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${text}\n`);
+};
+
+async function status(sha, state, description) {
+  await request(`repos/${repo}/statuses/${sha}`, {
+    method: 'POST',
+    body: JSON.stringify({
+      state,
+      context,
+      target_url: RUN_URL,
+      description: description.slice(0, 140),
+    }),
+  });
+  console.log(`${context} ${state} on ${sha}: ${description}`);
+}
+
+async function plan() {
+  const files = await all(`repos/${repo}/pulls/${values.pr}/files`);
+  const behaviour = behaviourFiles(files);
+  const labelled = values.labels.split(',').includes('merge-ok');
+  const self = reviewsItself(files);
+  if (behaviour.length === 0) {
+    await status(
+      values.head,
+      'success',
+      `not behaviour: ${files.map((f) => f.filename).join(', ')}`
+    );
+    summary(`#${values.pr} changes no shipped behaviour: not reviewed, cert-review success`);
+    return output({ go: 'false', behaviour: '', self: 'false' });
+  }
+  if (values.action === 'labeled' && values.label !== 'merge-ok') {
+    summary(`#${values.pr}: the label ${values.label} doesn't start a review`);
+    return output({ go: 'false', behaviour: behaviour.join(','), self: String(self) });
+  }
+  if (!labelled) {
+    await status(
+      values.head,
+      'failure',
+      `waits for merge-ok to be reviewed (changes ${behaviour.slice(0, 4).join(', ')})`
+    );
+    summary(`#${values.pr} changes shipped behaviour and has no merge-ok yet: not reviewed`);
+    return output({ go: 'false', behaviour: behaviour.join(','), self: String(self) });
+  }
+  await status(values.head, 'pending', `reviewing #${values.pr} at ${values.head.slice(0, 12)}`);
+  return output({ go: 'true', behaviour: behaviour.join(','), self: String(self) });
+}
+
+async function lookup() {
+  const commits = await all(`repos/${repo}/compare/${values.base}...${values.head}`);
+  const prs = [];
+  for (const n of mergedPrs(commits)) {
+    const pull = await (await request(`repos/${repo}/pulls/${n}`)).json();
+    const files = await all(`repos/${repo}/pulls/${n}/files`);
+    const statuses = await all(`repos/${repo}/commits/${pull.head.sha}/statuses`);
+    const found = statuses.find((s) => s.context === context);
+    prs.push({
+      pr: n,
+      head: pull.head.sha,
+      behaviour: behaviourFiles(files),
+      state: found?.state,
+      description: found?.description,
+    });
+  }
+  const verdict = groupVerdict(prs);
+  for (const l of verdict.lines) summary(`- ${l}`);
+  await status(values.head, verdict.state, verdict.line);
+  if (verdict.state !== 'success') {
+    console.log(`::error title=not certified::${verdict.line}`);
+    process.exit(1);
+  }
+}
+
+if (positionals[0] === 'plan') await plan();
+else if (positionals[0] === 'lookup') await lookup();
+else {
+  console.error('pr.mjs plan|lookup');
+  process.exit(2);
+}
