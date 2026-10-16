@@ -21,6 +21,12 @@ export interface Command {
   imports?: string;
   refused?: string;
   shows?: string;
+  variants?: CommandVariant[];
+}
+
+export interface CommandVariant {
+  env: Record<string, string>;
+  wasm: string;
 }
 
 interface CommandEntry {
@@ -35,6 +41,7 @@ interface CommandEntry {
   script?: unknown;
   imports?: unknown;
   module?: unknown;
+  variants?: unknown;
 }
 
 interface Manifest {
@@ -100,6 +107,44 @@ function argsOf(pkg: string, raw: unknown): string[] | undefined {
   return raw.map((arg) => arg.replace(PACKAGE, pkg));
 }
 
+const warnedVariants = new Set<string>();
+
+function variantOf(pkg: string, raw: unknown): CommandVariant | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const { env, wasm } = raw as { env?: unknown; wasm?: unknown };
+  const path = inside(pkg, wasm);
+  if (!path || !env || typeof env !== 'object' || Array.isArray(env)) return undefined;
+  const pairs = Object.entries(env);
+  if (pairs.length === 0) return undefined;
+  if (!pairs.every(([key, value]) => ENV_KEY.test(key) && typeof value === 'string')) {
+    return undefined;
+  }
+  return { env: Object.fromEntries(pairs) as Record<string, string>, wasm: path };
+}
+
+function variantsOf(pkg: string, name: string, raw: unknown): CommandVariant[] | undefined {
+  if (raw === undefined) return undefined;
+  const variants = Array.isArray(raw) ? raw.map((one) => variantOf(pkg, one)) : [undefined];
+  if (variants.every((one) => one !== undefined)) {
+    return variants.length > 0 ? (variants as CommandVariant[]) : undefined;
+  }
+  const key = `${pkg}:${name}:${JSON.stringify(raw)}`;
+  if (!warnedVariants.has(key)) {
+    warnedVariants.add(key);
+    console.warn(`slicc-kernel: ${pkg}: ${name}: ignoring malformed "variants", running its wasm`);
+  }
+  return undefined;
+}
+
+export function variantFor(
+  variants: readonly CommandVariant[] | undefined,
+  env: Record<string, string>
+): string | undefined {
+  return variants?.find((one) =>
+    Object.entries(one.env).every(([key, value]) => env[key] === value)
+  )?.wasm;
+}
+
 function abiOf(raw: unknown, fallback: Abi): Abi | undefined {
   const abi = raw ?? fallback;
   return abi === 'emscripten' || abi === 'wasi' || abi === 'js' ? abi : undefined;
@@ -140,6 +185,7 @@ function commandOf(
   const glue = abi === 'wasi' ? wasm : inside(pkg, raw.glue);
   if (!abi || !glue || !wasm) return undefined;
   const imports = abi === 'wasi' ? inside(pkg, raw.imports) : undefined;
+  const variants = variantsOf(pkg, name, raw.variants);
   return {
     name,
     abi,
@@ -152,6 +198,7 @@ function commandOf(
     ...(args ? { args } : {}),
     ...withEnv,
     ...(imports ? { imports } : {}),
+    ...(variants ? { variants } : {}),
   };
 }
 

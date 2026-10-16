@@ -8,10 +8,12 @@ import {
   binfmtOf,
   binfmtSuffix,
   type Command,
+  type CommandVariant,
   pnpmGlobalRoots,
   scanBinfmts,
   scanCommands,
   scanFilesystems,
+  variantFor,
 } from './commands.ts';
 import type { CronClock } from './cron/clock.ts';
 import { type CronLocks, CronService } from './cron/service.ts';
@@ -283,6 +285,7 @@ interface Target {
   imports?: string;
   preopenRoot?: boolean;
   asked?: string;
+  variants?: readonly CommandVariant[];
 }
 
 interface Compiled {
@@ -496,7 +499,17 @@ function targetOf(command: Command): Target {
     ...(command.unset ? { unset: command.unset } : {}),
     ...(command.imports ? { imports: command.imports } : {}),
     ...(command.preopenRoot ? { preopenRoot: true } : {}),
+    ...(command.variants ? { variants: command.variants } : {}),
   };
+}
+
+function chosen(planned: Planned, env: Record<string, string>): Planned {
+  const { target } = planned;
+  const wasm = variantFor(target.variants, env);
+  if (wasm === undefined) return planned;
+  const { asked: _asked, ...rest } = target;
+  const glue = target.abi === 'wasi' ? wasm : target.glue;
+  return { ...planned, target: { ...rest, wasm, glue } };
 }
 
 function withScriptEnv(target: Target, command: Command | undefined): Target {
@@ -1533,16 +1546,17 @@ export class Launcher {
   }
 
   private async launch(
-    planned: Planned,
+    asked: Planned,
     req: Omit<StartRequest, 'program' | 'argv0' | 'args'>
   ): Promise<WasmProcessHandle> {
-    const { target, args } = planned;
     const cwd = await physicalPathAsync(this.base, req.cwd);
     const seen = { ...req.env, HOSTNAME: this.hostname, cwd };
-    const env = { ...expandDefaults(target.env, seen), ...req.env };
-    for (const key of target.unset ?? []) delete env[key];
+    const env = { ...expandDefaults(asked.target.env, seen), ...req.env };
+    for (const key of asked.target.unset ?? []) delete env[key];
     delete env[TICKET_ENV];
     env.HOSTNAME = this.hostname;
+    const planned = chosen(asked, env);
+    const { target, args } = planned;
     let program: Program;
     await this.pnpmReady();
     try {
