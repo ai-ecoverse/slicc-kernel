@@ -421,6 +421,19 @@ export class WasiFds {
     return out;
   }
 
+  private locking = false;
+
+  holdLocks(): void {
+    this.locking = true;
+  }
+
+  private dropLocks(e: WasiEntry | undefined): void {
+    if (!this.locking || e?.type !== 'file') return;
+    try {
+      this.kernel.call({ op: 'lk-close', path: e.file.path });
+    } catch {}
+  }
+
   close(fd: number): void {
     const e = this.get(fd);
     this.table.delete(fd);
@@ -429,6 +442,7 @@ export class WasiFds {
       this.kernel.sys.close(fd);
     } finally {
       this.release(e);
+      this.dropLocks(e);
       this.bump();
     }
   }
@@ -449,6 +463,7 @@ export class WasiFds {
       if (this.cloexec.delete(from)) this.cloexec.add(to);
     }
     if (old) this.release(old);
+    this.dropLocks(old);
     this.bump();
   }
 

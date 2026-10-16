@@ -1,0 +1,12 @@
+{
+  "name": "wlocktest",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "wlocktest": {
+        "wasm": "bin/wlocktest.wasm"
+      }
+    }
+  }
+}

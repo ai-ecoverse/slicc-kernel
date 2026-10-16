@@ -4,6 +4,8 @@ import { localCpuNanos } from '../../kernel/cpu-clock.ts';
 import { type Cred, type CredChange, MAX_GROUPS } from '../../kernel/cred.ts';
 import type { DeviceMeta, KernelFdKind } from '../../kernel/fd-table.ts';
 import type { SyncFsBridgeStat, SyncFsPosixBridge } from '../../realm/sync-fs-wire.ts';
+import type { LockHeld } from '../process-locks.ts';
+import { type LockedFile, lockImports } from './slicc-lock.ts';
 import { semImports } from './slicc-sem.ts';
 import {
   CLOCK,
@@ -410,6 +412,28 @@ export class WasiHost {
         void this.o.kernel.call({ op: 'proc-setcred', change });
       },
       ...semImports(this),
+      ...lockImports({
+        mem,
+        file: (fd) => this.lockedFile(fd),
+        flush: (file) => {
+          if (file.path !== undefined) this.fds.flushPath(file.path);
+          else if (file.target.fd !== undefined) this.o.kernel.sys.flush(file.target.fd);
+        },
+        locked: () => this.fds.holdLocks(),
+        calls: {
+          set: (target, kind, start, len, wait) =>
+            void this.o.kernel.call({
+              op: 'lk-set',
+              ...target,
+              kind,
+              start,
+              len,
+              ...(wait ? { wait } : {}),
+            }),
+          get: (target, kind, start, len) =>
+            this.o.kernel.call({ op: 'lk-get', ...target, kind, start, len }) as LockHeld | null,
+        },
+      }),
       groups_get: (buf: number, cap: number, count: number) => {
         const { groups } = this.o.kernel.call({ op: 'proc-cred' }) as Cred;
         if (cap !== 0 && cap < groups.length) throw new WasiError('EINVAL');
@@ -904,6 +928,27 @@ export class WasiHost {
       return;
     }
     e.path = path;
+  }
+
+  private lockedFile(fd: number): LockedFile {
+    const e = this.fds.get(fd);
+    if (e.type === 'file') {
+      const { file } = e;
+      return {
+        target: { path: file.path },
+        path: file.path,
+        readable: file.readable,
+        writable: file.writable,
+        offset: () => file.offset,
+        size: () => file.size(),
+      };
+    }
+    if (e.type !== 'kernel' || this.fds.kind(fd, e) !== 'file') throw new WasiError('EBADF');
+    return {
+      target: { fd },
+      offset: () => this.o.kernel.sys.seek(fd, 0, WHENCE.CUR),
+      size: () => this.kernelStat(fd).size,
+    };
   }
 
   private kernelStat(fd: number): { path?: string; size: number; orphan?: true } {
