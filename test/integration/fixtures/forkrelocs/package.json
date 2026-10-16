@@ -1,0 +1,12 @@
+{
+  "name": "forkrelocs",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "forkrelocs": {
+        "wasm": "bin/forkrelocs.wasm"
+      }
+    }
+  }
+}
