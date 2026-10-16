@@ -34,6 +34,7 @@ import {
 } from './kernel-streams.ts';
 import { createProcessKernel, type ProcessKernel } from './process-children.ts';
 import {
+  devCreations,
   type FdImports,
   type GlueSyscalls,
   type KernelImports,
@@ -383,6 +384,7 @@ const GLUE_TRAILER = [
   "  umask: typeof ___syscall_umask === 'function' ? ___syscall_umask : undefined,",
   "  faccessat: typeof ___syscall_faccessat === 'function' ? ___syscall_faccessat : undefined,",
   "  linkat: typeof ___syscall_linkat === 'function' ? ___syscall_linkat : undefined,",
+  "  symlinkat: typeof ___syscall_symlinkat === 'function' ? ___syscall_symlinkat : undefined,",
   "  uname: typeof ___syscall_uname === 'function' ? ___syscall_uname : undefined,",
   "  utimensat: typeof ___syscall_utimensat === 'function' ? ___syscall_utimensat : undefined,",
   "  getppid: typeof _slicc_getppid_js === 'function' ? _slicc_getppid_js : undefined,",
@@ -542,6 +544,7 @@ function kernelWrappers(imports: WebAssembly.Imports, module: object, deps: Wrap
   noFollowUtimes(imports, fsOf, kernelGlue?.utimensat ?? utimensatOf(module), memory);
   kernelAccess(imports, fsOf, memory, kernelGlue);
   kernelLink(imports, fsOf, memory, kernelGlue);
+  devCreations(imports, fsOf, memory, kernelGlue);
   kernelUname(imports, hostnameOf(init.env), memory, kernelGlue);
   const glue = ownValue<FdImports>(module, 'sliccFdImports');
   syncFsync(imports, fsOf, glue);

@@ -16,7 +16,7 @@ import {
   retimable,
   writable,
 } from '../fs/dac.ts';
-import { devRemoval } from '../fs/dev-removal.ts';
+import { devCreation, devRemoval } from '../fs/dev-removal.ts';
 import { chownAs, ownerOf } from '../fs/owners.ts';
 import {
   type FsStat,
@@ -690,6 +690,26 @@ async function guardAndResolve(
 }
 
 const REMOVALS: ReadonlySet<SyncFsOp> = new Set<SyncFsOp>(['unlink', 'rmdir', 'rm']);
+const CREATIONS: ReadonlySet<SyncFsOp> = new Set<SyncFsOp>(['write', 'mkdir', 'symlink', 'create']);
+const NAMING: ReadonlySet<SyncFsOp> = new Set<SyncFsOp>(['link', 'rename']);
+
+async function newDevName(
+  entry: SyncFsTokenEntry,
+  path: string,
+  req: SyncFsRequest
+): Promise<SyncFsResult | undefined> {
+  const named = NAMING.has(req.op);
+  if (!named && !CREATIONS.has(req.op)) return undefined;
+  const target = named ? entry.fs.resolvePath(entry.cwd, req.arg2 ?? '') : path;
+  const refused = devCreation(target, entry.cred?.());
+  if (!refused) return undefined;
+  const there = await entry.fs.lstat(target).then(
+    () => true,
+    () => false
+  );
+  if (there) return undefined;
+  return { ok: false, errno: refused, message: `${target}: no new names in /dev or /proc` };
+}
 
 async function dispatchOne(entry: SyncFsTokenEntry, req: SyncFsRequest): Promise<SyncFsResult> {
   const { fs, cwd } = entry;
@@ -697,6 +717,8 @@ async function dispatchOne(entry: SyncFsTokenEntry, req: SyncFsRequest): Promise
     const path = fs.resolvePath(cwd, req.path);
     const device = REMOVALS.has(req.op) ? devRemoval(path, entry.cred?.()) : undefined;
     if (device) return { ok: false, errno: device, message: `${path}: a device entry stays` };
+    const made = await newDevName(entry, path, req);
+    if (made) return made;
     const held = await byHandle(entry, path, req);
     if (held) return held;
     if (req.op === 'access') return await accessOp(entry, path, req);
