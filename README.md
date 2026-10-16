@@ -1084,9 +1084,9 @@ A threaded WASIX C program for `test/integration/thread-signal.test.mjs` (#520).
 
 A WASIX C program for `test/integration/long-timers.test.mjs` (#767).
 - `longwait alarm` sets `alarm(3000000)` (about 35 days), sleeps 0.5 s, and prints how many alarms came and how many seconds were left.
-- `longwait select|ppoll|nanosleep` waits 3,000,000 s on a pipe that never gets data, until a 300 ms interval timer interrupts the wait.
+- `longwait select|ppoll|nanosleep` waits 3,000,000 s on a pipe that never gets data, until a 300 ms interval timer interrupts the wait, and prints `not before it` when the wait lasted at least 300 ms (`early` otherwise). It sets no upper bound, so a loaded CI host can't fail the row; a wait that never ends times the test out.
 
-**Build:** `WASIX_SYSROOT_28=/path/to/wasix-sysroot ./build.sh`, with `wasixcc` 0.4.7 and binaryen's `wasm-opt` on `PATH`. `bin/longwait.wasm` is 44,010 bytes, sha256 `70ae2adfb46864fad3af0241fe26f401a62a5176ccd25ab82fe6588178cfb5c8`.
+**Build:** `WASIX_SYSROOT_28=/path/to/wasix-sysroot ./build.sh`, with `wasixcc` 0.4.7 and binaryen's `wasm-opt` on `PATH`. `bin/longwait.wasm` is 44,004 bytes, sha256 `e69d03f01479693666078297e781f5373719700c8534d1f2933749f5b3cee903`.
 
 ### `epollmask`
 

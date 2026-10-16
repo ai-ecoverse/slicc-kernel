@@ -15,6 +15,17 @@ function liveTransport() {
   return { transport, extra };
 }
 
+function exitBecomes(client, exit) {
+  return new Promise((resolve) => {
+    if (client.transport.traits.exit === exit) return resolve();
+    const stop = client.onTraits((traits) => {
+      if (traits.exit !== exit) return;
+      stop();
+      resolve();
+    });
+  });
+}
+
 test('updateTransportTraits re-reads the transport and tells attached clients only when it changed', async (t) => {
   const { transport, extra } = liveTransport();
   const kernel = await createNodeKernel({ network: { transport } });
@@ -28,8 +39,9 @@ test('updateTransportTraits re-reads the transport and tells attached clients on
 
   assert.equal(await kernel.updateTransportTraits(), false);
   extra.exit = 'tailscale';
+  const told = exitBecomes(early, 'tailscale');
   assert.equal(await kernel.updateTransportTraits(), true);
-  for (let i = 0; i < 50 && seen.length === 0; i++) await new Promise((r) => setTimeout(r, 10));
+  await told;
   assert.equal(seen.length, 1);
   assert.equal(seen[0].exit, 'tailscale');
   assert.equal(early.transport.traits.exit, 'tailscale');
@@ -41,10 +53,9 @@ test('updateTransportTraits re-reads the transport and tells attached clients on
 
   stop();
   extra.exit = 'link';
+  const both = Promise.all([exitBecomes(early, 'link'), exitBecomes(late, 'link')]);
   assert.equal(await kernel.updateTransportTraits(), true);
-  for (let i = 0; i < 50 && late.transport.traits.exit !== 'link'; i++) {
-    await new Promise((r) => setTimeout(r, 10));
-  }
+  await both;
   assert.equal(late.transport.traits.exit, 'link');
   assert.equal(early.transport.traits.exit, 'link');
   assert.equal(seen.length, 1);
