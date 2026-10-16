@@ -56,6 +56,37 @@ export function titlesFromPatch(patch) {
   return [...titles];
 }
 
+export function droppedTitles(patch) {
+  const added = new Set(
+    titlesFromPatch(
+      (patch ?? '')
+        .split('\n')
+        .filter((l) => l.startsWith('+'))
+        .join('\n')
+    )
+  );
+  const removed = titlesFromPatch(
+    (patch ?? '')
+      .split('\n')
+      .filter((l) => l.startsWith('-'))
+      .map((l) => `+${l.slice(1)}`)
+      .join('\n')
+  );
+  return removed.filter((t) => !added.has(t));
+}
+
+export function droppedTests(files) {
+  const out = [];
+  for (const f of files) {
+    const was = f.previous_filename ?? f.filename;
+    if (!INTEGRATION.test(was) && !INTEGRATION.test(f.filename)) continue;
+    if (f.status === 'removed' || (f.status === 'renamed' && f.previous_filename !== f.filename))
+      out.push({ file: was, ...(f.status === 'renamed' ? { to: f.filename } : {}) });
+    else for (const title of droppedTitles(f.patch)) out.push({ file: f.filename, title });
+  }
+  return out;
+}
+
 export function rowOf(pr, files) {
   const kind = kindOf(pr.title);
   const tests = files
@@ -69,6 +100,7 @@ export function rowOf(pr, files) {
     behaviour: BEHAVIOUR.has(kind),
     src: files.some((f) => f.filename.startsWith('src/')),
     tests,
+    dropped: droppedTests(files),
     ...(pr.merge_commit_sha ? { merged: pr.merge_commit_sha } : {}),
   };
 }
@@ -347,6 +379,22 @@ export function knownAsOf(issue, { fixedBefore, releasedAt, version, fixedIn }) 
 }
 
 const GAPS = new Set(['no-test', 'no-negative', 'prev-not-run', 'no-titles', 'not-run']);
+
+export function baseEvidence(findings) {
+  const f = (findings ?? []).find(
+    (x) => x.kind === 'missing-evidence' && x.what === 'the certified suite'
+  );
+  if (!f) return { note: '' };
+  const note = `base suite incomplete (${f.results ?? 0} results)`;
+  if (!f.blocking) return { note };
+  const why = f.dropped
+    ? `the delta drops ${f.dropped} test files or titles`
+    : "the release suite isn't complete and all-pass";
+  return {
+    note,
+    problem: `the certified suite didn't finish (${f.results ?? 0} results), and ${why}, so nothing stands in for it`,
+  };
+}
 
 export function gapsOf(findings) {
   return (findings ?? []).filter((f) => GAPS.has(f.kind) && f.pr).map((f) => `#${f.pr} ${f.kind}`);

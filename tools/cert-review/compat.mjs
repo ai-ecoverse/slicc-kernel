@@ -165,21 +165,27 @@ function report(run) {
 }
 
 const deadline = Date.now() + Number(values.wait) * 60_000;
-const first = await finished({ own: true, deadline });
-const out = { version, commit, dispatched: first.dispatched, found: Boolean(first.run) };
-if (first.run && first.run.conclusion !== 'success') {
-  let shards = missingShards(first.jobs, artifactsOf(first.run));
+async function whole(found) {
+  if (!found.run || found.run.conclusion === 'success') return { ...found, shards: [] };
+  let { run, jobs } = found;
+  let shards = missingShards(jobs, artifactsOf(run));
+  let shardRerun;
   if (shards.length > 0 && values.rerun) {
-    const again = await rerunShards(first.run);
-    out.shardRerun = { shards, conclusion: again?.conclusion ?? 'timed out' };
+    const again = await rerunShards(run);
+    shardRerun = { shards, conclusion: again?.conclusion ?? 'timed out' };
     if (again) {
-      first.run = again;
-      first.jobs = await jobsOf(again);
-      shards = missingShards(first.jobs, artifactsOf(again));
+      run = again;
+      jobs = await jobsOf(again);
+      shards = missingShards(jobs, artifactsOf(again));
     }
   }
-  out.missingShards = shards;
+  return { ...found, run, jobs, shards, ...(shardRerun ? { shardRerun } : {}) };
 }
+
+const first = await whole(await finished({ own: true, deadline }));
+const out = { version, commit, dispatched: first.dispatched, found: Boolean(first.run) };
+if (first.run && first.run.conclusion !== 'success') out.missingShards = first.shards;
+if (first.shardRerun) out.shardRerun = first.shardRerun;
 if (first.run) {
   const got = report(first.run);
   Object.assign(out, {
@@ -194,7 +200,9 @@ if (first.run) {
   let regressions = compatRegressions(got?.json);
   if (regressions.length > 0 && values.rerun) {
     const set = [...new Set(regressions.map((r) => r.recipe))].join(',');
-    const again = await finished({ own: false, set, deadline: Date.now() + 120 * 60_000 });
+    const again = await whole(
+      await finished({ own: false, set, deadline: Date.now() + 120 * 60_000 })
+    );
     const rerun = again.run ? report(again.run) : undefined;
     out.rerun = again.run
       ? {
@@ -202,6 +210,8 @@ if (first.run) {
           conclusion: again.run.conclusion,
           set,
           verdict: rerun?.json.verdict,
+          ...(again.shards.length ? { missingShards: again.shards } : {}),
+          ...(again.shardRerun ? { shardRerun: again.shardRerun } : {}),
         }
       : { run: null, set };
     regressions = compatRegressions(

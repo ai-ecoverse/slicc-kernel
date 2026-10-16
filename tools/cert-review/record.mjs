@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { gapsOf, knownAsOf, knownLine, provenanceProblems } from './lib.mjs';
+import { baseEvidence, gapsOf, knownAsOf, knownLine, provenanceProblems } from './lib.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const { values } = parseArgs({
@@ -237,11 +237,15 @@ function standing() {
 }
 
 let gaps = [];
+let baseNote = '';
 
 function codedFindings() {
   if (!values.findings || !existsSync(values.findings)) return;
   const found = JSON.parse(readFileSync(values.findings, 'utf8')).findings ?? [];
   gaps = gapsOf(found);
+  const partial = baseEvidence(found);
+  baseNote = partial.note;
+  if (partial.problem) problems.push(partial.problem);
   for (const f of found.filter((x) => x.kind === 'compat-crash')) {
     problems.push(
       `kernel-compat: ${f.package} ${f.spec} crashes again on the rerun and not on the reference kernel`
@@ -283,7 +287,8 @@ const ci = `${covers}${values.run ? `ci: ${values.run}` : 'ci: local'}`;
 let line;
 if (problems.length === 0 && review?.verdict === 'certified') {
   const gap = gaps.length ? `; test gaps: ${gaps.join(', ')}` : '';
-  line = `certified ${NAME}@${version} sha256=${facts.sha256} (${ci}; known: ${known.length ? known.join(', ') : 'none'}${gap})`;
+  const partial = baseNote ? `; ${baseNote}` : '';
+  line = `certified ${NAME}@${version} sha256=${facts.sha256} (${ci}; known: ${known.length ? known.join(', ') : 'none'}${gap}${partial})`;
 } else {
   const why = [
     ...(review?.verdict === 'fail' ? [`the reviewer: ${review.reason || 'no reason given'}`] : []),
