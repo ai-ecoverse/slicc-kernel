@@ -35,13 +35,11 @@ const missing = [
   ['delta', delta],
   ['the previous release run', prev],
   ['the release suite', release],
-  ['the certified suite', base],
   ...negatives.map(([v, run]) => [`the v${v} run`, run]),
 ].filter(([, v]) => v === undefined);
 
 const incomplete = [
   ['the release suite', release, true],
-  ['the certified suite', base, true],
   ['the previous release run', prev, false],
   ...negatives.map(([v, run]) => [`the v${v} run`, run, false]),
 ]
@@ -60,6 +58,27 @@ function completed(exit, results, files, full) {
   if (results.length === 0) return !full && exit === 0 && files.length === 0;
   const failed = results.some((r) => r.status === 'fail' || r.status === 'cancelled');
   return exit === 0 || failed;
+}
+
+function baseFinding() {
+  const results = base?.results ?? [];
+  if (base !== undefined && completed(base.exit, results, base.files ?? [], true)) return [];
+  const releaseDone =
+    release !== undefined &&
+    completed(release.exit, release.results ?? [], release.files ?? [], true) &&
+    release.exit === 0 &&
+    !(release.results ?? []).some((r) => r.status === 'fail' || r.status === 'cancelled');
+  const dropped = (delta?.rows ?? []).flatMap((r) => r.dropped ?? []);
+  const waived = releaseDone && delta !== undefined && dropped.length === 0;
+  return [
+    {
+      kind: 'missing-evidence',
+      what: 'the certified suite',
+      ...(base === undefined ? {} : { exit: base.exit, results: results.length }),
+      blocking: !waived,
+      ...(dropped.length ? { dropped: dropped.length } : {}),
+    },
+  ];
 }
 
 function compatFindings(c) {
@@ -81,6 +100,7 @@ const suites = diffSuites(resultsMap(base?.results ?? []), nextMap);
 const findings = [
   ...missing.map(([what]) => ({ kind: 'missing-evidence', what })),
   ...incomplete,
+  ...baseFinding(),
   ...rows
     .filter((r) => FINDINGS.has(r.decision))
     .map((r) => ({ kind: r.decision, pr: r.pr, title: r.title })),

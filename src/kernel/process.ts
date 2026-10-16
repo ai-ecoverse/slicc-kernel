@@ -65,6 +65,7 @@ import { SEM_OPS, SemHandles, type SemSyscall, type SemTable, semSyscall } from 
 import { type DefaultAction, defaultAction, isSignal, SIG, sigbit } from './signals.ts';
 import { KernelSocket, LoopbackNet } from './socket.ts';
 import { SOCKET_OPS, type SocketSyscall, socketSyscall } from './socket-syscalls.ts';
+import { repeating } from './timer.ts';
 import type { KernelTty, Termios } from './tty.ts';
 import {
   present,
@@ -1886,7 +1887,7 @@ export class WasmProcess {
     return aborted(this.blockingSignal(cancelled));
   }
 
-  private alarm: ReturnType<typeof setTimeout> | undefined;
+  private alarm: (() => void) | undefined;
   private readonly dlLog: LinkRecord[] = [];
   private readonly closures = {
     next: 0,
@@ -1980,7 +1981,6 @@ export class WasmProcess {
     (req, cancelled) => this.syscall(req as WasmSyscall, cancelled),
     () => this.options.onAsync?.()
   );
-  private alarmEvery: ReturnType<typeof setInterval> | undefined;
 
   private setAlarm(sig: number, first: number, every: number, timer?: number): void {
     if (!isSignal(sig)) throw new KernelError('EINVAL');
@@ -1988,11 +1988,7 @@ export class WasmProcess {
     if (first <= 0) return;
     const fire =
       timer === undefined ? () => this.options.raise?.(sig) : () => this.timerExpired(timer);
-    this.alarm = setTimeout(() => {
-      this.alarm = undefined;
-      fire();
-      if (every > 0) this.alarmEvery = setInterval(fire, every);
-    }, first);
+    this.alarm = repeating(first, every, fire);
   }
 
   private timerExpired(which: number): void {
@@ -2003,10 +1999,8 @@ export class WasmProcess {
   }
 
   private clearAlarm(): void {
-    clearTimeout(this.alarm);
-    clearInterval(this.alarmEvery);
+    this.alarm?.();
     this.alarm = undefined;
-    this.alarmEvery = undefined;
   }
 
   async exit(): Promise<void> {
