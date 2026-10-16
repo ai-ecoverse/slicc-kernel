@@ -171,6 +171,14 @@ export function importsContext({
     }
     return undefined;
   };
+  const sizedOf = (fd: number): { path?: string | undefined; size?: number } => {
+    const e = host.fds.get(fd);
+    if (e.type === 'file') return { path: e.file.path, size: e.file.size() };
+    if (e.type === 'kernel' && host.fds.kind(fd, e) === 'file') {
+      return call({ op: 'fd-vfs-stat', fd }) as { path?: string; size: number };
+    }
+    return { path: pathOf(fd) };
+  };
   const requirePath = (fd: number): string => {
     const path = pathOf(fd);
     if (path === undefined) throw new WasiError('EBADF');
@@ -205,19 +213,19 @@ export function importsContext({
     },
     fstat(fd) {
       const e = host.fds.get(fd);
-      const path = pathOf(fd);
+      const { path, size } = sizedOf(fd);
       if (path === undefined) {
         const kind = e.type === 'device' ? 'device' : 'stream';
         return { kind, mode: kind === 'device' ? 0o20666 : 0o10600, ...live(), size: 0 };
       }
-      host.fds.flushPath(path);
+      if (size === undefined) host.fds.flushPath(path);
       const s = fs.stat(path);
       return {
         kind: s.isDirectory ? 'dir' : 'file',
         path,
         mode: s.mode ?? (s.isDirectory ? 0o40755 : 0o100644),
         ...(s.uid !== undefined && s.gid !== undefined ? { uid: s.uid, gid: s.gid } : live()),
-        size: s.size,
+        size: size ?? s.size,
         ...(s.ino !== undefined ? { ino: s.ino } : {}),
         ...(s.mtimeMs !== undefined ? { mtimeMs: s.mtimeMs } : {}),
       };
