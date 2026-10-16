@@ -84,7 +84,7 @@
     "@ai-ecoverse/wasm-tree": "2.3.2-2",
     "@ai-ecoverse/wasm-util-linux": "2.42.4-2",
     "@biomejs/biome": "2.5.15",
-    "@types/node": "24.19.1",
+    "@types/node": "24.19.2",
     "esbuild": "0.28.2",
     "fake-indexeddb": "6.2.5",
     "lefthook": "2.2.1",
