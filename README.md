@@ -1100,6 +1100,16 @@ A threaded WASIX C program for `test/integration/thread-signal.test.mjs` (#520).
 
 **Build:** `WASIX_SYSROOT_28=/path/to/wasix-sysroot ./build.sh`, with `wasixcc` 0.4.7 (`-pthread`) and binaryen's `wasm-opt` on `PATH`. `bin/sigthread.wasm` is 44,788 bytes, sha256 `5781fa39d0a0032cd9b214b71de1f15f589b40e4cecd6862362048dd27f0db56`.
 
+### `spintest`
+
+A WASIX C program and a JS command for `test/integration/transport-spin.test.mjs`, which guards the sync transport's paths from #856 (#864).
+- `spintest rounds N` does N 1-byte write+read rounds on a pipe, a different byte each round, and prints `N rounds in order` if every byte came back as sent. These are fast replies, which take the transport's spin.
+- `spintest wait` prints `waiting` and blocks in a 1-byte `read` of its terminal, a reply that comes only when the test types. The test measures its own process's CPU (all threads) while the read blocks.
+- `spintest big M` writes an M MiB file and reads it back in 1 MiB `read` calls, each of which must be whole and match. A 1 MiB read fills the transport window exactly.
+- `spinread PATH` (`bin/spinread.mjs`, a JS command) reads a whole file through the synchronous `ctx.sync.fs.readFile` and prints its length and a 31-hash. A file over 1 MiB is a reply larger than the window, so it comes in several chunks.
+
+**Build:** `WASIX_SYSROOT_28=/path/to/wasix-sysroot ./build.sh`, with `wasixcc` 0.4.7 and binaryen's `wasm-opt` on `PATH`. `bin/spintest.wasm` is 50,095 bytes, sha256 `be7659422f187a97fac412ac1dd2ec9d412e8dcd067da88157960352ded6178b`.
+
 ### `longwait`
 
 A WASIX C program for `test/integration/long-timers.test.mjs` (#767).
