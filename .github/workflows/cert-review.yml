@@ -302,6 +302,7 @@ jobs:
           VERSION: ${{ needs.plan.outputs.version }}
           COMMIT: ${{ needs.plan.outputs.commit }}
           PLANTED: ${{ needs.plan.outputs.planted }}
+          BASE: ${{ needs.plan.outputs.base }}
         run: |
           mkdir -p "$RUNNER_TEMP/evidence"
           if [ -n "$PLANTED" ]; then
@@ -309,7 +310,7 @@ jobs:
             exit 0
           fi
           node tools/cert-review/compat.mjs --repo "$GITHUB_REPOSITORY" --version "$VERSION" --commit "$COMMIT" \
-            --dispatch --rerun --wait 150 --out "$RUNNER_TEMP/evidence/compat.json"
+            --dispatch --rerun --wait 150 --reference "$BASE" --out "$RUNNER_TEMP/evidence/compat.json"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:

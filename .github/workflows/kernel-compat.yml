@@ -20,8 +20,12 @@ on:
         description: 'kernel-compat set'
         type: string
         default: 'base,catalog,all'
+      reference:
+        description: 'Reference kernel, a published version (empty: the one slicc-bios pins); cert-review passes its certified base'
+        type: string
+        default: ''
 
-run-name: ${{ github.event_name == 'workflow_dispatch' && format('Kernel compat v{0}{1}', inputs.version, inputs.set != 'base,catalog,all' && format(' ({0})', inputs.set) || '') || github.event_name == 'pull_request' && github.event.pull_request.title || 'Kernel compat' }}
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('Kernel compat v{0}{1}{2}', inputs.version, inputs.set != 'base,catalog,all' && format(' ({0})', inputs.set) || '', inputs.reference != '' && format(' ref {0}', inputs.reference) || '') || github.event_name == 'pull_request' && github.event.pull_request.title || 'Kernel compat' }}
 
 permissions:
   contents: read
@@ -194,6 +198,7 @@ jobs:
       homescoop-ref: main
       kernel: '@ai-ecoverse/slicc-kernel@${{ needs.published.outputs.version }}'
       set: ${{ inputs.set || 'base,catalog,all' }}
+      reference: ${{ inputs.reference || '' }}
       runner: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (contains(fromJSON('["schedule","workflow_dispatch","workflow_run","release"]'), github.event_name) && github.ref == 'refs/heads/main')) && vars.CERT_RUNNER || 'ubuntu-latest' }}
 
   attach:

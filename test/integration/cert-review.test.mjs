@@ -827,6 +827,29 @@ test('prev and base: the newest earlier release whose cert-review passed (prev a
   assert.deepEqual(covering(tags, '1.99.0', '1.99.1'), ['1.99.1']);
 });
 
+test("kernel-compat's reference for a cert review is the certified base: cert-review passes it, kernel-compat names it and hands it to homescoop", async () => {
+  const read = (name) =>
+    readFile(new URL(`../../.github/workflows/${name}`, import.meta.url), 'utf8');
+  const cert = await read('cert-review.yml');
+  const compat = await read('kernel-compat.yml');
+  assert.match(
+    cert,
+    /BASE: \$\{\{ needs\.plan\.outputs\.base \}\}\n {8}run: \|[\s\S]*?--reference "\$BASE"/
+  );
+  assert.match(
+    compat,
+    /\n {6}reference:\n {8}description: [^\n]+\n {8}type: string\n {8}default: ''/
+  );
+  assert.match(compat, /inputs\.reference != '' && format\(' ref \{0\}', inputs\.reference\)/);
+  assert.match(compat, /\n {6}reference: \$\{\{ inputs\.reference \|\| '' \}\}\n/);
+  const tool = await readFile(new URL('compat.mjs', tools), 'utf8');
+  assert.match(
+    tool,
+    /`Kernel compat v\$\{version\}\$\{reference \? ` ref \$\{reference\}` : ''\}`/
+  );
+  assert.match(tool, /finished\(\{ own: !reference, deadline \}\)/);
+});
+
 test('every release run has its own concurrency group, so a newer release never cancels a pending one', async () => {
   const workflow = await readFile(
     new URL('../../.github/workflows/cert-review.yml', import.meta.url),
