@@ -64,6 +64,7 @@ import { bytesSource, deviceFile, FdTable, type OpenFile, sinkFile } from './ker
 import { spawnWasmProcess, type WasmProcessHandle, type WasmWorkerLike } from './kernel/host.ts';
 import { type JobMember, JobTable } from './kernel/jobs.ts';
 import { LockTable } from './kernel/locks.ts';
+import { hostsReader } from './kernel/net/hosts-file.ts';
 import { HttpHandles } from './kernel/net/http-syscalls.ts';
 import { DEFAULT_HOSTNAME, isHostname } from './kernel/net/loopback-names.ts';
 import { KernelLoopback } from './kernel/net/loopback-transport.ts';
@@ -714,7 +715,12 @@ export class Launcher {
     this.uplink = options.uplink;
     this.routes = new Routes(options.uplink?.traits.ipv6 === true);
     if (options.uplink?.routes) this.routes.set(options.uplink.routes);
-    this.resolver = new Resolver({ uplink: options.uplink, routes: this.routes, hostname });
+    this.resolver = new Resolver({
+      uplink: options.uplink,
+      routes: this.routes,
+      hostname,
+      hosts: hostsReader(this.base),
+    });
     if (options.uplink) this.net.useUplink({ uplink: options.uplink, routes: this.routes });
     enableNetwork(this.net, {
       transport: this.transport,
