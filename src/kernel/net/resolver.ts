@@ -86,7 +86,7 @@ export class Resolver {
       return family === 4 ? v4 : [...v4, key];
     }
     const listed = this.hosts ? await this.fromFile(key, family) : undefined;
-    if (listed) return listed;
+    if (listed?.length) return listed;
     if (local) {
       const six = loopbackName(key, this.own) ? ['::1'] : [];
       return family === 6 ? six : family === 4 ? [local] : [local, ...six];
