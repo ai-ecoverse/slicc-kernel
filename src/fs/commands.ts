@@ -1,5 +1,14 @@
+import type { Cred } from '../kernel/cred.ts';
 import { access, R_OK } from './access.ts';
-import { type FsStat, inodeOf, type KernelFs, lutimesOf, mayLink, rangedOps } from './types.ts';
+import {
+  type FsStat,
+  fsError,
+  inodeOf,
+  type KernelFs,
+  lutimesOf,
+  mayLink,
+  rangedOps,
+} from './types.ts';
 
 const S_IFDIR = 0o040000;
 const S_IFREG = 0o100000;
@@ -39,27 +48,29 @@ export async function followLinks(fs: KernelFs, path: string): Promise<string> {
 
 export type UserCommandDir = (dir: string) => Promise<ReadonlySet<string> | undefined>;
 
-export type CommandTarget = (path: string) => Promise<string | undefined>;
+export interface EntryTarget {
+  path: string;
+  owner?: Cred;
+}
 
-const NOBODY = {
-  ruid: 65534,
-  euid: 65534,
-  suid: 65534,
-  rgid: 65534,
-  egid: 65534,
-  sgid: 65534,
-  groups: [],
-};
+export type CommandTarget = (path: string) => Promise<EntryTarget | undefined>;
+
+const NOBODY = { ruid: -1, euid: -1, suid: -1, rgid: -1, egid: -1, sgid: -1, groups: [] };
+
+const EMPTY = new Uint8Array(0);
 
 function quiet<T>(promise: Promise<T>): Promise<T | undefined> {
   return promise.catch(() => undefined);
 }
 
+async function readsAs(fs: KernelFs, cred: Readonly<Cred>, target: string): Promise<boolean> {
+  const walked = await quiet(access(fs, cred, target, R_OK, { directory: false }));
+  return walked !== undefined && walked.denied === undefined && !walked.missing;
+}
+
 async function shownTarget(fs: KernelFs, target: string): Promise<FsStat | undefined> {
   const st = await quiet(fs.stat(target));
-  if (!st?.isFile) return undefined;
-  const walked = await quiet(access(fs, NOBODY, target, R_OK, { directory: false }));
-  return walked && walked.denied === undefined && !walked.missing ? st : undefined;
+  return st?.isFile && (await readsAs(fs, NOBODY, target)) ? st : undefined;
 }
 
 export function withCommandDirs(
@@ -124,7 +135,7 @@ export function withCommandDirs(
     const st = await virtual(path);
     if (!st?.isFile) return st;
     const target = await targetOf(path);
-    const real = target === undefined ? undefined : await targetStat(target);
+    const real = target === undefined ? undefined : await targetStat(target.path);
     return real
       ? { ...st, size: real.size, mtime: real.mtime, ctime: real.mtime, atime: real.mtime }
       : st;
@@ -134,22 +145,30 @@ export function withCommandDirs(
     return (await shown(path)) ?? shown(await followLinks(fs, path));
   }
 
-  async function entryTarget(path: string): Promise<string | undefined> {
+  async function entryTarget(path: string): Promise<EntryTarget | undefined> {
     if (!BIN_ENTRY.test(path) || !(await virtual(path))?.isFile) return undefined;
     if (!(await fs.lstat(path).then(() => false, missing))) return undefined;
     const target = await targetOf(path);
-    return target === path ? undefined : target;
+    return target?.path === path ? undefined : target;
   }
 
   async function redirected(path: string): Promise<string | undefined> {
-    return (await entryTarget(path)) ?? entryTarget(await followLinks(fs, path));
+    const target = (await entryTarget(path)) ?? (await entryTarget(await followLinks(fs, path)));
+    if (target?.owner && !(await readsAs(fs, target.owner, target.path))) {
+      throw fsError('EACCES', path);
+    }
+    return target?.path;
   }
+
+  const absent = (err: unknown): Uint8Array => {
+    if (missing(err)) return EMPTY;
+    throw err;
+  };
 
   async function content(path: string, err: unknown): Promise<Uint8Array> {
     if (!missing(err) || !(await linked(path))?.isFile) throw err;
     const target = await redirected(path);
-    if (target === undefined) return new Uint8Array(0);
-    return fs.readFileBuffer(target).catch(() => new Uint8Array(0));
+    return target === undefined ? EMPTY : fs.readFileBuffer(target).catch(absent);
   }
 
   const ranged = rangedOps(fs);
@@ -172,7 +191,7 @@ export function withCommandDirs(
         return new TextDecoder().decode(await content(path, err));
       }),
     readFileBuffer: (path) => fs.readFileBuffer(path).catch((err) => content(path, err)),
-    commandTarget: (path) => entryTarget(path),
+    commandTarget: async (path) => (await entryTarget(path))?.path,
     writeFile: (path, content, owner) => fs.writeFile(path, content, owner),
     link: (from, to, follow) => fs.link(from, to, follow),
     links: (path) => mayLink(fs, path),
@@ -229,7 +248,7 @@ export function withCommandDirs(
             ranged.pread(path, offset, length, version).catch(async (err) => {
               const target = missing(err) ? await redirected(path) : undefined;
               if (target === undefined) throw err;
-              return ranged.pread(target, offset, length).catch(() => new Uint8Array(0));
+              return ranged.pread(target, offset, length).catch(absent);
             }),
         }
       : {}),

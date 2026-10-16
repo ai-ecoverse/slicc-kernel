@@ -79,7 +79,9 @@ test('under enforce, a user command entry is read as the user: a target the user
   const ran = await bash('peek; echo rc=$?', 'cone');
   assert.doesNotMatch(ran.stdout, /secret/);
   assert.match(ran.stdout, /rc=12[67]\n$/);
-  assert.deepEqual(await bash(`cat ${bin}`), ok('secret\n'));
+  const rooted = await bash(`cat ${bin}`);
+  assert.equal(rooted.status, 1);
+  assert.match(rooted.stderr, /Permission denied/);
   const mine = '/home/cone/.local/share/pnpm/global/5/g/node_modules/mine';
   await bash(
     `mkdir -p ${mine}/bin && printf 'echo mine\\n' > ${mine}/bin/mine && echo '{"name":"mine","slicc":{"commands":{"mine":{"script":"bin/mine"}}}}' > ${mine}/package.json && chown -R cone:cone /home/cone/.local`
@@ -95,6 +97,9 @@ test('under enforce, a user command entry is read as the user: a target the user
   assert.deepEqual(await bash(`stat -c %s ${own}`), ok('10\n'));
   const py = `python3 -c "import os, sys; print(os.stat(sys.argv[1]).st_size, os.path.getsize(sys.argv[1]))" ${own}`;
   assert.deepEqual(await bash(py, 'cone'), ok('10 10\n'));
+  const swap = `cd ${pkg}/bin && echo open > /tmp/open && ln -sf /tmp/open peek && exec 3< ${bin} && ln -sf /root/secret peek && cat <&3; echo rc=$?`;
+  const swapped = await bash(swap, 'cone');
+  assert.doesNotMatch(swapped.stdout, /secret/);
   await kernel.users.add({ name: 'bob' });
   const bob = await bash(`stat -c %s ${own}; echo rc=$?`, 'bob');
   assert.equal(bob.stdout, 'rc=1\n');

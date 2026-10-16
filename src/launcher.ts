@@ -18,7 +18,7 @@ import type { FacadeSpecs } from './facade/types.ts';
 import { R_OK, X_OK } from './fs/access.ts';
 import { type Attestation, attest, FileWatches, type RemoteFs } from './fs/attest.ts';
 import { FileChanges } from './fs/changes.ts';
-import { followLinks, withCommandDirs } from './fs/commands.ts';
+import { type EntryTarget, followLinks, withCommandDirs } from './fs/commands.ts';
 import { Dac, type DenialHook, type Guard, need, TTY_MODE } from './fs/dac.ts';
 import { SHM } from './fs/dev-removal.ts';
 import { FreshModules } from './fs/fresh-modules.ts';
@@ -254,6 +254,7 @@ interface Compiled {
 interface UserScopes {
   byUid: Map<number, string>;
   byBin: Map<string, string>;
+  owners?: Map<string, Cred>;
 }
 
 interface Planned {
@@ -844,6 +845,7 @@ export class Launcher {
         return {
           byUid: new Map(users.map((account, i) => [account.uid, homes[i] as string])),
           byBin: new Map(homes.map((home) => [`${home}/bin`, home])),
+          owners: new Map(homes.map((home, i) => [home, credOf(users[i] as Account)])),
         };
       },
       () => ({ byUid: new Map(), byBin: new Map() })
@@ -2493,14 +2495,15 @@ export class Launcher {
     return names;
   }
 
-  private async entryTarget(path: string): Promise<string | undefined> {
+  private async entryTarget(path: string): Promise<EntryTarget | undefined> {
     const system = COMMAND.exec(path)?.[1];
     const slash = path.lastIndexOf('/');
-    const scope =
-      system === undefined ? (await this.userScopes()).byBin.get(path.slice(0, slash)) : '';
+    const scopes = await this.userScopes();
+    const scope = system === undefined ? scopes.byBin.get(path.slice(0, slash)) : '';
     const name = system ?? path.slice(slash + 1);
     const command = scope === undefined ? undefined : (await this.commands(scope)).get(name);
-    return command && (command.script ?? command.wasm);
+    const owner = scope ? scopes.owners?.get(scope) : undefined;
+    return command && { path: command.script ?? command.wasm, ...(owner ? { owner } : {}) };
   }
 
   private processChain(fs: KernelFs, nodes: VfsNodes, unlinked: UnlinkedKeeper): KernelFs {
