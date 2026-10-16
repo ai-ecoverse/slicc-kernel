@@ -93,10 +93,5 @@
     "semantic-release": "25.0.9",
     "typescript": "7.0.2",
     "wabt": "1.0.39"
-  },
-  "overrides": {
-    "@ai-ecoverse/py-numpy": {
-      "@ai-ecoverse/wasix-python": "$@ai-ecoverse/wasix-python"
-    }
   }
 }
