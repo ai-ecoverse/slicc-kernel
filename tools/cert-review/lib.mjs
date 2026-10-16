@@ -392,13 +392,64 @@ export function knownAsOf(issue, { fixedBefore, releasedAt, version, fixedIn }) 
 
 const GAPS = new Set(['no-test', 'no-negative', 'prev-not-run', 'no-titles', 'not-run']);
 
+export function unfinishedFiles(expected, rows) {
+  const seen = new Map();
+  for (const r of rows) {
+    const cut = r.status === 'cancelled' || (r.status === 'fail' && r.name === r.file);
+    seen.set(r.file, (seen.get(r.file) ?? false) || cut);
+  }
+  const files = new Set([...expected, ...seen.keys()]);
+  return [...files].filter((f) => f && (!seen.has(f) || seen.get(f))).sort();
+}
+
+export function mergeRetry(rows, retried, files) {
+  const again = new Set(files);
+  return [...rows.filter((r) => !again.has(r.file)), ...retried];
+}
+
 export function releaseEvidence(findings) {
   const f = (findings ?? []).find(
     (x) => x.kind === 'missing-evidence' && x.what === 'the release suite' && x.blocking
   );
   if (!f) return undefined;
-  const got = f.results === undefined ? 'no results' : `${f.results} results, exit ${f.exit}`;
-  return `the release suite didn't finish (${got}): ${f.remedy ?? 're-run the failed jobs'}`;
+  const files = f.files ?? [];
+  const named = files.length
+    ? `${files.length} files without results: ${files.slice(0, 12).join(', ')}${files.length > 12 ? ', \u2026' : ''}`
+    : f.results === undefined
+      ? 'no results'
+      : `${f.results} results, exit ${f.exit}`;
+  return { files, named, remedy: f.remedy ?? 're-run the failed jobs' };
+}
+
+export function verdictLine({
+  name,
+  version,
+  planted,
+  ci,
+  problems,
+  review,
+  incomplete,
+  certified,
+}) {
+  const tag = `${name}@${version}${planted ? ` (planted ${planted})` : ''}`;
+  if (problems.length === 0 && !incomplete && review?.verdict === 'certified') {
+    return { state: 'success', line: certified };
+  }
+  if (incomplete && problems.length === 0) {
+    return {
+      state: 'error',
+      line: `cert-ci: INCOMPLETE ${tag} (${incomplete.named}; ${incomplete.remedy}) (${ci})`,
+    };
+  }
+  const why = [
+    ...(review?.verdict === 'fail' && !incomplete
+      ? [`the reviewer: ${review.reason || 'no reason given'}`]
+      : []),
+    ...(review?.verdict === 'certified' && !incomplete ? ['the reviewer certified it'] : []),
+    ...problems,
+    ...(incomplete ? [`the release suite is incomplete (${incomplete.named})`] : []),
+  ];
+  return { state: 'failure', line: `cert-ci: FAIL ${tag}: ${why.join('; ')} (${ci})` };
 }
 
 export function baseEvidence(findings) {

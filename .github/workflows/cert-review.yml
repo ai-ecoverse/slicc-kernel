@@ -479,7 +479,8 @@ jobs:
             --findings "$findings" --covers "$COVERS" ${PLANTED:+--planted "$PLANTED"}; then
             echo "conclusion=success" >> "$GITHUB_OUTPUT"
           else
-            echo "conclusion=failure" >> "$GITHUB_OUTPUT"
+            state=$(node -p 'require(process.argv[1]).state || "failure"' "$RUNNER_TEMP/record/record.json" 2> /dev/null || echo failure)
+            echo "conclusion=$state" >> "$GITHUB_OUTPUT"
           fi
           commit=$(node -p 'require(process.argv[1]).commit || ""' "$RUNNER_TEMP/record/record.json")
           echo "commit=${commit:-$PLAN_COMMIT}" >> "$GITHUB_OUTPUT"

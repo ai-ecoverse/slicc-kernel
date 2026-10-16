@@ -27,7 +27,9 @@ import {
   rowOf,
   testCommand,
   titlesFromPatch,
+  unfinishedFiles,
   unquote,
+  verdictLine,
   withBaselines,
 } from '../../tools/cert-review/lib.mjs';
 
@@ -829,18 +831,25 @@ test('prev and base: the newest earlier release whose cert-review passed (prev a
   const states = {
     '1.98.4': undefined,
     '1.98.3': 'failure',
+    '1.98.5': 'error',
     '1.98.2': 'success',
     '1.98.1': 'success',
     '1.99.1': 'pending',
   };
-  const tags = ['1.98.1', '1.98.2', '1.98.3', '1.98.4', '1.99.0', '1.99.1', '1.99.2'];
+  const tags = ['1.98.1', '1.98.2', '1.98.3', '1.98.4', '1.98.5', '1.99.0', '1.99.1', '1.99.2'];
   const stateOf = async (t) => states[t];
   assert.equal(await pickRelease(tags, '1.99.0', stateOf), '1.98.2');
   assert.equal(await pickRelease(tags, '1.99.0', stateOf, { pending: true }), '1.98.2');
   assert.equal(await pickRelease(tags, '1.99.2', stateOf, { pending: true }), '1.99.1');
   assert.equal(await pickRelease(tags, '1.99.2', stateOf), '1.98.2');
   assert.equal(await pickRelease(tags, '1.98.1', stateOf), undefined);
-  assert.deepEqual(covering(tags, '1.98.2', '1.99.1'), ['1.98.3', '1.98.4', '1.99.0', '1.99.1']);
+  assert.deepEqual(covering(tags, '1.98.2', '1.99.1'), [
+    '1.98.3',
+    '1.98.4',
+    '1.98.5',
+    '1.99.0',
+    '1.99.1',
+  ]);
   assert.deepEqual(covering(tags, '1.99.0', '1.99.1'), ['1.99.1']);
 });
 
@@ -1001,6 +1010,7 @@ test('a release suite cut off partway is missing evidence that always blocks, an
       what: 'the release suite',
       exit: 'no summary',
       results: 3,
+      files: [other],
       blocking: true,
       remedy: 're-run the failed jobs',
     },
@@ -1011,13 +1021,27 @@ test('a release suite cut off partway is missing evidence that always blocks, an
     [`${other} :: w2`]
   );
   assert.equal(out.suites.same, 1);
+  assert.deepEqual(releaseEvidence(out.findings), {
+    files: [other],
+    named: `1 files without results: ${other}`,
+    remedy: 're-run the failed jobs',
+  });
   assert.equal(
-    releaseEvidence(out.findings),
-    "the release suite didn't finish (3 results, exit no summary): re-run the failed jobs"
+    releaseEvidence([{ kind: 'missing-evidence', what: 'the release suite', blocking: true }])
+      .named,
+    'no results'
   );
   assert.equal(
-    releaseEvidence([{ kind: 'missing-evidence', what: 'the release suite', blocking: true }]),
-    "the release suite didn't finish (no results): re-run the failed jobs"
+    releaseEvidence([
+      {
+        kind: 'missing-evidence',
+        what: 'the release suite',
+        blocking: true,
+        results: 1,
+        exit: 'signal SIGTERM',
+      },
+    ]).named,
+    '1 results, exit signal SIGTERM'
   );
   assert.equal(releaseEvidence([]), undefined);
 });
@@ -1067,4 +1091,143 @@ test("a test title built from a template literal matches the rows it ran as, so 
     prev: 'missing',
   });
   assert.deepEqual(titlesFromPatch('+test(`${a}${b}`, () => {});'), []);
+});
+
+test('an incomplete release suite is INCOMPLETE with an error status, never certified and not FAIL, unless code found a real defect', () => {
+  const base = {
+    name: '@ai-ecoverse/slicc-kernel',
+    version: '1.2.3',
+    ci: 'ci: run',
+    certified: 'certified x',
+  };
+  const incomplete = {
+    files: ['test/integration/a.test.mjs'],
+    named: '1 files without results: test/integration/a.test.mjs',
+    remedy: 're-run the failed jobs',
+  };
+  assert.deepEqual(verdictLine({ ...base, problems: [], review: { verdict: 'certified' } }), {
+    state: 'success',
+    line: 'certified x',
+  });
+  for (const verdict of ['certified', 'fail']) {
+    assert.deepEqual(
+      verdictLine({
+        ...base,
+        problems: [],
+        review: { verdict, reason: 'missing tests' },
+        incomplete,
+      }),
+      {
+        state: 'error',
+        line: 'cert-ci: INCOMPLETE @ai-ecoverse/slicc-kernel@1.2.3 (1 files without results: test/integration/a.test.mjs; re-run the failed jobs) (ci: run)',
+      }
+    );
+  }
+  const failed = verdictLine({
+    ...base,
+    problems: ['kernel-compat: x crashes again'],
+    review: { verdict: 'certified' },
+    incomplete,
+  });
+  assert.equal(failed.state, 'failure');
+  assert.match(
+    failed.line,
+    /^cert-ci: FAIL .*kernel-compat: x crashes again; the release suite is incomplete/
+  );
+  assert.deepEqual(
+    unfinishedFiles(
+      ['a', 'b', 'c'],
+      [res('a', 'x', 'pass'), res('b', 'b', 'fail'), res('d', 'y', 'cancelled')]
+    ),
+    ['b', 'c', 'd']
+  );
+});
+
+test('the suite runner re-runs once the files that left no result and merges them, for the release and for a NEGATIVE run (#748)', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'cert-retry-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const tree = join(dir, 'tree');
+  await mkdir(join(tree, 'test/integration'), { recursive: true });
+  await mkdir(join(dir, 'package/dist'), { recursive: true });
+  await writeFile(join(dir, 'package/dist/node.js'), 'export {};\n');
+  execFileSync('tar', ['-czf', join(dir, 'k.tgz'), '-C', dir, 'package']);
+  await writeFile(
+    join(tree, 'package.json'),
+    JSON.stringify({ scripts: { test: "node --test 'test/integration/*.test.mjs'" } })
+  );
+  const flaky = (marker) =>
+    `import { existsSync, writeFileSync } from 'node:fs';\nimport { test } from 'node:test';\ntest('before', () => {});\ntest('the runner is lost', () => { if (!existsSync(${JSON.stringify(marker)})) { writeFileSync(${JSON.stringify(marker)}, ''); process.kill(process.pid, 'SIGKILL'); } });\ntest('after', () => {});\n`;
+  await writeFile(join(tree, 'test/integration/a.test.mjs'), flaky(join(dir, 'a.marker')));
+  await writeFile(
+    join(tree, 'test/integration/b.test.mjs'),
+    "import { test } from 'node:test';\ntest('steady', () => {});\n"
+  );
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  const suite = (out, files = []) =>
+    execFileSync(
+      process.execPath,
+      [
+        fileURLToPath(new URL('suite.mjs', tools)),
+        '--tree',
+        tree,
+        '--tgz',
+        join(dir, 'k.tgz'),
+        '--out',
+        out,
+        ...(files.length ? ['--files', files.join(',')] : []),
+      ],
+      { env, stdio: 'ignore' }
+    );
+  suite(join(dir, 'out/release'));
+  const release = JSON.parse(await readFile(join(dir, 'out/release.json'), 'utf8'));
+  assert.deepEqual(
+    [release.exit, release.firstExit, release.retried, release.unfinished],
+    [0, 1, ['test/integration/a.test.mjs'], []]
+  );
+  assert.deepEqual(
+    release.results.map((r) => `${r.file.split('/').pop()} ${r.name} ${r.status}`).sort(),
+    [
+      'a.test.mjs after pass',
+      'a.test.mjs before pass',
+      'a.test.mjs the runner is lost pass',
+      'b.test.mjs steady pass',
+    ]
+  );
+  assert.match(
+    await readFile(join(dir, 'out/release.log'), 'utf8'),
+    /retrying 1 files without results/
+  );
+  await writeFile(
+    join(dir, 'delta.json'),
+    JSON.stringify({ prev: '1.2.2', version: '1.2.3', rows: [], files: [] })
+  );
+  await writeFile(join(dir, 'base.json'), JSON.stringify({ exit: 0, results: release.results }));
+  execFileSync(process.execPath, [
+    fileURLToPath(new URL('findings.mjs', tools)),
+    '--delta',
+    join(dir, 'delta.json'),
+    '--prev',
+    join(dir, 'out/none.json'),
+    '--release',
+    join(dir, 'out/release.json'),
+    '--base',
+    join(dir, 'base.json'),
+    '--out',
+    join(dir, 'findings.json'),
+  ]);
+  const found = JSON.parse(await readFile(join(dir, 'findings.json'), 'utf8')).findings;
+  assert.deepEqual(
+    found.filter((f) => f.what === 'the release suite'),
+    []
+  );
+  assert.equal(releaseEvidence(found), undefined);
+  await rm(join(dir, 'a.marker'));
+  suite(join(dir, 'out/prev'), ['test/integration/a.test.mjs']);
+  const negative = JSON.parse(await readFile(join(dir, 'out/prev.json'), 'utf8'));
+  assert.deepEqual(
+    [negative.exit, negative.retried, negative.unfinished],
+    [0, ['test/integration/a.test.mjs'], []]
+  );
+  assert.deepEqual(unfinishedFiles(negative.expected, negative.results), []);
 });

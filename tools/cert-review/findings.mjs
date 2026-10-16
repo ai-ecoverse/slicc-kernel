@@ -9,6 +9,7 @@ import {
   FINDINGS,
   parseResults,
   resultsMap,
+  unfinishedFiles,
 } from './lib.mjs';
 
 const { values } = parseArgs({
@@ -81,8 +82,13 @@ function completed(exit, results, files, full) {
   return exit === 0 || failed;
 }
 
+const releaseUnfinished =
+  release === undefined
+    ? []
+    : (release.unfinished ?? unfinishedFiles(release.expected ?? [], release.results ?? []));
 const releaseComplete =
   release !== undefined &&
+  releaseUnfinished.length === 0 &&
   completed(release.exit, release.results ?? [], release.files ?? [], true);
 
 function releaseFinding() {
@@ -94,6 +100,7 @@ function releaseFinding() {
       ...(release === undefined
         ? {}
         : { exit: release.exit, results: (release.results ?? []).length }),
+      ...(releaseUnfinished.length ? { files: releaseUnfinished } : {}),
       blocking: true,
       remedy: 're-run the failed jobs',
     },
