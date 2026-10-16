@@ -444,3 +444,18 @@ test("the workflow: same-repo PRs with merge-ok review the merge ref with main's
     );
   assert.doesNotMatch(workflow, /always\(\)/);
 });
+
+test('a pull request review runs kernel-compat on ten shards, and kernel-compat hands the count to homescoop', async () => {
+  assert.match(jobs.compat, /--shards 10 --dispatch --rerun --wait 150/);
+  const compat = await readFile(
+    new URL('../../.github/workflows/kernel-compat.yml', import.meta.url),
+    'utf8'
+  );
+  assert.match(
+    compat,
+    /\n {6}shards:\n {8}description: [^\n]+\n {8}type: string\n {8}default: 'auto'\n/
+  );
+  assert.match(compat, /\n {6}shards: \$\{\{ inputs\.shards \|\| 'auto' \}\}\n/);
+  const tool = await readFile(new URL('compat.mjs', tools), 'utf8');
+  assert.match(tool, /\.\.\.\(values\.shards \? \{ shards: values\.shards \} : \{\}\)/);
+});

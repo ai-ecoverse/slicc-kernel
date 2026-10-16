@@ -33,6 +33,10 @@ on:
         description: "The pack job's sha256 of the tarball"
         type: string
         default: ''
+      shards:
+        description: 'Shard jobs: auto (homescoop measures about 15 min each) or 1-10'
+        type: string
+        default: 'auto'
 
 run-name: ${{ github.event_name == 'workflow_dispatch' && format('Kernel compat v{0}{1}{2}{3}', inputs.version, inputs.sha256 != '' && format(' {0}', inputs.sha256) || '', inputs.set != 'base,catalog,all' && format(' ({0})', inputs.set) || '', inputs.reference != '' && format(' ref {0}', inputs.reference) || '') || github.event_name == 'pull_request' && github.event.pull_request.title || 'Kernel compat' }}
 
@@ -225,6 +229,7 @@ jobs:
       kernel: ${{ needs.candidate.outputs.kernel }}
       set: ${{ inputs.set || 'base,catalog,all' }}
       reference: ${{ inputs.reference || '' }}
+      shards: ${{ inputs.shards || 'auto' }}
       runner: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (contains(fromJSON('["schedule","workflow_dispatch","workflow_run","release"]'), github.event_name) && github.ref == 'refs/heads/main')) && vars.CERT_RUNNER || 'ubuntu-latest' }}
 
   attach:

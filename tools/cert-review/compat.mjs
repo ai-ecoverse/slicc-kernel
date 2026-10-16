@@ -20,6 +20,7 @@ const { values } = parseArgs({
     run: { type: 'string', default: '' },
     artifact: { type: 'string', default: '' },
     sha256: { type: 'string', default: '' },
+    shards: { type: 'string', default: '' },
   },
 });
 const { repo, version, commit, reference } = values;
@@ -27,7 +28,10 @@ const API = process.env.GITHUB_API_URL ?? 'https://api.github.com';
 const WORKFLOW = 'kernel-compat.yml';
 const { sha256 } = values;
 const TITLE = `Kernel compat v${version}${sha256 ? ` ${sha256}` : ''}${reference ? ` ref ${reference}` : ''}`;
-const CANDIDATE = sha256 ? { run: values.run, artifact: values.artifact, sha256 } : {};
+const CANDIDATE = {
+  ...(sha256 ? { run: values.run, artifact: values.artifact, sha256 } : {}),
+  ...(values.shards ? { shards: values.shards } : {}),
+};
 const headers = {
   authorization: `Bearer ${process.env.GH_TOKEN}`,
   accept: 'application/vnd.github+json',
