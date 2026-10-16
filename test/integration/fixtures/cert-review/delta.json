@@ -1,0 +1,42 @@
+{
+  "commits": [
+    { "commit": { "message": "Merge pull request #12 from ai-ecoverse/fix/a\n\nfix: a" } },
+    { "commit": { "message": "fix: a" } },
+    { "commit": { "message": "Merge pull request #7 from ai-ecoverse/feat/b" } },
+    { "commit": { "message": "Merge pull request #12 from ai-ecoverse/fix/a" } },
+    { "commit": { "message": "chore(release): 1.2.3" } }
+  ],
+  "prs": [
+    {
+      "pr": { "number": 12, "title": "fix(node): an abort wins at once (#376)" },
+      "files": [
+        { "filename": "src/node.ts", "status": "modified", "patch": "@@ -1 +1 @@\n-a\n+b" },
+        {
+          "filename": "test/integration/node.test.mjs",
+          "status": "modified",
+          "patch": "@@ -10,6 +10,9 @@ test('an existing test whose body changed, with a title too long for the hunk header that git cuts sho\n   const k = 1;\n+  assert.ok(k);\n@@ -40,0 +44,6 @@ async function helper() {\n+test('a new test', async () => {\n+  await t.test(\"a new subtest with \\\"quotes\\\"\", () => {});\n+});\n+test(`a template ${title}`, () => {});\n+test(`${only} variable`, () => {});\n+// test('commented out')"
+        },
+        { "filename": "test/integration/gone.test.mjs", "status": "removed", "patch": "" },
+        {
+          "filename": "test/unit/x.test.mjs",
+          "status": "added",
+          "patch": "+test('a unit test', () => {});"
+        }
+      ]
+    },
+    {
+      "pr": { "number": 7, "title": "feat!: datagram sockets" },
+      "files": [
+        {
+          "filename": "test/integration/udp.test.mjs",
+          "status": "added",
+          "patch": "+test('udp echo', async () => {});"
+        }
+      ]
+    },
+    {
+      "pr": { "number": 9, "title": "ci: pin a workflow" },
+      "files": [{ "filename": ".github/workflows/ci.yml", "status": "modified", "patch": "+x" }]
+    }
+  ]
+}
