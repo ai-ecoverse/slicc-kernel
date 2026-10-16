@@ -130,7 +130,8 @@ export async function runJsProcess(
   });
   try {
     (deps.lockdown ?? lockdown)();
-    main = mainOf(await (deps.load ?? importSource)(init.program.glue));
+    const { url, glue } = init.program;
+    main = mainOf(await (url ? import(url) : (deps.load ?? importSource)(glue)));
   } catch (err) {
     await say(message(err));
     return NOT_RUNNABLE;

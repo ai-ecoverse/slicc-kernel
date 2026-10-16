@@ -30,6 +30,7 @@ export interface JsProgram {
   abi: 'js';
   glue: string;
   path: string;
+  url?: string;
 }
 
 export type Program = WasmProgram | JsProgram;
