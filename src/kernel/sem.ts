@@ -7,6 +7,7 @@ export const SEM_VALUE_MAX = 0x7fff_ffff;
 export const SEM_NAMES_MAX = 4096;
 export const SEM_HANDLES_MAX = 256;
 const NAME_MAX = 251;
+const TIMER_MAX_MS = 0x7fff_ffff;
 
 export type SemWaitHow = 'block' | 'try' | 'timed';
 
@@ -90,7 +91,7 @@ export class Semaphore {
       const expire = (): void => {
         const left = deadline - performance.now();
         if (left > 0) {
-          timer = setTimeout(expire, left);
+          timer = setTimeout(expire, Math.min(left, TIMER_MAX_MS));
           return;
         }
         leave();
@@ -98,7 +99,9 @@ export class Semaphore {
       };
       this.waiters.push(waiter);
       signal.addEventListener('abort', abort, { once: true });
-      if (deadline !== Number.POSITIVE_INFINITY) timer = setTimeout(expire, timeoutMs);
+      if (deadline !== Number.POSITIVE_INFINITY) {
+        timer = setTimeout(expire, Math.min(timeoutMs, TIMER_MAX_MS));
+      }
     });
   }
 }

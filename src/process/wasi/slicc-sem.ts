@@ -7,12 +7,10 @@ const SEM_CREAT = 1;
 const SEM_EXCL = 2;
 const HOW: readonly SemWaitHow[] = ['block', 'try', 'timed'];
 const NS_PER_MS = 1_000_000n;
-const MAX_TIMEOUT_MS = 0x7fff_ffff;
 
 export function remainingMs(deadline: bigint, now: bigint): number {
   if (deadline <= now) return 0;
-  const ms = (deadline - now + NS_PER_MS - 1n) / NS_PER_MS;
-  return ms > BigInt(MAX_TIMEOUT_MS) ? MAX_TIMEOUT_MS : Number(ms);
+  return Number((deadline - now + NS_PER_MS - 1n) / NS_PER_MS);
 }
 
 export function semImports(host: WasiHost): Record<string, WasiFunction> {
