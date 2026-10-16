@@ -36,6 +36,8 @@ export class SignalGate {
 
   private raised = 0;
 
+  private entering = 0;
+
   private readonly raw: SyncSabTransport;
 
   private readonly header: Int32Array;
@@ -118,8 +120,13 @@ export class SignalGate {
       Atomics.load(header, SAB_I_TIMERS) |
       Atomics.load(header, SAB_I_KILLED);
     if (pending === 0) return false;
-    this.raised = this.quieted > 0 ? -1 : 0;
-    this.deliver();
+    if (this.entering === 0) this.raised = this.quieted > 0 ? -1 : 0;
+    this.entering++;
+    try {
+      this.deliver();
+    } finally {
+      this.entering--;
+    }
     return true;
   }
 
