@@ -154,7 +154,7 @@ export function withCommandDirs(
 
   async function redirected(path: string): Promise<string | undefined> {
     const target = (await entryTarget(path)) ?? (await entryTarget(await followLinks(fs, path)));
-    if (target?.owner && !(await readsAs(fs, target.owner, target.path))) {
+    if (owners && target?.owner && !(await readsAs(fs, target.owner, target.path))) {
       throw fsError('EACCES', path);
     }
     return target?.path;
