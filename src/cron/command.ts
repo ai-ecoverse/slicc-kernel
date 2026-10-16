@@ -78,9 +78,11 @@ export const CRONTAB_SOURCE = `export default async function crontab(ctx) {
     const current = await call({ action: "list" });
     const before = current.error === undefined ? current.text : "";
     if (current.error !== undefined && !current.error.startsWith("no crontab for ")) return failed(current);
-    const tmp = "/tmp/crontab." + ctx.pid + "." + Date.now();
+    const tmp = "/tmp/crontab." + ctx.pid + "." + crypto.randomUUID();
     try {
-      await ctx.fs.writeFile(tmp, before, { mode: 0o600 });
+      const file = await ctx.open(tmp, { write: true, create: true, exclusive: true, mode: 0o600 });
+      await file.write(0, new TextEncoder().encode(before));
+      await file.close();
     } catch (err) {
       await say(2, "crontab: " + tmp + ": " + (err && err.code ? err.code : String(err)) + "\\n");
       return 1;

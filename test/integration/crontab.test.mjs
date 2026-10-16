@@ -193,7 +193,7 @@ test('crontab -e edits a copy with $VISUAL or $EDITOR and installs it', async (t
   assert.equal(bad.status, 1);
   assert.match(
     bad.stderr,
-    /^crontab: errors in crontab file, cannot install\n"-":3: minute: 61 is outside 0-59\ncrontab: your edit is kept in \/tmp\/crontab\.\d+\.\d+\n$/
+    /^crontab: errors in crontab file, cannot install\n"-":3: minute: 61 is outside 0-59\ncrontab: your edit is kept in \/tmp\/crontab\.\d+\.[0-9a-f-]{36}\n$/
   );
   assert.equal((await as('cone', 'crontab -l')).stdout, '@daily echo one\n@hourly echo two\n');
   assert.deepEqual(result(await as('cone', 'crontab -e', { env: { EDITOR: '' } })), {
