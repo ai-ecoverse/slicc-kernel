@@ -1002,9 +1002,9 @@ A WASIX C program for `test/integration/sigpipe.test.mjs` (#810). `pipetest MODE
 
 ### `reaptest`
 
-A WASIX C program for `test/integration/sigchld-reap.test.mjs` (#820). `reaptest MODE` forks a child that exits with 3 at once and checks after 300 ms whether `waitpid(WNOHANG)` still finds it, then forks two that exit after 100 and 250 ms and reports what `wait` returns and when. `MODE` is `ign` (`SIGCHLD` `SIG_IGN`), `nocldwait` (`SIG_DFL` with `SA_NOCLDWAIT`), `reset` (`SIG_IGN`, then `SIG_DFL`), `dfl`, or `inherited`, which first prints what `slicc.sigaction_inherited` reports for `SIGPIPE`, `SIGCHLD` and `SIGTERM`.
+A WASIX C program for `test/integration/sigchld-reap.test.mjs` (#820). `reaptest MODE` forks a child that exits with 3 at once and polls `waitpid(WNOHANG)` until the child is no longer running, then reports whether it was waitable or already reaped, then forks two that exit after 100 and 250 ms and reports what `wait` returns and when. `MODE` is `ign` (`SIGCHLD` `SIG_IGN`), `nocldwait` (`SIG_DFL` with `SA_NOCLDWAIT`), `reset` (`SIG_IGN`, then `SIG_DFL`), `dfl`, or `inherited`, which first prints what `slicc.sigaction_inherited` reports for `SIGPIPE`, `SIGCHLD` and `SIGTERM`.
 
-**Build:** `WASIX_SYSROOT_29=/path/to/wasix-sysroot ./build.sh`, with `wasixcc` 0.4.7 (legacy exceptions) and binaryen's `wasm-opt` (`--asyncify` for `proc_fork`) on `PATH`. `bin/reaptest.wasm` is 46837 bytes, sha256 `8e2718273edef94cb3882ee63ce6a9e53f03ba83ef2b2dd9759422d47fae89c7`.
+**Build:** `WASIX_SYSROOT_29=/path/to/wasix-sysroot ./build.sh`, with `wasixcc` 0.4.7 (legacy exceptions) and binaryen's `wasm-opt` (`--asyncify` for `proc_fork`) on `PATH`. `bin/reaptest.wasm` is 46,919 bytes, sha256 `b351d53b1a3b317a37642baceb731aef62a1bee387aa8972cba5d9949e1a9a3f`.
 
 ### `epolltest`
 

@@ -32,9 +32,12 @@ static pid_t child(long ms, int code) {
 
 static void reaping(const char *mode) {
   pid_t pid = child(0, 3);
-  nap(300);
   int st = 0;
-  pid_t got = waitpid(pid, &st, WNOHANG);
+  pid_t got = 0;
+  for (int i = 0; i < 3000 && got == 0; i++) {
+    got = waitpid(pid, &st, WNOHANG);
+    if (got == 0) nap(10);
+  }
   if (got == pid)
     printf("%s: exited child waitable, status %d\n", mode, WEXITSTATUS(st));
   else
