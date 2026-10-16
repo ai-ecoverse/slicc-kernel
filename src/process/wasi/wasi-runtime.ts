@@ -741,6 +741,7 @@ export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike
       procTree(call, id.pid)
     ),
     ...descriptors(init, fork, threads),
+    ...(threads ? { credGen: threads.ids } : {}),
   });
   host.sigmask = sigmaskOf(module, init.sab, gate, threads);
   if (threads) {
