@@ -6,9 +6,11 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
+  compatRegressions,
   decide,
   deltaFiles,
   diffSuites,
+  knownAsOf,
   knownLine,
   mergedPrs,
   parseResults,
@@ -17,6 +19,7 @@ import {
   rowOf,
   testCommand,
   titlesFromPatch,
+  unquote,
 } from '../../tools/cert-review/lib.mjs';
 
 const fixtures = new URL('fixtures/cert-review/', import.meta.url);
@@ -260,19 +263,22 @@ test('findings.mjs turns the runs into decisions, suite regressions and missing 
   const write = (name, value) => writeFile(join(dir, name), JSON.stringify(value));
   await write('delta.json', { prev: '1.2.2', version: '1.2.3', rows, files: deltaFiles(rows) });
   await write('prev.json', {
+    exit: 1,
+    files: [file],
     results: [
       res(file, 'a new test', 'fail'),
       res('test/integration/udp.test.mjs', 'udp echo', 'fail'),
     ],
   });
   await write('release.json', {
+    exit: 1,
     results: [
       res(file, 'a new test', 'pass'),
       res(file, 'old', 'fail'),
       res('test/integration/udp.test.mjs', 'udp echo', 'pass'),
     ],
   });
-  await write('base.json', { results: [res(file, 'old', 'pass')] });
+  await write('base.json', { exit: 0, results: [res(file, 'old', 'pass')] });
   const run = (base, extra = []) =>
     execFileSync(process.execPath, [
       fileURLToPath(new URL('findings.mjs', tools)),
@@ -314,25 +320,218 @@ test('findings.mjs turns the runs into decisions, suite regressions and missing 
   assert.deepEqual(await compat({ found: false }), [
     { kind: 'missing-evidence', what: 'kernel-compat' },
   ]);
+  const reg = (over) => ({
+    recipe: 'perl',
+    version: '1',
+    spec: 'a.mjs',
+    rerun: 'pass',
+    reproduced: false,
+    error: 'e',
+    ...over,
+  });
+  assert.deepEqual(await compat({ found: true, conclusion: 'success', regressions: [] }), []);
   assert.deepEqual(
     await compat({
       found: true,
-      run: 'r',
-      conclusion: 'success',
-      report: { verdict: 'pass', regressions: '0' },
-    }),
-    []
-  );
-  assert.deepEqual(
-    await compat({
-      found: true,
-      run: 'r',
       conclusion: 'failure',
-      report: { verdict: 'regression', regressions: '2', asset: 'a' },
+      regressions: [
+        reg({}),
+        reg({ spec: 'b.mjs', rerun: 'regression', reproduced: true }),
+        reg({
+          spec: 'c.mjs',
+          rerun: 'regression',
+          reproduced: true,
+          crashAgain: true,
+          referenceCrash: false,
+        }),
+        reg({
+          spec: 'd.mjs',
+          rerun: 'regression',
+          reproduced: true,
+          crashAgain: true,
+          referenceCrash: true,
+        }),
+      ],
     }),
-    [{ kind: 'compat-regression', run: 'r', verdict: 'regression', regressions: '2', report: 'a' }]
+    [
+      { kind: 'compat-flake', package: 'perl@1', spec: 'a.mjs', rerun: 'pass', error: 'e' },
+      {
+        kind: 'compat-regression',
+        package: 'perl@1',
+        spec: 'b.mjs',
+        rerun: 'regression',
+        error: 'e',
+      },
+      { kind: 'compat-crash', package: 'perl@1', spec: 'c.mjs', rerun: 'regression', error: 'e' },
+      {
+        kind: 'compat-regression',
+        package: 'perl@1',
+        spec: 'd.mjs',
+        rerun: 'regression',
+        error: 'e',
+      },
+    ]
   );
-  assert.deepEqual(await compat({ found: true, run: 'r', conclusion: 'failure' }), [
-    { kind: 'compat-regression', run: 'r', verdict: 'failure', regressions: 'unknown', report: '' },
+  assert.deepEqual(await compat({ found: true, conclusion: 'failure', regressions: [] }), [
+    {
+      kind: 'compat-regression',
+      package: 'unknown',
+      spec: '',
+      rerun: 'none',
+      error: 'kernel-compat failure',
+    },
+  ]);
+  assert.deepEqual(await compat({ found: false, planted: true }), []);
+  await write('release.json', {
+    exit: 'signal SIGTERM',
+    results: [res(file, 'a new test', 'pass')],
+  });
+  run('base.json');
+  const cut = JSON.parse(await readFile(join(dir, 'findings.json'), 'utf8')).findings;
+  assert.deepEqual(
+    cut.filter((f) => f.kind === 'suite-incomplete'),
+    [{ kind: 'suite-incomplete', what: 'the release suite', exit: 'signal SIGTERM', results: 1 }]
+  );
+});
+
+test('kernel-compat regressions are re-run in code: one that passes again is a flake, a crash that comes back is kept unless the reference crashes too', () => {
+  const row = (spec, verdict, error, refLog) => ({
+    package: '@ai-ecoverse/wasix-python',
+    recipe: 'wasix-python',
+    version: '3',
+    spec,
+    users: 'off',
+    verdict,
+    error,
+    reference: { status: 'fail', log: refLog },
+  });
+  const report = {
+    results: [
+      row('ok.mjs', 'pass', ''),
+      row('mode.mjs', 'regression', "'644' !== '755'"),
+      row('sig.mjs', 'regression', 'page renderer crashed (crashed, code 11)'),
+      row('ref.mjs', 'regression', 'page renderer crashed'),
+      row('gone.mjs', 'regression', 'x'),
+    ],
+  };
+  const rerun = {
+    results: [
+      row('mode.mjs', 'regression', "'644' !== '755'"),
+      row('sig.mjs', 'regression', 'Runtime.evaluate: page renderer crashed', 'logs/sig.ref.log'),
+      row('ref.mjs', 'regression', 'Segmentation fault', 'logs/ref.ref.log'),
+    ],
+  };
+  const logs = { 'logs/ref.ref.log': 'Error: page renderer crashed (code 11)' };
+  const got = compatRegressions(report, rerun, (r) => logs[r.reference.log] ?? '').map(
+    ({ spec, crash, rerun: again, reproduced, crashAgain, referenceCrash }) => ({
+      spec,
+      crash,
+      again,
+      reproduced,
+      crashAgain,
+      referenceCrash,
+    })
+  );
+  assert.deepEqual(got, [
+    {
+      spec: 'mode.mjs',
+      crash: false,
+      again: 'regression',
+      reproduced: true,
+      crashAgain: false,
+      referenceCrash: false,
+    },
+    {
+      spec: 'sig.mjs',
+      crash: true,
+      again: 'regression',
+      reproduced: true,
+      crashAgain: true,
+      referenceCrash: false,
+    },
+    {
+      spec: 'ref.mjs',
+      crash: true,
+      again: 'regression',
+      reproduced: true,
+      crashAgain: true,
+      referenceCrash: true,
+    },
+    {
+      spec: 'gone.mjs',
+      crash: false,
+      again: 'missing',
+      reproduced: true,
+      crashAgain: undefined,
+      referenceCrash: undefined,
+    },
+  ]);
+  assert.deepEqual(
+    compatRegressions(report, { results: [row('mode.mjs', 'pass', '')] }).map((r) => [
+      r.spec,
+      r.reproduced,
+    ]),
+    [
+      ['mode.mjs', false],
+      ['sig.mjs', true],
+      ['ref.mjs', true],
+      ['gone.mjs', true],
+    ]
+  );
+  assert.deepEqual(
+    compatRegressions(report).map((r) => r.rerun),
+    ['none', 'none', 'none', 'none']
+  );
+});
+
+test('a known issue applies to a release unless its fix came before it: fixedIn, then the closing pull request, then the closing time', () => {
+  const before = new Set(['old']);
+  const opts = (over = {}) => ({
+    fixedBefore: (oid) => before.has(oid),
+    releasedAt: '2026-10-10T00:00:00Z',
+    version: '1.95.3',
+    ...over,
+  });
+  const closed = (over) => ({ state: 'CLOSED', stateReason: 'COMPLETED', closedBy: [], ...over });
+  assert.equal(knownAsOf({ state: 'OPEN' }, opts()), true);
+  assert.equal(
+    knownAsOf(closed({ closedBy: [{ merged: true, mergeCommit: 'old' }] }), opts()),
+    false
+  );
+  assert.equal(
+    knownAsOf(closed({ closedBy: [{ merged: true, mergeCommit: 'new' }] }), opts()),
+    true
+  );
+  assert.equal(
+    knownAsOf(
+      closed({
+        closedBy: [{ merged: false, mergeCommit: null }],
+        closedAt: '2026-10-11T00:00:00Z',
+      }),
+      opts()
+    ),
+    true
+  );
+  assert.equal(knownAsOf(closed({ closedAt: '2026-10-09T00:00:00Z' }), opts()), false);
+  assert.equal(knownAsOf(closed({ closedAt: '2026-10-11T00:00:00Z' }), opts()), true);
+  assert.equal(knownAsOf(closed({ stateReason: 'NOT_PLANNED' }), opts()), false);
+  assert.equal(knownAsOf(closed({ stateReason: 'DUPLICATE' }), opts()), false);
+  assert.equal(
+    knownAsOf(
+      closed({ closedBy: [{ merged: true, mergeCommit: 'old' }] }),
+      opts({ fixedIn: '1.97.1' })
+    ),
+    true
+  );
+  assert.equal(knownAsOf({ state: 'OPEN' }, opts({ fixedIn: '1.95.3' })), false);
+});
+
+test('test titles are read as JavaScript reads them, escapes included', () => {
+  assert.equal(
+    unquote(String.raw`exec\u2019d by \x41 path\n\'q\' \u{1F600}`),
+    "exec\u2019d by A path\n'q' \u{1F600}"
+  );
+  assert.deepEqual(titlesFromPatch("+test('the kernel exec\\u2019d it', () => {});"), [
+    'the kernel exec\u2019d it',
   ]);
 });

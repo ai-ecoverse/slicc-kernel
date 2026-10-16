@@ -25,8 +25,17 @@ export function kindOf(title) {
   return m ? m[1].toLowerCase() : 'other';
 }
 
-function unquote(text, quote) {
-  return quote === '`' ? text : text.replace(/\\(.)/g, '$1');
+const ESCAPES = { n: '\n', t: '\t', r: '\r', b: '\b', f: '\f', v: '\v', 0: '\0' };
+
+export function unquote(text) {
+  return text.replace(
+    /\\(u\{([0-9a-fA-F]+)\}|u([0-9a-fA-F]{4})|x([0-9a-fA-F]{2})|.)/g,
+    (_, all, braced, four, two) => {
+      const hex = braced ?? four ?? two;
+      if (hex !== undefined) return String.fromCodePoint(Number.parseInt(hex, 16));
+      return ESCAPES[all] ?? all;
+    }
+  );
 }
 
 export function titlesFromPatch(patch) {
@@ -37,7 +46,7 @@ export function titlesFromPatch(patch) {
     if (text === undefined) continue;
     const m = TITLE.exec(text);
     if (!m) continue;
-    const title = unquote(m[2], m[1]);
+    const title = unquote(m[2]);
     const cut = m[1] === '`' ? title.indexOf('${') : -1;
     if (cut === 0) continue;
     if (cut > 0) titles.add(`${title.slice(0, cut)}${PREFIX}`);
@@ -223,4 +232,75 @@ export function knownLine(repo, entries) {
     if (full && !out.includes(full)) out.push(full);
   }
   return out;
+}
+
+const CRASH =
+  /renderer crashed|page crashed|Segmentation fault|SIGSEGV|SIGABRT|core dumped|exit code 139/i;
+
+export function crashed(text) {
+  return CRASH.test(text ?? '');
+}
+
+export function compatRegressions(report, rerun, referenceText = () => '') {
+  const regressions = (report?.results ?? []).filter((r) => r.verdict === 'regression');
+  return regressions.map((r) => {
+    const again = rerun?.results?.find(
+      (x) => x.recipe === r.recipe && x.spec === r.spec && x.users === r.users
+    );
+    const row = {
+      package: r.package,
+      recipe: r.recipe,
+      version: r.version,
+      spec: r.spec,
+      users: r.users,
+      error: String(r.error ?? '').slice(0, 600),
+      crash: crashed(r.error),
+    };
+    if (!rerun) return { ...row, rerun: 'none', reproduced: true };
+    if (!again) return { ...row, rerun: 'missing', reproduced: true };
+    const reproduced = again.verdict === 'regression';
+    const referenceCrash = crashed(again.reference?.error) || crashed(referenceText(again));
+    return {
+      ...row,
+      rerun: again.verdict,
+      reproduced,
+      crashAgain: reproduced && crashed(again.error),
+      referenceCrash,
+    };
+  });
+}
+
+export function compatFindingsOf(compat) {
+  if (!compat?.found) return [{ kind: 'missing-evidence', what: 'kernel-compat' }];
+  const rows = compat.regressions ?? [];
+  const out = rows.map((r) => ({
+    kind: r.reproduced
+      ? r.crashAgain && !r.referenceCrash
+        ? 'compat-crash'
+        : 'compat-regression'
+      : 'compat-flake',
+    package: `${r.recipe}@${r.version}`,
+    spec: r.spec,
+    rerun: r.rerun,
+    error: r.error,
+  }));
+  if (rows.length === 0 && compat.conclusion !== 'success') {
+    out.push({
+      kind: 'compat-regression',
+      package: 'unknown',
+      spec: '',
+      rerun: 'none',
+      error: `kernel-compat ${compat.conclusion}`,
+    });
+  }
+  return out;
+}
+
+export function knownAsOf(issue, { fixedBefore, releasedAt, version, fixedIn }) {
+  if (fixedIn) return compareVersions(version, fixedIn) < 0;
+  if (issue.state === 'OPEN' || issue.state === 'open') return true;
+  if (issue.stateReason === 'NOT_PLANNED' || issue.stateReason === 'DUPLICATE') return false;
+  const fixes = (issue.closedBy ?? []).filter((pr) => pr.merged && pr.mergeCommit);
+  if (fixes.length > 0) return !fixes.some((pr) => fixedBefore(pr.mergeCommit));
+  return Boolean(releasedAt && issue.closedAt && releasedAt < issue.closedAt);
 }

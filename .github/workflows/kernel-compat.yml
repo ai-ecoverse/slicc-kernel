@@ -21,7 +21,7 @@ on:
         type: string
         default: 'base,catalog,all'
 
-run-name: ${{ github.event_name == 'workflow_dispatch' && format('Kernel compat v{0}', inputs.version) || github.event_name == 'pull_request' && github.event.pull_request.title || 'Kernel compat' }}
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('Kernel compat v{0}{1}', inputs.version, inputs.set != 'base,catalog,all' && format(' ({0})', inputs.set) || '') || github.event_name == 'pull_request' && github.event.pull_request.title || 'Kernel compat' }}
 
 permissions:
   contents: read

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { readFileSync, writeFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
-import { decide, diffSuites, FINDINGS, resultsMap } from './lib.mjs';
+import { compatFindingsOf, decide, diffSuites, FINDINGS, resultsMap } from './lib.mjs';
 
 const { values } = parseArgs({
   options: {
@@ -34,20 +34,32 @@ const missing = [
   ['the certified suite', base],
 ].filter(([, v]) => v === undefined);
 
+const incomplete = [
+  ['the release suite', release, true],
+  ['the certified suite', base, true],
+  ['the previous release run', prev, false],
+]
+  .filter(
+    ([, v, full]) => v !== undefined && !completed(v.exit, v.results ?? [], v.files ?? [], full)
+  )
+  .map(([what, v]) => ({
+    kind: 'suite-incomplete',
+    what,
+    exit: v.exit,
+    results: (v.results ?? []).length,
+  }));
+
+function completed(exit, results, files, full) {
+  if (typeof exit !== 'number') return false;
+  if (results.length === 0) return !full && exit === 0 && files.length === 0;
+  const failed = results.some((r) => r.status === 'fail' || r.status === 'cancelled');
+  return exit === 0 || failed;
+}
+
 function compatFindings(c) {
   if (!values.compat) return [];
-  if (!c?.found) return [{ kind: 'missing-evidence', what: 'kernel-compat' }];
-  const regression = c.report?.verdict === 'regression' || c.conclusion !== 'success';
-  if (!regression) return [];
-  return [
-    {
-      kind: 'compat-regression',
-      run: c.run,
-      verdict: c.report?.verdict ?? c.conclusion,
-      regressions: c.report?.regressions ?? 'unknown',
-      report: c.report?.asset ?? '',
-    },
-  ];
+  if (c?.planted) return [];
+  return compatFindingsOf(c);
 }
 
 const nextMap = resultsMap(release?.results ?? []);
@@ -56,6 +68,7 @@ const rows = (delta?.rows ?? []).map((row) => decide(row, prevMap, nextMap));
 const suites = diffSuites(resultsMap(base?.results ?? []), nextMap);
 const findings = [
   ...missing.map(([what]) => ({ kind: 'missing-evidence', what })),
+  ...incomplete,
   ...rows
     .filter((r) => FINDINGS.has(r.decision))
     .map((r) => ({ kind: r.decision, pr: r.pr, title: r.title })),
@@ -76,7 +89,14 @@ const result = {
       v && { exit: v.exit, pass: v.pass, fail: v.fail, skip: v.skip, seconds: v.seconds },
     ])
   ),
-  compat: compat && { run: compat.run, conclusion: compat.conclusion, report: compat.report },
+  compat: compat && {
+    run: compat.run,
+    conclusion: compat.conclusion,
+    verdict: compat.verdict,
+    summary: compat.summary,
+    rerun: compat.rerun,
+    regressions: compat.regressions,
+  },
   rows,
   suites,
   findings,

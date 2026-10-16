@@ -18,6 +18,14 @@ on:
         description: 'The certified release the suite is compared with, x.y.z (default: the certified dist-tag, or prev)'
         required: false
         type: string
+      planted:
+        description: 'Proofs only: a branch to build and review instead of the npm package (never certified, always a dry run)'
+        required: false
+        type: string
+      pr:
+        description: 'Proofs only: the pull request of the planted branch, read as one more delta row'
+        required: false
+        type: string
       dry_run:
         description: 'Write the record artifact only: no commit status, no release notes (forced off main)'
         required: false
@@ -30,7 +38,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: cert-review-${{ github.event_name == 'workflow_dispatch' && inputs.version || 'release' }}
+  group: cert-review-${{ github.event_name == 'workflow_dispatch' && format('{0}{1}', inputs.version, inputs.planted) || 'release' }}
   cancel-in-progress: false
 
 env:
@@ -48,12 +56,17 @@ jobs:
       )
     runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
+    permissions:
+      contents: read
+      statuses: read
     outputs:
       go: ${{ steps.plan.outputs.go }}
       version: ${{ steps.plan.outputs.version }}
       prev: ${{ steps.plan.outputs.prev }}
       base: ${{ steps.plan.outputs.base }}
       commit: ${{ steps.plan.outputs.commit }}
+      planted: ${{ steps.plan.outputs.planted }}
+      pr: ${{ steps.plan.outputs.pr }}
       dry_run: ${{ steps.plan.outputs.dry_run }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -62,8 +75,13 @@ jobs:
           fetch-tags: true
           persist-credentials: false
 
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+
       - id: plan
         env:
+          GH_TOKEN: ${{ github.token }}
           EVENT: ${{ github.event_name }}
           REF: ${{ github.ref }}
           RUN_SHA: ${{ github.event.workflow_run.head_sha }}
@@ -71,42 +89,53 @@ jobs:
           IN_PREV: ${{ inputs.prev }}
           IN_BASE: ${{ inputs.base }}
           IN_DRY_RUN: ${{ inputs.dry_run }}
+          IN_PLANTED: ${{ inputs.planted }}
+          IN_PR: ${{ inputs.pr }}
         run: |
           set -euo pipefail
           skip() { echo "::notice::$1"; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0; }
           semver='^[0-9]+\.[0-9]+\.[0-9]+$'
           releases() { git tag --list 'v*' | sed 's/^v//' | grep -E "$semver" | sort -V; }
           before() { releases | awk -v v="$1" '$0 == v { print last; exit } { last = $0 }'; }
-          dry_run=false
+          dry_run=false planted='' pr=''
           if [ "$EVENT" = workflow_run ]; then
             version=$(git tag --points-at "$RUN_SHA" 'v*' | sed 's/^v//' | grep -E "$semver" | sort -V | tail -1 || true)
             [ -n "$version" ] || skip "Release on $RUN_SHA tagged no version"
             prev=$(before "$version")
             base=''
           else
-            version=$IN_VERSION prev=$IN_PREV base=$IN_BASE dry_run=$IN_DRY_RUN
+            version=$IN_VERSION prev=$IN_PREV base=$IN_BASE dry_run=$IN_DRY_RUN planted=$IN_PLANTED pr=$IN_PR
             [[ "$version" =~ $semver ]] || { echo "::error::version '$version' is not x.y.z"; exit 1; }
+            if [ -n "$planted" ]; then
+              [[ "$planted" =~ ^[A-Za-z0-9._/-]+$ ]] && [ "$planted" != main ] || { echo "::error::planted '$planted' is not a branch name"; exit 1; }
+              [ -z "$pr" ] || [[ "$pr" =~ ^[0-9]+$ ]] || { echo "::error::pr '$pr' is not a number"; exit 1; }
+              git fetch -q origin "refs/heads/$planted:refs/remotes/origin/$planted"
+              [ -n "$prev" ] || prev=$(releases | tail -1)
+              dry_run=true
+            fi
             [ -n "$prev" ] || prev=$(before "$version")
             [ "$REF" = refs/heads/main ] || dry_run=true
           fi
           [ -n "$prev" ] || skip "v$version has no earlier release tag"
           [[ "$prev" =~ $semver ]] || { echo "::error::prev '$prev' is not x.y.z"; exit 1; }
           if [ -z "$base" ]; then
-            base=$(npm view @ai-ecoverse/slicc-kernel dist-tags.certified 2> /dev/null || true)
-            if ! [[ "$base" =~ $semver ]] || [ "$(printf '%s\n%s\n' "$base" "$version" | sort -V | tail -1)" = "$base" ]; then
-              base=$prev
-            fi
+            base=$(node tools/cert-review/base.mjs --repo "$GITHUB_REPOSITORY" --version "$version" || echo "$prev")
           fi
           [[ "$base" =~ $semver ]] || { echo "::error::base '$base' is not x.y.z"; exit 1; }
-          for v in "$version" "$prev" "$base"; do
+          tags=("$prev" "$base")
+          [ -n "$planted" ] || tags+=("$version")
+          for v in "${tags[@]}"; do
             git rev-parse -q --verify "refs/tags/v$v^{commit}" > /dev/null || { echo "::error::no tag v$v"; exit 1; }
           done
+          if [ -n "$planted" ]; then commit=$(git rev-parse "origin/$planted^{commit}"); else commit=$(git rev-parse "v$version^{commit}"); fi
           {
             echo "go=true"
             echo "version=$version"
             echo "prev=$prev"
             echo "base=$base"
-            echo "commit=$(git rev-parse "v$version^{commit}")"
+            echo "commit=$commit"
+            echo "planted=$planted"
+            echo "pr=$pr"
             echo "dry_run=$dry_run"
           } | tee -a "$GITHUB_OUTPUT"
 
@@ -138,7 +167,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PREV: ${{ needs.plan.outputs.prev }}
           VERSION: ${{ needs.plan.outputs.version }}
-        run: node tools/cert-review/delta.mjs --repo "$GITHUB_REPOSITORY" --prev "$PREV" --version "$VERSION" --out "$RUNNER_TEMP/evidence/delta.json"
+          HEAD_SHA: ${{ needs.plan.outputs.planted && needs.plan.outputs.commit || '' }}
+          PR: ${{ needs.plan.outputs.pr }}
+        run: |
+          node tools/cert-review/delta.mjs --repo "$GITHUB_REPOSITORY" --prev "$PREV" --version "$VERSION" \
+            --head "$HEAD_SHA" --pr "$PR" --out "$RUNNER_TEMP/evidence/delta.json"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
@@ -160,6 +193,8 @@ jobs:
       PREV: ${{ needs.plan.outputs.prev }}
       BASE: ${{ needs.plan.outputs.base }}
       WHICH: ${{ matrix.which }}
+      PLANTED: ${{ needs.plan.outputs.planted }}
+      COMMIT: ${{ needs.plan.outputs.commit }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -180,11 +215,18 @@ jobs:
         run: |
           set -euo pipefail
           tag=$([ "$WHICH" = release ] && echo "$VERSION" || echo "$BASE")
+          ref="v$tag"
+          if [ "$WHICH" = release ] && [ -n "$PLANTED" ]; then ref=$COMMIT; fi
           tree="$RUNNER_TEMP/tree"
-          git worktree add --detach "$tree" "v$tag"
+          git worktree add --detach "$tree" "$ref"
           (cd "$tree" && npm ci --no-audit --no-fund && npx playwright-core install --no-shell chromium)
           mkdir -p "$RUNNER_TEMP/tgz"
-          (cd "$RUNNER_TEMP/tgz" && npm pack "@ai-ecoverse/slicc-kernel@$tag" --silent)
+          if [ "$ref" = "$COMMIT" ]; then
+            (cd "$tree" && npm pack --silent --pack-destination "$RUNNER_TEMP/planted")
+            mv "$RUNNER_TEMP"/planted/*.tgz "$RUNNER_TEMP/tgz/ai-ecoverse-slicc-kernel-$tag.tgz"
+          else
+            (cd "$RUNNER_TEMP/tgz" && npm pack "@ai-ecoverse/slicc-kernel@$tag" --silent)
+          fi
           if [ "$WHICH" = release ]; then (cd "$RUNNER_TEMP/tgz" && npm pack "@ai-ecoverse/slicc-kernel@$PREV" --silent); fi
           ls -l "$RUNNER_TEMP/tgz"
           echo "TREE=$tree" >> "$GITHUB_ENV"
@@ -221,7 +263,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.go == 'true'
     runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
-    timeout-minutes: 170
+    timeout-minutes: 300
     permissions:
       actions: write
       contents: read
@@ -235,14 +277,24 @@ jobs:
         with:
           node-version: 24
 
+      - name: gh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: tools/cert-review/gh.sh
+
       - env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.plan.outputs.version }}
           COMMIT: ${{ needs.plan.outputs.commit }}
+          PLANTED: ${{ needs.plan.outputs.planted }}
         run: |
           mkdir -p "$RUNNER_TEMP/evidence"
+          if [ -n "$PLANTED" ]; then
+            echo '{"found":false,"planted":true}' > "$RUNNER_TEMP/evidence/compat.json"
+            exit 0
+          fi
           node tools/cert-review/compat.mjs --repo "$GITHUB_REPOSITORY" --version "$VERSION" --commit "$COMMIT" \
-            --dispatch --wait 150 --out "$RUNNER_TEMP/evidence/compat.json"
+            --dispatch --rerun --wait 150 --out "$RUNNER_TEMP/evidence/compat.json"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
@@ -264,6 +316,8 @@ jobs:
       VERSION: ${{ needs.plan.outputs.version }}
       PREV: ${{ needs.plan.outputs.prev }}
       BASE: ${{ needs.plan.outputs.base }}
+      PLANTED: ${{ needs.plan.outputs.planted }}
+      FILING: ${{ github.ref == 'refs/heads/main' && needs.plan.outputs.planted == '' && 'on' || 'off' }}
       REPO: ${{ github.repository }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -326,7 +380,7 @@ jobs:
           show_full_output: ${{ github.event_name == 'workflow_dispatch' }}
           claude_args: |
             --model ${{ vars.CERT_BEDROCK_MODEL || 'global.anthropic.claude-opus-5-5' }}
-            --allowedTools "Read,Write,Glob,Grep,Bash(gh issue list:*),Bash(gh issue view:*),Bash(gh issue create:*),Bash(gh pr view:*),Bash(gh api:*)"
+            --allowedTools "Read,Write,Glob,Grep,Bash(gh issue list:*),Bash(gh issue view:*),Bash(gh pr view:*)${{ github.ref == 'refs/heads/main' && needs.plan.outputs.planted == '' && ',Bash(gh issue create:*)' || '' }}"
             --max-turns 200
           prompt: ${{ steps.findings.outputs.prompt }}
 
@@ -345,6 +399,7 @@ jobs:
           path: |
             ${{ runner.temp }}/cert-review/verdict.json
             ${{ runner.temp }}/cert-review/comment.md
+            ${{ runner.temp }}/evidence/findings.json
           if-no-files-found: ignore
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -361,12 +416,16 @@ jobs:
     runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 20
     permissions:
-      actions: read
-      contents: write
-      statuses: write
+      contents: read
+      issues: read
+      pull-requests: read
+    outputs:
+      conclusion: ${{ steps.record.outputs.conclusion }}
+      commit: ${{ steps.record.outputs.commit }}
+      artifact: ${{ steps.artifact.outputs.artifact-id }}
     env:
       VERSION: ${{ needs.plan.outputs.version }}
-      DRY_RUN: ${{ needs.plan.outputs.dry_run }}
+      PLANTED: ${{ needs.plan.outputs.planted }}
       PLAN_COMMIT: ${{ needs.plan.outputs.commit }}
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
@@ -382,8 +441,6 @@ jobs:
           node-version: 24
 
       - name: gh
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: tools/cert-review/gh.sh
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
@@ -392,12 +449,14 @@ jobs:
           name: cert-review-verdict-${{ needs.plan.outputs.version }}
           path: ${{ runner.temp }}/cert-review
 
-      - name: The line, from the registry and the verdict
+      - name: The line, from the registry, the findings and the verdict
         id: record
         run: |
           mkdir -p "$RUNNER_TEMP/cert-review"
+          findings=$(find "$RUNNER_TEMP/cert-review" -name findings.json | head -1)
           if node tools/cert-review/record.mjs --version "$VERSION" --review "$RUNNER_TEMP/cert-review" \
-            --out "$RUNNER_TEMP/record" --run "$RUN_URL" --repo "$GH_REPO"; then
+            --out "$RUNNER_TEMP/record" --run "$RUN_URL" --repo "$GH_REPO" --commit "$PLAN_COMMIT" \
+            --findings "$findings" ${PLANTED:+--planted "$PLANTED"}; then
             echo "conclusion=success" >> "$GITHUB_OUTPUT"
           else
             echo "conclusion=failure" >> "$GITHUB_OUTPUT"
@@ -416,12 +475,44 @@ jobs:
             ${{ runner.temp }}/record/body.md
           if-no-files-found: error
 
+  publish:
+    name: cert-review / publish
+    needs: [plan, record]
+    if: >-
+      always() && github.ref == 'refs/heads/main' && needs.record.result == 'success' &&
+      needs.plan.outputs.dry_run != 'true' && needs.plan.outputs.planted == ''
+    runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      statuses: write
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      CONCLUSION: ${{ needs.record.outputs.conclusion }}
+      COMMIT: ${{ needs.record.outputs.commit }}
+      ARTIFACT: ${{ needs.record.outputs.artifact }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          sparse-checkout: tools/cert-review
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+
+      - name: gh
+        run: tools/cert-review/gh.sh
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: cert-review-record-${{ needs.plan.outputs.version }}
+          path: ${{ runner.temp }}/record
+
       - name: The cert-review status on the release commit, and the line in the release notes
-        if: needs.plan.outputs.dry_run != 'true'
-        env:
-          CONCLUSION: ${{ steps.record.outputs.conclusion }}
-          COMMIT: ${{ steps.record.outputs.commit }}
-          ARTIFACT: ${{ steps.artifact.outputs.artifact-id }}
         run: |
           set -euo pipefail
           line=$(head -1 "$RUNNER_TEMP/record/line.txt")

@@ -10,6 +10,8 @@ const { values } = parseArgs({
     repo: { type: 'string', default: 'ai-ecoverse/slicc-kernel' },
     prev: { type: 'string' },
     version: { type: 'string' },
+    head: { type: 'string', default: '' },
+    pr: { type: 'string', default: '' },
     out: { type: 'string' },
   },
 });
@@ -23,15 +25,17 @@ const gh = (path) =>
     })
   );
 
-const pages = gh(`repos/${repo}/compare/v${prev}...v${version}?per_page=250`);
+const head = values.head || `v${version}`;
+const pages = gh(`repos/${repo}/compare/v${prev}...${head}?per_page=250`);
 const commits = pages.flatMap((p) => p.commits ?? []);
+const extra = values.pr ? values.pr.split(',').map(Number) : [];
 const rows = [];
-for (const n of mergedPrs(commits)) {
+for (const n of [...new Set([...mergedPrs(commits), ...extra])]) {
   const [pr] = gh(`repos/${repo}/pulls/${n}`);
   const files = gh(`repos/${repo}/pulls/${n}/files?per_page=100`).flat();
   rows.push(rowOf(pr, files));
 }
-const delta = { repo, prev, version, commits: commits.length, rows, files: deltaFiles(rows) };
+const delta = { repo, prev, version, head, commits: commits.length, rows, files: deltaFiles(rows) };
 mkdirSync(dirname(values.out), { recursive: true });
 writeFileSync(values.out, `${JSON.stringify(delta, null, 2)}\n`);
 console.log(
