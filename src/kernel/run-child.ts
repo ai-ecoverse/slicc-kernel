@@ -1,6 +1,7 @@
 import { type CaptureControl, type ChildStdio, type ChildTable, SpawnError } from './children.ts';
 import { KernelError } from './fd-table.ts';
 import { isSignal } from './signals.ts';
+import { timerAfter } from './timer.ts';
 
 export type RunStdio = 'pipe' | 'ignore' | 'inherit' | number;
 
@@ -120,9 +121,9 @@ export async function runChild(req: RunRequest, deps: RunDeps): Promise<Uint8Arr
     return frame(outcome, new Uint8Array(0), new Uint8Array(0));
   }
   if (failure !== undefined) kill();
-  const timer =
+  const cancel =
     req.timeoutMs !== undefined && req.timeoutMs > 0
-      ? setTimeout(() => stop('ETIMEDOUT'), req.timeoutMs)
+      ? timerAfter(req.timeoutMs, () => stop('ETIMEDOUT'))
       : undefined;
   let status: number;
   try {
@@ -130,7 +131,7 @@ export async function runChild(req: RunRequest, deps: RunDeps): Promise<Uint8Arr
     const open = controls.filter((c) => c.opened);
     await Promise.race([Promise.all(open.map((c) => c.eof)), decided.promise]);
   } finally {
-    clearTimeout(timer);
+    cancel?.();
     for (const control of controls) control.shut = true;
   }
   const out = deps.children.captured(pid, 1);

@@ -2,12 +2,12 @@ import { permits, R_OK, W_OK } from '../fs/access.ts';
 import type { SyncFsResult } from '../realm/sync-fs-wire.ts';
 import type { Cred } from './cred.ts';
 import { type ForkedHandles, KernelError } from './fd-table.ts';
+import { timerAt } from './timer.ts';
 
 export const SEM_VALUE_MAX = 0x7fff_ffff;
 export const SEM_NAMES_MAX = 4096;
 export const SEM_HANDLES_MAX = 256;
 const NAME_MAX = 251;
-const TIMER_MAX_MS = 0x7fff_ffff;
 
 export type SemWaitHow = 'block' | 'try' | 'timed';
 
@@ -71,11 +71,11 @@ export class Semaphore {
     if (signal.aborted) return Promise.reject(new KernelError('EINTR'));
     return new Promise((resolve, reject) => {
       const deadline = timeoutMs < 0 ? Number.POSITIVE_INFINITY : performance.now() + timeoutMs;
-      let timer: ReturnType<typeof setTimeout> | undefined;
+      let cancel = (): void => {};
       const leave = (): void => {
         const at = this.waiters.indexOf(waiter);
         if (at >= 0) this.waiters.splice(at, 1);
-        clearTimeout(timer);
+        cancel();
         signal.removeEventListener('abort', abort);
       };
       const waiter: Waiter = {
@@ -89,18 +89,13 @@ export class Semaphore {
         reject(new KernelError('EINTR'));
       };
       const expire = (): void => {
-        const left = deadline - performance.now();
-        if (left > 0) {
-          timer = setTimeout(expire, Math.min(left, TIMER_MAX_MS));
-          return;
-        }
         leave();
         resolve(false);
       };
       this.waiters.push(waiter);
       signal.addEventListener('abort', abort, { once: true });
       if (deadline !== Number.POSITIVE_INFINITY) {
-        timer = setTimeout(expire, Math.min(timeoutMs, TIMER_MAX_MS));
+        cancel = timerAt(deadline, expire);
       }
     });
   }
