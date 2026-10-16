@@ -69,7 +69,37 @@ export function rowOf(pr, files) {
     behaviour: BEHAVIOUR.has(kind),
     src: files.some((f) => f.filename.startsWith('src/')),
     tests,
+    ...(pr.merge_commit_sha ? { merged: pr.merge_commit_sha } : {}),
   };
+}
+
+export function withBaselines(rows, { commits, tags, prev }) {
+  const at = new Map(commits.map((c, i) => [c.sha, i]));
+  const released = tags
+    .filter((t) => at.has(t.sha))
+    .map((t) => ({ version: t.version, index: at.get(t.sha) }))
+    .sort((a, b) => compareVersions(a.version, b.version));
+  return rows.map((row) => {
+    const index = row.merged === undefined ? undefined : at.get(row.merged);
+    if (index === undefined) return { ...row, baseline: prev };
+    const holding = released.findIndex((t) => t.index >= index);
+    const before = holding === -1 ? released.at(-1) : released[holding - 1];
+    const baseline = before?.version ?? prev;
+    return { ...row, baseline };
+  });
+}
+
+export function baselineFiles(rows, prev) {
+  const out = {};
+  for (const r of rows.filter((x) => x.kind === 'fix' && x.tests.length > 0)) {
+    const files = (out[r.baseline ?? prev] ??= new Set());
+    for (const t of r.tests) files.add(t.file);
+  }
+  return Object.fromEntries(
+    Object.entries(out)
+      .sort(([a], [b]) => compareVersions(a, b))
+      .map(([v, files]) => [v, [...files].sort()])
+  );
 }
 
 export function deltaFiles(rows) {
@@ -286,14 +316,25 @@ export function compatFindingsOf(compat) {
   }));
   if (rows.length === 0 && compat.conclusion !== 'success') {
     out.push({
-      kind: 'compat-regression',
-      package: 'unknown',
-      spec: '',
-      rerun: 'none',
-      error: `kernel-compat ${compat.conclusion}`,
+      kind: 'compat-incomplete',
+      what: 'kernel-compat',
+      shards: compat.missingShards ?? [],
+      ...(compat.shardRerun ? { rerun: compat.shardRerun.conclusion } : {}),
+      error: `kernel-compat ${compat.conclusion} with no regression${(compat.missingShards ?? []).length ? `, no report from shard ${compat.missingShards.join(', ')}` : ''}`,
     });
   }
   return out;
+}
+
+export function missingShards(jobs, artifacts) {
+  const reported = new Set(
+    artifacts.map((n) => /-shard-(\d+)$/.exec(n)?.[1]).filter((n) => n !== undefined)
+  );
+  return jobs
+    .map((j) => /shard \((\d+)\)$/.exec(j.name)?.[1])
+    .filter((n) => n !== undefined && !reported.has(n))
+    .map(Number)
+    .sort((a, b) => a - b);
 }
 
 export function knownAsOf(issue, { fixedBefore, releasedAt, version, fixedIn }) {

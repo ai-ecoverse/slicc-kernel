@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
-import { compatRegressions } from './lib.mjs';
+import { compatRegressions, missingShards } from './lib.mjs';
 
 const { values } = parseArgs({
   options: {
@@ -119,14 +119,31 @@ async function finished({ own, set, deadline }) {
   }
 }
 
+function artifactsOf(run) {
+  return JSON.parse(
+    execFileSync('gh', ['api', `repos/${repo}/actions/runs/${run.id}/artifacts?per_page=100`], {
+      encoding: 'utf8',
+    })
+  ).artifacts.map((a) => a.name);
+}
+
+async function rerunShards(run) {
+  await api(`repos/${repo}/actions/runs/${run.id}/rerun-failed-jobs`, { method: 'POST' });
+  console.log(`compat: re-running the failed jobs of ${run.html_url}`);
+  const deadline = Date.now() + 120 * 60_000;
+  await sleep(15_000);
+  for (;;) {
+    const again = await api(`repos/${repo}/actions/runs/${run.id}`);
+    if (again.status === 'completed' && again.run_attempt > run.run_attempt) return again;
+    if (Date.now() > deadline) return undefined;
+    await sleep(60_000);
+  }
+}
+
 function report(run) {
   const dir = mkdtempSync(join(tmpdir(), 'compat-'));
   try {
-    const names = JSON.parse(
-      execFileSync('gh', ['api', `repos/${repo}/actions/runs/${run.id}/artifacts?per_page=100`], {
-        encoding: 'utf8',
-      })
-    ).artifacts.map((a) => a.name);
+    const names = artifactsOf(run);
     const name = names.find((n) => /^kernel-compat-/.test(n) && !/-(shard-\d+|plan)$/.test(n));
     if (!name) return undefined;
     execFileSync('gh', ['run', 'download', String(run.id), '-R', repo, '-n', name, '-D', dir], {
@@ -150,6 +167,19 @@ function report(run) {
 const deadline = Date.now() + Number(values.wait) * 60_000;
 const first = await finished({ own: true, deadline });
 const out = { version, commit, dispatched: first.dispatched, found: Boolean(first.run) };
+if (first.run && first.run.conclusion !== 'success') {
+  let shards = missingShards(first.jobs, artifactsOf(first.run));
+  if (shards.length > 0 && values.rerun) {
+    const again = await rerunShards(first.run);
+    out.shardRerun = { shards, conclusion: again?.conclusion ?? 'timed out' };
+    if (again) {
+      first.run = again;
+      first.jobs = await jobsOf(again);
+      shards = missingShards(first.jobs, artifactsOf(again));
+    }
+  }
+  out.missingShards = shards;
+}
 if (first.run) {
   const got = report(first.run);
   Object.assign(out, {
