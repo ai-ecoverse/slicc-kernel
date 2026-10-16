@@ -32,7 +32,7 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
         env:
           FORCED: ${{ vars.CI_RUNNER }}
-          POOL: ${{ vars.CERT_RUNNER || 'cloud-run-bench' }}
+          POOL: ${{ vars.CERT_RUNNER }}
         with:
           script: |
             const { runner, why } = await import(`${process.env.GITHUB_WORKSPACE}/.github/runner.mjs`)
