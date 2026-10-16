@@ -28,6 +28,7 @@ import {
   readBody,
   requestFraming,
   responseHead,
+  streamBody,
 } from './http1.ts';
 import { toHostLoopback } from './loopback-names.ts';
 import type {
@@ -262,6 +263,14 @@ export async function watchHangup(
     }
   }
 }
+const BODILESS_METHODS = new Set(['GET', 'HEAD']);
+async function* drain(
+  body: AsyncGenerator<Uint8Array>,
+  done: () => void
+): AsyncGenerator<Uint8Array> {
+  yield* body;
+  done();
+}
 function untilAborted(
   response: Promise<RealmTransportResponse>,
   signal: AbortSignal
@@ -415,8 +424,17 @@ export class RealmProxy {
     const url = ctx.origin ? tunnelRequestUrl(req, ctx.origin) : requestUrl(req);
     const keep = keepsAlive(req);
     const framing = requestFraming(req.headers);
-    const reserve =
-      framing.kind === 'length' ? framing.length : framing.kind === 'chunked' ? this.cap() : 0;
+    const streaming =
+      this.options.transport.traits.streamingBodies === true &&
+      framing.kind !== 'none' &&
+      !BODILESS_METHODS.has(req.method);
+    const reserve = streaming
+      ? 0
+      : framing.kind === 'length'
+        ? framing.length
+        : framing.kind === 'chunked'
+          ? this.cap()
+          : 0;
     if (reserve > this.cap()) throw new HttpError(413, `request body over ${this.cap()} bytes`);
     await this.expectContinue(conn, req, framing.kind !== 'none');
     await this.bodies.acquire(reserve, this.stop.signal);
@@ -424,9 +442,14 @@ export class RealmProxy {
     const abort = new AbortController();
     const stopExchange = () => abort.abort();
     this.stop.signal.addEventListener('abort', stopExchange, { once: true });
+    let drained = !streaming;
     try {
       try {
-        const body = await readBody(incoming, framing, this.cap());
+        const body = streaming
+          ? drain(streamBody(incoming, framing, abort.signal), () => {
+              drained = true;
+            })
+          : await readBody(incoming, framing, this.cap());
         const waiting = new AbortController();
         void watchHangup(ctx.socket, abort, waiting.signal);
         try {
@@ -437,7 +460,8 @@ export class RealmProxy {
       } finally {
         this.bodies.release(reserve);
       }
-      return await this.relay(conn, req.method, req.minor, response, keep);
+      const kept = await this.relay(conn, req.method, req.minor, response, keep && drained);
+      return kept && drained;
     } finally {
       this.stop.signal.removeEventListener('abort', stopExchange);
       abort.abort();
@@ -459,17 +483,18 @@ export class RealmProxy {
   private async upstream(
     req: RequestHead,
     url: string,
-    body: Uint8Array | undefined,
+    body: Uint8Array | AsyncIterable<Uint8Array> | undefined,
     signal: AbortSignal,
     owner?: number
   ): Promise<RealmTransportResponse> {
+    const sent = BODILESS_METHODS.has(req.method) ? undefined : body;
     try {
       const fetching = this.options.transport.fetch(
         {
           url: toHostLoopback(url),
           method: req.method.toUpperCase(),
           headers: forwardRequestHeaders(req.headers),
-          body: req.method === 'GET' || req.method === 'HEAD' ? undefined : body,
+          ...(sent instanceof Uint8Array ? { body: sent } : sent ? { bodyStream: sent } : {}),
           signal,
         },
         owner
