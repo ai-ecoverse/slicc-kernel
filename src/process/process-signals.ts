@@ -34,6 +34,8 @@ export class SignalGate {
 
   private delivered = 0;
 
+  private raised = 0;
+
   private readonly raw: SyncSabTransport;
 
   private readonly header: Int32Array;
@@ -116,8 +118,13 @@ export class SignalGate {
       Atomics.load(header, SAB_I_TIMERS) |
       Atomics.load(header, SAB_I_KILLED);
     if (pending === 0) return false;
+    this.raised = this.quieted > 0 ? -1 : 0;
     this.deliver();
     return true;
+  }
+
+  raisedOnEntry(): number {
+    return this.raised;
   }
 
   deliver(): void {
@@ -136,6 +143,7 @@ export class SignalGate {
 
     if (this.depth <= 1) this.lastDelivered = pending | (timers & 1 ? sigbit(SIG.ALRM) : 0);
     if (pending !== 0 || timers !== 0) this.delivered++;
+    this.raised |= pending | (timers & 1 ? sigbit(SIG.ALRM) : 0) | (timers & ~1 ? -1 : 0);
     for (let which = 0; which < 3; which++) {
       if (timers & (1 << which)) this.hooks.timer?.(which);
     }

@@ -82,6 +82,7 @@ const DELIVERED = [PREVIEW1, WASIX, SLICC, SLICC_FS, SLICC_TTY];
 
 export function wireSignals(host: WasiHost, gate: SignalGate): void {
   host.interrupted = () => gate.interrupt();
+  host.raisedOnEntry = () => gate.raisedOnEntry();
   host.quietly = (fn) => gate.quiet(fn);
 }
 
@@ -124,6 +125,7 @@ export function delivering(
       if (driver.idle) {
         before?.();
         host.entered = host.interrupted?.() === true;
+        host.enteredSignals = host.entered ? (host.raisedOnEntry?.() ?? -1) : 0;
       }
       return fn(...args);
     };

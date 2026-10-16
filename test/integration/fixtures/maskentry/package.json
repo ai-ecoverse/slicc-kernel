@@ -1,0 +1,12 @@
+{
+  "name": "maskentry",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "maskentry": {
+        "wasm": "bin/maskentry.wasm"
+      }
+    }
+  }
+}
