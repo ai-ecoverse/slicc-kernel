@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { compatFindingsOf, decide, diffSuites, FINDINGS, resultsMap } from './lib.mjs';
 
@@ -24,6 +25,9 @@ const read = (file) => {
 
 const delta = read(values.delta);
 const prev = read(values.prev);
+const negatives = Object.keys(delta?.baselines ?? {})
+  .filter((v) => v !== delta.prev)
+  .map((v) => [v, read(join(dirname(values.prev), `prev-${v}.json`))]);
 const release = read(values.release);
 const base = read(values.base);
 const compat = values.compat ? read(values.compat) : undefined;
@@ -32,12 +36,14 @@ const missing = [
   ['the previous release run', prev],
   ['the release suite', release],
   ['the certified suite', base],
+  ...negatives.map(([v, run]) => [`the v${v} run`, run]),
 ].filter(([, v]) => v === undefined);
 
 const incomplete = [
   ['the release suite', release, true],
   ['the certified suite', base, true],
   ['the previous release run', prev, false],
+  ...negatives.map(([v, run]) => [`the v${v} run`, run, false]),
 ]
   .filter(
     ([, v, full]) => v !== undefined && !completed(v.exit, v.results ?? [], v.files ?? [], full)
@@ -63,8 +69,14 @@ function compatFindings(c) {
 }
 
 const nextMap = resultsMap(release?.results ?? []);
-const prevMap = resultsMap(prev?.results ?? []);
-const rows = (delta?.rows ?? []).map((row) => decide(row, prevMap, nextMap));
+const prevMaps = new Map([
+  [delta?.prev, resultsMap(prev?.results ?? [])],
+  ...negatives.map(([v, run]) => [v, resultsMap(run?.results ?? [])]),
+]);
+const rows = (delta?.rows ?? []).map((row) => ({
+  ...decide(row, prevMaps.get(row.baseline ?? delta?.prev) ?? new Map(), nextMap),
+  ...(row.baseline && row.baseline !== delta?.prev ? { baseline: row.baseline } : {}),
+}));
 const suites = diffSuites(resultsMap(base?.results ?? []), nextMap);
 const findings = [
   ...missing.map(([what]) => ({ kind: 'missing-evidence', what })),
@@ -82,6 +94,7 @@ const result = {
   runs: Object.fromEntries(
     [
       ['prev', prev],
+      ...negatives.map(([v, run]) => [`prev-${v}`, run]),
       ['release', release],
       ['base', base],
     ].map(([k, v]) => [
