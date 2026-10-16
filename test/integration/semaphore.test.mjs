@@ -130,6 +130,25 @@ test('with users on, a semaphore checks its mode and only its owner or root unli
   );
 });
 
+test('with users in report mode, a denied open is reported and goes ahead (#717)', async (t) => {
+  const kernel = await booted(t, { users: 'report' });
+  await kernel.users.add({ name: 'cone' });
+  assert.deepEqual(await run(kernel, 'owners', 'setup'), ok('private ok', 'public ok'));
+  const r = await kernel.run(['semtest', 'owners', 'user'], { cwd: '/', user: 'cone' });
+  assert.equal(r.stdout.split('\n')[0], 'private ok');
+});
+
+test('a process out of semaphore handles gets EMFILE and leaves no name behind (#717)', async (t) => {
+  const kernel = await booted(t);
+  assert.deepEqual(
+    await run(kernel, 'handles'),
+    ok(
+      'opened 256, then No file descriptors available',
+      'the refused name No such file or directory'
+    )
+  );
+});
+
 test('a killed waiter loses no posted unit, and an exiting process undoes nothing (#717)', async (t) => {
   const kernel = await booted(t);
   assert.deepEqual(await run(kernel, 'killed'), ok('consumed 2, left 1, trywait took 1'));

@@ -2,6 +2,7 @@ import { R_OK, W_OK, walk } from '../fs/access.ts';
 import {
   type Created,
   type Dac,
+  deny,
   type Guard,
   heldChmodMode,
   heldRetimable,
@@ -1646,6 +1647,7 @@ export class WasmProcess {
   }
 
   private semSyscall(req: SemSyscall, cancelled: AbortSignal): Promise<SyncFsResult> {
+    const g = this.guarded();
     const known = this.fds.handles;
     const handles = known instanceof SemHandles ? known : new SemHandles();
     this.fds.handles = handles;
@@ -1653,7 +1655,7 @@ export class WasmProcess {
       table: this.options.sems,
       handles,
       cred: this.cred,
-      owners: this.options.owners === true,
+      denied: g ? (op, path) => deny(g, op, path) : undefined,
       umask: this.umask,
       blocking: () => this.blockingSignal(cancelled),
     });

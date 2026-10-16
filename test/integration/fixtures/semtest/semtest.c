@@ -305,6 +305,19 @@ static int capped(void) {
   return 0;
 }
 
+static int handles(void) {
+  unsigned h;
+  char name[32];
+  int n = 0, e = 0;
+  for (; n < 300; n++) {
+    snprintf(name, sizeof name, "/h%d", n);
+    if ((e = sopen(name, CREAT, 0600, 0, &h))) break;
+  }
+  printf("opened %d, then %s\n", n, err(e));
+  printf("the refused name %s\n", err(sopen(name, 0, 0, 0, &h)));
+  return 0;
+}
+
 int main(int argc, char **argv) {
   setvbuf(stdout, NULL, _IONBF, 0);
   const char *mode = argc > 1 ? argv[1] : "";
@@ -322,6 +335,7 @@ int main(int argc, char **argv) {
   if (!strcmp(mode, "killed")) return killed();
   if (!strcmp(mode, "exited")) return exited();
   if (!strcmp(mode, "cap")) return capped();
+  if (!strcmp(mode, "handles")) return handles();
   fprintf(stderr, "usage: semtest MODE\n");
   return 2;
 }

@@ -124,25 +124,27 @@ export class SemTable {
     create: boolean,
     exclusive: boolean,
     make: () => Semaphore,
-    may: (s: Semaphore) => boolean
-  ): Semaphore {
+    check: (s: Semaphore) => void,
+    adopt: (s: Semaphore) => number
+  ): number {
     const found = this.names.get(name);
     if (found) {
       if (create && exclusive) throw new KernelError('EEXIST');
-      if (!may(found)) throw new KernelError('EACCES');
-      return found;
+      check(found);
+      return adopt(found);
     }
     if (!create) throw new KernelError('ENOENT');
     if (this.names.size >= this.limit) throw new KernelError('ENOSPC');
     const sem = make();
+    const handle = adopt(sem);
     this.names.set(name, sem);
-    return sem;
+    return handle;
   }
 
-  unlink(name: string, may: (s: Semaphore) => boolean): void {
+  unlink(name: string, check: (s: Semaphore) => void): void {
     const found = this.names.get(name);
     if (!found) throw new KernelError('ENOENT');
-    if (!may(found)) throw new KernelError('EACCES');
+    check(found);
     this.names.delete(name);
   }
 }
@@ -201,7 +203,7 @@ export interface SemProcess {
   table: SemTable | undefined;
   handles: SemHandles;
   cred: Readonly<Cred>;
-  owners: boolean;
+  denied: ((op: string, path: string) => void) | undefined;
   umask: number;
   blocking(): AbortSignal;
 }
@@ -212,29 +214,39 @@ const ok = (json?: unknown): SyncFsResult =>
 export async function semSyscall(req: SemSyscall, proc: SemProcess): Promise<SyncFsResult> {
   const { table, handles, cred } = proc;
   if (!table) throw new KernelError('ENOSYS');
-  const may = (want: number) => (sem: Semaphore) =>
-    !proc.owners || permits(cred, { uid: sem.uid, gid: sem.gid, mode: sem.mode }, want, false);
-  const owns = (sem: Semaphore) => !proc.owners || cred.euid === 0 || cred.euid === sem.uid;
+  const { denied } = proc;
+  const shown = (name: string) => `/dev/shm/sem.${name}`;
+  const opens = (name: string) => (sem: Semaphore) => {
+    const perm = { uid: sem.uid, gid: sem.gid, mode: sem.mode };
+    if (denied && !permits(cred, perm, R_OK | W_OK, false)) denied('sem_open', shown(name));
+  };
+  const unlinks = (name: string) => (sem: Semaphore) => {
+    if (denied && cred.euid !== 0 && cred.euid !== sem.uid) denied('sem_unlink', shown(name));
+  };
   switch (req.op) {
     case 'sem-open': {
       if (req.value < 0 || req.value > SEM_VALUE_MAX) throw new KernelError('EINVAL');
       const name = semName(req.name);
       const mode = req.mode & 0o777 & ~proc.umask;
-      const sem = table.open(
-        name,
-        req.create,
-        req.exclusive,
-        () => new Semaphore(req.value, cred.euid, cred.egid, mode),
-        may(R_OK | W_OK)
+      return ok(
+        table.open(
+          name,
+          req.create,
+          req.exclusive,
+          () => new Semaphore(req.value, cred.euid, cred.egid, mode),
+          opens(name),
+          (sem) => handles.add(sem)
+        )
       );
-      return ok(handles.add(sem));
     }
     case 'sem-close':
       handles.close(req.handle);
       return ok();
-    case 'sem-unlink':
-      table.unlink(semName(req.name), owns);
+    case 'sem-unlink': {
+      const name = semName(req.name);
+      table.unlink(name, unlinks(name));
       return ok();
+    }
     case 'sem-post':
       handles.get(req.handle).post();
       return ok();
