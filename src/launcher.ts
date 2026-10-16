@@ -2416,6 +2416,7 @@ export class Launcher {
     if (this.owners) await this.stampLayout();
     if (this.owners) await this.sudoer.provision();
     await writeCaFile(this.base, this.ca).catch(() => undefined);
+    await this.cron.provision().catch(() => undefined);
     this.fstab = this.mountFstab();
     void this.cron.start();
   }

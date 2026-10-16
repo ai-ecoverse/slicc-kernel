@@ -64,6 +64,8 @@ interface Due {
 
 const encoder = new TextEncoder();
 
+const EMPTY_STAMP = JSON.stringify({ jobs: {}, reboot: {} });
+
 const messageOf = (err: unknown) => (err as Error)?.message ?? String(err);
 
 const keyOf = ({ source, job }: Loaded) => `${source}\t${job.id}`;
@@ -177,7 +179,7 @@ export class CronService {
     await this.clock.sleep(until, this.wake.signal);
   }
 
-  private async provision(): Promise<void> {
+  async provision(): Promise<void> {
     const { fs, owners } = this.host;
     for (const [dir, mode] of [
       [CRON_DIR, 0o755],
@@ -232,7 +234,8 @@ export class CronService {
   private async writeStamp(stamp: Stamp): Promise<void> {
     const { fs, owners } = this.host;
     const text = JSON.stringify(stamp);
-    if ((await fs.readFile(STAMP_PATH).catch(() => undefined)) === text) return;
+    const old = await fs.readFile(STAMP_PATH).catch(() => undefined);
+    if (old === text || (old === undefined && text === EMPTY_STAMP)) return;
     const fresh = `${STAMP_PATH}.new`;
     const owner: NewOwner | undefined = owners ? { uid: 0, gid: 0, mode: 0o600 } : undefined;
     await fs.writeFile(fresh, text, owner);
