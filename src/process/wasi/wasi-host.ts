@@ -4,6 +4,7 @@ import { localCpuNanos } from '../../kernel/cpu-clock.ts';
 import { type Cred, type CredChange, MAX_GROUPS } from '../../kernel/cred.ts';
 import type { DeviceMeta, KernelFdKind } from '../../kernel/fd-table.ts';
 import type { SyncFsBridgeStat, SyncFsPosixBridge } from '../../realm/sync-fs-wire.ts';
+import { semImports } from './slicc-sem.ts';
 import {
   CLOCK,
   E,
@@ -408,6 +409,7 @@ export class WasiHost {
         });
         void this.o.kernel.call({ op: 'proc-setcred', change });
       },
+      ...semImports(this),
       groups_get: (buf: number, cap: number, count: number) => {
         const { groups } = this.o.kernel.call({ op: 'proc-cred' }) as Cred;
         if (cap !== 0 && cap < groups.length) throw new WasiError('EINVAL');

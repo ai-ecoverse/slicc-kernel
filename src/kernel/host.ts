@@ -65,6 +65,7 @@ import {
 } from './protocol.ts';
 import type { PtyTable } from './pty.ts';
 import type { SealedBroker } from './sealed.ts';
+import type { SemTable } from './sem.ts';
 import { SIG, sigbit } from './signals.ts';
 import { KernelSocket, type LoopbackNet } from './socket.ts';
 import type { VfsNodes } from './vfs-file.ts';
@@ -131,6 +132,7 @@ export interface SpawnWasmOptions {
 
   http?: HttpHandles;
   locks?: LockTable;
+  sems?: SemTable;
   onReap?: (pid: number) => void;
   resolver?: Resolver;
 }
@@ -438,6 +440,7 @@ function processOptions(
     net: opts.net,
     http: opts.http,
     locks: opts.locks,
+    ...(opts.sems ? { sems: opts.sems } : {}),
     onReap: opts.onReap,
     resolver: opts.resolver,
     ...notifiers(header),

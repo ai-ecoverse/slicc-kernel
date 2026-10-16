@@ -82,6 +82,7 @@ import type { ForkState, Program } from './kernel/protocol.ts';
 import { PtyTable } from './kernel/pty.ts';
 import { type ScrubSecret, scrubbedAll, scrubberOf, scrubStdio } from './kernel/scrub-file.ts';
 import { SealedBroker, type SealedCaller, type SealedHook } from './kernel/sealed.ts';
+import { SemTable } from './kernel/sem.ts';
 import { SettlingChildren } from './kernel/settling.ts';
 import { SIG, sigbit } from './kernel/signals.ts';
 import { LoopbackNet } from './kernel/socket.ts';
@@ -537,6 +538,8 @@ export class Launcher {
   private readonly sudoer: Sudo;
   private readonly jobs = new JobTable();
   private readonly locks = new LockTable();
+
+  private readonly sems = new SemTable();
   private readonly settling = new SettlingChildren((pid) => this.jobs.pgidOf(pid));
   private readonly ptys = new PtyTable(
     (tty, sig) => this.keySignal(tty, 0, sig, () => this.jobs.signalOwnedForeground(tty, sig)),
@@ -1524,6 +1527,7 @@ export class Launcher {
       net: this.net,
       http: new HttpHandles(this.transport, pid, this.loopbackFor(pid)),
       locks: this.locks,
+      sems: this.sems,
       resolver: this.resolver,
       onReap: (child) => this.reaped(child, pid),
       ...(req.fork ? { fork: req.fork } : {}),
