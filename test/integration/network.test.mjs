@@ -66,3 +66,24 @@ test('without a transport, a request is answered 502 naming the missing option',
   assert.equal(status, 0);
   assert.match(stdout, /no network transport \(createKernel\(\{ network: \{ transport \} \}\)\)/);
 });
+
+test('a TLS engine without entropy fails each https cleanly, and the kernel keeps serving', async (t) => {
+  const { page, bash, read } = await booted(chrome, t);
+  const glue = 'node_modules/@ai-ecoverse/wasm-tls-engine/dist/slicc-tls-engine.mjs';
+  const real = await read(glue);
+  const draw = 'globalThis.crypto.getRandomValues(';
+  assert.equal(real.split(draw).length, 2);
+  const starved = real.replace(draw, '(()=>{throw new Error("no entropy")})(');
+  await page.evaluate((p, text) => window.opfs.write(p, text), glue, starved);
+
+  for (let i = 0; i < 2; i++) {
+    const { status, stdout, stderr } = await bash(`curl -sS ${latest}`);
+    assert.equal(status, 35);
+    assert.equal(stdout, '');
+    assert.match(stderr, /^curl: \(35\) /);
+  }
+  const { status, stdout } = await bash('echo still here');
+  assert.equal(status, 0);
+  assert.equal(stdout, 'still here\n');
+  assert.deepEqual(page.errors, []);
+});
