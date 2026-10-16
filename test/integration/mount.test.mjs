@@ -44,7 +44,7 @@ test('tmpfs: programs and git work on it, a large file has no cap, it umounts on
     stderr: '',
   });
   const big = await bash(
-    'head -c 110000000 /dev/urandom > /mnt/t/big && ls -l /mnt/t/big | cut -d" " -f5 && cat /mnt/t/big | wc -c && cat /proc/mounts | tail -1',
+    'head -c 110000000 /dev/zero > /mnt/t/big && ls -l /mnt/t/big | cut -d" " -f5 && cat /mnt/t/big | wc -c && cat /proc/mounts | tail -1',
     { cwd: '/home' }
   );
   assert.deepEqual(big, {
