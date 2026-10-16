@@ -321,9 +321,6 @@ const DECIDE_MS = 100;
 const INIT_PID = 1;
 const SHARED_DIRS = ['/tmp', '/home'];
 
-function unref(port: MessagePort): void {
-  (port as { unref?: () => void }).unref?.();
-}
 const LAYOUT: ReadonlyArray<[string, number]> = [
   ['/', 0o755],
   ['/root', 0o700],
@@ -566,7 +563,6 @@ export class Launcher {
   private pnpmMade: Promise<void> | undefined;
   private pnpmEpoch = 0;
   readonly mounts: MountTable;
-  private shmPorts: MessagePort[] = [];
   private readonly createDriverWorker: (() => WasmWorkerLike) | undefined;
   private readonly media: MediaStore;
   private readonly onMountPending: ((pending: PendingMedium) => void) | undefined;
@@ -2020,9 +2016,10 @@ export class Launcher {
         },
         { owned: true }
       );
-      if (spec.target === SHM) this.shmPorts = [port1, port2];
+      if (spec.target === SHM) (port2 as { unref?: () => void }).unref?.();
       return {
         port: port1,
+        ...(spec.target === SHM ? { idle: true as const } : {}),
         dispose: () => {
           port1.close();
           port2.close();
@@ -2143,7 +2140,6 @@ export class Launcher {
   private async mountShm(): Promise<void> {
     await this.base.mkdir(SHM, { recursive: true });
     await this.mounts.mountSystem({ type: 'tmpfs', source: 'shm', target: SHM }, this.fs);
-    for (const port of this.shmPorts) unref(port);
     await this.fs.chmod(SHM, 0o1777);
   }
 
