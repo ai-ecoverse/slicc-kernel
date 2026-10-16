@@ -617,3 +617,92 @@ export function releaseNotes(body, line, { version, sha256 }) {
     body: `${kept}${kept ? '\n\n' : ''}<!-- cert-verify -->\n${line}\n<!-- /cert-verify -->\n`,
   };
 }
+
+const MANIFEST_FILES = new Set(['package.json', 'package-lock.json']);
+
+export function manifestOnly(files) {
+  const behaviour = behaviourFiles(files);
+  return (
+    behaviour.length > 0 && !reviewsItself(files) && behaviour.every((f) => MANIFEST_FILES.has(f))
+  );
+}
+
+const SHIPPED_MANIFEST_IGNORES = ['devDependencies', 'scripts', 'version', 'gitHead'];
+
+const placeholder = (buffer, version) => {
+  const token = Buffer.from(version);
+  const parts = [];
+  let at = 0;
+  for (let i = buffer.indexOf(token); i !== -1; i = buffer.indexOf(token, at)) {
+    parts.push(buffer.subarray(at, i), Buffer.from('\0SLICC_VERSION\0'));
+    at = i + token.length;
+  }
+  parts.push(buffer.subarray(at));
+  return Buffer.concat(parts);
+};
+
+const canonical = (value) =>
+  Array.isArray(value)
+    ? `[${value.map(canonical).join(',')}]`
+    : value && typeof value === 'object'
+      ? `{${Object.keys(value)
+          .sort()
+          .map((k) => `${JSON.stringify(k)}:${canonical(value[k])}`)
+          .join(',')}}`
+      : JSON.stringify(value);
+
+const manifestOf = (buffer) => {
+  const m = JSON.parse(buffer.toString('utf8'));
+  for (const key of SHIPPED_MANIFEST_IGNORES) delete m[key];
+  return canonical(m);
+};
+
+const parsedSame = (a, b, read) => {
+  try {
+    return read(a) === read(b);
+  } catch {
+    return false;
+  }
+};
+
+function fileDifference(name, a, b, candidate, base) {
+  if (!a || !b) return `${name} only in the ${a ? 'candidate' : 'base'}`;
+  if (a.type !== b.type)
+    return `${name} is a ${a.type} in the candidate and a ${b.type} in the base`;
+  if (a.mode !== b.mode) return `${name} mode ${a.mode.toString(8)} vs ${b.mode.toString(8)}`;
+  if (name === 'package.json')
+    return parsedSame(a.bytes, b.bytes, manifestOf)
+      ? undefined
+      : 'package.json differs beyond devDependencies, scripts, version and gitHead';
+  const x = placeholder(a.bytes, candidate.version);
+  const y = placeholder(b.bytes, base.version);
+  if (name.endsWith('.map'))
+    return parsedSame(x, y, (bytes) => {
+      const map = JSON.parse(bytes.toString('utf8'));
+      delete map.mappings;
+      return canonical(map);
+    })
+      ? undefined
+      : `${name} differs beyond its mappings`;
+  return x.equals(y) ? undefined : `${name} differs`;
+}
+
+export function sameDist(candidate, base) {
+  if (
+    !candidate.version ||
+    !base.version ||
+    candidate.version.includes(base.version) ||
+    base.version.includes(candidate.version)
+  )
+    return {
+      identical: false,
+      differences: ['the two versions are empty or contain each other: not compared'],
+    };
+  const names = [...new Set([...candidate.files.keys(), ...base.files.keys()])].sort();
+  const differences = names
+    .map((name) =>
+      fileDifference(name, candidate.files.get(name), base.files.get(name), candidate, base)
+    )
+    .filter(Boolean);
+  return { identical: differences.length === 0, differences };
+}

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
-import { behaviourFiles, groupVerdict, mergedPrs, reviewsItself } from './lib.mjs';
+import { behaviourFiles, groupVerdict, manifestOnly, mergedPrs, reviewsItself } from './lib.mjs';
 
 const { positionals, values } = parseArgs({
   allowPositionals: true,
@@ -17,6 +17,7 @@ const { positionals, values } = parseArgs({
     context: { type: 'string', default: 'cert-review' },
     guard: { type: 'string', default: '' },
     approval: { type: 'string', default: 'cert-review-approved' },
+    evidence: { type: 'string', default: '' },
   },
 });
 const { repo, context } = values;
@@ -127,7 +128,12 @@ async function plan() {
     return output({ go: 'false', behaviour: behaviour.join(','), self: String(self) });
   }
   await status(values.head, 'pending', `reviewing #${values.pr} at ${values.head.slice(0, 12)}`);
-  return output({ go: 'true', behaviour: behaviour.join(','), self: String(self) });
+  return output({
+    go: 'true',
+    behaviour: behaviour.join(','),
+    self: String(self),
+    manifest: String(manifestOnly(files)),
+  });
 }
 
 async function lookup() {
@@ -164,9 +170,22 @@ async function lookup() {
   }
 }
 
+async function same() {
+  const evidence = JSON.parse(readFileSync(values.evidence, 'utf8'));
+  if (!evidence.identical) {
+    summary(`#${values.pr}: ${evidence.line}: the full review goes on`);
+    return;
+  }
+  await status(values.head, 'success', evidence.line);
+  summary(
+    `#${values.pr} is not reviewed, by the rule ${evidence.rule}. Candidate ${evidence.candidate.version} sha256 ${evidence.candidate.sha256}, base ${evidence.base.version} sha256 ${evidence.base.sha256}.`
+  );
+}
+
 if (positionals[0] === 'plan') await plan();
+else if (positionals[0] === 'same') await same();
 else if (positionals[0] === 'lookup') await lookup();
 else {
-  console.error('pr.mjs plan|lookup');
+  console.error('pr.mjs plan|lookup|same');
   process.exit(2);
 }
