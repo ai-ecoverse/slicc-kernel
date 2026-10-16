@@ -67,6 +67,8 @@ export function syncCallCount(): number {
 const SPIN_MS = 0.06;
 const SPIN_STRIDE = 128;
 const SPIN_STRIDES = 256;
+const SPIN_CORES = 4;
+const spinning = (globalThis.navigator?.hardwareConcurrency ?? 0) >= SPIN_CORES;
 const SPIN_CAP_MS = 1;
 
 export function createSyncSabTransport(
@@ -98,7 +100,7 @@ export function createSyncSabTransport(
 
   function awaitReady(id: number, deadline: number, label: string): void {
     const start = now();
-    if (typical < SPIN_MS && spinUntil(id, start + SPIN_MS)) {
+    if (spinning && typical < SPIN_MS && spinUntil(id, start + SPIN_MS)) {
       settled(start);
       return;
     }
