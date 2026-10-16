@@ -952,6 +952,21 @@ Releases are cut by semantic-release on every push to `main`, in two jobs, and o
 
 Moving the `certified` dist-tag stays manual. Automating it needs an npm token that may change dist-tags, in a step that re-hashes the tarball and tags only on a `certified` line.
 
+### Certification in the pull request (`cert-review-pr`)
+
+`.github/workflows/cert-review-pr.yml` certifies a pull request before it merges, so `main`, and with it npm's `latest`, only gets certified changes. For now it reports as the `cert-review-pr` commit status and isn't a required check. It becomes the required `cert-review` once it has proved itself on real pull requests; the post-publish review above stays until then.
+
+- **Which pull requests:** those that change shipped behaviour, by a conservative path filter (`behaviourFiles` in `lib.mjs`): `src/`, `build.mjs`, `package.json` and its lock, `tsconfig*.json`, `.releaserc*`, `tools/release-recover.mjs`, the workflows that build or publish (`release.yml`, `ci.yml`), and the reviewer's own code (`tools/cert-review/`, `cert-review*.yml`, `.github/runner.mjs`). A pull request run executes the pull request's own workflow, so a pull request that changes the reviewer reviews itself: **such pull requests always go to the Kernel Coordinator before they are queued.** Any other pull request gets a green status that says `not behaviour: <files>`, so the skip is recorded.
+- **When:** only for a same-repo pull request with `merge-ok`, when the label is added and on every push while it is set. Each pull request has its own concurrency group, and a newer push cancels the older review. A behaviour change without `merge-ok` gets a red status, `waits for merge-ok to be reviewed`. Other labels don't start or cancel anything. Fork code never reaches the pools or the key.
+- **What:** the checkout is the event's default `refs/pull/N/merge`, the pull request merged onto `main` at review time, so a review is of what would land, without pushing to the branch. Both sides are packed in the same run, on a GitHub-hosted runner, with no secrets: the candidate (the merge ref, `x.y.z-pr.N.<run>`) and the base (its first parent, `main`). Then:
+  - the candidate's whole suite, and the base's;
+  - the pull request's new or changed test files on the base build (the NEGATIVE: a fix's test must fail on `main` and pass on the candidate);
+  - kernel-compat on the candidate's artifact (#812), against npm's `latest`;
+  - the review (Claude through `claude-code-action/base-action`, with the Bedrock key in that step only, no issue filing);
+  - and record, which re-hashes the candidate's artifact against the pack job's sha256.
+- **The verdict** goes into the commit status on the pull request's head and a comment on the pull request. Certified is green. A FAIL is red with the line, and the pull request needs a fix. **INCOMPLETE** (a job that didn't succeed, no verdict, a suite without results) is red with `re-run the failed jobs`, never a silent pass. Main moving on after a review doesn't trigger another one; a push does.
+- **Merge groups only look up.** On `merge_group`, the job lists the group's pull requests (its merge commits) and requires, for each one, a green status on the head being merged, or no behaviour change. Otherwise it's red, naming the pull request. It runs in seconds, with no secrets and no model. The group's `ci / test` covers the combined tree.
+
 Not part of the run yet: bios's real setup (the base-set sweep in bios, the upgrade boot, the sudo rows under `enforce`). It would plug in as one more job before review that runs slicc-bios's `npm run test:cert` with `CERT_COMMANDS` and the release's tarball, and leaves its results next to the others.
 
 ## Test fixtures

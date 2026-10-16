@@ -19,6 +19,7 @@ const { values } = parseArgs({
     version: { type: 'string' },
     head: { type: 'string', default: '' },
     pr: { type: 'string', default: '' },
+    only: { type: 'boolean', default: false },
     out: { type: 'string' },
   },
 });
@@ -33,8 +34,9 @@ const gh = (path) =>
   );
 
 const head = values.head || `v${version}`;
-const pages = gh(`repos/${repo}/compare/v${prev}...${head}?per_page=250`);
-const commits = pages.flatMap((p) => p.commits ?? []);
+const commits = values.only
+  ? []
+  : gh(`repos/${repo}/compare/v${prev}...${head}?per_page=250`).flatMap((p) => p.commits ?? []);
 const extra = values.pr ? values.pr.split(',').map(Number) : [];
 const rows = [];
 for (const n of [...new Set([...mergedPrs(commits), ...extra])]) {
@@ -56,9 +58,8 @@ function published() {
   }
 }
 
-const onNpm = published();
-const tags = gh(`repos/${repo}/git/matching-refs/tags/v`)
-  .flat()
+const onNpm = values.only ? new Set() : published();
+const tags = (values.only ? [] : gh(`repos/${repo}/git/matching-refs/tags/v`).flat())
   .filter((ref) => ref.object.type === 'commit')
   .map((ref) => ({ version: ref.ref.replace(/^refs\/tags\/v/, ''), sha: ref.object.sha }))
   .filter(

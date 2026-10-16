@@ -1,0 +1,549 @@
+name: cert-review-pr
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  merge_group:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.event.action == 'labeled' && github.event.label.name != 'merge-ok' && format('cert-review-pr-noop-{0}', github.run_id) || format('cert-review-pr-{0}', github.event.pull_request.number || github.event.merge_group.head_sha) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  LEFTHOOK: '0'
+  CERT_CONTEXT: cert-review-pr
+
+jobs:
+  plan:
+    name: cert-review-pr / plan
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    outputs:
+      go: ${{ steps.plan.outputs.go }}
+      self: ${{ steps.plan.outputs.self }}
+      version: ${{ steps.versions.outputs.version }}
+      prev: ${{ steps.versions.outputs.prev }}
+      base: ${{ steps.versions.outputs.prev }}
+      latest: ${{ steps.versions.outputs.latest }}
+      commit: ${{ steps.versions.outputs.commit }}
+      parent: ${{ steps.versions.outputs.parent }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          ACTION: ${{ github.event.action }}
+          LABEL: ${{ github.event.label.name }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          node tools/cert-review/pr.mjs plan --repo "$GITHUB_REPOSITORY" --pr "$PR" --head "$HEAD_SHA" \
+            --action "$ACTION" --label "$LABEL" --labels "$LABELS" --run "$GITHUB_RUN_ID" --context "$CERT_CONTEXT"
+
+      - id: versions
+        if: steps.plan.outputs.go == 'true'
+        env:
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          latest=$(npm view @ai-ecoverse/slicc-kernel dist-tags.latest --prefer-online)
+          [[ "$latest" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::npm's latest reads as '$latest'"; exit 1; }
+          IFS=. read -r major minor patch <<< "$latest"
+          {
+            echo "latest=$latest"
+            echo "version=$major.$minor.$((patch + 1))-pr.$PR.$GITHUB_RUN_ID"
+            echo "prev=$latest-base.$PR.$GITHUB_RUN_ID"
+            echo "commit=$(git rev-parse HEAD)"
+            echo "parent=$(git rev-parse HEAD^1)"
+          } | tee -a "$GITHUB_OUTPUT"
+
+  pack:
+    name: cert-review-pr / pack ${{ matrix.side }}
+    needs: plan
+    if: needs.plan.outputs.go == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        side: [candidate, base]
+    outputs:
+      candidate: ${{ steps.pack.outputs.candidate }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+          cache: npm
+
+      - id: pack
+        env:
+          SIDE: ${{ matrix.side }}
+          VERSION: ${{ matrix.side == 'candidate' && needs.plan.outputs.version || needs.plan.outputs.prev }}
+          REF: ${{ matrix.side == 'candidate' && needs.plan.outputs.commit || needs.plan.outputs.parent }}
+        run: |
+          set -euo pipefail
+          node tools/cert-review/pack.mjs --version "$VERSION" --ref "$REF" --out "$RUNNER_TEMP/pack"
+          sha=$(cut -d' ' -f1 "$RUNNER_TEMP"/pack/*.tgz.sha256)
+          if [ "$SIDE" = candidate ]; then echo "candidate=$sha" >> "$GITHUB_OUTPUT"; fi
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: kernel-tgz-${{ matrix.side == 'candidate' && needs.plan.outputs.version || needs.plan.outputs.prev }}
+          path: |
+            ${{ runner.temp }}/pack/*.tgz
+            ${{ runner.temp }}/pack/*.tgz.sha256
+            ${{ runner.temp }}/pack/pack.json
+          if-no-files-found: error
+          overwrite: true
+
+  delta:
+    name: cert-review-pr / delta
+    needs: plan
+    if: needs.plan.outputs.go == 'true'
+    runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          sparse-checkout: tools/cert-review
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+
+      - name: gh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: tools/cert-review/gh.sh
+
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          PREV: ${{ needs.plan.outputs.prev }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          HEAD_SHA: ${{ needs.plan.outputs.commit }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          node tools/cert-review/delta.mjs --repo "$GITHUB_REPOSITORY" --prev "$PREV" --version "$VERSION" \
+            --head "$HEAD_SHA" --pr "$PR" --only --out "$RUNNER_TEMP/evidence/delta.json"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: cert-review-delta-${{ needs.plan.outputs.version }}
+          path: ${{ runner.temp }}/evidence/delta.json
+          if-no-files-found: error
+          overwrite: true
+
+  suite:
+    name: cert-review-pr / suite ${{ matrix.which }}
+    needs: [plan, pack, delta]
+    if: ${{ !cancelled() && needs.plan.outputs.go == 'true' && needs.pack.result == 'success' && needs.delta.result == 'success' }}
+    runs-on: ${{ vars.CERT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        which: [release, base]
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+      PREV: ${{ needs.plan.outputs.prev }}
+      WHICH: ${{ matrix.which }}
+      COMMIT: ${{ needs.plan.outputs.commit }}
+      PARENT: ${{ needs.plan.outputs.parent }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: cert-review-delta-${{ needs.plan.outputs.version }}
+          path: ${{ runner.temp }}/evidence
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          pattern: kernel-tgz-*
+          path: ${{ runner.temp }}/packs
+          merge-multiple: true
+
+      - name: The tree (the pull request on main, or main), its dependencies and Chromium, and both packed builds
+        run: |
+          set -euo pipefail
+          ref=$([ "$WHICH" = release ] && echo "$COMMIT" || echo "$PARENT")
+          tag=$([ "$WHICH" = release ] && echo "$VERSION" || echo "$PREV")
+          tree="$RUNNER_TEMP/tree"
+          git worktree add --detach "$tree" "$ref"
+          (cd "$tree" && npm ci --no-audit --no-fund && npx playwright-core install --no-shell chromium)
+          mkdir -p "$RUNNER_TEMP/tgz"
+          cp "$RUNNER_TEMP"/packs/*.tgz "$RUNNER_TEMP/tgz/"
+          ls -l "$RUNNER_TEMP/tgz"
+          echo "TREE=$tree" >> "$GITHUB_ENV"
+          echo "TAG=$tag" >> "$GITHUB_ENV"
+
+      - name: The suite on the packed build (no secrets in this step)
+        run: |
+          node tools/cert-review/suite.mjs --tree "$TREE" --tgz "$RUNNER_TEMP/tgz/ai-ecoverse-slicc-kernel-$TAG.tgz" \
+            --out "$RUNNER_TEMP/evidence/$WHICH"
+
+      - name: The pull request's tests on main's build, the NEGATIVE (no secrets in this step)
+        if: ${{ !cancelled() && matrix.which == 'release' }}
+        run: |
+          set -euo pipefail
+          ev="$RUNNER_TEMP/evidence"
+          files=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).files.join(","))' "$ev/delta.json")
+          if [ -n "$files" ]; then
+            node tools/cert-review/suite.mjs --tree "$TREE" --tgz "$RUNNER_TEMP/tgz/ai-ecoverse-slicc-kernel-$PREV.tgz" \
+              --files "$files" --out "$ev/prev" || true
+          else
+            printf '{"files":[],"exit":0,"pass":0,"fail":0,"skip":0,"results":[]}\n' > "$ev/prev.json"
+          fi
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: ${{ !cancelled() }}
+        with:
+          name: cert-review-suite-${{ matrix.which }}-${{ needs.plan.outputs.version }}
+          path: |
+            ${{ runner.temp }}/evidence/*.json
+            ${{ runner.temp }}/evidence/*.jsonl
+            ${{ runner.temp }}/evidence/*.log
+          if-no-files-found: ignore
+          overwrite: true
+
+  compat:
+    name: cert-review-pr / kernel-compat
+    needs: [plan, pack]
+    if: ${{ !cancelled() && needs.plan.outputs.go == 'true' && needs.pack.result == 'success' }}
+    runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 300
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          sparse-checkout: tools/cert-review
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+
+      - name: gh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: tools/cert-review/gh.sh
+
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          COMMIT: ${{ needs.plan.outputs.commit }}
+          SHA256: ${{ needs.pack.outputs.candidate }}
+          LATEST: ${{ needs.plan.outputs.latest }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/evidence"
+          node tools/cert-review/compat.mjs --repo "$GITHUB_REPOSITORY" --version "$VERSION" --commit "$COMMIT" \
+            --ref main --run "$GITHUB_RUN_ID" --artifact "kernel-tgz-$VERSION" --sha256 "$SHA256" \
+            --dispatch --rerun --wait 150 --reference "$LATEST" --out "$RUNNER_TEMP/evidence/compat.json"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: cert-review-compat-${{ needs.plan.outputs.version }}
+          path: ${{ runner.temp }}/evidence/compat.json
+          if-no-files-found: error
+          overwrite: true
+
+  review:
+    name: cert-review-pr / review
+    needs: [plan, pack, delta, suite, compat]
+    if: ${{ !cancelled() && needs.plan.outputs.go == 'true' && needs.delta.result == 'success' }}
+    runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      pull-requests: read
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+      PREV: ${{ needs.plan.outputs.prev }}
+      BASE: ${{ needs.plan.outputs.base }}
+      PR: ${{ github.event.pull_request.number }}
+      FILING: 'off'
+      REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          sparse-checkout: tools/cert-review
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+
+      - name: gh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: tools/cert-review/gh.sh
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          pattern: cert-review-suite-*-${{ needs.plan.outputs.version }}
+          path: ${{ runner.temp }}/evidence
+          merge-multiple: true
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: cert-review-delta-${{ needs.plan.outputs.version }}
+          path: ${{ runner.temp }}/evidence
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        continue-on-error: true
+        with:
+          name: cert-review-compat-${{ needs.plan.outputs.version }}
+          path: ${{ runner.temp }}/evidence
+
+      - name: Findings, in code
+        id: findings
+        run: |
+          set -euo pipefail
+          ev="$RUNNER_TEMP/evidence"
+          mkdir -p "$ev/logs" "$RUNNER_TEMP/cert-review"
+          mv "$ev"/*.log "$ev/logs/" 2> /dev/null || true
+          cp tools/cert-review/known.json "$ev/known.json"
+          node tools/cert-review/findings.mjs --delta "$ev/delta.json" --prev "$ev/prev.json" \
+            --release "$ev/release.json" --base "$ev/base.json" --compat "$ev/compat.json" --out "$ev/findings.json"
+          {
+            echo 'prompt<<CERT_PROMPT_END'
+            EVIDENCE="$ev" OUT="$RUNNER_TEMP/cert-review" node tools/cert-review/prompt.mjs
+            echo 'CERT_PROMPT_END'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Review
+        id: review
+        uses: anthropics/claude-code-action/base-action@a26b07d8c778b0c43f64618e5fd29fd0f8af72e8
+        env:
+          AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
+          AWS_REGION: ${{ vars.CERT_AWS_REGION || 'us-west-2' }}
+          GH_TOKEN: ${{ github.token }}
+        with:
+          use_bedrock: 'true'
+          claude_args: |
+            --model ${{ vars.CERT_BEDROCK_MODEL || 'global.anthropic.claude-opus-5-5' }}
+            --allowedTools "Read,Write,Glob,Grep,Bash(gh issue list:*),Bash(gh issue view:*),Bash(gh pr view:*)"
+            --max-turns 200
+          prompt: ${{ steps.findings.outputs.prompt }}
+
+      - name: Evidence
+        if: ${{ !cancelled() }}
+        env:
+          EXECUTION: ${{ steps.review.outputs.execution_file }}
+        run: |
+          cp "${EXECUTION:-/dev/null}" "$RUNNER_TEMP/evidence/claude-turns.json" 2> /dev/null || true
+          mkdir -p "$RUNNER_TEMP/cert-review"
+          cp "$RUNNER_TEMP/evidence/findings.json" "$RUNNER_TEMP/cert-review/findings.json" 2> /dev/null || true
+          cp -r "$RUNNER_TEMP/cert-review" "$RUNNER_TEMP/evidence/" 2> /dev/null || true
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: ${{ !cancelled() }}
+        with:
+          name: cert-review-verdict-${{ needs.plan.outputs.version }}
+          path: |
+            ${{ runner.temp }}/cert-review/verdict.json
+            ${{ runner.temp }}/cert-review/comment.md
+            ${{ runner.temp }}/cert-review/findings.json
+          if-no-files-found: ignore
+          overwrite: true
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: ${{ !cancelled() }}
+        with:
+          name: cert-review-evidence-${{ needs.plan.outputs.version }}
+          path: ${{ runner.temp }}/evidence/
+          if-no-files-found: ignore
+          overwrite: true
+
+  record:
+    name: cert-review-pr / record
+    needs: [plan, pack, suite, compat, review]
+    if: ${{ !cancelled() && needs.plan.outputs.go == 'true' && needs.review.result != 'cancelled' }}
+    runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    outputs:
+      conclusion: ${{ steps.record.outputs.conclusion }}
+      commit: ${{ steps.record.outputs.commit }}
+      line: ${{ steps.record.outputs.line }}
+      artifact: ${{ steps.artifact.outputs.artifact-id }}
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+      PLAN_COMMIT: ${{ needs.plan.outputs.commit }}
+      PR: ${{ github.event.pull_request.number }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      SHA256: ${{ needs.pack.outputs.candidate }}
+      REVIEW: ${{ needs.review.result }}
+      JOBS: pack=${{ needs.pack.result }},suite=${{ needs.suite.result }},kernel-compat=${{ needs.compat.result }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          sparse-checkout: tools/cert-review
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+
+      - name: gh
+        run: tools/cert-review/gh.sh
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        continue-on-error: true
+        with:
+          name: cert-review-verdict-${{ needs.plan.outputs.version }}
+          path: ${{ runner.temp }}/cert-review
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        continue-on-error: true
+        with:
+          name: kernel-tgz-${{ needs.plan.outputs.version }}
+          path: ${{ runner.temp }}/pack
+
+      - name: The line, from the build, the findings and the verdict
+        id: record
+        run: |
+          mkdir -p "$RUNNER_TEMP/cert-review" "$RUNNER_TEMP/pack"
+          findings="$RUNNER_TEMP/cert-review/findings.json"
+          tgz=$(find "$RUNNER_TEMP/pack" -maxdepth 1 -name '*.tgz' | head -1)
+          if node tools/cert-review/record.mjs --version "$VERSION" --review "$RUNNER_TEMP/cert-review" \
+            --out "$RUNNER_TEMP/record" --run "$RUN_URL" --repo "$GH_REPO" --commit "$PLAN_COMMIT" \
+            --pr "$PR" --head "$HEAD_SHA" --tarball "$tgz" --sha256 "$SHA256" --review-result "$REVIEW" --jobs "$JOBS" \
+            --findings "$findings"; then
+            echo "conclusion=success" >> "$GITHUB_OUTPUT"
+          else
+            state=$(node -p 'require(process.argv[1]).state || "failure"' "$RUNNER_TEMP/record/record.json" 2> /dev/null || echo failure)
+            echo "conclusion=$state" >> "$GITHUB_OUTPUT"
+          fi
+          commit=$(node -p 'require(process.argv[1]).commit || ""' "$RUNNER_TEMP/record/record.json")
+          echo "commit=${commit:-$PLAN_COMMIT}" >> "$GITHUB_OUTPUT"
+          echo "line=$(head -1 "$RUNNER_TEMP/record/line.txt")" >> "$GITHUB_OUTPUT"
+          { echo '```'; cat "$RUNNER_TEMP/record/line.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        id: artifact
+        with:
+          name: cert-review-record-${{ needs.plan.outputs.version }}
+          path: |
+            ${{ runner.temp }}/record/record.json
+            ${{ runner.temp }}/record/line.txt
+            ${{ runner.temp }}/record/body.md
+          if-no-files-found: error
+          overwrite: true
+
+  report:
+    name: cert-review-pr / report
+    needs: [plan, record]
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && needs.plan.outputs.go == 'true' }}
+    runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+      statuses: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      PR: ${{ github.event.pull_request.number }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      CONCLUSION: ${{ needs.record.outputs.conclusion }}
+      LINE: ${{ needs.record.outputs.line }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        continue-on-error: true
+        with:
+          name: cert-review-record-${{ needs.plan.outputs.version }}
+          path: ${{ runner.temp }}/record
+
+      - name: The verdict as the cert-review status on the pull request's head, and in a comment
+        run: |
+          set -euo pipefail
+          state=${CONCLUSION:-error}
+          line=${LINE:-"cert-ci: INCOMPLETE #$PR: no record (re-run the failed jobs)"}
+          desc=$(printf '%s' "$line" | cut -c1-140)
+          curl -fsS -X POST -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
+            "$GITHUB_API_URL/repos/$GH_REPO/statuses/$HEAD_SHA" \
+            -d "$(node -e 'console.log(JSON.stringify({ state: process.argv[1], context: process.argv[2], target_url: process.argv[3], description: process.argv[4] }))' "$state" "$CERT_CONTEXT" "$RUN_URL" "$desc")" > /dev/null
+          echo "$CERT_CONTEXT $state on $HEAD_SHA: $line"
+          { echo '```'; echo "$line"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          body="$RUNNER_TEMP/record/body.md"
+          [ -f "$body" ] || printf '%s\n' '<!-- cert-review -->' "$line" '<!-- /cert-review -->' > "$body"
+          id=$(gh api "repos/$GH_REPO/issues/$PR/comments" --paginate --jq '.[] | select(.body | contains("<!-- cert-review -->")) | .id' | tail -1)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$GH_REPO/issues/comments/$id" -F body=@"$body" > /dev/null
+          else
+            gh api "repos/$GH_REPO/issues/$PR/comments" -F body=@"$body" > /dev/null
+          fi
+          if [ "$state" != success ]; then echo "::error title=cert-review::$line"; exit 1; fi
+
+  group:
+    name: cert-review-pr / merge group
+    if: github.event_name == 'merge_group'
+    runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          sparse-checkout: tools/cert-review
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+
+      - name: Each pull request in the group has a certified review of the head being merged, or changes no behaviour
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+        run: |
+          node tools/cert-review/pr.mjs lookup --repo "$GITHUB_REPOSITORY" --base "$BASE_SHA" --head "$HEAD_SHA" \
+            --run "$GITHUB_RUN_ID" --context "$CERT_CONTEXT"
