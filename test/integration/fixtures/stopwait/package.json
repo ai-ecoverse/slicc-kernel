@@ -1,0 +1,12 @@
+{
+  "name": "stopwait",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "stopwait": {
+        "wasm": "bin/stopwait.wasm"
+      }
+    }
+  }
+}

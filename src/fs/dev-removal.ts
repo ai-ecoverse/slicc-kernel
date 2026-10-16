@@ -17,3 +17,12 @@ export function devRemoval(
   if (cred && cred.euid !== 0) return 'EACCES';
   return path === '/dev' ? 'EBUSY' : 'EPERM';
 }
+
+export function devCreation(
+  path: string,
+  cred: Readonly<{ euid: number }> | undefined
+): 'EACCES' | 'EPERM' | 'EROFS' | undefined {
+  if (path === '/proc' || path.startsWith('/proc/')) return 'EROFS';
+  if (path === '/dev' || !inDevTree(path)) return undefined;
+  return cred && cred.euid !== 0 ? 'EACCES' : 'EPERM';
+}

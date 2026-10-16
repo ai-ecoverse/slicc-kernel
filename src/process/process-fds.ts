@@ -1,4 +1,4 @@
-import { devRemoval } from '../fs/dev-removal.ts';
+import { devCreation, devRemoval } from '../fs/dev-removal.ts';
 import { hostnameOf, hostsFile } from '../kernel/net/loopback-names.ts';
 import type { MountLine } from '../kernel/proc-info.ts';
 import { type LiveFsNode, type LiveLinkFs, linkLive, liveNodePath } from '../realm/live-vfs-fs.ts';
@@ -253,6 +253,7 @@ export interface KernelImports {
   umask?: unknown;
   faccessat?: unknown;
   linkat?: unknown;
+  symlinkat?: unknown;
   uname?: unknown;
   utimensat?: unknown;
   getppid?: unknown;
@@ -269,6 +270,7 @@ const LITERALS: Record<keyof KernelImports, string> = {
   umask: '__syscall_umask',
   faccessat: '__syscall_faccessat',
   linkat: '__syscall_linkat',
+  symlinkat: '__syscall_symlinkat',
   uname: '__syscall_uname',
   utimensat: '__syscall_utimensat',
   getppid: 'slicc_getppid_js',
@@ -987,6 +989,65 @@ export function kernelLink(
       }
       return own(olddirfd, oldpath, newdirfd, newpath, flags);
     },
+    true
+  );
+}
+
+interface CreationFs extends AccessFs {
+  sliccCred?: { euid: number };
+}
+
+function refusedCreation(Fs: CreationFs, heap: WebAssembly.Memory, dirfd: number, ptr: number) {
+  const name = cString(heap, ptr);
+  const path = absoluteOf(name, name.startsWith('/') ? '/' : baseOf(Fs, dirfd));
+  const refused = devCreation(path, Fs.sliccCred);
+  if (!refused || !Fs.lookupPath) return 0;
+  try {
+    Fs.lookupPath(path, { follow: false });
+    return 0;
+  } catch {
+    return -wasiErrno(refused);
+  }
+}
+
+export function devCreations(
+  imports: WebAssembly.Imports,
+  fs: () => ProcessFs | undefined,
+  memory: () => WebAssembly.Memory | undefined,
+  glue?: KernelImports
+): void {
+  const check = (dirfd: number, ptr: number) => {
+    const Fs = fs() as CreationFs | undefined;
+    const heap = memory();
+    return Fs && heap ? refusedCreation(Fs, heap, dirfd, ptr) : 0;
+  };
+  wrapImport(
+    imports,
+    'openat',
+    glue,
+    (own) => (dirfd, path, flags, varargs) =>
+      (flags & O_CREAT && check(dirfd, path)) || own(dirfd, path, flags, varargs),
+    true
+  );
+  wrapImport(
+    imports,
+    'mkdirat',
+    glue,
+    (own) => (dirfd, path, mode) => check(dirfd, path) || own(dirfd, path, mode),
+    true
+  );
+  wrapImport(
+    imports,
+    'mknodat',
+    glue,
+    (own) => (dirfd, path, mode, dev) => check(dirfd, path) || own(dirfd, path, mode, dev),
+    true
+  );
+  wrapImport(
+    imports,
+    'symlinkat',
+    glue,
+    (own) => (target, dirfd, path) => check(dirfd, path) || own(target, dirfd, path),
     true
   );
 }
