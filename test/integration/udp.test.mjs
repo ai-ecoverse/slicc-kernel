@@ -116,7 +116,7 @@ test(
         '224.0.0.1 ENETUNREACH',
         '255.255.255.255 ENETUNREACH',
         'connect ENETUNREACH',
-        'unix EPROTONOSUPPORT',
+        'unix ok',
         '',
       ].join('\n')
     );
