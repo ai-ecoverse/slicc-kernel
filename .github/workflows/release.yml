@@ -89,3 +89,43 @@ jobs:
       - run: node tools/release-recover.mjs
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  verify:
+    name: release / verify on npm
+    needs: [tag, publish]
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && needs.tag.outputs.tags != '' }}
+    runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 90
+    env:
+      LEFTHOOK: '0'
+    permissions:
+      contents: write
+      issues: read
+      pull-requests: read
+      statuses: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          sparse-checkout: tools/cert-review
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+
+      - name: gh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: tools/cert-review/gh.sh
+
+      - name: Each tag on npm is the tarball release.yml built from the tag on main, and its notes carry the certified line
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAGS: ${{ needs.tag.outputs.tags }}
+        run: |
+          set -euo pipefail
+          status=0
+          for tag in $TAGS; do
+            node tools/cert-review/verify.mjs --repo "$GITHUB_REPOSITORY" --version "${tag#v}" --run "$GITHUB_RUN_ID" --wait 3600 || status=1
+          done
+          exit "$status"

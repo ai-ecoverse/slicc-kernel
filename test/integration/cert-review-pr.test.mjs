@@ -10,8 +10,11 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
   behaviourFiles,
+  decide,
   groupVerdict,
   jobsEvidence,
+  REVIEWER_GLOBS,
+  resultsMap,
   reviewsItself,
   withMissing,
 } from '../../tools/cert-review/lib.mjs';
@@ -143,7 +146,7 @@ test("record certifies a pull request's own build by its sha256, never other byt
     join(bin, 'gh'),
     `#!/usr/bin/env node
 const a = process.argv.slice(2).join(' ');
-if (a.includes('graphql')) console.log(JSON.stringify({ data: { repository: { issue: { state: 'OPEN', stateReason: null, closedAt: null, closedByPullRequestsReferences: { nodes: [] } } } } }));
+if (a.includes('graphql')) console.log(JSON.stringify({ data: { repository: { issue: { state: a.includes('n=407') ? 'CLOSED' : 'OPEN', stateReason: null, closedAt: null, closedByPullRequestsReferences: { nodes: [] } } } } }));
 else if (a.includes('--slurp')) console.log('[[]]');
 else if (a.includes('/compare/')) console.log(JSON.stringify({ status: 'ahead' }));
 else if (a.includes('/commits/')) console.log(JSON.stringify({ commit: { committer: { date: '2026-01-01T00:00:00Z' } } }));
@@ -195,6 +198,22 @@ else process.exit(1);
   };
   const good = await record(['--tarball', ok.file, '--sha256', ok.sha256]);
   assert.equal(good.status, 0, JSON.stringify(good.json.problems));
+  await writeFile(
+    join(review, 'verdict.json'),
+    JSON.stringify({
+      verdict: 'certified',
+      known: ['ai-ecoverse/homescoop#407', 'ai-ecoverse/homescoop#600', '#675'],
+    })
+  );
+  const closed = await record(['--tarball', ok.file, '--sha256', ok.sha256]);
+  assert.match(
+    closed.json.line,
+    /; known: ai-ecoverse\/homescoop#600, ai-ecoverse\/slicc-kernel#675\)$/
+  );
+  await writeFile(
+    join(review, 'verdict.json'),
+    JSON.stringify({ verdict: 'certified', known: [] })
+  );
   assert.equal(good.json.state, 'success');
   assert.equal(good.json.pr, '9');
   assert.match(
@@ -298,7 +317,7 @@ test('the plan reviews only a behaviour change with merge-ok, records a skip as 
   const go = await plan(['--action', 'labeled', '--label', 'merge-ok', '--labels', 'merge-ok']);
   assert.match(go.out, /go=true/);
   assert.equal(statuses().at(-1).state, 'pending');
-  assert.equal(statuses().at(-1).context, 'cert-review-pr');
+  assert.equal(statuses().at(-1).context, 'cert-review');
   const sync = await plan(['--action', 'synchronize', '--labels', 'bug,merge-ok']);
   assert.match(sync.out, /go=true/);
   const other = await plan(['--action', 'labeled', '--label', 'bug', '--labels', 'bug,merge-ok']);
@@ -343,10 +362,10 @@ test("the merge group's cert-review is a lookup: each PR's status on the head be
       if (st[1] === heads[11])
         return [
           { context: 'ci / test', state: 'success' },
-          { context: 'cert-review-pr', state: 'success' },
+          { context: 'cert-review', state: 'success' },
         ];
       if (st[1] === heads[12])
-        return [{ context: 'cert-review-pr', state: state12, description: 'cert-ci: INCOMPLETE' }];
+        return [{ context: 'cert-review', state: state12, description: 'cert-ci: INCOMPLETE' }];
       return [];
     }
     if (method === 'POST' && url.startsWith('/repos/o/r/statuses/')) return {};
@@ -590,7 +609,7 @@ test('a merge group with a reviewer change the self-guard did not pass is red, a
   assert.equal(posted().at(-1).state, 'error');
   assert.match(
     jobs.guard,
-    /uses: ai-ecoverse\/slicc-shared-web\/\.github\/actions\/cert-self-guard@64467c916d5c6936992da7fad0be74b653bc303d\n {8}with:\n {10}approval-label: cert-review-approved\n {10}paths: \|\n {12}\.github\/workflows\/cert\*\.yml\n {12}\.github\/workflows\/cert\*\.yaml\n {12}scripts\/cert\/\*\*\n {12}tools\/cert-review\/\*\*\n {12}\.github\/actions\/cert-self-guard\/\*\*\n {12}\.github\/runner\.mjs\n/
+    /uses: ai-ecoverse\/slicc-shared-web\/\.github\/actions\/cert-self-guard@fe97ae242f8ddcc824334cad287346d7df3f0bbb\n {8}with:\n {10}approval-label: cert-review-approved\n {10}paths: \|\n {12}\.github\/workflows\/cert\*\.yml\n {12}\.github\/workflows\/cert\*\.yaml\n {12}scripts\/cert\/\*\*\n {12}tools\/cert-review\/\*\*\n {12}\.github\/actions\/cert-self-guard\/\*\*\n {12}\.github\/runner\.mjs\n/
   );
   assert.match(jobs.guard, /continue-on-error: true/);
   assert.match(jobs.guard, /fetch-depth: 0/);
@@ -610,4 +629,149 @@ test('a merge group with a reviewer change the self-guard did not pass is red, a
       /needs\.plan\.outputs\.go == 'true'/,
       `${name} runs only when plan says go`
     );
+});
+
+test("the NEGATIVE runs the pull request's test/** on main's tree and build: a tools fix fails there, and a test file that fails to load is never a NEGATIVE (#861)", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'cert-negative-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const repo = join(dir, 'repo');
+  const git = (...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8' }).trim();
+  await mkdir(join(repo, 'tools'), { recursive: true });
+  await mkdir(join(repo, 'test/integration/helpers'), { recursive: true });
+  await writeFile(
+    join(repo, 'package.json'),
+    JSON.stringify({ scripts: { test: "node --test 'test/integration/*.test.mjs'" } })
+  );
+  await writeFile(join(repo, 'tools/recover.mjs'), 'export const skipsOlder = () => false;\n');
+  await writeFile(
+    join(repo, 'test/integration/helpers/fake.mjs'),
+    'export const latest = "1.0.0";\n'
+  );
+  execFileSync('git', ['init', '-q', repo]);
+  git('add', '-A');
+  git('-c', 'user.email=a@b', '-c', 'user.name=a', 'commit', '-qm', 'base');
+  const parent = git('rev-parse', 'HEAD');
+  await writeFile(join(repo, 'tools/recover.mjs'), 'export const skipsOlder = () => true;\n');
+  await writeFile(join(repo, 'tools/brand-new.mjs'), 'export const fresh = true;\n');
+  await writeFile(
+    join(repo, 'test/integration/helpers/fake.mjs'),
+    'export const latest = "2.0.0";\n'
+  );
+  await writeFile(join(repo, 'test/integration/fixture.json'), '{"older":"1.5.0"}\n');
+  await writeFile(
+    join(repo, 'test/integration/recover.test.mjs'),
+    "import assert from 'node:assert/strict';\nimport { readFileSync } from 'node:fs';\nimport { test } from 'node:test';\nimport { skipsOlder } from '../../tools/recover.mjs';\nimport { latest } from './helpers/fake.mjs';\ntest('skips a version older than latest', () => {\n  assert.equal(latest, '2.0.0');\n  assert.ok(JSON.parse(readFileSync(new URL('./fixture.json', import.meta.url))).older);\n  assert.equal(skipsOlder(), true);\n});\n"
+  );
+  await writeFile(
+    join(repo, 'test/integration/fresh.test.mjs'),
+    "import assert from 'node:assert/strict';\nimport { test } from 'node:test';\nimport { fresh } from '../../tools/brand-new.mjs';\ntest('the new tool is fresh', () => assert.equal(fresh, true));\n"
+  );
+  git('add', '-A');
+  git('-c', 'user.email=a@b', '-c', 'user.name=a', 'commit', '-qm', 'fix: skip older');
+  const commit = git('rev-parse', 'HEAD');
+  const tree = join(dir, 'tree');
+  git('worktree', 'add', '-q', '--detach', tree, parent);
+  const patch = join(dir, 'tests.patch');
+  await writeFile(
+    patch,
+    execFileSync('git', ['-C', tree, 'diff', '--binary', parent, commit, '--', 'test/'], {
+      encoding: 'utf8',
+    })
+  );
+  execFileSync('git', ['-C', tree, 'apply', patch]);
+  assert.equal(
+    await readFile(join(tree, 'tools/recover.mjs'), 'utf8'),
+    'export const skipsOlder = () => false;\n'
+  );
+  await mkdir(join(dir, 'package/dist'), { recursive: true });
+  await writeFile(join(dir, 'package/dist/node.js'), 'export {};\n');
+  execFileSync('tar', ['-czf', join(dir, 'k.tgz'), '-C', dir, 'package']);
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  const files = 'test/integration/recover.test.mjs,test/integration/fresh.test.mjs';
+  const out = join(dir, 'prev');
+  spawnSync(
+    process.execPath,
+    [
+      fileURLToPath(new URL('suite.mjs', tools)),
+      '--tree',
+      tree,
+      '--tgz',
+      join(dir, 'k.tgz'),
+      '--files',
+      files,
+      '--out',
+      out,
+    ],
+    { env, encoding: 'utf8' }
+  );
+  const prev = resultsMap(JSON.parse(await readFile(`${out}.json`, 'utf8')).results);
+  const next = resultsMap([
+    {
+      file: 'test/integration/recover.test.mjs',
+      name: 'skips a version older than latest',
+      status: 'pass',
+    },
+    { file: 'test/integration/fresh.test.mjs', name: 'the new tool is fresh', status: 'pass' },
+  ]);
+  const row = (file, title) => ({
+    pr: 9,
+    title: 'fix: skip older',
+    kind: 'fix',
+    behaviour: true,
+    tests: [{ file, titles: [title] }],
+  });
+  assert.equal(
+    decide(
+      row('test/integration/recover.test.mjs', 'skips a version older than latest'),
+      prev,
+      next
+    ).decision,
+    'negative'
+  );
+  assert.equal(
+    decide(row('test/integration/fresh.test.mjs', 'the new tool is fresh'), prev, next).decision,
+    'prev-not-run'
+  );
+  assert.match(
+    jobs.suite,
+    /if: \$\{\{ !cancelled\(\) && matrix\.which == 'base' \}\}\n {8}run: \|[\s\S]*?git -C "\$TREE" diff --binary "\$PARENT" "\$COMMIT" -- test\/ > "\$RUNNER_TEMP\/tests\.patch"\n {12}if \[ -s "\$RUNNER_TEMP\/tests\.patch" \]; then git -C "\$TREE" apply "\$RUNNER_TEMP\/tests\.patch"; fi\n {12}node tools\/cert-review\/suite\.mjs --tree "\$TREE" --tgz "\$RUNNER_TEMP\/tgz\/ai-ecoverse-slicc-kernel-\$PREV\.tgz"/
+  );
+});
+
+test("the reviewer's paths are one list: the self-guard holds exactly what plan counts as a change to the reviewer, so the coordinator's label is never ignored", () => {
+  const block = /\n {10}paths: \|\n((?: {12}[^\n]+\n)+)/.exec(jobs.guard)?.[1] ?? '';
+  assert.deepEqual(
+    block
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean),
+    REVIEWER_GLOBS
+  );
+  for (const filename of [
+    '.github/workflows/cert-foo.yml',
+    '.github/workflows/cert-review-pr.yml',
+    'scripts/cert/x.mjs',
+    'tools/cert-review/lib.mjs',
+    '.github/actions/cert-self-guard/action.yml',
+    '.github/runner.mjs',
+  ]) {
+    assert.equal(reviewsItself([{ filename }]), true, filename);
+    assert.deepEqual(behaviourFiles([{ filename }]), [filename], filename);
+  }
+  assert.equal(reviewsItself([{ filename: 'src/kernel/fd-table.ts' }]), false);
+  assert.equal(reviewsItself([{ filename: '.github/workflows/release.yml' }]), false);
+  assert.match(jobs.guard, /cert-self-guard@fe97ae242f8ddcc824334cad287346d7df3f0bbb\n/);
+});
+
+test('the required cert-review never waits forever: a plan or lookup that fails before its status posts an error that asks for a re-run', () => {
+  assert.match(workflow, /\n {2}CERT_CONTEXT: cert-review\n/);
+  assert.match(
+    jobs.plan,
+    /if: failure\(\) && \(steps\.plan\.outputs\.posted != 'true' \|\| steps\.plan\.outputs\.go == 'true'\)\n[\s\S]*?\\"state\\":\\"error\\",\\"context\\":\\"\$CERT_CONTEXT\\"[\s\S]*?did not finish its plan: re-run the failed jobs/
+  );
+  assert.match(
+    jobs.group,
+    /if: failure\(\) && steps\.lookup\.outputs\.posted != 'true'\n[\s\S]*?SHA: \$\{\{ github\.event\.merge_group\.head_sha \}\}[\s\S]*?did not finish its lookup: re-run the failed jobs/
+  );
 });

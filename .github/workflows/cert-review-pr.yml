@@ -14,7 +14,7 @@ concurrency:
 
 env:
   LEFTHOOK: '0'
-  CERT_CONTEXT: cert-review-pr
+  CERT_CONTEXT: cert-review
 
 jobs:
   guard:
@@ -40,7 +40,7 @@ jobs:
 
       - id: guard
         continue-on-error: true
-        uses: ai-ecoverse/slicc-shared-web/.github/actions/cert-self-guard@64467c916d5c6936992da7fad0be74b653bc303d
+        uses: ai-ecoverse/slicc-shared-web/.github/actions/cert-self-guard@fe97ae242f8ddcc824334cad287346d7df3f0bbb
         with:
           approval-label: cert-review-approved
           paths: |
@@ -113,6 +113,16 @@ jobs:
             echo "commit=$GITHUB_SHA"
             echo "parent=$(git rev-parse "$GITHUB_SHA^1")"
           } | tee -a "$GITHUB_OUTPUT"
+
+      - name: A plan that failed still leaves a status, so the required check never waits forever
+        if: failure() && (steps.plan.outputs.posted != 'true' || steps.plan.outputs.go == 'true')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          curl -fsS -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/$SHA" \
+            -d "{\"state\":\"error\",\"context\":\"$CERT_CONTEXT\",\"target_url\":\"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\",\"description\":\"cert-review did not finish its plan: re-run the failed jobs\"}" > /dev/null
 
   pack:
     name: cert-review-pr / pack ${{ matrix.side }}
@@ -264,13 +274,15 @@ jobs:
           node tools/cert-review/suite.mjs --tree "$TREE" --tgz "$RUNNER_TEMP/tgz/ai-ecoverse-slicc-kernel-$TAG.tgz" \
             --out "$RUNNER_TEMP/evidence/$WHICH"
 
-      - name: The pull request's tests on main's build, the NEGATIVE (no secrets in this step)
-        if: ${{ !cancelled() && matrix.which == 'release' }}
+      - name: The pull request's tests on main's tree and main's build, the NEGATIVE (no secrets in this step)
+        if: ${{ !cancelled() && matrix.which == 'base' }}
         run: |
           set -euo pipefail
           ev="$RUNNER_TEMP/evidence"
           files=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).files.join(","))' "$ev/delta.json")
           if [ -n "$files" ]; then
+            git -C "$TREE" diff --binary "$PARENT" "$COMMIT" -- test/ > "$RUNNER_TEMP/tests.patch"
+            if [ -s "$RUNNER_TEMP/tests.patch" ]; then git -C "$TREE" apply "$RUNNER_TEMP/tests.patch"; fi
             node tools/cert-review/suite.mjs --tree "$TREE" --tgz "$RUNNER_TEMP/tgz/ai-ecoverse-slicc-kernel-$PREV.tgz" \
               --files "$files" --out "$ev/prev" || true
           else
@@ -591,7 +603,8 @@ jobs:
         with:
           node-version: 24
 
-      - name: Each pull request in the group has a certified review of the head being merged, or changes no behaviour
+      - id: lookup
+        name: Each pull request in the group has a certified review of the head being merged, or changes no behaviour
         env:
           GH_TOKEN: ${{ github.token }}
           BASE_SHA: ${{ github.event.merge_group.base_sha }}
@@ -600,3 +613,13 @@ jobs:
         run: |
           node tools/cert-review/pr.mjs lookup --repo "$GITHUB_REPOSITORY" --base "$BASE_SHA" --head "$HEAD_SHA" \
             --run "$GITHUB_RUN_ID" --context "$CERT_CONTEXT" --guard "$GUARD" --approval cert-review-approved
+
+      - name: A lookup that failed still leaves a status, so the required check never waits forever
+        if: failure() && steps.lookup.outputs.posted != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.merge_group.head_sha }}
+        run: |
+          curl -fsS -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/$SHA" \
+            -d "{\"state\":\"error\",\"context\":\"$CERT_CONTEXT\",\"target_url\":\"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\",\"description\":\"cert-review did not finish its lookup: re-run the failed jobs\"}" > /dev/null

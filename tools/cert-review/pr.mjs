@@ -14,7 +14,7 @@ const { positionals, values } = parseArgs({
     labels: { type: 'string', default: '' },
     base: { type: 'string', default: '' },
     run: { type: 'string', default: '' },
-    context: { type: 'string', default: 'cert-review-pr' },
+    context: { type: 'string', default: 'cert-review' },
     guard: { type: 'string', default: '' },
     approval: { type: 'string', default: 'cert-review-approved' },
   },
@@ -71,6 +71,7 @@ async function status(sha, state, description) {
     }),
   });
   console.log(`${context} ${state} on ${sha}: ${description}`);
+  if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, 'posted=true\n');
 }
 
 const GUARD_FAIL = (label) => `reviewer change: needs coordinator review (${label} on this head)`;
