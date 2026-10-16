@@ -9,15 +9,6 @@ export const SEM_HANDLES_MAX = 256;
 const NAME_MAX = 251;
 const TIMER_MAX_MS = 0x7fff_ffff;
 
-const deadlines = new WeakMap<object, number>();
-
-function timeLeft(req: object, timeoutMs: number): number {
-  const now = performance.now();
-  const deadline = deadlines.get(req) ?? now + timeoutMs;
-  deadlines.set(req, deadline);
-  return Math.max(0, deadline - now);
-}
-
 export type SemWaitHow = 'block' | 'try' | 'timed';
 
 export type SemSyscall =
@@ -265,9 +256,8 @@ export async function semSyscall(req: SemSyscall, proc: SemProcess): Promise<Syn
       const sem = handles.get(req.handle);
       if (sem.take()) return ok();
       if (req.how === 'try') throw new KernelError('EAGAIN');
-      const timeoutMs = req.how === 'block' ? -1 : timeLeft(req, req.timeoutMs);
-      if (timeoutMs === 0) throw new KernelError('ETIMEDOUT');
-      const got = await sem.wait(proc.blocking(), timeoutMs);
+      if (req.how === 'timed' && req.timeoutMs === 0) throw new KernelError('ETIMEDOUT');
+      const got = await sem.wait(proc.blocking(), req.how === 'block' ? -1 : req.timeoutMs);
       if (!got) throw new KernelError('ETIMEDOUT');
       return ok();
     }
