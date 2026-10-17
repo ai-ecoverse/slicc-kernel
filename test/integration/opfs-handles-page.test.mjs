@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { after, test } from 'node:test';
 import { launch } from './chrome.mjs';
 import { booted, ok } from './kernel.mjs';
@@ -77,4 +78,19 @@ test('in the page, a write shows its size at once to the next stat, and an appen
     ),
     ok(counts)
   );
+});
+
+test('in the page, a 170 KB file tee writes from stdin reads back with the same bytes (#774)', async (t) => {
+  const { page } = await booted(chrome, t);
+  const body = Array.from(
+    { length: 4000 },
+    (_, i) => `line ${i} of the upload ${'x'.repeat(i % 37)}\n`
+  ).join('');
+  const sum = createHash('sha256').update(body).digest('hex');
+  const run = (argv, stdin) =>
+    page.evaluate((a, s) => window.kernel.run(a, { cwd: '/home', stdin: s }), argv, stdin);
+  for (let i = 0; i < 2; i++) {
+    assert.deepEqual(await run(['tee', 'up.txt'], body), ok(body));
+    assert.deepEqual(await run(['sha256sum', 'up.txt']), ok(`${sum}  up.txt\n`));
+  }
 });

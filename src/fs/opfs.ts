@@ -246,7 +246,10 @@ export class OpfsFs implements KernelFs {
   private changes = 0;
   private replacing: Promise<void> = Promise.resolve();
   private replacements = 0;
-  private readonly glances = new WeakMap<FileSystemFileHandle, { at: number; file: File }>();
+  private readonly glances = new WeakMap<
+    FileSystemFileHandle,
+    { at: number; file: File; changes: number }
+  >();
   private readonly found = new WeakMap<FileSystemFileHandle, number>();
   private readonly checked = new WeakMap<FileSystemDirectoryHandle, number>();
 
@@ -843,14 +846,15 @@ export class OpfsFs implements KernelFs {
 
   private glanced(handle: FileSystemFileHandle): File | undefined {
     const seen = this.glances.get(handle);
-    return seen && performance.now() - seen.at < GLANCE_MS ? seen.file : undefined;
+    const fresh = seen && seen.changes === this.changes && performance.now() - seen.at < GLANCE_MS;
+    return fresh ? seen.file : undefined;
   }
 
   private async glance(handle: FileSystemFileHandle): Promise<File> {
     const at = performance.now();
     const before = this.changes;
     const file = await handle.getFile();
-    if (before === this.changes) this.glances.set(handle, { at, file });
+    if (before === this.changes) this.glances.set(handle, { at, file, changes: before });
     else this.glances.delete(handle);
     return file;
   }
