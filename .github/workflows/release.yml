@@ -130,6 +130,6 @@ jobs:
           set -euo pipefail
           status=0
           for tag in $TAGS; do
-            node tools/cert-review/verify.mjs --repo "$GITHUB_REPOSITORY" --version "${tag#v}" --run "$GITHUB_RUN_ID" --wait 3600 || status=1
+            tools/cert-review/gate.sh verify node tools/cert-review/verify.mjs --repo "$GITHUB_REPOSITORY" --version "${tag#v}" --run "$GITHUB_RUN_ID" --wait 3600 || status=1
           done
           exit "$status"
