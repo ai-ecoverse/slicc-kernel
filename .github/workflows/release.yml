@@ -86,9 +86,13 @@ jobs:
 
       - run: npm ci
 
-      - run: node tools/release-recover.mjs
+      - name: Recover a release semantic-release left half done, and fail unless the tool printed its verdict
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -o pipefail
+          node tools/release-recover.mjs | tee "$RUNNER_TEMP/recover.log"
+          grep -q '^release-recover: PASS' "$RUNNER_TEMP/recover.log" || { echo "::error title=release-recover::no PASS verdict from release-recover; its silence is not a pass"; exit 1; }
 
   verify:
     name: release / verify on npm

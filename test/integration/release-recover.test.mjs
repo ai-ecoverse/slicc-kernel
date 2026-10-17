@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
-import { recover } from '../../tools/release-recover.mjs';
+import { fileURLToPath } from 'node:url';
+import { recover, verdictOf } from '../../tools/release-recover.mjs';
 
 const NAME = '@ai-ecoverse/slicc-kernel';
 
@@ -64,4 +69,53 @@ test("release-recover fails closed when npm's latest can't be read: nothing is p
     /npm's latest .* reads as ""/
   );
   assert.ok(!empty.calls.includes('npm publish'));
+});
+
+test("release.yml's `node tools/release-recover.mjs` does its work also from a checkout reached through a symlink, instead of exiting 0 having done nothing", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'recover-link-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const repo = fileURLToPath(new URL('../../', import.meta.url));
+  await symlink(repo, join(dir, 'checkout'));
+  const empty = join(dir, 'empty');
+  await symlink(tmpdir(), empty);
+  const run = spawnSync(process.execPath, [join(dir, 'checkout', 'tools', 'release-recover.mjs')], {
+    cwd: empty,
+    encoding: 'utf8',
+    env: { PATH: process.env.PATH, RELEASE_OUTCOME: 'success' },
+  });
+  assert.notEqual(run.status, 0, `it ran its main part: ${run.stdout}${run.stderr}`);
+  assert.match(run.stderr, /package\.json/);
+  assert.match(run.stdout, /^release-recover: FAIL .*package\.json/m);
+});
+
+test('release-recover always ends with a verdict line, and release.yml fails the step when the line is missing, so a tool that silently did nothing never reads as a pass', async (t) => {
+  assert.equal(verdictOf([]), 'release-recover: PASS nothing to recover');
+  assert.equal(
+    verdictOf(['tag v1.2.3 on origin', '@x/y@1.2.3 on npm']),
+    'release-recover: PASS recovered tag v1.2.3 on origin, @x/y@1.2.3 on npm'
+  );
+  assert.equal(verdictOf([], new Error('boom\nmore')), 'release-recover: FAIL boom');
+  const release = await readFile(
+    new URL('../../.github/workflows/release.yml', import.meta.url),
+    'utf8'
+  );
+  const step =
+    /\n {8}run: \|\n((?: {10}.*\n)*?) {10}node tools\/release-recover\.mjs \| tee "\$RUNNER_TEMP\/recover\.log"\n((?: {10}.*\n)+)/.exec(
+      release
+    );
+  assert.ok(step, 'release.yml runs release-recover through the verdict check');
+  const script = (tool) =>
+    `${step[1]}${tool} | tee "$RUNNER_TEMP/recover.log"\n${step[2]}`.replace(/^ {10}/gm, '');
+  const dir = await mkdtemp(join(tmpdir(), 'recover-step-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const bash = (tool) =>
+    spawnSync('bash', ['-c', script(tool)], {
+      encoding: 'utf8',
+      env: { PATH: process.env.PATH, RUNNER_TEMP: dir },
+    });
+  const silent = bash('true');
+  assert.equal(silent.status, 1, 'a guard that skipped the tool fails the step');
+  assert.match(silent.stdout, /no PASS verdict from release-recover/);
+  assert.equal(bash("echo 'release-recover: PASS nothing to recover'").status, 0);
+  assert.notEqual(bash("echo 'release-recover: FAIL x'; exit 1").status, 0);
 });

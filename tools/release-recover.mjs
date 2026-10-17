@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
@@ -200,11 +201,32 @@ export async function recover({
   return recovered;
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const { name } = JSON.parse(await readFile('package.json', 'utf8'));
-  const prior = (process.env.RELEASE_PRIOR_TAGS ?? '').split(/\s+/).filter(Boolean);
-  await recover({ name, outcome: process.env.RELEASE_OUTCOME, prior }).catch((err) => {
+const real = (path) => {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+};
+
+export const VERDICT = 'release-recover:';
+
+export function verdictOf(recovered, error) {
+  if (error) return `${VERDICT} FAIL ${String(error.message ?? error).split('\n')[0]}`;
+  return recovered.length
+    ? `${VERDICT} PASS recovered ${recovered.join(', ')}`
+    : `${VERDICT} PASS nothing to recover`;
+}
+
+if (process.argv[1] && real(process.argv[1]) === real(fileURLToPath(import.meta.url))) {
+  try {
+    const { name } = JSON.parse(await readFile('package.json', 'utf8'));
+    const prior = (process.env.RELEASE_PRIOR_TAGS ?? '').split(/\s+/).filter(Boolean);
+    const recovered = await recover({ name, outcome: process.env.RELEASE_OUTCOME, prior });
+    console.log(verdictOf(recovered));
+  } catch (err) {
     console.error(err.message);
+    console.log(verdictOf([], err));
     process.exitCode = 1;
-  });
+  }
 }
