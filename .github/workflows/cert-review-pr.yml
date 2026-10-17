@@ -217,7 +217,7 @@ jobs:
 
   same:
     name: cert-review-pr / same dist
-    needs: [plan, pack, pack-base]
+    needs: [plan, pack, pack-base, delta]
     if: ${{ !cancelled() && needs.plan.outputs.go == 'true' && needs.plan.outputs.manifest == 'true' && needs.pack.result == 'success' && needs.pack-base.result == 'success' }}
     runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
@@ -240,16 +240,18 @@ jobs:
         with:
           node-version: 24
 
-      - name: The run holds exactly the two packed builds, each the one its pack job uploaded
+      - name: The run holds exactly the two packed builds and the delta, each the one its job uploaded, and no other evidence yet
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.plan.outputs.version }}
           PREV: ${{ needs.plan.outputs.prev }}
           CANDIDATE: ${{ needs.pack.outputs.id }}@${{ needs.pack.outputs.digest }}
           BASE: ${{ needs.pack-base.outputs.id }}@${{ needs.pack-base.outputs.digest }}
+          DELTA: ${{ needs.delta.outputs.id }}@${{ needs.delta.outputs.digest }}
         run: |
           tools/cert-review/gate.sh artifacts node tools/cert-review/artifacts.mjs --repo "$GITHUB_REPOSITORY" --run "$GITHUB_RUN_ID" \
-            --prefix kernel-tgz- --expect "kernel-tgz-$VERSION=$CANDIDATE" --expect "kernel-tgz-$PREV=$BASE"
+            --prefix kernel-tgz- --prefix cert-review- --expect "kernel-tgz-$VERSION=$CANDIDATE" --expect "kernel-tgz-$PREV=$BASE" \
+            --expect "cert-review-delta-$VERSION=$DELTA"
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
@@ -273,6 +275,14 @@ jobs:
             --base "$RUNNER_TEMP/packs/kernel-tgz-$PREV/ai-ecoverse-slicc-kernel-$PREV.tgz" --candidate-version "$VERSION" --base-version "$PREV" \
             --out "$RUNNER_TEMP/same/same.json"
 
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        id: upload
+        if: ${{ !cancelled() }}
+        with:
+          name: cert-review-same-${{ needs.plan.outputs.version }}
+          path: ${{ runner.temp }}/same/same.json
+          if-no-files-found: ignore
+
       - name: Identical dist is not behaviour, and the status says so with both builds' sha256
         env:
           GH_TOKEN: ${{ github.token }}
@@ -281,14 +291,6 @@ jobs:
         run: |
           tools/cert-review/gate.sh 'pr same' node tools/cert-review/pr.mjs same --repo "$GITHUB_REPOSITORY" --pr "$PR" --head "$HEAD_SHA" \
             --run "$GITHUB_RUN_ID" --context "$CERT_CONTEXT" --evidence "$RUNNER_TEMP/same/same.json"
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        id: upload
-        if: ${{ !cancelled() }}
-        with:
-          name: cert-review-same-${{ needs.plan.outputs.version }}
-          path: ${{ runner.temp }}/same/same.json
-          if-no-files-found: ignore
 
   delta:
     name: cert-review-pr / delta

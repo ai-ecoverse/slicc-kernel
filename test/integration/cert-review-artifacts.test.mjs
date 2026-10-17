@@ -151,11 +151,20 @@ test('same posts "not behaviour (identical dist)" only after the run\'s tarballs
   const candidate = at(/artifact-ids: \$\{\{ needs\.pack\.outputs\.id \}\}/);
   const base = at(/artifact-ids: \$\{\{ needs\.pack-base\.outputs\.id \}\}/);
   const same = at(/tools\/cert-review\/same\.mjs/);
+  const upload = at(/name: cert-review-same-\$\{\{ needs\.plan\.outputs\.version \}\}/);
   const post = at(/tools\/cert-review\/pr\.mjs same/);
   assert.ok(
-    guard >= 0 && guard < candidate && candidate < base && base < same && same < post,
-    `${guard} ${candidate} ${base} ${same} ${post}`
+    guard >= 0 &&
+      guard < candidate &&
+      candidate < base &&
+      base < same &&
+      same < upload &&
+      upload < post,
+    `${guard} ${candidate} ${base} ${same} ${upload} ${post}`
   );
+  assert.match(all[guard].run, /--prefix kernel-tgz- --prefix cert-review- /);
+  assert.match(all[guard].run, /--expect "cert-review-delta-\$VERSION=\$DELTA"/);
+  assert.match(jobs.same, /needs: \[plan, pack, pack-base, delta\]/);
   assert.doesNotMatch(jobs.same, /continue-on-error|pattern:/);
   assert.match(
     all[guard].text,
@@ -165,7 +174,13 @@ test('same posts "not behaviour (identical dist)" only after the run\'s tarballs
     all[guard].text,
     /BASE: \$\{\{ needs\.pack-base\.outputs\.id \}\}@\$\{\{ needs\.pack-base\.outputs\.digest \}\}/
   );
-  const env = { VERSION: V, PREV: P, CANDIDATE: `1@${hex('a')}`, BASE: `2@${hex('b')}` };
+  const env = {
+    VERSION: V,
+    PREV: P,
+    CANDIDATE: `1@${hex('a')}`,
+    BASE: `2@${hex('b')}`,
+    DELTA: `3@${hex('c')}`,
+  };
   const honest = [
     art(1, `kernel-tgz-${V}`, 'a'),
     art(2, `kernel-tgz-${P}`, 'b'),
@@ -177,6 +192,19 @@ test('same posts "not behaviour (identical dist)" only after the run\'s tarballs
   const r = await sh(all[guard].run, { ...env, GITHUB_API_URL: await fakeApi(t, forged) });
   assert.notEqual(r.code, 0, r.out);
   assert.match(r.out, /kernel-tgz-1\.2\.3-base\.9\.77 \(8\) was uploaded by no producer job/);
+  const early = await sh(all[guard].run, {
+    ...env,
+    GITHUB_API_URL: await fakeApi(t, [...honest, art(9, `cert-review-same-${V}`, 'd')]),
+  });
+  assert.notEqual(
+    early.code,
+    0,
+    'evidence planted under the name same is about to upload stops same before it posts'
+  );
+  assert.match(
+    early.out,
+    /cert-review-same-1\.2\.4-pr\.9\.77 \(9\) was uploaded by no producer job/
+  );
 });
 
 test("record's artifact check covers every producer and fails the record as INCOMPLETE on a planted artifact; no consumer downloads by pattern, and no producer overwrites", async (t) => {
