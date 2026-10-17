@@ -476,16 +476,20 @@ export class WasiHost {
         promote: (fd) => this.fds.promote(fd),
         calls: {
           flock: (fd, kind, wait) =>
-            void this.o.kernel.call({ op: 'flock', fd, kind, ...(wait ? { wait } : {}) }),
+            void this.fds.restarting(() =>
+              this.o.kernel.call({ op: 'flock', fd, kind, ...(wait ? { wait } : {}) })
+            ),
           set: (target, kind, start, len, wait) =>
-            void this.o.kernel.call({
-              op: 'lk-set',
-              ...target,
-              kind,
-              start,
-              len,
-              ...(wait ? { wait } : {}),
-            }),
+            void this.fds.restarting(() =>
+              this.o.kernel.call({
+                op: 'lk-set',
+                ...target,
+                kind,
+                start,
+                len,
+                ...(wait ? { wait } : {}),
+              })
+            ),
           get: (target, kind, start, len) =>
             this.o.kernel.call({ op: 'lk-get', ...target, kind, start, len }) as LockHeld | null,
         },

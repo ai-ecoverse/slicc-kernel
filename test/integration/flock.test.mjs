@@ -190,3 +190,19 @@ test('flock on a FIFO: two opens of it are one object and exclude each other, a 
     'flock ok\nflock ok\nflock EAGAIN\nflock ok\n'
   );
 });
+
+test('a blocking flock and F_SETLKW go on waiting after a handler installed with SA_RESTART runs (#931)', async (t) => {
+  const { sh } = await booted(t);
+  assert.equal(
+    await sh(
+      'touch f; flocktest open 0 rw f flock 0 ex touch r await g & flocktest await r trapr open 0 rw f flock 0 ex & b=$!; sleep 0.3; kill -USR1 $b; sleep 0.3; echo released; touch g; wait'
+    ),
+    'flock ok\nhandler\nreleased\nflock ok\n'
+  );
+  assert.equal(
+    await sh(
+      'rm -f r g; flocktest open 0 rw f fcntl 0 w touch r await g & flocktest await r trapr open 0 rw f fcntlw 0 w & b=$!; sleep 0.3; kill -USR1 $b; sleep 0.3; echo released; touch g; wait'
+    ),
+    'fcntl ok\nhandler\nreleased\nfcntlw ok\n'
+  );
+});

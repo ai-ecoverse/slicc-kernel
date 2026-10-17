@@ -616,14 +616,14 @@ Directories are renamed with `FileSystemHandle.move()` where available, else by 
   - **cmd:** `12` `F_GETLK`, `13` `F_SETLK` or `14` `F_SETLKW`. Any other cmd is `EINVAL`.
   - **The struct:** musl's wasm32 `struct flock`, 32 bytes: `l_type` i16 at 0 (`0` read, `1` write, `2` unlock), `l_whence` i16 at 2 (`0` SET, `1` CUR, `2` END, resolved against the descriptor's offset or size), `l_start` i64 at 8, `l_len` i64 at 16 (`0` to EOF and beyond, negative before `l_start`), `l_pid` i32 at 24. The kernel reads and writes only those five fields and never the padding.
   - **F_GETLK:** with a conflicting lock, it writes that lock back (`l_whence` 0, its absolute start, its length, the holder's pid). Without one, it sets only `l_type` to `2`.
-  - **Errors (WASI numbers):** `EAGAIN` for a conflict on `F_SETLK` (never `EACCES`), `EINTR` when a signal with a handler ends an `F_SETLKW` wait, `EDEADLK` for a wait that would close a cycle, `EBADF` for a bad descriptor or a lock type the descriptor's access mode doesn't allow, and `EINVAL` for a bad `l_type` or `l_whence` or a start before 0.
+  - **Errors (WASI numbers):** `EAGAIN` for a conflict on `F_SETLK` (never `EACCES`), `EINTR` when a signal with a handler ends an `F_SETLKW` wait (a handler installed with `SA_RESTART` runs and the wait goes on, [#931](https://github.com/ai-ecoverse/slicc-kernel/issues/931)), `EDEADLK` for a wait that would close a cycle, `EBADF` for a bad descriptor or a lock type the descriptor's access mode doesn't allow, and `EINVAL` for a bad `l_type` or `l_whence` or a start before 0.
   - **Semantics:** the same as Emscripten's, above. A libc that finds no import on an older kernel gets `ENOSYS` and keeps its local answer.
   - **Any kind of descriptor** ([#893](https://github.com/ai-ecoverse/slicc-kernel/issues/893)): a pipe, a socket or a terminal takes record locks too, as on Linux, keyed by the object (both ends of a pipe are one object, each socket is its own, a terminal is one object however often it's opened). `l_whence` `CUR` and `END` count from 0 there.
 - **`slicc.flock(fd, op) -> errno`** ([#893](https://github.com/ai-ecoverse/slicc-kernel/issues/893)): BSD `flock(2)` locks, with Linux's semantics, for a WASIX program on any descriptor: a regular file, a directory, a pipe, a socket, a terminal or a `/dev` device.
   - **op:** Linux's bits, `LOCK_SH` `1`, `LOCK_EX` `2` or `LOCK_UN` `8`, optionally with `LOCK_NB` `4`. Anything else is `EINVAL`.
   - **Owner:** the open file description, not the process. A `dup`'d descriptor and one a forked child or a spawned program inherits share it, so the child's `LOCK_EX|LOCK_NB` is granted and its `LOCK_UN` releases the lock for the parent too. So children that `flock(STDOUT)` an inherited STDOUT don't exclude each other, on Linux either: for that, each child opens a lock file itself. A second open of the same object is another description and conflicts: the file opened again (by any name of it), `/dev/tty` opened again, the other end of a pipe.
   - **Rules:** shared locks coexist, an exclusive one excludes every other description, and any access mode takes either kind, so `LOCK_EX` on a read-only open excludes (homescoop#758). A conversion drops the old lock before it takes the new one, as on Linux, so a refused `LOCK_NB` conversion leaves no lock. The lock goes with `LOCK_UN` or when the description's last descriptor closes, at exit or kill too. flock locks and `fcntl` record locks are separate and don't block each other.
-  - **Errors (WASI numbers):** `EAGAIN` for a conflict with `LOCK_NB`, `EINTR` when a signal with a handler ends a wait (as for `F_SETLKW`: a libc that wants `SA_RESTART` asks again), `EBADF` for a bad descriptor, `EINVAL` for a bad op. There's no deadlock detection, as on Linux.
+  - **Errors (WASI numbers):** `EAGAIN` for a conflict with `LOCK_NB`, `EINTR` when a signal with a handler ends a wait (with `SA_RESTART` the handler runs and the wait goes on, [#931](https://github.com/ai-ecoverse/slicc-kernel/issues/931)), `EBADF` for a bad descriptor, `EINVAL` for a bad op. There's no deadlock detection, as on Linux.
   - **Limits:** locks are per kernel ([#675](https://github.com/ai-ecoverse/slicc-kernel/issues/675)). A file the program buffers itself is handed to the kernel at its first `flock`, with every other descriptor the program has open on it. A libc that finds no import on an older kernel gets `ENOSYS`; wasix-libc's `flock()` then keeps its old answer. Emscripten programs and the imports module's `tryLock` are unchanged.
 - **Rules on a mount:**
   - a rename across mounts is `EXDEV`, so `mv` copies;
@@ -1252,11 +1252,11 @@ A WASIX C program for `test/integration/wasix-locks.test.mjs` (#722). It calls `
 
 A WASIX C program for `test/integration/flock.test.mjs` (#893). It calls `slicc.flock` and `slicc.fcntl_lock` directly (`import_module("slicc")`). Its arguments are a sequence of steps, run in order:
 - `open SLOT r|w|rw PATH`, `pipe SLOT SLOT`, `pair SLOT SLOT` (a `socketpair`), `dup FROM TO`, `fd SLOT N` (names an inherited descriptor), `close SLOT`;
-- `flock SLOT OP`, where OP is made of `sh`, `ex`, `un` and `nb` (`exnb` is `LOCK_EX|LOCK_NB`) or is a number; `badfd`; `fcntl SLOT r|w|u` (`F_SETLK` on the whole file);
+- `flock SLOT OP`, where OP is made of `sh`, `ex`, `un` and `nb` (`exnb` is `LOCK_EX|LOCK_NB`) or is a number; `badfd`; `fcntl SLOT r|w|u` (`F_SETLK` on the whole file), `fcntlw SLOT r|w` (`F_SETLKW`);
 - `fork … end` (the child runs the steps up to the matching `end`, its lines start with `child `, and the parent waits for it before it goes on after `end`);
-- `touch PATH`, `await PATH`, `sleep MS`, `say TEXT`, `trap` (a `SIGUSR1` handler).
+- `touch PATH`, `await PATH`, `sleep MS`, `say TEXT`, `trap` (a `SIGUSR1` handler), `trapr` (one with `SA_RESTART` that prints `handler`).
 
-**Build:** as `wlocktest`. Two builds give the same bytes: `bin/flocktest.wasm` is 58,442 bytes, sha256 `687ecf21c836adda4ef2e328b6032eed28ca7d37efc8e88d3aaefb8fc117115a`.
+**Build:** as `wlocktest`. Two builds give the same bytes: `bin/flocktest.wasm` is 58,907 bytes, sha256 `58b16f19911e0665ba1fbda3fa6d370d6228f4c59dfc13902f126c6e8b43b120`.
 
 ## License
 
