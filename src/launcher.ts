@@ -1790,6 +1790,7 @@ export class Launcher {
         load: this.loadAverage(),
         cpu: this.cpuTotal(),
         wasm: this.memories.count(),
+        peers: Number(this.locks.shared?.() === true),
       }),
       sudo: (call, signal) => this.sudo(pid, call, signal),
       crontab: (call) => this.crontab(pid, call),

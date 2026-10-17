@@ -39,4 +39,5 @@ export interface ProcessListing {
   load?: readonly [number, number, number];
   cpu?: { utime: number; stime: number; idle: number };
   wasm?: { live: number; ceiling: number };
+  peers?: number;
 }

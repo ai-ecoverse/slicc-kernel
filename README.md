@@ -948,6 +948,8 @@ In a browser every process worker of the page shares one renderer. V8 reserves a
 - **The rare residual case:** a process that fails to instantiate with nobody waiting on it, which happens only when something outside the count fills the renderer. It ends with status 126 and `<program>: cannot allocate memory for a new process (too many processes at once)` on its stderr, never a JS `RangeError`.
 - **`/proc/sys/kernel/slicc_wasm_memories`** reads `<live> <ceiling>` (the ceiling 0 for none).
 
+`/proc/sys/kernel/slicc_shared_root` reads `1` while another kernel shares the root (a tab, or a second kernel in the page) and `0` otherwise. A peer's tab that closes is noticed when this kernel next writes to a shared file, at most every 30 s, so the value can stay `1` for a while after a peer has gone.
+
 ### Metadata
 
 OPFS stores names, bytes, sizes and modification times, nothing else. Everything POSIX needs on top of that lives in an IndexedDB sidecar, so it survives reloads and new kernels:
