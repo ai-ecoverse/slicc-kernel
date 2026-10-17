@@ -35,9 +35,15 @@ export interface JsConnectOptions {
   signal?: AbortSignal;
 }
 
+export interface JsResolveOptions {
+  family?: 0 | 4 | 6;
+  signal?: AbortSignal;
+}
+
 export interface JsNet {
   listen(options?: JsListenOptions): Promise<JsListener>;
   connect(options: JsConnectOptions): Promise<JsConnection>;
+  resolve(name: string, options?: JsResolveOptions): Promise<string[]>;
 }
 
 export interface NetIo {
@@ -157,7 +163,24 @@ export function netOps(kernel: JsKernel, io: NetIo): JsNet {
     };
   };
 
+  const lookup = async (name: string, options: JsResolveOptions = {}): Promise<string[]> => {
+    const family = options.family ?? 0;
+    if (family !== 0 && family !== 4 && family !== 6) {
+      throw new JsCallError('EAI_FAMILY', `resolve ${name}`);
+    }
+    const signal = options.signal ?? NEVER;
+    signal.throwIfAborted();
+    const req = { op: 'sock-resolve' as const, name: String(name), family };
+    const r = await kernel.blocking(req, signal).catch((err: unknown) => {
+      signal.throwIfAborted();
+      if ((err as { code?: unknown }).code !== 'ENOENT') throw err;
+      throw new JsCallError('ENOTFOUND', `resolve ${name}`);
+    });
+    return [...((r.ok && r.kind === 'json' ? r.json : []) as string[])];
+  };
+
   return {
+    resolve: lookup,
     listen: (options = {}) =>
       opened(async (fd) => {
         const addr: InetAddr = {
