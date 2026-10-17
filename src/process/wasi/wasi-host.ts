@@ -3,7 +3,7 @@ import { physicalPath } from '../../fs/physical-path.ts';
 import { localCpuNanos } from '../../kernel/cpu-clock.ts';
 import { type Cred, type CredChange, MAX_GROUPS } from '../../kernel/cred.ts';
 import type { DeviceMeta, KernelFdKind } from '../../kernel/fd-table.ts';
-import { SIG } from '../../kernel/signals.ts';
+import { KERNEL_SIGINFO, SIG, type SigInfo } from '../../kernel/signals.ts';
 import type { SyncFsBridgeStat, SyncFsPosixBridge } from '../../realm/sync-fs-wire.ts';
 import type { LockHeld } from '../process-locks.ts';
 import { type LockedFile, lockImports } from './slicc-lock.ts';
@@ -116,6 +116,7 @@ const DEFAULT_UMASK = 0o022;
 const MONOTONIC_BASE = BigInt(Math.round(performance.timeOrigin)) * NS_PER_MS;
 
 const MAX_READ = 1024 * 1024;
+const SIGINFO_BYTES = 24;
 
 const FD_ALIAS =
   /^\/(?:dev\/(stdin|stdout|stderr)|dev\/fd\/(\d+)|proc\/(self|[1-9]\d*)\/fd\/(\d+))$/;
@@ -556,6 +557,24 @@ export class WasiHost {
           this.entered
         );
       },
+      sigwait_info: (lo: number, _hi: number, timeout: bigint, info: number) => {
+        const mask = this.sigmask;
+        if (!mask) return E.NOSYS;
+        let took = 0;
+        const r = mask.sigwait(
+          lo,
+          timeout,
+          (set) => void this.o.kernel.call({ op: 'sig-waiting', tid: mask.tid, set }),
+          (sig) => {
+            took = sig;
+          },
+          this.entered
+        );
+        if (r === E.SUCCESS) this.writeSiginfo(info, took, mask.tid);
+        return r;
+      },
+      siginfo_take: (sig: number, info: number) =>
+        this.writeSiginfo(info, sig, this.sigmask?.tid ?? this.tid, false) ? E.SUCCESS : E.NOENT,
       sigaction_inherited: (out: number) => {
         const bits = this.o.kernel.call({ op: 'sig-inherited' }) as number;
         mem.view().setBigUint64(out, BigInt(libcBits(bits) >>> 0), true);
@@ -1273,6 +1292,23 @@ export class WasiHost {
     } catch {
       return undefined;
     }
+  }
+
+  private writeSiginfo(at: number, sig: number, tid: number, waited = true): boolean {
+    const taken = this.o.kernel.call({ op: 'sig-info', sig, tid }) as SigInfo | null;
+    if (!taken && !waited) return false;
+    const info = taken ?? KERNEL_SIGINFO;
+    const view = this.mem.view();
+    const size = Math.min(view.getUint32(at, true), SIGINFO_BYTES);
+    const fields = [sig, info.code, info.pid, info.uid, info.status];
+    let filled = 4;
+    for (const [i, value] of fields.entries()) {
+      if (4 + (i + 1) * 4 > size) break;
+      view.setInt32(4 + at + i * 4, value, true);
+      filled = 4 + (i + 1) * 4;
+    }
+    view.setUint32(at, filled, true);
+    return true;
   }
 
   private fdAlias(path: string): FdAlias | undefined {

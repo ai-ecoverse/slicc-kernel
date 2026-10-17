@@ -74,7 +74,7 @@ const RESERVED = RESERVED_NAMESPACES;
 export const UNDELIVERED: Readonly<Record<string, readonly string[]>> = {
   [PREVIEW1]: ['proc_exit', 'clock_time_get'],
   [WASIX]: ['proc_exit2', 'thread_exit', 'thread_spawn_v2', 'callback_signal'],
-  [SLICC]: ['sigaction_set'],
+  [SLICC]: ['sigaction_set', 'siginfo_take'],
   wasi: ['thread-spawn'],
 };
 
