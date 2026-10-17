@@ -172,7 +172,7 @@ export class RemoteWatch {
   }
 
   wrote(path: string): void {
-    if (!this.union.has(path)) return;
+    if (!this.union.has(path) && !this.crowded()) return;
     this.channel.postMessage({ changed: [path] });
     const now = Date.now();
     if (now - this.pruned < PRUNE_EVERY_MS) return;

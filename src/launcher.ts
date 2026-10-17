@@ -740,6 +740,7 @@ export class Launcher {
     this.nodes.keepsOnDisk = true;
     this.openFiles.add(this.nodes);
     options.fs.onPeer?.(() => this.flushOpen());
+    options.fs.remoteChanges?.((change) => this.rewritten(change.paths));
     const holders = [this.held, this.openFiles];
     this.unlinked = new UnlinkedKeeper(
       fs,
@@ -2674,6 +2675,11 @@ export class Launcher {
     }
     this.writers ??= this.writerStack();
     return this.writers;
+  }
+
+  private rewritten(paths: readonly string[]): void {
+    for (const nodes of this.openFiles) for (const path of paths) nodes.rewritten(path);
+    this.changes.publish(...paths);
   }
 
   private async flushOpen(): Promise<void> {

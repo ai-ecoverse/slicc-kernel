@@ -633,6 +633,10 @@ export class VfsNodes implements UnlinkHolder {
     this.kept.delete(node);
   }
 
+  rewritten(path: string): void {
+    this.byPath.get(path)?.reread();
+  }
+
   async flush(path: string): Promise<void> {
     for (const [p, node] of this.byPath) if (within(p, path)) await node.serial(() => node.flush());
   }
