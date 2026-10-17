@@ -261,6 +261,7 @@ export class OpfsFs implements KernelFs {
   private readonly mounts: { mounted?: (path: string) => boolean } = {};
   private readonly locks: LockManagerLike | undefined;
   private readonly lockPrefix: string;
+  readonly rootName: string | undefined;
 
   constructor(
     root: FileSystemDirectoryHandle,
@@ -273,6 +274,7 @@ export class OpfsFs implements KernelFs {
     this.ranged = options.ranged === true;
     this.locks = options.locks === undefined ? lockManager() : (options.locks ?? undefined);
     this.lockPrefix = `slicc-excl:${channel ?? ''}:`;
+    this.rootName = channel;
     this.channel = channel === undefined ? undefined : new BroadcastChannel(channel);
     this.remote = channel === undefined ? undefined : new RemoteWatch(`${channel}:watch`);
     if (this.remote) this.remote.quiet = () => this.quiet();

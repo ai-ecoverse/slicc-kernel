@@ -36,7 +36,7 @@ import { type Cred, copyCred } from './cred.ts';
 import { type FdTable, kernelFdKind, type OpenFile } from './fd-table.ts';
 import type { FifoTable } from './fifo.ts';
 import type { JobTable } from './jobs.ts';
-import type { LockTable } from './locks.ts';
+import type { KernelLocks } from './lock-service.ts';
 import type { HttpHandles } from './net/http-syscalls.ts';
 import type { Resolver } from './net/resolver.ts';
 import type { MountLine, ProcessListing } from './proc-info.ts';
@@ -133,7 +133,7 @@ export interface SpawnWasmOptions {
   net?: LoopbackNet;
 
   http?: HttpHandles;
-  locks?: LockTable;
+  locks?: KernelLocks;
   fifos?: FifoTable;
   sems?: SemTable;
   onReap?: (pid: number) => void;
