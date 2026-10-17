@@ -1572,13 +1572,17 @@ export class OpfsFs implements KernelFs {
   }
 
   async reconcile(): Promise<number> {
+    if (this.remote && (await this.remote.peered())) return 0;
     let removed = 0;
     for (const entry of await this.meta.all()) {
       const real = await this.real(entry.path);
       const stale =
         entry.link === undefined ? !real : real || !(await this.real(parentOf(entry.path)));
       if (!stale) continue;
-      await this.meta.update(entry.path, () => undefined);
+      const seen = JSON.stringify(entry);
+      await this.meta.update(entry.path, (now) =>
+        now === undefined || JSON.stringify(now) === seen ? undefined : now
+      );
       removed++;
     }
     return removed;
