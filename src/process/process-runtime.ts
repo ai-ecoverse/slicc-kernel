@@ -67,7 +67,7 @@ import {
   vfsPromoter,
 } from './process-fork.ts';
 import { createHttpKernel } from './process-http.ts';
-import { closeDropsLocks, type LockHeld, type LockKernel } from './process-locks.ts';
+import { closeDropsLocks, kernelFlock, type LockHeld, type LockKernel } from './process-locks.ts';
 import type { PtyKernel } from './process-pty.ts';
 import { SignalGate } from './process-signals.ts';
 import { createSocketKernel } from './process-sockets.ts';
@@ -245,6 +245,9 @@ export function kernelSys(transport: SyncSabTransport): ProcessSys & PtyKernel &
     closeLocks(target) {
       call({ op: 'lk-close', ...target }, 'lk-close');
     },
+    flock(fd, kind, wait) {
+      call({ op: 'flock', fd, kind, ...(wait ? { wait } : {}) }, `flock ${fd}`);
+    },
     ptyNumber(fd) {
       return json(call({ op: 'pty-number', fd }, `pty-number ${fd}`)) as number;
     },
@@ -394,6 +397,7 @@ const GLUE_TRAILER = [
   "  fdWrite: typeof _fd_write === 'function' ? _fd_write : undefined,",
   "  fdRead: typeof _fd_read === 'function' ? _fd_read : undefined,",
   "  sleepMs: typeof slicc_sleep_ms === 'function' ? slicc_sleep_ms : undefined,",
+  "  flock: typeof __syscall_flock === 'function' ? __syscall_flock : undefined,",
   '};',
   'Module.sliccFdImports ??= {',
   "  fd_sync: typeof _fd_sync === 'function' ? _fd_sync : undefined,",
@@ -525,7 +529,7 @@ function utimensatOf(module: object): unknown {
 interface WrapperDeps {
   init: WasmProcessInitMsg;
   transport: SyncSabTransport;
-  sys: ProcessSys;
+  sys: ProcessSys & LockKernel;
   memory: () => WebAssembly.Memory | undefined;
   ppid: () => number;
   poll: () => void;
@@ -548,6 +552,13 @@ function kernelWrappers(imports: WebAssembly.Imports, module: object, deps: Wrap
   kernelLink(imports, fsOf, memory, kernelGlue);
   devCreations(imports, fsOf, memory, kernelGlue);
   kernelUname(imports, hostnameOf(init.env), memory, kernelGlue);
+  wrapImport(
+    imports,
+    'flock',
+    kernelGlue,
+    () => kernelFlock({ fs: fsOf, flock: (fd, kind, wait) => sys.flock?.(fd, kind, wait) }),
+    true
+  );
   const glue = ownValue<FdImports>(module, 'sliccFdImports');
   syncFsync(imports, fsOf, glue);
   positionalIo(imports, { glue, fs: fsOf, sys, memory });
