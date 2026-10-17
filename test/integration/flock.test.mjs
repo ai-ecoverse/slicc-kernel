@@ -180,3 +180,13 @@ test('flock on a terminal: /dev/tty opened again conflicts with the inherited st
   assert.equal(await term.exited, 0);
   assert.equal(out, 'flock ok\r\nchild flock ok\r\nflock EAGAIN\r\n');
 });
+
+test('flock on a FIFO: two opens of it are one object and exclude each other, a dup shares (#893)', async (t) => {
+  const { sh } = await booted(t);
+  assert.equal(
+    await sh(
+      'mkfifo p; flocktest open 0 rw p open 1 rw p dup 0 2 flock 0 ex flock 2 exnb flock 1 exnb close 0 close 2 flock 1 exnb'
+    ),
+    'flock ok\nflock ok\nflock EAGAIN\nflock ok\n'
+  );
+});
