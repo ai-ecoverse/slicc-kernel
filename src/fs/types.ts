@@ -83,6 +83,8 @@ export interface KernelFs {
   readonly rootName?: string;
   chown?(path: string, change: OwnerChange): Promise<void>;
   trackOwners?(): void;
+  onPeer?(settle: () => Promise<void>): void;
+  peers?(): { joined(): Promise<unknown>; crowded(): boolean } | undefined;
   crossings?(mounted: (path: string) => boolean): void;
   ancestry?(path: string): Promise<Array<Perm | undefined>>;
   hasOwner?(path: string): Promise<boolean>;

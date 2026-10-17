@@ -207,6 +207,12 @@ export class VfsNode {
     return this.dirty;
   }
 
+  reread(): void {
+    if (this.dirty || this.orphaned || this.pin || this.revoked) return;
+    this.data = undefined;
+    this.ranged = undefined;
+  }
+
   replace(contents: Uint8Array): void {
     this.ranged = undefined;
     this.data = new Uint8Array(contents);
@@ -967,6 +973,7 @@ export function vfsFile(fs: VfsFileFs, opts: VfsFileOptions, nodes?: VfsNodes): 
       })),
     known: () => node.known(),
     flush: () => serial(() => node.flush()),
+    reread: () => serial(async () => node.reread()),
 
     close: () =>
       node.serial(async () => {
