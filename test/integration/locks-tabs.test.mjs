@@ -190,3 +190,44 @@ test('a lock call from a tab that is not the leader takes one BroadcastChannel r
   );
   assert.match(follower.stdout, /^per-call-ms \d+\.\d{3}\n$/);
 });
+
+const BUMP = (path, n) =>
+  py([
+    'import fcntl, os',
+    `for _ in range(${n}):`,
+    `    f = open('${path}', 'r+b')`,
+    '    fcntl.lockf(f, fcntl.LOCK_EX)',
+    '    v = int(f.read() or b"0")',
+    '    f.seek(0)',
+    '    f.write(str(v + 1).encode())',
+    '    f.truncate()',
+    '    f.flush()',
+    '    os.fsync(f.fileno())',
+    '    f.close()',
+    "print('done', flush=True)",
+  ]);
+
+test('lock-protected increments from two tabs lose none: each tab reads what the other wrote before it unlocked (#949)', {
+  timeout: 300_000,
+}, async (t) => {
+  const { first, second } = await setup(t);
+  await first.sh('rm -f n.count && printf 0 > n.count');
+  const [a, b] = await Promise.all([first.sh(BUMP('n.count', 50)), second.sh(BUMP('n.count', 50))]);
+  assert.equal(a.stdout + a.stderr, 'done\n');
+  assert.equal(b.stdout + b.stderr, 'done\n');
+  assert.equal((await first.sh('cat n.count')).stdout, '100');
+  assert.equal((await second.sh('cat n.count')).stdout, '100');
+});
+
+const UPDATES = (n) =>
+  `fails=0; for i in $(seq ${n}); do sqlite3 -cmd ".timeout 20000" u.db "update t set n = n + 1" || fails=$((fails + 1)); done; echo "fails $fails"`;
+
+test('sqlite3 updates from two tabs lose none (#949)', { timeout: 300_000 }, async (t) => {
+  const { first, second } = await setup(t);
+  await first.sh('rm -f u.db* && sqlite3 u.db "create table t(n); insert into t values(0)"');
+  const [a, b] = await Promise.all([first.sh(UPDATES(50)), second.sh(UPDATES(50))]);
+  assert.equal(a.stdout, 'fails 0\n', a.stderr);
+  assert.equal(b.stdout, 'fails 0\n', b.stderr);
+  assert.equal((await first.sh('sqlite3 u.db "select n from t"')).stdout, '100\n');
+  assert.equal((await second.sh('sqlite3 u.db "select n from t"')).stdout, '100\n');
+});
