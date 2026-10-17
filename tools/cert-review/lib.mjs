@@ -725,3 +725,49 @@ export function sameDist(candidate, base) {
     .filter(Boolean);
   return { identical: differences.length === 0, differences };
 }
+
+const hexOf = (digest) =>
+  String(digest ?? '')
+    .replace(/^sha256:/, '')
+    .toLowerCase();
+
+function readExpectations(expect, problems) {
+  const wanted = new Map();
+  const named = new Set();
+  for (const spec of expect) {
+    const m = /^([^=]+)=(\*|\d*)(?:@((?:sha256:)?[0-9a-fA-F]*))?$/.exec(spec);
+    if (!m) problems.push(`unreadable expectation ${spec}`);
+    else if (m[2] === '*') named.add(m[1]);
+    else wanted.set(m[1], { id: m[2] ? Number(m[2]) : undefined, digest: m[3] ? hexOf(m[3]) : '' });
+  }
+  return { wanted, named };
+}
+
+function producedProblem(live, name, want) {
+  const found = live.find((a) => a.id === want.id);
+  if (!found) return `${name}: its producer's artifact ${want.id} is gone`;
+  if (found.name !== name) return `${name}: artifact ${want.id} is named ${found.name}`;
+  if (want.digest && hexOf(found.digest) !== want.digest)
+    return `${name}: artifact ${want.id} has digest ${hexOf(found.digest) || 'none'}, its producer uploaded ${want.digest}`;
+  return undefined;
+}
+
+export function artifactProblems(artifacts, expect, prefixes) {
+  const live = artifacts.filter((a) => !a.expired);
+  const problems = [];
+  const { wanted, named } = readExpectations(expect, problems);
+  for (const name of named) {
+    const count = live.filter((a) => a.name === name).length;
+    if (count > 1) problems.push(`${name}: ${count} artifacts by that name`);
+  }
+  for (const [name, want] of wanted) {
+    const problem = want.id === undefined ? undefined : producedProblem(live, name, want);
+    if (problem) problems.push(problem);
+  }
+  const ids = new Set([...wanted.values()].map((w) => w.id).filter((id) => id !== undefined));
+  for (const a of live) {
+    if (!prefixes.some((p) => a.name.startsWith(p)) || ids.has(a.id) || named.has(a.name)) continue;
+    problems.push(`${a.name} (${a.id}) was uploaded by no producer job`);
+  }
+  return problems;
+}
