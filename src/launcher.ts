@@ -661,7 +661,7 @@ export class Launcher {
   constructor(options: LauncherOptions) {
     this.usersMode = usersMode(options.users);
     this.rootFs = options.fs;
-    this.locks = kernelLocks(options.fs.rootName);
+    this.locks = kernelLocks(options.fs.rootName, options.fs.peers?.());
     this.dac = this.usersMode === 'off' ? undefined : new Dac(this.usersMode, options.onDenial);
     if (this.dac) this.dac.tagOf = (pid) => this.tagOf(pid);
     this.clipboard = new ClipboardBroker(options.clipboard, this.usersMode, undefined, (pid) =>
@@ -737,6 +737,7 @@ export class Launcher {
     this.nodes = new VfsNodes(fs, (path) => this.released(path));
     this.nodes.keepsOnDisk = true;
     this.openFiles.add(this.nodes);
+    options.fs.onPeer?.(() => this.flushOpen());
     const holders = [this.held, this.openFiles];
     this.unlinked = new UnlinkedKeeper(
       fs,
@@ -2671,6 +2672,10 @@ export class Launcher {
     }
     this.writers ??= this.writerStack();
     return this.writers;
+  }
+
+  private async flushOpen(): Promise<void> {
+    for (const nodes of this.openFiles) await nodes.flush('/').catch(() => undefined);
   }
 
   private writerStack(): WriterStack {

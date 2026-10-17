@@ -277,7 +277,7 @@ export class OpfsFs implements KernelFs {
     this.rootName = channel;
     this.channel = channel === undefined ? undefined : new BroadcastChannel(channel);
     this.remote = channel === undefined ? undefined : new RemoteWatch(`${channel}:watch`);
-    if (this.remote) this.remote.quiet = () => this.quiet();
+    if (this.remote) this.remote.quiet = () => this.quiet().then(() => this.settle?.());
     if (this.channel) {
       const remote = this.remote;
       (meta as { listen?: (l: (c: Partial<RemoteChange>) => void) => void }).listen?.((c) =>
@@ -469,6 +469,18 @@ export class OpfsFs implements KernelFs {
       this.unlocked--;
       if (this.unlocked === 0) for (const done of this.idle.splice(0)) done();
     }
+  }
+
+  private settle: (() => Promise<void>) | undefined;
+
+  onPeer(settle: () => Promise<void>): void {
+    this.settle = settle;
+  }
+
+  peers(): { joined(): Promise<unknown>; crowded(): boolean } | undefined {
+    const remote = this.remote;
+    if (!remote) return undefined;
+    return { joined: () => remote.peered(), crowded: () => remote.crowded() };
   }
 
   private quiet(): Promise<void> {
