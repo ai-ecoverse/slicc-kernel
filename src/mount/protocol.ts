@@ -1,9 +1,10 @@
-export const DRIVER_PROTOCOL: readonly [number, number] = [1, 2];
+export const DRIVER_PROTOCOL: readonly [number, number] = [1, 3];
 
 export interface DriverCapabilities {
   readonly?: boolean;
   symlinks?: boolean;
   links?: boolean;
+  fifos?: boolean;
   chmod?: boolean;
   owners?: boolean;
   linkTimes?: boolean;
@@ -19,7 +20,7 @@ export interface DriverCapabilities {
 }
 
 export interface DriverAttr {
-  kind: 'file' | 'directory' | 'symlink';
+  kind: 'file' | 'directory' | 'symlink' | 'fifo';
   size: number;
   mtime: number;
   atime?: number;
@@ -75,6 +76,7 @@ export type DriverCall =
   | { op: 'rename'; from: string; to: string }
   | { op: 'link'; from: string; to: string }
   | ({ op: 'symlink'; target: string; path: string } & DriverOwner)
+  | ({ op: 'mkfifo'; path: string } & DriverOwner)
   | { op: 'readlink'; path: string }
   | {
       op: 'setattr';

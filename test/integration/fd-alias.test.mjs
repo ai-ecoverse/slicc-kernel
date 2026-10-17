@@ -70,6 +70,22 @@ for (const users of ['off', 'enforce']) {
   });
 }
 
+for (const users of ['off', 'enforce']) {
+  test(`a WASIX program's own open of a FIFO reads back as its path through /proc/self/fd/N, a pipe as pipe:[ino], users ${users} (#909)`, {
+    timeout: 60_000,
+  }, async (t) => {
+    const { bash } = await kernelWith(t, users);
+    assert.deepEqual(
+      await bash('mkfifo /tmp/f; fdalias open /tmp/f; echo x | fdalias /proc/self/fd/0'),
+      {
+        status: 0,
+        stdout: 'opened /tmp/f: link /tmp/f\n/proc/self/fd/0: stat fifo, lstat lnk, link pipe:[\n',
+        stderr: '',
+      }
+    );
+  });
+}
+
 test('on a terminal, /dev/stdin and /proc/self/fd/0 stat as a character device (#894)', {
   timeout: 60_000,
 }, async (t) => {

@@ -137,6 +137,7 @@ export class FsWatchers {
       };
     const overrides: Partial<Record<keyof KernelFs, unknown>> = {
       writeFile: content(fs.writeFile.bind(fs)),
+      ...(fs.createExclusive ? { createExclusive: content(fs.createExclusive.bind(fs)) } : {}),
       mkdir: async (path: string, options?: { recursive?: boolean; owner?: NewOwner }) => {
         const created: string[] = [];
         if (options?.recursive) {

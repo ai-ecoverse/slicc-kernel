@@ -52,7 +52,13 @@ function attr(node: Node): DriverAttr {
   return {
     kind: node.kind,
     size:
-      node.kind === 'file' ? node.data.size : node.kind === 'symlink' ? node.target.length : 4096,
+      node.kind === 'file'
+        ? node.data.size
+        : node.kind === 'symlink'
+          ? node.target.length
+          : node.kind === 'fifo'
+            ? 0
+            : 4096,
     mtime: node.mtime,
     atime: node.atime,
     mode: node.mode,
@@ -109,6 +115,7 @@ export function tmpfs(): FilesystemHandlers {
     const existing = dir.children.get(name);
     if (existing && flags.exclusive) throw fsError('EEXIST', path);
     if (existing?.kind === 'directory' && flags.write) throw fsError('EISDIR', path);
+    if (existing?.kind === 'fifo') throw fsError('ENXIO', path);
     if (existing) return existing;
     if (!flags.create) throw fsError('ENOENT', path);
     const node = make('file', 0o100644, dir, flags.owner);
@@ -153,6 +160,11 @@ export function tmpfs(): FilesystemHandlers {
     async release(fh) {
       handle(fh);
       handles.delete(fh);
+    },
+    async mkfifo(path, owner) {
+      const { dir, name } = parent(path);
+      if (dir.children.has(name)) throw fsError('EEXIST', path);
+      place(dir, name, make('fifo', 0o10644, dir, owner));
     },
     async mkdir(path, owner) {
       const { dir, name } = parent(path);

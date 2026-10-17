@@ -42,8 +42,22 @@ static int cat(const char *path) {
   return 0;
 }
 
+static int opened(const char *path) {
+  int fd = open(path, O_RDWR);
+  if (fd < 0) return printf("open %s: %s\n", path, strerror(errno)), 1;
+  char link[32];
+  snprintf(link, sizeof link, "/proc/self/fd/%d", fd);
+  char buf[256];
+  ssize_t n = readlink(link, buf, sizeof buf - 1);
+  if (n < 0) return printf("readlink: %s\n", strerror(errno)), 1;
+  buf[n] = 0;
+  printf("opened %s: link %s\n", path, buf);
+  return 0;
+}
+
 int main(int argc, char **argv) {
   if (argc > 2 && !strcmp(argv[1], "cat")) return cat(argv[2]);
+  if (argc > 2 && !strcmp(argv[1], "open")) return opened(argv[2]);
   for (int i = 1; i < argc; i++) describe(argv[i]);
   return 0;
 }
