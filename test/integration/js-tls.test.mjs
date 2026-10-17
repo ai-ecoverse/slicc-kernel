@@ -47,6 +47,11 @@ export default async function main(ctx) {
     const w = c.writable.getWriter();
     await w.write(enc.encode('GET / HTTP/1.1\\r\\nHost: api.example:8443\\r\\nConnection: close\\r\\n\\r\\n'));
     await say((await readAll(c)).split('\\r\\n')[0]);
+  } else if (mode === 'hostloop') {
+    const c = await ctx.net.connect({ host: 'host.slicc.internal', port: 8443, tls: {} });
+    const w = c.writable.getWriter();
+    await w.write(enc.encode('GET /h HTTP/1.1\\r\\nHost: host.slicc.internal:8443\\r\\nConnection: close\\r\\n\\r\\n'));
+    await say((await readAll(c)).split('\\r\\n')[0]);
   } else if (mode === 'ws') {
     const c = await ctx.net.connect({ host: 'ws.example', port: 443, tls: {} });
     const w = c.writable.getWriter();
@@ -67,6 +72,9 @@ export default async function main(ctx) {
       ['alpn', { host: 'api.example', port: 443, tls: { alpn: ['h2'] } }],
       ['smtps', { host: 'mail.example', port: 465, tls: {} }],
       ['imaps', { host: 'mail.example', port: 993, tls: {} }],
+      ...['localhost', 'app.localhost', '127.0.0.1', '127.9.9.9', '0.0.0.0', '::1', '[::1]'].map((host) => [host, { host, port: 443, tls: {} }]),
+      ['sni 127.0.0.1', { host: 'api.example', port: 443, tls: { servername: '127.0.0.1' } }],
+      ['host 127.0.0.1', { host: '127.0.0.1', port: 443, tls: { servername: 'api.example' } }],
     ]) {
       await ctx.net.connect(options).then(() => say(what + ' connected'), (e) => say(what + ' ' + e.code));
     }
@@ -179,13 +187,22 @@ test('ctx.net.connect with tls upgrades to a WebSocket through the transport, as
   assert.deepEqual(transport.seen, [{ url: 'wss://ws.example/chat', ws: true }]);
 });
 
-test('ctx.net.connect with tls refuses a custom ca, an alpn list without http/1.1 and well-known non-HTTP TLS ports, and answers non-HTTP bytes with 400 and a close (#914)', async (t) => {
+test('ctx.net.connect with tls refuses a custom ca, an alpn list without http/1.1, well-known non-HTTP TLS ports and the kernel loopback at connect, and answers non-HTTP bytes with 400 and a close (#914)', async (t) => {
   const { transport, run } = await booted(t);
   assert.deepEqual(await run('refused'), {
     status: 0,
     stdout:
-      'ca ENOTSUP\nalpn EPROTONOSUPPORT\nsmtps EPROTONOSUPPORT\nimaps EPROTONOSUPPORT\nsmtp over https HTTP/1.1 400 Bad Request\n',
+      'ca ENOTSUP\nalpn EPROTONOSUPPORT\nsmtps EPROTONOSUPPORT\nimaps EPROTONOSUPPORT\n' +
+      'localhost ENOTSUP\napp.localhost ENOTSUP\n127.0.0.1 ENOTSUP\n127.9.9.9 ENOTSUP\n0.0.0.0 ENOTSUP\n::1 ENOTSUP\n[::1] ENOTSUP\n' +
+      'sni 127.0.0.1 ENOTSUP\nhost 127.0.0.1 ENOTSUP\nsmtp over https HTTP/1.1 400 Bad Request\n',
     stderr: '',
   });
   assert.deepEqual(transport.seen, []);
+});
+
+test('a tls connect to host.slicc.internal goes to the transport under its policy, as ctx.fetch does (#914)', async (t) => {
+  const { transport, run } = await booted(t);
+  assert.deepEqual(await run('hostloop'), { status: 0, stdout: 'HTTP/1.1 200 OK\n', stderr: '' });
+  assert.equal(transport.seen.length, 1);
+  assert.match(transport.seen[0].url, /^https:\/\/(host\.slicc\.internal|127\.0\.0\.1):8443\/h$/);
 });

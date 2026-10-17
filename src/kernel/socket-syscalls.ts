@@ -2,6 +2,7 @@ import type { SyncFsResult } from '../realm/sync-fs-wire.ts';
 import { KernelDgram } from './dgram.ts';
 import { type FdTable, KernelError, OpenFile, pollFile } from './fd-table.ts';
 import { encodeReceived } from './net/datagram-wire.ts';
+import { isLoopbackHost } from './net/proxy-service.ts';
 import type { ResolveFamily } from './net/uplink.ts';
 import {
   type ConnectorStamp,
@@ -353,6 +354,7 @@ function tlsOverTransport(
   if (NOT_HTTP_PORTS.has(req.port)) throw new KernelError('EPROTONOSUPPORT');
   const servername = req.servername || req.host;
   if (!HOST_NAME.test(servername)) throw new KernelError('EINVAL');
+  if (isLoopbackHost(servername) || isLoopbackHost(req.host)) throw new KernelError('ENOTSUP');
   const host =
     servername.includes(':') && !servername.startsWith('[') ? `[${servername}]` : servername;
   const origin = req.port === 443 ? `https://${host}` : `https://${host}:${req.port}`;
