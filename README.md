@@ -1160,13 +1160,14 @@ A threaded WASIX C program for `test/integration/thread-signal.test.mjs` (#520).
 ### `fifotest`
 
 A WASIX C program for `test/integration/fifo.test.mjs` (#896).
+- `fifotest snatch PATH N` tries `open(O_RDONLY|O_NONBLOCK)` in a loop until it opens the FIFO or has been refused (`EACCES`) N times, and prints both counts.
 - `fifotest mkfifo PATH [MODE [DIR]]` makes a FIFO through its own `slicc_fs.path_mkfifo` declaration (`MODE` in octal, `666` by default), relative to the cwd, or to `DIR` opened as a directory fd, and prints the result.
 - `fifotest stat PATH` prints `fifo` or `not a fifo`.
 - `fifotest read PATH` opens it for reading (blocking) and prints what it reads until `EOF`. `fifotest nbread PATH` does the same with `O_NONBLOCK`.
 - `fifotest write PATH [TEXT]` opens it for writing and writes TEXT. `fifotest nbwrite PATH [TEXT]` does so with `O_NONBLOCK`, and prints `open: No such device or address` with no reader.
 - `fifotest alarm PATH [restart]` arms `alarm(1)` with a `SIGALRM` handler (with `SA_RESTART` if asked), then opens the FIFO for reading. It prints `open: Interrupted system call`, or `opened` and what it read. The handler creates the file named by `FIFOTEST_MARK`, so a test can wait for the interrupt instead of a clock.
 
-**Build:** `WASIX_SYSROOT_28=/path/to/wasix-sysroot ./build.sh`, with `wasixcc` 0.4.7 and binaryen's `wasm-opt` on `PATH`. `bin/fifotest.wasm` is 53,983 bytes, sha256 `2dbb2a0f741fe75a849d2ccb1a258633a38ade1f8d231b254bc0cbea0d074b9d`.
+**Build:** `WASIX_SYSROOT_28=/path/to/wasix-sysroot ./build.sh`, with `wasixcc` 0.4.7 and binaryen's `wasm-opt` on `PATH`. `bin/fifotest.wasm` is 54,410 bytes, sha256 `bec06cd5cc47e64f1b8871d0c09dd5ca9e679e0239c58825cb94047c34886b40`.
 
 ### `fdalias`
 

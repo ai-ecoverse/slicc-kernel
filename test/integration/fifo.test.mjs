@@ -201,3 +201,25 @@ for (const users of ['off', 'enforce']) {
     );
   });
 }
+
+test('under umask 077, path_mkfifo never lets another user open the new FIFO, not even right after it is made (homescoop#878)', {
+  timeout: 60_000,
+}, async (t) => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  t.after(() => kernel.terminate());
+  await kernel.users.add({ name: 'cone' });
+  for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
+  for (const file of ['package.json', 'bin/fifotest.wasm']) {
+    await kernel.writeFile(
+      `/node_modules/fifotest/${file}`,
+      await readFile(new URL(file, fixture))
+    );
+  }
+  const snatcher = kernel.run(['fifotest', 'snatch', '/tmp/s', '200'], { cwd: '/', user: 'cone' });
+  const made = await kernel.run(
+    ['bash', '-c', 'sleep 0.3; umask 077; fifotest mkfifo /tmp/s 666; stat -c "%U %a" /tmp/s'],
+    { cwd: '/' }
+  );
+  assert.deepEqual(made, ok('mkfifo /tmp/s: ok\nroot 600\n'));
+  assert.deepEqual(await snatcher, ok('opened 0 times, refused 200 times\n'));
+});

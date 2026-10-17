@@ -409,10 +409,11 @@ export class WasiHost {
           dirfd === AT_FDCWD && !raw.startsWith('/')
             ? fds.resolve(3, `${this.cwd}/${raw}`)
             : at(dirfd, p, l);
-        mkfifo.call(this.o.fs, path, mode & 0o7777);
         const umask = this.o.kernel.call({ op: 'proc-umask' }) as number;
         const want = mode & 0o7777 & ~umask;
-        if (((this.o.fs.lstat(path).mode ?? 0) & 0o7777) !== want) this.o.fs.chmod(path, want);
+        mkfifo.call(this.o.fs, path, want);
+        const made = (this.o.fs.lstat(path).mode ?? 0) & 0o7777;
+        if ((made & ~want) !== 0) this.o.fs.chmod(path, made & want);
         return E.SUCCESS;
       },
       umask: (mask: number, out: number) => {

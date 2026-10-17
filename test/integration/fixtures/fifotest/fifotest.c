@@ -19,6 +19,21 @@ static int make(const char *path, const char *mode, const char *dir) {
   return 0;
 }
 
+static int snatch(const char *path, int tries) {
+  int opened = 0, refused = 0;
+  while (opened == 0 && refused < tries) {
+    int fd = open(path, O_RDONLY | O_NONBLOCK);
+    if (fd >= 0) {
+      opened++;
+      close(fd);
+    } else if (errno == EACCES) {
+      refused++;
+    }
+  }
+  printf("opened %d times, refused %d times\n", opened, refused);
+  return 0;
+}
+
 static const char *mark;
 
 static void on_alarm(int sig) {
@@ -41,6 +56,7 @@ static void drain(int fd) {
 int main(int argc, char **argv) {
   if (argc < 3) return fprintf(stderr, "usage: fifotest stat|read|write|nbwrite|nbread|alarm|mkfifo PATH [restart|MODE [DIR]]\n"), 2;
   const char *mode = argv[1], *path = argv[2];
+  if (!strcmp(mode, "snatch")) return snatch(path, argc > 3 ? atoi(argv[3]) : 1000);
   if (!strcmp(mode, "mkfifo")) return make(path, argc > 3 ? argv[3] : "666", argc > 4 ? argv[4] : NULL);
   if (!strcmp(mode, "stat")) {
     struct stat st;
