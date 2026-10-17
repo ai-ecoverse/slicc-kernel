@@ -11,7 +11,7 @@ export interface LockTarget {
 
 export type HostSyscall =
   | { op: 'lock'; path: string; exclusive: boolean; fd: number }
-  | { op: 'unlock'; path: string }
+  | { op: 'unlock'; path: string; fd?: number }
   | ({
       op: 'lk-set';
       kind: LockKind | 'unlock';
@@ -215,12 +215,12 @@ export interface HostOpsContext {
 export async function hostSyscall(req: HostSyscall, ctx: HostOpsContext): Promise<SyncFsResult> {
   switch (req.op) {
     case 'lock':
-      if (!ctx.locks) throw new KernelError('ENOSYS');
-      if (!ctx.locks.lock(ctx.pid, req.path, req.exclusive, req.fd))
-        throw new KernelError('EAGAIN');
-      return done;
+      return wholeLock(req, ctx);
     case 'unlock':
       ctx.locks?.unlock(ctx.pid, req.path);
+      if (req.fd !== undefined && ctx.locks?.shared?.() && ctx.flockOf) {
+        return flock({ op: 'flock', fd: req.fd, kind: 'unlock' }, ctx);
+      }
       return done;
     case 'lk-set':
     case 'lk-get':
@@ -249,6 +249,27 @@ export async function hostSyscall(req: HostSyscall, ctx: HostOpsContext): Promis
       ctx.ops.close();
       return done;
   }
+}
+
+async function wholeLock(
+  req: Extract<HostSyscall, { op: 'lock' }>,
+  ctx: HostOpsContext
+): Promise<SyncFsResult> {
+  const { locks, flockOf } = ctx;
+  if (!locks) throw new KernelError('ENOSYS');
+  const kind = req.exclusive ? 'exclusive' : 'shared';
+  if (locks.shared?.() && flockOf) {
+    if (locks.wholeFree?.(ctx.pid, req.path, req.exclusive) === false) {
+      throw new KernelError('EAGAIN');
+    }
+    return flock({ op: 'flock', fd: req.fd, kind }, ctx);
+  }
+  if (flockOf && locks.flockFree) {
+    const { key, owner } = await flockOf(req.fd);
+    if (!locks.flockFree(key, owner, kind)) throw new KernelError('EAGAIN');
+  }
+  if (!locks.lock(ctx.pid, req.path, req.exclusive, req.fd)) throw new KernelError('EAGAIN');
+  return done;
 }
 
 const FLOCK_KINDS: ReadonlySet<string> = new Set(['shared', 'exclusive', 'unlock']);

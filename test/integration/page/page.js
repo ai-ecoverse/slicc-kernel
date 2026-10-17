@@ -9,6 +9,7 @@ import {
 } from '/dist/index.js';
 
 const packages = {
+  'node_modules/locktry/': ['package.json', 'locktry.wasm', 'host.mjs'],
   'node_modules/socktest/': ['package.json', 'bin/socktest', 'bin/socktest.wasm'],
   'node_modules/mounttest/': ['package.json', 'bin/mounttest.wasm'],
   'node_modules/httptest/': ['package.json', 'bin/httptest.wasm'],

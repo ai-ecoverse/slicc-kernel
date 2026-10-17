@@ -1,0 +1,13 @@
+{
+  "name": "locktry",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "locktry": {
+        "wasm": "locktry.wasm",
+        "imports": "host.mjs"
+      }
+    }
+  }
+}

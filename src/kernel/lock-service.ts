@@ -60,6 +60,8 @@ export interface KernelLocks {
   dropFile(key: string, owner: number): void;
   release(pid: number): void;
   lock(pid: number, path: string, exclusive: boolean, fd: number): boolean;
+  wholeFree?(pid: number, path: string, exclusive: boolean): boolean;
+  flockFree?(key: string, owner: object, kind: FlockKind): boolean;
   unlock(pid: number, path: string): void;
   closed(pid: number, fd: number): void;
 }
@@ -433,6 +435,14 @@ export class LockService implements KernelLocks {
 
   lock(pid: number, path: string, exclusive: boolean, fd: number): boolean {
     return this.table.lock(pid, path, exclusive, fd);
+  }
+
+  wholeFree(pid: number, path: string, exclusive: boolean): boolean {
+    return this.table.wholeFree(pid, path, exclusive);
+  }
+
+  flockFree(key: string, owner: object, kind: FlockKind): boolean {
+    return this.table.flockFree(key, owner, kind);
   }
 
   unlock(pid: number, path: string): void {
