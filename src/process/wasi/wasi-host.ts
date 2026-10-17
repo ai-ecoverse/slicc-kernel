@@ -473,7 +473,10 @@ export class WasiHost {
           else if (file.target.fd !== undefined) this.o.kernel.sys.flush(file.target.fd);
         },
         locked: () => this.fds.holdLocks(),
+        promote: (fd) => this.fds.promote(fd),
         calls: {
+          flock: (fd, kind, wait) =>
+            void this.o.kernel.call({ op: 'flock', fd, kind, ...(wait ? { wait } : {}) }),
           set: (target, kind, start, len, wait) =>
             void this.o.kernel.call({
               op: 'lk-set',
@@ -1078,7 +1081,8 @@ export class WasiHost {
         size: () => file.size(),
       };
     }
-    if (e.type !== 'kernel' || this.fds.kind(fd, e) !== 'file') throw new WasiError('EBADF');
+    if (e.type !== 'kernel') throw new WasiError('EBADF');
+    if (this.fds.kind(fd, e) !== 'file') return { target: { fd }, offset: () => 0, size: () => 0 };
     return {
       target: { fd },
       offset: () => this.o.kernel.sys.seek(fd, 0, WHENCE.CUR),

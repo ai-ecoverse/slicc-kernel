@@ -35,7 +35,89 @@ export function lockRange(start: number, len: number): { start: number; end: num
   return { start: from, end };
 }
 
+function changedAt(
+  wakers: Map<string, Set<() => void>>,
+  key: string,
+  signal: AbortSignal
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const set = wakers.get(key) ?? new Set<() => void>();
+    wakers.set(key, set);
+    const done = () => {
+      set.delete(wake);
+      if (set.size === 0 && wakers.get(key) === set) wakers.delete(key);
+      signal.removeEventListener('abort', abort);
+    };
+    const wake = () => {
+      done();
+      resolve();
+    };
+    const abort = () => {
+      done();
+      reject(new KernelError('EINTR'));
+    };
+    set.add(wake);
+    signal.addEventListener('abort', abort, { once: true });
+  });
+}
+
+function wakeAt(wakers: Map<string, Set<() => void>>, key: string): void {
+  for (const wake of [...(wakers.get(key) ?? [])]) wake();
+}
+
+export type FlockKind = 'shared' | 'exclusive';
+
+export class FlockTable {
+  private readonly held = new Map<string, Map<object, FlockKind>>();
+  private readonly keys = new WeakMap<object, string>();
+  private readonly wakers = new Map<string, Set<() => void>>();
+
+  private free(key: string, owner: object, kind: FlockKind): boolean {
+    for (const [other, has] of this.held.get(key) ?? [])
+      if (other !== owner && (kind === 'exclusive' || has === 'exclusive')) return false;
+    return true;
+  }
+
+  set(key: string, owner: object, kind: FlockKind | 'unlock'): boolean {
+    const has = this.held.get(key)?.get(owner);
+    if (has === kind) return true;
+    if (has !== undefined) this.drop(owner);
+    if (kind === 'unlock') return true;
+    if (!this.free(key, owner, kind)) return false;
+    const holders = this.held.get(key) ?? new Map<object, FlockKind>();
+    holders.set(owner, kind);
+    this.held.set(key, holders);
+    this.keys.set(owner, key);
+    return true;
+  }
+
+  async wait(
+    key: string,
+    owner: object,
+    kind: FlockKind,
+    blocking: () => AbortSignal
+  ): Promise<void> {
+    if (this.set(key, owner, kind)) return;
+    const signal = blocking();
+    while (!this.set(key, owner, kind)) {
+      if (signal.aborted) throw new KernelError('EINTR');
+      await changedAt(this.wakers, key, signal);
+    }
+  }
+
+  drop(owner: object): void {
+    const key = this.keys.get(owner);
+    if (key === undefined) return;
+    this.keys.delete(owner);
+    const holders = this.held.get(key);
+    holders?.delete(owner);
+    if (holders?.size === 0) this.held.delete(key);
+    wakeAt(this.wakers, key);
+  }
+}
+
 export class LockTable {
+  readonly flocks = new FlockTable();
   private readonly records = new Map<string, RecordLock[]>();
   private readonly blocked = new Map<number, Blocked>();
   private readonly wakers = new Map<string, Set<() => void>>();
@@ -104,29 +186,11 @@ export class LockTable {
   }
 
   private changed(key: string, signal: AbortSignal): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
-      const set = this.wakers.get(key) ?? new Set<() => void>();
-      this.wakers.set(key, set);
-      const done = () => {
-        set.delete(wake);
-        if (set.size === 0 && this.wakers.get(key) === set) this.wakers.delete(key);
-        signal.removeEventListener('abort', abort);
-      };
-      const wake = () => {
-        done();
-        resolve();
-      };
-      const abort = () => {
-        done();
-        reject(new KernelError('EINTR'));
-      };
-      set.add(wake);
-      signal.addEventListener('abort', abort, { once: true });
-    });
+    return changedAt(this.wakers, key, signal);
   }
 
   private wake(key: string): void {
-    for (const wake of [...(this.wakers.get(key) ?? [])]) wake();
+    wakeAt(this.wakers, key);
   }
 
   private store(key: string, locks: RecordLock[]): void {

@@ -618,6 +618,13 @@ Directories are renamed with `FileSystemHandle.move()` where available, else by 
   - **F_GETLK:** with a conflicting lock, it writes that lock back (`l_whence` 0, its absolute start, its length, the holder's pid). Without one, it sets only `l_type` to `2`.
   - **Errors (WASI numbers):** `EAGAIN` for a conflict on `F_SETLK` (never `EACCES`), `EINTR` when a signal with a handler ends an `F_SETLKW` wait, `EDEADLK` for a wait that would close a cycle, `EBADF` for a bad descriptor or a lock type the descriptor's access mode doesn't allow, and `EINVAL` for a bad `l_type` or `l_whence` or a start before 0.
   - **Semantics:** the same as Emscripten's, above. A libc that finds no import on an older kernel gets `ENOSYS` and keeps its local answer.
+  - **Any kind of descriptor** ([#893](https://github.com/ai-ecoverse/slicc-kernel/issues/893)): a pipe, a socket or a terminal takes record locks too, as on Linux, keyed by the object (both ends of a pipe are one object, each socket is its own, a terminal is one object however often it's opened). `l_whence` `CUR` and `END` count from 0 there.
+- **`slicc.flock(fd, op) -> errno`** ([#893](https://github.com/ai-ecoverse/slicc-kernel/issues/893)): BSD `flock(2)` locks, with Linux's semantics, for a WASIX program on any descriptor: a regular file, a directory, a pipe, a socket, a terminal or a `/dev` device.
+  - **op:** Linux's bits, `LOCK_SH` `1`, `LOCK_EX` `2` or `LOCK_UN` `8`, optionally with `LOCK_NB` `4`. Anything else is `EINVAL`.
+  - **Owner:** the open file description, not the process. A `dup`'d descriptor and one a forked child or a spawned program inherits share it, so the child's `LOCK_EX|LOCK_NB` is granted and its `LOCK_UN` releases the lock for the parent too. So children that `flock(STDOUT)` an inherited STDOUT don't exclude each other, on Linux either: for that, each child opens a lock file itself. A second open of the same object is another description and conflicts: the file opened again (by any name of it), `/dev/tty` opened again, the other end of a pipe.
+  - **Rules:** shared locks coexist, an exclusive one excludes every other description, and any access mode takes either kind, so `LOCK_EX` on a read-only open excludes (homescoop#758). A conversion drops the old lock before it takes the new one, as on Linux, so a refused `LOCK_NB` conversion leaves no lock. The lock goes with `LOCK_UN` or when the description's last descriptor closes, at exit or kill too. flock locks and `fcntl` record locks are separate and don't block each other.
+  - **Errors (WASI numbers):** `EAGAIN` for a conflict with `LOCK_NB`, `EINTR` when a signal with a handler ends a wait (as for `F_SETLKW`: a libc that wants `SA_RESTART` asks again), `EBADF` for a bad descriptor, `EINVAL` for a bad op. There's no deadlock detection, as on Linux.
+  - **Limits:** locks are per kernel ([#675](https://github.com/ai-ecoverse/slicc-kernel/issues/675)). A file the program buffers itself is handed to the kernel at its first `flock`, with every other descriptor the program has open on it. A libc that finds no import on an older kernel gets `ENOSYS`; wasix-libc's `flock()` then keeps its old answer. Emscripten programs and the imports module's `tryLock` are unchanged.
 - **Rules on a mount:**
   - a rename across mounts is `EXDEV`, so `mv` copies;
   - a symlink on the root file system that leads onto a mount, such as `~/proj` → `/mnt/drive/proj`, or a chain from a mount to the root and back, is followed onto the mount by every operation, in every runtime: reads, writes, `stat`, listings, `mkdir`, removals, renames, `chmod`, `chown` and times. Removing the link itself removes the link. Before [#547](https://github.com/ai-ecoverse/slicc-kernel/issues/547) was fixed, the kernel resolved such a link against the directory under the mount point for JS and WASI programs, the embedder's `fs` and attached clients (Emscripten programs weren't affected): reads failed with `ENOENT`, and writes went into that hidden directory, which shows again once the mount is gone;
@@ -1240,6 +1247,16 @@ A WASIX C program for `test/integration/wasix-locks.test.mjs` (#722). It calls `
 - `touch PATH`, `await PATH`, `sleep MS`, `pid`, `trap` (a `SIGUSR1` handler), `fork SLOT` (the child runs `F_GETLK` and `F_SETLK` on the slot).
 
 **Build:** `INSTALL_WASIXCC=<homescoop>/scripts/install-wasixcc.sh WASIX_SYSROOT_28=<unpacked @ai-ecoverse/wasix-sysroot 2025.9.30-28> ./build.sh`, with homescoop's pinned wasixcc 0.4.7 (LLVM 21.1.206, binaryen 133) and Homebrew's binaryen `wasm-opt` 132 on `PATH` for the Asyncify pass (`proc_fork`). Two builds give the same bytes: `bin/wlocktest.wasm` is 56,958 bytes, sha256 `31308a54e13e7dcac497ad9d8a05799008c8beaa4ae3a36c76e218af7235ec23`.
+
+### `flocktest`
+
+A WASIX C program for `test/integration/flock.test.mjs` (#893). It calls `slicc.flock` and `slicc.fcntl_lock` directly (`import_module("slicc")`). Its arguments are a sequence of steps, run in order:
+- `open SLOT r|w|rw PATH`, `pipe SLOT SLOT`, `pair SLOT SLOT` (a `socketpair`), `dup FROM TO`, `fd SLOT N` (names an inherited descriptor), `close SLOT`;
+- `flock SLOT OP`, where OP is made of `sh`, `ex`, `un` and `nb` (`exnb` is `LOCK_EX|LOCK_NB`) or is a number; `badfd`; `fcntl SLOT r|w|u` (`F_SETLK` on the whole file);
+- `fork … end` (the child runs the steps up to the matching `end`, its lines start with `child `, and the parent waits for it before it goes on after `end`);
+- `touch PATH`, `await PATH`, `sleep MS`, `say TEXT`, `trap` (a `SIGUSR1` handler).
+
+**Build:** as `wlocktest`. Two builds give the same bytes: `bin/flocktest.wasm` is 58,442 bytes, sha256 `687ecf21c836adda4ef2e328b6032eed28ca7d37efc8e88d3aaefb8fc117115a`.
 
 ## License
 

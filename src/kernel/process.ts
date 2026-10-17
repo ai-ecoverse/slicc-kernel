@@ -42,6 +42,7 @@ import {
   heldFile,
   KernelError,
   type KernelFdKind,
+  type KernelFile,
   kernelFdKind,
   memoryFile,
   type OpenFile,
@@ -485,6 +486,22 @@ const fileKeys = new WeakMap<object, string>();
 function identityKey(st: { ino?: number; dev?: number }, path: string): string {
   return st.ino === undefined ? path : `${st.dev ?? 0}:${st.ino}`;
 }
+
+const objectIds = new WeakMap<object, number>();
+
+let nextObjectId = 1;
+
+function objectKey(file: KernelFile): string {
+  const at = file.tty ?? file.identity ?? file.pty ?? file;
+  let id = objectIds.get(at);
+  if (id === undefined) {
+    id = nextObjectId++;
+    objectIds.set(at, id);
+  }
+  return `object:${id}`;
+}
+
+const flockHooked = new WeakSet<OpenFile>();
 
 const DYING: SyncFsResult = { ok: false, errno: 'EINTR', message: 'the process is being killed' };
 
@@ -966,6 +983,7 @@ export class WasmProcess {
           pid: this.pid,
           owner: () => this.lockOwner(),
           fileKey: (target, kind, setting) => this.lockKey(target, kind, setting),
+          flockOf: (fd) => this.flockOf(fd),
           locks: this.options.locks,
           ops: this.asyncOps,
           blocking: () => this.blockingSignal(cancelled),
@@ -1044,6 +1062,7 @@ export class WasmProcess {
       throw new KernelError('EBADF');
     const known = file ? fileKeys.get(file) : this.pathKeys.get(target.path ?? '');
     if (kind === 'close' && !file && target.path !== undefined) this.pathKeys.delete(target.path);
+    if (access && !access.stat) return objectKey(access);
     const want = kind === 'read' ? R_OK : kind === 'write' ? W_OK : 0;
     const path = await this.lockPath(target, want);
     if (known !== undefined) return known;
@@ -1056,6 +1075,35 @@ export class WasmProcess {
     if (kind === 'close') return key;
     if (file) fileKeys.set(file, key);
     else if (this.pathKeys.size < 4096) this.pathKeys.set(path, key);
+    return key;
+  }
+
+  private async flockOf(fd: number): Promise<{ key: string; owner: OpenFile }> {
+    const open = this.fds.get(fd);
+    const { locks } = this.options;
+    if (locks && !flockHooked.has(open)) {
+      flockHooked.add(open);
+      open.onClose(() => locks.flocks.drop(open));
+    }
+    return { key: await this.objectKeyOf(open), owner: open };
+  }
+
+  private async objectKeyOf(open: OpenFile): Promise<string> {
+    const { file } = open;
+    const meta = file.heldMeta;
+    if (meta && 'device' in meta) return `device:${meta.device}`;
+    if (meta && 'dir' in meta) {
+      const st = await this.options.fs.stat?.(meta.dir).catch(() => undefined);
+      return st ? identityKey(st, meta.dir) : objectKey(file);
+    }
+    const known = fileKeys.get(open);
+    if (known !== undefined) return known;
+    const vfs = await file.stat?.().catch(() => undefined);
+    if (!vfs || vfs.orphan) return objectKey(file);
+    const st = await this.options.fs.stat?.(vfs.path).catch(() => undefined);
+    if (!st) return objectKey(file);
+    const key = identityKey(st, vfs.path);
+    fileKeys.set(open, key);
     return key;
   }
 

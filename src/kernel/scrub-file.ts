@@ -130,6 +130,7 @@ export function scrubbed(inner: OpenFile, scrubber: Scrubber, idleMs = SCRUB_IDL
     },
     changed,
     ...(file.tty ? { tty: file.tty } : {}),
+    identity: file.identity ?? file,
     ...(file.clipboard ? { clipboard: file.clipboard } : {}),
     ...(file.write
       ? {
