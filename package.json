@@ -77,7 +77,7 @@
     "@ai-ecoverse/wasm-coreutils": "9.12.0-9",
     "@ai-ecoverse/wasm-curl": "8.22.0-5",
     "@ai-ecoverse/wasm-git": "2.55.0-15",
-    "@ai-ecoverse/wasm-gmake": "4.4.1-5",
+    "@ai-ecoverse/wasm-gmake": "4.4.1-6",
     "@ai-ecoverse/wasm-procps": "4.0.7-3",
     "@ai-ecoverse/wasm-sqlite3": "3.54.0-5",
     "@ai-ecoverse/wasm-tar": "1.35.0-7",
