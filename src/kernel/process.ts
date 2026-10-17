@@ -358,6 +358,7 @@ export interface FdInfo {
 
   name?: string;
   terminal?: string;
+  fifo?: string;
 }
 
 const SYSCALL_OPS: ReadonlySet<string> = new Set([
@@ -1794,6 +1795,7 @@ export class WasmProcess {
       ...(file.write && !file.read ? { access: 'write' as const } : {}),
       ...(file.tty?.name ? { name: file.tty.name } : file.pty ? { name: '/dev/ptmx' } : {}),
       ...(terminal ? { terminal } : {}),
+      ...(file.fifo !== undefined ? { fifo: file.fifo } : {}),
     };
   }
 

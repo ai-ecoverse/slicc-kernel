@@ -3,6 +3,7 @@ import { physicalPath } from '../../fs/physical-path.ts';
 import { localCpuNanos } from '../../kernel/cpu-clock.ts';
 import { type Cred, type CredChange, MAX_GROUPS } from '../../kernel/cred.ts';
 import type { DeviceMeta, KernelFdKind } from '../../kernel/fd-table.ts';
+import type { FdInfo } from '../../kernel/process.ts';
 import { KERNEL_SIGINFO, SIG, type SigInfo } from '../../kernel/signals.ts';
 import type { SyncFsBridgeStat, SyncFsPosixBridge } from '../../realm/sync-fs-wire.ts';
 import type { LockHeld } from '../process-locks.ts';
@@ -1349,6 +1350,10 @@ export class WasiHost {
     }
     if (kind === 'tty') return '/dev/tty';
     if (kind === 'device') return '/dev/null';
+    if (kind === 'stream') {
+      const { fifo } = this.o.kernel.call({ op: 'fd-info', fd: alias.fd }) as FdInfo;
+      if (fifo !== undefined) return fifo;
+    }
     const ino = this.fdFilestat(alias.fd).ino;
     if (kind === 'stream') return `pipe:[${ino}]`;
     if (kind === 'socket') return `socket:[${ino}]`;
