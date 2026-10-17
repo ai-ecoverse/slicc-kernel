@@ -223,3 +223,27 @@ test('under umask 077, path_mkfifo never lets another user open the new FIFO, no
   assert.deepEqual(made, ok('mkfifo /tmp/s: ok\nroot 600\n'));
   assert.deepEqual(await snatcher, ok('opened 0 times, refused 200 times\n'));
 });
+
+test('mkfifo of the root or any existing directory is EEXIST, and of an empty name ENOENT, from WASIX and Emscripten alike (#972)', {
+  timeout: 60_000,
+}, async (t) => {
+  const bash = await kernelWith(t);
+  assert.deepEqual(
+    await bash(
+      'cd /; fifotest mkfifo / 600; fifotest mkfifo . 600; fifotest mkfifo /tmp 600; fifotest mkfifo /dev/shm 600; fifotest mkfifo "" 600; cd /tmp; fifotest mkfifo .. 600; mkfifo /; mknod / p'
+    ),
+    {
+      status: 1,
+      stdout: [
+        'mkfifo /: File exists',
+        'mkfifo .: File exists',
+        'mkfifo /tmp: File exists',
+        'mkfifo /dev/shm: File exists',
+        'mkfifo : No such file or directory',
+        'mkfifo ..: File exists',
+        '',
+      ].join('\n'),
+      stderr: "mkfifo: cannot create fifo '/': File exists\nmknod: /: File exists\n",
+    }
+  );
+});

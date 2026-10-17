@@ -1283,6 +1283,7 @@ export class OpfsFs implements KernelFs {
   }
 
   async createExclusive(path: string, owner?: NewOwner): Promise<void> {
+    if (normalizePath(path) === '/') throw fsError('EEXIST', path);
     const parent = await this.locate(parentOf(path), true);
     if (parent.handle?.kind !== 'directory') throw fsError('ENOTDIR', path);
     const dir = parent.handle;
