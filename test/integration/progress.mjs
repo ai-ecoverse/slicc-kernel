@@ -72,28 +72,3 @@ export async function progressing(work, options) {
     settled = true;
   }
 }
-
-export async function pageBash(page, script, options = { cwd: '/os' }, everyMs = 1_000) {
-  const id = await page.evaluate(
-    (s, o) => {
-      const runs = (window.longRuns ??= []);
-      const slot = { done: false };
-      runs.push(slot);
-      window.kernel.run(['bash', '-c', s], o).then(
-        (result) => Object.assign(slot, { done: true, result }),
-        (err) => Object.assign(slot, { done: true, error: String(err?.message ?? err) })
-      );
-      return runs.length - 1;
-    },
-    script,
-    options
-  );
-  for (;;) {
-    const slot = await page.evaluate((i) => window.longRuns[i], id);
-    if (slot.done) {
-      if (slot.error !== undefined) throw new Error(slot.error);
-      return slot.result;
-    }
-    await sleep(everyMs);
-  }
-}
