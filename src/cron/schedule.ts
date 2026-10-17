@@ -202,5 +202,24 @@ export function missedFires(
     count++;
   }
   const next = nextFire(schedule, last as number, utc);
-  return { count, last, more: next !== null && next <= until };
+  if (next === null || next > until) return { count, last, more: false };
+  return { count, last: latestFire(schedule, last as number, until, utc), more: true };
+}
+
+export function latestFire(schedule: Schedule, from: number, until: number, utc = false): number {
+  let found = from;
+  for (let span = 60_000; ; span *= 2) {
+    const start = Math.max(from, until - span);
+    const first = nextFire(schedule, start, utc);
+    if (first !== null && first <= until) {
+      found = first;
+      break;
+    }
+    if (start === from) return from;
+  }
+  for (let at = nextFire(schedule, found, utc); at !== null && at <= until; ) {
+    found = at;
+    at = nextFire(schedule, at, utc);
+  }
+  return found;
 }
