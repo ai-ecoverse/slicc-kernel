@@ -17,7 +17,7 @@ export interface PermissionHandle {
 
 export type MediumHandle = FileSystemDirectoryHandle & PermissionHandle;
 
-type Handlers = Required<Omit<FilesystemHandlers, 'mount' | 'statfs' | 'link'>>;
+type Handlers = Required<Omit<FilesystemHandlers, 'mount' | 'statfs' | 'link' | 'mkfifo'>>;
 
 export type SessionFs = KernelFs & Pick<OpfsFs, 'writeSession' | 'pread'>;
 

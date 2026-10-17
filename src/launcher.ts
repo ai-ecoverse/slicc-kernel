@@ -2258,6 +2258,7 @@ export class Launcher {
         {
           symlinks: true,
           links: true,
+          fifos: true,
           chmod: true,
           owners: true,
           linkTimes: true,

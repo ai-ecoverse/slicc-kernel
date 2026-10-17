@@ -1,7 +1,9 @@
 import { type FilesystemHandlers, fsError } from './driver.ts';
 import type { DriverAttr, DriverStatfs } from './protocol.ts';
 
-export type MediumHandlers = Required<Omit<FilesystemHandlers, 'mount' | 'statfs' | 'link'>> &
+export type MediumHandlers = Required<
+  Omit<FilesystemHandlers, 'mount' | 'statfs' | 'link' | 'mkfifo'>
+> &
   Pick<FilesystemHandlers, 'statfs'>;
 
 export interface MediumSlot<K> {

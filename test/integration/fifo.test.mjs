@@ -65,11 +65,36 @@ for (const users of ['off', 'enforce']) {
       stdout: 'rc 1\n',
       stderr: "mkfifo: cannot create fifo '/tmp/f': File exists\n",
     });
-    assert.deepEqual(await bash('mkfifo /dev/shm/f; echo "rc $?"'), {
+  });
+}
+
+for (const users of ['off', 'enforce']) {
+  test(`mkfifo on a tmpfs mount (/dev/shm) makes a FIFO that a writer and a reader meet in, users ${users} (#907)`, {
+    timeout: 60_000,
+  }, async (t) => {
+    const bash = await kernelWith(t, users);
+    assert.deepEqual(
+      await bash(
+        'umask 022; mkfifo /dev/shm/f && stat -c "%F %a" /dev/shm/f && ls -l /dev/shm/f | cut -c1 && test -p /dev/shm/f && fifotest stat /dev/shm/f'
+      ),
+      ok('fifo 644\np\nfifo\n')
+    );
+    assert.deepEqual(
+      await bash('echo "over shm" > /dev/shm/f & sleep 0.3; cat /dev/shm/f; wait'),
+      ok('over shm\n')
+    );
+    assert.deepEqual(
+      await bash(
+        'fifotest read /dev/shm/f & sleep 0.3; fifotest write /dev/shm/f "wasix on shm"; wait'
+      ),
+      ok('wrote 12\nread: wasix on shmread end: 0 eof\n')
+    );
+    assert.deepEqual(await bash('mkfifo /dev/shm/f; echo "rc $?"; ls /dev/shm'), {
       status: 0,
-      stdout: 'rc 1\n',
-      stderr: "mkfifo: cannot create fifo '/dev/shm/f': Operation not permitted\n",
+      stdout: 'rc 1\nf\n',
+      stderr: "mkfifo: cannot create fifo '/dev/shm/f': File exists\n",
     });
+    assert.deepEqual(await bash('rm /dev/shm/f; ls /dev/shm'), ok(''));
   });
 }
 

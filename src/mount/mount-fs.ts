@@ -321,11 +321,18 @@ function inodeless(mount: Mount, attr: DriverAttr): boolean {
 function statOf(attr: DriverAttr, path: string, mount: Mount): FsStat {
   const mtime = new Date(attr.mtime);
   const fallback =
-    attr.kind === 'directory' ? 0o40755 : attr.kind === 'symlink' ? 0o120777 : 0o100644;
+    attr.kind === 'directory'
+      ? 0o40755
+      : attr.kind === 'symlink'
+        ? 0o120777
+        : attr.kind === 'fifo'
+          ? 0o10644
+          : 0o100644;
   return {
     isFile: attr.kind === 'file',
     isDirectory: attr.kind === 'directory',
     isSymbolicLink: attr.kind === 'symlink',
+    ...(attr.kind === 'fifo' ? { isFifo: true } : {}),
     size: attr.size,
     mode: attr.mode ?? fallback,
     mtime,
@@ -955,7 +962,7 @@ class MountFs implements KernelFs {
     }
     const { mount, rel } = found;
     this.writable(mount, real);
-    if (owner?.fifo) throw errnoError('EPERM', `${real}: this mount has no FIFOs`);
+    if (owner?.fifo) return this.mkfifo(found, real, owner);
     const bytes = typeof content === 'string' ? new TextEncoder().encode(content) : content;
     if (mount.maxFile > 0 && bytes.length > mount.maxFile) {
       throw errnoError(
@@ -970,6 +977,19 @@ class MountFs implements KernelFs {
       } catch (err) {
         if ((err as { code?: unknown }).code !== 'ESTALE' || attempt >= STALE_RETRIES) throw err;
       }
+    }
+  }
+
+  private async mkfifo(found: Located, real: string, owner: NewOwner): Promise<void> {
+    const { mount, rel } = found;
+    if (!mount.caps.fifos) throw errnoError('EPERM', `${real}: this mount has no FIFOs`);
+    const made = await this.driverOwner(found, real, owner, false);
+    await this.table.commit(real);
+    this.table.forget(mount, real);
+    try {
+      await mount.conn.call({ op: 'mkfifo', path: rel, ...made });
+    } finally {
+      this.table.forget(mount, real);
     }
   }
 
