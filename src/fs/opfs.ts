@@ -307,7 +307,7 @@ export class OpfsFs implements KernelFs {
 
   private committed(target: string): void {
     this.fileTimes.delete(target);
-    if (this.remote?.watched()) this.remote.wrote(target);
+    if (this.remote?.watched() || this.remote?.crowded()) this.remote.wrote(target);
   }
 
   private counted: readonly string[] = [];
