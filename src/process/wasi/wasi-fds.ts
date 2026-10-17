@@ -920,7 +920,7 @@ export class WasiFds {
 
   restartable: (() => boolean) | undefined;
 
-  private restarting<T>(call: () => T): T {
+  restarting<T>(call: () => T): T {
     for (;;) {
       try {
         return call();

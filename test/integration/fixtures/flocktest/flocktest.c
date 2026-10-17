@@ -61,6 +61,11 @@ static void touch(const char *path) { close(open(path, O_CREAT | O_WRONLY, 0644)
 
 static void on_signal(int sig) { (void)sig; }
 
+static void on_restart(int sig) {
+  (void)sig;
+  write(1, "handler\n", 8);
+}
+
 static int skip_block(int argc, char **argv, int i) {
   int depth = 1;
   for (i++; i < argc; i++) {
@@ -104,6 +109,13 @@ int main(int argc, char **argv) {
       memset(&l, 0, sizeof l);
       l.type = t[0] == 'r' ? 0 : t[0] == 'w' ? 1 : 2;
       printf("%sfcntl %s\n", who, name(k_lock(fds[slot], 13, &l)));
+    } else if (!strcmp(op, "fcntlw")) {
+      int slot = atoi(argv[++i]);
+      const char *t = argv[++i];
+      struct klock l;
+      memset(&l, 0, sizeof l);
+      l.type = t[0] == 'r' ? 0 : 1;
+      printf("%sfcntlw %s\n", who, name(k_lock(fds[slot], 14, &l)));
     } else if (!strcmp(op, "fork")) {
       int end = skip_block(argc, argv, i);
       pid_t child = fork();
@@ -130,6 +142,12 @@ int main(int argc, char **argv) {
       struct sigaction sa;
       memset(&sa, 0, sizeof sa);
       sa.sa_handler = on_signal;
+      sigaction(SIGUSR1, &sa, NULL);
+    } else if (!strcmp(op, "trapr")) {
+      struct sigaction sa;
+      memset(&sa, 0, sizeof sa);
+      sa.sa_handler = on_restart;
+      sa.sa_flags = SA_RESTART;
       sigaction(SIGUSR1, &sa, NULL);
     } else {
       fprintf(stderr, "unknown op %s\n", op);
