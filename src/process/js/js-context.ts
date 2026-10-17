@@ -432,12 +432,14 @@ async function vfsOpen(
   abs: string,
   options: JsOpenOptions,
   statOf: (op: 'stat' | 'lstat', path: string) => Promise<SyncFsBridgeStat>,
-  io: PipeIo
+  io: PipeIo,
+  whole: boolean
 ): Promise<JsFile> {
   const { infos, handles } = io;
   const existing = await statOf(isExclusive(options) ? 'lstat' : 'stat', abs).catch(absent);
   checkOpen(abs, options, existing);
-  if (existing?.isSocket && !isExclusive(options)) throw new JsCallError('ENXIO', abs);
+  const special = existing?.isSocket || (whole && existing?.isFifo);
+  if (special && !isExclusive(options)) throw new JsCallError('ENXIO', abs);
   if (existing?.isFifo && !isExclusive(options)) return fifoOpen(kernel, abs, options, io);
   const fd = (await kernel.json(openRequest(abs, options))) as number;
   try {
@@ -518,11 +520,15 @@ export function createContext(o: ContextOptions): CreatedContext {
 
   const devIo = { infos, handles, read, write: writeAll };
 
-  const open = async (path: string, options: JsOpenOptions = {}): Promise<JsFile> => {
+  const open = async (
+    path: string,
+    options: JsOpenOptions = {},
+    whole = false
+  ): Promise<JsFile> => {
     const abs = resolve(path);
     if (inDev(abs)) return openDev(kernel, abs, options, devIo);
     try {
-      return await vfsOpen(kernel, abs, options, statOf, devIo);
+      return await vfsOpen(kernel, abs, options, statOf, devIo, whole);
     } catch (err) {
       if (!(err instanceof JsCallError) || err.code !== 'ENOENT') throw err;
       const devPath = await tryDev(abs);
@@ -781,7 +787,7 @@ function pathOps(
   kernel: JsKernel,
   resolve: (path: string) => string,
   statOf: (op: 'stat' | 'lstat', path: string) => Promise<SyncFsBridgeStat>,
-  open: (path: string, options?: JsOpenOptions) => Promise<JsFile>,
+  open: (path: string, options?: JsOpenOptions, whole?: boolean) => Promise<JsFile>,
   tryDev: (abs: string) => Promise<string | undefined>
 ): JsProgramContext['fs'] {
   return {
@@ -845,12 +851,11 @@ function pathOps(
     },
     async writeFile(path, data, options) {
       const mode = options?.mode;
-      const file = await open(path, {
-        write: true,
-        create: true,
-        truncate: true,
-        ...(mode !== undefined ? { mode } : {}),
-      });
+      const file = await open(
+        path,
+        { write: true, create: true, truncate: true, ...(mode !== undefined ? { mode } : {}) },
+        true
+      );
       try {
         await file.write(0, typeof data === 'string' ? encoder.encode(data) : data);
       } finally {
