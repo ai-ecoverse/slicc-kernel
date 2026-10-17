@@ -764,6 +764,7 @@ export class WasiFds {
     mode?: number
   ): number {
     if (s?.isFifo) return this.kernelFifo(path, s, oflags, rights, fdflags);
+    if (s?.isSocket) throw new WasiError('ENXIO');
     if (this.shared || this.kernelHolds(path, s)) {
       return this.kernelFile(path, s, oflags, rights, fdflags, mode);
     }
