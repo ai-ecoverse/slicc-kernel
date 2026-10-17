@@ -61,6 +61,7 @@ export interface Peers {
   joined(): Promise<unknown>;
   crowded(): boolean;
   watch(listener: (crowded: boolean) => void): void;
+  observer?: true;
 }
 
 export interface KernelFs {

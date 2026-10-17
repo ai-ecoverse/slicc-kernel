@@ -263,12 +263,13 @@ export class OpfsFs implements KernelFs {
   private readonly locks: LockManagerLike | undefined;
   private readonly lockPrefix: string;
   readonly rootName: string | undefined;
+  private readonly observer: boolean;
 
   constructor(
     root: FileSystemDirectoryHandle,
     meta: MetaStore = new MemoryMeta(),
     channel?: string,
-    options: { ranged?: boolean; locks?: LockManagerLike | null } = {}
+    options: { ranged?: boolean; locks?: LockManagerLike | null; observer?: boolean } = {}
   ) {
     this.root = root;
     this.meta = sidecar(meta);
@@ -277,7 +278,11 @@ export class OpfsFs implements KernelFs {
     this.lockPrefix = `slicc-excl:${channel ?? ''}:`;
     this.rootName = channel;
     this.channel = channel === undefined ? undefined : new BroadcastChannel(channel);
-    this.remote = channel === undefined ? undefined : new RemoteWatch(`${channel}:watch`);
+    this.remote =
+      channel === undefined
+        ? undefined
+        : new RemoteWatch(`${channel}:watch`, options.observer ? { observer: true } : {});
+    this.observer = options.observer === true;
     if (this.remote) this.remote.quiet = () => this.quiet().then(() => this.settle?.());
     if (this.channel) {
       const remote = this.remote;
@@ -484,6 +489,7 @@ export class OpfsFs implements KernelFs {
     return {
       joined: () => remote.peered(),
       crowded: () => remote.crowded(),
+      ...(this.observer ? { observer: true as const } : {}),
       watch: (listener) => {
         remote.crowd = listener;
         listener(remote.crowded());
@@ -1602,6 +1608,7 @@ export class OpfsFs implements KernelFs {
   }
 
   async reconcile(): Promise<number> {
+    if (this.observer) return 0;
     let removed = 0;
     for (const entry of await this.meta.all()) {
       const real = await this.real(entry.path);

@@ -18,6 +18,7 @@ interface WatchMessage {
   ack?: number;
   from?: string;
   changed?: string[];
+  observer?: true;
 }
 
 export interface LockManagerLike {
@@ -34,6 +35,8 @@ export class RemoteWatch {
   private readonly name: string;
   private readonly tab = crypto.randomUUID();
   private readonly peers = new Set<string>();
+  private readonly observers = new Set<string>();
+  private readonly observer: boolean;
   private readonly others = new Map<string, readonly string[]>();
   private readonly union = new Set<string>();
   private readonly listeners = new Set<RemoteListener>();
@@ -56,8 +59,9 @@ export class RemoteWatch {
     this.crowd?.(now);
   }
 
-  constructor(name: string, options: { locks?: LockManagerLike | null } = {}) {
+  constructor(name: string, options: { locks?: LockManagerLike | null; observer?: boolean } = {}) {
     this.name = name;
+    this.observer = options.observer === true;
     this.locks = options.locks === undefined ? lockManager() : (options.locks ?? undefined);
     this.channel = new BroadcastChannel(name);
     this.channel.onmessage = ({ data }) => this.receive(data as WatchMessage);
@@ -75,7 +79,16 @@ export class RemoteWatch {
         this.settled = true;
         this.recount();
       });
-    this.channel.postMessage({ hello: this.tab });
+    this.channel.postMessage({ hello: this.tab, ...this.mark() });
+  }
+
+  private mark(): { observer?: true } {
+    return this.observer ? { observer: true } : {};
+  }
+
+  private meet(peer: string, observer: boolean | undefined): void {
+    if (observer) this.observers.add(peer);
+    else this.peers.add(peer);
   }
 
   private async join(): Promise<void> {
@@ -83,8 +96,7 @@ export class RemoteWatch {
     const prefix = `${this.name}:`;
     const mine = this.lockOf(this.tab);
     const held = ((await this.locks.query()).held ?? []).map((lock) => lock.name ?? '');
-    if (!held.some((name) => name.startsWith(prefix) && name !== mine) || this.peers.size > 0)
-      return;
+    if (!held.some((name) => name.startsWith(prefix) && name !== mine) || this.present()) return;
     await new Promise<void>((resolve) => {
       const timer = setTimeout(resolve, ANNOUNCE_WAIT_MS);
       this.met = () => {
@@ -96,11 +108,20 @@ export class RemoteWatch {
 
   async peered(): Promise<boolean> {
     await this.joined;
-    return this.peers.size > 0;
+    return !this.observer && this.peers.size > 0;
+  }
+
+  async company(): Promise<boolean> {
+    await this.joined;
+    return this.present();
+  }
+
+  private present(): boolean {
+    return this.peers.size > 0 || this.observers.size > 0;
   }
 
   crowded(): boolean {
-    return !this.settled || this.peers.size > 0;
+    return !this.observer && (!this.settled || this.peers.size > 0);
   }
 
   private lockOf(tab: string): string {
@@ -108,9 +129,9 @@ export class RemoteWatch {
   }
 
   private receive(data: WatchMessage): void {
-    if (data.hello !== undefined) this.greeted(data.hello);
+    if (data.hello !== undefined) this.greeted(data.hello, data.observer);
     if (data.here !== undefined && data.to === this.tab) {
-      this.peers.add(data.here);
+      this.meet(data.here, data.observer);
       this.recount();
       this.met?.();
     }
@@ -121,20 +142,20 @@ export class RemoteWatch {
     if (data.changed !== undefined) this.emit({ paths: data.changed, trees: [] });
   }
 
-  private greeted(peer: string): void {
-    this.peers.add(peer);
+  private greeted(peer: string, observer: boolean | undefined): void {
+    this.meet(peer, observer);
     this.recount();
     const answer = () => {
-      this.channel.postMessage({ here: this.tab, to: peer });
+      this.channel.postMessage({ here: this.tab, to: peer, ...this.mark() });
       if (this.mine.length > 0) void this.announce(this.mine);
     };
     if (this.quiet) void this.quiet().then(answer, answer);
     else answer();
   }
 
-  private announced({ tab, paths, seq }: WatchMessage): void {
+  private announced({ tab, paths, seq, observer }: WatchMessage): void {
     const from = tab as string;
-    this.peers.add(from);
+    this.meet(from, observer);
     this.recount();
     if ((paths as string[]).length > 0) this.others.set(from, paths as string[]);
     else this.others.delete(from);
@@ -157,10 +178,11 @@ export class RemoteWatch {
   async prune(): Promise<void> {
     if (!this.locks) return;
     const held = new Set(((await this.locks.query()).held ?? []).map((lock) => lock.name));
-    for (const tab of new Set([...this.others.keys(), ...this.peers])) {
+    for (const tab of new Set([...this.others.keys(), ...this.peers, ...this.observers])) {
       if (!held.has(this.lockOf(tab))) {
         this.others.delete(tab);
         this.peers.delete(tab);
+        this.observers.delete(tab);
       }
     }
     this.rebuild();
@@ -183,7 +205,7 @@ export class RemoteWatch {
   announce(paths: readonly string[]): Promise<void> {
     this.mine = [...paths];
     const seq = ++this.seq;
-    this.channel.postMessage({ tab: this.tab, paths: this.mine, seq });
+    this.channel.postMessage({ tab: this.tab, paths: this.mine, seq, ...this.mark() });
     if (this.peers.size === 0) return Promise.resolve();
     return new Promise<void>((resolve) => {
       const done = () => {

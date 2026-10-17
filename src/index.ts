@@ -166,6 +166,7 @@ export interface KernelOptions {
   metadata?: string | false;
   media?: string | false;
   ca?: string | false;
+  peer?: 'observer';
   worker?: string | URL;
   network?: NetworkOptions;
   requestDirectory?: () => Promise<FileSystemDirectoryHandle>;
@@ -355,6 +356,7 @@ function initCall(options: KernelOptions, transport: NetworkTransport | undefine
     ...(options.metadata !== undefined ? { metadata: options.metadata } : {}),
     ...(options.media !== undefined ? { media: options.media } : {}),
     ...(options.ca !== undefined ? { ca: options.ca } : {}),
+    ...(options.peer === 'observer' ? { peer: 'observer' as const } : {}),
     ...(transport ? { transport: transport.traits } : {}),
     ...uplinkInit(options.network?.uplink),
     ...(options.hostfs ? { hostfs: true } : {}),

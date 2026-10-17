@@ -80,7 +80,7 @@ export interface LockServiceOptions {
     ): Promise<unknown>;
   };
   channel?: (name: string) => BroadcastChannel;
-  peers?: { joined(): Promise<unknown>; crowded(): boolean };
+  peers?: { joined(): Promise<unknown>; crowded(): boolean; observer?: true };
 }
 
 export class LockService implements KernelLocks {
@@ -118,9 +118,11 @@ export class LockService implements KernelLocks {
     };
     void this.locks.request(this.aliveOf(this.kernel), () => new Promise<void>(() => {}));
     const peers = options.peers;
-    this.role = peers
-      ? Promise.all([this.elect(), peers.joined()]).then(() => undefined)
-      : this.elect();
+    this.role = peers?.observer
+      ? this.observe()
+      : peers
+        ? Promise.all([this.elect(), peers.joined()]).then(() => undefined)
+        : this.elect();
     this.peers = options.peers;
     this.flocks = {
       set: (key, owner, kind) => this.flockSet(key, owner, kind),
@@ -138,6 +140,11 @@ export class LockService implements KernelLocks {
 
   private aliveOf(kernel: string): string {
     return `slicc-locks-alive:${LOCKS_PROTOCOL}:${this.root}:${kernel}`;
+  }
+
+  private observe(): Promise<void> {
+    this.leader = true;
+    return Promise.resolve();
   }
 
   private elect(): Promise<void> {

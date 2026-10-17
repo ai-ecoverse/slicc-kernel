@@ -57,6 +57,7 @@ export interface InitRequest {
   metadata?: string | false;
   media?: string | false;
   ca?: string | false;
+  peer?: 'observer';
   transport?: RealmTransportTraits;
   uplink?: { traits: UplinkTraits; routes?: RouteTable };
   hostfs?: boolean;
@@ -532,7 +533,11 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
       const net = remotes(port, req);
       ({ transport: remote, uplink } = net);
       const ranged = await inOpfs(deps, root);
-      const fs = new OpfsFs(root, meta, dirsChannel(name), { ranged });
+      const observer = req.peer === 'observer';
+      const fs = new OpfsFs(root, meta, dirsChannel(name), {
+        ranged,
+        ...(observer ? { observer } : {}),
+      });
       await fs.reconcile();
       const started = new Launcher({
         fs,
