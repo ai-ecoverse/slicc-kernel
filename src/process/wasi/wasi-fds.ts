@@ -756,6 +756,9 @@ export class WasiFds {
     const alias = stdioAlias(path);
     if (alias !== undefined) return this.reopen(alias);
     const exclusive = (oflags & OFLAGS.CREAT) !== 0 && (oflags & OFLAGS.EXCL) !== 0;
+    if (exclusive && this.shared && !(oflags & OFLAGS.DIRECTORY) && this.fs.create) {
+      return this.kernelFile(path, undefined, oflags, rights, fdflags, mode);
+    }
     if (exclusive && this.isLink(path)) throw new WasiError('EEXIST');
     const s = this.statOrMissing(path);
     if (exclusive && s) throw new WasiError('EEXIST');
