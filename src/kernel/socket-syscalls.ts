@@ -2,6 +2,7 @@ import type { SyncFsResult } from '../realm/sync-fs-wire.ts';
 import { KernelDgram } from './dgram.ts';
 import { type FdTable, KernelError, OpenFile, pollFile } from './fd-table.ts';
 import { encodeReceived } from './net/datagram-wire.ts';
+import { isLoopbackHost } from './net/proxy-service.ts';
 import type { ResolveFamily } from './net/uplink.ts';
 import {
   type ConnectorStamp,
@@ -82,6 +83,14 @@ export type SocketSyscall =
       nonblock: boolean;
     }
   | {
+      op: 'sock-tls';
+      host: string;
+      port: number;
+      servername?: string;
+      alpn?: string[];
+      ca?: boolean;
+    }
+  | {
       op: 'sock-recvfrom';
       fd: number;
       max: number;
@@ -102,6 +111,7 @@ export const SOCKET_OPS: readonly SocketSyscall['op'][] = [
   'sock-resolve',
   'sock-sendto',
   'sock-recvfrom',
+  'sock-tls',
 ];
 export interface SocketProcess {
   fds: FdTable;
@@ -198,6 +208,8 @@ export async function socketSyscall(
       if (addresses.length === 0) throw new KernelError('ENOENT');
       return ok(addresses);
     }
+    case 'sock-tls':
+      return ok(tlsOverTransport(req, proc));
     default:
       return datagram(req, proc);
   }
@@ -323,4 +335,37 @@ async function accept(
   const waits = !nonblock && !pollFile(listener).readable;
   const socket = await listener.accept(waits ? proc.blocking() : undefined, nonblock);
   return { fd: proc.fds.install(new OpenFile(socket), 3), peer: socket.peer };
+}
+
+const NOT_HTTP_PORTS = new Set([
+  465, 563, 585, 636, 853, 989, 990, 992, 993, 994, 995, 5061, 5671, 6697, 8883,
+]);
+const HOST_NAME = /^[A-Za-z0-9.-]+$|^\[?[0-9A-Fa-f:.]+\]?$/;
+function tlsOverTransport(
+  req: Extract<SocketSyscall, { op: 'sock-tls' }>,
+  proc: SocketProcess
+): { fd: number; alpnProtocol: string; servername: string } {
+  if (req.ca) throw new KernelError('ENOTSUP');
+  if (req.alpn && req.alpn.length > 0 && !req.alpn.includes('http/1.1')) {
+    throw new KernelError('EPROTONOSUPPORT');
+  }
+  if (!Number.isInteger(req.port) || req.port < 1 || req.port > 65535)
+    throw new KernelError('EINVAL');
+  if (NOT_HTTP_PORTS.has(req.port)) throw new KernelError('EPROTONOSUPPORT');
+  const servername = req.servername || req.host;
+  if (!HOST_NAME.test(servername)) throw new KernelError('EINVAL');
+  if (isLoopbackHost(servername) || isLoopbackHost(req.host)) throw new KernelError('ENOTSUP');
+  const host =
+    servername.includes(':') && !servername.startsWith('[') ? `[${servername}]` : servername;
+  const origin = req.port === 443 ? `https://${host}` : `https://${host}:${req.port}`;
+  const [mine, theirs] = KernelSocket.pair(proc.net, 'inet', proc.cred?.());
+  mine.peer = { family: 'inet', host: req.host, port: req.port };
+  try {
+    proc.net.serveOrigin(theirs, origin);
+  } catch (err) {
+    mine.close();
+    theirs.close();
+    throw err;
+  }
+  return { fd: proc.fds.install(new OpenFile(mine), 3), alpnProtocol: 'http/1.1', servername };
 }

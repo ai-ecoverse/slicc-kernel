@@ -6,8 +6,23 @@ export interface JsAddress {
   port: number;
 }
 
+export interface JsTlsSession {
+  readonly protocol: 'transport';
+  readonly alpnProtocol: string;
+  readonly authorized: true;
+  readonly servername: string;
+}
+
+export interface JsTlsOptions {
+  servername?: string;
+  alpn?: string[];
+  rejectUnauthorized?: boolean;
+  ca?: unknown;
+}
+
 export interface JsConnection {
   readonly fd: number;
+  readonly tls?: JsTlsSession;
   readonly local: JsAddress;
   readonly remote: JsAddress;
   readonly readable: ReadableStream<Uint8Array>;
@@ -33,6 +48,7 @@ export interface JsConnectOptions {
   host?: string;
   port: number;
   signal?: AbortSignal;
+  tls?: JsTlsOptions;
 }
 
 export interface JsResolveOptions {
@@ -163,6 +179,27 @@ export function netOps(kernel: JsKernel, io: NetIo): JsNet {
     };
   };
 
+  const tlsConnect = async (
+    options: JsConnectOptions,
+    tls: JsTlsOptions
+  ): Promise<JsConnection> => {
+    const r = (await kernel.json({
+      op: 'sock-tls',
+      host: options.host ?? 'localhost',
+      port: port(options.port),
+      ...(tls.servername ? { servername: tls.servername } : {}),
+      ...(tls.alpn ? { alpn: [...tls.alpn] } : {}),
+      ...(tls.ca !== undefined ? { ca: true } : {}),
+    })) as { fd: number; alpnProtocol: string; servername: string };
+    const session: JsTlsSession = Object.freeze({
+      protocol: 'transport',
+      alpnProtocol: r.alpnProtocol,
+      authorized: true,
+      servername: r.servername,
+    });
+    return Object.assign(await connection(r.fd), { tls: session });
+  };
+
   const lookup = async (name: string, options: JsResolveOptions = {}): Promise<string[]> => {
     const family = options.family ?? 0;
     if (family !== 0 && family !== 4 && family !== 6) {
@@ -195,6 +232,7 @@ export function netOps(kernel: JsKernel, io: NetIo): JsNet {
     connect: async (options) => {
       const signal = options.signal ?? NEVER;
       signal.throwIfAborted();
+      if (options.tls) return tlsConnect(options, options.tls);
       const host = options.host ?? '127.0.0.1';
       if (host.includes(':')) throw new JsCallError('EADDRNOTAVAIL', host);
       const addr: InetAddr = {

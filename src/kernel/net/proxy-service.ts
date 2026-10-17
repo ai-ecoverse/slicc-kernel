@@ -46,6 +46,9 @@ export const NO_WEBSOCKET =
   'WebSocket not supported by this transport (fetchTransport needs { webSocket: true })';
 
 export const REALM_PROXY_PORT = 3128;
+const REQUEST_LINE_MAX = 8192;
+const REQUEST_LINE = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+ \S+ HTTP\/1\.[01]\r?\n$/;
+const NOT_HTTP = 'not HTTP/1.1: TLS through the transport carries only HTTP/1.1 and WebSocket';
 export interface ProxyLimits {
   maxConnections: number;
   maxHead: number;
@@ -389,6 +392,26 @@ export class RealmProxy {
     const incoming = new Incoming(timedSource(conn, idle, this.stop.signal));
     try {
       await this.requests({ sink: conn, incoming, conn, socket: conn, idle });
+    } finally {
+      this.connections.delete(conn);
+      conn.close();
+    }
+  }
+  async serveOrigin(conn: KernelSocket, origin: string): Promise<void> {
+    if (this.stop.signal.aborted) {
+      conn.close();
+      return;
+    }
+    this.connections.add(conn);
+    const idle = { ms: this.limits.idleMs };
+    const incoming = new Incoming(timedSource(conn, idle, this.stop.signal));
+    try {
+      const line = await incoming.firstLine(REQUEST_LINE_MAX).catch(() => '');
+      if (line !== '' && !REQUEST_LINE.test(line)) {
+        await this.refuse(conn, new HttpError(400, NOT_HTTP));
+        return;
+      }
+      await this.requests({ sink: conn, incoming, origin, socket: conn, idle });
     } finally {
       this.connections.delete(conn);
       conn.close();

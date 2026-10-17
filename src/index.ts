@@ -126,6 +126,8 @@ export type {
   JsListenOptions,
   JsNet,
   JsResolveOptions,
+  JsTlsOptions,
+  JsTlsSession,
 } from './process/js/js-net.ts';
 export type { JsRunOptions, JsRunResult, JsRunStdio } from './process/js/js-run.ts';
 export type { JsCred, JsSyncContext, JsSyncFile } from './process/js/js-sync.ts';
