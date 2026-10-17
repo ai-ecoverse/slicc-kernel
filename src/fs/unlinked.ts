@@ -46,6 +46,19 @@ export function webLocks(): UnlinkLocks | undefined {
   return (globalThis as { navigator?: { locks?: UnlinkLocks } }).navigator?.locks;
 }
 
+const LOOKUP_OPS = [
+  'exists',
+  'readFile',
+  'readFileBuffer',
+  'readVersioned',
+  'version',
+  'pread',
+  'readlink',
+  'realpath',
+] as const;
+
+type LookupOp = (typeof LOOKUP_OPS)[number];
+
 const within = (path: string, target: string) =>
   path === target || target === '/' || path.startsWith(`${target}/`);
 
@@ -136,6 +149,46 @@ export class UnlinkedKeeper {
 
   wrap(fs: KernelFs = this.fs): KernelFs {
     const keeper = this;
+    const replacing = new Map<string, { done: Promise<void> }>();
+    const replaced = new Map<string, number>();
+    const replace = async (target: string, op: () => Promise<void>) => {
+      const before = replacing.get(target);
+      const { promise, resolve } = Promise.withResolvers<void>();
+      const mine = {
+        done: Promise.all([before?.done, promise]).then(() => undefined),
+      };
+      replacing.set(target, mine);
+      try {
+        await op();
+      } finally {
+        replaced.set(target, (replaced.get(target) ?? 0) + 1);
+        resolve();
+        if (replacing.get(target) === mine) replacing.delete(target);
+      }
+    };
+    const unreplaced = async <T>(path: string, op: () => Promise<T>): Promise<T> => {
+      const at = fs.resolvePath('/', path);
+      for (let attempt = 1; ; attempt++) {
+        await replacing.get(at)?.done;
+        const seen = replaced.get(at) ?? 0;
+        try {
+          return await op();
+        } catch (err) {
+          const code = (err as { code?: unknown })?.code;
+          if (attempt >= 3 || code !== 'ENOENT') throw err;
+          await replacing.get(at)?.done;
+          if ((replaced.get(at) ?? 0) === seen) throw err;
+        }
+      }
+    };
+    const looking = <K extends LookupOp>(name: K): Partial<KernelFs> => {
+      const call = fs[name] as ((path: string, ...rest: unknown[]) => Promise<unknown>) | undefined;
+      if (!call) return {};
+      return {
+        [name]: (path: string, ...rest: unknown[]) =>
+          unreplaced(path, () => call.call(fs, path, ...rest)),
+      } as Partial<KernelFs>;
+    };
     const visible = (names: string[]) => names.filter((name) => name !== UNLINKED_DIR);
     const counted = (st: FsStat): FsStat => {
       const hidden = keeper.links.get(`${st.dev ?? 0}:${st.ino}`) ?? 0;
@@ -145,9 +198,10 @@ export class UnlinkedKeeper {
     };
     return {
       ...fs,
+      ...LOOKUP_OPS.reduce<Partial<KernelFs>>((all, name) => Object.assign(all, looking(name)), {}),
       links: (path) => mayLink(fs, path),
-      stat: async (path) => counted(await fs.stat(path)),
-      lstat: async (path) => counted(await fs.lstat(path)),
+      stat: (path) => unreplaced(path, async () => counted(await fs.stat(path))),
+      lstat: (path) => unreplaced(path, async () => counted(await fs.lstat(path))),
       async rm(path, options) {
         const target = fs.resolvePath('/', path);
         const pinned = await keeper.pin(target);
@@ -157,8 +211,10 @@ export class UnlinkedKeeper {
       async rename(from, to) {
         const target = fs.resolvePath('/', to);
         if (target === fs.resolvePath('/', from)) return fs.rename(from, to);
-        const pinned = await keeper.pin(target);
-        await keeper.settle(pinned, () => fs.rename(from, to));
+        await replace(target, async () => {
+          const pinned = await keeper.pin(target);
+          await keeper.settle(pinned, () => fs.rename(from, to));
+        });
       },
       readdir: async (path) => visible(await fs.readdir(path)),
       readdirStat: async (path) =>
