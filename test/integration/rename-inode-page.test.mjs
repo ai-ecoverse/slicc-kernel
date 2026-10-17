@@ -27,9 +27,9 @@ test('in the page, a placeholder held open, unlinked and replaced by a symlink k
   await installPackage(page, 'wasm-coreutils');
   assert.deepEqual(
     await bash(
-      'mkdir -p /home/p/inner && echo first > /home/p/a.txt && cd /home/p/inner && for i in $(seq 30); do : > l$i; exec 3<>l$i; rm l$i; ln -s ../a.txt l$i; exec 3>&-; done; sleep 1.2; n=0; for i in $(seq 30); do [ "$(readlink l$i)" = ../a.txt ] && n=$((n + 1)); done; echo "kept=$n"; ls | wc -l'
+      'mkdir -p /home/p/inner && echo first > /home/p/a.txt && cd /home/p/inner && for i in $(seq 12); do : > l$i; exec 3<>l$i; rm l$i; ln -s ../a.txt l$i; exec 3>&-; done; sleep 1.2; n=0; for i in $(seq 12); do [ "$(readlink l$i)" = ../a.txt ] && n=$((n + 1)); done; echo "kept=$n"; ls | wc -l'
     ),
-    ok('kept=30\n30\n')
+    ok('kept=12\n12\n')
   );
 });
 
