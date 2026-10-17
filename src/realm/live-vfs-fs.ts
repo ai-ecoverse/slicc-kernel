@@ -1089,6 +1089,7 @@ export interface LiveMountFsApi extends LiveFsApi {
   sliccRename?: true;
   sliccKept?: true;
   sliccStale?: true;
+  sliccVanished?: true;
   open?(path: string, flags: number, mode?: number): unknown;
   statfsNode?(node: LiveFsNode): Record<string, number>;
   sliccStatfs?: true;
@@ -1151,6 +1152,7 @@ export function liveRoot(Fs: LiveMountFsApi, bridge: SyncFsPosixBridge): void {
   guardRenames(Fs);
   guardKeptNodes(Fs, plugin.handled);
   guardStaleNodes(Fs, plugin);
+  guardVanished(Fs);
   guardStatfs(Fs);
   const memfs = root.memfs ?? root.node_ops;
   const live = plugin.node_ops;
@@ -1261,6 +1263,60 @@ function guardStaleNodes(Fs: LiveMountFsApi, plugin: LiveVfsPlugin): void {
     if (fresh.live) fresh.live.named = before;
     return fresh;
   };
+}
+
+const O_NOFOLLOW = 0o400000;
+
+const RESOLVING: ReadonlyArray<[string, (args: unknown[]) => boolean]> = [
+  ['open', (args) => ((args[1] as number) & O_NOFOLLOW) === 0],
+  ['stat', (args) => !args[1]],
+  ['lstat', () => false],
+  ['unlink', () => false],
+  ['rename', () => false],
+  ['readlink', () => false],
+  ['truncate', () => true],
+];
+
+function guardVanished(Fs: LiveMountFsApi): void {
+  const forget = Fs.hashRemoveNode?.bind(Fs);
+  if (!forget || !Fs.lookupPath || Fs.sliccVanished) return;
+  Fs.sliccVanished = true;
+  const drop: (node: LiveFsNode) => void = forget;
+  const lookupPath = Fs.lookupPath.bind(Fs);
+  const ops = Fs as unknown as Record<string, ((...args: unknown[]) => unknown) | undefined>;
+  const cached = (path: string, follow: boolean): LiveFsNode | undefined => {
+    try {
+      const node = lookupPath(path, { follow }).node as LiveFsNode;
+      return node.live && node.live.openCount === 0 && !node.live.dirty ? node : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  let open: ((...args: unknown[]) => unknown) | undefined;
+  for (const [name, follows] of RESOLVING) {
+    const op = ops[name]?.bind(Fs);
+    if (name === 'open') open = op;
+    if (op) ops[name] = vanishing(op, follows);
+  }
+  function vanishing(
+    op: (...args: unknown[]) => unknown,
+    follows: (args: unknown[]) => boolean
+  ): (...args: unknown[]) => unknown {
+    return (...args: unknown[]) => {
+      try {
+        return op(...args);
+      } catch (err) {
+        const path = args[0];
+        const code = (err as { errno?: unknown }).errno;
+        const taken = code === wasiErrno('EEXIST') && op === open;
+        if ((code !== wasiErrno('ENOENT') && !taken) || typeof path !== 'string') throw err;
+        const node = cached(path, follows(args));
+        if (!node) throw err;
+        drop(node);
+        return op(...args);
+      }
+    };
+  }
 }
 
 function guardRenames(Fs: LiveMountFsApi): void {

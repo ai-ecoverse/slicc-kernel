@@ -1252,6 +1252,7 @@ export class OpfsFs implements KernelFs {
         ? await this.meta.fresh([path])
         : await this.meta.get([path]);
       if (freshMeta[0]?.link !== undefined) throw fsError('EEXIST', path);
+      if (freshMeta[0] !== undefined) await this.meta.remove([path]);
       this.forget(physical);
       this.refuse(physical);
       await dir.getDirectoryHandle(name, { create: true });
@@ -1273,7 +1274,8 @@ export class OpfsFs implements KernelFs {
       const freshMeta = this.meta.fresh
         ? await this.meta.fresh([path])
         : await this.meta.get([path]);
-      if (freshMeta[0] !== undefined) throw fsError('EEXIST', path);
+      if (freshMeta[0]?.link !== undefined) throw fsError('EEXIST', path);
+      if (freshMeta[0] !== undefined) await this.meta.remove([path]);
       this.forget(physical);
       this.refuse(physical);
       await dir.getFileHandle(name, { create: true });
