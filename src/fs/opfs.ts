@@ -18,6 +18,7 @@ import {
   normalizePath,
   type Owner,
   type OwnerChange,
+  type Peers,
   type Perm,
   redirected,
   resolvePath,
@@ -477,10 +478,17 @@ export class OpfsFs implements KernelFs {
     this.settle = settle;
   }
 
-  peers(): { joined(): Promise<unknown>; crowded(): boolean } | undefined {
+  peers(): Peers | undefined {
     const remote = this.remote;
     if (!remote) return undefined;
-    return { joined: () => remote.peered(), crowded: () => remote.crowded() };
+    return {
+      joined: () => remote.peered(),
+      crowded: () => remote.crowded(),
+      watch: (listener) => {
+        remote.crowd = listener;
+        listener(remote.crowded());
+      },
+    };
   }
 
   private quiet(): Promise<void> {

@@ -306,7 +306,8 @@ function refusal(err: unknown): boolean {
   return code === 'EACCES' || code === 'EPERM';
 }
 
-function cachedStat(s: LiveNodeState, dir: boolean): boolean {
+function cachedStat(s: LiveNodeState, dir: boolean, view?: ChangeView): boolean {
+  if (view?.foreign() && !s.dirty) return false;
   return s.stat !== undefined && (!dir || s.statAt === syncCallCount());
 }
 
@@ -446,7 +447,7 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
       const size = node.live.ranged?.size() ?? node.live.len;
       return { ...(node.live.stat as SyncFsBridgeStat), size };
     }
-    if (!cachedStat(node.live, Fs.isDir(node.mode))) {
+    if (!cachedStat(node.live, Fs.isDir(node.mode), bridgeOf(node).changes)) {
       const st = call(() => bridgeOf(node).lstat(liveNodePath(linked.holder(node))));
       Object.assign(node.live, { stat: st, statAt: syncCallCount() });
       node.mode = modeFromStat(st, exactIn(node));
@@ -624,7 +625,7 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
       const owned = bridgeOf(node).owners === true;
       if (owned && Fs.isLink(node.mode) && statOf(node).uid === undefined)
         node.live.stat = undefined;
-      const cached = owned && cachedStat(node.live, Fs.isDir(node.mode));
+      const cached = owned && cachedStat(node.live, Fs.isDir(node.mode), bridgeOf(node).changes);
       const st = statOf(node);
       if (cached) searchParents(Fs, node, bridgeOf(node), call);
       const s = node.live;
@@ -1236,6 +1237,8 @@ function guardKeptNodes(Fs: LiveMountFsApi, handled: Set<LiveFsNode> | undefined
 
 function outdated(node: LiveFsNode, view: ChangeView, before: number): boolean {
   const s = node.live;
+  if (view.foreign() && s.openCount === 0 && !s.dirty && node !== node.mount.root && !node.mounted)
+    return true;
   if (s.named === undefined) {
     s.named = before;
     return false;

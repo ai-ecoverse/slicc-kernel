@@ -32,7 +32,7 @@ import {
   SyscallError,
   type TtyOwner,
 } from './kernel-streams.ts';
-import { createProcessKernel, type ProcessKernel } from './process-children.ts';
+import { createProcessKernel, inheritedSignals, type ProcessKernel } from './process-children.ts';
 import {
   devCreations,
   type FdImports,
@@ -614,7 +614,6 @@ export async function runWasmProcess(
     {
       masks: () => signalMasks(module as unknown as RunningModule),
       raise: (sig) => (module as unknown as RunningModule).sliccRaise?.(sig),
-
       timer: (which) => {
         const running = module as unknown as RunningModule;
         if (!running.sliccTimerFire?.(which)) running.sliccRaise?.(SIG.ALRM);
@@ -643,6 +642,7 @@ export async function runWasmProcess(
     sliccPid: id.pid,
     sliccPpid: id.ppid,
     sliccEnv: init.env,
+    sliccKernel: { sigInherited: () => inheritedSignals(transport) },
     print: say(1),
     printErr: say(2),
     instantiateWasm(

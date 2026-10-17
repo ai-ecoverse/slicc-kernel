@@ -57,6 +57,12 @@ export interface HeldEntry {
   direct: boolean;
 }
 
+export interface Peers {
+  joined(): Promise<unknown>;
+  crowded(): boolean;
+  watch(listener: (crowded: boolean) => void): void;
+}
+
 export interface KernelFs {
   resolvePath(base: string, path: string): string;
   exclusive?<T>(path: string, run: (held: HeldEntry) => Promise<T>, follow?: boolean): Promise<T>;
@@ -84,7 +90,7 @@ export interface KernelFs {
   chown?(path: string, change: OwnerChange): Promise<void>;
   trackOwners?(): void;
   onPeer?(settle: () => Promise<void>): void;
-  peers?(): { joined(): Promise<unknown>; crowded(): boolean } | undefined;
+  peers?(): Peers | undefined;
   crossings?(mounted: (path: string) => boolean): void;
   ancestry?(path: string): Promise<Array<Perm | undefined>>;
   hasOwner?(path: string): Promise<boolean>;

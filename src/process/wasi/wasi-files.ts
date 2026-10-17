@@ -586,7 +586,7 @@ export function cachingBridge(
     return undefined;
   };
   const cached = (map: typeof stats, path: string, get: () => SyncFsBridgeStat) => {
-    if (blind) return get();
+    if (blind || view?.foreign()) return get();
     cache.fresh();
     let hit = map.get(path);
     if (hit === undefined || ('until' in hit && !live(hit, path))) {
