@@ -170,15 +170,21 @@ export class UnlinkedKeeper {
     };
     const unreplaced = async <T>(path: string, op: () => Promise<T>): Promise<T> => {
       const at = fs.resolvePath('/', path);
+      const pending = async () => {
+        for (let p = at; replacing.size > 0; p = parentOf(p)) {
+          await replacing.get(p)?.done;
+          if (p === '/') return;
+        }
+      };
       for (let attempt = 1; ; attempt++) {
-        await replacing.get(at)?.done;
+        await pending();
         const seen = keeper.replaced;
         try {
           return await op();
         } catch (err) {
           const code = (err as { code?: unknown })?.code;
           if (attempt >= 3 || code !== 'ENOENT') throw err;
-          await replacing.get(at)?.done;
+          await pending();
           if (keeper.replaced === seen) throw err;
         }
       }
@@ -206,9 +212,11 @@ export class UnlinkedKeeper {
       lstat: (path) => unreplaced(path, async () => counted(await fs.lstat(path))),
       async rm(path, options) {
         const target = fs.resolvePath('/', path);
-        const pinned = await keeper.pin(target);
-        if (pinned.moved.has(target)) pinned.commit();
-        else await keeper.settle(pinned, () => fs.rm(path, options));
+        await replace(target, async (gated) => {
+          const pinned = await keeper.pin(target, gated);
+          if (pinned.moved.has(target)) pinned.commit();
+          else await keeper.settle(pinned, () => fs.rm(path, options));
+        });
       },
       async rename(from, to) {
         const target = fs.resolvePath('/', to);
@@ -249,9 +257,16 @@ export class UnlinkedKeeper {
   }
 
   async pin(target: string, gated: () => void = () => undefined): Promise<Pinned> {
-    const paths = [...this.heldWithin(target).keys()].sort();
+    const paths: string[] = [];
     const releases: Array<() => void> = [];
-    for (const path of paths) releases.push(await this.gate.acquire(path));
+    for (;;) {
+      const fresh = [...this.heldWithin(target).keys()].filter((path) => !paths.includes(path));
+      if (fresh.length === 0) break;
+      for (const path of fresh.sort()) {
+        paths.push(path);
+        releases.push(await this.gate.acquire(path));
+      }
+    }
     gated();
     const now = this.heldWithin(target);
     const held = new Map(
