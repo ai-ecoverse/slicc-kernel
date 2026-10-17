@@ -13,6 +13,7 @@ import {
   knownLine,
   provenanceProblems,
   releaseEvidence,
+  verdict,
   verdictLine,
   withMissing,
 } from './lib.mjs';
@@ -307,6 +308,7 @@ function elsewhereOf(v) {
 const pr = values.pr;
 if (!(pr ? /^\d+\.\d+\.\d+-pr\.\d+\.\d+$/ : /^\d+\.\d+\.\d+$/).test(version ?? '')) {
   console.error(`record: --version must be ${pr ? 'x.y.z-pr.N.M' : 'x.y.z'}`);
+  verdict('record', false, `--version must be ${pr ? 'x.y.z-pr.N.M' : 'x.y.z'}`);
   process.exit(2);
 }
 if (pr) {
@@ -389,4 +391,5 @@ writeFileSync(
 );
 console.log(line);
 for (const p of problems) console.error(`problem: ${p}`);
+verdict('record', certified, `${state}: ${line}`);
 process.exit(certified ? 0 : 1);

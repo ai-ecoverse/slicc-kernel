@@ -62,7 +62,7 @@ async function compare(t, candidateChange, baseChange) {
   const candidate = await tarball(dir, 'candidate', CANDIDATE, candidateChange);
   const base = await tarball(dir, 'base', BASE, baseChange);
   const out = join(dir, 'same.json');
-  execFileSync(
+  const stdout = execFileSync(
     process.execPath,
     [
       same,
@@ -77,9 +77,11 @@ async function compare(t, candidateChange, baseChange) {
       '--out',
       out,
     ],
-    { env: { ...process.env, GITHUB_OUTPUT: '', GITHUB_STEP_SUMMARY: '' } }
+    { encoding: 'utf8', env: { ...process.env, GITHUB_OUTPUT: '', GITHUB_STEP_SUMMARY: '' } }
   );
-  return JSON.parse(await readFile(out, 'utf8'));
+  const evidence = JSON.parse(await readFile(out, 'utf8'));
+  assert.match(stdout, new RegExp(`^same: PASS identical=${evidence.identical}: `, 'm'));
+  return evidence;
 }
 
 test('a devDependency bump whose build differs only in the baked version (and the source-map columns and gitHead it shifts) is not behaviour, and the evidence names the rule and both sha256', async (t) => {

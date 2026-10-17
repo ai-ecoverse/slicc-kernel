@@ -193,11 +193,13 @@ else process.exit(1);
     );
     return {
       status: run.status,
+      stdout: run.stdout,
       json: JSON.parse(await readFile(join(out, 'record.json'), 'utf8')),
     };
   };
   const good = await record(['--tarball', ok.file, '--sha256', ok.sha256]);
   assert.equal(good.status, 0, JSON.stringify(good.json.problems));
+  assert.match(good.stdout, /^record: PASS success: certified /m);
   await writeFile(
     join(review, 'verdict.json'),
     JSON.stringify({

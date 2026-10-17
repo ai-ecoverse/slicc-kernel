@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { appendFileSync, mkdirSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
+import { verdict } from './lib.mjs';
 import { sha, sri } from './tarball.mjs';
 
 const { values } = parseArgs({
@@ -15,6 +16,7 @@ const { values } = parseArgs({
 const { version } = values;
 if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$/.test(version ?? '') || !values.out) {
   console.error('pack: --version x.y.z and --out <dir> are required');
+  verdict('pack', false, 'usage: --version x.y.z[-pre] --out DIR');
   process.exit(2);
 }
 const ref = values.ref || `v${version}`;
@@ -53,4 +55,4 @@ if (process.env.GITHUB_OUTPUT) {
     `sha256=${sha256}\nfile=${basename(file)}\ncommit=${commit}\n`
   );
 }
-console.log(`pack: ${basename(file)} sha256=${sha256} from ${ref} (${commit})`);
+verdict('pack', true, `${basename(file)} sha256=${sha256} from ${ref} (${commit})`);
