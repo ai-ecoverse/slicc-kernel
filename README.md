@@ -586,7 +586,7 @@ Directories are renamed with `FileSystemHandle.move()` where available, else by 
 - **Creating one:** an Emscripten program's `mkfifo`/`mknod(S_IFIFO)` makes a FIFO node on the OPFS root (in `/tmp`, `/home` and the rest), owned by the caller, with mode `mode & ~umask`. `stat`, `ls -l` (`p`) and `test -p` show it as a FIFO, in Emscripten, WASI and JS programs. WASIX libc has no `mkfifo`, but WASIX programs `stat`, `open`, read and write a FIFO that exists. An existing name is `EEXIST`. tmpfs, hostfs, `fsa` and media mounts have no FIFO nodes, so `mkfifo` there is `EPERM`, and `EROFS` on a readonly path.
 - **Opening one** works as on Linux (fifo(7)). A read-open waits until a writer opens, and a write-open until a reader does. `O_RDWR` doesn't wait. With `O_NONBLOCK` a read-open returns at once, and a write-open with no reader is `ENXIO`. A waiting open is interrupted by a caught signal (`EINTR`), restarts under `SA_RESTART`, and isn't ended by a stop.
 - **The data path** is the kernel's pipe: the same capacity, `EOF` once the last writer closes, and `SIGPIPE`/`EPIPE` once the last reader closes. The data is dropped when no end is open.
-- **The node's identity, not its name, picks the FIFO:** an open FIFO keeps working after an `unlink` or a `rename`, and a new `mkfifo` at the same name is another FIFO. `/proc/<pid>/fd/N` names the FIFO's path, also in children that inherit the end.
+- **The node's identity, not its name, picks the FIFO:** an open FIFO keeps working after an `unlink` or a `rename`, and a new `mkfifo` at the same name is another FIFO. `/proc/<pid>/fd/N` names the FIFO's path, also in children that inherit the end and in a WASIX program's `readlink("/proc/self/fd/N")` of an end it opened itself ([#909](https://github.com/ai-ecoverse/slicc-kernel/issues/909)).
 - **One kernel per storage root:** the table of open FIFOs is per kernel, so two tabs (two kernels on one origin) opening the same FIFO don't connect, as with record locks ([#675](https://github.com/ai-ecoverse/slicc-kernel/issues/675)).
 - GNU make 4.4's `-jN` uses a FIFO jobserver this way (`--jobserver-auth=fifo:PATH`), so sub-makes join it by path.
 - **Below an open** ([#908](https://github.com/ai-ecoverse/slicc-kernel/issues/908)): a FIFO or socket node is never read or written as a plain file. A JS program's `ctx.fs.readFile`/`writeFile` and the kernel API's `readFile`/`writeFile` (and the positioned reads, writes and truncates under them) fail with `ENXIO` on either, because they read or write a whole file rather than open one. Emscripten and WASI programs' opens of a FIFO go through the kernel's FIFO open as above, and a WASI program's open of a socket node is `ENXIO`, as on Linux.
@@ -1162,8 +1162,9 @@ A WASIX C program for `test/integration/fifo.test.mjs` (#896). It opens an exist
 A WASIX C program for `test/integration/fd-alias.test.mjs` (#894).
 - `fdalias PATH...` prints, for each path, what `stat`, `lstat` and `readlink` give: a file type (`fifo`, `chr`, `reg`, `lnk`, `dir`, `sock`) or the error. A `pipe:[N]`/`socket:[N]` link is cut after the `[`, so the inode number doesn't enter the expected output.
 - `fdalias cat PATH` opens the path and prints what one read returns.
+- `fdalias open PATH` opens the path read-write itself and prints what `readlink("/proc/self/fd/N")` gives for the new descriptor (#909).
 
-**Build:** `WASIX_SYSROOT_28=/path/to/wasix-sysroot ./build.sh`, with `wasixcc` 0.4.7 and binaryen's `wasm-opt` on `PATH`. `bin/fdalias.wasm` is 46,260 bytes, sha256 `70412137fb34d310f8ad200345557490d0441acce4e8f917a7ad37094efb70ec`.
+**Build:** `WASIX_SYSROOT_28=/path/to/wasix-sysroot ./build.sh`, with `wasixcc` 0.4.7 and binaryen's `wasm-opt` on `PATH`. `bin/fdalias.wasm` is 47,699 bytes, sha256 `dad58b44dba8a5edc1dfc8a139a5fdd8105d8aebbdc03609ed144c37dad0f64c`.
 
 ### `spintest`
 
