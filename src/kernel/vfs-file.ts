@@ -413,7 +413,10 @@ export class VfsNodes implements UnlinkHolder {
     return this.onEntry(path, async () => {
       const node = this.byPath.get(path);
       const held = node ? await node.serial(async () => node.holds()) : false;
-      if (held || (await present(this.fs, path))) throw fsError('EEXIST', path);
+      if (held) throw fsError('EEXIST', path);
+      const exclusive = (this.fs as Partial<Pick<KernelFs, 'createExclusive'>>).createExclusive;
+      if (exclusive) return exclusive.call(this.fs, path, owner);
+      if (await present(this.fs, path)) throw fsError('EEXIST', path);
       await this.fs.writeFile(path, new Uint8Array(0), owner);
     });
   }

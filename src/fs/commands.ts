@@ -236,6 +236,7 @@ export function withCommandDirs(
     readlink: (path) => fs.readlink(path),
     ...(fs.realpath ? { realpath: fs.realpath.bind(fs) } : {}),
     ...(fs.chown ? { chown: fs.chown.bind(fs) } : {}),
+    ...(fs.createExclusive ? { createExclusive: fs.createExclusive.bind(fs) } : {}),
     ...(fs.ancestry ? { ancestry: fs.ancestry.bind(fs) } : {}),
     ...(fs.hasOwner ? { hasOwner: fs.hasOwner.bind(fs) } : {}),
     chmod: (path, mode) => fs.chmod(path, mode),
