@@ -19,13 +19,13 @@ static void look(const char *name, char *out, size_t size) {
 
 static long long now_ms(void) {
   struct timespec ts;
-  clock_gettime(CLOCK_MONOTONIC, &ts);
+  clock_gettime(CLOCK_REALTIME, &ts);
   return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
 int main(int argc, char **argv) {
   if (argc != 4) {
-    fprintf(stderr, "usage: clocklink NAME READY MS\n");
+    fprintf(stderr, "usage: clocklink NAME READY DEADLINE_MS\n");
     return 2;
   }
   int fd = open(argv[2], O_CREAT | O_WRONLY, 0644);
@@ -34,7 +34,7 @@ int main(int argc, char **argv) {
   char first[300];
   char second[300];
   look(argv[1], first, sizeof first);
-  long long end = now_ms() + atoll(argv[3]);
+  long long end = atoll(argv[3]);
   while (now_ms() < end) {
   }
   look(argv[1], second, sizeof second);

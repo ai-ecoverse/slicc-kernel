@@ -96,12 +96,57 @@ const replaced = (dir, wait) =>
 const replace = (dir) =>
   `while [ ! -e ${dir}/ready ]; do sleep 0.05; done; sleep 0.3; cd ${dir} && rm n && ln -s t n && echo x > done`;
 
+const SPANS = [1500, 5000, 15000];
+
+async function beforeDeadline(run) {
+  const late = [];
+  for (const span of SPANS) {
+    const deadline = Date.now() + span;
+    const { reader, writer, wrote } = await run(deadline, span);
+    assert.deepEqual(writer, ok());
+    if (wrote < deadline - 100) return reader;
+    late.push(wrote - deadline);
+  }
+  assert.fail(`the other kernel never finished before the deadline: ${late.join(', ')} ms late`);
+}
+
+const both = (page, r, w, cwd) =>
+  page.evaluate(
+    async ([r, w, cwd]) => {
+      await window.secondKernel({});
+      let wrote = 0;
+      const [reader, writer] = await Promise.all([
+        window.kernel.run(r, { cwd }),
+        window.second.run(w, { cwd: '/' }).then((x) => {
+          wrote = Date.now();
+          return x;
+        }),
+      ]);
+      await window.second.terminate?.();
+      return { reader, writer, wrote };
+    },
+    [r, w, cwd]
+  );
+
+test('a name another kernel replaces by a symlink resolves through the link once the program only reads the clock (#984, #959)', async (t) => {
+  const { page } = await booted(chrome, t);
+  const reader = await beforeDeadline((deadline, span) => {
+    const dir = `/tmp/cs1-${span}`;
+    return both(
+      page,
+      [
+        'bash',
+        '-c',
+        replaced(dir, `while (( \${EPOCHREALTIME/./} < ${deadline}000 )); do :; done`),
+      ],
+      ['bash', '-c', replace(dir)],
+      '/'
+    );
+  });
+  assert.deepEqual(reader, ok('new\n'));
+});
+
 for (const [n, what, wait] of [
-  [
-    1,
-    'only reads the clock',
-    'end=$(( ${EPOCHREALTIME/./} + 1500000 )); while (( ${EPOCHREALTIME/./} < end )); do :; done',
-  ],
   [2, 'sleeps', 'sleep 1.5'],
   [
     3,
@@ -128,31 +173,30 @@ for (const [n, what, wait] of [
 }
 
 test('a program that only reads the clock after looking a name up sees the symlink another kernel put there in the meantime (#984, #959)', async (t) => {
-  const { page, bash } = await booted(chrome, t);
+  const { page } = await booted(chrome, t);
   await page.evaluate(async () => {
     for (const name of ['package.json', 'bin/clocklink', 'bin/clocklink.wasm']) {
       const bytes = await (await fetch(`/fixtures/clocklink/${name}`)).arrayBuffer();
       await window.opfs.write(`node_modules/clocklink/${name}`, bytes);
     }
   });
-  assert.deepEqual(
-    await bash('rm -rf /tmp/ck && mkdir -p /tmp/ck && echo plain > /tmp/ck/n', { cwd: '/' }),
-    ok()
-  );
-  const [reader, writer] = await page.evaluate(async () => {
-    await window.secondKernel({});
-    return Promise.all([
-      window.kernel.run(['clocklink', 'n', 'ready', '1500'], { cwd: '/tmp/ck' }),
-      window.second.run(
-        [
-          'bash',
-          '-c',
-          'while [ ! -e /tmp/ck/ready ]; do sleep 0.05; done; sleep 0.3; cd /tmp/ck && rm n && ln -s t n',
-        ],
-        { cwd: '/' }
-      ),
-    ]);
+  const reader = await beforeDeadline(async (deadline, span) => {
+    const dir = `/tmp/ck-${span}`;
+    await page.evaluate(
+      (d) =>
+        window.kernel.run(['bash', '-c', `mkdir -p ${d} && echo plain > ${d}/n`], { cwd: '/' }),
+      dir
+    );
+    return both(
+      page,
+      ['clocklink', 'n', 'ready', String(deadline)],
+      [
+        'bash',
+        '-c',
+        `while [ ! -e ${dir}/ready ]; do sleep 0.05; done; sleep 0.3; cd ${dir} && rm n && ln -s t n`,
+      ],
+      dir
+    );
   });
-  assert.deepEqual(writer, ok());
   assert.deepEqual(reader, ok('first=EINVAL second=t\n'));
 });
