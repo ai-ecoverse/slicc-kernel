@@ -235,6 +235,7 @@ export function importsContext({
     },
     tryLock(fd, exclusive) {
       const path = requirePath(fd);
+      host.fds.promote(fd);
       try {
         call({ op: 'lock', path, exclusive, fd });
       } catch (err) {
@@ -244,7 +245,7 @@ export function importsContext({
       return E.SUCCESS;
     },
     unlock(fd) {
-      call({ op: 'unlock', path: requirePath(fd) });
+      call({ op: 'unlock', path: requirePath(fd), fd });
     },
   };
   const ctx: ImportsContext = {

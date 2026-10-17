@@ -11,7 +11,7 @@ export interface LockTarget {
 
 export type HostSyscall =
   | { op: 'lock'; path: string; exclusive: boolean; fd: number }
-  | { op: 'unlock'; path: string }
+  | { op: 'unlock'; path: string; fd?: number }
   | ({
       op: 'lk-set';
       kind: LockKind | 'unlock';
@@ -216,11 +216,18 @@ export async function hostSyscall(req: HostSyscall, ctx: HostOpsContext): Promis
   switch (req.op) {
     case 'lock':
       if (!ctx.locks) throw new KernelError('ENOSYS');
+      if (ctx.locks.shared?.() && ctx.flockOf) {
+        const kind = req.exclusive ? 'exclusive' : 'shared';
+        return flock({ op: 'flock', fd: req.fd, kind }, ctx);
+      }
       if (!ctx.locks.lock(ctx.pid, req.path, req.exclusive, req.fd))
         throw new KernelError('EAGAIN');
       return done;
     case 'unlock':
       ctx.locks?.unlock(ctx.pid, req.path);
+      if (req.fd !== undefined && ctx.locks?.shared?.() && ctx.flockOf) {
+        return flock({ op: 'flock', fd: req.fd, kind: 'unlock' }, ctx);
+      }
       return done;
     case 'lk-set':
     case 'lk-get':
