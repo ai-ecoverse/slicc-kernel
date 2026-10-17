@@ -278,3 +278,23 @@ test('a JSON file rewritten whole under the lock by two tabs parses at every ste
   assert.equal(final.n, 100);
   assert.deepEqual([final.a.length, final.b.length], [50, 50]);
 });
+
+test('sqlite3 updating one database from two tabs on one OPFS root never fails to open it: contention waits, it is not CANTOPEN (#950)', {
+  timeout: 600_000,
+}, async (t) => {
+  const { first, second } = await setup(t);
+  const made = await first.sh(
+    'rm -f u.db* && sqlite3 u.db "create table t(n); insert into t values(0)"'
+  );
+  assert.equal(made.status, 0, made.stderr);
+  const loop =
+    'fails=0; for i in $(seq 50); do sqlite3 -cmd ".timeout 20000" u.db "update t set n = n + 1" || fails=$((fails + 1)); done; echo "fails $fails"';
+  const runs = await Promise.all([first.sh(loop), second.sh(loop)]);
+  const n = (await first.sh('sqlite3 u.db "select n from t"')).stdout.trim();
+  console.log(`two tabs, 50 updates each: ${runs.map((r) => r.stdout.trim()).join(', ')}, n=${n}`);
+  for (const r of runs) assert.doesNotMatch(r.stderr, /unable to open database file/);
+  assert.deepEqual(
+    runs.map((r) => r.stdout),
+    ['fails 0\n', 'fails 0\n']
+  );
+});
