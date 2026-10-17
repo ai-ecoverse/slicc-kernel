@@ -44,6 +44,7 @@ export class RemoteWatch {
   private pruned = 0;
   private readonly joined: Promise<void>;
   private met: (() => void) | undefined;
+  private settled = false;
   quiet: (() => Promise<void>) | undefined;
 
   constructor(name: string, options: { locks?: LockManagerLike | null } = {}) {
@@ -59,7 +60,11 @@ export class RemoteWatch {
       });
       if (!this.locks) resolve();
     });
-    this.joined = granted.then(() => this.join());
+    this.joined = granted
+      .then(() => this.join())
+      .then(() => {
+        this.settled = true;
+      });
     this.channel.postMessage({ hello: this.tab });
   }
 
@@ -82,6 +87,10 @@ export class RemoteWatch {
   async peered(): Promise<boolean> {
     await this.joined;
     return this.peers.size > 0;
+  }
+
+  crowded(): boolean {
+    return !this.settled || this.peers.size > 0;
   }
 
   private lockOf(tab: string): string {
