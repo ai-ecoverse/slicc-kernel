@@ -29,6 +29,8 @@ const DETAILED: ReadonlySet<string> = new Set([
   'fd-close',
   'fd-open-clipboard',
   'net-ws-ready',
+  'sock-tls',
+  'sock-tls-upgrade',
 ]);
 
 export function umaskRequest(mask: unknown): { op: 'proc-umask'; mask?: number } {

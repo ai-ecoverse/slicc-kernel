@@ -19,9 +19,31 @@ type TlsExport =
   | 'tls_alpn_http11'
   | 'tls_session_free';
 
+type TlsClientExport =
+  | 'tls_ca_new'
+  | 'tls_ca_add_der'
+  | 'tls_ca_add_bundle'
+  | 'tls_ca_free'
+  | 'tls_client_new'
+  | 'tls_handshake'
+  | 'tls_verify_result'
+  | 'tls_verify_info'
+  | 'tls_alpn'
+  | 'tls_version'
+  | 'tls_peer_count'
+  | 'tls_peer_der';
+
 export type TlsEngineModule = { readonly HEAPU8: Uint8Array } & {
   readonly [K in TlsExport as `_${K}`]: (...args: number[]) => number;
+} & {
+  readonly [K in TlsClientExport as `_${K}`]?: (...args: number[]) => number;
 };
+
+type TlsClientModule = TlsEngineModule & {
+  readonly [K in TlsClientExport as `_${K}`]: (...args: number[]) => number;
+};
+
+export const TLS_CLIENT_INSECURE_SKIP_VERIFY = 1;
 
 const SCRATCH = 64 * 1024;
 const EOF = -1;
@@ -82,6 +104,82 @@ export class TlsEngine {
   intoScratch(fn: (ptr: number, max: number) => number): number | Uint8Array {
     const n = fn(this.scratch, SCRATCH);
     return n > 0 ? this.taken(n) : n;
+  }
+  get client(): TlsClientModule | undefined {
+    return typeof this.m._tls_client_new === 'function' ? (this.m as TlsClientModule) : undefined;
+  }
+  private clientModule(): TlsClientModule {
+    const m = this.client;
+    if (!m) throw new TlsError(0, 'tls client: the installed tls engine has no client sessions');
+    return m;
+  }
+  store(): TlsStore {
+    const m = this.clientModule();
+    const ptr = m._tls_ca_new();
+    if (!ptr) throw this.error(m._tls_last_error(), 'trust store');
+    return new TlsStore(this, m, ptr);
+  }
+  clientSession(
+    store: TlsStore | undefined,
+    servername: string,
+    alpn: readonly string[],
+    flags: number
+  ): TlsSession {
+    const m = this.clientModule();
+    const wire = alpnWire(alpn);
+    const name = this.put(new TextEncoder().encode(servername));
+    try {
+      const at = store?.ptr ?? 0;
+      const ptr = this.withBytes(wire, (p) => m._tls_client_new(at, name, p, wire.length, flags));
+      if (!ptr) throw this.error(m._tls_last_error(), 'tls client');
+      return new TlsSession(this, m, ptr);
+    } finally {
+      this.m._free(name);
+    }
+  }
+  verifyInfo(flags: number): string {
+    const m = this.clientModule();
+    const n = m._tls_verify_info(flags, this.scratch, SCRATCH);
+    const end = this.m.HEAPU8.indexOf(0, this.scratch);
+    const text = new TextDecoder().decode(this.m.HEAPU8.subarray(this.scratch, end));
+    return n < 0 ? `${text}…` : text;
+  }
+}
+
+function alpnWire(names: readonly string[]): Uint8Array {
+  const parts = names.map((name) => new TextEncoder().encode(name));
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length + 1, 0));
+  let at = 0;
+  for (const part of parts) {
+    out[at++] = part.length;
+    out.set(part, at);
+    at += part.length;
+  }
+  return out;
+}
+
+export class TlsStore {
+  private readonly engine: TlsEngine;
+  private readonly m: TlsClientModule;
+  readonly ptr: number;
+  constructor(engine: TlsEngine, m: TlsClientModule, ptr: number) {
+    this.engine = engine;
+    this.m = m;
+    this.ptr = ptr;
+  }
+  add(der: Uint8Array): void {
+    const ret = this.engine.withBytes(der, (p) => this.m._tls_ca_add_der(this.ptr, p, der.length));
+    if (ret !== 0) throw this.engine.error(ret, 'trust store certificate');
+  }
+  addBundle(bytes: Uint8Array): number {
+    const n = this.engine.withBytes(bytes, (p) =>
+      this.m._tls_ca_add_bundle(this.ptr, p, bytes.length)
+    );
+    if (n < 0) throw this.engine.error(n, 'trust store bundle');
+    return n;
+  }
+  release(): void {
+    this.m._tls_ca_free(this.ptr);
   }
 }
 export class TlsLeaf {
@@ -145,6 +243,33 @@ export class TlsSession {
   }
   free(): void {
     this.m._tls_session_free(this.ptr);
+  }
+  private get c(): TlsClientModule {
+    return this.m as TlsClientModule;
+  }
+  handshake(): boolean {
+    const ret = this.c._tls_handshake(this.ptr);
+    if (ret < 0) throw this.engine.error(ret, 'tls handshake');
+    return ret === 1;
+  }
+  get verifyResult(): number {
+    return this.c._tls_verify_result(this.ptr);
+  }
+  get version(): number {
+    return this.c._tls_version(this.ptr);
+  }
+  get alpn(): string | undefined {
+    const out = this.engine.intoScratch((p, max) => this.c._tls_alpn(this.ptr, p, max));
+    return out instanceof Uint8Array ? new TextDecoder().decode(out) : undefined;
+  }
+  peerChain(): Uint8Array[] {
+    const chain: Uint8Array[] = [];
+    const count = this.c._tls_peer_count(this.ptr);
+    for (let i = 0; i < count; i++) {
+      const der = this.engine.intoScratch((p, max) => this.c._tls_peer_der(this.ptr, i, p, max));
+      if (der instanceof Uint8Array) chain.push(der);
+    }
+    return chain;
   }
 }
 const loading = new WeakMap<() => Promise<TlsEngineModule>, Promise<TlsEngine>>();

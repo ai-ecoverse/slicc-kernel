@@ -77,6 +77,7 @@ import {
   missingTransport,
   networkEnv,
   packageTlsEngine,
+  packageTlsRoots,
   writeCaFile,
 } from './kernel/net/network.ts';
 import type { CaStore, RealmCa } from './kernel/net/realm-ca.ts';
@@ -740,6 +741,7 @@ export class Launcher {
     enableNetwork(this.net, {
       transport: this.transport,
       engine: kernelTlsEngine(packageTlsEngine(this.verifiedFs(options.fs), this.modulesDir)),
+      roots: packageTlsRoots(this.verifiedFs(options.fs), this.modulesDir),
       ca: this.ca,
     });
     enableCdp(this.net, this.cdp);

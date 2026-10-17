@@ -2,6 +2,8 @@ import { wasiErrno } from '../process/wasi-errno.ts';
 import type { Datagram, InetAddr, KernelDgram } from './dgram.ts';
 import { type KernelErrno, KernelError, type KernelFile, type PollState } from './fd-table.ts';
 import { type Destination, Routes } from './net/routes.ts';
+import { SwitchConn } from './net/switch-conn.ts';
+import type { TlsClientSupport } from './net/tls-uplink.ts';
 import type { NetworkUplink, UplinkConn } from './net/uplink.ts';
 import { hostPort, uplinkLink } from './net/uplink-socket.ts';
 import { KernelPipe, PIPE_CAPACITY, PipeError } from './pipe.ts';
@@ -319,7 +321,26 @@ export class KernelSocket implements KernelFile {
       clearTimeout(timer);
     }
   }
-  private dial(addr: Extract<SockAddr, { family: 'inet' }>, route: UplinkRoute): Promise<void> {
+  private switch: SwitchConn | undefined;
+  connectSecure(
+    addr: Extract<SockAddr, { family: 'inet' }>,
+    route: UplinkRoute,
+    secure: (conn: SwitchConn) => Promise<void>
+  ): Promise<void> {
+    if (this.state !== 'open') throw new KernelError('EISCONN');
+    return this.dial(addr, route, secure);
+  }
+  upgradeSecure<T>(make: (raw: UplinkConn) => Promise<{ conn: UplinkConn; info: T }>): Promise<T> {
+    if (this.state !== 'connected') throw new KernelError('ENOTCONN');
+    if (!this.switch) throw new KernelError('EOPNOTSUPP');
+    if (this.switch.upgraded || this.writeShut || this.readShut) throw new KernelError('EINVAL');
+    return this.switch.upgrade(make);
+  }
+  private dial(
+    addr: Extract<SockAddr, { family: 'inet' }>,
+    route: UplinkRoute,
+    secure?: (conn: SwitchConn) => Promise<void>
+  ): Promise<void> {
     this.state = 'connecting';
     const abort = new AbortController();
     this.dialing = abort;
@@ -341,11 +362,27 @@ export class KernelSocket implements KernelFile {
     );
     return Promise.race([dialled, abandoned])
       .then(
-        (conn) => {
+        async (raw) => {
           if (abort.signal.aborted) throw dialError(abort.signal.reason, timedOut, true);
+          const conn = new SwitchConn(raw);
+          if (secure) {
+            clearTimeout(timer);
+            try {
+              await Promise.race([secure(conn), abandoned]);
+            } catch (e) {
+              conn.close();
+              throw this.dialFailed(
+                abort,
+                e instanceof KernelError
+                  ? e
+                  : new KernelError('ENOTSUP', e instanceof Error ? e.message : String(e))
+              );
+            }
+          }
           this.local = { family: 'inet', host: '0.0.0.0', port: 0, ...hostPort(conn.localAddr) };
           this.peer = { ...addr, ...hostPort(conn.remoteAddr) };
           this.dialing = undefined;
+          this.switch = conn;
           this.attach(
             uplinkLink(conn, () => {
               this.reset = true;
@@ -354,17 +391,19 @@ export class KernelSocket implements KernelFile {
           );
         },
         (e: unknown) => {
-          const error = dialError(e, timedOut, abort.signal.aborted);
-          if (this.dialing === abort) {
-            this.dialing = undefined;
-            this.failed = error.code;
-            this.state = 'open';
-            this.changes.wake();
-          }
-          throw error;
+          throw this.dialFailed(abort, dialError(e, timedOut, abort.signal.aborted));
         }
       )
       .finally(() => clearTimeout(timer));
+  }
+  private dialFailed(abort: AbortController, error: KernelError): KernelError {
+    if (this.dialing === abort) {
+      this.dialing = undefined;
+      this.failed = error.code;
+      this.state = 'open';
+      this.changes.wake();
+    }
+    return error;
   }
   private unlink(): void {
     const link = this.link;
@@ -478,6 +517,7 @@ export class LoopbackNet {
   useUplink(route: UplinkRoute): void {
     this.route = route;
   }
+  tlsClient: TlsClientSupport | undefined;
   uplinkFor(host: string): UplinkRoute | undefined {
     const route = this.route;
     if (!route) return undefined;

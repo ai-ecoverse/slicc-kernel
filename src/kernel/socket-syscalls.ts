@@ -3,6 +3,7 @@ import { KernelDgram } from './dgram.ts';
 import { type FdTable, KernelError, OpenFile, pollFile } from './fd-table.ts';
 import { encodeReceived } from './net/datagram-wire.ts';
 import { isLoopbackHost } from './net/proxy-service.ts';
+import { connectSecure, upgradeSecure, uplinkAddress } from './net/tls-uplink.ts';
 import type { ResolveFamily } from './net/uplink.ts';
 import {
   type ConnectorStamp,
@@ -88,7 +89,17 @@ export type SocketSyscall =
       port: number;
       servername?: string;
       alpn?: string[];
-      ca?: boolean;
+      ca?: true | string[];
+      insecure?: boolean;
+      path?: 'kernel' | 'transport';
+    }
+  | {
+      op: 'sock-tls-upgrade';
+      fd: number;
+      servername?: string;
+      alpn?: string[];
+      ca?: true | string[];
+      insecure?: boolean;
     }
   | {
       op: 'sock-recvfrom';
@@ -112,6 +123,7 @@ export const SOCKET_OPS: readonly SocketSyscall['op'][] = [
   'sock-sendto',
   'sock-recvfrom',
   'sock-tls',
+  'sock-tls-upgrade',
 ];
 export interface SocketProcess {
   fds: FdTable;
@@ -209,7 +221,9 @@ export async function socketSyscall(
       return ok(addresses);
     }
     case 'sock-tls':
-      return ok(tlsOverTransport(req, proc));
+      return ok(await secureConnect(req, proc));
+    case 'sock-tls-upgrade':
+      return ok(await upgradeSecure(proc, socketAt(fds, req.fd), req));
     default:
       return datagram(req, proc);
   }
@@ -341,6 +355,46 @@ const NOT_HTTP_PORTS = new Set([
   465, 563, 585, 636, 853, 989, 990, 992, 993, 994, 995, 5061, 5671, 6697, 8883,
 ]);
 const HOST_NAME = /^[A-Za-z0-9.-]+$|^\[?[0-9A-Fa-f:.]+\]?$/;
+function wantsKernel(req: Extract<SocketSyscall, { op: 'sock-tls' }>): boolean {
+  if (req.path === 'kernel') return true;
+  if (req.path === 'transport') return false;
+  return (
+    Array.isArray(req.ca) ||
+    (req.alpn !== undefined && req.alpn.length > 0 && !req.alpn.includes('http/1.1')) ||
+    NOT_HTTP_PORTS.has(req.port)
+  );
+}
+
+async function secureConnect(
+  req: Extract<SocketSyscall, { op: 'sock-tls' }>,
+  proc: SocketProcess
+): Promise<unknown> {
+  if (!Number.isInteger(req.port) || req.port < 1 || req.port > 65535)
+    throw new KernelError('EINVAL');
+  const kernelPath = wantsKernel(req) && (await uplinked(proc, req.host));
+  if (!kernelPath) {
+    if (req.path === 'kernel' || Array.isArray(req.ca)) throw new KernelError('ENOTSUP');
+    return { ...tlsOverTransport(req, proc), path: 'transport', substitutes: true };
+  }
+  const socket = proc.net.socket('inet');
+  const fd = proc.fds.install(new OpenFile(socket), 3);
+  try {
+    return { fd, ...(await connectSecure(proc, socket, req.host, req.port, req)) };
+  } catch (e) {
+    await Promise.resolve(proc.fds.close(fd));
+    throw e;
+  }
+}
+
+async function uplinked(proc: SocketProcess, host: string): Promise<boolean> {
+  if (!proc.net.tlsClient || isLoopbackHost(host)) return false;
+  try {
+    return proc.net.uplinkFor(await uplinkAddress(proc, host)) !== undefined;
+  } catch {
+    return false;
+  }
+}
+
 function tlsOverTransport(
   req: Extract<SocketSyscall, { op: 'sock-tls' }>,
   proc: SocketProcess

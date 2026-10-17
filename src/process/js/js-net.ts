@@ -7,10 +7,14 @@ export interface JsAddress {
 }
 
 export interface JsTlsSession {
-  readonly protocol: 'transport';
-  readonly alpnProtocol: string;
-  readonly authorized: true;
+  readonly path: 'transport' | 'kernel';
+  readonly substitutes: boolean;
+  readonly protocol: 'transport' | 'TLSv1.2' | 'TLSv1.3';
+  readonly alpnProtocol: string | false;
+  readonly authorized: boolean;
+  readonly authorizationError?: string;
   readonly servername: string;
+  readonly peerCertificates?: readonly Uint8Array[];
 }
 
 export interface JsTlsOptions {
@@ -18,6 +22,7 @@ export interface JsTlsOptions {
   alpn?: string[];
   rejectUnauthorized?: boolean;
   ca?: unknown;
+  path?: 'kernel' | 'transport';
 }
 
 export interface JsConnection {
@@ -46,9 +51,10 @@ export interface JsListenOptions {
 
 export interface JsConnectOptions {
   host?: string;
-  port: number;
+  port?: number;
   signal?: AbortSignal;
   tls?: JsTlsOptions;
+  socket?: JsConnection;
 }
 
 export interface JsResolveOptions {
@@ -60,6 +66,90 @@ export interface JsNet {
   listen(options?: JsListenOptions): Promise<JsListener>;
   connect(options: JsConnectOptions): Promise<JsConnection>;
   resolve(name: string, options?: JsResolveOptions): Promise<string[]>;
+}
+
+interface WireSession {
+  path?: 'transport' | 'kernel';
+  substitutes?: boolean;
+  protocol?: 'TLSv1.2' | 'TLSv1.3';
+  alpnProtocol: string | false;
+  authorized?: boolean;
+  authorizationError?: string;
+  servername: string;
+  peerCertificates?: string[];
+}
+
+function fromBase64(text: string): Uint8Array {
+  const bin = atob(text);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function toBase64(bytes: Uint8Array): string {
+  let bin = '';
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin);
+}
+
+const PEM = /-----BEGIN CERTIFICATE-----([\s\S]*?)-----END CERTIFICATE-----/g;
+
+function caList(ca: unknown): string[] {
+  const items = Array.isArray(ca) ? ca : [ca];
+  const out: string[] = [];
+  for (const item of items) {
+    if (item instanceof Uint8Array && item[0] === 0x30) out.push(toBase64(item));
+    else {
+      const text = item instanceof Uint8Array ? new TextDecoder().decode(item) : String(item);
+      out.push(...[...text.matchAll(PEM)].map((m) => (m[1] as string).replace(/\s+/g, '')));
+    }
+  }
+  return out;
+}
+
+function tlsRequest(tls: JsTlsOptions) {
+  return {
+    ...(tls.servername ? { servername: tls.servername } : {}),
+    ...(tls.alpn ? { alpn: [...tls.alpn] } : {}),
+    ...(tls.ca !== undefined ? { ca: caList(tls.ca) } : {}),
+    ...(tls.rejectUnauthorized === false ? { insecure: true } : {}),
+  };
+}
+
+function sessionOf(r: WireSession): JsTlsSession {
+  if (r.path !== 'kernel') {
+    return Object.freeze({
+      path: 'transport',
+      substitutes: true,
+      protocol: 'transport',
+      alpnProtocol: r.alpnProtocol,
+      authorized: true,
+      servername: r.servername,
+    });
+  }
+  return Object.freeze({
+    path: 'kernel',
+    substitutes: false,
+    protocol: r.protocol ?? 'TLSv1.2',
+    alpnProtocol: r.alpnProtocol,
+    authorized: r.authorized === true,
+    ...(r.authorizationError ? { authorizationError: r.authorizationError } : {}),
+    servername: r.servername,
+    peerCertificates: Object.freeze((r.peerCertificates ?? []).map(fromBase64)),
+  });
+}
+
+const TLS_CODE = /^([A-Z][A-Z0-9_]+): /;
+
+async function secureCall<T>(call: () => Promise<T>): Promise<T> {
+  try {
+    return await call();
+  } catch (err) {
+    const e = err as JsCallError;
+    const code = e.code === 'EPROTO' && e.detail ? TLS_CODE.exec(e.detail)?.[1] : undefined;
+    if (code) throw new JsCallError(code, 'connect', e.detail);
+    throw err;
+  }
 }
 
 export interface NetIo {
@@ -183,21 +273,25 @@ export function netOps(kernel: JsKernel, io: NetIo): JsNet {
     options: JsConnectOptions,
     tls: JsTlsOptions
   ): Promise<JsConnection> => {
-    const r = (await kernel.json({
-      op: 'sock-tls',
-      host: options.host ?? 'localhost',
-      port: port(options.port),
-      ...(tls.servername ? { servername: tls.servername } : {}),
-      ...(tls.alpn ? { alpn: [...tls.alpn] } : {}),
-      ...(tls.ca !== undefined ? { ca: true } : {}),
-    })) as { fd: number; alpnProtocol: string; servername: string };
-    const session: JsTlsSession = Object.freeze({
-      protocol: 'transport',
-      alpnProtocol: r.alpnProtocol,
-      authorized: true,
-      servername: r.servername,
-    });
-    return Object.assign(await connection(r.fd), { tls: session });
+    const common = tlsRequest(
+      options.socket && !tls.servername && options.host ? { ...tls, servername: options.host } : tls
+    );
+    const r = (await secureCall(() =>
+      kernel.json(
+        options.socket
+          ? { op: 'sock-tls-upgrade', fd: options.socket.fd, ...common }
+          : {
+              op: 'sock-tls',
+              host: options.host ?? 'localhost',
+              port: port(options.port as number),
+              ...common,
+              ...(tls.path ? { path: tls.path } : {}),
+            }
+      )
+    )) as WireSession & { fd?: number };
+    const session = sessionOf(r);
+    if (options.socket) return Object.assign(Object.create(options.socket), { tls: session });
+    return Object.assign(await connection(r.fd as number), { tls: session });
   };
 
   const lookup = async (name: string, options: JsResolveOptions = {}): Promise<string[]> => {
@@ -238,7 +332,7 @@ export function netOps(kernel: JsKernel, io: NetIo): JsNet {
       const addr: InetAddr = {
         family: 'inet',
         host: await resolve(host, signal),
-        port: port(options.port),
+        port: port(options.port as number),
       };
       return opened(async (fd) => {
         const r = await kernel.raw({ op: 'sock-connect', fd, addr, nonblock: true });
