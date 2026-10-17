@@ -31,7 +31,6 @@ import {
 } from './children.ts';
 import type { ClipboardBroker, ClipboardChannel, ClipboardStamp } from './clipboard.ts';
 import { type Cred, type CredChange, changeCred, copyCred, ROOT } from './cred.ts';
-import { KernelDgram } from './dgram.ts';
 import { EPOLL_OPS, type EpollSyscall, epollSyscall } from './epoll.ts';
 import { EventFd } from './eventfd.ts';
 import {
@@ -80,6 +79,7 @@ import { socketNames } from './socket-nodes.ts';
 import { SOCKET_OPS, type SocketSyscall, socketSyscall } from './socket-syscalls.ts';
 import { repeating } from './timer.ts';
 import type { KernelTty, Termios } from './tty.ts';
+import { isDatagram } from './unix-dgram.ts';
 import {
   present,
   refuseReadonly,
@@ -1707,9 +1707,8 @@ export class WasmProcess {
     const terminal = (file.tty ?? file.pty?.slave)?.name;
     return {
       tty: file.tty !== undefined,
-      kind:
-        file instanceof KernelSocket || file instanceof KernelDgram ? 'socket' : kernelFdKind(file),
-      ...(file instanceof KernelDgram ? { dgram: true as const } : {}),
+      kind: file instanceof KernelSocket || isDatagram(file) ? 'socket' : kernelFdKind(file),
+      ...(isDatagram(file) ? { dgram: true as const } : {}),
       ...(file.heldMeta ? { meta: file.heldMeta } : {}),
       ...(flags !== undefined ? { flags } : {}),
       ...(this.fds.closesOnExec(fd) ? { cloexec: true } : {}),

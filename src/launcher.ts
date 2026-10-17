@@ -64,6 +64,7 @@ import { bytesSource, deviceFile, FdTable, type OpenFile, sinkFile } from './ker
 import { spawnWasmProcess, type WasmProcessHandle, type WasmWorkerLike } from './kernel/host.ts';
 import { type JobMember, JobTable } from './kernel/jobs.ts';
 import { LockTable } from './kernel/locks.ts';
+import { hostsReader } from './kernel/net/hosts-file.ts';
 import { HttpHandles } from './kernel/net/http-syscalls.ts';
 import { DEFAULT_HOSTNAME, isHostname } from './kernel/net/loopback-names.ts';
 import { KernelLoopback } from './kernel/net/loopback-transport.ts';
@@ -288,6 +289,7 @@ interface Target {
   preopenRoot?: boolean;
   asked?: string;
   variants?: readonly CommandVariant[];
+  copy?: string;
 }
 
 interface Compiled {
@@ -714,7 +716,12 @@ export class Launcher {
     this.uplink = options.uplink;
     this.routes = new Routes(options.uplink?.traits.ipv6 === true);
     if (options.uplink?.routes) this.routes.set(options.uplink.routes);
-    this.resolver = new Resolver({ uplink: options.uplink, routes: this.routes, hostname });
+    this.resolver = new Resolver({
+      uplink: options.uplink,
+      routes: this.routes,
+      hostname,
+      hosts: hostsReader(this.base),
+    });
     if (options.uplink) this.net.useUplink({ uplink: options.uplink, routes: this.routes });
     enableNetwork(this.net, {
       transport: this.transport,
@@ -1023,14 +1030,37 @@ export class Launcher {
       return { abi: 'emscripten', glue, wasm, argv0: baseName(argv0 || file), ...asked };
     }
     const owner = await this.glueOwner(glue, baseName(file), scope);
-    return owner && { ...targetOf(owner), ...asked };
+    if (!owner) return undefined;
+    return { ...targetOf(owner), ...asked, ...(owner.glue === glue ? {} : { copy: glue }) };
   }
 
   private async glueOwner(glue: string, name: string, scope: string): Promise<Command | undefined> {
-    const owners = [...(await this.commands(scope)).values()].filter(
-      (c) => c.abi === 'emscripten' && !c.script && c.glue === glue
-    );
-    return owners.find((c) => c.name === name) ?? owners[0];
+    const commands = [...(await this.commands(scope)).values()];
+    const owners = commands.filter((c) => c.abi === 'emscripten' && !c.script && c.glue === glue);
+    if (owners.length > 0) return owners.find((c) => c.name === name) ?? owners[0];
+    const leaf = baseName(glue);
+    const dir = glue.slice(0, glue.lastIndexOf('/'));
+    for (const c of commands) {
+      if (c.abi !== 'emscripten' || c.script || c.name !== leaf) continue;
+      const own = await physicalPathAsync(this.base, c.glue).catch(() => c.glue);
+      if (own.slice(0, own.lastIndexOf('/')) !== dir) continue;
+      if (await this.sameFile(glue, own)) return c;
+    }
+    return undefined;
+  }
+
+  private readonly sameFiles = new Map<string, { stamp: string; same: boolean }>();
+
+  private async sameFile(a: string, b: string): Promise<boolean> {
+    const [x, y] = await Promise.all([this.base.stat(a), this.base.stat(b)]).catch(() => []);
+    if (!x?.isFile || !y?.isFile || x.size !== y.size) return false;
+    const stamp = [x, y].map((st) => `${st.size}:${st.mtime.getTime()}:${st.ino}`).join('|');
+    const known = this.sameFiles.get(`${a}|${b}`);
+    if (known?.stamp === stamp) return known.same;
+    const [p, q] = await Promise.all([this.base.readFileBuffer(a), this.base.readFileBuffer(b)]);
+    const same = p.length === q.length && p.every((byte, i) => byte === q[i]);
+    this.sameFiles.set(`${a}|${b}`, { stamp, same });
+    return same;
   }
 
   private async wasmOwner(wasm: string, name: string, scope: string): Promise<Command | undefined> {
@@ -1152,6 +1182,7 @@ export class Launcher {
       await need(g, 'exec', this.fs.resolvePath(req.cwd, file), want);
     }
     for (const bin of planned?.bins ?? []) await need(g, 'exec', bin, R_OK | X_OK);
+    if (planned?.target.copy) await need(g, 'exec', planned.target.copy, R_OK | X_OK);
   }
 
   private async checkedPlan(

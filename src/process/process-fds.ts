@@ -805,6 +805,7 @@ export function useDevFd(Fs: ProcessFs): void {
 
 const O_ACCMODE = 0o3;
 const O_CREAT = 0o100;
+const O_EXCL = 0o200;
 
 const field = (text: string) =>
   (text || 'none').replace(/[\s\\]/g, (c) => `\\${c.charCodeAt(0).toString(8).padStart(3, '0')}`);
@@ -848,6 +849,7 @@ export function useMounts(Fs: ProcessFs, env: Record<string, string> = {}, live 
   if (typeof Fs.open !== 'function' || typeof writeFile !== 'function') return;
   const { passwd, group } = accounts(env);
   const backing: Record<string, string> = { '/etc/mtab': '/proc/mounts' };
+  const defaults: Record<string, string> = {};
   try {
     if (!live) writeFile.call(Fs, '/proc/mounts', mountTable());
   } catch {
@@ -855,18 +857,37 @@ export function useMounts(Fs: ProcessFs, env: Record<string, string> = {}, live 
   }
   try {
     mkdirTree.call(Fs, '/dev/.etc');
-    writeFile.call(Fs, '/dev/.etc/passwd', passwd);
-    writeFile.call(Fs, '/dev/.etc/group', group);
-    writeFile.call(Fs, '/dev/.etc/hosts', hostsFile(hostnameOf(env)));
-    writeFile.call(Fs, '/dev/.etc/hostname', `${hostnameOf(env)}\n`);
-    backing['/etc/passwd'] = '/dev/.etc/passwd';
-    backing['/etc/group'] = '/dev/.etc/group';
-    backing['/etc/hosts'] = '/dev/.etc/hosts';
-    backing['/etc/hostname'] = '/dev/.etc/hostname';
+    const files = {
+      passwd,
+      group,
+      hosts: hostsFile(hostnameOf(env)),
+      hostname: `${hostnameOf(env)}\n`,
+    };
+    for (const [name, text] of Object.entries(files)) {
+      writeFile.call(Fs, `/dev/.etc/${name}`, text);
+      backing[`/etc/${name}`] = `/dev/.etc/${name}`;
+      defaults[`/etc/${name}`] = text;
+    }
   } catch {}
   const open = Fs.open.bind(Fs);
+  const seed = (path: string, text: string): void => {
+    let stream: ProcessStream;
+    try {
+      stream = open(path, O_WRONLY | O_CREAT | O_EXCL, 0o644);
+    } catch {
+      return;
+    }
+    try {
+      const bytes = new TextEncoder().encode(text);
+      Fs.write(stream, bytes, 0, bytes.length);
+    } finally {
+      Fs.closeStream(stream.fd);
+    }
+  };
   Fs.open = (path, flags, mode) => {
     const instead = backing[path];
+    const text = defaults[path];
+    if (text !== undefined && (flags & (O_ACCMODE | O_CREAT)) !== 0) seed(path, text);
     if (!instead || (flags & (O_ACCMODE | O_CREAT)) !== 0) return open(path, flags, mode);
     try {
       return open(path, flags, mode);
