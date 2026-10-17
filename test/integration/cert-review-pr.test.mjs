@@ -430,7 +430,7 @@ test("the workflow: same-repo PRs with merge-ok review the merge ref with main's
       assert.match(
         c,
         name === 'group'
-          ? /ref: \$\{\{ github\.event\.merge_group\.base_sha \}\}$/
+          ? /ref: \$\{\{ github\.event\.merge_group\.base_ref \}\}$/
           : /ref: \$\{\{ github\.event\.pull_request\.base\.sha \}\}$/,
         `${name} runs main's tools`
       );
