@@ -12,8 +12,10 @@ const options = {
   ],
   isolated: true,
   timeout: 150000,
-  coverage: ['/dist/'],
-  exits: { '/dist/process-worker.js': [/WASM_PROCESS_EXIT, code/, /WASM_PROCESS_ERROR,$/] },
+  coverage: env.SLICC_COVERAGE ? ['/dist/'] : [],
+  ...(env.SLICC_COVERAGE
+    ? { exits: { '/dist/process-worker.js': [/WASM_PROCESS_EXIT, code/, /WASM_PROCESS_ERROR,$/] } }
+    : {}),
 };
 
 export const launch = (args = []) => start({ ...options, args });
