@@ -205,6 +205,7 @@ export interface HostOpsContext {
     setting?: boolean
   ) => Promise<string>;
   flockOf?: (fd: number) => Promise<{ key: string; owner: object }>;
+  settle?: (fd: number, granted: boolean) => Promise<void>;
   locks: KernelLocks | undefined;
   ops: AsyncOps;
   blocking: () => AbortSignal;
@@ -260,10 +261,14 @@ async function flock(
   if (!locks || !flockOf) throw new KernelError('ENOLCK');
   if (!FLOCK_KINDS.has(req.kind)) throw new KernelError('EINVAL');
   const { key, owner } = await flockOf(req.fd);
+  const granted = req.kind !== 'unlock';
+  const shared = locks.shared?.() === true;
+  if (shared && !granted) await ctx.settle?.(req.fd, false);
   if (req.kind !== 'unlock' && req.wait)
     await locks.flocks.wait(key, owner, req.kind, ctx.blocking);
   else if (!(await locks.flocks.set(key, owner, req.kind))) throw new KernelError('EAGAIN');
-  return done;
+  if (shared && granted) await ctx.settle?.(req.fd, true);
+  return shared ? json(true) : done;
 }
 
 async function recordLock(
@@ -278,6 +283,7 @@ async function recordLock(
     ...(req.fd !== undefined ? { fd: req.fd } : {}),
   };
   if (req.op === 'lk-close') {
+    if (req.fd !== undefined && locks.shared?.()) await ctx.settle?.(req.fd, false);
     locks.dropFile(await fileKey(target, 'close'), owner);
     return done;
   }
@@ -289,11 +295,14 @@ async function recordLock(
     const len = held.end === Number.POSITIVE_INFINITY ? 0 : held.end - held.start;
     return json({ kind: held.kind, pid: held.owner, start: held.start, len });
   }
-  if (req.kind !== 'unlock' && req.wait) {
+  const granted = req.kind !== 'unlock';
+  const shared = locks.shared?.() === true;
+  const fd = shared ? req.fd : undefined;
+  if (!granted && fd !== undefined) await ctx.settle?.(fd, false);
+  if (req.kind !== 'unlock' && req.wait)
     await locks.wait(key, owner, req.kind, range, ctx.blocking);
-    return done;
-  }
-  if (!(await locks.set(key, owner, req.kind, range.start, range.end)))
+  else if (!(await locks.set(key, owner, req.kind, range.start, range.end)))
     throw new KernelError('EAGAIN');
-  return done;
+  if (granted && fd !== undefined) await ctx.settle?.(fd, true);
+  return shared ? json(true) : done;
 }

@@ -7,7 +7,7 @@ import type { FdInfo } from '../../kernel/process.ts';
 import { KERNEL_SIGINFO, SIG, type SigInfo } from '../../kernel/signals.ts';
 import type { SyncFsBridgeStat, SyncFsPosixBridge } from '../../realm/sync-fs-wire.ts';
 import type { LockHeld } from '../process-locks.ts';
-import { type LockedFile, lockImports } from './slicc-lock.ts';
+import { type LockedFile, type LockHost, lockImports } from './slicc-lock.ts';
 import { semImports } from './slicc-sem.ts';
 import {
   CLOCK,
@@ -102,6 +102,7 @@ type EpollWait = (
 const IDS = ['ruid', 'euid', 'suid', 'rgid', 'egid', 'sgid'] as const;
 const NS_PER_MS = 1_000_000n;
 const AT_SYMLINK_NOFOLLOW = 1;
+const AT_FDCWD = -2;
 const AT_EACCESS = 2;
 
 const ROOT_IDS = Object.freeze({ uid: 0, gid: 0 });
@@ -400,6 +401,21 @@ export class WasiHost {
       fd_chmod: (fd: number, mode: number) => void this.o.fs.chmod(pathOf(fd), mode & 0o7777),
       path_chmod: (dirfd: number, p: number, l: number, mode: number, flags: number) =>
         void this.o.fs.chmod(target(at(dirfd, p, l), flags), mode & 0o7777),
+      path_mkfifo: (dirfd: number, p: number, l: number, mode: number) => {
+        const { mkfifo } = this.o.fs;
+        if (!mkfifo) return E.NOSYS;
+        const raw = mem.string(p, l);
+        const path =
+          dirfd === AT_FDCWD && !raw.startsWith('/')
+            ? fds.resolve(3, `${this.cwd}/${raw}`)
+            : at(dirfd, p, l);
+        const umask = this.o.kernel.call({ op: 'proc-umask' }) as number;
+        const want = mode & 0o7777 & ~umask;
+        mkfifo.call(this.o.fs, path, want);
+        const made = (this.o.fs.lstat(path).mode ?? 0) & 0o7777;
+        if ((made & ~want) !== 0) this.o.fs.chmod(path, made & want);
+        return E.SUCCESS;
+      },
       umask: (mask: number, out: number) => {
         const old = this.o.kernel.call({ op: 'proc-umask', mask }) as number;
         mem.view().setUint32(out, old, true);
@@ -422,6 +438,39 @@ export class WasiHost {
         mem.view().setUint32(out, (st.isFifo ? S_IFIFO : 0) | modeOf(st), true);
       },
     });
+  }
+
+  private lockHost(mem: WasiMemory): LockHost {
+    return {
+      mem,
+      file: (fd) => this.lockedFile(fd),
+      flush: (file) => {
+        if (file.path !== undefined) this.fds.flushPath(file.path);
+        else if (file.target.fd !== undefined) this.o.kernel.sys.flush(file.target.fd);
+      },
+      locked: () => this.fds.holdLocks(),
+      promote: (fd, moved) => this.fds.promote(fd, moved),
+      reread: (fd) => this.fds.reread(fd),
+      calls: {
+        flock: (fd, kind, wait) =>
+          this.fds.restarting(() =>
+            this.o.kernel.call({ op: 'flock', fd, kind, ...(wait ? { wait } : {}) })
+          ),
+        set: (target, kind, start, len, wait) =>
+          this.fds.restarting(() =>
+            this.o.kernel.call({
+              op: 'lk-set',
+              ...target,
+              kind,
+              start,
+              len,
+              ...(wait ? { wait } : {}),
+            })
+          ),
+        get: (target, kind, start, len) =>
+          this.o.kernel.call({ op: 'lk-get', ...target, kind, start, len }) as LockHeld | null,
+      },
+    };
   }
 
   sliccImports(): Record<string, WasiFunction> {
@@ -466,35 +515,7 @@ export class WasiHost {
         void this.creds.change(() => this.o.kernel.call({ op: 'proc-setcred', change }) as Cred);
       },
       ...semImports(this),
-      ...lockImports({
-        mem,
-        file: (fd) => this.lockedFile(fd),
-        flush: (file) => {
-          if (file.path !== undefined) this.fds.flushPath(file.path);
-          else if (file.target.fd !== undefined) this.o.kernel.sys.flush(file.target.fd);
-        },
-        locked: () => this.fds.holdLocks(),
-        promote: (fd, moved) => this.fds.promote(fd, moved),
-        calls: {
-          flock: (fd, kind, wait) =>
-            void this.fds.restarting(() =>
-              this.o.kernel.call({ op: 'flock', fd, kind, ...(wait ? { wait } : {}) })
-            ),
-          set: (target, kind, start, len, wait) =>
-            void this.fds.restarting(() =>
-              this.o.kernel.call({
-                op: 'lk-set',
-                ...target,
-                kind,
-                start,
-                len,
-                ...(wait ? { wait } : {}),
-              })
-            ),
-          get: (target, kind, start, len) =>
-            this.o.kernel.call({ op: 'lk-get', ...target, kind, start, len }) as LockHeld | null,
-        },
-      }),
+      ...lockImports(this.lockHost(mem)),
       groups_get: (buf: number, cap: number, count: number) => {
         const { groups } = this.creds.get();
         if (cap !== 0 && cap < groups.length) throw new WasiError('EINVAL');

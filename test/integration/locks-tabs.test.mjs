@@ -191,6 +191,94 @@ test('a lock call from a tab that is not the leader takes one BroadcastChannel r
   assert.match(follower.stdout, /^per-call-ms \d+\.\d{3}\n$/);
 });
 
+const BUMP = (path, n) =>
+  py([
+    'import fcntl, os',
+    `for _ in range(${n}):`,
+    `    f = open('${path}', 'r+b')`,
+    '    fcntl.lockf(f, fcntl.LOCK_EX)',
+    '    v = int(f.read() or b"0")',
+    '    f.seek(0)',
+    '    f.write(str(v + 1).encode())',
+    '    f.truncate()',
+    '    f.flush()',
+    '    os.fsync(f.fileno())',
+    '    f.close()',
+    "print('done', flush=True)",
+  ]);
+
+test('lock-protected increments from two tabs lose none: each tab reads what the other wrote before it unlocked (#949)', {
+  timeout: 300_000,
+}, async (t) => {
+  const { first, second } = await setup(t);
+  const finals = [];
+  for (let round = 0; round < 4; round++) {
+    await first.sh('rm -f n.count && printf 0 > n.count');
+    const runs = await Promise.all([first.sh(BUMP('n.count', 50)), second.sh(BUMP('n.count', 50))]);
+    for (const r of runs) assert.equal(r.stdout + r.stderr, 'done\n');
+    finals.push((await second.sh('cat n.count')).stdout);
+  }
+  assert.deepEqual(finals, ['100', '100', '100', '100']);
+});
+
+const UPDATES = (n) =>
+  `fails=0; for i in $(seq ${n}); do sqlite3 -cmd ".timeout 20000" u.db "update t set n = n + 1" 2>/dev/null || fails=$((fails + 1)); done; echo "fails $fails"`;
+
+test('sqlite3 updates from two tabs lose none: every update that succeeded is in the table (#949)', {
+  timeout: 300_000,
+}, async (t) => {
+  const { first, second } = await setup(t);
+  await first.sh('rm -f u.db* && sqlite3 u.db "create table t(n); insert into t values(0)"');
+  const [a, b] = await Promise.all([first.sh(UPDATES(50)), second.sh(UPDATES(50))]);
+  const fails =
+    Number(a.stdout.match(/fails (\d+)/)?.[1]) + Number(b.stdout.match(/fails (\d+)/)?.[1]);
+  assert.ok(fails < 100, `${a.stdout}${b.stdout}`);
+  const n = Number((await first.sh('sqlite3 u.db "select n from t"')).stdout);
+  assert.equal(n, 100 - fails);
+});
+
+const REWRITE = (path, tab, n) =>
+  py([
+    'import fcntl, json, os',
+    'bad = 0',
+    `for i in range(${n}):`,
+    `    f = open('${path}', 'r+b')`,
+    '    fcntl.lockf(f, fcntl.LOCK_EX)',
+    '    raw = f.read()',
+    '    try:',
+    '        d = json.loads(raw)',
+    '    except ValueError:',
+    '        bad += 1',
+    '        f.close()',
+    '        continue',
+    `    d['${tab}'].append(i)`,
+    "    d['n'] += 1",
+    "    d['pad'] = 'x' * (i * 37 % 500)",
+    '    f.seek(0)',
+    '    f.write(json.dumps(d).encode())',
+    '    f.truncate()',
+    '    f.flush()',
+    '    os.fsync(f.fileno())',
+    '    f.close()',
+    "print('bad', bad, flush=True)",
+  ]);
+
+test('a JSON file rewritten whole under the lock by two tabs parses at every step and keeps every change (#949)', {
+  timeout: 300_000,
+}, async (t) => {
+  const { first, second } = await setup(t);
+  await first.sh(`rm -f j.json && printf '{"a": [], "b": [], "n": 0}' > j.json`);
+  const [a, b] = await Promise.all([
+    first.sh(REWRITE('j.json', 'a', 50)),
+    second.sh(REWRITE('j.json', 'b', 50)),
+  ]);
+  assert.equal(a.stdout + a.stderr, 'bad 0\n');
+  assert.equal(b.stdout + b.stderr, 'bad 0\n');
+  const final = JSON.parse((await second.sh('cat j.json')).stdout);
+  assert.equal(final.n, 100);
+  assert.deepEqual([final.a.length, final.b.length], [50, 50]);
+});
+
 test('sqlite3 updating one database from two tabs on one OPFS root never fails to open it: contention waits, it is not CANTOPEN (#950)', {
   timeout: 600_000,
 }, async (t) => {

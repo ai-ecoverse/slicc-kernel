@@ -196,7 +196,7 @@ export class ProcTree {
 }
 
 const FOLLOWING = ['writeFile', 'chmod', 'utimes', 'pwrite', 'truncate'] as const;
-const NOT_FOLLOWING = ['mkdir', 'rm', 'unlink', 'rmdir', 'lutimes', 'create'] as const;
+const NOT_FOLLOWING = ['mkdir', 'rm', 'unlink', 'rmdir', 'lutimes', 'create', 'mkfifo'] as const;
 const MAX_HOPS = 40;
 
 type ProcRefusal = { refused: string };

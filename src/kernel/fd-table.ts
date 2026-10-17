@@ -96,6 +96,8 @@ export interface KernelFile {
 
   flush?(): Promise<void>;
 
+  reread?(): Promise<void>;
+
   pread?(max: number, at: number): Promise<Uint8Array>;
   pwrite?(bytes: Uint8Array, at: number): Promise<number>;
 

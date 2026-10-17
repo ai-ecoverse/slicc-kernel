@@ -42,48 +42,45 @@ test('an interactive bash runs commands and reports its size, also after a resiz
   await until('bash-5.3# ');
   await type('echo "hi from $PWD"\r', 'hi from /home');
   await type('stty size\r', '24 80');
+  await until(PROMPT, (await screen()).lastIndexOf('24 80'));
   await page.evaluate(() => window.term.resize(100, 30));
-  for (let tries = 1; ; tries++) {
-    const from = (await screen()).length;
-    await page.evaluate(() => window.term.write('echo "cols $COLUMNS"\r'));
-    try {
-      await until('cols 100', from, 2000);
-      break;
-    } catch (err) {
-      if (tries >= 20) throw err;
-    }
-  }
+  const settled = (await screen()).length;
+  await type('true\r');
+  await until(PROMPT, settled);
   await type('stty size; echo "cols $COLUMNS"\r', 'cols 100');
   assert.match(await page.evaluate(() => window.screen.screen), /30 100\r\ncols 100/);
   assert.deepEqual(page.errors, []);
 });
 
 test('^C interrupts the foreground job, ^Z stops it, and exit ends the session with its status', async (t) => {
-  if (process.env.SLICC_TIMING_TESTS !== '1') {
-    return t.skip('a SIGTERM to a stopped job can hang in CI (#287); set SLICC_TIMING_TESTS=1');
-  }
   const { page, screen, until, type } = await terminal(chrome, t, ['bash', '-i'], { cwd: '/home' });
+  const prompted = async (input, expected) => {
+    await type(input, expected);
+    const shown = await screen();
+    await until(PROMPT, shown.lastIndexOf(expected) + expected.length);
+  };
   await until(PROMPT);
-  await type('sh -c "echo \\$((6*7)); exec sleep 30"\r', '42\r\n');
-  await type('\u0003', '^C');
-  await type('echo "rc $?"\r', 'rc 130');
-  await type('sh -c "echo \\$((6*7)); exec sleep 30"\r', '42\r\n');
-  await type('\u001a', 'Stopped');
+  const job = 'sh -c "echo \\$((6*7)); exec sleep 30"\r';
+  await type(job, '42\r\n');
+  await prompted('\u0003', '^C');
+  await prompted('echo "rc $?"\r', 'rc 130');
+  await type(job, '42\r\n');
+  await prompted('\u001a', 'Stopped');
   const stopped = (await screen()).length;
-  await type('kill %1; wait\r');
-  await until('Terminated', stopped);
-  await type('echo listed\r', 'listed');
+  await prompted('kill %1; wait\r', 'Terminated');
+  await prompted('echo listed\r', 'listed');
   assert.match((await screen()).slice(stopped), /Terminated/);
-  await type('sh -c "echo \\$((6*7)); exec sleep 30"\r', '42\r\n');
+  await type(job, '42\r\n');
   await page.evaluate(() => window.term.signal('SIGINT'));
-  await type('echo "signalled $?"\r', 'signalled 130');
-  await type('sh -c "echo \\$((6*7)); exec sleep 30"\r', '42\r\n');
+  await until(PROMPT, (await screen()).lastIndexOf('42\r\n') + 4);
+  await prompted('echo "signalled $?"\r', 'signalled 130');
+  await type(job, '42\r\n');
   const before = (await screen()).length;
   await page.evaluate(() => window.term.signal('SIGTSTP'));
   await until('Stopped', before);
-  await type('kill -9 %1; wait\r');
-  await until('Killed', before);
-  await type('echo listed\r', 'listed');
+  await until(PROMPT, (await screen()).lastIndexOf('Stopped'));
+  await prompted('kill -9 %1; wait\r', 'Killed');
+  await prompted('echo listed\r', 'listed');
   assert.match((await screen()).slice(before), /Killed/);
   await type('exit 3\r');
   await page.until(() => window.screen.status === 3);
