@@ -2,7 +2,7 @@ import type { ChildStdio, InheritedSlot } from '../kernel/children.ts';
 import type { Cred, CredChange } from '../kernel/cred.ts';
 import type { WasmSyscall } from '../kernel/process.ts';
 import type { ForkState, ForkStream } from '../kernel/protocol.ts';
-import { defaultAction } from '../kernel/signals.ts';
+import { defaultAction, SIG, sigbit } from '../kernel/signals.ts';
 import type { SyncFsResult } from '../realm/sync-fs-wire.ts';
 import type { SyncSabTransport } from '../realm/sync-sab-bridge.ts';
 import type { ProcessFs, ProcessStream } from './kernel-streams.ts';
@@ -14,6 +14,7 @@ import type { Owner } from './realm-user.ts';
 import { wasiErrno } from './wasi-errno.ts';
 
 const S_IFMT = 0o170000;
+const UNSEEDED = sigbit(SIG.KILL) | sigbit(SIG.STOP) | 1;
 const S_IFDIR = 0o040000;
 
 const POLLIN = 0x001;
@@ -26,6 +27,10 @@ const SELECT_SLICE_MS = 20;
 
 const WUNTRACED = 2;
 const WCONTINUED = 8;
+
+function inheritedOf(r: SyncFsResult): number {
+  return r.ok && r.kind === 'json' ? (r.json as number) & ~UNSEEDED : 0;
+}
 
 function status(r: SyncFsResult): number {
   return r.ok ? 0 : -wasiErrno(r.errno);
@@ -63,6 +68,8 @@ export interface ProcessKernel {
   kill(pid: number, sig: number): number;
 
   pause(): number;
+
+  sigInherited(): number;
 
   setpgid(pid: number, pgid: number): number;
   setsid(): number;
@@ -384,9 +391,8 @@ export function createProcessKernel(deps: ProcessKernelDeps): ProcessKernel {
       execCaptures.delete(pid);
       return status;
     },
-    pause() {
-      return status(call({ op: 'sig-pause' }, 'pause'));
-    },
+    pause: () => status(call({ op: 'sig-pause' }, 'pause')),
+    sigInherited: () => inheritedOf(call({ op: 'sig-inherited' }, 'sig-inherited')),
     mount(source, target, type, flags, data) {
       const req = { op: 'mount' as const, source, target: at(target), type, flags, data };
       return status(call(req, `mount ${target}`));
