@@ -102,6 +102,7 @@ type EpollWait = (
 const IDS = ['ruid', 'euid', 'suid', 'rgid', 'egid', 'sgid'] as const;
 const NS_PER_MS = 1_000_000n;
 const AT_SYMLINK_NOFOLLOW = 1;
+const AT_FDCWD = -2;
 const AT_EACCESS = 2;
 
 const ROOT_IDS = Object.freeze({ uid: 0, gid: 0 });
@@ -400,6 +401,21 @@ export class WasiHost {
       fd_chmod: (fd: number, mode: number) => void this.o.fs.chmod(pathOf(fd), mode & 0o7777),
       path_chmod: (dirfd: number, p: number, l: number, mode: number, flags: number) =>
         void this.o.fs.chmod(target(at(dirfd, p, l), flags), mode & 0o7777),
+      path_mkfifo: (dirfd: number, p: number, l: number, mode: number) => {
+        const { mkfifo } = this.o.fs;
+        if (!mkfifo) return E.NOSYS;
+        const raw = mem.string(p, l);
+        const path =
+          dirfd === AT_FDCWD && !raw.startsWith('/')
+            ? fds.resolve(3, `${this.cwd}/${raw}`)
+            : at(dirfd, p, l);
+        const umask = this.o.kernel.call({ op: 'proc-umask' }) as number;
+        const want = mode & 0o7777 & ~umask;
+        mkfifo.call(this.o.fs, path, want);
+        const made = (this.o.fs.lstat(path).mode ?? 0) & 0o7777;
+        if ((made & ~want) !== 0) this.o.fs.chmod(path, made & want);
+        return E.SUCCESS;
+      },
       umask: (mask: number, out: number) => {
         const old = this.o.kernel.call({ op: 'proc-umask', mask }) as number;
         mem.view().setUint32(out, old, true);
