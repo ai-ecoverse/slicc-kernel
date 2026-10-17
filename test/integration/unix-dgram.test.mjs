@@ -30,7 +30,7 @@ async function booted(t) {
     return kernel.run(['python3', '/opt/t.py'], { cwd: '/', ...(user ? { user } : {}) });
   };
   const sh = (script) => kernel.run(['bash', '-c', script], { cwd: '/' });
-  return { py, sh };
+  return { kernel, py, sh };
 }
 
 const PRELUDE = `import errno, os, socket
@@ -129,11 +129,76 @@ try:
 except OSError as e:
     print('send', err(e))
 try:
+    dgram().connect('/srv/log/dev.sock')
+except OSError as e:
+    print('connect', err(e))
+try:
     dgram().bind('/srv/log/mine.sock')
 except OSError as e:
     print('bind', err(e))
 `,
     'cone'
   );
-  assert.deepEqual(user, { status: 0, stdout: 'send EACCES\nbind EACCES\n', stderr: '' });
+  assert.deepEqual(user, {
+    status: 0,
+    stdout: 'send EACCES\nconnect EACCES\nbind EACCES\n',
+    stderr: '',
+  });
+});
+
+test('AF_UNIX SOCK_DGRAM under enforce: a user can neither connect to nor send to a live root receiver it may not write, and the receiver gets nothing (#891)', async (t) => {
+  const { kernel, sh } = await booted(t);
+  await sh('mkdir -p /srv/log && chmod 755 /srv/log && rm -f /tmp/ready /tmp/go');
+  await kernel.writeFile(
+    '/opt/root.py',
+    `${PRELUDE}
+import time
+d = dgram(); d.bind('/srv/log/dev.sock'); os.chmod('/srv/log/dev.sock', 0o600)
+open('/tmp/ready', 'w').close()
+while not os.path.exists('/tmp/go'):
+    time.sleep(0.05)
+d.settimeout(0.5)
+try:
+    print('got', d.recvfrom(64))
+except OSError as e:
+    print('nothing', type(e).__name__)
+dgram().sendto(b'self', '/srv/log/dev.sock')
+print('live', d.recvfrom(64)[0])
+`
+  );
+  await kernel.writeFile(
+    '/opt/cone.py',
+    `${PRELUDE}
+import time
+while not os.path.exists('/tmp/ready'):
+    time.sleep(0.05)
+c = dgram()
+try:
+    c.connect('/srv/log/dev.sock')
+except OSError as e:
+    print('connect', err(e))
+try:
+    c.send(b'after')
+except OSError as e:
+    print('unconnected', err(e))
+try:
+    dgram().sendto(b'sneak', '/srv/log/dev.sock')
+except OSError as e:
+    print('send', err(e))
+open('/tmp/go', 'w').close()
+`
+  );
+  await sh('chmod 644 /opt/root.py /opt/cone.py && chmod 1777 /tmp');
+  const root = kernel.run(['python3', '/opt/root.py'], { cwd: '/' });
+  const cone = await kernel.run(['python3', '/opt/cone.py'], { cwd: '/', user: 'cone' });
+  assert.deepEqual(cone, {
+    status: 0,
+    stdout: 'connect EACCES\nunconnected EDESTADDRREQ\nsend EACCES\n',
+    stderr: '',
+  });
+  assert.deepEqual(await root, {
+    status: 0,
+    stdout: "nothing TimeoutError\nlive b'self'\n",
+    stderr: '',
+  });
 });

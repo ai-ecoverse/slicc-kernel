@@ -48,3 +48,16 @@ test('a file the page removes or rewrites through the OPFS API reads as it now i
   await new Promise((resolve) => setTimeout(resolve, 1100));
   assert.deepEqual(await bash(read), ok('cat: /home/g: Is a directory\ndir\n'));
 });
+
+test('a file another tab creates just after this tab found the name missing reads at the next command (#774)', async (t) => {
+  const { page, bash } = await booted(chrome, t);
+  const other = await page.tab();
+  await other.goto('/');
+  await other.until(() => typeof window.boot === 'function');
+  await other.evaluate(() => window.boot({}));
+  const there = (script) =>
+    other.evaluate((s) => window.kernel.run(['bash', '-c', s], { cwd: '/' }), script);
+  assert.deepEqual(await bash('rm -f /home/n; test -e /home/n || echo missing'), ok('missing\n'));
+  assert.deepEqual(await there('printf made > /home/n'), ok());
+  assert.deepEqual(await bash('cat /home/n'), ok('made'));
+});
