@@ -28,8 +28,14 @@ const SELECT_SLICE_MS = 20;
 const WUNTRACED = 2;
 const WCONTINUED = 8;
 
-function inheritedOf(r: SyncFsResult): number {
+export function inheritedOf(r: SyncFsResult): number {
   return r.ok && r.kind === 'json' ? (r.json as number) & ~UNSEEDED : 0;
+}
+
+export function inheritedSignals(transport: SyncSabTransport): number {
+  return inheritedOf(
+    transport.call({ op: 'sig-inherited' }, Number.POSITIVE_INFINITY, 'sig-inherited')
+  );
 }
 
 function status(r: SyncFsResult): number {

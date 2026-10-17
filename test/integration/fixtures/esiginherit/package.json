@@ -1,0 +1,13 @@
+{
+  "name": "esiginherit",
+  "private": true,
+  "slicc": {
+    "abi": "emscripten",
+    "commands": {
+      "esiginherit": {
+        "glue": "bin/esiginherit",
+        "wasm": "bin/esiginherit.wasm"
+      }
+    }
+  }
+}
