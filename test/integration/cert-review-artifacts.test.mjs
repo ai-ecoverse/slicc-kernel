@@ -1,10 +1,31 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 const repo = fileURLToPath(new URL('../../', import.meta.url));
+const workflow = await readFile(
+  new URL('../../.github/workflows/cert-review-pr.yml', import.meta.url),
+  'utf8'
+);
+const jobs = (() => {
+  const body = workflow.split(/^jobs:$/m)[1] ?? '';
+  const out = {};
+  for (const m of body.matchAll(/^ {2}([a-z-]+):\n([\s\S]*?)(?=^ {2}[a-z-]+:$|(?![\s\S]))/gm))
+    out[m[1]] = m[2];
+  return out;
+})();
+const steps = (job) =>
+  jobs[job]
+    .split(/^ {6}- /m)
+    .slice(1)
+    .map((text) => {
+      const run = /^ {8}run: \|\n((?: {10}.*\n|\n)+)/m.exec(text)?.[1];
+      return { text, run: run?.replace(/^ {10}/gm, '') };
+    });
+
 const V = '1.2.4-pr.9.77';
 const P = '1.2.3-base.9.77';
 const hex = (c) => c.repeat(64);
@@ -121,4 +142,166 @@ test('the artifact check passes only when every artifact in the namespace is the
     1,
     'a listing that fails is a FAIL, never a pass'
   );
+});
+
+test('same posts "not behaviour (identical dist)" only after the run\'s tarballs check out: a candidate-made artifact named like the base fails the step, and the base comes by the base pack job\'s id', async (t) => {
+  const all = steps('same');
+  const at = (re) => all.findIndex((s) => re.test(s.text));
+  const guard = at(/tools\/cert-review\/artifacts\.mjs/);
+  const candidate = at(/artifact-ids: \$\{\{ needs\.pack\.outputs\.id \}\}/);
+  const base = at(/artifact-ids: \$\{\{ needs\.pack-base\.outputs\.id \}\}/);
+  const same = at(/tools\/cert-review\/same\.mjs/);
+  const upload = at(/name: cert-review-same-\$\{\{ needs\.plan\.outputs\.version \}\}/);
+  const post = at(/tools\/cert-review\/pr\.mjs same/);
+  assert.ok(
+    guard >= 0 &&
+      guard < candidate &&
+      candidate < base &&
+      base < same &&
+      same < upload &&
+      upload < post,
+    `${guard} ${candidate} ${base} ${same} ${upload} ${post}`
+  );
+  assert.match(all[guard].run, /--prefix kernel-tgz- --prefix cert-review- /);
+  assert.match(all[guard].run, /--expect "cert-review-delta-\$VERSION=\$DELTA"/);
+  assert.match(jobs.same, /needs: \[plan, pack, pack-base, delta\]/);
+  assert.doesNotMatch(jobs.same, /continue-on-error|pattern:/);
+  assert.match(
+    all[guard].text,
+    /CANDIDATE: \$\{\{ needs\.pack\.outputs\.id \}\}@\$\{\{ needs\.pack\.outputs\.digest \}\}/
+  );
+  assert.match(
+    all[guard].text,
+    /BASE: \$\{\{ needs\.pack-base\.outputs\.id \}\}@\$\{\{ needs\.pack-base\.outputs\.digest \}\}/
+  );
+  const env = {
+    VERSION: V,
+    PREV: P,
+    CANDIDATE: `1@${hex('a')}`,
+    BASE: `2@${hex('b')}`,
+    DELTA: `3@${hex('c')}`,
+  };
+  const honest = [
+    art(1, `kernel-tgz-${V}`, 'a'),
+    art(2, `kernel-tgz-${P}`, 'b'),
+    art(3, `cert-review-delta-${V}`, 'c'),
+  ];
+  const ok = await sh(all[guard].run, { ...env, GITHUB_API_URL: await fakeApi(t, honest) });
+  assert.equal(ok.code, 0, ok.out);
+  const forged = [art(1, `kernel-tgz-${V}`, 'a'), art(8, `kernel-tgz-${P}`, 'a')];
+  const r = await sh(all[guard].run, { ...env, GITHUB_API_URL: await fakeApi(t, forged) });
+  assert.notEqual(r.code, 0, r.out);
+  assert.match(r.out, /kernel-tgz-1\.2\.3-base\.9\.77 \(8\) was uploaded by no producer job/);
+  const early = await sh(all[guard].run, {
+    ...env,
+    GITHUB_API_URL: await fakeApi(t, [...honest, art(9, `cert-review-same-${V}`, 'd')]),
+  });
+  assert.notEqual(
+    early.code,
+    0,
+    'evidence planted under the name same is about to upload stops same before it posts'
+  );
+  assert.match(
+    early.out,
+    /cert-review-same-1\.2\.4-pr\.9\.77 \(9\) was uploaded by no producer job/
+  );
+});
+
+test("record's artifact check covers every producer and fails the record as INCOMPLETE on a planted artifact; no consumer downloads by pattern, and no producer overwrites", async (t) => {
+  const all = steps('record');
+  const guard = all.find((s) => /tools\/cert-review\/artifacts\.mjs/.test(s.text));
+  assert.match(guard.text, /continue-on-error: true/);
+  for (const [name, job] of [
+    ['kernel-tgz-$VERSION', 'CANDIDATE'],
+    ['kernel-tgz-$PREV', 'BASE'],
+    ['cert-review-delta-$VERSION', 'DELTA'],
+    ['cert-review-same-$VERSION', 'SAME'],
+    ['cert-review-compat-$VERSION', 'COMPAT'],
+    ['cert-review-verdict-$VERSION', 'VERDICT'],
+    ['cert-review-evidence-$VERSION', 'EVIDENCE'],
+  ])
+    assert.ok(guard.run.includes(`--expect "${name}=$${job}"`), name);
+  assert.match(guard.run, /--prefix kernel-tgz- --prefix cert-review-/);
+  const record = all.find((s) => /tools\/cert-review\/record\.mjs/.test(s.text));
+  assert.match(record.text, /ARTIFACTS: \$\{\{ steps\.artifacts\.outcome \}\}/);
+  assert.match(record.run, /--jobs "\$JOBS,artifacts=\$ARTIFACTS"/);
+  const env = {
+    VERSION: V,
+    PREV: P,
+    CANDIDATE: `1@${hex('a')}`,
+    BASE: `2@${hex('b')}`,
+    DELTA: `3@${hex('c')}`,
+    SAME: '@',
+    COMPAT: `4@${hex('d')}`,
+    VERDICT: `5@${hex('e')}`,
+    EVIDENCE: `6@${hex('f')}`,
+  };
+  const honest = [
+    art(1, `kernel-tgz-${V}`, 'a'),
+    art(2, `kernel-tgz-${P}`, 'b'),
+    art(3, `cert-review-delta-${V}`, 'c'),
+    art(4, `cert-review-compat-${V}`, 'd'),
+    art(5, `cert-review-verdict-${V}`, 'e'),
+    art(6, `cert-review-evidence-${V}`, 'f'),
+    art(10, `cert-review-suite-release-${V}`, '1'),
+    art(11, `cert-review-suite-base-${V}`, '2'),
+  ];
+  const ok = await sh(guard.run, { ...env, GITHUB_API_URL: await fakeApi(t, honest) });
+  assert.equal(ok.code, 0, ok.out);
+  for (const planted of [
+    art(12, `cert-review-same-${V}`, '3'),
+    art(13, `cert-review-record-${V}`, '4'),
+  ]) {
+    const r = await sh(guard.run, {
+      ...env,
+      GITHUB_API_URL: await fakeApi(t, [...honest, planted]),
+    });
+    assert.notEqual(r.code, 0, `${planted.name}: ${r.out}`);
+    assert.match(
+      r.out,
+      new RegExp(
+        `${planted.name.replace(/\./g, '\\.')} \\(${planted.id}\\) was uploaded by no producer job`
+      )
+    );
+  }
+  for (const text of workflow
+    .split(/^ {6}- uses: /m)
+    .filter((s) => s.startsWith('actions/download-artifact@'))) {
+    assert.doesNotMatch(text.split(/\n {6}- /)[0], /pattern:/);
+    if (/artifact-ids:/.test(text)) assert.match(text, /digest-mismatch: error/);
+    else
+      assert.match(
+        text,
+        /name: cert-review-suite-(release|base)-\$\{\{ needs\.plan\.outputs\.version \}\}/
+      );
+  }
+  assert.doesNotMatch(workflow, /overwrite: true/);
+  assert.doesNotMatch(workflow, /merge-multiple/);
+  for (const job of ['same', 'suite']) {
+    for (const [side, v] of [
+      ['pack', 'version'],
+      ['pack-base', 'prev'],
+    ])
+      assert.match(
+        jobs[job],
+        new RegExp(
+          `artifact-ids: \\$\\{\\{ needs\\.${side}\\.outputs\\.id \\}\\}\\n {10}path: \\$\\{\\{ runner\\.temp \\}\\}/packs/kernel-tgz-\\$\\{\\{ needs\\.plan\\.outputs\\.${v} \\}\\}\\n`
+        ),
+        `${job} unpacks ${side} where its script reads it: a download by one id extracts into its path itself`
+      );
+  }
+  assert.match(
+    jobs.same,
+    /--candidate "\$RUNNER_TEMP\/packs\/kernel-tgz-\$VERSION\/ai-ecoverse-slicc-kernel-\$VERSION\.tgz"/
+  );
+  assert.match(
+    jobs.suite,
+    /cp "\$RUNNER_TEMP"\/packs\/kernel-tgz-\*\/\*\.tgz "\$RUNNER_TEMP\/tgz\/"/
+  );
+  for (const job of ['pack', 'pack-base', 'delta', 'same', 'compat'])
+    assert.match(
+      jobs[job],
+      /id: \$\{\{ steps\.upload\.outputs\.artifact-id \}\}\n {6}digest: \$\{\{ steps\.upload\.outputs\.artifact-digest \}\}/,
+      job
+    );
 });
