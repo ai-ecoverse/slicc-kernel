@@ -611,6 +611,11 @@ export class WasiFds {
     }
   }
 
+  reread(fd: number): void {
+    const e = this.get(fd);
+    if (e.type === 'file') e.file.buffer.reread();
+  }
+
   flushPath(path: string): void {
     for (const [p, buffer] of this.buffers) if (within(p, path)) buffer.flush();
 
