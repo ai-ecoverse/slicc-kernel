@@ -467,6 +467,14 @@ export class LoopbackNet {
   private readonly facades = new Map<number, string>();
   private nextEphemeral = EPHEMERAL_FIRST;
   private route: UplinkRoute | undefined;
+  private origins: ((conn: KernelSocket, origin: string) => Promise<void>) | undefined;
+  useOrigins(serve: (conn: KernelSocket, origin: string) => Promise<void>): void {
+    this.origins = serve;
+  }
+  serveOrigin(conn: KernelSocket, origin: string): void {
+    if (!this.origins) throw new KernelError('ENETUNREACH');
+    void this.origins(conn, origin).catch(() => conn.close());
+  }
   useUplink(route: UplinkRoute): void {
     this.route = route;
   }

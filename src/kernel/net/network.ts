@@ -163,7 +163,7 @@ export function enableNetwork(
 ): () => RealmProxy | undefined {
   let proxy: RealmProxy | undefined;
   const transport = options.transport ?? missingTransport();
-  net.activate({ family: 'inet', host: '127.0.0.1', port: REALM_PROXY_PORT }, () => {
+  const start = (): void => {
     const tls = new TlsTerminator({
       ca: options.ca,
       engine: options.engine,
@@ -182,6 +182,11 @@ export function enableNetwork(
       if (proxy === started) proxy = undefined;
       await tls.close();
     });
+  };
+  net.activate({ family: 'inet', host: '127.0.0.1', port: REALM_PROXY_PORT }, start);
+  net.useOrigins((conn, origin) => {
+    if (!proxy) start();
+    return (proxy as RealmProxy).serveOrigin(conn, origin);
   });
   return () => proxy;
 }
