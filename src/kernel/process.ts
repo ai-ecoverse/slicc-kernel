@@ -49,6 +49,7 @@ import {
   openPipe,
   pollFile,
 } from './fd-table.ts';
+import type { FifoTable } from './fifo.ts';
 import { AsyncOps, HOST_OPS, type HostSyscall, hostSyscall, type LockTarget } from './host-ops.ts';
 import type { JobTable } from './jobs.ts';
 import type { LockKind, LockTable } from './locks.ts';
@@ -133,6 +134,8 @@ export type WasmSyscall =
       pin?: VersionPin;
 
       handle?: number;
+
+      fifo?: boolean;
     }
   | { op: 'fd-pread'; fd: number; offset: number; max: number }
   | { op: 'fd-pwrite'; fd: number; offset: number; body: Uint8Array }
@@ -450,6 +453,7 @@ export function isWasmSyscall(req: object): req is WasmSyscall {
 }
 
 const MAX_READ = 1024 * 1024;
+const O_NONBLOCK = 0o4000;
 const WRITE_ACCESS = 0o3;
 const KEYBOARD: ReadonlySet<number> = new Set([SIG.INT, SIG.QUIT, SIG.TSTP]);
 
@@ -578,6 +582,8 @@ export interface WasmProcessOptions {
   http?: HttpHandles;
 
   locks?: LockTable;
+
+  fifos?: FifoTable;
 
   sems?: SemTable;
 
@@ -1170,7 +1176,10 @@ export class WasmProcess {
     );
   }
 
-  private async openVfs(req: Extract<FdSyscall, { op: 'fd-open-vfs' }>): Promise<number> {
+  private async openVfs(
+    req: Extract<FdSyscall, { op: 'fd-open-vfs' }>,
+    cancelled: AbortSignal
+  ): Promise<number> {
     if (inProc(req.path)) return this.openProc(req, req.path);
     const device = req.orphan ? undefined : deviceAt(req.path);
     if (device) return this.openDevice(req, device);
@@ -1183,6 +1192,10 @@ export class WasmProcess {
     await refuseReadonly(this.options.fs, req.path, req.flags, req);
     if (this.writesAt(req)) await this.options.fs.mayChange?.(req.path, !req.exclusive);
     await this.mayOpen(req);
+    if (req.fifo && !req.exclusive) {
+      const opened = await this.openFifo(req, cancelled);
+      if (opened !== undefined) return opened;
+    }
     const marked = await this.markedPath(req);
     await this.sourceOpen(marked === undefined ? req : { ...req, path: marked });
     const fs = marked === undefined ? this.options.fs : (this.options.noLinks as KernelFs);
@@ -1223,6 +1236,23 @@ export class WasmProcess {
       throw err;
     }
     return fd;
+  }
+
+  private async openFifo(
+    req: Extract<FdSyscall, { op: 'fd-open-vfs' }>,
+    cancelled: AbortSignal
+  ): Promise<number | undefined> {
+    const fifos = this.options.fifos;
+    const path = await this.nodes.targetKey(req.path);
+    const st = await (this.heldFs() as KernelFs).stat(path);
+    if (!st.isFifo) return undefined;
+    if (!fifos) throw new KernelError('ENXIO');
+    const access = openAccess(req.flags);
+    const nonblock = (req.flags & O_NONBLOCK) !== 0;
+    const blocks = !nonblock && access !== 'both';
+    const signal = blocks ? this.blockingSignal(cancelled) : cancelled;
+    const end = await fifos.open(`${st.dev ?? 0}:${st.ino}`, path, access, nonblock, signal);
+    return this.fds.install(end, 3);
   }
 
   private openDevice(
@@ -1476,7 +1506,7 @@ export class WasmProcess {
       case 'fd-poll':
         return { ok: true, kind: 'json', json: pollFile(this.fds.get(req.fd).file) };
       case 'fd-open-vfs':
-        return { ok: true, kind: 'json', json: await this.openVfs(req) };
+        return { ok: true, kind: 'json', json: await this.openVfs(req, cancelled) };
       case 'fd-info':
         return { ok: true, kind: 'json', json: this.fdInfo(req.fd) };
       case 'fd-list':

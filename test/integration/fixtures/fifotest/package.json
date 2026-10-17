@@ -1,0 +1,12 @@
+{
+  "name": "fifotest",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "fifotest": {
+        "wasm": "bin/fifotest.wasm"
+      }
+    }
+  }
+}

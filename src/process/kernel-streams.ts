@@ -154,6 +154,7 @@ export interface ProcessSys {
       created?: boolean;
       pin?: { version: string; size: number };
       handle?: number;
+      fifo?: boolean;
     }
   ): number;
 
@@ -223,6 +224,7 @@ export interface ProcessStream {
   sliccCloexec?: boolean;
 
   sliccKernelSocket?: boolean;
+  sliccKernelFifo?: string;
   path?: string;
   flags: number;
   position: number;
@@ -342,6 +344,14 @@ export class KernelStreams {
     stream.stream_ops = this.ops(kfd, stream.stream_ops);
     if (terminal ?? this.sys.isatty?.(kfd) ?? false) stream.tty = this.ttyOps(kfd);
     else delete stream.tty;
+  }
+
+  attachFifo(stream: ProcessStream, path: string): void {
+    const kfd = this.call(() =>
+      this.restarting(() => this.sys.openVfs(path, stream.flags, 0, { fifo: true }))
+    );
+    this.attach(stream, kfd, false);
+    stream.sliccKernelFifo = path;
   }
 
   attachSocket(stream: ProcessStream, kfd: number): void {

@@ -573,6 +573,14 @@ A lookup follows at most 40 symlinks, as Linux does: the 41st is `ELOOP`, for WA
 
 Directories are renamed with `FileSystemHandle.move()` where available, else by copy and delete.
 
+**FIFOs** (`mkfifo`, #896):
+- **Creating one:** an Emscripten program's `mkfifo`/`mknod(S_IFIFO)` makes a FIFO node on the OPFS root (in `/tmp`, `/home` and the rest), owned by the caller, with mode `mode & ~umask`. `stat`, `ls -l` (`p`) and `test -p` show it as a FIFO, in Emscripten, WASI and JS programs. WASIX libc has no `mkfifo`, but WASIX programs `stat`, `open`, read and write a FIFO that exists. An existing name is `EEXIST`. tmpfs, hostfs, `fsa` and media mounts have no FIFO nodes, so `mkfifo` there is `EPERM`, and `EROFS` on a readonly path.
+- **Opening one** works as on Linux (fifo(7)). A read-open waits until a writer opens, and a write-open until a reader does. `O_RDWR` doesn't wait. With `O_NONBLOCK` a read-open returns at once, and a write-open with no reader is `ENXIO`. A waiting open is interrupted by a caught signal (`EINTR`), restarts under `SA_RESTART`, and isn't ended by a stop.
+- **The data path** is the kernel's pipe: the same capacity, `EOF` once the last writer closes, and `SIGPIPE`/`EPIPE` once the last reader closes. The data is dropped when no end is open.
+- **The node's identity, not its name, picks the FIFO:** an open FIFO keeps working after an `unlink` or a `rename`, and a new `mkfifo` at the same name is another FIFO. `/proc/<pid>/fd/N` names the FIFO's path, also in children that inherit the end.
+- **One kernel per storage root:** the table of open FIFOs is per kernel, so two tabs (two kernels on one origin) opening the same FIFO don't connect, as with record locks ([#675](https://github.com/ai-ecoverse/slicc-kernel/issues/675)).
+- GNU make 4.4's `-jN` uses a FIFO jobserver this way (`--jobserver-auth=fifo:PATH`), so sub-makes join it by path.
+
 `mmap` of a regular file works on every file system, for Emscripten programs built with `mmap` (whose glue exports `emscripten_builtin_memalign`) as well as for WASIX ones: the kernel reads the mapped range into fresh memory of the process, as Emscripten's MEMFS does. A `MAP_PRIVATE` mapping may be written, and its changes stay in the process. A writable `MAP_SHARED` mapping of such a file is `ENODEV`; a file in the process's own in-memory file system (MEMFS, as under `/dev`) keeps Emscripten's own mapping, which writes back. A read-only `MAP_SHARED` mapping is a copy taken at `mmap`, so later changes to the file do not show in it.
 
 ### Mounts
@@ -1121,6 +1129,16 @@ A threaded WASIX C program for `test/integration/thread-signal.test.mjs` (#520).
 - `sigthread default` sends `SIGTERM` (no handler), which must end the process.
 
 **Build:** `WASIX_SYSROOT_28=/path/to/wasix-sysroot ./build.sh`, with `wasixcc` 0.4.7 (`-pthread`) and binaryen's `wasm-opt` on `PATH`. `bin/sigthread.wasm` is 44,788 bytes, sha256 `5781fa39d0a0032cd9b214b71de1f15f589b40e4cecd6862362048dd27f0db56`.
+
+### `fifotest`
+
+A WASIX C program for `test/integration/fifo.test.mjs` (#896). It opens an existing FIFO; WASIX libc has no `mkfifo`, so coreutils makes it.
+- `fifotest stat PATH` prints `fifo` or `not a fifo`.
+- `fifotest read PATH` opens it for reading (blocking) and prints what it reads until `EOF`. `fifotest nbread PATH` does the same with `O_NONBLOCK`.
+- `fifotest write PATH [TEXT]` opens it for writing and writes TEXT. `fifotest nbwrite PATH [TEXT]` does so with `O_NONBLOCK`, and prints `open: No such device or address` with no reader.
+- `fifotest alarm PATH [restart]` arms `alarm(1)` with a `SIGALRM` handler (with `SA_RESTART` if asked), then opens the FIFO for reading. It prints `open: Interrupted system call`, or `opened` and what it read. The handler creates the file named by `FIFOTEST_MARK`, so a test can wait for the interrupt instead of a clock.
+
+**Build:** `WASIX_SYSROOT_28=/path/to/wasix-sysroot ./build.sh`, with `wasixcc` 0.4.7 and binaryen's `wasm-opt` on `PATH`. `bin/fifotest.wasm` is 51,468 bytes, sha256 `a233774a219058050d8d793d48b05174cb35b8e571cb60aefa4b8d6612da9a28`.
 
 ### `fdalias`
 

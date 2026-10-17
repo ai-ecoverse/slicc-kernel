@@ -11,6 +11,7 @@ export interface MetaEntry {
   ino?: number;
   link?: string;
   socket?: true;
+  fifo?: true;
   dir?: string;
   uid?: number;
   gid?: number;

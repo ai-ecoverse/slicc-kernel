@@ -116,6 +116,8 @@ export interface KernelFile {
   held?: true;
 
   heldMeta?: HeldMeta;
+
+  fifo?: string;
 }
 
 export type HeldMeta = { dir: string; preopen?: string; twin?: number } | DeviceMeta;

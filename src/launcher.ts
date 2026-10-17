@@ -61,6 +61,7 @@ import type { CpuTimes } from './kernel/cpu-clock.ts';
 import { type Cred, copyCred, maySee, maySignal, ROOT } from './kernel/cred.ts';
 import { argvDigest, type Booked, TICKET_ENV } from './kernel/exec-ticket.ts';
 import { bytesSource, deviceFile, FdTable, type OpenFile, sinkFile } from './kernel/fd-table.ts';
+import { FifoTable } from './kernel/fifo.ts';
 import { spawnWasmProcess, type WasmProcessHandle, type WasmWorkerLike } from './kernel/host.ts';
 import { type JobMember, JobTable } from './kernel/jobs.ts';
 import { LockTable } from './kernel/locks.ts';
@@ -603,6 +604,7 @@ export class Launcher {
   private readonly sudoer: Sudo;
   private readonly jobs = new JobTable();
   private readonly locks = new LockTable();
+  private readonly fifos = new FifoTable();
 
   private readonly sems = new SemTable();
   private readonly settling = new SettlingChildren((pid) => this.jobs.pgidOf(pid));
@@ -1741,6 +1743,7 @@ export class Launcher {
       net: this.net,
       http: new HttpHandles(this.transport, pid, this.loopbackFor(pid)),
       locks: this.locks,
+      fifos: this.fifos,
       sems: this.sems,
       resolver: this.resolver,
       onReap: (child) => this.reaped(child, pid),

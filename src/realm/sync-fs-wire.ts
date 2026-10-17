@@ -21,6 +21,7 @@ export const SYNC_FS_OPS = [
   'statfs',
   'hold',
   'create',
+  'mkfifo',
   'kept',
   'pread',
   'pwrite',
@@ -74,6 +75,7 @@ export interface SyncFsBridgeStat {
   isDirectory: boolean;
   isSymbolicLink?: boolean;
   isSocket?: boolean;
+  isFifo?: boolean;
   size: number;
   mode?: number;
   mtimeMs?: number;
@@ -145,6 +147,7 @@ export interface SyncFsPosixBridge {
   ): number | undefined;
   access?(path: string, mode: number, kind?: AccessKind, nofollow?: boolean): void;
   create?(path: string, mode?: number, opening?: boolean): void;
+  mkfifo?(path: string, mode: number): void;
   chown?(path: string, ...rest: ChownArgs): void;
   owners?: boolean;
   links?: boolean;
@@ -177,6 +180,7 @@ export function parseSyncFsStat(json: unknown): SyncFsBridgeStat | null {
     isDirectory: s.isDirectory,
     isSymbolicLink: s.isSymbolicLink,
     ...(s.isSocket === true ? { isSocket: true } : {}),
+    ...(s.isFifo === true ? { isFifo: true } : {}),
     size: s.size,
     ...(typeof s.mode === 'number' ? { mode: s.mode } : {}),
     ...(typeof s.mtimeMs === 'number' ? { mtimeMs: s.mtimeMs } : {}),

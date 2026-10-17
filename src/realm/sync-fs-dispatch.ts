@@ -55,6 +55,7 @@ export interface SyncFsStatJson {
   isFile: boolean;
   isSymbolicLink: boolean;
   isSocket?: boolean;
+  isFifo?: boolean;
   size: number;
   mode: number;
   mtimeMs: number;
@@ -78,6 +79,7 @@ function statJson(s: FsStat): SyncFsStatJson {
     isFile: s.isFile,
     isSymbolicLink: s.isSymbolicLink,
     ...(s.isSocket ? { isSocket: true } : {}),
+    ...(s.isFifo ? { isFifo: true } : {}),
     size: s.size,
     mode: s.mode,
     mtimeMs: s.mtime.getTime(),
@@ -263,6 +265,12 @@ async function run(
     case 'symlink':
       await fs.symlink(req.arg2 ?? '', path, ownerFor(entry));
       return done;
+    case 'mkfifo': {
+      const owner = ownerFor(entry, req.mode ?? 0o666) ?? { uid: 0, gid: 0 };
+      await createExclusive(fs, path, { ...owner, fifo: true });
+      entry.fresh?.(path);
+      return done;
+    }
     case 'create':
       await createExclusive(fs, path, ownerFor(entry, req.mode ?? 0o666));
       if (req.opening) entry.created?.add(path);
@@ -360,9 +368,10 @@ async function guard(
       return { path: await walkSafe(g, path, false) };
     }
     case 'create':
+    case 'mkfifo':
     case 'symlink':
       await inParent(g, op, path);
-      return { path: await walkSafe(g, path, op === 'create') };
+      return { path: await walkSafe(g, path, op !== 'symlink') };
     case 'unlink':
     case 'rmdir': {
       await inParent(g, op, path, true);
@@ -455,6 +464,7 @@ async function accessOp(entry: SyncFsTokenEntry, path: string, req: SyncFsReques
 const CHANGING = new Set<SyncFsOp>([
   'mkdir',
   'create',
+  'mkfifo',
   'symlink',
   'unlink',
   'rmdir',
@@ -702,7 +712,13 @@ async function guardAndResolve(
 }
 
 const REMOVALS: ReadonlySet<SyncFsOp> = new Set<SyncFsOp>(['unlink', 'rmdir', 'rm']);
-const CREATIONS: ReadonlySet<SyncFsOp> = new Set<SyncFsOp>(['write', 'mkdir', 'symlink', 'create']);
+const CREATIONS: ReadonlySet<SyncFsOp> = new Set<SyncFsOp>([
+  'write',
+  'mkdir',
+  'symlink',
+  'create',
+  'mkfifo',
+]);
 const NAMING: ReadonlySet<SyncFsOp> = new Set<SyncFsOp>(['link', 'rename']);
 
 async function newDevName(

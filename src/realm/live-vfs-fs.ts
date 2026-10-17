@@ -27,6 +27,7 @@ const S_IFDIR = 0o040000;
 const S_IFREG = 0o100000;
 const S_IFLNK = 0o120000;
 const S_IFSOCK = 0o140000;
+const S_IFIFO = 0o010000;
 const S_IFMT = 0o170000;
 const PERM_MASK = 0o7777;
 
@@ -166,6 +167,7 @@ export interface LiveFsApi {
   sliccTouch?: boolean;
   sliccReading?: LiveFsNode | undefined;
   sliccCred?: LiveCred;
+  sliccOpenFifo?(stream: LiveFsStream, path: string): void;
 
   nameTable?: (LiveFsNode | null)[] | null;
   hashRemoveNode?(node: LiveFsNode): void;
@@ -214,7 +216,9 @@ function modeFromStat(st: SyncFsBridgeStat, exact = false): number {
       ? S_IFDIR
       : st.isSocket
         ? S_IFSOCK
-        : S_IFREG;
+        : st.isFifo
+          ? S_IFIFO
+          : S_IFREG;
   const fallback = st.isDirectory || st.isSymbolicLink ? 0o777 : 0o666;
   const perm = (st.mode ?? fallback) & PERM_MASK;
   return type | (exact ? perm : perm || fallback);
@@ -690,11 +694,14 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
             ? bridge.create(path, perm, (opening.get(h.Fs) as number) > 0)
             : bridge.writeFile(path, new Uint8Array(0))
         );
+      } else if ((mode & S_IFMT) === S_IFIFO && bridge.mkfifo) {
+        call(() => bridge.mkfifo?.(path, mode & PERM_MASK));
       } else {
         throw new Fs.ErrnoError(wasiErrno('EPERM'));
       }
       const node = makeNode(parent, name, {
         isFile: Fs.isFile(mode),
+        ...((mode & S_IFMT) === S_IFIFO ? { isFifo: true } : {}),
         isDirectory: Fs.isDir(mode),
         isSymbolicLink: false,
         size: 0,
@@ -828,7 +835,18 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
     }
     return want;
   };
+  const fifo = (stream: LiveFsStream) => {
+    const open = h.Fs.sliccOpenFifo;
+    try {
+      if (!open) throw new Fs.ErrnoError(wasiErrno('ENXIO'));
+      open.call(h.Fs, stream, liveNodePath(stream.node));
+    } catch (err) {
+      if (stream.fd !== undefined) Fs.closeStream?.(stream.fd);
+      throw err;
+    }
+  };
   const directory = (stream: LiveFsStream) => {
+    if ((stream.node.mode & S_IFMT) === S_IFIFO && !(stream.flags & O_PATH)) return fifo(stream);
     if ((stream.node.mode & S_IFMT) === S_IFSOCK && !(stream.flags & O_PATH)) {
       if (stream.fd !== undefined) Fs.closeStream?.(stream.fd);
       throw new Fs.ErrnoError(wasiErrno('ENXIO'));
