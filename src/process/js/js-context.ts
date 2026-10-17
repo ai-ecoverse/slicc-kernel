@@ -367,16 +367,78 @@ async function vfsStat(
   }
 }
 
+interface PipeIo {
+  infos: Map<number, FdInfo>;
+  handles: Map<number, () => void>;
+  read(fd: number, max?: number, signal?: AbortSignal): Promise<Uint8Array>;
+  write(fd: number, data: Uint8Array, signal?: AbortSignal): Promise<void>;
+}
+
+async function fifoOpen(
+  kernel: JsKernel,
+  abs: string,
+  options: JsOpenOptions,
+  io: PipeIo
+): Promise<JsFile> {
+  options.signal?.throwIfAborted();
+  const req = { ...openRequest(abs, { ...options, create: false }), fifo: true };
+  const r = await kernel.blocking(req, options.signal);
+  const fd = (r.ok && r.kind === 'json' ? r.json : -1) as number;
+  io.infos.set(fd, { kind: 'stream' });
+  let open = true;
+  const live = (): void => {
+    if (!open) throw new JsCallError('EBADF', abs);
+  };
+  const seekless = (position: number, what: string): void => {
+    live();
+    if (position !== 0) throw new JsCallError('ESPIPE', what);
+  };
+  io.handles.set(fd, () => {
+    open = false;
+  });
+  return {
+    fd,
+    path: abs,
+    async size() {
+      live();
+      return 0;
+    },
+    async read(position, length) {
+      seekless(position, 'read');
+      return io.read(fd, length);
+    },
+    async write(position, data) {
+      seekless(position, 'write');
+      await io.write(fd, data);
+      return data.length;
+    },
+    async truncate() {
+      live();
+      throw new JsCallError('EINVAL', 'truncate');
+    },
+    sync: async () => live(),
+    async close() {
+      if (!open) return;
+      open = false;
+      io.infos.delete(fd);
+      io.handles.delete(fd);
+      await kernel.raw({ op: 'fd-close', fd });
+    },
+  };
+}
+
 async function vfsOpen(
   kernel: JsKernel,
   abs: string,
   options: JsOpenOptions,
   statOf: (op: 'stat' | 'lstat', path: string) => Promise<SyncFsBridgeStat>,
-  infos: Map<number, FdInfo>,
-  handles: Map<number, () => void>
+  io: PipeIo
 ): Promise<JsFile> {
+  const { infos, handles } = io;
   const existing = await statOf(isExclusive(options) ? 'lstat' : 'stat', abs).catch(absent);
   checkOpen(abs, options, existing);
+  if (existing?.isSocket && !isExclusive(options)) throw new JsCallError('ENXIO', abs);
+  if (existing?.isFifo && !isExclusive(options)) return fifoOpen(kernel, abs, options, io);
   const fd = (await kernel.json(openRequest(abs, options))) as number;
   try {
     await kernel.call({ op: 'fd-vfs-stat', fd });
@@ -460,7 +522,7 @@ export function createContext(o: ContextOptions): CreatedContext {
     const abs = resolve(path);
     if (inDev(abs)) return openDev(kernel, abs, options, devIo);
     try {
-      return await vfsOpen(kernel, abs, options, statOf, infos, handles);
+      return await vfsOpen(kernel, abs, options, statOf, devIo);
     } catch (err) {
       if (!(err instanceof JsCallError) || err.code !== 'ENOENT') throw err;
       const devPath = await tryDev(abs);

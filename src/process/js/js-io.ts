@@ -14,6 +14,8 @@ export interface JsOpenOptions {
   exclusive?: boolean;
   truncate?: boolean;
   mode?: number;
+  nonblock?: boolean;
+  signal?: AbortSignal;
 }
 
 export type JsFdType = 'file' | 'pipe' | 'tty' | 'socket' | 'device' | 'directory';
@@ -133,8 +135,10 @@ export function checkOpen(abs: string, o: JsOpenOptions, existing?: SyncFsBridge
 function flagsOf(o: JsOpenOptions): number {
   const write = o.write || o.append || o.truncate;
   const access = write ? (o.read ? O_RDWR : O_WRONLY) : 0;
-  return access | (o.append ? O_APPEND : 0);
+  return access | (o.append ? O_APPEND : 0) | (o.nonblock ? O_NONBLOCK_OPEN : 0);
 }
+
+const O_NONBLOCK_OPEN = 0o4000;
 
 export function openRequest(abs: string, o: JsOpenOptions) {
   return {
