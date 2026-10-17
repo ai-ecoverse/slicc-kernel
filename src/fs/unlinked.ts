@@ -152,19 +152,20 @@ export class UnlinkedKeeper {
   wrap(fs: KernelFs = this.fs): KernelFs {
     const keeper = this;
     const { replacing } = this;
-    const replace = async (target: string, op: () => Promise<void>) => {
-      const before = replacing.get(target);
+    const replace = async (target: string, op: (gated: () => void) => Promise<void>) => {
       const { promise, resolve } = Promise.withResolvers<void>();
-      const mine = {
-        done: Promise.all([before?.done, promise]).then(() => undefined),
+      let mine: { done: Promise<void> } | undefined;
+      const gated = () => {
+        const before = replacing.get(target);
+        mine = { done: Promise.all([before?.done, promise]).then(() => undefined) };
+        replacing.set(target, mine);
       };
-      replacing.set(target, mine);
       try {
-        await op();
+        await op(gated);
       } finally {
         keeper.replaced += 1;
         resolve();
-        if (replacing.get(target) === mine) replacing.delete(target);
+        if (mine && replacing.get(target) === mine) replacing.delete(target);
       }
     };
     const unreplaced = async <T>(path: string, op: () => Promise<T>): Promise<T> => {
@@ -212,8 +213,8 @@ export class UnlinkedKeeper {
       async rename(from, to) {
         const target = fs.resolvePath('/', to);
         if (target === fs.resolvePath('/', from)) return fs.rename(from, to);
-        await replace(target, async () => {
-          const pinned = await keeper.pin(target);
+        await replace(target, async (gated) => {
+          const pinned = await keeper.pin(target, gated);
           await keeper.settle(pinned, () => fs.rename(from, to));
         });
       },
@@ -235,7 +236,7 @@ export class UnlinkedKeeper {
     pinned.commit();
   }
 
-  async pin(target: string): Promise<Pinned> {
+  async pin(target: string, gated: () => void = () => undefined): Promise<Pinned> {
     const held = new Map<string, UnlinkHolder[]>();
     for (const holder of this.holders) {
       if (holder.owns(target)) continue;
@@ -247,6 +248,7 @@ export class UnlinkedKeeper {
     const paths = [...held.keys()].sort();
     const releases: Array<() => void> = [];
     for (const path of paths) releases.push(await this.gate.acquire(path));
+    gated();
     const hidden = new Map<string, string>();
     for (const path of paths) {
       const at = await this.hide(path);
