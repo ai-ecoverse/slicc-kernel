@@ -126,3 +126,33 @@ for (const [n, what, wait] of [
     assert.deepEqual(reader, ok('new\n'));
   });
 }
+
+test('a program that only reads the clock after looking a name up sees the symlink another kernel put there in the meantime (#984, #959)', async (t) => {
+  const { page, bash } = await booted(chrome, t);
+  await page.evaluate(async () => {
+    for (const name of ['package.json', 'bin/clocklink', 'bin/clocklink.wasm']) {
+      const bytes = await (await fetch(`/fixtures/clocklink/${name}`)).arrayBuffer();
+      await window.opfs.write(`node_modules/clocklink/${name}`, bytes);
+    }
+  });
+  assert.deepEqual(
+    await bash('rm -rf /tmp/ck && mkdir -p /tmp/ck && echo plain > /tmp/ck/n', { cwd: '/' }),
+    ok()
+  );
+  const [reader, writer] = await page.evaluate(async () => {
+    await window.secondKernel({});
+    return Promise.all([
+      window.kernel.run(['clocklink', 'n', 'ready', '1500'], { cwd: '/tmp/ck' }),
+      window.second.run(
+        [
+          'bash',
+          '-c',
+          'while [ ! -e /tmp/ck/ready ]; do sleep 0.05; done; sleep 0.3; cd /tmp/ck && rm n && ln -s t n',
+        ],
+        { cwd: '/' }
+      ),
+    ]);
+  });
+  assert.deepEqual(writer, ok());
+  assert.deepEqual(reader, ok('first=EINVAL second=t\n'));
+});
