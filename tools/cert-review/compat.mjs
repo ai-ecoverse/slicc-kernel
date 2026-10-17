@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
-import { compatRegressions, missingShards, rerunSet } from './lib.mjs';
+import { compatRegressions, missingShards, rerunSet, verdict } from './lib.mjs';
 
 const { values } = parseArgs({
   options: {
@@ -237,4 +237,11 @@ console.log(
   out.found
     ? `compat: ${out.run} ${out.conclusion} (verdict ${out.verdict}, ${out.regressions.length} regressions${out.rerun ? `, rerun ${out.rerun.run} ${out.rerun.verdict}` : ''})`
     : `compat: no kernel-compat run for v${version} in time`
+);
+verdict(
+  'compat',
+  out.found && out.regressions.length === 0,
+  out.found
+    ? `${out.regressions.length} regressions, verdict ${out.verdict}: evidence in ${values.out}`
+    : `no kernel-compat run for v${version} in time: evidence in ${values.out}`
 );

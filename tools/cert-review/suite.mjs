@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { mergeRetry, parseResults, testCommand, unfinishedFiles } from './lib.mjs';
+import { mergeRetry, parseResults, testCommand, unfinishedFiles, verdict } from './lib.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const { values } = parseArgs({
@@ -142,6 +142,11 @@ function finish(exit, ignored) {
   };
   closeSync(log);
   writeFileSync(`${out}.json`, `${JSON.stringify(summary, null, 2)}\n`);
+  verdict(
+    'suite',
+    summary.exit === 0 && summary.fail === 0 && unfinished.length === 0,
+    `exit ${summary.exit}, pass ${summary.pass}, fail ${summary.fail}, skip ${summary.skip}, ${unfinished.length} files without results: evidence in ${out}.json`
+  );
   return summary;
 }
 const exitOf = (run) =>
