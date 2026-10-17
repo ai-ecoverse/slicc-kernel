@@ -42,6 +42,9 @@ export class RemoteWatch {
   private mine: readonly string[] = [];
   private seq = 0;
   private pruned = 0;
+  private readonly joined: Promise<void>;
+  private met: (() => void) | undefined;
+  quiet: (() => Promise<void>) | undefined;
 
   constructor(name: string, options: { locks?: LockManagerLike | null } = {}) {
     this.name = name;
@@ -49,8 +52,36 @@ export class RemoteWatch {
     this.channel = new BroadcastChannel(name);
     this.channel.onmessage = ({ data }) => this.receive(data as WatchMessage);
     (this.channel as BroadcastChannel & { unref?: () => void }).unref?.();
-    void this.locks?.request(this.lockOf(this.tab), () => new Promise<void>(() => {}));
+    const granted = new Promise<void>((resolve) => {
+      void this.locks?.request(this.lockOf(this.tab), () => {
+        resolve();
+        return new Promise<void>(() => {});
+      });
+      if (!this.locks) resolve();
+    });
+    this.joined = granted.then(() => this.join());
     this.channel.postMessage({ hello: this.tab });
+  }
+
+  private async join(): Promise<void> {
+    if (!this.locks) return;
+    const prefix = `${this.name}:`;
+    const mine = this.lockOf(this.tab);
+    const held = ((await this.locks.query()).held ?? []).map((lock) => lock.name ?? '');
+    if (!held.some((name) => name.startsWith(prefix) && name !== mine) || this.peers.size > 0)
+      return;
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, ANNOUNCE_WAIT_MS);
+      this.met = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+    });
+  }
+
+  async peered(): Promise<boolean> {
+    await this.joined;
+    return this.peers.size > 0;
   }
 
   private lockOf(tab: string): string {
@@ -59,7 +90,10 @@ export class RemoteWatch {
 
   private receive(data: WatchMessage): void {
     if (data.hello !== undefined) this.greeted(data.hello);
-    if (data.here !== undefined && data.to === this.tab) this.peers.add(data.here);
+    if (data.here !== undefined && data.to === this.tab) {
+      this.peers.add(data.here);
+      this.met?.();
+    }
     if (data.tab !== undefined && data.paths !== undefined) this.announced(data);
     if (data.ack !== undefined && data.to === this.tab && data.from !== undefined) {
       this.acked(data.ack, data.from);
@@ -69,8 +103,12 @@ export class RemoteWatch {
 
   private greeted(peer: string): void {
     this.peers.add(peer);
-    this.channel.postMessage({ here: this.tab, to: peer });
-    if (this.mine.length > 0) void this.announce(this.mine);
+    const answer = () => {
+      this.channel.postMessage({ here: this.tab, to: peer });
+      if (this.mine.length > 0) void this.announce(this.mine);
+    };
+    if (this.quiet) void this.quiet().then(answer, answer);
+    else answer();
   }
 
   private announced({ tab, paths, seq }: WatchMessage): void {

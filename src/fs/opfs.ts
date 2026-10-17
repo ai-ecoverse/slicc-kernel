@@ -275,6 +275,7 @@ export class OpfsFs implements KernelFs {
     this.lockPrefix = `slicc-excl:${channel ?? ''}:`;
     this.channel = channel === undefined ? undefined : new BroadcastChannel(channel);
     this.remote = channel === undefined ? undefined : new RemoteWatch(`${channel}:watch`);
+    if (this.remote) this.remote.quiet = () => this.quiet();
     if (this.channel) {
       const remote = this.remote;
       (meta as { listen?: (l: (c: Partial<RemoteChange>) => void) => void }).listen?.((c) =>
@@ -455,8 +456,27 @@ export class OpfsFs implements KernelFs {
     }
   }
 
+  private unlocked = 0;
+  private idle: Array<() => void> = [];
+
+  private async alone<T>(op: () => Promise<T>): Promise<T> {
+    this.unlocked++;
+    try {
+      return await op();
+    } finally {
+      this.unlocked--;
+      if (this.unlocked === 0) for (const done of this.idle.splice(0)) done();
+    }
+  }
+
+  private quiet(): Promise<void> {
+    if (this.unlocked === 0) return Promise.resolve();
+    return new Promise<void>((resolve) => this.idle.push(resolve));
+  }
+
   private async locked<T>(physicalPath: string, op: () => Promise<T>): Promise<T> {
     if (!this.locks) return op();
+    if (this.remote && !(await this.remote.peered())) return this.alone(op);
     const key = `${this.lockPrefix}${physicalPath}`;
     let result!: T;
     await this.locks.request(key, async () => {

@@ -1175,6 +1175,24 @@ class MountFs implements KernelFs {
     }
   }
 
+  async createExclusive(path: string, owner?: NewOwner, redirects = 0): Promise<void> {
+    const exclusive = this.base.createExclusive?.bind(this.base);
+    if (!this.at(path) && exclusive) {
+      return this.based(
+        [path],
+        redirects,
+        () => exclusive(path, owner),
+        ([to], n) => this.createExclusive(to as string, owner, n)
+      );
+    }
+    const there = await this.lstat(path).then(
+      () => true,
+      () => false
+    );
+    if (there) throw errnoError('EEXIST', path);
+    await this.writeFile(path, new Uint8Array(0), owner);
+  }
+
   async lstat(path: string, redirects = 0): Promise<FsStat> {
     const found = this.at(path);
     if (!found) {
