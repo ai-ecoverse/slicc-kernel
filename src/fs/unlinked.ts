@@ -262,7 +262,13 @@ export class UnlinkedKeeper {
     for (;;) {
       const fresh = [...this.heldWithin(target).keys()].filter((path) => !paths.includes(path));
       if (fresh.length === 0) break;
-      for (const path of fresh.sort()) {
+      fresh.sort();
+      if (paths.some((path) => path > (fresh[0] as string))) {
+        for (const release of releases.splice(0)) release();
+        fresh.push(...paths.splice(0));
+        fresh.sort();
+      }
+      for (const path of fresh) {
         paths.push(path);
         releases.push(await this.gate.acquire(path));
       }
