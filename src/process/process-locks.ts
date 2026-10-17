@@ -39,6 +39,7 @@ export interface LockKernel {
   ): void;
   getLock(target: LockTarget, kind: LockKind, start: number, len: number): LockHeld | null;
   closeLocks(target: LockTarget): void;
+  flock?(fd: number, kind: 'shared' | 'exclusive' | 'unlock', wait: boolean): void;
 }
 
 export interface LockDeps {
@@ -163,5 +164,35 @@ export function closeDropsLocks(Fs: ProcessFs, kernel: LockKernel): void {
     try {
       kernel.closeLocks(target);
     } catch {}
+  };
+}
+
+const LOCK_NB = 4;
+const FLOCK_KINDS: Readonly<Record<number, 'shared' | 'exclusive' | 'unlock'>> = {
+  1: 'shared',
+  2: 'exclusive',
+  8: 'unlock',
+};
+
+export interface FlockDeps {
+  fs(): ProcessFs | undefined;
+  flock(fd: number, kind: 'shared' | 'exclusive' | 'unlock', wait: boolean): void;
+}
+
+export function kernelFlock(deps: FlockDeps): (fd: number, op: number) => number {
+  return (fd, op) => {
+    const kind = FLOCK_KINDS[op & ~LOCK_NB];
+    if (!kind) return -wasiErrno('EINVAL');
+    const Fs = deps.fs();
+    const stream = Fs?.getStream(fd);
+    if (!Fs || !stream) return -wasiErrno('EBADF');
+    if (stream.sliccKernelFd === undefined) lockPromoters.get(Fs)?.()(stream);
+    if (stream.sliccKernelFd === undefined) return 0;
+    try {
+      deps.flock(stream.sliccKernelFd, kind, kind !== 'unlock' && (op & LOCK_NB) === 0);
+      return 0;
+    } catch (err) {
+      return -errnoOf(err);
+    }
   };
 }

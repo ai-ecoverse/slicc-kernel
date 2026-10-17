@@ -1,0 +1,13 @@
+{
+  "name": "eflocktest",
+  "private": true,
+  "slicc": {
+    "abi": "emscripten",
+    "commands": {
+      "eflocktest": {
+        "glue": "bin/eflocktest",
+        "wasm": "bin/eflocktest.wasm"
+      }
+    }
+  }
+}
