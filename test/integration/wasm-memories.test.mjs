@@ -34,6 +34,6 @@ test('more live processes than V8 has room for wait their turn instead of failin
     Array(20).fill('60000\n')
   );
   const shown = await bash('cat /proc/sys/kernel/slicc_wasm_memories');
-  assert.match(shown.stdout, /^\d+ \d+\n$/);
+  assert.match(shown.stdout, /^\d+ \d+ (default|learned)\n$/);
   assert.ok(Number(shown.stdout.split(' ')[1]) > 0, `a ceiling is known: ${shown.stdout}`);
 });

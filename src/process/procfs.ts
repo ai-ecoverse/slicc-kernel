@@ -26,7 +26,8 @@ export const SYS_TREE: ProcSysTree = {
   kernel: {
     osrelease: `${OS_RELEASE}\n`,
     ostype: 'Linux\n',
-    slicc_wasm_memories: (listing) => `${listing.wasm?.live ?? 0} ${listing.wasm?.ceiling ?? 0}\n`,
+    slicc_wasm_memories: (listing) =>
+      `${listing.wasm?.live ?? 0} ${listing.wasm?.ceiling ?? 0} ${listing.wasm?.source ?? 'none'}\n`,
     slicc_shared_root: (listing) => `${listing.peers ?? 0}\n`,
   },
 };
