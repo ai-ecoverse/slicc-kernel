@@ -45,7 +45,7 @@ export interface LockHost {
   file(fd: number): LockedFile;
   flush(file: LockedFile): void;
   locked(): void;
-  promote(fd: number): void;
+  promote(fd: number, moved?: boolean): void;
   calls: LockCalls;
 }
 
@@ -85,6 +85,7 @@ export function lockImports(host: LockHost): Record<string, WasiFunction> {
     },
     fcntl_lock: (fd: number, cmd: number, at: number) => {
       if (cmd !== F_GETLK && cmd !== F_SETLK && cmd !== F_SETLKW) throw new WasiError('EINVAL');
+      host.promote(fd, true);
       const file = host.file(fd);
       const view = host.mem.view();
       const kind = kindOf(view.getInt16(at, true));

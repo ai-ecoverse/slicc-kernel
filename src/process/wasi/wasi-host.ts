@@ -474,7 +474,7 @@ export class WasiHost {
           else if (file.target.fd !== undefined) this.o.kernel.sys.flush(file.target.fd);
         },
         locked: () => this.fds.holdLocks(),
-        promote: (fd) => this.fds.promote(fd),
+        promote: (fd, moved) => this.fds.promote(fd, moved),
         calls: {
           flock: (fd, kind, wait) =>
             void this.fds.restarting(() =>

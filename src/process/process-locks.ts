@@ -48,6 +48,8 @@ export interface LockDeps {
   flush(): void;
 }
 
+export const lockPromoters = new WeakMap<object, () => (stream: ProcessStream) => void>();
+
 const held = new WeakMap<ProcessFs, true>();
 
 export function lockTarget(stream: ProcessStream): LockTarget | undefined {
@@ -124,6 +126,7 @@ export function recordLock(
     const Fs = deps.fs();
     const buffer = deps.memory();
     const stream = Fs?.getStream(fd);
+    if (stream && Fs && !stream.sliccKernelFile) lockPromoters.get(Fs)?.()(stream);
     const target = stream ? lockTarget(stream) : undefined;
     if (!Fs || !buffer || !stream || !target) return fcntl(fd, cmd, varargs);
     const view = new DataView(buffer);

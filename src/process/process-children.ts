@@ -8,6 +8,7 @@ import type { SyncSabTransport } from '../realm/sync-sab-bridge.ts';
 import type { ProcessFs, ProcessStream } from './kernel-streams.ts';
 import { deviceOfStream } from './process-fork.ts';
 import type { HttpKernel } from './process-http.ts';
+import { lockPromoters } from './process-locks.ts';
 import type { SocketKernel } from './process-sockets.ts';
 import type { Owner } from './realm-user.ts';
 import { wasiErrno } from './wasi-errno.ts';
@@ -257,7 +258,7 @@ function anySelect(
 
 export function createProcessKernel(deps: ProcessKernelDeps): ProcessKernel {
   const { transport, Fs } = deps;
-
+  if (deps.stdioPromoter) lockPromoters.set(Fs, deps.stdioPromoter);
   const reaped = new Map<number, number>();
 
   const call = (req: WasmSyscall, label: string): SyncFsResult =>
