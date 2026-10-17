@@ -116,6 +116,8 @@ export interface KernelFile {
   held?: true;
 
   heldMeta?: HeldMeta;
+
+  identity?: object;
 }
 
 export type HeldMeta = { dir: string; preopen?: string; twin?: number } | DeviceMeta;
@@ -188,6 +190,7 @@ export function openPipe(capacity?: number): { read: OpenFile; write: OpenFile }
       close: () => pipe.closeRead(),
       poll: () => ({ readable: pipe.readReady, writable: false, hangup: pipe.writersGone }),
       changed: (signal) => pipe.changed(signal),
+      identity: pipe,
     }),
     write: new OpenFile({
       write: async (bytes, signal) => {
@@ -200,6 +203,7 @@ export function openPipe(capacity?: number): { read: OpenFile; write: OpenFile }
       close: () => pipe.closeWrite(),
       poll: () => ({ readable: false, writable: pipe.writeReady, hangup: pipe.readersGone }),
       changed: (signal) => pipe.changed(signal),
+      identity: pipe,
     }),
   };
 }

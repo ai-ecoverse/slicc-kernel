@@ -345,12 +345,12 @@ export class WasiFds {
   dup(fd: number, min: number, cloexec: boolean): number {
     const e = this.get(fd);
     let at: number;
-    if (e.type === 'kernel') {
+    if (e.type !== 'file') {
       at = this.kernel.call({ op: 'fd-dup', fd, min: Math.max(3, min) }) as number;
       this.table.set(at, { ...e });
     } else {
-      if (e.type === 'file') e.file.refs++;
-      at = this.install(e.type === 'file' ? e : { ...e }, min);
+      e.file.refs++;
+      at = this.install(e, min);
     }
     if (cloexec) this.setCloexec(at, true);
     this.bump(at);
@@ -378,12 +378,17 @@ export class WasiFds {
     this.bump();
   }
 
-  promoteFiles(): void {
+  promote(fd: number): void {
+    const e = this.get(fd);
+    if (e.type === 'file') this.promoteFiles(e.file.buffer);
+  }
+
+  promoteFiles(only?: FileBuffer): void {
     const promoted = new Map<LocalFile, number>();
 
     const handed = new Set<FileBuffer>();
     for (const [fd, e] of [...this.table]) {
-      if (e.type !== 'file') continue;
+      if (e.type !== 'file' || (only && e.file.buffer !== only)) continue;
       const first = promoted.get(e.file);
       if (first !== undefined) {
         this.kernel.call({ op: 'fd-promote', fd, share: first });

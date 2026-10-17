@@ -1,0 +1,12 @@
+{
+  "name": "flocktest",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "flocktest": {
+        "wasm": "bin/flocktest.wasm"
+      }
+    }
+  }
+}
