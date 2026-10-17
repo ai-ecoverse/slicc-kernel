@@ -123,6 +123,32 @@ async function append(ctx, [path]) {
   await ctx.write(1, `${text(await ctx.fs.readFile(path))}\n`);
 }
 
+const stamp = () => performance.timeOrigin + performance.now();
+
+async function peerwrite(ctx, [dir, n]) {
+  while (!(await ctx.fs.exists(`${dir}/ready`))) await sleep(5);
+  const done = [];
+  for (let i = 1; i <= Number(n); i++) {
+    await ctx.fs.writeFile(`${dir}/n${i}`, '');
+    done.push(stamp());
+    await sleep(10);
+  }
+  await ctx.fs.writeFile(`${dir}/stop`, '');
+  await ctx.write(1, `${JSON.stringify(done)}\n`);
+}
+
+async function peerwatch(ctx, [dir]) {
+  const missed = {};
+  let k = 1;
+  await ctx.fs.writeFile(`${dir}/ready`, '');
+  while (!(await ctx.fs.exists(`${dir}/stop`))) {
+    const at = stamp();
+    if (await ctx.fs.exists(`${dir}/n${k}`)) k++;
+    else missed[k] = at;
+  }
+  await ctx.write(1, `${JSON.stringify({ missed, k })}\n`);
+}
+
 async function exclusive(ctx, [path]) {
   const tries = await Promise.allSettled([
     ctx.open(path, { write: true, create: true, exclusive: true }),
@@ -1419,6 +1445,8 @@ const modes = {
   coherent,
   append,
   exclusive,
+  peerwrite,
+  peerwatch,
   lock,
   nodir,
   spawning,
