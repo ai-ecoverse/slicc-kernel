@@ -1157,6 +1157,12 @@ A threaded WASIX C program for `test/integration/thread-signal.test.mjs` (#520).
 
 **Build:** `WASIX_SYSROOT_28=/path/to/wasix-sysroot ./build.sh`, with `wasixcc` 0.4.7 (`-pthread`) and binaryen's `wasm-opt` on `PATH`. `bin/sigthread.wasm` is 44,788 bytes, sha256 `5781fa39d0a0032cd9b214b71de1f15f589b40e4cecd6862362048dd27f0db56`.
 
+### `inherittest`
+
+A WASIX C program for `test/integration/sig-inherited.test.mjs` (#820), built on wasix-sysroot 2025.9.30-33, whose libc seeds its `sigaction` table from `slicc.sigaction_inherited`. It prints what its own `sigaction(sig, NULL, &old)` reports for `SIGPIPE`, `SIGHUP` and `SIGINT` (`ignored`, `default` or `caught`), then sets `SIGPIPE` back to `SIG_DFL` and reports it again.
+
+**Build:** `WASIX_SYSROOT_33=/path/to/wasix-sysroot ./build.sh`, with `wasixcc` 0.4.7 and binaryen's `wasm-opt` on `PATH`. `bin/inherittest.wasm` is 39,068 bytes, sha256 `c561a52eb27b3c1b6204b997f4eec967b9f4869c6ab13e7915a5a94b326a710e`.
+
 ### `fifotest`
 
 A WASIX C program for `test/integration/fifo.test.mjs` (#896).
