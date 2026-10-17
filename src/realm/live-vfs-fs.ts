@@ -19,7 +19,7 @@ import {
   type SyncFsPosixBridge,
   type SyncFsUsage,
 } from './sync-fs-wire.ts';
-import { syncCallCount } from './sync-sab-bridge.ts';
+import { syncCallCount, syncEpoch } from './sync-sab-bridge.ts';
 
 export type LiveCred = Cred;
 
@@ -42,6 +42,7 @@ interface LiveNodeState {
   watch?: RangedWatch | undefined;
   stat?: SyncFsBridgeStat;
   statAt?: number;
+  seenAt?: number;
 
   data?: Uint8Array;
   len: number;
@@ -386,6 +387,11 @@ function linkedStates(bridgeOf: (node: LiveFsNode) => SyncFsPosixBridge) {
   return { opening, sharedWith, know, idOf, holder };
 }
 
+function freshState(stat?: SyncFsBridgeStat): LiveNodeState {
+  const base = { len: 0, loaded: false, dirty: false, openCount: 0 };
+  return stat ? { stat, statAt: syncCallCount(), seenAt: syncEpoch(), ...base } : base;
+}
+
 function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
   const bridgeOf = (node: LiveFsNode): SyncFsPosixBridge => node.mount.opts.bridge;
   const fileIo = (node: LiveFsNode): SyncFsFileIo => pinnedIo(bridgeOf(node), node.live.handle);
@@ -429,11 +435,6 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
     }
   }
 
-  function freshState(stat?: SyncFsBridgeStat): LiveNodeState {
-    const statAt = syncCallCount();
-    return { ...(stat ? { stat, statAt } : {}), len: 0, loaded: false, dirty: false, openCount: 0 };
-  }
-
   function makeNode(parent: LiveFsNode | null, name: string, st: SyncFsBridgeStat): LiveFsNode {
     const node = Fs.createNode(parent, name, modeFromStat(st, exactIn(parent)), 0);
     node.node_ops = ops.node as LiveNodeOps;
@@ -449,7 +450,7 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
     }
     if (!cachedStat(node.live, Fs.isDir(node.mode), bridgeOf(node).changes)) {
       const st = call(() => bridgeOf(node).lstat(liveNodePath(linked.holder(node))));
-      Object.assign(node.live, { stat: st, statAt: syncCallCount() });
+      Object.assign(node.live, { stat: st, statAt: syncCallCount(), seenAt: syncEpoch() });
       node.mode = modeFromStat(st, exactIn(node));
     }
     return node.live.stat as SyncFsBridgeStat;
@@ -1242,7 +1243,7 @@ function outdated(node: LiveFsNode, view: ChangeView, before: number): boolean {
   if (
     view.foreign() &&
     (node.mode & 0o170000) !== S_IFDIR &&
-    s.statAt !== syncCallCount() &&
+    s.seenAt !== syncEpoch() &&
     s.openCount === 0 &&
     !s.dirty &&
     node !== node.mount.root &&

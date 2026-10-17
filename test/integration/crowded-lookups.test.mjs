@@ -8,6 +8,7 @@ after(() => chrome.close());
 
 const DEEP = '/tmp/cl/a/b/c/d/e/f/g/h';
 const LOOKUPS = 2000;
+const RATIO = 3;
 
 const shared = (page) =>
   page.evaluate(async () => {
@@ -31,23 +32,33 @@ test('a tab that closes stops counting as a peer at once, without waiting for a 
   assert.equal(seen.at(-1), '0', `after the peer's tab closed: ${seen.join(' ')}`);
 });
 
-test('with an idle peer on the root, a program looking up names deep in a tree costs at most a few times what it costs alone (#984)', async (t) => {
+test('with an idle peer on the root, a program looking up names deep in a tree asks the kernel at most a few times as often as alone (#984)', async (t) => {
   const { page, bash } = await booted(chrome, t);
   assert.deepEqual(
     await bash(`rm -rf /tmp/cl && mkdir -p ${DEEP} && : > ${DEEP}/x`, { cwd: '/' }),
     ok()
   );
   const lookups = `n=0; for i in $(seq ${LOOKUPS}); do [ -e ${DEEP}/x ] && n=$((n + 1)); [ -e ${DEEP}/y$i ] || n=$((n + 1)); done; echo "n=$n"`;
-  const timed = async () => {
+  const calls = async () =>
+    Number((await bash('cat /proc/sys/kernel/slicc_fs_calls', { cwd: '/' })).stdout);
+  const counted = async () => {
+    const before = await calls();
     const t0 = Date.now();
     assert.deepEqual(await bash(lookups, { cwd: '/' }), ok(`n=${2 * LOOKUPS}\n`));
-    return Date.now() - t0;
+    const ms = Date.now() - t0;
+    return { calls: (await calls()) - before, ms };
   };
-  const alone = await timed();
+  const alone = await counted();
   await page.evaluate(() => window.secondKernel({}));
   assert.equal(await shared(page), '1');
-  const peered = await timed();
-  assert.ok(peered < 4 * alone, `alone ${alone} ms, with a peer ${peered} ms`);
+  const peered = await counted();
+  console.log(
+    `kernel calls for ${2 * LOOKUPS} lookups: alone ${alone.calls} in ${alone.ms} ms, with a peer ${peered.calls} in ${peered.ms} ms`
+  );
+  assert.ok(
+    peered.calls <= RATIO * alone.calls,
+    `alone ${alone.calls} calls, with a peer ${peered.calls}`
+  );
 });
 
 test('a directory another kernel renames while a program keeps it cached shows the new layout at the program’s next lookup (#984, #959)', async (t) => {
@@ -79,3 +90,39 @@ test('a directory another kernel renames while a program keeps it cached shows t
   assert.deepEqual(r[1], ok());
   assert.deepEqual(r[0], ok('old new old\n'));
 });
+
+const replaced = (dir, wait) =>
+  `rm -rf ${dir} && mkdir -p ${dir}/t && echo new > ${dir}/t/x && echo plain > ${dir}/n && cd ${dir} && : > ready && [ -f n ] && ${wait} && cd n && read -r v < x && echo "$v"`;
+const replace = (dir) =>
+  `while [ ! -e ${dir}/ready ]; do sleep 0.05; done; sleep 0.3; cd ${dir} && rm n && ln -s t n && echo x > done`;
+
+for (const [n, what, wait] of [
+  [
+    1,
+    'only reads the clock',
+    'end=$(( ${EPOCHREALTIME/./} + 1500000 )); while (( ${EPOCHREALTIME/./} < end )); do :; done',
+  ],
+  [2, 'sleeps', 'sleep 1.5'],
+  [
+    3,
+    'reads the file the other kernel wrote last',
+    'until read -r _ 2>/dev/null < done; do :; done',
+  ],
+]) {
+  test(`a name another kernel replaces by a symlink resolves through the link once the program ${what} (#984, #959)`, async (t) => {
+    const { page } = await booted(chrome, t);
+    const [reader, writer] = await page.evaluate(
+      async (r, w) => {
+        await window.secondKernel({});
+        return Promise.all([
+          window.kernel.run(['bash', '-c', r], { cwd: '/' }),
+          window.second.run(['bash', '-c', w], { cwd: '/' }),
+        ]);
+      },
+      replaced(`/tmp/cs${n}`, wait),
+      replace(`/tmp/cs${n}`)
+    );
+    assert.deepEqual(writer, ok());
+    assert.deepEqual(reader, ok('new\n'));
+  });
+}
