@@ -433,9 +433,11 @@ export class LockService implements KernelLocks {
 
 type ElectingLocks = LockServiceOptions['locks'];
 
-export function kernelLocks(root: string | undefined): KernelLocks {
+export const CROSS_KERNEL_LOCKS = false;
+
+export function kernelLocks(root: string | undefined, across = CROSS_KERNEL_LOCKS): KernelLocks {
   const locks = (globalThis.navigator as { locks?: ElectingLocks } | undefined)?.locks;
-  if (root === undefined || !locks || typeof BroadcastChannel !== 'function')
+  if (!across || root === undefined || !locks || typeof BroadcastChannel !== 'function')
     return new LockTable();
   return new LockService({ root, locks });
 }

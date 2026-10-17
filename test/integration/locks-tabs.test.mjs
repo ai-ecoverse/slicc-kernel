@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import { after, test } from 'node:test';
+import { CROSS_KERNEL_LOCKS } from '../../src/kernel/lock-service.ts';
 import { launch } from './chrome.mjs';
 import { booted, installPackage } from './kernel.mjs';
+
+const ACROSS = {
+  skip: !CROSS_KERNEL_LOCKS && 'cross-kernel locks are off (CROSS_KERNEL_LOCKS, #949)',
+};
+const PER_KERNEL = { skip: CROSS_KERNEL_LOCKS && 'cross-kernel locks are on' };
 
 const PYTHON_RUNTIME = { skip: /^lib\/libpython[^/]*\.a$/ };
 
@@ -75,6 +81,7 @@ async function setup(t) {
 }
 
 test('a record lock one tab holds keeps another tab out, and sqlite3 there finds the database locked (#675)', {
+  ...ACROSS,
   timeout: 180_000,
 }, async (t) => {
   const { first, second } = await setup(t);
@@ -92,6 +99,7 @@ test('a record lock one tab holds keeps another tab out, and sqlite3 there finds
 });
 
 test('flock and a rename across tabs: flock -n is EWOULDBLOCK, and a lock follows its file to its new name (#675)', {
+  ...ACROSS,
   timeout: 180_000,
 }, async (t) => {
   const { first, second } = await setup(t);
@@ -114,6 +122,7 @@ test('flock and a rename across tabs: flock -n is EWOULDBLOCK, and a lock follow
 });
 
 test("a tab's wait ends when the holding tab closes, and survives the leader closing while a third tab holds the lock (#675)", {
+  ...ACROSS,
   timeout: 240_000,
 }, async (t) => {
   const { first, second } = await setup(t);
@@ -138,6 +147,7 @@ test("a tab's wait ends when the holding tab closes, and survives the leader clo
 });
 
 test('a wait that would close a cycle across tabs is EDEADLK (#675)', {
+  ...ACROSS,
   timeout: 180_000,
 }, async (t) => {
   const { first, second } = await setup(t);
@@ -169,6 +179,7 @@ test('a wait that would close a cycle across tabs is EDEADLK (#675)', {
 });
 
 test('a lock call from a tab that is not the leader takes one BroadcastChannel round trip, with the leader tab in the background (#675)', {
+  ...ACROSS,
   timeout: 180_000,
 }, async (t) => {
   const { first, second } = await setup(t);
@@ -189,4 +200,18 @@ test('a lock call from a tab that is not the leader takes one BroadcastChannel r
     `lock call: leader ${leader.stdout.trim()}, non-leader with the leader tab in the background ${follower.stdout.trim()}`
   );
   assert.match(follower.stdout, /^per-call-ms \d+\.\d{3}\n$/);
+});
+
+test('with cross-kernel locks off, each tab keeps its own lock table: both tabs get an exclusive lock on one file, as on 1.118 (#675, #949 fallback)', {
+  ...PER_KERNEL,
+  timeout: 180_000,
+}, async (t) => {
+  const { first, second } = await setup(t);
+  await first.sh('rm -f p.*');
+  const holder = first.sh(HOLD('p.lock', 'p'));
+  await heldBy(first.sh, 'p');
+  assert.equal((await second.sh(TRY('p.lock'))).stdout, 'got\n');
+  assert.equal((await first.sh(TRY('p.lock'))).stdout, 'busy EAGAIN\n');
+  await first.sh('touch p.go');
+  assert.equal((await holder).stdout, 'released\n');
 });
