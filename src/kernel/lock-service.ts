@@ -56,6 +56,7 @@ export interface KernelLocks {
     blocking: () => AbortSignal
   ): Promise<void>;
   holds(owner: number): boolean;
+  shared?(): boolean;
   dropFile(key: string, owner: number): void;
   release(pid: number): void;
   lock(pid: number, path: string, exclusive: boolean, fd: number): boolean;
@@ -79,6 +80,7 @@ export interface LockServiceOptions {
     ): Promise<unknown>;
   };
   channel?: (name: string) => BroadcastChannel;
+  peers?: { joined(): Promise<unknown>; crowded(): boolean };
 }
 
 export class LockService implements KernelLocks {
@@ -115,12 +117,23 @@ export class LockService implements KernelLocks {
       if (isMessage(data)) void this.receive(data);
     };
     void this.locks.request(this.aliveOf(this.kernel), () => new Promise<void>(() => {}));
-    this.role = this.elect();
+    const peers = options.peers;
+    this.role = peers
+      ? Promise.all([this.elect(), peers.joined()]).then(() => undefined)
+      : this.elect();
+    this.peers = options.peers;
     this.flocks = {
       set: (key, owner, kind) => this.flockSet(key, owner, kind),
       wait: (key, owner, kind, blocking) => this.flockWait(key, owner, kind, blocking),
       drop: (owner) => this.flockDrop(owner),
     };
+  }
+
+  private readonly peers: LockServiceOptions['peers'];
+
+  shared(): boolean {
+    if (!this.leader || this.ownerOf.size > 0 || this.tokens.size > 0) return true;
+    return this.peers?.crowded() === true;
   }
 
   private aliveOf(kernel: string): string {
@@ -433,11 +446,14 @@ export class LockService implements KernelLocks {
 
 type ElectingLocks = LockServiceOptions['locks'];
 
-export function kernelLocks(root: string | undefined): KernelLocks {
+export function kernelLocks(
+  root: string | undefined,
+  peers?: LockServiceOptions['peers']
+): KernelLocks {
   const locks = (globalThis.navigator as { locks?: ElectingLocks } | undefined)?.locks;
   if (root === undefined || !locks || typeof BroadcastChannel !== 'function')
     return new LockTable();
-  return new LockService({ root, locks });
+  return new LockService({ root, locks, ...(peers ? { peers } : {}) });
 }
 
 const ASK_OPS: ReadonlySet<string> = new Set([
