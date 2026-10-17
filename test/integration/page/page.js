@@ -59,12 +59,20 @@ async function file(path, create = false) {
   return (await walk(parts.join('/'), create)).getFileHandle(name, { create });
 }
 
+function same(have, want) {
+  if (have.length !== want.length) return false;
+  for (let i = 0; i < have.length; i++) if (have[i] !== want[i]) return false;
+  return true;
+}
+
 async function install() {
   for (const [dir, names] of Object.entries(packages)) {
     for (const name of names) {
       const source = dir.replace(/^node_modules\/(?!@)/, 'fixtures/');
       const bytes = await fetchBytes(`/${source}${name}`);
-      const writable = await (await file(dir + name, true)).createWritable();
+      const handle = await file(dir + name, true);
+      if (same(new Uint8Array(await (await handle.getFile()).arrayBuffer()), bytes)) continue;
+      const writable = await handle.createWritable();
       await writable.write(bytes);
       await writable.close();
     }
