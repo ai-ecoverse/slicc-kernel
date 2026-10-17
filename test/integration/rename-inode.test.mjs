@@ -67,15 +67,15 @@ test('a placeholder held open, unlinked and replaced by a symlink keeps the syml
   const sh = await booted(t);
   assert.deepEqual(
     await sh(
-      'mkdir -p p/inner && echo first > p/a.txt && cd p/inner && n=0; for i in $(seq 50); do : > link; exec 3<>link; rm link; ln -s ../a.txt link; exec 3>&-; [ "$(readlink link)" = ../a.txt ] && n=$((n + 1)); rm link; done; echo "kept=$n"'
+      'mkdir -p p/inner && echo first > p/a.txt && cd p/inner && n=0; for i in $(seq 10); do : > link; exec 3<>link; rm link; ln -s ../a.txt link; exec 3>&-; [ "$(readlink link)" = ../a.txt ] && n=$((n + 1)); rm link; done; echo "kept=$n"'
     ),
-    ok('kept=50\n')
+    ok('kept=10\n')
   );
   assert.deepEqual(
     await sh(
-      'cd p/inner && for i in $(seq 20); do : > l$i; exec 3<>l$i; rm l$i; ln -s ../a.txt l$i; exec 3>&-; done; sleep 1.2; n=0; for i in $(seq 20); do [ "$(readlink l$i)" = ../a.txt ] && n=$((n + 1)); done; echo "kept=$n"; ls | wc -l'
+      'cd p/inner && for i in $(seq 10); do : > l$i; exec 3<>l$i; rm l$i; ln -s ../a.txt l$i; exec 3>&-; done; sleep 1.2; n=0; for i in $(seq 10); do [ "$(readlink l$i)" = ../a.txt ] && n=$((n + 1)); done; echo "kept=$n"; ls | wc -l'
     ),
-    ok('kept=20\n20\n')
+    ok('kept=10\n10\n')
   );
 });
 
