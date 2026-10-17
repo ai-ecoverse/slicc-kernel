@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
-import { covers, releaseNotes } from '../../tools/cert-review/lib.mjs';
+import * as lib from '../../tools/cert-review/lib.mjs';
+
+const { covers, releaseNotes } = lib;
 
 const sha = 'f59beab296b367cf84c28d0343d656b12fe9d3ebdc5045d0106376bd904c3f68';
 const line = (s = sha) =>
@@ -13,6 +15,36 @@ test('the certified line covers every version since the last one npm serves, so 
   assert.equal(covers('1.110.1', tags, ['1.103.4', '1.106.0', '1.110.0', '1.110.1']), '1.110.1');
   assert.equal(covers('1.106.0', tags, ['1.103.4', '1.106.0']), '1.104.0–1.106.0');
   assert.equal(covers('1.0.0', ['v1.0.0'], []), '1.0.0');
+});
+
+test('a pull request counts as certified by its cert-review at merge time: the newest finished verdict at or before the merge; a re-review still pending at the merge, or one that ends after it, changes nothing (#928)', () => {
+  assert.equal(typeof lib.statusAt, 'function', 'lib.mjs picks the status at merge time');
+  const { statusAt } = lib;
+  const st = (state, created_at, context = 'cert-review') => ({ state, created_at, context });
+  const merged = '2026-10-17T02:15:10Z';
+  const at928 = [
+    st('pending', '2026-10-17T02:08:19Z'),
+    st('success', '2026-10-17T02:04:08Z'),
+    st('pending', '2026-10-17T01:30:31Z'),
+    st('failure', '2026-10-17T01:30:09Z'),
+  ];
+  assert.equal(statusAt(at928, ['cert-review'], merged).state, 'success');
+  assert.equal(statusAt(at928.slice(2), ['cert-review'], merged).state, 'failure');
+  assert.equal(statusAt(at928.slice(2, 3), ['cert-review'], merged).state, 'pending');
+  const failedAgain = [st('failure', '2026-10-17T02:10:00Z'), ...at928];
+  assert.equal(statusAt(failedAgain, ['cert-review'], merged).state, 'failure');
+  const finished = [st('success', '2026-10-17T02:04:08Z'), st('pending', '2026-10-17T01:30:31Z')];
+  assert.equal(statusAt(finished, ['cert-review'], merged).state, 'success');
+  const late = [st('failure', '2026-10-17T02:40:00Z'), ...finished];
+  assert.equal(statusAt(late, ['cert-review'], merged).state, 'success');
+  assert.equal(statusAt([...finished].reverse(), ['cert-review'], merged).state, 'success');
+  assert.equal(statusAt(late, ['cert-review'], undefined).state, 'failure');
+  const old = [st('success', '2026-10-01T00:00:00Z', 'cert-review-pr')];
+  assert.equal(statusAt(old, ['cert-review', 'cert-review-pr'], merged).context, 'cert-review-pr');
+  assert.equal(
+    statusAt([st('success', '2026-10-18T00:00:00Z')], ['cert-review'], merged),
+    undefined
+  );
 });
 
 test("the verify job writes homescoop's certified line into the release notes once: an identical line is left alone, another sha is a supply-chain alert", () => {
