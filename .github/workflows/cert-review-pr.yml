@@ -94,7 +94,7 @@ jobs:
           LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
           GUARD: ${{ needs.guard.outputs.status }}
         run: |
-          node tools/cert-review/pr.mjs plan --repo "$GITHUB_REPOSITORY" --pr "$PR" --head "$HEAD_SHA" \
+          tools/cert-review/gate.sh 'pr plan' node tools/cert-review/pr.mjs plan --repo "$GITHUB_REPOSITORY" --pr "$PR" --head "$HEAD_SHA" \
             --action "$ACTION" --label "$LABEL" --labels "$LABELS" --run "$GITHUB_RUN_ID" --context "$CERT_CONTEXT" \
             --guard "$GUARD" --approval cert-review-approved
 
@@ -160,7 +160,7 @@ jobs:
           REF: ${{ matrix.side == 'candidate' && needs.plan.outputs.commit || needs.plan.outputs.parent }}
         run: |
           set -euo pipefail
-          node tools/cert-review/pack.mjs --version "$VERSION" --ref "$REF" --out "$RUNNER_TEMP/pack"
+          tools/cert-review/gate.sh pack node tools/cert-review/pack.mjs --version "$VERSION" --ref "$REF" --out "$RUNNER_TEMP/pack"
           sha=$(cut -d' ' -f1 "$RUNNER_TEMP"/pack/*.tgz.sha256)
           if [ "$SIDE" = candidate ]; then echo "candidate=$sha" >> "$GITHUB_OUTPUT"; fi
 
@@ -208,7 +208,7 @@ jobs:
           VERSION: ${{ needs.plan.outputs.version }}
           PREV: ${{ needs.plan.outputs.prev }}
         run: |
-          node tools/cert-review/same.mjs --candidate "$RUNNER_TEMP/packs/ai-ecoverse-slicc-kernel-$VERSION.tgz" \
+          tools/cert-review/gate.sh same node tools/cert-review/same.mjs --candidate "$RUNNER_TEMP/packs/ai-ecoverse-slicc-kernel-$VERSION.tgz" \
             --base "$RUNNER_TEMP/packs/ai-ecoverse-slicc-kernel-$PREV.tgz" --candidate-version "$VERSION" --base-version "$PREV" \
             --out "$RUNNER_TEMP/same/same.json"
 
@@ -218,7 +218,7 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          node tools/cert-review/pr.mjs same --repo "$GITHUB_REPOSITORY" --pr "$PR" --head "$HEAD_SHA" \
+          tools/cert-review/gate.sh 'pr same' node tools/cert-review/pr.mjs same --repo "$GITHUB_REPOSITORY" --pr "$PR" --head "$HEAD_SHA" \
             --run "$GITHUB_RUN_ID" --context "$CERT_CONTEXT" --evidence "$RUNNER_TEMP/same/same.json"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -261,7 +261,7 @@ jobs:
           HEAD_SHA: ${{ needs.plan.outputs.commit }}
           PR: ${{ github.event.pull_request.number }}
         run: |
-          node tools/cert-review/delta.mjs --repo "$GITHUB_REPOSITORY" --prev "$PREV" --version "$VERSION" \
+          tools/cert-review/gate.sh delta node tools/cert-review/delta.mjs --repo "$GITHUB_REPOSITORY" --prev "$PREV" --version "$VERSION" \
             --head "$HEAD_SHA" --pr "$PR" --only --out "$RUNNER_TEMP/evidence/delta.json"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -327,7 +327,7 @@ jobs:
 
       - name: The suite on the packed build (no secrets in this step)
         run: |
-          node tools/cert-review/suite.mjs --tree "$TREE" --tgz "$RUNNER_TEMP/tgz/ai-ecoverse-slicc-kernel-$TAG.tgz" \
+          tools/cert-review/gate.sh --either suite node tools/cert-review/suite.mjs --tree "$TREE" --tgz "$RUNNER_TEMP/tgz/ai-ecoverse-slicc-kernel-$TAG.tgz" \
             --out "$RUNNER_TEMP/evidence/$WHICH"
 
       - name: The pull request's tests on main's tree and main's build, the NEGATIVE (no secrets in this step)
@@ -339,8 +339,8 @@ jobs:
           if [ -n "$files" ]; then
             git -C "$TREE" diff --binary "$PARENT" "$COMMIT" -- test/ > "$RUNNER_TEMP/tests.patch"
             if [ -s "$RUNNER_TEMP/tests.patch" ]; then git -C "$TREE" apply "$RUNNER_TEMP/tests.patch"; fi
-            node tools/cert-review/suite.mjs --tree "$TREE" --tgz "$RUNNER_TEMP/tgz/ai-ecoverse-slicc-kernel-$PREV.tgz" \
-              --files "$files" --out "$ev/prev" || true
+            tools/cert-review/gate.sh --evidence suite node tools/cert-review/suite.mjs --tree "$TREE" --tgz "$RUNNER_TEMP/tgz/ai-ecoverse-slicc-kernel-$PREV.tgz" \
+              --files "$files" --out "$ev/prev"
           else
             printf '{"files":[],"exit":0,"pass":0,"fail":0,"skip":0,"results":[]}\n' > "$ev/prev.json"
           fi
@@ -389,7 +389,7 @@ jobs:
           LATEST: ${{ needs.plan.outputs.latest }}
         run: |
           mkdir -p "$RUNNER_TEMP/evidence"
-          node tools/cert-review/compat.mjs --repo "$GITHUB_REPOSITORY" --version "$VERSION" --commit "$COMMIT" \
+          tools/cert-review/gate.sh --either compat node tools/cert-review/compat.mjs --repo "$GITHUB_REPOSITORY" --version "$VERSION" --commit "$COMMIT" \
             --ref main --run "$GITHUB_RUN_ID" --artifact "kernel-tgz-$VERSION" --sha256 "$SHA256" \
             --shards 10 --dispatch --rerun --wait 150 --reference "$LATEST" --out "$RUNNER_TEMP/evidence/compat.json"
 
@@ -457,7 +457,7 @@ jobs:
           mkdir -p "$ev/logs" "$RUNNER_TEMP/cert-review"
           mv "$ev"/*.log "$ev/logs/" 2> /dev/null || true
           cp tools/cert-review/known.json "$ev/known.json"
-          node tools/cert-review/findings.mjs --delta "$ev/delta.json" --prev "$ev/prev.json" \
+          tools/cert-review/gate.sh findings node tools/cert-review/findings.mjs --delta "$ev/delta.json" --prev "$ev/prev.json" \
             --release "$ev/release.json" --base "$ev/base.json" --compat "$ev/compat.json" --out "$ev/findings.json"
           {
             echo 'prompt<<CERT_PROMPT_END'
@@ -567,13 +567,14 @@ jobs:
           mkdir -p "$RUNNER_TEMP/cert-review" "$RUNNER_TEMP/pack"
           findings="$RUNNER_TEMP/cert-review/findings.json"
           tgz=$(find "$RUNNER_TEMP/pack" -maxdepth 1 -name '*.tgz' | head -1)
-          if node tools/cert-review/record.mjs --version "$VERSION" --review "$RUNNER_TEMP/cert-review" \
+          if tools/cert-review/gate.sh record node tools/cert-review/record.mjs --version "$VERSION" --review "$RUNNER_TEMP/cert-review" \
             --out "$RUNNER_TEMP/record" --run "$RUN_URL" --repo "$GH_REPO" --commit "$PLAN_COMMIT" \
             --pr "$PR" --head "$HEAD_SHA" --tarball "$tgz" --sha256 "$SHA256" --review-result "$REVIEW" --jobs "$JOBS" \
             --findings "$findings"; then
             echo "conclusion=success" >> "$GITHUB_OUTPUT"
           else
             state=$(node -p 'require(process.argv[1]).state || "failure"' "$RUNNER_TEMP/record/record.json" 2> /dev/null || echo failure)
+            [ "$state" != success ] || state=failure
             echo "conclusion=$state" >> "$GITHUB_OUTPUT"
           fi
           commit=$(node -p 'require(process.argv[1]).commit || ""' "$RUNNER_TEMP/record/record.json")
@@ -667,7 +668,7 @@ jobs:
           HEAD_SHA: ${{ github.event.merge_group.head_sha }}
           GUARD: ${{ needs.guard.outputs.status }}
         run: |
-          node tools/cert-review/pr.mjs lookup --repo "$GITHUB_REPOSITORY" --base "$BASE_SHA" --head "$HEAD_SHA" \
+          tools/cert-review/gate.sh 'pr lookup' node tools/cert-review/pr.mjs lookup --repo "$GITHUB_REPOSITORY" --base "$BASE_SHA" --head "$HEAD_SHA" \
             --run "$GITHUB_RUN_ID" --context "$CERT_CONTEXT" --guard "$GUARD" --approval cert-review-approved
 
       - name: A lookup that failed still leaves a status, so the required check never waits forever

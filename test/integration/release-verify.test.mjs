@@ -96,7 +96,7 @@ test('release.yml verifies each published tag on npm after publish, code only, a
   assert.doesNotMatch(job, /id-token|secrets\./);
   assert.match(
     job,
-    /for tag in \$TAGS; do\n {12}node tools\/cert-review\/verify\.mjs --repo "\$GITHUB_REPOSITORY" --version "\$\{tag#v\}" --run "\$GITHUB_RUN_ID" --wait 3600 \|\| status=1\n/
+    /for tag in \$TAGS; do\n {12}tools\/cert-review\/gate\.sh verify node tools\/cert-review\/verify\.mjs --repo "\$GITHUB_REPOSITORY" --version "\$\{tag#v\}" --run "\$GITHUB_RUN_ID" --wait 3600 \|\| status=1\n/
   );
   assert.equal(
     existsSync(new URL('../../.github/workflows/cert-review.yml', import.meta.url)),

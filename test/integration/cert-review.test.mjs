@@ -927,6 +927,11 @@ test('a suite runner stopped with SIGTERM still writes its partial results, its 
   suite.kill('SIGTERM');
   assert.deepEqual(await exited, [143, null]);
   assert.match(said, /^suite: FAIL exit signal SIGTERM, pass 1, /m);
+  assert.doesNotMatch(
+    said,
+    /first ran/,
+    "the tests' own output goes to the log, never to suite's stdout, where the gate reads the verdict"
+  );
   const summary = JSON.parse(await readFile(`${out}.json`, 'utf8'));
   assert.equal(summary.exit, 'signal SIGTERM');
   assert.deepEqual(

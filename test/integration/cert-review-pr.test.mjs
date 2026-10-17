@@ -737,7 +737,7 @@ test("the NEGATIVE runs the pull request's test/** on main's tree and build: a t
   );
   assert.match(
     jobs.suite,
-    /if: \$\{\{ !cancelled\(\) && matrix\.which == 'base' \}\}\n {8}run: \|[\s\S]*?git -C "\$TREE" diff --binary "\$PARENT" "\$COMMIT" -- test\/ > "\$RUNNER_TEMP\/tests\.patch"\n {12}if \[ -s "\$RUNNER_TEMP\/tests\.patch" \]; then git -C "\$TREE" apply "\$RUNNER_TEMP\/tests\.patch"; fi\n {12}node tools\/cert-review\/suite\.mjs --tree "\$TREE" --tgz "\$RUNNER_TEMP\/tgz\/ai-ecoverse-slicc-kernel-\$PREV\.tgz"/
+    /if: \$\{\{ !cancelled\(\) && matrix\.which == 'base' \}\}\n {8}run: \|[\s\S]*?git -C "\$TREE" diff --binary "\$PARENT" "\$COMMIT" -- test\/ > "\$RUNNER_TEMP\/tests\.patch"\n {12}if \[ -s "\$RUNNER_TEMP\/tests\.patch" \]; then git -C "\$TREE" apply "\$RUNNER_TEMP\/tests\.patch"; fi\n {12}tools\/cert-review\/gate\.sh --evidence suite node tools\/cert-review\/suite\.mjs --tree "\$TREE" --tgz "\$RUNNER_TEMP\/tgz\/ai-ecoverse-slicc-kernel-\$PREV\.tgz"/
   );
 });
 

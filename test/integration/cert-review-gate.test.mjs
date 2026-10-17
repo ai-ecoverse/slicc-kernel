@@ -230,3 +230,163 @@ test('compat.mjs says FAIL when no kernel-compat run turned up, and delta, pack,
     assert.match(r.out, line);
   }
 });
+
+const repo = fileURLToPath(new URL('../../', import.meta.url));
+
+async function steps(file) {
+  const text = await readFile(new URL(`../../.github/workflows/${file}`, import.meta.url), 'utf8');
+  const out = [];
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^( *)run: \|$/.exec(lines[i]);
+    if (!m) continue;
+    const body = [];
+    for (i++; i < lines.length && (lines[i] === '' || lines[i].startsWith(`${m[1]}  `)); i++)
+      body.push(lines[i].slice(m[1].length + 2));
+    i--;
+    out.push(body.join('\n'));
+  }
+  return out;
+}
+
+const gated =
+  /tools\/cert-review\/gate\.sh (?:--either |--evidence )?('[a-z ]+'|[a-z]+) node tools\/cert-review\/([a-z]+)\.mjs/g;
+
+test('the workflows call every cert-review tool through gate.sh under its own name, and never call one bare', async () => {
+  const seen = [];
+  for (const file of ['cert-review-pr.yml', 'release.yml']) {
+    for (const script of await steps(file)) {
+      const bare = script
+        .replace(gated, '')
+        .match(/(?:^|[\s;(])node tools\/cert-review\/(?!prompt\.mjs)[a-z]+\.mjs/);
+      assert.equal(bare, null, `${file}: a bare tool call in\n${script}`);
+      for (const [, name, tool] of script.matchAll(gated)) {
+        const n = name.replace(/'/g, '');
+        assert.equal(n.split(' ')[0] === 'pr' ? 'pr' : n, tool, `${file}: ${n} gates ${tool}.mjs`);
+        seen.push(n);
+      }
+    }
+  }
+  assert.deepEqual(seen.sort(), [
+    'compat',
+    'delta',
+    'findings',
+    'pack',
+    'pr lookup',
+    'pr plan',
+    'pr same',
+    'record',
+    'same',
+    'suite',
+    'suite',
+    'verify',
+  ]);
+});
+
+test("each gated workflow step fails when its tool is replaced by `true`, and record's conclusion is failure even beside an old record.json that says success", async (t) => {
+  const dir = await scratch(t);
+  const bin = join(dir, 'bin');
+  await mkdir(bin);
+  await writeFile(join(bin, 'git'), '#!/bin/sh\nexit 0\n');
+  await chmod(join(bin, 'git'), 0o755);
+  let n = 0;
+  const step = async (script, setup = async () => {}) => {
+    const temp = join(dir, `t${n++}`);
+    await mkdir(join(temp, 'evidence'), { recursive: true });
+    await setup(temp);
+    const output = join(temp, 'output');
+    await writeFile(output, '');
+    const r = await new Promise((done) => {
+      const child = spawn('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', script], {
+        cwd: repo,
+        env: {
+          PATH: `${bin}:${process.env.PATH}`,
+          RUNNER_TEMP: temp,
+          GITHUB_OUTPUT: output,
+          GITHUB_STEP_SUMMARY: join(temp, 'summary'),
+          GITHUB_ENV: join(temp, 'env'),
+          TREE: temp,
+          TAGS: 'v1.0.0',
+          ...Object.fromEntries(
+            [
+              'VERSION',
+              'PREV',
+              'REF',
+              'SIDE',
+              'PR',
+              'HEAD_SHA',
+              'BASE_SHA',
+              'ACTION',
+              'LABEL',
+              'LABELS',
+              'GUARD',
+              'COMMIT',
+              'PARENT',
+              'WHICH',
+              'TAG',
+              'SHA256',
+              'LATEST',
+              'GH_TOKEN',
+              'GITHUB_REPOSITORY',
+              'GITHUB_RUN_ID',
+              'CERT_CONTEXT',
+              'RUN_URL',
+              'GH_REPO',
+              'PLAN_COMMIT',
+              'REVIEW',
+              'JOBS',
+            ].map((k) => [k, 'x'])
+          ),
+        },
+      });
+      let out = '';
+      child.stdout.on('data', (d) => {
+        out += d;
+      });
+      child.stderr.on('data', (d) => {
+        out += d;
+      });
+      child.on('close', (code) => done({ code, out }));
+    });
+    return { ...r, output: await readFile(output, 'utf8') };
+  };
+  const silenced = (script) =>
+    script.replace(/node tools\/cert-review\/([a-z]+)\.mjs/g, (m, tool) =>
+      tool === 'prompt' ? m : 'true'
+    );
+  let count = 0;
+  for (const file of ['cert-review-pr.yml', 'release.yml']) {
+    for (const script of await steps(file)) {
+      const names = [...script.matchAll(gated)].map(([, name]) => name.replace(/'/g, ''));
+      if (names.length === 0) continue;
+      count++;
+      const r = await step(silenced(script), (temp) =>
+        writeFile(
+          join(temp, 'evidence', 'delta.json'),
+          JSON.stringify({ files: ['test/integration/a.test.mjs'] })
+        )
+      );
+      const record = names.includes('record');
+      if (record) assert.match(r.output, /^conclusion=failure$/m, r.out);
+      else
+        assert.notEqual(
+          r.code,
+          0,
+          `${file} ${names}: a silent tool passed its step\n${script}\n${r.out}`
+        );
+      assert.match(r.out, /printed no PASS or FAIL verdict/, `${file} ${names}`);
+      if (record) {
+        const old = await step(silenced(script), async (temp) => {
+          await mkdir(join(temp, 'record'));
+          await writeFile(
+            join(temp, 'record', 'record.json'),
+            JSON.stringify({ state: 'success', commit: 'c' })
+          );
+          await writeFile(join(temp, 'record', 'line.txt'), 'certified x\n');
+        });
+        assert.match(old.output, /^conclusion=failure$/m, old.out);
+      }
+    }
+  }
+  assert.equal(count, 12);
+});
