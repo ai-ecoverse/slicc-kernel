@@ -1242,7 +1242,6 @@ function outdated(node: LiveFsNode, view: ChangeView, before: number): boolean {
   const s = node.live;
   if (
     view.foreign() &&
-    (node.mode & 0o170000) !== S_IFDIR &&
     s.seenAt !== syncEpoch() &&
     s.openCount === 0 &&
     !s.dirty &&
