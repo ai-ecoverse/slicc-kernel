@@ -61,3 +61,20 @@ test('a file another tab creates just after this tab found the name missing read
   assert.deepEqual(await there('printf made > /home/n'), ok());
   assert.deepEqual(await bash('cat /home/n'), ok('made'));
 });
+
+test('in the page, a write shows its size at once to the next stat, and an append loop counts up (#774)', async (t) => {
+  const { bash } = await booted(chrome, t);
+  assert.deepEqual(
+    await bash(
+      'printf abc > /home/s && stat -c %s /home/s && printf de >> /home/s && stat -c %s /home/s'
+    ),
+    ok('3\n5\n')
+  );
+  const counts = Array.from({ length: 25 }, (_, i) => `${i + 1}\n`).join('');
+  assert.deepEqual(
+    await bash(
+      'rm -f /home/a; for i in $(seq 25); do printf x >> /home/a; stat -c %s /home/a; done'
+    ),
+    ok(counts)
+  );
+});
