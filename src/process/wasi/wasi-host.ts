@@ -405,6 +405,7 @@ export class WasiHost {
         const { mkfifo } = this.o.fs;
         if (!mkfifo) return E.NOSYS;
         const raw = mem.string(p, l);
+        if (raw === '') throw new WasiError('ENOENT');
         const path =
           dirfd === AT_FDCWD && !raw.startsWith('/')
             ? fds.resolve(3, `${this.cwd}/${raw}`)
