@@ -651,7 +651,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ github.event.merge_group.base_sha }}
+          ref: ${{ github.event.merge_group.base_ref }}
           sparse-checkout: tools/cert-review
           persist-credentials: false
 
