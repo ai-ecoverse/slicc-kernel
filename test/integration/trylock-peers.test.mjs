@@ -55,3 +55,37 @@ test("an imports module's tryLock excludes across two kernels on one root, and c
   }
   assert.equal(freed.at(-1), '0', `after the holder's tab closed: ${freed.join(' ')}`);
 });
+
+test('a whole-file lock taken while a kernel was alone still excludes after a peer joins, and one taken while shared after the peer leaves (#983)', async (t) => {
+  const { page, bash } = await booted(chrome, t);
+  assert.deepEqual(await bash('rm -rf /tmp/lj && mkdir -p /tmp/lj', { cwd: '/' }), ok());
+  const holdHere = (path) =>
+    page.evaluate((p) => {
+      window.holding = window.kernel.run(['locktry', 'hold', p], { cwd: '/' });
+      return true;
+    }, path);
+  const tryHere = (path) =>
+    page.evaluate(
+      (p) => window.kernel.run(['locktry', 'try', p], { cwd: '/' }).then((r) => r.status),
+      path
+    );
+  await holdHere('/tmp/lj/a');
+  assert.equal(await read(page, 'tmp/lj/a.hold'), 'held');
+  await page.evaluate(() => window.secondKernel({}));
+  assert.equal(await tryHere('/tmp/lj/a'), 0);
+  assert.equal(await read(page, 'tmp/lj/a.try'), '6');
+  await page.evaluate(() => window.opfs.write('tmp/lj/a.release', ''));
+  await page.evaluate(() => window.holding);
+  const other = await page.tab();
+  await other.goto('/');
+  await other.until(() => typeof window.boot === 'function');
+  await other.evaluate(() => window.boot({}));
+  await holdHere('/tmp/lj/b');
+  assert.equal(await read(page, 'tmp/lj/b.hold'), 'held');
+  await other.close();
+  await new Promise((r) => setTimeout(r, 2500));
+  assert.equal(await tryHere('/tmp/lj/b'), 0);
+  assert.equal(await read(page, 'tmp/lj/b.try'), '6');
+  await page.evaluate(() => window.opfs.write('tmp/lj/b.release', ''));
+  await page.evaluate(() => window.holding);
+});

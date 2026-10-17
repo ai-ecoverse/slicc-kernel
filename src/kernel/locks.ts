@@ -72,6 +72,10 @@ export class FlockTable {
   private readonly keys = new WeakMap<object, string>();
   private readonly wakers = new Map<string, Set<() => void>>();
 
+  isFree(key: string, owner: object, kind: FlockKind): boolean {
+    return this.free(key, owner, kind);
+  }
+
   private free(key: string, owner: object, kind: FlockKind): boolean {
     for (const [other, has] of this.held.get(key) ?? [])
       if (other !== owner && (kind === 'exclusive' || has === 'exclusive')) return false;
@@ -225,9 +229,20 @@ export class LockTable {
     this.wake(key);
   }
 
+  wholeFree(pid: number, path: string, exclusive: boolean): boolean {
+    for (const [other, h] of this.held.get(path) ?? []) {
+      if (other !== pid && (exclusive || h.exclusive)) return false;
+    }
+    return true;
+  }
+
+  flockFree(key: string, owner: object, kind: FlockKind): boolean {
+    return this.flocks.isFree(key, owner, kind);
+  }
+
   lock(pid: number, path: string, exclusive: boolean, fd: number): boolean {
+    if (!this.wholeFree(pid, path, exclusive)) return false;
     const holders = this.held.get(path) ?? new Map<number, Holder>();
-    for (const [other, h] of holders) if (other !== pid && (exclusive || h.exclusive)) return false;
     const mine = holders.get(pid) ?? { exclusive, fds: new Set<number>() };
     mine.exclusive = exclusive;
     mine.fds.add(fd);
