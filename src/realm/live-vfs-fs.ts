@@ -1239,7 +1239,15 @@ function guardKeptNodes(Fs: LiveMountFsApi, handled: Set<LiveFsNode> | undefined
 
 function outdated(node: LiveFsNode, view: ChangeView, before: number): boolean {
   const s = node.live;
-  if (view.foreign() && s.openCount === 0 && !s.dirty && node !== node.mount.root && !node.mounted)
+  if (
+    view.foreign() &&
+    (node.mode & 0o170000) !== S_IFDIR &&
+    s.statAt !== syncCallCount() &&
+    s.openCount === 0 &&
+    !s.dirty &&
+    node !== node.mount.root &&
+    !node.mounted
+  )
     return true;
   if (s.named === undefined) {
     s.named = before;
