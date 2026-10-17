@@ -208,6 +208,7 @@ export class FileBuffer {
 export class LocalFile {
   offset = 0;
   refs = 1;
+  ino: number | undefined;
 
   readonly buffer: FileBuffer;
   readonly readable: boolean;

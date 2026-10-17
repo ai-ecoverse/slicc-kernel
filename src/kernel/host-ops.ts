@@ -1,6 +1,7 @@
 import type { SyncFsResult } from '../realm/sync-fs-wire.ts';
 import { KernelError } from './fd-table.ts';
-import { type FlockKind, type LockKind, type LockTable, lockRange } from './locks.ts';
+import type { KernelLocks } from './lock-service.ts';
+import { type FlockKind, type LockKind, lockRange } from './locks.ts';
 import { timerAfter } from './timer.ts';
 
 export interface LockTarget {
@@ -204,7 +205,7 @@ export interface HostOpsContext {
     setting?: boolean
   ) => Promise<string>;
   flockOf?: (fd: number) => Promise<{ key: string; owner: object }>;
-  locks: LockTable | undefined;
+  locks: KernelLocks | undefined;
   ops: AsyncOps;
   blocking: () => AbortSignal;
   valid: (req: { op: string }) => boolean;
@@ -261,7 +262,7 @@ async function flock(
   const { key, owner } = await flockOf(req.fd);
   if (req.kind !== 'unlock' && req.wait)
     await locks.flocks.wait(key, owner, req.kind, ctx.blocking);
-  else if (!locks.flocks.set(key, owner, req.kind)) throw new KernelError('EAGAIN');
+  else if (!(await locks.flocks.set(key, owner, req.kind))) throw new KernelError('EAGAIN');
   return done;
 }
 
@@ -283,7 +284,7 @@ async function recordLock(
   const range = lockRange(req.start, req.len);
   const key = await fileKey(target, req.kind, req.op === 'lk-set' && req.fd !== undefined);
   if (req.op === 'lk-get') {
-    const held = locks.holder(key, owner, { key, kind: req.kind, ...range });
+    const held = await locks.holder(key, owner, { key, kind: req.kind, ...range });
     if (!held) return json(null);
     const len = held.end === Number.POSITIVE_INFINITY ? 0 : held.end - held.start;
     return json({ kind: held.kind, pid: held.owner, start: held.start, len });
@@ -292,6 +293,7 @@ async function recordLock(
     await locks.wait(key, owner, req.kind, range, ctx.blocking);
     return done;
   }
-  if (!locks.set(key, owner, req.kind, range.start, range.end)) throw new KernelError('EAGAIN');
+  if (!(await locks.set(key, owner, req.kind, range.start, range.end)))
+    throw new KernelError('EAGAIN');
   return done;
 }

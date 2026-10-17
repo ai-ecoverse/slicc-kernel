@@ -261,6 +261,7 @@ export class OpfsFs implements KernelFs {
   private readonly mounts: { mounted?: (path: string) => boolean } = {};
   private readonly locks: LockManagerLike | undefined;
   private readonly lockPrefix: string;
+  readonly rootName: string | undefined;
 
   constructor(
     root: FileSystemDirectoryHandle,
@@ -273,6 +274,7 @@ export class OpfsFs implements KernelFs {
     this.ranged = options.ranged === true;
     this.locks = options.locks === undefined ? lockManager() : (options.locks ?? undefined);
     this.lockPrefix = `slicc-excl:${channel ?? ''}:`;
+    this.rootName = channel;
     this.channel = channel === undefined ? undefined : new BroadcastChannel(channel);
     this.remote = channel === undefined ? undefined : new RemoteWatch(`${channel}:watch`);
     if (this.remote) this.remote.quiet = () => this.quiet();
@@ -635,7 +637,7 @@ export class OpfsFs implements KernelFs {
     const kept = this.dirs.get(path);
     if (kept && (await this.current(path, kept))) return kept;
     const gone = this.absent.get(path);
-    if (gone !== undefined && performance.now() - gone < ABSENT_MS) {
+    if (gone !== undefined && !this.shared() && performance.now() - gone < ABSENT_MS) {
       throw translate({ name: 'NotFoundError' }, path);
     }
     const seen = this.changes;
@@ -864,7 +866,12 @@ export class OpfsFs implements KernelFs {
     }
   }
 
+  private shared(): boolean {
+    return this.remote?.crowded() === true;
+  }
+
   private glanced(handle: FileSystemFileHandle): File | undefined {
+    if (this.shared()) return undefined;
     const seen = this.glances.get(handle);
     const fresh = seen && seen.changes === this.changes && performance.now() - seen.at < GLANCE_MS;
     return fresh ? seen.file : undefined;
