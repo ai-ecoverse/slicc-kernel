@@ -1,0 +1,13 @@
+{
+  "name": "clocklink",
+  "private": true,
+  "slicc": {
+    "abi": "emscripten",
+    "commands": {
+      "clocklink": {
+        "glue": "bin/clocklink",
+        "wasm": "bin/clocklink.wasm"
+      }
+    }
+  }
+}

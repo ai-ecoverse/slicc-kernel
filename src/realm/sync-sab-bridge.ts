@@ -64,6 +64,16 @@ export function syncCallCount(): number {
   return calls;
 }
 
+let looks = 0;
+
+export function lookedOutside(): void {
+  looks++;
+}
+
+export function syncEpoch(): number {
+  return calls + looks;
+}
+
 const SPIN_MS = 0.06;
 const SPIN_STRIDE = 128;
 const SPIN_STRIDES = 256;

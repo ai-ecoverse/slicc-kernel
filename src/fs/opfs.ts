@@ -700,7 +700,8 @@ export class OpfsFs implements KernelFs {
   private async linkAlong(path: string): Promise<MetaEntry | undefined> {
     for (const entry of await this.meta.get(prefixes(path))) {
       if (entry?.link === undefined) continue;
-      if (!(await this.real(entry.path)) && (await this.real(parentOf(entry.path)))) return entry;
+      if (entry.path !== path && (await this.real(entry.path))) continue;
+      if (await this.real(parentOf(entry.path))) return entry;
     }
     return undefined;
   }
