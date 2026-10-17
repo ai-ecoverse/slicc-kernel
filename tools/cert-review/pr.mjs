@@ -1,7 +1,14 @@
 #!/usr/bin/env node
 import { appendFileSync, readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
-import { behaviourFiles, groupVerdict, manifestOnly, mergedPrs, reviewsItself } from './lib.mjs';
+import {
+  behaviourFiles,
+  groupVerdict,
+  manifestOnly,
+  mergedPrs,
+  reviewsItself,
+  verdict,
+} from './lib.mjs';
 
 const { positionals, values } = parseArgs({
   allowPositionals: true,
@@ -55,6 +62,7 @@ const output = (pairs) => {
     .join('\n');
   console.log(text);
   if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `${text}\n`);
+  return pairs;
 };
 const summary = (text) => {
   console.log(text);
@@ -144,6 +152,7 @@ async function lookup() {
       : GUARD_INCOMPLETE;
     await status(values.head, fail ? 'failure' : 'error', line);
     console.log(`::error title=not certified::${line}`);
+    verdict('pr lookup', false, line);
     process.exit(1);
   }
   const commits = await all(`repos/${repo}/compare/${values.base}...${values.head}`);
@@ -161,31 +170,37 @@ async function lookup() {
       description: found?.description,
     });
   }
-  const verdict = groupVerdict(prs);
-  for (const l of verdict.lines) summary(`- ${l}`);
-  await status(values.head, verdict.state, verdict.line);
-  if (verdict.state !== 'success') {
-    console.log(`::error title=not certified::${verdict.line}`);
+  const group = groupVerdict(prs);
+  for (const l of group.lines) summary(`- ${l}`);
+  await status(values.head, group.state, group.line);
+  if (group.state !== 'success') {
+    console.log(`::error title=not certified::${group.line}`);
+    verdict('pr lookup', false, group.line);
     process.exit(1);
   }
+  verdict('pr lookup', true, group.line);
 }
 
 async function same() {
   const evidence = JSON.parse(readFileSync(values.evidence, 'utf8'));
   if (!evidence.identical) {
     summary(`#${values.pr}: ${evidence.line}: the full review goes on`);
-    return;
+    return verdict('pr same', true, `the dist differs: the full review goes on`);
   }
   await status(values.head, 'success', evidence.line);
   summary(
     `#${values.pr} is not reviewed, by the rule ${evidence.rule}. Candidate ${evidence.candidate.version} sha256 ${evidence.candidate.sha256}, base ${evidence.base.version} sha256 ${evidence.base.sha256}.`
   );
+  return verdict('pr same', true, evidence.line);
 }
 
-if (positionals[0] === 'plan') await plan();
-else if (positionals[0] === 'same') await same();
+if (positionals[0] === 'plan') {
+  const { go, behaviour } = await plan();
+  verdict('pr plan', true, `go=${go}${behaviour ? ` (behaviour: ${behaviour})` : ''}`);
+} else if (positionals[0] === 'same') await same();
 else if (positionals[0] === 'lookup') await lookup();
 else {
   console.error('pr.mjs plan|lookup|same');
+  verdict(`pr ${positionals[0] ?? ''}`.trim(), false, 'usage: pr.mjs plan|lookup|same');
   process.exit(2);
 }

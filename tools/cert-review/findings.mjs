@@ -10,6 +10,7 @@ import {
   parseResults,
   resultsMap,
   unfinishedFiles,
+  verdict,
 } from './lib.mjs';
 
 const { values } = parseArgs({
@@ -188,3 +189,4 @@ for (const f of findings)
     `- ${f.kind}${f.pr ? ` #${f.pr}` : ''}${f.test ? ` ${f.test}` : ''}${f.what ? ` ${f.what}` : ''}`
   );
 for (const r of rows) console.log(`#${r.pr} ${r.decision}: ${r.title}`);
+verdict('findings', true, `${findings.length} findings in ${values.out}`);

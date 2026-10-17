@@ -306,7 +306,8 @@ function refusal(err: unknown): boolean {
   return code === 'EACCES' || code === 'EPERM';
 }
 
-function cachedStat(s: LiveNodeState, dir: boolean): boolean {
+function cachedStat(s: LiveNodeState, dir: boolean, view?: ChangeView): boolean {
+  if (view?.foreign() && !s.dirty) return false;
   return s.stat !== undefined && (!dir || s.statAt === syncCallCount());
 }
 
@@ -446,7 +447,7 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
       const size = node.live.ranged?.size() ?? node.live.len;
       return { ...(node.live.stat as SyncFsBridgeStat), size };
     }
-    if (!cachedStat(node.live, Fs.isDir(node.mode))) {
+    if (!cachedStat(node.live, Fs.isDir(node.mode), bridgeOf(node).changes)) {
       const st = call(() => bridgeOf(node).lstat(liveNodePath(linked.holder(node))));
       Object.assign(node.live, { stat: st, statAt: syncCallCount() });
       node.mode = modeFromStat(st, exactIn(node));
@@ -624,7 +625,7 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
       const owned = bridgeOf(node).owners === true;
       if (owned && Fs.isLink(node.mode) && statOf(node).uid === undefined)
         node.live.stat = undefined;
-      const cached = owned && cachedStat(node.live, Fs.isDir(node.mode));
+      const cached = owned && cachedStat(node.live, Fs.isDir(node.mode), bridgeOf(node).changes);
       const st = statOf(node);
       if (cached) searchParents(Fs, node, bridgeOf(node), call);
       const s = node.live;
@@ -1089,6 +1090,7 @@ export interface LiveMountFsApi extends LiveFsApi {
   sliccRename?: true;
   sliccKept?: true;
   sliccStale?: true;
+  sliccVanished?: true;
   open?(path: string, flags: number, mode?: number): unknown;
   statfsNode?(node: LiveFsNode): Record<string, number>;
   sliccStatfs?: true;
@@ -1151,6 +1153,7 @@ export function liveRoot(Fs: LiveMountFsApi, bridge: SyncFsPosixBridge): void {
   guardRenames(Fs);
   guardKeptNodes(Fs, plugin.handled);
   guardStaleNodes(Fs, plugin);
+  guardVanished(Fs);
   guardStatfs(Fs);
   const memfs = root.memfs ?? root.node_ops;
   const live = plugin.node_ops;
@@ -1236,6 +1239,8 @@ function guardKeptNodes(Fs: LiveMountFsApi, handled: Set<LiveFsNode> | undefined
 
 function outdated(node: LiveFsNode, view: ChangeView, before: number): boolean {
   const s = node.live;
+  if (view.foreign() && s.openCount === 0 && !s.dirty && node !== node.mount.root && !node.mounted)
+    return true;
   if (s.named === undefined) {
     s.named = before;
     return false;
@@ -1261,6 +1266,60 @@ function guardStaleNodes(Fs: LiveMountFsApi, plugin: LiveVfsPlugin): void {
     if (fresh.live) fresh.live.named = before;
     return fresh;
   };
+}
+
+const O_NOFOLLOW = 0o400000;
+
+const RESOLVING: ReadonlyArray<[string, (args: unknown[]) => boolean]> = [
+  ['open', (args) => ((args[1] as number) & O_NOFOLLOW) === 0],
+  ['stat', (args) => !args[1]],
+  ['lstat', () => false],
+  ['unlink', () => false],
+  ['rename', () => false],
+  ['readlink', () => false],
+  ['truncate', () => true],
+];
+
+function guardVanished(Fs: LiveMountFsApi): void {
+  const forget = Fs.hashRemoveNode?.bind(Fs);
+  if (!forget || !Fs.lookupPath || Fs.sliccVanished) return;
+  Fs.sliccVanished = true;
+  const drop: (node: LiveFsNode) => void = forget;
+  const lookupPath = Fs.lookupPath.bind(Fs);
+  const ops = Fs as unknown as Record<string, ((...args: unknown[]) => unknown) | undefined>;
+  const cached = (path: string, follow: boolean): LiveFsNode | undefined => {
+    try {
+      const node = lookupPath(path, { follow }).node as LiveFsNode;
+      return node.live && node.live.openCount === 0 && !node.live.dirty ? node : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  let open: ((...args: unknown[]) => unknown) | undefined;
+  for (const [name, follows] of RESOLVING) {
+    const op = ops[name]?.bind(Fs);
+    if (name === 'open') open = op;
+    if (op) ops[name] = vanishing(op, follows);
+  }
+  function vanishing(
+    op: (...args: unknown[]) => unknown,
+    follows: (args: unknown[]) => boolean
+  ): (...args: unknown[]) => unknown {
+    return (...args: unknown[]) => {
+      try {
+        return op(...args);
+      } catch (err) {
+        const path = args[0];
+        const code = (err as { errno?: unknown }).errno;
+        const taken = code === wasiErrno('EEXIST') && op === open;
+        if ((code !== wasiErrno('ENOENT') && !taken) || typeof path !== 'string') throw err;
+        const node = cached(path, follows(args));
+        if (!node) throw err;
+        drop(node);
+        return op(...args);
+      }
+    };
+  }
 }
 
 function guardRenames(Fs: LiveMountFsApi): void {

@@ -2,7 +2,12 @@ import type { Cred } from '../kernel/cred.ts';
 import type { DeviceMeta, HeldMeta, PollState } from '../kernel/fd-table.ts';
 import { hostnameOf } from '../kernel/net/loopback-names.ts';
 import type { MountLine, ProcessListing } from '../kernel/proc-info.ts';
-import type { ForkState, InheritedFd, WasmProcessInitMsg } from '../kernel/protocol.ts';
+import {
+  type ForkState,
+  type InheritedFd,
+  WASM_PROCESS_READY,
+  type WasmProcessInitMsg,
+} from '../kernel/protocol.ts';
 import { SIG } from '../kernel/signals.ts';
 import type { Termios } from '../kernel/tty.ts';
 import { mountVfsIntoEmscripten } from '../realm/emscripten-vfs-hook.ts';
@@ -32,7 +37,7 @@ import {
   SyscallError,
   type TtyOwner,
 } from './kernel-streams.ts';
-import { createProcessKernel, type ProcessKernel } from './process-children.ts';
+import { createProcessKernel, inheritedSignals, type ProcessKernel } from './process-children.ts';
 import {
   devCreations,
   type FdImports,
@@ -67,7 +72,7 @@ import {
   vfsPromoter,
 } from './process-fork.ts';
 import { createHttpKernel } from './process-http.ts';
-import { closeDropsLocks, type LockHeld, type LockKernel } from './process-locks.ts';
+import { closeDropsLocks, kernelFlock, type LockHeld, type LockKernel } from './process-locks.ts';
 import type { PtyKernel } from './process-pty.ts';
 import { SignalGate } from './process-signals.ts';
 import { createSocketKernel } from './process-sockets.ts';
@@ -245,6 +250,9 @@ export function kernelSys(transport: SyncSabTransport): ProcessSys & PtyKernel &
     closeLocks(target) {
       call({ op: 'lk-close', ...target }, 'lk-close');
     },
+    flock(fd, kind, wait) {
+      call({ op: 'flock', fd, kind, ...(wait ? { wait } : {}) }, `flock ${fd}`);
+    },
     ptyNumber(fd) {
       return json(call({ op: 'pty-number', fd }, `pty-number ${fd}`)) as number;
     },
@@ -394,6 +402,7 @@ const GLUE_TRAILER = [
   "  fdWrite: typeof _fd_write === 'function' ? _fd_write : undefined,",
   "  fdRead: typeof _fd_read === 'function' ? _fd_read : undefined,",
   "  sleepMs: typeof slicc_sleep_ms === 'function' ? slicc_sleep_ms : undefined,",
+  "  flock: typeof __syscall_flock === 'function' ? __syscall_flock : undefined,",
   '};',
   'Module.sliccFdImports ??= {',
   "  fd_sync: typeof _fd_sync === 'function' ? _fd_sync : undefined,",
@@ -525,7 +534,7 @@ function utimensatOf(module: object): unknown {
 interface WrapperDeps {
   init: WasmProcessInitMsg;
   transport: SyncSabTransport;
-  sys: ProcessSys;
+  sys: ProcessSys & LockKernel;
   memory: () => WebAssembly.Memory | undefined;
   ppid: () => number;
   poll: () => void;
@@ -548,6 +557,13 @@ function kernelWrappers(imports: WebAssembly.Imports, module: object, deps: Wrap
   kernelLink(imports, fsOf, memory, kernelGlue);
   devCreations(imports, fsOf, memory, kernelGlue);
   kernelUname(imports, hostnameOf(init.env), memory, kernelGlue);
+  wrapImport(
+    imports,
+    'flock',
+    kernelGlue,
+    () => kernelFlock({ fs: fsOf, flock: (fd, kind, wait) => sys.flock?.(fd, kind, wait) }),
+    true
+  );
   const glue = ownValue<FdImports>(module, 'sliccFdImports');
   syncFsync(imports, fsOf, glue);
   positionalIo(imports, { glue, fs: fsOf, sys, memory });
@@ -603,7 +619,6 @@ export async function runWasmProcess(
     {
       masks: () => signalMasks(module as unknown as RunningModule),
       raise: (sig) => (module as unknown as RunningModule).sliccRaise?.(sig),
-
       timer: (which) => {
         const running = module as unknown as RunningModule;
         if (!running.sliccTimerFire?.(which)) running.sliccRaise?.(SIG.ALRM);
@@ -632,6 +647,7 @@ export async function runWasmProcess(
     sliccPid: id.pid,
     sliccPpid: id.ppid,
     sliccEnv: init.env,
+    sliccKernel: { sigInherited: () => inheritedSignals(transport) },
     print: say(1),
     printErr: say(2),
     instantiateWasm(
@@ -645,7 +661,6 @@ export async function runWasmProcess(
             heap: () => (memory ? new Int32Array(memory.buffer) : undefined),
             pty: sys,
             locks: { kernel: sys, memory: () => memory?.buffer, flush: () => early() },
-
             timer: {
               arm: (ms) => {
                 transport.call(
@@ -668,6 +683,7 @@ export async function runWasmProcess(
         })
         .then((instance) => {
           memory = wasmMemory(instance, imports);
+          port.postMessage({ type: WASM_PROCESS_READY });
           exports = instance.exports;
           publishMemory(init.sab, memory?.buffer.byteLength ?? 0);
           done(

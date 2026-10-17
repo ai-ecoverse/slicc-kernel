@@ -99,7 +99,12 @@ export class RangedFile {
     if (!watch || this.pinned) return;
     const { now, changed } = watchedChange(watch, this.seen, this.path);
     this.seen = now;
-    if (!changed) return;
+    if (changed) this.reread();
+  }
+
+  reread(): void {
+    const watch = this.watch;
+    if (!watch || this.pinned || this.pages.changed) return;
     let st: ReturnType<RangedWatch['stat']>;
     try {
       st = watch.stat(this.path);

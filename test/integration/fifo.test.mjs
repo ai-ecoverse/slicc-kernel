@@ -164,3 +164,86 @@ test('make -j2 runs a recursive build through a FIFO jobserver, with no mkfifo w
   assert.match(r.stdout, /^a$/m);
   assert.match(r.stdout, /done\nrc 0\n$/);
 });
+
+for (const users of ['off', 'enforce']) {
+  test(`a WASIX program makes a FIFO through slicc_fs.path_mkfifo, under the umask and without following a link, users ${users} (homescoop#878)`, {
+    timeout: 60_000,
+  }, async (t) => {
+    const bash = await kernelWith(t, users);
+    assert.deepEqual(
+      await bash(
+        [
+          'cd /tmp && fifotest mkfifo w1 600 && stat -c "%F %a" /tmp/w1',
+          'fifotest mkfifo /tmp/w1',
+          'mkdir -p /tmp/d && fifotest mkfifo rel 640 /tmp/d && stat -c "%F %a" /tmp/d/rel',
+          'umask 077; fifotest mkfifo /tmp/w2 666; stat -c %a /tmp/w2',
+          'ln -s /tmp/nowhere /tmp/dang; fifotest mkfifo /tmp/dang',
+          'fifotest mkfifo /tmp/nodir/x',
+          'fifotest read /tmp/w1 & sleep 0.3; echo through > /tmp/w1; wait',
+        ].join('; ')
+      ),
+      ok(
+        [
+          'mkfifo w1: ok',
+          'fifo 600',
+          'mkfifo /tmp/w1: File exists',
+          'mkfifo rel: ok',
+          'fifo 640',
+          'mkfifo /tmp/w2: ok',
+          '600',
+          'mkfifo /tmp/dang: File exists',
+          'mkfifo /tmp/nodir/x: No such file or directory',
+          'read: through',
+          'read end: 0 eof',
+          '',
+        ].join('\n')
+      )
+    );
+  });
+}
+
+test('under umask 077, path_mkfifo never lets another user open the new FIFO, not even right after it is made (homescoop#878)', {
+  timeout: 60_000,
+}, async (t) => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  t.after(() => kernel.terminate());
+  await kernel.users.add({ name: 'cone' });
+  for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
+  for (const file of ['package.json', 'bin/fifotest.wasm']) {
+    await kernel.writeFile(
+      `/node_modules/fifotest/${file}`,
+      await readFile(new URL(file, fixture))
+    );
+  }
+  const snatcher = kernel.run(['fifotest', 'snatch', '/tmp/s', '200'], { cwd: '/', user: 'cone' });
+  const made = await kernel.run(
+    ['bash', '-c', 'sleep 0.3; umask 077; fifotest mkfifo /tmp/s 666; stat -c "%U %a" /tmp/s'],
+    { cwd: '/' }
+  );
+  assert.deepEqual(made, ok('mkfifo /tmp/s: ok\nroot 600\n'));
+  assert.deepEqual(await snatcher, ok('opened 0 times, refused 200 times\n'));
+});
+
+test('mkfifo of the root or any existing directory is EEXIST, and of an empty name ENOENT, from WASIX and Emscripten alike (#972)', {
+  timeout: 60_000,
+}, async (t) => {
+  const bash = await kernelWith(t);
+  assert.deepEqual(
+    await bash(
+      'cd /; fifotest mkfifo / 600; fifotest mkfifo . 600; fifotest mkfifo /tmp 600; fifotest mkfifo /dev/shm 600; fifotest mkfifo "" 600; cd /tmp; fifotest mkfifo .. 600; mkfifo /; mknod / p'
+    ),
+    {
+      status: 1,
+      stdout: [
+        'mkfifo /: File exists',
+        'mkfifo .: File exists',
+        'mkfifo /tmp: File exists',
+        'mkfifo /dev/shm: File exists',
+        'mkfifo : No such file or directory',
+        'mkfifo ..: File exists',
+        '',
+      ].join('\n'),
+      stderr: "mkfifo: cannot create fifo '/': File exists\nmknod: /: File exists\n",
+    }
+  );
+});

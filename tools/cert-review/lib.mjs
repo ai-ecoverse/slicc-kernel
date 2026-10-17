@@ -1,5 +1,11 @@
 import { matchesGlob } from 'node:path';
 
+export function verdict(name, ok, detail = '') {
+  const line = `${name}: ${ok ? 'PASS' : 'FAIL'}${detail ? ` ${String(detail).split('\n')[0]}` : ''}`;
+  console.log(line);
+  return line;
+}
+
 const MERGE = /^Merge pull request #(\d+) from /;
 const KIND = /^(\w+)(?:\([^)]*\))?(!)?:/;
 const BEHAVIOUR = new Set(['fix', 'feat', 'perf', 'revert']);

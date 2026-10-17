@@ -4,8 +4,9 @@ const RING_SIZE = 4096;
 const SLOT = 2;
 
 const DIRTY = RING + RING_SIZE * SLOT;
+const FOREIGN = DIRTY + 1;
 
-export const CHANGES_BYTES = (DIRTY + 1) * 4;
+export const CHANGES_BYTES = (FOREIGN + 1) * 4;
 
 export function changeHash(path: string): number {
   let h = 0x811c9dc5;
@@ -39,6 +40,10 @@ export class FileChanges {
     Atomics.add(this.view, DIRTY, delta);
   }
 
+  foreign(on: boolean): void {
+    Atomics.store(this.view, FOREIGN, on ? 1 : 0);
+  }
+
   publish(...paths: string[]): void {
     for (const path of paths) {
       const g = (Atomics.add(this.view, GEN, 1) + 1) | 0;
@@ -63,6 +68,10 @@ export class ChangeView {
 
   clean(): boolean {
     return this.view.length > DIRTY && Atomics.load(this.view, DIRTY) === 0;
+  }
+
+  foreign(): boolean {
+    return this.view.length > FOREIGN && Atomics.load(this.view, FOREIGN) === 1;
   }
 
   changedSince(seen: number, path: string): { now: number; changed: boolean } {

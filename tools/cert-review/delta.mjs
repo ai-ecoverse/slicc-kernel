@@ -9,6 +9,7 @@ import {
   deltaFiles,
   mergedPrs,
   rowOf,
+  verdict,
   withBaselines,
 } from './lib.mjs';
 
@@ -89,3 +90,8 @@ for (const r of placed)
   console.log(
     `#${r.pr} ${r.kind}${r.behaviour ? '' : ' (no behaviour)'}${r.kind === 'fix' && r.baseline !== prev ? ` (NEGATIVE on v${r.baseline})` : ''}: ${r.title} [${r.tests.map((t) => `${t.file}: ${t.titles.length}`).join(', ')}]`
   );
+verdict(
+  'delta',
+  true,
+  `${rows.length} pull requests, ${delta.files.length} integration test files`
+);

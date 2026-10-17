@@ -8,6 +8,7 @@ import type { DeviceMeta, KernelFdKind } from './fd-table.ts';
 export const WASM_PROCESS_INIT = 'wasm-process-init';
 export const WASM_PROCESS_EXIT = 'wasm-process-exit';
 export const WASM_PROCESS_ERROR = 'wasm-process-error';
+export const WASM_PROCESS_READY = 'wasm-process-ready';
 export const WASM_THREAD_SPAWN = 'wasm-thread-spawn';
 export const WASM_THREAD_INIT = 'wasm-thread-init';
 export const WASM_THREAD_EXIT = 'wasm-thread-exit';

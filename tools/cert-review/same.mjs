@@ -14,7 +14,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { parseArgs } from 'node:util';
-import { sameDist } from './lib.mjs';
+import { sameDist, verdict } from './lib.mjs';
 
 const { values } = parseArgs({
   options: {
@@ -73,3 +73,4 @@ if (process.env.GITHUB_OUTPUT)
   appendFileSync(process.env.GITHUB_OUTPUT, `identical=${identical}\n`);
 if (process.env.GITHUB_STEP_SUMMARY)
   appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${evidence.line}\n`);
+verdict('same', true, `identical=${identical}: ${evidence.line}`);

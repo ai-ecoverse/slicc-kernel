@@ -18,6 +18,7 @@ import {
   normalizePath,
   type Owner,
   type OwnerChange,
+  type Peers,
   type Perm,
   redirected,
   resolvePath,
@@ -277,7 +278,7 @@ export class OpfsFs implements KernelFs {
     this.rootName = channel;
     this.channel = channel === undefined ? undefined : new BroadcastChannel(channel);
     this.remote = channel === undefined ? undefined : new RemoteWatch(`${channel}:watch`);
-    if (this.remote) this.remote.quiet = () => this.quiet();
+    if (this.remote) this.remote.quiet = () => this.quiet().then(() => this.settle?.());
     if (this.channel) {
       const remote = this.remote;
       (meta as { listen?: (l: (c: Partial<RemoteChange>) => void) => void }).listen?.((c) =>
@@ -306,7 +307,7 @@ export class OpfsFs implements KernelFs {
 
   private committed(target: string): void {
     this.fileTimes.delete(target);
-    if (this.remote?.watched()) this.remote.wrote(target);
+    if (this.remote?.watched() || this.remote?.crowded()) this.remote.wrote(target);
   }
 
   private counted: readonly string[] = [];
@@ -469,6 +470,25 @@ export class OpfsFs implements KernelFs {
       this.unlocked--;
       if (this.unlocked === 0) for (const done of this.idle.splice(0)) done();
     }
+  }
+
+  private settle: (() => Promise<void>) | undefined;
+
+  onPeer(settle: () => Promise<void>): void {
+    this.settle = settle;
+  }
+
+  peers(): Peers | undefined {
+    const remote = this.remote;
+    if (!remote) return undefined;
+    return {
+      joined: () => remote.peered(),
+      crowded: () => remote.crowded(),
+      watch: (listener) => {
+        remote.crowd = listener;
+        listener(remote.crowded());
+      },
+    };
   }
 
   private quiet(): Promise<void> {
@@ -1252,6 +1272,7 @@ export class OpfsFs implements KernelFs {
         ? await this.meta.fresh([path])
         : await this.meta.get([path]);
       if (freshMeta[0]?.link !== undefined) throw fsError('EEXIST', path);
+      if (freshMeta[0] !== undefined) await this.meta.remove([path]);
       this.forget(physical);
       this.refuse(physical);
       await dir.getDirectoryHandle(name, { create: true });
@@ -1263,6 +1284,7 @@ export class OpfsFs implements KernelFs {
   }
 
   async createExclusive(path: string, owner?: NewOwner): Promise<void> {
+    if (normalizePath(path) === '/') throw fsError('EEXIST', path);
     const parent = await this.locate(parentOf(path), true);
     if (parent.handle?.kind !== 'directory') throw fsError('ENOTDIR', path);
     const dir = parent.handle;
@@ -1273,7 +1295,8 @@ export class OpfsFs implements KernelFs {
       const freshMeta = this.meta.fresh
         ? await this.meta.fresh([path])
         : await this.meta.get([path]);
-      if (freshMeta[0] !== undefined) throw fsError('EEXIST', path);
+      if (freshMeta[0]?.link !== undefined) throw fsError('EEXIST', path);
+      if (freshMeta[0] !== undefined) await this.meta.remove([path]);
       this.forget(physical);
       this.refuse(physical);
       await dir.getFileHandle(name, { create: true });

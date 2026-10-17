@@ -15,6 +15,7 @@ import {
   provenanceProblems,
   releaseNotes,
   statusAt,
+  verdict,
 } from './lib.mjs';
 
 const { values } = parseArgs({
@@ -171,11 +172,9 @@ function context(published) {
       });
     }
   }
-  const verdict = groupVerdict(prs);
+  const group = groupVerdict(prs);
   facts.prCertified =
-    verdict.state === 'success'
-      ? verdict.line
-      : verdict.line.replace(/^not certified: /, 'not all: ');
+    group.state === 'success' ? group.line : group.line.replace(/^not certified: /, 'not all: ');
   facts.known = ghAll(`repos/${repo}/issues?labels=known-issue&state=open`)
     .filter((i) => !i.pull_request)
     .map((i) => `${repo}#${i.number}`);
@@ -183,6 +182,7 @@ function context(published) {
 
 if (!/^\d+\.\d+\.\d+$/.test(version ?? '')) {
   console.error('verify: --version must be x.y.z');
+  verdict('verify', false, '--version must be x.y.z');
   process.exit(2);
 }
 try {
@@ -191,6 +191,11 @@ try {
   if (!published.includes(version) && typeof latest === 'string' && older(version, latest)) {
     summary(
       `${NAME}@${version} isn't on npm and npm's latest ${latest} is newer: release-recover skipped it (#837), nothing to verify`
+    );
+    verdict(
+      'verify',
+      true,
+      `${NAME}@${version}: skipped by release-recover (#837), nothing to verify`
     );
     process.exit(0);
   }
@@ -211,6 +216,7 @@ if (problems.length) {
   const alert = `supply-chain alert: ${NAME}@${version} on npm doesn't verify: ${problems.join('; ')} (ci: ${ci})`;
   summary(alert);
   console.log(`::error title=verify on npm::${alert}`);
+  verdict('verify', false, alert);
   process.exit(1);
 }
 const line = `certified ${NAME}@${version} sha256=${facts.sha256} (covers ${facts.covers}; ci: ${ci}; pr-certified: ${facts.prCertified}; known: ${facts.known.length ? facts.known.join(', ') : 'none'})`;
@@ -221,6 +227,7 @@ if (notes.conflict) {
   const alert = `supply-chain alert: ${NAME}@${version}: npm serves sha256=${facts.sha256}, but ${notes.conflict} (ci: ${ci})`;
   summary(alert);
   console.log(`::error title=verify on npm::${alert}`);
+  verdict('verify', false, alert);
   process.exit(1);
 }
 if (notes.unchanged) summary(`the release notes of v${version} already carry this line: unchanged`);
@@ -233,3 +240,4 @@ else if (values.notes === 'write') {
   summary(
     `the release notes of v${version} would get the line (--notes ${values.notes}: not written)`
   );
+verdict('verify', true, line);

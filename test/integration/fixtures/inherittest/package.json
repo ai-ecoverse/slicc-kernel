@@ -1,0 +1,12 @@
+{
+  "name": "inherittest",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "inherittest": {
+        "wasm": "bin/inherittest.wasm"
+      }
+    }
+  }
+}

@@ -178,6 +178,12 @@ export class FileBuffer {
     this.ranged?.pin();
   }
 
+  reread(): void {
+    if (this.dirty || this.orphaned) return;
+    if (this.ranged) this.ranged.reread();
+    else this.data = undefined;
+  }
+
   isOrphan(): boolean {
     return this.orphaned;
   }
@@ -580,7 +586,7 @@ export function cachingBridge(
     return undefined;
   };
   const cached = (map: typeof stats, path: string, get: () => SyncFsBridgeStat) => {
-    if (blind) return get();
+    if (blind || view?.foreign()) return get();
     cache.fresh();
     let hit = map.get(path);
     if (hit === undefined || ('until' in hit && !live(hit, path))) {
@@ -693,6 +699,12 @@ export function cachingBridge(
       ? {
           create: (p: string, mode?: number, opening?: boolean) =>
             mutating(() => bridge.create?.(p, mode, opening), ...entry(p)),
+        }
+      : {}),
+    ...(bridge.mkfifo
+      ? {
+          mkfifo: (p: string, mode: number) =>
+            mutating(() => bridge.mkfifo?.(p, mode), ...entry(p)),
         }
       : {}),
     ...(chown

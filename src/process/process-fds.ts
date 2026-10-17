@@ -261,6 +261,7 @@ export interface KernelImports {
   fdWrite?: unknown;
   fdRead?: unknown;
   sleepMs?: unknown;
+  flock?: unknown;
 }
 
 const LITERALS: Record<keyof KernelImports, string> = {
@@ -278,6 +279,7 @@ const LITERALS: Record<keyof KernelImports, string> = {
   fdWrite: 'fd_write',
   fdRead: 'fd_read',
   sleepMs: 'slicc_sleep_ms',
+  flock: '__syscall_flock',
 };
 
 export function importKey(

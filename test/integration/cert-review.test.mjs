@@ -359,7 +359,7 @@ test('findings.mjs turns the runs into decisions, suite regressions and missing 
       join(dir, 'findings.json'),
       ...extra,
     ]);
-  run('base.json');
+  assert.match(String(run('base.json')), /^findings: PASS \d+ findings in /m);
   const found = JSON.parse(await readFile(join(dir, 'findings.json'), 'utf8'));
   assert.deepEqual(
     found.rows.map((r) => [r.pr, r.decision]),
@@ -912,9 +912,13 @@ test('a suite runner stopped with SIGTERM still writes its partial results, its 
       '--out',
       out,
     ],
-    { env, stdio: 'ignore' }
+    { env, stdio: ['ignore', 'pipe', 'ignore'] }
   );
-  const exited = new Promise((r) => suite.once('exit', (c, s) => r([c, s])));
+  let said = '';
+  suite.stdout.on('data', (d) => {
+    said += d;
+  });
+  const exited = new Promise((r) => suite.once('close', (c, s) => r([c, s])));
   for (let i = 0; i < 200; i++) {
     const partial = await readFile(`${out}.jsonl`, 'utf8').catch(() => '');
     if (partial.includes('done first')) break;
@@ -922,6 +926,7 @@ test('a suite runner stopped with SIGTERM still writes its partial results, its 
   }
   suite.kill('SIGTERM');
   assert.deepEqual(await exited, [143, null]);
+  assert.match(said, /^suite: FAIL exit signal SIGTERM, pass 1, /m);
   const summary = JSON.parse(await readFile(`${out}.json`, 'utf8'));
   assert.equal(summary.exit, 'signal SIGTERM');
   assert.deepEqual(

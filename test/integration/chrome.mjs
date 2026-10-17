@@ -1,3 +1,4 @@
+import { realpathSync } from 'node:fs';
 import { argv, env } from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { serve, launch as start } from '@ai-ecoverse/slicc-shared-web/harness';
@@ -17,7 +18,15 @@ const options = {
 
 export const launch = (args = []) => start({ ...options, args });
 
-if (argv[1] === fileURLToPath(import.meta.url)) {
+const real = (path) => {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+};
+
+if (argv[1] && real(argv[1]) === real(fileURLToPath(import.meta.url))) {
   const { url } = await serve({ ...options, port: Number(env.PORT ?? 8080) });
   console.log(`slicc-kernel test page on ${url}`);
 }

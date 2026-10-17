@@ -207,6 +207,12 @@ export class VfsNode {
     return this.dirty;
   }
 
+  reread(): void {
+    if (this.dirty || this.orphaned || this.pin || this.revoked) return;
+    this.data = undefined;
+    this.ranged = undefined;
+  }
+
   replace(contents: Uint8Array): void {
     this.ranged = undefined;
     this.data = new Uint8Array(contents);
@@ -627,6 +633,10 @@ export class VfsNodes implements UnlinkHolder {
     this.kept.delete(node);
   }
 
+  rewritten(path: string): void {
+    this.byPath.get(path)?.reread();
+  }
+
   async flush(path: string): Promise<void> {
     for (const [p, node] of this.byPath) if (within(p, path)) await node.serial(() => node.flush());
   }
@@ -967,6 +977,7 @@ export function vfsFile(fs: VfsFileFs, opts: VfsFileOptions, nodes?: VfsNodes): 
       })),
     known: () => node.known(),
     flush: () => serial(() => node.flush()),
+    reread: () => serial(async () => node.reread()),
 
     close: () =>
       node.serial(async () => {

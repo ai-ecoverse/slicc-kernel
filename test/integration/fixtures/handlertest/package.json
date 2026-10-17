@@ -1,0 +1,12 @@
+{
+  "name": "handlertest",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "handlertest": {
+        "wasm": "bin/handlertest.wasm"
+      }
+    }
+  }
+}

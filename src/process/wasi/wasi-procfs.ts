@@ -14,6 +14,7 @@ import {
   pidFile,
   SYSTEM_FILES,
   sysEntry,
+  sysText,
   systemFile,
   taskIds,
   taskStat,
@@ -76,7 +77,9 @@ export class ProcTree {
     }
     if (top === 'sys') {
       const entry = sysEntry(parts.slice(1));
-      if (typeof entry === 'string') return { kind: 'file', content: () => entry };
+      if (typeof entry === 'string' || typeof entry === 'function') {
+        return { kind: 'file', content: () => sysText(entry, () => this.listing()) };
+      }
       return entry && { kind: 'dir', names: () => Object.keys(entry) };
     }
     if (top === 'self') {
@@ -196,7 +199,7 @@ export class ProcTree {
 }
 
 const FOLLOWING = ['writeFile', 'chmod', 'utimes', 'pwrite', 'truncate'] as const;
-const NOT_FOLLOWING = ['mkdir', 'rm', 'unlink', 'rmdir', 'lutimes', 'create'] as const;
+const NOT_FOLLOWING = ['mkdir', 'rm', 'unlink', 'rmdir', 'lutimes', 'create', 'mkfifo'] as const;
 const MAX_HOPS = 40;
 
 type ProcRefusal = { refused: string };

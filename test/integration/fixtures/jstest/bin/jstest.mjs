@@ -125,6 +125,43 @@ async function append(ctx, [path]) {
 
 const stamp = () => performance.timeOrigin + performance.now();
 
+async function heldread(ctx, [dir, n]) {
+  const f = await ctx.open(`${dir}/f`, { read: true });
+  const late = [];
+  for (let i = 1; i <= Number(n); i++) {
+    await f.read(0, 64);
+    await ctx.fs.writeFile(`${dir}/r${i}`, '');
+    while (!(await ctx.fs.exists(`${dir}/m${i}`))) await sleep(2);
+    const got = text(await f.read(0, 64));
+    if (got !== `v${i}`) late.push(`${i}:${got}`);
+  }
+  await f.close();
+  await ctx.write(1, `${late.length === 0 ? 'none' : late.join(' ')}\n`);
+}
+
+async function rewrites(ctx, [dir, n]) {
+  for (let i = 1; i <= Number(n); i++) {
+    while (!(await ctx.fs.exists(`${dir}/r${i}`))) await sleep(2);
+    const f = await ctx.open(`${dir}/f`, { write: true, truncate: true });
+    await f.write(0, new TextEncoder().encode(`v${i}`));
+    await f.sync();
+    await f.close();
+    await ctx.fs.writeFile(`${dir}/m${i}`, '');
+  }
+}
+
+async function fsyncfiles(ctx, [dir, n]) {
+  for (let i = 1; i <= Number(n); i++) {
+    while (!(await ctx.fs.exists(`${dir}/r${i}`))) await sleep(2);
+    await sleep(3);
+    const f = await ctx.open(`${dir}/f${i}`, { write: true });
+    await f.write(0, new TextEncoder().encode('x'));
+    await f.sync();
+    await f.close();
+    await ctx.fs.writeFile(`${dir}/m${i}`, '');
+  }
+}
+
 async function peerwrite(ctx, [dir, n]) {
   while (!(await ctx.fs.exists(`${dir}/ready`))) await sleep(5);
   const done = [];
@@ -1446,6 +1483,9 @@ const modes = {
   append,
   exclusive,
   peerwrite,
+  fsyncfiles,
+  heldread,
+  rewrites,
   peerwatch,
   lock,
   nodir,
