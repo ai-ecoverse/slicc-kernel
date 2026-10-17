@@ -695,6 +695,12 @@ export function cachingBridge(
             mutating(() => bridge.create?.(p, mode, opening), ...entry(p)),
         }
       : {}),
+    ...(bridge.mkfifo
+      ? {
+          mkfifo: (p: string, mode: number) =>
+            mutating(() => bridge.mkfifo?.(p, mode), ...entry(p)),
+        }
+      : {}),
     ...(chown
       ? {
           chown: (p: string, ...rest: ChownArgs) =>

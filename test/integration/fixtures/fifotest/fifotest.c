@@ -1,11 +1,23 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+__attribute__((import_module("slicc_fs"), import_name("path_mkfifo")))
+int32_t k_path_mkfifo(int32_t dirfd, const char *path, uint32_t len, uint32_t mode);
+
+static int make(const char *path, const char *mode, const char *dir) {
+  int dirfd = -2;
+  if (dir && (dirfd = open(dir, O_RDONLY | O_DIRECTORY)) < 0) return printf("open %s: %s\n", dir, strerror(errno)), 1;
+  int e = k_path_mkfifo(dirfd, path, strlen(path), (uint32_t)strtol(mode, NULL, 8));
+  printf("mkfifo %s: %s\n", path, e ? strerror(e) : "ok");
+  return 0;
+}
 
 static const char *mark;
 
@@ -27,8 +39,9 @@ static void drain(int fd) {
 }
 
 int main(int argc, char **argv) {
-  if (argc < 3) return fprintf(stderr, "usage: fifotest stat|read|write|nbwrite|nbread|alarm PATH [restart]\n"), 2;
+  if (argc < 3) return fprintf(stderr, "usage: fifotest stat|read|write|nbwrite|nbread|alarm|mkfifo PATH [restart|MODE [DIR]]\n"), 2;
   const char *mode = argv[1], *path = argv[2];
+  if (!strcmp(mode, "mkfifo")) return make(path, argc > 3 ? argv[3] : "666", argc > 4 ? argv[4] : NULL);
   if (!strcmp(mode, "stat")) {
     struct stat st;
     if (stat(path, &st) != 0) return printf("stat: %s\n", strerror(errno)), 1;

@@ -583,7 +583,7 @@ A lookup follows at most 40 symlinks, as Linux does: the 41st is `ELOOP`, for WA
 Directories are renamed with `FileSystemHandle.move()` where available, else by copy and delete.
 
 **FIFOs** (`mkfifo`, #896):
-- **Creating one:** an Emscripten program's `mkfifo`/`mknod(S_IFIFO)` makes a FIFO node on the OPFS root (in `/tmp`, `/home` and the rest), owned by the caller, with mode `mode & ~umask`. `stat`, `ls -l` (`p`) and `test -p` show it as a FIFO, in Emscripten, WASI and JS programs. WASIX libc has no `mkfifo`, but WASIX programs `stat`, `open`, read and write a FIFO that exists. An existing name is `EEXIST`. tmpfs mounts (`/dev/shm`, a tmpfs `/tmp`) have FIFO nodes too, through the driver's `fifos` capability ([#907](https://github.com/ai-ecoverse/slicc-kernel/issues/907)). hostfs, `fsa` and media mounts have none, so `mkfifo` there is `EPERM`, and `EROFS` on a readonly path.
+- **Creating one:** an Emscripten program's `mkfifo`/`mknod(S_IFIFO)` makes a FIFO node on the OPFS root (in `/tmp`, `/home` and the rest), owned by the caller, with mode `mode & ~umask`. `stat`, `ls -l` (`p`) and `test -p` show it as a FIFO, in Emscripten, WASI and JS programs. A WASIX program makes one through `slicc_fs.path_mkfifo` (see [File modes and the umask](#file-modes-and-the-umask); its libc uses it from wasix-sysroot -33), and `stat`s, `open`s, reads and writes one like any program. An existing name is `EEXIST`. tmpfs mounts (`/dev/shm`, a tmpfs `/tmp`) have FIFO nodes too, through the driver's `fifos` capability ([#907](https://github.com/ai-ecoverse/slicc-kernel/issues/907)). hostfs, `fsa` and media mounts have none, so `mkfifo` there is `EPERM`, and `EROFS` on a readonly path.
 - **Opening one** works as on Linux (fifo(7)). A read-open waits until a writer opens, and a write-open until a reader does. `O_RDWR` doesn't wait. With `O_NONBLOCK` a read-open returns at once, and a write-open with no reader is `ENXIO`. A waiting open is interrupted by a caught signal (`EINTR`), restarts under `SA_RESTART`, and isn't ended by a stop.
 - **The data path** is the kernel's pipe: the same capacity, `EOF` once the last writer closes, and `SIGPIPE`/`EPIPE` once the last reader closes. The data is dropped when no end is open.
 - **The node's identity, not its name, picks the FIFO:** an open FIFO keeps working after an `unlink` or a `rename`, and a new `mkfifo` at the same name is another FIFO. `/proc/<pid>/fd/N` names the FIFO's path, also in children that inherit the end and in a WASIX program's `readlink("/proc/self/fd/N")` of an end it opened itself ([#909](https://github.com/ai-ecoverse/slicc-kernel/issues/909)).
@@ -734,6 +734,7 @@ WASI and WASIX have no call for file modes, so the kernel adds the import module
 | `path_owner(dirfd, path, path_len, flags, out)` | those of a path, of the link itself with `flags & 1` |
 | `fd_filestat_owner(fd, filestat_out, out)` | `fd_filestat_get` and `fd_owner` in one call |
 | `path_filestat_owner(dirfd, lookupflags, path, path_len, filestat_out, out)` | `path_filestat_get` (with its preview1 lookup flags: `1` follows a symlink) and the owner of the same path, in one call, so a libc's `stat` costs one call either way |
+| `path_mkfifo(dirfd, path, path_len, mode)` | `mkfifo`/`mkfifoat` and `mknod(S_IFIFO)` (homescoop#878): makes a [FIFO](#filesystem) with `mode & ~umask`, relative to `dirfd` (`AT_FDCWD` is `-2`). It doesn't follow a link in the last component, so an existing name, also a FIFO or a dangling link, is `EEXIST`. A mount without FIFOs answers `EPERM` |
 | `path_access(dirfd, path, path_len, amode, flags)` | `faccessat`: `amode` is `R_OK` 4, `W_OK` 2, `X_OK` 1 or `F_OK` 0; the check uses the real uid and gid, or the effective ones with `flags & 2` (`AT_EACCESS`), and the link itself with `flags & 1`. With `users: 'off'` it checks only that the path exists, as a libc without it does (see [Permissions](#permissions)) |
 
 The owner calls follow [File owners](#file-owners): with `users: 'off'`, `fd_chown` and `path_chown` succeed and change nothing, and the four owner calls answer `ENOTSUP`, "owners not tracked", before looking at anything, so a libc can remember that once and take its own `getuid()` and `getgid()` as every file's owner, which is what an Emscripten program built against the credential calls sees. Devices are root's. A pipe's owner is the caller.
@@ -1158,13 +1159,14 @@ A threaded WASIX C program for `test/integration/thread-signal.test.mjs` (#520).
 
 ### `fifotest`
 
-A WASIX C program for `test/integration/fifo.test.mjs` (#896). It opens an existing FIFO; WASIX libc has no `mkfifo`, so coreutils makes it.
+A WASIX C program for `test/integration/fifo.test.mjs` (#896).
+- `fifotest mkfifo PATH [MODE [DIR]]` makes a FIFO through its own `slicc_fs.path_mkfifo` declaration (`MODE` in octal, `666` by default), relative to the cwd, or to `DIR` opened as a directory fd, and prints the result.
 - `fifotest stat PATH` prints `fifo` or `not a fifo`.
 - `fifotest read PATH` opens it for reading (blocking) and prints what it reads until `EOF`. `fifotest nbread PATH` does the same with `O_NONBLOCK`.
 - `fifotest write PATH [TEXT]` opens it for writing and writes TEXT. `fifotest nbwrite PATH [TEXT]` does so with `O_NONBLOCK`, and prints `open: No such device or address` with no reader.
 - `fifotest alarm PATH [restart]` arms `alarm(1)` with a `SIGALRM` handler (with `SA_RESTART` if asked), then opens the FIFO for reading. It prints `open: Interrupted system call`, or `opened` and what it read. The handler creates the file named by `FIFOTEST_MARK`, so a test can wait for the interrupt instead of a clock.
 
-**Build:** `WASIX_SYSROOT_28=/path/to/wasix-sysroot ./build.sh`, with `wasixcc` 0.4.7 and binaryen's `wasm-opt` on `PATH`. `bin/fifotest.wasm` is 51,468 bytes, sha256 `a233774a219058050d8d793d48b05174cb35b8e571cb60aefa4b8d6612da9a28`.
+**Build:** `WASIX_SYSROOT_28=/path/to/wasix-sysroot ./build.sh`, with `wasixcc` 0.4.7 and binaryen's `wasm-opt` on `PATH`. `bin/fifotest.wasm` is 53,983 bytes, sha256 `2dbb2a0f741fe75a849d2ccb1a258633a38ade1f8d231b254bc0cbea0d074b9d`.
 
 ### `fdalias`
 

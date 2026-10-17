@@ -164,3 +164,40 @@ test('make -j2 runs a recursive build through a FIFO jobserver, with no mkfifo w
   assert.match(r.stdout, /^a$/m);
   assert.match(r.stdout, /done\nrc 0\n$/);
 });
+
+for (const users of ['off', 'enforce']) {
+  test(`a WASIX program makes a FIFO through slicc_fs.path_mkfifo, under the umask and without following a link, users ${users} (homescoop#878)`, {
+    timeout: 60_000,
+  }, async (t) => {
+    const bash = await kernelWith(t, users);
+    assert.deepEqual(
+      await bash(
+        [
+          'cd /tmp && fifotest mkfifo w1 600 && stat -c "%F %a" /tmp/w1',
+          'fifotest mkfifo /tmp/w1',
+          'mkdir -p /tmp/d && fifotest mkfifo rel 640 /tmp/d && stat -c "%F %a" /tmp/d/rel',
+          'umask 077; fifotest mkfifo /tmp/w2 666; stat -c %a /tmp/w2',
+          'ln -s /tmp/nowhere /tmp/dang; fifotest mkfifo /tmp/dang',
+          'fifotest mkfifo /tmp/nodir/x',
+          'fifotest read /tmp/w1 & sleep 0.3; echo through > /tmp/w1; wait',
+        ].join('; ')
+      ),
+      ok(
+        [
+          'mkfifo w1: ok',
+          'fifo 600',
+          'mkfifo /tmp/w1: File exists',
+          'mkfifo rel: ok',
+          'fifo 640',
+          'mkfifo /tmp/w2: ok',
+          '600',
+          'mkfifo /tmp/dang: File exists',
+          'mkfifo /tmp/nodir/x: No such file or directory',
+          'read: through',
+          'read end: 0 eof',
+          '',
+        ].join('\n')
+      )
+    );
+  });
+}
