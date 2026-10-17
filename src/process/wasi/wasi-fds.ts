@@ -378,9 +378,9 @@ export class WasiFds {
     this.bump();
   }
 
-  promote(fd: number): void {
+  promote(fd: number, moved = false): void {
     const e = this.get(fd);
-    if (e.type === 'file') this.promoteFiles(e.file.buffer);
+    if (e.type === 'file' && (!moved || this.moved(fd))) this.promoteFiles(e.file.buffer);
   }
 
   promoteFiles(only?: FileBuffer): void {
@@ -646,6 +646,13 @@ export class WasiFds {
     }
   }
 
+  moved(fd: number): boolean {
+    const e = this.get(fd);
+    if (e.type !== 'file') return false;
+    if (e.file.buffer.isOrphan()) return true;
+    return e.file.ino !== undefined && this.inoOf(e.file.path) !== e.file.ino;
+  }
+
   private inoOf(path: string): number | undefined {
     try {
       return this.fs.stat(path).ino;
@@ -828,7 +835,9 @@ export class WasiFds {
       buffer = this.freshBuffer(path, existing, oflags, want, mode);
     }
     buffer.opens++;
-    return new LocalFile(buffer, readable, writable, (fdflags & FDFLAGS.APPEND) !== 0);
+    const file = new LocalFile(buffer, readable, writable, (fdflags & FDFLAGS.APPEND) !== 0);
+    file.ino = existing?.ino;
+    return file;
   }
 
   private freshBuffer(
