@@ -55,6 +55,16 @@ export interface ChildHandle {
   termsig?: () => number | undefined;
 
   onState?: (listener: ChildStateListener) => void;
+
+  uid?: () => number | undefined;
+}
+
+export interface ChildEvent {
+  pid: number;
+  state: 'exited' | 'stopped' | 'continued';
+  status: number;
+  termsig?: number | undefined;
+  uid?: number | undefined;
 }
 
 export type ChildStateListener = (state: 'stopped' | 'continued', sig: number) => void;
@@ -175,7 +185,7 @@ export class ChildTable {
 
   private readonly leftovers = new Map<number, Map<number, Uint8Array[]>>();
 
-  onChildState?: () => void;
+  onChildState?: (child?: ChildEvent) => void;
 
   onReap?: (pid: number) => void;
 
@@ -263,8 +273,16 @@ export class ChildTable {
     void handle.exited.then((code) => {
       child.code = code;
       this.watchers.delete(handle.pid);
+      const termsig = handle.termsig?.();
       if (!this.kept.delete(handle.pid) && this.autoReap?.()) this.reap(handle.pid, code);
-      this.onChildState?.();
+      const uid = handle.uid?.();
+      this.onChildState?.({
+        pid: handle.pid,
+        state: 'exited',
+        status: termsig ?? code,
+        termsig,
+        uid,
+      });
     });
     handle.onState?.((state, sig) => {
       child.stopReport = state === 'stopped' ? sig : undefined;
@@ -274,7 +292,7 @@ export class ChildTable {
       const waiters = this.stateChanged;
       this.stateChanged = [];
       for (const wake of waiters) wake();
-      this.onChildState?.();
+      this.onChildState?.({ pid: handle.pid, state, status: sig, uid: handle.uid?.() });
     });
     this.children.set(handle.pid, child);
     return handle.pid;

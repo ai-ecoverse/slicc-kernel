@@ -111,6 +111,20 @@ test('a job that missed several minutes runs once, says how many it missed, and 
   assert.notEqual((await kernel.run(['cat', log], { user: 'scoop', cwd: '/' })).status, 0);
 });
 
+test('after more missed runs than the cap, the one run names the latest due time, not the cap one (#843)', async (t) => {
+  const { kernel, clock, read, settle, until } = await boot(t);
+  await kernel.users.add({ name: 'cone' });
+  await kernel.writeFile(
+    `${SPOOL}/cone`,
+    '# name: long\n* * * * * echo "due $SLICC_CRON_DUE missed $SLICC_CRON_MISSED"\n'
+  );
+  await settle();
+  clock.advance(70 * 24 * 3600_000);
+  await settle();
+  const log = await until(() => read('/var/log/cron/cone/long.log'), 'the log');
+  assert.match(log, /\ndue 2026-03-12T10:00:00\.000Z missed 99999\n$/);
+});
+
 test('a due run is stamped before it starts, so a kernel killed mid-job never runs it again', async (t) => {
   const first = await boot(t);
   await first.kernel.users.add({ name: 'cone' });

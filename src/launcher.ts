@@ -61,6 +61,7 @@ import type { CpuTimes } from './kernel/cpu-clock.ts';
 import { type Cred, copyCred, maySee, maySignal, ROOT } from './kernel/cred.ts';
 import { argvDigest, type Booked, TICKET_ENV } from './kernel/exec-ticket.ts';
 import { bytesSource, deviceFile, FdTable, type OpenFile, sinkFile } from './kernel/fd-table.ts';
+import { FifoTable } from './kernel/fifo.ts';
 import { spawnWasmProcess, type WasmProcessHandle, type WasmWorkerLike } from './kernel/host.ts';
 import { type JobMember, JobTable } from './kernel/jobs.ts';
 import { LockTable } from './kernel/locks.ts';
@@ -92,7 +93,7 @@ import { type ScrubSecret, scrubbedAll, scrubberOf, scrubStdio } from './kernel/
 import { SealedBroker, type SealedCaller, type SealedHook } from './kernel/sealed.ts';
 import { SemTable } from './kernel/sem.ts';
 import { SettlingChildren } from './kernel/settling.ts';
-import { SIG, sigbit, signalField } from './kernel/signals.ts';
+import { SI, SIG, type SigInfo, sigbit, signalField } from './kernel/signals.ts';
 import { LoopbackNet } from './kernel/socket.ts';
 import { KernelTty } from './kernel/tty.ts';
 import { keepingOpen, VfsNodes } from './kernel/vfs-file.ts';
@@ -535,6 +536,7 @@ function childHandle(handle: WasmProcessHandle): ChildHandle {
     exited: handle.exited,
     termsig: handle.termsig,
     onState: (listener) => handle.onState(listener),
+    uid: () => handle.cred?.().ruid,
   };
 }
 
@@ -602,6 +604,7 @@ export class Launcher {
   private readonly sudoer: Sudo;
   private readonly jobs = new JobTable();
   private readonly locks = new LockTable();
+  private readonly fifos = new FifoTable();
 
   private readonly sems = new SemTable();
   private readonly settling = new SettlingChildren((pid) => this.jobs.pgidOf(pid));
@@ -1717,7 +1720,7 @@ export class Launcher {
       onError: req.report,
       spawner: this.spawner(pid, req.report),
       forker: this.forker(pid, req),
-      kill: (target, sig) => this.kill(target, sig, this.credOf(pid), pid),
+      kill: (target, sig, info) => this.kill(target, sig, this.credOf(pid), pid, info),
       writesBack: (target) => this.processes.get(target)?.writesBack() === true,
       processes: () => ({
         boot: this.boot,
@@ -1740,6 +1743,7 @@ export class Launcher {
       net: this.net,
       http: new HttpHandles(this.transport, pid, this.loopbackFor(pid)),
       locks: this.locks,
+      fifos: this.fifos,
       sems: this.sems,
       resolver: this.resolver,
       onReap: (child) => this.reaped(child, pid),
@@ -1752,7 +1756,7 @@ export class Launcher {
     this.creds.set(pid, () => handle.cred?.() ?? copyCred(cred));
     this.marks(pid, req);
     if (req.ppid !== undefined && this.controlsJobs(req.ppid)) this.settling.started(pid, req.ppid);
-    this.jobs.add(pid, req.ppid, (sig) => handle.signal(sig), terminal);
+    this.jobs.add(pid, req.ppid, (sig, info) => handle.signal(sig, info), terminal);
     if (req.exec && req.ppid !== undefined) this.jobs.exec(req.ppid, pid, true);
     if (req.pgid !== undefined) this.jobs.join(pid, req.pgid);
     if (req.group === 'lead') this.jobs.lead(pid);
@@ -2183,7 +2187,14 @@ export class Launcher {
     return this.processes.get(pid)?.ignoredSignals(fork) ?? 0;
   }
 
-  kill(pid: number, sig: number, sender?: Readonly<Cred>, from?: number): boolean {
+  kill(
+    pid: number,
+    sig: number,
+    sender?: Readonly<Cred>,
+    from?: number,
+    forwarded?: SigInfo
+  ): boolean {
+    const info = forwarded ?? this.senderInfo(sender, from);
     const session = from === undefined ? undefined : this.jobs.sidOf(from);
     const may = (target: number) =>
       !sender ||
@@ -2194,20 +2205,26 @@ export class Launcher {
       (from !== undefined && this.granted.get(this.jobs.pgidOf(target) ?? 0) === from);
     if (pid === -1) {
       const sender = from === undefined ? undefined : this.imageOf(from);
-      return this.killAll(sig, (member) => this.imageOf(member) !== sender, may);
+      return this.killAll(sig, (member) => this.imageOf(member) !== sender, may, info);
     }
-    if (pid < 0) return this.jobs.killGroup(-pid, sig, (member) => may(this.imageOf(member)));
+    if (pid < 0) return this.jobs.killGroup(-pid, sig, (member) => may(this.imageOf(member)), info);
     const handle = this.processes.get(pid);
     if (!handle) return false;
     if (!may(this.imageOf(pid))) throw fsError('EPERM', `pid ${pid}`);
-    if (sig !== 0) handle.signal(sig);
+    if (sig !== 0) handle.signal(sig, info);
     return true;
+  }
+
+  private senderInfo(sender?: Readonly<Cred>, from?: number): SigInfo | undefined {
+    if (from === undefined) return undefined;
+    return { code: SI.USER, pid: this.jobs.shown(from), uid: sender?.ruid ?? 0, status: 0 };
   }
 
   private killAll(
     sig: number,
     other: (pid: number) => boolean,
-    may: (pid: number) => boolean
+    may: (pid: number) => boolean,
+    info?: SigInfo
   ): boolean {
     const candidates = [...this.processes].filter(([pid]) => pid !== 1 && other(pid));
     const targets = candidates.filter(([pid]) => may(this.imageOf(pid)));
@@ -2216,7 +2233,7 @@ export class Launcher {
     const parents = new Map(this.jobs.list().map((m) => [m.pid, m.execParent]));
     for (const [pid, handle] of targets) {
       const parent = parents.get(pid);
-      if (sig !== 0 && (parent === undefined || !pids.has(parent))) handle.signal(sig);
+      if (sig !== 0 && (parent === undefined || !pids.has(parent))) handle.signal(sig, info);
     }
     return targets.length > 0;
   }

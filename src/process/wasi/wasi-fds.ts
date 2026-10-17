@@ -768,6 +768,7 @@ export class WasiFds {
     fdflags: number,
     mode?: number
   ): number {
+    if (s?.isFifo) return this.kernelFifo(path, s, oflags, rights, fdflags);
     if (this.shared || this.kernelHolds(path, s)) {
       return this.kernelFile(path, s, oflags, rights, fdflags, mode);
     }
@@ -895,6 +896,37 @@ export class WasiFds {
     if (append) this.publishFlags(fd, { nonblock: false, append });
     this.bump(fd);
     return fd;
+  }
+
+  private kernelFifo(
+    path: string,
+    existing: SyncFsBridgeStat,
+    oflags: number,
+    rights: bigint,
+    fdflags: number
+  ): number {
+    const { readable, writable } = openAccess(existing, oflags, rights);
+    const nonblock = (fdflags & FDFLAGS.NONBLOCK) !== 0;
+    const access = writable ? (readable ? O_RDWR : O_WRONLY) : 0;
+    const fd = this.restarting(() =>
+      this.kernel.sys.openVfs(path, access | (nonblock ? O_NONBLOCK : 0), 0, { fifo: true })
+    );
+    this.table.set(fd, { type: 'kernel', kind: 'stream', nonblock, append: false });
+    if (nonblock) this.publishFlags(fd, { nonblock, append: false });
+    this.bump(fd);
+    return fd;
+  }
+
+  restartable: (() => boolean) | undefined;
+
+  private restarting<T>(call: () => T): T {
+    for (;;) {
+      try {
+        return call();
+      } catch (err) {
+        if ((err as { code?: unknown }).code !== 'EINTR' || !this.restartable?.()) throw err;
+      }
+    }
   }
 
   private createNew(path: string, oflags: number, mode?: number): boolean {

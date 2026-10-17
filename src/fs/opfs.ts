@@ -28,6 +28,7 @@ const S_IFDIR = 0o040000;
 const S_IFREG = 0o100000;
 const S_IFLNK = 0o120000;
 const S_IFSOCK = 0o140000;
+const S_IFIFO = 0o010000;
 const PERM_MASK = 0o7777;
 const S_ISGID = 0o2000;
 const READ_ATTEMPTS = 3;
@@ -413,7 +414,16 @@ export class OpfsFs implements KernelFs {
 
   private async stampNew(path: string, owner: NewOwner | undefined, directory: boolean) {
     const owned = await this.newFields(path, owner, directory);
-    const fields = owner?.socket && !directory ? { ...owned, socket: true as const } : owned;
+    if (owner?.socket && owner.fifo) throw new Error('a new node is a socket or a FIFO, not both');
+    const kind = directory
+      ? undefined
+      : owner?.socket
+        ? 'socket'
+        : owner?.fifo
+          ? 'fifo'
+          : undefined;
+    const unique = kind === 'fifo' ? { ino: inodeOf(`${path}\0${crypto.randomUUID()}`) } : {};
+    const fields = kind ? { ...owned, ...unique, [kind]: true as const } : owned;
     if (fields) await this.meta.update(path, (entry) => ({ ...entry, path, ...fields }));
   }
 
@@ -695,7 +705,7 @@ export class OpfsFs implements KernelFs {
 
   private mode(path: string, directory: boolean, meta: MetaEntry | undefined): number {
     const fallback = directory || EXECUTABLE.test(path) ? 0o755 : 0o644;
-    const type = directory ? S_IFDIR : meta?.socket ? S_IFSOCK : S_IFREG;
+    const type = directory ? S_IFDIR : meta?.socket ? S_IFSOCK : meta?.fifo ? S_IFIFO : S_IFREG;
     return type | (meta?.mode ?? fallback);
   }
 
@@ -829,11 +839,13 @@ export class OpfsFs implements KernelFs {
       meta?.mtimeMs !== undefined && meta.mtimeFor === modified ? meta.mtimeMs : modified;
     const mtime = touched ?? kept;
     const socket = !directory && meta?.socket === true;
+    const fifo = !directory && meta?.fifo === true;
     return {
-      isFile: !directory && !socket,
+      isFile: !directory && !socket && !fifo,
       isDirectory: directory,
       isSymbolicLink: false,
       ...(socket ? { isSocket: true } : {}),
+      ...(fifo ? { isFifo: true } : {}),
       size: file?.size ?? 0,
       mode: this.mode(path, directory, meta),
       mtime: new Date(mtime),

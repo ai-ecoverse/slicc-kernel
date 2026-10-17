@@ -1,0 +1,12 @@
+{
+  "name": "siginfotest",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "siginfotest": {
+        "wasm": "bin/siginfotest.wasm"
+      }
+    }
+  }
+}

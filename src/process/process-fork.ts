@@ -106,7 +106,8 @@ function kernelEntry(stream: ProcessStream, kernel: number): ForkStream {
   const device = stream.path === undefined ? undefined : NAMED_DEVICES[stream.path];
   const kind = stream.sliccKernelFile ? 'file' : stream.tty ? 'tty' : (device ?? 'stream');
   const access = kind === 'tty' ? O_RDWR : (stream.flags ?? O_RDWR) & O_ACCMODE;
-  return { fd: stream.fd, kernel, kind, flags: access, ...cloexec };
+  const fifo = stream.sliccKernelFifo ? { fifo: stream.sliccKernelFifo } : {};
+  return { fd: stream.fd, kernel, kind, flags: access, ...cloexec, ...fifo };
 }
 
 const ACCESS: Readonly<Record<number, DeviceAccess>> = { 0: 'read', 1: 'write' };
@@ -223,6 +224,7 @@ export function placeKernelStream(
   if (entry.kind === 'tty') streams.nameTerminal(stream);
   if (entry.kind === 'stream') {
     asFifo(stream, streams, entry.desc !== undefined ? `d${entry.desc}` : `k${entry.kernel}`);
+    if (entry.fifo) stream.path = entry.fifo;
   }
   setCloseOnExec(stream, entry.cloexec === true);
   return stream;

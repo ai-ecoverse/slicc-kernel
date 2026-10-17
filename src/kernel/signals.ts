@@ -81,3 +81,21 @@ export const SIGNAL_BY_NAME: Readonly<
   SIGSTOP: SIG.STOP,
   SIGCONT: SIG.CONT,
 };
+
+export interface SigInfo {
+  code: number;
+  pid: number;
+  uid: number;
+  status: number;
+}
+
+export const SI = { USER: 0, QUEUE: -1, TIMER: -2, TKILL: -6, KERNEL: 0x80 } as const;
+
+export const CLD = { EXITED: 1, KILLED: 2, DUMPED: 3, STOPPED: 5, CONTINUED: 6 } as const;
+
+export const KERNEL_SIGINFO: Readonly<SigInfo> = Object.freeze({
+  code: SI.KERNEL,
+  pid: 0,
+  uid: 0,
+  status: 0,
+});

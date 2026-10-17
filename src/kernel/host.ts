@@ -34,6 +34,7 @@ import type { ClipboardBroker } from './clipboard.ts';
 import { type CpuTimes, ProcessClocks } from './cpu-clock.ts';
 import { type Cred, copyCred } from './cred.ts';
 import { type FdTable, kernelFdKind, type OpenFile } from './fd-table.ts';
+import type { FifoTable } from './fifo.ts';
 import type { JobTable } from './jobs.ts';
 import type { LockTable } from './locks.ts';
 import type { HttpHandles } from './net/http-syscalls.ts';
@@ -65,7 +66,7 @@ import {
 import type { PtyTable } from './pty.ts';
 import type { SealedBroker } from './sealed.ts';
 import type { SemTable } from './sem.ts';
-import { SIG, sigbit } from './signals.ts';
+import { SIG, type SigInfo, sigbit } from './signals.ts';
 import { KernelSocket, type LoopbackNet } from './socket.ts';
 import { isDatagram } from './unix-dgram.ts';
 import type { VfsNodes } from './vfs-file.ts';
@@ -113,7 +114,7 @@ export interface SpawnWasmOptions {
   ppid?: number;
 
   shownPid?: number;
-  kill?: (pid: number, sig: number) => boolean | Promise<boolean>;
+  kill?: (pid: number, sig: number, info?: SigInfo) => boolean | Promise<boolean>;
   writesBack?: (pid: number) => boolean;
   processes?: () => ProcessListing;
   sudo?: WasmProcessOptions['sudo'];
@@ -133,6 +134,7 @@ export interface SpawnWasmOptions {
 
   http?: HttpHandles;
   locks?: LockTable;
+  fifos?: FifoTable;
   sems?: SemTable;
   onReap?: (pid: number) => void;
   resolver?: Resolver;
@@ -142,7 +144,7 @@ export interface WasmProcessHandle {
   pid: number;
   exited: Promise<number>;
   kill(code?: number): void;
-  signal(sig: number): void;
+  signal(sig: number, info?: SigInfo): void;
   termsig(): number | undefined;
   onState(listener: StateListener): void;
   memory(): number;
@@ -189,6 +191,7 @@ export function inheritedFds(fds: FdTable): InheritedFd[] {
         ...(flags !== undefined ? { flags } : {}),
         ...(fds.closesOnExec(fd) ? { cloexec: true } : {}),
         ...(kind === 'stream' ? { desc: descId(open) } : {}),
+        ...(open.file.fifo ? { fifo: open.file.fifo } : {}),
       };
     });
 }
@@ -461,6 +464,7 @@ function processOptions(
     net: opts.net,
     http: opts.http,
     locks: opts.locks,
+    fifos: opts.fifos,
     ...(opts.sems ? { sems: opts.sems } : {}),
     onReap: opts.onReap,
     resolver: opts.resolver,
@@ -525,7 +529,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
       opts,
       header,
       {
-        raise: (sig) => signal(sig),
+        raise: (sig, info) => signal(sig, info),
         threadKill: (tid, sig) =>
           killThread(threadSignals.get(tid), process.signalMasks().caught, sig),
         unblockedThread: (sig) => unblockedThread(threadSignals, sig),
@@ -659,8 +663,9 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     if (opts.program.abi !== 'wasi' || done) finish(code, sig);
     else dying.start(code, sig, header, process, () => finish(code, sig));
   };
-  const signal = (sig: number): void => {
-    if (process.signal(sig) === 'terminate') terminate(sig === SIG.KILL ? 137 : 128 + sig, sig);
+  const signal = (sig: number, info?: SigInfo): void => {
+    if (process.signal(sig, info) === 'terminate')
+      terminate(sig === SIG.KILL ? 137 : 128 + sig, sig);
   };
   const kill = (code = 137): void =>
     finish(code, code > 128 && code < 160 ? code - 128 : undefined);

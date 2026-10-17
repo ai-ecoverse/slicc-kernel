@@ -60,6 +60,12 @@ export class Incoming {
     this.buf = this.buf.subarray(n);
     return out;
   }
+  async firstLine(max: number, signal?: AbortSignal): Promise<string> {
+    while (this.buf.length < max && !this.buf.includes(10) && (await this.fill(signal)));
+    const end = this.buf.indexOf(10);
+    const bytes = this.buf.subarray(0, end >= 0 ? end + 1 : Math.min(max, this.buf.length));
+    return String.fromCharCode(...bytes);
+  }
   async peek(signal?: AbortSignal): Promise<number | undefined> {
     if (this.buf.length === 0) await this.fill(signal);
     return this.buf[0];

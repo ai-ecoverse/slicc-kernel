@@ -955,6 +955,7 @@ class MountFs implements KernelFs {
     }
     const { mount, rel } = found;
     this.writable(mount, real);
+    if (owner?.fifo) throw errnoError('EPERM', `${real}: this mount has no FIFOs`);
     const bytes = typeof content === 'string' ? new TextEncoder().encode(content) : content;
     if (mount.maxFile > 0 && bytes.length > mount.maxFile) {
       throw errnoError(

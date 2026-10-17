@@ -51,6 +51,7 @@ import {
   trackCloseOnExec,
   useDevFd,
   useDevRemoval,
+  useFifoOpens,
   useFileMmap,
   useMounts,
   useZeroDevices,
@@ -132,6 +133,7 @@ export function kernelSys(transport: SyncSabTransport): ProcessSys & PtyKernel &
             ...(opts?.created ? { created: true } : {}),
             ...(opts?.pin ? { pin: opts.pin } : {}),
             ...(opts?.handle !== undefined ? { handle: opts.handle } : {}),
+            ...(opts?.fifo ? { fifo: true } : {}),
           },
           `fd-open-vfs ${path}`
         )
@@ -732,6 +734,7 @@ export async function runWasmProcess(
   streams.useKernelFdMetadata();
   useDevFd(running.FS);
   useDevRemoval(running.FS);
+  useFifoOpens(running.FS, (stream, path) => streams.attachFifo(stream, path));
   useFileMmap(running.FS, {
     sys,
     memory: () => memory,
