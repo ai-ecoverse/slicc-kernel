@@ -236,7 +236,7 @@ export class UnlinkedKeeper {
     pinned.commit();
   }
 
-  async pin(target: string, gated: () => void = () => undefined): Promise<Pinned> {
+  private heldWithin(target: string): Map<string, UnlinkHolder[]> {
     const held = new Map<string, UnlinkHolder[]>();
     for (const holder of this.holders) {
       if (holder.owns(target)) continue;
@@ -245,12 +245,20 @@ export class UnlinkedKeeper {
         held.set(path, [...(held.get(path) ?? []), holder]);
       }
     }
-    const paths = [...held.keys()].sort();
+    return held;
+  }
+
+  async pin(target: string, gated: () => void = () => undefined): Promise<Pinned> {
+    const paths = [...this.heldWithin(target).keys()].sort();
     const releases: Array<() => void> = [];
     for (const path of paths) releases.push(await this.gate.acquire(path));
     gated();
+    const now = this.heldWithin(target);
+    const held = new Map(
+      paths.flatMap((path) => (now.has(path) ? [[path, now.get(path) as UnlinkHolder[]]] : []))
+    );
     const hidden = new Map<string, string>();
-    for (const path of paths) {
+    for (const path of held.keys()) {
       const at = await this.hide(path);
       if (at !== undefined) hidden.set(path, at);
     }

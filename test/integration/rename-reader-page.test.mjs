@@ -6,7 +6,7 @@ import { booted, installPackage } from './kernel.mjs';
 const chrome = await launch();
 after(() => chrome.close());
 
-const RENAMES = 400;
+const RENAMES = 1000;
 const STALL_MS = 40_000;
 
 test('on the OPFS root, a file renamed over again and again while other processes keep reading it never hangs a read, a rename or a stat: the renames all finish (#980)', {
@@ -24,7 +24,7 @@ test('on the OPFS root, a file renamed over again and again while other processe
   await page.evaluate((renames) => {
     const script = [
       'cd /root/swap',
-      'for r in 1 2 3; do (while [ ! -e stop ]; do cat f > /dev/null 2>> err; stat f > /dev/null 2>> err; done) & done',
+      'for r in 1 2 3 4 5 6; do (while [ ! -e stop ]; do cat f > /dev/null 2>> err; stat f > /dev/null 2>> err; done) & done',
       `for i in $(seq 1 ${renames}); do echo $i > t.$i; mv t.$i f; echo $i >> progress; done`,
       ': > stop',
       'wait',
