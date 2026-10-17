@@ -35,9 +35,9 @@ export interface LockCalls {
     start: number,
     len: number,
     wait: boolean
-  ): void;
+  ): unknown;
   get(target: LockTarget, kind: LockKind, start: number, len: number): LockHeld | null;
-  flock(fd: number, kind: FlockKind, wait: boolean): void;
+  flock(fd: number, kind: FlockKind, wait: boolean): unknown;
 }
 
 export interface LockHost {
@@ -46,6 +46,7 @@ export interface LockHost {
   flush(file: LockedFile): void;
   locked(): void;
   promote(fd: number, moved?: boolean): void;
+  reread(fd: number): void;
   calls: LockCalls;
 }
 
@@ -81,7 +82,8 @@ export function lockImports(host: LockHost): Record<string, WasiFunction> {
       host.promote(fd);
       const kind = FLOCK_OPS[op & ~LOCK_NB];
       if (!kind) throw new WasiError('EINVAL');
-      host.calls.flock(fd, kind, kind !== 'unlock' && (op & LOCK_NB) === 0);
+      const shared = host.calls.flock(fd, kind, kind !== 'unlock' && (op & LOCK_NB) === 0);
+      if (kind !== 'unlock' && shared === true) host.reread(fd);
     },
     fcntl_lock: (fd: number, cmd: number, at: number) => {
       if (cmd !== F_GETLK && cmd !== F_SETLK && cmd !== F_SETLKW) throw new WasiError('EINVAL');
@@ -103,8 +105,10 @@ export function lockImports(host: LockHost): Record<string, WasiFunction> {
       )
         throw new WasiError('EBADF');
       if (kind !== 'write') host.flush(file);
-      host.calls.set(file.target, kind, start, len, cmd === F_SETLKW);
-      if (kind !== 'unlock') host.locked();
+      const shared = host.calls.set(file.target, kind, start, len, cmd === F_SETLKW);
+      if (kind === 'unlock') return;
+      host.locked();
+      if (shared === true) host.reread(fd);
     },
   };
 }

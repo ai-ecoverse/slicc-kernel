@@ -56,6 +56,7 @@ export interface KernelLocks {
     blocking: () => AbortSignal
   ): Promise<void>;
   holds(owner: number): boolean;
+  shared?(): boolean;
   dropFile(key: string, owner: number): void;
   release(pid: number): void;
   lock(pid: number, path: string, exclusive: boolean, fd: number): boolean;
@@ -121,6 +122,10 @@ export class LockService implements KernelLocks {
       wait: (key, owner, kind, blocking) => this.flockWait(key, owner, kind, blocking),
       drop: (owner) => this.flockDrop(owner),
     };
+  }
+
+  shared(): boolean {
+    return !this.leader || this.ownerOf.size > 0 || this.tokens.size > 0;
   }
 
   private aliveOf(kernel: string): string {

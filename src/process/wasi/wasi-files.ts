@@ -178,6 +178,12 @@ export class FileBuffer {
     this.ranged?.pin();
   }
 
+  reread(): void {
+    if (this.dirty || this.orphaned) return;
+    if (this.ranged) this.ranged.reread();
+    else this.data = undefined;
+  }
+
   isOrphan(): boolean {
     return this.orphaned;
   }

@@ -986,6 +986,7 @@ export class WasmProcess {
           owner: () => this.lockOwner(),
           fileKey: (target, kind, setting) => this.lockKey(target, kind, setting),
           flockOf: (fd) => this.flockOf(fd),
+          settle: (fd, granted) => this.settle(fd, granted),
           locks: this.options.locks,
           ops: this.asyncOps,
           blocking: () => this.blockingSignal(cancelled),
@@ -1078,6 +1079,12 @@ export class WasmProcess {
     if (file) fileKeys.set(file, key);
     else if (this.pathKeys.size < 4096) this.pathKeys.set(path, key);
     return key;
+  }
+
+  private async settle(fd: number, granted: boolean): Promise<void> {
+    const file = this.fds.has(fd) ? this.fds.get(fd).file : undefined;
+    if (granted) await file?.reread?.();
+    else await file?.flush?.();
   }
 
   private async flockOf(fd: number): Promise<{ key: string; owner: OpenFile }> {
