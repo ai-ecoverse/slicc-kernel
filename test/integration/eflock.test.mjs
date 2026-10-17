@@ -44,10 +44,11 @@ test("an Emscripten program's flock() reaches the kernel through __syscall_flock
       'bash',
       '-c',
       [
-        '{ sleep 1; } | eflocktest hold /tmp/l > /tmp/held &',
+        '{ until [ -e /tmp/release ]; do sleep 0.05; done; } | eflocktest hold /tmp/l > /tmp/held &',
         'until [ -s /tmp/held ]; do sleep 0.05; done',
         'eflocktest try /tmp/l',
         'eflocktest shared /tmp/l',
+        'touch /tmp/release',
         'wait',
         'cat /tmp/held',
         'eflocktest try /tmp/l',
