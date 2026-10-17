@@ -123,6 +123,16 @@ function sidecar(meta: MetaStore): MetaStore {
   return ops;
 }
 
+function occupied(entry: MetaEntry | undefined): Partial<MetaEntry> {
+  if (!entry?.vacated) return entry ?? {};
+  const { vacated: _, ...kept } = entry;
+  return kept;
+}
+
+function vacatedAt(path: string): MetaEntry {
+  return { path, ino: inodeOf(`${path}\0${crypto.randomUUID()}`), vacated: true };
+}
+
 function missing(err: unknown): boolean {
   const code = (err as { code?: unknown })?.code;
   return code === 'ENOENT' || code === 'ENOTDIR';
@@ -435,7 +445,7 @@ export class OpfsFs implements KernelFs {
           : undefined;
     const unique = kind === 'fifo' ? { ino: inodeOf(`${path}\0${crypto.randomUUID()}`) } : {};
     const fields = kind ? { ...owned, ...unique, [kind]: true as const } : owned;
-    if (fields) await this.meta.update(path, (entry) => ({ ...entry, path, ...fields }));
+    if (fields) await this.meta.update(path, (entry) => ({ ...occupied(entry), path, ...fields }));
   }
 
   private guarded: readonly string[] = [];
@@ -1271,8 +1281,9 @@ export class OpfsFs implements KernelFs {
       const freshMeta = this.meta.fresh
         ? await this.meta.fresh([path])
         : await this.meta.get([path]);
-      if (freshMeta[0]?.link !== undefined) throw fsError('EEXIST', path);
-      if (freshMeta[0] !== undefined) await this.meta.remove([path]);
+      const found = freshMeta[0];
+      if (found?.link !== undefined) throw fsError('EEXIST', path);
+      if (found !== undefined && !found.vacated) await this.meta.remove([path]);
       this.forget(physical);
       this.refuse(physical);
       await dir.getDirectoryHandle(name, { create: true });
@@ -1295,8 +1306,9 @@ export class OpfsFs implements KernelFs {
       const freshMeta = this.meta.fresh
         ? await this.meta.fresh([path])
         : await this.meta.get([path]);
-      if (freshMeta[0]?.link !== undefined) throw fsError('EEXIST', path);
-      if (freshMeta[0] !== undefined) await this.meta.remove([path]);
+      const found = freshMeta[0];
+      if (found?.link !== undefined) throw fsError('EEXIST', path);
+      if (found !== undefined && !found.vacated) await this.meta.remove([path]);
       this.forget(physical);
       this.refuse(physical);
       await dir.getFileHandle(name, { create: true });
@@ -1408,14 +1420,15 @@ export class OpfsFs implements KernelFs {
     const moving = await this.movedOwner(source);
     const carry = (entry: MetaEntry | undefined): MetaEntry => ({
       ino: inodeOf(source.path),
-      ...entry,
+      ...occupied(entry),
       ...moving,
       path: destination,
       ctimeMs: now,
     });
+    const left = vacatedAt(source.path);
     if (source.link) {
       if (target?.handle) await this.rm(destination);
-      await this.meta.move(source.path, destination, carry);
+      await this.meta.move(source.path, destination, carry, left);
       this.touch(Date.now(), parentOf(source.path), parent.path);
       return;
     }
@@ -1429,9 +1442,12 @@ export class OpfsFs implements KernelFs {
       this.place(source.handle as Handle, dir, staging)
     );
     if (swap) await this.rm(destination, { recursive: true });
-    await this.meta.move(source.path, destination, carry);
+    await this.meta.move(source.path, destination, carry, left);
     this.movePending(source.path, destination);
-    if (!moved) await this.rm(source.path, { recursive: true });
+    if (!moved) {
+      await this.rm(source.path, { recursive: true });
+      await this.meta.update(source.path, () => left);
+    }
     let copied = !moved;
     if (swap) {
       const staged = await dir.getDirectoryHandle(staging);
@@ -1524,11 +1540,11 @@ export class OpfsFs implements KernelFs {
     const now = Date.now();
     const fields = await this.newFields(at, owner && { uid: owner.uid, gid: owner.gid }, false);
     await this.entering(at, () =>
-      this.meta.update(at, () => ({
+      this.meta.update(at, (entry) => ({
         path: at,
         link: target,
         dir: parent.path,
-        ino: inodeOf(at),
+        ino: entry?.vacated && entry.ino !== undefined ? entry.ino : inodeOf(at),
         mtimeMs: now,
         ctimeMs: now,
         ...fields,
@@ -1603,7 +1619,10 @@ export class OpfsFs implements KernelFs {
 
   async reconcile(): Promise<number> {
     let removed = 0;
-    for (const entry of await this.meta.all()) {
+    const entries = await this.meta.all();
+    const carried = new Set(entries.filter((e) => !e.vacated).map((e) => e.ino));
+    for (const entry of entries) {
+      if (entry.vacated && carried.has(inodeOf(entry.path))) continue;
       const real = await this.real(entry.path);
       const stale =
         entry.link === undefined ? !real : real || !(await this.real(parentOf(entry.path)));

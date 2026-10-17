@@ -18,6 +18,7 @@ export interface MetaEntry {
   heir?: [number, number];
   writes?: number;
   epoch?: number;
+  vacated?: true;
 }
 
 export type MetaChange = (entry: MetaEntry | undefined) => MetaEntry | undefined;
@@ -32,7 +33,12 @@ export interface MetaStore {
   fresh?(paths: readonly string[]): Promise<Array<MetaEntry | undefined>>;
   update(path: string, change: MetaChange): Promise<void>;
   updateMany?(changes: ReadonlyArray<MetaUpdate>): Promise<void>;
-  move(from: string, to: string, root: (entry: MetaEntry | undefined) => MetaEntry): Promise<void>;
+  move(
+    from: string,
+    to: string,
+    root: (entry: MetaEntry | undefined) => MetaEntry,
+    left?: MetaEntry
+  ): Promise<void>;
   remove(paths: readonly string[]): Promise<void>;
   links(dir: string): Promise<MetaEntry[]>;
   under(path: string): Promise<MetaEntry[]>;
@@ -77,7 +83,12 @@ export class MemoryMeta implements MetaStore {
     else this.entries.delete(path);
   }
 
-  async move(from: string, to: string, root: (entry: MetaEntry | undefined) => MetaEntry) {
+  async move(
+    from: string,
+    to: string,
+    root: (entry: MetaEntry | undefined) => MetaEntry,
+    left?: MetaEntry
+  ) {
     await this.remove([to]);
     const carried = this.entries.subtree(from).map((path) => this.entries.get(path) as MetaEntry);
     for (const entry of carried) this.entries.delete(entry.path);
@@ -86,6 +97,7 @@ export class MemoryMeta implements MetaStore {
       if (path !== to) this.entries.set(path, moved(entry, path));
     }
     this.entries.set(to, moved(root(carried.find((entry) => entry.path === from)), to));
+    if (left) this.entries.set(from, left);
   }
 
   async remove(paths: readonly string[]): Promise<void> {
@@ -235,7 +247,12 @@ export class IndexedDbMeta implements MetaStore {
     this.db.close();
   }
 
-  async move(from: string, to: string, root: (entry: MetaEntry | undefined) => MetaEntry) {
+  async move(
+    from: string,
+    to: string,
+    root: (entry: MetaEntry | undefined) => MetaEntry,
+    left?: MetaEntry
+  ) {
     this.settleRemoves();
     const [transaction, store] = this.transaction('readwrite');
     store.delete(to);
@@ -249,6 +266,7 @@ export class IndexedDbMeta implements MetaStore {
         store.put(moved(entry, to + entry.path.slice(from.length)));
       }
       store.put(moved(root(source.result), to));
+      if (left) store.put(left);
     };
     await settle(transaction, () => undefined);
     this.changed({ trees: [from, to] });
