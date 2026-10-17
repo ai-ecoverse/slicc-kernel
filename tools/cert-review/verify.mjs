@@ -14,6 +14,7 @@ import {
   older,
   provenanceProblems,
   releaseNotes,
+  statusAt,
 } from './lib.mjs';
 
 const { values } = parseArgs({
@@ -161,9 +162,7 @@ function context(published) {
     for (const n of mergedPrs(ghAll(`repos/${repo}/compare/v${since}...v${version}`))) {
       const pull = gh(`repos/${repo}/pulls/${n}`);
       const statuses = ghAll(`repos/${repo}/commits/${pull.head.sha}/statuses`);
-      const found =
-        statuses.find((s) => s.context === 'cert-review') ??
-        statuses.find((s) => s.context === 'cert-review-pr');
+      const found = statusAt(statuses, ['cert-review', 'cert-review-pr'], pull.merged_at);
       prs.push({
         pr: n,
         head: pull.head.sha,
