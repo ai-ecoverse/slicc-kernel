@@ -111,6 +111,8 @@ export class UnlinkedKeeper {
   readonly gate = new PathGate();
   private queue: Promise<unknown> = Promise.resolve();
   private count = 0;
+  private readonly replacing = new Map<string, { done: Promise<void> }>();
+  private replaced = 0;
 
   private readonly links = new Map<string, number>();
 
@@ -149,8 +151,7 @@ export class UnlinkedKeeper {
 
   wrap(fs: KernelFs = this.fs): KernelFs {
     const keeper = this;
-    const replacing = new Map<string, { done: Promise<void> }>();
-    const replaced = new Map<string, number>();
+    const { replacing } = this;
     const replace = async (target: string, op: () => Promise<void>) => {
       const before = replacing.get(target);
       const { promise, resolve } = Promise.withResolvers<void>();
@@ -161,7 +162,7 @@ export class UnlinkedKeeper {
       try {
         await op();
       } finally {
-        replaced.set(target, (replaced.get(target) ?? 0) + 1);
+        keeper.replaced += 1;
         resolve();
         if (replacing.get(target) === mine) replacing.delete(target);
       }
@@ -170,14 +171,14 @@ export class UnlinkedKeeper {
       const at = fs.resolvePath('/', path);
       for (let attempt = 1; ; attempt++) {
         await replacing.get(at)?.done;
-        const seen = replaced.get(at) ?? 0;
+        const seen = keeper.replaced;
         try {
           return await op();
         } catch (err) {
           const code = (err as { code?: unknown })?.code;
           if (attempt >= 3 || code !== 'ENOENT') throw err;
           await replacing.get(at)?.done;
-          if ((replaced.get(at) ?? 0) === seen) throw err;
+          if (keeper.replaced === seen) throw err;
         }
       }
     };
