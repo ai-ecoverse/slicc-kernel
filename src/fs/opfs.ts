@@ -38,6 +38,7 @@ const ABSENT_MS = 2;
 const ABSENT_NAMES = 4096;
 const FILE_HANDLES = 4096;
 const STALE: ReadonlySet<string> = new Set(['NotFoundError', 'TypeMismatchError']);
+const REPLACED_ATTEMPTS = 4;
 const EXECUTABLE = /\/node_modules\/(?:@[^/]+\/)?[^/]+\/bin\//;
 
 type Handle = FileSystemFileHandle | FileSystemDirectoryHandle;
@@ -242,6 +243,8 @@ export class OpfsFs implements KernelFs {
   private readonly files = new PathMap<FileSystemFileHandle>();
   private readonly absent = new PathMap<number>();
   private changes = 0;
+  private replacing: Promise<void> = Promise.resolve();
+  private replacements = 0;
   private readonly snapshots = new WeakMap<FileSystemFileHandle, File>();
   private readonly found = new WeakMap<FileSystemFileHandle, number>();
   private readonly checked = new WeakMap<FileSystemDirectoryHandle, number>();
@@ -645,7 +648,24 @@ export class OpfsFs implements KernelFs {
     return undefined;
   }
 
-  private async locate(path: string, follow: boolean): Promise<Located> {
+  private locate(path: string, follow: boolean): Promise<Located> {
+    return this.unreplaced(() => this.located(path, follow));
+  }
+
+  private async unreplaced<T>(op: () => Promise<T>): Promise<T> {
+    for (let attempt = 1; ; attempt++) {
+      const seen = this.replacements;
+      try {
+        return await op();
+      } catch (err) {
+        if (attempt >= REPLACED_ATTEMPTS || !missing(err)) throw err;
+        await this.replacing;
+        if (this.replacements === seen) throw err;
+      }
+    }
+  }
+
+  private async located(path: string, follow: boolean): Promise<Located> {
     let current = path;
     for (let hops = 0; hops <= MAX_LINKS; hops++) {
       try {
@@ -889,12 +909,12 @@ export class OpfsFs implements KernelFs {
     return { ...stat, ...(ownOf(meta) ?? inherit(entries)) };
   }
 
-  async stat(path: string): Promise<FsStat> {
-    return this.describe(await this.locate(path, true));
+  stat(path: string): Promise<FsStat> {
+    return this.unreplaced(async () => this.describe(await this.located(path, true)));
   }
 
-  async lstat(path: string): Promise<FsStat> {
-    return this.describe(await this.locate(path, false));
+  lstat(path: string): Promise<FsStat> {
+    return this.unreplaced(async () => this.describe(await this.located(path, false)));
   }
 
   async exists(path: string): Promise<boolean> {
@@ -921,6 +941,13 @@ export class OpfsFs implements KernelFs {
     }
   }
 
+  private reading<T>(path: string, op: (handle: FileSystemFileHandle) => Promise<T>): Promise<T> {
+    return this.unreplaced(async () => {
+      const handle = await this.existing(path);
+      return this.retrying(path, () => op(handle), false);
+    });
+  }
+
   private async existing(path: string, writing = false): Promise<FileSystemFileHandle> {
     const found = await this.locate(path, true);
     if (writing) this.refuse(found.path);
@@ -936,11 +963,9 @@ export class OpfsFs implements KernelFs {
   }
 
   async readFileBuffer(path: string): Promise<Uint8Array> {
-    const handle = await this.existing(path);
-    const bytes = await this.retrying(
+    const bytes = await this.reading(
       path,
-      async () => new Uint8Array(await (await handle.getFile()).arrayBuffer()),
-      false
+      async (handle) => new Uint8Array(await (await handle.getFile()).arrayBuffer())
     );
     await this.refuseNode(path, bytes.length === 0);
     return bytes;
@@ -950,44 +975,29 @@ export class OpfsFs implements KernelFs {
     path: string,
     cached = false
   ): Promise<{ bytes: Uint8Array; version: string }> {
-    const handle = await this.existing(path);
-    return this.retrying(
-      path,
-      async () => {
-        const stamp = await this.stamp(path, cached);
-        const file = await handle.getFile();
-        const bytes = new Uint8Array(await file.arrayBuffer());
-        await this.refuseNode(path, bytes.length === 0);
-        return { bytes, version: `${file.lastModified}:${file.size}:${stamp}` };
-      },
-      false
-    );
+    return this.reading(path, async (handle) => {
+      const stamp = await this.stamp(path, cached);
+      const file = await handle.getFile();
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      await this.refuseNode(path, bytes.length === 0);
+      return { bytes, version: `${file.lastModified}:${file.size}:${stamp}` };
+    });
   }
 
   async version(path: string, cached = false): Promise<string> {
-    const handle = await this.existing(path);
-    return this.retrying(
-      path,
-      async () => {
-        const stamp = await this.stamp(path, cached);
-        const file = await handle.getFile();
-        return `${file.lastModified}:${file.size}:${stamp}`;
-      },
-      false
-    );
+    return this.reading(path, async (handle) => {
+      const stamp = await this.stamp(path, cached);
+      const file = await handle.getFile();
+      return `${file.lastModified}:${file.size}:${stamp}`;
+    });
   }
 
   async pread(path: string, offset: number, length: number): Promise<Uint8Array> {
-    const handle = await this.existing(path);
-    return this.retrying(
-      path,
-      async () => {
-        const file = await handle.getFile();
-        await this.refuseNode(path, file.size === 0);
-        return new Uint8Array(await file.slice(offset, offset + length).arrayBuffer());
-      },
-      false
-    );
+    return this.reading(path, async (handle) => {
+      const file = await handle.getFile();
+      await this.refuseNode(path, file.size === 0);
+      return new Uint8Array(await file.slice(offset, offset + length).arrayBuffer());
+    });
   }
 
   async pwrite(path: string, offset: number, bytes: Uint8Array): Promise<void> {
@@ -1333,7 +1343,9 @@ export class OpfsFs implements KernelFs {
     const staging = swap ? `.${name}.${crypto.randomUUID()}` : name;
     this.forget(destination);
     const timed = await this.explicitTimes(source.path);
-    const moved = await this.place(source.handle as Handle, dir, staging);
+    const moved = await this.replacingTarget(targetStat !== null, () =>
+      this.place(source.handle as Handle, dir, staging)
+    );
     if (swap) await this.rm(destination, { recursive: true });
     await this.meta.move(source.path, destination, carry);
     this.movePending(source.path, destination);
@@ -1348,6 +1360,22 @@ export class OpfsFs implements KernelFs {
     if (copied) await this.restamp(destination, timed);
     this.changed(source.path, destination);
     this.touch(Date.now(), parentOf(source.path), parent.path);
+  }
+
+  private async replacingTarget<T>(replaces: boolean, op: () => Promise<T>): Promise<T> {
+    if (!replaces) return op();
+    const { promise, resolve } = Promise.withResolvers<void>();
+    const before = this.replacing;
+    this.replacing = Promise.all([before, promise]).then(() => undefined);
+    this.replacements++;
+    this.changes++;
+    try {
+      return await op();
+    } finally {
+      this.replacements++;
+      this.changes++;
+      resolve();
+    }
   }
 
   private async modified(path: string): Promise<number> {
