@@ -312,15 +312,32 @@ function frozen(bytes: Uint8Array): SyncFsFileIo {
   };
 }
 
+export function physicalProc(fs: Pick<SyncFsPosixBridge, 'exists' | 'changes'>): () => boolean {
+  const view = fs.changes;
+  let seen: { gen: number; physical: boolean } | undefined;
+  return () => {
+    if (seen && view && !view.foreign()) {
+      const proc = view.changedSince(seen.gen, '/proc');
+      if (!proc.changed && !view.changedSince(seen.gen, '/').changed) {
+        seen.gen = proc.now;
+        return seen.physical;
+      }
+    }
+    const gen = view?.now();
+    let physical: boolean;
+    try {
+      physical = fs.exists('/proc');
+    } catch {
+      physical = false;
+    }
+    seen = gen === undefined ? undefined : { gen, physical };
+    return physical;
+  };
+}
+
 export function procfsBridge<T extends SyncFsPosixBridge>(fs: T, tree: ProcTree): T {
   const toProc = (path: string, follow: boolean) => procPath(fs, path, follow);
-  const shadowing = (): boolean => {
-    try {
-      return fs.exists('/proc');
-    } catch {
-      return false;
-    }
-  };
+  const shadowing = physicalProc(fs);
   const via = <R>(p: string, proc: (q: string) => R, own: () => R, follow = true): R => {
     if (inProc(p)) return proc(p);
     if (shadowing()) {
