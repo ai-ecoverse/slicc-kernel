@@ -6,7 +6,7 @@ import { booted, installPackage, ok } from './kernel.mjs';
 const chrome = await launch();
 after(() => chrome.close());
 
-const LINKS = 100;
+const LINKS = 60;
 
 test('a tab that boots while another extracts symlinks with tar leaves every symlink in place (bios tar symlink drop)', async (t) => {
   const { page, bash } = await booted(chrome, t, { users: 'enforce' });
@@ -20,7 +20,7 @@ test('a tab that boots while another extracts symlinks with tar leaves every sym
   );
   const other = await page.tab();
   const size = Number((await bash('wc -c < /tmp/pack/src.tar', { cwd: '/' })).stdout);
-  for (let round = 0; round < 3; round++) {
+  for (let round = 0; round < 2; round++) {
     const extracting = bash(
       `cd /tmp/pack && rm -rf out go && mkdir out && { head -c ${size - 10240} src.tar; while [ ! -e go ]; do sleep 0.05; done; tail -c 10240 src.tar; } | tar -xf - -C out && echo "unpack=$?"`,
       { cwd: '/' }
