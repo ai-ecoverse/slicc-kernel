@@ -33,7 +33,6 @@ import type { ChildForker, ChildSpawner } from './children.ts';
 import type { ClipboardBroker } from './clipboard.ts';
 import { type CpuTimes, ProcessClocks } from './cpu-clock.ts';
 import { type Cred, copyCred } from './cred.ts';
-import { KernelDgram } from './dgram.ts';
 import { type FdTable, kernelFdKind, type OpenFile } from './fd-table.ts';
 import type { FifoTable } from './fifo.ts';
 import type { JobTable } from './jobs.ts';
@@ -69,6 +68,7 @@ import type { SealedBroker } from './sealed.ts';
 import type { SemTable } from './sem.ts';
 import { SIG, sigbit } from './signals.ts';
 import { KernelSocket, type LoopbackNet } from './socket.ts';
+import { isDatagram } from './unix-dgram.ts';
 import type { VfsNodes } from './vfs-file.ts';
 
 export interface WasmWorkerLike {
@@ -180,7 +180,7 @@ export function inheritedFds(fds: FdTable): InheritedFd[] {
       const open = fds.get(fd);
       const flags = fds.statusFlags(fd);
       const kind =
-        open.file instanceof KernelSocket || open.file instanceof KernelDgram
+        open.file instanceof KernelSocket || isDatagram(open.file)
           ? 'socket'
           : kernelFdKind(open.file);
       const meta = open.file.heldMeta;

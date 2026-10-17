@@ -33,6 +33,7 @@ export type KernelErrno =
   | 'ENOTSOCK'
   | 'EAFNOSUPPORT'
   | 'EPROTONOSUPPORT'
+  | 'EPROTOTYPE'
   | 'EOPNOTSUPP'
   | 'EADDRINUSE'
   | 'EADDRNOTAVAIL'

@@ -6,6 +6,7 @@ import type { NetworkUplink, UplinkConn } from './net/uplink.ts';
 import { hostPort, uplinkLink } from './net/uplink-socket.ts';
 import { KernelPipe, PIPE_CAPACITY, PipeError } from './pipe.ts';
 import type { SealedCaller } from './sealed.ts';
+import type { UnixDgram } from './unix-dgram.ts';
 export type SockAddr =
   | {
       family: 'inet';
@@ -451,7 +452,7 @@ export class KernelSocket implements KernelFile {
 export function canonicalHost(host: string): string {
   return host === '0.0.0.0' ? '127.0.0.1' : host;
 }
-function keyOf(addr: SockAddr, name?: SocketName): string {
+export function keyOf(addr: SockAddr, name?: SocketName): string {
   if (name) return `node:${name.key}`;
   return addr.family === 'inet' ? `inet:${addr.port}` : `unix:${addr.path}`;
 }
@@ -459,6 +460,7 @@ const LOCAL_ONLY = new Routes();
 export class LoopbackNet {
   private readonly bound = new Map<string, KernelSocket>();
   private readonly dgrams = new Map<number, KernelDgram>();
+  private readonly unixDgrams = new Map<string, UnixDgram>();
   private readonly activators = new Map<string, () => void>();
   private readonly internal = new Set<number>();
   private readonly reserved = new Set<number>();
@@ -483,6 +485,18 @@ export class LoopbackNet {
     if (this.dgrams.has(port)) throw new KernelError('EADDRINUSE');
     this.dgrams.set(port, socket);
     return { ...addr, port };
+  }
+  bindUnixDgram(socket: UnixDgram, key: string): void {
+    if (this.bound.has(key) || this.unixDgrams.has(key)) throw new KernelError('EADDRINUSE');
+    this.unixDgrams.set(key, socket);
+  }
+  releaseUnixDgram(key: string, socket: UnixDgram): void {
+    if (this.unixDgrams.get(key) === socket) this.unixDgrams.delete(key);
+  }
+  unixDgramAt(key: string): UnixDgram {
+    const socket = this.unixDgrams.get(key);
+    if (socket) return socket;
+    throw new KernelError(this.bound.has(key) ? 'EPROTOTYPE' : 'ECONNREFUSED');
   }
   releaseDgram(addr: InetAddr, socket: KernelDgram): void {
     if (this.dgrams.get(addr.port) === socket) this.dgrams.delete(addr.port);
@@ -538,7 +552,9 @@ export class LoopbackNet {
     const named =
       addr.family === 'inet' && addr.port === 0 ? { ...addr, port: this.ephemeral() } : addr;
     const key = keyOf(named, name);
-    if (this.bound.has(key) && !name) throw new KernelError('EADDRINUSE');
+    if ((this.bound.has(key) && !name) || this.unixDgrams.has(key)) {
+      throw new KernelError('EADDRINUSE');
+    }
     this.bound.set(key, socket);
     socket.named = name;
     return named;
@@ -552,6 +568,7 @@ export class LoopbackNet {
       throw new KernelError('ENETUNREACH');
     }
     const key = keyOf(addr, name);
+    if (this.unixDgrams.has(key)) throw new KernelError('EPROTOTYPE');
     if (!this.bound.has(key)) this.activators.get(key)?.();
     const socket = this.bound.get(key);
     if (!socket?.listening) throw new KernelError('ECONNREFUSED');

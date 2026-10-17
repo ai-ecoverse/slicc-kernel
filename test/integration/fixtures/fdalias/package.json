@@ -1,0 +1,12 @@
+{
+  "name": "fdalias",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "fdalias": {
+        "wasm": "bin/fdalias.wasm"
+      }
+    }
+  }
+}
