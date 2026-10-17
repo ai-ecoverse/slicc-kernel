@@ -35,6 +35,7 @@ const READ_ATTEMPTS = 3;
 const MAX_LINKS = 40;
 const CHECK_MS = 1000;
 const ABSENT_MS = 2;
+const GLANCE_MS = 2;
 const ABSENT_NAMES = 4096;
 const FILE_HANDLES = 4096;
 const STALE: ReadonlySet<string> = new Set(['NotFoundError', 'TypeMismatchError']);
@@ -245,7 +246,10 @@ export class OpfsFs implements KernelFs {
   private changes = 0;
   private replacing: Promise<void> = Promise.resolve();
   private replacements = 0;
-  private readonly snapshots = new WeakMap<FileSystemFileHandle, File>();
+  private readonly glances = new WeakMap<
+    FileSystemFileHandle,
+    { at: number; file: File; changes: number }
+  >();
   private readonly found = new WeakMap<FileSystemFileHandle, number>();
   private readonly checked = new WeakMap<FileSystemDirectoryHandle, number>();
 
@@ -555,7 +559,7 @@ export class OpfsFs implements KernelFs {
     if (handle.kind !== 'file') return handle;
     if (looked) {
       this.found.set(handle as FileSystemFileHandle, performance.now());
-      this.snapshots.delete(handle as FileSystemFileHandle);
+      this.glances.delete(handle as FileSystemFileHandle);
     }
     this.files.delete(path);
     if (this.files.size >= FILE_HANDLES)
@@ -597,14 +601,15 @@ export class OpfsFs implements KernelFs {
     const fresh = cached && performance.now() - (this.found.get(cached) ?? -CHECK_MS) < CHECK_MS;
     if (cached && !fresh) this.files.delete(path);
     if (cached && fresh) {
+      if (this.glanced(cached)) return this.remember(path, cached);
       try {
-        this.snapshots.set(cached, await cached.getFile());
+        await this.glance(cached);
         return this.remember(path, cached);
       } catch (err) {
         if (!STALE.has((err as { name?: string })?.name as string))
           throw translate(err, path, 'read');
         this.files.delete(path);
-        this.snapshots.delete(cached);
+        this.glances.delete(cached);
       }
     }
     const kept = this.dirs.get(path);
@@ -839,11 +844,28 @@ export class OpfsFs implements KernelFs {
     }
   }
 
+  private glanced(handle: FileSystemFileHandle): File | undefined {
+    const seen = this.glances.get(handle);
+    const fresh = seen && seen.changes === this.changes && performance.now() - seen.at < GLANCE_MS;
+    return fresh ? seen.file : undefined;
+  }
+
+  private async glance(handle: FileSystemFileHandle): Promise<File> {
+    const at = performance.now();
+    const before = this.changes;
+    const file = await handle.getFile();
+    if (before === this.changes) this.glances.set(handle, { at, file, changes: before });
+    else this.glances.delete(handle);
+    return file;
+  }
+
+  private wrote(handle: FileSystemFileHandle): void {
+    this.changes++;
+    this.glances.delete(handle);
+  }
+
   private async snapshot(handle: FileSystemFileHandle): Promise<File> {
-    const taken = this.snapshots.get(handle);
-    if (!taken) return handle.getFile();
-    this.snapshots.delete(handle);
-    return taken;
+    return this.glanced(handle) ?? this.glance(handle);
   }
 
   private async statOf(
@@ -1003,9 +1025,11 @@ export class OpfsFs implements KernelFs {
   async pwrite(path: string, offset: number, bytes: Uint8Array): Promise<void> {
     const [handle, , target] = await this.fileFor(path);
     await this.counting(target);
+    this.wrote(handle);
     try {
       await this.retrying(path, () => positioned(handle, (io) => io.write(offset, bytes)), true);
     } finally {
+      this.wrote(handle);
       await this.recounting(handle, target);
     }
     this.written(target);
@@ -1017,9 +1041,11 @@ export class OpfsFs implements KernelFs {
     const resolve = this.ranged || this.remote?.watched();
     const target = resolve || this.counted.length > 0 ? (await this.locate(path, true)).path : path;
     await this.counting(target);
+    this.wrote(handle);
     try {
       await this.retrying(path, () => positioned(handle, (io) => io.truncate(size)), true);
     } finally {
+      this.wrote(handle);
       await this.recounting(handle, target);
     }
     this.written(target);
@@ -1044,9 +1070,12 @@ export class OpfsFs implements KernelFs {
           throw translate(err, path, 'write', false);
         }),
       close: async () => {
+        this.wrote(handle);
         await writable.close().catch((err: unknown) => {
+          this.wrote(handle);
           throw translate(err, path, 'commit', false);
         });
+        this.wrote(handle);
         this.committed(target);
       },
     };
@@ -1097,6 +1126,7 @@ export class OpfsFs implements KernelFs {
     if (!existed) await this.stampNew(target, owner, false);
     if (!existed && content.length === 0) return;
     let writable: FileSystemWritableFileStream | undefined;
+    this.wrote(file);
     try {
       writable = await file.createWritable();
       await writable.write(content as FileSystemWriteChunkType);
@@ -1104,6 +1134,8 @@ export class OpfsFs implements KernelFs {
     } catch (err) {
       await writable?.abort().catch(() => undefined);
       throw translate(err, path, 'commit', false);
+    } finally {
+      this.wrote(file);
     }
     this.committed(target);
   }
@@ -1380,7 +1412,7 @@ export class OpfsFs implements KernelFs {
 
   private async modified(path: string): Promise<number> {
     const handle = await this.handle(path);
-    return handle.kind === 'file' ? (await handle.getFile()).lastModified : 0;
+    return handle.kind === 'file' ? (await this.snapshot(handle)).lastModified : 0;
   }
 
   private async explicitTimes(path: string): Promise<string[]> {

@@ -40,3 +40,21 @@ test('a name found missing and then made, by this process or another, is there a
     stderr: '',
   });
 });
+
+test('a write shows its size at once to a stat in the same process and in the next, and an append loop counts up (#774)', async (t) => {
+  const kernel = await createNodeKernel();
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
+  const run = (script) => kernel.run(['bash', '-c', script], { cwd: '/' });
+  const same = await run(
+    'mkdir -p /w && cd /w && printf abc > f && stat -c %s f && printf de >> f && stat -c %s f && : > f && stat -c %s f'
+  );
+  assert.deepEqual(same, { status: 0, stdout: '3\n5\n0\n', stderr: '' });
+  assert.deepEqual(await run('printf 12345678 > /w/g'), { status: 0, stdout: '', stderr: '' });
+  assert.deepEqual(await run('stat -c %s /w/g'), { status: 0, stdout: '8\n', stderr: '' });
+  const loop = await run(
+    'cd /w && rm -f a && for i in $(seq 25); do printf x >> a; stat -c %s a; done'
+  );
+  const counts = Array.from({ length: 25 }, (_, i) => `${i + 1}\n`).join('');
+  assert.deepEqual(loop, { status: 0, stdout: counts, stderr: '' });
+});

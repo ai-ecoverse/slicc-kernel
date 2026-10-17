@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { after, test } from 'node:test';
 import { launch } from './chrome.mjs';
 import { booted, ok } from './kernel.mjs';
@@ -60,4 +61,36 @@ test('a file another tab creates just after this tab found the name missing read
   assert.deepEqual(await bash('rm -f /home/n; test -e /home/n || echo missing'), ok('missing\n'));
   assert.deepEqual(await there('printf made > /home/n'), ok());
   assert.deepEqual(await bash('cat /home/n'), ok('made'));
+});
+
+test('in the page, a write shows its size at once to the next stat, and an append loop counts up (#774)', async (t) => {
+  const { bash } = await booted(chrome, t);
+  assert.deepEqual(
+    await bash(
+      'printf abc > /home/s && stat -c %s /home/s && printf de >> /home/s && stat -c %s /home/s'
+    ),
+    ok('3\n5\n')
+  );
+  const counts = Array.from({ length: 25 }, (_, i) => `${i + 1}\n`).join('');
+  assert.deepEqual(
+    await bash(
+      'rm -f /home/a; for i in $(seq 25); do printf x >> /home/a; stat -c %s /home/a; done'
+    ),
+    ok(counts)
+  );
+});
+
+test('in the page, a 170 KB file tee writes from stdin reads back with the same bytes (#774)', async (t) => {
+  const { page } = await booted(chrome, t);
+  const body = Array.from(
+    { length: 4000 },
+    (_, i) => `line ${i} of the upload ${'x'.repeat(i % 37)}\n`
+  ).join('');
+  const sum = createHash('sha256').update(body).digest('hex');
+  const run = (argv, stdin) =>
+    page.evaluate((a, s) => window.kernel.run(a, { cwd: '/home', stdin: s }), argv, stdin);
+  for (let i = 0; i < 2; i++) {
+    assert.deepEqual(await run(['tee', 'up.txt'], body), ok(body));
+    assert.deepEqual(await run(['sha256sum', 'up.txt']), ok(`${sum}  up.txt\n`));
+  }
 });
