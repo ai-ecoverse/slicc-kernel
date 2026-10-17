@@ -52,8 +52,14 @@ export class RemoteWatch {
     this.channel = new BroadcastChannel(name);
     this.channel.onmessage = ({ data }) => this.receive(data as WatchMessage);
     (this.channel as BroadcastChannel & { unref?: () => void }).unref?.();
-    void this.locks?.request(this.lockOf(this.tab), () => new Promise<void>(() => {}));
-    this.joined = this.join();
+    const granted = new Promise<void>((resolve) => {
+      void this.locks?.request(this.lockOf(this.tab), () => {
+        resolve();
+        return new Promise<void>(() => {});
+      });
+      if (!this.locks) resolve();
+    });
+    this.joined = granted.then(() => this.join());
     this.channel.postMessage({ hello: this.tab });
   }
 
