@@ -6,7 +6,7 @@ import { booted, installPackage, ok } from './kernel.mjs';
 const chrome = await launch();
 after(() => chrome.close());
 
-const LINKS = 300;
+const LINKS = 100;
 
 test('a tab that boots while another extracts symlinks with tar leaves every symlink in place (bios tar symlink drop)', async (t) => {
   const { page, bash } = await booted(chrome, t, { users: 'enforce' });
@@ -19,22 +19,26 @@ test('a tab that boots while another extracts symlinks with tar leaves every sym
     ok('packed\n')
   );
   const other = await page.tab();
-  for (let round = 0; round < 2; round++) {
+  const size = Number((await bash('wc -c < /tmp/pack/src.tar', { cwd: '/' })).stdout);
+  for (let round = 0; round < 3; round++) {
     const extracting = bash(
-      `cd /tmp/pack && rm -rf out && mkdir out && tar -xf src.tar -C out && echo "unpack=$?"`,
+      `cd /tmp/pack && rm -rf out go && mkdir out && { head -c ${size - 10240} src.tar; while [ ! -e go ]; do sleep 0.05; done; tail -c 10240 src.tar; } | tar -xf - -C out && echo "unpack=$?"`,
       { cwd: '/' }
     );
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    const go = bash(': > /tmp/pack/go', { cwd: '/' });
     let done = false;
     void extracting.finally(() => {
       done = true;
     });
     let boots = 0;
-    while (!done && boots < 15) {
+    while (!done && boots < 3) {
       await other.goto('/');
       await other.until(() => typeof window.boot === 'function');
       await other.evaluate(() => window.boot({ users: 'enforce' }));
       boots++;
     }
+    await go;
     assert.deepEqual(await extracting, ok('unpack=0\n'));
     const count = `cd /tmp/pack/out/src/inner && echo "names=$(ls | wc -l) links=$(ls -l | { n=0; while read -r m _; do case $m in l*) n=$((n + 1)) ;; esac; done; echo $n; }) last=$(readlink l${LINKS})"`;
     assert.deepEqual(
