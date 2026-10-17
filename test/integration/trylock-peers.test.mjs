@@ -69,21 +69,37 @@ test('a whole-file lock taken while a kernel was alone still excludes after a pe
       (p) => window.kernel.run(['locktry', 'try', p], { cwd: '/' }).then((r) => r.status),
       path
     );
+  const sharedIs = (want) =>
+    page.run(
+      { maxMs: 60_000, label: `/proc/sys/kernel/slicc_shared_root reading ${want}` },
+      async (w) => {
+        for (;;) {
+          const r = await window.kernel.run(
+            ['bash', '-c', 'echo > /tmp/lj/tick; cat /proc/sys/kernel/slicc_shared_root'],
+            { cwd: '/' }
+          );
+          if (r.stdout === `${w}\n`) return true;
+          await new Promise((res) => setTimeout(res, 100));
+        }
+      },
+      want
+    );
+  await sharedIs(0);
   await holdHere('/tmp/lj/a');
   assert.equal(await read(page, 'tmp/lj/a.hold'), 'held');
-  await page.evaluate(() => window.secondKernel({}));
-  assert.equal(await tryHere('/tmp/lj/a'), 0);
-  assert.equal(await read(page, 'tmp/lj/a.try'), '6');
-  await page.evaluate(() => window.opfs.write('tmp/lj/a.release', ''));
-  await page.evaluate(() => window.holding);
   const other = await page.tab();
   await other.goto('/');
   await other.until(() => typeof window.boot === 'function');
   await other.evaluate(() => window.boot({}));
+  await sharedIs(1);
+  assert.equal(await tryHere('/tmp/lj/a'), 0);
+  assert.equal(await read(page, 'tmp/lj/a.try'), '6');
+  await page.evaluate(() => window.opfs.write('tmp/lj/a.release', ''));
+  await page.evaluate(() => window.holding);
   await holdHere('/tmp/lj/b');
   assert.equal(await read(page, 'tmp/lj/b.hold'), 'held');
   await other.close();
-  await new Promise((r) => setTimeout(r, 2500));
+  await sharedIs(0);
   assert.equal(await tryHere('/tmp/lj/b'), 0);
   assert.equal(await read(page, 'tmp/lj/b.try'), '6');
   await page.evaluate(() => window.opfs.write('tmp/lj/b.release', ''));
