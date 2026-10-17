@@ -268,9 +268,12 @@ test('the workflows call every cert-review tool through gate.sh under its own na
     }
   }
   assert.deepEqual(seen.sort(), [
+    'artifacts',
+    'artifacts',
     'compat',
     'delta',
     'findings',
+    'pack',
     'pack',
     'pr lookup',
     'pr plan',
@@ -388,5 +391,5 @@ test("each gated workflow step fails when its tool is replaced by `true`, and re
       }
     }
   }
-  assert.equal(count, 12);
+  assert.equal(count, 15);
 });

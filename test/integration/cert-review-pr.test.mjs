@@ -200,6 +200,16 @@ else process.exit(1);
   const good = await record(['--tarball', ok.file, '--sha256', ok.sha256]);
   assert.equal(good.status, 0, JSON.stringify(good.json.problems));
   assert.match(good.stdout, /^record: PASS success: certified /m);
+  const planted = await record([
+    '--tarball',
+    ok.file,
+    '--sha256',
+    ok.sha256,
+    '--jobs',
+    'pack=success,suite=success,kernel-compat=success,artifacts=failure',
+  ]);
+  assert.equal(planted.status, 1);
+  assert.match(planted.json.line, /^cert-ci: INCOMPLETE .*the artifacts job ended failure/);
   await writeFile(
     join(review, 'verdict.json'),
     JSON.stringify({
@@ -437,11 +447,12 @@ test("the workflow: same-repo PRs with merge-ok review the merge ref with main's
         `${name} runs main's tools`
       );
   }
-  for (const name of ['plan', 'pack', 'suite'])
+  for (const name of ['plan', 'pack', 'pack-base', 'suite'])
     assert.match(jobs[name], /git fetch -q --no-tags --depth=2 origin "\$GITHUB_SHA"/);
   assert.match(jobs.plan, /echo "commit=\$GITHUB_SHA"/);
   assert.match(jobs.plan, /echo "parent=\$\(git rev-parse "\$GITHUB_SHA\^1"\)"/);
   assert.match(jobs.pack, /^ {4}runs-on: ubuntu-latest$/m);
+  assert.match(jobs['pack-base'], /^ {4}runs-on: ubuntu-latest$/m);
   const secretSteps = workflow.match(/secrets\.[A-Z_]+/g) ?? [];
   assert.deepEqual(secretSteps, ['secrets.AWS_BEARER_TOKEN_BEDROCK']);
   assert.match(
@@ -459,7 +470,7 @@ test("the workflow: same-repo PRs with merge-ok review the merge ref with main's
   );
   assert.match(
     jobs.record,
-    /JOBS: pack=\$\{\{ needs\.pack\.result \}\},suite=\$\{\{ needs\.suite\.result \}\},kernel-compat=\$\{\{ needs\.compat\.result \}\}/
+    /JOBS: pack=\$\{\{ needs\.pack\.result \}\},pack-base=\$\{\{ needs\.pack-base\.result \}\},delta=\$\{\{ needs\.delta\.result \}\},suite=\$\{\{ needs\.suite\.result \}\},kernel-compat=\$\{\{ needs\.compat\.result \}\}/
   );
   assert.match(jobs.report, /statuses\/\$HEAD_SHA/);
   assert.match(jobs.report, /if \[ "\$state" != success \]; then .*exit 1; fi/);

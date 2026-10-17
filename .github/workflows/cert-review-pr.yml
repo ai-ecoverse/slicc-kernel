@@ -126,19 +126,17 @@ jobs:
             -d "{\"state\":\"error\",\"context\":\"$CERT_CONTEXT\",\"target_url\":\"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\",\"description\":\"cert-review did not finish its plan: re-run the failed jobs\"}" > /dev/null
 
   pack:
-    name: cert-review-pr / pack ${{ matrix.side }}
+    name: cert-review-pr / pack candidate
     needs: plan
     if: needs.plan.outputs.go == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        side: [candidate, base]
     outputs:
-      candidate: ${{ steps.pack.outputs.candidate }}
+      candidate: ${{ steps.pack.outputs.sha256 }}
+      id: ${{ steps.upload.outputs.artifact-id }}
+      digest: ${{ steps.upload.outputs.artifact-digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -155,36 +153,82 @@ jobs:
 
       - id: pack
         env:
-          SIDE: ${{ matrix.side }}
-          VERSION: ${{ matrix.side == 'candidate' && needs.plan.outputs.version || needs.plan.outputs.prev }}
-          REF: ${{ matrix.side == 'candidate' && needs.plan.outputs.commit || needs.plan.outputs.parent }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          REF: ${{ needs.plan.outputs.commit }}
         run: |
           set -euo pipefail
           tools/cert-review/gate.sh pack node tools/cert-review/pack.mjs --version "$VERSION" --ref "$REF" --out "$RUNNER_TEMP/pack"
-          sha=$(cut -d' ' -f1 "$RUNNER_TEMP"/pack/*.tgz.sha256)
-          if [ "$SIDE" = candidate ]; then echo "candidate=$sha" >> "$GITHUB_OUTPUT"; fi
+          echo "sha256=$(cut -d' ' -f1 "$RUNNER_TEMP"/pack/*.tgz.sha256)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        id: upload
         with:
-          name: kernel-tgz-${{ matrix.side == 'candidate' && needs.plan.outputs.version || needs.plan.outputs.prev }}
+          name: kernel-tgz-${{ needs.plan.outputs.version }}
           path: |
             ${{ runner.temp }}/pack/*.tgz
             ${{ runner.temp }}/pack/*.tgz.sha256
             ${{ runner.temp }}/pack/pack.json
           if-no-files-found: error
-          overwrite: true
+
+  pack-base:
+    name: cert-review-pr / pack base
+    needs: plan
+    if: needs.plan.outputs.go == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      sha256: ${{ steps.pack.outputs.sha256 }}
+      id: ${{ steps.upload.outputs.artifact-id }}
+      digest: ${{ steps.upload.outputs.artifact-digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+
+      - name: The trees under test, the pull request merged onto main and its first parent, with main's tools
+        run: git fetch -q --no-tags --depth=2 origin "$GITHUB_SHA"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+          cache: npm
+
+      - id: pack
+        env:
+          VERSION: ${{ needs.plan.outputs.prev }}
+          REF: ${{ needs.plan.outputs.parent }}
+        run: |
+          set -euo pipefail
+          tools/cert-review/gate.sh pack node tools/cert-review/pack.mjs --version "$VERSION" --ref "$REF" --out "$RUNNER_TEMP/pack"
+          echo "sha256=$(cut -d' ' -f1 "$RUNNER_TEMP"/pack/*.tgz.sha256)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        id: upload
+        with:
+          name: kernel-tgz-${{ needs.plan.outputs.prev }}
+          path: |
+            ${{ runner.temp }}/pack/*.tgz
+            ${{ runner.temp }}/pack/*.tgz.sha256
+            ${{ runner.temp }}/pack/pack.json
+          if-no-files-found: error
 
   same:
     name: cert-review-pr / same dist
-    needs: [plan, pack]
-    if: ${{ !cancelled() && needs.plan.outputs.go == 'true' && needs.plan.outputs.manifest == 'true' && needs.pack.result == 'success' }}
+    needs: [plan, pack, pack-base]
+    if: ${{ !cancelled() && needs.plan.outputs.go == 'true' && needs.plan.outputs.manifest == 'true' && needs.pack.result == 'success' && needs.pack-base.result == 'success' }}
     runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
+      actions: read
       contents: read
       statuses: write
     outputs:
       identical: ${{ steps.same.outputs.identical }}
+      id: ${{ steps.upload.outputs.artifact-id }}
+      digest: ${{ steps.upload.outputs.artifact-digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -196,11 +240,28 @@ jobs:
         with:
           node-version: 24
 
+      - name: The run holds exactly the two packed builds, each the one its pack job uploaded
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          PREV: ${{ needs.plan.outputs.prev }}
+          CANDIDATE: ${{ needs.pack.outputs.id }}@${{ needs.pack.outputs.digest }}
+          BASE: ${{ needs.pack-base.outputs.id }}@${{ needs.pack-base.outputs.digest }}
+        run: |
+          tools/cert-review/gate.sh artifacts node tools/cert-review/artifacts.mjs --repo "$GITHUB_REPOSITORY" --run "$GITHUB_RUN_ID" \
+            --prefix kernel-tgz- --expect "kernel-tgz-$VERSION=$CANDIDATE" --expect "kernel-tgz-$PREV=$BASE"
+
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
-          pattern: kernel-tgz-*
+          artifact-ids: ${{ needs.pack.outputs.id }}
           path: ${{ runner.temp }}/packs
-          merge-multiple: true
+          digest-mismatch: error
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ needs.pack-base.outputs.id }}
+          path: ${{ runner.temp }}/packs
+          digest-mismatch: error
 
       - id: same
         name: Only package.json or its lock changed, so compare what ships, the packed candidate against the packed base
@@ -208,8 +269,8 @@ jobs:
           VERSION: ${{ needs.plan.outputs.version }}
           PREV: ${{ needs.plan.outputs.prev }}
         run: |
-          tools/cert-review/gate.sh same node tools/cert-review/same.mjs --candidate "$RUNNER_TEMP/packs/ai-ecoverse-slicc-kernel-$VERSION.tgz" \
-            --base "$RUNNER_TEMP/packs/ai-ecoverse-slicc-kernel-$PREV.tgz" --candidate-version "$VERSION" --base-version "$PREV" \
+          tools/cert-review/gate.sh same node tools/cert-review/same.mjs --candidate "$RUNNER_TEMP/packs/kernel-tgz-$VERSION/ai-ecoverse-slicc-kernel-$VERSION.tgz" \
+            --base "$RUNNER_TEMP/packs/kernel-tgz-$PREV/ai-ecoverse-slicc-kernel-$PREV.tgz" --candidate-version "$VERSION" --base-version "$PREV" \
             --out "$RUNNER_TEMP/same/same.json"
 
       - name: Identical dist is not behaviour, and the status says so with both builds' sha256
@@ -222,12 +283,12 @@ jobs:
             --run "$GITHUB_RUN_ID" --context "$CERT_CONTEXT" --evidence "$RUNNER_TEMP/same/same.json"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        id: upload
         if: ${{ !cancelled() }}
         with:
           name: cert-review-same-${{ needs.plan.outputs.version }}
           path: ${{ runner.temp }}/same/same.json
           if-no-files-found: ignore
-          overwrite: true
 
   delta:
     name: cert-review-pr / delta
@@ -235,6 +296,9 @@ jobs:
     if: needs.plan.outputs.go == 'true'
     runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 20
+    outputs:
+      id: ${{ steps.upload.outputs.artifact-id }}
+      digest: ${{ steps.upload.outputs.artifact-digest }}
     permissions:
       contents: read
       pull-requests: read
@@ -265,16 +329,16 @@ jobs:
             --head "$HEAD_SHA" --pr "$PR" --only --out "$RUNNER_TEMP/evidence/delta.json"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        id: upload
         with:
           name: cert-review-delta-${{ needs.plan.outputs.version }}
           path: ${{ runner.temp }}/evidence/delta.json
           if-no-files-found: error
-          overwrite: true
 
   suite:
     name: cert-review-pr / suite ${{ matrix.which }}
-    needs: [plan, pack, delta, same]
-    if: ${{ !cancelled() && needs.plan.outputs.go == 'true' && needs.same.outputs.identical != 'true' && needs.pack.result == 'success' && needs.delta.result == 'success' }}
+    needs: [plan, pack, pack-base, delta, same]
+    if: ${{ !cancelled() && needs.plan.outputs.go == 'true' && needs.same.outputs.identical != 'true' && needs.pack.result == 'success' && needs.pack-base.result == 'success' && needs.delta.result == 'success' }}
     runs-on: ${{ vars.CERT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 120
     strategy:
@@ -302,14 +366,22 @@ jobs:
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
-          name: cert-review-delta-${{ needs.plan.outputs.version }}
+          artifact-ids: ${{ needs.delta.outputs.id }}
           path: ${{ runner.temp }}/evidence
+          merge-multiple: true
+          digest-mismatch: error
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
-          pattern: kernel-tgz-*
+          artifact-ids: ${{ needs.pack.outputs.id }}
           path: ${{ runner.temp }}/packs
-          merge-multiple: true
+          digest-mismatch: error
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ needs.pack-base.outputs.id }}
+          path: ${{ runner.temp }}/packs
+          digest-mismatch: error
 
       - name: The tree (the pull request on main, or main), its dependencies and Chromium, and both packed builds
         run: |
@@ -320,7 +392,7 @@ jobs:
           git worktree add --detach "$tree" "$ref"
           (cd "$tree" && npm ci --no-audit --no-fund && npx playwright-core install --no-shell chromium)
           mkdir -p "$RUNNER_TEMP/tgz"
-          cp "$RUNNER_TEMP"/packs/*.tgz "$RUNNER_TEMP/tgz/"
+          cp "$RUNNER_TEMP"/packs/kernel-tgz-*/*.tgz "$RUNNER_TEMP/tgz/"
           ls -l "$RUNNER_TEMP/tgz"
           echo "TREE=$tree" >> "$GITHUB_ENV"
           echo "TAG=$tag" >> "$GITHUB_ENV"
@@ -354,12 +426,14 @@ jobs:
             ${{ runner.temp }}/evidence/*.jsonl
             ${{ runner.temp }}/evidence/*.log
           if-no-files-found: ignore
-          overwrite: true
 
   compat:
     name: cert-review-pr / kernel-compat
     needs: [plan, pack, same]
     if: ${{ !cancelled() && needs.plan.outputs.go == 'true' && needs.same.outputs.identical != 'true' && needs.pack.result == 'success' }}
+    outputs:
+      id: ${{ steps.upload.outputs.artifact-id }}
+      digest: ${{ steps.upload.outputs.artifact-digest }}
     runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 300
     permissions:
@@ -394,11 +468,11 @@ jobs:
             --shards 10 --dispatch --rerun --wait 150 --reference "$LATEST" --out "$RUNNER_TEMP/evidence/compat.json"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        id: upload
         with:
           name: cert-review-compat-${{ needs.plan.outputs.version }}
           path: ${{ runner.temp }}/evidence/compat.json
           if-no-files-found: error
-          overwrite: true
 
   review:
     name: cert-review-pr / review
@@ -409,6 +483,11 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+    outputs:
+      verdict: ${{ steps.verdict.outputs.artifact-id }}
+      verdict_digest: ${{ steps.verdict.outputs.artifact-digest }}
+      evidence: ${{ steps.evidence.outputs.artifact-id }}
+      evidence_digest: ${{ steps.evidence.outputs.artifact-digest }}
     env:
       VERSION: ${{ needs.plan.outputs.version }}
       PREV: ${{ needs.plan.outputs.prev }}
@@ -433,21 +512,32 @@ jobs:
         run: tools/cert-review/gh.sh
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        continue-on-error: true
         with:
-          pattern: cert-review-suite-*-${{ needs.plan.outputs.version }}
-          path: ${{ runner.temp }}/evidence
-          merge-multiple: true
-
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
-        with:
-          name: cert-review-delta-${{ needs.plan.outputs.version }}
+          name: cert-review-suite-release-${{ needs.plan.outputs.version }}
           path: ${{ runner.temp }}/evidence
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         continue-on-error: true
         with:
-          name: cert-review-compat-${{ needs.plan.outputs.version }}
+          name: cert-review-suite-base-${{ needs.plan.outputs.version }}
           path: ${{ runner.temp }}/evidence
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ needs.delta.outputs.id }}
+          path: ${{ runner.temp }}/evidence
+          merge-multiple: true
+          digest-mismatch: error
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        if: ${{ needs.compat.outputs.id != '' }}
+        continue-on-error: true
+        with:
+          artifact-ids: ${{ needs.compat.outputs.id }}
+          path: ${{ runner.temp }}/evidence
+          merge-multiple: true
+          digest-mismatch: error
 
       - name: Findings, in code
         id: findings
@@ -491,6 +581,7 @@ jobs:
           cp -r "$RUNNER_TEMP/cert-review" "$RUNNER_TEMP/evidence/" 2> /dev/null || true
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        id: verdict
         if: ${{ !cancelled() }}
         with:
           name: cert-review-verdict-${{ needs.plan.outputs.version }}
@@ -499,23 +590,23 @@ jobs:
             ${{ runner.temp }}/cert-review/comment.md
             ${{ runner.temp }}/cert-review/findings.json
           if-no-files-found: ignore
-          overwrite: true
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        id: evidence
         if: ${{ !cancelled() }}
         with:
           name: cert-review-evidence-${{ needs.plan.outputs.version }}
           path: ${{ runner.temp }}/evidence/
           if-no-files-found: ignore
-          overwrite: true
 
   record:
     name: cert-review-pr / record
-    needs: [plan, pack, same, suite, compat, review]
+    needs: [plan, pack, pack-base, delta, same, suite, compat, review]
     if: ${{ !cancelled() && needs.plan.outputs.go == 'true' && needs.same.outputs.identical != 'true' && needs.review.result != 'cancelled' }}
     runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 20
     permissions:
+      actions: read
       contents: read
       issues: read
       pull-requests: read
@@ -531,7 +622,7 @@ jobs:
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       SHA256: ${{ needs.pack.outputs.candidate }}
       REVIEW: ${{ needs.review.result }}
-      JOBS: pack=${{ needs.pack.result }},suite=${{ needs.suite.result }},kernel-compat=${{ needs.compat.result }}
+      JOBS: pack=${{ needs.pack.result }},pack-base=${{ needs.pack-base.result }},delta=${{ needs.delta.result }},suite=${{ needs.suite.result }},kernel-compat=${{ needs.compat.result }}
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -549,27 +640,56 @@ jobs:
       - name: gh
         run: tools/cert-review/gh.sh
 
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+      - name: Every evidence artifact of the run is the one its producer job uploaded, and there is no other
+        id: artifacts
         continue-on-error: true
-        with:
-          name: cert-review-verdict-${{ needs.plan.outputs.version }}
-          path: ${{ runner.temp }}/cert-review
+        env:
+          PREV: ${{ needs.plan.outputs.prev }}
+          CANDIDATE: ${{ needs.pack.outputs.id }}@${{ needs.pack.outputs.digest }}
+          BASE: ${{ needs.pack-base.outputs.id }}@${{ needs.pack-base.outputs.digest }}
+          DELTA: ${{ needs.delta.outputs.id }}@${{ needs.delta.outputs.digest }}
+          SAME: ${{ needs.same.outputs.id }}@${{ needs.same.outputs.digest }}
+          COMPAT: ${{ needs.compat.outputs.id }}@${{ needs.compat.outputs.digest }}
+          VERDICT: ${{ needs.review.outputs.verdict }}@${{ needs.review.outputs.verdict_digest }}
+          EVIDENCE: ${{ needs.review.outputs.evidence }}@${{ needs.review.outputs.evidence_digest }}
+        run: |
+          tools/cert-review/gate.sh artifacts node tools/cert-review/artifacts.mjs --repo "$GITHUB_REPOSITORY" --run "$GITHUB_RUN_ID" \
+            --prefix kernel-tgz- --prefix cert-review- \
+            --expect "kernel-tgz-$VERSION=$CANDIDATE" --expect "kernel-tgz-$PREV=$BASE" \
+            --expect "cert-review-delta-$VERSION=$DELTA" --expect "cert-review-same-$VERSION=$SAME" \
+            --expect "cert-review-compat-$VERSION=$COMPAT" --expect "cert-review-verdict-$VERSION=$VERDICT" \
+            --expect "cert-review-evidence-$VERSION=$EVIDENCE" \
+            --expect "cert-review-suite-release-$VERSION=*" --expect "cert-review-suite-base-$VERSION=*"
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        if: ${{ needs.review.outputs.verdict != '' }}
         continue-on-error: true
         with:
-          name: kernel-tgz-${{ needs.plan.outputs.version }}
+          artifact-ids: ${{ needs.review.outputs.verdict }}
+          path: ${{ runner.temp }}/cert-review
+          merge-multiple: true
+          digest-mismatch: error
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        if: ${{ needs.pack.outputs.id != '' }}
+        continue-on-error: true
+        with:
+          artifact-ids: ${{ needs.pack.outputs.id }}
           path: ${{ runner.temp }}/pack
+          merge-multiple: true
+          digest-mismatch: error
 
       - name: The line, from the build, the findings and the verdict
         id: record
+        env:
+          ARTIFACTS: ${{ steps.artifacts.outcome }}
         run: |
           mkdir -p "$RUNNER_TEMP/cert-review" "$RUNNER_TEMP/pack"
           findings="$RUNNER_TEMP/cert-review/findings.json"
           tgz=$(find "$RUNNER_TEMP/pack" -maxdepth 1 -name '*.tgz' | head -1)
           if tools/cert-review/gate.sh record node tools/cert-review/record.mjs --version "$VERSION" --review "$RUNNER_TEMP/cert-review" \
             --out "$RUNNER_TEMP/record" --run "$RUN_URL" --repo "$GH_REPO" --commit "$PLAN_COMMIT" \
-            --pr "$PR" --head "$HEAD_SHA" --tarball "$tgz" --sha256 "$SHA256" --review-result "$REVIEW" --jobs "$JOBS" \
+            --pr "$PR" --head "$HEAD_SHA" --tarball "$tgz" --sha256 "$SHA256" --review-result "$REVIEW" --jobs "$JOBS,artifacts=$ARTIFACTS" \
             --findings "$findings"; then
             echo "conclusion=success" >> "$GITHUB_OUTPUT"
           else
@@ -591,7 +711,6 @@ jobs:
             ${{ runner.temp }}/record/line.txt
             ${{ runner.temp }}/record/body.md
           if-no-files-found: error
-          overwrite: true
 
   report:
     name: cert-review-pr / report
@@ -613,10 +732,13 @@ jobs:
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        if: ${{ needs.record.outputs.artifact != '' }}
         continue-on-error: true
         with:
-          name: cert-review-record-${{ needs.plan.outputs.version }}
+          artifact-ids: ${{ needs.record.outputs.artifact }}
           path: ${{ runner.temp }}/record
+          merge-multiple: true
+          digest-mismatch: error
 
       - name: The verdict as the cert-review status on the pull request's head, and in a comment
         run: |
