@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { mkdtemp, rm, symlink } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { recover } from '../../tools/release-recover.mjs';
 
 const NAME = '@ai-ecoverse/slicc-kernel';
@@ -64,4 +69,20 @@ test("release-recover fails closed when npm's latest can't be read: nothing is p
     /npm's latest .* reads as ""/
   );
   assert.ok(!empty.calls.includes('npm publish'));
+});
+
+test("release.yml's `node tools/release-recover.mjs` does its work also from a checkout reached through a symlink, instead of exiting 0 having done nothing", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'recover-link-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const repo = fileURLToPath(new URL('../../', import.meta.url));
+  await symlink(repo, join(dir, 'checkout'));
+  const empty = join(dir, 'empty');
+  await symlink(tmpdir(), empty);
+  const run = spawnSync(process.execPath, [join(dir, 'checkout', 'tools', 'release-recover.mjs')], {
+    cwd: empty,
+    encoding: 'utf8',
+    env: { PATH: process.env.PATH, RELEASE_OUTCOME: 'success' },
+  });
+  assert.notEqual(run.status, 0, `it ran its main part: ${run.stdout}${run.stderr}`);
+  assert.match(run.stderr, /package\.json/);
 });
