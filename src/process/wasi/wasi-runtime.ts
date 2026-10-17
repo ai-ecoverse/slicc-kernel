@@ -3,6 +3,7 @@ import type { MountLine, ProcessListing } from '../../kernel/proc-info.ts';
 import type { WasmSyscall } from '../../kernel/process.ts';
 import {
   WASM_PROCESS_EXIT,
+  WASM_PROCESS_READY,
   type WasmProcessInitMsg,
   type WasmProgram,
   type WasmThreadInitMsg,
@@ -764,6 +765,7 @@ export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike
   restoreExportedMemory(instance, memory, init);
   main.memory = memoryOf(instance, memory);
   publishMemory(init.sab, sizeOf(main)());
+  port.postMessage({ type: WASM_PROCESS_READY });
   signals.bind(instance.exports);
   if (importsSigactionHook(module)) signals.useHook();
   if (fork?.signals) signals.restore(fork.signals);

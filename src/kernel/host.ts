@@ -57,6 +57,7 @@ import {
   WASM_PROCESS_ERROR,
   WASM_PROCESS_EXIT,
   WASM_PROCESS_INIT,
+  WASM_PROCESS_READY,
   WASM_THREAD_EXIT,
   WASM_THREAD_INIT,
   WASM_THREAD_SPAWN,
@@ -108,6 +109,7 @@ export interface SpawnWasmOptions {
   noLinks: SyncFsTokenEntry['fs'];
   createWorker: () => WasmWorkerLike;
   onError?: (message: string) => void;
+  onOom?: () => boolean;
   spawner?: ChildSpawner;
   forker?: ChildForker;
   fork?: ForkState;
@@ -157,9 +159,13 @@ export interface WasmProcessHandle {
   times?(): CpuTimes | undefined;
   running?(): number;
   threads?(): Array<{ tid: number; state: 'R' | 'S' }>;
+  ready?: Promise<boolean>;
 }
 
 const CRASHED = 70;
+const NO_MEMORY = 126;
+const WASM_OOM = /Cannot allocate Wasm memory|WebAssembly\.Memory\(\): could not allocate memory/;
+
 export const KILL_GRACE_MS = 2000;
 export const KILL_HARD_MS = 5000;
 
@@ -515,7 +521,24 @@ function settleExit(exit: Promise<unknown>, settle: (status: number) => void, co
   void exit.catch(() => undefined).then(() => settle(code & 0xff));
 }
 
+function readiness(abi: string | undefined): PromiseWithResolvers<boolean> {
+  const ready = Promise.withResolvers<boolean>();
+  if (abi === 'js') ready.resolve(true);
+  return ready;
+}
+
+function outOfMemory(opts: SpawnWasmOptions, data: WorkerSays | undefined): boolean {
+  if (data?.type !== WASM_PROCESS_ERROR || !WASM_OOM.test(String(data.message))) return false;
+  if (!opts.onOom?.()) {
+    opts.onError?.(
+      `${opts.argv0}: cannot allocate memory for a new process (too many processes at once)`
+    );
+  }
+  return true;
+}
+
 export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
+  const { promise: ready, resolve: started } = readiness(opts.program.abi);
   const sab = new SharedArrayBuffer(SAB_HEADER_BYTES + SAB_DEFAULT_WINDOW_BYTES);
   const header = new Int32Array(sab, 0, SAB_HEADER_I32);
   const blocked = opts.fork?.wasi?.blocked ?? opts.blocked;
@@ -574,6 +597,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
   const finish = (code: number, sig?: number): void => {
     if (done) return;
     done = true;
+    started(true);
     clocks.freeze();
     dying.clear();
     endedBy = sig ?? process.execTermsig;
@@ -587,13 +611,16 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     worker.terminate();
     settleExit(process.exit(), settle, code);
   };
-
   const exitNow = (code: number): void => {
     queueMicrotask(() => finish(...dying.status(code)));
   };
-
   const handle = (data: WorkerSays | undefined): void => {
-    if (data?.type === WASM_PROCESS_EXIT) {
+    if (data?.type === WASM_PROCESS_READY) {
+      started(true);
+    } else if (outOfMemory(opts, data)) {
+      started(false);
+      finish(NO_MEMORY);
+    } else if (data?.type === WASM_PROCESS_EXIT) {
       finish(...dying.status(data.code));
     } else if (data?.type === WASM_PROCESS_ERROR) {
       if (!dying.ending) opts.onError?.(String(data.message));
@@ -610,7 +637,6 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
   };
   worker.addEventListener('message', onMessage);
   worker.addEventListener('error', onError);
-
   const threads = new Map<number, () => void>();
   const endThread = (tid: number): void => {
     const end = threads.get(tid);
@@ -653,12 +679,10 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     });
     tw.postMessage(threadInit(opts, program, tsab, process.cred, thread, sab));
   };
-
   worker.postMessage(
     processInit(opts, sab, process.umask, copyCred(process.cred), lane?.lane),
     transferOf(opts, lane?.lane)
   );
-
   const terminate = (code: number, sig: number): void => {
     if (opts.program.abi !== 'wasi' || done) finish(code, sig);
     else dying.start(code, sig, header, process, () => finish(code, sig));
@@ -672,6 +696,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
   return {
     pid: opts.pid,
     exited,
+    ready,
     kill,
     signal,
     termsig: () => endedBy,

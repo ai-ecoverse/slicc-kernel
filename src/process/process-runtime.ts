@@ -2,7 +2,12 @@ import type { Cred } from '../kernel/cred.ts';
 import type { DeviceMeta, HeldMeta, PollState } from '../kernel/fd-table.ts';
 import { hostnameOf } from '../kernel/net/loopback-names.ts';
 import type { MountLine, ProcessListing } from '../kernel/proc-info.ts';
-import type { ForkState, InheritedFd, WasmProcessInitMsg } from '../kernel/protocol.ts';
+import {
+  type ForkState,
+  type InheritedFd,
+  WASM_PROCESS_READY,
+  type WasmProcessInitMsg,
+} from '../kernel/protocol.ts';
 import { SIG } from '../kernel/signals.ts';
 import type { Termios } from '../kernel/tty.ts';
 import { mountVfsIntoEmscripten } from '../realm/emscripten-vfs-hook.ts';
@@ -656,7 +661,6 @@ export async function runWasmProcess(
             heap: () => (memory ? new Int32Array(memory.buffer) : undefined),
             pty: sys,
             locks: { kernel: sys, memory: () => memory?.buffer, flush: () => early() },
-
             timer: {
               arm: (ms) => {
                 transport.call(
@@ -679,6 +683,7 @@ export async function runWasmProcess(
         })
         .then((instance) => {
           memory = wasmMemory(instance, imports);
+          port.postMessage({ type: WASM_PROCESS_READY });
           exports = instance.exports;
           publishMemory(init.sab, memory?.buffer.byteLength ?? 0);
           done(

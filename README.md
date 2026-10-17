@@ -917,6 +917,15 @@ Every process of the kernel has `/proc/<pid>/` with `cmdline`, `comm`, `stat`, `
 
 The kernel writes `/etc/passwd` and `/etc/group` when it starts (see [Users](#users)). While the root has none of them, or no `/etc/mtab`, reading them gets per-process ones: root is uid 0 and the realm user, uid 1000, is named after `USER`, or `web_user` (Emscripten's default) without one, so it matches `$USER`, with `HOME` as its home, so `id`, `whoami`, `ls -l` and `ps` show names. Nothing is written to OPFS, and a real file there wins.
 
+### How many processes at once
+
+In a browser every process worker of the page shares one renderer. V8 reserves about 8 GiB of address space for each 32-bit wasm memory, whatever its declared maximum, and its sandbox holds about 1 TiB. So a page runs about 125 wasm processes (or programs that own a wasm memory) at once, counting everything in the renderer (#970). Node has no such ceiling, and neither does Linux. The kernel keeps processes inside that ceiling:
+- **The ceiling:** 112 by default in a browser and none in Node. It's the kernel's count of live wasm processes, with the kernel's other wasm memories in the page left outside it. When an instantiation runs out of memory anyway, the kernel learns the real ceiling at that moment (the live count minus one), and that learned value wins over the default.
+- **Admission:** a spawn, fork, exec or `kernel.run` at the ceiling waits for another process to exit. It keeps waiting as long as processes exit or are admitted, and fails with `EAGAIN` only after 10 s with neither. A long `make -j` or `xargs -P` therefore queues, and a pipeline that needs more live processes than the ceiling fails cleanly. bash's own retry on a fork's `EAGAIN` (`fork: retry: Resource temporarily unavailable`) handles the rest.
+- **Close to the ceiling** (within 16 of it), the kernel waits for each new process to finish instantiating before the spawn returns. If it ran out of memory, the kernel starts it again, quietly, once there's room, so the caller sees no failure.
+- **The rare residual case:** a process that fails to instantiate with nobody waiting on it, which happens only when something outside the count fills the renderer. It ends with status 126 and `<program>: cannot allocate memory for a new process (too many processes at once)` on its stderr, never a JS `RangeError`.
+- **`/proc/sys/kernel/slicc_wasm_memories`** reads `<live> <ceiling>` (the ceiling 0 for none).
+
 ### Metadata
 
 OPFS stores names, bytes, sizes and modification times, nothing else. Everything POSIX needs on top of that lives in an IndexedDB sidecar, so it survives reloads and new kernels:
