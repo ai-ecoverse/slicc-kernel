@@ -949,6 +949,8 @@ In a browser every process worker of the page shares one renderer. V8 reserves a
 - **Below a learned ceiling,** a process that still runs out of memory is started again once another process exits, and the spawn fails with `EAGAIN` after 10 s with none.
 - **`/proc/sys/kernel/slicc_wasm_memories`** reads `<live> <ceiling> <source>`. The source is `default`, `learned`, or `none` (with the ceiling 0).
 
+`/proc/sys/kernel/slicc_shared_root` reads `1` while another kernel shares the root (a tab, or a second kernel in the page) and `0` otherwise. A peer's tab that closes is noticed when this kernel next writes to a shared file, at most every 30 s, so the value can stay `1` for a while after a peer has gone.
+
 ### Metadata
 
 OPFS stores names, bytes, sizes and modification times, nothing else. Everything POSIX needs on top of that lives in an IndexedDB sidecar, so it survives reloads and new kernels:
