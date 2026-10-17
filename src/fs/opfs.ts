@@ -240,6 +240,7 @@ export class OpfsFs implements KernelFs {
   private readonly dirs = new PathMap<FileSystemDirectoryHandle>();
   private readonly files = new PathMap<FileSystemFileHandle>();
   private readonly absent = new PathMap<number>();
+  private changes = 0;
   private readonly snapshots = new WeakMap<FileSystemFileHandle, File>();
   private readonly found = new WeakMap<FileSystemFileHandle, number>();
   private readonly checked = new WeakMap<FileSystemDirectoryHandle, number>();
@@ -526,6 +527,7 @@ export class OpfsFs implements KernelFs {
   }
 
   private forget(path: string): void {
+    this.changes++;
     this.dirs.deleteTree(path);
     this.files.deleteTree(path);
     this.absent.deleteTree(path);
@@ -598,6 +600,7 @@ export class OpfsFs implements KernelFs {
     if (gone !== undefined && performance.now() - gone < ABSENT_MS) {
       throw translate({ name: 'NotFoundError' }, path);
     }
+    const seen = this.changes;
     const [dir, name] = await this.parent(path);
     const known = kept !== undefined;
     return this.inDir(dir, async (parent): Promise<Handle> => {
@@ -612,7 +615,7 @@ export class OpfsFs implements KernelFs {
       return this.remember(path, await this.child(parent, name, second), true);
     }).catch((err) => {
       const error = translate(err, path) as Error & { code?: string };
-      if (error.code === 'ENOENT') this.missed(path);
+      if (error.code === 'ENOENT' && seen === this.changes) this.missed(path);
       throw error;
     });
   }
@@ -770,6 +773,7 @@ export class OpfsFs implements KernelFs {
   } = {};
 
   private touch(now: number, ...dirs: string[]): void {
+    this.changes++;
     for (const dir of dirs) {
       this.absent.deleteTree(dir);
       this.dirTimes.set(dir, now);
