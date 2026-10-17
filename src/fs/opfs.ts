@@ -635,7 +635,7 @@ export class OpfsFs implements KernelFs {
     const kept = this.dirs.get(path);
     if (kept && (await this.current(path, kept))) return kept;
     const gone = this.absent.get(path);
-    if (gone !== undefined && performance.now() - gone < ABSENT_MS) {
+    if (gone !== undefined && !this.shared() && performance.now() - gone < ABSENT_MS) {
       throw translate({ name: 'NotFoundError' }, path);
     }
     const seen = this.changes;
@@ -864,7 +864,12 @@ export class OpfsFs implements KernelFs {
     }
   }
 
+  private shared(): boolean {
+    return this.remote?.crowded() === true;
+  }
+
   private glanced(handle: FileSystemFileHandle): File | undefined {
+    if (this.shared()) return undefined;
     const seen = this.glances.get(handle);
     const fresh = seen && seen.changes === this.changes && performance.now() - seen.at < GLANCE_MS;
     return fresh ? seen.file : undefined;
