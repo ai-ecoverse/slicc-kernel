@@ -618,6 +618,7 @@ Directories are renamed with `FileSystemHandle.move()` where available, else by 
   - **Kernels that go away:** each kernel holds a Web Lock of its own for as long as it runs, so a closed or crashed tab's locks are dropped and its waiters woken within about a second.
   - **Leader failover:** when the leader goes, the next kernel takes over. It waits half a second while the others hand it the locks they hold and re-send their pending calls. A re-sent call is answered once.
   - **The same file:** a lock is keyed by the file's device and inode, which both kernels read from the shared sidecar, so a rename by either tab keeps it. A file removed and created again at the same path has the same key, as it already has within one kernel.
+  - **Versions:** the channel and Web Lock names carry a protocol version (`v1`), and a kernel ignores messages that aren't v1. So kernels on different protocol versions (two tabs across an update) don't share locks, as before #675.
   - **Not across tabs:** the imports module's whole-file `tryLock` (per kernel), and locks on other mounts.
 - **`slicc.fcntl_lock(fd, cmd, flock_ptr) -> errno`** ([#722](https://github.com/ai-ecoverse/slicc-kernel/issues/722)): a WASIX program's `fcntl` record locks reach the same table as an Emscripten program's, so the two see each other's locks.
   - **cmd:** `12` `F_GETLK`, `13` `F_SETLK` or `14` `F_SETLKW`. Any other cmd is `EINVAL`.
