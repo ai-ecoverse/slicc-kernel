@@ -14,6 +14,7 @@ const KERNEL_DEFAULTS = [SIG.TSTP, SIG.TTIN, SIG.TTOU, SIG.CHLD, SIG.CONT, SIG.U
 const LIBC_DEFAULT_EXIT = 127;
 
 const SA_RESTART = 0x10000000;
+const SA_NODEFER = 0x40000000;
 const SA_NOCLDWAIT = 2;
 const DISPOSITION_IGNORE = 1;
 const DISPOSITION_HANDLER = 2;
@@ -52,6 +53,12 @@ export class WasiSignals implements SignalHooks {
 
   private restarting = 0;
 
+  private nodefer = 0;
+
+  private running = 0;
+
+  private deferred = 0;
+
   private defaults = 0;
 
   private nocldwait = false;
@@ -85,6 +92,7 @@ export class WasiSignals implements SignalHooks {
     this.handlers = withBit(this.handlers, bit, disposition === DISPOSITION_HANDLER);
     this.ignoring = withBit(this.ignoring, bit, disposition === DISPOSITION_IGNORE);
     this.restarting = withBit(this.restarting, bit, (flags & SA_RESTART) !== 0);
+    this.nodefer = withBit(this.nodefer, bit, (flags & SA_NODEFER) !== 0);
     this.defaults = withBit(this.defaults, bit, disposition === 0);
     if (sig === SIG.CHLD) this.nocldwait = (flags & SA_NOCLDWAIT) !== 0;
     return E.SUCCESS;
@@ -131,6 +139,23 @@ export class WasiSignals implements SignalHooks {
       if ((this.ignoring & sigbit(sig)) === 0) this.defaultAction(sig);
       return;
     }
+    const bit = sigbit(sig);
+    if ((this.running & bit) !== 0 && (this.nodefer & bit) === 0) {
+      this.deferred |= bit;
+      return;
+    }
+    this.running |= bit;
+    try {
+      this.run(handler, sig);
+    } finally {
+      this.running &= ~bit;
+    }
+    if ((this.deferred & bit) === 0) return;
+    this.deferred &= ~bit;
+    this.raise(sig);
+  }
+
+  private run(handler: (sig: number) => void, sig: number): void {
     const outer = { sig: this.delivering, defaulted: this.defaulted, libc: this.libcDefault };
     this.delivering = sig;
     this.defaulted = false;
