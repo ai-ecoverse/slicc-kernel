@@ -3,6 +3,7 @@ import { KernelError } from './fd-table.ts';
 import { type FlockKind, type LockKind, LockTable, type RecordLock } from './locks.ts';
 
 export const PRUNE_MS = 1000;
+export const LOCKS_PROTOCOL = 'v1';
 
 type Range = { start: number; end: number };
 type Want = { key: string; kind: LockKind } & Range;
@@ -107,10 +108,12 @@ export class LockService implements KernelLocks {
     this.root = options.root;
     this.locks = options.locks;
     this.channel = (options.channel ?? ((n) => new BroadcastChannel(n)))(
-      `slicc-locks:${this.root}`
+      `slicc-locks:${LOCKS_PROTOCOL}:${this.root}`
     );
     (this.channel as BroadcastChannel & { unref?: () => void }).unref?.();
-    this.channel.onmessage = ({ data }) => void this.receive(data as Message);
+    this.channel.onmessage = ({ data }) => {
+      if (isMessage(data)) void this.receive(data);
+    };
     void this.locks.request(this.aliveOf(this.kernel), () => new Promise<void>(() => {}));
     this.role = this.elect();
     this.flocks = {
@@ -121,11 +124,11 @@ export class LockService implements KernelLocks {
   }
 
   private aliveOf(kernel: string): string {
-    return `slicc-locks-alive:${this.root}:${kernel}`;
+    return `slicc-locks-alive:${LOCKS_PROTOCOL}:${this.root}:${kernel}`;
   }
 
   private elect(): Promise<void> {
-    const name = `slicc-locks-leader:${this.root}`;
+    const name = `slicc-locks-leader:${LOCKS_PROTOCOL}:${this.root}`;
     return new Promise<void>((decided) => {
       void this.locks.request(name, { ifAvailable: true }, async (lock) => {
         this.leader = lock !== null;
@@ -435,4 +438,33 @@ export function kernelLocks(root: string | undefined): KernelLocks {
   if (root === undefined || !locks || typeof BroadcastChannel !== 'function')
     return new LockTable();
   return new LockService({ root, locks });
+}
+
+const ASK_OPS: ReadonlySet<string> = new Set([
+  'set',
+  'wait',
+  'holder',
+  'drop',
+  'release',
+  'fset',
+  'fwait',
+  'fdrop',
+]);
+
+function askOk(ask: unknown): boolean {
+  if (typeof ask !== 'object' || ask === null) return false;
+  const a = ask as { op?: unknown; key?: unknown; owner?: unknown };
+  if (!ASK_OPS.has(String(a.op)) || typeof a.owner !== 'number') return false;
+  return a.key === undefined || typeof a.key === 'string';
+}
+
+function isMessage(data: unknown): data is Message {
+  if (typeof data !== 'object' || data === null || Array.isArray(data)) return false;
+  const m = data as Record<string, unknown>;
+  for (const field of ['id', 'from', 'to', 'cancel', 'errno'])
+    if (m[field] !== undefined && typeof m[field] !== 'string') return false;
+  if (m.ask !== undefined && !askOk(m.ask)) return false;
+  const adopt = m.adopt as { records?: unknown; flocks?: unknown } | null | undefined;
+  if (adopt === undefined) return true;
+  return adopt !== null && Array.isArray(adopt.records) && Array.isArray(adopt.flocks);
 }
