@@ -125,6 +125,7 @@ export class FifoTable {
     let open = true;
     return new OpenFile({
       fifo: path,
+      identity: fifo,
       ...(reads
         ? {
             read: async (max: number, signal?: AbortSignal) => {

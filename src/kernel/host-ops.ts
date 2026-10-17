@@ -1,6 +1,6 @@
 import type { SyncFsResult } from '../realm/sync-fs-wire.ts';
 import { KernelError } from './fd-table.ts';
-import { type LockKind, type LockTable, lockRange } from './locks.ts';
+import { type FlockKind, type LockKind, type LockTable, lockRange } from './locks.ts';
 import { timerAfter } from './timer.ts';
 
 export interface LockTarget {
@@ -20,6 +20,7 @@ export type HostSyscall =
     } & LockTarget)
   | ({ op: 'lk-get'; kind: LockKind; start: number; len: number } & LockTarget)
   | ({ op: 'lk-close' } & LockTarget)
+  | { op: 'flock'; fd: number; kind: FlockKind | 'unlock'; wait?: boolean }
   | { op: 'async-submit'; req: { op: string }; ack?: number[] }
   | { op: 'async-wait'; timeoutMs?: number }
   | { op: 'async-take'; id: number }
@@ -35,6 +36,7 @@ export const HOST_OPS: readonly HostSyscall['op'][] = [
   'lk-set',
   'lk-get',
   'lk-close',
+  'flock',
   'async-submit',
   'async-wait',
   'async-take',
@@ -201,6 +203,7 @@ export interface HostOpsContext {
     kind: LockKind | 'unlock' | 'close',
     setting?: boolean
   ) => Promise<string>;
+  flockOf?: (fd: number) => Promise<{ key: string; owner: object }>;
   locks: LockTable | undefined;
   ops: AsyncOps;
   blocking: () => AbortSignal;
@@ -221,6 +224,8 @@ export async function hostSyscall(req: HostSyscall, ctx: HostOpsContext): Promis
     case 'lk-get':
     case 'lk-close':
       return recordLock(req, ctx);
+    case 'flock':
+      return flock(req, ctx);
     case 'async-submit':
       if (!ctx.valid(req.req)) throw new KernelError('EINVAL');
       if (req.ack) ctx.ops.ack(req.ack);
@@ -242,6 +247,22 @@ export async function hostSyscall(req: HostSyscall, ctx: HostOpsContext): Promis
       ctx.ops.close();
       return done;
   }
+}
+
+const FLOCK_KINDS: ReadonlySet<string> = new Set(['shared', 'exclusive', 'unlock']);
+
+async function flock(
+  req: Extract<HostSyscall, { op: 'flock' }>,
+  ctx: HostOpsContext
+): Promise<SyncFsResult> {
+  const { locks, flockOf } = ctx;
+  if (!locks || !flockOf) throw new KernelError('ENOLCK');
+  if (!FLOCK_KINDS.has(req.kind)) throw new KernelError('EINVAL');
+  const { key, owner } = await flockOf(req.fd);
+  if (req.kind !== 'unlock' && req.wait)
+    await locks.flocks.wait(key, owner, req.kind, ctx.blocking);
+  else if (!locks.flocks.set(key, owner, req.kind)) throw new KernelError('EAGAIN');
+  return done;
 }
 
 async function recordLock(

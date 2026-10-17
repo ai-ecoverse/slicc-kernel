@@ -552,6 +552,19 @@ export function jobsEvidence(text, incomplete) {
   return withMissing(incomplete, failed);
 }
 
+export function statusAt(statuses, contexts, at) {
+  const cutoff = Date.parse(at ?? '');
+  const time = (s) => Date.parse(s.created_at ?? '');
+  for (const context of contexts) {
+    const seen = statuses
+      .filter((s) => s.context === context && !(time(s) > cutoff))
+      .sort((a, b) => time(b) - time(a));
+    const found = seen.find((s) => s.state !== 'pending') ?? seen[0];
+    if (found) return found;
+  }
+  return undefined;
+}
+
 export function groupVerdict(prs) {
   const lines = [];
   const missing = [];

@@ -23,6 +23,11 @@ export interface LockedFile {
   size(): number;
 }
 
+const LOCK_NB = 4;
+const FLOCK_OPS: Readonly<Record<number, FlockKind>> = { 1: 'shared', 2: 'exclusive', 8: 'unlock' };
+
+export type FlockKind = 'shared' | 'exclusive' | 'unlock';
+
 export interface LockCalls {
   set(
     target: LockTarget,
@@ -32,6 +37,7 @@ export interface LockCalls {
     wait: boolean
   ): void;
   get(target: LockTarget, kind: LockKind, start: number, len: number): LockHeld | null;
+  flock(fd: number, kind: FlockKind, wait: boolean): void;
 }
 
 export interface LockHost {
@@ -39,6 +45,7 @@ export interface LockHost {
   file(fd: number): LockedFile;
   flush(file: LockedFile): void;
   locked(): void;
+  promote(fd: number): void;
   calls: LockCalls;
 }
 
@@ -70,6 +77,12 @@ function writeHolder(view: DataView, at: number, found: LockHeld | null): void {
 
 export function lockImports(host: LockHost): Record<string, WasiFunction> {
   return {
+    flock: (fd: number, op: number) => {
+      host.promote(fd);
+      const kind = FLOCK_OPS[op & ~LOCK_NB];
+      if (!kind) throw new WasiError('EINVAL');
+      host.calls.flock(fd, kind, kind !== 'unlock' && (op & LOCK_NB) === 0);
+    },
     fcntl_lock: (fd: number, cmd: number, at: number) => {
       if (cmd !== F_GETLK && cmd !== F_SETLK && cmd !== F_SETLKW) throw new WasiError('EINVAL');
       const file = host.file(fd);

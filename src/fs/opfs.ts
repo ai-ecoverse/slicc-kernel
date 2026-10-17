@@ -929,13 +929,21 @@ export class OpfsFs implements KernelFs {
     return handle;
   }
 
+  private async refuseNode(path: string, empty: boolean): Promise<void> {
+    if (!empty) return;
+    const [entry] = await this.meta.get([(await this.locate(path, true)).path]);
+    if (entry?.fifo || entry?.socket) throw fsError('ENXIO', path);
+  }
+
   async readFileBuffer(path: string): Promise<Uint8Array> {
     const handle = await this.existing(path);
-    return this.retrying(
+    const bytes = await this.retrying(
       path,
       async () => new Uint8Array(await (await handle.getFile()).arrayBuffer()),
       false
     );
+    await this.refuseNode(path, bytes.length === 0);
+    return bytes;
   }
 
   async readVersioned(
@@ -949,6 +957,7 @@ export class OpfsFs implements KernelFs {
         const stamp = await this.stamp(path, cached);
         const file = await handle.getFile();
         const bytes = new Uint8Array(await file.arrayBuffer());
+        await this.refuseNode(path, bytes.length === 0);
         return { bytes, version: `${file.lastModified}:${file.size}:${stamp}` };
       },
       false
@@ -972,8 +981,11 @@ export class OpfsFs implements KernelFs {
     const handle = await this.existing(path);
     return this.retrying(
       path,
-      async () =>
-        new Uint8Array(await (await handle.getFile()).slice(offset, offset + length).arrayBuffer()),
+      async () => {
+        const file = await handle.getFile();
+        await this.refuseNode(path, file.size === 0);
+        return new Uint8Array(await file.slice(offset, offset + length).arrayBuffer());
+      },
       false
     );
   }
@@ -991,6 +1003,7 @@ export class OpfsFs implements KernelFs {
 
   async truncate(path: string, size: number): Promise<void> {
     const handle = await this.existing(path, true);
+    await this.refuseNode(path, (await handle.getFile()).size === 0);
     const resolve = this.ranged || this.remote?.watched();
     const target = resolve || this.counted.length > 0 ? (await this.locate(path, true)).path : path;
     await this.counting(target);
@@ -1052,6 +1065,10 @@ export class OpfsFs implements KernelFs {
 
   private async fileFor(path: string): Promise<[FileSystemFileHandle, boolean, string]> {
     const [target, existed] = await this.writeTarget(path);
+    if (existed) {
+      const [entry] = await this.meta.get([target]);
+      if (entry?.fifo || entry?.socket) throw fsError('ENXIO', path);
+    }
     const [dir, name] = await this.parent(target);
     try {
       const handle = await this.inDir(dir, (parent) =>

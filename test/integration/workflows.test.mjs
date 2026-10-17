@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -121,6 +121,28 @@ test('CI loads the decider from the protected branch for a merge group and the b
     /\n {10}ref: \$\{\{ github\.event\.merge_group\.base_ref \|\| github\.event\.pull_request\.base\.sha \|\| github\.sha \}\}\n {10}sparse-checkout: \.github\/runner\.mjs\n/
   );
   assert.doesNotMatch(ci, /merge_group\.base_sha/);
+});
+
+test("no workflow checks out a merge group's base_sha, which can be the previous group's speculative commit with queued PRs' changes; the group lookup loads its tools from the protected branch", async () => {
+  const dir = new URL('../../.github/workflows/', import.meta.url);
+  const names = (await readdir(dir)).filter((name) => /\.ya?ml$/.test(name));
+  assert.ok(names.includes('cert-review-pr.yml'));
+  for (const name of names) {
+    const text = await readFile(new URL(name, dir), 'utf8');
+    for (const line of text.split('\n').filter((l) => /^\s*ref:/.test(l))) {
+      assert.doesNotMatch(
+        line,
+        /merge_group\.base_sha|merge_group\.head_sha|pull_request\.head\./,
+        `${name}: ${line.trim()}`
+      );
+    }
+  }
+  const review = await readFile(new URL('cert-review-pr.yml', dir), 'utf8');
+  assert.match(
+    review,
+    /\n {10}ref: \$\{\{ github\.event\.merge_group\.base_ref \}\}\n {10}sparse-checkout: tools\/cert-review\n/
+  );
+  assert.match(review, /BASE_SHA: \$\{\{ github\.event\.merge_group\.base_sha \}\}/);
 });
 
 test('the pick step uses the decider and falls back to a hosted runner when it is missing or fails', async () => {
