@@ -47,6 +47,7 @@ export interface FilesystemHandlers {
   rename(from: string, to: string): Promise<void>;
   link?(from: string, to: string): Promise<void>;
   symlink?(target: string, path: string, owner?: DriverOwner): Promise<void>;
+  mkfifo?(path: string, owner?: DriverOwner): Promise<void>;
   readlink?(path: string): Promise<string>;
   setattr?(path: string, attr: DriverSetAttr): Promise<void>;
   statfs?(): Promise<DriverStatfs>;
@@ -133,6 +134,9 @@ async function dispatch(h: FilesystemHandlers, req: DriverRequest): Promise<unkn
     case 'link':
       if (!h.link) throw fsError('EPERM', 'this file system has no hard links');
       return h.link(req.from, req.to);
+    case 'mkfifo':
+      if (!h.mkfifo) throw fsError('EPERM', 'this file system has no FIFOs');
+      return ownerOf(req) ? h.mkfifo(req.path, ownerOf(req)) : h.mkfifo(req.path);
     case 'symlink':
       if (!h.symlink) throw fsError('EPERM', 'this file system has no symlinks');
       return ownerOf(req)
