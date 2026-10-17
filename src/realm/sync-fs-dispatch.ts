@@ -619,7 +619,14 @@ const IDENTITY_OPS = new Set<SyncFsOp>([
   'lchown',
 ]);
 
+let served = 0;
+
+export function servedFsCalls(): number {
+  return served;
+}
+
 export async function dispatchSyncFs(req: SyncFsRequest): Promise<SyncFsResult> {
+  served++;
   const entry = resolveSyncFsToken(req.token);
   if (!entry) return { ok: false, errno: 'EACCES', message: 'sync-fs: unknown or revoked token' };
   if (!req.identity || !IDENTITY_OPS.has(req.op)) return dispatchOne(entry, req);

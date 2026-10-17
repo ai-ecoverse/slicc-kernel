@@ -7,6 +7,8 @@ export type RemoteListener = (change: RemoteChange) => void;
 
 export const ANNOUNCE_WAIT_MS = 500;
 export const PRUNE_EVERY_MS = 30_000;
+export const MOURN_TRIES = 5;
+export const MOURN_RETRY_MS = 100;
 
 interface WatchMessage {
   hello?: string;
@@ -22,7 +24,7 @@ interface WatchMessage {
 
 export interface LockManagerLike {
   request(name: string, callback: () => Promise<void>): Promise<unknown>;
-  query(): Promise<{ held?: Array<{ name?: string }> }>;
+  query(): Promise<{ held?: Array<{ name?: string }>; pending?: Array<{ name?: string }> }>;
 }
 
 export function lockManager(): LockManagerLike | undefined {
@@ -34,6 +36,7 @@ export class RemoteWatch {
   private readonly name: string;
   private readonly tab = crypto.randomUUID();
   private readonly peers = new Set<string>();
+  private readonly mourned = new Set<string>();
   private readonly others = new Map<string, readonly string[]>();
   private readonly union = new Set<string>();
   private readonly listeners = new Set<RemoteListener>();
@@ -110,8 +113,7 @@ export class RemoteWatch {
   private receive(data: WatchMessage): void {
     if (data.hello !== undefined) this.greeted(data.hello);
     if (data.here !== undefined && data.to === this.tab) {
-      this.peers.add(data.here);
-      this.recount();
+      this.arrived(data.here);
       this.met?.();
     }
     if (data.tab !== undefined && data.paths !== undefined) this.announced(data);
@@ -121,9 +123,38 @@ export class RemoteWatch {
     if (data.changed !== undefined) this.emit({ paths: data.changed, trees: [] });
   }
 
-  private greeted(peer: string): void {
+  private arrived(peer: string): void {
     this.peers.add(peer);
     this.recount();
+    void this.mourn(peer);
+  }
+
+  private async mourn(peer: string, tries = MOURN_TRIES): Promise<void> {
+    if (!this.locks || this.mourned.has(peer)) return;
+    this.mourned.add(peer);
+    const name = this.lockOf(peer);
+    const { held = [], pending = [] } = await this.locks.query();
+    if (![...held, ...pending].some((lock) => lock.name === name)) {
+      this.mourned.delete(peer);
+      if (tries > 1 && this.peers.has(peer)) {
+        setTimeout(() => void this.mourn(peer, tries - 1), MOURN_RETRY_MS);
+      }
+      return;
+    }
+    void this.locks.request(name, async () => {
+      this.mourned.delete(peer);
+      this.others.delete(peer);
+      this.peers.delete(peer);
+      this.rebuild();
+      this.recount();
+      for (const wait of this.waiting.values()) {
+        if (wait.left.delete(peer) && wait.left.size === 0) wait.done();
+      }
+    });
+  }
+
+  private greeted(peer: string): void {
+    this.arrived(peer);
     const answer = () => {
       this.channel.postMessage({ here: this.tab, to: peer });
       if (this.mine.length > 0) void this.announce(this.mine);
@@ -134,8 +165,7 @@ export class RemoteWatch {
 
   private announced({ tab, paths, seq }: WatchMessage): void {
     const from = tab as string;
-    this.peers.add(from);
-    this.recount();
+    this.arrived(from);
     if ((paths as string[]).length > 0) this.others.set(from, paths as string[]);
     else this.others.delete(from);
     this.rebuild();
