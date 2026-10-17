@@ -276,6 +276,28 @@ test("record's artifact check covers every producer and fails the record as INCO
       );
   }
   assert.doesNotMatch(workflow, /overwrite: true/);
+  assert.doesNotMatch(workflow, /merge-multiple/);
+  for (const job of ['same', 'suite']) {
+    for (const [side, v] of [
+      ['pack', 'version'],
+      ['pack-base', 'prev'],
+    ])
+      assert.match(
+        jobs[job],
+        new RegExp(
+          `artifact-ids: \\$\\{\\{ needs\\.${side}\\.outputs\\.id \\}\\}\\n {10}path: \\$\\{\\{ runner\\.temp \\}\\}/packs/kernel-tgz-\\$\\{\\{ needs\\.plan\\.outputs\\.${v} \\}\\}\\n`
+        ),
+        `${job} unpacks ${side} where its script reads it: a download by one id extracts into its path itself`
+      );
+  }
+  assert.match(
+    jobs.same,
+    /--candidate "\$RUNNER_TEMP\/packs\/kernel-tgz-\$VERSION\/ai-ecoverse-slicc-kernel-\$VERSION\.tgz"/
+  );
+  assert.match(
+    jobs.suite,
+    /cp "\$RUNNER_TEMP"\/packs\/kernel-tgz-\*\/\*\.tgz "\$RUNNER_TEMP\/tgz\/"/
+  );
   for (const job of ['pack', 'pack-base', 'delta', 'same', 'compat'])
     assert.match(
       jobs[job],
