@@ -125,6 +125,7 @@ export type {
   JsListener,
   JsListenOptions,
   JsNet,
+  JsResolveOptions,
   JsTlsOptions,
   JsTlsSession,
 } from './process/js/js-net.ts';
