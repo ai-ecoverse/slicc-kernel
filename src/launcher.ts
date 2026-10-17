@@ -661,7 +661,9 @@ export class Launcher {
   constructor(options: LauncherOptions) {
     this.usersMode = usersMode(options.users);
     this.rootFs = options.fs;
-    this.locks = kernelLocks(options.fs.rootName, options.fs.peers?.());
+    const peers = options.fs.peers?.();
+    this.locks = kernelLocks(options.fs.rootName, peers);
+    peers?.watch((crowded) => this.changes.foreign(crowded));
     this.dac = this.usersMode === 'off' ? undefined : new Dac(this.usersMode, options.onDenial);
     if (this.dac) this.dac.tagOf = (pid) => this.tagOf(pid);
     this.clipboard = new ClipboardBroker(options.clipboard, this.usersMode, undefined, (pid) =>

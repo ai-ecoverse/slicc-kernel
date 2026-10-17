@@ -125,6 +125,18 @@ async function append(ctx, [path]) {
 
 const stamp = () => performance.timeOrigin + performance.now();
 
+async function fsyncfiles(ctx, [dir, n]) {
+  for (let i = 1; i <= Number(n); i++) {
+    while (!(await ctx.fs.exists(`${dir}/r${i}`))) await sleep(2);
+    await sleep(3);
+    const f = await ctx.open(`${dir}/f${i}`, { write: true });
+    await f.write(0, new TextEncoder().encode('x'));
+    await f.sync();
+    await f.close();
+    await ctx.fs.writeFile(`${dir}/m${i}`, '');
+  }
+}
+
 async function peerwrite(ctx, [dir, n]) {
   while (!(await ctx.fs.exists(`${dir}/ready`))) await sleep(5);
   const done = [];
@@ -1446,6 +1458,7 @@ const modes = {
   append,
   exclusive,
   peerwrite,
+  fsyncfiles,
   peerwatch,
   lock,
   nodir,

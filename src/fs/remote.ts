@@ -46,6 +46,15 @@ export class RemoteWatch {
   private met: (() => void) | undefined;
   private settled = false;
   quiet: (() => Promise<void>) | undefined;
+  crowd: ((crowded: boolean) => void) | undefined;
+  private told: boolean | undefined;
+
+  private recount(): void {
+    const now = this.crowded();
+    if (now === this.told) return;
+    this.told = now;
+    this.crowd?.(now);
+  }
 
   constructor(name: string, options: { locks?: LockManagerLike | null } = {}) {
     this.name = name;
@@ -64,6 +73,7 @@ export class RemoteWatch {
       .then(() => this.join())
       .then(() => {
         this.settled = true;
+        this.recount();
       });
     this.channel.postMessage({ hello: this.tab });
   }
@@ -101,6 +111,7 @@ export class RemoteWatch {
     if (data.hello !== undefined) this.greeted(data.hello);
     if (data.here !== undefined && data.to === this.tab) {
       this.peers.add(data.here);
+      this.recount();
       this.met?.();
     }
     if (data.tab !== undefined && data.paths !== undefined) this.announced(data);
@@ -112,6 +123,7 @@ export class RemoteWatch {
 
   private greeted(peer: string): void {
     this.peers.add(peer);
+    this.recount();
     const answer = () => {
       this.channel.postMessage({ here: this.tab, to: peer });
       if (this.mine.length > 0) void this.announce(this.mine);
@@ -123,6 +135,7 @@ export class RemoteWatch {
   private announced({ tab, paths, seq }: WatchMessage): void {
     const from = tab as string;
     this.peers.add(from);
+    this.recount();
     if ((paths as string[]).length > 0) this.others.set(from, paths as string[]);
     else this.others.delete(from);
     this.rebuild();
@@ -151,6 +164,7 @@ export class RemoteWatch {
       }
     }
     this.rebuild();
+    this.recount();
   }
 
   watched(): boolean {
