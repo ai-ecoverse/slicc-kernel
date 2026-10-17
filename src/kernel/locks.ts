@@ -105,6 +105,13 @@ export class FlockTable {
     }
   }
 
+  entries(): Array<[string, object, FlockKind]> {
+    const out: Array<[string, object, FlockKind]> = [];
+    for (const [key, holders] of this.held)
+      for (const [owner, kind] of holders) out.push([key, owner, kind]);
+    return out;
+  }
+
   drop(owner: object): void {
     const key = this.keys.get(owner);
     if (key === undefined) return;
@@ -196,6 +203,10 @@ export class LockTable {
   private store(key: string, locks: RecordLock[]): void {
     if (locks.length === 0) this.records.delete(key);
     else this.records.set(key, locks);
+  }
+
+  entries(): Array<[string, RecordLock[]]> {
+    return [...this.records].map(([key, locks]) => [key, locks.map((l) => ({ ...l }))]);
   }
 
   holds(owner: number): boolean {

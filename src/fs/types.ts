@@ -80,6 +80,7 @@ export interface KernelFs {
   readlink(path: string): Promise<string>;
   realpath?(path: string, follow: boolean): Promise<string>;
   createExclusive?(path: string, owner?: NewOwner): Promise<void>;
+  readonly rootName?: string;
   chown?(path: string, change: OwnerChange): Promise<void>;
   trackOwners?(): void;
   crossings?(mounted: (path: string) => boolean): void;

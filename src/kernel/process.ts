@@ -53,7 +53,8 @@ import {
 import type { FifoTable } from './fifo.ts';
 import { AsyncOps, HOST_OPS, type HostSyscall, hostSyscall, type LockTarget } from './host-ops.ts';
 import type { JobTable } from './jobs.ts';
-import type { LockKind, LockTable } from './locks.ts';
+import type { KernelLocks } from './lock-service.ts';
+import type { LockKind } from './locks.ts';
 import { HTTP_OPS, type HttpHandles, type HttpSyscall } from './net/http-syscalls.ts';
 import { NO_TRANSPORT } from './net/network.ts';
 import { Resolver } from './net/resolver.ts';
@@ -598,7 +599,7 @@ export interface WasmProcessOptions {
 
   http?: HttpHandles;
 
-  locks?: LockTable;
+  locks?: KernelLocks;
 
   fifos?: FifoTable;
 

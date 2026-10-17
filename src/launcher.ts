@@ -64,7 +64,7 @@ import { bytesSource, deviceFile, FdTable, type OpenFile, sinkFile } from './ker
 import { FifoTable } from './kernel/fifo.ts';
 import { spawnWasmProcess, type WasmProcessHandle, type WasmWorkerLike } from './kernel/host.ts';
 import { type JobMember, JobTable } from './kernel/jobs.ts';
-import { LockTable } from './kernel/locks.ts';
+import { type KernelLocks, kernelLocks } from './kernel/lock-service.ts';
 import { hostsReader } from './kernel/net/hosts-file.ts';
 import { HttpHandles } from './kernel/net/http-syscalls.ts';
 import { DEFAULT_HOSTNAME, isHostname } from './kernel/net/loopback-names.ts';
@@ -603,7 +603,7 @@ export class Launcher {
   readonly users: UserDb;
   private readonly sudoer: Sudo;
   private readonly jobs = new JobTable();
-  private readonly locks = new LockTable();
+  private readonly locks: KernelLocks;
   private readonly fifos = new FifoTable();
 
   private readonly sems = new SemTable();
@@ -661,6 +661,7 @@ export class Launcher {
   constructor(options: LauncherOptions) {
     this.usersMode = usersMode(options.users);
     this.rootFs = options.fs;
+    this.locks = kernelLocks(options.fs.rootName);
     this.dac = this.usersMode === 'off' ? undefined : new Dac(this.usersMode, options.onDenial);
     if (this.dac) this.dac.tagOf = (pid) => this.tagOf(pid);
     this.clipboard = new ClipboardBroker(options.clipboard, this.usersMode, undefined, (pid) =>
