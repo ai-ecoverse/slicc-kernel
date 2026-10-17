@@ -157,7 +157,7 @@ test('ctx.net.connect with tls carries HTTP/1.1 to the transport as ctx.fetch do
   assert.equal(got.stderr, '');
   assert.equal(
     got.stdout,
-    '{"protocol":"transport","alpnProtocol":"http/1.1","authorized":true,"servername":"api.example"} api.example:443\n' +
+    '{"path":"transport","substitutes":true,"protocol":"transport","alpnProtocol":"http/1.1","authorized":true,"servername":"api.example"} api.example:443\n' +
       'HTTP/1.1 200 OK | hello /v1/thing\n' +
       'fetch 200 hello /v1/thing\n'
   );

@@ -27,6 +27,7 @@ const packages = {
     'package.json',
     'dist/slicc-tls-engine.mjs',
     'dist/slicc-tls-engine.wasm',
+    'dist/roots.der',
   ],
   'node_modules/@ai-ecoverse/wasm-coreutils/': [
     'package.json',

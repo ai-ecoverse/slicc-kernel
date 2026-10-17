@@ -108,9 +108,21 @@ export function packageTlsEngine(fs: KernelFs, modules: string): () => Promise<T
   };
 }
 
+export function packageTlsRoots(fs: KernelFs, modules: string): () => Promise<Uint8Array> {
+  const file = `${modules.replace(/\/+$/, '')}/${TLS_ENGINE_PACKAGE}/dist/roots.der`;
+  return async () => {
+    try {
+      return await fs.readFileBuffer(file);
+    } catch {
+      throw new Error(`TLS client sessions need ${TLS_ENGINE_PACKAGE}'s roots.der in ${modules}`);
+    }
+  };
+}
+
 export interface NetworkOptions {
   transport?: RealmTransport;
   engine: () => Promise<TlsEngine>;
+  roots?: () => Promise<Uint8Array>;
   ca: () => Promise<RealmCa>;
   now?: () => number;
 }
@@ -163,6 +175,7 @@ export function enableNetwork(
 ): () => RealmProxy | undefined {
   let proxy: RealmProxy | undefined;
   const transport = options.transport ?? missingTransport();
+  if (options.roots) net.tlsClient = { engine: options.engine, roots: options.roots };
   const start = (): void => {
     const tls = new TlsTerminator({
       ca: options.ca,
