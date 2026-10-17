@@ -1719,6 +1719,10 @@ export class Launcher {
         return handle;
       }
       await handle.exited;
+      await this.memories.refused().catch(async (err) => {
+        await fds.closeAll();
+        throw err;
+      });
     }
   }
 
