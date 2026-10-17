@@ -16,21 +16,35 @@ const FALLBACK_MEMORY = 4 * KIB * KIB * KIB;
 export const PID_FILES = ['cmdline', 'comm', 'stat', 'statm', 'status'] as const;
 export const SYSTEM_FILES = ['loadavg', 'meminfo', 'stat', 'uptime', 'version'] as const;
 
+export type ProcSysFile = string | ((listing: ProcessListing) => string);
+
 export interface ProcSysTree {
-  readonly [name: string]: string | ProcSysTree;
+  readonly [name: string]: ProcSysFile | ProcSysTree;
 }
 
 export const SYS_TREE: ProcSysTree = {
-  kernel: { osrelease: `${OS_RELEASE}\n`, ostype: 'Linux\n' },
+  kernel: {
+    osrelease: `${OS_RELEASE}\n`,
+    ostype: 'Linux\n',
+    slicc_wasm_memories: (listing) => `${listing.wasm?.live ?? 0} ${listing.wasm?.ceiling ?? 0}\n`,
+  },
 };
 
-export function sysEntry(parts: readonly string[]): string | ProcSysTree | undefined {
-  let at: string | ProcSysTree | undefined = SYS_TREE;
+function isSysFile(at: ProcSysFile | ProcSysTree): at is ProcSysFile {
+  return typeof at === 'string' || typeof at === 'function';
+}
+
+export function sysEntry(parts: readonly string[]): ProcSysFile | ProcSysTree | undefined {
+  let at: ProcSysFile | ProcSysTree | undefined = SYS_TREE;
   for (const part of parts) {
-    if (typeof at !== 'object' || !Object.hasOwn(at, part)) return undefined;
+    if (isSysFile(at) || !Object.hasOwn(at, part)) return undefined;
     at = at[part];
   }
   return at;
+}
+
+export function sysText(file: ProcSysFile, listing: () => ProcessListing): string {
+  return typeof file === 'string' ? file : file(listing());
 }
 
 type PidFile = (typeof PID_FILES)[number];
@@ -371,8 +385,10 @@ export function useProcfs(Fs: ProcFs, sys: ProcSys, pid: number, memory = memory
     const dir = fresh(parent, name, DIR_MODE);
     dir.node_ops.lookup = (at, child) => {
       if (!Object.hasOwn(tree, child)) throw error();
-      const next = tree[child] as string | ProcSysTree;
-      return typeof next === 'string' ? file(at, child, () => next) : sysDir(at, child, next);
+      const next = tree[child] as ProcSysFile | ProcSysTree;
+      return isSysFile(next)
+        ? file(at, child, () => sysText(next, procList))
+        : sysDir(at, child, next);
     };
     dir.node_ops.readdir = () => ['.', '..', ...Object.keys(tree)];
     return dir;

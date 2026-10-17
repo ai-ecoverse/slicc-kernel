@@ -97,6 +97,7 @@ import { SI, SIG, type SigInfo, sigbit, signalField } from './kernel/signals.ts'
 import { LoopbackNet } from './kernel/socket.ts';
 import { KernelTty } from './kernel/tty.ts';
 import { keepingOpen, VfsNodes } from './kernel/vfs-file.ts';
+import { defaultCeiling, WasmMemories } from './kernel/wasm-memories.ts';
 import { type ServedFilesystem, serveFilesystem } from './mount/driver.ts';
 import {
   FSA_CAPABILITIES,
@@ -180,6 +181,7 @@ export interface LauncherOptions {
   uplink?: NetworkUplink;
   hostname?: string;
   users?: UsersMode;
+  wasmMemories?: { ceiling?: number; idleMs?: number };
   onDenial?: DenialHook;
   sealed?: SealedHook;
   clipboard?: ClipboardHook;
@@ -331,6 +333,7 @@ interface WriterStack {
 }
 
 interface StartRequest {
+  quietOom?: boolean | undefined;
   program: Program;
   argv0: string;
   args: string[];
@@ -530,6 +533,10 @@ function withScriptEnv(target: Target, command: Command | undefined): Target {
   };
 }
 
+function memoriesOf(given: LauncherOptions['wasmMemories']): WasmMemories {
+  return new WasmMemories(given?.ceiling ?? defaultCeiling(), given?.idleMs);
+}
+
 function childHandle(handle: WasmProcessHandle): ChildHandle {
   return {
     pid: handle.pid,
@@ -605,6 +612,7 @@ export class Launcher {
   private readonly jobs = new JobTable();
   private readonly locks: KernelLocks;
   private readonly fifos = new FifoTable();
+  private readonly memories: WasmMemories;
 
   private readonly sems = new SemTable();
   private readonly settling = new SettlingChildren((pid) => this.jobs.pgidOf(pid));
@@ -660,6 +668,7 @@ export class Launcher {
 
   constructor(options: LauncherOptions) {
     this.usersMode = usersMode(options.users);
+    this.memories = memoriesOf(options.wasmMemories);
     this.rootFs = options.fs;
     const peers = options.fs.peers?.();
     this.locks = kernelLocks(options.fs.rootName, peers);
@@ -1619,7 +1628,9 @@ export class Launcher {
     }
     const done = this.heldUrl(program);
     try {
-      const handle = this.start({ ...req, cwd, program, argv0: target.argv0, args, env });
+      const handle = await this.admitted(program.abi !== 'js', req.fds, (fds, quietOom) =>
+        this.start({ ...req, fds, quietOom, cwd, program, argv0: target.argv0, args, env })
+      );
       void handle.exited.finally(done);
       return handle;
     } catch (err) {
@@ -1667,6 +1678,46 @@ export class Launcher {
   private marks(pid: number, req: StartRequest): void {
     if (req.tag !== undefined) this.tags.set(pid, req.tag);
     if (req.links !== undefined) this.links.set(pid, req.links);
+  }
+
+  private async admitted(
+    wasm: boolean,
+    fds: FdTable,
+    start: (fds: FdTable, quietOom?: boolean) => WasmProcessHandle
+  ): Promise<WasmProcessHandle> {
+    if (!wasm) return start(fds);
+    for (;;) {
+      await this.memories.admit().catch(async (err) => {
+        await fds.closeAll();
+        throw err;
+      });
+      const counted = (handle: WasmProcessHandle) => {
+        void handle.exited.finally(() => this.memories.ended());
+        return handle;
+      };
+      if (!this.memories.near()) {
+        try {
+          return counted(start(fds));
+        } catch (err) {
+          this.memories.ended();
+          throw err;
+        }
+      }
+      const forked = fds.fork();
+      const handle = await Promise.resolve()
+        .then(() => counted(start(forked, true)))
+        .catch(async (err) => {
+          this.memories.ended();
+          await forked.closeAll();
+          throw err;
+        });
+      const fit = await (handle.ready ?? true);
+      if (fit) {
+        await fds.closeAll();
+        return handle;
+      }
+      await handle.exited;
+    }
   }
 
   private start(req: StartRequest): WasmProcessHandle {
@@ -1723,6 +1774,10 @@ export class Launcher {
         : {}),
       createWorker: this.createWorker,
       onError: req.report,
+      onOom: () => {
+        this.memories.learn();
+        return req.quietOom === true;
+      },
       spawner: this.spawner(pid, req.report),
       forker: this.forker(pid, req),
       kill: (target, sig, info) => this.kill(target, sig, this.credOf(pid), pid, info),
@@ -1732,6 +1787,7 @@ export class Launcher {
         processes: this.list(this.credOf(pid)),
         load: this.loadAverage(),
         cpu: this.cpuTotal(),
+        wasm: this.memories.count(),
       }),
       sudo: (call, signal) => this.sudo(pid, call, signal),
       crontab: (call) => this.crontab(pid, call),
@@ -2104,10 +2160,11 @@ export class Launcher {
 
   private forker(ppid: number, parent: StartRequest): ChildForker {
     const { exec: _exec, pgid: _pgid, group: _group, pid: _pid, scrub: _scrub, ...image } = parent;
-    return async (state, fds) =>
-      childHandle(
+    return async (state, given) => {
+      const fresh = (fds: FdTable, quietOom?: boolean) =>
         this.start({
           ...image,
+          quietOom,
           cwd: state.cwd ?? parent.cwd,
           fds,
           ppid,
@@ -2118,8 +2175,9 @@ export class Launcher {
           cred: this.credOf(ppid),
           tag: this.tagOf(ppid),
           links: this.links.get(ppid),
-        })
-      );
+        });
+      return childHandle(await this.admitted(parent.program.abi !== 'js', given, fresh));
+    };
   }
 
   private keySignal(tty: KernelTty, fallback: number, sig: number, send: () => void): void {

@@ -14,6 +14,7 @@ import {
   pidFile,
   SYSTEM_FILES,
   sysEntry,
+  sysText,
   systemFile,
   taskIds,
   taskStat,
@@ -76,7 +77,9 @@ export class ProcTree {
     }
     if (top === 'sys') {
       const entry = sysEntry(parts.slice(1));
-      if (typeof entry === 'string') return { kind: 'file', content: () => entry };
+      if (typeof entry === 'string' || typeof entry === 'function') {
+        return { kind: 'file', content: () => sysText(entry, () => this.listing()) };
+      }
       return entry && { kind: 'dir', names: () => Object.keys(entry) };
     }
     if (top === 'self') {
