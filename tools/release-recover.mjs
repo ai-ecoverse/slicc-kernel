@@ -71,11 +71,15 @@ async function serving(label, served, sleep, log) {
   for (let n = 0; !(await served()); n++) {
     if (n >= SERVED.times) {
       const minutes = (SERVED.every * SERVED.times) / 60000;
-      throw new Error(`npm took ${label}, but does not serve it after ${minutes} min`);
+      log(
+        `npm took ${label}, but does not serve it yet after ${minutes} min: release / verify on npm waits for it`
+      );
+      return false;
     }
     await sleep(SERVED.every);
   }
   log(`npm serves ${label}`);
+  return true;
 }
 
 async function latestOf(name, version, run) {

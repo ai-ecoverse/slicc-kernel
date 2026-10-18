@@ -975,3 +975,39 @@ export function downstreamLine(lines) {
     ? unique[0]
     : `downstream: ${unique.map((l) => l.replace(/^downstream: /, '')).join(' | ')}`;
 }
+
+export async function awaitAttestations({
+  url,
+  fetch: get,
+  modified,
+  publishedAt,
+  now = Date.now,
+  sleep,
+  deadline = Number.POSITIVE_INFINITY,
+  graceMs = 30 * 60_000,
+  quietMs = 10 * 60_000,
+  everyMs = 15_000,
+}) {
+  let last;
+  let quietSince = now();
+  for (;;) {
+    const res = await get(url);
+    if (res.ok) return { res };
+    if (res.status !== 404) return { problem: `attestations answered ${res.status}` };
+    const changed = await modified();
+    if (changed !== last) {
+      last = changed;
+      quietSince = now();
+    }
+    const served = now() - publishedAt;
+    if (now() >= deadline)
+      return {
+        problem: `attestations answered 404 for ${Math.round(served / 60_000)} min after npm started serving it, through the whole wait`,
+      };
+    if (served >= graceMs && now() - quietSince >= quietMs)
+      return {
+        problem: `attestations answered 404 for ${Math.round(served / 60_000)} min after npm started serving it, and its packument stopped changing ${Math.round((now() - quietSince) / 60_000)} min ago`,
+      };
+    await sleep(everyMs);
+  }
+}
