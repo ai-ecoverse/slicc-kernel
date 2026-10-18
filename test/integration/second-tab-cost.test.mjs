@@ -54,7 +54,7 @@ const tar = [
 ];
 
 test('cost per created file of pnpm and tar with one tab and with an idle second tab on the same OPFS root (#1017)', {
-  timeout: Number.POSITIVE_INFINITY,
+  timeout: 1_800_000,
 }, async (t) => {
   const { page, bash } = await booted(chrome, t, { worker: worker('writer') });
   for (const name of ['wasm-coreutils', 'wasm-tar', 'wasm-tls-engine', 'wasi-pnpm']) {
