@@ -1,3 +1,4 @@
+import type { ChangeView } from '../../fs/changes.ts';
 import { RangedFile, type RangedWatch, watchedChange } from '../../fs/ranged.ts';
 import type { DeviceAccess, KernelFdKind } from '../../kernel/fd-table.ts';
 import {
@@ -557,6 +558,43 @@ function index(map: Map<number, Set<string>>, key: number, path: string): void {
   map.set(key, paths);
 }
 
+const SEEN_CAP = 4096;
+
+class SeenAt {
+  private readonly view: ChangeView | undefined;
+  private readonly lstats: Map<string, Cached>;
+  private readonly links = new Map<string, number>();
+  private readonly stats = new Map<string, number>();
+  constructor(view: ChangeView | undefined, lstats: Map<string, Cached>) {
+    this.view = view;
+    this.lstats = lstats;
+  }
+
+  private of(map: Map<string, Cached>): Map<string, number> {
+    return map === this.lstats ? this.links : this.stats;
+  }
+
+  lstat(path: string): number | undefined {
+    return this.links.get(path);
+  }
+
+  saw(map: Map<string, Cached>, path: string, gen: number): void {
+    const seen = this.of(map);
+    if (seen.size >= SEEN_CAP) seen.clear();
+    seen.set(path, gen);
+  }
+
+  changed(map: Map<string, Cached>, path: string): boolean {
+    if (this.view === undefined) return false;
+    const seen = this.of(map);
+    const gen = seen.get(path);
+    if (gen === undefined) return true;
+    const since = this.view.changedSince(gen, path);
+    if (!since.changed) seen.set(path, since.now);
+    return since.changed;
+  }
+}
+
 export function cachingBridge(
   bridge: SyncFsPosixBridge,
   now: () => number = () => performance.now(),
@@ -573,7 +611,7 @@ export function cachingBridge(
   const live = (miss: Miss, path: string) =>
     miss.until > now() &&
     (view === undefined || miss.gen === undefined || !view.changedSince(miss.gen, path).changed);
-  const seenAt = new Map<string, number>();
+  const seen = new SeenAt(view, lstats);
   const gone = (path: string): Miss | undefined => {
     for (let at = path.lastIndexOf('/'); at > 0; at = path.lastIndexOf('/', at - 1)) {
       const up = path.slice(0, at);
@@ -589,13 +627,14 @@ export function cachingBridge(
     if (blind || view?.foreign()) return get();
     cache.fresh();
     let hit = map.get(path);
+    if (hit !== undefined && !('until' in hit) && seen.changed(map, path)) hit = undefined;
     if (hit === undefined || ('until' in hit && !live(hit, path))) {
       const missing = gone(path);
       if (missing) throw missing.error;
       const gen = view?.now();
       try {
         hit = get();
-        if (gen !== undefined && map === lstats) seenAt.set(path, gen);
+        if (gen !== undefined) seen.saw(map, path, gen);
       } catch (e) {
         hit = {
           error: e as Error,
@@ -650,18 +689,23 @@ export function cachingBridge(
     readdir: (p) => bridge.readdir(p),
 
     readdirStat: (p: string) => {
+      const gen = view?.now();
       const list = bridge.readdirStat(p);
       const base = p === '/' ? '' : p;
       for (const [name, st] of list) {
         if (!st || blind) continue;
-        cache.put(lstats, `${base}/${name}`, st);
-        if (!st.isSymbolicLink) cache.put(stats, `${base}/${name}`, st);
+        const at = `${base}/${name}`;
+        cache.put(lstats, at, st);
+        if (gen !== undefined) seen.saw(lstats, at, gen);
+        if (st.isSymbolicLink) continue;
+        cache.put(stats, at, st);
+        if (gen !== undefined) seen.saw(stats, at, gen);
       }
       return list;
     },
     readlink: (p) => {
       const known = blind ? undefined : (cache.fresh(), lstats.get(p));
-      const gen = seenAt.get(p);
+      const gen = seen.lstat(p);
       const current = view !== undefined && gen !== undefined && !view.changedSince(gen, p).changed;
       if (known && current && !('until' in known) && !known.isSymbolicLink) {
         throw syncError('EINVAL', `'${p}' is not a symbolic link`);
