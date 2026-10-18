@@ -61,3 +61,21 @@ for (const users of ['enforce', 'off']) {
     );
   });
 }
+
+test('an Emscripten stat through a symlink to /dev/pts/256 answers the pty, whose device number overflows the minor byte (#1069)', {
+  timeout: 180_000,
+}, async (t) => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
+  const r = await kernel.run(
+    [
+      'bash',
+      '-c',
+      'rm -f /tmp/pty; for i in $(seq 0 256); do exec {f}</dev/ptmx; done; ln -s /dev/pts/256 /tmp/pty; stat -L -c "%n %a %u %g" /tmp/pty /dev/pts/256',
+    ],
+    { cwd: '/' }
+  );
+  assert.equal(r.stderr, '');
+  assert.equal(r.stdout, '/tmp/pty 620 0 0\n/dev/pts/256 620 0 0\n');
+});
