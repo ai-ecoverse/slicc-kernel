@@ -1232,6 +1232,19 @@ A WASIX C program for `test/integration/sig-inherited.test.mjs` (#820), built on
 
 **Build:** `WASIX_SYSROOT_33=/path/to/wasix-sysroot ./build.sh`, with `wasixcc` 0.4.7 and binaryen's `wasm-opt` on `PATH`. `bin/inherittest.wasm` is 39,068 bytes, sha256 `c561a52eb27b3c1b6204b997f4eec967b9f4869c6ab13e7915a5a94b326a710e`.
 
+### `sigjmptest`
+
+A WASIX C program for `test/integration/sigjmp.test.mjs` ([#975](https://github.com/ai-ecoverse/slicc-kernel/issues/975), homescoop#1059), built on wasix-sysroot 2025.9.30-35. Each run takes a mode as its only argument:
+- `term`: a `SIGTERM` handler with `SIGUSR1` in its `sa_mask` sends itself `SIGUSR1`, which must wait until the handler returns: `term-done usr1`.
+- `longjmp`: `longjmp` out of a `SIGUSR1` handler that has `SIGUSR2` in `sa_mask`. It prints the mask after the jump, then unblocks everything and raises `SIGUSR1` again with a handler that returns.
+- `lsleep`, `lnanosleep`, `lread`, `lpoll`: the same with a `SIGALRM` that interrupts `sleep`, `nanosleep`, a `read` of an empty pipe, or `poll`. `sleep`, `nanosleep`, `read`, `poll` (no `l`) and `raise` use `sigsetjmp`/`siglongjmp`.
+- `direct`, `directmask`: `siglongjmp` with no signal at all. `fork` is `raise` in a forked child.
+- `hold` holds `flock` on `sigjmp.lock` for 3 seconds.
+
+On -35, `sigsetjmp` is an ordinary libc function rather than the `setjmp` that LLVM's wasm setjmp/longjmp lowering rewrites, so every `siglongjmp` escapes the program (`[object WebAssembly.Exception]`, exit 70), even `direct`. That is homescoop#1059. The rows use plain `longjmp` until the sysroot fixes it.
+
+**Build:** `WASIX_SYSROOT_35=/path/to/wasix-sysroot ./build.sh`, with `wasixcc` 0.4.7 and binaryen's `wasm-opt` 133 on `PATH`. Asyncify runs with `asyncify-ignore-indirect`, because functions with wasm `try` blocks can't be flattened. `bin/sigjmptest.wasm` is 52,725 bytes, sha256 `87039f3ba2e51a1297971bc614eb2976b88088a060df049ffd23d0288ad65491`.
+
 ### `handlertest`
 
 A WASIX C program for `test/integration/handler-defer.test.mjs` (#971), built on wasix-sysroot 2025.9.30-33. Its `SIGTERM` handler counts how often and how deeply it runs. On its first run it sends itself `SIGTERM` again and then writes to stderr. `handlertest` installs it with no flags, and `handlertest nodefer` with `SA_NODEFER`. Either way it prints `the handler ran N times, at most D deep`.
