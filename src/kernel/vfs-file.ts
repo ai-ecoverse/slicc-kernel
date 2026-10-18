@@ -97,6 +97,8 @@ export class VfsNode {
 
   private writeBackCost = 0;
 
+  private failed = false;
+
   opens = 0;
 
   writers = 0;
@@ -295,6 +297,7 @@ export class VfsNode {
 
   async pwrite(bytes: Uint8Array, at: number): Promise<number> {
     if (bytes.length === 0) return 0;
+    if (this.failed) await this.flush();
     await this.fits(at + bytes.length);
     const ranged = await this.prepare();
     if (ranged) {
@@ -311,6 +314,7 @@ export class VfsNode {
   }
 
   async truncate(size: number): Promise<void> {
+    if (this.failed) await this.flush();
     await this.fits(size);
     const ranged = await this.prepare();
     if (ranged) {
@@ -324,6 +328,10 @@ export class VfsNode {
     this.markDirty();
   }
 
+  doubted(): void {
+    if (this.dirty) this.failed = true;
+  }
+
   private markDirty(): void {
     this.dirty = true;
     this.recount();
@@ -332,7 +340,9 @@ export class VfsNode {
     const delay = Math.max(WRITEBACK_MS, this.writeBackCost * WRITEBACK_COST_FACTOR);
     this.writeBack = setTimeout(() => {
       this.writeBack = undefined;
-      this.serial(() => this.flush()).catch(() => undefined);
+      this.serial(() => this.flush()).catch(() => {
+        this.failed = true;
+      });
     }, delay);
   }
 
@@ -347,7 +357,10 @@ export class VfsNode {
 
   async flush(): Promise<void> {
     if (this.revoked && this.dirty) throw new KernelError('EIO');
-    if (!this.dirty || this.orphaned || !(this.data || this.ranged)) return;
+    if (!this.dirty || this.orphaned || !(this.data || this.ranged)) {
+      this.failed = false;
+      return;
+    }
     this.dirty = false;
     const started = performance.now();
     try {
@@ -359,6 +372,7 @@ export class VfsNode {
     } finally {
       this.recount();
     }
+    this.failed = false;
     this.writeBackCost = performance.now() - started;
   }
 }
@@ -659,6 +673,10 @@ export class VfsNodes implements UnlinkHolder {
 
   rewritten(path: string): void {
     this.byPath.get(path)?.reread();
+  }
+
+  doubted(path: string): void {
+    for (const [p, node] of this.byPath) if (within(p, path)) node.doubted();
   }
 
   async flush(path: string): Promise<void> {

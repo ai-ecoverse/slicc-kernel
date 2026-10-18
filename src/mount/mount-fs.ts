@@ -53,6 +53,7 @@ export interface MountDeps {
   open(type: string, spec: MountSpec): Promise<OpenedDriver>;
   busy(target: string): boolean;
   changed?(...paths: string[]): void;
+  doubted?(target: string): void;
   reshaped?(): void;
   timeoutMs?: number;
   owners?: boolean;
@@ -644,6 +645,7 @@ export class MountTable {
     if (paths === true) {
       mount.attrs.clear();
       mount.lists.clear();
+      this.deps.doubted?.(target);
       this.deps.changed?.(target);
       return;
     }
