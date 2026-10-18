@@ -311,8 +311,12 @@ export function createSyncFsSabBridge(
     },
     identifyNext: () => {
       once = true;
+      last = null;
     },
-    identified: () => last,
+    identified: () => {
+      once = false;
+      return last;
+    },
     lutimes: (path, atimeMs, mtimeMs, now) => {
       run({ op: 'lutimes', path, atimeMs, mtimeMs, ...(now ? { now } : {}) }, path);
     },
