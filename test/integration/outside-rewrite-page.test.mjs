@@ -31,18 +31,21 @@ test('on the OPFS root, bash keeps starting and its files keep existing while a 
     let stop = false;
     let rewrites = 0;
     const rewriter = (async () => {
-      for (let r = 0; r < rounds; r++) {
-        for (const f of files) {
-          const d = await dirOf([...pkg, ...f.slice(0, -1)]);
-          const h = await d.getFileHandle(f.at(-1));
-          const bytes = await (await h.getFile()).arrayBuffer();
-          const w = await h.createWritable();
-          await w.write(bytes);
-          await w.close();
-          rewrites++;
+      try {
+        for (let r = 0; r < rounds; r++) {
+          for (const f of files) {
+            const d = await dirOf([...pkg, ...f.slice(0, -1)]);
+            const h = await d.getFileHandle(f.at(-1));
+            const bytes = await (await h.getFile()).arrayBuffer();
+            const w = await h.createWritable();
+            await w.write(bytes);
+            await w.close();
+            rewrites++;
+          }
         }
+      } finally {
+        stop = true;
       }
-      stop = true;
     })();
     const dir = '/node_modules/@ai-ecoverse/wasm-bash';
     const looks = window.kernel.run(
