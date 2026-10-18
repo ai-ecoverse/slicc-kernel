@@ -88,7 +88,7 @@ console.log(
 );
 for (const r of placed)
   console.log(
-    `#${r.pr} ${r.kind}${r.behaviour ? '' : ' (no behaviour)'}${r.kind === 'fix' && r.baseline !== prev ? ` (NEGATIVE on v${r.baseline})` : ''}: ${r.title} [${r.tests.map((t) => `${t.file}: ${t.titles.length}`).join(', ')}]`
+    `#${r.pr} ${r.kind}${r.behaviour ? '' : ' (no behaviour)'}${r.behaviour && r.tests.length > 0 && r.baseline !== prev ? ` (NEGATIVE on v${r.baseline})` : ''}: ${r.title} [${r.tests.map((t) => `${t.file}: ${t.titles.length}`).join(', ')}]`
   );
 verdict(
   'delta',

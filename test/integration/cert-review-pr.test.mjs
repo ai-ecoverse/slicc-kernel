@@ -210,6 +210,26 @@ else process.exit(1);
   ]);
   assert.equal(planted.status, 1);
   assert.match(planted.json.line, /^cert-ci: INCOMPLETE .*the artifacts job ended failure/);
+  const unrun = join(dir, 'unrun-findings.json');
+  await writeFile(
+    unrun,
+    JSON.stringify({
+      findings: [{ kind: 'prev-not-run', pr: 1041, title: 'A2 net: sockets keep their peer' }],
+    })
+  );
+  const noNegative = await record([
+    '--tarball',
+    ok.file,
+    '--sha256',
+    ok.sha256,
+    '--findings',
+    unrun,
+  ]);
+  assert.equal(noNegative.status, 1);
+  assert.match(
+    noNegative.json.line,
+    /^cert-ci: INCOMPLETE .*#1041 changes shipped paths, and its tests' NEGATIVE on the previous tree has no result/
+  );
   await writeFile(
     join(review, 'verdict.json'),
     JSON.stringify({

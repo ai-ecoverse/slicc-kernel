@@ -21,6 +21,7 @@ import {
   knownLine,
   mergedPrs,
   missingShards,
+  negativeEvidence,
   parseResults,
   pickRelease,
   provenanceProblems,
@@ -365,7 +366,7 @@ test('findings.mjs turns the runs into decisions, suite regressions and missing 
     found.rows.map((r) => [r.pr, r.decision]),
     [
       [12, 'negative'],
-      [7, 'passes'],
+      [7, 'negative'],
       [9, 'not-behaviour'],
     ]
   );
@@ -626,7 +627,7 @@ test('a fix whose bug shipped inside the delta gets its NEGATIVE from the releas
   assert.deepEqual(baselineFiles(placed, '1.0.0'), {
     '1.0.0': ['test/integration/a.test.mjs', 'test/integration/x.test.mjs'],
     '1.0.1': ['test/integration/c.test.mjs'],
-    '1.0.2': ['test/integration/e.test.mjs'],
+    '1.0.2': ['test/integration/e.test.mjs', 'test/integration/f.test.mjs'],
   });
   const dir = await mkdtemp(join(tmpdir(), 'cert-baseline-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -825,9 +826,21 @@ test('test gaps go into the line in code, so a fix without a NEGATIVE is never c
       { kind: 'missing-evidence', what: 'kernel-compat' },
       { kind: 'prev-not-run', pr: 9 },
     ]),
-    ['#712 no-negative', '#714 no-test', '#9 prev-not-run']
+    ['#712 no-negative', '#714 no-test']
   );
   assert.deepEqual(gapsOf(undefined), []);
+  assert.deepEqual(
+    negativeEvidence([
+      { kind: 'prev-not-run', pr: 9 },
+      { kind: 'no-test', pr: 714 },
+    ]),
+    {
+      files: [],
+      named: "#9 changes shipped paths, and its tests' NEGATIVE on the previous tree has no result",
+      remedy: 're-run the failed jobs',
+    }
+  );
+  assert.equal(negativeEvidence([{ kind: 'no-negative', pr: 712 }]), undefined);
 });
 
 test('prev and base: the newest earlier release whose cert-review passed (prev also takes a pending one), past failures and unreviewed releases', async () => {
@@ -1023,6 +1036,7 @@ test("a test title built from a template literal matches the rows it ran as, so 
     .map((l) => `+${l}`)
     .join('\n')}`;
   const row = rowOf({ number: 731, title: 'fix: a forked WASIX child reads errno (#728)' }, [
+    { filename: 'src/process/wasi/wasi-fork.ts', status: 'modified', patch: '+x' },
     { filename: 'test/integration/fork-tls.test.mjs', status: 'added', patch },
   ]);
   const template =
@@ -1255,5 +1269,57 @@ test('a compat rerun tests exactly the package@version that regressed, and one t
   assert.deepEqual(
     same.map(({ rerun, reproduced }) => [rerun, reproduced]),
     [['pass', false]]
+  );
+});
+
+test('a pull request is behaviour by the paths it changes, not its title: an "A2 …" PR on src/ with a test gets its NEGATIVE, a docs-only one stays not behaviour, and a missing NEGATIVE is INCOMPLETE (#1036, #1041)', () => {
+  const net = rowOf({ number: 1041, title: 'A2 net: sockets keep their peer' }, [
+    { filename: 'src/kernel/net/socket.ts', status: 'modified', patch: '+x' },
+    { filename: 'src/process/js/js-net.ts', status: 'modified', patch: '+x' },
+    {
+      filename: 'test/integration/net.test.mjs',
+      status: 'modified',
+      patch: "+test('a socket keeps its peer', () => {});",
+    },
+  ]);
+  const docs = rowOf({ number: 1050, title: 'fix(docs): the README names the right flag' }, [
+    { filename: 'README.md', status: 'modified', patch: '+x' },
+    {
+      filename: 'test/integration/docs.test.mjs',
+      status: 'modified',
+      patch: "+test('docs only', () => {});",
+    },
+  ]);
+  assert.deepEqual(
+    [net.kind, net.behaviour, docs.kind, docs.behaviour],
+    ['other', true, 'fix', false]
+  );
+  assert.deepEqual(deltaFiles([net, docs]), ['test/integration/net.test.mjs']);
+  const placed = withBaselines([net, docs], { commits: [], tags: [], prev: '1.124.9' });
+  assert.deepEqual(baselineFiles(placed, '1.124.9'), {
+    '1.124.9': ['test/integration/net.test.mjs'],
+  });
+  const f = 'test/integration/net.test.mjs';
+  const next = resultsMap([res(f, 'a socket keeps its peer', 'pass')]);
+  assert.equal(
+    decide(net, resultsMap([res(f, 'a socket keeps its peer', 'fail')]), next).decision,
+    'negative'
+  );
+  assert.equal(
+    decide(net, resultsMap([res(f, 'a socket keeps its peer', 'pass')]), next).decision,
+    'passes'
+  );
+  assert.equal(decide(net, resultsMap([]), next).decision, 'prev-not-run');
+  assert.equal(
+    decide(
+      docs,
+      resultsMap([]),
+      resultsMap([res('test/integration/docs.test.mjs', 'docs only', 'pass')])
+    ).decision,
+    'not-behaviour'
+  );
+  assert.match(
+    negativeEvidence([{ kind: 'prev-not-run', pr: 1041 }]).named,
+    /^#1041 changes shipped paths/
   );
 });

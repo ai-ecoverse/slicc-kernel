@@ -8,7 +8,6 @@ export function verdict(name, ok, detail = '') {
 
 const MERGE = /^Merge pull request #(\d+) from /;
 const KIND = /^(\w+)(?:\([^)]*\))?(!)?:/;
-const BEHAVIOUR = new Set(['fix', 'feat', 'perf', 'revert']);
 const TITLE = /^\s*(?:await\s+)?(?:t\.)?(?:test|it|describe)\(\s*(['"`])((?:\\.|(?!\1).)+)(\1)?/;
 const PREFIX = '\u2026';
 const HUNK = /^@@[^@]*@@\s*(.*)$/;
@@ -103,7 +102,7 @@ export function rowOf(pr, files) {
     title: pr.title,
     kind,
     breaking: KIND.exec(pr.title ?? '')?.[2] === '!',
-    behaviour: BEHAVIOUR.has(kind),
+    behaviour: behaviourFiles(files).length > 0,
     src: files.some((f) => f.filename.startsWith('src/')),
     tests,
     dropped: droppedTests(files),
@@ -129,7 +128,7 @@ export function withBaselines(rows, { commits, tags, prev }) {
 
 export function baselineFiles(rows, prev) {
   const out = {};
-  for (const r of rows.filter((x) => x.kind === 'fix' && x.tests.length > 0)) {
+  for (const r of rows.filter((x) => x.behaviour && x.tests.length > 0)) {
     const files = (out[r.baseline ?? prev] ??= new Set());
     for (const t of r.tests) files.add(t.file);
   }
@@ -205,9 +204,9 @@ export function decide(row, prev, next) {
   if (checks.some((c) => c.next === 'fail')) return { ...base, decision: 'fails-on-release' };
   const ran = checks.filter((c) => c.next === 'pass');
   if (ran.length === 0) return { ...base, decision: 'not-run' };
-  if (row.kind !== 'fix') return { ...base, decision: 'passes' };
   if (ran.some((c) => c.prev === 'fail')) return { ...base, decision: 'negative' };
   if (ran.some((c) => c.prev === 'missing')) return { ...base, decision: 'prev-not-run' };
+  if (row.kind !== 'fix') return { ...base, decision: 'passes' };
   return { ...base, decision: 'no-negative' };
 }
 
@@ -405,7 +404,17 @@ export function knownAsOf(issue, { fixedBefore, releasedAt, version, fixedIn }) 
   return Boolean(releasedAt && issue.closedAt && releasedAt < issue.closedAt);
 }
 
-const GAPS = new Set(['no-test', 'no-negative', 'prev-not-run', 'no-titles', 'not-run']);
+const GAPS = new Set(['no-test', 'no-negative', 'no-titles', 'not-run']);
+
+export function negativeEvidence(findings, incomplete) {
+  const unrun = (findings ?? [])
+    .filter((f) => f.kind === 'prev-not-run' && f.pr)
+    .map(
+      (f) =>
+        `#${f.pr} changes shipped paths, and its tests' NEGATIVE on the previous tree has no result`
+    );
+  return withMissing(incomplete, unrun);
+}
 
 export function unfinishedFiles(expected, rows) {
   const seen = new Map();
