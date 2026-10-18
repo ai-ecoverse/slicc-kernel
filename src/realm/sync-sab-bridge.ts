@@ -176,14 +176,22 @@ export function createSyncSabTransport(
   };
 }
 
-function errnoError(code: string, path: string): Error & { code: string } {
-  return syncError(code, `sync-sab bridge, '${path}'`);
+function errnoError(code: string, path: string, direct?: true): Error & { code: string } {
+  const err = syncError(code, `sync-sab bridge, '${path}'`);
+  return direct ? Object.assign(err, { direct }) : err;
 }
 
 export function createSyncFsSabBridge(
   transport: SyncSabTransport,
-  opts: { timeoutMs?: number; owners?: boolean; links?: boolean; changes?: SharedArrayBuffer } = {}
+  opts: {
+    timeoutMs?: number;
+    owners?: boolean;
+    links?: boolean;
+    changes?: SharedArrayBuffer;
+    direct?: boolean;
+  } = {}
 ): SyncFsPosixBridge {
+  const direct = opts.direct ? { direct: true } : {};
   const timeoutMs = opts.timeoutMs ?? SYNC_FS_REQUEST_TIMEOUT_MS;
   let identity: { identity: true } | Record<string, never> = {};
   let once = false;
@@ -193,7 +201,7 @@ export function createSyncFsSabBridge(
     last = null;
     const silence = SYNC_FS_READ_ONLY.has(req.op) ? timeoutMs : Number.POSITIVE_INFINITY;
     const result = transport.call(req, silence, `sync-sab bridge, '${path}'`, transfer);
-    if (!result.ok) throw errnoError(result.errno, path);
+    if (!result.ok) throw errnoError(result.errno, path, result.direct);
     return result;
   }
   function bytes(req: SyncSabRequestBody, path: string): Uint8Array {
@@ -243,12 +251,12 @@ export function createSyncFsSabBridge(
       return s;
     },
     stat: (path) => {
-      const s = parseSyncFsStat(json({ op: 'stat', path }, path));
+      const s = parseSyncFsStat(json({ op: 'stat', path, ...direct }, path));
       if (!s) throw errnoError('EIO', path);
       return s;
     },
     lstat: (path) => {
-      const s = parseSyncFsStat(json({ op: 'lstat', path }, path));
+      const s = parseSyncFsStat(json({ op: 'lstat', path, ...direct }, path));
       if (!s) throw errnoError('EIO', path);
       return s;
     },
@@ -327,7 +335,12 @@ export function createSyncFsSabBridge(
     },
     create: (path, mode, opening) => {
       const flags = { ...(mode !== undefined ? { mode } : {}), ...(opening ? { opening } : {}) };
-      run({ op: 'create', path, ...flags }, path);
+      const r = run({ op: 'create', path, ...flags, identity: true }, path);
+      if (!r.ok || r.kind !== 'json') return undefined;
+      const st = parseSyncFsStat(r.json);
+      if (!st) return undefined;
+      const { seen } = r.json as { seen?: unknown };
+      return typeof seen === 'number' ? { ...st, seen } : st;
     },
     chown: (path, uid, gid, follow, handle) => {
       const ids = { ...(uid !== undefined ? { uid } : {}), ...(gid !== undefined ? { gid } : {}) };

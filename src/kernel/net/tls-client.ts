@@ -1,5 +1,6 @@
 import { KernelError } from '../fd-table.ts';
 import { ipv4Bytes, ipv6Groups } from './routes.ts';
+import { chainError, nameMatches } from './tls-chain.ts';
 import { cipherOf, type TlsCipher } from './tls-ciphers.ts';
 import {
   TLS_CLIENT_INSECURE_SKIP_VERIFY,
@@ -42,6 +43,7 @@ export interface TlsClientInfo {
   sni?: boolean;
   hostnameChecked?: boolean;
   hostnameMatches?: boolean;
+  chainError?: string;
 }
 
 export interface TlsClientOptions {
@@ -125,7 +127,12 @@ function refused(engine: TlsEngine, session: TlsSession, err: unknown): KernelEr
   if (code && flags !== -1)
     return new KernelError('EPROTO', `${code}: ${engine.verifyInfo(flags).trim()}`);
   const text = err instanceof TlsError ? err.message : String(err);
-  return new KernelError('EPROTO', `ERR_SSL_HANDSHAKE_FAILURE: ${text}`);
+  return new KernelError('EPROTO', `ERR_SSL_HANDSHAKE_FAILURE: ${text}${alertOf(session)}`);
+}
+
+function alertOf(session: TlsSession): string {
+  const alert = session.lastAlert;
+  return alert >= 0 ? ` (alert ${alert})` : '';
 }
 
 async function handshake(
@@ -153,7 +160,18 @@ async function handshake(
   }
 }
 
-function controlsOf(o: TlsClientOptions, session: TlsSession, protocol: TlsCipher['version']) {
+function insecureOf(session: TlsSession, chain: readonly Uint8Array[]) {
+  const flags = session.verifyResult;
+  const error = chainError(flags, chain);
+  return { hostnameMatches: nameMatches(flags), ...(error ? { chainError: error } : {}) };
+}
+
+function controlsOf(
+  o: TlsClientOptions,
+  session: TlsSession,
+  protocol: TlsCipher['version'],
+  chain: readonly Uint8Array[]
+) {
   if (!o.engine.sessionControls) return {};
   const checked = o.checkHostname !== false && !o.insecure;
   return {
@@ -161,7 +179,9 @@ function controlsOf(o: TlsClientOptions, session: TlsSession, protocol: TlsCiphe
     clientCertificate: o.clientCertificate === true,
     sni: o.sni !== false && !isIP(o.servername),
     hostnameChecked: checked,
-    ...(o.insecure ? {} : { hostnameMatches: checked || !session.nameMismatch }),
+    ...(o.insecure
+      ? insecureOf(session, chain)
+      : { hostnameMatches: checked || !session.nameMismatch }),
   };
 }
 
@@ -169,6 +189,7 @@ function infoOf(o: TlsClientOptions, session: TlsSession): TlsClientInfo {
   const flags = session.verifyResult;
   const code = verifyCode(flags);
   const protocol = session.version === 0x0304 ? 'TLSv1.3' : 'TLSv1.2';
+  const chain = session.peerChain();
   return {
     protocol,
     alpnProtocol: session.alpn ?? false,
@@ -176,18 +197,18 @@ function infoOf(o: TlsClientOptions, session: TlsSession): TlsClientInfo {
     ...(code
       ? { authorizationError: code, authorizationText: o.engine.verifyInfo(flags).trim() }
       : {}),
-    peerCertificates: session.peerChain(),
-    ...controlsOf(o, session, protocol),
+    peerCertificates: chain,
+    ...controlsOf(o, session, protocol, chain),
   };
 }
 
 const FATAL_ALERT = -0x7780;
 
-function alerted(err: TlsError): KernelError {
+function alerted(err: TlsError, session: TlsSession): KernelError {
   if (err.code === FATAL_ALERT)
     return new KernelError(
       'EPROTO',
-      `ERR_SSL_FATAL_ALERT: the server ended the session: ${err.message}`
+      `ERR_SSL_FATAL_ALERT: the server ended the session: ${err.message}${alertOf(session)}`
     );
   return new KernelError('EPROTO', `ERR_SSL_PROTOCOL_ERROR: ${err.message}`);
 }
@@ -210,7 +231,7 @@ function plaintext(conn: UplinkConn, session: TlsSession, inbox: Ciphertext): Up
         try {
           got = session.read();
         } catch (err) {
-          throw alerted(err as TlsError);
+          throw alerted(err as TlsError, session);
         }
         await send(conn, session);
         if (got instanceof Uint8Array) return got;

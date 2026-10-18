@@ -29,6 +29,7 @@ export interface SyncFsTokenEntry {
   created?: Created;
   holdsKept?: (path: string) => Promise<boolean>;
   replacements?: Replacements;
+  changes?: { now(): number };
   fresh?: (path: string) => void;
   source?: SourceCheck;
 }

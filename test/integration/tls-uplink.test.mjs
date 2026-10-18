@@ -8,7 +8,7 @@ import { createServer, TLSSocket } from 'node:tls';
 import { fileURLToPath } from 'node:url';
 import { createNodeKernel } from '../../dist/node.js';
 import { fakeUplink } from '../../dist/testing.js';
-import { makeCa } from './test-certs.mjs';
+import { makeCa, selfSigned } from './test-certs.mjs';
 
 const modules = new URL('../../node_modules/@ai-ecoverse/', import.meta.url);
 const TIMEOUT = { timeout: 60_000 };
@@ -79,7 +79,7 @@ export default async function main(ctx) {
     await say(out);
     await c.close();
   } catch (e) {
-    await say({ code: e.code, detail: e.detail, message: e.message, stack: e.stack });
+    await say({ code: e.code, detail: e.detail, message: e.message, stack: e.stack, alert: e.alert });
   }
 }
 `;
@@ -924,6 +924,101 @@ test(
       assert.equal(r.includes(SECRET), false);
     }
     assert.deepEqual(transport.seen, []);
+  }
+);
+
+test(
+  'with rejectUnauthorized: false, conn.tls says whether the leaf names the host (hostnameMatches) and what is wrong with the chain apart from the name (chainError, Node names) (#1004)',
+  TIMEOUT,
+  async (t) => {
+    const day = 86400_000;
+    const servers = [
+      ['wrong.test', await recordingServer(t, ca.server('other.test'))],
+      ['self.test', await recordingServer(t, selfSigned('secure.test'))],
+      ['untrusted.test', await recordingServer(t, other.server('secure.test'))],
+      [
+        'expired.test',
+        await recordingServer(
+          t,
+          ca.server('other.test', {
+            notBefore: new Date(Date.now() - 3 * day),
+            notAfter: new Date(Date.now() - day),
+          })
+        ),
+      ],
+      ['good.test', await recordingServer(t, ca.server('secure.test'))],
+    ];
+    const { run } = await kernelWith(
+      t,
+      servers.map(([host, s]) => [host, s.port])
+    );
+    const tls = { ca: ca.pem, servername: 'secure.test', rejectUnauthorized: false };
+    const got = {};
+    for (const [host] of servers) {
+      const r = await run({ host, port: 4433, tls, send: 'hi' });
+      got[host] = [
+        r.echo,
+        r.tls.authorized,
+        r.tls.authorizationError,
+        r.tls.hostnameMatches,
+        r.tls.chainError,
+      ];
+    }
+    assert.deepEqual(got, {
+      'wrong.test': ['anonymous hi', false, 'ERR_TLS_CERT_ALTNAME_INVALID', false, undefined],
+      'self.test': [
+        'anonymous hi',
+        false,
+        'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+        true,
+        'DEPTH_ZERO_SELF_SIGNED_CERT',
+      ],
+      'untrusted.test': [
+        'anonymous hi',
+        false,
+        'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+        true,
+        'SELF_SIGNED_CERT_IN_CHAIN',
+      ],
+      'expired.test': ['anonymous hi', false, 'CERT_HAS_EXPIRED', false, 'CERT_HAS_EXPIRED'],
+      'good.test': ['anonymous hi', true, undefined, true, undefined],
+    });
+  }
+);
+
+test(
+  'a server that wants a client certificate and gets none sends its alert, and the error carries it: 116 on TLS 1.3 (after the handshake), 40 on TLS 1.2 (at it) (#1004)',
+  TIMEOUT,
+  async (t) => {
+    const want = { requestCert: true, rejectUnauthorized: true, ca: clientCa.pem };
+    const v13 = await recordingServer(t, ca.server('secure.test'), {
+      ...want,
+      minVersion: 'TLSv1.3',
+    });
+    const v12 = await recordingServer(t, ca.server('secure.test'), {
+      ...want,
+      maxVersion: 'TLSv1.2',
+    });
+    const { run } = await kernelWith(t, [
+      ['secure.test', v13.port],
+      ['old.test', v12.port],
+    ]);
+    const tls = { ca: ca.pem, servername: 'secure.test' };
+    const late = await run({ host: 'secure.test', port: 4433, tls, send: 'hi' });
+    assert.equal(late.code, 'ERR_SSL_FATAL_ALERT');
+    assert.equal(late.alert, 116);
+    assert.match(late.detail, / \(alert 116\)$/);
+    const early = await run({ host: 'old.test', port: 4433, tls, send: 'hi' });
+    assert.equal(early.code, 'ERR_SSL_HANDSHAKE_FAILURE');
+    assert.equal(early.alert, 40);
+    assert.match(early.detail, / \(alert 40\)$/);
+    const refusal = await run({
+      host: 'old.test',
+      port: 4433,
+      tls: { ca: other.pem, servername: 'secure.test' },
+    });
+    assert.equal(refusal.code, 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY');
+    assert.equal(refusal.alert, undefined);
   }
 );
 

@@ -748,6 +748,8 @@ export class WasiFds {
   }
 
   open(path: string, oflags: number, rights: bigint, fdflags: number, mode?: number): number {
+    this.made = undefined;
+    this.created = false;
     const device = deviceOf(path);
     if (device) return this.install({ type: 'device', device });
 
@@ -756,8 +758,8 @@ export class WasiFds {
     const alias = stdioAlias(path);
     if (alias !== undefined) return this.reopen(alias);
     const exclusive = (oflags & OFLAGS.CREAT) !== 0 && (oflags & OFLAGS.EXCL) !== 0;
-    if (exclusive && this.shared && !(oflags & OFLAGS.DIRECTORY) && this.madeAtOnce(path, mode)) {
-      return this.kernelFile(path, undefined, oflags, rights, fdflags, mode, true);
+    if (exclusive && !(oflags & OFLAGS.DIRECTORY) && this.madeAtOnce(path, mode)) {
+      return this.regular(path, undefined, oflags, rights, fdflags, mode, true);
     }
     if (exclusive && this.isLink(path)) throw new WasiError('EEXIST');
     const s = this.statOrMissing(path);
@@ -781,16 +783,17 @@ export class WasiFds {
     oflags: number,
     rights: bigint,
     fdflags: number,
-    mode?: number
+    mode?: number,
+    created = false
   ): number {
     if (s?.isFifo) return this.kernelFifo(path, s, oflags, rights, fdflags);
     if (s?.isSocket) throw new WasiError('ENXIO');
     if (this.shared || this.kernelHolds(path, s)) {
-      return this.kernelFile(path, s, oflags, rights, fdflags, mode);
+      return this.kernelFile(path, s, oflags, rights, fdflags, mode, created);
     }
     return this.install({
       type: 'file',
-      file: this.file(path, s, oflags, rights, fdflags, mode),
+      file: this.file(path, s, oflags, rights, fdflags, mode, created),
     });
   }
 
@@ -826,10 +829,11 @@ export class WasiFds {
     oflags: number,
     rights: bigint,
     fdflags: number,
-    mode?: number
+    mode?: number,
+    created = false
   ): LocalFile {
     const { readable, writable } = openAccess(existing, oflags, rights);
-    let buffer = this.buffers.get(path);
+    let buffer = created ? undefined : this.buffers.get(path);
     if (buffer?.handle !== undefined && this.fs.kept?.(buffer.handle)) {
       this.buffers.delete(path);
       buffer = undefined;
@@ -840,7 +844,7 @@ export class WasiFds {
       if (this.fs.owners) this.fs.access?.(path, want, 'open');
       if (oflags & OFLAGS.TRUNC) buffer.truncate(0);
     } else {
-      buffer = this.freshBuffer(path, existing, oflags, want, mode);
+      buffer = this.freshBuffer(path, existing, oflags, want, mode, created);
     }
     buffer.opens++;
     const file = new LocalFile(buffer, readable, writable, (fdflags & FDFLAGS.APPEND) !== 0);
@@ -853,13 +857,16 @@ export class WasiFds {
     existing: SyncFsBridgeStat | undefined,
     oflags: number,
     want: number,
-    mode?: number
+    mode?: number,
+    created = false
   ): FileBuffer {
-    const made = !existing && this.createNew(path, oflags, mode);
+    const made = created || (!existing && this.createNew(path, oflags, mode));
+    const reply = made ? this.made : undefined;
+    this.made = undefined;
     const empty = made || (oflags & OFLAGS.TRUNC) !== 0;
     if (existing?.ranged) (this.fs as { invalidate?(): void }).invalidate?.();
-    const seen = this.fs.changes?.now();
-    const st = existing?.ranged || !existing ? this.fs.stat(path) : existing;
+    const seen = reply ? reply.seen : this.fs.changes?.now();
+    const st = reply?.st ?? (existing?.ranged || !existing ? this.fs.stat(path) : existing);
     const ranged = st.ranged ? st.size : undefined;
     const asked =
       (want & 4 ? HOLD_READ : 0) | (want & 2 ? HOLD_WRITE : 0) | (made ? HOLD_CREATED : 0);
@@ -950,10 +957,20 @@ export class WasiFds {
     }
   }
 
+  created = false;
+
+  private made: { st: SyncFsBridgeStat; seen: number | undefined } | undefined;
+
+  private creating(path: string, mode?: number): void {
+    const st = this.fs.create?.(path, mode, true);
+    this.made = st ? { st, seen: st.seen } : undefined;
+    this.created = true;
+  }
+
   private madeAtOnce(path: string, mode?: number): boolean {
     if (!this.fs.create) return false;
     try {
-      this.fs.create(path, mode, true);
+      this.creating(path, mode);
       return true;
     } catch (err) {
       if ((err as { code?: string }).code === 'EEXIST') throw err;
@@ -964,10 +981,11 @@ export class WasiFds {
   private createNew(path: string, oflags: number, mode?: number): boolean {
     if (!this.fs.create) {
       this.fs.writeFile(path, new Uint8Array(0));
+      this.created = true;
       return true;
     }
     try {
-      this.fs.create(path, mode, true);
+      this.creating(path, mode);
       return true;
     } catch (err) {
       if (oflags & OFLAGS.EXCL || (err as { code?: string }).code !== 'EEXIST') throw err;

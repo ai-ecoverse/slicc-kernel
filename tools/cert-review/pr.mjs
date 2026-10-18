@@ -3,6 +3,7 @@ import { appendFileSync, readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import {
   behaviourFiles,
+  DOWNSTREAM_OK,
   groupVerdict,
   manifestOnly,
   mergedPrs,
@@ -25,6 +26,7 @@ const { positionals, values } = parseArgs({
     guard: { type: 'string', default: '' },
     approval: { type: 'string', default: 'cert-review-approved' },
     evidence: { type: 'string', default: '' },
+    downstream: { type: 'string', default: '' },
   },
 });
 const { repo, context } = values;
@@ -144,6 +146,22 @@ async function plan() {
   });
 }
 
+function withDownstream(group, file) {
+  if (!file) return group;
+  let found;
+  try {
+    found = JSON.parse(readFileSync(file, 'utf8'));
+  } catch {
+    found = undefined;
+  }
+  const line = found?.line ?? 'downstream: INCOMPLETE the downstream smoke left no result';
+  const lines = [...group.lines, line];
+  if (group.state !== 'success') return { ...group, lines };
+  if (DOWNSTREAM_OK.has(found?.state)) return { ...group, lines, line: `${line}; ${group.line}` };
+  const state = found?.state === 'FAIL' ? 'failure' : 'error';
+  return { ...group, state, lines, line: `not certified: ${line}` };
+}
+
 async function lookup() {
   if (values.guard !== 'PASS') {
     const fail = values.guard === 'FAIL';
@@ -170,7 +188,7 @@ async function lookup() {
       description: found?.description,
     });
   }
-  const group = groupVerdict(prs);
+  const group = withDownstream(groupVerdict(prs), values.downstream);
   for (const l of group.lines) summary(`- ${l}`);
   await status(values.head, group.state, group.line);
   if (group.state !== 'success') {

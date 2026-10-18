@@ -649,6 +649,7 @@ export async function dispatchSyncFs(req: SyncFsRequest): Promise<SyncFsResult> 
   served++;
   const entry = resolveSyncFsToken(req.token);
   if (!entry) return { ok: false, errno: 'EACCES', message: 'sync-fs: unknown or revoked token' };
+  if (req.identity && req.op === 'create') return created(entry, req);
   if (!req.identity || !IDENTITY_OPS.has(req.op)) return dispatchOne(entry, req);
   const { fs, cwd } = entry;
   const path = fs.resolvePath(cwd, req.path);
@@ -668,6 +669,15 @@ export async function dispatchSyncFs(req: SyncFsRequest): Promise<SyncFsResult> 
   } catch (err) {
     return toErrno(err);
   }
+}
+
+async function created(entry: SyncFsTokenEntry, req: SyncFsRequest): Promise<SyncFsResult> {
+  const result = await dispatchOne(entry, req);
+  if (!result.ok) return result;
+  const seen = entry.changes?.now();
+  const looked = await dispatchOne(entry, { ...req, op: 'stat' });
+  if (!looked.ok || looked.kind !== 'json') return json(null);
+  return seen === undefined ? looked : json({ ...(looked.json as object), seen });
 }
 
 const DENIED: ReadonlySet<string> = new Set(['EACCES', 'EPERM']);
@@ -766,7 +776,36 @@ async function newDevName(
   return { ok: false, errno: refused, message: `${target}: no new names in /dev or /proc` };
 }
 
+const MISS_OPS: ReadonlySet<SyncFsOp> = new Set(['stat', 'lstat']);
+
+async function linkFree(fs: SyncFsTokenEntry['fs'], path: string): Promise<boolean> {
+  for (let at = path.indexOf('/', 1); ; at = path.indexOf('/', at + 1)) {
+    let st: FsStat;
+    try {
+      st = await fs.lstat(at === -1 ? path : path.slice(0, at));
+    } catch (err) {
+      return (err as { code?: unknown }).code === 'ENOENT';
+    }
+    if (st.isSymbolicLink || at === -1) return false;
+  }
+}
+
 async function dispatchOne(entry: SyncFsTokenEntry, req: SyncFsRequest): Promise<SyncFsResult> {
+  const result = await dispatchPath(entry, req);
+  if (
+    result.ok ||
+    result.errno !== 'ENOENT' ||
+    !req.direct ||
+    !MISS_OPS.has(req.op) ||
+    req.handle !== undefined
+  ) {
+    return result;
+  }
+  const path = entry.fs.resolvePath(entry.cwd, req.path);
+  return (await linkFree(entry.fs, path)) ? { ...result, direct: true } : result;
+}
+
+async function dispatchPath(entry: SyncFsTokenEntry, req: SyncFsRequest): Promise<SyncFsResult> {
   const { fs, cwd } = entry;
   try {
     const path = fs.resolvePath(cwd, req.path);

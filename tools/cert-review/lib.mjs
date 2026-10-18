@@ -886,3 +886,92 @@ export function artifactProblems(artifacts, expect, prefixes) {
   }
   return problems;
 }
+
+const named = (rows) =>
+  rows
+    .slice(0, 3)
+    .map((r) => `${r.shard}: ${r.test}`)
+    .join('; ') + (rows.length > 3 ? ` and ${rows.length - 3} more` : '');
+
+function unusable(result, biosRef) {
+  if (!result || typeof result !== 'object' || !result.counts)
+    return ['the canary left no readable result'];
+  const out = [];
+  if (biosRef && result.biosRef !== biosRef)
+    out.push(
+      `the result is from bios ${String(result.biosRef || 'unknown').slice(0, 12)}, not the pinned ${biosRef.slice(0, 12)}`
+    );
+  for (const s of result.missingShards ?? []) out.push(`shard ${s} missing`);
+  for (const e of result.unexplainedExits ?? [])
+    out.push(`shard ${e.shard} exited ${e.exit} without a failing test`);
+  for (const r of result.refused ?? []) out.push(`refused ${r.name}`);
+  if ((result.ambiguous ?? []).length) out.push('ambiguous test keys');
+  const ran = Object.values(result.counts).reduce((sum, n) => sum + n, 0);
+  if (!ran) out.push('0 tests ran');
+  return out;
+}
+
+function failing(result, counts) {
+  const rows = [...(result.regressions ?? []), ...(result.failures ?? [])];
+  const n = (counts.regression ?? 0) + (counts.fail ?? 0);
+  if (n === 0 && rows.length === 0) return undefined;
+  const detail = rows.length ? named(rows) : 'their rows are missing from the result';
+  return `${counts.regression ?? 0} regressions, ${counts.fail ?? 0} failures (${detail})`;
+}
+
+export function downstreamOf(result, { override = 'FAIL', biosRef = '', shards = [] } = {}) {
+  const where =
+    `bios ${String(result?.biosRef || biosRef).slice(0, 12)} ${shards.join(',')}`.trim();
+  const run = result?.url ? ` (${result.url})` : '';
+  const gaps = unusable(result, biosRef);
+  if (gaps.length)
+    return {
+      state: 'INCOMPLETE',
+      line: `downstream: INCOMPLETE ${where}: ${gaps.slice(0, 3).join(', ')}${run}`,
+      notify: [],
+    };
+  const counts = result.counts;
+  const both = result.both ?? [];
+  const flaky = result.flaky?.length ? `; flaky ${result.flaky.length}` : '';
+  const known = both.length ? `; known downstream failures ${both.length} (${named(both)})` : '';
+  const notify = both.length ? [`bios canary fails on main's pins too: ${named(both)}${run}`] : [];
+  const why = failing(result, counts);
+  if (why && override === 'PASS')
+    return {
+      state: 'OVERRIDDEN',
+      line: `downstream: overridden (downstream-override on the head, by the coordinator) ${where}: ${why}${run}`,
+      notify,
+    };
+  if (why)
+    return { state: 'FAIL', line: `downstream: FAIL ${where}: ${why}${known}${run}`, notify };
+  const passed = counts.pass > 0;
+  if (both.length && !passed)
+    return {
+      state: 'NOT_JUDGED',
+      line: `downstream: not judged (bios canary failing on main) ${where}: ${both.length} tests fail on the candidate and on main alike${run}`,
+      notify: [
+        `bios canary is failing on main: every failing test fails on main's pins too (${named(both)})${run}`,
+      ],
+    };
+  if (!passed)
+    return {
+      state: 'INCOMPLETE',
+      line: `downstream: INCOMPLETE ${where}: no downstream test passed${flaky}${run}`,
+      notify,
+    };
+  return {
+    state: 'PASS',
+    line: `downstream: PASS ${where}: ${counts.pass} pass${known}${flaky}${run}`,
+    notify,
+  };
+}
+
+export const DOWNSTREAM_OK = new Set(['PASS', 'OVERRIDDEN', 'NOT_JUDGED']);
+
+export function downstreamLine(lines) {
+  if (lines.length === 0) return 'downstream: not run (no merge group of this release carried it)';
+  const unique = [...new Set(lines)];
+  return unique.length === 1
+    ? unique[0]
+    : `downstream: ${unique.map((l) => l.replace(/^downstream: /, '')).join(' | ')}`;
+}

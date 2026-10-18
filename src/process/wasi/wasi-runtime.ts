@@ -740,7 +740,11 @@ export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike
     fs: ptsBridge(
       procfsBridge(
         cachingBridge(
-          traced(stats, 'fs', createSyncFsSabBridge(transport, ownersOf(init))),
+          traced(
+            stats,
+            'fs',
+            createSyncFsSabBridge(transport, { ...ownersOf(init), direct: true })
+          ),
           undefined,
           threads?.ids
         ),
@@ -874,7 +878,11 @@ export async function runWasiThread(init: WasmThreadInitMsg, port: SabPostLike):
     kernel: { sys, call },
     fs: ptsBridge(
       procfsBridge(
-        cachingBridge(createSyncFsSabBridge(transport, ownersOf(init)), undefined, threads.ids),
+        cachingBridge(
+          createSyncFsSabBridge(transport, { ...ownersOf(init), direct: true }),
+          undefined,
+          threads.ids
+        ),
         procTree(call, id.pid)
       ),
       call
