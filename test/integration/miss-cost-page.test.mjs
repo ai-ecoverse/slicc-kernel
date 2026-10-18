@@ -7,7 +7,6 @@ const chrome = await launch();
 after(() => chrome.close());
 
 const N = 200;
-const LOG = true;
 const DEEP = '/root/m/a/b/c/d/e/f';
 
 const py = (lines) =>
