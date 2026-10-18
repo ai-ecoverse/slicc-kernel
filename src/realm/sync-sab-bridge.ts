@@ -185,6 +185,7 @@ export function createSyncFsSabBridge(
 ): SyncFsPosixBridge {
   const timeoutMs = opts.timeoutMs ?? SYNC_FS_REQUEST_TIMEOUT_MS;
   let identity: { identity: true } | Record<string, never> = {};
+  let once = false;
   let last: SyncFsBridgeStat | null = null;
 
   function run(req: SyncSabRequestBody, path: string, transfer?: Transferable[]): SyncFsResult {
@@ -205,7 +206,9 @@ export function createSyncFsSabBridge(
   }
 
   const changing = (req: SyncSabRequestBody, path: string, transfer?: Transferable[]): void => {
-    const r = run({ ...req, ...identity }, path, transfer);
+    const ask = once ? { identity: true as const } : identity;
+    once = false;
+    const r = run({ ...req, ...ask }, path, transfer);
     if (r.ok && r.kind === 'json') last = parseSyncFsStat(r.json);
   };
 
@@ -305,6 +308,9 @@ export function createSyncFsSabBridge(
     },
     identify: () => {
       identity = { identity: true };
+    },
+    identifyNext: () => {
+      once = true;
     },
     identified: () => last,
     lutimes: (path, atimeMs, mtimeMs, now) => {
