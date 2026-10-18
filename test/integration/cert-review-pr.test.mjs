@@ -927,15 +927,15 @@ test('the merge group runs bios canary on its own tree, packed by main tools and
   assert.match(jobs.canary, /permissions:\n {6}contents: read\n {6}actions: read\n/);
   assert.match(
     jobs.guard,
-    /- id: override\n[^\n]*\n {8}continue-on-error: true\n {8}uses: ai-ecoverse\/slicc-shared-web\/\.github\/actions\/cert-self-guard@fe97ae242f8ddcc824334cad287346d7df3f0bbb\n {8}with:\n {10}approval-label: downstream-override\n {10}paths: '\*\*'\n/
+    /- id: override\n[^\n]*\n {8}continue-on-error: true\n {8}uses: ai-ecoverse\/slicc-shared-web\/\.github\/actions\/cert-self-guard@fe97ae242f8ddcc824334cad287346d7df3f0bbb\n {8}with:\n {10}approval-label: downstream-override\n {10}paths: \|\n {12}\*\*\n {12}\.\*\n {12}\.\*\/\*\*\n {12}\*\*\/\.\*\n {12}\*\*\/\.\*\/\*\*\n/
   );
-  assert.match(jobs.guard, /override: \$\{\{ steps\.override\.outputs\.status \}\}/);
+  assert.match(jobs.guard, /override: \$\{\{ steps\.override\.outputs\.receipt \}\}/);
   assert.match(jobs.group, /RESULT: \$\{\{ needs\.canary\.outputs\.result \}\}/);
   assert.match(jobs.group, /OVERRIDE: \$\{\{ needs\.guard\.outputs\.override \}\}/);
   assert.match(
     jobs.group,
     new RegExp(
-      `gate\\.sh --evidence downstream node tools/cert-review/downstream\\.mjs [^\\n]*--override "\\$\\{OVERRIDE:-FAIL\\}" \\\\\\n {12}--bios ${BIOS} --shards sweep,guard,k4-link --out`
+      `gate\\.sh --evidence downstream node tools/cert-review/downstream\\.mjs [^\\n]*--override "\\$override" \\\\\\n {12}--bios ${BIOS} --shards sweep,guard,k4-link --out`
     )
   );
   assert.match(
@@ -1006,7 +1006,21 @@ test("the merge group's steps end to end: a planted regression is red, a missing
       ...o,
     });
   let n = 0;
-  const group = async (result, override = 'FAIL') => {
+  const receipt = (status, members) =>
+    JSON.stringify({ schema: 1, label: 'downstream-override', status, members });
+  const member = (o = {}) => ({
+    pr: 11,
+    head: heads[11],
+    paths: ['src/x.ts'],
+    touched: ['src/x.ts'],
+    approved: true,
+    status: 'PASS',
+    ...o,
+  });
+  const group = async (
+    result,
+    override = receipt('FAIL', [member({ approved: false, status: 'FAIL' })])
+  ) => {
     const temp = join(dir, `g${n++}`);
     await mkdir(temp);
     const env = {
@@ -1070,13 +1084,13 @@ test("the merge group's steps end to end: a planted regression is red, a missing
     /^not certified: downstream: INCOMPLETE .*the canary left no readable result/
   );
 
-  const stale = await group(regression, 'FAIL');
+  const stale = await group(regression);
   assert.equal(
     stale.status.state,
     'failure',
     'an override the guard did not bind to the head waives nothing'
   );
-  const waived = await group(regression, 'PASS');
+  const waived = await group(regression, receipt('PASS', [member()]));
   assert.equal(waived.status.state, 'success');
   assert.match(
     waived.status.description,
@@ -1084,6 +1098,40 @@ test("the merge group's steps end to end: a planted regression is red, a missing
   );
   const unset = await group(regression, '');
   assert.equal(unset.status.state, 'failure', 'no guard output is no override');
+  const dotOnly = await group(
+    regression,
+    receipt('PASS', [member({ paths: ['.npmignore'], touched: [], approved: false })])
+  );
+  assert.equal(
+    dotOnly.status.state,
+    'failure',
+    'a PASS the guard gave without checking the label is no waiver'
+  );
+  assert.match(dotOnly.down.stdout, /^downstream-override: FAIL/m);
+  const none = await group(regression, receipt('PASS', []));
+  assert.equal(none.status.state, 'failure', 'a receipt with no pull requests waives nothing');
+  const unlabeled = await group(
+    regression,
+    receipt('PASS', [member(), member({ pr: 12, approved: false })])
+  );
+  assert.equal(
+    unlabeled.status.state,
+    'failure',
+    'every pull request in the group needs the override'
+  );
+  const { matchesGlob } = await import('node:path');
+  const globs = ['**', '.*', '.*/**', '**/.*', '**/.*/**'];
+  for (const f of [
+    '.npmignore',
+    '.github/workflows/ci.yml',
+    'src/a.ts',
+    'test/integration/.x',
+    'a/.b/c',
+  ])
+    assert.ok(
+      globs.some((g) => matchesGlob(f, g)),
+      `the override guard's paths cover ${f}`
+    );
 
   const broken = canary({
     counts: { pass: 0, skip: 0, fail: 0, regression: 0, both: 2, flaky: 0 },
