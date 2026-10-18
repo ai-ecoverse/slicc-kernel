@@ -30,6 +30,7 @@ export const SYS_TREE: ProcSysTree = {
       `${listing.wasm?.live ?? 0} ${listing.wasm?.ceiling ?? 0} ${listing.wasm?.source ?? 'none'}\n`,
     slicc_shared_root: (listing) => `${listing.peers ?? 0}\n`,
     slicc_fs_calls: (listing) => `${listing.fsCalls ?? 0}\n`,
+    slicc_opfs_calls: (listing) => `${listing.opfsCalls ?? 0}\n`,
   },
 };
 

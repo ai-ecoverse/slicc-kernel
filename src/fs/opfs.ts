@@ -291,9 +291,13 @@ export class OpfsFs implements KernelFs {
     if (this.remote) this.remote.quiet = () => this.quiet().then(() => this.settle?.());
     if (this.channel) {
       const remote = this.remote;
-      (meta as { listen?: (l: (c: Partial<RemoteChange>) => void) => void }).listen?.((c) =>
-        remote?.emit({ paths: c.paths ?? [], trees: c.trees ?? [] })
-      );
+      (meta as { listen?: (l: (c: Partial<RemoteChange>) => void) => void }).listen?.((c) => {
+        for (const path of [...(c.paths ?? []), ...(c.trees ?? [])]) this.forget(path);
+        remote?.emit({ paths: c.paths ?? [], trees: c.trees ?? [] });
+      });
+      remote?.listen((c) => {
+        for (const path of [...c.paths, ...c.trees]) this.forget(path);
+      });
       this.channel.onmessage = ({ data }) => {
         for (const path of data as string[]) this.forget(path);
         remote?.emit({ paths: data as string[], trees: [] });
@@ -495,9 +499,13 @@ export class OpfsFs implements KernelFs {
       joined: () => remote.peered(),
       crowded: () => remote.crowded(),
       watch: (listener) => {
-        remote.crowd = listener;
+        remote.crowd = (crowded) => {
+          this.fresh();
+          listener(crowded);
+        };
         listener(remote.crowded());
       },
+      fresh: () => this.fresh(),
     };
   }
 
@@ -559,6 +567,7 @@ export class OpfsFs implements KernelFs {
   private async walk(parts: string[], from: number, start: FileSystemDirectoryHandle) {
     let dir = start;
     for (let at = from; at < parts.length; at++) {
+      this.calls++;
       dir = await dir.getDirectoryHandle(parts[at] as string);
       this.dirs.set(`/${parts.slice(0, at + 1).join('/')}`, dir);
       this.checked.set(dir, performance.now());
@@ -589,10 +598,32 @@ export class OpfsFs implements KernelFs {
   private async current(path: string, dir: FileSystemDirectoryHandle): Promise<boolean> {
     if (dir === this.root) return path === '/';
     if (performance.now() - (this.checked.get(dir) ?? -CHECK_MS) < CHECK_MS) return true;
+    this.calls++;
     const where = await this.root.resolve(dir).catch(() => null);
     if (where === null || `/${where.join('/')}` !== path) return false;
     this.checked.set(dir, performance.now());
     return true;
+  }
+
+  private exact = 0;
+  private calls = 0;
+
+  opfsCalls(): number {
+    return this.calls;
+  }
+
+  private fresh(): void {
+    this.changes++;
+    this.absent.clear();
+  }
+
+  private async exactly<T>(op: () => Promise<T>): Promise<T> {
+    this.exact++;
+    try {
+      return await op();
+    } finally {
+      this.exact--;
+    }
   }
 
   private forget(path: string): void {
@@ -637,6 +668,7 @@ export class OpfsFs implements KernelFs {
     name: string,
     kind: 'file' | 'directory'
   ): Promise<Handle> {
+    this.calls++;
     return kind === 'file' ? parent.getFileHandle(name) : parent.getDirectoryHandle(name);
   }
 
@@ -667,7 +699,7 @@ export class OpfsFs implements KernelFs {
     const kept = this.dirs.get(path);
     if (kept && (await this.current(path, kept))) return kept;
     const gone = this.absent.get(path);
-    if (gone !== undefined && !this.shared() && performance.now() - gone < ABSENT_MS) {
+    if (gone !== undefined && this.exact === 0 && performance.now() - gone < ABSENT_MS) {
       throw translate({ name: 'NotFoundError' }, path);
     }
     const seen = this.changes;
@@ -862,6 +894,7 @@ export class OpfsFs implements KernelFs {
 
   private touch(now: number, ...dirs: string[]): void {
     this.changes++;
+    if (this.shared()) this.channel?.postMessage(dirs);
     for (const dir of dirs) {
       this.absent.deleteTree(dir);
       this.dirTimes.set(dir, now);
@@ -902,7 +935,7 @@ export class OpfsFs implements KernelFs {
   }
 
   private glanced(handle: FileSystemFileHandle): File | undefined {
-    if (this.shared()) return undefined;
+    if (this.exact > 0) return undefined;
     const seen = this.glances.get(handle);
     const fresh = seen && seen.changes === this.changes && performance.now() - seen.at < GLANCE_MS;
     return fresh ? seen.file : undefined;
@@ -911,6 +944,7 @@ export class OpfsFs implements KernelFs {
   private async glance(handle: FileSystemFileHandle): Promise<File> {
     const at = performance.now();
     const before = this.changes;
+    this.calls++;
     const file = await handle.getFile();
     if (before === this.changes) this.glances.set(handle, { at, file, changes: before });
     else this.glances.delete(handle);
@@ -1241,7 +1275,7 @@ export class OpfsFs implements KernelFs {
     if (!options.recursive) return this.mkdirExcl(path, options.owner);
     let found: Located | undefined;
     try {
-      found = await this.locate(path, true);
+      found = await this.exactly(() => this.locate(path, true));
     } catch (err) {
       if (!missing(err)) throw err;
     }
@@ -1321,6 +1355,7 @@ export class OpfsFs implements KernelFs {
   }
 
   private async handleExists(dir: FileSystemDirectoryHandle, name: string): Promise<boolean> {
+    this.calls++;
     try {
       await dir.getDirectoryHandle(name);
       return true;
@@ -1380,7 +1415,7 @@ export class OpfsFs implements KernelFs {
   async link(from: string, to: string, follow?: boolean): Promise<void> {
     await (follow ? this.stat(from) : this.lstat(from));
     if (!(await this.stat(parentOf(to))).isDirectory) throw fsError('ENOTDIR', to);
-    const taken = await this.lstat(to).then(
+    const taken = await this.exactly(() => this.lstat(to)).then(
       () => true,
       (err) => {
         if (missing(err)) return false;
@@ -1405,7 +1440,7 @@ export class OpfsFs implements KernelFs {
   private async moveTo(source: Located, parent: Located, destination: string, to: string) {
     const sourceStat = await this.describe(source);
     if (sourceStat.isDirectory && within(destination, source.path)) throw fsError('EINVAL', to);
-    const target = await this.locate(destination, false).catch((err) => {
+    const target = await this.exactly(() => this.locate(destination, false)).catch((err) => {
       if (missing(err)) return null;
       throw err;
     });
@@ -1531,7 +1566,7 @@ export class OpfsFs implements KernelFs {
     const at = resolvePath(parent.path, baseOf(path));
     this.refuse(at);
     if (
-      await this.locate(at, false).then(
+      await this.exactly(() => this.locate(at, false)).then(
         () => true,
         (err) => !missing(err)
       )

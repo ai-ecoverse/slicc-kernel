@@ -1797,6 +1797,7 @@ export class Launcher {
         wasm: this.memories.count(),
         peers: Number(this.locks.shared?.() === true),
         fsCalls: servedFsCalls(),
+        opfsCalls: this.rootFs.opfsCalls?.() ?? 0,
       }),
       sudo: (call, signal) => this.sudo(pid, call, signal),
       crontab: (call) => this.crontab(pid, call),

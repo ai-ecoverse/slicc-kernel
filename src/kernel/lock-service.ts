@@ -57,6 +57,7 @@ export interface KernelLocks {
   ): Promise<void>;
   holds(owner: number): boolean;
   shared?(): boolean;
+  fresh?(): void;
   dropFile(key: string, owner: number): void;
   release(pid: number): void;
   lock(pid: number, path: string, exclusive: boolean, fd: number): boolean;
@@ -82,7 +83,7 @@ export interface LockServiceOptions {
     ): Promise<unknown>;
   };
   channel?: (name: string) => BroadcastChannel;
-  peers?: { joined(): Promise<unknown>; crowded(): boolean };
+  peers?: { joined(): Promise<unknown>; crowded(): boolean; fresh?(): void };
 }
 
 export class LockService implements KernelLocks {
@@ -132,6 +133,10 @@ export class LockService implements KernelLocks {
   }
 
   private readonly peers: LockServiceOptions['peers'];
+
+  fresh(): void {
+    this.peers?.fresh?.();
+  }
 
   shared(): boolean {
     if (!this.leader || this.ownerOf.size > 0 || this.tokens.size > 0) return true;
