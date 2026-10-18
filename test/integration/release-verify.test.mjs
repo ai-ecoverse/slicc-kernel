@@ -263,3 +263,56 @@ test("verify waits out npm's attestations lag: a 404 that turns into 200 passes;
   );
   assert.match(verify, /not a supply-chain problem, re-run this job once it does/);
 });
+
+test('verify retries a tarball download that resets or is cut off after its 200 headers, within the wait; a non-2xx answer fails at once (#1089)', async () => {
+  const { downloadTarball } = await import('../../tools/cert-review/lib.mjs');
+  const clock = { t: 0 };
+  const now = () => clock.t;
+  const sleep = async (ms) => {
+    clock.t += ms;
+  };
+  let n = 0;
+  const flaky = await downloadTarball({
+    url: 'u',
+    fetch: async () => {
+      n++;
+      if (n === 1) throw new Error('ECONNRESET');
+      return {
+        ok: true,
+        status: 200,
+        arrayBuffer: async () => {
+          if (n === 2) throw new Error('terminated');
+          return new TextEncoder().encode('tgz').buffer;
+        },
+      };
+    },
+    now,
+    sleep,
+  });
+  assert.deepEqual([flaky.bytes?.toString(), n, clock.t], ['tgz', 3, 30_000]);
+  clock.t = 0;
+  const down = await downloadTarball({
+    url: 'u',
+    fetch: async () => {
+      throw new Error('fetch failed');
+    },
+    now,
+    sleep,
+    deadline: 3_600_000,
+  });
+  assert.equal(down.problem, 'downloading u failed through the whole wait: fetch failed');
+  assert.equal(clock.t, 3_600_000);
+  clock.t = 0;
+  const gone = await downloadTarball({
+    url: 'u',
+    fetch: async () => ({ ok: false, status: 403 }),
+    now,
+    sleep,
+  });
+  assert.deepEqual([gone.problem, clock.t], ['downloading u answered 403', 0]);
+  const verify = await readFile(
+    new URL('../../tools/cert-review/verify.mjs', import.meta.url),
+    'utf8'
+  );
+  assert.match(verify, /downloadTarball\(\{ url, fetch, sleep, deadline: budget/);
+});

@@ -9,6 +9,7 @@ import {
   awaitAttestations,
   behaviourFiles,
   covers,
+  downloadTarball,
   downstreamLine,
   groupVerdict,
   mergedPrs,
@@ -96,9 +97,9 @@ async function download(m) {
   const url = new URL(m.dist.tarball);
   if (url.origin !== 'https://registry.npmjs.org')
     return problems.push(`the tarball is at ${url.origin}`);
-  const res = await fetch(url);
-  if (!res.ok) return problems.push(`downloading ${url} answered ${res.status}`);
-  const bytes = Buffer.from(await res.arrayBuffer());
+  const got = await downloadTarball({ url, fetch, sleep, deadline: budget, log: console.log });
+  if (got.problem) return problems.push(got.problem);
+  const { bytes } = got;
   const sha512 = createHash('sha512').update(bytes);
   facts.integrity = `sha512-${sha512.copy().digest('base64')}`;
   facts.sha512 = sha512.digest('hex');
