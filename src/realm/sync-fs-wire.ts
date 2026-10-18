@@ -60,6 +60,7 @@ export interface SyncFsRequest {
   identity?: boolean;
   now?: boolean;
   nofollow?: boolean;
+  direct?: boolean;
   opening?: boolean;
 }
 

@@ -195,8 +195,15 @@ function errnoError(code: string, path: string, direct?: true): Error & { code: 
 
 export function createSyncFsSabBridge(
   transport: SyncSabTransport,
-  opts: { timeoutMs?: number; owners?: boolean; links?: boolean; changes?: SharedArrayBuffer } = {}
+  opts: {
+    timeoutMs?: number;
+    owners?: boolean;
+    links?: boolean;
+    changes?: SharedArrayBuffer;
+    direct?: boolean;
+  } = {}
 ): SyncFsPosixBridge {
+  const direct = opts.direct ? { direct: true } : {};
   const timeoutMs = opts.timeoutMs ?? SYNC_FS_REQUEST_TIMEOUT_MS;
   let identity: { identity: true } | Record<string, never> = {};
   let once = false;
@@ -256,12 +263,12 @@ export function createSyncFsSabBridge(
       return s;
     },
     stat: (path) => {
-      const s = parseSyncFsStat(json({ op: 'stat', path }, path));
+      const s = parseSyncFsStat(json({ op: 'stat', path, ...direct }, path));
       if (!s) throw errnoError('EIO', path);
       return s;
     },
     lstat: (path) => {
-      const s = parseSyncFsStat(json({ op: 'lstat', path }, path));
+      const s = parseSyncFsStat(json({ op: 'lstat', path, ...direct }, path));
       if (!s) throw errnoError('EIO', path);
       return s;
     },

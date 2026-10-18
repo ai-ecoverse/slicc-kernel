@@ -792,7 +792,13 @@ async function linkFree(fs: SyncFsTokenEntry['fs'], path: string): Promise<boole
 
 async function dispatchOne(entry: SyncFsTokenEntry, req: SyncFsRequest): Promise<SyncFsResult> {
   const result = await dispatchPath(entry, req);
-  if (result.ok || result.errno !== 'ENOENT' || !MISS_OPS.has(req.op) || req.handle !== undefined) {
+  if (
+    result.ok ||
+    result.errno !== 'ENOENT' ||
+    !req.direct ||
+    !MISS_OPS.has(req.op) ||
+    req.handle !== undefined
+  ) {
     return result;
   }
   const path = entry.fs.resolvePath(entry.cwd, req.path);
