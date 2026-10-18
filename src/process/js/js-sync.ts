@@ -82,6 +82,8 @@ export interface JsSyncContext {
   read(fd: number, max?: number): Uint8Array;
   write(fd: number, data: Uint8Array | string): void;
   close(fd: number): void;
+  socketpair(): [number, number];
+  pipe(): [number, number];
   open(path: string, options?: JsOpenOptions): JsSyncFile;
   fs: {
     stat(path: string): SyncFsBridgeStat;
@@ -113,6 +115,7 @@ export interface SyncShared {
   random(bytes: Uint8Array): void;
   infos: Map<number, FdInfo>;
   handles: Map<number, () => void>;
+  closing?(fd: number): void;
 }
 
 const encoder = new TextEncoder();
@@ -321,8 +324,12 @@ export function syncOps(
       handles.get(fd)?.();
       handles.delete(fd);
       infos.delete(fd);
+      shared.closing?.(fd);
       kernel.call({ op: 'fd-close', fd });
     },
+    socketpair: () =>
+      kernel.json({ op: 'sock-pair', domain: 'unix', type: 'stream' }) as [number, number],
+    pipe: () => kernel.json({ op: 'fd-pipe' }) as [number, number],
     open: procOpenSync(open, kernel, { resolve, pid: shared.pid }),
     fs: procFsSync(syncPathOps(kernel, resolve, statOf, open, tryDevSync), kernel, {
       resolve,

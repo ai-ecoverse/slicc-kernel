@@ -109,6 +109,8 @@ export interface JsProgramContext {
   read(fd: number, max?: number): Promise<Uint8Array>;
   write(fd: number, data: Uint8Array | string): Promise<void>;
   close(fd: number): Promise<void>;
+  socketpair(): Promise<[number, number]>;
+  pipe(): Promise<[number, number]>;
   fdStatus(fd: number): Promise<JsFdStatus>;
   isatty(fd: number): Promise<boolean>;
   open(path: string, options?: JsOpenOptions): Promise<JsFile>;
@@ -481,14 +483,45 @@ function watchingSyncOps(kernel: JsKernel, syncKernel: JsSyncKernel, shared: Syn
   return { ...ops, fs: { ...ops.fs, watch } };
 }
 
+function pendingReads(
+  kernel: ContextOptions['kernel'],
+  info: (fd: number) => Promise<FdInfo>,
+  random: (bytes: Uint8Array) => void
+) {
+  const reading = new Map<number, Set<AbortController>>();
+  const read = async (fd: number, max = CHUNK, signal?: AbortSignal): Promise<Uint8Array> => {
+    index(max, 'read');
+    const emulated = readDevice(await info(fd), max, random);
+    if (emulated) return emulated;
+    const stop = new AbortController();
+    const waits = reading.get(fd) ?? new Set();
+    reading.set(fd, waits.add(stop));
+    try {
+      const n = Math.min(max, MAX_IO);
+      if (signal) return await readPipe(kernel, fd, n, AbortSignal.any([signal, stop.signal]));
+      const r = await kernel.blocking({ op: 'fd-read', fd, max: n }, stop.signal);
+      return r.ok && r.kind === 'bytes' ? r.bytes : new Uint8Array(0);
+    } finally {
+      waits.delete(stop);
+      if (waits.size === 0 && reading.get(fd) === waits) reading.delete(fd);
+    }
+  };
+  const closing = (fd: number) => {
+    for (const stop of reading.get(fd) ?? []) stop.abort(new JsCallError('EBADF', 'read'));
+    reading.delete(fd);
+  };
+  return { read, closing };
+}
+
+const cryptoRandom = (bytes: Uint8Array) =>
+  void crypto.getRandomValues(bytes as Uint8Array<ArrayBuffer>);
+
 export function createContext(o: ContextOptions): CreatedContext {
   const { kernel } = o;
   const infos = new Map<number, FdInfo>();
   const handles = new Map<number, () => void>();
   const pending = new Set<Promise<unknown>>();
-  const random =
-    o.random ??
-    ((bytes: Uint8Array) => void crypto.getRandomValues(bytes as Uint8Array<ArrayBuffer>));
+  const random = o.random ?? cryptoRandom;
   const resolve = (path: string) => resolvePath(o.cwd, path);
   const tryDev = (abs: string) => resolveDevAsync(kernel, abs);
   let exiting: number | undefined;
@@ -509,12 +542,7 @@ export function createContext(o: ContextOptions): CreatedContext {
     infos.set(fd, got);
     return got;
   };
-  const read = async (fd: number, max = CHUNK, signal?: AbortSignal): Promise<Uint8Array> => {
-    index(max, 'read');
-    const emulated = readDevice(await info(fd), max, random);
-    if (emulated) return emulated;
-    return readPipe(kernel, fd, Math.min(max, MAX_IO), signal);
-  };
+  const { read, closing } = pendingReads(kernel, info, random);
 
   const { writes, writeAll } = writer(kernel, info, o.pid);
 
@@ -569,9 +597,10 @@ export function createContext(o: ContextOptions): CreatedContext {
   if (o.lane && o.lane !== noLane) kernel.syncLane = o.lane;
   const syncKernel = new JsSyncKernel(lane, kernel, unwind);
   const terminal = ttyOps(kernel);
+  const shared = { pid: o.pid, resolve, random, infos, handles, closing };
   const sync: JsSyncContext = {
     kernel: KERNEL_INFO,
-    ...watchingSyncOps(kernel, syncKernel, { pid: o.pid, resolve, random, infos, handles }),
+    ...watchingSyncOps(kernel, syncKernel, shared),
     run: (options) =>
       runSync(syncKernel, { env: o.env, cwd: o.cwd, resolve, signal: signalNumber }, options),
     spawn: (options) => spawnSync(options),
@@ -613,8 +642,12 @@ export function createContext(o: ContextOptions): CreatedContext {
       handles.get(fd)?.();
       handles.delete(fd);
       infos.delete(fd);
+      closing(fd);
       await kernel.call({ op: 'fd-close', fd });
     },
+    socketpair: async () =>
+      (await kernel.json({ op: 'sock-pair', domain: 'unix', type: 'stream' })) as [number, number],
+    pipe: async () => (await kernel.json({ op: 'fd-pipe' })) as [number, number],
     async fdStatus(fd) {
       const type = typeOf(await info(fd));
       return { type, tty: type === 'tty', seekable: type === 'file' };
