@@ -21,6 +21,7 @@ import {
   knownLine,
   mergedPrs,
   missingShards,
+  negativeEvidence,
   parseResults,
   pickRelease,
   provenanceProblems,
@@ -29,10 +30,12 @@ import {
   resultsMap,
   rowOf,
   testCommand,
+  titleScan,
   titlesFromPatch,
   unfinishedFiles,
   unquote,
   verdictLine,
+  versionsOnly,
   withBaselines,
 } from '../../tools/cert-review/lib.mjs';
 
@@ -365,7 +368,7 @@ test('findings.mjs turns the runs into decisions, suite regressions and missing 
     found.rows.map((r) => [r.pr, r.decision]),
     [
       [12, 'negative'],
-      [7, 'passes'],
+      [7, 'negative'],
       [9, 'not-behaviour'],
     ]
   );
@@ -626,7 +629,7 @@ test('a fix whose bug shipped inside the delta gets its NEGATIVE from the releas
   assert.deepEqual(baselineFiles(placed, '1.0.0'), {
     '1.0.0': ['test/integration/a.test.mjs', 'test/integration/x.test.mjs'],
     '1.0.1': ['test/integration/c.test.mjs'],
-    '1.0.2': ['test/integration/e.test.mjs'],
+    '1.0.2': ['test/integration/e.test.mjs', 'test/integration/f.test.mjs'],
   });
   const dir = await mkdtemp(join(tmpdir(), 'cert-baseline-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -825,9 +828,21 @@ test('test gaps go into the line in code, so a fix without a NEGATIVE is never c
       { kind: 'missing-evidence', what: 'kernel-compat' },
       { kind: 'prev-not-run', pr: 9 },
     ]),
-    ['#712 no-negative', '#714 no-test', '#9 prev-not-run']
+    ['#712 no-negative', '#714 no-test']
   );
   assert.deepEqual(gapsOf(undefined), []);
+  assert.deepEqual(
+    negativeEvidence([
+      { kind: 'prev-not-run', pr: 9 },
+      { kind: 'no-test', pr: 714 },
+    ]),
+    {
+      files: [],
+      named: "#9 changes shipped paths, and its tests' NEGATIVE on the previous tree has no result",
+      remedy: 're-run the failed jobs',
+    }
+  );
+  assert.equal(negativeEvidence([{ kind: 'no-negative', pr: 712 }]), undefined);
 });
 
 test('prev and base: the newest earlier release whose cert-review passed (prev also takes a pending one), past failures and unreviewed releases', async () => {
@@ -1023,6 +1038,7 @@ test("a test title built from a template literal matches the rows it ran as, so 
     .map((l) => `+${l}`)
     .join('\n')}`;
   const row = rowOf({ number: 731, title: 'fix: a forked WASIX child reads errno (#728)' }, [
+    { filename: 'src/process/wasi/wasi-fork.ts', status: 'modified', patch: '+x' },
     { filename: 'test/integration/fork-tls.test.mjs', status: 'added', patch },
   ]);
   const template =
@@ -1256,4 +1272,225 @@ test('a compat rerun tests exactly the package@version that regressed, and one t
     same.map(({ rerun, reproduced }) => [rerun, reproduced]),
     [['pass', false]]
   );
+});
+
+test('a pull request is behaviour by the paths it changes, not its title: an "A2 …" PR on src/ with a test gets its NEGATIVE, a docs-only one stays not behaviour, and a missing NEGATIVE is INCOMPLETE (#1036, #1041)', () => {
+  const net = rowOf({ number: 1041, title: 'A2 net: sockets keep their peer' }, [
+    { filename: 'src/kernel/net/socket.ts', status: 'modified', patch: '+x' },
+    { filename: 'src/process/js/js-net.ts', status: 'modified', patch: '+x' },
+    {
+      filename: 'test/integration/net.test.mjs',
+      status: 'modified',
+      patch: "+test('a socket keeps its peer', () => {});",
+    },
+  ]);
+  const docs = rowOf({ number: 1050, title: 'fix(docs): the README names the right flag' }, [
+    { filename: 'README.md', status: 'modified', patch: '+x' },
+    {
+      filename: 'test/integration/docs.test.mjs',
+      status: 'modified',
+      patch: "+test('docs only', () => {});",
+    },
+  ]);
+  assert.deepEqual(
+    [net.kind, net.behaviour, docs.kind, docs.behaviour],
+    ['other', true, 'fix', false]
+  );
+  assert.deepEqual(deltaFiles([net, docs]), ['test/integration/net.test.mjs']);
+  const placed = withBaselines([net, docs], { commits: [], tags: [], prev: '1.124.9' });
+  assert.deepEqual(baselineFiles(placed, '1.124.9'), {
+    '1.124.9': ['test/integration/net.test.mjs'],
+  });
+  const f = 'test/integration/net.test.mjs';
+  const next = resultsMap([res(f, 'a socket keeps its peer', 'pass')]);
+  assert.equal(
+    decide(net, resultsMap([res(f, 'a socket keeps its peer', 'fail')]), next).decision,
+    'negative'
+  );
+  assert.equal(
+    decide(net, resultsMap([res(f, 'a socket keeps its peer', 'pass')]), next).decision,
+    'passes'
+  );
+  assert.equal(decide(net, resultsMap([]), next).decision, 'prev-not-run');
+  assert.equal(
+    decide(
+      docs,
+      resultsMap([]),
+      resultsMap([res('test/integration/docs.test.mjs', 'docs only', 'pass')])
+    ).decision,
+    'not-behaviour'
+  );
+  assert.match(
+    negativeEvidence([{ kind: 'prev-not-run', pr: 1041 }]).named,
+    /^#1041 changes shipped paths/
+  );
+});
+
+test('a pull request that only moves dependency versions in package.json and its lock is decided "manifest", no gap, because its required PR cert settled it; a scripts or exports change stays behaviour with no-test', () => {
+  const pkg = (o) =>
+    JSON.stringify(
+      { name: 'k', version: '0.0.0', scripts: { build: 'node b.mjs' }, ...o },
+      null,
+      2
+    );
+  const deps = {
+    dependencies: { a: '1.0.0' },
+    devDependencies: { b: '2.0.0' },
+    optionalDependencies: { c: '3.0.0' },
+  };
+  const bumped = {
+    dependencies: { a: '1.0.1' },
+    devDependencies: { b: '2.1.0' },
+    optionalDependencies: { c: '3.0.1' },
+  };
+  assert.equal(versionsOnly(pkg(deps), pkg(bumped)), true);
+  assert.equal(
+    versionsOnly(pkg(deps), pkg({ ...bumped, scripts: { build: 'node c.mjs' } })),
+    false,
+    'a scripts change'
+  );
+  assert.equal(
+    versionsOnly(pkg(deps), pkg({ ...bumped, exports: './x.js' })),
+    false,
+    'an exports change'
+  );
+  assert.equal(
+    versionsOnly(pkg(deps), pkg({ ...bumped, dependencies: { a: '1.0.1', d: '1.0.0' } })),
+    false,
+    'a new dependency'
+  );
+  assert.equal(versionsOnly('{', pkg(deps)), false);
+  const files = [
+    { filename: 'package.json', status: 'modified', patch: '+x' },
+    { filename: 'package-lock.json', status: 'modified', patch: '+x' },
+  ];
+  const bump = rowOf(
+    { number: 1043, title: 'chore(deps): update dependency @ai-ecoverse/wasi-pnpm to v12.9.1-10' },
+    files,
+    { manifest: true }
+  );
+  const scripts = rowOf({ number: 1044, title: 'chore: build with c.mjs' }, files, {
+    manifest: false,
+  });
+  const sneaky = rowOf(
+    { number: 1045, title: 'chore(deps): bump' },
+    [...files, { filename: 'src/x.ts', status: 'modified', patch: '+x' }],
+    { manifest: true }
+  );
+  const none = resultsMap([]);
+  assert.deepEqual(
+    [bump, scripts, sneaky].map((r) => [r.behaviour, r.manifest, decide(r, none, none).decision]),
+    [
+      [true, true, 'manifest'],
+      [true, false, 'no-test'],
+      [true, false, 'no-test'],
+    ]
+  );
+  assert.deepEqual(
+    gapsOf([
+      { kind: 'manifest', pr: 1043 },
+      { kind: 'no-test', pr: 1044 },
+    ]),
+    ['#1044 no-test']
+  );
+});
+
+test("the delta reads every title shape the integration tests use, each changed line counts for the test around it, and a changed test it can't name makes the row no-titles, which is INCOMPLETE (#1036)", () => {
+  const scan = (patch, content) => titleScan(patch, content);
+  assert.deepEqual(scan("@@ -1,0 +1,1 @@\n+test('one line', async () => {});"), {
+    titles: ['one line'],
+    unreadable: 0,
+  });
+  assert.deepEqual(scan('@@ -1,0 +1,1 @@\n+  test(`a ${kind} row`, async () => {});').titles, [
+    'a \u2026 row',
+  ]);
+  assert.deepEqual(
+    scan(
+      "@@ -1,0 +1,4 @@\n+test(\n+  'a title on its own line, as biome wraps a long one (#1004)',\n+  TIMEOUT,\n+  async () => {});"
+    ),
+    { titles: ['a title on its own line, as biome wraps a long one (#1004)'], unreadable: 0 }
+  );
+  const file = [
+    "import x from 'y';",
+    '',
+    'test(',
+    "  'the test around the change',",
+    '  async () => {',
+    '    a();',
+    '    b();',
+    '  }',
+    ');',
+  ].join('\n');
+  const inside = '@@ -6,2 +6,3 @@ test(\n     a();\n+    c();\n     b();';
+  assert.deepEqual(scan(inside, file), { titles: ['the test around the change'], unreadable: 0 });
+  assert.deepEqual(
+    scan(inside),
+    { titles: [], unreadable: 1 },
+    'without the file the header names no test'
+  );
+  assert.deepEqual(
+    scan("@@ -10,2 +10,3 @@ test('named in the header', async () => {\n   a();\n+  b();").titles,
+    ['named in the header']
+  );
+  assert.deepEqual(
+    scan(
+      "@@ -1,6 +1,7 @@\n test(\n   'named in the context above',\n   async () => {\n+    more();\n     a();\n   }\n );"
+    ).titles,
+    ['named in the context above']
+  );
+  assert.deepEqual(
+    scan('@@ -3,2 +3,3 @@ async function helper() {\n   a();\n+  b();'),
+    { titles: [], unreadable: 0 },
+    'a helper is no test'
+  );
+  assert.deepEqual(scan('@@ -1,0 +1,3 @@\n+test(\n+  name,\n+  async () => {});'), {
+    titles: [],
+    unreadable: 1,
+  });
+  const row = rowOf({ number: 1036, title: 'A2 TLS session controls' }, [
+    { filename: 'src/kernel/net/tls-ciphers.ts', status: 'modified', patch: '+x' },
+    { filename: 'test/integration/tls-uplink.test.mjs', status: 'modified', patch: inside },
+  ]);
+  assert.deepEqual(row.tests[0], {
+    file: 'test/integration/tls-uplink.test.mjs',
+    status: 'modified',
+    titles: [],
+    unreadable: 1,
+  });
+  assert.equal(decide(row, resultsMap([]), resultsMap([])).decision, 'no-titles');
+  const read = rowOf(
+    { number: 1036, title: 'A2 TLS session controls' },
+    [
+      { filename: 'src/kernel/net/tls-ciphers.ts', status: 'modified', patch: '+x' },
+      { filename: 'test/integration/tls-uplink.test.mjs', status: 'modified', patch: inside },
+    ],
+    { contents: { 'test/integration/tls-uplink.test.mjs': file } }
+  );
+  assert.deepEqual(read.tests[0].titles, ['the test around the change']);
+  assert.match(
+    negativeEvidence([{ kind: 'no-titles', pr: 1036 }]).named,
+    /^#1036 changes shipped paths, and the delta can't read the titles/
+  );
+  assert.deepEqual(gapsOf([{ kind: 'no-titles', pr: 1036 }]), []);
+});
+
+test("the reviewer's instructions describe the decisions the code makes: behaviour by paths, a NEGATIVE for every behaviour change, prev-not-run and no-titles as INCOMPLETE and no gap, manifest as no finding", async () => {
+  const text = await readFile(new URL('instructions.txt', tools), 'utf8');
+  for (const decision of [
+    'negative',
+    'passes',
+    'no-negative',
+    'no-test',
+    'not-run',
+    'prev-not-run',
+    'no-titles',
+    'manifest',
+    'fails-on-release',
+    'not-behaviour',
+  ])
+    assert.match(text, new RegExp(`\\b${decision} = `), decision);
+  assert.match(text, /by the paths it changes/);
+  assert.match(text, /prev-not-run and no-titles are not gaps: the record is INCOMPLETE/);
+  assert.match(text, /Test gaps \(no-test, no-negative\) are known issues/);
+  assert.doesNotMatch(text, /(?<!no-)negative = a fix whose/);
 });

@@ -11,6 +11,7 @@ import {
   jobsEvidence,
   knownAsOf,
   knownLine,
+  negativeEvidence,
   provenanceProblems,
   releaseEvidence,
   verdict,
@@ -282,7 +283,7 @@ function codedFindings() {
   if (!values.findings || !existsSync(values.findings)) return;
   const found = JSON.parse(readFileSync(values.findings, 'utf8')).findings ?? [];
   gaps = gapsOf(found);
-  incomplete = releaseEvidence(found);
+  incomplete = negativeEvidence(found, releaseEvidence(found));
   const partial = baseEvidence(found);
   baseNote = partial.note;
   if (partial.problem) missing.push(partial.problem);

@@ -27,6 +27,7 @@
     {
       "pr": { "number": 7, "title": "feat!: datagram sockets" },
       "files": [
+        { "filename": "src/kernel/udp.ts", "status": "added", "patch": "+x" },
         {
           "filename": "test/integration/udp.test.mjs",
           "status": "added",
@@ -35,8 +36,8 @@
       ]
     },
     {
-      "pr": { "number": 9, "title": "ci: pin a workflow" },
-      "files": [{ "filename": ".github/workflows/ci.yml", "status": "modified", "patch": "+x" }]
+      "pr": { "number": 9, "title": "ci: pin a workflow that builds nothing" },
+      "files": [{ "filename": ".github/workflows/labels.yml", "status": "modified", "patch": "+x" }]
     }
   ]
 }
