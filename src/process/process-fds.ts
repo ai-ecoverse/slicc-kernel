@@ -1146,6 +1146,15 @@ export function kernelUname(
   );
 }
 
+const CHAR_DEVICES = new Set([
+  '/dev/null',
+  '/dev/zero',
+  '/dev/full',
+  '/dev/random',
+  '/dev/urandom',
+  '/dev/tty',
+]);
+
 const DEVICE_MODES: ReadonlyArray<[string, number]> = [
   ['/', 0o755],
   ['/dev', 0o755],
@@ -1186,12 +1195,15 @@ function kernelChdir(Fs: ChdirFs): void {
   };
 }
 
-export function linuxDevices(Fs: ProcessFs): void {
-  (Fs as { ignorePermissions?: boolean }).ignorePermissions = true;
-  kernelChdir(Fs as unknown as ChdirFs);
+export function linuxDevices(Fs: ProcessFs, owners = true): void {
+  if (owners) {
+    (Fs as { ignorePermissions?: boolean }).ignorePermissions = true;
+    kernelChdir(Fs as unknown as ChdirFs);
+  }
   const { chmod } = Fs as unknown as ChmodFs;
   if (!chmod) return;
   for (const [path, mode] of DEVICE_MODES) {
+    if (!owners && !CHAR_DEVICES.has(path)) continue;
     try {
       chmod.call(Fs, path, mode);
     } catch {}

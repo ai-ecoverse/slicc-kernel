@@ -6,6 +6,7 @@ import type { DeviceMeta, KernelFdKind } from '../../kernel/fd-table.ts';
 import type { FdInfo } from '../../kernel/process.ts';
 import { KERNEL_SIGINFO, SIG, type SigInfo } from '../../kernel/signals.ts';
 import type { SyncFsBridgeStat, SyncFsPosixBridge } from '../../realm/sync-fs-wire.ts';
+import { devFdStat, devStat, devSync, inDev } from '../js/js-dev.ts';
 import type { LockHeld } from '../process-locks.ts';
 import { type LockedFile, type LockHost, lockImports } from './slicc-lock.ts';
 import { semImports } from './slicc-sem.ts';
@@ -181,6 +182,11 @@ function filestatOf(path: string, s: SyncFsBridgeStat): Filestat {
 }
 
 const SEALED_MODE = 0o20666;
+const DEVICE_MODE = 0o20666;
+
+function kernelDev(path: string): boolean {
+  return inDev(path) && path !== SEALED_PATH && path !== CLIPBOARD_PATH;
+}
 
 function kernelFiletype(kind: string): { filetype: number; seeks: boolean } {
   switch (kind) {
@@ -320,11 +326,15 @@ export class WasiHost {
       view.setUint32(out, uid, true);
       view.setUint32(out + 4, gid, true);
     };
+    const dev = {
+      json: (req: Parameters<WasiHost['o']['kernel']['call']>[0]) => this.o.kernel.call(req),
+    };
     const fdOwned = (fd: number): { uid?: number; gid?: number } | undefined => {
       const e = fds.get(fd);
       if (e.type === 'device') return ROOT_IDS;
       const kind = e.type === 'kernel' ? fds.kind(fd, e) : 'file';
       if (kind === 'sealed' || kind === 'clipboard') return ROOT_IDS;
+      if (kind === 'tty') return devSync(dev, devFdStat(fd));
       if (kind !== 'file') return undefined;
       try {
         return this.o.fs.stat(pathOf(fd));
@@ -335,9 +345,12 @@ export class WasiHost {
     };
     const fdMode = (fd: number): number => {
       const e = fds.get(fd);
+      if (e.type === 'device') return DEVICE_MODE;
       const kind = e.type === 'kernel' ? fds.kind(fd, e) : undefined;
       if (kind === 'stream') return S_IFIFO | 0o600;
       if (kind === 'sealed' || kind === 'clipboard') return SEALED_MODE;
+      if (kind !== undefined && kind !== 'file')
+        return devSync(dev, devFdStat(fd)).mode ?? DEVICE_MODE;
       return modeOf(this.o.fs.stat(pathOf(fd)));
     };
     const pathOwned = (path: string, follow: boolean) => {
@@ -348,6 +361,7 @@ export class WasiHost {
         return fdOwned(alias.fd);
       }
       if (this.synthetic(path)) return ROOT_IDS;
+      if (kernelDev(path)) return devSync(dev, devStat(path, follow));
       return follow ? this.o.fs.stat(path) : this.o.fs.lstat(path);
     };
     return wrap({
@@ -435,6 +449,10 @@ export class WasiHost {
         }
         if (this.synthetic(path) && deviceOf(path) === undefined)
           return void mem.view().setUint32(out, SEALED_MODE, true);
+        if (kernelDev(path)) {
+          const node = devSync(dev, devStat(path, (flags & AT_SYMLINK_NOFOLLOW) === 0));
+          return void mem.view().setUint32(out, node.mode ?? DEVICE_MODE, true);
+        }
         const st = flags & AT_SYMLINK_NOFOLLOW ? this.o.fs.lstat(path) : this.o.fs.stat(path);
         mem.view().setUint32(out, (st.isFifo ? S_IFIFO : 0) | modeOf(st), true);
       },
@@ -1309,6 +1327,16 @@ export class WasiHost {
     );
   }
 
+  private devChar(path: string, follow: boolean): boolean {
+    try {
+      const json = (req: Parameters<WasiHost['o']['kernel']['call']>[0]) => this.o.kernel.call(req);
+      const st = devSync({ json }, devStat(path, follow));
+      return ((st.mode ?? 0) & 0o170000) === 0o020000;
+    } catch {
+      return false;
+    }
+  }
+
   private resolveForDev(path: string, follow = true): string | undefined {
     try {
       if (!follow) {
@@ -1413,6 +1441,14 @@ export class WasiHost {
       return filestatOf(path, follow ? this.o.fs.stat(path) : this.o.fs.lstat(path));
     } catch (err) {
       if ((err as { code?: string }).code !== 'ENOENT') throw err;
+      if (kernelDev(path) && this.devChar(path, follow)) {
+        return this.local({
+          filetype: FILETYPE.CHARACTER_DEVICE,
+          size: 0n,
+          ino: pathInode(path),
+          mtimeNs: 0n,
+        });
+      }
       const resolved = this.resolveForDev(path, follow);
       if (!resolved) throw err;
       return this.local({
