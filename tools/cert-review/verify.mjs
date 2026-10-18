@@ -8,6 +8,7 @@ import { parseArgs } from 'node:util';
 import {
   behaviourFiles,
   covers,
+  downstreamLine,
   groupVerdict,
   mergedPrs,
   NAME,
@@ -159,8 +160,16 @@ function context(published) {
   const before = published.filter((v) => older(v, version));
   const since = before.reduce((a, v) => (a && !older(a, v) ? a : v), undefined);
   const prs = [];
+  const downstream = [];
   if (since) {
-    for (const n of mergedPrs(ghAll(`repos/${repo}/compare/v${since}...v${version}`))) {
+    const commits = ghAll(`repos/${repo}/compare/v${since}...v${version}`);
+    for (const c of commits.filter((x) => (x.parents ?? []).length > 1)) {
+      const found = ghAll(`repos/${repo}/commits/${c.sha}/statuses`).find(
+        (st) => st.context === 'cert-review' && /downstream: /.test(st.description ?? '')
+      );
+      if (found) downstream.push(/downstream: [^;]*/.exec(found.description)[0]);
+    }
+    for (const n of mergedPrs(commits)) {
       const pull = gh(`repos/${repo}/pulls/${n}`);
       const statuses = ghAll(`repos/${repo}/commits/${pull.head.sha}/statuses`);
       const found = statusAt(statuses, ['cert-review', 'cert-review-pr'], pull.merged_at);
@@ -172,6 +181,7 @@ function context(published) {
       });
     }
   }
+  facts.downstream = downstreamLine(downstream);
   const group = groupVerdict(prs);
   facts.prCertified =
     group.state === 'success' ? group.line : group.line.replace(/^not certified: /, 'not all: ');
@@ -219,7 +229,7 @@ if (problems.length) {
   verdict('verify', false, alert);
   process.exit(1);
 }
-const line = `certified ${NAME}@${version} sha256=${facts.sha256} (covers ${facts.covers}; ci: ${ci}; pr-certified: ${facts.prCertified}; known: ${facts.known.length ? facts.known.join(', ') : 'none'})`;
+const line = `certified ${NAME}@${version} sha256=${facts.sha256} (covers ${facts.covers}; ci: ${ci}; pr-certified: ${facts.prCertified}; ${facts.downstream}; known: ${facts.known.length ? facts.known.join(', ') : 'none'})`;
 summary(line);
 const release = gh(`repos/${repo}/releases/tags/v${version}`);
 const notes = releaseNotes(release.body, line, { version, sha256: facts.sha256 });
