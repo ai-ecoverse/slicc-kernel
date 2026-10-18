@@ -113,6 +113,8 @@ const encoder = new TextEncoder();
 
 export const noLane: SyncCall = () => ({ ok: false, errno: 'ENOSYS', message: 'no sync lane' });
 
+const READ_ONLY: ReadonlySet<string> = new Set([...SYNC_FS_READ_ONLY, 'fd-path-flush']);
+
 export function laneOf(
   lane: JsLane | undefined,
   silence = SYNC_FS_REQUEST_TIMEOUT_MS,
@@ -121,8 +123,7 @@ export function laneOf(
   if (!lane) return noLane;
   const transport = open(lane.sab, lane.port);
   return (req) => {
-    if (!SYNC_FS_READ_ONLY.has(req.op))
-      return transport.call(req, Number.POSITIVE_INFINITY, req.op);
+    if (!READ_ONLY.has(req.op)) return transport.call(req, Number.POSITIVE_INFINITY, req.op);
     try {
       return transport.call(req, silence, req.op);
     } catch (err) {

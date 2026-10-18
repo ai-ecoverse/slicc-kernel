@@ -64,6 +64,16 @@ test('a read whose backend stops answering fails with EIO once nothing has come 
   assert.match(r.stdout, /^rc=1\nalive\n$/, JSON.stringify(r));
   assert.match(r.stderr, /I\/O error|Input\/output error/, JSON.stringify(r));
   assert.doesNotMatch(r.stderr, /timed out/i);
+  while (!(await released())) await new Promise((done) => setTimeout(done, 500));
+  await stall('GET', '*');
+  const dark = await bash('cat /mnt/s3/r.txt; echo "rc=$?"; echo alive', { cwd: '/' });
+  assert.equal(
+    await released(),
+    false,
+    'with the whole backend silent, metadata too, the read still gives up first'
+  );
+  assert.match(dark.stdout, /^rc=1\nalive\n$/, JSON.stringify(dark));
+  while (!(await released())) await new Promise((done) => setTimeout(done, 500));
 });
 
 test('a write whose backend stalls past the deadline waits like a hard mount and completes once the backend is back, exactly once; a SIGKILL ends a stalled write at once (#990)', {
@@ -118,6 +128,16 @@ test("a JS program's synchronous read of a stalled backend gets EIO once nothing
     'the read gave up while the backend still had not answered'
   );
   assert.equal(r.stdout, 'read EIO\nalive\n', JSON.stringify(r));
+  while (!(await released())) await new Promise((done) => setTimeout(done, 500));
+  await stall('GET', '*');
+  const dark = await bash('jstest syncfs read /mnt/s3/jr.txt; echo alive', { cwd: '/' });
+  assert.equal(
+    await released(),
+    false,
+    'with the whole backend silent, metadata too, the read still gives up first'
+  );
+  assert.equal(dark.stdout, 'read EIO\nalive\n', JSON.stringify(dark));
+  while (!(await released())) await new Promise((done) => setTimeout(done, 500));
   assert.equal(
     (await bash('jstest syncfs write /mnt/s3/jw0.txt hello', { cwd: '/' })).stdout,
     'wrote\n'

@@ -241,7 +241,8 @@ function storeTransport(inner) {
       const key = decodeURIComponent(url.pathname.replace(/^\/bucket\/?/, ''));
       const objects = window.objects;
       const stall = window.s3Stall;
-      if (stall && stall.method === req.method && stall.key === key) await stall.until;
+      if (stall && stall.method === req.method && (stall.key === '*' || stall.key === key))
+        await stall.until;
       if (req.method === 'PUT') window.s3Puts.set(key, (window.s3Puts.get(key) ?? 0) + 1);
       if (req.method === 'GET' && url.searchParams.has('list')) {
         const prefix = url.searchParams.get('list');
