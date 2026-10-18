@@ -20,6 +20,7 @@ export interface JsTlsSession {
   readonly sni?: boolean;
   readonly hostnameChecked?: boolean;
   readonly hostnameMatches?: boolean;
+  readonly chainError?: string;
 }
 
 export interface JsTlsCipher {
@@ -99,6 +100,7 @@ interface WireSession {
   sni?: boolean;
   hostnameChecked?: boolean;
   hostnameMatches?: boolean;
+  chainError?: string;
 }
 
 function fromBase64(text: string): Uint8Array {
@@ -168,6 +170,7 @@ function controlsOf(r: WireSession) {
     sni: r.sni !== false,
     hostnameChecked: r.hostnameChecked === true,
     ...(r.hostnameMatches === undefined ? {} : { hostnameMatches: r.hostnameMatches }),
+    ...(r.chainError ? { chainError: r.chainError } : {}),
   };
 }
 
@@ -197,13 +200,20 @@ function sessionOf(r: WireSession): JsTlsSession {
 
 const TLS_CODE = /^([A-Z][A-Z0-9_]+): /;
 
+const ALERT = / \(alert (\d+)\)$/;
+
+function withAlert(err: JsCallError): JsCallError {
+  const alert = ALERT.exec(err.detail ?? '')?.[1];
+  return alert === undefined ? err : Object.assign(err, { alert: Number(alert) });
+}
+
 async function secureCall<T>(call: () => Promise<T>, what = 'connect'): Promise<T> {
   try {
     return await call();
   } catch (err) {
     const e = err as JsCallError;
     const code = e.code === 'EPROTO' && e.detail ? TLS_CODE.exec(e.detail)?.[1] : undefined;
-    if (code) throw new JsCallError(code, what, e.detail);
+    if (code) throw withAlert(new JsCallError(code, what, e.detail));
     throw err;
   }
 }

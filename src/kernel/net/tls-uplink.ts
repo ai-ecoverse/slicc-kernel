@@ -97,6 +97,7 @@ export interface SecureSession {
   sni?: boolean;
   hostnameChecked?: boolean;
   hostnameMatches?: boolean;
+  chainError?: string;
 }
 
 function sessionOf(info: TlsClientInfo, servername: string): SecureSession {
@@ -126,6 +127,7 @@ function controls(info: TlsClientInfo) {
     sni: info.sni !== false,
     hostnameChecked: info.hostnameChecked === true,
     ...(info.hostnameMatches === undefined ? {} : { hostnameMatches: info.hostnameMatches }),
+    ...(info.chainError ? { chainError: info.chainError } : {}),
   };
 }
 

@@ -145,3 +145,20 @@ export function makeCa(cn = 'slicc-kernel test CA') {
     },
   };
 }
+
+export function selfSigned(host) {
+  const pair = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+  const spki = pair.publicKey.export({ type: 'spki', format: 'der' });
+  const now = Date.now();
+  const der = certificate({
+    issuer: host,
+    subject: host,
+    notBefore: new Date(now - 3600_000),
+    notAfter: new Date(now + 7 * DAY),
+    spki,
+    issuerSpki: spki,
+    host,
+    key: pair.privateKey,
+  });
+  return { der, cert: pem(der), key: pair.privateKey.export({ type: 'pkcs8', format: 'pem' }) };
+}
