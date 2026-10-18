@@ -123,3 +123,43 @@ test('more changes than a watch holds between reads come as an overflow note aft
     'true true',
   ]);
 });
+
+test("a user's recursive watch sees nothing inside another user's 0700 directory until it is opened up, and a path under an unsearchable directory is EACCES whether or not it exists (#1031)", async (t) => {
+  const { kernel, sh } = await booted(t);
+  await kernel.users.add({ name: 'cone' });
+  await kernel.users.add({ name: 'bee' });
+  await sh(
+    'mkdir -p /tmp/s && chmod 777 /tmp/s && rm -f /tmp/s1 /tmp/s2 && touch /root/.profile && chmod 700 /root'
+  );
+  await sh('mkdir /tmp/s/b && chmod 700 /tmp/s/b', 'bee');
+  const watch = (ready, then) =>
+    sh(
+      `watchtest events /tmp/s end /tmp/${ready} recursive > /tmp/${ready}.out & until [ -e /tmp/${ready} ]; do :; done; ${then}; wait; cat /tmp/${ready}.out`,
+      'cone'
+    );
+  const hidden = watch('s1', 'true');
+  for (;;) {
+    const ready = await kernel.readFile('/tmp/s1').then(
+      () => true,
+      () => false
+    );
+    if (ready) break;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  await sh('echo x > /tmp/s/b/x && touch /tmp/s/end', 'bee');
+  assert.deepEqual(lines(await hidden), ['rename end']);
+  await sh('rm /tmp/s/end && chmod 755 /tmp/s/b', 'bee');
+  const shown = watch('s2', 'true');
+  for (;;) {
+    const ready = await kernel.readFile('/tmp/s2').then(
+      () => true,
+      () => false
+    );
+    if (ready) break;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  await sh('echo y > /tmp/s/b/y && touch /tmp/s/end', 'bee');
+  assert.deepEqual(lines(await shown), ['rename b/y', 'change b/y', 'rename end']);
+  assert.deepEqual(lines(await sh('watchtest refused /root/nope', 'cone')), ['EACCES']);
+  assert.deepEqual(lines(await sh('watchtest refused /root/.profile', 'cone')), ['EACCES']);
+});
