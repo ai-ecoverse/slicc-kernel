@@ -991,7 +991,13 @@ async function attestationsAt(get, at) {
   } catch (error) {
     return { missing: `attestations unreachable (${error?.message ?? 'network error'})` };
   }
-  if (res.ok) return { res };
+  if (res.ok) {
+    try {
+      return { res, body: await res.json() };
+    } catch (error) {
+      return { missing: `attestations unreadable (${error?.message ?? 'body error'})` };
+    }
+  }
   if (res.status !== 404) return { problem: `attestations answered ${res.status}` };
   return { missing: 'attestations answered 404' };
 }
