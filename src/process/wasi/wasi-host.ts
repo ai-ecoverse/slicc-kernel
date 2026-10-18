@@ -362,7 +362,9 @@ export class WasiHost {
       }
       if (this.synthetic(path)) return ROOT_IDS;
       if (kernelDev(path)) return devSync(dev, devStat(path, follow));
-      return follow ? this.o.fs.stat(path) : this.o.fs.lstat(path);
+      return this.orDev(path, follow, () =>
+        follow ? this.o.fs.stat(path) : this.o.fs.lstat(path)
+      );
     };
     return wrap({
       fd_chown: (fd: number, uid: number, gid: number) => {
@@ -453,7 +455,16 @@ export class WasiHost {
           const node = devSync(dev, devStat(path, (flags & AT_SYMLINK_NOFOLLOW) === 0));
           return void mem.view().setUint32(out, node.mode ?? DEVICE_MODE, true);
         }
-        const st = flags & AT_SYMLINK_NOFOLLOW ? this.o.fs.lstat(path) : this.o.fs.stat(path);
+        const follow = (flags & AT_SYMLINK_NOFOLLOW) === 0;
+        let st: SyncFsBridgeStat;
+        try {
+          st = follow ? this.o.fs.stat(path) : this.o.fs.lstat(path);
+        } catch (err) {
+          const device = this.orDev(path, follow, () => {
+            throw err;
+          });
+          return void mem.view().setUint32(out, device.mode ?? DEVICE_MODE, true);
+        }
         mem.view().setUint32(out, (st.isFifo ? S_IFIFO : 0) | modeOf(st), true);
       },
     });
@@ -1327,6 +1338,23 @@ export class WasiHost {
     );
   }
 
+  private linkedDev(path: string, follow: boolean): string | undefined {
+    if (!follow) return undefined;
+    const real = physicalPath(this.o.fs, path);
+    return real !== path && kernelDev(real) ? real : undefined;
+  }
+
+  private orDev(path: string, follow: boolean, stat: () => SyncFsBridgeStat): SyncFsBridgeStat {
+    try {
+      return stat();
+    } catch (err) {
+      const device = (err as { code?: string }).code === 'ENOENT' && this.linkedDev(path, follow);
+      if (!device) throw err;
+      const json = (req: Parameters<WasiHost['o']['kernel']['call']>[0]) => this.o.kernel.call(req);
+      return devSync({ json }, devStat(device, true));
+    }
+  }
+
   private devChar(path: string, follow: boolean): boolean {
     try {
       const json = (req: Parameters<WasiHost['o']['kernel']['call']>[0]) => this.o.kernel.call(req);
@@ -1441,11 +1469,12 @@ export class WasiHost {
       return filestatOf(path, follow ? this.o.fs.stat(path) : this.o.fs.lstat(path));
     } catch (err) {
       if ((err as { code?: string }).code !== 'ENOENT') throw err;
-      if (kernelDev(path) && this.devChar(path, follow)) {
+      const device = kernelDev(path) ? path : this.linkedDev(path, follow);
+      if (device && this.devChar(device, true)) {
         return this.local({
           filetype: FILETYPE.CHARACTER_DEVICE,
           size: 0n,
-          ino: pathInode(path),
+          ino: pathInode(device),
           mtimeNs: 0n,
         });
       }
