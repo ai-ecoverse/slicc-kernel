@@ -58,6 +58,20 @@ export type AtomicsWaitLike = (
 ) => 'ok' | 'not-equal' | 'timed-out';
 
 const PATH_OPS: ReadonlySet<string> = new Set(SYNC_FS_OPS);
+
+const READ_ONLY: ReadonlySet<string> = new Set([
+  'read',
+  'pread',
+  'exists',
+  'stat',
+  'lstat',
+  'readdir',
+  'readdir-stat',
+  'readlink',
+  'statfs',
+  'kept',
+  'access',
+]);
 let calls = 0;
 
 export function syncCallCount(): number {
@@ -121,7 +135,7 @@ export function createSyncSabTransport(
         return;
       }
       const remaining = deadline - now();
-      if (remaining <= 0) throw syncError('ETIMEDOUT', label);
+      if (remaining <= 0) throw syncError('EIO', label);
       wait(header, SAB_I_PUB, published, remaining);
     }
   }
@@ -131,7 +145,6 @@ export function createSyncSabTransport(
       if (deps.memory) publishMemory(sab, deps.memory());
       const id = ++seq;
       calls += Number(!PATH_OPS.has(req.op));
-      const deadline = now() + timeoutMs;
       let out: Uint8Array | null = null;
       let status = 0;
       let offset = 0;
@@ -149,7 +162,7 @@ export function createSyncSabTransport(
           } catch {
             throw syncError('EIO', label);
           }
-          awaitReady(id, deadline, label);
+          awaitReady(id, now() + timeoutMs, label);
           const total = loadU53(header, SAB_I_TOTAL, SAB_I_TOTAL_HI);
           const chunk = Atomics.load(header, SAB_I_CHUNK);
           const at = loadU53(header, SAB_I_OFFSET, SAB_I_OFFSET_HI);
@@ -190,7 +203,8 @@ export function createSyncFsSabBridge(
 
   function run(req: SyncSabRequestBody, path: string, transfer?: Transferable[]): SyncFsResult {
     last = null;
-    const result = transport.call(req, timeoutMs, `sync-sab bridge, '${path}'`, transfer);
+    const silence = READ_ONLY.has(req.op) ? timeoutMs : Number.POSITIVE_INFINITY;
+    const result = transport.call(req, silence, `sync-sab bridge, '${path}'`, transfer);
     if (!result.ok) throw errnoError(result.errno, path);
     return result;
   }

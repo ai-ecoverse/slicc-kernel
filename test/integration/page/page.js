@@ -182,6 +182,7 @@ window.copyTree = async (from, to, names) => {
 };
 
 window.objects = new Map();
+window.s3Puts = new Map();
 
 function uploadSink(inner, maxRequestBody) {
   let seen;
@@ -239,6 +240,9 @@ function storeTransport(inner) {
       const url = new URL(req.url);
       const key = decodeURIComponent(url.pathname.replace(/^\/bucket\/?/, ''));
       const objects = window.objects;
+      const stall = window.s3Stall;
+      if (stall && stall.method === req.method && stall.key === key) await stall.until;
+      if (req.method === 'PUT') window.s3Puts.set(key, (window.s3Puts.get(key) ?? 0) + 1);
       if (req.method === 'GET' && url.searchParams.has('list')) {
         const prefix = url.searchParams.get('list');
         const listed = [...objects]
