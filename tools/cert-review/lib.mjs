@@ -948,6 +948,12 @@ export function downstreamOf(result, { override = 'FAIL', biosRef = '', shards =
         `bios canary is failing on main: every failing test fails on main's pins too (${named(both)})${run}`,
       ],
     };
+  if (!(counts.pass > 0))
+    return {
+      state: 'INCOMPLETE',
+      line: `downstream: INCOMPLETE ${where}: no downstream test passed${flaky}${run}`,
+      notify,
+    };
   return {
     state: 'PASS',
     line: `downstream: PASS ${where}: ${counts.pass} pass${known}${flaky}${run}`,

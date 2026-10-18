@@ -83,6 +83,16 @@ test('known bios failures pass with a note and a notice, a canary that fails on 
   assert.equal(DOWNSTREAM_OK.has('NOT_JUDGED'), true);
   const flaky = downstreamOf(result({ counts: { pass: 9, flaky: 1 }, flaky: [row('f')] }), at);
   assert.deepEqual([flaky.state, /; flaky 1/.test(flaky.line)], ['PASS', true]);
+  const onlyFlaky = downstreamOf(
+    result({ counts: { pass: 0, skip: 2, flaky: 1 }, flaky: [row('f')] }),
+    at
+  );
+  assert.equal(
+    onlyFlaky.state,
+    'INCOMPLETE',
+    'something ran, nothing passed: no evidence for a pass'
+  );
+  assert.match(onlyFlaky.line, /^downstream: INCOMPLETE .*: no downstream test passed; flaky 1/);
   const regressed = result({
     counts: { pass: 9, regression: 1 },
     regressions: [row('seven boots')],
