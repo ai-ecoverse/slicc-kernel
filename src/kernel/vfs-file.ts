@@ -192,13 +192,18 @@ export class VfsNode {
     await ranged?.pin();
   }
 
+  moving: Promise<void> | undefined;
+
   async load(): Promise<Uint8Array> {
     if (this.revoked) throw new KernelError('EIO');
-    if (!this.data) {
+    while (!this.data) {
+      const at = this.path;
       try {
-        this.data = await this.fs.readFileBuffer(this.path);
+        this.data = await this.fs.readFileBuffer(at);
       } catch (err) {
         if (!isMissing(err)) throw err;
+        await this.moving;
+        if (this.path !== at) continue;
         this.data = new Uint8Array(0);
         this.missing = true;
       }
@@ -630,6 +635,17 @@ export class VfsNodes implements UnlinkHolder {
     node.renamedTo(file.hidden);
     this.byPath.set(file.hidden, node);
     this.kept.set(node, file);
+  }
+
+  moving(path: string): () => void {
+    const node = this.byPath.get(path);
+    if (!node) return () => undefined;
+    const { promise, resolve } = Promise.withResolvers<void>();
+    node.moving = promise;
+    return () => {
+      if (node.moving === promise) node.moving = undefined;
+      resolve();
+    };
   }
 
   unkeep(path: string, file: KeptFile): void {
