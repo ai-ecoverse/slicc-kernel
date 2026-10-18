@@ -936,6 +936,23 @@ test("the cert-path guard fails closed: a reviewer path the guard's globs miss (
   assert.equal(run('PASS', [m({ paths: ['.github/runner.mjs'] })]).status, 'FAIL');
   assert.equal(run('PASS', undefined).status, 'INCOMPLETE', 'a PASS without a receipt');
   assert.equal(run('FAIL', [m({})]).status, 'FAIL');
+  assert.equal(
+    run('PASS', [{ pr: 7, touched: [], approved: false }]).status,
+    'INCOMPLETE',
+    'a member without paths is never checked as a pass'
+  );
+  assert.equal(
+    run('PASS', [
+      m({ paths: ['tools/cert-review/.x'] }),
+      { pr: 8, paths: ['tools/cert-review/.y'] },
+    ]).status,
+    'INCOMPLETE',
+    'a member without touched is INCOMPLETE, whatever the others say'
+  );
+  assert.equal(
+    run('PASS', [m({ paths: ['README.md'] }), { pr: 9, paths: null, touched: [] }]).status,
+    'INCOMPLETE'
+  );
   assert.equal(run('', undefined).status, 'INCOMPLETE');
   const { matchesGlob } = await import('node:path');
   for (const filename of [

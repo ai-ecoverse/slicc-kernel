@@ -79,10 +79,15 @@ jobs:
             if (status === "PASS") {
               if (!r || !Array.isArray(r.members)) status = "INCOMPLETE";
               else for (const m of r.members) {
-                const left = (m.paths ?? []).filter((p) => reviewer(p) && !(m.touched ?? []).includes(p));
+                if (!Array.isArray(m.paths) || !Array.isArray(m.touched)) {
+                  status = "INCOMPLETE";
+                  missed.length = 0;
+                  break;
+                }
+                const left = m.paths.filter((p) => reviewer(p) && !m.touched.includes(p));
                 if (left.length && m.approved !== true) missed.push("#" + m.pr + ": " + left.join(", "));
               }
-              if (missed.length) status = "FAIL";
+              if (missed.length && status === "PASS") status = "FAIL";
             }
             console.log("cert guard: " + status + (missed.length ? " (reviewer paths the globs missed, without the label: " + missed.join("; ") + ")" : ""));
             require("node:fs").appendFileSync(process.env.GITHUB_OUTPUT, "status=" + status + "\n");
