@@ -761,10 +761,14 @@ function namesFifo(fs: FifoOpenFs, path: string): boolean {
   try {
     const { node } = fs.lookupPath?.(path, { follow: true }) ?? { node: { mode: 0 } };
     return (node.mode & S_IFMT_BITS) === S_IFIFO_BITS;
-  } catch {
+  } catch (err) {
+    const { errno, code } = (err ?? {}) as { errno?: unknown; code?: unknown };
+    if (REFUSED.has(typeof errno === 'number' ? errno : wasiErrno(String(code)))) throw err;
     return false;
   }
 }
+
+const REFUSED: ReadonlySet<number> = new Set([wasiErrno('EACCES'), wasiErrno('EPERM')]);
 
 export function useFifoOpens(
   Fs: ProcessFs,
