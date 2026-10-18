@@ -1725,8 +1725,7 @@ export class WasmProcess {
   }
 
   private async keptOr(path: string, handle?: number): Promise<string> {
-    const held = handle === undefined ? undefined : this.keptHandle?.(handle);
-    if (held !== undefined) return held;
+    if (handle !== undefined) return this.keptHandle?.(handle) ?? path;
     const kept = this.keptPath?.(path);
     return kept !== undefined && !(await present(this.options.fs, path, true)) ? kept : path;
   }
