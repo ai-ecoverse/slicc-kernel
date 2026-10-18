@@ -15,7 +15,7 @@ export interface TypedWatch {
 }
 
 interface Typed {
-  root: string;
+  roots: string[];
   recursive: boolean;
   notes: WatchNote[];
   overflowed: boolean;
@@ -57,26 +57,35 @@ const REALS_KEPT = 4096;
 
 function noted(watch: Typed, note: WatchNote): void {
   if (watch.ended) return;
+  if ('ended' in note) {
+    watch.notes.push(note);
+    watch.ended = true;
+    watch.wake?.();
+    return;
+  }
   if (watch.overflowed) return;
   if (watch.notes.length >= WATCH_NOTES_LIMIT) {
     watch.overflowed = true;
     watch.notes.push({ overflow: true });
   } else watch.notes.push(note);
-  if ('ended' in note) watch.ended = true;
   watch.wake?.();
 }
 
 function route(watch: Typed, type: WatchEventType, path: string): void {
-  const root = watch.root;
+  for (const root of watch.roots) if (routed(watch, root, type, path)) return;
+}
+
+function routed(watch: Typed, root: string, type: WatchEventType, path: string): boolean {
   if (path === root || (type === 'rename' && root !== '/' && under(root, path))) {
     noted(watch, { type, filename: baseOf(root) });
     if (type === 'rename') noted(watch, { ended: true });
-    return;
+    return true;
   }
   if (parentOf(path) === root) noted(watch, { type, filename: baseOf(path) });
   else if (watch.recursive && under(path, root)) {
     noted(watch, { type, filename: path.slice(root === '/' ? 1 : root.length + 1) });
-  }
+  } else return false;
+  return true;
 }
 
 export class FsWatchers {
@@ -114,9 +123,11 @@ export class FsWatchers {
     };
   }
 
-  typedWatch(root: string, recursive: boolean): TypedWatch {
+  typedWatch(root: string, recursive: boolean, alias?: string): TypedWatch {
+    const main = normalizePath(root);
+    const other = alias === undefined ? main : normalizePath(alias);
     const watch: Typed = {
-      root: normalizePath(root),
+      roots: other === main ? [main] : [main, other],
       recursive,
       notes: [],
       overflowed: false,
@@ -153,9 +164,10 @@ export class FsWatchers {
 
   private covers(path: string): boolean {
     for (const watch of this.typed) {
-      const root = watch.root;
-      if (path === root || parentOf(path) === root || (watch.recursive && under(path, root)))
-        return true;
+      for (const root of watch.roots) {
+        if (path === root || parentOf(path) === root || (watch.recursive && under(path, root)))
+          return true;
+      }
     }
     return false;
   }

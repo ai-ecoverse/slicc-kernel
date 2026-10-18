@@ -163,3 +163,11 @@ test("a user's recursive watch sees nothing inside another user's 0700 directory
   assert.deepEqual(lines(await sh('watchtest refused /root/nope', 'cone')), ['EACCES']);
   assert.deepEqual(lines(await sh('watchtest refused /root/.profile', 'cone')), ['EACCES']);
 });
+
+test('a watch through a symlink to a directory hears operations made through either name (#1031)', async (t) => {
+  const { sh } = await booted(t);
+  const r = await sh(
+    'rm -rf /tmp/real /tmp/alias /tmp/ra; mkdir /tmp/real; ln -s /tmp/real /tmp/alias; watchtest events /tmp/alias end /tmp/ra & until [ -e /tmp/ra ]; do :; done; mkdir /tmp/alias/viaalias; mkdir /tmp/real/viareal; touch /tmp/alias/end; wait'
+  );
+  assert.deepEqual(lines(r), ['rename viaalias', 'rename viareal', 'rename end']);
+});
