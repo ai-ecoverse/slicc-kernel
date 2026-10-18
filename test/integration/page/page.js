@@ -501,6 +501,7 @@ window.boot = async (options = {}) => {
       ...(options.cdp ? { cdp: cdpHook } : {}),
       ...(options.protect ? { protect: protection(options.protect) } : {}),
       ...(options.clipboard ? { clipboard: clipboardHook } : {}),
+      ...(options.worker ? { worker: new URL(options.worker, location.href) } : {}),
     })
   );
   return true;
