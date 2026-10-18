@@ -92,7 +92,35 @@ export function droppedTests(files) {
   return out;
 }
 
-export function rowOf(pr, files) {
+const DEPENDENCY_SECTIONS = ['dependencies', 'devDependencies', 'optionalDependencies'];
+
+export function versionsOnly(before, after) {
+  let a;
+  let b;
+  try {
+    a = JSON.parse(before);
+    b = JSON.parse(after);
+  } catch {
+    return false;
+  }
+  if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false;
+  const rest = (o) =>
+    JSON.stringify(
+      Object.fromEntries(Object.entries(o).filter(([k]) => !DEPENDENCY_SECTIONS.includes(k)))
+    );
+  if (rest(a) !== rest(b)) return false;
+  return DEPENDENCY_SECTIONS.every((section) => {
+    const x = Object.keys(a[section] ?? {})
+      .sort()
+      .join('\n');
+    const y = Object.keys(b[section] ?? {})
+      .sort()
+      .join('\n');
+    return x === y;
+  });
+}
+
+export function rowOf(pr, files, { manifest } = {}) {
   const kind = kindOf(pr.title);
   const tests = files
     .filter((f) => INTEGRATION.test(f.filename) && f.status !== 'removed')
@@ -103,6 +131,7 @@ export function rowOf(pr, files) {
     kind,
     breaking: KIND.exec(pr.title ?? '')?.[2] === '!',
     behaviour: behaviourFiles(files).length > 0,
+    manifest: manifest === true && names(files).every((f) => MANIFEST_FILES.has(f)),
     src: files.some((f) => f.filename.startsWith('src/')),
     tests,
     dropped: droppedTests(files),
@@ -199,6 +228,7 @@ export function decide(row, prev, next) {
   );
   const base = { pr: row.pr, title: row.title, kind: row.kind, checks };
   if (!row.behaviour) return { ...base, decision: 'not-behaviour' };
+  if (row.manifest) return { ...base, decision: 'manifest' };
   if (row.tests.length === 0) return { ...base, decision: 'no-test' };
   if (checks.length === 0) return { ...base, decision: 'no-titles' };
   if (checks.some((c) => c.next === 'fail')) return { ...base, decision: 'fails-on-release' };

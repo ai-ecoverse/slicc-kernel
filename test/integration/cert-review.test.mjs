@@ -34,6 +34,7 @@ import {
   unfinishedFiles,
   unquote,
   verdictLine,
+  versionsOnly,
   withBaselines,
 } from '../../tools/cert-review/lib.mjs';
 
@@ -1321,5 +1322,74 @@ test('a pull request is behaviour by the paths it changes, not its title: an "A2
   assert.match(
     negativeEvidence([{ kind: 'prev-not-run', pr: 1041 }]).named,
     /^#1041 changes shipped paths/
+  );
+});
+
+test('a pull request that only moves dependency versions in package.json and its lock is decided "manifest", no gap, because its required PR cert settled it; a scripts or exports change stays behaviour with no-test', () => {
+  const pkg = (o) =>
+    JSON.stringify(
+      { name: 'k', version: '0.0.0', scripts: { build: 'node b.mjs' }, ...o },
+      null,
+      2
+    );
+  const deps = {
+    dependencies: { a: '1.0.0' },
+    devDependencies: { b: '2.0.0' },
+    optionalDependencies: { c: '3.0.0' },
+  };
+  const bumped = {
+    dependencies: { a: '1.0.1' },
+    devDependencies: { b: '2.1.0' },
+    optionalDependencies: { c: '3.0.1' },
+  };
+  assert.equal(versionsOnly(pkg(deps), pkg(bumped)), true);
+  assert.equal(
+    versionsOnly(pkg(deps), pkg({ ...bumped, scripts: { build: 'node c.mjs' } })),
+    false,
+    'a scripts change'
+  );
+  assert.equal(
+    versionsOnly(pkg(deps), pkg({ ...bumped, exports: './x.js' })),
+    false,
+    'an exports change'
+  );
+  assert.equal(
+    versionsOnly(pkg(deps), pkg({ ...bumped, dependencies: { a: '1.0.1', d: '1.0.0' } })),
+    false,
+    'a new dependency'
+  );
+  assert.equal(versionsOnly('{', pkg(deps)), false);
+  const files = [
+    { filename: 'package.json', status: 'modified', patch: '+x' },
+    { filename: 'package-lock.json', status: 'modified', patch: '+x' },
+  ];
+  const bump = rowOf(
+    { number: 1043, title: 'chore(deps): update dependency @ai-ecoverse/wasi-pnpm to v12.9.1-10' },
+    files,
+    { manifest: true }
+  );
+  const scripts = rowOf({ number: 1044, title: 'chore: build with c.mjs' }, files, {
+    manifest: false,
+  });
+  const sneaky = rowOf(
+    { number: 1045, title: 'chore(deps): bump' },
+    [...files, { filename: 'src/x.ts', status: 'modified', patch: '+x' }],
+    { manifest: true }
+  );
+  const none = resultsMap([]);
+  assert.deepEqual(
+    [bump, scripts, sneaky].map((r) => [r.behaviour, r.manifest, decide(r, none, none).decision]),
+    [
+      [true, true, 'manifest'],
+      [true, false, 'no-test'],
+      [true, false, 'no-test'],
+    ]
+  );
+  assert.deepEqual(
+    gapsOf([
+      { kind: 'manifest', pr: 1043 },
+      { kind: 'no-test', pr: 1044 },
+    ]),
+    ['#1044 no-test']
   );
 });

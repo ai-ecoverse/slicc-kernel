@@ -7,9 +7,11 @@ import {
   baselineFiles,
   compareVersions,
   deltaFiles,
+  manifestOnly,
   mergedPrs,
   rowOf,
   verdict,
+  versionsOnly,
   withBaselines,
 } from './lib.mjs';
 
@@ -43,8 +45,26 @@ const rows = [];
 for (const n of [...new Set([...mergedPrs(commits), ...extra])]) {
   const [pr] = gh(`repos/${repo}/pulls/${n}`);
   const files = gh(`repos/${repo}/pulls/${n}/files?per_page=100`).flat();
-  rows.push(rowOf(pr, files));
+  rows.push(rowOf(pr, files, { manifest: manifestVersionsOnly(pr, files) }));
 }
+function packageJsonAt(ref) {
+  const [file] = gh(`repos/${repo}/contents/package.json?ref=${ref}`);
+  return Buffer.from(file.content ?? '', 'base64').toString('utf8');
+}
+
+function manifestVersionsOnly(pr, files) {
+  if (
+    !manifestOnly(files) ||
+    !files.some((f) => f.filename === 'package.json') ||
+    !pr.merge_commit_sha
+  )
+    return files.every((f) => f.filename === 'package-lock.json') && manifestOnly(files);
+  const [merged] = gh(`repos/${repo}/commits/${pr.merge_commit_sha}`);
+  const parent = merged.parents?.[0]?.sha;
+  if (!parent) return false;
+  return versionsOnly(packageJsonAt(parent), packageJsonAt(pr.merge_commit_sha));
+}
+
 function published() {
   try {
     return new Set(
