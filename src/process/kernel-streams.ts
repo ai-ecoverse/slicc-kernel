@@ -909,13 +909,13 @@ export class KernelStreams {
         return mask;
       },
       dup: (stream) => {
-        if (!stream.sliccKernelFile) base.dup?.(stream);
+        base.dup?.(stream);
         this.refs.set(kfd, (this.refs.get(kfd) ?? 0) + 1);
       },
       close: (stream) => {
         if (this.atExit && stream.fd === 2 && this.reporting.size > 0) this.commitStdout();
         try {
-          if (!stream.sliccKernelFile) base.close?.(stream);
+          base.close?.(stream);
         } catch {}
         const left = (this.refs.get(kfd) ?? 1) - 1;
         if (left > 0) {

@@ -947,7 +947,7 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
         s.len = 0;
         s.loaded = false;
         held(stream, -1);
-        opened(node, false);
+        if (s.handle !== undefined) opened(node, false);
       }
     },
     read(stream, buffer, offset, length, position) {
