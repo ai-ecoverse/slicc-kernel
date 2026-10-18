@@ -277,6 +277,11 @@ test("record's artifact check covers every producer and fails the record as INCO
   }
   assert.doesNotMatch(workflow, /overwrite: true/);
   assert.doesNotMatch(workflow, /merge-multiple/);
+  assert.doesNotMatch(
+    jobs['pack-base'],
+    /cache:/,
+    "pack base restores no Actions cache: the candidate job, which runs the pull request's code, shares the run's cache scope"
+  );
   for (const job of ['same', 'suite']) {
     for (const [side, v] of [
       ['pack', 'version'],
