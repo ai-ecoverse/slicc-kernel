@@ -86,6 +86,7 @@ export function wireSignals(host: WasiHost, gate: SignalGate): void {
   host.interrupted = () => gate.interrupt();
   host.raisedOnEntry = () => gate.raisedOnEntry();
   host.quietly = (fn) => gate.quiet(fn);
+  host.deliverDue = () => void gate.interrupt();
   host.fds.restartable = () => gate.restartable();
 }
 
