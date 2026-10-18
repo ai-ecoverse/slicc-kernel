@@ -500,7 +500,7 @@ function processOptions(
   };
 }
 
-function threadInit(
+export function threadInit(
   opts: SpawnWasmOptions,
   program: WasmThreadInitMsg['program'],
   sab: SharedArrayBuffer,
@@ -520,6 +520,7 @@ function threadInit(
     cred: copyCred(cred),
     owners: opts.owners === true,
     ...(opts.links !== undefined ? { links: true } : {}),
+    ...(opts.changes ? { changes: opts.changes } : {}),
     ...(opts.ppid !== undefined ? { ppid: opts.ppid } : {}),
     thread,
     signals: main,
