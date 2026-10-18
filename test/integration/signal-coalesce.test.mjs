@@ -27,9 +27,22 @@ const CAUGHT = [
   'import os, signal',
   'hits = []',
   'signal.signal(signal.SIGUSR1, lambda s, f: hits.append(s))',
+  'signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGUSR1})',
   "open('/tmp/ready', 'w').close()",
+  "while not os.path.exists('/tmp/sent'): pass",
+  'signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGUSR1})',
+  'for i in range(3): os.getpid()',
+  "os.write(1, ('runs %d\\n' % len(hits)).encode())",
+].join('\n');
+
+const SPINNING = [
+  'import os, signal',
+  'hits = []',
+  'signal.signal(signal.SIGUSR1, lambda s, f: hits.append(s))',
+  "open('/tmp/ready.tmp', 'w').close()",
+  "os.rename('/tmp/ready.tmp', '/tmp/ready')",
   'n = 0',
-  'for i in range(20000000): n += i',
+  'for i in range(40000000): n += i',
   'for i in range(3): os.getpid()',
   "os.write(1, ('runs %d\\n' % len(hits)).encode())",
 ].join('\n');
@@ -42,7 +55,7 @@ const UNCAUGHT = [
 ].join('\n');
 
 const sender = (src) =>
-  `rm -f /tmp/ready; ${py(src)} & until [ -e /tmp/ready ]; do :; done; sleep 0.3; kill -USR1 $!; kill -USR1 $!; wait $!; echo "status $?"`;
+  `rm -f /tmp/ready /tmp/sent; ${py(src)} & until [ -e /tmp/ready ]; do :; done; kill -USR1 $!; kill -USR1 $!; touch /tmp/sent; wait $!; echo "status $?"`;
 
 async function booted(t) {
   const kernel = await createNodeKernel();
@@ -52,11 +65,20 @@ async function booted(t) {
   return kernel;
 }
 
-test('a second SIGUSR1 sent while the first is still pending at a caught handler coalesces: the handler runs once and the program lives (#1088)', {
+test('two SIGUSR1s sent while the program blocks it are both pending at once; unblocked, the handler runs once and the program lives (#1088)', {
   timeout: 180_000,
 }, async (t) => {
   const kernel = await booted(t);
   const r = await kernel.run(['bash', '-c', sender(CAUGHT)], { cwd: '/' });
+  assert.equal(r.stderr, '');
+  assert.equal(r.stdout, 'runs 1\nstatus 0\n');
+});
+
+test('a second SIGUSR1 sent while the first is still pending at a program spinning without kernel calls coalesces too: one handler run, and the program lives (#1088)', {
+  timeout: 180_000,
+}, async (t) => {
+  const kernel = await booted(t);
+  const r = await kernel.run(['bash', '-c', sender(SPINNING)], { cwd: '/' });
   assert.equal(r.stderr, '');
   assert.equal(r.stdout, 'runs 1\nstatus 0\n');
 });
@@ -110,23 +132,29 @@ async function terminal(kernel, script) {
 
 const settle = (ms) => new Promise((r) => setTimeout(r, ms));
 
-test('a second ^C ends a WASI program that computes without making kernel calls, while the first stays pending at its KeyboardInterrupt handler (#1088)', {
+test('a repeated ^C ends a WASI program that computes without making kernel calls, as its caught SIGINT can never run there (#1088)', {
   timeout: 180_000,
 }, async (t) => {
   const kernel = await booted(t);
-  const { term } = await terminal(
-    kernel,
-    ["open('/tmp/ready', 'w').close()", 'while True: pass'].join('\n')
-  );
+  const script = [
+    'import os, signal',
+    "signal.signal(signal.SIGINT, lambda s, f: os.write(1, b'handled\\n'))",
+    "open('/tmp/ready', 'w').close()",
+    'while True: pass',
+  ].join('\n');
+  const { term, screen } = await terminal(kernel, script);
+  const ended = term.exited.then((s) => ({ s }));
   term.write('\x03');
-  const early = await Promise.race([
-    term.exited.then(() => 'ended'),
-    settle(1500).then(() => 'running'),
-  ]);
-  assert.equal(early, 'running');
-  term.write('\x03');
-  const status = await Promise.race([term.exited, settle(20_000).then(() => 'still running')]);
-  assert.notEqual(status, 'still running');
+  assert.equal(await Promise.race([ended, settle(1500).then(() => 'running')]), 'running');
+  let sent = 1;
+  let result = 'running';
+  while (result === 'running' && sent < 4) {
+    term.write('\x03');
+    sent += 1;
+    result = await Promise.race([ended, settle(3000).then(() => 'running')]);
+  }
+  assert.notEqual(result, 'running', screen());
+  assert.equal(result.s, 130);
 });
 
 test('a SIGINT held while its own handler runs, then sent again, gives one more handler run, not a kill (#1088)', {
