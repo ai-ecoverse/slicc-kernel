@@ -980,7 +980,7 @@ export async function awaitAttestations({
   url,
   fetch: get,
   modified,
-  publishedAt,
+  servedAt,
   now = Date.now,
   sleep,
   deadline = Number.POSITIVE_INFINITY,
@@ -990,23 +990,33 @@ export async function awaitAttestations({
 }) {
   let last;
   let quietSince = now();
+  let missing = 'no attestations on npm';
   for (;;) {
-    const res = await get(url);
-    if (res.ok) return { res };
-    if (res.status !== 404) return { problem: `attestations answered ${res.status}` };
-    const changed = await modified();
+    const at = typeof url === 'function' ? await url() : url;
+    if (at) {
+      const res = await get(at);
+      if (res.ok) return { res };
+      if (res.status !== 404) return { problem: `attestations answered ${res.status}` };
+      missing = 'attestations answered 404';
+    }
+    let changed = last;
+    try {
+      changed = await modified();
+    } catch {
+      changed = last;
+    }
     if (changed !== last) {
       last = changed;
       quietSince = now();
     }
-    const served = now() - publishedAt;
+    const served = now() - servedAt;
     if (now() >= deadline)
       return {
-        problem: `attestations answered 404 for ${Math.round(served / 60_000)} min after npm started serving it, through the whole wait`,
+        problem: `${missing} for ${Math.round(served / 60_000)} min after npm started serving it, through the whole wait`,
       };
     if (served >= graceMs && now() - quietSince >= quietMs)
       return {
-        problem: `attestations answered 404 for ${Math.round(served / 60_000)} min after npm started serving it, and its packument stopped changing ${Math.round((now() - quietSince) / 60_000)} min ago`,
+        problem: `${missing} for ${Math.round(served / 60_000)} min after npm started serving it, and its packument stopped changing ${Math.round((now() - quietSince) / 60_000)} min ago`,
       };
     await sleep(everyMs);
   }

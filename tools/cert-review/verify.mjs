@@ -33,6 +33,7 @@ const { version, repo } = values;
 const problems = [];
 const facts = {};
 let waiting = '';
+let servedAt = Date.now();
 const one = (text) =>
   String(text ?? '')
     .replace(/\s+/g, ' ')
@@ -75,7 +76,10 @@ async function meta() {
     const m = npmView(`${NAME}@${version}`);
     if (m?.version === version && m.dist?.tarball) {
       const head = await fetch(m.dist.tarball, { method: 'HEAD' });
-      if (head.ok) return m;
+      if (head.ok) {
+        servedAt = Date.now();
+        return m;
+      }
     }
     if (Date.now() > until) {
       waiting = `npm doesn't serve ${NAME}@${version} yet after ${values.wait} s: not a supply-chain problem, re-run this job once it does`;
@@ -105,15 +109,13 @@ async function download(m) {
 }
 
 async function provenance(m) {
-  const url = m.dist.attestations?.url;
-  if (!url) return problems.push('no attestations on npm');
-  const times = () => npmView(NAME, 'time') ?? {};
-  const publishedAt = Date.parse(times()[version] ?? '') || Date.now();
+  const view = () => npmView(`${NAME}@${version}`);
   const answer = await awaitAttestations({
-    url,
+    url: async () =>
+      m.dist.attestations?.url ? m.dist.attestations.url : view()?.dist?.attestations?.url,
     fetch,
-    modified: () => times().modified,
-    publishedAt,
+    modified: () => npmView(NAME, 'time')?.modified,
+    servedAt,
     deadline: budget,
     sleep,
   });

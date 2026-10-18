@@ -149,7 +149,7 @@ test("verify waits out npm's attestations lag: a 404 that turns into 200 passes;
     url: 'u',
     fetch: answers([404, 404, 404, 200]),
     modified: async () => 'm1',
-    publishedAt: 0,
+    servedAt: 0,
     now,
     sleep,
   });
@@ -160,7 +160,7 @@ test("verify waits out npm's attestations lag: a 404 that turns into 200 passes;
     url: 'u',
     fetch: answers([404]),
     modified: async () => 'm1',
-    publishedAt: 0,
+    servedAt: 0,
     now,
     sleep,
   });
@@ -174,7 +174,7 @@ test("verify waits out npm's attestations lag: a 404 that turns into 200 passes;
     url: 'u',
     fetch: answers([404]),
     modified: async () => `m${n++}`,
-    publishedAt: 0,
+    servedAt: 0,
     now,
     sleep,
     deadline: 3_600_000,
@@ -190,11 +190,68 @@ test("verify waits out npm's attestations lag: a 404 that turns into 200 passes;
     url: 'u',
     fetch: answers([500]),
     modified: async () => 'm',
-    publishedAt: 0,
+    servedAt: 0,
     now,
     sleep,
   });
   assert.deepEqual([other.problem, clock.t], ['attestations answered 500', 0]);
+  clock.t = 60 * 60_000;
+  const lateServe = await awaitAttestations({
+    url: 'u',
+    fetch: answers([404, 404, 200]),
+    modified: async () => 'm',
+    servedAt: clock.t,
+    now,
+    sleep,
+  });
+  assert.equal(
+    lateServe.res.ok,
+    true,
+    'the grace runs from when npm started serving it, however long after the publish'
+  );
+  clock.t = 0;
+  let calls = 0;
+  const shaky = await awaitAttestations({
+    url: 'u',
+    fetch: answers([404, 404, 200]),
+    modified: async () => {
+      calls++;
+      if (calls === 1) throw new Error('npm error code ETIMEDOUT');
+      return 'm';
+    },
+    servedAt: 0,
+    now,
+    sleep,
+  });
+  assert.equal(shaky.res.ok, true, 'one npm view error in the wait is retried, not an alert');
+  clock.t = 0;
+  let urls = 0;
+  const later = await awaitAttestations({
+    url: async () => (++urls < 3 ? undefined : 'u'),
+    fetch: answers([200]),
+    modified: async () => 'm',
+    servedAt: 0,
+    now,
+    sleep,
+  });
+  assert.deepEqual(
+    [later.res.ok, urls, clock.t],
+    [true, 3, 30_000],
+    'dist.attestations that appears a little after the version is waited for'
+  );
+  clock.t = 0;
+  const never = await awaitAttestations({
+    url: async () => undefined,
+    fetch: answers([200]),
+    modified: async () => 'm',
+    servedAt: 0,
+    now,
+    sleep,
+  });
+  assert.match(
+    never.problem,
+    /^no attestations on npm for 30 min after npm started serving it, and its packument stopped changing/
+  );
   const verify = await readFile(
     new URL('../../tools/cert-review/verify.mjs', import.meta.url),
     'utf8'
