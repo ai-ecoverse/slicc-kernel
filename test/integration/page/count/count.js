@@ -14,7 +14,12 @@ IDBDatabase.prototype.transaction = function (stores, mode, ...rest) {
   add(name);
   const t0 = performance.now();
   const tx = transaction.call(this, stores, mode, ...rest);
-  const end = () => took(name, t0);
+  let ended = false;
+  const end = () => {
+    if (ended) return;
+    ended = true;
+    took(name, t0);
+  };
   tx.addEventListener('complete', end);
   tx.addEventListener('abort', end);
   tx.addEventListener('error', end);

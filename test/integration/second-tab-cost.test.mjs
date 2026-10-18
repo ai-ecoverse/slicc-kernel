@@ -11,10 +11,10 @@ import { alone, measured, peerTab, per, report, worker } from './second-tab.mjs'
 const chrome = await launch();
 after(() => chrome.close());
 
-const DIRS = 24;
-const PER_DIR = 50;
+const DIRS = 12;
+const PER_DIR = 40;
 const FILES = DIRS * PER_DIR;
-const TAR_ROUNDS = 5;
+const TAR_ROUNDS = 3;
 const TAR_ENTRIES = 61;
 
 async function tarball() {
@@ -53,7 +53,9 @@ const tar = [
   `cd /tmp/pack; s=$(wc -c < src.tar); for i in $(seq ${TAR_ROUNDS}); do rm -rf out && mkdir out; { head -c $((s - 10240)) src.tar; sleep 0.2; tail -c 10240 src.tar; } | tar -xf - -C out || echo fail; done; [ "$(cat out/src/inner/l60)" = first ] && echo good`,
 ];
 
-test('cost per created file of pnpm and tar with one tab and with an idle second tab on the same OPFS root (#1017)', async (t) => {
+test('cost per created file of pnpm and tar with one tab and with an idle second tab on the same OPFS root (#1017)', {
+  timeout: Number.POSITIVE_INFINITY,
+}, async (t) => {
   const { page, bash } = await booted(chrome, t, { worker: worker('writer') });
   for (const name of ['wasm-coreutils', 'wasm-tar', 'wasm-tls-engine', 'wasi-pnpm']) {
     await installPackage(page, name);

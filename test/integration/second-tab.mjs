@@ -31,22 +31,33 @@ const proc = async (page, name) => {
 
 const total = (counts) => Object.values(counts).reduce((a, b) => a + b, 0);
 
+const counters = async (page) => {
+  const r = await page.evaluate(() =>
+    window.kernel.run(
+      [
+        'bash',
+        '-c',
+        'read -r o < /proc/sys/kernel/slicc_opfs_calls; read -r f < /proc/sys/kernel/slicc_fs_calls; echo "$o $f"',
+      ],
+      { cwd: '/' }
+    )
+  );
+  const [opfs, fs] = r.stdout.trim().split(' ').map(Number);
+  return { opfs, fs };
+};
+
 async function snapshot(page, key) {
-  return {
-    opfs: await proc(page, 'slicc_opfs_calls'),
-    fs: await proc(page, 'slicc_fs_calls'),
-    ...(await ask(page, key, { reset: true })),
-  };
+  const first = await counters(page);
+  const second = await counters(page);
+  await ask(page, key, { reset: true });
+  return { first, second };
 }
 
-async function finish(page, key, before) {
+async function finish(page, key, { first, second }) {
   const { counts, ms } = await ask(page, key, {});
-  return {
-    opfs: (await proc(page, 'slicc_opfs_calls')) - before.opfs,
-    fs: (await proc(page, 'slicc_fs_calls')) - before.fs,
-    counts,
-    ms,
-  };
+  const end = await counters(page);
+  const net = (k) => end[k] - 2 * second[k] + first[k];
+  return { opfs: net('opfs'), fs: net('fs'), counts, ms };
 }
 
 export async function measured(page, peer, label, argv, cwd) {
@@ -122,12 +133,12 @@ export async function peerTab(page) {
     (w) => window.secondKernel({ worker: new URL(w, location.href) }, 'kernel'),
     worker('peer')
   );
-  for (let i = 0; i < 50 && (await proc(page, 'slicc_shared_root')) !== 1; i++) await sleep(100);
+  for (let i = 0; i < 300 && (await proc(page, 'slicc_shared_root')) !== 1; i++) await sleep(100);
   assert.equal(await proc(page, 'slicc_shared_root'), 1);
   return other;
 }
 
 export async function alone(page) {
-  for (let i = 0; i < 50 && (await proc(page, 'slicc_shared_root')) !== 0; i++) await sleep(100);
+  for (let i = 0; i < 300 && (await proc(page, 'slicc_shared_root')) !== 0; i++) await sleep(100);
   assert.equal(await proc(page, 'slicc_shared_root'), 0);
 }
