@@ -285,7 +285,7 @@ export class FsWatchers {
             if (created.length > 0 || !(await fs.exists(ancestor))) created.push(ancestor);
           }
         }
-        const fresh = !options?.recursive || !(this.covers(path) && (await fs.exists(path)));
+        const fresh = !options?.recursive || (this.typed.size > 0 && !(await fs.exists(path)));
         let done = false;
         try {
           await fs.mkdir(path, options);
