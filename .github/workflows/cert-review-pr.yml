@@ -28,6 +28,7 @@ jobs:
       pull-requests: write
     outputs:
       status: ${{ steps.guard.outputs.status }}
+      override: ${{ steps.override.outputs.status }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -50,6 +51,14 @@ jobs:
             tools/cert-review/**
             .github/actions/cert-self-guard/**
             .github/runner.mjs
+
+      - id: override
+        name: downstream-override, the coordinator's head-bound waiver of a downstream failure (every pull request in a group needs it on its head)
+        continue-on-error: true
+        uses: ai-ecoverse/slicc-shared-web/.github/actions/cert-self-guard@fe97ae242f8ddcc824334cad287346d7df3f0bbb
+        with:
+          approval-label: downstream-override
+          paths: '**'
 
   plan:
     name: cert-review-pr / plan
@@ -757,14 +766,87 @@ jobs:
           fi
           if [ "$state" != success ]; then echo "::error title=cert-review::$line"; exit 1; fi
 
+  group-pack:
+    name: cert-review-pr / merge group pack
+    if: github.event_name == 'merge_group'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      name: kernel-tgz-${{ steps.version.outputs.version }}
+      sha256: ${{ steps.pack.outputs.sha256 }}
+      id: ${{ steps.upload.outputs.artifact-id }}
+      digest: ${{ steps.upload.outputs.artifact-digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.merge_group.base_sha }}
+          persist-credentials: false
+
+      - name: The tree under test, the merge group, with main's tools
+        run: git fetch -q --no-tags --depth=1 origin "$GITHUB_SHA"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - id: version
+        run: |
+          set -euo pipefail
+          latest=$(npm view @ai-ecoverse/slicc-kernel dist-tags.latest --prefer-online)
+          [[ "$latest" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::npm's latest reads as '$latest'"; exit 1; }
+          IFS=. read -r major minor patch <<< "$latest"
+          echo "version=$major.$minor.$((patch + 1))-group.$GITHUB_RUN_ID" | tee -a "$GITHUB_OUTPUT"
+
+      - id: pack
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          tools/cert-review/gate.sh pack node tools/cert-review/pack.mjs --version "$VERSION" --ref "$GITHUB_SHA" --out "$RUNNER_TEMP/pack"
+          echo "sha256=$(cut -d' ' -f1 "$RUNNER_TEMP"/pack/*.tgz.sha256)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        id: upload
+        with:
+          name: kernel-tgz-${{ steps.version.outputs.version }}
+          path: |
+            ${{ runner.temp }}/pack/*.tgz
+            ${{ runner.temp }}/pack/*.tgz.sha256
+            ${{ runner.temp }}/pack/pack.json
+          if-no-files-found: error
+
+  canary:
+    name: cert-review-pr / downstream bios canary
+    needs: group-pack
+    if: github.event_name == 'merge_group'
+    permissions:
+      contents: read
+      actions: read
+    uses: ai-ecoverse/slicc-bios/.github/workflows/canary.yml@c2cec127b935419049568f584093d7ef03ac0721
+    with:
+      candidate-package: '@ai-ecoverse/slicc-kernel'
+      candidate-artifact: ${{ needs.group-pack.outputs.name }}
+      candidate-run: ${{ github.run_id }}
+      candidate-sha256: ${{ needs.group-pack.outputs.sha256 }}
+      candidate-repo: ${{ github.repository }}
+      candidate-artifact-id: ${{ needs.group-pack.outputs.id }}
+      candidate-artifact-digest: ${{ needs.group-pack.outputs.digest }}
+      shards: '["sweep","guard","k4-link"]'
+      repeat: 1
+      label: kernel
+
   group:
     name: cert-review-pr / merge group
-    needs: guard
+    needs: [guard, canary]
     if: ${{ !cancelled() && github.event_name == 'merge_group' }}
     runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
       contents: read
+      issues: write
       pull-requests: read
       statuses: write
     steps:
@@ -778,8 +860,18 @@ jobs:
         with:
           node-version: 24
 
+      - id: downstream
+        name: bios's canary on the merge group, judged against the pinned bios (a regression or no result is not certified)
+        env:
+          RESULT: ${{ needs.canary.outputs.result }}
+          OVERRIDE: ${{ needs.guard.outputs.override }}
+        run: |
+          printf '%s' "$RESULT" > "$RUNNER_TEMP/canary.json"
+          tools/cert-review/gate.sh --evidence downstream node tools/cert-review/downstream.mjs --result "$RUNNER_TEMP/canary.json" --override "${OVERRIDE:-FAIL}" \
+            --bios c2cec127b935419049568f584093d7ef03ac0721 --shards sweep,guard,k4-link --out "$RUNNER_TEMP/downstream.json"
+
       - id: lookup
-        name: Each pull request in the group has a certified review of the head being merged, or changes no behaviour
+        name: Each pull request in the group has a certified review of the head being merged, or changes no behaviour, and the group passes downstream
         env:
           GH_TOKEN: ${{ github.token }}
           BASE_SHA: ${{ github.event.merge_group.base_sha }}
@@ -787,7 +879,16 @@ jobs:
           GUARD: ${{ needs.guard.outputs.status }}
         run: |
           tools/cert-review/gate.sh 'pr lookup' node tools/cert-review/pr.mjs lookup --repo "$GITHUB_REPOSITORY" --base "$BASE_SHA" --head "$HEAD_SHA" \
-            --run "$GITHUB_RUN_ID" --context "$CERT_CONTEXT" --guard "$GUARD" --approval cert-review-approved
+            --run "$GITHUB_RUN_ID" --context "$CERT_CONTEXT" --guard "$GUARD" --approval cert-review-approved --downstream "$RUNNER_TEMP/downstream.json"
+
+      - name: bios's canary failing on main opens one issue, and a passing group closes it
+        if: ${{ !cancelled() && steps.downstream.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+        run: |
+          tools/cert-review/gate.sh 'pr notice' node tools/cert-review/pr.mjs notice --repo "$GITHUB_REPOSITORY" --head "$HEAD_SHA" --run "$GITHUB_RUN_ID" \
+            --bios c2cec127b935419049568f584093d7ef03ac0721 --downstream "$RUNNER_TEMP/downstream.json"
 
       - name: A lookup that failed still leaves a status, so the required check never waits forever
         if: failure() && steps.lookup.outputs.posted != 'true'
