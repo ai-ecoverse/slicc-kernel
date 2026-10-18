@@ -549,8 +549,12 @@ export class KernelStreams {
   }
 
   attachFile(stream: ProcessStream, kfd: number): void {
+    const base = stream.stream_ops;
     this.attach(stream, kfd, false);
     stream.sliccKernelFile = true;
+    try {
+      base.close?.(stream);
+    } catch {}
     stream.stream_ops = {
       ...stream.stream_ops,
       llseek: (_s, offset, whence) => this.call(() => this.sys.seek(kfd, offset, whence)),
@@ -909,13 +913,13 @@ export class KernelStreams {
         return mask;
       },
       dup: (stream) => {
-        base.dup?.(stream);
+        if (!stream.sliccKernelFile) base.dup?.(stream);
         this.refs.set(kfd, (this.refs.get(kfd) ?? 0) + 1);
       },
       close: (stream) => {
         if (this.atExit && stream.fd === 2 && this.reporting.size > 0) this.commitStdout();
         try {
-          base.close?.(stream);
+          if (!stream.sliccKernelFile) base.close?.(stream);
         } catch {}
         const left = (this.refs.get(kfd) ?? 1) - 1;
         if (left > 0) {

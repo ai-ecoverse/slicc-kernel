@@ -813,6 +813,12 @@ function holdLive(
   return bridge.hold?.(liveNodePath(node), on, true, s.handle, want, seen);
 }
 
+function dropOpen(s: LiveNodeState): boolean {
+  if (s.openCount === 0) return false;
+  s.openCount -= 1;
+  return true;
+}
+
 function createStreamOps(h: LiveHelpers): LiveStreamOps {
   const { Fs, statOf, ensureLoaded, ensureCapacity, flushNode, bridgeOf, rangedOf } = h;
   const held = (stream: LiveFsStream, change: 1 | -1) => {
@@ -927,7 +933,7 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
       const node = stream.node;
       if (!Fs.isFile(node.mode)) return;
       const s = node.live;
-      s.openCount = Math.max(0, s.openCount - 1);
+      if (!dropOpen(s)) return;
       if (s.openCount > 0) {
         held(stream, -1);
         return;
