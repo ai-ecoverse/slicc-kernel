@@ -1057,8 +1057,15 @@ export class OpfsFs implements KernelFs {
 
   private reading<T>(path: string, op: (handle: FileSystemFileHandle) => Promise<T>): Promise<T> {
     return this.unreplaced(async () => {
-      const handle = await this.existing(path);
-      return this.retrying(path, () => op(handle), false);
+      for (let attempt = 1; ; attempt++) {
+        const handle = await this.existing(path);
+        try {
+          return await this.retrying(path, () => op(handle), false);
+        } catch (err) {
+          if ((err as { code?: unknown }).code !== 'ENOENT' || attempt >= READ_ATTEMPTS) throw err;
+          this.files.delete(path);
+        }
+      }
     });
   }
 
