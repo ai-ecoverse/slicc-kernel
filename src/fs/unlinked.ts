@@ -25,6 +25,7 @@ export interface UnlinkHolder {
   isKept(path: string): boolean;
   keep(path: string, file: KeptFile): void;
   unkeep(path: string, file: KeptFile): void;
+  moving?(path: string): () => void;
 }
 
 export interface UnlinkOwner {
@@ -340,16 +341,24 @@ export class UnlinkedKeeper {
     gated();
     const held = new Map<string, UnlinkHolder[]>();
     const hidden = new Map<string, string>();
-    for (;;) {
-      await take();
-      const now = this.heldWithin(target);
-      const next = paths.filter((path) => now.has(path) && !held.has(path));
-      if (next.length === 0) break;
-      for (const path of next) {
-        held.set(path, now.get(path) as UnlinkHolder[]);
-        const at = await this.hide(path);
-        if (at !== undefined) hidden.set(path, at);
+    const moved: Array<() => void> = [];
+    try {
+      for (;;) {
+        await take();
+        const now = this.heldWithin(target);
+        const next = paths.filter((path) => now.has(path) && !held.has(path));
+        if (next.length === 0) break;
+        for (const path of next) {
+          const holders = now.get(path) as UnlinkHolder[];
+          held.set(path, holders);
+          for (const holder of holders) moved.push(holder.moving?.(path) ?? (() => undefined));
+          const at = await this.hide(path);
+          if (at !== undefined) hidden.set(path, at);
+        }
       }
+    } catch (err) {
+      for (const settle of moved) settle();
+      throw err;
     }
     sealed();
     const done = () => {
@@ -362,6 +371,7 @@ export class UnlinkedKeeper {
       files.set(path, file);
       for (const holder of holders) holder.keep(path, file);
     }
+    for (const settle of moved) settle();
     return {
       moved: new Set(hidden.keys()),
       commit: () => {
