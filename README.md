@@ -762,6 +762,13 @@ WASI and WASIX have no call for file modes, so the kernel adds the import module
 | `path_mkfifo(dirfd, path, path_len, mode)` | `mkfifo`/`mkfifoat` and `mknod(S_IFIFO)` (homescoop#878): makes a [FIFO](#filesystem) with `mode & ~umask`, relative to `dirfd` (`AT_FDCWD` is `-2`). It doesn't follow a link in the last component, so an existing name, also a FIFO, a dangling link, a directory or the root, is `EEXIST`, and an empty name is `ENOENT` (#972). A mount without FIFOs answers `EPERM` |
 | `path_access(dirfd, path, path_len, amode, flags)` | `faccessat`: `amode` is `R_OK` 4, `W_OK` 2, `X_OK` 1 or `F_OK` 0; the check uses the real uid and gid, or the effective ones with `flags & 2` (`AT_EACCESS`), and the link itself with `flags & 1`. With `users: 'off'` it checks only that the path exists, as a libc without it does (see [Permissions](#permissions)) |
 
+The kernel's device nodes answer the mode and owner an Emscripten program sees for them ([#1028](https://github.com/ai-ecoverse/slicc-kernel/issues/1028)):
+- `/dev/null`, `/dev/zero`, `/dev/full`, `/dev/random`, `/dev/urandom` and `/dev/tty` are root's character devices with `0666`. `/dev/tty` also stats when the process has no controlling terminal; opening it then is `ENXIO`, as on Linux.
+- A pty's `/dev/pts/N` is its owner's, with `0620`.
+- `/dev/stdin`, `/dev/stdout`, `/dev/stderr` and `/dev/fd/N` answer for the descriptor they name.
+
+An Emscripten program sees those six character devices at `0666` with `users: 'off'` too.
+
 The owner calls follow [File owners](#file-owners): with `users: 'off'`, `fd_chown` and `path_chown` succeed and change nothing, and the four owner calls answer `ENOTSUP`, "owners not tracked", before looking at anything, so a libc can remember that once and take its own `getuid()` and `getgid()` as every file's owner, which is what an Emscripten program built against the credential calls sees. Devices are root's. A pipe's owner is the caller.
 
 WASIX's own terminal calls carry only echo and line buffering (`tty_set`) and answer for "the" terminal whatever the descriptor (`tty_get`), so a WASIX program's `cfmakeraw` would leave `^C` a signal and its output post-processed. The kernel adds the import module `slicc_tty`, with the full Linux `struct termios` (musl's 60-byte layout: four `u32` flag words, `c_line`, `c_cc[32]`, then input and output speed; speeds read as `B38400` and are ignored when set) and answers per descriptor, again as a preview1 errno (`ENOTTY` for a descriptor that is no terminal, `EBADF` for one that isn't open, `ENOSYS` from kernels without them):

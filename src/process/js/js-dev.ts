@@ -145,6 +145,10 @@ function* fdTarget(fd: number, path: string): DevStep<string> {
   return `${info.kind === 'socket' ? 'socket' : 'pipe'}:[${fd}]`;
 }
 
+export function devFdStat(fd: number): DevStep<SyncFsBridgeStat> {
+  return fdStat(fd, `/dev/fd/${fd}`);
+}
+
 function linkStat(target: string): SyncFsBridgeStat {
   return nodeStat(LINK | 0o777, target.length);
 }

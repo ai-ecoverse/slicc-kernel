@@ -715,7 +715,7 @@ export async function runWasmProcess(
   await initialized;
   const running = module as unknown as RunningModule;
   if (!hasStreams(running)) return runStdioOnly(running, init);
-  if (init.owners) linuxDevices(running.FS);
+  linuxDevices(running.FS, init.owners === true);
   const vfs = mountVfsIntoEmscripten(running.FS, {
     bridge: createSyncFsSabBridge(transport, bridgeFlags(init)),
     cwd: init.cwd,
