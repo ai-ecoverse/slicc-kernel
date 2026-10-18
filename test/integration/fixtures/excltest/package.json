@@ -1,0 +1,12 @@
+{
+  "name": "excltest",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "excltest": {
+        "wasm": "bin/excltest.wasm"
+      }
+    }
+  }
+}
