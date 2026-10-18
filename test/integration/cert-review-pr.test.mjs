@@ -929,7 +929,17 @@ test('the merge group runs bios canary on its own tree, packed by main tools and
     /- id: override\n[^\n]*\n {8}continue-on-error: true\n {8}uses: ai-ecoverse\/slicc-shared-web\/\.github\/actions\/cert-self-guard@fe97ae242f8ddcc824334cad287346d7df3f0bbb\n {8}with:\n {10}approval-label: downstream-override\n {10}paths: \|\n {12}\*\*\n {12}\.\*\n {12}\.\*\/\*\*\n {12}\*\*\/\.\*\n {12}\*\*\/\.\*\/\*\*\n/
   );
   assert.match(jobs.guard, /override: \$\{\{ steps\.override\.outputs\.receipt \}\}/);
-  assert.match(jobs.group, /RESULT: \$\{\{ needs\.canary\.outputs\.result \}\}/);
+  assert.doesNotMatch(
+    workflow,
+    /needs\.canary\.outputs\.result/,
+    'the result output (up to 512 KB) never goes through an environment variable, which holds 128 KB'
+  );
+  assert.match(
+    jobs.group,
+    /if: \$\{\{ needs\.canary\.outputs\.artifact-id != '' \}\}\n {8}continue-on-error: true\n {8}uses: actions\/download-artifact@[0-9a-f]{40}\n {8}with:\n {10}artifact-ids: \$\{\{ needs\.canary\.outputs\.artifact-id \}\}\n {10}path: \$\{\{ runner\.temp \}\}\/canary\n {10}digest-mismatch: error\n/
+  );
+  assert.match(jobs.group, /permissions:\n {6}contents: read\n {6}actions: read\n/);
+  assert.match(jobs.group, /downstream\.mjs --result "\$RUNNER_TEMP\/canary\/result\.json"/);
   assert.match(jobs.group, /OVERRIDE: \$\{\{ needs\.guard\.outputs\.override \}\}/);
   assert.match(
     jobs.group,
@@ -1035,9 +1045,12 @@ test("the merge group's steps end to end: a planted regression is red, a missing
       BASE_SHA: 'e'.repeat(40),
       HEAD_SHA: 'f'.repeat(40),
       GUARD: 'PASS',
-      RESULT: result,
       OVERRIDE: override,
     };
+    if (result) {
+      await mkdir(join(temp, 'canary'));
+      await writeFile(join(temp, 'canary', 'result.json'), result);
+    }
     const run = (id) =>
       new Promise((done) => {
         const child = spawn('bash', ['-eo', 'pipefail', '-c', stepScript(jobs.group, id)], {
@@ -1183,6 +1196,19 @@ test("the merge group's steps end to end: a planted regression is red, a missing
     api.seen.filter((x) => x.method === 'PATCH').map((x) => [x.url, x.body.state]),
     [['/repos/o/r/issues/50', 'closed']]
   );
+
+  const real = JSON.parse(
+    readFileSync(new URL('fixtures/cert-review/bios-canary-result.json', import.meta.url), 'utf8')
+  );
+  while (JSON.stringify(real).length < 200_000) real.tests.push(...real.tests);
+  const shaped = await group(JSON.stringify(real));
+  assert.equal(shaped.down.status, 0, shaped.down.stdout);
+  assert.match(
+    shaped.down.stdout,
+    /downstream: PASS bios c2cec127b935 sweep,guard,k4-link: 605 pass \(https:\/\/github\.com\/ai-ecoverse\/slicc-kernel\/actions\/runs\/39168823799\)/,
+    "bios's real result (run 39168823799), over 128 KB, reaches the verdict through the artifact"
+  );
+  assert.equal(shaped.status.state, 'success', shaped.look.stdout);
 });
 
 test("the cert-path guard fails closed: a reviewer path the guard's globs miss (a dot path) still needs cert-review-approved, and the reviewer globs cover dot paths", async (t) => {

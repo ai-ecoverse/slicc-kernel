@@ -893,6 +893,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+      actions: read
       issues: write
       pull-requests: read
       statuses: write
@@ -903,6 +904,15 @@ jobs:
           sparse-checkout: tools/cert-review
           persist-credentials: false
 
+      - name: The canary's result, from its artifact by id and digest (the result output can be up to 512 KB, more than one environment variable holds)
+        if: ${{ needs.canary.outputs.artifact-id != '' }}
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ needs.canary.outputs.artifact-id }}
+          path: ${{ runner.temp }}/canary
+          digest-mismatch: error
+
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: 24
@@ -910,13 +920,11 @@ jobs:
       - id: downstream
         name: bios's canary on the merge group, judged against the pinned bios (a regression or no result is not certified)
         env:
-          RESULT: ${{ needs.canary.outputs.result }}
           OVERRIDE: ${{ needs.guard.outputs.override }}
         run: |
-          printf '%s' "$RESULT" > "$RUNNER_TEMP/canary.json"
           override=$(node -e 'let r; try { r = JSON.parse(process.env.OVERRIDE); } catch {} const m = r?.members ?? []; process.stdout.write(r?.status === "PASS" && m.length > 0 && m.every((x) => x.approved === true && x.touched?.length > 0) ? "PASS" : "FAIL")')
           echo "downstream-override: $override (every pull request in the group needs it on its head)"
-          tools/cert-review/gate.sh --evidence downstream node tools/cert-review/downstream.mjs --result "$RUNNER_TEMP/canary.json" --override "$override" \
+          tools/cert-review/gate.sh --evidence downstream node tools/cert-review/downstream.mjs --result "$RUNNER_TEMP/canary/result.json" --override "$override" \
             --bios c2cec127b935419049568f584093d7ef03ac0721 --shards sweep,guard,k4-link --out "$RUNNER_TEMP/downstream.json"
 
       - id: lookup
