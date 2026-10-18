@@ -400,6 +400,7 @@ interface Miss {
 
 export const FS_GEN = 4;
 export const CRED_GEN = 5;
+export const UMASK = 6;
 const RING = 8;
 const RING_SIZE = 64;
 const SLOT = 3;
