@@ -29,9 +29,28 @@ async function line(reader) {
   }
   return text;
 }
+async function dump(ctx, c, text) {
+  const seen = [];
+  for (const key in c) seen.push(key);
+  const proc = [];
+  const walk = async (dir, depth) => {
+    for (const name of await ctx.fs.readdir(dir).catch(() => [])) {
+      const path = dir + '/' + name;
+      const body = await ctx.fs.readFile(path).catch(() => undefined);
+      if (body !== undefined) proc.push(path + '\\n' + text(body));
+      else if (depth > 0) await walk(path, depth - 1);
+    }
+  };
+  await walk('/proc', 1);
+  const tls = JSON.stringify(c.tls, (k, v) => (v instanceof Uint8Array ? btoa(String.fromCharCode(...v)) : v));
+  return { keys: seen, tls, proc: proc.join('\\n') };
+}
 export default async function main(ctx) {
   const o = JSON.parse(ctx.argv[1]);
   if (o.derCa) o.tls.ca = [Uint8Array.from(atob(o.derCa), (ch) => ch.charCodeAt(0))];
+  const text = (v) => (typeof v === 'string' ? v : dec.decode(v));
+  if (o.keyFile) o.tls.key = text(await ctx.fs.readFile(o.keyFile));
+  if (o.passFile) o.tls.passphrase = text(await ctx.fs.readFile(o.passFile));
   const say = (v) => ctx.write(1, JSON.stringify(v) + '\\n');
   try {
     let c;
@@ -55,11 +74,12 @@ export default async function main(ctx) {
       await w.write(enc.encode(o.send + '\\n'));
       out.echo = (await line(c.readable.getReader())).trim();
     }
+    if (o.dump) out.dump = await dump(ctx, c, text);
     if (peerCertificates?.length) out.leafSha = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', peerCertificates[0]))).map((b) => b.toString(16).padStart(2, '0')).join('');
     await say(out);
     await c.close();
   } catch (e) {
-    await say({ code: e.code, detail: e.detail });
+    await say({ code: e.code, detail: e.detail, message: e.message, stack: e.stack });
   }
 }
 `;
@@ -175,7 +195,7 @@ async function kernelWith(t, servers) {
     assert.equal(r.stderr, '');
     return JSON.parse(r.stdout);
   };
-  return { run, uplink, transport: tr, dials };
+  return { run, uplink, transport: tr, dials, kernel };
 }
 
 const sha = (der) => createHash('sha256').update(der).digest('hex');
@@ -657,5 +677,252 @@ test(
     assert.equal(ip.seen[0].servername, false);
     assert.equal(byIp.tls.sni, false);
     assert.equal(byIp.tls.hostnameMatches, true);
+  }
+);
+
+function captureOutput(t) {
+  const chunks = [];
+  const tap = (stream) => {
+    const write = stream.write.bind(stream);
+    stream.write = (chunk, ...rest) => {
+      chunks.push(String(chunk));
+      return write(chunk, ...rest);
+    };
+    return () => {
+      stream.write = write;
+    };
+  };
+  const undo = [tap(process.stdout), tap(process.stderr)];
+  t.after(() => {
+    for (const u of undo) u();
+  });
+  return () => chunks.join('');
+}
+
+const PASS = 'zzy1049-passphrase-marker';
+
+function keyMarkers(pem) {
+  const body = pem.split('\n').filter((l) => l && !l.startsWith('-----'));
+  return body.map((l) => l.slice(4, 28)).filter((m) => m.length === 24);
+}
+
+test(
+  'a client key and its passphrase never come back: not on the connection, not in conn.tls, not in /proc, not in a refusal, not in anything the kernel prints (#1049)',
+  TIMEOUT,
+  async (t) => {
+    const mine = clientCa.server('kernel client', { eku: CLIENT_AUTH });
+    const stranger = clientCa.server('someone else', { eku: CLIENT_AUTH });
+    const locked = encrypted(mine.key, PASS);
+    const server = await recordingServer(t, ca.server('secure.test'), {
+      requestCert: true,
+      rejectUnauthorized: true,
+      ca: clientCa.pem,
+    });
+    const output = captureOutput(t);
+    const { run, kernel } = await kernelWith(t, [['secure.test', server.port]]);
+    await kernel.writeFile('/k/plain.pem', mine.key);
+    await kernel.writeFile('/k/locked.pem', locked);
+    await kernel.writeFile('/k/stranger.pem', stranger.key);
+    await kernel.writeFile('/k/pass', PASS);
+    await kernel.writeFile('/k/wrong', `${PASS}-wrong`);
+    const markers = [
+      PASS,
+      ...keyMarkers(mine.key),
+      ...keyMarkers(locked),
+      ...keyMarkers(stranger.key),
+    ];
+    const leaks = (what, text) => {
+      for (const m of markers) assert.equal(text.includes(m), false, `${what} holds ${m}`);
+    };
+    const tls = { ca: ca.pem, servername: 'secure.test', cert: mine.cert };
+    const runs = [
+      await run({
+        host: 'secure.test',
+        port: 4433,
+        tls,
+        keyFile: '/k/plain.pem',
+        send: 'hi',
+        dump: true,
+      }),
+      await run({
+        host: 'secure.test',
+        port: 4433,
+        tls,
+        keyFile: '/k/locked.pem',
+        passFile: '/k/pass',
+        send: 'hi',
+        dump: true,
+      }),
+      await run({
+        host: 'secure.test',
+        port: 4433,
+        tls,
+        keyFile: '/k/locked.pem',
+        passFile: '/k/wrong',
+      }),
+      await run({ host: 'secure.test', port: 4433, tls, keyFile: '/k/locked.pem' }),
+      await run({ host: 'secure.test', port: 4433, tls, keyFile: '/k/stranger.pem' }),
+      await run({
+        host: 'secure.test',
+        port: 4433,
+        tls: { ...tls, pfx: 'x' },
+        keyFile: '/k/plain.pem',
+      }),
+      await run({
+        host: 'localhost',
+        port: 4433,
+        tls: { cert: mine.cert },
+        keyFile: '/k/plain.pem',
+      }),
+    ];
+    assert.deepEqual(
+      runs.map((r) => r.echo ?? r.code),
+      [
+        'kernel client hi',
+        'kernel client hi',
+        'ERR_OSSL_BAD_DECRYPT',
+        'ERR_OSSL_CRYPTO_INTERRUPTED_OR_CANCELLED',
+        'ERR_OSSL_X509_KEY_VALUES_MISMATCH',
+        'ENOTSUP',
+        'ENOTSUP',
+      ]
+    );
+    for (const r of runs.slice(0, 2)) {
+      assert.equal(r.tls.clientCertificate, true);
+      assert.ok(r.dump.proc.includes('/proc/self/status'), 'the program read /proc');
+      assert.deepEqual(
+        r.dump.keys.filter((k) => /key|pass|cert/i.test(k)),
+        []
+      );
+    }
+    for (const [i, r] of runs.entries()) leaks(`run ${i}`, JSON.stringify(r));
+    leaks('the host process output', output());
+  }
+);
+
+const PLACEHOLDER = 'SEALED_PLACEHOLDER_1';
+const SECRET = 'zzy1049-the-sealed-secret';
+
+function substitutingTransport() {
+  const seen = [];
+  return {
+    seen,
+    traits: {
+      manualRedirects: false,
+      encodedBodies: false,
+      maxRequestBody: 1 << 20,
+      websocket: false,
+    },
+    async fetch(req) {
+      seen.push(JSON.stringify(req).replaceAll(PLACEHOLDER, SECRET));
+      return {
+        status: 200,
+        statusText: 'OK',
+        headers: [],
+        body: (async function* () {})(),
+        cancel: async () => {},
+      };
+    },
+  };
+}
+
+test(
+  'a sealed placeholder written into an A2 session with checkHostname: false, sni: false, or either with a client certificate reaches the server as written, never substituted, and the session says substitutes: false (#1049)',
+  TIMEOUT,
+  async (t) => {
+    const mine = clientCa.server('kernel client', { eku: CLIENT_AUTH });
+    const received = [];
+    const listen = async (cert) => {
+      const server = createServer(
+        {
+          key: cert.key,
+          cert: cert.cert,
+          requestCert: true,
+          rejectUnauthorized: false,
+          ca: clientCa.pem,
+        },
+        (s) => {
+          s.on('data', (d) => {
+            received.push(String(d));
+            s.write(d);
+          });
+        }
+      );
+      server.on('tlsClientError', () => {});
+      await new Promise((r) => server.listen(0, '127.0.0.1', r));
+      t.after(() => server.close());
+      return server.address().port;
+    };
+    const wrong = await listen(ca.server('other.test'));
+    const right = await listen(ca.server('secure.test'));
+    const transport = substitutingTransport();
+    const peers = {};
+    for (const [address, port] of [
+      ['203.0.113.10', wrong],
+      ['203.0.113.11', right],
+    ]) {
+      for (const p of [443, 4433]) peers[`${address}:${p}`] = pipeTo(port);
+    }
+    const uplink = fakeUplink({
+      routes: { prefixes: [], exit: true },
+      names: { 'wrong.test': ['203.0.113.10'], 'secure.test': ['203.0.113.11'] },
+      peers,
+    });
+    const kernel = await createNodeKernel({ users: 'off', network: { uplink, transport } });
+    t.after(() => kernel.terminate());
+    await install(kernel, 'wasm-tls-engine');
+    await kernel.writeFile('/node_modules/tlsup/package.json', PACKAGE);
+    await kernel.writeFile('/node_modules/tlsup/bin/tlsup.mjs', PROGRAM);
+    const run = async (o) =>
+      JSON.parse((await kernel.run(['tlsup', JSON.stringify(o)], { cwd: '/' })).stdout);
+    const client = { cert: mine.cert, key: mine.key };
+    const cases = [
+      ['wrong.test', { checkHostname: false }],
+      ['wrong.test', { checkHostname: false, ...client }],
+      ['secure.test', { sni: false }],
+      ['secure.test', { sni: false, ...client }],
+      ['wrong.test', { checkHostname: false, sni: false, ...client }],
+    ];
+    for (const port of [443, 4433]) {
+      for (const [host, extra] of cases) {
+        const send = `GET / HTTP/1.1\r\nHost: ${host}\r\nAuthorization: Bearer ${PLACEHOLDER}\r\n`;
+        const got = await run({
+          host,
+          port,
+          tls: { ca: ca.pem, servername: 'secure.test', ...extra },
+          send,
+        });
+        assert.equal(got.tls?.path, 'kernel', JSON.stringify([host, port, extra, got]));
+        assert.equal(got.tls.substitutes, false);
+        assert.equal(got.echo, send.trim());
+      }
+    }
+    const bare = [
+      ['secure.test', { sni: false, rejectUnauthorized: false }],
+      ['secure.test', { ...client, rejectUnauthorized: false }],
+      ['secure.test', { sni: false, ...client, rejectUnauthorized: false }],
+    ];
+    for (const [host, extra] of bare) {
+      const send = `GET / HTTP/1.1\r\nHost: ${host}\r\nAuthorization: Bearer ${PLACEHOLDER}\r\n`;
+      const got = await run({ host, port: 443, tls: extra, send });
+      assert.equal(got.tls?.path, 'kernel', JSON.stringify([host, extra, got]));
+      assert.equal(got.tls.substitutes, false);
+      assert.equal(got.echo, send.trim());
+    }
+    for (const extra of [{ checkHostname: false }, { checkHostname: false, ...client }]) {
+      const got = await run({
+        host: 'wrong.test',
+        port: 443,
+        tls: extra,
+        send: `Bearer ${PLACEHOLDER}`,
+      });
+      assert.equal(got.code, 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', JSON.stringify([extra, got]));
+    }
+    assert.equal(received.length, 13);
+    for (const r of received) {
+      assert.ok(r.includes(`Bearer ${PLACEHOLDER}`), r);
+      assert.equal(r.includes(SECRET), false);
+    }
+    assert.deepEqual(transport.seen, []);
   }
 );
