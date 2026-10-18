@@ -6,8 +6,8 @@ import { booted, installPackage } from './kernel.mjs';
 const chrome = await launch();
 after(() => chrome.close());
 
-const ROUNDS = 450;
-const HOGS = 4;
+const ROUNDS = Number(process.env.RMDIR_HELD_ROUNDS ?? 450);
+const HOGS = Number(process.env.RMDIR_HELD_HOGS ?? 4);
 
 test('on the OPFS root, files opened inside a directory that another process keeps removing and replacing read as a full version every time, never empty (#1013)', {
   timeout: 900_000,
@@ -49,7 +49,7 @@ test('on the OPFS root, files opened inside a directory that another process kee
   const script = [
     'cd /root/rd',
     '(while [ ! -e stop ]; do cat d/a > /dev/null 2>&1; done) &',
-    'for r in 1 2 3 4 5 6 7 8; do (while [ ! -e stop ]; do { sleep 0.005; read -r v <&3; case "$v" in v[0-9]*) ;; *) echo "bad [$v]" >> err;; esac; } 2> /dev/null 3< d/b; done) & done',
+    'for r in 1 2 3 4 5 6 7 8; do (while [ ! -e stop ]; do { sleep 0.005; read -r v <&3 2> /tmp/rd.$r; rc=$?; case "$v" in v[0-9]*) ;; *) echo "bad [$v] rc=$rc round=$(cat round 2> /dev/null) $(cat /tmp/rd.$r)" >> err;; esac; } 3< d/b; done 2> /dev/null) & done',
     `rdrm ${ROUNDS}`,
     'echo "rdrm $?"',
     'wait',
