@@ -952,7 +952,7 @@ export class KernelStreams {
         }),
       write: (s, buffer, offset, length) => {
         try {
-          const bytes = buffer.slice(offset, offset + length);
+          const bytes = new Uint8Array(buffer.buffer, buffer.byteOffset + offset, length).slice();
           return this.restarting(() => this.sys.write(kfd, bytes, nonblocking(s)));
         } catch (e) {
           if (e instanceof SyscallError && e.code === 'EPIPE' && !this.options.sigpipe?.()) {
