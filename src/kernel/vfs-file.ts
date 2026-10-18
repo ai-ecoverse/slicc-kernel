@@ -74,6 +74,8 @@ export interface VersionPin {
 
 export const WRITEBACK_MS = 250;
 
+const UNREACHABLE: ReadonlySet<string> = new Set(['ENOMEDIUM', 'ENOTCONN', 'ENODEV', 'EIO']);
+
 const WRITEBACK_COST_FACTOR = 10;
 
 function isMissing(err: unknown): boolean {
@@ -98,6 +100,8 @@ export class VfsNode {
   private writeBackCost = 0;
 
   private failed = false;
+
+  private doubt = false;
 
   opens = 0;
 
@@ -297,7 +301,7 @@ export class VfsNode {
 
   async pwrite(bytes: Uint8Array, at: number): Promise<number> {
     if (bytes.length === 0) return 0;
-    if (this.failed) await this.flush();
+    await this.settled();
     await this.fits(at + bytes.length);
     const ranged = await this.prepare();
     if (ranged) {
@@ -314,7 +318,7 @@ export class VfsNode {
   }
 
   async truncate(size: number): Promise<void> {
-    if (this.failed) await this.flush();
+    await this.settled();
     await this.fits(size);
     const ranged = await this.prepare();
     if (ranged) {
@@ -330,6 +334,18 @@ export class VfsNode {
 
   doubted(): void {
     if (this.dirty) this.failed = true;
+    else if (!this.orphaned) this.doubt = true;
+  }
+
+  private async settled(): Promise<void> {
+    if (this.failed) return this.flush();
+    if (!this.doubt) return;
+    const err = await this.fs.stat?.(this.path).then(
+      () => undefined,
+      (e: unknown) => e
+    );
+    if (UNREACHABLE.has((err as { code?: string } | undefined)?.code ?? '')) throw err;
+    this.doubt = false;
   }
 
   private markDirty(): void {

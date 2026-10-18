@@ -91,6 +91,26 @@ for (const [name, script, said] of [
   });
 }
 
+test('hostfs over a port: a writer whose file was all written back when the port died still fails its next write (#1062)', {
+  timeout: 600_000,
+}, async (t) => {
+  const { dir, page, bash, kill } = await mountedOverPort(t);
+  const writer = bash(
+    '{ x=$(echo forked); echo first; until [ -e /tmp/gone ]; do :; done; echo second; } > /mnt/p/w.txt 2> /tmp/err; echo "bash $?"; read -r first < /tmp/err; echo "$first"',
+    { cwd: '/home' }
+  );
+  await until(
+    async () => (await readFile(join(dir, 'w.txt'), 'utf8').catch(() => '')) === 'first\n'
+  );
+  await kill();
+  await until(
+    async () => (await page.evaluate(() => window.kernel.mounts()))[0].state === 'nomedium'
+  );
+  await bash(': > /tmp/gone', { cwd: '/' });
+  const r = await writer;
+  assert.equal(r.stdout, 'bash 1\nbash: line 1: echo: write error: No medium found\n');
+});
+
 test('hostfs over a port: what a program fsynced is on the host, and when the port dies before its close, fsync and close both fail (#1062)', {
   timeout: 600_000,
 }, async (t) => {
