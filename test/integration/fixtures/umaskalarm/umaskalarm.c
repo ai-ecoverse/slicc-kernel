@@ -23,6 +23,8 @@ static void on_alarm(int sig) {
   else close(fd);
   umask(was);
   hits++;
+  struct itimerval again = {{0, 0}, {0, 2000}};
+  if (hits < 20) setitimer(ITIMER_REAL, &again, NULL);
 }
 
 static void *idle(void *arg) { return arg; }
@@ -37,7 +39,7 @@ int main(int argc, char **argv) {
   memset(&sa, 0, sizeof sa);
   sa.sa_handler = on_alarm;
   sigaction(SIGALRM, &sa, NULL);
-  struct itimerval it = {{0, 2000}, {0, 2000}};
+  struct itimerval it = {{0, 0}, {0, 2000}};
   setitimer(ITIMER_REAL, &it, NULL);
   long calls = 0;
   while (hits < 20 && calls < 5000000) {
