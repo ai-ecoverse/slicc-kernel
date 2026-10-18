@@ -549,12 +549,8 @@ export class KernelStreams {
   }
 
   attachFile(stream: ProcessStream, kfd: number): void {
-    const base = stream.stream_ops;
     this.attach(stream, kfd, false);
     stream.sliccKernelFile = true;
-    try {
-      base.close?.(stream);
-    } catch {}
     stream.stream_ops = {
       ...stream.stream_ops,
       llseek: (_s, offset, whence) => this.call(() => this.sys.seek(kfd, offset, whence)),

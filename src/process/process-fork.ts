@@ -66,8 +66,10 @@ export function vfsPromoter(
   const promoted = new Map<object, number>();
   return (stream) => {
     if (stream.sliccKernelFd !== undefined || !isVfsFile(Fs, stream)) return;
+    const live = stream.stream_ops;
     let kfd = promoted.get(stream.shared);
     if (kfd === undefined) {
+      live.fsync?.(stream);
       const contents = orphanContents(stream);
       const held = heldOf((stream.node as LiveNodeBag).live);
       kfd = sys.openVfs(
@@ -83,6 +85,7 @@ export function vfsPromoter(
       promoted.set(stream.shared, kfd);
     }
     streams.attachFile(stream, kfd);
+    live.close?.(stream);
   };
 }
 
