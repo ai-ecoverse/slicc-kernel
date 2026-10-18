@@ -1239,16 +1239,16 @@ A WASIX C program for `test/integration/sig-inherited.test.mjs` (#820), built on
 
 ### `sigjmptest`
 
-A WASIX C program for `test/integration/sigjmp.test.mjs` ([#975](https://github.com/ai-ecoverse/slicc-kernel/issues/975), homescoop#1059), built on wasix-sysroot 2025.9.30-35. Each run takes a mode as its only argument:
+A WASIX C program for `test/integration/sigjmp.test.mjs` ([#975](https://github.com/ai-ecoverse/slicc-kernel/issues/975), homescoop#1059), built on wasix-sysroot 2025.9.30-36. Each run takes a mode as its only argument:
 - `term`: a `SIGTERM` handler with `SIGUSR1` in its `sa_mask` sends itself `SIGUSR1`, which must wait until the handler returns: `term-done usr1`.
 - `longjmp`: `longjmp` out of a `SIGUSR1` handler that has `SIGUSR2` in `sa_mask`. It prints the mask after the jump, then unblocks everything and raises `SIGUSR1` again with a handler that returns.
 - `lsleep`, `lnanosleep`, `lread`, `lpoll`: the same with a `SIGALRM` that interrupts `sleep`, `nanosleep`, a `read` of an empty pipe, or `poll`. `sleep`, `nanosleep`, `read`, `poll` (no `l`) and `raise` use `sigsetjmp`/`siglongjmp`.
 - `direct`, `directmask`: `siglongjmp` with no signal at all. `fork` is `raise` in a forked child.
-- `hold` holds `flock` on `sigjmp.lock` for 3 seconds.
+- `hold` holds `flock` on `sigjmp.lock` for 3 seconds, and creates `sigjmp.held` once it has the lock. `flock` is a `SIGALRM` that interrupts a wait for that lock.
 
-On -35, `sigsetjmp` is an ordinary libc function rather than the `setjmp` that LLVM's wasm setjmp/longjmp lowering rewrites, so every `siglongjmp` escapes the program (`[object WebAssembly.Exception]`, exit 70), even `direct`. That is homescoop#1059. The rows use plain `longjmp` until the sysroot fixes it.
+Up to -35, `sigsetjmp` was an ordinary libc function rather than the `setjmp` that LLVM's wasm setjmp/longjmp lowering rewrites, so every `siglongjmp` escaped the program (`[object WebAssembly.Exception]`, exit 70), even `direct` (homescoop#1059). In -36 it is a `setjmp` call site that records the mask, and `siglongjmp` restores it.
 
-**Build:** `WASIX_SYSROOT_35=/path/to/wasix-sysroot ./build.sh`, with `wasixcc` 0.4.7 and binaryen's `wasm-opt` 133 on `PATH`. Asyncify runs with `asyncify-ignore-indirect`, because functions with wasm `try` blocks can't be flattened. `bin/sigjmptest.wasm` is 52,240 bytes, sha256 `9768c2caafa0bcf55e4b9cd2c97a486d46496a275d4e9bd9d5998e163d630fbb`.
+**Build:** `WASIX_SYSROOT_36=/path/to/wasix-sysroot ./build.sh`, with `wasixcc` 0.4.7 and binaryen's `wasm-opt` 133 on `PATH`. Asyncify runs with `asyncify-ignore-indirect`, because functions with wasm `try` blocks can't be flattened. `bin/sigjmptest.wasm` is 52,855 bytes, sha256 `0de328b9cbe3f802dd159db200daa973cc857d3daa4227bca652864b55ebb93f`.
 
 ### `handlertest`
 

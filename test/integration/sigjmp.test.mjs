@@ -14,7 +14,13 @@ async function booted(t) {
       await readFile(new URL(file, fixture))
     );
   }
-  return (mode) => kernel.run(['sigjmptest', mode], { cwd: '/tmp' });
+  const run = (mode) => kernel.run(['sigjmptest', mode], { cwd: '/tmp' });
+  run.held = () =>
+    kernel.readFile('/tmp/sigjmp.held').then(
+      () => true,
+      () => false
+    );
+  return run;
 }
 
 const ok = (stdout) => ({ status: 0, stdout, stderr: '' });
@@ -38,4 +44,22 @@ test('a longjmp out of a WASIX signal handler lands in the program, keeps the ha
       how
     );
   }
+});
+
+test('a siglongjmp out of a WASIX signal handler lands at its sigsetjmp with the saved mask back, from raise, a blocking call, a flock wait and a forked child, and the next signal runs its handler (homescoop#1059)', {
+  timeout: 120_000,
+}, async (t) => {
+  const run = await booted(t);
+  const after = 'usr1=0 usr2=0 alrm=0\nagain=2\n';
+  assert.deepEqual(await run('direct'), ok('direct jumped\n'));
+  assert.deepEqual(await run('directmask'), ok('direct jumped\n'));
+  assert.deepEqual(await run('raise'), ok(`jumped\n${after}`));
+  for (const how of ['sleep', 'nanosleep', 'read', 'poll']) {
+    assert.deepEqual(await run(how), ok(`jumped ${how}\n${after}`), how);
+  }
+  assert.deepEqual(await run('fork'), ok(`child jumped\n${after}child status 0\n`));
+  const holder = run('hold');
+  while (!(await run.held())) await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(await run('flock'), ok(`jumped flock\n${after}`));
+  assert.deepEqual(await holder, ok('held\n'));
 });
