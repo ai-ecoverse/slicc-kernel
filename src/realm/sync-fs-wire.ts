@@ -67,7 +67,7 @@ export type SyncFsResult =
   | { ok: true; kind: 'bytes'; bytes: Uint8Array }
   | { ok: true; kind: 'json'; json: unknown }
   | { ok: true; kind: 'void' }
-  | { ok: false; errno: string; message: string };
+  | { ok: false; errno: string; message: string; direct?: true };
 
 export const SYNC_FS_REQUEST_TIMEOUT_MS = 25_000;
 
@@ -94,6 +94,8 @@ export interface SyncFsBridgeStat {
   gid?: number;
   gen?: number;
 }
+
+export type SyncFsCreated = SyncFsBridgeStat & { seen?: number };
 
 export interface SyncFsUsage {
   quota: number;
@@ -149,7 +151,7 @@ export interface SyncFsPosixBridge {
     seen?: { gen?: number }
   ): number | undefined;
   access?(path: string, mode: number, kind?: AccessKind, nofollow?: boolean): void;
-  create?(path: string, mode?: number, opening?: boolean): void;
+  create?(path: string, mode?: number, opening?: boolean): SyncFsCreated | undefined | void;
   mkfifo?(path: string, mode: number): void;
   chown?(path: string, ...rest: ChownArgs): void;
   owners?: boolean;

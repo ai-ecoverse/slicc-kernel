@@ -17,7 +17,6 @@ import {
   FILETYPE,
   FSTFLAGS,
   LOOKUP_SYMLINK_FOLLOW,
-  OFLAGS,
   PREOPENTYPE_DIR,
   RIFLAGS,
   RIGHTS,
@@ -861,10 +860,8 @@ export class WasiHost {
           if (alias && !alias.stdio) this.openFd(alias.fd);
           const path = alias && !alias.stdio ? `/dev/fd/${alias.fd}` : asked;
           if (deviceOf(path)) this.interrupted?.();
-          const fresh =
-            (oflags & OFLAGS.CREAT) !== 0 && !this.synthetic(path) && !o.fs.exists(path);
           mem.view().setUint32(out, fds.open(path, oflags, rights, fdflags), true);
-          if (fresh) this.created(path, 0o666);
+          if (fds.created) this.created(path, 0o666);
         } catch (err) {
           if ((err as { code?: string }).code !== 'ENOENT') throw err;
           const raw = mem.string(p, l);

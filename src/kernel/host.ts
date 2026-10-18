@@ -1,3 +1,4 @@
+import { ChangeView } from '../fs/changes.ts';
 import { Created, type Dac } from '../fs/dac.ts';
 import { type PathGate, type Replacements, UNLINKED_DIR } from '../fs/unlinked.ts';
 import { HeldPaths } from '../mount/mount-fs.ts';
@@ -415,6 +416,7 @@ function holdingToken(
     ...(opts.fresh ? { fresh: (path: string) => opts.fresh?.(path, caller.umask()) } : {}),
     ...(opts.source ? { source: opts.source } : {}),
     ...(opts.replacements ? { replacements: opts.replacements } : {}),
+    ...(opts.changes ? { changes: new ChangeView(opts.changes) } : {}),
     fs: opts.fs,
     noLinks: opts.noLinks,
     cwd: opts.cwd,
