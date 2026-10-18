@@ -63,6 +63,8 @@ export interface VfsFileOptions {
   create?: boolean;
 
   id?: string;
+
+  ino?: number;
 }
 
 export interface VersionPin {
@@ -110,6 +112,8 @@ export class VfsNode {
   orphaned: boolean;
 
   id: string | undefined;
+
+  ino: number | undefined;
 
   onDirty: (() => void) | undefined;
 
@@ -549,10 +553,14 @@ export class VfsNodes implements UnlinkHolder {
     return node;
   }
 
-  open(path: string, pin?: VersionPin, writable = false, id?: string): VfsNode {
+  open(path: string, pin?: VersionPin, writable = false, id?: string, ino?: number): VfsNode {
+    const found = this.named(path, id);
+    const same = !found || ino === undefined || found.ino === undefined || found.ino === ino;
+    if (found && !same) this.orphan(found);
     const node =
-      this.named(path, id) ??
+      (same ? found : undefined) ??
       this.create(path, id, new VfsNode(this.fs, path, undefined, false, false, pin));
+    node.ino ??= ino;
     node.opens++;
     if (writable) node.writers++;
     return node;
@@ -904,7 +912,7 @@ export function vfsFile(fs: VfsFileFs, opts: VfsFileOptions, nodes?: VfsNodes): 
       ? new VfsNode(fs, opts.path, opts.contents, opts.orphan === true, opts.dirty === true)
       : opts.contents !== undefined
         ? nodes.adopt(opts.path, opts.contents, opts.dirty === true, writable, opts.id)
-        : nodes.open(opts.path, opts.pin, writable, opts.id);
+        : nodes.open(opts.path, opts.pin, writable, opts.id, opts.ino);
 
   let openError: { err: unknown } | undefined;
   const atOpen = (op: () => Promise<void>): void => {

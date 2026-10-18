@@ -138,6 +138,8 @@ export type WasmSyscall =
 
       handle?: number;
 
+      ino?: number;
+
       fifo?: boolean;
     }
   | { op: 'fd-pread'; fd: number; offset: number; max: number }
@@ -195,6 +197,8 @@ export type WasmSyscall =
       pin?: VersionPin;
 
       handle?: number;
+
+      ino?: number;
     }
   | { op: 'fd-open-tty'; name?: string }
   | { op: 'fd-tty-names' }
@@ -1528,6 +1532,7 @@ export class WasmProcess {
         ...(req.create ? { create: true } : {}),
         ...(req.pin ? { pin: req.pin } : {}),
         ...(id !== undefined && !req.orphan ? { id } : {}),
+        ...(req.ino !== undefined && !req.orphan ? { ino: req.ino } : {}),
       },
       this.nodes
     );
@@ -1751,6 +1756,7 @@ export class WasmProcess {
           ...(req.dirty ? { dirty: true } : {}),
           ...(req.pin ? { pin: req.pin } : {}),
           ...(id !== undefined ? { id } : {}),
+          ...(req.ino !== undefined && path === asked ? { ino: req.ino } : {}),
         },
         this.nodes
       );

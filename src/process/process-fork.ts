@@ -18,6 +18,7 @@ interface LiveNodeBag {
     data?: Uint8Array;
     len?: number;
     handle?: number;
+    stat?: { ino?: number };
     ranged?: {
       pinnedVersion?: string;
       size(): number;
@@ -39,6 +40,23 @@ function orphanContents(stream: ProcessStream): Uint8Array | undefined {
   return live.data?.slice(0, live.len ?? live.data.length) ?? new Uint8Array(0);
 }
 
+function heldOf(live: LiveNodeBag['live']): {
+  pin?: { version: string; size: number };
+  handle?: number;
+  ino?: number;
+} {
+  const ranged = live?.ranged;
+  const version = ranged?.pinnedVersion;
+  const pin = ranged && version !== undefined ? { version, size: ranged.size() } : undefined;
+  const handle = live?.handle;
+  const ino = live?.stat?.ino;
+  return {
+    ...(pin ? { pin } : {}),
+    ...(handle !== undefined ? { handle } : {}),
+    ...(handle !== undefined && ino !== undefined ? { ino } : {}),
+  };
+}
+
 export function vfsPromoter(
   Fs: ProcessFs,
   sys: ProcessSys,
@@ -51,11 +69,7 @@ export function vfsPromoter(
     let kfd = promoted.get(stream.shared);
     if (kfd === undefined) {
       const contents = orphanContents(stream);
-      const ranged = (stream.node as LiveNodeBag).live?.ranged;
-      const version = ranged?.pinnedVersion;
-      const pin = ranged && version !== undefined ? { version, size: ranged.size() } : undefined;
-      const handle = (stream.node as LiveNodeBag).live?.handle;
-      const held = { ...(pin ? { pin } : {}), ...(handle !== undefined ? { handle } : {}) };
+      const held = heldOf((stream.node as LiveNodeBag).live);
       kfd = sys.openVfs(
         livePath(stream),
         stream.flags,

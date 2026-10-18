@@ -1077,5 +1077,6 @@ function promoteRequest(
 
     ...(!joins && f.buffer.isDirty() ? { dirty: true } : {}),
     ...(f.buffer.handle !== undefined ? { handle: f.buffer.handle } : {}),
+    ...(f.buffer.handle !== undefined && f.ino !== undefined ? { ino: f.ino } : {}),
   };
 }

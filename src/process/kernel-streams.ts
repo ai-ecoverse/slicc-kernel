@@ -154,6 +154,7 @@ export interface ProcessSys {
       created?: boolean;
       pin?: { version: string; size: number };
       handle?: number;
+      ino?: number;
       fifo?: boolean;
     }
   ): number;
