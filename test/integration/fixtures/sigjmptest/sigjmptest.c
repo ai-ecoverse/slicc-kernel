@@ -151,6 +151,7 @@ __attribute__((noinline)) static pid_t forked(void) { return fork(); }
 static void hold(void) {
   int fd = open("sigjmp.lock", O_RDWR | O_CREAT, 0644);
   flock(fd, LOCK_EX);
+  close(open("sigjmp.held", O_WRONLY | O_CREAT, 0644));
   printf("held\n");
   sleep(3);
 }
