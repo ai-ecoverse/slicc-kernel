@@ -803,6 +803,7 @@ WASI and WASIX have no call for file modes, so the kernel adds the import module
 The kernel's device nodes answer the mode and owner an Emscripten program sees for them ([#1028](https://github.com/ai-ecoverse/slicc-kernel/issues/1028)):
 - `/dev/null`, `/dev/zero`, `/dev/full`, `/dev/random`, `/dev/urandom` and `/dev/tty` are root's character devices with `0666`. `/dev/tty` also stats when the process has no controlling terminal; opening it then is `ENXIO`, as on Linux.
 - A pty's `/dev/pts/N` is its owner's, with `0620`.
+- `/dev/pts` is a directory listing the open ptys, for Emscripten and WASIX programs as for JS ones, and `/dev` lists it ([#1040](https://github.com/ai-ecoverse/slicc-kernel/issues/1040)); an Emscripten program also stats a pty through a symlink to it.
 - `/dev/stdin`, `/dev/stdout`, `/dev/stderr` and `/dev/fd/N` answer for the descriptor they name.
 - A symlink elsewhere that leads to one of them, such as `/tmp/console -> /dev/tty`, answers the same when followed ([#1042](https://github.com/ai-ecoverse/slicc-kernel/issues/1042)).
 

@@ -29,6 +29,8 @@ const PTY_PATH = /^\/dev\/(?:ptmx|pts\/(\d+))$/;
 
 const TTY_PATH = /^\/dev\/tty\d+$/;
 
+const PTS_MAJOR = 136;
+
 interface TtyNodeFs {
   analyzePath?: (path: string) => { exists: boolean };
   mkdev?: (path: string, dev: number) => unknown;
@@ -37,6 +39,7 @@ interface TtyNodeFs {
 }
 
 interface DevDirFs extends TtyNodeFs {
+  mkdir?: (path: string, mode?: number) => unknown;
   lookupNode?: (parent: object, name: string) => object;
   readdir?: (path: string) => string[];
   getPath?: (node: object) => string;
@@ -526,6 +529,50 @@ export class KernelStreams {
     };
   }
 
+  private usePtsNodes(): void {
+    const fs = this.Fs as unknown as DevDirFs;
+    const { lookupNode, readdir, getPath, mkdir, mkdev, makedev } = fs;
+    const numbers = this.sys.ptyNumbers?.bind(this.sys);
+    if (!lookupNode || !readdir || !getPath || !mkdir || !mkdev || !makedev || !numbers) return;
+    const make = (parent: object, name: string): boolean => {
+      const dir = getPath.call(fs, parent);
+      if (dir === '/dev' && name === 'pts') mkdir.call(fs, '/dev/pts', 0o755);
+      else if (dir === '/dev/pts' && numbers().includes(Number(name)) && /^\d+$/.test(name))
+        mkdev.call(fs, `/dev/pts/${name}`, makedev.call(fs, PTS_MAJOR, Number(name)));
+      else return false;
+      return true;
+    };
+    fs.lookupNode = (parent, name) => {
+      try {
+        return lookupNode.call(fs, parent, name);
+      } catch (e) {
+        if (this.creatingTerminal) throw e;
+        this.creatingTerminal = true;
+        let made: boolean;
+        try {
+          made = make(parent, name);
+        } finally {
+          this.creatingTerminal = false;
+        }
+        if (!made) throw e;
+        return lookupNode.call(fs, parent, name);
+      }
+    };
+    fs.readdir = (path) => {
+      const at = path.replace(/\/+$/, '');
+      if (at === '/dev/pts') return ['.', '..', ...numbers().map(String)];
+      const names = readdir.call(fs, path);
+      return at === '/dev' && !names.includes('pts') ? [...names, 'pts'] : names;
+    };
+  }
+
+  private ptsTarget(path: string, st: unknown): string | undefined {
+    if (((st as { rdev?: number } | null)?.rdev ?? 0) >> 8 !== PTS_MAJOR) return undefined;
+    const { lookupPath } = this.Fs as unknown as DevDirFs;
+    const real = lookupPath?.call(this.Fs, path, { follow: true }).path;
+    return real !== undefined && isPtyPath(real) ? real : undefined;
+  }
+
   private ttyNode(name: string): void {
     const { analyzePath, mkdev, makedev } = this.Fs as unknown as TtyNodeFs;
     if (!TTY_PATH.test(name) || !analyzePath || !mkdev || !makedev) return;
@@ -612,6 +659,7 @@ export class KernelStreams {
     if (typeof this.Fs.open !== 'function') return;
     this.usePtyPaths();
     this.useTerminalNodes();
+    this.usePtsNodes();
     this.listSealed();
     const open = this.Fs.open.bind(this.Fs);
     this.Fs.open = (path, flags, mode) => {
@@ -767,14 +815,21 @@ export class KernelStreams {
         if (path === CLIPBOARD_PATH && this.sys.openClipboard) return sealedStat(251);
         const owned = this.ownedTty(path);
         if (owned && isPtyPath(path)) return this.owned(path, ptyStat(path));
-        if (!isPtyPath(path)) {
-          const st = original.call(fs, path, ...rest);
-          return owned && TTY_PATH.test(path) ? this.owned(path, st as object) : st;
-        }
+        if (!isPtyPath(path))
+          return this.pathStat(path, original.call(fs, path, ...rest), name, owned);
         this.existingPty(path);
         return ptyStat(path);
       };
     }
+  }
+
+  private pathStat(path: string, st: unknown, name: 'stat' | 'lstat', owned: boolean): unknown {
+    const pts = name === 'stat' ? this.ptsTarget(path, st) : undefined;
+    if (pts) {
+      this.existingPty(pts);
+      return owned ? this.owned(pts, ptyStat(pts)) : ptyStat(pts);
+    }
+    return owned && TTY_PATH.test(path) ? this.owned(path, st as object) : st;
   }
 
   private ownedTty(path: string): boolean {

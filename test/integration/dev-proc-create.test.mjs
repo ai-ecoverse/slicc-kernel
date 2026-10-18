@@ -104,7 +104,7 @@ for (const [who, denied] of [
     const js = await kernel.run(['devmk', '/dev/j', '/proc/j'], opts);
     assert.equal(js.stdout, `/dev/j ${code}\n/proc/j EROFS\n`);
     const ls = await kernel.run(
-      ['bash', '-c', 'ls /dev/e /dev/ed /dev/p* /dev/j 2>/dev/null | wc -l'],
+      ['bash', '-c', 'ls -d /dev/e /dev/ed /dev/p /dev/j 2>/dev/null | wc -l'],
       opts
     );
     assert.equal(ls.stdout, '0\n');

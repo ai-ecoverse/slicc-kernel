@@ -167,6 +167,7 @@ function filetypeOf(s: SyncFsBridgeStat | null | undefined): number {
   if (s.isSymbolicLink) return FILETYPE.SYMBOLIC_LINK;
   if (s.isDirectory) return FILETYPE.DIRECTORY;
   if (s.isSocket) return FILETYPE.SOCKET_STREAM;
+  if (((s.mode ?? 0) & 0o170000) === 0o020000) return FILETYPE.CHARACTER_DEVICE;
   return s.isFile ? FILETYPE.REGULAR_FILE : FILETYPE.UNKNOWN;
 }
 
