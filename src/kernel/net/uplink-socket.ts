@@ -45,7 +45,7 @@ async function released(rx: KernelPipe, tx: KernelPipe): Promise<void> {
   while (!(rx.readersGone && tx.writersGone)) await Promise.race([rx.changed(), tx.changed()]);
 }
 
-export function uplinkLink(conn: UplinkConn, onReset: () => void): UplinkLink {
+export function uplinkLink(conn: UplinkConn, onReset: (err: unknown) => void): UplinkLink {
   const rx = new KernelPipe();
   const tx = new KernelPipe();
   for (const pipe of [rx, tx]) {
@@ -59,8 +59,8 @@ export function uplinkLink(conn: UplinkConn, onReset: () => void): UplinkLink {
     conn.close();
   };
   void inbound(conn, rx)
-    .catch(() => {
-      onReset();
+    .catch((err: unknown) => {
+      onReset(err);
       close();
       tx.closeRead();
     })

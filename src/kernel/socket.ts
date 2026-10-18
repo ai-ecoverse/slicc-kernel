@@ -120,7 +120,7 @@ export class KernelSocket implements KernelFile {
   private state: 'open' | 'connecting' | 'listening' | 'connected' | 'closed' = 'open';
   private dialing: AbortController | undefined;
   private failed: string | undefined;
-  private reset = false;
+  private reset: KernelError | undefined;
   local: SockAddr | undefined;
   peer: SockAddr | undefined;
   peerCred: PeerCred | undefined;
@@ -159,19 +159,20 @@ export class KernelSocket implements KernelFile {
     const { rx } = this.connection();
     if (this.readShut || max <= 0) return new Uint8Array(0);
     const bytes = await pipeCall(() => rx.read(max, signal));
-    if (bytes.length === 0 && this.reset) throw new KernelError('ECONNRESET');
+    if (bytes.length === 0 && this.reset) throw this.reset;
     return bytes;
   }
   async peek(max: number, signal?: AbortSignal): Promise<Uint8Array> {
     const { rx } = this.connection();
     if (this.readShut || max <= 0) return new Uint8Array(0);
     const bytes = await pipeCall(() => rx.peek(max, signal));
-    if (bytes.length === 0 && this.reset) throw new KernelError('ECONNRESET');
+    if (bytes.length === 0 && this.reset) throw this.reset;
     return bytes;
   }
   async write(bytes: Uint8Array, signal?: AbortSignal): Promise<number> {
     const { tx } = this.connection();
     if (this.writeShut) throw new KernelError('EPIPE');
+    if (this.reset?.code === 'EPROTO') throw this.reset;
     return pipeCall(() => tx.write(bytes, signal));
   }
   poll(): PollState {
@@ -384,8 +385,11 @@ export class KernelSocket implements KernelFile {
           this.dialing = undefined;
           this.switch = conn;
           this.attach(
-            uplinkLink(conn, () => {
-              this.reset = true;
+            uplinkLink(conn, (err) => {
+              this.reset =
+                err instanceof KernelError && err.code === 'EPROTO'
+                  ? err
+                  : new KernelError('ECONNRESET');
               this.changes.wake();
             })
           );

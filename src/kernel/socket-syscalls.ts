@@ -3,7 +3,12 @@ import { KernelDgram } from './dgram.ts';
 import { type FdTable, KernelError, OpenFile, pollFile } from './fd-table.ts';
 import { encodeReceived } from './net/datagram-wire.ts';
 import { isLoopbackHost } from './net/proxy-service.ts';
-import { connectSecure, upgradeSecure, uplinkAddress } from './net/tls-uplink.ts';
+import {
+  type ClientCertRequest,
+  connectSecure,
+  upgradeSecure,
+  uplinkAddress,
+} from './net/tls-uplink.ts';
 import type { ResolveFamily } from './net/uplink.ts';
 import {
   type ConnectorStamp,
@@ -91,6 +96,9 @@ export type SocketSyscall =
       alpn?: string[];
       ca?: true | string[];
       insecure?: boolean;
+      sni?: false;
+      checkHostname?: false;
+      clientCert?: ClientCertRequest;
       path?: 'kernel' | 'transport';
     }
   | {
@@ -100,6 +108,9 @@ export type SocketSyscall =
       alpn?: string[];
       ca?: true | string[];
       insecure?: boolean;
+      sni?: false;
+      checkHostname?: false;
+      clientCert?: ClientCertRequest;
     }
   | {
       op: 'sock-recvfrom';
@@ -355,11 +366,16 @@ const NOT_HTTP_PORTS = new Set([
   465, 563, 585, 636, 853, 989, 990, 992, 993, 994, 995, 5061, 5671, 6697, 8883,
 ]);
 const HOST_NAME = /^[A-Za-z0-9.-]+$|^\[?[0-9A-Fa-f:.]+\]?$/;
+function sessionControls(req: Extract<SocketSyscall, { op: 'sock-tls' }>): boolean {
+  return req.sni === false || req.checkHostname === false || req.clientCert !== undefined;
+}
+
 function wantsKernel(req: Extract<SocketSyscall, { op: 'sock-tls' }>): boolean {
   if (req.path === 'kernel') return true;
   if (req.path === 'transport') return false;
   return (
     Array.isArray(req.ca) ||
+    sessionControls(req) ||
     (req.alpn !== undefined && req.alpn.length > 0 && !req.alpn.includes('http/1.1')) ||
     NOT_HTTP_PORTS.has(req.port)
   );
@@ -373,7 +389,10 @@ async function secureConnect(
     throw new KernelError('EINVAL');
   const kernelPath = wantsKernel(req) && (await uplinked(proc, req.host));
   if (!kernelPath) {
-    if (req.path === 'kernel' || Array.isArray(req.ca)) throw new KernelError('ENOTSUP');
+    if (req.path === 'kernel' || Array.isArray(req.ca) || sessionControls(req)) {
+      delete req.clientCert;
+      throw new KernelError('ENOTSUP');
+    }
     return { ...tlsOverTransport(req, proc), path: 'transport', substitutes: true };
   }
   const socket = proc.net.socket('inet');

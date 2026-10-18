@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, createPrivateKey } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import { createServer as createTcp, connect as tcp } from 'node:net';
 import { join, relative } from 'node:path';
@@ -151,10 +151,17 @@ async function startTlsServer(t, cert) {
 async function kernelWith(t, servers) {
   const names = {};
   const peers = {};
+  const dials = { count: 0 };
   servers.forEach(([host, port], i) => {
     const address = /^\d/.test(host) ? host : `203.0.113.${10 + i}`;
     if (address !== host) names[host] = [address];
-    for (const p of [4433, 465, 443, 2525]) peers[`${address}:${p}`] = pipeTo(port);
+    const pipe = pipeTo(port);
+    for (const p of [4433, 465, 443, 2525]) {
+      peers[`${address}:${p}`] = (conn) => {
+        dials.count++;
+        pipe(conn);
+      };
+    }
   });
   const uplink = fakeUplink({ routes: { prefixes: [], exit: true }, names, peers });
   const tr = transport();
@@ -168,7 +175,7 @@ async function kernelWith(t, servers) {
     assert.equal(r.stderr, '');
     return JSON.parse(r.stdout);
   };
-  return { run, uplink, transport: tr };
+  return { run, uplink, transport: tr, dials };
 }
 
 const sha = (der) => createHash('sha256').update(der).digest('hex');
@@ -198,6 +205,15 @@ test(
         alpnProtocol: 'h2',
         authorized: true,
         servername: 'secure.test',
+        cipher: {
+          name: 'TLS_AES_256_GCM_SHA384',
+          standardName: 'TLS_AES_256_GCM_SHA384',
+          version: 'TLSv1.3',
+        },
+        clientCertificate: false,
+        sni: true,
+        hostnameChecked: true,
+        hostnameMatches: true,
       },
       peers: 2,
       echo: 'ping',
@@ -371,5 +387,249 @@ test(
       (await k.run({ host: 'secure.test', port: 4433, tls: { ca: 'not a pem' } })).code,
       'EINVAL'
     );
+  }
+);
+
+const clientCa = makeCa('client CA');
+const CLIENT_AUTH = '1.3.6.1.5.5.7.3.2';
+
+function encrypted(key, passphrase) {
+  return createPrivateKey(key).export({
+    type: 'pkcs8',
+    format: 'pem',
+    cipher: 'aes-256-cbc',
+    passphrase,
+  });
+}
+
+async function recordingServer(t, cert, options = {}) {
+  const seen = [];
+  const server = createServer({ key: cert.key, cert: cert.cert, ...options }, (s) => {
+    const peer = s.getPeerCertificate();
+    seen.push({ cipher: s.getCipher(), servername: s.servername, peer: peer?.subject?.CN });
+    s.on('data', (d) => s.write(`${peer?.subject?.CN ?? 'anonymous'} ${d}`));
+  });
+  server.on('tlsClientError', () => {});
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  t.after(() => server.close());
+  return { port: server.address().port, seen };
+}
+
+test(
+  'conn.tls reports the negotiated cipher the server agreed, on TLS 1.3 and 1.2 (#1004)',
+  TIMEOUT,
+  async (t) => {
+    const leaf = ca.server('secure.test');
+    const v13 = await recordingServer(t, leaf, { minVersion: 'TLSv1.3' });
+    const v12 = await recordingServer(t, leaf, { maxVersion: 'TLSv1.2' });
+    const { run } = await kernelWith(t, [
+      ['secure.test', v13.port],
+      ['old.test', v12.port],
+    ]);
+    const tls = { ca: ca.pem, servername: 'secure.test' };
+    for (const [host, server, version] of [
+      ['secure.test', v13, 'TLSv1.3'],
+      ['old.test', v12, 'TLSv1.2'],
+    ]) {
+      const got = await run({ host, port: 4433, tls, send: 'hi' });
+      const { name, standardName } = server.seen[0].cipher;
+      assert.deepEqual(got.tls.cipher, { name, standardName, version });
+      assert.equal(got.tls.clientCertificate, false);
+      assert.equal(got.tls.sni, true);
+      assert.equal(got.tls.hostnameChecked, true);
+      assert.equal(got.tls.hostnameMatches, true);
+    }
+  }
+);
+
+test(
+  'mTLS: cert and key present a client certificate the server requires; without one the server refuses, and an encrypted key needs its passphrase (#1004)',
+  TIMEOUT,
+  async (t) => {
+    const mine = clientCa.server('kernel client', { eku: CLIENT_AUTH });
+    const strict = await recordingServer(t, ca.server('secure.test'), {
+      requestCert: true,
+      rejectUnauthorized: true,
+      ca: clientCa.pem,
+      minVersion: 'TLSv1.3',
+    });
+    const strict12 = await recordingServer(t, ca.server('secure.test'), {
+      requestCert: true,
+      rejectUnauthorized: true,
+      ca: clientCa.pem,
+      maxVersion: 'TLSv1.2',
+    });
+    const { run } = await kernelWith(t, [
+      ['secure.test', strict.port],
+      ['old.test', strict12.port],
+    ]);
+    const tls = { ca: ca.pem, servername: 'secure.test' };
+    for (const host of ['secure.test', 'old.test']) {
+      const ok = await run({
+        host,
+        port: 4433,
+        tls: { ...tls, cert: mine.cert, key: mine.key },
+        send: 'hi',
+      });
+      assert.equal(ok.echo, 'kernel client hi');
+      assert.equal(ok.tls.clientCertificate, true);
+      const refused = await run({ host, port: 4433, tls, send: 'hi' });
+      assert.equal(
+        refused.code,
+        host === 'old.test' ? 'ERR_SSL_HANDSHAKE_FAILURE' : 'ERR_SSL_FATAL_ALERT'
+      );
+    }
+    const locked = encrypted(mine.key, 'open sesame');
+    const right = await run({
+      host: 'secure.test',
+      port: 4433,
+      tls: { ...tls, cert: mine.cert, key: locked, passphrase: 'open sesame' },
+      send: 'hi',
+    });
+    assert.equal(right.echo, 'kernel client hi');
+  }
+);
+
+test(
+  'a wrong passphrase, a missing one and a key that does not match the certificate are refused before anything is dialled (#1004)',
+  TIMEOUT,
+  async (t) => {
+    const mine = clientCa.server('kernel client', { eku: CLIENT_AUTH });
+    const stranger = clientCa.server('someone else', { eku: CLIENT_AUTH });
+    const server = await recordingServer(t, ca.server('secure.test'));
+    const { run, dials } = await kernelWith(t, [['secure.test', server.port]]);
+    const tls = { ca: ca.pem, cert: mine.cert };
+    const locked = encrypted(mine.key, 'open sesame');
+    const cases = [
+      [{ key: locked, passphrase: 'wrong' }, 'ERR_OSSL_BAD_DECRYPT'],
+      [{ key: locked }, 'ERR_OSSL_CRYPTO_INTERRUPTED_OR_CANCELLED'],
+      [{ key: stranger.key }, 'ERR_OSSL_X509_KEY_VALUES_MISMATCH'],
+      [{ key: 'not a key' }, 'ERR_OSSL_UNSUPPORTED'],
+    ];
+    for (const [extra, code] of cases) {
+      const got = await run({ host: 'secure.test', port: 4433, tls: { ...tls, ...extra } });
+      assert.equal(got.code, code);
+    }
+    assert.equal(dials.count, 0);
+    assert.equal(
+      (await run({ host: 'secure.test', port: 4433, tls: { ca: ca.pem, key: mine.key } })).code,
+      'EINVAL'
+    );
+    assert.equal(
+      (await run({ host: 'secure.test', port: 4433, tls: { ca: ca.pem, pfx: 'x' } })).code,
+      'ENOTSUP'
+    );
+    assert.equal(dials.count, 0);
+  }
+);
+
+test(
+  'sni: false sends no server name and still refuses a leaf for another host (#1004)',
+  TIMEOUT,
+  async (t) => {
+    const good = await recordingServer(t, ca.server('secure.test'));
+    const wrong = await recordingServer(t, ca.server('other.test'));
+    const { run } = await kernelWith(t, [
+      ['secure.test', good.port],
+      ['wrong.test', wrong.port],
+    ]);
+    const got = await run({
+      host: 'secure.test',
+      port: 4433,
+      tls: { ca: ca.pem, sni: false },
+      send: 'hi',
+    });
+    assert.equal(got.echo, 'anonymous hi');
+    assert.equal(got.tls.sni, false);
+    assert.equal(got.tls.hostnameMatches, true);
+    assert.equal(good.seen[0].servername, false);
+    const refused = await run({
+      host: 'wrong.test',
+      port: 4433,
+      tls: { ca: ca.pem, servername: 'secure.test', sni: false },
+    });
+    assert.equal(refused.code, 'ERR_TLS_CERT_ALTNAME_INVALID');
+  }
+);
+
+test(
+  'checkHostname: false connects a leaf for another host and says it does not match, still refuses untrusted and expired chains, and is EINVAL with rejectUnauthorized: false (#1004)',
+  TIMEOUT,
+  async (t) => {
+    const day = 86400_000;
+    const wrong = await recordingServer(t, ca.server('other.test'));
+    const untrusted = await recordingServer(t, other.server('secure.test'));
+    const expired = await recordingServer(
+      t,
+      ca.server('secure.test', {
+        notBefore: new Date(Date.now() - 3 * day),
+        notAfter: new Date(Date.now() - day),
+      })
+    );
+    const { run, dials } = await kernelWith(t, [
+      ['wrong.test', wrong.port],
+      ['untrusted.test', untrusted.port],
+      ['expired.test', expired.port],
+    ]);
+    const tls = { ca: ca.pem, servername: 'secure.test', checkHostname: false };
+    const got = await run({ host: 'wrong.test', port: 4433, tls, send: 'hi' });
+    assert.equal(got.echo, 'anonymous hi');
+    assert.equal(got.tls.authorized, true);
+    assert.equal(got.tls.hostnameChecked, false);
+    assert.equal(got.tls.hostnameMatches, false);
+    assert.equal(got.peers, 2);
+    assert.equal(
+      (await run({ host: 'untrusted.test', port: 4433, tls })).code,
+      'UNABLE_TO_GET_ISSUER_CERT_LOCALLY'
+    );
+    assert.equal((await run({ host: 'expired.test', port: 4433, tls })).code, 'CERT_HAS_EXPIRED');
+    const before = dials.count;
+    assert.equal(
+      (await run({ host: 'wrong.test', port: 4433, tls: { ...tls, rejectUnauthorized: false } }))
+        .code,
+      'EINVAL'
+    );
+    assert.equal(dials.count, before);
+  }
+);
+
+test(
+  'STARTTLS takes the client certificate too, and the new options on a destination the uplink does not route are ENOTSUP (#1004)',
+  TIMEOUT,
+  async (t) => {
+    const mine = clientCa.server('kernel client', { eku: CLIENT_AUTH });
+    const server = createTcp((sock) => {
+      sock.once('data', () => {
+        sock.write('OK\r\n');
+        const secure = new TLSSocket(sock, {
+          isServer: true,
+          ...ca.server('secure.test'),
+          requestCert: true,
+          rejectUnauthorized: true,
+          ca: clientCa.pem,
+        });
+        secure.on('error', () => {});
+        secure.on('data', (d) => secure.write(`${secure.getPeerCertificate()?.subject?.CN} ${d}`));
+      });
+    });
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    t.after(() => server.close());
+    const { run } = await kernelWith(t, [['mail.test', server.address().port]]);
+    const got = await run({
+      host: 'mail.test',
+      port: 2525,
+      starttls: true,
+      tls: { ca: ca.pem, servername: 'secure.test', cert: mine.cert, key: mine.key },
+      send: 'hi',
+    });
+    assert.equal(got.echo, 'kernel client hi');
+    assert.equal(got.tls.clientCertificate, true);
+    for (const extra of [
+      { sni: false },
+      { checkHostname: false },
+      { cert: mine.cert, key: mine.key },
+    ]) {
+      assert.equal((await run({ host: 'localhost', port: 4433, tls: extra })).code, 'ENOTSUP');
+    }
   }
 );

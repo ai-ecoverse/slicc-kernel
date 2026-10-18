@@ -33,10 +33,14 @@ type TlsClientExport =
   | 'tls_peer_count'
   | 'tls_peer_der';
 
+type TlsSessionExport = 'tls_client_cert' | 'tls_ciphersuite' | 'tls_name_mismatch';
+
 export type TlsEngineModule = { readonly HEAPU8: Uint8Array } & {
   readonly [K in TlsExport as `_${K}`]: (...args: number[]) => number;
 } & {
   readonly [K in TlsClientExport as `_${K}`]?: (...args: number[]) => number;
+} & {
+  readonly [K in TlsSessionExport as `_${K}`]?: (...args: number[]) => number;
 };
 
 type TlsClientModule = TlsEngineModule & {
@@ -44,6 +48,8 @@ type TlsClientModule = TlsEngineModule & {
 };
 
 export const TLS_CLIENT_INSECURE_SKIP_VERIFY = 1;
+export const TLS_CLIENT_NO_SNI = 2;
+export const TLS_CLIENT_VERIFY_CHAIN_ONLY = 4;
 
 const SCRATCH = 64 * 1024;
 const EOF = -1;
@@ -101,10 +107,24 @@ export class TlsEngine {
       this.m._free(ptr);
     }
   }
+  withSecret<T>(bytes: Uint8Array, fn: (ptr: number) => T): T {
+    const ptr = this.put(bytes);
+    try {
+      return fn(ptr);
+    } finally {
+      this.m.HEAPU8.fill(0, ptr, ptr + bytes.length + 1);
+      this.m._free(ptr);
+    }
+  }
+
   intoScratch(fn: (ptr: number, max: number) => number): number | Uint8Array {
     const n = fn(this.scratch, SCRATCH);
     return n > 0 ? this.taken(n) : n;
   }
+  get sessionControls(): boolean {
+    return typeof this.m._tls_client_cert === 'function';
+  }
+
   get client(): TlsClientModule | undefined {
     return typeof this.m._tls_client_new === 'function' ? (this.m as TlsClientModule) : undefined;
   }
@@ -262,6 +282,27 @@ export class TlsSession {
     const out = this.engine.intoScratch((p, max) => this.c._tls_alpn(this.ptr, p, max));
     return out instanceof Uint8Array ? new TextDecoder().decode(out) : undefined;
   }
+  ownCert(chain: Uint8Array, key: Uint8Array, pass: Uint8Array): void {
+    const set = this.m._tls_client_cert as (...args: number[]) => number;
+    const keyLen = key[0] === 0x2d ? key.length + 1 : key.length;
+    const ret = this.engine.withBytes(chain, (c) =>
+      this.engine.withSecret(key, (k) =>
+        this.engine.withSecret(pass, (p) =>
+          set(this.ptr, c, chain.length, k, keyLen, pass.length > 0 ? p : 0, pass.length)
+        )
+      )
+    );
+    if (ret !== 0) throw this.engine.error(ret, 'client certificate');
+  }
+
+  get ciphersuite(): number {
+    return (this.m._tls_ciphersuite as (s: number) => number)(this.ptr);
+  }
+
+  get nameMismatch(): boolean {
+    return (this.m._tls_name_mismatch as (s: number) => number)(this.ptr) === 1;
+  }
+
   peerChain(): Uint8Array[] {
     const chain: Uint8Array[] = [];
     const count = this.c._tls_peer_count(this.ptr);

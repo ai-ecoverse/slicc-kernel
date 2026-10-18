@@ -126,6 +126,7 @@ export type {
   JsListenOptions,
   JsNet,
   JsResolveOptions,
+  JsTlsCipher,
   JsTlsOptions,
   JsTlsSession,
 } from './process/js/js-net.ts';

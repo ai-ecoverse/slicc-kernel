@@ -15,6 +15,17 @@ export interface JsTlsSession {
   readonly authorizationError?: string;
   readonly servername: string;
   readonly peerCertificates?: readonly Uint8Array[];
+  readonly cipher?: JsTlsCipher;
+  readonly clientCertificate?: boolean;
+  readonly sni?: boolean;
+  readonly hostnameChecked?: boolean;
+  readonly hostnameMatches?: boolean;
+}
+
+export interface JsTlsCipher {
+  readonly name: string;
+  readonly standardName: string;
+  readonly version: 'TLSv1.2' | 'TLSv1.3';
 }
 
 export interface JsTlsOptions {
@@ -23,6 +34,12 @@ export interface JsTlsOptions {
   rejectUnauthorized?: boolean;
   ca?: unknown;
   path?: 'kernel' | 'transport';
+  cert?: unknown;
+  key?: unknown;
+  passphrase?: string;
+  pfx?: unknown;
+  sni?: boolean;
+  checkHostname?: boolean;
 }
 
 export interface JsConnection {
@@ -77,6 +94,11 @@ interface WireSession {
   authorizationError?: string;
   servername: string;
   peerCertificates?: string[];
+  cipher?: JsTlsCipher;
+  clientCertificate?: boolean;
+  sni?: boolean;
+  hostnameChecked?: boolean;
+  hostnameMatches?: boolean;
 }
 
 function fromBase64(text: string): Uint8Array {
@@ -107,12 +129,45 @@ function caList(ca: unknown): string[] {
   return out;
 }
 
+function keyText(key: unknown): string {
+  if (key instanceof Uint8Array) return toBase64(key);
+  if (typeof key === 'string') return toBase64(new TextEncoder().encode(key));
+  throw new JsCallError('EINVAL', 'connect', 'ERR_INVALID_ARG_TYPE: key must be a string or bytes');
+}
+
+function clientCert(tls: JsTlsOptions) {
+  if (tls.pfx !== undefined) {
+    throw new JsCallError('ENOTSUP', 'connect', 'pfx is not supported: pass cert and key');
+  }
+  if (tls.cert === undefined && tls.key === undefined) return {};
+  const chain = tls.cert === undefined ? [] : caList(tls.cert);
+  if (chain.length === 0 || tls.key === undefined) {
+    throw new JsCallError('EINVAL', 'connect', 'ERR_INVALID_ARG_VALUE: cert and key go together');
+  }
+  const passphrase = tls.passphrase === undefined ? {} : { passphrase: String(tls.passphrase) };
+  return { clientCert: { chain, key: keyText(tls.key), ...passphrase } };
+}
+
 function tlsRequest(tls: JsTlsOptions) {
   return {
     ...(tls.servername ? { servername: tls.servername } : {}),
     ...(tls.alpn ? { alpn: [...tls.alpn] } : {}),
     ...(tls.ca !== undefined ? { ca: caList(tls.ca) } : {}),
     ...(tls.rejectUnauthorized === false ? { insecure: true } : {}),
+    ...(tls.sni === false ? { sni: false as const } : {}),
+    ...(tls.checkHostname === false ? { checkHostname: false as const } : {}),
+    ...clientCert(tls),
+  };
+}
+
+function controlsOf(r: WireSession) {
+  if (!r.cipher) return {};
+  return {
+    cipher: Object.freeze({ ...r.cipher }),
+    clientCertificate: r.clientCertificate === true,
+    sni: r.sni !== false,
+    hostnameChecked: r.hostnameChecked === true,
+    ...(r.hostnameMatches === undefined ? {} : { hostnameMatches: r.hostnameMatches }),
   };
 }
 
@@ -136,18 +191,19 @@ function sessionOf(r: WireSession): JsTlsSession {
     ...(r.authorizationError ? { authorizationError: r.authorizationError } : {}),
     servername: r.servername,
     peerCertificates: Object.freeze((r.peerCertificates ?? []).map(fromBase64)),
+    ...controlsOf(r),
   });
 }
 
 const TLS_CODE = /^([A-Z][A-Z0-9_]+): /;
 
-async function secureCall<T>(call: () => Promise<T>): Promise<T> {
+async function secureCall<T>(call: () => Promise<T>, what = 'connect'): Promise<T> {
   try {
     return await call();
   } catch (err) {
     const e = err as JsCallError;
     const code = e.code === 'EPROTO' && e.detail ? TLS_CODE.exec(e.detail)?.[1] : undefined;
-    if (code) throw new JsCallError(code, 'connect', e.detail);
+    if (code) throw new JsCallError(code, what, e.detail);
     throw err;
   }
 }
@@ -203,7 +259,7 @@ export function netOps(kernel: JsKernel, io: NetIo): JsNet {
     const readable = new ReadableStream<Uint8Array>(
       {
         async pull(controller) {
-          const chunk = await io.read(fd, undefined, stop.signal);
+          const chunk = await secureCall(() => io.read(fd, undefined, stop.signal), 'read');
           if (chunk.length > 0) controller.enqueue(chunk);
           else controller.close();
         },
@@ -213,7 +269,10 @@ export function netOps(kernel: JsKernel, io: NetIo): JsNet {
     );
     const writable = new WritableStream<Uint8Array>({
       write: (chunk, controller) =>
-        io.send(fd, chunk, AbortSignal.any([controller.signal, stop.signal])),
+        secureCall(
+          () => io.send(fd, chunk, AbortSignal.any([controller.signal, stop.signal])),
+          'write'
+        ),
       close: async () => void (await shut(SHUT_WR)),
       abort: () => close(),
     });
