@@ -30,6 +30,7 @@ import {
   resultsMap,
   rowOf,
   testCommand,
+  titleScan,
   titlesFromPatch,
   unfinishedFiles,
   unquote,
@@ -1392,4 +1393,83 @@ test('a pull request that only moves dependency versions in package.json and its
     ]),
     ['#1044 no-test']
   );
+});
+
+test("the delta reads every title shape the integration tests use, each changed line counts for the test around it, and a changed test it can't name makes the row no-titles, which is INCOMPLETE (#1036)", () => {
+  const scan = (patch, content) => titleScan(patch, content);
+  assert.deepEqual(scan("@@ -1,0 +1,1 @@\n+test('one line', async () => {});"), {
+    titles: ['one line'],
+    unreadable: 0,
+  });
+  assert.deepEqual(scan('@@ -1,0 +1,1 @@\n+  test(`a ${kind} row`, async () => {});').titles, [
+    'a \u2026 row',
+  ]);
+  assert.deepEqual(
+    scan(
+      "@@ -1,0 +1,4 @@\n+test(\n+  'a title on its own line, as biome wraps a long one (#1004)',\n+  TIMEOUT,\n+  async () => {});"
+    ),
+    { titles: ['a title on its own line, as biome wraps a long one (#1004)'], unreadable: 0 }
+  );
+  const file = [
+    "import x from 'y';",
+    '',
+    'test(',
+    "  'the test around the change',",
+    '  async () => {',
+    '    a();',
+    '    b();',
+    '  }',
+    ');',
+  ].join('\n');
+  const inside = '@@ -6,2 +6,3 @@ test(\n     a();\n+    c();\n     b();';
+  assert.deepEqual(scan(inside, file), { titles: ['the test around the change'], unreadable: 0 });
+  assert.deepEqual(
+    scan(inside),
+    { titles: [], unreadable: 1 },
+    'without the file the header names no test'
+  );
+  assert.deepEqual(
+    scan("@@ -10,2 +10,3 @@ test('named in the header', async () => {\n   a();\n+  b();").titles,
+    ['named in the header']
+  );
+  assert.deepEqual(
+    scan(
+      "@@ -1,6 +1,7 @@\n test(\n   'named in the context above',\n   async () => {\n+    more();\n     a();\n   }\n );"
+    ).titles,
+    ['named in the context above']
+  );
+  assert.deepEqual(
+    scan('@@ -3,2 +3,3 @@ async function helper() {\n   a();\n+  b();'),
+    { titles: [], unreadable: 0 },
+    'a helper is no test'
+  );
+  assert.deepEqual(scan('@@ -1,0 +1,3 @@\n+test(\n+  name,\n+  async () => {});'), {
+    titles: [],
+    unreadable: 1,
+  });
+  const row = rowOf({ number: 1036, title: 'A2 TLS session controls' }, [
+    { filename: 'src/kernel/net/tls-ciphers.ts', status: 'modified', patch: '+x' },
+    { filename: 'test/integration/tls-uplink.test.mjs', status: 'modified', patch: inside },
+  ]);
+  assert.deepEqual(row.tests[0], {
+    file: 'test/integration/tls-uplink.test.mjs',
+    status: 'modified',
+    titles: [],
+    unreadable: 1,
+  });
+  assert.equal(decide(row, resultsMap([]), resultsMap([])).decision, 'no-titles');
+  const read = rowOf(
+    { number: 1036, title: 'A2 TLS session controls' },
+    [
+      { filename: 'src/kernel/net/tls-ciphers.ts', status: 'modified', patch: '+x' },
+      { filename: 'test/integration/tls-uplink.test.mjs', status: 'modified', patch: inside },
+    ],
+    { contents: { 'test/integration/tls-uplink.test.mjs': file } }
+  );
+  assert.deepEqual(read.tests[0].titles, ['the test around the change']);
+  assert.match(
+    negativeEvidence([{ kind: 'no-titles', pr: 1036 }]).named,
+    /^#1036 changes shipped paths, and the delta can't read the titles/
+  );
+  assert.deepEqual(gapsOf([{ kind: 'no-titles', pr: 1036 }]), []);
 });

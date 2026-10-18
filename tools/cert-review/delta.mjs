@@ -10,6 +10,7 @@ import {
   manifestOnly,
   mergedPrs,
   rowOf,
+  titleScan,
   verdict,
   versionsOnly,
   withBaselines,
@@ -45,8 +46,32 @@ const rows = [];
 for (const n of [...new Set([...mergedPrs(commits), ...extra])]) {
   const [pr] = gh(`repos/${repo}/pulls/${n}`);
   const files = gh(`repos/${repo}/pulls/${n}/files?per_page=100`).flat();
-  rows.push(rowOf(pr, files, { manifest: manifestVersionsOnly(pr, files) }));
+  rows.push(
+    rowOf(pr, files, { manifest: manifestVersionsOnly(pr, files), contents: unclear(pr, files) })
+  );
 }
+function fileAt(path, ref) {
+  try {
+    const [file] = gh(`repos/${repo}/contents/${path}?ref=${ref}`);
+    return Buffer.from(file.content ?? '', 'base64').toString('utf8');
+  } catch {
+    return undefined;
+  }
+}
+
+function unclear(pr, files) {
+  const out = {};
+  if (!pr.merge_commit_sha) return out;
+  for (const f of files) {
+    if (!/^test\/integration\/[^/]+\.test\.mjs$/.test(f.filename) || f.status === 'removed')
+      continue;
+    if (titleScan(f.patch).unreadable === 0) continue;
+    const text = fileAt(f.filename, pr.merge_commit_sha);
+    if (text !== undefined) out[f.filename] = text;
+  }
+  return out;
+}
+
 function packageJsonAt(ref) {
   const [file] = gh(`repos/${repo}/contents/package.json?ref=${ref}`);
   return Buffer.from(file.content ?? '', 'base64').toString('utf8');

@@ -10,7 +10,9 @@ const MERGE = /^Merge pull request #(\d+) from /;
 const KIND = /^(\w+)(?:\([^)]*\))?(!)?:/;
 const TITLE = /^\s*(?:await\s+)?(?:t\.)?(?:test|it|describe)\(\s*(['"`])((?:\\.|(?!\1).)+)(\1)?/;
 const PREFIX = '\u2026';
-const HUNK = /^@@[^@]*@@\s*(.*)$/;
+const HUNK = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@\s*(.*)$/;
+const BARE = /^\s*(?:await\s+)?(?:t\.)?(?:test|it|describe)\(\s*$/;
+const ARG = /^\s*(['"`])((?:\\.|(?!\1).)+)(\1)?/;
 const INTEGRATION = /^test\/integration\/[^/]+\.test\.mjs$/;
 
 export function mergedPrs(commits) {
@@ -45,20 +47,89 @@ export function unquote(text) {
   );
 }
 
-export function titlesFromPatch(patch) {
+function titleOf(m) {
+  const raw = m[1] === '`' ? m[2].replace(/\$\{[^}]*\}?/g, PREFIX) : m[2];
+  const title = unquote(raw).replace(/\u2026+/g, PREFIX);
+  if (title.replaceAll(PREFIX, '').trim() === '') return undefined;
+  return m[3] === undefined && !title.endsWith(PREFIX) ? `${title}${PREFIX}` : title;
+}
+
+function enclosing(content, line) {
+  const lines = content.split('\n');
+  for (let at = Math.min(line, lines.length) - 1; at >= 0; at--) {
+    const whole = TITLE.exec(lines[at]);
+    if (whole) return titleOf(whole);
+    if (BARE.test(lines[at])) {
+      const next = ARG.exec(lines[at + 1] ?? '');
+      return next ? titleOf(next) : undefined;
+    }
+  }
+  return undefined;
+}
+
+const UNREAD = Symbol('unreadable');
+
+function fromHeader(header, content, at) {
+  const m = TITLE.exec(header);
+  if (m) return titleOf(m) ?? UNREAD;
+  if (!BARE.test(header)) return undefined;
+  return (content === undefined ? undefined : enclosing(content, at)) ?? UNREAD;
+}
+
+function callAt(text, bare) {
+  if (bare) {
+    const m = ARG.exec(text);
+    return { current: (m && titleOf(m)) ?? UNREAD };
+  }
+  if (BARE.test(text)) return { bare: true };
+  const m = TITLE.exec(text);
+  return m ? { current: titleOf(m) ?? UNREAD } : {};
+}
+
+export function titleScan(patch, content) {
   const titles = new Set();
+  const blind = new Set();
+  let current;
+  let bare = false;
+  let waiting = false;
+  let at = 0;
+  let region = 0;
+  const mark = () => {
+    if (current === UNREAD) blind.add(region);
+    else if (current !== undefined) titles.add(current);
+  };
   for (const line of (patch ?? '').split('\n')) {
     const hunk = HUNK.exec(line);
-    const text = hunk ? hunk[1] : line.startsWith('+') ? line.slice(1) : undefined;
-    if (text === undefined) continue;
-    const m = TITLE.exec(text);
-    if (!m) continue;
-    const raw = m[1] === '`' ? m[2].replace(/\$\{[^}]*\}?/g, PREFIX) : m[2];
-    const title = unquote(raw).replace(/\u2026+/g, PREFIX);
-    if (title.replaceAll(PREFIX, '').trim() === '') continue;
-    titles.add(m[3] === undefined && !title.endsWith(PREFIX) ? `${title}${PREFIX}` : title);
+    if (hunk) {
+      at = Number(hunk[1]);
+      current = fromHeader(hunk[2], content, at);
+      region++;
+      bare = false;
+      continue;
+    }
+    const sign = line[0];
+    if (sign !== '+' && sign !== '-' && sign !== ' ') continue;
+    if (sign !== '-') {
+      at++;
+      const found = callAt(line.slice(1), bare);
+      bare = found.bare === true;
+      if ('current' in found) {
+        current = found.current;
+        region++;
+        if (waiting) mark();
+        waiting = false;
+      }
+    }
+    if (sign === ' ') continue;
+    if (bare) waiting = true;
+    else mark();
   }
-  return [...titles];
+  if (bare && waiting) blind.add(region);
+  return { titles: [...titles], unreadable: blind.size };
+}
+
+export function titlesFromPatch(patch, content) {
+  return titleScan(patch, content).titles;
 }
 
 export function droppedTitles(patch) {
@@ -120,11 +191,14 @@ export function versionsOnly(before, after) {
   });
 }
 
-export function rowOf(pr, files, { manifest } = {}) {
+export function rowOf(pr, files, { manifest, contents = {} } = {}) {
   const kind = kindOf(pr.title);
   const tests = files
     .filter((f) => INTEGRATION.test(f.filename) && f.status !== 'removed')
-    .map((f) => ({ file: f.filename, status: f.status, titles: titlesFromPatch(f.patch) }));
+    .map((f) => {
+      const { titles, unreadable } = titleScan(f.patch, contents[f.filename]);
+      return { file: f.filename, status: f.status, titles, ...(unreadable ? { unreadable } : {}) };
+    });
   return {
     pr: pr.number,
     title: pr.title,
@@ -230,7 +304,8 @@ export function decide(row, prev, next) {
   if (!row.behaviour) return { ...base, decision: 'not-behaviour' };
   if (row.manifest) return { ...base, decision: 'manifest' };
   if (row.tests.length === 0) return { ...base, decision: 'no-test' };
-  if (checks.length === 0) return { ...base, decision: 'no-titles' };
+  if (checks.length === 0 || row.tests.some((t) => t.unreadable > 0))
+    return { ...base, decision: 'no-titles' };
   if (checks.some((c) => c.next === 'fail')) return { ...base, decision: 'fails-on-release' };
   const ran = checks.filter((c) => c.next === 'pass');
   if (ran.length === 0) return { ...base, decision: 'not-run' };
@@ -434,14 +509,15 @@ export function knownAsOf(issue, { fixedBefore, releasedAt, version, fixedIn }) 
   return Boolean(releasedAt && issue.closedAt && releasedAt < issue.closedAt);
 }
 
-const GAPS = new Set(['no-test', 'no-negative', 'no-titles', 'not-run']);
+const GAPS = new Set(['no-test', 'no-negative', 'not-run']);
 
 export function negativeEvidence(findings, incomplete) {
   const unrun = (findings ?? [])
-    .filter((f) => f.kind === 'prev-not-run' && f.pr)
-    .map(
-      (f) =>
-        `#${f.pr} changes shipped paths, and its tests' NEGATIVE on the previous tree has no result`
+    .filter((f) => (f.kind === 'prev-not-run' || f.kind === 'no-titles') && f.pr)
+    .map((f) =>
+      f.kind === 'no-titles'
+        ? `#${f.pr} changes shipped paths, and the delta can't read the titles of the tests it changes, so their NEGATIVE can't be judged`
+        : `#${f.pr} changes shipped paths, and its tests' NEGATIVE on the previous tree has no result`
     );
   return withMissing(incomplete, unrun);
 }
