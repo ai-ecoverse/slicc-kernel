@@ -147,6 +147,7 @@ export class KernelTty {
         readable: this.readable.length > 0 || this.hungUp,
         writable: true,
         hangup: this.hungUp,
+        nread: this.readable.reduce((n, chunk) => n + (chunk?.length ?? 0), 0),
       }),
       changed: (signal) => this.changed(signal),
       close: () => {},

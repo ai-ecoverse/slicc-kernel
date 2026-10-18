@@ -53,6 +53,7 @@ export class PtyPair {
         readable: this.queue.length > 0 || this.slaveGone,
         writable: true,
         hangup: this.slaveGone,
+        nread: this.queue.reduce((n, chunk) => n + chunk.length, 0),
       }),
       changed: (signal) => this.changed(signal),
       close: () => this.closeMaster(),

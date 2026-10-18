@@ -75,6 +75,8 @@ export interface PollState {
 
   hangup: boolean;
 
+  nread?: number;
+
   rdhup?: boolean;
 
   error?: boolean;
@@ -193,7 +195,12 @@ export function openPipe(capacity?: number): { read: OpenFile; write: OpenFile }
         }
       },
       close: () => pipe.closeRead(),
-      poll: () => ({ readable: pipe.readReady, writable: false, hangup: pipe.writersGone }),
+      poll: () => ({
+        readable: pipe.readReady,
+        writable: false,
+        hangup: pipe.writersGone,
+        nread: pipe.buffered,
+      }),
       changed: (signal) => pipe.changed(signal),
       identity: pipe,
     }),

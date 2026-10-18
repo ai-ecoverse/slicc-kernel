@@ -6,18 +6,24 @@ export interface SelectResult {
   write: number[];
 
   hangup?: number[];
+
+  nread?: Record<number, number>;
 }
 
 function ready(fds: FdTable, read: readonly number[], write: readonly number[]): SelectResult {
   const hangup = new Set<number>();
+  const nread: Record<number, number> = {};
   const pick = (list: readonly number[], dir: 'readable' | 'writable') =>
     list.filter((fd) => {
       const state = pollFile(fds.get(fd).file);
       if (state.hangup) hangup.add(fd);
-      return state[dir] || state.hangup;
+      const picked = state[dir] || state.hangup;
+      if (picked && dir === 'readable' && state.nread !== undefined) nread[fd] = state.nread;
+      return picked;
     });
   const out: SelectResult = { read: pick(read, 'readable'), write: pick(write, 'writable') };
   if (hangup.size > 0) out.hangup = [...hangup];
+  if (Object.keys(nread).length > 0) out.nread = nread;
   return out;
 }
 
