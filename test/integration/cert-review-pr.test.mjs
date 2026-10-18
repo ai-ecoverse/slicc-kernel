@@ -8,12 +8,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import * as lib from '../../tools/cert-review/lib.mjs';
 import {
   behaviourFiles,
   decide,
   groupVerdict,
   jobsEvidence,
-  REVIEWER_DIRS,
   REVIEWER_GLOBS,
   resultsMap,
   reviewsItself,
@@ -975,13 +975,13 @@ test("the cert-path guard fails closed: a reviewer path the guard's globs miss (
       REVIEWER_GLOBS.some((g) => matchesGlob(filename, g)),
       `the guard's globs cover ${filename}`
     );
-  assert.deepEqual(REVIEWER_DIRS, [
+  assert.deepEqual(lib.REVIEWER_DIRS, [
     'scripts/cert/',
     'tools/cert-review/',
     '.github/actions/cert-self-guard/',
   ]);
   assert.ok(
-    block.includes(`const dirs = ${JSON.stringify(REVIEWER_DIRS).replaceAll(',', ', ')};`),
+    block.includes(`const dirs = ${JSON.stringify(lib.REVIEWER_DIRS).replaceAll(',', ', ')};`),
     'the step and lib hold the same reviewer dirs'
   );
 });
