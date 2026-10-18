@@ -699,6 +699,9 @@ export class Launcher {
         if (paths.some((path) => this.pnpmChain.has(path))) this.pnpmStale();
         this.watchers.changed(...paths);
       },
+      doubted: (target) => {
+        for (const nodes of this.openFiles) nodes.doubted(target);
+      },
       reshaped: () => this.watchers.reshaped(),
       owners: this.owners,
     });
