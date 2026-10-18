@@ -1,0 +1,13 @@
+{
+  "name": "umaskimport",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "umaskimport": {
+        "wasm": "bin/umaskimport.wasm",
+        "imports": "host/umask-host.mjs"
+      }
+    }
+  }
+}

@@ -293,6 +293,10 @@ export class WasiHost {
     return this.fds.cwd() ?? this.startCwd;
   }
 
+  umask(mask?: number): number {
+    return mask === undefined ? this.umasks.get() : this.umasks.set(mask);
+  }
+
   private created(path: string, mode: number): void {
     const umask = this.umasks.get();
     if (umask !== DEFAULT_UMASK) this.o.fs.chmod(path, mode & ~umask);

@@ -22,3 +22,23 @@ test("a threaded WASIX program's SIGALRM handler that calls umask() and creates 
     stderr: '',
   });
 });
+
+test("a umask an imports module sets through ctx.syscall applies to the program's next create, as one the program sets itself (#1078)", {
+  timeout: 120_000,
+}, async (t) => {
+  const kernel = await createNodeKernel();
+  t.after(() => kernel.terminate());
+  const fixture = new URL('fixtures/umaskimport/', import.meta.url);
+  for (const file of ['package.json', 'bin/umaskimport.wasm', 'host/umask-host.mjs']) {
+    await kernel.writeFile(
+      `/node_modules/umaskimport/${file}`,
+      await readFile(new URL(file, fixture))
+    );
+  }
+  await kernel.writeFile('/tmp/ui/.keep', '');
+  assert.deepEqual(await kernel.run(['umaskimport', '/tmp/ui'], { cwd: '/' }), {
+    status: 0,
+    stdout: '664 600 700 077\n',
+    stderr: '',
+  });
+});
