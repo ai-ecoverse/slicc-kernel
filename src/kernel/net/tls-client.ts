@@ -1,6 +1,6 @@
 import { KernelError } from '../fd-table.ts';
 import { ipv4Bytes, ipv6Groups } from './routes.ts';
-import { chainError, nameMatches } from './tls-chain.ts';
+import { type ChainShape, chainError, chainShape, nameMatches } from './tls-chain.ts';
 import { cipherOf, type TlsCipher } from './tls-ciphers.ts';
 import {
   TLS_CLIENT_INSECURE_SKIP_VERIFY,
@@ -160,9 +160,9 @@ async function handshake(
   }
 }
 
-function insecureOf(session: TlsSession, chain: readonly Uint8Array[]) {
+function insecureOf(session: TlsSession, chain: readonly Uint8Array[], shape: ChainShape) {
   const flags = session.verifyResult;
-  const error = chainError(flags, chain);
+  const error = chainError(flags, chain, shape);
   return { hostnameMatches: nameMatches(flags), ...(error ? { chainError: error } : {}) };
 }
 
@@ -170,7 +170,8 @@ function controlsOf(
   o: TlsClientOptions,
   session: TlsSession,
   protocol: TlsCipher['version'],
-  chain: readonly Uint8Array[]
+  chain: readonly Uint8Array[],
+  shape: ChainShape
 ) {
   if (!o.engine.sessionControls) return {};
   const checked = o.checkHostname !== false && !o.insecure;
@@ -180,16 +181,17 @@ function controlsOf(
     sni: o.sni !== false && !isIP(o.servername),
     hostnameChecked: checked,
     ...(o.insecure
-      ? insecureOf(session, chain)
+      ? insecureOf(session, chain, shape)
       : { hostnameMatches: checked || !session.nameMismatch }),
   };
 }
 
-function infoOf(o: TlsClientOptions, session: TlsSession): TlsClientInfo {
+async function infoOf(o: TlsClientOptions, session: TlsSession): Promise<TlsClientInfo> {
   const flags = session.verifyResult;
   const code = verifyCode(flags);
   const protocol = session.version === 0x0304 ? 'TLSv1.3' : 'TLSv1.2';
   const chain = session.peerChain();
+  const shape = await chainShape(o.insecure ? chain : []);
   return {
     protocol,
     alpnProtocol: session.alpn ?? false,
@@ -198,7 +200,7 @@ function infoOf(o: TlsClientOptions, session: TlsSession): TlsClientInfo {
       ? { authorizationError: code, authorizationText: o.engine.verifyInfo(flags).trim() }
       : {}),
     peerCertificates: chain,
-    ...controlsOf(o, session, protocol, chain),
+    ...controlsOf(o, session, protocol, chain, shape),
   };
 }
 
@@ -272,7 +274,8 @@ export async function tlsClient(
   inbox.hand(taken);
   try {
     await handshake(conn, o, session, inbox);
-    return { conn: plaintext(conn, session, inbox), info: infoOf(o, session) };
+    const info = await infoOf(o, session);
+    return { conn: plaintext(conn, session, inbox), info };
   } catch (err) {
     session.free();
     throw err;

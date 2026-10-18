@@ -162,3 +162,21 @@ export function selfSigned(host) {
   });
   return { der, cert: pem(der), key: pair.privateKey.export({ type: 'pkcs8', format: 'pem' }) };
 }
+
+export function selfIssued(host) {
+  const pair = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+  const signer = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+  const spki = pair.publicKey.export({ type: 'spki', format: 'der' });
+  const now = Date.now();
+  const der = certificate({
+    issuer: host,
+    subject: host,
+    notBefore: new Date(now - 3600_000),
+    notAfter: new Date(now + 7 * DAY),
+    spki,
+    issuerSpki: signer.publicKey.export({ type: 'spki', format: 'der' }),
+    host,
+    key: signer.privateKey,
+  });
+  return { der, cert: pem(der), key: pair.privateKey.export({ type: 'pkcs8', format: 'pem' }) };
+}
