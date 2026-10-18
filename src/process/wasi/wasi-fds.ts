@@ -756,6 +756,9 @@ export class WasiFds {
     const alias = stdioAlias(path);
     if (alias !== undefined) return this.reopen(alias);
     const exclusive = (oflags & OFLAGS.CREAT) !== 0 && (oflags & OFLAGS.EXCL) !== 0;
+    if (exclusive && this.shared && !(oflags & OFLAGS.DIRECTORY) && this.madeAtOnce(path, mode)) {
+      return this.kernelFile(path, undefined, oflags, rights, fdflags, mode, true);
+    }
     if (exclusive && this.isLink(path)) throw new WasiError('EEXIST');
     const s = this.statOrMissing(path);
     if (exclusive && s) throw new WasiError('EEXIST');
@@ -894,13 +897,14 @@ export class WasiFds {
     oflags: number,
     rights: bigint,
     fdflags: number,
-    mode?: number
+    mode?: number,
+    created = false
   ): number {
     const { readable, writable } = openAccess(existing, oflags, rights);
     const append = (fdflags & FDFLAGS.APPEND) !== 0;
     const flags = (writable ? (readable ? O_RDWR : O_WRONLY) : 0) | (append ? O_APPEND : 0);
 
-    const made = !existing && this.createNew(path, oflags, mode);
+    const made = created || (!existing && this.createNew(path, oflags, mode));
 
     const truncate = made || (oflags & OFLAGS.TRUNC) !== 0;
     const fd = this.kernel.sys.openVfs(path, flags, 0, {
@@ -943,6 +947,17 @@ export class WasiFds {
       } catch (err) {
         if ((err as { code?: unknown }).code !== 'EINTR' || !this.restartable?.()) throw err;
       }
+    }
+  }
+
+  private madeAtOnce(path: string, mode?: number): boolean {
+    if (!this.fs.create) return false;
+    try {
+      this.fs.create(path, mode, true);
+      return true;
+    } catch (err) {
+      if ((err as { code?: string }).code === 'EEXIST') throw err;
+      return false;
     }
   }
 
