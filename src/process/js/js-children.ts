@@ -20,6 +20,7 @@ export interface JsSpawnOptions {
   stdin?: JsStdio;
   stdout?: JsStdio;
   stderr?: JsStdio;
+  fds?: Readonly<Record<number, number>>;
 }
 
 export interface JsExited {
@@ -134,6 +135,7 @@ export function childOps(
     const group = groupOf(o, 'spawn');
     const named = argv0Of(o.argv0, 'spawn');
     const death = deathOf(o.parentDeathSignal, defaults);
+    const inherit = fdsOf(o.fds);
     return (stdio: Slot[]): SyncSabRequestBody => ({
       op: 'proc-spawn',
       file,
@@ -143,6 +145,7 @@ export function childOps(
       cwd: o.cwd ?? defaults.cwd,
       ...(o.cwd !== undefined ? { chdir: true as const } : {}),
       stdio,
+      ...(inherit.length > 0 ? { inherit } : {}),
       ...group,
       ...death,
     });
@@ -180,6 +183,21 @@ export function childOps(
   };
 
   return { spawn, wait, kill, spawnSync };
+}
+
+export function fdsOf(fds: unknown): Array<{ fd: number; kernel: number }> {
+  if (fds === undefined) return [];
+  if (typeof fds !== 'object' || fds === null || Array.isArray(fds)) {
+    throw new JsCallError('EINVAL', 'spawn');
+  }
+  return Object.entries(fds).map(([key, from]) => {
+    const fd = Number(key);
+    const valid = Number.isInteger(fd) && fd >= 3 && String(fd) === key;
+    if (!valid || !Number.isInteger(from) || (from as number) < 0) {
+      throw new JsCallError('EINVAL', 'spawn');
+    }
+    return { fd, kernel: from as number };
+  });
 }
 
 export function groupOf(
