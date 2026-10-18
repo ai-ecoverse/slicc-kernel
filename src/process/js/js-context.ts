@@ -596,10 +596,11 @@ export function createContext(o: ContextOptions): CreatedContext {
   const lane = o.lane ?? laneOf(undefined);
   if (o.lane && o.lane !== noLane) kernel.syncLane = o.lane;
   const syncKernel = new JsSyncKernel(lane, kernel, unwind);
-  const terminal = ttyOps(kernel);
+  const terminal = ttyOps(kernel, syncKernel);
   const shared = { pid: o.pid, resolve, random, infos, handles, closing };
   const sync: JsSyncContext = {
     kernel: KERNEL_INFO,
+    tty: terminal.syncTty,
     ...watchingSyncOps(kernel, syncKernel, shared),
     run: (options) =>
       runSync(syncKernel, { env: o.env, cwd: o.cwd, resolve, signal: signalNumber }, options),

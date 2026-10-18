@@ -14,6 +14,16 @@ export interface JsTtySize {
   rows: number;
 }
 
+export interface JsSyncTty {
+  getAttr(fd: number): JsTermios;
+  setAttr(fd: number, termios: JsTermios): void;
+  setRaw(fd: number, raw: boolean): void;
+}
+
+interface SyncTtyKernel {
+  json(req: Parameters<JsKernel['json']>[0]): unknown;
+}
+
 export interface JsTty {
   getAttr(fd: number): Promise<JsTermios>;
   setAttr(fd: number, termios: JsTermios): Promise<void>;
@@ -52,8 +62,12 @@ export function rawOf(termios: JsTermios): JsTermios {
   return raw;
 }
 
-export function ttyOps(kernel: JsKernel): {
+export function ttyOps(
+  kernel: JsKernel,
+  syncKernel?: SyncTtyKernel
+): {
   tty: JsTty;
+  syncTty: JsSyncTty;
   restore(): Promise<void>;
   modes(): Array<{ terminal: string; fd: number; termios: JsTermios }>;
 } {
@@ -114,7 +128,29 @@ export function ttyOps(kernel: JsKernel): {
     }
   };
 
+  const syncGet = (fd: number): JsTermios =>
+    (syncKernel as SyncTtyKernel).json({ op: 'tty-get', fd }) as JsTermios;
+  const syncSet = (fd: number, termios: JsTermios): void =>
+    void (syncKernel as SyncTtyKernel).json({ op: 'tty-set', fd, termios: copy(termios) });
+  const syncTty: JsSyncTty = {
+    getAttr: syncGet,
+    setAttr: syncSet,
+    setRaw(fd, raw) {
+      const info = (syncKernel as SyncTtyKernel).json({ op: 'fd-info', fd }) as FdInfo;
+      const terminal = info.terminal ?? `fd ${fd}`;
+      if (!raw) {
+        const original = saved.get(terminal);
+        saved.delete(terminal);
+        if (original) syncSet(fd, original.termios);
+        return;
+      }
+      const current = syncGet(fd);
+      if (!saved.has(terminal)) saved.set(terminal, { fd, termios: current });
+      syncSet(fd, rawOf(current));
+    },
+  };
+
   const modes = () =>
     [...saved].reverse().map(([terminal, { fd, termios }]) => ({ terminal, fd, termios }));
-  return { tty, restore, modes };
+  return { tty, syncTty, restore, modes };
 }
