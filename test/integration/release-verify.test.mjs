@@ -141,6 +141,7 @@ test("verify waits out npm's attestations lag: a 404 that turns into 200 passes;
     const queue = [...list];
     return async () => ({
       ok: queue[0] === 200,
+      json: async () => ({ attestations: [] }),
       status: queue.length > 1 ? queue.shift() : queue[0],
     });
   };
@@ -251,6 +252,97 @@ test("verify waits out npm's attestations lag: a 404 that turns into 200 passes;
   assert.match(
     never.problem,
     /^no attestations on npm for 30 min after npm started serving it, and its packument stopped changing/
+  );
+  clock.t = 0;
+  let views = 0;
+  const flaky = await awaitAttestations({
+    url: async () => {
+      views++;
+      if (views === 1) throw new Error('npm error code ETIMEDOUT');
+      return 'u';
+    },
+    fetch: answers([200]),
+    modified: async () => 'm',
+    servedAt: 0,
+    now,
+    sleep,
+  });
+  assert.deepEqual(
+    [flaky.res.ok, views],
+    [true, 2],
+    'an npm view error while looking for dist.attestations is retried'
+  );
+  clock.t = 0;
+  let gets = 0;
+  const unreachable = await awaitAttestations({
+    url: 'u',
+    fetch: async () => {
+      gets++;
+      if (gets === 1) throw new Error('fetch failed');
+      return { ok: true, status: 200, json: async () => ({ attestations: [] }) };
+    },
+    modified: async () => 'm',
+    servedAt: 0,
+    now,
+    sleep,
+  });
+  assert.equal(unreachable.res.ok, true, 'a network error on the attestations is retried');
+  clock.t = 0;
+  const down = await awaitAttestations({
+    url: 'u',
+    fetch: async () => {
+      throw new Error('fetch failed');
+    },
+    modified: async () => 'm',
+    servedAt: 0,
+    now,
+    sleep,
+  });
+  assert.match(
+    down.problem,
+    /^attestations unreachable \(fetch failed\) for 30 min after npm started serving it/
+  );
+  clock.t = 0;
+  let reads = 0;
+  const truncated = await awaitAttestations({
+    url: 'u',
+    fetch: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => {
+        reads++;
+        if (reads === 1) throw new Error('terminated');
+        return { attestations: [{ predicateType: 'x' }] };
+      },
+    }),
+    modified: async () => 'm',
+    servedAt: 0,
+    now,
+    sleep,
+  });
+  assert.deepEqual(
+    [truncated.body, reads, clock.t],
+    [{ attestations: [{ predicateType: 'x' }] }, 2, 15_000],
+    'a body cut off after 200 headers is read again within the wait, not an alert'
+  );
+  clock.t = 0;
+  const garbled = await awaitAttestations({
+    url: 'u',
+    fetch: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw new SyntaxError('Unexpected end of JSON input');
+      },
+    }),
+    modified: async () => 'm',
+    servedAt: 0,
+    now,
+    sleep,
+  });
+  assert.match(
+    garbled.problem,
+    /^attestations unreadable \(Unexpected end of JSON input\) for 30 min/
   );
   const verify = await readFile(
     new URL('../../tools/cert-review/verify.mjs', import.meta.url),

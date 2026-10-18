@@ -121,8 +121,7 @@ async function provenance(m) {
     sleep,
   });
   if (answer.problem) return problems.push(answer.problem);
-  const res = answer.res;
-  const bundle = ((await res.json()).attestations ?? []).find(
+  const bundle = (answer.body?.attestations ?? []).find(
     (b) => b.predicateType === 'https://slsa.dev/provenance/v1'
   );
   if (!bundle) return problems.push('no SLSA provenance attestation');
