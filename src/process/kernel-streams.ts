@@ -425,7 +425,12 @@ export class KernelStreams {
     }
   }
 
-  private openNode(stream: ProcessStream, path: string, opener: (flags: number) => number): void {
+  private openNode(
+    stream: ProcessStream,
+    path: string,
+    opener: (flags: number) => number,
+    terminal = false
+  ): void {
     let kfd: number;
     try {
       kfd = this.call(() => opener.call(this.sys, stream.flags & 3));
@@ -433,7 +438,7 @@ export class KernelStreams {
       this.Fs.closeStream(stream.fd);
       throw e;
     }
-    this.attach(stream, kfd, false);
+    this.attach(stream, kfd, terminal);
     this.nameStream(stream, path);
     if (path === CLIPBOARD_PATH) this.reportClose(kfd);
   }
@@ -537,8 +542,10 @@ export class KernelStreams {
     const make = (parent: object, name: string): boolean => {
       const dir = getPath.call(fs, parent);
       if (dir === '/dev' && name === 'pts') mkdir.call(fs, '/dev/pts', 0o755);
+      else if (dir === '/dev' && name === 'ptmx' && this.sys.openPty)
+        this.ptyNode('/dev/ptmx', makedev.call(fs, 5, 2));
       else if (dir === '/dev/pts' && numbers().includes(Number(name)) && /^\d+$/.test(name))
-        mkdev.call(fs, `/dev/pts/${name}`, makedev.call(fs, PTS_MAJOR, Number(name)));
+        this.ptyNode(`/dev/pts/${name}`, makedev.call(fs, PTS_MAJOR, Number(name)));
       else return false;
       return true;
     };
@@ -562,8 +569,26 @@ export class KernelStreams {
       const at = path.replace(/\/+$/, '');
       if (at === '/dev/pts') return ['.', '..', ...numbers().map(String)];
       const names = readdir.call(fs, path);
-      return at === '/dev' && !names.includes('pts') ? [...names, 'pts'] : names;
+      if (at !== '/dev') return names;
+      const extra = ['pts', ...(this.sys.openPty ? ['ptmx'] : [])];
+      return [...names, ...extra.filter((name) => !names.includes(name))];
     };
+  }
+
+  private ptyNode(path: string, dev: number): void {
+    const fs = this.Fs as unknown as DevDirFs;
+    fs.registerDevice?.call(fs, dev, {
+      open: (stream: ProcessStream) => {
+        const n = PTY_PATH.exec(path)?.[1];
+        const { openPty, openPts } = this.sys as Required<Pick<ProcessSys, 'openPty' | 'openPts'>>;
+        const opener = () =>
+          n === undefined
+            ? openPty.call(this.sys)
+            : openPts.call(this.sys, Number(n), (stream.flags & O_NOCTTY) !== 0);
+        this.openNode(stream, path, opener, true);
+      },
+    });
+    fs.mkdev?.call(fs, path, dev);
   }
 
   private ptsTarget(path: string, st: unknown): string | undefined {
@@ -818,7 +843,8 @@ export class KernelStreams {
         if (!isPtyPath(path))
           return this.pathStat(path, original.call(fs, path, ...rest), name, owned);
         this.existingPty(path);
-        return ptyStat(path);
+        const st = ptyStat(path);
+        return this.options.owners === true ? { ...st, uid: 0, gid: 0 } : st;
       };
     }
   }
