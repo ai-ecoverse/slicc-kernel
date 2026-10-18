@@ -51,7 +51,8 @@ proc_kb=${SLICC_HEAVY_PROC_KB:-2000000}
 root_kb=${SLICC_HEAVY_ROOT_KB:-2800000}
 [ "$root_kb" -lt "$proc_kb" ] && root_kb=$proc_kb
 limit_s=${SLICC_HEAVY_TIMEOUT:-900}
-began=$(date +%s)
+moved=$(date +%s)
+last=
 measure() {
   ps -axo pid=,ppid=,pgid=,rss=,lstart= | awk -v root="$child" -v state="$seen" '
     BEGIN { while ((getline line < state) > 0) { split(line, f, "\t"); known[f[1]] = f[2] } }
@@ -94,14 +95,20 @@ while kill -0 "$child" 2> /dev/null; do
   sum=${1:-0}
   max=${2:-0}
   top=${3:-0}
+  shift 3 2> /dev/null || set --
+  now="$*"
+  if [ "$now" != "$last" ]; then
+    last=$now
+    moved=$(date +%s)
+  fi
   [ "$sum" -gt "$peak" ] && peak=$sum
   if [ "$sum" -gt "$tree_kb" ] || [ "$max" -gt "$proc_kb" ] || [ "$top" -gt "$root_kb" ]; then
     printf 'heavy.sh: stopped at %s KB for the process tree, %s KB for one process, %s KB for the command itself (caps %s, %s and %s KB)\n' "$sum" "$max" "$top" "$tree_kb" "$proc_kb" "$root_kb" >&2
     stop
     exit 137
   fi
-  if [ $(($(date +%s) - began)) -gt "$limit_s" ]; then
-    printf 'heavy.sh: stopped after %s s, the time limit (SLICC_HEAVY_TIMEOUT)\n' "$limit_s" >&2
+  if [ $(($(date +%s) - moved)) -gt "$limit_s" ]; then
+    printf 'heavy.sh: stopped after %s s in which no process of the run started or ended (SLICC_HEAVY_TIMEOUT)\n' "$limit_s" >&2
     stop
     exit 124
   fi
