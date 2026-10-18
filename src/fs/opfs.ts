@@ -33,6 +33,18 @@ const S_IFIFO = 0o010000;
 const PERM_MASK = 0o7777;
 const S_ISGID = 0o2000;
 const READ_ATTEMPTS = 3;
+
+async function swapped<T>(op: () => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await op();
+    } catch (err) {
+      if ((err as { name?: unknown })?.name !== 'NotFoundError' || attempt >= READ_ATTEMPTS) {
+        throw err;
+      }
+    }
+  }
+}
 const MAX_LINKS = 40;
 const CHECK_MS = 1000;
 const ABSENT_MS = 2;
@@ -1024,11 +1036,15 @@ export class OpfsFs implements KernelFs {
   }
 
   stat(path: string): Promise<FsStat> {
-    return this.unreplaced(async () => this.describe(await this.located(path, true)));
+    return this.unreplaced(() =>
+      swapped(async () => this.describe(await this.located(path, true)))
+    );
   }
 
   lstat(path: string): Promise<FsStat> {
-    return this.unreplaced(async () => this.describe(await this.located(path, false)));
+    return this.unreplaced(() =>
+      swapped(async () => this.describe(await this.located(path, false)))
+    );
   }
 
   async exists(path: string): Promise<boolean> {
@@ -1622,11 +1638,11 @@ export class OpfsFs implements KernelFs {
   }
 
   async utimes(path: string, atime: Date, mtime: Date): Promise<void> {
-    await this.setTimes(await this.locate(path, true), atime, mtime);
+    await swapped(async () => this.setTimes(await this.locate(path, true), atime, mtime));
   }
 
   async lutimes(path: string, atime: Date, mtime: Date): Promise<void> {
-    await this.setTimes(await this.locate(path, false), atime, mtime);
+    await swapped(async () => this.setTimes(await this.locate(path, false), atime, mtime));
   }
 
   private async setTimes(found: Located, atime: Date, mtime: Date): Promise<void> {

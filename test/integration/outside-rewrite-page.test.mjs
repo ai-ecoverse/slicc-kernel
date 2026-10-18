@@ -6,7 +6,7 @@ import { booted } from './kernel.mjs';
 const chrome = await launch();
 after(() => chrome.close());
 
-test('on the OPFS root, bash keeps starting while a writer outside the kernel overwrites its package in place with createWritable, package.json last (#1075)', {
+test('on the OPFS root, bash keeps starting and its files keep existing while a writer outside the kernel overwrites its package in place with createWritable, package.json last (#1075)', {
   timeout: 900_000,
 }, async (t) => {
   const { page, bash } = await booted(chrome, t);
@@ -44,6 +44,15 @@ test('on the OPFS root, bash keeps starting while a writer outside the kernel ov
       }
       stop = true;
     })();
+    const dir = '/node_modules/@ai-ecoverse/wasm-bash';
+    const looks = window.kernel.run(
+      [
+        'bash',
+        '-c',
+        `n=0; bad=0; while [ ! -e /tmp/done ]; do for f in ${files.map((f) => `${dir}/${f.join('/')}`).join(' ')}; do [ -e $f ] || bad=$((bad+1)); n=$((n+1)); done; done; echo $bad $n`,
+      ],
+      { cwd: '/' }
+    );
     const fails = [];
     let runs = 0;
     while (!stop) {
@@ -56,8 +65,19 @@ test('on the OPFS root, bash keeps starting while a writer outside the kernel ov
       }
     }
     await rewriter.catch((e) => fails.push('rewriter ' + String(e)));
-    return { runs, rewrites, files: files.length, fails: fails.slice(0, 5), failed: fails.length };
+    await window.kernel.run(['bash', '-c', ': > /tmp/done'], { cwd: '/' });
+    const [bad, looked] = (await looks).stdout.trim().split(' ').map(Number);
+    return {
+      runs,
+      rewrites,
+      files: files.length,
+      fails: fails.slice(0, 5),
+      failed: fails.length,
+      bad,
+      looked,
+    };
   }, 30);
-  assert.ok(out.runs > 0 && out.rewrites === 30 * out.files, JSON.stringify(out));
+  assert.ok(out.runs > 0 && out.looked > 0 && out.rewrites === 30 * out.files, JSON.stringify(out));
+  assert.equal(out.bad, 0, JSON.stringify(out));
   assert.deepEqual(out.fails, []);
 });
