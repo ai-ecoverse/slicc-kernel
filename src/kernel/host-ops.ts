@@ -288,8 +288,13 @@ async function flock(
   if (req.kind !== 'unlock' && req.wait)
     await locks.flocks.wait(key, owner, req.kind, ctx.blocking);
   else if (!(await locks.flocks.set(key, owner, req.kind))) throw new KernelError('EAGAIN');
-  if (shared && granted) await ctx.settle?.(req.fd, true);
+  if (shared && granted) await grantedAcross(ctx, req.fd);
   return shared ? json(true) : done;
+}
+
+async function grantedAcross(ctx: HostOpsContext, fd: number | undefined): Promise<void> {
+  ctx.locks?.fresh?.();
+  if (fd !== undefined) await ctx.settle?.(fd, true);
 }
 
 async function recordLock(
@@ -324,6 +329,6 @@ async function recordLock(
     await locks.wait(key, owner, req.kind, range, ctx.blocking);
   else if (!(await locks.set(key, owner, req.kind, range.start, range.end)))
     throw new KernelError('EAGAIN');
-  if (granted && fd !== undefined) await ctx.settle?.(fd, true);
+  if (granted && shared) await grantedAcross(ctx, fd);
   return shared ? json(true) : done;
 }

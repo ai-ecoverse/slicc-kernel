@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, test } from 'node:test';
 import { launch } from './chrome.mjs';
-import { booted, ok } from './kernel.mjs';
+import { booted, installPackage, ok } from './kernel.mjs';
 
 const chrome = await launch();
 after(() => chrome.close());
@@ -199,4 +199,42 @@ test('a program that only reads the clock after looking a name up sees the symli
     );
   });
   assert.deepEqual(reader, ok('first=EINVAL second=t\n'));
+});
+
+test('with an idle peer on the root, tar unpacking an archive of symlinks makes at most 1.5 times the OPFS calls it makes alone (#984)', async (t) => {
+  const { page, bash } = await booted(chrome, t);
+  for (const name of ['wasm-coreutils', 'wasm-tar']) await installPackage(page, name);
+  assert.deepEqual(
+    await bash(
+      'rm -rf /tmp/ct && mkdir -p /tmp/ct/src/inner && cd /tmp/ct/src/inner && echo first > ../a.txt && for i in $(seq 60); do ln -s ../a.txt l$i; done && cd /tmp/ct && tar -cf src.tar src',
+      { cwd: '/' }
+    ),
+    ok()
+  );
+  const calls = async () =>
+    Number((await bash('cat /proc/sys/kernel/slicc_opfs_calls', { cwd: '/' })).stdout);
+  const unpack = async () => {
+    const before = await calls();
+    const t0 = Date.now();
+    assert.deepEqual(
+      await bash(
+        'cd /tmp/ct && for i in 1 2; do rm -rf out && mkdir out && tar -xf src.tar -C out && [ "$(cat out/src/inner/l60)" = first ] || echo bad; done',
+        { cwd: '/' }
+      ),
+      ok()
+    );
+    return { calls: (await calls()) - before, ms: Date.now() - t0 };
+  };
+  const alone = await unpack();
+  await page.evaluate(() => window.secondKernel({}));
+  assert.equal(await shared(page), '1');
+  const peered = await unpack();
+  console.log(
+    `OPFS calls for 2 unpacks: alone ${alone.calls} in ${alone.ms} ms, with a peer ${peered.calls} in ${peered.ms} ms`
+  );
+  assert.ok(alone.calls > 0, 'the kernel counts its OPFS calls');
+  assert.ok(
+    peered.calls <= 1.5 * alone.calls,
+    `alone ${alone.calls} OPFS calls, with a peer ${peered.calls}`
+  );
 });

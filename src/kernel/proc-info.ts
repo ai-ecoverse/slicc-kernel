@@ -41,4 +41,5 @@ export interface ProcessListing {
   wasm?: { live: number; ceiling: number; source?: string };
   peers?: number;
   fsCalls?: number;
+  opfsCalls?: number;
 }

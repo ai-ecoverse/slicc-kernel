@@ -61,6 +61,7 @@ export interface Peers {
   joined(): Promise<unknown>;
   crowded(): boolean;
   watch(listener: (crowded: boolean) => void): void;
+  fresh?(): void;
 }
 
 export interface KernelFs {
@@ -109,6 +110,7 @@ export interface KernelFs {
   commandTarget?(path: string): Promise<string | undefined>;
   readVersioned?(path: string, cached?: boolean): Promise<{ bytes: Uint8Array; version: string }>;
   version?(path: string, cached?: boolean): Promise<string>;
+  opfsCalls?(): number;
 }
 
 export type RangedOps = Required<Pick<KernelFs, 'pread' | 'pwrite' | 'truncate'>>;
