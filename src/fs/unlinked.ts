@@ -5,6 +5,8 @@ export const UNLINKED_DIR = '.slicc-unlinked';
 export interface Replacements {
   settled(path: string): Promise<void>;
   missed(path: string): boolean;
+  generation(): number;
+  changedSince(path: string, gen: number): boolean;
 }
 
 interface Replacing {
@@ -72,6 +74,7 @@ type LookupOp = (typeof LOOKUP_OPS)[number];
 const within = (path: string, target: string) =>
   path === target || target === '/' || path.startsWith(`${target}/`);
 
+const TOUCHED_MAX = 4096;
 const parentOf = (path: string) => path.slice(0, path.lastIndexOf('/')) || '/';
 
 const lockName = (instance: string) => `slicc-unlinked:${instance}`;
@@ -122,6 +125,9 @@ export class UnlinkedKeeper {
   private queue: Promise<unknown> = Promise.resolve();
   private count = 0;
   private readonly replacing = new Map<string, Replacing>();
+  private gen = 0;
+  private floor = 0;
+  private readonly touched = new Map<string, number>();
   private replaced = 0;
 
   private readonly links = new Map<string, number>();
@@ -167,6 +173,7 @@ export class UnlinkedKeeper {
       op: (gated: () => void, sealed: () => void) => Promise<void>
     ) => {
       const { promise, resolve } = Promise.withResolvers<void>();
+      keeper.touch(target);
       let mine: Replacing | undefined;
       const gated = () => {
         const before = replacing.get(target);
@@ -180,6 +187,7 @@ export class UnlinkedKeeper {
         await op(gated, sealed);
       } finally {
         keeper.replaced += 1;
+        keeper.touch(target);
         resolve();
         if (mine && replacing.get(target) === mine) replacing.delete(target);
       }
@@ -250,6 +258,29 @@ export class UnlinkedKeeper {
       await this.replacing.get(p)?.done;
       if (p === '/') return;
     }
+  }
+
+  generation(): number {
+    return this.gen;
+  }
+
+  changedSince(path: string, gen: number): boolean {
+    if (gen < this.floor) return true;
+    for (let p = path; this.touched.size > 0; p = parentOf(p)) {
+      if ((this.touched.get(p) ?? 0) > gen) return true;
+      if (p === '/') return false;
+    }
+    return false;
+  }
+
+  private touch(target: string): void {
+    this.gen += 1;
+    this.touched.delete(target);
+    this.touched.set(target, this.gen);
+    if (this.touched.size <= TOUCHED_MAX) return;
+    const [oldest, at] = this.touched.entries().next().value as [string, number];
+    this.touched.delete(oldest);
+    this.floor = at;
   }
 
   missed(path: string): boolean {

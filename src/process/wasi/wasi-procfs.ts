@@ -440,10 +440,17 @@ export function procfsBridge<T extends SyncFsPosixBridge>(fs: T, tree: ProcTree)
         ],
         () => fs.link(from, to, follow)
       ),
-    hold: (p: string, held: boolean, open?: boolean, handle?: number, want?: number) => {
+    hold: (
+      p: string,
+      held: boolean,
+      open?: boolean,
+      handle?: number,
+      want?: number,
+      seen?: { gen?: number }
+    ) => {
       if (handle !== undefined && snapshots.delete(handle)) return undefined;
       if (!held) return fs.hold?.(p, held, open, handle);
-      return via(p, snapshot, () => fs.hold?.(p, held, open, undefined, want) ?? late(p));
+      return via(p, snapshot, () => fs.hold?.(p, held, open, undefined, want, seen) ?? late(p));
     },
     kept: (handle: number) => snapshots.has(handle) || fs.kept?.(handle) === true,
     pinned: (handle: number) => {

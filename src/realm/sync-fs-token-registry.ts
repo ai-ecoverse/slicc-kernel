@@ -1,6 +1,6 @@
 import type { Created, Dac } from '../fs/dac.ts';
 import type { KernelFs } from '../fs/types.ts';
-import type { KeptFile } from '../fs/unlinked.ts';
+import type { KeptFile, Replacements } from '../fs/unlinked.ts';
 import type { Cred } from '../kernel/cred.ts';
 
 export interface SyncFsTokenEntry {
@@ -28,6 +28,7 @@ export interface SyncFsTokenEntry {
   links?: number;
   created?: Created;
   holdsKept?: (path: string) => Promise<boolean>;
+  replacements?: Replacements;
   fresh?: (path: string) => void;
   source?: SourceCheck;
 }

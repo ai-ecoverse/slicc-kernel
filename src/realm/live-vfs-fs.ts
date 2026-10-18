@@ -802,6 +802,17 @@ function appendThrough(h: LiveHelpers, stream: LiveFsStream, bytes: () => Uint8A
   return true;
 }
 
+function holdLive(
+  bridge: SyncFsPosixBridge,
+  node: LiveFsNode,
+  on: boolean,
+  want: number
+): number | undefined {
+  const s = node.live;
+  const seen = on && s.stat ? { gen: s.stat.gen } : undefined;
+  return bridge.hold?.(liveNodePath(node), on, true, s.handle, want, seen);
+}
+
 function createStreamOps(h: LiveHelpers): LiveStreamOps {
   const { Fs, statOf, ensureLoaded, ensureCapacity, flushNode, bridgeOf, rangedOf } = h;
   const held = (stream: LiveFsStream, change: 1 | -1) => {
@@ -818,7 +829,7 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
   const opened = (node: LiveFsNode, on: boolean, want = 0) => {
     const s = node.live;
     try {
-      const handle = bridgeOf(node).hold?.(liveNodePath(node), on, true, s.handle, want);
+      const handle = holdLive(bridgeOf(node), node, on, want);
       s.handle = on ? handle : undefined;
       h.linked.opening(node, on);
       if (s.handle === undefined) h.handled.delete(node);
