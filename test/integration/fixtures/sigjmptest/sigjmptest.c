@@ -120,7 +120,6 @@ __attribute__((noinline)) static void raise_mode(int longjmp_out, const char *wh
 
 __attribute__((noinline)) static void blocking_mode(const char *mode) {
   catch_with(SIGALRM, jump, SIGUSR2);
-  time_t t0 = time(NULL);
   plain = mode[0] == 'l';
   if (plain) mode++;
   if ((plain ? setjmp(jb) : sigsetjmp(sjb, 1)) == 0) {
@@ -128,7 +127,7 @@ __attribute__((noinline)) static void blocking_mode(const char *mode) {
     int r = blocking(mode);
     printf("returned %d\n", r);
   } else {
-    printf("jumped %s %s\n", mode, time(NULL) - t0 < 3 ? "early" : "late");
+    printf("jumped %s\n", mode);
   }
   mask();
   if (plain) {

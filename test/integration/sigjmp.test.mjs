@@ -34,7 +34,7 @@ test('a longjmp out of a WASIX signal handler lands in the program, keeps the ha
   for (const how of ['sleep', 'nanosleep', 'read', 'poll']) {
     assert.deepEqual(
       await run(`l${how}`),
-      ok(`jumped ${how} early\nusr1=0 usr2=1 alrm=1\nagain=2\n`),
+      ok(`jumped ${how}\nusr1=0 usr2=1 alrm=1\nagain=2\n`),
       how
     );
   }

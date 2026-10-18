@@ -1243,7 +1243,7 @@ A WASIX C program for `test/integration/sigjmp.test.mjs` ([#975](https://github.
 
 On -35, `sigsetjmp` is an ordinary libc function rather than the `setjmp` that LLVM's wasm setjmp/longjmp lowering rewrites, so every `siglongjmp` escapes the program (`[object WebAssembly.Exception]`, exit 70), even `direct`. That is homescoop#1059. The rows use plain `longjmp` until the sysroot fixes it.
 
-**Build:** `WASIX_SYSROOT_35=/path/to/wasix-sysroot ./build.sh`, with `wasixcc` 0.4.7 and binaryen's `wasm-opt` 133 on `PATH`. Asyncify runs with `asyncify-ignore-indirect`, because functions with wasm `try` blocks can't be flattened. `bin/sigjmptest.wasm` is 52,725 bytes, sha256 `87039f3ba2e51a1297971bc614eb2976b88088a060df049ffd23d0288ad65491`.
+**Build:** `WASIX_SYSROOT_35=/path/to/wasix-sysroot ./build.sh`, with `wasixcc` 0.4.7 and binaryen's `wasm-opt` 133 on `PATH`. Asyncify runs with `asyncify-ignore-indirect`, because functions with wasm `try` blocks can't be flattened. `bin/sigjmptest.wasm` is 52,240 bytes, sha256 `9768c2caafa0bcf55e4b9cd2c97a486d46496a275d4e9bd9d5998e163d630fbb`.
 
 ### `handlertest`
 
