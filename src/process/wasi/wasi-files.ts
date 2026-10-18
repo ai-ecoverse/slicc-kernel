@@ -673,6 +673,17 @@ export function cachingBridge(
       else cache.mutated([]);
     }
   };
+  const relabeling = <T>(p: string, op: () => T): T => {
+    if (exact || !bridge.identifyNext) return rewriting(p, op);
+    bridge.identifyNext();
+    try {
+      return op();
+    } finally {
+      const st = bridge.identified?.() ?? null;
+      if (st) cache.mutated([p], st.ino);
+      else cache.mutated([]);
+    }
+  };
   const rewriting = <T>(p: string, op: () => T, ...also: string[]): T => {
     if (exact) return identified(p, op, also);
     const ino = cache.inoOf(p, () => bridge.stat(p));
@@ -731,8 +742,8 @@ export function cachingBridge(
     unlink: (p) => mutating(() => bridge.unlink(p)),
     rmdir: (p) => mutating(() => bridge.rmdir(p)),
     symlink: (target, link) => mutating(() => bridge.symlink(target, link), ...entry(link)),
-    chmod: (p, mode) => rewriting(p, () => bridge.chmod(p, mode)),
-    utimes: (p, a, m, now) => rewriting(p, () => bridge.utimes(p, a, m, now)),
+    chmod: (p, mode) => relabeling(p, () => bridge.chmod(p, mode)),
+    utimes: (p, a, m, now) => relabeling(p, () => bridge.utimes(p, a, m, now)),
     lutimes: (p, a, m, now) => mutating(() => bridge.lutimes(p, a, m, now)),
     ...(bridge.hold ? { hold: bridge.hold.bind(bridge) } : {}),
     ...(bridge.access ? { access: bridge.access.bind(bridge) } : {}),
@@ -754,7 +765,7 @@ export function cachingBridge(
     ...(chown
       ? {
           chown: (p: string, ...rest: ChownArgs) =>
-            rewriting(p, () => chown.call(bridge, p, ...rest)),
+            relabeling(p, () => chown.call(bridge, p, ...rest)),
         }
       : {}),
     ...(bridge.pread && bridge.pwrite && bridge.truncate

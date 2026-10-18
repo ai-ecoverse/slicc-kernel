@@ -161,6 +161,7 @@ export interface SyncFsPosixBridge {
   truncate?(path: string, size: number): void;
   append?(path: string, bytes: Uint8Array): number;
   identify?(): void;
+  identifyNext?(): void;
   identified?(): SyncFsBridgeStat | null;
 }
 
