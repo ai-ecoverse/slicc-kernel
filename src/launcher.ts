@@ -1805,6 +1805,7 @@ export class Launcher {
       nodes: stack.nodes,
       held: this.held,
       unlinkGate: stack.unlinked.gate,
+      replacements: stack.unlinked,
       statfs: (path) => this.mounts.statfs(path),
       mounts: () => this.mounts.list(),
       mount: (call, signal) => this.processMount(pid, call, signal),

@@ -335,9 +335,12 @@ export function createSyncFsSabBridge(
     access: (path, mode, kind = 'access', nofollow) => {
       run({ op: 'access', path, mode, arg2: kind, ...(nofollow ? { nofollow } : {}) }, path);
     },
-    hold: (path, held, open, handle, want = 0) => {
+    hold: (path, held, open, handle, want = 0, seen = {}) => {
       const mode = (held ? 1 : 0) | (open ? 2 : 0);
-      if (mode === 3) return json({ op: 'hold', path, mode: mode | want }, path) as number;
+      if (mode === 3) {
+        const at = seen.gen !== undefined ? { gen: seen.gen } : {};
+        return json({ op: 'hold', path, mode: mode | want, ...at }, path) as number;
+      }
       run({ op: 'hold', path, mode, ...(handle !== undefined ? { handle } : {}) }, path);
       return undefined;
     },

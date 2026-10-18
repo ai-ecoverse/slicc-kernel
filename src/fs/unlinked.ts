@@ -2,6 +2,18 @@ import { type FsStat, type KernelFs, mayLink, type NewOwner } from './types.ts';
 
 export const UNLINKED_DIR = '.slicc-unlinked';
 
+export interface Replacements {
+  settled(path: string): Promise<void>;
+  missed(path: string): boolean;
+  generation(): number;
+  changedSince(path: string, gen: number): boolean;
+}
+
+interface Replacing {
+  done: Promise<void>;
+  sealed: boolean;
+}
+
 export interface KeptFile {
   readonly hidden: string;
   release(): void;
@@ -62,6 +74,7 @@ type LookupOp = (typeof LOOKUP_OPS)[number];
 const within = (path: string, target: string) =>
   path === target || target === '/' || path.startsWith(`${target}/`);
 
+const TOUCHED_MAX = 4096;
 const parentOf = (path: string) => path.slice(0, path.lastIndexOf('/')) || '/';
 
 const lockName = (instance: string) => `slicc-unlinked:${instance}`;
@@ -111,7 +124,10 @@ export class UnlinkedKeeper {
   readonly gate = new PathGate();
   private queue: Promise<unknown> = Promise.resolve();
   private count = 0;
-  private readonly replacing = new Map<string, { done: Promise<void> }>();
+  private readonly replacing = new Map<string, Replacing>();
+  private gen = 0;
+  private floor = 0;
+  private readonly touched = new Map<string, number>();
   private replaced = 0;
 
   private readonly links = new Map<string, number>();
@@ -152,30 +168,33 @@ export class UnlinkedKeeper {
   wrap(fs: KernelFs = this.fs): KernelFs {
     const keeper = this;
     const { replacing } = this;
-    const replace = async (target: string, op: (gated: () => void) => Promise<void>) => {
+    const replace = async (
+      target: string,
+      op: (gated: () => void, sealed: () => void) => Promise<void>
+    ) => {
       const { promise, resolve } = Promise.withResolvers<void>();
-      let mine: { done: Promise<void> } | undefined;
+      keeper.touch(target);
+      let mine: Replacing | undefined;
       const gated = () => {
         const before = replacing.get(target);
-        mine = { done: Promise.all([before?.done, promise]).then(() => undefined) };
+        mine = { done: Promise.all([before?.done, promise]).then(() => undefined), sealed: false };
         replacing.set(target, mine);
       };
+      const sealed = () => {
+        if (mine) mine.sealed = true;
+      };
       try {
-        await op(gated);
+        await op(gated, sealed);
       } finally {
         keeper.replaced += 1;
+        keeper.touch(target);
         resolve();
         if (mine && replacing.get(target) === mine) replacing.delete(target);
       }
     };
     const unreplaced = async <T>(path: string, op: () => Promise<T>): Promise<T> => {
       const at = fs.resolvePath('/', path);
-      const pending = async () => {
-        for (let p = at; replacing.size > 0; p = parentOf(p)) {
-          await replacing.get(p)?.done;
-          if (p === '/') return;
-        }
-      };
+      const pending = () => keeper.settled(at);
       for (let attempt = 1; ; attempt++) {
         await pending();
         const seen = keeper.replaced;
@@ -212,8 +231,8 @@ export class UnlinkedKeeper {
       lstat: (path) => unreplaced(path, async () => counted(await fs.lstat(path))),
       async rm(path, options) {
         const target = fs.resolvePath('/', path);
-        await replace(target, async (gated) => {
-          const pinned = await keeper.pin(target, gated);
+        await replace(target, async (gated, sealed) => {
+          const pinned = await keeper.pin(target, gated, sealed);
           if (pinned.moved.has(target)) pinned.commit();
           else await keeper.settle(pinned, () => fs.rm(path, options));
         });
@@ -221,8 +240,8 @@ export class UnlinkedKeeper {
       async rename(from, to) {
         const target = fs.resolvePath('/', to);
         if (target === fs.resolvePath('/', from)) return fs.rename(from, to);
-        await replace(target, async (gated) => {
-          const pinned = await keeper.pin(target, gated);
+        await replace(target, async (gated, sealed) => {
+          const pinned = await keeper.pin(target, gated, sealed);
           await keeper.settle(pinned, () => fs.rename(from, to));
         });
       },
@@ -232,6 +251,44 @@ export class UnlinkedKeeper {
           .filter(([name]) => name !== UNLINKED_DIR)
           .map(([name, st]) => [name, st && counted(st)]),
     };
+  }
+
+  async settled(path: string): Promise<void> {
+    for (let p = path; this.replacing.size > 0; p = parentOf(p)) {
+      await this.replacing.get(p)?.done;
+      if (p === '/') return;
+    }
+  }
+
+  generation(): number {
+    return this.gen;
+  }
+
+  changedSince(path: string, gen: number): boolean {
+    if (gen < this.floor) return true;
+    for (let p = path; this.touched.size > 0; p = parentOf(p)) {
+      if ((this.touched.get(p) ?? 0) > gen) return true;
+      if (p === '/') return false;
+    }
+    return false;
+  }
+
+  private touch(target: string): void {
+    this.gen += 1;
+    this.touched.delete(target);
+    this.touched.set(target, this.gen);
+    if (this.touched.size <= TOUCHED_MAX) return;
+    const [oldest, at] = this.touched.entries().next().value as [string, number];
+    this.touched.delete(oldest);
+    this.floor = at;
+  }
+
+  missed(path: string): boolean {
+    for (let p = path; this.replacing.size > 0; p = parentOf(p)) {
+      if (this.replacing.get(p)?.sealed) return true;
+      if (p === '/') return false;
+    }
+    return false;
   }
 
   async settle(pinned: Pinned, op: () => Promise<void>): Promise<void> {
@@ -256,33 +313,45 @@ export class UnlinkedKeeper {
     return held;
   }
 
-  async pin(target: string, gated: () => void = () => undefined): Promise<Pinned> {
+  async pin(
+    target: string,
+    gated: () => void = () => undefined,
+    sealed: () => void = () => undefined
+  ): Promise<Pinned> {
     const paths: string[] = [];
     const releases: Array<() => void> = [];
-    for (;;) {
-      const fresh = [...this.heldWithin(target).keys()].filter((path) => !paths.includes(path));
-      if (fresh.length === 0) break;
-      fresh.sort();
-      if (paths.some((path) => path > (fresh[0] as string))) {
-        for (const release of releases.splice(0)) release();
-        fresh.push(...paths.splice(0));
+    const take = async () => {
+      for (;;) {
+        const fresh = [...this.heldWithin(target).keys()].filter((path) => !paths.includes(path));
+        if (fresh.length === 0) return;
         fresh.sort();
+        if (paths.some((path) => path > (fresh[0] as string))) {
+          for (const release of releases.splice(0)) release();
+          fresh.push(...paths.splice(0));
+          fresh.sort();
+        }
+        for (const path of fresh) {
+          paths.push(path);
+          releases.push(await this.gate.acquire(path));
+        }
       }
-      for (const path of fresh) {
-        paths.push(path);
-        releases.push(await this.gate.acquire(path));
-      }
-    }
+    };
+    await take();
     gated();
-    const now = this.heldWithin(target);
-    const held = new Map(
-      paths.flatMap((path) => (now.has(path) ? [[path, now.get(path) as UnlinkHolder[]]] : []))
-    );
+    const held = new Map<string, UnlinkHolder[]>();
     const hidden = new Map<string, string>();
-    for (const path of held.keys()) {
-      const at = await this.hide(path);
-      if (at !== undefined) hidden.set(path, at);
+    for (;;) {
+      await take();
+      const now = this.heldWithin(target);
+      const next = paths.filter((path) => now.has(path) && !held.has(path));
+      if (next.length === 0) break;
+      for (const path of next) {
+        held.set(path, now.get(path) as UnlinkHolder[]);
+        const at = await this.hide(path);
+        if (at !== undefined) hidden.set(path, at);
+      }
     }
+    sealed();
     const done = () => {
       for (const release of releases) release();
     };

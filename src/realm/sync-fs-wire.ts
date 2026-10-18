@@ -53,6 +53,7 @@ export interface SyncFsRequest {
   length?: number;
   version?: string;
   handle?: number;
+  gen?: number;
   uid?: number;
   gid?: number;
   exclusive?: boolean;
@@ -91,6 +92,7 @@ export interface SyncFsBridgeStat {
   version?: string;
   uid?: number;
   gid?: number;
+  gen?: number;
 }
 
 export interface SyncFsUsage {
@@ -143,7 +145,8 @@ export interface SyncFsPosixBridge {
     held: boolean,
     open?: boolean,
     handle?: number,
-    want?: number
+    want?: number,
+    seen?: { gen?: number }
   ): number | undefined;
   access?(path: string, mode: number, kind?: AccessKind, nofollow?: boolean): void;
   create?(path: string, mode?: number, opening?: boolean): void;
@@ -194,6 +197,7 @@ export function parseSyncFsStat(json: unknown): SyncFsBridgeStat | null {
     ...(s.ranged === true ? { ranged: true } : {}),
     ...(s.linkable === true ? { linkable: true } : {}),
     ...(typeof s.version === 'string' ? { version: s.version } : {}),
+    ...(typeof s.gen === 'number' ? { gen: s.gen } : {}),
     ...(typeof s.uid === 'number' ? { uid: s.uid } : {}),
     ...(typeof s.gid === 'number' ? { gid: s.gid } : {}),
   };

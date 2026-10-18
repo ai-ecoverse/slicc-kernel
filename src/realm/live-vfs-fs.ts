@@ -802,6 +802,23 @@ function appendThrough(h: LiveHelpers, stream: LiveFsStream, bytes: () => Uint8A
   return true;
 }
 
+function holdLive(
+  bridge: SyncFsPosixBridge,
+  node: LiveFsNode,
+  on: boolean,
+  want: number
+): number | undefined {
+  const s = node.live;
+  const seen = on && s.stat ? { gen: s.stat.gen } : undefined;
+  return bridge.hold?.(liveNodePath(node), on, true, s.handle, want, seen);
+}
+
+function dropOpen(s: LiveNodeState): boolean {
+  if (s.openCount === 0) return false;
+  s.openCount -= 1;
+  return true;
+}
+
 function createStreamOps(h: LiveHelpers): LiveStreamOps {
   const { Fs, statOf, ensureLoaded, ensureCapacity, flushNode, bridgeOf, rangedOf } = h;
   const held = (stream: LiveFsStream, change: 1 | -1) => {
@@ -818,7 +835,7 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
   const opened = (node: LiveFsNode, on: boolean, want = 0) => {
     const s = node.live;
     try {
-      const handle = bridgeOf(node).hold?.(liveNodePath(node), on, true, s.handle, want);
+      const handle = holdLive(bridgeOf(node), node, on, want);
       s.handle = on ? handle : undefined;
       h.linked.opening(node, on);
       if (s.handle === undefined) h.handled.delete(node);
@@ -916,7 +933,7 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
       const node = stream.node;
       if (!Fs.isFile(node.mode)) return;
       const s = node.live;
-      s.openCount = Math.max(0, s.openCount - 1);
+      if (!dropOpen(s)) return;
       if (s.openCount > 0) {
         held(stream, -1);
         return;
@@ -930,7 +947,7 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
         s.len = 0;
         s.loaded = false;
         held(stream, -1);
-        opened(node, false);
+        if (s.handle !== undefined) opened(node, false);
       }
     },
     read(stream, buffer, offset, length, position) {

@@ -51,6 +51,7 @@ export function toErrno(err: unknown): SyncFsResult {
 }
 
 export interface SyncFsStatJson {
+  gen?: number;
   isDirectory: boolean;
   isFile: boolean;
   isSymbolicLink: boolean;
@@ -232,10 +233,16 @@ async function run(
       return done;
     case 'exists':
       return json(await fs.exists(path));
-    case 'stat':
-      return json(statJson(await shownAs(entry, path, await fs.stat(path))));
-    case 'lstat':
-      return json(statJson(await shownAs(entry, path, await fs.lstat(path))));
+    case 'stat': {
+      const gen = entry.replacements?.generation();
+      const st = statJson(await shownAs(entry, path, await fs.stat(path)));
+      return json(gen === undefined ? st : { ...st, gen });
+    }
+    case 'lstat': {
+      const gen = entry.replacements?.generation();
+      const st = statJson(await shownAs(entry, path, await fs.lstat(path)));
+      return json(gen === undefined ? st : { ...st, gen });
+    }
     case 'readdir':
       return json(await fs.readdir(path));
     case 'readdir-stat':
@@ -431,14 +438,27 @@ async function opening(entry: SyncFsTokenEntry, path: string, mode: number): Pro
   }
 }
 
+async function stillThere(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest) {
+  if (req.gen === undefined || !entry.replacements?.changedSince(path, req.gen)) return;
+  const st = await entry.fs.stat(path).catch(() => undefined);
+  if (!st) throw syncError('ENOENT', path);
+}
+
 async function holdOp(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest) {
   const mode = req.mode ?? 0;
   const [on, open] = [(mode & 1) === 1, (mode & 2) === 2];
   if (on && open) {
-    await opening(entry, path, mode);
-    const real = await entry.fs.realpath?.(path, true).catch(() => path);
-    await entry.source?.open(path, real);
-    return json(entry.hold?.(path, on, open, real) ?? null);
+    for (;;) {
+      const r = entry.replacements;
+      await r?.settled(path);
+      const gen = r?.generation() ?? 0;
+      await opening(entry, path, mode);
+      const real = await entry.fs.realpath?.(path, true).catch(() => path);
+      await entry.source?.open(path, real);
+      await stillThere(entry, path, req);
+      if (!r || (!r.missed(path) && !r.changedSince(path, gen)))
+        return json(entry.hold?.(path, on, open, real) ?? null);
+    }
   }
   entry.hold?.(path, on, open, undefined, req.handle);
   return done;

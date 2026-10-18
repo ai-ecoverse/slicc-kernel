@@ -184,6 +184,10 @@ export class HeldPaths extends Map<string, number> implements UnlinkHolder {
     return this.keptHandles.get(handle);
   }
 
+  holdsHandle(handle: number): boolean {
+    return this.handles.has(handle);
+  }
+
   keeps(hidden: string): boolean {
     for (const file of this.uses.keys()) if (file.hidden === hidden) return true;
     for (const file of this.unlinked.values()) if (file.hidden === hidden) return true;

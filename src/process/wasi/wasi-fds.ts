@@ -860,7 +860,9 @@ export class WasiFds {
     const ranged = st.ranged ? st.size : undefined;
     const asked =
       (want & 4 ? HOLD_READ : 0) | (want & 2 ? HOLD_WRITE : 0) | (made ? HOLD_CREATED : 0);
-    const handle = this.fs.hold?.(path, true, true, undefined, this.fs.owners ? asked : 0);
+    const handle = this.fs.hold?.(path, true, true, undefined, this.fs.owners ? asked : 0, {
+      gen: st.gen,
+    });
     const io = handle !== undefined && this.fs.pinned ? this.fs.pinned(handle) : this.fs;
     const view = this.fs.changes;
     const watch =
@@ -1075,5 +1077,6 @@ function promoteRequest(
 
     ...(!joins && f.buffer.isDirty() ? { dirty: true } : {}),
     ...(f.buffer.handle !== undefined ? { handle: f.buffer.handle } : {}),
+    ...(f.buffer.handle !== undefined && f.ino !== undefined ? { ino: f.ino } : {}),
   };
 }

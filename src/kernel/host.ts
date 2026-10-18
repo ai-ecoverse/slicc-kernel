@@ -1,5 +1,5 @@
 import { Created, type Dac } from '../fs/dac.ts';
-import { type PathGate, UNLINKED_DIR } from '../fs/unlinked.ts';
+import { type PathGate, type Replacements, UNLINKED_DIR } from '../fs/unlinked.ts';
 import { HeldPaths } from '../mount/mount-fs.ts';
 import { dispatchSyncFs } from '../realm/sync-fs-dispatch.ts';
 import {
@@ -129,6 +129,7 @@ export interface SpawnWasmOptions {
   umount?: WasmProcessOptions['umount'];
   held?: Set<HeldPaths>;
   unlinkGate?: PathGate;
+  replacements?: Replacements;
   jobs?: JobTable;
   ptys?: PtyTable;
 
@@ -390,6 +391,13 @@ function inherited(opts: SpawnWasmOptions): { ignored?: number; umask?: number; 
   };
 }
 
+function heldBy(process: WasmProcess, holds: HeldPaths, replacements?: Replacements): void {
+  process.keptPath = (path) => holds.keptAt(path)?.hidden;
+  process.keptHandle = (handle) => holds.keptFor(handle)?.hidden;
+  process.holdsHandle = (handle) => holds.holdsHandle(handle);
+  if (replacements) process.replacements = replacements;
+}
+
 function holdingToken(
   opts: SpawnWasmOptions,
   holds: HeldPaths,
@@ -406,6 +414,7 @@ function holdingToken(
     ...(opts.links !== undefined ? { links: opts.links } : {}),
     ...(opts.fresh ? { fresh: (path: string) => opts.fresh?.(path, caller.umask()) } : {}),
     ...(opts.source ? { source: opts.source } : {}),
+    ...(opts.replacements ? { replacements: opts.replacements } : {}),
     fs: opts.fs,
     noLinks: opts.noLinks,
     cwd: opts.cwd,
@@ -576,8 +585,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     holdsKept: async (path) =>
       path.includes(`/${UNLINKED_DIR}/`) && (holds.keeps(path) || (await process.holds(path))),
   });
-  process.keptPath = (path) => holds.keptAt(path)?.hidden;
-  process.keptHandle = (handle) => holds.keptFor(handle)?.hidden;
+  heldBy(process, holds, opts.replacements);
   const worker = opts.createWorker();
   const dying = new Dying();
   const dispatch = (req: SyncSabDispatchRequest, block?: () => void): Promise<SyncFsResult> =>

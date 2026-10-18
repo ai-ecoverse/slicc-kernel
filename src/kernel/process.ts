@@ -14,6 +14,7 @@ import {
 } from '../fs/dac.ts';
 import { chownAs } from '../fs/owners.ts';
 import type { FsStat, KernelFs, NewOwner, Perm } from '../fs/types.ts';
+import type { Replacements } from '../fs/unlinked.ts';
 import type { MountCall } from '../mount/syscall.ts';
 import { inProc, ProcTree, procAlias } from '../process/wasi/wasi-procfs.ts';
 import type { LinkRecord } from '../process/wasi/wasix-linker.ts';
@@ -137,6 +138,8 @@ export type WasmSyscall =
 
       handle?: number;
 
+      ino?: number;
+
       fifo?: boolean;
     }
   | { op: 'fd-pread'; fd: number; offset: number; max: number }
@@ -194,6 +197,8 @@ export type WasmSyscall =
       pin?: VersionPin;
 
       handle?: number;
+
+      ino?: number;
     }
   | { op: 'fd-open-tty'; name?: string }
   | { op: 'fd-tty-names' }
@@ -1259,6 +1264,7 @@ export class WasmProcess {
     const fd = this.fds.install(heldFile(), 3);
     try {
       const nodes = this.nodes;
+      const gen = this.replacements?.generation() ?? 0;
       const path = await this.openPath(req, marked);
       if (inProc(path)) {
         this.fds.installAt(fd, await this.procFile(req, path));
@@ -1283,7 +1289,15 @@ export class WasmProcess {
           }
         });
       } else {
-        this.fds.installAt(fd, this.openVfsFile(open, await nodes.identify(path), fs));
+        await this.unmissed(
+          () => this.openPath(req, marked),
+          async (at) => {
+            await this.stillOpen(at, req.handle);
+            return nodes.identify(at);
+          },
+          (id, at) => this.fds.installAt(fd, this.openVfsFile({ ...open, path: at }, id, fs)),
+          { at: path, gen }
+        );
       }
       if (req.existing && !(await present(fs, path, true))) {
         throw new KernelError('ENOENT');
@@ -1521,6 +1535,7 @@ export class WasmProcess {
         ...(req.create ? { create: true } : {}),
         ...(req.pin ? { pin: req.pin } : {}),
         ...(id !== undefined && !req.orphan ? { id } : {}),
+        ...(req.ino !== undefined && !req.orphan ? { ino: req.ino } : {}),
       },
       this.nodes
     );
@@ -1697,9 +1712,36 @@ export class WasmProcess {
 
   keptHandle?: (handle: number) => string | undefined;
 
+  holdsHandle?: (handle: number) => boolean;
+
+  replacements?: Replacements;
+
+  private async unmissed<T, R>(
+    path: () => Promise<string>,
+    look: (at: string) => Promise<T>,
+    make: (found: T, at: string) => R,
+    first?: { at: string; gen: number }
+  ): Promise<R> {
+    let given = first;
+    for (;;) {
+      const r = this.replacements;
+      const gen = given?.gen ?? r?.generation() ?? 0;
+      const at = given?.at ?? (await path());
+      given = undefined;
+      await r?.settled(at);
+      const found = await look(at);
+      if (!r || (!r.missed(at) && !r.changedSince(at, gen))) return make(found, at);
+    }
+  }
+
+  private async stillOpen(at: string, handle: number | undefined): Promise<void> {
+    if (handle === undefined || this.keptHandle?.(handle) !== undefined) return;
+    if (this.holdsHandle?.(handle) !== false) return;
+    if (!(await present(this.options.fs, at, true))) throw new KernelError('ENOENT');
+  }
+
   private async keptOr(path: string, handle?: number): Promise<string> {
-    const held = handle === undefined ? undefined : this.keptHandle?.(handle);
-    if (held !== undefined) return held;
+    if (handle !== undefined) return this.keptHandle?.(handle) ?? path;
     const kept = this.keptPath?.(path);
     return kept !== undefined && !(await present(this.options.fs, path, true)) ? kept : path;
   }
@@ -1710,27 +1752,37 @@ export class WasmProcess {
       await this.fds.dup2Clipboard(req.share, req.fd);
       return;
     }
-    if (req.path === undefined) throw new KernelError('EINVAL');
-    const path = req.orphan
-      ? req.path
-      : await this.keptOr(await this.nodes.targetKey(req.path), req.handle);
-    const id = req.orphan ? undefined : await this.nodes.identify(path);
-    if (!this.fds.get(req.fd).file.held) throw new KernelError('EBADF');
-    const file = vfsFile(
-      this.options.fs,
-      {
-        path,
-        flags: req.flags ?? 0,
-        position: req.position ?? 0,
-        ...(req.contents !== undefined ? { contents: req.contents } : {}),
-        ...(req.orphan ? { orphan: true } : {}),
-        ...(req.dirty ? { dirty: true } : {}),
-        ...(req.pin ? { pin: req.pin } : {}),
-        ...(id !== undefined ? { id } : {}),
+    const asked = req.path;
+    if (asked === undefined) throw new KernelError('EINVAL');
+    const install = ([path, id]: readonly [string, string | undefined]) => {
+      if (!this.fds.get(req.fd).file.held) throw new KernelError('EBADF');
+      const file = vfsFile(
+        this.options.fs,
+        {
+          path,
+          flags: req.flags ?? 0,
+          position: req.position ?? 0,
+          ...(req.contents !== undefined ? { contents: req.contents } : {}),
+          ...(req.orphan ? { orphan: true } : {}),
+          ...(req.dirty ? { dirty: true } : {}),
+          ...(req.pin ? { pin: req.pin } : {}),
+          ...(id !== undefined ? { id } : {}),
+          ...(req.ino !== undefined && path === asked ? { ino: req.ino } : {}),
+        },
+        this.nodes
+      );
+      this.fds.installAt(req.fd, file);
+    };
+    if (req.orphan) return install([asked, undefined]);
+    await this.unmissed(
+      () => this.nodes.targetKey(asked),
+      async (target) => {
+        const at = await this.keptOr(target, req.handle);
+        await this.stillOpen(at, req.handle);
+        return [at, await this.nodes.identify(at)] as const;
       },
-      this.nodes
+      install
     );
-    this.fds.installAt(req.fd, file);
   }
 
   private reserve(fd: number | undefined, min = 3, meta?: HeldMeta): number {

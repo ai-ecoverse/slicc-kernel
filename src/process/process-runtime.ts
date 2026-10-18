@@ -139,6 +139,7 @@ export function kernelSys(transport: SyncSabTransport): ProcessSys & PtyKernel &
             ...(opts?.created ? { created: true } : {}),
             ...(opts?.pin ? { pin: opts.pin } : {}),
             ...(opts?.handle !== undefined ? { handle: opts.handle } : {}),
+            ...(opts?.ino !== undefined ? { ino: opts.ino } : {}),
             ...(opts?.fifo ? { fifo: true } : {}),
           },
           `fd-open-vfs ${path}`
