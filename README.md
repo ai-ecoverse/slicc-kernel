@@ -399,7 +399,7 @@ The module's default export (or its `main` export) is called with a context and 
     | `tls: { path: 'transport' }` | A1 | A1 |
     | `connect({ socket: conn, host, tls })` (STARTTLS) | **A2** | `EOPNOTSUPP` |
 
-  - **A2, the handshake in the kernel** ([#922](https://github.com/ai-ecoverse/slicc-kernel/issues/922)): the kernel dials the destination through the uplink as raw TCP and runs a TLS client there, with [`@ai-ecoverse/wasm-tls-engine`](https://www.npmjs.com/package/@ai-ecoverse/wasm-tls-engine) (4.2.0-3 or later, loaded on the first A2 connect). The connection is then an ordinary uplink socket that carries the decrypted stream, so any protocol works: SMTP, IMAP, Postgres, MQTT, HTTP/2.
+  - **A2, the handshake in the kernel** ([#922](https://github.com/ai-ecoverse/slicc-kernel/issues/922)): the kernel dials the destination through the uplink as raw TCP and runs a TLS client there, with [`@ai-ecoverse/wasm-tls-engine`](https://www.npmjs.com/package/@ai-ecoverse/wasm-tls-engine) (4.2.0-4 or later, loaded on the first A2 connect). The connection is then an ordinary uplink socket that carries the decrypted stream, so any protocol works: SMTP, IMAP, Postgres, MQTT, HTTP/2.
     - **Verification** is required. The chain must reach a trusted root, the leaf must name `servername` (default `host`), and every certificate must be within its validity by the page's clock, with serverAuth usage. The trusted roots are Mozilla's set the engine package ships (`dist/roots.der`, its date in the package's `slicc.tls.roots`), read on the first A2 connect without a `ca`. A `ca` (PEM text, DER bytes, or a list of them) **replaces** them, as in Node.
     - **A refusal** rejects the connect with Node's code: `ERR_TLS_CERT_ALTNAME_INVALID`, `UNABLE_TO_GET_ISSUER_CERT_LOCALLY`, `CERT_HAS_EXPIRED`, `CERT_NOT_YET_VALID` or `INVALID_PURPOSE`, with the engine's reason as `detail`. A failed handshake otherwise is `ERR_SSL_HANDSHAKE_FAILURE`.
     - **`rejectUnauthorized: false`** finishes the handshake whatever the chain says and reports `authorized: false` with `authorizationError`.
@@ -408,12 +408,21 @@ The module's default export (or its `main` export) is called with a context and 
       - `peerCertificates` is the server's chain as DER, leaf first.
       - `cipher` is the negotiated suite as Node's `getCipher()` gives it: `{ name, standardName, version }`, where `name` is OpenSSL's (`ECDHE-RSA-AES128-GCM-SHA256`) and `standardName` IANA's. As in Node, `version` is the suite's own version, not the session's: `TLSv1.0` for a CBC-SHA suite on a TLS 1.2 session.
       - `clientCertificate` says whether a client certificate was offered. `sni` says whether the server name was sent: it's false with `sni: false` and for an IP-literal `servername`, which TLS never sends.
-      - `hostnameChecked` says whether the kernel checked the leaf against `servername`. `hostnameMatches` says whether it names it (absent with `rejectUnauthorized: false`).
+      - `hostnameChecked` says whether the kernel checked the leaf against `servername`. `hostnameMatches` says whether it names it.
+      - With `rejectUnauthorized: false`, `chainError` says what is wrong with the chain apart from the name, with Node's names, and is absent when the chain is fine:
+        - a self-signed leaf alone is `DEPTH_ZERO_SELF_SIGNED_CERT`;
+        - an untrusted chain ending in a self-signed root is `SELF_SIGNED_CERT_IN_CHAIN`;
+        - a lone leaf whose issuer is unknown is `UNABLE_TO_VERIFY_LEAF_SIGNATURE`;
+        - an untrusted longer chain is `UNABLE_TO_GET_ISSUER_CERT_LOCALLY`;
+        - otherwise it's the reason's code, such as `CERT_HAS_EXPIRED`.
+
+        It's never `ERR_TLS_CERT_ALTNAME_INVALID`; that's `hostnameMatches: false`. `authorized` and `authorizationError` are as before.
     - **A client certificate** ([#1004](https://github.com/ai-ecoverse/slicc-kernel/issues/1004)): `cert` (PEM text, DER bytes or a list: the leaf first, then its intermediates) and `key` (PEM, PKCS#1, SEC1 or PKCS#8, or DER), with `passphrase` for an encrypted key, as in Node.
       - The key goes to the engine before anything is dialled, and the kernel keeps no copy of it (nor of the passphrase) once the engine has it.
       - Before dialling, `cert` without `key` (or the reverse) is `EINVAL`. A key that doesn't match the leaf is `ERR_OSSL_X509_KEY_VALUES_MISMATCH`, a wrong passphrase `ERR_OSSL_BAD_DECRYPT`, a missing one `ERR_OSSL_CRYPTO_INTERRUPTED_OR_CANCELLED`, and a key the engine can't read `ERR_OSSL_UNSUPPORTED`.
       - `pfx` is `ENOTSUP`: pass `cert` and `key`.
       - A server that requires a certificate and gets none refuses with an alert. On TLS 1.2 that fails the connect (`ERR_SSL_HANDSHAKE_FAILURE`). On TLS 1.3 the client's side of the handshake is already done, so the next read or write fails with `ERR_SSL_FATAL_ALERT`, as Node's fails after `secureConnect`.
+      - **A fatal alert from the server**, at the handshake or after it, is in the error: its `detail` ends in ` (alert <n>)`, and a JS program's error has `alert: n`, the alert's description number (116 certificate_required, 40 handshake_failure).
     - **`sni: false`** sends no server name. The leaf is still checked against `servername` exactly as with SNI.
     - **`checkHostname: false`** checks the chain (trust, validity, usage) but **not that the leaf names `servername`**. The connection reports `hostnameChecked: false`, and `hostnameMatches` says what the skipped check found.
       - **The caller must then check the server's identity itself**, as slicc-jsh does with Node's `checkServerIdentity` and `peerCertificates[0]`; pass it only when the program supplied one.

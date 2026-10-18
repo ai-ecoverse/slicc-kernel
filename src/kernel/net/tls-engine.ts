@@ -33,7 +33,11 @@ type TlsClientExport =
   | 'tls_peer_count'
   | 'tls_peer_der';
 
-type TlsSessionExport = 'tls_client_cert' | 'tls_ciphersuite' | 'tls_name_mismatch';
+type TlsSessionExport =
+  | 'tls_client_cert'
+  | 'tls_ciphersuite'
+  | 'tls_name_mismatch'
+  | 'tls_last_alert';
 
 export type TlsEngineModule = { readonly HEAPU8: Uint8Array } & {
   readonly [K in TlsExport as `_${K}`]: (...args: number[]) => number;
@@ -297,6 +301,11 @@ export class TlsSession {
 
   get ciphersuite(): number {
     return (this.m._tls_ciphersuite as (s: number) => number)(this.ptr);
+  }
+
+  get lastAlert(): number {
+    const last = this.m._tls_last_alert;
+    return last ? last(this.ptr) : -1;
   }
 
   get nameMismatch(): boolean {
