@@ -68,7 +68,7 @@ test('python sqlite3 sees a commit of the sqlite3 CLI while its connection is op
 test('appenders in three processes keep every line of a shared log (#665)', async (t) => {
   const bash = await booted(t);
   const n = 100;
-  const py = `import time\nf = open('log', 'a')\nfor i in range(${n}):\n    f.write('p%d\\\\n' % i); f.flush(); time.sleep(0.01)`;
+  const py = `import time\nf = open('log', 'a')\nfor i in range(${n}):\n    f.write('p%d\\\\n' % i); f.flush(); time.sleep(0.01)\n    while i == 0 and not all(m in open('log').read().split() for m in ('a1', 'b1')): time.sleep(0.01)`;
   const r = await bash(`
     exec 4< <(sleep 120); tick=$!
     python3 -c "${py}" &

@@ -1,0 +1,12 @@
+{
+  "name": "watchtest",
+  "private": true,
+  "slicc": {
+    "commands": {
+      "watchtest": {
+        "abi": "js",
+        "module": "bin/watchtest.mjs"
+      }
+    }
+  }
+}

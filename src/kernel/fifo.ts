@@ -157,6 +157,7 @@ export class FifoTable {
         readable: reads && pipe.readReady,
         writable: writes && pipe.writeReady,
         hangup: reads ? pipe.writersGone : pipe.readersGone,
+        ...(reads ? { nread: pipe.buffered } : {}),
       }),
       changed: (signal) => pipe.changed(signal),
     });

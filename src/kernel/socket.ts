@@ -190,6 +190,7 @@ export class KernelSocket implements KernelFile {
       writable: this.writeShut || tx.writeReady,
       hangup: rx.writersGone && tx.readersGone,
       rdhup: rx.writersGone,
+      nread: this.readShut ? 0 : rx.buffered,
     };
   }
   changed(signal?: AbortSignal): Promise<void> {

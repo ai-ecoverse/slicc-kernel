@@ -21,11 +21,11 @@ import { type CrontabCall, type CrontabResult, Crontabs } from './cron/crontab.t
 import { type CronLocks, CronService } from './cron/service.ts';
 import { FacadeHosts } from './facade/hosts.ts';
 import type { FacadeSpecs } from './facade/types.ts';
-import { R_OK, X_OK } from './fs/access.ts';
+import { access, R_OK, X_OK } from './fs/access.ts';
 import { type Attestation, attest, FileWatches, type RemoteFs } from './fs/attest.ts';
 import { FileChanges } from './fs/changes.ts';
 import { type EntryTarget, followLinks, withCommandDirs } from './fs/commands.ts';
-import { Dac, type DenialHook, type Guard, need, TTY_MODE } from './fs/dac.ts';
+import { Dac, type DenialHook, type Guard, need, readable, TTY_MODE } from './fs/dac.ts';
 import { SHM } from './fs/dev-removal.ts';
 import { FreshModules } from './fs/fresh-modules.ts';
 import {
@@ -99,6 +99,7 @@ import { LoopbackNet } from './kernel/socket.ts';
 import { KernelTty } from './kernel/tty.ts';
 import { keepingOpen, VfsNodes } from './kernel/vfs-file.ts';
 import { defaultCeiling, WasmMemories } from './kernel/wasm-memories.ts';
+import { visibleTo, type WatchSource } from './kernel/watch-ops.ts';
 import { type ServedFilesystem, serveFilesystem } from './mount/driver.ts';
 import {
   FSA_CAPABILITIES,
@@ -1817,6 +1818,7 @@ export class Launcher {
       locks: this.locks,
       fifos: this.fifos,
       sems: this.sems,
+      watches: this.watchSource(pid),
       resolver: this.resolver,
       onReap: (child) => this.reaped(child, pid),
       ...(req.fork ? { fork: req.fork } : {}),
@@ -2443,6 +2445,24 @@ export class Launcher {
         .map((entry) => entry.target)
         .filter((target) => this.mounts.mounted(target) !== undefined),
     });
+  }
+
+  private watchSource(pid: number): WatchSource {
+    return {
+      open: async (path, recursive) => {
+        const at = normalizePath(path);
+        const g = this.execGuard(this.credOf(pid), pid);
+        if (g) await readable(g, 'watch', at);
+        const st = await this.fs.stat(at);
+        const real = (await this.fs.realpath?.(at, true).catch(() => at)) ?? at;
+        const watch = this.watchers.typedWatch(real, recursive && st.isDirectory, at);
+        if (!g || g.cred.euid === 0) return watch;
+        return visibleTo(watch, real, async (dir) => {
+          const walked = await access(g.fs, g.cred, dir, R_OK | X_OK, { directory: true });
+          return walked.denied === undefined && walked.missing !== true;
+        });
+      },
+    };
   }
 
   watchFiles(paths: readonly string[], notify: (path: string) => void): Promise<() => void> {

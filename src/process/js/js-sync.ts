@@ -3,10 +3,12 @@ import type { JsLane } from '../../kernel/protocol.ts';
 import { SIG } from '../../kernel/signals.ts';
 import {
   parseSyncFsStat,
+  SYNC_FS_READ_ONLY,
+  SYNC_FS_REQUEST_TIMEOUT_MS,
   type SyncFsBridgeStat,
   type SyncFsResult,
 } from '../../realm/sync-fs-wire.ts';
-import { createSyncSabTransport } from '../../realm/sync-sab-bridge.ts';
+import { createSyncSabTransport, type SyncSabTransport } from '../../realm/sync-sab-bridge.ts';
 import type { SyncSabRequestBody } from '../../realm/sync-sab-wire.ts';
 import type { JsChild, JsSpawnOptions } from './js-children.ts';
 import {
@@ -43,6 +45,7 @@ import {
 import { callError, JsCallError, type JsKernel, modeOf } from './js-kernel.ts';
 import { procFsSync, procOpenSync } from './js-proc.ts';
 import type { JsRunOptions, JsRunResult } from './js-run.ts';
+import type { JsWatcher, JsWatchListener, JsWatchOptions } from './js-watch.ts';
 
 export type SyncCall = (req: SyncSabRequestBody) => SyncFsResult;
 
@@ -96,6 +99,11 @@ export interface JsSyncContext {
     statfs(path: string): JsStatFs;
     readFile(path: string): Uint8Array;
     writeFile(path: string, data: Uint8Array | string, options?: { mode?: number }): void;
+    watch(
+      path: string,
+      options: JsWatchOptions | JsWatchListener,
+      listener?: JsWatchListener
+    ): JsWatcher;
   };
 }
 
@@ -111,10 +119,28 @@ const encoder = new TextEncoder();
 
 export const noLane: SyncCall = () => ({ ok: false, errno: 'ENOSYS', message: 'no sync lane' });
 
-export function laneOf(lane: JsLane | undefined): SyncCall {
+const READ_ONLY: ReadonlySet<string> = new Set([...SYNC_FS_READ_ONLY, 'fd-path-flush']);
+
+export function laneOf(
+  lane: JsLane | undefined,
+  silence = SYNC_FS_REQUEST_TIMEOUT_MS,
+  open: (sab: SharedArrayBuffer, port: JsLane['port']) => SyncSabTransport = createSyncSabTransport
+): SyncCall {
   if (!lane) return noLane;
-  const transport = createSyncSabTransport(lane.sab, lane.port);
-  return (req) => transport.call(req, Number.POSITIVE_INFINITY, req.op);
+  const transport = open(lane.sab, lane.port);
+  return (req) => {
+    if (!READ_ONLY.has(req.op)) return transport.call(req, Number.POSITIVE_INFINITY, req.op);
+    try {
+      return transport.call(req, silence, req.op);
+    } catch (err) {
+      const errno = (err as { code?: unknown } | null)?.code;
+      return {
+        ok: false,
+        errno: typeof errno === 'string' ? errno : 'EIO',
+        message: err instanceof Error ? err.message : String(err),
+      };
+    }
+  };
 }
 
 export class JsSyncKernel {
@@ -166,8 +192,8 @@ export function syncOps(
   shared: SyncShared
 ): Omit<
   JsSyncContext,
-  'run' | 'spawn' | 'exit' | 'kill' | 'cred' | 'setcred' | 'kernel' | 'umask'
-> {
+  'run' | 'spawn' | 'exit' | 'kill' | 'cred' | 'setcred' | 'kernel' | 'umask' | 'fs'
+> & { fs: Omit<JsSyncContext['fs'], 'watch'> } {
   const { infos, handles, resolve } = shared;
 
   const tryDevSync = (abs: string): string | undefined => {
@@ -382,7 +408,7 @@ function syncPathOps(
   statOf: (op: 'stat' | 'lstat', path: string) => SyncFsBridgeStat,
   open: (path: string, options?: JsOpenOptions) => JsSyncFile,
   tryDev: (abs: string) => string | undefined
-): JsSyncContext['fs'] {
+): Omit<JsSyncContext['fs'], 'watch'> {
   return {
     stat: (path) => statOf('stat', path),
     lstat: (path) => statOf('lstat', path),

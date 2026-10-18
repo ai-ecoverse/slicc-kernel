@@ -1464,6 +1464,18 @@ const modes = {
   readsteal,
   readcancel,
   waitcount,
+  syncfs: async (ctx, [how, path, data]) => {
+    try {
+      if (how === 'read')
+        await ctx.write(1, `read ${new TextDecoder().decode(ctx.sync.fs.readFile(path))}`);
+      else {
+        ctx.sync.fs.writeFile(path, data);
+        await ctx.write(1, 'wrote\n');
+      }
+    } catch (err) {
+      await ctx.write(1, `${how} ${err.code}\n`);
+    }
+  },
   echo: async (ctx, args) => {
     await ctx.write(
       1,

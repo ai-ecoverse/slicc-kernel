@@ -1021,3 +1021,80 @@ test(
     assert.equal(refusal.alert, undefined);
   }
 );
+
+test(
+  'rejectUnauthorized: false never puts a substituted secret on an unverified server: an A2 session to an untrusted or wrong-name server carries the placeholder as written, and on A1 the option changes nothing, as the transport makes and verifies the TLS itself (#1050 follow-up)',
+  TIMEOUT,
+  async (t) => {
+    const received = [];
+    const listen = async (cert) => {
+      const server = createServer({ key: cert.key, cert: cert.cert }, (s) => {
+        s.on('data', (d) => {
+          received.push(String(d));
+          s.write(d);
+        });
+      });
+      server.on('tlsClientError', () => {});
+      await new Promise((r) => server.listen(0, '127.0.0.1', r));
+      t.after(() => server.close());
+      return server.address().port;
+    };
+    const untrusted = await listen(other.server('secure.test'));
+    const wrong = await listen(ca.server('other.test'));
+    const transport = substitutingTransport();
+    const peers = {};
+    for (const [address, port] of [
+      ['203.0.113.20', untrusted],
+      ['203.0.113.21', wrong],
+    ]) {
+      for (const p of [443, 4433]) peers[`${address}:${p}`] = pipeTo(port);
+    }
+    const uplink = fakeUplink({
+      routes: { prefixes: [], exit: true },
+      names: { 'untrusted.test': ['203.0.113.20'], 'wrong.test': ['203.0.113.21'] },
+      peers,
+    });
+    const kernel = await createNodeKernel({ users: 'off', network: { uplink, transport } });
+    t.after(() => kernel.terminate());
+    await install(kernel, 'wasm-tls-engine');
+    await kernel.writeFile('/node_modules/tlsup/package.json', PACKAGE);
+    await kernel.writeFile('/node_modules/tlsup/bin/tlsup.mjs', PROGRAM);
+    const run = async (o) =>
+      JSON.parse((await kernel.run(['tlsup', JSON.stringify(o)], { cwd: '/' })).stdout);
+    const send = (host) =>
+      `GET / HTTP/1.1\r\nHost: ${host}\r\nAuthorization: Bearer ${PLACEHOLDER}\r\n`;
+    const insecure = { servername: 'secure.test', rejectUnauthorized: false };
+    const a2 = [
+      ['untrusted.test', 443, { ...insecure, ca: ca.pem }],
+      ['untrusted.test', 4433, { ...insecure, ca: ca.pem }],
+      ['wrong.test', 443, { ...insecure, ca: ca.pem }],
+      ['untrusted.test', 443, { ...insecure, path: 'kernel' }],
+      ['wrong.test', 4433, { ...insecure, path: 'kernel' }],
+    ];
+    for (const [host, port, tls] of a2) {
+      const got = await run({ host, port, tls, send: send(host) });
+      assert.equal(got.tls?.path, 'kernel', JSON.stringify([host, port, tls, got]));
+      assert.equal(got.tls.substitutes, false);
+      assert.equal(got.tls.authorized, false);
+      assert.equal(got.echo, send(host).trim());
+    }
+    assert.equal(received.length, a2.length);
+    for (const r of received) {
+      assert.ok(r.includes(`Bearer ${PLACEHOLDER}`), r);
+      assert.equal(r.includes(SECRET), false);
+    }
+    assert.deepEqual(transport.seen, []);
+    const a1 = await run({
+      host: 'untrusted.test',
+      port: 443,
+      tls: { rejectUnauthorized: false },
+      send: `${send('untrusted.test')}\r\n`,
+    });
+    assert.equal(a1.tls.path, 'transport');
+    assert.equal(a1.tls.substitutes, true);
+    assert.equal(a1.tls.authorized, true);
+    assert.equal(received.length, a2.length, 'the unverified server got nothing over A1');
+    assert.equal(transport.seen.length, 1);
+    assert.match(transport.seen[0], /"url":"https:\/\/untrusted\.test\//);
+  }
+);
