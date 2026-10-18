@@ -757,14 +757,20 @@ const O_TRUNC = 0o1000;
 const S_IFMT_BITS = 0o170000;
 const S_IFIFO_BITS = 0o010000;
 
-function namesFifo(fs: FifoOpenFs, path: string): boolean {
+function namesFifo(fs: FifoOpenFs, path: string, flags: number): boolean {
   try {
     const { node } = fs.lookupPath?.(path, { follow: true }) ?? { node: { mode: 0 } };
     return (node.mode & S_IFMT_BITS) === S_IFIFO_BITS;
-  } catch {
+  } catch (err) {
+    const { errno, code } = (err ?? {}) as { errno?: unknown; code?: unknown };
+    const errnum = typeof errno === 'number' ? errno : wasiErrno(String(code));
+    if (REFUSED.has(errnum) && (flags & OWN_ERRORS) === 0) throw err;
     return false;
   }
 }
+
+const REFUSED: ReadonlySet<number> = new Set([wasiErrno('EACCES'), wasiErrno('EPERM')]);
+const OWN_ERRORS = 0o200 | 0o400000;
 
 export function useFifoOpens(
   Fs: ProcessFs,
@@ -776,7 +782,10 @@ export function useFifoOpens(
   if (typeof open !== 'function' || typeof fs.lookupPath !== 'function') return;
   fs.open = (path, flags, ...rest) => {
     const truncates = typeof path === 'string' && typeof flags === 'number' && flags & O_TRUNC;
-    const kept = truncates && namesFifo(fs, path as string) ? (flags as number) & ~O_TRUNC : flags;
+    const kept =
+      truncates && namesFifo(fs, path as string, flags as number)
+        ? (flags as number) & ~O_TRUNC
+        : flags;
     return open.call(Fs, path, kept, ...rest);
   };
 }
