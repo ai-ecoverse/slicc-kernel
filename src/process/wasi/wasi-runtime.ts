@@ -25,6 +25,7 @@ import { WasiExit, type WasiFunction, WasiHost, type WasiHostOptions } from './w
 import { importsContext, loadImports, type ProgramImports, type Raw } from './wasi-imports.ts';
 import { type ForeignResults, type ImportedMemory, RESERVED_NAMESPACES } from './wasi-module.ts';
 import { ProcTree, procfsBridge } from './wasi-procfs.ts';
+import { ptsBridge } from './wasi-ptsfs.ts';
 import { WasiSigmask } from './wasi-sigmask.ts';
 import { WasiSignals } from './wasi-signals.ts';
 import { WasiStats } from './wasi-stats.ts';
@@ -736,13 +737,16 @@ export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike
     ppid: id.ppid,
     parent: () => identify(transport, init).ppid,
     kernel: { sys: traced(stats, 'kernel', sys), call },
-    fs: procfsBridge(
-      cachingBridge(
-        traced(stats, 'fs', createSyncFsSabBridge(transport, ownersOf(init))),
-        undefined,
-        threads?.ids
+    fs: ptsBridge(
+      procfsBridge(
+        cachingBridge(
+          traced(stats, 'fs', createSyncFsSabBridge(transport, ownersOf(init))),
+          undefined,
+          threads?.ids
+        ),
+        procTree(call, id.pid)
       ),
-      procTree(call, id.pid)
+      call
     ),
     ...descriptors(init, fork, threads),
     ...(threads ? { credGen: threads.ids } : {}),
@@ -868,9 +872,12 @@ export async function runWasiThread(init: WasmThreadInitMsg, port: SabPostLike):
     ppid: id.ppid,
     parent: () => identify(transport, init).ppid,
     kernel: { sys, call },
-    fs: procfsBridge(
-      cachingBridge(createSyncFsSabBridge(transport, ownersOf(init)), undefined, threads.ids),
-      procTree(call, id.pid)
+    fs: ptsBridge(
+      procfsBridge(
+        cachingBridge(createSyncFsSabBridge(transport, ownersOf(init)), undefined, threads.ids),
+        procTree(call, id.pid)
+      ),
+      call
     ),
     shared: threads.ids,
   });
