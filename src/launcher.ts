@@ -144,6 +144,7 @@ import {
   type ImportedMemory,
   importedMemory,
 } from './process/wasi/wasi-module.ts';
+import { servedFsCalls } from './realm/sync-fs-dispatch.ts';
 import type { SourceCheck } from './realm/sync-fs-token-registry.ts';
 import { anyBlocked, type BlockedMask } from './realm/sync-sab-wire.ts';
 import { REFUSED_PATH, REFUSED_SOURCE, refusing } from './refused-command.ts';
@@ -1795,6 +1796,7 @@ export class Launcher {
         cpu: this.cpuTotal(),
         wasm: this.memories.count(),
         peers: Number(this.locks.shared?.() === true),
+        fsCalls: servedFsCalls(),
       }),
       sudo: (call, signal) => this.sudo(pid, call, signal),
       crontab: (call) => this.crontab(pid, call),

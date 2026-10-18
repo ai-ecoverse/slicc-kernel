@@ -29,6 +29,7 @@ export const SYS_TREE: ProcSysTree = {
     slicc_wasm_memories: (listing) =>
       `${listing.wasm?.live ?? 0} ${listing.wasm?.ceiling ?? 0} ${listing.wasm?.source ?? 'none'}\n`,
     slicc_shared_root: (listing) => `${listing.peers ?? 0}\n`,
+    slicc_fs_calls: (listing) => `${listing.fsCalls ?? 0}\n`,
   },
 };
 

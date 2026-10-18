@@ -16,6 +16,7 @@ import { SYNC_FS_OPS, type SyncFsResult } from '../realm/sync-fs-wire.ts';
 import {
   createSyncFsSabBridge,
   createSyncSabTransport,
+  lookedOutside,
   type SabPostLike,
   type SyncSabTransport,
 } from '../realm/sync-sab-bridge.ts';
@@ -679,7 +680,7 @@ export async function runWasmProcess(
             ppid: () => identify(transport, init).ppid,
             poll: () => void signals.interrupt(),
           });
-          return WebAssembly.instantiate(init.program.module, imports);
+          return WebAssembly.instantiate(init.program.module, watchOutside(imports));
         })
         .then((instance) => {
           memory = wasmMemory(instance, imports);
@@ -867,4 +868,26 @@ function runMain(running: RunningModule, init: WasmProcessInitMsg): number {
     if (typeof status !== 'number') throw e;
     return status;
   }
+}
+
+const OUTSIDE: ReadonlySet<string> = new Set([
+  'clock_time_get',
+  'emscripten_date_now',
+  'emscripten_get_now',
+  'random_get',
+  'getentropy',
+]);
+
+function watchOutside(imports: WebAssembly.Imports): WebAssembly.Imports {
+  for (const space of Object.values(imports)) {
+    for (const [name, value] of Object.entries(space)) {
+      if (!OUTSIDE.has(name) || typeof value !== 'function') continue;
+      const look = value as (...args: unknown[]) => unknown;
+      space[name] = (...args: unknown[]) => {
+        lookedOutside();
+        return look(...args);
+      };
+    }
+  }
+  return imports;
 }
