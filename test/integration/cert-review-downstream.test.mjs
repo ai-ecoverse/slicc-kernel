@@ -49,6 +49,19 @@ test('the downstream smoke: a green canary passes, a regression or an unexplaine
     downstreamOf(result({ counts: { pass: 9, fail: 1 }, failures: [row('x')] }), at).state,
     'FAIL'
   );
+  const countsOnly = downstreamOf(
+    result({ counts: { pass: 9, regression: 2 }, regressions: [] }),
+    at
+  );
+  assert.equal(countsOnly.state, 'FAIL', 'the counts decide, even when the rows are missing');
+  assert.match(
+    countsOnly.line,
+    /2 regressions, 0 failures \(their rows are missing from the result\)/
+  );
+  assert.equal(
+    downstreamOf(result({ counts: { pass: 9, fail: 1 } }), { ...at, override: 'PASS' }).state,
+    'OVERRIDDEN'
+  );
   for (const partial of [
     undefined,
     'not json',
@@ -57,6 +70,9 @@ test('the downstream smoke: a green canary passes, a regression or an unexplaine
     result({ unexplainedExits: [{ shard: 'k4-link', exit: 137 }] }),
     result({ refused: [{ name: 'kernel-tgz' }] }),
     result({ counts: { pass: 0, skip: 0, fail: 0, regression: 0, both: 0, flaky: 0 } }),
+    result({ counts: { pass: 0, skip: 12, fail: 0, regression: 0, both: 0, flaky: 0 } }),
+    result({ biosRef: 'f'.repeat(40) }),
+    result({ biosRef: '' }),
   ]) {
     const found = downstreamOf(partial, at);
     assert.equal(found.state, 'INCOMPLETE', JSON.stringify(partial));
