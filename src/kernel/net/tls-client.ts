@@ -1,4 +1,5 @@
 import { KernelError } from '../fd-table.ts';
+import { ipv4Bytes, ipv6Groups } from './routes.ts';
 import { cipherOf, type TlsCipher } from './tls-ciphers.ts';
 import {
   TLS_CLIENT_INSECURE_SKIP_VERIFY,
@@ -53,6 +54,10 @@ export interface TlsClientOptions {
   checkHostname?: boolean;
   session?: TlsSession;
   clientCertificate?: boolean;
+}
+
+function isIP(name: string): boolean {
+  return ipv4Bytes(name) !== undefined || (name.includes(':') && ipv6Groups(name) !== undefined);
 }
 
 export function clientFlags(o: TlsClientOptions): number {
@@ -154,7 +159,7 @@ function controlsOf(o: TlsClientOptions, session: TlsSession, protocol: TlsCiphe
   return {
     cipher: cipherOf(session.ciphersuite, protocol),
     clientCertificate: o.clientCertificate === true,
-    sni: o.sni !== false,
+    sni: o.sni !== false && !isIP(o.servername),
     hostnameChecked: checked,
     ...(o.insecure ? {} : { hostnameMatches: checked || !session.nameMismatch }),
   };

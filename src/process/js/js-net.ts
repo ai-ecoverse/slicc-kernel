@@ -25,7 +25,7 @@ export interface JsTlsSession {
 export interface JsTlsCipher {
   readonly name: string;
   readonly standardName: string;
-  readonly version: 'TLSv1.2' | 'TLSv1.3';
+  readonly version: 'TLSv1.0' | 'TLSv1.2' | 'TLSv1.3';
 }
 
 export interface JsTlsOptions {
