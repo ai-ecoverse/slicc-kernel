@@ -474,6 +474,8 @@ const O_NONBLOCK = 0o4000;
 const WRITE_ACCESS = 0o3;
 const KEYBOARD: ReadonlySet<number> = new Set([SIG.INT, SIG.QUIT, SIG.TSTP]);
 
+const STUCK_ESCAPES: ReadonlySet<number> = new Set([SIG.INT, SIG.TERM, SIG.QUIT, SIG.HUP]);
+
 export const DEFAULT_UMASK = 0o022;
 
 function words(value: unknown): string[] {
@@ -660,6 +662,10 @@ export class WasmProcess {
 
   private killed = false;
 
+  private calls = 0;
+
+  private readonly pendingAt = new Map<number, number>();
+
   execTermsig: number | undefined;
 
   private stopped = 0;
@@ -792,9 +798,9 @@ export class WasmProcess {
       const action = defaultAction(sig);
       return action === 'stop' ? this.stop(sig) : action;
     }
-    if (((this.options.pendingBits?.() ?? 0) & bit) !== 0 && defaultAction(sig) === 'terminate') {
-      return 'terminate';
-    }
+    if (((this.options.pendingBits?.() ?? 0) & bit) !== 0) {
+      if (STUCK_ESCAPES.has(sig) && this.pendingAt.get(sig) === this.calls) return 'terminate';
+    } else this.pendingAt.set(sig, this.calls);
     this.options.onPending?.(sig);
     if (this.options.jobs?.keyboard && KEYBOARD.has(sig) && this.waiting.size === 0)
       this.owed = true;
@@ -940,6 +946,7 @@ export class WasmProcess {
     block?: () => void
   ): Promise<SyncFsResult> {
     this.options.onSyscall?.(req);
+    this.calls += 1;
     const started = performance.now();
     let restarted = false;
     for (;;) {
