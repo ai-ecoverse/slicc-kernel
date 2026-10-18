@@ -71,6 +71,20 @@ export type SyncFsResult =
 
 export const SYNC_FS_REQUEST_TIMEOUT_MS = 25_000;
 
+export const SYNC_FS_READ_ONLY: ReadonlySet<string> = new Set([
+  'read',
+  'pread',
+  'exists',
+  'stat',
+  'lstat',
+  'readdir',
+  'readdir-stat',
+  'readlink',
+  'statfs',
+  'kept',
+  'access',
+]);
+
 export interface SyncFsBridgeStat {
   isFile: boolean;
   isDirectory: boolean;

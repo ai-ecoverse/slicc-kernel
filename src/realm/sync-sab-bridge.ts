@@ -4,6 +4,7 @@ import {
   parseSyncFsStat,
   parseSyncFsUsage,
   SYNC_FS_OPS,
+  SYNC_FS_READ_ONLY,
   SYNC_FS_REQUEST_TIMEOUT_MS,
   type SyncFsBridgeStat,
   type SyncFsFileIo,
@@ -59,19 +60,6 @@ export type AtomicsWaitLike = (
 
 const PATH_OPS: ReadonlySet<string> = new Set(SYNC_FS_OPS);
 
-const READ_ONLY: ReadonlySet<string> = new Set([
-  'read',
-  'pread',
-  'exists',
-  'stat',
-  'lstat',
-  'readdir',
-  'readdir-stat',
-  'readlink',
-  'statfs',
-  'kept',
-  'access',
-]);
 let calls = 0;
 
 export function syncCallCount(): number {
@@ -203,7 +191,7 @@ export function createSyncFsSabBridge(
 
   function run(req: SyncSabRequestBody, path: string, transfer?: Transferable[]): SyncFsResult {
     last = null;
-    const silence = READ_ONLY.has(req.op) ? timeoutMs : Number.POSITIVE_INFINITY;
+    const silence = SYNC_FS_READ_ONLY.has(req.op) ? timeoutMs : Number.POSITIVE_INFINITY;
     const result = transport.call(req, silence, `sync-sab bridge, '${path}'`, transfer);
     if (!result.ok) throw errnoError(result.errno, path);
     return result;

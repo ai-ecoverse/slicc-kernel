@@ -3,10 +3,12 @@ import type { JsLane } from '../../kernel/protocol.ts';
 import { SIG } from '../../kernel/signals.ts';
 import {
   parseSyncFsStat,
+  SYNC_FS_READ_ONLY,
+  SYNC_FS_REQUEST_TIMEOUT_MS,
   type SyncFsBridgeStat,
   type SyncFsResult,
 } from '../../realm/sync-fs-wire.ts';
-import { createSyncSabTransport } from '../../realm/sync-sab-bridge.ts';
+import { createSyncSabTransport, type SyncSabTransport } from '../../realm/sync-sab-bridge.ts';
 import type { SyncSabRequestBody } from '../../realm/sync-sab-wire.ts';
 import type { JsChild, JsSpawnOptions } from './js-children.ts';
 import {
@@ -117,10 +119,28 @@ const encoder = new TextEncoder();
 
 export const noLane: SyncCall = () => ({ ok: false, errno: 'ENOSYS', message: 'no sync lane' });
 
-export function laneOf(lane: JsLane | undefined): SyncCall {
+const READ_ONLY: ReadonlySet<string> = new Set([...SYNC_FS_READ_ONLY, 'fd-path-flush']);
+
+export function laneOf(
+  lane: JsLane | undefined,
+  silence = SYNC_FS_REQUEST_TIMEOUT_MS,
+  open: (sab: SharedArrayBuffer, port: JsLane['port']) => SyncSabTransport = createSyncSabTransport
+): SyncCall {
   if (!lane) return noLane;
-  const transport = createSyncSabTransport(lane.sab, lane.port);
-  return (req) => transport.call(req, Number.POSITIVE_INFINITY, req.op);
+  const transport = open(lane.sab, lane.port);
+  return (req) => {
+    if (!READ_ONLY.has(req.op)) return transport.call(req, Number.POSITIVE_INFINITY, req.op);
+    try {
+      return transport.call(req, silence, req.op);
+    } catch (err) {
+      const errno = (err as { code?: unknown } | null)?.code;
+      return {
+        ok: false,
+        errno: typeof errno === 'string' ? errno : 'EIO',
+        message: err instanceof Error ? err.message : String(err),
+      };
+    }
+  };
 }
 
 export class JsSyncKernel {
