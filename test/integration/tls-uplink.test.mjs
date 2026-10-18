@@ -897,7 +897,28 @@ test(
         assert.equal(got.echo, send.trim());
       }
     }
-    assert.equal(received.length, 10);
+    const bare = [
+      ['secure.test', { sni: false, rejectUnauthorized: false }],
+      ['secure.test', { ...client, rejectUnauthorized: false }],
+      ['secure.test', { sni: false, ...client, rejectUnauthorized: false }],
+    ];
+    for (const [host, extra] of bare) {
+      const send = `GET / HTTP/1.1\r\nHost: ${host}\r\nAuthorization: Bearer ${PLACEHOLDER}\r\n`;
+      const got = await run({ host, port: 443, tls: extra, send });
+      assert.equal(got.tls?.path, 'kernel', JSON.stringify([host, extra, got]));
+      assert.equal(got.tls.substitutes, false);
+      assert.equal(got.echo, send.trim());
+    }
+    for (const extra of [{ checkHostname: false }, { checkHostname: false, ...client }]) {
+      const got = await run({
+        host: 'wrong.test',
+        port: 443,
+        tls: extra,
+        send: `Bearer ${PLACEHOLDER}`,
+      });
+      assert.equal(got.code, 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', JSON.stringify([extra, got]));
+    }
+    assert.equal(received.length, 13);
     for (const r of received) {
       assert.ok(r.includes(`Bearer ${PLACEHOLDER}`), r);
       assert.equal(r.includes(SECRET), false);
