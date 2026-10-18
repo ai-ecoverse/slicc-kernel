@@ -1473,3 +1473,24 @@ test("the delta reads every title shape the integration tests use, each changed 
   );
   assert.deepEqual(gapsOf([{ kind: 'no-titles', pr: 1036 }]), []);
 });
+
+test("the reviewer's instructions describe the decisions the code makes: behaviour by paths, a NEGATIVE for every behaviour change, prev-not-run and no-titles as INCOMPLETE and no gap, manifest as no finding", async () => {
+  const text = await readFile(new URL('instructions.txt', tools), 'utf8');
+  for (const decision of [
+    'negative',
+    'passes',
+    'no-negative',
+    'no-test',
+    'not-run',
+    'prev-not-run',
+    'no-titles',
+    'manifest',
+    'fails-on-release',
+    'not-behaviour',
+  ])
+    assert.match(text, new RegExp(`\\b${decision} = `), decision);
+  assert.match(text, /by the paths it changes/);
+  assert.match(text, /prev-not-run and no-titles are not gaps: the record is INCOMPLETE/);
+  assert.match(text, /Test gaps \(no-test, no-negative\) are known issues/);
+  assert.doesNotMatch(text, /(?<!no-)negative = a fix whose/);
+});
