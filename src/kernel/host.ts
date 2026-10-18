@@ -139,6 +139,7 @@ export interface SpawnWasmOptions {
   locks?: KernelLocks;
   fifos?: FifoTable;
   sems?: SemTable;
+  watches?: WasmProcessOptions['watches'];
   onReap?: (pid: number) => void;
   resolver?: Resolver;
 }
@@ -481,6 +482,7 @@ function processOptions(
     locks: opts.locks,
     fifos: opts.fifos,
     ...(opts.sems ? { sems: opts.sems } : {}),
+    watches: opts.watches,
     onReap: opts.onReap,
     resolver: opts.resolver,
     ...notifiers(header),

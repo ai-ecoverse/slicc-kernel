@@ -55,9 +55,18 @@ import {
   laneOf,
   noLane,
   type SyncCall,
+  type SyncShared,
   syncOps,
 } from './js-sync.ts';
 import { type JsTty, ttyOps } from './js-tty.ts';
+import {
+  follow,
+  type JsWatcher,
+  type JsWatchListener,
+  type JsWatchOptions,
+  watchArgs,
+  watchRequest,
+} from './js-watch.ts';
 import { type JsWebSocket, type JsWebSocketOptions, websocketOp } from './js-websocket.ts';
 
 export type { JsFdType, JsOpenOptions } from './js-io.ts';
@@ -120,6 +129,11 @@ export interface JsProgramContext {
     statfs(path: string): Promise<JsStatFs>;
     readFile(path: string): Promise<Uint8Array>;
     writeFile(path: string, data: Uint8Array | string, options?: { mode?: number }): Promise<void>;
+    watch(
+      path: string,
+      options: JsWatchOptions | JsWatchListener,
+      listener?: JsWatchListener
+    ): Promise<JsWatcher>;
   };
   signals: {
     on(signal: JsSignal, handler: (signal: number) => void): Promise<void>;
@@ -457,6 +471,16 @@ async function vfsOpen(
   return handle.file;
 }
 
+function watchingSyncOps(kernel: JsKernel, syncKernel: JsSyncKernel, shared: SyncShared) {
+  const ops = syncOps(syncKernel, shared);
+  const watch: JsSyncContext['fs']['watch'] = (path, options, listener) => {
+    const [given, onNote] = watchArgs(options, listener);
+    const id = syncKernel.json(watchRequest(shared.resolve(path), given)) as number;
+    return follow(kernel, id, onNote);
+  };
+  return { ...ops, fs: { ...ops.fs, watch } };
+}
+
 export function createContext(o: ContextOptions): CreatedContext {
   const { kernel } = o;
   const infos = new Map<number, FdInfo>();
@@ -547,7 +571,7 @@ export function createContext(o: ContextOptions): CreatedContext {
   const terminal = ttyOps(kernel);
   const sync: JsSyncContext = {
     kernel: KERNEL_INFO,
-    ...syncOps(syncKernel, { pid: o.pid, resolve, random, infos, handles }),
+    ...watchingSyncOps(kernel, syncKernel, { pid: o.pid, resolve, random, infos, handles }),
     run: (options) =>
       runSync(syncKernel, { env: o.env, cwd: o.cwd, resolve, signal: signalNumber }, options),
     spawn: (options) => spawnSync(options),
@@ -835,6 +859,11 @@ function pathOps(
       }
       await statOf('stat', abs);
       return statFsOf(await kernel.json({ op: 'statfs', path: abs }));
+    },
+    async watch(path, options, listener) {
+      const [given, onNote] = watchArgs(options, listener);
+      const id = (await kernel.json(watchRequest(resolve(path), given))) as number;
+      return follow(kernel, id, onNote);
     },
     async readFile(path) {
       const abs = resolve(path);

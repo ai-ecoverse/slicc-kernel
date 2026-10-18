@@ -92,6 +92,13 @@ import {
   VfsNodes,
   vfsFile,
 } from './vfs-file.ts';
+import {
+  isWatchSyscall,
+  ProcessWatches,
+  WATCH_OPS,
+  type WatchSource,
+  type WatchSyscall,
+} from './watch-ops.ts';
 
 function aborted(signal: AbortSignal): Promise<never> {
   return new Promise<never>((_, reject) => {
@@ -268,7 +275,8 @@ export type WasmSyscall =
   | SemSyscall
   | HttpSyscall
   | PtySyscall
-  | HostSyscall;
+  | HostSyscall
+  | WatchSyscall;
 
 type FdSyscall = Extract<WasmSyscall, { op: `fd-${string}` }>;
 
@@ -451,6 +459,7 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   ...HTTP_OPS,
   ...PTY_OPS,
   ...HOST_OPS,
+  ...WATCH_OPS,
 ]);
 
 type TtySyscall = Extract<WasmSyscall, { op: `tty-${string}` }>;
@@ -592,6 +601,7 @@ export interface WasmProcessOptions {
   raise?: (sig: number, info?: SigInfo) => void;
 
   exitNow?: (status: number) => void;
+  watches?: WatchSource | undefined;
 
   exitSignal?: (sig: number) => void;
 
@@ -625,6 +635,7 @@ export type SignalOutcome = DefaultAction | 'deliver' | 'forward';
 
 export class WasmProcess {
   private exited = false;
+  private readonly watches: ProcessWatches;
   private readonly children: ChildTable;
 
   private readonly deathSignals = new Map<number, number>();
@@ -682,6 +693,7 @@ export class WasmProcess {
     this.fds = fds;
 
     this.options = options;
+    this.watches = new ProcessWatches(options.watches);
     this.inherited = options.ignored ?? 0;
     this.umask = options.umask ?? DEFAULT_UMASK;
     this.cred = copyCred(options.cred ?? ROOT);
@@ -985,6 +997,7 @@ export class WasmProcess {
         });
       }
       if (isHttpSyscall(req)) return await this.httpSyscall(req);
+      if (isWatchSyscall(req)) return await this.watches.syscall(req, cancelled);
       if (isHostSyscall(req)) {
         return await hostSyscall(req, {
           pid: this.pid,
@@ -2001,6 +2014,7 @@ export class WasmProcess {
       | HttpSyscall
       | PtySyscall
       | HostSyscall
+      | WatchSyscall
     >,
     cancelled: AbortSignal
   ): Promise<SyncFsResult> {
@@ -2308,6 +2322,7 @@ export class WasmProcess {
     this.options.locks?.release(this.pid);
     for (const owner of this.lockOwners) this.options.locks?.release(owner);
     this.asyncOps.close();
+    this.watches.closeAll();
     for (const [target, sig] of this.deathSignals) this.sendDeath(target, sig);
     this.deathSignals.clear();
     for (const pid of this.children.pids()) this.options.onReap?.(pid);

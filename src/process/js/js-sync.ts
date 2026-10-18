@@ -43,6 +43,7 @@ import {
 import { callError, JsCallError, type JsKernel, modeOf } from './js-kernel.ts';
 import { procFsSync, procOpenSync } from './js-proc.ts';
 import type { JsRunOptions, JsRunResult } from './js-run.ts';
+import type { JsWatcher, JsWatchListener, JsWatchOptions } from './js-watch.ts';
 
 export type SyncCall = (req: SyncSabRequestBody) => SyncFsResult;
 
@@ -96,6 +97,11 @@ export interface JsSyncContext {
     statfs(path: string): JsStatFs;
     readFile(path: string): Uint8Array;
     writeFile(path: string, data: Uint8Array | string, options?: { mode?: number }): void;
+    watch(
+      path: string,
+      options: JsWatchOptions | JsWatchListener,
+      listener?: JsWatchListener
+    ): JsWatcher;
   };
 }
 
@@ -166,8 +172,8 @@ export function syncOps(
   shared: SyncShared
 ): Omit<
   JsSyncContext,
-  'run' | 'spawn' | 'exit' | 'kill' | 'cred' | 'setcred' | 'kernel' | 'umask'
-> {
+  'run' | 'spawn' | 'exit' | 'kill' | 'cred' | 'setcred' | 'kernel' | 'umask' | 'fs'
+> & { fs: Omit<JsSyncContext['fs'], 'watch'> } {
   const { infos, handles, resolve } = shared;
 
   const tryDevSync = (abs: string): string | undefined => {
@@ -382,7 +388,7 @@ function syncPathOps(
   statOf: (op: 'stat' | 'lstat', path: string) => SyncFsBridgeStat,
   open: (path: string, options?: JsOpenOptions) => JsSyncFile,
   tryDev: (abs: string) => string | undefined
-): JsSyncContext['fs'] {
+): Omit<JsSyncContext['fs'], 'watch'> {
   return {
     stat: (path) => statOf('stat', path),
     lstat: (path) => statOf('lstat', path),

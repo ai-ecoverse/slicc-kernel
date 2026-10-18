@@ -15,6 +15,7 @@ const packages = {
   'node_modules/httptest/': ['package.json', 'bin/httptest.wasm'],
   'node_modules/ttytest/': ['package.json', 'bin/ttytest.wasm'],
   'node_modules/statfstest/': ['package.json', 'bin/statfstest.mjs'],
+  'node_modules/watchtest/': ['package.json', 'bin/watchtest.mjs'],
   'node_modules/jstest/': [
     'package.json',
     'bin/jstest.mjs',
