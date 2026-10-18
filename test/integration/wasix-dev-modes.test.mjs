@@ -80,3 +80,30 @@ for (const users of ['enforce', 'off']) {
     ]);
   });
 }
+
+const ALIAS_PROBE = [
+  'import os, stat',
+  "for p in ['/tmp/out', '/tmp/fdlink']:",
+  '    try: os.unlink(p)',
+  '    except OSError: pass',
+  "os.symlink('/dev/stdout', '/tmp/out')",
+  "open('/tmp/f', 'w').write('12345')",
+  "fd = os.open('/tmp/f', os.O_RDONLY)",
+  "os.symlink('/dev/fd/%d' % fd, '/tmp/fdlink')",
+  "direct, linked = os.stat('/dev/stdout'), os.stat('/tmp/out')",
+  "print('stdout', stat.S_IFMT(linked.st_mode) == stat.S_IFMT(direct.st_mode), linked.st_ino == direct.st_ino)",
+  "f, l = os.stat('/tmp/f'), os.stat('/tmp/fdlink')",
+  "print('fd', stat.S_ISREG(l.st_mode), l.st_size, l.st_ino == f.st_ino)",
+].join('\n');
+
+test('a WASIX stat through a symlink to /dev/stdout or /dev/fd/N answers the descriptor it names, a pipe or a regular file (#1066)', {
+  timeout: 180_000,
+}, async (t) => {
+  const kernel = await createNodeKernel();
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
+  await install(kernel, 'wasix-python', /^lib\/libpython[^/]*\.a$/);
+  const r = await kernel.run(['bash', '-c', `${py(ALIAS_PROBE)} | cat`], { cwd: '/' });
+  assert.equal(r.stderr, '');
+  assert.equal(r.stdout, 'stdout True True\nfd True 5 True\n');
+});
