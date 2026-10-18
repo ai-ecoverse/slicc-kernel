@@ -123,7 +123,8 @@ test('bash that stops itself stays stopped until SIGCONT (#422)', async (t) => {
     return stat.slice(stat.lastIndexOf(') ') + 2, stat.lastIndexOf(') ') + 3);
   };
   while (!ended && (await state()) !== 'T') await new Promise((r) => setTimeout(r, 20));
-  const early = ended ? 'ended' : 'held';
+  await Promise.race([out, new Promise((r) => setTimeout(r, 500))]);
+  const early = ended ? 'ended' : (await state()) === 'T' ? 'held' : 'resumed';
   await ctx.kill(child.pid, 'SIGCONT');
   const waited = await child.wait();
   await ctx.write(1, JSON.stringify([early, await out, waited.status]));
