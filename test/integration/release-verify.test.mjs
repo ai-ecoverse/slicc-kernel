@@ -252,6 +252,55 @@ test("verify waits out npm's attestations lag: a 404 that turns into 200 passes;
     never.problem,
     /^no attestations on npm for 30 min after npm started serving it, and its packument stopped changing/
   );
+  clock.t = 0;
+  let views = 0;
+  const flaky = await awaitAttestations({
+    url: async () => {
+      views++;
+      if (views === 1) throw new Error('npm error code ETIMEDOUT');
+      return 'u';
+    },
+    fetch: answers([200]),
+    modified: async () => 'm',
+    servedAt: 0,
+    now,
+    sleep,
+  });
+  assert.deepEqual(
+    [flaky.res.ok, views],
+    [true, 2],
+    'an npm view error while looking for dist.attestations is retried'
+  );
+  clock.t = 0;
+  let gets = 0;
+  const unreachable = await awaitAttestations({
+    url: 'u',
+    fetch: async () => {
+      gets++;
+      if (gets === 1) throw new Error('fetch failed');
+      return { ok: true, status: 200 };
+    },
+    modified: async () => 'm',
+    servedAt: 0,
+    now,
+    sleep,
+  });
+  assert.equal(unreachable.res.ok, true, 'a network error on the attestations is retried');
+  clock.t = 0;
+  const down = await awaitAttestations({
+    url: 'u',
+    fetch: async () => {
+      throw new Error('fetch failed');
+    },
+    modified: async () => 'm',
+    servedAt: 0,
+    now,
+    sleep,
+  });
+  assert.match(
+    down.problem,
+    /^attestations unreachable \(fetch failed\) for 30 min after npm started serving it/
+  );
   const verify = await readFile(
     new URL('../../tools/cert-review/verify.mjs', import.meta.url),
     'utf8'
