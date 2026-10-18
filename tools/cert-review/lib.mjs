@@ -635,12 +635,32 @@ export const REVIEWER_GLOBS = [
   '.github/workflows/cert*.yml',
   '.github/workflows/cert*.yaml',
   'scripts/cert/**',
+  'scripts/cert/.*',
+  'scripts/cert/.*/**',
+  'scripts/cert/**/.*',
+  'scripts/cert/**/.*/**',
   'tools/cert-review/**',
+  'tools/cert-review/.*',
+  'tools/cert-review/.*/**',
+  'tools/cert-review/**/.*',
+  'tools/cert-review/**/.*/**',
   '.github/actions/cert-self-guard/**',
+  '.github/actions/cert-self-guard/.*',
+  '.github/actions/cert-self-guard/.*/**',
+  '.github/actions/cert-self-guard/**/.*',
+  '.github/actions/cert-self-guard/**/.*/**',
   '.github/runner.mjs',
 ];
 
-const isReviewer = (name) => REVIEWER_GLOBS.some((glob) => matchesGlob(name, glob));
+export const REVIEWER_DIRS = [
+  'scripts/cert/',
+  'tools/cert-review/',
+  '.github/actions/cert-self-guard/',
+];
+
+const isReviewer = (name) =>
+  REVIEWER_DIRS.some((dir) => name.startsWith(dir)) ||
+  REVIEWER_GLOBS.some((glob) => matchesGlob(name, glob));
 const names = (files) =>
   (files ?? []).flatMap((f) => [
     f.filename ?? f,
