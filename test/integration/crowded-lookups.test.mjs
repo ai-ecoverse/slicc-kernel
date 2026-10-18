@@ -92,9 +92,9 @@ test('a directory another kernel renames while a program keeps it cached shows t
 });
 
 const replaced = (dir, wait) =>
-  `rm -rf ${dir} && mkdir -p ${dir}/t && echo new > ${dir}/t/x && echo plain > ${dir}/n && cd ${dir} && : > ready && [ -f n ] && ${wait} && cd n && read -r v < x && echo "$v"`;
+  `rm -rf ${dir} ${dir}-mark && mkdir -p ${dir}/t && echo new > ${dir}/t/x && echo plain > ${dir}/n && cd ${dir} && : > ready && [ -f n ] && ${wait} && cd n && read -r v < x && echo "$v"`;
 const replace = (dir) =>
-  `while [ ! -e ${dir}/ready ]; do sleep 0.05; done; sleep 0.3; cd ${dir} && rm n && ln -s t n && echo x > done`;
+  `while [ ! -e ${dir}/ready ]; do sleep 0.05; done; sleep 0.3; cd ${dir} && rm n && ln -s t n && echo x > done && mkdir -p ${dir}-mark && : > ${dir}-mark/go`;
 
 const SPANS = [1500, 5000, 15000];
 
@@ -147,7 +147,7 @@ test('a name another kernel replaces by a symlink resolves through the link once
 });
 
 for (const [n, what, wait] of [
-  [2, 'sleeps', 'sleep 1.5'],
+  [2, 'sleeps', 'until [ -e /tmp/cs2-mark/go ]; do sleep 0.2; done'],
   [
     3,
     'reads the file the other kernel wrote last',
