@@ -6,7 +6,8 @@ import { booted, installPackage } from './kernel.mjs';
 const chrome = await launch();
 after(() => chrome.close());
 
-const ROUNDS = 300;
+const ROUNDS = 450;
+const HOGS = 4;
 
 test('on the OPFS root, files opened inside a directory that another process keeps removing and replacing read as a full version every time, never empty (#1013)', {
   timeout: 900_000,
@@ -48,12 +49,17 @@ test('on the OPFS root, files opened inside a directory that another process kee
   const script = [
     'cd /root/rd',
     '(while [ ! -e stop ]; do cat d/a > /dev/null 2>&1; done) &',
-    'for r in 1 2 3 4; do (while [ ! -e stop ]; do { sleep 0.02; read -r v <&3; case "$v" in v[0-9]*) ;; *) echo "bad [$v]" >> err;; esac; } 2> /dev/null 3< d/b; done) & done',
+    'for r in 1 2 3 4 5 6 7 8; do (while [ ! -e stop ]; do { sleep 0.005; read -r v <&3; case "$v" in v[0-9]*) ;; *) echo "bad [$v]" >> err;; esac; } 2> /dev/null 3< d/b; done) & done',
     `rdrm ${ROUNDS}`,
     'echo "rdrm $?"',
     'wait',
     'echo done',
   ].join('\n');
+  await page.evaluate((n) => {
+    const spin = 'const end = Date.now() + 600000; while (Date.now() < end);';
+    const url = URL.createObjectURL(new Blob([spin]));
+    window.hogs = Array.from({ length: n }, () => new Worker(url));
+  }, HOGS);
   const outcome = await page.run(
     {
       marker: () => window.__rdRound,
@@ -71,6 +77,9 @@ test('on the OPFS root, files opened inside a directory that another process kee
     },
     script
   );
+  await page.evaluate(() => {
+    for (const hog of window.hogs) hog.terminate();
+  });
   assert.equal(outcome, 'rdrm 0\ndone\n');
   const err = await bash('cat /root/rd/err', { cwd: '/' });
   assert.equal(err.stdout, '', `reads that weren't a full version:\n${err.stdout.slice(0, 2000)}`);
