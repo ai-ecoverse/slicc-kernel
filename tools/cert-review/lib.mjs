@@ -975,3 +975,49 @@ export function downstreamLine(lines) {
     ? unique[0]
     : `downstream: ${unique.map((l) => l.replace(/^downstream: /, '')).join(' | ')}`;
 }
+
+export async function awaitAttestations({
+  url,
+  fetch: get,
+  modified,
+  servedAt,
+  now = Date.now,
+  sleep,
+  deadline = Number.POSITIVE_INFINITY,
+  graceMs = 30 * 60_000,
+  quietMs = 10 * 60_000,
+  everyMs = 15_000,
+}) {
+  let last;
+  let quietSince = now();
+  let missing = 'no attestations on npm';
+  for (;;) {
+    const at = typeof url === 'function' ? await url() : url;
+    if (at) {
+      const res = await get(at);
+      if (res.ok) return { res };
+      if (res.status !== 404) return { problem: `attestations answered ${res.status}` };
+      missing = 'attestations answered 404';
+    }
+    let changed = last;
+    try {
+      changed = await modified();
+    } catch {
+      changed = last;
+    }
+    if (changed !== last) {
+      last = changed;
+      quietSince = now();
+    }
+    const served = now() - servedAt;
+    if (now() >= deadline)
+      return {
+        problem: `${missing} for ${Math.round(served / 60_000)} min after npm started serving it, through the whole wait`,
+      };
+    if (served >= graceMs && now() - quietSince >= quietMs)
+      return {
+        problem: `${missing} for ${Math.round(served / 60_000)} min after npm started serving it, and its packument stopped changing ${Math.round((now() - quietSince) / 60_000)} min ago`,
+      };
+    await sleep(everyMs);
+  }
+}
