@@ -42,14 +42,23 @@ export class CredCache {
 const KNOWN = 0x10000;
 const LOCKED = 0x20000;
 
+export interface UmaskSignals {
+  quiet<T>(fn: () => T): T;
+  deliver(): void;
+}
+
+export const UNGATED: UmaskSignals = { quiet: (fn) => fn(), deliver: () => {} };
+
 export class UmaskCache {
   private mask: number | undefined;
   private readonly call: (mask?: number) => number;
   private readonly shared: Int32Array | undefined;
+  private readonly signals: UmaskSignals;
 
-  constructor(call: (mask?: number) => number, shared?: Int32Array) {
+  constructor(call: (mask?: number) => number, shared?: Int32Array, signals = UNGATED) {
     this.call = call;
     this.shared = shared;
+    this.signals = signals;
   }
 
   get(): number {
@@ -70,6 +79,14 @@ export class UmaskCache {
   }
 
   set(mask: number): number {
+    try {
+      return this.signals.quiet(() => this.change(mask));
+    } finally {
+      this.signals.deliver();
+    }
+  }
+
+  private change(mask: number): number {
     const { shared } = this;
     if (!shared) {
       const old = this.call(mask);

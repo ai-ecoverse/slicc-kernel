@@ -26,7 +26,7 @@ import {
   WHENCE,
   wasiErrnoOf,
 } from './wasi-abi.ts';
-import { CredCache, UmaskCache } from './wasi-cred.ts';
+import { CredCache, UmaskCache, UNGATED } from './wasi-cred.ts';
 import {
   CLIPBOARD_PATH,
   deviceOf,
@@ -245,7 +245,9 @@ export class WasiHost {
 
   interrupted: (() => boolean) | undefined;
 
-  quietly: (fn: () => void) => void = (fn) => fn();
+  quietly: <T>(fn: () => T) => T = UNGATED.quiet;
+
+  deliverDue: () => void = UNGATED.deliver;
 
   private readonly listening: number[];
 
@@ -278,7 +280,8 @@ export class WasiHost {
         this.o.kernel.call(
           mask === undefined ? { op: 'proc-umask' } : { op: 'proc-umask', mask }
         ) as number,
-      o.credGen ?? o.shared
+      o.credGen ?? o.shared,
+      { quiet: (fn) => this.quietly(fn), deliver: () => this.deliverDue() }
     );
     if (o.shared) this.fds.share(o.shared, true);
     else if (o.forked) this.fds.restore(o.forked.fds, o.forked.cloexec);
