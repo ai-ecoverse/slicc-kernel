@@ -637,15 +637,12 @@ export function cachingBridge(
   const relabeling = <T>(p: string, op: () => T): T => {
     if (exact || !bridge.identifyNext) return rewriting(p, op);
     bridge.identifyNext();
-    let done = false;
     try {
-      const result = op();
-      done = true;
-      return result;
+      return op();
     } finally {
       const st = bridge.identified?.() ?? null;
       if (st) cache.mutated([p], st.ino);
-      else cache.mutated(done ? [] : [p]);
+      else cache.mutated([]);
     }
   };
   const rewriting = <T>(p: string, op: () => T, ...also: string[]): T => {
