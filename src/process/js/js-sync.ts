@@ -3,6 +3,8 @@ import type { JsLane } from '../../kernel/protocol.ts';
 import { SIG } from '../../kernel/signals.ts';
 import {
   parseSyncFsStat,
+  SYNC_FS_READ_ONLY,
+  SYNC_FS_REQUEST_TIMEOUT_MS,
   type SyncFsBridgeStat,
   type SyncFsResult,
 } from '../../realm/sync-fs-wire.ts';
@@ -111,10 +113,18 @@ const encoder = new TextEncoder();
 
 export const noLane: SyncCall = () => ({ ok: false, errno: 'ENOSYS', message: 'no sync lane' });
 
-export function laneOf(lane: JsLane | undefined): SyncCall {
+export function laneOf(lane: JsLane | undefined, silence = SYNC_FS_REQUEST_TIMEOUT_MS): SyncCall {
   if (!lane) return noLane;
   const transport = createSyncSabTransport(lane.sab, lane.port);
-  return (req) => transport.call(req, Number.POSITIVE_INFINITY, req.op);
+  return (req) => {
+    if (!SYNC_FS_READ_ONLY.has(req.op))
+      return transport.call(req, Number.POSITIVE_INFINITY, req.op);
+    try {
+      return transport.call(req, silence, req.op);
+    } catch (err) {
+      return { ok: false, errno: 'EIO', message: err instanceof Error ? err.message : String(err) };
+    }
+  };
 }
 
 export class JsSyncKernel {

@@ -102,3 +102,33 @@ test('a write whose backend stalls past the deadline waits like a hard mount and
   );
   assert.equal(k.stdout, 'rc=137\n', JSON.stringify(k));
 });
+
+test("a JS program's synchronous read of a stalled backend gets EIO once nothing has come back for the deadline, and its synchronous write waits and lands once (#1033)", {
+  timeout: 300_000,
+}, async (t) => {
+  const { page, bash, stall, released, object, puts } = await mounted(t);
+  await page.evaluate(() =>
+    window.objects.set('jr.txt', { body: new TextEncoder().encode('kept\n'), mtime: Date.now() })
+  );
+  await stall('GET', 'jr.txt');
+  const r = await bash('jstest syncfs read /mnt/s3/jr.txt; echo alive', { cwd: '/' });
+  assert.equal(
+    await released(),
+    false,
+    'the read gave up while the backend still had not answered'
+  );
+  assert.equal(r.stdout, 'read EIO\nalive\n', JSON.stringify(r));
+  assert.equal(
+    (await bash('jstest syncfs write /mnt/s3/jw0.txt hello', { cwd: '/' })).stdout,
+    'wrote\n'
+  );
+  const once = await puts('jw0.txt');
+  await stall('PUT', 'jw.txt');
+  const w = await bash('jstest syncfs write /mnt/s3/jw.txt hello; cat /mnt/s3/jw.txt', {
+    cwd: '/',
+  });
+  assert.equal(await released(), true, 'the write waited for the backend');
+  assert.equal(w.stdout, 'wrote\nhello', JSON.stringify(w));
+  assert.equal(await object('jw.txt'), 'hello');
+  assert.equal(await puts('jw.txt'), once);
+});
