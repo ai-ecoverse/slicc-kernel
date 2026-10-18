@@ -69,6 +69,7 @@ export function vfsPromoter(
       promoted.set(stream.shared, kfd);
     }
     streams.attachFile(stream, kfd);
+    streams.sizeFromKernel(stream, kfd);
   };
 }
 
