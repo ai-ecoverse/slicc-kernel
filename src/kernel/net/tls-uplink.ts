@@ -2,8 +2,8 @@ import { KernelError } from '../fd-table.ts';
 import type { KernelSocket, LoopbackNet } from '../socket.ts';
 import { isLoopbackHost } from './proxy-service.ts';
 import { ipv4Bytes, ipv6Groups } from './routes.ts';
-import { type TlsClientInfo, tlsClient } from './tls-client.ts';
-import type { TlsEngine, TlsStore } from './tls-engine.ts';
+import { openSession, type TlsClientInfo, type TlsClientOptions, tlsClient } from './tls-client.ts';
+import { type TlsEngine, TlsError, type TlsSession, type TlsStore } from './tls-engine.ts';
 import type { ResolveFamily } from './uplink.ts';
 
 export interface TlsClientSupport {
@@ -16,6 +16,15 @@ export interface SecureRequest {
   alpn?: string[];
   ca?: true | string[];
   insecure?: boolean;
+  sni?: false;
+  checkHostname?: false;
+  clientCert?: ClientCertRequest;
+}
+
+export interface ClientCertRequest {
+  chain: string[];
+  key: string;
+  passphrase?: string;
 }
 
 export interface SecureProcess {
@@ -83,6 +92,11 @@ export interface SecureSession {
   authorizationText?: string;
   servername: string;
   peerCertificates: string[];
+  cipher?: TlsClientInfo['cipher'];
+  clientCertificate?: boolean;
+  sni?: boolean;
+  hostnameChecked?: boolean;
+  hostnameMatches?: boolean;
 }
 
 function sessionOf(info: TlsClientInfo, servername: string): SecureSession {
@@ -100,7 +114,77 @@ function sessionOf(info: TlsClientInfo, servername: string): SecureSession {
       : {}),
     servername,
     peerCertificates: info.peerCertificates.map(encode),
+    ...controls(info),
   };
+}
+
+function controls(info: TlsClientInfo) {
+  if (!info.cipher) return {};
+  return {
+    cipher: info.cipher,
+    clientCertificate: info.clientCertificate === true,
+    sni: info.sni !== false,
+    hostnameChecked: info.hostnameChecked === true,
+    ...(info.hostnameMatches === undefined ? {} : { hostnameMatches: info.hostnameMatches }),
+  };
+}
+
+const KEY_ERRORS: ReadonlyArray<[number, string]> = [
+  [-3, 'ERR_OSSL_X509_KEY_VALUES_MISMATCH'],
+  [-0x3b80, 'ERR_OSSL_BAD_DECRYPT'],
+  [-0x3c00, 'ERR_OSSL_CRYPTO_INTERRUPTED_OR_CANCELLED'],
+];
+
+function keyRefused(err: unknown): KernelError {
+  const code = err instanceof TlsError ? err.code : 0;
+  const name = KEY_ERRORS.find(([n]) => n === code)?.[1] ?? 'ERR_OSSL_UNSUPPORTED';
+  const text = code === -3 ? 'the key does not match the certificate' : (err as Error).message;
+  return new KernelError('EPROTO', `${name}: ${text}`);
+}
+
+function takeCert(req: SecureRequest) {
+  const cert = req.clientCert;
+  if (!cert) return undefined;
+  delete req.clientCert;
+  if (!Array.isArray(cert.chain) || cert.chain.length === 0 || typeof cert.key !== 'string')
+    throw new KernelError('EINVAL', 'ERR_INVALID_ARG_VALUE: cert and key go together');
+  let ders: Uint8Array[];
+  let key: Uint8Array;
+  try {
+    ders = cert.chain.map(base64Der);
+    key = base64Der(cert.key);
+  } catch {
+    throw new KernelError('EINVAL', 'ERR_INVALID_ARG_VALUE: cert or key is not base64');
+  }
+  const chain = new Uint8Array(ders.reduce((n, d) => n + d.length, 0));
+  let at = 0;
+  for (const der of ders) {
+    chain.set(der, at);
+    at += der.length;
+  }
+  const pass = new TextEncoder().encode(cert.passphrase ?? '');
+  return { chain, key, pass };
+}
+
+type ClientCert = NonNullable<ReturnType<typeof takeCert>>;
+
+function withCert(session: TlsSession, cert: ClientCert | undefined): void {
+  if (!cert) return;
+  try {
+    session.ownCert(cert.chain, cert.key, cert.pass);
+  } catch (err) {
+    throw keyRefused(err);
+  }
+}
+
+function wipe(cert: ClientCert | undefined): void {
+  cert?.key.fill(0);
+  cert?.pass.fill(0);
+}
+
+interface Prepared {
+  options: TlsClientOptions & { session: TlsSession };
+  own: TlsStore | undefined;
 }
 
 async function setUp(support: TlsClientSupport, req: SecureRequest) {
@@ -121,21 +205,77 @@ async function setUp(support: TlsClientSupport, req: SecureRequest) {
   return { engine, store: own, own };
 }
 
-function secure(support: TlsClientSupport, req: SecureRequest, servername: string) {
-  return async (raw: Parameters<Parameters<KernelSocket['upgradeSecure']>[0]>[0]) => {
-    const { engine, store, own } = await setUp(support, req);
+async function prepare(
+  support: TlsClientSupport,
+  req: SecureRequest,
+  servername: string
+): Promise<Prepared> {
+  const cert = takeCert(req);
+  try {
+    return await prepareWith(support, req, servername, cert);
+  } catch (err) {
+    if (err instanceof KernelError) throw err;
+    throw new KernelError('ENOTSUP', err instanceof Error ? err.message : String(err));
+  } finally {
+    wipe(cert);
+  }
+}
+
+async function prepareWith(
+  support: TlsClientSupport,
+  req: SecureRequest,
+  servername: string,
+  cert: ClientCert | undefined
+): Promise<Prepared> {
+  if (req.checkHostname === false && req.insecure === true) {
+    throw new KernelError(
+      'EINVAL',
+      'ERR_INVALID_ARG_VALUE: checkHostname: false needs rejectUnauthorized'
+    );
+  }
+  const { engine, store, own } = await setUp(support, req);
+  const options: TlsClientOptions = {
+    engine,
+    store,
+    servername,
+    alpn: req.alpn ?? [],
+    insecure: req.insecure === true,
+    ...(req.sni === false ? { sni: false } : {}),
+    ...(req.checkHostname === false ? { checkHostname: false } : {}),
+    clientCertificate: cert !== undefined,
+  };
+  let session: TlsSession | undefined;
+  try {
+    const controls = req.sni === false || req.checkHostname === false || cert !== undefined;
+    if (controls && !engine.sessionControls) {
+      throw new KernelError('ENOTSUP', 'the installed tls engine has no client certificates');
+    }
+    session = openSession(options);
+    withCert(session, cert);
+    return { options: { ...options, session }, own };
+  } catch (err) {
+    session?.free();
+    own?.release();
+    throw err;
+  }
+}
+
+function secure(prepared: Prepared) {
+  let ran = false;
+  const make = async (raw: Parameters<Parameters<KernelSocket['upgradeSecure']>[0]>[0]) => {
+    ran = true;
     try {
-      return await tlsClient(raw, {
-        engine,
-        store,
-        servername,
-        alpn: req.alpn ?? [],
-        insecure: req.insecure === true,
-      });
+      return await tlsClient(raw, prepared.options);
     } finally {
-      own?.release();
+      prepared.own?.release();
     }
   };
+  const abandon = () => {
+    if (ran) return;
+    prepared.options.session.free();
+    prepared.own?.release();
+  };
+  return { make, abandon };
 }
 
 export function supportOf(net: LoopbackNet): TlsClientSupport {
@@ -167,10 +307,14 @@ export async function connectSecure(
     throw new KernelError('ENOTSUP', 'TLS in the kernel needs a destination the uplink routes');
   const support = supportOf(proc.net);
   let info: TlsClientInfo | undefined;
-  const make = secure(support, req, servername);
-  await socket.connectSecure({ family: 'inet', host: address, port }, route, async (conn) => {
-    info = await conn.upgrade(make);
-  });
+  const { make, abandon } = secure(await prepare(support, req, servername));
+  try {
+    await socket.connectSecure({ family: 'inet', host: address, port }, route, async (conn) => {
+      info = await conn.upgrade(make);
+    });
+  } finally {
+    abandon();
+  }
   return sessionOf(info as TlsClientInfo, servername);
 }
 
@@ -182,6 +326,10 @@ export async function upgradeSecure(
   const peer = socket.peer;
   const host = req.servername || (peer?.family === 'inet' ? peer.host : '');
   const servername = serverName(host);
-  const info = await socket.upgradeSecure(secure(supportOf(proc.net), req, servername));
-  return sessionOf(info, servername);
+  const { make, abandon } = secure(await prepare(supportOf(proc.net), req, servername));
+  try {
+    return sessionOf(await socket.upgradeSecure(make), servername);
+  } finally {
+    abandon();
+  }
 }

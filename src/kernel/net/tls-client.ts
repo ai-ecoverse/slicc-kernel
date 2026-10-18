@@ -1,6 +1,9 @@
 import { KernelError } from '../fd-table.ts';
+import { cipherOf, type TlsCipher } from './tls-ciphers.ts';
 import {
   TLS_CLIENT_INSECURE_SKIP_VERIFY,
+  TLS_CLIENT_NO_SNI,
+  TLS_CLIENT_VERIFY_CHAIN_ONLY,
   type TlsEngine,
   TlsError,
   type TlsSession,
@@ -33,6 +36,11 @@ export interface TlsClientInfo {
   authorizationError?: string;
   authorizationText?: string;
   peerCertificates: Uint8Array[];
+  cipher?: TlsCipher;
+  clientCertificate?: boolean;
+  sni?: boolean;
+  hostnameChecked?: boolean;
+  hostnameMatches?: boolean;
 }
 
 export interface TlsClientOptions {
@@ -41,6 +49,22 @@ export interface TlsClientOptions {
   servername: string;
   alpn: readonly string[];
   insecure: boolean;
+  sni?: boolean;
+  checkHostname?: boolean;
+  session?: TlsSession;
+  clientCertificate?: boolean;
+}
+
+export function clientFlags(o: TlsClientOptions): number {
+  return (
+    (o.insecure ? TLS_CLIENT_INSECURE_SKIP_VERIFY : 0) |
+    (o.sni === false ? TLS_CLIENT_NO_SNI : 0) |
+    (o.checkHostname === false ? TLS_CLIENT_VERIFY_CHAIN_ONLY : 0)
+  );
+}
+
+export function openSession(o: TlsClientOptions): TlsSession {
+  return o.engine.clientSession(o.store, o.servername, o.alpn, clientFlags(o));
 }
 
 class Ciphertext {
@@ -124,18 +148,43 @@ async function handshake(
   }
 }
 
+function controlsOf(o: TlsClientOptions, session: TlsSession, protocol: TlsCipher['version']) {
+  if (!o.engine.sessionControls) return {};
+  const checked = o.checkHostname !== false && !o.insecure;
+  return {
+    cipher: cipherOf(session.ciphersuite, protocol),
+    clientCertificate: o.clientCertificate === true,
+    sni: o.sni !== false,
+    hostnameChecked: checked,
+    ...(o.insecure ? {} : { hostnameMatches: checked || !session.nameMismatch }),
+  };
+}
+
 function infoOf(o: TlsClientOptions, session: TlsSession): TlsClientInfo {
   const flags = session.verifyResult;
   const code = verifyCode(flags);
+  const protocol = session.version === 0x0304 ? 'TLSv1.3' : 'TLSv1.2';
   return {
-    protocol: session.version === 0x0304 ? 'TLSv1.3' : 'TLSv1.2',
+    protocol,
     alpnProtocol: session.alpn ?? false,
     authorized: code === undefined,
     ...(code
       ? { authorizationError: code, authorizationText: o.engine.verifyInfo(flags).trim() }
       : {}),
     peerCertificates: session.peerChain(),
+    ...controlsOf(o, session, protocol),
   };
+}
+
+const FATAL_ALERT = -0x7780;
+
+function alerted(err: TlsError): KernelError {
+  if (err.code === FATAL_ALERT)
+    return new KernelError(
+      'EPROTO',
+      `ERR_SSL_FATAL_ALERT: the server ended the session: ${err.message}`
+    );
+  return new KernelError('EPROTO', `ERR_SSL_PROTOCOL_ERROR: ${err.message}`);
 }
 
 function plaintext(conn: UplinkConn, session: TlsSession, inbox: Ciphertext): UplinkConn {
@@ -152,7 +201,12 @@ function plaintext(conn: UplinkConn, session: TlsSession, inbox: Ciphertext): Up
     async read() {
       for (;;) {
         if (freed) return null;
-        const got = session.read();
+        let got: ReturnType<TlsSession['read']>;
+        try {
+          got = session.read();
+        } catch (err) {
+          throw alerted(err as TlsError);
+        }
         await send(conn, session);
         if (got instanceof Uint8Array) return got;
         if (got === 'eof') return null;
@@ -187,8 +241,7 @@ export async function tlsClient(
   o: TlsClientOptions,
   taken: Uint8Array = new Uint8Array(0)
 ): Promise<{ conn: UplinkConn; info: TlsClientInfo }> {
-  const flags = o.insecure ? TLS_CLIENT_INSECURE_SKIP_VERIFY : 0;
-  const session = o.engine.clientSession(o.store, o.servername, o.alpn, flags);
+  const session = o.session ?? openSession(o);
   const inbox = new Ciphertext(conn, session);
   inbox.hand(taken);
   try {
