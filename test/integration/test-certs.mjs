@@ -1,4 +1,4 @@
-import { createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto';
+import { constants, createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto';
 
 const cat = (parts) => Buffer.concat(parts.map((p) => Buffer.from(p)));
 
@@ -40,6 +40,15 @@ function oid(dotted) {
 }
 
 const ECDSA_SHA256 = seq(oid('1.2.840.10045.4.3.2'));
+const SHA256 = seq(oid('2.16.840.1.101.3.4.2.1'));
+const RSA_PSS_SHA256 = seq(
+  oid('1.2.840.113549.1.1.10'),
+  seq(
+    tlv(0xa0, SHA256),
+    tlv(0xa1, seq(oid('1.2.840.113549.1.1.8'), SHA256)),
+    tlv(0xa2, integer(Buffer.of(32)))
+  )
+);
 
 function time(date) {
   const iso = date.toISOString().replace(/[-:T]/g, '').slice(2, 14);
@@ -82,17 +91,21 @@ function certificate(o) {
       extension('2.5.29.17', false, seq(ip ? tlv(0x87, ip) : tlv(0x82, Buffer.from(o.host))))
     );
   }
+  const algorithm = o.pss ? RSA_PSS_SHA256 : ECDSA_SHA256;
   const tbs = seq(
     tlv(0xa0, integer(Buffer.of(2))),
     integer(serial),
-    ECDSA_SHA256,
+    algorithm,
     name(o.issuer),
     seq(time(o.notBefore), time(o.notAfter)),
     name(o.subject),
     Buffer.from(o.spki),
     tlv(0xa3, seq(...exts))
   );
-  return seq(tbs, ECDSA_SHA256, bits(sign('sha256', tbs, o.key)));
+  const key = o.pss
+    ? { key: o.key, padding: constants.RSA_PKCS1_PSS_PADDING, saltLength: 32 }
+    : o.key;
+  return seq(tbs, algorithm, bits(sign('sha256', tbs, key)));
 }
 
 export function pem(der) {
@@ -177,6 +190,25 @@ export function selfIssued(host) {
     issuerSpki: signer.publicKey.export({ type: 'spki', format: 'der' }),
     host,
     key: signer.privateKey,
+  });
+  return { der, cert: pem(der), key: pair.privateKey.export({ type: 'pkcs8', format: 'pem' }) };
+}
+
+export function rsaPss(host, { rollover = false } = {}) {
+  const pair = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const signer = rollover ? generateKeyPairSync('rsa', { modulusLength: 2048 }) : pair;
+  const spki = pair.publicKey.export({ type: 'spki', format: 'der' });
+  const now = Date.now();
+  const der = certificate({
+    issuer: host,
+    subject: host,
+    notBefore: new Date(now - 3600_000),
+    notAfter: new Date(now + 7 * DAY),
+    spki,
+    issuerSpki: signer.publicKey.export({ type: 'spki', format: 'der' }),
+    host,
+    key: signer.privateKey,
+    pss: true,
   });
   return { der, cert: pem(der), key: pair.privateKey.export({ type: 'pkcs8', format: 'pem' }) };
 }

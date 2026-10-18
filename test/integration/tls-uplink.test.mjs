@@ -8,7 +8,7 @@ import { createServer, TLSSocket } from 'node:tls';
 import { fileURLToPath } from 'node:url';
 import { createNodeKernel } from '../../dist/node.js';
 import { fakeUplink } from '../../dist/testing.js';
-import { makeCa, selfIssued, selfSigned } from './test-certs.mjs';
+import { makeCa, rsaPss, selfIssued, selfSigned } from './test-certs.mjs';
 
 const modules = new URL('../../node_modules/@ai-ecoverse/', import.meta.url);
 const TIMEOUT = { timeout: 60_000 };
@@ -948,6 +948,8 @@ test(
       ],
       ['good.test', await recordingServer(t, ca.server('secure.test'))],
       ['rollover.test', await recordingServer(t, selfIssued('secure.test'))],
+      ['pss.test', await recordingServer(t, rsaPss('secure.test'))],
+      ['pssroll.test', await recordingServer(t, rsaPss('secure.test', { rollover: true }))],
     ];
     const { run } = await kernelWith(
       t,
@@ -984,6 +986,20 @@ test(
       'expired.test': ['anonymous hi', false, 'CERT_HAS_EXPIRED', false, 'CERT_HAS_EXPIRED'],
       'good.test': ['anonymous hi', true, undefined, true, undefined],
       'rollover.test': [
+        'anonymous hi',
+        false,
+        'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+        true,
+        'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+      ],
+      'pss.test': [
+        'anonymous hi',
+        false,
+        'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+        true,
+        'DEPTH_ZERO_SELF_SIGNED_CERT',
+      ],
+      'pssroll.test': [
         'anonymous hi',
         false,
         'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',

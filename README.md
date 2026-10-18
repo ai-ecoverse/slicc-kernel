@@ -426,7 +426,7 @@ The module's default export (or its `main` export) is called with a context and 
       - With `rejectUnauthorized: false`, `chainError` says what is wrong with the chain apart from the name, with Node's names, and is absent when the chain is fine:
         - a self-signed leaf alone is `DEPTH_ZERO_SELF_SIGNED_CERT`;
         - an untrusted chain ending in a self-signed root is `SELF_SIGNED_CERT_IN_CHAIN`;
-        - self-signed means the certificate's own key verifies its signature (RSA PKCS#1 v1.5, ECDSA P-256/384/521 or Ed25519), not just that its issuer and subject names match, so a self-issued certificate signed by another key, such as a CA rollover certificate, is not self-signed, as in Node ([#1059](https://github.com/ai-ecoverse/slicc-kernel/issues/1059));
+        - self-signed means the certificate's own key verifies its signature (RSA PKCS#1 v1.5, RSA-PSS, ECDSA P-256/384/521 or Ed25519; a signature the kernel can't verify is not self-signed), not just that its issuer and subject names match, so a self-issued certificate signed by another key, such as a CA rollover certificate, is not self-signed, as in Node ([#1059](https://github.com/ai-ecoverse/slicc-kernel/issues/1059));
         - a lone leaf whose issuer is unknown is `UNABLE_TO_VERIFY_LEAF_SIGNATURE`;
         - an untrusted longer chain is `UNABLE_TO_GET_ISSUER_CERT_LOCALLY`;
         - otherwise it's the reason's code, such as `CERT_HAS_EXPIRED`.
