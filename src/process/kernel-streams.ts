@@ -567,7 +567,7 @@ export class KernelStreams {
   }
 
   private ptsTarget(path: string, st: unknown): string | undefined {
-    if (((st as { rdev?: number } | null)?.rdev ?? 0) >> 8 !== PTS_MAJOR) return undefined;
+    if (((st as { rdev?: number } | null)?.rdev ?? 0) < PTS_MAJOR << 8) return undefined;
     const { lookupPath } = this.Fs as unknown as DevDirFs;
     const real = lookupPath?.call(this.Fs, path, { follow: true }).path;
     return real !== undefined && isPtyPath(real) ? real : undefined;
