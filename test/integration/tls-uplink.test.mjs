@@ -633,3 +633,29 @@ test(
     }
   }
 );
+
+test(
+  'conn.tls.cipher.version is the suite version Node reports (TLSv1.0 for a CBC-SHA suite on a TLS 1.2 session), and an IP-literal servername reports sni: false as the server sees none (#1037)',
+  TIMEOUT,
+  async (t) => {
+    const leaf = ca.server('secure.test');
+    const cbc = await recordingServer(t, leaf, {
+      maxVersion: 'TLSv1.2',
+      ciphers: 'ECDHE-ECDSA-AES128-SHA',
+    });
+    const ip = await recordingServer(t, ca.server('192.0.2.7'));
+    const { run } = await kernelWith(t, [
+      ['secure.test', cbc.port],
+      ['192.0.2.7', ip.port],
+    ]);
+    const got = await run({ host: 'secure.test', port: 4433, tls: { ca: ca.pem }, send: 'hi' });
+    assert.equal(got.tls.protocol, 'TLSv1.2');
+    assert.deepEqual(got.tls.cipher, cbc.seen[0].cipher);
+    assert.equal(got.tls.cipher.version, 'TLSv1.0');
+    const byIp = await run({ host: '192.0.2.7', port: 4433, tls: { ca: ca.pem }, send: 'hi' });
+    assert.equal(byIp.tls.authorized, true);
+    assert.equal(ip.seen[0].servername, false);
+    assert.equal(byIp.tls.sni, false);
+    assert.equal(byIp.tls.hostnameMatches, true);
+  }
+);

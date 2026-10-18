@@ -406,8 +406,8 @@ The module's default export (or its `main` export) is called with a context and 
     - **`servername`** must be a host name (letters, digits and `-` in labels of at most 63, at most 253 in all, one trailing dot allowed) or an IP literal, else `EINVAL` before anything is dialled. An IP literal sends no SNI and must match an iPAddress subjectAltName.
     - **The `tls` property** is the handshake's: `{ path: 'kernel', substitutes: false, protocol: 'TLSv1.3' or 'TLSv1.2', alpnProtocol (the agreed protocol, or false), authorized, authorizationError?, servername, peerCertificates, cipher, clientCertificate, sni, hostnameChecked, hostnameMatches? }`.
       - `peerCertificates` is the server's chain as DER, leaf first.
-      - `cipher` is the negotiated suite as Node's `getCipher()` gives it: `{ name, standardName, version }`, where `name` is OpenSSL's (`ECDHE-RSA-AES128-GCM-SHA256`) and `standardName` IANA's.
-      - `clientCertificate` says whether a client certificate was offered, and `sni` whether the server name was sent.
+      - `cipher` is the negotiated suite as Node's `getCipher()` gives it: `{ name, standardName, version }`, where `name` is OpenSSL's (`ECDHE-RSA-AES128-GCM-SHA256`) and `standardName` IANA's. As in Node, `version` is the suite's own version, not the session's: `TLSv1.0` for a CBC-SHA suite on a TLS 1.2 session.
+      - `clientCertificate` says whether a client certificate was offered. `sni` says whether the server name was sent: it's false with `sni: false` and for an IP-literal `servername`, which TLS never sends.
       - `hostnameChecked` says whether the kernel checked the leaf against `servername`. `hostnameMatches` says whether it names it (absent with `rejectUnauthorized: false`).
     - **A client certificate** ([#1004](https://github.com/ai-ecoverse/slicc-kernel/issues/1004)): `cert` (PEM text, DER bytes or a list: the leaf first, then its intermediates) and `key` (PEM, PKCS#1, SEC1 or PKCS#8, or DER), with `passphrase` for an encrypted key, as in Node.
       - The key goes to the engine before anything is dialled, and the kernel keeps no copy of it (nor of the passphrase) once the engine has it.
