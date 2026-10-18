@@ -16,6 +16,8 @@ interface PollEvent {
   type: number;
 
   hangup?: boolean;
+
+  nbytes?: number;
 }
 
 export type ClockNow = (id: number) => bigint;
@@ -51,7 +53,7 @@ function writeEvents(mem: WasiMemory, ptr: number, events: readonly PollEvent[])
     v.setUint8(p + 10, ev.type);
 
     if (ev.type !== EVENTTYPE.CLOCK) {
-      v.setBigUint64(p + 16, 1n, true);
+      v.setBigUint64(p + 16, BigInt(ev.nbytes ?? 1), true);
       if (ev.hangup) v.setUint16(p + 24, EVENT_FD_READWRITE_HANGUP, true);
     }
   });
@@ -75,10 +77,19 @@ function classify(
   return { events, read, write };
 }
 
-function readyEvents(
-  subs: readonly Subscription[],
-  ready: { read: number[]; write: number[]; hangup?: number[] }
-): PollEvent[] {
+interface Ready {
+  read: number[];
+  write: number[];
+  hangup?: number[];
+  nread?: Record<number, number>;
+}
+
+function nbytesOf(s: Subscription, ready: Ready): { nbytes?: number } {
+  const n = s.type === EVENTTYPE.FD_READ ? ready.nread?.[s.fd] : undefined;
+  return n === undefined ? {} : { nbytes: n };
+}
+
+function readyEvents(subs: readonly Subscription[], ready: Ready): PollEvent[] {
   return subs
     .filter(
       (s) =>
@@ -90,6 +101,7 @@ function readyEvents(
       error: E.SUCCESS,
       type: s.type,
       hangup: ready.hangup?.includes(s.fd) === true,
+      ...nbytesOf(s, ready),
     }));
 }
 
@@ -109,10 +121,10 @@ function selectOnce(
   read: number[],
   write: number[],
   timeoutMs: number
-): { ready: { read: number[]; write: number[]; hangup?: number[] }; interrupted: boolean } {
+): { ready: Ready; interrupted: boolean } {
   try {
     const ready = deps.kernel.call({ op: 'fd-select', read, write, timeoutMs });
-    return { ready: ready as { read: number[]; write: number[] }, interrupted: false };
+    return { ready: ready as Ready, interrupted: false };
   } catch (e) {
     if (!deps.interruptWakes || (e as { code?: unknown }).code !== 'EINTR') throw e;
     return { ready: { read: [], write: [] }, interrupted: true };

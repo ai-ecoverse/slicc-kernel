@@ -1,0 +1,12 @@
+{
+  "name": "npolltest",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "npolltest": {
+        "wasm": "bin/npolltest.wasm"
+      }
+    }
+  }
+}
