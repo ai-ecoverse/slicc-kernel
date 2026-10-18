@@ -171,3 +171,58 @@ test('a watch through a symlink to a directory hears operations made through eit
   );
   assert.deepEqual(lines(r), ['rename viaalias', 'rename viareal', 'rename end']);
 });
+
+async function watchWhile(t, { args, flags = '', setup = 'mkdir -p /tmp/w', act }) {
+  const { kernel, sh } = await booted(t);
+  await sh(`rm -rf /tmp/w /tmp/p /tmp/q /tmp/r /tmp/new; ${setup}`);
+  const running = sh(`watchtest events ${args} /tmp/r ${flags}`);
+  const ready = () =>
+    kernel.readFile('/tmp/r').then(
+      () => true,
+      () => false
+    );
+  while (!(await ready())) await new Promise((r) => setTimeout(r, 10));
+  await act(kernel, sh);
+  return lines(await running);
+}
+
+test('an embedder writeFile beside a watched directory makes its parents with mkdir -p, which leaves the watch alive and says nothing of the parent (#1047 follow-up)', async (t) => {
+  const got = await watchWhile(t, {
+    args: '/tmp/w end',
+    act: async (kernel) => {
+      await kernel.writeFile('/tmp/new', '');
+      await kernel.writeFile('/tmp/w/end', '');
+    },
+  });
+  assert.deepEqual(got, ['rename end']);
+});
+
+test("a rename of the watched directory's parent still ends the watch (#1047 follow-up)", async (t) => {
+  const got = await watchWhile(t, {
+    args: '/tmp/p/w end',
+    setup: 'mkdir -p /tmp/p/w',
+    act: (_kernel, sh) => sh('mv /tmp/p /tmp/q'),
+  });
+  assert.deepEqual(got, ['rename w', 'ended']);
+});
+
+test('an embedder writeFile into a new subtree of a watched directory reports each directory mkdir -p made (#1047 follow-up)', async (t) => {
+  const got = await watchWhile(t, {
+    args: '/tmp/w n1/n2/f',
+    flags: 'recursive',
+    act: (kernel) => kernel.writeFile('/tmp/w/n1/n2/f', 'x'),
+  });
+  assert.deepEqual(got, ['rename n1', 'rename n1/n2', 'rename n1/n2/f']);
+});
+
+test('an embedder writeFile in the parent of a watched file leaves that watch alive too (#1047 follow-up)', async (t) => {
+  const got = await watchWhile(t, {
+    args: '/tmp/fl fl',
+    setup: 'rm -f /tmp/fl; echo a > /tmp/fl',
+    act: async (kernel) => {
+      await kernel.writeFile('/tmp/new', '');
+      await kernel.writeFile('/tmp/fl', 'b');
+    },
+  });
+  assert.deepEqual(got, ['change fl']);
+});
