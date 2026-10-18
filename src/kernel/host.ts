@@ -394,6 +394,7 @@ function inherited(opts: SpawnWasmOptions): { ignored?: number; umask?: number; 
 function heldBy(process: WasmProcess, holds: HeldPaths, replacements?: Replacements): void {
   process.keptPath = (path) => holds.keptAt(path)?.hidden;
   process.keptHandle = (handle) => holds.keptFor(handle)?.hidden;
+  process.holdsHandle = (handle) => holds.holdsHandle(handle);
   if (replacements) process.replacements = replacements;
 }
 

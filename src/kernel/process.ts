@@ -1291,7 +1291,10 @@ export class WasmProcess {
       } else {
         await this.unmissed(
           () => this.openPath(req, marked),
-          (at) => nodes.identify(at),
+          async (at) => {
+            await this.stillOpen(at, req.handle);
+            return nodes.identify(at);
+          },
           (id, at) => this.fds.installAt(fd, this.openVfsFile({ ...open, path: at }, id, fs)),
           { at: path, gen }
         );
@@ -1709,6 +1712,8 @@ export class WasmProcess {
 
   keptHandle?: (handle: number) => string | undefined;
 
+  holdsHandle?: (handle: number) => boolean;
+
   replacements?: Replacements;
 
   private async unmissed<T, R>(
@@ -1727,6 +1732,12 @@ export class WasmProcess {
       const found = await look(at);
       if (!r || (!r.missed(at) && !r.changedSince(at, gen))) return make(found, at);
     }
+  }
+
+  private async stillOpen(at: string, handle: number | undefined): Promise<void> {
+    if (handle === undefined || this.keptHandle?.(handle) !== undefined) return;
+    if (this.holdsHandle?.(handle) !== false) return;
+    if (!(await present(this.options.fs, at, true))) throw new KernelError('ENOENT');
   }
 
   private async keptOr(path: string, handle?: number): Promise<string> {
@@ -1767,6 +1778,7 @@ export class WasmProcess {
       () => this.nodes.targetKey(asked),
       async (target) => {
         const at = await this.keptOr(target, req.handle);
+        await this.stillOpen(at, req.handle);
         return [at, await this.nodes.identify(at)] as const;
       },
       install
