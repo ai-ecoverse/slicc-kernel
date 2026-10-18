@@ -1041,3 +1041,28 @@ export async function awaitAttestations({
     await sleep(everyMs);
   }
 }
+
+export async function downloadTarball({
+  url,
+  fetch: get,
+  now = Date.now,
+  sleep,
+  deadline = Number.POSITIVE_INFINITY,
+  everyMs = 15_000,
+  log = () => {},
+}) {
+  for (;;) {
+    let failure;
+    try {
+      const res = await get(url);
+      if (!res.ok) return { problem: `downloading ${url} answered ${res.status}` };
+      return { bytes: Buffer.from(await res.arrayBuffer()) };
+    } catch (error) {
+      failure = String(error?.message ?? error);
+    }
+    if (now() >= deadline)
+      return { problem: `downloading ${url} failed through the whole wait: ${failure}` };
+    log(`downloading ${url} failed, retrying: ${failure}`);
+    await sleep(everyMs);
+  }
+}
