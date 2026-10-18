@@ -86,6 +86,10 @@ export function attachSyncSabResponder(
     Atomics.notify(header, SAB_I_PUB);
 
     if (offset + chunk >= entry.payload.byteLength) drop(id);
+    else if (entry.timer) {
+      clearTimeout(entry.timer);
+      entry.timer = setTimeout(() => drop(id), PENDING_TTL_MS);
+    }
   }
 
   function settle(id: number, result: SyncFsResult): void {
