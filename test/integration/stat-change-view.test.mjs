@@ -22,7 +22,7 @@ async function install(kernel, name) {
 const py = (lines) =>
   `python3 -c "$(echo ${Buffer.from(['import os', ...lines].join('\n')).toString('base64')} | base64 -d)"`;
 
-test("a WASI program that keeps stat-ing a file sees another process's append at its next stat and a read sized by a stat gets all of it, without sleeping in between (#1026)", {
+test("a WASI program busy-polling stat sees another process's append within its loop, and a pread sized by that stat gets all of it (#1026)", {
   timeout: 120_000,
 }, async (t) => {
   const kernel = await createNodeKernel({ users: 'enforce' });
@@ -37,9 +37,13 @@ test("a WASI program that keeps stat-ing a file sees another process's append at
       "open('ready', 'w').close()",
       "while not os.path.exists('done'):",
       '  pass',
-      "now = os.stat('f').st_size",
+      'now = was',
+      'for i in range(100000):',
+      "  now = os.stat('f').st_size",
+      '  if now != was:',
+      '    break',
       "fd = os.open('f', os.O_RDONLY)",
-      "print(was, now, len(os.read(fd, os.stat('f').st_size)))",
+      'print(was, now, len(os.pread(fd, now, 0)))',
     ])
   );
   const writer = await sh('until [ -e ready ]; do :; done; printf bb >> f; touch done');

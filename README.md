@@ -986,6 +986,11 @@ A kernel caches the directory handles it has walked and the sidecar entries it h
 
 So a locked read-modify-write across tabs (sqlite, a JSON counter under `flock`) is exact, and anything else between tabs is as fresh as the last notice. Programs add their own rule on top: see "Another tab's writes" above. `crowded-lookups.test.mjs` and `notice-caches.test.mjs` hold the rows. The `notice-caches` rows freeze one kernel's clock and drop the other's notices, through the kernel workers in `test/integration/page/notice/`.
 
+**Within one kernel** ([#1026](https://github.com/ai-ecoverse/slicc-kernel/issues/1026)): a WASI process keeps the stats it has read, and checks each one against the kernel's change ring at every look. So a process that keeps stat-ing a file, even in a loop that never sleeps, sees another process's change to that path at its next stat. Before #1026's fix, from v1.4.0 on, a stat it had looked up lasted until the process slept, polled, waited for a child or wrote the path itself. The ring names the changed paths only, so in a loop with none of those calls, a stat stays stale until the next sleep, poll, wait or own write when the change was named elsewhere:
+- a write through another hard link of the same file. Only tmpfs mounts support `link`; on the OPFS root and every other mount, a file's link count is always 1;
+- a change to a symlink's target (the notice names the target, not the link);
+- an ancestor renamed or replaced (`mv /a /c; mv /d /a`: the notices name `/a`, `/c` and `/d`, not `/a/f`).
+
 The filesystem is our own rather than [ZenFS](https://github.com/zen-fs/core) (which SLICC uses), because OPFS stays the single source of truth: other writers, such as the BIOS installing packages or a page writing files, need no index to stay consistent with, and nothing is preloaded into memory at mount. POSIX metadata lives in the IndexedDB sidecar described above, which has per-entry transactions instead of one JSON file rewritten on every change.
 
 ## What is in here
