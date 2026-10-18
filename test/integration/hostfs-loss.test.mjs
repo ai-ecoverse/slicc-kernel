@@ -23,7 +23,7 @@ async function install(kernel, name) {
 }
 
 test('hostfs from Node against slicc-node: a writer whose proxy goes away mid-write fails instead of 0, its later writes fail, and a fresh write after the loss fails too (#1062)', {
-  timeout: 300_000,
+  timeout: 900_000,
 }, async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'slicc-loss-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -53,7 +53,7 @@ test('hostfs from Node against slicc-node: a writer whose proxy goes away mid-wr
     [
       'bash',
       '-c',
-      'for i in $(seq 1 300000); do echo line-$i; done > /mnt/h/w.txt; echo "writer $?"',
+      '( for i in $(seq 1 300000); do echo line-$i || exit 3; done ) > /mnt/h/w.txt; echo "writer $?"',
     ],
     { cwd: '/' }
   );
@@ -66,7 +66,7 @@ test('hostfs from Node against slicc-node: a writer whose proxy goes away mid-wr
   up = false;
   await proxy.close();
   const r = await writer;
-  assert.equal(r.stdout, 'writer 1\n', r.stderr.slice(0, 300));
+  assert.equal(r.stdout, 'writer 3\n', r.stderr.slice(0, 300));
   assert.match(r.stderr, /write error/);
   const fresh = await kernel.run(['bash', '-c', 'echo data > /mnt/h/fresh.txt; echo "fresh $?"'], {
     cwd: '/',

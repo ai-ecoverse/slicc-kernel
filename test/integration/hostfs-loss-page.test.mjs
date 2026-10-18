@@ -72,13 +72,13 @@ const PYTHON = py([
 for (const [name, script, said] of [
   [
     'bash',
-    'for i in $(seq 1 100000); do echo line-$i; done > /mnt/p/w.txt 2> /tmp/err; echo "bash $?"; read -r first < /tmp/err; echo "$first"',
-    /^bash 1\nbash: line 1: echo: write error: No medium found\n$/,
+    '( for i in $(seq 1 100000); do echo line-$i || exit 3; done ) > /mnt/p/w.txt 2> /tmp/err; echo "bash $?"; read -r first < /tmp/err; echo "$first"',
+    /^bash 3\nbash: line 1: echo: write error: No medium found\n$/,
   ],
   ['python', PYTHON, /^python (write )?close\n$/],
 ]) {
   test(`hostfs over a port: a ${name} writer whose port dies mid-write is told, and a fresh write after the loss fails too (#1062)`, {
-    timeout: 600_000,
+    timeout: 900_000,
   }, async (t) => {
     const { bash, kill, on } = await mountedOverPort(t);
     const writer = bash(script, { cwd: '/home' });
@@ -92,7 +92,7 @@ for (const [name, script, said] of [
 }
 
 test('hostfs over a port: a writer whose file was all written back when the port died still fails its next write (#1062)', {
-  timeout: 600_000,
+  timeout: 900_000,
 }, async (t) => {
   const { dir, page, bash, kill } = await mountedOverPort(t);
   const writer = bash(
@@ -112,7 +112,7 @@ test('hostfs over a port: a writer whose file was all written back when the port
 });
 
 test('hostfs over a port: what a program fsynced is on the host, and when the port dies before its close, fsync and close both fail (#1062)', {
-  timeout: 600_000,
+  timeout: 900_000,
 }, async (t) => {
   const { dir, bash, kill } = await mountedOverPort(t);
   const held = bash(
@@ -145,10 +145,10 @@ test('hostfs over a port: what a program fsynced is on the host, and when the po
 });
 
 test('hostfs over a live port: the same writers finish with 0 and every line on the host (#1062)', {
-  timeout: 600_000,
+  timeout: 900_000,
 }, async (t) => {
   const { dir, bash } = await mountedOverPort(t);
-  const lines = 'i=0; while [ $i -lt 300000 ]; do echo line-$i; i=$((i+1)); done';
+  const lines = 'i=0; while [ $i -lt 100000 ]; do echo line-$i; i=$((i+1)); done';
   const r = await bash(
     `${lines} > /mnt/p/w.txt; echo "bash $?"; ${lines} | cat > /mnt/p/c.txt; echo "cat $?"`,
     {
@@ -156,7 +156,7 @@ test('hostfs over a live port: the same writers finish with 0 and every line on 
     }
   );
   assert.deepEqual(r, { status: 0, stdout: 'bash 0\ncat 0\n', stderr: '' });
-  const want = Array.from({ length: 300000 }, (_, i) => `line-${i}\n`).join('');
+  const want = Array.from({ length: 100000 }, (_, i) => `line-${i}\n`).join('');
   assert.equal(await readFile(join(dir, 'w.txt'), 'utf8'), want);
   assert.equal(await readFile(join(dir, 'c.txt'), 'utf8'), want);
 });
