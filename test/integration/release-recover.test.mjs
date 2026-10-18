@@ -119,3 +119,27 @@ test('release-recover always ends with a verdict line, and release.yml fails the
   assert.equal(bash("echo 'release-recover: PASS nothing to recover'").status, 0);
   assert.notEqual(bash("echo 'release-recover: FAIL x'; exit 1").status, 0);
 });
+
+test('a version npm took but does not serve yet is handed to release / verify on npm, which waits for it, instead of failing release-recover after 25 min (1.125.4)', async () => {
+  const { run } = fakeRun({ head: 'v1.2.3' });
+  const said = [];
+  const done = await recover({
+    name: NAME,
+    run,
+    outcome: 'success',
+    prior: [],
+    sleep: async () => {},
+    head: async () => false,
+    log: (l) => said.push(l),
+  });
+  assert.deepEqual(done, []);
+  assert.ok(
+    said.some(
+      (l) =>
+        l ===
+        `npm took ${NAME}@1.2.3, but does not serve it yet after 25 min: release / verify on npm waits for it`
+    ),
+    said.join('\n')
+  );
+  assert.equal(verdictOf(done), 'release-recover: PASS nothing to recover');
+});

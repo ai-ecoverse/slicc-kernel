@@ -129,3 +129,137 @@ test("release.yml's tag job is light work on the light runner, publish stays on 
   );
   assert.doesNotMatch(release, /CERT_RUNNER /);
 });
+
+test("verify waits out npm's attestations lag: a 404 that turns into 200 passes; a 404 that lasts while the packument stays still, or through the whole wait, is the supply-chain FAIL; any other status fails at once (1.125.4)", async () => {
+  const { awaitAttestations } = await import('../../tools/cert-review/lib.mjs');
+  const clock = { t: 0 };
+  const now = () => clock.t;
+  const sleep = async (ms) => {
+    clock.t += ms;
+  };
+  const answers = (list) => {
+    const queue = [...list];
+    return async () => ({
+      ok: queue[0] === 200,
+      status: queue.length > 1 ? queue.shift() : queue[0],
+    });
+  };
+  clock.t = 0;
+  const lag = await awaitAttestations({
+    url: 'u',
+    fetch: answers([404, 404, 404, 200]),
+    modified: async () => 'm1',
+    servedAt: 0,
+    now,
+    sleep,
+  });
+  assert.equal(lag.res.ok, true);
+  assert.equal(clock.t, 45_000, 'three 15 s retries');
+  clock.t = 0;
+  const missing = await awaitAttestations({
+    url: 'u',
+    fetch: answers([404]),
+    modified: async () => 'm1',
+    servedAt: 0,
+    now,
+    sleep,
+  });
+  assert.match(
+    missing.problem,
+    /^attestations answered 404 for 30 min after npm started serving it, and its packument stopped changing 30 min ago$/
+  );
+  clock.t = 0;
+  let n = 0;
+  const moving = await awaitAttestations({
+    url: 'u',
+    fetch: answers([404]),
+    modified: async () => `m${n++}`,
+    servedAt: 0,
+    now,
+    sleep,
+    deadline: 3_600_000,
+  });
+  assert.match(
+    moving.problem,
+    /through the whole wait$/,
+    'a packument that keeps changing waits until the budget ends'
+  );
+  assert.equal(clock.t, 3_600_000);
+  clock.t = 0;
+  const other = await awaitAttestations({
+    url: 'u',
+    fetch: answers([500]),
+    modified: async () => 'm',
+    servedAt: 0,
+    now,
+    sleep,
+  });
+  assert.deepEqual([other.problem, clock.t], ['attestations answered 500', 0]);
+  clock.t = 60 * 60_000;
+  const lateServe = await awaitAttestations({
+    url: 'u',
+    fetch: answers([404, 404, 200]),
+    modified: async () => 'm',
+    servedAt: clock.t,
+    now,
+    sleep,
+  });
+  assert.equal(
+    lateServe.res.ok,
+    true,
+    'the grace runs from when npm started serving it, however long after the publish'
+  );
+  clock.t = 0;
+  let calls = 0;
+  const shaky = await awaitAttestations({
+    url: 'u',
+    fetch: answers([404, 404, 200]),
+    modified: async () => {
+      calls++;
+      if (calls === 1) throw new Error('npm error code ETIMEDOUT');
+      return 'm';
+    },
+    servedAt: 0,
+    now,
+    sleep,
+  });
+  assert.equal(shaky.res.ok, true, 'one npm view error in the wait is retried, not an alert');
+  clock.t = 0;
+  let urls = 0;
+  const later = await awaitAttestations({
+    url: async () => (++urls < 3 ? undefined : 'u'),
+    fetch: answers([200]),
+    modified: async () => 'm',
+    servedAt: 0,
+    now,
+    sleep,
+  });
+  assert.deepEqual(
+    [later.res.ok, urls, clock.t],
+    [true, 3, 30_000],
+    'dist.attestations that appears a little after the version is waited for'
+  );
+  clock.t = 0;
+  const never = await awaitAttestations({
+    url: async () => undefined,
+    fetch: answers([200]),
+    modified: async () => 'm',
+    servedAt: 0,
+    now,
+    sleep,
+  });
+  assert.match(
+    never.problem,
+    /^no attestations on npm for 30 min after npm started serving it, and its packument stopped changing/
+  );
+  const verify = await readFile(
+    new URL('../../tools/cert-review/verify.mjs', import.meta.url),
+    'utf8'
+  );
+  assert.match(
+    verify,
+    /deadline: budget/,
+    "the attestations wait shares the publish wait's budget"
+  );
+  assert.match(verify, /not a supply-chain problem, re-run this job once it does/);
+});

@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import * as lib from '../../tools/cert-review/lib.mjs';
 import {
   behaviourFiles,
   decide,
@@ -726,7 +727,7 @@ test('a merge group with a reviewer change the self-guard did not pass is red, a
   assert.equal(posted().at(-1).state, 'error');
   assert.match(
     jobs.guard,
-    /uses: ai-ecoverse\/slicc-shared-web\/\.github\/actions\/cert-self-guard@fe97ae242f8ddcc824334cad287346d7df3f0bbb\n {8}with:\n {10}approval-label: cert-review-approved\n {10}paths: \|\n {12}\.github\/workflows\/cert\*\.yml\n {12}\.github\/workflows\/cert\*\.yaml\n {12}scripts\/cert\/\*\*\n {12}tools\/cert-review\/\*\*\n {12}\.github\/actions\/cert-self-guard\/\*\*\n {12}\.github\/runner\.mjs\n/
+    /uses: ai-ecoverse\/slicc-shared-web\/\.github\/actions\/cert-self-guard@fe97ae242f8ddcc824334cad287346d7df3f0bbb\n {8}with:\n {10}approval-label: cert-review-approved\n {10}paths: \|\n {12}\.github\/workflows\/cert\*\.yml\n {12}\.github\/workflows\/cert\*\.yaml\n {12}scripts\/cert\/\*\*\n/
   );
   assert.match(jobs.guard, /continue-on-error: true/);
   assert.match(jobs.guard, /fetch-depth: 0/);
@@ -1181,5 +1182,105 @@ test("the merge group's steps end to end: a planted regression is red, a missing
   assert.deepEqual(
     api.seen.filter((x) => x.method === 'PATCH').map((x) => [x.url, x.body.state]),
     [['/repos/o/r/issues/50', 'closed']]
+  );
+});
+
+test("the cert-path guard fails closed: a reviewer path the guard's globs miss (a dot path) still needs cert-review-approved, and the reviewer globs cover dot paths", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'cert-guard-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const block = jobs.guard.split('\n      - ').find((b) => b.startsWith('id: cert\n'));
+  assert.ok(block, 'the cert step');
+  assert.match(jobs.guard, /^ {6}status: \$\{\{ steps\.cert\.outputs\.status \}\}$/m);
+  assert.match(block, /RECEIPT: \$\{\{ steps\.guard\.outputs\.receipt \}\}/);
+  const lines = block.split('\n');
+  const script = lines
+    .slice(lines.indexOf('        run: |') + 1)
+    .map((l) => l.slice(10))
+    .join('\n');
+  let n = 0;
+  const run = (status, members) => {
+    const out = join(dir, `o${n++}`);
+    const r = spawnSync('bash', ['-eo', 'pipefail', '-c', script], {
+      env: {
+        ...process.env,
+        GITHUB_OUTPUT: out,
+        STATUS: status,
+        RECEIPT: members === undefined ? '' : JSON.stringify({ status, members }),
+      },
+      encoding: 'utf8',
+    });
+    assert.equal(r.status, 0, r.stderr);
+    return { said: r.stdout, status: /^status=(.*)$/m.exec(readFileSync(out, 'utf8'))[1] };
+  };
+  const m = (o) => ({ pr: 7, paths: [], touched: [], approved: false, ...o });
+  assert.equal(run('PASS', [m({ paths: ['README.md'] })]).status, 'PASS', 'no reviewer change');
+  const hidden = run('PASS', [m({ paths: ['tools/cert-review/.a/b/.c', 'README.md'] })]);
+  assert.equal(hidden.status, 'FAIL', 'a reviewer dot path the globs missed, without the label');
+  assert.match(
+    hidden.said,
+    /^cert guard: FAIL \(reviewer paths the globs missed, without the label: #7: tools\/cert-review\/\.a\/b\/\.c\)$/m
+  );
+  assert.equal(
+    run('PASS', [
+      m({
+        paths: ['tools/cert-review/.a/b/.c', 'tools/cert-review/lib.mjs'],
+        touched: ['tools/cert-review/lib.mjs'],
+        approved: true,
+      }),
+    ]).status,
+    'PASS',
+    'approved on its head covers the missed path too'
+  );
+  assert.equal(run('PASS', [m({ paths: ['.github/workflows/cert-x.yaml'] })]).status, 'FAIL');
+  assert.equal(run('PASS', [m({ paths: ['.github/runner.mjs'] })]).status, 'FAIL');
+  assert.equal(run('PASS', undefined).status, 'INCOMPLETE', 'a PASS without a receipt');
+  assert.equal(run('FAIL', [m({})]).status, 'FAIL');
+  assert.equal(
+    run('PASS', [{ pr: 7, touched: [], approved: false }]).status,
+    'INCOMPLETE',
+    'a member without paths is never checked as a pass'
+  );
+  assert.equal(
+    run('PASS', [
+      m({ paths: ['tools/cert-review/.x'] }),
+      { pr: 8, paths: ['tools/cert-review/.y'] },
+    ]).status,
+    'INCOMPLETE',
+    'a member without touched is INCOMPLETE, whatever the others say'
+  );
+  assert.equal(
+    run('PASS', [m({ paths: ['README.md'] }), { pr: 9, paths: null, touched: [] }]).status,
+    'INCOMPLETE'
+  );
+  assert.equal(run('', undefined).status, 'INCOMPLETE');
+  const { matchesGlob } = await import('node:path');
+  for (const filename of [
+    'tools/cert-review/.npmrc',
+    'tools/cert-review/a/.b/c.mjs',
+    'tools/cert-review/.a/b',
+    'scripts/cert/.env',
+    '.github/actions/cert-self-guard/.x/y',
+    'tools/cert-review/.a/b/.c',
+  ]) {
+    assert.equal(reviewsItself([{ filename }]), true, filename);
+    assert.deepEqual(behaviourFiles([{ filename }]), [filename], filename);
+  }
+  for (const filename of [
+    'tools/cert-review/.npmrc',
+    'tools/cert-review/a/.b/c.mjs',
+    'scripts/cert/.env',
+  ])
+    assert.ok(
+      REVIEWER_GLOBS.some((g) => matchesGlob(filename, g)),
+      `the guard's globs cover ${filename}`
+    );
+  assert.deepEqual(lib.REVIEWER_DIRS, [
+    'scripts/cert/',
+    'tools/cert-review/',
+    '.github/actions/cert-self-guard/',
+  ]);
+  assert.ok(
+    block.includes(`const dirs = ${JSON.stringify(lib.REVIEWER_DIRS).replaceAll(',', ', ')};`),
+    'the step and lib hold the same reviewer dirs'
   );
 });

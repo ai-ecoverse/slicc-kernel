@@ -106,3 +106,87 @@ test('creating through O_EXCL still refuses a dangling symlink, the umask applie
     stderr: '',
   });
 });
+
+const kernelCalls = (stderr) =>
+  stderr
+    .split('\n')
+    .filter((line) => /\skernel\.\S+$/.test(line))
+    .reduce((sum, line) => sum + Number(line.trim().split(/\s+/)[1]), 0);
+
+test('a WASI program creating files and directories asks the kernel for its umask once, not per file (#1017)', {
+  timeout: 180_000,
+}, async (t) => {
+  const sh = await booted(t);
+  await sh('rm -rf /tmp/cu && mkdir -p /tmp/cu');
+  const run = async (tag, count, body) => {
+    const r = await sh(
+      `SLICC_WASI_STATS=1 ${py([`for i in range(${count}):`, ...body.map((line) => `  ${line.replaceAll('TAG', tag)}`), "print('ok')"])}`
+    );
+    assert.equal(r.stdout, 'ok\n');
+    return kernelCalls(r.stderr);
+  };
+  const rows = [
+    [
+      'O_EXCL',
+      2.2,
+      ["os.close(os.open(f'/tmp/cu/TAG-e{i}', os.O_WRONLY|os.O_CREAT|os.O_EXCL, 0o644))"],
+    ],
+    [
+      'O_TRUNC',
+      2.1,
+      [
+        "fd = os.open(f'/tmp/cu/TAG-t{i}', os.O_WRONLY|os.O_CREAT|os.O_TRUNC, 0o644)",
+        "os.write(fd, b'x')",
+        'os.close(fd)',
+      ],
+    ],
+    ['mkdir', 0.1, ["os.mkdir(f'/tmp/cu/TAG-d{i}')"]],
+  ];
+  const seen = [];
+  for (const [name, most, body] of rows) {
+    const per = ((await run('a', N, body)) - (await run('b', 0, body))) / N;
+    seen.push(`${name} ${per.toFixed(2)}`);
+    assert.ok(per <= most, `${name}: ${per} kernel calls per file`);
+  }
+  console.log(`kernel calls per created file: ${seen.join(', ')}`);
+});
+
+test('a umask set in one thread applies at once to files the other threads create, to the program and to its children (#1017)', {
+  timeout: 180_000,
+}, async (t) => {
+  const sh = await booted(t);
+  await sh('rm -rf /tmp/cw && mkdir -p /tmp/cw');
+  const r = await sh(
+    `umask 022; ${py([
+      'import threading',
+      'masks = [0o077, 0o027, 0o002, 0o070]',
+      'go = [threading.Event() for _ in masks]',
+      'done = [threading.Event() for _ in masks]',
+      'def setter():',
+      '  for k, m in enumerate(masks):',
+      '    os.umask(m)',
+      '    go[k].set()',
+      '    done[k].wait()',
+      'def maker():',
+      '  for k, m in enumerate(masks):',
+      '    go[k].wait()',
+      "    os.close(os.open(f'/tmp/cw/f{k}', os.O_WRONLY|os.O_CREAT|os.O_EXCL, 0o666))",
+      "    os.mkdir(f'/tmp/cw/d{k}')",
+      '    done[k].set()',
+      'a = threading.Thread(target=setter)',
+      'b = threading.Thread(target=maker)',
+      'a.start(); b.start(); a.join(); b.join()',
+      "os.close(os.open('/tmp/cw/main', os.O_WRONLY|os.O_CREAT|os.O_EXCL, 0o666))",
+      "print(*[oct(os.stat(f'/tmp/cw/{n}').st_mode & 0o777) for n in ('f0', 'd0', 'f1', 'd1', 'f2', 'd2', 'f3', 'd3', 'main')])",
+      'print(oct(os.umask(0o022)), oct(os.umask(0o022)))',
+      'os.umask(0o007)',
+      "os.system('umask; echo > /tmp/cw/child')",
+      "print(oct(os.stat('/tmp/cw/child').st_mode & 0o777))",
+    ])}`
+  );
+  assert.deepEqual(r, {
+    status: 0,
+    stdout: '0o600 0o700 0o640 0o750 0o664 0o775 0o606 0o707 0o606\n0o70 0o22\n0007\n0o660\n',
+    stderr: '',
+  });
+});

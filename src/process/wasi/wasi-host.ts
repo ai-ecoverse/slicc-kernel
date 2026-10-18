@@ -26,7 +26,7 @@ import {
   WHENCE,
   wasiErrnoOf,
 } from './wasi-abi.ts';
-import { CredCache } from './wasi-cred.ts';
+import { CredCache, UmaskCache, UNGATED } from './wasi-cred.ts';
 import {
   CLIPBOARD_PATH,
   deviceOf,
@@ -211,6 +211,7 @@ export class WasiHost {
   readonly mem = new WasiMemory();
   readonly fds: WasiFds;
   private readonly creds: CredCache;
+  private readonly umasks: UmaskCache;
   private readonly started = performance.now();
   private cache: Record<string, WasiFunction> | undefined;
 
@@ -244,7 +245,9 @@ export class WasiHost {
 
   interrupted: (() => boolean) | undefined;
 
-  quietly: (fn: () => void) => void = (fn) => fn();
+  quietly: <T>(fn: () => T) => T = UNGATED.quiet;
+
+  deliverDue: () => void = UNGATED.deliver;
 
   private readonly listening: number[];
 
@@ -272,6 +275,14 @@ export class WasiHost {
       () => this.o.kernel.call({ op: 'proc-cred' }) as Cred,
       o.credGen ?? o.shared
     );
+    this.umasks = new UmaskCache(
+      (mask) =>
+        this.o.kernel.call(
+          mask === undefined ? { op: 'proc-umask' } : { op: 'proc-umask', mask }
+        ) as number,
+      o.credGen ?? o.shared,
+      { quiet: (fn) => this.quietly(fn), deliver: () => this.deliverDue() }
+    );
     if (o.shared) this.fds.share(o.shared, true);
     else if (o.forked) this.fds.restore(o.forked.fds, o.forked.cloexec);
     else this.fds.setup(o.cwd, o.inherited ?? [], o.preopenRoot === true);
@@ -282,8 +293,12 @@ export class WasiHost {
     return this.fds.cwd() ?? this.startCwd;
   }
 
+  umask(mask?: number): number {
+    return mask === undefined ? this.umasks.get() : this.umasks.set(mask);
+  }
+
   private created(path: string, mode: number): void {
-    const umask = this.o.kernel.call({ op: 'proc-umask' }) as number;
+    const umask = this.umasks.get();
     if (umask !== DEFAULT_UMASK) this.o.fs.chmod(path, mode & ~umask);
   }
 
@@ -426,7 +441,7 @@ export class WasiHost {
           dirfd === AT_FDCWD && !raw.startsWith('/')
             ? fds.resolve(3, `${this.cwd}/${raw}`)
             : at(dirfd, p, l);
-        const umask = this.o.kernel.call({ op: 'proc-umask' }) as number;
+        const umask = this.umasks.get();
         const want = mode & 0o7777 & ~umask;
         mkfifo.call(this.o.fs, path, want);
         const made = (this.o.fs.lstat(path).mode ?? 0) & 0o7777;
@@ -434,7 +449,7 @@ export class WasiHost {
         return E.SUCCESS;
       },
       umask: (mask: number, out: number) => {
-        const old = this.o.kernel.call({ op: 'proc-umask', mask }) as number;
+        const old = this.umasks.set(mask);
         mem.view().setUint32(out, old, true);
       },
       fd_mode: (fd: number, out: number) => void mem.view().setUint32(out, fdMode(fd), true),

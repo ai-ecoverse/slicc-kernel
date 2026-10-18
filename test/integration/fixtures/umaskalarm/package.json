@@ -1,0 +1,12 @@
+{
+  "name": "umaskalarm",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "umaskalarm": {
+        "wasm": "bin/umaskalarm.wasm"
+      }
+    }
+  }
+}

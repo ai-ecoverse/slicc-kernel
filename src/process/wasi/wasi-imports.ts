@@ -257,7 +257,8 @@ export function importsContext({
     cwd: () => host.cwd,
     fs,
     fds,
-    syscall: call,
+    syscall: (req) =>
+      req.op === 'proc-umask' ? host.umask((req as { mask?: number }).mask) : call(req),
     net: network(raw, call),
     ...processes(host, call, tid !== MAIN_TID),
     async: {
