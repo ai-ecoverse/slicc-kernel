@@ -107,7 +107,13 @@ export function encodeSabResult(result: SyncFsResult): SabEncodedResult {
   if (!result.ok) {
     return {
       status: SAB_STATUS_ERRNO,
-      payload: encoder.encode(JSON.stringify({ errno: result.errno, message: result.message })),
+      payload: encoder.encode(
+        JSON.stringify({
+          errno: result.errno,
+          message: result.message,
+          ...(result.direct ? { direct: true } : {}),
+        })
+      ),
     };
   }
   switch (result.kind) {
@@ -138,12 +144,16 @@ export function decodeSabResult(status: number, payload: Uint8Array): SyncFsResu
         const parsed = JSON.parse(decoder.decode(payload)) as {
           errno?: unknown;
           message?: unknown;
+          direct?: unknown;
         };
         const errno =
           typeof parsed.errno === 'string' && /^E[A-Z]+$|^EAI_[A-Z]+$/.test(parsed.errno)
             ? parsed.errno
             : 'EIO';
-        return { ok: false, errno, message: String(parsed.message ?? errno) };
+        const message = String(parsed.message ?? errno);
+        return parsed.direct === true
+          ? { ok: false, errno, message, direct: true }
+          : { ok: false, errno, message };
       } catch {
         return { ok: false, errno: 'EIO', message: 'sync-sab: malformed errno payload' };
       }

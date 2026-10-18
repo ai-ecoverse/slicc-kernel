@@ -4,6 +4,7 @@ import type { DeviceAccess, KernelFdKind } from '../../kernel/fd-table.ts';
 import {
   type ChownArgs,
   type SyncFsBridgeStat,
+  type SyncFsCreated,
   type SyncFsFileIo,
   type SyncFsPosixBridge,
   syncError,
@@ -595,6 +596,32 @@ class SeenAt {
   }
 }
 
+function goneAbove(
+  maps: Array<Map<string, Cached>>,
+  live: (miss: Miss, path: string) => boolean,
+  path: string
+): Miss | undefined {
+  for (let at = path.lastIndexOf('/'); at > 0; at = path.lastIndexOf('/', at - 1)) {
+    const up = path.slice(0, at);
+    for (const map of maps) {
+      const hit = map.get(up);
+      const code = hit && 'until' in hit ? (hit.error as { code?: string }).code : undefined;
+      if (hit && 'until' in hit && code === 'ENOENT' && live(hit, up)) return hit;
+    }
+  }
+  return undefined;
+}
+
+const remember =
+  (cache: StatCache, seen: SeenAt, blind: boolean) =>
+  (path: string, made: SyncFsCreated | undefined | void): SyncFsCreated | undefined | void => {
+    if (!made || blind) return made;
+    const { seen: at, ...st } = made;
+    cache.put(cache.stats, path, st);
+    if (at !== undefined) seen.saw(cache.stats, path, at);
+    return made;
+  };
+
 export function cachingBridge(
   bridge: SyncFsPosixBridge,
   now: () => number = () => performance.now(),
@@ -612,17 +639,8 @@ export function cachingBridge(
     miss.until > now() &&
     (view === undefined || miss.gen === undefined || !view.changedSince(miss.gen, path).changed);
   const seen = new SeenAt(view, lstats);
-  const gone = (path: string): Miss | undefined => {
-    for (let at = path.lastIndexOf('/'); at > 0; at = path.lastIndexOf('/', at - 1)) {
-      const up = path.slice(0, at);
-      for (const map of [lstats, stats]) {
-        const hit = map.get(up);
-        const code = hit && 'until' in hit ? (hit.error as { code?: string }).code : undefined;
-        if (hit && 'until' in hit && code === 'ENOENT' && live(hit, up)) return hit;
-      }
-    }
-    return undefined;
-  };
+  const kept = remember(cache, seen, blind);
+  const gone = (path: string) => goneAbove([lstats, stats], live, path);
   const cached = (map: typeof stats, path: string, get: () => SyncFsBridgeStat) => {
     if (blind || view?.foreign()) return get();
     cache.fresh();
@@ -753,7 +771,10 @@ export function cachingBridge(
     ...(bridge.create
       ? {
           create: (p: string, mode?: number, opening?: boolean) =>
-            mutating(() => bridge.create?.(p, mode, opening), ...entry(p)),
+            kept(
+              p,
+              mutating(() => bridge.create?.(p, mode, opening), ...entry(p))
+            ),
         }
       : {}),
     ...(bridge.mkfifo

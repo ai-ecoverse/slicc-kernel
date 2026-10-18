@@ -341,6 +341,11 @@ export function physicalProc(fs: Pick<SyncFsPosixBridge, 'stat' | 'changes'>): (
   };
 }
 
+function directMiss(err: unknown, path: string): boolean {
+  if ((err as { direct?: unknown } | null)?.direct !== true) return false;
+  return !path.split('/').some((part) => part === '.' || part === '..');
+}
+
 export function procfsBridge<T extends SyncFsPosixBridge>(fs: T, tree: ProcTree): T {
   const toProc = (path: string, follow: boolean) => procPath(fs, path, follow);
   const shadowing = physicalProc(fs);
@@ -353,6 +358,7 @@ export function procfsBridge<T extends SyncFsPosixBridge>(fs: T, tree: ProcTree)
     try {
       return own();
     } catch (err) {
+      if (directMiss(err, p)) throw err;
       const real = toProc(p, follow);
       if (real === undefined) throw err;
       return proc(real);
@@ -417,7 +423,12 @@ export function procfsBridge<T extends SyncFsPosixBridge>(fs: T, tree: ProcTree)
       const real = shadowing() ? probe() : undefined;
       if (real === null) return false;
       if (real !== undefined) return tree.exists(real);
-      if (fs.exists(p)) return true;
+      try {
+        fs.stat(p);
+        return true;
+      } catch (err) {
+        if (directMiss(err, p)) return false;
+      }
       const late = probe();
       return typeof late === 'string' && tree.exists(late);
     },
