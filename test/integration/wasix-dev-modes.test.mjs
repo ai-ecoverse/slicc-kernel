@@ -28,6 +28,7 @@ const NODES = [
   '/dev/pts/0',
   '/dev/stdin',
   '/dev/fd/0',
+  '/tmp/console',
 ];
 
 const PROBE = [
@@ -35,6 +36,8 @@ const PROBE = [
   `for p in ${JSON.stringify(NODES)}:`,
   '    st = os.stat(p)',
   '    print(p, oct(st.st_mode), st.st_uid, st.st_gid)',
+  "st = os.stat('/tmp/pty')",
+  "print('/tmp/pty', oct(st.st_mode), st.st_uid == os.stat('/dev/pts/0').st_uid)",
   "fd = os.open('/dev/null', os.O_RDWR)",
   "print('fstat /dev/null', oct(os.fstat(fd).st_mode))",
   "print('fstat 0', oct(os.fstat(0).st_mode))",
@@ -47,12 +50,13 @@ const PROBE = [
 const py = (lines) => `python3 -c "$(echo ${Buffer.from(lines).toString('base64')} | base64 -d)"`;
 
 const SHELL = `exec 3</dev/ptmx
+rm -f /tmp/console /tmp/pty; ln -s /dev/tty /tmp/console; ln -s /dev/pts/0 /tmp/pty
 for p in ${NODES.join(' ')}; do echo "$p 0o$(printf %o 0x$(stat -L -c %f $p)) $(stat -L -c '%u %g' $p)"; done
 echo ---
 ${py(PROBE)}`;
 
 for (const users of ['enforce', 'off']) {
-  test(`a WASIX program stats the kernel's device nodes with the mode and owner an Emscripten program sees (#1028, users: ${users})`, {
+  test(`a WASIX program stats the kernel's device nodes with the mode and owner an Emscripten program sees, also through a symlink (#1028, #1042, users: ${users})`, {
     timeout: 180_000,
   }, async (t) => {
     const kernel = await createNodeKernel({ users });
@@ -66,7 +70,9 @@ for (const users of ['enforce', 'off']) {
     assert.equal(lines.slice(0, NODES.length).join('\n') + '\n', emscripten);
     assert.match(emscripten, /^\/dev\/null 0o20666 0 0\n/m);
     assert.match(emscripten, /^\/dev\/pts\/0 0o20620 /m);
+    assert.match(emscripten, /^\/tmp\/console 0o20666 0 0\n/m);
     assert.deepEqual(lines.slice(NODES.length), [
+      '/tmp/pty 0o20620 True',
       'fstat /dev/null 0o20666',
       'fstat 0 0o20666',
       'open /dev/tty ENXIO',

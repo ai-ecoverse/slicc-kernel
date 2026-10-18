@@ -803,6 +803,7 @@ The kernel's device nodes answer the mode and owner an Emscripten program sees f
 - `/dev/null`, `/dev/zero`, `/dev/full`, `/dev/random`, `/dev/urandom` and `/dev/tty` are root's character devices with `0666`. `/dev/tty` also stats when the process has no controlling terminal; opening it then is `ENXIO`, as on Linux.
 - A pty's `/dev/pts/N` is its owner's, with `0620`.
 - `/dev/stdin`, `/dev/stdout`, `/dev/stderr` and `/dev/fd/N` answer for the descriptor they name.
+- A symlink elsewhere that leads to one of them, such as `/tmp/console -> /dev/tty`, answers the same when followed ([#1042](https://github.com/ai-ecoverse/slicc-kernel/issues/1042)).
 
 An Emscripten program sees those six character devices at `0666` with `users: 'off'` too.
 
