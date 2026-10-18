@@ -67,6 +67,17 @@ int main(int argc, char **argv) {
       int other = open(argv[i + 1], O_RDONLY);
       if (other >= 0) close(other);
       i += 1;
+    } else if (!strcmp(op, "append") && i + 1 < argc) {
+      const char *text = argv[++i];
+      off_t at = lseek(fd, 0, SEEK_END);
+      ssize_t n = write(fd, text, strlen(text));
+      printf("append %lld %zd\n", (long long)at, n);
+      fflush(stdout);
+    } else if (!strcmp(op, "size")) {
+      struct stat st;
+      if (fstat(fd, &st) != 0) printf("size %s\n", err(errno));
+      else printf("size %lld\n", (long long)st.st_size);
+      fflush(stdout);
     } else if (!strcmp(op, "close")) {
       close(fd);
     } else if (!strcmp(op, "lock") && i + 3 < argc) {

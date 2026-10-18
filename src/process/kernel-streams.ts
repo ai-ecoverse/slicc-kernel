@@ -563,15 +563,25 @@ export class KernelStreams {
   }
 
   sizeFromKernel(stream: ProcessStream, kfd: number): void {
+    const getattr = this.kernelAttrs(stream, kfd);
+    if (getattr) this.describe(stream, `${stream.path ?? ''}:${++this.described}`, getattr);
+  }
+
+  fstatFromKernel(stream: ProcessStream, kfd: number): void {
+    const getattr = this.kernelAttrs(stream, kfd);
+    if (getattr) stream.stream_ops = { ...stream.stream_ops, getattr };
+  }
+
+  private kernelAttrs(stream: ProcessStream, kfd: number): (() => object) | undefined {
     const { size, fdStat } = this.sys;
-    if (!size) return;
+    if (!size) return undefined;
     const node = stream.node;
-    this.describe(stream, `${stream.path ?? ''}:${++this.described}`, () => {
+    return () => {
       const base = node.node_ops?.getattr?.(node);
       const live = this.call(() => size.call(this.sys, kfd));
       const real = fdStat && this.call(() => fdStat.call(this.sys, kfd));
       return { ...base, ...real, ...datesOf(real), size: live };
-    });
+    };
   }
 
   describe(stream: ProcessStream, name: string, getattr: () => object): void {
