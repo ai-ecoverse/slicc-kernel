@@ -436,6 +436,82 @@ test("the merge group's cert-review is a lookup: each PR's status on the head be
   );
 });
 
+test("the merge group's cert-review needs the downstream smoke too: a regression or a missing result is not certified, a known bios failure or an override passes with its note (#480)", async (t) => {
+  const head = 'a'.repeat(40);
+  const api = await fakeApi(t, (method, url) => {
+    if (url.startsWith('/repos/o/r/compare/'))
+      return { commits: [{ commit: { message: 'Merge pull request #11 from o/x' } }] };
+    if (/^\/repos\/o\/r\/pulls\/11$/.test(url)) return { head: { sha: head } };
+    if (/^\/repos\/o\/r\/pulls\/11\/files/.test(url)) return [{ filename: 'src/x.ts' }];
+    if (url.startsWith(`/repos/o/r/commits/${head}/statuses`))
+      return [{ context: 'cert-review', state: 'success' }];
+    if (method === 'POST' && url.startsWith('/repos/o/r/statuses/')) return {};
+    return undefined;
+  });
+  const dir = await mkdtemp(join(tmpdir(), 'cert-downstream-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const posted = () => api.seen.filter((x) => x.method === 'POST').at(-1).body;
+  const lookup = async (state, line) => {
+    const file = join(dir, `${state}.json`);
+    if (state !== 'missing') await writeFile(file, JSON.stringify({ state, line }));
+    return pr(api.url, [
+      'lookup',
+      '--repo',
+      'o/r',
+      '--base',
+      'e'.repeat(40),
+      '--head',
+      'f'.repeat(40),
+      '--run',
+      '2',
+      '--guard',
+      'PASS',
+      '--downstream',
+      file,
+    ]);
+  };
+  const pass = await lookup('PASS', 'downstream: PASS bios c2cec127b935 sweep: 12 pass');
+  assert.equal(pass.code, 0, pass.out);
+  assert.equal(posted().state, 'success');
+  assert.match(
+    posted().description,
+    /^downstream: PASS bios c2cec127b935 sweep: 12 pass; #11 certified at a{12}/
+  );
+  const regression = await lookup(
+    'FAIL',
+    'downstream: FAIL bios c2cec127b935 sweep: 1 regressions'
+  );
+  assert.equal(regression.code, 1);
+  assert.deepEqual(
+    [posted().state, posted().description],
+    ['failure', 'not certified: downstream: FAIL bios c2cec127b935 sweep: 1 regressions']
+  );
+  const unavailable = await lookup(
+    'INCOMPLETE',
+    'downstream: INCOMPLETE bios: the canary left no readable result'
+  );
+  assert.equal(unavailable.code, 1);
+  assert.equal(posted().state, 'error');
+  const missing = await lookup('missing');
+  assert.equal(missing.code, 1);
+  assert.deepEqual(
+    [posted().state, posted().description],
+    ['error', 'not certified: downstream: INCOMPLETE the downstream smoke left no result']
+  );
+  for (const [state, line] of [
+    ['NOT_JUDGED', 'downstream: not judged (bios canary failing on main) bios c2cec127b935 sweep'],
+    [
+      'OVERRIDDEN',
+      'downstream: overridden (downstream-override on the head, by the coordinator) bios c2cec127b935',
+    ],
+  ]) {
+    const r = await lookup(state, line);
+    assert.equal(r.code, 0, `${state}: ${r.out}`);
+    assert.equal(posted().state, 'success');
+    assert.ok(posted().description.startsWith(line.slice(0, 60)), state);
+  }
+});
+
 test("the workflow: same-repo PRs with merge-ok review the merge ref with main's own tools, the key only in the review step, merge groups only look up", () => {
   assert.match(
     workflow,
