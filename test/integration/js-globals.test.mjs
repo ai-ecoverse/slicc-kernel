@@ -26,10 +26,13 @@ export default async function main(ctx) {
     thrown = String(err);
   }
   const read = NAMES.map((n) => globalThis[n]);
+  const same = globalThis.self === globalThis;
+  globalThis.self = 'mine';
+  const own = globalThis.self;
   for (const n of NAMES) delete globalThis[n];
   const after = NAMES.map((n) => typeof globalThis[n]);
   const hidden = [typeof process, typeof globalThis.global];
-  await ctx.write(1, JSON.stringify({ before, thrown, read, after, hidden }));
+  await ctx.write(1, JSON.stringify({ before, thrown, read, self: [same, own], after, hidden }));
   return 0;
 }
 `;
@@ -38,6 +41,7 @@ const WANT = {
   before: NAMES.map(() => 'undefined'),
   thrown: null,
   read: NAMES.map((_, i) => i + 1),
+  self: [true, 'mine'],
   after: NAMES.map(() => 'undefined'),
   hidden: ['undefined', 'undefined'],
 };
@@ -57,7 +61,7 @@ test("a JS program can assign its own require, module, Worker, importScripts and
   assert.deepEqual(JSON.parse(r.stdout), WANT);
 });
 
-test('in the page, a JS program can assign its own importScripts, postMessage and Worker too, and deleting them brings back undefined, not the worker scope', async (t) => {
+test('in the page, a JS program can assign its own self (an own writable slot, the global by default), importScripts, postMessage and Worker too, and deleting them brings back undefined, not the worker scope', async (t) => {
   const chrome = await launch();
   t.after(() => chrome.close());
   const { page, run } = await bootedPage(chrome, t);

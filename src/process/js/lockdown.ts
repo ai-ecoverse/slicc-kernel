@@ -87,6 +87,14 @@ export function vacate(target: object, names: readonly string[]): void {
 export function lockdown(scope: object = globalThis): void {
   hide(scope, BLOCKED_GLOBALS);
   vacate(scope, OPEN_SLOTS);
+  if ('self' in scope) {
+    Reflect.defineProperty(scope, 'self', {
+      value: scope,
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+  }
   const navigator = (scope as { navigator?: unknown }).navigator;
   if (navigator && typeof navigator === 'object') hide(navigator, BLOCKED_NAVIGATOR);
 }
