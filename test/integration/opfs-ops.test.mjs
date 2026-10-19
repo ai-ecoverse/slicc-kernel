@@ -29,7 +29,7 @@ async function booted(t) {
 }
 
 const py = (lines) =>
-  `python3 -c "$(echo ${Buffer.from(['import os', ...lines].join('\n')).toString('base64')} | base64 -d)"`;
+  `python3 -c "$(echo ${Buffer.from(['import os, time', ...lines].join('\n')).toString('base64')} | base64 -d)"`;
 
 const N = 60;
 
@@ -72,7 +72,7 @@ test('/proc/sys/kernel/slicc_opfs_ops counts every request the root file system 
   }
 });
 
-test('a file a WASI program creates and writes reuses the handle its create made: per file 2 OPFS lookups with O_EXCL, 3 with a write, 4 with O_TRUNC and a write (#1017)', {
+test('a file a WASI program creates and writes reuses the handle its create made: per file 2 OPFS lookups with O_EXCL, 4 with a write and its time stamp, 5 with O_TRUNC (#1017)', {
   timeout: 180_000,
 }, async (t) => {
   const sh = await booted(t);
@@ -85,8 +85,8 @@ test('a file a WASI program creates and writes reuses the handle its create made
     ],
     [
       'O_EXCL + write',
-      3.9,
-      6.05,
+      4.5,
+      7.3,
       [
         "fd = os.open(f'/tmp/oo/TAG{i}', os.O_WRONLY|os.O_CREAT|os.O_EXCL, 0o644)",
         "os.write(fd, b'x' * 4096)",
@@ -95,8 +95,8 @@ test('a file a WASI program creates and writes reuses the handle its create made
     ],
     [
       'O_TRUNC + write',
-      4.9,
-      7.05,
+      5.5,
+      8.3,
       [
         "fd = os.open(f'/tmp/oo/TAG{i}', os.O_WRONLY|os.O_CREAT|os.O_TRUNC, 0o644)",
         "os.write(fd, b'x' * 4096)",
@@ -113,7 +113,12 @@ test('a file a WASI program creates and writes reuses the handle its create made
         `  a = ${KNOWN}`,
         `  for i in range(${N}):`,
         ...body.map((line) => `    ${line.replace('TAG', `r${k}_{r}_`)}`),
-        `  b = ${KNOWN}`,
+        '  b, quiet = None, 0',
+        '  while quiet < 10:',
+        `    c = ${KNOWN}`,
+        '    quiet = quiet + 1 if c == b else 0',
+        '    b = c',
+        '    time.sleep(0.05)',
         '  d = [y - x for x, y in zip(a, b)]',
         '  least = d if least is None else [min(p, q) for p, q in zip(least, d)]',
         "print(' '.join(str(v) for v in least))",
