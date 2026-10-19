@@ -7,37 +7,48 @@ interface Entry {
   scrubber: Scrubber | undefined;
 }
 
+type Tree = Map<string, Entry>;
+
 export interface SessionScrub {
   version: number;
   scrubber: Scrubber;
 }
 
 export class SessionScrubs {
-  private readonly by = new Map<string, Entry>();
+  private readonly trees = new Map<number, Tree>();
 
-  private static key(pid: number, host: string): string {
-    return `${pid}\0${host}`;
+  private treeOf(pid: number): Tree {
+    let tree = this.trees.get(pid);
+    if (!tree) {
+      tree = new Map();
+      this.trees.set(pid, tree);
+    }
+    return tree;
+  }
+
+  inherit(parent: number, child: number): void {
+    this.trees.set(child, this.treeOf(parent));
   }
 
   add(pid: number, host: string, secrets: readonly ScrubSecret[]): void {
-    const key = SessionScrubs.key(pid, host);
-    const entry = this.by.get(key) ?? { secrets: [], version: 0, scrubber: undefined };
+    const tree = this.treeOf(pid);
+    const entry = tree.get(host) ?? { secrets: [], version: 0, scrubber: undefined };
     const fresh = secrets.filter((s) => !entry.secrets.some((e) => e.value === s.value));
     if (fresh.length === 0) return;
     entry.secrets = [...entry.secrets, ...fresh];
     entry.version += 1;
     entry.scrubber = undefined;
-    this.by.set(key, entry);
+    tree.set(host, entry);
   }
 
   of(pid: number, host: string): SessionScrub | undefined {
-    const entry = this.by.get(SessionScrubs.key(pid, host));
+    const entry = this.trees.get(pid)?.get(host);
     if (!entry) return undefined;
     entry.scrubber ??= scrubberOf(entry.secrets);
     return entry.scrubber ? { version: entry.version, scrubber: entry.scrubber } : undefined;
   }
 
   drop(pid: number): void {
-    for (const key of [...this.by.keys()]) if (key.startsWith(`${pid}\0`)) this.by.delete(key);
+    this.trees.delete(pid);
   }
 }

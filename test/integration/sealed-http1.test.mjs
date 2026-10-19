@@ -24,6 +24,12 @@ export default async function main(ctx) {
   const steps = JSON.parse(ctx.argv[1]);
   const out = [];
   for (const s of steps) {
+    if (s.spawn) {
+      const child = await ctx.spawn({ argv: ['sh1', JSON.stringify(s.spawn), '/tmp/child.json'] });
+      await child.wait();
+      out.push({ child: JSON.parse(dec.decode(await ctx.fs.readFile('/tmp/child.json'))) });
+      continue;
+    }
     try {
       const c = await ctx.net.connect({ host: s.host, port: s.port, tls: s.tls });
       const w = c.writable.getWriter();
@@ -41,7 +47,8 @@ export default async function main(ctx) {
       out.push({ code: e.code, message: e.message });
     }
   }
-  await ctx.write(1, JSON.stringify(out));
+  if (ctx.argv[2]) await ctx.fs.writeFile(ctx.argv[2], JSON.stringify(out));
+  else await ctx.write(1, JSON.stringify(out));
 }
 `;
 
@@ -64,6 +71,7 @@ function tokenOf(head) {
 }
 
 function http(log, leak) {
+  const box = { stored: '' };
   return (sock) => {
     let buf = Buffer.alloc(0);
     const conn = [];
@@ -81,9 +89,12 @@ function http(log, leak) {
         buf = buf.subarray(end + 4 + length);
         conn.push({ head, body });
         const token = tokenOf(head);
-        const text = leak
-          ? `LEAK ${SECRET} ${Buffer.from(SECRET).toString('base64')}\n`
-          : `HEAD ${head}BODY ${body}\nB64 ${Buffer.from(token).toString('base64')}\nHEX ${Buffer.from(token).toString('hex')}\n`;
+        if (token) box.stored = token;
+        const text = head.startsWith('GET /stored ')
+          ? `STORED ${box.stored}\n`
+          : leak
+            ? `LEAK ${SECRET} ${Buffer.from(SECRET).toString('base64')}\n`
+            : `HEAD ${head}BODY ${body}\nB64 ${Buffer.from(token).toString('base64')}\nHEX ${Buffer.from(token).toString('hex')}\n`;
         sock.write(`HTTP/1.1 200 OK\r\nContent-Length: ${Buffer.byteLength(text)}\r\n\r\n${text}`);
         if (/^connection:\s*close/im.test(head)) sock.end();
       }
@@ -338,5 +349,36 @@ test(
     assert.equal(before.got.includes(`LEAK ${SECRET}`), true, before.got);
     assert.equal(after.got.includes(SECRET), false, after.got);
     assert.match(after.got, new RegExp(`LEAK ${PH} \\[redacted:sealed\\]`));
+  }
+);
+
+test(
+  'the scrub covers the process tree: a child spawned after its parent had a value substituted reads a stored copy back from its own session as the placeholder (#1090)',
+  TIMEOUT,
+  async (t) => {
+    const a = await server(t, ca.server('api.test'));
+    const { run } = await kernelWith(t, [['api.test', a.port]]);
+    const steps = [
+      { host: 'api.test', port: 465, tls: {}, writes: [get([`Authorization: Bearer ${PH}`])] },
+      {
+        spawn: [
+          {
+            host: 'api.test',
+            port: 465,
+            tls: { ca: ca.pem },
+            writes: [get([], { path: '/stored' })],
+          },
+        ],
+      },
+    ];
+    const [first, { child }] = await run(steps);
+    assert.equal(first.substitutes, true);
+    assert.equal(tokenOf(a.log[0][0].head), SECRET);
+    assert.equal(child[0].got.includes(SECRET), false, child[0].got);
+    assert.match(child[0].got, new RegExp(`STORED ${PH}`));
+    const [alone] = await run([
+      { host: 'api.test', port: 465, tls: { ca: ca.pem }, writes: [get([], { path: '/stored' })] },
+    ]);
+    assert.match(alone.got, new RegExp(`STORED ${SECRET}`));
   }
 );

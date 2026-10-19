@@ -1829,6 +1829,7 @@ export class Launcher {
     });
     this.processes.set(pid, handle);
     if (scrubs) this.scrubs.set(pid, scrubs);
+    if (req.ppid !== undefined) this.sealed.sessions.inherit(req.ppid, pid);
     const { cred } = req;
     this.creds.set(pid, () => handle.cred?.() ?? copyCred(cred));
     this.marks(pid, req);
