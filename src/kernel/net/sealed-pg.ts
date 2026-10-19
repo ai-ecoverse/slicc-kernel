@@ -53,6 +53,7 @@ export class PgServer {
 
   private auth(message: Uint8Array): Uint8Array {
     const code = message.length >= 9 ? int32(message, 5) : -1;
+    if (this.expect && code !== SASL_FINAL) this.failed = true;
     this.cleartext = message.length === 9 && code === CLEARTEXT;
     if (code === SASL) return this.mechanisms(message);
     else if (code === SASL_CONTINUE) this.serverFirst = latin(message.subarray(9));
@@ -114,6 +115,10 @@ export class PgServer {
         break;
       }
       if (data[at] !== 0x52) {
+        if (this.expect) {
+          this.failed = true;
+          break;
+        }
         this.skip = whole;
         continue;
       }

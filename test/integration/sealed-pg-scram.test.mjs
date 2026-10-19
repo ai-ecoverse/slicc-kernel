@@ -142,14 +142,14 @@ test(
 );
 
 test(
-  'pg SCRAM-SHA-256: the server echoes the client-final message in an ErrorResponse, and the program never reads the value (#1090)',
+  'pg SCRAM-SHA-256: an ErrorResponse instead of the final message, which would carry the substituted proof back, ends the session before the program reads it (#1090, #1138 review)',
   TIMEOUT,
   async (t) => {
     const db = await pgFixture(t, ca.server('db.test'), VALUE, { echoFinal: true });
     const { run } = await kernelWith(t, [['db.test', db.port]], matched);
     const got = await run({ host: 'db.test', port: 5432, password: PH });
-    const last = got.steps.at(-1);
-    assert.match(last, /^E .*received c=biws,r=fixedtestclientnonce/);
+    assert.equal(got.steps.at(-1), 'error ERR_SSL_PROTOCOL_ERROR', JSON.stringify(got));
+    assert.equal(JSON.stringify(got).includes('received c=biws'), false, JSON.stringify(got));
     assert.equal(JSON.stringify(got).includes(VALUE), false);
   }
 );

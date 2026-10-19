@@ -96,6 +96,7 @@ class SessionWriter {
   private readonly session = sessionId();
   private readonly smtp: SmtpClient;
   private pgStarted = false;
+  sawPg = false;
   private readonly conn: UplinkConn;
   private readonly s: SealedSession;
   private readonly pgClient: PgClient;
@@ -159,6 +160,7 @@ class SessionWriter {
     this.buffer.fill(0);
     this.buffer = joined;
     if (this.mode === 'sniff') this.mode = modeOf(latin1(joined.subarray(0, 8))) ?? 'sniff';
+    if (this.mode === 'pg') this.sawPg = true;
     if (this.mode === 'pass') await this.release();
     else if (this.mode === 'http1') await this.http1();
     else if (this.mode === 'smtp') await this.lines();
@@ -359,7 +361,7 @@ export function sealedConn(conn: UplinkConn, s: SealedSession): UplinkConn {
       for (;;) {
         const bytes = await conn.read();
         if (!bytes) return bytes;
-        const out = pg.filter(bytes);
+        const out = writer?.sawPg ? pg.filter(bytes) : bytes;
         if (pg.failed) {
           conn.close();
           throw new KernelError(
