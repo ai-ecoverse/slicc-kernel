@@ -44,6 +44,11 @@ export interface NewOwner extends Owner {
   fifo?: boolean;
 }
 
+export interface CopyOptions {
+  exclusive: boolean;
+  owner?: NewOwner;
+}
+
 export interface OwnerChange {
   uid?: number;
   gid?: number;
@@ -87,6 +92,7 @@ export interface KernelFs {
   readlink(path: string): Promise<string>;
   realpath?(path: string, follow: boolean): Promise<string>;
   createExclusive?(path: string, owner?: NewOwner): Promise<void>;
+  copyFile?(from: string, to: string, options: CopyOptions): Promise<void>;
   readonly rootName?: string;
   chown?(path: string, change: OwnerChange): Promise<void>;
   trackOwners?(): void;
