@@ -1,0 +1,35 @@
+name: Install A/B
+
+on:
+  workflow_dispatch:
+    inputs:
+      base:
+        description: git ref of A
+        required: true
+        default: main
+      candidate:
+        description: git ref of B
+        required: true
+      pnpm:
+        description: wasi-pnpm version for both (empty keeps the lockfile's)
+        required: false
+        default: ''
+      pairs:
+        description: A-B pairs, run alternately on one runner
+        required: false
+        default: '3'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: install-ab
+  cancel-in-progress: false
+
+jobs:
+  ab:
+    uses: ai-ecoverse/slicc-shared-web/.github/workflows/node-ci.yml@e1c211785267ed44d88c865072a1dcd586692997
+    with:
+      runs-on: ${{ vars.CERT_RUNNER || 'ubuntu-latest' }}
+      timeout-minutes: 150
+      test: npm run pretest && node tools/install-ab.mjs
