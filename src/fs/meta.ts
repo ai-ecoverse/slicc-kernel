@@ -19,7 +19,14 @@ export interface MetaEntry {
   writes?: number;
   epoch?: number;
   vacated?: true;
-  rename?: { from: string; to: string; at: number; replace?: true };
+  rename?: {
+    from: string;
+    to: string;
+    at: number;
+    replace?: true;
+    lock?: string;
+    root: { ino: number; uid?: number; gid?: number; mode?: number };
+  };
 }
 
 export type MetaChange = (entry: MetaEntry | undefined) => MetaEntry | undefined;
@@ -38,7 +45,8 @@ export interface MetaStore {
     from: string,
     to: string,
     root: (entry: MetaEntry | undefined) => MetaEntry,
-    left?: MetaEntry
+    left?: MetaEntry,
+    keep?: (entry: MetaEntry) => MetaEntry
   ): Promise<void>;
   remove(paths: readonly string[]): Promise<void>;
   links(dir: string): Promise<MetaEntry[]>;
@@ -88,14 +96,15 @@ export class MemoryMeta implements MetaStore {
     from: string,
     to: string,
     root: (entry: MetaEntry | undefined) => MetaEntry,
-    left?: MetaEntry
+    left?: MetaEntry,
+    keep: (entry: MetaEntry) => MetaEntry = (entry) => entry
   ) {
     await this.remove([to]);
     const carried = this.entries.subtree(from).map((path) => this.entries.get(path) as MetaEntry);
     for (const entry of carried) this.entries.delete(entry.path);
     for (const entry of carried) {
       const path = to + entry.path.slice(from.length);
-      if (path !== to) this.entries.set(path, moved(entry, path));
+      if (path !== to) this.entries.set(path, moved(keep(entry), path));
     }
     this.entries.set(to, moved(root(carried.find((entry) => entry.path === from)), to));
     if (left) this.entries.set(from, left);
@@ -252,7 +261,8 @@ export class IndexedDbMeta implements MetaStore {
     from: string,
     to: string,
     root: (entry: MetaEntry | undefined) => MetaEntry,
-    left?: MetaEntry
+    left?: MetaEntry,
+    keep: (entry: MetaEntry) => MetaEntry = (entry) => entry
   ) {
     this.settleRemoves();
     const [transaction, store] = this.transaction('readwrite');
@@ -264,7 +274,7 @@ export class IndexedDbMeta implements MetaStore {
       store.delete(from);
       store.delete(descendants(from));
       for (const entry of below.result as MetaEntry[]) {
-        store.put(moved(entry, to + entry.path.slice(from.length)));
+        store.put(moved(keep(entry), to + entry.path.slice(from.length)));
       }
       store.put(moved(root(source.result), to));
       if (left) store.put(left);
