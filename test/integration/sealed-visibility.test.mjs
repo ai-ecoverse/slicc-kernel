@@ -211,8 +211,13 @@ test(
     await kernel.writeFile('/tmp/go', '1');
     const done = await holding;
     assert.equal(done.stdout, 'done true\n', done.stderr);
-    const after = await kernel.run(['walker'], { cwd: '/', user: 'mallory' });
-    for (const [label, r] of [...Object.entries(during), ['after', after]]) {
+    const after = {};
+    for (const user of ['mallory', 'root', 'alice'])
+      after[user] = await kernel.run(['walker'], { cwd: '/', user });
+    for (const [label, r] of [
+      ...Object.entries(during),
+      ...Object.entries(after).map(([u, r]) => [`after ${u}`, r]),
+    ]) {
       const walked = JSON.parse(r.stdout);
       assert.ok(walked.files > 10, `${label} walked ${walked.files} files`);
       assert.equal(walked.text.includes(SECRET), false, `${label} sees the value in /proc`);
