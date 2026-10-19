@@ -175,6 +175,7 @@ export class WasixProcess {
       const spawn = {
         op: 'proc-spawn' as const,
         file: this.locate(req.name, req.search, req.path),
+        ...(req.search ? {} : { search: false as const }),
         argv: req.argv.length > 0 ? req.argv : [req.name],
         env: req.env ?? this.environment(),
         cwd,

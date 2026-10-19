@@ -233,6 +233,7 @@ export type WasmSyscall =
       inherit?: InheritedSlot[];
 
       exec?: boolean;
+      search?: false;
 
       restart?: true;
     }
@@ -840,6 +841,7 @@ export class WasmProcess {
       ...moved,
       ...group,
       ...(exec ? { exec } : {}),
+      search: req.search,
     };
     const pid = await this.children.spawn(spawned, stdio, inherit);
     if (deathSignal !== undefined) this.onDeath(pgid === 0 || session ? -pid : pid, deathSignal);

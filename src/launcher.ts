@@ -1210,18 +1210,66 @@ export class Launcher {
 
   private async checkedPlan(
     req: ChildSpawnRequest,
-    { ppid, cred, scope }: { ppid: number; cred: Readonly<Cred>; scope: string },
+    ctx: { ppid: number; cred: Readonly<Cred>; scope: string },
     fds: FdTable
   ): Promise<Planned> {
-    const refused = async (err: unknown): Promise<never> => {
+    try {
+      return await this.planOrSearch(req, ctx);
+    } catch (err) {
       await fds.closeAll();
-      throw (err as { code?: unknown }).code === 'EACCES' ? new SpawnError('EACCES') : err;
+      throw err;
+    }
+  }
+
+  private async planOrSearch(
+    req: ChildSpawnRequest,
+    ctx: { ppid: number; cred: Readonly<Cred>; scope: string }
+  ): Promise<Planned> {
+    const bare = !req.file.includes('/') && !COMMAND.test(req.file);
+    try {
+      return await this.planOne(req, ctx);
+    } catch (err) {
+      const code = codeOf(err);
+      const searched = bare && req.search !== false && (code === 'ENOENT' || code === 'ENOEXEC');
+      if (!searched || (await this.commandAt(req.file, ctx.scope))) throw err;
+      const found = await this.onPath(req, ctx);
+      if (found) return found;
+      throw err;
+    }
+  }
+
+  private async onPath(
+    req: ChildSpawnRequest,
+    ctx: { ppid: number; cred: Readonly<Cred>; scope: string }
+  ): Promise<Planned | undefined> {
+    const path = req.env.PATH;
+    if (typeof path !== 'string') return undefined;
+    let denied = false;
+    for (const dir of path.split(':')) {
+      const file = dir === '' ? `./${req.file}` : `${dir.replace(/\/+$/, '')}/${req.file}`;
+      try {
+        return await this.planOne({ ...req, file }, ctx);
+      } catch (err) {
+        const code = codeOf(err);
+        if (code === 'EACCES') denied = true;
+        else if (code !== 'ENOENT' && code !== 'ENOTDIR') throw err;
+      }
+    }
+    if (denied) throw new SpawnError('EACCES');
+    return undefined;
+  }
+
+  private async planOne(
+    req: ChildSpawnRequest,
+    { ppid, cred, scope }: { ppid: number; cred: Readonly<Cred>; scope: string }
+  ): Promise<Planned> {
+    const refused = (err: unknown): never => {
+      throw codeOf(err) === 'EACCES' ? new SpawnError('EACCES') : err;
     };
     const file = await this.execFile(req.file, req.cwd, this.execGuard(cred, ppid)).catch(refused);
     const planned = await this.plan(file, req.argv, req.cwd, scope, req.argv0);
     await this.mayExec(cred, { ...req, file, pid: ppid }, planned).catch(refused);
     if (planned) return planned;
-    await fds.closeAll();
     throw new SpawnError(await this.unrunnable(file, req.cwd, scope));
   }
 
@@ -2967,4 +3015,8 @@ export type { ProcessInfo, ProcessListing } from './kernel/proc-info.ts';
 
 function cronLocks(): CronLocks | undefined {
   return (globalThis as { navigator?: { locks?: CronLocks } }).navigator?.locks;
+}
+
+function codeOf(err: unknown): unknown {
+  return (err as { code?: unknown } | null)?.code;
 }

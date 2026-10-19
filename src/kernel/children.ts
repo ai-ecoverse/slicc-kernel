@@ -45,6 +45,8 @@ export interface ChildSpawnRequest {
   session?: true;
 
   exec?: boolean;
+
+  search?: false | undefined;
 }
 
 export interface ChildHandle {
