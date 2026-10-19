@@ -1,5 +1,6 @@
 import { openMeta } from './fs/meta.ts';
 import { syncAccessHandles } from './fs/opfs.ts';
+import { rootId } from './fs/roots.ts';
 import type { WasmWorkerLike } from './kernel/host.ts';
 import { blobModuleUrl } from './launcher.ts';
 import { openMedia } from './mount/media.ts';
@@ -17,4 +18,5 @@ serveKernel(globalThis as unknown as KernelPort, {
   moduleUrl: blobModuleUrl,
   metadata: (name) => openMeta(name, indexedDB),
   media: (name) => openMedia(name, indexedDB),
+  rootId: (root) => rootId(indexedDB, root),
 });
