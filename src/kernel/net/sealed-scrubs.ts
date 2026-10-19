@@ -1,5 +1,20 @@
-import type { Scrubber } from '@ai-ecoverse/slicc-scrub';
-import { type ScrubSecret, scrubberOf } from '../scrub-file.ts';
+import { scrubberOf } from '../scrub-file.ts';
+
+export interface ScrubSecret {
+  name: string;
+  value: string;
+  placeholder: string;
+}
+
+export interface ScrubStream {
+  push(chunk: Uint8Array): Uint8Array;
+  idle(): Uint8Array;
+  end(): Uint8Array;
+}
+
+export interface Scrubber {
+  stream(): ScrubStream;
+}
 
 interface Entry {
   secrets: ScrubSecret[];

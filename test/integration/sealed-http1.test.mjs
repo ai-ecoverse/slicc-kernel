@@ -23,13 +23,15 @@ const dec = new TextDecoder();
 async function child(ctx) {
   const parent = '/proc/' + ctx.argv[2];
   while (await ctx.fs.exists(parent)) await new Promise((r) => setTimeout(r, 20));
+  await ctx.write(3, ctx.argv[3]);
   let got = '';
   for (;;) {
     const chunk = await ctx.read(3);
     if (chunk.length === 0) break;
     got += dec.decode(chunk, { stream: true });
   }
-  await ctx.fs.writeFile('/tmp/handoff.out', got);
+  await ctx.fs.writeFile('/tmp/handoff.tmp', got);
+  await ctx.fs.rename('/tmp/handoff.tmp', '/tmp/handoff.out');
 }
 export default async function main(ctx) {
   if (ctx.argv[1] === '__child') return child(ctx);
@@ -43,9 +45,7 @@ export default async function main(ctx) {
     }
     if (s.handoff) {
       const c = opened[s.handoff.name];
-      const w = c.writable.getWriter();
-      for (const piece of s.handoff.writes) await w.write(enc.encode(piece));
-      await ctx.spawn({ argv: ['sh1', '__child', String(ctx.pid)], fds: { 3: c.fd } });
+      await ctx.spawn({ argv: ['sh1', '__child', String(ctx.pid), s.handoff.writes.join('')], fds: { 3: c.fd } });
       out.push({ handedOff: true });
       continue;
     }
