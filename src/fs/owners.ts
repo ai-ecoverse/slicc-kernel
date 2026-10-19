@@ -13,7 +13,7 @@ export function ownOf(entry: MetaEntry | undefined): Owner | undefined {
   return { uid: entry.uid, gid: entry.gid };
 }
 
-function handedBy(entry: MetaEntry | undefined): Owner | undefined {
+export function handedBy(entry: MetaEntry | undefined): Owner | undefined {
   return entry?.heir ? { uid: entry.heir[0], gid: entry.heir[1] } : ownOf(entry);
 }
 

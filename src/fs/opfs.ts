@@ -1,5 +1,5 @@
 import { MemoryMeta, type MetaEntry, type MetaStore, type MetaUpdate } from './meta.ts';
-import { chain, inherit, ownOf, ROOT_OWNER, sameOwner } from './owners.ts';
+import { chain, handedBy, inherit, ownOf, ROOT_OWNER, sameOwner } from './owners.ts';
 import { PathMap } from './path-map.ts';
 import { holdsProtected, isProtected } from './protect.ts';
 import {
@@ -87,13 +87,29 @@ export type OpfsOp = 'lookup' | 'read' | 'write' | 'commit' | 'sidecar';
 
 const reported = new Set<string>();
 
+const traced = Error as ErrorConstructor & { stackTraceLimit?: number };
+
+function quietError(code: string, path: string): Error {
+  const limit = traced.stackTraceLimit;
+  traced.stackTraceLimit = 0;
+  try {
+    return fsError(code, path);
+  } finally {
+    traced.stackTraceLimit = limit;
+  }
+}
+
 export function translate(err: unknown, path: string, op: OpfsOp = 'lookup', mapped = true): Error {
   if (typeof (err as { code?: unknown })?.code === 'string') return err as Error;
   const raw = (err as { name?: unknown })?.name;
   const name = typeof raw === 'string' ? raw : 'Error';
   const code =
     name === 'QuotaExceededError' ? 'ENOSPC' : (mapped && ERRNO_BY_DOM_ERROR[name]) || 'EIO';
-  const error = Object.assign(fsError(code, path), { domName: name, op, cause: err });
+  const error = Object.assign(code === 'ENOENT' ? quietError(code, path) : fsError(code, path), {
+    domName: name,
+    op,
+    cause: err,
+  });
   if (code !== 'EIO' && code !== 'ENOSPC') return error;
   const detail = (err as { message?: unknown })?.message;
   error.message += ` (OPFS ${op}: ${name}${typeof detail === 'string' && detail ? `: ${detail}` : ''})`;
@@ -408,13 +424,15 @@ export class OpfsFs implements KernelFs {
   async ancestry(path: string): Promise<Perm[]> {
     const entries = await this.meta.get(chain(path));
     const out: Perm[] = [];
-    for (const [i, entry] of entries.entries()) {
+    let handed: Owner = ROOT_OWNER;
+    for (const entry of entries) {
       const link = entry?.link !== undefined && !(await this.real(entry.path));
       out.push({
-        ...(ownOf(entry) ?? (i === 0 ? ROOT_OWNER : inherit(entries.slice(0, i)))),
+        ...(ownOf(entry) ?? handed),
         ...(entry?.mode !== undefined ? { mode: entry.mode } : {}),
         ...(link ? { link: entry.link } : {}),
       });
+      handed = handedBy(entry) ?? handed;
     }
     return out;
   }
