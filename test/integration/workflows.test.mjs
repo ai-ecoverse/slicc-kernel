@@ -248,18 +248,19 @@ test('kernel-compat takes a PR build x.y.z-pr.N.M from a named artifact run, for
   assert.match(compat, /\n {4}if: .*!contains\(needs\.candidate\.outputs\.version, '-pr\.'\)/);
 });
 
-test('Renovate labels its PRs merge-ok and auto-merges them, except majors and updates under .github/, which wait for a review', async () => {
+test('Renovate auto-merges its PRs once cert-review is green, except majors and updates under .github/, which open as drafts and wait for a review', async () => {
   const config = JSON.parse(
     await readFile(new URL('../../renovate.json', import.meta.url), 'utf8')
   );
   assert.deepEqual(config.extends, ['github>ai-ecoverse/slicc-shared-web']);
-  assert.deepEqual(config.labels, ['merge-ok']);
+  assert.equal(config.labels, undefined);
   assert.equal(config.automerge, true);
   assert.equal(config.platformAutomerge, true);
   const held = (match) =>
     config.packageRules.find(
       (rule) => JSON.stringify(rule).includes(match) && rule.automerge === false
     );
-  assert.deepEqual(held('"major"')?.labels, []);
-  assert.deepEqual(held('".github/**"')?.labels, []);
+  assert.equal(held('"major"')?.draftPR, true);
+  assert.equal(held('".github/**"')?.draftPR, true);
+  assert.doesNotMatch(JSON.stringify(config), /merge-ok/);
 });

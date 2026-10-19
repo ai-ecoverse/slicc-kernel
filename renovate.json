@@ -1,20 +1,19 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["github>ai-ecoverse/slicc-shared-web"],
-  "labels": ["merge-ok"],
   "automerge": true,
   "platformAutomerge": true,
   "packageRules": [
     {
-      "description": "Majors get no merge-ok and no automerge: they come to the Kernel Coordinator for review.",
+      "description": "Majors open as drafts with no automerge: a draft is not reviewed, so they come to the Kernel Coordinator, who marks them ready.",
       "matchUpdateTypes": ["major"],
-      "labels": [],
+      "draftPR": true,
       "automerge": false
     },
     {
-      "description": "Updates to files under .github/ (workflow and action pins, reusable shared-web workflows) can touch reviewer paths: no merge-ok and no automerge, so they come to the Kernel Coordinator.",
+      "description": "Updates to files under .github/ (workflow and action pins, reusable shared-web workflows) can touch reviewer paths: drafts with no automerge, so they come to the Kernel Coordinator.",
       "matchFileNames": [".github/**"],
-      "labels": [],
+      "draftPR": true,
       "automerge": false
     },
     {
