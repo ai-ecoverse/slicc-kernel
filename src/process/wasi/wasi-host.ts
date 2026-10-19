@@ -87,6 +87,8 @@ export interface WasiHostOptions {
   forked?: { fds: readonly WasiForkFd[]; cloexec: readonly number[] };
 
   preopenRoot?: boolean;
+
+  bare?: boolean;
 }
 
 export type WasiFunction = (...args: never[]) => number | undefined;
@@ -287,7 +289,7 @@ export class WasiHost {
     );
     if (o.shared) this.fds.share(o.shared, true);
     else if (o.forked) this.fds.restore(o.forked.fds, o.forked.cloexec);
-    else this.fds.setup(o.cwd, o.inherited ?? [], o.preopenRoot === true);
+    else if (!o.bare) this.fds.setup(o.cwd, o.inherited ?? [], o.preopenRoot === true);
     this.listening = o.shared ? [] : this.fds.sockets();
   }
 
@@ -791,6 +793,7 @@ export class WasiHost {
   }
 
   private environ(): string[] {
+    if (this.o.bare) return Object.entries(this.o.env).map(([k, v]) => `${k}=${v}`);
     const listen = this.listening.length > 0 ? { SLICC_LISTEN_FDS: this.listening.join(' ') } : {};
     const env = { PWD: this.cwd, ...this.o.env, ...listen };
     return Object.entries(env).map(([k, v]) => `${k}=${v}`);

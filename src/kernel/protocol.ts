@@ -21,6 +21,7 @@ export const JS_MAX_THREADS = 256;
 export const JS_DEFAULT_THREADS = 16;
 export const JS_THREAD_NO_MEMORY = 256;
 export const JS_THREAD_CRASHED = 257;
+export const JS_THREAD_OWNED_FDS = 1024;
 
 export interface WasmProgram {
   abi?: 'emscripten' | 'wasi';
@@ -128,6 +129,7 @@ export interface JsThreadStart {
   tid: number;
   port: MessagePort;
   data: unknown;
+  owned?: SharedArrayBuffer;
 }
 
 export type JsThreadInitMsg = Omit<JsProcessInitMsg, 'type'> & {

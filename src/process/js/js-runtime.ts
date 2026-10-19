@@ -137,8 +137,10 @@ async function runJs(
     cwd: init.cwd,
     exit: (status) => exited(statusOf(status)),
     lane: laneOf(init.lane),
+    fs: { owners: init.owners === true, links: init.links === true },
     strays,
     thread: threadContext(port, thread),
+    ...(thread?.owned ? { owned: thread.owned } : {}),
   });
   const say = (text: string) => ctx.write(2, `${init.argv0}: ${text}\n`).catch(() => undefined);
 
