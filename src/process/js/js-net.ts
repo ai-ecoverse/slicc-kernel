@@ -9,6 +9,7 @@ export interface JsAddress {
 export interface JsTlsSession {
   readonly path: 'transport' | 'kernel';
   readonly substitutes: boolean;
+  readonly verified?: boolean;
   readonly protocol: 'transport' | 'TLSv1.2' | 'TLSv1.3';
   readonly alpnProtocol: string | false;
   readonly authorized: boolean;
@@ -89,6 +90,7 @@ export interface JsNet {
 interface WireSession {
   path?: 'transport' | 'kernel';
   substitutes?: boolean;
+  verified?: boolean;
   protocol?: 'TLSv1.2' | 'TLSv1.3';
   alpnProtocol: string | false;
   authorized?: boolean;
@@ -187,7 +189,8 @@ function sessionOf(r: WireSession): JsTlsSession {
   }
   return Object.freeze({
     path: 'kernel',
-    substitutes: false,
+    substitutes: r.substitutes === true,
+    verified: r.verified === true,
     protocol: r.protocol ?? 'TLSv1.2',
     alpnProtocol: r.alpnProtocol,
     authorized: r.authorized === true,

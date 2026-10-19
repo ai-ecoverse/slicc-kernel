@@ -2,6 +2,12 @@ import type { UsersMode } from '../fs/types.ts';
 import type { Cred } from './cred.ts';
 import { isStrings, stringRecord, TicketBook } from './exec-ticket.ts';
 import { KernelError, type OpenAccess, OpenFile, type PollState } from './fd-table.ts';
+import {
+  type SessionFields,
+  sessionAskable,
+  sessionRequest,
+  sessionValues,
+} from './sealed-session.ts';
 
 export const SEALED_PATH = '/dev/sealed';
 export const SEALED_MAX_BYTES = 64 * 1024;
@@ -269,6 +275,20 @@ export class SealedBroker {
   }
 
   async consume(fields: ConsumeFields): Promise<Swap | undefined> {
+    const req = { ...fields, v: 1, op: 'materializeConsume', caller: fields.stamp };
+    return this.ask(req as SealedRequest, swapOf);
+  }
+
+  async sessionMaterialize(
+    fields: SessionFields,
+    now = Date.now()
+  ): Promise<Record<string, string> | undefined> {
+    if (!sessionAskable(fields, now)) return undefined;
+    const req = sessionRequest(fields);
+    return this.ask(req, (reply) => sessionValues(reply, req.placeholders));
+  }
+
+  private async ask<T>(req: SealedRequest, parse: (reply: unknown) => T | undefined) {
     const { hook } = this;
     if (!hook) return undefined;
     const control = new AbortController();
@@ -276,16 +296,10 @@ export class SealedBroker {
     const stopped = new Promise<undefined>((resolve) => {
       control.signal.addEventListener('abort', () => resolve(undefined), { once: true });
     });
-    const req = {
-      ...fields,
-      v: 1,
-      op: 'materializeConsume',
-      caller: fields.stamp,
-    } as SealedRequest;
     try {
       const asked = Promise.resolve()
         .then(() => hook(req, { signal: control.signal }))
-        .then(swapOf, () => undefined);
+        .then(parse, () => undefined);
       return await Promise.race([asked, stopped]);
     } finally {
       clearTimeout(timer);

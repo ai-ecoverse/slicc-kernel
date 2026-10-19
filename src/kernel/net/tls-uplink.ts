@@ -84,7 +84,8 @@ function encode(bytes: Uint8Array): string {
 
 export interface SecureSession {
   path: 'kernel';
-  substitutes: false;
+  substitutes: boolean;
+  verified: boolean;
   protocol: TlsClientInfo['protocol'];
   alpnProtocol: string | false;
   authorized: boolean;
@@ -104,6 +105,7 @@ function sessionOf(info: TlsClientInfo, servername: string): SecureSession {
   return {
     path: 'kernel',
     substitutes: false,
+    verified: info.verified,
     protocol: info.protocol,
     alpnProtocol: info.alpnProtocol,
     authorized: info.authorized,
@@ -245,6 +247,7 @@ async function prepareWith(
     ...(req.sni === false ? { sni: false } : {}),
     ...(req.checkHostname === false ? { checkHostname: false } : {}),
     clientCertificate: cert !== undefined,
+    bundled: own === undefined,
   };
   let session: TlsSession | undefined;
   try {
