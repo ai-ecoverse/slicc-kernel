@@ -147,7 +147,16 @@ export function fsError(code: string, path: string): Error & { code: string } {
   return Object.assign(new Error(`${code}: ${path}`), { code });
 }
 
+const UNNORMAL = /\/\/|\/\.\.?(?:\/|$)/;
+
 export function normalizePath(path: string): string {
+  if (
+    path.charCodeAt(0) === 47 &&
+    (path.length === 1 || path.charCodeAt(path.length - 1) !== 47) &&
+    !UNNORMAL.test(path)
+  ) {
+    return path;
+  }
   const parts: string[] = [];
   for (const part of path.split('/')) {
     if (part === '' || part === '.') continue;
