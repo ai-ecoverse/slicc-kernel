@@ -32,4 +32,4 @@ jobs:
     with:
       runs-on: ${{ vars.CERT_RUNNER || 'ubuntu-latest' }}
       timeout-minutes: 150
-      test: npm run pretest && AB_BASE='${{ inputs.base }}' AB_CANDIDATE='${{ inputs.candidate }}' AB_PNPM='${{ inputs.pnpm }}' AB_PAIRS='${{ inputs.pairs }}' node tools/install-ab.mjs
+      test: npm run pretest && node tools/install-ab.mjs

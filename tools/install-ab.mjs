@@ -1,14 +1,23 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { appendFileSync, cpSync, mkdirSync, rmSync, symlinkSync } from 'node:fs';
+import { appendFileSync, cpSync, mkdirSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
-const [base, candidate] = [process.env.AB_BASE, process.env.AB_CANDIDATE];
-const pairs = Number(process.env.AB_PAIRS ?? 3);
-const pnpm = process.env.AB_PNPM ?? '';
-if (!base || !candidate) {
-  console.error('install-ab: set AB_BASE and AB_CANDIDATE to git refs');
+const dispatched = process.env.GITHUB_EVENT_PATH
+  ? (JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8')).inputs ?? {})
+  : {};
+const input = (name, env) => String(dispatched[name] ?? process.env[env] ?? '');
+const base = input('base', 'AB_BASE');
+const candidate = input('candidate', 'AB_CANDIDATE');
+const pnpm = input('pnpm', 'AB_PNPM');
+const pairs = Number(input('pairs', 'AB_PAIRS') || 3);
+const REF = /^[A-Za-z0-9._/-]{1,200}$/;
+const fail = (message) => {
+  console.error(`install-ab: FAIL ${message}`);
   process.exit(2);
-}
+};
+if (!REF.test(base) || !REF.test(candidate)) fail('base and candidate must be git refs');
+if (pnpm && !/^[0-9A-Za-z.+-]{1,50}$/.test(pnpm)) fail('pnpm must be a version');
+if (!Number.isInteger(pairs) || pairs < 1 || pairs > 10) fail('pairs must be 1 to 10');
 
 const here = resolve('.');
 const work = resolve(process.env.RUNNER_TEMP ?? '/tmp', 'install-ab');
