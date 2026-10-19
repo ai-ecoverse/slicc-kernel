@@ -26,12 +26,12 @@ const listed = (name) => {
 const calls = async (sh) =>
   Number((await sh('read -r n < /proc/sys/kernel/slicc_fs_calls; echo $n')).stdout);
 
-async function looping(sh) {
+async function looping(sh, idle) {
   let last = await calls(sh);
   for (;;) {
-    await new Promise((r) => setTimeout(r, 200));
+    await new Promise((r) => setTimeout(r, 300));
     const now = await calls(sh);
-    if (now - last > 500) return;
+    if (now - last - idle > 5) return;
     last = now;
   }
 }
@@ -47,8 +47,9 @@ const filling = (dir, lines) => [
 async function filled(page, mine, dir) {
   await until(mine, `${dir}/ready`);
   await programClock(page, { freeze: true });
+  const idle = -(await calls(mine)) + (await calls(mine));
   assert.deepEqual(await mine(`: > ${dir}/go`), ok());
-  await looping(mine);
+  await looping(mine, idle);
 }
 
 const programClock = (page, change) =>
@@ -110,7 +111,7 @@ async function setup(t, dir, { mine = 'program-clock', theirs = 'deaf' } = {}) {
   return { page, a, b: kernelOf(page, 'b') };
 }
 
-test("a program polling stat while another kernel's notice is lost asks the kernel again 2 ms after each answer, however often it looks, and so sees the change (#1017)", async (t) => {
+test("a program polling stat while another kernel's notice is lost asks the kernel again 100 ms after each answer, however often it looks, and so sees the change (#1017)", async (t) => {
   const dir = '/tmp/pp';
   const { page, a, b } = await setup(t, dir);
   const idle = -(await calls(a)) + (await calls(a));
@@ -127,11 +128,11 @@ test("a program polling stat while another kernel's notice is lost asks the kern
   );
   await until(b, `${dir}/ready`);
   const before = await calls(a);
-  await new Promise((r) => setTimeout(r, 1000));
+  await new Promise((r) => setTimeout(r, 2000));
   const asked = (await calls(a)) - before - idle;
   assert.deepEqual(await b(`echo 12345 > ${dir}/f`), ok());
   assert.deepEqual(await finished(page), ok('seen\n'));
-  assert.ok(asked > 100, `kernel calls in 1 s of polling: ${asked}`);
+  assert.ok(asked >= 8, `kernel calls in 2 s of polling: ${asked}`);
 });
 
 test("a directory another kernel renames moves away from a program's cached look inside it once the notice arrives, even while its own clock stands still (#1017)", async (t) => {
@@ -229,6 +230,84 @@ test('a file another kernel saves by a temporary and a rename gives a program it
   );
   assert.deepEqual(await a(`: > ${dir}-sig/go2`), ok());
   assert.deepEqual(await finished(page), ok('2 13 13 saved-longer\n'));
+});
+
+for (const [ms, size] of [
+  [50, 2],
+  [101, 6],
+]) {
+  test(`with another kernel's notice lost, a stat a program cached ${size === 6 ? 'shows the change' : 'may stay as it was'} ${ms} ms of its clock later: never more than 100 ms (#1017)`, async (t) => {
+    const dir = `/tmp/pt${ms}`;
+    const { page, a, b } = await setup(t, dir);
+    await started(page, 'a', py([...filling(dir, ['os.stat(f)']), 'print(os.stat(f).st_size)']));
+    await filled(page, a, dir);
+    assert.deepEqual(await b(`echo 12345 > ${dir}/f`), ok());
+    await programClock(page, { advance: ms });
+    assert.deepEqual(await a(`: > ${dir}-sig/go2`), ok());
+    assert.deepEqual(await finished(page), ok(`${size}\n`));
+  });
+}
+
+test("an open after another kernel's lost notice reads the new size and bytes, whatever the program cached by path (#1017)", async (t) => {
+  const dir = '/tmp/po';
+  const { page, a, b } = await setup(t, dir);
+  await started(
+    page,
+    'a',
+    py([
+      ...filling(dir, ['os.stat(f)']),
+      'fd = os.open(f, os.O_RDONLY)',
+      'size = os.fstat(fd).st_size',
+      'print(size, os.read(fd, size).decode().strip())',
+    ])
+  );
+  await filled(page, a, dir);
+  assert.deepEqual(await b(`echo 12345 > ${dir}/f`), ok());
+  assert.deepEqual(await a(`: > ${dir}-sig/go2`), ok());
+  assert.deepEqual(await finished(page), ok('6 12345\n'));
+});
+
+test('a peer that ends between its write and its notice makes the programs of every other kernel look again (#1017)', async (t) => {
+  const dir = '/tmp/pd';
+  const { page, bash } = await booted(chrome, t);
+  await installPackage(page, 'wasix-python', { skip: /^lib\/libpython[^/]*\.a$/ });
+  assert.deepEqual(
+    await bash(`rm -rf ${dir} ${dir}-sig && mkdir -p ${dir} ${dir}-sig && echo 1 > ${dir}/f`, {
+      cwd: '/',
+    }),
+    ok()
+  );
+  await page.evaluate(() =>
+    window.secondKernel({ worker: new URL('/notice/program-clock-worker.js', location.href) }, 'a')
+  );
+  const a = kernelOf(page, 'a');
+  const tab = await page.tab();
+  await tab.goto('/');
+  await tab.until(() => typeof window.boot === 'function');
+  await tab.evaluate(() =>
+    window.secondKernel({ worker: new URL('/notice/deaf-worker.js', location.href) }, 'b')
+  );
+  await started(
+    page,
+    'a',
+    py([
+      ...filling(dir, ['os.stat(f)']),
+      'n = 0',
+      `while os.stat(f).st_size != 6 and n < ${CAP}: n += 1`,
+      `print(n < ${CAP})`,
+    ])
+  );
+  await filled(page, a, dir);
+  assert.deepEqual(
+    await tab.evaluate(
+      (d) => window.b.run(['bash', '-c', `echo 12345 > ${d}/f`], { cwd: '/' }),
+      dir
+    ),
+    ok()
+  );
+  await tab.close();
+  assert.deepEqual(await a(`: > ${dir}-sig/go2`), ok());
+  assert.deepEqual(await finished(page), ok('True\n'));
 });
 
 test('with an idle peer on the root, pnpm installing a package of many files asks the kernel at most 1.5 times as often per file as alone (#1017)', async (t) => {

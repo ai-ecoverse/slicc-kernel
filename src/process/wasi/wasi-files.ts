@@ -390,7 +390,7 @@ export function pathInode(path: string): bigint {
 }
 
 export const MISS_TTL_MS = 20;
-export const SHARED_TTL_MS = 2;
+export const SHARED_TTL_MS = 100;
 const CACHE_CAP = 8192;
 
 interface Miss {
@@ -677,6 +677,38 @@ function listed(
   }
 }
 
+function fetched(
+  {
+    view,
+    now,
+    seen,
+    filled,
+    cache,
+  }: {
+    view: ChangeView | undefined;
+    now: () => number;
+    seen: SeenAt;
+    filled: Fills;
+    cache: StatCache;
+  },
+  map: Map<string, Cached>,
+  path: string,
+  get: () => SyncFsBridgeStat
+): Cached {
+  const gen = view?.now();
+  const asked = now();
+  let hit: Cached;
+  try {
+    hit = get();
+    if (gen !== undefined) seen.saw(map, path, gen);
+  } catch (e) {
+    hit = { error: e as Error, until: asked + MISS_TTL_MS, ...(gen !== undefined ? { gen } : {}) };
+  }
+  filled.set(hit, asked);
+  cache.put(map, path, hit);
+  return hit;
+}
+
 export function cachingBridge(
   bridge: SyncFsPosixBridge,
   now: () => number = () => performance.now(),
@@ -699,29 +731,20 @@ export function cachingBridge(
   const seen = new SeenAt(view, lstats);
   const kept = remember(cache, seen, blind, (entry) => filled.set(entry));
   const gone = (path: string) => goneAbove([lstats, stats], live, path);
+  const usable = (map: typeof stats, path: string): Cached | undefined => {
+    const hit = map.get(path);
+    if (hit === undefined) return undefined;
+    if ('until' in hit) return live(hit, path) ? hit : undefined;
+    return young(hit) && !seen.changed(map, path) ? hit : undefined;
+  };
   const cached = (map: typeof stats, path: string, get: () => SyncFsBridgeStat) => {
     if (blind) return get();
     cache.fresh();
-    let hit = map.get(path);
-    if (hit !== undefined && !('until' in hit) && (!young(hit) || seen.changed(map, path)))
-      hit = undefined;
-    if (hit === undefined || ('until' in hit && !live(hit, path))) {
+    let hit = usable(map, path);
+    if (hit === undefined) {
       const missing = gone(path);
       if (missing) throw missing.error;
-      const gen = view?.now();
-      const asked = now();
-      try {
-        hit = get();
-        if (gen !== undefined) seen.saw(map, path, gen);
-      } catch (e) {
-        hit = {
-          error: e as Error,
-          until: asked + MISS_TTL_MS,
-          ...(gen !== undefined ? { gen } : {}),
-        };
-      }
-      filled.set(hit, asked);
-      cache.put(map, path, hit);
+      hit = fetched({ view, now, seen, filled, cache }, map, path, get);
     }
     if ('until' in hit) throw hit.error;
     return hit;
