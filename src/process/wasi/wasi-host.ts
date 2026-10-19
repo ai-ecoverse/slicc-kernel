@@ -1422,12 +1422,16 @@ export class WasiHost {
       if (!follow) {
         const slash = path.lastIndexOf('/');
         if (slash <= 0) return undefined;
-        const parent = physicalPath(this.o.fs, path.slice(0, slash));
-        const resolved = `${parent}/${path.slice(slash + 1)}`;
-        return resolved !== path && this.synthetic(resolved) ? resolved : undefined;
+        const parent = physicalLeaf(this.o.fs, path.slice(0, slash));
+        const resolved = parent === undefined ? undefined : `${parent}/${path.slice(slash + 1)}`;
+        return resolved !== undefined && resolved !== path && this.synthetic(resolved)
+          ? resolved
+          : undefined;
       }
-      const resolved = physicalPath(this.o.fs, path);
-      return resolved !== path && this.synthetic(resolved) ? resolved : undefined;
+      const resolved = physicalLeaf(this.o.fs, path);
+      return resolved !== undefined && resolved !== path && this.synthetic(resolved)
+        ? resolved
+        : undefined;
     } catch {
       return undefined;
     }
