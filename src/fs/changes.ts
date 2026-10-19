@@ -2,6 +2,7 @@ const GEN = 0;
 const RING = 1;
 const RING_SIZE = 4096;
 const SLOT = 2;
+export const SHARED_TTL_MS = 100;
 
 const DIRTY = RING + RING_SIZE * SLOT;
 const FOREIGN = DIRTY + 1;

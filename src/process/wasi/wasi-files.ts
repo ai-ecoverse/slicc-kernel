@@ -1,4 +1,7 @@
-import type { ChangeView } from '../../fs/changes.ts';
+import { type ChangeView, SHARED_TTL_MS } from '../../fs/changes.ts';
+
+export { SHARED_TTL_MS };
+
 import { RangedFile, type RangedWatch, watchedChange } from '../../fs/ranged.ts';
 import type { DeviceAccess, KernelFdKind } from '../../kernel/fd-table.ts';
 import {
@@ -390,7 +393,6 @@ export function pathInode(path: string): bigint {
 }
 
 export const MISS_TTL_MS = 20;
-export const SHARED_TTL_MS = 100;
 const CACHE_CAP = 8192;
 
 interface Miss {
