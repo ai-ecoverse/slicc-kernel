@@ -1,5 +1,5 @@
 import { permits, X_OK } from '../fs/access.ts';
-import type { ChangeView } from '../fs/changes.ts';
+import { type ChangeView, SHARED_TTL_MS } from '../fs/changes.ts';
 import {
   linkedWatch,
   RangedFile,
@@ -42,6 +42,8 @@ interface LiveNodeState {
   watch?: RangedWatch | undefined;
   stat?: SyncFsBridgeStat;
   statAt?: number;
+  filledAt?: number;
+  statGen?: number;
   seenAt?: number;
 
   data?: Uint8Array;
@@ -307,8 +309,17 @@ function refusal(err: unknown): boolean {
   return code === 'EACCES' || code === 'EPERM';
 }
 
-function cachedStat(s: LiveNodeState, dir: boolean, view?: ChangeView): boolean {
-  if (view?.foreign() && !s.dirty) return false;
+function young(s: LiveNodeState): boolean {
+  return performance.now() - (s.filledAt ?? Number.NEGATIVE_INFINITY) < SHARED_TTL_MS;
+}
+
+function cachedStat(node: LiveFsNode, dir: boolean, view?: ChangeView): boolean {
+  const s = node.live;
+  if (view?.foreign() && !s.dirty) {
+    const gen = s.statGen ?? s.named;
+    if (s.openCount > 0 || !young(s) || gen === undefined) return false;
+    if (view.changedSince(gen, liveNodePath(node)).changed) return false;
+  }
   return s.stat !== undefined && (!dir || s.statAt === syncCallCount());
 }
 
@@ -387,9 +398,19 @@ function linkedStates(bridgeOf: (node: LiveFsNode) => SyncFsPosixBridge) {
   return { opening, sharedWith, know, idOf, holder };
 }
 
+function filled(
+  s: LiveNodeState,
+  stat: SyncFsBridgeStat,
+  asked: { statGen: number | undefined; filledAt: number }
+): void {
+  Object.assign(s, { stat, statAt: syncCallCount(), seenAt: syncEpoch(), ...asked });
+}
+
 function freshState(stat?: SyncFsBridgeStat): LiveNodeState {
   const base = { len: 0, loaded: false, dirty: false, openCount: 0 };
-  return stat ? { stat, statAt: syncCallCount(), seenAt: syncEpoch(), ...base } : base;
+  return stat
+    ? { stat, statAt: syncCallCount(), filledAt: performance.now(), seenAt: syncEpoch(), ...base }
+    : base;
 }
 
 function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
@@ -448,9 +469,11 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
       const size = node.live.ranged?.size() ?? node.live.len;
       return { ...(node.live.stat as SyncFsBridgeStat), size };
     }
-    if (!cachedStat(node.live, Fs.isDir(node.mode), bridgeOf(node).changes)) {
+    const view = bridgeOf(node).changes;
+    if (!cachedStat(node, Fs.isDir(node.mode), view)) {
+      const asked = { statGen: view?.now(), filledAt: performance.now() };
       const st = call(() => bridgeOf(node).lstat(liveNodePath(linked.holder(node))));
-      Object.assign(node.live, { stat: st, statAt: syncCallCount(), seenAt: syncEpoch() });
+      filled(node.live, st, asked);
       node.mode = modeFromStat(st, exactIn(node));
     }
     return node.live.stat as SyncFsBridgeStat;
@@ -626,7 +649,7 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
       const owned = bridgeOf(node).owners === true;
       if (owned && Fs.isLink(node.mode) && statOf(node).uid === undefined)
         node.live.stat = undefined;
-      const cached = owned && cachedStat(node.live, Fs.isDir(node.mode), bridgeOf(node).changes);
+      const cached = owned && cachedStat(node, Fs.isDir(node.mode), bridgeOf(node).changes);
       const st = statOf(node);
       if (cached) searchParents(Fs, node, bridgeOf(node), call);
       const s = node.live;
