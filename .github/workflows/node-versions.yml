@@ -48,7 +48,7 @@ jobs:
         run: |
           mapfile -t files < <(grep -l "dist/node.js" test/integration/*.test.mjs)
           set +e
-          node --test --test-timeout=180000 "${files[@]}" > "$RUNNER_TEMP/node-suite.log" 2>&1
+          node --test --test-timeout=180000 --test-reporter=tap "${files[@]}" > "$RUNNER_TEMP/node-suite.log" 2>&1
           status=$?
           set -e
           tail -n 40 "$RUNNER_TEMP/node-suite.log"
