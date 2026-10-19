@@ -1,4 +1,4 @@
-import { META_DB } from './meta.ts';
+import { META_DB, META_STORE, openMetaDb } from './meta.ts';
 
 const ROOTS_DB = 'slicc-kernel-roots';
 const ROOTS_STORE = 'roots';
@@ -29,6 +29,40 @@ async function same(a: FileSystemHandle, b: FileSystemHandle): Promise<boolean> 
   }
 }
 
+export const nameOf = (id: string): string => `${META_DB}:${id}`;
+
+function done(tx: IDBTransaction): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
+
+async function used(root: FileSystemDirectoryHandle): Promise<boolean> {
+  for await (const _ of root.keys()) return true;
+  return false;
+}
+
+async function seed(factory: IDBFactory, name: string): Promise<void> {
+  const known = await factory.databases?.().catch(() => undefined);
+  if (known && !known.some((db) => db.name === META_DB)) return;
+  const from = await openMetaDb(META_DB, factory);
+  const to = await openMetaDb(name, factory);
+  try {
+    const rows = await request(
+      from.transaction(META_STORE, 'readonly').objectStore(META_STORE).getAll()
+    );
+    const tx = to.transaction(META_STORE, 'readwrite');
+    const store = tx.objectStore(META_STORE);
+    for (const row of rows) store.put(row);
+    await done(tx);
+  } finally {
+    from.close();
+    to.close();
+  }
+}
+
 export async function rootId(
   factory: IDBFactory,
   root: FileSystemDirectoryHandle,
@@ -42,13 +76,10 @@ export async function rootId(
       )) as RootRecord[];
       for (const record of all) if (await same(record.handle, root)) return record.id;
       const id = crypto.randomUUID();
+      if (await used(root)) await seed(factory, nameOf(id));
       const tx = db.transaction(ROOTS_STORE, 'readwrite');
       tx.objectStore(ROOTS_STORE).put({ id, handle: root });
-      await new Promise<void>((resolve, reject) => {
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(tx.error);
-        tx.onabort = () => reject(tx.error);
-      });
+      await done(tx);
       return id;
     } finally {
       db.close();
@@ -63,5 +94,5 @@ export async function metadataName(
   id: (root: FileSystemDirectoryHandle) => Promise<string>
 ): Promise<string> {
   if (!top || (await same(top, root))) return META_DB;
-  return `${META_DB}:${await id(root)}`;
+  return nameOf(await id(root));
 }

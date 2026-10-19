@@ -29,7 +29,7 @@ const elsewhere = (page, name, dir) =>
         await top.getDirectoryHandle('node_modules'),
         await root.getDirectoryHandle('node_modules', { create: true })
       );
-      return window.secondKernel({ root }, n);
+      return n ? window.secondKernel({ root }, n) : true;
     },
     name,
     dir
@@ -106,4 +106,31 @@ test("kernels on the origin's own root, passed explicitly or not, still peer (#1
     ok('made\n')
   );
   assert.deepEqual(await bash('stat -c %a /home/both', { cwd: '/' }), ok('606\n'));
+});
+
+test('two kernels booting one new OPFS directory at once agree on its id and peer (#1120)', async (t) => {
+  const { page } = await booted(chrome, t);
+  await elsewhere(page, undefined, 'rootd');
+  const shared = await page.evaluate(async () => {
+    const root = await (await navigator.storage.getDirectory()).getDirectoryHandle('rootd');
+    await Promise.all([window.secondKernel({ root }, 'c'), window.secondKernel({ root }, 'd')]);
+    const read = (k) => window[k].run(['cat', '/proc/sys/kernel/slicc_shared_root'], { cwd: '/' });
+    return [(await read('c')).stdout, (await read('d')).stdout];
+  });
+  assert.deepEqual(shared, ['1\n', '1\n']);
+});
+
+test("an OPFS directory used as a root before #1120 keeps the modes and inodes it had in the origin's shared records (#1120)", async (t) => {
+  const { page, bash } = await booted(chrome, t);
+  const look = 'stat -c "%a %i" /home/sub';
+  const before = await bash(`: > /home/sub && chmod 640 /home/sub && ${look}`, { cwd: '/' });
+  assert.match(before.stdout, /^640 \d+\n$/);
+  await page.evaluate(async () => {
+    const top = await navigator.storage.getDirectory();
+    const root = await top.getDirectoryHandle('rootu', { create: true });
+    const home = await root.getDirectoryHandle('home', { create: true });
+    await home.getFileHandle('sub', { create: true });
+  });
+  await elsewhere(page, 'b', 'rootu');
+  assert.deepEqual(await other(page, 'b', look), ok(before.stdout));
 });
