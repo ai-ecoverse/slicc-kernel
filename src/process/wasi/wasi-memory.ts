@@ -2,9 +2,23 @@ const decoder = new TextDecoder();
 
 export class WasiMemory {
   private memory: WebAssembly.Memory | undefined;
+  private shared = false;
+  private seen = 0;
 
   bind(memory: WebAssembly.Memory): void {
     this.memory = memory;
+    this.shared =
+      typeof SharedArrayBuffer !== 'undefined' && memory.buffer instanceof SharedArrayBuffer;
+    this.seen = memory.buffer.byteLength;
+  }
+
+  refresh(): void {
+    const memory = this.memory;
+    if (!this.shared || !memory) return;
+    const length = memory.buffer.byteLength;
+    if (length === this.seen) return;
+    this.seen = length;
+    memory.grow(0);
   }
 
   private buffer(): ArrayBuffer {

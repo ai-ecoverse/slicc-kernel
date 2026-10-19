@@ -131,7 +131,9 @@ export function delivering(
         host.entered = host.interrupted?.() === true;
         host.enteredSignals = host.entered ? (host.raisedOnEntry?.() ?? -1) : 0;
       }
-      return fn(...args);
+      const result = fn(...args);
+      host.mem.refresh();
+      return result;
     };
   }
   return out;
