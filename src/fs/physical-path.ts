@@ -63,6 +63,23 @@ export function physicalPath(fs: LinkReader, path: string): string {
   return `/${walk.done.join('/')}`;
 }
 
+export function physicalLeaf(fs: LinkReader, path: string): string | undefined {
+  const walk = start(path);
+  for (let part = next(walk); part !== undefined; part = next(walk)) {
+    const at = `/${[...walk.done, part].join('/')}`;
+    let target: string | undefined;
+    try {
+      target = fs.lstat(at).isSymbolicLink ? fs.readlink(at) : undefined;
+    } catch {
+      const tail = walk.todo;
+      return tail.some((p) => p === '.' || p === '..') ? undefined : [at, ...tail].join('/');
+    }
+    if (target === undefined) walk.done.push(part);
+    else if (!follow(walk, target)) return undefined;
+  }
+  return `/${walk.done.join('/')}`;
+}
+
 export interface AsyncLinkReader {
   lstat(path: string): Promise<{ isSymbolicLink?: boolean }>;
   readlink(path: string): Promise<string>;
