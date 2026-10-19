@@ -130,8 +130,8 @@ test('known bios failures pass with a note and a notice, a canary that fails on 
     'downstream: PASS bios x'
   );
   assert.equal(
-    downstreamLine(['downstream: PASS a', 'downstream: overridden b']),
-    'downstream: PASS a | overridden b'
+    downstreamLine(['downstream: PASS a', 'downstream: not judged b']),
+    'downstream: PASS a | not judged b'
   );
 });
 

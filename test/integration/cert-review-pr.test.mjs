@@ -534,7 +534,10 @@ test("the merge group's cert-review needs the downstream smoke too: a regression
   assert.ok(posted().description.startsWith(line.slice(0, 60)));
   const waiver = await lookup('OVERRIDDEN', 'downstream: overridden bios c2cec127b935');
   assert.equal(waiver.code, 1, 'there is no waiver state any more');
-  assert.equal(posted().state, 'error');
+  assert.deepEqual(
+    [posted().state, posted().description],
+    ['error', 'not certified: downstream: overridden bios c2cec127b935']
+  );
 });
 
 test("the workflow: same-repo non-draft PRs review the merge ref with main's own tools, the key only in the review step, merge groups only look up", () => {
