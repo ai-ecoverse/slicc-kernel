@@ -1159,9 +1159,15 @@ export class OpfsFs implements KernelFs {
 
   async pread(path: string, offset: number, length: number): Promise<Uint8Array> {
     return this.reading(path, async (handle) => {
-      const file = await this.io(handle.getFile());
+      const seen = this.glanced(handle);
+      const file = seen ?? (await this.glance(handle));
       await this.refuseNode(path, file.size === 0);
-      return new Uint8Array(await file.slice(offset, offset + length).arrayBuffer());
+      try {
+        return new Uint8Array(await file.slice(offset, offset + length).arrayBuffer());
+      } catch (err) {
+        this.glances.delete(handle);
+        throw err;
+      }
     });
   }
 
