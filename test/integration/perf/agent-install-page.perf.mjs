@@ -9,6 +9,7 @@ after(() => chrome.close());
 
 const AGENT = new URL('./agent/', import.meta.url);
 const BIOS = '25b32202';
+const OFFLINE = Boolean(process.env.SLICC_INSTALL_OFFLINE);
 const COUNTERS = ['slicc_fs_calls', 'slicc_opfs_calls', 'slicc_opfs_ops'];
 
 function phases(ndjson, series, wall) {
@@ -37,12 +38,21 @@ function phases(ndjson, series, wall) {
 test('a cold install of bios’s agent project into /opt/agent on the OPFS root, timed per pnpm phase with the kernel’s file and OPFS counts', {
   timeout: 1_800_000,
 }, async (t) => {
-  const { page, bash } = await booted(chrome, t, { users: 'enforce' });
+  const { page, bash } = await booted(chrome, t, {
+    users: 'enforce',
+    ...(OFFLINE ? { registry: true } : {}),
+  });
   for (const name of ['wasm-coreutils', 'wasm-tls-engine', 'wasi-pnpm'])
     await installPackage(page, name);
   for (const file of ['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml']) {
     const text = await readFile(new URL(file, AGENT), 'utf8');
     await page.evaluate((n, x) => window.opfs.write(`opt/agent/${n}`, x), file, text);
+  }
+  if (OFFLINE) {
+    await page.evaluate(
+      (x) => window.opfs.write('opt/agent/.npmrc', x),
+      'registry=http://registry.test/\n'
+    );
   }
   const counters = async () => {
     const reads = COUNTERS.map((c) => `cat /proc/sys/kernel/${c} 2> /dev/null || echo 0`).join(
