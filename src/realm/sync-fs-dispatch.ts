@@ -1,5 +1,6 @@
 import { permOf, R_OK, trustedLink, W_OK, walk } from '../fs/access.ts';
 import { callerStat } from '../fs/command-stat.ts';
+import { copyByBytes } from '../fs/copy.ts';
 import {
   chmodMode,
   deny,
@@ -272,6 +273,8 @@ async function run(
     case 'symlink':
       await fs.symlink(req.arg2 ?? '', path, ownerFor(entry));
       return done;
+    case 'copy':
+      return copyOp(entry, path, req);
     case 'mkfifo': {
       const owner = ownerFor(entry, req.mode ?? 0o666) ?? { uid: 0, gid: 0 };
       await createExclusive(fs, path, { ...owner, fifo: true });
@@ -397,6 +400,18 @@ async function guard(
       const toWalked = await walkSafe(g, to, false);
       return { path: fromWalked, arg2: toWalked };
     }
+    case 'copy': {
+      const to = other();
+      await readable(g, op, path);
+      const there =
+        !req.exclusive &&
+        (await g.fs.lstat(to).then(
+          () => true,
+          () => false
+        ));
+      await (there ? writable(g, op, to) : inParent(g, op, to));
+      return { path: await walkSafe(g, path, true), arg2: await walkSafe(g, to, false) };
+    }
     case 'link': {
       const to = other();
       const follow = req.mode === 1;
@@ -506,6 +521,9 @@ async function mayChange(entry: SyncFsTokenEntry, path: string, req: SyncFsReque
   const { mayChange } = entry.fs;
   if (!mayChange) return;
   const { op } = req;
+  if (op === 'copy') {
+    return mayChange.call(entry.fs, entry.fs.resolvePath(entry.cwd, req.arg2 ?? ''), false);
+  }
   if (CONTENT.has(op) && req.handle === undefined) return mayChange.call(entry.fs, path, true);
   if (!CHANGING.has(op)) return;
   const follow = op === 'utimes' || op === 'chmod' || op === 'chown';
@@ -533,6 +551,22 @@ async function guarded(
     const refused = req.op === 'exists' && refusal ? json(false) : toErrno(err);
     return { refused };
   }
+}
+
+async function copyOp(
+  entry: SyncFsTokenEntry,
+  path: string,
+  req: SyncFsRequest
+): Promise<SyncFsResult> {
+  const { fs, cwd } = entry;
+  const to = fs.resolvePath(cwd, req.arg2 ?? '');
+  const mode = (req.mode ?? 0o666) & 0o7777 & ~(entry.umask?.() ?? 0o022);
+  const owner = ownerFor(entry, mode);
+  const options = { exclusive: req.exclusive === true, ...(owner ? { owner } : {}) };
+  await (fs.copyFile ? fs.copyFile(path, to, options) : copyByBytes(fs, path, to, options));
+  if (!owner) await fs.chmod(to, mode);
+  entry.fresh?.(to);
+  return done;
 }
 
 async function createExclusive(fs: KernelFs, path: string, owner?: NewOwner): Promise<void> {
@@ -756,7 +790,7 @@ const CREATIONS: ReadonlySet<SyncFsOp> = new Set<SyncFsOp>([
   'create',
   'mkfifo',
 ]);
-const NAMING: ReadonlySet<SyncFsOp> = new Set<SyncFsOp>(['link', 'rename']);
+const NAMING: ReadonlySet<SyncFsOp> = new Set<SyncFsOp>(['link', 'rename', 'copy']);
 
 async function newDevName(
   entry: SyncFsTokenEntry,

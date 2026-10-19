@@ -74,7 +74,9 @@ export interface ImportsContext {
   argv: readonly string[];
   env: Readonly<Record<string, string>>;
   cwd(): string;
-  fs: SyncFsPosixBridge;
+  fs: SyncFsPosixBridge & {
+    copyFile(from: string, to: string, options?: { mode?: number; excl?: boolean }): void;
+  };
   fds: {
     open(path: string, options?: OpenOptions): number;
     close(fd: number): void;
@@ -255,7 +257,12 @@ export function importsContext({
     argv: host.o.args,
     env: host.o.env,
     cwd: () => host.cwd,
-    fs,
+    fs: Object.assign(Object.create(fs) as SyncFsPosixBridge, {
+      copyFile(from: string, to: string, options: { mode?: number; excl?: boolean } = {}) {
+        const at = (p: string) => host.fds.resolve(3, p.startsWith('/') ? p : `${host.cwd}/${p}`);
+        host.copyFile(at(from), at(to), options.mode ?? 0o666, options.excl === true);
+      },
+    }),
     fds,
     syscall: (req) =>
       req.op === 'proc-umask' ? host.umask((req as { mask?: number }).mask) : call(req),

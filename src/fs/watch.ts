@@ -1,4 +1,11 @@
-import { type KernelFs, lutimesOf, type NewOwner, normalizePath, rangedOps } from './types.ts';
+import {
+  type CopyOptions,
+  type KernelFs,
+  lutimesOf,
+  type NewOwner,
+  normalizePath,
+  rangedOps,
+} from './types.ts';
 
 export type WatchChange = { paths: string[] } | { overflow: true };
 
@@ -275,6 +282,15 @@ export class FsWatchers {
       writeFile: content(fs.writeFile.bind(fs), written),
       ...(fs.createExclusive
         ? { createExclusive: content(fs.createExclusive.bind(fs), () => ['rename']) }
+        : {}),
+      ...(fs.copyFile
+        ? {
+            copyFile: (from: string, to: string, options: CopyOptions) =>
+              content(
+                (_to: string) => fs.copyFile?.(from, to, options) as Promise<void>,
+                written
+              )(to),
+          }
         : {}),
       mkdir: async (path: string, options?: { recursive?: boolean; owner?: NewOwner }) => {
         const created: string[] = [];

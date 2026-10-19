@@ -62,7 +62,11 @@ test('on the OPFS root a directory staged and renamed into place is never seen h
     },
     async (s) => {
       const poll = setInterval(async () => {
-        window.__stage = (await window.opfs.list('root/st').catch(() => [])).join(',');
+        const top = await window.opfs.list('root/st').catch(() => []);
+        const files = await Promise.all(
+          top.map((name) => window.opfs.list(`root/st/${name}/lib`).catch(() => []))
+        );
+        window.__stage = `${top.join(',')} ${files.map((f) => f.length).join(',')}`;
       }, 1000);
       const r = await window.kernel.run(['bash', '-c', s], { cwd: '/' });
       clearInterval(poll);
