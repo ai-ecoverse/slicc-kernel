@@ -70,9 +70,10 @@ function hostOk(host: unknown): boolean {
 }
 
 export function sessionAskable(f: SessionFields, now: number): boolean {
-  const check = POSITIONS[f.protocol];
-  if (!check || typeof f.position !== 'string' || !check(f.position)) return false;
-  if (f.verified !== true || !hostOk(f.host) || !SESSION_ID.test(String(f.session))) return false;
+  if (!Object.hasOwn(POSITIONS, f.protocol) || typeof f.position !== 'string') return false;
+  if (!POSITIONS[f.protocol](f.position)) return false;
+  if (typeof f.session !== 'string' || !SESSION_ID.test(f.session)) return false;
+  if (f.verified !== true || !hostOk(f.host) || typeof f.handshakeAt !== 'number') return false;
   if (!Number.isInteger(f.port) || f.port < 1 || f.port > 65535) return false;
   const age = now - f.handshakeAt;
   if (!Number.isFinite(age) || age < 0 || age > SESSION_WINDOW_MS) return false;
