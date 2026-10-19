@@ -283,6 +283,14 @@ async function noticeFailing(found, state, notify) {
   );
 }
 
+const FAILING_REPORT = "found bios's canary failing";
+
+async function reportedSince(issue) {
+  const since = encodeURIComponent(issue.updated_at ?? '1970-01-01T00:00:00Z');
+  const comments = await all(`repos/${repo}/issues/${issue.number}/comments?since=${since}`);
+  return comments.some((c) => String(c.body ?? '').includes(FAILING_REPORT));
+}
+
 async function noticePassing(found) {
   const closed = [];
   const kept = [];
@@ -298,7 +306,10 @@ async function noticePassing(found) {
       `The merge group ${values.head.slice(0, 12)} (${RUN_URL}) passed bios's canary: \`${found.line}\`. Closing.`
     );
     await setState(i.number, 'closed', 'completed');
-    closed.push(i.number);
+    if (await reportedSince(i)) {
+      await setState(i.number, 'open');
+      kept.push(i.number);
+    } else closed.push(i.number);
   }
   const parts = [
     ...(closed.length ? [`closed ${closed.map((n) => `#${n}`).join(', ')}`] : []),

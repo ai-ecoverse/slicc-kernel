@@ -995,6 +995,7 @@ test("the merge group's steps end to end: a planted regression is red, a missing
     if (method === 'POST' && url === '/repos/o/r/issues') return { number: nextIssue };
     if (method === 'POST' && /^\/repos\/o\/r\/issues\/\d+\/comments$/.test(url)) return {};
     if (method === 'PATCH' && /^\/repos\/o\/r\/issues\/\d+$/.test(url)) return {};
+    if (method === 'GET' && /^\/repos\/o\/r\/issues\/\d+\/comments\?/.test(url)) return [];
     if (method === 'GET' && /^\/repos\/o\/r\/issues\/\d+$/.test(url)) {
       const number = Number(url.split('/').at(-1));
       return issues.find((i) => i.number === number) ?? { number, state: 'open' };
@@ -1321,8 +1322,11 @@ test('the downstream notice reconciles concurrent merge groups: twins close into
   const title = 'downstream: bios canary failing on main (c2cec127b935)';
   let listed = [];
   let now = {};
+  let reports = {};
   const api = await fakeApi(t, (method, url) => {
     if (method === 'GET' && url.startsWith('/repos/o/r/issues?')) return listed;
+    if (method === 'GET' && /^\/repos\/o\/r\/issues\/\d+\/comments\?since=t1&/.test(url))
+      return reports[Number(url.split('/').at(-2))] ?? [];
     if (method === 'GET' && /^\/repos\/o\/r\/issues\/\d+$/.test(url))
       return now[Number(url.split('/').at(-1))];
     if (method === 'POST' && url === '/repos/o/r/issues') return { number: 70 };
@@ -1381,6 +1385,26 @@ test('the downstream notice reconciles concurrent merge groups: twins close into
     passing.out,
     /^pr notice: PASS PASS: closed #53; left #51 open: a concurrent group reported to it$/m
   );
+
+  listed = [open(54)];
+  now = { 54: open(54) };
+  reports = {
+    54: [{ body: "The merge group 0123 (x) found bios's canary failing on main's own pins" }],
+  };
+  const raced = await notice({ state: 'PASS', notify: [], line: 'ok' });
+  assert.deepEqual(
+    raced.patches,
+    [
+      [54, 'closed'],
+      [54, 'open'],
+    ],
+    raced.out
+  );
+  assert.match(
+    raced.out,
+    /^pr notice: PASS PASS: left #54 open: a concurrent group reported to it$/m
+  );
+  reports = {};
 
   listed = [];
   now = { 70: { number: 70, title, state: 'open' } };
