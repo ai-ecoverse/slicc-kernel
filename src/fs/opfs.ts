@@ -1516,7 +1516,10 @@ export class OpfsFs implements KernelFs {
           : undefined;
       const moved = await this.replacingTarget(targetStat !== null, () =>
         this.place(source.handle as Handle, dir, staging)
-      );
+      ).catch(async (err) => {
+        if (first) await this.rollBack(staged, source.path, [first, second]);
+        throw err;
+      });
       if (swap) await this.rm(destination, { recursive: true });
       if (second) await this.intend({ from: staged, to: destination }, second);
       await this.meta.move(source.path, destination, carry, left);
@@ -1563,6 +1566,25 @@ export class OpfsFs implements KernelFs {
     return at;
   }
 
+  private async rollBack(from: string, to: string, intents: Array<string | undefined>) {
+    try {
+      if (await this.real(from)) {
+        const moved = await this.locate(from, false);
+        const back = await this.locate(parentOf(to), true);
+        await this.copy(
+          moved.handle as Handle,
+          back.handle as FileSystemDirectoryHandle,
+          baseOf(to)
+        );
+        const [dir, name] = await this.parent(from);
+        await this.inDir(dir, (parent) => parent.removeEntry(name, { recursive: true }));
+      }
+      this.forget(from);
+      this.forget(to);
+      for (const intent of intents) if (intent) await this.meta.update(intent, () => undefined);
+    } catch {}
+  }
+
   private async finishRenames(): Promise<number> {
     const intents = (await this.meta.under(RENAMES))
       .filter((entry) => entry.rename !== undefined)
@@ -1599,14 +1621,30 @@ export class OpfsFs implements KernelFs {
   async settledRename(path: unknown): Promise<void> {
     if (this.renamingDirs.size === 0 || typeof path !== 'string') return;
     const at = normalizePath(path);
-    for (;;) {
-      const busy = [...this.renamingDirs].find(
-        (m) =>
-          within(at, m.from) || within(at, m.to) || at === parentOf(m.from) || at === parentOf(m.to)
-      );
-      if (!busy) return;
-      await busy.done;
+    for (let real: string | undefined; ; ) {
+      const busy = this.renameAt(at) ?? (real === undefined ? undefined : this.renameAt(real));
+      if (busy) {
+        await busy.done;
+        continue;
+      }
+      if (real !== undefined || at === '/') return;
+      const parent = await this.realpath(parentOf(at), true).catch(() => parentOf(at));
+      real = resolvePath(parent, baseOf(at));
+      if (real === at) return;
     }
+  }
+
+  private renameAt(at: string): { done: Promise<void> } | undefined {
+    for (const m of this.renamingDirs) {
+      if (
+        within(at, m.from) ||
+        within(at, m.to) ||
+        at === parentOf(m.from) ||
+        at === parentOf(m.to)
+      )
+        return m;
+    }
+    return undefined;
   }
 
   private async replacingTarget<T>(replaces: boolean, op: () => Promise<T>): Promise<T> {
@@ -1860,6 +1898,8 @@ const READS = [
   'readdirStat',
   'readlink',
   'realpath',
+  'version',
+  'readVersioned',
 ] as const;
 const WRITES = [
   'writeFile',
