@@ -163,6 +163,7 @@ class SessionWriter {
     for (;;) {
       const at = crlf(this.buffer);
       if (at < 0) break;
+      if (at > SMTP_LINE_MAX) return this.release();
       const all = this.buffer;
       this.buffer = all.slice(at + 2);
       const out = await this.smtp

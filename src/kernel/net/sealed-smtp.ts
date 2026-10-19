@@ -84,7 +84,7 @@ export class SmtpClient {
       return state === 'plain' ? plain(text, this.ask) : login(text, this.ask);
     }
     if (state === 'user') {
-      this.state = 'password';
+      this.state = text === '*' ? 'done' : 'password';
       return { line: text };
     }
     return this.command(text);
