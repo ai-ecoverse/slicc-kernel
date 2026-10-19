@@ -386,7 +386,7 @@ export class WasiFds {
       e.path = path;
       this.kernel.call({ op: 'fd-meta', fd, meta: metaOf(e) as HeldMeta });
     }
-    this.held?.moved(this.kernel.call({ op: 'cwd-chdir', path }) as HeldCwdReply);
+    this.held?.moved(this.kernel.call({ op: 'cwd-chdir', path }) as HeldCwdReply, path);
     this.bump();
   }
 
@@ -723,7 +723,7 @@ export class WasiFds {
   }
 
   goneCwd(dir: Extract<WasiEntry, { type: 'dir' }>): boolean {
-    return this.held !== undefined && this.cwdEntry(dir) && !this.held.alive();
+    return this.held !== undefined && this.cwdEntry(dir) && !this.held.alive(dir.path);
   }
 
   resolve(dirfd: number, path: string): string {

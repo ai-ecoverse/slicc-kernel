@@ -695,13 +695,13 @@ function ownersOf(init: { owners?: boolean; links?: boolean; changes?: SharedArr
 }
 
 function heldOf(
-  init: { held?: HeldCwdInit },
+  init: { held?: HeldCwdInit; cwd: string },
   call: (req: WasmSyscall) => unknown
 ): { held?: HeldCwd } {
   const { held } = init;
   if (!held) return {};
   const ask = () => call({ op: 'cwd-check' }) as CwdAnswer;
-  return { held: new HeldCwd(held.sab, held.slot, ask, held) };
+  return { held: new HeldCwd(held.sab, held.slot, ask, { ...held, path: init.cwd }) };
 }
 
 export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike): Promise<number> {

@@ -13,6 +13,7 @@ export interface HeldCwdReply {
 export interface CwdAnswer {
   gen: number;
   alive: boolean;
+  slot?: number;
 }
 
 interface Held {
@@ -106,36 +107,48 @@ export class HeldCwd {
   private seen: number;
   private dead = false;
   private slot: number;
+  private at: string | undefined;
   private readonly ask: () => CwdAnswer;
 
   constructor(
     sab: SharedArrayBuffer,
     slot: number,
     ask: () => CwdAnswer,
-    state: { seen: number; dead: boolean }
+    state: { seen: number; dead: boolean; path?: string }
   ) {
     this.view = new Int32Array(sab);
     this.slot = slot;
     this.ask = ask;
     this.seen = state.seen;
     this.dead = state.dead;
+    this.at = state.path;
   }
 
-  moved(reply: HeldCwdReply): boolean {
+  moved(reply: HeldCwdReply, path?: string): boolean {
     if (reply.slot === undefined) return false;
     this.slot = reply.slot;
     this.seen = reply.seen ?? Atomics.load(this.view, reply.slot);
     this.dead = reply.dead === true;
+    this.at = path;
     return true;
   }
 
-  alive(): boolean {
-    if (this.dead) return false;
-    if (Atomics.load(this.view, this.slot) === this.seen) return true;
+  private follow(): boolean {
     const answer = this.ask();
+    if (answer.slot !== undefined) this.slot = answer.slot;
     this.seen = answer.gen;
     this.dead = !answer.alive;
     return answer.alive;
+  }
+
+  alive(path?: string): boolean {
+    if (path !== undefined && this.at !== undefined && path !== this.at) {
+      this.at = path;
+      return this.follow();
+    }
+    if (this.dead) return false;
+    if (Atomics.load(this.view, this.slot) === this.seen) return true;
+    return this.follow();
   }
 
   get current(): number {

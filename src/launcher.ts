@@ -2250,7 +2250,10 @@ export class Launcher {
       cwds: this.cwds.sab,
       cwdSlot: slot,
       cwdState: this.cwds.stateOf(slot),
-      cwdCheck: () => this.cwds.check(this.cwdSlots.get(pid) as number),
+      cwdCheck: async () => {
+        const current = this.cwdSlots.get(pid) as number;
+        return { ...(await this.cwds.check(current)), slot: current };
+      },
       cwdChdir: (path: string) => this.chdirHeld(pid, path),
     };
   }
