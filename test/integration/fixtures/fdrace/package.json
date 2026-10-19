@@ -1,0 +1,12 @@
+{
+  "name": "fdrace",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "fdrace": {
+        "wasm": "bin/fdrace.wasm"
+      }
+    }
+  }
+}
