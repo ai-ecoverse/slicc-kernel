@@ -108,6 +108,43 @@ test('a WASIX stat through a symlink to /dev/stdout or /dev/fd/N answers the des
   assert.equal(r.stdout, 'stdout True True\nfd True 5 True\n');
 });
 
+const CREAT_PROBE = [
+  'import errno, os',
+  "for p in ['/dev/null', '/dev/zero', '/dev/stdout']:",
+  "    for flags, name in ((os.O_RDWR | os.O_CREAT, 'creat'), (os.O_RDWR | os.O_CREAT | os.O_EXCL, 'excl')):",
+  '        try:',
+  '            os.close(os.open(p, flags))',
+  "            print(p, name, 'ok')",
+  '        except OSError as e:',
+  '            print(p, name, errno.errorcode[e.errno])',
+].join('\n');
+
+test('O_CREAT on an existing device opens it, and O_CREAT|O_EXCL is EEXIST, in WASIX and through bash <> in Emscripten (#1104)', {
+  timeout: 180_000,
+}, async (t) => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
+  await install(kernel, 'wasix-python', /^lib\/libpython[^/]*\.a$/);
+  const shell = `for p in /dev/null /dev/ptmx; do (exec 3<>$p) && echo "bash <> $p ok"; done; ${py(CREAT_PROBE)}`;
+  const r = await kernel.run(['bash', '-c', `(${shell}) < /dev/null`], { cwd: '/' });
+  assert.equal(r.stderr, '');
+  assert.equal(
+    r.stdout,
+    [
+      'bash <> /dev/null ok',
+      'bash <> /dev/ptmx ok',
+      '/dev/null creat ok',
+      '/dev/null excl EEXIST',
+      '/dev/zero creat ok',
+      '/dev/zero excl EEXIST',
+      '/dev/stdout creat ok',
+      '/dev/stdout excl EEXIST',
+      '',
+    ].join('\n')
+  );
+});
+
 const WALK_PROBE = [
   'import errno, os',
   "for p in ['/tmp/through', '/tmp/dotted', '/tmp/ptsdot', '/tmp/nulled']:",
