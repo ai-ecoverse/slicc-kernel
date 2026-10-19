@@ -86,6 +86,13 @@ export interface InheritedFd {
   fifo?: string;
 }
 
+export interface HeldCwdInit {
+  sab: SharedArrayBuffer;
+  slot: number;
+  seen: number;
+  dead: boolean;
+}
+
 export interface WasmProcessInitMsg {
   type: typeof WASM_PROCESS_INIT;
   pid: number;
@@ -96,6 +103,7 @@ export interface WasmProcessInitMsg {
   cwd: string;
   sab: SharedArrayBuffer;
   changes?: SharedArrayBuffer;
+  held?: HeldCwdInit;
   ppid?: number;
   umask?: number;
   cred?: Cred;

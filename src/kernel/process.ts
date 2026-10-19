@@ -52,6 +52,7 @@ import {
   pollFile,
 } from './fd-table.ts';
 import type { FifoTable } from './fifo.ts';
+import type { CwdAnswer, HeldCwdReply } from './held-cwd.ts';
 import { AsyncOps, HOST_OPS, type HostSyscall, hostSyscall, type LockTarget } from './host-ops.ts';
 import type { JobTable } from './jobs.ts';
 import type { KernelLocks } from './lock-service.ts';
@@ -188,6 +189,8 @@ export type WasmSyscall =
     }
   | { op: 'fd-renumber'; from: number; to: number; keep?: boolean }
   | { op: 'proc-umask'; mask?: number }
+  | { op: 'cwd-check' }
+  | { op: 'cwd-chdir'; path: string }
   | { op: 'proc-cred' }
   | { op: 'proc-setcred'; change: CredChange }
   | {
@@ -406,6 +409,8 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'fd-list',
   'proc-alarm',
   'proc-umask',
+  'cwd-check',
+  'cwd-chdir',
   'proc-cred',
   'proc-setcred',
   'dl-log',
@@ -529,6 +534,10 @@ const HOSTS_ONLY = new Resolver({ routes: new Routes() });
 
 export interface WasmProcessOptions {
   ignored?: number;
+
+  cwdCheck?: () => Promise<CwdAnswer>;
+
+  cwdChdir?: (path: string) => Promise<HeldCwdReply>;
 
   source?: SourceCheck;
 
@@ -2088,6 +2097,14 @@ export class WasmProcess {
         return { ok: true, kind: 'void' };
       case 'proc-umask':
         return { ok: true, kind: 'json', json: this.setUmask(req.mask) };
+      case 'cwd-check':
+        return {
+          ok: true,
+          kind: 'json',
+          json: (await this.options.cwdCheck?.()) ?? { gen: 0, alive: true },
+        };
+      case 'cwd-chdir':
+        return { ok: true, kind: 'json', json: (await this.options.cwdChdir?.(req.path)) ?? {} };
       case 'proc-cred':
         return { ok: true, kind: 'json', json: copyCred(this.cred) };
       case 'proc-setcred':
