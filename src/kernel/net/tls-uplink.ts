@@ -93,7 +93,7 @@ export interface SecureSession {
   path: 'kernel';
   substitutes: boolean;
   verified: boolean;
-  verifiedBy?: 'bundled';
+  verifiedBy: 'bundled' | 'none';
   protocol: TlsClientInfo['protocol'];
   alpnProtocol: string | false;
   authorized: boolean;
@@ -114,7 +114,7 @@ function sessionOf(info: TlsClientInfo, servername: string): SecureSession {
     path: 'kernel',
     substitutes: info.substitutes === true,
     verified: info.verified,
-    ...(info.verified ? { verifiedBy: 'bundled' as const } : {}),
+    verifiedBy: info.verified ? 'bundled' : 'none',
     protocol: info.protocol,
     alpnProtocol: info.alpnProtocol,
     authorized: info.authorized,

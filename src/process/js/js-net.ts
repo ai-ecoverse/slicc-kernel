@@ -10,7 +10,7 @@ export interface JsTlsSession {
   readonly path: 'transport' | 'kernel';
   readonly substitutes: boolean;
   readonly verified?: boolean;
-  readonly verifiedBy?: 'bundled';
+  readonly verifiedBy?: 'bundled' | 'none';
   readonly protocol: 'transport' | 'TLSv1.2' | 'TLSv1.3';
   readonly alpnProtocol: string | false;
   readonly authorized: boolean;
@@ -92,7 +92,7 @@ interface WireSession {
   path?: 'transport' | 'kernel';
   substitutes?: boolean;
   verified?: boolean;
-  verifiedBy?: 'bundled';
+  verifiedBy?: 'bundled' | 'none';
   protocol?: 'TLSv1.2' | 'TLSv1.3';
   alpnProtocol: string | false;
   authorized?: boolean;
@@ -193,7 +193,7 @@ function sessionOf(r: WireSession): JsTlsSession {
     path: 'kernel',
     substitutes: r.substitutes === true,
     verified: r.verified === true,
-    ...(r.verifiedBy === 'bundled' ? { verifiedBy: 'bundled' as const } : {}),
+    verifiedBy: r.verifiedBy === 'bundled' ? 'bundled' : 'none',
     protocol: r.protocol ?? 'TLSv1.2',
     alpnProtocol: r.alpnProtocol,
     authorized: r.authorized === true,

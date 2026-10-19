@@ -67,7 +67,7 @@ export default async function main(ctx) {
         if (done) break;
         got += dec.decode(value, { stream: true });
       }
-      out.push({ substitutes: c.tls.substitutes, verified: c.tls.verified, got });
+      out.push({ substitutes: c.tls.substitutes, verified: c.tls.verified, verifiedBy: c.tls.verifiedBy, got });
       await c.close();
     } catch (e) {
       out.push({ code: e.code, message: e.message });
@@ -249,7 +249,7 @@ test(
     const [one] = await byDer.run([
       { host: 'db.test', port: 465, tls: { ca: priv.pem }, writes: [bearer()] },
     ]);
-    assert.deepEqual([one.verified, one.substitutes], [false, true]);
+    assert.deepEqual([one.verified, one.verifiedBy, one.substitutes], [false, 'none', true]);
     assert.equal(a.log[0][0].head.includes(`Bearer ${SECRET}`), true, a.log[0][0].head);
     assert.deepEqual(
       byDer.asked.map((r) => [r.verifiedBy, r.anchor]),
@@ -293,7 +293,7 @@ test(
     await roots.run([{ host: 'api.test', port: 465, tls: {}, writes: [bearer()] }]);
     assert.deepEqual(
       roots.asked.map((r) => [r.verified, r.verifiedBy, r.anchor]),
-      [[true, undefined, undefined]]
+      [[true, 'roots', undefined]]
     );
   }
 );

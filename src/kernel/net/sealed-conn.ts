@@ -169,7 +169,9 @@ class SessionWriter {
       protocol,
       position,
       verified: true,
-      ...(proof.anchor ? { verifiedBy: 'anchored' as const, anchor: proof.anchor } : {}),
+      ...(proof.anchor
+        ? { verifiedBy: 'anchored' as const, anchor: proof.anchor }
+        : { verifiedBy: 'roots' as const }),
       handshakeAt: s.handshakeAt,
       exit: s.exit as string,
       ...extra,
