@@ -107,3 +107,32 @@ test('a WASIX stat through a symlink to /dev/stdout or /dev/fd/N answers the des
   assert.equal(r.stderr, '');
   assert.equal(r.stdout, 'stdout True True\nfd True 5 True\n');
 });
+
+const WALK_PROBE = [
+  'import errno, os',
+  "for p in ['/tmp/through', '/tmp/dotted', '/tmp/ptsdot']:",
+  '    try: os.unlink(p)',
+  '    except OSError: pass',
+  "os.symlink('/dev/missing/../tty', '/tmp/through')",
+  "os.symlink('/dev/./tty', '/tmp/dotted')",
+  "os.symlink('/dev/pts/../tty', '/tmp/ptsdot')",
+  "for p in ['/tmp/through', '/tmp/dotted', '/tmp/ptsdot']:",
+  '    try:',
+  '        print(p, oct(os.stat(p).st_mode))',
+  '    except OSError as e:',
+  '        print(p, errno.errorcode[e.errno])',
+].join('\n');
+
+test('a WASIX stat through a symlink whose target passes a missing directory is ENOENT, as on Linux, while . and an existing directory still resolve to the device (#1092)', {
+  timeout: 180_000,
+}, async (t) => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
+  await install(kernel, 'wasix-python', /^lib\/libpython[^/]*\.a$/);
+  const r = await kernel.run(['bash', '-c', `(exec 3</dev/ptmx; ${py(WALK_PROBE)}) < /dev/null`], {
+    cwd: '/',
+  });
+  assert.equal(r.stderr, '');
+  assert.equal(r.stdout, '/tmp/through ENOENT\n/tmp/dotted 0o20666\n/tmp/ptsdot 0o20666\n');
+});
