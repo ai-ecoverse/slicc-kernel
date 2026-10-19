@@ -57,6 +57,9 @@ async function seed(factory: IDBFactory, name: string): Promise<void> {
     const store = tx.objectStore(META_STORE);
     for (const row of rows) store.put(row);
     await done(tx);
+    console.warn(
+      `slicc-kernel: a root not seen before got its own metadata database ${name}, a copy of ${rows.length} records of ${META_DB} (#1120)`
+    );
   } finally {
     from.close();
     to.close();

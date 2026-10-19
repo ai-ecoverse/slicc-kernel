@@ -134,3 +134,32 @@ test("an OPFS directory used as a root before #1120 keeps the modes and inodes i
   await elsewhere(page, 'b', 'rootu');
   assert.deepEqual(await other(page, 'b', look), ok(before.stdout));
 });
+
+test('the first boot on a used OPFS directory says once that it copied the shared records, and a later boot says nothing (#1120)', async (t) => {
+  const { page, bash } = await booted(chrome, t);
+  assert.deepEqual(await bash(': > /home/logged && chmod 600 /home/logged', { cwd: '/' }), ok());
+  await elsewhere(page, undefined, 'rootw');
+  const boots = await page.evaluate(async () => {
+    const heard = [];
+    const channel = new BroadcastChannel('kernel-warnings');
+    channel.onmessage = ({ data }) => heard.push(data);
+    const root = await (await navigator.storage.getDirectory()).getDirectoryHandle('rootw');
+    const worker = new URL('/count/warn-worker.js', location.href);
+    const counts = [];
+    for (const name of ['first', 'later']) {
+      await window.secondKernel({ root, worker }, name);
+      await window[name].run(['true'], { cwd: '/' });
+      await new Promise((r) => setTimeout(r, 200));
+      counts.push(heard.splice(0).filter((w) => w.includes('#1120')));
+    }
+    channel.close();
+    return counts;
+  });
+  assert.equal(boots[0].length, 1, JSON.stringify(boots));
+  assert.match(
+    boots[0][0],
+    /^slicc-kernel: a root not seen before got its own metadata database slicc-kernel:[0-9a-f-]+, a copy of \d+ records of slicc-kernel \(#1120\)$/
+  );
+  assert.ok(!boots[0][0].includes('/home'), boots[0][0]);
+  assert.deepEqual(boots[1], []);
+});
