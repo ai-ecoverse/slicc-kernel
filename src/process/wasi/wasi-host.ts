@@ -1,5 +1,5 @@
 import { inDevTree } from '../../fs/dev-removal.ts';
-import { physicalPath } from '../../fs/physical-path.ts';
+import { physicalLeaf, physicalPath } from '../../fs/physical-path.ts';
 import { localCpuNanos } from '../../kernel/cpu-clock.ts';
 import { type Cred, type CredChange, MAX_GROUPS } from '../../kernel/cred.ts';
 import type { DeviceMeta, KernelFdKind } from '../../kernel/fd-table.ts';
@@ -1384,8 +1384,8 @@ export class WasiHost {
 
   private linkedDev(path: string, follow: boolean): string | undefined {
     if (!follow) return undefined;
-    const real = physicalPath(this.o.fs, path);
-    return real !== path && kernelDev(real) ? real : undefined;
+    const real = physicalLeaf(this.o.fs, path);
+    return real !== undefined && real !== path && kernelDev(real) ? real : undefined;
   }
 
   private statOf(path: string, follow: boolean): SyncFsBridgeStat {
@@ -1422,12 +1422,16 @@ export class WasiHost {
       if (!follow) {
         const slash = path.lastIndexOf('/');
         if (slash <= 0) return undefined;
-        const parent = physicalPath(this.o.fs, path.slice(0, slash));
-        const resolved = `${parent}/${path.slice(slash + 1)}`;
-        return resolved !== path && this.synthetic(resolved) ? resolved : undefined;
+        const parent = physicalLeaf(this.o.fs, path.slice(0, slash));
+        const resolved = parent === undefined ? undefined : `${parent}/${path.slice(slash + 1)}`;
+        return resolved !== undefined && resolved !== path && this.synthetic(resolved)
+          ? resolved
+          : undefined;
       }
-      const resolved = physicalPath(this.o.fs, path);
-      return resolved !== path && this.synthetic(resolved) ? resolved : undefined;
+      const resolved = physicalLeaf(this.o.fs, path);
+      return resolved !== undefined && resolved !== path && this.synthetic(resolved)
+        ? resolved
+        : undefined;
     } catch {
       return undefined;
     }
