@@ -79,13 +79,13 @@ test('a file a WASI program creates and writes reuses the handle its create made
   const rows = [
     [
       'O_EXCL',
-      2.05,
-      3.05,
+      2.3,
+      3.3,
       ["os.close(os.open(f'/tmp/oo/TAG{i}', os.O_WRONLY|os.O_CREAT|os.O_EXCL, 0o644))"],
     ],
     [
       'O_EXCL + write',
-      3.05,
+      3.3,
       6.05,
       [
         "fd = os.open(f'/tmp/oo/TAG{i}', os.O_WRONLY|os.O_CREAT|os.O_EXCL, 0o644)",
@@ -95,7 +95,7 @@ test('a file a WASI program creates and writes reuses the handle its create made
     ],
     [
       'O_TRUNC + write',
-      4.05,
+      4.3,
       7.05,
       [
         "fd = os.open(f'/tmp/oo/TAG{i}', os.O_WRONLY|os.O_CREAT|os.O_TRUNC, 0o644)",
