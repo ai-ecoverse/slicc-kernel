@@ -53,7 +53,7 @@ async function appear(path) {
 
 const WAIT = ': > ready$N; while [ ! -e go$N ]; do sleep 0.05; done';
 
-test('hostfs through the Node entry: a host edit mid-read is ESTALE on an inherited or an opened descriptor, a write in the kernel is not', async (t) => {
+test('hostfs through the Node entry: a host edit mid-read is ESTALE on an inherited or an opened descriptor, so is a removal the kernel has seen, a write in the kernel is not', async (t) => {
   const dir = await folder(t, 'slicc-hostfs-');
   const proxy = await hostfsProxy({
     folders: { project: dir },
@@ -62,7 +62,7 @@ test('hostfs through the Node entry: a host edit mid-read is ESTALE on an inheri
   });
   t.after(() => proxy.close());
   await writeFile(join(dir, 'v'), Buffer.alloc(3 * 1024 * 1024, 65));
-  for (const name of ['v1', 'v2', 'v3']) {
+  for (const name of ['v1', 'v2', 'v3', 'v4']) {
     await writeFile(join(dir, name), Buffer.alloc(3 * 1024 * 1024, 65));
   }
   const kernel = await mounted(t, {
@@ -77,7 +77,7 @@ test('hostfs through the Node entry: a host edit mid-read is ESTALE on an inheri
   assert.equal(await readFile(join(dir, 'api'), 'utf8'), 'from the API');
   assert.equal((await kernel.readFile('/mnt/h/v')).length, 3 * 1024 * 1024);
   await run('rm api');
-  assert.equal((await run('head -c 3 v; echo; ls')).stdout, 'AAA\nv\nv1\nv2\nv3\n');
+  assert.equal((await run('head -c 3 v; echo; ls')).stdout, 'AAA\nv\nv1\nv2\nv3\nv4\n');
   let n = 0;
   const hostEdit = async (script, edit) => {
     n += 1;
@@ -111,6 +111,19 @@ test('hostfs through the Node entry: a host edit mid-read is ESTALE on an inheri
   );
   assert.equal(shrunk.stdout, 'rc 1\n');
   assert.match(shrunk.stderr, /Stale file handle/);
+  const removed = await hostEdit(
+    `exec 3< v4; read -r -N 1 -u 3 a; ${WAIT}; dd bs=1048576 skip=1 count=1 <&3 of=/dev/null; echo "rc $?"`,
+    async () => {
+      await rm(join(dir, 'v4'));
+      const end = Date.now() + 120_000;
+      while ((await run('test -e v4')).status === 0) {
+        assert.ok(Date.now() < end, 'the kernel never saw v4 gone');
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    }
+  );
+  assert.equal(removed.stdout, 'rc 1\n');
+  assert.match(removed.stderr, /Stale file handle/);
   await writeFile(join(dir, 'w'), Buffer.alloc(3 * 1024 * 1024, 66));
   const local = await run(
     'exec 3< w; head -c 1 <&3 >/dev/null; echo x | tee -a w >/dev/null; dd bs=1048576 skip=2 count=2 <&3 2>/dev/null | wc -c; echo "rc $?"'
