@@ -323,6 +323,7 @@ int main(int argc, char **argv) {
   memset(&sa, 0, sizeof sa);
   sa.sa_handler = on_usr1;
   sigaction(SIGUSR1, &sa, 0);
+  signal(SIGPIPE, SIG_IGN);
   if (setup() != 0) {
     printf("canary: setup failed (%d)\n", errno);
     return 2;
@@ -342,7 +343,7 @@ int main(int argc, char **argv) {
   for (int t = 0; t < threads; t++) pthread_join(workers[t], 0);
   atomic_store(&nworkers, 0);
   atomic_store(&stop, 1);
-  write(pipes[1], "x", 1);
+  close(pipes[0]);
   for (int h = 0; h < 4; h++) pthread_join(helpers[h], 0);
   printf("canary: %s, %ld calls, %ld checked 200 ms later, %ld interrupted, %ld timed out, %ld stale memory.size\n",
          atomic_load(&failed) ? "FAIL" : "clean", atomic_load(&calls), atomic_load(&late),
