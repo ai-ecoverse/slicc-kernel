@@ -970,11 +970,11 @@ export class OpfsFs implements KernelFs {
     return this.remote?.crowded() === true;
   }
 
-  private glanced(handle: FileSystemFileHandle): File | undefined {
+  private glanced(handle: FileSystemFileHandle, since = Infinity): File | undefined {
     if (this.exact > 0) return undefined;
     const seen = this.glances.get(handle);
-    const fresh = seen && seen.changes === this.changes && performance.now() - seen.at < GLANCE_MS;
-    return fresh ? seen.file : undefined;
+    const recent = seen && (seen.at >= since || performance.now() - seen.at < GLANCE_MS);
+    return recent && seen.changes === this.changes ? seen.file : undefined;
   }
 
   private async glance(handle: FileSystemFileHandle): Promise<File> {
@@ -1156,9 +1156,9 @@ export class OpfsFs implements KernelFs {
   }
 
   async pread(path: string, offset: number, length: number): Promise<Uint8Array> {
+    const since = performance.now();
     return this.reading(path, async (handle) => {
-      const seen = this.glanced(handle);
-      const file = seen ?? (await this.glance(handle));
+      const file = this.glanced(handle, since) ?? (await this.glance(handle));
       await this.refuseNode(path, file.size === 0);
       try {
         return new Uint8Array(await file.slice(offset, offset + length).arrayBuffer());
