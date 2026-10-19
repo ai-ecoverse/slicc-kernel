@@ -1,0 +1,21 @@
+name: Install baseline
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: install-baseline
+  cancel-in-progress: false
+
+jobs:
+  baseline:
+    uses: ai-ecoverse/slicc-shared-web/.github/workflows/node-ci.yml@e1c211785267ed44d88c865072a1dcd586692997
+    with:
+      runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
+      timeout-minutes: 40
+      test: npm run pretest && node --test --test-timeout=1800000 --test-concurrency=1 --test-global-setup=node_modules/@ai-ecoverse/slicc-shared-web/harness/global.mjs test/integration/perf/agent-install-page.perf.mjs
