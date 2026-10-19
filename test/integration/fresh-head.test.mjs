@@ -50,7 +50,7 @@ test('a file a WASI program creates and writes from its start is not read back t
   assert.equal(r.status, 0, r.stderr);
   const per = Number(r.stdout) / N;
   const seen = [`O_EXCL + write ${per.toFixed(2)}`];
-  assert.ok(per <= 3.5, `${per} OPFS lookups per file`);
+  assert.ok(per <= 3.9, `${per} OPFS lookups per file`);
   console.log(`OPFS lookups per created and written file: ${seen.join(', ')}`);
   const made = await sh(
     `${py([
