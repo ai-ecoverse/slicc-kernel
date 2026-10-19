@@ -9,7 +9,7 @@ const input = (name, env) => String(dispatched[name] ?? process.env[env] ?? '');
 const base = input('base', 'AB_BASE');
 const candidate = input('candidate', 'AB_CANDIDATE');
 const pnpm = input('pnpm', 'AB_PNPM');
-const pairs = Number(input('pairs', 'AB_PAIRS') || 3);
+const pairs = Number(input('pairs', 'AB_PAIRS') || 4);
 const offline = input('offline', 'AB_OFFLINE') !== 'false';
 const serial = input('serial', 'AB_SERIAL') === 'true';
 const REF = /^[A-Za-z0-9._/-]{1,200}$/;
@@ -19,7 +19,9 @@ const fail = (message) => {
 };
 if (!REF.test(base) || !REF.test(candidate)) fail('base and candidate must be git refs');
 if (pnpm && !/^[0-9A-Za-z.+-]{1,50}$/.test(pnpm)) fail('pnpm must be a version');
-if (!Number.isInteger(pairs) || pairs < 1 || pairs > 10) fail('pairs must be 1 to 10');
+if (!Number.isInteger(pairs) || pairs < 2 || pairs > 10 || pairs % 2 !== 0) {
+  fail('pairs must be an even number from 2 to 10, so A-first and B-first pairs balance');
+}
 
 const here = resolve('.');
 const work = resolve(process.env.RUNNER_TEMP ?? '/tmp', 'install-ab');
