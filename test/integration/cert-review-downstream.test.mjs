@@ -60,7 +60,8 @@ test('the downstream smoke: a green canary passes, a regression or an unexplaine
   );
   assert.equal(
     downstreamOf(result({ counts: { pass: 9, fail: 1 } }), { ...at, override: 'PASS' }).state,
-    'OVERRIDDEN'
+    'FAIL',
+    'there is no override: a failure is a failure'
   );
   for (const partial of [
     undefined,
@@ -81,7 +82,7 @@ test('the downstream smoke: a green canary passes, a regression or an unexplaine
   }
 });
 
-test('known bios failures pass with a note and a notice, a canary that fails on main alike is not judged and notifies, and an override passes a regression in the line (#480)', () => {
+test('known bios failures pass with a note and a notice, a canary that fails on main alike is not judged and notifies, and nothing waives a regression (#480)', () => {
   const known = downstreamOf(
     result({ counts: { pass: 9, both: 1 }, both: [row('pydata loads', 'rest')] }),
     at
@@ -113,18 +114,13 @@ test('known bios failures pass with a note and a notice, a canary that fails on 
     counts: { pass: 9, regression: 1 },
     regressions: [row('seven boots')],
   });
-  const overridden = downstreamOf(regressed, { ...at, override: 'PASS' });
-  assert.equal(overridden.state, 'OVERRIDDEN');
-  assert.match(
-    overridden.line,
-    /^downstream: overridden \(downstream-override on the head, by the coordinator\) /
-  );
-  for (const stale of ['FAIL', 'INCOMPLETE', ''])
+  for (const old of ['PASS', 'FAIL', ''])
     assert.equal(
-      downstreamOf(regressed, { ...at, override: stale }).state,
+      downstreamOf(regressed, { ...at, override: old }).state,
       'FAIL',
-      `override ${stale}`
+      `a leftover override option (${old}) waives nothing`
     );
+  assert.equal(DOWNSTREAM_OK.has('OVERRIDDEN'), false);
   assert.equal(
     downstreamLine([]),
     'downstream: not run (no merge group of this release carried it)'
@@ -182,11 +178,10 @@ test('downstream.mjs ends with its verdict through the gate: PASS for a pass, FA
     missing.out,
     /^downstream: FAIL downstream: INCOMPLETE .*the canary left no readable result/m
   );
-  const overridden = await run(
-    result({ counts: { pass: 1, regression: 1 }, regressions: [row('x')] }),
-    ['--override', 'PASS']
+  const regressed = await run(
+    result({ counts: { pass: 1, regression: 1 }, regressions: [row('x')] })
   );
-  assert.equal(overridden.code, 0, overridden.out);
+  assert.equal(regressed.code, 1, regressed.out);
   const broken = await run(result({ counts: { pass: 0, both: 2 }, both: [row('a'), row('b')] }));
   assert.equal(broken.code, 0, broken.out);
   assert.match(broken.out, /::warning title=downstream::bios canary is failing on main/);
