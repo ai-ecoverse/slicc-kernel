@@ -2,14 +2,14 @@ name: cert-review-pr
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled]
   merge_group:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ ((github.event.action == 'labeled' && github.event.label.name != 'merge-ok' && github.event.label.name != 'cert-review-approved') || (github.event.action == 'unlabeled' && github.event.label.name != 'cert-review-approved') || github.event.action == 'ready_for_review') && format('cert-review-pr-noop-{0}', github.run_id) || format('cert-review-pr-{0}', github.event.pull_request.number || github.event.merge_group.head_sha) }}
+  group: ${{ ((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'cert-review-approved') && format('cert-review-pr-noop-{0}', github.run_id) || format('cert-review-pr-{0}', github.event.pull_request.number || github.event.merge_group.head_sha) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -148,6 +148,7 @@ jobs:
           ACTION: ${{ github.event.action }}
           LABEL: ${{ github.event.label.name }}
           LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          PR_DRAFT: ${{ github.event.pull_request.draft }}
           GUARD: ${{ needs.guard.outputs.status }}
         run: |
           tools/cert-review/gate.sh 'pr plan' node tools/cert-review/pr.mjs plan --repo "$GITHUB_REPOSITORY" --pr "$PR" --head "$HEAD_SHA" \

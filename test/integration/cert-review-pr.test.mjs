@@ -324,7 +324,7 @@ const pr = (api, args) =>
     child.on('close', (code) => done({ code, out }));
   });
 
-test('the plan reviews only a behaviour change with merge-ok, records a skip as not behaviour, and makes an unreviewed one red', async (t) => {
+test('the plan reviews every non-draft behaviour change, records a skip as not behaviour, and keeps a draft red and unreviewed', async (t) => {
   let files = [{ filename: 'src/a.ts' }];
   const api = await fakeApi(t, (method, url) => {
     if (url.startsWith('/repos/o/r/pulls/9/files')) return files;
@@ -347,25 +347,53 @@ test('the plan reviews only a behaviour change with merge-ok, records a skip as 
       'PASS',
       ...extra,
     ]);
-  const go = await plan(['--action', 'labeled', '--label', 'merge-ok', '--labels', 'merge-ok']);
-  assert.match(go.out, /go=true/);
-  assert.equal(statuses().at(-1).state, 'pending');
-  assert.equal(statuses().at(-1).context, 'cert-review');
-  const sync = await plan(['--action', 'synchronize', '--labels', 'bug,merge-ok']);
-  assert.match(sync.out, /go=true/);
-  const other = await plan(['--action', 'labeled', '--label', 'bug', '--labels', 'bug,merge-ok']);
-  assert.match(other.out, /go=false/);
+  for (const action of ['opened', 'synchronize', 'reopened', 'ready_for_review']) {
+    const go = await plan(['--action', action, '--labels', '', '--draft', 'false']);
+    assert.match(go.out, /go=true/, action);
+    assert.equal(statuses().at(-1).state, 'pending');
+    assert.equal(statuses().at(-1).context, 'cert-review');
+  }
+  const legacy = await plan([
+    '--action',
+    'labeled',
+    '--label',
+    'merge-ok',
+    '--labels',
+    'merge-ok',
+    '--draft',
+    'false',
+  ]);
+  assert.match(legacy.out, /go=false/);
   const before = statuses().length;
-  const waiting = await plan(['--action', 'synchronize', '--labels', '']);
-  assert.match(waiting.out, /go=false/);
-  assert.equal(statuses().length, before + 1);
-  assert.equal(statuses().at(-1).state, 'failure');
-  assert.match(
-    statuses().at(-1).description,
-    /^waits for merge-ok to be reviewed \(changes src\/a\.ts\)/
-  );
+  const other = await plan([
+    '--action',
+    'unlabeled',
+    '--label',
+    'bug',
+    '--labels',
+    '',
+    '--draft',
+    'false',
+  ]);
+  assert.match(other.out, /go=false/);
+  assert.equal(statuses().length, before);
+  for (const extra of [
+    ['--action', 'converted_to_draft', '--labels', 'merge-ok', '--draft', 'true'],
+    ['--action', 'opened', '--labels', '', '--draft', 'true'],
+    ['--action', 'synchronize', '--labels', ''],
+  ]) {
+    const count = statuses().length;
+    const waiting = await plan(extra);
+    assert.match(waiting.out, /go=false/, extra.join(' '));
+    assert.equal(statuses().length, count + 1, extra.join(' '));
+    assert.equal(statuses().at(-1).state, 'failure');
+    assert.match(
+      statuses().at(-1).description,
+      /^draft: not reviewed, mark it ready for review \(changes src\/a\.ts\)/
+    );
+  }
   files = [{ filename: 'README.md' }, { filename: 'test/integration/a.test.mjs' }];
-  const docs = await plan(['--action', 'opened', '--labels', '']);
+  const docs = await plan(['--action', 'opened', '--labels', '', '--draft', 'true']);
   assert.match(docs.out, /go=false/);
   assert.equal(statuses().at(-1).state, 'success');
   assert.equal(
@@ -513,15 +541,18 @@ test("the merge group's cert-review needs the downstream smoke too: a regression
   }
 });
 
-test("the workflow: same-repo PRs with merge-ok review the merge ref with main's own tools, the key only in the review step, merge groups only look up", () => {
+test("the workflow: same-repo non-draft PRs review the merge ref with main's own tools, the key only in the review step, merge groups only look up", () => {
   assert.match(
     workflow,
-    /^ {2}pull_request:\n {4}types: \[opened, synchronize, reopened, labeled, unlabeled, ready_for_review\]\n {2}merge_group:\n/m
+    /^ {2}pull_request:\n {4}types: \[opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled\]\n {2}merge_group:\n/m
   );
   assert.match(
     workflow,
-    /\(\(github\.event\.action == 'labeled' && github\.event\.label\.name != 'merge-ok' && github\.event\.label\.name != 'cert-review-approved'\) \|\| \(github\.event\.action == 'unlabeled' && github\.event\.label\.name != 'cert-review-approved'\) \|\| github\.event\.action == 'ready_for_review'\) && format\('cert-review-pr-noop-\{0\}', github\.run_id\)/
+    /\(\(github\.event\.action == 'labeled' \|\| github\.event\.action == 'unlabeled'\) && github\.event\.label\.name != 'cert-review-approved'\) && format\('cert-review-pr-noop-\{0\}', github\.run_id\)/
   );
+  assert.match(jobs.plan, /PR_DRAFT: \$\{\{ github\.event\.pull_request\.draft \}\}/);
+  assert.doesNotMatch(jobs.plan, /--draft/);
+  assert.doesNotMatch(workflow, /merge-ok/);
   assert.match(
     jobs.plan,
     /needs: guard\n {4}if: \$\{\{ !cancelled\(\) && github\.event_name == 'pull_request' && github\.event\.pull_request\.head\.repo\.full_name == github\.repository \}\}/
@@ -624,16 +655,11 @@ test('a change to the reviewer is reviewed only with cert-review-approved on its
       '1',
       '--guard',
       guard,
+      '--draft',
+      'false',
       ...extra,
     ]);
-  const unapproved = await plan('FAIL', [
-    '--action',
-    'labeled',
-    '--label',
-    'merge-ok',
-    '--labels',
-    'merge-ok',
-  ]);
+  const unapproved = await plan('FAIL', ['--action', 'synchronize', '--labels', '']);
   assert.match(unapproved.out, /go=false/);
   assert.equal(statuses().at(-1).state, 'failure');
   assert.equal(
@@ -646,15 +672,15 @@ test('a change to the reviewer is reviewed only with cert-review-approved on its
     '--label',
     'cert-review-approved',
     '--labels',
-    'merge-ok,cert-review-approved',
+    'cert-review-approved',
   ]);
   assert.match(approved.out, /go=true/);
   assert.equal(statuses().at(-1).state, 'pending');
-  const pushed = await plan('FAIL', ['--action', 'synchronize', '--labels', 'merge-ok']);
+  const pushed = await plan('FAIL', ['--action', 'synchronize', '--labels', '']);
   assert.match(pushed.out, /go=false/);
   assert.equal(statuses().at(-1).state, 'failure');
   assert.match(statuses().at(-1).description, /^reviewer change: needs coordinator review/);
-  const unfinished = await plan('', ['--action', 'synchronize', '--labels', 'merge-ok']);
+  const unfinished = await plan('', ['--action', 'synchronize', '--labels', '']);
   assert.match(unfinished.out, /go=false/);
   assert.equal(statuses().at(-1).state, 'error');
   assert.equal(
@@ -663,9 +689,9 @@ test('a change to the reviewer is reviewed only with cert-review-approved on its
   );
   const before = statuses().length;
   for (const extra of [
-    ['--action', 'ready_for_review', '--labels', 'merge-ok'],
-    ['--action', 'unlabeled', '--label', 'bug', '--labels', 'merge-ok'],
-    ['--action', 'unlabeled', '--label', 'merge-ok', '--labels', ''],
+    ['--action', 'labeled', '--label', 'bug', '--labels', 'bug'],
+    ['--action', 'unlabeled', '--label', 'bug', '--labels', ''],
+    ['--action', 'labeled', '--label', 'merge-ok', '--labels', 'merge-ok'],
   ]) {
     const quiet = await plan('PASS', extra);
     assert.match(quiet.out, /go=false/);
@@ -677,7 +703,7 @@ test('a change to the reviewer is reviewed only with cert-review-approved on its
     '--label',
     'cert-review-approved',
     '--labels',
-    'merge-ok',
+    '',
   ]);
   assert.match(removed.out, /go=false/);
   assert.equal(statuses().at(-1).state, 'failure');
