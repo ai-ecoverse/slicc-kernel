@@ -35,10 +35,11 @@ int main(int argc, char **argv) {
   close(fd);
   int in = open(argv[1], O_RDONLY);
   static int seen[THREADS][RECORDS];
-  char rec[LEN];
+  char rec[LEN + 1];
   long count = 0, torn = 0, dup = 0;
   ssize_t n;
   while ((n = read(in, rec, LEN)) == LEN) {
+    rec[LEN] = '\0';
     int t, i;
     if (rec[0] != 'T' || rec[2] != ':' || rec[LEN - 1] != '\n' || sscanf(rec, "T%d:%d", &t, &i) != 2 ||
         t < 0 || t >= THREADS || i < 0 || i >= RECORDS) {
