@@ -60,7 +60,7 @@ test('a cold install of bios’s agent project into /opt/agent on the OPFS root,
     }
   })();
   const r = await bash(
-    'cd /opt/agent && pnpm install --frozen-lockfile --ignore-scripts --config.store-dir=/opt/slicc/.store --reporter=ndjson > /tmp/pnpm.ndjson 2>&1; echo "rc=$?"',
+    'cd /opt/agent && pnpm install --frozen-lockfile --ignore-scripts --config.store-dir=/opt/slicc/.store --reporter=ndjson > /dev/shm/pnpm.ndjson 2>&1; echo "rc=$?"',
     { cwd: '/' }
   );
   const wall = Date.now() - t0;
@@ -72,7 +72,7 @@ test('a cold install of bios’s agent project into /opt/agent on the OPFS root,
     { cwd: '/' }
   );
   const [modules, store, modulesKb, storeKb] = sizes.stdout.trim().split('\n').map(Number);
-  const log = (await bash('cat /tmp/pnpm.ndjson', { cwd: '/' })).stdout;
+  const log = (await bash('cat /dev/shm/pnpm.ndjson', { cwd: '/' })).stdout;
   assert.equal(r.stdout.trim(), 'rc=0', log.slice(-2000));
   const p = phases(log, series, wall);
   const inodes = modules + store;
