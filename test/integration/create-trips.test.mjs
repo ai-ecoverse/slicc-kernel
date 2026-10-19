@@ -69,7 +69,6 @@ test('a WASI program creating a file asks the kernel 3 times with O_CREAT|O_EXCL
       ],
     ],
   ];
-  await run('w', 0, rows[0][2]);
   const seen = [];
   for (const [name, most, body] of rows) {
     const trips = await per(sh, N, body);
