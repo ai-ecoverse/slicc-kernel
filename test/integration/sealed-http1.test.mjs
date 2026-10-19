@@ -20,10 +20,35 @@ const SECRET = 'sk-live-0123456789abcdefXYZ';
 
 const PROGRAM = `const enc = new TextEncoder();
 const dec = new TextDecoder();
+async function child(ctx) {
+  const parent = '/proc/' + ctx.argv[2];
+  while (await ctx.fs.exists(parent)) await new Promise((r) => setTimeout(r, 20));
+  let got = '';
+  for (;;) {
+    const chunk = await ctx.read(3);
+    if (chunk.length === 0) break;
+    got += dec.decode(chunk, { stream: true });
+  }
+  await ctx.fs.writeFile('/tmp/handoff.out', got);
+}
 export default async function main(ctx) {
+  if (ctx.argv[1] === '__child') return child(ctx);
   const steps = JSON.parse(ctx.argv[1]);
   const out = [];
+  const opened = {};
   for (const s of steps) {
+    if (s.open) {
+      opened[s.open] = await ctx.net.connect({ host: s.host, port: s.port, tls: s.tls });
+      continue;
+    }
+    if (s.handoff) {
+      const c = opened[s.handoff.name];
+      const w = c.writable.getWriter();
+      for (const piece of s.handoff.writes) await w.write(enc.encode(piece));
+      await ctx.spawn({ argv: ['sh1', '__child', String(ctx.pid)], fds: { 3: c.fd } });
+      out.push({ handedOff: true });
+      continue;
+    }
     if (s.spawn) {
       const child = await ctx.spawn({ argv: ['sh1', JSON.stringify(s.spawn), '/tmp/child.json'] });
       await child.wait();
@@ -70,7 +95,7 @@ function tokenOf(head) {
   return m[1].toLowerCase() === 'basic' ? Buffer.from(m[2], 'base64').toString('latin1') : m[2];
 }
 
-function http(log, leak) {
+function http(log, leak, delay = 0) {
   const box = { stored: '' };
   return (sock) => {
     let buf = Buffer.alloc(0);
@@ -95,8 +120,13 @@ function http(log, leak) {
           : leak
             ? `LEAK ${SECRET} ${Buffer.from(SECRET).toString('base64')}\n`
             : `HEAD ${head}BODY ${body}\nB64 ${Buffer.from(token).toString('base64')}\nHEX ${Buffer.from(token).toString('hex')}\n`;
-        sock.write(`HTTP/1.1 200 OK\r\nContent-Length: ${Buffer.byteLength(text)}\r\n\r\n${text}`);
-        if (/^connection:\s*close/im.test(head)) sock.end();
+        const close = /^connection:\s*close/im.test(head);
+        setTimeout(() => {
+          sock.write(
+            `HTTP/1.1 200 OK\r\nContent-Length: ${Buffer.byteLength(text)}\r\n\r\n${text}`
+          );
+          if (close) sock.end();
+        }, delay);
       }
     });
   };
@@ -104,7 +134,10 @@ function http(log, leak) {
 
 async function server(t, cert, options = {}) {
   const log = [];
-  const s = createServer({ key: cert.key, cert: cert.cert, ...options }, http(log, options.leak));
+  const s = createServer(
+    { key: cert.key, cert: cert.cert, ...options },
+    http(log, options.leak, options.delay)
+  );
   s.on('tlsClientError', () => {});
   await new Promise((r) => s.listen(0, '127.0.0.1', r));
   t.after(() => s.close());
@@ -178,7 +211,7 @@ async function kernelWith(
     assert.equal(r.stderr, '');
     return JSON.parse(r.stdout);
   };
-  return { run, asked };
+  return { run, asked, kernel };
 }
 
 const get = (headers, { path = '/v1/me', method = 'GET', body = '' } = {}) =>
@@ -380,5 +413,39 @@ test(
       { host: 'api.test', port: 465, tls: { ca: ca.pem }, writes: [get([], { path: '/stored' })] },
     ]);
     assert.match(alone.got, new RegExp(`STORED ${SECRET}`));
+  }
+);
+
+test(
+  'a session opened before the substitution and handed to a child stays scrubbed after the parent that substituted has exited (#1090 review)',
+  TIMEOUT,
+  async (t) => {
+    const a = await server(t, ca.server('api.test'));
+    const leak = await server(t, other.server('api.test'), { leak: true, delay: 1500 });
+    const { run, kernel } = await kernelWith(t, [
+      ['api.test', a.port],
+      ['leak.test', leak.port],
+    ]);
+    await run([
+      {
+        open: 'leak',
+        host: 'leak.test',
+        port: 465,
+        tls: { ca: other.pem, servername: 'api.test' },
+      },
+      { host: 'api.test', port: 465, tls: {}, writes: [get([`Authorization: Bearer ${PH}`])] },
+      { handoff: { name: 'leak', writes: [get([])] } },
+    ]);
+    let got;
+    for (let i = 0; i < 500 && got === undefined; i++) {
+      got = await kernel.readFile('/tmp/handoff.out').then(
+        (b) => new TextDecoder().decode(b),
+        () => undefined
+      );
+      if (got === undefined) await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.notEqual(got, undefined);
+    assert.equal(got.includes(SECRET), false, got);
+    assert.match(got, new RegExp(`LEAK ${PH}`));
   }
 );

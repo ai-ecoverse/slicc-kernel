@@ -14,6 +14,28 @@ export interface SessionScrub {
   scrubber: Scrubber;
 }
 
+export interface ScrubScope {
+  add(secrets: readonly ScrubSecret[]): void;
+  of(): SessionScrub | undefined;
+}
+
+function addTo(tree: Tree, host: string, secrets: readonly ScrubSecret[]): void {
+  const entry = tree.get(host) ?? { secrets: [], version: 0, scrubber: undefined };
+  const fresh = secrets.filter((s) => !entry.secrets.some((e) => e.value === s.value));
+  if (fresh.length === 0) return;
+  entry.secrets = [...entry.secrets, ...fresh];
+  entry.version += 1;
+  entry.scrubber = undefined;
+  tree.set(host, entry);
+}
+
+function scrubOf(tree: Tree | undefined, host: string): SessionScrub | undefined {
+  const entry = tree?.get(host);
+  if (!entry) return undefined;
+  entry.scrubber ??= scrubberOf(entry.secrets);
+  return entry.scrubber ? { version: entry.version, scrubber: entry.scrubber } : undefined;
+}
+
 export class SessionScrubs {
   private readonly trees = new Map<number, Tree>();
 
@@ -30,22 +52,17 @@ export class SessionScrubs {
     this.trees.set(child, this.treeOf(parent));
   }
 
-  add(pid: number, host: string, secrets: readonly ScrubSecret[]): void {
+  scope(pid: number, host: string): ScrubScope {
     const tree = this.treeOf(pid);
-    const entry = tree.get(host) ?? { secrets: [], version: 0, scrubber: undefined };
-    const fresh = secrets.filter((s) => !entry.secrets.some((e) => e.value === s.value));
-    if (fresh.length === 0) return;
-    entry.secrets = [...entry.secrets, ...fresh];
-    entry.version += 1;
-    entry.scrubber = undefined;
-    tree.set(host, entry);
+    return { add: (secrets) => addTo(tree, host, secrets), of: () => scrubOf(tree, host) };
+  }
+
+  add(pid: number, host: string, secrets: readonly ScrubSecret[]): void {
+    addTo(this.treeOf(pid), host, secrets);
   }
 
   of(pid: number, host: string): SessionScrub | undefined {
-    const entry = this.trees.get(pid)?.get(host);
-    if (!entry) return undefined;
-    entry.scrubber ??= scrubberOf(entry.secrets);
-    return entry.scrubber ? { version: entry.version, scrubber: entry.scrubber } : undefined;
+    return scrubOf(this.trees.get(pid), host);
   }
 
   drop(pid: number): void {

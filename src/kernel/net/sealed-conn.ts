@@ -2,7 +2,7 @@ import { SCRUB_IDLE_MS } from '../scrub-file.ts';
 import type { SealedBroker, SealedCaller } from '../sealed.ts';
 import { SESSION_EXIT } from '../sealed-session.ts';
 import { HEAD_MAX, sniffHttp1, substituteHead } from './sealed-http1.ts';
-import type { SessionScrub } from './sealed-scrubs.ts';
+import type { ScrubScope, SessionScrub } from './sealed-scrubs.ts';
 import type { UplinkConn } from './uplink.ts';
 
 export const HEAD_IDLE_MS = 2000;
@@ -69,9 +69,11 @@ class Http1Writer {
   private failed: unknown;
   private readonly conn: UplinkConn;
   private readonly s: SealedSession;
-  constructor(conn: UplinkConn, s: SealedSession) {
+  private readonly scope: ScrubScope;
+  constructor(conn: UplinkConn, s: SealedSession, scope: ScrubScope) {
     this.conn = conn;
     this.s = s;
+    this.scope = scope;
   }
 
   write(bytes: Uint8Array): Promise<number> {
@@ -94,7 +96,8 @@ class Http1Writer {
     this.buffer = joined;
     const sniff = sniffHttp1(latin1(joined.subarray(0, 8)));
     const end = sniff === 'yes' ? headEnd(joined) : -1;
-    if (sniff === 'no' || (end < 0 && joined.length > HEAD_MAX)) await this.release();
+    if (sniff === 'no' || end > HEAD_MAX || (end < 0 && joined.length > HEAD_MAX))
+      await this.release();
     else if (end >= 0) await this.substitute(end);
     else this.timer = setTimeout(() => this.idle(), HEAD_IDLE_MS);
     return bytes.length;
@@ -144,9 +147,7 @@ class Http1Writer {
     ).catch(() => undefined);
     const head = done ? bytesOf(done.head) : all.subarray(0, end);
     if (done) {
-      s.broker.sessions.add(
-        s.pid,
-        s.host,
+      this.scope.add(
         Object.entries(done.values).map(([placeholder, value]) => ({
           name: 'sealed',
           value,
@@ -187,19 +188,22 @@ class ScrubReader {
   private ended = false;
   private readonly conn: UplinkConn;
   private readonly s: SealedSession;
-  constructor(conn: UplinkConn, s: SealedSession) {
+  private readonly scope: ScrubScope;
+  constructor(conn: UplinkConn, s: SealedSession, scope: ScrubScope) {
     this.conn = conn;
     this.s = s;
+    this.scope = scope;
   }
 
   private current(): Uint8Array {
-    const scrub = this.s.broker.sessions.of(this.s.pid, this.s.host);
+    const scrub = this.scope.of();
     if (!scrub || scrub.version === this.version) return new Uint8Array(0);
     const tail = this.stream?.end() ?? new Uint8Array(0);
-    this.stream = scrub.scrubber.stream();
+    const stream = scrub.scrubber.stream();
+    this.stream = stream;
     this.version = scrub.version;
-    this.held = false;
-    return tail;
+    this.held = tail.length > 0;
+    return tail.length > 0 ? stream.push(tail) : tail;
   }
 
   async read(): Promise<Uint8Array | null> {
@@ -251,8 +255,9 @@ function idle(): Promise<typeof IDLE> {
 }
 
 export function sealedConn(conn: UplinkConn, s: SealedSession): UplinkConn {
-  const writer = substitutes(s) ? new Http1Writer(conn, s) : undefined;
-  const reader = new ScrubReader(conn, s);
+  const scope = s.broker.sessions.scope(s.pid, s.host);
+  const writer = substitutes(s) ? new Http1Writer(conn, s, scope) : undefined;
+  const reader = new ScrubReader(conn, s, scope);
   return {
     localAddr: conn.localAddr,
     remoteAddr: conn.remoteAddr,
