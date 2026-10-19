@@ -1617,8 +1617,9 @@ export class OpfsFs implements KernelFs {
   }
 
   private async place(handle: Handle, dir: FileSystemDirectoryHandle, name: string) {
-    this.others++;
-    const moved = await (handle as Handle & MovableHandle).move?.(dir, name).then(
+    const move = (handle as Handle & MovableHandle).move;
+    if (move) this.others++;
+    const moved = await move?.call(handle, dir, name).then(
       () => true,
       () => false
     );
@@ -1626,7 +1627,7 @@ export class OpfsFs implements KernelFs {
     try {
       await this.copy(handle, dir, name);
     } catch (err) {
-      if (handle.kind === 'directory') await dir.removeEntry(name, { recursive: true });
+      if (handle.kind === 'directory') await this.io(dir.removeEntry(name, { recursive: true }));
       throw translate(err, name);
     }
     return false;
@@ -1634,12 +1635,14 @@ export class OpfsFs implements KernelFs {
 
   private async copy(handle: Handle, dir: FileSystemDirectoryHandle, name: string): Promise<void> {
     if (handle.kind === 'file') {
-      const writable = await (await dir.getFileHandle(name, { create: true })).createWritable();
-      await writable.write(await handle.getFile());
+      const made = await this.io(dir.getFileHandle(name, { create: true }));
+      const writable = await this.io(made.createWritable());
+      await writable.write(await this.io(handle.getFile()));
       await writable.close();
       return;
     }
-    const target = await dir.getDirectoryHandle(name, { create: true });
+    const target = await this.io(dir.getDirectoryHandle(name, { create: true }));
+    this.others++;
     for await (const child of handle.values()) await this.copy(child, target, child.name);
   }
 
