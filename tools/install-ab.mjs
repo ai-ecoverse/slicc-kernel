@@ -97,23 +97,27 @@ const median = (values) => {
 
 const rows = [];
 for (let i = 1; i <= pairs; i++) {
-  const a = install('A');
-  const b = install('B');
-  rows.push({ i, a, b, ratio: b.wall / a.wall, requests: b.requests / a.requests });
-  console.log(`pair ${i}: A ${a.wall} s, B ${b.wall} s, ratio ${(b.wall / a.wall).toFixed(3)}`);
+  const order = i % 2 === 1 ? 'AB' : 'BA';
+  const first = install(order[0]);
+  const second = install(order[1]);
+  const [a, b] = order === 'AB' ? [first, second] : [second, first];
+  rows.push({ i, order, a, b, ratio: b.wall / a.wall, requests: b.requests / a.requests });
+  console.log(
+    `pair ${i} (${order}): A ${a.wall} s, B ${b.wall} s, ratio ${(b.wall / a.wall).toFixed(3)}`
+  );
 }
 
 const ratios = rows.map((r) => r.ratio);
 const table = [
   `### Install A/B on one runner: A ${builds.A.ref} (${builds.A.sha.slice(0, 8)}), B ${builds.B.ref} (${builds.B.sha.slice(0, 8)})${pnpm ? `, wasi-pnpm ${pnpm}` : ''}${offline ? ', offline registry' : ', live registry'}${serial ? ', serial pnpm' : ''}`,
   '',
-  '| pair | A wall | B wall | B/A wall | A requests | B requests | B/A requests | A calls | B calls | A MiB | B MiB |',
-  '|---|---|---|---|---|---|---|---|---|---|---|',
+  '| pair | order | A wall | B wall | B/A wall | A requests | B requests | B/A requests | A calls | B calls | A MiB | B MiB |',
+  '|---|---|---|---|---|---|---|---|---|---|---|---|',
   ...rows.map(
     (r) =>
-      `| ${r.i} | ${r.a.wall} s | ${r.b.wall} s | ${r.ratio.toFixed(3)} | ${r.a.requests} | ${r.b.requests} | ${r.requests.toFixed(3)} | ${r.a.calls} | ${r.b.calls} | ${r.a.memory} | ${r.b.memory} |`
+      `| ${r.i} | ${r.order} | ${r.a.wall} s | ${r.b.wall} s | ${r.ratio.toFixed(3)} | ${r.a.requests} | ${r.b.requests} | ${r.requests.toFixed(3)} | ${r.a.calls} | ${r.b.calls} | ${r.a.memory} | ${r.b.memory} |`
   ),
-  `| **median** | ${median(rows.map((r) => r.a.wall))} s | ${median(rows.map((r) => r.b.wall))} s | **${median(ratios).toFixed(3)}** | | | **${median(rows.map((r) => r.requests)).toFixed(3)}** | | | ${median(rows.map((r) => r.a.memory))} | ${median(rows.map((r) => r.b.memory))} |`,
+  `| **median** | | ${median(rows.map((r) => r.a.wall))} s | ${median(rows.map((r) => r.b.wall))} s | **${median(ratios).toFixed(3)}** | | | **${median(rows.map((r) => r.requests)).toFixed(3)}** | | | ${median(rows.map((r) => r.a.memory))} | ${median(rows.map((r) => r.b.memory))} |`,
   '',
   `Pair ratio spread: ${Math.min(...ratios).toFixed(3)}–${Math.max(...ratios).toFixed(3)}.`,
   '',
