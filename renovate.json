@@ -16,6 +16,11 @@
       "matchFileNames": [".github/**"],
       "labels": [],
       "automerge": false
+    },
+    {
+      "description": "wasix-python and its py-* extension packages are built against one CPython: they bump together, in one PR, so a new numpy never meets the old python (#1180, #1181).",
+      "matchPackageNames": ["@ai-ecoverse/wasix-python", "/^@ai-ecoverse/py-/"],
+      "groupName": "wasix-python and py extensions"
     }
   ]
 }
