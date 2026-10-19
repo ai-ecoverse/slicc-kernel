@@ -18,6 +18,10 @@ export interface JsOpenOptions {
   signal?: AbortSignal;
 }
 
+export interface JsWriteOptions {
+  nonblock?: boolean;
+}
+
 export type JsFdType = 'file' | 'pipe' | 'tty' | 'socket' | 'device' | 'directory';
 
 export interface FdInfo {

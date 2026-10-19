@@ -114,8 +114,11 @@ export type {
   JsFile,
   JsOpenOptions,
   JsProgramContext,
+  JsSelected,
+  JsSelectSets,
   JsSignal,
   JsSudoAnswer,
+  JsWriteOptions,
 } from './process/js/js-context.ts';
 export type { JsStatFs } from './process/js/js-io.ts';
 export type {
