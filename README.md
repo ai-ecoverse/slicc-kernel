@@ -462,13 +462,17 @@ The module's default export (or its `main` export) is called with a context and 
 
       Then:
       - **HTTP/1.1:** if the **first request head** the program writes on the session (it starts with a standard method) has placeholders (`fnox_proxy_<24 hex>`) in exactly one header line, either in the value or in the `user:password` of `Basic` credentials, the kernel asks the vault once (`sessionMaterialize`, below) for that header's position.
+      - **SMTP:** a session whose first line is `EHLO` or `HELO` (implicit TLS, or after a STARTTLS upgrade; bytes written before the upgrade are never substituted) is read line by line, and only the `AUTH` exchange is a position:
+        - `AUTH PLAIN <blob>`, or the line after a bare `AUTH PLAIN`: the kernel decodes the blob, and asks the vault (`auth-plain`) only when the placeholders are in the **password field**. A placeholder in the user or authorization identity goes out as written. It substitutes there and re-encodes.
+        - `AUTH LOGIN`: the password line (the second line, or the first after `AUTH LOGIN <user>`) is decoded, substituted (`auth-login`) and re-encoded; the user line goes out as written.
+        - Every other line goes out as written. After the first `AUTH`, or once `MAIL`, `RCPT`, `DATA` or `BDAT` is seen, so is the rest of the session. A line still unfinished after 2 s, or longer than 4 KiB, is sent as written, and so is the rest.
       - **What goes out:** the placeholders the vault answers with a value of at least 8 bytes go out as that value (`Basic` decoded, substituted and re-encoded). Everything else goes out as written:
         - the request line and the body;
         - other headers;
         - a head with placeholders in two header lines;
         - later requests on the same connection;
         - anything once the head passes 16 KiB, or once the program pauses for 2 s in the middle of it;
-        - SMTP and pg, which come next.
+        - pg, which comes next.
       - **What's read back:** once a process has had a value substituted for a host, everything its whole process tree reads from any A2 session to that host is scrubbed: the process itself, its ancestors and every descendant (forked, spawned or exec'd, before or after the substitution; a forked child's own new session included) with [slicc-scrub](https://github.com/ai-ecoverse/slicc-scrub), as S2 does: the value comes back as its placeholder, and a fragment or an encoded form (JSON, percent, HTML, base64, hex) as `[redacted:sealed]`. The scrub stays until the whole tree has ended. A process outside the tree isn't covered. A value shorter than 8 bytes is never substituted, as it couldn't be scrubbed.
       - **The bound:** the server the value goes to is the one the vault rule names, verified against the kernel's own roots. Substitution trusts that server not to reflect the value back in a form the scrub doesn't know (encrypted under a key the program chose, say). That's the same residual as A1's.
       - **Elsewhere:** a placeholder written into any other A2 session reaches the server as written. It isn't the secret, so nothing leaks.
