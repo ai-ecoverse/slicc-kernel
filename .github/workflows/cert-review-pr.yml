@@ -41,7 +41,7 @@ jobs:
 
       - id: guard
         continue-on-error: true
-        uses: ai-ecoverse/slicc-shared-web/.github/actions/cert-self-guard@fe97ae242f8ddcc824334cad287346d7df3f0bbb
+        uses: ai-ecoverse/slicc-shared-web/.github/actions/cert-self-guard@f342d7cf558c817ce517bbbbc4cc46df6eac2f97
         with:
           approval-label: cert-review-approved
           paths: |
@@ -67,7 +67,7 @@ jobs:
       - id: override
         name: downstream-override, the coordinator's head-bound waiver of a downstream failure (every pull request in a group needs it on its head)
         continue-on-error: true
-        uses: ai-ecoverse/slicc-shared-web/.github/actions/cert-self-guard@fe97ae242f8ddcc824334cad287346d7df3f0bbb
+        uses: ai-ecoverse/slicc-shared-web/.github/actions/cert-self-guard@f342d7cf558c817ce517bbbbc4cc46df6eac2f97
         with:
           approval-label: downstream-override
           paths: |

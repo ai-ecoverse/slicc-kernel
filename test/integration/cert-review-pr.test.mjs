@@ -727,7 +727,7 @@ test('a merge group with a reviewer change the self-guard did not pass is red, a
   assert.equal(posted().at(-1).state, 'error');
   assert.match(
     jobs.guard,
-    /uses: ai-ecoverse\/slicc-shared-web\/\.github\/actions\/cert-self-guard@fe97ae242f8ddcc824334cad287346d7df3f0bbb\n {8}with:\n {10}approval-label: cert-review-approved\n {10}paths: \|\n {12}\.github\/workflows\/cert\*\.yml\n {12}\.github\/workflows\/cert\*\.yaml\n {12}scripts\/cert\/\*\*\n/
+    /uses: ai-ecoverse\/slicc-shared-web\/\.github\/actions\/cert-self-guard@f342d7cf558c817ce517bbbbc4cc46df6eac2f97\n {8}with:\n {10}approval-label: cert-review-approved\n {10}paths: \|\n {12}\.github\/workflows\/cert\*\.yml\n {12}\.github\/workflows\/cert\*\.yaml\n {12}scripts\/cert\/\*\*\n/
   );
   assert.match(jobs.guard, /continue-on-error: true/);
   assert.match(jobs.guard, /fetch-depth: 0/);
@@ -879,7 +879,7 @@ test("the reviewer's paths are one list: the self-guard holds exactly what plan 
   }
   assert.equal(reviewsItself([{ filename: 'src/kernel/fd-table.ts' }]), false);
   assert.equal(reviewsItself([{ filename: '.github/workflows/release.yml' }]), false);
-  assert.match(jobs.guard, /cert-self-guard@fe97ae242f8ddcc824334cad287346d7df3f0bbb\n/);
+  assert.match(jobs.guard, /cert-self-guard@f342d7cf558c817ce517bbbbc4cc46df6eac2f97\n/);
 });
 
 test('the required cert-review never waits forever: a plan or lookup that fails before its status posts an error that asks for a re-run', () => {
@@ -926,7 +926,7 @@ test('the merge group runs bios canary on its own tree, packed by main tools and
   assert.match(jobs.canary, /permissions:\n {6}contents: read\n {6}actions: read\n/);
   assert.match(
     jobs.guard,
-    /- id: override\n[^\n]*\n {8}continue-on-error: true\n {8}uses: ai-ecoverse\/slicc-shared-web\/\.github\/actions\/cert-self-guard@fe97ae242f8ddcc824334cad287346d7df3f0bbb\n {8}with:\n {10}approval-label: downstream-override\n {10}paths: \|\n {12}\*\*\n {12}\.\*\n {12}\.\*\/\*\*\n {12}\*\*\/\.\*\n {12}\*\*\/\.\*\/\*\*\n/
+    /- id: override\n[^\n]*\n {8}continue-on-error: true\n {8}uses: ai-ecoverse\/slicc-shared-web\/\.github\/actions\/cert-self-guard@f342d7cf558c817ce517bbbbc4cc46df6eac2f97\n {8}with:\n {10}approval-label: downstream-override\n {10}paths: \|\n {12}\*\*\n {12}\.\*\n {12}\.\*\/\*\*\n {12}\*\*\/\.\*\n {12}\*\*\/\.\*\/\*\*\n/
   );
   assert.match(jobs.guard, /override: \$\{\{ steps\.override\.outputs\.receipt \}\}/);
   assert.doesNotMatch(
