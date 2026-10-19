@@ -53,6 +53,7 @@ const ABSENT_NAMES = 4096;
 const FILE_HANDLES = 4096;
 const STALE: ReadonlySet<string> = new Set(['NotFoundError', 'TypeMismatchError']);
 const REPLACED_ATTEMPTS = 4;
+const RECONCILE_LISTINGS = 8;
 const EXECUTABLE = /\/node_modules\/(?:@[^/]+\/)?[^/]+\/bin\//;
 
 type Handle = FileSystemFileHandle | FileSystemDirectoryHandle;
@@ -1678,16 +1679,62 @@ export class OpfsFs implements KernelFs {
     }));
   }
 
+  private async present(paths: readonly string[]): Promise<(path: string) => Promise<boolean>> {
+    type Listing = Map<string, FileSystemHandle> | undefined | null;
+    const listed = new Map<string, Promise<Listing>>();
+    const done = new Map<string, Listing>();
+    const list = (dir: string): Promise<Listing> => {
+      const known = listed.get(dir);
+      if (known !== undefined) return known;
+      const listing = (async (): Promise<Listing> => {
+        const above = dir === '/' ? undefined : await list(parentOf(dir));
+        if (above === null) return null;
+        const handle = dir === '/' ? this.root : above?.get(baseOf(dir));
+        if (handle?.kind !== 'directory') return undefined;
+        this.calls++;
+        const children = new Map<string, FileSystemHandle>();
+        try {
+          for await (const child of (handle as FileSystemDirectoryHandle).values())
+            children.set(child.name, child);
+        } catch {
+          return null;
+        }
+        return children;
+      })().then((children) => {
+        done.set(dir, children);
+        return children;
+      });
+      listed.set(dir, listing);
+      return listing;
+    };
+    const dirs = [...new Set(paths.filter((p) => split(p).length > 0).map(parentOf))];
+    let next = 0;
+    const lister = async () => {
+      while (next < dirs.length) await list(dirs[next++] as string);
+    };
+    await Promise.all(Array.from({ length: Math.min(RECONCILE_LISTINGS, dirs.length) }, lister));
+    return async (path) => {
+      if (split(path).length === 0) return true;
+      const listing = done.get(parentOf(path));
+      if (listing === null) return this.real(path);
+      return listing?.has(baseOf(path)) === true;
+    };
+  }
+
   async reconcile(): Promise<number> {
     if (this.remote && (await this.remote.peered())) return 0;
     let removed = 0;
     const entries = await this.meta.all();
     const carried = new Set(entries.filter((e) => !e.vacated).map((e) => e.ino));
-    for (const entry of entries) {
-      if (entry.vacated && carried.has(inodeOf(entry.path))) continue;
-      const real = await this.real(entry.path);
+    const checked = entries.filter((e) => !(e.vacated && carried.has(inodeOf(e.path))));
+    const real = await this.present(
+      checked.flatMap((e) => (e.link === undefined ? [e.path] : [e.path, parentOf(e.path)]))
+    );
+    for (const entry of checked) {
       const stale =
-        entry.link === undefined ? !real : real || !(await this.real(parentOf(entry.path)));
+        entry.link === undefined
+          ? !(await real(entry.path))
+          : (await real(entry.path)) || !(await real(parentOf(entry.path)));
       if (!stale) continue;
       const seen = JSON.stringify(entry);
       await this.meta.update(entry.path, (now) =>
