@@ -11,6 +11,7 @@ const candidate = input('candidate', 'AB_CANDIDATE');
 const pnpm = input('pnpm', 'AB_PNPM');
 const pairs = Number(input('pairs', 'AB_PAIRS') || 3);
 const offline = input('offline', 'AB_OFFLINE') !== 'false';
+const serial = input('serial', 'AB_SERIAL') === 'true';
 const REF = /^[A-Za-z0-9._/-]{1,200}$/;
 const fail = (message) => {
   console.error(`install-ab: FAIL ${message}`);
@@ -67,6 +68,7 @@ const install = (name) => {
         ...process.env,
         GITHUB_STEP_SUMMARY: '',
         ...(offline ? { SLICC_INSTALL_OFFLINE: '1' } : {}),
+        ...(serial ? { SLICC_INSTALL_SERIAL: '1' } : {}),
       },
     }
   );
@@ -100,7 +102,7 @@ for (let i = 1; i <= pairs; i++) {
 
 const ratios = rows.map((r) => r.ratio);
 const table = [
-  `### Install A/B on one runner: A ${builds.A.ref} (${builds.A.sha.slice(0, 8)}), B ${builds.B.ref} (${builds.B.sha.slice(0, 8)})${pnpm ? `, wasi-pnpm ${pnpm}` : ''}${offline ? ', offline registry' : ', live registry'}`,
+  `### Install A/B on one runner: A ${builds.A.ref} (${builds.A.sha.slice(0, 8)}), B ${builds.B.ref} (${builds.B.sha.slice(0, 8)})${pnpm ? `, wasi-pnpm ${pnpm}` : ''}${offline ? ', offline registry' : ', live registry'}${serial ? ', serial pnpm' : ''}`,
   '',
   '| pair | A wall | B wall | B/A wall | A requests | B requests | B/A requests | A calls | B calls |',
   '|---|---|---|---|---|---|---|---|---|',
