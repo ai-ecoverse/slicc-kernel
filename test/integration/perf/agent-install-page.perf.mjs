@@ -37,13 +37,26 @@ function phases(ndjson, series, wall) {
 test('a cold install of bios’s agent project into /opt/agent on the OPFS root, timed per pnpm phase with the kernel’s file and OPFS counts', {
   timeout: 1_800_000,
 }, async (t) => {
-  const { page, bash } = await booted(chrome, t, { users: 'enforce' });
+  const { page, bash } = await booted(chrome, t, {
+    users: 'enforce',
+    worker: '/count/count-worker.js?k=writer',
+  });
   for (const name of ['wasm-coreutils', 'wasm-tls-engine', 'wasi-pnpm'])
     await installPackage(page, name);
   for (const file of ['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml']) {
     const text = await readFile(new URL(file, AGENT), 'utf8');
     await page.evaluate((n, x) => window.opfs.write(`opt/agent/${n}`, x), file, text);
   }
+  const peer = await page.tab();
+  await peer.goto('/');
+  await peer.until(() => typeof window.boot === 'function');
+  await peer.evaluate(() =>
+    window.secondKernel(
+      { worker: new URL('/count/count-worker.js?k=peer', location.href) },
+      'kernel'
+    )
+  );
+  assert.equal((await bash('cat /proc/sys/kernel/slicc_shared_root', { cwd: '/' })).stdout, '1\n');
   const counters = async () => {
     const reads = COUNTERS.map((c) => `cat /proc/sys/kernel/${c} 2> /dev/null || echo 0`).join(
       '; '
@@ -71,6 +84,24 @@ test('a cold install of bios’s agent project into /opt/agent on the OPFS root,
   );
   const r = { stdout };
   const wall = Date.now() - t0;
+  const ask = (pg, to) =>
+    pg.evaluate(
+      (to) =>
+        new Promise((resolve) => {
+          const c = new BroadcastChannel('second-tab-count');
+          const id = Math.random();
+          c.onmessage = ({ data }) => {
+            if (data.from === to && data.id === id) {
+              c.close();
+              resolve(data);
+            }
+          };
+          c.postMessage({ to, id });
+        }),
+      to
+    );
+  console.log(`COUNTS writer ${JSON.stringify(await ask(page, 'writer'))}`);
+  console.log(`COUNTS peer ${JSON.stringify(await ask(peer, 'peer'))}`);
   running = false;
   await sampling;
   series.push([wall, ...(await counters())]);
