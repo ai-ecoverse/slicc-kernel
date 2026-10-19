@@ -1,8 +1,9 @@
 import { SCRUB_IDLE_MS } from '../scrub-file.ts';
 import type { SealedBroker, SealedCaller } from '../sealed.ts';
-import { SESSION_EXIT } from '../sealed-session.ts';
+import { SESSION_EXIT, type SessionHead, type SessionProtocol } from '../sealed-session.ts';
 import { HEAD_MAX, sniffHttp1, substituteHead } from './sealed-http1.ts';
 import type { ScrubScope, SessionScrub } from './sealed-scrubs.ts';
+import { SMTP_LINE_MAX, SmtpClient, sniffSmtp } from './sealed-smtp.ts';
 import type { UplinkConn } from './uplink.ts';
 
 export const HEAD_IDLE_MS = 2000;
@@ -61,12 +62,29 @@ function headEnd(bytes: Uint8Array): number {
   return -1;
 }
 
-class Http1Writer {
+type Mode = 'sniff' | 'http1' | 'smtp' | 'pass';
+
+function modeOf(start: string): Mode | undefined {
+  const http = sniffHttp1(start);
+  const smtp = sniffSmtp(start);
+  if (http === 'yes') return 'http1';
+  if (smtp === 'yes') return 'smtp';
+  return http === 'no' && smtp === 'no' ? 'pass' : undefined;
+}
+
+function crlf(bytes: Uint8Array): number {
+  for (let i = 0; i + 1 < bytes.length; i++) if (bytes[i] === 13 && bytes[i + 1] === 10) return i;
+  return -1;
+}
+
+class SessionWriter {
   private buffer = new Uint8Array(0);
-  private passing = false;
+  private mode: Mode = 'sniff';
   private timer: ReturnType<typeof setTimeout> | undefined;
   private chain: Promise<void> = Promise.resolve();
   private failed: unknown;
+  private readonly session = sessionId();
+  private readonly smtp: SmtpClient;
   private readonly conn: UplinkConn;
   private readonly s: SealedSession;
   private readonly scope: ScrubScope;
@@ -74,6 +92,9 @@ class Http1Writer {
     this.conn = conn;
     this.s = s;
     this.scope = scope;
+    this.smtp = new SmtpClient((position, placeholders) =>
+      this.ask('smtp', position, placeholders)
+    );
   }
 
   write(bytes: Uint8Array): Promise<number> {
@@ -85,22 +106,80 @@ class Http1Writer {
     return run;
   }
 
+  private async ask(
+    protocol: SessionProtocol,
+    position: string,
+    placeholders: string[],
+    head?: SessionHead
+  ): Promise<Record<string, string> | undefined> {
+    const s = this.s;
+    const values = await s.broker.sessionMaterialize({
+      stamp: await s.stamp(),
+      session: this.session,
+      host: s.host,
+      port: s.port,
+      protocol,
+      position,
+      verified: s.verified,
+      handshakeAt: s.handshakeAt,
+      exit: s.exit as string,
+      placeholders,
+      ...(head ? { head } : {}),
+    });
+    return values;
+  }
+
+  private remember(values: Record<string, string>): void {
+    this.scope.add(
+      Object.entries(values).map(([placeholder, value]) => ({ name: 'sealed', value, placeholder }))
+    );
+  }
+
   private async take(bytes: Uint8Array): Promise<number> {
     if (this.failed !== undefined) throw this.failed;
-    if (this.passing) return this.conn.write(bytes);
+    if (this.mode === 'pass') return this.conn.write(bytes);
     clearTimeout(this.timer);
     const joined = new Uint8Array(this.buffer.length + bytes.length);
     joined.set(this.buffer);
     joined.set(bytes, this.buffer.length);
     this.buffer.fill(0);
     this.buffer = joined;
-    const sniff = sniffHttp1(latin1(joined.subarray(0, 8)));
-    const end = sniff === 'yes' ? headEnd(joined) : -1;
-    if (sniff === 'no' || end > HEAD_MAX || (end < 0 && joined.length > HEAD_MAX))
-      await this.release();
-    else if (end >= 0) await this.substitute(end);
-    else this.timer = setTimeout(() => this.idle(), HEAD_IDLE_MS);
+    if (this.mode === 'sniff') this.mode = modeOf(latin1(joined.subarray(0, 8))) ?? 'sniff';
+    if (this.mode === 'pass') await this.release();
+    else if (this.mode === 'http1') await this.http1();
+    else if (this.mode === 'smtp') await this.lines();
+    if (this.mode !== 'pass' && this.buffer.length > 0)
+      this.timer = setTimeout(() => this.idle(), HEAD_IDLE_MS);
     return bytes.length;
+  }
+
+  private async http1(): Promise<void> {
+    const end = headEnd(this.buffer);
+    if (end > HEAD_MAX || (end < 0 && this.buffer.length > HEAD_MAX)) await this.release();
+    else if (end >= 0) await this.substitute(end);
+  }
+
+  private async lines(): Promise<void> {
+    for (;;) {
+      const at = crlf(this.buffer);
+      if (at < 0) break;
+      if (at > SMTP_LINE_MAX) return this.release();
+      const all = this.buffer;
+      this.buffer = all.slice(at + 2);
+      const out = await this.smtp
+        .line(latin1(all.subarray(0, at)))
+        .catch(() => ({ line: latin1(all.subarray(0, at)) }));
+      all.fill(0);
+      if ('values' in out && out.values) this.remember(out.values);
+      const line = bytesOf(`${out.line}\r\n`);
+      try {
+        await writeAll(this.conn, line);
+      } finally {
+        line.fill(0);
+      }
+      if (this.smtp.done) return this.release();
+    }
+    if (this.buffer.length > SMTP_LINE_MAX) await this.release();
   }
 
   private idle(): void {
@@ -112,7 +191,7 @@ class Http1Writer {
   }
 
   private async release(): Promise<void> {
-    this.passing = true;
+    this.mode = 'pass';
     const out = this.buffer;
     this.buffer = new Uint8Array(0);
     try {
@@ -123,38 +202,15 @@ class Http1Writer {
   }
 
   private async substitute(end: number): Promise<void> {
-    this.passing = true;
+    this.mode = 'pass';
     const all = this.buffer;
     this.buffer = new Uint8Array(0);
-    const s = this.s;
-    const session = sessionId();
     const done = await substituteHead(
       latin1(all.subarray(0, end)),
-      async (position, placeholders, head) =>
-        s.broker.sessionMaterialize({
-          stamp: await s.stamp(),
-          session,
-          host: s.host,
-          port: s.port,
-          protocol: 'http1',
-          position,
-          verified: s.verified,
-          handshakeAt: s.handshakeAt,
-          exit: s.exit as string,
-          placeholders,
-          head,
-        })
+      (position, placeholders, head) => this.ask('http1', position, placeholders, head)
     ).catch(() => undefined);
     const head = done ? bytesOf(done.head) : all.subarray(0, end);
-    if (done) {
-      this.scope.add(
-        Object.entries(done.values).map(([placeholder, value]) => ({
-          name: 'sealed',
-          value,
-          placeholder,
-        }))
-      );
-    }
+    if (done) this.remember(done.values);
     try {
       await writeAll(this.conn, head);
       await writeAll(this.conn, all.subarray(end));
@@ -166,7 +222,7 @@ class Http1Writer {
 
   flushed(): Promise<void> {
     clearTimeout(this.timer);
-    this.chain = this.chain.then(() => (this.passing ? undefined : this.release()));
+    this.chain = this.chain.then(() => (this.mode === 'pass' ? undefined : this.release()));
     return this.chain;
   }
 
@@ -174,7 +230,7 @@ class Http1Writer {
     clearTimeout(this.timer);
     this.buffer.fill(0);
     this.buffer = new Uint8Array(0);
-    this.passing = true;
+    this.mode = 'pass';
   }
 }
 
@@ -187,11 +243,9 @@ class ScrubReader {
   private held = false;
   private ended = false;
   private readonly conn: UplinkConn;
-  private readonly s: SealedSession;
   private readonly scope: ScrubScope;
-  constructor(conn: UplinkConn, s: SealedSession, scope: ScrubScope) {
+  constructor(conn: UplinkConn, scope: ScrubScope) {
     this.conn = conn;
-    this.s = s;
     this.scope = scope;
   }
 
@@ -256,8 +310,8 @@ function idle(): Promise<typeof IDLE> {
 
 export function sealedConn(conn: UplinkConn, s: SealedSession): UplinkConn {
   const scope = s.broker.sessions.scope(s.pid, s.host);
-  const writer = substitutes(s) ? new Http1Writer(conn, s, scope) : undefined;
-  const reader = new ScrubReader(conn, s, scope);
+  const writer = substitutes(s) ? new SessionWriter(conn, s, scope) : undefined;
+  const reader = new ScrubReader(conn, scope);
   return {
     localAddr: conn.localAddr,
     remoteAddr: conn.remoteAddr,
