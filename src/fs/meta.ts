@@ -356,7 +356,7 @@ export class IndexedDbMeta implements MetaStore {
   }
 }
 
-export function openMeta(name: string, factory: IDBFactory): Promise<IndexedDbMeta> {
+export function openMetaDb(name: string, factory: IDBFactory): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = factory.open(name, META_VERSION);
     request.onupgradeneeded = (event) => {
@@ -364,7 +364,11 @@ export function openMeta(name: string, factory: IDBFactory): Promise<IndexedDbMe
         request.result.createObjectStore(META_STORE, { keyPath: 'path' }).createIndex('dir', 'dir');
       }
     };
-    request.onsuccess = () => resolve(new IndexedDbMeta(request.result));
+    request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
+}
+
+export async function openMeta(name: string, factory: IDBFactory): Promise<IndexedDbMeta> {
+  return new IndexedDbMeta(await openMetaDb(name, factory));
 }

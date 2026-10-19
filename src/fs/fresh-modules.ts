@@ -114,8 +114,10 @@ export class FreshModules {
         transfer?: boolean
       ) => {
         const touches = at < MAGIC.length && this.fresh.has(normalizePath(path));
+        const first =
+          at === 0 && bytes.length >= MAGIC.length ? bytes.slice(0, MAGIC.length) : undefined;
         await ranged.pwrite(path, at, bytes, transfer);
-        if (touches) await decide(path);
+        if (touches) await decide(path, first);
       };
       overrides.truncate = async (path: string, size: number) => {
         await ranged.truncate(path, size);

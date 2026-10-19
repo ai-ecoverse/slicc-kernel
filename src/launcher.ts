@@ -44,7 +44,7 @@ import {
   protectedPrefixes,
   writerTags,
 } from './fs/protect.ts';
-import type { KernelFs, UsersMode } from './fs/types.ts';
+import type { KernelFs, Peers, UsersMode } from './fs/types.ts';
 import { fsError, normalizePath } from './fs/types.ts';
 import { UNLINKED_DIR, UnlinkedKeeper, type UnlinkOwner, webLocks } from './fs/unlinked.ts';
 import { joinName, parentOf, realDir } from './fs/walk.ts';
@@ -673,9 +673,7 @@ export class Launcher {
     this.usersMode = usersMode(options.users);
     this.memories = memoriesOf(options.wasmMemories);
     this.rootFs = options.fs;
-    const peers = options.fs.peers?.();
-    this.locks = kernelLocks(options.fs.rootName, peers);
-    peers?.watch((crowded) => this.changes.foreign(crowded));
+    this.locks = kernelLocks(options.fs.rootName, this.flushingPeers(options.fs));
     this.dac = this.usersMode === 'off' ? undefined : new Dac(this.usersMode, options.onDenial);
     if (this.dac) this.dac.tagOf = (pid) => this.tagOf(pid);
     this.clipboard = new ClipboardBroker(options.clipboard, this.usersMode, undefined, (pid) =>
@@ -756,7 +754,10 @@ export class Launcher {
     this.nodes.keepsOnDisk = true;
     this.openFiles.add(this.nodes);
     options.fs.onPeer?.(() => this.flushOpen());
-    options.fs.remoteChanges?.((change) => this.rewritten(change.paths, change.trees));
+    options.fs.remoteChanges?.((change) => {
+      this.changes.flush();
+      this.rewritten(change.paths, change.trees);
+    });
     const holders = [this.held, this.openFiles];
     this.unlinked = new UnlinkedKeeper(
       fs,
@@ -1210,18 +1211,66 @@ export class Launcher {
 
   private async checkedPlan(
     req: ChildSpawnRequest,
-    { ppid, cred, scope }: { ppid: number; cred: Readonly<Cred>; scope: string },
+    ctx: { ppid: number; cred: Readonly<Cred>; scope: string },
     fds: FdTable
   ): Promise<Planned> {
-    const refused = async (err: unknown): Promise<never> => {
+    try {
+      return await this.planOrSearch(req, ctx);
+    } catch (err) {
       await fds.closeAll();
-      throw (err as { code?: unknown }).code === 'EACCES' ? new SpawnError('EACCES') : err;
+      throw err;
+    }
+  }
+
+  private async planOrSearch(
+    req: ChildSpawnRequest,
+    ctx: { ppid: number; cred: Readonly<Cred>; scope: string }
+  ): Promise<Planned> {
+    const bare = !req.file.includes('/') && !COMMAND.test(req.file);
+    try {
+      return await this.planOne(req, ctx);
+    } catch (err) {
+      const code = codeOf(err);
+      const searched = bare && req.search !== false && (code === 'ENOENT' || code === 'ENOEXEC');
+      if (!searched || (await this.commandAt(req.file, ctx.scope))) throw err;
+      const found = await this.onPath(req, ctx);
+      if (found) return found;
+      throw err;
+    }
+  }
+
+  private async onPath(
+    req: ChildSpawnRequest,
+    ctx: { ppid: number; cred: Readonly<Cred>; scope: string }
+  ): Promise<Planned | undefined> {
+    const path = req.env.PATH;
+    if (typeof path !== 'string') return undefined;
+    let denied = false;
+    for (const dir of path.split(':')) {
+      const file = dir === '' ? `./${req.file}` : `${dir.replace(/\/+$/, '')}/${req.file}`;
+      try {
+        return await this.planOne({ ...req, file }, ctx);
+      } catch (err) {
+        const code = codeOf(err);
+        if (code === 'EACCES') denied = true;
+        else if (code !== 'ENOENT' && code !== 'ENOTDIR') throw err;
+      }
+    }
+    if (denied) throw new SpawnError('EACCES');
+    return undefined;
+  }
+
+  private async planOne(
+    req: ChildSpawnRequest,
+    { ppid, cred, scope }: { ppid: number; cred: Readonly<Cred>; scope: string }
+  ): Promise<Planned> {
+    const refused = (err: unknown): never => {
+      throw codeOf(err) === 'EACCES' ? new SpawnError('EACCES') : err;
     };
     const file = await this.execFile(req.file, req.cwd, this.execGuard(cred, ppid)).catch(refused);
     const planned = await this.plan(file, req.argv, req.cwd, scope, req.argv0);
     await this.mayExec(cred, { ...req, file, pid: ppid }, planned).catch(refused);
     if (planned) return planned;
-    await fds.closeAll();
     throw new SpawnError(await this.unrunnable(file, req.cwd, scope));
   }
 
@@ -2772,13 +2821,28 @@ export class Launcher {
     return this.writers;
   }
 
+  private flushingPeers(fs: KernelFs): Peers | undefined {
+    const peers = fs.peers?.();
+    if (!peers) return undefined;
+    peers.watch((crowded) => {
+      this.changes.flush();
+      this.changes.foreign(crowded);
+    });
+    return {
+      ...peers,
+      fresh: () => {
+        this.changes.flush();
+        peers.fresh?.();
+      },
+    };
+  }
+
   private rewritten(paths: readonly string[], trees: readonly string[] = []): void {
     for (const nodes of this.openFiles) {
       for (const path of paths) nodes.rewritten(path);
       for (const tree of trees) nodes.rewrittenUnder(tree);
     }
     this.changes.publish(...paths);
-    if (trees.length > 0) this.changes.everything();
   }
 
   private async flushOpen(): Promise<void> {
@@ -2971,4 +3035,8 @@ export type { ProcessInfo, ProcessListing } from './kernel/proc-info.ts';
 
 function cronLocks(): CronLocks | undefined {
   return (globalThis as { navigator?: { locks?: CronLocks } }).navigator?.locks;
+}
+
+function codeOf(err: unknown): unknown {
+  return (err as { code?: unknown } | null)?.code;
 }

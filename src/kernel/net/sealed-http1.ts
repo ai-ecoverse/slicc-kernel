@@ -33,7 +33,7 @@ export interface Substituted {
 
 const encoder = new TextEncoder();
 
-function binary(text: string): string {
+export function binary(text: string): string {
   let out = '';
   for (const b of encoder.encode(text)) out += String.fromCharCode(b);
   return out;
@@ -66,7 +66,7 @@ function basicOf(value: string): Found['basic'] {
   }
 }
 
-function placeholdersIn(text: string): string[] {
+export function placeholdersIn(text: string): string[] {
   return [...new Set(text.match(ANY_PLACEHOLDER) ?? [])];
 }
 
@@ -84,13 +84,13 @@ function scan(lines: readonly string[]): Found[] | undefined {
   return found;
 }
 
-function replaced(text: string, values: Record<string, string>): string {
+export function replaced(text: string, values: Record<string, string>): string {
   let out = text;
   for (const [ph, value] of Object.entries(values)) out = out.split(ph).join(binary(value));
   return out;
 }
 
-function usable(values: Record<string, string> | undefined): Record<string, string> {
+export function usable(values: Record<string, string> | undefined): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [ph, value] of Object.entries(values ?? {}))
     if (encoder.encode(value).length >= MIN_VALUE) out[ph] = value;

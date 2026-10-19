@@ -12,6 +12,7 @@ import { META_DB, type MetaStore } from './fs/meta.ts';
 import { dirsChannel } from './fs/notice.ts';
 import { OpfsFs } from './fs/opfs.ts';
 import { type ProtectInit, type Protection, protectInit } from './fs/protect.ts';
+import { metadataName } from './fs/roots.ts';
 import { fsError, modeOption, type UsersMode } from './fs/types.ts';
 import { type IntegrityReply, integrityAsker } from './integrity-relay.ts';
 import type { ClipboardHook } from './kernel/clipboard.ts';
@@ -181,7 +182,19 @@ export async function inOpfs(deps: ServeDeps, root: FileSystemDirectoryHandle): 
   return (await opfs?.resolve(root).catch(() => null)) != null;
 }
 
+async function rootNamed(
+  deps: ServeDeps,
+  req: InitRequest,
+  root: FileSystemDirectoryHandle
+): Promise<InitRequest> {
+  if (req.metadata !== undefined || !req.root || !deps.rootId) return req;
+  const top = await deps.storage().catch(() => undefined);
+  const name = await metadataName(top, root, deps.rootId);
+  return name === META_DB ? req : { ...req, metadata: name };
+}
+
 export interface ServeDeps {
+  rootId?: (root: FileSystemDirectoryHandle) => Promise<string>;
   storage: () => Promise<FileSystemDirectoryHandle>;
   syncAccess?: boolean;
   createWorker: () => WasmWorkerLike;
@@ -528,6 +541,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
 
   async function init(req: InitRequest): Promise<boolean> {
     launcher = (req.root ? Promise.resolve(req.root) : deps.storage()).then(async (root) => {
+      req = await rootNamed(deps, req, root);
       const name = req.metadata ?? META_DB;
       const { meta, media } = await stores(deps, name, req.media);
       const net = remotes(port, req);

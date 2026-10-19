@@ -51,11 +51,13 @@ export class RemoteWatch {
   quiet: (() => Promise<void>) | undefined;
   crowd: ((crowded: boolean) => void) | undefined;
   private told: boolean | undefined;
+  private counted = 0;
 
   private recount(): void {
     const now = this.crowded();
-    if (now === this.told) return;
+    if (now === this.told && this.peers.size === this.counted) return;
     this.told = now;
+    this.counted = this.peers.size;
     this.crowd?.(now);
   }
 

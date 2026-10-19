@@ -44,7 +44,7 @@ export class FileChanges {
     Atomics.store(this.view, FOREIGN, on ? 1 : 0);
   }
 
-  everything(): void {
+  flush(): void {
     Atomics.add(this.view, GEN, RING_SIZE + 1);
   }
 

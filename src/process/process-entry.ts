@@ -1,6 +1,10 @@
 import { useLocalClock } from '../kernel/cpu-clock.ts';
 import {
+  JS_THREAD_EXIT,
+  JS_THREAD_INIT,
   type JsProcessInitMsg,
+  type JsThreadExitMsg,
+  type JsThreadInitMsg,
   type ProcessInitMsg,
   WASM_PROCESS_ERROR,
   WASM_PROCESS_EXIT,
@@ -25,6 +29,7 @@ export type WasiLoader = () => Promise<WasiRuntime>;
 
 export interface JsRuntime {
   runJsProcess(init: JsProcessInitMsg, port: SabPostLike): Promise<number>;
+  runJsThread?(init: JsThreadInitMsg, port: SabPostLike): Promise<number>;
 }
 
 export type JsLoader = () => Promise<JsRuntime>;
@@ -78,8 +83,21 @@ export function processEntry(
   };
   return (data) => {
     const type = (data as { type?: string } | undefined)?.type;
-    if (type !== WASM_THREAD_INIT && type !== WASM_PROCESS_INIT) return;
+    if (type !== WASM_THREAD_INIT && type !== WASM_PROCESS_INIT && type !== JS_THREAD_INIT) return;
     const refusal = sealOnce();
+    if (type === JS_THREAD_INIT) {
+      if (refusal) return failed(refusal.error);
+      js()
+        .then((m) => {
+          if (!m.runJsThread) throw new Error('this process worker runs no JS threads');
+          return m.runJsThread(data as JsThreadInitMsg, port);
+        })
+        .then(
+          (code) => port.postMessage({ type: JS_THREAD_EXIT, code } satisfies JsThreadExitMsg),
+          failed
+        );
+      return;
+    }
     const init = data as { sab?: SharedArrayBuffer; program?: { abi?: string } } | undefined;
     if (type === WASM_THREAD_INIT || init?.program?.abi !== 'js') useLocalClock(init?.sab);
     if (type === WASM_THREAD_INIT) {

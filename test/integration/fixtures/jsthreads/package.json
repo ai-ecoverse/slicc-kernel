@@ -1,0 +1,12 @@
+{
+  "name": "jsthreads",
+  "private": true,
+  "slicc": {
+    "commands": {
+      "jsthreads": {
+        "abi": "js",
+        "module": "bin/jsthreads.mjs"
+      }
+    }
+  }
+}

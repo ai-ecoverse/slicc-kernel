@@ -135,6 +135,7 @@ export type {
 } from './process/js/js-net.ts';
 export type { JsRunOptions, JsRunResult, JsRunStdio } from './process/js/js-run.ts';
 export type { JsCred, JsSyncContext, JsSyncFile } from './process/js/js-sync.ts';
+export type { JsThread, JsThreadContext, JsThreadSpawnOptions } from './process/js/js-thread.ts';
 export type { JsTermios, JsTty, JsTtySize } from './process/js/js-tty.ts';
 export type {
   JsWebSocket,

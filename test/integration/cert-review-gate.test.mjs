@@ -166,7 +166,7 @@ test('pr.mjs plan, same and lookup each end with their verdict, through the gate
   );
   const usage = await run(['pr bogus', process.execPath, tool('pr.mjs'), 'bogus']);
   assert.equal(usage.code, 2);
-  assert.match(usage.out, /^pr bogus: FAIL usage: pr\.mjs plan\|lookup\|same$/m);
+  assert.match(usage.out, /^pr bogus: FAIL usage: pr\.mjs plan\|lookup\|same\|notice$/m);
 });
 
 test('compat.mjs says FAIL when no kernel-compat run turned up, and delta, pack, record and verify each end with their verdict', async (t) => {
@@ -272,10 +272,13 @@ test('the workflows call every cert-review tool through gate.sh under its own na
     'artifacts',
     'compat',
     'delta',
+    'downstream',
     'findings',
     'pack',
     'pack',
+    'pack',
     'pr lookup',
+    'pr notice',
     'pr plan',
     'pr same',
     'record',
@@ -332,6 +335,7 @@ test("each gated workflow step fails when its tool is replaced by `true`, and re
               'GH_TOKEN',
               'GITHUB_REPOSITORY',
               'GITHUB_RUN_ID',
+              'GITHUB_SHA',
               'CERT_CONTEXT',
               'RUN_URL',
               'GH_REPO',
@@ -391,5 +395,5 @@ test("each gated workflow step fails when its tool is replaced by `true`, and re
       }
     }
   }
-  assert.equal(count, 15);
+  assert.equal(count, 18);
 });

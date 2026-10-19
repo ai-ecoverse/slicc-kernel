@@ -59,6 +59,7 @@ import {
   type SyncShared,
   syncOps,
 } from './js-sync.ts';
+import type { JsThreadContext } from './js-thread.ts';
 import { type JsTty, ttyOps } from './js-tty.ts';
 import {
   follow,
@@ -156,6 +157,7 @@ export interface JsProgramContext {
   tty: JsTty;
   fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
   exit(code?: number): never;
+  readonly thread: JsThreadContext;
   onUncaught(listener: JsStrayListener): () => void;
   onUnhandledRejection(listener: JsStrayListener): () => void;
 }
@@ -247,6 +249,7 @@ export interface ContextOptions {
   random?: (bytes: Uint8Array) => void;
   lane?: SyncCall;
   strays?: JsStrays;
+  thread: JsThreadContext;
 }
 
 const encoder = new TextEncoder();
@@ -693,9 +696,7 @@ export function createContext(o: ContextOptions): CreatedContext {
     argv: o.argv,
     env: o.env,
     pid: o.pid,
-    async ppid() {
-      return identityOf(await kernel.json({ op: 'proc-identity' }), o).ppid;
-    },
+    ppid: async () => identityOf(await kernel.json({ op: 'proc-identity' }), o).ppid,
     cwd: o.cwd,
     stdin: readable(read),
     stdout: writable(1),
@@ -743,6 +744,7 @@ export function createContext(o: ContextOptions): CreatedContext {
     websocket: websocketOp(kernel),
     tty: terminal.tty,
     exit,
+    thread: o.thread,
     onUncaught: (listener) => listen(strays.exception, listener),
     onUnhandledRejection: (listener) => listen(strays.rejection, listener),
   };

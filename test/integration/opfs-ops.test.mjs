@@ -33,8 +33,8 @@ const py = (lines) =>
 
 const N = 60;
 
-const COUNTERS =
-  "[int(open(f'/proc/sys/kernel/{n}').read()) for n in ('slicc_opfs_calls', 'slicc_opfs_ops')]";
+const CALLS = "int(open('/proc/sys/kernel/slicc_opfs_calls').read())";
+const OPS = "int(open('/proc/sys/kernel/slicc_opfs_ops').read())";
 
 const KNOWN =
   "[int(open(f'/proc/sys/kernel/{n}').read()) if os.path.exists(f'/proc/sys/kernel/{n}') else 0 for n in ('slicc_opfs_calls', 'slicc_opfs_ops')]";
@@ -56,9 +56,12 @@ test('/proc/sys/kernel/slicc_opfs_ops counts every request the root file system 
     py([
       'seen = []',
       ...steps.flatMap(([name, line]) => [
-        `a = ${COUNTERS}`,
+        'a = [None, None]',
+        `a[1] = ${OPS}`,
+        `a[0] = ${CALLS}`,
         line,
-        `b = ${COUNTERS}`,
+        `b = [${CALLS}, 0]`,
+        `b[1] = ${OPS}`,
         `seen.append('${name} %d %d' % (b[0] - a[0], b[1] - a[1]))`,
       ]),
       "print('\\n'.join(seen))",

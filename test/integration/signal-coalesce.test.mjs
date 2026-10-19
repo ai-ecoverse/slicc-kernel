@@ -54,8 +54,11 @@ const UNCAUGHT = [
   "print('survived')",
 ].join('\n');
 
-const sender = (src) =>
-  `rm -f /tmp/ready /tmp/sent; ${py(src)} & until [ -e /tmp/ready ]; do :; done; kill -USR1 $!; kill -USR1 $!; touch /tmp/sent; wait $!; echo "status $?"`;
+const SPUN =
+  'read -r -a st < /proc/$!/stat; u0=${st[13]}; while read -r -a st < /proc/$!/stat && [ $(( st[13] - u0 )) -lt 5 ]; do :; done; ';
+
+const sender = (src, spun = '') =>
+  `rm -f /tmp/ready /tmp/sent; ${py(src)} & until [ -e /tmp/ready ]; do :; done; ${spun}kill -USR1 $!; kill -USR1 $!; touch /tmp/sent; wait $!; echo "status $?"`;
 
 async function booted(t) {
   const kernel = await createNodeKernel();
@@ -78,7 +81,7 @@ test('a second SIGUSR1 sent while the first is still pending at a program spinni
   timeout: 180_000,
 }, async (t) => {
   const kernel = await booted(t);
-  const r = await kernel.run(['bash', '-c', sender(SPINNING)], { cwd: '/' });
+  const r = await kernel.run(['bash', '-c', sender(SPINNING, SPUN)], { cwd: '/' });
   assert.equal(r.stderr, '');
   assert.equal(r.stdout, 'runs 1\nstatus 0\n');
 });

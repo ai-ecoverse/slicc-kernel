@@ -11,6 +11,7 @@ import {
   RemoteWatch,
 } from './remote.ts';
 import {
+  type CopyOptions,
   type FsStat,
   fsError,
   inodeOf,
@@ -1677,10 +1678,11 @@ export class OpfsFs implements KernelFs {
   }
 
   async settledRename(path: unknown): Promise<void> {
-    if (this.renamingDirs.size === 0 || typeof path !== 'string') return;
+    if ((this.renamingDirs.size === 0 && this.copying.size === 0) || typeof path !== 'string')
+      return;
     const at = normalizePath(path);
     for (let real: string | undefined; ; ) {
-      const busy = this.renameAt(at) ?? (real === undefined ? undefined : this.renameAt(real));
+      const busy = this.busyAt(at) ?? (real === undefined ? undefined : this.busyAt(real));
       if (busy) {
         await busy.done;
         continue;
@@ -1690,6 +1692,66 @@ export class OpfsFs implements KernelFs {
       real = resolvePath(parent, baseOf(at));
       if (real === at) return;
     }
+  }
+
+  private busyAt(at: string): { done: Promise<void> } | undefined {
+    return this.renameAt(at) ?? this.copying.get(at);
+  }
+
+  private readonly copying = new Map<string, { done: Promise<void> }>();
+
+  async copyFile(from: string, to: string, options: CopyOptions): Promise<void> {
+    const source = await this.locate(from, true);
+    if (source.handle?.kind !== 'file') throw fsError('EINVAL', `${from}: not a regular file`);
+    const [entry] = await this.meta.get([source.path]);
+    if (entry?.fifo || entry?.socket) throw fsError('EINVAL', `${from}: not a regular file`);
+    const parent = await this.locate(parentOf(to), true);
+    if (parent.handle?.kind !== 'directory') throw fsError('ENOTDIR', to);
+    const destination = resolvePath(parent.path, baseOf(to));
+    if (destination === source.path) throw fsError('EINVAL', `${from}: copied onto itself`);
+    const file = await this.reading(source.path, (handle) => handle.getFile());
+    const { promise, resolve } = Promise.withResolvers<void>();
+    while (this.copying.has(destination)) await this.copying.get(destination)?.done;
+    this.copying.set(destination, { done: promise });
+    try {
+      await this.copyInto(file, destination, to, options);
+    } finally {
+      this.copying.delete(destination);
+      resolve();
+    }
+  }
+
+  private async copyInto(file: File, destination: string, to: string, options: CopyOptions) {
+    let created = false;
+    if (options.exclusive) {
+      await this.createExclusive(destination, options.owner);
+      created = true;
+    }
+    let target = destination;
+    let writable: FileSystemWritableFileStream | undefined;
+    let handle: FileSystemFileHandle | undefined;
+    try {
+      const [made, existed, at] = await this.fileFor(destination);
+      handle = made;
+      target = at;
+      if (!existed && !created) {
+        created = true;
+        await this.stampNew(target, options.owner, false);
+      }
+      const [entry] = await this.meta.get([target]);
+      if (entry?.fifo || entry?.socket) throw fsError('ENXIO', to);
+      this.wrote(handle);
+      writable = await handle.createWritable();
+      await writable.write(file);
+      await writable.close();
+    } catch (err) {
+      await writable?.abort().catch(() => undefined);
+      if (created) await this.rm(target, { file: true }).catch(() => undefined);
+      throw translate(err, to, 'commit', false);
+    } finally {
+      if (handle) this.wrote(handle);
+    }
+    this.committed(target);
   }
 
   private renameAt(at: string): { done: Promise<void> } | undefined {
@@ -1965,6 +2027,7 @@ const READS = [
   'readVersioned',
 ] as const;
 const WRITES = [
+  'copyFile',
   'writeFile',
   'pwrite',
   'truncate',
