@@ -19,6 +19,9 @@ export class SwitchConn implements UplinkConn {
   get remoteAddr(): string {
     return this.raw.remoteAddr;
   }
+  get exit(): string | undefined {
+    return this.raw.exit;
+  }
   get upgraded(): boolean {
     return this.switching || this.secure !== undefined;
   }
@@ -90,6 +93,7 @@ export class SwitchConn implements UplinkConn {
     const view: UplinkConn = {
       localAddr: this.raw.localAddr,
       remoteAddr: this.raw.remoteAddr,
+      ...(this.raw.exit === undefined ? {} : { exit: this.raw.exit }),
       read: () => this.rawRead(),
       write: (bytes) => this.raw.write(bytes),
       closeWrite: () => this.raw.closeWrite(),

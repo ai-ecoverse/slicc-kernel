@@ -1854,6 +1854,7 @@ export class Launcher {
       this.stopped.delete(pid);
       this.processes.delete(pid);
       this.scrubs.delete(pid);
+      this.sealed.sessions.drop(pid);
       if (this.processes.size === 0) {
         clearInterval(this.sampler);
         this.sampler = undefined;

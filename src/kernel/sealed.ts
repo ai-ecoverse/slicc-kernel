@@ -2,6 +2,7 @@ import type { UsersMode } from '../fs/types.ts';
 import type { Cred } from './cred.ts';
 import { isStrings, stringRecord, TicketBook } from './exec-ticket.ts';
 import { KernelError, type OpenAccess, OpenFile, type PollState } from './fd-table.ts';
+import { SessionScrubs } from './net/sealed-scrubs.ts';
 import {
   type SessionFields,
   sessionAskable,
@@ -242,6 +243,7 @@ export class SealedBroker {
   readonly timeoutMs: number;
   readonly tagOf: (pid: number) => string | undefined;
   readonly tickets = new TicketBook();
+  readonly sessions = new SessionScrubs();
   userOf: (uid: number) => Promise<string | undefined> = async () => undefined;
 
   constructor(
