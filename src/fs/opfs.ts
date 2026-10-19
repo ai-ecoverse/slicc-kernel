@@ -64,6 +64,8 @@ interface MovableHandle {
 
 const RENAMES = '/.slicc-renames';
 
+type Copies = Map<string, { before: number; made: FileSystemFileHandle }>;
+
 function movable(handle: Handle): boolean {
   return typeof (handle as Handle & MovableHandle).move === 'function';
 }
@@ -1564,14 +1566,14 @@ export class OpfsFs implements KernelFs {
     const staged = resolvePath(parent.path, staging);
     const place = async () => {
       this.forget(destination);
-      const timed = await this.explicitTimes(source.path);
+      const copies: Copies = new Map();
       const first = copying ? await this.intend({ from: source.path, to: staged }) : undefined;
       const second =
         copying && swap
           ? await this.intend({ from: staged, to: destination, replace: true })
           : undefined;
       const moved = await this.replacingTarget(targetStat !== null, () =>
-        this.place(source.handle as Handle, dir, staging)
+        this.place(source.handle as Handle, dir, staging, copies)
       ).catch(async (err) => {
         if (first) await this.rollBack(staged, source.path, [first, second]);
         throw err;
@@ -1585,15 +1587,13 @@ export class OpfsFs implements KernelFs {
         await this.meta.update(source.path, () => left);
       }
       if (first) await this.meta.update(first, () => undefined);
-      let copied = !moved;
       if (swap) {
         const hidden = await dir.getDirectoryHandle(staging);
-        const placed = await this.place(hidden, dir, name);
+        const placed = await this.place(hidden, dir, name, copies);
         if (!placed) await dir.removeEntry(staging, { recursive: true });
-        copied ||= !placed;
       }
       if (second) await this.meta.update(second, () => undefined);
-      if (copied) await this.restamp(destination, timed);
+      await this.restamp(destination, copies);
       this.changed(source.path, destination);
       this.touch(Date.now(), parentOf(source.path), parent.path);
     };
@@ -1724,24 +1724,23 @@ export class OpfsFs implements KernelFs {
     return handle.kind === 'file' ? (await this.snapshot(handle)).lastModified : 0;
   }
 
-  private async explicitTimes(path: string): Promise<string[]> {
-    const timed: string[] = [];
-    for (const entry of await this.meta.under(path)) {
-      if (entry.mtimeFor === undefined || entry.link !== undefined) continue;
-      const current = await this.modified(entry.path).catch(() => undefined);
-      if (current === entry.mtimeFor) timed.push(entry.path.slice(path.length));
-    }
-    return timed;
-  }
-
-  private async restamp(path: string, timed: string[]): Promise<void> {
-    for (const rest of timed) {
-      const mtimeFor = await this.modified(path + rest);
+  private async restamp(path: string, copies: Copies): Promise<void> {
+    if (copies.size === 0) return;
+    const copied = [...copies];
+    const entries = await this.meta.get(copied.map(([rest]) => path + rest));
+    for (const [i, [rest, { before, made }]] of copied.entries()) {
+      if (entries[i]?.mtimeFor !== before) continue;
+      const mtimeFor = (await this.io(made.getFile())).lastModified;
       await this.meta.update(path + rest, (entry) => entry && { ...entry, mtimeFor });
     }
   }
 
-  private async place(handle: Handle, dir: FileSystemDirectoryHandle, name: string) {
+  private async place(
+    handle: Handle,
+    dir: FileSystemDirectoryHandle,
+    name: string,
+    copies?: Copies
+  ) {
     const move = (handle as Handle & MovableHandle).move;
     if (move) this.others++;
     const moved = await move?.call(handle, dir, name).then(
@@ -1751,7 +1750,7 @@ export class OpfsFs implements KernelFs {
     if (moved) return true;
     const before = this.fileMoves;
     try {
-      await this.copy(handle, dir, name);
+      await this.copy(handle, dir, name, copies);
     } catch (err) {
       if (handle.kind === 'directory' && this.fileMoves === before) {
         await this.io(dir.removeEntry(name, { recursive: true }));
@@ -1763,7 +1762,13 @@ export class OpfsFs implements KernelFs {
 
   private fileMoves = 0;
 
-  private async copy(handle: Handle, dir: FileSystemDirectoryHandle, name: string): Promise<void> {
+  private async copy(
+    handle: Handle,
+    dir: FileSystemDirectoryHandle,
+    name: string,
+    copies?: Copies,
+    rest = ''
+  ): Promise<void> {
     if (handle.kind === 'file' && movable(handle)) {
       this.others++;
       const moved = await (handle as Handle & MovableHandle).move?.(dir, name).then(
@@ -1778,13 +1783,17 @@ export class OpfsFs implements KernelFs {
     if (handle.kind === 'file') {
       const made = await this.io(dir.getFileHandle(name, { create: true }));
       const writable = await this.io(made.createWritable());
-      await writable.write(await this.io(handle.getFile()));
+      const file = await this.io(handle.getFile());
+      await writable.write(file);
       await writable.close();
+      copies?.set(rest, { before: copies.get(rest)?.before ?? file.lastModified, made });
       return;
     }
     const target = await this.io(dir.getDirectoryHandle(name, { create: true }));
     this.others++;
-    for await (const child of handle.values()) await this.copy(child, target, child.name);
+    for await (const child of handle.values()) {
+      await this.copy(child, target, child.name, copies, `${rest}/${child.name}`);
+    }
   }
 
   async symlink(target: string, path: string, owner?: NewOwner): Promise<void> {
