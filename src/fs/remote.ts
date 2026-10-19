@@ -192,7 +192,7 @@ export class RemoteWatch {
     let left = false;
     for (const tab of new Set([...this.others.keys(), ...this.peers])) {
       if (!held.has(this.lockOf(tab))) {
-        left ||= this.peers.delete(tab);
+        if (this.peers.delete(tab)) left = true;
         this.others.delete(tab);
       }
     }

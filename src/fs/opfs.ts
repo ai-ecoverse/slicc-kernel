@@ -1732,7 +1732,7 @@ export class OpfsFs implements KernelFs {
           (moved) => ({
             ...occupied(moved),
             ...root,
-            ino: occupied(moved).ino ?? root.ino,
+            ino: occupied(moved).ino ?? root?.ino ?? inodeOf(from),
             path: to,
           }),
           undefined,

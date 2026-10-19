@@ -25,7 +25,7 @@ export interface MetaEntry {
     at: number;
     replace?: true;
     lock?: string;
-    root: { ino: number; uid?: number; gid?: number; mode?: number };
+    root?: { ino: number; uid?: number; gid?: number; mode?: number };
   };
 }
 
