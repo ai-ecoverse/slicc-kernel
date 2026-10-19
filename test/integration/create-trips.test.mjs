@@ -142,6 +142,7 @@ test('a WASI program creating files and directories asks the kernel for its umas
     ],
     ['mkdir', 0.1, ["os.mkdir(f'/tmp/cu/TAG-d{i}')"]],
   ];
+  await run('w', 0, rows[0][2]);
   const seen = [];
   for (const [name, most, body] of rows) {
     const per = ((await run('a', N, body)) - (await run('b', 0, body))) / N;
