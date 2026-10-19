@@ -148,11 +148,11 @@ jobs:
           ACTION: ${{ github.event.action }}
           LABEL: ${{ github.event.label.name }}
           LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
-          DRAFT: ${{ github.event.pull_request.draft }}
+          PR_DRAFT: ${{ github.event.pull_request.draft }}
           GUARD: ${{ needs.guard.outputs.status }}
         run: |
           tools/cert-review/gate.sh 'pr plan' node tools/cert-review/pr.mjs plan --repo "$GITHUB_REPOSITORY" --pr "$PR" --head "$HEAD_SHA" \
-            --action "$ACTION" --label "$LABEL" --labels "$LABELS" --draft "$DRAFT" --run "$GITHUB_RUN_ID" --context "$CERT_CONTEXT" \
+            --action "$ACTION" --label "$LABEL" --labels "$LABELS" --run "$GITHUB_RUN_ID" --context "$CERT_CONTEXT" \
             --guard "$GUARD" --approval cert-review-approved
 
       - id: versions

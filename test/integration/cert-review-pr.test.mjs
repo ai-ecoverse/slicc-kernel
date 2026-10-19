@@ -382,8 +382,10 @@ test('the plan reviews every non-draft behaviour change, records a skip as not b
     ['--action', 'opened', '--labels', '', '--draft', 'true'],
     ['--action', 'synchronize', '--labels', ''],
   ]) {
+    const count = statuses().length;
     const waiting = await plan(extra);
     assert.match(waiting.out, /go=false/, extra.join(' '));
+    assert.equal(statuses().length, count + 1, extra.join(' '));
     assert.equal(statuses().at(-1).state, 'failure');
     assert.match(
       statuses().at(-1).description,
@@ -548,6 +550,9 @@ test("the workflow: same-repo non-draft PRs review the merge ref with main's own
     workflow,
     /\(\(github\.event\.action == 'labeled' \|\| github\.event\.action == 'unlabeled'\) && github\.event\.label\.name != 'cert-review-approved'\) && format\('cert-review-pr-noop-\{0\}', github\.run_id\)/
   );
+  assert.match(jobs.plan, /PR_DRAFT: \$\{\{ github\.event\.pull_request\.draft \}\}/);
+  assert.doesNotMatch(jobs.plan, /--draft/);
+  assert.doesNotMatch(workflow, /merge-ok/);
   assert.match(
     jobs.plan,
     /needs: guard\n {4}if: \$\{\{ !cancelled\(\) && github\.event_name == 'pull_request' && github\.event\.pull_request\.head\.repo\.full_name == github\.repository \}\}/

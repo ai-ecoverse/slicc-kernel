@@ -20,7 +20,7 @@ const { positionals, values } = parseArgs({
     action: { type: 'string', default: '' },
     label: { type: 'string', default: '' },
     labels: { type: 'string', default: '' },
-    draft: { type: 'string', default: '' },
+    draft: { type: 'string', default: process.env.PR_DRAFT ?? '' },
     base: { type: 'string', default: '' },
     run: { type: 'string', default: '' },
     context: { type: 'string', default: 'cert-review' },
@@ -111,10 +111,6 @@ async function plan() {
       `#${values.pr}: the certification self-guard says ${values.guard || 'nothing'}: not reviewed`
     );
     return output({ go: 'false', behaviour: behaviour.join(','), self: String(self) });
-  }
-  if (label === approval && !self) {
-    summary(`#${values.pr} doesn't change the reviewer: ${action} ${label} changes nothing`);
-    return output({ go: 'false', behaviour: behaviour.join(','), self: 'false' });
   }
   if (behaviour.length === 0) {
     await status(
