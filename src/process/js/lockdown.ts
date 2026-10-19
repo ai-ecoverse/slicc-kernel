@@ -3,13 +3,10 @@ export const BLOCKED_GLOBALS: readonly string[] = [
   'WebSocketStream',
   'WebTransport',
   'EventSource',
-  'importScripts',
   'indexedDB',
   'caches',
   'cookieStore',
-  'Worker',
   'SharedWorker',
-  'postMessage',
   'close',
   'webkitRequestFileSystem',
   'webkitRequestFileSystemSync',
@@ -27,7 +24,14 @@ export const BLOCKED_NAVIGATOR: readonly string[] = [
   'serial',
 ];
 
-export const OPEN_SLOTS: readonly string[] = ['fetch', 'WebSocket', 'BroadcastChannel'];
+export const OPEN_SLOTS: readonly string[] = [
+  'fetch',
+  'WebSocket',
+  'BroadcastChannel',
+  'importScripts',
+  'Worker',
+  'postMessage',
+];
 
 function chain(target: object): object[] {
   const out: object[] = [];
