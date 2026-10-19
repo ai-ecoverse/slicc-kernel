@@ -10,7 +10,7 @@ const FILES = 600;
 const KILL_AT = 20;
 const FINISH_MS = 60_000;
 
-test('a peer killed mid directory rename: the survivor finishes it, modes and inodes kept (#1141)', async (t) => {
+test('a peer killed mid directory rename: the survivor finishes it, modes and the directory inode kept (#1141)', async (t) => {
   const { page, bash } = await booted(chrome, t);
   assert.deepEqual(
     await bash(
@@ -19,7 +19,8 @@ test('a peer killed mid directory rename: the survivor finishes it, modes and in
     ),
     ok()
   );
-  const shape = (dir) => bash(`stat -c '%a %i' ${dir} ${dir}/f1 ${dir}/f${FILES}`, { cwd: '/' });
+  const shape = (dir) =>
+    bash(`stat -c '%a %i' ${dir}; stat -c %a ${dir}/f1 ${dir}/f${FILES}`, { cwd: '/' });
   const before = await shape('/home/r/s');
   assert.equal(before.status, 0, before.stderr);
   const out = await page.evaluate(

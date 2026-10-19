@@ -63,12 +63,6 @@ interface MovableHandle {
   move?(parent: FileSystemDirectoryHandle, name: string): Promise<void>;
 }
 
-function keepInode(entry: MetaEntry): MetaEntry {
-  return entry.ino === undefined && entry.link === undefined
-    ? { ...entry, ino: inodeOf(entry.path) }
-    : entry;
-}
-
 const RENAMES = '/.slicc-renames';
 const RENAME_LOCK = 'slicc-rename:';
 
@@ -1597,7 +1591,7 @@ export class OpfsFs implements KernelFs {
       });
       if (swap) await this.rm(destination, { recursive: true });
       if (second) await this.intend({ from: staged, to: destination, root, ...owned }, second);
-      await this.meta.move(source.path, destination, carry, left, keepInode);
+      await this.meta.move(source.path, destination, carry, left);
       this.movePending(source.path, destination);
       if (!moved) {
         await this.rm(source.path, { recursive: true });
@@ -1735,8 +1729,7 @@ export class OpfsFs implements KernelFs {
             ino: occupied(moved).ino ?? root?.ino ?? inodeOf(from),
             path: to,
           }),
-          undefined,
-          keepInode
+          undefined
         );
       }
       await this.meta.update(entry.path, () => undefined);
