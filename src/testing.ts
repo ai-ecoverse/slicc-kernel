@@ -14,6 +14,11 @@ import {
 } from './kernel/net/uplink.ts';
 
 export { type CronClock, type FakeCronClock, fakeCronClock } from './cron/clock.ts';
+export {
+  setTestSyscallHook,
+  type TestSyscall,
+  type TestSyscallHook,
+} from './kernel/test-hooks.ts';
 export type {
   NetworkUplink,
   ResolveAnswer,

@@ -81,6 +81,7 @@ import {
 import { KernelSocket, LoopbackNet } from './socket.ts';
 import { socketNames } from './socket-nodes.ts';
 import { SOCKET_OPS, type SocketSyscall, socketSyscall } from './socket-syscalls.ts';
+import { testSyscallHook } from './test-hooks.ts';
 import { repeating } from './timer.ts';
 import type { KernelTty, Termios } from './tty.ts';
 import { isDatagram } from './unix-dgram.ts';
@@ -947,6 +948,8 @@ export class WasmProcess {
     cancelled?: AbortSignal,
     block?: () => void
   ): Promise<SyncFsResult> {
+    const hook = testSyscallHook();
+    if (hook) await hook({ pid: this.pid, op: req.op });
     this.options.onSyscall?.(req);
     this.calls += 1;
     const started = performance.now();
