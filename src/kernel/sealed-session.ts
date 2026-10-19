@@ -20,6 +20,13 @@ export interface SessionHead {
   path: string;
 }
 
+export interface SessionScram {
+  clientFirstBare: string;
+  serverFirst: string;
+  clientFinalBare: string;
+  proof: string;
+}
+
 export interface SessionFields {
   stamp: SealedCaller;
   session: string;
@@ -30,14 +37,15 @@ export interface SessionFields {
   verified: boolean;
   handshakeAt: number;
   exit: string;
-  placeholders: string[];
+  placeholders?: string[];
   head?: SessionHead;
+  scram?: SessionScram;
 }
 
 const POSITIONS: Readonly<Record<SessionProtocol, (position: string) => boolean>> = {
   http1: (position) => HEADER.test(position),
   smtp: (position) => position === 'auth-plain' || position === 'auth-login',
-  pg: (position) => position === 'password-cleartext',
+  pg: (position) => position === 'password-cleartext' || position === 'scram-sha-256',
 };
 
 export function boundHost(servername: string): string {
@@ -65,6 +73,17 @@ function placeholdersOk(list: unknown): boolean {
   );
 }
 
+const SCRAM_TEXT = /^[\x21-\x7e]{1,1024}$/;
+
+function scramOk(f: SessionFields): boolean {
+  if (f.position !== 'scram-sha-256')
+    return f.scram === undefined && placeholdersOk(f.placeholders);
+  const x = f.scram;
+  if (f.placeholders !== undefined || typeof x !== 'object' || x === null) return false;
+  const texts = [x.clientFirstBare, x.serverFirst, x.clientFinalBare, x.proof];
+  return texts.every((t) => typeof t === 'string' && SCRAM_TEXT.test(t));
+}
+
 function hostOk(host: unknown): boolean {
   return typeof host === 'string' && HOST.test(host) && boundHost(host) === host;
 }
@@ -77,12 +96,7 @@ export function sessionAskable(f: SessionFields, now: number): boolean {
   if (!Number.isInteger(f.port) || f.port < 1 || f.port > 65535) return false;
   const age = now - f.handshakeAt;
   if (!Number.isFinite(age) || age < 0 || age > SESSION_WINDOW_MS) return false;
-  return (
-    typeof f.exit === 'string' &&
-    SESSION_EXIT.test(f.exit) &&
-    placeholdersOk(f.placeholders) &&
-    headOk(f)
-  );
+  return typeof f.exit === 'string' && SESSION_EXIT.test(f.exit) && scramOk(f) && headOk(f);
 }
 
 export function sessionRequest(f: SessionFields) {
@@ -99,20 +113,33 @@ export function sessionRequest(f: SessionFields) {
     verified: true,
     handshakeAt: f.handshakeAt,
     exit: f.exit,
-    placeholders: [...f.placeholders],
+    ...(f.placeholders ? { placeholders: [...f.placeholders] } : {}),
     ...(f.head ? { head: { method: f.head.method, path: f.head.path } } : {}),
+    ...(f.scram
+      ? {
+          scram: {
+            clientFirstBare: f.scram.clientFirstBare,
+            serverFirst: f.scram.serverFirst,
+            clientFinalBare: f.scram.clientFinalBare,
+            proof: f.scram.proof,
+          },
+        }
+      : {}),
   };
 }
 
 export function sessionValues(
   reply: unknown,
-  asked: readonly string[]
+  asked: readonly string[] | undefined
 ): Record<string, string> | undefined {
   if (typeof reply !== 'object' || reply === null || Array.isArray(reply)) return undefined;
   const { error, values } = reply as { error?: unknown; values?: unknown };
   if (error !== undefined || typeof values !== 'object' || values === null) return undefined;
   const out: Record<string, string> = {};
-  for (const ph of asked) {
+  const keys = Object.keys(values);
+  const wanted =
+    asked ?? (keys.length === 1 && SESSION_PLACEHOLDER.test(keys[0] as string) ? keys : []);
+  for (const ph of wanted) {
     const value = (values as Record<string, unknown>)[ph];
     if (typeof value === 'string' && value.length > 0 && !UNSAFE.test(value)) out[ph] = value;
   }

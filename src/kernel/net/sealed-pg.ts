@@ -1,12 +1,12 @@
+import type { SessionScram } from '../sealed-session.ts';
 import { SESSION_PLACEHOLDERS } from '../sealed-session.ts';
 import { placeholdersIn, replaced, usable } from './sealed-http1.ts';
+import { base64Of, exchangeOf, sameBytes, saslprep, scramKeys } from './sealed-scram.ts';
 
 export const PG_MESSAGE_MAX = 16 * 1024;
 
 const PROTOCOL_3 = 0x00030000;
 const CLEARTEXT = 3;
-
-export type PgAsk = (placeholders: string[]) => Promise<Record<string, string> | undefined>;
 
 function int32(bytes: Uint8Array, at: number): number {
   return (
@@ -25,45 +25,110 @@ export function sniffPg(start: string): 'yes' | 'no' | 'more' {
   return length >= 8 && length <= PG_MESSAGE_MAX && int32(bytes, 4) === PROTOCOL_3 ? 'yes' : 'no';
 }
 
+const PLUS = 'SCRAM-SHA-256-PLUS';
+const SASL = 10;
+const SASL_CONTINUE = 11;
+const SASL_FINAL = 12;
+
+function latin(bytes: Uint8Array): string {
+  let out = '';
+  for (const b of bytes) out += String.fromCharCode(b);
+  return out;
+}
+
+export interface PgExpect {
+  real: string;
+  fake: string;
+}
+
 export class PgServer {
   private buffer = new Uint8Array(0);
   private skip = 0;
-  private lost = false;
   cleartext = false;
+  sasl = false;
+  serverFirst: string | undefined;
+  expect: PgExpect | undefined;
+  failed = false;
+  private lost = false;
 
-  feed(bytes: Uint8Array): void {
-    if (this.lost) return;
+  private auth(message: Uint8Array): Uint8Array {
+    const code = message.length >= 9 ? int32(message, 5) : -1;
+    this.cleartext = message.length === 9 && code === CLEARTEXT;
+    if (code === SASL) return this.mechanisms(message);
+    else if (code === SASL_CONTINUE) this.serverFirst = latin(message.subarray(9));
+    else if (code === SASL_FINAL) this.final(message);
+    return message;
+  }
+
+  private mechanisms(message: Uint8Array): Uint8Array {
+    this.sasl = true;
+    const names = latin(message.subarray(9))
+      .split('\0')
+      .filter((n) => n !== '' && n !== PLUS);
+    return frame(0x52, `${latin(message.subarray(5, 9))}${names.map((n) => `${n}\0`).join('')}\0`);
+  }
+
+  private final(message: Uint8Array): void {
+    const expect = this.expect;
+    if (!expect) return;
+    this.expect = undefined;
+    const data = latin(message.subarray(9));
+    if (data !== expect.real || expect.fake.length !== expect.real.length) {
+      this.failed = true;
+      return;
+    }
+    for (let i = 0; i < expect.fake.length; i++) message[9 + i] = expect.fake.charCodeAt(i);
+  }
+
+  private lose(): void {
+    this.lost = true;
+    this.cleartext = false;
+    this.sasl = false;
+    if (this.expect) this.failed = true;
+    this.expect = undefined;
+  }
+
+  filter(bytes: Uint8Array): Uint8Array {
+    if (this.lost) return bytes;
     const data = new Uint8Array(this.buffer.length + bytes.length);
     data.set(this.buffer);
     data.set(bytes, this.buffer.length);
+    const out: Uint8Array[] = [];
     let at = 0;
     for (;;) {
       const left = data.length - at;
       if (this.skip > 0) {
         const n = Math.min(this.skip, left);
+        out.push(data.subarray(at, at + n));
         this.skip -= n;
         at += n;
         if (this.skip > 0) break;
         continue;
       }
       if (left < 5) break;
-      const type = data[at] as number;
       const whole = 1 + int32(data, at + 1);
-      if (whole < 5 || (type === 0x52 && whole > PG_MESSAGE_MAX)) {
-        this.lost = true;
-        this.cleartext = false;
-        this.buffer = new Uint8Array(0);
-        return;
+      if (whole < 5 || (data[at] === 0x52 && whole > PG_MESSAGE_MAX)) {
+        this.lose();
+        out.push(data.subarray(at));
+        at = data.length;
+        break;
       }
-      if (type !== 0x52) {
+      if (data[at] !== 0x52) {
         this.skip = whole;
         continue;
       }
       if (left < whole) break;
-      this.cleartext = whole === 9 && int32(data, at + 5) === CLEARTEXT;
+      out.push(this.auth(data.slice(at, at + whole)));
       at += whole;
     }
     this.buffer = data.slice(at);
+    const joined = new Uint8Array(out.reduce((n, b) => n + b.length, 0));
+    let to = 0;
+    for (const b of out) {
+      joined.set(b, to);
+      to += b.length;
+    }
+    return joined;
   }
 }
 
@@ -89,22 +154,83 @@ export function pgLength(bytes: Uint8Array, started: boolean): number | undefine
   return started ? 1 + length : length;
 }
 
-export async function pgPassword(
-  message: Uint8Array,
-  server: PgServer,
-  ask: PgAsk
-): Promise<PgFrame> {
-  if (message[0] !== 0x70 || !server.cleartext) return { bytes: message, done: true };
-  server.cleartext = false;
-  let body = '';
-  for (const b of message.subarray(5)) body += String.fromCharCode(b);
+export interface PgAsks {
+  cleartext(placeholders: string[]): Promise<Record<string, string> | undefined>;
+  scram(scram: SessionScram): Promise<Record<string, string> | undefined>;
+}
+
+const MECHANISMS = new Set(['SCRAM-SHA-256']);
+
+async function cleartext(message: Uint8Array, asks: PgAsks): Promise<PgFrame> {
+  const body = latin(message.subarray(5));
   if (!body.endsWith('\0') || body.indexOf('\0') !== body.length - 1)
     return { bytes: message, done: true };
   const password = body.slice(0, -1);
   const placeholders = placeholdersIn(password);
   if (placeholders.length === 0 || placeholders.length > SESSION_PLACEHOLDERS)
     return { bytes: message, done: true };
-  const values = usable(await ask(placeholders));
+  const values = usable(await asks.cleartext(placeholders));
   if (Object.keys(values).length === 0) return { bytes: message, done: true };
   return { bytes: frame(0x70, `${replaced(password, values)}\0`), values, done: true };
+}
+
+function initial(message: Uint8Array): string | undefined {
+  const body = latin(message.subarray(5));
+  const nul = body.indexOf('\0');
+  if (nul < 0 || !MECHANISMS.has(body.slice(0, nul)) || body.length < nul + 5) return undefined;
+  const data = message.subarray(5 + nul + 5);
+  return int32(message, 5 + nul + 1) === data.length ? latin(data) : undefined;
+}
+
+export class PgClient {
+  private clientFirst: string | undefined;
+  private readonly server: PgServer;
+  private readonly asks: PgAsks;
+  constructor(server: PgServer, asks: PgAsks) {
+    this.server = server;
+    this.asks = asks;
+  }
+
+  async message(message: Uint8Array): Promise<PgFrame> {
+    const server = this.server;
+    if (message[0] !== 0x70) return { bytes: message, done: true };
+    if (server.cleartext) {
+      server.cleartext = false;
+      return cleartext(message, this.asks);
+    }
+    if (server.sasl && this.clientFirst === undefined) {
+      this.clientFirst = initial(message);
+      return { bytes: message, done: this.clientFirst === undefined };
+    }
+    if (this.clientFirst !== undefined && server.serverFirst !== undefined)
+      return this.final(message, this.clientFirst, server.serverFirst);
+    return { bytes: message, done: true };
+  }
+
+  private async final(message: Uint8Array, first: string, serverFirst: string): Promise<PgFrame> {
+    const got = exchangeOf(first, serverFirst, latin(message.subarray(5)));
+    if (!got) return { bytes: message, done: true };
+    const x = got.exchange;
+    const values = usable(
+      await this.asks.scram({
+        clientFirstBare: x.clientFirstBare,
+        serverFirst: x.serverFirst,
+        clientFinalBare: x.clientFinalBare,
+        proof: base64Of(got.proof),
+      })
+    );
+    const [entry, ...more] = Object.entries(values);
+    if (!entry || more.length > 0) return { bytes: message, done: true };
+    const [placeholder, value] = entry;
+    const fake = await scramKeys(placeholder, x);
+    if (!sameBytes(fake.proof, got.proof)) return { bytes: message, done: true };
+    const real = await scramKeys(saslprep(value), x);
+    this.server.expect = {
+      real: `v=${base64Of(real.serverSignature)}`,
+      fake: `v=${base64Of(fake.serverSignature)}`,
+    };
+    const bytes = frame(0x70, `${x.clientFinalBare},p=${base64Of(real.proof)}`);
+    for (const k of [real.proof, real.serverSignature, fake.proof, fake.serverSignature]) k.fill(0);
+    return { bytes, values, done: true };
+  }
 }

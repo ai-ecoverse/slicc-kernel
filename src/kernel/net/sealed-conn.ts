@@ -1,8 +1,14 @@
+import { KernelError } from '../fd-table.ts';
 import { SCRUB_IDLE_MS } from '../scrub-file.ts';
 import type { SealedBroker, SealedCaller } from '../sealed.ts';
-import { SESSION_EXIT, type SessionHead, type SessionProtocol } from '../sealed-session.ts';
+import {
+  SESSION_EXIT,
+  type SessionHead,
+  type SessionProtocol,
+  type SessionScram,
+} from '../sealed-session.ts';
 import { HEAD_MAX, sniffHttp1, substituteHead } from './sealed-http1.ts';
-import { PG_MESSAGE_MAX, PgServer, pgLength, pgPassword, sniffPg } from './sealed-pg.ts';
+import { PG_MESSAGE_MAX, PgClient, PgServer, pgLength, sniffPg } from './sealed-pg.ts';
 import type { ScrubScope, SessionScrub } from './sealed-scrubs.ts';
 import { SMTP_LINE_MAX, SmtpClient, sniffSmtp } from './sealed-smtp.ts';
 import type { UplinkConn } from './uplink.ts';
@@ -92,15 +98,18 @@ class SessionWriter {
   private pgStarted = false;
   private readonly conn: UplinkConn;
   private readonly s: SealedSession;
-  private readonly pg: PgServer;
+  private readonly pgClient: PgClient;
   private readonly scope: ScrubScope;
   constructor(conn: UplinkConn, s: SealedSession, pg: PgServer, scope: ScrubScope) {
     this.conn = conn;
     this.s = s;
-    this.pg = pg;
     this.scope = scope;
+    this.pgClient = new PgClient(pg, {
+      cleartext: (placeholders) => this.ask('pg', 'password-cleartext', { placeholders }),
+      scram: (scram) => this.ask('pg', 'scram-sha-256', { scram }),
+    });
     this.smtp = new SmtpClient((position, placeholders) =>
-      this.ask('smtp', position, placeholders)
+      this.ask('smtp', position, { placeholders })
     );
   }
 
@@ -116,8 +125,7 @@ class SessionWriter {
   private async ask(
     protocol: SessionProtocol,
     position: string,
-    placeholders: string[],
-    head?: SessionHead
+    extra: { placeholders?: string[]; head?: SessionHead; scram?: SessionScram }
   ): Promise<Record<string, string> | undefined> {
     const s = this.s;
     const values = await s.broker.sessionMaterialize({
@@ -130,8 +138,7 @@ class SessionWriter {
       verified: s.verified,
       handshakeAt: s.handshakeAt,
       exit: s.exit as string,
-      placeholders,
-      ...(head ? { head } : {}),
+      ...extra,
     });
     return values;
   }
@@ -203,9 +210,7 @@ class SessionWriter {
       const started = this.pgStarted;
       this.pgStarted = true;
       const out = started
-        ? await pgPassword(message, this.pg, (placeholders) =>
-            this.ask('pg', 'password-cleartext', placeholders)
-          ).catch(() => ({ bytes: message, done: true }))
+        ? await this.pgClient.message(message).catch(() => ({ bytes: message, done: true }))
         : { bytes: message, done: false };
       if ('values' in out && out.values) this.remember(out.values);
       try {
@@ -243,7 +248,7 @@ class SessionWriter {
     this.buffer = new Uint8Array(0);
     const done = await substituteHead(
       latin1(all.subarray(0, end)),
-      (position, placeholders, head) => this.ask('http1', position, placeholders, head)
+      (position, placeholders, head) => this.ask('http1', position, { placeholders, head })
     ).catch(() => undefined);
     const head = done ? bytesOf(done.head) : all.subarray(0, end);
     if (done) this.remember(done.values);
@@ -351,9 +356,19 @@ export function sealedConn(conn: UplinkConn, s: SealedSession): UplinkConn {
   const observed: UplinkConn = {
     ...conn,
     read: async () => {
-      const bytes = await conn.read();
-      if (bytes) pg.feed(bytes);
-      return bytes;
+      for (;;) {
+        const bytes = await conn.read();
+        if (!bytes) return bytes;
+        const out = pg.filter(bytes);
+        if (pg.failed) {
+          conn.close();
+          throw new KernelError(
+            'EPROTO',
+            'ERR_SSL_PROTOCOL_ERROR: the pg server failed the SCRAM proof'
+          );
+        }
+        if (out.length > 0) return out;
+      }
     },
   };
   const reader = new ScrubReader(writer ? observed : conn, scope);
