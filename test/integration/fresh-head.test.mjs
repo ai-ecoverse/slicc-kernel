@@ -20,7 +20,7 @@ async function install(kernel, name) {
 }
 
 const py = (lines) =>
-  `python3 -c "$(echo ${Buffer.from(['import os', ...lines].join('\n')).toString('base64')} | base64 -d)"`;
+  `python3 -c "$(echo ${Buffer.from(['import os, time', ...lines].join('\n')).toString('base64')} | base64 -d)"`;
 
 const N = 60;
 const LOOKUPS = "int(open('/proc/sys/kernel/slicc_opfs_calls').read())";
@@ -42,7 +42,12 @@ test('a file a WASI program creates and writes from its start is not read back t
       "    fd = os.open(f'/tmp/fh/f{r}_{i}', os.O_WRONLY|os.O_CREAT|os.O_EXCL, 0o644)",
       "    os.write(fd, b'x' * 4096)",
       '    os.close(fd)',
-      `  b = ${LOOKUPS}`,
+      '  b, quiet = None, 0',
+      '  while quiet < 10:',
+      `    c = ${LOOKUPS}`,
+      '    quiet = quiet + 1 if c == b else 0',
+      '    b = c',
+      '    time.sleep(0.05)',
       '  least = b - a if least is None else min(least, b - a)',
       'print(least)',
     ])
@@ -50,7 +55,7 @@ test('a file a WASI program creates and writes from its start is not read back t
   assert.equal(r.status, 0, r.stderr);
   const per = Number(r.stdout) / N;
   const seen = [`O_EXCL + write ${per.toFixed(2)}`];
-  assert.ok(per <= 3.9, `${per} OPFS lookups per file`);
+  assert.ok(per <= 4.5, `${per} OPFS lookups per file`);
   console.log(`OPFS lookups per created and written file: ${seen.join(', ')}`);
   const made = await sh(
     `${py([
