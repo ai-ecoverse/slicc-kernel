@@ -3,6 +3,7 @@ const SETUP_OPS = new Set([
   'proc-identity',
   'fd-info',
   'sig-mask',
+  'sig-inherited',
   'proc-setpgid',
   'tty-pgrp-set',
   'proc-exec',
