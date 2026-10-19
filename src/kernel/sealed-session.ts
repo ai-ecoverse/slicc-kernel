@@ -9,7 +9,7 @@ const TOKEN = "[!#$%&'*+.^_`|~0-9a-z-]+";
 const HEADER = new RegExp(`^header:${TOKEN}$`);
 const METHOD = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 const TARGET = /^[\x21-\x7e]+$/;
-export const SESSION_EXIT = /^(tailscale|device:[A-Za-z0-9._-]+)$/;
+export const SESSION_EXIT = /^(tailscale|device:[A-Za-z0-9._:-]+)$/;
 const HOST = /^[a-z0-9.:-]+$/;
 const UNSAFE = /[\r\n\0]/;
 
