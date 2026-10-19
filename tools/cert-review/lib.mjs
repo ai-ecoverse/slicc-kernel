@@ -996,6 +996,32 @@ export function downstreamLine(lines) {
     : `downstream: ${unique.map((l) => l.replace(/^downstream: /, '')).join(' | ')}`;
 }
 
+async function quietly(fn, fallback) {
+  try {
+    return await fn();
+  } catch {
+    return fallback;
+  }
+}
+
+async function attestationsAt(get, at) {
+  let res;
+  try {
+    res = await get(at);
+  } catch (error) {
+    return { missing: `attestations unreachable (${error?.message ?? 'network error'})` };
+  }
+  if (res.ok) {
+    try {
+      return { res, body: await res.json() };
+    } catch (error) {
+      return { missing: `attestations unreadable (${error?.message ?? 'body error'})` };
+    }
+  }
+  if (res.status !== 404) return { problem: `attestations answered ${res.status}` };
+  return { missing: 'attestations answered 404' };
+}
+
 export async function awaitAttestations({
   url,
   fetch: get,
@@ -1012,32 +1038,52 @@ export async function awaitAttestations({
   let quietSince = now();
   let missing = 'no attestations on npm';
   for (;;) {
-    const at = typeof url === 'function' ? await url() : url;
+    const at = await quietly(() => (typeof url === 'function' ? url() : url), undefined);
     if (at) {
-      const res = await get(at);
-      if (res.ok) return { res };
-      if (res.status !== 404) return { problem: `attestations answered ${res.status}` };
-      missing = 'attestations answered 404';
+      const found = await attestationsAt(get, at);
+      if (!found.missing) return found;
+      missing = found.missing;
     }
-    let changed = last;
-    try {
-      changed = await modified();
-    } catch {
-      changed = last;
-    }
+    const changed = await quietly(modified, last);
     if (changed !== last) {
       last = changed;
       quietSince = now();
     }
     const served = now() - servedAt;
+    const minutes = (ms) => Math.round(ms / 60_000);
     if (now() >= deadline)
       return {
-        problem: `${missing} for ${Math.round(served / 60_000)} min after npm started serving it, through the whole wait`,
+        problem: `${missing} for ${minutes(served)} min after npm started serving it, through the whole wait`,
       };
     if (served >= graceMs && now() - quietSince >= quietMs)
       return {
-        problem: `${missing} for ${Math.round(served / 60_000)} min after npm started serving it, and its packument stopped changing ${Math.round((now() - quietSince) / 60_000)} min ago`,
+        problem: `${missing} for ${minutes(served)} min after npm started serving it, and its packument stopped changing ${minutes(now() - quietSince)} min ago`,
       };
+    await sleep(everyMs);
+  }
+}
+
+export async function downloadTarball({
+  url,
+  fetch: get,
+  now = Date.now,
+  sleep,
+  deadline = Number.POSITIVE_INFINITY,
+  everyMs = 15_000,
+  log = () => {},
+}) {
+  for (;;) {
+    let failure;
+    try {
+      const res = await get(url);
+      if (!res.ok) return { problem: `downloading ${url} answered ${res.status}` };
+      return { bytes: Buffer.from(await res.arrayBuffer()) };
+    } catch (error) {
+      failure = String(error?.message ?? error);
+    }
+    if (now() >= deadline)
+      return { problem: `downloading ${url} failed through the whole wait: ${failure}` };
+    log(`downloading ${url} failed, retrying: ${failure}`);
     await sleep(everyMs);
   }
 }

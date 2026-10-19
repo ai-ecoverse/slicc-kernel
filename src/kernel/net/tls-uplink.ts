@@ -1,10 +1,13 @@
 import { KernelError } from '../fd-table.ts';
+import type { SealedBroker, SealedCaller } from '../sealed.ts';
+import { boundHost } from '../sealed-session.ts';
 import type { KernelSocket, LoopbackNet } from '../socket.ts';
 import { isLoopbackHost } from './proxy-service.ts';
 import { ipv4Bytes, ipv6Groups } from './routes.ts';
+import { type SealedSession, sealedConn, substitutes } from './sealed-conn.ts';
 import { openSession, type TlsClientInfo, type TlsClientOptions, tlsClient } from './tls-client.ts';
 import { type TlsEngine, TlsError, type TlsSession, type TlsStore } from './tls-engine.ts';
-import type { ResolveFamily } from './uplink.ts';
+import type { ResolveFamily, UplinkConn } from './uplink.ts';
 
 export interface TlsClientSupport {
   engine: () => Promise<TlsEngine>;
@@ -29,6 +32,9 @@ export interface ClientCertRequest {
 
 export interface SecureProcess {
   net: LoopbackNet;
+  sealed?: SealedBroker | undefined;
+  stamp?(): Promise<SealedCaller>;
+  cred?(): { pid: number };
   blocking(): AbortSignal;
   resolve(name: string, family: ResolveFamily, blocking: () => AbortSignal): Promise<string[]>;
 }
@@ -84,7 +90,8 @@ function encode(bytes: Uint8Array): string {
 
 export interface SecureSession {
   path: 'kernel';
-  substitutes: false;
+  substitutes: boolean;
+  verified: boolean;
   protocol: TlsClientInfo['protocol'];
   alpnProtocol: string | false;
   authorized: boolean;
@@ -103,7 +110,8 @@ export interface SecureSession {
 function sessionOf(info: TlsClientInfo, servername: string): SecureSession {
   return {
     path: 'kernel',
-    substitutes: false,
+    substitutes: info.substitutes === true,
+    verified: info.verified,
     protocol: info.protocol,
     alpnProtocol: info.alpnProtocol,
     authorized: info.authorized,
@@ -245,6 +253,7 @@ async function prepareWith(
     ...(req.sni === false ? { sni: false } : {}),
     ...(req.checkHostname === false ? { checkHostname: false } : {}),
     clientCertificate: cert !== undefined,
+    bundled: own === undefined,
   };
   let session: TlsSession | undefined;
   try {
@@ -262,12 +271,40 @@ async function prepareWith(
   }
 }
 
-function secure(prepared: Prepared) {
+interface Seal {
+  proc: SecureProcess;
+  port: number;
+}
+
+function sealing(seal: Seal, raw: UplinkConn, info: TlsClientInfo, servername: string) {
+  const { proc } = seal;
+  const broker = proc.sealed;
+  if (!broker || !proc.stamp || !proc.cred) return undefined;
+  const stamp = proc.stamp.bind(proc);
+  const session: SealedSession = {
+    broker,
+    stamp,
+    pid: proc.cred().pid,
+    host: boundHost(servername),
+    port: seal.port,
+    exit: raw.exit,
+    verified: info.verified,
+    handshakeAt: info.handshakeAt,
+    alpn: info.alpnProtocol,
+  };
+  return session;
+}
+
+function secure(prepared: Prepared, seal: Seal) {
   let ran = false;
-  const make = async (raw: Parameters<Parameters<KernelSocket['upgradeSecure']>[0]>[0]) => {
+  const make = async (raw: UplinkConn) => {
     ran = true;
     try {
-      return await tlsClient(raw, prepared.options);
+      const made = await tlsClient(raw, prepared.options);
+      const session = sealing(seal, raw, made.info, prepared.options.servername);
+      if (!session) return made;
+      made.info.substitutes = substitutes(session);
+      return { conn: sealedConn(made.conn, session), info: made.info };
     } finally {
       prepared.own?.release();
     }
@@ -309,7 +346,7 @@ export async function connectSecure(
     throw new KernelError('ENOTSUP', 'TLS in the kernel needs a destination the uplink routes');
   const support = supportOf(proc.net);
   let info: TlsClientInfo | undefined;
-  const { make, abandon } = secure(await prepare(support, req, servername));
+  const { make, abandon } = secure(await prepare(support, req, servername), { proc, port });
   try {
     await socket.connectSecure({ family: 'inet', host: address, port }, route, async (conn) => {
       info = await conn.upgrade(make);
@@ -328,7 +365,11 @@ export async function upgradeSecure(
   const peer = socket.peer;
   const host = req.servername || (peer?.family === 'inet' ? peer.host : '');
   const servername = serverName(host);
-  const { make, abandon } = secure(await prepare(supportOf(proc.net), req, servername));
+  const port = peer?.family === 'inet' ? peer.port : 0;
+  const { make, abandon } = secure(await prepare(supportOf(proc.net), req, servername), {
+    proc,
+    port,
+  });
   try {
     return sessionOf(await socket.upgradeSecure(make), servername);
   } finally {

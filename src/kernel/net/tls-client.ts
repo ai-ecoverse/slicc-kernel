@@ -44,6 +44,9 @@ export interface TlsClientInfo {
   hostnameChecked?: boolean;
   hostnameMatches?: boolean;
   chainError?: string;
+  verified: boolean;
+  handshakeAt: number;
+  substitutes?: boolean;
 }
 
 export interface TlsClientOptions {
@@ -56,6 +59,7 @@ export interface TlsClientOptions {
   checkHostname?: boolean;
   session?: TlsSession;
   clientCertificate?: boolean;
+  bundled?: boolean;
 }
 
 function isIP(name: string): boolean {
@@ -186,6 +190,11 @@ function controlsOf(
   };
 }
 
+export function verdictOf(o: TlsClientOptions, session: TlsSession): boolean {
+  if (o.bundled !== true || isIP(o.servername) || session.verifyResult !== 0) return false;
+  return o.checkHostname !== false || !session.nameMismatch;
+}
+
 async function infoOf(o: TlsClientOptions, session: TlsSession): Promise<TlsClientInfo> {
   const flags = session.verifyResult;
   const code = verifyCode(flags);
@@ -201,6 +210,8 @@ async function infoOf(o: TlsClientOptions, session: TlsSession): Promise<TlsClie
       : {}),
     peerCertificates: chain,
     ...controlsOf(o, session, protocol, chain, shape),
+    verified: verdictOf(o, session),
+    handshakeAt: Date.now(),
   };
 }
 

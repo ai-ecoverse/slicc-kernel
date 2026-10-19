@@ -55,6 +55,7 @@ test('bash that signals itself ends by the signal, for ctx.spawn and ctx.sync.ru
     return;
   }
   const kernel = await kernelWithBash();
+  t.after(() => kernel.terminate());
   const outcome = async (script) => JSON.parse((await kernel.run(['selfkill', script])).stdout);
   assert.deepEqual(await outcome('kill -TERM $$; echo after'), {
     wait: [143, 15, ''],
@@ -78,8 +79,9 @@ test('bash that signals itself ends by the signal, for ctx.spawn and ctx.sync.ru
   });
 });
 
-test('a WASIX program that signals itself with a handler runs it before kill returns', async () => {
+test('a WASIX program that signals itself with a handler runs it before kill returns', async (t) => {
   const kernel = await createNodeKernel();
+  t.after(() => kernel.terminate());
   const base = new URL('../../node_modules/@ai-ecoverse/wasix-python/', import.meta.url).pathname;
   const entries = await readdir(base, { recursive: true, withFileTypes: true });
   for (const entry of entries.filter((e) => e.isFile())) {
@@ -109,12 +111,20 @@ test('bash that stops itself stays stopped until SIGCONT (#422)', async (t) => {
     return;
   }
   const kernel = await kernelWithBash();
+  t.after(() => kernel.terminate());
   await kernel.writeFile(
     '/node_modules/selfkill/stop.mjs',
     `export default async function main(ctx) {
   const child = await ctx.spawn({ argv: ['bash', '-c', 'kill -STOP $$; echo after'], stdout: 'pipe' });
-  const out = new Response(child.stdout).text();
-  const early = await Promise.race([out.then(() => 'ended'), new Promise((r) => setTimeout(() => r('held'), 1000))]);
+  let ended = false;
+  const out = new Response(child.stdout).text().then((t) => { ended = true; return t; });
+  const state = async () => {
+    const stat = new TextDecoder().decode(await ctx.fs.readFile('/proc/' + child.pid + '/stat').catch(() => new Uint8Array()));
+    return stat.slice(stat.lastIndexOf(') ') + 2, stat.lastIndexOf(') ') + 3);
+  };
+  while (!ended && (await state()) !== 'T') await new Promise((r) => setTimeout(r, 20));
+  await Promise.race([out, new Promise((r) => setTimeout(r, 500))]);
+  const early = ended ? 'ended' : (await state()) === 'T' ? 'held' : 'resumed';
   await ctx.kill(child.pid, 'SIGCONT');
   const waited = await child.wait();
   await ctx.write(1, JSON.stringify([early, await out, waited.status]));

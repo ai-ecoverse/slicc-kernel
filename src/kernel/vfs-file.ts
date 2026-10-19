@@ -1,3 +1,4 @@
+import { copyByBytes } from '../fs/copy.ts';
 import { AsyncRangedFile, type AsyncRangedIo } from '../fs/ranged.ts';
 import {
   fsError,
@@ -195,10 +196,23 @@ export class VfsNode {
 
   async keep(): Promise<void> {
     const ranged = await this.prepare();
-    await ranged?.pin();
+    if (ranged) await this.followed(() => ranged.pin());
   }
 
   readonly moving = new Set<Promise<void>>();
+
+  private async followed<T>(op: () => Promise<T>): Promise<T> {
+    for (;;) {
+      const at = this.path;
+      try {
+        return await op();
+      } catch (err) {
+        if (!isMissing(err)) throw err;
+        while (this.moving.size > 0) await Promise.all(this.moving);
+        if (this.path === at) throw err;
+      }
+    }
+  }
 
   async load(): Promise<Uint8Array> {
     if (this.revoked) throw new KernelError('EIO');
@@ -251,7 +265,7 @@ export class VfsNode {
 
   async pread(max: number, at: number): Promise<Uint8Array> {
     const ranged = await this.prepare();
-    if (ranged) return ranged.read(at, max);
+    if (ranged) return this.followed(() => ranged.read(at, max));
     const bytes = await this.load();
     const n = Math.max(0, Math.min(max, this.length - at));
     return bytes.slice(at, at + n);
@@ -305,7 +319,7 @@ export class VfsNode {
     await this.fits(at + bytes.length);
     const ranged = await this.prepare();
     if (ranged) {
-      await ranged.write(at, bytes);
+      await this.followed(() => ranged.write(at, bytes));
       this.markDirty();
       return bytes.length;
     }
@@ -380,8 +394,11 @@ export class VfsNode {
     this.dirty = false;
     const started = performance.now();
     try {
-      if (this.ranged) await this.ranged.flush();
-      else await this.fs.writeFile(this.path, (this.data as Uint8Array).slice(0, this.length));
+      await this.followed(() =>
+        this.ranged
+          ? this.ranged.flush()
+          : this.fs.writeFile(this.path, (this.data as Uint8Array).slice(0, this.length))
+      );
     } catch (err) {
       this.dirty = true;
       throw err;
@@ -949,6 +966,19 @@ export function keepingOpen(
     },
     mkdir: (path, options) =>
       nodes.onEntry(fs.resolvePath('/', path), () => fs.mkdir(path, options)),
+    ...(fs.copyFile
+      ? {
+          async copyFile(from, to, options) {
+            const source = await nodes.targetKey(fs.resolvePath('/', from));
+            await nodes.flush(source);
+            await nodes.flushLinked(source);
+            const at = fs.resolvePath('/', to);
+            const key = await nodes.entryKey(at);
+            if (await heldAt(fs, nodes, at)) return copyByBytes(this, from, to, options);
+            await nodes.onEntry(key, () => fs.copyFile?.(from, to, options) as Promise<void>);
+          },
+        }
+      : {}),
   };
 }
 

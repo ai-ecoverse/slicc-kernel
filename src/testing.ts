@@ -48,6 +48,7 @@ export interface FakeUplinkOptions {
   names?: Readonly<Record<string, string[] | ResolveAnswer>>;
   routes?: RouteTable;
   ipv6?: boolean;
+  exit?: string;
   peers?: Readonly<Record<string, FakePeer>>;
   datagrams?: Readonly<Record<string, FakeDatagramPeer>>;
   address?: string;
@@ -224,6 +225,7 @@ export function fakeUplink(options: FakeUplinkOptions = {}): FakeUplink {
       return {
         localAddr: named(options.address ?? '100.100.100.100', nextPort++),
         remoteAddr: named(host, port),
+        ...(options.exit === undefined ? {} : { exit: options.exit }),
         read: () => down.read(),
         write: async (bytes) => {
           await up.push(bytes);

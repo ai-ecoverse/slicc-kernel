@@ -64,7 +64,35 @@ const HASHES: Record<string, [string, string]> = {
   '2a8648ce3d040303': ['ECDSA', 'SHA-384'],
   '2a8648ce3d040304': ['ECDSA', 'SHA-512'],
   '2b6570': ['Ed25519', ''],
+  '2a864886f70d01010a': ['RSA-PSS', 'SHA-1'],
 };
+
+const PSS_HASHES: Record<string, string> = {
+  '2b0e03021a': 'SHA-1',
+  '608648016503040201': 'SHA-256',
+  '608648016503040202': 'SHA-384',
+  '608648016503040203': 'SHA-512',
+};
+
+function pssOf(der: Uint8Array, algorithm: Tlv): { hash: string; salt: number } | undefined {
+  const params = children(der, algorithm, 2)?.[1];
+  let hash = 'SHA-1';
+  let salt = 20;
+  for (const field of params && der[params.start] === 0x30
+    ? (children(der, params, 3) ?? [])
+    : []) {
+    const inner = tlv(der, field.body);
+    if (!inner) return undefined;
+    if (der[field.start] === 0xa0) {
+      const known = PSS_HASHES[oidOf(der, inner) ?? ''];
+      if (!known) return undefined;
+      hash = known;
+    } else if (der[field.start] === 0xa2) {
+      salt = der.subarray(inner.body, inner.end).reduce((n, b) => n * 256 + b, 0);
+    }
+  }
+  return { hash, salt };
+}
 
 const CURVES: Record<string, [string, number]> = {
   '2a8648ce3d030107': ['P-256', 32],
@@ -105,18 +133,22 @@ interface Signed {
   scheme: string;
   hash: string;
   curve?: [string, number];
+  salt?: number;
 }
 
-function signedOf(der: Uint8Array): Signed | 'unknown' | undefined {
+function signedOf(der: Uint8Array): Signed | undefined {
   const parts = tbsFields(der);
   const [tbs, algorithm, value] = parts?.cert ?? [];
   const spki = parts?.tbs[5];
   if (!tbs || !algorithm || !value || !spki || der[value.start] !== 0x03) return undefined;
   const known = HASHES[oidOf(der, algorithm) ?? ''];
-  if (!known) return 'unknown';
-  const [scheme, hash] = known;
+  if (!known) return undefined;
+  const [scheme] = known;
+  const pss = scheme === 'RSA-PSS' ? pssOf(der, algorithm) : undefined;
+  if (scheme === 'RSA-PSS' && !pss) return undefined;
+  const hash = pss?.hash ?? known[1];
   const curve = scheme === 'ECDSA' ? curveOf(der, spki) : undefined;
-  if (scheme === 'ECDSA' && !curve) return 'unknown';
+  if (scheme === 'ECDSA' && !curve) return undefined;
   const signature = der.subarray(value.body + 1, value.end);
   return {
     tbs: raw(der, tbs),
@@ -125,6 +157,7 @@ function signedOf(der: Uint8Array): Signed | 'unknown' | undefined {
     scheme,
     hash,
     ...(curve ? { curve } : {}),
+    ...(pss ? { salt: pss.salt } : {}),
   };
 }
 
@@ -141,14 +174,18 @@ async function verifiesItself(s: Signed): Promise<boolean> {
   ]);
   const signature = s.curve ? fixedEcdsa(s.signature, s.curve[1]) : s.signature;
   if (!signature) return false;
-  const params = s.scheme === 'ECDSA' ? { name: 'ECDSA', hash: s.hash } : { name: s.scheme };
+  const params =
+    s.scheme === 'ECDSA'
+      ? { name: 'ECDSA', hash: s.hash }
+      : s.salt === undefined
+        ? { name: s.scheme }
+        : { name: s.scheme, saltLength: s.salt };
   return crypto.subtle.verify(params, key, new Uint8Array(signature), new Uint8Array(s.tbs));
 }
 
 export async function selfSigned(der: Uint8Array | undefined): Promise<boolean> {
   if (!selfIssued(der)) return false;
   const signed = signedOf(der as Uint8Array);
-  if (signed === 'unknown') return true;
   if (!signed) return false;
   return verifiesItself(signed).catch(() => false);
 }

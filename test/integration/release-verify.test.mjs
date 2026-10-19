@@ -141,6 +141,7 @@ test("verify waits out npm's attestations lag: a 404 that turns into 200 passes;
     const queue = [...list];
     return async () => ({
       ok: queue[0] === 200,
+      json: async () => ({ attestations: [] }),
       status: queue.length > 1 ? queue.shift() : queue[0],
     });
   };
@@ -252,6 +253,97 @@ test("verify waits out npm's attestations lag: a 404 that turns into 200 passes;
     never.problem,
     /^no attestations on npm for 30 min after npm started serving it, and its packument stopped changing/
   );
+  clock.t = 0;
+  let views = 0;
+  const flaky = await awaitAttestations({
+    url: async () => {
+      views++;
+      if (views === 1) throw new Error('npm error code ETIMEDOUT');
+      return 'u';
+    },
+    fetch: answers([200]),
+    modified: async () => 'm',
+    servedAt: 0,
+    now,
+    sleep,
+  });
+  assert.deepEqual(
+    [flaky.res.ok, views],
+    [true, 2],
+    'an npm view error while looking for dist.attestations is retried'
+  );
+  clock.t = 0;
+  let gets = 0;
+  const unreachable = await awaitAttestations({
+    url: 'u',
+    fetch: async () => {
+      gets++;
+      if (gets === 1) throw new Error('fetch failed');
+      return { ok: true, status: 200, json: async () => ({ attestations: [] }) };
+    },
+    modified: async () => 'm',
+    servedAt: 0,
+    now,
+    sleep,
+  });
+  assert.equal(unreachable.res.ok, true, 'a network error on the attestations is retried');
+  clock.t = 0;
+  const down = await awaitAttestations({
+    url: 'u',
+    fetch: async () => {
+      throw new Error('fetch failed');
+    },
+    modified: async () => 'm',
+    servedAt: 0,
+    now,
+    sleep,
+  });
+  assert.match(
+    down.problem,
+    /^attestations unreachable \(fetch failed\) for 30 min after npm started serving it/
+  );
+  clock.t = 0;
+  let reads = 0;
+  const truncated = await awaitAttestations({
+    url: 'u',
+    fetch: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => {
+        reads++;
+        if (reads === 1) throw new Error('terminated');
+        return { attestations: [{ predicateType: 'x' }] };
+      },
+    }),
+    modified: async () => 'm',
+    servedAt: 0,
+    now,
+    sleep,
+  });
+  assert.deepEqual(
+    [truncated.body, reads, clock.t],
+    [{ attestations: [{ predicateType: 'x' }] }, 2, 15_000],
+    'a body cut off after 200 headers is read again within the wait, not an alert'
+  );
+  clock.t = 0;
+  const garbled = await awaitAttestations({
+    url: 'u',
+    fetch: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw new SyntaxError('Unexpected end of JSON input');
+      },
+    }),
+    modified: async () => 'm',
+    servedAt: 0,
+    now,
+    sleep,
+  });
+  assert.match(
+    garbled.problem,
+    /^attestations unreadable \(Unexpected end of JSON input\) for 30 min/
+  );
   const verify = await readFile(
     new URL('../../tools/cert-review/verify.mjs', import.meta.url),
     'utf8'
@@ -262,4 +354,57 @@ test("verify waits out npm's attestations lag: a 404 that turns into 200 passes;
     "the attestations wait shares the publish wait's budget"
   );
   assert.match(verify, /not a supply-chain problem, re-run this job once it does/);
+});
+
+test('verify retries a tarball download that resets or is cut off after its 200 headers, within the wait; a non-2xx answer fails at once (#1089)', async () => {
+  const { downloadTarball } = await import('../../tools/cert-review/lib.mjs');
+  const clock = { t: 0 };
+  const now = () => clock.t;
+  const sleep = async (ms) => {
+    clock.t += ms;
+  };
+  let n = 0;
+  const flaky = await downloadTarball({
+    url: 'u',
+    fetch: async () => {
+      n++;
+      if (n === 1) throw new Error('ECONNRESET');
+      return {
+        ok: true,
+        status: 200,
+        arrayBuffer: async () => {
+          if (n === 2) throw new Error('terminated');
+          return new TextEncoder().encode('tgz').buffer;
+        },
+      };
+    },
+    now,
+    sleep,
+  });
+  assert.deepEqual([flaky.bytes?.toString(), n, clock.t], ['tgz', 3, 30_000]);
+  clock.t = 0;
+  const down = await downloadTarball({
+    url: 'u',
+    fetch: async () => {
+      throw new Error('fetch failed');
+    },
+    now,
+    sleep,
+    deadline: 3_600_000,
+  });
+  assert.equal(down.problem, 'downloading u failed through the whole wait: fetch failed');
+  assert.equal(clock.t, 3_600_000);
+  clock.t = 0;
+  const gone = await downloadTarball({
+    url: 'u',
+    fetch: async () => ({ ok: false, status: 403 }),
+    now,
+    sleep,
+  });
+  assert.deepEqual([gone.problem, clock.t], ['downloading u answered 403', 0]);
+  const verify = await readFile(
+    new URL('../../tools/cert-review/verify.mjs', import.meta.url),
+    'utf8'
+  );
+  assert.match(verify, /downloadTarball\(\{ url, fetch, sleep, deadline: budget/);
 });

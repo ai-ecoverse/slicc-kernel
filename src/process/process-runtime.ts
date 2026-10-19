@@ -80,6 +80,11 @@ import { createSocketKernel } from './process-sockets.ts';
 import { type ProcFs, useProcfs } from './procfs.ts';
 import { credAbi, type Owner, ownByCaller } from './realm-user.ts';
 
+function ownBytes(bytes: Uint8Array): Uint8Array {
+  if (bytes.constructor === Uint8Array) return bytes;
+  return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength).slice();
+}
+
 export {
   type ProcessFs,
   type ProcessStream,
@@ -109,7 +114,7 @@ export function kernelSys(transport: SyncSabTransport): ProcessSys & PtyKernel &
       const req = {
         op: 'fd-write' as const,
         fd,
-        body: bytes,
+        body: ownBytes(bytes),
         ...(opts?.nonblock ? { nonblock: true } : {}),
       };
       const n = json(call(req, `fd-write ${fd}`));
@@ -158,7 +163,7 @@ export function kernelSys(transport: SyncSabTransport): ProcessSys & PtyKernel &
     },
     pwrite(fd, bytes, at) {
       return json(
-        call({ op: 'fd-pwrite', fd, offset: at, body: bytes }, `fd-pwrite ${fd}`)
+        call({ op: 'fd-pwrite', fd, offset: at, body: ownBytes(bytes) }, `fd-pwrite ${fd}`)
       ) as number;
     },
     isatty(fd) {

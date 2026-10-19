@@ -103,6 +103,8 @@ const IDS = ['ruid', 'euid', 'suid', 'rgid', 'egid', 'sgid'] as const;
 const NS_PER_MS = 1_000_000n;
 const AT_SYMLINK_NOFOLLOW = 1;
 const AT_FDCWD = -2;
+const COPY_EXCL = 1;
+const COPY_MODE = 2;
 const AT_EACCESS = 2;
 
 const ROOT_IDS = Object.freeze({ uid: 0, gid: 0 });
@@ -297,6 +299,42 @@ export class WasiHost {
     return mask === undefined ? this.umasks.get() : this.umasks.set(mask);
   }
 
+  private copyImport(): WasiFunction {
+    const { mem, fds } = this;
+    const named = (dirfd: number, p: number, l: number): string => {
+      const raw = mem.string(p, l);
+      if (raw === '') throw new WasiError('ENOENT');
+      if (raw.startsWith('/')) return fds.resolve(3, raw);
+      return dirfd === AT_FDCWD ? fds.resolve(3, `${this.cwd}/${raw}`) : fds.resolve(dirfd, raw);
+    };
+    return (...args: number[]) => {
+      const [srcDirfd, sp, sl, dstDirfd, dp, dl, mode, flags] = args as [
+        number,
+        number,
+        number,
+        number,
+        number,
+        number,
+        number,
+        number,
+      ];
+      if (!this.o.fs.copy) return E.NOSYS;
+      if ((flags & ~(COPY_EXCL | COPY_MODE)) !== 0) throw new WasiError('EINVAL');
+      const from = named(srcDirfd, sp, sl);
+      const to = named(dstDirfd, dp, dl);
+      const bits = flags & COPY_MODE ? (this.o.fs.stat(from).mode ?? 0) : mode;
+      this.copyFile(from, to, bits, (flags & COPY_EXCL) !== 0);
+      return E.SUCCESS;
+    };
+  }
+
+  copyFile(from: string, to: string, mode: number, exclusive: boolean): void {
+    const { copy } = this.o.fs;
+    if (!copy) throw new WasiError('ENOSYS');
+    this.fds.flushPath(from);
+    copy.call(this.o.fs, from, to, mode & 0o7777 & ~this.umasks.get(), exclusive);
+  }
+
   private created(path: string, mode: number): void {
     const umask = this.umasks.get();
     if (umask !== DEFAULT_UMASK) this.o.fs.chmod(path, mode & ~umask);
@@ -368,7 +406,10 @@ export class WasiHost {
         return devSync(dev, devFdStat(fd)).mode ?? DEVICE_MODE;
       return modeOf(this.o.fs.stat(pathOf(fd)));
     };
-    const pathOwned = (path: string, follow: boolean) => {
+    const pathOwned = (
+      path: string,
+      follow: boolean
+    ): { uid?: number; gid?: number } | undefined => {
       const alias = this.fdAlias(path);
       if (alias && !follow) return alias.stdio ? ROOT_IDS : undefined;
       if (alias) {
@@ -377,9 +418,22 @@ export class WasiHost {
       }
       if (this.synthetic(path)) return ROOT_IDS;
       if (kernelDev(path)) return devSync(dev, devStat(path, follow));
-      return this.orDev(path, follow, () =>
-        follow ? this.o.fs.stat(path) : this.o.fs.lstat(path)
-      );
+      return this.viaDev(path, follow, () => this.statOf(path, follow), pathOwned);
+    };
+    const pathMode = (path: string, follow: boolean): number => {
+      const alias = this.fdAlias(path);
+      if (alias && !follow) {
+        this.fdTarget(alias);
+        return S_IFLNK | 0o777;
+      }
+      if (alias) {
+        this.openFd(alias.fd);
+        return fdMode(alias.fd);
+      }
+      if (this.synthetic(path) && deviceOf(path) === undefined) return SEALED_MODE;
+      if (kernelDev(path)) return devSync(dev, devStat(path, follow)).mode ?? DEVICE_MODE;
+      const fileMode = (st: SyncFsBridgeStat) => (st.isFifo ? S_IFIFO : 0) | modeOf(st);
+      return this.viaDev(path, follow, () => fileMode(this.statOf(path, follow)), pathMode);
     };
     return wrap({
       fd_chown: (fd: number, uid: number, gid: number) => {
@@ -448,6 +502,7 @@ export class WasiHost {
         if ((made & ~want) !== 0) this.o.fs.chmod(path, made & want);
         return E.SUCCESS;
       },
+      path_copy_file: this.copyImport(),
       umask: (mask: number, out: number) => {
         const old = this.umasks.set(mask);
         mem.view().setUint32(out, old, true);
@@ -455,32 +510,8 @@ export class WasiHost {
       fd_mode: (fd: number, out: number) => void mem.view().setUint32(out, fdMode(fd), true),
       path_mode: (dirfd: number, p: number, l: number, flags: number, out: number) => {
         const path = at(dirfd, p, l);
-        const alias = this.fdAlias(path);
-        if (alias && flags & AT_SYMLINK_NOFOLLOW) {
-          this.fdTarget(alias);
-          return void mem.view().setUint32(out, S_IFLNK | 0o777, true);
-        }
-        if (alias) {
-          this.openFd(alias.fd);
-          return void mem.view().setUint32(out, fdMode(alias.fd), true);
-        }
-        if (this.synthetic(path) && deviceOf(path) === undefined)
-          return void mem.view().setUint32(out, SEALED_MODE, true);
-        if (kernelDev(path)) {
-          const node = devSync(dev, devStat(path, (flags & AT_SYMLINK_NOFOLLOW) === 0));
-          return void mem.view().setUint32(out, node.mode ?? DEVICE_MODE, true);
-        }
-        const follow = (flags & AT_SYMLINK_NOFOLLOW) === 0;
-        let st: SyncFsBridgeStat;
-        try {
-          st = follow ? this.o.fs.stat(path) : this.o.fs.lstat(path);
-        } catch (err) {
-          const device = this.orDev(path, follow, () => {
-            throw err;
-          });
-          return void mem.view().setUint32(out, device.mode ?? DEVICE_MODE, true);
-        }
-        mem.view().setUint32(out, (st.isFifo ? S_IFIFO : 0) | modeOf(st), true);
+        const mode = pathMode(path, (flags & AT_SYMLINK_NOFOLLOW) === 0);
+        mem.view().setUint32(out, mode, true);
       },
     });
   }
@@ -1357,14 +1388,22 @@ export class WasiHost {
     return real !== path && kernelDev(real) ? real : undefined;
   }
 
-  private orDev(path: string, follow: boolean, stat: () => SyncFsBridgeStat): SyncFsBridgeStat {
+  private statOf(path: string, follow: boolean): SyncFsBridgeStat {
+    return follow ? this.o.fs.stat(path) : this.o.fs.lstat(path);
+  }
+
+  private viaDev<T>(
+    path: string,
+    follow: boolean,
+    stat: () => T,
+    device: (path: string, follow: boolean) => T
+  ): T {
     try {
       return stat();
     } catch (err) {
-      const device = (err as { code?: string }).code === 'ENOENT' && this.linkedDev(path, follow);
-      if (!device) throw err;
-      const json = (req: Parameters<WasiHost['o']['kernel']['call']>[0]) => this.o.kernel.call(req);
-      return devSync({ json }, devStat(device, true));
+      const linked = (err as { code?: string }).code === 'ENOENT' && this.linkedDev(path, follow);
+      if (!linked) throw err;
+      return device(linked, true);
     }
   }
 
@@ -1483,6 +1522,8 @@ export class WasiHost {
     } catch (err) {
       if ((err as { code?: string }).code !== 'ENOENT') throw err;
       const device = kernelDev(path) ? path : this.linkedDev(path, follow);
+      const alias = device && device !== path ? this.fdAlias(device) : undefined;
+      if (device && alias) return this.aliasFilestat(device, alias, lookup);
       if (device && this.devChar(device, true)) {
         return this.local({
           filetype: FILETYPE.CHARACTER_DEVICE,

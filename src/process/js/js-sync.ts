@@ -34,6 +34,7 @@ import {
   isExclusive,
   type JsOpenOptions,
   type JsStatFs,
+  type JsWriteOptions,
   joined,
   MAX_IO,
   openRequest,
@@ -45,6 +46,7 @@ import {
 import { callError, JsCallError, type JsKernel, modeOf } from './js-kernel.ts';
 import { procFsSync, procOpenSync } from './js-proc.ts';
 import type { JsRunOptions, JsRunResult } from './js-run.ts';
+import type { JsSyncTty } from './js-tty.ts';
 import type { JsWatcher, JsWatchListener, JsWatchOptions } from './js-watch.ts';
 
 export type SyncCall = (req: SyncSabRequestBody) => SyncFsResult;
@@ -72,6 +74,7 @@ export interface JsCred {
 
 export interface JsSyncContext {
   readonly kernel: { readonly version: string };
+  tty: JsSyncTty;
   run(options: JsRunOptions): JsRunResult;
   spawn(options: JsSpawnOptions): JsChild;
   exit(status?: number): never;
@@ -80,8 +83,10 @@ export interface JsSyncContext {
   umask(mask?: number): number;
   setcred(change: Partial<JsCred>): JsCred;
   read(fd: number, max?: number): Uint8Array;
-  write(fd: number, data: Uint8Array | string): void;
+  write(fd: number, data: Uint8Array | string, options?: JsWriteOptions): number;
   close(fd: number): void;
+  socketpair(): [number, number];
+  pipe(): [number, number];
   open(path: string, options?: JsOpenOptions): JsSyncFile;
   fs: {
     stat(path: string): SyncFsBridgeStat;
@@ -113,6 +118,7 @@ export interface SyncShared {
   random(bytes: Uint8Array): void;
   infos: Map<number, FdInfo>;
   handles: Map<number, () => void>;
+  closing?(fd: number): void;
 }
 
 const encoder = new TextEncoder();
@@ -192,7 +198,7 @@ export function syncOps(
   shared: SyncShared
 ): Omit<
   JsSyncContext,
-  'run' | 'spawn' | 'exit' | 'kill' | 'cred' | 'setcred' | 'kernel' | 'umask' | 'fs'
+  'run' | 'spawn' | 'exit' | 'kill' | 'cred' | 'setcred' | 'kernel' | 'umask' | 'fs' | 'tty'
 > & { fs: Omit<JsSyncContext['fs'], 'watch'> } {
   const { infos, handles, resolve } = shared;
 
@@ -231,20 +237,24 @@ export function syncOps(
     return r.ok && r.kind === 'bytes' ? r.bytes : new Uint8Array(0);
   };
 
-  const write = (fd: number, data: Uint8Array | string): void => {
+  const write = (fd: number, data: Uint8Array | string, options?: JsWriteOptions): number => {
     const bytes = typeof data === 'string' ? encoder.encode(data) : data;
     const i = info(fd);
-    if (writeDevice(i)) return;
+    if (writeDevice(i)) return bytes.length;
+    const nonblock = options?.nonblock === true;
     let at = 0;
     while (at < bytes.length) {
       const body = bytes.subarray(at, at + MAX_IO);
       try {
-        at += written(kernel.blocking({ op: 'fd-write', fd, body }), body.length);
+        const req = { op: 'fd-write' as const, fd, body, ...(nonblock ? { nonblock } : {}) };
+        at += written(kernel.blocking(req), body.length);
       } catch (err) {
         if (brokenPipe(err, i)) kernel.call({ op: 'proc-kill', pid: shared.pid, sig: SIG.PIPE });
         throw err;
       }
+      if (nonblock) break;
     }
+    return at;
   };
 
   const statOf = (op: 'stat' | 'lstat', path: string): SyncFsBridgeStat => {
@@ -321,8 +331,12 @@ export function syncOps(
       handles.get(fd)?.();
       handles.delete(fd);
       infos.delete(fd);
+      shared.closing?.(fd);
       kernel.call({ op: 'fd-close', fd });
     },
+    socketpair: () =>
+      kernel.json({ op: 'sock-pair', domain: 'unix', type: 'stream' }) as [number, number],
+    pipe: () => kernel.json({ op: 'fd-pipe' }) as [number, number],
     open: procOpenSync(open, kernel, { resolve, pid: shared.pid }),
     fs: procFsSync(syncPathOps(kernel, resolve, statOf, open, tryDevSync), kernel, {
       resolve,
