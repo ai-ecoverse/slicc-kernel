@@ -62,6 +62,7 @@ const install = (name) => {
     { encoding: 'utf8', env: { ...process.env, GITHUB_STEP_SUMMARY: '' } }
   );
   const line = (run.stdout ?? '').split('\n').find((l) => l.startsWith('| total |'));
+  const mem = (run.stdout ?? '').split('\n').find((l) => l.startsWith('| memory |'));
   if (run.status !== 0 || !line) {
     console.error(run.stdout?.slice(-3000), run.stderr?.slice(-3000));
     throw new Error(`install-ab: the ${name} install failed`);
@@ -72,6 +73,7 @@ const install = (name) => {
     calls: Number(cells[3]),
     lookups: Number(cells[4]),
     requests: Number(cells[5]),
+    memory: mem ? Number.parseFloat(mem.split('|')[2]) : 0,
   };
 };
 
@@ -93,13 +95,13 @@ const ratios = rows.map((r) => r.ratio);
 const table = [
   `### Install A/B on one runner: A ${builds.A.ref} (${builds.A.sha.slice(0, 8)}), B ${builds.B.ref} (${builds.B.sha.slice(0, 8)})${pnpm ? `, wasi-pnpm ${pnpm}` : ''}`,
   '',
-  '| pair | A wall | B wall | B/A wall | A requests | B requests | B/A requests | A calls | B calls |',
-  '|---|---|---|---|---|---|---|---|---|',
+  '| pair | A wall | B wall | B/A wall | A requests | B requests | B/A requests | A calls | B calls | A MiB | B MiB |',
+  '|---|---|---|---|---|---|---|---|---|---|---|',
   ...rows.map(
     (r) =>
-      `| ${r.i} | ${r.a.wall} s | ${r.b.wall} s | ${r.ratio.toFixed(3)} | ${r.a.requests} | ${r.b.requests} | ${r.requests.toFixed(3)} | ${r.a.calls} | ${r.b.calls} |`
+      `| ${r.i} | ${r.a.wall} s | ${r.b.wall} s | ${r.ratio.toFixed(3)} | ${r.a.requests} | ${r.b.requests} | ${r.requests.toFixed(3)} | ${r.a.calls} | ${r.b.calls} | ${r.a.memory} | ${r.b.memory} |`
   ),
-  `| **median** | ${median(rows.map((r) => r.a.wall))} s | ${median(rows.map((r) => r.b.wall))} s | **${median(ratios).toFixed(3)}** | | | **${median(rows.map((r) => r.requests)).toFixed(3)}** | | |`,
+  `| **median** | ${median(rows.map((r) => r.a.wall))} s | ${median(rows.map((r) => r.b.wall))} s | **${median(ratios).toFixed(3)}** | | | **${median(rows.map((r) => r.requests)).toFixed(3)}** | | | ${median(rows.map((r) => r.a.memory))} | ${median(rows.map((r) => r.b.memory))} |`,
   '',
   `Pair ratio spread: ${Math.min(...ratios).toFixed(3)}–${Math.max(...ratios).toFixed(3)}.`,
   '',
