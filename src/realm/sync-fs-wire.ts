@@ -11,6 +11,7 @@ export const SYNC_FS_OPS = [
   'rm',
   'rename',
   'link',
+  'copy',
   'unlink',
   'rmdir',
   'symlink',
@@ -168,6 +169,7 @@ export interface SyncFsPosixBridge {
   access?(path: string, mode: number, kind?: AccessKind, nofollow?: boolean): void;
   create?(path: string, mode?: number, opening?: boolean): SyncFsCreated | undefined | void;
   mkfifo?(path: string, mode: number): void;
+  copy?(from: string, to: string, mode: number, exclusive: boolean): void;
   chown?(path: string, ...rest: ChownArgs): void;
   owners?: boolean;
   links?: boolean;

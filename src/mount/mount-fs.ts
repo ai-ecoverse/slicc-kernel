@@ -1,7 +1,9 @@
 import { fresh } from '../bytes.ts';
 import { ancestryOf, permOf } from '../fs/access.ts';
+import { copyByBytes } from '../fs/copy.ts';
 import { chain } from '../fs/owners.ts';
 import {
+  type CopyOptions,
   type FsStat,
   inodeOf,
   type KernelFs,
@@ -1199,6 +1201,24 @@ class MountFs implements KernelFs {
       if (code === 'ENOENT' || code === 'ENOTDIR') return false;
       throw err;
     }
+  }
+
+  async copyFile(from: string, to: string, options: CopyOptions, redirects = 0): Promise<void> {
+    const source = await realTarget(this, normalizePath(from));
+    const a = this.at(source);
+    const b = this.at(to);
+    const copy = this.base.copyFile?.bind(this.base);
+    if (!a && !b && copy) {
+      return this.based(
+        [source, to],
+        redirects,
+        () => copy(source, to, options),
+        ([f, t], n) => this.copyFile(f as string, t as string, options, n)
+      );
+    }
+    if (a?.mount !== b?.mount) throw errnoError('EXDEV', `${from} -> ${to}`);
+    if (a) this.writable(a.mount, normalizePath(to));
+    return copyByBytes(this, source, to, options);
   }
 
   async createExclusive(path: string, owner?: NewOwner, redirects = 0): Promise<void> {

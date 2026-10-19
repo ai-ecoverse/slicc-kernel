@@ -192,6 +192,14 @@ export class ProtectedFs {
           st && marked(`${dir}/${name}`, st),
         ]);
       },
+      ...(fs.copyFile
+        ? {
+            async copyFile(...args: Parameters<NonNullable<KernelFs['copyFile']>>) {
+              await check(args[1], false);
+              return fs.copyFile?.(...args);
+            },
+          }
+        : {}),
       ...(fs.createExclusive
         ? {
             async createExclusive(...args: Parameters<NonNullable<KernelFs['createExclusive']>>) {
