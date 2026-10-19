@@ -63,7 +63,7 @@ export function deviceOf(path: string): Device | undefined {
 
 function namedDevice(path: string): boolean {
   if (deviceOf(path) || stdioAlias(path) !== undefined) return true;
-  return path === SEALED_PATH || path === CLIPBOARD_PATH || /^\/dev\/tty\d*$/.test(path);
+  return path === SEALED_PATH || path === CLIPBOARD_PATH || path === '/dev/tty';
 }
 
 function within(path: string, root: string): boolean {
