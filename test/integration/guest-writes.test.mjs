@@ -15,18 +15,24 @@ test('a threaded WASI program reading files, directories, links, stats, pipes, p
     );
   }
   const rounds = Number(process.env.SLICC_GUESTWRITES_ROUNDS ?? 6);
+  const check = (r) => {
+    assert.equal(r.status, 0, `round ${r.i}: ${r.stdout}${r.stderr}`);
+    assert.match(r.stdout, /^canary: clean, 5280 calls, 5280 checked 200 ms later, /m);
+    const answered = r.stdout.match(/^canary: answered with data: ((?:\d+ ){9}\d+)$/m);
+    assert.ok(answered, r.stdout);
+    const counts = answered[1].split(' ').map(Number);
+    assert.ok(
+      counts.every((n) => n > 0),
+      `round ${r.i}: every call answered at least once (${counts.join(' ')})`
+    );
+  };
   const runs = [];
   for (let i = 0; i < rounds; i++) {
     await kernel.writeFile(`/tmp/guest-${i}/.keep`, '');
     runs.push(
       kernel.run(['guestwrites', '8', '600'], { cwd: `/tmp/guest-${i}` }).then((r) => ({ i, ...r }))
     );
-    if (runs.length === 2) {
-      for (const r of await Promise.all(runs.splice(0))) {
-        assert.equal(r.status, 0, `round ${r.i}: ${r.stdout}${r.stderr}`);
-        assert.match(r.stdout, /^canary: clean, 5280 calls, 5280 checked 200 ms later, /m);
-        assert.match(r.stdout, /^canary: answered with data: (\d+ ){9}\d+$/m);
-      }
-    }
+    if (runs.length === 2 || i === rounds - 1)
+      for (const r of await Promise.all(runs.splice(0))) check(r);
   }
 });

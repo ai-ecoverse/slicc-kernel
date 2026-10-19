@@ -34,6 +34,8 @@ static int bulk;
 static _Atomic long ok[10];
 static pthread_t workers[64];
 static _Atomic int nworkers;
+static int alive[64];
+static pthread_mutex_t pool = PTHREAD_MUTEX_INITIALIZER;
 
 static long long now_ns(void) {
   struct timespec ts;
@@ -244,6 +246,9 @@ static void *worker(void *arg) {
   nanosleep(&wait, 0);
   settle(ring, &n, 1);
   free(ring);
+  pthread_mutex_lock(&pool);
+  alive[self] = 0;
+  pthread_mutex_unlock(&pool);
   return 0;
 }
 
@@ -266,7 +271,12 @@ static void *signaller(void *arg) {
   struct timespec gap = {0, 2000000};
   while (!atomic_load(&stop)) {
     int w = atomic_load(&nworkers);
-    if (direct && w > 0) pthread_kill(workers[rand() % w], SIGUSR1);
+    if (direct && w > 0) {
+      int pick = rand() % w;
+      pthread_mutex_lock(&pool);
+      if (alive[pick]) pthread_kill(workers[pick], SIGUSR1);
+      pthread_mutex_unlock(&pool);
+    }
     kill(getpid(), SIGUSR1);
     nanosleep(&gap, 0);
   }
@@ -325,6 +335,7 @@ int main(int argc, char **argv) {
   pthread_create(&helpers[2], 0, spinner, 0);
   pthread_create(&helpers[3], 0, spinner, 0);
   for (int t = 0; t < threads; t++) {
+    alive[t] = 1;
     pthread_create(&workers[t], 0, worker, (void *)(intptr_t)t);
     atomic_store(&nworkers, t + 1);
   }
