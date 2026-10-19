@@ -414,6 +414,17 @@ test(
 const clientCa = makeCa('client CA');
 const CLIENT_AUTH = '1.3.6.1.5.5.7.3.2';
 
+function badDecrypt(locked, base) {
+  for (let i = 0; ; i++) {
+    const tried = i ? `${base}-${i}` : base;
+    try {
+      createPrivateKey({ key: locked, passphrase: tried });
+    } catch (err) {
+      if (err.code === 'ERR_OSSL_BAD_DECRYPT') return tried;
+    }
+  }
+}
+
 function encrypted(key, passphrase) {
   return createPrivateKey(key).export({
     type: 'pkcs8',
@@ -522,7 +533,7 @@ test(
     const tls = { ca: ca.pem, cert: mine.cert };
     const locked = encrypted(mine.key, 'open sesame');
     const cases = [
-      [{ key: locked, passphrase: 'wrong' }, 'ERR_OSSL_BAD_DECRYPT'],
+      [{ key: locked, passphrase: badDecrypt(locked, 'wrong') }, 'ERR_OSSL_BAD_DECRYPT'],
       [{ key: locked }, 'ERR_OSSL_CRYPTO_INTERRUPTED_OR_CANCELLED'],
       [{ key: stranger.key }, 'ERR_OSSL_X509_KEY_VALUES_MISMATCH'],
       [{ key: 'not a key' }, 'ERR_OSSL_UNSUPPORTED'],
@@ -725,7 +736,7 @@ test(
     await kernel.writeFile('/k/locked.pem', locked);
     await kernel.writeFile('/k/stranger.pem', stranger.key);
     await kernel.writeFile('/k/pass', PASS);
-    await kernel.writeFile('/k/wrong', `${PASS}-wrong`);
+    await kernel.writeFile('/k/wrong', badDecrypt(locked, `${PASS}-wrong`));
     const markers = [
       PASS,
       ...keyMarkers(mine.key),
