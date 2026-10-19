@@ -61,6 +61,7 @@ interface LiveNodeState {
 
   listed?: Map<string, SyncFsBridgeStat>;
   listedAt?: number;
+  listedGen?: number | undefined;
 
   maxFile?: number;
 
@@ -407,8 +408,21 @@ function filled(
   Object.assign(s, { stat, statAt: syncCallCount(), seenAt: syncEpoch(), ...asked });
 }
 
-function answeredAt(node: LiveFsNode, filledAt: number): LiveFsNode {
-  node.live.filledAt = filledAt;
+interface Asked {
+  filledAt: number;
+  statGen: number | undefined;
+}
+
+function asking(bridge: SyncFsPosixBridge): Asked {
+  return { filledAt: performance.now(), statGen: bridge.changes?.now() };
+}
+
+function listing(s: LiveNodeState): Asked {
+  return { filledAt: s.listedAt ?? Number.NEGATIVE_INFINITY, statGen: s.listedGen };
+}
+
+function answeredAt(node: LiveFsNode, asked: Asked): LiveFsNode {
+  Object.assign(node.live, asked);
   return node;
 }
 
@@ -704,7 +718,7 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
     lookup(parent, name) {
       const listed = parent.live.listed?.get(name);
       parent.live.listed?.delete(name);
-      const asked = listed ? (parent.live.listedAt ?? Number.NEGATIVE_INFINITY) : performance.now();
+      const asked = listed ? listing(parent.live) : asking(bridgeOf(parent));
       const st = listed ?? call(() => bridgeOf(parent).lstat(childPath(parent, name)));
       return answeredAt(makeNode(parent, name, st), asked);
     },
@@ -783,9 +797,10 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
     },
     readdir(node) {
       const listedAt = performance.now();
+      const listedGen = bridgeOf(node).changes?.now();
       const listed = call(() => bridgeOf(node).readdirStat(liveNodePath(node)));
       node.live.listed = new Map();
-      node.live.listedAt = listedAt;
+      Object.assign(node.live, { listedAt, listedGen });
       for (const [name, st] of listed) if (st) node.live.listed.set(name, st);
       return ['.', '..', ...listed.map(([name]) => name)];
     },
