@@ -28,9 +28,11 @@ export function sniffPg(start: string): 'yes' | 'no' | 'more' {
 export class PgServer {
   private buffer = new Uint8Array(0);
   private skip = 0;
+  private lost = false;
   cleartext = false;
 
   feed(bytes: Uint8Array): void {
+    if (this.lost) return;
     const data = new Uint8Array(this.buffer.length + bytes.length);
     data.set(this.buffer);
     data.set(bytes, this.buffer.length);
@@ -47,6 +49,12 @@ export class PgServer {
       if (left < 5) break;
       const type = data[at] as number;
       const whole = 1 + int32(data, at + 1);
+      if (whole < 5 || (type === 0x52 && whole > PG_MESSAGE_MAX)) {
+        this.lost = true;
+        this.cleartext = false;
+        this.buffer = new Uint8Array(0);
+        return;
+      }
       if (type !== 0x52) {
         this.skip = whole;
         continue;

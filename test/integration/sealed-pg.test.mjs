@@ -96,6 +96,12 @@ const AUTH = {
   cleartext: () => message('R', int32(3)),
   md5: () => message('R', Buffer.concat([int32(5), Buffer.from([1, 2, 3, 4])])),
   scram: () => message('R', Buffer.concat([int32(10), Buffer.from('SCRAM-SHA-256\0\0')])),
+  negative: () =>
+    Buffer.concat([
+      Buffer.from('N'),
+      Buffer.from([0xff, 0xff, 0xff, 0xff]),
+      message('R', int32(3)),
+    ]),
 };
 
 async function pgServer(t, cert, method) {
@@ -220,5 +226,20 @@ test(
         ['pg', 'password-cleartext', [SHORT_PH], 5432],
       ]
     );
+  }
+);
+
+test(
+  'pg: a server frame with a negative length stops the kernel following the server, without spinning; the session goes on and nothing is substituted (#1090, #1136 review)',
+  TIMEOUT,
+  async (t) => {
+    const bad = await pgServer(t, ca.server('db.test'), 'negative');
+    const { run, asked } = await kernelWith(t, [['db.test', bad.port]]);
+    const started = Date.now();
+    const [got] = await run([{ host: 'db.test', password: PH }]);
+    assert.ok(Date.now() - started < 30_000, 'the kernel answered');
+    assert.equal(got.verified, true, JSON.stringify(got));
+    assert.equal(bad.log[0].password, PH);
+    assert.deepEqual(asked, []);
   }
 );
