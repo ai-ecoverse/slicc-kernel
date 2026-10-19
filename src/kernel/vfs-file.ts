@@ -1,3 +1,4 @@
+import { copyByBytes } from '../fs/copy.ts';
 import { AsyncRangedFile, type AsyncRangedIo } from '../fs/ranged.ts';
 import {
   fsError,
@@ -965,6 +966,19 @@ export function keepingOpen(
     },
     mkdir: (path, options) =>
       nodes.onEntry(fs.resolvePath('/', path), () => fs.mkdir(path, options)),
+    ...(fs.copyFile
+      ? {
+          async copyFile(from, to, options) {
+            const source = await nodes.targetKey(fs.resolvePath('/', from));
+            await nodes.flush(source);
+            await nodes.flushLinked(source);
+            const at = fs.resolvePath('/', to);
+            const key = await nodes.entryKey(at);
+            if (await heldAt(fs, nodes, at)) return copyByBytes(this, from, to, options);
+            await nodes.onEntry(key, () => fs.copyFile?.(from, to, options) as Promise<void>);
+          },
+        }
+      : {}),
   };
 }
 
