@@ -734,6 +734,10 @@ export class WasiFds {
     } else if (path === '/dev/tty' || /^\/dev\/tty\d+$/.test(path)) {
       fd = openTty?.call(this.kernel.sys, path === '/dev/tty' ? undefined : path);
       if (fd === undefined) throw new WasiError('ENXIO');
+      if ((oflags & OFLAGS.CREAT) !== 0 && (oflags & OFLAGS.EXCL) !== 0) {
+        this.kernel.sys.close(fd);
+        throw new WasiError('EEXIST');
+      }
       kind = 'tty';
     } else return undefined;
     this.adopt(fd, kind, nonblock);
