@@ -145,10 +145,43 @@ const KEY_ERRORS: ReadonlyArray<[number, string]> = [
   [-0x3c00, 'ERR_OSSL_CRYPTO_INTERRUPTED_OR_CANCELLED'],
 ];
 
-function keyRefused(err: unknown): KernelError {
-  const code = err instanceof TlsError ? err.code : 0;
+const PBE_OIDS = [
+  [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x05],
+  [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x0c, 0x01],
+];
+
+function hasBytes(hay: Uint8Array, needle: readonly number[]): boolean {
+  for (let i = 0; i + needle.length <= hay.length; i++) {
+    if (needle.every((b, j) => hay[i + j] === b)) return true;
+  }
+  return false;
+}
+
+export function encryptedKey(key: Uint8Array): boolean {
+  if (key[0] === 0x30) return PBE_OIDS.some((oid) => hasBytes(key, oid));
+  return new TextDecoder().decode(key).includes('ENCRYPTED');
+}
+
+const KEY_PARSE_RANGES: ReadonlyArray<[number, number]> = [
+  [-0x3fff, -0x3800],
+  [-0x14ff, -0x1000],
+  [-0x6fff, -0x6000],
+  [-0x7f, -0x60],
+];
+
+const keyParse = (code: number): boolean =>
+  code !== -0x3c00 && KEY_PARSE_RANGES.some(([lo, hi]) => code >= lo && code <= hi);
+
+export function keyRefused(err: unknown, locked: boolean): KernelError {
+  const raw = err instanceof TlsError ? err.code : 0;
+  const code = locked && keyParse(raw) ? -0x3b80 : raw;
   const name = KEY_ERRORS.find(([n]) => n === code)?.[1] ?? 'ERR_OSSL_UNSUPPORTED';
-  const text = code === -3 ? 'the key does not match the certificate' : (err as Error).message;
+  const text =
+    code === -3
+      ? 'the key does not match the certificate'
+      : code === raw
+        ? (err as Error).message
+        : 'bad decrypt';
   return new KernelError('EPROTO', `${name}: ${text}`);
 }
 
@@ -178,12 +211,12 @@ function takeCert(req: SecureRequest) {
 
 type ClientCert = NonNullable<ReturnType<typeof takeCert>>;
 
-function withCert(session: TlsSession, cert: ClientCert | undefined): void {
+export function withCert(session: TlsSession, cert: ClientCert | undefined): void {
   if (!cert) return;
   try {
     session.ownCert(cert.chain, cert.key, cert.pass);
   } catch (err) {
-    throw keyRefused(err);
+    throw keyRefused(err, cert.pass.length > 0 && encryptedKey(cert.key));
   }
 }
 
