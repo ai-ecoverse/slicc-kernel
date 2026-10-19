@@ -37,6 +37,7 @@ import { type Cred, copyCred } from './cred.ts';
 import { type FdTable, kernelFdKind, type OpenFile } from './fd-table.ts';
 import type { FifoTable } from './fifo.ts';
 import type { JobTable } from './jobs.ts';
+import { JsThreads, jsThreadCap } from './js-threads.ts';
 import type { KernelLocks } from './lock-service.ts';
 import type { HttpHandles } from './net/http-syscalls.ts';
 import type { Resolver } from './net/resolver.ts';
@@ -51,7 +52,10 @@ import {
 import {
   type ForkState,
   type InheritedFd,
+  JS_THREAD_SPAWN,
   type JsLane,
+  type JsProcessInitMsg,
+  type JsThreadSpawnMsg,
   type ProcessInitMsg,
   type Program,
   WASM_MAX_THREADS,
@@ -306,6 +310,8 @@ function threadCancel(thread: ThreadSignals): AbortSignal {
   return unblocked(thread.header) !== 0 ? AbortSignal.abort() : thread.interrupt.signal;
 }
 
+const asyncFanout = new WeakMap<Int32Array, Set<Int32Array>>();
+
 function notifiers(header: Int32Array): { onPending(sig: number): void; onAsync(): void } {
   return {
     onPending(sig) {
@@ -313,8 +319,10 @@ function notifiers(header: Int32Array): { onPending(sig: number): void; onAsync(
       Atomics.notify(header, SAB_I_SIGNALS);
     },
     onAsync() {
-      Atomics.add(header, SAB_I_ASYNC, 1);
-      Atomics.notify(header, SAB_I_ASYNC);
+      for (const at of [header, ...(asyncFanout.get(header) ?? [])]) {
+        Atomics.add(at, SAB_I_ASYNC, 1);
+        Atomics.notify(at, SAB_I_ASYNC);
+      }
     },
   };
 }
@@ -602,6 +610,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     dispatch: clocks.timed(undefined, dispatch),
   });
   const lane = opts.program.abi === 'js' ? openLane(token, dispatch) : undefined;
+  const jsThreads = jsThreadsOf(opts, process, token, dispatch, clocks, header);
 
   const { promise: exited, resolve: settle } = Promise.withResolvers<number>();
   let done = false;
@@ -617,6 +626,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     worker.removeEventListener('message', onMessage);
     worker.removeEventListener('error', onError);
     for (const tid of [...threads.keys()]) endThread(tid);
+    jsThreads?.close();
     responder.dispose();
     lane?.dispose();
     revokeSyncFsToken(token);
@@ -640,6 +650,8 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
       finish(...dying.status(data.code));
     } else if (data?.type === WASM_THREAD_SPAWN && data.thread) {
       spawnThread(data.thread);
+    } else if (data?.type === JS_THREAD_SPAWN && jsThreads) {
+      jsThreads.spawn(data as unknown as JsThreadSpawnMsg);
     }
   };
   const onMessage = (event: MessageEvent): void => handle(event.data as WorkerSays | undefined);
@@ -715,13 +727,50 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     termsig: () => endedBy,
     onState: (listener) => process.onState(listener),
     memory: () => Atomics.load(header, SAB_I_MEMORY) * 65536,
+    ...processViews(process, opts, header),
+    writesBack: () => opts.program.abi === 'wasi' && !done,
+    ...clockViews(clocks),
+  };
+}
+
+function jsThreadsOf(
+  opts: SpawnWasmOptions,
+  process: WasmProcess,
+  token: string,
+  dispatch: (req: SyncSabDispatchRequest, block?: () => void) => Promise<SyncFsResult>,
+  clocks: ProcessClocks,
+  header: Int32Array
+): JsThreads | undefined {
+  if (opts.program.abi !== 'js') return undefined;
+  const wakes = new Set<Int32Array>();
+  asyncFanout.set(header, wakes);
+  const threads = new JsThreads({
+    wakes,
+    cap: jsThreadCap(opts.env),
+    createWorker: opts.createWorker,
+    init: (sab, lane) =>
+      processInit(opts, sab, process.umask, copyCred(process.cred), lane) as JsProcessInitMsg,
+    openLane: (laneDispatch) => openLane(token, laneDispatch),
+    attach: (worker, sab, threadDispatch) =>
+      attachSyncSabResponder(worker, sab, token, { dispatch: threadDispatch }),
+    dispatch,
+    clocks,
+  });
+  process.onState((state) => threads.stopped(state === 'stopped'));
+  return threads;
+}
+
+function processViews(
+  process: WasmProcess,
+  opts: SpawnWasmOptions,
+  header: Int32Array
+): Pick<WasmProcessHandle, 'ignoredSignals' | 'blockedSignals' | 'signalMasks' | 'umask' | 'cred'> {
+  return {
     ignoredSignals: (fork) => process.inheritable(fork),
     blockedSignals: () => (opts.program.abi === 'wasi' ? loadBlocked(header) : [0, 0]),
     signalMasks: () => process.signalMasks(),
     umask: () => process.umask,
     cred: () => copyCred(process.cred),
-    writesBack: () => opts.program.abi === 'wasi' && !done,
-    ...clockViews(clocks),
   };
 }
 
