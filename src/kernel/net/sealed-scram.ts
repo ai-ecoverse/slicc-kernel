@@ -1,3 +1,5 @@
+import { prepFails } from './saslprep-tables.ts';
+
 const encoder = new TextEncoder();
 
 export interface ScramExchange {
@@ -113,12 +115,10 @@ export async function scramKeys(password: string, x: ScramExchange): Promise<Scr
 
 const SPACES = /[\u00A0\u1680\u2000-\u200B\u202F\u205F\u3000]/g;
 const NOTHING = /\u00AD|\u034F|\u1806|[\u180B-\u180D]|\u200C|\u200D|\u2060|[\uFE00-\uFE0F]|\uFEFF/g;
-const PROHIBITED = /[\u0000-\u001F\u007F-\u009F\uE000-\uF8FF\uFFFE\uFFFF]/;
-
 export function saslprep(password: string): string {
-  if (/^[\x20-\x7e]*$/.test(password)) return password;
-  const mapped = password.replace(SPACES, ' ').replace(NOTHING, '').normalize('NFKC');
-  return PROHIBITED.test(mapped) ? password : mapped;
+  if (/^[\x00-\x7f]*$/.test(password)) return password;
+  const mapped = password.replace(SPACES, ' ').replace(NOTHING, '');
+  return prepFails(mapped) ? password : mapped.normalize('NFKC');
 }
 
 export function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
