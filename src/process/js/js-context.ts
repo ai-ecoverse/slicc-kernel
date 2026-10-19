@@ -183,6 +183,7 @@ async function selectOp(
   sets: JsSelectSets,
   signal: AbortSignal | undefined
 ): Promise<JsSelected> {
+  signal?.throwIfAborted();
   const read = fdList(sets.read);
   const write = fdList(sets.write);
   const timeoutMs = sets.timeoutMs ?? -1;
