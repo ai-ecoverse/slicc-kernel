@@ -4,7 +4,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 home="${WASIXCC_HOME:-$HOME/.wasixcc}"
 sysroot="$home/sysroot/sysroot"
 lib="$sysroot/lib/wasm32-wasi"
-"$home/llvm/bin/clang" --target=wasm32-wasi --sysroot="$sysroot" -O2 -fno-builtin -pthread -matomics \
+"$home/llvm/bin/clang" --target=wasm32-wasi --sysroot="$sysroot" -O2 -pthread -matomics \
   -mbulk-memory -mmutable-globals -nodefaultlibs "$here/guestwrites.c" "$lib/libc.a" \
   "$lib/libclang_rt.builtins-wasm32.a" \
   -Wl,--shared-memory,--import-memory,--max-memory=1073741824,--strip-all \

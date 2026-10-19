@@ -60,13 +60,13 @@ static unsigned char *guarded(struct block *b, size_t len, const char *op, unsig
     fflush(stdout);
     _Exit(3);
   }
-  if ((size_t)b->base + len + 2 * GUARD > __builtin_wasm_memory_size(0) * 65536) atomic_fetch_add(&stale, 1);
   if (bulk) {
-    memset(b->base, tag, GUARD);
-    memset(b->base + GUARD, FILL, len);
-    memset(b->base + GUARD + len, tag, GUARD);
+    __builtin_memset(b->base, tag, GUARD);
+    __builtin_memset(b->base + GUARD, FILL, len);
+    __builtin_memset(b->base + GUARD + len, tag, GUARD);
     return b->base + GUARD;
   }
+  if ((size_t)b->base + len + 2 * GUARD > __builtin_wasm_memory_size(0) * 65536) atomic_fetch_add(&stale, 1);
   volatile unsigned char *v = b->base;
   for (size_t i = 0; i < GUARD; i++) v[i] = tag;
   for (size_t i = 0; i < len; i++) v[GUARD + i] = FILL;
