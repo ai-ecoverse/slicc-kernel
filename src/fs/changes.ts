@@ -44,6 +44,10 @@ export class FileChanges {
     Atomics.store(this.view, FOREIGN, on ? 1 : 0);
   }
 
+  flush(): void {
+    Atomics.add(this.view, GEN, RING_SIZE + 1);
+  }
+
   publish(...paths: string[]): void {
     for (const path of paths) {
       const g = (Atomics.add(this.view, GEN, 1) + 1) | 0;

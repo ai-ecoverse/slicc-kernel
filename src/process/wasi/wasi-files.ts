@@ -390,6 +390,7 @@ export function pathInode(path: string): bigint {
 }
 
 export const MISS_TTL_MS = 20;
+export const SHARED_TTL_MS = 2;
 const CACHE_CAP = 8192;
 
 interface Miss {
@@ -614,10 +615,11 @@ function goneAbove(
 }
 
 const remember =
-  (cache: StatCache, seen: SeenAt, blind: boolean) =>
+  (cache: StatCache, seen: SeenAt, blind: boolean, fill: (entry: object) => void) =>
   (path: string, made: SyncFsCreated | undefined | void): SyncFsCreated | undefined | void => {
     if (!made || blind) return made;
     const { seen: at, ...st } = made;
+    fill(st);
     cache.put(cache.stats, path, st);
     if (at !== undefined) seen.saw(cache.stats, path, at);
     return made;
@@ -636,6 +638,45 @@ function copying(
   };
 }
 
+class Fills {
+  private readonly at = new WeakMap<object, number>();
+  private readonly view: ChangeView | undefined;
+  private readonly now: () => number;
+  constructor(view: ChangeView | undefined, now: () => number) {
+    this.view = view;
+    this.now = now;
+  }
+
+  set(entry: object, at = this.now()): void {
+    this.at.set(entry, at);
+  }
+
+  young(entry: object): boolean {
+    if (!this.view?.foreign()) return true;
+    return this.now() - (this.at.get(entry) ?? Number.NEGATIVE_INFINITY) < SHARED_TTL_MS;
+  }
+}
+
+function listed(
+  { cache, seen, filled }: { cache: StatCache; seen: SeenAt; filled: Fills },
+  p: string,
+  list: ReturnType<SyncFsPosixBridge['readdirStat']>,
+  gen: number | undefined,
+  asked: number
+): void {
+  const base = p === '/' ? '' : p;
+  for (const [name, st] of list) {
+    if (!st) continue;
+    filled.set(st, asked);
+    const at = `${base}/${name}`;
+    cache.put(cache.lstats, at, st);
+    if (gen !== undefined) seen.saw(cache.lstats, at, gen);
+    if (st.isSymbolicLink) continue;
+    cache.put(cache.stats, at, st);
+    if (gen !== undefined) seen.saw(cache.stats, at, gen);
+  }
+}
+
 export function cachingBridge(
   bridge: SyncFsPosixBridge,
   now: () => number = () => performance.now(),
@@ -649,31 +690,37 @@ export function cachingBridge(
   const cache = new StatCache(blind ? undefined : shared);
   const { stats, lstats } = cache;
   const view = bridge.changes;
+  const filled = new Fills(view, now);
+  const young = (entry: object) => filled.young(entry);
   const live = (miss: Miss, path: string) =>
     miss.until > now() &&
+    young(miss) &&
     (view === undefined || miss.gen === undefined || !view.changedSince(miss.gen, path).changed);
   const seen = new SeenAt(view, lstats);
-  const kept = remember(cache, seen, blind);
+  const kept = remember(cache, seen, blind, (entry) => filled.set(entry));
   const gone = (path: string) => goneAbove([lstats, stats], live, path);
   const cached = (map: typeof stats, path: string, get: () => SyncFsBridgeStat) => {
-    if (blind || view?.foreign()) return get();
+    if (blind) return get();
     cache.fresh();
     let hit = map.get(path);
-    if (hit !== undefined && !('until' in hit) && seen.changed(map, path)) hit = undefined;
+    if (hit !== undefined && !('until' in hit) && (!young(hit) || seen.changed(map, path)))
+      hit = undefined;
     if (hit === undefined || ('until' in hit && !live(hit, path))) {
       const missing = gone(path);
       if (missing) throw missing.error;
       const gen = view?.now();
+      const asked = now();
       try {
         hit = get();
         if (gen !== undefined) seen.saw(map, path, gen);
       } catch (e) {
         hit = {
           error: e as Error,
-          until: now() + MISS_TTL_MS,
+          until: asked + MISS_TTL_MS,
           ...(gen !== undefined ? { gen } : {}),
         };
       }
+      filled.set(hit, asked);
       cache.put(map, path, hit);
     }
     if ('until' in hit) throw hit.error;
@@ -733,24 +780,16 @@ export function cachingBridge(
 
     readdirStat: (p: string) => {
       const gen = view?.now();
+      const asked = now();
       const list = bridge.readdirStat(p);
-      const base = p === '/' ? '' : p;
-      for (const [name, st] of list) {
-        if (!st || blind) continue;
-        const at = `${base}/${name}`;
-        cache.put(lstats, at, st);
-        if (gen !== undefined) seen.saw(lstats, at, gen);
-        if (st.isSymbolicLink) continue;
-        cache.put(stats, at, st);
-        if (gen !== undefined) seen.saw(stats, at, gen);
-      }
+      if (!blind) listed({ cache, seen, filled }, p, list, gen, asked);
       return list;
     },
     readlink: (p) => {
       const known = blind ? undefined : (cache.fresh(), lstats.get(p));
       const gen = seen.lstat(p);
       const current = view !== undefined && gen !== undefined && !view.changedSince(gen, p).changed;
-      if (known && current && !('until' in known) && !known.isSymbolicLink) {
+      if (known && current && !('until' in known) && young(known) && !known.isSymbolicLink) {
         throw syncError('EINVAL', `'${p}' is not a symbolic link`);
       }
       return bridge.readlink(p);
