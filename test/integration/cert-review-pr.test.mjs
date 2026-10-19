@@ -995,6 +995,11 @@ test("the merge group's steps end to end: a planted regression is red, a missing
     if (method === 'POST' && url === '/repos/o/r/issues') return { number: nextIssue };
     if (method === 'POST' && /^\/repos\/o\/r\/issues\/\d+\/comments$/.test(url)) return {};
     if (method === 'PATCH' && /^\/repos\/o\/r\/issues\/\d+$/.test(url)) return {};
+    if (method === 'GET' && /^\/repos\/o\/r\/issues\/\d+\/comments\?/.test(url)) return [];
+    if (method === 'GET' && /^\/repos\/o\/r\/issues\/\d+$/.test(url)) {
+      const number = Number(url.split('/').at(-1));
+      return issues.find((i) => i.number === number) ?? { number, state: 'open' };
+    }
     return undefined;
   });
   const BIOS = 'c2cec127b935419049568f584093d7ef03ac0721';
@@ -1309,4 +1314,101 @@ test("the cert-path guard fails closed: a reviewer path the guard's globs miss (
     block.includes(`const dirs = ${JSON.stringify(lib.REVIEWER_DIRS).replaceAll(',', ', ')};`),
     'the step and lib hold the same reviewer dirs'
   );
+});
+
+test('the downstream notice reconciles concurrent merge groups: twins close into the oldest, a failing group reopens the issue a passing one closed under it, and a passing group leaves open an issue another group reported to meanwhile (#1082)', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'cert-notice-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const title = 'downstream: bios canary failing on main (c2cec127b935)';
+  let listed = [];
+  let now = {};
+  let reports = {};
+  const api = await fakeApi(t, (method, url) => {
+    if (method === 'GET' && url.startsWith('/repos/o/r/issues?')) return listed;
+    if (method === 'GET' && /^\/repos\/o\/r\/issues\/\d+\/comments\?since=t1&/.test(url))
+      return reports[Number(url.split('/').at(-2))] ?? [];
+    if (method === 'GET' && /^\/repos\/o\/r\/issues\/\d+$/.test(url))
+      return now[Number(url.split('/').at(-1))];
+    if (method === 'POST' && url === '/repos/o/r/issues') return { number: 70 };
+    if (method === 'POST' && /\/comments$/.test(url)) return {};
+    if (method === 'PATCH') return {};
+    return undefined;
+  });
+  const file = join(dir, 'downstream.json');
+  const notice = async (found) => {
+    await writeFile(file, JSON.stringify(found));
+    api.seen.length = 0;
+    const r = await pr(api.url, [
+      'notice',
+      '--repo',
+      'o/r',
+      '--head',
+      'f'.repeat(40),
+      '--run',
+      '2',
+      '--bios',
+      'c2cec127b935419049568f584093d7ef03ac0721',
+      '--downstream',
+      file,
+    ]);
+    assert.equal(r.code, 0, r.out);
+    const patches = api.seen
+      .filter((x) => x.method === 'PATCH')
+      .map((x) => [Number(x.url.split('/').at(-1)), x.body.state]);
+    const comments = api.seen
+      .filter((x) => x.method === 'POST' && x.url.endsWith('/comments'))
+      .map((x) => Number(x.url.split('/').at(-2)));
+    return { out: r.out, patches, comments };
+  };
+  const failing = { state: 'NOT_JUDGED', notify: ['bios canary is failing on main'], line: 'x' };
+  const open = (number, updated = 't1') => ({ number, title, state: 'open', updated_at: updated });
+
+  listed = [open(52), open(51)];
+  now = { 51: open(51), 52: open(52) };
+  const twins = await notice(failing);
+  assert.deepEqual(twins.comments, [51, 52], twins.out);
+  assert.deepEqual(twins.patches, [[52, 'closed']], twins.out);
+  assert.match(twins.out, /^pr notice: PASS commented on #51: NOT_JUDGED$/m);
+
+  listed = [open(51)];
+  now = { 51: { ...open(51, 't2'), state: 'closed' } };
+  const reopened = await notice(failing);
+  assert.deepEqual(reopened.patches, [[51, 'open']], reopened.out);
+  assert.match(reopened.out, /reopened #51 that a concurrent group closed/);
+
+  listed = [open(51), open(53)];
+  now = { 51: open(51, 't2'), 53: open(53) };
+  const passing = await notice({ state: 'PASS', notify: [], line: 'ok' });
+  assert.deepEqual(passing.patches, [[53, 'closed']], passing.out);
+  assert.deepEqual(passing.comments, [53], passing.out);
+  assert.match(
+    passing.out,
+    /^pr notice: PASS PASS: closed #53; left #51 open: a concurrent group reported to it$/m
+  );
+
+  listed = [open(54)];
+  now = { 54: open(54) };
+  reports = {
+    54: [{ body: "The merge group 0123 (x) found bios's canary failing on main's own pins" }],
+  };
+  const raced = await notice({ state: 'PASS', notify: [], line: 'ok' });
+  assert.deepEqual(
+    raced.patches,
+    [
+      [54, 'closed'],
+      [54, 'open'],
+    ],
+    raced.out
+  );
+  assert.match(
+    raced.out,
+    /^pr notice: PASS PASS: left #54 open: a concurrent group reported to it$/m
+  );
+  reports = {};
+
+  listed = [];
+  now = { 70: { number: 70, title, state: 'open' } };
+  const fresh = await notice(failing);
+  assert.deepEqual(fresh.patches, [], fresh.out);
+  assert.match(fresh.out, /opened "downstream: bios canary failing on main \(c2cec127b935\)"/);
 });
