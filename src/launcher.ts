@@ -44,7 +44,7 @@ import {
   protectedPrefixes,
   writerTags,
 } from './fs/protect.ts';
-import type { KernelFs, UsersMode } from './fs/types.ts';
+import type { KernelFs, Peers, UsersMode } from './fs/types.ts';
 import { fsError, normalizePath } from './fs/types.ts';
 import { UNLINKED_DIR, UnlinkedKeeper, type UnlinkOwner, webLocks } from './fs/unlinked.ts';
 import { joinName, parentOf, realDir } from './fs/walk.ts';
@@ -673,9 +673,7 @@ export class Launcher {
     this.usersMode = usersMode(options.users);
     this.memories = memoriesOf(options.wasmMemories);
     this.rootFs = options.fs;
-    const peers = options.fs.peers?.();
-    this.locks = kernelLocks(options.fs.rootName, peers);
-    peers?.watch((crowded) => this.changes.foreign(crowded));
+    this.locks = kernelLocks(options.fs.rootName, this.flushingPeers(options.fs));
     this.dac = this.usersMode === 'off' ? undefined : new Dac(this.usersMode, options.onDenial);
     if (this.dac) this.dac.tagOf = (pid) => this.tagOf(pid);
     this.clipboard = new ClipboardBroker(options.clipboard, this.usersMode, undefined, (pid) =>
@@ -756,7 +754,10 @@ export class Launcher {
     this.nodes.keepsOnDisk = true;
     this.openFiles.add(this.nodes);
     options.fs.onPeer?.(() => this.flushOpen());
-    options.fs.remoteChanges?.((change) => this.rewritten(change.paths));
+    options.fs.remoteChanges?.((change) => {
+      this.changes.flush();
+      this.rewritten(change.paths);
+    });
     const holders = [this.held, this.openFiles];
     this.unlinked = new UnlinkedKeeper(
       fs,
@@ -2818,6 +2819,22 @@ export class Launcher {
     }
     this.writers ??= this.writerStack();
     return this.writers;
+  }
+
+  private flushingPeers(fs: KernelFs): Peers | undefined {
+    const peers = fs.peers?.();
+    if (!peers) return undefined;
+    peers.watch((crowded) => {
+      this.changes.flush();
+      this.changes.foreign(crowded);
+    });
+    return {
+      ...peers,
+      fresh: () => {
+        this.changes.flush();
+        peers.fresh?.();
+      },
+    };
   }
 
   private rewritten(paths: readonly string[]): void {
