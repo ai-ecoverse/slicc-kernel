@@ -35,11 +35,12 @@ async function boot(t) {
   );
   const pids = async (name) => (await root(`pids ${name}`)).stdout.split('\n').filter(Boolean);
   const until = async (check, what) => {
-    for (let i = 0; i < 600; i++) {
+    const deadline = Date.now() + 45_000;
+    while (Date.now() < deadline) {
       if (await check()) return;
       await tick(100);
     }
-    assert.fail(`timed out: ${what}`);
+    assert.fail(`no progress in 45 s: ${what}`);
   };
   return { kernel, root, pids, until };
 }
