@@ -30,6 +30,21 @@ export const JS_OOM =
 
 const ENDING: SyncFsResult = { ok: false, errno: 'EINTR', message: 'the thread is ending' };
 
+const MAIN_ONLY: SyncFsResult = { ok: true, kind: 'void' };
+
+type Tracked = { op: string; id?: unknown; token?: unknown };
+
+function track(ops: Map<number, unknown>, req: Tracked, result: SyncFsResult): void {
+  if (req.op === 'async-submit' && result.ok && result.kind === 'json') {
+    if (typeof result.json === 'number') ops.set(result.json, req.token);
+  } else if (
+    req.op === 'async-cancel' ||
+    (req.op === 'async-take' && (result.ok || result.errno !== 'EAGAIN'))
+  ) {
+    ops.delete(req.id as number);
+  }
+}
+
 function cores(): number {
   const n = (globalThis as { navigator?: { hardwareConcurrency?: number } }).navigator
     ?.hardwareConcurrency;
@@ -46,6 +61,7 @@ type Dispatch = (req: SyncSabDispatchRequest, block?: () => void) => Promise<Syn
 
 export interface JsThreadDeps {
   cap: number;
+  wakes: Set<Int32Array>;
   createWorker: () => WasmWorkerLike;
   init: (sab: SharedArrayBuffer, lane: JsLane) => JsProcessInitMsg;
   openLane: (dispatch: Dispatch) => { lane: JsLane; dispose(): void };
@@ -56,7 +72,6 @@ export interface JsThreadDeps {
   ) => { dispose(): void };
   dispatch: Dispatch;
   clocks: Pick<ProcessClocks, 'thread' | 'threadEnded' | 'timed'>;
-  onError: ((message: string) => void) | undefined;
 }
 
 interface ThreadSays {
@@ -115,6 +130,11 @@ export class JsThreads {
       ended = true;
       this.live.delete(tid);
       this.headers.delete(tid);
+      this.deps.wakes.delete(header);
+      for (const [id, token] of ops) {
+        void this.deps.dispatch({ op: 'async-cancel', id, token } as SyncSabDispatchRequest);
+      }
+      ops.clear();
       worker.removeEventListener('message', onMessage);
       worker.removeEventListener('error', onError);
       control.removeEventListener('message', onControl);
@@ -125,12 +145,16 @@ export class JsThreads {
       answer(control, { exited: code });
       control.close();
     };
-    const dispatch: Dispatch = (req, block) => {
+    const ops = new Map<number, unknown>();
+    const dispatch: Dispatch = async (req, block) => {
       if (isWasmSyscall(req) && req.op === 'proc-exit') {
         queueMicrotask(() => end(req.status & 0xff));
-        return Promise.resolve(ENDING);
+        return ENDING;
       }
-      return this.deps.dispatch(req, block);
+      if (isWasmSyscall(req) && req.op === 'sig-mask') return MAIN_ONLY;
+      const result = await this.deps.dispatch(req, block);
+      if (!ended) track(ops, req as Tracked, result);
+      return result;
     };
     const responder = this.deps.attach(worker, sab, this.deps.clocks.timed(clock, dispatch));
     const lane = this.deps.openLane(dispatch);
@@ -153,6 +177,7 @@ export class JsThreads {
     control.start();
     this.live.set(tid, end);
     this.headers.set(tid, header);
+    this.deps.wakes.add(header);
     const init: JsThreadInitMsg = {
       ...this.deps.init(sab, lane.lane),
       type: JS_THREAD_INIT,
@@ -160,8 +185,7 @@ export class JsThreads {
     };
     try {
       worker.postMessage(init, [lane.lane.port, port, ...(msg.transfer ?? [])]);
-    } catch (error) {
-      this.deps.onError?.(`thread ${tid}: ${error instanceof Error ? error.message : error}`);
+    } catch {
       end(JS_THREAD_CRASHED);
       return;
     }
@@ -169,12 +193,7 @@ export class JsThreads {
   }
 
   private crashed(message: string, end: (code: number) => void): void {
-    if (JS_OOM.test(message)) {
-      end(JS_THREAD_NO_MEMORY);
-      return;
-    }
-    this.deps.onError?.(message);
-    end(JS_THREAD_CRASHED);
+    end(JS_OOM.test(message) ? JS_THREAD_NO_MEMORY : JS_THREAD_CRASHED);
   }
 
   stopped(stopped: boolean): void {

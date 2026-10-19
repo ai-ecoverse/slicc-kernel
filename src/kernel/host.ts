@@ -310,6 +310,8 @@ function threadCancel(thread: ThreadSignals): AbortSignal {
   return unblocked(thread.header) !== 0 ? AbortSignal.abort() : thread.interrupt.signal;
 }
 
+const asyncFanout = new WeakMap<Int32Array, Set<Int32Array>>();
+
 function notifiers(header: Int32Array): { onPending(sig: number): void; onAsync(): void } {
   return {
     onPending(sig) {
@@ -317,8 +319,10 @@ function notifiers(header: Int32Array): { onPending(sig: number): void; onAsync(
       Atomics.notify(header, SAB_I_SIGNALS);
     },
     onAsync() {
-      Atomics.add(header, SAB_I_ASYNC, 1);
-      Atomics.notify(header, SAB_I_ASYNC);
+      for (const at of [header, ...(asyncFanout.get(header) ?? [])]) {
+        Atomics.add(at, SAB_I_ASYNC, 1);
+        Atomics.notify(at, SAB_I_ASYNC);
+      }
     },
   };
 }
@@ -606,7 +610,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     dispatch: clocks.timed(undefined, dispatch),
   });
   const lane = opts.program.abi === 'js' ? openLane(token, dispatch) : undefined;
-  const jsThreads = jsThreadsOf(opts, process, token, dispatch, clocks);
+  const jsThreads = jsThreadsOf(opts, process, token, dispatch, clocks, header);
 
   const { promise: exited, resolve: settle } = Promise.withResolvers<number>();
   let done = false;
@@ -734,10 +738,14 @@ function jsThreadsOf(
   process: WasmProcess,
   token: string,
   dispatch: (req: SyncSabDispatchRequest, block?: () => void) => Promise<SyncFsResult>,
-  clocks: ProcessClocks
+  clocks: ProcessClocks,
+  header: Int32Array
 ): JsThreads | undefined {
   if (opts.program.abi !== 'js') return undefined;
+  const wakes = new Set<Int32Array>();
+  asyncFanout.set(header, wakes);
   const threads = new JsThreads({
+    wakes,
     cap: jsThreadCap(opts.env),
     createWorker: opts.createWorker,
     init: (sab, lane) =>
@@ -747,7 +755,6 @@ function jsThreadsOf(
       attachSyncSabResponder(worker, sab, token, { dispatch: threadDispatch }),
     dispatch,
     clocks,
-    onError: opts.onError,
   });
   process.onState((state) => threads.stopped(state === 'stopped'));
   return threads;

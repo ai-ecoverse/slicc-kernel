@@ -119,6 +119,17 @@ test("spawn keeps the platform's MessageChannel when the program replaces the gl
   assert.deepEqual(await run('stub'), { code: 3, stderr: '' });
 });
 
+test("a thread's async call that waits wakes when the kernel answers it, and a call a thread leaves in flight is cancelled when it ends (#1132 review)", async (t) => {
+  const run = await booted(t);
+  assert.deepEqual(await run('pipewake'), { got: 'late data', stderr: '' });
+  assert.deepEqual(await run('abandon'), { code: 0, got: 'for main', stderr: '' });
+});
+
+test("a thread's signals.on/reset leave the main thread's disposition alone: signals are the main thread's (#1132 review)", async (t) => {
+  const run = await booted(t);
+  assert.deepEqual(await run('sigreset'), { code: 0, caught: 1, stderr: '' });
+});
+
 test('a thread can spawn a thread of its own (#1094)', async (t) => {
   const run = await booted(t);
   assert.deepEqual(await run('nested'), { outer: 1, inner: 2, code: 3, stderr: '' });
@@ -161,6 +172,9 @@ test('in Chrome: messages, a shared SAB with Atomics both ways, transfer, thread
   assert.deepEqual(await go('fds'), { same: true, text: 'from the thread fd', stderr: '' });
   assert.deepEqual(await go('nested'), { outer: 1, inner: 2, code: 3, stderr: '' });
   assert.deepEqual(await go('stub'), { code: 3, stderr: '' });
+  assert.deepEqual(await go('pipewake'), { got: 'late data', stderr: '' });
+  assert.deepEqual(await go('abandon'), { code: 0, got: 'for main', stderr: '' });
+  assert.deepEqual(await go('sigreset'), { code: 0, caught: 1, stderr: '' });
   assert.deepEqual(await go('wasm'), { woke: true, first: 99, second: 77, inner: 5, stderr: '' });
   assert.deepEqual(page.errors, []);
 });

@@ -59,6 +59,21 @@ const threads = {
     port.postMessage({ fd: file.fd, pid: ctx.pid });
     await new Promise(() => {});
   },
+  async pipewake(ctx, port) {
+    const got = await ctx.read(ctx.thread.data.fd);
+    port.postMessage(new TextDecoder().decode(got));
+    await new Promise(() => {});
+  },
+  async abandon(ctx) {
+    void ctx.read(ctx.thread.data.fd).catch(() => {});
+    await pause(50);
+    return 0;
+  },
+  async sigreset(ctx) {
+    await ctx.signals.reset('SIGUSR1');
+    await ctx.signals.on('SIGUSR2', () => {});
+    return 0;
+  },
   async wasm(ctx, port) {
     const { module, memory } = await said(port);
     const instance = await WebAssembly.instantiate(module, { env: { memory } });
@@ -196,6 +211,38 @@ const cases = {
     };
     const t = await ctx.thread.spawn({ data: { kind: 'exit' } });
     return { code: await t.exited };
+  },
+  async pipewake(ctx) {
+    const [r, w] = await ctx.pipe();
+    const t = await ctx.thread.spawn({ data: { kind: 'pipewake', fd: r } });
+    const back = said(t.port);
+    await pause(200);
+    await ctx.write(w, 'late data');
+    const got = await back;
+    await t.terminate();
+    return { got };
+  },
+  async abandon(ctx) {
+    const [r, w] = await ctx.pipe();
+    const t = await ctx.thread.spawn({ data: { kind: 'abandon', fd: r } });
+    const code = await t.exited;
+    await ctx.write(w, 'for main');
+    const got = await Promise.race([
+      ctx.read(r).then((b) => new TextDecoder().decode(b)),
+      pause(3000).then(() => 'nothing'),
+    ]);
+    return { code, got };
+  },
+  async sigreset(ctx) {
+    let caught = 0;
+    await ctx.signals.on('SIGUSR1', () => {
+      caught++;
+    });
+    const t = await ctx.thread.spawn({ data: { kind: 'sigreset' } });
+    const code = await t.exited;
+    await ctx.kill(ctx.pid, 'SIGUSR1');
+    for (let i = 0; i < 100 && caught === 0; i++) await pause(10);
+    return { code, caught };
   },
   async wasm(ctx) {
     const module = await WebAssembly.compile(new Uint8Array(PUT));
