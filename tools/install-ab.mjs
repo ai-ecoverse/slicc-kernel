@@ -73,7 +73,7 @@ const install = (name) => {
     calls: Number(cells[3]),
     lookups: Number(cells[4]),
     requests: Number(cells[5]),
-    memory: mem ? Number.parseFloat(mem.split('|')[2]) : 0,
+    memory: mem ? Number.parseFloat(mem.split('|')[2]) : Number.NaN,
   };
 };
 

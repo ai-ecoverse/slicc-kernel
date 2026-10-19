@@ -80,9 +80,9 @@ test('a cold install of bios’s agent project into /opt/agent on the OPFS root,
   );
   const [modules, store, modulesKb, storeKb] = sizes.stdout.trim().split('\n').map(Number);
   const log = (await bash('cat /dev/shm/pnpm.ndjson', { cwd: '/' })).stdout;
-  const memory = await page
-    .evaluate(async () => (await performance.measureUserAgentSpecificMemory()).bytes)
-    .catch(() => 0);
+  const memory = await page.evaluate(
+    async () => (await performance.measureUserAgentSpecificMemory()).bytes
+  );
   assert.equal(r.stdout.trim(), 'rc=0', log.slice(-2000));
   const p = phases(log, series, wall);
   const inodes = modules + store;
