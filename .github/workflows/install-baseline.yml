@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: install-baseline
+  group: install-baseline-${{ github.ref_name }}-${{ github.run_id }}
   cancel-in-progress: false
 
 jobs:
