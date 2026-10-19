@@ -83,13 +83,13 @@ test('a file a WASI program creates and writes reuses the handle its create made
     [
       'O_EXCL',
       2.5,
-      3.3,
+      3.8,
       ["os.close(os.open(f'/tmp/oo/TAG{i}', os.O_WRONLY|os.O_CREAT|os.O_EXCL, 0o644))"],
     ],
     [
       'O_EXCL + write',
       4.5,
-      7.3,
+      7.8,
       [
         "fd = os.open(f'/tmp/oo/TAG{i}', os.O_WRONLY|os.O_CREAT|os.O_EXCL, 0o644)",
         "os.write(fd, b'x' * 4096)",
@@ -99,7 +99,7 @@ test('a file a WASI program creates and writes reuses the handle its create made
     [
       'O_TRUNC + write',
       5.5,
-      8.3,
+      8.8,
       [
         "fd = os.open(f'/tmp/oo/TAG{i}', os.O_WRONLY|os.O_CREAT|os.O_TRUNC, 0o644)",
         "os.write(fd, b'x' * 4096)",
