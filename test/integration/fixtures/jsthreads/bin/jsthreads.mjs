@@ -40,7 +40,8 @@ const threads = {
     let n = 0;
     setInterval(() => n++, 10);
     for (;;) {
-      await ctx.fs.writeFile('/tmp/ticks', String(n));
+      await ctx.fs.writeFile('/tmp/ticks.new', `${n} ${Date.now()}`);
+      await ctx.fs.rename('/tmp/ticks.new', '/tmp/ticks');
       await pause(20);
     }
   },
@@ -191,16 +192,31 @@ const cases = {
   },
   async stopper(ctx) {
     const pid = Number(ctx.argv[2]);
-    const ticks = async () => new TextDecoder().decode(await ctx.fs.readFile('/tmp/ticks'));
+    const ticks = async () => {
+      const [n, t] = new TextDecoder().decode(await ctx.fs.readFile('/tmp/ticks')).split(' ');
+      return { n: Number(n), t: Number(t) };
+    };
     await ctx.kill(pid, 'SIGSTOP');
-    await pause(150);
-    const a = await ticks();
+    let a = await ticks();
+    for (let i = 0; i < 50; i++) {
+      await pause(150);
+      const now = await ticks();
+      if (now.t === a.t) break;
+      a = now;
+    }
     await pause(400);
     const b = await ticks();
     await ctx.kill(pid, 'SIGCONT');
-    await pause(100);
-    const c = await ticks();
-    return { frozen: a === b, resumed: c !== b, timersFrozen: Number(c) - Number(b) < 35 };
+    let c = b;
+    for (let i = 0; i < 1000 && c.t < b.t + 500; i++) {
+      await pause(10);
+      c = await ticks();
+    }
+    return {
+      frozen: a.t === b.t,
+      resumed: c.t >= b.t + 500,
+      timersFrozen: (c.n - b.n) * 10 < c.t - b.t - 300,
+    };
   },
   async stub(ctx) {
     globalThis.MessageChannel = class {
