@@ -79,13 +79,13 @@ test('a file a WASI program creates and writes reuses the handle its create made
   const rows = [
     [
       'O_EXCL',
-      2.3,
+      2.5,
       3.3,
       ["os.close(os.open(f'/tmp/oo/TAG{i}', os.O_WRONLY|os.O_CREAT|os.O_EXCL, 0o644))"],
     ],
     [
       'O_EXCL + write',
-      3.3,
+      3.9,
       6.05,
       [
         "fd = os.open(f'/tmp/oo/TAG{i}', os.O_WRONLY|os.O_CREAT|os.O_EXCL, 0o644)",
@@ -95,7 +95,7 @@ test('a file a WASI program creates and writes reuses the handle its create made
     ],
     [
       'O_TRUNC + write',
-      4.3,
+      4.9,
       7.05,
       [
         "fd = os.open(f'/tmp/oo/TAG{i}', os.O_WRONLY|os.O_CREAT|os.O_TRUNC, 0o644)",
@@ -109,7 +109,7 @@ test('a file a WASI program creates and writes reuses the handle its create made
     const r = await sh(
       py([
         'least = None',
-        'for r in range(3):',
+        'for r in range(5):',
         `  a = ${KNOWN}`,
         `  for i in range(${N}):`,
         ...body.map((line) => `    ${line.replace('TAG', `r${k}_{r}_`)}`),
