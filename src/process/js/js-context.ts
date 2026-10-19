@@ -61,6 +61,7 @@ import {
 } from './js-sync.ts';
 import type { JsThreadContext } from './js-thread.ts';
 import { type JsTty, ttyOps } from './js-tty.ts';
+import { wasiFor } from './js-wasi.ts';
 import {
   follow,
   type JsWatcher,
@@ -250,6 +251,8 @@ export interface ContextOptions {
   lane?: SyncCall;
   strays?: JsStrays;
   thread: JsThreadContext;
+  fs?: { owners: boolean; links: boolean };
+  owned?: SharedArrayBuffer;
 }
 
 const encoder = new TextEncoder();
@@ -664,6 +667,7 @@ export function createContext(o: ContextOptions): CreatedContext {
   const syncKernel = new JsSyncKernel(lane, kernel, unwind);
   const terminal = ttyOps(kernel, syncKernel);
   const shared = { pid: o.pid, resolve, random, infos, handles, closing };
+  const wasi = wasiFor({ lane, pid: o.pid, cwd: o.cwd, resolve, fs: o.fs, owned: o.owned });
   const sync: JsSyncContext = {
     kernel: KERNEL_INFO,
     tty: terminal.syncTty,
@@ -671,8 +675,10 @@ export function createContext(o: ContextOptions): CreatedContext {
     run: (options) =>
       runSync(syncKernel, { env: o.env, cwd: o.cwd, resolve, signal: signalNumber }, options),
     spawn: (options) => spawnSync(options),
+    wasi: { create: wasi.create },
     exit: (status = 0): never => {
       exiting ??= status & 0xff;
+      wasi.closeAll();
       return exitAtOnce(lane, [...writes], terminal.modes(), exiting);
     },
     kill: killer({ self: o.pid, kernel, syncKernel, lane, writes, modes: terminal.modes }),
@@ -749,6 +755,7 @@ export function createContext(o: ContextOptions): CreatedContext {
     onUnhandledRejection: (listener) => listen(strays.rejection, listener),
   };
   const drain = async (): Promise<void> => {
+    wasi.closeAll();
     for (;;) {
       await Promise.all([...pending]);
       await new Promise((resolve) => setTimeout(resolve, 0));

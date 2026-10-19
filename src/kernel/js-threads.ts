@@ -16,6 +16,7 @@ import {
   JS_THREAD_EXIT,
   JS_THREAD_INIT,
   JS_THREAD_NO_MEMORY,
+  JS_THREAD_OWNED_FDS,
   JS_THREAD_SPAWN,
   type JsLane,
   type JsProcessInitMsg,
@@ -89,6 +90,12 @@ function answer(control: MessagePort, message: JsThreadControl): void {
   control.postMessage(message);
 }
 
+function ownedFds(owned: SharedArrayBuffer): number[] {
+  const view = new Int32Array(owned);
+  const n = Math.min(Atomics.load(view, 0), JS_THREAD_OWNED_FDS);
+  return Array.from(view.subarray(1, 1 + Math.max(0, n)));
+}
+
 export class JsThreads {
   private readonly deps: JsThreadDeps;
   private readonly live = new Map<number, (code: number) => void>();
@@ -121,6 +128,7 @@ export class JsThreads {
     const tid = ++this.last;
     const sab = new SharedArrayBuffer(SAB_HEADER_BYTES + SAB_DEFAULT_WINDOW_BYTES);
     const header = new Int32Array(sab, 0, SAB_HEADER_I32);
+    const owned = new SharedArrayBuffer(4 * (1 + JS_THREAD_OWNED_FDS));
     if (this.frozen) Atomics.store(header, SAB_I_STOP, 1);
     const worker = this.deps.createWorker();
     const clock: CpuClock = this.deps.clocks.thread(tid + 1, sab);
@@ -142,6 +150,9 @@ export class JsThreads {
       lane.dispose();
       this.deps.clocks.threadEnded(tid + 1);
       worker.terminate();
+      for (const fd of ownedFds(owned)) {
+        void this.deps.dispatch({ op: 'fd-close', fd } as SyncSabDispatchRequest);
+      }
       answer(control, { exited: code });
       control.close();
     };
@@ -181,7 +192,7 @@ export class JsThreads {
     const init: JsThreadInitMsg = {
       ...this.deps.init(sab, lane.lane),
       type: JS_THREAD_INIT,
-      thread: { tid, port, data: msg.data },
+      thread: { tid, port, data: msg.data, owned },
     };
     try {
       worker.postMessage(init, [lane.lane.port, port, ...(msg.transfer ?? [])]);

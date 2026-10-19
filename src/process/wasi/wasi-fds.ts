@@ -116,6 +116,16 @@ export class WasiFds {
     });
   }
 
+  adoptCopy(fd: number): number {
+    const at = this.kernel.call({ op: 'fd-dup', fd, min: 3 }) as number;
+    this.table.set(at, this.stdioEntry(at));
+    return at;
+  }
+
+  preopenAt(path: string, name: string): number {
+    return this.install({ type: 'dir', path: normalize(path), preopen: name });
+  }
+
   private preopens(cwd: string, root: boolean): WasiEntry[] {
     const here = normalize(cwd);
     const dot: Extract<WasiEntry, { type: 'dir' }> = { type: 'dir', path: here, preopen: '.' };

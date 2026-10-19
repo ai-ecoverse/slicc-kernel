@@ -47,6 +47,7 @@ import { callError, JsCallError, type JsKernel, modeOf } from './js-kernel.ts';
 import { procFsSync, procOpenSync } from './js-proc.ts';
 import type { JsRunOptions, JsRunResult } from './js-run.ts';
 import type { JsSyncTty } from './js-tty.ts';
+import type { JsWasi, JsWasiOptions } from './js-wasi.ts';
 import type { JsWatcher, JsWatchListener, JsWatchOptions } from './js-watch.ts';
 
 export type SyncCall = (req: SyncSabRequestBody) => SyncFsResult;
@@ -88,6 +89,7 @@ export interface JsSyncContext {
   socketpair(): [number, number];
   pipe(): [number, number];
   open(path: string, options?: JsOpenOptions): JsSyncFile;
+  wasi: { create(options?: JsWasiOptions): JsWasi };
   fs: {
     stat(path: string): SyncFsBridgeStat;
     lstat(path: string): SyncFsBridgeStat;
@@ -198,7 +200,17 @@ export function syncOps(
   shared: SyncShared
 ): Omit<
   JsSyncContext,
-  'run' | 'spawn' | 'exit' | 'kill' | 'cred' | 'setcred' | 'kernel' | 'umask' | 'fs' | 'tty'
+  | 'run'
+  | 'spawn'
+  | 'exit'
+  | 'kill'
+  | 'cred'
+  | 'setcred'
+  | 'kernel'
+  | 'umask'
+  | 'fs'
+  | 'tty'
+  | 'wasi'
 > & { fs: Omit<JsSyncContext['fs'], 'watch'> } {
   const { infos, handles, resolve } = shared;
 

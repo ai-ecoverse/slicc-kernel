@@ -1,0 +1,12 @@
+{
+  "name": "jswasi",
+  "private": true,
+  "slicc": {
+    "commands": {
+      "jswasi": {
+        "abi": "js",
+        "module": "bin/main.mjs"
+      }
+    }
+  }
+}
