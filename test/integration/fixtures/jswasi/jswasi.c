@@ -234,6 +234,12 @@ static void poll(void) {
   say("\n");
 }
 
+static void fault(void) {
+  say("fault ");
+  num(open_at(3, "in.txt", 0, (u32 *)0xfffffff0u));
+  say("\n");
+}
+
 static void mkdir_ro(void) {
   say("mkdir ");
   num(path_create_directory(3, "made", 4));
@@ -251,6 +257,7 @@ __attribute__((export_name("run"))) u32 run(u32 mode) {
     case 7: args(); break;
     case 8: mkdir_ro(); break;
     case 9: poll(); break;
+    case 10: fault(); break;
     default: if (mode >= 100) thread_write(mode - 100); break;
   }
   return mode;

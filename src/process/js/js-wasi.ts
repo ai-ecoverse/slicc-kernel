@@ -98,6 +98,8 @@ const PATHS: Readonly<Record<string, readonly PathArgs[]>> = {
   ],
 };
 
+const RESULTS: Readonly<Record<string, number>> = { path_open: 8, sock_accept: 2 };
+
 const SPECIAL = new Set(['fd_close', 'fd_renumber', 'poll_oneoff', 'proc_exit']);
 
 function fdArgsOf(name: string): readonly number[] {
@@ -220,10 +222,11 @@ export function createJsWasi(deps: JsWasiDeps, o: JsWasiOptions = {}): JsWasi {
         args[at] = k;
       }
       if (!confined(name, raw)) return E.NOTCAPABLE;
+      const out = RESULTS[name];
+      if (out !== undefined && (raw[out] >>> 0) + 4 > host.mem.size()) return E.FAULT;
       const errno = (fn as (...a: number[]) => number)(...args);
       if (errno !== E.SUCCESS) return errno;
-      if (name === 'path_open') opens(raw[8], roots.get(raw[0]));
-      else if (name === 'sock_accept') opens(raw[2], undefined);
+      if (out !== undefined) opens(raw[out] >>> 0, roots.get(raw[0]));
       return errno;
     }) as WasiFunction;
   }

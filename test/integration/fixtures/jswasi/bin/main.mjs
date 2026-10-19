@@ -194,6 +194,19 @@ const cases = {
     await t.terminate();
     return { before, exitCode, afterExit, holding, code: await t.exited, after: fdCount(ctx) };
   },
+  async fault(ctx) {
+    ctx.sync.fs.mkdir('/w', { recursive: true });
+    ctx.sync.fs.writeFile('/w/in.txt', 'x');
+    const [r, w] = ctx.sync.pipe();
+    const wasi = ctx.sync.wasi.create({ preopens: { '/sandbox': '/w' }, stdio: [0, w, 2] });
+    const inst = instance(wasi, await compile(ctx, 'jswasi.wasm'));
+    const before = fdCount(ctx);
+    for (let i = 0; i < 20; i++) inst.exports.run(10);
+    const after = fdCount(ctx);
+    wasi.close();
+    ctx.sync.close(w);
+    return { before, after, stdout: readAll(ctx, r).split('\n')[0] };
+  },
   async poll(ctx) {
     const [r, w] = ctx.sync.pipe();
     const [ir, iw] = ctx.sync.pipe();

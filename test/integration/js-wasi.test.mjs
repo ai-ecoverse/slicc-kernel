@@ -96,6 +96,13 @@ test('ctx.sync.wasi.create: poll_oneoff sees guest fds, a guest fd with no entry
   assert.deepEqual(await run('poll'), { stdout: 'poll 0 got 2 11:8 10:0 fds kept 0,42\n' });
 });
 
+test('ctx.sync.wasi.create: a path_open whose result pointer is outside guest memory is EFAULT and opens nothing (#1186 review)', async (t) => {
+  const run = await booted(t);
+  const r = await run('fault');
+  assert.equal(r.stdout, 'fault 21');
+  assert.equal(r.after, r.before);
+});
+
 test('ctx.sync.wasi.create: the guest has the program permissions and no more, so a preopen the user may not write gives EACCES (#1111)', async (t) => {
   const run = await booted(t, { users: 'enforce' }, ['cone']);
   assert.deepEqual(await run('readonly', { user: 'cone', env: { RO_DIR: '/etc' } }), {
