@@ -62,6 +62,12 @@ interface MovableHandle {
   move?(parent: FileSystemDirectoryHandle, name: string): Promise<void>;
 }
 
+const RENAMES = '/.slicc-renames';
+
+function movable(handle: Handle): boolean {
+  return typeof (handle as Handle & MovableHandle).move === 'function';
+}
+
 interface Located {
   path: string;
   handle?: Handle;
@@ -1498,28 +1504,147 @@ export class OpfsFs implements KernelFs {
     const name = baseOf(destination);
     const swap = targetStat?.isDirectory === true;
     const staging = swap ? `.${name}.${crypto.randomUUID()}` : name;
-    this.forget(destination);
-    const timed = await this.explicitTimes(source.path);
-    const moved = await this.replacingTarget(targetStat !== null, () =>
-      this.place(source.handle as Handle, dir, staging)
-    );
-    if (swap) await this.rm(destination, { recursive: true });
-    await this.meta.move(source.path, destination, carry, left);
-    this.movePending(source.path, destination);
-    if (!moved) {
-      await this.rm(source.path, { recursive: true });
-      await this.meta.update(source.path, () => left);
+    const copying = sourceStat.isDirectory && !movable(source.handle as Handle);
+    const staged = resolvePath(parent.path, staging);
+    const place = async () => {
+      this.forget(destination);
+      const timed = await this.explicitTimes(source.path);
+      const first = copying ? await this.intend({ from: source.path, to: staged }) : undefined;
+      const second =
+        copying && swap
+          ? await this.intend({ from: staged, to: destination, replace: true })
+          : undefined;
+      const moved = await this.replacingTarget(targetStat !== null, () =>
+        this.place(source.handle as Handle, dir, staging)
+      ).catch(async (err) => {
+        if (first) await this.rollBack(staged, source.path, [first, second]);
+        throw err;
+      });
+      if (swap) await this.rm(destination, { recursive: true });
+      if (second) await this.intend({ from: staged, to: destination }, second);
+      await this.meta.move(source.path, destination, carry, left);
+      this.movePending(source.path, destination);
+      if (!moved) {
+        await this.rm(source.path, { recursive: true });
+        await this.meta.update(source.path, () => left);
+      }
+      if (first) await this.meta.update(first, () => undefined);
+      let copied = !moved;
+      if (swap) {
+        const hidden = await dir.getDirectoryHandle(staging);
+        const placed = await this.place(hidden, dir, name);
+        if (!placed) await dir.removeEntry(staging, { recursive: true });
+        copied ||= !placed;
+      }
+      if (second) await this.meta.update(second, () => undefined);
+      if (copied) await this.restamp(destination, timed);
+      this.changed(source.path, destination);
+      this.touch(Date.now(), parentOf(source.path), parent.path);
+    };
+    if (!copying) return place();
+    const { promise, resolve } = Promise.withResolvers<void>();
+    const entry = { from: source.path, to: destination, done: promise };
+    this.renamingDirs.add(entry);
+    try {
+      await place();
+    } finally {
+      this.renamingDirs.delete(entry);
+      resolve();
     }
-    let copied = !moved;
-    if (swap) {
-      const staged = await dir.getDirectoryHandle(staging);
-      const placed = await this.place(staged, dir, name);
-      if (!placed) await dir.removeEntry(staging, { recursive: true });
-      copied ||= !placed;
+  }
+
+  private readonly renamingDirs = new Set<{ from: string; to: string; done: Promise<void> }>();
+
+  private intents = 0;
+
+  private async intend(
+    rename: { from: string; to: string; replace?: true },
+    at = `${RENAMES}/${crypto.randomUUID()}`
+  ): Promise<string> {
+    const record = { ...rename, at: Date.now() * 1000 + (this.intents++ % 1000) };
+    await this.meta.update(at, () => ({ path: at, rename: record }));
+    return at;
+  }
+
+  private async rollBack(from: string, to: string, intents: Array<string | undefined>) {
+    try {
+      if (await this.real(from)) {
+        const moved = await this.locate(from, false);
+        const back = await this.locate(parentOf(to), true);
+        await this.copy(
+          moved.handle as Handle,
+          back.handle as FileSystemDirectoryHandle,
+          baseOf(to)
+        );
+        const [dir, name] = await this.parent(from);
+        await this.inDir(dir, (parent) => parent.removeEntry(name, { recursive: true }));
+      }
+      this.forget(from);
+      this.forget(to);
+      for (const intent of intents) if (intent) await this.meta.update(intent, () => undefined);
+    } catch {}
+  }
+
+  private async finishRenames(): Promise<number> {
+    const intents = (await this.meta.under(RENAMES))
+      .filter((entry) => entry.rename !== undefined)
+      .sort(
+        (a, b) =>
+          (a.rename as NonNullable<MetaEntry['rename']>).at -
+          (b.rename as NonNullable<MetaEntry['rename']>).at
+      );
+    for (const entry of intents) {
+      const { from, to, replace } = entry.rename as NonNullable<MetaEntry['rename']>;
+      const left = await this.real(from);
+      if (left && replace && (await this.real(to))) await this.rm(to, { recursive: true });
+      if (left) {
+        const source = await this.locate(from, false);
+        const target = await this.locate(parentOf(to), true);
+        await this.copy(
+          source.handle as Handle,
+          target.handle as FileSystemDirectoryHandle,
+          baseOf(to)
+        );
+        const [dir, name] = await this.parent(from);
+        await this.inDir(dir, (parent) => parent.removeEntry(name, { recursive: true }));
+        this.forget(from);
+        this.forget(to);
+      }
+      if ((await this.meta.under(from)).length > 0) {
+        await this.meta.move(from, to, (moved) => ({ ...occupied(moved), path: to }));
+      }
+      await this.meta.update(entry.path, () => undefined);
     }
-    if (copied) await this.restamp(destination, timed);
-    this.changed(source.path, destination);
-    this.touch(Date.now(), parentOf(source.path), parent.path);
+    return intents.length;
+  }
+
+  async settledRename(path: unknown): Promise<void> {
+    if (this.renamingDirs.size === 0 || typeof path !== 'string') return;
+    const at = normalizePath(path);
+    for (let real: string | undefined; ; ) {
+      const busy = this.renameAt(at) ?? (real === undefined ? undefined : this.renameAt(real));
+      if (busy) {
+        await busy.done;
+        continue;
+      }
+      if (real !== undefined || at === '/') return;
+      const parent = await this.realpath(parentOf(at), true).catch(() => parentOf(at));
+      real = resolvePath(parent, baseOf(at));
+      if (real === at) return;
+    }
+  }
+
+  private renameAt(at: string): { done: Promise<void> } | undefined {
+    for (const m of this.renamingDirs) {
+      if (
+        within(at, m.from) ||
+        within(at, m.to) ||
+        at === parentOf(m.from) ||
+        at === parentOf(m.to)
+      )
+        return m;
+    }
+    return undefined;
   }
 
   private async replacingTarget<T>(replaces: boolean, op: () => Promise<T>): Promise<T> {
@@ -1566,16 +1691,31 @@ export class OpfsFs implements KernelFs {
       () => false
     );
     if (moved) return true;
+    const before = this.fileMoves;
     try {
       await this.copy(handle, dir, name);
     } catch (err) {
-      if (handle.kind === 'directory') await dir.removeEntry(name, { recursive: true });
+      if (handle.kind === 'directory' && this.fileMoves === before) {
+        await dir.removeEntry(name, { recursive: true });
+      }
       throw translate(err, name);
     }
     return false;
   }
 
+  private fileMoves = 0;
+
   private async copy(handle: Handle, dir: FileSystemDirectoryHandle, name: string): Promise<void> {
+    if (handle.kind === 'file' && movable(handle)) {
+      const moved = await (handle as Handle & MovableHandle).move?.(dir, name).then(
+        () => true,
+        () => false
+      );
+      if (moved) {
+        this.fileMoves++;
+        return;
+      }
+    }
     if (handle.kind === 'file') {
       const writable = await (await dir.getFileHandle(name, { create: true })).createWritable();
       await writable.write(await handle.getFile());
@@ -1723,6 +1863,7 @@ export class OpfsFs implements KernelFs {
 
   async reconcile(): Promise<number> {
     if (this.remote && (await this.remote.peered())) return 0;
+    await this.finishRenames();
     let removed = 0;
     const entries = await this.meta.all();
     const carried = new Set(entries.filter((e) => !e.vacated).map((e) => e.ino));
@@ -1757,6 +1898,8 @@ const READS = [
   'readdirStat',
   'readlink',
   'realpath',
+  'version',
+  'readVersioned',
 ] as const;
 const WRITES = [
   'writeFile',
@@ -1786,6 +1929,7 @@ for (const [names, op] of [
     const inner = proto[name] as (...args: unknown[]) => Promise<unknown>;
     proto[name] = async function (this: OpfsFs, ...args: unknown[]) {
       try {
+        if (op === 'read') await this.settledRename(args[0]);
         return await inner.apply(this, args);
       } catch (err) {
         throw translate(err, String(args[0]), op, false);

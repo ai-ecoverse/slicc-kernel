@@ -19,6 +19,7 @@ export interface MetaEntry {
   writes?: number;
   epoch?: number;
   vacated?: true;
+  rename?: { from: string; to: string; at: number; replace?: true };
 }
 
 export type MetaChange = (entry: MetaEntry | undefined) => MetaEntry | undefined;
