@@ -62,6 +62,10 @@ interface MovableHandle {
   move?(parent: FileSystemDirectoryHandle, name: string): Promise<void>;
 }
 
+function movable(handle: Handle): boolean {
+  return typeof (handle as Handle & MovableHandle).move === 'function';
+}
+
 interface Located {
   path: string;
   handle?: Handle;
@@ -1498,28 +1502,56 @@ export class OpfsFs implements KernelFs {
     const name = baseOf(destination);
     const swap = targetStat?.isDirectory === true;
     const staging = swap ? `.${name}.${crypto.randomUUID()}` : name;
-    this.forget(destination);
-    const timed = await this.explicitTimes(source.path);
-    const moved = await this.replacingTarget(targetStat !== null, () =>
-      this.place(source.handle as Handle, dir, staging)
-    );
-    if (swap) await this.rm(destination, { recursive: true });
-    await this.meta.move(source.path, destination, carry, left);
-    this.movePending(source.path, destination);
-    if (!moved) {
-      await this.rm(source.path, { recursive: true });
-      await this.meta.update(source.path, () => left);
+    const copying = sourceStat.isDirectory && !movable(source.handle as Handle);
+    const place = async () => {
+      this.forget(destination);
+      const timed = await this.explicitTimes(source.path);
+      const moved = await this.replacingTarget(targetStat !== null, () =>
+        this.place(source.handle as Handle, dir, staging)
+      );
+      if (swap) await this.rm(destination, { recursive: true });
+      await this.meta.move(source.path, destination, carry, left);
+      this.movePending(source.path, destination);
+      if (!moved) {
+        await this.rm(source.path, { recursive: true });
+        await this.meta.update(source.path, () => left);
+      }
+      let copied = !moved;
+      if (swap) {
+        const staged = await dir.getDirectoryHandle(staging);
+        const placed = await this.place(staged, dir, name);
+        if (!placed) await dir.removeEntry(staging, { recursive: true });
+        copied ||= !placed;
+      }
+      if (copied) await this.restamp(destination, timed);
+      this.changed(source.path, destination);
+      this.touch(Date.now(), parentOf(source.path), parent.path);
+    };
+    if (!copying) return place();
+    const { promise, resolve } = Promise.withResolvers<void>();
+    const entry = { from: source.path, to: destination, done: promise };
+    this.renamingDirs.add(entry);
+    try {
+      await place();
+    } finally {
+      this.renamingDirs.delete(entry);
+      resolve();
     }
-    let copied = !moved;
-    if (swap) {
-      const staged = await dir.getDirectoryHandle(staging);
-      const placed = await this.place(staged, dir, name);
-      if (!placed) await dir.removeEntry(staging, { recursive: true });
-      copied ||= !placed;
+  }
+
+  private readonly renamingDirs = new Set<{ from: string; to: string; done: Promise<void> }>();
+
+  async settledRename(path: unknown): Promise<void> {
+    if (this.renamingDirs.size === 0 || typeof path !== 'string') return;
+    const at = normalizePath(path);
+    for (;;) {
+      const busy = [...this.renamingDirs].find(
+        (m) =>
+          within(at, m.from) || within(at, m.to) || at === parentOf(m.from) || at === parentOf(m.to)
+      );
+      if (!busy) return;
+      await busy.done;
     }
-    if (copied) await this.restamp(destination, timed);
-    this.changed(source.path, destination);
-    this.touch(Date.now(), parentOf(source.path), parent.path);
   }
 
   private async replacingTarget<T>(replaces: boolean, op: () => Promise<T>): Promise<T> {
@@ -1576,6 +1608,13 @@ export class OpfsFs implements KernelFs {
   }
 
   private async copy(handle: Handle, dir: FileSystemDirectoryHandle, name: string): Promise<void> {
+    if (handle.kind === 'file' && movable(handle)) {
+      const moved = await (handle as Handle & MovableHandle).move?.(dir, name).then(
+        () => true,
+        () => false
+      );
+      if (moved) return;
+    }
     if (handle.kind === 'file') {
       const writable = await (await dir.getFileHandle(name, { create: true })).createWritable();
       await writable.write(await handle.getFile());
@@ -1786,6 +1825,7 @@ for (const [names, op] of [
     const inner = proto[name] as (...args: unknown[]) => Promise<unknown>;
     proto[name] = async function (this: OpfsFs, ...args: unknown[]) {
       try {
+        if (op === 'read') await this.settledRename(args[0]);
         return await inner.apply(this, args);
       } catch (err) {
         throw translate(err, String(args[0]), op, false);
