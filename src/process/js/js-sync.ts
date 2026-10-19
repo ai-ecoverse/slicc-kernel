@@ -45,6 +45,7 @@ import {
 import { callError, JsCallError, type JsKernel, modeOf } from './js-kernel.ts';
 import { procFsSync, procOpenSync } from './js-proc.ts';
 import type { JsRunOptions, JsRunResult } from './js-run.ts';
+import type { JsSyncTty } from './js-tty.ts';
 import type { JsWatcher, JsWatchListener, JsWatchOptions } from './js-watch.ts';
 
 export type SyncCall = (req: SyncSabRequestBody) => SyncFsResult;
@@ -72,6 +73,7 @@ export interface JsCred {
 
 export interface JsSyncContext {
   readonly kernel: { readonly version: string };
+  tty: JsSyncTty;
   run(options: JsRunOptions): JsRunResult;
   spawn(options: JsSpawnOptions): JsChild;
   exit(status?: number): never;
@@ -195,7 +197,7 @@ export function syncOps(
   shared: SyncShared
 ): Omit<
   JsSyncContext,
-  'run' | 'spawn' | 'exit' | 'kill' | 'cred' | 'setcred' | 'kernel' | 'umask' | 'fs'
+  'run' | 'spawn' | 'exit' | 'kill' | 'cred' | 'setcred' | 'kernel' | 'umask' | 'fs' | 'tty'
 > & { fs: Omit<JsSyncContext['fs'], 'watch'> } {
   const { infos, handles, resolve } = shared;
 
