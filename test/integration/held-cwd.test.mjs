@@ -113,3 +113,78 @@ test(
     assert.equal(checks(moved.stderr), 1);
   }
 );
+
+const SHELL = (replace) =>
+  [
+    'rm -rf /t; mkdir -p /t/d && cd /t/d',
+    replace,
+    'ls; echo "ls=$?"',
+    'echo *',
+    'touch made; echo "touch=$?"',
+    '(echo sub *)',
+    'cd .. && ls d',
+  ].join('\n');
+
+for (const [name, replace] of REPLACEMENTS) {
+  test(
+    `bash, its children and a subshell in a cwd replaced by "${name}" keep the removed directory: ls fails, a glob matches nothing, a create is ENOENT, and cd .. reaches the new one (#1164)`,
+    TIMEOUT,
+    async (t) => {
+      const { sh } = await booted(t);
+      const r = await sh(SHELL(replace));
+      assert.equal(r.stdout, 'ls=2\n*\ntouch=1\nsub *\nx\n', r.stderr);
+      assert.match(r.stderr, /ls: cannot open directory '\.': No such file or directory/);
+    }
+  );
+}
+
+const JSPROG = `export default async function main(ctx) {
+  const dec = new TextDecoder();
+  const tried = async (f) => {
+    try {
+      return JSON.stringify(await f());
+    } catch (err) {
+      return err.code ?? String(err);
+    }
+  };
+  const out = [];
+  out.push('before ' + (await tried(async () => (await ctx.fs.readdir('.')).sort())));
+  await ctx.fs.writeFile('/t/s/ready', '');
+  while ((await ctx.read(0, 1)).length > 0);
+  out.push('after ' + (await tried(async () => (await ctx.fs.readdir('.')).sort())));
+  out.push('write ' + (await tried(() => ctx.fs.writeFile('made', 'x'))));
+  out.push('parent ' + (await tried(async () => (await ctx.fs.readdir('../d')).sort())));
+  await ctx.write(1, out.join('\\n') + '\\n');
+  return 0;
+}
+`;
+
+test(
+  'a JS program whose cwd is replaced keeps the removed directory: readdir and a relative write are ENOENT, and ../d reaches the new one (#1164)',
+  TIMEOUT,
+  async (t) => {
+    const { sh, kernel } = await booted(t);
+    await kernel.writeFile(
+      '/node_modules/jsheld/package.json',
+      JSON.stringify({
+        name: 'jsheld',
+        slicc: { commands: { jsheld: { abi: 'js', module: 'main.mjs' } } },
+      })
+    );
+    await kernel.writeFile('/node_modules/jsheld/main.mjs', JSPROG);
+    const r = await sh(
+      [
+        'rm -rf /t; mkdir -p /t/d /t/s && touch /t/d/old',
+        'cd /t/d',
+        '{ until [ -e /t/s/go ]; do sleep 0.05; done; } | jsheld > /t/s/out &',
+        'p=$!',
+        'cd /',
+        'n=0; until [ -e /t/s/ready ] || [ $n -ge 2400 ]; do sleep 0.05; n=$((n+1)); done',
+        'rm -r /t/d && mkdir /t/d && touch /t/d/x && touch /t/s/go',
+        'wait $p',
+        'cat /t/s/out',
+      ].join('\n')
+    );
+    assert.equal(r.stdout, 'before ["old"]\nafter ENOENT\nwrite ENOENT\nparent ["x"]\n', r.stderr);
+  }
+);

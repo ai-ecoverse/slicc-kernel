@@ -49,3 +49,35 @@ for (const [name, replace] of [
     );
   });
 }
+
+test('on the OPFS root, bash keeps a cwd that another tab replaces: ls fails, a glob matches nothing, and cd .. reaches the new one (#1164)', async (t) => {
+  const { page, bash } = await booted(chrome, t);
+  assert.deepEqual(
+    await bash('rm -rf /t && mkdir -p /t/d /t/s && touch /t/d/old', { cwd: '/' }),
+    ok()
+  );
+  const out = await page.evaluate(async () => {
+    await window.secondKernel({});
+    const held = window.kernel.run(
+      [
+        'bash',
+        '-c',
+        'cd /t/d && touch /t/s/ready && until [ -e /t/s/go ]; do sleep 0.05; done; ls; echo "ls=$?"; echo *; cd .. && ls d',
+      ],
+      { cwd: '/' }
+    );
+    const end = Date.now() + 60_000;
+    while (Date.now() < end) {
+      const r = await window.second.run(['bash', '-c', 'test -e /t/s/ready'], { cwd: '/' });
+      if (r.status === 0) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    const replaced = await window.second.run(
+      ['bash', '-c', 'mkdir /t/n && touch /t/n/x && rm -r /t/d && mv /t/n /t/d && touch /t/s/go'],
+      { cwd: '/' }
+    );
+    return { replaced, held: await held };
+  });
+  assert.equal(out.replaced.status, 0, out.replaced.stderr);
+  assert.equal(out.held.stdout, 'ls=2\n*\nx\n', out.held.stderr);
+});

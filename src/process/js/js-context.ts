@@ -1,5 +1,8 @@
 import { physicalPathAsync } from '../../fs/physical-path.ts';
+import { type CwdAnswer, HeldCwd } from '../../kernel/held-cwd.ts';
+import type { HeldCwdInit } from '../../kernel/protocol.ts';
 import { SIG } from '../../kernel/signals.ts';
+import { cwdFor } from '../../realm/emscripten-held-cwd.ts';
 import { parseSyncFsStat, type SyncFsBridgeStat } from '../../realm/sync-fs-wire.ts';
 import { KERNEL_VERSION } from '../../version.ts';
 import {
@@ -253,6 +256,7 @@ export interface ContextOptions {
   thread: JsThreadContext;
   fs?: { owners: boolean; links: boolean };
   owned?: SharedArrayBuffer;
+  held?: HeldCwdInit | undefined;
 }
 
 const encoder = new TextEncoder();
@@ -594,13 +598,24 @@ function tracked(
   };
 }
 
+function heldOn(
+  init: HeldCwdInit | undefined,
+  lane: SyncCall,
+  syncKernel: JsSyncKernel
+): HeldCwd | undefined {
+  if (!init || lane === noLane) return undefined;
+  const ask = () => syncKernel.json({ op: 'cwd-check' }) as CwdAnswer;
+  return new HeldCwd(init.sab, init.slot, ask, init);
+}
+
 export function createContext(o: ContextOptions): CreatedContext {
   const { kernel } = o;
   const infos = new Map<number, FdInfo>();
   const handles = new Map<number, () => void>();
   const pending = new Set<Promise<unknown>>();
   const random = o.random ?? cryptoRandom;
-  const resolve = (path: string) => resolvePath(o.cwd, path);
+  let held: HeldCwd | undefined;
+  const resolve = (path: string) => resolvePath(cwdFor(o.cwd, held, path), path);
   const tryDev = (abs: string) => resolveDevAsync(kernel, abs);
   let exiting: number | undefined;
   const exit = (code = 0): never => {
@@ -665,6 +680,7 @@ export function createContext(o: ContextOptions): CreatedContext {
   const lane = o.lane ?? laneOf(undefined);
   if (o.lane && o.lane !== noLane) kernel.syncLane = o.lane;
   const syncKernel = new JsSyncKernel(lane, kernel, unwind);
+  held = heldOn(o.held, lane, syncKernel);
   const terminal = ttyOps(kernel, syncKernel);
   const shared = { pid: o.pid, resolve, random, infos, handles, closing };
   const wasi = wasiFor({ lane, pid: o.pid, cwd: o.cwd, resolve, fs: o.fs, owned: o.owned });

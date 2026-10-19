@@ -853,13 +853,14 @@ A process's working directory is the directory it changed into, not just its pat
   - a wasip1 program's `.` (its `.` preopen) can't be opened or listed (`ENOENT`, an empty listing for its preopen descriptor);
   - its relative lookups and creates are `ENOENT`;
   - `..` still reaches the parent.
+  - an Emscripten program (bash, coreutils, …) and its forked subshells and children: relative paths resolve against `<path> (deleted)`, so `ls` fails with `cannot open directory '.'`, a glob matches nothing, and a relative create is `ENOENT`. `getcwd` (`pwd -P`) returns `<path> (deleted)`, as `/proc/<pid>/cwd` reads on Linux, and bash's own `$PWD` and `cd ..` keep working.
+  - a JS program: `ctx.fs` and `ctx.sync.fs` with relative paths are `ENOENT`, `ctx.cwd` keeps the path, and `../x` reaches the parent. This needs the sync lane, which JS programs have where `SharedArrayBuffer` is available.
 - **Detection costs nothing in the steady state:**
   - each held directory has a counter in memory the kernel shares with the process. It moves only when this kernel, another tab, or a `postFsNotice` reports a change at that directory or above it: the kernel's own watcher paths, and every path and tree of a peer change or notice.
   - a process checks the counter, a memory read, before each relative lookup. Only after it moved does it ask the kernel once (`cwd-check`), and the kernel compares the inode at the path with the one it recorded.
 - **The `rm` record:** so that `rm -r d; mkdir d` can be told apart, removing a directory leaves the same small record a rename leaves at the name it vacates (see [Metadata](#metadata)).
 - **Limits:**
   - a WASIX program's C library keeps the working directory as a string and turns relative paths into absolute ones before they reach the kernel. So a WASIX program still sees the new directory through relative paths, and `getcwd` still returns the path, until wasix-sysroot resolves relative paths against the working directory's descriptor ([#1164](https://github.com/ai-ecoverse/slicc-kernel/issues/1164) stays open for that).
-  - Emscripten and JS programs: [#1164](https://github.com/ai-ecoverse/slicc-kernel/issues/1164), next.
   - a removal between the check and the lookup is a race, as with any path, and the lookup sees the new directory.
   - on a `hostfs` folder the inode is the host's, which a host file system may reuse for the new directory (ext4 can; APFS doesn't). There the replacement isn't noticed.
   - with more than 1023 distinct working directories held at once, the rest are not tracked.

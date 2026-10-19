@@ -141,6 +141,7 @@ async function runJs(
     strays,
     thread: threadContext(port, thread),
     ...(thread?.owned ? { owned: thread.owned } : {}),
+    held: init.held,
   });
   const say = (text: string) => ctx.write(2, `${init.argv0}: ${text}\n`).catch(() => undefined);
 
