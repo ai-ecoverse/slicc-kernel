@@ -123,6 +123,7 @@ export interface NodeKernelOptions {
   approve?: ApproveHook;
   protect?: Protection;
   cron?: { clock?: CronClock };
+  wasmMemories?: { ceiling?: number; idleMs?: number };
 }
 
 export interface NodeKernel {
@@ -277,6 +278,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     ...(options.sealed ? { sealed: options.sealed } : {}),
     ...(options.clipboard ? { clipboard: options.clipboard } : {}),
     ...(options.approve ? { approve: options.approve } : {}),
+    ...(options.wasmMemories ? { wasmMemories: options.wasmMemories } : {}),
     cron: { lock: cronLock(root), ...(options.cron?.clock ? { clock: options.cron.clock } : {}) },
   });
   await launcher.prepare();
