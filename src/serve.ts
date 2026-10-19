@@ -9,6 +9,7 @@ import type { Attestation } from './fs/attest.ts';
 import type { Denial, DenialHook } from './fs/dac.ts';
 import type { IntegrityLookup } from './fs/integrity.ts';
 import { META_DB, type MetaStore } from './fs/meta.ts';
+import { dirsChannel } from './fs/notice.ts';
 import { OpfsFs } from './fs/opfs.ts';
 import { type ProtectInit, type Protection, protectInit } from './fs/protect.ts';
 import { fsError, modeOption, type UsersMode } from './fs/types.ts';
@@ -215,8 +216,8 @@ function act(session: TerminalSession, req: TerminalAction): void {
   else session.close();
 }
 
-function dirsChannel(name: string | false): string | undefined {
-  return name === false ? undefined : `slicc-kernel-dirs:${name}`;
+function dirsChannelOf(name: string | false): string | undefined {
+  return name === false ? undefined : dirsChannel(name);
 }
 
 function caDb(req: InitRequest): string | false {
@@ -532,7 +533,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
       const net = remotes(port, req);
       ({ transport: remote, uplink } = net);
       const ranged = await inOpfs(deps, root);
-      const fs = new OpfsFs(root, meta, dirsChannel(name), { ranged });
+      const fs = new OpfsFs(root, meta, dirsChannelOf(name), { ranged });
       await fs.reconcile();
       const started = new Launcher({
         fs,

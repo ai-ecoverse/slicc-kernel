@@ -1,4 +1,5 @@
 import { MemoryMeta, type MetaEntry, type MetaStore, type MetaUpdate } from './meta.ts';
+import { noticeOf } from './notice.ts';
 import { chain, inherit, ownOf, ROOT_OWNER, sameOwner } from './owners.ts';
 import { PathMap } from './path-map.ts';
 import { holdsProtected, isProtected } from './protect.ts';
@@ -318,8 +319,9 @@ export class OpfsFs implements KernelFs {
         for (const path of [...c.paths, ...c.trees]) this.forget(path);
       });
       this.channel.onmessage = ({ data }) => {
-        for (const path of data as string[]) this.forget(path);
-        remote?.emit({ paths: data as string[], trees: [] });
+        const { paths, trees } = noticeOf(data);
+        for (const path of [...paths, ...trees]) this.forget(normalizePath(path));
+        remote?.emit({ paths, trees });
       };
       (this.channel as BroadcastChannel & { unref?: () => void }).unref?.();
     }
