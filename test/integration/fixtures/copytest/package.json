@@ -1,0 +1,16 @@
+{
+  "name": "copytest",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "copytest": {
+        "wasm": "bin/copytest.wasm"
+      },
+      "copyhost": {
+        "wasm": "bin/copyhost.wasm",
+        "imports": "host/copy-host.mjs"
+      }
+    }
+  }
+}

@@ -103,6 +103,8 @@ const IDS = ['ruid', 'euid', 'suid', 'rgid', 'egid', 'sgid'] as const;
 const NS_PER_MS = 1_000_000n;
 const AT_SYMLINK_NOFOLLOW = 1;
 const AT_FDCWD = -2;
+const COPY_EXCL = 1;
+const COPY_MODE = 2;
 const AT_EACCESS = 2;
 
 const ROOT_IDS = Object.freeze({ uid: 0, gid: 0 });
@@ -297,6 +299,42 @@ export class WasiHost {
     return mask === undefined ? this.umasks.get() : this.umasks.set(mask);
   }
 
+  private copyImport(): WasiFunction {
+    const { mem, fds } = this;
+    const named = (dirfd: number, p: number, l: number): string => {
+      const raw = mem.string(p, l);
+      if (raw === '') throw new WasiError('ENOENT');
+      if (raw.startsWith('/')) return fds.resolve(3, raw);
+      return dirfd === AT_FDCWD ? fds.resolve(3, `${this.cwd}/${raw}`) : fds.resolve(dirfd, raw);
+    };
+    return (...args: number[]) => {
+      const [srcDirfd, sp, sl, dstDirfd, dp, dl, mode, flags] = args as [
+        number,
+        number,
+        number,
+        number,
+        number,
+        number,
+        number,
+        number,
+      ];
+      if (!this.o.fs.copy) return E.NOSYS;
+      if ((flags & ~(COPY_EXCL | COPY_MODE)) !== 0) throw new WasiError('EINVAL');
+      const from = named(srcDirfd, sp, sl);
+      const to = named(dstDirfd, dp, dl);
+      const bits = flags & COPY_MODE ? (this.o.fs.stat(from).mode ?? 0) : mode;
+      this.copyFile(from, to, bits, (flags & COPY_EXCL) !== 0);
+      return E.SUCCESS;
+    };
+  }
+
+  copyFile(from: string, to: string, mode: number, exclusive: boolean): void {
+    const { copy } = this.o.fs;
+    if (!copy) throw new WasiError('ENOSYS');
+    this.fds.flushPath(from);
+    copy.call(this.o.fs, from, to, mode & 0o7777 & ~this.umasks.get(), exclusive);
+  }
+
   private created(path: string, mode: number): void {
     const umask = this.umasks.get();
     if (umask !== DEFAULT_UMASK) this.o.fs.chmod(path, mode & ~umask);
@@ -464,6 +502,7 @@ export class WasiHost {
         if ((made & ~want) !== 0) this.o.fs.chmod(path, made & want);
         return E.SUCCESS;
       },
+      path_copy_file: this.copyImport(),
       umask: (mask: number, out: number) => {
         const old = this.umasks.set(mask);
         mem.view().setUint32(out, old, true);
