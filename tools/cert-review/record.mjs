@@ -357,7 +357,7 @@ const { line, state } = verdictLine({
   incomplete,
   known,
   certified: pr
-    ? `certified ${NAME} PR #${pr} at ${values.head.slice(0, 12)}, build ${version} sha256=${facts.sha256} (${ci}; known: ${known.length ? known.join(', ') : 'none'}${gap}${partial})`
+    ? `certified ${NAME} PR #${pr} at ${values.head.slice(0, 12)}, build ${version} sha256=${facts.sha256} (${ci}; known: ${known.length ? known.join(', ') : 'none'}${gap}${partial}; downstream: merge group)`
     : `certified ${NAME}@${version} sha256=${facts.sha256} (${ci}; known: ${known.length ? known.join(', ') : 'none'}${gap}${partial})`,
 });
 const certified = state === 'success';

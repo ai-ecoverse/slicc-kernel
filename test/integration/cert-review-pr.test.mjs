@@ -241,7 +241,7 @@ else process.exit(1);
   const closed = await record(['--tarball', ok.file, '--sha256', ok.sha256]);
   assert.match(
     closed.json.line,
-    /; known: ai-ecoverse\/homescoop#600, ai-ecoverse\/slicc-kernel#675\)$/
+    /; known: ai-ecoverse\/homescoop#600, ai-ecoverse\/slicc-kernel#675; downstream: merge group\)$/
   );
   await writeFile(
     join(review, 'verdict.json'),
@@ -538,7 +538,7 @@ test("the workflow: same-repo PRs with merge-ok review the merge ref with main's
     for (const c of checkouts)
       assert.match(
         c,
-        name === 'group'
+        name === 'group' || name === 'group-pack'
           ? /ref: \$\{\{ github\.event\.merge_group\.base_ref \}\}$/
           : /ref: \$\{\{ github\.event\.pull_request\.base\.sha \}\}$/,
         `${name} runs main's tools`
@@ -557,7 +557,15 @@ test("the workflow: same-repo PRs with merge-ok review the merge ref with main's
     /uses: anthropics\/claude-code-action\/base-action@[0-9a-f]{40}\n {8}env:\n {10}AWS_BEARER_TOKEN_BEDROCK:/
   );
   assert.match(jobs.review, /FILING: 'off'/);
-  assert.doesNotMatch(workflow, /id-token|issues: write|contents: write/);
+  assert.doesNotMatch(workflow, /id-token|contents: write/);
+  for (const [name, body] of Object.entries(jobs))
+    if (name !== 'group')
+      assert.doesNotMatch(body, /issues: write/, `${name}: only the group's notice files issues`);
+  assert.match(
+    jobs.group,
+    /sparse-checkout: tools\/cert-review\n/,
+    "the job that can file issues runs only main's tools"
+  );
   assert.match(jobs.group, /if: \$\{\{ !cancelled\(\) && github\.event_name == 'merge_group' \}\}/);
   assert.match(jobs.group, /pr\.mjs lookup /);
   assert.doesNotMatch(jobs.group, /secrets\.|claude|suite\.mjs|compat\.mjs/);
@@ -719,7 +727,7 @@ test('a merge group with a reviewer change the self-guard did not pass is red, a
   assert.equal(posted().at(-1).state, 'error');
   assert.match(
     jobs.guard,
-    /uses: ai-ecoverse\/slicc-shared-web\/\.github\/actions\/cert-self-guard@fe97ae242f8ddcc824334cad287346d7df3f0bbb\n {8}with:\n {10}approval-label: cert-review-approved\n {10}paths: \|\n {12}\.github\/workflows\/cert\*\.yml\n {12}\.github\/workflows\/cert\*\.yaml\n {12}scripts\/cert\/\*\*\n/
+    /uses: ai-ecoverse\/slicc-shared-web\/\.github\/actions\/cert-self-guard@f342d7cf558c817ce517bbbbc4cc46df6eac2f97\n {8}with:\n {10}approval-label: cert-review-approved\n {10}paths: \|\n {12}\.github\/workflows\/cert\*\.yml\n {12}\.github\/workflows\/cert\*\.yaml\n {12}scripts\/cert\/\*\*\n/
   );
   assert.match(jobs.guard, /continue-on-error: true/);
   assert.match(jobs.guard, /fetch-depth: 0/);
@@ -729,7 +737,7 @@ test('a merge group with a reviewer change the self-guard did not pass is red, a
   );
   assert.match(
     jobs.group,
-    /needs: guard\n {4}if: \$\{\{ !cancelled\(\) && github\.event_name == 'merge_group' \}\}/
+    /needs: \[guard, canary\]\n {4}if: \$\{\{ !cancelled\(\) && github\.event_name == 'merge_group' \}\}/
   );
   assert.match(jobs.group, /--guard "\$GUARD" --approval cert-review-approved/);
   assert.match(jobs.plan, /--guard "\$GUARD" --approval cert-review-approved/);
@@ -871,7 +879,7 @@ test("the reviewer's paths are one list: the self-guard holds exactly what plan 
   }
   assert.equal(reviewsItself([{ filename: 'src/kernel/fd-table.ts' }]), false);
   assert.equal(reviewsItself([{ filename: '.github/workflows/release.yml' }]), false);
-  assert.match(jobs.guard, /cert-self-guard@fe97ae242f8ddcc824334cad287346d7df3f0bbb\n/);
+  assert.match(jobs.guard, /cert-self-guard@f342d7cf558c817ce517bbbbc4cc46df6eac2f97\n/);
 });
 
 test('the required cert-review never waits forever: a plan or lookup that fails before its status posts an error that asks for a re-run', () => {
@@ -884,6 +892,323 @@ test('the required cert-review never waits forever: a plan or lookup that fails 
     jobs.group,
     /if: failure\(\) && steps\.lookup\.outputs\.posted != 'true'\n[\s\S]*?SHA: \$\{\{ github\.event\.merge_group\.head_sha \}\}[\s\S]*?did not finish its lookup: re-run the failed jobs/
   );
+});
+
+test('the merge group runs bios canary on its own tree, packed by main tools and bound by id, digest and sha256, at a pinned bios sha, and the downstream-override is the shared self-guard on every path (#480)', () => {
+  const BIOS = 'c2cec127b935419049568f584093d7ef03ac0721';
+  assert.match(jobs['group-pack'], /^ {4}if: github\.event_name == 'merge_group'$/m);
+  assert.match(jobs['group-pack'], /^ {4}runs-on: ubuntu-latest$/m);
+  assert.match(jobs['group-pack'], /git fetch -q --no-tags --depth=1 origin "\$GITHUB_SHA"/);
+  assert.match(
+    jobs['group-pack'],
+    /gate\.sh pack node tools\/cert-review\/pack\.mjs --version "\$VERSION" --ref "\$GITHUB_SHA"/
+  );
+  assert.match(jobs['group-pack'], /-group\.\$GITHUB_RUN_ID/);
+  assert.match(jobs['group-pack'], /package-manager-cache: false/);
+  assert.match(jobs.canary, /needs: group-pack\n {4}if: github\.event_name == 'merge_group'\n/);
+  assert.match(
+    jobs.canary,
+    new RegExp(`uses: ai-ecoverse/slicc-bios/\\.github/workflows/canary\\.yml@${BIOS}\\n`)
+  );
+  for (const [input, value] of [
+    ['candidate-package', "'@ai-ecoverse/slicc-kernel'"],
+    ['candidate-artifact', '${{ needs.group-pack.outputs.name }}'],
+    ['candidate-run', '${{ github.run_id }}'],
+    ['candidate-sha256', '${{ needs.group-pack.outputs.sha256 }}'],
+    ['candidate-repo', '${{ github.repository }}'],
+    ['candidate-artifact-id', '${{ needs.group-pack.outputs.id }}'],
+    ['candidate-artifact-digest', '${{ needs.group-pack.outputs.digest }}'],
+    ['shards', `'["sweep","guard","k4-link"]'`],
+    ['repeat', '1'],
+  ])
+    assert.ok(jobs.canary.includes(`\n      ${input}: ${value}\n`), `${input}: ${value}`);
+  assert.doesNotMatch(jobs.canary, /candidate-binding|secrets/, 'strict binding, no secrets');
+  assert.match(jobs.canary, /permissions:\n {6}contents: read\n {6}actions: read\n/);
+  assert.match(
+    jobs.guard,
+    /- id: override\n[^\n]*\n {8}continue-on-error: true\n {8}uses: ai-ecoverse\/slicc-shared-web\/\.github\/actions\/cert-self-guard@f342d7cf558c817ce517bbbbc4cc46df6eac2f97\n {8}with:\n {10}approval-label: downstream-override\n {10}paths: \|\n {12}\*\*\n {12}\.\*\n {12}\.\*\/\*\*\n {12}\*\*\/\.\*\n {12}\*\*\/\.\*\/\*\*\n/
+  );
+  assert.match(jobs.guard, /override: \$\{\{ steps\.override\.outputs\.receipt \}\}/);
+  assert.doesNotMatch(
+    workflow,
+    /needs\.canary\.outputs\.result/,
+    'the result output (up to 512 KB) never goes through an environment variable, which holds 128 KB'
+  );
+  assert.match(
+    jobs.group,
+    /if: \$\{\{ needs\.canary\.outputs\.artifact-id != '' \}\}\n {8}continue-on-error: true\n {8}uses: actions\/download-artifact@[0-9a-f]{40}\n {8}with:\n {10}artifact-ids: \$\{\{ needs\.canary\.outputs\.artifact-id \}\}\n {10}path: \$\{\{ runner\.temp \}\}\/canary\n {10}digest-mismatch: error\n/
+  );
+  assert.match(jobs.group, /permissions:\n {6}contents: read\n {6}actions: read\n/);
+  assert.match(jobs.group, /downstream\.mjs --result "\$RUNNER_TEMP\/canary\/result\.json"/);
+  assert.match(jobs.group, /OVERRIDE: \$\{\{ needs\.guard\.outputs\.override \}\}/);
+  assert.match(
+    jobs.group,
+    new RegExp(
+      `gate\\.sh --evidence downstream node tools/cert-review/downstream\\.mjs [^\\n]*--override "\\$override" \\\\\\n {12}--bios ${BIOS} --shards sweep,guard,k4-link --out`
+    )
+  );
+  assert.match(
+    jobs.group,
+    /--approval cert-review-approved --downstream "\$RUNNER_TEMP\/downstream\.json"/
+  );
+  assert.match(
+    jobs.group,
+    new RegExp(`pr\\.mjs notice [^\\n]*\\n {12}--bios ${BIOS} --downstream`)
+  );
+});
+
+function stepScript(job, id) {
+  const block = job
+    .split('\n      - ')
+    .find(
+      (b) =>
+        b.startsWith(`id: ${id}\n`) ||
+        b.includes(`\n        id: ${id}\n`) ||
+        b.includes(`name: ${id}`)
+    );
+  assert.ok(block, `step ${id}`);
+  const lines = block.split('\n');
+  const at = lines.findIndex((l) => l === '        run: |');
+  return lines
+    .slice(at + 1)
+    .filter((l) => l.startsWith('          ') || l === '')
+    .map((l) => l.slice(10))
+    .join('\n');
+}
+
+test("the merge group's steps end to end: a planted regression is red, a missing result INCOMPLETE, a stale override no waiver, and a canary broken on main is not judged, files one issue, and the next passing group closes it (#480)", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'cert-group-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const heads = { 11: 'a'.repeat(40) };
+  let issues = [];
+  const nextIssue = 50;
+  const api = await fakeApi(t, (method, url) => {
+    if (url.startsWith('/repos/o/r/compare/'))
+      return { commits: [{ commit: { message: 'Merge pull request #11 from o/x' } }] };
+    if (url === '/repos/o/r/pulls/11') return { head: { sha: heads[11] } };
+    if (url.startsWith('/repos/o/r/pulls/11/files')) return [{ filename: 'src/x.ts' }];
+    if (url.startsWith(`/repos/o/r/commits/${heads[11]}/statuses`))
+      return [{ context: 'cert-review', state: 'success' }];
+    if (method === 'POST' && url.startsWith('/repos/o/r/statuses/')) return {};
+    if (method === 'GET' && url.startsWith('/repos/o/r/issues?'))
+      return issues.filter((i) => i.state === 'open');
+    if (method === 'POST' && url === '/repos/o/r/issues') return { number: nextIssue };
+    if (method === 'POST' && /^\/repos\/o\/r\/issues\/\d+\/comments$/.test(url)) return {};
+    if (method === 'PATCH' && /^\/repos\/o\/r\/issues\/\d+$/.test(url)) return {};
+    return undefined;
+  });
+  const BIOS = 'c2cec127b935419049568f584093d7ef03ac0721';
+  const canary = (o = {}) =>
+    JSON.stringify({
+      ok: true,
+      biosRef: BIOS,
+      url: 'https://github.com/o/r/actions/runs/2',
+      counts: { pass: 30, skip: 0, fail: 0, regression: 0, both: 0, flaky: 0 },
+      regressions: [],
+      both: [],
+      flaky: [],
+      failures: [],
+      missingShards: [],
+      unexplainedExits: [],
+      refused: [],
+      ambiguous: [],
+      ...o,
+    });
+  let n = 0;
+  const receipt = (status, members) =>
+    JSON.stringify({ schema: 1, label: 'downstream-override', status, members });
+  const member = (o = {}) => ({
+    pr: 11,
+    head: heads[11],
+    paths: ['src/x.ts'],
+    touched: ['src/x.ts'],
+    approved: true,
+    status: 'PASS',
+    ...o,
+  });
+  const group = async (
+    result,
+    override = receipt('FAIL', [member({ approved: false, status: 'FAIL' })])
+  ) => {
+    const temp = join(dir, `g${n++}`);
+    await mkdir(temp);
+    const env = {
+      ...process.env,
+      RUNNER_TEMP: temp,
+      GITHUB_OUTPUT: join(temp, 'out'),
+      GITHUB_STEP_SUMMARY: join(temp, 'summary'),
+      GITHUB_API_URL: api.url,
+      GITHUB_REPOSITORY: 'o/r',
+      GITHUB_RUN_ID: '2',
+      CERT_CONTEXT: 'cert-review',
+      GH_TOKEN: 'x',
+      BASE_SHA: 'e'.repeat(40),
+      HEAD_SHA: 'f'.repeat(40),
+      GUARD: 'PASS',
+      OVERRIDE: override,
+    };
+    if (result) {
+      await mkdir(join(temp, 'canary'));
+      await writeFile(join(temp, 'canary', 'result.json'), result);
+    }
+    const run = (id) =>
+      new Promise((done) => {
+        const child = spawn('bash', ['-eo', 'pipefail', '-c', stepScript(jobs.group, id)], {
+          cwd: fileURLToPath(new URL('../../', import.meta.url)),
+          env,
+        });
+        let stdout = '';
+        child.stdout.on('data', (d) => {
+          stdout += d;
+        });
+        child.stderr.on('data', (d) => {
+          stdout += d;
+        });
+        child.on('close', (status) => done({ status, stdout }));
+      });
+    const down = await run('downstream');
+    const look = await run('lookup');
+    const notice = down.status === 0 ? await run("bios's canary failing on main") : undefined;
+    const status = api.seen
+      .filter((x) => x.method === 'POST' && x.url.startsWith('/repos/o/r/statuses/'))
+      .at(-1).body;
+    return { down, look, notice, status };
+  };
+  const regression = canary({
+    counts: { pass: 29, skip: 0, fail: 0, regression: 1, both: 0, flaky: 0 },
+    regressions: [{ shard: 'sweep', test: 'gpg verifies', log: '' }],
+  });
+
+  const planted = await group(regression);
+  assert.equal(planted.down.status, 0, planted.down.stdout);
+  assert.notEqual(planted.look.status, 0);
+  assert.equal(planted.status.state, 'failure');
+  assert.match(
+    planted.status.description,
+    /^not certified: downstream: FAIL bios c2cec127b935 sweep,guard,k4-link: 1 regressions/
+  );
+
+  const missing = await group('');
+  assert.notEqual(missing.look.status, 0);
+  assert.equal(missing.status.state, 'error');
+  assert.match(
+    missing.status.description,
+    /^not certified: downstream: INCOMPLETE .*the canary left no readable result/
+  );
+
+  const stale = await group(regression);
+  assert.equal(
+    stale.status.state,
+    'failure',
+    'an override the guard did not bind to the head waives nothing'
+  );
+  const waived = await group(regression, receipt('PASS', [member()]));
+  assert.equal(waived.status.state, 'success');
+  assert.match(
+    waived.status.description,
+    /^downstream: overridden \(downstream-override on the head, by the coordinator\)/
+  );
+  const unset = await group(regression, '');
+  assert.equal(unset.status.state, 'failure', 'no guard output is no override');
+  const dotOnly = await group(
+    regression,
+    receipt('PASS', [member({ paths: ['.npmignore'], touched: [], approved: false })])
+  );
+  assert.equal(
+    dotOnly.status.state,
+    'failure',
+    'a PASS the guard gave without checking the label is no waiver'
+  );
+  assert.match(dotOnly.down.stdout, /^downstream-override: FAIL/m);
+  const none = await group(regression, receipt('PASS', []));
+  assert.equal(none.status.state, 'failure', 'a receipt with no pull requests waives nothing');
+  const unlabeled = await group(
+    regression,
+    receipt('PASS', [member(), member({ pr: 12, approved: false })])
+  );
+  assert.equal(
+    unlabeled.status.state,
+    'failure',
+    'every pull request in the group needs the override'
+  );
+  const { matchesGlob } = await import('node:path');
+  const globs = ['**', '.*', '.*/**', '**/.*', '**/.*/**'];
+  for (const f of [
+    '.npmignore',
+    '.github/workflows/ci.yml',
+    'src/a.ts',
+    'test/integration/.x',
+    'a/.b/c',
+  ])
+    assert.ok(
+      globs.some((g) => matchesGlob(f, g)),
+      `the override guard's paths cover ${f}`
+    );
+
+  const broken = canary({
+    counts: { pass: 0, skip: 0, fail: 0, regression: 0, both: 2, flaky: 0 },
+    both: [
+      { shard: 'guard', test: 'boot', log: '' },
+      { shard: 'k4-link', test: 'link', log: '' },
+    ],
+  });
+  const notJudged = await group(broken);
+  assert.equal(notJudged.status.state, 'success', notJudged.look.stdout);
+  assert.match(
+    notJudged.status.description,
+    /^downstream: not judged \(bios canary failing on main\)/
+  );
+  assert.equal(notJudged.notice.status, 0, notJudged.notice.stdout);
+  assert.match(
+    notJudged.notice.stdout,
+    /::warning title=downstream::bios canary is failing on main/
+  );
+  const opened = api.seen.filter((x) => x.method === 'POST' && x.url === '/repos/o/r/issues');
+  assert.equal(opened.length, 1);
+  assert.equal(
+    opened[0].body.title,
+    `downstream: bios canary failing on main (${BIOS.slice(0, 12)})`
+  );
+  issues = [{ number: 50, state: 'open', title: opened[0].body.title }];
+
+  const knownBoth = canary({
+    counts: { pass: 28, skip: 0, fail: 0, regression: 0, both: 2, flaky: 0 },
+    both: [
+      { shard: 'guard', test: 'boot', log: '' },
+      { shard: 'k4-link', test: 'link', log: '' },
+    ],
+  });
+  const noted = await group(knownBoth);
+  assert.equal(noted.status.state, 'success');
+  assert.match(noted.status.description, /^downstream: PASS .*known downstream failures 2/);
+  assert.equal(
+    api.seen.filter((x) => x.method === 'POST' && x.url === '/repos/o/r/issues').length,
+    1,
+    'deduplicated'
+  );
+  assert.ok(api.seen.some((x) => x.method === 'POST' && x.url === '/repos/o/r/issues/50/comments'));
+  assert.match(noted.notice.stdout, /^pr notice: PASS commented on #50/m);
+
+  const green = await group(canary());
+  assert.equal(green.status.state, 'success');
+  assert.match(green.notice.stdout, /^pr notice: PASS PASS: closed #50$/m);
+  assert.deepEqual(
+    api.seen.filter((x) => x.method === 'PATCH').map((x) => [x.url, x.body.state]),
+    [['/repos/o/r/issues/50', 'closed']]
+  );
+
+  const real = JSON.parse(
+    readFileSync(new URL('fixtures/cert-review/bios-canary-result.json', import.meta.url), 'utf8')
+  );
+  while (JSON.stringify(real).length < 200_000) real.tests.push(...real.tests);
+  const shaped = await group(JSON.stringify(real));
+  assert.equal(shaped.down.status, 0, shaped.down.stdout);
+  assert.match(
+    shaped.down.stdout,
+    /downstream: PASS bios c2cec127b935 sweep,guard,k4-link: 605 pass \(https:\/\/github\.com\/ai-ecoverse\/slicc-kernel\/actions\/runs\/39168823799\)/,
+    "bios's real result (run 39168823799), over 128 KB, reaches the verdict through the artifact"
+  );
+  assert.equal(shaped.status.state, 'success', shaped.look.stdout);
 });
 
 test("the cert-path guard fails closed: a reviewer path the guard's globs miss (a dot path) still needs cert-review-approved, and the reviewer globs cover dot paths", async (t) => {
