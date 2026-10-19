@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   node-versions:
-    name: node kernel on Node ${{ matrix.node }} (jit_page crashes, #1129)
+    name: node kernel on Node ${{ matrix.node }}, counting jit_page crashes
     runs-on: ubuntu-latest
     timeout-minutes: 45
     continue-on-error: true
@@ -54,7 +54,8 @@ jobs:
           tail -n 40 "$RUNNER_TEMP/node-suite.log"
           jit=$(grep -c 'jit_page' "$RUNNER_TEMP/node-suite.log" || true)
           signals=$(grep -cE "signal: '?SIG(TRAP|SEGV|ILL|ABRT|BUS)" "$RUNNER_TEMP/node-suite.log" || true)
-          line="node-versions: Node $(node -p process.version), ${#files[@]} files, exit $status, jit_page lines $jit, test processes ended by a crash signal $signals"
+          count=$(printf '%s\n' "${files[@]}" | wc -l)
+          line="node-versions: Node $(node -p process.version), $count files, exit $status, jit_page lines $jit, test processes ended by a crash signal $signals"
           echo "$line"
           echo "$line" >> "$GITHUB_STEP_SUMMARY"
           exit "$status"
