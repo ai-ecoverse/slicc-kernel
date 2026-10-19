@@ -122,7 +122,7 @@ export class RemoteWatch {
     if (data.ack !== undefined && data.to === this.tab && data.from !== undefined) {
       this.acked(data.ack, data.from);
     }
-    if (data.changed !== undefined) this.emit({ paths: data.changed, trees: [] });
+
   }
 
   private arrived(peer: string): void {

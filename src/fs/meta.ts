@@ -158,6 +158,7 @@ export class IndexedDbMeta implements MetaStore {
     db.onversionchange = () => db.close();
     this.channel = new BroadcastChannel(`slicc-kernel-meta:${db.name}`);
     this.channel.onmessage = ({ data }) => {
+      if (data !== undefined) return;
       this.drop(data as Invalidation);
       for (const listener of this.listeners) listener(data as Invalidation);
     };
