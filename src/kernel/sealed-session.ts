@@ -9,7 +9,7 @@ const TOKEN = "[!#$%&'*+.^_`|~0-9a-z-]+";
 const HEADER = new RegExp(`^header:${TOKEN}$`);
 const METHOD = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 const TARGET = /^[\x21-\x7e]+$/;
-const EXIT = /^(page|proxy|tailscale|device:[\x21-\x7e]+)$/;
+export const SESSION_EXIT = /^(tailscale|device:[A-Za-z0-9._-]+)$/;
 const HOST = /^[a-z0-9.:-]+$/;
 const UNSAFE = /[\r\n\0]/;
 
@@ -78,7 +78,10 @@ export function sessionAskable(f: SessionFields, now: number): boolean {
   const age = now - f.handshakeAt;
   if (!Number.isFinite(age) || age < 0 || age > SESSION_WINDOW_MS) return false;
   return (
-    typeof f.exit === 'string' && EXIT.test(f.exit) && placeholdersOk(f.placeholders) && headOk(f)
+    typeof f.exit === 'string' &&
+    SESSION_EXIT.test(f.exit) &&
+    placeholdersOk(f.placeholders) &&
+    headOk(f)
   );
 }
 

@@ -56,13 +56,20 @@ test('a cold install of bios’s agent project into /opt/agent on the OPFS root,
   const sampling = (async () => {
     while (running) {
       await new Promise((resolve) => setTimeout(resolve, 2000));
-      if (running) series.push([Date.now() - t0, ...(await counters())]);
+      if (!running) continue;
+      const sample = await counters();
+      series.push([Date.now() - t0, ...sample]);
+      await page.evaluate((v) => {
+        window.__install = v;
+      }, sample.join(','));
     }
   })();
-  const r = await bash(
-    'cd /opt/agent && pnpm install --frozen-lockfile --ignore-scripts --config.store-dir=/opt/slicc/.store --reporter=ndjson > /dev/shm/pnpm.ndjson 2>&1; echo "rc=$?"',
-    { cwd: '/' }
+  const stdout = await page.run(
+    { marker: () => window.__install, quietMs: 120_000, maxMs: 1_700_000, label: 'the install' },
+    async (script) => (await window.kernel.run(['bash', '-c', script], { cwd: '/' })).stdout,
+    'cd /opt/agent && pnpm install --frozen-lockfile --ignore-scripts --config.store-dir=/opt/slicc/.store --reporter=ndjson > /dev/shm/pnpm.ndjson 2>&1; echo "rc=$?"'
   );
+  const r = { stdout };
   const wall = Date.now() - t0;
   running = false;
   await sampling;

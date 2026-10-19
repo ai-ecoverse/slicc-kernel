@@ -623,6 +623,19 @@ const remember =
     return made;
   };
 
+function copying(
+  bridge: SyncFsPosixBridge,
+  mutating: <T>(op: () => T, ...paths: string[]) => T,
+  entry: (p: string) => string[]
+): Pick<SyncFsPosixBridge, 'copy'> {
+  const { copy } = bridge;
+  if (!copy) return {};
+  return {
+    copy: (from, to, mode, exclusive) =>
+      mutating(() => copy.call(bridge, from, to, mode, exclusive), ...entry(to)),
+  };
+}
+
 export function cachingBridge(
   bridge: SyncFsPosixBridge,
   now: () => number = () => performance.now(),
@@ -784,6 +797,7 @@ export function cachingBridge(
             mutating(() => bridge.mkfifo?.(p, mode), ...entry(p)),
         }
       : {}),
+    ...copying(bridge, mutating, entry),
     ...(chown
       ? {
           chown: (p: string, ...rest: ChownArgs) =>

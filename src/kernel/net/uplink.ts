@@ -16,6 +16,7 @@ export interface ResolveAnswer {
 export interface UplinkConn {
   readonly localAddr: string;
   readonly remoteAddr: string;
+  readonly exit?: string;
   read(): Promise<Uint8Array | null>;
   write(bytes: Uint8Array): Promise<number>;
   closeWrite(): void;

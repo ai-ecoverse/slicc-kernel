@@ -333,6 +333,9 @@ export function createSyncFsSabBridge(
     mkfifo: (path, mode) => {
       run({ op: 'mkfifo', path, mode }, path);
     },
+    copy: (from, to, mode, exclusive) => {
+      run({ op: 'copy', path: from, arg2: to, mode, ...(exclusive ? { exclusive } : {}) }, to);
+    },
     create: (path, mode, opening) => {
       const flags = { ...(mode !== undefined ? { mode } : {}), ...(opening ? { opening } : {}) };
       const r = run({ op: 'create', path, ...flags, identity: true }, path);
