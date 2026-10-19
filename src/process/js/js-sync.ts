@@ -34,6 +34,7 @@ import {
   isExclusive,
   type JsOpenOptions,
   type JsStatFs,
+  type JsWriteOptions,
   joined,
   MAX_IO,
   openRequest,
@@ -80,7 +81,7 @@ export interface JsSyncContext {
   umask(mask?: number): number;
   setcred(change: Partial<JsCred>): JsCred;
   read(fd: number, max?: number): Uint8Array;
-  write(fd: number, data: Uint8Array | string): void;
+  write(fd: number, data: Uint8Array | string, options?: JsWriteOptions): number;
   close(fd: number): void;
   socketpair(): [number, number];
   pipe(): [number, number];
@@ -234,20 +235,24 @@ export function syncOps(
     return r.ok && r.kind === 'bytes' ? r.bytes : new Uint8Array(0);
   };
 
-  const write = (fd: number, data: Uint8Array | string): void => {
+  const write = (fd: number, data: Uint8Array | string, options?: JsWriteOptions): number => {
     const bytes = typeof data === 'string' ? encoder.encode(data) : data;
     const i = info(fd);
-    if (writeDevice(i)) return;
+    if (writeDevice(i)) return bytes.length;
+    const nonblock = options?.nonblock === true;
     let at = 0;
     while (at < bytes.length) {
       const body = bytes.subarray(at, at + MAX_IO);
       try {
-        at += written(kernel.blocking({ op: 'fd-write', fd, body }), body.length);
+        const req = { op: 'fd-write' as const, fd, body, ...(nonblock ? { nonblock } : {}) };
+        at += written(kernel.blocking(req), body.length);
       } catch (err) {
         if (brokenPipe(err, i)) kernel.call({ op: 'proc-kill', pid: shared.pid, sig: SIG.PIPE });
         throw err;
       }
+      if (nonblock) break;
     }
+    return at;
   };
 
   const statOf = (op: 'stat' | 'lstat', path: string): SyncFsBridgeStat => {

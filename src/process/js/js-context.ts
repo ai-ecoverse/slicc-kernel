@@ -35,6 +35,7 @@ import {
   type JsFdType,
   type JsOpenOptions,
   type JsStatFs,
+  type JsWriteOptions,
   joined,
   MAX_IO,
   openRequest,
@@ -69,7 +70,7 @@ import {
 } from './js-watch.ts';
 import { type JsWebSocket, type JsWebSocketOptions, websocketOp } from './js-websocket.ts';
 
-export type { JsFdType, JsOpenOptions } from './js-io.ts';
+export type { JsFdType, JsOpenOptions, JsWriteOptions } from './js-io.ts';
 
 export interface JsFile {
   readonly fd: number;
@@ -107,10 +108,11 @@ export interface JsProgramContext {
   readonly stdout: WritableStream<Uint8Array>;
   readonly stderr: WritableStream<Uint8Array>;
   read(fd: number, max?: number): Promise<Uint8Array>;
-  write(fd: number, data: Uint8Array | string): Promise<void>;
+  write(fd: number, data: Uint8Array | string, options?: JsWriteOptions): Promise<number>;
   close(fd: number): Promise<void>;
   socketpair(): Promise<[number, number]>;
   pipe(): Promise<[number, number]>;
+  select(sets: JsSelectSets, options?: { signal?: AbortSignal }): Promise<JsSelected>;
   fdStatus(fd: number): Promise<JsFdStatus>;
   isatty(fd: number): Promise<boolean>;
   open(path: string, options?: JsOpenOptions): Promise<JsFile>;
@@ -156,6 +158,42 @@ export interface JsProgramContext {
   exit(code?: number): never;
   onUncaught(listener: JsStrayListener): () => void;
   onUnhandledRejection(listener: JsStrayListener): () => void;
+}
+
+export interface JsSelectSets {
+  read?: readonly number[];
+  write?: readonly number[];
+  timeoutMs?: number;
+}
+
+export interface JsSelected {
+  read: number[];
+  write: number[];
+}
+
+function fdList(list: readonly number[] | undefined): number[] {
+  const fds = [...(list ?? [])];
+  if (!fds.every((fd) => Number.isInteger(fd) && fd >= 0))
+    throw new JsCallError('EINVAL', 'select', 'ERR_INVALID_ARG_VALUE: fds must be integers >= 0');
+  return fds;
+}
+
+async function selectOp(
+  kernel: JsKernel,
+  sets: JsSelectSets,
+  signal: AbortSignal | undefined
+): Promise<JsSelected> {
+  const read = fdList(sets.read);
+  const write = fdList(sets.write);
+  const timeoutMs = sets.timeoutMs ?? -1;
+  if (!Number.isFinite(timeoutMs))
+    throw new JsCallError('EINVAL', 'select', 'ERR_INVALID_ARG_VALUE: timeoutMs');
+  const r = await kernel.blocking(
+    { op: 'fd-select', read, write, timeoutMs: Math.max(-1, Math.floor(timeoutMs)) },
+    signal
+  );
+  const got = (r.ok && r.kind === 'json' ? r.json : {}) as Partial<JsSelected>;
+  return { read: got.read ?? [], write: got.write ?? [] };
 }
 
 export interface JsCrontabCall {
@@ -329,7 +367,17 @@ function writer(kernel: JsKernel, info: (fd: number) => Promise<FdInfo>, pid: nu
     }
   };
 
-  return { writes, writeAll };
+  const writeSome = async (fd: number, data: Uint8Array): Promise<number> => {
+    const i = await info(fd);
+    if (writeDevice(i)) return data.length;
+    const body = data.subarray(0, MAX_IO);
+    const r = await kernel.raw({ op: 'fd-write', fd, body, nonblock: true });
+    if (r.ok) return written(r, body.length);
+    if (brokenPipe(callError(r, 'fd-write'), i))
+      await kernel.call({ op: 'proc-kill', pid, sig: SIG.PIPE });
+    throw callError(r, 'fd-write');
+  };
+  return { writes, writeAll, writeSome };
 }
 
 function readable(read: (fd: number) => Promise<Uint8Array>): ReadableStream<Uint8Array> {
@@ -516,6 +564,29 @@ function pendingReads(
 const cryptoRandom = (bytes: Uint8Array) =>
   void crypto.getRandomValues(bytes as Uint8Array<ArrayBuffer>);
 
+function tracked(
+  pending: Set<Promise<unknown>>,
+  writeAll: (fd: number, data: Uint8Array) => Promise<void>,
+  writeSome: (fd: number, data: Uint8Array) => Promise<number>
+) {
+  return (fd: number, data: Uint8Array | string, options?: JsWriteOptions): Promise<number> => {
+    const bytes = typeof data === 'string' ? encoder.encode(data) : data;
+    let settle!: () => void;
+    const settled = new Promise<void>((resolve) => (settle = resolve));
+    pending.add(settled);
+    return (async () => {
+      try {
+        if (options?.nonblock === true) return await writeSome(fd, bytes);
+        await writeAll(fd, bytes);
+        return bytes.length;
+      } finally {
+        pending.delete(settled);
+        settle();
+      }
+    })();
+  };
+}
+
 export function createContext(o: ContextOptions): CreatedContext {
   const { kernel } = o;
   const infos = new Map<number, FdInfo>();
@@ -544,25 +615,16 @@ export function createContext(o: ContextOptions): CreatedContext {
   };
   const { read, closing } = pendingReads(kernel, info, random);
 
-  const { writes, writeAll } = writer(kernel, info, o.pid);
+  const { writes, writeAll, writeSome } = writer(kernel, info, o.pid);
 
-  const write = (fd: number, data: Uint8Array | string): Promise<void> => {
-    const bytes = typeof data === 'string' ? encoder.encode(data) : data;
-    let settle!: () => void;
-    const settled = new Promise<void>((resolve) => (settle = resolve));
-    pending.add(settled);
-    return (async () => {
-      try {
-        await writeAll(fd, bytes);
-      } finally {
-        pending.delete(settled);
-        settle();
-      }
-    })();
-  };
+  const write = tracked(pending, writeAll, writeSome);
 
   const writable = (fd: number) =>
-    new WritableStream<Uint8Array>({ write: (chunk) => write(fd, chunk) });
+    new WritableStream<Uint8Array>({
+      write: async (chunk) => {
+        await write(fd, chunk);
+      },
+    });
 
   const statOf = async (op: 'stat' | 'lstat', path: string): Promise<SyncFsBridgeStat> => {
     const abs = resolve(path);
@@ -648,6 +710,7 @@ export function createContext(o: ContextOptions): CreatedContext {
     socketpair: async () =>
       (await kernel.json({ op: 'sock-pair', domain: 'unix', type: 'stream' })) as [number, number],
     pipe: async () => (await kernel.json({ op: 'fd-pipe' })) as [number, number],
+    select: (sets, options) => selectOp(kernel, sets, options?.signal),
     async fdStatus(fd) {
       const type = typeOf(await info(fd));
       return { type, tty: type === 'tty', seekable: type === 'file' };
