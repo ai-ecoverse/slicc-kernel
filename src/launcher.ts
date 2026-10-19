@@ -756,7 +756,7 @@ export class Launcher {
     options.fs.onPeer?.(() => this.flushOpen());
     options.fs.remoteChanges?.((change) => {
       this.changes.flush();
-      this.rewritten(change.paths);
+      this.rewritten(change.paths, change.trees);
     });
     const holders = [this.held, this.openFiles];
     this.unlinked = new UnlinkedKeeper(
@@ -2837,8 +2837,11 @@ export class Launcher {
     };
   }
 
-  private rewritten(paths: readonly string[]): void {
-    for (const nodes of this.openFiles) for (const path of paths) nodes.rewritten(path);
+  private rewritten(paths: readonly string[], trees: readonly string[] = []): void {
+    for (const nodes of this.openFiles) {
+      for (const path of paths) nodes.rewritten(path);
+      for (const tree of trees) nodes.rewrittenUnder(tree);
+    }
     this.changes.publish(...paths);
   }
 

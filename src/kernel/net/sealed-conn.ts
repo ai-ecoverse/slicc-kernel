@@ -2,6 +2,7 @@ import { SCRUB_IDLE_MS } from '../scrub-file.ts';
 import type { SealedBroker, SealedCaller } from '../sealed.ts';
 import { SESSION_EXIT, type SessionHead, type SessionProtocol } from '../sealed-session.ts';
 import { HEAD_MAX, sniffHttp1, substituteHead } from './sealed-http1.ts';
+import { PG_MESSAGE_MAX, PgServer, pgLength, pgPassword, sniffPg } from './sealed-pg.ts';
 import type { ScrubScope, SessionScrub } from './sealed-scrubs.ts';
 import { SMTP_LINE_MAX, SmtpClient, sniffSmtp } from './sealed-smtp.ts';
 import type { UplinkConn } from './uplink.ts';
@@ -62,14 +63,17 @@ function headEnd(bytes: Uint8Array): number {
   return -1;
 }
 
-type Mode = 'sniff' | 'http1' | 'smtp' | 'pass';
+type Mode = 'sniff' | 'http1' | 'smtp' | 'pg' | 'pass';
 
 function modeOf(start: string): Mode | undefined {
-  const http = sniffHttp1(start);
-  const smtp = sniffSmtp(start);
-  if (http === 'yes') return 'http1';
-  if (smtp === 'yes') return 'smtp';
-  return http === 'no' && smtp === 'no' ? 'pass' : undefined;
+  const sniffs: Array<[Mode, 'yes' | 'no' | 'more']> = [
+    ['http1', sniffHttp1(start)],
+    ['smtp', sniffSmtp(start)],
+    ['pg', sniffPg(start)],
+  ];
+  const hit = sniffs.find(([, v]) => v === 'yes');
+  if (hit) return hit[0];
+  return sniffs.every(([, v]) => v === 'no') ? 'pass' : undefined;
 }
 
 function crlf(bytes: Uint8Array): number {
@@ -85,12 +89,15 @@ class SessionWriter {
   private failed: unknown;
   private readonly session = sessionId();
   private readonly smtp: SmtpClient;
+  private pgStarted = false;
   private readonly conn: UplinkConn;
   private readonly s: SealedSession;
+  private readonly pg: PgServer;
   private readonly scope: ScrubScope;
-  constructor(conn: UplinkConn, s: SealedSession, scope: ScrubScope) {
+  constructor(conn: UplinkConn, s: SealedSession, pg: PgServer, scope: ScrubScope) {
     this.conn = conn;
     this.s = s;
+    this.pg = pg;
     this.scope = scope;
     this.smtp = new SmtpClient((position, placeholders) =>
       this.ask('smtp', position, placeholders)
@@ -148,6 +155,7 @@ class SessionWriter {
     if (this.mode === 'pass') await this.release();
     else if (this.mode === 'http1') await this.http1();
     else if (this.mode === 'smtp') await this.lines();
+    else if (this.mode === 'pg') await this.messages();
     if (this.mode !== 'pass' && this.buffer.length > 0)
       this.timer = setTimeout(() => this.idle(), HEAD_IDLE_MS);
     return bytes.length;
@@ -180,6 +188,34 @@ class SessionWriter {
       if (this.smtp.done) return this.release();
     }
     if (this.buffer.length > SMTP_LINE_MAX) await this.release();
+  }
+
+  private async messages(): Promise<void> {
+    for (;;) {
+      const whole = pgLength(this.buffer, this.pgStarted);
+      if (whole === undefined || whole < 4 || whole > PG_MESSAGE_MAX) {
+        if (whole !== undefined) await this.release();
+        return;
+      }
+      if (this.buffer.length < whole) return;
+      const message = this.buffer.slice(0, whole);
+      this.buffer = this.buffer.slice(whole);
+      const started = this.pgStarted;
+      this.pgStarted = true;
+      const out = started
+        ? await pgPassword(message, this.pg, (placeholders) =>
+            this.ask('pg', 'password-cleartext', placeholders)
+          ).catch(() => ({ bytes: message, done: true }))
+        : { bytes: message, done: false };
+      if ('values' in out && out.values) this.remember(out.values);
+      try {
+        await writeAll(this.conn, out.bytes);
+      } finally {
+        out.bytes.fill(0);
+        message.fill(0);
+      }
+      if (out.done) return this.release();
+    }
   }
 
   private idle(): void {
@@ -309,9 +345,18 @@ function idle(): Promise<typeof IDLE> {
 }
 
 export function sealedConn(conn: UplinkConn, s: SealedSession): UplinkConn {
+  const pg = new PgServer();
   const scope = s.broker.sessions.scope(s.pid, s.host);
-  const writer = substitutes(s) ? new SessionWriter(conn, s, scope) : undefined;
-  const reader = new ScrubReader(conn, scope);
+  const writer = substitutes(s) ? new SessionWriter(conn, s, pg, scope) : undefined;
+  const observed: UplinkConn = {
+    ...conn,
+    read: async () => {
+      const bytes = await conn.read();
+      if (bytes) pg.feed(bytes);
+      return bytes;
+    },
+  };
+  const reader = new ScrubReader(writer ? observed : conn, scope);
   return {
     localAddr: conn.localAddr,
     remoteAddr: conn.remoteAddr,
