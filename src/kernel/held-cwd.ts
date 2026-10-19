@@ -17,13 +17,13 @@ export interface CwdAnswer {
 
 interface Held {
   path: string;
-  ino: number | undefined;
+  ino: string | number | undefined;
   refs: number;
   dead: boolean;
   verified: number;
 }
 
-export type InodeOf = (path: string) => Promise<number | undefined>;
+export type InodeOf = (path: string) => Promise<string | number | undefined>;
 
 const under = (path: string, changed: string): boolean =>
   changed === '/' || path === changed || path.startsWith(`${changed}/`);

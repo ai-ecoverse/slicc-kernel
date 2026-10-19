@@ -637,7 +637,10 @@ export class Launcher {
   readonly hostname: string;
   readonly watchers = new FsWatchers();
   private readonly changes = new FileChanges();
-  readonly cwds = new CwdTable(async (path) => (await this.base.stat(path)).ino);
+  readonly cwds = new CwdTable(async (path) => {
+    const { dev, ino } = await this.base.stat(path);
+    return `${dev ?? 0}:${ino}`;
+  });
   private readonly cwdSlots = new Map<number, number>();
   private readonly pnpmHome: string;
   private readonly pnpmChain: ReadonlySet<string>;
