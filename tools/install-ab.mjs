@@ -38,7 +38,8 @@ for (const [name, ref] of [
   ['A', base],
   ['B', candidate],
 ]) {
-  sh('git', ['fetch', '--quiet', '--depth', '1', 'origin', ref]);
+  const shallow = sh('git', ['rev-parse', '--is-shallow-repository']).trim() === 'true';
+  sh('git', ['fetch', '--quiet', ...(shallow ? ['--depth', '1'] : []), 'origin', ref]);
   const sha = sh('git', ['rev-parse', 'FETCH_HEAD']).trim();
   const dir = join(work, name);
   mkdirSync(dir, { recursive: true });
