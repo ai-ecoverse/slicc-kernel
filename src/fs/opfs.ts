@@ -1732,8 +1732,10 @@ export class OpfsFs implements KernelFs {
     let handle: FileSystemFileHandle | undefined;
     try {
       const kept = created ? this.files.get(destination) : undefined;
-      if (kept) handle = kept;
-      else {
+      if (kept) {
+        if (options.owner?.fifo || options.owner?.socket) throw fsError('ENXIO', to);
+        handle = kept;
+      } else {
         const [made, existed, at] = await this.fileFor(destination);
         handle = made;
         target = at;
