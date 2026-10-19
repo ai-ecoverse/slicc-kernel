@@ -732,9 +732,16 @@ export class WasiFds {
       fd = this.openCharDevice(openClipboard, oflags, rights);
       kind = 'clipboard';
     } else if (path === '/dev/tty' || /^\/dev\/tty\d+$/.test(path)) {
-      fd = openTty?.call(this.kernel.sys, path === '/dev/tty' ? undefined : path);
+      const exclusive = (oflags & OFLAGS.CREAT) !== 0 && (oflags & OFLAGS.EXCL) !== 0;
+      try {
+        fd = openTty?.call(this.kernel.sys, path === '/dev/tty' ? undefined : path);
+      } catch (err) {
+        if (exclusive && (err as { code?: string }).code === 'EACCES')
+          throw new WasiError('EEXIST');
+        throw err;
+      }
       if (fd === undefined) throw new WasiError('ENXIO');
-      if ((oflags & OFLAGS.CREAT) !== 0 && (oflags & OFLAGS.EXCL) !== 0) {
+      if (exclusive) {
         this.kernel.sys.close(fd);
         throw new WasiError('EEXIST');
       }
