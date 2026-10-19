@@ -1802,6 +1802,7 @@ export class Launcher {
         peers: Number(this.locks.shared?.() === true),
         fsCalls: servedFsCalls(),
         opfsCalls: this.rootFs.opfsCalls?.() ?? 0,
+        opfsOps: this.rootFs.opfsOps?.() ?? 0,
       }),
       sudo: (call, signal) => this.sudo(pid, call, signal),
       crontab: (call) => this.crontab(pid, call),

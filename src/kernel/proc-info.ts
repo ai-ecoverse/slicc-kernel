@@ -42,4 +42,5 @@ export interface ProcessListing {
   peers?: number;
   fsCalls?: number;
   opfsCalls?: number;
+  opfsOps?: number;
 }

@@ -111,6 +111,7 @@ export interface KernelFs {
   readVersioned?(path: string, cached?: boolean): Promise<{ bytes: Uint8Array; version: string }>;
   version?(path: string, cached?: boolean): Promise<string>;
   opfsCalls?(): number;
+  opfsOps?(): number;
 }
 
 export type RangedOps = Required<Pick<KernelFs, 'pread' | 'pwrite' | 'truncate'>>;
