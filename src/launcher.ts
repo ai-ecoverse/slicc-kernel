@@ -1230,7 +1230,8 @@ export class Launcher {
       return await this.planOne(req, ctx);
     } catch (err) {
       const code = codeOf(err);
-      if (!bare || (code !== 'ENOENT' && code !== 'ENOEXEC')) throw err;
+      const searched = bare && req.search !== false && (code === 'ENOENT' || code === 'ENOEXEC');
+      if (!searched || (await this.commandAt(req.file, ctx.scope))) throw err;
       const found = await this.onPath(req, ctx);
       if (found) return found;
       throw err;

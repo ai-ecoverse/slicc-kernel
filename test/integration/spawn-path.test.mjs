@@ -7,11 +7,12 @@ import { createNodeKernel } from '../../dist/node.js';
 
 const modules = new URL('../../node_modules/@ai-ecoverse/', import.meta.url);
 
-async function install(kernel, name) {
+async function install(kernel, name, skip) {
   const base = new URL(`${name}/`, modules);
   const entries = await readdir(base, { recursive: true, withFileTypes: true });
   for (const entry of entries.filter((e) => e.isFile())) {
     const file = join(entry.parentPath, entry.name);
+    if (skip?.test(relative(fileURLToPath(base), file))) continue;
     await kernel.writeFile(
       `/node_modules/@ai-ecoverse/${name}/${relative(fileURLToPath(base), file)}`,
       await readFile(file)
@@ -55,4 +56,27 @@ test('timeout (posix_spawnp) finds a command by name in the PATH it was given wh
   assert.match(lines[2], /^missing => rc 127 .*No such file or directory/);
   assert.match(lines[3], /^noexec => rc 126 .*Permission denied/);
   assert.match(lines[4], /^seq 2 => rc 0 1$/);
+});
+
+const PY = [
+  'import os',
+  'env = dict(os.environ)',
+  "for name, fn in (('spawn', os.posix_spawn), ('spawnp', os.posix_spawnp)):",
+  '    try:',
+  "        pid = fn('pyfound', ['pyfound'], env)",
+  "        print(name, 'ran', os.waitpid(pid, 0)[1] >> 8, flush=True)",
+  '    except OSError as e:',
+  '        print(name, type(e).__name__, flush=True)',
+].join('\n');
+
+test('a WASIX posix_spawn that asks for no PATH search keeps its bare name: absent from the cwd it is ENOENT even though PATH has it; posix_spawnp still finds it (#1165)', {
+  timeout: 180_000,
+}, async (t) => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
+  await install(kernel, 'wasix-python', /^lib\/libpython[^/]*\.a$/);
+  const script = `mkdir -p /tmp/pbin /tmp/empty; printf '#!/bin/sh\\nexit 7\\n' > /tmp/pbin/pyfound; chmod 755 /tmp/pbin/pyfound; export PATH="/tmp/pbin:$PATH"; cd /tmp/empty; python3 -c "$(echo ${Buffer.from(PY).toString('base64')} | base64 -d)"`;
+  const r = await kernel.run(['bash', '-c', script], { cwd: '/' });
+  assert.equal(r.stdout, 'spawn FileNotFoundError\nspawnp ran 7\n', r.stderr);
 });
