@@ -1,4 +1,9 @@
-import type { JsProcessInitMsg } from '../../kernel/protocol.ts';
+import {
+  JS_THREAD_NO_MEMORY,
+  type JsProcessInitMsg,
+  type JsThreadInitMsg,
+  type JsThreadStart,
+} from '../../kernel/protocol.ts';
 import type { SabPostLike } from '../../realm/sync-sab-bridge.ts';
 import { importSource } from '../wasi/wasi-imports.ts';
 import { createAsyncSabTransport, type WaitAsyncLike } from './async-sab.ts';
@@ -11,6 +16,7 @@ import {
 } from './js-context.ts';
 import { JsKernel } from './js-kernel.ts';
 import { laneOf } from './js-sync.ts';
+import { outOfMemory, threadContext } from './js-thread.ts';
 import { lockdown } from './lockdown.ts';
 
 export type JsMain = (ctx: JsProgramContext) => unknown;
@@ -75,11 +81,30 @@ export function mainOf(module: Record<string, unknown>): JsMain | undefined {
   return typeof main === 'function' ? (main as JsMain) : undefined;
 }
 
-export async function runJsProcess(
+export function runJsProcess(
   init: JsProcessInitMsg,
   port: SabPostLike,
   deps: JsRuntimeDeps = {}
 ): Promise<number> {
+  return runJs(init, port, deps, undefined);
+}
+
+export function runJsThread(
+  init: JsThreadInitMsg,
+  port: SabPostLike,
+  deps: JsRuntimeDeps = {}
+): Promise<number> {
+  const { thread, ...rest } = init;
+  return runJs(rest as unknown as JsProcessInitMsg, port, deps, thread);
+}
+
+async function runJs(
+  init: JsProcessInitMsg,
+  port: SabPostLike,
+  deps: JsRuntimeDeps,
+  thread: JsThreadStart | undefined
+): Promise<number> {
+  const failed = (err: unknown): number => (thread && outOfMemory(err) ? JS_THREAD_NO_MEMORY : 1);
   const transport = createAsyncSabTransport(init.sab, port, deps.waitAsync);
   let resolveExit!: (status: number) => void;
   const exit = new Promise<number>((resolve) => (resolveExit = resolve));
@@ -91,7 +116,7 @@ export async function runJsProcess(
   let failing: Promise<void> | undefined;
   const fail = (err: unknown): void => {
     if (err instanceof JsExit) return;
-    failing ??= say(message(err)).then(() => exited(1));
+    failing ??= (thread ? Promise.resolve() : say(message(err))).then(() => exited(failed(err)));
   };
   const kernel = new JsKernel({
     sab: init.sab,
@@ -113,6 +138,7 @@ export async function runJsProcess(
     exit: (status) => exited(statusOf(status)),
     lane: laneOf(init.lane),
     strays,
+    thread: threadContext(port, thread),
   });
   const say = (text: string) => ctx.write(2, `${init.argv0}: ${text}\n`).catch(() => undefined);
 
@@ -145,8 +171,8 @@ export async function runJsProcess(
     .then(() => program(ctx))
     .then(statusOf, async (err: unknown) => {
       if (err instanceof JsExit) return err.status;
-      await say(message(err));
-      return 1;
+      if (!thread) await say(message(err));
+      return failed(err);
     });
   const status = await Promise.race([ran, exit]);
   await drain();

@@ -14,6 +14,13 @@ export const WASM_THREAD_INIT = 'wasm-thread-init';
 export const WASM_THREAD_EXIT = 'wasm-thread-exit';
 export const WASM_MAX_THREADS = 256;
 export const WASM_DEFAULT_THREADS = 64;
+export const JS_THREAD_SPAWN = 'js-thread-spawn';
+export const JS_THREAD_INIT = 'js-thread-init';
+export const JS_THREAD_EXIT = 'js-thread-exit';
+export const JS_MAX_THREADS = 256;
+export const JS_DEFAULT_THREADS = 16;
+export const JS_THREAD_NO_MEMORY = 256;
+export const JS_THREAD_CRASHED = 257;
 
 export interface WasmProgram {
   abi?: 'emscripten' | 'wasi';
@@ -108,6 +115,35 @@ export type JsProcessInitMsg = Omit<WasmProcessInitMsg, 'program' | 'fork'> & {
 };
 
 export type ProcessInitMsg = WasmProcessInitMsg | JsProcessInitMsg;
+
+export interface JsThreadSpawnMsg {
+  type: typeof JS_THREAD_SPAWN;
+  data: unknown;
+  port: MessagePort;
+  control: MessagePort;
+  transfer: Transferable[];
+}
+
+export interface JsThreadStart {
+  tid: number;
+  port: MessagePort;
+  data: unknown;
+}
+
+export type JsThreadInitMsg = Omit<JsProcessInitMsg, 'type'> & {
+  type: typeof JS_THREAD_INIT;
+  thread: JsThreadStart;
+};
+
+export interface JsThreadExitMsg {
+  type: typeof JS_THREAD_EXIT;
+  code: number;
+}
+
+export type JsThreadControl =
+  | { tid: number }
+  | { errno: 'EAGAIN' | 'ESRCH'; message: string }
+  | { exited: number };
 
 export interface WasmProcessExitMsg {
   type: typeof WASM_PROCESS_EXIT;
