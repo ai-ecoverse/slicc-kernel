@@ -80,7 +80,9 @@ test('of two processes copying to one name with COPY_EXCL, exactly one succeeds 
   assert.deepEqual(counts, { 'copy /home/r/dN: ok': 20, 'copy /home/r/dN: File exists': 20 });
 });
 
-test('a copy costs one kernel call per file (#1017)', { timeout: 120_000 }, async (t) => {
+test('a copy costs one kernel call per file, and an exclusive copy writes through the handle its create made: under 5.5 OPFS requests, not 6.9 (#1017)', {
+  timeout: 120_000,
+}, async (t) => {
   const bash = await kernelWith(t);
   const r = await bash(
     'mkdir -p /home/n/s /home/n/d && cd /home/n/s && for i in $(seq 0 39); do head -c 3000 /dev/urandom > f$i; done && copytest many /home/n/s /home/n/d 40 && same /home/n/s/f7 /home/n/d/f7'
@@ -94,6 +96,7 @@ test('a copy costs one kernel call per file (#1017)', { timeout: 120_000 }, asyn
     `per copied file: ${calls.toFixed(2)} kernel calls, ${lookups.toFixed(2)} OPFS lookups, ${requests.toFixed(2)} OPFS requests`
   );
   assert.ok(calls <= 1.5, `${calls} kernel calls per copy`);
+  assert.ok(requests >= 1 && requests <= 5.5, `${requests} OPFS requests per copy`);
 });
 
 test('an imports module copies with ctx.fs.copyFile, with the same mode, exclusivity and errors (#1017)', {
