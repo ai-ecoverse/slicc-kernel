@@ -10,6 +10,7 @@ const base = input('base', 'AB_BASE');
 const candidate = input('candidate', 'AB_CANDIDATE');
 const pnpm = input('pnpm', 'AB_PNPM');
 const pairs = Number(input('pairs', 'AB_PAIRS') || 3);
+const offline = input('offline', 'AB_OFFLINE') !== 'false';
 const REF = /^[A-Za-z0-9._/-]{1,200}$/;
 const fail = (message) => {
   console.error(`install-ab: FAIL ${message}`);
@@ -30,6 +31,7 @@ const sh = (cmd, args, options = {}) =>
 if (pnpm) {
   sh('npm', ['install', '--no-save', '--no-audit', '--no-fund', `@ai-ecoverse/wasi-pnpm@${pnpm}`]);
 }
+if (offline) execFileSync('node', ['tools/fetch-registry.mjs'], { stdio: 'inherit' });
 
 const builds = {};
 for (const [name, ref] of [
@@ -59,7 +61,14 @@ const install = (name) => {
       '--test-global-setup=node_modules/@ai-ecoverse/slicc-shared-web/harness/global.mjs',
       'test/integration/perf/agent-install-page.perf.mjs',
     ],
-    { encoding: 'utf8', env: { ...process.env, GITHUB_STEP_SUMMARY: '' } }
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        GITHUB_STEP_SUMMARY: '',
+        ...(offline ? { SLICC_INSTALL_OFFLINE: '1' } : {}),
+      },
+    }
   );
   const line = (run.stdout ?? '').split('\n').find((l) => l.startsWith('| total |'));
   if (run.status !== 0 || !line) {
@@ -91,7 +100,7 @@ for (let i = 1; i <= pairs; i++) {
 
 const ratios = rows.map((r) => r.ratio);
 const table = [
-  `### Install A/B on one runner: A ${builds.A.ref} (${builds.A.sha.slice(0, 8)}), B ${builds.B.ref} (${builds.B.sha.slice(0, 8)})${pnpm ? `, wasi-pnpm ${pnpm}` : ''}`,
+  `### Install A/B on one runner: A ${builds.A.ref} (${builds.A.sha.slice(0, 8)}), B ${builds.B.ref} (${builds.B.sha.slice(0, 8)})${pnpm ? `, wasi-pnpm ${pnpm}` : ''}${offline ? ', offline registry' : ', live registry'}`,
   '',
   '| pair | A wall | B wall | B/A wall | A requests | B requests | B/A requests | A calls | B calls |',
   '|---|---|---|---|---|---|---|---|---|',

@@ -185,6 +185,20 @@ window.copyTree = async (from, to, names) => {
 window.objects = new Map();
 window.s3Puts = new Map();
 
+const REGISTRY = 'http://registry.test/';
+
+function registryTransport(inner) {
+  return {
+    traits: inner.traits,
+    fetch(req) {
+      if (!req.url.startsWith(REGISTRY)) return inner.fetch(req);
+      const rest = req.url.slice(REGISTRY.length).split('?')[0];
+      const path = rest.includes('/-/') ? rest : `${decodeURIComponent(rest)}/index.json`;
+      return inner.fetch({ ...req, url: `${location.origin}/registry/${path}` });
+    },
+  };
+}
+
 function uploadSink(inner, maxRequestBody) {
   let seen;
   window.firstPart = new Promise((resolve) => {
@@ -486,7 +500,8 @@ window.boot = async (options = {}) => {
     : fetchTransport(options.hint ? { hint: options.hint } : {});
   const sunk = options.uploadSink ? uploadSink(base, options.uploadSink) : base;
   const stored = options.store ? storeTransport(sunk) : sunk;
-  const transport = options.liveTraits ? liveTraits(stored) : stored;
+  const served = options.registry ? registryTransport(stored) : stored;
+  const transport = options.liveTraits ? liveTraits(served) : served;
   const network = options.network === false ? {} : { network: { transport } };
   const policy =
     options.processMounts === undefined ? {} : { processMounts: options.processMounts };

@@ -18,6 +18,10 @@ on:
         description: A-B pairs, run alternately on one runner
         required: false
         default: '3'
+      offline:
+        description: serve the agent lockfile's packages from a local registry (true) or use npm (false)
+        required: false
+        default: 'true'
 
 permissions:
   contents: read
