@@ -1503,6 +1503,9 @@ export class OpfsFs implements KernelFs {
       }
     }
     await this.meta.remove([found.path]);
+    if (found.handle?.kind === 'directory') {
+      await this.meta.update(found.path, (entry) => entry ?? vacatedAt(found.path));
+    }
     this.touch(Date.now(), parentOf(found.path));
   }
 

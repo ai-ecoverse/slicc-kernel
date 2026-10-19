@@ -36,6 +36,7 @@ import { type CpuTimes, ProcessClocks } from './cpu-clock.ts';
 import { type Cred, copyCred } from './cred.ts';
 import { type FdTable, kernelFdKind, type OpenFile } from './fd-table.ts';
 import type { FifoTable } from './fifo.ts';
+import { type CwdAnswer, type HeldCwdReply, heldHooks, heldInit } from './held-cwd.ts';
 import type { JobTable } from './jobs.ts';
 import { JsThreads, jsThreadCap } from './js-threads.ts';
 import type { KernelLocks } from './lock-service.ts';
@@ -87,6 +88,11 @@ export interface WasmWorkerLike {
 export interface SpawnWasmOptions {
   pid: number;
   changes?: SharedArrayBuffer;
+  cwds?: SharedArrayBuffer;
+  cwdSlot?: number;
+  cwdState?: { seen: number; dead: boolean };
+  cwdCheck?: () => Promise<CwdAnswer>;
+  cwdChdir?: (path: string) => Promise<HeldCwdReply>;
   ignored?: number;
   blocked?: BlockedMask;
   umask?: number;
@@ -374,6 +380,7 @@ function processInit(
     umask,
     cred,
     ...(opts.changes ? { changes: opts.changes } : {}),
+    ...heldInit(opts),
     ...(opts.owners ? { owners: true } : {}),
     ...(opts.links !== undefined ? { links: true } : {}),
     ...(opts.ppid !== undefined ? { ppid: opts.ppid } : {}),
@@ -471,6 +478,7 @@ function processOptions(
     ...(opts.identity ? { identity: opts.identity } : {}),
     ...(opts.onSyscall ? { onSyscall: opts.onSyscall } : {}),
     ...(opts.settling ? { settling: opts.settling } : {}),
+    ...heldHooks(opts),
     spawner: opts.spawner,
     forker: opts.forker,
     ...(opts.fork?.dl ? { dl: opts.fork.dl } : {}),
@@ -533,6 +541,7 @@ export function threadInit(
     owners: opts.owners === true,
     ...(opts.links !== undefined ? { links: true } : {}),
     ...(opts.changes ? { changes: opts.changes } : {}),
+    ...heldInit(opts),
     ...(opts.ppid !== undefined ? { ppid: opts.ppid } : {}),
     thread,
     signals: main,

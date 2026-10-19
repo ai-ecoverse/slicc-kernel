@@ -6,6 +6,7 @@ import {
   type HeldMeta,
   type KernelFdKind,
 } from '../../kernel/fd-table.ts';
+import type { HeldCwd, HeldCwdReply } from '../../kernel/held-cwd.ts';
 import type { FdInfo, WasmSyscall } from '../../kernel/process.ts';
 import {
   HOLD_CREATED,
@@ -390,6 +391,7 @@ export class WasiFds {
       e.path = path;
       this.kernel.call({ op: 'fd-meta', fd, meta: metaOf(e) as HeldMeta });
     }
+    this.held?.moved(this.kernel.call({ op: 'cwd-chdir', path }) as HeldCwdReply, path);
     this.bump();
   }
 
@@ -719,9 +721,25 @@ export class WasiFds {
     }
   }
 
+  held: HeldCwd | undefined;
+
+  private cwdEntry(dir: Extract<WasiEntry, { type: 'dir' }>): boolean {
+    return dir.preopen === '.' || dir.preopen === './';
+  }
+
+  goneCwd(dir: Extract<WasiEntry, { type: 'dir' }>): boolean {
+    return this.held !== undefined && this.cwdEntry(dir) && !this.held.alive(dir.path);
+  }
+
   resolve(dirfd: number, path: string): string {
     if (path === '') throw new WasiError('ENOENT');
-    const joined = path.startsWith('/') ? path : `${this.dir(dirfd).path}/${path}`;
+    if (path.startsWith('/')) return this.joined(path);
+    const dir = this.dir(dirfd);
+    if (path.split('/')[0] !== '..' && this.goneCwd(dir)) throw new WasiError('ENOENT');
+    return this.joined(`${dir.path}/${path}`);
+  }
+
+  private joined(joined: string): string {
     return joined.split('/').includes('..') ? physical(this.fs, joined) : normalize(joined);
   }
 

@@ -62,6 +62,7 @@ import { type Cred, copyCred, maySee, maySignal, ROOT } from './kernel/cred.ts';
 import { argvDigest, type Booked, TICKET_ENV } from './kernel/exec-ticket.ts';
 import { bytesSource, deviceFile, FdTable, type OpenFile, sinkFile } from './kernel/fd-table.ts';
 import { FifoTable } from './kernel/fifo.ts';
+import { CwdTable, type HeldCwdReply, type HeldOptions, inheritedCwd } from './kernel/held-cwd.ts';
 import { spawnWasmProcess, type WasmProcessHandle, type WasmWorkerLike } from './kernel/host.ts';
 import { type JobMember, JobTable } from './kernel/jobs.ts';
 import { type KernelLocks, kernelLocks } from './kernel/lock-service.ts';
@@ -358,6 +359,8 @@ interface StartRequest {
   decided?: Promise<boolean>;
   pid?: number;
   scrub?: Scrubber;
+  cwdFrom?: number | undefined;
+  cwdSlot?: number | undefined;
 }
 
 function linksOf(req: StartRequest): { links?: number } {
@@ -634,6 +637,11 @@ export class Launcher {
   readonly hostname: string;
   readonly watchers = new FsWatchers();
   private readonly changes = new FileChanges();
+  readonly cwds = new CwdTable(async (path) => {
+    const { dev, ino } = await this.base.stat(path);
+    return `${dev ?? 0}:${ino}`;
+  });
+  private readonly cwdSlots = new Map<number, number>();
   private readonly pnpmHome: string;
   private readonly pnpmChain: ReadonlySet<string>;
   private pnpmMade: Promise<void> | undefined;
@@ -685,7 +693,10 @@ export class Launcher {
     this.sealed.tickets.normalise = (path) => physicalPathAsync(this.base, path);
     this.sealed.userOf = async (uid) => (await this.users.lookup(uid))?.name;
     if (this.owners) options.fs.trackOwners?.();
-    this.watchers.tap((paths) => this.changes.publish(...paths));
+    this.watchers.tap((paths) => {
+      this.changes.publish(...paths);
+      this.cwds.touched(paths);
+    });
     this.watchers.onReshape(() => {
       for (const nodes of this.openFiles) nodes.reshaped();
     });
@@ -756,6 +767,7 @@ export class Launcher {
     options.fs.onPeer?.(() => this.flushOpen());
     options.fs.remoteChanges?.((change) => {
       this.changes.flush();
+      this.cwds.touched(change.paths, change.trees);
       this.rewritten(change.paths, change.trees);
     });
     const holders = [this.held, this.openFiles];
@@ -1684,9 +1696,10 @@ export class Launcher {
     }
     const done = this.heldUrl(program);
     try {
+      const cwdSlot = await this.cwds.hold(cwd, req.cwdFrom);
       const handle = await this.admitted(program.abi !== 'js', req.fds, (fds, quietOom) =>
-        this.start({ ...req, fds, quietOom, cwd, program, argv0: target.argv0, args, env })
-      );
+        this.start({ ...req, fds, quietOom, cwd, program, argv0: target.argv0, args, env, cwdSlot })
+      ).finally(() => this.cwds.release(cwdSlot));
       void handle.exited.finally(done);
       return handle;
     } catch (err) {
@@ -1786,6 +1799,8 @@ export class Launcher {
       throw new SpawnError('ESRCH');
     }
     const pid = req.pid ?? this.nextPid++;
+    const cwdSlot = this.cwds.share(req.cwdSlot);
+    this.cwdSlots.set(pid, cwdSlot);
     const scrubs = this.treeScrubs(req);
     const stack = this.stackFor(req.tag);
     const terminal = req.fds.stdioTerminal();
@@ -1822,6 +1837,7 @@ export class Launcher {
       ...(this.dac ? { dac: this.dac } : {}),
       program: req.program,
       changes: this.changes.sab,
+      ...this.heldFor(pid, cwdSlot),
       argv0: req.argv0,
       args: req.args,
       env: req.env,
@@ -1898,6 +1914,8 @@ export class Launcher {
       state === 'stopped' ? this.stopped.add(pid) : this.stopped.delete(pid)
     );
     void handle.exited.then(() => {
+      this.cwds.release(this.cwdSlots.get(pid));
+      this.cwdSlots.delete(pid);
       this.freshModules.forget(pid);
       const spent = handle.times?.();
       if (spent) this.spent.set(pid, spent);
@@ -2153,6 +2171,7 @@ export class Launcher {
       const handle = await this.launch(planned, {
         ...(deciding ? { decided: deciding.promise } : {}),
         cwd: req.cwd,
+        cwdFrom: inheritedCwd(req.chdir, this.cwdSlots.get(ppid)),
         ...redeemed,
         fds,
         report,
@@ -2226,6 +2245,26 @@ export class Launcher {
     }, 0);
   }
 
+  private heldFor(pid: number, slot: number): HeldOptions {
+    return {
+      cwds: this.cwds.sab,
+      cwdSlot: slot,
+      cwdState: this.cwds.stateOf(slot),
+      cwdCheck: async () => {
+        const current = this.cwdSlots.get(pid) as number;
+        return { ...(await this.cwds.check(current)), slot: current };
+      },
+      cwdChdir: (path: string) => this.chdirHeld(pid, path),
+    };
+  }
+
+  private async chdirHeld(pid: number, path: string): Promise<HeldCwdReply> {
+    this.cwds.release(this.cwdSlots.get(pid));
+    const slot = await this.cwds.hold(path);
+    this.cwdSlots.set(pid, slot);
+    return { slot, ...this.cwds.stateOf(slot) };
+  }
+
   private forker(ppid: number, parent: StartRequest): ChildForker {
     const { exec: _exec, pgid: _pgid, group: _group, pid: _pid, scrub: _scrub, ...image } = parent;
     return async (state, given) => {
@@ -2234,6 +2273,7 @@ export class Launcher {
           ...image,
           quietOom,
           cwd: state.cwd ?? parent.cwd,
+          cwdSlot: this.cwdSlots.get(ppid),
           fds,
           ppid,
           fork: state,
