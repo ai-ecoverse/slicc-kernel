@@ -708,6 +708,10 @@ export class VfsNodes implements UnlinkHolder {
     this.byPath.get(path)?.reread();
   }
 
+  rewrittenUnder(tree: string): void {
+    for (const [p, node] of this.byPath) if (within(p, tree)) node.reread();
+  }
+
   doubted(path: string): void {
     for (const [p, node] of this.byPath) if (within(p, path)) node.doubted();
   }

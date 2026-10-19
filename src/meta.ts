@@ -1,5 +1,8 @@
 import { META_DB, type MetaEntry, openMeta } from './fs/meta.ts';
+import { dirsChannel, type FsNotice } from './fs/notice.ts';
 import { fsError, normalizePath } from './fs/types.ts';
+
+export type { FsNotice };
 
 export interface MetadataEntry {
   path: string;
@@ -88,5 +91,26 @@ export async function writeMetadata(
     );
   } finally {
     store.close();
+  }
+}
+
+export interface PostFsNoticeOptions {
+  metadata?: string;
+}
+
+export function postFsNotice(notice: FsNotice, options: PostFsNoticeOptions = {}): void {
+  const absolute = (list: readonly string[] | undefined) =>
+    (list ?? []).map((path) => {
+      if (!String(path).startsWith('/')) throw fsError('EINVAL', `not an absolute path: ${path}`);
+      return normalizePath(String(path));
+    });
+  const paths = absolute(notice.paths);
+  const trees = absolute(notice.trees);
+  if (paths.length === 0 && trees.length === 0) return;
+  const channel = new BroadcastChannel(dirsChannel(options.metadata ?? META_DB));
+  try {
+    channel.postMessage({ paths, trees });
+  } finally {
+    channel.close();
   }
 }
