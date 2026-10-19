@@ -40,6 +40,45 @@ export interface SessionFields {
   placeholders?: string[];
   head?: SessionHead;
   scram?: SessionScram;
+  verifiedBy?: 'roots' | 'anchored';
+  anchor?: string;
+}
+
+export interface SessionAnchorFields {
+  stamp: SealedCaller;
+  session: string;
+  host: string;
+  port: number;
+  protocol: SessionProtocol;
+  exit: string;
+}
+
+const ANCHOR_ID = /^[A-Za-z0-9+/]{43}=$/;
+
+function verifiedByOk(f: SessionFields): boolean {
+  if (f.verifiedBy === undefined || f.verifiedBy === 'roots') return f.anchor === undefined;
+  return f.verifiedBy === 'anchored' && typeof f.anchor === 'string' && ANCHOR_ID.test(f.anchor);
+}
+
+export function anchorsAskable(f: SessionAnchorFields): boolean {
+  if (!Object.hasOwn(POSITIONS, f.protocol)) return false;
+  if (typeof f.session !== 'string' || !SESSION_ID.test(f.session) || !hostOk(f.host)) return false;
+  if (!Number.isInteger(f.port) || f.port < 1 || f.port > 65535) return false;
+  return typeof f.exit === 'string' && SESSION_EXIT.test(f.exit);
+}
+
+export function anchorsRequest(f: SessionAnchorFields) {
+  return {
+    v: 1 as const,
+    op: 'sessionAnchors',
+    caller: f.stamp,
+    stamp: f.stamp,
+    session: f.session,
+    host: f.host,
+    port: f.port,
+    protocol: f.protocol,
+    exit: f.exit,
+  };
 }
 
 const POSITIONS: Readonly<Record<SessionProtocol, (position: string) => boolean>> = {
@@ -96,7 +135,8 @@ export function sessionAskable(f: SessionFields, now: number): boolean {
   if (!Number.isInteger(f.port) || f.port < 1 || f.port > 65535) return false;
   const age = now - f.handshakeAt;
   if (!Number.isFinite(age) || age < 0 || age > SESSION_WINDOW_MS) return false;
-  return typeof f.exit === 'string' && SESSION_EXIT.test(f.exit) && scramOk(f) && headOk(f);
+  const exitOk = typeof f.exit === 'string' && SESSION_EXIT.test(f.exit);
+  return exitOk && scramOk(f) && verifiedByOk(f) && headOk(f);
 }
 
 export function sessionRequest(f: SessionFields) {
@@ -111,6 +151,7 @@ export function sessionRequest(f: SessionFields) {
     protocol: f.protocol,
     position: f.position,
     verified: true,
+    ...(f.verifiedBy === 'anchored' ? { verifiedBy: 'anchored', anchor: f.anchor } : {}),
     handshakeAt: f.handshakeAt,
     exit: f.exit,
     ...(f.placeholders ? { placeholders: [...f.placeholders] } : {}),

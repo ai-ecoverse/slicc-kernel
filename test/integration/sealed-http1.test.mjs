@@ -313,7 +313,7 @@ test(
     assert.deepEqual(
       got.map((g) => [g.verified, g.substitutes]),
       [
-        [false, false],
+        [false, true],
         [true, false],
         [true, true],
         [true, true],
