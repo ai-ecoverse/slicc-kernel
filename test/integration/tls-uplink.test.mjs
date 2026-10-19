@@ -221,6 +221,7 @@ test(
       tls: {
         path: 'kernel',
         substitutes: false,
+        verified: false,
         protocol: 'TLSv1.3',
         alpnProtocol: 'h2',
         authorized: true,
@@ -1120,5 +1121,57 @@ test(
     assert.equal(received.length, a2.length, 'the unverified server got nothing over A1');
     assert.equal(transport.seen.length, 1);
     assert.match(transport.seen[0], /"url":"https:\/\/untrusted\.test\//);
+  }
+);
+
+test(
+  "conn.tls.verified is the kernel's own verdict against its bundled roots, whatever the caller's flags: a caller's ca, an untrusted or wrong-name leaf and an IP literal are never verified (#1090)",
+  TIMEOUT,
+  async (t) => {
+    const good = await tlsServer(t, ca.server('secure.test'));
+    const wrong = await tlsServer(t, ca.server('other.test'));
+    const untrusted = await tlsServer(t, other.server('secure.test'));
+    const ip = await tlsServer(t, ca.server('192.0.2.7'));
+    const { run, kernel } = await kernelWith(t, [
+      ['secure.test', good],
+      ['wrong.test', wrong],
+      ['untrusted.test', untrusted],
+      ['192.0.2.7', ip],
+    ]);
+    await kernel.writeFile('/node_modules/@ai-ecoverse/wasm-tls-engine/dist/roots.der', ca.der);
+    const verdict = async (host, tls) => {
+      const got = await run({ host, port: 465, tls, send: 'v' });
+      assert.equal(got.echo, 'v', JSON.stringify(got));
+      return [got.tls.authorized, got.tls.verified, got.tls.substitutes];
+    };
+    assert.deepEqual(await verdict('secure.test', {}), [true, true, false]);
+    assert.deepEqual(await verdict('secure.test', { rejectUnauthorized: false }), [
+      true,
+      true,
+      false,
+    ]);
+    assert.deepEqual(await verdict('secure.test', { sni: false }), [true, true, false]);
+    assert.deepEqual(await verdict('secure.test', { ca: ca.pem }), [true, false, false]);
+    assert.deepEqual(
+      await verdict('untrusted.test', { ca: other.pem, servername: 'secure.test' }),
+      [true, false, false]
+    );
+    assert.deepEqual(
+      await verdict('untrusted.test', { servername: 'secure.test', rejectUnauthorized: false }),
+      [false, false, false]
+    );
+    assert.deepEqual(
+      await verdict('wrong.test', { servername: 'secure.test', checkHostname: false }),
+      [true, false, false]
+    );
+    assert.deepEqual(
+      await verdict('wrong.test', { servername: 'other.test', checkHostname: false }),
+      [true, true, false]
+    );
+    assert.deepEqual(
+      await verdict('wrong.test', { servername: 'secure.test', rejectUnauthorized: false }),
+      [false, false, false]
+    );
+    assert.deepEqual(await verdict('192.0.2.7', {}), [true, false, false]);
   }
 );
