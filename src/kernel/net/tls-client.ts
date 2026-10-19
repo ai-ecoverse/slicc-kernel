@@ -46,6 +46,7 @@ export interface TlsClientInfo {
   chainError?: string;
   verified: boolean;
   handshakeAt: number;
+  substitutes?: boolean;
 }
 
 export interface TlsClientOptions {

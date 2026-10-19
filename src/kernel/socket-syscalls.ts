@@ -10,6 +10,7 @@ import {
   uplinkAddress,
 } from './net/tls-uplink.ts';
 import type { ResolveFamily } from './net/uplink.ts';
+import type { SealedBroker } from './sealed.ts';
 import {
   type ConnectorStamp,
   KernelSocket,
@@ -144,6 +145,7 @@ export interface SocketProcess {
   cred?(): PeerCred;
   stamp?(): Promise<ConnectorStamp>;
   names?: SocketNames;
+  sealed?: SealedBroker | undefined;
 }
 function socketAt(fds: FdTable, fd: number): KernelSocket {
   const file = anySocketAt(fds, fd);

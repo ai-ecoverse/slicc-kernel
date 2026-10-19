@@ -1987,6 +1987,7 @@ export class WasmProcess {
       resolve: (name, family, blocking) => resolver.resolve(name, family, blocking),
       cred: () => ({ pid: this.pid, uid: this.cred.euid, gid: this.cred.egid }),
       stamp: () => this.connectorStamp(),
+      sealed: this.options.sealed,
       names: socketNames({
         fs: this.heldFs() as KernelFs,
         guard: () => this.guarded(),
