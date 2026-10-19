@@ -162,11 +162,19 @@ export function encryptedKey(key: Uint8Array): boolean {
   return new TextDecoder().decode(key).includes('ENCRYPTED');
 }
 
-const KEPT_KEY_ERRORS = new Set([-3, -0x3c00]);
+const KEY_PARSE_RANGES: ReadonlyArray<[number, number]> = [
+  [-0x3fff, -0x3800],
+  [-0x14ff, -0x1000],
+  [-0x6fff, -0x6000],
+  [-0x7f, -0x60],
+];
+
+const keyParse = (code: number): boolean =>
+  code !== -0x3c00 && KEY_PARSE_RANGES.some(([lo, hi]) => code >= lo && code <= hi);
 
 export function keyRefused(err: unknown, locked: boolean): KernelError {
   const raw = err instanceof TlsError ? err.code : 0;
-  const code = locked && !KEPT_KEY_ERRORS.has(raw) ? -0x3b80 : raw;
+  const code = locked && keyParse(raw) ? -0x3b80 : raw;
   const name = KEY_ERRORS.find(([n]) => n === code)?.[1] ?? 'ERR_OSSL_UNSUPPORTED';
   const text =
     code === -3
