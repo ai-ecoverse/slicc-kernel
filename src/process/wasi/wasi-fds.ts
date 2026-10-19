@@ -61,6 +61,11 @@ export function deviceOf(path: string): Device | undefined {
   return deviceAt(path);
 }
 
+function namedDevice(path: string): boolean {
+  if (deviceOf(path) || stdioAlias(path) !== undefined) return true;
+  return path === SEALED_PATH || path === CLIPBOARD_PATH || /^\/dev\/tty\d*$/.test(path);
+}
+
 function within(path: string, root: string): boolean {
   return path === root || path.startsWith(root === '/' ? '/' : `${root}/`);
 }
@@ -750,6 +755,8 @@ export class WasiFds {
   open(path: string, oflags: number, rights: bigint, fdflags: number, mode?: number): number {
     this.made = undefined;
     this.created = false;
+    const exclusive = (oflags & OFLAGS.CREAT) !== 0 && (oflags & OFLAGS.EXCL) !== 0;
+    if (exclusive && namedDevice(path)) throw new WasiError('EEXIST');
     const device = deviceOf(path);
     if (device) return this.install({ type: 'device', device });
 
@@ -757,7 +764,6 @@ export class WasiFds {
     if (kernelDevice !== undefined) return kernelDevice;
     const alias = stdioAlias(path);
     if (alias !== undefined) return this.reopen(alias);
-    const exclusive = (oflags & OFLAGS.CREAT) !== 0 && (oflags & OFLAGS.EXCL) !== 0;
     if (exclusive && !(oflags & OFLAGS.DIRECTORY) && this.madeAtOnce(path, mode)) {
       return this.regular(path, undefined, oflags, rights, fdflags, mode, true);
     }
