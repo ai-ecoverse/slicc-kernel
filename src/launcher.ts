@@ -735,6 +735,7 @@ export class Launcher {
     this.hostname = hostname;
     this.env = {
       ...networkEnv(hostname),
+      HOSTNAME: hostname,
       SLICC_CDP_URL: this.cdp.url,
       ...this.facades.env(),
       ...options.env,
@@ -1707,7 +1708,7 @@ export class Launcher {
     const env = { ...expandDefaults(asked.target.env, seen), ...req.env };
     for (const key of asked.target.unset ?? []) delete env[key];
     delete env[TICKET_ENV];
-    env.HOSTNAME = this.hostname;
+    if (asked.target.abi === 'wasi') env.HOSTNAME = this.hostname;
     const planned = chosen(asked, env);
     const { target, args } = planned;
     let program: Program;
@@ -1863,6 +1864,7 @@ export class Launcher {
       ...(this.dac ? { dac: this.dac } : {}),
       program: req.program,
       changes: this.changes.sab,
+      hostname: this.hostname,
       ...this.heldFor(pid, cwdSlot),
       argv0: req.argv0,
       args: req.args,
@@ -2835,7 +2837,7 @@ export class Launcher {
     login = false
   ) {
     const env: Record<string, string> = {
-      ...(login ? networkEnv(this.hostname) : this.env),
+      ...(login ? { ...networkEnv(this.hostname), HOSTNAME: this.hostname } : this.env),
       ...userEnv(account, this.pnpmHome),
       PWD: cwd,
       ...extra,
