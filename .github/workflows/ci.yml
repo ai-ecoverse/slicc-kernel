@@ -47,4 +47,4 @@ jobs:
     uses: ai-ecoverse/slicc-shared-web/.github/workflows/node-ci.yml@v1.25.2
     with:
       runs-on: ${{ needs.runner.outputs.runner || 'ubuntu-latest' }}
-      timeout-minutes: 35
+      timeout-minutes: 45
