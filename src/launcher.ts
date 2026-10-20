@@ -919,7 +919,16 @@ export class Launcher {
       found = this.trustedAppended()
         .then(async (appended) => {
           const tiers = await this.tiers(scope, appended);
-          return scanCommands(this.scanned, tiers, tiers.length - appended.length);
+          const refused: Command[] = [];
+          const commands = await scanCommands(
+            this.scanned,
+            tiers,
+            tiers.length - appended.length,
+            undefined,
+            refused
+          );
+          this.refusedOf.set(commands, refused.map(refusing));
+          return commands;
         })
         .then((commands) =>
           this.refusals(commands)
@@ -930,6 +939,8 @@ export class Launcher {
     }
     return found;
   }
+
+  private readonly refusedOf = new WeakMap<Map<string, Command>, Command[]>();
 
   private refusals(commands: Map<string, Command>): Map<string, Command> {
     for (const [name, command] of commands) {
@@ -1098,22 +1109,32 @@ export class Launcher {
   }
 
   private async refusedAt(path: string, name: string, scope: string): Promise<Command | undefined> {
-    const refused = [...(await this.commands(scope)).values()].filter((c) => c.origin);
-    if (refused.length === 0 || !(await this.base.exists(path))) return undefined;
+    const refused = this.refusedOf.get(await this.commands(scope)) ?? [];
+    if (refused.length === 0) return undefined;
+    const st = await this.base.stat(path).catch(() => undefined);
+    if (!st?.isFile) return undefined;
     const real = await physicalPathAsync(this.base, path).catch(() => path);
-    const at = async (c: Command, which: 'glue' | 'wasm') => {
-      const own = (c.origin as { glue: string; wasm: string })[which];
-      return own === path || (await physicalPathAsync(this.base, own).catch(() => own)) === real;
-    };
+    const same = async (own: string) =>
+      own === path || (await physicalPathAsync(this.base, own).catch(() => own)) === real;
     const owners: Command[] = [];
     for (const c of refused) {
-      if ((await at(c, 'glue')) || (await at(c, 'wasm'))) owners.push(c);
+      const origin = c.origin as NonNullable<Command['origin']>;
+      for (const own of [origin.glue, origin.wasm, ...(origin.variants ?? [])]) {
+        if (!(await same(own))) continue;
+        owners.push(c);
+        break;
+      }
     }
-    if (owners.length > 0) return owners.find((c) => c.name === name) ?? owners[0];
+    const stem = name.replace(/\.wasm$/, '');
+    const named = owners.find((c) => c.name === name) ?? owners.find((c) => c.name === stem);
+    return named ?? owners[0] ?? (await this.refusedCopy(real, name, refused));
+  }
+
+  private async refusedCopy(real: string, name: string, refused: Command[]) {
     const dir = real.slice(0, real.lastIndexOf('/'));
     for (const c of refused) {
-      const origin = c.origin as { abi: string; glue: string };
-      if (origin.abi !== 'emscripten' || c.name !== name) continue;
+      const origin = c.origin as NonNullable<Command['origin']>;
+      if (origin.abi !== 'emscripten' || origin.script || c.name !== name) continue;
       const own = await physicalPathAsync(this.base, origin.glue).catch(() => origin.glue);
       if (own.slice(0, own.lastIndexOf('/')) === dir && (await this.sameFile(real, own))) return c;
     }
