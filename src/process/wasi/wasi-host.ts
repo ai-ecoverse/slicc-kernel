@@ -47,7 +47,7 @@ import {
 } from './wasi-files.ts';
 import { WasiMemory } from './wasi-memory.ts';
 import { pollOneoff } from './wasi-poll.ts';
-import { libcBits, type WasiSigmask } from './wasi-sigmask.ts';
+import { libcBits, SIG_SETMASK, SIG_UNBLOCK, type WasiSigmask } from './wasi-sigmask.ts';
 import type { WasiSignals } from './wasi-signals.ts';
 import { sliccTty } from './wasi-termios.ts';
 import { wasixEpollImports } from './wasix-epoll.ts';
@@ -297,6 +297,12 @@ export class WasiHost {
     this.listening = o.shared ? [] : this.fds.sockets();
   }
 
+  private fromCwd(raw: string): string {
+    return this.fds.cwd() === undefined
+      ? this.fds.resolve(3, `${this.cwd}/${raw}`)
+      : this.fds.resolve(3, raw);
+  }
+
   get cwd(): string {
     return this.fds.cwd() ?? this.startCwd;
   }
@@ -311,7 +317,7 @@ export class WasiHost {
       const raw = mem.string(p, l);
       if (raw === '') throw new WasiError('ENOENT');
       if (raw.startsWith('/')) return fds.resolve(3, raw);
-      return dirfd === AT_FDCWD ? fds.resolve(3, `${this.cwd}/${raw}`) : fds.resolve(dirfd, raw);
+      return dirfd === AT_FDCWD ? this.fromCwd(raw) : fds.resolve(dirfd, raw);
     };
     return (...args: number[]) => {
       const [srcDirfd, sp, sl, dstDirfd, dp, dl, mode, flags] = args as [
@@ -498,9 +504,7 @@ export class WasiHost {
         const raw = mem.string(p, l);
         if (raw === '') throw new WasiError('ENOENT');
         const path =
-          dirfd === AT_FDCWD && !raw.startsWith('/')
-            ? fds.resolve(3, `${this.cwd}/${raw}`)
-            : at(dirfd, p, l);
+          dirfd === AT_FDCWD && !raw.startsWith('/') ? this.fromCwd(raw) : at(dirfd, p, l);
         const umask = this.umasks.get();
         const want = mode & 0o7777 & ~umask;
         mkfifo.call(this.o.fs, path, want);
@@ -622,15 +626,18 @@ export class WasiHost {
         if (errno === E.SUCCESS && disposition === SIG_IGN) this.sigmask?.discard(sig);
         return errno;
       },
-      sigmask_set: (how: number, lo: number, hi: number, old: number) =>
-        this.sigmask
-          ? this.sigmask.set(how, lo, hi, (oldLo, oldHi) => {
-              if (old === 0) return;
-              const view = mem.view();
-              view.setUint32(old, oldLo, true);
-              view.setUint32(old + 4, oldHi, true);
-            })
-          : E.NOSYS,
+      sigmask_set: (how: number, lo: number, hi: number, old: number) => {
+        if (!this.sigmask) return E.NOSYS;
+        if (how === SIG_UNBLOCK || how === SIG_SETMASK) {
+          this.signals?.unblocking(how === SIG_UNBLOCK ? lo << 1 : ~(lo << 1));
+        }
+        return this.sigmask.set(how, lo, hi, (oldLo, oldHi) => {
+          if (old === 0) return;
+          const view = mem.view();
+          view.setUint32(old, oldLo, true);
+          view.setUint32(old + 4, oldHi, true);
+        });
+      },
       sigmask_poll: (
         lo: number,
         hi: number,

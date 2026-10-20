@@ -1208,12 +1208,14 @@ export class Launcher {
     argv: string[],
     cwd: string,
     scope: string,
-    argv0?: unknown
+    argv0?: unknown,
+    catalogOnly = false
   ): Promise<Planned | undefined> {
     const found = await this.resolve(file, argv[0] ?? file, cwd, scope);
     const named = typeof argv0 === 'string' && found && !found.fixed;
     const direct = named ? { ...found, argv0 } : found;
     if (direct) return { target: direct, args: [...(direct.prefix ?? []), ...argv.slice(1)] };
+    if (catalogOnly && !(await this.scriptCommand(file, cwd, scope))) return undefined;
     const script = await this.interpreted(file, argv, cwd, scope);
     return script && { ...script, script: true };
   }
@@ -1266,16 +1268,12 @@ export class Launcher {
     ctx: { ppid: number; cred: Readonly<Cred>; scope: string }
   ): Promise<Planned> {
     const bare = !req.file.includes('/') && !COMMAND.test(req.file);
-    try {
-      return await this.planOne(req, ctx);
-    } catch (err) {
-      const code = codeOf(err);
-      const searched = bare && req.search !== false && (code === 'ENOENT' || code === 'ENOEXEC');
-      if (!searched || (await this.commandAt(req.file, ctx.scope))) throw err;
+    if (bare && req.search !== false && !(await this.commandAt(req.file, ctx.scope))) {
       const found = await this.onPath(req, ctx);
       if (found) return found;
-      throw err;
+      throw new SpawnError('ENOENT');
     }
+    return this.planOne(req, ctx, bare && req.search !== false);
   }
 
   private async onPath(
@@ -1301,16 +1299,17 @@ export class Launcher {
 
   private async planOne(
     req: ChildSpawnRequest,
-    { ppid, cred, scope }: { ppid: number; cred: Readonly<Cred>; scope: string }
+    { ppid, cred, scope }: { ppid: number; cred: Readonly<Cred>; scope: string },
+    catalogOnly = false
   ): Promise<Planned> {
     const refused = (err: unknown): never => {
       throw codeOf(err) === 'EACCES' ? new SpawnError('EACCES') : err;
     };
     const file = await this.execFile(req.file, req.cwd, this.execGuard(cred, ppid)).catch(refused);
-    const planned = await this.plan(file, req.argv, req.cwd, scope, req.argv0);
+    const planned = await this.plan(file, req.argv, req.cwd, scope, req.argv0, catalogOnly);
     await this.mayExec(cred, { ...req, file, pid: ppid }, planned).catch(refused);
     if (planned) return planned;
-    throw new SpawnError(await this.unrunnable(file, req.cwd, scope));
+    throw new SpawnError(catalogOnly ? 'ENOENT' : await this.unrunnable(file, req.cwd, scope));
   }
 
   private async enterable(g: Guard | undefined, cwd: string): Promise<void> {

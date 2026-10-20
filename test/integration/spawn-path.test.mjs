@@ -80,3 +80,54 @@ test('a WASIX posix_spawn that asks for no PATH search keeps its bare name: abse
   const r = await kernel.run(['bash', '-c', script], { cwd: '/' });
   assert.equal(r.stdout, 'spawn FileNotFoundError\nspawnp ran 7\n', r.stderr);
 });
+
+test('a bare name spawned by timeout (posix_spawnp) never runs a file of that name in the cwd when PATH has no empty or . entry: 127 as on Linux, for a user, while an empty PATH entry still finds it (#1234, homescoop#1362)', {
+  timeout: 180_000,
+}, async (t) => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
+  await kernel.users.add({ name: 'cone' });
+  const r = await kernel.run(
+    [
+      'bash',
+      '-c',
+      [
+        'mkdir -p /tmp/e && cd /tmp/e',
+        "printf '#!/bin/sh\\necho cwd-ran\\n' > hscwd && chmod 755 hscwd",
+        'out=$(timeout 5 hscwd 2>&1); echo "timeout rc=$? $out"',
+        'hscwd 2>/dev/null; echo "bash rc=$?"',
+        'out=$(PATH="$PATH:" timeout 5 hscwd 2>&1); echo "empty entry rc=$? $out"',
+      ].join('; '),
+    ],
+    { cwd: '/home/cone', user: 'cone' }
+  );
+  const lines = r.stdout.trim().split('\n');
+  assert.equal(lines.length, 3, r.stdout + r.stderr);
+  assert.match(lines[0], /^timeout rc=127 .*No such file or directory/);
+  assert.equal(lines[1], 'bash rc=127');
+  assert.equal(lines[2], 'empty entry rc=0 cwd-ran');
+});
+
+test("a user's own pnpm-global command run by a bare name through timeout (posix_spawnp) is the user's, also when a system command has the same name (#1241 review)", {
+  timeout: 180_000,
+}, async (t) => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
+  await kernel.users.add({ name: 'cone' });
+  const sh = (script, user) =>
+    kernel.run(['bash', '-c', script], user ? { cwd: '/home/cone', user } : { cwd: '/' });
+  const pkg = (name, text) =>
+    `mkdir -p ${name}/bin && printf '#!/bin/sh\\necho ${text}\\n' > ${name}/bin/run && chmod 755 ${name}/bin/run`;
+  const g = '/home/cone/.local/share/pnpm/global/5/g/node_modules';
+  await sh(
+    [
+      `${pkg(`${g}/mine`, 'mine ran')} && echo '{"name":"mine","slicc":{"commands":{"mine":{"script":"bin/run"},"both":{"script":"bin/run"}}}}' > ${g}/mine/package.json`,
+      `${pkg('/node_modules/sys', 'system ran')} && echo '{"name":"sys","slicc":{"commands":{"both":{"script":"bin/run"}}}}' > /node_modules/sys/package.json`,
+      'chown -R cone:cone /home/cone/.local',
+    ].join(' && ')
+  );
+  const r = await sh('timeout 5 mine; timeout 5 both; echo done', 'cone');
+  assert.equal(r.stdout, 'mine ran\nmine ran\ndone\n', r.stderr);
+});

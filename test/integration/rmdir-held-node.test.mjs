@@ -29,6 +29,7 @@ const REPLACER = `export default async function main(ctx) {
     await ctx.fs.writeFile('/root/rd/n/b', 'v' + i + '\\n');
     await ctx.fs.rm('/root/rd/d');
     await ctx.fs.rename('/root/rd/n', '/root/rd/d');
+    await ctx.fs.writeFile('/root/rd/round', String(i));
   }
   await ctx.fs.writeFile('/root/rd/stop', '');
   return 0;
@@ -49,10 +50,10 @@ test('in Node, files opened inside a directory that another process keeps removi
   );
   await kernel.writeFile('/node_modules/rdrm/main.mjs', REPLACER);
   const script = [
-    'mkdir -p /root/rd/d && echo v0 > /root/rd/d/a && echo v0 > /root/rd/d/b && : > /root/rd/err',
+    'mkdir -p /root/rd/d && echo v0 > /root/rd/d/a && echo v0 > /root/rd/d/b && : > /root/rd/err && echo 0 > /root/rd/round',
     'cd /root/rd',
     '(while [ ! -e stop ]; do cat d/a > /dev/null 2>&1; done) &',
-    `for r in $(seq ${READERS}); do (while [ ! -e stop ]; do { sleep 0.005; read -r v <&3; case "$v" in v[0-9]*) ;; *) echo "bad [$v]" >> err;; esac; } 2> /dev/null 3< d/b; done) & done`,
+    `for r in $(seq ${READERS}); do (while [ ! -e stop ]; do { sleep 0.005; read -r v <&3; rc=$?; case "$v" in v[0-9]*) ;; *) echo "bad [$v] rc=$rc len=\${#v} rest=$(wc -c <&3 2>&1) round=$(cat round 2> /dev/null) fd=$(stat -L -c '%i %s' /dev/fd/3 2>&1) name=$(stat -c '%i %s' d/b 2>&1)" >> err;; esac; } 2> /dev/null 3< d/b; done) & done`,
     'rdrm',
     'echo "replaced $?"',
     'wait',

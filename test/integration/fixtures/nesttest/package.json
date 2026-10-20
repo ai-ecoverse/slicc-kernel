@@ -1,0 +1,12 @@
+{
+  "name": "nesttest",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "nesttest": {
+        "wasm": "bin/nesttest.wasm"
+      }
+    }
+  }
+}

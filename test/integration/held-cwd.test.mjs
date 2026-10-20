@@ -209,3 +209,35 @@ test(
     assert.equal((await checks()) - middle, 1);
   }
 );
+
+test(
+  'the slicc_fs path_mkfifo and path_copy_file of a wasip1 program, called with AT_FDCWD, are ENOENT in a cwd replaced by rm -r d; mv n d, and work in a live one (#1208)',
+  TIMEOUT,
+  async (t) => {
+    const { sh, kernel } = await booted(t);
+    for (const file of ['package.json', 'bin/heldcwd.wasm']) {
+      await kernel.writeFile(
+        `/node_modules/heldcwd/${file}`,
+        await readFile(new URL(file, fixture))
+      );
+    }
+    const at = (replace) =>
+      [
+        'rm -rf /t; mkdir -p /t/d /t/s && touch /t/d/old',
+        'cd /t/d',
+        '{ until [ -e /t/s/go ]; do sleep 0.05; done; echo; } | heldcwd at > /t/s/out &',
+        'p=$!',
+        'cd /',
+        'n=0; until [ -s /t/s/out ] || [ $n -ge 2400 ]; do sleep 0.05; n=$((n+1)); done',
+        replace,
+        'touch /t/s/go',
+        'wait $p',
+        'cat /t/s/out',
+        'ls /t/d',
+      ].join('\n');
+    const live = await sh(at(':'));
+    assert.equal(live.stdout, 'ready\nmkfifo 0 copy 0\ncopied\nold\npipe\n', live.stderr);
+    const gone = await sh(at('mkdir /t/n && touch /t/n/old && rm -r /t/d && mv /t/n /t/d'));
+    assert.equal(gone.stdout, 'ready\nmkfifo 44 copy 44\nold\n', gone.stderr);
+  }
+);
