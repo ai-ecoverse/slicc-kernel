@@ -2,8 +2,12 @@ import type { UsersMode } from '../fs/types.ts';
 import type { Cred } from './cred.ts';
 import { isStrings, stringRecord, TicketBook } from './exec-ticket.ts';
 import { KernelError, type OpenAccess, OpenFile, type PollState } from './fd-table.ts';
+import { type Anchors, anchorsOf } from './net/sealed-anchor.ts';
 import { SessionScrubs } from './net/sealed-scrubs.ts';
 import {
+  anchorsAskable,
+  anchorsRequest,
+  type SessionAnchorFields,
   type SessionFields,
   sessionAskable,
   sessionRequest,
@@ -288,6 +292,11 @@ export class SealedBroker {
     if (!sessionAskable(fields, now)) return undefined;
     const req = sessionRequest(fields);
     return this.ask(req, (reply) => sessionValues(reply, req.placeholders));
+  }
+
+  async sessionAnchors(fields: SessionAnchorFields): Promise<Anchors | undefined> {
+    if (!anchorsAskable(fields)) return undefined;
+    return this.ask(anchorsRequest(fields), anchorsOf);
   }
 
   private async ask<T>(req: SealedRequest, parse: (reply: unknown) => T | undefined) {

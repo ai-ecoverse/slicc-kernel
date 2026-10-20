@@ -7,6 +7,7 @@ import {
   type SessionProtocol,
   type SessionScram,
 } from '../sealed-session.ts';
+import type { Anchors } from './sealed-anchor.ts';
 import { HEAD_MAX, sniffHttp1, substituteHead } from './sealed-http1.ts';
 import { PG_MESSAGE_MAX, PgClient, PgServer, pgLength, sniffPg } from './sealed-pg.ts';
 import type { ScrubScope, SessionScrub } from './sealed-scrubs.ts';
@@ -25,11 +26,16 @@ export interface SealedSession {
   verified: boolean;
   handshakeAt: number;
   alpn: string | false;
+  anchoring?: (found: Anchors) => Promise<string | undefined>;
+}
+
+interface Proof {
+  anchor?: string;
 }
 
 export function substitutes(s: SealedSession): boolean {
   return (
-    s.verified &&
+    (s.verified || s.anchoring !== undefined) &&
     s.alpn !== 'h2' &&
     s.broker.hook !== undefined &&
     typeof s.exit === 'string' &&
@@ -123,25 +129,53 @@ class SessionWriter {
     return run;
   }
 
+  private proven: Promise<Proof | undefined> | undefined;
+
+  private proof(protocol: SessionProtocol): Promise<Proof | undefined> {
+    this.proven ??= this.prove(protocol).catch(() => undefined);
+    return this.proven;
+  }
+
+  private async prove(protocol: SessionProtocol): Promise<Proof | undefined> {
+    const s = this.s;
+    if (s.anchoring) {
+      const found = await s.broker.sessionAnchors({
+        stamp: await s.stamp(),
+        session: this.session,
+        host: s.host,
+        port: s.port,
+        protocol,
+        exit: s.exit as string,
+      });
+      const anchor = found ? await s.anchoring(found) : undefined;
+      if (anchor) return { anchor };
+    }
+    return s.verified ? {} : undefined;
+  }
+
   private async ask(
     protocol: SessionProtocol,
     position: string,
     extra: { placeholders?: string[]; head?: SessionHead; scram?: SessionScram }
   ): Promise<Record<string, string> | undefined> {
     const s = this.s;
-    const values = await s.broker.sessionMaterialize({
+    const proof = await this.proof(protocol);
+    if (!proof) return undefined;
+    return s.broker.sessionMaterialize({
       stamp: await s.stamp(),
       session: this.session,
       host: s.host,
       port: s.port,
       protocol,
       position,
-      verified: s.verified,
+      verified: true,
+      ...(proof.anchor
+        ? { verifiedBy: 'anchored' as const, anchor: proof.anchor }
+        : { verifiedBy: 'roots' as const }),
       handshakeAt: s.handshakeAt,
       exit: s.exit as string,
       ...extra,
     });
-    return values;
   }
 
   private remember(values: Record<string, string>): void {

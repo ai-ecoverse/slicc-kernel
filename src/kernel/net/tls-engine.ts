@@ -37,7 +37,8 @@ type TlsSessionExport =
   | 'tls_client_cert'
   | 'tls_ciphersuite'
   | 'tls_name_mismatch'
-  | 'tls_last_alert';
+  | 'tls_last_alert'
+  | 'tls_chain_verify';
 
 export type TlsEngineModule = { readonly HEAPU8: Uint8Array } & {
   readonly [K in TlsExport as `_${K}`]: (...args: number[]) => number;
@@ -158,6 +159,32 @@ export class TlsEngine {
       const ptr = this.withBytes(wire, (p) => m._tls_client_new(at, name, p, wire.length, flags));
       if (!ptr) throw this.error(m._tls_last_error(), 'tls client');
       return new TlsSession(this, m, ptr);
+    } finally {
+      this.m._free(name);
+    }
+  }
+  get chainVerify(): boolean {
+    return typeof this.m._tls_chain_verify === 'function';
+  }
+  chainFlags(store: TlsStore, chain: readonly Uint8Array[], hostname: string): number | undefined {
+    const verify = this.m._tls_chain_verify;
+    if (!verify || chain.length === 0) return undefined;
+    const joined = new Uint8Array(chain.reduce((n, c) => n + c.length, 0));
+    let at = 0;
+    for (const der of chain) {
+      joined.set(der, at);
+      at += der.length;
+    }
+    const name = this.put(new TextEncoder().encode(hostname));
+    try {
+      return this.withBytes(joined, (p) => {
+        const out = this.scratch;
+        this.m.HEAPU8.fill(0xff, out, out + 4);
+        const ret = verify(store.ptr, p, joined.length, name, out);
+        const flags = new DataView(this.m.HEAPU8.buffer, out, 4).getUint32(0, true);
+        if (ret === 0) return flags === 0 ? 0 : undefined;
+        return ret === 1 && flags !== 0 ? flags : undefined;
+      });
     } finally {
       this.m._free(name);
     }

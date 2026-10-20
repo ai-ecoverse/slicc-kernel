@@ -46,6 +46,11 @@ function tbsFields(der: Uint8Array): { cert: Tlv[]; tbs: Tlv[] } | undefined {
 
 const raw = (der: Uint8Array, t: Tlv): Uint8Array => der.subarray(t.start, t.end);
 
+export function spkiOf(der: Uint8Array): Uint8Array | undefined {
+  const spki = tbsFields(der)?.tbs[5];
+  return spki ? raw(der, spki) : undefined;
+}
+
 function names(der: Uint8Array): [Uint8Array, Uint8Array] | undefined {
   const fields = tbsFields(der)?.tbs;
   const [, , issuer, , subject] = fields ?? [];

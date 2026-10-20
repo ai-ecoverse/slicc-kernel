@@ -4,6 +4,7 @@ import { boundHost } from '../sealed-session.ts';
 import type { KernelSocket, LoopbackNet } from '../socket.ts';
 import { isLoopbackHost } from './proxy-service.ts';
 import { ipv4Bytes, ipv6Groups } from './routes.ts';
+import { type Anchors, anchorFor } from './sealed-anchor.ts';
 import { type SealedSession, sealedConn, substitutes } from './sealed-conn.ts';
 import { openSession, type TlsClientInfo, type TlsClientOptions, tlsClient } from './tls-client.ts';
 import { type TlsEngine, TlsError, type TlsSession, type TlsStore } from './tls-engine.ts';
@@ -92,6 +93,7 @@ export interface SecureSession {
   path: 'kernel';
   substitutes: boolean;
   verified: boolean;
+  verifiedBy: 'bundled' | 'none';
   protocol: TlsClientInfo['protocol'];
   alpnProtocol: string | false;
   authorized: boolean;
@@ -112,6 +114,7 @@ function sessionOf(info: TlsClientInfo, servername: string): SecureSession {
     path: 'kernel',
     substitutes: info.substitutes === true,
     verified: info.verified,
+    verifiedBy: info.verified ? 'bundled' : 'none',
     protocol: info.protocol,
     alpnProtocol: info.alpnProtocol,
     authorized: info.authorized,
@@ -169,8 +172,12 @@ const KEY_PARSE_RANGES: ReadonlyArray<[number, number]> = [
   [-0x7f, -0x60],
 ];
 
+const BEFORE_DECRYPT = new Set([
+  -0x3c00, -0x3c80, -0x3f80, -0x3980, -0x1180, -0x1200, -0x1280, -0x1400, -0x6080, -0x6180, -0x6a,
+]);
+
 const keyParse = (code: number): boolean =>
-  code !== -0x3c00 && KEY_PARSE_RANGES.some(([lo, hi]) => code >= lo && code <= hi);
+  !BEFORE_DECRYPT.has(code) && KEY_PARSE_RANGES.some(([lo, hi]) => code >= lo && code <= hi);
 
 export function keyRefused(err: unknown, locked: boolean): KernelError {
   const raw = err instanceof TlsError ? err.code : 0;
@@ -307,6 +314,15 @@ async function prepareWith(
 interface Seal {
   proc: SecureProcess;
   port: number;
+  engine?: TlsEngine;
+}
+
+function anchoringOf(seal: Seal, info: TlsClientInfo, servername: string) {
+  const engine = seal.engine;
+  if (!engine?.chainVerify || isIP(servername) || info.peerCertificates.length === 0) return {};
+  return {
+    anchoring: (found: Anchors) => anchorFor(engine, info.peerCertificates, servername, found),
+  };
 }
 
 function sealing(seal: Seal, raw: UplinkConn, info: TlsClientInfo, servername: string) {
@@ -324,6 +340,7 @@ function sealing(seal: Seal, raw: UplinkConn, info: TlsClientInfo, servername: s
     verified: info.verified,
     handshakeAt: info.handshakeAt,
     alpn: info.alpnProtocol,
+    ...anchoringOf(seal, info, servername),
   };
   return session;
 }
@@ -334,7 +351,8 @@ function secure(prepared: Prepared, seal: Seal) {
     ran = true;
     try {
       const made = await tlsClient(raw, prepared.options);
-      const session = sealing(seal, raw, made.info, prepared.options.servername);
+      const engine = prepared.options.engine;
+      const session = sealing({ ...seal, engine }, raw, made.info, prepared.options.servername);
       if (!session) return made;
       made.info.substitutes = substitutes(session);
       return { conn: sealedConn(made.conn, session), info: made.info };

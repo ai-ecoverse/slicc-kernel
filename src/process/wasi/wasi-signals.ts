@@ -59,6 +59,12 @@ export class WasiSignals implements SignalHooks {
 
   private deferred = 0;
 
+  private lifted = 0;
+
+  unblocking(bits: number): void {
+    this.lifted |= bits & this.running;
+  }
+
   private defaults = 0;
 
   private nocldwait = false;
@@ -140,15 +146,18 @@ export class WasiSignals implements SignalHooks {
       return;
     }
     const bit = sigbit(sig);
-    if ((this.running & bit) !== 0 && (this.nodefer & bit) === 0) {
+    if ((this.running & bit) !== 0 && ((this.nodefer | this.lifted) & bit) === 0) {
       this.deferred |= bit;
       return;
     }
+    const outer = { running: this.running & bit, lifted: this.lifted & bit };
     this.running |= bit;
+    this.lifted &= ~bit;
     try {
       this.run(handler, sig);
     } finally {
-      this.running &= ~bit;
+      this.running = (this.running & ~bit) | outer.running;
+      this.lifted = (this.lifted & ~bit) | outer.lifted;
     }
     if ((this.deferred & bit) === 0) return;
     this.deferred &= ~bit;
