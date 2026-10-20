@@ -1,0 +1,12 @@
+{
+  "name": "deeptest",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "deeptest": {
+        "wasm": "bin/deeptest.wasm"
+      }
+    }
+  }
+}
