@@ -883,8 +883,8 @@ export class OpfsFs implements KernelFs {
   private async noticed(paths: readonly string[], at: number): Promise<void> {
     for (const path of new Set(paths)) {
       const st = await this.lstat(path).catch(() => undefined);
-      if (!st?.isFile) continue;
-      this.fileTimes.set(path, Math.max(at, this.fileTimes.get(path) ?? 0, st.mtime.getTime()));
+      if (!st?.isFile || st.mtime.getTime() >= at) continue;
+      this.fileTimes.set(path, Math.max(at, this.fileTimes.get(path) ?? 0));
     }
     this.scheduleFileTimes();
   }
