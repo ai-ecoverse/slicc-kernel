@@ -82,13 +82,19 @@ async function serving(label, served, sleep, log) {
   return true;
 }
 
-async function integrityOf(run) {
-  const r = await run('npm', ['pack', '--dry-run', '--json']);
+export async function packOnce(run) {
+  const r = await run('npm', ['pack', '--json']);
+  if (r.code !== 0) throw new Error(`npm pack failed: ${gist(r.stderr)}`);
+  const at = r.stdout.search(/^\[/m);
+  let file;
+  let integrity;
   try {
-    return JSON.parse(r.stdout)[0]?.integrity ?? '';
+    [{ filename: file, integrity }] = JSON.parse(at < 0 ? '' : r.stdout.slice(at));
   } catch {
-    return '';
+    throw new Error(`npm pack printed no JSON report: ${gist(r.stdout)}`);
   }
+  if (!file || !integrity) throw new Error('npm pack reported no tarball or no integrity');
+  return { file: `./${file}`, integrity };
 }
 
 async function latestOf(name, version, run) {
@@ -114,11 +120,12 @@ async function publishNewer({ name, version, run, published, sleep, log, packed 
     return false;
   }
   await run('npm', ['version', version, '--no-git-tag-version', '--allow-same-version']);
-  packed.set(version, await integrityOf(run));
+  const tarball = await packOnce(run);
+  packed.set(version, tarball.integrity);
   const ours = await retried({
     label: `npm publish ${version}`,
     attempt: async () => {
-      const r = await run('npm', ['publish']);
+      const r = await run('npm', ['publish', tarball.file, '--provenance', '--access', 'public']);
       log(`npm publish ${version} exited ${r.code}`);
       for (const [stream, text] of [
         ['stdout', r.stdout],
