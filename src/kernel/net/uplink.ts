@@ -59,6 +59,7 @@ export interface UplinkUdp {
 export interface NetworkUplink {
   readonly traits: UplinkTraits;
   readonly routes?: RouteTable;
+  readonly nameserver?: string;
   resolve(
     name: string,
     family: ResolveFamily,
@@ -296,14 +297,16 @@ type Answer = Exclude<UplinkReply, { uplink: 'error' }>;
 export class RemoteUplink implements NetworkUplink {
   readonly traits: UplinkTraits;
   readonly routes: RouteTable | undefined;
+  readonly nameserver: string | undefined;
   private readonly port: UplinkPort;
   private readonly waiting = new Map<number, PromiseWithResolvers<Answer>>();
   private nextId = 0;
 
-  constructor(port: UplinkPort, traits: UplinkTraits, routes?: RouteTable) {
+  constructor(port: UplinkPort, traits: UplinkTraits, routes?: RouteTable, nameserver?: string) {
     this.port = port;
     this.traits = traits;
     this.routes = routes;
+    this.nameserver = nameserver;
   }
 
   receive(reply: UplinkReply): void {

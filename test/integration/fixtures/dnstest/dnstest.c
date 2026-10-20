@@ -247,7 +247,22 @@ static int stall(const char *server, const char *name, int type, int seconds) {
   return 0;
 }
 
+static const char *bind_errno(int type) {
+  int s = socket(AF_INET, type, 0);
+  struct sockaddr_in me = {0};
+  me.sin_family = AF_INET;
+  me.sin_port = htons(53);
+  inet_pton(AF_INET, "127.0.0.1", &me.sin_addr);
+  if (bind(s, (struct sockaddr *)&me, sizeof me) == 0) return "ok";
+  return errno == EADDRINUSE ? "EADDRINUSE" : errno == EACCES ? "EACCES" : strerror(errno);
+}
+
 int main(int argc, char **argv) {
+  if (argc == 2 && !strcmp(argv[1], "bind")) {
+    const char *udp = bind_errno(SOCK_DGRAM);
+    printf("udp %s tcp %s\n", udp, bind_errno(SOCK_STREAM));
+    return 0;
+  }
   if (argc == 6 && !strcmp(argv[1], "flood")) return flood(argv[2], argv[3], type_of(argv[4]), atoi(argv[5]));
   if (argc == 6 && !strcmp(argv[1], "stall")) return stall(argv[2], argv[3], type_of(argv[4]), atoi(argv[5]));
   if (argc < 5) {

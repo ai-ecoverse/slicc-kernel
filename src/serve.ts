@@ -60,7 +60,7 @@ export interface InitRequest {
   media?: string | false;
   ca?: string | false;
   transport?: RealmTransportTraits;
-  uplink?: { traits: UplinkTraits; routes?: RouteTable };
+  uplink?: { traits: UplinkTraits; routes?: RouteTable; nameserver?: string };
   doh?: string | false;
   hostfs?: boolean;
   hostname?: string;
@@ -292,7 +292,16 @@ function remotes(
 ): { transport?: RemoteTransport; uplink?: RemoteUplink } {
   return {
     ...(req.transport ? { transport: new RemoteTransport(port, req.transport) } : {}),
-    ...(req.uplink ? { uplink: new RemoteUplink(port, req.uplink.traits, req.uplink.routes) } : {}),
+    ...(req.uplink
+      ? {
+          uplink: new RemoteUplink(
+            port,
+            req.uplink.traits,
+            req.uplink.routes,
+            req.uplink.nameserver
+          ),
+        }
+      : {}),
   };
 }
 

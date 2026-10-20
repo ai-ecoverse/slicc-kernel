@@ -766,7 +766,10 @@ export class Launcher {
       roots: packageTlsRoots(this.verifiedFs(options.fs), this.modulesDir),
       ca: this.ca,
     });
-    enableDnsStub(this.net, kernelDnsStub(this.resolver, this.transport, options.doh));
+    enableDnsStub(
+      this.net,
+      kernelDnsStub(this.resolver, this.transport, options.uplink, options.doh)
+    );
     enableCdp(this.net, this.cdp);
     this.facades.enable(this.net);
     const fs = this.commandFs(this.base);

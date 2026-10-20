@@ -2,14 +2,13 @@ import type { InetAddr } from '../dgram.ts';
 import type { KernelSocket, LoopbackNet } from '../socket.ts';
 import { ipv4Bytes, ipv6Groups } from './routes.ts';
 import type { RealmTransport } from './transport.ts';
-import type { ResolveFamily } from './uplink.ts';
+import type { NetworkUplink, ResolveFamily } from './uplink.ts';
 
 export const DNS_PORT = 53;
 export const DNS_STUB_ADDRESS = '127.0.0.53';
 export const RESOLV_CONF_PATH = '/etc/resolv.conf';
 export const RESOLV_CONF = `nameserver ${DNS_STUB_ADDRESS}\noptions edns0\n`;
 export const DNS_STUB_TTL = 30;
-export const DEFAULT_DOH = 'https://cloudflare-dns.com/dns-query';
 export const DNS_FORWARD_TIMEOUT_MS = 5000;
 export const DNS_TCP_IDLE_MS = 10_000;
 export const DNS_TCP_MAX = 64;
@@ -164,6 +163,15 @@ function replyFlags(query: number, rcode: number, aa: boolean): number {
   return QR | (query & 0x7800) | (aa ? AA : 0) | (query & RD) | RA | (query & CD) | rcode;
 }
 
+function answers(reply: Uint8Array, q: DnsQuestion): boolean {
+  if (reply.length < 12 || !(u16(reply, 2) & QR) || u16(reply, 4) !== 1) return false;
+  const read = readName(reply, 12);
+  if (!read || read.end + 4 > reply.length) return false;
+  return (
+    read.name === q.name && u16(reply, read.end) === q.type && u16(reply, read.end + 2) === q.klass
+  );
+}
+
 export function errorReply(id: number, flags: number, rcode: number): Uint8Array {
   return new Uint8Array(header(id, replyFlags(flags, rcode, false), [0, 0, 0, 0]));
 }
@@ -272,29 +280,41 @@ export class DnsStub {
     if (q.klass !== CLASS_IN || literal(q.name)) return this.forward(query, q);
     if (q.type === TYPE_PTR) {
       const address = reverseAddress(q.name);
-      const name = address !== undefined ? await this.resolver.reverse(address) : undefined;
+      const name = address !== undefined ? await this.reverse(address) : undefined;
       if (name !== undefined)
         return answerReply(query, q, NOERROR, [record(TYPE_PTR, encodeName(name))], true);
       return this.forward(query, q);
     }
     if (q.type === TYPE_A || q.type === TYPE_AAAA) {
-      const addresses = q.name === '' ? [] : await this.resolver.resolve(q.name, 0);
+      const addresses = q.name === '' ? [] : await this.lookup(q.name);
       const answers = addresses.flatMap((a) => {
         const data = addressData(a, q.type);
         return data ? [record(q.type, data)] : [];
       });
-      if (answers.length > 0 || local(q.name) || (await this.resolver.known(q.name))) {
+      if (answers.length > 0 || local(q.name) || (await this.known(q.name))) {
         const rcode = addresses.length > 0 ? NOERROR : NXDOMAIN;
         return answerReply(query, q, rcode, answers, local(q.name));
       }
       return this.forward(query, q);
     }
-    if (await this.resolver.known(q.name)) return answerReply(query, q, NOERROR, [], true);
+    if (await this.known(q.name)) return answerReply(query, q, NOERROR, [], true);
     if (local(q.name)) {
-      const there = (await this.resolver.resolve(q.name, 0)).length > 0;
+      const there = (await this.lookup(q.name)).length > 0;
       return answerReply(query, q, there ? NOERROR : NXDOMAIN, [], true);
     }
     return this.forward(query, q);
+  }
+
+  private lookup(name: string): Promise<string[]> {
+    return this.resolver.resolve(name, 0).catch(() => []);
+  }
+
+  private known(name: string): Promise<boolean> {
+    return this.resolver.known(name).catch(() => false);
+  }
+
+  private reverse(address: string): Promise<string | undefined> {
+    return this.resolver.reverse(address).catch(() => undefined);
   }
 
   private async forward(query: Uint8Array, q: DnsQuestion): Promise<Uint8Array> {
@@ -305,8 +325,7 @@ export class DnsStub {
     const got = await this.forwarder(asked, AbortSignal.timeout(this.timeoutMs)).catch(
       () => undefined
     );
-    if (!got || got.length < 12 || !(u16(got, 2) & QR))
-      return answerReply(query, q, SERVFAIL, [], false);
+    if (!got || !answers(got, q)) return answerReply(query, q, SERVFAIL, [], false);
     const reply = got.slice();
     reply[0] = q.id >> 8;
     reply[1] = q.id & 0xff;
@@ -355,13 +374,48 @@ export function dohForward(transport: RealmTransport, url: string): DnsForward {
   };
 }
 
+export function uplinkForward(uplink: NetworkUplink, server: string): DnsForward {
+  return async (query, signal) => {
+    const conn = await uplink.dial({ network: 'tcp', host: server, port: DNS_PORT, signal });
+    const stop = () => conn.close();
+    signal.addEventListener('abort', stop, { once: true });
+    try {
+      await conn.write(new Uint8Array([query.length >> 8, query.length & 0xff, ...query]));
+      let got = new Uint8Array();
+      for (;;) {
+        if (got.length >= 2 && got.length >= 2 + u16(got, 0)) return got.slice(2, 2 + u16(got, 0));
+        const piece = await conn.read();
+        if (!piece) return undefined;
+        const next = new Uint8Array(got.length + piece.length);
+        next.set(got);
+        next.set(piece, got.length);
+        got = next;
+      }
+    } finally {
+      signal.removeEventListener('abort', stop);
+      conn.close();
+    }
+  };
+}
+
+export function dnsForward(
+  uplink: NetworkUplink | undefined,
+  transport: RealmTransport,
+  doh: string | false | undefined
+): DnsForward | undefined {
+  const server = uplink?.nameserver;
+  if (uplink && server && (ipv4Bytes(server) || ipv6Groups(server)))
+    return uplinkForward(uplink, server);
+  return typeof doh === 'string' ? dohForward(transport, doh) : undefined;
+}
+
 export function kernelDnsStub(
   resolver: StubResolver,
   transport: RealmTransport,
+  uplink: NetworkUplink | undefined,
   doh: string | false | undefined
 ): DnsStub {
-  const url = doh ?? DEFAULT_DOH;
-  return new DnsStub({ resolver, forward: url === false ? undefined : dohForward(transport, url) });
+  return new DnsStub({ resolver, forward: dnsForward(uplink, transport, doh) });
 }
 
 async function readExactly(
@@ -403,6 +457,8 @@ async function serveTcp(stub: DnsStub, conn: KernelSocket): Promise<void> {
 
 export function enableDnsStub(net: LoopbackNet, stub: DnsStub): void {
   const at = { family: 'inet', host: '127.0.0.1', port: DNS_PORT } as const;
+  net.reserve(DNS_PORT);
+  net.kernelOnly(DNS_PORT, true);
   net.activate(at, () => {
     const listener = net.listen(at);
     const open = new Set<KernelSocket>();

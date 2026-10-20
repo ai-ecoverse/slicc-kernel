@@ -348,7 +348,8 @@ function dialer(call: (req: KernelCall) => Promise<unknown>) {
 function uplinkInit(uplink: NetworkUplink | undefined): Pick<InitRequest, 'uplink'> {
   if (!uplink) return {};
   const traits = { tcp: true, udp: carriesUdp(uplink), ipv6: uplink.traits.ipv6 === true } as const;
-  return { uplink: { traits, ...(uplink.routes ? { routes: uplink.routes } : {}) } };
+  const nameserver = typeof uplink.nameserver === 'string' ? { nameserver: uplink.nameserver } : {};
+  return { uplink: { traits, ...(uplink.routes ? { routes: uplink.routes } : {}), ...nameserver } };
 }
 
 function initCall(options: KernelOptions, transport: NetworkTransport | undefined): KernelCall {
