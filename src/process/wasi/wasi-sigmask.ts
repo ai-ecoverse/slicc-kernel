@@ -17,9 +17,9 @@ const FOREVER = 0xffff_ffff_ffff_ffffn;
 const NS_PER_MS = 1_000_000n;
 const POLL_MS = 50;
 
-const SIG_BLOCK = 0;
-const SIG_UNBLOCK = 1;
-const SIG_SETMASK = 2;
+export const SIG_BLOCK = 0;
+export const SIG_UNBLOCK = 1;
+export const SIG_SETMASK = 2;
 
 export const kernelBits = (lo: number): number => (lo << 1) & ~UNBLOCKABLE;
 
