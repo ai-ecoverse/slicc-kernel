@@ -1240,3 +1240,19 @@ test(
     assert.equal(dials.count, 3);
   }
 );
+
+test(
+  'a server name with a NUL byte is refused with EINVAL before anything is dialled, as servername and as the host of a socket upgrade, so the engine never verifies a name cut at the NUL (tls-engine#1042)',
+  TIMEOUT,
+  async (t) => {
+    const server = await recordingServer(t, ca.server('secure.test'));
+    const { run, dials } = await kernelWith(t, [['secure.test', server.port]]);
+    for (const servername of ['secure.test\0evil.test', 'secure.test\0']) {
+      const got = await run({ host: 'secure.test', port: 4433, tls: { ca: ca.pem, servername } });
+      assert.equal(got.code, 'EINVAL', JSON.stringify(got));
+    }
+    const host = await run({ host: 'secure.test\0evil.test', port: 4433, tls: { ca: ca.pem } });
+    assert.notEqual(host.code, undefined, JSON.stringify(host));
+    assert.equal(dials.count, 0);
+  }
+);
