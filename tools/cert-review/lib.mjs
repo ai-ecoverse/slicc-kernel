@@ -693,19 +693,6 @@ export function jobsEvidence(text, incomplete) {
   return withMissing(incomplete, failed);
 }
 
-export function statusAt(statuses, contexts, at) {
-  const cutoff = Date.parse(at ?? '');
-  const time = (s) => Date.parse(s.created_at ?? '');
-  for (const context of contexts) {
-    const seen = statuses
-      .filter((s) => s.context === context && !(time(s) > cutoff))
-      .sort((a, b) => time(b) - time(a));
-    const found = seen.find((s) => s.state !== 'pending') ?? seen[0];
-    if (found) return found;
-  }
-  return undefined;
-}
-
 export function groupVerdict(prs) {
   const lines = [];
   const missing = [];
@@ -729,47 +716,6 @@ export function groupVerdict(prs) {
         lines: [...lines, ...missing],
       }
     : { state: 'success', line: lines.join(', ') || 'no pull requests', lines };
-}
-
-export const NAME = '@ai-ecoverse/slicc-kernel';
-
-const SEMVER = /^(\d+)\.(\d+)\.(\d+)$/;
-const semver = (v) => SEMVER.exec(v)?.slice(1).map(Number);
-export const older = (a, b) => {
-  const [x, y] = [semver(a), semver(b)];
-  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] < y[i];
-  return false;
-};
-
-export function covers(version, tags, published) {
-  const released = (tags ?? []).map((t) => t.replace(/^v/, '')).filter((v) => semver(v));
-  const before = (published ?? []).filter((v) => semver(v) && older(v, version));
-  const since = before.reduce((a, v) => (a && !older(a, v) ? a : v), undefined);
-  const first = released
-    .filter((v) => older(v, version) && (!since || older(since, v)))
-    .reduce((a, v) => (a && older(a, v) ? a : v), undefined);
-  return first ? `${first}–${version}` : version;
-}
-
-export function releaseNotes(body, line, { version, sha256 }) {
-  const text = body ?? '';
-  const prefix = `certified ${NAME}@${version} sha256=`;
-  const found = [
-    ...text.matchAll(
-      new RegExp(`${prefix.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}([0-9a-f]{64})`, 'g')
-    ),
-  ].map((m) => m[1]);
-  if (found.some((sha) => sha !== sha256))
-    return {
-      conflict: `the release notes already certify sha256=${found.find((sha) => sha !== sha256)}`,
-    };
-  if (found.length) return { unchanged: true, body: text };
-  const kept = text
-    .replace(/\n*<!-- cert-verify -->[\s\S]*?<!-- \/cert-verify -->\n*/g, '')
-    .trimEnd();
-  return {
-    body: `${kept}${kept ? '\n\n' : ''}<!-- cert-verify -->\n${line}\n<!-- /cert-verify -->\n`,
-  };
 }
 
 const MANIFEST_FILES = new Set(['package.json', 'package-lock.json']);
@@ -984,103 +930,3 @@ export function downstreamOf(result, { biosRef = '', shards = [] } = {}) {
 }
 
 export const DOWNSTREAM_OK = new Set(['PASS', 'NOT_JUDGED']);
-
-export function downstreamLine(lines) {
-  if (lines.length === 0) return 'downstream: not run (no merge group of this release carried it)';
-  const unique = [...new Set(lines)];
-  return unique.length === 1
-    ? unique[0]
-    : `downstream: ${unique.map((l) => l.replace(/^downstream: /, '')).join(' | ')}`;
-}
-
-async function quietly(fn, fallback) {
-  try {
-    return await fn();
-  } catch {
-    return fallback;
-  }
-}
-
-async function attestationsAt(get, at) {
-  let res;
-  try {
-    res = await get(at);
-  } catch (error) {
-    return { missing: `attestations unreachable (${error?.message ?? 'network error'})` };
-  }
-  if (res.ok) {
-    try {
-      return { res, body: await res.json() };
-    } catch (error) {
-      return { missing: `attestations unreadable (${error?.message ?? 'body error'})` };
-    }
-  }
-  if (res.status !== 404) return { problem: `attestations answered ${res.status}` };
-  return { missing: 'attestations answered 404' };
-}
-
-export async function awaitAttestations({
-  url,
-  fetch: get,
-  modified,
-  servedAt,
-  now = Date.now,
-  sleep,
-  deadline = Number.POSITIVE_INFINITY,
-  graceMs = 30 * 60_000,
-  quietMs = 10 * 60_000,
-  everyMs = 15_000,
-}) {
-  let last;
-  let quietSince = now();
-  let missing = 'no attestations on npm';
-  for (;;) {
-    const at = await quietly(() => (typeof url === 'function' ? url() : url), undefined);
-    if (at) {
-      const found = await attestationsAt(get, at);
-      if (!found.missing) return found;
-      missing = found.missing;
-    }
-    const changed = await quietly(modified, last);
-    if (changed !== last) {
-      last = changed;
-      quietSince = now();
-    }
-    const served = now() - servedAt;
-    const minutes = (ms) => Math.round(ms / 60_000);
-    if (now() >= deadline)
-      return {
-        problem: `${missing} for ${minutes(served)} min after npm started serving it, through the whole wait`,
-      };
-    if (served >= graceMs && now() - quietSince >= quietMs)
-      return {
-        problem: `${missing} for ${minutes(served)} min after npm started serving it, and its packument stopped changing ${minutes(now() - quietSince)} min ago`,
-      };
-    await sleep(everyMs);
-  }
-}
-
-export async function downloadTarball({
-  url,
-  fetch: get,
-  now = Date.now,
-  sleep,
-  deadline = Number.POSITIVE_INFINITY,
-  everyMs = 15_000,
-  log = () => {},
-}) {
-  for (;;) {
-    let failure;
-    try {
-      const res = await get(url);
-      if (!res.ok) return { problem: `downloading ${url} answered ${res.status}` };
-      return { bytes: Buffer.from(await res.arrayBuffer()) };
-    } catch (error) {
-      failure = String(error?.message ?? error);
-    }
-    if (now() >= deadline)
-      return { problem: `downloading ${url} failed through the whole wait: ${failure}` };
-    log(`downloading ${url} failed, retrying: ${failure}`);
-    await sleep(everyMs);
-  }
-}

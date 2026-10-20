@@ -79,9 +79,6 @@ test("a gate passes on its tool's PASS and exit 0 only; --either keeps the tool'
     [[], "echo 'same: PASS x'; echo 'same: FAIL y'; exit 1", 1],
     [[], "echo 'same: FAIL x'; echo 'same: PASS y'", 0],
     [[], "echo 'same: PASSED'", 70],
-    [[], "echo 'same: SKIPPED x: never served'", 0],
-    [[], "echo 'same: SKIPPED x'; exit 1", 1],
-    [[], "echo 'same: SKIPPEDX'", 70],
     [['--either'], "echo 'same: FAIL x'", 0],
     [['--either'], "echo 'same: FAIL x'; exit 1", 1],
     [['--either'], "echo 'same: PASS x'", 0],
@@ -226,7 +223,6 @@ test('compat.mjs says FAIL when no kernel-compat run turned up, and delta, pack,
   for (const [name, args, line] of [
     ['pack', [], /^pack: FAIL usage: --version x\.y\.z\[-pre\] --out DIR$/m],
     ['record', ['--version', 'x'], /^record: FAIL --version must be x\.y\.z$/m],
-    ['verify', ['--version', 'x'], /^verify: FAIL --version must be x\.y\.z$/m],
   ]) {
     const r = await run([name, process.execPath, tool(`${name}.mjs`), ...args]);
     assert.equal(r.code, 2, `${name}: ${r.out}`);
@@ -288,7 +284,6 @@ test('the workflows call every cert-review tool through gate.sh under its own na
     'same',
     'suite',
     'suite',
-    'verify',
   ]);
 });
 
@@ -398,5 +393,5 @@ test("each gated workflow step fails when its tool is replaced by `true`, and re
       }
     }
   }
-  assert.equal(count, 18);
+  assert.equal(count, 17);
 });

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { DOWNSTREAM_OK, downstreamLine, downstreamOf } from '../../tools/cert-review/lib.mjs';
+import { DOWNSTREAM_OK, downstreamOf } from '../../tools/cert-review/lib.mjs';
 
 const repo = fileURLToPath(new URL('../../', import.meta.url));
 const at = {
@@ -121,18 +121,6 @@ test('known bios failures pass with a note and a notice, a canary that fails on 
       `a leftover override option (${old}) waives nothing`
     );
   assert.equal(DOWNSTREAM_OK.has('OVERRIDDEN'), false);
-  assert.equal(
-    downstreamLine([]),
-    'downstream: not run (no merge group of this release carried it)'
-  );
-  assert.equal(
-    downstreamLine(['downstream: PASS bios x', 'downstream: PASS bios x']),
-    'downstream: PASS bios x'
-  );
-  assert.equal(
-    downstreamLine(['downstream: PASS a', 'downstream: not judged b']),
-    'downstream: PASS a | not judged b'
-  );
 });
 
 test('downstream.mjs ends with its verdict through the gate: PASS for a pass, FAIL and a non-zero exit for a regression or no result (#480)', async (t) => {
