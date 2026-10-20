@@ -1236,6 +1236,18 @@ export class WasmProcess {
     }
   }
 
+  async complain(line: string): Promise<boolean> {
+    const stderr = this.fds.has(2) ? this.fds.get(2).file : undefined;
+    if (!stderr?.write || stderr.sealed || stderr.clipboard) return false;
+    const bytes = new TextEncoder().encode(`${line}\n`);
+    const timeout = new Promise<0>((r) => setTimeout(() => r(0), 1000));
+    const sent = await Promise.race([stderr.write(bytes, AbortSignal.timeout(1000)), timeout]).then(
+      (n) => n,
+      () => 0
+    );
+    return sent > 0;
+  }
+
   private async clipboardComplaint(err: unknown): Promise<void> {
     const name = this.options.clipboardName;
     if (name === undefined || !(err instanceof KernelError) || err.detail === undefined) return;

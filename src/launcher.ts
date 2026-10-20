@@ -1045,7 +1045,7 @@ export class Launcher {
       const byPath = !COMMAND.test(path) && (await this.commands()).get(linked)?.argv0Path === true;
       return target && byPath ? { ...target, argv0: path } : target;
     }
-    const own = await this.commandAt(glue, scope);
+    const own = await this.ownOrRefused(glue, baseName(file), scope);
     if (own) return own.script ? undefined : { ...targetOf(own), ...asked };
     const head = await this.head(glue);
     if (!head) return undefined;
@@ -1068,6 +1068,33 @@ export class Launcher {
     const owner = await this.glueOwner(glue, baseName(file), scope);
     if (!owner) return undefined;
     return { ...targetOf(owner), ...asked, ...(owner.glue === glue ? {} : { copy: glue }) };
+  }
+
+  private async ownOrRefused(path: string, name: string, scope: string) {
+    return (await this.commandAt(path, scope)) ?? (await this.refusedAt(path, name, scope));
+  }
+
+  private async refusedAt(path: string, name: string, scope: string): Promise<Command | undefined> {
+    const refused = [...(await this.commands(scope)).values()].filter((c) => c.origin);
+    if (refused.length === 0 || !(await this.base.exists(path))) return undefined;
+    const real = await physicalPathAsync(this.base, path).catch(() => path);
+    const at = async (c: Command, which: 'glue' | 'wasm') => {
+      const own = (c.origin as { glue: string; wasm: string })[which];
+      return own === path || (await physicalPathAsync(this.base, own).catch(() => own)) === real;
+    };
+    const owners: Command[] = [];
+    for (const c of refused) {
+      if ((await at(c, 'glue')) || (await at(c, 'wasm'))) owners.push(c);
+    }
+    if (owners.length > 0) return owners.find((c) => c.name === name) ?? owners[0];
+    const dir = real.slice(0, real.lastIndexOf('/'));
+    for (const c of refused) {
+      const origin = c.origin as { abi: string; glue: string };
+      if (origin.abi !== 'emscripten' || c.name !== name) continue;
+      const own = await physicalPathAsync(this.base, origin.glue).catch(() => origin.glue);
+      if (own.slice(0, own.lastIndexOf('/')) === dir && (await this.sameFile(real, own))) return c;
+    }
+    return undefined;
   }
 
   private async glueOwner(glue: string, name: string, scope: string): Promise<Command | undefined> {
@@ -1652,7 +1679,7 @@ export class Launcher {
         this.text(target.glue, caller, asked),
         this.module(target.wasm, caller, asked && modulePath(asked)),
       ]);
-      return { glue, module };
+      return { glue, module, path: target.glue };
     }
     const { module, memory, foreign } = await this.module(target.wasm, caller, asked);
     const names =

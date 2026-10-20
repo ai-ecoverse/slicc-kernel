@@ -26,6 +26,7 @@ export interface SealedSession {
   verified: boolean;
   handshakeAt: number;
   alpn: string | false;
+  binding?: Uint8Array | undefined;
   anchoring?: (found: Anchors) => Promise<string | undefined>;
 }
 
@@ -386,7 +387,7 @@ function idle(): Promise<typeof IDLE> {
 }
 
 export function sealedConn(conn: UplinkConn, s: SealedSession): UplinkConn {
-  const pg = new PgServer();
+  const pg = new PgServer(s.binding);
   const scope = s.broker.sessions.scope(s.pid, s.host);
   const writer = substitutes(s) ? new SessionWriter(conn, s, pg, scope) : undefined;
   const observed: UplinkConn = {

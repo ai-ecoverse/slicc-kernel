@@ -1,8 +1,9 @@
 import { createRequire } from 'node:module';
 import { parentPort } from 'node:worker_threads';
-import { nodeLockdown, nodeMemory, nodeProcess } from './node-lockdown.ts';
+import { glueUrl, nodeLockdown, nodeMemory, nodeProcess, workerShaped } from './node-lockdown.ts';
 import { runJsProcess, runJsThread } from './process/js/js-runtime.ts';
 import { processEntry } from './process/process-entry.ts';
+import { runWasmProcess } from './process/process-runtime.ts';
 import * as wasiRuntime from './process/wasi/wasi-runtime.ts';
 
 const scope = globalThis as { require?: unknown; __filename?: string; __dirname?: string };
@@ -18,7 +19,10 @@ const post = {
 const strayScope = nodeProcess ? { process: nodeProcess } : {};
 const onMessage = processEntry(
   post,
-  undefined,
+  (init, at) => {
+    workerShaped(globalThis, glueUrl(init.program?.path));
+    return runWasmProcess(init, at);
+  },
   async () => wasiRuntime,
   async () => ({
     runJsProcess: (init, at) =>

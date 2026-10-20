@@ -55,3 +55,28 @@ test("a WASIX program's own sigaction reads back the SIG_IGN it inherited across
     stderr: '',
   });
 });
+
+test('bash resetting an inherited SIG_IGN with trap - gets the signal again: kill -INT $$ ends it with 130, while TERM and HUP stay as bash keeps them (#1258, homescoop#1113)', {
+  timeout: 60_000,
+}, async (t) => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
+  const reset = (sig) =>
+    kernel.run(
+      [
+        'bash',
+        '-c',
+        `trap '' ${sig}; bash -c 'trap - ${sig}; kill -${sig} $$; echo notreached'; echo rc=$?`,
+      ],
+      { cwd: '/' }
+    );
+  assert.deepEqual(await reset('INT'), { status: 0, stdout: 'rc=130\n', stderr: '' });
+  for (const sig of ['TERM', 'HUP']) {
+    assert.deepEqual(
+      await reset(sig),
+      { status: 0, stdout: 'notreached\nrc=0\n', stderr: '' },
+      sig
+    );
+  }
+});

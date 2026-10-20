@@ -151,6 +151,7 @@ export class TlsEngine {
     flags: number
   ): TlsSession {
     const m = this.clientModule();
+    if (servername.includes('\0')) throw new TlsError(-3, 'tls engine: a server name has no NUL');
     const wire = alpnWire(alpn);
     const name = this.put(new TextEncoder().encode(servername));
     try {

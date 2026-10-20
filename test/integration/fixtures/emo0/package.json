@@ -1,0 +1,13 @@
+{
+  "name": "emo0",
+  "private": true,
+  "slicc": {
+    "abi": "emscripten",
+    "commands": {
+      "emo0": {
+        "glue": "bin/emo0",
+        "wasm": "bin/emo0.wasm"
+      }
+    }
+  }
+}
