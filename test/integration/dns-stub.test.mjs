@@ -274,6 +274,44 @@ test(
   }
 );
 
+function trickling(uplink, take) {
+  return {
+    ...uplink,
+    dial: async (options) => {
+      const conn = await uplink.dial(options);
+      return { ...conn, write: (bytes) => conn.write(bytes.subarray(0, take(bytes.length))) };
+    },
+  };
+}
+
+test(
+  'the forwarded query reaches the nameserver whole when the uplink takes a few bytes per write, and an uplink that takes none is SERVFAIL at once (#1282)',
+  TIMEOUT,
+  async (t) => {
+    const ids = [];
+    const peers = { '100.100.100.100:53': tcpResolver(ids) };
+    const uplink = trickling(fakeUplink({ nameserver: '100.100.100.100', peers }), (n) =>
+      Math.min(3, n)
+    );
+    const { dns } = await boot(t, { network: { uplink } });
+    const started = Date.now();
+    assert.equal(
+      await dns('udp', STUB, 'example.com', 'MX'),
+      'id ok rcode 0 aa 0 tc 0 ra 1 an 1 ar 0\nexample.com 300 15 10 mail.example.com\n'
+    );
+    assert.ok(Date.now() - started < 4000, `took ${Date.now() - started} ms`);
+    assert.deepEqual(ids, [0]);
+    const stuck = trickling(fakeUplink({ nameserver: '100.100.100.100', peers }), () => 0);
+    const none = await boot(t, { network: { uplink: stuck } });
+    const before = Date.now();
+    assert.equal(
+      await none.dns('udp', STUB, 'example.com', 'MX'),
+      'id ok rcode 2 aa 0 tc 0 ra 1 an 0 ar 0\n'
+    );
+    assert.ok(Date.now() - before < 4000, `took ${Date.now() - before} ms`);
+  }
+);
+
 test(
   'network.doh names a DNS over HTTPS endpoint, asked through the transport with id 0; a failed or mismatched answer is SERVFAIL (#1244, #1263 review)',
   TIMEOUT,
