@@ -136,3 +136,86 @@ test('a package below its engines.slicc-kernel floor is refused when its glue is
     [message('emfloored'), message('emfloored'), message('emfloored'), message('emcopy')].join('')
   );
 });
+
+test('a refused package is refused by path when its command names are all taken, by a built-in or an earlier package, and for a variant wasm; a shared wasm names its own command; a directory at a declared path and a copy of a refused script are not refused (#1248)', async (t) => {
+  const { kernel, version, major } = await booted(t);
+  const floor = { 'slicc-kernel': `>=${major + 1}.0.0` };
+  const glue = await readFile(new URL('wasm-coreutils/bin/coreutils', modules));
+  const wasm = await readFile(new URL('wasm-coreutils/bin/coreutils.wasm', modules));
+  const wasi = await readFile(new URL('./fixtures/heldcwd/bin/heldcwd.wasm', import.meta.url));
+  const write = (path, data) => kernel.writeFile(`/node_modules/${path}`, data);
+  const manifest = (name, slicc, engines = floor) =>
+    write(`${name}/package.json`, JSON.stringify({ name, version: '1.0.0', engines, slicc }));
+  await manifest('zsudo', {
+    commands: { sudo: { glue: 'bin/zsudo', wasm: 'bin/zsudo.wasm', args: ['echo'] } },
+  });
+  await write('zsudo/bin/zsudo', glue);
+  await write('zsudo/bin/zsudo.wasm', wasm);
+  await manifest('aaplain', { commands: { dup: { script: 'bin/dup' } } }, {});
+  await write('aaplain/bin/dup', '#!/bin/bash\necho plain dup\n');
+  await manifest('zzdup', {
+    commands: { dup: { glue: 'bin/zzdup', wasm: 'bin/zzdup.wasm', args: ['echo'] } },
+  });
+  await write('zzdup/bin/zzdup', glue);
+  await write('zzdup/bin/zzdup.wasm', wasm);
+  await manifest('wvar', {
+    abi: 'wasi',
+    commands: {
+      wvar: {
+        wasm: 'bin/wvar.wasm',
+        variants: [{ env: { WVAR: '1' }, wasm: 'bin/wvar-alt.wasm' }],
+      },
+    },
+  });
+  await write('wvar/bin/wvar.wasm', wasi);
+  await write('wvar/bin/wvar-alt.wasm', wasi);
+  await manifest('wshared', {
+    abi: 'wasi',
+    commands: { alias: { wasm: 'bin/foo.wasm' }, foo: { wasm: 'bin/foo.wasm' } },
+  });
+  await write('wshared/bin/foo.wasm', wasi);
+  await manifest('dirglue', {
+    commands: { dirglue: { glue: 'bin/dirglue', wasm: 'bin/dirglue.wasm' } },
+  });
+  await kernel.run(['mkdir', '-p', '/node_modules/dirglue/bin/dirglue'], { cwd: '/' });
+  await write('dirglue/bin/dirglue.wasm', wasm);
+  await manifest('scr', { commands: { scr: { script: 'bin/run' } } });
+  await write('scr/bin/run', '#!/bin/bash\necho scr ran\n');
+  await write('scr/bin/scr', '#!/bin/bash\necho scr ran\n');
+  const needs = (name, pkg) =>
+    `${name}: ${pkg}@1.0.0 needs slicc-kernel ${floor['slicc-kernel']}; this kernel is ${version}\n`;
+  const run = (script) =>
+    kernel.run(['bash', '-c', `chmod +x ${script.split(' ')[0]}; ${script}; echo "rc=$?"`], {
+      cwd: '/',
+    });
+  assert.deepEqual(await run('/node_modules/zsudo/bin/zsudo hi'), {
+    status: 0,
+    stdout: 'rc=126\n',
+    stderr: needs('sudo', 'zsudo'),
+  });
+  assert.deepEqual(await run('/node_modules/zzdup/bin/zzdup hi'), {
+    status: 0,
+    stdout: 'rc=126\n',
+    stderr: needs('dup', 'zzdup'),
+  });
+  const dup = await kernel.run(['dup'], { cwd: '/' });
+  assert.equal(dup.stdout, 'plain dup\n', JSON.stringify(dup));
+  assert.deepEqual(await run('/node_modules/wvar/bin/wvar-alt.wasm'), {
+    status: 0,
+    stdout: 'rc=126\n',
+    stderr: needs('wvar', 'wvar'),
+  });
+  assert.deepEqual(await run('/node_modules/wshared/bin/foo.wasm'), {
+    status: 0,
+    stdout: 'rc=126\n',
+    stderr: needs('foo', 'wshared'),
+  });
+  const dir = await run('/node_modules/dirglue/bin/dirglue');
+  assert.doesNotMatch(dir.stderr, /needs slicc-kernel/);
+  assert.match(dir.stderr, /directory/i);
+  assert.deepEqual(await run('/node_modules/scr/bin/scr'), {
+    status: 0,
+    stdout: 'scr ran\nrc=0\n',
+    stderr: '',
+  });
+});

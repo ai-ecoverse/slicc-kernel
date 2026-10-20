@@ -20,6 +20,12 @@ export function refusing(command: Command): Command {
     args: [`${command.name}: ${command.refused}`],
     refused: command.refused,
     shows: command.script ?? command.wasm,
-    origin: { abi: command.abi, glue: command.glue, wasm: command.wasm },
+    origin: {
+      abi: command.abi,
+      glue: command.glue,
+      wasm: command.wasm,
+      ...(command.variants ? { variants: command.variants.map((one) => one.wasm) } : {}),
+      ...(command.script ? { script: true as const } : {}),
+    },
   };
 }
