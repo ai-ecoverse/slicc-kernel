@@ -286,3 +286,60 @@ test(
     ]);
   }
 );
+
+test(
+  'at most 64 UDP questions wait on the forwarder at once; more are dropped, as by a full receive queue (#1263 review)',
+  TIMEOUT,
+  async (t) => {
+    const held = [];
+    let asked = 0;
+    const transport = {
+      traits: { manualRedirects: true, encodedBodies: true, maxRequestBody: 1 << 20 },
+      fetch(req) {
+        asked++;
+        return new Promise((resolve, reject) => {
+          req.signal.addEventListener('abort', () => reject(req.signal.reason), { once: true });
+          held.push(() =>
+            resolve({
+              status: 200,
+              statusText: 'OK',
+              headers: [['content-type', 'application/dns-message']],
+              body: (async function* () {
+                yield mxReply(req.body);
+              })(),
+              cancel: async () => {},
+            })
+          );
+        });
+      },
+    };
+    const { dns } = await boot(t, { network: { transport } });
+    assert.equal(await dns('flood', STUB, 'example.com', 'MX', '200'), 'sent 200\n');
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(asked, 64);
+    for (const release of held.splice(0)) release();
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(asked, 64);
+    const next = dns('udp', STUB, 'example.com', 'MX');
+    await new Promise((r) => setTimeout(r, 100));
+    for (const release of held.splice(0)) release();
+    assert.equal(
+      await next,
+      'id ok rcode 0 aa 0 tc 0 ra 1 an 1 ar 0\nexample.com 300 15 10 mail.example.com\n'
+    );
+  }
+);
+
+test(
+  'a TCP client that sends questions but never reads the answers is closed after 10 s (#1263 review)',
+  TIMEOUT,
+  async (t) => {
+    const { dns } = await boot(t);
+    const got = await dns('stall', STUB, 'host.slicc.internal', 'A', '12');
+    assert.match(got, /^wrote \d+ got \d+ closed\n$/, got);
+    assert.equal(
+      await dns('tcp', STUB, 'host.slicc.internal', 'A'),
+      'id ok rcode 0 aa 1 tc 0 ra 1 an 1 ar 0\nhost.slicc.internal 30 1 10.0.2.2\n'
+    );
+  }
+);

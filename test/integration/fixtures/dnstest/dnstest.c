@@ -185,7 +185,71 @@ static int over_tcp(const char *server, const unsigned char *q, size_t n, unsign
   return len;
 }
 
+static int flood(const char *server, const char *name, int type, int count) {
+  int s = socket(AF_INET, SOCK_DGRAM, 0);
+  struct sockaddr_in to = {0};
+  to.sin_family = AF_INET;
+  to.sin_port = htons(53);
+  inet_pton(AF_INET, server, &to.sin_addr);
+  if (connect(s, (struct sockaddr *)&to, sizeof to) < 0) return 1;
+  unsigned char q[1024];
+  for (int i = 0; i < count; i++) {
+    size_t n = query(q, name, type, 0, i + 1);
+    if (send(s, q, n, 0) < 0) {
+      printf("send %s\n", strerror(errno));
+      return 1;
+    }
+  }
+  printf("sent %d\n", count);
+  return 0;
+}
+
+static int stall(const char *server, const char *name, int type, int seconds) {
+  int s = socket(AF_INET, SOCK_STREAM, 0);
+  struct sockaddr_in to = {0};
+  to.sin_family = AF_INET;
+  to.sin_port = htons(53);
+  inet_pton(AF_INET, server, &to.sin_addr);
+  if (connect(s, (struct sockaddr *)&to, sizeof to) < 0) {
+    printf("connect %s\n", strerror(errno));
+    return 1;
+  }
+  unsigned char q[1024], framed[1026];
+  size_t n = query(q, name, type, 0, 7);
+  framed[0] = n >> 8;
+  framed[1] = n & 255;
+  memcpy(framed + 2, q, n);
+  fcntl(s, F_SETFL, fcntl(s, F_GETFL) | O_NONBLOCK);
+  int wrote = 0;
+  for (int i = 0; i < 20000; i++) {
+    ssize_t w = write(s, framed, n + 2);
+    if (w == (ssize_t)(n + 2)) {
+      wrote++;
+      continue;
+    }
+    if (w < 0 && errno == EAGAIN) {
+      struct timespec t = {0, 50000000L};
+      nanosleep(&t, NULL);
+      if (write(s, framed, n + 2) == (ssize_t)(n + 2)) {
+        wrote++;
+        continue;
+      }
+    }
+    break;
+  }
+  struct timespec wait = {seconds, 0};
+  nanosleep(&wait, NULL);
+  fcntl(s, F_SETFL, fcntl(s, F_GETFL) & ~O_NONBLOCK);
+  int got = 0;
+  unsigned char head[2], r[65536];
+  while (read_all(s, head, 2) == 0 && read_all(s, r, (size_t)((head[0] << 8) | head[1])) == 0) got++;
+  printf("wrote %d got %d %s\n", wrote, got, got < wrote ? "closed" : "all");
+  return 0;
+}
+
 int main(int argc, char **argv) {
+  if (argc == 6 && !strcmp(argv[1], "flood")) return flood(argv[2], argv[3], type_of(argv[4]), atoi(argv[5]));
+  if (argc == 6 && !strcmp(argv[1], "stall")) return stall(argv[2], argv[3], type_of(argv[4]), atoi(argv[5]));
   if (argc < 5) {
     fprintf(stderr, "usage: dnstest udp|tcp|tcp2 <server> <name> <type> [edns]\n");
     return 2;

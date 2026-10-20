@@ -13,6 +13,7 @@ export const DEFAULT_DOH = 'https://cloudflare-dns.com/dns-query';
 export const DNS_FORWARD_TIMEOUT_MS = 5000;
 export const DNS_TCP_IDLE_MS = 10_000;
 export const DNS_TCP_MAX = 64;
+export const DNS_UDP_INFLIGHT = 64;
 
 const TYPE_A = 1;
 const TYPE_PTR = 12;
@@ -389,7 +390,9 @@ async function serveTcp(stub: DnsStub, conn: KernelSocket): Promise<void> {
       if (!query) return;
       const reply = await stub.answer(query, false);
       if (!reply) return;
-      await conn.write(new Uint8Array([reply.length >> 8, reply.length & 0xff, ...reply]));
+      const framed = new Uint8Array([reply.length >> 8, reply.length & 0xff, ...reply]);
+      const sent = await conn.write(framed, AbortSignal.timeout(DNS_TCP_IDLE_MS));
+      if (sent < framed.length) return;
     }
   } catch {
     return;
@@ -416,14 +419,20 @@ export function enableDnsStub(net: LoopbackNet, stub: DnsStub): void {
       }
     })();
   });
+  let inflight = 0;
   net.serveDgram(DNS_PORT, (datagram, to) => {
-    void stub.answer(datagram.bytes, true).then(
-      (reply) => {
-        if (!reply) return;
-        const from: InetAddr = { family: 'inet', host: to.host, port: DNS_PORT };
-        net.deliverDgram(datagram.from.port, { bytes: reply, from });
-      },
-      () => undefined
-    );
+    if (inflight >= DNS_UDP_INFLIGHT) return;
+    inflight++;
+    void stub
+      .answer(datagram.bytes, true)
+      .then(
+        (reply) => {
+          if (!reply) return;
+          const from: InetAddr = { family: 'inet', host: to.host, port: DNS_PORT };
+          net.deliverDgram(datagram.from.port, { bytes: reply, from });
+        },
+        () => undefined
+      )
+      .finally(() => inflight--);
   });
 }
