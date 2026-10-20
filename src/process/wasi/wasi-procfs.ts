@@ -1,4 +1,5 @@
 import {
+  fileIdentity,
   type MountLine,
   mayTrace,
   type ProcessInfo,
@@ -393,7 +394,8 @@ function directMiss(err: unknown, path: string): boolean {
 function same(fs: SyncFsPosixBridge, path: string, id: string): boolean {
   try {
     const st = fs.stat(path);
-    return `${st.ino}:${st.mtimeMs}` === id;
+    const now = fileIdentity(st.ino, st.mtimeMs);
+    return now === undefined || now === id;
   } catch {
     return false;
   }

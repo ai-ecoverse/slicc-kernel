@@ -94,7 +94,7 @@ import { Resolver } from './kernel/net/resolver.ts';
 import { Routes, type RouteTable } from './kernel/net/routes.ts';
 import type { RealmTransport } from './kernel/net/transport.ts';
 import type { NetworkUplink } from './kernel/net/uplink.ts';
-import type { ProcessInfo } from './kernel/proc-info.ts';
+import { fileIdentity, type ProcessInfo } from './kernel/proc-info.ts';
 import { DEFAULT_UMASK } from './kernel/process.ts';
 import type { ForkState, Program } from './kernel/protocol.ts';
 import { PtyTable } from './kernel/pty.ts';
@@ -342,6 +342,10 @@ interface WriterStack {
   nodes: VfsNodes;
   unlinked: UnlinkedKeeper;
   writer: boolean;
+}
+
+function exeIdOf(exeId: string | undefined): { exeId?: string } {
+  return exeId === undefined ? {} : { exeId };
 }
 
 function describe(req: StartRequest, tty: string | null) {
@@ -1681,14 +1685,14 @@ export class Launcher {
     return (await this.base.exists(optional)) ? optional : undefined;
   }
 
-  private async exeId(target: Target): Promise<{ exeId?: string }> {
-    if (target.abi !== 'wasi' || (target.copy ?? target.glue) !== target.wasm) return {};
-    try {
-      const st = await this.base.stat(target.wasm);
-      return { exeId: `${st.ino}:${st.mtime.getTime()}` };
-    } catch {
-      return {};
+  private exeId(target: Target): Promise<{ exeId?: string }> {
+    if (target.abi !== 'wasi' || (target.copy ?? target.glue) !== target.wasm) {
+      return Promise.resolve({});
     }
+    return this.base.stat(target.wasm).then(
+      (st) => exeIdOf(fileIdentity(st.ino, st.mtime.getTime())),
+      () => ({})
+    );
   }
 
   private async program(

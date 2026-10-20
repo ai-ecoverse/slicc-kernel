@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict';
-import { readdir, readFile } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, utimes, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { startProxy } from '@ai-ecoverse/slicc-node';
 import { createNodeKernel } from '../../dist/node.js';
 
 const modules = new URL('../../node_modules/@ai-ecoverse/', import.meta.url);
 const fixture = new URL('./fixtures/exetest/', import.meta.url);
+const ORIGIN = 'http://localhost:8787';
 
 async function install(kernel, name) {
   const base = new URL(`${name}/`, modules);
@@ -156,6 +159,50 @@ test('a symlink to /proc/self/exe opens the program file, and exe keeps to the r
   assert.deepEqual(r, {
     status: 0,
     stdout: `True b'\\x00asm'\nRead-only file system\n${gone}${gone}b'\\x00asm'\n`,
+    stderr: '',
+  });
+});
+
+test('a WASI program run from a tmpfs or a hostfs mount reads its /proc/self/exe link without "(deleted)" (#1317)', {
+  timeout: 300_000,
+}, async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'slicc-exe-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const proxy = await startProxy({
+    port: 0,
+    origins: [ORIGIN],
+    mounts: [`${dir}:project`],
+    kernelPort: null,
+  });
+  t.after(() => proxy.close());
+  const hostfs = async (mount, { readonly }) => {
+    const response = await fetch(`${proxy.url}/api/hostfs/grant`, {
+      method: 'POST',
+      headers: { 'X-Bridge-Token': proxy.key, Origin: ORIGIN, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mount, readonly }),
+    });
+    const { token, capabilities } = await response.json();
+    return { url: proxy.url, token, capabilities };
+  };
+  const kernel = await createNodeKernel({ hostfs, hostfsOrigin: ORIGIN });
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
+  await kernel.writeFile('/mnt/t/.keep', '');
+  await kernel.writeFile('/mnt/h/.keep', '');
+  await kernel.mount({ type: 'tmpfs', source: 'tmpfs', target: '/mnt/t' });
+  await kernel.mount({ type: 'hostfs', source: 'project', target: '/mnt/h' });
+  await kernel.writeFile('/mnt/t/prog', await readFile(new URL('bin/exetest.wasm', fixture)));
+  await writeFile(join(dir, 'prog'), await readFile(new URL('bin/exetest.wasm', fixture)));
+  await utimes(join(dir, 'prog'), 1_700_000_000.123456, 1_700_000_000.123456);
+  const r = await kernel.run(
+    ['bash', '-c', 'chmod +x /mnt/t/prog /mnt/h/prog; /mnt/t/prog && /mnt/h/prog'],
+    {
+      cwd: '/',
+    }
+  );
+  assert.deepEqual(r, {
+    status: 0,
+    stdout: 'exe=/mnt/t/prog argv0=/mnt/t/prog\nexe=/mnt/h/prog argv0=/mnt/h/prog\n',
     stderr: '',
   });
 });

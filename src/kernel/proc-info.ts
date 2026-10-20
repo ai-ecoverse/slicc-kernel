@@ -55,3 +55,11 @@ export function mayTrace(viewer: ProcessInfo | undefined, target: ProcessInfo): 
   const uid = of.ruid === by.euid && of.euid === by.euid && of.suid === by.euid;
   return uid && of.rgid === by.egid && of.egid === by.egid && of.sgid === by.egid;
 }
+
+export function fileIdentity(
+  ino: number | undefined,
+  mtimeMs: number | undefined
+): string | undefined {
+  if (ino === undefined || mtimeMs === undefined || !Number.isFinite(mtimeMs)) return undefined;
+  return `${ino}:${Math.trunc(mtimeMs)}`;
+}
