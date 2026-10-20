@@ -133,6 +133,26 @@ export function makeCa(cn = 'slicc-kernel test CA') {
   return {
     der,
     pem: pem(der),
+    rsaClient(subject) {
+      const pair = generateKeyPairSync('rsa', { modulusLength: 2048 });
+      const leaf = certificate({
+        issuer: cn,
+        subject,
+        notBefore: new Date(now - 3600_000),
+        notAfter: new Date(now + 7 * DAY),
+        spki: pair.publicKey.export({ type: 'spki', format: 'der' }),
+        issuerSpki: spki,
+        host: subject,
+        san: 'dns',
+        eku: '1.3.6.1.5.5.7.3.2',
+        key: privateKey,
+      });
+      return {
+        der: leaf,
+        cert: pem(leaf) + pem(der),
+        key: pair.privateKey.export({ type: 'pkcs8', format: 'pem' }),
+      };
+    },
     server(
       host,
       { notBefore = new Date(now - 3600_000), notAfter = new Date(now + 7 * DAY), san, eku } = {}
