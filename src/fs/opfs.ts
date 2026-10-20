@@ -546,6 +546,7 @@ export class OpfsFs implements KernelFs {
   }
 
   private async locked<T>(physicalPath: string, op: () => Promise<T>): Promise<T> {
+    if (physicalPath !== undefined) return this.alone(op);
     if (!this.locks) return op();
     if (this.remote && !(await this.remote.peered())) return this.alone(op);
     const key = `${this.lockPrefix}${physicalPath}`;
