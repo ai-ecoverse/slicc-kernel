@@ -133,3 +133,43 @@ print(open('/etc/hostname').read().strip())
   );
   assert.equal(wasi.stdout, 'third\n', wasi.stderr);
 });
+
+test('appending to or overwriting part of the synthetic /etc/hostname keeps its bytes, and the kernel reads it through a symlink to it or to /etc (#1306)', async (t) => {
+  const kernel = await createNodeKernel({ hostname: 'devbox' });
+  t.after(() => kernel.terminate());
+  await install(kernel, 'wasm-bash');
+  await install(kernel, 'wasm-coreutils');
+  const base = fileURLToPath(new URL('wasix-python/', modules));
+  for (const entry of (await readdir(base, { recursive: true, withFileTypes: true })).filter((e) =>
+    e.isFile()
+  )) {
+    const rel = relative(base, join(entry.parentPath, entry.name));
+    if (/^lib\/libpython[^/]*\.a$/.test(rel)) continue;
+    await kernel.writeFile(
+      `/node_modules/@ai-ecoverse/wasix-python/${rel}`,
+      await readFile(join(entry.parentPath, entry.name))
+    );
+  }
+  const run = (argv) => kernel.run(argv, { cwd: '/' });
+  const shell = await run(['bash', '-c', 'echo extra >> /etc/hostname && cat /etc/hostname']);
+  assert.equal(shell.stdout, 'devbox\nextra\n', shell.stderr);
+  await run(['bash', '-c', 'rm /etc/hostname']);
+  const append = await run([
+    'python3',
+    '-c',
+    "open('/etc/hostname', 'a').write('more\\n'); print(repr(open('/etc/hostname').read()))",
+  ]);
+  assert.equal(append.stdout, "'devbox\\nmore\\n'\n", append.stderr);
+  await run(['bash', '-c', 'rm /etc/hostname']);
+  const overwrite = await run([
+    'python3',
+    '-c',
+    "f = open('/etc/hostname', 'r+'); f.write('D'); f.close(); print(repr(open('/etc/hostname').read()))",
+  ]);
+  assert.equal(overwrite.stdout, "'Devbox\\n'\n", overwrite.stderr);
+  await run(['bash', '-c', 'rm /etc/hostname && ln -s /etc/hostname /tmp/host && ln -s /etc /e']);
+  const text = (bytes) => new TextDecoder().decode(bytes);
+  assert.equal(text(await kernel.readFile('/tmp/host')), 'devbox\n');
+  assert.equal(text(await kernel.readFile('/e/hostname')), 'devbox\n');
+  await assert.rejects(kernel.readFile('/tmp/none'), { code: 'ENOENT' });
+});
