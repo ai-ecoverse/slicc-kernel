@@ -65,6 +65,10 @@ export function nodeLockdown(scope: object = globalThis): void {
 
 class WorkerGlobalScope {}
 
+export function glueUrl(path: string | undefined): string {
+  return new URL(path?.startsWith('/') ? path : '/', 'file:///').href;
+}
+
 export function workerShaped(scope: object, href: string): void {
   const slot = (value: unknown) => ({
     value,

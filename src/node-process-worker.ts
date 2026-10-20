@@ -1,6 +1,6 @@
 import { createRequire } from 'node:module';
 import { parentPort } from 'node:worker_threads';
-import { nodeLockdown, nodeProcess, workerShaped } from './node-lockdown.ts';
+import { glueUrl, nodeLockdown, nodeProcess, workerShaped } from './node-lockdown.ts';
 import { runJsProcess, runJsThread } from './process/js/js-runtime.ts';
 import { processEntry } from './process/process-entry.ts';
 import { runWasmProcess } from './process/process-runtime.ts';
@@ -20,7 +20,7 @@ const strayScope = nodeProcess ? { process: nodeProcess } : {};
 const onMessage = processEntry(
   post,
   (init, at) => {
-    workerShaped(globalThis, import.meta.url);
+    workerShaped(globalThis, glueUrl(init.program?.path));
     return runWasmProcess(init, at);
   },
   async () => wasiRuntime,

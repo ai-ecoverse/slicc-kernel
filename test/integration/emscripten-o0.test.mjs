@@ -9,13 +9,39 @@ const FILES = ['package.json', 'bin/emo0', 'bin/emo0.wasm'];
 const fixture = new URL('fixtures/emo0/', import.meta.url);
 const HELLO = { status: 0, stdout: 'hello from an -O0 emcc build, 2 args\n', stderr: '' };
 
-test("an emcc -O0 program (ASSERTIONS, ENVIRONMENT web,worker,node) runs on the Node entry: its glue reads the process worker as a worker, not a JS shell, and Node's process stays hidden (#1238, homescoop#1065)", async (t) => {
+test("an emcc -O0 program (ASSERTIONS, ENVIRONMENT web,worker,node) runs on the Node entry: its glue reads the process worker as a worker, not a JS shell, whose location is the glue's own path in the kernel, never the host's, and Node's process stays hidden (#1238, homescoop#1065)", async (t) => {
   const kernel = await createNodeKernel({ users: 'off' });
   t.after(() => kernel.terminate());
   for (const file of FILES) {
     await kernel.writeFile(`/node_modules/emo0/${file}`, await readFile(new URL(file, fixture)));
   }
   assert.deepEqual(await kernel.run(['emo0', 'a', 'b'], { cwd: '/' }), HELLO);
+  const glue = await readFile(new URL('bin/emo0', fixture), 'utf8');
+  await kernel.writeFile(
+    '/node_modules/where/package.json',
+    JSON.stringify({
+      name: 'where',
+      slicc: {
+        abi: 'emscripten',
+        commands: { where: { glue: 'bin/where', wasm: 'bin/where.wasm' } },
+      },
+    })
+  );
+  await kernel.writeFile(
+    '/node_modules/where/bin/where',
+    `${glue}\nModule.preRun = [() => { out(String(self.location.href)); }];`
+  );
+  await kernel.writeFile(
+    '/node_modules/where/bin/where.wasm',
+    await readFile(new URL('bin/emo0.wasm', fixture))
+  );
+  const where = await kernel.run(['where'], { cwd: '/' });
+  assert.match(
+    where.stdout,
+    /^file:\/\/\/node_modules\/where\/bin\/where\n/,
+    where.stdout + where.stderr
+  );
+  assert.doesNotMatch(where.stdout, /slicc-kernel|Users|home/);
   await kernel.writeFile(
     '/node_modules/probe/package.json',
     JSON.stringify({
