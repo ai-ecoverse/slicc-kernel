@@ -2,7 +2,7 @@ import type { InetAddr } from '../dgram.ts';
 import type { KernelSocket, LoopbackNet } from '../socket.ts';
 import { ipv4Bytes, ipv6Groups } from './routes.ts';
 import type { RealmTransport } from './transport.ts';
-import type { NetworkUplink, ResolveFamily } from './uplink.ts';
+import type { NetworkUplink, ResolveFamily, UplinkConn } from './uplink.ts';
 
 export const DNS_PORT = 53;
 export const DNS_STUB_ADDRESS = '127.0.0.53';
@@ -374,13 +374,21 @@ export function dohForward(transport: RealmTransport, url: string): DnsForward {
   };
 }
 
+async function writeAll(conn: UplinkConn, bytes: Uint8Array): Promise<void> {
+  for (let at = 0; at < bytes.length; ) {
+    const n = await conn.write(bytes.subarray(at));
+    if (!(n > 0)) throw new Error('the uplink wrote nothing');
+    at += n;
+  }
+}
+
 export function uplinkForward(uplink: NetworkUplink, server: string): DnsForward {
   return async (query, signal) => {
     const conn = await uplink.dial({ network: 'tcp', host: server, port: DNS_PORT, signal });
     const stop = () => conn.close();
     signal.addEventListener('abort', stop, { once: true });
     try {
-      await conn.write(new Uint8Array([query.length >> 8, query.length & 0xff, ...query]));
+      await writeAll(conn, new Uint8Array([query.length >> 8, query.length & 0xff, ...query]));
       let got = new Uint8Array();
       for (;;) {
         if (got.length >= 2 && got.length >= 2 + u16(got, 0)) return got.slice(2, 2 + u16(got, 0));
