@@ -137,6 +137,11 @@ class SessionWriter {
     return this.proven;
   }
 
+  async mayTouch(): Promise<boolean> {
+    if (this.s.verified) return true;
+    return (await this.proof('pg'))?.anchor !== undefined;
+  }
+
   private async prove(protocol: SessionProtocol): Promise<Proof | undefined> {
     const s = this.s;
     if (s.anchoring) {
@@ -195,7 +200,10 @@ class SessionWriter {
     this.buffer.fill(0);
     this.buffer = joined;
     if (this.mode === 'sniff') this.mode = modeOf(latin1(joined.subarray(0, 8))) ?? 'sniff';
-    if (this.mode === 'pg') this.sawPg = true;
+    if (this.mode === 'pg' && !this.sawPg) {
+      this.sawPg = true;
+      if (!this.s.verified) void this.proof('pg');
+    }
     if (this.mode === 'pass') await this.release();
     else if (this.mode === 'http1') await this.http1();
     else if (this.mode === 'smtp') await this.lines();
@@ -396,6 +404,7 @@ export function sealedConn(conn: UplinkConn, s: SealedSession): UplinkConn {
       for (;;) {
         const bytes = await conn.read();
         if (!bytes) return bytes;
+        if (writer?.sawPg && pg.touch === undefined) pg.touch = await writer.mayTouch();
         const out = writer?.sawPg ? pg.filter(bytes) : bytes;
         if (pg.failed) {
           conn.close();

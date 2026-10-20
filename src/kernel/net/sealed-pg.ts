@@ -54,6 +54,7 @@ export interface PgExpect {
 export class PgServer {
   readonly binding: Uint8Array | undefined;
   plus = false;
+  touch: boolean | undefined;
   constructor(binding?: Uint8Array) {
     this.binding = binding;
   }
@@ -77,6 +78,7 @@ export class PgServer {
   }
 
   private mechanisms(message: Uint8Array): Uint8Array {
+    if (this.touch !== true) return message;
     this.sasl = true;
     const offered = latin(message.subarray(9))
       .split('\0')
