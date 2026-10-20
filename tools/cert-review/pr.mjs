@@ -20,7 +20,6 @@ const { positionals, values } = parseArgs({
     action: { type: 'string', default: '' },
     label: { type: 'string', default: '' },
     labels: { type: 'string', default: '' },
-    draft: { type: 'string', default: process.env.PR_DRAFT ?? '' },
     base: { type: 'string', default: '' },
     run: { type: 'string', default: '' },
     context: { type: 'string', default: 'cert-review' },
@@ -88,6 +87,8 @@ async function status(sha, state, description) {
 }
 
 const GUARD_FAIL = (label) => `reviewer change: needs coordinator review (${label} on this head)`;
+const LIVE_FAILED =
+  'cert-review could not read whether the pull request is a draft: re-run the failed jobs';
 const GUARD_INCOMPLETE = 'the certification self-guard did not finish: re-run the failed jobs';
 
 async function plan() {
@@ -98,7 +99,6 @@ async function plan() {
   }
   const files = await all(`repos/${repo}/pulls/${values.pr}/files`);
   const behaviour = behaviourFiles(files);
-  const draft = values.draft !== 'false';
   const self = reviewsItself(files);
   if (values.guard !== 'PASS') {
     const fail = values.guard === 'FAIL';
@@ -121,7 +121,13 @@ async function plan() {
     summary(`#${values.pr} changes no shipped behaviour: not reviewed, cert-review success`);
     return output({ go: 'false', behaviour: '', self: 'false' });
   }
-  if (draft) {
+  const live = await request(`repos/${repo}/pulls/${values.pr}`)
+    .then((r) => r.json())
+    .catch(async (err) => {
+      await status(values.head, 'error', LIVE_FAILED);
+      throw err;
+    });
+  if (live.draft !== false) {
     await status(
       values.head,
       'failure',
