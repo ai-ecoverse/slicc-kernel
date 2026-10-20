@@ -80,3 +80,41 @@ test('a WASIX program as a user reads /etc/hostname as the node name, 0644 and r
   const real = await kernel.run(['bash', '-c', probe], { cwd: '/home/cone', user: 'cone' });
   assert.equal(real.stdout, "'from-the-root\\n' 0o644 0\n", real.stderr);
 });
+
+test('an exclusive create of the synthetic /etc/hostname is EEXIST, and a dangling symlink there stays dangling (#1301 review)', async (t) => {
+  const kernel = await createNodeKernel({ hostname: 'devbox' });
+  t.after(() => kernel.terminate());
+  await install(kernel, 'wasm-bash');
+  await install(kernel, 'wasm-coreutils');
+  const base = fileURLToPath(new URL('wasix-python/', modules));
+  for (const entry of (await readdir(base, { recursive: true, withFileTypes: true })).filter((e) =>
+    e.isFile()
+  )) {
+    const rel = relative(base, join(entry.parentPath, entry.name));
+    if (/^lib\/libpython[^/]*\.a$/.test(rel)) continue;
+    await kernel.writeFile(
+      `/node_modules/@ai-ecoverse/wasix-python/${rel}`,
+      await readFile(join(entry.parentPath, entry.name))
+    );
+  }
+  const probe = `python3 -c "
+import os, errno
+try:
+    os.close(os.open('/etc/hostname', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644))
+    print('created')
+except OSError as e:
+    print(errno.errorcode[e.errno])
+print(open('/etc/hostname').read().strip())
+"`;
+  const excl = await kernel.run(['bash', '-c', probe], { cwd: '/' });
+  assert.equal(excl.stdout, 'EEXIST\ndevbox\n', excl.stderr);
+  const dangling = await kernel.run(
+    [
+      'python3',
+      '-c',
+      "import os; os.symlink('/nowhere', '/etc/hostname'); print(os.path.exists('/etc/hostname'), os.path.islink('/etc/hostname'))",
+    ],
+    { cwd: '/' }
+  );
+  assert.equal(dangling.stdout, 'False True\n', dangling.stderr);
+});
