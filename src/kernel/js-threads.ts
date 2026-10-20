@@ -140,7 +140,15 @@ export class JsThreads {
       () => {
         this.pending--;
         if (!this.closed) {
-          this.begin(msg);
+          let worker: WasmWorkerLike;
+          try {
+            worker = this.deps.createWorker();
+          } catch {
+            this.admission.ended();
+            this.refuse(msg, { errno: 'EAGAIN', message: 'no worker for the thread' });
+            return;
+          }
+          this.begin(msg, worker);
           return;
         }
         this.admission.ended();
@@ -159,14 +167,13 @@ export class JsThreads {
     msg.port.close();
   }
 
-  private begin(msg: JsThreadSpawnMsg): void {
+  private begin(msg: JsThreadSpawnMsg, worker: WasmWorkerLike): void {
     const { control, port } = msg;
     const tid = ++this.last;
     const sab = new SharedArrayBuffer(SAB_HEADER_BYTES + SAB_DEFAULT_WINDOW_BYTES);
     const header = new Int32Array(sab, 0, SAB_HEADER_I32);
     const owned = new SharedArrayBuffer(4 * (1 + JS_THREAD_OWNED_FDS));
     if (this.frozen) Atomics.store(header, SAB_I_STOP, 1);
-    const worker = this.deps.createWorker();
     const clock: CpuClock = this.deps.clocks.thread(tid + 1, sab);
     let ended = false;
     const end = (code: number): void => {
