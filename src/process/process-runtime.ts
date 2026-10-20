@@ -481,13 +481,23 @@ export function liveParent(
   wrapImport(imports, 'getppid', glue, () => parent);
 }
 
+function seedInherited(transport: SyncSabTransport, seeded: { bits: number }): number {
+  const bits = inheritedSignals(transport);
+  seeded.bits |= bits;
+  return bits;
+}
+
 export function signalMasks(
-  m: Pick<RunningModule, 'sliccSigMask'>
-): { caught: number; ignored: number; restart: number } | null {
+  m: Pick<RunningModule, 'sliccSigMask'>,
+  seeded: { bits: number } = { bits: 0 }
+): { caught: number; ignored: number; restart: number; defaults?: number } | null {
   const mask = m.sliccSigMask;
   const caught = mask?.(0) ?? -1;
   if (!mask || caught === -1) return null;
-  return { caught, ignored: mask(1), restart: mask(2) };
+  const ignored = mask(1);
+  const defaults = seeded.bits & ~ignored & ~caught;
+  seeded.bits &= ~defaults;
+  return { caught, ignored, restart: mask(2), ...(defaults ? { defaults } : {}) };
 }
 
 export function reportGrowth(
@@ -636,13 +646,12 @@ export async function runWasmProcess(
   port: SabPostLike,
   deps: { evaluate?: GlueEvaluator; warn?: (message: string) => void } = {}
 ): Promise<number> {
+  const seeded = { bits: 0 };
   const signals = new SignalGate(
-    createSyncSabTransport(init.sab, port, {
-      memory: () => memory?.buffer.byteLength ?? 0,
-    }),
+    createSyncSabTransport(init.sab, port, { memory: () => memory?.buffer.byteLength ?? 0 }),
     new Int32Array(init.sab, 0, SAB_HEADER_I32),
     {
-      masks: () => signalMasks(module as unknown as RunningModule),
+      masks: () => signalMasks(module as unknown as RunningModule, seeded),
       raise: (sig) => (module as unknown as RunningModule).sliccRaise?.(sig),
       timer: (which) => {
         const running = module as unknown as RunningModule;
@@ -672,7 +681,7 @@ export async function runWasmProcess(
     sliccPid: id.pid,
     sliccPpid: id.ppid,
     sliccEnv: init.env,
-    sliccKernel: { sigInherited: () => inheritedSignals(transport) },
+    sliccKernel: { sigInherited: () => seedInherited(transport, seeded) },
     print: say(1),
     printErr: say(2),
     instantiateWasm(
