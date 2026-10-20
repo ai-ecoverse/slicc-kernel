@@ -68,7 +68,7 @@
     "@ai-ecoverse/slicc-scrub": "1.0.0",
     "@ai-ecoverse/slicc-shared-web": "1.27.0",
     "@ai-ecoverse/wasi-cargo": "0.99.0-3",
-    "@ai-ecoverse/wasi-pnpm": "12.9.1-16",
+    "@ai-ecoverse/wasi-pnpm": "12.9.1-17",
     "@ai-ecoverse/wasi-ripgrep": "15.2.0-5",
     "@ai-ecoverse/wasi-rustc": "1.98.1-6",
     "@ai-ecoverse/wasi-zig": "0.16.0-17",
