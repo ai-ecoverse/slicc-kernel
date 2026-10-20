@@ -1239,16 +1239,12 @@ export class Launcher {
     ctx: { ppid: number; cred: Readonly<Cred>; scope: string }
   ): Promise<Planned> {
     const bare = !req.file.includes('/') && !COMMAND.test(req.file);
-    try {
-      return await this.planOne(req, ctx);
-    } catch (err) {
-      const code = codeOf(err);
-      const searched = bare && req.search !== false && (code === 'ENOENT' || code === 'ENOEXEC');
-      if (!searched || (await this.commandAt(req.file, ctx.scope))) throw err;
+    if (bare && req.search !== false && !(await this.commandAt(req.file, ctx.scope))) {
       const found = await this.onPath(req, ctx);
       if (found) return found;
-      throw err;
+      throw new SpawnError('ENOENT');
     }
+    return this.planOne(req, ctx);
   }
 
   private async onPath(
