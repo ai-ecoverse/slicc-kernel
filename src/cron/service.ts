@@ -167,6 +167,8 @@ export class CronService {
   }
 
   private async pass(): Promise<void> {
+    if (this.wake.signal.aborted) this.wake = new AbortController();
+    const wake = this.wake;
     let until: number;
     try {
       until = await this.tick();
@@ -175,8 +177,7 @@ export class CronService {
       until = this.clock.now() + WAKE_MS;
     }
     if (this.stopping.signal.aborted) return;
-    if (this.wake.signal.aborted) this.wake = new AbortController();
-    await this.clock.sleep(until, this.wake.signal);
+    await this.clock.sleep(until, wake.signal);
   }
 
   async provision(): Promise<void> {
