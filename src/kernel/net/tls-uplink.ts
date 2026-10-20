@@ -312,17 +312,18 @@ async function prepareWith(
   }
 }
 
-interface Seal {
+export interface Seal {
   proc: SecureProcess;
   port: number;
   engine?: TlsEngine;
 }
 
-function anchoringOf(seal: Seal, info: TlsClientInfo, servername: string) {
+export function anchoringOf(seal: Seal, info: TlsClientInfo, servername: string) {
   const engine = seal.engine;
   if (!engine?.chainVerify || isIP(servername) || info.peerCertificates.length === 0) return {};
   return {
     anchoring: (found: Anchors) => anchorFor(engine, info.peerCertificates, servername, found),
+    anchoredBinding: () => endPointBinding(info.peerCertificates[0]),
   };
 }
 

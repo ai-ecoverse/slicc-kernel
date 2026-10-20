@@ -52,7 +52,7 @@ export interface PgExpect {
 }
 
 export class PgServer {
-  readonly binding: Uint8Array | undefined;
+  binding: Uint8Array | undefined;
   plus = false;
   touch: boolean | undefined;
   constructor(binding?: Uint8Array) {
