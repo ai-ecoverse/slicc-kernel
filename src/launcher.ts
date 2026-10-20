@@ -336,10 +336,16 @@ interface WriterStack {
   writer: boolean;
 }
 
+function describe(req: StartRequest, tty: string | null) {
+  const exe = req.exe === undefined ? {} : { exe: req.exe };
+  return { argv: [req.argv0, ...req.args], tty, started: Date.now(), ...exe };
+}
+
 interface StartRequest {
   quietOom?: boolean | undefined;
   program: Program;
   argv0: string;
+  exe?: string;
   args: string[];
   env: Record<string, string>;
   cwd: string;
@@ -607,7 +613,10 @@ export class Launcher {
   private readonly processes = new Map<number, WasmProcessHandle>();
   private readonly zombies = new Set<number>();
   private readonly orphans = new Set<number>();
-  private readonly described = new Map<number, Pick<ProcessInfo, 'argv' | 'tty' | 'started'>>();
+  private readonly described = new Map<
+    number,
+    Pick<ProcessInfo, 'argv' | 'tty' | 'started' | 'exe'>
+  >();
   private readonly creds = new Map<number, () => Cred>();
   private readonly tags = new Map<number, string>();
   private readonly links = new Map<number, number>();
@@ -1056,7 +1065,7 @@ export class Launcher {
         abi: 'wasi',
         glue,
         wasm: glue,
-        argv0: baseName(argv0 || file).replace(/\.wasm$/, ''),
+        argv0,
         ...asked,
       };
     }
@@ -1724,7 +1733,18 @@ export class Launcher {
     try {
       const cwdSlot = await this.cwds.hold(cwd, req.cwdFrom);
       const handle = await this.admitted(program.abi !== 'js', req.fds, (fds, quietOom) =>
-        this.start({ ...req, fds, quietOom, cwd, program, argv0: target.argv0, args, env, cwdSlot })
+        this.start({
+          ...req,
+          fds,
+          quietOom,
+          cwd,
+          program,
+          argv0: target.argv0,
+          exe: target.copy ?? target.glue,
+          args,
+          env,
+          cwdSlot,
+        })
       ).finally(() => this.cwds.release(cwdSlot));
       void handle.exited.finally(done);
       return handle;
@@ -1933,11 +1953,7 @@ export class Launcher {
     if (req.pgid !== undefined) this.jobs.join(pid, req.pgid);
     if (req.group === 'lead') this.jobs.lead(pid);
     if (req.group === 'session') this.jobs.setsid(pid);
-    this.described.set(pid, {
-      argv: [req.argv0, ...req.args],
-      tty: terminal?.name ?? null,
-      started: Date.now(),
-    });
+    this.described.set(pid, describe(req, terminal?.name ?? null));
     handle.onState((state) =>
       state === 'stopped' ? this.stopped.add(pid) : this.stopped.delete(pid)
     );
