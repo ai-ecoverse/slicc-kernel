@@ -253,6 +253,7 @@ export interface ContextOptions {
   thread: JsThreadContext;
   fs?: { owners: boolean; links: boolean };
   owned?: SharedArrayBuffer;
+  failed?: () => number | undefined;
 }
 
 const encoder = new TextEncoder();
@@ -574,9 +575,12 @@ const cryptoRandom = (bytes: Uint8Array) =>
 function tracked(
   pending: Set<Promise<unknown>>,
   writeAll: (fd: number, data: Uint8Array) => Promise<void>,
-  writeSome: (fd: number, data: Uint8Array) => Promise<number>
+  writeSome: (fd: number, data: Uint8Array) => Promise<number>,
+  failed?: () => number | undefined
 ) {
   return (fd: number, data: Uint8Array | string, options?: JsWriteOptions): Promise<number> => {
+    const status = failed?.();
+    if (status !== undefined) return Promise.reject(new JsExit(status));
     const bytes = typeof data === 'string' ? encoder.encode(data) : data;
     let settle!: () => void;
     const settled = new Promise<void>((resolve) => (settle = resolve));
@@ -624,7 +628,7 @@ export function createContext(o: ContextOptions): CreatedContext {
 
   const { writes, writeAll, writeSome } = writer(kernel, info, o.pid);
 
-  const write = tracked(pending, writeAll, writeSome);
+  const write = tracked(pending, writeAll, writeSome, o.failed);
 
   const writable = (fd: number) =>
     new WritableStream<Uint8Array>({
