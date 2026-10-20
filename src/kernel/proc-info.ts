@@ -7,6 +7,7 @@ export interface ProcessInfo {
   pgid: number;
   sid: number;
   argv: string[];
+  exe?: string;
   tty: string | null;
   started: number;
   state: 'S' | 'T' | 'Z';
@@ -44,4 +45,12 @@ export interface ProcessListing {
   opfsCalls?: number;
   opfsOps?: number;
   cwdChecks?: number;
+}
+
+export function mayTrace(viewer: ProcessInfo | undefined, target: ProcessInfo): boolean {
+  const by = viewer?.cred;
+  const of = target.cred;
+  if (!by || !of || by.euid === 0) return true;
+  const uid = of.ruid === by.euid && of.euid === by.euid && of.suid === by.euid;
+  return uid && of.rgid === by.egid && of.egid === by.egid && of.sgid === by.egid;
 }

@@ -164,7 +164,10 @@ export class WasiSignals implements SignalHooks {
     this.raise(sig);
   }
 
+  ran = 0;
+
   private run(handler: (sig: number) => void, sig: number): void {
+    this.ran++;
     const outer = { sig: this.delivering, defaulted: this.defaulted, libc: this.libcDefault };
     this.delivering = sig;
     this.defaulted = false;

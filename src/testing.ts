@@ -57,6 +57,7 @@ export interface FakeUplinkOptions {
   peers?: Readonly<Record<string, FakePeer>>;
   datagrams?: Readonly<Record<string, FakeDatagramPeer>>;
   address?: string;
+  nameserver?: string;
 }
 
 export interface FakeUplink extends NetworkUplink {
@@ -195,6 +196,7 @@ export function fakeUplink(options: FakeUplinkOptions = {}): FakeUplink {
   return {
     traits: { tcp: true, udp: options.datagrams !== undefined, ipv6: options.ipv6 === true },
     ...(options.routes ? { routes: options.routes } : {}),
+    ...(options.nameserver ? { nameserver: options.nameserver } : {}),
     asked,
     dialled,
     sent,

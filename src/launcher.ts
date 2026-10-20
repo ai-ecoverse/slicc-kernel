@@ -27,6 +27,7 @@ import { FileChanges } from './fs/changes.ts';
 import { type EntryTarget, followLinks, withCommandDirs } from './fs/commands.ts';
 import { Dac, type DenialHook, type Guard, need, readable, TTY_MODE } from './fs/dac.ts';
 import { SHM } from './fs/dev-removal.ts';
+import { HOSTNAME_PATH, withEtcFiles } from './fs/etc-files.ts';
 import { FreshModules } from './fs/fresh-modules.ts';
 import {
   Integrity,
@@ -66,6 +67,12 @@ import { CwdTable, type HeldCwdReply, type HeldOptions, inheritedCwd } from './k
 import { spawnWasmProcess, type WasmProcessHandle, type WasmWorkerLike } from './kernel/host.ts';
 import { type JobMember, JobTable } from './kernel/jobs.ts';
 import { type KernelLocks, kernelLocks } from './kernel/lock-service.ts';
+import {
+  enableDnsStub,
+  kernelDnsStub,
+  RESOLV_CONF,
+  RESOLV_CONF_PATH,
+} from './kernel/net/dns-stub.ts';
 import { hostsReader } from './kernel/net/hosts-file.ts';
 import { HttpHandles } from './kernel/net/http-syscalls.ts';
 import { DEFAULT_HOSTNAME, isHostname } from './kernel/net/loopback-names.ts';
@@ -183,6 +190,7 @@ export interface LauncherOptions {
   cdp?: CdpHook;
   facades?: FacadeSpecs;
   uplink?: NetworkUplink;
+  doh?: string | false;
   hostname?: string;
   users?: UsersMode;
   wasmMemories?: { ceiling?: number; idleMs?: number };
@@ -336,10 +344,16 @@ interface WriterStack {
   writer: boolean;
 }
 
+function describe(req: StartRequest, tty: string | null) {
+  const exe = req.exe === undefined ? {} : { exe: req.exe };
+  return { argv: [req.argv0, ...req.args], tty, started: Date.now(), ...exe };
+}
+
 interface StartRequest {
   quietOom?: boolean | undefined;
   program: Program;
   argv0: string;
+  exe?: string;
   args: string[];
   env: Record<string, string>;
   cwd: string;
@@ -386,6 +400,7 @@ const LAYOUT: ReadonlyArray<[string, number]> = [
   ['/etc', 0o755],
   [PASSWD, 0o644],
   [GROUP, 0o644],
+  [RESOLV_CONF_PATH, 0o644],
   ['/usr', 0o755],
   ['/usr/local', 0o755],
 ];
@@ -607,7 +622,10 @@ export class Launcher {
   private readonly processes = new Map<number, WasmProcessHandle>();
   private readonly zombies = new Set<number>();
   private readonly orphans = new Set<number>();
-  private readonly described = new Map<number, Pick<ProcessInfo, 'argv' | 'tty' | 'started'>>();
+  private readonly described = new Map<
+    number,
+    Pick<ProcessInfo, 'argv' | 'tty' | 'started' | 'exe'>
+  >();
   private readonly creds = new Map<number, () => Cred>();
   private readonly tags = new Map<number, string>();
   private readonly links = new Map<number, number>();
@@ -759,6 +777,10 @@ export class Launcher {
       roots: packageTlsRoots(this.verifiedFs(options.fs), this.modulesDir),
       ca: this.ca,
     });
+    enableDnsStub(
+      this.net,
+      kernelDnsStub(this.resolver, this.transport, options.uplink, options.doh)
+    );
     enableCdp(this.net, this.cdp);
     this.facades.enable(this.net);
     const fs = this.commandFs(this.base);
@@ -1057,7 +1079,7 @@ export class Launcher {
         abi: 'wasi',
         glue,
         wasm: glue,
-        argv0: baseName(argv0 || file).replace(/\.wasm$/, ''),
+        argv0,
         ...asked,
       };
     }
@@ -1725,7 +1747,18 @@ export class Launcher {
     try {
       const cwdSlot = await this.cwds.hold(cwd, req.cwdFrom);
       const handle = await this.admitted(program.abi !== 'js', req.fds, (fds, quietOom) =>
-        this.start({ ...req, fds, quietOom, cwd, program, argv0: target.argv0, args, env, cwdSlot })
+        this.start({
+          ...req,
+          fds,
+          quietOom,
+          cwd,
+          program,
+          argv0: target.argv0,
+          exe: target.copy ?? target.glue,
+          args,
+          env,
+          cwdSlot,
+        })
       ).finally(() => this.cwds.release(cwdSlot));
       void handle.exited.finally(done);
       return handle;
@@ -1935,11 +1968,7 @@ export class Launcher {
     if (req.pgid !== undefined) this.jobs.join(pid, req.pgid);
     if (req.group === 'lead') this.jobs.lead(pid);
     if (req.group === 'session') this.jobs.setsid(pid);
-    this.described.set(pid, {
-      argv: [req.argv0, ...req.args],
-      tty: terminal?.name ?? null,
-      started: Date.now(),
-    });
+    this.described.set(pid, describe(req, terminal?.name ?? null));
     handle.onState((state) =>
       state === 'stopped' ? this.stopped.add(pid) : this.stopped.delete(pid)
     );
@@ -2647,6 +2676,20 @@ export class Launcher {
     return [...this.openFiles].some((nodes) => nodes.holds(path)) || heldUnder(this.held, path);
   }
 
+  private async resolvConf(): Promise<void> {
+    if (isProtected(this.prefixes, RESOLV_CONF_PATH)) return;
+    try {
+      const there = await this.base.lstat(RESOLV_CONF_PATH).then(
+        () => true,
+        () => false
+      );
+      if (there) return;
+      await this.base.writeFile(RESOLV_CONF_PATH, RESOLV_CONF);
+    } catch {
+      return;
+    }
+  }
+
   private async stampLayout(): Promise<void> {
     const layout: Array<[string, number]> = [
       ...LAYOUT,
@@ -2800,6 +2843,7 @@ export class Launcher {
     await this.mountShm();
     await this.pnpmReady();
     await this.users.ensure();
+    await this.resolvConf();
     if (this.owners) await this.stampLayout();
     if (this.owners) await this.sudoer.provision();
     await writeCaFile(this.base, this.ca).catch(() => undefined);
@@ -2957,7 +3001,7 @@ export class Launcher {
 
   private commandFs(root: KernelFs): KernelFs {
     return withCommandDirs(
-      root,
+      withEtcFiles(root, new Map([[HOSTNAME_PATH, () => `${this.hostname}\n`]])),
       async () => this.commandNames(await this.commands()),
       (dir) => this.userCommandDir(dir),
       this.owners,

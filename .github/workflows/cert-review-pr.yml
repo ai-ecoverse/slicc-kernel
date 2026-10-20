@@ -134,7 +134,6 @@ jobs:
           ACTION: ${{ github.event.action }}
           LABEL: ${{ github.event.label.name }}
           LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
-          PR_DRAFT: ${{ github.event.pull_request.draft }}
           GUARD: ${{ needs.guard.outputs.status }}
         run: |
           tools/cert-review/gate.sh 'pr plan' node tools/cert-review/pr.mjs plan --repo "$GITHUB_REPOSITORY" --pr "$PR" --head "$HEAD_SHA" \
@@ -889,7 +888,7 @@ jobs:
     permissions:
       contents: read
       actions: read
-    uses: ai-ecoverse/slicc-bios/.github/workflows/canary.yml@1f071319d24e70a56ae2901584aa4dfff21cfcfb
+    uses: ai-ecoverse/slicc-bios/.github/workflows/canary.yml@fcaa9a23d9755fa0246ace5a27ca089ea3596b5b
     with:
       candidate-package: '@ai-ecoverse/slicc-kernel'
       candidate-artifact: ${{ needs.group-pack.outputs.name }}
@@ -939,7 +938,7 @@ jobs:
         name: bios's canary on the merge group, judged against the pinned bios (a regression or no result is not certified)
         run: |
           tools/cert-review/gate.sh --evidence downstream node tools/cert-review/downstream.mjs --result "$RUNNER_TEMP/canary/result.json" \
-            --bios 1f071319d24e70a56ae2901584aa4dfff21cfcfb --shards sweep,guard-prompt,guard-lagging,k4-upgrade,k4-agent-modes,link-serve --out "$RUNNER_TEMP/downstream.json"
+            --bios fcaa9a23d9755fa0246ace5a27ca089ea3596b5b --shards sweep,guard-prompt,guard-lagging,k4-upgrade,k4-agent-modes,link-serve --out "$RUNNER_TEMP/downstream.json"
 
       - id: lookup
         name: Each pull request in the group has a certified review of the head being merged, or changes no behaviour, and the group passes downstream
@@ -959,7 +958,7 @@ jobs:
           HEAD_SHA: ${{ github.event.merge_group.head_sha }}
         run: |
           tools/cert-review/gate.sh 'pr notice' node tools/cert-review/pr.mjs notice --repo "$GITHUB_REPOSITORY" --head "$HEAD_SHA" --run "$GITHUB_RUN_ID" \
-            --bios 1f071319d24e70a56ae2901584aa4dfff21cfcfb --downstream "$RUNNER_TEMP/downstream.json"
+            --bios fcaa9a23d9755fa0246ace5a27ca089ea3596b5b --downstream "$RUNNER_TEMP/downstream.json"
 
       - name: A lookup that failed still leaves a status, so the required check never waits forever
         if: failure() && steps.lookup.outputs.posted != 'true'

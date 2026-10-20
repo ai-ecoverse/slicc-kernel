@@ -1,0 +1,12 @@
+{
+  "name": "eintrsleep",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "eintrsleep": {
+        "wasm": "bin/eintrsleep.wasm"
+      }
+    }
+  }
+}

@@ -123,7 +123,8 @@ export class KernelDgram implements KernelFile {
       host: local.host === '0.0.0.0' ? '127.0.0.1' : local.host,
       port: local.port,
     };
-    const delivered = this.net.deliverDgram(target.port, { bytes: bytes.slice(), from });
+    const dest: InetAddr = { family: 'inet', host: canonicalHost(target.host), port: target.port };
+    const delivered = this.net.deliverDgram(target.port, { bytes: bytes.slice(), from }, dest);
     if (!delivered && this.peer && sameAddr(this.peer, target)) {
       this.pending = 'ECONNREFUSED';
       this.changes.wake();

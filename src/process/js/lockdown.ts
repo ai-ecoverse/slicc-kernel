@@ -45,11 +45,7 @@ function chain(target: object): object[] {
 export function hide(target: object, names: readonly string[]): void {
   for (const name of names) {
     const holders = chain(target);
-    for (const holder of holders) {
-      if (Object.getOwnPropertyDescriptor(holder, name)?.configurable) {
-        Reflect.deleteProperty(holder, name);
-      }
-    }
+    for (const holder of holders) Reflect.deleteProperty(holder, name);
     const kept = holders.slice(1).some((holder) => Object.hasOwn(holder, name));
     const defined = Reflect.defineProperty(target, name, {
       value: undefined,
@@ -66,11 +62,7 @@ export function hide(target: object, names: readonly string[]): void {
 export function vacate(target: object, names: readonly string[]): void {
   for (const name of names) {
     const holders = chain(target);
-    for (const holder of holders) {
-      if (Object.getOwnPropertyDescriptor(holder, name)?.configurable) {
-        Reflect.deleteProperty(holder, name);
-      }
-    }
+    for (const holder of holders) Reflect.deleteProperty(holder, name);
     const kept = holders.slice(1).some((holder) => Object.hasOwn(holder, name));
     const opened = Reflect.defineProperty(target, name, {
       value: undefined,
