@@ -4,6 +4,7 @@ import { boundHost } from '../sealed-session.ts';
 import type { KernelSocket, LoopbackNet } from '../socket.ts';
 import { isLoopbackHost } from './proxy-service.ts';
 import { ipv4Bytes, ipv6Groups } from './routes.ts';
+import { type Anchors, anchorFor } from './sealed-anchor.ts';
 import { endPointBinding } from './sealed-binding.ts';
 import { type SealedSession, sealedConn, substitutes } from './sealed-conn.ts';
 import { openSession, type TlsClientInfo, type TlsClientOptions, tlsClient } from './tls-client.ts';
@@ -93,6 +94,7 @@ export interface SecureSession {
   path: 'kernel';
   substitutes: boolean;
   verified: boolean;
+  verifiedBy: 'bundled' | 'none';
   protocol: TlsClientInfo['protocol'];
   alpnProtocol: string | false;
   authorized: boolean;
@@ -113,6 +115,7 @@ function sessionOf(info: TlsClientInfo, servername: string): SecureSession {
     path: 'kernel',
     substitutes: info.substitutes === true,
     verified: info.verified,
+    verifiedBy: info.verified ? 'bundled' : 'none',
     protocol: info.protocol,
     alpnProtocol: info.alpnProtocol,
     authorized: info.authorized,
@@ -308,6 +311,15 @@ async function prepareWith(
 interface Seal {
   proc: SecureProcess;
   port: number;
+  engine?: TlsEngine;
+}
+
+function anchoringOf(seal: Seal, info: TlsClientInfo, servername: string) {
+  const engine = seal.engine;
+  if (!engine?.chainVerify || isIP(servername) || info.peerCertificates.length === 0) return {};
+  return {
+    anchoring: (found: Anchors) => anchorFor(engine, info.peerCertificates, servername, found),
+  };
 }
 
 function sealing(seal: Seal, raw: UplinkConn, info: TlsClientInfo, servername: string) {
@@ -325,6 +337,7 @@ function sealing(seal: Seal, raw: UplinkConn, info: TlsClientInfo, servername: s
     verified: info.verified,
     handshakeAt: info.handshakeAt,
     alpn: info.alpnProtocol,
+    ...anchoringOf(seal, info, servername),
   };
   return session;
 }
@@ -335,10 +348,11 @@ function secure(prepared: Prepared, seal: Seal) {
     ran = true;
     try {
       const made = await tlsClient(raw, prepared.options);
-      const session = sealing(seal, raw, made.info, prepared.options.servername);
+      const engine = prepared.options.engine;
+      const session = sealing({ ...seal, engine }, raw, made.info, prepared.options.servername);
       if (!session) return made;
       made.info.substitutes = substitutes(session);
-      if (made.info.substitutes)
+      if (made.info.substitutes && session.verified)
         session.binding = await endPointBinding(made.info.peerCertificates[0]);
       return { conn: sealedConn(made.conn, session), info: made.info };
     } finally {

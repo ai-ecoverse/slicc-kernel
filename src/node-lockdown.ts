@@ -3,17 +3,14 @@ import { hide, lockdown, vacate } from './process/js/lockdown.ts';
 
 export { vacate };
 
-export const NODE_GLOBALS: readonly string[] = [
+export const NODE_GLOBALS: readonly string[] = ['localStorage', 'sessionStorage'];
+
+export const NODE_SLOTS: readonly string[] = [
   'require',
   'module',
   'exports',
   '__filename',
   '__dirname',
-  'localStorage',
-  'sessionStorage',
-];
-
-export const NODE_SLOTS: readonly string[] = [
   'process',
   'global',
   'setImmediate',

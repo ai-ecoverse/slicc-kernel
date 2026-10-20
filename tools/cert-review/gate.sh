@@ -11,7 +11,7 @@ shift
 log=$(mktemp)
 "$@" | tee "$log"
 code=${PIPESTATUS[0]}
-line=$(awk -v p="$name: " 'index($0, p) == 1 { rest = substr($0, length(p) + 1); if (rest ~ /^(PASS|FAIL)( |$)/) last = $0 } END { print last }' "$log")
+line=$(awk -v p="$name: " 'index($0, p) == 1 { rest = substr($0, length(p) + 1); if (rest ~ /^(PASS|FAIL|SKIPPED)( |$)/) last = $0 } END { print last }' "$log")
 rm -f "$log"
 if [ -z "$line" ]; then
   echo "::error title=$name::$name printed no PASS or FAIL verdict (exit $code): its silence is not a pass"
@@ -20,7 +20,7 @@ fi
 [ "$mode" = evidence ] && exit 0
 [ "$mode" = either ] && exit "$code"
 case "$line" in
-  "$name: PASS"*)
+  "$name: PASS"* | "$name: SKIPPED"*)
     [ "$code" -eq 0 ] && exit 0
     echo "::error title=$name::$name said PASS but exited $code"
     exit "$code"
