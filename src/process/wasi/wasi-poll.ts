@@ -114,19 +114,28 @@ interface PollDeps {
   interruptWakes?: boolean;
 
   entered?: boolean;
+
+  resumes?: () => boolean;
 }
+
+const RESUMES = 64;
 
 function selectOnce(
   deps: PollDeps,
   read: number[],
   write: number[],
-  timeoutMs: number
-): { ready: Ready; interrupted: boolean } {
+  timeoutMs: number,
+  mayResume: boolean
+): { ready: Ready; interrupted: boolean; resumed?: true } {
   try {
     const ready = deps.kernel.call({ op: 'fd-select', read, write, timeoutMs });
     return { ready: ready as Ready, interrupted: false };
   } catch (e) {
-    if (!deps.interruptWakes || (e as { code?: unknown }).code !== 'EINTR') throw e;
+    if ((e as { code?: unknown }).code !== 'EINTR') throw e;
+    if (!deps.interruptWakes && mayResume && deps.resumes?.()) {
+      return { ready: { read: [], write: [] }, interrupted: false, resumed: true };
+    }
+    if (!deps.interruptWakes) throw e;
     return { ready: { read: [], write: [] }, interrupted: true };
   }
 }
@@ -142,8 +151,15 @@ function waitEvents(
     if (events.length > 0 || entered) return 0;
     return earliest === Infinity ? -1 : Math.max(0, Math.ceil(earliest - performance.now()));
   };
-  for (;;) {
-    const { ready, interrupted } = selectOnce(deps, read, write, timeout());
+  for (let resumes = 0; ; ) {
+    const { ready, interrupted, resumed } = selectOnce(
+      deps,
+      read,
+      write,
+      timeout(),
+      resumes++ < RESUMES
+    );
+    if (resumed) continue;
     events.push(...readyEvents(subs, ready));
     if (interrupted) return true;
     if (events.length > 0 || entered || earliest === Infinity) return false;
