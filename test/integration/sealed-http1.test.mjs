@@ -248,6 +248,7 @@ test(
       protocol: 'http1',
       position: 'header:authorization',
       verified: true,
+      verifiedBy: 'roots',
       exit: 'device:a1b2-c3.d4_e5',
       placeholders: [PH],
       head: { method: 'GET', path: '/v1/me?x=1' },
@@ -313,7 +314,7 @@ test(
     assert.deepEqual(
       got.map((g) => [g.verified, g.substitutes]),
       [
-        [false, false],
+        [false, true],
         [true, false],
         [true, true],
         [true, true],
