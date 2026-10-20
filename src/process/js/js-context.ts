@@ -102,8 +102,17 @@ export interface JsKernelInfo {
 
 export const KERNEL_INFO: JsKernelInfo = Object.freeze({ version: KERNEL_VERSION });
 
+export interface JsMemory {
+  heapUsed?: number;
+  heapTotal?: number;
+  heapLimit?: number;
+  external?: number;
+  arrayBuffers?: number;
+}
+
 export interface JsProgramContext {
   readonly kernel: JsKernelInfo;
+  memory(): JsMemory;
   readonly argv: readonly string[];
   readonly env: Readonly<Record<string, string>>;
   readonly pid: number;
@@ -254,6 +263,7 @@ export interface ContextOptions {
   lane?: SyncCall;
   strays?: JsStrays;
   thread: JsThreadContext;
+  memory?: (() => JsMemory) | undefined;
   fs?: { owners: boolean; links: boolean };
   owned?: SharedArrayBuffer;
   held?: HeldCwdInit | undefined;
@@ -612,6 +622,18 @@ function heldOn(
   return new HeldCwd(init.sab, init.slot, ask, init);
 }
 
+const MEMORY_FIELDS = ['heapUsed', 'heapTotal', 'heapLimit', 'external', 'arrayBuffers'] as const;
+
+function measured(measure: (() => JsMemory) | undefined): JsMemory {
+  const got = measure?.() ?? {};
+  const out: JsMemory = {};
+  for (const field of MEMORY_FIELDS) {
+    const value = got[field];
+    if (typeof value === 'number' && Number.isFinite(value)) out[field] = value;
+  }
+  return out;
+}
+
 export function createContext(o: ContextOptions): CreatedContext {
   const { kernel } = o;
   const infos = new Map<number, FdInfo>();
@@ -631,7 +653,6 @@ export function createContext(o: ContextOptions): CreatedContext {
     if (exiting !== undefined) throw new JsExit(exiting);
     if (kernel.faulted) throw new JsExit(1);
   };
-
   const info = async (fd: number): Promise<FdInfo> => {
     const known = infos.get(fd);
     if (known) return known;
@@ -771,6 +792,7 @@ export function createContext(o: ContextOptions): CreatedContext {
     tty: terminal.tty,
     exit,
     thread: o.thread,
+    memory: () => measured(o.memory),
     onUncaught: (listener) => listen(strays.exception, listener),
     onUnhandledRejection: (listener) => listen(strays.rejection, listener),
   };
