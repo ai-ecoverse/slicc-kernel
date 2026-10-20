@@ -1,4 +1,4 @@
-import { type FsStat, type KernelFs, mayLink, type NewOwner } from './types.ts';
+import { type FsStat, fsError, type KernelFs, mayLink, type NewOwner } from './types.ts';
 
 export const UNLINKED_DIR = '.slicc-unlinked';
 
@@ -352,12 +352,20 @@ export class UnlinkedKeeper {
           const holders = now.get(path) as UnlinkHolder[];
           held.set(path, holders);
           for (const holder of holders) moved.push(holder.moving?.(path) ?? (() => undefined));
-          const at = await this.hide(path);
-          if (at !== undefined) hidden.set(path, at);
+          const at = await this.keepAside(path);
+          if (at === undefined) continue;
+          hidden.set(path, at);
         }
       }
     } catch (err) {
+      for (const [path, at] of hidden) {
+        await this.serial(async () => {
+          await Promise.allSettled([this.fs.rename(at, path)]);
+          this.unlinkedName(at);
+        });
+      }
       for (const settle of moved) settle();
+      for (const release of releases) release();
       throw err;
     }
     sealed();
@@ -390,6 +398,19 @@ export class UnlinkedKeeper {
         done();
       },
     };
+  }
+
+  private async keepAside(path: string): Promise<string | undefined> {
+    const at = (await this.hide(path)) ?? (await this.hide(path));
+    if (at !== undefined || !(await this.present(path))) return at;
+    throw fsError('EBUSY', `${path}: open, and it could not be kept aside`);
+  }
+
+  private present(path: string): Promise<boolean> {
+    return this.fs.lstat(path).then(
+      () => true,
+      (err: { code?: string }) => err?.code !== 'ENOENT' && err?.code !== 'ENOTDIR'
+    );
   }
 
   private keptFile(hidden: string, entry: { refs: number }): KeptFile {
