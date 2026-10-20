@@ -852,14 +852,44 @@ jobs:
             ${{ runner.temp }}/pack/pack.json
           if-no-files-found: error
 
+  canary-runner:
+    name: cert-review-pr / canary runner
+    if: github.event_name == 'merge_group'
+    runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.merge_group.base_ref }}
+          sparse-checkout: .github/runner.mjs
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - id: pick
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+        env:
+          POOL: ${{ vars.CERT_CANARY_RUNNER }}
+        with:
+          script: |
+            const { runner, why } = await import(`${process.env.GITHUB_WORKSPACE}/.github/runner.mjs`)
+              .then(({ decide }) => decide({ context, github, env: process.env }))
+              .catch((error) => ({ runner: 'ubuntu-latest', why: `the decider failed: ${error.message}` }));
+            core.setOutput('runner', runner);
+            await core.summary.addRaw(`canary runner: ${runner} (${why})\n`).write();
+
   canary:
     name: cert-review-pr / downstream bios canary
-    needs: group-pack
+    needs: [group-pack, canary-runner]
     if: github.event_name == 'merge_group'
     permissions:
       contents: read
       actions: read
-    uses: ai-ecoverse/slicc-bios/.github/workflows/canary.yml@c2cec127b935419049568f584093d7ef03ac0721
+    uses: ai-ecoverse/slicc-bios/.github/workflows/canary.yml@1f071319d24e70a56ae2901584aa4dfff21cfcfb
     with:
       candidate-package: '@ai-ecoverse/slicc-kernel'
       candidate-artifact: ${{ needs.group-pack.outputs.name }}
@@ -868,7 +898,8 @@ jobs:
       candidate-repo: ${{ github.repository }}
       candidate-artifact-id: ${{ needs.group-pack.outputs.id }}
       candidate-artifact-digest: ${{ needs.group-pack.outputs.digest }}
-      shards: '["sweep","guard","k4-link"]'
+      shards: '["sweep","guard-prompt","guard-lagging","k4-upgrade","k4-agent-modes","link-serve"]'
+      runner: ${{ needs.canary-runner.outputs.runner || 'ubuntu-latest' }}
       repeat: 1
       label: kernel
 
@@ -908,7 +939,7 @@ jobs:
         name: bios's canary on the merge group, judged against the pinned bios (a regression or no result is not certified)
         run: |
           tools/cert-review/gate.sh --evidence downstream node tools/cert-review/downstream.mjs --result "$RUNNER_TEMP/canary/result.json" \
-            --bios c2cec127b935419049568f584093d7ef03ac0721 --shards sweep,guard,k4-link --out "$RUNNER_TEMP/downstream.json"
+            --bios 1f071319d24e70a56ae2901584aa4dfff21cfcfb --shards sweep,guard-prompt,guard-lagging,k4-upgrade,k4-agent-modes,link-serve --out "$RUNNER_TEMP/downstream.json"
 
       - id: lookup
         name: Each pull request in the group has a certified review of the head being merged, or changes no behaviour, and the group passes downstream
@@ -928,7 +959,7 @@ jobs:
           HEAD_SHA: ${{ github.event.merge_group.head_sha }}
         run: |
           tools/cert-review/gate.sh 'pr notice' node tools/cert-review/pr.mjs notice --repo "$GITHUB_REPOSITORY" --head "$HEAD_SHA" --run "$GITHUB_RUN_ID" \
-            --bios c2cec127b935419049568f584093d7ef03ac0721 --downstream "$RUNNER_TEMP/downstream.json"
+            --bios 1f071319d24e70a56ae2901584aa4dfff21cfcfb --downstream "$RUNNER_TEMP/downstream.json"
 
       - name: A lookup that failed still leaves a status, so the required check never waits forever
         if: failure() && steps.lookup.outputs.posted != 'true'

@@ -366,3 +366,21 @@ test(
     assert.match(sasl[1].slice(5), /^c=biws,r=fixedtestclientnonce[^,]+,p=[A-Za-z0-9+/=]+$/);
   }
 );
+
+test(
+  'pg SCRAM-SHA-256 with a sealed password that SASLprep refuses on its bidi rules: the kernel uses the raw value, as pg stores it, and the server accepts (#1177)',
+  TIMEOUT,
+  async (t) => {
+    const raw = 'TEST-ONLY-SEALED-\u05D0-VALUE-\u00A0-2';
+    const db = await pgFixture(t, ca.server('db.test'), raw);
+    const { run } = await kernelWith(t, [['db.test', db.port]], (req) =>
+      req.position === 'scram-sha-256'
+        ? { values: { [PH]: raw } }
+        : { v: 1, error: { code: 'EACCES' } }
+    );
+    const got = await run({ host: 'db.test', port: 5432, password: PH });
+    assert.equal(got.steps.includes('final ok'), true, JSON.stringify(got));
+    assert.equal(db.seen.authenticated, 1);
+    assert.equal(JSON.stringify(got).includes(raw), false);
+  }
+);

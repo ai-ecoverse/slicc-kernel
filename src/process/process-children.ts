@@ -167,7 +167,7 @@ function forkRestarted(
       const live = deps.memory?.();
       if (live) memory = new Uint8Array(live.buffer).slice();
     }
-    const forked = { ...state, memory, streams, cwd: deps.Fs.cwd() };
+    const forked = { ...state, memory, streams, cwd: heldCwdOf(deps.Fs) };
     return deps.transport.call(
       { op: 'proc-fork', state: forked, restart: true },
       Infinity,
@@ -269,6 +269,8 @@ function anySelect(
   }
 }
 
+const heldCwdOf = (Fs: ProcessFs): string => (Fs.sliccHeldCwd ?? Fs.cwd).call(Fs);
+
 export function createProcessKernel(deps: ProcessKernelDeps): ProcessKernel {
   const { transport, Fs } = deps;
   if (deps.stdioPromoter) lockPromoters.set(Fs, deps.stdioPromoter);
@@ -350,7 +352,7 @@ export function createProcessKernel(deps: ProcessKernelDeps): ProcessKernel {
       file,
       argv,
       env: env ?? deps.env,
-      cwd: cwd ?? Fs.cwd(),
+      cwd: cwd ?? heldCwdOf(Fs),
       ...(cwd !== null ? { chdir: true as const } : {}),
       stdio,
       ...(inherit.length > 0 ? { inherit } : {}),
