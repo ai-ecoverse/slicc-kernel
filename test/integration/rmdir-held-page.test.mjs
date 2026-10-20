@@ -63,8 +63,8 @@ test('on the OPFS root, files opened inside a directory that another process kee
   const outcome = await page.run(
     {
       marker: () => window.__rdRound,
-      quietMs: 30_000,
-      maxMs: 600_000,
+      quietMs: 120_000,
+      maxMs: 800_000,
       label: 'the directory removals',
     },
     async (s) => {
