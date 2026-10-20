@@ -1679,7 +1679,7 @@ export class Launcher {
         this.text(target.glue, caller, asked),
         this.module(target.wasm, caller, asked && modulePath(asked)),
       ]);
-      return { glue, module };
+      return { glue, module, path: target.glue };
     }
     const { module, memory, foreign } = await this.module(target.wasm, caller, asked);
     const names =
