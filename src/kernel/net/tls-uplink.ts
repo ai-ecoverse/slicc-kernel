@@ -5,6 +5,7 @@ import type { KernelSocket, LoopbackNet } from '../socket.ts';
 import { isLoopbackHost } from './proxy-service.ts';
 import { ipv4Bytes, ipv6Groups } from './routes.ts';
 import { type Anchors, anchorFor } from './sealed-anchor.ts';
+import { endPointBinding } from './sealed-binding.ts';
 import { type SealedSession, sealedConn, substitutes } from './sealed-conn.ts';
 import { openSession, type TlsClientInfo, type TlsClientOptions, tlsClient } from './tls-client.ts';
 import { type TlsEngine, TlsError, type TlsSession, type TlsStore } from './tls-engine.ts';
@@ -355,6 +356,8 @@ function secure(prepared: Prepared, seal: Seal) {
       const session = sealing({ ...seal, engine }, raw, made.info, prepared.options.servername);
       if (!session) return made;
       made.info.substitutes = substitutes(session);
+      if (made.info.substitutes && session.verified)
+        session.binding = await endPointBinding(made.info.peerCertificates[0]);
       return { conn: sealedConn(made.conn, session), info: made.info };
     } finally {
       prepared.own?.release();
