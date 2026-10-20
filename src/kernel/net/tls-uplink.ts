@@ -172,8 +172,12 @@ const KEY_PARSE_RANGES: ReadonlyArray<[number, number]> = [
   [-0x7f, -0x60],
 ];
 
+const BEFORE_DECRYPT = new Set([
+  -0x3c00, -0x3c80, -0x3f80, -0x3980, -0x1180, -0x1200, -0x1280, -0x1400, -0x6080, -0x6180, -0x6a,
+]);
+
 const keyParse = (code: number): boolean =>
-  code !== -0x3c00 && KEY_PARSE_RANGES.some(([lo, hi]) => code >= lo && code <= hi);
+  !BEFORE_DECRYPT.has(code) && KEY_PARSE_RANGES.some(([lo, hi]) => code >= lo && code <= hi);
 
 export function keyRefused(err: unknown, locked: boolean): KernelError {
   const raw = err instanceof TlsError ? err.code : 0;
