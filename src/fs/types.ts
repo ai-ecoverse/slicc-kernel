@@ -119,6 +119,13 @@ export interface KernelFs {
   readVersioned?(path: string, cached?: boolean): Promise<{ bytes: Uint8Array; version: string }>;
   version?(path: string, cached?: boolean): Promise<string>;
   opfsCalls?(): number;
+  renameWaits?(): {
+    acks: number;
+    busy: number;
+    waits: number;
+    queries: number;
+    ackMs: readonly number[];
+  };
   opfsOps?(): number;
 }
 

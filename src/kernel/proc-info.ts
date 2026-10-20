@@ -45,6 +45,13 @@ export interface ProcessListing {
   opfsCalls?: number;
   opfsOps?: number;
   cwdChecks?: number;
+  renameAcks?: {
+    acks: number;
+    busy: number;
+    waits: number;
+    queries: number;
+    ackMs: readonly number[];
+  };
 }
 
 export function mayTrace(viewer: ProcessInfo | undefined, target: ProcessInfo): boolean {

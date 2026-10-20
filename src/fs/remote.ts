@@ -3,12 +3,19 @@ export interface RemoteChange {
   trees: readonly string[];
 }
 
+export interface PeerRename {
+  from: string;
+  to: string;
+  lock: string;
+}
+
 export type RemoteListener = (change: RemoteChange) => void;
 
 export const ANNOUNCE_WAIT_MS = 500;
 export const PRUNE_EVERY_MS = 30_000;
 export const MOURN_TRIES = 5;
 export const MOURN_RETRY_MS = 100;
+export const RENAME_ACK_MAX_MS = 10_000;
 
 interface WatchMessage {
   hello?: string;
@@ -20,6 +27,9 @@ interface WatchMessage {
   ack?: number;
   from?: string;
   changed?: string[];
+  renames?: true;
+  renaming?: PeerRename;
+  renamed?: string;
 }
 
 export interface LockManagerLike {
@@ -51,6 +61,9 @@ export class RemoteWatch {
   quiet: (() => Promise<void>) | undefined;
   crowd: ((crowded: boolean) => void) | undefined;
   gone: (() => void) | undefined;
+  renaming: ((rename: PeerRename) => Promise<void>) | undefined;
+  renamed: ((lock: string) => void) | undefined;
+  private readonly ackers = new Set<string>();
   private told: boolean | undefined;
   private counted = 0;
 
@@ -81,7 +94,7 @@ export class RemoteWatch {
         this.settled = true;
         this.recount();
       });
-    this.channel.postMessage({ hello: this.tab });
+    this.channel.postMessage({ hello: this.tab, renames: true });
   }
 
   private async join(): Promise<void> {
@@ -114,7 +127,11 @@ export class RemoteWatch {
   }
 
   private receive(data: WatchMessage): void {
+    const sender = data.hello ?? data.here;
+    if (sender !== undefined && data.renames) this.ackers.add(sender);
     if (data.hello !== undefined) this.greeted(data.hello);
+    if (data.renaming !== undefined && data.tab !== undefined) this.heard(data);
+    if (data.renamed !== undefined) this.renamed?.(data.renamed);
     if (data.here !== undefined && data.to === this.tab) {
       this.arrived(data.here);
       this.met?.();
@@ -148,6 +165,7 @@ export class RemoteWatch {
       this.mourned.delete(peer);
       this.others.delete(peer);
       this.peers.delete(peer);
+      this.ackers.delete(peer);
       this.rebuild();
       this.recount();
       this.gone?.();
@@ -160,11 +178,18 @@ export class RemoteWatch {
   private greeted(peer: string): void {
     this.arrived(peer);
     const answer = () => {
-      this.channel.postMessage({ here: this.tab, to: peer });
+      this.channel.postMessage({ here: this.tab, to: peer, renames: true });
       if (this.mine.length > 0) void this.announce(this.mine);
     };
     if (this.quiet) void this.quiet().then(answer, answer);
     else answer();
+  }
+
+  private heard({ tab, renaming, seq }: WatchMessage): void {
+    const ack = () => this.channel.postMessage({ ack: seq, from: this.tab, to: tab });
+    const heard = this.renaming?.(renaming as PeerRename);
+    if (heard !== undefined) void heard.then(ack, ack);
+    else ack();
   }
 
   private announced({ tab, paths, seq }: WatchMessage): void {
@@ -196,6 +221,7 @@ export class RemoteWatch {
       if (!held.has(this.lockOf(tab))) {
         if (this.peers.delete(tab)) left = true;
         this.others.delete(tab);
+        this.ackers.delete(tab);
       }
     }
     this.rebuild();
@@ -220,7 +246,37 @@ export class RemoteWatch {
     this.mine = [...paths];
     const seq = ++this.seq;
     this.channel.postMessage({ tab: this.tab, paths: this.mine, seq });
-    if (this.peers.size === 0) return Promise.resolve();
+    return this.acks(seq, this.peers);
+  }
+
+  renamingTree(rename: PeerRename, cap = RENAME_ACK_MAX_MS): Promise<string[]> {
+    const seq = ++this.seq;
+    this.channel.postMessage({ tab: this.tab, renaming: rename, seq });
+    const left = new Set(this.ackers);
+    if (left.size === 0) return Promise.resolve([]);
+    const began = performance.now();
+    return new Promise<string[]>((resolve) => {
+      const done = () => {
+        clearInterval(timer);
+        this.waiting.delete(seq);
+        resolve([...left]);
+      };
+      const timer = setInterval(() => {
+        void this.prune().then(() => {
+          for (const peer of left) if (!this.ackers.has(peer)) left.delete(peer);
+          if (left.size === 0 || performance.now() - began >= cap) done();
+        });
+      }, ANNOUNCE_WAIT_MS);
+      this.waiting.set(seq, { left, done });
+    });
+  }
+
+  renamedTree(lock: string): void {
+    this.channel.postMessage({ renamed: lock });
+  }
+
+  private acks(seq: number, from: ReadonlySet<string>): Promise<void> {
+    if (from.size === 0) return Promise.resolve();
     return new Promise<void>((resolve) => {
       const done = () => {
         clearTimeout(timer);
@@ -231,7 +287,7 @@ export class RemoteWatch {
         done();
         void this.prune();
       }, ANNOUNCE_WAIT_MS);
-      this.waiting.set(seq, { left: new Set(this.peers), done });
+      this.waiting.set(seq, { left: new Set(from), done });
     });
   }
 
