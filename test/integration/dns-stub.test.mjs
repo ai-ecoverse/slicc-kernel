@@ -314,14 +314,20 @@ test(
       },
     };
     const { dns } = await boot(t, { network: { transport } });
+    const until = async (done) => {
+      for (const end = Date.now() + 20_000; !done() && Date.now() < end; ) {
+        await new Promise((r) => setTimeout(r, 25));
+      }
+    };
     assert.equal(await dns('flood', STUB, 'example.com', 'MX', '200'), 'sent 200\n');
+    await until(() => asked >= 64);
     await new Promise((r) => setTimeout(r, 300));
     assert.equal(asked, 64);
     for (const release of held.splice(0)) release();
-    await new Promise((r) => setTimeout(r, 100));
+    await new Promise((r) => setTimeout(r, 300));
     assert.equal(asked, 64);
     const next = dns('udp', STUB, 'example.com', 'MX');
-    await new Promise((r) => setTimeout(r, 100));
+    await until(() => held.length > 0);
     for (const release of held.splice(0)) release();
     assert.equal(
       await next,
