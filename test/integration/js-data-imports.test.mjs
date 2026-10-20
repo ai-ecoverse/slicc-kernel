@@ -8,6 +8,7 @@ const PROGRAM = `const tries = {
   plain: () => import('data:text/javascript;base64,${b64('export default 5')}'),
   asJson: () => import('data:text/javascript;base64,${b64('export default 6')}', { with: { type: 'json' } }),
   json: () => import('data:application/json;base64,${b64('{"seven":7}')}', { with: { type: 'json' } }),
+  other: () => import('data:text/javascript;base64,${b64('export default 8')}', { with: { foo: 'bar' } }),
 };
 export default async function main(ctx) {
   const out = {};
@@ -24,7 +25,7 @@ export default async function main(ctx) {
 }
 `;
 
-test("a JS program's nested base64 data: imports on the Node entry keep Node's import-attribute rules: JavaScript asked for as JSON is refused, a JSON module with the json attribute loads, and plain JavaScript runs (#1302)", async (t) => {
+test("a JS program's nested base64 data: imports on the Node entry keep Node's import-attribute rules: JavaScript asked for as JSON, or with an attribute Node doesn't know, is refused, a JSON module with the json attribute loads, and plain JavaScript runs (#1302)", async (t) => {
   const kernel = await createNodeKernel({ users: 'off' });
   t.after(() => kernel.terminate());
   await kernel.writeFile(
@@ -41,5 +42,6 @@ test("a JS program's nested base64 data: imports on the Node entry keep Node's i
     plain: 5,
     asJson: 'ERR_IMPORT_ATTRIBUTE_TYPE_INCOMPATIBLE',
     json: { seven: 7 },
+    other: 'ERR_IMPORT_ATTRIBUTE_UNSUPPORTED',
   });
 });

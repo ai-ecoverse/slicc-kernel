@@ -52,7 +52,7 @@ export function refuseModules(): void {
     },
     load(url, context, next) {
       const payload = url.startsWith(BASE64_MODULE) ? url.slice(BASE64_MODULE.length) : '';
-      const typed = context.importAttributes?.type !== undefined;
+      const typed = Object.keys(context.importAttributes ?? {}).length > 0;
       if (typed || payload.length % 4 !== 0 || !PLAIN_BASE64.test(payload))
         return next(url, context);
       const source = toText(fromBase64(payload, 'base64'), 'utf8');
