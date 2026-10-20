@@ -62,3 +62,19 @@ export function nodeLockdown(scope: object = globalThis): void {
   vacate(scope, NODE_SLOTS);
   refuseModules();
 }
+
+class WorkerGlobalScope {}
+
+export function workerShaped(scope: object, href: string): void {
+  const slot = (value: unknown) => ({
+    value,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+  Object.defineProperties(scope, {
+    WorkerGlobalScope: slot(WorkerGlobalScope),
+    self: slot(scope),
+    location: slot(Object.freeze({ href })),
+  });
+}
