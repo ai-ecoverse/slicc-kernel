@@ -35,7 +35,7 @@ import { MAIN_TID, ThreadExit, threadCap, WasiThreads } from './wasi-threads.ts'
 import { AsyncifyDriver, type WasiForkState } from './wasix-fork.ts';
 import { WasixHost } from './wasix-host.ts';
 import { type LinkerHost, type LinkRecord, TABLE_BASE, WasixLinker } from './wasix-linker.ts';
-import { mainModule, nameFrame, sidecarNames } from './wasm-names.ts';
+import { definedFunctions, mainModule, nameFrame, sidecarNames } from './wasm-names.ts';
 
 type ProgramOption = (
   memory: () => WebAssembly.Memory,
@@ -812,7 +812,7 @@ export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike
     if (e instanceof WasiExit) return e.code;
     if (!(e instanceof WebAssembly.RuntimeError)) throw e;
     try {
-      say(trapMessage(e, init.env, '', programNames(host, init.program)));
+      say(trapReport(e, init, host, ''));
     } catch {
       throw new Error(`${init.argv0}: wasm trap: ${e.message}`);
     }
@@ -844,12 +844,30 @@ export function trapMessage(
   return frames.length ? `${head}\n${frames.join('\n')}` : head;
 }
 
+function trapReport(
+  e: WebAssembly.RuntimeError,
+  init: { env: Readonly<Record<string, string>>; program: WasmProgram; argv0: string },
+  host: WasiHost,
+  where: string
+): string {
+  const warned: string[] = [];
+  const message = trapMessage(e, init.env, where, programNames(host, init.program, warned));
+  return [...warned, message].join(`\n${init.argv0}: `);
+}
+
 function programNames(
   host: WasiHost,
-  program: WasmProgram
+  program: WasmProgram,
+  warned: string[]
 ): ((index: number) => string | undefined) | undefined {
   const path = program.names;
-  return path === undefined ? undefined : sidecarNames((p) => host.o.fs.readFile(p), path);
+  if (path === undefined) return undefined;
+  const read = (p: string) => host.o.fs.readFile(p);
+  const imported = WebAssembly.Module.imports(program.module).filter((i) => i.kind === 'function');
+  return sidecarNames(read, path, {
+    functions: () => imported.length + definedFunctions(read(program.path as string)),
+    warn: (line) => warned.push(line),
+  });
 }
 
 async function programImports(
@@ -940,7 +958,7 @@ export async function runWasiThread(init: WasmThreadInitMsg, port: SabPostLike):
     }
     if (e instanceof WebAssembly.RuntimeError) {
       try {
-        say(trapMessage(e, init.env, ` in thread ${thread.tid}`, programNames(host, init.program)));
+        say(trapReport(e, init, host, ` in thread ${thread.tid}`));
       } catch {}
       port.postMessage({ type: WASM_PROCESS_EXIT, code: TRAPPED });
       return;
