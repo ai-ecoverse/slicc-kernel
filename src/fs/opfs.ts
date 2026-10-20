@@ -329,9 +329,11 @@ export class OpfsFs implements KernelFs {
         for (const path of [...c.paths, ...c.trees]) this.forget(path);
       });
       this.channel.onmessage = ({ data }) => {
-        const { paths, trees } = noticeOf(data);
+        const { paths, trees, outside } = noticeOf(data);
         for (const path of [...paths, ...trees]) this.forget(normalizePath(path));
-        remote?.emit({ paths, trees });
+        const tell = () => remote?.emit({ paths, trees });
+        if (!outside) tell();
+        else void this.noticed(paths.map(normalizePath), Date.now()).finally(tell);
       };
       (this.channel as BroadcastChannel & { unref?: () => void }).unref?.();
     }
@@ -875,6 +877,15 @@ export class OpfsFs implements KernelFs {
     this.committed(target);
     if (!this.ranged) return;
     this.fileTimes.set(target, Date.now());
+    this.scheduleFileTimes();
+  }
+
+  private async noticed(paths: readonly string[], at: number): Promise<void> {
+    for (const path of new Set(paths)) {
+      const st = await this.lstat(path).catch(() => undefined);
+      if (!st?.isFile || st.mtime.getTime() >= at) continue;
+      this.fileTimes.set(path, Math.max(at, this.fileTimes.get(path) ?? 0));
+    }
     this.scheduleFileTimes();
   }
 
