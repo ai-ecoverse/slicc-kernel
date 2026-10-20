@@ -71,11 +71,14 @@ function npmView(spec, field) {
 const budget = Date.now() + Number(values.wait) * 1000;
 
 function superseded() {
-  const listed = npmView(NAME, 'versions') ?? [];
-  const latest = npmView(NAME, 'dist-tags.latest');
-  return !listed.includes(version) && typeof latest === 'string' && older(version, latest)
-    ? latest
-    : undefined;
+  try {
+    const listed = npmView(NAME, 'versions');
+    const latest = npmView(NAME, 'dist-tags.latest');
+    if (!Array.isArray(listed) || typeof latest !== 'string') return undefined;
+    return !listed.includes(version) && older(version, latest) ? latest : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 async function meta() {
@@ -90,9 +93,9 @@ async function meta() {
         return m;
       }
     }
-    const newer = superseded();
-    if (newer) return { superseded: newer };
     if (Date.now() > until) {
+      const newer = superseded();
+      if (newer) return { superseded: newer };
       waiting = `npm doesn't serve ${NAME}@${version} yet after ${values.wait} s: not a supply-chain problem, re-run this job once it does`;
       return undefined;
     }
