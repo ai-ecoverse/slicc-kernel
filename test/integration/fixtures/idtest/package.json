@@ -1,0 +1,12 @@
+{
+  "name": "idtest",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "idtest": {
+        "wasm": "bin/idtest.wasm"
+      }
+    }
+  }
+}
