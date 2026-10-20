@@ -57,9 +57,38 @@ export function nameFrame(
   return found === undefined ? line : `${m[1]}${found} (${m[2]})`;
 }
 
+export function definedFunctions(bytes: Uint8Array): number {
+  let at = 8;
+  const leb = (): number => {
+    let value = 0;
+    let shift = 0;
+    let byte: number;
+    do {
+      if (at >= bytes.length) throw new RangeError('truncated module');
+      byte = bytes[at++] as number;
+      value += (byte & 0x7f) * 2 ** shift;
+      shift += 7;
+    } while (byte & 0x80);
+    return value;
+  };
+  while (at < bytes.length) {
+    const id = bytes[at++];
+    const size = leb();
+    if (id === 3) return leb();
+    at += size;
+  }
+  return 0;
+}
+
+export interface SidecarFit {
+  functions(): number;
+  warn(line: string): void;
+}
+
 export function sidecarNames(
   read: (path: string) => Uint8Array,
-  path: string
+  path: string,
+  fit?: SidecarFit
 ): (index: number) => string | undefined {
   let names: Map<number, string> | undefined;
   return (index) => {
@@ -67,6 +96,13 @@ export function sidecarNames(
       try {
         names = parseFunctionNames(read(path));
       } catch {
+        names = new Map();
+      }
+      const want = fit ? fit.functions() : names.size;
+      if (fit && names.size !== want) {
+        fit.warn(
+          `${path} names ${names.size} functions, but the module has ${want}: it doesn't fit, so the frames show raw indices`
+        );
         names = new Map();
       }
     }
