@@ -38,7 +38,7 @@ import { type FdTable, kernelFdKind, type OpenFile } from './fd-table.ts';
 import type { FifoTable } from './fifo.ts';
 import { type CwdAnswer, type HeldCwdReply, heldHooks, heldInit } from './held-cwd.ts';
 import type { JobTable } from './jobs.ts';
-import { JsThreads, jsThreadCap } from './js-threads.ts';
+import { type Admission, JsThreads, jsThreadCap } from './js-threads.ts';
 import type { KernelLocks } from './lock-service.ts';
 import type { HttpHandles } from './net/http-syscalls.ts';
 import type { Resolver } from './net/resolver.ts';
@@ -87,6 +87,7 @@ export interface WasmWorkerLike {
 
 export interface SpawnWasmOptions {
   pid: number;
+  admission: Admission;
   changes?: SharedArrayBuffer;
   cwds?: SharedArrayBuffer;
   cwdSlot?: number;
@@ -764,6 +765,7 @@ function jsThreadsOf(
       attachSyncSabResponder(worker, sab, token, { dispatch: threadDispatch }),
     dispatch,
     clocks,
+    admission: opts.admission,
   });
   process.onState((state) => threads.stopped(state === 'stopped'));
   return threads;

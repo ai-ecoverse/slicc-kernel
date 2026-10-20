@@ -1754,7 +1754,6 @@ export class Launcher {
     fds: FdTable,
     start: (fds: FdTable, quietOom?: boolean) => WasmProcessHandle
   ): Promise<WasmProcessHandle> {
-    if (!wasm) return start(fds);
     for (;;) {
       await this.memories.admit().catch(async (err) => {
         await fds.closeAll();
@@ -1765,7 +1764,7 @@ export class Launcher {
         void Promise.resolve(handle.ready).then(() => this.memories.started());
         return handle;
       };
-      if (!this.memories.near()) {
+      if (!wasm || !this.memories.near()) {
         try {
           return counted(start(fds));
         } catch (err) {
@@ -1850,6 +1849,7 @@ export class Launcher {
         ? { readonlyAt: (path: string) => isProtected(this.prefixes, path) }
         : {}),
       createWorker: this.createWorker,
+      admission: this.memories,
       onError: req.report,
       onOom: () => {
         this.memories.learn();
