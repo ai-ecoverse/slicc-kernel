@@ -1,7 +1,9 @@
 import { physicalPath } from '../../fs/physical-path.ts';
+import { type CwdAnswer, HeldCwd } from '../../kernel/held-cwd.ts';
 import type { MountLine, ProcessListing } from '../../kernel/proc-info.ts';
 import type { WasmSyscall } from '../../kernel/process.ts';
 import {
+  type HeldCwdInit,
   WASM_PROCESS_EXIT,
   WASM_PROCESS_READY,
   type WasmProcessInitMsg,
@@ -692,6 +694,16 @@ function ownersOf(init: { owners?: boolean; links?: boolean; changes?: SharedArr
   };
 }
 
+function heldOf(
+  init: { held?: HeldCwdInit; cwd: string },
+  call: (req: WasmSyscall) => unknown
+): { held?: HeldCwd } {
+  const { held } = init;
+  if (!held) return {};
+  const ask = () => call({ op: 'cwd-check' }) as CwdAnswer;
+  return { held: new HeldCwd(held.sab, held.slot, ask, { ...held, path: init.cwd }) };
+}
+
 export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike): Promise<number> {
   captureBacktraces(init.env);
 
@@ -754,6 +766,7 @@ export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike
       call
     ),
     ...descriptors(init, fork, threads),
+    ...heldOf(init, call),
     ...(threads ? { credGen: threads.ids } : {}),
   });
   host.sigmask = sigmaskOf(module, init.sab, gate, threads);
@@ -889,6 +902,7 @@ export async function runWasiThread(init: WasmThreadInitMsg, port: SabPostLike):
       call
     ),
     shared: threads.ids,
+    ...heldOf(init, call),
   });
   host.tid = thread.tid;
   host.sigmask = sigmaskOf(init.program.module, init.sab, gate, threads, init.signals);

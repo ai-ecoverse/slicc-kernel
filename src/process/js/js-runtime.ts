@@ -114,9 +114,11 @@ async function runJs(
     resolveExit(status);
   };
   let failing: Promise<void> | undefined;
+  let failedWith: number | undefined;
   const fail = (err: unknown): void => {
     if (err instanceof JsExit) return;
     failing ??= (thread ? Promise.resolve() : say(message(err))).then(() => exited(failed(err)));
+    failedWith ??= failed(err);
   };
   const kernel = new JsKernel({
     sab: init.sab,
@@ -141,6 +143,8 @@ async function runJs(
     strays,
     thread: threadContext(port, thread),
     ...(thread?.owned ? { owned: thread.owned } : {}),
+    held: init.held,
+    failed: () => failedWith,
   });
   const say = (text: string) => ctx.write(2, `${init.argv0}: ${text}\n`).catch(() => undefined);
 

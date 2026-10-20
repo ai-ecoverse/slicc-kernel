@@ -2,14 +2,14 @@ name: cert-review-pr
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled]
   merge_group:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ ((github.event.action == 'labeled' && github.event.label.name != 'merge-ok' && github.event.label.name != 'cert-review-approved') || (github.event.action == 'unlabeled' && github.event.label.name != 'cert-review-approved') || github.event.action == 'ready_for_review') && format('cert-review-pr-noop-{0}', github.run_id) || format('cert-review-pr-{0}', github.event.pull_request.number || github.event.merge_group.head_sha) }}
+  group: ${{ ((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'cert-review-approved') && format('cert-review-pr-noop-{0}', github.run_id) || format('cert-review-pr-{0}', github.event.pull_request.number || github.event.merge_group.head_sha) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -28,7 +28,6 @@ jobs:
       pull-requests: write
     outputs:
       status: ${{ steps.cert.outputs.status }}
-      override: ${{ steps.override.outputs.receipt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -63,19 +62,6 @@ jobs:
             .github/actions/cert-self-guard/**/.*
             .github/actions/cert-self-guard/**/.*/**
             .github/runner.mjs
-
-      - id: override
-        name: downstream-override, the coordinator's head-bound waiver of a downstream failure (every pull request in a group needs it on its head)
-        continue-on-error: true
-        uses: ai-ecoverse/slicc-shared-web/.github/actions/cert-self-guard@f342d7cf558c817ce517bbbbc4cc46df6eac2f97
-        with:
-          approval-label: downstream-override
-          paths: |
-            **
-            .*
-            .*/**
-            **/.*
-            **/.*/**
 
       - id: cert
         name: The cert-path guard fails closed, a reviewer path its globs missed still needs the label
@@ -148,6 +134,7 @@ jobs:
           ACTION: ${{ github.event.action }}
           LABEL: ${{ github.event.label.name }}
           LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          PR_DRAFT: ${{ github.event.pull_request.draft }}
           GUARD: ${{ needs.guard.outputs.status }}
         run: |
           tools/cert-review/gate.sh 'pr plan' node tools/cert-review/pr.mjs plan --repo "$GITHUB_REPOSITORY" --pr "$PR" --head "$HEAD_SHA" \
@@ -865,14 +852,44 @@ jobs:
             ${{ runner.temp }}/pack/pack.json
           if-no-files-found: error
 
+  canary-runner:
+    name: cert-review-pr / canary runner
+    if: github.event_name == 'merge_group'
+    runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.merge_group.base_ref }}
+          sparse-checkout: .github/runner.mjs
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - id: pick
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+        env:
+          POOL: ${{ vars.CERT_CANARY_RUNNER }}
+        with:
+          script: |
+            const { runner, why } = await import(`${process.env.GITHUB_WORKSPACE}/.github/runner.mjs`)
+              .then(({ decide }) => decide({ context, github, env: process.env }))
+              .catch((error) => ({ runner: 'ubuntu-latest', why: `the decider failed: ${error.message}` }));
+            core.setOutput('runner', runner);
+            await core.summary.addRaw(`canary runner: ${runner} (${why})\n`).write();
+
   canary:
     name: cert-review-pr / downstream bios canary
-    needs: group-pack
+    needs: [group-pack, canary-runner]
     if: github.event_name == 'merge_group'
     permissions:
       contents: read
       actions: read
-    uses: ai-ecoverse/slicc-bios/.github/workflows/canary.yml@c2cec127b935419049568f584093d7ef03ac0721
+    uses: ai-ecoverse/slicc-bios/.github/workflows/canary.yml@1f071319d24e70a56ae2901584aa4dfff21cfcfb
     with:
       candidate-package: '@ai-ecoverse/slicc-kernel'
       candidate-artifact: ${{ needs.group-pack.outputs.name }}
@@ -881,7 +898,8 @@ jobs:
       candidate-repo: ${{ github.repository }}
       candidate-artifact-id: ${{ needs.group-pack.outputs.id }}
       candidate-artifact-digest: ${{ needs.group-pack.outputs.digest }}
-      shards: '["sweep","guard","k4-link"]'
+      shards: '["sweep","guard-prompt","guard-lagging","k4-upgrade","k4-agent-modes","link-serve"]'
+      runner: ${{ needs.canary-runner.outputs.runner || 'ubuntu-latest' }}
       repeat: 1
       label: kernel
 
@@ -919,13 +937,9 @@ jobs:
 
       - id: downstream
         name: bios's canary on the merge group, judged against the pinned bios (a regression or no result is not certified)
-        env:
-          OVERRIDE: ${{ needs.guard.outputs.override }}
         run: |
-          override=$(node -e 'let r; try { r = JSON.parse(process.env.OVERRIDE); } catch {} const m = r?.members ?? []; process.stdout.write(r?.status === "PASS" && m.length > 0 && m.every((x) => x.approved === true && x.touched?.length > 0) ? "PASS" : "FAIL")')
-          echo "downstream-override: $override (every pull request in the group needs it on its head)"
-          tools/cert-review/gate.sh --evidence downstream node tools/cert-review/downstream.mjs --result "$RUNNER_TEMP/canary/result.json" --override "$override" \
-            --bios c2cec127b935419049568f584093d7ef03ac0721 --shards sweep,guard,k4-link --out "$RUNNER_TEMP/downstream.json"
+          tools/cert-review/gate.sh --evidence downstream node tools/cert-review/downstream.mjs --result "$RUNNER_TEMP/canary/result.json" \
+            --bios 1f071319d24e70a56ae2901584aa4dfff21cfcfb --shards sweep,guard-prompt,guard-lagging,k4-upgrade,k4-agent-modes,link-serve --out "$RUNNER_TEMP/downstream.json"
 
       - id: lookup
         name: Each pull request in the group has a certified review of the head being merged, or changes no behaviour, and the group passes downstream
@@ -945,7 +959,7 @@ jobs:
           HEAD_SHA: ${{ github.event.merge_group.head_sha }}
         run: |
           tools/cert-review/gate.sh 'pr notice' node tools/cert-review/pr.mjs notice --repo "$GITHUB_REPOSITORY" --head "$HEAD_SHA" --run "$GITHUB_RUN_ID" \
-            --bios c2cec127b935419049568f584093d7ef03ac0721 --downstream "$RUNNER_TEMP/downstream.json"
+            --bios 1f071319d24e70a56ae2901584aa4dfff21cfcfb --downstream "$RUNNER_TEMP/downstream.json"
 
       - name: A lookup that failed still leaves a status, so the required check never waits forever
         if: failure() && steps.lookup.outputs.posted != 'true'

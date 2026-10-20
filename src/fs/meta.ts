@@ -19,7 +19,14 @@ export interface MetaEntry {
   writes?: number;
   epoch?: number;
   vacated?: true;
-  rename?: { from: string; to: string; at: number; replace?: true };
+  rename?: {
+    from: string;
+    to: string;
+    at: number;
+    replace?: true;
+    lock?: string;
+    root?: { ino: number; uid?: number; gid?: number; mode?: number };
+  };
 }
 
 export type MetaChange = (entry: MetaEntry | undefined) => MetaEntry | undefined;

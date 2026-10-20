@@ -1030,7 +1030,13 @@ class MountFs implements KernelFs {
     version?: string,
     redirects = 0
   ): Promise<Uint8Array> {
-    const real = await this.follow(path);
+    const gone =
+      (at: string) =>
+      (err: unknown): never => {
+        const stale = version !== undefined && (err as { code?: unknown }).code === 'ENOENT';
+        throw stale ? errnoError('ESTALE', `${at} is gone from the host`) : err;
+      };
+    const real = await this.follow(path).catch(gone(path));
     const found = this.at(real);
     const { pread } = this.base;
     if (!found && pread) {
@@ -1043,7 +1049,7 @@ class MountFs implements KernelFs {
     }
     if (!found) return (await this.base.readFileBuffer(real)).slice(offset, offset + length);
     const { mount, rel } = found;
-    if ((await this.table.getattr(mount, real, rel)).kind === 'directory') {
+    if ((await this.table.getattr(mount, real, rel).catch(gone(real))).kind === 'directory') {
       throw errnoError('EISDIR', real);
     }
     await this.table.commitOverlapping(real, offset, length);
@@ -1057,10 +1063,7 @@ class MountFs implements KernelFs {
         exclusive: false,
         ...(version !== undefined ? { ifMatch: version } : {}),
       })
-      .catch((err: unknown) => {
-        const gone = version !== undefined && (err as { code?: unknown }).code === 'ENOENT';
-        throw gone ? errnoError('ESTALE', `${real} is gone from the host`) : err;
-      })) as number;
+      .catch(gone(real))) as number;
     const chunk = mount.caps.maxIo ?? DEFAULT_IO;
     const chunks: Uint8Array[] = [];
     let total = 0;

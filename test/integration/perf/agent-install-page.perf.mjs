@@ -10,6 +10,9 @@ after(() => chrome.close());
 const AGENT = new URL('./agent/', import.meta.url);
 const BIOS = '25b32202';
 const OFFLINE = Boolean(process.env.SLICC_INSTALL_OFFLINE);
+const SERIAL = process.env.SLICC_INSTALL_SERIAL
+  ? ' --network-concurrency=1 --child-concurrency=1'
+  : '';
 const COUNTERS = ['slicc_fs_calls', 'slicc_opfs_calls', 'slicc_opfs_ops'];
 
 function phases(ndjson, series, wall) {
@@ -77,7 +80,7 @@ test('a cold install of bios’s agent project into /opt/agent on the OPFS root,
   const stdout = await page.run(
     { marker: () => window.__install, quietMs: 120_000, maxMs: 1_700_000, label: 'the install' },
     async (script) => (await window.kernel.run(['bash', '-c', script], { cwd: '/' })).stdout,
-    'cd /opt/agent && pnpm install --frozen-lockfile --ignore-scripts --config.store-dir=/opt/slicc/.store --reporter=ndjson > /dev/shm/pnpm.ndjson 2>&1; echo "rc=$?"'
+    `cd /opt/agent && pnpm install --frozen-lockfile --ignore-scripts${SERIAL} --config.store-dir=/opt/slicc/.store --reporter=ndjson > /dev/shm/pnpm.ndjson 2>&1; echo "rc=$?"`
   );
   const r = { stdout };
   const wall = Date.now() - t0;

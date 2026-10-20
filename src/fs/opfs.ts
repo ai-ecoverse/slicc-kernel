@@ -65,6 +65,9 @@ interface MovableHandle {
 }
 
 const RENAMES = '/.slicc-renames';
+const RENAME_LOCK = 'slicc-rename:';
+
+type Copies = Map<string, { before: number; made: FileSystemFileHandle }>;
 
 function movable(handle: Handle): boolean {
   return typeof (handle as Handle & MovableHandle).move === 'function';
@@ -308,8 +311,14 @@ export class OpfsFs implements KernelFs {
     this.lockPrefix = `slicc-excl:${channel ?? ''}:`;
     this.rootName = channel;
     this.channel = channel === undefined ? undefined : new BroadcastChannel(channel);
-    this.remote = channel === undefined ? undefined : new RemoteWatch(`${channel}:watch`);
-    if (this.remote) this.remote.quiet = () => this.quiet().then(() => this.settle?.());
+    this.remote =
+      channel === undefined
+        ? undefined
+        : new RemoteWatch(`${channel}:watch`, { locks: this.locks ?? null });
+    if (this.remote) {
+      this.remote.quiet = () => this.quiet().then(() => this.settle?.());
+      this.remote.gone = () => void this.orphans();
+    }
     if (this.channel) {
       const remote = this.remote;
       (meta as { listen?: (l: (c: Partial<RemoteChange>) => void) => void }).listen?.((c) => {
@@ -1496,6 +1505,9 @@ export class OpfsFs implements KernelFs {
       }
     }
     await this.meta.remove([found.path]);
+    if (found.handle?.kind === 'directory') {
+      await this.meta.update(found.path, (entry) => entry ?? vacatedAt(found.path));
+    }
     this.touch(Date.now(), parentOf(found.path));
   }
 
@@ -1562,25 +1574,30 @@ export class OpfsFs implements KernelFs {
     const dir = parent.handle as FileSystemDirectoryHandle;
     const name = baseOf(destination);
     const swap = targetStat?.isDirectory === true;
+    let lock: string | undefined;
     const staging = swap ? `.${name}.${crypto.randomUUID()}` : name;
     const copying = sourceStat.isDirectory && !movable(source.handle as Handle);
     const staged = resolvePath(parent.path, staging);
     const place = async () => {
       this.forget(destination);
-      const timed = await this.explicitTimes(source.path);
-      const first = copying ? await this.intend({ from: source.path, to: staged }) : undefined;
+      const copies: Copies = new Map();
+      const root = { ino: inodeOf(source.path), ...moving };
+      const owned = lock ? { lock } : {};
+      const first = copying
+        ? await this.intend({ from: source.path, to: staged, root, ...owned })
+        : undefined;
       const second =
         copying && swap
-          ? await this.intend({ from: staged, to: destination, replace: true })
+          ? await this.intend({ from: staged, to: destination, replace: true, root, ...owned })
           : undefined;
       const moved = await this.replacingTarget(targetStat !== null, () =>
-        this.place(source.handle as Handle, dir, staging)
+        this.place(source.handle as Handle, dir, staging, copies)
       ).catch(async (err) => {
         if (first) await this.rollBack(staged, source.path, [first, second]);
         throw err;
       });
       if (swap) await this.rm(destination, { recursive: true });
-      if (second) await this.intend({ from: staged, to: destination }, second);
+      if (second) await this.intend({ from: staged, to: destination, root, ...owned }, second);
       await this.meta.move(source.path, destination, carry, left);
       this.movePending(source.path, destination);
       if (!moved) {
@@ -1588,15 +1605,13 @@ export class OpfsFs implements KernelFs {
         await this.meta.update(source.path, () => left);
       }
       if (first) await this.meta.update(first, () => undefined);
-      let copied = !moved;
       if (swap) {
         const hidden = await dir.getDirectoryHandle(staging);
-        const placed = await this.place(hidden, dir, name);
+        const placed = await this.place(hidden, dir, name, copies);
         if (!placed) await dir.removeEntry(staging, { recursive: true });
-        copied ||= !placed;
       }
       if (second) await this.meta.update(second, () => undefined);
-      if (copied) await this.restamp(destination, timed);
+      await this.restamp(destination, copies);
       this.changed(source.path, destination);
       this.touch(Date.now(), parentOf(source.path), parent.path);
     };
@@ -1605,7 +1620,11 @@ export class OpfsFs implements KernelFs {
     const entry = { from: source.path, to: destination, done: promise };
     this.renamingDirs.add(entry);
     try {
-      await place();
+      const locks = this.locks;
+      if (locks) {
+        lock = `${RENAME_LOCK}${crypto.randomUUID()}`;
+        await locks.request(lock, place);
+      } else await place();
     } finally {
       this.renamingDirs.delete(entry);
       resolve();
@@ -1617,7 +1636,7 @@ export class OpfsFs implements KernelFs {
   private intents = 0;
 
   private async intend(
-    rename: { from: string; to: string; replace?: true },
+    rename: Omit<NonNullable<MetaEntry['rename']>, 'at'>,
     at = `${RENAMES}/${crypto.randomUUID()}`
   ): Promise<string> {
     const record = { ...rename, at: Date.now() * 1000 + (this.intents++ % 1000) };
@@ -1644,16 +1663,52 @@ export class OpfsFs implements KernelFs {
     } catch {}
   }
 
-  private async finishRenames(): Promise<number> {
+  private replaying: Promise<unknown> = Promise.resolve();
+
+  private orphans(): Promise<unknown> {
+    this.replaying = this.replaying.then(() => this.finishRenames(true)).catch(() => 0);
+    return this.replaying;
+  }
+
+  private async finishRenames(orphaned = false): Promise<number> {
+    const locks = this.locks;
+    const held = new Set<string | undefined>();
+    if (orphaned && locks) {
+      const { held: h = [], pending = [] } = await locks.query();
+      for (const lock of [...h, ...pending]) held.add(lock.name);
+    }
     const intents = (await this.meta.under(RENAMES))
-      .filter((entry) => entry.rename !== undefined)
+      .filter(
+        (entry) =>
+          entry.rename !== undefined &&
+          (!orphaned ||
+            (locks !== undefined &&
+              entry.rename.lock !== undefined &&
+              !held.has(entry.rename.lock)))
+      )
       .sort(
         (a, b) =>
           (a.rename as NonNullable<MetaEntry['rename']>).at -
           (b.rename as NonNullable<MetaEntry['rename']>).at
       );
     for (const entry of intents) {
-      const { from, to, replace } = entry.rename as NonNullable<MetaEntry['rename']>;
+      const lock = (entry.rename as NonNullable<MetaEntry['rename']>).lock;
+      if (!orphaned || !locks || !lock) await this.finishRename(entry);
+      else await locks.request(lock, () => this.finishRename(entry));
+    }
+    return intents.length;
+  }
+
+  private async finishRename(entry: MetaEntry): Promise<void> {
+    const [current] = await this.meta.under(entry.path);
+    if (current?.rename === undefined) return;
+    const { from, to, replace, root } = current.rename;
+    const { promise, resolve } = Promise.withResolvers<void>();
+    const barrier = { from, to, done: promise };
+    this.renamingDirs.add(barrier);
+    this.forget(from);
+    this.forget(to);
+    try {
       const left = await this.real(from);
       if (left && replace && (await this.real(to))) await this.rm(to, { recursive: true });
       if (left) {
@@ -1670,11 +1725,23 @@ export class OpfsFs implements KernelFs {
         this.forget(to);
       }
       if ((await this.meta.under(from)).length > 0) {
-        await this.meta.move(from, to, (moved) => ({ ...occupied(moved), path: to }));
+        await this.meta.move(
+          from,
+          to,
+          (moved) => ({
+            ...occupied(moved),
+            ...root,
+            ino: occupied(moved).ino ?? root?.ino ?? inodeOf(from),
+            path: to,
+          }),
+          undefined
+        );
       }
       await this.meta.update(entry.path, () => undefined);
+    } finally {
+      this.renamingDirs.delete(barrier);
+      resolve();
     }
-    return intents.length;
   }
 
   async settledRename(path: unknown): Promise<void> {
@@ -1731,15 +1798,21 @@ export class OpfsFs implements KernelFs {
     let writable: FileSystemWritableFileStream | undefined;
     let handle: FileSystemFileHandle | undefined;
     try {
-      const [made, existed, at] = await this.fileFor(destination);
-      handle = made;
-      target = at;
-      if (!existed && !created) {
-        created = true;
-        await this.stampNew(target, options.owner, false);
+      const kept = created ? this.files.get(destination) : undefined;
+      if (kept) {
+        if (options.owner?.fifo || options.owner?.socket) throw fsError('ENXIO', to);
+        handle = kept;
+      } else {
+        const [made, existed, at] = await this.fileFor(destination);
+        handle = made;
+        target = at;
+        if (!existed && !created) {
+          created = true;
+          await this.stampNew(target, options.owner, false);
+        }
+        const [entry] = await this.meta.get([target]);
+        if (entry?.fifo || entry?.socket) throw fsError('ENXIO', to);
       }
-      const [entry] = await this.meta.get([target]);
-      if (entry?.fifo || entry?.socket) throw fsError('ENXIO', to);
       this.wrote(handle);
       writable = await handle.createWritable();
       await writable.write(file);
@@ -1788,24 +1861,23 @@ export class OpfsFs implements KernelFs {
     return handle.kind === 'file' ? (await this.snapshot(handle)).lastModified : 0;
   }
 
-  private async explicitTimes(path: string): Promise<string[]> {
-    const timed: string[] = [];
-    for (const entry of await this.meta.under(path)) {
-      if (entry.mtimeFor === undefined || entry.link !== undefined) continue;
-      const current = await this.modified(entry.path).catch(() => undefined);
-      if (current === entry.mtimeFor) timed.push(entry.path.slice(path.length));
-    }
-    return timed;
-  }
-
-  private async restamp(path: string, timed: string[]): Promise<void> {
-    for (const rest of timed) {
-      const mtimeFor = await this.modified(path + rest);
+  private async restamp(path: string, copies: Copies): Promise<void> {
+    if (copies.size === 0) return;
+    const copied = [...copies];
+    const entries = await this.meta.get(copied.map(([rest]) => path + rest));
+    for (const [i, [rest, { before, made }]] of copied.entries()) {
+      if (entries[i]?.mtimeFor !== before) continue;
+      const mtimeFor = (await this.io(made.getFile())).lastModified;
       await this.meta.update(path + rest, (entry) => entry && { ...entry, mtimeFor });
     }
   }
 
-  private async place(handle: Handle, dir: FileSystemDirectoryHandle, name: string) {
+  private async place(
+    handle: Handle,
+    dir: FileSystemDirectoryHandle,
+    name: string,
+    copies?: Copies
+  ) {
     const move = (handle as Handle & MovableHandle).move;
     if (move) this.others++;
     const moved = await move?.call(handle, dir, name).then(
@@ -1815,7 +1887,7 @@ export class OpfsFs implements KernelFs {
     if (moved) return true;
     const before = this.fileMoves;
     try {
-      await this.copy(handle, dir, name);
+      await this.copy(handle, dir, name, copies);
     } catch (err) {
       if (handle.kind === 'directory' && this.fileMoves === before) {
         await this.io(dir.removeEntry(name, { recursive: true }));
@@ -1827,7 +1899,13 @@ export class OpfsFs implements KernelFs {
 
   private fileMoves = 0;
 
-  private async copy(handle: Handle, dir: FileSystemDirectoryHandle, name: string): Promise<void> {
+  private async copy(
+    handle: Handle,
+    dir: FileSystemDirectoryHandle,
+    name: string,
+    copies?: Copies,
+    rest = ''
+  ): Promise<void> {
     if (handle.kind === 'file' && movable(handle)) {
       this.others++;
       const moved = await (handle as Handle & MovableHandle).move?.(dir, name).then(
@@ -1842,13 +1920,17 @@ export class OpfsFs implements KernelFs {
     if (handle.kind === 'file') {
       const made = await this.io(dir.getFileHandle(name, { create: true }));
       const writable = await this.io(made.createWritable());
-      await writable.write(await this.io(handle.getFile()));
+      const file = await this.io(handle.getFile());
+      await writable.write(file);
       await writable.close();
+      copies?.set(rest, { before: copies.get(rest)?.before ?? file.lastModified, made });
       return;
     }
     const target = await this.io(dir.getDirectoryHandle(name, { create: true }));
     this.others++;
-    for await (const child of handle.values()) await this.copy(child, target, child.name);
+    for await (const child of handle.values()) {
+      await this.copy(child, target, child.name, copies, `${rest}/${child.name}`);
+    }
   }
 
   async symlink(target: string, path: string, owner?: NewOwner): Promise<void> {
@@ -1987,7 +2069,10 @@ export class OpfsFs implements KernelFs {
   }
 
   async reconcile(): Promise<number> {
-    if (this.remote && (await this.remote.peered())) return 0;
+    if (this.remote && (await this.remote.peered())) {
+      await this.orphans();
+      return 0;
+    }
     await this.finishRenames();
     let removed = 0;
     const entries = await this.meta.all();

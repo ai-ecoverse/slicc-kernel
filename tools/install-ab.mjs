@@ -9,8 +9,9 @@ const input = (name, env) => String(dispatched[name] ?? process.env[env] ?? '');
 const base = input('base', 'AB_BASE');
 const candidate = input('candidate', 'AB_CANDIDATE');
 const pnpm = input('pnpm', 'AB_PNPM');
-const pairs = Number(input('pairs', 'AB_PAIRS') || 3);
+const pairs = Number(input('pairs', 'AB_PAIRS') || 4);
 const offline = input('offline', 'AB_OFFLINE') !== 'false';
+const serial = input('serial', 'AB_SERIAL') === 'true';
 const REF = /^[A-Za-z0-9._/-]{1,200}$/;
 const fail = (message) => {
   console.error(`install-ab: FAIL ${message}`);
@@ -18,7 +19,9 @@ const fail = (message) => {
 };
 if (!REF.test(base) || !REF.test(candidate)) fail('base and candidate must be git refs');
 if (pnpm && !/^[0-9A-Za-z.+-]{1,50}$/.test(pnpm)) fail('pnpm must be a version');
-if (!Number.isInteger(pairs) || pairs < 1 || pairs > 10) fail('pairs must be 1 to 10');
+if (!Number.isInteger(pairs) || pairs < 2 || pairs > 10 || pairs % 2 !== 0) {
+  fail('pairs must be an even number from 2 to 10, so A-first and B-first pairs balance');
+}
 
 const here = resolve('.');
 const work = resolve(process.env.RUNNER_TEMP ?? '/tmp', 'install-ab');
@@ -68,6 +71,7 @@ const install = (name) => {
         ...process.env,
         GITHUB_STEP_SUMMARY: '',
         ...(offline ? { SLICC_INSTALL_OFFLINE: '1' } : {}),
+        ...(serial ? { SLICC_INSTALL_SERIAL: '1' } : {}),
       },
     }
   );
@@ -95,23 +99,27 @@ const median = (values) => {
 
 const rows = [];
 for (let i = 1; i <= pairs; i++) {
-  const a = install('A');
-  const b = install('B');
-  rows.push({ i, a, b, ratio: b.wall / a.wall, requests: b.requests / a.requests });
-  console.log(`pair ${i}: A ${a.wall} s, B ${b.wall} s, ratio ${(b.wall / a.wall).toFixed(3)}`);
+  const order = i % 2 === 1 ? 'AB' : 'BA';
+  const first = install(order[0]);
+  const second = install(order[1]);
+  const [a, b] = order === 'AB' ? [first, second] : [second, first];
+  rows.push({ i, order, a, b, ratio: b.wall / a.wall, requests: b.requests / a.requests });
+  console.log(
+    `pair ${i} (${order}): A ${a.wall} s, B ${b.wall} s, ratio ${(b.wall / a.wall).toFixed(3)}`
+  );
 }
 
 const ratios = rows.map((r) => r.ratio);
 const table = [
-  `### Install A/B on one runner: A ${builds.A.ref} (${builds.A.sha.slice(0, 8)}), B ${builds.B.ref} (${builds.B.sha.slice(0, 8)})${pnpm ? `, wasi-pnpm ${pnpm}` : ''}${offline ? ', offline registry' : ', live registry'}`,
+  `### Install A/B on one runner: A ${builds.A.ref} (${builds.A.sha.slice(0, 8)}), B ${builds.B.ref} (${builds.B.sha.slice(0, 8)})${pnpm ? `, wasi-pnpm ${pnpm}` : ''}${offline ? ', offline registry' : ', live registry'}${serial ? ', serial pnpm' : ''}`,
   '',
-  '| pair | A wall | B wall | B/A wall | A requests | B requests | B/A requests | A calls | B calls | A MiB | B MiB |',
-  '|---|---|---|---|---|---|---|---|---|---|---|',
+  '| pair | order | A wall | B wall | B/A wall | A requests | B requests | B/A requests | A calls | B calls | A MiB | B MiB |',
+  '|---|---|---|---|---|---|---|---|---|---|---|---|',
   ...rows.map(
     (r) =>
-      `| ${r.i} | ${r.a.wall} s | ${r.b.wall} s | ${r.ratio.toFixed(3)} | ${r.a.requests} | ${r.b.requests} | ${r.requests.toFixed(3)} | ${r.a.calls} | ${r.b.calls} | ${r.a.memory} | ${r.b.memory} |`
+      `| ${r.i} | ${r.order} | ${r.a.wall} s | ${r.b.wall} s | ${r.ratio.toFixed(3)} | ${r.a.requests} | ${r.b.requests} | ${r.requests.toFixed(3)} | ${r.a.calls} | ${r.b.calls} | ${r.a.memory} | ${r.b.memory} |`
   ),
-  `| **median** | ${median(rows.map((r) => r.a.wall))} s | ${median(rows.map((r) => r.b.wall))} s | **${median(ratios).toFixed(3)}** | | | **${median(rows.map((r) => r.requests)).toFixed(3)}** | | | ${median(rows.map((r) => r.a.memory))} | ${median(rows.map((r) => r.b.memory))} |`,
+  `| **median** | | ${median(rows.map((r) => r.a.wall))} s | ${median(rows.map((r) => r.b.wall))} s | **${median(ratios).toFixed(3)}** | | | **${median(rows.map((r) => r.requests)).toFixed(3)}** | | | ${median(rows.map((r) => r.a.memory))} | ${median(rows.map((r) => r.b.memory))} |`,
   '',
   `Pair ratio spread: ${Math.min(...ratios).toFixed(3)}–${Math.max(...ratios).toFixed(3)}.`,
   '',

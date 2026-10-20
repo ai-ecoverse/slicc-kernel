@@ -1,5 +1,6 @@
 import type { Cred } from '../kernel/cred.ts';
 import type { DeviceMeta, HeldMeta, PollState } from '../kernel/fd-table.ts';
+import { type CwdAnswer, HeldCwd, type HeldCwdReply } from '../kernel/held-cwd.ts';
 import { hostnameOf } from '../kernel/net/loopback-names.ts';
 import type { MountLine, ProcessListing } from '../kernel/proc-info.ts';
 import {
@@ -10,6 +11,7 @@ import {
 } from '../kernel/protocol.ts';
 import { SIG } from '../kernel/signals.ts';
 import type { Termios } from '../kernel/tty.ts';
+import { type HeldCwdFs, holdingCwd } from '../realm/emscripten-held-cwd.ts';
 import { mountVfsIntoEmscripten } from '../realm/emscripten-vfs-hook.ts';
 import { type LiveFsNode, liveNodePath } from '../realm/live-vfs-fs.ts';
 import { SYNC_FS_OPS, type SyncFsResult } from '../realm/sync-fs-wire.ts';
@@ -43,6 +45,7 @@ import {
   devCreations,
   type FdImports,
   type GlueSyscalls,
+  goneCwdGetcwd,
   type KernelImports,
   kernelAccess,
   kernelLink,
@@ -561,6 +564,7 @@ function kernelWrappers(imports: WebAssembly.Imports, module: object, deps: Wrap
   const fsOf = () => ownValue<ProcessFs>(module, 'FS');
   noFollowUtimes(imports, fsOf, kernelGlue?.utimensat ?? utimensatOf(module), memory);
   kernelAccess(imports, fsOf, memory, kernelGlue);
+  goneCwdGetcwd(imports, fsOf, kernelGlue);
   kernelLink(imports, fsOf, memory, kernelGlue);
   devCreations(imports, fsOf, memory, kernelGlue);
   kernelUname(imports, hostnameOf(init.env), memory, kernelGlue);
@@ -577,6 +581,20 @@ function kernelWrappers(imports: WebAssembly.Imports, module: object, deps: Wrap
   const grown = () => publishMemory(init.sab, memory()?.buffer.byteLength ?? 0);
   reportGrowth(imports, grown, kernelGlue);
   holdWhileStopped(imports, new Int32Array(init.sab, 0, SAB_HEADER_I32), kernelGlue, deps.poll);
+}
+
+function heldIn(fs: unknown, init: WasmProcessInitMsg, transport: SyncSabTransport): void {
+  if (!init.held) return;
+  const ask = (req: { op: 'cwd-check' } | { op: 'cwd-chdir'; path: string }) => {
+    const r = transport.call(req, Number.POSITIVE_INFINITY, req.op);
+    return r.ok && r.kind === 'json' ? r.json : {};
+  };
+  const check = () => ask({ op: 'cwd-check' }) as CwdAnswer;
+  holdingCwd(
+    fs as HeldCwdFs,
+    new HeldCwd(init.held.sab, init.held.slot, check, init.held),
+    (path) => ask({ op: 'cwd-chdir', path }) as HeldCwdReply
+  );
 }
 
 function bridgeFlags(init: WasmProcessInitMsg): {
@@ -727,15 +745,15 @@ export async function runWasmProcess(
     warn: deps.warn ?? say(2),
     cred: init.owners ? init.cred : undefined,
   });
+  heldIn(running.FS, init, transport);
   early = () => signals.quiet(() => vfs.flushDirty());
   closeDropsLocks(running.FS, sys);
   const sigpipe = (): boolean => running.sliccSigpipe?.() === 1 || sigpipeSpared(gated);
   const restartable = (): boolean => signals.restartable();
-  const owners = init.owners ? { owners: true } : {};
   const streams = new KernelStreams(running.FS, sys, {
     sigpipe,
     restartable,
-    ...owners,
+    ...(init.owners ? { owners: true } : {}),
     program: init.argv0,
   });
   trackCloseOnExec(running.FS);

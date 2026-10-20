@@ -1,0 +1,12 @@
+{
+  "name": "heldcwd",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "heldcwd": {
+        "wasm": "bin/heldcwd.wasm"
+      }
+    }
+  }
+}

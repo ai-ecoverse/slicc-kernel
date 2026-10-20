@@ -50,6 +50,7 @@ export class RemoteWatch {
   private settled = false;
   quiet: (() => Promise<void>) | undefined;
   crowd: ((crowded: boolean) => void) | undefined;
+  gone: (() => void) | undefined;
   private told: boolean | undefined;
   private counted = 0;
 
@@ -149,6 +150,7 @@ export class RemoteWatch {
       this.peers.delete(peer);
       this.rebuild();
       this.recount();
+      this.gone?.();
       for (const wait of this.waiting.values()) {
         if (wait.left.delete(peer) && wait.left.size === 0) wait.done();
       }
@@ -189,14 +191,16 @@ export class RemoteWatch {
   async prune(): Promise<void> {
     if (!this.locks) return;
     const held = new Set(((await this.locks.query()).held ?? []).map((lock) => lock.name));
+    let left = false;
     for (const tab of new Set([...this.others.keys(), ...this.peers])) {
       if (!held.has(this.lockOf(tab))) {
+        if (this.peers.delete(tab)) left = true;
         this.others.delete(tab);
-        this.peers.delete(tab);
       }
     }
     this.rebuild();
     this.recount();
+    if (left) this.gone?.();
   }
 
   watched(): boolean {

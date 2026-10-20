@@ -262,6 +262,7 @@ export interface KernelImports {
   fdRead?: unknown;
   sleepMs?: unknown;
   flock?: unknown;
+  getcwd?: unknown;
 }
 
 const LITERALS: Record<keyof KernelImports, string> = {
@@ -280,6 +281,7 @@ const LITERALS: Record<keyof KernelImports, string> = {
   fdRead: 'fd_read',
   sleepMs: 'slicc_sleep_ms',
   flock: '__syscall_flock',
+  getcwd: '__syscall_getcwd',
 };
 
 export function importKey(
@@ -1001,6 +1003,22 @@ function kernelChecks(
   const kind = call.flags & AT_EACCESS ? 'eaccess' : 'access';
   bridge.access(liveNodePath(node), call.amode, kind, (call.flags & AT_SYMLINK_NOFOLLOW) !== 0);
   return 0;
+}
+
+export function goneCwdGetcwd(
+  imports: WebAssembly.Imports,
+  fs: () => { sliccCwdGone?(): boolean } | undefined,
+  glue?: KernelImports
+): void {
+  wrapImport(
+    imports,
+    'getcwd',
+    glue,
+    (own) =>
+      (...args: number[]) =>
+        fs()?.sliccCwdGone?.() === true ? -44 : own(...args),
+    true
+  );
 }
 
 export function kernelAccess(

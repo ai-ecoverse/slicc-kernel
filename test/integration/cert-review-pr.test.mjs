@@ -324,7 +324,7 @@ const pr = (api, args) =>
     child.on('close', (code) => done({ code, out }));
   });
 
-test('the plan reviews only a behaviour change with merge-ok, records a skip as not behaviour, and makes an unreviewed one red', async (t) => {
+test('the plan reviews every non-draft behaviour change, records a skip as not behaviour, and keeps a draft red and unreviewed', async (t) => {
   let files = [{ filename: 'src/a.ts' }];
   const api = await fakeApi(t, (method, url) => {
     if (url.startsWith('/repos/o/r/pulls/9/files')) return files;
@@ -347,25 +347,53 @@ test('the plan reviews only a behaviour change with merge-ok, records a skip as 
       'PASS',
       ...extra,
     ]);
-  const go = await plan(['--action', 'labeled', '--label', 'merge-ok', '--labels', 'merge-ok']);
-  assert.match(go.out, /go=true/);
-  assert.equal(statuses().at(-1).state, 'pending');
-  assert.equal(statuses().at(-1).context, 'cert-review');
-  const sync = await plan(['--action', 'synchronize', '--labels', 'bug,merge-ok']);
-  assert.match(sync.out, /go=true/);
-  const other = await plan(['--action', 'labeled', '--label', 'bug', '--labels', 'bug,merge-ok']);
-  assert.match(other.out, /go=false/);
+  for (const action of ['opened', 'synchronize', 'reopened', 'ready_for_review']) {
+    const go = await plan(['--action', action, '--labels', '', '--draft', 'false']);
+    assert.match(go.out, /go=true/, action);
+    assert.equal(statuses().at(-1).state, 'pending');
+    assert.equal(statuses().at(-1).context, 'cert-review');
+  }
+  const legacy = await plan([
+    '--action',
+    'labeled',
+    '--label',
+    'merge-ok',
+    '--labels',
+    'merge-ok',
+    '--draft',
+    'false',
+  ]);
+  assert.match(legacy.out, /go=false/);
   const before = statuses().length;
-  const waiting = await plan(['--action', 'synchronize', '--labels', '']);
-  assert.match(waiting.out, /go=false/);
-  assert.equal(statuses().length, before + 1);
-  assert.equal(statuses().at(-1).state, 'failure');
-  assert.match(
-    statuses().at(-1).description,
-    /^waits for merge-ok to be reviewed \(changes src\/a\.ts\)/
-  );
+  const other = await plan([
+    '--action',
+    'unlabeled',
+    '--label',
+    'bug',
+    '--labels',
+    '',
+    '--draft',
+    'false',
+  ]);
+  assert.match(other.out, /go=false/);
+  assert.equal(statuses().length, before);
+  for (const extra of [
+    ['--action', 'converted_to_draft', '--labels', 'merge-ok', '--draft', 'true'],
+    ['--action', 'opened', '--labels', '', '--draft', 'true'],
+    ['--action', 'synchronize', '--labels', ''],
+  ]) {
+    const count = statuses().length;
+    const waiting = await plan(extra);
+    assert.match(waiting.out, /go=false/, extra.join(' '));
+    assert.equal(statuses().length, count + 1, extra.join(' '));
+    assert.equal(statuses().at(-1).state, 'failure');
+    assert.match(
+      statuses().at(-1).description,
+      /^draft: not reviewed, mark it ready for review \(changes src\/a\.ts\)/
+    );
+  }
   files = [{ filename: 'README.md' }, { filename: 'test/integration/a.test.mjs' }];
-  const docs = await plan(['--action', 'opened', '--labels', '']);
+  const docs = await plan(['--action', 'opened', '--labels', '', '--draft', 'true']);
   assert.match(docs.out, /go=false/);
   assert.equal(statuses().at(-1).state, 'success');
   assert.equal(
@@ -437,7 +465,7 @@ test("the merge group's cert-review is a lookup: each PR's status on the head be
   );
 });
 
-test("the merge group's cert-review needs the downstream smoke too: a regression or a missing result is not certified, a known bios failure or an override passes with its note (#480)", async (t) => {
+test("the merge group's cert-review needs the downstream smoke too: a regression or a missing result is not certified, a known bios failure passes with its note, and nothing waives a failure (#480)", async (t) => {
   const head = 'a'.repeat(40);
   const api = await fakeApi(t, (method, url) => {
     if (url.startsWith('/repos/o/r/compare/'))
@@ -499,29 +527,31 @@ test("the merge group's cert-review needs the downstream smoke too: a regression
     [posted().state, posted().description],
     ['error', 'not certified: downstream: INCOMPLETE the downstream smoke left no result']
   );
-  for (const [state, line] of [
-    ['NOT_JUDGED', 'downstream: not judged (bios canary failing on main) bios c2cec127b935 sweep'],
-    [
-      'OVERRIDDEN',
-      'downstream: overridden (downstream-override on the head, by the coordinator) bios c2cec127b935',
-    ],
-  ]) {
-    const r = await lookup(state, line);
-    assert.equal(r.code, 0, `${state}: ${r.out}`);
-    assert.equal(posted().state, 'success');
-    assert.ok(posted().description.startsWith(line.slice(0, 60)), state);
-  }
+  const line = 'downstream: not judged (bios canary failing on main) bios c2cec127b935 sweep';
+  const judged = await lookup('NOT_JUDGED', line);
+  assert.equal(judged.code, 0, judged.out);
+  assert.equal(posted().state, 'success');
+  assert.ok(posted().description.startsWith(line.slice(0, 60)));
+  const waiver = await lookup('OVERRIDDEN', 'downstream: overridden bios c2cec127b935');
+  assert.equal(waiver.code, 1, 'there is no waiver state any more');
+  assert.deepEqual(
+    [posted().state, posted().description],
+    ['error', 'not certified: downstream: overridden bios c2cec127b935']
+  );
 });
 
-test("the workflow: same-repo PRs with merge-ok review the merge ref with main's own tools, the key only in the review step, merge groups only look up", () => {
+test("the workflow: same-repo non-draft PRs review the merge ref with main's own tools, the key only in the review step, merge groups only look up", () => {
   assert.match(
     workflow,
-    /^ {2}pull_request:\n {4}types: \[opened, synchronize, reopened, labeled, unlabeled, ready_for_review\]\n {2}merge_group:\n/m
+    /^ {2}pull_request:\n {4}types: \[opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled\]\n {2}merge_group:\n/m
   );
   assert.match(
     workflow,
-    /\(\(github\.event\.action == 'labeled' && github\.event\.label\.name != 'merge-ok' && github\.event\.label\.name != 'cert-review-approved'\) \|\| \(github\.event\.action == 'unlabeled' && github\.event\.label\.name != 'cert-review-approved'\) \|\| github\.event\.action == 'ready_for_review'\) && format\('cert-review-pr-noop-\{0\}', github\.run_id\)/
+    /\(\(github\.event\.action == 'labeled' \|\| github\.event\.action == 'unlabeled'\) && github\.event\.label\.name != 'cert-review-approved'\) && format\('cert-review-pr-noop-\{0\}', github\.run_id\)/
   );
+  assert.match(jobs.plan, /PR_DRAFT: \$\{\{ github\.event\.pull_request\.draft \}\}/);
+  assert.doesNotMatch(jobs.plan, /--draft/);
+  assert.doesNotMatch(workflow, /merge-ok/);
   assert.match(
     jobs.plan,
     /needs: guard\n {4}if: \$\{\{ !cancelled\(\) && github\.event_name == 'pull_request' && github\.event\.pull_request\.head\.repo\.full_name == github\.repository \}\}/
@@ -538,7 +568,7 @@ test("the workflow: same-repo PRs with merge-ok review the merge ref with main's
     for (const c of checkouts)
       assert.match(
         c,
-        name === 'group' || name === 'group-pack'
+        ['group', 'group-pack', 'canary-runner'].includes(name)
           ? /ref: \$\{\{ github\.event\.merge_group\.base_ref \}\}$/
           : /ref: \$\{\{ github\.event\.pull_request\.base\.sha \}\}$/,
         `${name} runs main's tools`
@@ -624,16 +654,11 @@ test('a change to the reviewer is reviewed only with cert-review-approved on its
       '1',
       '--guard',
       guard,
+      '--draft',
+      'false',
       ...extra,
     ]);
-  const unapproved = await plan('FAIL', [
-    '--action',
-    'labeled',
-    '--label',
-    'merge-ok',
-    '--labels',
-    'merge-ok',
-  ]);
+  const unapproved = await plan('FAIL', ['--action', 'synchronize', '--labels', '']);
   assert.match(unapproved.out, /go=false/);
   assert.equal(statuses().at(-1).state, 'failure');
   assert.equal(
@@ -646,15 +671,15 @@ test('a change to the reviewer is reviewed only with cert-review-approved on its
     '--label',
     'cert-review-approved',
     '--labels',
-    'merge-ok,cert-review-approved',
+    'cert-review-approved',
   ]);
   assert.match(approved.out, /go=true/);
   assert.equal(statuses().at(-1).state, 'pending');
-  const pushed = await plan('FAIL', ['--action', 'synchronize', '--labels', 'merge-ok']);
+  const pushed = await plan('FAIL', ['--action', 'synchronize', '--labels', '']);
   assert.match(pushed.out, /go=false/);
   assert.equal(statuses().at(-1).state, 'failure');
   assert.match(statuses().at(-1).description, /^reviewer change: needs coordinator review/);
-  const unfinished = await plan('', ['--action', 'synchronize', '--labels', 'merge-ok']);
+  const unfinished = await plan('', ['--action', 'synchronize', '--labels', '']);
   assert.match(unfinished.out, /go=false/);
   assert.equal(statuses().at(-1).state, 'error');
   assert.equal(
@@ -663,9 +688,9 @@ test('a change to the reviewer is reviewed only with cert-review-approved on its
   );
   const before = statuses().length;
   for (const extra of [
-    ['--action', 'ready_for_review', '--labels', 'merge-ok'],
-    ['--action', 'unlabeled', '--label', 'bug', '--labels', 'merge-ok'],
-    ['--action', 'unlabeled', '--label', 'merge-ok', '--labels', ''],
+    ['--action', 'labeled', '--label', 'bug', '--labels', 'bug'],
+    ['--action', 'unlabeled', '--label', 'bug', '--labels', ''],
+    ['--action', 'labeled', '--label', 'merge-ok', '--labels', 'merge-ok'],
   ]) {
     const quiet = await plan('PASS', extra);
     assert.match(quiet.out, /go=false/);
@@ -677,7 +702,7 @@ test('a change to the reviewer is reviewed only with cert-review-approved on its
     '--label',
     'cert-review-approved',
     '--labels',
-    'merge-ok',
+    '',
   ]);
   assert.match(removed.out, /go=false/);
   assert.equal(statuses().at(-1).state, 'failure');
@@ -894,8 +919,38 @@ test('the required cert-review never waits forever: a plan or lookup that fails 
   );
 });
 
-test('the merge group runs bios canary on its own tree, packed by main tools and bound by id, digest and sha256, at a pinned bios sha, and the downstream-override is the shared self-guard on every path (#480)', () => {
-  const BIOS = 'c2cec127b935419049568f584093d7ef03ac0721';
+test("the canary's runner comes from the shared decider on the protected branch, which gives the pool only to a merge group of same-repo PRs, and never straight from vars.CERT_CANARY_RUNNER", () => {
+  const pick = jobs['canary-runner'];
+  assert.match(pick, /^ {4}if: github\.event_name == 'merge_group'$/m);
+  assert.match(
+    pick,
+    /ref: \$\{\{ github\.event\.merge_group\.base_ref \}\}\n {10}sparse-checkout: \.github\/runner\.mjs\n/
+  );
+  assert.match(pick, /POOL: \$\{\{ vars\.CERT_CANARY_RUNNER \}\}/);
+  assert.doesNotMatch(pick, /FORCED/);
+  assert.match(
+    pick,
+    /decide\(\{ context, github, env: process\.env \}\)\)\n {14}\.catch\(\(error\) => \(\{ runner: 'ubuntu-latest'/
+  );
+  assert.match(
+    jobs.canary,
+    /\n {6}runner: \$\{\{ needs\.canary-runner\.outputs\.runner \|\| 'ubuntu-latest' \}\}\n/
+  );
+  assert.doesNotMatch(jobs.canary, /CERT_CANARY_RUNNER/);
+});
+
+test("one bios sha everywhere: the canary's uses: pin, the judging step's --bios and the notice's --bios name the same full sha, so a bump can't miss one", () => {
+  const pins = [
+    ...workflow.matchAll(/slicc-bios\/\.github\/workflows\/canary\.yml@([0-9a-f]+)/g),
+    ...workflow.matchAll(/--bios ([0-9a-f]+)/g),
+  ].map((m) => m[1]);
+  assert.equal(pins.length, 3, pins.join(' '));
+  assert.match(pins[0], /^[0-9a-f]{40}$/);
+  assert.deepEqual(new Set(pins), new Set([pins[0]]));
+});
+
+test('the merge group runs bios canary on its own tree, packed by main tools and bound by id, digest and sha256, at a pinned bios sha, with no downstream waiver (#480)', () => {
+  const BIOS = '1f071319d24e70a56ae2901584aa4dfff21cfcfb';
   assert.match(jobs['group-pack'], /^ {4}if: github\.event_name == 'merge_group'$/m);
   assert.match(jobs['group-pack'], /^ {4}runs-on: ubuntu-latest$/m);
   assert.match(jobs['group-pack'], /git fetch -q --no-tags --depth=1 origin "\$GITHUB_SHA"/);
@@ -905,7 +960,10 @@ test('the merge group runs bios canary on its own tree, packed by main tools and
   );
   assert.match(jobs['group-pack'], /-group\.\$GITHUB_RUN_ID/);
   assert.match(jobs['group-pack'], /package-manager-cache: false/);
-  assert.match(jobs.canary, /needs: group-pack\n {4}if: github\.event_name == 'merge_group'\n/);
+  assert.match(
+    jobs.canary,
+    /needs: \[group-pack, canary-runner\]\n {4}if: github\.event_name == 'merge_group'\n/
+  );
   assert.match(
     jobs.canary,
     new RegExp(`uses: ai-ecoverse/slicc-bios/\\.github/workflows/canary\\.yml@${BIOS}\\n`)
@@ -918,17 +976,17 @@ test('the merge group runs bios canary on its own tree, packed by main tools and
     ['candidate-repo', '${{ github.repository }}'],
     ['candidate-artifact-id', '${{ needs.group-pack.outputs.id }}'],
     ['candidate-artifact-digest', '${{ needs.group-pack.outputs.digest }}'],
-    ['shards', `'["sweep","guard","k4-link"]'`],
+    [
+      'shards',
+      `'["sweep","guard-prompt","guard-lagging","k4-upgrade","k4-agent-modes","link-serve"]'`,
+    ],
+    ['runner', "${{ needs.canary-runner.outputs.runner || 'ubuntu-latest' }}"],
     ['repeat', '1'],
   ])
     assert.ok(jobs.canary.includes(`\n      ${input}: ${value}\n`), `${input}: ${value}`);
   assert.doesNotMatch(jobs.canary, /candidate-binding|secrets/, 'strict binding, no secrets');
   assert.match(jobs.canary, /permissions:\n {6}contents: read\n {6}actions: read\n/);
-  assert.match(
-    jobs.guard,
-    /- id: override\n[^\n]*\n {8}continue-on-error: true\n {8}uses: ai-ecoverse\/slicc-shared-web\/\.github\/actions\/cert-self-guard@f342d7cf558c817ce517bbbbc4cc46df6eac2f97\n {8}with:\n {10}approval-label: downstream-override\n {10}paths: \|\n {12}\*\*\n {12}\.\*\n {12}\.\*\/\*\*\n {12}\*\*\/\.\*\n {12}\*\*\/\.\*\/\*\*\n/
-  );
-  assert.match(jobs.guard, /override: \$\{\{ steps\.override\.outputs\.receipt \}\}/);
+  assert.doesNotMatch(workflow, /downstream-override|OVERRIDE|--override/, 'no downstream waiver');
   assert.doesNotMatch(
     workflow,
     /needs\.canary\.outputs\.result/,
@@ -940,11 +998,10 @@ test('the merge group runs bios canary on its own tree, packed by main tools and
   );
   assert.match(jobs.group, /permissions:\n {6}contents: read\n {6}actions: read\n/);
   assert.match(jobs.group, /downstream\.mjs --result "\$RUNNER_TEMP\/canary\/result\.json"/);
-  assert.match(jobs.group, /OVERRIDE: \$\{\{ needs\.guard\.outputs\.override \}\}/);
   assert.match(
     jobs.group,
     new RegExp(
-      `gate\\.sh --evidence downstream node tools/cert-review/downstream\\.mjs [^\\n]*--override "\\$override" \\\\\\n {12}--bios ${BIOS} --shards sweep,guard,k4-link --out`
+      `gate\\.sh --evidence downstream node tools/cert-review/downstream\\.mjs --result "\\$RUNNER_TEMP/canary/result\\.json" \\\\\\n {12}--bios ${BIOS} --shards sweep,guard-prompt,guard-lagging,k4-upgrade,k4-agent-modes,link-serve --out`
     )
   );
   assert.match(
@@ -976,7 +1033,7 @@ function stepScript(job, id) {
     .join('\n');
 }
 
-test("the merge group's steps end to end: a planted regression is red, a missing result INCOMPLETE, a stale override no waiver, and a canary broken on main is not judged, files one issue, and the next passing group closes it (#480)", async (t) => {
+test("the merge group's steps end to end: a planted regression is red, a missing result INCOMPLETE, and a canary broken on main is not judged, files one issue, and the next passing group closes it (#480)", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'cert-group-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const heads = { 11: 'a'.repeat(40) };
@@ -995,9 +1052,14 @@ test("the merge group's steps end to end: a planted regression is red, a missing
     if (method === 'POST' && url === '/repos/o/r/issues') return { number: nextIssue };
     if (method === 'POST' && /^\/repos\/o\/r\/issues\/\d+\/comments$/.test(url)) return {};
     if (method === 'PATCH' && /^\/repos\/o\/r\/issues\/\d+$/.test(url)) return {};
+    if (method === 'GET' && /^\/repos\/o\/r\/issues\/\d+\/comments\?/.test(url)) return [];
+    if (method === 'GET' && /^\/repos\/o\/r\/issues\/\d+$/.test(url)) {
+      const number = Number(url.split('/').at(-1));
+      return issues.find((i) => i.number === number) ?? { number, state: 'open' };
+    }
     return undefined;
   });
-  const BIOS = 'c2cec127b935419049568f584093d7ef03ac0721';
+  const BIOS = '1f071319d24e70a56ae2901584aa4dfff21cfcfb';
   const canary = (o = {}) =>
     JSON.stringify({
       ok: true,
@@ -1015,21 +1077,7 @@ test("the merge group's steps end to end: a planted regression is red, a missing
       ...o,
     });
   let n = 0;
-  const receipt = (status, members) =>
-    JSON.stringify({ schema: 1, label: 'downstream-override', status, members });
-  const member = (o = {}) => ({
-    pr: 11,
-    head: heads[11],
-    paths: ['src/x.ts'],
-    touched: ['src/x.ts'],
-    approved: true,
-    status: 'PASS',
-    ...o,
-  });
-  const group = async (
-    result,
-    override = receipt('FAIL', [member({ approved: false, status: 'FAIL' })])
-  ) => {
+  const group = async (result) => {
     const temp = join(dir, `g${n++}`);
     await mkdir(temp);
     const env = {
@@ -1045,7 +1093,6 @@ test("the merge group's steps end to end: a planted regression is red, a missing
       BASE_SHA: 'e'.repeat(40),
       HEAD_SHA: 'f'.repeat(40),
       GUARD: 'PASS',
-      OVERRIDE: override,
     };
     if (result) {
       await mkdir(join(temp, 'canary'));
@@ -1085,7 +1132,7 @@ test("the merge group's steps end to end: a planted regression is red, a missing
   assert.equal(planted.status.state, 'failure');
   assert.match(
     planted.status.description,
-    /^not certified: downstream: FAIL bios c2cec127b935 sweep,guard,k4-link: 1 regressions/
+    /^not certified: downstream: FAIL bios 1f071319d24e 6 shards: 1 regressions/
   );
 
   const missing = await group('');
@@ -1096,60 +1143,11 @@ test("the merge group's steps end to end: a planted regression is red, a missing
     /^not certified: downstream: INCOMPLETE .*the canary left no readable result/
   );
 
-  const stale = await group(regression);
-  assert.equal(
-    stale.status.state,
-    'failure',
-    'an override the guard did not bind to the head waives nothing'
-  );
-  const waived = await group(regression, receipt('PASS', [member()]));
-  assert.equal(waived.status.state, 'success');
-  assert.match(
-    waived.status.description,
-    /^downstream: overridden \(downstream-override on the head, by the coordinator\)/
-  );
-  const unset = await group(regression, '');
-  assert.equal(unset.status.state, 'failure', 'no guard output is no override');
-  const dotOnly = await group(
-    regression,
-    receipt('PASS', [member({ paths: ['.npmignore'], touched: [], approved: false })])
-  );
-  assert.equal(
-    dotOnly.status.state,
-    'failure',
-    'a PASS the guard gave without checking the label is no waiver'
-  );
-  assert.match(dotOnly.down.stdout, /^downstream-override: FAIL/m);
-  const none = await group(regression, receipt('PASS', []));
-  assert.equal(none.status.state, 'failure', 'a receipt with no pull requests waives nothing');
-  const unlabeled = await group(
-    regression,
-    receipt('PASS', [member(), member({ pr: 12, approved: false })])
-  );
-  assert.equal(
-    unlabeled.status.state,
-    'failure',
-    'every pull request in the group needs the override'
-  );
-  const { matchesGlob } = await import('node:path');
-  const globs = ['**', '.*', '.*/**', '**/.*', '**/.*/**'];
-  for (const f of [
-    '.npmignore',
-    '.github/workflows/ci.yml',
-    'src/a.ts',
-    'test/integration/.x',
-    'a/.b/c',
-  ])
-    assert.ok(
-      globs.some((g) => matchesGlob(f, g)),
-      `the override guard's paths cover ${f}`
-    );
-
   const broken = canary({
     counts: { pass: 0, skip: 0, fail: 0, regression: 0, both: 2, flaky: 0 },
     both: [
-      { shard: 'guard', test: 'boot', log: '' },
-      { shard: 'k4-link', test: 'link', log: '' },
+      { shard: 'guard-prompt', test: 'boot', log: '' },
+      { shard: 'link-serve', test: 'link', log: '' },
     ],
   });
   const notJudged = await group(broken);
@@ -1174,8 +1172,8 @@ test("the merge group's steps end to end: a planted regression is red, a missing
   const knownBoth = canary({
     counts: { pass: 28, skip: 0, fail: 0, regression: 0, both: 2, flaky: 0 },
     both: [
-      { shard: 'guard', test: 'boot', log: '' },
-      { shard: 'k4-link', test: 'link', log: '' },
+      { shard: 'guard-prompt', test: 'boot', log: '' },
+      { shard: 'link-serve', test: 'link', log: '' },
     ],
   });
   const noted = await group(knownBoth);
@@ -1201,11 +1199,12 @@ test("the merge group's steps end to end: a planted regression is red, a missing
     readFileSync(new URL('fixtures/cert-review/bios-canary-result.json', import.meta.url), 'utf8')
   );
   while (JSON.stringify(real).length < 200_000) real.tests.push(...real.tests);
+  real.biosRef = BIOS;
   const shaped = await group(JSON.stringify(real));
   assert.equal(shaped.down.status, 0, shaped.down.stdout);
   assert.match(
     shaped.down.stdout,
-    /downstream: PASS bios c2cec127b935 sweep,guard,k4-link: 605 pass \(https:\/\/github\.com\/ai-ecoverse\/slicc-kernel\/actions\/runs\/39168823799\)/,
+    /downstream: PASS bios 1f071319d24e 6 shards: 605 pass \(https:\/\/github\.com\/ai-ecoverse\/slicc-kernel\/actions\/runs\/39168823799\)/,
     "bios's real result (run 39168823799), over 128 KB, reaches the verdict through the artifact"
   );
   assert.equal(shaped.status.state, 'success', shaped.look.stdout);
@@ -1309,4 +1308,101 @@ test("the cert-path guard fails closed: a reviewer path the guard's globs miss (
     block.includes(`const dirs = ${JSON.stringify(lib.REVIEWER_DIRS).replaceAll(',', ', ')};`),
     'the step and lib hold the same reviewer dirs'
   );
+});
+
+test('the downstream notice reconciles concurrent merge groups: twins close into the oldest, a failing group reopens the issue a passing one closed under it, and a passing group leaves open an issue another group reported to meanwhile (#1082)', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'cert-notice-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const title = 'downstream: bios canary failing on main (c2cec127b935)';
+  let listed = [];
+  let now = {};
+  let reports = {};
+  const api = await fakeApi(t, (method, url) => {
+    if (method === 'GET' && url.startsWith('/repos/o/r/issues?')) return listed;
+    if (method === 'GET' && /^\/repos\/o\/r\/issues\/\d+\/comments\?since=t1&/.test(url))
+      return reports[Number(url.split('/').at(-2))] ?? [];
+    if (method === 'GET' && /^\/repos\/o\/r\/issues\/\d+$/.test(url))
+      return now[Number(url.split('/').at(-1))];
+    if (method === 'POST' && url === '/repos/o/r/issues') return { number: 70 };
+    if (method === 'POST' && /\/comments$/.test(url)) return {};
+    if (method === 'PATCH') return {};
+    return undefined;
+  });
+  const file = join(dir, 'downstream.json');
+  const notice = async (found) => {
+    await writeFile(file, JSON.stringify(found));
+    api.seen.length = 0;
+    const r = await pr(api.url, [
+      'notice',
+      '--repo',
+      'o/r',
+      '--head',
+      'f'.repeat(40),
+      '--run',
+      '2',
+      '--bios',
+      'c2cec127b935419049568f584093d7ef03ac0721',
+      '--downstream',
+      file,
+    ]);
+    assert.equal(r.code, 0, r.out);
+    const patches = api.seen
+      .filter((x) => x.method === 'PATCH')
+      .map((x) => [Number(x.url.split('/').at(-1)), x.body.state]);
+    const comments = api.seen
+      .filter((x) => x.method === 'POST' && x.url.endsWith('/comments'))
+      .map((x) => Number(x.url.split('/').at(-2)));
+    return { out: r.out, patches, comments };
+  };
+  const failing = { state: 'NOT_JUDGED', notify: ['bios canary is failing on main'], line: 'x' };
+  const open = (number, updated = 't1') => ({ number, title, state: 'open', updated_at: updated });
+
+  listed = [open(52), open(51)];
+  now = { 51: open(51), 52: open(52) };
+  const twins = await notice(failing);
+  assert.deepEqual(twins.comments, [51, 52], twins.out);
+  assert.deepEqual(twins.patches, [[52, 'closed']], twins.out);
+  assert.match(twins.out, /^pr notice: PASS commented on #51: NOT_JUDGED$/m);
+
+  listed = [open(51)];
+  now = { 51: { ...open(51, 't2'), state: 'closed' } };
+  const reopened = await notice(failing);
+  assert.deepEqual(reopened.patches, [[51, 'open']], reopened.out);
+  assert.match(reopened.out, /reopened #51 that a concurrent group closed/);
+
+  listed = [open(51), open(53)];
+  now = { 51: open(51, 't2'), 53: open(53) };
+  const passing = await notice({ state: 'PASS', notify: [], line: 'ok' });
+  assert.deepEqual(passing.patches, [[53, 'closed']], passing.out);
+  assert.deepEqual(passing.comments, [53], passing.out);
+  assert.match(
+    passing.out,
+    /^pr notice: PASS PASS: closed #53; left #51 open: a concurrent group reported to it$/m
+  );
+
+  listed = [open(54)];
+  now = { 54: open(54) };
+  reports = {
+    54: [{ body: "The merge group 0123 (x) found bios's canary failing on main's own pins" }],
+  };
+  const raced = await notice({ state: 'PASS', notify: [], line: 'ok' });
+  assert.deepEqual(
+    raced.patches,
+    [
+      [54, 'closed'],
+      [54, 'open'],
+    ],
+    raced.out
+  );
+  assert.match(
+    raced.out,
+    /^pr notice: PASS PASS: left #54 open: a concurrent group reported to it$/m
+  );
+  reports = {};
+
+  listed = [];
+  now = { 70: { number: 70, title, state: 'open' } };
+  const fresh = await notice(failing);
+  assert.deepEqual(fresh.patches, [], fresh.out);
+  assert.match(fresh.out, /opened "downstream: bios canary failing on main \(c2cec127b935\)"/);
 });

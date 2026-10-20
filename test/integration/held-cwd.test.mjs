@@ -1,0 +1,211 @@
+import assert from 'node:assert/strict';
+import { readdir, readFile } from 'node:fs/promises';
+import { join, relative } from 'node:path';
+import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
+import { createNodeKernel } from '../../dist/node.js';
+
+const modules = new URL('../../node_modules/@ai-ecoverse/', import.meta.url);
+const TIMEOUT = { timeout: 300_000 };
+
+async function install(kernel, name, skip) {
+  const base = new URL(`${name}/`, modules);
+  const entries = await readdir(base, { recursive: true, withFileTypes: true });
+  for (const entry of entries.filter((e) => e.isFile())) {
+    const file = join(entry.parentPath, entry.name);
+    const rel = relative(fileURLToPath(base), file);
+    if (skip?.test(rel)) continue;
+    await kernel.writeFile(`/node_modules/@ai-ecoverse/${name}/${rel}`, await readFile(file));
+  }
+}
+
+async function booted(t) {
+  const kernel = await createNodeKernel();
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
+  await install(kernel, 'wasix-python', /^lib\/libpython[^/]*\.a$/);
+  const sh = (script, env = '') =>
+    kernel.run(['bash', '-c', `export PATH=/usr/bin:/bin; ${env}${script}`], { cwd: '/' });
+  return { sh, kernel };
+}
+
+const py = (lines) =>
+  `python3 -c "$(echo ${Buffer.from(['import os, sys', ...lines].join('\n')).toString('base64')} | base64 -d)"`;
+
+const fixture = new URL('fixtures/heldcwd/', import.meta.url);
+
+const REPLACEMENTS = [
+  ['rm -r d; mv n d', 'mkdir /t/n && touch /t/n/x && rm -r /t/d && mv /t/n /t/d'],
+  ['rm -r d; mkdir d', 'rm -r /t/d && mkdir /t/d && touch /t/d/x'],
+  ['mv d away; mv n d', 'mkdir /t/n && touch /t/n/x && mv /t/d /t/away && mv /t/n /t/d'],
+];
+
+const held = (replace) =>
+  [
+    'rm -rf /t; mkdir -p /t/d /t/s && touch /t/d/old',
+    'cd /t/d',
+    '{ until [ -e /t/s/go ]; do sleep 0.05; done; echo go; } | heldcwd > /t/s/out &',
+    'p=$!',
+    'cd /',
+    'n=0; until [ -s /t/s/out ] || [ $n -ge 2400 ]; do sleep 0.05; n=$((n+1)); done',
+    replace,
+    'touch /t/s/go',
+    'wait $p',
+    'cat /t/s/out',
+  ].join('\n');
+
+for (const [name, replace] of REPLACEMENTS) {
+  test(
+    `a wasip1 program whose cwd is replaced by "${name}" keeps the removed directory: . lists nothing, a relative create and stat are NotFound, and .. still lists the parent (#1164)`,
+    TIMEOUT,
+    async (t) => {
+      const { sh, kernel } = await booted(t);
+      for (const file of ['package.json', 'bin/heldcwd.wasm']) {
+        await kernel.writeFile(
+          `/node_modules/heldcwd/${file}`,
+          await readFile(new URL(file, fixture))
+        );
+      }
+      const r = await sh(held(replace));
+      const parent = name.startsWith('mv d away') ? '[away,d,n,s]' : '[d,s]';
+      assert.equal(
+        r.stdout,
+        `before [old]\nafter error entity not found\ncreate NotFound\nstat NotFound\nparent ${parent.replace(',n,', ',')}\n`,
+        r.stderr
+      );
+    }
+  );
+}
+
+test(
+  'a wasip1 program making relative lookups in a held cwd with no directory changes asks the kernel nothing about the cwd, and once after one (#1164)',
+  TIMEOUT,
+  async (t) => {
+    const { sh, kernel } = await booted(t);
+    for (const file of ['package.json', 'bin/heldcwd.wasm']) {
+      await kernel.writeFile(
+        `/node_modules/heldcwd/${file}`,
+        await readFile(new URL(file, fixture))
+      );
+    }
+    await sh('mkdir -p /t/d && touch /t/d/old');
+    const checks = (stderr) =>
+      stderr
+        .split('\n')
+        .filter((l) => /\skernel\.cwd-check$/.test(l))
+        .reduce((n, l) => n + Number(l.trim().split(/\s+/)[1]), 0);
+    const quiet = await sh(
+      'cd /t/d && heldcwd loop 500 < /dev/null',
+      'export SLICC_WASI_STATS=1; '
+    );
+    assert.equal(quiet.stdout, 'looped 500\n', quiet.stderr);
+    assert.match(
+      quiet.stderr,
+      /\s1000\s+\S+\s+wasi\.path_filestat_get$/m,
+      'the stats were printed'
+    );
+    assert.equal(checks(quiet.stderr), 0);
+    const moved = await sh(
+      'cd /t/d && { until [ -e /tmp/go ]; do sleep 0.05; done; echo; } | heldcwd loop 500 & p=$!; cd /; sleep 0.5; touch /t/d; touch /tmp/go; wait $p',
+      'export SLICC_WASI_STATS=1; '
+    );
+    assert.equal(moved.stdout, 'looped 500\n', moved.stderr);
+    assert.equal(checks(moved.stderr), 1);
+  }
+);
+
+const SHELL = (replace) =>
+  [
+    'rm -rf /t; mkdir -p /t/d && cd /t/d',
+    replace,
+    'ls; echo "ls=$?"',
+    'echo *',
+    'touch made; echo "touch=$?"',
+    '(echo sub *)',
+    'bash -c \'pwd\' 2>/dev/null; echo "pwd=$?"',
+    'cd .. && ls d',
+  ].join('\n');
+
+for (const [name, replace] of REPLACEMENTS) {
+  test(
+    `bash, its children and a subshell in a cwd replaced by "${name}" keep the removed directory: ls fails, a glob matches nothing, a create is ENOENT, and cd .. reaches the new one (#1164)`,
+    TIMEOUT,
+    async (t) => {
+      const { sh } = await booted(t);
+      const r = await sh(SHELL(replace));
+      assert.equal(r.stdout, 'ls=2\n*\ntouch=1\nsub *\npwd=1\nx\n', r.stderr);
+      assert.match(r.stderr, /ls: cannot open directory '\.': No such file or directory/);
+    }
+  );
+}
+
+const JSPROG = `export default async function main(ctx) {
+  const dec = new TextDecoder();
+  const tried = async (f) => {
+    try {
+      return JSON.stringify(await f());
+    } catch (err) {
+      return err.code ?? String(err);
+    }
+  };
+  const out = [];
+  out.push('before ' + (await tried(async () => (await ctx.fs.readdir('.')).sort())));
+  await ctx.fs.writeFile('/t/s/ready', '');
+  while ((await ctx.read(0, 1)).length > 0);
+  out.push('after ' + (await tried(async () => (await ctx.fs.readdir('.')).sort())));
+  out.push('write ' + (await tried(() => ctx.fs.writeFile('made', 'x'))));
+  out.push('parent ' + (await tried(async () => (await ctx.fs.readdir('../d')).sort())));
+  await ctx.write(1, out.join('\\n') + '\\n');
+  return 0;
+}
+`;
+
+test(
+  'a JS program whose cwd is replaced keeps the removed directory: readdir and a relative write are ENOENT, and ../d reaches the new one (#1164)',
+  TIMEOUT,
+  async (t) => {
+    const { sh, kernel } = await booted(t);
+    await kernel.writeFile(
+      '/node_modules/jsheld/package.json',
+      JSON.stringify({
+        name: 'jsheld',
+        slicc: { commands: { jsheld: { abi: 'js', module: 'main.mjs' } } },
+      })
+    );
+    await kernel.writeFile('/node_modules/jsheld/main.mjs', JSPROG);
+    const r = await sh(
+      [
+        'rm -rf /t; mkdir -p /t/d /t/s && touch /t/d/old',
+        'cd /t/d',
+        '{ until [ -e /t/s/go ]; do sleep 0.05; done; } | jsheld > /t/s/out &',
+        'p=$!',
+        'cd /',
+        'n=0; until [ -e /t/s/ready ] || [ $n -ge 2400 ]; do sleep 0.05; n=$((n+1)); done',
+        'rm -r /t/d && mkdir /t/d && touch /t/d/x && touch /t/s/go',
+        'wait $p',
+        'cat /t/s/out',
+      ].join('\n')
+    );
+    assert.equal(r.stdout, 'before ["old"]\nafter ENOENT\nwrite ENOENT\nparent ["x"]\n', r.stderr);
+  }
+);
+
+test(
+  'bash making relative lookups in a held cwd with no directory changes asks the kernel nothing about the cwd, and once after a change at it (#1164)',
+  TIMEOUT,
+  async (t) => {
+    const { sh } = await booted(t);
+    const checks = async () => Number((await sh('cat /proc/sys/kernel/slicc_cwd_checks')).stdout);
+    await sh('mkdir -p /t/d && touch /t/d/old');
+    const before = await checks();
+    const quiet = await sh('cd /t/d && for i in {1..300}; do test -e old; done; echo ok');
+    assert.equal(quiet.stdout, 'ok\n', quiet.stderr);
+    assert.equal((await checks()) - before, 0);
+    const middle = await checks();
+    const moved = await sh(
+      'cd /t/d && for i in {1..100}; do test -e old; done; (cd / && touch /t/d); for i in {1..100}; do test -e old; done; echo ok'
+    );
+    assert.equal(moved.stdout, 'ok\n', moved.stderr);
+    assert.equal((await checks()) - middle, 1);
+  }
+);

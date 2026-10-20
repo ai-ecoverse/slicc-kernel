@@ -43,6 +43,10 @@ export class WasmMemories {
     return { live: this.live, ceiling: ceiling ?? 0, source };
   }
 
+  started(): void {
+    this.progress();
+  }
+
   ended(): void {
     this.live = Math.max(0, this.live - 1);
     this.progress();

@@ -6,6 +6,7 @@ import {
   type HeldMeta,
   type KernelFdKind,
 } from '../../kernel/fd-table.ts';
+import type { HeldCwd, HeldCwdReply } from '../../kernel/held-cwd.ts';
 import type { FdInfo, WasmSyscall } from '../../kernel/process.ts';
 import {
   HOLD_CREATED,
@@ -59,6 +60,11 @@ export const CLIPBOARD_PATH = '/dev/clipboard';
 
 export function deviceOf(path: string): Device | undefined {
   return deviceAt(path);
+}
+
+function namedDevice(path: string): boolean {
+  if (deviceOf(path) || stdioAlias(path) !== undefined) return true;
+  return path === SEALED_PATH || path === CLIPBOARD_PATH || path === '/dev/tty';
 }
 
 function within(path: string, root: string): boolean {
@@ -385,6 +391,7 @@ export class WasiFds {
       e.path = path;
       this.kernel.call({ op: 'fd-meta', fd, meta: metaOf(e) as HeldMeta });
     }
+    this.held?.moved(this.kernel.call({ op: 'cwd-chdir', path }) as HeldCwdReply, path);
     this.bump();
   }
 
@@ -714,9 +721,25 @@ export class WasiFds {
     }
   }
 
+  held: HeldCwd | undefined;
+
+  private cwdEntry(dir: Extract<WasiEntry, { type: 'dir' }>): boolean {
+    return dir.preopen === '.' || dir.preopen === './';
+  }
+
+  goneCwd(dir: Extract<WasiEntry, { type: 'dir' }>): boolean {
+    return this.held !== undefined && this.cwdEntry(dir) && !this.held.alive(dir.path);
+  }
+
   resolve(dirfd: number, path: string): string {
     if (path === '') throw new WasiError('ENOENT');
-    const joined = path.startsWith('/') ? path : `${this.dir(dirfd).path}/${path}`;
+    if (path.startsWith('/')) return this.joined(path);
+    const dir = this.dir(dirfd);
+    if (path.split('/')[0] !== '..' && this.goneCwd(dir)) throw new WasiError('ENOENT');
+    return this.joined(`${dir.path}/${path}`);
+  }
+
+  private joined(joined: string): string {
     return joined.split('/').includes('..') ? physical(this.fs, joined) : normalize(joined);
   }
 
@@ -737,8 +760,19 @@ export class WasiFds {
       fd = this.openCharDevice(openClipboard, oflags, rights);
       kind = 'clipboard';
     } else if (path === '/dev/tty' || /^\/dev\/tty\d+$/.test(path)) {
-      fd = openTty?.call(this.kernel.sys, path === '/dev/tty' ? undefined : path);
+      const exclusive = (oflags & OFLAGS.CREAT) !== 0 && (oflags & OFLAGS.EXCL) !== 0;
+      try {
+        fd = openTty?.call(this.kernel.sys, path === '/dev/tty' ? undefined : path);
+      } catch (err) {
+        if (exclusive && (err as { code?: string }).code === 'EACCES')
+          throw new WasiError('EEXIST');
+        throw err;
+      }
       if (fd === undefined) throw new WasiError('ENXIO');
+      if (exclusive) {
+        this.kernel.sys.close(fd);
+        throw new WasiError('EEXIST');
+      }
       kind = 'tty';
     } else return undefined;
     this.adopt(fd, kind, nonblock);
@@ -760,6 +794,8 @@ export class WasiFds {
   open(path: string, oflags: number, rights: bigint, fdflags: number, mode?: number): number {
     this.made = undefined;
     this.created = false;
+    const exclusive = (oflags & OFLAGS.CREAT) !== 0 && (oflags & OFLAGS.EXCL) !== 0;
+    if (exclusive && namedDevice(path)) throw new WasiError('EEXIST');
     const device = deviceOf(path);
     if (device) return this.install({ type: 'device', device });
 
@@ -767,7 +803,6 @@ export class WasiFds {
     if (kernelDevice !== undefined) return kernelDevice;
     const alias = stdioAlias(path);
     if (alias !== undefined) return this.reopen(alias);
-    const exclusive = (oflags & OFLAGS.CREAT) !== 0 && (oflags & OFLAGS.EXCL) !== 0;
     if (exclusive && !(oflags & OFLAGS.DIRECTORY) && this.madeAtOnce(path, mode)) {
       return this.regular(path, undefined, oflags, rights, fdflags, mode, true);
     }

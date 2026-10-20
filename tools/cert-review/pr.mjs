@@ -20,6 +20,7 @@ const { positionals, values } = parseArgs({
     action: { type: 'string', default: '' },
     label: { type: 'string', default: '' },
     labels: { type: 'string', default: '' },
+    draft: { type: 'string', default: process.env.PR_DRAFT ?? '' },
     base: { type: 'string', default: '' },
     run: { type: 'string', default: '' },
     context: { type: 'string', default: 'cert-review' },
@@ -91,18 +92,13 @@ const GUARD_INCOMPLETE = 'the certification self-guard did not finish: re-run th
 
 async function plan() {
   const { action, label, approval } = values;
-  const starts =
-    action === 'labeled' ? ['merge-ok', approval] : action === 'unlabeled' ? [approval] : [];
-  if (
-    action === 'ready_for_review' ||
-    ((action === 'labeled' || action === 'unlabeled') && !starts.includes(label))
-  ) {
+  if ((action === 'labeled' || action === 'unlabeled') && label !== approval) {
     summary(`#${values.pr}: ${action} ${label} doesn't start or change a review`);
     return output({ go: 'false', behaviour: '', self: 'false' });
   }
   const files = await all(`repos/${repo}/pulls/${values.pr}/files`);
   const behaviour = behaviourFiles(files);
-  const labelled = values.labels.split(',').includes('merge-ok');
+  const draft = values.draft !== 'false';
   const self = reviewsItself(files);
   if (values.guard !== 'PASS') {
     const fail = values.guard === 'FAIL';
@@ -116,10 +112,6 @@ async function plan() {
     );
     return output({ go: 'false', behaviour: behaviour.join(','), self: String(self) });
   }
-  if (label === approval && !self) {
-    summary(`#${values.pr} doesn't change the reviewer: ${action} ${label} changes nothing`);
-    return output({ go: 'false', behaviour: behaviour.join(','), self: 'false' });
-  }
   if (behaviour.length === 0) {
     await status(
       values.head,
@@ -129,13 +121,13 @@ async function plan() {
     summary(`#${values.pr} changes no shipped behaviour: not reviewed, cert-review success`);
     return output({ go: 'false', behaviour: '', self: 'false' });
   }
-  if (!labelled) {
+  if (draft) {
     await status(
       values.head,
       'failure',
-      `waits for merge-ok to be reviewed (changes ${behaviour.slice(0, 4).join(', ')})`
+      `draft: not reviewed, mark it ready for review (changes ${behaviour.slice(0, 4).join(', ')})`
     );
-    summary(`#${values.pr} changes shipped behaviour and has no merge-ok yet: not reviewed`);
+    summary(`#${values.pr} changes shipped behaviour and is a draft: not reviewed`);
     return output({ go: 'false', behaviour: behaviour.join(','), self: String(self) });
   }
   await status(values.head, 'pending', `reviewing #${values.pr} at ${values.head.slice(0, 12)}`);
@@ -215,6 +207,111 @@ async function same() {
 
 const NOTICE = 'downstream: bios canary failing on main';
 
+const openNotices = async () =>
+  (await all(`repos/${repo}/issues?state=open`)).filter(
+    (i) => !i.pull_request && i.title.startsWith(NOTICE)
+  );
+
+const issueNow = async (number) => (await request(`repos/${repo}/issues/${number}`)).json();
+
+const comment = (number, body) =>
+  request(`repos/${repo}/issues/${number}/comments`, {
+    method: 'POST',
+    body: JSON.stringify({ body }),
+  });
+
+const setState = (number, state, reason) =>
+  request(`repos/${repo}/issues/${number}`, {
+    method: 'PATCH',
+    body: JSON.stringify(reason ? { state, state_reason: reason } : { state }),
+  });
+
+async function keepOneOpen(title) {
+  const twins = (await openNotices())
+    .filter((i) => i.title === title)
+    .sort((a, b) => a.number - b.number);
+  for (const twin of twins.slice(1)) {
+    await comment(
+      twin.number,
+      `A concurrent merge group opened #${twins[0].number} too. Closing this one as its duplicate.`
+    );
+    await setState(twin.number, 'closed', 'not_planned');
+  }
+  return twins[0]?.number;
+}
+
+async function noticeFailing(found, state, notify) {
+  const title = `${NOTICE} (${(values.bios || 'unknown').slice(0, 12)})`;
+  const body = [
+    `The merge group ${values.head.slice(0, 12)} (${RUN_URL}) found bios's canary failing on main's own pins, so those tests judge no kernel change until bios fixes them:`,
+    '',
+    ...notify.map((n) => `- ${n}`),
+    '',
+    `\`${found?.line ?? state}\``,
+    '',
+    'This issue closes on its own when a later merge group passes the canary.',
+  ].join('\n');
+  const same = (await openNotices())
+    .filter((i) => i.title === title)
+    .sort((x, y) => x.number - y.number)[0];
+  let created;
+  if (same) await comment(same.number, body);
+  else
+    created = await (
+      await request(`repos/${repo}/issues`, {
+        method: 'POST',
+        body: JSON.stringify({ title, body }),
+      })
+    ).json();
+  const kept = (await keepOneOpen(title)) ?? same?.number ?? created.number;
+  const reopened = (await issueNow(kept)).state !== 'open';
+  if (reopened) await setState(kept, 'open');
+  for (const n of notify) console.log(`::warning title=downstream::${n}`);
+  const what = same ? `commented on #${same.number}` : `opened "${title}"`;
+  return verdict(
+    'pr notice',
+    true,
+    `${what}${reopened ? `, reopened #${kept} that a concurrent group closed` : ''}: ${state}`
+  );
+}
+
+const FAILING_REPORT = "found bios's canary failing";
+
+async function reportedSince(issue) {
+  const since = encodeURIComponent(issue.updated_at ?? '1970-01-01T00:00:00Z');
+  const comments = await all(`repos/${repo}/issues/${issue.number}/comments?since=${since}`);
+  return comments.some((c) => String(c.body ?? '').includes(FAILING_REPORT));
+}
+
+async function noticePassing(found) {
+  const closed = [];
+  const kept = [];
+  for (const i of await openNotices()) {
+    const now = await issueNow(i.number);
+    if (now.state !== 'open') continue;
+    if (now.updated_at !== i.updated_at) {
+      kept.push(i.number);
+      continue;
+    }
+    await comment(
+      i.number,
+      `The merge group ${values.head.slice(0, 12)} (${RUN_URL}) passed bios's canary: \`${found.line}\`. Closing.`
+    );
+    await setState(i.number, 'closed', 'completed');
+    if (await reportedSince(i)) {
+      await setState(i.number, 'open');
+      kept.push(i.number);
+    } else closed.push(i.number);
+  }
+  const parts = [
+    ...(closed.length ? [`closed ${closed.map((n) => `#${n}`).join(', ')}`] : []),
+    ...(kept.length
+      ? [`left ${kept.map((n) => `#${n}`).join(', ')} open: a concurrent group reported to it`]
+      : []),
+  ];
+  return verdict('pr notice', true, `PASS: ${parts.length ? parts.join('; ') : 'no notice open'}`);
+}
+
 async function notice() {
   let found;
   try {
@@ -224,59 +321,9 @@ async function notice() {
   }
   const state = found?.state ?? 'none';
   const notify = found?.notify ?? [];
-  const open = (await all(`repos/${repo}/issues?state=open`)).filter(
-    (i) => !i.pull_request && i.title.startsWith(NOTICE)
-  );
-  if (state === 'NOT_JUDGED' || notify.length) {
-    const title = `${NOTICE} (${(values.bios || 'unknown').slice(0, 12)})`;
-    const body = [
-      `The merge group ${values.head.slice(0, 12)} (${RUN_URL}) found bios's canary failing on main's own pins, so those tests judge no kernel change until bios fixes them:`,
-      '',
-      ...notify.map((n) => `- ${n}`),
-      '',
-      `\`${found?.line ?? state}\``,
-      '',
-      'This issue closes on its own when a later merge group passes the canary.',
-    ].join('\n');
-    const same = open.find((i) => i.title === title);
-    if (same) {
-      await request(`repos/${repo}/issues/${same.number}/comments`, {
-        method: 'POST',
-        body: JSON.stringify({ body }),
-      });
-    } else {
-      await request(`repos/${repo}/issues`, {
-        method: 'POST',
-        body: JSON.stringify({ title, body }),
-      });
-    }
-    for (const n of notify) console.log(`::warning title=downstream::${n}`);
-    return verdict(
-      'pr notice',
-      true,
-      `${same ? `commented on #${same.number}` : `opened "${title}"`}: ${state}`
-    );
-  }
+  if (state === 'NOT_JUDGED' || notify.length) return noticeFailing(found, state, notify);
   if (state !== 'PASS') return verdict('pr notice', true, `${state}: nothing to notice`);
-  for (const i of open) {
-    await request(`repos/${repo}/issues/${i.number}/comments`, {
-      method: 'POST',
-      body: JSON.stringify({
-        body: `The merge group ${values.head.slice(0, 12)} (${RUN_URL}) passed bios's canary: \`${found.line}\`. Closing.`,
-      }),
-    });
-    await request(`repos/${repo}/issues/${i.number}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ state: 'closed', state_reason: 'completed' }),
-    });
-  }
-  return verdict(
-    'pr notice',
-    true,
-    open.length
-      ? `PASS: closed ${open.map((i) => `#${i.number}`).join(', ')}`
-      : 'PASS: no notice open'
-  );
+  return noticePassing(found);
 }
 
 if (positionals[0] === 'plan') {

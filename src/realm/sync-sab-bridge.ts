@@ -58,7 +58,7 @@ export type AtomicsWaitLike = (
   timeout?: number
 ) => 'ok' | 'not-equal' | 'timed-out';
 
-const PATH_OPS: ReadonlySet<string> = new Set(SYNC_FS_OPS);
+const UNCOUNTED_OPS: ReadonlySet<string> = new Set([...SYNC_FS_OPS, 'cwd-check', 'cwd-chdir']);
 
 let calls = 0;
 
@@ -132,7 +132,7 @@ export function createSyncSabTransport(
     call(req, timeoutMs, label, transfer = []): SyncFsResult {
       if (deps.memory) publishMemory(sab, deps.memory());
       const id = ++seq;
-      calls += Number(!PATH_OPS.has(req.op));
+      calls += Number(!UNCOUNTED_OPS.has(req.op));
       let out: Uint8Array | null = null;
       let status = 0;
       let offset = 0;

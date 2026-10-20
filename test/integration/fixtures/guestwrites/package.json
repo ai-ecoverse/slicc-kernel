@@ -1,0 +1,12 @@
+{
+  "name": "guestwrites",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "guestwrites": {
+        "wasm": "bin/guestwrites.wasm"
+      }
+    }
+  }
+}

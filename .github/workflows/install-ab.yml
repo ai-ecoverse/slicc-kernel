@@ -15,9 +15,13 @@ on:
         required: false
         default: ''
       pairs:
-        description: A-B pairs, run alternately on one runner
+        description: A-B pairs (even), run alternately A B and B A on one runner
         required: false
-        default: '3'
+        default: '4'
+      serial:
+        description: run pnpm with network and child concurrency 1 (true) or as users do (false)
+        required: false
+        default: 'false'
       offline:
         description: serve the agent lockfile's packages from a local registry (true) or use npm (false)
         required: false
