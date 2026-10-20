@@ -18,6 +18,7 @@ export interface EmscriptenFsForHook extends LiveMountFsApi {
   chdir(path: string): void;
   sliccChdirAt?(path: string): void;
   sliccHeldCwd?(): string;
+  sliccCwdGone?(): boolean;
   chown?(path: string | object, uid: number, gid: number, dontFollow?: boolean): void;
 }
 

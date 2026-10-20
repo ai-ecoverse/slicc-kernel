@@ -12,6 +12,7 @@ export interface HeldCwdFs {
   chdir?(path: string): void;
   cwd?(): string;
   sliccHeldCwd?(): string;
+  sliccCwdGone?(): boolean;
 }
 
 export function holdingCwd(
@@ -22,6 +23,7 @@ export function holdingCwd(
   const { chdir, cwd } = Fs;
   if (!chdir || !cwd) return;
   Fs.sliccHeldCwd = () => cwd.call(Fs);
+  Fs.sliccCwdGone = () => !held.alive();
   Fs.cwd = () => {
     const path = cwd.call(Fs);
     return held.alive() ? path : `${path}${DELETED}`;

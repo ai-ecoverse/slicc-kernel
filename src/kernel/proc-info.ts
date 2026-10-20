@@ -43,4 +43,5 @@ export interface ProcessListing {
   fsCalls?: number;
   opfsCalls?: number;
   opfsOps?: number;
+  cwdChecks?: number;
 }

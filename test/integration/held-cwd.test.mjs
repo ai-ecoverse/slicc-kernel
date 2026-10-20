@@ -122,6 +122,7 @@ const SHELL = (replace) =>
     'echo *',
     'touch made; echo "touch=$?"',
     '(echo sub *)',
+    'bash -c \'pwd\' 2>/dev/null; echo "pwd=$?"',
     'cd .. && ls d',
   ].join('\n');
 
@@ -132,7 +133,7 @@ for (const [name, replace] of REPLACEMENTS) {
     async (t) => {
       const { sh } = await booted(t);
       const r = await sh(SHELL(replace));
-      assert.equal(r.stdout, 'ls=2\n*\ntouch=1\nsub *\nx\n', r.stderr);
+      assert.equal(r.stdout, 'ls=2\n*\ntouch=1\nsub *\npwd=1\nx\n', r.stderr);
       assert.match(r.stderr, /ls: cannot open directory '\.': No such file or directory/);
     }
   );
@@ -186,5 +187,25 @@ test(
       ].join('\n')
     );
     assert.equal(r.stdout, 'before ["old"]\nafter ENOENT\nwrite ENOENT\nparent ["x"]\n', r.stderr);
+  }
+);
+
+test(
+  'bash making relative lookups in a held cwd with no directory changes asks the kernel nothing about the cwd, and once after a change at it (#1164)',
+  TIMEOUT,
+  async (t) => {
+    const { sh } = await booted(t);
+    const checks = async () => Number((await sh('cat /proc/sys/kernel/slicc_cwd_checks')).stdout);
+    await sh('mkdir -p /t/d && touch /t/d/old');
+    const before = await checks();
+    const quiet = await sh('cd /t/d && for i in {1..300}; do test -e old; done; echo ok');
+    assert.equal(quiet.stdout, 'ok\n', quiet.stderr);
+    assert.equal((await checks()) - before, 0);
+    const middle = await checks();
+    const moved = await sh(
+      'cd /t/d && for i in {1..100}; do test -e old; done; (cd / && touch /t/d); for i in {1..100}; do test -e old; done; echo ok'
+    );
+    assert.equal(moved.stdout, 'ok\n', moved.stderr);
+    assert.equal((await checks()) - middle, 1);
   }
 );

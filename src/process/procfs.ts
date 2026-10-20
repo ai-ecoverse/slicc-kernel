@@ -32,6 +32,7 @@ export const SYS_TREE: ProcSysTree = {
     slicc_fs_calls: (listing) => `${listing.fsCalls ?? 0}\n`,
     slicc_opfs_calls: (listing) => `${listing.opfsCalls ?? 0}\n`,
     slicc_opfs_ops: (listing) => `${listing.opfsOps ?? 0}\n`,
+    slicc_cwd_checks: (listing) => `${listing.cwdChecks ?? 0}\n`,
   },
 };
 

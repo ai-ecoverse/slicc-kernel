@@ -45,6 +45,7 @@ import {
   devCreations,
   type FdImports,
   type GlueSyscalls,
+  goneCwdGetcwd,
   type KernelImports,
   kernelAccess,
   kernelLink,
@@ -563,6 +564,7 @@ function kernelWrappers(imports: WebAssembly.Imports, module: object, deps: Wrap
   const fsOf = () => ownValue<ProcessFs>(module, 'FS');
   noFollowUtimes(imports, fsOf, kernelGlue?.utimensat ?? utimensatOf(module), memory);
   kernelAccess(imports, fsOf, memory, kernelGlue);
+  goneCwdGetcwd(imports, fsOf, kernelGlue);
   kernelLink(imports, fsOf, memory, kernelGlue);
   devCreations(imports, fsOf, memory, kernelGlue);
   kernelUname(imports, hostnameOf(init.env), memory, kernelGlue);
