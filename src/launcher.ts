@@ -1076,15 +1076,17 @@ export class Launcher {
 
   private async refusedAt(path: string, name: string, scope: string): Promise<Command | undefined> {
     const refused = [...(await this.commands(scope)).values()].filter((c) => c.origin);
-    if (refused.length === 0) return undefined;
+    if (refused.length === 0 || !(await this.base.exists(path))) return undefined;
     const real = await physicalPathAsync(this.base, path).catch(() => path);
     const at = async (c: Command, which: 'glue' | 'wasm') => {
       const own = (c.origin as { glue: string; wasm: string })[which];
       return own === path || (await physicalPathAsync(this.base, own).catch(() => own)) === real;
     };
+    const owners: Command[] = [];
     for (const c of refused) {
-      if ((await at(c, 'glue')) || (await at(c, 'wasm'))) return c;
+      if ((await at(c, 'glue')) || (await at(c, 'wasm'))) owners.push(c);
     }
+    if (owners.length > 0) return owners.find((c) => c.name === name) ?? owners[0];
     const dir = real.slice(0, real.lastIndexOf('/'));
     for (const c of refused) {
       const origin = c.origin as { abi: string; glue: string };
