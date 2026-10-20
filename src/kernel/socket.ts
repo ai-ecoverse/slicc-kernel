@@ -504,6 +504,7 @@ const LOCAL_ONLY = new Routes();
 export class LoopbackNet {
   private readonly bound = new Map<string, KernelSocket>();
   private readonly dgrams = new Map<number, KernelDgram>();
+  private readonly dgramServices = new Map<number, (datagram: Datagram, to: InetAddr) => void>();
   private readonly unixDgrams = new Map<string, UnixDgram>();
   private readonly activators = new Map<string, () => void>();
   private readonly internal = new Set<number>();
@@ -554,9 +555,16 @@ export class LoopbackNet {
   releaseDgram(addr: InetAddr, socket: KernelDgram): void {
     if (this.dgrams.get(addr.port) === socket) this.dgrams.delete(addr.port);
   }
-  deliverDgram(port: number, datagram: Datagram): boolean {
+  serveDgram(port: number, serve: (datagram: Datagram, to: InetAddr) => void): void {
+    this.dgramServices.set(port, serve);
+  }
+  deliverDgram(port: number, datagram: Datagram, to?: InetAddr): boolean {
     const target = this.dgrams.get(port);
-    return target ? target.deliver(datagram) : false;
+    if (target) return target.deliver(datagram);
+    const service = this.dgramServices.get(port);
+    if (!service) return false;
+    service(datagram, to ?? { family: 'inet', host: '127.0.0.1', port });
+    return true;
   }
   private bindable(addr: Extract<SockAddr, { family: 'inet' }>, kernel: boolean): void {
     if (addr.host !== '0.0.0.0' && !isLoopback(addr.host)) {

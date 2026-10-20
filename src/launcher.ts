@@ -66,6 +66,12 @@ import { CwdTable, type HeldCwdReply, type HeldOptions, inheritedCwd } from './k
 import { spawnWasmProcess, type WasmProcessHandle, type WasmWorkerLike } from './kernel/host.ts';
 import { type JobMember, JobTable } from './kernel/jobs.ts';
 import { type KernelLocks, kernelLocks } from './kernel/lock-service.ts';
+import {
+  enableDnsStub,
+  kernelDnsStub,
+  RESOLV_CONF,
+  RESOLV_CONF_PATH,
+} from './kernel/net/dns-stub.ts';
 import { hostsReader } from './kernel/net/hosts-file.ts';
 import { HttpHandles } from './kernel/net/http-syscalls.ts';
 import { DEFAULT_HOSTNAME, isHostname } from './kernel/net/loopback-names.ts';
@@ -183,6 +189,7 @@ export interface LauncherOptions {
   cdp?: CdpHook;
   facades?: FacadeSpecs;
   uplink?: NetworkUplink;
+  doh?: string | false;
   hostname?: string;
   users?: UsersMode;
   wasmMemories?: { ceiling?: number; idleMs?: number };
@@ -392,6 +399,7 @@ const LAYOUT: ReadonlyArray<[string, number]> = [
   ['/etc', 0o755],
   [PASSWD, 0o644],
   [GROUP, 0o644],
+  [RESOLV_CONF_PATH, 0o644],
   ['/usr', 0o755],
   ['/usr/local', 0o755],
 ];
@@ -767,6 +775,10 @@ export class Launcher {
       roots: packageTlsRoots(this.verifiedFs(options.fs), this.modulesDir),
       ca: this.ca,
     });
+    enableDnsStub(
+      this.net,
+      kernelDnsStub(this.resolver, this.transport, options.uplink, options.doh)
+    );
     enableCdp(this.net, this.cdp);
     this.facades.enable(this.net);
     const fs = this.commandFs(this.base);
@@ -2661,6 +2673,20 @@ export class Launcher {
     return [...this.openFiles].some((nodes) => nodes.holds(path)) || heldUnder(this.held, path);
   }
 
+  private async resolvConf(): Promise<void> {
+    if (isProtected(this.prefixes, RESOLV_CONF_PATH)) return;
+    try {
+      const there = await this.base.lstat(RESOLV_CONF_PATH).then(
+        () => true,
+        () => false
+      );
+      if (there) return;
+      await this.base.writeFile(RESOLV_CONF_PATH, RESOLV_CONF);
+    } catch {
+      return;
+    }
+  }
+
   private async stampLayout(): Promise<void> {
     const layout: Array<[string, number]> = [
       ...LAYOUT,
@@ -2814,6 +2840,7 @@ export class Launcher {
     await this.mountShm();
     await this.pnpmReady();
     await this.users.ensure();
+    await this.resolvConf();
     if (this.owners) await this.stampLayout();
     if (this.owners) await this.sudoer.provision();
     await writeCaFile(this.base, this.ca).catch(() => undefined);
