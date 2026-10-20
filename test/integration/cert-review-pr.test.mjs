@@ -303,11 +303,12 @@ async function fakeApi(t, routes) {
   return { url: `http://127.0.0.1:${server.address().port}`, seen };
 }
 
-const pr = (api, args) =>
+const pr = (api, args, extra = {}) =>
   new Promise((done) => {
     const child = spawn(process.execPath, [fileURLToPath(new URL('pr.mjs', tools)), ...args], {
       env: {
         ...process.env,
+        ...extra,
         GITHUB_API_URL: api,
         GH_TOKEN: 'x',
         GITHUB_OUTPUT: '',
@@ -324,66 +325,61 @@ const pr = (api, args) =>
     child.on('close', (code) => done({ code, out }));
   });
 
-test('the plan reviews every non-draft behaviour change, records a skip as not behaviour, and keeps a draft red and unreviewed', async (t) => {
+test('the plan reviews every non-draft behaviour change, records a skip as not behaviour, and keeps a draft red and unreviewed, reading the draft flag live from the pull request, never from the event', async (t) => {
   let files = [{ filename: 'src/a.ts' }];
+  let live = { draft: false };
   const api = await fakeApi(t, (method, url) => {
     if (url.startsWith('/repos/o/r/pulls/9/files')) return files;
+    if (method === 'GET' && url === '/repos/o/r/pulls/9') return live;
     if (method === 'POST' && url.startsWith('/repos/o/r/statuses/')) return {};
     return undefined;
   });
   const statuses = () => api.seen.filter((x) => x.method === 'POST').map((x) => x.body);
-  const plan = (extra) =>
-    pr(api.url, [
-      'plan',
-      '--repo',
-      'o/r',
-      '--pr',
-      '9',
-      '--head',
-      'h'.repeat(40),
-      '--run',
-      '1',
-      '--guard',
-      'PASS',
-      ...extra,
-    ]);
+  const plan = (extra, env = {}) =>
+    pr(
+      api.url,
+      [
+        'plan',
+        '--repo',
+        'o/r',
+        '--pr',
+        '9',
+        '--head',
+        'h'.repeat(40),
+        '--run',
+        '1',
+        '--guard',
+        'PASS',
+        ...extra,
+      ],
+      env
+    );
   for (const action of ['opened', 'synchronize', 'reopened', 'ready_for_review']) {
-    const go = await plan(['--action', action, '--labels', '', '--draft', 'false']);
+    const go = await plan(['--action', action, '--labels', '']);
     assert.match(go.out, /go=true/, action);
     assert.equal(statuses().at(-1).state, 'pending');
     assert.equal(statuses().at(-1).context, 'cert-review');
   }
-  const legacy = await plan([
-    '--action',
-    'labeled',
-    '--label',
-    'merge-ok',
-    '--labels',
-    'merge-ok',
-    '--draft',
-    'false',
-  ]);
+  const stale = await plan(['--action', 'synchronize', '--labels', ''], { PR_DRAFT: 'true' });
+  assert.match(
+    stale.out,
+    /go=true/,
+    'a synchronize run whose payload still says draft reviews a PR that is ready now (#1224)'
+  );
+  const legacy = await plan(['--action', 'labeled', '--label', 'merge-ok', '--labels', 'merge-ok']);
   assert.match(legacy.out, /go=false/);
   const before = statuses().length;
-  const other = await plan([
-    '--action',
-    'unlabeled',
-    '--label',
-    'bug',
-    '--labels',
-    '',
-    '--draft',
-    'false',
-  ]);
+  const other = await plan(['--action', 'unlabeled', '--label', 'bug', '--labels', '']);
   assert.match(other.out, /go=false/);
   assert.equal(statuses().length, before);
-  for (const extra of [
-    ['--action', 'converted_to_draft', '--labels', 'merge-ok', '--draft', 'true'],
-    ['--action', 'opened', '--labels', '', '--draft', 'true'],
-    ['--action', 'synchronize', '--labels', ''],
+  live = { draft: true };
+  for (const [extra, env] of [
+    [['--action', 'converted_to_draft', '--labels', 'merge-ok'], {}],
+    [['--action', 'ready_for_review', '--labels', ''], { PR_DRAFT: 'false' }],
+    [['--action', 'synchronize', '--labels', ''], {}],
   ]) {
     const count = statuses().length;
-    const waiting = await plan(extra);
+    const waiting = await plan(extra, env);
     assert.match(waiting.out, /go=false/, extra.join(' '));
     assert.equal(statuses().length, count + 1, extra.join(' '));
     assert.equal(statuses().at(-1).state, 'failure');
@@ -392,8 +388,18 @@ test('the plan reviews every non-draft behaviour change, records a skip as not b
       /^draft: not reviewed, mark it ready for review \(changes src\/a\.ts\)/
     );
   }
+  live = undefined;
+  const unread = await plan(['--action', 'ready_for_review', '--labels', '']);
+  assert.notEqual(
+    unread.code,
+    0,
+    'a draft flag it cannot read is an error, never a review or a pass'
+  );
+  assert.doesNotMatch(unread.out, /go=true/);
+  assert.equal(statuses().at(-1).state, 'error');
+  assert.match(statuses().at(-1).description, /could not read whether the pull request is a draft/);
   files = [{ filename: 'README.md' }, { filename: 'test/integration/a.test.mjs' }];
-  const docs = await plan(['--action', 'opened', '--labels', '', '--draft', 'true']);
+  const docs = await plan(['--action', 'opened', '--labels', '']);
   assert.match(docs.out, /go=false/);
   assert.equal(statuses().at(-1).state, 'success');
   assert.equal(
@@ -549,8 +555,7 @@ test("the workflow: same-repo non-draft PRs review the merge ref with main's own
     workflow,
     /\(\(github\.event\.action == 'labeled' \|\| github\.event\.action == 'unlabeled'\) && github\.event\.label\.name != 'cert-review-approved'\) && format\('cert-review-pr-noop-\{0\}', github\.run_id\)/
   );
-  assert.match(jobs.plan, /PR_DRAFT: \$\{\{ github\.event\.pull_request\.draft \}\}/);
-  assert.doesNotMatch(jobs.plan, /--draft/);
+  assert.doesNotMatch(jobs.plan, /PR_DRAFT|--draft|pull_request\.draft/);
   assert.doesNotMatch(workflow, /merge-ok/);
   assert.match(
     jobs.plan,
@@ -637,6 +642,7 @@ test('a change to the reviewer is reviewed only with cert-review-approved on its
   const files = [{ filename: 'tools/cert-review/record.mjs' }];
   const api = await fakeApi(t, (method, url) => {
     if (url.startsWith('/repos/o/r/pulls/9/files')) return files;
+    if (method === 'GET' && url === '/repos/o/r/pulls/9') return { draft: false };
     if (method === 'POST' && url.startsWith('/repos/o/r/statuses/')) return {};
     return undefined;
   });
@@ -654,8 +660,6 @@ test('a change to the reviewer is reviewed only with cert-review-approved on its
       '1',
       '--guard',
       guard,
-      '--draft',
-      'false',
       ...extra,
     ]);
   const unapproved = await plan('FAIL', ['--action', 'synchronize', '--labels', '']);

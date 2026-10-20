@@ -134,7 +134,6 @@ jobs:
           ACTION: ${{ github.event.action }}
           LABEL: ${{ github.event.label.name }}
           LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
-          PR_DRAFT: ${{ github.event.pull_request.draft }}
           GUARD: ${{ needs.guard.outputs.status }}
         run: |
           tools/cert-review/gate.sh 'pr plan' node tools/cert-review/pr.mjs plan --repo "$GITHUB_REPOSITORY" --pr "$PR" --head "$HEAD_SHA" \
