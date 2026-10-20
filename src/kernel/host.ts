@@ -569,6 +569,14 @@ function outOfMemory(opts: SpawnWasmOptions, data: WorkerSays | undefined): bool
   return true;
 }
 
+async function crashReport(
+  process: WasmProcess,
+  onError: ((message: string) => void) | undefined,
+  message: string
+): Promise<void> {
+  if (!(await process.complain(message))) onError?.(message);
+}
+
 export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
   const { promise: ready, resolve: started } = readiness(opts.program.abi);
   const sab = new SharedArrayBuffer(SAB_HEADER_BYTES + SAB_DEFAULT_WINDOW_BYTES);
@@ -656,8 +664,9 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     } else if (data?.type === WASM_PROCESS_EXIT) {
       finish(...dying.status(data.code));
     } else if (data?.type === WASM_PROCESS_ERROR) {
-      if (!dying.ending) opts.onError?.(String(data.message));
-      finish(...dying.status(data.code));
+      const status = dying.status(data.code);
+      if (dying.ending) finish(...status);
+      else void reported(String(data.message)).then(() => finish(...status));
     } else if (data?.type === WASM_THREAD_SPAWN && data.thread) {
       spawnThread(data.thread);
     } else if (data?.type === JS_THREAD_SPAWN && jsThreads) {
@@ -665,10 +674,12 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
     }
   };
   const onMessage = (event: MessageEvent): void => handle(event.data as WorkerSays | undefined);
+  const reported = (message: string) => crashReport(process, opts.onError, message);
   const onError = (event: MessageEvent): void => {
     event.preventDefault();
-    opts.onError?.(String((event as unknown as ErrorEvent).message ?? 'worker error'));
-    finish(CRASHED);
+    void reported(String((event as unknown as ErrorEvent).message ?? 'worker error')).then(() =>
+      finish(CRASHED)
+    );
   };
   worker.addEventListener('message', onMessage);
   worker.addEventListener('error', onError);
