@@ -35,6 +35,10 @@ function refused(specifier: string): Error {
 
 const BASE64_MODULE = 'data:text/javascript;base64,';
 const fromBase64 = Buffer.from.bind(Buffer);
+const toText = Function.prototype.call.bind(Buffer.prototype.toString) as (
+  bytes: Buffer,
+  encoding: 'utf8'
+) => string;
 const PLAIN_BASE64 = /^[A-Za-z0-9+/]+={0,2}$/;
 
 export function refuseModules(): void {
@@ -48,7 +52,7 @@ export function refuseModules(): void {
     load(url, context, next) {
       const payload = url.startsWith(BASE64_MODULE) ? url.slice(BASE64_MODULE.length) : '';
       if (payload.length % 4 !== 0 || !PLAIN_BASE64.test(payload)) return next(url, context);
-      const source = fromBase64(payload, 'base64').toString('utf8');
+      const source = toText(fromBase64(payload, 'base64'), 'utf8');
       return { format: 'module', source, shortCircuit: true };
     },
   });
