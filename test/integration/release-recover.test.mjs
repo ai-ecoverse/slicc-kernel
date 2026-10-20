@@ -9,7 +9,13 @@ import { recover, verdictOf } from '../../tools/release-recover.mjs';
 
 const NAME = '@ai-ecoverse/slicc-kernel';
 
-function fakeRun({ head = 'v1.2.3', latest = { code: 0, stdout: '1.2.2\n' } } = {}) {
+const INTEGRITY = 'sha512-packed';
+
+function fakeRun({
+  head = 'v1.2.3',
+  latest = { code: 0, stdout: '1.2.2\n' },
+  integrity = INTEGRITY,
+} = {}) {
   const calls = [];
   const run = async (cmd, args) => {
     const line = `${cmd} ${args.join(' ')}`;
@@ -23,6 +29,18 @@ function fakeRun({ head = 'v1.2.3', latest = { code: 0, stdout: '1.2.2\n' } } = 
         : { code: 1, stdout: '', stderr: 'npm error code E404' };
     if (line === `npm view ${NAME} dist-tags.latest --prefer-online`)
       return { stderr: '', ...latest };
+    if (line === 'npm pack --dry-run --json')
+      return { code: 0, stdout: JSON.stringify([{ integrity: INTEGRITY }]), stderr: '' };
+    if (line.startsWith('npm view') && line.endsWith('dist.integrity --prefer-online'))
+      return integrity
+        ? { code: 0, stdout: `${integrity}\n`, stderr: '' }
+        : { code: 1, stdout: '', stderr: 'npm error code E404' };
+    if (line === 'npm publish')
+      return {
+        code: 0,
+        stdout: '+ @ai-ecoverse/slicc-kernel@1.2.3\n',
+        stderr: 'npm notice publishing\n',
+      };
     if (line.startsWith('npm view') && line.endsWith('dist.tarball --prefer-online'))
       return { code: 0, stdout: 'https://registry.npmjs.org/x.tgz\n', stderr: '' };
     if (cmd === 'npm') return { code: 0, stdout: '', stderr: '' };
@@ -142,4 +160,34 @@ test('a version npm took but does not serve yet is handed to release / verify on
     said.join('\n')
   );
   assert.equal(verdictOf(done), 'release-recover: PASS nothing to recover');
+});
+
+test("a publish npm takes but never serves is release-recover INCOMPLETE, never PASS, and npm publish's own output is in the log; a version served with another integrity is not served (#1228, 1.134.2)", async () => {
+  const lost = fakeRun({ head: 'v1.2.3', integrity: '' });
+  const said = [];
+  const done = await recover({
+    name: NAME,
+    run: lost.run,
+    sleep: async () => {},
+    head: async () => false,
+    log: (l) => said.push(l),
+  });
+  assert.ok(lost.calls.includes('npm publish'));
+  assert.deepEqual(done.unserved, [`${NAME}@1.2.3`]);
+  assert.match(
+    verdictOf(done),
+    /^release-recover: INCOMPLETE npm took @ai-ecoverse\/slicc-kernel@1\.2\.3 but does not serve it/
+  );
+  assert.ok(said.includes('npm publish 1.2.3 exited 0'), said.join('\n'));
+  assert.ok(
+    said.some((l) => l.startsWith('npm publish stdout:\n+ @ai-ecoverse/slicc-kernel@1.2.3'))
+  );
+  assert.ok(said.some((l) => l.startsWith('npm publish stderr:\nnpm notice publishing')));
+  const other = fakeRun({ head: 'v1.2.3', integrity: 'sha512-someone-else' });
+  const wrong = await recover({ name: NAME, run: other.run, ...quiet });
+  assert.deepEqual(wrong.unserved, [`${NAME}@1.2.3`]);
+  const fine = fakeRun({ head: 'v1.2.3' });
+  const ok = await recover({ name: NAME, run: fine.run, ...quiet });
+  assert.equal(ok.unserved, undefined);
+  assert.equal(verdictOf(ok), `release-recover: PASS recovered ${NAME}@1.2.3 on npm`);
 });
