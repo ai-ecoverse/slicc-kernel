@@ -20,18 +20,22 @@ async function install(kernel, name) {
   }
 }
 
+const IDLE = 5000;
+const HOLD = 3000;
+const SLEEP_MS = 3000;
+
 test('a spawn beyond the wasm-memory ceiling waits while the processes ahead of it are still starting, and gets in when one ends, instead of EAGAIN (#1196, #970)', {
   timeout: 120_000,
 }, async (t) => {
   const kernel = await createNodeKernel({
     users: 'off',
-    wasmMemories: { ceiling: 2, idleMs: 1500 },
+    wasmMemories: { ceiling: 2, idleMs: IDLE },
   });
   t.after(() => kernel.terminate());
   t.after(() => testing.setTestSyscallHook(undefined));
   await install(kernel, 'wasm-coreutils');
   assert.equal((await kernel.run(['sleep', '0'], { cwd: '/' })).status, 0);
-  const holds = [1000, 2000];
+  const holds = [HOLD, HOLD];
   const held = new Map();
   testing.setTestSyscallHook(async ({ pid }) => {
     if (!held.has(pid)) held.set(pid, holds.length > 0 ? holds.shift() : 0);
@@ -45,7 +49,7 @@ test('a spawn beyond the wasm-memory ceiling waits while the processes ahead of 
   const runs = await Promise.all(
     [0, 1, 2].map((i) =>
       new Promise((r) => setTimeout(r, i * 50))
-        .then(() => kernel.run(['sleep', '1'], { cwd: '/' }))
+        .then(() => kernel.run(['sleep', String(SLEEP_MS / 1000)], { cwd: '/' }))
         .then(
           (r) => r.status,
           (e) => e.code ?? String(e)
