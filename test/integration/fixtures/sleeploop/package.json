@@ -1,0 +1,12 @@
+{
+  "name": "sleeploop",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "sleeploop": {
+        "wasm": "bin/sleeploop.wasm"
+      }
+    }
+  }
+}
