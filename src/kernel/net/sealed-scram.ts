@@ -27,32 +27,55 @@ export function base64Of(bytes: Uint8Array): string {
   return btoa(bin);
 }
 
+export interface ClientFirst {
+  header: string;
+  bare: string;
+}
+
+export function clientFirstOf(message: string): ClientFirst | undefined {
+  const m = /^((?:n|y|p=[A-Za-z0-9.-]+),,)(n=[^,]*,r=[^,]+)$/.exec(message);
+  return m ? { header: m[1] as string, bare: m[2] as string } : undefined;
+}
+
 export function clientFirstBare(message: string): string | undefined {
-  const m = /^n,,(n=[^,]*,r=[^,]+)$/.exec(message);
-  return m ? (m[1] as string) : undefined;
+  return clientFirstOf(message)?.bare;
+}
+
+const latinBytes = (text: string): Uint8Array => Uint8Array.from(text, (c) => c.charCodeAt(0));
+
+export function channelOf(header: string, binding?: Uint8Array): string {
+  const head = latinBytes(header);
+  const all = new Uint8Array(head.length + (binding?.length ?? 0));
+  all.set(head);
+  if (binding) all.set(binding, head.length);
+  return base64Of(all);
 }
 
 const SERVER_FIRST = /^r=([^,]+),s=([^,]+),i=(\d{1,6})$/;
-const CLIENT_FINAL = /^(c=biws,r=([^,]+)),p=([^,]+)$/;
+const CLIENT_FINAL = /^(c=([A-Za-z0-9+/]+={0,2}),r=([^,]+)),p=([^,]+)$/;
 const SCRAM_MAX = 1024;
 
 export function exchangeOf(
   clientFirst: string,
   serverFirst: string,
   clientFinal: string
-): { exchange: ScramExchange; proof: Uint8Array } | undefined {
-  const bare = clientFirstBare(clientFirst);
+): { exchange: ScramExchange; proof: Uint8Array; channel: Uint8Array; nonce: string } | undefined {
+  const first = clientFirstOf(clientFirst);
+  const bare = first?.bare;
   const sf = SERVER_FIRST.exec(serverFirst);
   const fin = CLIENT_FINAL.exec(clientFinal);
   if (!bare || !sf || !fin || [bare, serverFirst, clientFinal].some((t) => t.length > SCRAM_MAX))
     return undefined;
+  const channel = base64Bytes(fin[2] as string);
   const cnonce = bare.slice(bare.indexOf(',r=') + 3);
   const nonce = sf[1] as string;
   const salt = base64Bytes(sf[2] as string);
   const iterations = Number(sf[3]);
-  const proof = base64Bytes(fin[3] as string);
+  const proof = base64Bytes(fin[4] as string);
   const ok =
-    fin[2] === nonce &&
+    channel !== undefined &&
+    latin(channel).startsWith(first.header) &&
+    fin[3] === nonce &&
     nonce.startsWith(cnonce) &&
     iterations >= 1 &&
     iterations <= 100_000 &&
@@ -68,7 +91,15 @@ export function exchangeOf(
       iterations,
     },
     proof: proof as Uint8Array,
+    channel: channel as Uint8Array,
+    nonce,
   };
+}
+
+function latin(bytes: Uint8Array): string {
+  let out = '';
+  for (const b of bytes) out += String.fromCharCode(b);
+  return out;
 }
 
 async function hmac(key: Uint8Array, data: Uint8Array): Promise<Uint8Array> {

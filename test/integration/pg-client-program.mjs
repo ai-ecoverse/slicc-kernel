@@ -57,12 +57,20 @@ export default async function main(ctx) {
   const r10 = await next();
   out.mechanisms = latin(r10.subarray(9)).split('\\0').filter(Boolean);
   const first = 'n=,r=fixedtestclientnonce';
-  const initial = 'n,,' + first;
-  await w.write(msg('p', [...enc.encode('SCRAM-SHA-256\\0'), ...int32(initial.length), ...enc.encode(initial)]));
+  const header = o.gs2 === 'p' ? 'p=tls-server-end-point,,' : (o.gs2 ?? 'n') + ',,';
+  const mechanism = o.gs2 === 'p' ? 'SCRAM-SHA-256-PLUS' : 'SCRAM-SHA-256';
+  const initial = header + first;
+  await w.write(msg('p', [...enc.encode(mechanism + '\\0'), ...int32(initial.length), ...enc.encode(initial)]));
   const r11 = await next();
+  if (String.fromCharCode(r11[0]) === 'E') {
+    out.steps.push('E ' + latin(r11.subarray(5)));
+    await ctx.write(1, JSON.stringify(out));
+    return 0;
+  }
   const serverFirst = latin(r11.subarray(9));
   const attrs = Object.fromEntries(serverFirst.split(',').map((a) => [a[0], a.slice(2)]));
-  const finalBare = 'c=biws,r=' + attrs.r;
+  const cbind = o.gs2 === 'p' ? bytesOf(atob(o.binding)) : new Uint8Array(0);
+  const finalBare = 'c=' + b64(new Uint8Array([...bytesOf(header), ...cbind])) + ',r=' + attrs.r;
   const auth = first + ',' + serverFirst + ',' + finalBare;
   const k = await keysFor(o.password, bytesOf(atob(attrs.s)), Number(attrs.i), auth);
   await w.write(msg('p', enc.encode(finalBare + ',p=' + k.proof)));

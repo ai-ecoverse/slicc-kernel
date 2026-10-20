@@ -74,7 +74,11 @@ async function kernelWith(t, servers, answer) {
       cancel: async () => {},
     }),
   };
-  const kernel = await createNodeKernel({ users: 'off', sealed, network: { uplink, transport } });
+  const kernel = await createNodeKernel({
+    users: 'off',
+    ...(answer ? { sealed } : {}),
+    network: { uplink, transport },
+  });
   t.after(() => kernel.terminate());
   await install(kernel, 'wasm-tls-engine');
   await kernel.writeFile('/node_modules/@ai-ecoverse/wasm-tls-engine/dist/roots.der', ca.der);
@@ -151,5 +155,103 @@ test(
     assert.equal(got.steps.at(-1), 'error ERR_SSL_PROTOCOL_ERROR', JSON.stringify(got));
     assert.equal(JSON.stringify(got).includes('received c=biws'), false, JSON.stringify(got));
     assert.equal(JSON.stringify(got).includes(VALUE), false);
+  }
+);
+
+const b64 = (bytes) => Buffer.from(bytes).toString('base64');
+const header = (db) =>
+  db.seen.plus.finals.map((f) =>
+    Buffer.from(f.slice(2, f.indexOf(',')), 'base64')
+      .toString('latin1')
+      .slice(0, 3)
+  );
+
+test(
+  'the SCRAM-PLUS fixture refuses as PostgreSQL does: y,, after it offered PLUS, and a c= whose binding is not its leaf, so the binding rows mean something (jsh#531)',
+  TIMEOUT,
+  async (t) => {
+    const leaf = ca.server('db.test');
+    const db = await pgFixture(t, leaf, 'TEST-ONLY-OWN-PASSWORD-1', { plus: true });
+    const raw = await kernelWith(t, [['db.test', db.port]]);
+    const y = await raw.run({
+      host: 'db.test',
+      port: 5432,
+      password: 'TEST-ONLY-OWN-PASSWORD-1',
+      gs2: 'y',
+    });
+    assert.deepEqual(y.tls, { verified: true, substitutes: false });
+    assert.deepEqual(y.mechanisms, ['SCRAM-SHA-256-PLUS', 'SCRAM-SHA-256']);
+    assert.match(y.steps.at(-1), /SCRAM channel binding negotiation error/);
+    const wrong = await raw.run({
+      host: 'db.test',
+      port: 5432,
+      password: 'TEST-ONLY-OWN-PASSWORD-1',
+      gs2: 'p',
+      binding: b64(Buffer.alloc(32, 7)),
+    });
+    assert.match(wrong.steps.at(-1), /SCRAM channel binding check failed/);
+    const right = await raw.run({
+      host: 'db.test',
+      port: 5432,
+      password: 'TEST-ONLY-OWN-PASSWORD-1',
+      gs2: 'p',
+      binding: b64(db.binding),
+    });
+    assert.equal(right.steps.includes('final ok'), true, JSON.stringify(right));
+    assert.deepEqual(db.seen.plus.refused, [
+      'SCRAM channel binding negotiation error',
+      'SCRAM channel binding check failed',
+    ]);
+    assert.equal(db.seen.authenticated, 1);
+  }
+);
+
+test(
+  'pg SCRAM-SHA-256-PLUS with a sealed password: y,, (libpq prefer), p= with the right binding (pg enableChannelBinding), p= with a wrong one, and n,, all authenticate, the kernel binding to the verified leaf where the server would refuse what the program sent (jsh#531)',
+  TIMEOUT,
+  async (t) => {
+    const db = await pgFixture(t, ca.server('db.test'), VALUE, { plus: true });
+    const { run } = await kernelWith(t, [['db.test', db.port]], matched);
+    const results = [];
+    for (const o of [
+      { gs2: 'y' },
+      { gs2: 'p', binding: b64(db.binding) },
+      { gs2: 'p', binding: b64(Buffer.alloc(32, 7)) },
+      { gs2: 'n' },
+    ]) {
+      const got = await run({ host: 'db.test', port: 5432, password: PH, ...o });
+      assert.deepEqual(got.mechanisms, ['SCRAM-SHA-256-PLUS', 'SCRAM-SHA-256']);
+      results.push(got.steps.includes('final ok') && got.steps.includes('R 0'));
+      assert.equal(JSON.stringify(got).includes(VALUE), false);
+    }
+    assert.deepEqual(results, [true, true, true, true], JSON.stringify(db.seen.plus));
+    assert.deepEqual(db.seen.plus.refused, []);
+    assert.deepEqual(header(db), ['p=t', 'p=t', 'p=t', 'n,,']);
+    assert.equal(db.seen.authenticated, 4);
+  }
+);
+
+test(
+  'pg SCRAM-SHA-256 in a substituting session: a program using its own password with n,, still authenticates against a PLUS server, and y,, against a server without PLUS goes through unchanged (jsh#531)',
+  TIMEOUT,
+  async (t) => {
+    const own = 'TEST-ONLY-OWN-PASSWORD-1';
+    const plus = await pgFixture(t, ca.server('db.test'), own, { plus: true });
+    const a = await kernelWith(t, [['db.test', plus.port]], () => ({
+      v: 1,
+      error: { code: 'EACCES' },
+    }));
+    const mine = await a.run({ host: 'db.test', port: 5432, password: own, gs2: 'n' });
+    assert.equal(mine.steps.includes('final ok'), true, JSON.stringify(mine));
+    assert.deepEqual(mine.tls, { verified: true, substitutes: true });
+    const plain = await pgFixture(t, ca.server('db.test'), VALUE);
+    const b = await kernelWith(t, [['db.test', plain.port]], matched);
+    const y = await b.run({ host: 'db.test', port: 5432, password: PH, gs2: 'y' });
+    assert.deepEqual(y.mechanisms, ['SCRAM-SHA-256']);
+    assert.equal(y.steps.includes('final ok'), true, JSON.stringify(y));
+    const final = plain.seen.messages
+      .map((m) => m.subarray(5).toString('latin1'))
+      .find((m) => m.startsWith('c='));
+    assert.equal(final.slice(0, 7), 'c=eSws,');
   }
 );
