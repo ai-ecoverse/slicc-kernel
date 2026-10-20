@@ -114,11 +114,15 @@ test('a WASI program can stat, open and read /proc/self/exe as the program file,
     'print(stat.S_ISLNK(os.lstat(p).st_mode), os.readlink(p))',
     `print(os.stat(p).st_size == os.stat('${python}').st_size, stat.S_ISREG(os.stat(p).st_mode))`,
     "print(open(p, 'rb').read(4))",
+    'for mode in (os.O_WRONLY, os.O_RDWR, os.O_RDONLY | os.O_TRUNC):',
+    '    try: os.open(p, mode); print("opened")',
+    '    except OSError as e: print(e.strerror)',
+    `print(os.stat('${python}').st_size == os.stat(p).st_size)`,
   ].join('\n');
   const r = await kernel.run(['python3', '-c', script], { cwd: '/' });
   assert.deepEqual(r, {
     status: 0,
-    stdout: `True ${python}\nTrue True\nb'\\x00asm'\n`,
+    stdout: `True ${python}\nTrue True\nb'\\x00asm'\n${'Read-only file system\n'.repeat(3)}True\n`,
     stderr: '',
   });
 });

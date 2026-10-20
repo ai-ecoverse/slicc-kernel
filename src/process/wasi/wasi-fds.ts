@@ -803,7 +803,7 @@ export class WasiFds {
     if (kernelDevice !== undefined) return kernelDevice;
     const alias = stdioAlias(path);
     if (alias !== undefined) return this.reopen(alias);
-    const outside = this.fs.escape?.(path);
+    const outside = this.escaped(path, oflags, rights);
     if (outside !== undefined) return this.open(outside, oflags, rights, fdflags, mode);
     if (exclusive && !(oflags & OFLAGS.DIRECTORY) && this.madeAtOnce(path, mode)) {
       return this.regular(path, undefined, oflags, rights, fdflags, mode, true);
@@ -822,6 +822,13 @@ export class WasiFds {
     if (!s && !(oflags & OFLAGS.CREAT)) throw new WasiError('ENOENT');
     refuseWrite(s, oflags, rights);
     return this.regular(path, s, oflags, rights, fdflags, mode);
+  }
+
+  private escaped(path: string, oflags: number, rights: bigint): string | undefined {
+    const outside = this.fs.escape?.(path);
+    if (outside === undefined) return undefined;
+    refuseWrite({ readonly: true }, oflags | (oflags & OFLAGS.CREAT ? OFLAGS.TRUNC : 0), rights);
+    return outside;
   }
 
   private regular(
