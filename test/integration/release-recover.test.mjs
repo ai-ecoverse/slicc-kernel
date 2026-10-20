@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { recover, verdictOf } from '../../tools/release-recover.mjs';
+import { publishReport, recover, verdictOf } from '../../tools/release-recover.mjs';
 
 const NAME = '@ai-ecoverse/slicc-kernel';
 
@@ -239,4 +239,40 @@ test("release-recover checks a publish against npm publish's own report, publish
     ),
     said.join('\n')
   );
+});
+
+test("npm 11's publish --json report, keyed by package name, gives the published integrity, as do the flat and array forms; a report for another package gives none (1.136.7)", () => {
+  const keyed = `sync hooks: ✔️(pre-commit)
+{
+  "@ai-ecoverse/slicc-kernel": {
+    "id": "@ai-ecoverse/slicc-kernel@1.136.7",
+    "name": "@ai-ecoverse/slicc-kernel",
+    "version": "1.136.7",
+    "size": 3045328,
+    "unpackedSize": 12622225,
+    "shasum": "3f029dd2a78930f47eaf68a9287121d47da256c8",
+    "integrity": "sha512-7Gywj93fB/lOVHa8AK8Miv9jAwgof9ZUfjtkqje4nK25tV4It3hF4E24JqrFpY7+KkFigvCDwp/IozKZsSPjJA==",
+    "filename": "ai-ecoverse-slicc-kernel-1.136.7.tgz",
+    "files": []
+  }
+}
+`;
+  const want =
+    'sha512-7Gywj93fB/lOVHa8AK8Miv9jAwgof9ZUfjtkqje4nK25tV4It3hF4E24JqrFpY7+KkFigvCDwp/IozKZsSPjJA==';
+  assert.equal(publishReport(keyed, NAME, '1.136.7'), want);
+  assert.equal(
+    publishReport(
+      keyed.replace('"@ai-ecoverse/slicc-kernel": {', '"other-key": {'),
+      NAME,
+      '1.136.7'
+    ),
+    want
+  );
+  assert.equal(
+    publishReport(keyed.replaceAll('slicc-kernel', 'other'), NAME, '1.136.7'),
+    undefined
+  );
+  assert.equal(publishReport(`{"integrity":"sha512-flat"}`, NAME, '1.2.3'), 'sha512-flat');
+  assert.equal(publishReport(`[{"integrity":"sha512-array"}]`, NAME, '1.2.3'), 'sha512-array');
+  assert.equal(publishReport('no report', NAME, '1.2.3'), undefined);
 });

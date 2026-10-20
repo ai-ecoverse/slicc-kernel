@@ -82,11 +82,20 @@ async function serving(label, served, sleep, log) {
   return true;
 }
 
-export function publishReport(stdout) {
+function reportFor(report, name, version) {
+  if (Array.isArray(report)) return report[0];
+  if (typeof report?.integrity === 'string') return report;
+  if (report && typeof report === 'object') {
+    if (report[name]) return report[name];
+    return Object.values(report).find((one) => one?.id === `${name}@${version}`);
+  }
+  return undefined;
+}
+
+export function publishReport(stdout, name = '', version = '') {
   const at = stdout.search(/^[[{]/m);
   try {
-    const report = JSON.parse(at < 0 ? '' : stdout.slice(at));
-    const one = Array.isArray(report) ? report[0] : report;
+    const one = reportFor(JSON.parse(at < 0 ? '' : stdout.slice(at)), name, version);
     return typeof one?.integrity === 'string' && one.integrity ? one.integrity : undefined;
   } catch {
     return undefined;
@@ -128,7 +137,7 @@ async function publishNewer({ name, version, run, published, sleep, log, packed 
         if (text.trim()) log(`npm publish ${stream}:\n${text.trimEnd()}`);
       }
       if (r.code !== 0) return r;
-      const integrity = publishReport(r.stdout);
+      const integrity = publishReport(r.stdout, name, version);
       if (!integrity)
         throw new Error(
           `npm publish ${version} exited 0 but printed no JSON report with an integrity`
