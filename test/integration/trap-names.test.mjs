@@ -33,7 +33,7 @@ test("a backtrace names sidecar that doesn't fit the module prints one warning a
   await kernel.writeFile('/home/fit/trap.wasm.names', sidecar(['_start', 'boom']));
   const fits = await kernel.run(['/home/fit/trap.wasm'], { cwd: '/', env });
   assert.equal(fits.status, 134);
-  assert.match(fits.stderr, /^trap: wasm trap: unreachable\n/);
+  assert.match(fits.stderr, /^\/home\/fit\/trap\.wasm: wasm trap: unreachable\n/);
   assert.match(fits.stderr, /at boom \(wasm:\/\/wasm\/[^)]*wasm-function\[1\]/);
   assert.doesNotMatch(fits.stderr, /doesn't fit/);
 
@@ -43,9 +43,9 @@ test("a backtrace names sidecar that doesn't fit the module prints one warning a
   assert.equal(off.status, 134);
   const warnings = off.stderr.split('\n').filter((l) => l.includes("doesn't fit"));
   assert.deepEqual(warnings, [
-    "trap: /home/off/trap.wasm.names names 3 functions, but the module has 2: it doesn't fit, so the frames show raw indices",
+    "/home/off/trap.wasm: /home/off/trap.wasm.names names 3 functions, but the module has 2: it doesn't fit, so the frames show raw indices",
   ]);
-  assert.match(off.stderr, /\ntrap: wasm trap: unreachable\n/);
+  assert.match(off.stderr, /\n\/home\/off\/trap\.wasm: wasm trap: unreachable\n/);
   assert.match(off.stderr, /at wasm:\/\/wasm\/[^\s]*wasm-function\[1\]/);
   assert.doesNotMatch(off.stderr, /at (boom|_start|extra) \(/);
 });
