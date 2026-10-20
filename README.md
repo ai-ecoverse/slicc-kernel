@@ -505,10 +505,20 @@ The module's default export (or its `main` export) is called with a context and 
         - `AUTH LOGIN`: the password line (the second line, or the first after `AUTH LOGIN <user>`) is decoded, substituted (`auth-login`) and re-encoded; the user line goes out as written.
         - Every other line goes out as written. After the first `AUTH`, or once `MAIL`, `RCPT`, `DATA` or `BDAT` is seen, so is the rest of the session. A line still unfinished after 2 s, or longer than 4 KiB, is sent as written, and so is the rest.
       - **pg:** a session that starts with a protocol 3 `StartupMessage` (after `sslmode`'s `SSLRequest` upgrade, or with direct TLS) is followed message by message. The only position is the **`PasswordMessage` answering `AuthenticationCleartextPassword` (`R` 3)**, as the program read it from the server. The password is substituted (`password-cleartext`) and the message is framed again. **SCRAM-SHA-256** (`R` 10, the pg 14+ default) works with an unmodified client:
-        - **What the server is offered:** in a session that can substitute, the kernel offers the program only `SCRAM-SHA-256`, never `-PLUS`. The program's client computes its proof from the placeholder. Dropping `-PLUS` costs nothing here: the kernel terminates and verifies the TLS itself, so channel binding would only bind to the kernel's own session. A client that **requires** channel binding (libpq's `channel_binding=require`) refuses the connection and never gets the value, so leave it at `prefer` or `disable` for sealed SCRAM.
+        - **What the program is offered:** the server's mechanisms. `SCRAM-SHA-256-PLUS` is offered only when the kernel can bind to the server: a verified session whose leaf certificate's signature hash is SHA-256, SHA-384 or SHA-512, with MD5 and SHA-1 counting as SHA-256 (RFC 5929 §4.1). With any other hash (RSA-PSS or Ed25519, say), `-PLUS` is dropped. So libpq's default `channel_binding=prefer`, `require`, and node-postgres' `enableChannelBinding` all work.
+        - **Channel binding (`tls-server-end-point`):** the kernel changes only what the server would refuse.
+          - `n,,` goes out as written.
+          - `y,,` goes out as written to a server that didn't offer `-PLUS`. Otherwise it becomes `SCRAM-SHA-256-PLUS` with `p=tls-server-end-point,,` (or `n,,` when the kernel can't bind), because pg refuses `y,,` from a client after offering `-PLUS`.
+          - `p=tls-server-end-point,,` keeps its header. Its `c=` binding data becomes the hash of the leaf the kernel verified, when the program's differs.
+          - Any other `p=` type is changed to the kernel's choice.
+
+          So a program that asks for binding is bound to the real server. A program using its own password in such a session still authenticates whenever nothing had to change: `n,,`, `y,,` without `-PLUS`, or a right `p=`.
+        - **The vault:** substitution with `-PLUS` (a program's `p=tls-server-end-point`) needs slicc-vault ≥ 1.15.1. An older vault refuses `p=` with `EINVAL` and fails closed. A program's `p=tls-unique` or `p=tls-exporter` fails in a substituting session either way: the vault refuses it with a placeholder (`EINVAL`), and with the program's own password, the kernel's rewrite to `tls-server-end-point` invalidates its proof. PostgreSQL supports only `tls-server-end-point` anyway.
+        - **Two auth messages:** the vault and the check against the placeholder see the program's own messages (P). The server sees the kernel's (S), with its header and `c=`. The real proof is computed over S, and the server's signature is verified over S before the program gets the placeholder's signature over P.
         - **The match:** the kernel sends the three SCRAM messages and that proof to the vault (`scram-sha-256`, with no placeholders), and the vault names the one bound placeholder whose proof matches.
         - **The exchange:** the kernel recomputes the proof from the value and sends that instead. It checks the server's final signature against the value **before** it hands the program the signature its own placeholder-based check expects. A server whose signature doesn't verify, or that answers with an error, ends the session (`EPROTO`) without passing it on. The salted password and the derived keys are wiped after the exchange.
-        - **Requirements:** only the plain GS2 header (`n,,`) and the bare RFC 5802 messages; at most 100000 iterations.
+        - **Requirements:** a GS2 header without an authorization identity (`n,,`, `y,,` or `p=<type>,,`), whose `c=` starts with it, and the bare RFC 5802 messages; at most 100000 iterations.
+        - **A stale vault value:** on a verified session, a value the server no longer accepts makes its final signature fail to verify. The program sees `EPROTO`, not pg's `28P01`. This is by design: the kernel never passes on a signature it couldn't check.
 
         Anything else goes out as written: the startup, an MD5 (`R` 5) answer, every later message, and a frame over 16 KiB. A server whose `pg_hba` asks for MD5 gets the placeholder, and refuses.
       - **Vault anchors** (§3.19.6) are for private-CA services such as managed pg and corporate APIs.
@@ -1265,6 +1275,16 @@ Not part of the run yet: the rest of bios's setup (the `rest` shard, the upgrade
 ## Test fixtures
 
 The WASIX fixtures of `test/integration/epoll.test.mjs` (#674), under `test/integration/fixtures/`, are committed with their sources, build scripts and built wasm.
+
+### `pg-fixture` with `plus`
+
+`test/integration/pg-fixture.mjs`, `pgFixture(t, cert, password, { plus: true })`: pg-gateway's SCRAM-SHA-256 server, which offers `SCRAM-SHA-256-PLUS` too and refuses as PostgreSQL's `auth-scram.c` does (jsh#531):
+- `y,,` after it offered `-PLUS`: "SCRAM channel binding negotiation error";
+- `p=` with `SCRAM-SHA-256`, and `SCRAM-SHA-256-PLUS` without `p=`;
+- a channel-binding type other than `tls-server-end-point`;
+- a `c=` other than base64 of the GS2 header plus, for `-PLUS`, the SHA-256 of its leaf.
+
+The refusals and the client-final messages are recorded in `seen.plus`. The real-server check is slicc-jsh's, against PostgreSQL over SSL.
 
 ### `heldcwd`
 
