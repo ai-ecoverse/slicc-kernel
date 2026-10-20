@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createHash, createPrivateKey } from 'node:crypto';
+import { createHash, createPrivateKey, generateKeyPairSync } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import { createServer as createTcp, connect as tcp } from 'node:net';
 import { join, relative } from 'node:path';
@@ -1238,5 +1238,41 @@ test(
     }
     assert.deepEqual([...seen], ['ERR_OSSL_BAD_DECRYPT']);
     assert.equal(dials.count, 3);
+  }
+);
+
+test(
+  'an encrypted client key the engine cannot use (Ed25519) is ERR_OSSL_UNSUPPORTED with the right passphrase, not a wrong-passphrase error, and still ERR_OSSL_BAD_DECRYPT with a wrong one (#1205)',
+  TIMEOUT,
+  async (t) => {
+    const server = await recordingServer(t, ca.server('secure.test'));
+    const { run, dials } = await kernelWith(t, [['secure.test', server.port]]);
+    const mine = clientCa.server('kernel client', { eku: CLIENT_AUTH });
+    const { privateKey } = generateKeyPairSync('ed25519', {
+      privateKeyEncoding: {
+        type: 'pkcs8',
+        format: 'pem',
+        cipher: 'aes-256-cbc',
+        passphrase: 'open sesame',
+      },
+      publicKeyEncoding: { type: 'spki', format: 'pem' },
+    });
+    const tls = { ca: ca.pem, cert: mine.cert, key: privateKey };
+    const right = await run({
+      host: 'secure.test',
+      port: 4433,
+      tls: { ...tls, passphrase: 'open sesame' },
+    });
+    const wrong = await run({
+      host: 'secure.test',
+      port: 4433,
+      tls: { ...tls, passphrase: badDecrypt(privateKey, 'wrong') },
+    });
+    assert.deepEqual(
+      [right.code, wrong.code],
+      ['ERR_OSSL_UNSUPPORTED', 'ERR_OSSL_BAD_DECRYPT'],
+      JSON.stringify(right)
+    );
+    assert.equal(dials.count, 0);
   }
 );
