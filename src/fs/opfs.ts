@@ -331,8 +331,9 @@ export class OpfsFs implements KernelFs {
       this.channel.onmessage = ({ data }) => {
         const { paths, trees, outside } = noticeOf(data);
         for (const path of [...paths, ...trees]) this.forget(normalizePath(path));
-        remote?.emit({ paths, trees });
-        if (outside) void this.noticed(paths.map(normalizePath), Date.now());
+        const tell = () => remote?.emit({ paths, trees });
+        if (!outside) tell();
+        else void this.noticed(paths.map(normalizePath), Date.now()).finally(tell);
       };
       (this.channel as BroadcastChannel & { unref?: () => void }).unref?.();
     }
