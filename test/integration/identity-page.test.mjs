@@ -8,7 +8,7 @@ after(() => chrome.close());
 
 const same = (line) => {
   const ids = [...line.matchAll(/\d+:\d+/g)].map((m) => m[0]);
-  return ids.length > 0 && ids.every((id) => id === ids[0]) ? ids[0] : `mismatch ${line}`;
+  return ids.length === 4 && ids.every((id) => id === ids[0]) ? ids[0] : `mismatch ${line}`;
 };
 
 test('on the OPFS root a file has one dev:ino across stat, lstat, fstat and fstatat, in WASIX, WASI and Emscripten programs, also kept by a rename (#1287)', async (t) => {
@@ -20,13 +20,13 @@ test('on the OPFS root a file has one dev:ino across stat, lstat, fstat and fsta
     ['package.json', 'bin/idtest.wasm']
   );
   const py =
-    'import os,sys; p=sys.argv[1]; fd=os.open(p,os.O_RDONLY); s=[os.stat(p),os.lstat(p),os.fstat(fd),os.stat(p,dir_fd=None)]; print(" ".join("%d:%d"%(x.st_dev,x.st_ino) for x in s))';
+    'import os,sys; p=sys.argv[1]; fd=os.open(p,os.O_RDONLY); d=os.open(".",os.O_RDONLY); s=[os.stat(p),os.lstat(p),os.fstat(fd),os.stat(p,dir_fd=d)]; print(" ".join("%d:%d"%(x.st_dev,x.st_ino) for x in s))';
   const r = await bash(
     [
       'mkdir -p /home/cone/h2 && cd /home/cone/h2 && echo x > f',
       'idtest f',
       `python3 -c '${py}' f`,
-      'echo "$(stat -c %d:%i f) $(stat -L -c %d:%i f) $(exec 3< f; stat -L -c %d:%i /dev/fd/3)"',
+      'a=$(stat -c %d:%i f) && b=$(stat -L -c %d:%i f) && c=$(exec 3< f; stat -L -c %d:%i /dev/fd/3) && d=$(stat -c %d:%i ./f) && echo "$a $b $c $d"',
       'idtest trustdb.gpg new',
       'mv f g && idtest g',
       'echo y > a && ln -s a l && idtest l',
