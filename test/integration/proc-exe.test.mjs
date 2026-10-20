@@ -126,3 +126,36 @@ test('a WASI program can stat, open and read /proc/self/exe as the program file,
     stderr: '',
   });
 });
+
+test('a symlink to /proc/self/exe opens the program file, and exe keeps to the running file when its name is moved or replaced (#1317)', {
+  timeout: 120_000,
+}, async (t) => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils', 'wasix-python']) await install(kernel, name);
+  const python = '/node_modules/@ai-ecoverse/wasix-python/bin/python.wasm';
+  const script = [
+    'import os',
+    "p = '/proc/self/exe'",
+    "os.symlink(p, '/tmp/exe')",
+    `print(os.stat('/tmp/exe').st_size == os.stat('${python}').st_size, open('/tmp/exe', 'rb').read(4))`,
+    'try: os.open("/tmp/exe", os.O_WRONLY)',
+    'except OSError as e: print(e.strerror)',
+    'def look():',
+    '    try: print(os.readlink(p), os.stat(p).st_size, open(p, "rb").read(4))',
+    '    except OSError as e: print(os.readlink(p), e.strerror)',
+    `os.rename('${python}', '${python}.old')`,
+    'look()',
+    `open('${python}', 'wb').write(b'other')`,
+    'look()',
+    `os.replace('${python}.old', '${python}')`,
+    'print(open(p, "rb").read(4))',
+  ].join('\n');
+  const r = await kernel.run(['python3', '-c', script], { cwd: '/' });
+  const gone = `${python} (deleted) No such file or directory\n`;
+  assert.deepEqual(r, {
+    status: 0,
+    stdout: `True b'\\x00asm'\nRead-only file system\n${gone}${gone}b'\\x00asm'\n`,
+    stderr: '',
+  });
+});

@@ -811,6 +811,10 @@ export class WasiFds {
     if (exclusive && this.isLink(path)) throw new WasiError('EEXIST');
     const s = this.statOrMissing(path);
     if (exclusive && s) throw new WasiError('EEXIST');
+    if (s?.escape !== undefined) {
+      refuseWrite({ readonly: true }, oflags, rights);
+      return this.open(s.escape, oflags, rights, fdflags, mode);
+    }
     if (oflags & OFLAGS.DIRECTORY && !s?.isDirectory) {
       throw new WasiError(s ? 'ENOTDIR' : 'ENOENT');
     }

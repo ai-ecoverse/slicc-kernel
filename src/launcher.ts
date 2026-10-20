@@ -345,7 +345,10 @@ interface WriterStack {
 }
 
 function describe(req: StartRequest, tty: string | null) {
-  const exe = req.exe === undefined ? {} : { exe: req.exe };
+  const exe = {
+    ...(req.exe === undefined ? {} : { exe: req.exe }),
+    ...(req.exeId === undefined ? {} : { exeId: req.exeId }),
+  };
   return { argv: [req.argv0, ...req.args], tty, started: Date.now(), ...exe };
 }
 
@@ -354,6 +357,7 @@ interface StartRequest {
   program: Program;
   argv0: string;
   exe?: string;
+  exeId?: string;
   args: string[];
   env: Record<string, string>;
   cwd: string;
@@ -624,7 +628,7 @@ export class Launcher {
   private readonly orphans = new Set<number>();
   private readonly described = new Map<
     number,
-    Pick<ProcessInfo, 'argv' | 'tty' | 'started' | 'exe'>
+    Pick<ProcessInfo, 'argv' | 'tty' | 'started' | 'exe' | 'exeId'>
   >();
   private readonly creds = new Map<number, () => Cred>();
   private readonly tags = new Map<number, string>();
@@ -1677,6 +1681,16 @@ export class Launcher {
     return (await this.base.exists(optional)) ? optional : undefined;
   }
 
+  private async exeId(target: Target): Promise<{ exeId?: string }> {
+    if (target.abi !== 'wasi' || (target.copy ?? target.glue) !== target.wasm) return {};
+    try {
+      const st = await this.base.stat(target.wasm);
+      return { exeId: `${st.ino}:${st.mtime.getTime()}` };
+    } catch {
+      return {};
+    }
+  }
+
   private async program(
     target: Target,
     env: Record<string, string>,
@@ -1733,11 +1747,12 @@ export class Launcher {
     const planned = chosen(asked, env);
     const { target, args } = planned;
     let program: Program;
+    let exeId: { exeId?: string };
     await this.pnpmReady();
     try {
       const caller = { pid: req.ppid ?? 0, uid: req.cred.euid, tag: req.tag };
       if (this.integrity) await this.checkedSources(planned, caller);
-      program = await this.program(target, env, caller);
+      [program, exeId] = await Promise.all([this.program(target, env, caller), this.exeId(target)]);
     } catch (err) {
       await req.fds.closeAll();
       throw err;
@@ -1754,6 +1769,7 @@ export class Launcher {
           program,
           argv0: target.argv0,
           exe: target.copy ?? target.glue,
+          ...exeId,
           args,
           env,
           cwdSlot,

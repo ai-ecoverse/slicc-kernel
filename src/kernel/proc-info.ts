@@ -8,6 +8,7 @@ export interface ProcessInfo {
   sid: number;
   argv: string[];
   exe?: string;
+  exeId?: string;
   tty: string | null;
   started: number;
   state: 'S' | 'T' | 'Z';
