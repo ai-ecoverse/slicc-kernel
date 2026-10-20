@@ -1762,6 +1762,7 @@ export class Launcher {
       });
       const counted = (handle: WasmProcessHandle) => {
         void handle.exited.finally(() => this.memories.ended());
+        void Promise.resolve(handle.ready).then(() => this.memories.started());
         return handle;
       };
       if (!this.memories.near()) {
