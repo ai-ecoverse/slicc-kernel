@@ -409,7 +409,7 @@ export class UnlinkedKeeper {
   private present(path: string): Promise<boolean> {
     return this.fs.lstat(path).then(
       () => true,
-      () => false
+      (err: { code?: string }) => err?.code !== 'ENOENT' && err?.code !== 'ENOTDIR'
     );
   }
 
