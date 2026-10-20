@@ -1,4 +1,5 @@
 import { isBuiltin, registerHooks } from 'node:module';
+import { getHeapStatistics } from 'node:v8';
 import { hide, lockdown, vacate } from './process/js/lockdown.ts';
 
 export { vacate };
@@ -52,6 +53,27 @@ const nodeProcess =
     : undefined;
 
 export { nodeProcess };
+
+const heapStatistics = getHeapStatistics;
+const memoryUsage = process.memoryUsage.bind(process);
+
+export function nodeMemory(): {
+  heapUsed: number;
+  heapTotal: number;
+  heapLimit: number;
+  external: number;
+  arrayBuffers: number;
+} {
+  const heap = heapStatistics();
+  const usage = memoryUsage();
+  return {
+    heapUsed: heap.used_heap_size,
+    heapTotal: heap.total_heap_size,
+    heapLimit: heap.heap_size_limit,
+    external: heap.external_memory,
+    arrayBuffers: usage.arrayBuffers,
+  };
+}
 
 export function nodeLockdown(scope: object = globalThis): void {
   if (locked.has(scope)) return;
