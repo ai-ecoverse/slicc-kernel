@@ -327,12 +327,18 @@ test(
     await new Promise((r) => setTimeout(r, 300));
     assert.equal(asked, 64);
     const next = dns('udp', STUB, 'example.com', 'MX');
-    await until(() => held.length > 0);
+    await until(() => asked === 65);
+    assert.equal(asked, 65);
     for (const release of held.splice(0)) release();
     assert.equal(
       await next,
       'id ok rcode 0 aa 0 tc 0 ra 1 an 1 ar 0\nexample.com 300 15 10 mail.example.com\n'
     );
+    assert.equal(await dns('flood', STUB, 'example.com', 'MX', '200'), 'sent 200\n');
+    await until(() => asked >= 129);
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(asked, 129, 'a second flood after the first drained gets all 64 slots back');
+    for (const release of held.splice(0)) release();
   }
 );
 
