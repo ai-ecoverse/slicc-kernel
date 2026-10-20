@@ -1244,7 +1244,8 @@ export class Launcher {
       if (found) return found;
       throw new SpawnError('ENOENT');
     }
-    return this.planOne(req, ctx);
+    const pinned = bare && req.search !== false ? { ...req, file: `/usr/bin/${req.file}` } : req;
+    return this.planOne(pinned, ctx);
   }
 
   private async onPath(
