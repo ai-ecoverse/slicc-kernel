@@ -1,4 +1,5 @@
 import {
+  fileIdentity,
   type MountLine,
   mayTrace,
   type ProcessInfo,
@@ -33,7 +34,7 @@ export interface ProcSource {
 
 type Node =
   | { kind: 'dir'; names: () => string[] }
-  | { kind: 'link'; target: string; denied?: boolean }
+  | { kind: 'link'; target: string; denied?: boolean; id?: string }
   | { kind: 'file'; content: () => string };
 
 const DIR_MODE = 0o40555;
@@ -107,12 +108,7 @@ export class ProcTree {
       const exe = () => (this.info(Number(top))?.exe === undefined ? [] : ['exe']);
       return { kind: 'dir', names: () => [...PID_NAMES, ...exe(), 'task'] };
     }
-    if (leaf === 'exe') {
-      const info = this.info(Number(top));
-      if (info?.exe === undefined) return undefined;
-      const denied = !mayTrace(this.ownInfo(), info);
-      return { kind: 'link', target: info.exe, ...(denied ? { denied } : {}) };
-    }
+    if (leaf === 'exe') return this.exe(Number(top));
     if (!PID_NAMES.includes(leaf)) return undefined;
     return {
       kind: 'file',
@@ -123,6 +119,14 @@ export class ProcTree {
         return pidFile(leaf as (typeof PID_FILES)[number], info, listing.boot);
       },
     };
+  }
+
+  private exe(pid: number): Node | undefined {
+    const info = this.info(pid);
+    if (info?.exe === undefined) return undefined;
+    const denied = !mayTrace(this.ownInfo(), info);
+    const id = info.exeId === undefined ? {} : { id: info.exeId };
+    return { kind: 'link', target: info.exe, ...(denied ? { denied } : {}), ...id };
   }
 
   private ownInfo(): ProcessInfo | undefined {
@@ -202,10 +206,20 @@ export class ProcTree {
   }
 
   escape(path: string): string | undefined {
+    return this.escapeTo(path)?.target;
+  }
+
+  escapeTo(path: string): { target: string; id?: string } | undefined {
     const node = this.node(this.parts(path, true));
     if (node?.kind !== 'link' || !node.target.startsWith('/')) return undefined;
     if (node.denied) throw syncError('EACCES', path);
-    return node.target;
+    return node.id === undefined ? { target: node.target } : { target: node.target, id: node.id };
+  }
+
+  linkTo(path: string): { target: string; id: string } | undefined {
+    const node = this.node(this.parts(path, false));
+    if (node?.kind !== 'link' || node.id === undefined || node.denied) return undefined;
+    return { target: node.target, id: node.id };
   }
 
   readlink(path: string): string {
@@ -377,7 +391,45 @@ function directMiss(err: unknown, path: string): boolean {
   return !path.split('/').some((part) => part === '.' || part === '..');
 }
 
+function same(fs: SyncFsPosixBridge, path: string, id: string): boolean {
+  try {
+    const st = fs.stat(path);
+    const now = fileIdentity(st.ino, st.mtimeMs);
+    return now === undefined || now === id;
+  } catch {
+    return false;
+  }
+}
+
+function current(fs: SyncFsPosixBridge, tree: ProcTree, q: string): string | undefined {
+  const to = tree.escapeTo(q);
+  if (!to || to.id === undefined) return to?.target;
+  if (!same(fs, to.target, to.id)) throw syncError('ENOENT', q);
+  return to.target;
+}
+
+function guard(
+  toProc: (path: string, follow: boolean) => string | undefined,
+  shadowing: () => boolean
+) {
+  return <R>(paths: Array<[string, boolean]>, run: () => R): R => {
+    const physical = shadowing();
+    for (const [p, follow] of paths) {
+      if (inProc(p) || (physical && toProc(p, follow) !== undefined)) throw syncError('EROFS', p);
+    }
+    return run();
+  };
+}
+
+function shownLink(fs: SyncFsPosixBridge, tree: ProcTree, q: string): string {
+  const target = tree.readlink(q);
+  const to = tree.linkTo(q);
+  if (!to) return target;
+  return same(fs, to.target, to.id) ? target : `${target} (deleted)`;
+}
+
 function routing(
+  fs: SyncFsPosixBridge,
   tree: ProcTree,
   toProc: (path: string, follow: boolean) => string | undefined,
   shadowing: () => boolean
@@ -390,7 +442,7 @@ function routing(
     outside?: (target: string) => R
   ): R => {
     const proc = (q: string): R => {
-      const target = outside ? tree.escape(q) : undefined;
+      const target = outside ? current(fs, tree, q) : undefined;
       return target === undefined ? inner(q) : (outside as (t: string) => R)(target);
     };
     if (inProc(p)) return proc(p);
@@ -412,14 +464,8 @@ function routing(
 export function procfsBridge<T extends SyncFsPosixBridge>(fs: T, tree: ProcTree): T {
   const toProc = (path: string, follow: boolean) => procPath(fs, path, follow);
   const shadowing = physicalProc(fs);
-  const via = routing(tree, toProc, shadowing);
-  const readOnly = <R>(paths: Array<[string, boolean]>, run: () => R): R => {
-    const physical = shadowing();
-    for (const [p, follow] of paths) {
-      if (inProc(p) || (physical && toProc(p, follow) !== undefined)) throw syncError('EROFS', p);
-    }
-    return run();
-  };
+  const via = routing(fs, tree, toProc, shadowing);
+  const readOnly = guard(toProc, shadowing);
   const snapshots = new Map<number, Uint8Array>();
   let lastSnapshot = 0;
   const snapshot = (q: string): number => {
@@ -446,7 +492,7 @@ export function procfsBridge<T extends SyncFsPosixBridge>(fs: T, tree: ProcTree)
         (q) => tree.stat(q),
         () => fs.stat(p),
         true,
-        (t) => fs.stat(t)
+        (t) => ({ ...fs.stat(t), escape: t })
       ),
     lstat: (p: string) =>
       via(
@@ -488,7 +534,7 @@ export function procfsBridge<T extends SyncFsPosixBridge>(fs: T, tree: ProcTree)
     readlink: (p: string) =>
       via(
         p,
-        (q) => tree.readlink(q),
+        (q) => shownLink(fs, tree, q),
         () => fs.readlink(p),
         false
       ),
@@ -540,7 +586,7 @@ export function procfsBridge<T extends SyncFsPosixBridge>(fs: T, tree: ProcTree)
       return via(p, snapshot, () => fs.hold?.(p, held, open, undefined, want, seen) ?? late(p));
     },
     kept: (handle: number) => snapshots.has(handle) || fs.kept?.(handle) === true,
-    escape: (p: string) => (inProc(p) ? tree.escape(p) : undefined),
+    escape: (p: string) => (inProc(p) ? current(fs, tree, p) : undefined),
     pinned: (handle: number) => {
       const bytes = snapshots.get(handle);
       return bytes ? frozen(bytes) : (fs.pinned?.(handle) ?? fs);

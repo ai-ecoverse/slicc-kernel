@@ -99,6 +99,7 @@ export interface SyncFsBridgeStat {
   atimeMs?: number;
   ctimeMs?: number;
   ino?: number;
+  escape?: string;
   nlink?: number;
   dev?: number;
   readonly?: boolean;
