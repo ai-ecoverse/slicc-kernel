@@ -173,3 +173,45 @@ test('appending to or overwriting part of the synthetic /etc/hostname keeps its 
   assert.equal(text(await kernel.readFile('/e/hostname')), 'devbox\n');
   await assert.rejects(kernel.readFile('/tmp/none'), { code: 'ENOENT' });
 });
+
+test('a user appending to, overwriting or truncating the synthetic /etc/hostname gets EACCES and leaves no real file (#1306)', async (t) => {
+  const kernel = await createNodeKernel({ hostname: 'devbox', users: 'enforce' });
+  t.after(() => kernel.terminate());
+  await install(kernel, 'wasm-bash');
+  await install(kernel, 'wasm-coreutils');
+  const base = fileURLToPath(new URL('wasix-python/', modules));
+  for (const entry of (await readdir(base, { recursive: true, withFileTypes: true })).filter((e) =>
+    e.isFile()
+  )) {
+    const rel = relative(base, join(entry.parentPath, entry.name));
+    if (/^lib\/libpython[^/]*\.a$/.test(rel)) continue;
+    await kernel.writeFile(
+      `/node_modules/@ai-ecoverse/wasix-python/${rel}`,
+      await readFile(join(entry.parentPath, entry.name))
+    );
+  }
+  await kernel.users.add({ name: 'cone' });
+  const probe = `python3 -c "
+import os, errno
+for name, act in [('append', lambda: open('/etc/hostname', 'a').write('x')), ('pwrite', lambda: open('/etc/hostname', 'r+').write('X')), ('truncate', lambda: os.truncate('/etc/hostname', 3))]:
+    try:
+        act()
+        print(name, 'ok')
+    except OSError as e:
+        print(name, errno.errorcode[e.errno])
+"`;
+  const user = await kernel.run(['bash', '-c', probe], { cwd: '/home/cone', user: 'cone' });
+  assert.equal(user.stdout, 'append EACCES\npwrite EACCES\ntruncate EACCES\n', user.stderr);
+  const shell = await kernel.run(['bash', '-c', 'echo x >> /etc/hostname'], {
+    cwd: '/home/cone',
+    user: 'cone',
+  });
+  assert.notEqual(shell.status, 0);
+  const left = await kernel.run(
+    ['bash', '-c', 'cat /etc/hostname; stat -c "%Y %u %a" /etc/hostname'],
+    {
+      cwd: '/',
+    }
+  );
+  assert.equal(left.stdout, 'devbox\n0 0 644\n', left.stderr);
+});
