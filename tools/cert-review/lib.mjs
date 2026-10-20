@@ -939,9 +939,12 @@ function failing(result, counts) {
   return `${counts.regression ?? 0} regressions, ${counts.fail ?? 0} failures (${detail})`;
 }
 
+const SHARD_NAMES_MAX = 32;
+
 export function downstreamOf(result, { biosRef = '', shards = [] } = {}) {
-  const where =
-    `bios ${String(result?.biosRef || biosRef).slice(0, 12)} ${shards.join(',')}`.trim();
+  const listed = shards.join(',');
+  const shown = listed.length > SHARD_NAMES_MAX ? `${shards.length} shards` : listed;
+  const where = `bios ${String(result?.biosRef || biosRef).slice(0, 12)} ${shown}`.trim();
   const run = result?.url ? ` (${result.url})` : '';
   const gaps = unusable(result, biosRef);
   if (gaps.length)
