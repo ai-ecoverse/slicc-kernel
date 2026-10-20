@@ -201,6 +201,13 @@ export class ProcTree {
     return node.names();
   }
 
+  escape(path: string): string | undefined {
+    const node = this.node(this.parts(path, true));
+    if (node?.kind !== 'link' || !node.target.startsWith('/')) return undefined;
+    if (node.denied) throw syncError('EACCES', path);
+    return node.target;
+  }
+
   readlink(path: string): string {
     const node = this.find(path, false);
     if (node.kind !== 'link') throw syncError('EINVAL', path);
@@ -370,10 +377,22 @@ function directMiss(err: unknown, path: string): boolean {
   return !path.split('/').some((part) => part === '.' || part === '..');
 }
 
-export function procfsBridge<T extends SyncFsPosixBridge>(fs: T, tree: ProcTree): T {
-  const toProc = (path: string, follow: boolean) => procPath(fs, path, follow);
-  const shadowing = physicalProc(fs);
-  const via = <R>(p: string, proc: (q: string) => R, own: () => R, follow = true): R => {
+function routing(
+  tree: ProcTree,
+  toProc: (path: string, follow: boolean) => string | undefined,
+  shadowing: () => boolean
+) {
+  return <R>(
+    p: string,
+    inner: (q: string) => R,
+    own: () => R,
+    follow = true,
+    outside?: (target: string) => R
+  ): R => {
+    const proc = (q: string): R => {
+      const target = outside ? tree.escape(q) : undefined;
+      return target === undefined ? inner(q) : (outside as (t: string) => R)(target);
+    };
     if (inProc(p)) return proc(p);
     if (shadowing()) {
       const real = toProc(p, follow);
@@ -388,6 +407,12 @@ export function procfsBridge<T extends SyncFsPosixBridge>(fs: T, tree: ProcTree)
       return proc(real);
     }
   };
+}
+
+export function procfsBridge<T extends SyncFsPosixBridge>(fs: T, tree: ProcTree): T {
+  const toProc = (path: string, follow: boolean) => procPath(fs, path, follow);
+  const shadowing = physicalProc(fs);
+  const via = routing(tree, toProc, shadowing);
   const readOnly = <R>(paths: Array<[string, boolean]>, run: () => R): R => {
     const physical = shadowing();
     for (const [p, follow] of paths) {
@@ -411,13 +436,17 @@ export function procfsBridge<T extends SyncFsPosixBridge>(fs: T, tree: ProcTree)
       via(
         p,
         (q) => tree.read(q),
-        () => fs.readFile(p)
+        () => fs.readFile(p),
+        true,
+        (t) => fs.readFile(t)
       ),
     stat: (p: string) =>
       via(
         p,
         (q) => tree.stat(q),
-        () => fs.stat(p)
+        () => fs.stat(p),
+        true,
+        (t) => fs.stat(t)
       ),
     lstat: (p: string) =>
       via(
@@ -511,6 +540,7 @@ export function procfsBridge<T extends SyncFsPosixBridge>(fs: T, tree: ProcTree)
       return via(p, snapshot, () => fs.hold?.(p, held, open, undefined, want, seen) ?? late(p));
     },
     kept: (handle: number) => snapshots.has(handle) || fs.kept?.(handle) === true,
+    escape: (p: string) => (inProc(p) ? tree.escape(p) : undefined),
     pinned: (handle: number) => {
       const bytes = snapshots.get(handle);
       return bytes ? frozen(bytes) : (fs.pinned?.(handle) ?? fs);

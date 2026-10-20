@@ -83,12 +83,12 @@ test("a process cone can see but not trace (root with cone as its real uid) has 
     kernel.run(['bash', '-c', script], { cwd: '/', ...(user ? { user } : {}) });
   assert.deepEqual(
     await sh(
-      'p=$(cat /tmp/mixed); tail -n +9 /proc/$p/status | head -1; readlink -v /proc/$p/exe; echo rc=$?; readlink /proc/self/exe; python3 -c "import os; os.readlink(\'/proc/$p/exe\')" 2>&1 | tail -1',
+      "p=$(cat /tmp/mixed); tail -n +9 /proc/$p/status | head -1; readlink -v /proc/$p/exe; echo rc=$?; readlink /proc/self/exe; python3 -c \"import os; os.readlink('/proc/$p/exe')\" 2>&1 | tail -1; python3 -c \"open('/proc/$p/exe', 'rb')\" 2>&1 | tail -1",
       'cone'
     ),
     {
       status: 0,
-      stdout: `Uid:\t1000\t0\t0\t0\nrc=1\n/node_modules/@ai-ecoverse/wasm-coreutils/bin/coreutils\nPermissionError: [Errno 2] Permission denied: '/proc/1000/exe'\n`,
+      stdout: `Uid:\t1000\t0\t0\t0\nrc=1\n/node_modules/@ai-ecoverse/wasm-coreutils/bin/coreutils\nPermissionError: [Errno 2] Permission denied: '/proc/1000/exe'\nPermissionError: [Errno 2] Permission denied: '/proc/1000/exe'\n`,
       stderr: 'readlink: /proc/1000/exe: Permission denied\n',
     }
   );
@@ -99,4 +99,26 @@ test("a process cone can see but not trace (root with cone as its real uid) has 
   });
   await kernel.writeFile('/tmp/done', '');
   await held;
+});
+
+test('a WASI program can stat, open and read /proc/self/exe as the program file, while lstat and readlink show the link (#1273)', {
+  timeout: 120_000,
+}, async (t) => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils', 'wasix-python']) await install(kernel, name);
+  const python = '/node_modules/@ai-ecoverse/wasix-python/bin/python.wasm';
+  const script = [
+    'import os, stat',
+    "p = '/proc/self/exe'",
+    'print(stat.S_ISLNK(os.lstat(p).st_mode), os.readlink(p))',
+    `print(os.stat(p).st_size == os.stat('${python}').st_size, stat.S_ISREG(os.stat(p).st_mode))`,
+    "print(open(p, 'rb').read(4))",
+  ].join('\n');
+  const r = await kernel.run(['python3', '-c', script], { cwd: '/' });
+  assert.deepEqual(r, {
+    status: 0,
+    stdout: `True ${python}\nTrue True\nb'\\x00asm'\n`,
+    stderr: '',
+  });
 });

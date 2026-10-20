@@ -803,6 +803,8 @@ export class WasiFds {
     if (kernelDevice !== undefined) return kernelDevice;
     const alias = stdioAlias(path);
     if (alias !== undefined) return this.reopen(alias);
+    const outside = this.fs.escape?.(path);
+    if (outside !== undefined) return this.open(outside, oflags, rights, fdflags, mode);
     if (exclusive && !(oflags & OFLAGS.DIRECTORY) && this.madeAtOnce(path, mode)) {
       return this.regular(path, undefined, oflags, rights, fdflags, mode, true);
     }

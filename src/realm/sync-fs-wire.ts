@@ -155,6 +155,7 @@ export interface SyncFsPosixBridge {
   rmdir(path: string): void;
   symlink(target: string, linkPath: string): void;
   readlink(path: string): string;
+  escape?(path: string): string | undefined;
   chmod(path: string, mode: number): void;
   utimes(path: string, atimeMs: number, mtimeMs: number, now?: boolean): void;
   lutimes(path: string, atimeMs: number, mtimeMs: number, now?: boolean): void;
