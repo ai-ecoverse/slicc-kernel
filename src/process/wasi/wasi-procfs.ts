@@ -98,7 +98,14 @@ export class ProcTree {
     if (!/^[1-9]\d*$/.test(top) || !this.alive(Number(top))) return undefined;
     if (leaf === 'task') return this.task(Number(top), rest);
     if (rest.length > 0) return undefined;
-    if (leaf === undefined) return { kind: 'dir', names: () => [...PID_NAMES, 'task'] };
+    if (leaf === undefined) {
+      const exe = () => (this.info(Number(top))?.exe === undefined ? [] : ['exe']);
+      return { kind: 'dir', names: () => [...PID_NAMES, ...exe(), 'task'] };
+    }
+    if (leaf === 'exe') {
+      const exe = this.info(Number(top))?.exe;
+      return exe === undefined ? undefined : { kind: 'link', target: exe };
+    }
     if (!PID_NAMES.includes(leaf)) return undefined;
     return {
       kind: 'file',

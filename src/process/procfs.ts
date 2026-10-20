@@ -321,6 +321,28 @@ function attr(node: ProcNode): object {
   };
 }
 
+function withPidFiles(names: string[], extra: string[]): string[] {
+  return [...new Set([...names, ...PID_FILES, ...extra])];
+}
+
+function exeNodes(
+  fresh: (parent: ProcNode, name: string, mode: number) => ProcNode,
+  info: (target: number, own: boolean) => ProcessInfo | undefined,
+  error: () => Error
+) {
+  return {
+    exeLink: (parent: ProcNode, target: number, own = false): ProcNode => {
+      const exe = info(target, own)?.exe;
+      if (exe === undefined) throw error();
+      const link = fresh(parent, 'exe', LINK_MODE);
+      link.node_ops.readlink = () => exe;
+      return link;
+    },
+    hasExe: (target: number, own = false): string[] =>
+      info(target, own)?.exe === undefined ? [] : ['exe'],
+  };
+}
+
 export function useProcfs(Fs: ProcFs, sys: ProcSys, pid: number, memory = memorySource()): void {
   const { lookupPath, createNode, hashRemoveNode } = Fs;
   const procList = sys.procList?.bind(sys);
@@ -399,14 +421,16 @@ export function useProcfs(Fs: ProcFs, sys: ProcSys, pid: number, memory = memory
     dir.node_ops.readdir = () => ['.', '..', ...Object.keys(tree)];
     return dir;
   };
-  const pidNames = (names: string[]) => [...new Set([...names, ...PID_FILES])];
+  const exe = exeNodes(fresh, (at, own) => find(procList().processes, at, own), error);
+  const pidNames = (names: string[]) => withPidFiles(names, exe.hasExe(pid, true));
   const pidDir = (name: string, target: number): ProcNode => {
     const dir = fresh(proc, name, DIR_MODE);
     dir.node_ops.lookup = (parent, child) => {
+      if (child === 'exe') return exe.exeLink(parent, target);
       if (!(PID_FILES as readonly string[]).includes(child)) throw error();
       return file(parent, child, pidContent(target, child as PidFile));
     };
-    dir.node_ops.readdir = () => ['.', '..', ...PID_FILES];
+    dir.node_ops.readdir = () => ['.', '..', ...PID_FILES, ...exe.hasExe(target)];
     return dir;
   };
   const scans = new Map<ProcStream, Set<number>>();
@@ -490,6 +514,7 @@ export function useProcfs(Fs: ProcFs, sys: ProcSys, pid: number, memory = memory
   self.node_ops = {
     ...selfOps,
     lookup: (parent, name) => {
+      if (name === 'exe') return exe.exeLink(parent, pid, true);
       if ((PID_FILES as readonly string[]).includes(name)) {
         return file(parent, name, pidContent(pid, name as PidFile, true));
       }
