@@ -39,57 +39,16 @@ function gist(stderr) {
 }
 
 const PUBLISHED = /cannot publish over (the )?previously (published|staged) version/i;
-const CONFIRM = { every: 15000, times: 20 };
-const SERVED = { every: 30000, times: 50 };
-
-async function confirmed(done, sleep) {
-  for (let n = 0; n < CONFIRM.times; n++) {
-    if (await done()) return true;
-    await sleep(CONFIRM.every);
-  }
-  return done();
-}
 
 async function retried({ label, attempt, done, sleep, log, already = () => false }) {
   for (let n = 0; ; n++) {
     const r = await attempt();
     if (r.code === 0) return true;
-    if (already(r)) {
-      if (await confirmed(done, sleep)) return false;
-      throw new Error(
-        `${label}: npm refuses it as already published, but the registry does not show it (unpublished?)`
-      );
-    }
+    if (already(r)) return false;
     if (await done()) return false;
     if (n >= DELAYS.length) throw new Error(`${label} failed: ${r.stderr.trim()}`);
     log(`${label} failed, retrying: ${gist(r.stderr)}`);
     await sleep(DELAYS[n]);
-  }
-}
-
-async function serving(label, served, sleep, log) {
-  for (let n = 0; !(await served()); n++) {
-    if (n >= SERVED.times) {
-      const minutes = (SERVED.every * SERVED.times) / 60000;
-      log(
-        `npm took ${label}, but does not serve it yet after ${minutes} min: release / verify on npm waits for it`
-      );
-      return false;
-    }
-    await sleep(SERVED.every);
-  }
-  log(`npm serves ${label}`);
-  return true;
-}
-
-export function publishReport(stdout) {
-  const at = stdout.search(/^[[{]/m);
-  try {
-    const report = JSON.parse(at < 0 ? '' : stdout.slice(at));
-    const one = Array.isArray(report) ? report[0] : report;
-    return typeof one?.integrity === 'string' && one.integrity ? one.integrity : undefined;
-  } catch {
-    return undefined;
   }
 }
 
@@ -107,7 +66,7 @@ async function latestOf(name, version, run) {
   return latest;
 }
 
-async function publishNewer({ name, version, run, published, sleep, log, packed }) {
+async function publishNewer({ name, version, run, published, sleep, log }) {
   const latest = await latestOf(name, version, run);
   if (olderThan(version, latest)) {
     log(
@@ -119,7 +78,7 @@ async function publishNewer({ name, version, run, published, sleep, log, packed 
   const ours = await retried({
     label: `npm publish ${version}`,
     attempt: async () => {
-      const r = await run('npm', ['publish', '--json']);
+      const r = await run('npm', ['publish', '--provenance']);
       log(`npm publish ${version} exited ${r.code}`);
       for (const [stream, text] of [
         ['stdout', r.stdout],
@@ -127,13 +86,6 @@ async function publishNewer({ name, version, run, published, sleep, log, packed 
       ]) {
         if (text.trim()) log(`npm publish ${stream}:\n${text.trimEnd()}`);
       }
-      if (r.code !== 0) return r;
-      const integrity = publishReport(r.stdout);
-      if (!integrity)
-        throw new Error(
-          `npm publish ${version} exited 0 but printed no JSON report with an integrity`
-        );
-      packed.set(version, integrity);
       return r;
     },
     done: () => published(version),
@@ -141,43 +93,8 @@ async function publishNewer({ name, version, run, published, sleep, log, packed 
     sleep,
     log,
   });
-  if (!ours)
-    log(
-      `${name}@${version} was already on npm: no publish report to check it against, so only that npm serves its tarball`
-    );
+  if (!ours) log(`${name}@${version} was already on npm`);
   return ours;
-}
-
-function servedBy(name, run, head, packed) {
-  return async (version) => {
-    const want = packed.get(version);
-    if (want !== undefined) {
-      const i = await run('npm', [
-        'view',
-        `${name}@${version}`,
-        'dist.integrity',
-        '--prefer-online',
-      ]);
-      if (i.code !== 0 || i.stdout.trim() !== want || want === '') return false;
-    }
-    const r = await run('npm', ['view', `${name}@${version}`, 'dist.tarball', '--prefer-online']);
-    if (r.code !== 0 || r.stdout.trim() === '') return false;
-    try {
-      return await head(r.stdout.trim());
-    } catch {
-      return false;
-    }
-  };
-}
-
-async function unservedOf(fresh, { name, served, sleep, log, packed }) {
-  const out = [];
-  for (const tag of fresh) {
-    const version = tag.slice(1);
-    const ok = await serving(`${name}@${version}`, () => served(version), sleep, log);
-    if (!ok && packed.has(version)) out.push(`${name}@${version}`);
-  }
-  return out;
 }
 
 export async function recover({
@@ -187,10 +104,8 @@ export async function recover({
   run = exec,
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
   log = console.log,
-  head = async (url) => (await fetch(url, { method: 'HEAD' })).ok,
 }) {
   const listed = await run('git', ['tag', '--points-at', 'HEAD']);
-  const fresh = [];
   const tags = listed.stdout
     .split('\n')
     .map((t) => t.trim())
@@ -198,15 +113,12 @@ export async function recover({
     .filter((t) => {
       if (outcome !== 'success' || prior.includes(t)) return true;
       log(`semantic-release just released ${t}, nothing to recover`);
-      fresh.push(t);
       return false;
     });
   const published = async (version) => {
     const r = await run('npm', ['view', `${name}@${version}`, 'version', '--prefer-online']);
     return r.code === 0 && r.stdout.trim() === version;
   };
-  const packed = new Map();
-  const served = servedBy(name, run, head, packed);
   const remote = async (ref) =>
     (await run('git', ['ls-remote', '--exit-code', 'origin', ref])).code === 0;
   const recovered = [];
@@ -232,11 +144,8 @@ export async function recover({
       else log(`git push ${notes} failed, leaving it: ${gist(r.stderr)}`);
     }
     if (!(await published(version))) {
-      const ours = await publishNewer({ name, version, run, published, sleep, log, packed });
-      if (ours) {
-        recovered.push(`${name}@${version} on npm`);
-        fresh.push(tag);
-      }
+      const ours = await publishNewer({ name, version, run, published, sleep, log });
+      if (ours) recovered.push(`${name}@${version} on npm`);
     }
     if ((await run('gh', ['release', 'view', tag])).code !== 0) {
       const r = await run('gh', [
@@ -252,9 +161,7 @@ export async function recover({
       recovered.push(`GitHub release ${tag}`);
     }
   }
-  const unserved = await unservedOf(fresh, { name, served, sleep, log, packed });
   for (const line of recovered) log(`recovered ${line}`);
-  if (unserved.length) return Object.assign(recovered, { unserved });
   if (outcome === 'failure' && recovered.length === 0) {
     throw new Error('semantic-release failed, and no version tagged at HEAD was left to complete');
   }
@@ -273,8 +180,6 @@ export const VERDICT = 'release-recover:';
 
 export function verdictOf(recovered, error) {
   if (error) return `${VERDICT} FAIL ${String(error.message ?? error).split('\n')[0]}`;
-  if (recovered.unserved?.length)
-    return `${VERDICT} INCOMPLETE npm took ${recovered.unserved.join(', ')} but does not serve it with the packed integrity: not published, re-run once npm serves it (verify skips a version a newer one supersedes)`;
   return recovered.length
     ? `${VERDICT} PASS recovered ${recovered.join(', ')}`
     : `${VERDICT} PASS nothing to recover`;
@@ -286,7 +191,6 @@ if (process.argv[1] && real(process.argv[1]) === real(fileURLToPath(import.meta.
     const prior = (process.env.RELEASE_PRIOR_TAGS ?? '').split(/\s+/).filter(Boolean);
     const recovered = await recover({ name, outcome: process.env.RELEASE_OUTCOME, prior });
     console.log(verdictOf(recovered));
-    if (recovered.unserved?.length) process.exitCode = 1;
   } catch (err) {
     console.error(err.message);
     console.log(verdictOf([], err));

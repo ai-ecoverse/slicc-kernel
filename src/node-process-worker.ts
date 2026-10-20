@@ -1,6 +1,6 @@
 import { createRequire } from 'node:module';
 import { parentPort } from 'node:worker_threads';
-import { glueUrl, nodeLockdown, nodeProcess, workerShaped } from './node-lockdown.ts';
+import { glueUrl, nodeLockdown, nodeMemory, nodeProcess, workerShaped } from './node-lockdown.ts';
 import { runJsProcess, runJsThread } from './process/js/js-runtime.ts';
 import { processEntry } from './process/process-entry.ts';
 import { runWasmProcess } from './process/process-runtime.ts';
@@ -26,9 +26,17 @@ const onMessage = processEntry(
   async () => wasiRuntime,
   async () => ({
     runJsProcess: (init, at) =>
-      runJsProcess(init, at, { lockdown: () => nodeLockdown(), scope: strayScope }),
+      runJsProcess(init, at, {
+        lockdown: () => nodeLockdown(),
+        scope: strayScope,
+        memory: nodeMemory,
+      }),
     runJsThread: (init, at) =>
-      runJsThread(init, at, { lockdown: () => nodeLockdown(), scope: strayScope }),
+      runJsThread(init, at, {
+        lockdown: () => nodeLockdown(),
+        scope: strayScope,
+        memory: nodeMemory,
+      }),
   }),
   () => nodeLockdown()
 );
