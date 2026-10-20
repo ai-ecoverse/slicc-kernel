@@ -27,3 +27,20 @@ test('a WASIX signal is held while its own handler runs and delivered once after
     stderr: 'the handler wrote\n',
   });
 });
+
+const nest = new URL('./fixtures/nesttest/', import.meta.url);
+
+test('a handler that unblocks its own signal and raises it nests at once, as on Linux (#1236, homescoop#1058)', {
+  timeout: 60_000,
+}, async (t) => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  t.after(() => kernel.terminate());
+  for (const file of ['package.json', 'bin/nesttest.wasm']) {
+    await kernel.writeFile(`/node_modules/nesttest/${file}`, await readFile(new URL(file, nest)));
+  }
+  assert.deepEqual(await kernel.run(['nesttest'], { cwd: '/' }), {
+    status: 0,
+    stdout: 'order=<<>> maxdepth=2\n',
+    stderr: '',
+  });
+});

@@ -47,7 +47,7 @@ import {
 } from './wasi-files.ts';
 import { WasiMemory } from './wasi-memory.ts';
 import { pollOneoff } from './wasi-poll.ts';
-import { libcBits, type WasiSigmask } from './wasi-sigmask.ts';
+import { libcBits, SIG_SETMASK, SIG_UNBLOCK, type WasiSigmask } from './wasi-sigmask.ts';
 import type { WasiSignals } from './wasi-signals.ts';
 import { sliccTty } from './wasi-termios.ts';
 import { wasixEpollImports } from './wasix-epoll.ts';
@@ -622,15 +622,18 @@ export class WasiHost {
         if (errno === E.SUCCESS && disposition === SIG_IGN) this.sigmask?.discard(sig);
         return errno;
       },
-      sigmask_set: (how: number, lo: number, hi: number, old: number) =>
-        this.sigmask
-          ? this.sigmask.set(how, lo, hi, (oldLo, oldHi) => {
-              if (old === 0) return;
-              const view = mem.view();
-              view.setUint32(old, oldLo, true);
-              view.setUint32(old + 4, oldHi, true);
-            })
-          : E.NOSYS,
+      sigmask_set: (how: number, lo: number, hi: number, old: number) => {
+        if (!this.sigmask) return E.NOSYS;
+        if (how === SIG_UNBLOCK || how === SIG_SETMASK) {
+          this.signals?.unblocking(how === SIG_UNBLOCK ? lo << 1 : ~(lo << 1));
+        }
+        return this.sigmask.set(how, lo, hi, (oldLo, oldHi) => {
+          if (old === 0) return;
+          const view = mem.view();
+          view.setUint32(old, oldLo, true);
+          view.setUint32(old + 4, oldHi, true);
+        });
+      },
       sigmask_poll: (
         lo: number,
         hi: number,
