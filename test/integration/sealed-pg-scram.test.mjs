@@ -424,29 +424,85 @@ test(
   }
 );
 
+const anchoredBy = (der) => (req) =>
+  req.op === 'sessionAnchors'
+    ? { anchors: [Buffer.from(der).toString('base64')], pins: [] }
+    : req.position === 'scram-sha-256'
+      ? { values: { [PH]: VALUE } }
+      : { v: 1, error: { code: 'EACCES' } };
+
 test(
-  'pg SCRAM in a session trusted by a vault anchor that binds a secret: -PLUS is not offered, the server side is n,, and the sealed password authenticates (slicc-jsh#584)',
+  'pg SCRAM-SHA-256-PLUS in a session trusted by a vault anchor: -PLUS is offered once the anchor verified this handshake, y,, (prefer), p= with a wrong binding and n,, authenticate with the sealed password, the server side bound to this leaf (#1259)',
   TIMEOUT,
   async (t) => {
     const priv = makeCa('private pg CA');
     const db = await pgFixture(t, priv.server('db.test'), VALUE, { plus: true });
-    const { run } = await kernelWith(t, [['db.test', db.port]], (req) =>
-      req.op === 'sessionAnchors'
-        ? { anchors: [Buffer.from(priv.der).toString('base64')], pins: [] }
-        : req.position === 'scram-sha-256'
-          ? { values: { [PH]: VALUE } }
-          : { v: 1, error: { code: 'EACCES' } }
-    );
-    const got = await run({
+    const { run } = await kernelWith(t, [['db.test', db.port]], anchoredBy(priv.der));
+    const results = [];
+    for (const o of [{ gs2: 'y' }, { gs2: 'p', binding: b64(Buffer.alloc(32, 7)) }, { gs2: 'n' }]) {
+      const got = await run({
+        host: 'db.test',
+        port: 5432,
+        password: PH,
+        tls: { rejectUnauthorized: false },
+        ...o,
+      });
+      assert.deepEqual(got.mechanisms, ['SCRAM-SHA-256-PLUS', 'SCRAM-SHA-256']);
+      results.push(got.steps.includes('final ok') && got.steps.includes('R 0'));
+      assert.equal(JSON.stringify(got).includes(VALUE), false);
+    }
+    assert.deepEqual(results, [true, true, true], JSON.stringify(db.seen.plus));
+    assert.deepEqual(db.seen.plus.refused, []);
+    assert.deepEqual(header(db), ['p=t', 'p=t', 'n,,']);
+    assert.equal(db.seen.authenticated, 3);
+  }
+);
+
+test(
+  'pg SCRAM-SHA-256-PLUS in an anchored session whose server checks the binding against another leaf fails once with no retry unbound, and an anchor that does not verify the chain leaves the session to pass through byte for byte (#1259)',
+  TIMEOUT,
+  async (t) => {
+    const priv = makeCa('private pg CA');
+    const other = priv.server('other.test');
+    const pinned = await pgFixture(t, priv.server('db.test'), VALUE, {
+      plus: true,
+      bindTo: other.der,
+    });
+    const a = await kernelWith(t, [['db.test', pinned.port]], anchoredBy(priv.der));
+    const refused = await a.run({
       host: 'db.test',
       port: 5432,
       password: PH,
-      gs2: 'prefer',
+      gs2: 'y',
       tls: { rejectUnauthorized: false },
     });
-    assert.deepEqual(got.mechanisms, ['SCRAM-SHA-256']);
-    assert.equal(got.steps.includes('final ok'), true, JSON.stringify(got));
-    assert.deepEqual(header(db), ['n,,']);
-    assert.equal(JSON.stringify(got).includes(VALUE), false);
+    assert.equal(refused.steps.includes('R 0'), false, JSON.stringify(refused));
+    assert.equal(refused.steps.at(-1), 'error ERR_SSL_PROTOCOL_ERROR', JSON.stringify(refused));
+    assert.deepEqual(pinned.seen.plus.refused, ['SCRAM channel binding check failed']);
+    assert.equal(pinned.seen.authenticated, 0);
+    const own = 'TEST-ONLY-OWN-PASSWORD-1';
+    const db = await pgFixture(t, priv.server('db.test'), own, { plus: true });
+    const stranger = makeCa('another CA');
+    const b = await kernelWith(t, [['db.test', db.port]], anchoredBy(stranger.der));
+    const passed = await b.run({
+      host: 'db.test',
+      port: 5432,
+      password: own,
+      gs2: 'prefer',
+      binding: b64(db.binding),
+      tls: { rejectUnauthorized: false },
+    });
+    assert.deepEqual(passed.mechanisms, ['SCRAM-SHA-256-PLUS', 'SCRAM-SHA-256']);
+    assert.equal(passed.steps.includes('final ok'), true, JSON.stringify(passed));
+    assert.deepEqual(header(db), ['p=t']);
+    const sealed = await b.run({
+      host: 'db.test',
+      port: 5432,
+      password: PH,
+      gs2: 'y',
+      tls: { rejectUnauthorized: false },
+    });
+    assert.equal(sealed.steps.includes('R 0'), false, JSON.stringify(sealed));
+    assert.equal(db.seen.authenticated, 1);
   }
 );

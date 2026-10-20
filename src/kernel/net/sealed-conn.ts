@@ -28,10 +28,12 @@ export interface SealedSession {
   alpn: string | false;
   binding?: Uint8Array | undefined;
   anchoring?: (found: Anchors) => Promise<string | undefined>;
+  anchoredBinding?: () => Promise<Uint8Array | undefined>;
 }
 
 interface Proof {
   anchor?: string;
+  binding?: Uint8Array | undefined;
 }
 
 export function substitutes(s: SealedSession): boolean {
@@ -137,9 +139,10 @@ class SessionWriter {
     return this.proven;
   }
 
-  async mayTouch(): Promise<boolean> {
-    if (this.s.verified) return true;
-    return (await this.proof('pg'))?.anchor !== undefined;
+  async mayTouch(): Promise<{ touch: boolean; binding?: Uint8Array | undefined }> {
+    if (this.s.verified) return { touch: true };
+    const proof = await this.proof('pg');
+    return { touch: proof?.anchor !== undefined, binding: proof?.binding };
   }
 
   private async prove(protocol: SessionProtocol): Promise<Proof | undefined> {
@@ -154,9 +157,13 @@ class SessionWriter {
         exit: s.exit as string,
       });
       const anchor = found ? await s.anchoring(found) : undefined;
-      if (anchor) return { anchor };
+      if (anchor) return this.anchored(anchor);
     }
     return s.verified ? {} : undefined;
+  }
+
+  private async anchored(anchor: string): Promise<Proof> {
+    return { anchor, binding: await this.s.anchoredBinding?.() };
   }
 
   private async ask(
@@ -404,7 +411,11 @@ export function sealedConn(conn: UplinkConn, s: SealedSession): UplinkConn {
       for (;;) {
         const bytes = await conn.read();
         if (!bytes) return bytes;
-        if (writer?.sawPg && pg.touch === undefined) pg.touch = await writer.mayTouch();
+        if (writer?.sawPg && pg.touch === undefined) {
+          const may = await writer.mayTouch();
+          pg.touch = may.touch;
+          pg.binding ??= may.binding;
+        }
         const out = writer?.sawPg ? pg.filter(bytes) : bytes;
         if (pg.failed) {
           conn.close();
