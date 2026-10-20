@@ -64,7 +64,7 @@
   },
   "devDependencies": {
     "@ai-ecoverse/py-numpy": "2.5.4-3",
-    "@ai-ecoverse/slicc-node": "2.5.1",
+    "@ai-ecoverse/slicc-node": "2.5.2",
     "@ai-ecoverse/slicc-scrub": "1.0.0",
     "@ai-ecoverse/slicc-shared-web": "1.29.0",
     "@ai-ecoverse/wasi-cargo": "0.99.0-3",
