@@ -62,3 +62,24 @@ export function nodeLockdown(scope: object = globalThis): void {
   vacate(scope, NODE_SLOTS);
   refuseModules();
 }
+
+class WorkerGlobalScope {}
+
+export function glueUrl(path: string | undefined): string {
+  const at = path?.startsWith('/') ? path : '/';
+  return `file://${at.split('/').map(encodeURIComponent).join('/')}`;
+}
+
+export function workerShaped(scope: object, href: string): void {
+  const slot = (value: unknown) => ({
+    value,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+  Object.defineProperties(scope, {
+    WorkerGlobalScope: slot(WorkerGlobalScope),
+    self: slot(scope),
+    location: slot(Object.freeze({ href })),
+  });
+}

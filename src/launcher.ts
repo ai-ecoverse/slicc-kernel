@@ -1045,7 +1045,7 @@ export class Launcher {
       const byPath = !COMMAND.test(path) && (await this.commands()).get(linked)?.argv0Path === true;
       return target && byPath ? { ...target, argv0: path } : target;
     }
-    const own = await this.commandAt(glue, scope);
+    const own = await this.ownOrRefused(glue, baseName(file), scope);
     if (own) return own.script ? undefined : { ...targetOf(own), ...asked };
     const head = await this.head(glue);
     if (!head) return undefined;
@@ -1068,6 +1068,33 @@ export class Launcher {
     const owner = await this.glueOwner(glue, baseName(file), scope);
     if (!owner) return undefined;
     return { ...targetOf(owner), ...asked, ...(owner.glue === glue ? {} : { copy: glue }) };
+  }
+
+  private async ownOrRefused(path: string, name: string, scope: string) {
+    return (await this.commandAt(path, scope)) ?? (await this.refusedAt(path, name, scope));
+  }
+
+  private async refusedAt(path: string, name: string, scope: string): Promise<Command | undefined> {
+    const refused = [...(await this.commands(scope)).values()].filter((c) => c.origin);
+    if (refused.length === 0 || !(await this.base.exists(path))) return undefined;
+    const real = await physicalPathAsync(this.base, path).catch(() => path);
+    const at = async (c: Command, which: 'glue' | 'wasm') => {
+      const own = (c.origin as { glue: string; wasm: string })[which];
+      return own === path || (await physicalPathAsync(this.base, own).catch(() => own)) === real;
+    };
+    const owners: Command[] = [];
+    for (const c of refused) {
+      if ((await at(c, 'glue')) || (await at(c, 'wasm'))) owners.push(c);
+    }
+    if (owners.length > 0) return owners.find((c) => c.name === name) ?? owners[0];
+    const dir = real.slice(0, real.lastIndexOf('/'));
+    for (const c of refused) {
+      const origin = c.origin as { abi: string; glue: string };
+      if (origin.abi !== 'emscripten' || c.name !== name) continue;
+      const own = await physicalPathAsync(this.base, origin.glue).catch(() => origin.glue);
+      if (own.slice(0, own.lastIndexOf('/')) === dir && (await this.sameFile(real, own))) return c;
+    }
+    return undefined;
   }
 
   private async glueOwner(glue: string, name: string, scope: string): Promise<Command | undefined> {
@@ -1181,12 +1208,14 @@ export class Launcher {
     argv: string[],
     cwd: string,
     scope: string,
-    argv0?: unknown
+    argv0?: unknown,
+    catalogOnly = false
   ): Promise<Planned | undefined> {
     const found = await this.resolve(file, argv[0] ?? file, cwd, scope);
     const named = typeof argv0 === 'string' && found && !found.fixed;
     const direct = named ? { ...found, argv0 } : found;
     if (direct) return { target: direct, args: [...(direct.prefix ?? []), ...argv.slice(1)] };
+    if (catalogOnly && !(await this.scriptCommand(file, cwd, scope))) return undefined;
     const script = await this.interpreted(file, argv, cwd, scope);
     return script && { ...script, script: true };
   }
@@ -1239,16 +1268,12 @@ export class Launcher {
     ctx: { ppid: number; cred: Readonly<Cred>; scope: string }
   ): Promise<Planned> {
     const bare = !req.file.includes('/') && !COMMAND.test(req.file);
-    try {
-      return await this.planOne(req, ctx);
-    } catch (err) {
-      const code = codeOf(err);
-      const searched = bare && req.search !== false && (code === 'ENOENT' || code === 'ENOEXEC');
-      if (!searched || (await this.commandAt(req.file, ctx.scope))) throw err;
+    if (bare && req.search !== false && !(await this.commandAt(req.file, ctx.scope))) {
       const found = await this.onPath(req, ctx);
       if (found) return found;
-      throw err;
+      throw new SpawnError('ENOENT');
     }
+    return this.planOne(req, ctx, bare && req.search !== false);
   }
 
   private async onPath(
@@ -1274,16 +1299,17 @@ export class Launcher {
 
   private async planOne(
     req: ChildSpawnRequest,
-    { ppid, cred, scope }: { ppid: number; cred: Readonly<Cred>; scope: string }
+    { ppid, cred, scope }: { ppid: number; cred: Readonly<Cred>; scope: string },
+    catalogOnly = false
   ): Promise<Planned> {
     const refused = (err: unknown): never => {
       throw codeOf(err) === 'EACCES' ? new SpawnError('EACCES') : err;
     };
     const file = await this.execFile(req.file, req.cwd, this.execGuard(cred, ppid)).catch(refused);
-    const planned = await this.plan(file, req.argv, req.cwd, scope, req.argv0);
+    const planned = await this.plan(file, req.argv, req.cwd, scope, req.argv0, catalogOnly);
     await this.mayExec(cred, { ...req, file, pid: ppid }, planned).catch(refused);
     if (planned) return planned;
-    throw new SpawnError(await this.unrunnable(file, req.cwd, scope));
+    throw new SpawnError(catalogOnly ? 'ENOENT' : await this.unrunnable(file, req.cwd, scope));
   }
 
   private async enterable(g: Guard | undefined, cwd: string): Promise<void> {
@@ -1653,7 +1679,7 @@ export class Launcher {
         this.text(target.glue, caller, asked),
         this.module(target.wasm, caller, asked && modulePath(asked)),
       ]);
-      return { glue, module };
+      return { glue, module, path: target.glue };
     }
     const { module, memory, foreign } = await this.module(target.wasm, caller, asked);
     const names =
