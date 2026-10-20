@@ -65,6 +65,7 @@ interface MovableHandle {
 }
 
 const RENAMES = '/.slicc-renames';
+const RENAME_LOCK = 'slicc-rename:';
 
 type Copies = Map<string, { before: number; made: FileSystemFileHandle }>;
 
@@ -310,8 +311,14 @@ export class OpfsFs implements KernelFs {
     this.lockPrefix = `slicc-excl:${channel ?? ''}:`;
     this.rootName = channel;
     this.channel = channel === undefined ? undefined : new BroadcastChannel(channel);
-    this.remote = channel === undefined ? undefined : new RemoteWatch(`${channel}:watch`);
-    if (this.remote) this.remote.quiet = () => this.quiet().then(() => this.settle?.());
+    this.remote =
+      channel === undefined
+        ? undefined
+        : new RemoteWatch(`${channel}:watch`, { locks: this.locks ?? null });
+    if (this.remote) {
+      this.remote.quiet = () => this.quiet().then(() => this.settle?.());
+      this.remote.gone = () => void this.orphans();
+    }
     if (this.channel) {
       const remote = this.remote;
       (meta as { listen?: (l: (c: Partial<RemoteChange>) => void) => void }).listen?.((c) => {
@@ -1498,6 +1505,9 @@ export class OpfsFs implements KernelFs {
       }
     }
     await this.meta.remove([found.path]);
+    if (found.handle?.kind === 'directory') {
+      await this.meta.update(found.path, (entry) => entry ?? vacatedAt(found.path));
+    }
     this.touch(Date.now(), parentOf(found.path));
   }
 
@@ -1564,16 +1574,21 @@ export class OpfsFs implements KernelFs {
     const dir = parent.handle as FileSystemDirectoryHandle;
     const name = baseOf(destination);
     const swap = targetStat?.isDirectory === true;
+    let lock: string | undefined;
     const staging = swap ? `.${name}.${crypto.randomUUID()}` : name;
     const copying = sourceStat.isDirectory && !movable(source.handle as Handle);
     const staged = resolvePath(parent.path, staging);
     const place = async () => {
       this.forget(destination);
       const copies: Copies = new Map();
-      const first = copying ? await this.intend({ from: source.path, to: staged }) : undefined;
+      const root = { ino: inodeOf(source.path), ...moving };
+      const owned = lock ? { lock } : {};
+      const first = copying
+        ? await this.intend({ from: source.path, to: staged, root, ...owned })
+        : undefined;
       const second =
         copying && swap
-          ? await this.intend({ from: staged, to: destination, replace: true })
+          ? await this.intend({ from: staged, to: destination, replace: true, root, ...owned })
           : undefined;
       const moved = await this.replacingTarget(targetStat !== null, () =>
         this.place(source.handle as Handle, dir, staging, copies)
@@ -1582,7 +1597,7 @@ export class OpfsFs implements KernelFs {
         throw err;
       });
       if (swap) await this.rm(destination, { recursive: true });
-      if (second) await this.intend({ from: staged, to: destination }, second);
+      if (second) await this.intend({ from: staged, to: destination, root, ...owned }, second);
       await this.meta.move(source.path, destination, carry, left);
       this.movePending(source.path, destination);
       if (!moved) {
@@ -1605,7 +1620,11 @@ export class OpfsFs implements KernelFs {
     const entry = { from: source.path, to: destination, done: promise };
     this.renamingDirs.add(entry);
     try {
-      await place();
+      const locks = this.locks;
+      if (locks) {
+        lock = `${RENAME_LOCK}${crypto.randomUUID()}`;
+        await locks.request(lock, place);
+      } else await place();
     } finally {
       this.renamingDirs.delete(entry);
       resolve();
@@ -1617,7 +1636,7 @@ export class OpfsFs implements KernelFs {
   private intents = 0;
 
   private async intend(
-    rename: { from: string; to: string; replace?: true },
+    rename: Omit<NonNullable<MetaEntry['rename']>, 'at'>,
     at = `${RENAMES}/${crypto.randomUUID()}`
   ): Promise<string> {
     const record = { ...rename, at: Date.now() * 1000 + (this.intents++ % 1000) };
@@ -1644,16 +1663,52 @@ export class OpfsFs implements KernelFs {
     } catch {}
   }
 
-  private async finishRenames(): Promise<number> {
+  private replaying: Promise<unknown> = Promise.resolve();
+
+  private orphans(): Promise<unknown> {
+    this.replaying = this.replaying.then(() => this.finishRenames(true)).catch(() => 0);
+    return this.replaying;
+  }
+
+  private async finishRenames(orphaned = false): Promise<number> {
+    const locks = this.locks;
+    const held = new Set<string | undefined>();
+    if (orphaned && locks) {
+      const { held: h = [], pending = [] } = await locks.query();
+      for (const lock of [...h, ...pending]) held.add(lock.name);
+    }
     const intents = (await this.meta.under(RENAMES))
-      .filter((entry) => entry.rename !== undefined)
+      .filter(
+        (entry) =>
+          entry.rename !== undefined &&
+          (!orphaned ||
+            (locks !== undefined &&
+              entry.rename.lock !== undefined &&
+              !held.has(entry.rename.lock)))
+      )
       .sort(
         (a, b) =>
           (a.rename as NonNullable<MetaEntry['rename']>).at -
           (b.rename as NonNullable<MetaEntry['rename']>).at
       );
     for (const entry of intents) {
-      const { from, to, replace } = entry.rename as NonNullable<MetaEntry['rename']>;
+      const lock = (entry.rename as NonNullable<MetaEntry['rename']>).lock;
+      if (!orphaned || !locks || !lock) await this.finishRename(entry);
+      else await locks.request(lock, () => this.finishRename(entry));
+    }
+    return intents.length;
+  }
+
+  private async finishRename(entry: MetaEntry): Promise<void> {
+    const [current] = await this.meta.under(entry.path);
+    if (current?.rename === undefined) return;
+    const { from, to, replace, root } = current.rename;
+    const { promise, resolve } = Promise.withResolvers<void>();
+    const barrier = { from, to, done: promise };
+    this.renamingDirs.add(barrier);
+    this.forget(from);
+    this.forget(to);
+    try {
       const left = await this.real(from);
       if (left && replace && (await this.real(to))) await this.rm(to, { recursive: true });
       if (left) {
@@ -1670,11 +1725,23 @@ export class OpfsFs implements KernelFs {
         this.forget(to);
       }
       if ((await this.meta.under(from)).length > 0) {
-        await this.meta.move(from, to, (moved) => ({ ...occupied(moved), path: to }));
+        await this.meta.move(
+          from,
+          to,
+          (moved) => ({
+            ...occupied(moved),
+            ...root,
+            ino: occupied(moved).ino ?? root?.ino ?? inodeOf(from),
+            path: to,
+          }),
+          undefined
+        );
       }
       await this.meta.update(entry.path, () => undefined);
+    } finally {
+      this.renamingDirs.delete(barrier);
+      resolve();
     }
-    return intents.length;
   }
 
   async settledRename(path: unknown): Promise<void> {
@@ -1996,7 +2063,10 @@ export class OpfsFs implements KernelFs {
   }
 
   async reconcile(): Promise<number> {
-    if (this.remote && (await this.remote.peered())) return 0;
+    if (this.remote && (await this.remote.peered())) {
+      await this.orphans();
+      return 0;
+    }
     await this.finishRenames();
     let removed = 0;
     const entries = await this.meta.all();

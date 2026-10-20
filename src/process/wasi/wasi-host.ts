@@ -3,6 +3,7 @@ import { physicalLeaf, physicalPath } from '../../fs/physical-path.ts';
 import { localCpuNanos } from '../../kernel/cpu-clock.ts';
 import { type Cred, type CredChange, MAX_GROUPS } from '../../kernel/cred.ts';
 import type { DeviceMeta, KernelFdKind } from '../../kernel/fd-table.ts';
+import type { HeldCwd } from '../../kernel/held-cwd.ts';
 import type { FdInfo } from '../../kernel/process.ts';
 import { KERNEL_SIGINFO, SIG, type SigInfo } from '../../kernel/signals.ts';
 import type { SyncFsBridgeStat, SyncFsPosixBridge } from '../../realm/sync-fs-wire.ts';
@@ -89,6 +90,8 @@ export interface WasiHostOptions {
   preopenRoot?: boolean;
 
   bare?: boolean;
+
+  held?: HeldCwd;
 }
 
 export type WasiFunction = (...args: never[]) => number | undefined;
@@ -275,6 +278,7 @@ export class WasiHost {
     this.o = { ...o, kernel: { sys, call } };
     this.startCwd = o.cwd;
     this.fds = new WasiFds(this.o.kernel, o.fs);
+    if (o.held) this.fds.held = o.held;
     this.creds = new CredCache(
       () => this.o.kernel.call({ op: 'proc-cred' }) as Cred,
       o.credGen ?? o.shared
@@ -1577,7 +1581,9 @@ export class WasiHost {
 
   private readdir(fd: number, buf: number, len: number, cookie: number, usedPtr: number): void {
     const dir = this.fds.dir(fd);
-    if (cookie === 0 || !dir.listing) dir.listing = this.list(dir.path);
+    if (cookie === 0 || !dir.listing) {
+      dir.listing = this.fds.goneCwd(dir) ? { names: [], stats: new Map() } : this.list(dir.path);
+    }
     const { names, stats } = dir.listing;
     let at = 0;
     for (let i = cookie; i < names.length && at < len; i++) {

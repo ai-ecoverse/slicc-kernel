@@ -50,6 +50,7 @@ export default async function main(ctx) {
   if (o.derCa) o.tls.ca = [Uint8Array.from(atob(o.derCa), (ch) => ch.charCodeAt(0))];
   const text = (v) => (typeof v === 'string' ? v : dec.decode(v));
   if (o.keyFile) o.tls.key = text(await ctx.fs.readFile(o.keyFile));
+  if (o.keyDer) o.tls.key = await ctx.fs.readFile(o.keyDer);
   if (o.passFile) o.tls.passphrase = text(await ctx.fs.readFile(o.passFile));
   const say = (v) => ctx.write(1, JSON.stringify(v) + '\\n');
   try {
@@ -1184,5 +1185,58 @@ test(
       [false, false, false]
     );
     assert.deepEqual(await verdict('192.0.2.7', {}), [true, false, false]);
+  }
+);
+
+test(
+  'every wrong passphrase of an encrypted client key is ERR_OSSL_BAD_DECRYPT, also one whose garbage passes the padding check, for PEM and DER keys (#1203)',
+  TIMEOUT,
+  async (t) => {
+    const server = await recordingServer(t, ca.server('secure.test'), {
+      requestCert: true,
+      rejectUnauthorized: true,
+      ca: clientCa.pem,
+    });
+    const { run, dials, kernel } = await kernelWith(t, [['secure.test', server.port]]);
+    const seen = new Set();
+    for (let k = 0; k < 3; k++) {
+      const mine = clientCa.server(`kernel client ${k}`, { eku: CLIENT_AUTH });
+      const pem = encrypted(mine.key, 'open sesame');
+      const der = createPrivateKey(mine.key).export({
+        type: 'pkcs8',
+        format: 'der',
+        cipher: 'aes-256-cbc',
+        passphrase: 'open sesame',
+      });
+      const wrong = ['wrong'];
+      for (let i = 0; wrong.length < 3; i++) {
+        try {
+          createPrivateKey({ key: pem, passphrase: `w${i}` });
+        } catch (err) {
+          if (err.code !== 'ERR_OSSL_BAD_DECRYPT') wrong.push(`w${i}`);
+        }
+      }
+      await kernel.writeFile(`/k/${k}.der`, new Uint8Array(der));
+      for (const key of [{ key: pem }, { keyDer: `/k/${k}.der` }]) {
+        for (const passphrase of wrong) {
+          const got = await run({
+            host: 'secure.test',
+            port: 4433,
+            tls: { ca: ca.pem, cert: mine.cert, ...(key.key ? { key: key.key } : {}), passphrase },
+            ...(key.keyDer ? { keyDer: key.keyDer } : {}),
+          });
+          seen.add(got.code);
+        }
+      }
+      const right = await run({
+        host: 'secure.test',
+        port: 4433,
+        tls: { ca: ca.pem, cert: mine.cert, key: pem, passphrase: 'open sesame' },
+        send: 'hi',
+      });
+      assert.equal(right.echo, `kernel client ${k} hi`);
+    }
+    assert.deepEqual([...seen], ['ERR_OSSL_BAD_DECRYPT']);
+    assert.equal(dials.count, 3);
   }
 );
