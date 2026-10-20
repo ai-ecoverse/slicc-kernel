@@ -47,7 +47,7 @@ export function refuseModules(): void {
     },
     load(url, context, next) {
       const payload = url.startsWith(BASE64_MODULE) ? url.slice(BASE64_MODULE.length) : '';
-      if (!PLAIN_BASE64.test(payload)) return next(url, context);
+      if (payload.length % 4 !== 0 || !PLAIN_BASE64.test(payload)) return next(url, context);
       const source = fromBase64(payload, 'base64').toString('utf8');
       return { format: 'module', source, shortCircuit: true };
     },
