@@ -4,7 +4,7 @@ import { join, relative } from 'node:path';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import { createNodeKernel } from '../../dist/node.js';
+import { createNodeKernel, memoryRoot } from '../../dist/node.js';
 import { fakeCronClock } from '../../dist/testing.js';
 
 const modules = new URL('../../node_modules/@ai-ecoverse/', import.meta.url);
@@ -266,4 +266,51 @@ test('crontab - keeps a character that arrives split across two reads', async (t
     "{ printf '@daily echo caf\\303'; sleep 0.3; printf '\\251\\n'; } | crontab - && crontab -l"
   );
   assert.deepEqual(result(piped), { status: 0, stdout: '@daily echo café\n', stderr: '' });
+});
+
+test('a crontab root installs with crontab -u less than a minute before its line is due fires on time, though the rename lands while cron is still in the pass the first write started (#1326)', async (t) => {
+  const root = memoryRoot();
+  const dirProto = Object.getPrototypeOf(root);
+  const probe = await root.getFileHandle('probe', { create: true });
+  const fileProto = Object.getPrototypeOf(probe);
+  await root.removeEntry('probe');
+  const { move } = fileProto;
+  const { getFileHandle } = dirProto;
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  let slow = false;
+  fileProto.move = async function (parent, name) {
+    if (slow && name === 'cone') await wait(300);
+    return move.call(this, parent, name);
+  };
+  dirProto.getFileHandle = async function (name, options) {
+    if (slow && name === 'stamp') {
+      slow = false;
+      await wait(700);
+    }
+    return getFileHandle.call(this, name, options);
+  };
+  t.after(() => {
+    fileProto.move = move;
+    dirProto.getFileHandle = getFileHandle;
+  });
+  const { kernel, clock, as } = await boot(t, { root });
+  await delay(150);
+  await clock.flush();
+  slow = true;
+  assert.equal(
+    (await as('root', 'crontab -u cone -', { stdin: '* * * * * echo on >> due\n' })).status,
+    0
+  );
+  await delay(1000);
+  await clock.flush();
+  clock.advance(30_000);
+  let ran;
+  for (let i = 0; i < 60 && !ran; i++) {
+    await delay(50);
+    ran = await kernel.readFile('/home/cone/due').then(
+      (b) => new TextDecoder().decode(b),
+      () => undefined
+    );
+  }
+  assert.equal(ran, 'on\n');
 });
