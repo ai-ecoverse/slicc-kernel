@@ -27,6 +27,7 @@ import { FileChanges } from './fs/changes.ts';
 import { type EntryTarget, followLinks, withCommandDirs } from './fs/commands.ts';
 import { Dac, type DenialHook, type Guard, need, readable, TTY_MODE } from './fs/dac.ts';
 import { SHM } from './fs/dev-removal.ts';
+import { HOSTNAME_PATH, withEtcFiles } from './fs/etc-files.ts';
 import { FreshModules } from './fs/fresh-modules.ts';
 import {
   Integrity,
@@ -2955,7 +2956,7 @@ export class Launcher {
 
   private commandFs(root: KernelFs): KernelFs {
     return withCommandDirs(
-      root,
+      withEtcFiles(root, new Map([[HOSTNAME_PATH, () => `${this.hostname}\n`]])),
       async () => this.commandNames(await this.commands()),
       (dir) => this.userCommandDir(dir),
       this.owners,

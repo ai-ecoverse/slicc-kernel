@@ -54,3 +54,29 @@ test('uname -n is the node name the kernel was given', async (t) => {
   const r = await bash('uname -n; cat /etc/hostname');
   assert.equal(r.stdout, 'box1\nbox1\n', r.stderr);
 });
+
+test('a WASIX program as a user reads /etc/hostname as the node name, 0644 and root-owned, and a real /etc/hostname in the root wins (#1297)', async (t) => {
+  const kernel = await createNodeKernel({ hostname: 'devbox', users: 'enforce' });
+  t.after(() => kernel.terminate());
+  await install(kernel, 'wasm-bash');
+  await install(kernel, 'wasm-coreutils');
+  const base = fileURLToPath(new URL('wasix-python/', modules));
+  for (const entry of (await readdir(base, { recursive: true, withFileTypes: true })).filter((e) =>
+    e.isFile()
+  )) {
+    const rel = relative(base, join(entry.parentPath, entry.name));
+    if (/^lib\/libpython[^/]*\.a$/.test(rel)) continue;
+    await kernel.writeFile(
+      `/node_modules/@ai-ecoverse/wasix-python/${rel}`,
+      await readFile(join(entry.parentPath, entry.name))
+    );
+  }
+  await kernel.users.add({ name: 'cone' });
+  const probe =
+    "python3 -c \"import os; s = os.stat('/etc/hostname'); print(repr(open('/etc/hostname').read()), oct(s.st_mode & 0o777), s.st_uid)\"";
+  const synthetic = await kernel.run(['bash', '-c', probe], { cwd: '/home/cone', user: 'cone' });
+  assert.equal(synthetic.stdout, "'devbox\\n' 0o644 0\n", synthetic.stderr);
+  await kernel.writeFile('/etc/hostname', 'from-the-root\n');
+  const real = await kernel.run(['bash', '-c', probe], { cwd: '/home/cone', user: 'cone' });
+  assert.equal(real.stdout, "'from-the-root\\n' 0o644 0\n", real.stderr);
+});
