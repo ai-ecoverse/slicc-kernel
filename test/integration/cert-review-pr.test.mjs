@@ -568,7 +568,7 @@ test("the workflow: same-repo non-draft PRs review the merge ref with main's own
     for (const c of checkouts)
       assert.match(
         c,
-        name === 'group' || name === 'group-pack'
+        ['group', 'group-pack', 'canary-runner'].includes(name)
           ? /ref: \$\{\{ github\.event\.merge_group\.base_ref \}\}$/
           : /ref: \$\{\{ github\.event\.pull_request\.base\.sha \}\}$/,
         `${name} runs main's tools`
@@ -919,8 +919,38 @@ test('the required cert-review never waits forever: a plan or lookup that fails 
   );
 });
 
+test("the canary's runner comes from the shared decider on the protected branch, which gives the pool only to a merge group of same-repo PRs, and never straight from vars.CERT_CANARY_RUNNER", () => {
+  const pick = jobs['canary-runner'];
+  assert.match(pick, /^ {4}if: github\.event_name == 'merge_group'$/m);
+  assert.match(
+    pick,
+    /ref: \$\{\{ github\.event\.merge_group\.base_ref \}\}\n {10}sparse-checkout: \.github\/runner\.mjs\n/
+  );
+  assert.match(pick, /POOL: \$\{\{ vars\.CERT_CANARY_RUNNER \}\}/);
+  assert.doesNotMatch(pick, /FORCED/);
+  assert.match(
+    pick,
+    /decide\(\{ context, github, env: process\.env \}\)\)\n {14}\.catch\(\(error\) => \(\{ runner: 'ubuntu-latest'/
+  );
+  assert.match(
+    jobs.canary,
+    /\n {6}runner: \$\{\{ needs\.canary-runner\.outputs\.runner \|\| 'ubuntu-latest' \}\}\n/
+  );
+  assert.doesNotMatch(jobs.canary, /CERT_CANARY_RUNNER/);
+});
+
+test("one bios sha everywhere: the canary's uses: pin, the judging step's --bios and the notice's --bios name the same full sha, so a bump can't miss one", () => {
+  const pins = [
+    ...workflow.matchAll(/slicc-bios\/\.github\/workflows\/canary\.yml@([0-9a-f]+)/g),
+    ...workflow.matchAll(/--bios ([0-9a-f]+)/g),
+  ].map((m) => m[1]);
+  assert.equal(pins.length, 3, pins.join(' '));
+  assert.match(pins[0], /^[0-9a-f]{40}$/);
+  assert.deepEqual(new Set(pins), new Set([pins[0]]));
+});
+
 test('the merge group runs bios canary on its own tree, packed by main tools and bound by id, digest and sha256, at a pinned bios sha, with no downstream waiver (#480)', () => {
-  const BIOS = 'c2cec127b935419049568f584093d7ef03ac0721';
+  const BIOS = '1f071319d24e70a56ae2901584aa4dfff21cfcfb';
   assert.match(jobs['group-pack'], /^ {4}if: github\.event_name == 'merge_group'$/m);
   assert.match(jobs['group-pack'], /^ {4}runs-on: ubuntu-latest$/m);
   assert.match(jobs['group-pack'], /git fetch -q --no-tags --depth=1 origin "\$GITHUB_SHA"/);
@@ -930,7 +960,10 @@ test('the merge group runs bios canary on its own tree, packed by main tools and
   );
   assert.match(jobs['group-pack'], /-group\.\$GITHUB_RUN_ID/);
   assert.match(jobs['group-pack'], /package-manager-cache: false/);
-  assert.match(jobs.canary, /needs: group-pack\n {4}if: github\.event_name == 'merge_group'\n/);
+  assert.match(
+    jobs.canary,
+    /needs: \[group-pack, canary-runner\]\n {4}if: github\.event_name == 'merge_group'\n/
+  );
   assert.match(
     jobs.canary,
     new RegExp(`uses: ai-ecoverse/slicc-bios/\\.github/workflows/canary\\.yml@${BIOS}\\n`)
@@ -943,7 +976,11 @@ test('the merge group runs bios canary on its own tree, packed by main tools and
     ['candidate-repo', '${{ github.repository }}'],
     ['candidate-artifact-id', '${{ needs.group-pack.outputs.id }}'],
     ['candidate-artifact-digest', '${{ needs.group-pack.outputs.digest }}'],
-    ['shards', `'["sweep","guard","k4-link"]'`],
+    [
+      'shards',
+      `'["sweep","guard-prompt","guard-lagging","k4-upgrade","k4-agent-modes","link-serve"]'`,
+    ],
+    ['runner', "${{ needs.canary-runner.outputs.runner || 'ubuntu-latest' }}"],
     ['repeat', '1'],
   ])
     assert.ok(jobs.canary.includes(`\n      ${input}: ${value}\n`), `${input}: ${value}`);
@@ -964,7 +1001,7 @@ test('the merge group runs bios canary on its own tree, packed by main tools and
   assert.match(
     jobs.group,
     new RegExp(
-      `gate\\.sh --evidence downstream node tools/cert-review/downstream\\.mjs --result "\\$RUNNER_TEMP/canary/result\\.json" \\\\\\n {12}--bios ${BIOS} --shards sweep,guard,k4-link --out`
+      `gate\\.sh --evidence downstream node tools/cert-review/downstream\\.mjs --result "\\$RUNNER_TEMP/canary/result\\.json" \\\\\\n {12}--bios ${BIOS} --shards sweep,guard-prompt,guard-lagging,k4-upgrade,k4-agent-modes,link-serve --out`
     )
   );
   assert.match(
@@ -1022,7 +1059,7 @@ test("the merge group's steps end to end: a planted regression is red, a missing
     }
     return undefined;
   });
-  const BIOS = 'c2cec127b935419049568f584093d7ef03ac0721';
+  const BIOS = '1f071319d24e70a56ae2901584aa4dfff21cfcfb';
   const canary = (o = {}) =>
     JSON.stringify({
       ok: true,
@@ -1095,7 +1132,7 @@ test("the merge group's steps end to end: a planted regression is red, a missing
   assert.equal(planted.status.state, 'failure');
   assert.match(
     planted.status.description,
-    /^not certified: downstream: FAIL bios c2cec127b935 sweep,guard,k4-link: 1 regressions/
+    /^not certified: downstream: FAIL bios 1f071319d24e 6 shards: 1 regressions/
   );
 
   const missing = await group('');
@@ -1109,8 +1146,8 @@ test("the merge group's steps end to end: a planted regression is red, a missing
   const broken = canary({
     counts: { pass: 0, skip: 0, fail: 0, regression: 0, both: 2, flaky: 0 },
     both: [
-      { shard: 'guard', test: 'boot', log: '' },
-      { shard: 'k4-link', test: 'link', log: '' },
+      { shard: 'guard-prompt', test: 'boot', log: '' },
+      { shard: 'link-serve', test: 'link', log: '' },
     ],
   });
   const notJudged = await group(broken);
@@ -1135,8 +1172,8 @@ test("the merge group's steps end to end: a planted regression is red, a missing
   const knownBoth = canary({
     counts: { pass: 28, skip: 0, fail: 0, regression: 0, both: 2, flaky: 0 },
     both: [
-      { shard: 'guard', test: 'boot', log: '' },
-      { shard: 'k4-link', test: 'link', log: '' },
+      { shard: 'guard-prompt', test: 'boot', log: '' },
+      { shard: 'link-serve', test: 'link', log: '' },
     ],
   });
   const noted = await group(knownBoth);
@@ -1162,11 +1199,12 @@ test("the merge group's steps end to end: a planted regression is red, a missing
     readFileSync(new URL('fixtures/cert-review/bios-canary-result.json', import.meta.url), 'utf8')
   );
   while (JSON.stringify(real).length < 200_000) real.tests.push(...real.tests);
+  real.biosRef = BIOS;
   const shaped = await group(JSON.stringify(real));
   assert.equal(shaped.down.status, 0, shaped.down.stdout);
   assert.match(
     shaped.down.stdout,
-    /downstream: PASS bios c2cec127b935 sweep,guard,k4-link: 605 pass \(https:\/\/github\.com\/ai-ecoverse\/slicc-kernel\/actions\/runs\/39168823799\)/,
+    /downstream: PASS bios 1f071319d24e 6 shards: 605 pass \(https:\/\/github\.com\/ai-ecoverse\/slicc-kernel\/actions\/runs\/39168823799\)/,
     "bios's real result (run 39168823799), over 128 KB, reaches the verdict through the artifact"
   );
   assert.equal(shaped.status.state, 'success', shaped.look.stdout);
