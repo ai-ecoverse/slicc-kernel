@@ -38,6 +38,6 @@ jobs:
   ab:
     uses: ai-ecoverse/slicc-shared-web/.github/workflows/node-ci.yml@e1c211785267ed44d88c865072a1dcd586692997
     with:
-      runs-on: ${{ vars.CERT_RUNNER || 'ubuntu-latest' }}
+      runs-on: ${{ vars.CERT_LIGHT_RUNNER || 'ubuntu-latest' }}
       timeout-minutes: 150
       test: npm run pretest && node tools/install-ab.mjs

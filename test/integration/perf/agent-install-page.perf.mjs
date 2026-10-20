@@ -51,6 +51,11 @@ test('a cold install of bios’s agent project into /opt/agent on the OPFS root,
     const text = await readFile(new URL(file, AGENT), 'utf8');
     await page.evaluate((n, x) => window.opfs.write(`opt/agent/${n}`, x), file, text);
   }
+  const peer = await page.tab();
+  await peer.goto('/');
+  await peer.until(() => typeof window.boot === 'function');
+  await peer.evaluate(() => window.secondKernel({}, 'kernel'));
+  assert.equal((await bash('cat /proc/sys/kernel/slicc_shared_root', { cwd: '/' })).stdout, '1\n');
   if (OFFLINE) {
     await page.evaluate(
       (x) => window.opfs.write('opt/agent/.npmrc', x),
