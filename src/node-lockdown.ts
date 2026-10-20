@@ -66,7 +66,8 @@ export function nodeLockdown(scope: object = globalThis): void {
 class WorkerGlobalScope {}
 
 export function glueUrl(path: string | undefined): string {
-  return new URL(path?.startsWith('/') ? path : '/', 'file:///').href;
+  const at = path?.startsWith('/') ? path : '/';
+  return `file://${at.split('/').map(encodeURIComponent).join('/')}`;
 }
 
 export function workerShaped(scope: object, href: string): void {
