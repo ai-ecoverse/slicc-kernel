@@ -55,6 +55,40 @@ test('uname -n is the node name the kernel was given', async (t) => {
   assert.equal(r.stdout, 'box1\nbox1\n', r.stderr);
 });
 
+test('a program started with an empty environment gets no HOSTNAME, yet uname -n, hostname, /etc/hostname and a WASIX gethostname still give the kernel name, and a shell still has $HOSTNAME (#1272)', async (t) => {
+  const kernel = await createNodeKernel({ hostname: 'devbox' });
+  t.after(() => kernel.terminate());
+  await install(kernel, 'wasm-bash');
+  await install(kernel, 'wasm-coreutils');
+  const base = fileURLToPath(new URL('wasix-python/', modules));
+  for (const entry of (await readdir(base, { recursive: true, withFileTypes: true })).filter((e) =>
+    e.isFile()
+  )) {
+    const rel = relative(base, join(entry.parentPath, entry.name));
+    if (/^lib\/libpython[^/]*\.a$/.test(rel)) continue;
+    await kernel.writeFile(
+      `/node_modules/@ai-ecoverse/wasix-python/${rel}`,
+      await readFile(join(entry.parentPath, entry.name))
+    );
+  }
+  const r = await kernel.run(
+    [
+      'bash',
+      '-c',
+      [
+        'case "$(env -i env)" in *HOSTNAME=*) echo has ;; *) echo none ;; esac',
+        'env -i uname -n',
+        'env -i hostname',
+        'env -i cat /etc/hostname',
+        'env -i python3 -c "import socket; print(socket.gethostname())"',
+        'echo "shell $HOSTNAME"',
+      ].join('; '),
+    ],
+    { cwd: '/' }
+  );
+  assert.equal(r.stdout, 'none\ndevbox\ndevbox\ndevbox\ndevbox\nshell devbox\n', r.stderr);
+});
+
 test('a WASIX program as a user reads /etc/hostname as the node name, 0644 and root-owned, and a real /etc/hostname in the root wins (#1297)', async (t) => {
   const kernel = await createNodeKernel({ hostname: 'devbox', users: 'enforce' });
   t.after(() => kernel.terminate());
