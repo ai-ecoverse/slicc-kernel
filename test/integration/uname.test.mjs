@@ -81,7 +81,7 @@ test('a WASIX program as a user reads /etc/hostname as the node name, 0644 and r
   assert.equal(real.stdout, "'from-the-root\\n' 0o644 0\n", real.stderr);
 });
 
-test('an exclusive create of the synthetic /etc/hostname is EEXIST, and a dangling symlink there stays dangling (#1301 review)', async (t) => {
+test('an exclusive create of the synthetic /etc/hostname is EEXIST, a dangling symlink there stays dangling, and root writing it from a shell or a WASI program makes the real file (#1301 review)', async (t) => {
   const kernel = await createNodeKernel({ hostname: 'devbox' });
   t.after(() => kernel.terminate());
   await install(kernel, 'wasm-bash');
@@ -117,4 +117,19 @@ print(open('/etc/hostname').read().strip())
     { cwd: '/' }
   );
   assert.equal(dangling.stdout, 'False True\n', dangling.stderr);
+  await kernel.run(['python3', '-c', "import os; os.unlink('/etc/hostname')"], { cwd: '/' });
+  const shell = await kernel.run(
+    ['bash', '-c', 'echo other > /etc/hostname && cat /etc/hostname'],
+    { cwd: '/' }
+  );
+  assert.equal(shell.stdout, 'other\n', shell.stderr);
+  const wasi = await kernel.run(
+    [
+      'python3',
+      '-c',
+      "import os; os.unlink('/etc/hostname'); open('/etc/hostname', 'w').write('third\\n'); print(open('/etc/hostname').read().strip())",
+    ],
+    { cwd: '/' }
+  );
+  assert.equal(wasi.stdout, 'third\n', wasi.stderr);
 });
