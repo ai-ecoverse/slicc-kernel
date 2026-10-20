@@ -92,3 +92,47 @@ test('an unreadable engines.slicc-kernel range refuses only that package, and a 
     }
   );
 });
+
+test('a package below its engines.slicc-kernel floor is refused when its glue is run by path, with or without the .wasm beside it, and when a byte-identical copy of the glue named for its command is, as by name: 126 and the same message (#1235, homescoop#1285)', async (t) => {
+  const { kernel, version, major } = await booted(t);
+  const floor = `>=${major + 1}.0.0`;
+  const glue = await readFile(new URL('wasm-coreutils/bin/coreutils', modules));
+  const wasm = await readFile(new URL('wasm-coreutils/bin/coreutils.wasm', modules));
+  await kernel.writeFile(
+    '/node_modules/emfloored/package.json',
+    JSON.stringify({
+      name: 'emfloored',
+      version: '1.0.0',
+      engines: { 'slicc-kernel': floor },
+      slicc: {
+        commands: {
+          emfloored: { glue: 'bin/emfloored', wasm: 'bin/emfloored.wasm', args: ['echo'] },
+          emcopy: { glue: 'bin/emfloored', wasm: 'bin/emfloored.wasm', args: ['echo'] },
+        },
+      },
+    })
+  );
+  await kernel.writeFile('/node_modules/emfloored/bin/emfloored', glue);
+  await kernel.writeFile('/node_modules/emfloored/bin/emfloored.wasm', wasm);
+  await kernel.writeFile('/node_modules/emfloored/bin/emcopy', glue);
+  const message = (name) =>
+    `${name}: emfloored@1.0.0 needs slicc-kernel ${floor}; this kernel is ${version}\n`;
+  const r = await kernel.run(
+    [
+      'bash',
+      '-c',
+      [
+        'emfloored hi; echo "name rc=$?"',
+        '/node_modules/emfloored/bin/emfloored hi; echo "glue rc=$?"',
+        '/node_modules/emfloored/bin/emfloored.wasm hi; echo "wasm rc=$?"',
+        '/node_modules/emfloored/bin/emcopy hi; echo "copy rc=$?"',
+      ].join('; '),
+    ],
+    { cwd: '/' }
+  );
+  assert.equal(r.stdout, 'name rc=126\nglue rc=126\nwasm rc=126\ncopy rc=126\n', r.stderr);
+  assert.equal(
+    r.stderr,
+    [message('emfloored'), message('emfloored'), message('emfloored'), message('emcopy')].join('')
+  );
+});

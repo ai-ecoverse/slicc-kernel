@@ -1,7 +1,15 @@
 import type { SessionScram } from '../sealed-session.ts';
 import { SESSION_PLACEHOLDERS } from '../sealed-session.ts';
 import { placeholdersIn, replaced, usable } from './sealed-http1.ts';
-import { base64Of, exchangeOf, sameBytes, saslprep, scramKeys } from './sealed-scram.ts';
+import {
+  base64Of,
+  channelOf,
+  clientFirstOf,
+  exchangeOf,
+  sameBytes,
+  saslprep,
+  scramKeys,
+} from './sealed-scram.ts';
 
 export const PG_MESSAGE_MAX = 16 * 1024;
 
@@ -25,7 +33,9 @@ export function sniffPg(start: string): 'yes' | 'no' | 'more' {
   return length >= 8 && length <= PG_MESSAGE_MAX && int32(bytes, 4) === PROTOCOL_3 ? 'yes' : 'no';
 }
 
+const PLAIN = 'SCRAM-SHA-256';
 const PLUS = 'SCRAM-SHA-256-PLUS';
+const END_POINT = 'p=tls-server-end-point,,';
 const SASL = 10;
 const SASL_CONTINUE = 11;
 const SASL_FINAL = 12;
@@ -42,6 +52,11 @@ export interface PgExpect {
 }
 
 export class PgServer {
+  readonly binding: Uint8Array | undefined;
+  plus = false;
+  constructor(binding?: Uint8Array) {
+    this.binding = binding;
+  }
   private buffer = new Uint8Array(0);
   private skip = 0;
   cleartext = false;
@@ -63,9 +78,11 @@ export class PgServer {
 
   private mechanisms(message: Uint8Array): Uint8Array {
     this.sasl = true;
-    const names = latin(message.subarray(9))
+    const offered = latin(message.subarray(9))
       .split('\0')
-      .filter((n) => n !== '' && n !== PLUS);
+      .filter((n) => n !== '');
+    this.plus = offered.includes(PLUS);
+    const names = offered.filter((n) => n !== PLUS || this.binding !== undefined);
     return frame(0x52, `${latin(message.subarray(5, 9))}${names.map((n) => `${n}\0`).join('')}\0`);
   }
 
@@ -164,7 +181,7 @@ export interface PgAsks {
   scram(scram: SessionScram): Promise<Record<string, string> | undefined>;
 }
 
-const MECHANISMS = new Set(['SCRAM-SHA-256']);
+const MECHANISMS = new Set([PLAIN, PLUS]);
 
 async function cleartext(message: Uint8Array, asks: PgAsks): Promise<PgFrame> {
   const body = latin(message.subarray(5));
@@ -179,16 +196,40 @@ async function cleartext(message: Uint8Array, asks: PgAsks): Promise<PgFrame> {
   return { bytes: frame(0x70, `${replaced(password, values)}\0`), values, done: true };
 }
 
-function initial(message: Uint8Array): string | undefined {
+interface Initial {
+  mechanism: string;
+  data: string;
+}
+
+function initial(message: Uint8Array): Initial | undefined {
   const body = latin(message.subarray(5));
   const nul = body.indexOf('\0');
-  if (nul < 0 || !MECHANISMS.has(body.slice(0, nul)) || body.length < nul + 5) return undefined;
+  const mechanism = body.slice(0, nul);
+  if (nul < 0 || !MECHANISMS.has(mechanism) || body.length < nul + 5) return undefined;
   const data = message.subarray(5 + nul + 5);
-  return int32(message, 5 + nul + 1) === data.length ? latin(data) : undefined;
+  return int32(message, 5 + nul + 1) === data.length ? { mechanism, data: latin(data) } : undefined;
+}
+
+function int32Text(n: number): string {
+  return String.fromCharCode((n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255);
+}
+
+export function serverHeader(header: string, server: PgServer): string {
+  if (header === 'n,,') return header;
+  if (header === 'y,,' && !server.plus) return header;
+  if (header === END_POINT && server.binding) return header;
+  return server.plus && server.binding ? END_POINT : 'n,,';
+}
+
+function rewritten(first: Initial, header: string): Initial {
+  const parsed = clientFirstOf(first.data);
+  if (!parsed || parsed.header === header) return first;
+  return { mechanism: header === END_POINT ? PLUS : PLAIN, data: `${header}${parsed.bare}` };
 }
 
 export class PgClient {
   private clientFirst: string | undefined;
+  private header = 'n,,';
   private readonly server: PgServer;
   private readonly asks: PgAsks;
   constructor(server: PgServer, asks: PgAsks) {
@@ -204,8 +245,17 @@ export class PgClient {
       return cleartext(message, this.asks);
     }
     if (server.sasl && this.clientFirst === undefined) {
-      this.clientFirst = initial(message);
-      return { bytes: message, done: this.clientFirst === undefined };
+      const first = initial(message);
+      const parsed = first && clientFirstOf(first.data);
+      if (!first || !parsed) return { bytes: message, done: true };
+      this.clientFirst = first.data;
+      this.header = serverHeader(parsed.header, server);
+      const sent = rewritten(first, this.header);
+      if (sent === first) return { bytes: message, done: false };
+      return {
+        bytes: frame(0x70, `${sent.mechanism}\0${int32Text(sent.data.length)}${sent.data}`),
+        done: false,
+      };
     }
     if (this.clientFirst !== undefined && server.serverFirst !== undefined)
       return this.final(message, this.clientFirst, server.serverFirst);
@@ -216,6 +266,8 @@ export class PgClient {
     const got = exchangeOf(first, serverFirst, latin(message.subarray(5)));
     if (!got) return { bytes: message, done: true };
     const x = got.exchange;
+    const binding = this.header === END_POINT ? this.server.binding : undefined;
+    const serverFinal = `c=${channelOf(this.header, binding)},r=${got.nonce}`;
     const values = usable(
       await this.asks.scram({
         clientFirstBare: x.clientFirstBare,
@@ -225,16 +277,19 @@ export class PgClient {
       })
     );
     const [entry, ...more] = Object.entries(values);
-    if (!entry || more.length > 0) return { bytes: message, done: true };
+    const own = { bytes: frame(0x70, `${serverFinal},p=${base64Of(got.proof)}`), done: true };
+    if (!entry || more.length > 0)
+      return serverFinal === x.clientFinalBare ? { bytes: message, done: true } : own;
     const [placeholder, value] = entry;
     const fake = await scramKeys(placeholder, x);
-    if (!sameBytes(fake.proof, got.proof)) return { bytes: message, done: true };
-    const real = await scramKeys(saslprep(value), x);
+    if (!sameBytes(fake.proof, got.proof))
+      return serverFinal === x.clientFinalBare ? { bytes: message, done: true } : own;
+    const real = await scramKeys(saslprep(value), { ...x, clientFinalBare: serverFinal });
     this.server.expect = {
       real: `v=${base64Of(real.serverSignature)}`,
       fake: `v=${base64Of(fake.serverSignature)}`,
     };
-    const bytes = frame(0x70, `${x.clientFinalBare},p=${base64Of(real.proof)}`);
+    const bytes = frame(0x70, `${serverFinal},p=${base64Of(real.proof)}`);
     for (const k of [real.proof, real.serverSignature, fake.proof, fake.serverSignature]) k.fill(0);
     return { bytes, values, done: true };
   }
