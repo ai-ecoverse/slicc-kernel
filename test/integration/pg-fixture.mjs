@@ -113,11 +113,15 @@ function patchFlow() {
   };
 }
 
-export async function pgFixture(t, cert, password, { signWith, echoFinal, plus } = {}) {
+export async function pgFixture(t, cert, password, { signWith, echoFinal, plus, bindTo } = {}) {
   const data = await createScramSha256Data(password);
   if (signWith) data.serverKey = (await createScramSha256Data(signWith)).serverKey;
   const getScramSha256Data = () => data;
-  const binding = plus ? createHash('sha256').update(cert.der).digest() : undefined;
+  const binding = plus
+    ? createHash('sha256')
+        .update(bindTo ?? cert.der)
+        .digest()
+    : undefined;
   if (plus) {
     patchFlow();
     getScramSha256Data.plus = { binding, refused: [], finals: [] };
@@ -143,5 +147,5 @@ export async function pgFixture(t, cert, password, { signWith, echoFinal, plus }
   });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   t.after(() => server.close());
-  return { port: server.address().port, seen, binding };
+  return { port: server.address().port, seen, binding, data };
 }

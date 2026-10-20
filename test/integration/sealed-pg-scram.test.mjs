@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash, createHmac, pbkdf2Sync } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import { connect as tcp } from 'node:net';
 import { join, relative } from 'node:path';
@@ -8,7 +9,7 @@ import { createNodeKernel } from '../../dist/node.js';
 import { fakeUplink } from '../../dist/testing.js';
 import { PG_CLIENT } from './pg-client-program.mjs';
 import { pgFixture } from './pg-fixture.mjs';
-import { makeCa } from './test-certs.mjs';
+import { makeCa, pssCa } from './test-certs.mjs';
 
 const modules = new URL('../../node_modules/@ai-ecoverse/', import.meta.url);
 const TIMEOUT = { timeout: 120_000 };
@@ -44,7 +45,7 @@ function pipeTo(port) {
   };
 }
 
-async function kernelWith(t, servers, answer) {
+async function kernelWith(t, servers, answer, { roots = ca.der } = {}) {
   const names = {};
   const peers = {};
   servers.forEach(([host, port], i) => {
@@ -81,7 +82,7 @@ async function kernelWith(t, servers, answer) {
   });
   t.after(() => kernel.terminate());
   await install(kernel, 'wasm-tls-engine');
-  await kernel.writeFile('/node_modules/@ai-ecoverse/wasm-tls-engine/dist/roots.der', ca.der);
+  await kernel.writeFile('/node_modules/@ai-ecoverse/wasm-tls-engine/dist/roots.der', roots);
   await kernel.writeFile(
     '/node_modules/pgc/package.json',
     JSON.stringify({ name: 'pgc', slicc: { commands: { pgc: { abi: 'js', module: 'pgc.mjs' } } } })
@@ -253,5 +254,115 @@ test(
       .map((m) => m.subarray(5).toString('latin1'))
       .find((m) => m.startsWith('c='));
     assert.equal(final.slice(0, 7), 'c=eSws,');
+  }
+);
+
+test(
+  "pg SCRAM-SHA-256-PLUS, the cert lane's rows: a server signature that does not verify ends the session before anything reaches the program; a binding the server checks against another leaf fails once, with no retry without binding (jsh#531)",
+  TIMEOUT,
+  async (t) => {
+    const bad = await pgFixture(t, ca.server('db.test'), VALUE, {
+      plus: true,
+      signWith: 'TEST-ONLY-OTHER-VALUE-2',
+    });
+    const a = await kernelWith(t, [['db.test', bad.port]], matched);
+    const signed = await a.run({ host: 'db.test', port: 5432, password: PH, gs2: 'y' });
+    assert.equal(signed.steps.at(-1), 'error ERR_SSL_PROTOCOL_ERROR', JSON.stringify(signed));
+    assert.equal(
+      signed.steps.some((x) => x.startsWith('final') || x === 'R 0'),
+      false
+    );
+    const other = ca.server('other.test');
+    const pinned = await pgFixture(t, ca.server('db.test'), VALUE, {
+      plus: true,
+      bindTo: other.der,
+    });
+    const b = await kernelWith(t, [['db.test', pinned.port]], matched);
+    const refused = await b.run({ host: 'db.test', port: 5432, password: PH, gs2: 'y' });
+    assert.equal(refused.steps.includes('R 0'), false, JSON.stringify(refused));
+    assert.equal(refused.steps.at(-1), 'error ERR_SSL_PROTOCOL_ERROR', JSON.stringify(refused));
+    assert.deepEqual(pinned.seen.plus.refused, ['SCRAM channel binding check failed']);
+    assert.equal(pinned.seen.plus.finals.length, 1);
+    assert.equal(pinned.seen.authenticated, 0);
+  }
+);
+
+test(
+  'pg SCRAM-SHA-256-PLUS: no byte the program receives carries the value or its SCRAM derivatives (SaltedPassword, ClientKey, ServerKey, StoredKey), raw or base64 (jsh#531)',
+  TIMEOUT,
+  async (t) => {
+    const db = await pgFixture(t, ca.server('db.test'), VALUE, { plus: true });
+    const { run } = await kernelWith(t, [['db.test', db.port]], matched);
+    const got = await run({ host: 'db.test', port: 5432, password: PH, gs2: 'y', dump: true });
+    assert.equal(got.steps.includes('final ok'), true, JSON.stringify(got));
+    const received = Buffer.from(got.received, 'base64');
+    const salted = pbkdf2Sync(
+      VALUE,
+      Buffer.from(db.data.salt, 'base64'),
+      db.data.iterations,
+      32,
+      'sha256'
+    );
+    const clientKey = createHmac('sha256', salted).update('Client Key').digest();
+    const serverKey = createHmac('sha256', salted).update('Server Key').digest();
+    const storedKey = createHash('sha256').update(clientKey).digest();
+    assert.equal(serverKey.toString('base64'), db.data.serverKey);
+    for (const secret of [Buffer.from(VALUE), salted, clientKey, serverKey, storedKey]) {
+      assert.equal(received.includes(secret), false);
+      assert.equal(received.includes(Buffer.from(secret.toString('base64'))), false);
+      assert.equal(JSON.stringify(got).includes(secret.toString('base64')), false);
+    }
+    assert.equal(JSON.stringify(got).includes(VALUE), false);
+  }
+);
+
+test(
+  'pg SCRAM with a leaf whose signature hash the binding does not know (RSA-PSS): -PLUS is not offered, y,, becomes n,, and plain SCRAM authenticates (jsh#531)',
+  TIMEOUT,
+  async (t) => {
+    const pss = pssCa();
+    const db = await pgFixture(t, pss.server('db.test'), VALUE, { plus: true });
+    const { run } = await kernelWith(t, [['db.test', db.port]], matched, { roots: pss.der });
+    const got = await run({ host: 'db.test', port: 5432, password: PH, gs2: 'y' });
+    assert.deepEqual(got.tls, { verified: true, substitutes: true }, JSON.stringify(got));
+    assert.deepEqual(got.mechanisms, ['SCRAM-SHA-256']);
+    assert.equal(got.steps.includes('final ok'), true, JSON.stringify(got));
+    assert.deepEqual(header(db), ['n,,']);
+  }
+);
+
+test(
+  'pg SCRAM-SHA-256-PLUS: a p= of another binding type is rewritten to tls-server-end-point and authenticates, and an n,, exchange reaches the server byte for byte as the program wrote it (jsh#531)',
+  TIMEOUT,
+  async (t) => {
+    const db = await pgFixture(t, ca.server('db.test'), VALUE, { plus: true });
+    const { run } = await kernelWith(t, [['db.test', db.port]], matched);
+    const unique = await run({
+      host: 'db.test',
+      port: 5432,
+      password: PH,
+      gs2: 'p',
+      type: 'tls-unique',
+      binding: b64(Buffer.alloc(12, 3)),
+    });
+    assert.equal(unique.steps.includes('final ok'), true, JSON.stringify(unique));
+    assert.deepEqual(header(db), ['p=t']);
+    const own = await pgFixture(t, ca.server('db.test'), 'TEST-ONLY-OWN-PASSWORD-1', {
+      plus: true,
+    });
+    const o = await kernelWith(t, [['db.test', own.port]], () => ({
+      v: 1,
+      error: { code: 'EACCES' },
+    }));
+    const n = await o.run({
+      host: 'db.test',
+      port: 5432,
+      password: 'TEST-ONLY-OWN-PASSWORD-1',
+      gs2: 'n',
+    });
+    assert.equal(n.steps.includes('final ok'), true, JSON.stringify(n));
+    const sasl = own.seen.messages.filter((m) => m[0] === 0x70).map((m) => m.toString('latin1'));
+    assert.equal(sasl[0].slice(5), 'SCRAM-SHA-256\0\0\0\0\u001cn,,n=,r=fixedtestclientnonce');
+    assert.match(sasl[1].slice(5), /^c=biws,r=fixedtestclientnonce[^,]+,p=[A-Za-z0-9+/=]+$/);
   }
 );

@@ -16,6 +16,7 @@ async function keysFor(password, salt, iterations, auth) {
   const sig = await hmac(stored, auth);
   return { proof: b64(clientKey.map((x, i) => x ^ sig[i])), server: b64(await hmac(await hmac(salted, 'Server Key'), auth)) };
 }
+const received = [];
 function reader(r) {
   let buf = new Uint8Array(0);
   return async () => {
@@ -30,6 +31,7 @@ function reader(r) {
       }
       const { value, done } = await r.read();
       if (done) return null;
+      received.push(...value);
       const next = new Uint8Array(buf.length + value.length);
       next.set(buf);
       next.set(value, buf.length);
@@ -57,7 +59,7 @@ export default async function main(ctx) {
   const r10 = await next();
   out.mechanisms = latin(r10.subarray(9)).split('\\0').filter(Boolean);
   const first = 'n=,r=fixedtestclientnonce';
-  const header = o.gs2 === 'p' ? 'p=tls-server-end-point,,' : (o.gs2 ?? 'n') + ',,';
+  const header = o.gs2 === 'p' ? 'p=' + (o.type ?? 'tls-server-end-point') + ',,' : (o.gs2 ?? 'n') + ',,';
   const mechanism = o.gs2 === 'p' ? 'SCRAM-SHA-256-PLUS' : 'SCRAM-SHA-256';
   const initial = header + first;
   await w.write(msg('p', [...enc.encode(mechanism + '\\0'), ...int32(initial.length), ...enc.encode(initial)]));
@@ -85,6 +87,7 @@ export default async function main(ctx) {
     else out.steps.push(type + (code === undefined ? '' : ' ' + code));
     if (type === 'Z') break;
   }
+  if (o.dump) out.received = b64(new Uint8Array(received));
   await ctx.write(1, JSON.stringify(out));
   await c.close();
 }

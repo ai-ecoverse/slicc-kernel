@@ -212,3 +212,42 @@ export function rsaPss(host, { rollover = false } = {}) {
   });
   return { der, cert: pem(der), key: pair.privateKey.export({ type: 'pkcs8', format: 'pem' }) };
 }
+
+export function pssCa(cn = 'slicc-kernel PSS test CA') {
+  const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const spki = publicKey.export({ type: 'spki', format: 'der' });
+  const now = Date.now();
+  const der = certificate({
+    issuer: cn,
+    subject: cn,
+    notBefore: new Date(now - DAY),
+    notAfter: new Date(now + 365 * DAY),
+    spki,
+    ca: true,
+    key: privateKey,
+    pss: true,
+  });
+  return {
+    der,
+    pem: pem(der),
+    server(host) {
+      const pair = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+      const leaf = certificate({
+        issuer: cn,
+        subject: host,
+        notBefore: new Date(now - 3600_000),
+        notAfter: new Date(now + 7 * DAY),
+        spki: pair.publicKey.export({ type: 'spki', format: 'der' }),
+        issuerSpki: spki,
+        host,
+        key: privateKey,
+        pss: true,
+      });
+      return {
+        der: leaf,
+        cert: pem(leaf) + pem(der),
+        key: pair.privateKey.export({ type: 'pkcs8', format: 'pem' }),
+      };
+    },
+  };
+}
