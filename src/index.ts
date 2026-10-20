@@ -161,6 +161,7 @@ export type { Account, AddUser, Group, RemoveUser } from './users.ts';
 export interface NetworkOptions {
   transport?: NetworkTransport;
   uplink?: NetworkUplink;
+  doh?: string | false;
 }
 
 export interface KernelOptions {
@@ -362,6 +363,7 @@ function initCall(options: KernelOptions, transport: NetworkTransport | undefine
     ...(options.ca !== undefined ? { ca: options.ca } : {}),
     ...(transport ? { transport: transport.traits } : {}),
     ...uplinkInit(options.network?.uplink),
+    ...(options.network?.doh !== undefined ? { doh: options.network.doh } : {}),
     ...(options.hostfs ? { hostfs: true } : {}),
     ...(options.cdp ? { cdp: true } : {}),
     ...facadesInit(options.facades),

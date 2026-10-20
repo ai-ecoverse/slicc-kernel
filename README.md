@@ -33,7 +33,7 @@ TypeScript declarations ship in `dist/types/`, and each entry (`.`, `./node`, `.
 | `ca` | `'<metadata>-ca'`, or `'slicc-kernel-ca'` | the IndexedDB database for the proxy's CA (see [Network](#network)); `false` keeps it in memory |
 | `media` | `'<metadata>:media'` | the IndexedDB database for the folder handles of `fsa` drives (see [Removable media](#removable-media-fsa)); `false` keeps them in memory, as `metadata: false` does |
 | `worker` | `new URL('./kernel-worker.js', import.meta.url)` | the kernel worker script |
-| `network` | none | `{ transport, uplink }`: how programs reach the outside world (see [Network](#network) and [Uplink](#uplink)) |
+| `network` | none | `{ transport, uplink, doh }`: how programs reach the outside world (see [Network](#network), [Uplink](#uplink) and [DNS](#dns)) |
 | `requestDirectory` | none | `() => Promise<FileSystemDirectoryHandle>`, typically `showDirectoryPicker`: how an `fsa` mount gets its folder (see [Removable media](#removable-media-fsa)) |
 | `hostfs` | none | `(source, { readonly }) => Promise<{ url, token, capabilities? } \| { port, token?, capabilities? }>`: a grant for a `hostfs` mount from the local proxy, or a `MessagePort` the page serves the folder on (see [Host folders](#host-folders-hostfs)) |
 | `onMountPending` | none | `({ target, source, insert }) => void`: an `fsa` mount needs a folder; call `insert()` from a user gesture |
@@ -581,6 +581,14 @@ WASIX programs get `AF_INET`/`AF_INET6` `SOCK_DGRAM` sockets, and `AF_UNIX` ones
 - **Errors:** a missing path is `ENOENT`, a file no datagram socket is bound to is `ECONNREFUSED`, a stream socket's path is `EPROTOTYPE` (both ways), and a taken path is `EADDRINUSE`.
 - **Flow control:** a receiver queue holds 512 messages or 256 KiB. A full one blocks a sender, or fails a non-blocking send with `EAGAIN`, as on Linux.
 - **Not supported:** passing descriptors or credentials (`SCM_RIGHTS`, `SCM_CREDENTIALS`) over datagrams, and `AF_UNIX` datagrams for Emscripten and JS programs.
+
+#### DNS
+
+The kernel answers DNS itself, so DNS clients (BIND's `dig`, `host` and `nslookup`) see the same names as `getaddrinfo` (#1244).
+- **Where it listens:** UDP and TCP port 53 on the kernel's loopback; `/etc/resolv.conf` names `127.0.0.53`, as systemd-resolved does, but any loopback address reaches it. TCP takes several queries on one connection (2-byte length framing), at most 64 connections at once, each closed after 10 s without a query. A program that binds port 53 itself first (its own DNS server) gets that port's traffic instead; the stub doesn't reserve it.
+- **What it answers itself,** from the [kernel's resolver](#node-name): `A` and `AAAA` for `/etc/hosts` names, the node name, `localhost` and `*.localhost`, `host.slicc.internal`, and the [uplink](#uplink)'s names (a tray's `<device>.slicc.internal`, MagicDNS); `PTR` from `/etc/hosts` and the built-in entries (`127.0.0.0/8` is `localhost`). TTLs are 30 s. Answers for `localhost` and `slicc.internal` are authoritative (`aa`), and a name there that nothing knows is `NXDOMAIN`. Other types for a name the kernel knows (`MX` for `host.slicc.internal`) get an empty answer.
+- **Everything else** (other names, other types, other classes, address literals, an `AAAA` the uplink has no answer to) is forwarded over DNS over HTTPS (RFC 8484, `POST`, id 0) through the [transport](#network), to `https://cloudflare-dns.com/dns-query` unless `network: { doh }` names another endpoint. `doh: false` turns forwarding off; those questions are then `SERVFAIL`, as is a failed or non-`application/dns-message` answer, or none within 5 s. The answer goes back as the endpoint gave it, with the query's id. Over UDP, an answer longer than 512 bytes (or the query's EDNS size, at most 4096) comes back truncated (`tc`, no records), so the client asks again over TCP.
+- **`/etc/resolv.conf`:** at boot, the kernel writes `nameserver 127.0.0.53` and `options edns0` there when there is no such file (a symlink counts as one), owned by root with mode `0644`. A file root wrote stays. One that root removes comes back at the next boot. It has no `search` line, because musl's `getaddrinfo` (WASIX programs) would then try every short name in that domain first.
 
 ### Node name
 
@@ -1265,6 +1273,10 @@ Not part of the run yet: the rest of bios's setup (the `rest` shard, the upgrade
 ## Test fixtures
 
 The WASIX fixtures of `test/integration/epoll.test.mjs` (#674), under `test/integration/fixtures/`, are committed with their sources, build scripts and built wasm.
+
+### `dnstest`
+
+`test/integration/fixtures/dnstest`: a C WASIX program, built by `build.sh` with `wasixcc`, for the [DNS](#dns) rows (#1244). `dnstest udp|tcp|tcp2 <server> <name> <type> [edns]` sends one question to `<server>:53` (`tcp2` sends it twice on one connection), then prints the reply's id check, rcode and `aa`/`tc`/`ra` flags and section counts, and each answer as `<name> <ttl> <type> <data>`.
 
 ### `heldcwd`
 

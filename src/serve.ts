@@ -61,6 +61,7 @@ export interface InitRequest {
   ca?: string | false;
   transport?: RealmTransportTraits;
   uplink?: { traits: UplinkTraits; routes?: RouteTable };
+  doh?: string | false;
   hostfs?: boolean;
   hostname?: string;
   users?: UsersMode;
@@ -426,6 +427,7 @@ function hostOptions(
   lookup: IntegrityLookup
 ): {
   hostname?: string;
+  doh?: string | false;
   users?: UsersMode;
   onDenial?: DenialHook;
   sealed?: SealedHook;
@@ -436,6 +438,7 @@ function hostOptions(
   return {
     cron: { lock: `slicc-kernel-cron:${req.metadata ?? META_DB}` },
     ...(req.hostname !== undefined ? { hostname: req.hostname } : {}),
+    ...(req.doh !== undefined ? { doh: req.doh } : {}),
     ...(req.users !== undefined ? { users: req.users } : {}),
     ...(req.denials ? { onDenial: (denial: Denial) => port.postMessage({ denial }) } : {}),
     ...(req.protect ? { protect: hostProtect(req.protect, lookup) } : {}),
