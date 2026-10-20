@@ -21,6 +21,7 @@ export interface Command {
   imports?: string;
   refused?: string;
   shows?: string;
+  origin?: { abi: string; glue: string; wasm: string };
   variants?: CommandVariant[];
 }
 
