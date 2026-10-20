@@ -555,7 +555,7 @@ test("the workflow: same-repo non-draft PRs review the merge ref with main's own
     workflow,
     /\(\(github\.event\.action == 'labeled' \|\| github\.event\.action == 'unlabeled'\) && github\.event\.label\.name != 'cert-review-approved'\) && format\('cert-review-pr-noop-\{0\}', github\.run_id\)/
   );
-  assert.doesNotMatch(jobs.plan, /--draft/);
+  assert.doesNotMatch(jobs.plan, /--draft|PR_DRAFT|pull_request\.draft/);
   const tool = readFileSync(new URL('pr.mjs', tools), 'utf8');
   assert.doesNotMatch(
     tool,
@@ -960,7 +960,7 @@ test("one bios sha everywhere: the canary's uses: pin, the judging step's --bios
 });
 
 test('the merge group runs bios canary on its own tree, packed by main tools and bound by id, digest and sha256, at a pinned bios sha, with no downstream waiver (#480)', () => {
-  const BIOS = '1f071319d24e70a56ae2901584aa4dfff21cfcfb';
+  const BIOS = 'fcaa9a23d9755fa0246ace5a27ca089ea3596b5b';
   assert.match(jobs['group-pack'], /^ {4}if: github\.event_name == 'merge_group'$/m);
   assert.match(jobs['group-pack'], /^ {4}runs-on: ubuntu-latest$/m);
   assert.match(jobs['group-pack'], /git fetch -q --no-tags --depth=1 origin "\$GITHUB_SHA"/);
@@ -1069,7 +1069,7 @@ test("the merge group's steps end to end: a planted regression is red, a missing
     }
     return undefined;
   });
-  const BIOS = '1f071319d24e70a56ae2901584aa4dfff21cfcfb';
+  const BIOS = 'fcaa9a23d9755fa0246ace5a27ca089ea3596b5b';
   const canary = (o = {}) =>
     JSON.stringify({
       ok: true,
@@ -1142,7 +1142,7 @@ test("the merge group's steps end to end: a planted regression is red, a missing
   assert.equal(planted.status.state, 'failure');
   assert.match(
     planted.status.description,
-    /^not certified: downstream: FAIL bios 1f071319d24e 6 shards: 1 regressions/
+    /^not certified: downstream: FAIL bios fcaa9a23d975 6 shards: 1 regressions/
   );
 
   const missing = await group('');
@@ -1214,7 +1214,7 @@ test("the merge group's steps end to end: a planted regression is red, a missing
   assert.equal(shaped.down.status, 0, shaped.down.stdout);
   assert.match(
     shaped.down.stdout,
-    /downstream: PASS bios 1f071319d24e 6 shards: 605 pass \(https:\/\/github\.com\/ai-ecoverse\/slicc-kernel\/actions\/runs\/39168823799\)/,
+    /downstream: PASS bios fcaa9a23d975 6 shards: 605 pass \(https:\/\/github\.com\/ai-ecoverse\/slicc-kernel\/actions\/runs\/39168823799\)/,
     "bios's real result (run 39168823799), over 128 KB, reaches the verdict through the artifact"
   );
   assert.equal(shaped.status.state, 'success', shaped.look.stdout);

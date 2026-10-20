@@ -50,7 +50,7 @@ export default async function main(ctx) {
   pw.releaseLock();
   pr.releaseLock();
   out.ssl = latin(s.value);
-  const c = await ctx.net.connect({ socket: plain, host: o.host, tls: {} });
+  const c = await ctx.net.connect({ socket: plain, host: o.host, tls: o.tls ?? {} });
   out.tls = { verified: c.tls.verified, substitutes: c.tls.substitutes };
   const w = c.writable.getWriter();
   const next = reader(c.readable.getReader());
@@ -59,6 +59,7 @@ export default async function main(ctx) {
   const r10 = await next();
   out.mechanisms = latin(r10.subarray(9)).split('\\0').filter(Boolean);
   const first = 'n=,r=fixedtestclientnonce';
+  if (o.gs2 === 'prefer') o.gs2 = out.mechanisms.includes('SCRAM-SHA-256-PLUS') ? 'p' : 'y';
   const header = o.gs2 === 'p' ? 'p=' + (o.type ?? 'tls-server-end-point') + ',,' : (o.gs2 ?? 'n') + ',,';
   const mechanism = o.gs2 === 'p' ? 'SCRAM-SHA-256-PLUS' : 'SCRAM-SHA-256';
   const initial = header + first;

@@ -19,6 +19,17 @@ type TlsExport =
   | 'tls_alpn_http11'
   | 'tls_session_free';
 
+interface TlsNamedModule {
+  _tls_client_new_name(
+    store: number,
+    name: number,
+    nameLen: number,
+    alpn: number,
+    alpnLen: number,
+    flags: number
+  ): number;
+}
+
 type TlsClientExport =
   | 'tls_ca_new'
   | 'tls_ca_add_der'
@@ -151,11 +162,18 @@ export class TlsEngine {
     flags: number
   ): TlsSession {
     const m = this.clientModule();
+    if (servername.includes('\0')) throw new TlsError(-3, 'tls engine: a server name has no NUL');
     const wire = alpnWire(alpn);
-    const name = this.put(new TextEncoder().encode(servername));
+    const bytes = new TextEncoder().encode(servername);
+    const name = this.put(bytes);
     try {
       const at = store?.ptr ?? 0;
-      const ptr = this.withBytes(wire, (p) => m._tls_client_new(at, name, p, wire.length, flags));
+      const named = (m as Partial<TlsNamedModule>)._tls_client_new_name;
+      const ptr = this.withBytes(wire, (p) =>
+        named
+          ? named(at, name, bytes.length, p, wire.length, flags)
+          : m._tls_client_new(at, name, p, wire.length, flags)
+      );
       if (!ptr) throw this.error(m._tls_last_error(), 'tls client');
       return new TlsSession(this, m, ptr);
     } finally {

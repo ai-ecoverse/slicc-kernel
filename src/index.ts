@@ -161,6 +161,7 @@ export type { Account, AddUser, Group, RemoveUser } from './users.ts';
 export interface NetworkOptions {
   transport?: NetworkTransport;
   uplink?: NetworkUplink;
+  doh?: string | false;
 }
 
 export interface KernelOptions {
@@ -347,7 +348,8 @@ function dialer(call: (req: KernelCall) => Promise<unknown>) {
 function uplinkInit(uplink: NetworkUplink | undefined): Pick<InitRequest, 'uplink'> {
   if (!uplink) return {};
   const traits = { tcp: true, udp: carriesUdp(uplink), ipv6: uplink.traits.ipv6 === true } as const;
-  return { uplink: { traits, ...(uplink.routes ? { routes: uplink.routes } : {}) } };
+  const nameserver = typeof uplink.nameserver === 'string' ? { nameserver: uplink.nameserver } : {};
+  return { uplink: { traits, ...(uplink.routes ? { routes: uplink.routes } : {}), ...nameserver } };
 }
 
 function initCall(options: KernelOptions, transport: NetworkTransport | undefined): KernelCall {
@@ -362,6 +364,7 @@ function initCall(options: KernelOptions, transport: NetworkTransport | undefine
     ...(options.ca !== undefined ? { ca: options.ca } : {}),
     ...(transport ? { transport: transport.traits } : {}),
     ...uplinkInit(options.network?.uplink),
+    ...(options.network?.doh !== undefined ? { doh: options.network.doh } : {}),
     ...(options.hostfs ? { hostfs: true } : {}),
     ...(options.cdp ? { cdp: true } : {}),
     ...facadesInit(options.facades),

@@ -105,7 +105,7 @@ export interface NodeKernelOptions {
   modules?: string;
   commands?: { append?: readonly string[] };
   env?: Record<string, string>;
-  network?: { transport?: NetworkTransport; uplink?: NetworkUplink };
+  network?: { transport?: NetworkTransport; uplink?: NetworkUplink; doh?: string | false };
   worker?: string | URL;
   driverWorker?: string | URL;
   processMounts?: ProcessMountPolicy;
@@ -265,6 +265,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     ...(options.env ? { env: options.env } : {}),
     ...(transport ? { transport } : {}),
     ...(options.network?.uplink ? { uplink: options.network.uplink } : {}),
+    ...(options.network?.doh !== undefined ? { doh: options.network.doh } : {}),
     ...(options.processMounts !== undefined ? { processMounts: options.processMounts } : {}),
     ...(options.fstabRetries ? { fstabRetries: options.fstabRetries } : {}),
     ...(options.hostfs ? { hostfs: options.hostfs } : {}),

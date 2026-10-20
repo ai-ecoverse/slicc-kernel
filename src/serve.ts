@@ -60,7 +60,8 @@ export interface InitRequest {
   media?: string | false;
   ca?: string | false;
   transport?: RealmTransportTraits;
-  uplink?: { traits: UplinkTraits; routes?: RouteTable };
+  uplink?: { traits: UplinkTraits; routes?: RouteTable; nameserver?: string };
+  doh?: string | false;
   hostfs?: boolean;
   hostname?: string;
   users?: UsersMode;
@@ -291,7 +292,16 @@ function remotes(
 ): { transport?: RemoteTransport; uplink?: RemoteUplink } {
   return {
     ...(req.transport ? { transport: new RemoteTransport(port, req.transport) } : {}),
-    ...(req.uplink ? { uplink: new RemoteUplink(port, req.uplink.traits, req.uplink.routes) } : {}),
+    ...(req.uplink
+      ? {
+          uplink: new RemoteUplink(
+            port,
+            req.uplink.traits,
+            req.uplink.routes,
+            req.uplink.nameserver
+          ),
+        }
+      : {}),
   };
 }
 
@@ -426,6 +436,7 @@ function hostOptions(
   lookup: IntegrityLookup
 ): {
   hostname?: string;
+  doh?: string | false;
   users?: UsersMode;
   onDenial?: DenialHook;
   sealed?: SealedHook;
@@ -436,6 +447,7 @@ function hostOptions(
   return {
     cron: { lock: `slicc-kernel-cron:${req.metadata ?? META_DB}` },
     ...(req.hostname !== undefined ? { hostname: req.hostname } : {}),
+    ...(req.doh !== undefined ? { doh: req.doh } : {}),
     ...(req.users !== undefined ? { users: req.users } : {}),
     ...(req.denials ? { onDenial: (denial: Denial) => port.postMessage({ denial }) } : {}),
     ...(req.protect ? { protect: hostProtect(req.protect, lookup) } : {}),

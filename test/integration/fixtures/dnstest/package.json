@@ -1,0 +1,12 @@
+{
+  "name": "dnstest",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "dnstest": {
+        "wasm": "bin/dnstest.wasm"
+      }
+    }
+  }
+}

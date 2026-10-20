@@ -61,6 +61,7 @@ async function kernelWith(t, servers, answer, { roots = ca.der } = {}) {
   });
   const asked = [];
   const sealed = async (req) => {
+    if (req.op === 'sessionAnchors') return answer(req);
     if (req.op !== 'sessionMaterialize') return { v: 1, error: { code: 'EINVAL' } };
     asked.push(req);
     return answer(req);
@@ -382,5 +383,70 @@ test(
     assert.equal(got.steps.includes('final ok'), true, JSON.stringify(got));
     assert.equal(db.seen.authenticated, 1);
     assert.equal(JSON.stringify(got).includes(raw), false);
+  }
+);
+
+test(
+  "pg SCRAM with the program's own password in a session no sealed value can reach passes through byte for byte: libpq prefer against a private-CA server (the program's own ca, no vault anchor) and against an unverified chain (sslmode=require) authenticates, -PLUS bound by the program (slicc-jsh#584)",
+  TIMEOUT,
+  async (t) => {
+    const own = 'TEST-ONLY-OWN-PASSWORD-1';
+    const priv = makeCa('private pg CA');
+    const db = await pgFixture(t, priv.server('db.test'), own, { plus: true });
+    const none = () => ({ anchors: [], pins: [] });
+    const { run, asked } = await kernelWith(t, [['db.test', db.port]], (req) =>
+      req.op === 'sessionAnchors' ? none() : { v: 1, error: { code: 'EACCES' } }
+    );
+    const binding = b64(db.binding);
+    const mine = await run({
+      host: 'db.test',
+      port: 5432,
+      password: own,
+      gs2: 'prefer',
+      binding,
+      tls: { ca: priv.pem },
+    });
+    assert.deepEqual(mine.tls, { verified: false, substitutes: true }, JSON.stringify(mine));
+    assert.deepEqual(mine.mechanisms, ['SCRAM-SHA-256-PLUS', 'SCRAM-SHA-256']);
+    assert.equal(mine.steps.includes('final ok'), true, JSON.stringify(mine));
+    const loose = await run({
+      host: 'db.test',
+      port: 5432,
+      password: own,
+      gs2: 'prefer',
+      binding,
+      tls: { rejectUnauthorized: false },
+    });
+    assert.equal(loose.steps.includes('final ok'), true, JSON.stringify(loose));
+    assert.deepEqual(db.seen.plus.refused, []);
+    assert.equal(db.seen.authenticated, 2);
+    assert.deepEqual(asked, []);
+  }
+);
+
+test(
+  'pg SCRAM in a session trusted by a vault anchor that binds a secret: -PLUS is not offered, the server side is n,, and the sealed password authenticates (slicc-jsh#584)',
+  TIMEOUT,
+  async (t) => {
+    const priv = makeCa('private pg CA');
+    const db = await pgFixture(t, priv.server('db.test'), VALUE, { plus: true });
+    const { run } = await kernelWith(t, [['db.test', db.port]], (req) =>
+      req.op === 'sessionAnchors'
+        ? { anchors: [Buffer.from(priv.der).toString('base64')], pins: [] }
+        : req.position === 'scram-sha-256'
+          ? { values: { [PH]: VALUE } }
+          : { v: 1, error: { code: 'EACCES' } }
+    );
+    const got = await run({
+      host: 'db.test',
+      port: 5432,
+      password: PH,
+      gs2: 'prefer',
+      tls: { rejectUnauthorized: false },
+    });
+    assert.deepEqual(got.mechanisms, ['SCRAM-SHA-256']);
+    assert.equal(got.steps.includes('final ok'), true, JSON.stringify(got));
+    assert.deepEqual(header(db), ['n,,']);
+    assert.equal(JSON.stringify(got).includes(VALUE), false);
   }
 );

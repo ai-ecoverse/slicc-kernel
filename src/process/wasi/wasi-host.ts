@@ -706,7 +706,8 @@ export class WasiHost {
     });
   }
 
-  private poll(inPtr: number, outPtr: number, n: number, nevents: number): number {
+  private poll(inPtr: number, outPtr: number, n: number, nevents: number, resume = true): number {
+    const ran = this.signals?.ran ?? 0;
     try {
       return pollOneoff(
         {
@@ -716,6 +717,7 @@ export class WasiHost {
           now: (id) => this.now(id),
           interruptWakes: this.interruptWakes,
           entered: this.entered,
+          ...(resume ? { resumes: () => this.resumesPoll(ran) } : {}),
         },
         inPtr,
         outPtr,
@@ -725,6 +727,11 @@ export class WasiHost {
     } finally {
       this.o.fs.invalidate?.();
     }
+  }
+
+  private resumesPoll(ran: number): boolean {
+    this.interrupted?.();
+    return (this.signals?.ran ?? 0) === ran;
   }
 
   private maskedPoll(
@@ -737,7 +744,7 @@ export class WasiHost {
       this.mem.view().setUint32(nevents, 0, true);
       if (mask.deliverUnblocked()) return E.INTR;
       this.settleEntry(mask);
-      if (n > 0) return this.poll(inPtr, outPtr, n, nevents);
+      if (n > 0) return this.poll(inPtr, outPtr, n, nevents, false);
       return this.entered ? E.INTR : this.suspend();
     } finally {
       mask.deliverUnblocked();

@@ -1,10 +1,11 @@
 import { KernelError } from '../fd-table.ts';
-import type { HostsTable } from './hosts-file.ts';
+import { type HostsTable, parseHosts } from './hosts-file.ts';
 import {
   DEFAULT_HOSTNAME,
   HOST_LOOPBACK,
   HOST_LOOPBACK_ADDRESS,
   HOSTNAME_ADDRESS,
+  hostsFile,
   ownNames,
 } from './loopback-names.ts';
 import { ipv4Bytes, ipv6Groups, type Routes } from './routes.ts';
@@ -52,6 +53,7 @@ export class Resolver {
   private readonly timeoutMs: number;
   private readonly log: (message: string) => void;
   private readonly own: readonly string[];
+  private readonly builtin: HostsTable;
   private readonly cache = new Map<string, Cached>();
   private readonly pending = new Map<string, Lookup>();
   private readonly hosts: (() => Promise<HostsTable | undefined>) | undefined;
@@ -63,6 +65,7 @@ export class Resolver {
     this.timeoutMs = options.timeoutMs ?? RESOLVE_TIMEOUT_MS;
     this.log = options.log ?? ((message) => console.warn(message));
     this.own = ownNames(options.hostname ?? DEFAULT_HOSTNAME);
+    this.builtin = parseHosts(hostsFile(options.hostname ?? DEFAULT_HOSTNAME));
     this.hosts = options.hosts;
   }
 
@@ -72,6 +75,25 @@ export class Resolver {
     const v4 = listed.filter((a) => ipv4Bytes(a) !== undefined);
     const v6 = listed.filter((a) => ipv4Bytes(a) === undefined);
     return family === 4 ? v4 : family === 6 ? v6 : [...v4, ...v6];
+  }
+
+  async known(name: string): Promise<boolean> {
+    const key = name.toLowerCase().replace(/\.$/, '');
+    if (ipv4Bytes(key) || ipv6Groups(key)) return false;
+    if (hostsEntry(key, this.own) !== undefined) return true;
+    return ((await this.hosts?.().catch(() => undefined))?.get(key)?.length ?? 0) > 0;
+  }
+
+  async reverse(address: string): Promise<string | undefined> {
+    const v6 = ipv6Groups(address)?.join(':');
+    const same = (a: string) =>
+      a === address || (v6 !== undefined && ipv6Groups(a)?.join(':') === v6);
+    const file = await this.hosts?.().catch(() => undefined);
+    for (const table of [file, this.builtin]) {
+      for (const [name, addresses] of table ?? []) if (addresses.some(same)) return name;
+    }
+    if (ipv4Bytes(address)?.[0] === 127) return 'localhost';
+    return undefined;
   }
 
   async resolve(

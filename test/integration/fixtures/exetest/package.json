@@ -1,0 +1,12 @@
+{
+  "name": "exetest",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "exetest": {
+        "wasm": "bin/exetest.wasm"
+      }
+    }
+  }
+}
