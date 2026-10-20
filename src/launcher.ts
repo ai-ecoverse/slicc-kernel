@@ -1869,6 +1869,7 @@ export class Launcher {
         fsCalls: servedFsCalls(),
         opfsCalls: this.rootFs.opfsCalls?.() ?? 0,
         opfsOps: this.rootFs.opfsOps?.() ?? 0,
+        cwdChecks: this.cwds.checks,
       }),
       sudo: (call, signal) => this.sudo(pid, call, signal),
       crontab: (call) => this.crontab(pid, call),
