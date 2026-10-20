@@ -70,6 +70,14 @@ function npmView(spec, field) {
 
 const budget = Date.now() + Number(values.wait) * 1000;
 
+function superseded() {
+  const listed = npmView(NAME, 'versions') ?? [];
+  const latest = npmView(NAME, 'dist-tags.latest');
+  return !listed.includes(version) && typeof latest === 'string' && older(version, latest)
+    ? latest
+    : undefined;
+}
+
 async function meta() {
   const until = budget;
   let waited = false;
@@ -82,6 +90,8 @@ async function meta() {
         return m;
       }
     }
+    const newer = superseded();
+    if (newer) return { superseded: newer };
     if (Date.now() > until) {
       waiting = `npm doesn't serve ${NAME}@${version} yet after ${values.wait} s: not a supply-chain problem, re-run this job once it does`;
       return undefined;
@@ -236,6 +246,11 @@ try {
     process.exit(0);
   }
   const m = await meta();
+  if (m?.superseded) {
+    const skipped = `${NAME}@${version}: never served by npm; superseded by ${m.superseded}`;
+    summary(`verify: SKIPPED ${skipped}`);
+    process.exit(0);
+  }
   if (!m) {
     summary(waiting);
     console.log(`::error title=verify on npm::${waiting}`);

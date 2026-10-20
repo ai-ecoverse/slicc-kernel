@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import * as lib from '../../tools/cert-review/lib.mjs';
 
@@ -407,4 +410,42 @@ test('verify retries a tarball download that resets or is cut off after its 200 
     'utf8'
   );
   assert.match(verify, /downloadTarball\(\{ url, fetch, sleep, deadline: budget/);
+});
+
+test('verify ends a version npm took but never serves, once a newer one of ours is latest, with a terminal SKIPPED, not an hour of waiting and a supply-chain alert (#1228, 1.134.2)', (t) => {
+  const bin = mkdtempSync(join(tmpdir(), 'verify-npm-'));
+  t.after(() => rmSync(bin, { recursive: true, force: true }));
+  const count = join(bin, 'latest-calls');
+  writeFileSync(count, '0');
+  writeFileSync(
+    join(bin, 'npm'),
+    `#!/usr/bin/env bash
+case "$*" in
+  "view @ai-ecoverse/slicc-kernel versions --json --prefer-online") echo '["1.2.2","1.2.4"]' ;;
+  "view @ai-ecoverse/slicc-kernel dist-tags.latest --json --prefer-online")
+    n=$(cat "${count}"); echo $((n + 1)) > "${count}"
+    if [ "$n" -eq 0 ]; then echo '"1.2.2"'; else echo '"1.2.4"'; fi ;;
+  "view @ai-ecoverse/slicc-kernel@1.2.3 --json --prefer-online") echo 'npm error code E404' >&2; exit 1 ;;
+  *) echo "unexpected npm $*" >&2; exit 9 ;;
+esac
+`
+  );
+  chmodSync(join(bin, 'npm'), 0o755);
+  const gate = new URL('../../tools/cert-review/gate.sh', import.meta.url).pathname;
+  const verify = new URL('../../tools/cert-review/verify.mjs', import.meta.url).pathname;
+  const r = spawnSync(
+    gate,
+    ['verify', process.execPath, verify, '--version', '1.2.3', '--wait', '3600'],
+    {
+      encoding: 'utf8',
+      timeout: 60_000,
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, GITHUB_STEP_SUMMARY: '' },
+    }
+  );
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(
+    r.stdout,
+    /^verify: SKIPPED @ai-ecoverse\/slicc-kernel@1\.2\.3: never served by npm; superseded by 1\.2\.4$/m
+  );
+  assert.doesNotMatch(r.stdout + r.stderr, /supply-chain alert/);
 });
