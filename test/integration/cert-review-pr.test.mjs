@@ -555,7 +555,13 @@ test("the workflow: same-repo non-draft PRs review the merge ref with main's own
     workflow,
     /\(\(github\.event\.action == 'labeled' \|\| github\.event\.action == 'unlabeled'\) && github\.event\.label\.name != 'cert-review-approved'\) && format\('cert-review-pr-noop-\{0\}', github\.run_id\)/
   );
-  assert.doesNotMatch(jobs.plan, /PR_DRAFT|--draft|pull_request\.draft/);
+  assert.doesNotMatch(jobs.plan, /--draft/);
+  const tool = readFileSync(new URL('pr.mjs', tools), 'utf8');
+  assert.doesNotMatch(
+    tool,
+    /PR_DRAFT|--draft|values\.draft/,
+    'the plan reads the draft flag live, never from the event'
+  );
   assert.doesNotMatch(workflow, /merge-ok/);
   assert.match(
     jobs.plan,
