@@ -1,4 +1,9 @@
-import type { MountLine, ProcessInfo, ProcessListing } from '../../kernel/proc-info.ts';
+import {
+  type MountLine,
+  mayTrace,
+  type ProcessInfo,
+  type ProcessListing,
+} from '../../kernel/proc-info.ts';
 import {
   type ChownArgs,
   type SyncFsBridgeStat,
@@ -28,7 +33,7 @@ export interface ProcSource {
 
 type Node =
   | { kind: 'dir'; names: () => string[] }
-  | { kind: 'link'; target: string }
+  | { kind: 'link'; target: string; denied?: boolean }
   | { kind: 'file'; content: () => string };
 
 const DIR_MODE = 0o40555;
@@ -103,8 +108,10 @@ export class ProcTree {
       return { kind: 'dir', names: () => [...PID_NAMES, ...exe(), 'task'] };
     }
     if (leaf === 'exe') {
-      const exe = this.info(Number(top))?.exe;
-      return exe === undefined ? undefined : { kind: 'link', target: exe };
+      const info = this.info(Number(top));
+      if (info?.exe === undefined) return undefined;
+      const denied = !mayTrace(this.ownInfo(), info);
+      return { kind: 'link', target: info.exe, ...(denied ? { denied } : {}) };
     }
     if (!PID_NAMES.includes(leaf)) return undefined;
     return {
@@ -116,6 +123,11 @@ export class ProcTree {
         return pidFile(leaf as (typeof PID_FILES)[number], info, listing.boot);
       },
     };
+  }
+
+  private ownInfo(): ProcessInfo | undefined {
+    const processes = this.listing().processes;
+    return processes.find((p) => p.tid === this.pid) ?? processes.find((p) => p.pid === this.pid);
   }
 
   private info(pid: number): ProcessInfo | undefined {
@@ -192,6 +204,7 @@ export class ProcTree {
   readlink(path: string): string {
     const node = this.find(path, false);
     if (node.kind !== 'link') throw syncError('EINVAL', path);
+    if (node.denied) throw syncError('EACCES', path);
     return node.target;
   }
 

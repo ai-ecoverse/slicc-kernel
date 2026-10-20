@@ -46,3 +46,11 @@ export interface ProcessListing {
   opfsOps?: number;
   cwdChecks?: number;
 }
+
+export function mayTrace(viewer: ProcessInfo | undefined, target: ProcessInfo): boolean {
+  const by = viewer?.cred;
+  const of = target.cred;
+  if (!by || !of || by.euid === 0) return true;
+  const uid = of.ruid === by.euid && of.euid === by.euid && of.suid === by.euid;
+  return uid && of.rgid === by.egid && of.egid === by.egid && of.sgid === by.egid;
+}

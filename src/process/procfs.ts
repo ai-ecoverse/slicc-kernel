@@ -1,5 +1,10 @@
 import { ROOT } from '../kernel/cred.ts';
-import type { MountLine, ProcessInfo, ProcessListing } from '../kernel/proc-info.ts';
+import {
+  type MountLine,
+  mayTrace,
+  type ProcessInfo,
+  type ProcessListing,
+} from '../kernel/proc-info.ts';
 import { OS_RELEASE, procVersion } from '../version.ts';
 import { mountTable } from './process-fds.ts';
 
@@ -9,6 +14,7 @@ const FILE_MODE = 0o100444;
 const LINK_MODE = 0o120777;
 const ENOENT = 44;
 const EINVAL = 28;
+const EACCES = 2;
 const UID = 1000;
 const KIB = 1024;
 const FALLBACK_MEMORY = 4 * KIB * KIB * KIB;
@@ -328,14 +334,19 @@ function withPidFiles(names: string[], extra: string[]): string[] {
 function exeNodes(
   fresh: (parent: ProcNode, name: string, mode: number) => ProcNode,
   info: (target: number, own: boolean) => ProcessInfo | undefined,
-  error: () => Error
+  error: (errno?: number) => Error,
+  self: number
 ) {
   return {
     exeLink: (parent: ProcNode, target: number, own = false): ProcNode => {
-      const exe = info(target, own)?.exe;
-      if (exe === undefined) throw error();
+      const of = info(target, own);
+      const exe = of?.exe;
+      if (!of || exe === undefined) throw error();
       const link = fresh(parent, 'exe', LINK_MODE);
-      link.node_ops.readlink = () => exe;
+      link.node_ops.readlink = () => {
+        if (!mayTrace(info(self, true), of)) throw error(EACCES);
+        return exe;
+      };
       return link;
     },
     hasExe: (target: number, own = false): string[] =>
@@ -421,7 +432,7 @@ export function useProcfs(Fs: ProcFs, sys: ProcSys, pid: number, memory = memory
     dir.node_ops.readdir = () => ['.', '..', ...Object.keys(tree)];
     return dir;
   };
-  const exe = exeNodes(fresh, (at, own) => find(procList().processes, at, own), error);
+  const exe = exeNodes(fresh, (at, own) => find(procList().processes, at, own), error, pid);
   const pidNames = (names: string[]) => withPidFiles(names, exe.hasExe(pid, true));
   const pidDir = (name: string, target: number): ProcNode => {
     const dir = fresh(proc, name, DIR_MODE);

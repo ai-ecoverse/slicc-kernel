@@ -57,3 +57,46 @@ test('/proc/self/exe links to the file a program was run from, a copy run by pat
     }
   );
 });
+
+test("a process cone can see but not trace (root with cone as its real uid) has an exe cone may not readlink, EACCES as on Linux, while root and cone's own processes read theirs (#1264 review)", {
+  timeout: 120_000,
+}, async (t) => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils', 'wasix-python']) await install(kernel, name);
+  await kernel.users.add({ name: 'cone' });
+  const held = kernel.run(
+    [
+      'python3',
+      '-c',
+      'import os,time; os.setresuid(1000,0,0); open("/tmp/mixed","w").write(str(os.getpid())); os.chmod("/tmp/mixed",0o644); [time.sleep(0.05) for _ in range(600) if not os.path.exists("/tmp/done")]',
+    ],
+    { cwd: '/' }
+  );
+  for (;;) {
+    const text = await kernel.readFile('/tmp/mixed').catch(() => undefined);
+    if (text && text.length > 0) break;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  const python = '/node_modules/@ai-ecoverse/wasix-python/bin/python.wasm';
+  const sh = (script, user) =>
+    kernel.run(['bash', '-c', script], { cwd: '/', ...(user ? { user } : {}) });
+  assert.deepEqual(
+    await sh(
+      'p=$(cat /tmp/mixed); tail -n +9 /proc/$p/status | head -1; readlink -v /proc/$p/exe; echo rc=$?; readlink /proc/self/exe; python3 -c "import os; os.readlink(\'/proc/$p/exe\')" 2>&1 | tail -1',
+      'cone'
+    ),
+    {
+      status: 0,
+      stdout: `Uid:\t1000\t0\t0\t0\nrc=1\n/node_modules/@ai-ecoverse/wasm-coreutils/bin/coreutils\nPermissionError: [Errno 2] Permission denied: '/proc/1000/exe'\n`,
+      stderr: 'readlink: /proc/1000/exe: Permission denied\n',
+    }
+  );
+  assert.deepEqual(await sh('readlink /proc/$(cat /tmp/mixed)/exe'), {
+    status: 0,
+    stdout: `${python}\n`,
+    stderr: '',
+  });
+  await kernel.writeFile('/tmp/done', '');
+  await held;
+});
