@@ -82,19 +82,15 @@ async function serving(label, served, sleep, log) {
   return true;
 }
 
-export async function packOnce(run) {
-  const r = await run('npm', ['pack', '--json']);
-  if (r.code !== 0) throw new Error(`npm pack failed: ${gist(r.stderr)}`);
-  const at = r.stdout.search(/^\[/m);
-  let file;
-  let integrity;
+export function publishReport(stdout) {
+  const at = stdout.search(/^[[{]/m);
   try {
-    [{ filename: file, integrity }] = JSON.parse(at < 0 ? '' : r.stdout.slice(at));
+    const report = JSON.parse(at < 0 ? '' : stdout.slice(at));
+    const one = Array.isArray(report) ? report[0] : report;
+    return typeof one?.integrity === 'string' && one.integrity ? one.integrity : undefined;
   } catch {
-    throw new Error(`npm pack printed no JSON report: ${gist(r.stdout)}`);
+    return undefined;
   }
-  if (!file || !integrity) throw new Error('npm pack reported no tarball or no integrity');
-  return { file: `./${file}`, integrity };
 }
 
 async function latestOf(name, version, run) {
@@ -120,12 +116,10 @@ async function publishNewer({ name, version, run, published, sleep, log, packed 
     return false;
   }
   await run('npm', ['version', version, '--no-git-tag-version', '--allow-same-version']);
-  const tarball = await packOnce(run);
-  packed.set(version, tarball.integrity);
   const ours = await retried({
     label: `npm publish ${version}`,
     attempt: async () => {
-      const r = await run('npm', ['publish', tarball.file, '--provenance', '--access', 'public']);
+      const r = await run('npm', ['publish', '--json']);
       log(`npm publish ${version} exited ${r.code}`);
       for (const [stream, text] of [
         ['stdout', r.stdout],
@@ -133,6 +127,13 @@ async function publishNewer({ name, version, run, published, sleep, log, packed 
       ]) {
         if (text.trim()) log(`npm publish ${stream}:\n${text.trimEnd()}`);
       }
+      if (r.code !== 0) return r;
+      const integrity = publishReport(r.stdout);
+      if (!integrity)
+        throw new Error(
+          `npm publish ${version} exited 0 but printed no JSON report with an integrity`
+        );
+      packed.set(version, integrity);
       return r;
     },
     done: () => published(version),
@@ -140,7 +141,10 @@ async function publishNewer({ name, version, run, published, sleep, log, packed 
     sleep,
     log,
   });
-  if (!ours) log(`${name}@${version} was already on npm`);
+  if (!ours)
+    log(
+      `${name}@${version} was already on npm: no publish report to check it against, so only that npm serves its tarball`
+    );
   return ours;
 }
 
