@@ -19,7 +19,7 @@ import {
   taskIds,
   taskStat,
 } from '../procfs.ts';
-import { normalize } from './wasi-files.ts';
+import { normalize, SHARED_TTL_MS } from './wasi-files.ts';
 
 export interface ProcSource {
   procList(): ProcessListing;
@@ -312,11 +312,14 @@ function frozen(bytes: Uint8Array): SyncFsFileIo {
   };
 }
 
-export function physicalProc(fs: Pick<SyncFsPosixBridge, 'stat' | 'changes'>): () => boolean {
+export function physicalProc(
+  fs: Pick<SyncFsPosixBridge, 'stat' | 'changes'>,
+  now: () => number = () => performance.now()
+): () => boolean {
   const view = fs.changes;
-  let seen: { gen: number; physical: boolean } | undefined;
+  let seen: { gen: number; physical: boolean; at: number } | undefined;
   return () => {
-    if (seen && view && !view.foreign()) {
+    if (seen && view && (!view.foreign() || now() - seen.at < SHARED_TTL_MS)) {
       const proc = view.changedSince(seen.gen, '/proc');
       if (!proc.changed && !view.changedSince(seen.gen, '/').changed) {
         seen.gen = proc.now;
@@ -324,6 +327,7 @@ export function physicalProc(fs: Pick<SyncFsPosixBridge, 'stat' | 'changes'>): (
       }
     }
     const gen = view?.now();
+    const at = now();
     let physical: boolean;
     try {
       fs.stat('/proc');
@@ -336,7 +340,7 @@ export function physicalProc(fs: Pick<SyncFsPosixBridge, 'stat' | 'changes'>): (
       }
       physical = false;
     }
-    seen = gen === undefined ? undefined : { gen, physical };
+    seen = gen === undefined ? undefined : { gen, physical, at };
     return physical;
   };
 }
