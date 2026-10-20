@@ -6,7 +6,6 @@ import { DOWNSTREAM_OK, downstreamOf, verdict } from './lib.mjs';
 const { values } = parseArgs({
   options: {
     result: { type: 'string', default: '' },
-    override: { type: 'string', default: 'FAIL' },
     bios: { type: 'string', default: '' },
     shards: { type: 'string', default: '' },
     out: { type: 'string' },
@@ -25,7 +24,7 @@ const shards = values.shards
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
-const found = downstreamOf(result, { override: values.override, biosRef: values.bios, shards });
+const found = downstreamOf(result, { biosRef: values.bios, shards });
 if (values.out) {
   mkdirSync(dirname(values.out), { recursive: true });
   writeFileSync(values.out, `${JSON.stringify(found, null, 2)}\n`);

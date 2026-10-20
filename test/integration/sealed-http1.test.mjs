@@ -449,3 +449,21 @@ test(
     assert.match(got, new RegExp(`LEAK ${PH}`));
   }
 );
+
+test(
+  'a session that is neither http1, SMTP nor pg passes the server short replies through at once, never held for the pg parser (#1138 review)',
+  TIMEOUT,
+  async (t) => {
+    const leaf = ca.server('api.test');
+    const s = createServer({ key: leaf.key, cert: leaf.cert }, (sock) => {
+      sock.on('error', () => {});
+      sock.once('data', () => sock.end('ok'));
+    });
+    s.on('tlsClientError', () => {});
+    await new Promise((r) => s.listen(0, '127.0.0.1', r));
+    t.after(() => s.close());
+    const { run } = await kernelWith(t, [['api.test', s.address().port]]);
+    const [got] = await run([{ host: 'api.test', port: 465, tls: {}, writes: ['hello\n'] }]);
+    assert.deepEqual([got.substitutes, got.got], [true, 'ok']);
+  }
+);

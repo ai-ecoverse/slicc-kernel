@@ -28,7 +28,6 @@ jobs:
       pull-requests: write
     outputs:
       status: ${{ steps.cert.outputs.status }}
-      override: ${{ steps.override.outputs.receipt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -63,19 +62,6 @@ jobs:
             .github/actions/cert-self-guard/**/.*
             .github/actions/cert-self-guard/**/.*/**
             .github/runner.mjs
-
-      - id: override
-        name: downstream-override, the coordinator's head-bound waiver of a downstream failure (every pull request in a group needs it on its head)
-        continue-on-error: true
-        uses: ai-ecoverse/slicc-shared-web/.github/actions/cert-self-guard@f342d7cf558c817ce517bbbbc4cc46df6eac2f97
-        with:
-          approval-label: downstream-override
-          paths: |
-            **
-            .*
-            .*/**
-            **/.*
-            **/.*/**
 
       - id: cert
         name: The cert-path guard fails closed, a reviewer path its globs missed still needs the label
@@ -920,12 +906,8 @@ jobs:
 
       - id: downstream
         name: bios's canary on the merge group, judged against the pinned bios (a regression or no result is not certified)
-        env:
-          OVERRIDE: ${{ needs.guard.outputs.override }}
         run: |
-          override=$(node -e 'let r; try { r = JSON.parse(process.env.OVERRIDE); } catch {} const m = r?.members ?? []; process.stdout.write(r?.status === "PASS" && m.length > 0 && m.every((x) => x.approved === true && x.touched?.length > 0) ? "PASS" : "FAIL")')
-          echo "downstream-override: $override (every pull request in the group needs it on its head)"
-          tools/cert-review/gate.sh --evidence downstream node tools/cert-review/downstream.mjs --result "$RUNNER_TEMP/canary/result.json" --override "$override" \
+          tools/cert-review/gate.sh --evidence downstream node tools/cert-review/downstream.mjs --result "$RUNNER_TEMP/canary/result.json" \
             --bios c2cec127b935419049568f584093d7ef03ac0721 --shards sweep,guard,k4-link --out "$RUNNER_TEMP/downstream.json"
 
       - id: lookup

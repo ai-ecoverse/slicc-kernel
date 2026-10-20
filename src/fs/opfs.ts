@@ -1798,15 +1798,21 @@ export class OpfsFs implements KernelFs {
     let writable: FileSystemWritableFileStream | undefined;
     let handle: FileSystemFileHandle | undefined;
     try {
-      const [made, existed, at] = await this.fileFor(destination);
-      handle = made;
-      target = at;
-      if (!existed && !created) {
-        created = true;
-        await this.stampNew(target, options.owner, false);
+      const kept = created ? this.files.get(destination) : undefined;
+      if (kept) {
+        if (options.owner?.fifo || options.owner?.socket) throw fsError('ENXIO', to);
+        handle = kept;
+      } else {
+        const [made, existed, at] = await this.fileFor(destination);
+        handle = made;
+        target = at;
+        if (!existed && !created) {
+          created = true;
+          await this.stampNew(target, options.owner, false);
+        }
+        const [entry] = await this.meta.get([target]);
+        if (entry?.fifo || entry?.socket) throw fsError('ENXIO', to);
       }
-      const [entry] = await this.meta.get([target]);
-      if (entry?.fifo || entry?.socket) throw fsError('ENXIO', to);
       this.wrote(handle);
       writable = await handle.createWritable();
       await writable.write(file);

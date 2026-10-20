@@ -939,7 +939,7 @@ function failing(result, counts) {
   return `${counts.regression ?? 0} regressions, ${counts.fail ?? 0} failures (${detail})`;
 }
 
-export function downstreamOf(result, { override = 'FAIL', biosRef = '', shards = [] } = {}) {
+export function downstreamOf(result, { biosRef = '', shards = [] } = {}) {
   const where =
     `bios ${String(result?.biosRef || biosRef).slice(0, 12)} ${shards.join(',')}`.trim();
   const run = result?.url ? ` (${result.url})` : '';
@@ -956,12 +956,6 @@ export function downstreamOf(result, { override = 'FAIL', biosRef = '', shards =
   const known = both.length ? `; known downstream failures ${both.length} (${named(both)})` : '';
   const notify = both.length ? [`bios canary fails on main's pins too: ${named(both)}${run}`] : [];
   const why = failing(result, counts);
-  if (why && override === 'PASS')
-    return {
-      state: 'OVERRIDDEN',
-      line: `downstream: overridden (downstream-override on the head, by the coordinator) ${where}: ${why}${run}`,
-      notify,
-    };
   if (why)
     return { state: 'FAIL', line: `downstream: FAIL ${where}: ${why}${known}${run}`, notify };
   const passed = counts.pass > 0;
@@ -986,7 +980,7 @@ export function downstreamOf(result, { override = 'FAIL', biosRef = '', shards =
   };
 }
 
-export const DOWNSTREAM_OK = new Set(['PASS', 'OVERRIDDEN', 'NOT_JUDGED']);
+export const DOWNSTREAM_OK = new Set(['PASS', 'NOT_JUDGED']);
 
 export function downstreamLine(lines) {
   if (lines.length === 0) return 'downstream: not run (no merge group of this release carried it)';
