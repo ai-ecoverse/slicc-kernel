@@ -98,7 +98,14 @@ export function sidecarNames(
       } catch {
         names = new Map();
       }
-      const want = fit ? fit.functions() : names.size;
+      let want = names.size;
+      try {
+        if (fit) want = fit.functions();
+      } catch {
+        fit?.warn(`${path} can't be checked against the module, so the frames show raw indices`);
+        names = new Map();
+        return undefined;
+      }
       if (fit && names.size !== want) {
         fit.warn(
           `${path} names ${names.size} functions, but the module has ${want}: it doesn't fit, so the frames show raw indices`
