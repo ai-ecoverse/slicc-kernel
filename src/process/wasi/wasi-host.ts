@@ -18,6 +18,7 @@ import {
   FILETYPE,
   FSTFLAGS,
   LOOKUP_SYMLINK_FOLLOW,
+  OFLAGS,
   PREOPENTYPE_DIR,
   RIFLAGS,
   RIGHTS,
@@ -938,6 +939,7 @@ export class WasiHost {
         try {
           const asked = at(dirfd, p, l);
           const alias = this.fdAlias(asked);
+          this.finalLink(asked, oflags, follow, alias !== undefined);
           if (alias && !alias.stdio) this.openFd(alias.fd);
           const path = alias && !alias.stdio ? `/dev/fd/${alias.fd}` : asked;
           if (deviceOf(path)) this.interrupted?.();
@@ -1593,6 +1595,20 @@ export class WasiHost {
       pick(FSTFLAGS.MTIM, FSTFLAGS.MTIM_NOW, mtim, 'mtimeMs'),
       (flags & (FSTFLAGS.ATIM | FSTFLAGS.MTIM)) === 0
     );
+  }
+
+  private finalLink(path: string, oflags: number, follow: boolean, alias: boolean): void {
+    const exclusive = (oflags & OFLAGS.CREAT) !== 0 && (oflags & OFLAGS.EXCL) !== 0;
+    if (follow && !exclusive) return;
+    let link = alias;
+    if (!link) {
+      try {
+        link = this.o.fs.lstat(path).isSymbolicLink === true;
+      } catch {
+        return;
+      }
+    }
+    if (link) throw new WasiError(exclusive ? 'EEXIST' : 'ELOOP');
   }
 
   private readdir(fd: number, buf: number, len: number, cookie: number, usedPtr: number): void {

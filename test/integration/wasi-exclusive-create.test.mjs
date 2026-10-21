@@ -80,3 +80,38 @@ test('a thread’s O_CREAT|O_EXCL on /proc/self and on a dangling symlink fails 
     'kept\n'
   );
 });
+
+test('path_open honours lookupflags: without LOOKUP_SYMLINK_FOLLOW a final symlink gives ELOOP (a dangling one too, even with O_CREAT), a regular file opens, a symlinked directory earlier in the path is still followed, and O_CREAT|O_EXCL on any link gives EEXIST, as on Linux', async (t) => {
+  const kernel = await createNodeKernel({ users: 'off' });
+  t.after(() => kernel.terminate());
+  await installDir(
+    kernel,
+    fileURLToPath(new URL('fixtures/nofollowtest/', import.meta.url)),
+    '/node_modules/nofollowtest'
+  );
+  await kernel.writeFile('/w/.keep', '');
+  const r = await kernel.run(['nofollowtest'], { cwd: '/w' });
+  assert.deepEqual(
+    {
+      status: r.status,
+      stderr: r.stderr,
+      lines: r.stdout
+        .trim()
+        .split('\n')
+        .map((l) => l.replace(/ \(fd .*\)$/, '')),
+    },
+    {
+      status: 0,
+      stderr: '',
+      lines: [
+        'link nofollow ELOOP',
+        'link follow ok',
+        'file nofollow ok',
+        'dirlink/file nofollow ok',
+        'link excl EEXIST',
+        'dangling excl EEXIST',
+        'dangling nofollow creat ELOOP',
+      ],
+    }
+  );
+});
