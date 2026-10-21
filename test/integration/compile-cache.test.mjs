@@ -67,7 +67,7 @@ test("without compileCache nothing is cached, not even when a program's own env 
   );
 });
 
-test("a host started with NODE_COMPILE_CACHE doesn't hand it to the process workers: the program goes only into compileCache's directory, never the host's (#1334 review)", async (t) => {
+test("a host started with NODE_COMPILE_CACHE doesn't hand it to the process workers: the program goes only into compileCache's directory, never the host's; a host preload that enables its own cache makes the worker refuse to run programs (#1334 review)", async (t) => {
   const host = await mkdtemp(join(tmpdir(), 'slicc-cc-host-'));
   const own = await mkdtemp(join(tmpdir(), 'slicc-cc-own-'));
   t.after(() => rm(host, { recursive: true, force: true }));
@@ -81,12 +81,12 @@ test("a host started with NODE_COMPILE_CACHE doesn't hand it to the process work
 const k = await createNodeKernel({ users: 'off', compileCache: process.argv[2] });
 await k.writeFile('/node_modules/cc/package.json', ${JSON.stringify(JSON.stringify({ name: 'cc', slicc: { commands: { cc: { abi: 'js', module: 'main.mjs' } } } }))});
 await k.writeFile('/node_modules/cc/main.mjs', 'export default async () => 0;');
-if (process.argv[3] === 'run') console.log((await k.run(['cc'], { cwd: '/' })).status);
+if (process.argv[3] === 'run') { const r = await k.run(['cc'], { cwd: '/' }); console.log(r.status); console.log(r.stderr); }
 k.terminate();
 `
   );
-  const go = (mode) =>
-    spawnSync(process.execPath, [script, own, mode], {
+  const go = (mode, flags = []) =>
+    spawnSync(process.execPath, [...flags, script, own, mode], {
       encoding: 'utf8',
       timeout: 60_000,
       env: { ...process.env, NODE_COMPILE_CACHE: host },
@@ -94,7 +94,7 @@ k.terminate();
   assert.equal(go('idle').status, 0);
   const hostOnly = (await files(host)).length;
   const ran = go('run');
-  assert.equal(ran.stdout.trim(), '0', ran.stderr);
+  assert.equal(ran.stdout.split('\n')[0], '0', ran.stderr);
   assert.equal(
     (await files(host)).length,
     hostOnly,
@@ -104,4 +104,17 @@ k.terminate();
     (await files(own)).length > 0,
     "the program's compiled code is in compileCache's directory"
   );
+  const preload = join(own, '..', `slicc-cc-preload-${process.pid}.mjs`);
+  t.after(() => rm(preload, { force: true }));
+  await writeFile(
+    preload,
+    `import { enableCompileCache } from 'node:module';\nenableCompileCache(${JSON.stringify(host)});\n`
+  );
+  const refused = go('run', ['--import', preload]);
+  assert.notEqual(
+    refused.stdout.split('\n')[0],
+    '0',
+    'a worker whose cache a host preload chose runs no program'
+  );
+  assert.match(refused.stdout, /already caches in .*refusing to run programs/);
 });

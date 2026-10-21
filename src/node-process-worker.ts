@@ -1,6 +1,13 @@
 import { createRequire, enableCompileCache, flushCompileCache } from 'node:module';
 import { parentPort, workerData } from 'node:worker_threads';
-import { glueUrl, nodeLockdown, nodeMemory, nodeProcess, workerShaped } from './node-lockdown.ts';
+import {
+  glueUrl,
+  nodeLockdown,
+  nodeMemory,
+  nodeProcess,
+  ownCache,
+  workerShaped,
+} from './node-lockdown.ts';
 import { runJsProcess, runJsThread } from './process/js/js-runtime.ts';
 import { processEntry } from './process/process-entry.ts';
 import { runWasmProcess } from './process/process-runtime.ts';
@@ -12,7 +19,7 @@ scope.__filename ??= new URL(import.meta.url).pathname;
 scope.__dirname ??= new URL('.', import.meta.url).pathname;
 
 const cacheDir = (workerData as { compileCache?: unknown } | null)?.compileCache;
-const cached = typeof cacheDir === 'string' && enableCompileCache(cacheDir).directory !== undefined;
+const cached = typeof cacheDir === 'string' && ownCache(cacheDir, enableCompileCache(cacheDir));
 const imported = cached ? () => flushCompileCache() : undefined;
 
 const port = parentPort as NonNullable<typeof parentPort>;
