@@ -3,6 +3,7 @@ const RING = 1;
 const RING_SIZE = 4096;
 const SLOT = 2;
 export const SHARED_TTL_MS = 100;
+export const RENAME_WAIT_MS = 100;
 
 const DIRTY = RING + RING_SIZE * SLOT;
 const FOREIGN = DIRTY + 1;
@@ -51,7 +52,9 @@ export class FileChanges {
   }
 
   renamed(): number {
-    return (Atomics.add(this.view, RENAMES, 1) + 1) | 0;
+    const seq = (Atomics.add(this.view, RENAMES, 1) + 1) | 0;
+    Atomics.notify(this.view, RENAMES);
+    return seq;
   }
 
   publish(...paths: string[]): void {
@@ -86,6 +89,11 @@ export class ChangeView {
 
   renames(): number {
     return this.view.length > RENAMES ? Atomics.load(this.view, RENAMES) : 0;
+  }
+
+  awaitRename(seen: number, ms: number): number {
+    if (this.view.length > RENAMES) Atomics.wait(this.view, RENAMES, seen, ms);
+    return this.renames();
   }
 
   changedSince(seen: number, path: string): { now: number; changed: boolean } {

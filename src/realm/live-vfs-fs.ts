@@ -1,5 +1,5 @@
 import { permits, X_OK } from '../fs/access.ts';
-import { type ChangeView, SHARED_TTL_MS } from '../fs/changes.ts';
+import { type ChangeView, RENAME_WAIT_MS, SHARED_TTL_MS } from '../fs/changes.ts';
 import {
   linkedWatch,
   RangedFile,
@@ -491,9 +491,11 @@ function renameFollower(
 ) {
   const open = new Set<LiveFsNode>();
   let seen: number | undefined;
-  const follow = (node: LiveFsNode): boolean => {
+  const follow = (node: LiveFsNode, missing = false): boolean => {
     const bridge = bridgeOf(node);
-    const now = bridge.changes?.renames() ?? 0;
+    const view = bridge.changes;
+    let now = view?.renames() ?? 0;
+    if (missing && view && now === seen) now = view.awaitRename(now, RENAME_WAIT_MS);
     const ask = bridge.renames?.bind(bridge);
     if (seen === undefined || now === seen || !ask) return false;
     const held = [...open].filter((n) => !n.live.orphan);
@@ -679,7 +681,7 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
       s.ranged
         ? call(() => s.ranged?.flush())
         : call(() => fileIo(node).writeFile(liveNodePath(linked.holder(node)), whole(), true));
-    followingOnce(write, () => renames.follow(node));
+    followingOnce(write, () => renames.follow(node, true));
     s.dirty = false;
     s.stat = undefined;
   }

@@ -1,3 +1,4 @@
+import { RENAME_WAIT_MS } from '../../fs/changes.ts';
 import { linkedWatch } from '../../fs/ranged.ts';
 import {
   type DeviceAccess,
@@ -96,8 +97,10 @@ export class WasiFds {
     if (now === ((this.renamesSeen + 1) | 0)) this.renamesSeen = now;
   }
 
-  followRenames(): boolean {
-    const now = this.fs.changes?.renames() ?? 0;
+  followRenames(missing = false): boolean {
+    const view = this.fs.changes;
+    let now = view?.renames() ?? 0;
+    if (missing && view && now === this.renamesSeen) now = view.awaitRename(now, RENAME_WAIT_MS);
     if (now === this.renamesSeen || !this.fs.renames) return false;
     const held = [...this.buffers].filter(([, b]) => !b.isOrphan()).map(([p]) => p);
     if (held.length === 0) {
@@ -973,7 +976,7 @@ export class WasiFds {
         st
       );
     const buffer = new FileBuffer(io, path, empty, st.maxFile, ranged, st.version, watch);
-    buffer.moved = () => this.followRenames();
+    buffer.moved = (missing) => this.followRenames(missing);
     buffer.handle = handle;
     this.buffers.set(path, buffer);
     const id = this.identity(st);
