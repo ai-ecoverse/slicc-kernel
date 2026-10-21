@@ -46,5 +46,6 @@ jobs:
     if: ${{ !cancelled() }}
     uses: ai-ecoverse/slicc-shared-web/.github/workflows/node-ci.yml@v1.29.9
     with:
+      node-version: '26'
       runs-on: ${{ needs.runner.outputs.runner || 'ubuntu-latest' }}
       timeout-minutes: 45

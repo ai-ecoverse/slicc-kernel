@@ -284,7 +284,7 @@ test("record's artifact check covers every producer and fails the record as INCO
   );
   assert.match(
     jobs['pack-base'],
-    /node-version: 24\n {10}package-manager-cache: false\n/,
+    /node-version: 26\n {10}package-manager-cache: false\n/,
     "and setup-node's automatic npm cache, which a packageManager field in package.json would switch on, is off"
   );
   for (const job of ['same', 'suite']) {

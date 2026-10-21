@@ -191,7 +191,7 @@ When the kernel goes away (the page closed or reloaded, `terminate()`), pending 
 
 `@ai-ecoverse/slicc-kernel/node` runs the same kernel in Node without a browser, so packages built for SLICC can test against it. It is a testing entry, not a supported runtime: there is no OPFS, JS programs get the same guard as in the page but no sandbox (see [JS programs](#js-programs)), and nothing beyond what its tests use is promised.
 
-**Known issue, Node 24** ([#1129](https://github.com/ai-ecoverse/slicc-kernel/issues/1129)): V8 in Node 24 sometimes crashes the whole Node process with a `jit_page` check failure while a process worker starts or is torn down. slicc-cli measured 15 crashes in 1,600 runs on Node 24 and none in 1,600 on Node 26. Use Node 26 where you can. The `Node versions` workflow (nightly, and on demand) runs the suites that start the Node kernel on both versions and counts the crashes in each job's summary, so the `engines` floor can follow the numbers.
+**Node 26 or later** ([#1129](https://github.com/ai-ecoverse/slicc-kernel/issues/1129)): `engines` asks for Node >=26. V8 in Node 24 sometimes crashed the whole Node process with a `jit_page` check failure while a process worker started or was torn down; slicc-cli measured 15 crashes in 1,600 runs on Node 24 and none in 1,600 on Node 26. The kernel's CI and release run on 26, and the nightly `Node versions` workflow keeps running the suites that start the Node kernel and counts any such crash.
 
 ```js
 import { createNodeKernel, nodeTransport } from '@ai-ecoverse/slicc-kernel/node';
