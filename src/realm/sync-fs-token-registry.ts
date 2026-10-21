@@ -21,6 +21,10 @@ export interface SyncFsTokenEntry {
   own?: <T>(path: string, op: () => Promise<T>) => Promise<T>;
   revoked?: (path: string) => boolean;
   renamed?: (from: string, to: string) => void;
+  renames?: (
+    since: number,
+    held: readonly string[]
+  ) => { now: number; renames: Array<[string, string]> };
   cred?: () => Readonly<Cred>;
   umask?: () => number;
   dac?: Dac;

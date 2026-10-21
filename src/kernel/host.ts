@@ -137,6 +137,10 @@ export interface SpawnWasmOptions {
   openFiles?: Set<VfsNodes>;
   nodes?: VfsNodes;
   statfs?: (path: string) => Promise<{ quota: number; usage: number } | undefined>;
+  renames?: (
+    since: number,
+    held: readonly string[]
+  ) => { now: number; renames: Array<[string, string]> };
   mounts?: () => MountLine[];
   mount?: WasmProcessOptions['mount'];
   umount?: WasmProcessOptions['umount'];
@@ -440,6 +444,7 @@ function holdingToken(
     noLinks: opts.noLinks,
     cwd: opts.cwd,
     ...(opts.statfs ? { statfs: opts.statfs } : {}),
+    ...(opts.renames ? { renames: opts.renames } : {}),
     hold: (path, on, open, real, handle) => holds.hold(path, on, open, real, handle),
     keptFor: (handle) => holds.keptFor(handle),
     unlinked: (path) => holds.keptAt(path),

@@ -176,7 +176,10 @@ export interface LiveFsApi {
 
   nameTable?: (LiveFsNode | null)[] | null;
   hashRemoveNode?(node: LiveFsNode): void;
+  hashAddNode?(node: LiveFsNode): void;
+  hashName?(parentId: number, name: string): number;
   lookupNode?(parent: LiveFsNode, name: string): LiveFsNode;
+  lookupPath?(path: string, opts?: { follow?: boolean; parent?: boolean }): { node: object };
   open?(...args: unknown[]): unknown;
 }
 
@@ -437,13 +440,137 @@ function freshState(stat?: SyncFsBridgeStat): LiveNodeState {
     : base;
 }
 
+function inCache(Fs: LiveFsApi, node: LiveFsNode): boolean {
+  const table = Fs.nameTable;
+  const parent = node.parent as LiveFsNode & { id?: number };
+  const hash = Fs.hashName?.(parent.id ?? 0, node.name);
+  if (!table || hash === undefined) return true;
+  let at: LiveFsNode | null | undefined = table[hash];
+  while (at) {
+    if (at === node) return true;
+    at = (at as LiveFsNode & { name_next?: LiveFsNode | null }).name_next;
+  }
+  return false;
+}
+
+function heldUnder(held: LiveFsNode, from: string): LiveFsNode | undefined {
+  let moving: LiveFsNode | undefined = held;
+  while (moving && moving !== moving.mount.root && liveNodePath(moving) !== from) {
+    moving = moving.parent;
+  }
+  return moving && moving !== moving.mount.root && liveNodePath(moving) === from
+    ? moving
+    : undefined;
+}
+
+function relinked(Fs: LiveFsApi, moving: LiveFsNode, to: string): void {
+  const slash = to.lastIndexOf('/');
+  let dir: LiveFsNode | undefined;
+  try {
+    dir = Fs.lookupPath?.(slash <= 0 ? '/' : to.slice(0, slash)).node as LiveFsNode;
+  } catch {}
+  if (!dir || dir.mount !== moving.mount) return;
+  const name = to.slice(slash + 1);
+  try {
+    const existing = Fs.lookupNode?.(dir, name);
+    if (existing && existing !== moving) Fs.hashRemoveNode?.(existing);
+  } catch {}
+  moving.parent.live.listed = undefined;
+  dir.live.listed = undefined;
+  Fs.hashRemoveNode?.(moving);
+  moving.name = name;
+  moving.parent = dir;
+  Fs.hashAddNode?.(moving);
+  moving.live.stat = undefined;
+}
+
+function renameFollower(
+  Fs: LiveFsApi,
+  bridgeOf: (node: LiveFsNode) => SyncFsPosixBridge,
+  call: <T>(fn: () => T) => T
+) {
+  const open = new Set<LiveFsNode>();
+  let seen: number | undefined;
+  const follow = (node: LiveFsNode): boolean => {
+    const bridge = bridgeOf(node);
+    const now = bridge.changes?.renames() ?? 0;
+    const ask = bridge.renames?.bind(bridge);
+    if (seen === undefined || now === seen || !ask) return false;
+    const held = [...open].filter((n) => !n.live.orphan);
+    if (held.length === 0) {
+      seen = now;
+      return false;
+    }
+    const since = seen;
+    const reply = call(() =>
+      ask(
+        since,
+        held.map((n) => liveNodePath(n))
+      )
+    );
+    seen = reply.now;
+    for (const [from, to] of reply.renames) {
+      for (const node of held) {
+        const moving = heldUnder(node, from);
+        if (moving && inCache(Fs, moving)) relinked(Fs, moving, to);
+      }
+    }
+    return reply.renames.length > 0;
+  };
+  return {
+    open,
+    follow,
+    track(node: LiveFsNode, on: boolean): void {
+      if (!on) {
+        open.delete(node);
+        return;
+      }
+      follow(node);
+      open.add(node);
+    },
+    watchRenames(bridge: SyncFsPosixBridge): void {
+      seen ??= bridge.changes?.renames() ?? 0;
+    },
+    ownRename(bridge: SyncFsPosixBridge): void {
+      const now = bridge.changes?.renames() ?? 0;
+      if (seen !== undefined && now === ((seen + 1) | 0)) seen = now;
+    },
+  };
+}
+
+function followingOnce(write: () => void, follow: () => boolean): void {
+  try {
+    write();
+  } catch (err) {
+    if ((err as { errno?: number }).errno !== wasiErrno('ENOENT') || !follow()) throw err;
+    write();
+  }
+}
+
+function renameThrough(h: LiveHelpers, node: LiveFsNode, from: string, to: string): void {
+  h.call(() => h.bridgeOf(node).rename(from, to));
+  h.ownRename(h.bridgeOf(node));
+}
+
+function heldStream(h: LiveHelpers, stream: LiveFsStream, change: 1 | -1): void {
+  const s = stream.node.live;
+  if ((stream.flags & 3) === 0 || s.orphan) return;
+  const before = s.writers ?? 0;
+  s.writers = Math.max(0, before + change);
+  if ((before === 0) !== (s.writers === 0)) {
+    try {
+      h.bridgeOf(stream.node).hold?.(liveNodePath(stream.node), s.writers > 0);
+    } catch {}
+  }
+}
+
 function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
   const bridgeOf = (node: LiveFsNode): SyncFsPosixBridge => node.mount.opts.bridge;
   const fileIo = (node: LiveFsNode): SyncFsFileIo => pinnedIo(bridgeOf(node), node.live.handle);
   const dirty = new Set<LiveFsNode>();
   const handled = new Set<LiveFsNode>();
   const linked = linkedStates(bridgeOf);
-
+  const renames = renameFollower(Fs, bridgeOf, (fn) => call(fn));
   function markDirty(node: LiveFsNode): void {
     node.live.dirty = true;
     dirty.add(node);
@@ -547,11 +674,12 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
   function flushNode(node: LiveFsNode): void {
     const s = node.live;
     if (!s.dirty || stale(s) || !(s.data || s.ranged)) return;
-    if (s.ranged) call(() => s.ranged?.flush());
-    else {
-      const bytes = (s.data as Uint8Array).slice(0, s.len);
-      call(() => fileIo(node).writeFile(liveNodePath(linked.holder(node)), bytes, true));
-    }
+    const whole = () => (s.data as Uint8Array).slice(0, s.len);
+    const write = () =>
+      s.ranged
+        ? call(() => s.ranged?.flush())
+        : call(() => fileIo(node).writeFile(liveNodePath(linked.holder(node)), whole(), true));
+    followingOnce(write, () => renames.follow(node));
     s.dirty = false;
     s.stat = undefined;
   }
@@ -602,6 +730,7 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
     bridgeOf,
     handled,
     linked,
+    ...renames,
     call,
     metadataCall,
     makeNode,
@@ -769,7 +898,7 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
       const from = liveNodePath(oldNode);
       const to = childPath(newDir, newName);
       flushNode(oldNode);
-      call(() => bridgeOf(oldNode).rename(from, to));
+      renameThrough(h, oldNode, from, to);
 
       try {
         const existing = Fs.lookupNode?.(newDir, newName);
@@ -872,20 +1001,12 @@ function dropOpen(s: LiveNodeState): boolean {
 
 function createStreamOps(h: LiveHelpers): LiveStreamOps {
   const { Fs, statOf, ensureLoaded, ensureCapacity, flushNode, bridgeOf, rangedOf } = h;
-  const held = (stream: LiveFsStream, change: 1 | -1) => {
-    const s = stream.node.live;
-    if ((stream.flags & 3) === 0 || s.orphan) return;
-    const before = s.writers ?? 0;
-    s.writers = Math.max(0, before + change);
-    if ((before === 0) !== (s.writers === 0)) {
-      try {
-        bridgeOf(stream.node).hold?.(liveNodePath(stream.node), s.writers > 0);
-      } catch {}
-    }
-  };
+  const held = (stream: LiveFsStream, change: 1 | -1) => heldStream(h, stream, change);
+
   const opened = (node: LiveFsNode, on: boolean, want = 0) => {
     const s = node.live;
     try {
+      h.track(node, on);
       const handle = holdLive(bridgeOf(node), node, on, want);
       s.handle = on ? handle : undefined;
       h.linked.opening(node, on);
@@ -987,6 +1108,7 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
       if (!Fs.isFile(node.mode)) return;
       const s = node.live;
       if (!dropOpen(s)) return;
+      h.follow(node);
       if (s.openCount > 0) {
         held(stream, -1);
         return;
@@ -1000,12 +1122,14 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
         s.len = 0;
         s.loaded = false;
         held(stream, -1);
+        h.track(node, false);
         if (s.handle !== undefined) opened(node, false);
       }
     },
     read(stream, buffer, offset, length, position) {
       const node = stream.node;
       if (Fs.isDir(node.mode)) throw new Fs.ErrnoError(wasiErrno('EISDIR'));
+      h.follow(node);
       const ranged = rangedOf(node);
       if (ranged) {
         const out = new Uint8Array(buffer.buffer, buffer.byteOffset + offset, Math.max(0, length));
@@ -1023,6 +1147,7 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
       const node = stream.node;
       if (Fs.isDir(node.mode)) throw new Fs.ErrnoError(wasiErrno('EISDIR'));
       if (length <= 0) return 0;
+      h.follow(node);
       const s = node.live;
       const end = position + length;
       if (s.maxFile !== undefined && end > s.maxFile) throw new Fs.ErrnoError(wasiErrno('EFBIG'));
@@ -1054,6 +1179,7 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
       return pos;
     },
     fsync(stream) {
+      h.follow(stream.node);
       flushNode(stream.node);
     },
   };
@@ -1092,6 +1218,7 @@ export function createLiveVfsPlugin(Fs: LiveFsApi): LiveVfsPlugin {
     flushDirty: () => h.flushDirty(),
     mount(mount) {
       const st = h.call(() => mount.opts.bridge.stat(mount.opts.root));
+      h.watchRenames(mount.opts.bridge);
       if (!st.isDirectory) throw new Fs.ErrnoError(wasiErrno('ENOTDIR'));
       const root = h.makeNode(null, '/', st);
       root.mode = modeFromStat(st, mount.opts.bridge.owners === true);

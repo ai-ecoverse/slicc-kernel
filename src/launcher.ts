@@ -98,6 +98,7 @@ import { fileIdentity, type ProcessInfo } from './kernel/proc-info.ts';
 import { DEFAULT_UMASK } from './kernel/process.ts';
 import type { ForkState, Program } from './kernel/protocol.ts';
 import { PtyTable } from './kernel/pty.ts';
+import { RenameLog } from './kernel/rename-log.ts';
 import { type ScrubSecret, scrubbedAll, scrubberOf, scrubStdio } from './kernel/scrub-file.ts';
 import { SealedBroker, type SealedCaller, type SealedHook } from './kernel/sealed.ts';
 import { SemTable } from './kernel/sem.ts';
@@ -663,6 +664,7 @@ export class Launcher {
   readonly hostname: string;
   readonly watchers = new FsWatchers();
   private readonly changes = new FileChanges();
+  private readonly renameLog = new RenameLog(this.changes);
   readonly cwds = new CwdTable(async (path) => {
     const { dev, ino } = await this.base.stat(path);
     return `${dev ?? 0}:${ino}`;
@@ -797,6 +799,7 @@ export class Launcher {
     this.openFiles.add(this.nodes);
     options.fs.onPeer?.(() => this.flushOpen());
     options.fs.remoteChanges?.((change) => {
+      if (change.moved) this.moved(change.moved.from, change.moved.to);
       this.changes.flush();
       this.cwds.touched(change.paths, change.trees);
       this.rewritten(change.paths, change.trees);
@@ -1982,6 +1985,7 @@ export class Launcher {
       unlinkGate: stack.unlinked.gate,
       replacements: stack.unlinked,
       statfs: (path) => this.mounts.statfs(path),
+      renames: (since, held) => this.renameLog.since(since, held),
       mounts: () => this.mounts.list(),
       mount: (call, signal) => this.processMount(pid, call, signal),
       umount: (target, flags) => this.processUmount(pid, target, flags),
@@ -3074,8 +3078,15 @@ export class Launcher {
     return target === undefined ? undefined : { path: target, ...(owner ? { owner } : {}) };
   }
 
+  private moved(from: string, to: string, source?: VfsNodes): void {
+    this.renameLog.add(from, to);
+    if (source) return;
+    for (const nodes of this.openFiles) nodes.renamed(from, to);
+  }
+
   private processChain(fs: KernelFs, nodes: VfsNodes, unlinked: UnlinkedKeeper): KernelFs {
     nodes.changed = (path) => this.changes.publish(path);
+    nodes.movedAway = (from, to) => this.moved(from, to, nodes);
     nodes.dirtied = (delta) => this.changes.dirtied(delta);
     return unlinked.wrap(keepingOpen(fs, nodes, (path) => this.changes.publish(path)));
   }
