@@ -1,0 +1,15 @@
+{
+  "name": "cwdfd",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "cwdfd": {
+        "wasm": "bin/cwdfd.wasm"
+      },
+      "cwdfd-old": {
+        "wasm": "bin/cwdfd-old.wasm"
+      }
+    }
+  }
+}

@@ -51,6 +51,7 @@ export function futexWait(
 
 const EINTR_LIBC = 22;
 const STRICT_EPOLL_LIBC = 29;
+const CWD_FD_LIBC = 41;
 const MAIN_HANDLE = 0x7fffffff;
 
 export class WasixHost {
@@ -77,7 +78,9 @@ export class WasixHost {
       () => (this.threads?.tid ?? MAIN_TID) !== MAIN_TID
     );
 
-    if (module) host.strictEpoll = (libcVersion(module) ?? 0) >= STRICT_EPOLL_LIBC;
+    const libc = module ? (libcVersion(module) ?? 0) : undefined;
+    if (libc !== undefined) host.strictEpoll = libc >= STRICT_EPOLL_LIBC;
+    if (libc !== undefined) host.cwdFd = libc >= CWD_FD_LIBC;
     if (module && !WebAssembly.Module.imports(module).some((i) => i.name === 'fd_fdflags_set')) {
       host.fds.implicitCloexec = true;
 
@@ -242,6 +245,7 @@ export class WasixHost {
         mem.view().setUint32(out, host.o.parent?.() ?? host.o.ppid ?? 1, true);
       },
       getcwd: (buf: number, lenPtr: number) => {
+        if (host.cwdFd && host.fds.held && !host.fds.held.alive()) return E.NOENT;
         const bytes = new TextEncoder().encode(host.cwd);
         const max = mem.view().getUint32(lenPtr, true);
         mem.view().setUint32(lenPtr, bytes.length, true);
