@@ -38,6 +38,7 @@ const POLL = (dir, pause = '') =>
     ...(pause ? [`    ${pause}`] : []),
     '    files=($before/lib/*); c=${#files[@]}',
     '    if [ -e $before/package.json ]; then p=1; else p=0; fi',
+    ...(pause ? [`    ${pause}`] : []),
     '    after=$(names)',
     `    if [ "$after" = "$before" ] && { [ $c -ne ${FILES} ] || [ $p -eq 0 ]; }; then`,
     '      bad=$((bad+1)); [ $bad -le 5 ] && echo "partial $before: $c package.json=$p"',
@@ -49,7 +50,7 @@ const POLL = (dir, pause = '') =>
   ].join('\n');
 
 const SETTLE =
-  'settle() { local t u; read -r t < tick 2>/dev/null; until read -r u < tick 2>/dev/null; [ "$u" != "$t" ]; do :; done; }';
+  'settle() { local t u; read -r t 2>/dev/null < tick; until read -r u 2>/dev/null < tick; [ "$u" != "$t" ]; do :; done; }';
 
 const RENAMES = (dir, paced = true) =>
   `cd ${dir} && ${SETTLE} && for r in $(seq ${ROUNDS}); do mv a b && ${paced ? 'settle && ' : ''}mv b a && ${paced ? 'settle' : ':'} || echo "mv failed $r"; done; : > stop; echo renamed`;
@@ -80,8 +81,8 @@ test('another tab polling a directory a kernel renames back and forth never sees
   await polled(page, other, { at: dir, label: 'poller' });
   await polled(page, other, {
     at: dir,
-    label: 'a poller slower than the renames',
-    pause: 'sleep 0.3',
+    label: `a poller slower than the renames${process.env.RENAME_UNPACED ? ' (unpaced)' : ''}`,
+    pause: `sleep ${process.env.RENAME_PAUSE ?? '0.15'}`,
     paced: process.env.RENAME_UNPACED === undefined,
   });
   const seen = await sh(other, whole(dir));
