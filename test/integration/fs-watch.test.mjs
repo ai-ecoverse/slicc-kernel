@@ -20,8 +20,8 @@ async function install(kernel, name) {
   }
 }
 
-async function booted(t) {
-  const kernel = await createNodeKernel({ users: 'enforce' });
+async function booted(t, users = 'enforce') {
+  const kernel = await createNodeKernel({ users });
   t.after(() => kernel.terminate());
   for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
   for (const file of ['package.json', 'bin/watchtest.mjs']) {
@@ -249,4 +249,56 @@ test('an embedder writeFile in the parent of a watched file leaves that watch al
     },
   });
   assert.deepEqual(got, ['change fl']);
+});
+
+test('an embedder writeFile over an existing file is a truncate and a write: two changes, as on Linux and as a program write already gives; an empty one only the truncate (#1357)', async (t) => {
+  const { kernel, sh } = await booted(t, 'off');
+  const bytes = (text) => new TextEncoder().encode(text);
+  const seen = async (write) => {
+    await kernel.writeFile('/tmp/c/old/o.txt', bytes('o'));
+    await sh('rm -f /tmp/r');
+    const watching = sh('watchtest rewrite /tmp/c/old/o.txt /tmp/r 400');
+    for (;;) {
+      const ready = await kernel.readFile('/tmp/r').then(
+        () => true,
+        () => false
+      );
+      if (ready) break;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    await write();
+    return (await watching).stdout;
+  };
+  const embedder = (text) => () => kernel.writeFile('/tmp/c/old/o.txt', bytes(text));
+  assert.equal(await seen(embedder('oo')), 'change o.txt\nchange o.txt\n');
+  assert.equal(await seen(embedder('')), 'change o.txt\n');
+  const program = await seen(() => sh('printf oo > /tmp/c/old/o.txt'));
+  assert.equal(program, 'change o.txt\nchange o.txt\n');
+});
+
+test('every note carries a kernel-wide sequence, so a program can merge its watches back into one queue in operation order, and one event heard by two watches has one number (#1357)', async (t) => {
+  const { sh } = await booted(t, 'off');
+  const r = await sh(
+    'rm -rf /tmp/a /tmp/b; mkdir -p /tmp/a /tmp/b; echo -n 0 > /tmp/a/x; watchtest sequence /tmp/a /tmp/b'
+  );
+  assert.equal(
+    r.stdout,
+    [
+      'true',
+      'A change x',
+      'F change x',
+      'A change x',
+      'F change x',
+      'B rename y',
+      'B change y',
+      'B change y',
+      'A change x',
+      'F change x',
+      'A change x',
+      'F change x',
+      'A+F A+F A+F A+F',
+      '',
+    ].join('\n'),
+    r.stderr
+  );
 });
