@@ -110,9 +110,16 @@ export interface JsMemory {
   arrayBuffers?: number;
 }
 
+export interface JsAsyncContext {
+  run<R>(store: unknown, fn: (...args: unknown[]) => R, ...args: unknown[]): R;
+  getStore(): unknown;
+  enterWith(store: unknown): void;
+}
+
 export interface JsProgramContext {
   readonly kernel: JsKernelInfo;
   memory(): JsMemory;
+  readonly asyncContext?: JsAsyncContext;
   readonly argv: readonly string[];
   readonly env: Readonly<Record<string, string>>;
   readonly pid: number;
@@ -264,6 +271,7 @@ export interface ContextOptions {
   strays?: JsStrays;
   thread: JsThreadContext;
   memory?: (() => JsMemory) | undefined;
+  asyncContext?: (() => JsAsyncContext) | undefined;
   fs?: { owners: boolean; links: boolean };
   owned?: SharedArrayBuffer;
   held?: HeldCwdInit | undefined;
@@ -634,6 +642,16 @@ function measured(measure: (() => JsMemory) | undefined): JsMemory {
   return out;
 }
 
+function hostExtras(o: ContextOptions): {
+  memory: () => JsMemory;
+  asyncContext?: JsAsyncContext;
+} {
+  return {
+    memory: () => measured(o.memory),
+    ...(o.asyncContext ? { asyncContext: o.asyncContext() } : {}),
+  };
+}
+
 export function createContext(o: ContextOptions): CreatedContext {
   const { kernel } = o;
   const infos = new Map<number, FdInfo>();
@@ -792,7 +810,7 @@ export function createContext(o: ContextOptions): CreatedContext {
     tty: terminal.tty,
     exit,
     thread: o.thread,
-    memory: () => measured(o.memory),
+    ...hostExtras(o),
     onUncaught: (listener) => listen(strays.exception, listener),
     onUnhandledRejection: (listener) => listen(strays.rejection, listener),
   };

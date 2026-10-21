@@ -2,6 +2,7 @@ import { createRequire, enableCompileCache, flushCompileCache } from 'node:modul
 import { parentPort, workerData } from 'node:worker_threads';
 import {
   glueUrl,
+  nodeAsyncContext,
   nodeLockdown,
   nodeMemory,
   nodeProcess,
@@ -41,6 +42,7 @@ const onMessage = processEntry(
         lockdown: () => nodeLockdown(),
         scope: strayScope,
         memory: nodeMemory,
+        asyncContext: nodeAsyncContext,
         imported,
       }),
     runJsThread: (init, at) =>
@@ -48,6 +50,7 @@ const onMessage = processEntry(
         lockdown: () => nodeLockdown(),
         scope: strayScope,
         memory: nodeMemory,
+        asyncContext: nodeAsyncContext,
         imported,
       }),
   }),
