@@ -153,6 +153,7 @@ import {
   foreignImports,
   type ImportedMemory,
   importedMemory,
+  libcVersion,
 } from './process/wasi/wasi-module.ts';
 import { servedFsCalls } from './realm/sync-fs-dispatch.ts';
 import type { SourceCheck } from './realm/sync-fs-token-registry.ts';
@@ -455,6 +456,17 @@ export function cronPath(path: string): boolean {
     (at) =>
       path === at || path.startsWith(`${at}/`) || at.startsWith(path === '/' ? '/' : `${path}/`)
   );
+}
+
+const ETC_HOSTNAME_LIBC = 42;
+
+function readsEtcHostname(program: Program): boolean {
+  return program.abi === 'wasi' && (libcVersion(program.module) ?? 0) >= ETC_HOSTNAME_LIBC;
+}
+
+function setOrDrop(env: Record<string, string>, key: string, value: string | undefined): void {
+  if (value === undefined) delete env[key];
+  else env[key] = value;
 }
 
 function baseName(path: string): string {
@@ -1802,6 +1814,7 @@ export class Launcher {
     const env = { ...expandDefaults(asked.target.env, seen), ...req.env };
     for (const key of asked.target.unset ?? []) delete env[key];
     delete env[TICKET_ENV];
+    const own = env.HOSTNAME;
     if (asked.target.abi === 'wasi') env.HOSTNAME = this.hostname;
     const planned = chosen(asked, env);
     const { target, args } = planned;
@@ -1812,6 +1825,7 @@ export class Launcher {
       const caller = { pid: req.ppid ?? 0, uid: req.cred.euid, tag: req.tags?.[0] };
       if (this.integrity) await this.checkedSources(planned, caller);
       [program, exeId] = await Promise.all([this.program(target, env, caller), this.exeId(target)]);
+      if (readsEtcHostname(program)) setOrDrop(env, 'HOSTNAME', own);
     } catch (err) {
       await req.fds.closeAll();
       throw err;

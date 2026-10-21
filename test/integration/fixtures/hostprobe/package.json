@@ -1,0 +1,15 @@
+{
+  "name": "hostprobe",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "hostprobe": {
+        "wasm": "bin/hostprobe.wasm"
+      },
+      "hostprobe-old": {
+        "wasm": "bin/hostprobe-old.wasm"
+      }
+    }
+  }
+}
