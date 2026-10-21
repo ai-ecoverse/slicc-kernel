@@ -65,7 +65,7 @@ import type { MountLine, ProcessListing } from './proc-info.ts';
 import type { DlState, ForkState } from './protocol.ts';
 import { PTY_OPS, type PtySyscall, type PtyTable, ptsNumber, ptySyscall, sizeKey } from './pty.ts';
 import { type RunRequest, runChild } from './run-child.ts';
-import type { SealedBroker, SealedCaller } from './sealed.ts';
+import { type SealedBroker, type SealedCaller, tagFields } from './sealed.ts';
 import { selectFds } from './select.ts';
 import { SEM_OPS, SemHandles, type SemSyscall, type SemTable, semSyscall } from './sem.ts';
 import {
@@ -1477,13 +1477,12 @@ export class WasmProcess {
   private async clipboardStamp(): Promise<ClipboardStamp> {
     const shown = await this.options.identity?.();
     const broker = this.options.clipboard as ClipboardBroker;
-    const tag = broker.tagOf(this.pid);
     return {
       pid: shown?.pid ?? this.pid,
       uid: this.cred.euid,
       gid: this.cred.egid,
       users: broker.users,
-      ...(tag !== undefined ? { tag } : {}),
+      ...tagFields(broker.tagOf(this.pid)),
     };
   }
 

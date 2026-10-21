@@ -2,6 +2,7 @@ import { access, X_OK } from './fs/access.ts';
 import type { KernelFs, UsersMode } from './fs/types.ts';
 import { normalizePath } from './fs/types.ts';
 import type { Cred } from './kernel/cred.ts';
+import { tagFields } from './kernel/sealed.ts';
 import { type Account, credOf, type UserDb, userEnv } from './users.ts';
 
 export const SUDOERS = '/etc/sudoers';
@@ -30,6 +31,7 @@ export interface SudoRequest {
   cwd: string;
   pid: number;
   tag?: string;
+  tags?: string[];
   tty?: string;
   createdAt: number;
   expiresAt: number;
@@ -68,7 +70,7 @@ export type SudoResult =
 export interface SudoCaller {
   cred: Cred;
   pid: number;
-  tag?: string | undefined;
+  tags?: readonly string[] | undefined;
   tty?: string | null | undefined;
 }
 
@@ -430,7 +432,7 @@ export class Sudo {
       path,
       cwd,
       pid: caller.pid,
-      ...(caller.tag !== undefined ? { tag: caller.tag } : {}),
+      ...tagFields(caller.tags),
       ...(caller.tty ? { tty: caller.tty } : {}),
       createdAt,
       expiresAt: createdAt + timeout,

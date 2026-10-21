@@ -177,7 +177,7 @@ export function pidStatus(info: ProcessInfo): string {
     'TracerPid:\t0',
     `Uid:\t${ids(c.ruid, c.euid, c.suid)}`,
     `Gid:\t${ids(c.rgid, c.egid, c.sgid)}`,
-    ...(info.tag !== undefined ? [tagLine(info.tag)] : []),
+    ...(info.tags ?? (info.tag !== undefined ? [info.tag] : [])).map(tagLine),
     'FDSize:\t64',
     `VmSize:\t${Math.ceil(info.memory / KIB)} kB`,
     `VmRSS:\t${Math.ceil(info.memory / KIB)} kB`,

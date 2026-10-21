@@ -3,6 +3,7 @@ import { type KernelFs, normalizePath } from '../fs/types.ts';
 import { PathGate } from '../fs/unlinked.ts';
 import type { Account } from '../users.ts';
 import { type CronClock, systemCronClock } from './clock.ts';
+import { type JobTags, readTags } from './crontab.ts';
 import { missedFires, nextFire } from './schedule.ts';
 import { type CronJob, parseCrontab, SPOOL_DIR, SYSTEM_CRONTAB } from './table.ts';
 
@@ -30,6 +31,8 @@ export interface CronRun {
   cwd: string;
   env: Record<string, string>;
   output: (bytes: Uint8Array) => void;
+  tags?: readonly string[];
+  tagBase?: number;
 }
 
 export interface CronHost {
@@ -49,6 +52,7 @@ interface Loaded {
   source: string;
   account: Account;
   job: CronJob;
+  tags?: JobTags | undefined;
 }
 
 interface Stamp {
@@ -251,6 +255,7 @@ export class CronService {
       const account = await this.host.lookup(job.user as string);
       if (account) out.push({ source: 'system', account, job });
     }
+    const tags = await readTags(fs);
     const names = await fs.readdir(SPOOL_DIR).catch((err: { code?: string }) => {
       if (err?.code === 'ENOENT') return [] as string[];
       throw err;
@@ -264,7 +269,8 @@ export class CronService {
         continue;
       }
       const table = await this.table(path, account.uid, false);
-      for (const job of table?.jobs ?? []) out.push({ source: name, account, job });
+      for (const job of table?.jobs ?? [])
+        out.push({ source: name, account, job, tags: tags[job.id] });
     }
     return out;
   }
@@ -371,6 +377,7 @@ export class CronService {
           SLICC_CRON_MISSED: String(missed),
         },
         output: (bytes) => output.push(bytes),
+        ...(entry.tags ? { tags: entry.tags.tags, tagBase: entry.tags.base } : {}),
       });
     } catch (err) {
       output.push(encoder.encode(`cron: ${messageOf(err)}\n`));

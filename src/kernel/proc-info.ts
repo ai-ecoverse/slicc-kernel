@@ -25,6 +25,7 @@ export interface ProcessInfo {
   sigCgt?: number;
   sigBlk?: number;
   tag?: string;
+  tags?: string[];
 }
 
 export interface MountLine {

@@ -42,6 +42,7 @@ export class Dac {
   private readonly seen = new Set<string>();
   private suppressed = false;
   tagOf: (pid: number) => string | undefined = () => undefined;
+  fenced: (pid: number, path: string) => boolean = () => false;
 
   constructor(
     mode: 'report' | 'enforce',
@@ -55,6 +56,13 @@ export class Dac {
 
   get enforcing(): boolean {
     return this.mode === 'enforce';
+  }
+
+  fence(denial: Denial): never {
+    try {
+      this.hook?.({ ...denial });
+    } catch {}
+    throw refused(denial.path, denial.errno);
   }
 
   denied(given: Denial): void {
@@ -115,6 +123,15 @@ export function deny(g: Guard, op: string, path: string, errno = 'EACCES'): void
   g.dac.denied({ pid: g.pid, uid: g.cred.euid, op, path, errno, ...tag });
 }
 
+async function fence(g: Guard, op: string, path: string, parent?: string): Promise<void> {
+  if (!g.pid) return;
+  const real = parent && (await g.fs.realpath?.(parent, true).catch(() => undefined));
+  const at = real ? joinName(real, path.slice(path.lastIndexOf('/') + 1)) : path;
+  if (!g.dac.fenced(g.pid, normalizePath(path)) && !g.dac.fenced(g.pid, normalizePath(at))) return;
+  const tag = g.tag === undefined ? {} : { tag: g.tag };
+  g.dac.fence({ pid: g.pid, uid: g.cred.euid, op, path, errno: 'EACCES', ...tag });
+}
+
 export const TTY_MODE = 0o620;
 
 export function ttyOpenable(g: Guard | undefined, tty: { name?: string; owner?: Perm }): void {
@@ -130,6 +147,7 @@ export async function need(
   options: AccessOptions = {},
   shown = path
 ): Promise<Walked> {
+  if (want & W_OK && shown === path) await fence(g, op, path);
   const walked = await access(g.fs, g.cred, path, want, linked(g, options));
   if (walked.denied !== undefined) deny(g, op, walked.link ? walked.denied : shown);
   else if (want & R_OK && g.fs.commandTarget) await readsAs(g, op, walked.path, shown);
@@ -159,6 +177,7 @@ export async function inParent(
   path: string,
   old: boolean | 'replaced' = false
 ): Promise<void> {
+  await fence(g, op, path, parentOf(path));
   if (old === 'replaced') {
     const dir = await need(g, op, parentOf(path), W_OK | X_OK, DIR, path);
     return dir.denied === undefined ? stickyEntry(g, op, path, dir) : undefined;
