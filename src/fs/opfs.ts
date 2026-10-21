@@ -76,12 +76,14 @@ const LEGACY_RENAME_LOCK =
   /^slicc-rename:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const PAIRED = new Set(['rename', 'link', 'copyFile']);
 const LISTINGS = new Set(['readdir', 'readdirStat']);
+const REMOVALS = new Set(['rm', 'rename']);
 const RETRY = Symbol('retry');
 const ACK_SAMPLES = 4096;
 const INTENT_POLL_MS = 5;
 
 interface Inflight {
   paths: readonly string[];
+  removing?: boolean;
   waiting?: { promise: Promise<void>; resolve: () => void };
   release: () => void;
 }
@@ -1862,10 +1864,11 @@ export class OpfsFs implements KernelFs {
     const running = [...this.inflight];
     const reached = await Promise.all(
       running.map(async (op) => {
-        if (op.paths.some((at) => touches(at, trees))) return true;
+        const near = (at: string) => touches(at, trees, true, op.removing === true);
+        if (op.paths.some(near)) return true;
         for (const at of op.paths) {
           const forms = await this.resolvedForms(at);
-          if (forms.some((form) => touches(form, trees))) return true;
+          if (forms.some(near)) return true;
         }
         return false;
       })
@@ -1883,10 +1886,10 @@ export class OpfsFs implements KernelFs {
     );
   }
 
-  private peerAt(at: string, listing: boolean): PeerMove | undefined {
+  private peerAt(at: string, listing: boolean, removing = false): PeerMove | undefined {
     for (const move of this.peerMoves.values()) {
       if (this.ownLocks.has(move.lock)) continue;
-      if (touches(at, move.trees, listing)) return move;
+      if (touches(at, move.trees, listing, removing)) return move;
     }
     return undefined;
   }
@@ -1926,11 +1929,11 @@ export class OpfsFs implements KernelFs {
     return wait;
   }
 
-  private async peerSettled(at: string, listing: boolean): Promise<string[]> {
+  private async peerSettled(at: string, listing: boolean, removing: boolean): Promise<string[]> {
     await this.lookForRenames();
     for (let reals: string[] | undefined; ; ) {
       const forms = [at, ...(reals ?? [])];
-      const move = forms.map((form) => this.peerAt(form, listing)).find(Boolean);
+      const move = forms.map((form) => this.peerAt(form, listing, removing)).find(Boolean);
       if (move) {
         this.peerWaited++;
         await this.peerMoved(move);
@@ -1984,13 +1987,14 @@ export class OpfsFs implements KernelFs {
       .filter((path): path is string => typeof path === 'string')
       .map(normalizePath);
     const listing = LISTINGS.has(name);
+    const removing = REMOVALS.has(name);
     const checked = [...paths];
     while (this.amongPeers()) {
       checked.length = 0;
-      for (const at of paths) checked.push(...(await this.peerSettled(at, listing)));
-      if (!checked.some((at) => this.peerAt(at, listing))) break;
+      for (const at of paths) checked.push(...(await this.peerSettled(at, listing, removing)));
+      if (!checked.some((at) => this.peerAt(at, listing, removing))) break;
     }
-    const busy: Inflight = { paths: checked, release: () => undefined };
+    const busy: Inflight = { paths: checked, removing, release: () => undefined };
     const done = () => {
       this.inflight.delete(busy);
       busy.waiting?.resolve();
@@ -2480,13 +2484,15 @@ function nothing(): undefined {
 function touches(
   at: string,
   trees: ReadonlyArray<readonly [string, string]>,
-  listing = true
+  listing = true,
+  removing = false
 ): boolean {
   return trees.some(
     ([from, to]) =>
       within(at, from) ||
       within(at, to) ||
-      (listing && (at === parentOf(from) || at === parentOf(to)))
+      (listing && (at === parentOf(from) || at === parentOf(to))) ||
+      (removing && (at === '/' || within(from, at) || within(to, at)))
   );
 }
 
