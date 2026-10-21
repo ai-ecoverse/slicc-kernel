@@ -311,6 +311,10 @@ function refusal(err: unknown): boolean {
   return code === 'EACCES' || code === 'EPERM';
 }
 
+function gone(err: unknown): boolean {
+  return (err as { code?: unknown } | null)?.code === 'ENOENT';
+}
+
 function young(s: LiveNodeState): boolean {
   return performance.now() - (s.filledAt ?? Number.NEGATIVE_INFINITY) < SHARED_TTL_MS;
 }
@@ -888,7 +892,9 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
       if (s.handle === undefined) h.handled.delete(node);
       else h.handled.add(node);
     } catch (err) {
-      if (refusal(err)) throw new Fs.ErrnoError(wasiErrno((err as { code: string }).code));
+      if (refusal(err) || gone(err)) {
+        throw new Fs.ErrnoError(wasiErrno((err as { code: string }).code));
+      }
     }
   };
   const permitted = (stream: LiveFsStream, created: boolean): number => {

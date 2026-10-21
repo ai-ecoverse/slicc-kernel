@@ -62,3 +62,49 @@ test('in Node, files opened inside a directory that another process keeps removi
   const r = await kernel.run(['bash', '-c', script], { cwd: '/' });
   assert.equal(String(r.stdout), 'replaced 0\n', String(r.stderr));
 });
+
+test('in Node, a file whose directory another process removes while bash opens it is not found, rather than opened and read back empty (#1198)', {
+  timeout: 300_000,
+}, async (t) => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
+  await kernel.writeFile(
+    '/node_modules/rdrm/package.json',
+    JSON.stringify({
+      name: 'rdrm',
+      slicc: {
+        commands: { rmd: { abi: 'js', module: 'rm.mjs' }, mkd: { abi: 'js', module: 'mk.mjs' } },
+      },
+    })
+  );
+  await kernel.writeFile(
+    '/node_modules/rdrm/rm.mjs',
+    `export default async function main(ctx) {
+  await ctx.fs.writeFile('/root/rd/going', '');
+  await ctx.fs.rm('/root/rd/d');
+  return 0;
+}`
+  );
+  await kernel.writeFile(
+    '/node_modules/rdrm/mk.mjs',
+    `export default async function main(ctx) {
+  await ctx.fs.mkdir('/root/rd/d');
+  await ctx.fs.writeFile('/root/rd/d/b', 'v' + ctx.argv[1] + '\\n');
+  return 0;
+}`
+  );
+  const script = [
+    'mkdir -p /root/rd && cd /root/rd',
+    'for i in $(seq 20); do',
+    '  mkd $i && rm -f going && read v < d/b',
+    '  rmd & until [ -e going ]; do :; done',
+    '  { sleep 0; read v <&3; echo "$i [$v] rc=$? fd=$(stat -L -c %s /dev/fd/3)"; } 2> /dev/null 3< d/b',
+    '  wait',
+    'done',
+  ].join('\n');
+  const r = await kernel.run(['bash', '-c', script], { cwd: '/' });
+  const lines = String(r.stdout).split('\n').filter(Boolean);
+  const bad = lines.filter((line) => !/^(\d+) \[v\1\] rc=0 fd=\d+$/.test(line));
+  assert.deepEqual({ status: r.status, bad }, { status: 0, bad: [] }, String(r.stdout));
+});
