@@ -409,3 +409,46 @@ test('a shared root whose metadata name holds an unpaired surrogate still rename
   );
   assert.deepEqual(await sh(other, 'cat /s/b/lib/f', 'z'), ok('x\n'));
 });
+
+const RMTREE = [
+  'mkdir -p /node_modules/rmtree',
+  `echo '{"name":"rmtree","slicc":{"commands":{"rmtree":{"abi":"js","module":"main.mjs"}}}}' > /node_modules/rmtree/package.json`,
+  `echo 'export default async function main(ctx) { await ctx.fs.rm(ctx.argv[1], { recursive: true }); return 0; }' > /node_modules/rmtree/main.mjs`,
+  'echo installed',
+].join('\n');
+
+test("a peer's removal or rename of the parent of a tree being renamed waits for the rename, so nothing is left half moved (#1338)", {
+  timeout: 1_500_000,
+}, async (t) => {
+  const { page } = await booted(chrome, t);
+  await installPackage(page, 'wasm-coreutils');
+  const other = await peerTab(page);
+  assert.deepEqual(await sh(other, RMTREE), ok('installed\n'));
+  const dir = '/root/rp';
+  for (const [label, change, left] of [
+    ['rm', `rmtree ${dir}/p`, ''],
+    ['mv', `mv ${dir}/p ${dir}/q`, `q\n`],
+  ]) {
+    assert.deepEqual(
+      await sh(page, `rm -rf ${dir} && mkdir -p ${dir}/p && echo made`),
+      ok('made\n')
+    );
+    assert.deepEqual(await sh(page, tree(`${dir}/p`, BIG)), ok('made\n'));
+    await page.evaluate((d) => {
+      window.mv = window.kernel.run(['mv', `${d}/p/a`, `${d}/p/b`], { cwd: '/' });
+    }, dir);
+    await untilFound(page, `${dir.slice(1)}/p/b/lib`);
+    const changed = await sh(other, change);
+    const moved = await page.evaluate(() => window.mv);
+    assert.equal(changed.status, 0, `${label}: ${changed.stderr}`);
+    assert.equal(moved.status, 0, `${label}: mv ${moved.stderr}`);
+    assert.deepEqual(await sh(page, `ls -A ${dir}`), ok(left), label);
+    if (left) {
+      const kept = await sh(page, whole(`${dir}/q`));
+      assert.ok(
+        wholeAs(BIG)(kept.stdout) && kept.stdout.startsWith('b '),
+        `${label}: ${kept.stdout}`
+      );
+    }
+  }
+});
