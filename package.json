@@ -80,7 +80,7 @@
     "@ai-ecoverse/wasm-gmake": "4.4.1-9",
     "@ai-ecoverse/wasm-procps": "4.0.7-4",
     "@ai-ecoverse/wasm-sqlite3": "3.54.0-7",
-    "@ai-ecoverse/wasm-tar": "1.35.0-8",
+    "@ai-ecoverse/wasm-tar": "1.35.0-9",
     "@ai-ecoverse/wasm-tls-engine": "4.2.0-7",
     "@ai-ecoverse/wasm-tree": "2.3.2-7",
     "@ai-ecoverse/wasm-util-linux": "2.42.4-5",
