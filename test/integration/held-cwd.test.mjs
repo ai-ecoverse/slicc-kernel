@@ -241,3 +241,41 @@ test(
     assert.equal(gone.stdout, 'ready\nmkfifo 44 copy 44\nold\n', gone.stderr);
   }
 );
+
+const cwdfd = new URL('fixtures/cwdfd/', import.meta.url);
+
+const heldWasix = (command, replace) =>
+  [
+    'rm -rf /t; mkdir -p /t/d /t/s && touch /t/d/old',
+    'cd /t/d',
+    `{ until [ -e /t/s/go ]; do sleep 0.05; done; echo go; } | ${command} > /t/s/out &`,
+    'p=$!',
+    'cd /',
+    'n=0; until [ -s /t/s/out ] || [ $n -ge 2400 ]; do sleep 0.05; n=$((n+1)); done',
+    replace,
+    'touch /t/s/go',
+    'wait $p',
+    'cat /t/s/out',
+  ].join('\n');
+
+for (const [name, replace] of REPLACEMENTS) {
+  test(
+    `a WASIX program built on wasix-sysroot -41 whose cwd is replaced by "${name}" keeps the removed directory: listing ., a relative create and a stat are ENOENT, getcwd is ENOENT, and chdir("..") reaches the parent; an older libc keeps getcwd's path (#1227)`,
+    TIMEOUT,
+    async (t) => {
+      const { sh, kernel } = await booted(t);
+      for (const file of ['package.json', 'bin/cwdfd.wasm', 'bin/cwdfd-old.wasm']) {
+        await kernel.writeFile(`/node_modules/cwdfd/${file}`, await readFile(new URL(file, cwdfd)));
+      }
+      const parent = name.startsWith('mv d away') ? '[away,d,s]' : '[d,s]';
+      const r = await sh(heldWasix('cwdfd', replace));
+      assert.equal(
+        r.stdout,
+        `before [old]\ngetcwd /t/d\nafter error No such file or directory\ncreate ENOENT\nstat ENOENT\ngetcwd ENOENT\nchdir ok\nthen /t\nparent ${parent}\n`,
+        r.stderr
+      );
+      const old = await sh(heldWasix('cwdfd-old', replace));
+      assert.match(old.stdout, /\ngetcwd \/t\/d\nchdir ok\nthen \/t\n/, old.stderr);
+    }
+  );
+}

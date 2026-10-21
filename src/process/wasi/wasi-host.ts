@@ -228,6 +228,8 @@ export class WasiHost {
 
   strictEpoll = false;
 
+  cwdFd = false;
+
   entered = false;
 
   enteredSignals = 0;
