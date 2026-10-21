@@ -3083,6 +3083,7 @@ export class Launcher {
     this.renameLog.add(from, to);
     if (source) return;
     for (const nodes of this.openFiles) nodes.renamed(from, to);
+    this.watchers.moved(from, to);
   }
 
   private processChain(fs: KernelFs, nodes: VfsNodes, unlinked: UnlinkedKeeper): KernelFs {

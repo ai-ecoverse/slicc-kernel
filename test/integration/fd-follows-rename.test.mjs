@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { after, test } from 'node:test';
 import { launch } from './chrome.mjs';
 import { booted, installPackage, ok } from './kernel.mjs';
@@ -174,4 +175,40 @@ test('renames by one program while it holds files open cost it no extra kernel c
     ok('200\n200\n')
   );
   assert.ok(used < 200 * 7.5, `${used} kernel calls, where main makes 1405`);
+});
+
+test("a watch in one tab follows a rename of a directory above it in another tab, so this tab's later changes there arrive (#1356, #1257)", {
+  timeout: 1_500_000,
+}, async (t) => {
+  const { page } = await booted(chrome, t);
+  await installPackage(page, 'wasm-coreutils');
+  for (const file of ['package.json', 'bin/watchtest.mjs']) {
+    const text = await readFile(new URL(`./fixtures/watchtest/${file}`, import.meta.url), 'utf8');
+    await page.evaluate((p, s) => window.opfs.write(p, s), `node_modules/watchtest/${file}`, text);
+  }
+  const other = await peerTab(page);
+  assert.deepEqual(
+    await sh(page, 'rm -rf /root/fw && mkdir -p /root/fw/a/w && echo made'),
+    ok('made\n')
+  );
+  await page.evaluate(() => {
+    window.watchRun = window.kernel.run(
+      ['watchtest', 'events', '/root/fw/a/w', 'end', '/root/fw/ready'],
+      { cwd: '/' }
+    );
+  });
+  for (;;) {
+    const r = await sh(page, '[ -e /root/fw/ready ] && echo yes || echo no');
+    if (r.stdout === 'yes\n') break;
+  }
+  assert.deepEqual(await sh(other, 'mv /root/fw/a /root/fw/b && echo moved'), ok('moved\n'));
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  assert.deepEqual(await sh(page, ': > /root/fw/b/w/end && echo touched'), ok('touched\n'));
+  const watched = await page.evaluate(() =>
+    Promise.race([
+      window.watchRun,
+      new Promise((resolve) => setTimeout(() => resolve({ stdout: 'no event in 20 s\n' }), 20_000)),
+    ])
+  );
+  assert.equal(watched.stdout, 'rename end\n');
 });
