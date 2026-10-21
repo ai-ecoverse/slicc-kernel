@@ -1,4 +1,5 @@
 import { isBuiltin, registerHooks } from 'node:module';
+import { resolve, sep } from 'node:path';
 import { getHeapStatistics } from 'node:v8';
 import { hide, lockdown, vacate } from './process/js/lockdown.ts';
 
@@ -120,4 +121,15 @@ export function workerShaped(scope: object, href: string): void {
     self: slot(scope),
     location: slot(Object.freeze({ href })),
   });
+}
+
+export function ownCache(dir: string, result: { directory?: string }): boolean {
+  const active = result.directory;
+  if (active === undefined) return false;
+  if (!`${resolve(active)}${sep}`.startsWith(`${resolve(dir)}${sep}`)) {
+    throw new Error(
+      `slicc-kernel: compileCache ${dir} was asked for, but this worker already caches in ${active} (a host preload enabled it): refusing to run programs`
+    );
+  }
+  return true;
 }

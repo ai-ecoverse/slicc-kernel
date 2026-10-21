@@ -1,6 +1,13 @@
-import { createRequire } from 'node:module';
-import { parentPort } from 'node:worker_threads';
-import { glueUrl, nodeLockdown, nodeMemory, nodeProcess, workerShaped } from './node-lockdown.ts';
+import { createRequire, enableCompileCache, flushCompileCache } from 'node:module';
+import { parentPort, workerData } from 'node:worker_threads';
+import {
+  glueUrl,
+  nodeLockdown,
+  nodeMemory,
+  nodeProcess,
+  ownCache,
+  workerShaped,
+} from './node-lockdown.ts';
 import { runJsProcess, runJsThread } from './process/js/js-runtime.ts';
 import { processEntry } from './process/process-entry.ts';
 import { runWasmProcess } from './process/process-runtime.ts';
@@ -10,6 +17,10 @@ const scope = globalThis as { require?: unknown; __filename?: string; __dirname?
 scope.require ??= createRequire(import.meta.url);
 scope.__filename ??= new URL(import.meta.url).pathname;
 scope.__dirname ??= new URL('.', import.meta.url).pathname;
+
+const cacheDir = (workerData as { compileCache?: unknown } | null)?.compileCache;
+const cached = typeof cacheDir === 'string' && ownCache(cacheDir, enableCompileCache(cacheDir));
+const imported = cached ? () => flushCompileCache() : undefined;
 
 const port = parentPort as NonNullable<typeof parentPort>;
 const post = {
@@ -30,12 +41,14 @@ const onMessage = processEntry(
         lockdown: () => nodeLockdown(),
         scope: strayScope,
         memory: nodeMemory,
+        imported,
       }),
     runJsThread: (init, at) =>
       runJsThread(init, at, {
         lockdown: () => nodeLockdown(),
         scope: strayScope,
         memory: nodeMemory,
+        imported,
       }),
   }),
   () => nodeLockdown()

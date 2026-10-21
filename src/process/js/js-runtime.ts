@@ -28,6 +28,7 @@ export interface JsRuntimeDeps {
   lockdown?: () => void;
   scope?: object;
   memory?: () => JsMemory;
+  imported?: () => void;
 }
 
 const NOT_RUNNABLE = 126;
@@ -167,6 +168,7 @@ async function runJs(
     (deps.lockdown ?? lockdown)();
     const { url, glue } = init.program;
     main = mainOf(await (url ? import(url) : (deps.load ?? importSource)(glue)));
+    deps.imported?.();
   } catch (err) {
     await say(message(err));
     return NOT_RUNNABLE;

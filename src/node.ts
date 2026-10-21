@@ -1,3 +1,4 @@
+import { isAbsolute } from 'node:path';
 import { MessageChannel, type MessagePort, Worker } from 'node:worker_threads';
 import type { CdpHook } from './cdp/types.ts';
 import type { MessagePortLike } from './client/protocol.ts';
@@ -123,6 +124,7 @@ export interface NodeKernelOptions {
   approve?: ApproveHook;
   protect?: Protection;
   cron?: { clock?: CronClock };
+  compileCache?: string;
   wasmMemories?: { ceiling?: number; idleMs?: number };
 }
 
@@ -176,7 +178,12 @@ export function nodeTransport(options: NodeTransportOptions = {}): NetworkTransp
 const TERMINATED = 'the kernel is terminated';
 const EXIT_GRACE_MS = 50;
 
-function nodeWorker(file: string | URL, live: Set<() => void>, closed: boolean): WasmWorkerLike {
+function nodeWorker(
+  file: string | URL,
+  live: Set<() => void>,
+  closed: boolean,
+  workerData?: { compileCache: string }
+): WasmWorkerLike {
   const errors = new Set<(event: MessageEvent) => void>();
   const messages = new Map<(event: MessageEvent) => void, (data: unknown) => void>();
   const fail = (message: string) => {
@@ -184,7 +191,9 @@ function nodeWorker(file: string | URL, live: Set<() => void>, closed: boolean):
       handler({ message, preventDefault() {} } as unknown as MessageEvent);
     }
   };
-  const worker = closed ? undefined : new Worker(file);
+  const worker = closed
+    ? undefined
+    : new Worker(file, { env: workerEnv(), ...(workerData ? { workerData } : {}) });
   let ending = false;
   if (worker) {
     const kill = () => {
@@ -240,6 +249,19 @@ function cronLock(root: FileSystemDirectoryHandle): string {
   return lock;
 }
 
+function workerEnv(): NodeJS.ProcessEnv {
+  const { NODE_COMPILE_CACHE: _inherited, ...env } = process.env;
+  return env;
+}
+
+function cacheDirOf(dir: unknown): string | undefined {
+  if (dir === undefined) return undefined;
+  if (typeof dir !== 'string' || !isAbsolute(dir)) {
+    throw new TypeError('createNodeKernel: compileCache must be an absolute directory path');
+  }
+  return dir;
+}
+
 export async function createNodeKernel(options: NodeKernelOptions = {}): Promise<NodeKernel> {
   const root = options.root ?? memoryRoot();
   const fs = new OpfsFs(root, undefined, undefined, { ranged: isMemoryRoot(root) });
@@ -249,11 +271,13 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
   const clients = new Set<ServedClient>();
   let terminated = false;
   const file = options.worker ?? new URL('./node-process-worker.js', import.meta.url);
+  const compileCache = cacheDirOf(options.compileCache);
   const transport = options.network?.transport;
   const launcher = new Launcher({
     fs,
     unlinkOwner: pidOwner(process),
-    createWorker: () => nodeWorker(file, live, terminated),
+    createWorker: () =>
+      nodeWorker(file, live, terminated, compileCache ? { compileCache } : undefined),
     createDriverWorker: () =>
       nodeWorker(
         options.driverWorker ?? new URL('./node-driver-worker.js', import.meta.url),
