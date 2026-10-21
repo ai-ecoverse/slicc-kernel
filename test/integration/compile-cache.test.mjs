@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readdir, rm, stat } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import { mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -63,5 +64,44 @@ test("without compileCache nothing is cached, not even when a program's own env 
   await assert.rejects(
     createNodeKernel({ compileCache: 'relative/dir' }),
     /compileCache must be an absolute directory path/
+  );
+});
+
+test("a host started with NODE_COMPILE_CACHE doesn't hand it to the process workers: the program goes only into compileCache's directory, never the host's (#1334 review)", async (t) => {
+  const host = await mkdtemp(join(tmpdir(), 'slicc-cc-host-'));
+  const own = await mkdtemp(join(tmpdir(), 'slicc-cc-own-'));
+  t.after(() => rm(host, { recursive: true, force: true }));
+  t.after(() => rm(own, { recursive: true, force: true }));
+  const script = join(own, '..', `slicc-cc-host-${process.pid}.mjs`);
+  t.after(() => rm(script, { force: true }));
+  const dist = new URL('../../dist/node.js', import.meta.url).href;
+  await writeFile(
+    script,
+    `const { createNodeKernel } = await import(${JSON.stringify(dist)});
+const k = await createNodeKernel({ users: 'off', compileCache: process.argv[2] });
+await k.writeFile('/node_modules/cc/package.json', ${JSON.stringify(JSON.stringify({ name: 'cc', slicc: { commands: { cc: { abi: 'js', module: 'main.mjs' } } } }))});
+await k.writeFile('/node_modules/cc/main.mjs', 'export default async () => 0;');
+if (process.argv[3] === 'run') console.log((await k.run(['cc'], { cwd: '/' })).status);
+k.terminate();
+`
+  );
+  const go = (mode) =>
+    spawnSync(process.execPath, [script, own, mode], {
+      encoding: 'utf8',
+      timeout: 60_000,
+      env: { ...process.env, NODE_COMPILE_CACHE: host },
+    });
+  assert.equal(go('idle').status, 0);
+  const hostOnly = (await files(host)).length;
+  const ran = go('run');
+  assert.equal(ran.stdout.trim(), '0', ran.stderr);
+  assert.equal(
+    (await files(host)).length,
+    hostOnly,
+    "the worker wrote nothing into the host's NODE_COMPILE_CACHE"
+  );
+  assert.ok(
+    (await files(own)).length > 0,
+    "the program's compiled code is in compileCache's directory"
   );
 });

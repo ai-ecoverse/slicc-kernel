@@ -191,7 +191,9 @@ function nodeWorker(
       handler({ message, preventDefault() {} } as unknown as MessageEvent);
     }
   };
-  const worker = closed ? undefined : new Worker(file, workerData ? { workerData } : {});
+  const worker = closed
+    ? undefined
+    : new Worker(file, { env: workerEnv(), ...(workerData ? { workerData } : {}) });
   let ending = false;
   if (worker) {
     const kill = () => {
@@ -245,6 +247,11 @@ function cronLock(root: FileSystemDirectoryHandle): string {
   let lock = cronLocks.get(root);
   if (!lock) cronLocks.set(root, (lock = `slicc-kernel-cron:${crypto.randomUUID()}`));
   return lock;
+}
+
+function workerEnv(): NodeJS.ProcessEnv {
+  const { NODE_COMPILE_CACHE: _inherited, ...env } = process.env;
+  return env;
 }
 
 function cacheDirOf(dir: unknown): string | undefined {
