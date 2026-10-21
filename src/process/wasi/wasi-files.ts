@@ -42,7 +42,7 @@ export class FileBuffer {
 
   maxFile: number | undefined;
   handle: number | undefined;
-  moved: (() => boolean) | undefined;
+  moved: ((missing: boolean) => boolean) | undefined;
 
   constructor(
     fs: SyncFsFileIo,
@@ -86,7 +86,7 @@ export class FileBuffer {
     try {
       return op();
     } catch (err) {
-      if ((err as { code?: unknown }).code !== 'ENOENT' || !this.moved?.()) throw err;
+      if ((err as { code?: unknown }).code !== 'ENOENT' || !this.moved?.(true)) throw err;
       return op();
     }
   }
@@ -164,7 +164,7 @@ export class FileBuffer {
   append(bytes: Uint8Array): number | undefined {
     const { append } = this.fs;
     if (!append || this.orphaned) return undefined;
-    this.moved?.();
+    this.moved?.(false);
     this.flush();
     const end = this.retried(() => append.call(this.fs, this.path, bytes));
     if (!this.ranged) {
@@ -222,7 +222,7 @@ export class FileBuffer {
 
   flush(): void {
     if (this.orphaned || !this.dirty) return;
-    this.moved?.();
+    this.moved?.(false);
     if (this.ranged) this.ranged.flush();
     else if (!this.data) return;
     else if (this.whole || !this.fs.pwrite) {
