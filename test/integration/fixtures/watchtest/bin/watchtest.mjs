@@ -1,5 +1,9 @@
 const line = (note) =>
-  'ended' in note ? 'ended' : 'overflow' in note ? 'overflow' : `${note.type} ${note.filename}`;
+  'ended' in note
+    ? 'ended'
+    : 'overflow' in note
+      ? 'overflow'
+      : `${note.type} ${note.filename}${note.moved ? ' moved' : ''}`;
 
 async function events(ctx, [path, end, ready, ...flags]) {
   const notes = [];

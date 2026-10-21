@@ -12,7 +12,7 @@ export type WatchChange = { paths: string[] } | { overflow: true };
 export type WatchEventType = 'rename' | 'change';
 
 export type WatchNote =
-  | { type: WatchEventType; filename: string }
+  | { type: WatchEventType; filename: string; moved?: true }
   | { overflow: true }
   | { ended: true };
 
@@ -23,6 +23,7 @@ export interface TypedWatch {
 
 interface Typed {
   roots: string[];
+  names: Map<string, string>;
   recursive: boolean;
   notes: WatchNote[];
   overflowed: boolean;
@@ -84,7 +85,7 @@ function route(watch: Typed, type: WatchEventType, path: string): void {
 
 function routed(watch: Typed, root: string, type: WatchEventType, path: string): boolean {
   if (path === root || (type === 'rename' && root !== '/' && under(root, path))) {
-    noted(watch, { type, filename: baseOf(root) });
+    noted(watch, { type, filename: watch.names.get(root) ?? baseOf(root) });
     if (type === 'rename') noted(watch, { ended: true });
     return true;
   }
@@ -93,6 +94,12 @@ function routed(watch: Typed, root: string, type: WatchEventType, path: string):
     noted(watch, { type, filename: path.slice(root === '/' ? 1 : root.length + 1) });
   } else return false;
   return true;
+}
+
+function remapped(root: string, from: string, to: string): string | undefined {
+  if (root === from) return to;
+  if (from !== '/' && root.startsWith(`${from}/`)) return to + root.slice(from.length);
+  return undefined;
 }
 
 export class FsWatchers {
@@ -135,6 +142,7 @@ export class FsWatchers {
     const other = alias === undefined ? main : normalizePath(alias);
     const watch: Typed = {
       roots: other === main ? [main] : [main, other],
+      names: new Map(),
       recursive,
       notes: [],
       overflowed: false,
@@ -184,6 +192,37 @@ export class FsWatchers {
     for (const path of paths) {
       const at = normalizePath(path);
       for (const watch of [...this.typed]) route(watch, type, at);
+    }
+  }
+
+  moved(from: string, to: string): Set<Typed> {
+    const source = normalizePath(from);
+    const target = normalizePath(to);
+    const followed = new Set<Typed>();
+    for (const watch of this.typed) {
+      const [main] = watch.roots;
+      const roots = watch.roots.map((root) => remapped(root, source, target) ?? root);
+      if (roots.every((root, i) => root === watch.roots[i])) continue;
+      followed.add(watch);
+      const names = new Map<string, string>();
+      watch.roots.forEach((root, i) => {
+        names.set(roots[i] as string, watch.names.get(root) ?? baseOf(root));
+      });
+      watch.names = names;
+      watch.roots = [...new Set(roots)];
+      if (main === source) {
+        noted(watch, { type: 'rename', filename: names.get(target) as string, moved: true });
+      }
+    }
+    return followed;
+  }
+
+  private renamed(from: string, to: string): void {
+    const followed = this.moved(from, to);
+    if (this.typed.size === 0) return;
+    for (const path of [from, to]) {
+      const at = normalizePath(path);
+      for (const watch of [...this.typed]) if (!followed.has(watch)) route(watch, 'rename', at);
     }
   }
 
@@ -312,7 +351,16 @@ export class FsWatchers {
         }
       },
       rm: reshaping(after(fs.rm.bind(fs), (path) => [path], 'rename')),
-      rename: reshaping(after(fs.rename.bind(fs), (from, to) => [from, to], 'rename')),
+      rename: reshaping(async (from: string, to: string) => {
+        let done = false;
+        try {
+          await fs.rename(from, to);
+          done = true;
+        } finally {
+          this.report([from, to]);
+          if (done) this.renamed(from, to);
+        }
+      }),
       link: reshaping(
         after(
           (from: string, to: string, follow?: boolean) => fs.link(from, to, follow),

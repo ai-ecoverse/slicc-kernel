@@ -81,8 +81,32 @@ test('a file watch reports its changes by basename, then one rename when the fil
   const { sh } = await booted(t);
   const r = await sh(watching('/tmp/w/e end', 'echo y >> /tmp/w/e; rm /tmp/w/e'));
   assert.deepEqual(lines(r), ['change e', 'rename e', 'ended']);
-  const dir = await sh(watching('/tmp/w/sub end', 'mv /tmp/w /tmp/gone'));
+  const dir = await sh(
+    watching('/tmp/w/sub end', 'rm -rf /tmp/gone; mv /tmp/w /tmp/gone; rm -r /tmp/gone')
+  );
   assert.deepEqual(lines(dir), ['rename sub', 'ended']);
+});
+
+test('a watch follows a rename of a directory above it with no event, and later changes arrive by the old name, as with inotify (#1356, slicc-jsh#441)', async (t) => {
+  const { sh } = await booted(t);
+  const r = await sh(
+    watching('/tmp/w/e end', 'rm -rf /tmp/v; mv /tmp/w /tmp/v; echo 2 >> /tmp/v/e; rm /tmp/v/e')
+  );
+  assert.deepEqual(lines(r), ['change e', 'rename e', 'ended']);
+  const dir = await sh(
+    watching('/tmp/w/sub end', 'rm -rf /tmp/v; mv /tmp/w /tmp/v; : > /tmp/v/sub/end')
+  );
+  assert.deepEqual(lines(dir), ['rename end']);
+});
+
+test("a watch follows its root's own rename, which it notes as a moved rename, and only a removal ends it (#1356, slicc-jsh#441)", async (t) => {
+  const { sh } = await booted(t);
+  const r = await sh(
+    watching('/tmp/w/e end', 'mv /tmp/w/e /tmp/w/g; echo 2 >> /tmp/w/g; rm /tmp/w/g')
+  );
+  assert.deepEqual(lines(r), ['rename e moved', 'change e', 'rename e', 'ended']);
+  const over = await sh(watching('/tmp/w/e end', 'echo n > /tmp/w/n; mv /tmp/w/n /tmp/w/e'));
+  assert.deepEqual(lines(over), ['rename e', 'ended']);
 });
 
 test('the embedder and a tmpfs mount count as writers (#1031)', async (t) => {
@@ -197,13 +221,13 @@ test('an embedder writeFile beside a watched directory makes its parents with mk
   assert.deepEqual(got, ['rename end']);
 });
 
-test("a rename of the watched directory's parent still ends the watch (#1047 follow-up)", async (t) => {
+test("a rename of the watched directory's parent leaves the watch on the moved directory (#1047 follow-up, #1356)", async (t) => {
   const got = await watchWhile(t, {
     args: '/tmp/p/w end',
     setup: 'mkdir -p /tmp/p/w',
-    act: (_kernel, sh) => sh('mv /tmp/p /tmp/q'),
+    act: (_kernel, sh) => sh('mv /tmp/p /tmp/q && : > /tmp/q/w/end'),
   });
-  assert.deepEqual(got, ['rename w', 'ended']);
+  assert.deepEqual(got, ['rename end']);
 });
 
 test('an embedder writeFile into a new subtree of a watched directory reports each directory mkdir -p made (#1047 follow-up)', async (t) => {
