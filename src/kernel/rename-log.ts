@@ -26,6 +26,14 @@ export class RenameLog {
     return seq;
   }
 
+  seqOf(from: string, to: string): number | undefined {
+    for (let i = this.entries.length - 1; i >= 0; i--) {
+      const entry = this.entries[i] as { seq: number; from: string; to: string };
+      if (entry.from === from && entry.to === to) return entry.seq;
+    }
+    return undefined;
+  }
+
   since(seen: number, held: readonly string[]): RenamesSince {
     const now = this.entries.at(-1)?.seq ?? seen;
     const renames: Array<[string, string]> = [];

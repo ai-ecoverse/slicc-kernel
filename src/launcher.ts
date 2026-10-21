@@ -1986,6 +1986,7 @@ export class Launcher {
       replacements: stack.unlinked,
       statfs: (path) => this.mounts.statfs(path),
       renames: (since, held) => this.renameLog.since(since, held),
+      renameSeq: (from, to) => this.renameLog.seqOf(from, to),
       mounts: () => this.mounts.list(),
       mount: (call, signal) => this.processMount(pid, call, signal),
       umount: (target, flags) => this.processUmount(pid, target, flags),

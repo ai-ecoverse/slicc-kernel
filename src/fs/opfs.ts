@@ -1227,7 +1227,7 @@ export class OpfsFs implements KernelFs {
   }
 
   pwrite(path: string, offset: number, bytes: Uint8Array): Promise<void> {
-    return this.writing(path, async (moved) => {
+    return this.writing(path, async (movedAway) => {
       const [kept, target, existed] = await this.keptFor(path);
       if (kept) {
         try {
@@ -1238,7 +1238,7 @@ export class OpfsFs implements KernelFs {
           this.files.delete(target);
         }
       }
-      const [handle] = await this.fileFor(path, !existed && !moved);
+      const [handle] = await this.fileFor(path, !existed && !movedAway);
       await this.writeAt(handle, target, path, offset, bytes);
     });
   }
@@ -1285,37 +1285,40 @@ export class OpfsFs implements KernelFs {
   private readonly movingFiles = new Map<string, Promise<void>>();
   private writesIdle: PromiseWithResolvers<void> | undefined;
 
-  private writeBlocked(at: string): Promise<void> | undefined {
+  private writeBlocked(at: string): { done: Promise<void>; away: boolean } | undefined {
     const file = this.movingFiles.get(at);
-    if (file !== undefined) return file;
-    for (const m of this.renamingDirs) if (within(at, m.from) || within(at, m.to)) return m.done;
+    if (file !== undefined) return { done: file, away: true };
+    for (const m of this.renamingDirs) {
+      if (within(at, m.from)) return { done: m.done, away: true };
+      if (within(at, m.to)) return { done: m.done, away: false };
+    }
     return undefined;
   }
 
-  private async writing<T>(path: string, op: (moved: boolean) => Promise<T>): Promise<T> {
+  private async writing<T>(path: string, op: (movedAway: boolean) => Promise<T>): Promise<T> {
     const at = normalizePath(path);
-    let moved = false;
+    let away = false;
     for (let busy = this.writeBlocked(at); busy !== undefined; busy = this.writeBlocked(at)) {
-      moved = true;
-      await busy;
+      away ||= busy.away;
+      await busy.done;
     }
     this.fileWrites.set(at, (this.fileWrites.get(at) ?? 0) + 1);
     try {
-      return await op(moved);
+      return await op(away);
     } finally {
       const left = (this.fileWrites.get(at) ?? 1) - 1;
       if (left > 0) this.fileWrites.set(at, left);
       else this.fileWrites.delete(at);
-      if (this.fileWrites.size === 0) this.writesIdle?.resolve();
+      const idle = this.writesIdle;
+      this.writesIdle = undefined;
+      idle?.resolve();
     }
   }
 
   private async writesDrained(tree: string): Promise<void> {
     while ([...this.fileWrites.keys()].some((at) => within(at, tree))) {
       this.writesIdle ??= Promise.withResolvers<void>();
-      const idle = this.writesIdle;
-      await Promise.race([idle.promise, new Promise((resolve) => setTimeout(resolve, 5))]);
-      if (this.writesIdle === idle && this.fileWrites.size === 0) this.writesIdle = undefined;
+      await this.writesIdle.promise;
     }
   }
 

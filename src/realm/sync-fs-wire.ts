@@ -152,7 +152,7 @@ export interface SyncFsPosixBridge {
   exists(path: string): boolean;
   mkdir(path: string, mode?: number): void;
   rm(path: string): void;
-  rename(from: string, to: string): void;
+  rename(from: string, to: string): number | undefined | void;
   link(from: string, to: string, follow?: boolean): void;
   unlink(path: string): void;
   rmdir(path: string): void;

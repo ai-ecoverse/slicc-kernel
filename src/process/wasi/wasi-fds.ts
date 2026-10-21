@@ -92,9 +92,8 @@ export class WasiFds {
     this.renamesSeen = fs.changes?.renames() ?? 0;
   }
 
-  ownRename(): void {
-    const now = this.fs.changes?.renames() ?? 0;
-    if (now === ((this.renamesSeen + 1) | 0)) this.renamesSeen = now;
+  ownRename(seq: number | undefined): void {
+    if (seq !== undefined && seq === ((this.renamesSeen + 1) | 0)) this.renamesSeen = seq;
   }
 
   followRenames(missing = false): boolean {
