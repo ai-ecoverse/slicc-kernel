@@ -122,3 +122,37 @@ test('with users on, a process tagged beyond its connection cannot write /etc/cr
   }
   assert.equal(ran, 'agent,guest\n');
 });
+
+test("a job named like another user's tagged job keeps both apart: the tagged one still runs tagged, and the other runs untagged (#1380 review)", async (t) => {
+  const clock = fakeCronClock(Date.UTC(2026, 0, 1, 10, 0, 30));
+  const { kernel, client } = await booted(t, { cron: { clock } });
+  await kernel.users.add({ name: 'cone' });
+  await kernel.users.add({ name: 'scoop' });
+  await kernel.writeFile('/tmp/t.sh', `${TAGS}; T $$ > /tmp/tags-$(id -un)\n`);
+  const table = '# name: pending\n* * * * * bash /tmp/t.sh\n';
+  const a = await client.run(['bash', '-c', `printf '%s' '${table}' | crontab -`], {
+    tag: 'guest',
+    user: 'cone',
+    cwd: '/tmp',
+  });
+  assert.equal(a.status, 0, a.stderr);
+  const b = await kernel.run(['bash', '-c', `printf '%s' '${table}' | crontab -`], {
+    user: 'scoop',
+    cwd: '/tmp',
+  });
+  assert.equal(b.status, 0, b.stderr);
+  await delay(150);
+  await clock.flush();
+  clock.advance(30_000);
+  const read = (path) =>
+    kernel.readFile(path).then(
+      (bytes) => new TextDecoder().decode(bytes),
+      () => undefined
+    );
+  let both = [undefined, undefined];
+  for (let i = 0; i < 100 && both.includes(undefined); i++) {
+    await delay(50);
+    both = [await read('/tmp/tags-cone'), await read('/tmp/tags-scoop')];
+  }
+  assert.deepEqual(both, ['agent,guest\n', '\n']);
+});

@@ -16,11 +16,13 @@ export interface CrontabCaller {
   base?: number | undefined;
 }
 
-export async function readTags(fs: KernelFs): Promise<Record<string, JobTags>> {
+export type TableTags = Record<string, Record<string, JobTags>>;
+
+export async function readTags(fs: KernelFs): Promise<TableTags> {
   const text = await fs.readFile(TAGS_PATH).catch(() => '');
   try {
     const parsed = JSON.parse(text) as unknown;
-    return parsed && typeof parsed === 'object' ? (parsed as Record<string, JobTags>) : {};
+    return parsed && typeof parsed === 'object' ? (parsed as TableTags) : {};
   } catch {
     return {};
   }
@@ -103,12 +105,15 @@ export class Crontabs {
     const all = await readTags(fs);
     const before = await fs.readFile(path).catch(() => '');
     const old = new Set(parseCrontab(before, path).jobs.map((job) => job.id));
-    const kept: Record<string, JobTags> = {};
-    for (const [id, entry] of Object.entries(all)) if (!old.has(id)) kept[id] = entry;
+    const recorded = all[path] ?? {};
+    const table: Record<string, JobTags> = {};
     for (const { id } of parseCrontab(text, path).jobs) {
-      const entry = merged(old.has(id) ? all[id] : undefined, caller);
-      if (entry) kept[id] = entry;
+      const entry = merged(old.has(id) ? recorded[id] : undefined, caller);
+      if (entry) table[id] = entry;
     }
+    const kept: TableTags = { ...all };
+    if (Object.keys(table).length > 0) kept[path] = table;
+    else delete kept[path];
     const json = JSON.stringify(kept);
     if (json === JSON.stringify(all)) return;
     const owner: NewOwner | undefined = owners ? { uid: 0, gid: 0, mode: 0o600 } : undefined;

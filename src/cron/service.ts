@@ -270,7 +270,7 @@ export class CronService {
       }
       const table = await this.table(path, account.uid, false);
       for (const job of table?.jobs ?? [])
-        out.push({ source: name, account, job, tags: tags[job.id] });
+        out.push({ source: name, account, job, tags: tags[path]?.[job.id] });
     }
     return out;
   }
