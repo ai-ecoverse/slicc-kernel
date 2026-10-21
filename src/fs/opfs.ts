@@ -70,6 +70,8 @@ interface MovableHandle {
 const RENAMES = '/.slicc-renames';
 const RENAME_LOCK = 'slicc-rename:';
 const RENAME_ADMIT = 'slicc-rename-admit:';
+const escapeRoot = (name: string): string =>
+  name.replace(/[%:]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
 const LEGACY_RENAME_LOCK =
   /^slicc-rename:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const PAIRED = new Set(['rename', 'link', 'copyFile']);
@@ -321,6 +323,7 @@ export class OpfsFs implements KernelFs {
   private readonly locks: LockManagerLike | undefined;
   private readonly lockPrefix: string;
   readonly rootName: string | undefined;
+  private readonly renamePrefix: string;
 
   constructor(
     root: FileSystemDirectoryHandle,
@@ -334,6 +337,7 @@ export class OpfsFs implements KernelFs {
     this.locks = options.locks === undefined ? lockManager() : (options.locks ?? undefined);
     this.lockPrefix = `slicc-excl:${channel ?? ''}:`;
     this.rootName = channel;
+    this.renamePrefix = `${RENAME_LOCK}${escapeRoot(channel ?? '')}:`;
     this.channel = channel === undefined ? undefined : new BroadcastChannel(channel);
     this.remote =
       channel === undefined
@@ -1799,7 +1803,7 @@ export class OpfsFs implements KernelFs {
   }
 
   private renameLocks(): string {
-    return `${RENAME_LOCK}${encodeURIComponent(this.rootName ?? '')}:`;
+    return this.renamePrefix;
   }
 
   private renameHere(name: string | undefined): boolean {

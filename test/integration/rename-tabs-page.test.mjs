@@ -321,13 +321,8 @@ test("a peer's exclusive create into the source or the destination of a director
   }
 });
 
-test('a directory rename in one shared OPFS root does not stall the peers of another root on the same origin (#1314)', {
-  timeout: 1_500_000,
-}, async (t) => {
-  const { page } = await booted(chrome, t);
-  await installPackage(page, 'wasm-coreutils');
-  const other = await peerTab(page);
-  await page.evaluate(async () => {
+const rootWithModules = (page, dir) =>
+  page.evaluate(async (d) => {
     const top = await navigator.storage.getDirectory();
     const copy = async (from, to) => {
       for await (const entry of from.values()) {
@@ -340,12 +335,20 @@ test('a directory rename in one shared OPFS root does not stall the peers of ano
         await w.close();
       }
     };
-    const root = await top.getDirectoryHandle('rooty', { create: true });
+    const root = await top.getDirectoryHandle(d, { create: true });
     await copy(
       await top.getDirectoryHandle('node_modules'),
       await root.getDirectoryHandle('node_modules', { create: true })
     );
-  });
+  }, dir);
+
+test('a directory rename in one shared OPFS root does not stall the peers of another root on the same origin (#1314)', {
+  timeout: 1_500_000,
+}, async (t) => {
+  const { page } = await booted(chrome, t);
+  await installPackage(page, 'wasm-coreutils');
+  const other = await peerTab(page);
+  await rootWithModules(page, 'rooty');
   for (const tab of [page, other]) {
     await tab.evaluate(async () => {
       const root = await (await navigator.storage.getDirectory()).getDirectoryHandle('rooty', {
@@ -378,4 +381,31 @@ test('a directory rename in one shared OPFS root does not stall the peers of ano
     if (during) overlapped++;
   }
   assert.equal(overlapped, 3, 'a call on root y waited for the rename on root x to end');
+});
+
+test('a shared root whose metadata name holds an unpaired surrogate still renames a directory (#1339 review)', {
+  timeout: 600_000,
+}, async (t) => {
+  const { page } = await booted(chrome, t);
+  const other = await peerTab(page);
+  await rootWithModules(page, 'rootz');
+  for (const tab of [page, other]) {
+    await tab.evaluate(async () => {
+      const root = await (await navigator.storage.getDirectory()).getDirectoryHandle('rootz');
+      await window.secondKernel({ root, metadata: 'z:%\uD800' }, 'z');
+    });
+  }
+  const shared = async () =>
+    Number((await sh(page, 'cat /proc/sys/kernel/slicc_shared_root', 'z')).stdout);
+  for (let i = 0; i < 300 && (await shared()) !== 1; i++) await sleep(100);
+  assert.equal(await shared(), 1);
+  assert.deepEqual(
+    await sh(
+      page,
+      'mkdir -p /s/a/lib && echo x > /s/a/lib/f && mv /s/a /s/b && cat /s/b/lib/f',
+      'z'
+    ),
+    ok('x\n')
+  );
+  assert.deepEqual(await sh(other, 'cat /s/b/lib/f', 'z'), ok('x\n'));
 });
