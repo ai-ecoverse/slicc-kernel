@@ -125,6 +125,7 @@ export interface NodeKernelOptions {
   protect?: Protection;
   cron?: { clock?: CronClock };
   compileCache?: string;
+  warmWorker?: boolean;
   wasmMemories?: { ceiling?: number; idleMs?: number };
 }
 
@@ -178,11 +179,76 @@ export function nodeTransport(options: NodeTransportOptions = {}): NetworkTransp
 const TERMINATED = 'the kernel is terminated';
 const EXIT_GRACE_MS = 50;
 
+export const WARM_IDLE_MS = 30_000;
+
+type MakeWorker = () => Worker;
+
+export function warmPool(make: MakeWorker, live: Set<() => void>, idleMs = WARM_IDLE_MS) {
+  let spare: Worker | undefined;
+  let idle: ReturnType<typeof setTimeout> | undefined;
+  let closed = false;
+  const drop = (worker: Worker) => {
+    if (spare !== worker) return;
+    spare = undefined;
+    clearTimeout(idle);
+    live.delete(kill);
+  };
+  const kill = () => {
+    const worker = spare;
+    if (!worker) return;
+    drop(worker);
+    void worker.terminate();
+  };
+  const fill = () => {
+    if (closed || spare) return;
+    const worker = make();
+    worker.unref();
+    worker.once('error', () => drop(worker));
+    worker.once('exit', () => drop(worker));
+    spare = worker;
+    live.add(kill);
+    idle = setTimeout(kill, idleMs);
+    idle.unref?.();
+  };
+  return {
+    take(): Worker {
+      const worker = spare;
+      if (worker) {
+        drop(worker);
+        worker.removeAllListeners('error');
+        worker.removeAllListeners('exit');
+        worker.ref();
+      }
+      setImmediate(fill);
+      return worker ?? make();
+    },
+    close() {
+      closed = true;
+      kill();
+    },
+  };
+}
+
+function processWorker(file: string | URL, workerData?: { compileCache: string }): Worker {
+  return new Worker(file, { env: workerEnv(), ...(workerData ? { workerData } : {}) });
+}
+
+function warmPoolOf(
+  options: NodeKernelOptions,
+  file: string | URL,
+  workerData: { compileCache: string } | undefined,
+  live: Set<() => void>
+) {
+  if (options.warmWorker === false) return undefined;
+  return warmPool(() => processWorker(file, workerData), live);
+}
+
 function nodeWorker(
   file: string | URL,
   live: Set<() => void>,
   closed: boolean,
-  workerData?: { compileCache: string }
+  workerData?: { compileCache: string },
+  take?: () => Worker
 ): WasmWorkerLike {
   const errors = new Set<(event: MessageEvent) => void>();
   const messages = new Map<(event: MessageEvent) => void, (data: unknown) => void>();
@@ -191,9 +257,7 @@ function nodeWorker(
       handler({ message, preventDefault() {} } as unknown as MessageEvent);
     }
   };
-  const worker = closed
-    ? undefined
-    : new Worker(file, { env: workerEnv(), ...(workerData ? { workerData } : {}) });
+  const worker = closed ? undefined : (take?.() ?? processWorker(file, workerData));
   let ending = false;
   if (worker) {
     const kill = () => {
@@ -272,12 +336,14 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
   let terminated = false;
   const file = options.worker ?? new URL('./node-process-worker.js', import.meta.url);
   const compileCache = cacheDirOf(options.compileCache);
+  const workerData = compileCache ? { compileCache } : undefined;
+  const warm = warmPoolOf(options, file, workerData, live);
   const transport = options.network?.transport;
   const launcher = new Launcher({
     fs,
     unlinkOwner: pidOwner(process),
     createWorker: () =>
-      nodeWorker(file, live, terminated, compileCache ? { compileCache } : undefined),
+      nodeWorker(file, live, terminated, workerData, warm ? () => warm.take() : undefined),
     createDriverWorker: () =>
       nodeWorker(
         options.driverWorker ?? new URL('./node-driver-worker.js', import.meta.url),
@@ -417,6 +483,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     },
     terminate() {
       terminated = true;
+      warm?.close();
       for (const client of [...clients]) client.detach();
       for (const reject of [...pending]) reject(new Error(TERMINATED));
       for (const kill of [...live]) kill();
