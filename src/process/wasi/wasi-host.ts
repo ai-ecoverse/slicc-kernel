@@ -18,7 +18,6 @@ import {
   FILETYPE,
   FSTFLAGS,
   LOOKUP_SYMLINK_FOLLOW,
-  OFLAGS,
   PREOPENTYPE_DIR,
   RIFLAGS,
   RIGHTS,
@@ -939,11 +938,12 @@ export class WasiHost {
         try {
           const asked = at(dirfd, p, l);
           const alias = this.fdAlias(asked);
-          this.finalLink(asked, oflags, follow, alias !== undefined);
           if (alias && !alias.stdio) this.openFd(alias.fd);
           const path = alias && !alias.stdio ? `/dev/fd/${alias.fd}` : asked;
           if (deviceOf(path)) this.interrupted?.();
-          mem.view().setUint32(out, fds.open(path, oflags, rights, fdflags), true);
+          mem
+            .view()
+            .setUint32(out, fds.open(path, oflags, rights, fdflags, undefined, !follow), true);
           if (fds.created) this.created(path, 0o666);
         } catch (err) {
           if ((err as { code?: string }).code !== 'ENOENT') throw err;
@@ -951,7 +951,9 @@ export class WasiHost {
           const joined = raw.startsWith('/') ? raw : `${fds.dir(dirfd).path}/${raw}`;
           const resolved = this.resolveForDev(joined, follow);
           if (!resolved) throw err;
-          mem.view().setUint32(out, fds.open(resolved, oflags, rights, fdflags), true);
+          mem
+            .view()
+            .setUint32(out, fds.open(resolved, oflags, rights, fdflags, undefined, !follow), true);
         }
       },
       path_filestat_get: (dirfd: number, lookup: number, p: number, l: number, out: number) => {
@@ -1595,21 +1597,6 @@ export class WasiHost {
       pick(FSTFLAGS.MTIM, FSTFLAGS.MTIM_NOW, mtim, 'mtimeMs'),
       (flags & (FSTFLAGS.ATIM | FSTFLAGS.MTIM)) === 0
     );
-  }
-
-  private finalLink(path: string, oflags: number, follow: boolean, alias: boolean): void {
-    if (follow) return;
-    let link = alias;
-    if (!link) {
-      try {
-        link = this.o.fs.lstat(path).isSymbolicLink === true;
-      } catch {
-        return;
-      }
-    }
-    if (!link) return;
-    const exclusive = (oflags & OFLAGS.CREAT) !== 0 && (oflags & OFLAGS.EXCL) !== 0;
-    throw new WasiError(exclusive ? 'EEXIST' : 'ELOOP');
   }
 
   private readdir(fd: number, buf: number, len: number, cookie: number, usedPtr: number): void {

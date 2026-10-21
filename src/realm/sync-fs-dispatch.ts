@@ -468,6 +468,9 @@ async function holdOp(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest)
       await r?.settled(path);
       const gen = r?.generation() ?? 0;
       await opening(entry, path, mode);
+      if (req.nofollow && (await entry.fs.lstat(path).catch(() => undefined))?.isSymbolicLink) {
+        throw syncError('ELOOP', path);
+      }
       const real = await entry.fs.realpath?.(path, true).catch(() => path);
       await entry.source?.open(path, real);
       await stillThere(entry, path, req);

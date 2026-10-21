@@ -1,6 +1,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -16,7 +17,55 @@ static void try_open(const char *label, const char *path, int flags) {
   }
 }
 
-int main(void) {
+/* swap: until "racy.stop" exists, put a symlink to "secret" at "racy", then a
+   regular file, alternating rename-over and move-away-then-create. A swap after
+   the open has bound its fd is the lazy-binding follow-up; what this row checks
+   is the open's own decision, which these swaps race. */
+static int swap(void) {
+  for (int i = 0; access("racy.stop", F_OK) != 0; i++) {
+    unlink("racy.l");
+    symlink("secret", "racy.l");
+    if (i % 2) rename("racy.l", "racy");
+    else {
+      rename("racy", "racy.gone");
+      symlink("secret", "racy");
+    }
+    int fd = open("racy.f", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    write(fd, "plain", 5);
+    close(fd);
+    if (i % 2) rename("racy.f", "racy");
+    else {
+      rename("racy", "racy.gone");
+      rename("racy.f", "racy");
+    }
+  }
+  return 0;
+}
+
+/* race N: N no-follow opens of "racy"; prints whether some opened and some were
+   refused, and how many read the symlink's target; then stops the swapper. */
+static int race(int n) {
+  int opened = 0, refused = 0, leaked = 0;
+  for (int i = 0; i < n; i++) {
+    int fd = open("racy", O_RDONLY | O_NOFOLLOW);
+    if (fd < 0) {
+      refused++;
+      continue;
+    }
+    char buf[16] = {0};
+    read(fd, buf, sizeof buf - 1);
+    close(fd);
+    if (strcmp(buf, "SECRET") == 0) leaked++;
+    else opened++;
+  }
+  printf("opened %d refused %d leaked %d\n", opened > 0, refused > 0, leaked);
+  close(open("racy.stop", O_WRONLY | O_CREAT, 0644));
+  return 0;
+}
+
+int main(int argc, char **argv) {
+  if (argc == 2 && strcmp(argv[1], "swap") == 0) return swap();
+  if (argc == 3 && strcmp(argv[1], "race") == 0) return race(atoi(argv[2]));
   int fd = open("file", O_WRONLY | O_CREAT | O_TRUNC, 0644);
   write(fd, "x", 1);
   close(fd);

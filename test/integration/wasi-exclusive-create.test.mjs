@@ -135,7 +135,7 @@ const CALLS_RUN = new Uint8Array([
   ...section(10, [1, 4, 0, 0x10, 0, 0x0b]),
 ]);
 
-test("an imports module's ctx.fds.open with nofollow refuses a final symlink with ELOOP, a dangling one too even with create (it never creates the link's target), and opens a regular file", async (t) => {
+test("an imports module's ctx.fds.open with nofollow refuses a final symlink with ELOOP, a dangling one too even with create (it never creates the link's target), and /dev/stdin and /dev/fd/N, which are links on Linux; it opens a regular file", async (t) => {
   const kernel = await createNodeKernel({ users: 'off' });
   t.after(() => kernel.terminate());
   await kernel.writeFile(
@@ -168,6 +168,10 @@ test("an imports module's ctx.fds.open with nofollow refuses a final symlink wit
         tryOpen('dangling', '/w/dangling', { write: true, create: true, nofollow: true });
         tryOpen('file', '/w/file', { read: true, nofollow: true });
         tryOpen('link follow', '/w/link', { read: true });
+        tryOpen('stdin', '/dev/stdin', { read: true, nofollow: true });
+        tryOpen('fd 1', '/dev/fd/1', { write: true, nofollow: true });
+        tryOpen('fd 1 create', '/dev/fd/1', { write: true, create: true, nofollow: true });
+        tryOpen('stdout follow', '/dev/stdout', { write: true });
         out.push('target ' + ctx.fs.exists('/w/target'));
         ctx.fs.writeFile('/w/out', new TextEncoder().encode(out.join('\\n')));
       },
@@ -182,6 +186,28 @@ test("an imports module's ctx.fds.open with nofollow refuses a final symlink wit
     'dangling ELOOP',
     'file ok',
     'link follow ok',
+    'stdin ELOOP',
+    'fd 1 ELOOP',
+    'fd 1 create ELOOP',
+    'stdout follow ok',
     'target false',
   ]);
+});
+
+test("a no-follow open racing a process that swaps the file for a symlink and back never reads the link target: the open's own hold decides", async (t) => {
+  const kernel = await createNodeKernel({ users: 'off' });
+  t.after(() => kernel.terminate());
+  await installDir(
+    kernel,
+    fileURLToPath(new URL('fixtures/nofollowtest/', import.meta.url)),
+    '/node_modules/nofollowtest'
+  );
+  await kernel.writeFile('/w/secret', 'SECRET');
+  await kernel.writeFile('/w/racy', 'plain');
+  const [swapper, racer] = await Promise.all([
+    kernel.run(['nofollowtest', 'swap'], { cwd: '/w' }),
+    kernel.run(['nofollowtest', 'race', '8000'], { cwd: '/w' }),
+  ]);
+  assert.equal(swapper.status, 0, swapper.stderr);
+  assert.deepEqual([racer.status, racer.stdout], [0, 'opened 1 refused 1 leaked 0\n']);
 });
