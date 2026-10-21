@@ -42,6 +42,7 @@ export class FileBuffer {
 
   maxFile: number | undefined;
   handle: number | undefined;
+  moved: ((missing: boolean) => boolean) | undefined;
 
   constructor(
     fs: SyncFsFileIo,
@@ -60,7 +61,14 @@ export class FileBuffer {
     this.watch = watch;
     this.seen = watch?.seen ?? watch?.view.now() ?? 0;
     if (size !== undefined && pread && pwrite && truncate) {
-      const io = { pread: pread.bind(fs), pwrite: pwrite.bind(fs), truncate: truncate.bind(fs) };
+      const io = {
+        pread: (_: string, ...rest: [number, number, string?]) =>
+          this.retried(() => pread.call(fs, this.where, ...rest)),
+        pwrite: (_: string, ...rest: [number, Uint8Array, boolean?]) =>
+          this.retried(() => pwrite.call(fs, this.where, ...rest)),
+        truncate: (_: string, size: number) =>
+          this.retried(() => truncate.call(fs, this.where, size)),
+      };
       this.ranged = new RangedFile(io, path, size, version, watch);
       if (empty) this.truncate(0);
     } else if (empty) {
@@ -72,6 +80,15 @@ export class FileBuffer {
 
   get path(): string {
     return this.where;
+  }
+
+  private retried<T>(op: () => T): T {
+    try {
+      return op();
+    } catch (err) {
+      if ((err as { code?: unknown }).code !== 'ENOENT' || !this.moved?.(true)) throw err;
+      return op();
+    }
   }
 
   set path(path: string) {
@@ -101,7 +118,7 @@ export class FileBuffer {
     }
     if (!this.data) {
       this.seen = view?.now() ?? 0;
-      this.data = this.fs.readFile(this.path);
+      this.data = this.retried(() => this.fs.readFile(this.path));
       this.length = this.data.length;
     }
     return this.data;
@@ -147,8 +164,9 @@ export class FileBuffer {
   append(bytes: Uint8Array): number | undefined {
     const { append } = this.fs;
     if (!append || this.orphaned) return undefined;
+    this.moved?.(false);
     this.flush();
-    const end = append.call(this.fs, this.path, bytes);
+    const end = this.retried(() => append.call(this.fs, this.path, bytes));
     if (!this.ranged) {
       this.data = undefined;
       this.length = 0;
@@ -204,11 +222,17 @@ export class FileBuffer {
 
   flush(): void {
     if (this.orphaned || !this.dirty) return;
+    this.moved?.(false);
     if (this.ranged) this.ranged.flush();
     else if (!this.data) return;
-    else if (this.whole || !this.fs.pwrite)
-      this.fs.writeFile(this.path, this.data.slice(0, this.length), true);
-    else this.fs.pwrite(this.path, this.from, this.data.slice(this.from, this.to), true);
+    else if (this.whole || !this.fs.pwrite) {
+      const whole = this.data.slice(0, this.length);
+      this.retried(() => this.fs.writeFile(this.path, whole, true));
+    } else {
+      const { pwrite } = this.fs;
+      const run = this.data.slice(this.from, this.to);
+      this.retried(() => pwrite.call(this.fs, this.path, this.from, run, true));
+    }
     this.dirty = false;
     this.whole = false;
     this.from = Infinity;
@@ -800,6 +824,7 @@ export function cachingBridge(
   const entry = (p: string) => [p, p.slice(0, p.lastIndexOf('/')) || '/'];
   return {
     ...(bridge.changes ? { changes: bridge.changes } : {}),
+    ...(bridge.renames ? { renames: bridge.renames.bind(bridge) } : {}),
     readFile: (p) => bridge.readFile(p),
     readdir: (p) => bridge.readdir(p),
 

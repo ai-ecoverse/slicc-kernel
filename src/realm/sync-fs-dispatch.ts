@@ -1,4 +1,4 @@
-import { permOf, R_OK, trustedLink, W_OK, walk } from '../fs/access.ts';
+import { permits, permOf, R_OK, trustedLink, W_OK, walk, X_OK } from '../fs/access.ts';
 import { callerStat } from '../fs/command-stat.ts';
 import { copyByBytes } from '../fs/copy.ts';
 import {
@@ -109,6 +109,36 @@ async function readdirStat(
   const shown = async (name: string, stat: FsStat | null) =>
     stat && statJson(await callerStat(g, joinName(dir, name), stat));
   return Promise.all(listed.map(async ([name, stat]) => [name, await shown(name, stat)]));
+}
+
+async function visibleRenames(
+  entry: SyncFsTokenEntry,
+  req: SyncFsRequest
+): Promise<{ now: number; renames: Array<[string, string]> }> {
+  const answer = entry.renames?.(req.offset ?? 0, heldPaths(req.arg2)) ?? { now: 0, renames: [] };
+  const g = guardOf(entry);
+  if (!g?.dac.enforcing) return answer;
+  const searchable = async (path: string) => {
+    const dir = path.slice(0, Math.max(1, path.lastIndexOf('/')));
+    const w = await walk(g.fs, g.cred, dir, true, g.links).catch(nothing);
+    if (w === false || w.denied || w.perm === undefined || !permits(g.cred, w.perm, X_OK))
+      return false;
+    return g.fs.stat(w.path).then((st) => st.isDirectory, nothing);
+  };
+  const shown: Array<[string, string]> = [];
+  for (const [from, to] of answer.renames) {
+    if ((await searchable(from)) && (await searchable(to))) shown.push([from, to]);
+  }
+  return { now: answer.now, renames: shown };
+}
+
+function nothing(): false {
+  return false;
+}
+
+function heldPaths(arg: string | undefined): string[] {
+  const held: unknown = JSON.parse(arg ?? '[]');
+  return Array.isArray(held) ? held.filter((path): path is string => typeof path === 'string') : [];
 }
 
 async function usageAt(entry: SyncFsTokenEntry, path: string): Promise<SyncFsUsage | undefined> {
@@ -257,7 +287,8 @@ async function run(
       const to = fs.resolvePath(cwd, req.arg2 ?? '');
       await fs.rename(path, to);
       entry.renamed?.(path, to);
-      return done;
+      const seq = entry.renameSeq?.(path, to);
+      return seq === undefined ? done : json({ seq });
     }
     case 'link':
       await fs.link(path, fs.resolvePath(cwd, req.arg2 ?? ''), req.mode === 1);
@@ -825,6 +856,7 @@ async function linkFree(fs: SyncFsTokenEntry['fs'], path: string): Promise<boole
 }
 
 async function dispatchOne(entry: SyncFsTokenEntry, req: SyncFsRequest): Promise<SyncFsResult> {
+  if (req.op === 'renames') return json(await visibleRenames(entry, req));
   const result = await dispatchPath(entry, req);
   if (
     result.ok ||

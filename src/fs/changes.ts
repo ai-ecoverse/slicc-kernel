@@ -3,11 +3,13 @@ const RING = 1;
 const RING_SIZE = 4096;
 const SLOT = 2;
 export const SHARED_TTL_MS = 100;
+export const RENAME_WAIT_MS = 100;
 
 const DIRTY = RING + RING_SIZE * SLOT;
 const FOREIGN = DIRTY + 1;
+const RENAMES = FOREIGN + 1;
 
-export const CHANGES_BYTES = (FOREIGN + 1) * 4;
+export const CHANGES_BYTES = (RENAMES + 1) * 4;
 
 export function changeHash(path: string): number {
   let h = 0x811c9dc5;
@@ -49,6 +51,12 @@ export class FileChanges {
     Atomics.add(this.view, GEN, RING_SIZE + 1);
   }
 
+  renamed(): number {
+    const seq = (Atomics.add(this.view, RENAMES, 1) + 1) | 0;
+    Atomics.notify(this.view, RENAMES);
+    return seq;
+  }
+
   publish(...paths: string[]): void {
     for (const path of paths) {
       const g = (Atomics.add(this.view, GEN, 1) + 1) | 0;
@@ -77,6 +85,15 @@ export class ChangeView {
 
   foreign(): boolean {
     return this.view.length > FOREIGN && Atomics.load(this.view, FOREIGN) === 1;
+  }
+
+  renames(): number {
+    return this.view.length > RENAMES ? Atomics.load(this.view, RENAMES) : 0;
+  }
+
+  awaitRename(seen: number, ms: number): number {
+    if (this.view.length > RENAMES) Atomics.wait(this.view, RENAMES, seen, ms);
+    return this.renames();
   }
 
   changedSince(seen: number, path: string): { now: number; changed: boolean } {

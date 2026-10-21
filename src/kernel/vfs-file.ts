@@ -420,6 +420,7 @@ export class VfsNodes implements UnlinkHolder {
   keepsOnDisk = false;
 
   changed: ((path: string) => void) | undefined;
+  movedAway: ((from: string, to: string) => void) | undefined;
 
   dirtied: ((delta: number) => void) | undefined;
 
@@ -939,6 +940,7 @@ export function keepingOpen(
         await nodes.unlinking(b);
         await fs.rename(from, to);
         nodes.renamed(a, b);
+        nodes.movedAway?.(a, b);
       });
     },
     writeFile: async (path, content, owner) => {

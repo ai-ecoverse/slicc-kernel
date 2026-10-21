@@ -1,3 +1,4 @@
+import { RENAME_WAIT_MS } from '../../fs/changes.ts';
 import { linkedWatch } from '../../fs/ranged.ts';
 import {
   type DeviceAccess,
@@ -84,9 +85,31 @@ export class WasiFds {
 
   private readonly kernel: WasiKernel;
   private readonly fs: SyncFsPosixBridge;
+  private renamesSeen: number;
   constructor(kernel: WasiKernel, fs: SyncFsPosixBridge) {
     this.kernel = kernel;
     this.fs = fs;
+    this.renamesSeen = fs.changes?.renames() ?? 0;
+  }
+
+  ownRename(seq: number | undefined): void {
+    if (seq !== undefined && seq === ((this.renamesSeen + 1) | 0)) this.renamesSeen = seq;
+  }
+
+  followRenames(missing = false): boolean {
+    const view = this.fs.changes;
+    let now = view?.renames() ?? 0;
+    if (missing && view && now === this.renamesSeen) now = view.awaitRename(now, RENAME_WAIT_MS);
+    if (now === this.renamesSeen || !this.fs.renames) return false;
+    const held = [...this.buffers].filter(([, b]) => !b.isOrphan()).map(([p]) => p);
+    if (held.length === 0) {
+      this.renamesSeen = now;
+      return false;
+    }
+    const { now: seen, renames } = this.fs.renames(this.renamesSeen, held);
+    this.renamesSeen = seen;
+    for (const [from, to] of renames) this.renamed(from, to, undefined, true);
+    return renames.length > 0;
   }
 
   setup(
@@ -327,6 +350,7 @@ export class WasiFds {
   get(fd: number): WasiEntry {
     const e = this.find(fd);
     if (!e) throw new WasiError('EBADF');
+    if (e.type === 'file') this.followRenames();
     return e;
   }
 
@@ -697,9 +721,9 @@ export class WasiFds {
     this.forget(buffer);
   }
 
-  renamed(from: string, to: string, replacedLinked?: SyncFsBridgeStat): void {
+  renamed(from: string, to: string, replacedLinked?: SyncFsBridgeStat, foreign = false): void {
     if (from === to) return;
-    if (this.shared) this.kernel.call({ op: 'fd-path-renamed', from, to });
+    if (this.shared && !foreign) this.kernel.call({ op: 'fd-path-renamed', from, to });
     for (const e of this.table.values()) {
       if (e.type === 'kernel' && e.path !== undefined && within(e.path, from)) {
         e.path = to + e.path.slice(from.length);
@@ -707,6 +731,7 @@ export class WasiFds {
     }
     const moved: Array<[string, FileBuffer]> = [];
     for (const [p, buffer] of this.buffers) {
+      if (foreign && buffer.isOrphan()) continue;
       if (within(p, from)) moved.push([p, buffer]);
       else if (within(p, to)) {
         this.detach(buffer, replacedLinked);
@@ -891,6 +916,7 @@ export class WasiFds {
     created = false
   ): LocalFile {
     const { readable, writable } = openAccess(existing, oflags, rights);
+    this.followRenames();
     let buffer = created ? undefined : this.buffers.get(path);
     if (buffer?.handle !== undefined && this.fs.kept?.(buffer.handle)) {
       this.buffers.delete(path);
@@ -949,6 +975,7 @@ export class WasiFds {
         st
       );
     const buffer = new FileBuffer(io, path, empty, st.maxFile, ranged, st.version, watch);
+    buffer.moved = (missing) => this.followRenames(missing);
     buffer.handle = handle;
     this.buffers.set(path, buffer);
     const id = this.identity(st);

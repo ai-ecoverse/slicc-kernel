@@ -1000,8 +1000,9 @@ export class WasiHost {
         const to = at(fd2, p2, l2);
         fds.flushPath(from);
         const replaced = fds.holdsUnder(to) ? linkedElsewhere(o.fs, to) : undefined;
-        o.fs.rename(from, to);
+        const seq = o.fs.rename(from, to);
         fds.renamed(from, to, replaced);
+        fds.ownRename(typeof seq === 'number' ? seq : undefined);
       },
       path_symlink: (tp: number, tl: number, dirfd: number, p: number, l: number) => {
         const path = at(dirfd, p, l);
