@@ -1934,7 +1934,7 @@ export class Launcher {
     const cwdSlot = this.cwds.share(req.cwdSlot);
     this.cwdSlots.set(pid, cwdSlot);
     const scrubs = this.treeScrubs(req);
-    const stack = this.stackFor(req.tags);
+    const stack = this.stackFor(req.tags, req.tagBase);
     const terminal = req.fds.stdioTerminal();
     const decided = req.decided ?? Promise.resolve(true);
     const count = (byParent: boolean) => {
@@ -2475,12 +2475,7 @@ export class Launcher {
 
   private wireDac(dac: Dac): void {
     dac.tagOf = (pid) => this.tagOf(pid);
-    dac.fenced = (pid, path) => this.beyondConnection(pid) && cronPath(path);
-  }
-
-  beyondConnection(pid: number): boolean {
-    const tags = this.tags.get(pid);
-    return tags !== undefined && tags.length > (this.tagBases.get(pid) ?? tags.length);
+    dac.fenced = (pid, path) => this.tags.has(pid) && cronPath(path);
   }
 
   private released(path: string): void {
@@ -3013,13 +3008,13 @@ export class Launcher {
     return this.stackFor(withTag(undefined, tag)).fs;
   }
 
-  isWriter(tags: readonly string[] | undefined): boolean {
-    if (!tags?.length || this.prefixes.length === 0) return false;
+  isWriter(tags: readonly string[] | undefined, base = tags?.length ?? 0): boolean {
+    if (!tags?.length || base === 0 || this.prefixes.length === 0) return false;
     return tags.every((tag) => this.writerTags.has(tag));
   }
 
-  private stackFor(tags: readonly string[] | undefined): WriterStack {
-    if (!this.isWriter(tags)) {
+  private stackFor(tags: readonly string[] | undefined, base?: number): WriterStack {
+    if (!this.isWriter(tags, base)) {
       return {
         fs: this.processFs,
         noLinks: this.noLinksFs,
@@ -3139,7 +3134,8 @@ export class Launcher {
     argv: string[],
     dir: string | undefined,
     account: Account,
-    tags?: readonly string[]
+    tags?: readonly string[],
+    base?: number
   ) {
     const tag = tags?.[0];
     this.resetCatalogs();
@@ -3149,7 +3145,7 @@ export class Launcher {
     await this.enterable(this.execGuard(credOf(account), 0, tag), cwd);
     const file = await this.execFile(argv[0] ?? '', cwd, this.execGuard(credOf(account), 0, tag));
     if (!(await this.base.exists(cwd)))
-      await this.stackFor(tags).fs.mkdir(cwd, { recursive: true });
+      await this.stackFor(tags, base).fs.mkdir(cwd, { recursive: true });
     const planned = await this.plan(file, argv, cwd, scope);
     await this.mayExec(credOf(account), { file, cwd, pid: 0, tag }, planned);
     return { cwd, file, planned };
@@ -3159,7 +3155,13 @@ export class Launcher {
     const tagged = tagsOption(options);
     const { tags } = tagged;
     const { account, tty: ttyGroup } = await this.terminalAccount(options.user);
-    const { cwd, file, planned } = await this.starting(argv, options.cwd, account, tags);
+    const { cwd, file, planned } = await this.starting(
+      argv,
+      options.cwd,
+      account,
+      tags,
+      tagged.tagBase
+    );
     if (!planned) throw new Error(`${file}: command not found`);
     let leader = 0;
     const tty: KernelTty = new KernelTty(
@@ -3212,7 +3214,13 @@ export class Launcher {
     const tagged = tagsOption(options);
     const { tags } = tagged;
     const account = await this.account(options.user);
-    const { cwd, file, planned } = await this.starting(argv, options.cwd, account, tags);
+    const { cwd, file, planned } = await this.starting(
+      argv,
+      options.cwd,
+      account,
+      tags,
+      tagged.tagBase
+    );
     const env = this.environment(cwd, options.env, account, options.login);
     const out: Uint8Array[] = [];
     const err: Uint8Array[] = [];

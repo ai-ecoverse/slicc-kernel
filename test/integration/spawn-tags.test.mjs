@@ -89,7 +89,7 @@ test('protect.writers needs every tag of a process to be a writer: a guest-tagge
   );
 });
 
-test('with users on, a process tagged beyond its connection cannot write /etc/crontab or the cron spool; through crontab its job runs with its tags, which an untagged reinstall of the same line keeps and text in the line cannot set (#1380)', async (t) => {
+test('with users on, a tagged process cannot write /etc/crontab or the cron spool; through crontab its job runs with its tags, which an untagged reinstall of the same line keeps and text in the line cannot set (#1380)', async (t) => {
   const clock = fakeCronClock(Date.UTC(2026, 0, 1, 10, 0, 30));
   const { kernel, client } = await booted(t, { cron: { clock } });
   const guest = (script) => client.run(['bash', '-c', script], { tag: 'guest', cwd: '/tmp' });
@@ -155,4 +155,72 @@ test("a job named like another user's tagged job keeps both apart: the tagged on
     both = [await read('/tmp/tags-cone'), await read('/tmp/tags-scoop')];
   }
   assert.deepEqual(both, ['agent,guest\n', '\n']);
+});
+
+async function protectedKernel(t) {
+  const kernel = await createNodeKernel({
+    users: 'enforce',
+    protect: { paths: ['/opt/p'], writers: ['agent', 'installer'] },
+  });
+  t.after(() => kernel.terminate());
+  await install(kernel, 'wasm-bash');
+  await install(kernel, 'wasm-coreutils');
+  return { kernel, tagged: await attachKernel(await kernel.connect({ tag: 'agent' })) };
+}
+
+const crontabText = async (kernel) =>
+  new TextDecoder().decode(await kernel.readFile('/etc/crontab').catch(() => new Uint8Array()));
+
+test('with users on, a process tagged only by its connection cannot write /etc/crontab directly either, while an untagged one can (#1380 review)', async (t) => {
+  const { kernel, tagged } = await protectedKernel(t);
+  const r = await tagged.run(
+    ['bash', '-c', "echo '* * * * * root echo x' >> /etc/crontab; echo $?"],
+    {
+      cwd: '/tmp',
+    }
+  );
+  assert.equal(r.stdout, '1\n', r.stderr);
+  assert.doesNotMatch(await crontabText(kernel), /echo x/);
+  const untagged = await kernel.run(['bash', '-c', 'echo "# ok" >> /etc/crontab; echo $?'], {
+    cwd: '/',
+  });
+  assert.equal(untagged.stdout, '0\n', untagged.stderr);
+});
+
+test('the cron fence follows a symlink onto /etc/crontab, for a program that hands the kernel the link, and refuses a hard link of it (#1380 review)', async (t) => {
+  const { kernel, tagged } = await protectedKernel(t);
+  await kernel.writeFile(
+    '/node_modules/via/package.json',
+    JSON.stringify({ name: 'via', slicc: { commands: { via: { abi: 'js', module: 'via.mjs' } } } })
+  );
+  await kernel.writeFile(
+    '/node_modules/via/via.mjs',
+    "export default async function main(ctx) {\n  try {\n    await ctx.fs.writeFile(ctx.argv[1], '* * * * * root echo y\\n');\n    await ctx.write(1, 'wrote\\n');\n  } catch (e) {\n    await ctx.write(1, e.code + '\\n');\n  }\n}\n"
+  );
+  await kernel.run(['bash', '-c', 'echo "# root" >> /etc/crontab; ln -s /etc/crontab /tmp/ct'], {
+    cwd: '/',
+  });
+  const via = await tagged.run(['via', '/tmp/ct'], { cwd: '/tmp', tag: 'guest' });
+  assert.equal(via.stdout, 'EACCES\n', via.stderr);
+  assert.doesNotMatch(await crontabText(kernel), /echo y/);
+  const hard = await tagged.run(['bash', '-c', 'ln /etc/crontab /tmp/hard 2>/dev/null; echo $?'], {
+    cwd: '/tmp',
+    tag: 'guest',
+  });
+  assert.equal(hard.stdout, '1\n', hard.stderr);
+});
+
+test('a tag added to a spawn of an untagged connection never makes a writer, while one added under a writer connection may stay a writer (#1380 review)', async (t) => {
+  const { kernel, tagged } = await protectedKernel(t);
+  const writer = await tagged.run(['bash', '-c', 'mkdir -p /opt/p && echo w > /opt/p/a; echo $?'], {
+    tag: 'installer',
+    cwd: '/tmp',
+  });
+  assert.equal(writer.stdout, '0\n', writer.stderr);
+  const bare = await attachKernel(await kernel.connect({}));
+  const forged = await bare.run(['bash', '-c', 'echo f > /opt/p/b; echo $?'], {
+    tag: 'installer',
+    cwd: '/tmp',
+  });
+  assert.equal(forged.stdout, '1\n', forged.stderr);
 });

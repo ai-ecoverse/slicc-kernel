@@ -123,11 +123,30 @@ export function deny(g: Guard, op: string, path: string, errno = 'EACCES'): void
   g.dac.denied({ pid: g.pid, uid: g.cred.euid, op, path, errno, ...tag });
 }
 
-async function fence(g: Guard, op: string, path: string, parent?: string): Promise<void> {
-  if (!g.pid) return;
-  const real = parent && (await g.fs.realpath?.(parent, true).catch(() => undefined));
-  const at = real ? joinName(real, path.slice(path.lastIndexOf('/') + 1)) : path;
-  if (!g.dac.fenced(g.pid, normalizePath(path)) && !g.dac.fenced(g.pid, normalizePath(at))) return;
+const FENCE_HOPS = 40;
+
+async function entryAt(g: Guard, path: string): Promise<string> {
+  const parent = parentOf(path);
+  const real = await g.fs.realpath?.(parent, true).catch(() => undefined);
+  return real ? joinName(real, path.slice(path.lastIndexOf('/') + 1)) : path;
+}
+
+async function fencedNames(g: Guard, path: string): Promise<string[]> {
+  const names = [normalizePath(path)];
+  let at = await entryAt(g, names[0] as string);
+  for (let hop = 0; hop < FENCE_HOPS; hop++) {
+    names.push(at);
+    const link = await g.fs.readlink(at).catch(() => undefined);
+    if (link === undefined) break;
+    at = await entryAt(g, normalizePath(g.fs.resolvePath(parentOf(at), link)));
+  }
+  return names;
+}
+
+async function fence(g: Guard, op: string, path: string): Promise<void> {
+  if (!g.pid || !g.dac.fenced(g.pid, '/')) return;
+  const names = await fencedNames(g, path);
+  if (!names.some((name) => g.dac.fenced(g.pid, name))) return;
   const tag = g.tag === undefined ? {} : { tag: g.tag };
   g.dac.fence({ pid: g.pid, uid: g.cred.euid, op, path, errno: 'EACCES', ...tag });
 }
@@ -177,7 +196,7 @@ export async function inParent(
   path: string,
   old: boolean | 'replaced' = false
 ): Promise<void> {
-  await fence(g, op, path, parentOf(path));
+  await fence(g, op, path);
   if (old === 'replaced') {
     const dir = await need(g, op, parentOf(path), W_OK | X_OK, DIR, path);
     return dir.denied === undefined ? stickyEntry(g, op, path, dir) : undefined;
@@ -229,6 +248,7 @@ export async function renamable(g: Guard, from: string, to: string): Promise<voi
 }
 
 export async function linkable(g: Guard, from: string, to: string, follow: boolean) {
+  await fence(g, 'link', from);
   const source = await need(g, 'link', from, 0, { follow });
   const perm = source.perm;
   if (perm && g.cred.euid !== 0 && perm.uid !== g.cred.euid) {
