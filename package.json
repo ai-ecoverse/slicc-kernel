@@ -9,7 +9,7 @@
     "url": "git+https://github.com/ai-ecoverse/slicc-kernel.git"
   },
   "engines": {
-    "node": ">=24"
+    "node": ">=26"
   },
   "fledgling": {
     "provider": "github",
