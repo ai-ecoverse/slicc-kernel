@@ -888,7 +888,7 @@ jobs:
     permissions:
       contents: read
       actions: read
-    uses: ai-ecoverse/slicc-bios/.github/workflows/canary.yml@42cdf3a8d672f0e9e1b2601d57b10bb8927e211f
+    uses: ai-ecoverse/slicc-bios/.github/workflows/canary.yml@b59afdf686fcce0ab3cd83126cb9532303174bbb
     with:
       candidate-package: '@ai-ecoverse/slicc-kernel'
       candidate-artifact: ${{ needs.group-pack.outputs.name }}
@@ -938,7 +938,7 @@ jobs:
         name: bios's canary on the merge group, judged against the pinned bios (a regression or no result is not certified)
         run: |
           tools/cert-review/gate.sh --evidence downstream node tools/cert-review/downstream.mjs --result "$RUNNER_TEMP/canary/result.json" \
-            --bios 42cdf3a8d672f0e9e1b2601d57b10bb8927e211f --shards sweep,guard-prompt,guard-lagging,k4-upgrade,k4-agent-modes,link-serve --out "$RUNNER_TEMP/downstream.json"
+            --bios b59afdf686fcce0ab3cd83126cb9532303174bbb --shards sweep,guard-prompt,guard-lagging,k4-upgrade,k4-agent-modes,link-serve --out "$RUNNER_TEMP/downstream.json"
 
       - id: lookup
         name: Each pull request in the group has a certified review of the head being merged, or changes no behaviour, and the group passes downstream
@@ -958,7 +958,7 @@ jobs:
           HEAD_SHA: ${{ github.event.merge_group.head_sha }}
         run: |
           tools/cert-review/gate.sh 'pr notice' node tools/cert-review/pr.mjs notice --repo "$GITHUB_REPOSITORY" --head "$HEAD_SHA" --run "$GITHUB_RUN_ID" \
-            --bios 42cdf3a8d672f0e9e1b2601d57b10bb8927e211f --downstream "$RUNNER_TEMP/downstream.json"
+            --bios b59afdf686fcce0ab3cd83126cb9532303174bbb --downstream "$RUNNER_TEMP/downstream.json"
 
       - name: A lookup that failed still leaves a status, so the required check never waits forever
         if: failure() && steps.lookup.outputs.posted != 'true'
