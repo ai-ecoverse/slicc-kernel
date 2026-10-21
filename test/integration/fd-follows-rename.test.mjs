@@ -57,13 +57,16 @@ test("a program's open file follows a rename of its directory by another process
   const { page } = await booted(chrome, t);
   await installPackage(page, 'wasm-coreutils');
   await installPackage(page, 'wasix-python', { skip: /^lib\/libpython[^/]*\.a$/ });
-  await written(page, page, {
-    dir: '/root/fd1',
-    file: '/root/fd1/a/log',
-    from: '/root/fd1/a',
-    to: '/root/fd1/b',
-    renamed: '/root/fd1/b/log',
-  });
+  for (let round = 0; round < 6; round++) {
+    const dir = `/root/fd1-${round}`;
+    await written(page, page, {
+      dir,
+      file: `${dir}/a/log`,
+      from: `${dir}/a`,
+      to: `${dir}/b`,
+      renamed: `${dir}/b/log`,
+    });
+  }
 });
 
 test("a program's open file follows a rename of the file itself by another process (#1257)", {
@@ -72,13 +75,16 @@ test("a program's open file follows a rename of the file itself by another proce
   const { page } = await booted(chrome, t);
   await installPackage(page, 'wasm-coreutils');
   await installPackage(page, 'wasix-python', { skip: /^lib\/libpython[^/]*\.a$/ });
-  await written(page, page, {
-    dir: '/root/fd2',
-    file: '/root/fd2/a/f',
-    from: '/root/fd2/a/f',
-    to: '/root/fd2/a/g',
-    renamed: '/root/fd2/a/g',
-  });
+  for (let round = 0; round < 6; round++) {
+    const dir = `/root/fd2-${round}`;
+    await written(page, page, {
+      dir,
+      file: `${dir}/a/f`,
+      from: `${dir}/a/f`,
+      to: `${dir}/a/g`,
+      renamed: `${dir}/a/g`,
+    });
+  }
 });
 
 test("an Emscripten program's open file follows a rename of its directory by another process (#1257)", {
@@ -132,8 +138,6 @@ test("a program's open file in one tab follows a rename of its directory in anot
     from: '/root/fd4/a',
     to: '/root/fd4/b',
     renamed: '/root/fd4/b/log',
-  }).catch(async (err) => {
-    throw err;
   });
 });
 
