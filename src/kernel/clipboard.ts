@@ -12,6 +12,7 @@ export interface ClipboardStamp {
   gid: number;
   users: UsersMode;
   tag?: string;
+  tags?: string[];
 }
 
 export interface ClipboardHook {
@@ -162,13 +163,13 @@ export class ClipboardBroker {
   readonly hook: ClipboardHook | undefined;
   readonly users: UsersMode;
   readonly timeoutMs: number;
-  readonly tagOf: (pid: number) => string | undefined;
+  readonly tagOf: (pid: number) => readonly string[] | undefined;
 
   constructor(
     hook: ClipboardHook | undefined,
     users: UsersMode,
     timeoutMs = CLIPBOARD_TIMEOUT_MS,
-    tagOf: (pid: number) => string | undefined = () => undefined
+    tagOf: (pid: number) => readonly string[] | undefined = () => undefined
   ) {
     this.hook = hook;
     this.users = users;

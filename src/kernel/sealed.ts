@@ -37,6 +37,13 @@ export interface SealedCaller {
   groups: number[];
   users: UsersMode;
   tag?: string;
+  tags?: string[];
+}
+
+export function tagFields(tags: readonly string[] | undefined): { tag?: string; tags?: string[] } {
+  const [tag] = tags ?? [];
+  if (tag === undefined) return {};
+  return (tags as readonly string[]).length > 1 ? { tag, tags: [...(tags as string[])] } : { tag };
 }
 
 export type SealedRequest = { v: 1; op: string; caller: SealedCaller } & Record<string, unknown>;
@@ -245,7 +252,7 @@ export class SealedBroker {
   readonly hook: SealedHook | undefined;
   readonly users: UsersMode;
   readonly timeoutMs: number;
-  readonly tagOf: (pid: number) => string | undefined;
+  readonly tagOf: (pid: number) => readonly string[] | undefined;
   readonly tickets = new TicketBook();
   readonly sessions = new SessionScrubs();
   userOf: (uid: number) => Promise<string | undefined> = async () => undefined;
@@ -254,7 +261,7 @@ export class SealedBroker {
     hook: SealedHook | undefined,
     users: UsersMode,
     timeoutMs = SEALED_TIMEOUT_MS,
-    tagOf: (pid: number) => string | undefined = () => undefined
+    tagOf: (pid: number) => readonly string[] | undefined = () => undefined
   ) {
     this.hook = hook;
     this.users = users;
@@ -265,7 +272,7 @@ export class SealedBroker {
   async stamp(
     ids: { pid: number; ppid: number },
     cred: Readonly<Cred>,
-    tag: string | undefined
+    tags: readonly string[] | undefined
   ): Promise<SealedCaller> {
     const user = await this.userOf(cred.euid).catch(() => undefined);
     return {
@@ -276,7 +283,7 @@ export class SealedBroker {
       ...(user !== undefined ? { user } : {}),
       groups: [...cred.groups],
       users: this.users,
-      ...(tag !== undefined ? { tag } : {}),
+      ...tagFields(tags),
     };
   }
 
