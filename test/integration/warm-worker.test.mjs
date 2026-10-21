@@ -67,3 +67,19 @@ if (process.argv[2] === 'terminate') k.terminate();
     assert.ok(Date.now() - started < 15_000, `${mode}: the host exited on its own`);
   }
 });
+
+test("a worker the host can't construct fails the spawn, and the warm refill behind it never throws out of the host (#1343 review)", async (t) => {
+  const kernel = await createNodeKernel({ users: 'off', worker: 'worker.js' });
+  t.after(() => kernel.terminate());
+  await kernel.writeFile('/node_modules/warm/package.json', PACKAGE);
+  await kernel.writeFile('/node_modules/warm/main.mjs', 'export default async () => 0;');
+  let uncaught;
+  const seen = (err) => {
+    uncaught = err;
+  };
+  process.on('uncaughtException', seen);
+  t.after(() => process.off('uncaughtException', seen));
+  await assert.rejects(kernel.run(['warm'], { cwd: '/' }), /worker script or module filename/);
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(uncaught, undefined, String(uncaught));
+});

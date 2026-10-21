@@ -201,7 +201,13 @@ export function warmPool(make: MakeWorker, live: Set<() => void>, idleMs = WARM_
   };
   const fill = () => {
     if (closed || spare) return;
-    const worker = make();
+    let worker: Worker;
+    try {
+      worker = make();
+    } catch {
+      closed = true;
+      return;
+    }
     worker.unref();
     worker.once('error', () => drop(worker));
     worker.once('exit', () => drop(worker));
