@@ -16,6 +16,7 @@ export const PRUNE_EVERY_MS = 30_000;
 export const MOURN_TRIES = 5;
 export const MOURN_RETRY_MS = 100;
 export const RENAME_ACK_MAX_MS = 10_000;
+export const ANNOUNCE_POLL_MS = 20;
 
 interface WatchMessage {
   hello?: string;
@@ -116,6 +117,24 @@ export class RemoteWatch {
   async peered(): Promise<boolean> {
     await this.joined;
     return this.peers.size > 0;
+  }
+
+  async joinedAll(cap: number): Promise<boolean> {
+    if (!this.locks) return true;
+    const prefix = `${this.name}:`;
+    const began = performance.now();
+    for (;;) {
+      const held = ((await this.locks.query()).held ?? []).map((lock) => lock.name ?? '');
+      const silent = held.some(
+        (name) =>
+          name.startsWith(prefix) &&
+          name !== this.lockOf(this.tab) &&
+          !this.peers.has(name.slice(prefix.length))
+      );
+      if (!silent) return true;
+      if (performance.now() - began >= cap) return false;
+      await new Promise((resolve) => setTimeout(resolve, ANNOUNCE_POLL_MS));
+    }
   }
 
   crowded(): boolean {

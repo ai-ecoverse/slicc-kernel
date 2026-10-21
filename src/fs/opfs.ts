@@ -1712,6 +1712,13 @@ export class OpfsFs implements KernelFs {
     hooks: { notify?: () => void; started?: () => Promise<void> }
   ): Promise<void> {
     const remote = this.remote;
+    if (remote && !this.shared() && !(await remote.joinedAll(RENAME_ACK_MAX_MS))) {
+      this.ackBusy++;
+      console.warn(
+        `slicc-kernel: renaming ${from} to ${to} gave up (EBUSY): a tab sharing the root did not finish joining in ${RENAME_ACK_MAX_MS} ms (#1140)`
+      );
+      throw fsError('EBUSY', from);
+    }
     if (!remote || !this.shared()) {
       await locks.request(lock, place);
       return;
@@ -1835,7 +1842,18 @@ export class OpfsFs implements KernelFs {
     this.notePeer(lock, [from, to]);
     this.lookedAt = performance.now();
     const trees: Array<[string, string]> = [[from, to]];
-    const busy = [...this.inflight].filter((op) => op.paths.some((at) => touches(at, trees)));
+    const running = [...this.inflight];
+    const reached = await Promise.all(
+      running.map(async (op) => {
+        if (op.paths.some((at) => touches(at, trees))) return true;
+        for (const at of op.paths) {
+          const forms = await this.resolvedForms(at);
+          if (forms.some((form) => touches(form, trees))) return true;
+        }
+        return false;
+      })
+    );
+    const busy = running.filter((op, i) => reached[i] && this.inflight.has(op));
     if (this.aloneCalls > 0) {
       this.aloneDrain ??= Promise.withResolvers<void>();
       busy.push({ paths: [], waiting: this.aloneDrain, release: nothing });
@@ -1902,10 +1920,7 @@ export class OpfsFs implements KernelFs {
         continue;
       }
       if (reals !== undefined || at === '/' || this.peerMoves.size === 0) return forms;
-      const parent = await PLAIN.realpath.call(this, parentOf(at), true).catch(() => parentOf(at));
-      const named = resolvePath(parent, baseOf(at));
-      const target = await PLAIN.realpath.call(this, at, true).catch(() => named);
-      reals = [...new Set([named, target])].filter((form) => form !== at);
+      reals = await this.resolvedForms(at);
       if (reals.length === 0) return forms;
     }
   }
@@ -1927,6 +1942,14 @@ export class OpfsFs implements KernelFs {
         this.aloneDrain = undefined;
       }
     }
+  }
+
+  private async resolvedForms(at: string): Promise<string[]> {
+    if (at === '/') return [];
+    const parent = await PLAIN.realpath.call(this, parentOf(at), true).catch(() => parentOf(at));
+    const named = resolvePath(parent, baseOf(at));
+    const target = await PLAIN.realpath.call(this, at, true).catch(() => named);
+    return [...new Set([named, target])].filter((form) => form !== at);
   }
 
   amongPeers(): boolean {
