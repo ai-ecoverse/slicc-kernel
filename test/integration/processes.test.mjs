@@ -104,11 +104,18 @@ test('/proc lists every process of the kernel in the formats procps reads', asyn
     r.stdout,
     /^1000\n(?:\d+\n)*loadavg\nmeminfo\nmounts\nself\nstat\nsys\nuptime\nversion\n/
   );
-  assert.match(
-    r.stdout,
+  const sleeping = r.stdout.match(
     /\n(\d+) \(sleep\) S 1000\nsleep\nName:\thead\nUmask:\t0022\nState:\tS \(sleeping\)\n/
   );
-  assert.match(r.stdout, /\n0\.00 0\.00 0\.00 1\/\d+ \d+\nMemTotal: +\d+ kB\nbtime \d+\ngone\n$/);
+  assert.ok(sleeping, r.stdout);
+  const sleeper = Number(sleeping[1]);
+  const load = r.stdout.match(
+    /\n(\d+\.\d\d) (\d+\.\d\d) (\d+\.\d\d) 1\/(\d+) (\d+)\nMemTotal: +\d+ kB\nbtime \d+\ngone\n$/
+  );
+  assert.ok(load, r.stdout);
+  for (const average of load.slice(1, 4)) assert.ok(Number(average) >= 0, load[0]);
+  assert.ok(Number(load[4]) >= 2, `the sleep and the shell are running: ${load[0]}`);
+  assert.ok(Number(load[5]) >= sleeper, `the last pid is at least the sleep's: ${load[0]}`);
   assert.deepEqual(page.errors, []);
 });
 
