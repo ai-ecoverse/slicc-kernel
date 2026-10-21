@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { isBuiltin, registerHooks } from 'node:module';
 import { resolve, sep } from 'node:path';
 import { getHeapStatistics } from 'node:v8';
@@ -132,4 +133,28 @@ export function ownCache(dir: string, result: { directory?: string }): boolean {
     );
   }
   return true;
+}
+
+const Storage = AsyncLocalStorage;
+const apply = Reflect.apply;
+const freeze = Object.freeze;
+const blank = Object.create;
+
+export function nodeAsyncContext(): {
+  run<R>(store: unknown, fn: (...args: unknown[]) => R, ...args: unknown[]): R;
+  getStore(): unknown;
+  enterWith(store: unknown): void;
+} {
+  const storage = new Storage<unknown>();
+  const run = storage.run.bind(storage);
+  const getStore = storage.getStore.bind(storage);
+  const enterWith = storage.enterWith.bind(storage);
+  const api = blank(null);
+  api.run = freeze(<R>(store: unknown, fn: (...args: unknown[]) => R, ...args: unknown[]): R => {
+    if (typeof fn !== 'function') throw new TypeError('asyncContext.run needs a function');
+    return run(store, () => apply(fn, undefined, args));
+  });
+  api.getStore = freeze((): unknown => getStore());
+  api.enterWith = freeze((store: unknown): void => enterWith(store));
+  return freeze(api);
 }
