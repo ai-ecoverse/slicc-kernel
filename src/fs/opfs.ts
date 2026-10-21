@@ -1226,33 +1226,37 @@ export class OpfsFs implements KernelFs {
     });
   }
 
-  async pwrite(path: string, offset: number, bytes: Uint8Array): Promise<void> {
-    const [kept, target] = await this.keptFor(path);
-    if (kept) {
-      try {
-        await this.writeAt(kept, target, path, offset, bytes);
-        return;
-      } catch (err) {
-        if ((err as { code?: string }).code !== 'ENOENT') throw err;
-        this.files.delete(target);
+  pwrite(path: string, offset: number, bytes: Uint8Array): Promise<void> {
+    return this.writing(path, async (moved) => {
+      const [kept, target, existed] = await this.keptFor(path);
+      if (kept) {
+        try {
+          await this.writeAt(kept, target, path, offset, bytes);
+          return;
+        } catch (err) {
+          if ((err as { code?: string }).code !== 'ENOENT') throw err;
+          this.files.delete(target);
+        }
       }
-    }
-    const [handle] = await this.fileFor(path);
-    await this.writeAt(handle, target, path, offset, bytes);
+      const [handle] = await this.fileFor(path, !existed && !moved);
+      await this.writeAt(handle, target, path, offset, bytes);
+    });
   }
 
-  private async keptFor(path: string): Promise<[FileSystemFileHandle | undefined, string]> {
+  private async keptFor(
+    path: string
+  ): Promise<[FileSystemFileHandle | undefined, string, boolean]> {
     const at = normalizePath(path);
     const cached = this.files.get(at);
     const fresh = cached && performance.now() - (this.found.get(cached) ?? -CHECK_MS) < CHECK_MS;
     const [target, existed] = fresh ? [at, true] : await this.writeTarget(path);
-    if (!existed) return [undefined, target];
+    if (!existed) return [undefined, target, false];
     this.refuse(target);
     const [entry] = await this.meta.get([target]);
     if (entry?.fifo || entry?.socket) throw fsError('ENXIO', path);
     const kept = fresh ? cached : this.files.get(target);
     const usable = kept && performance.now() - (this.found.get(kept) ?? -CHECK_MS) < CHECK_MS;
-    return [usable ? kept : undefined, target];
+    return [usable ? kept : undefined, target, true];
   }
 
   private async writeAt(
@@ -1277,7 +1281,62 @@ export class OpfsFs implements KernelFs {
     this.written(target);
   }
 
-  async truncate(path: string, size: number): Promise<void> {
+  private readonly fileWrites = new Map<string, number>();
+  private readonly movingFiles = new Map<string, Promise<void>>();
+  private writesIdle: PromiseWithResolvers<void> | undefined;
+
+  private writeBlocked(at: string): Promise<void> | undefined {
+    const file = this.movingFiles.get(at);
+    if (file !== undefined) return file;
+    for (const m of this.renamingDirs) if (within(at, m.from) || within(at, m.to)) return m.done;
+    return undefined;
+  }
+
+  private async writing<T>(path: string, op: (moved: boolean) => Promise<T>): Promise<T> {
+    const at = normalizePath(path);
+    let moved = false;
+    for (let busy = this.writeBlocked(at); busy !== undefined; busy = this.writeBlocked(at)) {
+      moved = true;
+      await busy;
+    }
+    this.fileWrites.set(at, (this.fileWrites.get(at) ?? 0) + 1);
+    try {
+      return await op(moved);
+    } finally {
+      const left = (this.fileWrites.get(at) ?? 1) - 1;
+      if (left > 0) this.fileWrites.set(at, left);
+      else this.fileWrites.delete(at);
+      if (this.fileWrites.size === 0) this.writesIdle?.resolve();
+    }
+  }
+
+  private async writesDrained(tree: string): Promise<void> {
+    while ([...this.fileWrites.keys()].some((at) => within(at, tree))) {
+      this.writesIdle ??= Promise.withResolvers<void>();
+      const idle = this.writesIdle;
+      await Promise.race([idle.promise, new Promise((resolve) => setTimeout(resolve, 5))]);
+      if (this.writesIdle === idle && this.fileWrites.size === 0) this.writesIdle = undefined;
+    }
+  }
+
+  private async movingFile<T>(path: string, op: () => Promise<T>): Promise<T> {
+    const { promise, resolve } = Promise.withResolvers<void>();
+    while (this.movingFiles.has(path)) await this.movingFiles.get(path);
+    this.movingFiles.set(path, promise);
+    try {
+      await this.writesDrained(path);
+      return await op();
+    } finally {
+      this.movingFiles.delete(path);
+      resolve();
+    }
+  }
+
+  truncate(path: string, size: number): Promise<void> {
+    return this.writing(path, () => this.truncated(path, size));
+  }
+
+  private async truncated(path: string, size: number): Promise<void> {
     const handle = await this.existing(path, true);
     await this.refuseNode(path, (await this.io(handle.getFile())).size === 0);
     const resolve = this.ranged || this.remote?.watched();
@@ -1344,8 +1403,12 @@ export class OpfsFs implements KernelFs {
     return [resolvePath((await this.locate(parentOf(wanted), true)).path, baseOf(wanted)), false];
   }
 
-  private async fileFor(path: string): Promise<[FileSystemFileHandle, boolean, string]> {
+  private async fileFor(
+    path: string,
+    create = true
+  ): Promise<[FileSystemFileHandle, boolean, string]> {
     const [target, existed] = await this.writeTarget(path);
+    if (!existed && !create) throw fsError('ENOENT', path);
     if (existed) {
       const [entry] = await this.meta.get([target]);
       if (entry?.fifo || entry?.socket) throw fsError('ENXIO', path);
@@ -1353,7 +1416,7 @@ export class OpfsFs implements KernelFs {
     const [dir, name] = await this.parent(target);
     try {
       const handle = await this.inDir(dir, (parent) =>
-        this.io(parent.getFileHandle(name, { create: true }))
+        this.io(parent.getFileHandle(name, { create }))
       );
       if (!existed) this.touch(Date.now(), parentOf(target));
       return [handle, existed, target];
@@ -1693,11 +1756,12 @@ export class OpfsFs implements KernelFs {
       this.changed(source.path, destination);
       this.touch(Date.now(), parentOf(source.path), parent.path);
     };
-    if (!copying) return place();
+    if (!copying) return sourceStat.isDirectory ? place() : this.movingFile(source.path, place);
     const { promise, resolve } = Promise.withResolvers<void>();
     const entry = { from: source.path, to: destination, done: promise };
     this.renamingDirs.add(entry);
     try {
+      await this.writesDrained(source.path);
       const locks = this.locks;
       if (locks) {
         lock = `${this.renameLocks()}${crypto.randomUUID()}`;
