@@ -126,6 +126,7 @@ export interface NodeKernelOptions {
   cron?: { clock?: CronClock };
   compileCache?: string;
   warmWorker?: boolean;
+  warmWorkers?: number;
   wasmMemories?: { ceiling?: number; idleMs?: number };
 }
 
@@ -180,45 +181,50 @@ const TERMINATED = 'the kernel is terminated';
 const EXIT_GRACE_MS = 50;
 
 export const WARM_IDLE_MS = 30_000;
+export const MAX_WARM_WORKERS = 64;
 
 type MakeWorker = () => Worker;
 
-export function warmPool(make: MakeWorker, live: Set<() => void>, idleMs = WARM_IDLE_MS) {
-  let spare: Worker | undefined;
+export function warmPool(make: MakeWorker, live: Set<() => void>, idleMs = WARM_IDLE_MS, size = 1) {
+  const spares: Worker[] = [];
   let idle: ReturnType<typeof setTimeout> | undefined;
   let closed = false;
   const drop = (worker: Worker) => {
-    if (spare !== worker) return;
-    spare = undefined;
+    const at = spares.indexOf(worker);
+    if (at < 0) return;
+    spares.splice(at, 1);
+    if (spares.length > 0) return;
     clearTimeout(idle);
     live.delete(kill);
   };
   const kill = () => {
-    const worker = spare;
-    if (!worker) return;
-    drop(worker);
-    void worker.terminate();
+    for (const worker of [...spares]) {
+      drop(worker);
+      void worker.terminate();
+    }
   };
   const fill = () => {
-    if (closed || spare) return;
-    let worker: Worker;
-    try {
-      worker = make();
-    } catch {
-      closed = true;
-      return;
+    while (!closed && spares.length < size) {
+      let worker: Worker;
+      try {
+        worker = make();
+      } catch {
+        closed = true;
+        return;
+      }
+      worker.unref();
+      worker.once('error', () => drop(worker));
+      worker.once('exit', () => drop(worker));
+      spares.push(worker);
+      live.add(kill);
     }
-    worker.unref();
-    worker.once('error', () => drop(worker));
-    worker.once('exit', () => drop(worker));
-    spare = worker;
-    live.add(kill);
+    clearTimeout(idle);
     idle = setTimeout(kill, idleMs);
     idle.unref?.();
   };
   return {
     take(): Worker {
-      const worker = spare;
+      const worker = spares[0];
       if (worker) {
         drop(worker);
         worker.removeAllListeners('error');
@@ -235,6 +241,17 @@ export function warmPool(make: MakeWorker, live: Set<() => void>, idleMs = WARM_
   };
 }
 
+export function sparesOf(options: { warmWorker?: boolean; warmWorkers?: unknown }): number {
+  if (options.warmWorker === false) return 0;
+  const n = options.warmWorkers ?? 1;
+  if (typeof n !== 'number' || !Number.isInteger(n) || n < 0 || n > MAX_WARM_WORKERS) {
+    throw new TypeError(
+      `createNodeKernel: warmWorkers must be an integer from 0 to ${MAX_WARM_WORKERS}`
+    );
+  }
+  return n;
+}
+
 function processWorker(file: string | URL, workerData?: { compileCache: string }): Worker {
   return new Worker(file, { env: workerEnv(), ...(workerData ? { workerData } : {}) });
 }
@@ -245,8 +262,9 @@ function warmPoolOf(
   workerData: { compileCache: string } | undefined,
   live: Set<() => void>
 ) {
-  if (options.warmWorker === false) return undefined;
-  return warmPool(() => processWorker(file, workerData), live);
+  const size = sparesOf(options);
+  if (size === 0) return undefined;
+  return warmPool(() => processWorker(file, workerData), live, WARM_IDLE_MS, size);
 }
 
 function nodeWorker(
