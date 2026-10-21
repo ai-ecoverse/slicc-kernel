@@ -53,6 +53,7 @@ export interface MetaStore {
   all(): Promise<MetaEntry[]>;
   absent?(path: string): boolean;
   removeFile?(path: string): Promise<void>;
+  forgetTrees?(trees: readonly string[]): void;
 }
 
 export const META_DB = 'slicc-kernel';
@@ -170,6 +171,10 @@ export class IndexedDbMeta implements MetaStore {
       for (const listener of this.listeners) listener(data as Invalidation);
     };
     (this.channel as BroadcastChannel & { unref?: () => void }).unref?.();
+  }
+
+  forgetTrees(trees: readonly string[]): void {
+    this.drop({ trees: [...trees] });
   }
 
   private drop({ paths = [], trees = [] }: Invalidation): void {

@@ -39,6 +39,15 @@ export const SYS_TREE: ProcSysTree = {
     slicc_opfs_calls: (listing) => `${listing.opfsCalls ?? 0}\n`,
     slicc_opfs_ops: (listing) => `${listing.opfsOps ?? 0}\n`,
     slicc_cwd_checks: (listing) => `${listing.cwdChecks ?? 0}\n`,
+    slicc_rename_ack_busy: (listing) => `${listing.renameAcks?.busy ?? 0}\n`,
+    slicc_rename_acks: (listing) => {
+      const samples = [...(listing.renameAcks?.ackMs ?? [])].sort((a, b) => a - b);
+      const median = samples[Math.floor(samples.length / 2)] ?? 0;
+      const most = samples.at(-1) ?? 0;
+      const waits = listing.renameAcks?.waits ?? 0;
+      const queries = listing.renameAcks?.queries ?? 0;
+      return `${listing.renameAcks?.acks ?? 0} ${median.toFixed(1)} ${most.toFixed(1)} ${waits} ${queries}\n`;
+    },
   },
 };
 

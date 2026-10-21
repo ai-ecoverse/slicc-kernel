@@ -1,3 +1,4 @@
+import { SHARED_TTL_MS } from './changes.ts';
 import { MemoryMeta, type MetaEntry, type MetaStore, type MetaUpdate } from './meta.ts';
 import { noticeOf } from './notice.ts';
 import { chain, inherit, ownOf, ROOT_OWNER, sameOwner } from './owners.ts';
@@ -6,6 +7,8 @@ import { holdsProtected, isProtected } from './protect.ts';
 import {
   type LockManagerLike,
   lockManager,
+  type PeerRename,
+  RENAME_ACK_MAX_MS,
   type RemoteChange,
   type RemoteListener,
   RemoteWatch,
@@ -66,6 +69,24 @@ interface MovableHandle {
 
 const RENAMES = '/.slicc-renames';
 const RENAME_LOCK = 'slicc-rename:';
+const RENAME_ADMIT = 'slicc-rename-admit:';
+const PAIRED = new Set(['rename', 'link', 'copyFile']);
+const LISTINGS = new Set(['readdir', 'readdirStat']);
+const RETRY = Symbol('retry');
+const ACK_SAMPLES = 4096;
+const INTENT_POLL_MS = 5;
+
+interface Inflight {
+  paths: readonly string[];
+  waiting?: { promise: Promise<void>; resolve: () => void };
+  release: () => void;
+}
+
+interface PeerMove {
+  lock: string;
+  trees: Array<[string, string]>;
+  done?: true;
+}
 
 type Copies = Map<string, { before: number; made: FileSystemFileHandle }>;
 
@@ -138,6 +159,7 @@ function sidecar(meta: MetaStore): MetaStore {
         for (const { path, change } of changes) await ops.update(path, change);
       };
   if (meta.absent) ops.absent = meta.absent.bind(meta);
+  if (meta.forgetTrees) ops.forgetTrees = meta.forgetTrees.bind(meta);
   const { removeFile } = meta;
   if (removeFile)
     ops.removeFile = (path: string) =>
@@ -317,7 +339,17 @@ export class OpfsFs implements KernelFs {
         : new RemoteWatch(`${channel}:watch`, { locks: this.locks ?? null });
     if (this.remote) {
       this.remote.quiet = () => this.quiet().then(() => this.settle?.());
-      this.remote.gone = () => void this.orphans();
+      this.remote.gone = () => {
+        void this.orphans();
+        for (const move of [...this.peerMoves.values()]) void this.peerMoved(move);
+      };
+      this.remote.renaming = (rename) => this.heardRename(rename);
+      this.remote.renamed = (lock) => {
+        const move = this.peerMoves.get(lock);
+        if (!move) return;
+        move.done = true;
+        void this.peerMoved(move);
+      };
     }
     if (this.channel) {
       const remote = this.remote;
@@ -1541,17 +1573,35 @@ export class OpfsFs implements KernelFs {
   }
 
   async rename(from: string, to: string): Promise<void> {
+    const call = this.renameCall;
+    this.renameCall = undefined;
     if (from === to) return;
+    for (;;) {
+      try {
+        return await this.renameOnce(from, to, call);
+      } catch (err) {
+        if (err !== RETRY) throw err;
+      }
+    }
+  }
+
+  private async renameOnce(from: string, to: string, call?: Inflight): Promise<void> {
     const source = await this.locate(from, false);
     this.refuse(source.path, true);
     this.forget(source.path);
     const parent = await this.locate(parentOf(to), true);
     const destination = resolvePath(parent.path, baseOf(to));
     this.refuse(destination, true);
-    await this.entering(destination, () => this.moveTo(source, parent, destination, to));
+    await this.entering(destination, () => this.moveTo(source, parent, destination, to, call));
   }
 
-  private async moveTo(source: Located, parent: Located, destination: string, to: string) {
+  private async moveTo(
+    source: Located,
+    parent: Located,
+    destination: string,
+    to: string,
+    call?: Inflight
+  ) {
     const sourceStat = await this.describe(source);
     if (sourceStat.isDirectory && within(destination, source.path)) throw fsError('EINVAL', to);
     const target = await this.exactly(() => this.locate(destination, false)).catch((err) => {
@@ -1586,6 +1636,7 @@ export class OpfsFs implements KernelFs {
     const name = baseOf(destination);
     const swap = targetStat?.isDirectory === true;
     let lock: string | undefined;
+    const hooks: { notify?: () => void; started?: () => Promise<void> } = {};
     const staging = swap ? `.${name}.${crypto.randomUUID()}` : name;
     const copying = sourceStat.isDirectory && !movable(source.handle as Handle);
     const staged = resolvePath(parent.path, staging);
@@ -1594,6 +1645,7 @@ export class OpfsFs implements KernelFs {
       const copies: Copies = new Map();
       const root = { ino: inodeOf(source.path), ...moving };
       const owned = lock ? { lock } : {};
+      hooks.notify?.();
       const first = copying
         ? await this.intend({ from: source.path, to: staged, root, ...owned })
         : undefined;
@@ -1601,6 +1653,12 @@ export class OpfsFs implements KernelFs {
         copying && swap
           ? await this.intend({ from: staged, to: destination, replace: true, root, ...owned })
           : undefined;
+      await hooks.started?.().catch(async (err: unknown) => {
+        for (const intent of [first, second]) {
+          if (intent) await this.meta.update(intent, () => undefined);
+        }
+        throw err;
+      });
       const moved = await this.replacingTarget(targetStat !== null, () =>
         this.place(source.handle as Handle, dir, staging, copies)
       ).catch(async (err) => {
@@ -1634,12 +1692,301 @@ export class OpfsFs implements KernelFs {
       const locks = this.locks;
       if (locks) {
         lock = `${RENAME_LOCK}${crypto.randomUUID()}`;
-        await locks.request(lock, place);
+        this.ownLocks.add(lock);
+        call?.release();
+        await this.admitted(locks, lock, source.path, destination, place, hooks);
       } else await place();
     } finally {
+      if (lock) this.ownLocks.delete(lock);
       this.renamingDirs.delete(entry);
       resolve();
     }
+  }
+
+  private async admitted(
+    locks: LockManagerLike,
+    lock: string,
+    from: string,
+    to: string,
+    place: () => Promise<void>,
+    hooks: { notify?: () => void; started?: () => Promise<void> }
+  ): Promise<void> {
+    const remote = this.remote;
+    if (remote && !this.shared() && !(await remote.joinedAll(RENAME_ACK_MAX_MS))) {
+      this.ackBusy++;
+      console.warn(
+        `slicc-kernel: renaming ${from} to ${to} gave up (EBUSY): a tab sharing the root did not finish joining in ${RENAME_ACK_MAX_MS} ms (#1140)`
+      );
+      throw fsError('EBUSY', from);
+    }
+    if (!remote || !this.shared()) {
+      await locks.request(lock, place);
+      return;
+    }
+    let clash: PeerMove | undefined;
+    let run: Promise<unknown> | undefined;
+    await locks.request(`${RENAME_ADMIT}${this.rootName ?? ''}`, async () => {
+      if (await this.renamingElsewhere()) await this.learnRenames();
+      clash = this.clashing(from, to);
+      if (clash) return;
+      const { promise, resolve } = Promise.withResolvers<void>();
+      let told: Promise<string[]> | undefined;
+      hooks.notify = () => {
+        told = remote.renamingTree({ from, to, lock });
+      };
+      hooks.started = async () => {
+        resolve();
+        this.renameAcks++;
+        const at = performance.now();
+        const stuck = await (told as Promise<string[]>);
+        this.ackMs.push(performance.now() - at);
+        if (this.ackMs.length > ACK_SAMPLES) this.ackMs.shift();
+        if (stuck.length === 0) return;
+        this.ackBusy++;
+        console.warn(
+          `slicc-kernel: renaming ${from} to ${to} gave up (EBUSY): peer tab ${stuck.join(', ')} is alive but did not answer in ${RENAME_ACK_MAX_MS} ms (#1140)`
+        );
+        throw fsError('EBUSY', from);
+      };
+      run = locks.request(lock, async () => {
+        await place();
+        remote.renamedTree(lock);
+      });
+      await Promise.race([promise, run.then(nothing, nothing)]);
+    });
+    if (clash) {
+      this.peerWaited++;
+      await this.peerMoved(clash);
+      throw RETRY;
+    }
+    await run;
+  }
+
+  private renameAcks = 0;
+  private ackBusy = 0;
+  private readonly ackMs: number[] = [];
+  private readonly ownLocks = new Set<string>();
+  private readonly peerMoves = new Map<string, PeerMove>();
+  private readonly peerWaits = new Map<string, Promise<void>>();
+  private readonly inflight = new Set<Inflight>();
+  private renameCall: Inflight | undefined;
+  private looking: Promise<void> | undefined;
+  private lookedAt = Number.NEGATIVE_INFINITY;
+
+  private peerWaited = 0;
+  private queries = 0;
+
+  renameWaits(): NonNullable<ReturnType<NonNullable<KernelFs['renameWaits']>>> {
+    return {
+      acks: this.renameAcks,
+      busy: this.ackBusy,
+      waits: this.peerWaited,
+      queries: this.queries,
+      ackMs: this.ackMs,
+    };
+  }
+
+  private notePeer(lock: string, tree: [string, string]): PeerMove {
+    let known = this.peerMoves.get(lock);
+    if (!known) {
+      known = { lock, trees: [] };
+      this.peerMoves.set(lock, known);
+    }
+    if (!known.trees.some(([a, b]) => a === tree[0] && b === tree[1])) known.trees.push(tree);
+    return known;
+  }
+
+  private async learnRenames(): Promise<void> {
+    for (const { rename } of await this.meta.under(RENAMES)) {
+      if (rename?.lock === undefined || this.ownLocks.has(rename.lock)) continue;
+      this.notePeer(rename.lock, [rename.from, rename.to]);
+    }
+  }
+
+  private async renamingElsewhere(): Promise<boolean> {
+    const { held = [] } = await (this.locks as LockManagerLike).query();
+    return held.some(({ name }) => name?.startsWith(RENAME_LOCK) && !this.ownLocks.has(name));
+  }
+
+  private lookForRenames(): Promise<void> {
+    const locks = this.locks;
+    const age = performance.now() - this.lookedAt;
+    if (!locks || age < SHARED_TTL_MS / 2) return Promise.resolve();
+    this.looking ??= (async () => {
+      for (;;) {
+        const asked = performance.now();
+        this.queries++;
+        const { held = [] } = await locks.query();
+        const unknown = () =>
+          held.some(
+            ({ name }) =>
+              name?.startsWith(RENAME_LOCK) && !this.ownLocks.has(name) && !this.peerMoves.has(name)
+          );
+        if (unknown()) await this.learnRenames();
+        if (!unknown()) {
+          this.lookedAt = asked;
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, INTENT_POLL_MS));
+      }
+    })().finally(() => {
+      this.looking = undefined;
+    });
+    if (age >= SHARED_TTL_MS) return this.looking;
+    this.looking.catch(nothing);
+    return Promise.resolve();
+  }
+
+  private async heardRename({ from, to, lock }: PeerRename): Promise<void> {
+    if (this.ownLocks.has(lock)) return;
+    this.notePeer(lock, [from, to]);
+    this.lookedAt = performance.now();
+    const trees: Array<[string, string]> = [[from, to]];
+    const running = [...this.inflight];
+    const reached = await Promise.all(
+      running.map(async (op) => {
+        if (op.paths.some((at) => touches(at, trees))) return true;
+        for (const at of op.paths) {
+          const forms = await this.resolvedForms(at);
+          if (forms.some((form) => touches(form, trees))) return true;
+        }
+        return false;
+      })
+    );
+    const busy = running.filter((op, i) => reached[i] && this.inflight.has(op));
+    if (this.aloneCalls > 0) {
+      this.aloneDrain ??= Promise.withResolvers<void>();
+      busy.push({ paths: [], waiting: this.aloneDrain, release: nothing });
+    }
+    await Promise.all(
+      busy.map((op) => {
+        op.waiting ??= Promise.withResolvers<void>();
+        return op.waiting.promise;
+      })
+    );
+  }
+
+  private peerAt(at: string, listing: boolean): PeerMove | undefined {
+    for (const move of this.peerMoves.values()) {
+      if (this.ownLocks.has(move.lock)) continue;
+      if (touches(at, move.trees, listing)) return move;
+    }
+    return undefined;
+  }
+
+  private clashing(from: string, to: string): PeerMove | undefined {
+    for (const move of this.peerMoves.values()) {
+      for (const tree of move.trees) {
+        for (const mine of [from, to]) {
+          if (tree.some((theirs) => within(mine, theirs) || within(theirs, mine))) return move;
+        }
+      }
+    }
+    return undefined;
+  }
+
+  private peerMoved(move: PeerMove): Promise<void> {
+    const locks = this.locks as LockManagerLike;
+    let wait = this.peerWaits.get(move.lock);
+    if (wait !== undefined) return wait;
+    wait = (async () => {
+      if (!move.done)
+        await locks.request(move.lock, async () => {
+          if (move.done) return;
+          const left = (await this.meta.under(RENAMES))
+            .filter((entry) => entry.rename?.lock === move.lock)
+            .sort(byIntent);
+          for (const entry of left) await this.finishRename(entry);
+        });
+      this.peerMoves.delete(move.lock);
+      for (const [from, to] of move.trees) {
+        this.forget(from);
+        this.forget(to);
+        this.meta.forgetTrees?.([from, to]);
+      }
+    })().finally(() => this.peerWaits.delete(move.lock));
+    this.peerWaits.set(move.lock, wait);
+    return wait;
+  }
+
+  private async peerSettled(at: string, listing: boolean): Promise<string[]> {
+    await this.lookForRenames();
+    for (let reals: string[] | undefined; ; ) {
+      const forms = [at, ...(reals ?? [])];
+      const move = forms.map((form) => this.peerAt(form, listing)).find(Boolean);
+      if (move) {
+        this.peerWaited++;
+        await this.peerMoved(move);
+        continue;
+      }
+      if (reals !== undefined || at === '/' || this.peerMoves.size === 0) return forms;
+      reals = await this.resolvedForms(at);
+      if (reals.length === 0) return forms;
+    }
+  }
+
+  private aloneCalls = 0;
+  private aloneDrain: { promise: Promise<void>; resolve: () => void } | undefined;
+
+  async alonePlain(
+    inner: (...args: unknown[]) => Promise<unknown>,
+    args: unknown[]
+  ): Promise<unknown> {
+    this.aloneCalls++;
+    try {
+      return await inner.apply(this, args);
+    } finally {
+      this.aloneCalls--;
+      if (this.aloneCalls === 0 && this.aloneDrain) {
+        this.aloneDrain.resolve();
+        this.aloneDrain = undefined;
+      }
+    }
+  }
+
+  private async resolvedForms(at: string): Promise<string[]> {
+    if (at === '/') return [];
+    const parent = await PLAIN.realpath.call(this, parentOf(at), true).catch(() => parentOf(at));
+    const named = resolvePath(parent, baseOf(at));
+    const target = await PLAIN.realpath.call(this, at, true).catch(() => named);
+    return [...new Set([named, target])].filter((form) => form !== at);
+  }
+
+  amongPeers(): boolean {
+    return this.remote !== undefined && this.locks !== undefined && this.shared();
+  }
+
+  async peerOp(
+    name: string,
+    args: unknown[],
+    inner: (...args: unknown[]) => Promise<unknown>
+  ): Promise<unknown> {
+    const paths = (
+      name === 'symlink' ? args.slice(1, 2) : PAIRED.has(name) ? args.slice(0, 2) : args.slice(0, 1)
+    )
+      .filter((path): path is string => typeof path === 'string')
+      .map(normalizePath);
+    const listing = LISTINGS.has(name);
+    const checked = [...paths];
+    while (this.amongPeers()) {
+      checked.length = 0;
+      for (const at of paths) checked.push(...(await this.peerSettled(at, listing)));
+      if (!checked.some((at) => this.peerAt(at, listing))) break;
+    }
+    const busy: Inflight = { paths: checked, release: () => undefined };
+    const done = () => {
+      this.inflight.delete(busy);
+      busy.waiting?.resolve();
+    };
+    busy.release = done;
+    this.inflight.add(busy);
+    if (name === 'rename') this.renameCall = busy;
+    if (name !== 'writeSession') return await inner.apply(this, args).finally(done);
+    const session = (await inner.apply(this, args).catch((err: unknown) => {
+      done();
+      throw err;
+    })) as WriteSession;
+    return { ...session, close: () => session.close().finally(done) };
   }
 
   private readonly renamingDirs = new Set<{ from: string; to: string; done: Promise<void> }>();
@@ -1704,7 +2051,7 @@ export class OpfsFs implements KernelFs {
       );
     for (const entry of intents) {
       const lock = (entry.rename as NonNullable<MetaEntry['rename']>).lock;
-      if (!orphaned || !locks || !lock) await this.finishRename(entry);
+      if (!locks || !lock) await this.finishRename(entry);
       else await locks.request(lock, () => this.finishRename(entry));
     }
     return intents.length;
@@ -1721,7 +2068,8 @@ export class OpfsFs implements KernelFs {
     this.forget(to);
     try {
       const left = await this.real(from);
-      if (left && replace && (await this.real(to))) await this.rm(to, { recursive: true });
+      if (left && replace && (await this.real(to)))
+        await PLAIN.rm.call(this, to, { recursive: true });
       if (left) {
         const source = await this.locate(from, false);
         const target = await this.locate(parentOf(to), true);
@@ -1735,7 +2083,7 @@ export class OpfsFs implements KernelFs {
         this.forget(from);
         this.forget(to);
       }
-      if ((await this.meta.under(from)).length > 0) {
+      if ((await this.meta.under(from)).some((entry) => !entry.vacated)) {
         await this.meta.move(
           from,
           to,
@@ -2108,6 +2456,35 @@ export class OpfsFs implements KernelFs {
   }
 }
 
+function nothing(): undefined {
+  return undefined;
+}
+
+function touches(
+  at: string,
+  trees: ReadonlyArray<readonly [string, string]>,
+  listing = true
+): boolean {
+  return trees.some(
+    ([from, to]) =>
+      within(at, from) ||
+      within(at, to) ||
+      (listing && (at === parentOf(from) || at === parentOf(to)))
+  );
+}
+
+function byIntent(a: MetaEntry, b: MetaEntry): number {
+  return (
+    (a.rename as NonNullable<MetaEntry['rename']>).at -
+    (b.rename as NonNullable<MetaEntry['rename']>).at
+  );
+}
+
+const PLAIN = {
+  rm: OpfsFs.prototype.rm,
+  realpath: OpfsFs.prototype.realpath,
+};
+
 const READS = [
   'stat',
   'lstat',
@@ -2139,6 +2516,18 @@ const WRITES = [
   'chown',
 ] as const;
 
+{
+  const proto = OpfsFs.prototype as unknown as Record<
+    string,
+    (...args: unknown[]) => Promise<unknown>
+  >;
+  const inner = proto.createExclusive as (...args: unknown[]) => Promise<unknown>;
+  proto.createExclusive = function (this: OpfsFs, ...args: unknown[]) {
+    if (this.amongPeers()) return this.peerOp('createExclusive', args, inner);
+    return this.alonePlain(inner, args);
+  };
+}
+
 for (const [names, op] of [
   [READS, 'read'],
   [WRITES, 'write'],
@@ -2152,7 +2541,9 @@ for (const [names, op] of [
     proto[name] = async function (this: OpfsFs, ...args: unknown[]) {
       try {
         if (op === 'read') await this.settledRename(args[0]);
-        return await inner.apply(this, args);
+        if (this.amongPeers() || name === 'writeSession')
+          return await this.peerOp(name, args, inner);
+        return await this.alonePlain(inner, args);
       } catch (err) {
         throw translate(err, String(args[0]), op, false);
       }
