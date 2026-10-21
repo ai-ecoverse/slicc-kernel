@@ -150,7 +150,7 @@ test("a job named like another user's tagged job keeps both apart: the tagged on
       () => undefined
     );
   let both = [undefined, undefined];
-  for (let i = 0; i < 100 && both.includes(undefined); i++) {
+  for (let i = 0; i < 100 && !both.every((x) => x?.endsWith('\n')); i++) {
     await delay(50);
     both = [await read('/tmp/tags-cone'), await read('/tmp/tags-scoop')];
   }
