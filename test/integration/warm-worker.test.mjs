@@ -83,3 +83,34 @@ test("a worker the host can't construct fails the spawn, and the warm refill beh
   await new Promise((resolve) => setTimeout(resolve, 200));
   assert.equal(uncaught, undefined, String(uncaught));
 });
+
+test('warmWorkers: n keeps up to n spares for a burst of starts, each still a fresh worker; it must be an integer from 0 to 64, and warmWorker: false still means none (#1361)', async (t) => {
+  const kernel = await createNodeKernel({ users: 'off', warmWorkers: 8 });
+  t.after(() => kernel.terminate());
+  await kernel.writeFile('/node_modules/warm/package.json', PACKAGE);
+  await kernel.writeFile('/node_modules/warm/main.mjs', PROGRAM);
+  await kernel.run(['warm', 'boot'], { cwd: '/' });
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  const burst = await Promise.all(
+    Array.from({ length: 8 }, (_, i) =>
+      kernel.run(['warm', `b${i}`], { cwd: '/', env: { WHO: `w${i}` } })
+    )
+  );
+  const seen = burst.map((r) => JSON.parse(r.stdout));
+  assert.deepEqual(
+    seen.map((s) => [s.seen, s.env]),
+    Array.from({ length: 8 }, (_, i) => ['none', `w${i}`])
+  );
+  assert.equal(new Set(seen.map((s) => s.pid)).size, 8);
+  for (const bad of [-1, 1.5, 65, '2']) {
+    await assert.rejects(
+      createNodeKernel({ warmWorkers: bad }),
+      /warmWorkers must be an integer from 0 to 64/
+    );
+  }
+  const none = await createNodeKernel({ users: 'off', warmWorker: false, warmWorkers: 4 });
+  t.after(() => none.terminate());
+  await none.writeFile('/node_modules/warm/package.json', PACKAGE);
+  await none.writeFile('/node_modules/warm/main.mjs', PROGRAM);
+  assert.equal((await none.run(['warm', 'x'], { cwd: '/' })).status, 0);
+});
