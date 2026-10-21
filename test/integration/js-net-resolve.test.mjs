@@ -82,3 +82,38 @@ test('ctx.net.resolve answers as the kernel resolver does, by family, with ENOTF
     stderr: '',
   });
 });
+
+test("ctx.net.resolve rejects with EAI_AGAIN when the uplink's lookup fails, keeps ENOTFOUND for a name with no answer, and caches no failure (#1363)", async (t) => {
+  const { fakeUplink } = await import('../../dist/testing.js');
+  const base = fakeUplink({ names: { 'up.test': ['203.0.113.7'], 'flaky.test': ['203.0.113.8'] } });
+  let flaky = 0;
+  const uplink = {
+    ...base,
+    resolve: async (name, family, signal) => {
+      if (name === 'down.test') throw Object.assign(new Error('SERVFAIL'), { code: 'EAI_AGAIN' });
+      if (name === 'flaky.test' && flaky++ === 0) throw new Error('the resolver is unreachable');
+      return base.resolve(name, family, signal);
+    },
+  };
+  const kernel = await createNodeKernel({ users: 'off', network: { uplink } });
+  t.after(() => kernel.terminate());
+  await kernel.writeFile('/node_modules/lookup/package.json', PACKAGE);
+  await kernel.writeFile('/node_modules/lookup/bin/lookup.mjs', PROGRAM);
+  const got = await kernel.run(
+    ['lookup', 'up.test/4', 'down.test/4', 'none.test/4', 'flaky.test/4', 'flaky.test/4'],
+    { cwd: '/' }
+  );
+  assert.equal(
+    got.stdout,
+    [
+      'up.test/4 ["203.0.113.7"]',
+      'down.test/4 EAI_AGAIN',
+      'none.test/4 ENOTFOUND',
+      'flaky.test/4 EAI_AGAIN',
+      'flaky.test/4 ["203.0.113.8"]',
+      'aborted stopped',
+      '',
+    ].join('\n'),
+    got.stderr
+  );
+});

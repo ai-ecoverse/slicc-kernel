@@ -379,7 +379,9 @@ export function netOps(kernel: JsKernel, io: NetIo): JsNet {
     const req = { op: 'sock-resolve' as const, name: String(name), family };
     const r = await kernel.blocking(req, signal).catch((err: unknown) => {
       signal.throwIfAborted();
-      if ((err as { code?: unknown }).code !== 'ENOENT') throw err;
+      const code = (err as { code?: unknown }).code;
+      if (code === 'ETIMEDOUT') throw new JsCallError('EAI_AGAIN', `resolve ${name}`);
+      if (code !== 'ENOENT') throw err;
       throw new JsCallError('ENOTFOUND', `resolve ${name}`);
     });
     return [...((r.ok && r.kind === 'json' ? r.json : []) as string[])];
