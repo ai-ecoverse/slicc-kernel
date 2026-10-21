@@ -1218,8 +1218,11 @@ export class OpfsFs implements KernelFs {
     });
   }
 
-  pwrite(path: string, offset: number, bytes: Uint8Array): Promise<void> {
-    return this.writing(path, async (movedAway) => {
+  async pwrite(path: string, offset: number, bytes: Uint8Array): Promise<void> {
+    const at = normalizePath(path);
+    const movedAway = this.renamesInFlight() ? await this.writeWaits(at) : false;
+    this.fileWrites.set(at, (this.fileWrites.get(at) ?? 0) + 1);
+    try {
       const [kept, target, existed] = await this.keptFor(path);
       if (kept) {
         try {
@@ -1232,7 +1235,9 @@ export class OpfsFs implements KernelFs {
       }
       const [handle] = await this.fileFor(path, !existed && !movedAway);
       await this.writeAt(handle, target, path, offset, bytes);
-    });
+    } finally {
+      this.writeEnded(at);
+    }
   }
 
   private async keptFor(
@@ -1287,24 +1292,27 @@ export class OpfsFs implements KernelFs {
     return undefined;
   }
 
-  private async writing<T>(path: string, op: (movedAway: boolean) => Promise<T>): Promise<T> {
-    const at = normalizePath(path);
+  private renamesInFlight(): boolean {
+    return this.movingFiles.size > 0 || this.renamingDirs.size > 0;
+  }
+
+  private async writeWaits(at: string): Promise<boolean> {
     let away = false;
     for (let busy = this.writeBlocked(at); busy !== undefined; busy = this.writeBlocked(at)) {
       away ||= busy.away;
       await busy.done;
     }
-    this.fileWrites.set(at, (this.fileWrites.get(at) ?? 0) + 1);
-    try {
-      return await op(away);
-    } finally {
-      const left = (this.fileWrites.get(at) ?? 1) - 1;
-      if (left > 0) this.fileWrites.set(at, left);
-      else this.fileWrites.delete(at);
-      const idle = this.writesIdle;
-      this.writesIdle = undefined;
-      idle?.resolve();
-    }
+    return away;
+  }
+
+  private writeEnded(at: string): void {
+    const left = (this.fileWrites.get(at) ?? 1) - 1;
+    if (left > 0) this.fileWrites.set(at, left);
+    else this.fileWrites.delete(at);
+    const idle = this.writesIdle;
+    if (idle === undefined) return;
+    this.writesIdle = undefined;
+    idle.resolve();
   }
 
   private async writesDrained(tree: string): Promise<void> {
@@ -1327,8 +1335,15 @@ export class OpfsFs implements KernelFs {
     }
   }
 
-  truncate(path: string, size: number): Promise<void> {
-    return this.writing(path, () => this.truncated(path, size));
+  async truncate(path: string, size: number): Promise<void> {
+    const at = normalizePath(path);
+    if (this.renamesInFlight()) await this.writeWaits(at);
+    this.fileWrites.set(at, (this.fileWrites.get(at) ?? 0) + 1);
+    try {
+      await this.truncated(path, size);
+    } finally {
+      this.writeEnded(at);
+    }
   }
 
   private async truncated(path: string, size: number): Promise<void> {
