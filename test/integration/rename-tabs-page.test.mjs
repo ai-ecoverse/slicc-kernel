@@ -320,3 +320,92 @@ test("a peer's exclusive create into the source or the destination of a director
     assert.ok(wholeAs(BIG)(seen.stdout), seen.stdout);
   }
 });
+
+const rootWithModules = (page, dir) =>
+  page.evaluate(async (d) => {
+    const top = await navigator.storage.getDirectory();
+    const copy = async (from, to) => {
+      for await (const entry of from.values()) {
+        if (entry.kind === 'directory') {
+          await copy(entry, await to.getDirectoryHandle(entry.name, { create: true }));
+          continue;
+        }
+        const w = await (await to.getFileHandle(entry.name, { create: true })).createWritable();
+        await w.write(await entry.getFile());
+        await w.close();
+      }
+    };
+    const root = await top.getDirectoryHandle(d, { create: true });
+    await copy(
+      await top.getDirectoryHandle('node_modules'),
+      await root.getDirectoryHandle('node_modules', { create: true })
+    );
+  }, dir);
+
+test('a directory rename in one shared OPFS root does not stall the peers of another root on the same origin (#1314)', {
+  timeout: 1_500_000,
+}, async (t) => {
+  const { page } = await booted(chrome, t);
+  await installPackage(page, 'wasm-coreutils');
+  const other = await peerTab(page);
+  await rootWithModules(page, 'rooty');
+  for (const tab of [page, other]) {
+    await tab.evaluate(async () => {
+      const root = await (await navigator.storage.getDirectory()).getDirectoryHandle('rooty', {
+        create: true,
+      });
+      await window.secondKernel({ root }, 'y');
+    });
+  }
+  const shared = async () =>
+    Number((await sh(page, 'cat /proc/sys/kernel/slicc_shared_root', 'y')).stdout);
+  for (let i = 0; i < 300 && (await shared()) !== 1; i++) await sleep(100);
+  assert.equal(await shared(), 1);
+  assert.deepEqual(await sh(page, 'mkdir -p /r && echo y > /r/f && echo ok', 'y'), ok('ok\n'));
+  const dir = '/root/rs';
+  let overlapped = 0;
+  for (let round = 0; round < 6 && overlapped < 3; round++) {
+    assert.deepEqual(await sh(page, tree(dir, BIG)), ok('made\n'));
+    await page.evaluate((d) => {
+      window.mvDone = false;
+      window.mv = window.kernel.run(['mv', `${d}/a`, `${d}/b`], { cwd: '/' });
+      window.mv.then(() => {
+        window.mvDone = true;
+      });
+    }, dir);
+    await untilFound(page, `${dir.slice(1)}/b/lib`);
+    const r = await sh(other, 'cat /r/f', 'y');
+    const during = !(await page.evaluate(() => window.mvDone));
+    assert.deepEqual(r, ok('y\n'));
+    assert.equal((await page.evaluate(() => window.mv)).status, 0);
+    if (during) overlapped++;
+  }
+  assert.equal(overlapped, 3, 'a call on root y waited for the rename on root x to end');
+});
+
+test('a shared root whose metadata name holds an unpaired surrogate still renames a directory (#1339 review)', {
+  timeout: 600_000,
+}, async (t) => {
+  const { page } = await booted(chrome, t);
+  const other = await peerTab(page);
+  await rootWithModules(page, 'rootz');
+  for (const tab of [page, other]) {
+    await tab.evaluate(async () => {
+      const root = await (await navigator.storage.getDirectory()).getDirectoryHandle('rootz');
+      await window.secondKernel({ root, metadata: 'z:%\uD800' }, 'z');
+    });
+  }
+  const shared = async () =>
+    Number((await sh(page, 'cat /proc/sys/kernel/slicc_shared_root', 'z')).stdout);
+  for (let i = 0; i < 300 && (await shared()) !== 1; i++) await sleep(100);
+  assert.equal(await shared(), 1);
+  assert.deepEqual(
+    await sh(
+      page,
+      'mkdir -p /s/a/lib && echo x > /s/a/lib/f && mv /s/a /s/b && cat /s/b/lib/f',
+      'z'
+    ),
+    ok('x\n')
+  );
+  assert.deepEqual(await sh(other, 'cat /s/b/lib/f', 'z'), ok('x\n'));
+});

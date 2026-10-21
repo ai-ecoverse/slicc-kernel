@@ -70,6 +70,10 @@ interface MovableHandle {
 const RENAMES = '/.slicc-renames';
 const RENAME_LOCK = 'slicc-rename:';
 const RENAME_ADMIT = 'slicc-rename-admit:';
+const escapeRoot = (name: string): string =>
+  name.replace(/[%:]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+const LEGACY_RENAME_LOCK =
+  /^slicc-rename:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const PAIRED = new Set(['rename', 'link', 'copyFile']);
 const LISTINGS = new Set(['readdir', 'readdirStat']);
 const RETRY = Symbol('retry');
@@ -319,6 +323,7 @@ export class OpfsFs implements KernelFs {
   private readonly locks: LockManagerLike | undefined;
   private readonly lockPrefix: string;
   readonly rootName: string | undefined;
+  private readonly renamePrefix: string;
 
   constructor(
     root: FileSystemDirectoryHandle,
@@ -332,6 +337,7 @@ export class OpfsFs implements KernelFs {
     this.locks = options.locks === undefined ? lockManager() : (options.locks ?? undefined);
     this.lockPrefix = `slicc-excl:${channel ?? ''}:`;
     this.rootName = channel;
+    this.renamePrefix = `${RENAME_LOCK}${escapeRoot(channel ?? '')}:`;
     this.channel = channel === undefined ? undefined : new BroadcastChannel(channel);
     this.remote =
       channel === undefined
@@ -1691,7 +1697,7 @@ export class OpfsFs implements KernelFs {
     try {
       const locks = this.locks;
       if (locks) {
-        lock = `${RENAME_LOCK}${crypto.randomUUID()}`;
+        lock = `${this.renameLocks()}${crypto.randomUUID()}`;
         this.ownLocks.add(lock);
         call?.release();
         await this.admitted(locks, lock, source.path, destination, place, hooks);
@@ -1796,6 +1802,15 @@ export class OpfsFs implements KernelFs {
     return known;
   }
 
+  private renameLocks(): string {
+    return this.renamePrefix;
+  }
+
+  private renameHere(name: string | undefined): boolean {
+    if (name === undefined) return false;
+    return name.startsWith(this.renameLocks()) || LEGACY_RENAME_LOCK.test(name);
+  }
+
   private async learnRenames(): Promise<void> {
     for (const { rename } of await this.meta.under(RENAMES)) {
       if (rename?.lock === undefined || this.ownLocks.has(rename.lock)) continue;
@@ -1805,7 +1820,7 @@ export class OpfsFs implements KernelFs {
 
   private async renamingElsewhere(): Promise<boolean> {
     const { held = [] } = await (this.locks as LockManagerLike).query();
-    return held.some(({ name }) => name?.startsWith(RENAME_LOCK) && !this.ownLocks.has(name));
+    return held.some(({ name }) => this.renameHere(name) && !this.ownLocks.has(name as string));
   }
 
   private lookForRenames(): Promise<void> {
@@ -1820,7 +1835,9 @@ export class OpfsFs implements KernelFs {
         const unknown = () =>
           held.some(
             ({ name }) =>
-              name?.startsWith(RENAME_LOCK) && !this.ownLocks.has(name) && !this.peerMoves.has(name)
+              this.renameHere(name) &&
+              !this.ownLocks.has(name as string) &&
+              !this.peerMoves.has(name as string)
           );
         if (unknown()) await this.learnRenames();
         if (!unknown()) {
