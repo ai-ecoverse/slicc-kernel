@@ -5,13 +5,13 @@
   "platformAutomerge": true,
   "packageRules": [
     {
-      "description": "Majors open as drafts with no automerge: a draft is not reviewed, so they come to the Kernel Coordinator, who marks them ready.",
+      "description": "Majors open as drafts with no automerge, so they wait for the Kernel Coordinator, who marks them ready.",
       "matchUpdateTypes": ["major"],
       "draftPR": true,
       "automerge": false
     },
     {
-      "description": "Updates to files under .github/ (workflow and action pins, reusable shared-web workflows) can touch reviewer paths: drafts with no automerge, so they come to the Kernel Coordinator.",
+      "description": "Updates to files under .github/ (the pipeline pin) change CI itself: drafts with no automerge, so they wait for the Kernel Coordinator.",
       "matchFileNames": [".github/**"],
       "draftPR": true,
       "automerge": false

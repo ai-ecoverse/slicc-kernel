@@ -3,4 +3,3 @@ dist/
 coverage/
 artifacts/
 test/unit/
-test/integration/perf/.registry/
