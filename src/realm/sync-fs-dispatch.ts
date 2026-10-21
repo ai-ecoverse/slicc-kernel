@@ -111,6 +111,26 @@ async function readdirStat(
   return Promise.all(listed.map(async ([name, stat]) => [name, await shown(name, stat)]));
 }
 
+async function visibleRenames(
+  entry: SyncFsTokenEntry,
+  req: SyncFsRequest
+): Promise<{ now: number; renames: Array<[string, string]> }> {
+  const answer = entry.renames?.(req.offset ?? 0, heldPaths(req.arg2)) ?? { now: 0, renames: [] };
+  const g = guardOf(entry);
+  if (!g?.dac.enforcing) return answer;
+  const seen = (path: string) => walk(g.fs, g.cred, path, false, g.links);
+  const searchable = (path: string) => seen(path).then((w) => !w.denied, nothing);
+  const shown: Array<[string, string]> = [];
+  for (const [from, to] of answer.renames) {
+    if ((await searchable(from)) && (await searchable(to))) shown.push([from, to]);
+  }
+  return { now: answer.now, renames: shown };
+}
+
+function nothing(): false {
+  return false;
+}
+
 function heldPaths(arg: string | undefined): string[] {
   const held: unknown = JSON.parse(arg ?? '[]');
   return Array.isArray(held) ? held.filter((path): path is string => typeof path === 'string') : [];
@@ -830,8 +850,7 @@ async function linkFree(fs: SyncFsTokenEntry['fs'], path: string): Promise<boole
 }
 
 async function dispatchOne(entry: SyncFsTokenEntry, req: SyncFsRequest): Promise<SyncFsResult> {
-  if (req.op === 'renames')
-    return json(entry.renames?.(req.offset ?? 0, heldPaths(req.arg2)) ?? { now: 0, renames: [] });
+  if (req.op === 'renames') return json(await visibleRenames(entry, req));
   const result = await dispatchPath(entry, req);
   if (
     result.ok ||
