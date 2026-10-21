@@ -1,6 +1,7 @@
 export interface RemoteChange {
   paths: readonly string[];
   trees: readonly string[];
+  moved?: { from: string; to: string };
 }
 
 export interface PeerRename {

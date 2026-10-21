@@ -146,6 +146,7 @@ function settle<T>(transaction: IDBTransaction, value: () => T): Promise<T> {
 interface Invalidation {
   paths?: readonly string[];
   trees?: readonly string[];
+  moved?: { from: string; to: string };
 }
 
 const REMOVE_BATCH = 256;
@@ -283,7 +284,7 @@ export class IndexedDbMeta implements MetaStore {
       if (left) store.put(left);
     };
     await settle(transaction, () => undefined);
-    this.changed({ trees: [from, to] });
+    this.changed({ trees: [from, to], moved: { from, to } });
   }
 
   absent(path: string): boolean {

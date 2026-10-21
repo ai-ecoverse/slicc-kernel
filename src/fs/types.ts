@@ -98,7 +98,11 @@ export interface KernelFs {
   trackOwners?(): void;
   onPeer?(settle: () => Promise<void>): void;
   remoteChanges?(
-    listener: (change: { paths: readonly string[]; trees?: readonly string[] }) => void
+    listener: (change: {
+      paths: readonly string[];
+      trees?: readonly string[];
+      moved?: { from: string; to: string };
+    }) => void
   ): () => void;
   peers?(): Peers | undefined;
   crossings?(mounted: (path: string) => boolean): void;

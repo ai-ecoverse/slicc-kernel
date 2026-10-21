@@ -363,7 +363,8 @@ export class OpfsFs implements KernelFs {
       const remote = this.remote;
       (meta as { listen?: (l: (c: Partial<RemoteChange>) => void) => void }).listen?.((c) => {
         for (const path of [...(c.paths ?? []), ...(c.trees ?? [])]) this.forget(path);
-        remote?.emit({ paths: c.paths ?? [], trees: c.trees ?? [] });
+        const moved = movedOf(c.moved);
+        remote?.emit({ paths: c.paths ?? [], trees: c.trees ?? [], ...(moved ? { moved } : {}) });
       });
       remote?.listen((c) => {
         for (const path of [...c.paths, ...c.trees]) this.forget(path);
@@ -2118,6 +2119,7 @@ export class OpfsFs implements KernelFs {
         );
       }
       await this.meta.update(entry.path, () => undefined);
+      this.remote?.emit({ paths: [], trees: [], moved: { from, to } });
     } finally {
       this.renamingDirs.delete(barrier);
       resolve();
@@ -2475,6 +2477,13 @@ export class OpfsFs implements KernelFs {
     }
     return removed;
   }
+}
+
+function movedOf(moved: unknown): { from: string; to: string } | undefined {
+  const m = moved as { from?: unknown; to?: unknown } | undefined;
+  return typeof m?.from === 'string' && typeof m.to === 'string'
+    ? { from: m.from, to: m.to }
+    : undefined;
 }
 
 function nothing(): undefined {

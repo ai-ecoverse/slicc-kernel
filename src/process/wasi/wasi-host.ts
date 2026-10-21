@@ -1002,6 +1002,7 @@ export class WasiHost {
         const replaced = fds.holdsUnder(to) ? linkedElsewhere(o.fs, to) : undefined;
         o.fs.rename(from, to);
         fds.renamed(from, to, replaced);
+        fds.ownRename();
       },
       path_symlink: (tp: number, tl: number, dirfd: number, p: number, l: number) => {
         const path = at(dirfd, p, l);

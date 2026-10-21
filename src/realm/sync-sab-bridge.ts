@@ -9,6 +9,7 @@ import {
   type SyncFsBridgeStat,
   type SyncFsFileIo,
   type SyncFsPosixBridge,
+  type SyncFsRenames,
   type SyncFsResult,
   syncError,
 } from './sync-fs-wire.ts';
@@ -373,5 +374,10 @@ export function createSyncFsSabBridge(
       return undefined;
     },
     statfs: (path = '/') => parseSyncFsUsage(json({ op: 'statfs', path }, path)),
+    renames: (since, held) =>
+      json(
+        { op: 'renames', path: '/', offset: since, arg2: JSON.stringify(held) },
+        '/'
+      ) as SyncFsRenames,
   };
 }

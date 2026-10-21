@@ -111,6 +111,11 @@ async function readdirStat(
   return Promise.all(listed.map(async ([name, stat]) => [name, await shown(name, stat)]));
 }
 
+function heldPaths(arg: string | undefined): string[] {
+  const held: unknown = JSON.parse(arg ?? '[]');
+  return Array.isArray(held) ? held.filter((path): path is string => typeof path === 'string') : [];
+}
+
 async function usageAt(entry: SyncFsTokenEntry, path: string): Promise<SyncFsUsage | undefined> {
   if (!entry.statfs) return undefined;
   const real = await realTarget(entry.fs, path).catch(() => path);
@@ -825,6 +830,8 @@ async function linkFree(fs: SyncFsTokenEntry['fs'], path: string): Promise<boole
 }
 
 async function dispatchOne(entry: SyncFsTokenEntry, req: SyncFsRequest): Promise<SyncFsResult> {
+  if (req.op === 'renames')
+    return json(entry.renames?.(req.offset ?? 0, heldPaths(req.arg2)) ?? { now: 0, renames: [] });
   const result = await dispatchPath(entry, req);
   if (
     result.ok ||
