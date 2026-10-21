@@ -67,7 +67,39 @@ async function flood(ctx, [dir, count]) {
   await ctx.write(1, `${notes.includes('overflow')} ${notes.indexOf('overflow') > 0}\n`);
 }
 
-const MODES = { events, refused, closed, leave, flood };
+async function rewrite(ctx, [path, ready, ms]) {
+  const notes = [];
+  const watcher = ctx.sync.fs.watch(path, (note) => notes.push(line(note)));
+  await ctx.fs.writeFile(ready, '');
+  await new Promise((resolve) => setTimeout(resolve, Number(ms)));
+  watcher.close();
+  await ctx.write(1, `${notes.join('\n')}\n`);
+}
+
+async function sequence(ctx, [a, b]) {
+  const notes = [];
+  const seen = (label) => (note) => notes.push({ label, note });
+  const wa = ctx.sync.fs.watch(a, seen('A'));
+  const wb = ctx.sync.fs.watch(b, seen('B'));
+  const wf = ctx.sync.fs.watch(`${a}/x`, seen('F'));
+  ctx.sync.fs.writeFile(`${a}/x`, '1');
+  ctx.sync.fs.writeFile(`${b}/y`, '2');
+  ctx.sync.fs.writeFile(`${a}/x`, '3');
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  for (const w of [wa, wb, wf]) w.close();
+  const numbered = notes.every(({ note }) => Number.isInteger(note.seq) && note.seq > 0);
+  const order = [...notes].sort(
+    (p, q) => p.note.seq - q.note.seq || p.label.localeCompare(q.label)
+  );
+  const out = order.map(({ label, note }) => `${label} ${line(note)}`);
+  const by = new Map();
+  for (const { label, note } of notes)
+    by.set(`${note.seq}`, [...(by.get(`${note.seq}`) ?? []), label].sort());
+  const shared = [...by.values()].filter((labels) => labels.length > 1).map((l) => l.join('+'));
+  await ctx.write(1, `${numbered}\n${out.join('\n')}\n${shared.join(' ')}\n`);
+}
+
+const MODES = { events, refused, closed, leave, flood, rewrite, sequence };
 
 export default async function main(ctx) {
   const [mode, ...rest] = ctx.argv.slice(1);
