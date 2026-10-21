@@ -21,7 +21,7 @@ export interface Command {
   imports?: string;
   refused?: string;
   shows?: string;
-  origin?: { abi: string; glue: string; wasm: string };
+  origin?: { abi: string; glue: string; wasm: string; variants?: string[]; script?: true };
   variants?: CommandVariant[];
 }
 
@@ -436,7 +436,8 @@ export async function scanCommands(
   fs: KernelFs,
   modules: string | (string | string[])[],
   binsFrom = Number.POSITIVE_INFINITY,
-  kernel = KERNEL_VERSION
+  kernel = KERNEL_VERSION,
+  refused?: Command[]
 ): Promise<Map<string, Command>> {
   const found = new Map<string, Command>();
   const physical = physicalResolver(fs);
@@ -445,6 +446,7 @@ export async function scanCommands(
   );
   for (const [index, roots] of tiers.entries()) {
     const tier = await tierPackages(fs, physical, roots, index >= binsFrom, kernel);
+    if (refused) refused.push(...tier.flatMap((entry) => entry.commands.filter((c) => c.refused)));
     for (const [name, { pkg, command }] of winners(tier)) {
       if (!found.has(name)) found.set(name, await withPackagePaths(fs, pkg, command));
     }

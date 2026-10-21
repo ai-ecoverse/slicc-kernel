@@ -104,6 +104,7 @@ export interface WasmProcessInitMsg {
   sab: SharedArrayBuffer;
   changes?: SharedArrayBuffer;
   held?: HeldCwdInit;
+  hostname?: string | undefined;
   ppid?: number;
   umask?: number;
   cred?: Cred;

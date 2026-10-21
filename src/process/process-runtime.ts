@@ -1,7 +1,7 @@
 import type { Cred } from '../kernel/cred.ts';
 import type { DeviceMeta, HeldMeta, PollState } from '../kernel/fd-table.ts';
 import { type CwdAnswer, HeldCwd, type HeldCwdReply } from '../kernel/held-cwd.ts';
-import { hostnameOf } from '../kernel/net/loopback-names.ts';
+import { initHostname } from '../kernel/net/loopback-names.ts';
 import type { MountLine, ProcessListing } from '../kernel/proc-info.ts';
 import {
   type ForkState,
@@ -577,7 +577,7 @@ function kernelWrappers(imports: WebAssembly.Imports, module: object, deps: Wrap
   goneCwdGetcwd(imports, fsOf, kernelGlue);
   kernelLink(imports, fsOf, memory, kernelGlue);
   devCreations(imports, fsOf, memory, kernelGlue);
-  kernelUname(imports, hostnameOf(init.env), memory, kernelGlue);
+  kernelUname(imports, initHostname(init), memory, kernelGlue);
   wrapImport(
     imports,
     'flock',
@@ -770,7 +770,7 @@ export async function runWasmProcess(
     streams.quitting = on;
   });
   atExit = () => streams.exiting();
-  useMounts(running.FS, init.env, true);
+  useMounts(running.FS, { ...init.env, HOSTNAME: initHostname(init) }, true);
   useZeroDevices(running.FS);
   useProcfs(running.FS as unknown as ProcFs, sys, init.pid);
   if (init.fork) restoreForkedStreams(running.FS, streams, init.fork.streams ?? []);
@@ -808,7 +808,7 @@ export async function runWasmProcess(
     ...callerOwner(running.FS, init),
   });
   running.sliccKernel.http = createHttpKernel(transport);
-  running.sliccKernel.hostname = hostnameOf(init.env);
+  running.sliccKernel.hostname = initHostname(init);
   running.sliccKernel.net = createSocketKernel({
     transport,
     Fs: running.FS,

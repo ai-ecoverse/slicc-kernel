@@ -47,7 +47,7 @@ export interface MetaStore {
     root: (entry: MetaEntry | undefined) => MetaEntry,
     left?: MetaEntry
   ): Promise<void>;
-  remove(paths: readonly string[]): Promise<void>;
+  remove(paths: readonly string[], left?: MetaEntry): Promise<void>;
   links(dir: string): Promise<MetaEntry[]>;
   under(path: string): Promise<MetaEntry[]>;
   all(): Promise<MetaEntry[]>;
@@ -108,8 +108,9 @@ export class MemoryMeta implements MetaStore {
     if (left) this.entries.set(from, left);
   }
 
-  async remove(paths: readonly string[]): Promise<void> {
+  async remove(paths: readonly string[], left?: MetaEntry): Promise<void> {
     for (const path of paths) this.entries.deleteTree(path);
+    if (left) this.entries.set(left.path, left);
   }
 
   absent(path: string): boolean {
@@ -287,9 +288,9 @@ export class IndexedDbMeta implements MetaStore {
   private removing = new Map<string, string>();
   private removeTimer: ReturnType<typeof setTimeout> | undefined;
 
-  async remove(paths: readonly string[]): Promise<void> {
+  async remove(paths: readonly string[], left?: MetaEntry): Promise<void> {
     this.settleRemoves();
-    return this.removeNow(paths);
+    return this.removeNow(paths, left);
   }
 
   async removeFile(path: string): Promise<void> {
@@ -305,14 +306,16 @@ export class IndexedDbMeta implements MetaStore {
     );
   }
 
-  private async removeNow(paths: readonly string[]): Promise<void> {
+  private async removeNow(paths: readonly string[], left?: MetaEntry): Promise<void> {
     const [transaction, store] = this.transaction('readwrite');
     for (const path of paths) {
       store.delete(path);
       store.delete(descendants(path));
     }
+    if (left) store.put(left);
     await settle(transaction, () => undefined);
     this.changed({ trees: paths });
+    if (left) this.cache.set(left.path, left);
   }
 
   private settleRemoves(): void {

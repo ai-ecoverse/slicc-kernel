@@ -55,6 +55,40 @@ test('uname -n is the node name the kernel was given', async (t) => {
   assert.equal(r.stdout, 'box1\nbox1\n', r.stderr);
 });
 
+test('a program started with an empty environment gets no HOSTNAME, yet uname -n, hostname, /etc/hostname and a WASIX gethostname still give the kernel name, and a shell still has $HOSTNAME (#1272)', async (t) => {
+  const kernel = await createNodeKernel({ hostname: 'devbox' });
+  t.after(() => kernel.terminate());
+  await install(kernel, 'wasm-bash');
+  await install(kernel, 'wasm-coreutils');
+  const base = fileURLToPath(new URL('wasix-python/', modules));
+  for (const entry of (await readdir(base, { recursive: true, withFileTypes: true })).filter((e) =>
+    e.isFile()
+  )) {
+    const rel = relative(base, join(entry.parentPath, entry.name));
+    if (/^lib\/libpython[^/]*\.a$/.test(rel)) continue;
+    await kernel.writeFile(
+      `/node_modules/@ai-ecoverse/wasix-python/${rel}`,
+      await readFile(join(entry.parentPath, entry.name))
+    );
+  }
+  const r = await kernel.run(
+    [
+      'bash',
+      '-c',
+      [
+        'case "$(env -i env)" in *HOSTNAME=*) echo has ;; *) echo none ;; esac',
+        'env -i uname -n',
+        'env -i hostname',
+        'env -i cat /etc/hostname',
+        'env -i python3 -c "import socket; print(socket.gethostname())"',
+        'echo "shell $HOSTNAME"',
+      ].join('; '),
+    ],
+    { cwd: '/' }
+  );
+  assert.equal(r.stdout, 'none\ndevbox\ndevbox\ndevbox\ndevbox\nshell devbox\n', r.stderr);
+});
+
 test('a WASIX program as a user reads /etc/hostname as the node name, 0644 and root-owned, and a real /etc/hostname in the root wins (#1297)', async (t) => {
   const kernel = await createNodeKernel({ hostname: 'devbox', users: 'enforce' });
   t.after(() => kernel.terminate());
@@ -132,4 +166,86 @@ print(open('/etc/hostname').read().strip())
     { cwd: '/' }
   );
   assert.equal(wasi.stdout, 'third\n', wasi.stderr);
+});
+
+test('appending to or overwriting part of the synthetic /etc/hostname keeps its bytes, and the kernel reads it through a symlink to it or to /etc (#1306)', async (t) => {
+  const kernel = await createNodeKernel({ hostname: 'devbox' });
+  t.after(() => kernel.terminate());
+  await install(kernel, 'wasm-bash');
+  await install(kernel, 'wasm-coreutils');
+  const base = fileURLToPath(new URL('wasix-python/', modules));
+  for (const entry of (await readdir(base, { recursive: true, withFileTypes: true })).filter((e) =>
+    e.isFile()
+  )) {
+    const rel = relative(base, join(entry.parentPath, entry.name));
+    if (/^lib\/libpython[^/]*\.a$/.test(rel)) continue;
+    await kernel.writeFile(
+      `/node_modules/@ai-ecoverse/wasix-python/${rel}`,
+      await readFile(join(entry.parentPath, entry.name))
+    );
+  }
+  const run = (argv) => kernel.run(argv, { cwd: '/' });
+  const shell = await run(['bash', '-c', 'echo extra >> /etc/hostname && cat /etc/hostname']);
+  assert.equal(shell.stdout, 'devbox\nextra\n', shell.stderr);
+  await run(['bash', '-c', 'rm /etc/hostname']);
+  const append = await run([
+    'python3',
+    '-c',
+    "open('/etc/hostname', 'a').write('more\\n'); print(repr(open('/etc/hostname').read()))",
+  ]);
+  assert.equal(append.stdout, "'devbox\\nmore\\n'\n", append.stderr);
+  await run(['bash', '-c', 'rm /etc/hostname']);
+  const overwrite = await run([
+    'python3',
+    '-c',
+    "f = open('/etc/hostname', 'r+'); f.write('D'); f.close(); print(repr(open('/etc/hostname').read()))",
+  ]);
+  assert.equal(overwrite.stdout, "'Devbox\\n'\n", overwrite.stderr);
+  await run(['bash', '-c', 'rm /etc/hostname && ln -s /etc/hostname /tmp/host && ln -s /etc /e']);
+  const text = (bytes) => new TextDecoder().decode(bytes);
+  assert.equal(text(await kernel.readFile('/tmp/host')), 'devbox\n');
+  assert.equal(text(await kernel.readFile('/e/hostname')), 'devbox\n');
+  await assert.rejects(kernel.readFile('/tmp/none'), { code: 'ENOENT' });
+});
+
+test('a user appending to, overwriting or truncating the synthetic /etc/hostname gets EACCES and leaves no real file (#1306)', async (t) => {
+  const kernel = await createNodeKernel({ hostname: 'devbox', users: 'enforce' });
+  t.after(() => kernel.terminate());
+  await install(kernel, 'wasm-bash');
+  await install(kernel, 'wasm-coreutils');
+  const base = fileURLToPath(new URL('wasix-python/', modules));
+  for (const entry of (await readdir(base, { recursive: true, withFileTypes: true })).filter((e) =>
+    e.isFile()
+  )) {
+    const rel = relative(base, join(entry.parentPath, entry.name));
+    if (/^lib\/libpython[^/]*\.a$/.test(rel)) continue;
+    await kernel.writeFile(
+      `/node_modules/@ai-ecoverse/wasix-python/${rel}`,
+      await readFile(join(entry.parentPath, entry.name))
+    );
+  }
+  await kernel.users.add({ name: 'cone' });
+  const probe = `python3 -c "
+import os, errno
+for name, act in [('append', lambda: open('/etc/hostname', 'a').write('x')), ('pwrite', lambda: open('/etc/hostname', 'r+').write('X')), ('truncate', lambda: os.truncate('/etc/hostname', 3))]:
+    try:
+        act()
+        print(name, 'ok')
+    except OSError as e:
+        print(name, errno.errorcode[e.errno])
+"`;
+  const user = await kernel.run(['bash', '-c', probe], { cwd: '/home/cone', user: 'cone' });
+  assert.equal(user.stdout, 'append EACCES\npwrite EACCES\ntruncate EACCES\n', user.stderr);
+  const shell = await kernel.run(['bash', '-c', 'echo x >> /etc/hostname'], {
+    cwd: '/home/cone',
+    user: 'cone',
+  });
+  assert.notEqual(shell.status, 0);
+  const left = await kernel.run(
+    ['bash', '-c', 'cat /etc/hostname; stat -c "%Y %u %a" /etc/hostname'],
+    {
+      cwd: '/',
+    }
+  );
+  assert.equal(left.stdout, 'devbox\n0 0 644\n', left.stderr);
 });

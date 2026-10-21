@@ -87,6 +87,7 @@ export interface WasmWorkerLike {
 
 export interface SpawnWasmOptions {
   pid: number;
+  hostname?: string | undefined;
   admission: Admission;
   changes?: SharedArrayBuffer;
   cwds?: SharedArrayBuffer;
@@ -377,6 +378,7 @@ function processInit(
     args: opts.args,
     env: opts.env,
     cwd: opts.cwd,
+    hostname: opts.hostname,
     sab,
     umask,
     cred,

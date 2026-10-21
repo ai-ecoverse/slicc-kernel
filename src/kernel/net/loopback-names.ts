@@ -81,6 +81,13 @@ export function hostnameOf(env: Readonly<Record<string, string>>): string {
   return isHostname(env.HOSTNAME) ? env.HOSTNAME : DEFAULT_HOSTNAME;
 }
 
+export function initHostname(init: {
+  hostname?: string | undefined;
+  env: Readonly<Record<string, string>>;
+}): string {
+  return isHostname(init.hostname) ? init.hostname : hostnameOf(init.env);
+}
+
 export function ownNames(hostname: string): string[] {
   return [...new Set([hostname.toLowerCase(), ...LIBC_HOSTNAMES])];
 }
