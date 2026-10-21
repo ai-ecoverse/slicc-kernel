@@ -25,6 +25,7 @@ export interface SyncFsTokenEntry {
     since: number,
     held: readonly string[]
   ) => { now: number; renames: Array<[string, string]> };
+  renameSeq?: (from: string, to: string) => number | undefined;
   cred?: () => Readonly<Cred>;
   umask?: () => number;
   dac?: Dac;

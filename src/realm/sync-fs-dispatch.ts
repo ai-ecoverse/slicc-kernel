@@ -1,4 +1,4 @@
-import { permOf, R_OK, trustedLink, W_OK, walk } from '../fs/access.ts';
+import { permits, permOf, R_OK, trustedLink, W_OK, walk, X_OK } from '../fs/access.ts';
 import { callerStat } from '../fs/command-stat.ts';
 import { copyByBytes } from '../fs/copy.ts';
 import {
@@ -118,8 +118,13 @@ async function visibleRenames(
   const answer = entry.renames?.(req.offset ?? 0, heldPaths(req.arg2)) ?? { now: 0, renames: [] };
   const g = guardOf(entry);
   if (!g?.dac.enforcing) return answer;
-  const seen = (path: string) => walk(g.fs, g.cred, path, false, g.links);
-  const searchable = (path: string) => seen(path).then((w) => !w.denied, nothing);
+  const searchable = async (path: string) => {
+    const dir = path.slice(0, Math.max(1, path.lastIndexOf('/')));
+    const w = await walk(g.fs, g.cred, dir, true, g.links).catch(nothing);
+    if (w === false || w.denied || w.perm === undefined || !permits(g.cred, w.perm, X_OK))
+      return false;
+    return g.fs.stat(w.path).then((st) => st.isDirectory, nothing);
+  };
   const shown: Array<[string, string]> = [];
   for (const [from, to] of answer.renames) {
     if ((await searchable(from)) && (await searchable(to))) shown.push([from, to]);
@@ -282,7 +287,8 @@ async function run(
       const to = fs.resolvePath(cwd, req.arg2 ?? '');
       await fs.rename(path, to);
       entry.renamed?.(path, to);
-      return done;
+      const seq = entry.renameSeq?.(path, to);
+      return seq === undefined ? done : json({ seq });
     }
     case 'link':
       await fs.link(path, fs.resolvePath(cwd, req.arg2 ?? ''), req.mode === 1);

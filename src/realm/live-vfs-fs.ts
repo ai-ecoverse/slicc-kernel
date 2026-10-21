@@ -490,30 +490,30 @@ function renameFollower(
   call: <T>(fn: () => T) => T
 ) {
   const open = new Set<LiveFsNode>();
-  let seen: number | undefined;
+  const seen = new Map<SyncFsPosixBridge, number>();
   const follow = (node: LiveFsNode, missing = false): boolean => {
     const bridge = bridgeOf(node);
     const view = bridge.changes;
+    const since = seen.get(bridge);
     let now = view?.renames() ?? 0;
-    if (missing && view && now === seen) now = view.awaitRename(now, RENAME_WAIT_MS);
+    if (missing && view && now === since) now = view.awaitRename(now, RENAME_WAIT_MS);
     const ask = bridge.renames?.bind(bridge);
-    if (seen === undefined || now === seen || !ask) return false;
-    const held = [...open].filter((n) => !n.live.orphan);
+    if (since === undefined || now === since || !ask) return false;
+    const held = [...open].filter((n) => !n.live.orphan && bridgeOf(n) === bridge);
     if (held.length === 0) {
-      seen = now;
+      seen.set(bridge, now);
       return false;
     }
-    const since = seen;
     const reply = call(() =>
       ask(
         since,
         held.map((n) => liveNodePath(n))
       )
     );
-    seen = reply.now;
+    seen.set(bridge, reply.now);
     for (const [from, to] of reply.renames) {
-      for (const node of held) {
-        const moving = heldUnder(node, from);
+      for (const n of held) {
+        const moving = heldUnder(n, from);
         if (moving && inCache(Fs, moving)) relinked(Fs, moving, to);
       }
     }
@@ -531,11 +531,12 @@ function renameFollower(
       open.add(node);
     },
     watchRenames(bridge: SyncFsPosixBridge): void {
-      seen ??= bridge.changes?.renames() ?? 0;
+      if (!seen.has(bridge)) seen.set(bridge, bridge.changes?.renames() ?? 0);
     },
-    ownRename(bridge: SyncFsPosixBridge): void {
-      const now = bridge.changes?.renames() ?? 0;
-      if (seen !== undefined && now === ((seen + 1) | 0)) seen = now;
+    ownRename(bridge: SyncFsPosixBridge, seq: number | undefined): void {
+      const since = seen.get(bridge);
+      if (seq !== undefined && since !== undefined && seq === ((since + 1) | 0))
+        seen.set(bridge, seq);
     },
   };
 }
@@ -550,8 +551,8 @@ function followingOnce(write: () => void, follow: () => boolean): void {
 }
 
 function renameThrough(h: LiveHelpers, node: LiveFsNode, from: string, to: string): void {
-  h.call(() => h.bridgeOf(node).rename(from, to));
-  h.ownRename(h.bridgeOf(node));
+  const seq = h.call(() => h.bridgeOf(node).rename(from, to));
+  h.ownRename(h.bridgeOf(node), typeof seq === 'number' ? seq : undefined);
 }
 
 function heldStream(h: LiveHelpers, stream: LiveFsStream, change: 1 | -1): void {
