@@ -126,7 +126,8 @@ export class Resolver {
       const abort = new AbortController();
       lookup = { work: this.lookup(key, asked, id, abort.signal), abort, waiters: 0 };
       this.pending.set(id, lookup);
-      void lookup.work.then(() => this.pending.delete(id));
+      const done = () => this.pending.delete(id);
+      void lookup.work.then(done, done);
     }
     return waitFor(lookup, signal);
   }
@@ -150,7 +151,7 @@ export class Resolver {
         ])
       );
     } catch {
-      return [];
+      throw new KernelError('ETIMEDOUT', `resolve ${name}: the uplink gave no answer`);
     }
     const addresses = answer.addresses.filter((a) => this.usable(name, a, family));
     if (addresses.length > 0) this.remember(id, addresses, answer.ttl);
@@ -192,11 +193,15 @@ function waitFor(lookup: Lookup, signal: AbortSignal | undefined): Promise<strin
       reject(new KernelError('EINTR'));
     };
     signal?.addEventListener('abort', abort, { once: true });
-    void lookup.work.then((value) => {
+    const settle = (finish: () => void) => {
       if (signal?.aborted) return;
       lookup.waiters--;
       signal?.removeEventListener('abort', abort);
-      resolve(value);
-    });
+      finish();
+    };
+    void lookup.work.then(
+      (value) => settle(() => resolve(value)),
+      (err: unknown) => settle(() => reject(err))
+    );
   });
 }
