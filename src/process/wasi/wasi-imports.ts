@@ -13,6 +13,17 @@ export interface Request {
 
 export type Raw = (req: Request) => SyncFsResult;
 
+function finalLink(
+  fs: { lstat(path: string): { isSymbolicLink?: boolean } },
+  path: string
+): boolean {
+  try {
+    return fs.lstat(path).isSymbolicLink === true;
+  } catch {
+    return false;
+  }
+}
+
 export interface OpenOptions {
   read?: boolean;
   write?: boolean;
@@ -196,8 +207,7 @@ export function importsContext({
     open(path, o = {}) {
       const abs = host.fds.resolve(3, path);
       const fresh = o.create === true && o.exclusive === true && owners && fs.create !== undefined;
-      if (!fresh && o.nofollow && fs.exists(abs) && fs.lstat(abs).isSymbolicLink)
-        throw new WasiError('ELOOP');
+      if (!fresh && o.nofollow && finalLink(fs, abs)) throw new WasiError('ELOOP');
       const existed = !fresh && fs.exists(abs);
       const oflags =
         (o.create ? OFLAGS.CREAT : 0) |

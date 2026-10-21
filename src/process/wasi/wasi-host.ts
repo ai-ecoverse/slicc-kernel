@@ -1598,8 +1598,7 @@ export class WasiHost {
   }
 
   private finalLink(path: string, oflags: number, follow: boolean, alias: boolean): void {
-    const exclusive = (oflags & OFLAGS.CREAT) !== 0 && (oflags & OFLAGS.EXCL) !== 0;
-    if (follow && !exclusive) return;
+    if (follow) return;
     let link = alias;
     if (!link) {
       try {
@@ -1608,7 +1607,9 @@ export class WasiHost {
         return;
       }
     }
-    if (link) throw new WasiError(exclusive ? 'EEXIST' : 'ELOOP');
+    if (!link) return;
+    const exclusive = (oflags & OFLAGS.CREAT) !== 0 && (oflags & OFLAGS.EXCL) !== 0;
+    throw new WasiError(exclusive ? 'EEXIST' : 'ELOOP');
   }
 
   private readdir(fd: number, buf: number, len: number, cookie: number, usedPtr: number): void {
