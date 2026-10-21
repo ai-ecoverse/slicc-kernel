@@ -402,6 +402,7 @@ export class UnlinkedKeeper {
 
   private async keepAside(path: string): Promise<string | undefined> {
     const at = (await this.hide(path)) ?? (await this.hide(path));
+    console.warn(`DBG1198 keepAside ${path} -> ${at}`);
     if (at !== undefined || !(await this.present(path))) return at;
     throw fsError('EBUSY', `${path}: open, and it could not be kept aside`);
   }

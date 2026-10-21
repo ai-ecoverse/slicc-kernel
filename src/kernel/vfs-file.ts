@@ -226,6 +226,7 @@ export class VfsNode {
         if (this.path !== at) continue;
         this.data = new Uint8Array(0);
         this.missing = true;
+        console.warn(`DBG1198 load-missing ${at} orphaned=${this.orphaned}`);
       }
       this.length = this.data.length;
     }

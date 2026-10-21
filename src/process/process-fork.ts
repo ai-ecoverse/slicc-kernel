@@ -72,6 +72,9 @@ export function vfsPromoter(
       live.fsync?.(stream);
       const contents = orphanContents(stream);
       const held = heldOf((stream.node as LiveNodeBag).live);
+      console.warn(
+        `DBG1198 promote ${livePath(stream)} held=${JSON.stringify(held)} orphan=${contents !== undefined}`
+      );
       kfd = sys.openVfs(
         livePath(stream),
         stream.flags,

@@ -861,7 +861,20 @@ function holdLive(
 ): number | undefined {
   const s = node.live;
   const seen = on && s.stat ? { gen: s.stat.gen } : undefined;
-  return bridge.hold?.(liveNodePath(node), on, true, s.handle, want, seen);
+  try {
+    const handle = bridge.hold?.(liveNodePath(node), on, true, s.handle, want, seen);
+    holdTrace(node, on, handle);
+    return handle;
+  } catch (err) {
+    holdTrace(node, on, undefined, err);
+    throw err;
+  }
+}
+
+export function holdTrace(node: LiveFsNode, on: boolean, handle?: number, err?: unknown): void {
+  const code = (err as { code?: string } | undefined)?.code;
+  if (code !== undefined) console.warn(`DBG1198 hold-error ${code} ${liveNodePath(node)} on=${on}`);
+  else if (on && handle === undefined) console.warn(`DBG1198 no-handle ${liveNodePath(node)}`);
 }
 
 function dropOpen(s: LiveNodeState): boolean {
