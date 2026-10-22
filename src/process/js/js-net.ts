@@ -1,5 +1,6 @@
 import { E } from '../wasi/wasi-abi.ts';
 import { JsCallError, type JsKernel } from './js-kernel.ts';
+import type { JsSyncKernel } from './js-sync.ts';
 
 export interface JsAddress {
   host: string;
@@ -258,7 +259,15 @@ function port(n: number): number {
   return n;
 }
 
-export function netOps(kernel: JsKernel, io: NetIo): JsNet {
+export interface JsSyncNet {
+  listen(options?: JsListenOptions): JsListener;
+}
+
+export function netOps(
+  kernel: JsKernel,
+  io: NetIo,
+  sync?: JsSyncKernel
+): JsNet & { sync: JsSyncNet } {
   const name = async (fd: number, peer: boolean): Promise<JsAddress> =>
     addressOf(await kernel.json({ op: 'sock-name', fd, peer }));
 
@@ -387,15 +396,32 @@ export function netOps(kernel: JsKernel, io: NetIo): JsNet {
     return [...((r.ok && r.kind === 'json' ? r.json : []) as string[])];
   };
 
+  const inetAt = (options: JsListenOptions): InetAddr => ({
+    family: 'inet',
+    host: options.host ?? '127.0.0.1',
+    port: port(options.port ?? 0),
+  });
+
+  const listenSync = (options: JsListenOptions = {}): JsListener => {
+    const lane = sync as JsSyncKernel;
+    const addr = inetAt(options);
+    const fd = lane.json({ op: 'sock-open', domain: 'inet' }) as number;
+    try {
+      lane.call({ op: 'sock-bind', fd, addr });
+      lane.call({ op: 'sock-listen', fd, backlog: options.backlog ?? 128 });
+      return listener(fd, addressOf(lane.json({ op: 'sock-name', fd, peer: false })));
+    } catch (err) {
+      lane.raw({ op: 'fd-close', fd });
+      throw err;
+    }
+  };
+
   return {
+    sync: { listen: listenSync },
     resolve: lookup,
     listen: (options = {}) =>
       opened(async (fd) => {
-        const addr: InetAddr = {
-          family: 'inet',
-          host: options.host ?? '127.0.0.1',
-          port: port(options.port ?? 0),
-        };
+        const addr = inetAt(options);
         await kernel.call({ op: 'sock-bind', fd, addr });
         await kernel.call({ op: 'sock-listen', fd, backlog: options.backlog ?? 128 });
         return listener(fd, await name(fd, false));

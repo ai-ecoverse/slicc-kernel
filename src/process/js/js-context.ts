@@ -551,6 +551,15 @@ async function vfsOpen(
   return handle.file;
 }
 
+function setcredOn(syncKernel: JsSyncKernel): JsSyncContext['setcred'] {
+  return (change) => {
+    if (typeof change !== 'object' || change === null || Array.isArray(change)) {
+      throw new JsCallError('EINVAL', 'setcred');
+    }
+    return syncKernel.json({ op: 'proc-setcred', change: { ...change } }) as JsCred;
+  };
+}
+
 function watchingSyncOps(kernel: JsKernel, syncKernel: JsSyncKernel, shared: SyncShared) {
   const ops = syncOps(syncKernel, shared);
   const watch: JsSyncContext['fs']['watch'] = (path, options, listener) => {
@@ -735,6 +744,7 @@ export function createContext(o: ContextOptions): CreatedContext {
       runSync(syncKernel, { env: o.env, cwd: o.cwd, resolve, signal: signalNumber }, options),
     spawn: (options) => spawnSync(options),
     wasi: { create: wasi.create },
+    net: { listen: (options) => syncNet.listen(options) },
     exit: (status = 0): never => {
       exiting ??= status & 0xff;
       wasi.closeAll();
@@ -743,17 +753,13 @@ export function createContext(o: ContextOptions): CreatedContext {
     kill: killer({ self: o.pid, kernel, syncKernel, lane, writes, modes: terminal.modes }),
     cred: () => syncKernel.json({ op: 'proc-cred' }) as JsCred,
     umask: (mask) => syncKernel.json(umaskRequest(mask)) as number,
-    setcred(change) {
-      if (typeof change !== 'object' || change === null || Array.isArray(change)) {
-        throw new JsCallError('EINVAL', 'setcred');
-      }
-      return syncKernel.json({ op: 'proc-setcred', change: { ...change } }) as JsCred;
-    },
+    setcred: setcredOn(syncKernel),
   };
 
   const io = { read, send: writeAll, close: (fd: number) => ctx.close(fd) };
   const defaults = { env: o.env, cwd: o.cwd, signal: signalNumber };
   const { spawnSync, ...children } = childOps(kernel, io, defaults, syncKernel);
+  const { sync: syncNet, ...net } = netOps(kernel, io, syncKernel);
 
   const strays = o.strays ?? { exception: new Set(), rejection: new Set() };
   const ctx: JsProgramContext = {
@@ -805,7 +811,7 @@ export function createContext(o: ContextOptions): CreatedContext {
     crontab: async (call) =>
       (await kernel.json({ ...call, op: 'proc-crontab' })) as JsCrontabAnswer,
     ...children,
-    net: netOps(kernel, io),
+    net,
     websocket: websocketOp(kernel),
     tty: terminal.tty,
     exit,
