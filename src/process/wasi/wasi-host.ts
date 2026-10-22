@@ -1004,6 +1004,7 @@ export class WasiHost {
         const to = at(fd2, p2, l2);
         fds.flushPath(from);
         const replaced = fds.holdsUnder(to) ? linkedElsewhere(o.fs, to) : undefined;
+        if (replaced === undefined) fds.replacing(to);
         const seq = o.fs.rename(from, to);
         fds.renamed(from, to, replaced);
         fds.ownRename(typeof seq === 'number' ? seq : undefined);
@@ -1364,12 +1365,20 @@ export class WasiHost {
 
   private localFilestat(file: LocalFile): Filestat {
     const { buffer } = file;
-    if (buffer.isOrphan()) return this.statOrphanable(file.path, file.size(), false, true);
+    if (buffer.isOrphan()) {
+      const bound = buffer.bound;
+      if (!bound) return this.statOrphanable(file.path, file.size(), false, true);
+      return { ...this.sized(file.path, bound, file.size()), nlink: 0n };
+    }
     let s: SyncFsBridgeStat | undefined;
     try {
       s = this.o.fs.stat(file.path);
     } catch {
       s = this.keptStat(buffer.handle);
+    }
+    const bound = buffer.bound;
+    if (s && bound?.ino !== undefined && s.ino !== bound.ino) {
+      s = this.keptStat(buffer.handle) ?? bound;
     }
     return this.sized(file.path, s, file.size());
   }

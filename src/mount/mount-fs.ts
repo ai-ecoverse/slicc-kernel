@@ -132,6 +132,13 @@ export class HeldSet extends Set<HeldPaths> {
     return super.add(holds);
   }
 
+  doubt(paths: readonly string[], over?: string): void {
+    for (const holds of this) {
+      for (const path of paths) holds.doubt(path, true);
+      if (over !== undefined) holds.doubt(over);
+    }
+  }
+
   override delete(holds: HeldPaths): boolean {
     const removed = super.delete(holds);
     for (const path of new Set([...holds.keys(), ...holds.opens.keys()])) this.idle(path);
@@ -155,6 +162,9 @@ export class HeldPaths extends Map<string, number> implements UnlinkHolder {
   private readonly uses = new Map<KeptFile, number>();
   private lastHandle = 0;
   private owning: string | undefined;
+  private readonly bound = new Map<number, number>();
+  private readonly doubted = new Map<number, number>();
+  private doubts = 0;
 
   onIdle?: (path: string) => void;
 
@@ -181,6 +191,24 @@ export class HeldPaths extends Map<string, number> implements UnlinkHolder {
 
   private handlesAt(path: string): number[] {
     return [...this.handles].filter(([, key]) => key === path).map(([id]) => id);
+  }
+
+  doubt(over: string, exact = false): void {
+    if (this.bound.size === 0) return;
+    for (const [handle, key] of this.handles) {
+      if (!this.bound.has(handle) || this.keptHandles.has(handle)) continue;
+      if (exact ? key === over : within(key, over)) this.doubted.set(handle, ++this.doubts);
+    }
+  }
+
+  boundIno(handle: number): { ino: number; doubt: number } | undefined {
+    const doubt = this.doubted.get(handle);
+    const ino = this.bound.get(handle);
+    return doubt === undefined || ino === undefined ? undefined : { ino, doubt };
+  }
+
+  trust(handle: number, doubt: number): void {
+    if (this.doubted.get(handle) === doubt) this.doubted.delete(handle);
   }
 
   keptFor(handle: number): KeptFile | undefined {
@@ -231,9 +259,18 @@ export class HeldPaths extends Map<string, number> implements UnlinkHolder {
     on: boolean,
     open = false,
     real?: string,
-    handle?: number
+    handle?: number,
+    ino?: number
   ): number | undefined {
-    if (open) return this.holdOpen(path, on, real, handle);
+    if (open) {
+      const made = this.holdOpen(path, on, real, handle);
+      if (handle !== undefined) {
+        this.bound.delete(handle);
+        this.doubted.delete(handle);
+      }
+      if (made !== undefined && ino !== undefined) this.bound.set(made, ino);
+      return made;
+    }
     this.holdWrite(path, on);
     return undefined;
   }

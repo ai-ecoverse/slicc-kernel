@@ -202,6 +202,10 @@ function errnoError(code: string, path: string, direct?: true): Error & { code: 
   return direct ? Object.assign(err, { direct }) : err;
 }
 
+function holdSeen(seen: { gen?: number; nofollow?: boolean; ino?: number }) {
+  return { gen: seen.gen, ino: seen.ino, ...(seen.nofollow ? { nofollow: true } : {}) };
+}
+
 export function createSyncFsSabBridge(
   transport: SyncSabTransport,
   opts: {
@@ -389,9 +393,7 @@ export function createSyncFsSabBridge(
     hold: (path, held, open, handle, want = 0, seen = {}) => {
       const mode = (held ? 1 : 0) | (open ? 2 : 0);
       if (mode === 3) {
-        const at = seen.gen !== undefined ? { gen: seen.gen } : {};
-        const link = seen.nofollow ? { nofollow: true } : {};
-        return json({ op: 'hold', path, mode: mode | want, ...at, ...link }, path) as number;
+        return json({ op: 'hold', path, mode: mode | want, ...holdSeen(seen) }, path) as number;
       }
       run({ op: 'hold', path, mode, ...(handle !== undefined ? { handle } : {}) }, path);
       return undefined;

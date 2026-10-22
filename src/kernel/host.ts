@@ -447,7 +447,9 @@ function holdingToken(
     ...(opts.statfs ? { statfs: opts.statfs } : {}),
     ...(opts.renames ? { renames: opts.renames } : {}),
     ...(opts.renameSeq ? { renameSeq: opts.renameSeq } : {}),
-    hold: (path, on, open, real, handle) => holds.hold(path, on, open, real, handle),
+    hold: (path, on, open, real, handle, ino) => holds.hold(path, on, open, real, handle, ino),
+    boundIno: holds.boundIno.bind(holds),
+    trust: holds.trust.bind(holds),
     keptFor: (handle) => holds.keptFor(handle),
     unlinked: (path) => holds.keptAt(path),
     gate: (path, op) =>

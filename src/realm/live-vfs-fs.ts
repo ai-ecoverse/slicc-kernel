@@ -41,6 +41,7 @@ interface LiveNodeState {
   named?: number | undefined;
   watch?: RangedWatch | undefined;
   stat?: SyncFsBridgeStat;
+  bound?: SyncFsBridgeStat;
   statAt?: number;
   filledAt?: number;
   statGen?: number;
@@ -523,6 +524,7 @@ function renameFollower(
     open,
     follow,
     track(node: LiveFsNode, on: boolean): void {
+      node.live.bound = on && node.live.stat?.ino !== undefined ? node.live.stat : undefined;
       if (!on) {
         open.delete(node);
         return;
@@ -550,6 +552,47 @@ function followingOnce(write: () => void, follow: () => boolean): void {
   }
 }
 
+function openReplaced(
+  h: LiveHelpers,
+  dir: LiveFsNode,
+  name: string,
+  moving: LiveFsNode
+): { node: LiveFsNode; st: SyncFsBridgeStat } | undefined {
+  let node: LiveFsNode | undefined;
+  try {
+    node = h.Fs.lookupNode?.(dir, name);
+  } catch {
+    return undefined;
+  }
+  if (!node || node === moving || node.live?.openCount === 0 || !h.Fs.isFile(node.mode))
+    return undefined;
+  const st = freshStat(h, node);
+  if ((st.nlink ?? 1) > 1) return undefined;
+  const ranged = h.rangedOf(node);
+  if (ranged) ranged.prefetch();
+  else h.ensureLoaded(node);
+  return { node, st };
+}
+
+function renamedOver(
+  h: LiveHelpers,
+  dir: LiveFsNode,
+  name: string,
+  moving: LiveFsNode,
+  rename: () => void
+): void {
+  const replaced = openReplaced(h, dir, name, moving);
+  rename();
+  if (replaced) {
+    h.rangedOf(replaced.node)?.pin();
+    orphaned(h, replaced.node, replaced.st);
+  }
+  try {
+    const existing = h.Fs.lookupNode?.(dir, name);
+    if (existing && existing !== moving) h.Fs.hashRemoveNode?.(existing);
+  } catch {}
+}
+
 function renameThrough(h: LiveHelpers, node: LiveFsNode, from: string, to: string): void {
   const seq = h.call(() => h.bridgeOf(node).rename(from, to));
   h.ownRename(h.bridgeOf(node), typeof seq === 'number' ? seq : undefined);
@@ -565,6 +608,18 @@ function heldStream(h: LiveHelpers, stream: LiveFsStream, change: 1 | -1): void 
       h.bridgeOf(stream.node).hold?.(liveNodePath(stream.node), s.writers > 0);
     } catch {}
   }
+}
+
+function adopted(
+  node: LiveFsNode,
+  st: SyncFsBridgeStat,
+  asked: { statGen: number | undefined; filledAt: number }
+): boolean {
+  const bound = node.live.openCount > 0 ? node.live.bound : undefined;
+  if (bound && st.ino !== bound.ino) return false;
+  filled(node.live, st, asked);
+  node.mode = modeFromStat(st, exactIn(node));
+  return true;
 }
 
 function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
@@ -627,8 +682,7 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
     if (!cachedStat(node, Fs.isDir(node.mode), view)) {
       const asked = { statGen: view?.now(), filledAt: performance.now() };
       const st = call(() => bridgeOf(node).lstat(liveNodePath(linked.holder(node))));
-      filled(node.live, st, asked);
-      node.mode = modeFromStat(st, exactIn(node));
+      if (!adopted(node, st, asked)) return node.live.bound as SyncFsBridgeStat;
     }
     return node.live.stat as SyncFsBridgeStat;
   }
@@ -901,12 +955,7 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
       const from = liveNodePath(oldNode);
       const to = childPath(newDir, newName);
       flushNode(oldNode);
-      renameThrough(h, oldNode, from, to);
-
-      try {
-        const existing = Fs.lookupNode?.(newDir, newName);
-        if (existing && existing !== oldNode) Fs.hashRemoveNode?.(existing);
-      } catch {}
+      renamedOver(h, newDir, newName, oldNode, () => renameThrough(h, oldNode, from, to));
       oldNode.name = newName;
       oldNode.parent = newDir;
       oldNode.live.stat = undefined;
@@ -992,7 +1041,10 @@ function holdLive(
   want: number
 ): number | undefined {
   const s = node.live;
-  const seen = on && s.stat ? { gen: s.stat.gen } : undefined;
+  const seen =
+    on && s.stat
+      ? { gen: s.stat.gen, ...(s.stat.ino !== undefined ? { ino: s.stat.ino } : {}) }
+      : undefined;
   return bridge.hold?.(liveNodePath(node), on, true, s.handle, want, seen);
 }
 

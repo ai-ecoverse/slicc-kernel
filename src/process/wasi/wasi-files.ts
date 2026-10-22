@@ -43,6 +43,7 @@ export class FileBuffer {
   maxFile: number | undefined;
   handle: number | undefined;
   moved: ((missing: boolean) => boolean) | undefined;
+  bound: SyncFsBridgeStat | undefined;
 
   constructor(
     fs: SyncFsFileIo,
@@ -106,6 +107,11 @@ export class FileBuffer {
 
   keep(): void {
     if (this.ranged) this.ranged.pin();
+    else this.load();
+  }
+
+  prefetch(): void {
+    if (this.ranged) this.ranged.prefetch();
     else this.load();
   }
 

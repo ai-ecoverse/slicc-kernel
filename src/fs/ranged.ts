@@ -175,6 +175,11 @@ export class RangedFile {
   pin(): void {
     this.pinned = true;
     this.pages.pin();
+    this.prefetch();
+  }
+
+  prefetch(): void {
+    this.fresh();
     this.fetch(this.pages.missing(0, this.pages.length));
   }
 
