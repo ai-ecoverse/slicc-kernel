@@ -1819,15 +1819,24 @@ export class Launcher {
   ): Promise<[Program, { exeId?: string }]> {
     const read = () => this.program(target, env, caller);
     const id = () => this.exeId(target);
-    return Promise.all([read(), id()]).then(([first, before]) =>
-      id().then((after) =>
-        after.exeId === before.exeId
-          ? ([first, after] as [Program, { exeId?: string }])
-          : read().then((again) =>
-              id().then((last) => [again, last] as [Program, { exeId?: string }])
-            )
+    return id().then((before) =>
+      read().then((first) =>
+        id().then((after) =>
+          after.exeId === before.exeId
+            ? ([first, after] as [Program, { exeId?: string }])
+            : this.reread(target, read).then((again) =>
+                id().then((last) => [again, last] as [Program, { exeId?: string }])
+              )
+        )
       )
     );
+  }
+
+  private reread(target: Target, read: () => Promise<Program>): Promise<Program> {
+    for (const key of this.compiled.keys()) {
+      if (key.startsWith(`${target.wasm}:`)) this.compiled.delete(key);
+    }
+    return read();
   }
 
   private exeId(target: Target): Promise<{ exeId?: string }> {
