@@ -88,6 +88,10 @@ function ownBytes(bytes: Uint8Array): Uint8Array {
   return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength).slice();
 }
 
+function ownedBuffer(body: Uint8Array, given: Uint8Array): Transferable[] | undefined {
+  return body === given ? undefined : [body.buffer as ArrayBuffer];
+}
+
 export {
   type ProcessFs,
   type ProcessStream,
@@ -98,8 +102,12 @@ export {
 const FS_OPS: ReadonlySet<string> = new Set(SYNC_FS_OPS);
 
 export function kernelSys(transport: SyncSabTransport): ProcessSys & PtyKernel & LockKernel {
-  const call = (req: SyncSabRequestBody, label: string): SyncFsResult => {
-    const r = transport.call(req, Number.POSITIVE_INFINITY, label);
+  const call = (
+    req: SyncSabRequestBody,
+    label: string,
+    transfer?: Transferable[]
+  ): SyncFsResult => {
+    const r = transport.call(req, Number.POSITIVE_INFINITY, label, transfer);
     if (!r.ok) throw new SyscallError(r.errno);
     return r;
   };
@@ -114,13 +122,14 @@ export function kernelSys(transport: SyncSabTransport): ProcessSys & PtyKernel &
       return r.ok && r.kind === 'bytes' ? r.bytes : new Uint8Array(0);
     },
     write(fd, bytes, opts) {
+      const body = ownBytes(bytes);
       const req = {
         op: 'fd-write' as const,
         fd,
-        body: ownBytes(bytes),
+        body,
         ...(opts?.nonblock ? { nonblock: true } : {}),
       };
-      const n = json(call(req, `fd-write ${fd}`));
+      const n = json(call(req, `fd-write ${fd}`, ownedBuffer(body, bytes)));
       return typeof n === 'number' ? n : bytes.length;
     },
     close(fd) {
@@ -165,8 +174,9 @@ export function kernelSys(transport: SyncSabTransport): ProcessSys & PtyKernel &
       return r.ok && r.kind === 'bytes' ? r.bytes : new Uint8Array(0);
     },
     pwrite(fd, bytes, at) {
+      const body = ownBytes(bytes);
       return json(
-        call({ op: 'fd-pwrite', fd, offset: at, body: ownBytes(bytes) }, `fd-pwrite ${fd}`)
+        call({ op: 'fd-pwrite', fd, offset: at, body }, `fd-pwrite ${fd}`, ownedBuffer(body, bytes))
       ) as number;
     },
     isatty(fd) {

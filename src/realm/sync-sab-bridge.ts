@@ -63,6 +63,25 @@ const UNCOUNTED_OPS: ReadonlySet<string> = new Set([...SYNC_FS_OPS, 'cwd-check',
 
 let calls = 0;
 
+export function exactBody<T extends object>(
+  req: T,
+  transfer: Transferable[] = []
+): { req: T; transfer: Transferable[] } {
+  const body: unknown = (req as { body?: unknown }).body;
+  if (!ArrayBuffer.isView(body)) return { req, transfer };
+  if (Object.prototype.toString.call(body.buffer) === '[object SharedArrayBuffer]') {
+    return { req, transfer };
+  }
+  const whole =
+    (body as { constructor?: unknown }).constructor === Uint8Array &&
+    body.byteOffset === 0 &&
+    body.byteLength === body.buffer.byteLength;
+  if (whole) return { req, transfer };
+  const copy = new Uint8Array(body.byteLength);
+  copy.set(new Uint8Array(body.buffer, body.byteOffset, body.byteLength));
+  return { req: { ...req, body: copy }, transfer: [...transfer, copy.buffer] };
+}
+
 export function syncCallCount(): number {
   return calls;
 }
@@ -130,8 +149,9 @@ export function createSyncSabTransport(
   }
 
   return {
-    call(req, timeoutMs, label, transfer = []): SyncFsResult {
+    call(asked, timeoutMs, label, given = []): SyncFsResult {
       if (deps.memory) publishMemory(sab, deps.memory());
+      const { req, transfer } = exactBody(asked, given);
       const id = ++seq;
       calls += Number(!UNCOUNTED_OPS.has(req.op));
       let out: Uint8Array | null = null;
