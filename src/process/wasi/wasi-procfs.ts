@@ -391,14 +391,18 @@ function directMiss(err: unknown, path: string): boolean {
   return !path.split('/').some((part) => part === '.' || part === '..');
 }
 
+const GONE = new Set(['ENOENT', 'ENOTDIR']);
+
 function same(fs: SyncFsPosixBridge, path: string, id: string): boolean {
+  let st: ReturnType<SyncFsPosixBridge['stat']>;
   try {
-    const st = fs.stat(path);
-    const now = fileIdentity(st.ino, st.mtimeMs);
-    return now === undefined || now === id;
-  } catch {
-    return false;
+    st = fs.stat(path);
+  } catch (err) {
+    if (GONE.has((err as { code?: string } | null)?.code ?? '')) return false;
+    throw err;
   }
+  const now = fileIdentity(st.ino, st.mtimeMs);
+  return now === undefined || now === id;
 }
 
 function current(fs: SyncFsPosixBridge, tree: ProcTree, q: string): string | undefined {
@@ -425,7 +429,11 @@ function shownLink(fs: SyncFsPosixBridge, tree: ProcTree, q: string): string {
   const target = tree.readlink(q);
   const to = tree.linkTo(q);
   if (!to) return target;
-  return same(fs, to.target, to.id) ? target : `${target} (deleted)`;
+  try {
+    return same(fs, to.target, to.id) ? target : `${target} (deleted)`;
+  } catch {
+    return target;
+  }
 }
 
 function routing(
