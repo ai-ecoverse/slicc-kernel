@@ -24,7 +24,7 @@ const counters = async (bash) =>
     .split('\n')
     .map(Number);
 
-test(`a serial, offline pnpm install of bios's agent into /opt/agent on the OPFS root stays within ${CALLS_MAX} kernel calls and ${REQUESTS_MAX} OPFS requests: CI measured 41.6k and 241.5k on a slow runner (OPFS requests rise there as the 2 ms glance lapses, #1425), plus headroom (wall time printed, not gated)`, {
+test(`a serial offline agent install stays within ${CALLS_MAX} calls and ${REQUESTS_MAX} OPFS requests, limits from slow CI runners (#1425)`, {
   timeout: 600_000,
 }, async (t) => {
   const { page, bash } = await booted(chrome, t, { users: 'enforce', registry: true });
