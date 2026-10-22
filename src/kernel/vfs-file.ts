@@ -177,7 +177,7 @@ export class VfsNode {
     this.ranged = undefined;
   }
 
-  private async prepare(): Promise<AsyncRangedFile | undefined> {
+  private async prepare(onFd = true): Promise<AsyncRangedFile | undefined> {
     if (this.revoked) throw new KernelError('EIO');
     if (this.ranged || this.data) return this.ranged;
     const io = rangedOps(this.fs);
@@ -192,18 +192,18 @@ export class VfsNode {
       this.ranged = new AsyncRangedFile(io, this.path, st.size ?? 0, st.version);
       return this.ranged;
     }
-    await this.load();
+    await this.load(onFd);
     return undefined;
   }
 
   async keep(): Promise<void> {
-    const ranged = await this.prepare();
-    if (ranged) await this.followed(() => ranged.pin());
+    const ranged = await this.prepare(false);
+    if (ranged) await this.followed(() => ranged.pin(), false);
   }
 
   readonly moving = new Set<Promise<void>>();
 
-  private async followed<T>(op: () => Promise<T>): Promise<T> {
+  private async followed<T>(op: () => Promise<T>, onFd = true): Promise<T> {
     for (;;) {
       const at = this.path;
       try {
@@ -211,12 +211,12 @@ export class VfsNode {
       } catch (err) {
         if (!isMissing(err)) throw err;
         while (this.moving.size > 0) await Promise.all(this.moving);
-        if (this.path === at) throw err;
+        if (this.path === at) throw onFd && !this.made ? new KernelError('EIO') : err;
       }
     }
   }
 
-  async load(): Promise<Uint8Array> {
+  async load(onFd = true): Promise<Uint8Array> {
     if (this.revoked) throw new KernelError('EIO');
     while (!this.data) {
       const at = this.path;
@@ -226,7 +226,7 @@ export class VfsNode {
         if (!isMissing(err)) throw err;
         while (this.moving.size > 0) await Promise.all(this.moving);
         if (this.path !== at) continue;
-        if (!this.made) throw new KernelError('ENOENT');
+        if (!this.made) throw new KernelError(onFd ? 'EIO' : 'ENOENT');
         this.data = new Uint8Array(0);
         this.missing = true;
       }
