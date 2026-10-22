@@ -317,6 +317,7 @@ interface Target {
   asked?: string;
   variants?: readonly CommandVariant[];
   copy?: string;
+  shim?: string;
 }
 
 interface Compiled {
@@ -403,6 +404,8 @@ function linksOf(req: StartRequest): { links?: number } {
 }
 
 const COMMAND = /^\/(?:usr\/)?bin\/([^/]+)$/;
+const SHIM_MARKER = /^\/\/ pnpm-wasm-shim=(\{.*\})$/gm;
+const SHIM_MAX = 64 * 1024;
 const PACKAGE_ROOT = /^(.*\/node_modules\/(?:@[^/]+\/)?[^/]+)\//;
 const ENV_REFERENCE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
 const WASM_MAGIC = [0x00, 0x61, 0x73, 0x6d];
@@ -1162,7 +1165,10 @@ export class Launcher {
       return { abi: 'emscripten', glue, wasm, argv0: baseName(argv0 || file), ...asked };
     }
     const owner = await this.glueOwner(glue, baseName(file), scope);
-    if (!owner) return undefined;
+    if (!owner) {
+      const shim = await this.shimOwner(glue, baseName(file), scope);
+      return shim && { ...targetOf(shim), ...asked, shim: glue };
+    }
     return { ...targetOf(owner), ...asked, ...(owner.glue === glue ? {} : { copy: glue }) };
   }
 
@@ -1199,6 +1205,46 @@ export class Launcher {
       if (origin.abi !== 'emscripten' || origin.script || c.name !== name) continue;
       const own = await physicalPathAsync(this.base, origin.glue).catch(() => origin.glue);
       if (own.slice(0, own.lastIndexOf('/')) === dir && (await this.sameFile(real, own))) return c;
+    }
+    return undefined;
+  }
+
+  private async shimOwner(script: string, name: string, scope: string) {
+    const command = (await this.commands(scope)).get(name);
+    if (!command || command.script || command.origin?.script) return undefined;
+    const target = await this.shimTarget(script);
+    if (target === undefined) return undefined;
+    const pkg = await this.installedPackage(await physicalPathAsync(this.base, target), scope);
+    if (!pkg) return undefined;
+    const glue = command.origin?.glue ?? command.glue;
+    const own = await physicalPathAsync(this.base, glue).catch(() => undefined);
+    return own?.startsWith(`${pkg}/`) ? command : undefined;
+  }
+
+  private async shimTarget(script: string): Promise<string | undefined> {
+    const st = await this.base.stat(script).catch(() => undefined);
+    if (!st?.isFile || st.size > SHIM_MAX) return undefined;
+    const text = await this.base.readFile(script).catch(() => '');
+    const marker = [...text.matchAll(SHIM_MARKER)].at(-1)?.[1];
+    if (marker === undefined) return undefined;
+    let target: unknown;
+    try {
+      target = (JSON.parse(marker) as { target?: unknown }).target;
+    } catch {
+      return undefined;
+    }
+    if (typeof target !== 'string' || target === '') return undefined;
+    const dir = await physicalPathAsync(this.base, script.slice(0, script.lastIndexOf('/')) || '/');
+    return this.fs.resolvePath(dir, target);
+  }
+
+  private async installedPackage(real: string, scope: string): Promise<string | undefined> {
+    for (const root of await this.roots(scope)) {
+      const top = await physicalPathAsync(this.base, root).catch(() => undefined);
+      if (!top || !real.startsWith(`${top}/`)) continue;
+      const [first = '', second] = real.slice(top.length + 1).split('/');
+      const pkg = first.startsWith('@') && second ? `${top}/${first}/${second}` : `${top}/${first}`;
+      if (pkg !== real && (await this.base.exists(`${pkg}/package.json`))) return pkg;
     }
     return undefined;
   }
@@ -1320,7 +1366,12 @@ export class Launcher {
     const found = await this.resolve(file, argv[0] ?? file, cwd, scope);
     const named = typeof argv0 === 'string' && found && !found.fixed;
     const direct = named ? { ...found, argv0 } : found;
-    if (direct) return { target: direct, args: [...(direct.prefix ?? []), ...argv.slice(1)] };
+    if (direct) {
+      const shim = direct.shim
+        ? { sources: [direct.shim], asked: direct.asked ? { [direct.shim]: direct.asked } : {} }
+        : {};
+      return { target: direct, args: [...(direct.prefix ?? []), ...argv.slice(1)], ...shim };
+    }
     if (catalogOnly && !(await this.scriptCommand(file, cwd, scope))) return undefined;
     const script = await this.interpreted(file, argv, cwd, scope);
     return script && { ...script, script: true };
