@@ -116,3 +116,38 @@ test("reads through the file's sync access handle don't stop another tab writing
   assert.ok(wrote > 0);
   assert.match(loop.stdout, /^reads [1-9]\d*\n$/);
 });
+
+test('small reads in a tight loop never refuse a writer outside the kernel (#1431, #1017)', {
+  timeout: 1_500_000,
+}, async (t) => {
+  const { page } = await booted(chrome, t);
+  await installPackage(page, 'wasm-coreutils');
+  await installPackage(page, 'wasix-python', { skip: /^lib\/libpython[^/]*\.a$/ });
+  await page.evaluate(
+    (s) => window.opfs.write('tmp/loop.py', s),
+    LOOP.replace('1 << 20', '4096').replace('1 << 20', '4096')
+  );
+  await page.evaluate(() => window.opfs.write('tmp/small', 'x'.repeat(4096)));
+  await page.evaluate(() => window.kernel.run(['rm', '-f', '/tmp/stop'], { cwd: '/' }));
+  await page.evaluate(() => {
+    window.loopRun = window.kernel.run(['python3', '/tmp/loop.py', '/tmp/small', '/tmp/stop'], {
+      cwd: '/',
+    });
+  });
+  const refused = await page.evaluate(async () => {
+    let refused = 0;
+    for (let i = 0; i < 1000; i++) {
+      try {
+        await window.opfs.write('tmp/small', String(i % 10).repeat(4096));
+      } catch {
+        refused++;
+      }
+    }
+    await window.opfs.write('tmp/stop', '');
+    return refused;
+  });
+  const loop = await page.evaluate(() => window.loopRun);
+  console.log(`outside writes refused ${refused}, ${loop.stdout.trim()}`);
+  assert.equal(loop.status, 0, loop.stderr);
+  assert.equal(refused, 0);
+});
