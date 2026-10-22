@@ -206,3 +206,35 @@ test('a WASI program run from a tmpfs or a hostfs mount reads its /proc/self/exe
     stderr: '',
   });
 });
+
+test('/proc/self/exe of a program whose directory becomes unsearchable is not deleted: readlink keeps the plain path and following it fails with EACCES (#1329)', {
+  timeout: 120_000,
+}, async (t) => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils', 'wasix-python']) await install(kernel, name);
+  await kernel.users.add({ name: 'cone' });
+  const bin = '/node_modules/@ai-ecoverse/wasix-python/bin';
+  const script = [
+    'import os, time',
+    "open('/tmp/x1329/ready', 'w').close()",
+    "while not os.path.exists('/tmp/x1329/go'): time.sleep(0.01)",
+    "print(os.readlink('/proc/self/exe'))",
+    'try:',
+    "    os.stat('/proc/self/exe'); print('stat ok')",
+    'except OSError as e:',
+    '    print(e.strerror)',
+  ].join('\n');
+  await kernel.run(['bash', '-c', 'rm -rf /tmp/x1329 && mkdir -m 777 /tmp/x1329'], { cwd: '/' });
+  const running = kernel.run(['python3', '-c', script], { cwd: '/', user: 'cone' });
+  const ready = () =>
+    kernel.readFile('/tmp/x1329/ready').then(
+      () => true,
+      () => false
+    );
+  while (!(await ready())) await new Promise((resolve) => setTimeout(resolve, 10));
+  await kernel.run(['bash', '-c', `chmod 700 ${bin} && touch /tmp/x1329/go`], { cwd: '/' });
+  const r = await running;
+  await kernel.run(['bash', '-c', `chmod 755 ${bin}`], { cwd: '/' });
+  assert.deepEqual(r, { status: 0, stdout: `${bin}/python.wasm\nPermission denied\n`, stderr: '' });
+});
