@@ -169,6 +169,19 @@ export class VfsNode {
     return next;
   }
 
+  private named = 0;
+
+  byName<T>(op: () => Promise<T>): Promise<T> {
+    return this.serial(async () => {
+      this.named++;
+      try {
+        return await op();
+      } finally {
+        this.named--;
+      }
+    });
+  }
+
   revoke(): void {
     this.revoked = true;
     clearTimeout(this.writeBack);
@@ -177,7 +190,7 @@ export class VfsNode {
     this.ranged = undefined;
   }
 
-  private async prepare(): Promise<AsyncRangedFile | undefined> {
+  private async prepare(onFd = this.named === 0): Promise<AsyncRangedFile | undefined> {
     if (this.revoked) throw new KernelError('EIO');
     if (this.ranged || this.data) return this.ranged;
     const io = rangedOps(this.fs);
@@ -192,18 +205,18 @@ export class VfsNode {
       this.ranged = new AsyncRangedFile(io, this.path, st.size ?? 0, st.version);
       return this.ranged;
     }
-    await this.load();
+    await this.load(onFd);
     return undefined;
   }
 
   async keep(): Promise<void> {
-    const ranged = await this.prepare();
-    if (ranged) await this.followed(() => ranged.pin());
+    const ranged = await this.prepare(false);
+    if (ranged) await this.followed(() => ranged.pin(), false);
   }
 
   readonly moving = new Set<Promise<void>>();
 
-  private async followed<T>(op: () => Promise<T>): Promise<T> {
+  private async followed<T>(op: () => Promise<T>, onFd = this.named === 0): Promise<T> {
     for (;;) {
       const at = this.path;
       try {
@@ -211,12 +224,12 @@ export class VfsNode {
       } catch (err) {
         if (!isMissing(err)) throw err;
         while (this.moving.size > 0) await Promise.all(this.moving);
-        if (this.path === at) throw err;
+        if (this.path === at) throw onFd && !this.made ? new KernelError('EIO') : err;
       }
     }
   }
 
-  async load(): Promise<Uint8Array> {
+  async load(onFd = this.named === 0): Promise<Uint8Array> {
     if (this.revoked) throw new KernelError('EIO');
     while (!this.data) {
       const at = this.path;
@@ -226,7 +239,7 @@ export class VfsNode {
         if (!isMissing(err)) throw err;
         while (this.moving.size > 0) await Promise.all(this.moving);
         if (this.path !== at) continue;
-        if (!this.made) throw new KernelError('ENOENT');
+        if (!this.made) throw new KernelError(onFd ? 'EIO' : 'ENOENT');
         this.data = new Uint8Array(0);
         this.missing = true;
       }
@@ -843,7 +856,7 @@ function heldIo(fs: KernelFs, nodes: VfsNodes, changed: (path: string) => void):
   ) => {
     const held = await node(path);
     if (!held) return fallback();
-    const out = await held.serial(async () => {
+    const out = await held.byName(async () => {
       const done = await op(held);
       await held.flush();
       return done;
@@ -876,23 +889,23 @@ function heldIo(fs: KernelFs, nodes: VfsNodes, changed: (path: string) => void):
     async stat(path) {
       const st = await fs.stat(path);
       const held = st.isFile ? await node(path) : undefined;
-      return held ? { ...st, size: await held.serial(() => held.size()) } : st;
+      return held ? { ...st, size: await held.byName(() => held.size()) } : st;
     },
     async lstat(path) {
       const st = await fs.lstat(path);
       const held = st.isFile && !st.isSymbolicLink ? await node(path) : undefined;
-      return held ? { ...st, size: await held.serial(() => held.size()) } : st;
+      return held ? { ...st, size: await held.byName(() => held.size()) } : st;
     },
     async readFileBuffer(path) {
       const held = await node(path);
       if (!held) return fs.readFileBuffer(path);
-      return held.serial(async () => held.pread(await held.size(), 0));
+      return held.byName(async () => held.pread(await held.size(), 0));
     },
     ...(ranged
       ? {
           pread: async (path: string, at: number, n: number, version?: string) => {
             const held = await node(path);
-            return held ? held.serial(() => held.pread(n, at)) : ranged.pread(path, at, n, version);
+            return held ? held.byName(() => held.pread(n, at)) : ranged.pread(path, at, n, version);
           },
           pwrite: (path: string, at: number, bytes: Uint8Array, transfer?: boolean) =>
             write(
@@ -951,7 +964,7 @@ export function keepingOpen(
       const held = await heldAt(fs, nodes, at);
       if (!held) return nodes.onEntry(at, () => fs.writeFile(path, content, owner));
       const bytes = typeof content === 'string' ? new TextEncoder().encode(content) : content;
-      return held.serial(async () => {
+      return held.byName(async () => {
         await held.truncate(0);
         await held.pwrite(bytes, 0);
         await held.flush();
