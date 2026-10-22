@@ -31,6 +31,7 @@ export const SYNC_FS_OPS = [
   'chown',
   'lchown',
   'access',
+  'renames',
 ] as const;
 
 export type AccessKind = 'open' | 'access' | 'eaccess' | 'follow';
@@ -85,6 +86,7 @@ export const SYNC_FS_READ_ONLY: ReadonlySet<string> = new Set([
   'statfs',
   'kept',
   'access',
+  'renames',
 ]);
 
 export interface SyncFsBridgeStat {
@@ -150,7 +152,7 @@ export interface SyncFsPosixBridge {
   exists(path: string): boolean;
   mkdir(path: string, mode?: number): void;
   rm(path: string): void;
-  rename(from: string, to: string): void;
+  rename(from: string, to: string): number | undefined | void;
   link(from: string, to: string, follow?: boolean): void;
   unlink(path: string): void;
   rmdir(path: string): void;
@@ -184,6 +186,12 @@ export interface SyncFsPosixBridge {
   identify?(): void;
   identifyNext?(): void;
   identified?(): SyncFsBridgeStat | null;
+  renames?(since: number, held: readonly string[]): SyncFsRenames;
+}
+
+export interface SyncFsRenames {
+  now: number;
+  renames: Array<[string, string]>;
 }
 
 export function syncError(code: string, label: string): Error & { code: string } {
