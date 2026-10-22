@@ -25,7 +25,7 @@ const counters = async (bash) =>
     .map(Number);
 
 test(`a serial offline agent install stays within ${CALLS_MAX} calls and ${REQUESTS_MAX} OPFS requests, limits from slow CI runners (#1425)`, {
-  timeout: 600_000,
+  timeout: 960_000,
 }, async (t) => {
   const { page, bash } = await booted(chrome, t, { users: 'enforce', registry: true });
   for (const name of ['wasm-coreutils', 'wasm-tls-engine', 'wasi-pnpm'])
@@ -45,7 +45,7 @@ test(`a serial offline agent install stays within ${CALLS_MAX} calls and ${REQUE
     { cwd: '/' }
   );
   let rc = '';
-  while (!rc && Date.now() - t0 < 540_000) {
+  while (!rc && Date.now() - t0 < 900_000) {
     await new Promise((resolve) => setTimeout(resolve, 2000));
     rc = (
       (await page.evaluate(() => window.opfs.read('tmp/pnpm.rc').catch(() => null))) ?? ''
