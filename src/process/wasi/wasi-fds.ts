@@ -1046,6 +1046,7 @@ export class WasiFds {
     const fd = this.kernel.sys.openVfs(path, flags, 0, {
       ...(truncate ? { truncate } : {}),
       ...(made ? { created: true } : {}),
+      ...(this.nofollow && !made ? { nofollow: true } : {}),
     });
     const ino = writable ? (this.openedIno(fd) ?? this.inoOf(path)) : undefined;
     if (truncate) (this.fs as { touched?(path?: string, ino?: number): void }).touched?.(path, ino);
