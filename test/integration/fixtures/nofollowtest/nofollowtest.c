@@ -18,9 +18,6 @@ static void try_open(const char *label, const char *path, int flags) {
   }
 }
 
-/* swap [over]: until "racy.stop" exists, put a symlink to "secret" at "racy",
-   then a regular file; by renaming over it only with "over", otherwise
-   alternating that with moving the old one away first. */
 static int swap(int over) {
   for (int i = 0; access("racy.stop", F_OK) != 0; i++) {
     unlink("racy.l");
@@ -67,8 +64,6 @@ static void *idle(void *arg) {
   return arg;
 }
 
-/* A first argument "threaded" starts a thread first, so the process's files are
-   then opened through the kernel's descriptor table. */
 int main(int argc, char **argv) {
   if (argc > 1 && strcmp(argv[1], "threaded") == 0) {
     pthread_t t;
