@@ -33,7 +33,7 @@ test("a watch hears another tab's changes on a shared OPFS root by name, and a w
       [
         'bash',
         '-c',
-        'watchtest events /tmp/s end /tmp/rs > /tmp/os & watchtest events /tmp/w end /tmp/r > /tmp/o; wait; cat /tmp/o; echo --; cat /tmp/os',
+        'watchtest events /tmp/s end /tmp/rs stream > /tmp/os & watchtest events /tmp/w end /tmp/r stream > /tmp/o; wait; cat /tmp/o; echo --; cat /tmp/os',
       ],
       { cwd: '/' }
     );
@@ -48,7 +48,15 @@ test("a watch hears another tab's changes on a shared OPFS root by name, and a w
   );
   await sleep(2000);
   await sh(page, 'touch /tmp/w/end /tmp/s/end');
-  const [watched, sibling] = (await page.evaluate(() => window.watched)).stdout.split('--\n');
+  const finished = await Promise.race([
+    page.evaluate(() => window.watched),
+    sleep(15_000).then(() => undefined),
+  ]);
+  if (!finished) {
+    const partial = await sh(page, 'cat /tmp/o; echo --; cat /tmp/os');
+    assert.fail(`a watch never heard its end: ${JSON.stringify(partial.stdout)}`);
+  }
+  const [watched, sibling] = finished.stdout.split('--\n');
   const heard = lines(watched);
   assert.equal(heard.at(-1), 'rename end', watched);
   for (const want of ['rename x', 'change x', 'change e', 'rename d'])
