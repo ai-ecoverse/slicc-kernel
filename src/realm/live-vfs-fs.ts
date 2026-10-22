@@ -543,6 +543,16 @@ function renameFollower(
   };
 }
 
+function movedAway(
+  node: LiveFsNode,
+  holder: (node: LiveFsNode) => LiveFsNode,
+  follow: (node: LiveFsNode, missing: boolean) => boolean
+): boolean {
+  const before = liveNodePath(holder(node));
+  follow(node, true);
+  return liveNodePath(holder(node)) !== before;
+}
+
 function followingOnce(write: () => void, follow: () => boolean): void {
   try {
     write();
@@ -737,7 +747,7 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
       s.ranged
         ? call(() => s.ranged?.flush())
         : call(() => fileIo(node).writeFile(liveNodePath(linked.holder(node)), whole(), true));
-    followingOnce(write, () => renames.follow(node, true));
+    followingOnce(write, () => movedAway(node, (n) => linked.holder(n), renames.follow));
     s.dirty = false;
     s.stat = undefined;
   }
