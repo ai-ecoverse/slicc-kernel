@@ -73,7 +73,7 @@
     "@ai-ecoverse/wasi-ripgrep": "15.2.0-5",
     "@ai-ecoverse/wasi-rustc": "1.98.1-10",
     "@ai-ecoverse/wasi-zig": "0.16.0-20",
-    "@ai-ecoverse/wasix-python": "3.15.0-5",
+    "@ai-ecoverse/wasix-python": "3.15.0-6",
     "@ai-ecoverse/wasm-bash": "5.3.0-23",
     "@ai-ecoverse/wasm-coreutils": "9.12.0-15",
     "@ai-ecoverse/wasm-curl": "8.22.0-9",
