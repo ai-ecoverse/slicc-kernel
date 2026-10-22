@@ -507,7 +507,7 @@ async function holdOp(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest)
       await stillThere(entry, path, req);
       if (req.nofollow && !(await ownEntry(entry, path, real ?? path))) continue;
       if (!r || (!r.missed(path) && !r.changedSince(path, gen) && !r.inFlight?.(path)))
-        return json(entry.hold?.(path, on, open, real) ?? null);
+        return json(entry.hold?.(path, on, open, real, undefined, req.ino) ?? null);
     }
   }
   entry.hold?.(path, on, open, undefined, req.handle);
@@ -683,9 +683,26 @@ async function linkedElsewhere(fs: KernelFs, path: string, from?: string): Promi
 }
 
 async function keptOr(entry: SyncFsTokenEntry, path: string, handle?: number): Promise<string> {
-  if (handle !== undefined) return entry.keptFor?.(handle)?.hidden ?? path;
+  if (handle !== undefined) {
+    const hidden = entry.keptFor?.(handle)?.hidden;
+    if (hidden !== undefined) return hidden;
+    await bound(entry, path, handle);
+    return path;
+  }
   const kept = entry.unlinked?.(path);
   return kept && !(await entry.fs.exists(path)) ? kept.hidden : path;
+}
+
+async function bound(entry: SyncFsTokenEntry, path: string, handle: number): Promise<void> {
+  const ino = entry.boundIno?.(handle);
+  if (ino === undefined) return;
+  const now = await entry.fs.stat(path).catch(() => undefined);
+  if (now?.ino === ino) {
+    entry.trust?.(handle);
+    return;
+  }
+  staleFds++;
+  throw syncError('ESTALE', path);
 }
 
 async function keptStat(entry: SyncFsTokenEntry, req: SyncFsRequest): Promise<SyncFsResult> {
@@ -723,6 +740,12 @@ let served = 0;
 
 export function servedFsCalls(): number {
   return served;
+}
+
+let staleFds = 0;
+
+export function staleFdCount(): number {
+  return staleFds;
 }
 
 export async function dispatchSyncFs(req: SyncFsRequest): Promise<SyncFsResult> {

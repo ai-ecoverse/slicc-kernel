@@ -161,7 +161,7 @@ import {
   importedMemory,
   libcVersion,
 } from './process/wasi/wasi-module.ts';
-import { servedFsCalls } from './realm/sync-fs-dispatch.ts';
+import { servedFsCalls, staleFdCount } from './realm/sync-fs-dispatch.ts';
 import type { SourceCheck } from './realm/sync-fs-token-registry.ts';
 import { anyBlocked, type BlockedMask } from './realm/sync-sab-wire.ts';
 import { REFUSED_PATH, REFUSED_SOURCE, refusing } from './refused-command.ts';
@@ -848,6 +848,7 @@ export class Launcher {
     options.fs.onPeer?.(() => this.flushOpen());
     options.fs.remoteChanges?.((change) => {
       if (change.moved) this.moved(change.moved.from, change.moved.to);
+      if (change.moved) for (const holds of this.held) holds.doubt(change.moved.to);
       this.changes.flush();
       this.cwds.touched(change.paths, change.trees);
       this.rewritten(change.paths, change.trees);
@@ -2029,6 +2030,7 @@ export class Launcher {
         opfsOps: this.rootFs.opfsOps?.() ?? 0,
         cwdChecks: this.cwds.checks,
         renameAcks: this.rootFs.renameWaits?.(),
+        staleFds: staleFdCount(),
       }),
       sudo: (call, signal) => this.sudo(pid, call, signal),
       crontab: (call) => this.crontab(pid, call),
