@@ -614,3 +614,85 @@ test('a WASI process killed by SIGKILL keeps the bytes it wrote but never fsynce
   assert.equal((await kernel.readFile('/home/f')).length, 3145728);
   kernel.terminate();
 });
+
+async function shimPackage(name, { listed = true } = {}) {
+  const dir = await mkdtemp(join(tmpdir(), 'slicc-shim-'));
+  await mkdir(join(dir, 'package', 'bin'), { recursive: true });
+  const manifest = {
+    name,
+    version: '1.0.0',
+    bin: { [name]: 'bin/host.mjs' },
+    slicc: {
+      abi: 'js',
+      commands: { [listed ? name : `${name}-kernel`]: { module: 'bin/tool.mjs' } },
+    },
+  };
+  await writeFile(join(dir, 'package', 'package.json'), JSON.stringify(manifest));
+  await writeFile(
+    join(dir, 'package', 'bin', 'host.mjs'),
+    '#!/usr/bin/env node\nconsole.log("host");\n'
+  );
+  await writeFile(
+    join(dir, 'package', 'bin', 'tool.mjs'),
+    `export default async function main(ctx) { await ctx.write(1, "${name} kernel " + ctx.argv.slice(1).join(" ") + "\\n"); return 0; }\n`
+  );
+  execFileSync('tar', ['czf', join(dir, 'p.tgz'), '-C', dir, 'package']);
+  const bytes = await readFile(join(dir, 'p.tgz'));
+  await rm(dir, { recursive: true, force: true });
+  return bytes;
+}
+
+test('a pnpm global bin shim whose package lists the same name in slicc.commands runs that kernel command, in the same shell line as the install, as root and as a user (#1453)', async (t) => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils', 'wasm-tls-engine', 'wasi-pnpm']) {
+    await install(kernel, name);
+  }
+  await kernel.users.add({ name: 'cone' });
+  await kernel.writeFile('/srv/k4tool.tgz', await shimPackage('k4tool'));
+  const line = 'pnpm add -g /srv/k4tool.tgz >/dev/null 2>&1 && k4tool --version; echo "rc=$?"';
+  const root = await kernel.run(['bash', '-c', line], { cwd: '/root' });
+  assert.equal(root.stdout, 'k4tool kernel --version\nrc=0\n', root.stderr);
+  const user = await kernel.run(['bash', '-c', line], { cwd: '/home/cone', user: 'cone' });
+  assert.equal(user.stdout, 'k4tool kernel --version\nrc=0\n', user.stderr);
+});
+
+test('a bin shim runs no kernel command when its package does not list the name, or when its marker points outside the installed packages (#1453)', async (t) => {
+  const kernel = await createNodeKernel({});
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils', 'wasm-tls-engine', 'wasi-pnpm']) {
+    await install(kernel, name);
+  }
+  await kernel.writeFile('/srv/k5tool.tgz', await shimPackage('k5tool', { listed: false }));
+  const unlisted = await kernel.run(
+    ['bash', '-c', 'pnpm add -g /srv/k5tool.tgz >/dev/null 2>&1; k5tool; echo "rc=$?"'],
+    { cwd: '/root' }
+  );
+  assert.match(unlisted.stdout, /rc=126\n$/, unlisted.stderr);
+  assert.match(unlisted.stderr, /bad interpreter/);
+  await kernel.writeFile('/srv/k6tool.tgz', await shimPackage('k6tool'));
+  await kernel.run(['bash', '-c', 'pnpm add -g /srv/k6tool.tgz >/dev/null 2>&1'], { cwd: '/root' });
+  await kernel.writeFile(
+    '/tmp/elsewhere/node_modules/k6tool/package.json',
+    JSON.stringify({
+      name: 'k6tool',
+      slicc: { abi: 'js', commands: { k6tool: { module: 'bin/tool.mjs' } } },
+    })
+  );
+  await kernel.writeFile(
+    '/tmp/elsewhere/node_modules/k6tool/bin/host.mjs',
+    '#!/usr/bin/env node\n'
+  );
+  await kernel.writeFile(
+    '/tmp/bin/k6tool',
+    '#!/usr/bin/env node\n// pnpm-wasm-shim={"target":"../../tmp/elsewhere/node_modules/k6tool/bin/host.mjs"}\n'
+  );
+  const escaped = await kernel.run(
+    ['bash', '-c', 'chmod +x /tmp/bin/k6tool; /tmp/bin/k6tool; echo "rc=$?"'],
+    {
+      cwd: '/root',
+    }
+  );
+  assert.match(escaped.stdout, /rc=126\n$/, escaped.stderr);
+  assert.doesNotMatch(escaped.stdout, /kernel/);
+});
