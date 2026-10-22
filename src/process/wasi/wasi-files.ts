@@ -110,6 +110,11 @@ export class FileBuffer {
     else this.load();
   }
 
+  prefetch(): void {
+    if (this.ranged) this.ranged.prefetch();
+    else this.load();
+  }
+
   load(): Uint8Array {
     const view = this.watch?.view;
     if (this.data && view && this.watch && !this.dirty) {

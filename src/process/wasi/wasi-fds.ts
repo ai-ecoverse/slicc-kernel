@@ -672,7 +672,7 @@ export class WasiFds {
     for (const [p, buffer] of this.buffers) {
       if (!within(p, path)) continue;
       try {
-        buffer.keep();
+        buffer.prefetch();
       } catch {}
     }
   }

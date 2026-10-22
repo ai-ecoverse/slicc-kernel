@@ -568,7 +568,7 @@ function openReplaced(
     return undefined;
   const st = freshStat(h, node);
   const ranged = h.rangedOf(node);
-  if (ranged) ranged.pin();
+  if (ranged) ranged.prefetch();
   else h.ensureLoaded(node);
   return { node, st };
 }
@@ -582,7 +582,10 @@ function renamedOver(
 ): void {
   const replaced = openReplaced(h, dir, name, moving);
   rename();
-  if (replaced) orphaned(h, replaced.node, replaced.st);
+  if (replaced) {
+    h.rangedOf(replaced.node)?.pin();
+    orphaned(h, replaced.node, replaced.st);
+  }
   try {
     const existing = h.Fs.lookupNode?.(dir, name);
     if (existing && existing !== moving) h.Fs.hashRemoveNode?.(existing);
