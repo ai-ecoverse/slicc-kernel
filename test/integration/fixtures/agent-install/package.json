@@ -1,0 +1,9 @@
+{
+  "name": "slicc-bios-agent",
+  "private": true,
+  "description": "SLICC's agent, which the UI installs with pnpm in the background into /opt/agent in OPFS",
+  "dependencies": {
+    "@ai-ecoverse/slicc-agent": "6.1.0",
+    "@ai-ecoverse/slicc-kernel": "1.125.9"
+  }
+}
