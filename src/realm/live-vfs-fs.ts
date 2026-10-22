@@ -38,6 +38,7 @@ const SEEK_CUR = 1;
 const SEEK_END = 2;
 
 interface LiveNodeState {
+  moves?: number;
   named?: number | undefined;
   watch?: RangedWatch | undefined;
   stat?: SyncFsBridgeStat;
@@ -515,7 +516,9 @@ function renameFollower(
     for (const [from, to] of reply.renames) {
       for (const n of held) {
         const moving = heldUnder(n, from);
-        if (moving && inCache(Fs, moving)) relinked(Fs, moving, to);
+        if (!moving || !inCache(Fs, moving)) continue;
+        relinked(Fs, moving, to);
+        n.live.moves = (n.live.moves ?? 0) + 1;
       }
     }
     return reply.renames.length > 0;
@@ -548,9 +551,9 @@ function movedAway(
   holder: (node: LiveFsNode) => LiveFsNode,
   follow: (node: LiveFsNode, missing: boolean) => boolean
 ): boolean {
-  const before = liveNodePath(holder(node));
+  const before = holder(node).live.moves ?? 0;
   follow(node, true);
-  return liveNodePath(holder(node)) !== before;
+  return (holder(node).live.moves ?? 0) !== before;
 }
 
 function followingOnce(write: () => void, follow: () => boolean): void {

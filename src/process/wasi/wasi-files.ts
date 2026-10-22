@@ -93,7 +93,10 @@ export class FileBuffer {
     }
   }
 
+  moves = 0;
+
   set path(path: string) {
+    this.moves++;
     this.where = path;
     if (this.ranged) this.ranged.path = path;
   }

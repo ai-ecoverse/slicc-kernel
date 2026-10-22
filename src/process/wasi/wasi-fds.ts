@@ -1018,9 +1018,9 @@ export class WasiFds {
       );
     const buffer = new FileBuffer(io, path, empty, st.maxFile, ranged, st.version, watch);
     buffer.moved = (missing) => {
-      const before = buffer.path;
+      const before = buffer.moves;
       this.followRenames(missing);
-      return buffer.path !== before;
+      return buffer.moves !== before;
     };
     buffer.bound = st;
     buffer.handle = handle;
