@@ -60,3 +60,29 @@ test("a watch hears another tab's changes on a shared OPFS root by name, and a w
   );
   assert.deepEqual(lines(sibling), ['rename end'], 'a sibling watch heard the peer');
 });
+
+test("a watch on a single file hears another tab's write to it as a change (#1391 review)", {
+  timeout: 300_000,
+}, async (t) => {
+  const { page } = await booted(chrome, t);
+  const other = await peerTab(page);
+  assert.equal(
+    (await sh(page, 'rm -rf /tmp/fw && mkdir -p /tmp/fw && echo {} > /tmp/fw/c.json && echo made'))
+      .stdout,
+    'made\n'
+  );
+  await page.evaluate(() => {
+    window.watchedFile = window.kernel.run(
+      ['bash', '-c', 'watchtest events /tmp/fw/c.json c.json /tmp/fw/r'],
+      { cwd: '/' }
+    );
+  });
+  while (!(await page.evaluate(() => window.opfs.exists('tmp/fw/r')))) await sleep(20);
+  assert.equal(
+    (await sh(other, 'echo \'{"a":1}\' > /tmp/fw/c.json && echo done')).stdout,
+    'done\n'
+  );
+  assert.deepEqual(lines((await page.evaluate(() => window.watchedFile)).stdout), [
+    'change c.json',
+  ]);
+});

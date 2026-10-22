@@ -248,7 +248,8 @@ export class FsWatchers {
       const at = normalizePath(path);
       const seq = ++this.seq;
       for (const watch of [...this.typed]) {
-        if (watch.roots.some((root) => at === root || under(root, at))) continue;
+        if (type === 'rename' && watch.roots.some((root) => at === root || under(root, at)))
+          continue;
         route(watch, type, at, seq);
       }
     }
