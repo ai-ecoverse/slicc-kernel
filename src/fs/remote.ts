@@ -2,6 +2,7 @@ export interface RemoteChange {
   paths: readonly string[];
   trees: readonly string[];
   moved?: { from: string; to: string };
+  content?: true;
 }
 
 export interface PeerRename {
@@ -160,7 +161,7 @@ export class RemoteWatch {
     if (data.ack !== undefined && data.to === this.tab && data.from !== undefined) {
       this.acked(data.ack, data.from);
     }
-    if (data.changed !== undefined) this.emit({ paths: data.changed, trees: [] });
+    if (data.changed !== undefined) this.emit({ paths: data.changed, trees: [], content: true });
   }
 
   private arrived(peer: string): void {

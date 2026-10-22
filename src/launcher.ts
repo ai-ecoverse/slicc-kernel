@@ -855,6 +855,8 @@ export class Launcher {
       this.changes.flush();
       this.cwds.touched(change.paths, change.trees);
       this.rewritten(change.paths, change.trees);
+      this.watchers.heard(change.content ? 'change' : 'rename', change.paths);
+      this.watchers.heard('rename', change.trees ?? []);
     });
     const holders = [this.held, this.openFiles];
     this.unlinked = new UnlinkedKeeper(

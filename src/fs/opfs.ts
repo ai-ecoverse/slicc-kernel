@@ -413,7 +413,12 @@ export class OpfsFs implements KernelFs {
       (meta as { listen?: (l: (c: Partial<RemoteChange>) => void) => void }).listen?.((c) => {
         for (const path of [...(c.paths ?? []), ...(c.trees ?? [])]) this.forget(path);
         const moved = movedOf(c.moved);
-        remote?.emit({ paths: c.paths ?? [], trees: c.trees ?? [], ...(moved ? { moved } : {}) });
+        remote?.emit({
+          paths: c.paths ?? [],
+          trees: c.trees ?? [],
+          content: true,
+          ...(moved ? { moved } : {}),
+        });
       });
       remote?.listen((c) => {
         for (const path of [...c.paths, ...c.trees]) this.forget(path);

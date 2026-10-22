@@ -242,6 +242,10 @@ export class FsWatchers {
     }
   }
 
+  heard(type: WatchEventType, paths: readonly string[]): void {
+    this.emit(type, paths);
+  }
+
   changed(...paths: string[]): void {
     this.report(paths);
     this.emit('change', paths);
