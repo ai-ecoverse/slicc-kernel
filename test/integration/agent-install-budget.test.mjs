@@ -40,10 +40,18 @@ test(`a serial, offline pnpm install of bios's agent into /opt/agent on the OPFS
   );
   const start = await counters(bash);
   const t0 = Date.now();
-  const r = await bash(
-    'cd /opt/agent && pnpm install --frozen-lockfile --ignore-scripts --network-concurrency=1 --child-concurrency=1 --config.store-dir=/opt/slicc/.store --reporter=silent > /dev/shm/pnpm.log 2>&1; echo "rc=$?"; tail -c 2000 /dev/shm/pnpm.log',
+  await bash(
+    '(cd /opt/agent && pnpm install --frozen-lockfile --ignore-scripts --network-concurrency=1 --child-concurrency=1 --config.store-dir=/opt/slicc/.store --reporter=silent > /dev/shm/pnpm.log 2>&1; echo "rc=$?" > /tmp/pnpm.rc) > /dev/null 2>&1 &',
     { cwd: '/' }
   );
+  let rc = '';
+  while (!rc && Date.now() - t0 < 540_000) {
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    rc = ((await page.evaluate(() => window.opfs.read('tmp/pnpm.rc'))) ?? '').trim();
+  }
+  const r = {
+    stdout: `${rc}\n${(await bash('tail -c 2000 /dev/shm/pnpm.log', { cwd: '/' })).stdout}`,
+  };
   const wall = Date.now() - t0;
   const end = await counters(bash);
   assert.match(r.stdout, /^rc=0\n/, r.stdout);
