@@ -43,6 +43,7 @@ export class FileBuffer {
   maxFile: number | undefined;
   handle: number | undefined;
   moved: ((missing: boolean) => boolean) | undefined;
+  bound: SyncFsBridgeStat | undefined;
 
   constructor(
     fs: SyncFsFileIo,

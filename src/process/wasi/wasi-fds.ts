@@ -668,6 +668,15 @@ export class WasiFds {
     return false;
   }
 
+  replacing(path: string): void {
+    for (const [p, buffer] of this.buffers) {
+      if (!within(p, path)) continue;
+      try {
+        buffer.keep();
+      } catch {}
+    }
+  }
+
   unlinking(path: string, linked?: SyncFsBridgeStat): void {
     const buffer = this.buffers.get(path);
     if (buffer && this.survives(buffer, linked)) buffer.flush();
@@ -981,6 +990,7 @@ export class WasiFds {
     const handle = this.fs.hold?.(path, true, true, undefined, this.fs.owners ? asked : 0, {
       gen: st.gen,
       ...(this.nofollow ? { nofollow: true } : {}),
+      ...(st.ino !== undefined ? { ino: st.ino } : {}),
     });
     const io = handle !== undefined && this.fs.pinned ? this.fs.pinned(handle) : this.fs;
     const view = this.fs.changes;
@@ -1001,6 +1011,7 @@ export class WasiFds {
       );
     const buffer = new FileBuffer(io, path, empty, st.maxFile, ranged, st.version, watch);
     buffer.moved = (missing) => this.followRenames(missing);
+    buffer.bound = st;
     buffer.handle = handle;
     this.buffers.set(path, buffer);
     const id = this.identity(st);

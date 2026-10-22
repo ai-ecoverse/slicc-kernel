@@ -550,6 +550,43 @@ function followingOnce(write: () => void, follow: () => boolean): void {
   }
 }
 
+function openReplaced(
+  h: LiveHelpers,
+  dir: LiveFsNode,
+  name: string,
+  moving: LiveFsNode
+): { node: LiveFsNode; st: SyncFsBridgeStat } | undefined {
+  let node: LiveFsNode | undefined;
+  try {
+    node = h.Fs.lookupNode?.(dir, name);
+  } catch {
+    return undefined;
+  }
+  if (!node || node === moving || node.live?.openCount === 0 || !h.Fs.isFile(node.mode))
+    return undefined;
+  const st = freshStat(h, node);
+  const ranged = h.rangedOf(node);
+  if (ranged) ranged.pin();
+  else h.ensureLoaded(node);
+  return { node, st };
+}
+
+function renamedOver(
+  h: LiveHelpers,
+  dir: LiveFsNode,
+  name: string,
+  moving: LiveFsNode,
+  rename: () => void
+): void {
+  const replaced = openReplaced(h, dir, name, moving);
+  rename();
+  if (replaced) orphaned(h, replaced.node, replaced.st);
+  try {
+    const existing = h.Fs.lookupNode?.(dir, name);
+    if (existing && existing !== moving) h.Fs.hashRemoveNode?.(existing);
+  } catch {}
+}
+
 function renameThrough(h: LiveHelpers, node: LiveFsNode, from: string, to: string): void {
   const seq = h.call(() => h.bridgeOf(node).rename(from, to));
   h.ownRename(h.bridgeOf(node), typeof seq === 'number' ? seq : undefined);
@@ -901,12 +938,7 @@ function createNodeOps(h: LiveHelpers): LiveNodeOps {
       const from = liveNodePath(oldNode);
       const to = childPath(newDir, newName);
       flushNode(oldNode);
-      renameThrough(h, oldNode, from, to);
-
-      try {
-        const existing = Fs.lookupNode?.(newDir, newName);
-        if (existing && existing !== oldNode) Fs.hashRemoveNode?.(existing);
-      } catch {}
+      renamedOver(h, newDir, newName, oldNode, () => renameThrough(h, oldNode, from, to));
       oldNode.name = newName;
       oldNode.parent = newDir;
       oldNode.live.stat = undefined;
@@ -992,7 +1024,10 @@ function holdLive(
   want: number
 ): number | undefined {
   const s = node.live;
-  const seen = on && s.stat ? { gen: s.stat.gen } : undefined;
+  const seen =
+    on && s.stat
+      ? { gen: s.stat.gen, ...(s.stat.ino !== undefined ? { ino: s.stat.ino } : {}) }
+      : undefined;
   return bridge.hold?.(liveNodePath(node), on, true, s.handle, want, seen);
 }
 
