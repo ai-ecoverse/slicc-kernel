@@ -75,14 +75,14 @@ test('/proc/sys/kernel/slicc_opfs_ops counts every request the root file system 
   }
 });
 
-test('a file a WASI program creates and writes reuses the handle its create made: per file 2 OPFS lookups with O_EXCL, 4 with a write and its time stamp, 5 with O_TRUNC (#1017)', {
+test('a file a WASI program creates and writes reuses the handle its create made: per file 2 OPFS lookups with O_EXCL (at most one more on a runner slow enough to outlast the 2 ms glance between the create and its open), 4 with a write and its time stamp, 5 with O_TRUNC (#1017)', {
   timeout: 180_000,
 }, async (t) => {
   const sh = await booted(t);
   const rows = [
     [
       'O_EXCL',
-      2.5,
+      3,
       3.8,
       ["os.close(os.open(f'/tmp/oo/TAG{i}', os.O_WRONLY|os.O_CREAT|os.O_EXCL, 0o644))"],
     ],
