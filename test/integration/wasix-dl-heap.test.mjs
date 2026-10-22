@@ -132,3 +132,31 @@ test(
     assert.equal(r.stdout, '[0, 1, 2]\n', r.stderr);
   }
 );
+
+test(
+  "a side module loaded as another one's DT_NEEDED gets its data from the heap too, and its 1 MiB bss reads as zeros (#1408 review)",
+  TIMEOUT,
+  async (t) => {
+    const kernel = await createNodeKernel({});
+    t.after(() => kernel.terminate());
+    await install(kernel, 'wasix-python');
+    const lib = new URL('./fixtures/dlbss/lib/', import.meta.url);
+    for (const name of ['libzzybss.so', 'libzzytop.so']) {
+      await kernel.writeFile(`/opt/dl/${name}`, await readFile(new URL(name, lib)));
+    }
+    const code = [
+      'import ctypes',
+      ...RSS,
+      'junk = [bytes([7]) * 4096 for _ in range(2048)]',
+      'del junk',
+      'a = rss()',
+      'top = ctypes.CDLL("/opt/dl/libzzytop.so")',
+      'print(top.top_check(), rss() - a)',
+    ].join('\n');
+    const r = await kernel.run(['python3', '-c', code], {
+      cwd: '/',
+      env: { LD_LIBRARY_PATH: '/opt/dl' },
+    });
+    assert.equal(String(r.stdout), '42 0\n', String(r.stderr));
+  }
+);
