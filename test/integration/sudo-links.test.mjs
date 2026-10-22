@@ -156,7 +156,7 @@ test('a sudo process shares the open and removed files of the others: its writes
   assert.deepEqual([String(r.stdout), String(r.stderr)], ['new\nkept\na\n', '']);
 });
 
-test('a sudo process opening without follow, threaded, while another process renames a symlink and a file over the name in turn, never reads the link target (#1394)', {
+test('a sudo process opening without follow, threaded, while another sudo process renames a symlink it may follow and a file over the name in turn, never reads the link target (#1394)', {
   timeout: 300_000,
 }, async (t) => {
   const kernel = await createNodeKernel({ users: 'enforce' });
@@ -184,7 +184,7 @@ test('a sudo process opening without follow, threaded, while another process ren
     0
   );
   const [swapper, racer] = await Promise.all([
-    cone('cd w && nofollowtest swap over'),
+    cone('cd w && sudo nofollowtest swap over'),
     cone('cd w && sudo nofollowtest threaded race 8000'),
   ]);
   assert.equal(swapper.status, 0, swapper.stderr);
