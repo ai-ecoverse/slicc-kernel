@@ -243,7 +243,15 @@ export class FsWatchers {
   }
 
   heard(type: WatchEventType, paths: readonly string[]): void {
-    this.emit(type, paths);
+    if (this.typed.size === 0) return;
+    for (const path of paths) {
+      const at = normalizePath(path);
+      const seq = ++this.seq;
+      for (const watch of [...this.typed]) {
+        if (watch.roots.some((root) => at === root || under(root, at))) continue;
+        route(watch, type, at, seq);
+      }
+    }
   }
 
   changed(...paths: string[]): void {
