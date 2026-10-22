@@ -249,3 +249,44 @@ for name, act in [('append', lambda: open('/etc/hostname', 'a').write('x')), ('p
   );
   assert.equal(left.stdout, 'devbox\n0 0 644\n', left.stderr);
 });
+
+test("a WASIX program on wasix-sysroot -42, whose gethostname and uname read /etc/hostname, keeps the environment its caller gave it: no HOSTNAME after env -i, the caller's own one otherwise; an older libc still gets the node name forced (#1272 follow-up)", async (t) => {
+  const kernel = await createNodeKernel({ hostname: 'devbox' });
+  t.after(() => kernel.terminate());
+  await install(kernel, 'wasm-bash');
+  await install(kernel, 'wasm-coreutils');
+  const fixture = new URL('./fixtures/hostprobe/', import.meta.url);
+  for (const file of ['package.json', 'bin/hostprobe.wasm', 'bin/hostprobe-old.wasm']) {
+    await kernel.writeFile(
+      `/node_modules/hostprobe/${file}`,
+      await readFile(new URL(file, fixture))
+    );
+  }
+  const r = await kernel.run(
+    [
+      'bash',
+      '-c',
+      'env -i hostprobe; HOSTNAME=mine hostprobe; env -i hostprobe-old; HOSTNAME=mine hostprobe-old',
+    ],
+    { cwd: '/' }
+  );
+  assert.equal(
+    r.stdout,
+    [
+      'env (none)',
+      'gethostname devbox',
+      'uname devbox',
+      'env mine',
+      'gethostname devbox',
+      'uname devbox',
+      'env devbox',
+      'gethostname devbox',
+      'uname devbox',
+      'env devbox',
+      'gethostname devbox',
+      'uname devbox',
+      '',
+    ].join('\n'),
+    r.stderr
+  );
+});
