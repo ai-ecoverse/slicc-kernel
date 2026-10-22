@@ -221,6 +221,37 @@ interface SyncAccess {
   truncate(size: number): void;
   flush(): void;
   close(): void;
+  getSize?(): number;
+}
+
+const unstored = () =>
+  Object.assign(new Error('the file system kept fewer bytes than were written'), {
+    code: 'ENOSPC',
+  });
+
+const CHECKED_BYTES = 16 * 1024 * 1024;
+
+class Extent {
+  floor = 0;
+  exact: number | undefined;
+
+  wrote(end: number): void {
+    this.floor = Math.max(this.floor, end);
+    if (this.exact !== undefined) this.exact = Math.max(this.exact, end);
+  }
+
+  cut(size: number): void {
+    this.exact = size;
+    this.floor = Math.min(this.floor, size);
+  }
+
+  big(): boolean {
+    return Math.max(this.floor, this.exact ?? 0) >= CHECKED_BYTES;
+  }
+
+  check(size: number): void {
+    if (size < this.floor || (this.exact !== undefined && size < this.exact)) throw unstored();
+  }
 }
 
 type SyncCapable = FileSystemFileHandle & {
@@ -256,14 +287,22 @@ function writeAll(access: SyncAccess, at: number, bytes: Uint8Array): void {
 }
 
 async function positioned(handle: FileSystemFileHandle, op: (io: Positioned) => unknown) {
+  const extent = new Extent();
   const access = await openSync(handle);
   if (access) {
     try {
       op({
-        write: (at, bytes) => writeAll(access, at, bytes),
-        truncate: (n) => access.truncate(n),
+        write: (at, bytes) => {
+          writeAll(access, at, bytes);
+          extent.wrote(at + bytes.length);
+        },
+        truncate: (n) => {
+          access.truncate(n);
+          extent.cut(n);
+        },
       });
       access.flush();
+      if (access.getSize) extent.check(access.getSize());
     } finally {
       access.close();
     }
@@ -272,15 +311,25 @@ async function positioned(handle: FileSystemFileHandle, op: (io: Positioned) => 
   const writable = await handle.createWritable({ keepExistingData: true });
   try {
     await op({
-      write: (at, bytes) =>
-        writable.write({ type: 'write', position: at, data: bytes as Uint8Array<ArrayBuffer> }),
-      truncate: (n) => writable.truncate(n),
+      write: async (at, bytes) => {
+        await writable.write({
+          type: 'write',
+          position: at,
+          data: bytes as Uint8Array<ArrayBuffer>,
+        });
+        extent.wrote(at + bytes.length);
+      },
+      truncate: async (n) => {
+        await writable.truncate(n);
+        extent.cut(n);
+      },
     });
   } catch (err) {
     await writable.abort();
     throw err;
   }
   await writable.close();
+  if (extent.big()) extent.check((await handle.getFile()).size);
 }
 
 export interface WriteSession {
@@ -1454,6 +1503,11 @@ export class OpfsFs implements KernelFs {
       writable = await this.io(file.createWritable());
       await writable.write(content as FileSystemWriteChunkType);
       await writable.close();
+      if (typeof content !== 'string' && content.length >= CHECKED_BYTES) {
+        const extent = new Extent();
+        extent.cut(content.length);
+        extent.check((await file.getFile()).size);
+      }
     } catch (err) {
       await writable?.abort().catch(() => undefined);
       throw translate(err, path, 'commit', false);
