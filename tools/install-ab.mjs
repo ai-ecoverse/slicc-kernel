@@ -75,6 +75,8 @@ const install = (name) => {
       },
     }
   );
+  for (const l of (run.stdout ?? '').split('\n'))
+    if (l.includes('RENAMES')) console.log(`${name}: ${l.trim()}`);
   const line = (run.stdout ?? '').split('\n').find((l) => l.startsWith('| total |'));
   const mem = (run.stdout ?? '').split('\n').find((l) => l.startsWith('| memory |'));
   if (run.status !== 0 || !line) {
