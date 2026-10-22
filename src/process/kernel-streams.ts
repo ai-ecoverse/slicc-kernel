@@ -159,6 +159,7 @@ export interface ProcessSys {
       handle?: number;
       ino?: number;
       fifo?: boolean;
+      nofollow?: boolean;
     }
   ): number;
 

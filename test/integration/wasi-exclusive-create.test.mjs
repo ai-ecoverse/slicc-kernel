@@ -211,3 +211,21 @@ test("a no-follow open racing a process that swaps the file for a symlink and ba
   assert.equal(swapper.status, 0, swapper.stderr);
   assert.deepEqual([racer.status, racer.stdout], [0, 'opened 1 refused 1 leaked 0\n']);
 });
+
+test('a no-follow open by a threaded program, whose files the kernel opens, racing a process that renames a symlink and a file over its name in turn never reads the link target (#1394)', async (t) => {
+  const kernel = await createNodeKernel({ users: 'off' });
+  t.after(() => kernel.terminate());
+  await installDir(
+    kernel,
+    fileURLToPath(new URL('fixtures/nofollowtest/', import.meta.url)),
+    '/node_modules/nofollowtest'
+  );
+  await kernel.writeFile('/w/secret', 'SECRET');
+  await kernel.writeFile('/w/racy', 'plain');
+  const [swapper, racer] = await Promise.all([
+    kernel.run(['nofollowtest', 'swap', 'over'], { cwd: '/w' }),
+    kernel.run(['nofollowtest', 'threaded', 'race', '8000'], { cwd: '/w' }),
+  ]);
+  assert.equal(swapper.status, 0, swapper.stderr);
+  assert.deepEqual([racer.status, racer.stdout], [0, 'opened 1 refused 1 leaked 0\n']);
+});

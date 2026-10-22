@@ -150,6 +150,8 @@ export type WasmSyscall =
       ino?: number;
 
       fifo?: boolean;
+
+      nofollow?: boolean;
     }
   | { op: 'fd-pread'; fd: number; offset: number; max: number }
   | { op: 'fd-pwrite'; fd: number; offset: number; body: Uint8Array }
@@ -1335,15 +1337,7 @@ export class WasmProcess {
           }
         });
       } else {
-        await this.unmissed(
-          () => this.openPath(req, marked),
-          async (at) => {
-            await this.stillOpen(at, req.handle);
-            return nodes.identify(at);
-          },
-          (id, at) => this.fds.installAt(fd, this.openVfsFile({ ...open, path: at }, id, fs)),
-          { at: path, gen }
-        );
+        await this.openExisting(req, marked, fd, open, fs, { at: path, gen });
       }
       if (req.existing && !(await present(fs, path, true))) {
         throw new KernelError('ENOENT');
@@ -1425,7 +1419,30 @@ export class WasmProcess {
     const inherited = req.orphan || req.contents !== undefined || req.handle !== undefined;
     if (guard?.links === undefined || !noLinks || inherited || req.pin !== undefined)
       return undefined;
-    return (await walk(guard.fs, this.cred, req.path, !req.exclusive, guard.links)).path;
+    const follow = !req.exclusive && req.nofollow !== true;
+    return (await walk(guard.fs, this.cred, req.path, follow, guard.links)).path;
+  }
+
+  private async openExisting(
+    req: Extract<FdSyscall, { op: 'fd-open-vfs' }>,
+    marked: string | undefined,
+    fd: number,
+    open: Extract<FdSyscall, { op: 'fd-open-vfs' }>,
+    fs: KernelFs | VfsFileFs,
+    first: { at: string; gen: number }
+  ): Promise<void> {
+    const nodes = this.nodes;
+    const own = unfollowed(req);
+    await this.unmissed(
+      this.openPath.bind(this, req, marked),
+      async (at) => {
+        if (own) await notLink(this.options.fs, at);
+        await this.stillOpen(at, req.handle);
+        return nodes.identify(at);
+      },
+      (id, at) => this.fds.installAt(fd, this.openVfsFile({ ...open, path: at }, id, fs)),
+      first
+    );
   }
 
   private async openPath(
@@ -1437,6 +1454,7 @@ export class WasmProcess {
     if (req.exclusive) return nodes.entryKey(marked ?? req.path);
     if (marked !== undefined) return marked;
     if (req.create) return nodes.targetKey(req.path);
+    if (unfollowed(req)) return nodes.entryKey(req.path);
     return this.keptOr(await nodes.targetKey(req.path), req.handle);
   }
 
@@ -1775,7 +1793,9 @@ export class WasmProcess {
       given = undefined;
       await r?.settled(at);
       const found = await look(at);
-      if (!r || (!r.missed(at) && !r.changedSince(at, gen))) return make(found, at);
+      if (!r || (!r.missed(at) && !r.changedSince(at, gen) && !r.inFlight?.(at))) {
+        return make(found, at);
+      }
     }
   }
 
@@ -2372,4 +2392,13 @@ export class WasmProcess {
     if (!this.options.nodes) this.options.openFiles?.delete(this.nodes);
     await this.options.http?.closeAll();
   }
+}
+
+function unfollowed(req: Extract<FdSyscall, { op: 'fd-open-vfs' }>): boolean {
+  return req.nofollow === true && req.handle === undefined;
+}
+
+async function notLink(fs: VfsFileFs, path: string): Promise<void> {
+  const st = (await fs.lstat?.(path)) as FsStat | undefined;
+  if (st?.isSymbolicLink) throw new KernelError('ELOOP');
 }

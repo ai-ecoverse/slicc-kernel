@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,15 +18,11 @@ static void try_open(const char *label, const char *path, int flags) {
   }
 }
 
-/* swap: until "racy.stop" exists, put a symlink to "secret" at "racy", then a
-   regular file, alternating rename-over and move-away-then-create. A swap after
-   the open has bound its fd is the lazy-binding follow-up; what this row checks
-   is the open's own decision, which these swaps race. */
-static int swap(void) {
+static int swap(int over) {
   for (int i = 0; access("racy.stop", F_OK) != 0; i++) {
     unlink("racy.l");
     symlink("secret", "racy.l");
-    if (i % 2) rename("racy.l", "racy");
+    if (over || i % 2) rename("racy.l", "racy");
     else {
       rename("racy", "racy.gone");
       symlink("secret", "racy");
@@ -33,7 +30,7 @@ static int swap(void) {
     int fd = open("racy.f", O_WRONLY | O_CREAT | O_TRUNC, 0644);
     write(fd, "plain", 5);
     close(fd);
-    if (i % 2) rename("racy.f", "racy");
+    if (over || i % 2) rename("racy.f", "racy");
     else {
       rename("racy", "racy.gone");
       rename("racy.f", "racy");
@@ -63,8 +60,19 @@ static int race(int n) {
   return 0;
 }
 
+static void *idle(void *arg) {
+  return arg;
+}
+
 int main(int argc, char **argv) {
-  if (argc == 2 && strcmp(argv[1], "swap") == 0) return swap();
+  if (argc > 1 && strcmp(argv[1], "threaded") == 0) {
+    pthread_t t;
+    pthread_create(&t, NULL, idle, NULL);
+    pthread_join(t, NULL);
+    argc--;
+    argv++;
+  }
+  if (argc >= 2 && strcmp(argv[1], "swap") == 0) return swap(argc == 3 && strcmp(argv[2], "over") == 0);
   if (argc == 3 && strcmp(argv[1], "race") == 0) return race(atoi(argv[2]));
   int fd = open("file", O_WRONLY | O_CREAT | O_TRUNC, 0644);
   write(fd, "x", 1);
