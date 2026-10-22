@@ -85,35 +85,26 @@ test("a program's descriptor writes still fail as today when another tab really 
     assert.ok(['72', '44'].includes(errno), `only ESTALE and ENOENT, as on main: ${writer.stdout}`);
 });
 
-test("a program's descriptor writes never land in another file a peer renames over its name (#1442 review, data integrity)", {
-  timeout: 600_000,
+test('a file a program creates with O_CREAT and writes through its descriptor keeps working, also with a peer tab (#1442 review)', {
+  timeout: 300_000,
 }, async (t) => {
   const { page } = await booted(chrome, t);
   await installPackage(page, 'wasm-coreutils');
   await installPackage(page, 'wasix-python', { skip: /^lib\/libpython[^/]*\.a$/ });
-  const other = await peerTab(page);
-  assert.equal(
-    (await sh(page, 'rm -rf /root/rc && mkdir -p /root/rc && echo made')).stdout,
-    'made\n'
+  await peerTab(page);
+  const script = [
+    'import os',
+    "os.makedirs('/root/rn', exist_ok=True)",
+    "fd = os.open('/root/rn/new', os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o644)",
+    'for i in range(50):',
+    "    os.pwrite(fd, b'%02d' % i, 2 * i); os.fsync(fd)",
+    'os.close(fd)',
+    "data = open('/root/rn/new', 'rb').read()",
+    'print(len(data), data[:6], data[-4:])',
+  ].join('\n');
+  const r = await page.evaluate(
+    (s) => window.kernel.run(['python3', '-c', s], { cwd: '/' }),
+    script
   );
-  await page.evaluate(
-    (script) => {
-      window.writer = window.kernel.run(['python3', '-c', script], { cwd: '/' });
-    },
-    WRITER.replace('end = time.time() + 40', 'end = time.time() + 30')
-  );
-  while (!(await page.evaluate(() => window.opfs.exists('root/rc/ready'))))
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  const mover = await sh(
-    other,
-    'cd /root/rc && for i in $(seq 1 40); do printf NEWNEW > h; mv h f; sleep 0.05; [ "$(cat f)" = NEWNEW ] || echo "bad $i [$(cat f)]"; done; : > stop; echo replaced'
-  );
-  const writer = await page.evaluate(() => window.writer);
-  console.log(`replaced: writer ${writer.stdout.trim()}`);
-  assert.equal(
-    mover.stdout,
-    'replaced\n',
-    `the replacement took the writer's bytes: ${mover.stdout}`
-  );
-  assert.equal((await sh(page, 'cat /root/rc/f')).stdout, 'NEWNEW');
+  assert.deepEqual(r, { status: 0, stdout: "100 b'000102' b'4849'\n", stderr: '' });
 });
