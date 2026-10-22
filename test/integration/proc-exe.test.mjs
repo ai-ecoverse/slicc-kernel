@@ -238,3 +238,67 @@ test('/proc/self/exe of a program whose directory becomes unsearchable is not de
   await kernel.run(['bash', '-c', `chmod 755 ${bin}`], { cwd: '/' });
   assert.deepEqual(r, { status: 0, stdout: `${bin}/python.wasm\nPermission denied\n`, stderr: '' });
 });
+
+for (const when of ['after', 'start']) {
+  const phrase = {
+    after: 'right after the kernel has read it',
+    start: 'as soon as the kernel starts reading it',
+  }[when];
+  test(`a program replaced ${phrase} runs the bytes its /proc/self/exe identity names, never the old bytes under the new identity (#1329)`, {
+    timeout: 120_000,
+  }, async (t) => {
+    const { memoryRoot } = await import('../../dist/node.js');
+    const first = await readFile(new URL('../idtest/bin/idtest.wasm', fixture));
+    const second = await readFile(new URL('bin/exetest.wasm', fixture));
+    let swap;
+    let reads = 0;
+
+    const wrap = (handle) => {
+      if (handle.kind === 'directory')
+        return new Proxy(handle, {
+          get(target, key) {
+            if (key === 'getDirectoryHandle' || key === 'getFileHandle')
+              return async (...args) => wrap(await target[key](...args));
+            if (key === 'values')
+              return async function* () {
+                for await (const child of target.values()) yield wrap(child);
+              };
+            const value = Reflect.get(target, key);
+            return typeof value === 'function' ? value.bind(target) : value;
+          },
+        });
+      if (handle.name !== 'prog') return handle;
+      return new Proxy(handle, {
+        get(target, key) {
+          if (key === 'getFile')
+            return async () => {
+              const file = await target.getFile();
+              const read = file.arrayBuffer.bind(file);
+              file.arrayBuffer = async () => {
+                const now = ++reads === 2;
+                if (now && when === 'start') await swap?.(target);
+                const bytes = await read();
+                if (now && when === 'after') await swap?.(target);
+                return bytes;
+              };
+              return file;
+            };
+          const value = Reflect.get(target, key);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+    };
+    const kernel = await createNodeKernel({ root: wrap(memoryRoot()) });
+    t.after(() => kernel.terminate());
+    for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
+    await kernel.writeFile('/tmp/p/prog', first);
+    await kernel.run(['bash', '-c', 'chmod 755 /tmp/p/prog'], { cwd: '/' });
+    swap = async () => {
+      swap = undefined;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      await kernel.writeFile('/tmp/p/prog', second);
+    };
+    const r = await kernel.run(['/tmp/p/prog'], { cwd: '/' });
+    assert.deepEqual(r, { status: 0, stdout: 'exe=/tmp/p/prog argv0=/tmp/p/prog\n', stderr: '' });
+  });
+}
