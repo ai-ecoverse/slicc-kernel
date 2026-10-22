@@ -7,6 +7,62 @@ export interface Replacements {
   missed(path: string): boolean;
   generation(): number;
   changedSince(path: string, gen: number): boolean;
+  inFlight?(path: string): boolean;
+}
+
+export class PathMarks {
+  private gen = 0;
+  private floor = 0;
+  private readonly touched = new Map<string, number>();
+  private readonly flying = new Map<string, number>();
+
+  generation(): number {
+    return this.gen;
+  }
+
+  touch(target: string): void {
+    this.gen += 1;
+    this.touched.delete(target);
+    this.touched.set(target, this.gen);
+    if (this.touched.size <= TOUCHED_MAX) return;
+    const [oldest, at] = this.touched.entries().next().value as [string, number];
+    this.touched.delete(oldest);
+    this.floor = at;
+  }
+
+  changedSince(path: string, gen: number): boolean {
+    if (gen < this.floor) return true;
+    for (let p = path; this.touched.size > 0; p = parentOf(p)) {
+      if ((this.touched.get(p) ?? 0) > gen) return true;
+      if (p === '/') return false;
+    }
+    return false;
+  }
+
+  async around<T>(paths: readonly string[], op: () => Promise<T>): Promise<T> {
+    for (const p of paths) {
+      this.flying.set(p, (this.flying.get(p) ?? 0) + 1);
+      this.touch(p);
+    }
+    try {
+      return await op();
+    } finally {
+      for (const p of paths) {
+        const n = (this.flying.get(p) ?? 1) - 1;
+        if (n > 0) this.flying.set(p, n);
+        else this.flying.delete(p);
+        this.touch(p);
+      }
+    }
+  }
+
+  inFlight(path: string): boolean {
+    for (let p = path; this.flying.size > 0; p = parentOf(p)) {
+      if (this.flying.has(p)) return true;
+      if (p === '/') return false;
+    }
+    return false;
+  }
 }
 
 interface Replacing {
@@ -126,9 +182,7 @@ export class UnlinkedKeeper {
   private queue: Promise<unknown> = Promise.resolve();
   private count = 0;
   private readonly replacing = new Map<string, Replacing>();
-  private gen = 0;
-  private floor = 0;
-  private readonly touched = new Map<string, number>();
+  private readonly marks: PathMarks;
   private replaced = 0;
 
   private readonly links = new Map<string, number>();
@@ -146,8 +200,10 @@ export class UnlinkedKeeper {
       busy?: (path: string) => boolean;
       owner?: UnlinkOwner | undefined;
       dirOwner?: NewOwner;
+      marks?: PathMarks;
     } = {}
   ) {
+    this.marks = options.marks ?? new PathMarks();
     const { locks, owner } = options;
     this.dirOwner = options.dirOwner;
     this.fs = fs;
@@ -174,7 +230,6 @@ export class UnlinkedKeeper {
       op: (gated: () => void, sealed: () => void) => Promise<void>
     ) => {
       const { promise, resolve } = Promise.withResolvers<void>();
-      keeper.touch(target);
       let mine: Replacing | undefined;
       const gated = () => {
         const before = replacing.get(target);
@@ -185,10 +240,9 @@ export class UnlinkedKeeper {
         if (mine) mine.sealed = true;
       };
       try {
-        await op(gated, sealed);
+        await keeper.marks.around([target], () => op(gated, sealed));
       } finally {
         keeper.replaced += 1;
-        keeper.touch(target);
         resolve();
         if (mine && replacing.get(target) === mine) replacing.delete(target);
       }
@@ -242,25 +296,15 @@ export class UnlinkedKeeper {
         const target = fs.resolvePath('/', to);
         const source = fs.resolvePath('/', from);
         if (target === source) return fs.rename(from, to);
-        keeper.touch(source);
-        try {
-          await replace(target, async (gated, sealed) => {
+        await keeper.marks.around([source], () =>
+          replace(target, async (gated, sealed) => {
             const pinned = await keeper.pin(target, gated, sealed);
             await keeper.settle(pinned, () => fs.rename(from, to));
-          });
-        } finally {
-          keeper.touch(source);
-        }
+          })
+        );
       },
-      async symlink(target, path, owner) {
-        const at = fs.resolvePath('/', path);
-        keeper.touch(at);
-        try {
-          await fs.symlink(target, path, owner);
-        } finally {
-          keeper.touch(at);
-        }
-      },
+      symlink: (target, path, owner) =>
+        keeper.marks.around([fs.resolvePath('/', path)], () => fs.symlink(target, path, owner)),
       readdir: async (path) => visible(await fs.readdir(path)),
       readdirStat: async (path) =>
         (await fs.readdirStat(path))
@@ -277,26 +321,15 @@ export class UnlinkedKeeper {
   }
 
   generation(): number {
-    return this.gen;
+    return this.marks.generation();
   }
 
   changedSince(path: string, gen: number): boolean {
-    if (gen < this.floor) return true;
-    for (let p = path; this.touched.size > 0; p = parentOf(p)) {
-      if ((this.touched.get(p) ?? 0) > gen) return true;
-      if (p === '/') return false;
-    }
-    return false;
+    return this.marks.changedSince(path, gen);
   }
 
-  private touch(target: string): void {
-    this.gen += 1;
-    this.touched.delete(target);
-    this.touched.set(target, this.gen);
-    if (this.touched.size <= TOUCHED_MAX) return;
-    const [oldest, at] = this.touched.entries().next().value as [string, number];
-    this.touched.delete(oldest);
-    this.floor = at;
+  inFlight(path: string): boolean {
+    return this.marks.inFlight(path);
   }
 
   missed(path: string): boolean {

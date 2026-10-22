@@ -506,7 +506,7 @@ async function holdOp(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest)
       await entry.source?.open(path, real);
       await stillThere(entry, path, req);
       if (req.nofollow && !(await ownEntry(entry, path, real ?? path))) continue;
-      if (!r || (!r.missed(path) && !r.changedSince(path, gen)))
+      if (!r || (!r.missed(path) && !r.changedSince(path, gen) && !r.inFlight?.(path)))
         return json(entry.hold?.(path, on, open, real) ?? null);
     }
   }
@@ -515,10 +515,12 @@ async function holdOp(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest)
 }
 
 async function ownEntry(entry: SyncFsTokenEntry, path: string, real: string): Promise<boolean> {
-  const own = await entry.fs.realpath?.(path, false).catch(() => path);
+  const own = await entry.fs.realpath?.(path, false).catch((err: unknown) => {
+    if ((err as { code?: unknown }).code !== 'ENOENT') throw err;
+    return path;
+  });
   if (own !== undefined && own !== real) return false;
-  const st = await entry.fs.lstat(path).catch(() => undefined);
-  if (!st) throw syncError('ENOENT', path);
+  const st = await entry.fs.lstat(path);
   if (st.isSymbolicLink) throw syncError('ELOOP', path);
   return true;
 }
