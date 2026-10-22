@@ -857,6 +857,11 @@ export class Launcher {
       this.rewritten(change.paths, change.trees);
     });
     const holders = [this.held, this.openFiles];
+    options.fs.heldBy?.((dir) =>
+      holders
+        .flatMap((set) => [...set].flatMap((holder) => [...holder.held()]))
+        .filter((p) => p.startsWith(`${dir}/`))
+    );
     this.unlinked = new UnlinkedKeeper(
       fs,
       { [Symbol.iterator]: () => holders.flatMap((set) => [...set]).values() },

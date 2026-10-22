@@ -97,6 +97,7 @@ export interface KernelFs {
   chown?(path: string, change: OwnerChange): Promise<void>;
   trackOwners?(): void;
   onPeer?(settle: () => Promise<void>): void;
+  heldBy?(held: (dir: string) => readonly string[]): void;
   remoteChanges?(
     listener: (change: {
       paths: readonly string[];
