@@ -262,6 +262,19 @@ const LOCKED = new Set(['NotReadableError', 'NoModificationAllowedError', 'Inval
 
 const SYNC_BACKOFF_MS = [5, 10, 20, 40, 80];
 
+async function unlocked<T>(name: string, op: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await op();
+    } catch (err) {
+      if (!LOCKED.has((err as { name?: unknown })?.name as string)) throw err;
+      const delay = SYNC_BACKOFF_MS[attempt];
+      if (delay === undefined) throw fsError('EBUSY', name);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+}
+
 async function openSync(handle: FileSystemFileHandle): Promise<SyncAccess | undefined> {
   const sync = (handle as SyncCapable).createSyncAccessHandle;
   if (!sync) return undefined;
@@ -1676,7 +1689,9 @@ export class OpfsFs implements KernelFs {
       const [dir, name] = await this.parent(found.path);
       try {
         await this.inDir(dir, (parent) =>
-          this.io(parent.removeEntry(name, { recursive: options.recursive === true }))
+          unlocked(name, () =>
+            this.io(parent.removeEntry(name, { recursive: options.recursive === true }))
+          )
         );
       } catch (err) {
         throw translate(err, path);
