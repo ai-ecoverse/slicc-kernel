@@ -1,5 +1,5 @@
 import type { SyncFsResult } from '../../realm/sync-fs-wire.ts';
-import type { SabPostLike } from '../../realm/sync-sab-bridge.ts';
+import { exactBody, type SabPostLike } from '../../realm/sync-sab-bridge.ts';
 import {
   decodeSabResult,
   loadU53,
@@ -71,7 +71,8 @@ export function createAsyncSabTransport(
     }
   }
 
-  async function once(req: SyncSabRequestBody): Promise<SyncFsResult> {
+  async function once(asked: SyncSabRequestBody): Promise<SyncFsResult> {
+    const { req, transfer } = exactBody(asked);
     const id = ++seq;
     let out: Uint8Array | null = null;
     let status = 0;
@@ -80,11 +81,8 @@ export function createAsyncSabTransport(
     try {
       for (;;) {
         Atomics.store(header, SAB_I_STATE, SAB_STATE_PENDING);
-        port.postMessage(
-          offset === 0
-            ? { type: SYNC_SAB_REQ_MSG, id, req }
-            : { type: SYNC_SAB_NEXT_MSG, id, offset }
-        );
+        if (offset === 0) port.postMessage({ type: SYNC_SAB_REQ_MSG, id, req }, transfer);
+        else port.postMessage({ type: SYNC_SAB_NEXT_MSG, id, offset });
         await ready(id);
         const total = loadU53(header, SAB_I_TOTAL, SAB_I_TOTAL_HI);
         const chunk = Atomics.load(header, SAB_I_CHUNK);
