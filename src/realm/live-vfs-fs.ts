@@ -547,7 +547,8 @@ function followingOnce(write: () => void, follow: () => boolean): void {
   try {
     write();
   } catch (err) {
-    if ((err as { errno?: number }).errno !== wasiErrno('ENOENT') || !follow()) throw err;
+    const errno = (err as { errno?: number }).errno;
+    if ((errno !== wasiErrno('ENOENT') && errno !== wasiErrno('ESTALE')) || !follow()) throw err;
     write();
   }
 }

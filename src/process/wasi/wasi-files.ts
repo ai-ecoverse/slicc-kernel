@@ -87,7 +87,8 @@ export class FileBuffer {
     try {
       return op();
     } catch (err) {
-      if ((err as { code?: unknown }).code !== 'ENOENT' || !this.moved?.(true)) throw err;
+      const code = (err as { code?: unknown }).code;
+      if ((code !== 'ENOENT' && code !== 'ESTALE') || !this.moved?.(true)) throw err;
       return op();
     }
   }
