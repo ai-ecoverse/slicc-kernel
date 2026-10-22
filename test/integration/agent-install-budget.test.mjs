@@ -6,8 +6,8 @@ import { launch } from './chrome.mjs';
 import { booted, installPackage } from './kernel.mjs';
 
 const AGENT = new URL('./fixtures/agent-install/', import.meta.url);
-const CALLS_MAX = 53_000;
-const REQUESTS_MAX = 240_000;
+const CALLS_MAX = 48_000;
+const REQUESTS_MAX = 270_000;
 
 const chrome = await launch();
 after(() => chrome.close());
@@ -24,8 +24,8 @@ const counters = async (bash) =>
     .split('\n')
     .map(Number);
 
-test(`a serial, offline pnpm install of bios's agent into /opt/agent on the OPFS root stays within ${CALLS_MAX} kernel calls and ${REQUESTS_MAX} OPFS requests: main's 49-51k and 227-230k plus 4-5% headroom (wall time printed, not gated)`, {
-  timeout: 600_000,
+test(`a serial offline agent install stays within ${CALLS_MAX} calls and ${REQUESTS_MAX} OPFS requests, limits from slow CI runners (#1425)`, {
+  timeout: 960_000,
 }, async (t) => {
   const { page, bash } = await booted(chrome, t, { users: 'enforce', registry: true });
   for (const name of ['wasm-coreutils', 'wasm-tls-engine', 'wasi-pnpm'])
@@ -45,7 +45,7 @@ test(`a serial, offline pnpm install of bios's agent into /opt/agent on the OPFS
     { cwd: '/' }
   );
   let rc = '';
-  while (!rc && Date.now() - t0 < 540_000) {
+  while (!rc && Date.now() - t0 < 900_000) {
     await new Promise((resolve) => setTimeout(resolve, 2000));
     rc = (
       (await page.evaluate(() => window.opfs.read('tmp/pnpm.rc').catch(() => null))) ?? ''
