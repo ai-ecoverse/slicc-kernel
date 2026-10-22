@@ -835,10 +835,9 @@ export class WasiFds {
     if (exclusive && !(oflags & OFLAGS.DIRECTORY) && this.madeAtOnce(path, mode)) {
       return this.regular(path, undefined, oflags, rights, fdflags, mode, true);
     }
-    if ((exclusive || nofollow) && this.isLink(path)) {
-      throw new WasiError(exclusive ? 'EEXIST' : 'ELOOP');
-    }
-    const s = this.statOrMissing(path);
+    if (exclusive && !nofollow && this.isLink(path)) throw new WasiError('EEXIST');
+    const s = nofollow ? this.lstatOrMissing(path) : this.statOrMissing(path);
+    if (s?.isSymbolicLink) throw new WasiError(exclusive ? 'EEXIST' : 'ELOOP');
     if (exclusive && s) throw new WasiError('EEXIST');
     if (s?.escape !== undefined) {
       refuseWrite({ readonly: true }, oflags, rights);
@@ -858,6 +857,13 @@ export class WasiFds {
   }
 
   private nofollow = false;
+
+  private readonly inos = new WeakMap<FileBuffer, number>();
+
+  private otherFile(buffer: FileBuffer, st: SyncFsBridgeStat | undefined): boolean {
+    const ino = this.inos.get(buffer);
+    return ino !== undefined && st?.ino !== undefined && ino !== st.ino;
+  }
 
   private openSpecial(
     path: string,
@@ -947,6 +953,7 @@ export class WasiFds {
       buffer = undefined;
     }
     buffer ??= this.sharing(path, existing);
+    if (buffer && this.nofollow && this.otherFile(buffer, existing)) buffer = undefined;
     const want = wantOf(oflags, rights);
     if (buffer) {
       if (this.fs.owners) this.fs.access?.(path, want, 'open');
@@ -1002,6 +1009,7 @@ export class WasiFds {
     const buffer = new FileBuffer(io, path, empty, st.maxFile, ranged, st.version, watch);
     buffer.moved = (missing) => this.followRenames(missing);
     buffer.handle = handle;
+    if (st.ino !== undefined) this.inos.set(buffer, st.ino);
     this.buffers.set(path, buffer);
     const id = this.identity(st);
     if (id !== undefined) this.know(buffer, id);
@@ -1108,6 +1116,15 @@ export class WasiFds {
       return this.fs.lstat(path).isSymbolicLink === true;
     } catch {
       return false;
+    }
+  }
+
+  private lstatOrMissing(path: string): SyncFsBridgeStat | undefined {
+    try {
+      return this.fs.lstat(path);
+    } catch (e) {
+      if ((e as { code?: string }).code === 'ENOENT') return undefined;
+      throw e;
     }
   }
 

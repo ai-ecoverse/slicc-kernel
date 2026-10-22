@@ -47,7 +47,13 @@ import {
 } from './fs/protect.ts';
 import type { KernelFs, Peers, UsersMode } from './fs/types.ts';
 import { fsError, normalizePath } from './fs/types.ts';
-import { UNLINKED_DIR, UnlinkedKeeper, type UnlinkOwner, webLocks } from './fs/unlinked.ts';
+import {
+  PathMarks,
+  UNLINKED_DIR,
+  UnlinkedKeeper,
+  type UnlinkOwner,
+  webLocks,
+} from './fs/unlinked.ts';
 import { joinName, parentOf, realDir } from './fs/walk.ts';
 import { FsWatchers } from './fs/watch.ts';
 import {
@@ -724,6 +730,7 @@ export class Launcher {
   private readonly fstabRetries: readonly number[];
   private readonly inserted = new Map<string, MediumHandle>();
   private readonly openFiles = new Set<VfsNodes>();
+  private readonly pathMarks = new PathMarks();
   private readonly deciding = new Map<number, Set<(byParent: boolean) => void>>();
   readonly identities = { asked: 0, timedOut: 0 };
   private readonly nodes: VfsNodes;
@@ -854,6 +861,7 @@ export class Launcher {
         locks: webLocks(),
         busy: (path) => [...this.openFiles].some((nodes) => nodes.holds(path)),
         owner: options.unlinkOwner,
+        marks: this.pathMarks,
         ...(this.owners ? { dirOwner: { uid: 0, gid: 0, mode: 0o700 } } : {}),
       }
     );
@@ -3088,6 +3096,7 @@ export class Launcher {
         locks: webLocks(),
         busy: (path) => [...this.openFiles].some((open) => open.holds(path)),
         owner: this.unlinkOwnerOption,
+        marks: this.pathMarks,
         ...(this.owners ? { dirOwner: { uid: 0, gid: 0, mode: 0o700 } } : {}),
       }
     );
