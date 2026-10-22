@@ -51,3 +51,29 @@ test("a program's writes through a descriptor follow another tab's plain moves o
   assert.equal(mover.stderr, '', 'the mover lost its own file');
   assert.match(writer.stdout, /^\d+ \{\}\n$/, 'the writer saw errors');
 });
+
+test("what a program's descriptor writes see when another tab really removes its file (#1442, the baseline #1423 owns)", {
+  timeout: 600_000,
+}, async (t) => {
+  const { page } = await booted(chrome, t);
+  await installPackage(page, 'wasm-coreutils');
+  await installPackage(page, 'wasix-python', { skip: /^lib\/libpython[^/]*\.a$/ });
+  const other = await peerTab(page);
+  assert.equal(
+    (await sh(page, 'rm -rf /root/rc && mkdir -p /root/rc && echo made')).stdout,
+    'made\n'
+  );
+  await page.evaluate(
+    (script) => {
+      window.writer = window.kernel.run(['python3', '-c', script], { cwd: '/' });
+    },
+    WRITER.replace('end = time.time() + 40', 'end = time.time() + 8')
+  );
+  while (!(await page.evaluate(() => window.opfs.exists('root/rc/ready'))))
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  const mover = await sh(other, 'cd /root/rc && rm f && sleep 2 && : > stop; echo removed');
+  const writer = await page.evaluate(() => window.writer);
+  console.log(`removed baseline: writer ${writer.stdout.trim()} ${writer.stderr.trim()}`);
+  console.log(`removed baseline: mover ${JSON.stringify(mover)}`);
+  assert.equal(mover.stdout, 'removed\n');
+});
