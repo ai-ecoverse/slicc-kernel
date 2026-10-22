@@ -217,6 +217,8 @@ interface Positioned {
 }
 
 interface SyncAccess {
+  read?(into: Uint8Array, options: { at: number }): number;
+  getSize?(): number;
   write(bytes: Uint8Array, options: { at: number }): number;
   truncate(size: number): void;
   flush(): void;
@@ -261,6 +263,37 @@ type SyncCapable = FileSystemFileHandle & {
 const LOCKED = new Set(['NotReadableError', 'NoModificationAllowedError', 'InvalidStateError']);
 
 const SYNC_BACKOFF_MS = [5, 10, 20, 40, 80];
+export const SAH_READ_MIN = 256 * 1024;
+
+async function syncRead(
+  handle: FileSystemFileHandle,
+  offset: number,
+  length: number
+): Promise<{ bytes: Uint8Array; size: number } | undefined> {
+  const sync = (handle as SyncCapable).createSyncAccessHandle;
+  if (!sync) return undefined;
+  let access: SyncAccess;
+  try {
+    access = await sync.call(handle, { mode: 'readwrite-unsafe' });
+  } catch (err) {
+    if (LOCKED.has((err as { name?: unknown })?.name as string)) return undefined;
+    throw err;
+  }
+  try {
+    if (!access.read || !access.getSize) return undefined;
+    const size = access.getSize();
+    const into = new Uint8Array(Math.max(0, Math.min(length, size - offset)));
+    let done = 0;
+    while (done < into.length) {
+      const n = access.read(into.subarray(done), { at: offset + done });
+      if (!(n > 0)) break;
+      done += n;
+    }
+    return { bytes: done === into.length ? into : into.subarray(0, done), size };
+  } finally {
+    access.close();
+  }
+}
 
 async function openSync(handle: FileSystemFileHandle): Promise<SyncAccess | undefined> {
   const sync = (handle as SyncCapable).createSyncAccessHandle;
@@ -1269,6 +1302,14 @@ export class OpfsFs implements KernelFs {
 
   async pread(path: string, offset: number, length: number): Promise<Uint8Array> {
     return this.reading(path, async (handle) => {
+      if (length >= SAH_READ_MIN) {
+        this.calls++;
+        const read = await this.io(syncRead(handle, offset, length));
+        if (read) {
+          await this.refuseNode(path, read.size === 0);
+          return read.bytes;
+        }
+      }
       const file = await this.io(handle.getFile());
       await this.refuseNode(path, file.size === 0);
       return new Uint8Array(await file.slice(offset, offset + length).arrayBuffer());
