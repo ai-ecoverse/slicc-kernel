@@ -25,6 +25,7 @@ interface Typed {
   roots: string[];
   names: Map<string, string>;
   recursive: boolean;
+  directory: boolean;
   notes: WatchNote[];
   overflowed: boolean;
   ended: boolean;
@@ -144,13 +145,14 @@ export class FsWatchers {
     };
   }
 
-  typedWatch(root: string, recursive: boolean, alias?: string): TypedWatch {
+  typedWatch(root: string, recursive: boolean, alias?: string, directory = recursive): TypedWatch {
     const main = normalizePath(root);
     const other = alias === undefined ? main : normalizePath(alias);
     const watch: Typed = {
       roots: other === main ? [main] : [main, other],
       names: new Map(),
       recursive,
+      directory,
       notes: [],
       overflowed: false,
       ended: false,
@@ -250,6 +252,7 @@ export class FsWatchers {
       for (const watch of [...this.typed]) {
         if (type === 'rename' && watch.roots.some((root) => at === root || under(root, at)))
           continue;
+        if (type === 'change' && watch.directory && watch.roots.includes(at)) continue;
         route(watch, type, at, seq);
       }
     }

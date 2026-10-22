@@ -2779,7 +2779,12 @@ export class Launcher {
         if (g) await readable(g, 'watch', at);
         const st = await this.fs.stat(at);
         const real = (await this.fs.realpath?.(at, true).catch(() => at)) ?? at;
-        const watch = this.watchers.typedWatch(real, recursive && st.isDirectory, at);
+        const watch = this.watchers.typedWatch(
+          real,
+          recursive && st.isDirectory,
+          at,
+          st.isDirectory
+        );
         if (!g || g.cred.euid === 0) return watch;
         return visibleTo(watch, real, async (dir) => {
           const walked = await access(g.fs, g.cred, dir, R_OK | X_OK, { directory: true });
