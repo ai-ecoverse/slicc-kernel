@@ -858,7 +858,12 @@ export class WasiFds {
 
   private nofollow = false;
 
-  private readonly unfollowed = new WeakSet<FileBuffer>();
+  private readonly inos = new WeakMap<FileBuffer, number>();
+
+  private otherFile(buffer: FileBuffer, st: SyncFsBridgeStat | undefined): boolean {
+    const ino = this.inos.get(buffer);
+    return ino !== undefined && st?.ino !== undefined && ino !== st.ino;
+  }
 
   private openSpecial(
     path: string,
@@ -948,7 +953,7 @@ export class WasiFds {
       buffer = undefined;
     }
     buffer ??= this.sharing(path, existing);
-    if (buffer && this.nofollow && !this.unfollowed.has(buffer)) buffer = undefined;
+    if (buffer && this.nofollow && this.otherFile(buffer, existing)) buffer = undefined;
     const want = wantOf(oflags, rights);
     if (buffer) {
       if (this.fs.owners) this.fs.access?.(path, want, 'open');
@@ -1004,7 +1009,7 @@ export class WasiFds {
     const buffer = new FileBuffer(io, path, empty, st.maxFile, ranged, st.version, watch);
     buffer.moved = (missing) => this.followRenames(missing);
     buffer.handle = handle;
-    if (this.nofollow) this.unfollowed.add(buffer);
+    if (st.ino !== undefined) this.inos.set(buffer, st.ino);
     this.buffers.set(path, buffer);
     const id = this.identity(st);
     if (id !== undefined) this.know(buffer, id);
