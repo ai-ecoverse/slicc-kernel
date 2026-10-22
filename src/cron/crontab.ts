@@ -18,11 +18,15 @@ export interface CrontabCaller {
 
 export type TableTags = Record<string, Record<string, JobTags>>;
 
+export const TAGS_VERSION = 1;
+
 export async function readTags(fs: KernelFs): Promise<TableTags> {
   const text = await fs.readFile(TAGS_PATH).catch(() => '');
   try {
     const parsed = JSON.parse(text) as unknown;
-    return parsed && typeof parsed === 'object' ? (parsed as TableTags) : {};
+    if (!parsed || typeof parsed !== 'object') return {};
+    const { v: _, ...tables } = parsed as TableTags & { v?: unknown };
+    return tables as TableTags;
   } catch {
     return {};
   }
@@ -114,8 +118,8 @@ export class Crontabs {
     const kept: TableTags = { ...all };
     if (Object.keys(table).length > 0) kept[path] = table;
     else delete kept[path];
-    const json = JSON.stringify(kept);
-    if (json === JSON.stringify(all)) return;
+    const json = JSON.stringify({ v: TAGS_VERSION, ...kept });
+    if (json === (await fs.readFile(TAGS_PATH).catch(() => ''))) return;
     const owner: NewOwner | undefined = owners ? { uid: 0, gid: 0, mode: 0o600 } : undefined;
     const fresh = `${TAGS_PATH}.${crypto.randomUUID()}.new`;
     await fs.writeFile(fresh, json, owner);

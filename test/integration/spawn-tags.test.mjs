@@ -121,6 +121,14 @@ test('with users on, a tagged process cannot write /etc/crontab or the cron spoo
     );
   }
   assert.equal(ran, 'agent,guest\n');
+  const record = JSON.parse(
+    new TextDecoder().decode(await kernel.readFile('/var/spool/cron/tags'))
+  );
+  assert.equal(record.v, 1);
+  assert.deepEqual(
+    Object.values(record['/var/spool/cron/crontabs/root']).map((j) => j.tags),
+    [['agent', 'guest']]
+  );
 });
 
 test("a job named like another user's tagged job keeps both apart: the tagged one still runs tagged, and the other runs untagged (#1380 review)", async (t) => {
