@@ -567,6 +567,7 @@ function openReplaced(
   if (!node || node === moving || node.live?.openCount === 0 || !h.Fs.isFile(node.mode))
     return undefined;
   const st = freshStat(h, node);
+  if ((st.nlink ?? 1) > 1) return undefined;
   const ranged = h.rangedOf(node);
   if (ranged) ranged.prefetch();
   else h.ensureLoaded(node);
