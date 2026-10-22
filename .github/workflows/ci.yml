@@ -13,6 +13,7 @@ permissions:
   pull-requests: write
   statuses: write
   id-token: write
+  attestations: write
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -20,7 +21,7 @@ concurrency:
 
 jobs:
   ci:
-    uses: ai-ecoverse/slicc-shared-web/.github/workflows/pipeline.yml@v2.7.8
+    uses: ai-ecoverse/slicc-shared-web/.github/workflows/pipeline.yml@v2.7.9
     secrets: inherit
     with:
       node-version: '26'

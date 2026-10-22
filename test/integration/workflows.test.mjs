@@ -21,6 +21,13 @@ test('CI is one caller of slicc-shared-web pipeline.yml, at the release of the h
   assert.deepEqual(ci.split('\njobs:\n')[1].match(/^ {2}[a-z-]+:$/gm), ['  ci:']);
 });
 
+test('CI grants the pipeline the permissions its jobs ask for, attestations for the release included', () => {
+  assert.match(
+    ci,
+    /\npermissions:\n {2}contents: write\n {2}actions: read\n {2}issues: write\n {2}pull-requests: write\n {2}statuses: write\n {2}id-token: write\n {2}attestations: write\n\n/
+  );
+});
+
 test('CI runs on pull requests, merge groups and pushes to main, and cancels a superseded run only on a pull request', () => {
   assert.match(
     ci,
