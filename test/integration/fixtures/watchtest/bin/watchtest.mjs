@@ -10,9 +10,11 @@ async function events(ctx, [path, end, ready, ...flags]) {
   let done;
   const finished = new Promise((resolve) => (done = resolve));
   let over = false;
+  const stream = flags.includes('stream');
   const listener = (note) => {
     if (over) return;
     notes.push(line(note));
+    if (stream) void ctx.write(1, `${line(note)}\n`);
     over = 'ended' in note || note.filename === end;
     if ('ended' in note || note.filename === end) done();
   };
@@ -24,7 +26,7 @@ async function events(ctx, [path, end, ready, ...flags]) {
   await finished;
   watcher.close();
   watcher.close();
-  await ctx.write(1, `${notes.join('\n')}\n`);
+  if (!stream) await ctx.write(1, `${notes.join('\n')}\n`);
 }
 
 async function refused(ctx, [path]) {

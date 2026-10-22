@@ -102,6 +102,7 @@ export interface KernelFs {
       paths: readonly string[];
       trees?: readonly string[];
       moved?: { from: string; to: string };
+      content?: true;
     }) => void
   ): () => void;
   peers?(): Peers | undefined;
