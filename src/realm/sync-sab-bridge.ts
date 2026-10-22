@@ -370,7 +370,8 @@ export function createSyncFsSabBridge(
       const mode = (held ? 1 : 0) | (open ? 2 : 0);
       if (mode === 3) {
         const at = seen.gen !== undefined ? { gen: seen.gen } : {};
-        return json({ op: 'hold', path, mode: mode | want, ...at }, path) as number;
+        const link = seen.nofollow ? { nofollow: true } : {};
+        return json({ op: 'hold', path, mode: mode | want, ...at, ...link }, path) as number;
       }
       run({ op: 'hold', path, mode, ...(handle !== undefined ? { handle } : {}) }, path);
       return undefined;

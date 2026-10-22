@@ -816,24 +816,28 @@ export class WasiFds {
     return openDevice.call(this.kernel.sys, flags);
   }
 
-  open(path: string, oflags: number, rights: bigint, fdflags: number, mode?: number): number {
+  open(
+    path: string,
+    oflags: number,
+    rights: bigint,
+    fdflags: number,
+    mode?: number,
+    nofollow = false
+  ): number {
     this.made = undefined;
     this.created = false;
+    this.nofollow = nofollow;
     const exclusive = (oflags & OFLAGS.CREAT) !== 0 && (oflags & OFLAGS.EXCL) !== 0;
-    if (exclusive && namedDevice(path)) throw new WasiError('EEXIST');
-    const device = deviceOf(path);
-    if (device) return this.install({ type: 'device', device });
-
-    const kernelDevice = this.openKernelDevice(path, oflags, fdflags, rights);
-    if (kernelDevice !== undefined) return kernelDevice;
-    const alias = stdioAlias(path);
-    if (alias !== undefined) return this.reopen(alias);
+    const special = this.openSpecial(path, oflags, rights, fdflags, exclusive);
+    if (special !== undefined) return special;
     const outside = this.escaped(path, oflags, rights);
     if (outside !== undefined) return this.open(outside, oflags, rights, fdflags, mode);
     if (exclusive && !(oflags & OFLAGS.DIRECTORY) && this.madeAtOnce(path, mode)) {
       return this.regular(path, undefined, oflags, rights, fdflags, mode, true);
     }
-    if (exclusive && this.isLink(path)) throw new WasiError('EEXIST');
+    if ((exclusive || nofollow) && this.isLink(path)) {
+      throw new WasiError(exclusive ? 'EEXIST' : 'ELOOP');
+    }
     const s = this.statOrMissing(path);
     if (exclusive && s) throw new WasiError('EEXIST');
     if (s?.escape !== undefined) {
@@ -851,6 +855,26 @@ export class WasiFds {
     if (!s && !(oflags & OFLAGS.CREAT)) throw new WasiError('ENOENT');
     refuseWrite(s, oflags, rights);
     return this.regular(path, s, oflags, rights, fdflags, mode);
+  }
+
+  private nofollow = false;
+
+  private openSpecial(
+    path: string,
+    oflags: number,
+    rights: bigint,
+    fdflags: number,
+    exclusive: boolean
+  ): number | undefined {
+    if (exclusive && namedDevice(path)) throw new WasiError('EEXIST');
+    const device = deviceOf(path);
+    if (device) return this.install({ type: 'device', device });
+    const kernelDevice = this.openKernelDevice(path, oflags, fdflags, rights);
+    if (kernelDevice !== undefined) return kernelDevice;
+    const alias = stdioAlias(path);
+    if (alias === undefined) return undefined;
+    if (this.nofollow) throw new WasiError('ELOOP');
+    return this.reopen(alias);
   }
 
   private escaped(path: string, oflags: number, rights: bigint): string | undefined {
@@ -956,6 +980,7 @@ export class WasiFds {
       (want & 4 ? HOLD_READ : 0) | (want & 2 ? HOLD_WRITE : 0) | (made ? HOLD_CREATED : 0);
     const handle = this.fs.hold?.(path, true, true, undefined, this.fs.owners ? asked : 0, {
       gen: st.gen,
+      ...(this.nofollow ? { nofollow: true } : {}),
     });
     const io = handle !== undefined && this.fs.pinned ? this.fs.pinned(handle) : this.fs;
     const view = this.fs.changes;

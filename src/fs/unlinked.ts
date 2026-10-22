@@ -240,11 +240,26 @@ export class UnlinkedKeeper {
       },
       async rename(from, to) {
         const target = fs.resolvePath('/', to);
-        if (target === fs.resolvePath('/', from)) return fs.rename(from, to);
-        await replace(target, async (gated, sealed) => {
-          const pinned = await keeper.pin(target, gated, sealed);
-          await keeper.settle(pinned, () => fs.rename(from, to));
-        });
+        const source = fs.resolvePath('/', from);
+        if (target === source) return fs.rename(from, to);
+        keeper.touch(source);
+        try {
+          await replace(target, async (gated, sealed) => {
+            const pinned = await keeper.pin(target, gated, sealed);
+            await keeper.settle(pinned, () => fs.rename(from, to));
+          });
+        } finally {
+          keeper.touch(source);
+        }
+      },
+      async symlink(target, path, owner) {
+        const at = fs.resolvePath('/', path);
+        keeper.touch(at);
+        try {
+          await fs.symlink(target, path, owner);
+        } finally {
+          keeper.touch(at);
+        }
       },
       readdir: async (path) => visible(await fs.readdir(path)),
       readdirStat: async (path) =>
