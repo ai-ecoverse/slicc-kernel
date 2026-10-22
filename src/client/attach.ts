@@ -61,6 +61,7 @@ export interface SpawnOptions {
   stdin?: string | Uint8Array;
   group?: 'new';
   pgid?: number;
+  tag?: string;
   onStdout?: (bytes: Uint8Array) => void;
   onStderr?: (bytes: Uint8Array) => void;
 }
@@ -83,6 +84,7 @@ export interface ClientRunOptions {
   user?: string | number;
   env?: Record<string, string>;
   stdin?: string | Uint8Array;
+  tag?: string;
   onStdout?: (text: string) => void;
   onStderr?: (text: string) => void;
 }
@@ -101,6 +103,7 @@ export interface ClientTerminalOptions {
   env?: Record<string, string>;
   cols?: number;
   rows?: number;
+  tag?: string;
   onData?: (bytes: Uint8Array) => void;
 }
 
@@ -413,6 +416,7 @@ async function spawnOn(
   if (opts.pgid !== undefined)
     await since(channel, 3, 'spawn into a process group', async () => {});
   if (opts.user !== undefined) await since(channel, 8, 'spawn as a user', async () => {});
+  if (opts.tag !== undefined) await since(channel, 12, 'a tag per spawn', async () => {});
   const started = Promise.withResolvers<number>();
   let endedBy: string | undefined;
   const options = { ...rest, ...(stdin !== undefined ? { stdin: bytesOf(stdin) } : {}) };
@@ -481,6 +485,7 @@ async function terminalOn(
 ): Promise<ClientTerminal> {
   const { onData, ...options } = opts;
   if (opts.user !== undefined) await since(channel, 8, 'a terminal as a user', async () => {});
+  if (opts.tag !== undefined) await since(channel, 12, 'a tag per terminal', async () => {});
   let listener = onData ?? null;
   const backlog: Uint8Array[] = [];
   const started = Promise.withResolvers<number>();

@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   ci:
-    uses: ai-ecoverse/slicc-shared-web/.github/workflows/pipeline.yml@v2.7.5
+    uses: ai-ecoverse/slicc-shared-web/.github/workflows/pipeline.yml@v2.7.8
     secrets: inherit
     with:
       node-version: '26'

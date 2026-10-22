@@ -100,7 +100,7 @@ import type { ForkState, Program } from './kernel/protocol.ts';
 import { PtyTable } from './kernel/pty.ts';
 import { RenameLog } from './kernel/rename-log.ts';
 import { type ScrubSecret, scrubbedAll, scrubberOf, scrubStdio } from './kernel/scrub-file.ts';
-import { SealedBroker, type SealedCaller, type SealedHook } from './kernel/sealed.ts';
+import { SealedBroker, type SealedCaller, type SealedHook, tagFields } from './kernel/sealed.ts';
 import { SemTable } from './kernel/sem.ts';
 import { SettlingChildren } from './kernel/settling.ts';
 import { SI, SIG, type SigInfo, sigbit, signalField } from './kernel/signals.ts';
@@ -262,6 +262,8 @@ export interface RunOptions {
   pgid?: number;
   user?: string | number | Account;
   tag?: string;
+  tags?: readonly string[];
+  tagBase?: number;
   login?: boolean;
 }
 
@@ -272,6 +274,8 @@ export interface TerminalOptions {
   rows?: number;
   user?: string | number | Account;
   tag?: string;
+  tags?: readonly string[];
+  tagBase?: number;
   onData: (bytes: Uint8Array) => void;
 }
 
@@ -377,7 +381,8 @@ interface StartRequest {
   blocked?: BlockedMask;
   umask?: number;
   cred: Cred;
-  tag?: string | undefined;
+  tags?: readonly string[] | undefined;
+  tagBase?: number | undefined;
   links?: number | undefined;
   decided?: Promise<boolean>;
   pid?: number;
@@ -427,6 +432,29 @@ function usersMode(mode: unknown = 'off'): UsersMode {
 
 export function tagOption(tag: unknown): void {
   if (tag !== undefined && typeof tag !== 'string') throw new TypeError('a tag must be a string');
+}
+
+export function withTag(
+  tags: readonly string[] | undefined,
+  tag: string | undefined
+): readonly string[] | undefined {
+  if (tag === undefined || tags?.includes(tag)) return tags;
+  return [...(tags ?? []), tag];
+}
+
+function tagsOption(options: { tag?: string; tags?: readonly string[]; tagBase?: number }) {
+  tagOption(options.tag);
+  const tags = options.tags ?? withTag(undefined, options.tag);
+  return { tags, tagBase: options.tags ? (options.tagBase ?? 0) : (tags?.length ?? 0) };
+}
+
+const CRON_PATHS = ['/etc/crontab', '/var/spool/cron'];
+
+export function cronPath(path: string): boolean {
+  return CRON_PATHS.some(
+    (at) =>
+      path === at || path.startsWith(`${at}/`) || at.startsWith(path === '/' ? '/' : `${path}/`)
+  );
 }
 
 function baseName(path: string): string {
@@ -636,7 +664,8 @@ export class Launcher {
     Pick<ProcessInfo, 'argv' | 'tty' | 'started' | 'exe' | 'exeId'>
   >();
   private readonly creds = new Map<number, () => Cred>();
-  private readonly tags = new Map<number, string>();
+  private readonly tags = new Map<number, readonly string[]>();
+  private readonly tagBases = new Map<number, number>();
   private readonly links = new Map<number, number>();
   private readonly freshModules = new FreshModules();
   private readonly granted = new Map<number, number>();
@@ -711,12 +740,12 @@ export class Launcher {
     this.rootFs = options.fs;
     this.locks = kernelLocks(options.fs.rootName, this.flushingPeers(options.fs));
     this.dac = this.usersMode === 'off' ? undefined : new Dac(this.usersMode, options.onDenial);
-    if (this.dac) this.dac.tagOf = (pid) => this.tagOf(pid);
+    if (this.dac) this.wireDac(this.dac);
     this.clipboard = new ClipboardBroker(options.clipboard, this.usersMode, undefined, (pid) =>
-      this.tagOf(pid)
+      this.tagsOf(pid)
     );
     this.sealed = new SealedBroker(options.sealed, this.usersMode, undefined, (pid) =>
-      this.tagOf(pid)
+      this.tagsOf(pid)
     );
     this.sealed.tickets.normalise = (path) => physicalPathAsync(this.base, path);
     this.sealed.userOf = async (uid) => (await this.users.lookup(uid))?.name;
@@ -884,8 +913,9 @@ export class Launcher {
           remote();
         };
       },
-      run: async ({ account, argv, cwd, env, output }) => {
+      run: async ({ account, argv, cwd, env, output, tags, tagBase }) => {
         const ended = await this.run(argv, {
+          ...(tags ? { tags, tagBase: tagBase as number } : {}),
           user: account,
           cwd,
           env,
@@ -1439,7 +1469,7 @@ export class Launcher {
     const { requested: path, requestedCwd: cwd, path: resolved } = booked;
     const pid = this.nextPid++;
     const ids = { pid: req.exec ? caller : pid, ppid: caller };
-    const stamp = await this.sealed.stamp(ids, cred, this.tagOf(ppid));
+    const stamp = await this.sealed.stamp(ids, cred, this.tagsOf(ppid));
     const interpreters = await this.interpreterChain(planned, booked.cwd, scope);
     const trusted =
       this.usersMode === 'enforce' &&
@@ -1779,7 +1809,7 @@ export class Launcher {
     let exeId: { exeId?: string };
     await this.pnpmReady();
     try {
-      const caller = { pid: req.ppid ?? 0, uid: req.cred.euid, tag: req.tag };
+      const caller = { pid: req.ppid ?? 0, uid: req.cred.euid, tag: req.tags?.[0] };
       if (this.integrity) await this.checkedSources(planned, caller);
       [program, exeId] = await Promise.all([this.program(target, env, caller), this.exeId(target)]);
     } catch (err) {
@@ -1849,7 +1879,8 @@ export class Launcher {
   }
 
   private marks(pid: number, req: StartRequest): void {
-    if (req.tag !== undefined) this.tags.set(pid, req.tag);
+    if (req.tags?.length) this.tags.set(pid, req.tags);
+    if (req.tags?.length) this.tagBases.set(pid, req.tagBase ?? req.tags.length);
     if (req.links !== undefined) this.links.set(pid, req.links);
   }
 
@@ -1906,7 +1937,7 @@ export class Launcher {
     const cwdSlot = this.cwds.share(req.cwdSlot);
     this.cwdSlots.set(pid, cwdSlot);
     const scrubs = this.treeScrubs(req);
-    const stack = this.stackFor(req.tag);
+    const stack = this.stackFor(req.tags, req.tagBase);
     const terminal = req.fds.stdioTerminal();
     const decided = req.decided ?? Promise.resolve(true);
     const count = (byParent: boolean) => {
@@ -2067,6 +2098,7 @@ export class Launcher {
     this.childTimes.delete(pid);
     this.creds.delete(pid);
     this.tags.delete(pid);
+    this.tagBases.delete(pid);
     this.links.delete(pid);
     this.granted.delete(pid);
   }
@@ -2196,7 +2228,7 @@ export class Launcher {
       const cred = this.credOf(member.pid);
       if (!maySee(viewer, cred)) continue;
       const root = rootOf(member);
-      const tag = this.tagOf(member.pid) ?? this.tagOf(root.pid);
+      const tags = this.tagsOf(member.pid) ?? this.tagsOf(root.pid);
       listed.push({
         pid: root.pid,
         tid: member.pid,
@@ -2213,7 +2245,7 @@ export class Launcher {
         umask: this.umaskOf(member.pid),
         cred,
         ...this.signalMasksOf(member.pid),
-        ...(tag !== undefined && maySee(viewer, cred) ? { tag } : {}),
+        ...tagFields(tags),
       });
     }
     return listed;
@@ -2230,14 +2262,17 @@ export class Launcher {
       owners: this.owners,
       lookup: (user) => this.users.lookup(user),
     });
-    return this.crontabs.request(this.credOf(pid), call);
+    return this.crontabs.request(this.credOf(pid), call, {
+      tags: this.tagsOf(pid),
+      base: this.tagBases.get(pid),
+    });
   }
 
   private sudo(pid: number, call: SudoCall, signal: AbortSignal): Promise<SudoResult> {
     const caller = {
       cred: this.credOf(pid),
       pid: this.jobs.shown(pid),
-      tag: this.tagOf(pid),
+      tags: this.tagsOf(pid),
       tty: this.described.get(pid)?.tty,
     };
     return this.sudoer.request(caller, call, signal);
@@ -2286,7 +2321,8 @@ export class Launcher {
         blocked: this.blockedBy(ppid),
         umask: this.umaskOf(ppid),
         cred,
-        tag: this.tagOf(ppid),
+        tags: this.tagsOf(ppid),
+        tagBase: this.tagBases.get(ppid),
         links: grant ? grant.cred.euid : this.links.get(ppid),
         ...group,
         ...exec,
@@ -2327,7 +2363,7 @@ export class Launcher {
   }
 
   connectorStamp(pid: number): Promise<SealedCaller> {
-    return this.sealed.stamp(this.identityOf(pid), this.credOf(pid), this.tagOf(pid));
+    return this.sealed.stamp(this.identityOf(pid), this.credOf(pid), this.tagsOf(pid));
   }
 
   private identityOf(pid: number): { pid: number; ppid: number } {
@@ -2387,7 +2423,8 @@ export class Launcher {
           blocked: this.blockedBy(ppid),
           umask: this.umaskOf(ppid),
           cred: this.credOf(ppid),
-          tag: this.tagOf(ppid),
+          tags: this.tagsOf(ppid),
+          tagBase: this.tagBases.get(ppid),
           links: this.links.get(ppid),
         });
       return childHandle(await this.admitted(parent.program.abi !== 'js', given, fresh));
@@ -2434,7 +2471,16 @@ export class Launcher {
   }
 
   tagOf(pid: number): string | undefined {
+    return this.tags.get(pid)?.[0];
+  }
+
+  tagsOf(pid: number): readonly string[] | undefined {
     return this.tags.get(pid);
+  }
+
+  private wireDac(dac: Dac): void {
+    dac.tagOf = (pid) => this.tagOf(pid);
+    dac.fenced = (pid, path) => this.tags.has(pid) && cronPath(path);
   }
 
   private released(path: string): void {
@@ -2952,24 +2998,28 @@ export class Launcher {
     return found;
   }
 
-  private identity(account: Account, tag?: string): Pick<StartRequest, 'cred' | 'umask' | 'tag'> {
+  private identity(
+    account: Account,
+    given: { tags: readonly string[] | undefined; tagBase: number }
+  ): Pick<StartRequest, 'cred' | 'umask' | 'tags' | 'tagBase'> {
     return {
-      tag,
+      ...given,
       cred: credOf(account),
       ...(account.umask !== undefined ? { umask: account.umask } : {}),
     };
   }
 
   fsFor(tag: string | undefined): KernelFs {
-    return this.stackFor(tag).fs;
+    return this.stackFor(withTag(undefined, tag)).fs;
   }
 
-  isWriter(tag: string | undefined): boolean {
-    return tag !== undefined && this.prefixes.length > 0 && this.writerTags.has(tag);
+  isWriter(tags: readonly string[] | undefined, base = tags?.length ?? 0): boolean {
+    if (!tags?.length || base === 0 || this.prefixes.length === 0) return false;
+    return tags.every((tag) => this.writerTags.has(tag));
   }
 
-  private stackFor(tag: string | undefined): WriterStack {
-    if (!this.isWriter(tag)) {
+  private stackFor(tags: readonly string[] | undefined, base?: number): WriterStack {
+    if (!this.isWriter(tags, base)) {
       return {
         fs: this.processFs,
         noLinks: this.noLinksFs,
@@ -3093,23 +3143,38 @@ export class Launcher {
     return unlinked.wrap(keepingOpen(fs, nodes, (path) => this.changes.publish(path)));
   }
 
-  private async starting(argv: string[], dir: string | undefined, account: Account, tag?: string) {
+  private async starting(
+    argv: string[],
+    dir: string | undefined,
+    account: Account,
+    tags?: readonly string[],
+    base?: number
+  ) {
+    const tag = tags?.[0];
     this.resetCatalogs();
     const scope = account.uid === 0 ? '' : pnpmHomeOf(account, this.pnpmHome);
     const start = dir ?? '/';
     const cwd = await physicalPathAsync(this.base, start.startsWith('/') ? start : `/${start}`);
     await this.enterable(this.execGuard(credOf(account), 0, tag), cwd);
     const file = await this.execFile(argv[0] ?? '', cwd, this.execGuard(credOf(account), 0, tag));
-    if (!(await this.base.exists(cwd))) await this.stackFor(tag).fs.mkdir(cwd, { recursive: true });
+    if (!(await this.base.exists(cwd)))
+      await this.stackFor(tags, base).fs.mkdir(cwd, { recursive: true });
     const planned = await this.plan(file, argv, cwd, scope);
     await this.mayExec(credOf(account), { file, cwd, pid: 0, tag }, planned);
     return { cwd, file, planned };
   }
 
   async openTerminal(argv: string[], options: TerminalOptions): Promise<TerminalSession> {
-    tagOption(options.tag);
+    const tagged = tagsOption(options);
+    const { tags } = tagged;
     const { account, tty: ttyGroup } = await this.terminalAccount(options.user);
-    const { cwd, file, planned } = await this.starting(argv, options.cwd, account, options.tag);
+    const { cwd, file, planned } = await this.starting(
+      argv,
+      options.cwd,
+      account,
+      tags,
+      tagged.tagBase
+    );
     if (!planned) throw new Error(`${file}: command not found`);
     let leader = 0;
     const tty: KernelTty = new KernelTty(
@@ -3140,7 +3205,7 @@ export class Launcher {
       cwd,
       fds,
       report,
-      ...this.identity(account, options.tag),
+      ...this.identity(account, tagged),
     });
     leader = handle.pid;
     void handle.exited.then(() => tty.hangup());
@@ -3159,9 +3224,16 @@ export class Launcher {
   }
 
   async run(argv: string[], options: RunOptions = {}): Promise<RunResult> {
-    tagOption(options.tag);
+    const tagged = tagsOption(options);
+    const { tags } = tagged;
     const account = await this.account(options.user);
-    const { cwd, file, planned } = await this.starting(argv, options.cwd, account, options.tag);
+    const { cwd, file, planned } = await this.starting(
+      argv,
+      options.cwd,
+      account,
+      tags,
+      tagged.tagBase
+    );
     const env = this.environment(cwd, options.env, account, options.login);
     const out: Uint8Array[] = [];
     const err: Uint8Array[] = [];
@@ -3191,7 +3263,7 @@ export class Launcher {
       fds,
       report,
       ...group,
-      ...this.identity(account, options.tag),
+      ...this.identity(account, tagged),
     });
     options.onStarted?.(handle.pid);
     const status = await handle.exited;

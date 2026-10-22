@@ -21,7 +21,7 @@ import { dialSocket, serveSocket } from '../kernel/dial.ts';
 import type { TransportCall } from '../kernel/net/remote-transport.ts';
 import type { RealmTransport } from '../kernel/net/transport.ts';
 import { SIG, signalField } from '../kernel/signals.ts';
-import type { Launcher, TerminalSession } from '../launcher.ts';
+import { type Launcher, type TerminalSession, tagOption, withTag } from '../launcher.ts';
 import { serveTransport, type TransportServer } from '../transport.ts';
 import { type Account, credOf } from '../users.ts';
 import {
@@ -236,10 +236,22 @@ function clientCred(self: Account | undefined): Cred {
 async function runTagged(
   l: Launcher,
   self: Account,
-  requested: string | number | undefined,
+  options: { user?: string | number | undefined; tag?: unknown },
   tag: string | undefined
-): Promise<{ user: Account; tag: string | undefined }> {
-  return { user: await runAs(l, self, requested), tag };
+): Promise<{
+  user: Account;
+  tag: string | undefined;
+  tags: readonly string[] | undefined;
+  tagBase: number;
+}> {
+  tagOption(options.tag);
+  const tags = withTag(withTag(undefined, tag), options.tag as string | undefined);
+  return {
+    user: await runAs(l, self, options.user),
+    tag,
+    tags,
+    tagBase: tag === undefined ? 0 : 1,
+  };
 }
 
 function processes(l: Launcher, self: Account): ProcessEntry[] {
@@ -476,7 +488,7 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
   async function terminal(req: Extract<ClientRequest, { op: 'open-terminal' }>, l: Launcher) {
     const session = await l.openTerminal(req.argv, {
       ...req.options,
-      ...(await runTagged(l, self as Account, req.options.user, host.tag)),
+      ...(await runTagged(l, self as Account, req.options, host.tag)),
       onData: (bytes) => reply(req.id, { fd: 1, bytes: bytes.slice() }),
     });
     if (state === 'closed') {
@@ -500,7 +512,7 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
     let leader: number | undefined;
     const result = await l.run(req.argv, {
       ...req.options,
-      ...(await runTagged(l, self as Account, req.options.user, host.tag)),
+      ...(await runTagged(l, self as Account, req.options, host.tag)),
       collect: false,
       onStdout: out(1),
       onStderr: out(2),

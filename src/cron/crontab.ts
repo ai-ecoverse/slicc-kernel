@@ -4,6 +4,39 @@ import type { Account } from '../users.ts';
 import { parseCrontab, SPOOL_DIR } from './table.ts';
 
 export const CRONTAB_MAX = 256 * 1024;
+export const TAGS_PATH = '/var/spool/cron/tags';
+
+export interface JobTags {
+  tags: string[];
+  base: number;
+}
+
+export interface CrontabCaller {
+  tags?: readonly string[] | undefined;
+  base?: number | undefined;
+}
+
+export type TableTags = Record<string, Record<string, JobTags>>;
+
+export async function readTags(fs: KernelFs): Promise<TableTags> {
+  const text = await fs.readFile(TAGS_PATH).catch(() => '');
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    return parsed && typeof parsed === 'object' ? (parsed as TableTags) : {};
+  } catch {
+    return {};
+  }
+}
+
+function merged(old: JobTags | undefined, caller: CrontabCaller): JobTags | undefined {
+  const tags = [...new Set([...(old?.tags ?? []), ...(caller.tags ?? [])])];
+  if (tags.length === 0) return undefined;
+  const base = Math.min(
+    old?.base ?? Number.POSITIVE_INFINITY,
+    caller.base ?? caller.tags?.length ?? 0
+  );
+  return { tags, base: Number.isFinite(base) ? base : 0 };
+}
 
 export interface CrontabCall {
   op: 'proc-crontab';
@@ -42,11 +75,15 @@ export class Crontabs {
     this.o = options;
   }
 
-  async request(cred: Readonly<Cred>, call: CrontabCall): Promise<CrontabResult> {
-    const caller = await this.o.lookup(cred.ruid);
-    if (!caller) return { error: `crontab: your uid ${cred.ruid} is not in /etc/passwd` };
-    let target = caller;
-    if (call.user !== undefined && call.user !== caller.name) {
+  async request(
+    cred: Readonly<Cred>,
+    call: CrontabCall,
+    caller: CrontabCaller = {}
+  ): Promise<CrontabResult> {
+    const self = await this.o.lookup(cred.ruid);
+    if (!self) return { error: `crontab: your uid ${cred.ruid} is not in /etc/passwd` };
+    let target = self;
+    if (call.user !== undefined && call.user !== self.name) {
       if (cred.euid !== 0) return { error: 'crontab: must be privileged to use -u' };
       const found = await this.o.lookup(call.user);
       if (!found) return { error: `crontab: user ${call.user} unknown` };
@@ -55,14 +92,42 @@ export class Crontabs {
     const path = `${SPOOL_DIR}/${target.name}`;
     const none = { error: `no crontab for ${target.name}` };
     const { fs } = this.o;
-    if (call.action === 'install') return this.install(path, target, call.text as string);
+    if (call.action === 'install') return this.install(path, target, call.text as string, caller);
     if (!(await fs.exists(path))) return none;
     if (call.action === 'list') return { text: await fs.readFile(path) };
+    await this.retag(path, '', {});
     await fs.rm(path);
     return { text: '' };
   }
 
-  private async install(path: string, target: Account, text: string): Promise<CrontabResult> {
+  private async retag(path: string, text: string, caller: CrontabCaller): Promise<void> {
+    const { fs, owners } = this.o;
+    const all = await readTags(fs);
+    const before = await fs.readFile(path).catch(() => '');
+    const old = new Set(parseCrontab(before, path).jobs.map((job) => job.id));
+    const recorded = all[path] ?? {};
+    const table: Record<string, JobTags> = {};
+    for (const { id } of parseCrontab(text, path).jobs) {
+      const entry = merged(old.has(id) ? recorded[id] : undefined, caller);
+      if (entry) table[id] = entry;
+    }
+    const kept: TableTags = { ...all };
+    if (Object.keys(table).length > 0) kept[path] = table;
+    else delete kept[path];
+    const json = JSON.stringify(kept);
+    if (json === JSON.stringify(all)) return;
+    const owner: NewOwner | undefined = owners ? { uid: 0, gid: 0, mode: 0o600 } : undefined;
+    const fresh = `${TAGS_PATH}.${crypto.randomUUID()}.new`;
+    await fs.writeFile(fresh, json, owner);
+    await fs.rename(fresh, TAGS_PATH);
+  }
+
+  private async install(
+    path: string,
+    target: Account,
+    text: string,
+    caller: CrontabCaller
+  ): Promise<CrontabResult> {
     if (text.length > CRONTAB_MAX) return { error: 'crontab: the table is too long' };
     const { errors } = parseCrontab(text, path);
     if (errors.length > 0) {
@@ -78,6 +143,7 @@ export class Crontabs {
     const owner: NewOwner | undefined = owners
       ? { uid: target.uid, gid: target.gid, mode: 0o600 }
       : undefined;
+    await this.retag(path, text, caller);
     await fs.writeFile(fresh, text, owner);
     await fs.rename(fresh, path);
     return { text: '' };
