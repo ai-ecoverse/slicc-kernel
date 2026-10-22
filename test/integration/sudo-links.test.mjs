@@ -155,3 +155,38 @@ test('a sudo process shares the open and removed files of the others: its writes
   const r = await kernel.run(['bash', '-c', script], { cwd: '/home/cone', user: 'cone' });
   assert.deepEqual([String(r.stdout), String(r.stderr)], ['new\nkept\na\n', '']);
 });
+
+test('a sudo process opening without follow, threaded, while another process renames a symlink and a file over the name in turn, never reads the link target (#1394)', {
+  timeout: 300_000,
+}, async (t) => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
+  const fixture = fileURLToPath(new URL('fixtures/nofollowtest/', import.meta.url));
+  for (const file of ['package.json', 'bin/nofollowtest.wasm']) {
+    await kernel.writeFile(
+      `/node_modules/nofollowtest/${file}`,
+      await readFile(join(fixture, file))
+    );
+  }
+  await kernel.users.add({ name: 'cone', groups: ['sudo'] });
+  await kernel.run(
+    [
+      'bash',
+      '-c',
+      "printf '%s\\n' 'NOPASSWD cone Cmnd *' > /etc/sudoers.d/cone && chmod 440 /etc/sudoers.d/cone",
+    ],
+    { cwd: '/' }
+  );
+  const cone = (script) => kernel.run(['bash', '-c', script], { cwd: '/home/cone', user: 'cone' });
+  assert.equal(
+    (await cone('mkdir -p w && printf SECRET > w/secret && printf plain > w/racy')).status,
+    0
+  );
+  const [swapper, racer] = await Promise.all([
+    cone('cd w && nofollowtest swap over'),
+    cone('cd w && sudo nofollowtest threaded race 8000'),
+  ]);
+  assert.equal(swapper.status, 0, swapper.stderr);
+  assert.deepEqual([racer.status, String(racer.stdout)], [0, 'opened 1 refused 1 leaked 0\n']);
+});

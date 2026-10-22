@@ -1419,7 +1419,8 @@ export class WasmProcess {
     const inherited = req.orphan || req.contents !== undefined || req.handle !== undefined;
     if (guard?.links === undefined || !noLinks || inherited || req.pin !== undefined)
       return undefined;
-    return (await walk(guard.fs, this.cred, req.path, !req.exclusive, guard.links)).path;
+    const follow = !req.exclusive && req.nofollow !== true;
+    return (await walk(guard.fs, this.cred, req.path, follow, guard.links)).path;
   }
 
   private async openExisting(
@@ -1431,7 +1432,7 @@ export class WasmProcess {
     first: { at: string; gen: number }
   ): Promise<void> {
     const nodes = this.nodes;
-    const own = unfollowed(req, marked);
+    const own = unfollowed(req);
     await this.unmissed(
       this.openPath.bind(this, req, marked),
       async (at) => {
@@ -1453,7 +1454,7 @@ export class WasmProcess {
     if (req.exclusive) return nodes.entryKey(marked ?? req.path);
     if (marked !== undefined) return marked;
     if (req.create) return nodes.targetKey(req.path);
-    if (unfollowed(req, marked)) return nodes.entryKey(req.path);
+    if (unfollowed(req)) return nodes.entryKey(req.path);
     return this.keptOr(await nodes.targetKey(req.path), req.handle);
   }
 
@@ -2393,11 +2394,8 @@ export class WasmProcess {
   }
 }
 
-function unfollowed(
-  req: Extract<FdSyscall, { op: 'fd-open-vfs' }>,
-  marked: string | undefined
-): boolean {
-  return req.nofollow === true && marked === undefined && req.handle === undefined;
+function unfollowed(req: Extract<FdSyscall, { op: 'fd-open-vfs' }>): boolean {
+  return req.nofollow === true && req.handle === undefined;
 }
 
 async function notLink(fs: VfsFileFs, path: string): Promise<void> {
