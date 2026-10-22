@@ -32,7 +32,8 @@ export function visibleTo(
       const shown = await Promise.all(
         notes.map(async (note) => {
           if (!('filename' in note) || !note.filename.includes('/')) return true;
-          const dir = parentOf(`${root === '/' ? '' : root}/${note.filename}`);
+          const at = watch.root?.() ?? root;
+          const dir = parentOf(`${at === '/' ? '' : at}/${note.filename}`);
           if (!seen.has(dir)) seen.set(dir, visible(dir));
           return seen.get(dir);
         })

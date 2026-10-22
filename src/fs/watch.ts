@@ -19,6 +19,7 @@ export type WatchNote =
 export interface TypedWatch {
   next(signal: AbortSignal): Promise<WatchNote[]>;
   close(): void;
+  root?(): string;
 }
 
 interface Typed {
@@ -164,6 +165,7 @@ export class FsWatchers {
     };
     return {
       close,
+      root: () => watch.roots[0] as string,
       next: async (signal) => {
         while (watch.notes.length === 0 && !watch.ended && !signal.aborted) {
           await new Promise<void>((resolve) => {
