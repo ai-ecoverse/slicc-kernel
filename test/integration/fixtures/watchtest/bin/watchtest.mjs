@@ -67,11 +67,16 @@ async function flood(ctx, [dir, count]) {
   await ctx.write(1, `${notes.includes('overflow')} ${notes.indexOf('overflow') > 0}\n`);
 }
 
-async function rewrite(ctx, [path, ready, ms]) {
+async function rewrite(ctx, [dir, name, ready, end]) {
   const notes = [];
-  const watcher = ctx.sync.fs.watch(path, (note) => notes.push(line(note)));
+  let done;
+  const finished = new Promise((resolve) => (done = resolve));
+  const watcher = ctx.sync.fs.watch(dir, (note) => {
+    if (note.filename === end) done();
+    else if (note.filename === name) notes.push(line(note));
+  });
   await ctx.fs.writeFile(ready, '');
-  await new Promise((resolve) => setTimeout(resolve, Number(ms)));
+  await finished;
   watcher.close();
   await ctx.write(1, `${notes.join('\n')}\n`);
 }
