@@ -263,7 +263,7 @@ type SyncCapable = FileSystemFileHandle & {
 const LOCKED = new Set(['NotReadableError', 'NoModificationAllowedError', 'InvalidStateError']);
 
 const SYNC_BACKOFF_MS = [5, 10, 20, 40, 80];
-export const SAH_READ_MIN = 256 * 1024;
+export const SAH_READ_MIN = 1;
 
 async function syncRead(
   handle: FileSystemFileHandle,

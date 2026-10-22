@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { after, test } from 'node:test';
 import { launch } from './chrome.mjs';
 import { booted, installPackage, ok } from './kernel.mjs';
+import { peerTab } from './rename-tabs.mjs';
 
 const chrome = await launch();
 after(() => chrome.close());
@@ -63,4 +64,55 @@ test('positioned reads of a big OPFS file return its bytes at every read size, a
     await page.evaluate(() => window.kernel.run(['rm', '/tmp/big'], { cwd: '/' })),
     ok('')
   );
+});
+
+const LOOP = [
+  'import os, sys, time',
+  'fd = os.open(sys.argv[1], os.O_RDONLY)',
+  'n = 0',
+  'while not os.path.exists(sys.argv[2]):',
+  '    assert len(os.pread(fd, 1 << 20, 0)) <= 1 << 20',
+  '    n += 1',
+  'print("reads", n)',
+].join('\n');
+
+test("reads through the file's sync access handle don't stop another tab writing the same file (#1431)", {
+  timeout: 1_500_000,
+}, async (t) => {
+  const { page } = await booted(chrome, t);
+  await installPackage(page, 'wasm-coreutils');
+  await installPackage(page, 'wasix-python', { skip: /^lib\/libpython[^/]*\.a$/ });
+  const other = await peerTab(page);
+  await page.evaluate((s) => window.opfs.write('tmp/loop.py', s), LOOP);
+  assert.deepEqual(
+    await page.evaluate(() =>
+      window.kernel.run(
+        ['bash', '-c', 'rm -f /tmp/stop; head -c 4194304 /dev/zero > /tmp/shared; echo made'],
+        { cwd: '/' }
+      )
+    ),
+    ok('made\n')
+  );
+  await page.evaluate(() => {
+    window.loopRun = window.kernel.run(['python3', '/tmp/loop.py', '/tmp/shared', '/tmp/stop'], {
+      cwd: '/',
+    });
+  });
+  const writer = await other.evaluate(() =>
+    window.kernel.run(
+      [
+        'bash',
+        '-c',
+        'n=0; end=$((SECONDS + 5)); while [ $SECONDS -lt $end ]; do head -c 4194304 /dev/urandom > /tmp/shared || exit 1; n=$((n+1)); done; : > /tmp/stop; echo $n',
+      ],
+      { cwd: '/' }
+    )
+  );
+  assert.equal(writer.status, 0, writer.stderr);
+  const wrote = Number(writer.stdout);
+  const loop = await page.evaluate(() => window.loopRun);
+  console.log(`peer writes ${wrote}, ${loop.stdout.trim()}`);
+  assert.equal(loop.status, 0, loop.stderr);
+  assert.ok(wrote > 0);
+  assert.match(loop.stdout, /^reads [1-9]\d*\n$/);
 });
