@@ -828,8 +828,8 @@ export class Launcher {
     this.openFiles.add(this.nodes);
     options.fs.onPeer?.(() => this.flushOpen());
     options.fs.remoteChanges?.((change) => {
+      this.held.doubt(change.paths, change.moved?.to);
       if (change.moved) this.moved(change.moved.from, change.moved.to);
-      if (change.moved) for (const holds of this.held) holds.doubt(change.moved.to);
       this.changes.flush();
       this.cwds.touched(change.paths, change.trees);
       this.rewritten(change.paths, change.trees);
@@ -3135,6 +3135,7 @@ export class Launcher {
     this.renameLog.add(from, to);
     if (source) return;
     for (const nodes of this.openFiles) nodes.renamed(from, to);
+    for (const holds of this.held) holds.renamed(from, to);
     this.watchers.moved(from, to);
   }
 

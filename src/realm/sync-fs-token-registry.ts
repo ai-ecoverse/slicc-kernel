@@ -17,8 +17,8 @@ export interface SyncFsTokenEntry {
     ino?: number
   ) => number | undefined;
   keptFor?: (handle: number) => KeptFile | undefined;
-  boundIno?: (handle: number) => number | undefined;
-  trust?: (handle: number) => void;
+  boundIno?: (handle: number) => { ino: number; doubt: number } | undefined;
+  trust?: (handle: number, doubt: number) => void;
   gate?: <T>(path: string, op: () => Promise<T>) => Promise<T>;
   unlinked?: (path: string) => KeptFile | undefined;
   own?: <T>(path: string, op: () => Promise<T>) => Promise<T>;
