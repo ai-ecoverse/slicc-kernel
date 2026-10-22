@@ -86,3 +86,44 @@ test("an Emscripten program's open file stays bound to it when the program renam
     stderr: '',
   });
 });
+
+test('a rename over a held name keeps what another writer last wrote to the file, not an older copy (#1394, #1410 review)', {
+  timeout: 600_000,
+}, async (t) => {
+  const kernel = await createNodeKernel();
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
+  await install(kernel, 'wasix-python', /^lib\/libpython[^/]*\.a$/);
+  for (const read of [false, true]) {
+    const dir = `/tmp/fw${read ? 'r' : ''}`;
+    const script = [
+      'import os',
+      `os.makedirs("${dir}", exist_ok=True)`,
+      `open("${dir}/f", "w").write("old")`,
+      `open("${dir}/other", "w").write("OTHER")`,
+      `fd = os.open("${dir}/f", os.O_RDONLY)`,
+      ...(read ? ['os.pread(fd, 64, 0)'] : []),
+      `open("${dir}/ready", "w").close()`,
+      `while not os.path.exists("${dir}/go"): pass`,
+      `os.rename("${dir}/other", "${dir}/f")`,
+      'print(os.pread(fd, 64, 0).decode())',
+    ].join('\n');
+    const running = kernel.run(['python3', '-c', script], { cwd: '/' });
+    for (;;) {
+      const there = await kernel.readFile(`${dir}/ready`).then(
+        () => true,
+        () => false
+      );
+      if (there) break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    await kernel.writeFile(`${dir}/f`, 'updated-longer');
+    await kernel.writeFile(`${dir}/go`, '');
+    const r = await running;
+    assert.deepEqual(
+      r,
+      { status: 0, stdout: 'updated-longer\n', stderr: '' },
+      `read before: ${read}`
+    );
+  }
+});

@@ -179,6 +179,7 @@ export class RangedFile {
   }
 
   prefetch(): void {
+    this.fresh();
     this.fetch(this.pages.missing(0, this.pages.length));
   }
 
