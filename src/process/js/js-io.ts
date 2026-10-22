@@ -34,6 +34,18 @@ export interface FdInfo {
 
 export const CHUNK = 64 * 1024;
 export const MAX_IO = 1024 * 1024;
+export const MAX_PREAD = 16 * 1024 * 1024;
+
+export function intoTarget(
+  into: Uint8Array | undefined,
+  offset: number,
+  length: number
+): { into: Uint8Array; at: number } | undefined {
+  if (!into) return undefined;
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset + length > into.length)
+    throw Object.assign(new RangeError('read: the buffer is too small'), { code: 'EINVAL' });
+  return { into, at: offset };
+}
 const O_WRONLY = 0o1;
 const O_RDWR = 0o2;
 const O_APPEND = 0o2000;

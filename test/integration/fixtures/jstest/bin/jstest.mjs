@@ -1440,7 +1440,63 @@ async function ttyroundtrip(ctx) {
   );
 }
 
+function crc(bytes, start = 0) {
+  let h = start;
+  for (let i = 0; i < bytes.length; i += 4096) h = (Math.imul(h, 31) + bytes[i]) | 0;
+  return h;
+}
+
+async function preadbench(ctx, [path]) {
+  const sync = ctx.sync;
+  const f = sync.open(path, { read: true });
+  const size = f.size();
+  const out = [];
+  let want;
+  for (const chunk of [65536, 1 << 20, 16 << 20]) {
+    const buf = new Uint8Array(chunk);
+    let sum = 0;
+    const start = performance.now();
+    for (let at = 0; at < size; at += chunk) {
+      if (!f.readInto) break;
+      const n = f.readInto(at, buf, 0, Math.min(chunk, size - at));
+      sum = crc(buf.subarray(0, n), sum);
+    }
+    const took = (performance.now() - start) / 1000;
+    want ??= sum;
+    out.push(
+      `readInto ${chunk} ${(size / took / 1e6).toFixed(0)} MB/s ${sum === want ? 'same' : 'DIFFERENT'}`
+    );
+  }
+  for (const chunk of [65536, 1 << 20, 16 << 20]) {
+    const start = performance.now();
+    let sum = 0;
+    for (let at = 0; at < size; at += chunk) sum = crc(f.read(at, chunk), sum);
+    const took = (performance.now() - start) / 1000;
+    out.push(
+      `read ${chunk} ${(size / took / 1e6).toFixed(0)} MB/s ${sum === want ? 'same' : 'DIFFERENT'}`
+    );
+  }
+  const tail = new Uint8Array(8).fill(7);
+  out.push(`tail ${f.readInto(size - 3, tail, 2, 6)} ${tail.join(',')}`);
+  let bad = 'none';
+  try {
+    f.readInto(0, new Uint8Array(4), 2, 4);
+  } catch (err) {
+    bad = err.code;
+  }
+  out.push(`small buffer ${bad}`);
+  const af = await ctx.open(path, { read: true });
+  const abuf = new Uint8Array(size);
+  out.push(
+    `async readInto ${await af.readInto(0, abuf)} ${crc(abuf) === want ? 'same' : 'DIFFERENT'}`
+  );
+  await af.close();
+  f.close();
+  await ctx.write(1, `${out.join('\n')}\n`);
+}
+
 const modes = {
+  preadbench,
   rawkeys,
   rawclosed,
   rawpair,
