@@ -523,13 +523,27 @@ export class WasixLinker {
     return index;
   }
 
+  private heapAlloc(bytes: number): number | undefined {
+    const exports = this.main?.exports;
+    const calloc = exports?.calloc;
+    if (typeof calloc !== 'function') return undefined;
+    const state = exports?.asyncify_get_state;
+    if (typeof state === 'function' && (state as () => number)() !== 0) return undefined;
+    const at = (calloc as Calloc)(1, bytes) >>> 0;
+    return at === 0 ? undefined : at;
+  }
+
   private allocate(size: number, alignment: number): number {
     if (size === 0) return 0;
     const to = Math.max(alignment, 16);
+    const heap = this.heapAlloc(size + to - 16);
+    if (heap !== undefined) return align(heap, to);
     const pages = Math.ceil((size + (to > PAGE ? to : 0)) / PAGE);
     return align(this.memory.grow(pages) * PAGE, to);
   }
 }
+
+type Calloc = (count: number, size: number) => number;
 
 function align(n: number, to: number): number {
   return Math.ceil(n / to) * to;
