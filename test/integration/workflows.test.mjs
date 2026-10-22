@@ -1,257 +1,82 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { readdir, readFile } from 'node:fs/promises';
 import { test } from 'node:test';
-import { decide } from '../../.github/runner.mjs';
 
-const ci = await readFile(new URL('../../.github/workflows/ci.yml', import.meta.url), 'utf8');
-const repo = { owner: 'ai-ecoverse', repo: 'slicc-kernel' };
-const env = { POOL: 'cloud-run-job' };
-const queued = (nodes) => ({
-  graphql: async () => ({ repository: { mergeQueue: { entries: { nodes } } } }),
-});
-const run = async (context, nodes = []) =>
-  (await decide({ context: { repo, ...context }, github: queued(nodes), env })).runner;
-const pr = (head) => ({
-  eventName: 'pull_request',
-  payload: { pull_request: { head: { repo: head } } },
-});
-const group = {
-  eventName: 'merge_group',
-  payload: { merge_group: { base_ref: 'refs/heads/main', head_sha: 'b' } },
-};
-const entry = (position, oid, isCrossRepository) => ({
-  position,
-  headCommit: { oid },
-  pullRequest: { number: position, isCrossRepository },
-});
+const read = (path) => readFile(new URL(`../../${path}`, import.meta.url), 'utf8');
+const ci = await read('.github/workflows/ci.yml');
+const pkg = JSON.parse(await read('package.json'));
+const input = (name) => ci.match(new RegExp(`\\n {6}${name}: (.+)\\n`))?.[1];
 
-test('the decider gives the pool to same-repo PRs and a hosted runner to forks', async () => {
-  assert.equal(await run(pr({ full_name: 'ai-ecoverse/slicc-kernel' })), 'cloud-run-job');
-  assert.equal(await run(pr({ full_name: 'someone/slicc-kernel' })), 'ubuntu-latest');
-  assert.equal(await run(pr(null)), 'ubuntu-latest');
-});
-
-test('a merge group gets the pool only when it and every entry ahead of it are same-repo', async () => {
-  assert.equal(await run(group, [entry(1, 'a', false), entry(2, 'b', false)]), 'cloud-run-job');
-  assert.equal(await run(group, [entry(1, 'b', false), entry(2, 'c', true)]), 'cloud-run-job');
-  assert.equal(await run(group, [entry(1, 'a', true), entry(2, 'b', false)]), 'ubuntu-latest');
-  assert.equal(await run(group, [entry(1, 'b', true)]), 'ubuntu-latest');
-  assert.equal(
-    await run(group, [{ position: 1, headCommit: { oid: 'b' }, pullRequest: null }]),
-    'ubuntu-latest'
-  );
-});
-
-test('a merge group the queue does not list runs hosted', async () => {
-  assert.equal(await run(group, [entry(1, 'a', false)]), 'ubuntu-latest');
-  assert.equal(await run(group, []), 'ubuntu-latest');
-  const missing = { graphql: async () => ({ repository: { mergeQueue: null } }) };
-  const r = await decide({ context: { repo, ...group }, github: missing, env });
-  assert.equal(r.runner, 'ubuntu-latest');
-});
-
-test('with no pool set (vars.CERT_RUNNER empty), same-repo PRs and merge groups run hosted', async () => {
-  for (const POOL of [undefined, '']) {
-    const decided = (context, nodes = []) =>
-      decide({ context: { repo, ...context }, github: queued(nodes), env: { POOL } });
-    const same = await decided(pr({ full_name: 'ai-ecoverse/slicc-kernel' }));
-    assert.equal(same.runner, 'ubuntu-latest');
-    const grouped = await decided(group, [entry(1, 'b', false)]);
-    assert.equal(grouped.runner, 'ubuntu-latest');
-  }
-  assert.doesNotMatch(ci, /cloud-run-bench/);
-  assert.match(ci, /\n {10}POOL: \$\{\{ vars\.CERT_RUNNER \}\}\n/);
-});
-
-test('other events run hosted, and vars.CI_RUNNER overrides the decision', async () => {
-  assert.equal(await run({ eventName: 'push', ref: 'refs/heads/main' }), 'ubuntu-latest');
-  assert.equal(await run({ eventName: 'workflow_dispatch' }), 'ubuntu-latest');
-  const forced = await decide({
-    context: { repo, eventName: 'merge_group' },
-    github: queued([]),
-    env: { FORCED: 'x' },
-  });
-  assert.equal(forced.runner, 'x');
-});
-
-test('CI classifies a fork PR on a hosted runner and never skips the required check', () => {
+test('CI is one caller of slicc-shared-web pipeline.yml, at the release of the harness the tests use', async () => {
+  assert.deepEqual(await readdir(new URL('../../.github/workflows/', import.meta.url)), ['ci.yml']);
+  assert.deepEqual(await readdir(new URL('../../.github/', import.meta.url)), ['workflows']);
+  const version = pkg.devDependencies['@ai-ecoverse/slicc-shared-web'];
+  assert.match(version, /^2\.\d+\.\d+$/);
   assert.match(
     ci,
-    /\n {4}runs-on: \$\{\{ github\.event_name == 'pull_request' && github\.event\.pull_request\.head\.repo\.full_name != github\.repository && 'ubuntu-latest' \|\| vars\.CERT_LIGHT_RUNNER/
+    new RegExp(
+      `\\njobs:\\n {2}ci:\\n {4}uses: ai-ecoverse/slicc-shared-web/\\.github/workflows/pipeline\\.yml@v${version.replaceAll('.', '\\.')}\\n {4}secrets: inherit\\n {4}with:\\n`
+    )
   );
-  assert.match(ci, /sparse-checkout: \.github\/runner\.mjs\n/);
-  assert.match(ci, /\.catch\(\s*\(error\) => \(\{ runner: 'ubuntu-latest'/);
-  assert.match(ci, /\n {2}ci:\n {4}needs: runner\n {4}if: \$\{\{ !cancelled\(\) \}\}\n/);
+  assert.deepEqual(ci.split('\njobs:\n')[1].match(/^ {2}[a-z-]+:$/gm), ['  ci:']);
+});
+
+test('CI runs on pull requests, merge groups and pushes to main, and cancels a superseded run only on a pull request', () => {
   assert.match(
     ci,
-    /\n {6}runs-on: \$\{\{ needs\.runner\.outputs\.runner \|\| 'ubuntu-latest' \}\}\n/
+    /\non:\n {2}pull_request:\n {2}merge_group:\n {2}push:\n {4}branches: \[main\]\n/
   );
-});
-
-const pick = ci
-  .match(/\n {6}- id: pick\n[\s\S]*?\n {10}script: \|\n((?: {12}.*\n)+)/)[1]
-  .replace(/^ {12}/gm, '');
-const runPick = async (workspace) => {
-  const out = {};
-  const summary = {
-    addRaw(s) {
-      out.why = s;
-      return summary;
-    },
-    write: async () => {},
-  };
-  const core = { setOutput: (k, v) => (out[k] = v), summary };
-  const process = { env: { GITHUB_WORKSPACE: workspace, POOL: 'cloud-run-job' } };
-  const context = { repo, ...pr({ full_name: 'ai-ecoverse/slicc-kernel' }) };
-  const AsyncFunction = (async () => {}).constructor;
-  await new AsyncFunction('context', 'github', 'core', 'process', pick)(
-    context,
-    queued([]),
-    core,
-    process
-  );
-  return out;
-};
-
-test('CI loads the decider from the protected branch for a merge group and the base commit for a PR, never from the code under test', () => {
   assert.match(
     ci,
-    /\n {10}ref: \$\{\{ github\.event\.merge_group\.base_ref \|\| github\.event\.pull_request\.base\.sha \|\| github\.sha \}\}\n {10}sparse-checkout: \.github\/runner\.mjs\n/
+    /\nconcurrency:\n {2}group: ci-\$\{\{ github\.ref \}\}\n {2}cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}\n/
   );
-  assert.doesNotMatch(ci, /merge_group\.base_sha/);
+  assert.doesNotMatch(ci, /workflow_dispatch|schedule:|workflow_run/);
 });
 
-test("no workflow checks out a merge group's base_sha, which can be the previous group's speculative commit with queued PRs' changes; the group lookup loads its tools from the protected branch", async () => {
-  const dir = new URL('../../.github/workflows/', import.meta.url);
-  const names = (await readdir(dir)).filter((name) => /\.ya?ml$/.test(name));
-  assert.ok(names.includes('cert-review-pr.yml'));
-  for (const name of names) {
-    const text = await readFile(new URL(name, dir), 'utf8');
-    for (const line of text.split('\n').filter((l) => /^\s*ref:/.test(l))) {
-      assert.doesNotMatch(
-        line,
-        /merge_group\.base_sha|merge_group\.head_sha|pull_request\.head\./,
-        `${name}: ${line.trim()}`
-      );
-    }
+test('the pipeline picks its runners and reviews no Renovate pull request, and nothing runs after a release', () => {
+  for (const name of [
+    'runs-on',
+    'after-release',
+    'review-renovate',
+    'release-environment',
+    'deploy',
+  ]) {
+    assert.equal(input(name), undefined, name);
   }
-  const review = await readFile(new URL('cert-review-pr.yml', dir), 'utf8');
-  assert.match(
-    review,
-    /\n {10}ref: \$\{\{ github\.event\.merge_group\.base_ref \}\}\n {10}sparse-checkout: tools\/cert-review\n/
-  );
-  assert.match(review, /BASE_SHA: \$\{\{ github\.event\.merge_group\.base_sha \}\}/);
+  assert.doesNotMatch(ci, /vars\./);
+  assert.equal(input('shards'), '4');
+  assert.equal(input('timeout-minutes'), '30');
+  assert.match(input('review-prompt'), /^\|$/);
 });
 
-test('the pick step uses the decider and falls back to a hosted runner when it is missing or fails', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'runner-pick-'));
-  try {
-    const good = join(root, 'good');
-    await mkdir(join(good, '.github'), { recursive: true });
-    await writeFile(
-      join(good, '.github/runner.mjs'),
-      await readFile(new URL('../../.github/runner.mjs', import.meta.url))
-    );
-    assert.equal((await runPick(good)).runner, 'cloud-run-job');
+test('the shards split exactly the files npm test runs, on the Node the package asks for', () => {
+  assert.equal(input('test'), undefined);
+  assert.equal(input('test-glob'), 'test/integration/*.test.mjs');
+  assert.ok(pkg.scripts.test.endsWith(` '${input('test-glob')}'`), pkg.scripts.test);
+  assert.doesNotMatch(pkg.scripts.test, /NODE_OPTIONS/);
+  assert.equal(input('node-version'), `'${pkg.engines.node.replace(/^>=/, '')}'`);
+  assert.match(pkg.scripts.pretest, /slicc-cdp install-browser/);
+  assert.equal(pkg.devDependencies['playwright-core'], undefined);
+});
 
-    const missing = await runPick(join(root, 'missing'));
-    assert.equal(missing.runner, 'ubuntu-latest');
-    assert.match(missing.why, /the decider failed/);
+test('semantic-release publishes to npm from the trusted ci.yml, with provenance', async () => {
+  assert.equal(pkg.fledgling.workflow, 'ci.yml');
+  assert.equal(pkg.fledgling.repo, 'ai-ecoverse/slicc-kernel');
+  assert.equal(pkg.publishConfig.provenance, true);
+  const release = JSON.parse(await read('.releaserc.json'));
+  assert.deepEqual(release.branches, ['main']);
+  assert.ok(release.plugins.includes('@semantic-release/npm'));
+  assert.doesNotMatch(JSON.stringify(release), /npmPublish/);
+});
 
-    const bad = join(root, 'bad');
-    await mkdir(join(bad, '.github'), { recursive: true });
-    await writeFile(
-      join(bad, '.github/runner.mjs'),
-      'export async function decide() { throw new Error("boom"); }\n'
-    );
-    const failed = await runPick(bad);
-    assert.equal(failed.runner, 'ubuntu-latest');
-    assert.match(failed.why, /the decider failed: boom/);
-
-    const broken = join(root, 'broken');
-    await mkdir(join(broken, '.github'), { recursive: true });
-    await writeFile(join(broken, '.github/runner.mjs'), 'export const nothing = 1;\n');
-    assert.equal((await runPick(broken)).runner, 'ubuntu-latest');
-  } finally {
-    await rm(root, { recursive: true, force: true });
+test('the workflow has no comments but renovate annotations', () => {
+  for (const line of ci.split('\n')) {
+    if (/^\s*#/.test(line)) assert.match(line, /^\s*# renovate:/);
   }
 });
 
-const compat = await readFile(
-  new URL('../../.github/workflows/kernel-compat.yml', import.meta.url),
-  'utf8'
-);
-
-const candidateScript = () => {
-  const at = compat.indexOf('  candidate:');
-  const start = compat.indexOf("node --input-type=module - <<'JS'\n", at);
-  const body = compat.slice(
-    compat.indexOf('\n', start) + 1,
-    compat.indexOf('\n          JS\n', start)
-  );
-  return body.replace(/^ {10}/gm, '');
-};
-
-const runCandidate = async (env) => {
-  const { execFile } = await import('node:child_process');
-  return new Promise((resolve) => {
-    const child = execFile(
-      process.execPath,
-      ['--input-type=module', '-'],
-      { env: { PATH: process.env.PATH, ...env } },
-      (error, stdout, stderr) => resolve({ ok: !error, stdout, stderr })
-    );
-    child.stdin.end(candidateScript());
-  });
-};
-
-test('kernel-compat takes a PR build x.y.z-pr.N.M from a named artifact run, for proofs of PR builds, and stays x.y.z for npm (#684)', async () => {
-  const { execFileSync } = await import('node:child_process');
-  const { createHash } = await import('node:crypto');
-  const root = await mkdtemp(join(tmpdir(), 'compat-candidate-'));
-  try {
-    const version = '1.2.3-pr.45.67';
-    await mkdir(join(root, 'pkg/package'), { recursive: true });
-    await writeFile(
-      join(root, 'pkg/package/package.json'),
-      JSON.stringify({ name: '@ai-ecoverse/slicc-kernel', version })
-    );
-    await mkdir(join(root, 'candidate'));
-    const tgz = join(root, 'candidate/kernel.tgz');
-    execFileSync('tar', ['-czf', tgz, '-C', join(root, 'pkg'), 'package']);
-    const sha = createHash('sha256')
-      .update(await readFile(tgz))
-      .digest('hex');
-    const output = join(root, 'output');
-    await writeFile(output, '');
-    const env = { RUNNER_TEMP: root, GITHUB_OUTPUT: output, RUN: '89', SHA256: sha };
-
-    const pr = await runCandidate({ ...env, INPUT: version, ARTIFACT: 'kernel-tgz' });
-    assert.equal(pr.ok, true, pr.stderr);
-    assert.equal(
-      await readFile(output, 'utf8'),
-      `version=${version}\nkernel=kernel-tgz-${version}-${sha.slice(0, 12)}\n`
-    );
-
-    const npm = await runCandidate({ ...env, INPUT: version, ARTIFACT: '' });
-    assert.equal(npm.ok, false);
-    assert.match(npm.stderr, /version 1\.2\.3-pr\.45\.67 is not x\.y\.z\n/);
-
-    const other = await runCandidate({ ...env, INPUT: '1.2.3-beta.1', ARTIFACT: 'kernel-tgz' });
-    assert.equal(other.ok, false);
-    assert.match(other.stderr, /is not x\.y\.z or x\.y\.z-pr\.N\.M/);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-  assert.match(compat, /\n {4}if: .*!contains\(needs\.candidate\.outputs\.version, '-pr\.'\)/);
-});
-
-test('Renovate auto-merges its PRs once cert-review is green, except majors and updates under .github/, which open as drafts and wait for a review', async () => {
-  const config = JSON.parse(
-    await readFile(new URL('../../renovate.json', import.meta.url), 'utf8')
-  );
+test('Renovate auto-merges its PRs once CI is green, except majors and updates under .github/, which open as drafts and wait for the Kernel Coordinator, and moves slicc-shared-web and its pipeline ref in one PR', async () => {
+  const config = JSON.parse(await read('renovate.json'));
   assert.deepEqual(config.extends, ['github>ai-ecoverse/slicc-shared-web']);
   assert.equal(config.labels, undefined);
   assert.equal(config.automerge, true);
@@ -262,5 +87,11 @@ test('Renovate auto-merges its PRs once cert-review is green, except majors and 
     );
   assert.equal(held('"major"')?.draftPR, true);
   assert.equal(held('".github/**"')?.draftPR, true);
-  assert.doesNotMatch(JSON.stringify(config), /merge-ok/);
+  assert.doesNotMatch(JSON.stringify(config), /merge-ok|cert-review|reviewer/);
+  const shared = config.packageRules.find((rule) => rule.groupSlug === 'slicc-shared-web');
+  assert.deepEqual(shared?.matchPackageNames, [
+    '@ai-ecoverse/slicc-shared-web',
+    'ai-ecoverse/slicc-shared-web',
+  ]);
+  assert.equal(shared.groupName, 'slicc-shared-web');
 });

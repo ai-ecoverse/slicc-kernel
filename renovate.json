@@ -5,13 +5,13 @@
   "platformAutomerge": true,
   "packageRules": [
     {
-      "description": "Majors open as drafts with no automerge: a draft is not reviewed, so they come to the Kernel Coordinator, who marks them ready.",
+      "description": "Majors open as drafts with no automerge, so they wait for the Kernel Coordinator, who marks them ready.",
       "matchUpdateTypes": ["major"],
       "draftPR": true,
       "automerge": false
     },
     {
-      "description": "Updates to files under .github/ (workflow and action pins, reusable shared-web workflows) can touch reviewer paths: drafts with no automerge, so they come to the Kernel Coordinator.",
+      "description": "Updates to files under .github/ (the pipeline pin) change CI itself: drafts with no automerge, so they wait for the Kernel Coordinator.",
       "matchFileNames": [".github/**"],
       "draftPR": true,
       "automerge": false
@@ -20,6 +20,12 @@
       "description": "wasix-python and its py-* extension packages are built against one CPython: they bump together, in one PR, so a new numpy never meets the old python (#1180, #1181).",
       "matchPackageNames": ["@ai-ecoverse/wasix-python", "/^@ai-ecoverse/py-/"],
       "groupName": "wasix-python and py extensions"
+    },
+    {
+      "description": "The slicc-shared-web npm package and the pipeline.yml ref in ci.yml move together, in one PR, so the harness and the pipeline stay at one release (workflows.test.mjs holds them equal).",
+      "matchPackageNames": ["@ai-ecoverse/slicc-shared-web", "ai-ecoverse/slicc-shared-web"],
+      "groupName": "slicc-shared-web",
+      "groupSlug": "slicc-shared-web"
     }
   ]
 }

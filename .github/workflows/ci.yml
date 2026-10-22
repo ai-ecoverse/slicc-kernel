@@ -3,49 +3,46 @@ name: CI
 on:
   pull_request:
   merge_group:
+  push:
+    branches: [main]
 
 permissions:
-  contents: read
+  contents: write
+  actions: read
+  issues: write
+  pull-requests: write
+  statuses: write
+  id-token: write
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  runner:
-    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.CERT_LIGHT_RUNNER || vars.CERT_RUNNER || 'ubuntu-latest' }}
-    timeout-minutes: 5
-    permissions:
-      contents: read
-      pull-requests: read
-    outputs:
-      runner: ${{ steps.pick.outputs.runner }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: ${{ github.event.merge_group.base_ref || github.event.pull_request.base.sha || github.sha }}
-          sparse-checkout: .github/runner.mjs
-          sparse-checkout-cone-mode: false
-          persist-credentials: false
-
-      - id: pick
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
-        env:
-          FORCED: ${{ vars.CI_RUNNER }}
-          POOL: ${{ vars.CERT_RUNNER }}
-        with:
-          script: |
-            const { runner, why } = await import(`${process.env.GITHUB_WORKSPACE}/.github/runner.mjs`)
-              .then(({ decide }) => decide({ context, github, env: process.env }))
-              .catch((error) => ({ runner: 'ubuntu-latest', why: `the decider failed: ${error.message}` }));
-            core.setOutput('runner', runner);
-            await core.summary.addRaw(`runner: ${runner} (${why})\n`).write();
-
   ci:
-    needs: runner
-    if: ${{ !cancelled() }}
-    uses: ai-ecoverse/slicc-shared-web/.github/workflows/node-ci.yml@v1.30.8
+    uses: ai-ecoverse/slicc-shared-web/.github/workflows/pipeline.yml@v2.7.8
+    secrets: inherit
     with:
       node-version: '26'
-      runs-on: ${{ needs.runner.outputs.runner || 'ubuntu-latest' }}
-      timeout-minutes: 45
+      test-glob: test/integration/*.test.mjs
+      shards: 4
+      timeout-minutes: 30
+      review-timeout-minutes: 90
+      review-prompt: |
+        SLICC-KERNEL
+
+        This repository is slicc-kernel (`@ai-ecoverse/slicc-kernel`): the wasm-realm kernel that seven (seven.sliccy.ai), slicc-bios and every slicc package run on. It runs Emscripten, WASI, WASIX and JS programs against OPFS, with fork, spawn, pipes, signals, terminals, users, a network stack and a CDP facade. The README is the contract: read the sections the change touches first. `git diff origin/main...HEAD`, or `$RUNNER_TEMP/review/context/pr.diff`, is the change.
+
+        There is no certification after you: once this pull request passes the merge queue, semantic-release publishes it to npm from `main`, and bios and homescoop pin that release. Review it as the last check before it ships.
+
+        Look for real defects, in this order:
+        1. Correctness against Linux and POSIX: errno values, signals and job control, fork, exec, spawn and waitpid, descriptors, pipes and terminals, file system semantics (rename, links, permissions, times), and what the README says. Races between processes, threads, workers and tabs sharing one OPFS root, and promises that resolve late or never.
+        2. Security: `users` (off, report, enforce) never grants more than it should, credentials and sudo, the lockdown of JS programs, the network policy (`hostLoopback`, DNS rebinding, the proxy and its CA), and secrets (TLS keys, passphrases, vault values) that must never reach a program, `/proc`, an error or the console.
+        3. Data loss or corruption: OPFS writes, metadata, interrupted renames and their recovery at boot.
+        4. Compatibility for consumers: the public entries (`.`, `./node`, `./driver`, `./testing`, `./meta`) and their types change only additively, `files` ships everything the entries load, command resolution and `engines.slicc-kernel` keep every homescoop package (`wasm-*`, `wasi-*`, `wasix-*`, `py-*`) running.
+        5. Tests: every behaviour change has an integration test in `test/integration/` through the public API, and a fix's test fails without the fix. Confirm that for a fix: copy the changed test files into `$RUNNER_TEMP/base`, build it and run them there.
+        6. Repo rules: no comments anywhere (YAML too, except `# renovate:` annotations), no unit tests in git, and a conventional-commit title (`fix`, `feat` and `perf` release, the rest don't).
+
+        Neither tree is built: run `npm run build` in a tree before you read or run its `dist/`. Run one test file with `node --test --test-timeout=180000 --test-global-setup=node_modules/@ai-ecoverse/slicc-shared-web/harness/global.mjs test/integration/<file>.test.mjs`. Tests that import `dist/node.js` need no browser. The review browsers aren't used by this repository. Don't report style preferences, or anything you haven't confirmed in the code or by a run.
+
+        Severity: deny for a confirmed P1 or P2: a security or secret exposure, data loss or corruption, a crash or a kernel that doesn't boot, a regression in a common workflow or a base command (bash, coreutils, git, pnpm, python) without a workaround, a behaviour change without its test, or a fix whose test passes without it. A narrow problem with a workaround is P3: comment with a repro and approve. A problem in a package build belongs to ai-ecoverse/homescoop, one in bios's pins to ai-ecoverse/slicc-bios: open it there as an issue.

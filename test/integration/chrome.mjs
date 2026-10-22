@@ -8,7 +8,6 @@ const options = {
     ['/dist/', 'dist/'],
     ['/node_modules/@ai-ecoverse/', 'node_modules/@ai-ecoverse/'],
     ['/fixtures/', 'test/integration/fixtures/'],
-    ['/registry/', 'test/integration/perf/.registry/'],
     ['/', 'test/integration/page/'],
   ],
   isolated: true,
