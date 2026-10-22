@@ -6,8 +6,8 @@ import { launch } from './chrome.mjs';
 import { booted, installPackage } from './kernel.mjs';
 
 const AGENT = new URL('./fixtures/agent-install/', import.meta.url);
-const CALLS_MAX = 53_000;
-const REQUESTS_MAX = 240_000;
+const CALLS_MAX = 48_000;
+const REQUESTS_MAX = 270_000;
 
 const chrome = await launch();
 after(() => chrome.close());
@@ -24,7 +24,7 @@ const counters = async (bash) =>
     .split('\n')
     .map(Number);
 
-test(`a serial, offline pnpm install of bios's agent into /opt/agent on the OPFS root stays within ${CALLS_MAX} kernel calls and ${REQUESTS_MAX} OPFS requests: main's 49-51k and 227-230k plus 4-5% headroom (wall time printed, not gated)`, {
+test(`a serial, offline pnpm install of bios's agent into /opt/agent on the OPFS root stays within ${CALLS_MAX} kernel calls and ${REQUESTS_MAX} OPFS requests: CI measured 41.6k and 241.5k on a slow runner (OPFS requests rise there as the 2 ms glance lapses, #1425), plus headroom (wall time printed, not gated)`, {
   timeout: 600_000,
 }, async (t) => {
   const { page, bash } = await booted(chrome, t, { users: 'enforce', registry: true });
