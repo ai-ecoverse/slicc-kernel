@@ -49,11 +49,34 @@ const POLL = (dir, pause = '') =>
     'echo "samples $n bad $bad"',
   ].join('\n');
 
-const SETTLE =
-  'settle() { local t u; read -r t 2>/dev/null < tick; until read -r u 2>/dev/null < tick; [ "$u" != "$t" ]; do :; done; }';
+const SETTLE_S = 30;
 
-const RENAMES = (dir, paced = true) =>
-  `cd ${dir} && ${SETTLE} && for r in $(seq ${ROUNDS}); do mv a b && ${paced ? 'settle && ' : ''}mv b a && ${paced ? 'settle' : ':'} || echo "mv failed $r"; done; : > stop; echo renamed`;
+const SETTLE = [
+  'settle() {',
+  '  local t u end=$((SECONDS + ' + SETTLE_S + '))',
+  '  read -r t 2>/dev/null < tick',
+  '  until read -r u 2>/dev/null < tick; [ "$u" != "$t" ]; do',
+  '    if [ $SECONDS -ge $end ]; then echo "the poller took no sample in ' +
+    SETTLE_S +
+    ' s, last at ${t:-none}"; return 1; fi',
+  '  done',
+  '}',
+].join('\n');
+
+const ROUND = (dir, paced) =>
+  `cd ${dir} && ${SETTLE}\nmv a b && ${paced ? 'settle && ' : ''}mv b a && ${paced ? 'settle && ' : ''}echo renamed`;
+
+async function renames(page, dir, paced) {
+  try {
+    for (let r = 1; r <= ROUNDS; r++) {
+      const round = await sh(page, ROUND(dir, paced));
+      if (round.stdout !== 'renamed\n') return { ...round, round: r };
+    }
+    return ok('renamed\n');
+  } finally {
+    await sh(page, `: > ${dir}/stop`);
+  }
+}
 
 async function polled(page, other, { at, through = at, label, pause = '', paced = true }) {
   await sh(page, `rm -f ${at}/stop ${at}/tick`);
@@ -63,7 +86,7 @@ async function polled(page, other, { at, through = at, label, pause = '', paced 
     },
     POLL(at, pause)
   );
-  const renamed = await sh(page, RENAMES(through, paced));
+  const renamed = await renames(page, through, paced);
   const poll = await other.evaluate(() => window.pollRun);
   console.log(`${label}: ${poll.stdout.trim().split('\n').at(-1)}`);
   assert.deepEqual(renamed, ok('renamed\n'));
