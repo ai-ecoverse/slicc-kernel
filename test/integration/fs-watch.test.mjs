@@ -304,3 +304,27 @@ test('every note carries a kernel-wide sequence, so a program can merge its watc
     r.stderr
   );
 });
+
+test("a user's recursive watch checks what it may see against where its root is now, not where it was opened (#1359)", async (t) => {
+  const { kernel, sh } = await booted(t);
+  await kernel.users.add({ name: 'cone' });
+  await sh(
+    'rm -rf /tmp/u /tmp/v /tmp/ur /tmp/uo && mkdir -p /tmp/u/sub && chown -R cone /tmp/u && chmod 777 /tmp'
+  );
+  const run = sh('watchtest events /tmp/u end /tmp/ur recursive > /tmp/uo; cat /tmp/uo', 'cone');
+  while (
+    !(await kernel.readFile('/tmp/ur').then(
+      () => true,
+      () => false
+    ))
+  )
+    await new Promise((r) => setTimeout(r, 10));
+  await sh('mv /tmp/u /tmp/v && mkdir -p /tmp/u/sub && chmod 700 /tmp/u');
+  await sh('echo x > /tmp/v/sub/x && touch /tmp/v/end', 'cone');
+  assert.deepEqual(lines(await run), [
+    'rename u moved',
+    'rename sub/x',
+    'change sub/x',
+    'rename end',
+  ]);
+});
