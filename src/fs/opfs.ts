@@ -2396,13 +2396,7 @@ export class OpfsFs implements KernelFs {
     name: string,
     copies?: Copies
   ) {
-    const move = (handle as Handle & MovableHandle).move;
-    if (move) this.others++;
-    const moved = await move?.call(handle, dir, name).then(
-      () => true,
-      () => false
-    );
-    if (moved) return true;
+    if (await this.moved(handle, dir, name)) return true;
     const before = this.fileMoves;
     try {
       await this.copy(handle, dir, name, copies);
@@ -2416,6 +2410,24 @@ export class OpfsFs implements KernelFs {
   }
 
   private fileMoves = 0;
+
+  private async moved(handle: Handle, dir: FileSystemDirectoryHandle, name: string) {
+    const move = (handle as Handle & MovableHandle).move;
+    if (!move) return false;
+    for (let attempt = 0; ; attempt++) {
+      this.others++;
+      const failed = await move.call(handle, dir, name).then(
+        () => undefined,
+        (err: unknown) => ({ err })
+      );
+      if (!failed) return true;
+      const error = (failed.err as { name?: unknown } | null)?.name;
+      if (handle.kind !== 'file' || !LOCKED.has(error as string)) return false;
+      const delay = SYNC_BACKOFF_MS[attempt];
+      if (delay === undefined) throw fsError('EBUSY', name);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
 
   private async copy(
     handle: Handle,
