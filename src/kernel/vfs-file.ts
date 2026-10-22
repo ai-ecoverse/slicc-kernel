@@ -110,6 +110,8 @@ export class VfsNode {
 
   private missing = false;
 
+  made = false;
+
   private revoked = false;
 
   private readonly fs: VfsFileFs;
@@ -224,6 +226,7 @@ export class VfsNode {
         if (!isMissing(err)) throw err;
         while (this.moving.size > 0) await Promise.all(this.moving);
         if (this.path !== at) continue;
+        if (!this.made) throw new KernelError('ENOENT');
         this.data = new Uint8Array(0);
         this.missing = true;
       }
@@ -1006,6 +1009,7 @@ export function vfsFile(fs: VfsFileFs, opts: VfsFileOptions, nodes?: VfsNodes): 
       openError ??= { err };
     });
   };
+  if (opts.create || opts.truncate) node.made = true;
   if (opts.create) atOpen(() => node.materialize());
   if (opts.truncate) atOpen(() => node.truncate(0));
   const takeOpenError = (): void => {

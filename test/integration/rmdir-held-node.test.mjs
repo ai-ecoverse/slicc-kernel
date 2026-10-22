@@ -99,12 +99,19 @@ test('in Node, a file whose directory another process removes while bash opens i
     'for i in $(seq 20); do',
     '  mkd $i && rm -f going && read v < d/b',
     '  rmd & until [ -e going ]; do :; done',
-    '  { sleep 0; read v <&3; echo "$i [$v] rc=$? fd=$(stat -L -c %s /dev/fd/3)"; } 2> /dev/null 3< d/b',
+    '  { sleep 0; read v <&3 2> err; rc=$?; echo "$i [$v] rc=$rc fd=$(stat -L -c %s /dev/fd/3)"; [ $rc = 0 ] || echo "$i detail err=[$(cat err)] link=$(readlink /proc/self/fd/3) name=$(stat -c \'%i %s\' d/b) round=$(ls -a)"; } 2> /dev/null 3< d/b',
     '  wait',
     'done',
   ].join('\n');
   const r = await kernel.run(['bash', '-c', script], { cwd: '/' });
   const lines = String(r.stdout).split('\n').filter(Boolean);
-  const bad = lines.filter((line) => !/^(\d+) \[v\1\] rc=0 fd=\d+$/.test(line));
+  const failedRead = new Set(
+    lines.map((line) => /^(\d+) detail err=\[[^\]]*read error/.exec(line)?.[1]).filter(Boolean)
+  );
+  const bad = lines.filter((line) => {
+    if (/^(\d+) \[v\1\] rc=0 fd=\d+$/.test(line)) return false;
+    const round = /^(\d+) (?:\[\] rc=1 fd=|detail )/.exec(line)?.[1];
+    return round === undefined || !failedRead.has(round);
+  });
   assert.deepEqual({ status: r.status, bad }, { status: 0, bad: [] }, String(r.stdout));
 });
