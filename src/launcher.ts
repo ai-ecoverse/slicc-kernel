@@ -317,6 +317,7 @@ interface Target {
   asked?: string;
   variants?: readonly CommandVariant[];
   copy?: string;
+  shim?: string;
 }
 
 interface Compiled {
@@ -1166,7 +1167,7 @@ export class Launcher {
     const owner = await this.glueOwner(glue, baseName(file), scope);
     if (!owner) {
       const shim = await this.shimOwner(glue, baseName(file), scope);
-      return shim && { ...targetOf(shim), ...asked };
+      return shim && { ...targetOf(shim), ...asked, shim: glue };
     }
     return { ...targetOf(owner), ...asked, ...(owner.glue === glue ? {} : { copy: glue }) };
   }
@@ -1211,8 +1212,9 @@ export class Launcher {
   private async shimOwner(script: string, name: string, scope: string) {
     const command = (await this.commands(scope)).get(name);
     if (!command || command.script || command.origin?.script) return undefined;
-    const real = await physicalPathAsync(this.base, (await this.shimTarget(script)) ?? script);
-    const pkg = await this.installedPackage(real, scope);
+    const target = await this.shimTarget(script);
+    if (target === undefined) return undefined;
+    const pkg = await this.installedPackage(await physicalPathAsync(this.base, target), scope);
     if (!pkg) return undefined;
     const glue = command.origin?.glue ?? command.glue;
     const own = await physicalPathAsync(this.base, glue).catch(() => undefined);
@@ -1364,7 +1366,12 @@ export class Launcher {
     const found = await this.resolve(file, argv[0] ?? file, cwd, scope);
     const named = typeof argv0 === 'string' && found && !found.fixed;
     const direct = named ? { ...found, argv0 } : found;
-    if (direct) return { target: direct, args: [...(direct.prefix ?? []), ...argv.slice(1)] };
+    if (direct) {
+      const shim = direct.shim
+        ? { sources: [direct.shim], asked: direct.asked ? { [direct.shim]: direct.asked } : {} }
+        : {};
+      return { target: direct, args: [...(direct.prefix ?? []), ...argv.slice(1)], ...shim };
+    }
     if (catalogOnly && !(await this.scriptCommand(file, cwd, scope))) return undefined;
     const script = await this.interpreted(file, argv, cwd, scope);
     return script && { ...script, script: true };

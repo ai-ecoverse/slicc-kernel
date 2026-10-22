@@ -125,3 +125,25 @@ test('a writer reads a changed source unchecked, the next process is refused, an
   const revoked = await kernel.run(['reader', '/opt/agent/m.mjs'], { cwd: '/' });
   assert.equal(revoked.stdout, changed);
 });
+
+test('a protected node script swapped for a pnpm shim that points at an installed kernel command is still refused by its hash (#1453 review)', async (t) => {
+  const { kernel, root, denials } = await kernelWith();
+  t.after(() => kernel.terminate());
+  await put(
+    root,
+    '/node_modules/reader/package.json',
+    JSON.stringify({ slicc: { commands: { run: { abi: 'js', module: 'main.mjs' } } } })
+  );
+  await put(
+    root,
+    '/node_modules/agent/bin/run',
+    '#!/usr/bin/env node\n// pnpm-wasm-shim={"target":"../../reader/main.mjs"}\n'
+  );
+  const r = await kernel.run(['bash', '-c', '/node_modules/agent/bin/run; echo "rc=$?"'], {
+    cwd: '/',
+  });
+  assert.equal(r.stdout, 'rc=126\n', r.stderr);
+  assert.ok(
+    denials.some((d) => d.op === 'read-integrity' && d.path === '/node_modules/agent/bin/run')
+  );
+});
