@@ -47,7 +47,9 @@ test(`a serial, offline pnpm install of bios's agent into /opt/agent on the OPFS
   let rc = '';
   while (!rc && Date.now() - t0 < 540_000) {
     await new Promise((resolve) => setTimeout(resolve, 2000));
-    rc = ((await page.evaluate(() => window.opfs.read('tmp/pnpm.rc'))) ?? '').trim();
+    rc = (
+      (await page.evaluate(() => window.opfs.read('tmp/pnpm.rc').catch(() => null))) ?? ''
+    ).trim();
   }
   const r = {
     stdout: `${rc}\n${(await bash('tail -c 2000 /dev/shm/pnpm.log', { cwd: '/' })).stdout}`,
