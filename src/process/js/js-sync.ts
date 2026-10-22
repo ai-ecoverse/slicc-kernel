@@ -44,6 +44,7 @@ import {
   written,
 } from './js-io.ts';
 import { callError, JsCallError, type JsKernel, modeOf } from './js-kernel.ts';
+import type { JsSyncNet } from './js-net.ts';
 import { procFsSync, procOpenSync } from './js-proc.ts';
 import type { JsRunOptions, JsRunResult } from './js-run.ts';
 import type { JsSyncTty } from './js-tty.ts';
@@ -90,6 +91,7 @@ export interface JsSyncContext {
   pipe(): [number, number];
   open(path: string, options?: JsOpenOptions): JsSyncFile;
   wasi: { create(options?: JsWasiOptions): JsWasi };
+  net: JsSyncNet;
   fs: {
     stat(path: string): SyncFsBridgeStat;
     lstat(path: string): SyncFsBridgeStat;
@@ -211,6 +213,7 @@ export function syncOps(
   | 'fs'
   | 'tty'
   | 'wasi'
+  | 'net'
 > & { fs: Omit<JsSyncContext['fs'], 'watch'> } {
   const { infos, handles, resolve } = shared;
 
