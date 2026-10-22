@@ -257,7 +257,8 @@ test('an embedder writeFile over an existing file is a truncate and a write: two
   const seen = async (write) => {
     await kernel.writeFile('/tmp/c/old/o.txt', bytes('o'));
     await sh('rm -f /tmp/r');
-    const watching = sh('watchtest rewrite /tmp/c/old/o.txt /tmp/r 400');
+    await sh('rm -f /tmp/c/old/end');
+    const watching = sh('watchtest rewrite /tmp/c/old o.txt /tmp/r end');
     for (;;) {
       const ready = await kernel.readFile('/tmp/r').then(
         () => true,
@@ -267,6 +268,7 @@ test('an embedder writeFile over an existing file is a truncate and a write: two
       await new Promise((r) => setTimeout(r, 20));
     }
     await write();
+    await kernel.writeFile('/tmp/c/old/end', bytes(''));
     return (await watching).stdout;
   };
   const embedder = (text) => () => kernel.writeFile('/tmp/c/old/o.txt', bytes(text));
