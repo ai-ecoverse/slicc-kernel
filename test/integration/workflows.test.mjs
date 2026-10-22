@@ -75,7 +75,7 @@ test('the workflow has no comments but renovate annotations', () => {
   }
 });
 
-test('Renovate auto-merges its PRs once CI is green, except majors and updates under .github/, which open as drafts and wait for the Kernel Coordinator', async () => {
+test('Renovate auto-merges its PRs once CI is green, except majors and updates under .github/, which open as drafts and wait for the Kernel Coordinator, and moves slicc-shared-web and its pipeline ref in one PR', async () => {
   const config = JSON.parse(await read('renovate.json'));
   assert.deepEqual(config.extends, ['github>ai-ecoverse/slicc-shared-web']);
   assert.equal(config.labels, undefined);
@@ -88,4 +88,10 @@ test('Renovate auto-merges its PRs once CI is green, except majors and updates u
   assert.equal(held('"major"')?.draftPR, true);
   assert.equal(held('".github/**"')?.draftPR, true);
   assert.doesNotMatch(JSON.stringify(config), /merge-ok|cert-review|reviewer/);
+  const shared = config.packageRules.find((rule) => rule.groupSlug === 'slicc-shared-web');
+  assert.deepEqual(shared?.matchPackageNames, [
+    '@ai-ecoverse/slicc-shared-web',
+    'ai-ecoverse/slicc-shared-web',
+  ]);
+  assert.equal(shared.groupName, 'slicc-shared-web');
 });
