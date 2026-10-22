@@ -23,7 +23,7 @@ test("a watch hears another tab's changes on a shared OPFS root by name, and a w
     (
       await sh(
         page,
-        'rm -rf /tmp/w /tmp/r /tmp/o && mkdir -p /tmp/w && echo old > /tmp/w/e && echo made'
+        'rm -rf /tmp/w /tmp/s /tmp/r /tmp/rs /tmp/o /tmp/os && mkdir -p /tmp/w /tmp/s && echo old > /tmp/w/e && echo made'
       )
     ).stdout,
     'made\n'
@@ -38,16 +38,30 @@ test("a watch hears another tab's changes on a shared OPFS root by name, and a w
       { cwd: '/' }
     );
   });
-  const ready = () =>
-    page.evaluate(async () => (await window.opfs.exists('tmp/r')) && window.opfs.exists('tmp/rs'));
-  while (!(await ready())) await sleep(20);
-  assert.equal(
-    (await sh(other, 'echo x > /tmp/w/x && echo more >> /tmp/w/e && mkdir /tmp/w/d && echo done'))
-      .stdout,
-    'done\n'
+  const step = async (label, run, ms = 30_000) => {
+    const at = performance.now();
+    const done = await Promise.race([run(), sleep(ms).then(() => step.late)]);
+    console.log(`#1391 row: ${label} took ${Math.round(performance.now() - at)} ms`);
+    if (done === step.late) {
+      const partial = await sh(page, 'cat /tmp/o /tmp/os 2>&1; ls /tmp/r /tmp/rs 2>&1');
+      assert.fail(`${label} never finished: ${JSON.stringify(partial.stdout)}`);
+    }
+    return done;
+  };
+  step.late = Symbol('late');
+  await step('both watches ready', async () => {
+    const ready = () =>
+      page.evaluate(
+        async () => (await window.opfs.exists('tmp/r')) && window.opfs.exists('tmp/rs')
+      );
+    while (!(await ready())) await sleep(20);
+  });
+  const wrote = await step('the peer writes', () =>
+    sh(other, 'echo x > /tmp/w/x && echo more >> /tmp/w/e && mkdir /tmp/w/d && echo done')
   );
+  assert.equal(wrote.stdout, 'done\n', JSON.stringify(wrote));
   await sleep(2000);
-  await sh(page, 'touch /tmp/w/end /tmp/s/end');
+  await step('the ends', () => sh(page, 'touch /tmp/w/end /tmp/s/end'));
   const finished = await Promise.race([
     page.evaluate(() => window.watched),
     sleep(15_000).then(() => undefined),
