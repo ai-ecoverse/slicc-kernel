@@ -1,0 +1,13 @@
+{
+  "name": "ebindtest",
+  "private": true,
+  "slicc": {
+    "abi": "emscripten",
+    "commands": {
+      "ebindtest": {
+        "glue": "bin/ebindtest",
+        "wasm": "bin/ebindtest.wasm"
+      }
+    }
+  }
+}

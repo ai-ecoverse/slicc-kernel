@@ -45,3 +45,44 @@ test('a descriptor keeps writing to its file after a rename over its name fails 
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.stdout.trim().split('\n').at(-1), 'old+new', r.stdout);
 });
+
+const fixture = new URL('./fixtures/ebindtest/', import.meta.url);
+
+test("an Emscripten program's open file stays bound to it when the program renames another file over its name, also on tmpfs and between two links of one file (#1394, #1410 review)", {
+  timeout: 120_000,
+}, async (t) => {
+  const kernel = await createNodeKernel();
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
+  await kernel.writeFile(
+    '/node_modules/ebindtest/package.json',
+    await readFile(new URL('package.json', fixture))
+  );
+  for (const file of ['bin/ebindtest', 'bin/ebindtest.wasm']) {
+    await kernel.writeFile(
+      `/node_modules/ebindtest/${file}`,
+      await readFile(new URL(file, fixture)),
+      { mode: 0o755 }
+    );
+  }
+  await kernel.run(['mkdir', '-p', '/mnt/t'], { cwd: '/' });
+  await kernel.mount({ type: 'tmpfs', source: 'tmpfs', target: '/mnt/t' });
+  const r = await kernel.run(
+    [
+      'bash',
+      '-c',
+      [
+        'for d in /tmp/eb /mnt/t; do',
+        '  mkdir -p $d && cd $d && printf old > held && printf NEW-BYTES > other && rm -f twin',
+        '  ebindtest held other twin; cat held; echo',
+        'done',
+      ].join('\n'),
+    ],
+    { cwd: '/' }
+  );
+  assert.deepEqual(r, {
+    status: 0,
+    stdout: 'old old+w same\nNEW-BYTES\nold old+w same\nNEW-BYTES\n',
+    stderr: '',
+  });
+});
