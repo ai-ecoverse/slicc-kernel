@@ -217,6 +217,7 @@ interface Positioned {
 }
 
 interface SyncAccess {
+  mode?: string;
   read?(into: Uint8Array, options: { at: number }): number;
   getSize?(): number;
   write(bytes: Uint8Array, options: { at: number }): number;
@@ -265,13 +266,15 @@ const LOCKED = new Set(['NotReadableError', 'NoModificationAllowedError', 'Inval
 const SYNC_BACKOFF_MS = [5, 10, 20, 40, 80];
 export const SAH_READ_MIN = 1;
 
+let sharedReads = true;
+
 async function syncRead(
   handle: FileSystemFileHandle,
   offset: number,
   length: number
 ): Promise<{ bytes: Uint8Array; size: number } | undefined> {
   const sync = (handle as SyncCapable).createSyncAccessHandle;
-  if (!sync) return undefined;
+  if (!sync || !sharedReads) return undefined;
   let access: SyncAccess;
   try {
     access = await sync.call(handle, { mode: 'readwrite-unsafe' });
@@ -280,6 +283,10 @@ async function syncRead(
     throw err;
   }
   try {
+    if (access.mode !== 'readwrite-unsafe') {
+      sharedReads = false;
+      return undefined;
+    }
     if (!access.read || !access.getSize) return undefined;
     const size = access.getSize();
     const into = new Uint8Array(Math.max(0, Math.min(length, size - offset)));
