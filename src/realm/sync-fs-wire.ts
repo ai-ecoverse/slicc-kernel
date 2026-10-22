@@ -168,7 +168,7 @@ export interface SyncFsPosixBridge {
     open?: boolean,
     handle?: number,
     want?: number,
-    seen?: { gen?: number }
+    seen?: { gen?: number; nofollow?: boolean }
   ): number | undefined;
   access?(path: string, mode: number, kind?: AccessKind, nofollow?: boolean): void;
   create?(path: string, mode?: number, opening?: boolean): SyncFsCreated | undefined | void;

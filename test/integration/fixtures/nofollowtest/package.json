@@ -1,0 +1,12 @@
+{
+  "name": "nofollowtest",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "nofollowtest": {
+        "wasm": "bin/nofollowtest.wasm"
+      }
+    }
+  }
+}

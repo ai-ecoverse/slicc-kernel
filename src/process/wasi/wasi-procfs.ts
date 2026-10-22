@@ -579,7 +579,7 @@ export function procfsBridge<T extends SyncFsPosixBridge>(fs: T, tree: ProcTree)
       open?: boolean,
       handle?: number,
       want?: number,
-      seen?: { gen?: number }
+      seen?: { gen?: number; nofollow?: boolean }
     ) => {
       if (handle !== undefined && snapshots.delete(handle)) return undefined;
       if (!held) return fs.hold?.(p, held, open, handle);
