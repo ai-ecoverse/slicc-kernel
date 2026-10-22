@@ -24,7 +24,7 @@ const BIG = 400;
 const ROUNDS = Number(process.env.RENAME_ROUNDS ?? 20);
 const KILLS = Number(process.env.RENAME_KILLS ?? 8);
 
-const POLL = (dir) =>
+const POLL = (dir, pause = '') =>
   [
     `cd ${dir}`,
     'shopt -s nullglob',
@@ -35,26 +35,58 @@ const POLL = (dir) =>
     '  if [ "$before" != a ] && [ "$before" != b ]; then',
     '    bad=$((bad+1)); [ $bad -le 5 ] && echo "parent shows [$before]"',
     '  else',
+    ...(pause ? [`    ${pause}`] : []),
     '    files=($before/lib/*); c=${#files[@]}',
     '    if [ -e $before/package.json ]; then p=1; else p=0; fi',
+    ...(pause ? [`    ${pause}`] : []),
     '    after=$(names)',
     `    if [ "$after" = "$before" ] && { [ $c -ne ${FILES} ] || [ $p -eq 0 ]; }; then`,
     '      bad=$((bad+1)); [ $bad -le 5 ] && echo "partial $before: $c package.json=$p"',
     '    fi',
     '  fi',
-    '  n=$((n+1))',
+    '  n=$((n+1)); echo $n > tick',
     'done',
     'echo "samples $n bad $bad"',
   ].join('\n');
 
-const RENAMES = (dir) =>
-  `cd ${dir} && for r in $(seq ${ROUNDS}); do mv a b && mv b a || echo "mv failed $r"; done; : > stop; echo renamed`;
+const SETTLE_S = 30;
 
-async function polled(page, other, { at, through = at, label }) {
-  await other.evaluate((s) => {
-    window.pollRun = window.kernel.run(['bash', '-c', s], { cwd: '/' });
-  }, POLL(at));
-  const renamed = await sh(page, RENAMES(through));
+const SETTLE = [
+  'settle() {',
+  '  local t u end=$((SECONDS + ' + SETTLE_S + '))',
+  '  read -r t 2>/dev/null < tick',
+  '  until read -r u 2>/dev/null < tick; [ "$u" != "$t" ]; do',
+  '    if [ $SECONDS -ge $end ]; then echo "the poller took no sample in ' +
+    SETTLE_S +
+    ' s, last at ${t:-none}"; return 1; fi',
+  '  done',
+  '}',
+].join('\n');
+
+const ROUND = (dir, paced) =>
+  `cd ${dir} && ${SETTLE}\nmv a b && ${paced ? 'settle && ' : ''}mv b a && ${paced ? 'settle && ' : ''}echo renamed`;
+
+async function renames(page, dir, paced) {
+  try {
+    for (let r = 1; r <= ROUNDS; r++) {
+      const round = await sh(page, ROUND(dir, paced));
+      if (round.stdout !== 'renamed\n') return { ...round, round: r };
+    }
+    return ok('renamed\n');
+  } finally {
+    await sh(page, `: > ${dir}/stop`);
+  }
+}
+
+async function polled(page, other, { at, through = at, label, pause = '', paced = true }) {
+  await sh(page, `rm -f ${at}/stop ${at}/tick`);
+  await other.evaluate(
+    (s) => {
+      window.pollRun = window.kernel.run(['bash', '-c', s], { cwd: '/' });
+    },
+    POLL(at, pause)
+  );
+  const renamed = await renames(page, through, paced);
   const poll = await other.evaluate(() => window.pollRun);
   console.log(`${label}: ${poll.stdout.trim().split('\n').at(-1)}`);
   assert.deepEqual(renamed, ok('renamed\n'));
@@ -70,6 +102,12 @@ test('another tab polling a directory a kernel renames back and forth never sees
   assert.deepEqual(await sh(page, tree(dir, FILES)), ok('made\n'));
   const other = await peerTab(page);
   await polled(page, other, { at: dir, label: 'poller' });
+  await polled(page, other, {
+    at: dir,
+    label: `a poller slower than the renames${process.env.RENAME_UNPACED ? ' (unpaced)' : ''}`,
+    pause: `sleep ${process.env.RENAME_PAUSE ?? '0.15'}`,
+    paced: process.env.RENAME_UNPACED === undefined,
+  });
   const seen = await sh(other, whole(dir));
   assert.ok(wholeAs(FILES)(seen.stdout), seen.stdout);
   assert.deepEqual(
