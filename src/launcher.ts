@@ -1812,6 +1812,24 @@ export class Launcher {
     return (await this.base.exists(optional)) ? optional : undefined;
   }
 
+  private loaded(
+    target: Target,
+    env: Record<string, string>,
+    caller: IntegrityCaller
+  ): Promise<[Program, { exeId?: string }]> {
+    const read = () => this.program(target, env, caller);
+    const id = () => this.exeId(target);
+    return Promise.all([read(), id()]).then(([first, before]) =>
+      id().then((after) =>
+        after.exeId === before.exeId
+          ? ([first, after] as [Program, { exeId?: string }])
+          : read().then((again) =>
+              id().then((last) => [again, last] as [Program, { exeId?: string }])
+            )
+      )
+    );
+  }
+
   private exeId(target: Target): Promise<{ exeId?: string }> {
     if (target.abi !== 'wasi' || (target.copy ?? target.glue) !== target.wasm) {
       return Promise.resolve({});
@@ -1884,7 +1902,7 @@ export class Launcher {
     try {
       const caller = { pid: req.ppid ?? 0, uid: req.cred.euid, tag: req.tags?.[0] };
       if (this.integrity) await this.checkedSources(planned, caller);
-      [program, exeId] = await Promise.all([this.program(target, env, caller), this.exeId(target)]);
+      [program, exeId] = await this.loaded(target, env, caller);
       if (readsEtcHostname(program)) setOrDrop(env, 'HOSTNAME', own);
     } catch (err) {
       await req.fds.closeAll();
