@@ -694,11 +694,11 @@ async function keptOr(entry: SyncFsTokenEntry, path: string, handle?: number): P
 }
 
 async function bound(entry: SyncFsTokenEntry, path: string, handle: number): Promise<void> {
-  const ino = entry.boundIno?.(handle);
-  if (ino === undefined) return;
+  const bound = entry.boundIno?.(handle);
+  if (bound === undefined) return;
   const now = await entry.fs.stat(path).catch(() => undefined);
-  if (now?.ino === ino) {
-    entry.trust?.(handle);
+  if (now?.ino === bound.ino) {
+    entry.trust?.(handle, bound.doubt);
     return;
   }
   staleFds++;

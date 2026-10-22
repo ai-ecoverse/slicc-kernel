@@ -41,6 +41,7 @@ interface LiveNodeState {
   named?: number | undefined;
   watch?: RangedWatch | undefined;
   stat?: SyncFsBridgeStat;
+  bound?: SyncFsBridgeStat;
   statAt?: number;
   filledAt?: number;
   statGen?: number;
@@ -523,6 +524,7 @@ function renameFollower(
     open,
     follow,
     track(node: LiveFsNode, on: boolean): void {
+      node.live.bound = on && node.live.stat?.ino !== undefined ? node.live.stat : undefined;
       if (!on) {
         open.delete(node);
         return;
@@ -604,6 +606,18 @@ function heldStream(h: LiveHelpers, stream: LiveFsStream, change: 1 | -1): void 
   }
 }
 
+function adopted(
+  node: LiveFsNode,
+  st: SyncFsBridgeStat,
+  asked: { statGen: number | undefined; filledAt: number }
+): boolean {
+  const bound = node.live.openCount > 0 ? node.live.bound : undefined;
+  if (bound && st.ino !== bound.ino) return false;
+  filled(node.live, st, asked);
+  node.mode = modeFromStat(st, exactIn(node));
+  return true;
+}
+
 function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
   const bridgeOf = (node: LiveFsNode): SyncFsPosixBridge => node.mount.opts.bridge;
   const fileIo = (node: LiveFsNode): SyncFsFileIo => pinnedIo(bridgeOf(node), node.live.handle);
@@ -664,8 +678,7 @@ function createHelpers(Fs: LiveFsApi, ops: LiveOpsTables) {
     if (!cachedStat(node, Fs.isDir(node.mode), view)) {
       const asked = { statGen: view?.now(), filledAt: performance.now() };
       const st = call(() => bridgeOf(node).lstat(liveNodePath(linked.holder(node))));
-      filled(node.live, st, asked);
-      node.mode = modeFromStat(st, exactIn(node));
+      if (!adopted(node, st, asked)) return node.live.bound as SyncFsBridgeStat;
     }
     return node.live.stat as SyncFsBridgeStat;
   }

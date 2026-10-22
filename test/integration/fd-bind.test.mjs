@@ -117,3 +117,63 @@ test('an open file stays bound to the file it opened when another tab renames a 
     JSON.stringify(read)
   );
 });
+
+const PHASES = (dir) =>
+  [
+    'import os',
+    `os.chdir('${dir}')`,
+    "os.makedirs('d', exist_ok=True)",
+    "open('secret', 'w').write('SECRET-BYTES')",
+    "open('d/racy', 'w').write('old')",
+    "fd = os.open('d/racy', os.O_RDONLY)",
+    'out = []',
+    'for phase in (1, 2):',
+    "    open(f'ready{phase}', 'w').close()",
+    "    while not os.path.exists(f'go{phase}'): pass",
+    '    if phase == 1: continue',
+    '    try:',
+    '        out.append(os.pread(fd, 64, 0).decode())',
+    '    except OSError as e:',
+    '        out.append(f"errno {e.errno}")',
+    "print(' '.join(out))",
+  ].join('\n');
+
+async function phased(page, other, dir, steps) {
+  const reading = page.evaluate(
+    (s) => window.kernel.run(['python3', '-c', s], { cwd: '/' }),
+    PHASES(dir)
+  );
+  for (const [phase, step] of steps.entries()) {
+    for (let i = 0; ; i++) {
+      const r = await sh(other, `[ -e ${dir}/ready${phase + 1} ] && echo yes || echo no`);
+      if (r.stdout === 'yes\n') break;
+      if (i % 100 === 99) {
+        const early = await Promise.race([reading, 'running']);
+        assert.equal(early, 'running', `the reader ended early: ${JSON.stringify(early)}`);
+      }
+    }
+    assert.deepEqual(
+      await sh(other, `cd ${dir} && ${step} && sleep 0.3 && : > go${phase + 1} && echo done`),
+      ok('done\n')
+    );
+  }
+  return Promise.race([
+    reading,
+    new Promise((resolve) => setTimeout(() => resolve({ stdout: 'no answer in 60 s' }), 60_000)),
+  ]);
+}
+
+test('an open file another tab moved with its directory and then renamed something over is never read from that something (#1394 review)', {
+  timeout: 1_500_000,
+}, async (t) => {
+  const page = await python(t);
+  const other = await peerTab(page);
+  await sh(page, 'rm -rf /root/b5 && mkdir -p /root/b5');
+  const r = await phased(page, other, '/root/b5', [
+    'mv d e',
+    'ln -s secret e/racy.l && mv e/racy.l e/racy',
+  ]);
+  console.log(`moved then renamed over: ${JSON.stringify(r)}`);
+  assert.equal(r.status, 0, JSON.stringify(r));
+  assert.match(r.stdout, /^(old|errno 72)\n$/, r.stdout);
+});

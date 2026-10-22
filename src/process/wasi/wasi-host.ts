@@ -1378,7 +1378,7 @@ export class WasiHost {
     }
     const bound = buffer.bound;
     if (s && bound?.ino !== undefined && s.ino !== bound.ino) {
-      s = this.keptStat(buffer.handle) ?? { ...s, ino: bound.ino };
+      s = this.keptStat(buffer.handle) ?? bound;
     }
     return this.sized(file.path, s, file.size());
   }
