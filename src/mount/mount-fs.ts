@@ -786,6 +786,7 @@ const RELINKED: ReadonlyArray<readonly [string, readonly number[]]> = [
   ['writeFile', [0]],
   ['pread', [0]],
   ['pwrite', [0]],
+  ['append', [0]],
   ['truncate', [0]],
   ['lstat', [0]],
   ['stat', [0]],
