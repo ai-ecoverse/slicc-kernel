@@ -306,10 +306,20 @@ export async function contextSecure(
   }
 }
 
-function contextAt(fds: FdTable, fd: number): TlsLeaf {
-  const file = fds.get(fd).file;
+function contextAt(fds: FdTable, fd: number): { leaf: TlsLeaf; done: () => void } {
+  const open = fds.get(fd);
+  const file = open.file;
   if (!(file instanceof TlsContext)) throw new KernelError('EBADF', 'not a tls context');
-  return file.leaf;
+  const held = open.retain();
+  let released = false;
+  return {
+    leaf: file.leaf,
+    done: () => {
+      if (released) return;
+      released = true;
+      void held.release();
+    },
+  };
 }
 
 function choiceOf(fds: FdTable, pause: Pause, req: SelectRequest): ServerChoice {
@@ -320,7 +330,7 @@ function choiceOf(fds: FdTable, pause: Pause, req: SelectRequest): ServerChoice 
   if (req.alpn !== undefined && !pause.offer.protocols.includes(req.alpn))
     throw new KernelError('EINVAL', 'ERR_TLS_ALPN_CALLBACK_INVALID_RESULT: not offered');
   return {
-    ...(req.context === undefined ? {} : { leaf: contextAt(fds, req.context) }),
+    ...(req.context === undefined ? {} : contextAt(fds, req.context)),
     ...(req.alpn === undefined ? {} : { alpn: req.alpn }),
   };
 }
@@ -341,5 +351,9 @@ export async function selectSecure(
     throw err;
   }
   selecting.pause.choose(choice);
-  return servedOf(await selecting.run);
+  try {
+    return servedOf(await selecting.run);
+  } finally {
+    choice.done?.();
+  }
 }

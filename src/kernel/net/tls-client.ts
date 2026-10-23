@@ -324,6 +324,7 @@ export interface ServerChoice {
   leaf?: TlsLeaf;
   alpn?: string;
   refuse?: number;
+  done?: () => void;
 }
 
 export type ServerSelect = (offer: ServerOffer) => Promise<ServerChoice>;
@@ -332,7 +333,11 @@ async function chosen(conn: UplinkConn, session: TlsSession, select: ServerSelec
   if (!select) throw new KernelError('EPROTO', 'ERR_SSL_HANDSHAKE_FAILURE: no selection');
   const choice = await select({ servername: session.sni, protocols: session.clientAlpn() });
   if (choice.refuse === undefined) {
-    session.select(choice.leaf, choice.alpn);
+    try {
+      session.select(choice.leaf, choice.alpn);
+    } finally {
+      choice.done?.();
+    }
     return;
   }
   session.refuse(choice.refuse);
