@@ -87,6 +87,10 @@ export interface JsSyncContext {
   cred(): JsCred;
   umask(mask?: number): number;
   setcred(change: Partial<JsCred>): JsCred;
+  runScript(
+    source: string,
+    options?: { filename?: string }
+  ): { value: unknown; completion: boolean } | undefined;
   read(fd: number, max?: number): Uint8Array;
   write(fd: number, data: Uint8Array | string, options?: JsWriteOptions): number;
   close(fd: number): void;
@@ -217,6 +221,7 @@ export function syncOps(
   | 'tty'
   | 'wasi'
   | 'net'
+  | 'runScript'
 > & { fs: Omit<JsSyncContext['fs'], 'watch'> } {
   const { infos, handles, resolve } = shared;
 
