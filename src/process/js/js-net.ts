@@ -57,6 +57,7 @@ export interface JsTlsServerSession {
   readonly authorized: boolean;
   readonly authorizationError?: string;
   readonly peerCertificates: readonly Uint8Array[];
+  readonly cipher: JsTlsCipher;
 }
 
 export interface JsConnection {
@@ -178,6 +179,7 @@ interface ServedWire {
   authorized: boolean;
   authorizationError?: string;
   peerCertificates: string[];
+  cipher: JsTlsCipher;
 }
 
 function servedOf(r: ServedWire): JsTlsServerSession {
@@ -187,6 +189,7 @@ function servedOf(r: ServedWire): JsTlsServerSession {
     path: 'kernel',
     ...(authorizationError ? { authorizationError } : {}),
     peerCertificates: Object.freeze(r.peerCertificates.map(fromBase64)),
+    cipher: Object.freeze({ ...r.cipher }),
   });
 }
 
