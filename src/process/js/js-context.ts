@@ -128,6 +128,13 @@ export interface JsScriptResult {
 
 export type JsRunScript = (source: string, filename: string) => JsScriptResult;
 
+export interface JsPromiseState {
+  state: 'pending' | 'fulfilled' | 'rejected';
+  value: unknown;
+}
+
+export type JsPromiseProbe = (promise: unknown) => JsPromiseState | undefined;
+
 export interface JsProgramContext {
   readonly kernel: JsKernelInfo;
   memory(): JsMemory;
@@ -285,6 +292,7 @@ export interface ContextOptions {
   memory?: (() => JsMemory) | undefined;
   asyncContext?: (() => JsAsyncContext) | undefined;
   runScript?: JsRunScript | undefined;
+  promiseState?: JsPromiseProbe | undefined;
   fs?: { owners: boolean; links: boolean };
   owned?: SharedArrayBuffer;
   held?: HeldCwdInit | undefined;
@@ -675,6 +683,13 @@ function measured(measure: (() => JsMemory) | undefined): JsMemory {
   return out;
 }
 
+function realmOps(o: ContextOptions): Pick<JsSyncContext, 'runScript' | 'promiseState'> {
+  return {
+    runScript: scriptRunner(o.runScript),
+    promiseState: (promise) => o.promiseState?.(promise),
+  };
+}
+
 function scriptRunner(
   run: JsRunScript | undefined
 ): (source: string, options?: { filename?: string }) => JsScriptResult | undefined {
@@ -789,7 +804,7 @@ export function createContext(o: ContextOptions): CreatedContext {
     cred: () => syncKernel.json({ op: 'proc-cred' }) as JsCred,
     umask: (mask) => syncKernel.json(umaskRequest(mask)) as number,
     setcred: setcredOn(syncKernel),
-    runScript: scriptRunner(o.runScript),
+    ...realmOps(o),
   };
 
   const io = { read, send: writeAll, close: (fd: number) => ctx.close(fd) };

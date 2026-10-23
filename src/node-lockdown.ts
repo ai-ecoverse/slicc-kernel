@@ -1,6 +1,8 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import type { Session } from 'node:inspector';
 import { isBuiltin, registerHooks } from 'node:module';
 import { resolve, sep } from 'node:path';
+import { types } from 'node:util';
 import { getHeapStatistics } from 'node:v8';
 import { runInThisContext } from 'node:vm';
 import { hide, lockdown, vacate } from './process/js/lockdown.ts';
@@ -147,6 +149,174 @@ export function nodeRunScript(
   const options = blank(null) as { filename: string };
   options.filename = filename;
   return freeze({ value: runHere(source, options), completion: true });
+}
+
+const isPromise = types.isPromise;
+const here: object = globalThis;
+const define = Reflect.defineProperty;
+const remove = Reflect.deleteProperty;
+const call = Reflect.apply;
+const hasOwn = Object.hasOwn;
+const stringify = JSON.stringify;
+const endsWith = String.prototype.endsWith;
+const sliceOf = String.prototype.slice;
+const toHex = Number.prototype.toString;
+const random = Math.random;
+const makeBigInt = BigInt;
+const builtin = process.getBuiltinModule.bind(process);
+const find = Array.prototype.find;
+const keysOf = Object.keys;
+const nothing = Object.create;
+const isList = Array.isArray;
+const seal = Object.freeze;
+const ownKeys = Reflect.ownKeys;
+const ownDescriptor = Reflect.getOwnPropertyDescriptor;
+const BASE = Object.prototype;
+const BASE_KEYS = ownKeys(BASE).length;
+const SERIALIZED = [Array.prototype, String.prototype, Number.prototype, Boolean.prototype];
+
+function untouched(): boolean {
+  if (ownKeys(BASE).length !== BASE_KEYS) return false;
+  for (let i = 0; i < SERIALIZED.length; i++) {
+    if (ownDescriptor(SERIALIZED[i] as object, 'toJSON') !== undefined) return false;
+  }
+  return true;
+}
+const Failure = Error;
+const WrongType = TypeError;
+
+function own(from: unknown, key: string): unknown {
+  return typeof from === 'object' && from !== null && hasOwn(from, key)
+    ? (from as Record<string, unknown>)[key]
+    : undefined;
+}
+
+function bare(fields: Record<string, unknown>): object {
+  const out = nothing(null) as Record<string, unknown>;
+  const keys = keysOf(fields);
+  for (let i = 0; i < keys.length; i++) out[keys[i] as string] = fields[keys[i] as string];
+  return out;
+}
+
+let session: Session | undefined;
+let inspectorGone = false;
+let probing = false;
+
+function post(method: string, params: Record<string, unknown>): unknown {
+  let out: unknown;
+  let failed: unknown;
+  let done = false;
+  call((session as Session).post, session, [
+    method,
+    bare(params),
+    (err: unknown, result: unknown) => {
+      failed = err;
+      out = result;
+      done = true;
+    },
+  ]);
+  if (!done) throw new Failure('slicc-kernel: the inspector did not answer synchronously');
+  if (failed) throw failed;
+  return out;
+}
+
+export function inspectorSession(load: () => { Session: new () => Session }): Session | undefined {
+  try {
+    const made = new (load().Session)();
+    made.connect();
+    return made;
+  } catch {
+    return undefined;
+  }
+}
+
+function connected(): boolean {
+  if (session) return true;
+  if (inspectorGone) return false;
+  session = inspectorSession(() => builtin('node:inspector') as { Session: new () => Session });
+  inspectorGone = session === undefined;
+  return !inspectorGone;
+}
+
+function idOf(key: string, value: unknown, group: string): unknown {
+  define(here, key, { __proto__: null, value, configurable: true } as PropertyDescriptor);
+  const result = own(
+    post('Runtime.evaluate', {
+      expression: `this[${stringify(key)}]`,
+      objectGroup: group,
+      includeCommandLineAPI: false,
+      silent: true,
+      returnByValue: false,
+      generatePreview: false,
+    }),
+    'result'
+  );
+  return own(result, 'objectId');
+}
+
+function primitive(remote: unknown): unknown {
+  const raw = own(remote, 'unserializableValue');
+  if (typeof raw !== 'string') return own(remote, 'value');
+  if (call(endsWith, raw, ['n'])) return makeBigInt(call(sliceOf, raw, [0, -1]) as string);
+  if (raw === 'NaN') return 0 / 0;
+  if (raw === '-0') return -0;
+  return raw === 'Infinity' ? 1 / 0 : -1 / 0;
+}
+
+function internal(list: unknown, name: string): unknown {
+  if (!isList(list)) return undefined;
+  return own(call(find, list, [(item: unknown) => own(item, 'name') === name]), 'value');
+}
+
+type Settled = { state: 'pending' | 'fulfilled' | 'rejected'; value: unknown };
+
+function probe(promise: unknown, group: string, key: string): Settled {
+  const promiseId = idOf(key, promise, group);
+  const found = own(
+    post('Runtime.getProperties', {
+      objectId: promiseId,
+      ownProperties: true,
+      generatePreview: false,
+    }),
+    'internalProperties'
+  );
+  const state = own(internal(found, '[[PromiseState]]'), 'value') as Settled['state'];
+  if (state === 'pending') return seal({ state, value: undefined });
+  const result = internal(found, '[[PromiseResult]]');
+  const resultId = own(result, 'objectId');
+  if (typeof resultId !== 'string') return seal({ state, value: primitive(result) });
+  const holder = nothing(null) as { v?: unknown };
+  post('Runtime.callFunctionOn', {
+    objectId: resultId,
+    functionDeclaration: 'function (h) { "use strict"; h.v = this; }',
+    arguments: [bare({ objectId: idOf(`${key}_v`, holder, group) })],
+    objectGroup: group,
+    silent: true,
+    returnByValue: false,
+    generatePreview: false,
+  });
+  return seal({ state, value: holder.v });
+}
+
+export function nodePromiseState(promise: unknown): Settled | undefined {
+  if (!isPromise(promise)) throw new WrongType('promiseState needs a native promise');
+  if (probing) throw new Failure('slicc-kernel: promiseState is already running');
+  if (!untouched() || !connected()) return undefined;
+  probing = true;
+  const tag = call(toHex, random() * 2 ** 52, [16]) as string;
+  const group = `slicc-promise-${tag}`;
+  const key = `__slicc_promise_${tag}`;
+  try {
+    return probe(promise, group, key);
+  } finally {
+    remove(here, key);
+    remove(here, `${key}_v`);
+    try {
+      post('Runtime.releaseObjectGroup', { objectGroup: group });
+    } finally {
+      probing = false;
+    }
+  }
 }
 
 const Storage = AsyncLocalStorage;
