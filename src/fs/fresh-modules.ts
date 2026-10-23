@@ -107,9 +107,9 @@ export class FreshModules {
     };
     const { append } = fs;
     if (append) {
-      overrides.append = async (path: string, bytes: Uint8Array) => {
+      overrides.append = async (path: string, bytes: Uint8Array, options?: PwriteOptions) => {
         const fresh = this.fresh.has(normalizePath(path));
-        const end = await append.call(fs, path, bytes);
+        const end = await append.call(fs, path, bytes, options);
         if (fresh && end - bytes.length < MAGIC.length) await decide(path);
         return end;
       };
@@ -129,8 +129,8 @@ export class FreshModules {
         await ranged.pwrite(path, at, bytes, transfer, options);
         if (touches) await decide(path, first);
       };
-      overrides.truncate = async (path: string, size: number) => {
-        await ranged.truncate(path, size);
+      overrides.truncate = async (path: string, size: number, options?: PwriteOptions) => {
+        await ranged.truncate(path, size, options);
         if (size < MAGIC.length && this.fresh.has(normalizePath(path))) await decide(path);
       };
     }

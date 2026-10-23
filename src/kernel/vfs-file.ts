@@ -908,18 +908,18 @@ function heldIo(fs: KernelFs, nodes: VfsNodes, changed: (path: string) => void):
     return out;
   };
   return {
-    append: (path: string, bytes: Uint8Array) =>
+    append: (path: string, bytes: Uint8Array, options?: PwriteOptions) =>
       write(
         path,
         (held) => held.append(bytes),
         async () => {
-          const end = await fs.append?.(path, bytes).catch((err: unknown) => {
+          const end = await fs.append?.(path, bytes, options).catch((err: unknown) => {
             if (!positional(err)) throw err;
             return undefined;
           });
           if (end !== undefined) return end;
           const at = (await fs.stat(path)).size;
-          if (ranged) await ranged.pwrite(path, at, bytes, true);
+          if (ranged) await ranged.pwrite(path, at, bytes, true, options);
           else {
             const whole = new Uint8Array(at + bytes.length);
             whole.set(await fs.readFileBuffer(path));
@@ -962,11 +962,11 @@ function heldIo(fs: KernelFs, nodes: VfsNodes, changed: (path: string) => void):
               async (held) => void (await held.pwrite(bytes, at)),
               () => ranged.pwrite(path, at, bytes, transfer, options)
             ),
-          truncate: (path: string, size: number) =>
+          truncate: (path: string, size: number, options?: PwriteOptions) =>
             write(
               path,
               (held) => held.truncate(size),
-              () => ranged.truncate(path, size)
+              () => ranged.truncate(path, size, options)
             ),
         }
       : {}),

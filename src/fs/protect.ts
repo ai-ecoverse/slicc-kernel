@@ -1,5 +1,12 @@
 import { type IntegrityOptions, integritySources, integrityUnknown } from './integrity.ts';
-import { type FsStat, fsError, type HeldEntry, type KernelFs, normalizePath } from './types.ts';
+import {
+  type FsStat,
+  fsError,
+  type HeldEntry,
+  type KernelFs,
+  normalizePath,
+  type PwriteOptions,
+} from './types.ts';
 
 export interface Protection {
   readonly paths: readonly string[];
@@ -234,17 +241,17 @@ export class ProtectedFs {
         : {}),
       ...(fs.append
         ? {
-            async append(path: string, bytes: Uint8Array) {
+            async append(path: string, bytes: Uint8Array, options?: PwriteOptions) {
               await check(path, true);
-              return (fs.append as NonNullable<KernelFs['append']>).call(fs, path, bytes);
+              return (fs.append as NonNullable<KernelFs['append']>).call(fs, path, bytes, options);
             },
           }
         : {}),
       ...(fs.truncate
         ? {
-            async truncate(path: string, size: number) {
+            async truncate(path: string, size: number, options?: PwriteOptions) {
               await check(path, true);
-              return fs.truncate?.(path, size);
+              return fs.truncate?.(path, size, options);
             },
           }
         : {}),

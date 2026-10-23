@@ -144,6 +144,9 @@ const META_OPS = ['get', 'update', 'move', 'remove', 'links', 'under', 'all'] as
 
 type MetaOp = (typeof META_OPS)[number] | 'fresh';
 
+const FID_SETTLE_TRIES = 4;
+const FID_SETTLE_MS = 15;
+
 function sidecar(meta: MetaStore): MetaStore {
   const pathOf = ([first]: unknown[]) =>
     [first, '/'].flat().find((p): p is string => typeof p === 'string') as string;
@@ -455,6 +458,18 @@ export class OpfsFs implements KernelFs {
   private changed(...paths: string[]): void {
     for (const path of paths) this.forget(path);
     this.channel?.postMessage(paths);
+  }
+
+  private async sameFile(path: string, fid: string | undefined): Promise<void> {
+    if (fid === undefined) return;
+    const found = await this.locate(path, true);
+    const read = this.meta.fresh ?? this.meta.get;
+    for (let tries = 0; ; tries++) {
+      const [entry] = await read.call(this.meta, [found.path]);
+      if (entry?.fid === fid) return;
+      if (entry?.fid !== undefined || tries >= FID_SETTLE_TRIES) throw fsError('ESTALE', path);
+      await new Promise((resolve) => setTimeout(resolve, FID_SETTLE_MS));
+    }
   }
 
   async fileId(path: string): Promise<string> {
@@ -1353,6 +1368,7 @@ export class OpfsFs implements KernelFs {
     const movedAway = this.renamesInFlight() ? await this.writeWaits(at) : false;
     this.fileWrites.set(at, (this.fileWrites.get(at) ?? 0) + 1);
     try {
+      await this.sameFile(path, options?.fid);
       const [kept, target, existed] = await this.keptFor(path);
       if (kept) {
         try {
@@ -1468,18 +1484,19 @@ export class OpfsFs implements KernelFs {
     }
   }
 
-  async truncate(path: string, size: number): Promise<void> {
+  async truncate(path: string, size: number, options?: PwriteOptions): Promise<void> {
     const at = normalizePath(path);
     if (this.renamesInFlight()) await this.writeWaits(at);
     this.fileWrites.set(at, (this.fileWrites.get(at) ?? 0) + 1);
     try {
+      await this.sameFile(path, options?.fid);
       await this.ending(path, () => this.truncated(path, size));
     } finally {
       this.writeEnded(at);
     }
   }
 
-  async append(path: string, bytes: Uint8Array): Promise<number> {
+  async append(path: string, bytes: Uint8Array, options?: PwriteOptions): Promise<number> {
     if (!this.locks || !this.remote || !this.shared()) {
       throw fsError('ENOTSUP', `${path}: appended by position while no other tab shares the root`);
     }
@@ -1487,6 +1504,7 @@ export class OpfsFs implements KernelFs {
     if (this.renamesInFlight()) await this.writeWaits(at);
     this.fileWrites.set(at, (this.fileWrites.get(at) ?? 0) + 1);
     try {
+      await this.sameFile(path, options?.fid);
       const found = await this.locate(path, true);
       if (found.handle?.kind !== 'file') throw fsError(found.handle ? 'EISDIR' : 'ENOENT', path);
       this.refuse(found.path);
@@ -1604,6 +1622,7 @@ export class OpfsFs implements KernelFs {
   }
 
   async writeFile(path: string, content: Uint8Array | string, owner?: NewOwner): Promise<void> {
+    await this.sameFile(path, owner?.fid);
     const [file, existed, target] = await this.fileFor(path);
     if (!existed) await this.stampNew(target, owner, false);
     if (!existed && content.length === 0) return;
