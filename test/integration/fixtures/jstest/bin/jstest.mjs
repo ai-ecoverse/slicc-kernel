@@ -1495,8 +1495,48 @@ async function preadbench(ctx, [path]) {
   await ctx.write(1, `${out.join('\n')}\n`);
 }
 
+async function readintoall(ctx, [dir]) {
+  const out = [];
+  const buf = new Uint8Array(8).fill(7);
+  const zero = await ctx.open('/dev/zero', { read: true });
+  out.push(`dev ${await zero.readInto(0, buf, 2, 4)} ${buf.join('')}`);
+  await zero.close();
+  const szero = ctx.sync.open('/dev/zero', { read: true });
+  buf.fill(7);
+  out.push(`sync dev ${szero.readInto(0, buf, 6)} ${buf.join('')}`);
+  szero.close();
+  const proc = await ctx.open('/proc/self/stat', { read: true });
+  const pbuf = new Uint8Array(4);
+  out.push(`proc ${await proc.readInto(0, pbuf)} ${pbuf.every((b) => b > 0)}`);
+  await proc.close();
+  const sproc = ctx.sync.open('/proc/self/stat', { read: true });
+  out.push(`sync proc ${sproc.readInto(0, pbuf, 1, 2)}`);
+  let bad = 'none';
+  try {
+    sproc.readInto(0, pbuf, 3, 4);
+  } catch (err) {
+    bad = err.code;
+  }
+  out.push(`sync proc small ${bad}`);
+  sproc.close();
+  const fifo = await ctx.open(`${dir}/p`, { read: true, write: true });
+  await fifo.write(0, new TextEncoder().encode('abc'));
+  const fbuf = new Uint8Array(6).fill(46);
+  out.push(`fifo ${await fifo.readInto(0, fbuf, 1)} ${new TextDecoder().decode(fbuf)}`);
+  let seek = 'none';
+  try {
+    await fifo.readInto(5, fbuf);
+  } catch (err) {
+    seek = err.code;
+  }
+  out.push(`fifo seek ${seek}`);
+  await fifo.close();
+  await ctx.write(1, `${out.join('\n')}\n`);
+}
+
 const modes = {
   preadbench,
+  readintoall,
   rawkeys,
   rawclosed,
   rawpair,

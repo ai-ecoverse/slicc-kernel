@@ -3,7 +3,7 @@ import type { SyncSabRequestBody } from '../../realm/sync-sab-wire.ts';
 import { memorySource } from '../procfs.ts';
 import { inProc, ProcTree } from '../wasi/wasi-procfs.ts';
 import { type DevStep, devAsync, devSync } from './js-dev.ts';
-import { index } from './js-io.ts';
+import { index, readingInto } from './js-io.ts';
 import { JsCallError } from './js-kernel.ts';
 
 export { inProc };
@@ -50,6 +50,12 @@ function snapshotFile(path: string, bytes: Uint8Array) {
   const live = () => {
     if (closed) throw new JsCallError('EBADF', path);
   };
+  const read = (position: number, length: number) => {
+    live();
+    index(position, 'read');
+    index(length, 'read');
+    return bytes.slice(position, position + length);
+  };
   return {
     fd: -1,
     path,
@@ -57,12 +63,8 @@ function snapshotFile(path: string, bytes: Uint8Array) {
       live();
       return bytes.length;
     },
-    read: (position: number, length: number) => {
-      live();
-      index(position, 'read');
-      index(length, 'read');
-      return bytes.slice(position, position + length);
-    },
+    read,
+    readInto: readingInto(read),
     write: (): number => {
       throw new JsCallError('EBADF', path);
     },

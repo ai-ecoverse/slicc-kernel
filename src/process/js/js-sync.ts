@@ -60,7 +60,7 @@ export interface JsSyncFile {
   readonly path: string;
   size(): number;
   read(position: number, length: number): Uint8Array;
-  readInto?(position: number, into: Uint8Array, offset?: number, length?: number): number;
+  readInto(position: number, into: Uint8Array, offset?: number, length?: number): number;
   write(position: number, data: Uint8Array): number;
   truncate(size: number): void;
   sync(): void;

@@ -11,6 +11,8 @@ import {
   joined,
   MAX_IO,
   openRequest,
+  readingInto,
+  readingIntoAsync,
 } from './js-io.ts';
 import { JsCallError } from './js-kernel.ts';
 import type { JsSyncFile } from './js-sync.ts';
@@ -367,6 +369,13 @@ export function streamFile(
   access: StreamAccess
 ): { file: JsFile; invalidate: () => void } {
   const { live, end } = liveness(path);
+  const readAsync = async (position: number, length: number): Promise<Uint8Array> => {
+    index(position, 'read');
+    index(length, 'read');
+    live();
+    allowed(access.read, 'read');
+    return length === 0 ? new Uint8Array(0) : io.read(fd, Math.min(length, MAX_IO));
+  };
   const file: JsFile = {
     fd,
     path,
@@ -374,13 +383,8 @@ export function streamFile(
       live();
       return 0;
     },
-    async read(position, length) {
-      index(position, 'read');
-      index(length, 'read');
-      live();
-      allowed(access.read, 'read');
-      return length === 0 ? new Uint8Array(0) : io.read(fd, Math.min(length, MAX_IO));
-    },
+    read: (position, length) => readAsync(position, length),
+    readInto: readingIntoAsync((position, length) => readAsync(position, length)),
     async write(position, data) {
       index(position, 'write');
       live();
@@ -410,6 +414,13 @@ export function streamSyncFile(
   access: StreamAccess
 ): { file: JsSyncFile; invalidate: () => void } {
   const { live, end } = liveness(path);
+  const readSync = (position: number, length: number): Uint8Array => {
+    index(position, 'read');
+    index(length, 'read');
+    live();
+    allowed(access.read, 'read');
+    return length === 0 ? new Uint8Array(0) : io.read(fd, Math.min(length, MAX_IO));
+  };
   const file: JsSyncFile = {
     fd,
     path,
@@ -417,13 +428,8 @@ export function streamSyncFile(
       live();
       return 0;
     },
-    read(position, length) {
-      index(position, 'read');
-      index(length, 'read');
-      live();
-      allowed(access.read, 'read');
-      return length === 0 ? new Uint8Array(0) : io.read(fd, Math.min(length, MAX_IO));
-    },
+    read: (position, length) => readSync(position, length),
+    readInto: readingInto((position, length) => readSync(position, length)),
     write(position, data) {
       index(position, 'write');
       live();

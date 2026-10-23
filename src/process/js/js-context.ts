@@ -45,6 +45,7 @@ import {
   MAX_PREAD,
   openRequest,
   readDevice,
+  readingIntoAsync,
   statFsOf,
   typeOf,
   writeDevice,
@@ -84,7 +85,7 @@ export interface JsFile {
   readonly path: string;
   size(): Promise<number>;
   read(position: number, length: number): Promise<Uint8Array>;
-  readInto?(position: number, into: Uint8Array, offset?: number, length?: number): Promise<number>;
+  readInto(position: number, into: Uint8Array, offset?: number, length?: number): Promise<number>;
   write(position: number, data: Uint8Array): Promise<number>;
   truncate(size: number): Promise<void>;
   sync(): Promise<void>;
@@ -504,6 +505,10 @@ async function fifoOpen(
       seekless(position, 'read');
       return io.read(fd, length);
     },
+    readInto: readingIntoAsync(async (position, length) => {
+      seekless(position, 'read');
+      return io.read(fd, length);
+    }),
     async write(position, data) {
       seekless(position, 'write');
       await io.write(fd, data);
