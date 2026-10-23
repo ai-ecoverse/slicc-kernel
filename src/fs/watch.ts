@@ -414,6 +414,19 @@ export class FsWatchers {
         'change'
       ),
     };
+    const { append } = fs;
+    if (append) {
+      overrides.append = async (path: string, bytes: Uint8Array) => {
+        let end = 0;
+        await content(
+          async (_path: string) => {
+            end = await append.call(fs, path, bytes);
+          },
+          () => ['change']
+        )(path);
+        return end;
+      };
+    }
     const ranged = rangedOps(fs);
     if (ranged) {
       overrides.pwrite = content(ranged.pwrite, () => ['change']);

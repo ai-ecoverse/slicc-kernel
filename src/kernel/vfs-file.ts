@@ -27,6 +27,7 @@ export interface VfsFileFs extends Partial<AsyncRangedIo> {
     nlink?: number;
   }>;
   readlink?(path: string): Promise<string>;
+  append?(path: string, bytes: Uint8Array): Promise<number>;
   lstat?(path: string): Promise<unknown>;
   realpath?(path: string, follow: boolean): Promise<string>;
   chown?(path: string, change: OwnerChange): Promise<void>;
@@ -327,6 +328,20 @@ export class VfsNode {
     this.path = path;
     if (this.ranged) this.ranged.path = path;
     this.cap = undefined;
+  }
+
+  async append(bytes: Uint8Array): Promise<number> {
+    const { append } = this.fs;
+    if (!append || this.orphaned || this.revoked || bytes.length === 0) {
+      const at = await this.size();
+      return at + (await this.pwrite(bytes, at));
+    }
+    await this.settled();
+    await this.fits((await this.size()) + bytes.length);
+    await this.flush();
+    const end = await this.followed(() => append.call(this.fs, this.path, bytes));
+    this.reread();
+    return end;
   }
 
   async pwrite(bytes: Uint8Array, at: number): Promise<number> {
@@ -870,11 +885,18 @@ function heldIo(fs: KernelFs, nodes: VfsNodes, changed: (path: string) => void):
       write(
         path,
         async (held) => {
+          if (fs.append) {
+            await held.flush();
+            const end = await fs.append(path, bytes);
+            held.reread();
+            return end;
+          }
           const at = await held.size();
           await held.pwrite(bytes, at);
           return at + bytes.length;
         },
         async () => {
+          if (fs.append) return fs.append(path, bytes);
           const at = (await fs.stat(path)).size;
           if (ranged) await ranged.pwrite(path, at, bytes, true);
           else {
@@ -1050,8 +1072,8 @@ export function vfsFile(fs: VfsFileFs, opts: VfsFileOptions, nodes?: VfsNodes): 
     write: writable
       ? (bytes) =>
           serial(async () => {
-            if (opts.flags & O_APPEND) offset = await node.size();
-            offset += await node.pwrite(bytes, offset);
+            if (opts.flags & O_APPEND) offset = await node.append(bytes);
+            else offset += await node.pwrite(bytes, offset);
             return bytes.length;
           })
       : undefined,

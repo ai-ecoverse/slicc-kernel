@@ -388,6 +388,7 @@ export class OpfsFs implements KernelFs {
   private readonly mounts: { mounted?: (path: string) => boolean } = {};
   private readonly locks: LockManagerLike | undefined;
   private readonly lockPrefix: string;
+  private readonly appendPrefix: string;
   readonly rootName: string | undefined;
   private readonly renamePrefix: string;
 
@@ -402,6 +403,7 @@ export class OpfsFs implements KernelFs {
     this.ranged = options.ranged === true;
     this.locks = options.locks === undefined ? lockManager() : (options.locks ?? undefined);
     this.lockPrefix = `slicc-excl:${channel ?? ''}:`;
+    this.appendPrefix = `slicc-append:${escapeRoot(channel ?? '')}:`;
     this.rootName = channel;
     this.renamePrefix = `${RENAME_LOCK}${escapeRoot(channel ?? '')}:`;
     this.channel = channel === undefined ? undefined : new BroadcastChannel(channel);
@@ -1454,10 +1456,41 @@ export class OpfsFs implements KernelFs {
     if (this.renamesInFlight()) await this.writeWaits(at);
     this.fileWrites.set(at, (this.fileWrites.get(at) ?? 0) + 1);
     try {
-      await this.truncated(path, size);
+      await this.ending(path, () => this.truncated(path, size));
     } finally {
       this.writeEnded(at);
     }
+  }
+
+  async append(path: string, bytes: Uint8Array): Promise<number> {
+    const at = normalizePath(path);
+    if (this.renamesInFlight()) await this.writeWaits(at);
+    this.fileWrites.set(at, (this.fileWrites.get(at) ?? 0) + 1);
+    try {
+      const found = await this.locate(path, true);
+      if (found.handle?.kind !== 'file') throw fsError(found.handle ? 'EISDIR' : 'ENOENT', path);
+      this.refuse(found.path);
+      const [entry] = await this.meta.get([found.path]);
+      if (entry?.fifo || entry?.socket) throw fsError('ENXIO', path);
+      const handle = found.handle as FileSystemFileHandle;
+      return await this.ending(found.path, async () => {
+        const end = (await this.io(handle.getFile())).size;
+        await this.writeAt(handle, found.path, path, end, bytes);
+        return end + bytes.length;
+      });
+    } finally {
+      this.writeEnded(at);
+    }
+  }
+
+  private async ending<T>(path: string, op: () => Promise<T>): Promise<T> {
+    if (!this.locks || !this.remote || !this.shared()) return op();
+    const physical = (await this.locate(path, true)).path;
+    let result!: T;
+    await this.locks.request(`${this.appendPrefix}${physical}`, async () => {
+      result = await op();
+    });
+    return result;
   }
 
   private async truncated(path: string, size: number): Promise<void> {
