@@ -162,7 +162,7 @@ export class HeldPaths extends Map<string, number> implements UnlinkHolder {
   private readonly uses = new Map<KeptFile, number>();
   private lastHandle = 0;
   private owning: string | undefined;
-  private readonly bound = new Map<number, number>();
+  private readonly bound = new Map<number, { ino: number; fid?: string }>();
   private readonly doubted = new Map<number, number>();
   private doubts = 0;
 
@@ -201,10 +201,10 @@ export class HeldPaths extends Map<string, number> implements UnlinkHolder {
     }
   }
 
-  boundIno(handle: number): { ino: number; doubt: number } | undefined {
+  boundIno(handle: number): { ino: number; fid?: string; doubt: number } | undefined {
     const doubt = this.doubted.get(handle);
-    const ino = this.bound.get(handle);
-    return doubt === undefined || ino === undefined ? undefined : { ino, doubt };
+    const bound = this.bound.get(handle);
+    return doubt === undefined || bound === undefined ? undefined : { ...bound, doubt };
   }
 
   trust(handle: number, doubt: number): void {
@@ -260,7 +260,8 @@ export class HeldPaths extends Map<string, number> implements UnlinkHolder {
     open = false,
     real?: string,
     handle?: number,
-    ino?: number
+    ino?: number,
+    fid?: string
   ): number | undefined {
     if (open) {
       const made = this.holdOpen(path, on, real, handle);
@@ -268,7 +269,8 @@ export class HeldPaths extends Map<string, number> implements UnlinkHolder {
         this.bound.delete(handle);
         this.doubted.delete(handle);
       }
-      if (made !== undefined && ino !== undefined) this.bound.set(made, ino);
+      if (made !== undefined && ino !== undefined)
+        this.bound.set(made, fid === undefined ? { ino } : { ino, fid });
       return made;
     }
     this.holdWrite(path, on);

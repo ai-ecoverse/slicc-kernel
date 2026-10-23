@@ -2145,6 +2145,10 @@ export class Launcher {
       replacements: stack.unlinked,
       statfs: (path) => this.mounts.statfs(path),
       renames: (since, held) => this.renameLog.since(since, held),
+      fileId: (path) =>
+        this.locks.shared?.() === true && this.mounts.locate(path) === undefined
+          ? this.rootFs.fileId?.(path)
+          : undefined,
       renameSeq: (from, to) => this.renameLog.seqOf(from, to),
       mounts: () => this.mounts.list(),
       mount: (call, signal) => this.processMount(pid, call, signal),

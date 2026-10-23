@@ -508,12 +508,17 @@ async function holdOp(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest)
       await entry.source?.open(path, real);
       await stillThere(entry, path, req);
       if (req.nofollow && !(await ownEntry(entry, path, real ?? path))) continue;
+      const fid = req.ino === undefined ? undefined : await idOf(entry, real ?? path);
       if (!r || (!r.missed(path) && !r.changedSince(path, gen) && !r.inFlight?.(path)))
-        return json(entry.hold?.(path, on, open, real, undefined, req.ino) ?? null);
+        return json(entry.hold?.(path, on, open, real, undefined, req.ino, fid) ?? null);
     }
   }
   entry.hold?.(path, on, open, undefined, req.handle);
   return done;
+}
+
+async function idOf(entry: SyncFsTokenEntry, path: string): Promise<string | undefined> {
+  return (await entry.fileId?.(path)?.catch(() => undefined)) ?? undefined;
 }
 
 async function ownEntry(entry: SyncFsTokenEntry, path: string, real: string): Promise<boolean> {
@@ -699,7 +704,7 @@ async function bound(entry: SyncFsTokenEntry, path: string, handle: number): Pro
   const bound = entry.boundIno?.(handle);
   if (bound === undefined) return;
   const now = await entry.fs.stat(path).catch(() => undefined);
-  if (now?.ino === bound.ino) {
+  if (bound.fid === undefined ? now?.ino === bound.ino : now?.fid === bound.fid) {
     entry.trust?.(handle, bound.doubt);
     return;
   }

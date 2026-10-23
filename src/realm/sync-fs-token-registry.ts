@@ -14,10 +14,12 @@ export interface SyncFsTokenEntry {
     open: boolean,
     real?: string,
     handle?: number,
-    ino?: number
+    ino?: number,
+    fid?: string
   ) => number | undefined;
   keptFor?: (handle: number) => KeptFile | undefined;
-  boundIno?: (handle: number) => { ino: number; doubt: number } | undefined;
+  boundIno?: (handle: number) => { ino: number; fid?: string; doubt: number } | undefined;
+  fileId?: (path: string) => Promise<string> | undefined;
   trust?: (handle: number, doubt: number) => void;
   gate?: <T>(path: string, op: () => Promise<T>) => Promise<T>;
   unlinked?: (path: string) => KeptFile | undefined;
