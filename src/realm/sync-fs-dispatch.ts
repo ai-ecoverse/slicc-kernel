@@ -707,9 +707,11 @@ async function gatedByHandle(
   req: SyncFsRequest,
   opReq: SyncFsRequest
 ): Promise<SyncFsResult> {
-  const serve = async () => run(opEntry, await keptOr(opEntry, path, req.handle), opReq);
-  if (req.handle !== undefined) await opEntry.replacements?.landed?.(path);
-  return entry.gate ? entry.gate(path, serve) : serve();
+  const heldAt = () => (req.handle === undefined ? undefined : opEntry.heldAt?.(req.handle));
+  if (req.handle !== undefined) await opEntry.replacements?.landed?.(heldAt() ?? path);
+  const at = heldAt() ?? path;
+  const serve = async () => run(opEntry, await keptOr(opEntry, at, req.handle), opReq);
+  return entry.gate ? entry.gate(at, serve) : serve();
 }
 
 async function keptOr(entry: SyncFsTokenEntry, path: string, handle?: number): Promise<string> {
