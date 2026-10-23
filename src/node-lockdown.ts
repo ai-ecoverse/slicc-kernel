@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { isBuiltin, registerHooks } from 'node:module';
 import { resolve, sep } from 'node:path';
 import { getHeapStatistics } from 'node:v8';
+import { runInThisContext } from 'node:vm';
 import { hide, lockdown, vacate } from './process/js/lockdown.ts';
 
 export { vacate };
@@ -133,6 +134,15 @@ export function ownCache(dir: string, result: { directory?: string }): boolean {
     );
   }
   return true;
+}
+
+const runHere = runInThisContext;
+
+export function nodeRunScript(
+  source: string,
+  filename: string
+): { value: unknown; completion: boolean } {
+  return freeze({ value: runHere(source, { filename }), completion: true });
 }
 
 const Storage = AsyncLocalStorage;

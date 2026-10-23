@@ -7,7 +7,7 @@ import {
 import type { SabPostLike } from '../../realm/sync-sab-bridge.ts';
 import { importSource } from '../wasi/wasi-imports.ts';
 import { createAsyncSabTransport, type WaitAsyncLike } from './async-sab.ts';
-import type { JsAsyncContext, JsMemory } from './js-context.ts';
+import type { JsAsyncContext, JsMemory, JsRunScript } from './js-context.ts';
 import {
   createContext,
   identityOf,
@@ -29,6 +29,7 @@ export interface JsRuntimeDeps {
   scope?: object;
   memory?: () => JsMemory;
   asyncContext?: () => JsAsyncContext;
+  runScript?: JsRunScript;
   imported?: () => void;
 }
 
@@ -148,6 +149,7 @@ async function runJs(
     thread: threadContext(port, thread),
     memory: deps.memory,
     asyncContext: deps.asyncContext,
+    runScript: deps.runScript,
     ...(thread?.owned ? { owned: thread.owned } : {}),
     held: init.held,
     failed: () => failedWith,

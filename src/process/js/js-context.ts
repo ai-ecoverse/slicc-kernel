@@ -120,6 +120,13 @@ export interface JsAsyncContext {
   enterWith(store: unknown): void;
 }
 
+export interface JsScriptResult {
+  value: unknown;
+  completion: boolean;
+}
+
+export type JsRunScript = (source: string, filename: string) => JsScriptResult;
+
 export interface JsProgramContext {
   readonly kernel: JsKernelInfo;
   memory(): JsMemory;
@@ -276,6 +283,7 @@ export interface ContextOptions {
   thread: JsThreadContext;
   memory?: (() => JsMemory) | undefined;
   asyncContext?: (() => JsAsyncContext) | undefined;
+  runScript?: JsRunScript | undefined;
   fs?: { owners: boolean; links: boolean };
   owned?: SharedArrayBuffer;
   held?: HeldCwdInit | undefined;
@@ -659,6 +667,17 @@ function measured(measure: (() => JsMemory) | undefined): JsMemory {
   return out;
 }
 
+function scriptRunner(
+  run: JsRunScript | undefined
+): (source: string, options?: { filename?: string }) => JsScriptResult | undefined {
+  return (source, options = {}) => {
+    if (typeof source !== 'string') throw new TypeError('runScript needs a source string');
+    const filename = options.filename ?? '[eval]';
+    if (typeof filename !== 'string') throw new TypeError('runScript needs a filename string');
+    return run?.(source, filename);
+  };
+}
+
 function hostExtras(o: ContextOptions): {
   memory: () => JsMemory;
   asyncContext?: JsAsyncContext;
@@ -762,6 +781,7 @@ export function createContext(o: ContextOptions): CreatedContext {
     cred: () => syncKernel.json({ op: 'proc-cred' }) as JsCred,
     umask: (mask) => syncKernel.json(umaskRequest(mask)) as number,
     setcred: setcredOn(syncKernel),
+    runScript: scriptRunner(o.runScript),
   };
 
   const io = { read, send: writeAll, close: (fd: number) => ctx.close(fd) };

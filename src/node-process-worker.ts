@@ -6,6 +6,7 @@ import {
   nodeLockdown,
   nodeMemory,
   nodeProcess,
+  nodeRunScript,
   ownCache,
   workerShaped,
 } from './node-lockdown.ts';
@@ -43,6 +44,7 @@ const onMessage = processEntry(
         scope: strayScope,
         memory: nodeMemory,
         asyncContext: nodeAsyncContext,
+        runScript: nodeRunScript,
         imported,
       }),
     runJsThread: (init, at) =>
@@ -51,6 +53,7 @@ const onMessage = processEntry(
         scope: strayScope,
         memory: nodeMemory,
         asyncContext: nodeAsyncContext,
+        runScript: nodeRunScript,
         imported,
       }),
   }),
