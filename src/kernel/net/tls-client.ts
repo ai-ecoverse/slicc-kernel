@@ -292,3 +292,58 @@ export async function tlsClient(
     throw err;
   }
 }
+
+export interface TlsServerInfo {
+  protocol: 'TLSv1.2' | 'TLSv1.3';
+  alpnProtocol: string | false;
+  servername: string;
+  authorized: boolean;
+  authorizationError?: string;
+  peerCertificates: Uint8Array[];
+}
+
+async function serverHandshake(conn: UplinkConn, session: TlsSession, inbox: Ciphertext) {
+  for (;;) {
+    let done: boolean;
+    try {
+      done = session.handshake();
+    } catch (err) {
+      await send(conn, session).catch(() => undefined);
+      const text = err instanceof TlsError ? err.message : String(err);
+      throw new KernelError('EPROTO', `ERR_SSL_HANDSHAKE_FAILURE: ${text}${alertOf(session)}`);
+    }
+    await send(conn, session);
+    if (done) return;
+    if (!(await inbox.more())) {
+      throw new KernelError(
+        'ECONNRESET',
+        'the client closed the connection during the TLS handshake'
+      );
+    }
+  }
+}
+
+export async function tlsServer(
+  conn: UplinkConn,
+  session: TlsSession,
+  clientCerts: boolean
+): Promise<{ conn: UplinkConn; info: TlsServerInfo }> {
+  const inbox = new Ciphertext(conn, session);
+  try {
+    await serverHandshake(conn, session, inbox);
+    const chain = session.peerChain();
+    const code = clientCerts ? verifyCode(session.verifyResult) : undefined;
+    const info: TlsServerInfo = {
+      protocol: session.version === 0x0304 ? 'TLSv1.3' : 'TLSv1.2',
+      alpnProtocol: session.alpn ?? false,
+      servername: session.sni,
+      authorized: clientCerts && chain.length > 0 && code === undefined,
+      ...(clientCerts && chain.length > 0 && code ? { authorizationError: code } : {}),
+      peerCertificates: chain,
+    };
+    return { conn: plaintext(conn, session, inbox), info };
+  } catch (err) {
+    session.free();
+    throw err;
+  }
+}

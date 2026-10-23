@@ -31,6 +31,8 @@ const DETAILED: ReadonlySet<string> = new Set([
   'net-ws-ready',
   'sock-tls',
   'sock-tls-upgrade',
+  'sock-tls-serve',
+  'sock-tls-listen',
 ]);
 
 export function umaskRequest(mask: unknown): { op: 'proc-umask'; mask?: number } {

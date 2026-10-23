@@ -45,6 +45,9 @@ type TlsClientExport =
   | 'tls_peer_der';
 
 type TlsSessionExport =
+  | 'tls_leaf_import'
+  | 'tls_server_new'
+  | 'tls_sni'
   | 'tls_client_cert'
   | 'tls_ciphersuite'
   | 'tls_name_mismatch'
@@ -66,6 +69,8 @@ type TlsClientModule = TlsEngineModule & {
 export const TLS_CLIENT_INSECURE_SKIP_VERIFY = 1;
 export const TLS_CLIENT_NO_SNI = 2;
 export const TLS_CLIENT_VERIFY_CHAIN_ONLY = 4;
+export const TLS_SERVER_REQUEST_CERT = 1;
+export const TLS_SERVER_REQUIRE_CERT = 2;
 
 const SCRATCH = 64 * 1024;
 const EOF = -1;
@@ -114,6 +119,36 @@ export class TlsEngine {
     } finally {
       this.m._free(name);
     }
+  }
+  get serverSessions(): boolean {
+    return typeof this.m._tls_server_new === 'function';
+  }
+  importLeaf(chain: Uint8Array, key: Uint8Array, pass: Uint8Array): TlsLeaf {
+    const leafImport = this.m._tls_leaf_import as (...args: number[]) => number;
+    const keyLen = key[0] === 0x2d ? key.length + 1 : key.length;
+    const ptr = this.withBytes(chain, (c) =>
+      this.withSecret(key, (k) =>
+        this.withSecret(pass, (p) =>
+          leafImport(c, chain.length, k, keyLen, pass.length > 0 ? p : 0, pass.length)
+        )
+      )
+    );
+    if (!ptr) throw this.error(this.m._tls_last_error(), 'server certificate');
+    return new TlsLeaf(this, this.m, ptr);
+  }
+  serverSession(
+    leaf: TlsLeaf,
+    alpn: readonly string[],
+    clientCa: TlsStore | undefined,
+    flags: number
+  ): TlsSession {
+    const open = this.m._tls_server_new as (...args: number[]) => number;
+    const wire = alpnWire(alpn);
+    const ptr = this.withBytes(wire, (p) =>
+      open(leaf.ptr, wire.length > 0 ? p : 0, wire.length, clientCa?.ptr ?? 0, flags)
+    );
+    if (!ptr) throw this.error(this.m._tls_last_error(), 'tls server');
+    return new TlsSession(this, this.m, ptr);
   }
   withBytes<T>(bytes: Uint8Array, fn: (ptr: number) => T): T {
     const ptr = this.put(bytes);
@@ -326,6 +361,12 @@ export class TlsSession {
   }
   get version(): number {
     return this.c._tls_version(this.ptr);
+  }
+  get sni(): string {
+    const out = this.engine.intoScratch((p, max) =>
+      (this.m._tls_sni as (...a: number[]) => number)(this.ptr, p, max)
+    );
+    return out instanceof Uint8Array ? new TextDecoder().decode(out) : '';
   }
   get alpn(): string | undefined {
     const out = this.engine.intoScratch((p, max) => this.c._tls_alpn(this.ptr, p, max));
