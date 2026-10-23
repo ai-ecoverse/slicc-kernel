@@ -26,7 +26,7 @@ const SHARED = `const enc = new TextEncoder();
 const dec = new TextDecoder();
 const b64 = (v) => btoa(String.fromCharCode(...v));
 const shown = (tls) => tls && JSON.parse(JSON.stringify(tls, (k, v) => (v instanceof Uint8Array ? b64(v) : v)));
-const failure = (err) => ({ code: err.code, message: String(err.message), detail: err.detail ?? '' });
+const failure = (err) => ({ code: err.code, message: String(err.message), detail: err.detail ?? '', alert: err.alert });
 async function drain(readable) {
   let text = '';
   for await (const chunk of readable) text += dec.decode(chunk);
@@ -462,5 +462,31 @@ test(
     assert.equal(loose.server[0].tls.authorized, false);
     assert.ok(loose.server[0].tls.authorizationError);
     assert.equal(loose.server[0].tls.peerCertificates.length, 1);
+  }
+);
+
+test(
+  "a kernel server refusing a loopback client's certificate sends an alert the client reads: 116 for none and the verifier's alert for an untrusted one, not a MAC failure (#1499, tls-engine 4.2.0-9)",
+  TIMEOUT,
+  async (t) => {
+    const run = await kernelWith(t);
+    const own = selfSigned('localhost');
+    const ca = makeCa();
+    const stranger = makeCa('another client CA').rsaClient('client.test');
+    const { clients } = await run({
+      tls: { cert: own.cert, key: own.key, ca: ca.pem, requestCert: true },
+      clients: [
+        { name: 'none', tls: { ca: own.cert } },
+        { name: 'untrusted', tls: { ca: own.cert, cert: stranger.cert, key: stranger.key } },
+      ],
+    });
+    assert.equal(clients.none.error?.code, 'ERR_SSL_FATAL_ALERT', JSON.stringify(clients.none));
+    assert.equal(clients.none.error.alert, 116);
+    assert.equal(
+      clients.untrusted.error?.code,
+      'ERR_SSL_FATAL_ALERT',
+      JSON.stringify(clients.untrusted)
+    );
+    assert.equal(clients.untrusted.error.alert, 48);
   }
 );
