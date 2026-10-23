@@ -1,5 +1,6 @@
 import { fresh } from '../bytes.ts';
 import { portCdpHook } from '../cdp/port.ts';
+import { embedderAsker, embedderReplyOf } from '../embedder-relay.ts';
 import { portFacadeHook } from '../facade/port.ts';
 import { access, R_OK, X_OK } from '../fs/access.ts';
 import {
@@ -45,6 +46,8 @@ export interface ClientHost {
   signal?: (name: string) => number;
   user?: string | number;
   tag?: string;
+  session?: number;
+  attachRequests?: boolean;
 }
 
 export interface ServedClient {
@@ -237,12 +240,14 @@ async function runTagged(
   l: Launcher,
   self: Account,
   options: { user?: string | number | undefined; tag?: unknown },
-  tag: string | undefined
+  tag: string | undefined,
+  session = -1
 ): Promise<{
   user: Account;
   tag: string | undefined;
   tags: readonly string[] | undefined;
   tagBase: number;
+  session: number;
 }> {
   tagOption(options.tag);
   const tags = withTag(withTag(undefined, tag), options.tag as string | undefined);
@@ -251,6 +256,7 @@ async function runTagged(
     tag,
     tags,
     tagBase: tag === undefined ? 0 : 1,
+    session,
   };
 }
 
@@ -365,11 +371,14 @@ type HostOp = Extract<
 
 function hostRegistries(
   send: (message: object, transfer: Transferable[]) => void,
-  gone: Promise<void>
+  gone: Promise<void>,
+  port: MessagePortLike
 ) {
   const cdps = cdpRegistry(send, gone);
   const facades = facadeRegistry(send, gone);
+  const requests = requestBinding(send, port);
   return {
+    requests,
     answer(l: Launcher, req: HostOp): number | boolean {
       if (req.op === 'serve-cdp') return cdps.serve(l, req);
       if (req.op === 'unserve-cdp') return cdps.drop(req.registration);
@@ -377,6 +386,7 @@ function hostRegistries(
       return facades.drop(req.registration);
     },
     close(): void {
+      requests.close();
       cdps.close();
       facades.close();
     },
@@ -428,6 +438,32 @@ function traitsWatch(
   return launcher.onTraits(() => send({ traits: transport.traits }));
 }
 
+function requestBinding(
+  send: (message: object, transfer: Transferable[]) => void,
+  port: MessagePortLike
+) {
+  const asker = embedderAsker({ postMessage: (m, t) => send(m as object, t as Transferable[]) });
+  let unbind: (() => void) | undefined;
+  port.addEventListener('message', (event) => {
+    const reply = embedderReplyOf(event.data);
+    if (reply) asker.answer(reply);
+  });
+  return {
+    async accept(host: ClientHost, hello: ClientHello) {
+      if (!hello.requests) return undefined;
+      if (!host.attachRequests || host.session === undefined)
+        return 'EPERM: this port may not answer requests';
+      const launcher = await host.launcher();
+      unbind = launcher.embedder.register(
+        host.session,
+        asker.hookFor(host.session, hello.requests)
+      );
+      return undefined;
+    },
+    close: () => unbind?.(),
+  };
+}
+
 export function serveClient(port: MessagePortLike, host: ClientHost): ServedClient {
   let state: 'new' | 'open' | 'closed' = 'new';
   let self: Account | undefined;
@@ -443,7 +479,7 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
   };
   const reply = (id: number, body: object, transfer?: Transferable[]) =>
     send({ id, ...body }, transfer);
-  const hosts = hostRegistries(send, ended.promise);
+  const hosts = hostRegistries(send, ended.promise, port);
 
   function detach(kill = false, bye = 'the slicc-kernel detached this client'): void {
     if (state === 'closed') return;
@@ -462,7 +498,7 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
   }
 
   async function hello(message: ClientHello): Promise<void> {
-    const refused = versionError(message.protocol);
+    const refused = versionError(message.protocol) ?? (await hosts.requests.accept(host, message));
     if (refused) {
       send({ hello: { protocol: PROTOCOL, error: refused } });
       detach();
@@ -488,7 +524,7 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
   async function terminal(req: Extract<ClientRequest, { op: 'open-terminal' }>, l: Launcher) {
     const session = await l.openTerminal(req.argv, {
       ...req.options,
-      ...(await runTagged(l, self as Account, req.options, host.tag)),
+      ...(await runTagged(l, self as Account, req.options, host.tag, host.session)),
       onData: (bytes) => reply(req.id, { fd: 1, bytes: bytes.slice() }),
     });
     if (state === 'closed') {
@@ -512,7 +548,7 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
     let leader: number | undefined;
     const result = await l.run(req.argv, {
       ...req.options,
-      ...(await runTagged(l, self as Account, req.options, host.tag)),
+      ...(await runTagged(l, self as Account, req.options, host.tag, host.session)),
       collect: false,
       onStdout: out(1),
       onStderr: out(2),

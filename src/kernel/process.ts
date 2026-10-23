@@ -32,6 +32,7 @@ import {
 } from './children.ts';
 import type { ClipboardBroker, ClipboardChannel, ClipboardStamp } from './clipboard.ts';
 import { type Cred, type CredChange, changeCred, copyCred, ROOT } from './cred.ts';
+import { EMBEDDER_PATH, type EmbedderBroker, type EmbedderCaller } from './embedder.ts';
 import { EPOLL_OPS, type EpollSyscall, epollSyscall } from './epoll.ts';
 import { EventFd } from './eventfd.ts';
 import {
@@ -219,6 +220,7 @@ export type WasmSyscall =
   | { op: 'fd-open-sealed'; flags: number }
   | { op: 'fd-open-clipboard'; flags: number }
   | { op: 'fd-clipboard-abort'; fd: number }
+  | { op: 'fd-open-embedder'; flags: number }
   | { op: 'tty-get'; fd: number }
   | { op: 'tty-set'; fd: number; termios: Termios; flush?: boolean }
   | { op: 'tty-winsz'; fd: number }
@@ -430,6 +432,7 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'fd-open-sealed',
   'fd-open-clipboard',
   'fd-clipboard-abort',
+  'fd-open-embedder',
   'tty-get',
   'tty-set',
   'tty-winsz',
@@ -557,6 +560,12 @@ export interface WasmProcessOptions {
   clipboard?: ClipboardBroker;
 
   clipboardName?: string;
+
+  embedder?: EmbedderBroker;
+
+  embedderSession?: () => { client: number; uid: number };
+
+  embedderName?: string;
 
   readonlyAt?: (path: string) => boolean;
 
@@ -1212,6 +1221,7 @@ export class WasmProcess {
     if (!read) throw new KernelError(req.peek && file.read ? 'EOPNOTSUPP' : 'EBADF');
     if (file.tty) this.checkForeground(file.tty);
     if (file.clipboard) return this.readClipboard(file.clipboard, req, cancelled);
+    if (file.embedder) return this.readEmbedder(file, req, cancelled);
 
     if (file instanceof EventFd && req.max < EventFd.SIZE) throw new KernelError('EINVAL');
     if (req.max <= 0) return new Uint8Array(0);
@@ -1237,6 +1247,96 @@ export class WasmProcess {
       await this.clipboardComplaint(err);
       throw err;
     }
+  }
+
+  private async readEmbedder(
+    file: KernelFile,
+    req: Extract<WasmSyscall, { op: 'fd-read' }>,
+    cancelled: AbortSignal
+  ): Promise<Uint8Array> {
+    const channel = file.embedder as NonNullable<KernelFile['embedder']>;
+    if (req.max <= 0) return new Uint8Array(0);
+    channel.caller = await this.embedderCaller();
+    try {
+      return await channel.read(Math.min(req.max, MAX_READ), this.blockingSignal(cancelled));
+    } catch (err) {
+      await this.deviceComplaint(EMBEDDER_PATH, err);
+      throw err;
+    }
+  }
+
+  private async writeEmbedder(
+    file: KernelFile,
+    body: Uint8Array,
+    nonblock: boolean,
+    cancelled: AbortSignal
+  ): Promise<number> {
+    const channel = file.embedder as NonNullable<KernelFile['embedder']>;
+    channel.caller = await this.embedderCaller();
+    const write = file.write as NonNullable<KernelFile['write']>;
+    if (!pollFile(file).writable && nonblock) throw new KernelError('EAGAIN');
+    try {
+      return await write.call(file, body, this.blockingSignal(cancelled));
+    } catch (err) {
+      await this.deviceComplaint(EMBEDDER_PATH, err);
+      throw err;
+    }
+  }
+
+  private async deviceComplaint(path: string, err: unknown): Promise<void> {
+    const name = this.options.clipboardName;
+    if (name === undefined || !(err instanceof KernelError) || err.detail === undefined) return;
+    if (err.code === 'EINTR') return;
+    await this.complainLine(`${name}: ${path}: ${clipboardLine(err.detail)}`);
+  }
+
+  private async complainLine(line: string): Promise<void> {
+    const stderr = this.fds.has(2) ? this.fds.get(2).file : undefined;
+    if (!stderr?.write || stderr.clipboard || stderr.embedder || stderr.sealed) return;
+    const timeout = new Promise<0>((r) => setTimeout(() => r(0), 1000));
+    await Promise.race([
+      stderr.write(new TextEncoder().encode(`${line}\n`), AbortSignal.timeout(1000)).catch(() => 0),
+      timeout,
+    ]);
+  }
+
+  private async embedderCaller(): Promise<EmbedderCaller> {
+    const shown = await this.options.identity?.();
+    const session = this.options.embedderSession?.() ?? { client: 0, uid: 0 };
+    const name = this.options.clipboardName ?? this.options.embedderName ?? 'program';
+    return {
+      pid: this.pid,
+      shownPid: shown?.pid ?? this.pid,
+      euid: this.cred.euid,
+      egid: this.cred.egid,
+      groups: [...this.cred.groups],
+      sessionUid: session.uid,
+      client: session.client,
+      tags: this.options.embedder?.tagsOf(this.pid),
+      progress: (line) => void this.complainLine(`${name}: ${line}`),
+      closing: () => AbortSignal.any([this.interrupt.signal, this.gone.signal]),
+    };
+  }
+
+  private async closeFd(fd: number): Promise<void> {
+    this.options.locks?.closed(this.pid, fd);
+    await this.dropRecordLocks(fd);
+    const closing = this.fds.get(fd).file;
+    const channel = closing.clipboard;
+    if (channel) channel.stamp = await this.clipboardStamp();
+    if (closing.embedder) closing.embedder.caller = await this.embedderCaller();
+    await Promise.resolve(this.fds.close(fd)).catch(async (err: unknown) => {
+      if (channel) await this.clipboardComplaint(err);
+      if (closing.embedder) await this.deviceComplaint(EMBEDDER_PATH, err);
+      throw err;
+    });
+  }
+
+  private async openEmbedder(flags: number): Promise<number> {
+    const broker = this.options.embedder;
+    if (!broker) throw new KernelError('ENOENT');
+    const file = broker.channel(openAccess(flags), await this.embedderCaller());
+    return this.fds.install(this.options.outputFilter?.(file) ?? file, 3);
   }
 
   async complain(line: string): Promise<boolean> {
@@ -1274,6 +1374,7 @@ export class WasmProcess {
     const file = this.fds.get(fd).file;
     if (file.sealed) return file.sealed.send(body, await this.sealedCaller(), this.gone.signal);
     if (!file.write) throw new KernelError('EBADF');
+    if (file.embedder) return this.writeEmbedder(file, body, nonblock, cancelled);
     if (!pollFile(file).writable) {
       if (nonblock) throw new KernelError('EAGAIN');
       return file.write(body, this.blockingSignal(cancelled));
@@ -1616,17 +1717,9 @@ export class WasmProcess {
           kind: 'json',
           json: await this.write(req.fd, req.body, req.nonblock, cancelled),
         };
-      case 'fd-close': {
-        this.options.locks?.closed(this.pid, req.fd);
-        await this.dropRecordLocks(req.fd);
-        const channel = this.fds.get(req.fd).file.clipboard;
-        if (channel) channel.stamp = await this.clipboardStamp();
-        await Promise.resolve(this.fds.close(req.fd)).catch(async (err: unknown) => {
-          if (channel) await this.clipboardComplaint(err);
-          throw err;
-        });
+      case 'fd-close':
+        await this.closeFd(req.fd);
         return { ok: true, kind: 'void' };
-      }
       case 'fd-pipe': {
         const pipe = openPipe();
         const read = this.fds.install(pipe.read, 3);
@@ -1686,6 +1779,8 @@ export class WasmProcess {
         return { ok: true, kind: 'json', json: this.openSealed(req.flags) };
       case 'fd-open-clipboard':
         return { ok: true, kind: 'json', json: await this.openClipboard(req.flags) };
+      case 'fd-open-embedder':
+        return { ok: true, kind: 'json', json: await this.openEmbedder(req.flags) };
       case 'fd-clipboard-abort': {
         const file = this.fds.get(req.fd);
         file.file.clipboard?.abort();

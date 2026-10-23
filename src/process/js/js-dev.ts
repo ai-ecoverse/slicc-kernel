@@ -33,6 +33,7 @@ const CHAR_KINDS: ReadonlySet<string | undefined> = new Set([
   'device',
   'tty',
   'clipboard',
+  'embedder',
   'sealed',
 ]);
 
@@ -41,6 +42,7 @@ type DevNode =
   | { kind: 'device' }
   | { kind: 'tty' }
   | { kind: 'clipboard' }
+  | { kind: 'embedder' }
   | { kind: 'sealed' }
   | { kind: 'terminal'; name: string; pts?: number }
   | { kind: 'link'; target: string; fd?: number }
@@ -82,6 +84,7 @@ function* lookup(abs: string): DevStep<DevNode> {
   if (DEVICES.includes(name)) return { kind: 'device' };
   if (name === 'tty') return { kind: 'tty' };
   if (name === 'clipboard') return { kind: 'clipboard' };
+  if (name === 'embedder') return { kind: 'embedder' };
   if (name === 'sealed') return { kind: 'sealed' };
   const std = STDIO.indexOf(name);
   if (std >= 0) return { kind: 'link', target: `${SELF_FD}/${std}`, fd: std };
@@ -143,7 +146,8 @@ function* fdTarget(fd: number, path: string): DevStep<string> {
   if (info.kind === 'file') return ((yield { op: 'fd-vfs-stat', fd }) as { path: string }).path;
   if (info.terminal) return info.terminal;
   if (info.meta && 'device' in info.meta) return `/dev/${(info.meta as DeviceMeta).device}`;
-  if (info.kind === 'clipboard' || info.kind === 'sealed') return `/dev/${info.kind}`;
+  if (info.kind === 'clipboard' || info.kind === 'sealed' || info.kind === 'embedder')
+    return `/dev/${info.kind}`;
   return `${info.kind === 'socket' ? 'socket' : 'pipe'}:[${fd}]`;
 }
 
@@ -163,6 +167,7 @@ export function* devStat(abs: string, follow: boolean): DevStep<SyncFsBridgeStat
     case 'device':
     case 'tty':
     case 'clipboard':
+    case 'embedder':
     case 'sealed':
       return nodeStat(CHAR | 0o666);
     case 'terminal':
@@ -212,7 +217,18 @@ export function* devReaddir(abs: string): DevStep<string[]> {
   if (node.kind !== 'dir') throw new JsCallError('ENOTDIR', abs);
   const names = (yield { op: 'fd-tty-names' }) as string[];
   const ttys = names.filter((n) => /^\/dev\/tty\d+$/.test(n)).map((n) => n.slice(5));
-  return [...DEVICES, 'clipboard', 'sealed', 'tty', 'fd', 'pts', 'shm', ...STDIO, ...ttys].sort();
+  return [
+    ...DEVICES,
+    'clipboard',
+    'embedder',
+    'sealed',
+    'tty',
+    'fd',
+    'pts',
+    'shm',
+    ...STDIO,
+    ...ttys,
+  ].sort();
 }
 
 export interface DevOpened {
@@ -265,6 +281,11 @@ function* opened(abs: string, o: JsOpenOptions): DevStep<Omit<DevOpened, 'read' 
     case 'clipboard':
       return {
         fd: (yield { op: 'fd-open-clipboard', flags: accessFlags(o) }) as number,
+        file: false,
+      };
+    case 'embedder':
+      return {
+        fd: (yield { op: 'fd-open-embedder', flags: accessFlags(o) }) as number,
         file: false,
       };
     case 'sealed':

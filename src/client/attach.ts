@@ -1,9 +1,11 @@
 import { type CdpOpen, serveCdpPort } from '../cdp/port.ts';
 import type { CdpHook } from '../cdp/types.ts';
+import { embedderAnswerer } from '../embedder-relay.ts';
 import { type FacadeOpen, serveFacadePort } from '../facade/port.ts';
 import type { FacadeHook } from '../facade/types.ts';
 import type { FsStat, UsersMode } from '../fs/types.ts';
 import type { WatchChange } from '../fs/watch.ts';
+import { type EmbedderHook, type EmbedderKindPolicy, kindsOf } from '../kernel/embedder.ts';
 import { RemoteTransport, type TransportReply } from '../kernel/net/remote-transport.ts';
 import type {
   RealmTransport,
@@ -52,6 +54,7 @@ export class KernelCallError extends Error {
 export interface AttachOptions {
   timeoutMs?: number;
   locks?: LockManagerLike | null;
+  requests?: EmbedderHook;
 }
 
 export interface SpawnOptions {
@@ -272,6 +275,8 @@ class Channel {
     return this.request(call).done;
   }
 
+  requests: { handle(data: unknown): boolean } | undefined;
+
   private receive(data: {
     hello?: KernelHello;
     net?: unknown;
@@ -284,6 +289,7 @@ class Channel {
     traits?: RealmTransportTraits;
     id?: number;
   }): void {
+    if (this.requests?.handle(data)) return;
     if (data.traits && data.id === undefined) {
       if (this.remote) this.remote.traits = data.traits;
       for (const listener of [...this.traitsListeners]) listener(data.traits);
@@ -581,9 +587,12 @@ function since(channel: Channel, minor: number, what: string, run: () => Promise
 async function greet(
   channel: Channel,
   lock: string | undefined,
-  timeoutMs: number
+  timeoutMs: number,
+  requests?: Record<string, EmbedderKindPolicy>
 ): Promise<KernelHello> {
-  channel.post({ hello: { protocol: PROTOCOL, ...(lock ? { lock } : {}) } });
+  channel.post({
+    hello: { protocol: PROTOCOL, ...(lock ? { lock } : {}), ...(requests ? { requests } : {}) },
+  });
   const timer = setTimeout(
     () =>
       channel.end(
@@ -613,7 +622,14 @@ export async function attachKernel(
   const locks = options.locks === null ? undefined : (options.locks ?? locksOf());
   const own = await holdLock(locks);
   const channel = new Channel(port, own.release);
-  const hello = await greet(channel, own.name, options.timeoutMs ?? 10_000);
+  const requests = options.requests;
+  if (requests) channel.requests = embedderAnswerer(port, () => requests);
+  const hello = await greet(
+    channel,
+    own.name,
+    options.timeoutMs ?? 10_000,
+    requests ? kindsOf(requests) : undefined
+  );
   channel.protocol = hello.protocol;
   if (hello.lock && locks) void locks.request(hello.lock, () => channel.end(new KernelGoneError()));
   const transport = new RemoteTransport(

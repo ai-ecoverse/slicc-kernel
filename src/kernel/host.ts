@@ -34,6 +34,7 @@ import type { ChildForker, ChildSpawner } from './children.ts';
 import type { ClipboardBroker } from './clipboard.ts';
 import { type CpuTimes, ProcessClocks } from './cpu-clock.ts';
 import { type Cred, copyCred } from './cred.ts';
+import type { EmbedderBroker } from './embedder.ts';
 import { type FdTable, kernelFdKind, type OpenFile } from './fd-table.ts';
 import type { FifoTable } from './fifo.ts';
 import { type CwdAnswer, type HeldCwdReply, heldHooks, heldInit } from './held-cwd.ts';
@@ -106,6 +107,7 @@ export interface SpawnWasmOptions {
   sealed?: SealedBroker;
   outputFilter?: (file: OpenFile) => OpenFile;
   clipboard?: ClipboardBroker;
+  embedder?: { broker: EmbedderBroker; session: () => { client: number; uid: number } };
   readonlyAt?: (path: string) => boolean;
   dac?: Dac;
   identity?: () => Promise<{ pid: number; ppid: number }>;
@@ -472,6 +474,16 @@ function clipboardName(opts: SpawnWasmOptions): { clipboardName?: string } {
   return opts.program.abi === 'js' ? {} : { clipboardName: opts.argv0 };
 }
 
+function embedderOptions(opts: SpawnWasmOptions): Partial<WasmProcessOptions> {
+  if (!opts.embedder) return {};
+  return {
+    embedder: opts.embedder.broker,
+    embedderSession: opts.embedder.session,
+    embedderName: opts.argv0,
+    ...clipboardName(opts),
+  };
+}
+
 function processOptions(
   opts: SpawnWasmOptions,
   header: Int32Array,
@@ -487,6 +499,7 @@ function processOptions(
     ...(opts.sealed ? { sealed: opts.sealed } : {}),
     ...(opts.outputFilter ? { outputFilter: opts.outputFilter } : {}),
     ...(opts.clipboard ? { clipboard: opts.clipboard, ...clipboardName(opts) } : {}),
+    ...embedderOptions(opts),
     ...(opts.readonlyAt ? { readonlyAt: opts.readonlyAt } : {}),
     ...(opts.source ? { source: opts.source } : {}),
     noLinks: opts.noLinks,

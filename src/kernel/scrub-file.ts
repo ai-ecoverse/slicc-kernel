@@ -132,6 +132,7 @@ export function scrubbed(inner: OpenFile, scrubber: Scrubber, idleMs = SCRUB_IDL
     ...(file.tty ? { tty: file.tty } : {}),
     identity: file.identity ?? file,
     ...(file.clipboard ? { clipboard: file.clipboard } : {}),
+    ...(file.embedder ? { embedder: file.embedder } : {}),
     ...(file.write
       ? {
           write: async (bytes: Uint8Array, signal?: AbortSignal) => {
@@ -195,7 +196,8 @@ export function scrubStdio(fds: FdTable, scrubber: Scrubber): void {
   const stdio = stdioFiles(fds);
   for (const fd of fds.numbers()) {
     const original = fds.get(fd);
-    if (!stdio.has(original) && !original.file.tty && !original.file.clipboard) continue;
+    const named = original.file.tty || original.file.clipboard || original.file.embedder;
+    if (!stdio.has(original) && !named) continue;
     const known = wrapped.get(original);
     const flags = fds.statusFlags(fd);
     const wrapper = known ? known.retain() : scrubbed(original.retain(), scrubber);

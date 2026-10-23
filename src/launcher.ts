@@ -64,6 +64,12 @@ import {
   SpawnError,
 } from './kernel/children.ts';
 import { ClipboardBroker, type ClipboardHook } from './kernel/clipboard.ts';
+import { EmbedderBroker, type EmbedderHook } from './kernel/embedder.ts';
+
+type EmbedderSession = { client: number; uid: number };
+
+const NO_SESSION: EmbedderSession = { client: -1, uid: -1 };
+
 import type { CpuTimes } from './kernel/cpu-clock.ts';
 import { type Cred, copyCred, maySee, maySignal, ROOT } from './kernel/cred.ts';
 import { argvDigest, type Booked, TICKET_ENV } from './kernel/exec-ticket.ts';
@@ -205,6 +211,7 @@ export interface LauncherOptions {
   onDenial?: DenialHook;
   sealed?: SealedHook;
   clipboard?: ClipboardHook;
+  embedder?: EmbedderHook;
   approve?: ApproveHook;
   sudoTimeoutMs?: number;
   protect?: Protection;
@@ -272,6 +279,7 @@ export interface RunOptions {
   tags?: readonly string[];
   tagBase?: number;
   login?: boolean;
+  session?: number;
 }
 
 export interface TerminalOptions {
@@ -283,6 +291,7 @@ export interface TerminalOptions {
   tag?: string;
   tags?: readonly string[];
   tagBase?: number;
+  session?: number;
   onData: (bytes: Uint8Array) => void;
 }
 
@@ -391,6 +400,7 @@ interface StartRequest {
   cred: Cred;
   tags?: readonly string[] | undefined;
   tagBase?: number | undefined;
+  session?: EmbedderSession | undefined;
   links?: number | undefined;
   decided?: Promise<boolean>;
   pid?: number;
@@ -686,6 +696,7 @@ export class Launcher {
   >();
   private readonly creds = new Map<number, () => Cred>();
   private readonly tags = new Map<number, readonly string[]>();
+  private readonly sessions = new Map<number, EmbedderSession>();
   private readonly tagBases = new Map<number, number>();
   private readonly links = new Map<number, number>();
   private readonly freshModules = new FreshModules();
@@ -747,6 +758,7 @@ export class Launcher {
   private readonly sealed: SealedBroker;
   private readonly scrubs = new Map<number, Scrubber[]>();
   private readonly clipboard: ClipboardBroker;
+  readonly embedder: EmbedderBroker;
   private readonly rootFs: KernelFs;
   private fileWatches: FileWatches | undefined;
   private nextPid = 1000;
@@ -766,11 +778,11 @@ export class Launcher {
     this.clipboard = new ClipboardBroker(options.clipboard, this.usersMode, undefined, (pid) =>
       this.tagsOf(pid)
     );
+    this.embedder = this.embedderBroker(options.embedder);
     this.sealed = new SealedBroker(options.sealed, this.usersMode, undefined, (pid) =>
       this.tagsOf(pid)
     );
-    this.sealed.tickets.normalise = (path) => physicalPathAsync(this.base, path);
-    this.sealed.userOf = async (uid) => (await this.users.lookup(uid))?.name;
+    this.wireSealed();
     if (this.owners) options.fs.trackOwners?.();
     this.watchers.tap((paths) => {
       this.changes.publish(...paths);
@@ -2007,6 +2019,8 @@ export class Launcher {
 
   private marks(pid: number, req: StartRequest): void {
     if (req.tags?.length) this.tags.set(pid, req.tags);
+    const session = req.session ?? this.sessions.get(req.ppid ?? -1);
+    if (session) this.sessions.set(pid, session);
     if (req.tags?.length) this.tagBases.set(pid, req.tagBase ?? req.tags.length);
     if (req.links !== undefined) this.links.set(pid, req.links);
   }
@@ -2096,6 +2110,7 @@ export class Launcher {
       sealed: this.sealed,
       ...(scrubs ? { outputFilter: (file: OpenFile) => scrubbedAll(file, scrubs) } : {}),
       clipboard: this.clipboard,
+      embedder: { broker: this.embedder, session: () => this.sessionOf(pid) },
       ...(this.dac ? { dac: this.dac } : {}),
       program: req.program,
       changes: this.changes.sab,
@@ -2228,6 +2243,7 @@ export class Launcher {
     this.childTimes.delete(pid);
     this.creds.delete(pid);
     this.tags.delete(pid);
+    this.sessions.delete(pid);
     this.tagBases.delete(pid);
     this.links.delete(pid);
     this.granted.delete(pid);
@@ -2598,6 +2614,28 @@ export class Launcher {
 
   credOf(pid: number): Cred {
     return this.creds.get(pid)?.() ?? copyCred(ROOT);
+  }
+
+  private wireSealed(): void {
+    this.sealed.tickets.normalise = (path) => physicalPathAsync(this.base, path);
+    this.sealed.userOf = async (uid) => (await this.users.lookup(uid))?.name;
+  }
+
+  private embedderBroker(hook: EmbedderHook | undefined): EmbedderBroker {
+    const broker = new EmbedderBroker(
+      this.usersMode,
+      {
+        groupId: async (name) => (await this.users.groups()).find((g) => g.name === name)?.gid,
+        userId: async (name) => (await this.users.lookup(name))?.uid,
+      },
+      (pid) => this.tagsOf(pid)
+    );
+    broker.register(0, hook);
+    return broker;
+  }
+
+  sessionOf(pid: number): EmbedderSession {
+    return this.sessions.get(pid) ?? NO_SESSION;
   }
 
   tagOf(pid: number): string | undefined {
@@ -3135,10 +3173,12 @@ export class Launcher {
 
   private identity(
     account: Account,
-    given: { tags: readonly string[] | undefined; tagBase: number }
-  ): Pick<StartRequest, 'cred' | 'umask' | 'tags' | 'tagBase'> {
+    given: { tags: readonly string[] | undefined; tagBase: number },
+    session = 0
+  ): Pick<StartRequest, 'cred' | 'umask' | 'tags' | 'tagBase' | 'session'> {
     return {
       ...given,
+      session: { client: session, uid: account.uid },
       cred: credOf(account),
       ...(account.umask !== undefined ? { umask: account.umask } : {}),
     };
@@ -3347,7 +3387,7 @@ export class Launcher {
       cwd,
       fds,
       report,
-      ...this.identity(account, tagged),
+      ...this.identity(account, tagged, options.session),
     });
     leader = handle.pid;
     void handle.exited.then(() => tty.hangup());
@@ -3405,7 +3445,7 @@ export class Launcher {
       fds,
       report,
       ...group,
-      ...this.identity(account, tagged),
+      ...this.identity(account, tagged, options.session),
     });
     options.onStarted?.(handle.pid);
     const status = await handle.exited;

@@ -43,6 +43,7 @@ TypeScript declarations ship in `dist/types/`, and each entry (`.`, `./node`, `.
 | `onDenial` | none | `({ pid, uid, op, path, errno, tag? }) => void`: called for every permission check that fails, under `'report'` and `'enforce'` (see [Permissions](#permissions)). `createNodeKernel` takes it too |
 | `sealed` | none | `(req, { signal }) => Promise<object>`: answers requests written to [`/dev/sealed`](#devsealed). `createNodeKernel` takes it too |
 | `clipboard` | none | `{ read(stamp) => Promise<string>, write(text, stamp) => Promise<void> }`: the clipboard behind [`/dev/clipboard`](#devclipboard). `createNodeKernel` takes it too |
+| `requests` | none | `{ kinds, handle(request) }`: the page's answers to [`/dev/embedder`](#devembedder) for the processes it starts. `createNodeKernel` takes it too |
 | `approve` | none | `(req, { signal }) => 'once' \| 'always' \| 'deny'` (or a promise of one): decides a `sudo` request that needs approval (see [Sudo](#sudo)); without it, such a request is denied. `createNodeKernel` takes it too |
 | `cdp` | none | `({ runtime }) => Promise<CdpConnection>`: a browser-level DevTools connection for programs that drive a browser (see [Browser automation](#browser-automation-cdp)) |
 | `facades` | none | `{ link: { port, hook? } }`: kernel-only loopback ports whose connections a hook on the page serves, with the connecting program's identity (see [Page facades](#page-facades)) |
@@ -86,9 +87,11 @@ Starts `argv` as the session leader on a new terminal and resolves once it is ru
 
 Stops the kernel worker and every process. Pending and later calls reject.
 
-### `kernel.connect({ user, tag }?) → Promise<MessagePort>`
+### `kernel.connect({ user, tag, requests }?) → Promise<MessagePort>`
 
 Makes a port for another client of the same kernel. Hand it to a dedicated worker, or through a SharedWorker to another tab: it can be transferred any number of times. All clients share one process table, so a terminal on the page can `ps` and `kill` what a worker started.
+
+**`requests`** binds the port's [`/dev/embedder`](#devembedder) requests when the port is made: a hook (`{ kinds, handle }`, as `createKernel`'s) answers for every process the port's client starts, in the embedder's own realm, so a worker client (an agent) never answers or registers requests itself. `'attach'` lets the client that attaches to the port bring its own hook (`attachKernel(port, { requests })`, protocol 1.13); without it, an attach with `requests` fails with `EPERM`. A port with neither answers nothing: its processes' requests are `ENOTSUP`.
 
 **`user`** (a name or uid) binds the client to that user; without it the client is root. The binding is a capability: the client's `spawn`, `run` and `openTerminal` run as that user, its `ps` lists only that user's processes, and its `kill` follows POSIX permission. A bound client can't run anything as another user (`code: 'EPERM'`). A root client may pass `user` to `spawn`, `run` or `openTerminal` to run one command as any user. An unknown user rejects with `code: 'ENOENT'`. **`tag`** is the tag (see `kernel.run`) of every process the client starts; its own `spawn`, `run` and `openTerminal` cannot name another. They may add one with their own `tag` option (protocol 1.12; an older kernel answers `ENOSYS`): the process then has both tags, the connection's first, and so does everything it starts. A per-spawn tag only adds; no client, program or child can remove or replace a tag ([#1380](https://github.com/ai-ecoverse/slicc-kernel/issues/1380)).
 
@@ -166,7 +169,7 @@ Page-only: neither is on an attached client (`attachKernel`, `connect()`), so no
 
 ### `attachKernel(port, options?) → Promise<KernelClient>`
 
-Attaches to a kernel over a port from `kernel.connect()`, in any realm: a worker, another tab, or Node. `options.timeoutMs` (10 s by default) bounds the handshake: a port with no kernel behind it rejects with `KernelGoneError`.
+Attaches to a kernel over a port from `kernel.connect()`, in any realm: a worker, another tab, or Node. `options.timeoutMs` (10 s by default) bounds the handshake: a port with no kernel behind it rejects with `KernelGoneError`. `options.requests` (`{ kinds, handle }`) answers the [`/dev/embedder`](#devembedder) requests of the client's processes, when the port was made with `connect({ requests: 'attach' })`.
 
 | Client | |
 |---|---|
@@ -1125,6 +1128,27 @@ A character device (`0666`), there in every `users` mode, through which programs
 - **The stamp:** `{ pid, uid, gid, users, tag? }`: the pid as the program sees it, the effective ids, the kernel's `users` mode, and the process's `tag` (see `kernel.run`; a process inherits it from its parent, and a client's processes get the client's `connect({ tag })`), in every `users` mode. A read is stamped with the process that reads first; a commit with the process that closes last (or ends, at teardown).
 - **Cost:** other files' reads and closes check one property more, and their writes nothing; an Emscripten close checks one flag.
 - **On the page,** `createKernel` relays the calls from the kernel worker and back, keeping the error's `name` and `message`.
+
+### `/dev/embedder`
+
+A character device (`0666`, every `users` mode) through which a program asks its embedder's page to do what only a page can: open a URL, capture the screen, play or record audio ([#1527](https://github.com/ai-ecoverse/slicc-kernel/issues/1527)). One open file description is one request, and the reply streams back; plain `sh` with coreutils is enough:
+
+```sh
+exec 3<>/dev/embedder
+{ printf '%s\n' '{"kind":"audio.transcribe","language":"en"}'; cat speech.wav; } >&3
+cat <&3 > text.txt
+printf '{"kind":"open.url","url":"%s"}\n' "$url" | cat > /dev/embedder
+```
+
+- **The request:** the first line is a JSON object with a `kind` (`a.b-c`: lower-case words with dots, at most 64 bytes) and options (every other key), at most 64 KiB. Everything written after it is the body, streamed to the page as it is written: a write waits while 1 MiB of it is unread by the page. A bad header fails that `write()` with `EINVAL`, and the description stays failed. The request goes to the page when its header line ends.
+- **The reply:** reads return the page's reply in order, pulled as the program reads, and its end is end-of-file. Opened `O_RDWR`, the first `read()` ends the body. Opened `O_WRONLY` (nobody reads), the last close ends the body and waits for the page to finish, so `close()` returns its error (an Emscripten program's standard output follows `/dev/clipboard`'s exit rule, so `printf … | cat > /dev/embedder` fails with `cat: write error: …`). There is no timeout: a reply may wait for a prompt or a model download; run `timeout` for one.
+- **Cancel:** a signal during a blocked read, write or `O_WRONLY` close fails it with `EINTR`, and the page's `signal` aborts with reason `interrupted`. Closing the description before the end of the reply aborts it with reason `closed`, and that is no error: it is how `hear` stops recording. A process that ends during a request aborts it too.
+- **Errors:** the hook's error gives the errno: `NotAllowedError` or `AbortError` (a dismissed prompt, a refused permission) `EACCES`; `NotSupportedError` `ENOTSUP`; `NotFoundError` `ENOENT`; anything else `EIO`. An Emscripten or WASI program first gets `<argv0>: /dev/embedder: <first line of the message>` on standard error, as for `/dev/clipboard`; a JS program has it in the error. `request.progress(line)` from the page writes `<argv0>: <line>` to standard error the same way, at most 4 lines a second.
+- **Who answers:** the hook of the client the process's session was started through, inherited by its children, forks and `exec`s: `createKernel({ requests })` (and `createNodeKernel`) for the page's own `run` and `openTerminal`, the hook a port was made with (`connect({ requests })`), or the hook its attached client brought (`connect({ requests: 'attach' })`, then `attachKernel(port, { requests })`). Nothing falls back to another client's hook, so a request from another tab's terminal never opens in this one. With no hook, or a kind the hook doesn't list, the request is `ENOTSUP` before the page sees it. A program has no way to register, replace or see a hook.
+- **The allow-list and policy:** `kinds` maps each kind the hook answers to its policy: `{}`, `{ group: 'video' }`, `{ users: ['alice', 1001] }`. With `users: 'report'` or `'enforce'` the kernel lets a request through only from root, the session's user (the user its port was connected as, or the user `run` or `openTerminal` ran as), a member of the kind's `group`, or a listed user: a process that `sudo -u`'d to someone else gets `EACCES`, and the page never sees it. The handler can still prompt or refuse by the stamp.
+- **The hook:** `handle({ kind, options, body, stamp, signal, progress })` gets the body as a `ReadableStream<Uint8Array>` and resolves with the reply: a `ReadableStream<Uint8Array>`, bytes, a string, or nothing (an empty reply). `stamp` is `{ pid, uid, gid, groups, users, kind, tag?, tags? }`: the process that sent the header line, with its effective ids and groups.
+- **Limits:** at most 16 open requests per process (`EMFILE`) and 256 MiB of request windows per kernel, 128 requests at 2 MiB each (`EAGAIN` at `open()` beyond); a closed request frees its share.
+- `/dev/clipboard` stays as it is, text only. Image clipboards are kinds on this channel (`clipboard.read`, `clipboard.write`), answered by the embedder.
 
 ### Protected paths
 

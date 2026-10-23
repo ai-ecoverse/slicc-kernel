@@ -58,14 +58,22 @@ function stdioAlias(path: string): number | undefined {
 
 export const SEALED_PATH = '/dev/sealed';
 export const CLIPBOARD_PATH = '/dev/clipboard';
+export const EMBEDDER_PATH = '/dev/embedder';
 
 export function deviceOf(path: string): Device | undefined {
   return deviceAt(path);
 }
 
+const NAMED_PATHS: ReadonlySet<string> = new Set([
+  SEALED_PATH,
+  CLIPBOARD_PATH,
+  EMBEDDER_PATH,
+  '/dev/tty',
+]);
+
 function namedDevice(path: string): boolean {
   if (deviceOf(path) || stdioAlias(path) !== undefined) return true;
-  return path === SEALED_PATH || path === CLIPBOARD_PATH || path === '/dev/tty';
+  return NAMED_PATHS.has(path);
 }
 
 function within(path: string, root: string): boolean {
@@ -795,7 +803,7 @@ export class WasiFds {
     fdflags: number,
     rights: bigint
   ): number | undefined {
-    const { openSealed, openClipboard, openTty } = this.kernel.sys;
+    const { openSealed, openClipboard, openEmbedder, openTty } = this.kernel.sys;
     const nonblock = (fdflags & FDFLAGS.NONBLOCK) !== 0;
     let fd: number | undefined;
     let kind: KernelFdKind;
@@ -805,6 +813,9 @@ export class WasiFds {
     } else if (path === CLIPBOARD_PATH && openClipboard) {
       fd = this.openCharDevice(openClipboard, oflags, rights);
       kind = 'clipboard';
+    } else if (path === EMBEDDER_PATH && openEmbedder) {
+      fd = this.openCharDevice(openEmbedder, oflags, rights);
+      kind = 'embedder';
     } else if (path === '/dev/tty' || /^\/dev\/tty\d+$/.test(path)) {
       const exclusive = (oflags & OFLAGS.CREAT) !== 0 && (oflags & OFLAGS.EXCL) !== 0;
       try {

@@ -85,12 +85,14 @@ const STRERROR: Readonly<Record<string, string>> = {
   EINTR: 'Interrupted system call',
 };
 const CLIPBOARD_PATH = '/dev/clipboard';
+const EMBEDDER_PATH = '/dev/embedder';
+const DEVICE_INO: Readonly<Record<number, number>> = { 250: 1, 251: 2, 252: 3 };
 
 function sealedStat(minor = 250): object {
   const now = new Date();
   return {
     dev: 0x16,
-    ino: minor === 251 ? 2 : 1,
+    ino: DEVICE_INO[minor] as number,
     mode: 0o20666,
     nlink: 1,
     uid: 0,
@@ -203,6 +205,7 @@ export interface ProcessSys {
   openSealed?(flags: number): number;
   openClipboard?(flags: number): number;
   clipboardAbort?(fd: number): void;
+  openEmbedder?(flags: number): number;
   procList?(): ProcessListing;
   mountList?(): MountLine[];
 }
@@ -397,8 +400,8 @@ export class KernelStreams {
     stream.stream_ops = { ...stream.stream_ops, getattr: () => this.Fs.stat?.(name) ?? {} };
   }
 
-  nameDevice(stream: ProcessStream, kind: 'sealed' | 'clipboard'): void {
-    this.nameStream(stream, kind === 'sealed' ? SEALED_PATH : CLIPBOARD_PATH);
+  nameDevice(stream: ProcessStream, kind: 'sealed' | 'clipboard' | 'embedder'): void {
+    this.nameStream(stream, `/dev/${kind}`);
   }
 
   private listSealed(): void {
@@ -408,6 +411,7 @@ export class KernelStreams {
     const nodes: Array<[string, number, ((flags: number) => number) | undefined]> = [
       [SEALED_PATH, 250, this.sys.openSealed],
       [CLIPBOARD_PATH, 251, this.sys.openClipboard],
+      [EMBEDDER_PATH, 252, this.sys.openEmbedder],
     ];
     for (const [path, minor, opener] of nodes) {
       if (!opener) continue;
@@ -442,6 +446,7 @@ export class KernelStreams {
     this.attach(stream, kfd, terminal);
     this.nameStream(stream, path);
     if (path === CLIPBOARD_PATH) this.reportClose(kfd);
+    if (path === EMBEDDER_PATH) this.reportClose(kfd);
   }
 
   private readonly reporting = new Set<number>();
@@ -790,10 +795,11 @@ export class KernelStreams {
     flags: number,
     mode?: number
   ): ProcessStream | undefined {
-    const { openClipboard } = this.sys;
-    if (path !== CLIPBOARD_PATH || !openClipboard) return undefined;
+    const clipboard = path === CLIPBOARD_PATH;
+    const opener = clipboard ? this.sys.openClipboard : this.sys.openEmbedder;
+    if ((!clipboard && path !== EMBEDDER_PATH) || !opener) return undefined;
     if (flags & O_DIRECTORY) throw new this.Fs.ErrnoError(wasiErrno('ENOTDIR'));
-    const kfd = this.call(() => openClipboard.call(this.sys, flags & 3));
+    const kfd = this.call(() => opener.call(this.sys, flags & 3));
     try {
       const stream = this.vessel(open, kfd, { path, flags, mode }, false);
       this.reportClose(kfd);
@@ -839,6 +845,7 @@ export class KernelStreams {
       fs[name] = (path: string, ...rest: unknown[]) => {
         if (path === SEALED_PATH && this.sys.openSealed) return sealedStat();
         if (path === CLIPBOARD_PATH && this.sys.openClipboard) return sealedStat(251);
+        if (path === EMBEDDER_PATH && this.sys.openEmbedder) return sealedStat(252);
         const owned = this.ownedTty(path);
         if (owned && isPtyPath(path)) return this.owned(path, ptyStat(path));
         if (!isPtyPath(path))
