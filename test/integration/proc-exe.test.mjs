@@ -239,17 +239,22 @@ test('/proc/self/exe of a program whose directory becomes unsearchable is not de
   assert.deepEqual(r, { status: 0, stdout: `${bin}/python.wasm\nPermission denied\n`, stderr: '' });
 });
 
-for (const when of ['after', 'start']) {
+for (const when of ['after', 'start', 'removed']) {
   const phrase = {
-    after: 'right after the kernel has read it',
-    start: 'as soon as the kernel starts reading it',
+    after:
+      'replaced right after the kernel has read it runs the bytes its /proc/self/exe identity names, never the old bytes under the new identity (#1329)',
+    start:
+      'replaced as soon as the kernel starts reading it runs the bytes its /proc/self/exe identity names, never the old bytes under the new identity (#1329)',
+    removed:
+      'removed right after the kernel has read it still starts, from the bytes it read (#1468)',
   }[when];
-  test(`a program replaced ${phrase} runs the bytes its /proc/self/exe identity names, never the old bytes under the new identity (#1329)`, {
+  test(`a program ${phrase}`, {
     timeout: 120_000,
   }, async (t) => {
     const { memoryRoot } = await import('../../dist/node.js');
-    const first = await readFile(new URL('../idtest/bin/idtest.wasm', fixture));
     const second = await readFile(new URL('bin/exetest.wasm', fixture));
+    const first =
+      when === 'removed' ? second : await readFile(new URL('../idtest/bin/idtest.wasm', fixture));
     let swap;
     let reads = 0;
 
@@ -278,7 +283,7 @@ for (const when of ['after', 'start']) {
                 const now = ++reads === 2;
                 if (now && when === 'start') await swap?.(target);
                 const bytes = await read();
-                if (now && when === 'after') await swap?.(target);
+                if (now && when !== 'start') await swap?.(target);
                 return bytes;
               };
               return file;
@@ -296,7 +301,8 @@ for (const when of ['after', 'start']) {
     swap = async () => {
       swap = undefined;
       await new Promise((resolve) => setTimeout(resolve, 5));
-      await kernel.writeFile('/tmp/p/prog', second);
+      if (when === 'removed') await kernel.run(['rm', '/tmp/p/prog'], { cwd: '/' });
+      else await kernel.writeFile('/tmp/p/prog', second);
     };
     const r = await kernel.run(['/tmp/p/prog'], { cwd: '/' });
     assert.deepEqual(r, { status: 0, stdout: 'exe=/tmp/p/prog argv0=/tmp/p/prog\n', stderr: '' });
