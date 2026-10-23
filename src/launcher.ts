@@ -3217,7 +3217,10 @@ export class Launcher {
     peers.watch((crowded) => {
       this.changes.flush();
       this.changes.foreign(crowded);
-      if (crowded) void this.held?.bindIds((path) => this.rootFileId(path));
+      if (crowded) {
+        void this.held?.bindIds((path) => this.rootFileId(path));
+        for (const nodes of this.openFiles) nodes.shared();
+      }
     });
     return {
       ...peers,

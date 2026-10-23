@@ -28,6 +28,7 @@ export interface VfsFileFs extends Partial<AsyncRangedIo> {
     nlink?: number;
   }>;
   readlink?(path: string): Promise<string>;
+  append?(path: string, bytes: Uint8Array): Promise<number>;
   lstat?(path: string): Promise<unknown>;
   realpath?(path: string, follow: boolean): Promise<string>;
   chown?(path: string, change: OwnerChange): Promise<void>;
@@ -40,6 +41,7 @@ const O_ACCMODE = 0o3;
 const O_WRONLY = 0o1;
 const O_RDWR = 0o2;
 const O_APPEND = 0o2000;
+const POSITIONAL_MS = 100;
 
 const SEEK_SET = 0;
 const SEEK_CUR = 1;
@@ -330,6 +332,37 @@ export class VfsNode {
     this.cap = undefined;
   }
 
+  async append(bytes: Uint8Array): Promise<number> {
+    const { append } = this.fs;
+    const recently = performance.now() - this.positionalAt < POSITIONAL_MS;
+    if (!append || this.orphaned || this.revoked || bytes.length === 0 || recently) {
+      const at = await this.size();
+      return at + (await this.pwrite(bytes, at));
+    }
+    await this.settled();
+    await this.fits((await this.size()) + bytes.length);
+    await this.flush();
+    const end = await this.followed(() => append.call(this.fs, this.path, bytes)).catch(
+      (err: unknown) => {
+        if (!positional(err)) throw err;
+        return undefined;
+      }
+    );
+    if (end === undefined) {
+      this.positionalAt = performance.now();
+      const at = await this.size();
+      return at + (await this.pwrite(bytes, at));
+    }
+    this.reread();
+    return end;
+  }
+
+  private positionalAt = Number.NEGATIVE_INFINITY;
+
+  shared(): void {
+    this.positionalAt = Number.NEGATIVE_INFINITY;
+  }
+
   async pwrite(bytes: Uint8Array, at: number): Promise<number> {
     if (bytes.length === 0) return 0;
     await this.settled();
@@ -425,6 +458,10 @@ export class VfsNode {
     this.failed = false;
     this.writeBackCost = performance.now() - started;
   }
+}
+
+function positional(err: unknown): boolean {
+  return (err as { code?: unknown } | null)?.code === 'ENOTSUP';
 }
 
 export class VfsNodes implements UnlinkHolder {
@@ -557,6 +594,10 @@ export class VfsNodes implements UnlinkHolder {
     this.byPath.delete(path);
     if (node.path === path) node.renamedTo(others[0] as string);
     return true;
+  }
+
+  shared(): void {
+    for (const node of new Set(this.byPath.values())) node.shared();
   }
 
   holdsAny(): boolean {
@@ -870,12 +911,13 @@ function heldIo(fs: KernelFs, nodes: VfsNodes, changed: (path: string) => void):
     append: (path: string, bytes: Uint8Array) =>
       write(
         path,
-        async (held) => {
-          const at = await held.size();
-          await held.pwrite(bytes, at);
-          return at + bytes.length;
-        },
+        (held) => held.append(bytes),
         async () => {
+          const end = await fs.append?.(path, bytes).catch((err: unknown) => {
+            if (!positional(err)) throw err;
+            return undefined;
+          });
+          if (end !== undefined) return end;
           const at = (await fs.stat(path)).size;
           if (ranged) await ranged.pwrite(path, at, bytes, true);
           else {
@@ -1057,8 +1099,8 @@ export function vfsFile(fs: VfsFileFs, opts: VfsFileOptions, nodes?: VfsNodes): 
     write: writable
       ? (bytes) =>
           serial(async () => {
-            if (opts.flags & O_APPEND) offset = await node.size();
-            offset += await node.pwrite(bytes, offset);
+            if (opts.flags & O_APPEND) offset = await node.append(bytes);
+            else offset += await node.pwrite(bytes, offset);
             return bytes.length;
           })
       : undefined,
