@@ -200,12 +200,12 @@ const FIELDS = ['value', 'get', 'set', 'writable', 'enumerable', 'configurable']
 const BASE_SNAPSHOT = snapshot(BASE);
 
 function baseUnchanged(): boolean {
-  const now = snapshot(BASE);
-  if (now.length !== BASE_SNAPSHOT.length) return false;
-  for (let i = 0; i < now.length; i++) {
-    const at = now[i] as readonly [PropertyKey, PropertyDescriptor | undefined];
+  const keys = ownKeys(BASE);
+  if (keys.length !== BASE_SNAPSHOT.length) return false;
+  for (let i = 0; i < keys.length; i++) {
     const was = BASE_SNAPSHOT[i] as readonly [PropertyKey, PropertyDescriptor | undefined];
-    if (at[0] !== was[0] || !sameDescriptor(at[1], was[1])) return false;
+    if (keys[i] !== was[0]) return false;
+    if (!sameDescriptor(ownDescriptor(BASE, keys[i] as PropertyKey), was[1])) return false;
   }
   return true;
 }

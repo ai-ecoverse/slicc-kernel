@@ -157,7 +157,26 @@ const HOSTILE = `export default async function main(ctx) {
     define(proto, '__proto__', protoKey);
     define(proto, 'toLocaleString', keep);
   }
-  got.push(polluted, swapped, ps(seven).value);
+  const indexed = [];
+  const arrayProto = Array.prototype;
+  for (let i = 0; i < 32; i++) {
+    define(arrayProto, String(i), {
+      set(v) {
+        define(this, String(i), { value: v, writable: true, enumerable: true, configurable: true });
+        if (!describe(proto, 'toJSON'))
+          define(proto, 'toJSON', { value() { calls.push('index.toJSON'); return {}; }, configurable: true, writable: true });
+      },
+      configurable: true,
+    });
+  }
+  try {
+    indexed.push(ps(seven));
+  } catch (err) {
+    indexed.push('threw ' + err.message);
+  }
+  for (let i = 0; i < 32; i++) delete arrayProto[String(i)];
+  delete proto.toJSON;
+  got.push(polluted, swapped, indexed.length === 1 && (indexed[0] === undefined || indexed[0]?.value === 7), ps(seven).value);
   await ctx.write(1, JSON.stringify({ got, read, calls }));
   return 0;
 }
@@ -178,6 +197,7 @@ test('ctx.sync.promiseState runs no program code: global let shadows of globalTh
       7,
       [null, null, null, null, null, null],
       [null, null, null],
+      true,
       7,
     ],
     read: 0,
