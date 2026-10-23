@@ -17,6 +17,8 @@ const PH = 'fnox_proxy_0123456789abcdef01234567';
 const PH2 = 'fnox_proxy_89abcdef0123456789abcdef';
 const SHORT_PH = 'fnox_proxy_aaaaaaaaaaaaaaaaaaaaaaaa';
 const SECRET = 'sk-live-0123456789abcdefXYZ';
+const HIDDEN = '*'.repeat(SECRET.length);
+const hidden = (encoded) => `\\*{${encoded.length}}`;
 
 const PROGRAM = `const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -218,7 +220,7 @@ const get = (headers, { path = '/v1/me', method = 'GET', body = '' } = {}) =>
   `${method} ${path} HTTP/1.1\r\nHost: api.test\r\n${headers.map((h) => `${h}\r\n`).join('')}${body ? `Content-Length: ${body.length}\r\n` : ''}Connection: close\r\n\r\n${body}`;
 
 test(
-  'a placeholder in an Authorization header of the first request on a kernel-verified A2 session reaches the server as the secret, from one vault request, and the program reads back only placeholders (#1090)',
+  'a placeholder in an Authorization header of the first request on a kernel-verified A2 session reaches the server as the secret, from one vault request, and the program reads it back as filler of its own length (#1090, #1509)',
   TIMEOUT,
   async (t) => {
     const a = await server(t, ca.server('api.test'));
@@ -235,9 +237,9 @@ test(
       a.log[0][0].head
     );
     assert.equal(got.got.includes(SECRET), false, got.got);
-    assert.equal(got.got.includes(`Authorization: Bearer ${PH}`), true, got.got);
-    assert.match(got.got, /B64 \[redacted:sealed\]/);
-    assert.match(got.got, /HEX \[redacted:sealed\]/);
+    assert.equal(got.got.includes(`Authorization: Bearer ${HIDDEN}\r\n`), true, got.got);
+    assert.match(got.got, new RegExp(`B64 ${hidden(Buffer.from(SECRET).toString('base64'))}\n`));
+    assert.match(got.got, new RegExp(`HEX ${hidden(Buffer.from(SECRET).toString('hex'))}\n`));
     assert.equal(asked.length, 1);
     const { stamp, caller, session, handshakeAt, ...rest } = asked[0];
     assert.deepEqual(rest, {
@@ -382,12 +384,15 @@ test(
     const [before, , after] = await run(steps);
     assert.equal(before.got.includes(`LEAK ${SECRET}`), true, before.got);
     assert.equal(after.got.includes(SECRET), false, after.got);
-    assert.match(after.got, new RegExp(`LEAK ${PH} \\[redacted:sealed\\]`));
+    assert.match(
+      after.got,
+      new RegExp(`LEAK ${hidden(SECRET)} ${hidden(Buffer.from(SECRET).toString('base64'))}\n`)
+    );
   }
 );
 
 test(
-  'the scrub covers the process tree: a child spawned after its parent had a value substituted reads a stored copy back from its own session as the placeholder (#1090)',
+  'the scrub covers the process tree: a child spawned after its parent had a value substituted reads a stored copy back from its own session scrubbed (#1090, #1509)',
   TIMEOUT,
   async (t) => {
     const a = await server(t, ca.server('api.test'));
@@ -409,7 +414,7 @@ test(
     assert.equal(first.substitutes, true);
     assert.equal(tokenOf(a.log[0][0].head), SECRET);
     assert.equal(child[0].got.includes(SECRET), false, child[0].got);
-    assert.match(child[0].got, new RegExp(`STORED ${PH}`));
+    assert.match(child[0].got, new RegExp(`STORED ${hidden(SECRET)}\n`));
     const [alone] = await run([
       { host: 'api.test', port: 465, tls: { ca: ca.pem }, writes: [get([], { path: '/stored' })] },
     ]);
@@ -447,7 +452,7 @@ test(
     }
     assert.notEqual(got, undefined);
     assert.equal(got.includes(SECRET), false, got);
-    assert.match(got, new RegExp(`LEAK ${PH}`));
+    assert.match(got, new RegExp(`LEAK ${hidden(SECRET)} `));
   }
 );
 
@@ -466,5 +471,46 @@ test(
     const { run } = await kernelWith(t, [['api.test', s.address().port]]);
     const [got] = await run([{ host: 'api.test', port: 465, tls: {}, writes: ['hello\n'] }]);
     assert.deepEqual([got.substitutes, got.got], [true, 'ok']);
+  }
+);
+
+function framed(text) {
+  const out = [];
+  let rest = Buffer.from(text);
+  while (rest.length > 0) {
+    const end = rest.indexOf('\r\n\r\n');
+    if (end < 0) return { out, trailing: rest.toString() };
+    const head = rest.subarray(0, end).toString();
+    const length = Number(/^content-length:\s*(\d+)/im.exec(head)?.[1] ?? 0);
+    out.push({
+      status: head.split('\r\n')[0],
+      body: rest.subarray(end + 4, end + 4 + length).toString(),
+    });
+    rest = rest.subarray(end + 4 + length);
+  }
+  return { out, trailing: '' };
+}
+
+test(
+  'a secret the server reflects in a Content-Length body is scrubbed to its own length, so the next response on the connection still parses (#1509)',
+  TIMEOUT,
+  async (t) => {
+    const a = await server(t, ca.server('api.test'));
+    const { run } = await kernelWith(t, [['api.test', a.port]]);
+    const first = `GET /v1/me HTTP/1.1\r\nHost: api.test\r\nAuthorization: Bearer ${PH}\r\n\r\n`;
+    const [got] = await run([
+      { host: 'api.test', port: 465, tls: {}, writes: [first, get([], { path: '/stored' })] },
+    ]);
+    assert.equal(got.substitutes, true, JSON.stringify(got));
+    assert.equal(got.got.includes(SECRET), false);
+    const { out, trailing } = framed(got.got);
+    assert.deepEqual(
+      out.map((r) => r.status),
+      ['HTTP/1.1 200 OK', 'HTTP/1.1 200 OK'],
+      JSON.stringify(got.got)
+    );
+    assert.equal(trailing, '');
+    assert.match(out[0].body, new RegExp(`Authorization: Bearer \\*{${SECRET.length}}\\r\\n`));
+    assert.equal(out[1].body, `STORED ${HIDDEN}\n`);
   }
 );

@@ -215,7 +215,8 @@ test(
     assert.deepEqual([got[0].verified, got[0].substitutes], [true, true]);
     assert.equal(got[0].got.includes(SECRET), false, got[0].got);
     assert.equal(got[0].got.includes(Buffer.from(SECRET).toString('base64')), false);
-    assert.match(got[0].got, new RegExp(`got "${PH}" b64 \\[redacted:sealed\\]`));
+    const b64 = Buffer.from(SECRET).toString('base64');
+    assert.match(got[0].got, new RegExp(`got "\\*{${SECRET.length}}" b64 \\*{${b64.length}}`));
     assert.equal(md5.log[0].password, PH);
     assert.equal(scram.log[0].password, PH);
     assert.equal(clear.log[1].password, `x${SHORT_PH}`);

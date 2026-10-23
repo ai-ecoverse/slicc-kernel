@@ -47,7 +47,7 @@ function addTo(tree: Tree, host: string, secrets: readonly ScrubSecret[]): void 
 function scrubOf(tree: Tree | undefined, host: string): SessionScrub | undefined {
   const entry = tree?.get(host);
   if (!entry) return undefined;
-  entry.scrubber ??= scrubberOf(entry.secrets);
+  entry.scrubber ??= scrubberOf(entry.secrets, true);
   return entry.scrubber ? { version: entry.version, scrubber: entry.scrubber } : undefined;
 }
 

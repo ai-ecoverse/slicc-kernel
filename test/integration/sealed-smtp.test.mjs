@@ -269,7 +269,7 @@ test(
       assert.equal(got[i].substitutes, true);
       assert.equal(text.includes(SECRET), false, text);
       assert.equal(text.includes(auth.arg), false, text);
-      assert.match(got[i].got[2], new RegExp(`pass=${PH}`));
+      assert.match(got[i].got[2], new RegExp(`pass=\\*{${SECRET.length}}$`));
     });
     assert.deepEqual(
       asked.map((r) => [r.protocol, r.position, r.placeholders, 'head' in r]),
