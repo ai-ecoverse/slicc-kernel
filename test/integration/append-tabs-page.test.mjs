@@ -193,3 +193,41 @@ test('a tab that joins while another buffers appends alone waits for those to la
   );
   assert.deepEqual(counted, ok(`${n} ${n} 50 ${n + 50}\n`));
 });
+
+test('a tab whose flushing peer dies before answering still appends, once that peer is gone (#1556, #1557)', {
+  timeout: 600_000,
+}, async (t) => {
+  const { page } = await booted(chrome, t, { worker: '/slow-flush-worker.js?ms=600000' });
+  await installPackage(page, 'wasix-python', { skip: /^lib\/libpython[^/]*\.a$/ });
+  await installPackage(page, 'wasm-coreutils');
+  assert.deepEqual(
+    await sh(
+      page,
+      'rm -rf /root/ap && mkdir -p /root/ap && : > /root/ap/go && echo a > /root/ap/log && echo made'
+    ),
+    ok('made\n')
+  );
+  const held = [
+    'import os, time',
+    "fd = os.open('/root/ap/log', os.O_WRONLY | os.O_APPEND)",
+    "os.write(fd, b'x\\n')",
+    'time.sleep(600)',
+  ].join('\n');
+  await page.evaluate((s) => {
+    void window.kernel.run(['python3', '-c', s], { cwd: '/' });
+  }, held);
+  await sleep(2000);
+  const other = await peerTab(page, { wait: false });
+  assert.deepEqual(await sh(other, JSAPP), ok('installed\n'));
+  await other.evaluate(() => {
+    window.appending = window.kernel.run(['jsapp', 'y', '3'], { cwd: '/' });
+  });
+  await sleep(3000);
+  await page.evaluate(() => window.kernel.terminate());
+  const y = await Promise.race([
+    other.evaluate(() => window.appending),
+    sleep(60_000).then(() => 'stuck'),
+  ]);
+  assert.notEqual(y, 'stuck', 'the append never ran after its flushing peer died');
+  assert.equal(y.stdout, '3\n', JSON.stringify(y));
+});

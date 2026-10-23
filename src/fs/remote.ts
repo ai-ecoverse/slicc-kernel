@@ -120,7 +120,10 @@ export class RemoteWatch {
   }
 
   private flushingAt(peer: string): void {
-    if (!this.flushes.has(peer)) this.flushes.set(peer, Promise.withResolvers<void>());
+    if (this.locks && !this.flushes.has(peer)) {
+      this.flushes.set(peer, Promise.withResolvers<void>());
+      void this.mourn(peer);
+    }
     this.met?.();
   }
 
@@ -199,9 +202,10 @@ export class RemoteWatch {
     const { held = [], pending = [] } = await this.locks.query();
     if (![...held, ...pending].some((lock) => lock.name === name)) {
       this.mourned.delete(peer);
-      if (tries > 1 && this.peers.has(peer)) {
+      const live = this.peers.has(peer) || this.flushes.has(peer);
+      if (tries > 1 && live) {
         setTimeout(() => void this.mourn(peer, tries - 1), MOURN_RETRY_MS);
-      }
+      } else this.flushedAt(peer);
       return;
     }
     void this.locks.request(name, async () => {
