@@ -139,6 +139,10 @@ export class HeldSet extends Set<HeldPaths> {
     }
   }
 
+  async bindIds(id: (path: string) => Promise<string> | undefined): Promise<void> {
+    for (const holds of [...this]) await holds.bindIds(id);
+  }
+
   override delete(holds: HeldPaths): boolean {
     const removed = super.delete(holds);
     for (const path of new Set([...holds.keys(), ...holds.opens.keys()])) this.idle(path);
@@ -205,6 +209,16 @@ export class HeldPaths extends Map<string, number> implements UnlinkHolder {
     const doubt = this.doubted.get(handle);
     const bound = this.bound.get(handle);
     return doubt === undefined || bound === undefined ? undefined : { ...bound, doubt };
+  }
+
+  async bindIds(id: (path: string) => Promise<string> | undefined): Promise<void> {
+    for (const [handle, bound] of [...this.bound]) {
+      const key = this.handles.get(handle);
+      if (bound.fid !== undefined || key === undefined) continue;
+      const fid = await id(key)?.catch(() => undefined);
+      if (fid !== undefined && this.bound.get(handle) === bound)
+        this.bound.set(handle, { ...bound, fid });
+    }
   }
 
   trust(handle: number, doubt: number): void {

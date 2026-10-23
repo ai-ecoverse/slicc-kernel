@@ -2145,10 +2145,7 @@ export class Launcher {
       replacements: stack.unlinked,
       statfs: (path) => this.mounts.statfs(path),
       renames: (since, held) => this.renameLog.since(since, held),
-      fileId: (path) =>
-        this.locks.shared?.() === true && this.mounts.locate(path) === undefined
-          ? this.rootFs.fileId?.(path)
-          : undefined,
+      fileId: (path) => (this.locks.shared?.() === true ? this.rootFileId(path) : undefined),
       renameSeq: (from, to) => this.renameLog.seqOf(from, to),
       mounts: () => this.mounts.list(),
       mount: (call, signal) => this.processMount(pid, call, signal),
@@ -3169,12 +3166,17 @@ export class Launcher {
     return this.writers;
   }
 
+  private rootFileId(path: string): Promise<string> | undefined {
+    return this.mounts.locate(path) === undefined ? this.rootFs.fileId?.(path) : undefined;
+  }
+
   private flushingPeers(fs: KernelFs): Peers | undefined {
     const peers = fs.peers?.();
     if (!peers) return undefined;
     peers.watch((crowded) => {
       this.changes.flush();
       this.changes.foreign(crowded);
+      if (crowded) void this.held?.bindIds((path) => this.rootFileId(path));
     });
     return {
       ...peers,
