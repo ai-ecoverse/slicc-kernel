@@ -6,11 +6,11 @@ import { booted, installPackage } from './kernel.mjs';
 const chrome = await launch();
 after(() => chrome.close());
 
-const ROUNDS = Number(process.env.RMDIR_HELD_ROUNDS ?? 450);
+const ROUNDS = Number(process.env.RMDIR_HELD_ROUNDS ?? 1350);
 const HOGS = Number(process.env.RMDIR_HELD_HOGS ?? 4);
 
 test('on the OPFS root, files opened inside a directory that another process keeps removing and replacing read as a full version every time, never empty (#1013)', {
-  timeout: 900_000,
+  timeout: 2_700_000,
 }, async (t) => {
   const { page, bash } = await booted(chrome, t, { users: 'enforce' });
   await installPackage(page, 'wasm-coreutils');

@@ -19,7 +19,7 @@ async function install(kernel, name) {
   }
 }
 
-const ROUNDS = 600;
+const ROUNDS = 1800;
 const READERS = 8;
 
 const REPLACER = `export default async function main(ctx) {
@@ -64,7 +64,7 @@ test('in Node, files opened inside a directory that another process keeps removi
 });
 
 test('in Node, a file whose directory another process removes while bash opens it is not found, rather than opened and read back empty (#1198)', {
-  timeout: 300_000,
+  timeout: 1_500_000,
 }, async (t) => {
   const kernel = await createNodeKernel({ users: 'enforce' });
   t.after(() => kernel.terminate());
@@ -96,7 +96,7 @@ test('in Node, a file whose directory another process removes while bash opens i
   );
   const script = [
     'mkdir -p /root/rd && cd /root/rd',
-    'for i in $(seq 20); do',
+    'for i in $(seq 100); do',
     '  mkd $i && rm -f going && read v < d/b',
     '  rmd & until [ -e going ]; do :; done',
     '  { sleep 0; read v <&3 2> err; rc=$?; echo "$i [$v] rc=$rc fd=$(stat -L -c %s /dev/fd/3)"; [ $rc = 0 ] || echo "$i detail err=[$(cat err)] link=$(readlink /proc/self/fd/3) name=$(stat -c \'%i %s\' d/b) round=$(ls -a)"; } 2> /dev/null 3< d/b',
