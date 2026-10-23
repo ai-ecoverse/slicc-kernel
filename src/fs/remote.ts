@@ -152,7 +152,7 @@ export class RemoteWatch {
   }
 
   private receive(data: WatchMessage): void {
-    const sender = data.hello ?? data.here;
+    const sender = data.hello ?? data.here ?? (data.paths !== undefined ? data.tab : undefined);
     if (sender !== undefined && data.renames) this.ackers.add(sender);
     if (data.hello !== undefined) this.greeted(data.hello);
     if (data.renaming !== undefined && data.tab !== undefined) this.heard(data);
@@ -270,7 +270,7 @@ export class RemoteWatch {
   announce(paths: readonly string[]): Promise<void> {
     this.mine = [...paths];
     const seq = ++this.seq;
-    this.channel.postMessage({ tab: this.tab, paths: this.mine, seq });
+    this.channel.postMessage({ tab: this.tab, paths: this.mine, seq, renames: true });
     return this.acks(seq, this.peers);
   }
 
