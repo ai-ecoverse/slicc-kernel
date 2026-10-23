@@ -98,6 +98,7 @@ export interface JsConnection {
   readonly readable: ReadableStream<Uint8Array>;
   readonly writable: WritableStream<Uint8Array>;
   close(): Promise<void>;
+  reset(): Promise<void>;
 }
 
 export interface JsListener extends AsyncIterable<JsConnection> {
@@ -607,6 +608,18 @@ function capOf(options: JsListenOptions, tls: object | undefined): number {
   return tls ? Math.max(1, Math.min(options.backlog ?? 128, HANDSHAKES_MAX)) : 0;
 }
 
+function resetOf(
+  kernel: JsKernel,
+  fd: number,
+  closed: () => boolean,
+  close: () => Promise<void>
+): () => Promise<void> {
+  return async () => {
+    if (!closed()) await kernel.call({ op: 'sock-reset', fd });
+    await close();
+  };
+}
+
 export function netOps(
   kernel: JsKernel,
   io: NetIo,
@@ -645,7 +658,8 @@ export function netOps(
       close: async () => void (await shut(SHUT_WR)),
       abort: () => close(),
     });
-    return { fd, local, remote, readable, writable, close };
+    const reset = resetOf(kernel, fd, () => closed !== undefined, close);
+    return { fd, local, remote, readable, writable, close, reset };
   };
 
   const resolve = async (host: string, signal: AbortSignal): Promise<string> => {
