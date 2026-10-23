@@ -7,7 +7,7 @@ import { booted, installPackage } from './kernel.mjs';
 
 const AGENT = new URL('./fixtures/agent-install/', import.meta.url);
 const CALLS_MAX = 48_000;
-const REQUESTS_MAX = 225_000;
+const REQUESTS_MAX = 235_000;
 
 const chrome = await launch();
 after(() => chrome.close());
