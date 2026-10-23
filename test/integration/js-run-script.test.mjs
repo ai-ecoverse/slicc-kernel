@@ -115,3 +115,37 @@ test('ctx.sync.runScript is undefined in a page, where process workers are modul
     [0, ['function', true, 'TypeError'], '']
   );
 });
+
+const POLLUTER = `export default async (ctx) => {
+  let spied = 0;
+  Object.prototype.timeout = 1;
+  Object.prototype.importModuleDynamically = () => {
+    spied++;
+    return {};
+  };
+  Object.prototype.cachedData = new Uint8Array([1, 2, 3, 4]);
+  Object.prototype.produceCachedData = true;
+  let out;
+  try {
+    const r = ctx.sync.runScript('{ const t = Date.now(); while (Date.now() - t < 50); } import("node:fs")');
+    out = await r.value.then(() => 'loaded', (err) => 'rejected ' + err.code);
+  } catch (err) {
+    out = 'threw ' + (err.code ?? err.message);
+  }
+  for (const k of ['timeout', 'importModuleDynamically', 'cachedData', 'produceCachedData']) delete Object.prototype[k];
+  await ctx.write(1, JSON.stringify([out, spied]));
+  return 0;
+};`;
+
+test("ctx.sync.runScript's options can't be set through Object.prototype: a timeout, an import callback and cached code a program puts there are not used (#1541)", async (t) => {
+  const kernel = await createNodeKernel({ users: 'off' });
+  t.after(() => kernel.terminate());
+  await kernel.writeFile(
+    '/node_modules/rp/package.json',
+    JSON.stringify({ name: 'rp', slicc: { commands: { rp: { abi: 'js', module: 'main.mjs' } } } })
+  );
+  await kernel.writeFile('/node_modules/rp/main.mjs', POLLUTER);
+  const r = await kernel.run(['rp'], { cwd: '/' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(JSON.parse(r.stdout), ['rejected ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING', 0]);
+});

@@ -142,7 +142,9 @@ export function nodeRunScript(
   source: string,
   filename: string
 ): { value: unknown; completion: boolean } {
-  return freeze({ value: runHere(source, { filename }), completion: true });
+  const options = blank(null) as { filename: string };
+  options.filename = filename;
+  return freeze({ value: runHere(source, options), completion: true });
 }
 
 const Storage = AsyncLocalStorage;
