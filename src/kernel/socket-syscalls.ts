@@ -3,7 +3,7 @@ import { KernelDgram } from './dgram.ts';
 import { type FdTable, KernelError, OpenFile, pollFile } from './fd-table.ts';
 import { encodeReceived } from './net/datagram-wire.ts';
 import { isLoopbackHost } from './net/proxy-service.ts';
-import { listenSecure, serveSecure } from './net/tls-server.ts';
+import { contextSecure, listenSecure, selectSecure, serveSecure } from './net/tls-server.ts';
 import {
   type ClientCertRequest,
   connectSecure,
@@ -124,7 +124,10 @@ export type SocketSyscall =
       rejectUnauthorized?: boolean;
       alpn?: string[];
       handshakeTimeout?: number;
+      select?: boolean;
     }
+  | { op: 'sock-tls-context'; cert?: ClientCertRequest }
+  | { op: 'sock-tls-select'; fd: number; context?: number; alpn?: string; refuse?: number }
   | {
       op: 'sock-recvfrom';
       fd: number;
@@ -150,6 +153,8 @@ export const SOCKET_OPS: readonly SocketSyscall['op'][] = [
   'sock-tls-upgrade',
   'sock-tls-serve',
   'sock-tls-listen',
+  'sock-tls-context',
+  'sock-tls-select',
 ];
 export interface SocketProcess {
   fds: FdTable;
@@ -256,6 +261,12 @@ export async function socketSyscall(
       const { from, ...rest } = req;
       const listener = from === undefined ? {} : { listener: socketAt(fds, from) };
       return ok(await serveSecure(proc, socketAt(fds, req.fd), { ...rest, ...listener }));
+    }
+    case 'sock-tls-context':
+      return ok(await contextSecure(proc, req.cert));
+    case 'sock-tls-select': {
+      const { fd, ...choice } = req;
+      return ok(await selectSecure(fds, socketAt(fds, fd), choice));
     }
     case 'sock-tls-listen':
       await listenSecure(proc, socketAt(fds, req.fd), req);

@@ -47,6 +47,33 @@ export interface JsTlsOptions {
   server?: boolean;
   requestCert?: boolean;
   handshakeTimeout?: number;
+  select?: JsTlsSelect;
+}
+
+export interface JsTlsOffer {
+  servername: string;
+  protocols: string[];
+}
+
+export interface JsTlsChoice {
+  context?: JsTlsContext | number;
+  alpn?: string;
+  refuse?: string | number;
+}
+
+export type JsTlsSelect = (
+  offer: JsTlsOffer
+) => JsTlsChoice | undefined | Promise<JsTlsChoice | undefined>;
+
+export interface JsTlsContext {
+  readonly fd: number;
+  close(): Promise<void>;
+}
+
+export interface JsTlsContextOptions {
+  cert: unknown;
+  key: unknown;
+  passphrase?: string;
 }
 
 export interface JsTlsServerSession {
@@ -102,6 +129,7 @@ export interface JsNet {
   listen(options?: JsListenOptions): Promise<JsListener>;
   connect(options: JsConnectOptions): Promise<JsConnection>;
   secure(conn: JsConnection, tls: JsTlsOptions): Promise<JsConnection>;
+  tlsContext(options: JsTlsContextOptions): Promise<JsTlsContext>;
   resolve(name: string, options?: JsResolveOptions): Promise<string[]>;
 }
 
@@ -160,10 +188,13 @@ function keyText(key: unknown, what: string): string {
 
 function serveRequest(tls: JsTlsOptions) {
   const own = clientCert(tls, 'listen').clientCert;
-  if (!own)
+  if (tls.select !== undefined && typeof tls.select !== 'function')
+    throw new JsCallError('EINVAL', 'listen', 'ERR_INVALID_ARG_TYPE: select must be a function');
+  if (!own && !tls.select)
     throw new JsCallError('EINVAL', 'listen', 'ERR_INVALID_ARG_VALUE: a server needs cert and key');
   return {
-    cert: own,
+    ...(own ? { cert: own } : {}),
+    ...(tls.select ? { select: true } : {}),
     ...(tls.ca !== undefined ? { ca: caList(tls.ca) } : {}),
     ...(tls.requestCert ? { requestCert: true } : {}),
     ...(tls.rejectUnauthorized === false ? { rejectUnauthorized: false } : {}),
@@ -315,17 +346,80 @@ export interface JsSyncNet {
   listen(options?: JsListenOptions): JsListener;
 }
 
+const ALERTS: Record<string, number> = {
+  unrecognized_name: 112,
+  no_application_protocol: 120,
+  handshake_failure: 40,
+  access_denied: 49,
+  internal_error: 80,
+};
+
+function choiceWire(choice: JsTlsChoice | undefined) {
+  if (!choice) return {};
+  const { context, alpn, refuse } = choice;
+  return {
+    ...(context === undefined
+      ? {}
+      : { context: typeof context === 'number' ? context : context.fd }),
+    ...(alpn === undefined ? {} : { alpn: String(alpn) }),
+    ...(refuse === undefined ? {} : { refuse: ALERTS[String(refuse)] ?? Number(refuse) }),
+  };
+}
+
+type Selected = { wire: object; thrown?: unknown };
+
+const HANDSHAKE_TIMEOUT_MS = 120_000;
+
+function expiry(ms: number): { late: Promise<never>; clear(): void } {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(new JsCallError('ERR_TLS_HANDSHAKE_TIMEOUT', 'accept', 'ERR_TLS_HANDSHAKE_TIMEOUT')),
+      ms
+    );
+  });
+  late.catch(() => undefined);
+  return { late, clear: () => clearTimeout(timer) };
+}
+
+async function selected(
+  pick: JsTlsSelect | undefined,
+  offer: JsTlsOffer,
+  ms: number
+): Promise<Selected> {
+  const limit = expiry(ms);
+  try {
+    if (!pick) return { wire: {} };
+    const choice = await Promise.race([pick(Object.freeze({ ...offer })), limit.late]);
+    return { wire: choiceWire(choice) };
+  } catch (thrown) {
+    return { wire: { refuse: ALERTS.handshake_failure }, thrown };
+  } finally {
+    limit.clear();
+  }
+}
+
 async function serveOn(
   kernel: JsKernel,
   conn: JsConnection,
   req: object,
-  signal: AbortSignal = NEVER
+  signal: AbortSignal = NEVER,
+  pick?: JsTlsSelect,
+  ms = HANDSHAKE_TIMEOUT_MS
 ): Promise<JsConnection> {
-  const r = await secureCall(
-    () => kernel.blocking({ op: 'sock-tls-serve', fd: conn.fd, ...req }, signal),
-    'accept'
-  );
-  const wire = (r.ok && r.kind === 'json' ? r.json : {}) as ServedWire;
+  const call = (body: object) =>
+    secureCall(async () => {
+      const r = await kernel.blocking(body as Parameters<JsKernel['blocking']>[0], signal);
+      return (r.ok && r.kind === 'json' ? r.json : {}) as ServedWire & { select?: JsTlsOffer };
+    }, 'accept');
+  let wire = await call({ op: 'sock-tls-serve', fd: conn.fd, ...req });
+  while (wire.select) {
+    const { wire: choice, thrown } = await selected(pick, wire.select, ms);
+    wire = await call({ op: 'sock-tls-select', fd: conn.fd, ...choice }).catch((err) => {
+      throw thrown ?? err;
+    });
+  }
   return Object.assign(Object.create(conn), { tls: servedOf(wire) });
 }
 
@@ -411,10 +505,22 @@ interface ListenerOps {
   kernel: JsKernel;
   io: NetIo;
   connection(fd: number): Promise<JsConnection>;
-  serve(conn: JsConnection, req: object, signal?: AbortSignal): Promise<JsConnection>;
+  serve(
+    conn: JsConnection,
+    req: object,
+    signal?: AbortSignal,
+    pick?: JsTlsSelect,
+    ms?: number
+  ): Promise<JsConnection>;
 }
 
-function listenerOf(ops: ListenerOps, fd: number, at: JsAddress, handshakes: number): JsListener {
+function listenerOf(
+  ops: ListenerOps,
+  fd: number,
+  at: JsAddress,
+  handshakes: number,
+  tls?: JsTlsOptions
+): JsListener {
   const { kernel, io, connection, serve } = ops;
   const stop = new AbortController();
   const acceptPlain = async (signal: AbortSignal): Promise<JsConnection> => {
@@ -428,7 +534,12 @@ function listenerOf(ops: ListenerOps, fd: number, at: JsAddress, handshakes: num
   };
   const next =
     handshakes > 0
-      ? securedAccepts(acceptPlain, (c, s) => serve(c, { from: fd }, s), stop.signal, handshakes)
+      ? securedAccepts(
+          acceptPlain,
+          (c, s) => serve(c, { from: fd }, s, tls?.select, tls?.handshakeTimeout),
+          stop.signal,
+          handshakes
+        )
       : acceptPlain;
   const accept = (options: { signal?: AbortSignal } = {}): Promise<JsConnection> =>
     next(AbortSignal.any([options.signal ?? NEVER, stop.signal]));
@@ -451,6 +562,32 @@ function listenerOf(ops: ListenerOps, fd: number, at: JsAddress, handshakes: num
       }
     },
   };
+}
+
+async function contextOf(
+  kernel: JsKernel,
+  io: NetIo,
+  options: JsTlsContextOptions
+): Promise<JsTlsContext> {
+  const own = clientCert(options ?? {}, 'tlsContext').clientCert;
+  if (!own)
+    throw new JsCallError(
+      'EINVAL',
+      'tlsContext',
+      'ERR_INVALID_ARG_VALUE: a context needs cert and key'
+    );
+  const fd = (await secureCall(
+    () => kernel.json({ op: 'sock-tls-context', cert: own }),
+    'tlsContext'
+  )) as number;
+  let closed: Promise<void> | undefined;
+  return Object.freeze({
+    fd,
+    close: () => {
+      closed ??= io.close(fd);
+      return closed;
+    },
+  });
 }
 
 function capOf(options: JsListenOptions, tls: object | undefined): number {
@@ -514,12 +651,11 @@ export function netOps(
     }
   };
 
-  const serve = (conn: JsConnection, req: object, signal?: AbortSignal) =>
-    serveOn(kernel, conn, req, signal);
+  const serve: ListenerOps['serve'] = (...args) => serveOn(kernel, ...args);
 
   const ops: ListenerOps = { kernel, io, connection, serve };
-  const listener = (fd: number, at: JsAddress, handshakes = 0): JsListener =>
-    listenerOf(ops, fd, at, handshakes);
+  const listener = (fd: number, at: JsAddress, handshakes = 0, tls?: JsTlsOptions): JsListener =>
+    listenerOf(ops, fd, at, handshakes, tls);
 
   const connect = async (options: JsConnectOptions): Promise<JsConnection> => {
     const signal = options.signal ?? NEVER;
@@ -613,7 +749,7 @@ export function netOps(
       lane.call({ op: 'sock-listen', fd, backlog: options.backlog ?? 128 });
       if (tls) lane.call({ op: 'sock-tls-listen', fd, ...tls });
       const at = addressOf(lane.json({ op: 'sock-name', fd, peer: false }));
-      return listener(fd, at, capOf(options, tls));
+      return listener(fd, at, capOf(options, tls), options.tls);
     } catch (err) {
       lane.raw({ op: 'fd-close', fd });
       throw err;
@@ -631,13 +767,14 @@ export function netOps(
         await kernel.call({ op: 'sock-listen', fd, backlog: options.backlog ?? 128 });
         if (tls)
           await secureCall(() => kernel.call({ op: 'sock-tls-listen', fd, ...tls }), 'listen');
-        return listener(fd, await name(fd, false), capOf(options, tls));
+        return listener(fd, await name(fd, false), capOf(options, tls), options.tls);
       });
     },
     secure: async (conn, tls) => {
       if (tls.server !== true) return tlsConnect({ socket: conn }, tls);
-      return serve(conn, serveRequest(tls));
+      return serve(conn, serveRequest(tls), undefined, tls.select, tls.handshakeTimeout);
     },
+    tlsContext: (options) => contextOf(kernel, io, options),
     connect: (options) => {
       (options.signal ?? NEVER).throwIfAborted();
       return options.tls ? tlsConnect(options, options.tls) : connect(options);

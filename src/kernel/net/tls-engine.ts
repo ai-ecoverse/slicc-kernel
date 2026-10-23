@@ -48,6 +48,9 @@ type TlsSessionExport =
   | 'tls_leaf_import'
   | 'tls_server_new'
   | 'tls_sni'
+  | 'tls_server_select'
+  | 'tls_server_refuse'
+  | 'tls_client_alpn'
   | 'tls_client_cert'
   | 'tls_ciphersuite'
   | 'tls_name_mismatch'
@@ -71,6 +74,8 @@ export const TLS_CLIENT_NO_SNI = 2;
 export const TLS_CLIENT_VERIFY_CHAIN_ONLY = 4;
 export const TLS_SERVER_REQUEST_CERT = 1;
 export const TLS_SERVER_REQUIRE_CERT = 2;
+export const TLS_SERVER_SELECT = 4;
+export const TLS_HANDSHAKE_SELECT = 2;
 
 const SCRATCH = 64 * 1024;
 const EOF = -1;
@@ -136,8 +141,11 @@ export class TlsEngine {
     if (!ptr) throw this.error(this.m._tls_last_error(), 'server certificate');
     return new TlsLeaf(this, this.m, ptr);
   }
+  get serverSelect(): boolean {
+    return typeof this.m._tls_server_select === 'function';
+  }
   serverSession(
-    leaf: TlsLeaf,
+    leaf: TlsLeaf | undefined,
     alpn: readonly string[],
     clientCa: TlsStore | undefined,
     flags: number
@@ -145,7 +153,7 @@ export class TlsEngine {
     const open = this.m._tls_server_new as (...args: number[]) => number;
     const wire = alpnWire(alpn);
     const ptr = this.withBytes(wire, (p) =>
-      open(leaf.ptr, wire.length > 0 ? p : 0, wire.length, clientCa?.ptr ?? 0, flags)
+      open(leaf?.ptr ?? 0, wire.length > 0 ? p : 0, wire.length, clientCa?.ptr ?? 0, flags)
     );
     if (!ptr) throw this.error(this.m._tls_last_error(), 'tls server');
     return new TlsSession(this, this.m, ptr);
@@ -352,9 +360,34 @@ export class TlsSession {
     return this.m as TlsClientModule;
   }
   handshake(): boolean {
+    return this.step() === 1;
+  }
+  step(): number {
     const ret = this.c._tls_handshake(this.ptr);
     if (ret < 0) throw this.engine.error(ret, 'tls handshake');
-    return ret === 1;
+    return ret;
+  }
+  clientAlpn(): string[] {
+    const list = this.m._tls_client_alpn as (...a: number[]) => number;
+    const out = this.engine.intoScratch((p, max) => list(this.ptr, p, max));
+    if (!(out instanceof Uint8Array)) return [];
+    const names: string[] = [];
+    for (let at = 0; at < out.length; at += 1 + (out[at] as number)) {
+      names.push(new TextDecoder().decode(out.subarray(at + 1, at + 1 + (out[at] as number))));
+    }
+    return names;
+  }
+  select(leaf: TlsLeaf | undefined, alpn: string | undefined): void {
+    const pick = this.m._tls_server_select as (...a: number[]) => number;
+    const name = new TextEncoder().encode(alpn ?? '');
+    const ret = this.engine.withBytes(name, (p) =>
+      pick(this.ptr, leaf?.ptr ?? 0, name.length > 0 ? p : 0, name.length)
+    );
+    if (ret !== 0) throw this.engine.error(ret, 'tls select');
+  }
+  refuse(alert: number): void {
+    const ret = (this.m._tls_server_refuse as (...a: number[]) => number)(this.ptr, alert);
+    if (ret !== 0) throw this.engine.error(ret, 'tls refuse');
   }
   get verifyResult(): number {
     return this.c._tls_verify_result(this.ptr);

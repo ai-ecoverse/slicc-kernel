@@ -18,6 +18,7 @@ const PACKAGE = JSON.stringify({
       tlsc: { abi: 'js', module: 'bin/tlsc.mjs' },
       tlsone: { abi: 'js', module: 'bin/tlsone.mjs' },
       tlsparity: { abi: 'js', module: 'bin/tlsparity.mjs' },
+      tlsselect: { abi: 'js', module: 'bin/tlsselect.mjs' },
     },
   },
 });
@@ -221,6 +222,116 @@ export default async function main(ctx) {
   out.listenerNext = (await next).tls.servername;
   await good.close();
   await l.close();
+  ctx.write(1, JSON.stringify(out) + '\\n');
+  return 0;
+}
+`;
+
+const SELECT = `${SHARED}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function hello(c) {
+  const r = c.readable.getReader();
+  await r.read().catch(() => undefined);
+  r.releaseLock();
+  const w = c.writable.getWriter();
+  await w.write(enc.encode('hi from ' + c.tls.servername));
+  await w.close();
+}
+async function dial(ctx, port, tls) {
+  try {
+    const c = await ctx.net.connect({ host: 'localhost', port, tls });
+    const w = c.writable.getWriter();
+    await w.write(enc.encode('x'));
+    const text = await drain(c.readable);
+    return { text, alpn: c.tls.alpnProtocol, leaf: b64(c.tls.peerCertificates[0]) };
+  } catch (err) {
+    return { error: failure(err) };
+  }
+}
+async function child(ctx, o) {
+  let c;
+  for (let i = 0; i < 20; i++) c = await ctx.net.tlsContext({ cert: o.c.cert, key: o.c.key });
+  await ctx.fs.writeFile('/tmp/child-ctx', String(c.fd));
+  while (!(await ctx.fs.exists('/tmp/child-done'))) await sleep(10);
+  return 0;
+}
+export default async function main(ctx) {
+  const o = JSON.parse(ctx.argv[1]);
+  if (o.child) return child(ctx, o);
+  const out = {};
+  const a = await ctx.net.tlsContext({ cert: o.a.cert, key: o.a.key });
+  const b = await ctx.net.tlsContext({ cert: o.b.cert, key: o.b.key });
+  const kid = await ctx.spawn({ argv: ['tlsselect', JSON.stringify({ child: true, c: o.c })] });
+  while (!(await ctx.fs.exists('/tmp/child-ctx'))) await sleep(10);
+  const foreign = Number(dec.decode(await ctx.fs.readFile('/tmp/child-ctx')));
+  out.foreignFd = foreign;
+  const seen = [];
+  const errors = [];
+  const l = await ctx.net.listen({
+    tls: {
+      handshakeTimeout: 400,
+      select: async ({ servername, protocols }) => {
+        seen.push({ servername, protocols });
+        if (servername === 'a.test') return { context: a, alpn: protocols.at(-1) };
+        if (servername === 'b.test') return { context: b };
+        if (servername === 'nope.test') return { refuse: 'unrecognized_name' };
+        if (servername === 'throw.test') throw new Error('select failed');
+        if (servername === 'foreign.test') return { context: foreign };
+        if (servername === 'listener.test') return { context: l.fd };
+        await new Promise(() => {});
+      },
+    },
+  });
+  const serving = (async () => {
+    for (;;) {
+      let c;
+      try {
+        c = await l.accept();
+      } catch {
+        return;
+      }
+      void hello(c);
+    }
+  })();
+  out.a = await dial(ctx, l.port, { ca: o.a.cert, servername: 'a.test', alpn: ['h2', 'http/1.1'] });
+  out.b = await dial(ctx, l.port, { ca: o.b.cert, servername: 'b.test' });
+  out.nope = await dial(ctx, l.port, { ca: o.a.cert, servername: 'nope.test' });
+  out.thrown = await dial(ctx, l.port, { ca: o.a.cert, servername: 'throw.test' });
+  out.foreign = await dial(ctx, l.port, { ca: o.c.cert, servername: 'foreign.test' });
+  out.listenerFd = await dial(ctx, l.port, { ca: o.a.cert, servername: 'listener.test' });
+  out.silent = await dial(ctx, l.port, { ca: o.a.cert, servername: 'silent.test' });
+  out.after = await dial(ctx, l.port, { ca: o.b.cert, servername: 'b.test' });
+  out.seen = seen.map((s) => s.servername);
+  out.offered = seen[0].protocols;
+  await l.close();
+  await serving;
+  const plain = await ctx.net.listen({});
+  const acc = plain.accept();
+  const peer = dial(ctx, plain.port, { ca: o.c.cert, servername: 'foreign.test' });
+  const raw = await acc;
+  out.secureForeign = await ctx.net
+    .secure(raw, { server: true, select: () => ({ context: foreign }) })
+    .then(() => 'served', (e) => e.code);
+  out.secureForeignClient = Boolean((await peer).error);
+  await plain.close();
+  out.both = await ctx.net
+    .listen({ tls: { alpn: ['h2'], select: () => ({}) } })
+    .then(() => 'listened', (e) => e.detail);
+  const many = [a, b];
+  let refused;
+  for (let i = 0; i < 70 && !refused; i++) {
+    try {
+      many.push(await ctx.net.tlsContext({ cert: o.a.cert, key: o.a.key }));
+    } catch (err) {
+      refused = err.code;
+    }
+  }
+  out.count = many.length;
+  out.refused = refused;
+  await many.pop().close();
+  out.again = await ctx.net.tlsContext({ cert: o.a.cert, key: o.a.key }).then(() => 'ok', (e) => e.code);
+  await ctx.fs.writeFile('/tmp/child-done', '');
+  await kid.wait();
   ctx.write(1, JSON.stringify(out) + '\\n');
   return 0;
 }
@@ -490,3 +601,45 @@ test(
     assert.equal(clients.untrusted.error.alert, 48);
   }
 );
+
+test('select picks a certificate by SNI and ALPN from the client offer, refuses with an alert, drops a throwing or silent select, and never uses a context the process does not hold: EBADF for another process context or a non-context fd; 64 contexts per process (#1501, #1502)', {
+  timeout: 120_000,
+}, async (t) => {
+  const kernel = await createNodeKernel({ users: 'off' });
+  t.after(() => kernel.terminate());
+  await install(kernel, 'wasm-tls-engine');
+  await kernel.writeFile('/node_modules/tlsd/package.json', PACKAGE);
+  await kernel.writeFile('/node_modules/tlsd/bin/tlsselect.mjs', SELECT);
+  const a = selfSigned('a.test');
+  const b = selfSigned('b.test');
+  const c = selfSigned('foreign.test');
+  const r = await kernel.run(['tlsselect', JSON.stringify({ a, b, c })], { cwd: '/' });
+  assert.equal(r.stderr, '');
+  const out = JSON.parse(r.stdout);
+  const der = (cert) => new X509Certificate(cert.cert).raw.toString('base64');
+  assert.deepEqual(out.a, { text: 'hi from a.test', alpn: 'http/1.1', leaf: der(a) });
+  assert.deepEqual(out.offered, ['h2', 'http/1.1']);
+  assert.equal(out.b.leaf, der(b));
+  assert.equal(out.b.alpn, false);
+  assert.match(out.nope.error.detail, /\(alert 112\)$/, JSON.stringify(out.nope));
+  assert.ok(out.thrown.error, JSON.stringify(out.thrown));
+  assert.ok(out.foreign.error, JSON.stringify(out.foreign));
+  assert.ok(out.listenerFd.error, JSON.stringify(out.listenerFd));
+  assert.ok(out.silent.error, JSON.stringify(out.silent));
+  assert.equal(out.after.leaf, der(b));
+  assert.deepEqual(out.seen, [
+    'a.test',
+    'b.test',
+    'nope.test',
+    'throw.test',
+    'foreign.test',
+    'listener.test',
+    'silent.test',
+    'b.test',
+  ]);
+  assert.equal(out.secureForeign, 'EBADF');
+  assert.match(out.both, /^ERR_TLS_ALPN_CALLBACK_WITH_PROTOCOLS/);
+  assert.equal(out.count, 64);
+  assert.equal(out.refused, 'EMFILE');
+  assert.equal(out.again, 'ok');
+});

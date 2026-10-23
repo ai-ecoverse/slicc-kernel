@@ -129,8 +129,14 @@ export type {
   JsListenOptions,
   JsNet,
   JsResolveOptions,
+  JsTlsChoice,
   JsTlsCipher,
+  JsTlsContext,
+  JsTlsContextOptions,
+  JsTlsOffer,
   JsTlsOptions,
+  JsTlsSelect,
+  JsTlsServerSession,
   JsTlsSession,
 } from './process/js/js-net.ts';
 export type { JsRunOptions, JsRunResult, JsRunStdio } from './process/js/js-run.ts';

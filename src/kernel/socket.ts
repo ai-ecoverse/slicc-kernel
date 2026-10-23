@@ -337,6 +337,7 @@ export class KernelSocket implements KernelFile {
     return this.dial(addr, route, secure);
   }
   serving: { release(): void } | undefined;
+  pending: (() => void) | undefined;
   private served = false;
   get loopbackLinked(): boolean {
     return this.state === 'connected' && !this.switch;
@@ -539,6 +540,8 @@ export class KernelSocket implements KernelFile {
     this.boundAt = undefined;
     this.serving?.release();
     this.serving = undefined;
+    this.pending?.();
+    this.pending = undefined;
     this.changes.wake();
   }
   static pair(
