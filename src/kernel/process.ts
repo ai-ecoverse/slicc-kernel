@@ -479,6 +479,7 @@ export function isWasmSyscall(req: object): req is WasmSyscall {
 }
 
 const MAX_READ = 1024 * 1024;
+const MAX_PREAD = 16 * 1024 * 1024;
 const O_NONBLOCK = 0o4000;
 const WRITE_ACCESS = 0o3;
 const KEYBOARD: ReadonlySet<number> = new Set([SIG.INT, SIG.QUIT, SIG.TSTP]);
@@ -1736,7 +1737,7 @@ export class WasmProcess {
         return {
           ok: true,
           kind: 'bytes',
-          bytes: await file.pread(Math.min(req.max, MAX_READ), req.offset),
+          bytes: await file.pread(Math.min(req.max, MAX_PREAD), req.offset),
         };
       case 'fd-pwrite':
         return { ok: true, kind: 'json', json: await file.pwrite(req.body, req.offset) };

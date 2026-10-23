@@ -31,12 +31,14 @@ import {
   type FdInfo,
   fileWrite,
   index,
+  intoTarget,
   isExclusive,
   type JsOpenOptions,
   type JsStatFs,
   type JsWriteOptions,
   joined,
   MAX_IO,
+  MAX_PREAD,
   openRequest,
   readDevice,
   statFsOf,
@@ -58,6 +60,7 @@ export interface JsSyncFile {
   readonly path: string;
   size(): number;
   read(position: number, length: number): Uint8Array;
+  readInto?(position: number, into: Uint8Array, offset?: number, length?: number): number;
   write(position: number, data: Uint8Array): number;
   truncate(size: number): void;
   sync(): void;
@@ -371,6 +374,27 @@ function syncFile(
   const live = (): void => {
     if (!open) throw new JsCallError('EBADF', path);
   };
+  const pread = (
+    position: number,
+    length: number,
+    target?: { into: Uint8Array; at: number }
+  ): Uint8Array | number => {
+    index(position, 'read');
+    index(length, 'read');
+    const parts: Uint8Array[] = [];
+    let got = 0;
+    do {
+      live();
+      const max = Math.min(length - got, MAX_PREAD);
+      if (max <= 0) break;
+      const chunk = kernel.bytes({ op: 'fd-pread', fd, offset: position + got, max });
+      if (chunk.length === 0) break;
+      if (target) target.into.set(chunk, target.at + got);
+      else parts.push(chunk);
+      got += chunk.length;
+    } while (got < length);
+    return target ? got : joined(parts, got);
+  };
   const file: JsSyncFile = {
     fd,
     path,
@@ -378,21 +402,11 @@ function syncFile(
       live();
       return (kernel.json({ op: 'fd-vfs-stat', fd }) as { size: number }).size;
     },
-    read(position, length) {
-      index(position, 'read');
-      index(length, 'read');
-      const parts: Uint8Array[] = [];
-      let got = 0;
-      do {
-        live();
-        const max = Math.min(length - got, MAX_IO);
-        if (max <= 0) break;
-        const chunk = kernel.bytes({ op: 'fd-pread', fd, offset: position + got, max });
-        if (chunk.length === 0) break;
-        parts.push(chunk);
-        got += chunk.length;
-      } while (got < length);
-      return joined(parts, got);
+    readInto(position: number, into: Uint8Array, offset = 0, length = into.length - offset) {
+      return pread(position, length, intoTarget(into, offset, length)) as number;
+    },
+    read(position: number, length: number) {
+      return pread(position, length) as Uint8Array;
     },
     write(position, data) {
       index(position, 'write');
