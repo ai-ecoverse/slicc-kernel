@@ -239,7 +239,7 @@ test('/proc/self/exe of a program whose directory becomes unsearchable is not de
   assert.deepEqual(r, { status: 0, stdout: `${bin}/python.wasm\nPermission denied\n`, stderr: '' });
 });
 
-for (const when of ['after', 'start', 'removed']) {
+for (const when of ['after', 'start', 'removed', 'twice']) {
   const phrase = {
     after:
       'replaced right after the kernel has read it runs the bytes its /proc/self/exe identity names, never the old bytes under the new identity (#1329)',
@@ -247,6 +247,8 @@ for (const when of ['after', 'start', 'removed']) {
       'replaced as soon as the kernel starts reading it runs the bytes its /proc/self/exe identity names, never the old bytes under the new identity (#1329)',
     removed:
       'removed right after the kernel has read it still starts, from the bytes it read (#1468)',
+    twice:
+      'replaced by another file twice, once after each read, runs the second read and its /proc/self/exe shows it deleted (#1468)',
   }[when];
   test(`a program ${phrase}`, {
     timeout: 120_000,
@@ -284,6 +286,7 @@ for (const when of ['after', 'start', 'removed']) {
                 if (now && when === 'start') await swap?.(target);
                 const bytes = await read();
                 if (now && when !== 'start') await swap?.(target);
+                if (reads === 3 && when === 'twice') await again?.();
                 return bytes;
               };
               return file;
@@ -298,14 +301,28 @@ for (const when of ['after', 'start', 'removed']) {
     for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
     await kernel.writeFile('/tmp/p/prog', first);
     await kernel.run(['bash', '-c', 'chmod 755 /tmp/p/prog'], { cwd: '/' });
+    const over = async (bytes) => {
+      await kernel.writeFile('/tmp/p/next', bytes);
+      await kernel.run(['bash', '-c', 'chmod 755 /tmp/p/next && mv /tmp/p/next /tmp/p/prog'], {
+        cwd: '/',
+      });
+    };
+    let again =
+      when === 'twice'
+        ? async () => {
+            again = undefined;
+            await over(first);
+          }
+        : undefined;
     swap = async () => {
       swap = undefined;
+      if (when === 'twice') return over(second);
       await new Promise((resolve) => setTimeout(resolve, 5));
       if (when === 'removed') await kernel.run(['rm', '/tmp/p/prog'], { cwd: '/' });
       else await kernel.writeFile('/tmp/p/prog', second);
     };
     const r = await kernel.run(['/tmp/p/prog'], { cwd: '/' });
-    const exe = when === 'removed' ? '/tmp/p/prog (deleted)' : '/tmp/p/prog';
+    const exe = when === 'removed' || when === 'twice' ? '/tmp/p/prog (deleted)' : '/tmp/p/prog';
     assert.deepEqual(r, { status: 0, stdout: `exe=${exe} argv0=/tmp/p/prog\n`, stderr: '' });
   });
 }

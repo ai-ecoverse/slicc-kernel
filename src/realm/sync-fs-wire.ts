@@ -102,6 +102,7 @@ export interface SyncFsBridgeStat {
   atimeMs?: number;
   ctimeMs?: number;
   ino?: number;
+  fid?: string;
   escape?: string;
   nlink?: number;
   dev?: number;
@@ -221,6 +222,7 @@ export function parseSyncFsStat(json: unknown): SyncFsBridgeStat | null {
     ...(typeof s.atimeMs === 'number' ? { atimeMs: s.atimeMs } : {}),
     ...(typeof s.ctimeMs === 'number' ? { ctimeMs: s.ctimeMs } : {}),
     ...(typeof s.ino === 'number' ? { ino: s.ino } : {}),
+    ...(typeof s.fid === 'string' ? { fid: s.fid } : {}),
     ...(typeof s.nlink === 'number' ? { nlink: s.nlink } : {}),
     ...(typeof s.dev === 'number' ? { dev: s.dev } : {}),
     ...(s.readonly === true ? { readonly: true } : {}),

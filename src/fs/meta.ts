@@ -9,6 +9,7 @@ export interface MetaEntry {
   timesBy?: string;
   ctimeMs?: number;
   ino?: number;
+  fid?: string;
   link?: string;
   socket?: true;
   fifo?: true;

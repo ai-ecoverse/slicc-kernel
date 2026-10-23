@@ -454,6 +454,20 @@ export class OpfsFs implements KernelFs {
     this.channel?.postMessage(paths);
   }
 
+  async fileId(path: string): Promise<string> {
+    const found = await this.locate(path, true);
+    const [entry] = await this.meta.get([found.path]);
+    if (entry?.fid !== undefined) return entry.fid;
+    const fid = crypto.randomUUID();
+    await this.meta.update(found.path, (now) => ({
+      ...occupied(now),
+      path: found.path,
+      fid: now?.fid ?? fid,
+    }));
+    const [stored] = await this.meta.get([found.path]);
+    return stored?.fid ?? fid;
+  }
+
   private heldUnder: (dir: string) => readonly string[] = () => [];
 
   heldBy(held: (dir: string) => readonly string[]): void {
@@ -1176,6 +1190,7 @@ export class OpfsFs implements KernelFs {
       atime: new Date(meta?.atimeMs ?? mtime),
       ctime: new Date(Math.max(touched ?? meta?.ctimeMs ?? mtime, modified)),
       ino: meta?.ino ?? inodeOf(path),
+      ...(meta?.fid !== undefined ? { fid: meta.fid } : {}),
       ...(this.ranged && !directory ? { ranged: true } : {}),
     };
   }

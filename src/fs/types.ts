@@ -10,6 +10,7 @@ export interface FsStat {
   atime: Date;
   ctime: Date;
   ino: number;
+  fid?: string;
   nlink?: number;
   dev?: number;
   readonly?: boolean;
@@ -98,6 +99,7 @@ export interface KernelFs {
   trackOwners?(): void;
   onPeer?(settle: () => Promise<void>): void;
   heldBy?(held: (dir: string) => readonly string[]): void;
+  fileId?(path: string): Promise<string>;
   remoteChanges?(
     listener: (change: {
       paths: readonly string[];
