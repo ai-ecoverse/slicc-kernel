@@ -340,7 +340,16 @@ export class VfsNode {
     await this.settled();
     await this.fits((await this.size()) + bytes.length);
     await this.flush();
-    const end = await this.followed(() => append.call(this.fs, this.path, bytes));
+    const end = await this.followed(() => append.call(this.fs, this.path, bytes)).catch(
+      (err: unknown) => {
+        if (!positional(err)) throw err;
+        return undefined;
+      }
+    );
+    if (end === undefined) {
+      const at = await this.size();
+      return at + (await this.pwrite(bytes, at));
+    }
     this.reread();
     return end;
   }
@@ -440,6 +449,10 @@ export class VfsNode {
     this.failed = false;
     this.writeBackCost = performance.now() - started;
   }
+}
+
+function positional(err: unknown): boolean {
+  return (err as { code?: unknown } | null)?.code === 'ENOTSUP';
 }
 
 export class VfsNodes implements UnlinkHolder {
@@ -885,19 +898,13 @@ function heldIo(fs: KernelFs, nodes: VfsNodes, changed: (path: string) => void):
     append: (path: string, bytes: Uint8Array) =>
       write(
         path,
-        async (held) => {
-          if (fs.append) {
-            await held.flush();
-            const end = await fs.append(path, bytes);
-            held.reread();
-            return end;
-          }
-          const at = await held.size();
-          await held.pwrite(bytes, at);
-          return at + bytes.length;
-        },
+        (held) => held.append(bytes),
         async () => {
-          if (fs.append) return fs.append(path, bytes);
+          const end = await fs.append?.(path, bytes).catch((err: unknown) => {
+            if (!positional(err)) throw err;
+            return undefined;
+          });
+          if (end !== undefined) return end;
           const at = (await fs.stat(path)).size;
           if (ranged) await ranged.pwrite(path, at, bytes, true);
           else {

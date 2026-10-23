@@ -1164,9 +1164,7 @@ class MountFs implements KernelFs {
         ([to], n) => this.append(to as string, bytes, n)
       );
     }
-    const end = (await this.stat(real)).size;
-    await this.pwrite(real, end, bytes, true);
-    return end + bytes.length;
+    throw errnoError('ENOTSUP', `${real}: appended by position on a mount`);
   }
 
   async pwrite(
