@@ -394,11 +394,12 @@ export class KernelSocket implements KernelFile {
       handshaking = false;
       signal.removeEventListener('abort', abandon);
     }
-    this.link = uplinkLink(made.conn, (err) => {
+    const plain = uplinkLink(made.conn, (err) => {
       this.reset =
         err instanceof KernelError && err.code === 'EPROTO' ? err : new KernelError('ECONNRESET');
       this.changes.wake();
     });
+    this.link = { ...plain, ...(raw.peer ? { peer: raw.peer } : {}) };
     this.changes.wake();
     return made.info;
   }
@@ -531,13 +532,18 @@ export class KernelSocket implements KernelFile {
     this.connection();
     this.abortive = true;
   }
+  private abort(): void {
+    const link = this.link as Link;
+    if (link.peer) link.peer.resetBy();
+    else link.tx.closeRead();
+  }
   private resetBy(): void {
     this.refused ??= new KernelError('ECONNRESET');
     this.changes.wake();
   }
   close(): void {
     const was = this.state;
-    if (this.abortive && was === 'connected') this.link?.peer?.resetBy();
+    if (this.abortive && was === 'connected') this.abort();
     this.state = 'closed';
     this.dialing?.abort(new KernelError('ECONNABORTED'));
     this.dialing = undefined;

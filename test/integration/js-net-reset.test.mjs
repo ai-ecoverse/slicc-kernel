@@ -56,3 +56,65 @@ test('conn.reset() closes a loopback connection with an RST: the peer pending an
     fin: 'eof',
   });
 });
+
+const TLS_PROGRAM = `export default async function main(ctx) {
+  const o = JSON.parse(ctx.argv[1]);
+  const out = {};
+  const l = await ctx.net.listen({ tls: { cert: o.cert, key: o.key } });
+  const acc = l.accept();
+  const client = await ctx.net.connect({ host: 'localhost', port: l.port, tls: { ca: o.cert } });
+  const server = await acc;
+  const pending = server.readable.getReader().read().then((r) => (r.done ? 'eof' : 'data'), (e) => e.code);
+  await client.reset();
+  out.tls = await pending;
+  await server.close();
+  await l.close();
+  const plain = await ctx.net.listen({});
+  const acc2 = plain.accept();
+  const raw = await ctx.net.connect({ port: plain.port });
+  const s2 = await acc2;
+  const serving = ctx.net.secure(s2, { server: true, cert: o.cert, key: o.key });
+  const c2 = await ctx.net.secure(raw, { ca: o.cert, servername: 'localhost' });
+  const served = await serving;
+  const waiting = c2.readable.getReader().read().then((r) => (r.done ? 'eof' : 'data'), (e) => e.code);
+  await served.reset();
+  out.secured = await waiting;
+  await c2.close();
+  await plain.close();
+  ctx.write(1, JSON.stringify(out));
+  return 0;
+}
+`;
+
+test('reset() works on TLS connections too: a loopback TLS client that resets gives the server pending read ECONNRESET, and a secure()d server that resets gives its client one (#1530)', async (t) => {
+  const { readdir, readFile } = await import('node:fs/promises');
+  const { join, relative } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const { selfSigned } = await import('./test-certs.mjs');
+  const kernel = await createNodeKernel({ users: 'off' });
+  t.after(() => kernel.terminate());
+  const base = new URL('../../node_modules/@ai-ecoverse/wasm-tls-engine/', import.meta.url);
+  for (const e of (await readdir(base, { recursive: true, withFileTypes: true })).filter((x) =>
+    x.isFile()
+  )) {
+    const f = join(e.parentPath, e.name);
+    await kernel.writeFile(
+      `/node_modules/@ai-ecoverse/wasm-tls-engine/${relative(fileURLToPath(base), f)}`,
+      await readFile(f)
+    );
+  }
+  await kernel.writeFile(
+    '/node_modules/rsttls/package.json',
+    JSON.stringify({
+      name: 'rsttls',
+      slicc: { commands: { rsttls: { abi: 'js', module: 'r.mjs' } } },
+    })
+  );
+  await kernel.writeFile('/node_modules/rsttls/r.mjs', TLS_PROGRAM);
+  const own = selfSigned('localhost');
+  const r = await kernel.run(['rsttls', JSON.stringify({ cert: own.cert, key: own.key })], {
+    cwd: '/',
+  });
+  assert.equal(r.stderr, '');
+  assert.deepEqual(JSON.parse(r.stdout), { tls: 'ECONNRESET', secured: 'ECONNRESET' });
+});
