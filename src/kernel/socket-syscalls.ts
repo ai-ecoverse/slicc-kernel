@@ -123,6 +123,7 @@ export type SocketSyscall =
       requestCert?: boolean;
       rejectUnauthorized?: boolean;
       alpn?: string[];
+      handshakeTimeout?: number;
     }
   | {
       op: 'sock-recvfrom';

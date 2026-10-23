@@ -46,6 +46,7 @@ export interface JsTlsOptions {
   checkHostname?: boolean;
   server?: boolean;
   requestCert?: boolean;
+  handshakeTimeout?: number;
 }
 
 export interface JsTlsServerSession {
@@ -166,6 +167,7 @@ function serveRequest(tls: JsTlsOptions) {
     ...(tls.requestCert ? { requestCert: true } : {}),
     ...(tls.rejectUnauthorized === false ? { rejectUnauthorized: false } : {}),
     ...(tls.alpn ? { alpn: [...tls.alpn] } : {}),
+    ...(tls.handshakeTimeout !== undefined ? { handshakeTimeout: tls.handshakeTimeout } : {}),
   };
 }
 
@@ -310,19 +312,81 @@ export interface JsSyncNet {
   listen(options?: JsListenOptions): JsListener;
 }
 
-async function serveOn(kernel: JsKernel, conn: JsConnection, req: object): Promise<JsConnection> {
-  const r = (await secureCall(
-    () => kernel.json({ op: 'sock-tls-serve', fd: conn.fd, ...req }),
+async function serveOn(
+  kernel: JsKernel,
+  conn: JsConnection,
+  req: object,
+  signal: AbortSignal = NEVER
+): Promise<JsConnection> {
+  const r = await secureCall(
+    () => kernel.blocking({ op: 'sock-tls-serve', fd: conn.fd, ...req }, signal),
     'accept'
-  )) as ServedWire;
-  return Object.assign(Object.create(conn), { tls: servedOf(r) });
+  );
+  const wire = (r.ok && r.kind === 'json' ? r.json : {}) as ServedWire;
+  return Object.assign(Object.create(conn), { tls: servedOf(wire) });
+}
+
+function securedAccepts(
+  plain: (signal: AbortSignal) => Promise<JsConnection>,
+  serve: (conn: JsConnection, signal: AbortSignal) => Promise<JsConnection>,
+  stop: AbortSignal
+): (signal: AbortSignal) => Promise<JsConnection> {
+  const ready: JsConnection[] = [];
+  const waiters = new Set<() => void>();
+  let failure: unknown;
+  let pumping = false;
+  const wake = () => {
+    for (const w of [...waiters]) w();
+  };
+  const pump = async () => {
+    for (;;) {
+      let conn: JsConnection;
+      try {
+        conn = await plain(stop);
+      } catch (err) {
+        failure = err;
+        for (const left of ready.splice(0)) void left.close();
+        wake();
+        return;
+      }
+      serve(conn, stop).then(
+        (secured) => {
+          if (stop.aborted) void secured.close();
+          else ready.push(secured);
+          wake();
+        },
+        () => conn.close()
+      );
+    }
+  };
+  return async (signal) => {
+    if (!pumping) {
+      pumping = true;
+      void pump();
+    }
+    for (;;) {
+      const next = ready.shift();
+      if (next) return next;
+      if (failure !== undefined) throw failure;
+      signal.throwIfAborted();
+      await new Promise<void>((resolve) => {
+        const done = () => {
+          waiters.delete(done);
+          signal.removeEventListener('abort', done);
+          resolve();
+        };
+        waiters.add(done);
+        signal.addEventListener('abort', done, { once: true });
+      });
+    }
+  };
 }
 
 interface ListenerOps {
   kernel: JsKernel;
   io: NetIo;
   connection(fd: number): Promise<JsConnection>;
-  serve(conn: JsConnection, req: object): Promise<JsConnection>;
+  serve(conn: JsConnection, req: object, signal?: AbortSignal): Promise<JsConnection>;
 }
 
 function listenerOf(ops: ListenerOps, fd: number, at: JsAddress, secured: boolean): JsListener {
@@ -337,18 +401,11 @@ function listenerOf(ops: ListenerOps, fd: number, at: JsAddress, secured: boolea
       await kernel.blocking({ op: 'fd-select', read: [fd], write: [], timeoutMs: -1 }, signal);
     }
   };
-  const accept = async (options: { signal?: AbortSignal } = {}): Promise<JsConnection> => {
-    const signal = AbortSignal.any([options.signal ?? NEVER, stop.signal]);
-    for (;;) {
-      const conn = await acceptPlain(signal);
-      if (!secured) return conn;
-      try {
-        return await serve(conn, { from: fd });
-      } catch {
-        await conn.close();
-      }
-    }
-  };
+  const next = secured
+    ? securedAccepts(acceptPlain, (c, s) => serve(c, { from: fd }, s), stop.signal)
+    : acceptPlain;
+  const accept = (options: { signal?: AbortSignal } = {}): Promise<JsConnection> =>
+    next(AbortSignal.any([options.signal ?? NEVER, stop.signal]));
   return {
     fd,
     ...at,
@@ -427,7 +484,8 @@ export function netOps(
     }
   };
 
-  const serve = (conn: JsConnection, req: object) => serveOn(kernel, conn, req);
+  const serve = (conn: JsConnection, req: object, signal?: AbortSignal) =>
+    serveOn(kernel, conn, req, signal);
 
   const ops: ListenerOps = { kernel, io, connection, serve };
   const listener = (fd: number, at: JsAddress, secured = false): JsListener =>
@@ -473,19 +531,19 @@ export function netOps(
     const common = tlsRequest(
       options.socket && !tls.servername && options.host ? { ...tls, servername: options.host } : tls
     );
-    const r = (await secureCall(() =>
-      kernel.json(
-        options.socket
-          ? { op: 'sock-tls-upgrade', fd: options.socket.fd, ...common }
-          : {
-              op: 'sock-tls',
-              host: options.host ?? 'localhost',
-              port: port(options.port as number),
-              ...common,
-              ...(tls.path ? { path: tls.path } : {}),
-            }
-      )
-    )) as WireSession & { fd?: number };
+    const r = (await secureCall(async () => {
+      if (!options.socket)
+        return kernel.json({
+          op: 'sock-tls',
+          host,
+          port: port(options.port as number),
+          ...common,
+          ...(tls.path ? { path: tls.path } : {}),
+        });
+      const req = { op: 'sock-tls-upgrade' as const, fd: options.socket.fd, ...common };
+      const done = await kernel.blocking(req, options.signal ?? NEVER);
+      return done.ok && done.kind === 'json' ? done.json : undefined;
+    })) as WireSession & { fd?: number };
     const session = sessionOf(r);
     if (options.socket) return Object.assign(Object.create(options.socket), { tls: session });
     return Object.assign(await connection(r.fd as number), { tls: session });

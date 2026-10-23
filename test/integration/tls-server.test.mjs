@@ -16,6 +16,7 @@ const PACKAGE = JSON.stringify({
     commands: {
       tlsd: { abi: 'js', module: 'bin/tlsd.mjs' },
       tlsc: { abi: 'js', module: 'bin/tlsc.mjs' },
+      tlsone: { abi: 'js', module: 'bin/tlsone.mjs' },
     },
   },
 });
@@ -110,6 +111,82 @@ export default async function main(ctx) {
 }
 `;
 
+const ONE = `${SHARED}
+const within = (p, ms) =>
+  Promise.race([p.then((v) => ({ v }), (e) => ({ e: failure(e) })), new Promise((r) => setTimeout(() => r({ hung: true }), ms))]);
+async function roundTrip(c, text) {
+  const w = c.writable.getWriter();
+  await w.write(enc.encode(text));
+  await w.close();
+  return drain(c.readable);
+}
+async function echo(c) {
+  const r = c.readable.getReader();
+  const { value } = await r.read();
+  r.releaseLock();
+  const w = c.writable.getWriter();
+  await w.write(value);
+  await w.close();
+}
+export default async function main(ctx) {
+  const o = JSON.parse(ctx.argv[1]);
+  const out = {};
+  const alive = async () => {
+    await ctx.fs.writeFile('/tmp/alive', 'yes');
+    return dec.decode(await ctx.fs.readFile('/tmp/alive'));
+  };
+  const l = await ctx.net.listen({ tls: { cert: o.cert, key: o.key } });
+  const a = l.accept();
+  const c = ctx.net.connect({ host: 'localhost', port: l.port, tls: { ca: o.cert } });
+  const both = await within(Promise.all([a, c]), 10000);
+  out.same = both.hung ? 'hung' : both.e ? both.e.code : 'ok';
+  if (!both.hung && !both.e) {
+    const [served, client] = both.v;
+    const echoed = echo(served);
+    out.sameEcho = await roundTrip(client, 'same');
+    await echoed;
+  }
+  const idle = await ctx.net.connect({ port: l.port });
+  const next = l.accept();
+  const real = await within(ctx.net.connect({ host: 'localhost', port: l.port, tls: { ca: o.cert } }), 10000);
+  out.afterIdle = real.hung ? 'hung' : real.e ? real.e.code : 'ok';
+  out.aliveAfterIdle = (await within(alive(), 5000)).v ?? 'hung';
+  const got = await within(next, 10000);
+  if (!got.hung && !got.e) {
+    const echoed = echo(got.v);
+    out.idleEcho = await roundTrip(real.v, 'next');
+    await echoed;
+  }
+  const stop = new AbortController();
+  const waiting = l.accept({ signal: stop.signal });
+  setTimeout(() => stop.abort(), 100);
+  const aborted = await within(waiting, 5000);
+  out.aborted = aborted.hung ? 'hung' : aborted.e ? aborted.e.message : 'accepted';
+  out.aliveAfterAbort = (await within(alive(), 5000)).v ?? 'hung';
+  await idle.close();
+  await l.close();
+  const plain = await ctx.net.listen({});
+  const quiet = plain.accept();
+  const raw = await ctx.net.connect({ port: plain.port });
+  const served = await quiet;
+  const timed = await within(ctx.net.secure(served, { server: true, cert: o.cert, key: o.key, handshakeTimeout: 200 }), 5000);
+  out.timeout = timed.hung ? 'hung' : timed.e ? timed.e.code : 'served';
+  await raw.close();
+  const silent = plain.accept();
+  const cancel = new AbortController();
+  const dialling = ctx.net.connect({ host: 'localhost', port: plain.port, tls: { ca: o.cert }, signal: cancel.signal });
+  const held = await silent;
+  setTimeout(() => cancel.abort(), 100);
+  const dialled = await within(dialling, 5000);
+  out.clientAbort = dialled.hung ? 'hung' : dialled.e ? 'refused' : 'connected';
+  out.aliveAfterClient = (await within(alive(), 5000)).v ?? 'hung';
+  await held.close();
+  await plain.close();
+  ctx.write(1, JSON.stringify(out) + '\\n');
+  return 0;
+}
+`;
+
 async function install(kernel, name) {
   const base = new URL(`${name}/`, modules);
   const entries = await readdir(base, { recursive: true, withFileTypes: true });
@@ -129,6 +206,7 @@ async function kernelWith(t) {
   await kernel.writeFile('/node_modules/tlsd/package.json', PACKAGE);
   await kernel.writeFile('/node_modules/tlsd/bin/tlsd.mjs', SERVER);
   await kernel.writeFile('/node_modules/tlsd/bin/tlsc.mjs', CLIENT);
+  await kernel.writeFile('/node_modules/tlsd/bin/tlsone.mjs', ONE);
   return async (o) => {
     const r = await kernel.run(['tlsd', JSON.stringify(o)], { cwd: '/' });
     assert.equal(r.stderr, '');
@@ -265,5 +343,34 @@ test(
     assert.equal(admitted.tls.authorized, true);
     assert.equal(admitted.tls.peerCertificates[0], Buffer.from(mine.der).toString('base64'));
     assert.equal(server.length, 1, JSON.stringify(server));
+  }
+);
+
+test(
+  'handshakes never hold the program: a client in the same program, an idle connection ahead of a real client, an aborted accept, a handshake timeout and an aborted loopback client all leave the program running (#1401)',
+  TIMEOUT,
+  async (t) => {
+    const kernel = await createNodeKernel({ users: 'off' });
+    t.after(() => kernel.terminate());
+    await install(kernel, 'wasm-tls-engine');
+    await kernel.writeFile('/node_modules/tlsd/package.json', PACKAGE);
+    await kernel.writeFile('/node_modules/tlsd/bin/tlsone.mjs', ONE);
+    const own = selfSigned('localhost');
+    const r = await kernel.run(['tlsone', JSON.stringify({ cert: own.cert, key: own.key })], {
+      cwd: '/',
+    });
+    assert.equal(r.stderr, '');
+    assert.deepEqual(JSON.parse(r.stdout), {
+      same: 'ok',
+      sameEcho: 'same',
+      afterIdle: 'ok',
+      aliveAfterIdle: 'yes',
+      idleEcho: 'next',
+      aborted: 'This operation was aborted',
+      aliveAfterAbort: 'yes',
+      timeout: 'ERR_TLS_HANDSHAKE_TIMEOUT',
+      clientAbort: 'refused',
+      aliveAfterClient: 'yes',
+    });
   }
 );

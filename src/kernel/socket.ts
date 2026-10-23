@@ -115,6 +115,8 @@ export interface SocketName {
   typed: boolean;
 }
 const SERVE_CHUNK = 64 * 1024;
+const NEVER_ABORTED = new AbortController().signal;
+const EMPTY = new Uint8Array(0);
 
 export class KernelSocket implements KernelFile {
   private readonly net: LoopbackNet;
@@ -340,17 +342,22 @@ export class KernelSocket implements KernelFile {
     return this.state === 'connected' && !this.switch;
   }
   async secureLink<T>(
-    make: (raw: UplinkConn) => Promise<{ conn: UplinkConn; info: T }>
+    make: (raw: UplinkConn) => Promise<{ conn: UplinkConn; info: T }>,
+    signal: AbortSignal = NEVER_ABORTED
   ): Promise<T> {
     const raw = this.connection();
     if (this.switch || this.served || this.writeShut || this.readShut)
       throw new KernelError('EINVAL');
+    signal.throwIfAborted();
     this.served = true;
+    let handshaking = true;
     const view: UplinkConn = {
       localAddr: '',
       remoteAddr: '',
       read: async () => {
-        const bytes = await raw.rx.read(SERVE_CHUNK);
+        const bytes = await raw.rx
+          .read(SERVE_CHUNK, handshaking ? signal : undefined)
+          .catch(() => EMPTY);
         return bytes.length > 0 ? bytes : null;
       },
       write: (bytes) => raw.tx.write(bytes),
@@ -361,6 +368,8 @@ export class KernelSocket implements KernelFile {
       },
     };
     let made: { conn: UplinkConn; info: T };
+    const abandon = () => view.close();
+    signal.addEventListener('abort', abandon, { once: true });
     try {
       made = await make(view);
     } catch (err) {
@@ -368,7 +377,10 @@ export class KernelSocket implements KernelFile {
       this.readShut = true;
       this.writeShut = true;
       this.changes.wake();
-      throw err;
+      throw signal.aborted ? signal.reason : err;
+    } finally {
+      handshaking = false;
+      signal.removeEventListener('abort', abandon);
     }
     this.link = uplinkLink(made.conn, (err) => {
       this.reset =

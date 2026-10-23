@@ -432,7 +432,7 @@ async function loopbackSecure(
       } finally {
         prepared.own?.release();
       }
-    });
+    }, proc.blocking());
     return sessionOf({ ...info, substitutes: false }, servername);
   } finally {
     if (!ran) {

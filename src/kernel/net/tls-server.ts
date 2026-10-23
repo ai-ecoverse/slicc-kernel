@@ -27,8 +27,11 @@ export interface ServeRequest {
   requestCert?: boolean;
   rejectUnauthorized?: boolean;
   alpn?: string[];
+  handshakeTimeout?: number;
   listener?: KernelSocket;
 }
+
+const HANDSHAKE_TIMEOUT_MS = 120_000;
 
 export interface ServedSession {
   path: 'kernel';
@@ -46,6 +49,7 @@ interface Server {
   store: TlsStore | undefined;
   alpn: string[];
   flags: number;
+  timeoutMs: number;
   release(): void;
 }
 
@@ -76,6 +80,26 @@ function flagsOf(req: ServeRequest, store: TlsStore | undefined): number {
   return req.rejectUnauthorized === false ? TLS_SERVER_REQUEST_CERT : TLS_SERVER_REQUIRE_CERT;
 }
 
+function timeoutOf(req: ServeRequest): number {
+  const ms = req.handshakeTimeout ?? HANDSHAKE_TIMEOUT_MS;
+  if (!Number.isInteger(ms) || ms <= 0)
+    throw new KernelError(
+      'EINVAL',
+      'ERR_OUT_OF_RANGE: handshakeTimeout must be a positive integer'
+    );
+  return ms;
+}
+
+function handshakeSignal(proc: SecureProcess, ms: number) {
+  const timer = new AbortController();
+  const id = setTimeout(
+    () =>
+      timer.abort(new KernelError('EPROTO', 'ERR_TLS_HANDSHAKE_TIMEOUT: TLS handshake timeout')),
+    ms
+  );
+  return { signal: AbortSignal.any([proc.blocking(), timer.signal]), done: () => clearTimeout(id) };
+}
+
 export async function serverOf(proc: SecureProcess, req: ServeRequest): Promise<Server> {
   const own = req.cert;
   delete req.cert;
@@ -101,6 +125,7 @@ export async function serverOf(proc: SecureProcess, req: ServeRequest): Promise<
       store,
       alpn: req.alpn ?? [],
       flags,
+      timeoutMs: timeoutOf(req),
       release() {
         leaf.release();
         store?.release();
@@ -134,9 +159,13 @@ export async function serveSecure(
   const server = shared ?? (await serverOf(proc, req));
   try {
     const { engine, leaf, alpn, store, flags } = server;
-    const info = await socket.secureLink((raw) =>
-      tlsServer(raw, engine.serverSession(leaf, alpn, store, flags), flags !== 0)
-    );
+    const limit = handshakeSignal(proc, server.timeoutMs);
+    const info = await socket
+      .secureLink(
+        (raw) => tlsServer(raw, engine.serverSession(leaf, alpn, store, flags), flags !== 0),
+        limit.signal
+      )
+      .finally(limit.done);
     return {
       path: 'kernel',
       protocol: info.protocol,
