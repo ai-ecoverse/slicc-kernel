@@ -6,8 +6,10 @@ import {
   TLS_CLIENT_INSECURE_SKIP_VERIFY,
   TLS_CLIENT_NO_SNI,
   TLS_CLIENT_VERIFY_CHAIN_ONLY,
+  TLS_HANDSHAKE_SELECT,
   type TlsEngine,
   TlsError,
+  type TlsLeaf,
   type TlsSession,
   type TlsStore,
 } from './tls-engine.ts';
@@ -313,22 +315,54 @@ function serverRefusal(err: unknown, session: TlsSession, first: Uint8Array | un
   return new KernelError('EPROTO', `ERR_SSL_HANDSHAKE_FAILURE: ${text}${alertOf(session)}`);
 }
 
+export interface ServerOffer {
+  servername: string;
+  protocols: string[];
+}
+
+export interface ServerChoice {
+  leaf?: TlsLeaf;
+  alpn?: string;
+  refuse?: number;
+}
+
+export type ServerSelect = (offer: ServerOffer) => Promise<ServerChoice>;
+
+async function chosen(conn: UplinkConn, session: TlsSession, select: ServerSelect | undefined) {
+  if (!select) throw new KernelError('EPROTO', 'ERR_SSL_HANDSHAKE_FAILURE: no selection');
+  const choice = await select({ servername: session.sni, protocols: session.clientAlpn() });
+  if (choice.refuse === undefined) {
+    session.select(choice.leaf, choice.alpn);
+    return;
+  }
+  session.refuse(choice.refuse);
+  await send(conn, session).catch(() => undefined);
+  throw new KernelError(
+    'EPROTO',
+    `ERR_SSL_HANDSHAKE_FAILURE: the program refused the handshake (alert ${choice.refuse})`
+  );
+}
+
 async function serverHandshake(
   conn: UplinkConn,
   session: TlsSession,
   inbox: Ciphertext,
-  first: () => Uint8Array | undefined
+  hooks: { first: () => Uint8Array | undefined; select: ServerSelect | undefined }
 ) {
   for (;;) {
-    let done: boolean;
+    let step: number;
     try {
-      done = session.handshake();
+      step = session.step();
     } catch (err) {
       await send(conn, session).catch(() => undefined);
-      throw serverRefusal(err, session, first());
+      throw serverRefusal(err, session, hooks.first());
+    }
+    if (step === TLS_HANDSHAKE_SELECT) {
+      await chosen(conn, session, hooks.select);
+      continue;
     }
     await send(conn, session);
-    if (done) return;
+    if (step === 1) return;
     if (!(await inbox.more())) {
       throw new KernelError(
         'ECONNRESET',
@@ -341,7 +375,8 @@ async function serverHandshake(
 export async function tlsServer(
   conn: UplinkConn,
   session: TlsSession,
-  clientCerts: boolean
+  clientCerts: boolean,
+  select?: ServerSelect
 ): Promise<{ conn: UplinkConn; info: TlsServerInfo }> {
   let first: Uint8Array | undefined;
   const watched: UplinkConn = {
@@ -354,7 +389,7 @@ export async function tlsServer(
   };
   const inbox = new Ciphertext(watched, session);
   try {
-    await serverHandshake(conn, session, inbox, () => first);
+    await serverHandshake(conn, session, inbox, { first: () => first, select });
     const chain = session.peerChain();
     const code = clientCerts ? verifyCode(session.verifyResult) : undefined;
     const protocol = session.version === 0x0304 ? 'TLSv1.3' : 'TLSv1.2';
