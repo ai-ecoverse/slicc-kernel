@@ -1675,7 +1675,7 @@ export class OpfsFs implements KernelFs {
   }
 
   async writeFile(path: string, content: Uint8Array | string, owner?: NewOwner): Promise<void> {
-    const [file, existed, target] = await this.fileFor(path);
+    const [file, existed, target] = await this.fileFor(path, owner?.existing !== true);
     if (!existed) await this.stampNew(target, owner, false);
     if (!existed && content.length === 0) return;
     let writable: FileSystemWritableFileStream | undefined;
