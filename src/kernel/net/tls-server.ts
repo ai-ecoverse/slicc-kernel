@@ -15,6 +15,7 @@ import {
   certBytes,
   encode,
   encryptedKey,
+  handshakeAbort,
   keyRefused,
   type SecureProcess,
   supportOf,
@@ -97,7 +98,10 @@ function handshakeSignal(proc: SecureProcess, ms: number) {
       timer.abort(new KernelError('EPROTO', 'ERR_TLS_HANDSHAKE_TIMEOUT: TLS handshake timeout')),
     ms
   );
-  return { signal: AbortSignal.any([proc.blocking(), timer.signal]), done: () => clearTimeout(id) };
+  return {
+    signal: AbortSignal.any([handshakeAbort(proc), timer.signal]),
+    done: () => clearTimeout(id),
+  };
 }
 
 export async function serverOf(proc: SecureProcess, req: ServeRequest): Promise<Server> {

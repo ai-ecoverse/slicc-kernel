@@ -155,6 +155,7 @@ export interface SocketProcess {
   fds: FdTable;
   net: LoopbackNet;
   blocking(): AbortSignal;
+  cancelled?: AbortSignal;
   resolve(name: string, family: ResolveFamily, blocking: () => AbortSignal): Promise<string[]>;
   cred?(): PeerCred;
   stamp?(): Promise<ConnectorStamp>;

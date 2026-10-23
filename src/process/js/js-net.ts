@@ -326,37 +326,63 @@ async function serveOn(
   return Object.assign(Object.create(conn), { tls: servedOf(wire) });
 }
 
-function securedAccepts(
+export const HANDSHAKES_MAX = 64;
+
+function changeOf(waiters: Set<() => void>, signal: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const done = () => {
+      waiters.delete(done);
+      signal.removeEventListener('abort', done);
+      resolve();
+    };
+    waiters.add(done);
+    signal.addEventListener('abort', done, { once: true });
+  });
+}
+
+export function securedAccepts(
   plain: (signal: AbortSignal) => Promise<JsConnection>,
   serve: (conn: JsConnection, signal: AbortSignal) => Promise<JsConnection>,
-  stop: AbortSignal
+  stop: AbortSignal,
+  cap: number
 ): (signal: AbortSignal) => Promise<JsConnection> {
   const ready: JsConnection[] = [];
   const waiters = new Set<() => void>();
   let failure: unknown;
   let pumping = false;
+  let inFlight = 0;
   const wake = () => {
     for (const w of [...waiters]) w();
   };
+  const handshake = (conn: JsConnection) => {
+    inFlight++;
+    serve(conn, stop)
+      .then(
+        (secured) => {
+          if (stop.aborted) void secured.close();
+          else ready.push(secured);
+        },
+        () => conn.close()
+      )
+      .finally(() => {
+        inFlight--;
+        wake();
+      });
+  };
   const pump = async () => {
     for (;;) {
-      let conn: JsConnection;
       try {
-        conn = await plain(stop);
+        while (inFlight + ready.length >= cap) {
+          stop.throwIfAborted();
+          await changeOf(waiters, stop);
+        }
+        handshake(await plain(stop));
       } catch (err) {
         failure = err;
         for (const left of ready.splice(0)) void left.close();
         wake();
         return;
       }
-      serve(conn, stop).then(
-        (secured) => {
-          if (stop.aborted) void secured.close();
-          else ready.push(secured);
-          wake();
-        },
-        () => conn.close()
-      );
     }
   };
   return async (signal) => {
@@ -365,19 +391,15 @@ function securedAccepts(
       void pump();
     }
     for (;;) {
+      if (stop.aborted) throw stop.reason;
       const next = ready.shift();
-      if (next) return next;
+      if (next) {
+        wake();
+        return next;
+      }
       if (failure !== undefined) throw failure;
       signal.throwIfAborted();
-      await new Promise<void>((resolve) => {
-        const done = () => {
-          waiters.delete(done);
-          signal.removeEventListener('abort', done);
-          resolve();
-        };
-        waiters.add(done);
-        signal.addEventListener('abort', done, { once: true });
-      });
+      await changeOf(waiters, signal);
     }
   };
 }
@@ -389,7 +411,7 @@ interface ListenerOps {
   serve(conn: JsConnection, req: object, signal?: AbortSignal): Promise<JsConnection>;
 }
 
-function listenerOf(ops: ListenerOps, fd: number, at: JsAddress, secured: boolean): JsListener {
+function listenerOf(ops: ListenerOps, fd: number, at: JsAddress, handshakes: number): JsListener {
   const { kernel, io, connection, serve } = ops;
   const stop = new AbortController();
   const acceptPlain = async (signal: AbortSignal): Promise<JsConnection> => {
@@ -401,9 +423,10 @@ function listenerOf(ops: ListenerOps, fd: number, at: JsAddress, secured: boolea
       await kernel.blocking({ op: 'fd-select', read: [fd], write: [], timeoutMs: -1 }, signal);
     }
   };
-  const next = secured
-    ? securedAccepts(acceptPlain, (c, s) => serve(c, { from: fd }, s), stop.signal)
-    : acceptPlain;
+  const next =
+    handshakes > 0
+      ? securedAccepts(acceptPlain, (c, s) => serve(c, { from: fd }, s), stop.signal, handshakes)
+      : acceptPlain;
   const accept = (options: { signal?: AbortSignal } = {}): Promise<JsConnection> =>
     next(AbortSignal.any([options.signal ?? NEVER, stop.signal]));
   return {
@@ -425,6 +448,10 @@ function listenerOf(ops: ListenerOps, fd: number, at: JsAddress, secured: boolea
       }
     },
   };
+}
+
+function capOf(options: JsListenOptions, tls: object | undefined): number {
+  return tls ? Math.max(1, Math.min(options.backlog ?? 128, HANDSHAKES_MAX)) : 0;
 }
 
 export function netOps(
@@ -488,8 +515,8 @@ export function netOps(
     serveOn(kernel, conn, req, signal);
 
   const ops: ListenerOps = { kernel, io, connection, serve };
-  const listener = (fd: number, at: JsAddress, secured = false): JsListener =>
-    listenerOf(ops, fd, at, secured);
+  const listener = (fd: number, at: JsAddress, handshakes = 0): JsListener =>
+    listenerOf(ops, fd, at, handshakes);
 
   const connect = async (options: JsConnectOptions): Promise<JsConnection> => {
     const signal = options.signal ?? NEVER;
@@ -582,7 +609,8 @@ export function netOps(
       lane.call({ op: 'sock-bind', fd, addr });
       lane.call({ op: 'sock-listen', fd, backlog: options.backlog ?? 128 });
       if (tls) lane.call({ op: 'sock-tls-listen', fd, ...tls });
-      return listener(fd, addressOf(lane.json({ op: 'sock-name', fd, peer: false })), !!tls);
+      const at = addressOf(lane.json({ op: 'sock-name', fd, peer: false }));
+      return listener(fd, at, capOf(options, tls));
     } catch (err) {
       lane.raw({ op: 'fd-close', fd });
       throw err;
@@ -600,7 +628,7 @@ export function netOps(
         await kernel.call({ op: 'sock-listen', fd, backlog: options.backlog ?? 128 });
         if (tls)
           await secureCall(() => kernel.call({ op: 'sock-tls-listen', fd, ...tls }), 'listen');
-        return listener(fd, await name(fd, false), !!tls);
+        return listener(fd, await name(fd, false), capOf(options, tls));
       });
     },
     secure: async (conn, tls) => {

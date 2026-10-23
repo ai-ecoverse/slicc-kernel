@@ -38,8 +38,12 @@ export interface SecureProcess {
   stamp?(): Promise<SealedCaller>;
   cred?(): { pid: number };
   blocking(): AbortSignal;
+  cancelled?: AbortSignal;
   resolve(name: string, family: ResolveFamily, blocking: () => AbortSignal): Promise<string[]>;
 }
+
+export const handshakeAbort = (proc: SecureProcess): AbortSignal =>
+  proc.cancelled ?? proc.blocking();
 
 const isIP = (text: string): boolean =>
   ipv4Bytes(text) !== undefined || (text.includes(':') && ipv6Groups(text) !== undefined);
@@ -432,7 +436,7 @@ async function loopbackSecure(
       } finally {
         prepared.own?.release();
       }
-    }, proc.blocking());
+    }, handshakeAbort(proc));
     return sessionOf({ ...info, substitutes: false }, servername);
   } finally {
     if (!ran) {
