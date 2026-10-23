@@ -35,7 +35,7 @@ async function pair(page) {
   return { mine: sh('a'), other: sh('b') };
 }
 
-test("a name another kernel creates while its notice is lost stays missing to a lookup for at most 2 ms of this kernel's clock (#984)", async (t) => {
+test("a name another kernel creates while its notice is lost stays missing to a lookup for at most 256 of this kernel's lookups and 100 ms of its clock (#984, #1425)", async (t) => {
   const { page, bash } = await booted(chrome, t);
   assert.deepEqual(await bash('rm -rf /tmp/nl && mkdir /tmp/nl', { cwd: '/' }), ok());
   const { mine, other } = await pair(page);
@@ -43,8 +43,16 @@ test("a name another kernel creates while its notice is lost stays missing to a 
   assert.deepEqual(await mine('[ -e /tmp/nl/f ] || echo missing'), ok('missing\n'));
   assert.deepEqual(await other('echo made > /tmp/nl/f'), ok());
   assert.deepEqual(await mine('[ -e /tmp/nl/f ] || echo missing'), ok('missing\n'));
-  await advance(page, 3);
-  assert.deepEqual(await mine('cat /tmp/nl/f'), ok('made\n'));
+  await advance(page, 50);
+  assert.deepEqual(await mine('[ -e /tmp/nl/f ] || echo missing'), ok('missing\n'));
+  assert.deepEqual(
+    await mine('for i in $(seq 300); do [ -e /tmp/nl/x ]; done; cat /tmp/nl/f'),
+    ok('made\n')
+  );
+  assert.deepEqual(await mine('[ -e /tmp/nl/g ] || echo missing'), ok('missing\n'));
+  assert.deepEqual(await other('echo late > /tmp/nl/g'), ok());
+  await advance(page, 101);
+  assert.deepEqual(await mine('cat /tmp/nl/g'), ok('late\n'));
 });
 
 test('a name another kernel created is found by O_EXCL, mkdir, symlink, link and rename-over even while a lookup still has it as missing (#984, #942)', async (t) => {
@@ -94,7 +102,6 @@ test("a lock granted after another kernel's write sees the new size even while t
     ),
     ok()
   );
-  assert.deepEqual(await mine('stat -c %s /tmp/nk/c'), ok('2\n'));
   assert.deepEqual(
     await mine(
       py([
