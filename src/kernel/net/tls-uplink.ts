@@ -64,7 +64,10 @@ export function serverName(name: string): string {
 
 const defaults = new WeakMap<TlsEngine, Promise<TlsStore>>();
 
-function defaultStore(engine: TlsEngine, roots: () => Promise<Uint8Array>): Promise<TlsStore> {
+export function defaultStore(
+  engine: TlsEngine,
+  roots: () => Promise<Uint8Array>
+): Promise<TlsStore> {
   let store = defaults.get(engine);
   if (!store) {
     const made = roots().then((bundle) => {

@@ -273,7 +273,7 @@ function encrypted(key, passphrase) {
 const derOf = (pem) => new X509Certificate(pem).raw.toString('base64');
 
 test(
-  'a JS program serves HTTPS with its own self-signed cert and key, and another JS program fetches it with that cert as ca; ALPN is the server preference the client offers and servername is the SNI (#1401)',
+  'a JS program serves HTTPS with its own self-signed cert and key, and another JS program fetches it with that cert as ca; ALPN is the server preference the client offers, servername is the SNI, and both sides report the same cipher (#1401, #1500)',
   TIMEOUT,
   async (t) => {
     const run = await kernelWith(t);
@@ -295,6 +295,8 @@ test(
     assert.equal(server[0].tls.alpnProtocol, 'http/1.1');
     assert.equal(server[0].tls.authorized, false);
     assert.deepEqual(server[0].tls.peerCertificates, []);
+    assert.ok(server[0].tls.cipher?.name, JSON.stringify(server[0].tls));
+    assert.deepEqual(server[0].tls.cipher, clients.a.tls.cipher);
   }
 );
 
@@ -435,5 +437,30 @@ test(
       listenerDrops: 0,
       listenerNext: 'localhost',
     });
+  }
+);
+
+test(
+  'requestCert without ca checks a client certificate against the bundled roots: a self-signed one is refused, and only reported with rejectUnauthorized: false (#1503)',
+  TIMEOUT,
+  async (t) => {
+    const run = await kernelWith(t);
+    const own = selfSigned('localhost');
+    const stranger = selfSigned('client.test');
+    const client = { ca: own.cert, cert: stranger.cert, key: stranger.key };
+    const strict = await run({
+      tls: { cert: own.cert, key: own.key, requestCert: true },
+      clients: [{ name: 'self', tls: client }],
+    });
+    assert.equal(strict.server.length, 0, JSON.stringify(strict));
+    assert.ok(strict.clients.self.error, JSON.stringify(strict.clients.self));
+    const loose = await run({
+      tls: { cert: own.cert, key: own.key, requestCert: true, rejectUnauthorized: false },
+      clients: [{ name: 'self', tls: client }],
+    });
+    assert.equal(loose.clients.self.body, 'hello', JSON.stringify(loose));
+    assert.equal(loose.server[0].tls.authorized, false);
+    assert.ok(loose.server[0].tls.authorizationError);
+    assert.equal(loose.server[0].tls.peerCertificates.length, 1);
   }
 );

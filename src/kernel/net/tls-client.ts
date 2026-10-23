@@ -300,6 +300,7 @@ export interface TlsServerInfo {
   authorized: boolean;
   authorizationError?: string;
   peerCertificates: Uint8Array[];
+  cipher: TlsCipher;
 }
 
 const HTTP_REQUEST = /^[A-Z]{3,10} [!-~]/;
@@ -356,8 +357,10 @@ export async function tlsServer(
     await serverHandshake(conn, session, inbox, () => first);
     const chain = session.peerChain();
     const code = clientCerts ? verifyCode(session.verifyResult) : undefined;
+    const protocol = session.version === 0x0304 ? 'TLSv1.3' : 'TLSv1.2';
     const info: TlsServerInfo = {
-      protocol: session.version === 0x0304 ? 'TLSv1.3' : 'TLSv1.2',
+      protocol,
+      cipher: cipherOf(session.ciphersuite, protocol),
       alpnProtocol: session.alpn ?? false,
       servername: session.sni,
       authorized: clientCerts && chain.length > 0 && code === undefined,

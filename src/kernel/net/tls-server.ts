@@ -1,5 +1,6 @@
 import { KernelError } from '../fd-table.ts';
 import type { KernelSocket } from '../socket.ts';
+import type { TlsCipher } from './tls-ciphers.ts';
 import { tlsServer } from './tls-client.ts';
 import {
   TLS_SERVER_REQUEST_CERT,
@@ -13,6 +14,7 @@ import {
   type ClientCert,
   type ClientCertRequest,
   certBytes,
+  defaultStore,
   encode,
   encryptedKey,
   handshakeAbort,
@@ -42,6 +44,7 @@ export interface ServedSession {
   authorized: boolean;
   authorizationError?: string;
   peerCertificates: string[];
+  cipher: TlsCipher;
 }
 
 interface Server {
@@ -75,9 +78,8 @@ function storeOf(engine: TlsEngine, ca: readonly string[]): TlsStore {
   }
 }
 
-function flagsOf(req: ServeRequest, store: TlsStore | undefined): number {
+function flagsOf(req: ServeRequest): number {
   if (!req.requestCert) return 0;
-  if (!store) throw new KernelError('EINVAL', 'ERR_INVALID_ARG_VALUE: requestCert needs a ca');
   return req.rejectUnauthorized === false ? TLS_SERVER_REQUEST_CERT : TLS_SERVER_REQUIRE_CERT;
 }
 
@@ -117,10 +119,12 @@ export async function serverOf(proc: SecureProcess, req: ServeRequest): Promise<
     throw err;
   }
   const leaf = leafOf(engine, cert);
-  let store: TlsStore | undefined;
+  let mine: TlsStore | undefined;
   try {
-    store = req.ca && req.ca.length > 0 ? storeOf(engine, req.ca) : undefined;
-    const flags = flagsOf(req, store);
+    mine = req.ca && req.ca.length > 0 ? storeOf(engine, req.ca) : undefined;
+    const flags = flagsOf(req);
+    const store =
+      mine ?? (flags ? await defaultStore(engine, supportOf(proc.net).roots) : undefined);
     return {
       engine,
       leaf,
@@ -130,12 +134,12 @@ export async function serverOf(proc: SecureProcess, req: ServeRequest): Promise<
       timeoutMs: timeoutOf(req),
       release() {
         leaf.release();
-        store?.release();
+        mine?.release();
       },
     };
   } catch (err) {
     leaf.release();
-    store?.release();
+    mine?.release();
     throw err;
   }
 }
@@ -177,6 +181,7 @@ export async function serveSecure(
       authorized: info.authorized,
       ...(info.authorizationError ? { authorizationError: info.authorizationError } : {}),
       peerCertificates: info.peerCertificates.map(encode),
+      cipher: info.cipher,
     };
   } finally {
     if (!shared) server.release();
