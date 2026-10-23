@@ -43,6 +43,7 @@ export interface NewOwner extends Owner {
   parents?: number;
   socket?: boolean;
   fifo?: boolean;
+  existing?: true;
 }
 
 export interface CopyOptions {
