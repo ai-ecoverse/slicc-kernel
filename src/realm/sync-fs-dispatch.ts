@@ -715,7 +715,12 @@ async function bound(entry: SyncFsTokenEntry, path: string, handle: number): Pro
   const bound = entry.boundIno?.(handle);
   if (bound === undefined) return;
   const now = await entry.fs.stat(path).catch(() => undefined);
-  if (now === undefined && bound.fid !== undefined) throw syncError('ENOENT', path);
+  if (
+    now === undefined &&
+    bound.fid !== undefined &&
+    !(await entry.fs.lstat(path).catch(() => undefined))
+  )
+    throw syncError('ENOENT', path);
   const same =
     bound.fid === undefined
       ? now?.ino === bound.ino
