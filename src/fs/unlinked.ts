@@ -8,6 +8,7 @@ export interface Replacements {
   generation(): number;
   changedSince(path: string, gen: number): boolean;
   inFlight?(path: string): boolean;
+  landed?(path: string): Promise<void>;
 }
 
 export class PathMarks {
@@ -15,6 +16,7 @@ export class PathMarks {
   private floor = 0;
   private readonly touched = new Map<string, number>();
   private readonly flying = new Map<string, number>();
+  private readonly waiting = new Set<() => void>();
 
   generation(): number {
     return this.gen;
@@ -51,8 +53,21 @@ export class PathMarks {
         const n = (this.flying.get(p) ?? 1) - 1;
         if (n > 0) this.flying.set(p, n);
         else this.flying.delete(p);
+        for (const wake of [...this.waiting]) wake();
         this.touch(p);
       }
+    }
+  }
+
+  async landed(path: string): Promise<void> {
+    while (this.inFlight(path)) {
+      await new Promise<void>((resolve) => {
+        const wake = () => {
+          this.waiting.delete(wake);
+          resolve();
+        };
+        this.waiting.add(wake);
+      });
     }
   }
 
@@ -326,6 +341,10 @@ export class UnlinkedKeeper {
 
   changedSince(path: string, gen: number): boolean {
     return this.marks.changedSince(path, gen);
+  }
+
+  landed(path: string): Promise<void> {
+    return this.marks.landed(path);
   }
 
   inFlight(path: string): boolean {

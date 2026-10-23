@@ -702,10 +702,12 @@ async function linkedElsewhere(fs: KernelFs, path: string, from?: string): Promi
 
 async function keptOr(entry: SyncFsTokenEntry, path: string, handle?: number): Promise<string> {
   if (handle !== undefined) {
+    await entry.replacements?.landed?.(path);
     const hidden = entry.keptFor?.(handle)?.hidden;
     if (hidden !== undefined) return hidden;
-    await bound(entry, path, handle);
-    return path;
+    const at = entry.heldAt?.(handle) ?? path;
+    await bound(entry, at, handle);
+    return at;
   }
   const kept = entry.unlinked?.(path);
   return kept && !(await entry.fs.exists(path)) ? kept.hidden : path;

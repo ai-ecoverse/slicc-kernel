@@ -454,6 +454,7 @@ function holdingToken(
     boundIno: holds.boundIno.bind(holds),
     trust: holds.trust.bind(holds),
     keptFor: (handle) => holds.keptFor(handle),
+    heldAt: (handle) => holds.pathOf(handle),
     unlinked: (path) => holds.keptAt(path),
     gate: (path, op) =>
       opts.unlinkGate && holds.holding(path) ? opts.unlinkGate.run(holds.keyOf(path), op) : op(),

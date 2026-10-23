@@ -226,6 +226,10 @@ export class HeldPaths extends Map<string, number> implements UnlinkHolder {
     if (this.doubted.get(handle) === doubt) this.doubted.delete(handle);
   }
 
+  pathOf(handle: number): string | undefined {
+    return this.handles.get(handle);
+  }
+
   keptFor(handle: number): KeptFile | undefined {
     return this.keptHandles.get(handle);
   }
