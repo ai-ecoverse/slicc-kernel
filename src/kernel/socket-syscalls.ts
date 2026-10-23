@@ -101,6 +101,7 @@ export type SocketSyscall =
       sni?: false;
       checkHostname?: false;
       clientCert?: ClientCertRequest;
+      keylog?: boolean;
       path?: 'kernel' | 'transport';
     }
   | {
@@ -113,6 +114,7 @@ export type SocketSyscall =
       sni?: false;
       checkHostname?: false;
       clientCert?: ClientCertRequest;
+      keylog?: boolean;
     }
   | {
       op: 'sock-tls-serve' | 'sock-tls-listen';
@@ -125,6 +127,7 @@ export type SocketSyscall =
       alpn?: string[];
       handshakeTimeout?: number;
       select?: boolean;
+      keylog?: boolean;
     }
   | { op: 'sock-tls-context'; cert?: ClientCertRequest }
   | { op: 'sock-tls-select'; fd: number; context?: number; alpn?: string; refuse?: number }
@@ -403,7 +406,12 @@ const NOT_HTTP_PORTS = new Set([
 ]);
 const HOST_NAME = /^[A-Za-z0-9.-]+$|^\[?[0-9A-Fa-f:.]+\]?$/;
 function sessionControls(req: Extract<SocketSyscall, { op: 'sock-tls' }>): boolean {
-  return req.sni === false || req.checkHostname === false || req.clientCert !== undefined;
+  return (
+    req.sni === false ||
+    req.checkHostname === false ||
+    req.clientCert !== undefined ||
+    req.keylog === true
+  );
 }
 
 function wantsKernel(req: Extract<SocketSyscall, { op: 'sock-tls' }>): boolean {

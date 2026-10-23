@@ -8,6 +8,7 @@ import {
   tlsServer,
 } from './tls-client.ts';
 import {
+  TLS_KEYLOG,
   TLS_SERVER_REQUEST_CERT,
   TLS_SERVER_REQUIRE_CERT,
   TLS_SERVER_SELECT,
@@ -38,6 +39,7 @@ export interface ServeRequest {
   alpn?: string[];
   handshakeTimeout?: number;
   select?: boolean;
+  keylog?: boolean;
   listener?: KernelSocket;
 }
 
@@ -58,6 +60,7 @@ export interface ServedSession {
   authorizationError?: string;
   peerCertificates: string[];
   cipher: TlsCipher;
+  keylog?: string[];
 }
 
 interface Server {
@@ -96,27 +99,37 @@ function certFlags(req: ServeRequest): number {
   return req.rejectUnauthorized === false ? TLS_SERVER_REQUEST_CERT : TLS_SERVER_REQUIRE_CERT;
 }
 
-function flagsOf(req: ServeRequest): number {
-  if (!req.select) return certFlags(req);
+const CERT_FLAGS = TLS_SERVER_REQUEST_CERT | TLS_SERVER_REQUIRE_CERT;
+
+function selectFlag(req: ServeRequest): number {
+  if (!req.select) return 0;
   if (req.alpn && req.alpn.length > 0)
     throw new KernelError('EINVAL', 'ERR_TLS_ALPN_CALLBACK_WITH_PROTOCOLS: alpn with select');
-  return certFlags(req) | TLS_SERVER_SELECT;
+  return TLS_SERVER_SELECT;
 }
 
-async function engineOf(proc: SecureProcess, select: boolean | undefined): Promise<TlsEngine> {
+function flagsOf(req: ServeRequest): number {
+  return certFlags(req) | selectFlag(req) | (req.keylog ? TLS_KEYLOG : 0);
+}
+
+type Needs = { select?: boolean | undefined; keylog?: boolean | undefined };
+
+async function engineOf(proc: SecureProcess, { select, keylog }: Needs): Promise<TlsEngine> {
   const engine = await supportOf(proc.net).engine();
   if (!engine.serverSessions)
     throw new KernelError('ENOTSUP', 'the installed tls engine has no server sessions');
+  if (keylog && !engine.keylogs)
+    throw new KernelError('ENOTSUP', 'the installed tls engine has no key log');
   if (select && !engine.serverSelect)
     throw new KernelError('ENOTSUP', 'the installed tls engine has no server selection');
   return engine;
 }
 
-async function importedLeaf(proc: SecureProcess, own: ClientCertRequest, select?: boolean) {
+async function importedLeaf(proc: SecureProcess, own: ClientCertRequest, needs: Needs = {}) {
   const cert = certBytes(own);
   let engine: TlsEngine;
   try {
-    engine = await engineOf(proc, select);
+    engine = await engineOf(proc, needs);
   } catch (err) {
     wipe(cert);
     throw err;
@@ -151,17 +164,15 @@ export async function serverOf(proc: SecureProcess, req: ServeRequest): Promise<
   if (!own && !req.select)
     throw new KernelError('EINVAL', 'ERR_INVALID_ARG_VALUE: a server needs cert and key');
   const { engine, leaf } = own
-    ? await importedLeaf(proc, own, req.select)
-    : { engine: await engineOf(proc, true), leaf: undefined };
+    ? await importedLeaf(proc, own, req)
+    : { engine: await engineOf(proc, { ...req, select: true }), leaf: undefined };
   let mine: TlsStore | undefined;
   try {
     mine = req.ca && req.ca.length > 0 ? storeOf(engine, req.ca) : undefined;
     const flags = flagsOf(req);
     const store =
       mine ??
-      (flags & ~TLS_SERVER_SELECT
-        ? await defaultStore(engine, supportOf(proc.net).roots)
-        : undefined);
+      (flags & CERT_FLAGS ? await defaultStore(engine, supportOf(proc.net).roots) : undefined);
     return {
       engine,
       leaf,
@@ -202,6 +213,7 @@ function servedOf(info: TlsServerInfo): ServedSession {
     ...(info.authorizationError ? { authorizationError: info.authorizationError } : {}),
     peerCertificates: info.peerCertificates.map(encode),
     cipher: info.cipher,
+    ...(info.keylog ? { keylog: info.keylog } : {}),
   };
 }
 
@@ -243,7 +255,7 @@ export async function serveSecure(
   const { engine, leaf, alpn, store, flags } = server;
   const limit = handshakeSignal(proc, server.timeoutMs);
   const { pausedAt, select } = pausing(limit.signal);
-  const certs = (flags & ~TLS_SERVER_SELECT) !== 0;
+  const certs = (flags & CERT_FLAGS) !== 0;
   const run = socket
     .secureLink(
       (raw) =>
@@ -251,7 +263,8 @@ export async function serveSecure(
           raw,
           engine.serverSession(leaf, alpn, store, flags),
           certs,
-          flags & TLS_SERVER_SELECT ? select : undefined
+          flags & TLS_SERVER_SELECT ? select : undefined,
+          (flags & TLS_KEYLOG) !== 0
         ),
       limit.signal,
       (reason) => !shared && reason === timedOut

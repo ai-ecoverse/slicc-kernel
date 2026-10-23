@@ -24,6 +24,7 @@ export interface SecureRequest {
   sni?: false;
   checkHostname?: false;
   clientCert?: ClientCertRequest;
+  keylog?: boolean;
 }
 
 export interface ClientCertRequest {
@@ -115,6 +116,7 @@ export interface SecureSession {
   hostnameChecked?: boolean;
   hostnameMatches?: boolean;
   chainError?: string;
+  keylog?: string[];
 }
 
 function sessionOf(info: TlsClientInfo, servername: string): SecureSession {
@@ -135,6 +137,7 @@ function sessionOf(info: TlsClientInfo, servername: string): SecureSession {
     servername,
     peerCertificates: info.peerCertificates.map(encode),
     ...controls(info),
+    ...(info.keylog ? { keylog: info.keylog } : {}),
   };
 }
 
@@ -304,11 +307,14 @@ async function prepareWith(
     insecure: req.insecure === true,
     ...(req.sni === false ? { sni: false } : {}),
     ...(req.checkHostname === false ? { checkHostname: false } : {}),
+    ...(req.keylog === true ? { keylog: true } : {}),
     clientCertificate: cert !== undefined,
     bundled: own === undefined,
   };
   let session: TlsSession | undefined;
   try {
+    if (req.keylog === true && !engine.keylogs)
+      throw new KernelError('ENOTSUP', 'the installed tls engine has no key log');
     const controls = req.sni === false || req.checkHostname === false || cert !== undefined;
     if (controls && !engine.sessionControls) {
       throw new KernelError('ENOTSUP', 'the installed tls engine has no client certificates');
@@ -365,7 +371,9 @@ function secure(prepared: Prepared, seal: Seal) {
     try {
       const made = await tlsClient(raw, prepared.options);
       const engine = prepared.options.engine;
-      const session = sealing({ ...seal, engine }, raw, made.info, prepared.options.servername);
+      const session = prepared.options.keylog
+        ? undefined
+        : sealing({ ...seal, engine }, raw, made.info, prepared.options.servername);
       if (!session) return made;
       made.info.substitutes = substitutes(session);
       if (made.info.substitutes && session.verified)

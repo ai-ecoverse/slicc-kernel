@@ -51,6 +51,7 @@ type TlsSessionExport =
   | 'tls_server_select'
   | 'tls_server_refuse'
   | 'tls_client_alpn'
+  | 'tls_keylog'
   | 'tls_client_cert'
   | 'tls_ciphersuite'
   | 'tls_name_mismatch'
@@ -76,6 +77,7 @@ export const TLS_SERVER_REQUEST_CERT = 1;
 export const TLS_SERVER_REQUIRE_CERT = 2;
 export const TLS_SERVER_SELECT = 4;
 export const TLS_HANDSHAKE_SELECT = 2;
+export const TLS_KEYLOG = 8;
 
 const SCRATCH = 64 * 1024;
 const EOF = -1;
@@ -141,6 +143,9 @@ export class TlsEngine {
     if (!ptr) throw this.error(this.m._tls_last_error(), 'server certificate');
     return new TlsLeaf(this, this.m, ptr);
   }
+  get keylogs(): boolean {
+    return typeof this.m._tls_keylog === 'function';
+  }
   get serverSelect(): boolean {
     return typeof this.m._tls_server_select === 'function';
   }
@@ -176,9 +181,11 @@ export class TlsEngine {
     }
   }
 
-  intoScratch(fn: (ptr: number, max: number) => number): number | Uint8Array {
+  intoScratch(fn: (ptr: number, max: number) => number, secret = false): number | Uint8Array {
     const n = fn(this.scratch, SCRATCH);
-    return n > 0 ? this.taken(n) : n;
+    const out = n > 0 ? this.taken(n) : n;
+    if (secret && n > 0) this.m.HEAPU8.fill(0, this.scratch, this.scratch + n);
+    return out;
   }
   get sessionControls(): boolean {
     return typeof this.m._tls_client_cert === 'function';
@@ -394,6 +401,14 @@ export class TlsSession {
   }
   get version(): number {
     return this.c._tls_version(this.ptr);
+  }
+  keylog(): string[] {
+    const drain = this.m._tls_keylog as (...a: number[]) => number;
+    const out = this.engine.intoScratch((p, max) => drain(this.ptr, p, max), true);
+    if (!(out instanceof Uint8Array)) return [];
+    const text = new TextDecoder().decode(out);
+    out.fill(0);
+    return text.split('\n').filter((line) => line.length > 0);
   }
   get sni(): string {
     const out = this.engine.intoScratch((p, max) =>

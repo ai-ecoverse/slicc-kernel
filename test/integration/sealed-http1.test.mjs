@@ -514,3 +514,27 @@ test(
     assert.equal(out[1].body, `STORED ${HIDDEN}\n`);
   }
 );
+
+test(
+  'a keylogged A2 session is never sealed: the placeholder reaches the server as written and the session says substitutes: false; a keylog on the transport path is ENOTSUP (#1504)',
+  TIMEOUT,
+  async (t) => {
+    const a = await server(t, ca.server('api.test'));
+    const { run, asked } = await kernelWith(t, [['api.test', a.port]]);
+    const req = get([`Authorization: Bearer ${PH}`]);
+    const [got] = await run([
+      { host: 'api.test', port: 465, tls: { keylog: true }, writes: [req] },
+    ]);
+    assert.equal(got.substitutes, false, JSON.stringify(got));
+    assert.equal(
+      a.log[0][0].head.includes(`Authorization: Bearer ${PH}\r\n`),
+      true,
+      a.log[0][0].head
+    );
+    assert.equal(asked.length, 0);
+    const [transport] = await run([
+      { host: 'elsewhere.test', port: 443, tls: { keylog: true }, writes: [req] },
+    ]);
+    assert.equal(transport.code, 'ENOTSUP', JSON.stringify(transport));
+  }
+);

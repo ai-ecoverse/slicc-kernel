@@ -24,6 +24,7 @@ export interface JsTlsSession {
   readonly hostnameChecked?: boolean;
   readonly hostnameMatches?: boolean;
   readonly chainError?: string;
+  readonly keylog?: readonly string[];
 }
 
 export interface JsTlsCipher {
@@ -47,6 +48,7 @@ export interface JsTlsOptions {
   server?: boolean;
   requestCert?: boolean;
   handshakeTimeout?: number;
+  keylog?: boolean;
   select?: JsTlsSelect;
 }
 
@@ -85,6 +87,7 @@ export interface JsTlsServerSession {
   readonly authorizationError?: string;
   readonly peerCertificates: readonly Uint8Array[];
   readonly cipher: JsTlsCipher;
+  readonly keylog?: readonly string[];
 }
 
 export interface JsConnection {
@@ -150,6 +153,7 @@ interface WireSession {
   hostnameChecked?: boolean;
   hostnameMatches?: boolean;
   chainError?: string;
+  keylog?: string[];
 }
 
 function fromBase64(text: string): Uint8Array {
@@ -200,6 +204,7 @@ function serveRequest(tls: JsTlsOptions) {
     ...(tls.rejectUnauthorized === false ? { rejectUnauthorized: false } : {}),
     ...(tls.alpn ? { alpn: [...tls.alpn] } : {}),
     ...(tls.handshakeTimeout !== undefined ? { handshakeTimeout: tls.handshakeTimeout } : {}),
+    ...(tls.keylog === true ? { keylog: true } : {}),
   };
 }
 
@@ -211,6 +216,7 @@ interface ServedWire {
   authorizationError?: string;
   peerCertificates: string[];
   cipher: JsTlsCipher;
+  keylog?: string[];
 }
 
 function servedOf(r: ServedWire): JsTlsServerSession {
@@ -221,7 +227,12 @@ function servedOf(r: ServedWire): JsTlsServerSession {
     ...(authorizationError ? { authorizationError } : {}),
     peerCertificates: Object.freeze(r.peerCertificates.map(fromBase64)),
     cipher: Object.freeze({ ...r.cipher }),
+    ...keylogOf(r.keylog),
   });
+}
+
+function keylogOf(lines: string[] | undefined): { keylog?: readonly string[] } {
+  return lines ? { keylog: Object.freeze([...lines]) } : {};
 }
 
 function clientCert(tls: JsTlsOptions, what = 'connect') {
@@ -245,6 +256,7 @@ function tlsRequest(tls: JsTlsOptions) {
     ...(tls.rejectUnauthorized === false ? { insecure: true } : {}),
     ...(tls.sni === false ? { sni: false as const } : {}),
     ...(tls.checkHostname === false ? { checkHostname: false as const } : {}),
+    ...(tls.keylog === true ? { keylog: true } : {}),
     ...clientCert(tls),
   };
 }
@@ -284,6 +296,7 @@ function sessionOf(r: WireSession): JsTlsSession {
     servername: r.servername,
     peerCertificates: Object.freeze((r.peerCertificates ?? []).map(fromBase64)),
     ...controlsOf(r),
+    ...keylogOf(r.keylog),
   });
 }
 
