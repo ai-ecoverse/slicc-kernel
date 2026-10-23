@@ -667,6 +667,7 @@ export class RealmProxy {
     const stopping = () => socket.close(1001, 'the proxy is stopping');
     stop.addEventListener('abort', stopping, { once: true });
     let guestDone = false;
+    let guestClosed = false;
     let closeSent = false;
     const outbound = (async () => {
       for await (const data of socket.messages) {
@@ -680,6 +681,7 @@ export class RealmProxy {
       if (guestDone) return;
       closeSent = true;
       await toGuest(closeFrame(wireCode(closed.code), closed.reason));
+      if (guestClosed) return;
       AbortSignal.timeout(this.limits.closeWaitMs).addEventListener('abort', () => done.abort(), {
         once: true,
       });
@@ -694,15 +696,13 @@ export class RealmProxy {
           continue;
         }
         if (event.kind === 'close') {
-          guestDone = true;
           if (closeSent) break;
+          guestClosed = true;
           const code = wireCode(event.code);
           socket.close(code, event.reason);
-          const reply = await Promise.race([
-            socket.closed,
-            quietly(this.limits.closeWaitMs).then(() => ({ code, reason: event.reason })),
-          ]);
-          await toGuest(closeFrame(wireCode(reply.code), reply.reason));
+          await Promise.race([outbound, quietly(this.limits.closeWaitMs)]);
+          guestDone = true;
+          if (!closeSent) await toGuest(closeFrame(code, event.reason));
           break;
         }
         while (socket.buffered > SEND_BUFFER && !reading.aborted) await quietly(10);
