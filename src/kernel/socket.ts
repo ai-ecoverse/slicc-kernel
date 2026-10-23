@@ -173,8 +173,10 @@ export class KernelSocket implements KernelFile {
   }
   async peek(max: number, signal?: AbortSignal): Promise<Uint8Array> {
     const { rx } = this.connection();
+    if (this.refused) throw this.refused;
     if (this.readShut || max <= 0) return new Uint8Array(0);
     const bytes = await pipeCall(() => rx.peek(max, signal));
+    if (this.refused) throw this.refused;
     if (bytes.length === 0 && this.reset) throw this.reset;
     return bytes;
   }
