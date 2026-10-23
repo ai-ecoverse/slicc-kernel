@@ -359,6 +359,10 @@ export class VfsNode {
 
   private positionalAt = Number.NEGATIVE_INFINITY;
 
+  shared(): void {
+    this.positionalAt = Number.NEGATIVE_INFINITY;
+  }
+
   async pwrite(bytes: Uint8Array, at: number): Promise<number> {
     if (bytes.length === 0) return 0;
     await this.settled();
@@ -590,6 +594,10 @@ export class VfsNodes implements UnlinkHolder {
     this.byPath.delete(path);
     if (node.path === path) node.renamedTo(others[0] as string);
     return true;
+  }
+
+  shared(): void {
+    for (const node of new Set(this.byPath.values())) node.shared();
   }
 
   holdsAny(): boolean {
