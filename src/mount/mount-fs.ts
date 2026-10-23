@@ -1152,6 +1152,22 @@ class MountFs implements KernelFs {
     }
   }
 
+  async append(path: string, bytes: Uint8Array, redirects = 0): Promise<number> {
+    const real = await this.follow(path, 0, true);
+    const { append } = this.base;
+    if (!this.at(real) && append) {
+      return this.based(
+        [real],
+        redirects,
+        () => append.call(this.base, real, bytes),
+        ([to], n) => this.append(to as string, bytes, n)
+      );
+    }
+    const end = (await this.stat(real)).size;
+    await this.pwrite(real, end, bytes, true);
+    return end + bytes.length;
+  }
+
   async pwrite(
     path: string,
     offset: number,

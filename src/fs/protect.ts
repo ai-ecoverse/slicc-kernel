@@ -232,6 +232,14 @@ export class ProtectedFs {
             },
           }
         : {}),
+      ...(fs.append
+        ? {
+            async append(path: string, bytes: Uint8Array) {
+              await check(path, true);
+              return (fs.append as NonNullable<KernelFs['append']>).call(fs, path, bytes);
+            },
+          }
+        : {}),
       ...(fs.truncate
         ? {
             async truncate(path: string, size: number) {

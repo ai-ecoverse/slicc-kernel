@@ -105,6 +105,15 @@ export class FreshModules {
         if (fresh) this.fresh.set(normalizePath(to), fresh);
       },
     };
+    const { append } = fs;
+    if (append) {
+      overrides.append = async (path: string, bytes: Uint8Array) => {
+        const fresh = this.fresh.has(normalizePath(path));
+        const end = await append.call(fs, path, bytes);
+        if (fresh && end - bytes.length < MAGIC.length) await decide(path);
+        return end;
+      };
+    }
     const ranged = rangedOps(fs);
     if (ranged) {
       overrides.pwrite = async (
