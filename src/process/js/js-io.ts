@@ -36,6 +36,28 @@ export const CHUNK = 64 * 1024;
 export const MAX_IO = 1024 * 1024;
 export const MAX_PREAD = 16 * 1024 * 1024;
 
+export function readingInto(
+  read: (position: number, length: number) => Uint8Array
+): (position: number, into: Uint8Array, offset?: number, length?: number) => number {
+  return (position, into, offset = 0, length = into.length - offset) => {
+    const target = intoTarget(into, offset, length) as { into: Uint8Array; at: number };
+    const chunk = read(position, length);
+    target.into.set(chunk, target.at);
+    return chunk.length;
+  };
+}
+
+export function readingIntoAsync(
+  read: (position: number, length: number) => Promise<Uint8Array>
+): (position: number, into: Uint8Array, offset?: number, length?: number) => Promise<number> {
+  return async (position, into, offset = 0, length = into.length - offset) => {
+    const target = intoTarget(into, offset, length) as { into: Uint8Array; at: number };
+    const chunk = await read(position, length);
+    target.into.set(chunk, target.at);
+    return chunk.length;
+  };
+}
+
 export function intoTarget(
   into: Uint8Array | undefined,
   offset: number,
