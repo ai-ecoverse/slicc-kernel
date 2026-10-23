@@ -215,6 +215,7 @@ class Throttle {
 
 export class EmbedderChannel {
   readonly access: OpenAccess;
+  readonly owner: number;
   caller: EmbedderCaller;
   private readonly broker: EmbedderBroker;
   private header: Uint8Array = new Uint8Array(0);
@@ -233,6 +234,7 @@ export class EmbedderChannel {
     this.broker = broker;
     this.access = access;
     this.caller = caller;
+    this.owner = caller.pid;
   }
 
   get dispatched(): boolean {
@@ -486,9 +488,9 @@ export class EmbedderBroker {
   }
 
   release(channel: EmbedderChannel): void {
-    const mine = this.open.get(channel.caller.pid);
+    const mine = this.open.get(channel.owner);
     if (!mine?.delete(channel)) return;
-    if (mine.size === 0) this.open.delete(channel.caller.pid);
+    if (mine.size === 0) this.open.delete(channel.owner);
     this.budget.give(2 * EMBEDDER_WINDOW);
   }
 }
