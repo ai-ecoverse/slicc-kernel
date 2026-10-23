@@ -700,12 +700,27 @@ async function linkedElsewhere(fs: KernelFs, path: string, from?: string): Promi
   return !(source && source.ino === st.ino && source.dev === st.dev);
 }
 
+async function gatedByHandle(
+  entry: SyncFsTokenEntry,
+  opEntry: SyncFsTokenEntry,
+  path: string,
+  req: SyncFsRequest,
+  opReq: SyncFsRequest
+): Promise<SyncFsResult> {
+  const heldAt = () => (req.handle === undefined ? undefined : opEntry.heldAt?.(req.handle));
+  if (req.handle !== undefined) await opEntry.replacements?.landed?.(heldAt() ?? path);
+  const at = heldAt() ?? path;
+  const serve = async () => run(opEntry, await keptOr(opEntry, at, req.handle), opReq);
+  return entry.gate ? entry.gate(at, serve) : serve();
+}
+
 async function keptOr(entry: SyncFsTokenEntry, path: string, handle?: number): Promise<string> {
   if (handle !== undefined) {
     const hidden = entry.keptFor?.(handle)?.hidden;
     if (hidden !== undefined) return hidden;
-    await bound(entry, path, handle);
-    return path;
+    const at = entry.heldAt?.(handle) ?? path;
+    await bound(entry, at, handle);
+    return at;
   }
   const kept = entry.unlinked?.(path);
   return kept && !(await entry.fs.exists(path)) ? kept.hidden : path;
@@ -962,9 +977,7 @@ async function dispatchPath(entry: SyncFsTokenEntry, req: SyncFsRequest): Promis
     if (entry.revoked?.(resolvedPath))
       return { ok: false, errno: 'EIO', message: `${resolvedPath} was unmounted` };
     if ((req.op === 'write' && req.mode === 1) || UNLINKED_OPS.has(req.op)) {
-      const serve = async () =>
-        run(opEntry, await keptOr(opEntry, resolvedPath, req.handle), opReq);
-      return await (entry.gate ? entry.gate(resolvedPath, serve) : serve());
+      return await gatedByHandle(entry, opEntry, resolvedPath, req, opReq);
     }
     if (!entry.own || !OWN_OPS.has(req.op)) return await run(opEntry, resolvedPath, opReq);
     const target =

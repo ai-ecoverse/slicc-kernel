@@ -3272,9 +3272,9 @@ export class Launcher {
 
   private moved(from: string, to: string, source?: VfsNodes): void {
     this.renameLog.add(from, to);
+    for (const holds of this.held) holds.renamed(from, to);
     if (source) return;
     for (const nodes of this.openFiles) nodes.renamed(from, to);
-    for (const holds of this.held) holds.renamed(from, to);
     this.watchers.moved(from, to);
   }
 

@@ -18,6 +18,7 @@ export interface SyncFsTokenEntry {
     fid?: string
   ) => number | undefined;
   keptFor?: (handle: number) => KeptFile | undefined;
+  heldAt?: (handle: number) => string | undefined;
   boundIno?: (handle: number) => { ino: number; fid?: string; doubt: number } | undefined;
   fileId?: (path: string) => Promise<string> | undefined;
   trust?: (handle: number, doubt: number) => void;
