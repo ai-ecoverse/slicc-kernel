@@ -13,6 +13,7 @@ import {
   normalizePath,
   type OwnerChange,
   type Perm,
+  type PwriteOptions,
   redirectOf,
 } from '../fs/types.ts';
 import type { KeptFile, UnlinkHolder } from '../fs/unlinked.ts';
@@ -139,6 +140,10 @@ export class HeldSet extends Set<HeldPaths> {
     }
   }
 
+  async bindIds(id: (path: string) => Promise<string> | undefined): Promise<void> {
+    for (const holds of [...this]) await holds.bindIds(id);
+  }
+
   override delete(holds: HeldPaths): boolean {
     const removed = super.delete(holds);
     for (const path of new Set([...holds.keys(), ...holds.opens.keys()])) this.idle(path);
@@ -162,7 +167,7 @@ export class HeldPaths extends Map<string, number> implements UnlinkHolder {
   private readonly uses = new Map<KeptFile, number>();
   private lastHandle = 0;
   private owning: string | undefined;
-  private readonly bound = new Map<number, number>();
+  private readonly bound = new Map<number, { ino: number; fid?: string }>();
   private readonly doubted = new Map<number, number>();
   private doubts = 0;
 
@@ -201,10 +206,20 @@ export class HeldPaths extends Map<string, number> implements UnlinkHolder {
     }
   }
 
-  boundIno(handle: number): { ino: number; doubt: number } | undefined {
+  boundIno(handle: number): { ino: number; fid?: string; doubt: number } | undefined {
     const doubt = this.doubted.get(handle);
-    const ino = this.bound.get(handle);
-    return doubt === undefined || ino === undefined ? undefined : { ino, doubt };
+    const bound = this.bound.get(handle);
+    return doubt === undefined || bound === undefined ? undefined : { ...bound, doubt };
+  }
+
+  async bindIds(id: (path: string) => Promise<string> | undefined): Promise<void> {
+    for (const [handle, bound] of [...this.bound]) {
+      const key = this.handles.get(handle);
+      if (bound.fid !== undefined || key === undefined) continue;
+      const fid = await id(key)?.catch(() => undefined);
+      if (fid !== undefined && this.bound.get(handle) === bound)
+        this.bound.set(handle, { ...bound, fid });
+    }
   }
 
   trust(handle: number, doubt: number): void {
@@ -260,7 +275,8 @@ export class HeldPaths extends Map<string, number> implements UnlinkHolder {
     open = false,
     real?: string,
     handle?: number,
-    ino?: number
+    ino?: number,
+    fid?: string
   ): number | undefined {
     if (open) {
       const made = this.holdOpen(path, on, real, handle);
@@ -268,7 +284,8 @@ export class HeldPaths extends Map<string, number> implements UnlinkHolder {
         this.bound.delete(handle);
         this.doubted.delete(handle);
       }
-      if (made !== undefined && ino !== undefined) this.bound.set(made, ino);
+      if (made !== undefined && ino !== undefined)
+        this.bound.set(made, fid === undefined ? { ino } : { ino, fid });
       return made;
     }
     this.holdWrite(path, on);
@@ -1136,6 +1153,7 @@ class MountFs implements KernelFs {
     offset: number,
     bytes: Uint8Array,
     transfer = false,
+    options?: PwriteOptions,
     redirects = 0
   ): Promise<void> {
     const real = await this.follow(path, 0, true);
@@ -1145,8 +1163,8 @@ class MountFs implements KernelFs {
       return this.based(
         [real],
         redirects,
-        () => pwrite.call(this.base, real, offset, bytes),
-        ([to], n) => this.pwrite(to as string, offset, bytes, transfer, n)
+        () => pwrite.call(this.base, real, offset, bytes, false, options),
+        ([to], n) => this.pwrite(to as string, offset, bytes, transfer, options, n)
       );
     }
     if (!found)
@@ -1170,7 +1188,7 @@ class MountFs implements KernelFs {
       op: 'open',
       path: rel,
       write: true,
-      create: true,
+      create: options?.create !== false,
       truncate: false,
       exclusive: false,
     })) as number;

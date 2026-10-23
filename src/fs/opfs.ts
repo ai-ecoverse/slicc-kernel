@@ -25,6 +25,7 @@ import {
   type OwnerChange,
   type Peers,
   type Perm,
+  type PwriteOptions,
   redirected,
   resolvePath,
 } from './types.ts';
@@ -456,9 +457,10 @@ export class OpfsFs implements KernelFs {
 
   async fileId(path: string): Promise<string> {
     const found = await this.locate(path, true);
-    const [entry] = await this.meta.get([found.path]);
+    const [entry] = await (this.meta.fresh ?? this.meta.get).call(this.meta, [found.path]);
     if (entry?.fid !== undefined) return entry.fid;
     const fid = crypto.randomUUID();
+    this.idWrites++;
     await this.meta.update(found.path, (now) => ({
       ...occupied(now),
       path: found.path,
@@ -784,6 +786,12 @@ export class OpfsFs implements KernelFs {
 
   opfsCalls(): number {
     return this.calls;
+  }
+
+  private idWrites = 0;
+
+  fileIdWrites(): number {
+    return this.idWrites;
   }
 
   opfsOps(): number {
@@ -1332,7 +1340,13 @@ export class OpfsFs implements KernelFs {
     });
   }
 
-  async pwrite(path: string, offset: number, bytes: Uint8Array): Promise<void> {
+  async pwrite(
+    path: string,
+    offset: number,
+    bytes: Uint8Array,
+    _transfer?: boolean,
+    options?: PwriteOptions
+  ): Promise<void> {
     const at = normalizePath(path);
     const movedAway = this.renamesInFlight() ? await this.writeWaits(at) : false;
     this.fileWrites.set(at, (this.fileWrites.get(at) ?? 0) + 1);
@@ -1347,7 +1361,10 @@ export class OpfsFs implements KernelFs {
           this.files.delete(target);
         }
       }
-      const [handle] = await this.fileFor(path, !existed && !movedAway);
+      const [handle] = await this.fileFor(
+        path,
+        !existed && !movedAway && options?.create !== false
+      );
       await this.writeAt(handle, target, path, offset, bytes);
     } finally {
       this.writeEnded(at);

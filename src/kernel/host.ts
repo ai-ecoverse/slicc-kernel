@@ -141,6 +141,7 @@ export interface SpawnWasmOptions {
     since: number,
     held: readonly string[]
   ) => { now: number; renames: Array<[string, string]> };
+  fileId?: (path: string) => Promise<string> | undefined;
   renameSeq?: (from: string, to: string) => number | undefined;
   mounts?: () => MountLine[];
   mount?: WasmProcessOptions['mount'];
@@ -446,8 +447,10 @@ function holdingToken(
     cwd: opts.cwd,
     ...(opts.statfs ? { statfs: opts.statfs } : {}),
     ...(opts.renames ? { renames: opts.renames } : {}),
+    ...(opts.fileId ? { fileId: opts.fileId } : {}),
     ...(opts.renameSeq ? { renameSeq: opts.renameSeq } : {}),
-    hold: (path, on, open, real, handle, ino) => holds.hold(path, on, open, real, handle, ino),
+    hold: (path, on, open, real, handle, ino, fid) =>
+      holds.hold(path, on, open, real, handle, ino, fid),
     boundIno: holds.boundIno.bind(holds),
     trust: holds.trust.bind(holds),
     keptFor: (handle) => holds.keptFor(handle),

@@ -130,13 +130,26 @@ export class FileBuffer {
     return this.data;
   }
 
+  private spoiled = false;
+
+  spoil(): void {
+    this.spoiled = true;
+    this.dirty = false;
+  }
+
+  private live(): void {
+    if (this.spoiled) throw new WasiError('ESTALE');
+  }
+
   size(): number {
+    this.live();
     if (this.ranged) return this.ranged.size();
     this.load();
     return this.length;
   }
 
   pread(max: number, at: number): Uint8Array {
+    this.live();
     if (this.ranged) return this.ranged.read(at, max);
     const bytes = this.load();
     const n = Math.max(0, Math.min(max, this.length - at));
@@ -148,6 +161,7 @@ export class FileBuffer {
   }
 
   pwrite(bytes: Uint8Array, at: number): number {
+    this.live();
     if (bytes.length === 0) return 0;
     const end = at + bytes.length;
     this.fits(end);
@@ -168,6 +182,7 @@ export class FileBuffer {
   }
 
   append(bytes: Uint8Array): number | undefined {
+    this.live();
     const { append } = this.fs;
     if (!append || this.orphaned) return undefined;
     this.moved?.(false);
@@ -181,6 +196,7 @@ export class FileBuffer {
   }
 
   truncate(size: number): void {
+    this.live();
     this.fits(size);
     this.dirty = true;
     if (this.ranged) {
@@ -222,6 +238,7 @@ export class FileBuffer {
   }
 
   contents(): Uint8Array {
+    this.live();
     if (this.ranged) return this.ranged.read(0, this.ranged.size());
     return this.load().slice(0, this.length);
   }
