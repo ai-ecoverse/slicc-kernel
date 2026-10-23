@@ -514,7 +514,7 @@ export class VfsNodes implements UnlinkHolder {
     if (this.byId.size === 0 || !mayLink(this.fs, path)) return;
     const id = await this.identity(path);
     const node = id === undefined ? undefined : this.byId.get(id);
-    if (node) await node.serial(() => node.flush());
+    if (node) await node.byName(() => node.flush());
   }
 
   async linked(from: string, to: string): Promise<void> {
@@ -734,7 +734,7 @@ export class VfsNodes implements UnlinkHolder {
   }
 
   async flush(path: string): Promise<void> {
-    for (const [p, node] of this.byPath) if (within(p, path)) await node.serial(() => node.flush());
+    for (const [p, node] of this.byPath) if (within(p, path)) await node.byName(() => node.flush());
   }
 
   async unlinking(path: string): Promise<void> {
