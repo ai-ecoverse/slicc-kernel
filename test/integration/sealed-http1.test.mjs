@@ -468,3 +468,44 @@ test(
     assert.deepEqual([got.substitutes, got.got], [true, 'ok']);
   }
 );
+
+function framed(text) {
+  const out = [];
+  let rest = Buffer.from(text);
+  while (rest.length > 0) {
+    const end = rest.indexOf('\r\n\r\n');
+    if (end < 0) return { out, trailing: rest.toString() };
+    const head = rest.subarray(0, end).toString();
+    const length = Number(/^content-length:\s*(\d+)/im.exec(head)?.[1] ?? 0);
+    out.push({
+      status: head.split('\r\n')[0],
+      body: rest.subarray(end + 4, end + 4 + length).toString(),
+    });
+    rest = rest.subarray(end + 4 + length);
+  }
+  return { out, trailing: '' };
+}
+
+test(
+  'a secret the server reflects in a Content-Length body is scrubbed to its own length, so the next response on the connection still parses (#1509)',
+  TIMEOUT,
+  async (t) => {
+    const a = await server(t, ca.server('api.test'));
+    const { run } = await kernelWith(t, [['api.test', a.port]]);
+    const first = `GET /v1/me HTTP/1.1\r\nHost: api.test\r\nAuthorization: Bearer ${PH}\r\n\r\n`;
+    const [got] = await run([
+      { host: 'api.test', port: 465, tls: {}, writes: [first, get([], { path: '/stored' })] },
+    ]);
+    assert.equal(got.substitutes, true, JSON.stringify(got));
+    assert.equal(got.got.includes(SECRET), false);
+    const { out, trailing } = framed(got.got);
+    assert.deepEqual(
+      out.map((r) => r.status),
+      ['HTTP/1.1 200 OK', 'HTTP/1.1 200 OK'],
+      JSON.stringify(got.got)
+    );
+    assert.equal(trailing, '');
+    assert.match(out[0].body, new RegExp(`Authorization: Bearer \\*{${SECRET.length}}\\r\\n`));
+    assert.equal(out[1].body, `STORED ${'*'.repeat(SECRET.length)}\n`);
+  }
+);
