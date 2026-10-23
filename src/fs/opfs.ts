@@ -452,6 +452,22 @@ export class OpfsFs implements KernelFs {
     this.channel?.postMessage(paths);
   }
 
+  private heldUnder: (dir: string) => readonly string[] = () => [];
+
+  heldBy(held: (dir: string) => readonly string[]): void {
+    this.heldUnder = held;
+  }
+
+  private async pinHeld(dir: string): Promise<void> {
+    const held = this.heldUnder(dir);
+    if (held.length === 0) return;
+    const known = await this.meta.get(held);
+    const bare = held.filter((_, i) => known[i]?.ino === undefined);
+    for (const p of bare) {
+      await this.meta.update(p, (entry) => ({ ...occupied(entry), path: p, ino: inodeOf(p) }));
+    }
+  }
+
   remoteChanges(listener: RemoteListener): () => void {
     return this.remote?.listen(listener) ?? (() => {});
   }
@@ -1780,6 +1796,7 @@ export class OpfsFs implements KernelFs {
     if (targetStat?.isDirectory && (await this.readdir(destination)).length > 0) {
       throw fsError('ENOTEMPTY', to);
     }
+    if (sourceStat.isDirectory) await this.pinHeld(source.path);
     const now = Date.now();
     const moving = await this.movedOwner(source);
     const carry = (entry: MetaEntry | undefined): MetaEntry => ({
