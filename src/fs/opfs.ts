@@ -303,6 +303,7 @@ function writeAll(access: SyncAccess, at: number, bytes: Uint8Array): void {
 async function positioned(handle: FileSystemFileHandle, op: (io: Positioned) => unknown) {
   const extent = new Extent();
   const access = await openSync(handle);
+  lastPositioned = access ? 'sync' : 'writable';
   if (access) {
     try {
       op({
@@ -2744,6 +2745,8 @@ function movedOf(moved: unknown): { from: string; to: string } | undefined {
     : undefined;
 }
 
+let lastPositioned = '';
+
 export function appendTrace(
   state: string,
   path: string,
@@ -2751,7 +2754,7 @@ export function appendTrace(
   n: number,
   after: number
 ): void {
-  console.warn(`DBG1520 ${state} ${path} end=${end} n=${n} after=${after}`);
+  console.warn(`DBG1520 ${state} ${lastPositioned} ${path} end=${end} n=${n} after=${after}`);
 }
 
 function nothing(): undefined {

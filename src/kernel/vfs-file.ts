@@ -424,6 +424,7 @@ export class VfsNode {
     }
     this.dirty = false;
     const started = performance.now();
+    flushTrace(this.path, this.length, !!this.ranged);
     try {
       await this.followed(() =>
         this.ranged
@@ -439,6 +440,11 @@ export class VfsNode {
     this.failed = false;
     this.writeBackCost = performance.now() - started;
   }
+}
+
+export function flushTrace(path: string, length: number, ranged: boolean): void {
+  if (path.includes('/root/ap/'))
+    console.warn(`DBG1520 flush ${path} len=${length} ranged=${ranged}`);
 }
 
 export class VfsNodes implements UnlinkHolder {
