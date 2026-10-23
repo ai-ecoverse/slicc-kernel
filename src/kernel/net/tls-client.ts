@@ -302,15 +302,29 @@ export interface TlsServerInfo {
   peerCertificates: Uint8Array[];
 }
 
-async function serverHandshake(conn: UplinkConn, session: TlsSession, inbox: Ciphertext) {
+const HTTP_REQUEST = /^[A-Z]{3,10} [!-~]/;
+
+function serverRefusal(err: unknown, session: TlsSession, first: Uint8Array | undefined) {
+  const opening = first ? new TextDecoder('latin1').decode(first.subarray(0, 16)) : '';
+  if (HTTP_REQUEST.test(opening))
+    return new KernelError('EPROTO', 'ERR_SSL_HTTP_REQUEST: http request');
+  const text = err instanceof TlsError ? err.message : String(err);
+  return new KernelError('EPROTO', `ERR_SSL_HANDSHAKE_FAILURE: ${text}${alertOf(session)}`);
+}
+
+async function serverHandshake(
+  conn: UplinkConn,
+  session: TlsSession,
+  inbox: Ciphertext,
+  first: () => Uint8Array | undefined
+) {
   for (;;) {
     let done: boolean;
     try {
       done = session.handshake();
     } catch (err) {
       await send(conn, session).catch(() => undefined);
-      const text = err instanceof TlsError ? err.message : String(err);
-      throw new KernelError('EPROTO', `ERR_SSL_HANDSHAKE_FAILURE: ${text}${alertOf(session)}`);
+      throw serverRefusal(err, session, first());
     }
     await send(conn, session);
     if (done) return;
@@ -328,9 +342,18 @@ export async function tlsServer(
   session: TlsSession,
   clientCerts: boolean
 ): Promise<{ conn: UplinkConn; info: TlsServerInfo }> {
-  const inbox = new Ciphertext(conn, session);
+  let first: Uint8Array | undefined;
+  const watched: UplinkConn = {
+    ...conn,
+    read: async () => {
+      const bytes = await conn.read();
+      first ??= bytes ?? undefined;
+      return bytes;
+    },
+  };
+  const inbox = new Ciphertext(watched, session);
   try {
-    await serverHandshake(conn, session, inbox);
+    await serverHandshake(conn, session, inbox, () => first);
     const chain = session.peerChain();
     const code = clientCerts ? verifyCode(session.verifyResult) : undefined;
     const info: TlsServerInfo = {

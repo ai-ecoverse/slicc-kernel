@@ -343,7 +343,8 @@ export class KernelSocket implements KernelFile {
   }
   async secureLink<T>(
     make: (raw: UplinkConn) => Promise<{ conn: UplinkConn; info: T }>,
-    signal: AbortSignal = NEVER_ABORTED
+    signal: AbortSignal = NEVER_ABORTED,
+    keeps: (reason: unknown) => boolean = () => false
   ): Promise<T> {
     const raw = this.connection();
     if (this.switch || this.served || this.writeShut || this.readShut)
@@ -368,14 +369,18 @@ export class KernelSocket implements KernelFile {
       },
     };
     let made: { conn: UplinkConn; info: T };
-    const abandon = () => view.close();
+    const abandon = () => {
+      if (!keeps(signal.reason)) view.close();
+    };
     signal.addEventListener('abort', abandon, { once: true });
     try {
       made = await make(view);
     } catch (err) {
-      view.close();
-      this.readShut = true;
-      this.writeShut = true;
+      if (!(signal.aborted && keeps(signal.reason))) {
+        view.close();
+        this.readShut = true;
+        this.writeShut = true;
+      }
       this.changes.wake();
       throw signal.aborted ? signal.reason : err;
     } finally {
