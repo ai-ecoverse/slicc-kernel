@@ -60,6 +60,7 @@ export type SocketSyscall =
       fd: number;
       how: number;
     }
+  | { op: 'sock-reset'; fd: number }
   | {
       op: 'sock-name';
       fd: number;
@@ -146,6 +147,7 @@ export const SOCKET_OPS: readonly SocketSyscall['op'][] = [
   'sock-accept',
   'sock-connect',
   'sock-shutdown',
+  'sock-reset',
   'sock-name',
   'sock-getopt',
   'sock-setopt',
@@ -239,6 +241,9 @@ export async function socketSyscall(
       return connect(req, proc);
     case 'sock-shutdown':
       anySocketAt(fds, req.fd).shutdown(req.how);
+      return ok();
+    case 'sock-reset':
+      socketAt(fds, req.fd).resetOnClose();
       return ok();
     case 'sock-name': {
       const socket = anySocketAt(fds, req.fd);

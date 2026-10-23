@@ -93,6 +93,7 @@ export class Changes {
 interface Link {
   rx: KernelPipe;
   tx: KernelPipe;
+  peer?: KernelSocket;
 }
 function link(a: KernelSocket, b: KernelSocket): void {
   const ab = new KernelPipe();
@@ -101,8 +102,8 @@ function link(a: KernelSocket, b: KernelSocket): void {
     pipe.openRead();
     pipe.openWrite();
   }
-  a.attach({ rx: ba, tx: ab });
-  b.attach({ rx: ab, tx: ba });
+  a.attach({ rx: ba, tx: ab, peer: b });
+  b.attach({ rx: ab, tx: ba, peer: a });
 }
 export interface PeerCred {
   pid: number;
@@ -125,6 +126,8 @@ export class KernelSocket implements KernelFile {
   private dialing: AbortController | undefined;
   private failed: string | undefined;
   private reset: KernelError | undefined;
+  private abortive = false;
+  private refused: KernelError | undefined;
   local: SockAddr | undefined;
   peer: SockAddr | undefined;
   peerCred: PeerCred | undefined;
@@ -161,8 +164,10 @@ export class KernelSocket implements KernelFile {
   }
   async read(max: number, signal?: AbortSignal): Promise<Uint8Array> {
     const { rx } = this.connection();
+    if (this.refused) throw this.refused;
     if (this.readShut || max <= 0) return new Uint8Array(0);
     const bytes = await pipeCall(() => rx.read(max, signal));
+    if (this.refused) throw this.refused;
     if (bytes.length === 0 && this.reset) throw this.reset;
     return bytes;
   }
@@ -175,6 +180,7 @@ export class KernelSocket implements KernelFile {
   }
   async write(bytes: Uint8Array, signal?: AbortSignal): Promise<number> {
     const { tx } = this.connection();
+    if (this.refused) throw this.refused;
     if (this.writeShut) throw new KernelError('EPIPE');
     if (this.reset?.code === 'EPROTO') throw this.reset;
     return pipeCall(() => tx.write(bytes, signal));
@@ -521,8 +527,17 @@ export class KernelSocket implements KernelFile {
   setOption(level: number, name: number, value: number): void {
     this.options.set(`${level}:${name}`, value);
   }
+  resetOnClose(): void {
+    this.connection();
+    this.abortive = true;
+  }
+  private resetBy(): void {
+    this.refused ??= new KernelError('ECONNRESET');
+    this.changes.wake();
+  }
   close(): void {
     const was = this.state;
+    if (this.abortive && was === 'connected') this.link?.peer?.resetBy();
     this.state = 'closed';
     this.dialing?.abort(new KernelError('ECONNABORTED'));
     this.dialing = undefined;
