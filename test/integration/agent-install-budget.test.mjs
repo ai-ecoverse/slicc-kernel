@@ -7,7 +7,7 @@ import { booted, installPackage } from './kernel.mjs';
 
 const AGENT = new URL('./fixtures/agent-install/', import.meta.url);
 const CALLS_MAX = 48_000;
-const REQUESTS_MAX = 270_000;
+const REQUESTS_MAX = 235_000;
 
 const chrome = await launch();
 after(() => chrome.close());
@@ -24,7 +24,7 @@ const counters = async (bash) =>
     .split('\n')
     .map(Number);
 
-test(`a serial offline agent install stays within ${CALLS_MAX} calls and ${REQUESTS_MAX} OPFS requests, limits from slow CI runners (#1425)`, {
+test(`a serial offline agent install stays within ${CALLS_MAX} calls and ${REQUESTS_MAX} OPFS requests, CI samples after #1425`, {
   timeout: 960_000,
 }, async (t) => {
   const { page, bash } = await booted(chrome, t, { users: 'enforce', registry: true });
