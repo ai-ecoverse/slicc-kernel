@@ -643,3 +643,32 @@ test('select picks a certificate by SNI and ALPN from the client offer, refuses 
   assert.equal(out.refused, 'EMFILE');
   assert.equal(out.again, 'ok');
 });
+
+test(
+  'keylog: true gives a session its NSS key log lines, the same on the kernel server and the loopback client, and a session without it has none (#1504)',
+  TIMEOUT,
+  async (t) => {
+    const run = await kernelWith(t);
+    const own = selfSigned('localhost');
+    const { server, clients } = await run({
+      tls: { cert: own.cert, key: own.key, keylog: true },
+      clients: [
+        { name: 'logged', tls: { ca: own.cert, keylog: true } },
+        { name: 'plain', tls: { ca: own.cert } },
+      ],
+    });
+    const logged = clients.logged.tls.keylog;
+    assert.equal(logged.length, 4, JSON.stringify(clients.logged));
+    assert.deepEqual(logged.map((line) => line.split(' ')[0]).sort(), [
+      'CLIENT_HANDSHAKE_TRAFFIC_SECRET',
+      'CLIENT_TRAFFIC_SECRET_0',
+      'SERVER_HANDSHAKE_TRAFFIC_SECRET',
+      'SERVER_TRAFFIC_SECRET_0',
+    ]);
+    const random = logged[0].split(' ')[1];
+    const mine = server.find((s) => s.tls.keylog.some((l) => l.includes(random)));
+    assert.deepEqual([...mine.tls.keylog].sort(), [...logged].sort());
+    assert.equal(clients.plain.tls.keylog, undefined);
+    assert.equal(server.length, 2);
+  }
+);

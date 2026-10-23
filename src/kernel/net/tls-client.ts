@@ -7,6 +7,7 @@ import {
   TLS_CLIENT_NO_SNI,
   TLS_CLIENT_VERIFY_CHAIN_ONLY,
   TLS_HANDSHAKE_SELECT,
+  TLS_KEYLOG,
   type TlsEngine,
   TlsError,
   type TlsLeaf,
@@ -49,6 +50,7 @@ export interface TlsClientInfo {
   verified: boolean;
   handshakeAt: number;
   substitutes?: boolean;
+  keylog?: string[];
 }
 
 export interface TlsClientOptions {
@@ -62,6 +64,7 @@ export interface TlsClientOptions {
   session?: TlsSession;
   clientCertificate?: boolean;
   bundled?: boolean;
+  keylog?: boolean;
 }
 
 function isIP(name: string): boolean {
@@ -72,7 +75,8 @@ export function clientFlags(o: TlsClientOptions): number {
   return (
     (o.insecure ? TLS_CLIENT_INSECURE_SKIP_VERIFY : 0) |
     (o.sni === false ? TLS_CLIENT_NO_SNI : 0) |
-    (o.checkHostname === false ? TLS_CLIENT_VERIFY_CHAIN_ONLY : 0)
+    (o.checkHostname === false ? TLS_CLIENT_VERIFY_CHAIN_ONLY : 0) |
+    (o.keylog ? TLS_KEYLOG : 0)
   );
 }
 
@@ -214,6 +218,7 @@ async function infoOf(o: TlsClientOptions, session: TlsSession): Promise<TlsClie
     ...controlsOf(o, session, protocol, chain, shape),
     verified: verdictOf(o, session),
     handshakeAt: Date.now(),
+    ...(o.keylog ? { keylog: session.keylog() } : {}),
   };
 }
 
@@ -303,6 +308,7 @@ export interface TlsServerInfo {
   authorizationError?: string;
   peerCertificates: Uint8Array[];
   cipher: TlsCipher;
+  keylog?: string[];
 }
 
 const HTTP_REQUEST = /^[A-Z]{3,10} [!-~]/;
@@ -381,7 +387,8 @@ export async function tlsServer(
   conn: UplinkConn,
   session: TlsSession,
   clientCerts: boolean,
-  select?: ServerSelect
+  select?: ServerSelect,
+  keylog = false
 ): Promise<{ conn: UplinkConn; info: TlsServerInfo }> {
   let first: Uint8Array | undefined;
   const watched: UplinkConn = {
@@ -406,6 +413,7 @@ export async function tlsServer(
       authorized: clientCerts && chain.length > 0 && code === undefined,
       ...(clientCerts && chain.length > 0 && code ? { authorizationError: code } : {}),
       peerCertificates: chain,
+      ...(keylog ? { keylog: session.keylog() } : {}),
     };
     return { conn: plaintext(conn, session, inbox), info };
   } catch (err) {
