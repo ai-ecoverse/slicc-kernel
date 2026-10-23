@@ -244,7 +244,7 @@ test('a peer that misses the rename notice still never sees the tree half moved,
 }, async (t) => {
   const { page } = await booted(chrome, t);
   await installPackage(page, 'wasm-coreutils');
-  const other = await peerTab(page, { worker: `${PEER_WORKER}?old=1` });
+  const other = await peerTab(page, { worker: `${PEER_WORKER}?deaf=1` });
   const dir = '/root/rl';
   for (let round = 0; round < 4; round++) {
     assert.deepEqual(await sh(page, tree(dir, BIG)), ok('made\n'));
@@ -489,4 +489,32 @@ test("a peer's removal or rename of the parent of a tree being renamed waits for
       );
     }
   }
+});
+
+test('a directory rename that copies is EBUSY, with nothing moved, while a tab running a kernel without rename acks shares the root, and works once that tab is gone (#1309)', {
+  timeout: 600_000,
+}, async (t) => {
+  const { page } = await booted(chrome, t);
+  await installPackage(page, 'wasm-coreutils');
+  const old = await peerTab(page, { worker: `${PEER_WORKER}?old=1` });
+  const dir = '/root/ro';
+  assert.deepEqual(await sh(page, tree(dir, 40)), ok('made\n'));
+  const refused = await sh(page, `mv ${dir}/a ${dir}/b; echo "mv $?"`);
+  assert.match(refused.stdout, /mv 1\n$/, JSON.stringify(refused));
+  assert.match(refused.stderr, /Resource busy/);
+  assert.ok(wholeAs(40)((await sh(page, whole(dir))).stdout), 'the tree is whole and unmoved');
+  await old.evaluate(() => window.kernel.terminate());
+  await old.close();
+  const began = performance.now();
+  let moved;
+  for (let i = 0; i < 100; i++) {
+    moved = await sh(page, `mv ${dir}/a ${dir}/b 2> /dev/null && echo moved`);
+    if (moved.stdout === 'moved\n') break;
+    await sleep(50);
+  }
+  const took = performance.now() - began;
+  console.log(`#1309: a closed old tab stopped blocking renames after ${Math.round(took)} ms`);
+  assert.equal(moved.stdout, 'moved\n');
+  assert.ok(took < 5000, `${took} ms`);
+  assert.ok(wholeAs(40)((await sh(page, whole(dir))).stdout));
 });

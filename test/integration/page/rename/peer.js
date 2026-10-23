@@ -1,4 +1,5 @@
-const state = { noticeDelay: 0, old: new URL(self.location.href).searchParams.has('old') };
+const params = new URL(self.location.href).searchParams;
+const state = { noticeDelay: 0, old: params.has('old'), deaf: params.has('deaf') };
 const control = new BroadcastChannel('rename-peer-control');
 control.onmessage = ({ data }) => {
   if (!data?.set) return;
@@ -7,7 +8,9 @@ control.onmessage = ({ data }) => {
 };
 const watching = (channel) => channel.name.endsWith(':watch');
 const post = BroadcastChannel.prototype.postMessage;
+let me;
 BroadcastChannel.prototype.postMessage = function (data) {
+  if (watching(this) && data?.hello !== undefined) me = data.hello;
   if (watching(this) && state.old && data?.renames) {
     const { renames: _, ...rest } = data;
     return post.call(this, rest);
@@ -19,14 +22,19 @@ Object.defineProperty(BroadcastChannel.prototype, 'onmessage', {
   ...handler,
   set(listener) {
     handler.set.call(this, (event) => {
+      const missing = state.old || state.deaf;
       const touched = [...(event.data?.paths ?? []), ...(event.data?.trees ?? [])];
       if (
-        state.old &&
+        missing &&
         this.name.startsWith('slicc-kernel-meta:') &&
         touched.some((path) => String(path).startsWith('/.slicc-renames'))
       )
         return undefined;
       if (watching(this) && event.data?.renaming) {
+        if (state.deaf && me !== undefined) {
+          post.call(this, { ack: event.data.seq, from: me, to: event.data.tab });
+          return undefined;
+        }
         if (state.old) return undefined;
         if (state.noticeDelay > 0) {
           setTimeout(() => listener.call(this, event), state.noticeDelay);
