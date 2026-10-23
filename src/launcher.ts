@@ -860,7 +860,7 @@ export class Launcher {
     options.fs.heldBy?.((dir) =>
       holders
         .flatMap((set) => [...set].flatMap((holder) => [...holder.held()]))
-        .filter((p) => p.startsWith(`${dir}/`))
+        .filter((p) => p.startsWith(`${dir}/`) && this.mounts.locate(p) === undefined)
     );
     this.unlinked = new UnlinkedKeeper(
       fs,
