@@ -680,11 +680,8 @@ export class RealmProxy {
       const closed = await socket.closed;
       if (guestDone) return;
       closeSent = true;
-      if (guestClosed) {
-        await toGuest(closeFrame(wireCode(closed.code), closed.reason));
-        return;
-      }
       await toGuest(closeFrame(wireCode(closed.code), closed.reason));
+      if (guestClosed) return;
       AbortSignal.timeout(this.limits.closeWaitMs).addEventListener('abort', () => done.abort(), {
         once: true,
       });
