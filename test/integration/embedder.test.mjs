@@ -31,6 +31,7 @@ function page(name = 'page') {
       'test.wait': {},
       'test.fail': {},
       'test.video': { group: 'video' },
+      'test.later': {},
       'test.users': { group: 'users' },
       'test.named': { users: ['carol'] },
     },
@@ -67,6 +68,10 @@ function page(name = 'page') {
             reject(request.signal.reason);
           })
         );
+      }
+      if (request.kind === 'test.later') {
+        await new Promise((r) => setTimeout(r, 800));
+        throw Object.assign(new Error('denied after a prompt'), { name: 'NotAllowedError' });
       }
       if (request.kind === 'test.fail') {
         const name = request.options.as;
@@ -296,5 +301,24 @@ test(
       cwd: '/tmp',
     });
     assert.equal(after.stdout, 'opened\n');
+  }
+);
+
+test(
+  'a page that refuses after a delay, without reading a body over 1 MiB, frees the blocked writer with EACCES, read-write and write-only (#1527 review)',
+  TIMEOUT,
+  async (t) => {
+    const { hook } = page();
+    const { bash } = await booted(t, { requests: hook });
+    const rw = await bash(
+      `head -c 4000000 /dev/zero > in; exec 3<>/dev/embedder; { printf '%s\\n' '{"kind":"test.later"}'; cat in; } >&3; echo "w $?"`
+    );
+    assert.match(rw.stdout, /w 1/);
+    assert.match(rw.stderr, /denied after a prompt/);
+    const wo = await bash(
+      `{ printf '%s\\n' '{"kind":"test.later"}'; head -c 2097152 /dev/zero; } | cat > /dev/embedder; echo "rc=$?"`
+    );
+    assert.match(wo.stdout, /rc=1/);
+    assert.match(wo.stderr, /Permission denied/);
   }
 );

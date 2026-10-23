@@ -137,6 +137,7 @@ export function embedderAsker(port: EmbedderPort) {
         Object.assign(new Error(message.error.message), { name: message.error.name })
       );
       asks.delete(message.id);
+      void asked.body.cancel(message.error.message).catch(() => undefined);
       push(asked, message.error);
     } else if ('progress' in message) asked.progress(message.progress);
     else void sendBody(message.id, asked);

@@ -274,6 +274,7 @@ export class EmbedderChannel {
       )
       .then((reply) => replyStream(reply).getReader());
     this.replied = asked.catch((err: unknown) => {
+      body.end();
       throw this.fail(err);
     });
     this.replied.catch(() => undefined);
@@ -301,12 +302,13 @@ export class EmbedderChannel {
 
   private async writeBody(bytes: Uint8Array, signal?: AbortSignal): Promise<number> {
     const body = this.body as BodyPipe;
-    while (body.full) {
+    while (body.full && !this.failure) {
       await interruptible(body.waitRoom(), signal).catch((err: unknown) => {
         this.cancel('interrupted');
         throw err;
       });
     }
+    if (this.failure) throw this.report(this.failure);
     body.push(bytes);
     return bytes.length;
   }
