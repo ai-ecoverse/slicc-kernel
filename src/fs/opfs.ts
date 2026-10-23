@@ -1917,6 +1917,17 @@ export class OpfsFs implements KernelFs {
     hooks: { notify?: () => void; started?: () => Promise<void> }
   ): Promise<void> {
     const remote = this.remote;
+    const older = remote?.legacy() ?? [];
+    if (older.length > 0) {
+      this.ackBusy++;
+      if (!this.warnedLegacy) {
+        this.warnedLegacy = true;
+        console.warn(
+          `slicc-kernel: renaming ${from} to ${to} gave up (EBUSY): a tab running an older slicc-kernel shares this root and can't be waited for; reload it to rename directories (#1309)`
+        );
+      }
+      throw fsError('EBUSY', from);
+    }
     if (remote && !this.shared() && !(await remote.joinedAll(RENAME_ACK_MAX_MS))) {
       this.ackBusy++;
       console.warn(
@@ -1968,6 +1979,7 @@ export class OpfsFs implements KernelFs {
   }
 
   private renameAcks = 0;
+  private warnedLegacy = false;
   private ackBusy = 0;
   private readonly ackMs: number[] = [];
   private readonly ownLocks = new Set<string>();

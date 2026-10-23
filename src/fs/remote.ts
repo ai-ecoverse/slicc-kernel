@@ -139,6 +139,10 @@ export class RemoteWatch {
     }
   }
 
+  legacy(): string[] {
+    return [...this.peers].filter((peer) => !this.ackers.has(peer));
+  }
+
   crowded(): boolean {
     return !this.settled || this.peers.size > 0;
   }
