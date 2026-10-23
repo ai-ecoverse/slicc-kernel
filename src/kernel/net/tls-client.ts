@@ -87,6 +87,7 @@ export function openSession(o: TlsClientOptions): TlsSession {
 class Ciphertext {
   private readonly queue: Uint8Array[] = [];
   private ended = false;
+  opening: Uint8Array = new Uint8Array(0);
   private readonly conn: UplinkConn;
   private readonly session: TlsSession;
   constructor(conn: UplinkConn, session: TlsSession) {
@@ -95,11 +96,19 @@ class Ciphertext {
   }
   hand(bytes: Uint8Array): void {
     if (bytes.length > 0) this.queue.push(bytes);
+    this.note(bytes);
+  }
+  private note(bytes: Uint8Array): void {
+    if (this.opening.length >= OPENING) return;
+    const next = new Uint8Array(Math.min(OPENING, this.opening.length + bytes.length));
+    next.set(this.opening);
+    next.set(bytes.subarray(0, next.length - this.opening.length), this.opening.length);
+    this.opening = next;
   }
   async more(): Promise<boolean> {
     if (this.queue.length === 0 && !this.ended) {
       const bytes = await this.conn.read();
-      if (bytes) this.queue.push(bytes);
+      if (bytes) this.hand(bytes);
       else this.ended = true;
     }
     if (this.queue.length === 0) {
@@ -131,11 +140,46 @@ async function send(conn: UplinkConn, session: TlsSession): Promise<void> {
   }
 }
 
-function refused(engine: TlsEngine, session: TlsSession, err: unknown): KernelError {
+const OPENING = 6;
+const PLAIN_MAX = 16384;
+const ENCRYPTED_MAX = PLAIN_MAX + 320;
+const HTTP_METHODS = ['GET ', 'POST ', 'HEAD ', 'PUT ', 'PATCH', 'OPTIO', 'DELET', 'TRACE'];
+
+function headerClass(head: Uint8Array): [string, string] | undefined {
+  const [type, major, minor, hi, lo] = head as unknown as number[];
+  if (major === 0 && minor === 2) return ['ERR_SSL_WRONG_VERSION_NUMBER', 'wrong version number'];
+  const length = ((hi as number) << 8) | (lo as number);
+  if (length > ENCRYPTED_MAX) return ['ERR_SSL_PACKET_LENGTH_TOO_LONG', 'packet length too long'];
+  if (major !== 3) {
+    const text = new TextDecoder('latin1').decode(head.subarray(0, 5));
+    if (HTTP_METHODS.some((m) => text.startsWith(m)))
+      return ['ERR_SSL_HTTP_REQUEST', 'http request'];
+    return ['ERR_SSL_WRONG_VERSION_NUMBER', 'wrong version number'];
+  }
+  if (length > PLAIN_MAX) return ['ERR_SSL_DATA_LENGTH_TOO_LONG', 'data length too long'];
+  if (type === 0x16 && head.length > 5 && head[5] !== 2)
+    return ['ERR_SSL_UNEXPECTED_MESSAGE', 'unexpected message'];
+  return undefined;
+}
+
+export function recordRefusal(opening: Uint8Array): KernelError | undefined {
+  if (opening.length < 5) return undefined;
+  const found = headerClass(opening);
+  return found && new KernelError('EPROTO', `${found[0]}: ${found[1]}`);
+}
+
+function refused(
+  engine: TlsEngine,
+  session: TlsSession,
+  err: unknown,
+  opening: Uint8Array
+): KernelError {
   const flags = session.verifyResult;
   const code = verifyCode(flags);
   if (code && flags !== -1)
     return new KernelError('EPROTO', `${code}: ${engine.verifyInfo(flags).trim()}`);
+  const record = recordRefusal(opening);
+  if (record) return record;
   const text = err instanceof TlsError ? err.message : String(err);
   return new KernelError('EPROTO', `ERR_SSL_HANDSHAKE_FAILURE: ${text}${alertOf(session)}`);
 }
@@ -157,14 +201,14 @@ async function handshake(
       done = session.handshake();
     } catch (err) {
       await send(conn, session).catch(() => undefined);
-      throw refused(o.engine, session, err);
+      throw refused(o.engine, session, err, inbox.opening);
     }
     await send(conn, session);
     if (done) return;
     if (!(await inbox.more())) {
-      throw new KernelError(
-        'ECONNRESET',
-        'the server closed the connection during the TLS handshake'
+      throw (
+        recordRefusal(inbox.opening) ??
+        new KernelError('ECONNRESET', 'the server closed the connection during the TLS handshake')
       );
     }
   }
