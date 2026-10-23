@@ -52,8 +52,9 @@ async function swapped<T>(op: () => Promise<T>): Promise<T> {
 }
 const MAX_LINKS = 40;
 const CHECK_MS = 1000;
-const ABSENT_MS = 2;
-const GLANCE_MS = 2;
+const ABSENT_LOOKUPS = 256;
+const GLANCE_LOOKUPS = 64;
+const GLANCE_CAP_MS = 100;
 const ABSENT_NAMES = 4096;
 const FILE_HANDLES = 4096;
 const STALE: ReadonlySet<string> = new Set(['NotFoundError', 'TypeMismatchError']);
@@ -367,13 +368,14 @@ export class OpfsFs implements KernelFs {
   private readonly meta: MetaStore;
   private readonly dirs = new PathMap<FileSystemDirectoryHandle>();
   private readonly files = new PathMap<FileSystemFileHandle>();
-  private readonly absent = new PathMap<number>();
+  private readonly absent = new PathMap<{ at: number; op: number }>();
+  private lookups = 0;
   private changes = 0;
   private replacing: Promise<void> = Promise.resolve();
   private replacements = 0;
   private readonly glances = new WeakMap<
     FileSystemFileHandle,
-    { at: number; file: File; changes: number }
+    { at: number; op: number; file: File; changes: number }
   >();
   private readonly found = new WeakMap<FileSystemFileHandle, number>();
   private readonly checked = new WeakMap<FileSystemDirectoryHandle, number>();
@@ -786,7 +788,7 @@ export class OpfsFs implements KernelFs {
 
   private missed(path: string): void {
     if (this.absent.size >= ABSENT_NAMES) this.absent.clear();
-    this.absent.set(path, performance.now());
+    this.absent.set(path, { at: performance.now(), op: this.lookups });
   }
 
   private remember(path: string, handle: Handle, looked = false): Handle {
@@ -836,7 +838,12 @@ export class OpfsFs implements KernelFs {
     return [`/${parts.join('/')}`, name];
   }
 
+  private recent(seen: { at: number; op: number }, lookups: number): boolean {
+    return this.lookups - seen.op < lookups && performance.now() - seen.at < GLANCE_CAP_MS;
+  }
+
   private async handle(path: string): Promise<Handle> {
+    this.lookups++;
     if (split(path).length === 0) return this.root;
     const cached = this.files.get(path);
     const fresh = cached && performance.now() - (this.found.get(cached) ?? -CHECK_MS) < CHECK_MS;
@@ -856,7 +863,7 @@ export class OpfsFs implements KernelFs {
     const kept = this.dirs.get(path);
     if (kept && (await this.current(path, kept))) return kept;
     const gone = this.absent.get(path);
-    if (gone !== undefined && this.exact === 0 && performance.now() - gone < ABSENT_MS) {
+    if (gone !== undefined && this.exact === 0 && this.recent(gone, ABSENT_LOOKUPS)) {
       throw translate({ name: 'NotFoundError' }, path);
     }
     const seen = this.changes;
@@ -1103,16 +1110,17 @@ export class OpfsFs implements KernelFs {
   private glanced(handle: FileSystemFileHandle): File | undefined {
     if (this.exact > 0) return undefined;
     const seen = this.glances.get(handle);
-    const fresh = seen && seen.changes === this.changes && performance.now() - seen.at < GLANCE_MS;
+    const fresh = seen && seen.changes === this.changes && this.recent(seen, GLANCE_LOOKUPS);
     return fresh ? seen.file : undefined;
   }
 
   private async glance(handle: FileSystemFileHandle): Promise<File> {
     const at = performance.now();
+    const op = this.lookups;
     const before = this.changes;
     this.calls++;
     const file = await handle.getFile();
-    if (before === this.changes) this.glances.set(handle, { at, file, changes: before });
+    if (before === this.changes) this.glances.set(handle, { at, op, file, changes: before });
     else this.glances.delete(handle);
     return file;
   }
