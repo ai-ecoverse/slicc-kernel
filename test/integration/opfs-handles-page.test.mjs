@@ -26,7 +26,7 @@ test('a file another tab removes, rewrites or replaces with a directory reads as
   assert.deepEqual(await bash(READ), ok('cat: /home/f: Is a directory\ndir\n'));
 });
 
-test('a file the page removes or rewrites through the OPFS API reads as it now is at once, and one it replaces with a directory within a second (#774)', async (t) => {
+test('a file the page removes or rewrites through the OPFS API reads as it now is within 100 ms, and one it replaces with a directory within a second (#774, #1425)', async (t) => {
   const { page, bash } = await booted(chrome, t);
   const raw = (op) =>
     page.evaluate(async (o) => {
@@ -41,9 +41,12 @@ test('a file the page removes or rewrites through the OPFS API reads as it now i
     }, op);
   const read = 'cat /home/g 2>&1; test -d /home/g && echo dir; true';
   assert.deepEqual(await bash('printf one > /home/g; cat /home/g'), ok('one'));
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 150));
   await raw('rm');
+  await settle();
   assert.deepEqual(await bash(read), ok('cat: /home/g: No such file or directory\n'));
   await raw('write');
+  await settle();
   assert.deepEqual(await bash(read), ok('three'));
   await raw('dir');
   await new Promise((resolve) => setTimeout(resolve, 1100));
@@ -93,4 +96,23 @@ test('in the page, a 170 KB file tee writes from stdin reads back with the same 
     assert.deepEqual(await run(['tee', 'up.txt'], body), ok(body));
     assert.deepEqual(await run(['sha256sum', 'up.txt']), ok(`${sum}  up.txt\n`));
   }
+});
+
+test('a name the kernel just found missing, then a file the page creates and rewrites through the OPFS API with no notice, reads as it now is after the 100 ms cap (#1425)', async (t) => {
+  const { page, bash } = await booted(chrome, t);
+  const write = (text) =>
+    page.evaluate(async (x) => {
+      const dir = await (await navigator.storage.getDirectory()).getDirectoryHandle('home');
+      const w = await (await dir.getFileHandle('p', { create: true })).createWritable();
+      await w.write(x);
+      await w.close();
+    }, text);
+  const wait = () => new Promise((resolve) => setTimeout(resolve, 150));
+  assert.deepEqual(await bash('rm -f /home/p; test -e /home/p || echo missing'), ok('missing\n'));
+  await write('made');
+  await wait();
+  assert.deepEqual(await bash('cat /home/p'), ok('made'));
+  await write('changed');
+  await wait();
+  assert.deepEqual(await bash('cat /home/p'), ok('changed'));
 });
