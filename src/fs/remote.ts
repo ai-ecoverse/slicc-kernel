@@ -131,6 +131,9 @@ export class RemoteWatch {
 
   async peered(): Promise<boolean> {
     await this.joined;
+    while (this.flushes.size > 0) {
+      await Promise.all([...this.flushes.values()].map((flush) => flush.promise));
+    }
     return this.peers.size > 0;
   }
 
