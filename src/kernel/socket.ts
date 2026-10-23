@@ -114,6 +114,10 @@ export interface SocketName {
   key: string;
   typed: boolean;
 }
+const SERVE_CHUNK = 64 * 1024;
+const NEVER_ABORTED = new AbortController().signal;
+const EMPTY = new Uint8Array(0);
+
 export class KernelSocket implements KernelFile {
   private readonly net: LoopbackNet;
   readonly domain: SocketDomain;
@@ -332,6 +336,60 @@ export class KernelSocket implements KernelFile {
     if (this.state !== 'open') throw new KernelError('EISCONN');
     return this.dial(addr, route, secure);
   }
+  serving: { release(): void } | undefined;
+  private served = false;
+  get loopbackLinked(): boolean {
+    return this.state === 'connected' && !this.switch;
+  }
+  async secureLink<T>(
+    make: (raw: UplinkConn) => Promise<{ conn: UplinkConn; info: T }>,
+    signal: AbortSignal = NEVER_ABORTED
+  ): Promise<T> {
+    const raw = this.connection();
+    if (this.switch || this.served || this.writeShut || this.readShut)
+      throw new KernelError('EINVAL');
+    signal.throwIfAborted();
+    this.served = true;
+    let handshaking = true;
+    const view: UplinkConn = {
+      localAddr: '',
+      remoteAddr: '',
+      read: async () => {
+        const bytes = await raw.rx
+          .read(SERVE_CHUNK, handshaking ? signal : undefined)
+          .catch(() => EMPTY);
+        return bytes.length > 0 ? bytes : null;
+      },
+      write: (bytes) => raw.tx.write(bytes),
+      closeWrite: () => raw.tx.closeWrite(),
+      close: () => {
+        raw.rx.closeRead();
+        raw.tx.closeWrite();
+      },
+    };
+    let made: { conn: UplinkConn; info: T };
+    const abandon = () => view.close();
+    signal.addEventListener('abort', abandon, { once: true });
+    try {
+      made = await make(view);
+    } catch (err) {
+      view.close();
+      this.readShut = true;
+      this.writeShut = true;
+      this.changes.wake();
+      throw signal.aborted ? signal.reason : err;
+    } finally {
+      handshaking = false;
+      signal.removeEventListener('abort', abandon);
+    }
+    this.link = uplinkLink(made.conn, (err) => {
+      this.reset =
+        err instanceof KernelError && err.code === 'EPROTO' ? err : new KernelError('ECONNRESET');
+      this.changes.wake();
+    });
+    this.changes.wake();
+    return made.info;
+  }
   upgradeSecure<T>(make: (raw: UplinkConn) => Promise<{ conn: UplinkConn; info: T }>): Promise<T> {
     if (this.state !== 'connected') throw new KernelError('ENOTCONN');
     if (!this.switch) throw new KernelError('EOPNOTSUPP');
@@ -474,6 +532,8 @@ export class KernelSocket implements KernelFile {
     }
     if (this.boundAt) this.net.release(this.boundAt, this, this.named);
     this.boundAt = undefined;
+    this.serving?.release();
+    this.serving = undefined;
     this.changes.wake();
   }
   static pair(

@@ -38,8 +38,12 @@ export interface SecureProcess {
   stamp?(): Promise<SealedCaller>;
   cred?(): { pid: number };
   blocking(): AbortSignal;
+  cancelled?: AbortSignal;
   resolve(name: string, family: ResolveFamily, blocking: () => AbortSignal): Promise<string[]>;
 }
+
+export const handshakeAbort = (proc: SecureProcess): AbortSignal =>
+  proc.cancelled ?? proc.blocking();
 
 const isIP = (text: string): boolean =>
   ipv4Bytes(text) !== undefined || (text.includes(':') && ipv6Groups(text) !== undefined);
@@ -77,14 +81,14 @@ function defaultStore(engine: TlsEngine, roots: () => Promise<Uint8Array>): Prom
   return store;
 }
 
-function base64Der(text: string): Uint8Array {
+export function base64Der(text: string): Uint8Array {
   const bin = atob(text);
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
   return out;
 }
 
-function encode(bytes: Uint8Array): string {
+export function encode(bytes: Uint8Array): string {
   let bin = '';
   for (const b of bytes) bin += String.fromCharCode(b);
   return btoa(bin);
@@ -197,6 +201,10 @@ function takeCert(req: SecureRequest) {
   const cert = req.clientCert;
   if (!cert) return undefined;
   delete req.clientCert;
+  return certBytes(cert);
+}
+
+export function certBytes(cert: ClientCertRequest) {
   if (!Array.isArray(cert.chain) || cert.chain.length === 0 || typeof cert.key !== 'string')
     throw new KernelError('EINVAL', 'ERR_INVALID_ARG_VALUE: cert and key go together');
   let ders: Uint8Array[];
@@ -217,7 +225,7 @@ function takeCert(req: SecureRequest) {
   return { chain, key, pass };
 }
 
-type ClientCert = NonNullable<ReturnType<typeof takeCert>>;
+export type ClientCert = NonNullable<ReturnType<typeof takeCert>>;
 
 export function withCert(session: TlsSession, cert: ClientCert | undefined): void {
   if (!cert) return;
@@ -228,7 +236,7 @@ export function withCert(session: TlsSession, cert: ClientCert | undefined): voi
   }
 }
 
-function wipe(cert: ClientCert | undefined): void {
+export function wipe(cert: ClientCert | undefined): void {
   cert?.key.fill(0);
   cert?.pass.fill(0);
 }
@@ -412,12 +420,42 @@ export async function connectSecure(
   return sessionOf(info as TlsClientInfo, servername);
 }
 
+async function loopbackSecure(
+  proc: SecureProcess,
+  socket: KernelSocket,
+  servername: string,
+  req: SecureRequest
+): Promise<SecureSession> {
+  const prepared = await prepare(supportOf(proc.net), req, servername);
+  let ran = false;
+  try {
+    const info = await socket.secureLink(async (raw) => {
+      ran = true;
+      try {
+        return await tlsClient(raw, prepared.options);
+      } finally {
+        prepared.own?.release();
+      }
+    }, handshakeAbort(proc));
+    return sessionOf({ ...info, substitutes: false }, servername);
+  } finally {
+    if (!ran) {
+      prepared.options.session.free();
+      prepared.own?.release();
+    }
+  }
+}
+
 export async function upgradeSecure(
   proc: SecureProcess,
   socket: KernelSocket,
   req: SecureRequest
 ): Promise<SecureSession> {
   const peer = socket.peer;
+  if (socket.loopbackLinked) {
+    const host = req.servername || (peer?.family === 'inet' ? peer.host : 'localhost');
+    return loopbackSecure(proc, socket, serverName(host), req);
+  }
   const host = req.servername || (peer?.family === 'inet' ? peer.host : '');
   const servername = serverName(host);
   const port = peer?.family === 'inet' ? peer.port : 0;

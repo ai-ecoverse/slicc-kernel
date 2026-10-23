@@ -44,6 +44,19 @@ export interface JsTlsOptions {
   pfx?: unknown;
   sni?: boolean;
   checkHostname?: boolean;
+  server?: boolean;
+  requestCert?: boolean;
+  handshakeTimeout?: number;
+}
+
+export interface JsTlsServerSession {
+  readonly path: 'kernel';
+  readonly protocol: 'TLSv1.2' | 'TLSv1.3';
+  readonly alpnProtocol: string | false;
+  readonly servername: string;
+  readonly authorized: boolean;
+  readonly authorizationError?: string;
+  readonly peerCertificates: readonly Uint8Array[];
 }
 
 export interface JsConnection {
@@ -68,6 +81,7 @@ export interface JsListenOptions {
   port?: number;
   host?: string;
   backlog?: number;
+  tls?: JsTlsOptions;
 }
 
 export interface JsConnectOptions {
@@ -86,6 +100,7 @@ export interface JsResolveOptions {
 export interface JsNet {
   listen(options?: JsListenOptions): Promise<JsListener>;
   connect(options: JsConnectOptions): Promise<JsConnection>;
+  secure(conn: JsConnection, tls: JsTlsOptions): Promise<JsConnection>;
   resolve(name: string, options?: JsResolveOptions): Promise<string[]>;
 }
 
@@ -136,23 +151,56 @@ function caList(ca: unknown): string[] {
   return out;
 }
 
-function keyText(key: unknown): string {
+function keyText(key: unknown, what: string): string {
   if (key instanceof Uint8Array) return toBase64(key);
   if (typeof key === 'string') return toBase64(new TextEncoder().encode(key));
-  throw new JsCallError('EINVAL', 'connect', 'ERR_INVALID_ARG_TYPE: key must be a string or bytes');
+  throw new JsCallError('EINVAL', what, 'ERR_INVALID_ARG_TYPE: key must be a string or bytes');
 }
 
-function clientCert(tls: JsTlsOptions) {
+function serveRequest(tls: JsTlsOptions) {
+  const own = clientCert(tls, 'listen').clientCert;
+  if (!own)
+    throw new JsCallError('EINVAL', 'listen', 'ERR_INVALID_ARG_VALUE: a server needs cert and key');
+  return {
+    cert: own,
+    ...(tls.ca !== undefined ? { ca: caList(tls.ca) } : {}),
+    ...(tls.requestCert ? { requestCert: true } : {}),
+    ...(tls.rejectUnauthorized === false ? { rejectUnauthorized: false } : {}),
+    ...(tls.alpn ? { alpn: [...tls.alpn] } : {}),
+    ...(tls.handshakeTimeout !== undefined ? { handshakeTimeout: tls.handshakeTimeout } : {}),
+  };
+}
+
+interface ServedWire {
+  protocol: 'TLSv1.2' | 'TLSv1.3';
+  alpnProtocol: string | false;
+  servername: string;
+  authorized: boolean;
+  authorizationError?: string;
+  peerCertificates: string[];
+}
+
+function servedOf(r: ServedWire): JsTlsServerSession {
+  const { authorizationError, ...rest } = r;
+  return Object.freeze({
+    ...rest,
+    path: 'kernel',
+    ...(authorizationError ? { authorizationError } : {}),
+    peerCertificates: Object.freeze(r.peerCertificates.map(fromBase64)),
+  });
+}
+
+function clientCert(tls: JsTlsOptions, what = 'connect') {
   if (tls.pfx !== undefined) {
-    throw new JsCallError('ENOTSUP', 'connect', 'pfx is not supported: pass cert and key');
+    throw new JsCallError('ENOTSUP', what, 'pfx is not supported: pass cert and key');
   }
   if (tls.cert === undefined && tls.key === undefined) return {};
   const chain = tls.cert === undefined ? [] : caList(tls.cert);
   if (chain.length === 0 || tls.key === undefined) {
-    throw new JsCallError('EINVAL', 'connect', 'ERR_INVALID_ARG_VALUE: cert and key go together');
+    throw new JsCallError('EINVAL', what, 'ERR_INVALID_ARG_VALUE: cert and key go together');
   }
   const passphrase = tls.passphrase === undefined ? {} : { passphrase: String(tls.passphrase) };
-  return { clientCert: { chain, key: keyText(tls.key), ...passphrase } };
+  return { clientCert: { chain, key: keyText(tls.key, what), ...passphrase } };
 }
 
 function tlsRequest(tls: JsTlsOptions) {
@@ -239,6 +287,7 @@ interface InetAddr {
 
 const SHUT_RD = 0;
 const SHUT_WR = 1;
+const LOOPBACK = /^(localhost|127\.\d{1,3}\.\d{1,3}\.\d{1,3})$/;
 const IPV4 = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/;
 const NEVER = new AbortController().signal;
 const SOL_SOCKET = 1;
@@ -261,6 +310,148 @@ function port(n: number): number {
 
 export interface JsSyncNet {
   listen(options?: JsListenOptions): JsListener;
+}
+
+async function serveOn(
+  kernel: JsKernel,
+  conn: JsConnection,
+  req: object,
+  signal: AbortSignal = NEVER
+): Promise<JsConnection> {
+  const r = await secureCall(
+    () => kernel.blocking({ op: 'sock-tls-serve', fd: conn.fd, ...req }, signal),
+    'accept'
+  );
+  const wire = (r.ok && r.kind === 'json' ? r.json : {}) as ServedWire;
+  return Object.assign(Object.create(conn), { tls: servedOf(wire) });
+}
+
+export const HANDSHAKES_MAX = 64;
+
+function changeOf(waiters: Set<() => void>, signal: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const done = () => {
+      waiters.delete(done);
+      signal.removeEventListener('abort', done);
+      resolve();
+    };
+    waiters.add(done);
+    signal.addEventListener('abort', done, { once: true });
+  });
+}
+
+export function securedAccepts(
+  plain: (signal: AbortSignal) => Promise<JsConnection>,
+  serve: (conn: JsConnection, signal: AbortSignal) => Promise<JsConnection>,
+  stop: AbortSignal,
+  cap: number
+): (signal: AbortSignal) => Promise<JsConnection> {
+  const ready: JsConnection[] = [];
+  const waiters = new Set<() => void>();
+  let failure: unknown;
+  let pumping = false;
+  let inFlight = 0;
+  const wake = () => {
+    for (const w of [...waiters]) w();
+  };
+  const handshake = (conn: JsConnection) => {
+    inFlight++;
+    serve(conn, stop)
+      .then(
+        (secured) => {
+          if (stop.aborted) void secured.close();
+          else ready.push(secured);
+        },
+        () => conn.close()
+      )
+      .finally(() => {
+        inFlight--;
+        wake();
+      });
+  };
+  const pump = async () => {
+    for (;;) {
+      try {
+        while (inFlight + ready.length >= cap) {
+          stop.throwIfAborted();
+          await changeOf(waiters, stop);
+        }
+        handshake(await plain(stop));
+      } catch (err) {
+        failure = err;
+        for (const left of ready.splice(0)) void left.close();
+        wake();
+        return;
+      }
+    }
+  };
+  return async (signal) => {
+    if (!pumping) {
+      pumping = true;
+      void pump();
+    }
+    for (;;) {
+      if (stop.aborted) throw stop.reason;
+      const next = ready.shift();
+      if (next) {
+        wake();
+        return next;
+      }
+      if (failure !== undefined) throw failure;
+      signal.throwIfAborted();
+      await changeOf(waiters, signal);
+    }
+  };
+}
+
+interface ListenerOps {
+  kernel: JsKernel;
+  io: NetIo;
+  connection(fd: number): Promise<JsConnection>;
+  serve(conn: JsConnection, req: object, signal?: AbortSignal): Promise<JsConnection>;
+}
+
+function listenerOf(ops: ListenerOps, fd: number, at: JsAddress, handshakes: number): JsListener {
+  const { kernel, io, connection, serve } = ops;
+  const stop = new AbortController();
+  const acceptPlain = async (signal: AbortSignal): Promise<JsConnection> => {
+    for (;;) {
+      signal.throwIfAborted();
+      const r = await kernel.raw({ op: 'sock-accept', fd, nonblock: true });
+      if (r.ok) return connection(((r.kind === 'json' ? r.json : {}) as { fd: number }).fd);
+      if (r.errno !== 'EAGAIN') throw new JsCallError(r.errno, 'accept');
+      await kernel.blocking({ op: 'fd-select', read: [fd], write: [], timeoutMs: -1 }, signal);
+    }
+  };
+  const next =
+    handshakes > 0
+      ? securedAccepts(acceptPlain, (c, s) => serve(c, { from: fd }, s), stop.signal, handshakes)
+      : acceptPlain;
+  const accept = (options: { signal?: AbortSignal } = {}): Promise<JsConnection> =>
+    next(AbortSignal.any([options.signal ?? NEVER, stop.signal]));
+  return {
+    fd,
+    ...at,
+    accept,
+    async close() {
+      stop.abort(new JsCallError('EBADF', 'listener closed'));
+      await io.close(fd);
+    },
+    async *[Symbol.asyncIterator]() {
+      for (;;) {
+        try {
+          yield await accept();
+        } catch (err) {
+          if (stop.signal.aborted) return;
+          throw err;
+        }
+      }
+    },
+  };
+}
+
+function capOf(options: JsListenOptions, tls: object | undefined): number {
+  return tls ? Math.max(1, Math.min(options.backlog ?? 128, HANDSHAKES_MAX)) : 0;
 }
 
 export function netOps(
@@ -320,59 +511,66 @@ export function netOps(
     }
   };
 
-  const listener = (fd: number, at: JsAddress): JsListener => {
-    const stop = new AbortController();
-    const accept = async (options: { signal?: AbortSignal } = {}): Promise<JsConnection> => {
-      const signal = AbortSignal.any([options.signal ?? NEVER, stop.signal]);
-      for (;;) {
-        signal.throwIfAborted();
-        const r = await kernel.raw({ op: 'sock-accept', fd, nonblock: true });
-        if (r.ok) return connection(((r.kind === 'json' ? r.json : {}) as { fd: number }).fd);
-        if (r.errno !== 'EAGAIN') throw new JsCallError(r.errno, 'accept');
-        await kernel.blocking({ op: 'fd-select', read: [fd], write: [], timeoutMs: -1 }, signal);
-      }
+  const serve = (conn: JsConnection, req: object, signal?: AbortSignal) =>
+    serveOn(kernel, conn, req, signal);
+
+  const ops: ListenerOps = { kernel, io, connection, serve };
+  const listener = (fd: number, at: JsAddress, handshakes = 0): JsListener =>
+    listenerOf(ops, fd, at, handshakes);
+
+  const connect = async (options: JsConnectOptions): Promise<JsConnection> => {
+    const signal = options.signal ?? NEVER;
+    const host = options.host ?? '127.0.0.1';
+    if (host.includes(':')) throw new JsCallError('EADDRNOTAVAIL', host);
+    const addr: InetAddr = {
+      family: 'inet',
+      host: await resolve(host, signal),
+      port: port(options.port as number),
     };
-    return {
-      fd,
-      ...at,
-      accept,
-      async close() {
-        stop.abort(new JsCallError('EBADF', 'listener closed'));
-        await io.close(fd);
-      },
-      async *[Symbol.asyncIterator]() {
-        for (;;) {
-          try {
-            yield await accept();
-          } catch (err) {
-            if (stop.signal.aborted) return;
-            throw err;
-          }
-        }
-      },
-    };
+    return opened(async (fd) => {
+      const r = await kernel.raw({ op: 'sock-connect', fd, addr, nonblock: true });
+      if (!r.ok && r.errno !== 'EINPROGRESS') throw new JsCallError(r.errno, 'connect');
+      await kernel.blocking({ op: 'fd-select', read: [], write: [fd], timeoutMs: -1 }, signal);
+      const failed = (await kernel.json({
+        op: 'sock-getopt',
+        fd,
+        level: SOL_SOCKET,
+        name: SO_ERROR,
+      })) as number;
+      if (failed !== 0) throw new JsCallError(errnoName(failed), 'connect');
+      return connection(fd);
+    });
   };
 
   const tlsConnect = async (
     options: JsConnectOptions,
     tls: JsTlsOptions
   ): Promise<JsConnection> => {
+    const host = options.host ?? 'localhost';
+    if (!options.socket && LOOPBACK.test(host)) {
+      const { tls: _, ...plain } = options;
+      const socket = await connect({ ...plain, host });
+      return tlsConnect({ ...plain, host, socket }, tls).catch(async (err: unknown) => {
+        await socket.close();
+        throw err;
+      });
+    }
     const common = tlsRequest(
       options.socket && !tls.servername && options.host ? { ...tls, servername: options.host } : tls
     );
-    const r = (await secureCall(() =>
-      kernel.json(
-        options.socket
-          ? { op: 'sock-tls-upgrade', fd: options.socket.fd, ...common }
-          : {
-              op: 'sock-tls',
-              host: options.host ?? 'localhost',
-              port: port(options.port as number),
-              ...common,
-              ...(tls.path ? { path: tls.path } : {}),
-            }
-      )
-    )) as WireSession & { fd?: number };
+    const r = (await secureCall(async () => {
+      if (!options.socket)
+        return kernel.json({
+          op: 'sock-tls',
+          host,
+          port: port(options.port as number),
+          ...common,
+          ...(tls.path ? { path: tls.path } : {}),
+        });
+      const req = { op: 'sock-tls-upgrade' as const, fd: options.socket.fd, ...common };
+      const done = await kernel.blocking(req, options.signal ?? NEVER);
+      return done.ok && done.kind === 'json' ? done.json : undefined;
+    })) as WireSession & { fd?: number };
     const session = sessionOf(r);
     if (options.socket) return Object.assign(Object.create(options.socket), { tls: session });
     return Object.assign(await connection(r.fd as number), { tls: session });
@@ -405,11 +603,14 @@ export function netOps(
   const listenSync = (options: JsListenOptions = {}): JsListener => {
     const lane = sync as JsSyncKernel;
     const addr = inetAt(options);
+    const tls = options.tls ? serveRequest(options.tls) : undefined;
     const fd = lane.json({ op: 'sock-open', domain: 'inet' }) as number;
     try {
       lane.call({ op: 'sock-bind', fd, addr });
       lane.call({ op: 'sock-listen', fd, backlog: options.backlog ?? 128 });
-      return listener(fd, addressOf(lane.json({ op: 'sock-name', fd, peer: false })));
+      if (tls) lane.call({ op: 'sock-tls-listen', fd, ...tls });
+      const at = addressOf(lane.json({ op: 'sock-name', fd, peer: false }));
+      return listener(fd, at, capOf(options, tls));
     } catch (err) {
       lane.raw({ op: 'fd-close', fd });
       throw err;
@@ -419,37 +620,24 @@ export function netOps(
   return {
     sync: { listen: listenSync },
     resolve: lookup,
-    listen: (options = {}) =>
-      opened(async (fd) => {
+    listen: async (options = {}) => {
+      const tls = options.tls ? serveRequest(options.tls) : undefined;
+      return opened(async (fd) => {
         const addr = inetAt(options);
         await kernel.call({ op: 'sock-bind', fd, addr });
         await kernel.call({ op: 'sock-listen', fd, backlog: options.backlog ?? 128 });
-        return listener(fd, await name(fd, false));
-      }),
-    connect: async (options) => {
-      const signal = options.signal ?? NEVER;
-      signal.throwIfAborted();
-      if (options.tls) return tlsConnect(options, options.tls);
-      const host = options.host ?? '127.0.0.1';
-      if (host.includes(':')) throw new JsCallError('EADDRNOTAVAIL', host);
-      const addr: InetAddr = {
-        family: 'inet',
-        host: await resolve(host, signal),
-        port: port(options.port as number),
-      };
-      return opened(async (fd) => {
-        const r = await kernel.raw({ op: 'sock-connect', fd, addr, nonblock: true });
-        if (!r.ok && r.errno !== 'EINPROGRESS') throw new JsCallError(r.errno, 'connect');
-        await kernel.blocking({ op: 'fd-select', read: [], write: [fd], timeoutMs: -1 }, signal);
-        const failed = (await kernel.json({
-          op: 'sock-getopt',
-          fd,
-          level: SOL_SOCKET,
-          name: SO_ERROR,
-        })) as number;
-        if (failed !== 0) throw new JsCallError(errnoName(failed), 'connect');
-        return connection(fd);
+        if (tls)
+          await secureCall(() => kernel.call({ op: 'sock-tls-listen', fd, ...tls }), 'listen');
+        return listener(fd, await name(fd, false), capOf(options, tls));
       });
+    },
+    secure: async (conn, tls) => {
+      if (tls.server !== true) return tlsConnect({ socket: conn }, tls);
+      return serve(conn, serveRequest(tls));
+    },
+    connect: (options) => {
+      (options.signal ?? NEVER).throwIfAborted();
+      return options.tls ? tlsConnect(options, options.tls) : connect(options);
     },
   };
 }

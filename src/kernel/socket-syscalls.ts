@@ -3,6 +3,7 @@ import { KernelDgram } from './dgram.ts';
 import { type FdTable, KernelError, OpenFile, pollFile } from './fd-table.ts';
 import { encodeReceived } from './net/datagram-wire.ts';
 import { isLoopbackHost } from './net/proxy-service.ts';
+import { listenSecure, serveSecure } from './net/tls-server.ts';
 import {
   type ClientCertRequest,
   connectSecure,
@@ -114,6 +115,17 @@ export type SocketSyscall =
       clientCert?: ClientCertRequest;
     }
   | {
+      op: 'sock-tls-serve' | 'sock-tls-listen';
+      fd: number;
+      from?: number;
+      cert?: ClientCertRequest;
+      ca?: string[];
+      requestCert?: boolean;
+      rejectUnauthorized?: boolean;
+      alpn?: string[];
+      handshakeTimeout?: number;
+    }
+  | {
       op: 'sock-recvfrom';
       fd: number;
       max: number;
@@ -136,11 +148,14 @@ export const SOCKET_OPS: readonly SocketSyscall['op'][] = [
   'sock-recvfrom',
   'sock-tls',
   'sock-tls-upgrade',
+  'sock-tls-serve',
+  'sock-tls-listen',
 ];
 export interface SocketProcess {
   fds: FdTable;
   net: LoopbackNet;
   blocking(): AbortSignal;
+  cancelled?: AbortSignal;
   resolve(name: string, family: ResolveFamily, blocking: () => AbortSignal): Promise<string[]>;
   cred?(): PeerCred;
   stamp?(): Promise<ConnectorStamp>;
@@ -237,6 +252,14 @@ export async function socketSyscall(
       return ok(await secureConnect(req, proc));
     case 'sock-tls-upgrade':
       return ok(await upgradeSecure(proc, socketAt(fds, req.fd), req));
+    case 'sock-tls-serve': {
+      const { from, ...rest } = req;
+      const listener = from === undefined ? {} : { listener: socketAt(fds, from) };
+      return ok(await serveSecure(proc, socketAt(fds, req.fd), { ...rest, ...listener }));
+    }
+    case 'sock-tls-listen':
+      await listenSecure(proc, socketAt(fds, req.fd), req);
+      return ok({});
     default:
       return datagram(req, proc);
   }

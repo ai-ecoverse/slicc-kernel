@@ -401,7 +401,7 @@ test(
   async (t) => {
     const { run } = await kernelWith(t, []);
     assert.equal(
-      (await run({ host: 'localhost', port: 4433, tls: { ca: ca.pem } })).code,
+      (await run({ host: 'elsewhere.test', port: 4433, tls: { ca: ca.pem } })).code,
       'ENOTSUP'
     );
     const port = await tlsServer(t, ca.server('secure.test'));
@@ -663,7 +663,7 @@ test(
       { checkHostname: false },
       { cert: mine.cert, key: mine.key },
     ]) {
-      assert.equal((await run({ host: 'localhost', port: 4433, tls: extra })).code, 'ENOTSUP');
+      assert.equal((await run({ host: 'elsewhere.test', port: 4433, tls: extra })).code, 'ENOTSUP');
     }
   }
 );
@@ -783,7 +783,7 @@ test(
         keyFile: '/k/plain.pem',
       }),
       await run({
-        host: 'localhost',
+        host: 'elsewhere.test',
         port: 4433,
         tls: { cert: mine.cert },
         keyFile: '/k/plain.pem',
