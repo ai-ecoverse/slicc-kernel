@@ -60,15 +60,15 @@ export class PathMarks {
   }
 
   async landed(path: string): Promise<void> {
-    while (this.inFlight(path)) {
-      await new Promise<void>((resolve) => {
-        const wake = () => {
-          this.waiting.delete(wake);
-          resolve();
-        };
-        this.waiting.add(wake);
-      });
-    }
+    if (!this.inFlight(path)) return;
+    await new Promise<void>((resolve) => {
+      const wake = () => {
+        if (this.inFlight(path)) return;
+        this.waiting.delete(wake);
+        resolve();
+      };
+      this.waiting.add(wake);
+    });
   }
 
   inFlight(path: string): boolean {
