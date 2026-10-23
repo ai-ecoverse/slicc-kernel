@@ -32,7 +32,8 @@ export type EmbedderToKernel =
   | { id: number; done: true }
   | { id: number; error: { name: string; message: string } }
   | { id: number; progress: string }
-  | { id: number; bodyPull: true };
+  | { id: number; bodyPull: true }
+  | { id: number; bodyCancel: true };
 
 function fresh(bytes: Uint8Array): Uint8Array {
   return bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
@@ -140,6 +141,7 @@ export function embedderAsker(port: EmbedderPort) {
       void asked.body.cancel(message.error.message).catch(() => undefined);
       push(asked, message.error);
     } else if ('progress' in message) asked.progress(message.progress);
+    else if ('bodyCancel' in message) void asked.body.cancel('the page').catch(() => undefined);
     else void sendBody(message.id, asked);
   };
   return { hookFor, answer };
@@ -182,6 +184,7 @@ function bodyStream(id: number, state: Answering, post: (m: EmbedderToKernel) =>
         if (next) controller.enqueue(next);
         else controller.close();
       },
+      cancel: () => post({ id, bodyCancel: true }),
     },
     { highWaterMark: 0 }
   );
