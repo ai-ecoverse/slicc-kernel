@@ -193,6 +193,34 @@ class BodyPipe {
   }
 }
 
+function endsWith(
+  stream: ReadableStream<Uint8Array>,
+  ended: () => void
+): ReadableStream<Uint8Array> {
+  const reader = stream.getReader();
+  return new ReadableStream<Uint8Array>(
+    {
+      pull: async (controller) => {
+        let got: ReadableStreamReadResult<Uint8Array>;
+        try {
+          got = await reader.read();
+        } catch (err) {
+          ended();
+          throw err;
+        }
+        if (!got.done) return controller.enqueue(got.value);
+        ended();
+        controller.close();
+      },
+      cancel: (reason) => {
+        ended();
+        return reader.cancel(reason);
+      },
+    },
+    { highWaterMark: 0 }
+  );
+}
+
 function replyStream(reply: EmbedderReply): ReadableStream<Uint8Array> {
   if (reply instanceof ReadableStream) return reply;
   const bytes =
@@ -282,8 +310,8 @@ export class EmbedderChannel {
         })
       )
       .then((reply) => {
-        body.drop();
-        return replyStream(reply).getReader();
+        if (!(reply instanceof ReadableStream)) body.drop();
+        return endsWith(replyStream(reply), () => body.drop()).getReader();
       });
     this.replied = asked.catch((err: unknown) => {
       body.end();

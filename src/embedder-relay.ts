@@ -210,14 +210,16 @@ export function embedderAnswerer(
         throw Object.assign(new Error(`this page does not answer ${ask.kind}`), {
           name: 'NotSupportedError',
         });
+      const body = bodyStream(ask.id, state, post);
       const reply = await hook.handle({
         kind: ask.kind,
         options: ask.options,
-        body: bodyStream(ask.id, state, post),
+        body,
         stamp: ask.stamp,
         signal: state.abort.signal,
         progress: (line) => post({ id: ask.id, progress: String(line) }),
       });
+      if (!(reply instanceof ReadableStream)) void body.cancel('answered').catch(() => undefined);
       state.reader = bytesOf(reply).getReader();
       post({ id: ask.id, ready: true });
     } catch (err) {

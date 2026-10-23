@@ -34,6 +34,7 @@ function page(name = 'page') {
       'test.later': {},
       'test.steps': {},
       'test.cancel': {},
+      'test.count': {},
       'test.ignore': {},
       'test.users': { group: 'users' },
       'test.named': { users: ['carol'] },
@@ -71,6 +72,18 @@ function page(name = 'page') {
             reject(request.signal.reason);
           })
         );
+      }
+      if (request.kind === 'test.count') {
+        let done = false;
+        return new ReadableStream({
+          async pull(controller) {
+            if (done) return controller.close();
+            let n = 0;
+            for await (const chunk of request.body) n += chunk.length;
+            done = true;
+            controller.enqueue(new TextEncoder().encode(String(n)));
+          },
+        });
       }
       if (request.kind === 'test.cancel') {
         await request.body.cancel('no');
@@ -375,5 +388,18 @@ test(
       );
       assert.equal(wo.stdout, 'rc=0\n', `${kind}: ${JSON.stringify(wo)}`);
     }
+  }
+);
+
+test(
+  'a page that returns a stream at once and reads the whole body inside its pull gets all of it (#1536 review)',
+  TIMEOUT,
+  async (t) => {
+    const { hook } = page();
+    const { bash } = await booted(t, { requests: hook });
+    const r = await bash(
+      `head -c 4000000 /dev/zero > in; exec 3<>/dev/embedder; { printf '%s\\n' '{"kind":"test.count"}'; cat in; } >&3; cat <&3`
+    );
+    assert.equal(r.stdout, '4000000', JSON.stringify(r));
   }
 );

@@ -30,6 +30,11 @@ test('the page answers /dev/embedder through its requests hook, and a port it bi
     `printf '%s\\n' '{"kind":"page.echo"}' | cat > /dev/embedder; exec 3<>/dev/embedder; printf '%s\\n' '{"kind":"page.echo"}' >&3; cat <&3`
   );
   assert.equal(bound.stdout, 'bound', JSON.stringify(bound));
+  const counted = await bash(
+    `head -c 4000000 /dev/zero > in; exec 3<>/dev/embedder; { printf '%s\\n' '{"kind":"page.count"}'; cat in; } >&3; cat <&3`,
+    { cwd: '/tmp' }
+  );
+  assert.equal(counted.stdout, '4000000', JSON.stringify(counted));
   const calls = await page.evaluate(() => window.requests.calls);
   assert.deepEqual(
     calls.map((c) => [c.kind, c.options, c.stamp.uid]),
@@ -38,6 +43,7 @@ test('the page answers /dev/embedder through its requests hook, and a port it bi
       ['page.fail', {}, 0],
       ['bound page.echo', {}, 0],
       ['bound page.echo', {}, 0],
+      ['page.count', {}, 0],
     ]
   );
 });
