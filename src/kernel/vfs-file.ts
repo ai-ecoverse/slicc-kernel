@@ -41,6 +41,7 @@ const O_ACCMODE = 0o3;
 const O_WRONLY = 0o1;
 const O_RDWR = 0o2;
 const O_APPEND = 0o2000;
+const POSITIONAL_MS = 100;
 
 const SEEK_SET = 0;
 const SEEK_CUR = 1;
@@ -333,7 +334,8 @@ export class VfsNode {
 
   async append(bytes: Uint8Array): Promise<number> {
     const { append } = this.fs;
-    if (!append || this.orphaned || this.revoked || bytes.length === 0) {
+    const recently = performance.now() - this.positionalAt < POSITIONAL_MS;
+    if (!append || this.orphaned || this.revoked || bytes.length === 0 || recently) {
       const at = await this.size();
       return at + (await this.pwrite(bytes, at));
     }
@@ -347,12 +349,15 @@ export class VfsNode {
       }
     );
     if (end === undefined) {
+      this.positionalAt = performance.now();
       const at = await this.size();
       return at + (await this.pwrite(bytes, at));
     }
     this.reread();
     return end;
   }
+
+  private positionalAt = Number.NEGATIVE_INFINITY;
 
   async pwrite(bytes: Uint8Array, at: number): Promise<number> {
     if (bytes.length === 0) return 0;
