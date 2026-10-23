@@ -174,6 +174,7 @@ export interface TransportServer {
 interface Flow {
   inflight: number;
   closing: boolean;
+  dropped: boolean;
   deadline(): void;
   wake?: () => void;
 }
@@ -300,6 +301,7 @@ export function serveTransport(
     const flow: Flow = {
       inflight: 0,
       closing: false,
+      dropped: false,
       deadline: () =>
         AbortSignal.timeout(closeWaitMs).addEventListener('abort', late, { once: true }),
     };
@@ -312,7 +314,7 @@ export function serveTransport(
         const next = await Promise.race([messages.next(), unanswered]);
         if (next === 'late' || next.done) break;
         const data = next.value;
-        if (flow.closing) continue;
+        if (flow.dropped) continue;
         if (payloadSize(data) > MESSAGE_LIMIT) {
           oversize = true;
           break;
@@ -368,6 +370,8 @@ export function serveTransport(
   };
   const drop = (nid: number) => {
     sockets.get(nid)?.close(1000, 'cancelled');
+    const flow = credit.get(nid);
+    if (flow) flow.dropped = true;
     refill(nid, 0, true);
     const entry = open.get(nid);
     open.delete(nid);
