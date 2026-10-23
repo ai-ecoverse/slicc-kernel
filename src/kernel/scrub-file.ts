@@ -13,9 +13,9 @@ export interface ScrubSecret {
   placeholder: string;
 }
 
-export function scrubberOf(secrets: ScrubSecret[]): Scrubber | undefined {
+export function scrubberOf(secrets: ScrubSecret[], sameLength = false): Scrubber | undefined {
   const usable = secrets.filter((s) => encoder.encode(s.value).length >= MIN_VALUE);
-  return usable.length > 0 ? compile(usable, { idleMs: SCRUB_IDLE_MS }) : undefined;
+  return usable.length > 0 ? compile(usable, { idleMs: SCRUB_IDLE_MS, sameLength }) : undefined;
 }
 
 async function writeAll(file: KernelFile, bytes: Uint8Array): Promise<void> {
