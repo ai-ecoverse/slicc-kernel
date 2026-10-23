@@ -49,9 +49,9 @@ test('O_APPEND writes from two tabs to one file all land, as two processes on on
   const x = await page.evaluate(() => window.append_x);
   const y = await other.evaluate(() => window.append_y);
   assert.deepEqual([x.stdout, y.stdout], [`${N}\n`, `${N}\n`], JSON.stringify([x, y]));
-  const counted = await sh(
-    page,
-    "grep -c '^x' /root/ap/log; grep -c '^y' /root/ap/log; wc -l < /root/ap/log"
+  const counted = await page.evaluate(
+    (s) => window.kernel.run(['python3', '-c', s], { cwd: '/' }),
+    "lines = open('/root/ap/log').read().splitlines(); print(sum(l.startswith('x') for l in lines), sum(l.startswith('y') for l in lines), len(lines))"
   );
-  assert.deepEqual(counted, ok(`${N}\n${N}\n${2 * N}\n`));
+  assert.deepEqual(counted, ok(`${N} ${N} ${2 * N}\n`));
 });
