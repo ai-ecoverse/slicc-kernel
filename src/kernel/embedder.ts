@@ -141,6 +141,7 @@ class BodyPipe {
   private queue: Uint8Array[] = [];
   private size = 0;
   private ended = false;
+  private dropped = false;
   private wake: (() => void) | undefined;
   private room: (() => void) | undefined;
   readonly stream: ReadableStream<Uint8Array>;
@@ -160,6 +161,7 @@ class BodyPipe {
             controller.enqueue(next);
           } else controller.close();
         },
+        cancel: () => this.drop(),
       },
       { highWaterMark: 0 }
     );
@@ -167,8 +169,14 @@ class BodyPipe {
   get full(): boolean {
     return this.size >= EMBEDDER_WINDOW;
   }
+  drop(): void {
+    this.dropped = true;
+    this.queue = [];
+    this.size = 0;
+    this.end();
+  }
   push(bytes: Uint8Array): void {
-    if (bytes.length === 0) return;
+    if (bytes.length === 0 || this.dropped) return;
     this.queue.push(bytes.slice());
     this.size += bytes.length;
     this.wake?.();
@@ -183,6 +191,34 @@ class BodyPipe {
     this.wake?.();
     this.room?.();
   }
+}
+
+function endsWith(
+  stream: ReadableStream<Uint8Array>,
+  ended: () => void
+): ReadableStream<Uint8Array> {
+  const reader = stream.getReader();
+  return new ReadableStream<Uint8Array>(
+    {
+      pull: async (controller) => {
+        let got: ReadableStreamReadResult<Uint8Array>;
+        try {
+          got = await reader.read();
+        } catch (err) {
+          ended();
+          throw err;
+        }
+        if (!got.done) return controller.enqueue(got.value);
+        ended();
+        controller.close();
+      },
+      cancel: (reason) => {
+        ended();
+        return reader.cancel(reason);
+      },
+    },
+    { highWaterMark: 0 }
+  );
 }
 
 function replyStream(reply: EmbedderReply): ReadableStream<Uint8Array> {
@@ -273,7 +309,10 @@ export class EmbedderChannel {
           progress,
         })
       )
-      .then((reply) => replyStream(reply).getReader());
+      .then((reply) => {
+        if (!(reply instanceof ReadableStream)) body.drop();
+        return endsWith(replyStream(reply), () => body.drop()).getReader();
+      });
     this.replied = asked.catch((err: unknown) => {
       body.end();
       throw this.fail(err);

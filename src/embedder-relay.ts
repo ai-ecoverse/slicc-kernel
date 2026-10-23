@@ -32,7 +32,8 @@ export type EmbedderToKernel =
   | { id: number; done: true }
   | { id: number; error: { name: string; message: string } }
   | { id: number; progress: string }
-  | { id: number; bodyPull: true };
+  | { id: number; bodyPull: true }
+  | { id: number; bodyCancel: true };
 
 function fresh(bytes: Uint8Array): Uint8Array {
   return bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
@@ -140,6 +141,7 @@ export function embedderAsker(port: EmbedderPort) {
       void asked.body.cancel(message.error.message).catch(() => undefined);
       push(asked, message.error);
     } else if ('progress' in message) asked.progress(message.progress);
+    else if ('bodyCancel' in message) void asked.body.cancel('the page').catch(() => undefined);
     else void sendBody(message.id, asked);
   };
   return { hookFor, answer };
@@ -182,6 +184,7 @@ function bodyStream(id: number, state: Answering, post: (m: EmbedderToKernel) =>
         if (next) controller.enqueue(next);
         else controller.close();
       },
+      cancel: () => post({ id, bodyCancel: true }),
     },
     { highWaterMark: 0 }
   );
@@ -207,14 +210,16 @@ export function embedderAnswerer(
         throw Object.assign(new Error(`this page does not answer ${ask.kind}`), {
           name: 'NotSupportedError',
         });
+      const body = bodyStream(ask.id, state, post);
       const reply = await hook.handle({
         kind: ask.kind,
         options: ask.options,
-        body: bodyStream(ask.id, state, post),
+        body,
         stamp: ask.stamp,
         signal: state.abort.signal,
         progress: (line) => post({ id: ask.id, progress: String(line) }),
       });
+      if (!(reply instanceof ReadableStream)) post({ id: ask.id, bodyCancel: true });
       state.reader = bytesOf(reply).getReader();
       post({ id: ask.id, ready: true });
     } catch (err) {
