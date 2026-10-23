@@ -305,6 +305,7 @@ for (const when of ['after', 'start', 'removed']) {
       else await kernel.writeFile('/tmp/p/prog', second);
     };
     const r = await kernel.run(['/tmp/p/prog'], { cwd: '/' });
-    assert.deepEqual(r, { status: 0, stdout: 'exe=/tmp/p/prog argv0=/tmp/p/prog\n', stderr: '' });
+    const exe = when === 'removed' ? '/tmp/p/prog (deleted)' : '/tmp/p/prog';
+    assert.deepEqual(r, { status: 0, stdout: `exe=${exe} argv0=/tmp/p/prog\n`, stderr: '' });
   });
 }
