@@ -1823,12 +1823,19 @@ export class Launcher {
     const id = () => this.exeId(target);
     return id().then((before) =>
       read().then((first) =>
-        id().then((after) =>
-          after.exeId === before.exeId
-            ? ([first, after] as [Program, { exeId?: string }])
-            : this.reread(target, read).then((again) =>
-                id().then((last) => [again, last] as [Program, { exeId?: string }])
-              )
+        id().then(
+          (after): Promise<[Program, { exeId?: string }]> | [Program, { exeId?: string }] => {
+            if (after.exeId === before.exeId) return [first, after];
+            const gone: [Program, { exeId?: string }] = [
+              first,
+              { exeId: `gone:${crypto.randomUUID()}` },
+            ];
+            if (after.exeId === undefined) return gone;
+            return this.reread(target, read).then(
+              (again) => id().then((last) => [again, last] as [Program, { exeId?: string }]),
+              () => gone
+            );
+          }
         )
       )
     );
