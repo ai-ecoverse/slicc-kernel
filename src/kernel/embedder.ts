@@ -53,6 +53,7 @@ export interface EmbedderCaller {
   sessionUid: number;
   client: number;
   tags: readonly string[] | undefined;
+  name: string;
   progress(line: string): void;
   closing(): AbortSignal;
 }
@@ -257,8 +258,9 @@ export class EmbedderChannel {
     const hook = this.broker.hookFor(this.caller.client) as EmbedderHook;
     const body = new BodyPipe();
     this.body = body;
+    const prefix = this.caller.name;
     const progress = (line: string) => {
-      if (this.throttle.allow(Date.now())) this.caller.progress(lineOf(line));
+      if (this.throttle.allow(Date.now())) this.caller.progress(`${prefix}: ${lineOf(line)}`);
     };
     const asked = Promise.resolve()
       .then(() =>

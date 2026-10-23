@@ -1313,7 +1313,8 @@ export class WasmProcess {
       sessionUid: session.uid,
       client: session.client,
       tags: this.options.embedder?.tagsOf(this.pid),
-      progress: (line) => void this.complainLine(`${name}: ${line}`),
+      name,
+      progress: (line) => void this.complainLine(line),
       closing: () => AbortSignal.any([this.interrupt.signal, this.gone.signal]),
     };
   }
