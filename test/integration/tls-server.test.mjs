@@ -17,6 +17,7 @@ const PACKAGE = JSON.stringify({
       tlsd: { abi: 'js', module: 'bin/tlsd.mjs' },
       tlsc: { abi: 'js', module: 'bin/tlsc.mjs' },
       tlsone: { abi: 'js', module: 'bin/tlsone.mjs' },
+      tlsparity: { abi: 'js', module: 'bin/tlsparity.mjs' },
     },
   },
 });
@@ -182,6 +183,44 @@ export default async function main(ctx) {
   out.aliveAfterClient = (await within(alive(), 5000)).v ?? 'hung';
   await held.close();
   await plain.close();
+  ctx.write(1, JSON.stringify(out) + '\\n');
+  return 0;
+}
+`;
+
+const PARITY = `${SHARED}
+export default async function main(ctx) {
+  const o = JSON.parse(ctx.argv[1]);
+  const out = {};
+  const plain = await ctx.net.listen({});
+  const tls = { server: true, cert: o.cert, key: o.key };
+  const a1 = plain.accept();
+  const http = await ctx.net.connect({ port: plain.port });
+  const s1 = await a1;
+  const hw = http.writable.getWriter();
+  await hw.write(enc.encode('GET / HTTP/1.1\\r\\nhost: x\\r\\n\\r\\n'));
+  out.http = await ctx.net.secure(s1, tls).then(() => 'served', (e) => e.code);
+  await http.close();
+  const a2 = plain.accept();
+  const quiet = await ctx.net.connect({ port: plain.port });
+  const s2 = await a2;
+  out.timeout = await ctx.net.secure(s2, { ...tls, handshakeTimeout: 200 }).then(() => 'served', (e) => e.code);
+  const w = s2.writable.getWriter();
+  await w.write(enc.encode('HTTP/1.1 408 Request Timeout\\r\\n\\r\\n'));
+  await w.close();
+  out.afterTimeout = (await drain(quiet.readable)).split('\\r\\n')[0];
+  await s2.close();
+  await plain.close();
+  const l = await ctx.net.listen({ tls: { cert: o.cert, key: o.key } });
+  const next = l.accept();
+  const bad = await ctx.net.connect({ port: l.port });
+  const bw = bad.writable.getWriter();
+  await bw.write(enc.encode('GET / HTTP/1.1\\r\\nhost: x\\r\\n\\r\\n'));
+  out.listenerDrops = (await drain(bad.readable)).length;
+  const good = await ctx.net.connect({ host: 'localhost', port: l.port, tls: { ca: o.cert } });
+  out.listenerNext = (await next).tls.servername;
+  await good.close();
+  await l.close();
   ctx.write(1, JSON.stringify(out) + '\\n');
   return 0;
 }
@@ -371,6 +410,30 @@ test(
       timeout: 'ERR_TLS_HANDSHAKE_TIMEOUT',
       clientAbort: 'refused',
       aliveAfterClient: 'yes',
+    });
+  }
+);
+
+test(
+  'secure({ server: true }) refuses a plain HTTP request with ERR_SSL_HTTP_REQUEST, and a handshake timeout leaves the connection to the program, as Node with tlsClientError; a listener drops both and keeps accepting (#1504)',
+  TIMEOUT,
+  async (t) => {
+    const kernel = await createNodeKernel({ users: 'off' });
+    t.after(() => kernel.terminate());
+    await install(kernel, 'wasm-tls-engine');
+    await kernel.writeFile('/node_modules/tlsd/package.json', PACKAGE);
+    await kernel.writeFile('/node_modules/tlsd/bin/tlsparity.mjs', PARITY);
+    const own = selfSigned('localhost');
+    const r = await kernel.run(['tlsparity', JSON.stringify({ cert: own.cert, key: own.key })], {
+      cwd: '/',
+    });
+    assert.equal(r.stderr, '');
+    assert.deepEqual(JSON.parse(r.stdout), {
+      http: 'ERR_SSL_HTTP_REQUEST',
+      timeout: 'ERR_TLS_HANDSHAKE_TIMEOUT',
+      afterTimeout: 'HTTP/1.1 408 Request Timeout',
+      listenerDrops: 0,
+      listenerNext: 'localhost',
     });
   }
 );

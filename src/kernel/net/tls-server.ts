@@ -91,13 +91,11 @@ function timeoutOf(req: ServeRequest): number {
   return ms;
 }
 
+const timedOut = new KernelError('EPROTO', 'ERR_TLS_HANDSHAKE_TIMEOUT: TLS handshake timeout');
+
 function handshakeSignal(proc: SecureProcess, ms: number) {
   const timer = new AbortController();
-  const id = setTimeout(
-    () =>
-      timer.abort(new KernelError('EPROTO', 'ERR_TLS_HANDSHAKE_TIMEOUT: TLS handshake timeout')),
-    ms
-  );
+  const id = setTimeout(() => timer.abort(timedOut), ms);
   return {
     signal: AbortSignal.any([handshakeAbort(proc), timer.signal]),
     done: () => clearTimeout(id),
@@ -167,7 +165,8 @@ export async function serveSecure(
     const info = await socket
       .secureLink(
         (raw) => tlsServer(raw, engine.serverSession(leaf, alpn, store, flags), flags !== 0),
-        limit.signal
+        limit.signal,
+        (reason) => !shared && reason === timedOut
       )
       .finally(limit.done);
     return {
