@@ -1476,6 +1476,8 @@ export class OpfsFs implements KernelFs {
       return await this.ending(found.path, async () => {
         const end = (await this.io(handle.getFile())).size;
         await this.writeAt(handle, found.path, path, end, bytes);
+        const after = (await this.io(handle.getFile())).size;
+        appendTrace(this.tracing, found.path, end, bytes.length, after);
         return end + bytes.length;
       });
     } finally {
@@ -1483,7 +1485,10 @@ export class OpfsFs implements KernelFs {
     }
   }
 
+  private tracing = '';
+
   private async ending<T>(path: string, op: () => Promise<T>): Promise<T> {
+    this.tracing = `locks=${!!this.locks} remote=${!!this.remote} shared=${this.shared()}`;
     if (!this.locks || !this.remote || !this.shared()) return op();
     const physical = (await this.locate(path, true)).path;
     let result!: T;
@@ -2737,6 +2742,16 @@ function movedOf(moved: unknown): { from: string; to: string } | undefined {
   return typeof m?.from === 'string' && typeof m.to === 'string'
     ? { from: m.from, to: m.to }
     : undefined;
+}
+
+export function appendTrace(
+  state: string,
+  path: string,
+  end: number,
+  n: number,
+  after: number
+): void {
+  console.warn(`DBG1520 ${state} ${path} end=${end} n=${n} after=${after}`);
 }
 
 function nothing(): undefined {
