@@ -182,7 +182,7 @@ test(
 );
 
 test(
-  'listen({ tls }) keeps accepting after a handshake fails, secure(conn, { server: true }) secures an accepted connection, and sync.net.listen takes tls too (#1401)',
+  'a loopback client without ca refuses a self-signed server, listen({ tls }) keeps accepting after that failed handshake, secure(conn, { server: true }) secures an accepted connection, and sync.net.listen takes tls too (#1401)',
   TIMEOUT,
   async (t) => {
     const run = await kernelWith(t);
@@ -195,7 +195,11 @@ test(
         { name: 'b', tls: { ca: own.cert } },
       ],
     });
-    assert.ok(listened.clients.untrusting.error, JSON.stringify(listened.clients.untrusting));
+    assert.equal(
+      listened.clients.untrusting.error?.code,
+      'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+      JSON.stringify(listened.clients.untrusting)
+    );
     assert.equal(listened.clients.b.body, 'hello', JSON.stringify(listened.clients.b));
     assert.equal(listened.server.length, 1);
     assert.equal(listened.server[0].tls.servername, 'localhost');
