@@ -48,6 +48,7 @@ export interface ProcessListing {
   opfsOps?: number;
   cwdChecks?: number;
   staleFds?: number;
+  fileIds?: number;
   renameAcks?: {
     acks: number;
     busy: number;

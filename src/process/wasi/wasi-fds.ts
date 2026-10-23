@@ -683,7 +683,9 @@ export class WasiFds {
       if (!within(p, path)) continue;
       try {
         buffer.prefetch();
-      } catch {}
+      } catch {
+        buffer.spoil();
+      }
     }
   }
 

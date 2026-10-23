@@ -141,6 +141,7 @@ export interface KernelFs {
     ackMs: readonly number[];
   };
   opfsOps?(): number;
+  fileIdWrites?(): number;
 }
 
 export interface PwriteOptions {

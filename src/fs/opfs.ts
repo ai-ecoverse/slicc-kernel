@@ -460,6 +460,7 @@ export class OpfsFs implements KernelFs {
     const [entry] = await this.meta.get([found.path]);
     if (entry?.fid !== undefined) return entry.fid;
     const fid = crypto.randomUUID();
+    this.idWrites++;
     await this.meta.update(found.path, (now) => ({
       ...occupied(now),
       path: found.path,
@@ -785,6 +786,12 @@ export class OpfsFs implements KernelFs {
 
   opfsCalls(): number {
     return this.calls;
+  }
+
+  private idWrites = 0;
+
+  fileIdWrites(): number {
+    return this.idWrites;
   }
 
   opfsOps(): number {

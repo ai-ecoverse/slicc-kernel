@@ -2135,6 +2135,7 @@ export class Launcher {
         cwdChecks: this.cwds.checks,
         renameAcks: this.rootFs.renameWaits?.(),
         staleFds: staleFdCount(),
+        fileIds: this.rootFs.fileIdWrites?.() ?? 0,
       }),
       sudo: (call, signal) => this.sudo(pid, call, signal),
       crontab: (call) => this.crontab(pid, call),
