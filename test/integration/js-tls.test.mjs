@@ -187,14 +187,14 @@ test('ctx.net.connect with tls upgrades to a WebSocket through the transport, as
   assert.deepEqual(transport.seen, [{ url: 'wss://ws.example/chat', ws: true }]);
 });
 
-test('ctx.net.connect with tls refuses a custom ca, an alpn list without http/1.1, well-known non-HTTP TLS ports and the kernel loopback at connect, and answers non-HTTP bytes with 400 and a close (#914)', async (t) => {
+test('ctx.net.connect with tls refuses a custom ca, an alpn list without http/1.1, well-known non-HTTP TLS ports and the kernel loopback at connect (never sent to the transport; localhost and 127.x dial the kernel loopback since #1401), and answers non-HTTP bytes with 400 and a close (#914)', async (t) => {
   const { transport, run } = await booted(t);
   assert.deepEqual(await run('refused'), {
     status: 0,
     stdout:
       'ca ENOTSUP\nalpn EPROTONOSUPPORT\nsmtps EPROTONOSUPPORT\nimaps EPROTONOSUPPORT\n' +
-      'localhost ENOTSUP\napp.localhost ENOTSUP\n127.0.0.1 ENOTSUP\n127.9.9.9 ENOTSUP\n0.0.0.0 ENOTSUP\n::1 ENOTSUP\n[::1] ENOTSUP\n' +
-      'sni 127.0.0.1 ENOTSUP\nhost 127.0.0.1 ENOTSUP\nsmtp over https HTTP/1.1 400 Bad Request\n',
+      'localhost ECONNREFUSED\napp.localhost ENOTSUP\n127.0.0.1 ECONNREFUSED\n127.9.9.9 ECONNREFUSED\n0.0.0.0 ENOTSUP\n::1 ENOTSUP\n[::1] ENOTSUP\n' +
+      'sni 127.0.0.1 ENOTSUP\nhost 127.0.0.1 ECONNREFUSED\nsmtp over https HTTP/1.1 400 Bad Request\n',
     stderr: '',
   });
   assert.deepEqual(transport.seen, []);
