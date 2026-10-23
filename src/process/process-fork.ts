@@ -110,10 +110,13 @@ export function describeForFork(
   return out;
 }
 
-const NAMED_DEVICES: Readonly<Record<string, 'sealed' | 'clipboard'>> = {
+const NAMED_DEVICES: Readonly<Record<string, 'sealed' | 'clipboard' | 'embedder'>> = {
   '/dev/sealed': 'sealed',
   '/dev/clipboard': 'clipboard',
+  '/dev/embedder': 'embedder',
 };
+
+const DEVICE_KINDS: ReadonlySet<string> = new Set(['sealed', 'clipboard', 'embedder']);
 
 function kernelEntry(stream: ProcessStream, kernel: number): ForkStream {
   const cloexec = closesOnExec(stream) ? { cloexec: true } : {};
@@ -199,8 +202,7 @@ function placeholder(
   const access = entry.flags ?? O_RDWR;
   if (entry.kind === 'socket') return streams.socketStream(access);
   if (entry.kind === 'tty') return Fs.open('/dev/tty', O_RDWR);
-  if (entry.kind === 'stream' || entry.kind === 'clipboard' || entry.kind === 'sealed')
-    return Fs.open('/dev/null', access);
+  if (entry.kind === 'stream' || DEVICE_KINDS.has(entry.kind)) return Fs.open('/dev/null', access);
   Fs.mkdirTree(PLACEHOLDER_DIR);
   return Fs.open(`${PLACEHOLDER_DIR}/${entry.fd}`, access | O_CREAT);
 }
@@ -236,8 +238,9 @@ export function placeKernelStream(
     streams.sizeFromKernel(stream, entry.kernel);
   } else if (entry.kind === 'socket') streams.attachSocket(stream, entry.kernel);
   else streams.attach(stream, entry.kernel, entry.kind === 'tty');
-  if (entry.kind === 'clipboard') streams.reportClose(entry.kernel);
-  if (entry.kind === 'sealed' || entry.kind === 'clipboard') streams.nameDevice(stream, entry.kind);
+  if (entry.kind === 'clipboard' || entry.kind === 'embedder') streams.reportClose(entry.kernel);
+  if (DEVICE_KINDS.has(entry.kind))
+    streams.nameDevice(stream, entry.kind as 'sealed' | 'clipboard' | 'embedder');
   if (entry.kind === 'tty') streams.nameTerminal(stream);
   if (entry.kind === 'stream') {
     asFifo(stream, streams, entry.desc !== undefined ? `d${entry.desc}` : `k${entry.kernel}`);

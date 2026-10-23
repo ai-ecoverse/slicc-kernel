@@ -3,6 +3,7 @@ import type { CdpHook } from './cdp/types.ts';
 import { type LockManagerLike, locksOf } from './client/protocol.ts';
 import { type ServedClient, serveClient } from './client/serve-client.ts';
 import { type ClipboardReply, clipboardAsker } from './clipboard-relay.ts';
+import { embedderAsker, embedderReplyOf } from './embedder-relay.ts';
 import { portFacadeHook } from './facade/port.ts';
 import type { FacadeSpec } from './facade/types.ts';
 import type { Attestation } from './fs/attest.ts';
@@ -17,6 +18,7 @@ import { fsError, modeOption, type UsersMode } from './fs/types.ts';
 import { type IntegrityReply, integrityAsker } from './integrity-relay.ts';
 import type { ClipboardHook } from './kernel/clipboard.ts';
 import { dialSocket, serveSocket } from './kernel/dial.ts';
+import type { EmbedderHook, EmbedderKindPolicy } from './kernel/embedder.ts';
 import type { WasmWorkerLike } from './kernel/host.ts';
 import { CA_DB, caStore } from './kernel/net/network.ts';
 import { RemoteTransport, type TransportReply } from './kernel/net/remote-transport.ts';
@@ -69,6 +71,7 @@ export interface InitRequest {
   denials?: boolean;
   sealed?: boolean;
   clipboard?: boolean;
+  requests?: Record<string, EmbedderKindPolicy>;
   approve?: boolean;
   processMounts?: boolean | 'ask';
   cdp?: boolean;
@@ -102,6 +105,7 @@ export interface ConnectRequest {
   op: 'connect';
   user?: string | number;
   tag?: string;
+  requests?: Record<string, EmbedderKindPolicy> | 'attach';
 }
 
 export type UsersRequest =
@@ -391,6 +395,8 @@ function isUsersRequest(req: KernelRequest): req is UsersRequest {
 
 function transferOf(req: KernelRequest, result: unknown): Transferable[] | undefined {
   if (result instanceof MessagePort) return [result];
+  const bound = (result as { port?: unknown } | null)?.port;
+  if (req.op === 'connect' && bound instanceof MessagePort) return [bound];
   if (req.op === 'attest') return [(result as Attestation).bytes.buffer as ArrayBuffer];
   return undefined;
 }
@@ -428,12 +434,59 @@ function usersOp(l: Launcher, req: UsersRequest): Promise<unknown> {
   return l.users.list();
 }
 
+type Binding = ConnectRequest['requests'];
+
+interface ConnectDeps {
+  ready(): Promise<Launcher>;
+  clients: Set<ServedClient>;
+  requests: ReturnType<typeof embedderAsker>;
+  held: (() => Promise<string>) | undefined;
+  locks: LockManagerLike | undefined;
+}
+
+let clientIds = 0;
+
+async function connectClient(
+  deps: ConnectDeps,
+  { user, tag, bind }: { user: string | number | undefined; tag?: string; bind?: Binding }
+): Promise<MessagePort | { port: MessagePort; client: number }> {
+  const l = await deps.ready();
+  tagOption(tag);
+  if (user !== undefined && !(await l.users.lookup(user))) {
+    throw fsError('ENOENT', `no user ${String(user)}`);
+  }
+  const { port1, port2 } = new MessageChannel();
+  const held = deps.held ? await deps.held() : undefined;
+  const client = ++clientIds;
+  const served = serveClient(port1, {
+    launcher: deps.ready,
+    signal: signalNumber,
+    session: client,
+    ...(bind === 'attach' ? { attachRequests: true } : {}),
+    ...(user !== undefined ? { user } : {}),
+    ...(tag !== undefined ? { tag } : {}),
+    ...(deps.locks ? { locks: deps.locks } : {}),
+    ...(held ? { lock: held } : {}),
+  });
+  deps.clients.add(served);
+  const unbind =
+    bind && bind !== 'attach'
+      ? l.embedder.register(client, deps.requests.hookFor(client, bind))
+      : undefined;
+  void served.closed.then(() => {
+    deps.clients.delete(served);
+    unbind?.();
+  });
+  return unbind ? { port: port2, client } : port2;
+}
+
 function hostOptions(
   req: InitRequest,
   port: KernelPort,
   sealed: SealedHook,
   clipboard: ClipboardHook,
-  lookup: IntegrityLookup
+  lookup: IntegrityLookup,
+  requests: ReturnType<typeof embedderAsker>
 ): {
   hostname?: string;
   doh?: string | false;
@@ -441,6 +494,7 @@ function hostOptions(
   onDenial?: DenialHook;
   sealed?: SealedHook;
   clipboard?: ClipboardHook;
+  embedder?: EmbedderHook;
   protect?: Protection;
   cron: CronOptions;
 } {
@@ -453,6 +507,7 @@ function hostOptions(
     ...(req.protect ? { protect: hostProtect(req.protect, lookup) } : {}),
     ...(req.sealed ? { sealed } : {}),
     ...(req.clipboard ? { clipboard } : {}),
+    ...(req.requests ? { embedder: requests.hookFor(0, req.requests) } : {}),
   };
 }
 
@@ -493,6 +548,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
   const clients = new Set<ServedClient>();
   const sealed = sealedAsker(port);
   const clipboard = clipboardAsker(port);
+  const requests = embedderAsker(port);
   const integrity = integrityAsker(port);
   const approvals = sudoApprovals(port);
   const locks = deps.locks === null ? undefined : (deps.locks ?? locksOf());
@@ -509,26 +565,11 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
     return holding;
   }
 
-  async function connect(user: string | number | undefined, tag?: string): Promise<MessagePort> {
-    const l = await ready();
-    tagOption(tag);
-    if (user !== undefined && !(await l.users.lookup(user))) {
-      throw fsError('ENOENT', `no user ${String(user)}`);
-    }
-    const { port1, port2 } = new MessageChannel();
-    const held = locks ? await holdLock(locks) : undefined;
-    const served = serveClient(port1, {
-      launcher: ready,
-      signal: signalNumber,
-      ...(user !== undefined ? { user } : {}),
-      ...(tag !== undefined ? { tag } : {}),
-      ...(locks ? { locks } : {}),
-      ...(held ? { lock: held } : {}),
-    });
-    clients.add(served);
-    void served.closed.then(() => clients.delete(served));
-    return port2;
-  }
+  const connect = (user: string | number | undefined, tag?: string, bind?: Binding) =>
+    connectClient(
+      { ready, clients, requests, held: locks ? () => holdLock(locks) : undefined, locks },
+      { user, tag, bind }
+    );
 
   async function ready(): Promise<Launcher> {
     if (!launcher) throw new Error('the kernel is not initialized');
@@ -567,7 +608,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
         ...(req.modules ? { modules: req.modules } : {}),
         ...(req.commands ? { commands: req.commands } : {}),
         ...(req.env ? { env: req.env } : {}),
-        ...hostOptions(req, port, sealed.hook, clipboard.hook, integrity.lookup),
+        ...hostOptions(req, port, sealed.hook, clipboard.hook, integrity.lookup, requests),
         ...(req.approve ? { approve: approvals.ask } : {}),
         ...net,
         ...(media ? { media } : {}),
@@ -598,7 +639,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
     if (req.op === 'init') return init(req);
     if (isAttestRequest(req)) return attestOp(await ready(), req);
     if (req.op === 'open-terminal') return terminal(req);
-    if (req.op === 'connect') return connect(req.user, req.tag);
+    if (req.op === 'connect') return connect(req.user, req.tag, req.requests);
     if (isUsersRequest(req)) return usersOp(await ready(), req);
     if (req.op === 'routes' || req.op === 'transport-traits') {
       return networkOp(await ready(), req, remote);
@@ -643,6 +684,8 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
     if (sealedReply) return sealed.answer(sealedReply);
     const clipboardReply = (event.data as { clipboardReply?: ClipboardReply }).clipboardReply;
     if (clipboardReply) return clipboard.answer(clipboardReply);
+    const embedderReply = embedderReplyOf(event.data);
+    if (embedderReply) return requests.answer(embedderReply);
     const integrityReply = (event.data as { integrityReply?: IntegrityReply }).integrityReply;
     if (integrityReply) return integrity.answer(integrityReply);
     const grant = (event.data as { hostfsGrant?: GrantReply }).hostfsGrant;

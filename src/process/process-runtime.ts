@@ -252,6 +252,9 @@ export function kernelSys(transport: SyncSabTransport): ProcessSys & PtyKernel &
     clipboardAbort(fd) {
       call({ op: 'fd-clipboard-abort', fd }, 'fd-clipboard-abort');
     },
+    openEmbedder(flags) {
+      return json(call({ op: 'fd-open-embedder', flags }, 'fd-open-embedder')) as number;
+    },
     ptyNumbers() {
       return json(call({ op: 'pty-list' }, 'pty-list')) as number[];
     },
@@ -336,7 +339,14 @@ function openAt(Fs: ProcessFs, fd: number, path: string, flags: number): boolean
   return true;
 }
 
-const PLACED: ReadonlySet<string> = new Set(['stream', 'file', 'socket', 'clipboard', 'sealed']);
+const PLACED: ReadonlySet<string> = new Set([
+  'stream',
+  'file',
+  'socket',
+  'clipboard',
+  'embedder',
+  'sealed',
+]);
 
 export function wireKernelStdio(Fs: ProcessFs, streams: KernelStreams, sys?: ProcessSys): void {
   for (const fd of [0, 1, 2]) {

@@ -21,6 +21,7 @@ import type {
   TerminalOptions,
 } from './index.ts';
 import type { ClipboardHook } from './kernel/clipboard.ts';
+import { type EmbedderHook, kindsOf } from './kernel/embedder.ts';
 import type { WasmWorkerLike } from './kernel/host.ts';
 import type { RouteTable } from './kernel/net/routes.ts';
 import type { NetworkUplink } from './kernel/net/uplink.ts';
@@ -82,6 +83,13 @@ export type {
 } from './index.ts';
 export type { ClipboardHook, ClipboardStamp } from './kernel/clipboard.ts';
 export type {
+  EmbedderHook,
+  EmbedderKindPolicy,
+  EmbedderReply,
+  EmbedderRequest,
+  EmbedderStamp,
+} from './kernel/embedder.ts';
+export type {
   SealedAbortReason,
   SealedCaller,
   SealedHook,
@@ -121,6 +129,7 @@ export interface NodeKernelOptions {
   onDenial?: DenialHook;
   sealed?: SealedHook;
   clipboard?: ClipboardHook;
+  requests?: EmbedderHook;
   approve?: ApproveHook;
   protect?: Protection;
   cron?: { clock?: CronClock };
@@ -350,6 +359,41 @@ function cacheDirOf(dir: unknown): string | undefined {
   return dir;
 }
 
+let nodeSessions = 0;
+
+function nodeClient(
+  launcher: Launcher,
+  clients: Set<ServedClient>,
+  { user, tag, requests }: ConnectOptions
+): MessagePort {
+  tagOption(tag);
+  const { port1, port2 } = new MessageChannel();
+  const session = ++nodeSessions;
+  const served = serveClient(port1 as unknown as MessagePortLike, {
+    launcher: async () => launcher,
+    signal: signalNumber,
+    session,
+    ...(requests === 'attach' ? { attachRequests: true } : {}),
+    ...(user !== undefined ? { user } : {}),
+    ...(tag !== undefined ? { tag } : {}),
+  });
+  clients.add(served);
+  const unbind =
+    requests && requests !== 'attach'
+      ? launcher.embedder.register(session, checkedRequests(requests))
+      : undefined;
+  void served.closed.then(() => {
+    clients.delete(served);
+    unbind?.();
+  });
+  return port2 as unknown as MessagePort;
+}
+
+function checkedRequests(hook: EmbedderHook): EmbedderHook {
+  const kinds = kindsOf(hook);
+  return { kinds, handle: (request) => hook.handle(request) };
+}
+
 export async function createNodeKernel(options: NodeKernelOptions = {}): Promise<NodeKernel> {
   const root = options.root ?? memoryRoot();
   const fs = new OpfsFs(root, undefined, undefined, { ranged: isMemoryRoot(root) });
@@ -392,6 +436,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     ...(options.protect ? { protect: options.protect } : {}),
     ...(options.sealed ? { sealed: options.sealed } : {}),
     ...(options.clipboard ? { clipboard: options.clipboard } : {}),
+    ...(options.requests ? { embedder: checkedRequests(options.requests) } : {}),
     ...(options.approve ? { approve: options.approve } : {}),
     ...(options.wasmMemories ? { wasmMemories: options.wasmMemories } : {}),
     cron: { lock: cronLock(root), ...(options.cron?.clock ? { clock: options.cron.clock } : {}) },
@@ -488,22 +533,13 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
       addMember: (group, user) => guard(() => launcher.users.addMember(group, user)),
       removeMember: (group, user) => guard(() => launcher.users.removeMember(group, user)),
     },
-    async connect({ user, tag } = {}) {
+    async connect(connectOptions = {}) {
       if (terminated) throw new Error(TERMINATED);
-      tagOption(tag);
+      const { user } = connectOptions;
       if (user !== undefined && !(await guard(() => launcher.users.lookup(user)))) {
         throw fsError('ENOENT', `no user ${String(user)}`);
       }
-      const { port1, port2 } = new MessageChannel();
-      const served = serveClient(port1 as unknown as MessagePortLike, {
-        launcher: async () => launcher,
-        signal: signalNumber,
-        ...(user !== undefined ? { user } : {}),
-        ...(tag !== undefined ? { tag } : {}),
-      });
-      clients.add(served);
-      void served.closed.then(() => clients.delete(served));
-      return port2;
+      return nodeClient(launcher, clients, connectOptions);
     },
     terminate() {
       terminated = true;

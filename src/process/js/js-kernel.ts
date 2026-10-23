@@ -28,6 +28,7 @@ const DETAILED: ReadonlySet<string> = new Set([
   'fd-write',
   'fd-close',
   'fd-open-clipboard',
+  'fd-open-embedder',
   'net-ws-ready',
   'sock-tls',
   'sock-tls-upgrade',

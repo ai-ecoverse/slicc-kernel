@@ -1,4 +1,5 @@
 import type { ClipboardChannel } from './clipboard.ts';
+import type { EmbedderChannel } from './embedder.ts';
 import { KernelPipe, type PipeError } from './pipe.ts';
 import type { PtyPair } from './pty.ts';
 import type { SealedChannel } from './sealed.ts';
@@ -117,6 +118,7 @@ export interface KernelFile {
   sealed?: SealedChannel;
 
   clipboard?: ClipboardChannel;
+  embedder?: EmbedderChannel;
 
   held?: true;
 
@@ -325,7 +327,8 @@ export type KernelFdKind =
   | 'held'
   | 'device'
   | 'sealed'
-  | 'clipboard';
+  | 'clipboard'
+  | 'embedder';
 
 export function kernelFdKind(file: KernelFile): Exclude<KernelFdKind, 'socket'> {
   if (file.held) return 'held';
@@ -333,6 +336,7 @@ export function kernelFdKind(file: KernelFile): Exclude<KernelFdKind, 'socket'> 
   if (file.tty) return 'tty';
   if (file.sealed) return 'sealed';
   if (file.clipboard) return 'clipboard';
+  if (file.embedder) return 'embedder';
   return file.seek ? 'file' : 'stream';
 }
 

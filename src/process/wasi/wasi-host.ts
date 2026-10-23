@@ -31,6 +31,7 @@ import { CredCache, UmaskCache, UNGATED } from './wasi-cred.ts';
 import {
   CLIPBOARD_PATH,
   deviceOf,
+  EMBEDDER_PATH,
   SEALED_PATH,
   WasiFds,
   type WasiForkFd,
@@ -200,6 +201,7 @@ function kernelFiletype(kind: string): { filetype: number; seeks: boolean } {
     case 'tty':
     case 'sealed':
     case 'clipboard':
+    case 'embedder':
       return { filetype: FILETYPE.CHARACTER_DEVICE, seeks: false };
     case 'device':
       return { filetype: FILETYPE.CHARACTER_DEVICE, seeks: true };
@@ -1415,7 +1417,8 @@ export class WasiHost {
     return (
       deviceOf(path) !== undefined ||
       (path === SEALED_PATH && !!this.o.kernel.sys.openSealed) ||
-      (path === CLIPBOARD_PATH && !!this.o.kernel.sys.openClipboard)
+      (path === CLIPBOARD_PATH && !!this.o.kernel.sys.openClipboard) ||
+      (path === EMBEDDER_PATH && !!this.o.kernel.sys.openEmbedder)
     );
   }
 

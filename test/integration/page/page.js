@@ -472,6 +472,43 @@ const clipboardHook = {
   },
 };
 
+window.requests = { calls: [] };
+
+const requestHook = {
+  kinds: { 'page.echo': {}, 'page.fail': {} },
+  handle: async (request) => {
+    window.requests.calls.push({
+      kind: request.kind,
+      options: request.options,
+      stamp: request.stamp,
+    });
+    if (request.kind === 'page.fail')
+      throw Object.assign(new Error('the page said no'), { name: 'NotAllowedError' });
+    const chunks = [];
+    for await (const chunk of request.body) chunks.push(...chunk);
+    request.progress('echoing');
+    return new Uint8Array([...new TextEncoder().encode('page:'), ...chunks]);
+  },
+};
+
+window.boundRun = async (script) => {
+  const bound = {
+    kinds: { 'page.echo': {} },
+    handle: async (request) => {
+      window.requests.calls.push({
+        kind: `bound ${request.kind}`,
+        options: {},
+        stamp: request.stamp,
+      });
+      return 'bound';
+    },
+  };
+  const client = await attachKernel(await window.kernel.connect({ requests: bound, tag: 'agent' }));
+  const r = await client.run(['bash', '-c', script], { cwd: '/tmp' });
+  client.close();
+  return r;
+};
+
 window.extraTraits = {};
 
 const liveTraits = (inner) => ({
@@ -516,6 +553,7 @@ window.boot = async (options = {}) => {
       ...(options.cdp ? { cdp: cdpHook } : {}),
       ...(options.protect ? { protect: protection(options.protect) } : {}),
       ...(options.clipboard ? { clipboard: clipboardHook } : {}),
+      ...(options.requests ? { requests: requestHook } : {}),
       ...(options.worker ? { worker: new URL(options.worker, location.href) } : {}),
     })
   );

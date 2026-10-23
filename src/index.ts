@@ -9,6 +9,7 @@ import {
 } from './client/dial-stream.ts';
 import { type LoopbackFetchOptions, loopbackFetch } from './client/loopback-fetch.ts';
 import { clipboardAnswerer } from './clipboard-relay.ts';
+import { embedderAnswerer } from './embedder-relay.ts';
 import { type FacadeOpen, serveFacadePort } from './facade/port.ts';
 import type { FacadeSpecs } from './facade/types.ts';
 import type { Attestation } from './fs/attest.ts';
@@ -18,6 +19,7 @@ import { type Protection, protectInit } from './fs/protect.ts';
 import { DEFAULT_USERS, type UsersMode } from './fs/types.ts';
 import { integrityAnswerer } from './integrity-relay.ts';
 import type { ClipboardHook } from './kernel/clipboard.ts';
+import { type EmbedderHook, kindsOf } from './kernel/embedder.ts';
 import { isHostname } from './kernel/net/loopback-names.ts';
 import type { TransportCall } from './kernel/net/remote-transport.ts';
 import type { RouteTable } from './kernel/net/routes.ts';
@@ -71,6 +73,13 @@ export type {
 export type { Attestation, AttestedDir } from './fs/attest.ts';
 export type { Denial, DenialHook } from './fs/dac.ts';
 export type { ClipboardHook, ClipboardStamp } from './kernel/clipboard.ts';
+export type {
+  EmbedderHook,
+  EmbedderKindPolicy,
+  EmbedderReply,
+  EmbedderRequest,
+  EmbedderStamp,
+} from './kernel/embedder.ts';
 export type { RouteTable } from './kernel/net/routes.ts';
 export type {
   NetworkUplink,
@@ -191,6 +200,7 @@ export interface KernelOptions {
   onDenial?: DenialHook;
   sealed?: SealedHook;
   clipboard?: ClipboardHook;
+  requests?: EmbedderHook;
   approve?: ApproveHook;
   protect?: Protection;
 }
@@ -227,6 +237,7 @@ export interface RunResult {
 export interface ConnectOptions {
   user?: string | number;
   tag?: string;
+  requests?: EmbedderHook | 'attach';
 }
 
 export interface KernelGroups {
@@ -379,6 +390,7 @@ function initCall(options: KernelOptions, transport: NetworkTransport | undefine
     ...(options.onDenial ? { denials: true } : {}),
     ...(options.sealed ? { sealed: true } : {}),
     ...(options.clipboard ? { clipboard: true } : {}),
+    ...(options.requests ? { requests: kindsOf(options.requests) } : {}),
     ...(options.approve ? { approve: true } : {}),
     ...(options.protect ? { protect: protectInit(options.protect) } : {}),
     ...(options.processMounts !== undefined
@@ -590,15 +602,41 @@ function checkOptions(options: KernelOptions): void {
   facadesInit(options.facades);
 }
 
+function connector(
+  call: (req: KernelCall) => Promise<unknown>,
+  bound: Map<number, EmbedderHook>
+): (options?: ConnectOptions) => Promise<MessagePort> {
+  return async (connectOptions = {}) => {
+    const { requests, ...rest } = connectOptions;
+    if (requests === undefined || requests === 'attach')
+      return (await call({
+        op: 'connect',
+        ...rest,
+        ...(requests ? { requests } : {}),
+      })) as MessagePort;
+    const made = (await call({ op: 'connect', ...rest, requests: kindsOf(requests) })) as {
+      port: MessagePort;
+      client: number;
+    };
+    bound.set(made.client, requests);
+    return made.port;
+  };
+}
+
 function hookRelays(
   worker: Worker,
-  options: KernelOptions
+  options: KernelOptions,
+  bound: Map<number, EmbedderHook>
 ): { handle(data: unknown): boolean; close(): void } {
   const sealed = sealedAnswerer(worker, options.sealed);
   const clipboard = clipboardAnswerer(worker, options.clipboard);
   const integrity = integrityAnswerer(worker, options.protect?.integrity?.lookup);
+  const requests = embedderAnswerer(worker, (client) =>
+    client === 0 ? options.requests : bound.get(client)
+  );
   return {
-    handle: (data) => sealed.handle(data) || clipboard.handle(data) || integrity(data),
+    handle: (data) =>
+      sealed.handle(data) || clipboard.handle(data) || requests.handle(data) || integrity(data),
     close: () => sealed.close(),
   };
 }
@@ -658,7 +696,8 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
   );
   const cdp = cdpBridge(options.cdp);
   const facades = facadeBridge(options.facades);
-  const sealed = hookRelays(worker, options);
+  const bound = new Map<number, EmbedderHook>();
+  const sealed = hookRelays(worker, options, bound);
   const approvals = approver(options.approve, worker);
   const fail = (error: Error) => {
     dials.reset();
@@ -797,8 +836,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
       return decodedRun(result);
     },
     openTerminal,
-    connect: async (connectOptions = {}) =>
-      (await call({ op: 'connect', ...connectOptions })) as MessagePort,
+    connect: connector(call, bound),
     ...accounts(call, options.users === undefined ? DEFAULT_USERS : options.users),
     setRoutes: async (routes) => void (await call({ op: 'routes', routes })),
     chmod: async (path, mode) => void (await call({ op: 'chmod', path, mode })),
