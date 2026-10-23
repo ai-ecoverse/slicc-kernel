@@ -16,7 +16,7 @@ const WRITER = (dir, tag, slot) =>
     'end = None',
     'try:',
     '    while n < 20000:',
-    `        os.pwrite(fd, f'${tag}{n:06d}\\n'.encode(), (2 * n + ${slot}) * 8)`,
+    `        os.pwrite(fd, f'${tag}{n:06d}\\n'.encode(), ${slot} * 1048576 + n * 8)`,
     '        os.fsync(fd)',
     '        n += 1',
     `        if end is None and os.path.exists('${dir}/b/moved'): end = n + 50`,
@@ -48,7 +48,7 @@ test("two tabs that hold one file both follow another tab's move of it, with no 
         (s) => {
           window.writeRun = window.kernel.run(['python3', '-c', s], { cwd: '/' });
         },
-        WRITER(dir, tag)
+        WRITER(dir, tag, slot)
       );
     }
     for (const tag of ['x', 'y'])
@@ -67,11 +67,13 @@ test("two tabs that hold one file both follow another tab's move of it, with no 
     for (const r of runs) assert.match(r.stdout, /^\d+ ok\n$/, `${r.stdout} ${r.stderr}`);
     const after = Number((await sh(page, 'cat /proc/sys/kernel/slicc_stale_fds')).stdout);
     assert.equal(after - stale, 0, 'a descriptor was stale');
-    const counts = await sh(
-      page,
-      `grep -a -c '^x[0-9]' ${dir}/b/log; grep -a -c '^y[0-9]' ${dir}/b/log`
+    const log = await page.evaluate((p) => window.opfs.read(p), `${dir.slice(1)}/b/log`);
+    const count = (tag) =>
+      log.split('\n').filter((line) => line.replace(/^\0+/, '').startsWith(tag)).length;
+    assert.deepEqual(
+      [count('x'), count('y')],
+      runs.map((r) => Number(r.stdout.split(' ')[0])),
+      'every write is at the new name'
     );
-    const want = runs.map((r) => r.stdout.split(' ')[0]).join('\n');
-    assert.deepEqual(counts, ok(`${want}\n`), 'every write is at the new name');
   }
 });
