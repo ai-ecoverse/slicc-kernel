@@ -644,6 +644,16 @@ export class WasiFds {
     }
   }
 
+  synced(file: LocalFile): void {
+    try {
+      file.flush();
+      this.reported.delete(file.buffer);
+    } catch (err) {
+      this.reported.add(file.buffer);
+      throw err;
+    }
+  }
+
   flushEarly(): void {
     for (const buffer of this.buffers.values()) {
       try {

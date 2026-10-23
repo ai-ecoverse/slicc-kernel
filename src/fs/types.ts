@@ -117,7 +117,13 @@ export interface KernelFs {
   utimes(path: string, atime: Date, mtime: Date): Promise<void>;
   lutimes?(path: string, atime: Date, mtime: Date): Promise<void>;
   pread?(path: string, offset: number, length: number, version?: string): Promise<Uint8Array>;
-  pwrite?(path: string, offset: number, bytes: Uint8Array, transfer?: boolean): Promise<void>;
+  pwrite?(
+    path: string,
+    offset: number,
+    bytes: Uint8Array,
+    transfer?: boolean,
+    options?: PwriteOptions
+  ): Promise<void>;
   truncate?(path: string, size: number): Promise<void>;
   protect?(prefixes: readonly string[], versions?: boolean): void;
   unguarded?(): KernelFs;
@@ -135,6 +141,10 @@ export interface KernelFs {
     ackMs: readonly number[];
   };
   opfsOps?(): number;
+}
+
+export interface PwriteOptions {
+  create?: false;
 }
 
 export type RangedOps = Required<Pick<KernelFs, 'pread' | 'pwrite' | 'truncate'>>;

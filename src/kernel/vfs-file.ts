@@ -6,6 +6,7 @@ import {
   mayLink,
   type NewOwner,
   type OwnerChange,
+  type PwriteOptions,
   rangedOps,
 } from '../fs/types.ts';
 import type { KeptFile, UnlinkHolder } from '../fs/unlinked.ts';
@@ -907,11 +908,17 @@ function heldIo(fs: KernelFs, nodes: VfsNodes, changed: (path: string) => void):
             const held = await node(path);
             return held ? held.byName(() => held.pread(n, at)) : ranged.pread(path, at, n, version);
           },
-          pwrite: (path: string, at: number, bytes: Uint8Array, transfer?: boolean) =>
+          pwrite: (
+            path: string,
+            at: number,
+            bytes: Uint8Array,
+            transfer?: boolean,
+            options?: PwriteOptions
+          ) =>
             write(
               path,
               async (held) => void (await held.pwrite(bytes, at)),
-              () => ranged.pwrite(path, at, bytes, transfer)
+              () => ranged.pwrite(path, at, bytes, transfer, options)
             ),
           truncate: (path: string, size: number) =>
             write(

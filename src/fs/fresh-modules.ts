@@ -1,4 +1,4 @@
-import { type KernelFs, normalizePath, rangedOps } from './types.ts';
+import { type KernelFs, normalizePath, type PwriteOptions, rangedOps } from './types.ts';
 
 const MAGIC = [0x00, 0x61, 0x73, 0x6d];
 const MAX_FRESH = 65_536;
@@ -111,12 +111,13 @@ export class FreshModules {
         path: string,
         at: number,
         bytes: Uint8Array,
-        transfer?: boolean
+        transfer?: boolean,
+        options?: PwriteOptions
       ) => {
         const touches = at < MAGIC.length && this.fresh.has(normalizePath(path));
         const first =
           at === 0 && bytes.length >= MAGIC.length ? bytes.slice(0, MAGIC.length) : undefined;
-        await ranged.pwrite(path, at, bytes, transfer);
+        await ranged.pwrite(path, at, bytes, transfer, options);
         if (touches) await decide(path, first);
       };
       overrides.truncate = async (path: string, size: number) => {

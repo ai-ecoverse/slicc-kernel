@@ -13,6 +13,7 @@ import {
   normalizePath,
   type OwnerChange,
   type Perm,
+  type PwriteOptions,
   redirectOf,
 } from '../fs/types.ts';
 import type { KeptFile, UnlinkHolder } from '../fs/unlinked.ts';
@@ -1152,6 +1153,7 @@ class MountFs implements KernelFs {
     offset: number,
     bytes: Uint8Array,
     transfer = false,
+    options?: PwriteOptions,
     redirects = 0
   ): Promise<void> {
     const real = await this.follow(path, 0, true);
@@ -1161,8 +1163,8 @@ class MountFs implements KernelFs {
       return this.based(
         [real],
         redirects,
-        () => pwrite.call(this.base, real, offset, bytes),
-        ([to], n) => this.pwrite(to as string, offset, bytes, transfer, n)
+        () => pwrite.call(this.base, real, offset, bytes, false, options),
+        ([to], n) => this.pwrite(to as string, offset, bytes, transfer, options, n)
       );
     }
     if (!found)
@@ -1186,7 +1188,7 @@ class MountFs implements KernelFs {
       op: 'open',
       path: rel,
       write: true,
-      create: true,
+      create: options?.create !== false,
       truncate: false,
       exclusive: false,
     })) as number;

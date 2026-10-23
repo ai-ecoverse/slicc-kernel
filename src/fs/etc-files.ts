@@ -1,4 +1,11 @@
-import { type FsStat, fsError, inodeOf, type KernelFs, rangedOps } from './types.ts';
+import {
+  type FsStat,
+  fsError,
+  inodeOf,
+  type KernelFs,
+  type PwriteOptions,
+  rangedOps,
+} from './types.ts';
 
 export const HOSTNAME_PATH = '/etc/hostname';
 
@@ -118,9 +125,15 @@ export function withEtcFiles(fs: KernelFs, files: ReadonlyMap<string, () => stri
             ranged
               .pread(path, offset, length, version)
               .catch(fallback(path, (b) => b.slice(offset, offset + length))),
-          pwrite: async (path: string, offset: number, bytes: Uint8Array, transfer?: boolean) => {
+          pwrite: async (
+            path: string,
+            offset: number,
+            bytes: Uint8Array,
+            transfer?: boolean,
+            options?: PwriteOptions
+          ) => {
             if (files.has(path)) await materialize(path);
-            return ranged.pwrite(path, offset, bytes, transfer);
+            return ranged.pwrite(path, offset, bytes, transfer, options);
           },
           truncate: async (path: string, size: number) => {
             if (files.has(path)) await materialize(path);

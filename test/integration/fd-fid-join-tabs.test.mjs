@@ -40,6 +40,7 @@ test('a file held before another tab joins is not read through a name that tab r
     ok('swapped\n')
   );
   const read = await page.evaluate(() => window.readRun);
+  console.log(`read ${read.stdout.trim()}`);
   assert.equal(read.status, 0, read.stderr);
   assert.notEqual(
     read.stdout,

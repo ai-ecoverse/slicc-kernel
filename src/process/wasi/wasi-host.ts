@@ -1299,7 +1299,7 @@ export class WasiHost {
 
   private sync(fd: number): void {
     const e = this.fds.get(fd);
-    if (e.type === 'file') e.file.flush();
+    if (e.type === 'file') this.fds.synced(e.file);
     else if (e.type === 'device') this.interrupted?.();
     else if (e.type === 'kernel') {
       const kind = this.fds.kind(fd, e);

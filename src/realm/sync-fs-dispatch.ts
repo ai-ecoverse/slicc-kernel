@@ -27,6 +27,7 @@ import {
   lutimesOf,
   mayLink,
   type NewOwner,
+  type PwriteOptions,
   rangedOps,
 } from '../fs/types.ts';
 import { joinName, realTarget } from '../fs/walk.ts';
@@ -340,7 +341,7 @@ async function run(
     case 'truncate':
       return ranged(fs, path, req);
     case 'append':
-      return json(await appended(fs, path, req.body ?? new Uint8Array(0)));
+      return json(await appended(fs, path, req.body ?? new Uint8Array(0), req.handle));
     default:
       return { ok: false, errno: 'EINVAL', message: `sync-fs: unknown op '${req.op as string}'` };
   }
@@ -636,14 +637,19 @@ async function createExclusive(fs: KernelFs, path: string, owner?: NewOwner): Pr
 
 const appending = new Map<string, Promise<unknown>>();
 
-async function appended(fs: KernelFs, path: string, body: Uint8Array): Promise<number> {
+async function appended(
+  fs: KernelFs,
+  path: string,
+  body: Uint8Array,
+  handle?: number
+): Promise<number> {
   const key = (await fs.realpath?.(path, true).catch(() => undefined)) ?? path;
   const before = appending.get(key) ?? Promise.resolve();
   const run = before.then(async () => {
     if (fs.append) return fs.append(path, body);
     const size = (await fs.stat(path)).size;
     const ops = rangedOps(fs);
-    if (ops) await ops.pwrite(path, size, body, true);
+    if (ops) await ops.pwrite(path, size, body, true, noCreate(handle));
     else {
       const whole = new Uint8Array(size + body.length);
       whole.set(await fs.readFileBuffer(path));
@@ -660,6 +666,10 @@ async function appended(fs: KernelFs, path: string, body: Uint8Array): Promise<n
   return run;
 }
 
+function noCreate(handle: number | undefined): PwriteOptions | undefined {
+  return handle === undefined ? undefined : { create: false };
+}
+
 async function ranged(fs: KernelFs, path: string, req: SyncFsRequest): Promise<SyncFsResult> {
   const ops = rangedOps(fs);
   if (!ops) throw syncError('ENOSYS', path);
@@ -670,7 +680,8 @@ async function ranged(fs: KernelFs, path: string, req: SyncFsRequest): Promise<S
       kind: 'bytes',
       bytes: await ops.pread(path, offset, req.length ?? 0, req.version),
     };
-  if (req.op === 'pwrite') await ops.pwrite(path, offset, req.body ?? new Uint8Array(0), true);
+  if (req.op === 'pwrite')
+    await ops.pwrite(path, offset, req.body ?? new Uint8Array(0), true, noCreate(req.handle));
   else await ops.truncate(path, req.length ?? 0);
   return done;
 }

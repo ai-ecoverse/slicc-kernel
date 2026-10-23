@@ -25,6 +25,7 @@ import {
   type OwnerChange,
   type Peers,
   type Perm,
+  type PwriteOptions,
   redirected,
   resolvePath,
 } from './types.ts';
@@ -1332,7 +1333,13 @@ export class OpfsFs implements KernelFs {
     });
   }
 
-  async pwrite(path: string, offset: number, bytes: Uint8Array): Promise<void> {
+  async pwrite(
+    path: string,
+    offset: number,
+    bytes: Uint8Array,
+    _transfer?: boolean,
+    options?: PwriteOptions
+  ): Promise<void> {
     const at = normalizePath(path);
     const movedAway = this.renamesInFlight() ? await this.writeWaits(at) : false;
     this.fileWrites.set(at, (this.fileWrites.get(at) ?? 0) + 1);
@@ -1347,7 +1354,10 @@ export class OpfsFs implements KernelFs {
           this.files.delete(target);
         }
       }
-      const [handle] = await this.fileFor(path, !existed && !movedAway);
+      const [handle] = await this.fileFor(
+        path,
+        !existed && !movedAway && options?.create !== false
+      );
       await this.writeAt(handle, target, path, offset, bytes);
     } finally {
       this.writeEnded(at);
