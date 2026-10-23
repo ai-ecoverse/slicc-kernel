@@ -401,6 +401,7 @@ function same(fs: SyncFsPosixBridge, path: string, id: string): boolean {
     if (GONE.has((err as { code?: string } | null)?.code ?? '')) return false;
     throw err;
   }
+  if (id.startsWith('fid:')) return st.fid !== undefined && id.startsWith(`fid:${st.fid}:`);
   const now = fileIdentity(st.ino, st.mtimeMs);
   return now === undefined || now === id;
 }

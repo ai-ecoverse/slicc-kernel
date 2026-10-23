@@ -1837,7 +1837,14 @@ export class Launcher {
             ];
             if (after.exeId === undefined) return gone;
             return this.reread(target, read).then(
-              (again) => id().then((last) => [again, last] as [Program, { exeId?: string }]),
+              (again) =>
+                id().then(
+                  (last) =>
+                    [again, last.exeId === after.exeId ? last : gone[1]] as [
+                      Program,
+                      { exeId?: string },
+                    ]
+                ),
               () => gone
             );
           }
@@ -1857,8 +1864,13 @@ export class Launcher {
     if (target.abi !== 'wasi' || (target.copy ?? target.glue) !== target.wasm) {
       return Promise.resolve({});
     }
+    const assign = this.mounts.locate(target.wasm) === undefined ? this.rootFs.fileId : undefined;
     return this.base.stat(target.wasm).then(
-      (st) => exeIdOf(fileIdentity(st.ino, st.mtime.getTime())),
+      async (st) => {
+        const fid = st.fid ?? (await assign?.call(this.rootFs, target.wasm));
+        if (fid === undefined) return exeIdOf(fileIdentity(st.ino, st.mtime.getTime()));
+        return { exeId: `fid:${fid}:${st.mtime.getTime()}` };
+      },
       () => ({})
     );
   }
