@@ -155,3 +155,41 @@ test('a tab appending while another tab truncates once and pwrites in the middle
   );
   assert.match(checked.stdout, /^ok \d+\n$/, JSON.stringify(checked));
 });
+
+test('a tab that joins while another buffers appends alone waits for those to land before its own, so no record is lost or doubled (#1546)', {
+  timeout: 600_000,
+}, async (t) => {
+  const { page } = await booted(chrome, t, { worker: '/slow-flush-worker.js?ms=6000' });
+  await installPackage(page, 'wasix-python', { skip: /^lib\/libpython[^/]*\.a$/ });
+  await installPackage(page, 'wasm-coreutils');
+  assert.deepEqual(
+    await sh(page, 'rm -rf /root/ap && mkdir -p /root/ap && : > /root/ap/go && echo made'),
+    ok('made\n')
+  );
+  const alone = [
+    'import os, time',
+    "fd = os.open('/root/ap/log', os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)",
+    'end = time.time() + 20',
+    'n = 0',
+    'while time.time() < end:',
+    "    os.write(fd, b'x%d\\n' % n); n += 1; time.sleep(0.005)",
+    'os.close(fd)',
+    'print(n)',
+  ].join('\n');
+  await page.evaluate((s) => {
+    window.append_x = window.kernel.run(['python3', '-c', s], { cwd: '/' });
+  }, alone);
+  await sleep(3000);
+  const other = await peerTab(page, { wait: false });
+  assert.deepEqual(await sh(other, JSAPP), ok('installed\n'));
+  const y = await other.evaluate(() => window.kernel.run(['jsapp', 'y', '50'], { cwd: '/' }));
+  assert.equal(y.stdout, '50\n', JSON.stringify(y));
+  const x = await page.evaluate(() => window.append_x);
+  const n = Number(x.stdout.trim());
+  assert.ok(n > 0, JSON.stringify(x));
+  const counted = await page.evaluate(
+    (s) => window.kernel.run(['python3', '-c', s], { cwd: '/' }),
+    "lines = open('/root/ap/log').read().splitlines(); print(len(set(l for l in lines if l.startswith('x'))), sum(l.startswith('x') for l in lines), sum(l.startswith('y') for l in lines), len(lines))"
+  );
+  assert.deepEqual(counted, ok(`${n} ${n} 50 ${n + 50}\n`));
+});

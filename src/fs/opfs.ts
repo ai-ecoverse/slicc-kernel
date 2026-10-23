@@ -1483,6 +1483,7 @@ export class OpfsFs implements KernelFs {
     if (!this.locks || !this.remote || !this.shared()) {
       throw fsError('ENOTSUP', `${path}: appended by position while no other tab shares the root`);
     }
+    await this.remote.peered();
     const at = normalizePath(path);
     if (this.renamesInFlight()) await this.writeWaits(at);
     this.fileWrites.set(at, (this.fileWrites.get(at) ?? 0) + 1);
