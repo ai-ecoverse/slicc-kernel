@@ -257,9 +257,8 @@ export class EmbedderChannel {
     const hook = this.broker.hookFor(this.caller.client) as EmbedderHook;
     const body = new BodyPipe();
     this.body = body;
-    const caller = this.caller;
     const progress = (line: string) => {
-      if (this.throttle.allow(Date.now())) caller.progress(lineOf(line));
+      if (this.throttle.allow(Date.now())) this.caller.progress(lineOf(line));
     };
     const asked = Promise.resolve()
       .then(() =>

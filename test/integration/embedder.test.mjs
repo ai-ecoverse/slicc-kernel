@@ -32,6 +32,7 @@ function page(name = 'page') {
       'test.fail': {},
       'test.video': { group: 'video' },
       'test.later': {},
+      'test.steps': {},
       'test.users': { group: 'users' },
       'test.named': { users: ['carol'] },
     },
@@ -68,6 +69,12 @@ function page(name = 'page') {
             reject(request.signal.reason);
           })
         );
+      }
+      if (request.kind === 'test.steps') {
+        await new Promise((r) => setTimeout(r, 200));
+        request.progress('step one');
+        await new Promise((r) => setTimeout(r, 100));
+        return 'done';
       }
       if (request.kind === 'test.later') {
         await new Promise((r) => setTimeout(r, 800));
@@ -320,5 +327,24 @@ test(
     );
     assert.match(wo.stdout, /rc=1/);
     assert.match(wo.stderr, /Permission denied/);
+  }
+);
+
+test(
+  "progress reaches the stderr of the process reading the reply, also when the process that sent the header has exec'd into the reader (#1527 follow-up)",
+  TIMEOUT,
+  async (t) => {
+    const { hook } = page();
+    const { bash } = await booted(t, { requests: hook });
+    const header = `printf '%s\\n' '{"kind":"test.steps"}' >&3`;
+    for (const script of [
+      `exec 3<>/dev/embedder; ${header}; cat <&3`,
+      `exec 3<>/dev/embedder; (${header}; exec cat <&3)`,
+      `exec 3<>/dev/embedder; ${header}; exec cat <&3`,
+    ]) {
+      const r = await bash(script);
+      assert.equal(r.stdout, 'done', script);
+      assert.equal(r.stderr, 'cat: step one\n', script);
+    }
   }
 );
