@@ -219,7 +219,7 @@ export function embedderAnswerer(
         signal: state.abort.signal,
         progress: (line) => post({ id: ask.id, progress: String(line) }),
       });
-      if (!(reply instanceof ReadableStream)) void body.cancel('answered').catch(() => undefined);
+      if (!(reply instanceof ReadableStream)) post({ id: ask.id, bodyCancel: true });
       state.reader = bytesOf(reply).getReader();
       post({ id: ask.id, ready: true });
     } catch (err) {

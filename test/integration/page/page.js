@@ -475,13 +475,17 @@ const clipboardHook = {
 window.requests = { calls: [] };
 
 const requestHook = {
-  kinds: { 'page.echo': {}, 'page.fail': {}, 'page.count': {} },
+  kinds: { 'page.echo': {}, 'page.fail': {}, 'page.count': {}, 'page.held': {} },
   handle: async (request) => {
     window.requests.calls.push({
       kind: request.kind,
       options: request.options,
       stamp: request.stamp,
     });
+    if (request.kind === 'page.held') {
+      await request.body.getReader().read();
+      return 'ok';
+    }
     if (request.kind === 'page.count') {
       let done = false;
       return new ReadableStream({
