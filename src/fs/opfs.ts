@@ -457,7 +457,7 @@ export class OpfsFs implements KernelFs {
 
   async fileId(path: string): Promise<string> {
     const found = await this.locate(path, true);
-    const [entry] = await this.meta.get([found.path]);
+    const [entry] = await (this.meta.fresh ?? this.meta.get).call(this.meta, [found.path]);
     if (entry?.fid !== undefined) return entry.fid;
     const fid = crypto.randomUUID();
     this.idWrites++;

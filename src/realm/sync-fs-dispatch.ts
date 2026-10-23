@@ -715,7 +715,11 @@ async function bound(entry: SyncFsTokenEntry, path: string, handle: number): Pro
   const bound = entry.boundIno?.(handle);
   if (bound === undefined) return;
   const now = await entry.fs.stat(path).catch(() => undefined);
-  if (bound.fid === undefined ? now?.ino === bound.ino : now?.fid === bound.fid) {
+  const same =
+    bound.fid === undefined
+      ? now?.ino === bound.ino
+      : now !== undefined && (now.fid === bound.fid || (await idOf(entry, path)) === bound.fid);
+  if (same) {
     entry.trust?.(handle, bound.doubt);
     return;
   }
