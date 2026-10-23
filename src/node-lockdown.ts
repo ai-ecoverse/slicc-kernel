@@ -172,11 +172,47 @@ const seal = Object.freeze;
 const ownKeys = Reflect.ownKeys;
 const ownDescriptor = Reflect.getOwnPropertyDescriptor;
 const BASE = Object.prototype;
-const BASE_KEYS = ownKeys(BASE).length;
+type Snapshot = ReadonlyArray<readonly [PropertyKey, PropertyDescriptor | undefined]>;
+
+function snapshot(of: object): Snapshot {
+  const keys = ownKeys(of);
+  const out: Array<readonly [PropertyKey, PropertyDescriptor | undefined]> = [];
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i] as PropertyKey;
+    out[i] = [key, ownDescriptor(of, key)];
+  }
+  return out;
+}
+
+function sameDescriptor(
+  a: PropertyDescriptor | undefined,
+  b: PropertyDescriptor | undefined
+): boolean {
+  if (a === undefined || b === undefined) return a === b;
+  for (let i = 0; i < FIELDS.length; i++) {
+    const field = FIELDS[i] as string;
+    if (own(a, field) !== own(b, field)) return false;
+  }
+  return true;
+}
+
+const FIELDS = ['value', 'get', 'set', 'writable', 'enumerable', 'configurable'];
+const BASE_SNAPSHOT = snapshot(BASE);
+
+function baseUnchanged(): boolean {
+  const now = snapshot(BASE);
+  if (now.length !== BASE_SNAPSHOT.length) return false;
+  for (let i = 0; i < now.length; i++) {
+    const at = now[i] as readonly [PropertyKey, PropertyDescriptor | undefined];
+    const was = BASE_SNAPSHOT[i] as readonly [PropertyKey, PropertyDescriptor | undefined];
+    if (at[0] !== was[0] || !sameDescriptor(at[1], was[1])) return false;
+  }
+  return true;
+}
 const SERIALIZED = [Array.prototype, String.prototype, Number.prototype, Boolean.prototype];
 
 function untouched(): boolean {
-  if (ownKeys(BASE).length !== BASE_KEYS) return false;
+  if (!baseUnchanged()) return false;
   for (let i = 0; i < SERIALIZED.length; i++) {
     if (ownDescriptor(SERIALIZED[i] as object, 'toJSON') !== undefined) return false;
   }

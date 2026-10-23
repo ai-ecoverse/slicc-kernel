@@ -79,6 +79,7 @@ for (const where of ['process', 'thread']) {
 const HOSTILE = `export default async function main(ctx) {
   const calls = [];
   const define = Object.defineProperty;
+  const describe = Object.getOwnPropertyDescriptor;
   const proto = Object.prototype;
   const trap = (name) =>
     new Proxy(function () {}, {
@@ -131,20 +132,54 @@ const HOSTILE = `export default async function main(ctx) {
     polluted.push(ps(seven));
     delete where[k];
   }
-  got.push(polluted, ps(seven).value);
+  const swapped = [];
+  const keep = describe(proto, 'toLocaleString');
+  const protoKey = describe(proto, '__proto__');
+  for (const swap of [
+    () => {
+      delete proto.toLocaleString;
+      define(proto, 'toJSON', { value() { calls.push('swap.toJSON'); return {}; }, configurable: true, writable: true });
+    },
+    () => define(proto, '__proto__', { get() { calls.push('swap.__proto__'); return null; }, set() { calls.push('swap.__proto__.set'); }, configurable: true }),
+    () => {
+      delete proto.toLocaleString;
+      define(proto, 'params', { set() { calls.push('swap.params'); }, configurable: true });
+    },
+  ]) {
+    swap();
+    try {
+      swapped.push(ps(seven));
+    } catch (err) {
+      swapped.push('threw ' + err.message);
+    }
+    delete proto.toJSON;
+    delete proto.params;
+    define(proto, '__proto__', protoKey);
+    define(proto, 'toLocaleString', keep);
+  }
+  got.push(polluted, swapped, ps(seven).value);
   await ctx.write(1, JSON.stringify({ got, read, calls }));
   return 0;
 }
 `;
 
-test('ctx.sync.promiseState runs no program code: global let shadows of globalThis, Object and Reflect, getters on the value and on a promise subclass never run, and with Object.prototype or a toJSON on a prototype changed it answers undefined rather than run any of it (#1531)', async (t) => {
+test('ctx.sync.promiseState runs no program code: global let shadows of globalThis, Object and Reflect, getters on the value and on a promise subclass never run, and with Object.prototype changed in any way (added, replaced or swapped keys) or a toJSON on a prototype it answers undefined rather than run any of it (#1531)', async (t) => {
   const kernel = await createNodeKernel({ users: 'off' });
   t.after(() => kernel.terminate());
   await program(kernel, 'hostile', HOSTILE);
   const r = await kernel.run(['hostile'], { cwd: '/' });
   assert.equal(r.status, 0, r.stderr);
   assert.deepEqual(JSON.parse(r.stdout), {
-    got: [true, true, 'rejected', 'pending', 7, [null, null, null, null, null, null], 7],
+    got: [
+      true,
+      true,
+      'rejected',
+      'pending',
+      7,
+      [null, null, null, null, null, null],
+      [null, null, null],
+      7,
+    ],
     read: 0,
     calls: [],
   });
