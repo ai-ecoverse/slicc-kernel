@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
-import { isAbsolute } from 'node:path';
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { isAbsolute, join } from 'node:path';
 import { MessageChannel, type MessagePort, Worker } from 'node:worker_threads';
 import type { CdpHook } from './cdp/types.ts';
 import type { MessagePortLike } from './client/protocol.ts';
@@ -134,7 +136,7 @@ export interface NodeKernelOptions {
   approve?: ApproveHook;
   protect?: Protection;
   cron?: { clock?: CronClock };
-  compileCache?: string;
+  compileCache?: string | false;
   warmWorker?: boolean;
   warmWorkers?: number;
   wasmMemories?: { ceiling?: number; idleMs?: number };
@@ -262,7 +264,10 @@ export function sparesOf(options: { warmWorker?: boolean; warmWorkers?: unknown 
   return n;
 }
 
-function processWorker(file: string | URL, workerData?: { compileCache: string }): Worker {
+function processWorker(
+  file: string | URL,
+  workerData?: { compileCache: string; ownedCache?: boolean }
+): Worker {
   return new Worker(file, { env: workerEnv(), ...(workerData ? { workerData } : {}) });
 }
 
@@ -274,7 +279,7 @@ export function sourceModule(source: string): { url: string; source: string; rev
 function warmPoolOf(
   options: NodeKernelOptions,
   file: string | URL,
-  workerData: { compileCache: string } | undefined,
+  workerData: { compileCache: string; ownedCache?: boolean } | undefined,
   live: Set<() => void>
 ) {
   const size = sparesOf(options);
@@ -286,7 +291,7 @@ function nodeWorker(
   file: string | URL,
   live: Set<() => void>,
   closed: boolean,
-  workerData?: { compileCache: string },
+  workerData?: { compileCache: string; ownedCache?: boolean },
   take?: () => Worker
 ): WasmWorkerLike {
   const errors = new Set<(event: MessageEvent) => void>();
@@ -357,12 +362,62 @@ function workerEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
-function cacheDirOf(dir: unknown): string | undefined {
-  if (dir === undefined) return undefined;
+const CACHE_PREFIX = 'slicc-kernel-cc-';
+
+function cacheDirOf(dir: unknown): { dir: string; own: boolean } | undefined {
+  if (dir === false) return undefined;
+  if (dir === undefined) return { dir: privateCacheDir(), own: true };
   if (typeof dir !== 'string' || !isAbsolute(dir)) {
-    throw new TypeError('createNodeKernel: compileCache must be an absolute directory path');
+    throw new TypeError(
+      'createNodeKernel: compileCache must be an absolute directory path or false'
+    );
   }
-  return dir;
+  return { dir, own: false };
+}
+
+function cacheData(
+  cache: { dir: string; own: boolean } | undefined
+): { compileCache: string; ownedCache?: boolean } | undefined {
+  if (!cache) return undefined;
+  return { compileCache: cache.dir, ...(cache.own ? { ownedCache: true } : {}) };
+}
+
+function dropCache(cache: { dir: string; own: boolean } | undefined): void {
+  if (cache?.own) rmSync(cache.dir, { recursive: true, force: true });
+}
+
+let swept = false;
+
+export function privateCacheDir(base = tmpdir(), alive = pidAlive): string {
+  if (!swept) {
+    swept = true;
+    sweepCacheDirs(base, alive);
+  }
+  return mkdtempSync(join(base, `${CACHE_PREFIX}${process.pid}-`));
+}
+
+export function sweepCacheDirs(base: string, alive: (pid: number) => boolean = pidAlive): void {
+  let names: string[];
+  try {
+    names = readdirSync(base);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (!name.startsWith(CACHE_PREFIX)) continue;
+    const pid = Number(name.slice(CACHE_PREFIX.length).split('-')[0]);
+    if (!Number.isInteger(pid) || pid <= 0 || alive(pid)) continue;
+    rmSync(join(base, name), { recursive: true, force: true });
+  }
+}
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as { code?: string }).code === 'EPERM';
+  }
 }
 
 let nodeSessions = 0;
@@ -409,8 +464,8 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
   const clients = new Set<ServedClient>();
   let terminated = false;
   const file = options.worker ?? new URL('./node-process-worker.js', import.meta.url);
-  const compileCache = cacheDirOf(options.compileCache);
-  const workerData = compileCache ? { compileCache } : undefined;
+  const cache = cacheDirOf(options.compileCache);
+  const workerData = cacheData(cache);
   const warm = warmPoolOf(options, file, workerData, live);
   const transport = options.network?.transport;
   const launcher = new Launcher({
@@ -556,6 +611,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
       for (const kill of [...live]) kill();
       launcher.cdp.close();
       launcher.unmountAll();
+      dropCache(cache);
     },
   };
 }

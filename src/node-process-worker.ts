@@ -22,8 +22,11 @@ scope.require ??= createRequire(import.meta.url);
 scope.__filename ??= new URL(import.meta.url).pathname;
 scope.__dirname ??= new URL('.', import.meta.url).pathname;
 
-const cacheDir = (workerData as { compileCache?: unknown } | null)?.compileCache;
-const cached = typeof cacheDir === 'string' && ownCache(cacheDir, enableCompileCache(cacheDir));
+const data = workerData as { compileCache?: unknown; ownedCache?: unknown } | null;
+const cacheDir = data?.compileCache;
+const cached =
+  typeof cacheDir === 'string' &&
+  ownCache(cacheDir, enableCompileCache(cacheDir), data?.ownedCache === true);
 const imported = cached ? () => flushCompileCache() : undefined;
 
 const port = parentPort as NonNullable<typeof parentPort>;
