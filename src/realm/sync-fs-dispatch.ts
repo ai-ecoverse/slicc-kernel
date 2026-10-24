@@ -169,6 +169,12 @@ function ownerFor(entry: SyncFsTokenEntry, mode?: number): NewOwner | undefined 
   return ownerOf(cred, mode === undefined ? undefined : mode & ~(entry.umask?.() ?? 0o022));
 }
 
+function writeOwner(entry: SyncFsTokenEntry, req: SyncFsRequest): NewOwner | undefined {
+  const owner = ownerFor(entry, 0o666);
+  if (req.handle === undefined || req.mode !== 1) return owner;
+  return { ...(owner ?? ({} as NewOwner)), existing: true };
+}
+
 function plainDirMode(entry: SyncFsTokenEntry, mode: number | undefined): number | undefined {
   if (entry.cred || mode === undefined) return undefined;
   const wanted = mode & 0o7777 & ~(entry.umask?.() ?? 0o022);
@@ -263,7 +269,7 @@ async function run(
     case 'read':
       return { ok: true, kind: 'bytes', bytes: await readSource(entry, path) };
     case 'write':
-      await fs.writeFile(path, req.body ?? new Uint8Array(0), ownerFor(entry, 0o666));
+      await fs.writeFile(path, req.body ?? new Uint8Array(0), writeOwner(entry, req));
       return done;
     case 'exists':
       return json(await fs.exists(path));
