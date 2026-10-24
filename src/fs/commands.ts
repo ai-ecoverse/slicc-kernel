@@ -7,6 +7,7 @@ import {
   type KernelFs,
   lutimesOf,
   mayLink,
+  type NewOwner,
   rangedOps,
 } from './types.ts';
 
@@ -71,6 +72,15 @@ async function readsAs(fs: KernelFs, cred: Readonly<Cred>, target: string): Prom
 async function shownTarget(fs: KernelFs, target: string): Promise<FsStat | undefined> {
   const st = await quiet(fs.stat(target));
   return st?.isFile && (await readsAs(fs, NOBODY, target)) ? st : undefined;
+}
+
+async function madeFor(
+  owner: NewOwner | undefined,
+  virtual: () => Promise<unknown>
+): Promise<NewOwner | undefined> {
+  if (!owner?.existing || (await virtual()) === undefined) return owner;
+  const { existing: _, ...made } = owner;
+  return made;
 }
 
 export function withCommandDirs(
@@ -192,7 +202,8 @@ export function withCommandDirs(
       }),
     readFileBuffer: (path) => fs.readFileBuffer(path).catch((err) => content(path, err)),
     commandTarget: async (path) => (await entryTarget(path))?.path,
-    writeFile: (path, content, owner) => fs.writeFile(path, content, owner),
+    writeFile: async (path, content, owner) =>
+      fs.writeFile(path, content, await madeFor(owner, () => entryTarget(path))),
     link: (from, to, follow) => fs.link(from, to, follow),
     links: (path) => mayLink(fs, path),
     async exists(path) {
