@@ -103,7 +103,7 @@ test('opens of an existing file never wait for a tab running an older kernel, wh
   await installPackage(page, 'wasix-python', { skip: /^lib\/libpython[^/]*\.a$/ });
   const old = await peerTab(page, { worker: `${PEER_WORKER}?old=1` });
   assert.deepEqual(
-    await sh(page, 'mkdir -p /root/po && echo x > /root/po/f && echo made'),
+    await sh(page, 'rm -rf /root/po && mkdir -p /root/po && echo x > /root/po/f && echo made'),
     ok('made\n')
   );
   const script = [
@@ -113,21 +113,22 @@ test('opens of an existing file never wait for a tab running an older kernel, wh
     "    os.close(os.open('/root/po/f', os.O_RDONLY))",
     'print(round((time.time() - t) * 1000))',
   ].join('\n');
-  const busy = old.evaluate(() =>
-    window.kernel.run(
+  await old.evaluate(() => {
+    window.busy = window.kernel.run(
       [
         'bash',
         '-c',
-        'for i in $(seq 1 400); do echo $i > /root/po/w; mv /root/po/w /root/po/v; done',
+        'until [ -e /root/po/stop ]; do echo 1 > /root/po/w; mv /root/po/w /root/po/v; done',
       ],
       { cwd: '/' }
-    )
-  );
+    );
+  });
   const r = await page.evaluate(
     (s) => window.kernel.run(['python3', '-c', s], { cwd: '/' }),
     script
   );
-  await busy;
+  await sh(page, ': > /root/po/stop');
+  await old.evaluate(() => window.busy);
   const out = typeof r.stdout === 'string' ? r.stdout : new TextDecoder().decode(r.stdout);
   console.log(`50 opens with an older-kernel peer: ${out.trim()} ms`);
   assert.ok(Number(out) < 1000, `${out.trim()} ms for 50 opens`);
