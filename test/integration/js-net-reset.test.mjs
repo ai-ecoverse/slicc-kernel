@@ -138,13 +138,22 @@ const SERVE_PROGRAM = `export default async function main(ctx) {
     out[how] = await serving;
     await s.close();
   }
+  const acc = l.accept();
+  const raw = await ctx.net.connect({ port: l.port });
+  const s = await acc;
+  await s.reset();
+  out.early = await ctx.net.secure(raw, { ca: o.cert, servername: 'localhost' }).then(
+    () => 'ok',
+    (e) => ({ code: e.code, message: String(e.message) })
+  );
+  await raw.close();
   await l.close();
   ctx.write(1, JSON.stringify(out));
   return 0;
 }
 `;
 
-test('a server handshake tells a client that resets (read ECONNRESET) from one that closes, as Node 22 does (#1578)', async (t) => {
+test('a server handshake tells a client that resets (read ECONNRESET) from one that closes, as Node 22 does (#1578), and a client whose server reset before the ClientHello gets read ECONNRESET too, not EPIPE (#1611)', async (t) => {
   const { readdir, readFile } = await import('node:fs/promises');
   const { join, relative } = await import('node:path');
   const { fileURLToPath } = await import('node:url');
@@ -179,4 +188,6 @@ test('a server handshake tells a client that resets (read ECONNRESET) from one t
   assert.equal(out.close.code, 'ECONNRESET', r.stdout);
   assert.match(out.close.message, /the client closed the connection during the TLS handshake/);
   assert.doesNotMatch(out.close.message, /read ECONNRESET/);
+  assert.equal(out.early.code, 'ECONNRESET', r.stdout);
+  assert.match(out.early.message, /read ECONNRESET/);
 });

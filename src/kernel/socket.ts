@@ -408,7 +408,10 @@ export class KernelSocket implements KernelFile {
           throw new KernelError('ECONNRESET', 'read ECONNRESET');
         return bytes.length > 0 ? bytes : null;
       },
-      write: (bytes) => raw.tx.write(bytes),
+      write: (bytes) =>
+        raw.tx.write(bytes).catch((err: unknown) => {
+          throw this.refused ? new KernelError('ECONNRESET', 'read ECONNRESET') : err;
+        }),
       closeWrite: () => raw.tx.closeWrite(),
       close: () => {
         raw.rx.closeRead();
