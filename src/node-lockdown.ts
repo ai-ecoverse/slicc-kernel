@@ -146,8 +146,9 @@ export function nodeRunScript(
   source: string,
   filename: string
 ): { value: unknown; completion: boolean } {
-  const options = blank(null) as { filename: string };
+  const options = blank(null) as { filename: string; displayErrors: boolean };
   options.filename = filename;
+  options.displayErrors = false;
   return freeze({ value: runHere(source, options), completion: true });
 }
 
