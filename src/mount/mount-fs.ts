@@ -248,6 +248,18 @@ export class HeldPaths extends Map<string, number> implements UnlinkHolder {
     return false;
   }
 
+  boundAt(path: string, fid: string | undefined): number[] {
+    return this.handlesAt(path).filter(
+      (id) => !this.keptHandles.has(id) && this.bound.get(id)?.fid === fid
+    );
+  }
+
+  keepBound(ids: readonly number[], path: string, file: KeptFile): void {
+    for (const id of ids) this.keptHandles.set(id, file);
+    this.uses.set(file, ids.length);
+    this.unlinked.set(path, file);
+  }
+
   keep(path: string, file: KeptFile): void {
     const fresh = this.handlesAt(path).filter((id) => !this.keptHandles.has(id));
     for (const id of fresh) this.keptHandles.set(id, file);

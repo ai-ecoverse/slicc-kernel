@@ -45,7 +45,7 @@ import {
   protectedPrefixes,
   writerTags,
 } from './fs/protect.ts';
-import type { KernelFs, Peers, UsersMode } from './fs/types.ts';
+import type { KernelFs, NewOwner, PeerKeeps, Peers, UsersMode } from './fs/types.ts';
 import { fsError, normalizePath } from './fs/types.ts';
 import {
   PathMarks,
@@ -891,7 +891,7 @@ export class Launcher {
         busy: (path) => [...this.openFiles].some((nodes) => nodes.holds(path)),
         owner: options.unlinkOwner,
         marks: this.pathMarks,
-        ...(this.owners ? { dirOwner: { uid: 0, gid: 0, mode: 0o700 } } : {}),
+        ...this.peerOptions(options.fs),
       }
     );
     this.fs = this.processChain(fs, this.nodes, this.unlinked);
@@ -3221,6 +3221,51 @@ export class Launcher {
     return this.writers;
   }
 
+  private readonly peerGates = new Map<string, Array<() => void>>();
+
+  private peerOptions(fs: KernelFs): { peers?: PeerKeeps; dirOwner?: NewOwner } {
+    const peers = fs.peerKeeps?.();
+    queueMicrotask(() => fs.servePeerKeeps?.(this.unlinked.id, this.peerKept()));
+    return {
+      ...(peers ? { peers } : {}),
+      ...(this.owners ? { dirOwner: { uid: 0, gid: 0, mode: 0o700 } } : {}),
+    };
+  }
+
+  private peerKept() {
+    const gates = this.peerGates;
+    const open = (tab: string) => {
+      for (const release of gates.get(tab) ?? []) release();
+      gates.delete(tab);
+    };
+    return {
+      keeping: async (tab: string, paths: readonly string[]) => {
+        const mine = gates.get(tab) ?? [];
+        gates.set(tab, mine);
+        for (const path of paths) mine.push(await this.unlinked.gate.acquire(path));
+      },
+      kept: async (
+        tab: string,
+        items: ReadonlyArray<{ path: string; hidden: string | undefined; fid: string | undefined }>
+      ) => {
+        for (const { path, hidden, fid } of items) {
+          if (hidden === undefined) continue;
+          const bound = [...this.held].map(
+            (holds) =>
+              [holds, [...holds.boundAt(path, fid), ...holds.boundAt(hidden, fid)]] as const
+          );
+          const keeping = bound.filter(([, ids]) => ids.length > 0);
+          const file = this.unlinked.adopt(hidden, Math.max(keeping.length, 1));
+          if (keeping.length === 0) file.release();
+          for (const [holds, ids] of keeping) holds.keepBound(ids, path, file);
+          void this.rootFs.announceHolds?.([], [path, hidden], false);
+        }
+        open(tab);
+      },
+      left: open,
+    };
+  }
+
   private rootFileId(path: string): Promise<string | undefined> | undefined {
     return this.mounts.locate(path) === undefined ? this.rootFs.bindId?.(path) : undefined;
   }
@@ -3272,6 +3317,7 @@ export class Launcher {
         busy: (path) => [...this.openFiles].some((open) => open.holds(path)),
         owner: this.unlinkOwnerOption,
         marks: this.pathMarks,
+        peers: this.rootFs.peerKeeps?.(),
         ...(this.owners ? { dirOwner: { uid: 0, gid: 0, mode: 0o700 } } : {}),
       }
     );
