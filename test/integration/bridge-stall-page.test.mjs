@@ -24,15 +24,21 @@ async function mounted(t) {
     page.evaluate(
       ([m, k, ms]) => {
         window.s3Released = false;
+        let held;
         window.s3Stall = {
           method: m,
           key: k,
-          until: new Promise((done) =>
-            setTimeout(() => {
-              window.s3Released = true;
-              done();
-            }, ms)
-          ),
+          until: {
+            then: (done, failed) => {
+              held ??= new Promise((release) =>
+                setTimeout(() => {
+                  window.s3Released = true;
+                  release();
+                }, ms)
+              );
+              return held.then(done, failed);
+            },
+          },
         };
       },
       [method, key, STALL_MS]
@@ -59,7 +65,7 @@ test('a read whose backend stops answering fails with EIO once nothing has come 
   assert.equal(
     await released(),
     false,
-    'the read gave up while the backend still had not answered'
+    'the read was still waiting when the backend answered: it did not give up within the deadline'
   );
   assert.match(r.stdout, /^rc=1\nalive\n$/, JSON.stringify(r));
   assert.match(r.stderr, /I\/O error|Input\/output error/, JSON.stringify(r));
@@ -125,7 +131,7 @@ test("a JS program's synchronous read of a stalled backend gets EIO once nothing
   assert.equal(
     await released(),
     false,
-    'the read gave up while the backend still had not answered'
+    'the read was still waiting when the backend answered: it did not give up within the deadline'
   );
   assert.equal(r.stdout, 'read EIO\nalive\n', JSON.stringify(r));
   while (!(await released())) await new Promise((done) => setTimeout(done, 500));
