@@ -413,7 +413,12 @@ export class OpfsFs implements KernelFs {
         ? undefined
         : new RemoteWatch(`${channel}:watch`, { locks: this.locks ?? null });
     if (this.remote) {
-      this.remote.quiet = () => this.quiet().then(() => this.settle?.());
+      this.remote.quiet = () => {
+        const pending = [...this.inFlight];
+        return this.quiet()
+          .then(() => Promise.all(pending))
+          .then(() => this.settle?.());
+      };
       this.remote.gone = () => {
         void this.orphans();
         for (const move of [...this.peerMoves.values()]) void this.peerMoved(move);
@@ -1351,7 +1356,7 @@ export class OpfsFs implements KernelFs {
   ): Promise<void> {
     const at = normalizePath(path);
     const movedAway = this.renamesInFlight() ? await this.writeWaits(at) : false;
-    this.fileWrites.set(at, (this.fileWrites.get(at) ?? 0) + 1);
+    const ended = this.writeStarted(at);
     try {
       const [kept, target, existed] = await this.keptFor(path);
       if (kept) {
@@ -1369,7 +1374,7 @@ export class OpfsFs implements KernelFs {
       );
       await this.writeAt(handle, target, path, offset, bytes);
     } finally {
-      this.writeEnded(at);
+      ended();
     }
   }
 
@@ -1438,6 +1443,19 @@ export class OpfsFs implements KernelFs {
     return away;
   }
 
+  private readonly inFlight = new Set<Promise<void>>();
+
+  private writeStarted(at: string): () => void {
+    this.fileWrites.set(at, (this.fileWrites.get(at) ?? 0) + 1);
+    const { promise, resolve } = Promise.withResolvers<void>();
+    this.inFlight.add(promise);
+    return () => {
+      this.inFlight.delete(promise);
+      resolve();
+      this.writeEnded(at);
+    };
+  }
+
   private writeEnded(at: string): void {
     const left = (this.fileWrites.get(at) ?? 1) - 1;
     if (left > 0) this.fileWrites.set(at, left);
@@ -1471,22 +1489,23 @@ export class OpfsFs implements KernelFs {
   async truncate(path: string, size: number): Promise<void> {
     const at = normalizePath(path);
     if (this.renamesInFlight()) await this.writeWaits(at);
-    this.fileWrites.set(at, (this.fileWrites.get(at) ?? 0) + 1);
+    const ended = this.writeStarted(at);
     try {
       await this.ending(path, () => this.truncated(path, size));
     } finally {
-      this.writeEnded(at);
+      ended();
     }
   }
 
-  async append(path: string, bytes: Uint8Array): Promise<number> {
-    if (!this.locks || !this.remote || !this.shared()) {
+  async append(path: string, bytes: Uint8Array, options?: PwriteOptions): Promise<number> {
+    const crowded = this.locks !== undefined && this.remote !== undefined && this.shared();
+    if (!crowded && options?.alone !== true) {
       throw fsError('ENOTSUP', `${path}: appended by position while no other tab shares the root`);
     }
-    await this.remote.peered();
+    if (crowded) await this.remote?.peered();
     const at = normalizePath(path);
     if (this.renamesInFlight()) await this.writeWaits(at);
-    this.fileWrites.set(at, (this.fileWrites.get(at) ?? 0) + 1);
+    const ended = this.writeStarted(at);
     try {
       const found = await this.locate(path, true);
       if (found.handle?.kind !== 'file') throw fsError(found.handle ? 'EISDIR' : 'ENOENT', path);
@@ -1500,7 +1519,7 @@ export class OpfsFs implements KernelFs {
         return end + bytes.length;
       });
     } finally {
-      this.writeEnded(at);
+      ended();
     }
   }
 

@@ -107,9 +107,9 @@ export class FreshModules {
     };
     const { append } = fs;
     if (append) {
-      overrides.append = async (path: string, bytes: Uint8Array) => {
+      overrides.append = async (path: string, bytes: Uint8Array, options?: PwriteOptions) => {
         const fresh = this.fresh.has(normalizePath(path));
-        const end = await append.call(fs, path, bytes);
+        const end = await append.call(fs, path, bytes, options);
         if (fresh && end - bytes.length < MAGIC.length) await decide(path);
         return end;
       };
