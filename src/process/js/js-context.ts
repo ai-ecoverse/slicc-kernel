@@ -146,6 +146,7 @@ export interface JsProgramContext {
   readonly kernel: JsKernelInfo;
   memory(): JsMemory;
   readonly asyncContext?: JsAsyncContext;
+  readonly module?: { readonly path: string };
   readonly argv: readonly string[];
   readonly env: Readonly<Record<string, string>>;
   readonly pid: number;
@@ -301,6 +302,7 @@ export interface ContextOptions {
   memory?: (() => JsMemory) | undefined;
   asyncContext?: (() => JsAsyncContext) | undefined;
   runScript?: JsRunScript | undefined;
+  modulePath?: string | undefined;
   promiseState?: JsPromiseProbe | undefined;
   fs?: { owners: boolean; links: boolean };
   owned?: SharedArrayBuffer;
@@ -725,10 +727,14 @@ function scriptRunner(
 function hostExtras(o: ContextOptions): {
   memory: () => JsMemory;
   asyncContext?: JsAsyncContext;
+  module?: { readonly path: string };
 } {
+  const path = o.modulePath;
+  const module = path === undefined ? {} : { module: Object.freeze({ path }) };
   return {
     memory: () => measured(o.memory),
     ...(o.asyncContext ? { asyncContext: o.asyncContext() } : {}),
+    ...module,
   };
 }
 

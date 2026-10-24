@@ -152,6 +152,7 @@ async function runJs(
     memory: deps.memory,
     asyncContext: deps.asyncContext,
     runScript: deps.runScript,
+    modulePath: modulePathOf(init.program),
     promiseState: deps.promiseState,
     ...(thread?.owned ? { owned: thread.owned } : {}),
     held: init.held,
@@ -198,4 +199,9 @@ async function runJs(
   await failing;
   if (exitedWith !== undefined) return exitedWith;
   return status;
+}
+
+function modulePathOf(program: { glue: string; path: string }): string | undefined {
+  if (program.glue !== '') return undefined;
+  return program.path;
 }
