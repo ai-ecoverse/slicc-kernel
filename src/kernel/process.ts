@@ -1314,7 +1314,11 @@ export class WasmProcess {
       client: session.client,
       tags: this.options.embedder?.tagsOf(this.pid),
       name,
-      progress: (line) => void this.complainLine(line),
+      progress: (line) => {
+        if (!this.fds.has(2)) return false;
+        void this.complainLine(line);
+        return true;
+      },
       closing: () => AbortSignal.any([this.interrupt.signal, this.gone.signal]),
     };
   }
