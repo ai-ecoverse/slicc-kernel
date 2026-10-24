@@ -143,7 +143,7 @@ export class HeldSet extends Set<HeldPaths> {
     }
   }
 
-  async bindIds(id: (path: string) => Promise<string> | undefined): Promise<void> {
+  async bindIds(id: (path: string) => Promise<string | undefined> | undefined): Promise<void> {
     for (const holds of [...this]) await holds.bindIds(id);
   }
 
@@ -216,7 +216,7 @@ export class HeldPaths extends Map<string, number> implements UnlinkHolder {
     return doubt === undefined || bound === undefined ? undefined : { ...bound, doubt };
   }
 
-  async bindIds(id: (path: string) => Promise<string> | undefined): Promise<void> {
+  async bindIds(id: (path: string) => Promise<string | undefined> | undefined): Promise<void> {
     for (const [handle, bound] of [...this.bound]) {
       const key = this.handles.get(handle);
       if (bound.fid !== undefined || key === undefined) continue;

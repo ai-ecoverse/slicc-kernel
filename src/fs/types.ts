@@ -100,6 +100,7 @@ export interface KernelFs {
   onPeer?(settle: () => Promise<void>): void;
   heldBy?(held: (dir: string) => readonly string[]): void;
   fileId?(path: string): Promise<string>;
+  bindId?(path: string): Promise<string | undefined>;
   remoteChanges?(
     listener: (change: {
       paths: readonly string[];
