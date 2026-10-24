@@ -151,6 +151,35 @@ export interface KernelFs {
   ): Promise<void>;
   holdCounts?(): { mine: number; peers: number; sent: number; held: string[] } | undefined;
   rehold?(from: string, to: string): void;
+  peerKeeps?(): PeerKeeps | undefined;
+  servePeerKeeps?(
+    instance: string,
+    handlers: {
+      keeping(tab: string, paths: readonly string[]): Promise<void>;
+      kept(
+        tab: string,
+        items: ReadonlyArray<{ path: string; hidden: string | undefined; fid: string | undefined }>
+      ): Promise<void>;
+      left(tab: string): void;
+    }
+  ): void;
+}
+
+export interface PeerKeeps {
+  shared(): boolean;
+  heldWithin(
+    path: string
+  ): Array<{ tab: string; path: string; fid: string | undefined; instance: string | undefined }>;
+  ask(
+    to: string,
+    body: {
+      keeping?: { paths: string[] };
+      kept?: {
+        items: Array<{ path: string; hidden: string | undefined; fid: string | undefined }>;
+      };
+    },
+    cap: number
+  ): Promise<boolean>;
 }
 
 export interface PwriteOptions {

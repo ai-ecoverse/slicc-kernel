@@ -5,6 +5,7 @@ import { chain, inherit, ownOf, ROOT_OWNER, sameOwner } from './owners.ts';
 import { PathMap } from './path-map.ts';
 import { holdsProtected, isProtected } from './protect.ts';
 import {
+  type KeepHandlers,
   type LockManagerLike,
   lockManager,
   type PeerRename,
@@ -23,6 +24,7 @@ import {
   normalizePath,
   type Owner,
   type OwnerChange,
+  type PeerKeeps,
   type Peers,
   type Perm,
   type PwriteOptions,
@@ -542,6 +544,22 @@ export class OpfsFs implements KernelFs {
   holdCounts(): { mine: number; peers: number; sent: number; held: string[] } | undefined {
     const remote = this.remote;
     return remote && { ...remote.holdCounts(), held: remote.peerHeldPaths() };
+  }
+
+  peerKeeps(): PeerKeeps | undefined {
+    const remote = this.remote;
+    if (!remote) return undefined;
+    return {
+      shared: () => this.shared(),
+      heldWithin: (path) => remote.heldWithin(path),
+      ask: (to, body, cap) => remote.ask(to, body, cap),
+    };
+  }
+
+  servePeerKeeps(instance: string, handlers: KeepHandlers): void {
+    if (!this.remote) return;
+    this.remote.instance = instance;
+    this.remote.keeps = handlers;
   }
 
   rehold(from: string, to: string): void {
