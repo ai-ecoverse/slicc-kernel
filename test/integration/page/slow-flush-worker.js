@@ -6,7 +6,11 @@ const open = FileSystemFileHandle.prototype.createSyncAccessHandle;
 FileSystemFileHandle.prototype.createSyncAccessHandle = async function (...args) {
   if (slow) {
     slow = false;
+    const stamps = new BroadcastChannel('slow-flush');
+    stamps.postMessage({ start: Date.now() });
     await new Promise((resolve) => setTimeout(resolve, delay));
+    stamps.postMessage({ end: Date.now() });
+    stamps.close();
   }
   return open.apply(this, args);
 };

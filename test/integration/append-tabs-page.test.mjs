@@ -61,17 +61,18 @@ const JSAPP = [
   `echo '{"name":"jsapp","slicc":{"commands":{"jsapp":{"abi":"js","module":"main.mjs"}}}}' > /node_modules/jsapp/package.json`,
   "cat > /node_modules/jsapp/main.mjs <<'EOF'",
   'export default async function main(ctx) {',
-  '  const [, tag, n] = ctx.argv;',
+  '  const [, tag, n, stamp] = ctx.argv;',
   "  while (!(await ctx.fs.exists('/root/ap/go'))) await new Promise((r) => setTimeout(r, 5));",
   "  const f = await ctx.open('/root/ap/log', { write: true, append: true, create: true });",
   '  let ok = 0;',
+  '  const first = Date.now();',
   '  for (let i = 0; i < Number(n); i++) {',
   '    await f.write(0, new TextEncoder().encode(`${tag}${i}\\n`));',
   '    await f.sync();',
   '    ok++;',
   '  }',
   '  await f.close();',
-  '  await ctx.write(1, `${ok}\\n`);',
+  '  await ctx.write(1, stamp ? `${ok} ${first}\\n` : `${ok}\\n`);',
   '  return 0;',
   '}',
   'EOF',
@@ -159,7 +160,7 @@ test('a tab appending while another tab truncates once and pwrites in the middle
 test('a tab that joins while another buffers appends alone waits for those to land before its own, so no record is lost or doubled (#1546)', {
   timeout: 600_000,
 }, async (t) => {
-  const { page } = await booted(chrome, t, { worker: '/slow-flush-worker.js?ms=6000' });
+  const { page } = await booted(chrome, t, { worker: '/slow-flush-worker.js?ms=30000' });
   await installPackage(page, 'wasix-python', { skip: /^lib\/libpython[^/]*\.a$/ });
   await installPackage(page, 'wasm-coreutils');
   assert.deepEqual(
@@ -169,21 +170,36 @@ test('a tab that joins while another buffers appends alone waits for those to la
   const alone = [
     'import os, time',
     "fd = os.open('/root/ap/log', os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)",
-    'end = time.time() + 20',
+    'end = time.time() + 60',
     'n = 0',
     'while time.time() < end:',
     "    os.write(fd, b'x%d\\n' % n); n += 1; time.sleep(0.005)",
     'os.close(fd)',
     'print(n)',
   ].join('\n');
+  assert.deepEqual(await sh(page, JSAPP), ok('installed\n'));
+  await page.evaluate(() => {
+    window.flushStamps = [];
+    new BroadcastChannel('slow-flush').onmessage = ({ data }) => window.flushStamps.push(data);
+  });
   await page.evaluate((s) => {
     window.append_x = window.kernel.run(['python3', '-c', s], { cwd: '/' });
   }, alone);
   await sleep(3000);
   const other = await peerTab(page, { wait: false });
-  assert.deepEqual(await sh(other, JSAPP), ok('installed\n'));
-  const y = await other.evaluate(() => window.kernel.run(['jsapp', 'y', '50'], { cwd: '/' }));
-  assert.equal(y.stdout, '50\n', JSON.stringify(y));
+  const y = await other.evaluate(() =>
+    window.kernel.run(['jsapp', 'y', '50', 'stamp'], { cwd: '/' })
+  );
+  const [count, first] = y.stdout.trim().split(' ').map(Number);
+  assert.equal(count, 50, JSON.stringify(y));
+  const stamps = await page.evaluate(() => window.flushStamps);
+  const start = stamps.find((s) => s.start)?.start;
+  const end = stamps.find((s) => s.end)?.end;
+  console.log(`#1546 row: flush ${start}..${end}, the joiner's first append started at ${first}`);
+  assert.ok(
+    start < first && first < end,
+    `the joiner's first append did not start inside the flush: ${JSON.stringify({ start, end, first })}`
+  );
   const x = await page.evaluate(() => window.append_x);
   const n = Number(x.stdout.trim());
   assert.ok(n > 0, JSON.stringify(x));
