@@ -27,7 +27,9 @@ async function child(ctx) {
   out.bytes = td.decode(got.bytes);
   out.count = got.fds.length;
   out.ctrunc = got.ctrunc;
-  const [file, server] = got.fds;
+  const [file, server, written] = got.fds;
+  out.wrote = await ctx.write(written, te.encode('from the child'));
+  out.ownWrite = await code(() => ctx.open('/srv/out', { write: true }));
   out.offset = td.decode(await ctx.read(file, 2));
   const listener = await ctx.net.adopt(server);
   const conn = await listener.accept();
@@ -89,9 +91,11 @@ export default async function main(ctx) {
   const l = await ctx.net.listen({});
   const spawned = await ctx.spawn({ argv: ['fdp', 'child'], stdin: b, stdout: 'inherit', stderr: 'inherit' });
   await ctx.close(b);
-  const sent = await ctx.sendmsg(a, 'x', { fds: [file.fd, l.fd] });
+  const outFile = await ctx.open('/srv/out', { write: true, create: true, truncate: true, mode: 0o600 });
+  const sent = await ctx.sendmsg(a, 'x', { fds: [file.fd, l.fd, outFile.fd] });
   const port = l.port;
   await ctx.close(file.fd);
+  await ctx.close(outFile.fd);
   await l.close();
   const conn = await ctx.net.connect({ port });
   const hi = td.decode((await conn.readable.getReader().read()).value);
@@ -115,7 +119,7 @@ export default async function main(ctx) {
 }
 `;
 
-test('a descriptor passes over a socketpair write as SCM_RIGHTS: the open file description (its offset, a listener the sender closed) under users enforce, the refused kinds, and rights dropped by a plain read or a closed receiver (#1562)', async (t) => {
+test('a descriptor passes over a socketpair write as SCM_RIGHTS: the open file description (its offset, a listener the sender closed, a file written back by path) under users enforce, the refused kinds, and rights dropped by a plain read or a closed receiver (#1562)', async (t) => {
   const kernel = await createNodeKernel({ users: 'enforce' });
   t.after(() => kernel.terminate());
   await kernel.writeFile(
@@ -146,7 +150,9 @@ test('a descriptor passes over a socketpair write as SCM_RIGHTS: the open file d
     child: {
       direct: 'EACCES',
       bytes: 'x',
-      count: 2,
+      count: 3,
+      wrote: 14,
+      ownWrite: 'EACCES',
       ctrunc: false,
       offset: 'cd',
       next: 'z',
@@ -164,4 +170,5 @@ test('a descriptor passes over a socketpair write as SCM_RIGHTS: the open file d
     receiverClosed: 'eof',
     plainRead: 'eof',
   });
+  assert.equal(new TextDecoder().decode(await kernel.readFile('/srv/out')), 'from the child');
 });

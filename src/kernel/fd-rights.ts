@@ -61,7 +61,11 @@ export interface SendRights {
   nonblock: boolean;
 }
 
-export function sendRights(fds: FdTable, req: SendRights, signal?: AbortSignal): Promise<number> {
+export async function sendRights(
+  fds: FdTable,
+  req: SendRights,
+  signal?: AbortSignal
+): Promise<number> {
   const carrier = carrierAt(fds, req.fd);
   if (req.fds.length === 0) return carrier.write(req.body, signal);
   if (req.fds.length > RIGHTS_MAX || req.body.length === 0) throw new KernelError('EINVAL');
@@ -70,14 +74,21 @@ export function sendRights(fds: FdTable, req: SendRights, signal?: AbortSignal):
     const errno = refusal(file.file);
     if (errno) throw new KernelError(errno, 'this descriptor cannot be passed');
   }
+  for (const { file } of passed) file.retain();
+  let handed = false;
   const mark = (at: number, inFlight: number): RightsMark => {
     if (inFlight + passed.length > RIGHTS_IN_FLIGHT) {
       throw new KernelError('EMFILE', 'too many descriptors in flight');
     }
-    for (const { file } of passed) file.retain();
+    handed = true;
     return new RightsMark(at, passed);
   };
-  return carrier.sendRights(req.body, mark, req.nonblock, signal);
+  try {
+    return await carrier.sendRights(req.body, mark, req.nonblock, signal);
+  } catch (err) {
+    if (!handed) new RightsMark(0, passed).drop();
+    throw err;
+  }
 }
 
 export interface ReceiveRights {

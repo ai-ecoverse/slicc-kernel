@@ -118,8 +118,22 @@ export class KernelPipe {
       await this.changed(signal);
     }
     if (this.readers === 0) throw new PipeError('EPIPE');
-    this.marks.push(mark(this.pushed));
-    return this.write(bytes, signal);
+    const before = this.pushed;
+    const made = mark(before);
+    this.marks.push(made);
+    try {
+      const n = await this.write(bytes, signal);
+      this.orphan(made, before);
+      return n;
+    } catch (err) {
+      this.orphan(made, before);
+      throw err;
+    }
+  }
+
+  private orphan(made: PipeMark, before: number): void {
+    if (this.pushed !== before) return;
+    this.dropMarks((mark) => mark === made);
   }
 
   private bounded(n: number): number {
