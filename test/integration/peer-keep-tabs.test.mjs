@@ -200,3 +200,31 @@ test("a holder's gate on a path opens when the tab that asked for it goes away b
   assert.ok(took < 8000, `the holder waited ${took} ms`);
   assert.equal(r.stdout, 'old kept\n');
 });
+
+test('a rename onto, or a removal of the directory of, a file another tab holds open that fails leaves the file where it was (#1607 review)', {
+  timeout: 900_000,
+}, async (t) => {
+  const dir = '/root/pk6';
+  const { page, other } = await setup(t, dir);
+  for (;;) {
+    const listed = (await sh(other, 'cat /proc/sys/kernel/slicc_peer_held')).stdout;
+    if (listed.includes(`${dir}/f`)) break;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  const tries = await sh(
+    other,
+    [
+      `mv ${dir}/missing ${dir}/f; echo "mv=$?"`,
+      `rmdir ${dir}; echo "rmdir=$?"`,
+      `mkdir -p /root/pk6e && python3 -c "import os; os.rename('/root/pk6e', '${dir}')" 2> /dev/null; echo "dir=$?"`,
+      `cat ${dir}/f`,
+    ].join('; ')
+  );
+  console.log(`failed ops: ${JSON.stringify(tries)}`);
+  assert.match(tries.stdout, /mv=1\nrmdir=1\ndir=1\nold\n$/);
+  assert.deepEqual(await kept(other), []);
+  await sh(page, `: > ${dir}/go`);
+  const r = await page.evaluate(() => window.holder);
+  assert.equal(r.stdout, 'old kept\n');
+  assert.equal((await sh(other, `cat ${dir}/f`)).stdout, 'kept');
+});

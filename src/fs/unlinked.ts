@@ -156,6 +156,18 @@ const within = (path: string, target: string) =>
 const TOUCHED_MAX = 4096;
 const parentOf = (path: string) => path.slice(0, path.lastIndexOf('/')) || '/';
 
+interface Moved {
+  tab: string;
+  path: string;
+  hidden: string;
+  fid: string | undefined;
+}
+
+export interface PeerKept {
+  whole: boolean;
+  undoing<T>(op: () => Promise<T>): Promise<T>;
+}
+
 export const PEER_RM_MS = 1000;
 export const PEER_RENAME_MS = 10_000;
 export const PEER_GATE_MS = PEER_RENAME_MS + 5000;
@@ -315,23 +327,28 @@ export class UnlinkedKeeper {
       lstat: (path) => unreplaced(path, async () => counted(await fs.lstat(path))),
       async rm(path, options) {
         const target = fs.resolvePath('/', path);
-        if (await keeper.peerKeep(target, false)) return;
-        await replace(target, async (gated, sealed) => {
-          const pinned = await keeper.pin(target, gated, sealed);
-          if (pinned.moved.has(target)) pinned.commit();
-          else await keeper.settle(pinned, () => fs.rm(path, options));
-        });
+        const kept = await keeper.peerKeep(target, false, () => keeper.removable(target, options));
+        if (kept.whole) return;
+        await kept.undoing(() =>
+          replace(target, async (gated, sealed) => {
+            const pinned = await keeper.pin(target, gated, sealed);
+            if (pinned.moved.has(target)) pinned.commit();
+            else await keeper.settle(pinned, () => fs.rm(path, options));
+          })
+        );
       },
       async rename(from, to) {
         const target = fs.resolvePath('/', to);
         const source = fs.resolvePath('/', from);
         if (target === source) return fs.rename(from, to);
-        await keeper.peerKeep(target, true);
-        await keeper.marks.around([source], () =>
-          replace(target, async (gated, sealed) => {
-            const pinned = await keeper.pin(target, gated, sealed);
-            await keeper.settle(pinned, () => fs.rename(from, to));
-          })
+        const kept = await keeper.peerKeep(target, true, () => keeper.renamable(source, target));
+        await kept.undoing(() =>
+          keeper.marks.around([source], () =>
+            replace(target, async (gated, sealed) => {
+              const pinned = await keeper.pin(target, gated, sealed);
+              await keeper.settle(pinned, () => fs.rename(from, to));
+            })
+          )
         );
       },
       symlink: (target, path, owner) =>
@@ -504,11 +521,16 @@ export class UnlinkedKeeper {
     return this.keptFile(hidden, { refs });
   }
 
-  async peerKeep(target: string, over: boolean): Promise<boolean> {
+  async peerKeep(
+    target: string,
+    over: boolean,
+    valid: () => Promise<boolean> = async () => true
+  ): Promise<PeerKept> {
+    const none: PeerKept = { whole: false, undoing: (op) => op() };
     const peers = this.peers;
-    if (!peers?.shared() || this.rootOf(target) !== '/') return false;
+    if (!peers?.shared() || this.rootOf(target) !== '/') return none;
     const held = peers.heldWithin(target).filter((holder) => holder.instance !== undefined);
-    if (held.length === 0) return false;
+    if (held.length === 0 || !(await valid())) return none;
     const tabs = new Map<string, typeof held>();
     for (const holder of held) tabs.set(holder.tab, [...(tabs.get(holder.tab) ?? []), holder]);
     const asked = [...tabs].map(([tab, holders]) => {
@@ -525,10 +547,29 @@ export class UnlinkedKeeper {
         void peers.ask(tab, { kept: { items: [], paths } }, PEER_RM_MS);
       throw fsError('EBUSY', `${target}: open in another tab that did not answer`);
     }
+    const { whole, moved } = await this.setAside(peers, target, asked, heard);
+    return { whole, undoing: (op) => this.undoing(op, moved) };
+  }
+
+  private async setAside(
+    peers: PeerKeeps,
+    target: string,
+    asked: ReadonlyArray<{
+      tab: string;
+      holders: ReadonlyArray<{
+        path: string;
+        fid: string | undefined;
+        instance: string | undefined;
+      }>;
+      paths: string[];
+    }>,
+    heard: readonly boolean[]
+  ): Promise<{ whole: boolean; moved: Moved[] }> {
     const mine = this.heldWithin(target);
     const taken = new Set<string>();
     let whole = false;
     const told: Array<Promise<boolean>> = [];
+    const moved: Moved[] = [];
     for (const [i, { tab, holders, paths }] of asked.entries()) {
       const items = [];
       for (const holder of holders) {
@@ -536,15 +577,50 @@ export class UnlinkedKeeper {
         const hidden = free
           ? await this.asideFor(holder.path, holder.instance as string)
           : undefined;
-        if (hidden !== undefined) taken.add(holder.path);
-        if (hidden !== undefined && holder.path === target) whole = true;
+        if (hidden !== undefined) {
+          taken.add(holder.path);
+          moved.push({ tab, path: holder.path, hidden, fid: holder.fid });
+          if (holder.path === target) whole = true;
+        }
         items.push({ path: holder.path, hidden, fid: holder.fid });
       }
       const answer = peers.ask(tab, { kept: { items, paths } }, PEER_RM_MS);
       if (heard[i]) told.push(answer);
     }
     await Promise.all(told);
-    return whole;
+    return { whole, moved };
+  }
+
+  private async undoing<T>(op: () => Promise<T>, moved: readonly Moved[]): Promise<T> {
+    try {
+      return await op();
+    } catch (err) {
+      for (const { tab, path, hidden, fid } of moved) {
+        await this.serial(() => this.fs.rename(hidden, path)).catch(() => undefined);
+        void this.peers?.ask(
+          tab,
+          { kept: { items: [{ path, hidden: undefined, fid, undo: hidden }], paths: [] } },
+          PEER_RM_MS
+        );
+      }
+      throw err;
+    }
+  }
+
+  async removable(target: string, options?: { recursive?: boolean }): Promise<boolean> {
+    const st = await this.fs.lstat(target).catch(() => undefined);
+    return st !== undefined && (!st.isDirectory || options?.recursive === true);
+  }
+
+  async renamable(source: string, target: string): Promise<boolean> {
+    const from = await this.fs.lstat(source);
+    const to = await this.fs.lstat(target).catch(() => undefined);
+    if (!to) return true;
+    if (to.isDirectory && !from.isDirectory) throw fsError('EISDIR', target);
+    if (!to.isDirectory && from.isDirectory) throw fsError('ENOTDIR', target);
+    if (to.isDirectory && (await this.fs.readdir(target)).length > 0)
+      throw fsError('ENOTEMPTY', target);
+    return true;
   }
 
   private async asideFor(path: string, instance: string): Promise<string | undefined> {

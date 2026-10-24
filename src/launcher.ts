@@ -3271,10 +3271,18 @@ export class Launcher {
       },
       kept: async (
         tab: string,
-        items: ReadonlyArray<{ path: string; hidden: string | undefined; fid: string | undefined }>,
+        items: ReadonlyArray<{
+          path: string;
+          hidden: string | undefined;
+          fid: string | undefined;
+          undo?: string;
+        }>,
         paths: readonly string[]
       ) => {
-        for (const { path, hidden, fid } of items) this.adoptKept(path, hidden, fid, ours);
+        for (const { path, hidden, fid, undo } of items) {
+          if (undo !== undefined) this.unadopt(path, undo, fid);
+          else this.adoptKept(path, hidden, fid, ours);
+        }
         open(tab, paths);
       },
       left: (tab: string) => {
@@ -3282,6 +3290,11 @@ export class Launcher {
         open(tab);
       },
     };
+  }
+
+  private unadopt(path: string, undo: string, fid: string | undefined): void {
+    for (const holds of this.held) holds.unkeepAt(path, undo);
+    void this.rootFs.announceHolds?.([[path, fid]], [], false);
   }
 
   private adoptKept(

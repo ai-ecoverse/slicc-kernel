@@ -45,6 +45,7 @@ export interface PeerKept {
   path: string;
   hidden: string | undefined;
   fid: string | undefined;
+  undo?: string;
 }
 
 export interface PeerHolder {

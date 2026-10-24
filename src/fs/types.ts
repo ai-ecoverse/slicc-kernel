@@ -158,7 +158,12 @@ export interface KernelFs {
       keeping(tab: string, paths: readonly string[]): Promise<void>;
       kept(
         tab: string,
-        items: ReadonlyArray<{ path: string; hidden: string | undefined; fid: string | undefined }>,
+        items: ReadonlyArray<{
+          path: string;
+          hidden: string | undefined;
+          fid: string | undefined;
+          undo?: string;
+        }>,
         paths: readonly string[]
       ): Promise<void>;
       left(tab: string): void;
@@ -176,7 +181,12 @@ export interface PeerKeeps {
     body: {
       keeping?: { paths: string[] };
       kept?: {
-        items: Array<{ path: string; hidden: string | undefined; fid: string | undefined }>;
+        items: Array<{
+          path: string;
+          hidden: string | undefined;
+          fid: string | undefined;
+          undo?: string;
+        }>;
         paths?: string[];
       };
     },
