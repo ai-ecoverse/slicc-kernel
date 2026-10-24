@@ -463,18 +463,36 @@ export class OpfsFs implements KernelFs {
   }
 
   async fileId(path: string): Promise<string> {
-    const found = await this.locate(path, true);
-    const [entry] = await (this.meta.fresh ?? this.meta.get).call(this.meta, [found.path]);
-    if (entry?.fid !== undefined) return entry.fid;
-    const fid = crypto.randomUUID();
-    this.idWrites++;
-    await this.meta.update(found.path, (now) => ({
-      ...occupied(now),
-      path: found.path,
-      fid: now?.fid ?? fid,
-    }));
-    const [stored] = await this.meta.get([found.path]);
-    return stored?.fid ?? fid;
+    for (;;) {
+      const found = await this.locate(path, true);
+      const [entry] = await (this.meta.fresh ?? this.meta.get).call(this.meta, [found.path]);
+      if (entry?.fid !== undefined) return entry.fid;
+      const fid = crypto.randomUUID();
+      let moved = false;
+      await this.meta.update(found.path, (now) => {
+        if (now?.vacated || (entry !== undefined && now === undefined)) {
+          moved = true;
+          return now;
+        }
+        return { ...now, path: found.path, fid: now?.fid ?? fid };
+      });
+      if (moved) continue;
+      this.idWrites++;
+      const there = await this.locate(path, true).then(
+        (at) => at.path === found.path,
+        () => false
+      );
+      if (!there) {
+        await this.meta.update(found.path, (now) => {
+          if (now?.fid !== fid) return now;
+          const { fid: _, ...rest } = now;
+          return rest;
+        });
+        continue;
+      }
+      const [stored] = await this.meta.get([found.path]);
+      return stored?.fid ?? fid;
+    }
   }
 
   private heldUnder: (dir: string) => readonly string[] = () => [];
