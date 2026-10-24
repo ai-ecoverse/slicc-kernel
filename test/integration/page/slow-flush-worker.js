@@ -1,16 +1,20 @@
 import '/dist/kernel-worker.js';
 
-const delay = Number(new URL(import.meta.url).searchParams.get('ms') ?? 6000);
+const params = new URL(import.meta.url).searchParams;
+const delay = Number(params.get('ms') ?? 20000);
+const name = params.get('name');
+let armed = name === null;
 let slow = false;
 const open = FileSystemFileHandle.prototype.createSyncAccessHandle;
 FileSystemFileHandle.prototype.createSyncAccessHandle = async function (...args) {
-  if (slow) {
+  const now = name === null ? slow : armed && this.name === name;
+  if (now) {
     slow = false;
+    armed = false;
     const stamps = new BroadcastChannel('slow-flush');
     stamps.postMessage({ start: Date.now() });
     await new Promise((resolve) => setTimeout(resolve, delay));
     stamps.postMessage({ end: Date.now() });
-    stamps.close();
   }
   return open.apply(this, args);
 };
