@@ -351,7 +351,7 @@ test(
 );
 
 test(
-  "progress reaches the stderr of the process reading the reply, named for the process that sent the header, also when that process has exec'd into the reader (#1527 follow-up)",
+  "progress reaches the stderr of the process reading the reply, named for the process that sent the header, also when that process has exec'd into the reader, and a line sent before the exec'd program reads waits for it (#1527 follow-up)",
   TIMEOUT,
   async (t) => {
     const { hook } = page();
@@ -361,6 +361,7 @@ test(
       `exec 3<>/dev/embedder; ${header}; cat <&3`,
       `exec 3<>/dev/embedder; (${header}; exec cat <&3)`,
       `exec 3<>/dev/embedder; ${header}; exec cat <&3`,
+      `exec 3<>/dev/embedder; (${header}; exec bash -c 'sleep 0.6; cat <&3')`,
     ]) {
       const r = await bash(script);
       assert.equal(r.stdout, 'done', script);

@@ -54,7 +54,7 @@ export interface EmbedderCaller {
   client: number;
   tags: readonly string[] | undefined;
   name: string;
-  progress(line: string): void;
+  progress(line: string): boolean;
   closing(): AbortSignal;
 }
 
@@ -237,6 +237,8 @@ function replyStream(reply: EmbedderReply): ReadableStream<Uint8Array> {
   });
 }
 
+const HELD_MAX = 16;
+
 class Throttle {
   private window = 0;
   private count = 0;
@@ -253,7 +255,8 @@ class Throttle {
 export class EmbedderChannel {
   readonly access: OpenAccess;
   readonly owner: number;
-  caller: EmbedderCaller;
+  private current: EmbedderCaller;
+  private held: string[] = [];
   private readonly broker: EmbedderBroker;
   private header: Uint8Array = new Uint8Array(0);
   private body: BodyPipe | undefined;
@@ -270,12 +273,27 @@ export class EmbedderChannel {
   constructor(broker: EmbedderBroker, access: OpenAccess, caller: EmbedderCaller) {
     this.broker = broker;
     this.access = access;
-    this.caller = caller;
+    this.current = caller;
     this.owner = caller.pid;
   }
 
   get dispatched(): boolean {
     return this.body !== undefined;
+  }
+
+  get caller(): EmbedderCaller {
+    return this.current;
+  }
+
+  set caller(caller: EmbedderCaller) {
+    this.current = caller;
+    const held = this.held;
+    this.held = [];
+    for (const line of held) this.tell(line);
+  }
+
+  private tell(line: string): void {
+    if (!this.current.progress(line) && this.held.length < HELD_MAX) this.held.push(line);
   }
 
   private fail(err: unknown): KernelError {
@@ -296,7 +314,7 @@ export class EmbedderChannel {
     this.body = body;
     const prefix = this.caller.name;
     const progress = (line: string) => {
-      if (this.throttle.allow(Date.now())) this.caller.progress(`${prefix}: ${lineOf(line)}`);
+      if (this.throttle.allow(Date.now())) this.tell(`${prefix}: ${lineOf(line)}`);
     };
     const asked = Promise.resolve()
       .then(() =>
