@@ -645,7 +645,7 @@ test('select picks a certificate by SNI and ALPN from the client offer, refuses 
 });
 
 test(
-  'keylog: true gives a session its NSS key log lines, the same on the kernel server and the loopback client, and a session without it has none (#1504)',
+  'keylog: true gives a session its NSS key log lines, the five of TLS 1.3 with EXPORTER_SECRET as Node 22, the same on the kernel server and the loopback client, and a session without it has none (#1504, #1545)',
   TIMEOUT,
   async (t) => {
     const run = await kernelWith(t);
@@ -658,13 +658,15 @@ test(
       ],
     });
     const logged = clients.logged.tls.keylog;
-    assert.equal(logged.length, 4, JSON.stringify(clients.logged));
+    assert.equal(logged.length, 5, JSON.stringify(clients.logged));
     assert.deepEqual(logged.map((line) => line.split(' ')[0]).sort(), [
       'CLIENT_HANDSHAKE_TRAFFIC_SECRET',
       'CLIENT_TRAFFIC_SECRET_0',
+      'EXPORTER_SECRET',
       'SERVER_HANDSHAKE_TRAFFIC_SECRET',
       'SERVER_TRAFFIC_SECRET_0',
     ]);
+    assert.ok(logged.every((line) => line.split(' ')[1] === logged[0].split(' ')[1]));
     const random = logged[0].split(' ')[1];
     const mine = server.find((s) => s.tls.keylog.some((l) => l.includes(random)));
     assert.deepEqual([...mine.tls.keylog].sort(), [...logged].sort());
