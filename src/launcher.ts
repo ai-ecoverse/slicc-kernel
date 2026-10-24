@@ -1885,7 +1885,8 @@ export class Launcher {
     const assign = this.mounts.locate(target.wasm) === undefined ? this.rootFs.fileId : undefined;
     return this.base.stat(target.wasm).then(
       async (st) => {
-        const fid = st.fid ?? (await assign?.call(this.rootFs, target.wasm));
+        const fid =
+          st.fid ?? (await assign?.call(this.rootFs, target.wasm)?.catch(() => undefined));
         if (fid === undefined) return exeIdOf(fileIdentity(st.ino, st.mtime.getTime()));
         return { exeId: `fid:${fid}:${st.mtime.getTime()}` };
       },
