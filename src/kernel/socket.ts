@@ -404,6 +404,8 @@ export class KernelSocket implements KernelFile {
         const bytes = await raw.rx
           .read(SERVE_CHUNK, handshaking ? signal : undefined)
           .catch(() => EMPTY);
+        if (bytes.length === 0 && this.refused)
+          throw new KernelError('ECONNRESET', 'read ECONNRESET');
         return bytes.length > 0 ? bytes : null;
       },
       write: (bytes) => raw.tx.write(bytes),
