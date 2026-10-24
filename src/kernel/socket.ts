@@ -164,26 +164,28 @@ export class KernelSocket implements KernelFile {
   }
   async read(max: number, signal?: AbortSignal): Promise<Uint8Array> {
     const { rx } = this.connection();
-    if (this.refused) throw this.refused;
+    this.drained(rx);
     if (this.readShut || max <= 0) return new Uint8Array(0);
     const bytes = await pipeCall(() => rx.read(max, signal));
-    if (this.refused) throw this.refused;
+    if (bytes.length === 0) this.drained(rx);
     if (bytes.length === 0 && this.reset) throw this.reset;
     return bytes;
   }
   async peek(max: number, signal?: AbortSignal): Promise<Uint8Array> {
     const { rx } = this.connection();
-    if (this.refused) throw this.refused;
+    this.drained(rx);
     if (this.readShut || max <= 0) return new Uint8Array(0);
     const bytes = await pipeCall(() => rx.peek(max, signal));
-    if (this.refused) throw this.refused;
+    if (bytes.length === 0) this.drained(rx);
     if (bytes.length === 0 && this.reset) throw this.reset;
     return bytes;
+  }
+  private drained(rx: KernelPipe): void {
+    if (this.refused && rx.buffered === 0) throw this.refused;
   }
   private rightsLink(): Link {
     const link = this.connection();
     if (this.domain !== 'unix' || this.switch || this.served) throw new KernelError('EOPNOTSUPP');
-    if (this.refused) throw this.refused;
     return link;
   }
   sendRights(
@@ -193,6 +195,7 @@ export class KernelSocket implements KernelFile {
     signal?: AbortSignal
   ): Promise<number> {
     const { tx } = this.rightsLink();
+    if (this.refused) throw this.refused;
     if (this.writeShut) throw new KernelError('EPIPE');
     return pipeCall(() => tx.writeMarked(bytes, (at) => mark(at, tx.inFlight), nonblock, signal));
   }
@@ -202,12 +205,10 @@ export class KernelSocket implements KernelFile {
     signal?: AbortSignal
   ): Promise<{ bytes: Uint8Array; marks: PipeMark[] }> {
     const { rx } = this.rightsLink();
+    this.drained(rx);
     if (this.readShut || max <= 0) return { bytes: EMPTY, marks: [] };
     const got = await pipeCall(() => rx.receive(max, nonblock, signal));
-    if (this.refused) {
-      for (const mark of got.marks) mark.drop();
-      throw this.refused;
-    }
+    if (got.bytes.length === 0) this.drained(rx);
     return got;
   }
   get secured(): boolean {
