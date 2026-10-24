@@ -71,7 +71,7 @@ const CHILD = `
 const { createNodeKernel } = await import(process.env.DIST);
 const { readdirSync, statSync } = await import('node:fs');
 const { join } = await import('node:path');
-const own = join(process.env.TMPDIR, 'slicc-kernel-cc-' + process.getuid());
+const own = join(process.env.TMPDIR, 'slicc-kernel-cc-u' + process.getuid());
 const mine = () => readdirSync(own).filter((n) => n.startsWith(process.pid + '-'));
 const off = await createNodeKernel({ users: 'off', compileCache: false });
 const noneWhenOff = mine().length;
@@ -93,7 +93,7 @@ const LOOSE = `
 const { createNodeKernel } = await import(process.env.DIST);
 const { readdirSync } = await import('node:fs');
 const { join } = await import('node:path');
-const own = join(process.env.TMPDIR, 'slicc-kernel-cc-' + process.getuid());
+const own = join(process.env.TMPDIR, 'slicc-kernel-cc-u' + process.getuid());
 const kernel = await createNodeKernel({ users: 'off' });
 await kernel.writeFile('/node_modules/cc/package.json', JSON.stringify({ name: 'cc', slicc: { commands: { cc: { abi: 'js', module: 'main.mjs' } } } }));
 await kernel.writeFile('/node_modules/cc/main.mjs', process.env.PROGRAM);
@@ -120,12 +120,12 @@ async function child(t, script, base) {
   return JSON.parse(r.stdout);
 }
 
-test("by default a Node kernel caches compiled programs in a private directory of its own under the host temp dir's per-user slicc-kernel-cc-<uid> (0700, removed on terminate), sweeps only there for directories whose process is gone, and never lists the temp dir itself; compileCache: false makes none (#1597)", {
+test("by default a Node kernel caches compiled programs in a private directory of its own under the host temp dir's per-user slicc-kernel-cc-u<uid> (0700, removed on terminate), sweeps only there for directories whose process is gone, and never lists the temp dir itself; compileCache: false makes none (#1597)", {
   skip: process.platform === 'win32',
 }, async (t) => {
   const base = await mkdtemp(join(tmpdir(), 'slicc-ccbase-'));
   t.after(() => rm(base, { recursive: true, force: true }));
-  const own = join(base, `slicc-kernel-cc-${process.getuid()}`);
+  const own = join(base, `slicc-kernel-cc-u${process.getuid()}`);
   await mkdir(join(own, '2147483646-stale'), { recursive: true, mode: 0o700 });
   await writeFile(join(own, '2147483646-stale', 'x'), 'x');
   await mkdir(join(own, `${process.pid}-alive`));
@@ -140,7 +140,7 @@ test("by default a Node kernel caches compiled programs in a private directory o
     mode: '700/700',
     left: [`${process.pid}-alive`],
     top: [
-      `slicc-kernel-cc-${process.getuid()}`,
+      `slicc-kernel-cc-u${process.getuid()}`,
       'slicc-kernel-cc-2147483646-old',
       'unrelated',
     ].sort(),
@@ -152,7 +152,7 @@ test('a per-user cache parent that others can write is not used: the kernel runs
 }, async (t) => {
   const base = await mkdtemp(join(tmpdir(), 'slicc-ccloose-'));
   t.after(() => rm(base, { recursive: true, force: true }));
-  const own = join(base, `slicc-kernel-cc-${process.getuid()}`);
+  const own = join(base, `slicc-kernel-cc-u${process.getuid()}`);
   await mkdir(own);
   await chmod(own, 0o777);
   assert.deepEqual(await child(t, LOOSE, base), {

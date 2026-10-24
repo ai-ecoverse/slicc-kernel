@@ -417,7 +417,7 @@ export function privateCacheDir(
 }
 
 function cacheParent(base: string, uid: number | undefined): string {
-  const parent = join(base, uid === undefined ? 'slicc-kernel-cc' : `${CACHE_PREFIX}${uid}`);
+  const parent = join(base, uid === undefined ? 'slicc-kernel-cc' : `${CACHE_PREFIX}u${uid}`);
   try {
     mkdirSync(parent, { mode: 0o700 });
   } catch (err) {
