@@ -372,13 +372,8 @@ async function kernelWith(t) {
   };
 }
 
-function encrypted(key, passphrase) {
-  return createPrivateKey(key).export({
-    type: 'pkcs8',
-    format: 'pem',
-    cipher: 'aes-256-cbc',
-    passphrase,
-  });
+function encrypted(key, passphrase, cipher = 'aes-256-cbc') {
+  return createPrivateKey(key).export({ type: 'pkcs8', format: 'pem', cipher, passphrase });
 }
 
 const derOf = (pem) => new X509Certificate(pem).raw.toString('base64');
@@ -471,6 +466,39 @@ test(
     const mismatch = await run({ tls: { cert: own.cert, key: other.key }, clients: [] });
     assert.equal(mismatch.server[0].listen.code, 'ERR_OSSL_X509_KEY_VALUES_MISMATCH');
     assert.match(mismatch.server[0].listen.detail, /the key does not match the certificate$/);
+  }
+);
+
+test(
+  'a PKCS#8 key under PBES2 with Camellia or ARIA serves with its passphrase and is ERR_OSSL_BAD_DECRYPT with a wrong one, and one under 3DES is ERR_OSSL_UNSUPPORTED either way, as Mbed TLS 4 has no DES (#1564)',
+  TIMEOUT,
+  async (t) => {
+    const run = await kernelWith(t);
+    const own = selfSigned('localhost');
+    const ciphers = ['camellia-128-cbc', 'camellia-192-cbc', 'camellia-256-cbc'];
+    ciphers.push('aria-128-cbc', 'aria-192-cbc', 'aria-256-cbc');
+    for (const cipher of ciphers) {
+      const key = encrypted(own.key, 'correct horse', cipher);
+      const served = await run({
+        tls: { cert: own.cert, key, passphrase: 'correct horse' },
+        clients: [{ name: 'a', tls: { ca: own.cert } }],
+      });
+      assert.equal(served.clients.a.body, 'hello', `${cipher} ${JSON.stringify(served)}`);
+      const wrong = await run({
+        tls: { cert: own.cert, key, passphrase: 'battery staple' },
+        clients: [],
+      });
+      assert.equal(
+        wrong.server[0].listen?.code,
+        'ERR_OSSL_BAD_DECRYPT',
+        `${cipher} ${JSON.stringify(wrong)}`
+      );
+    }
+    const des = encrypted(own.key, 'correct horse', 'des-ede3-cbc');
+    for (const passphrase of ['correct horse', 'battery staple']) {
+      const refused = await run({ tls: { cert: own.cert, key: des, passphrase }, clients: [] });
+      assert.equal(refused.server[0].listen?.code, 'ERR_OSSL_UNSUPPORTED', JSON.stringify(refused));
+    }
   }
 );
 
