@@ -82,6 +82,7 @@ export function nodeMemory(): {
   heapLimit: number;
   external: number;
   arrayBuffers: number;
+  rss: number;
 } {
   const heap = heapStatistics();
   const usage = memoryUsage();
@@ -91,6 +92,7 @@ export function nodeMemory(): {
     heapLimit: heap.heap_size_limit,
     external: heap.external_memory,
     arrayBuffers: usage.arrayBuffers,
+    rss: usage.rss,
   };
 }
 

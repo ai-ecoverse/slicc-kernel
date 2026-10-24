@@ -1,4 +1,4 @@
-const KEYS = ['heapUsed', 'heapTotal', 'heapLimit', 'external', 'arrayBuffers'];
+const KEYS = ['heapUsed', 'heapTotal', 'heapLimit', 'external', 'arrayBuffers', 'rss'];
 const held = [];
 const grow = () => {
   for (let i = 0; i < 400_000; i++) held.push({ i, s: `item ${i}` });
@@ -17,7 +17,7 @@ export default async function main(ctx) {
     numbers: Object.values(a).every((v) => typeof v === 'number'),
     plain: Object.getPrototypeOf(a) === Object.prototype,
     fresh: a !== b,
-    rss: 'rss' in a,
+    rss: a.rss > a.heapUsed,
     positive: ['heapUsed', 'heapTotal', 'heapLimit'].map((k) => a[k] > 0),
     process: typeof process,
     viaFunction: ctx.memory.constructor('return typeof process')(),
