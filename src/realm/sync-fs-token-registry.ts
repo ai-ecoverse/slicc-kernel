@@ -20,7 +20,7 @@ export interface SyncFsTokenEntry {
   keptFor?: (handle: number) => KeptFile | undefined;
   heldAt?: (handle: number) => string | undefined;
   boundIno?: (handle: number) => { ino: number; fid?: string; doubt: number } | undefined;
-  fileId?: (path: string) => Promise<string> | undefined;
+  fileId?: (path: string) => Promise<string | undefined> | undefined;
   announceHold?: (
     path: string,
     fid: string | undefined,

@@ -5,6 +5,7 @@ import { chain, inherit, ownOf, ROOT_OWNER, sameOwner } from './owners.ts';
 import { PathMap } from './path-map.ts';
 import { holdsProtected, isProtected } from './protect.ts';
 import {
+  type KeepHandlers,
   type LockManagerLike,
   lockManager,
   type PeerRename,
@@ -23,6 +24,7 @@ import {
   normalizePath,
   type Owner,
   type OwnerChange,
+  type PeerKeeps,
   type Peers,
   type Perm,
   type PwriteOptions,
@@ -143,6 +145,8 @@ export function translate(err: unknown, path: string, op: OpfsOp = 'lookup', map
 const META_OPS = ['get', 'update', 'move', 'remove', 'links', 'under', 'all'] as const;
 
 type MetaOp = (typeof META_OPS)[number] | 'fresh';
+
+const FILE_ID_TRIES = 3;
 
 function sidecar(meta: MetaStore): MetaStore {
   const pathOf = ([first]: unknown[]) =>
@@ -463,18 +467,50 @@ export class OpfsFs implements KernelFs {
   }
 
   async fileId(path: string): Promise<string> {
+    for (let tries = 0; tries < FILE_ID_TRIES; tries++) {
+      const fid = await this.assignId(path);
+      if (fid !== undefined) return fid;
+    }
+    throw fsError('EAGAIN', `${path}: moved while its file id was assigned`);
+  }
+
+  bindId(path: string): Promise<string | undefined> {
+    return this.assignId(path);
+  }
+
+  private async assignId(path: string): Promise<string | undefined> {
     const found = await this.locate(path, true);
     const [entry] = await (this.meta.fresh ?? this.meta.get).call(this.meta, [found.path]);
     if (entry?.fid !== undefined) return entry.fid;
     const fid = crypto.randomUUID();
+    let moved = false;
+    await this.meta.update(found.path, (now) => {
+      const vacatedSince = now?.vacated && (!entry?.vacated || now.ino !== entry.ino);
+      if (vacatedSince || (entry !== undefined && now === undefined)) {
+        moved = true;
+        return now;
+      }
+      return { ...occupied(now), path: found.path, fid: now?.fid ?? fid };
+    });
+    if (moved) return undefined;
     this.idWrites++;
-    await this.meta.update(found.path, (now) => ({
-      ...occupied(now),
-      path: found.path,
-      fid: now?.fid ?? fid,
-    }));
-    const [stored] = await this.meta.get([found.path]);
-    return stored?.fid ?? fid;
+    const there = await this.locate(path, true).then(
+      (at) => at.path === found.path,
+      () => false
+    );
+    if (there) return (await this.meta.get([found.path]))[0]?.fid ?? fid;
+    const gone = await this.locate(found.path, true).then(
+      () => false,
+      (err: unknown) => missing(err)
+    );
+    if (gone) {
+      await this.meta.update(found.path, (now) => {
+        if (now?.fid !== fid || now.vacated) return now;
+        const { fid: _, ...rest } = now;
+        return rest;
+      });
+    }
+    return undefined;
   }
 
   private heldUnder: (dir: string) => readonly string[] = () => [];
@@ -508,6 +544,22 @@ export class OpfsFs implements KernelFs {
   holdCounts(): { mine: number; peers: number; sent: number; held: string[] } | undefined {
     const remote = this.remote;
     return remote && { ...remote.holdCounts(), held: remote.peerHeldPaths() };
+  }
+
+  peerKeeps(): PeerKeeps | undefined {
+    const remote = this.remote;
+    if (!remote) return undefined;
+    return {
+      shared: () => this.shared(),
+      heldWithin: (path) => remote.heldWithin(path),
+      ask: (to, body, cap) => remote.ask(to, body, cap),
+    };
+  }
+
+  servePeerKeeps(instance: string, handlers: KeepHandlers): void {
+    if (!this.remote) return;
+    this.remote.instance = instance;
+    this.remote.keeps = handlers;
   }
 
   rehold(from: string, to: string): void {
@@ -1641,7 +1693,7 @@ export class OpfsFs implements KernelFs {
   }
 
   async writeFile(path: string, content: Uint8Array | string, owner?: NewOwner): Promise<void> {
-    const [file, existed, target] = await this.fileFor(path);
+    const [file, existed, target] = await this.fileFor(path, owner?.existing !== true);
     if (!existed) await this.stampNew(target, owner, false);
     if (!existed && content.length === 0) return;
     let writable: FileSystemWritableFileStream | undefined;

@@ -1,4 +1,11 @@
-import { type FsStat, fsError, type KernelFs, mayLink, type NewOwner } from './types.ts';
+import {
+  type FsStat,
+  fsError,
+  type KernelFs,
+  mayLink,
+  type NewOwner,
+  type PeerKeeps,
+} from './types.ts';
 
 export const UNLINKED_DIR = '.slicc-unlinked';
 
@@ -149,6 +156,22 @@ const within = (path: string, target: string) =>
 const TOUCHED_MAX = 4096;
 const parentOf = (path: string) => path.slice(0, path.lastIndexOf('/')) || '/';
 
+interface Moved {
+  tab: string;
+  path: string;
+  hidden: string;
+  fid: string | undefined;
+}
+
+export interface PeerKept {
+  whole: boolean;
+  undoing<T>(op: () => Promise<T>): Promise<T>;
+}
+
+export const PEER_RM_MS = 1000;
+export const PEER_RENAME_MS = 10_000;
+export const PEER_GATE_MS = PEER_RENAME_MS + 5000;
+
 const lockName = (instance: string) => `slicc-unlinked:${instance}`;
 
 const dirOf = (root: string) => (root === '/' ? `/${UNLINKED_DIR}` : `${root}/${UNLINKED_DIR}`);
@@ -205,6 +228,7 @@ export class UnlinkedKeeper {
   private readonly linked = new Map<string, string>();
 
   private readonly dirOwner: NewOwner | undefined;
+  private readonly peers: PeerKeeps | undefined;
 
   constructor(
     fs: KernelFs,
@@ -216,8 +240,10 @@ export class UnlinkedKeeper {
       owner?: UnlinkOwner | undefined;
       dirOwner?: NewOwner;
       marks?: PathMarks;
+      peers?: PeerKeeps | undefined;
     } = {}
   ) {
+    this.peers = options.peers;
     this.marks = options.marks ?? new PathMarks();
     const { locks, owner } = options;
     this.dirOwner = options.dirOwner;
@@ -301,21 +327,28 @@ export class UnlinkedKeeper {
       lstat: (path) => unreplaced(path, async () => counted(await fs.lstat(path))),
       async rm(path, options) {
         const target = fs.resolvePath('/', path);
-        await replace(target, async (gated, sealed) => {
-          const pinned = await keeper.pin(target, gated, sealed);
-          if (pinned.moved.has(target)) pinned.commit();
-          else await keeper.settle(pinned, () => fs.rm(path, options));
-        });
+        const kept = await keeper.peerKeep(target, false, () => keeper.removable(target, options));
+        if (kept.whole) return;
+        await kept.undoing(() =>
+          replace(target, async (gated, sealed) => {
+            const pinned = await keeper.pin(target, gated, sealed);
+            if (pinned.moved.has(target)) pinned.commit();
+            else await keeper.settle(pinned, () => fs.rm(path, options));
+          })
+        );
       },
       async rename(from, to) {
         const target = fs.resolvePath('/', to);
         const source = fs.resolvePath('/', from);
         if (target === source) return fs.rename(from, to);
-        await keeper.marks.around([source], () =>
-          replace(target, async (gated, sealed) => {
-            const pinned = await keeper.pin(target, gated, sealed);
-            await keeper.settle(pinned, () => fs.rename(from, to));
-          })
+        const kept = await keeper.peerKeep(target, true, () => keeper.renamable(source, target));
+        await kept.undoing(() =>
+          keeper.marks.around([source], () =>
+            replace(target, async (gated, sealed) => {
+              const pinned = await keeper.pin(target, gated, sealed);
+              await keeper.settle(pinned, () => fs.rename(from, to));
+            })
+          )
         );
       },
       symlink: (target, path, owner) =>
@@ -480,6 +513,142 @@ export class UnlinkedKeeper {
     );
   }
 
+  get id(): string {
+    return this.instance;
+  }
+
+  adopt(hidden: string, refs: number): KeptFile {
+    return this.keptFile(hidden, { refs });
+  }
+
+  async peerKeep(
+    target: string,
+    over: boolean,
+    valid: () => Promise<boolean> = async () => true
+  ): Promise<PeerKept> {
+    const none: PeerKept = { whole: false, undoing: (op) => op() };
+    const peers = this.peers;
+    if (!peers?.shared() || this.rootOf(target) !== '/') return none;
+    const held = peers.heldWithin(target).filter((holder) => holder.instance !== undefined);
+    if (held.length === 0 || !(await valid())) return none;
+    const tabs = new Map<string, typeof held>();
+    for (const holder of held) tabs.set(holder.tab, [...(tabs.get(holder.tab) ?? []), holder]);
+    const asked = [...tabs].map(([tab, holders]) => {
+      const paths = holders.map((holder) => holder.path);
+      return { tab, holders, paths };
+    });
+    const heard = await Promise.all(
+      asked.map(({ tab, paths }) =>
+        peers.ask(tab, { keeping: { paths } }, over ? PEER_RENAME_MS : PEER_RM_MS)
+      )
+    );
+    if (over && heard.includes(false)) {
+      for (const { tab, paths } of asked)
+        void peers.ask(tab, { kept: { items: [], paths } }, PEER_RM_MS);
+      throw fsError('EBUSY', `${target}: open in another tab that did not answer`);
+    }
+    const { whole, moved } = await this.setAside(peers, target, asked, heard);
+    return { whole, undoing: (op) => this.undoing(op, moved) };
+  }
+
+  private async setAside(
+    peers: PeerKeeps,
+    target: string,
+    asked: ReadonlyArray<{
+      tab: string;
+      holders: ReadonlyArray<{
+        path: string;
+        fid: string | undefined;
+        instance: string | undefined;
+      }>;
+      paths: string[];
+    }>,
+    heard: readonly boolean[]
+  ): Promise<{ whole: boolean; moved: Moved[] }> {
+    const mine = this.heldWithin(target);
+    const taken = new Set<string>();
+    let whole = false;
+    const told: Array<Promise<boolean>> = [];
+    const moved: Moved[] = [];
+    for (const [i, { tab, holders, paths }] of asked.entries()) {
+      const items = [];
+      for (const holder of holders) {
+        const free = !mine.has(holder.path) && !taken.has(holder.path);
+        const hidden = free
+          ? await this.asideFor(holder.path, holder.instance as string)
+          : undefined;
+        if (hidden !== undefined) {
+          taken.add(holder.path);
+          moved.push({ tab, path: holder.path, hidden, fid: holder.fid });
+          if (holder.path === target) whole = true;
+        }
+        items.push({ path: holder.path, hidden, fid: holder.fid });
+      }
+      const answer = peers.ask(tab, { kept: { items, paths } }, PEER_RM_MS);
+      if (heard[i]) told.push(answer);
+    }
+    await Promise.all(told);
+    return { whole, moved };
+  }
+
+  private async undoing<T>(op: () => Promise<T>, moved: readonly Moved[]): Promise<T> {
+    try {
+      return await op();
+    } catch (err) {
+      for (const { tab, path, hidden, fid } of moved) {
+        const back = await this.serial(async () => {
+          if (await this.present(path)) return false;
+          return this.fs.rename(hidden, path).then(
+            () => true,
+            () => false
+          );
+        });
+        if (!back) continue;
+        void this.peers?.ask(
+          tab,
+          { kept: { items: [{ path, hidden: undefined, fid, undo: hidden }], paths: [] } },
+          PEER_RM_MS
+        );
+      }
+      throw err;
+    }
+  }
+
+  async removable(target: string, options?: { recursive?: boolean }): Promise<boolean> {
+    const st = await this.fs.lstat(target).catch(() => undefined);
+    return st !== undefined && (!st.isDirectory || options?.recursive === true);
+  }
+
+  async renamable(source: string, target: string): Promise<boolean> {
+    const from = await this.fs.lstat(source);
+    const to = await this.fs.lstat(target).catch(() => undefined);
+    if (!to) return true;
+    if (to.isDirectory && !from.isDirectory) throw fsError('EISDIR', target);
+    if (!to.isDirectory && from.isDirectory) throw fsError('ENOTDIR', target);
+    if (to.isDirectory && (await this.fs.readdir(target)).length > 0)
+      throw fsError('ENOTEMPTY', target);
+    return true;
+  }
+
+  private async asideFor(path: string, instance: string): Promise<string | undefined> {
+    return (await this.hideFor(path, instance)) ?? this.hideFor(path, instance);
+  }
+
+  private hideFor(path: string, instance: string): Promise<string | undefined> {
+    return this.serial(async () => {
+      const dir = dirOf('/');
+      const hidden = `${dir}/${instance}.p${crypto.randomUUID().replaceAll('-', '')}`;
+      try {
+        const owner = this.dirOwner;
+        await this.fs.mkdir(dir, { recursive: true, ...(owner ? { owner } : {}) });
+        await this.fs.rename(path, hidden);
+        return hidden;
+      } catch {
+        return undefined;
+      }
+    });
+  }
+
   private keptFile(hidden: string, entry: { refs: number }): KeptFile {
     return {
       hidden,
@@ -540,7 +709,7 @@ export class UnlinkedKeeper {
 
   private async tidy(dir: string): Promise<void> {
     const left = await this.fs.readdir(dir).catch(() => [UNLINKED_DIR]);
-    if (left.length === 0) await this.fs.rm(dir, { recursive: true }).catch(() => undefined);
+    if (left.length === 0) await this.fs.rm(dir).catch(() => undefined);
   }
 
   sweep(root: string): Promise<void> {
