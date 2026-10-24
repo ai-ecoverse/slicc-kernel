@@ -483,11 +483,12 @@ export class OpfsFs implements KernelFs {
     const fid = crypto.randomUUID();
     let moved = false;
     await this.meta.update(found.path, (now) => {
-      if (now?.vacated || (entry !== undefined && now === undefined)) {
+      const vacatedSince = now?.vacated && (!entry?.vacated || now.ino !== entry.ino);
+      if (vacatedSince || (entry !== undefined && now === undefined)) {
         moved = true;
         return now;
       }
-      return { ...now, path: found.path, fid: now?.fid ?? fid };
+      return { ...occupied(now), path: found.path, fid: now?.fid ?? fid };
     });
     if (moved) return undefined;
     this.idWrites++;
