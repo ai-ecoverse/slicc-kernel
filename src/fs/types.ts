@@ -113,7 +113,7 @@ export interface KernelFs {
   ancestry?(path: string): Promise<Array<Perm | undefined>>;
   hasOwner?(path: string): Promise<boolean>;
   chmod(path: string, mode: number): Promise<void>;
-  append?(path: string, bytes: Uint8Array): Promise<number>;
+  append?(path: string, bytes: Uint8Array, options?: PwriteOptions): Promise<number>;
   utimes(path: string, atime: Date, mtime: Date): Promise<void>;
   lutimes?(path: string, atime: Date, mtime: Date): Promise<void>;
   pread?(path: string, offset: number, length: number, version?: string): Promise<Uint8Array>;
@@ -146,6 +146,7 @@ export interface KernelFs {
 
 export interface PwriteOptions {
   create?: false;
+  alone?: true;
 }
 
 export type RangedOps = Required<Pick<KernelFs, 'pread' | 'pwrite' | 'truncate'>>;

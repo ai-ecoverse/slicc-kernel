@@ -4,6 +4,7 @@ import {
   lutimesOf,
   type NewOwner,
   normalizePath,
+  type PwriteOptions,
   rangedOps,
 } from './types.ts';
 
@@ -416,11 +417,11 @@ export class FsWatchers {
     };
     const { append } = fs;
     if (append) {
-      overrides.append = async (path: string, bytes: Uint8Array) => {
+      overrides.append = async (path: string, bytes: Uint8Array, options?: PwriteOptions) => {
         let end = 0;
         await content(
           async (_path: string) => {
-            end = await append.call(fs, path, bytes);
+            end = await append.call(fs, path, bytes, options);
           },
           () => ['change']
         )(path);

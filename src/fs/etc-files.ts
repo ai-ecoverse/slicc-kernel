@@ -112,9 +112,9 @@ export function withEtcFiles(fs: KernelFs, files: ReadonlyMap<string, () => stri
     readFile: (path) => fs.readFile(path).catch(fallback(path, (b) => new TextDecoder().decode(b))),
     ...(fs.append
       ? {
-          append: async (path: string, bytes: Uint8Array) => {
+          append: async (path: string, bytes: Uint8Array, options?: PwriteOptions) => {
             if (files.has(path)) await materialize(path);
-            return (fs.append as NonNullable<KernelFs['append']>).call(fs, path, bytes);
+            return (fs.append as NonNullable<KernelFs['append']>).call(fs, path, bytes, options);
           },
         }
       : {}),

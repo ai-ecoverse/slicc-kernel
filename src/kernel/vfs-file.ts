@@ -913,7 +913,7 @@ function heldIo(fs: KernelFs, nodes: VfsNodes, changed: (path: string) => void):
         path,
         (held) => held.append(bytes),
         async () => {
-          const end = await fs.append?.(path, bytes).catch((err: unknown) => {
+          const end = await fs.append?.(path, bytes, { alone: true }).catch((err: unknown) => {
             if (!positional(err)) throw err;
             return undefined;
           });

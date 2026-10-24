@@ -33,6 +33,7 @@ interface WatchMessage {
   renames?: true;
   renaming?: PeerRename;
   renamed?: string;
+  flushing?: string;
 }
 
 export interface LockManagerLike {
@@ -60,6 +61,7 @@ export class RemoteWatch {
   private pruned = 0;
   private readonly joined: Promise<void>;
   private met: (() => void) | undefined;
+  private readonly flushes = new Map<string, PromiseWithResolvers<void>>();
   private settled = false;
   quiet: (() => Promise<void>) | undefined;
   crowd: ((crowded: boolean) => void) | undefined;
@@ -114,10 +116,27 @@ export class RemoteWatch {
         resolve();
       };
     });
+    await Promise.all([...this.flushes.values()].map((flush) => flush.promise));
+  }
+
+  private flushingAt(peer: string): void {
+    if (this.locks && !this.flushes.has(peer)) {
+      this.flushes.set(peer, Promise.withResolvers<void>());
+      void this.mourn(peer);
+    }
+    this.met?.();
+  }
+
+  private flushedAt(peer: string): void {
+    this.flushes.get(peer)?.resolve();
+    this.flushes.delete(peer);
   }
 
   async peered(): Promise<boolean> {
     await this.joined;
+    while (this.flushes.size > 0) {
+      await Promise.all([...this.flushes.values()].map((flush) => flush.promise));
+    }
     return this.peers.size > 0;
   }
 
@@ -157,7 +176,9 @@ export class RemoteWatch {
     if (data.hello !== undefined) this.greeted(data.hello);
     if (data.renaming !== undefined && data.tab !== undefined) this.heard(data);
     if (data.renamed !== undefined) this.renamed?.(data.renamed);
+    if (data.flushing !== undefined && data.to === this.tab) this.flushingAt(data.flushing);
     if (data.here !== undefined && data.to === this.tab) {
+      this.flushedAt(data.here);
       this.arrived(data.here);
       this.met?.();
     }
@@ -181,9 +202,10 @@ export class RemoteWatch {
     const { held = [], pending = [] } = await this.locks.query();
     if (![...held, ...pending].some((lock) => lock.name === name)) {
       this.mourned.delete(peer);
-      if (tries > 1 && this.peers.has(peer)) {
+      const live = this.peers.has(peer) || this.flushes.has(peer);
+      if (tries > 1 && live) {
         setTimeout(() => void this.mourn(peer, tries - 1), MOURN_RETRY_MS);
-      }
+      } else this.flushedAt(peer);
       return;
     }
     void this.locks.request(name, async () => {
@@ -191,6 +213,7 @@ export class RemoteWatch {
       this.others.delete(peer);
       this.peers.delete(peer);
       this.ackers.delete(peer);
+      this.flushedAt(peer);
       this.rebuild();
       this.recount();
       this.gone?.();
@@ -206,8 +229,12 @@ export class RemoteWatch {
       this.channel.postMessage({ here: this.tab, to: peer, renames: true });
       if (this.mine.length > 0) void this.announce(this.mine);
     };
-    if (this.quiet) void this.quiet().then(answer, answer);
-    else answer();
+    if (!this.quiet) {
+      answer();
+      return;
+    }
+    this.channel.postMessage({ flushing: this.tab, to: peer });
+    void this.quiet().then(answer, answer);
   }
 
   private heard({ tab, renaming, seq }: WatchMessage): void {
