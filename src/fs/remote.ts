@@ -37,7 +37,7 @@ interface WatchMessage {
   flushing?: string;
   holds?: { add: Array<[string, string | undefined]>; drop: string[]; instance?: string };
   keeping?: { paths: string[] };
-  kept?: { items: PeerKept[] };
+  kept?: { items: PeerKept[]; paths?: string[] };
   instance?: string;
 }
 
@@ -56,7 +56,7 @@ export interface PeerHolder {
 
 export interface KeepHandlers {
   keeping(tab: string, paths: readonly string[]): Promise<void>;
-  kept(tab: string, items: readonly PeerKept[]): Promise<void>;
+  kept(tab: string, items: readonly PeerKept[], paths: readonly string[]): Promise<void>;
   left(tab: string): void;
 }
 
@@ -315,7 +315,8 @@ export class RemoteWatch {
     const keeps = this.keeps;
     try {
       if (keeping) await keeps?.keeping(from, keeping.paths);
-      if (kept) await keeps?.kept(from, kept.items);
+      if (kept)
+        await keeps?.kept(from, kept.items, kept.paths ?? kept.items.map((item) => item.path));
     } finally {
       this.channel.postMessage({
         ack: seq,

@@ -158,6 +158,7 @@ const parentOf = (path: string) => path.slice(0, path.lastIndexOf('/')) || '/';
 
 export const PEER_RM_MS = 1000;
 export const PEER_RENAME_MS = 10_000;
+export const PEER_GATE_MS = PEER_RENAME_MS + 5000;
 
 const lockName = (instance: string) => `slicc-unlinked:${instance}`;
 
@@ -506,40 +507,48 @@ export class UnlinkedKeeper {
   async peerKeep(target: string, over: boolean): Promise<boolean> {
     const peers = this.peers;
     if (!peers?.shared() || this.rootOf(target) !== '/') return false;
-    const held = peers.heldWithin(target);
+    const held = peers.heldWithin(target).filter((holder) => holder.instance !== undefined);
     if (held.length === 0) return false;
     const tabs = new Map<string, typeof held>();
     for (const holder of held) tabs.set(holder.tab, [...(tabs.get(holder.tab) ?? []), holder]);
-    let whole = false;
-    for (const [tab, holders] of tabs) {
+    const asked = [...tabs].map(([tab, holders]) => {
       const paths = holders.map((holder) => holder.path);
-      const heard = await peers.ask(
-        tab,
-        { keeping: { paths } },
-        over ? PEER_RENAME_MS : PEER_RM_MS
-      );
-      if (!heard && over) {
-        void peers.ask(tab, { kept: { items: [] } }, PEER_RM_MS);
-        throw fsError('EBUSY', `${target}: open in another tab that did not answer`);
-      }
+      return { tab, holders, paths };
+    });
+    const heard = await Promise.all(
+      asked.map(({ tab, paths }) =>
+        peers.ask(tab, { keeping: { paths } }, over ? PEER_RENAME_MS : PEER_RM_MS)
+      )
+    );
+    if (over && heard.includes(false)) {
+      for (const { tab, paths } of asked)
+        void peers.ask(tab, { kept: { items: [], paths } }, PEER_RM_MS);
+      throw fsError('EBUSY', `${target}: open in another tab that did not answer`);
+    }
+    const mine = this.heldWithin(target);
+    const taken = new Set<string>();
+    let whole = false;
+    const told: Array<Promise<boolean>> = [];
+    for (const [i, { tab, holders, paths }] of asked.entries()) {
       const items = [];
       for (const holder of holders) {
-        const hidden = await this.asideFor(holder);
+        const free = !mine.has(holder.path) && !taken.has(holder.path);
+        const hidden = free
+          ? await this.asideFor(holder.path, holder.instance as string)
+          : undefined;
+        if (hidden !== undefined) taken.add(holder.path);
         if (hidden !== undefined && holder.path === target) whole = true;
         items.push({ path: holder.path, hidden, fid: holder.fid });
       }
-      const told = peers.ask(tab, { kept: { items } }, PEER_RM_MS);
-      if (heard) await told;
+      const answer = peers.ask(tab, { kept: { items, paths } }, PEER_RM_MS);
+      if (heard[i]) told.push(answer);
     }
+    await Promise.all(told);
     return whole;
   }
 
-  private async asideFor(holder: { path: string; instance: string | undefined }) {
-    const { instance, path } = holder;
-    const hidden = instance === undefined ? undefined : await this.hideFor(path, instance);
-    if (hidden === undefined && (await this.present(path)))
-      throw fsError('EBUSY', `${path}: open in another tab, and it could not be kept aside`);
-    return hidden;
+  private async asideFor(path: string, instance: string): Promise<string | undefined> {
+    return (await this.hideFor(path, instance)) ?? this.hideFor(path, instance);
   }
 
   private hideFor(path: string, instance: string): Promise<string | undefined> {
@@ -617,7 +626,7 @@ export class UnlinkedKeeper {
 
   private async tidy(dir: string): Promise<void> {
     const left = await this.fs.readdir(dir).catch(() => [UNLINKED_DIR]);
-    if (left.length === 0) await this.fs.rm(dir, { recursive: true }).catch(() => undefined);
+    if (left.length === 0) await this.fs.rm(dir).catch(() => undefined);
   }
 
   sweep(root: string): Promise<void> {

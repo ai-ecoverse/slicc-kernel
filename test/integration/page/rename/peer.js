@@ -1,5 +1,10 @@
 const params = new URL(self.location.href).searchParams;
-const state = { noticeDelay: 0, old: params.has('old'), deaf: params.has('deaf') };
+const state = {
+  noticeDelay: 0,
+  old: params.has('old'),
+  deaf: params.has('deaf'),
+  holdsOnly: params.has('holds-only'),
+};
 const control = new BroadcastChannel('rename-peer-control');
 control.onmessage = ({ data }) => {
   if (!data?.set) return;
@@ -11,6 +16,10 @@ const post = BroadcastChannel.prototype.postMessage;
 let me;
 BroadcastChannel.prototype.postMessage = function (data) {
   if (watching(this) && data?.hello !== undefined) me = data.hello;
+  if (watching(this) && state.holdsOnly && data?.holds?.instance !== undefined) {
+    const { instance: _, ...holds } = data.holds;
+    return post.call(this, { ...data, holds });
+  }
   if (watching(this) && state.old && (data?.renames || data?.keeps)) {
     const { renames: _, keeps: __, ...rest } = data;
     return post.call(this, rest);
@@ -27,6 +36,8 @@ Object.defineProperty(BroadcastChannel.prototype, 'onmessage', {
         watching(this) &&
         (event.data?.holds || event.data?.keeping || event.data?.kept)
       )
+        return undefined;
+      if (state.holdsOnly && watching(this) && (event.data?.keeping || event.data?.kept))
         return undefined;
       const missing = state.old || state.deaf;
       const touched = [...(event.data?.paths ?? []), ...(event.data?.trees ?? [])];

@@ -49,6 +49,7 @@ import type { KernelFs, NewOwner, PeerKeeps, Peers, UsersMode } from './fs/types
 import { fsError, normalizePath } from './fs/types.ts';
 import {
   PathMarks,
+  PEER_GATE_MS,
   UNLINKED_DIR,
   UnlinkedKeeper,
   type UnlinkOwner,
@@ -3221,7 +3222,7 @@ export class Launcher {
     return this.writers;
   }
 
-  private readonly peerGates = new Map<string, Array<() => void>>();
+  private readonly peerGates = new Map<string, () => void>();
 
   private peerOptions(fs: KernelFs): { peers?: PeerKeeps; dirOwner?: NewOwner } {
     const peers = fs.peerKeeps?.();
@@ -3234,36 +3235,73 @@ export class Launcher {
 
   private peerKept() {
     const gates = this.peerGates;
-    const open = (tab: string) => {
-      for (const release of gates.get(tab) ?? []) release();
-      gates.delete(tab);
+    const gone = new Set<string>();
+    const instance = this.unlinked.id;
+    const ours = (hidden: string) =>
+      hidden.startsWith(`/${UNLINKED_DIR}/${instance}.p`) &&
+      /^[0-9a-f]+$/.test(hidden.slice(`/${UNLINKED_DIR}/${instance}.p`.length));
+    const open = (tab: string, paths?: readonly string[]) => {
+      for (const [key, release] of [...gates]) {
+        const [owner, path] = key.split('\0') as [string, string];
+        if (owner !== tab || (paths && !paths.includes(path))) continue;
+        gates.delete(key);
+        release();
+      }
     };
     return {
       keeping: async (tab: string, paths: readonly string[]) => {
-        const mine = gates.get(tab) ?? [];
-        gates.set(tab, mine);
-        for (const path of paths) mine.push(await this.unlinked.gate.acquire(path));
+        for (const path of paths) {
+          if (gone.has(tab)) return;
+          const release = await this.unlinked.gate.acquire(path);
+          const key = `${tab}\0${path}`;
+          let done = false;
+          const once = () => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            release();
+          };
+          const timer = setTimeout(() => {
+            if (gates.get(key) === once) gates.delete(key);
+            once();
+          }, PEER_GATE_MS);
+          if (gone.has(tab)) once();
+          else gates.set(key, once);
+        }
       },
       kept: async (
         tab: string,
-        items: ReadonlyArray<{ path: string; hidden: string | undefined; fid: string | undefined }>
+        items: ReadonlyArray<{ path: string; hidden: string | undefined; fid: string | undefined }>,
+        paths: readonly string[]
       ) => {
-        for (const { path, hidden, fid } of items) {
-          if (hidden === undefined) continue;
-          const bound = [...this.held].map(
-            (holds) =>
-              [holds, [...holds.boundAt(path, fid), ...holds.boundAt(hidden, fid)]] as const
-          );
-          const keeping = bound.filter(([, ids]) => ids.length > 0);
-          const file = this.unlinked.adopt(hidden, Math.max(keeping.length, 1));
-          if (keeping.length === 0) file.release();
-          for (const [holds, ids] of keeping) holds.keepBound(ids, path, file);
-          void this.rootFs.announceHolds?.([], [path, hidden], false);
-        }
+        for (const { path, hidden, fid } of items) this.adoptKept(path, hidden, fid, ours);
+        open(tab, paths);
+      },
+      left: (tab: string) => {
+        gone.add(tab);
         open(tab);
       },
-      left: open,
     };
+  }
+
+  private adoptKept(
+    path: string,
+    hidden: string | undefined,
+    fid: string | undefined,
+    ours: (hidden: string) => boolean
+  ): void {
+    if (hidden === undefined || !ours(hidden)) {
+      this.held.doubt([path]);
+      return;
+    }
+    const bound = [...this.held].map(
+      (holds) => [holds, [...holds.boundAt(path, fid), ...holds.boundAt(hidden, fid)]] as const
+    );
+    const keeping = bound.filter(([, ids]) => ids.length > 0);
+    const file = this.unlinked.adopt(hidden, Math.max(keeping.length, 1));
+    if (keeping.length === 0) file.release();
+    for (const [holds, ids] of keeping) holds.keepBound(ids, path, file);
+    void this.rootFs.announceHolds?.([], [path, hidden], false);
   }
 
   private rootFileId(path: string): Promise<string | undefined> | undefined {
