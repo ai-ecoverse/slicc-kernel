@@ -91,6 +91,9 @@ export interface JsSyncContext {
     source: string,
     options?: { filename?: string }
   ): { value: unknown; completion: boolean } | undefined;
+  promiseState(
+    promise: unknown
+  ): { state: 'pending' | 'fulfilled' | 'rejected'; value: unknown } | undefined;
   read(fd: number, max?: number): Uint8Array;
   write(fd: number, data: Uint8Array | string, options?: JsWriteOptions): number;
   close(fd: number): void;
@@ -222,6 +225,7 @@ export function syncOps(
   | 'wasi'
   | 'net'
   | 'runScript'
+  | 'promiseState'
 > & { fs: Omit<JsSyncContext['fs'], 'watch'> } {
   const { infos, handles, resolve } = shared;
 

@@ -6,6 +6,7 @@ import {
   nodeLockdown,
   nodeMemory,
   nodeProcess,
+  nodePromiseState,
   nodeRunScript,
   ownCache,
   workerShaped,
@@ -45,6 +46,7 @@ const onMessage = processEntry(
         memory: nodeMemory,
         asyncContext: nodeAsyncContext,
         runScript: nodeRunScript,
+        promiseState: nodePromiseState,
         imported,
       }),
     runJsThread: (init, at) =>
@@ -54,6 +56,7 @@ const onMessage = processEntry(
         memory: nodeMemory,
         asyncContext: nodeAsyncContext,
         runScript: nodeRunScript,
+        promiseState: nodePromiseState,
         imported,
       }),
   }),
