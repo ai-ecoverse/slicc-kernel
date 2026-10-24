@@ -383,7 +383,10 @@ function cacheData(
 }
 
 function dropCache(cache: { dir: string; own: boolean } | undefined): void {
-  if (cache?.own) rmSync(cache.dir, { recursive: true, force: true });
+  if (!cache?.own) return;
+  try {
+    rmSync(cache.dir, { recursive: true, force: true });
+  } catch {}
 }
 
 function ownCacheDir(
