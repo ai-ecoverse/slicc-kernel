@@ -38,7 +38,6 @@ await build({
   entryPoints: [
     'src/index.ts',
     'src/kernel-worker.ts',
-    'src/process-worker.ts',
     'src/driver-worker.ts',
     'src/driver.ts',
     'src/testing.ts',
@@ -54,7 +53,7 @@ await build({
   logLevel: 'warning',
 });
 await build({
-  entryPoints: ['src/node.ts', 'src/node-process-worker.ts', 'src/node-driver-worker.ts'],
+  entryPoints: ['src/node.ts', 'src/node-driver-worker.ts'],
   outdir: 'dist',
   bundle: true,
   format: 'esm',
@@ -64,6 +63,23 @@ await build({
   define,
   logLevel: 'warning',
 });
+for (const [entry, platform] of [
+  ['src/process-worker.ts', 'browser'],
+  ['src/node-process-worker.ts', 'node'],
+]) {
+  await build({
+    entryPoints: [entry],
+    outdir: 'dist',
+    bundle: true,
+    format: 'esm',
+    platform,
+    target: platform === 'node' ? 'node22' : 'es2024',
+    sourcemap: 'linked',
+    define,
+    inject: ['src/captured-globals.ts'],
+    logLevel: 'warning',
+  });
+}
 await appendFile(
   new URL('./dist/node-process-worker.js', import.meta.url),
   '//# sourceURL=slicc-kernel:/node-process-worker.js\n'
