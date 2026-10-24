@@ -831,14 +831,26 @@ async function devsOf(
     ? result.kind === 'json' && result.json === false
     : result.errno === 'ENOENT';
   if (!absent) return result;
-  const dev = await devTarget(entry.fs, entry.fs.resolvePath(entry.cwd, req.path));
+  const dev = await devTarget(entry, req, entry.fs.resolvePath(entry.cwd, req.path));
   if (dev === undefined) return result;
   return result.ok ? json({ dev }) : { ...result, dev };
 }
 
-async function devTarget(fs: KernelFs, path: string): Promise<string | undefined> {
+async function devTarget(
+  entry: SyncFsTokenEntry,
+  req: SyncFsRequest,
+  path: string
+): Promise<string | undefined> {
+  const look = async (op: 'lstat' | 'readlink', at: string) => {
+    const r = await dispatchPath(entry, { token: req.token, op, path: at });
+    if (!r.ok) throw new Error(r.errno);
+    return (r as { json?: unknown }).json;
+  };
   const resolved = await physicalPathAsync(
-    { lstat: (p) => fs.lstat(p), readlink: (p) => fs.readlink(p) },
+    {
+      lstat: async (p) => (await look('lstat', p)) as { isSymbolicLink?: boolean },
+      readlink: async (p) => String(await look('readlink', p)),
+    },
     path
   );
   return resolved !== path && (resolved === '/dev' || resolved.startsWith('/dev/'))
