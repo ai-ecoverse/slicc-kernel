@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { after, test } from 'node:test';
 import { launch } from './chrome.mjs';
 import { booted, installPackage, ok } from './kernel.mjs';
-import { peerTab, sh } from './rename-tabs.mjs';
+import { PEER_WORKER, peerTab, sh } from './rename-tabs.mjs';
 
 const chrome = await launch();
 after(() => chrome.close());
@@ -93,4 +93,42 @@ test('opens of an existing file do not each wait for a peer that has gone silent
     new BroadcastChannel('pause-control').postMessage({ id: 'p', thaw: true })
   );
   assert.ok(Number(out) < (50 * 500) / 5, `${out.trim()} ms for 50 opens`);
+});
+
+test('opens of an existing file never wait for a tab running an older kernel, which does not ack holds (#1409 review)', {
+  timeout: 900_000,
+}, async (t) => {
+  const { page } = await booted(chrome, t);
+  await installPackage(page, 'wasm-coreutils');
+  await installPackage(page, 'wasix-python', { skip: /^lib\/libpython[^/]*\.a$/ });
+  const old = await peerTab(page, { worker: `${PEER_WORKER}?old=1` });
+  assert.deepEqual(
+    await sh(page, 'mkdir -p /root/po && echo x > /root/po/f && echo made'),
+    ok('made\n')
+  );
+  const script = [
+    'import os, time',
+    't = time.time()',
+    'for _ in range(50):',
+    "    os.close(os.open('/root/po/f', os.O_RDONLY))",
+    'print(round((time.time() - t) * 1000))',
+  ].join('\n');
+  const busy = old.evaluate(() =>
+    window.kernel.run(
+      [
+        'bash',
+        '-c',
+        'for i in $(seq 1 400); do echo $i > /root/po/w; mv /root/po/w /root/po/v; done',
+      ],
+      { cwd: '/' }
+    )
+  );
+  const r = await page.evaluate(
+    (s) => window.kernel.run(['python3', '-c', s], { cwd: '/' }),
+    script
+  );
+  await busy;
+  const out = typeof r.stdout === 'string' ? r.stdout : new TextDecoder().decode(r.stdout);
+  console.log(`50 opens with an older-kernel peer: ${out.trim()} ms`);
+  assert.ok(Number(out) < 1000, `${out.trim()} ms for 50 opens`);
 });
