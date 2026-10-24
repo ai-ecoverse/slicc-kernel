@@ -596,7 +596,14 @@ export class UnlinkedKeeper {
       return await op();
     } catch (err) {
       for (const { tab, path, hidden, fid } of moved) {
-        await this.serial(() => this.fs.rename(hidden, path)).catch(() => undefined);
+        const back = await this.serial(async () => {
+          if (await this.present(path)) return false;
+          return this.fs.rename(hidden, path).then(
+            () => true,
+            () => false
+          );
+        });
+        if (!back) continue;
         void this.peers?.ask(
           tab,
           { kept: { items: [{ path, hidden: undefined, fid, undo: hidden }], paths: [] } },
