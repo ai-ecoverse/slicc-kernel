@@ -31,7 +31,7 @@ export default async function main(ctx) {
   if (ctx.thread.tid !== 0) {
     const port = ctx.thread.port;
     shadow(ctx, ctx.thread.data.how);
-    ctx.write(1, 'thread wrote\\n');
+    await ctx.write(1, 'thread wrote\\n');
     port.postMessage('done');
     return 0;
   }
