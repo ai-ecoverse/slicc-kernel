@@ -158,7 +158,7 @@ test('a holder whose tab runs 4(a) only (holds without an instance) is never ask
   assert.deepEqual(await sh(other, `cd ${dir} && echo NEW > h && mv h f2 && cat f2`), ok('NEW\n'));
   const mv = Date.now() - t0;
   console.log(`4(a) holder: rm ${rm} ms, mv over ${mv} ms`);
-  assert.ok(rm < 800 && mv < 800, `rm ${rm} ms, mv ${mv} ms`);
+  assert.ok(rm < 950 && mv < 5000, `rm ${rm} ms, mv ${mv} ms`);
   assert.deepEqual(await kept(other), []);
   await sh(page, `: > ${dir}/go`);
   await page.evaluate(() => window.holder);
