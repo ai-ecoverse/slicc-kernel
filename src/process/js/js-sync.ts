@@ -143,6 +143,7 @@ export interface SyncShared {
   infos: Map<number, FdInfo>;
   handles: Map<number, () => void>;
   closing?(fd: number): void;
+  clean?: () => boolean;
 }
 
 const encoder = new TextEncoder();
@@ -238,6 +239,7 @@ export function syncOps(
   | 'promiseState'
 > & { fs: Omit<JsSyncContext['fs'], 'watch'> } {
   const { infos, handles, resolve } = shared;
+  const clean = () => shared.clean?.() === true;
 
   const tryDevSync = (abs: string): string | undefined => {
     try {
@@ -298,7 +300,7 @@ export function syncOps(
     const abs = resolve(path);
     if (inDev(abs)) return devSync(kernel, devStat(abs, op === 'stat'));
     try {
-      kernel.call({ op: 'fd-path-flush', path: abs });
+      if (!clean()) kernel.call({ op: 'fd-path-flush', path: abs });
       const s = parseSyncFsStat(kernel.json({ op, path: abs }));
       if (!s) throw new JsCallError('EIO', op);
       return s;
@@ -381,7 +383,7 @@ export function syncOps(
     },
     pipe: () => kernel.json({ op: 'fd-pipe' }) as [number, number],
     open: procOpenSync(open, kernel, { resolve, pid: shared.pid }),
-    fs: procFsSync(syncPathOps(kernel, resolve, statOf, open, tryDevSync), kernel, {
+    fs: procFsSync(syncPathOps(kernel, resolve, statOf, open, tryDevSync, clean), kernel, {
       resolve,
       pid: shared.pid,
     }),
@@ -475,7 +477,8 @@ function syncPathOps(
   resolve: (path: string) => string,
   statOf: (op: 'stat' | 'lstat', path: string) => SyncFsBridgeStat,
   open: (path: string, options?: JsOpenOptions) => JsSyncFile,
-  tryDev: (abs: string) => string | undefined
+  tryDev: (abs: string) => string | undefined,
+  clean: () => boolean
 ): Omit<JsSyncContext['fs'], 'watch'> {
   return {
     stat: (path) => statOf('stat', path),
@@ -528,7 +531,7 @@ function syncPathOps(
       const abs = resolve(path);
       if (inDev(abs)) return readWholeSync(open(abs));
       try {
-        kernel.call({ op: 'fd-path-flush', path: abs });
+        if (!clean()) kernel.call({ op: 'fd-path-flush', path: abs });
         return kernel.bytes({ op: 'read', path: abs });
       } catch (err) {
         if (!(err instanceof JsCallError) || err.code !== 'ENOENT') throw err;

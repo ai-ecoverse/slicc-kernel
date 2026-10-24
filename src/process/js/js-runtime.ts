@@ -145,6 +145,7 @@ async function runJs(
     cwd: init.cwd,
     exit: (status) => exited(statusOf(status)),
     lane: laneOf(init.lane),
+    changes: init.changes,
     fs: { owners: init.owners === true, links: init.links === true },
     strays,
     thread: threadContext(port, thread),

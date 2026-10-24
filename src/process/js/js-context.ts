@@ -1,3 +1,4 @@
+import { ChangeView } from '../../fs/changes.ts';
 import { physicalPathAsync } from '../../fs/physical-path.ts';
 import { type CwdAnswer, HeldCwd } from '../../kernel/held-cwd.ts';
 import type { HeldCwdInit } from '../../kernel/protocol.ts';
@@ -305,6 +306,7 @@ export interface ContextOptions {
   owned?: SharedArrayBuffer;
   held?: HeldCwdInit | undefined;
   failed?: () => number | undefined;
+  changes?: SharedArrayBuffer | undefined;
 }
 
 const encoder = new TextEncoder();
@@ -475,10 +477,11 @@ async function vfsStat(
   kernel: JsKernel,
   abs: string,
   op: 'stat' | 'lstat',
-  tryDev: (abs: string) => Promise<string | undefined>
+  tryDev: (abs: string) => Promise<string | undefined>,
+  clean: () => boolean
 ): Promise<SyncFsBridgeStat> {
   try {
-    await kernel.call({ op: 'fd-path-flush', path: abs });
+    if (!clean()) await kernel.call({ op: 'fd-path-flush', path: abs });
     const s = parseSyncFsStat(await kernel.json({ op, path: abs }));
     if (!s) throw new JsCallError('EIO', op);
     return s;
@@ -729,6 +732,11 @@ function hostExtras(o: ContextOptions): {
   };
 }
 
+function cleanOf(sab: SharedArrayBuffer | undefined): () => boolean {
+  const changes = sab ? new ChangeView(sab) : undefined;
+  return () => changes?.clean() === true;
+}
+
 export function createContext(o: ContextOptions): CreatedContext {
   const { kernel } = o;
   const infos = new Map<number, FdInfo>();
@@ -738,6 +746,7 @@ export function createContext(o: ContextOptions): CreatedContext {
   let held: HeldCwd | undefined;
   const resolve = (path: string) => resolvePath(cwdFor(o.cwd, held, path), path);
   const tryDev = (abs: string) => resolveDevAsync(kernel, abs);
+  const clean = cleanOf(o.changes);
   let exiting: number | undefined;
   const exit = (code = 0): never => {
     exiting ??= code;
@@ -771,7 +780,7 @@ export function createContext(o: ContextOptions): CreatedContext {
   const statOf = async (op: 'stat' | 'lstat', path: string): Promise<SyncFsBridgeStat> => {
     const abs = resolve(path);
     if (inDev(abs)) return devAsync(kernel, devStat(abs, op === 'stat'));
-    return vfsStat(kernel, abs, op, tryDev);
+    return vfsStat(kernel, abs, op, tryDev, clean);
   };
 
   const devIo = { infos, handles, read, write: writeAll };
@@ -793,7 +802,7 @@ export function createContext(o: ContextOptions): CreatedContext {
     }
   };
 
-  const fs = procFsAsync(pathOps(kernel, resolve, statOf, open, tryDev), kernel, {
+  const fs = procFsAsync(pathOps(kernel, resolve, statOf, open, tryDev, clean), kernel, {
     resolve,
     pid: o.pid,
   });
@@ -802,7 +811,7 @@ export function createContext(o: ContextOptions): CreatedContext {
   const syncKernel = new JsSyncKernel(lane, kernel, unwind);
   held = heldOn(o.held, lane, syncKernel);
   const terminal = ttyOps(kernel, syncKernel);
-  const shared = { pid: o.pid, resolve, random, infos, handles, closing };
+  const shared = { pid: o.pid, resolve, random, infos, handles, closing, clean };
   const wasi = wasiFor({ lane, pid: o.pid, cwd: o.cwd, resolve, fs: o.fs, owned: o.owned });
   const sync: JsSyncContext = {
     kernel: KERNEL_INFO,
@@ -1064,7 +1073,8 @@ function pathOps(
   resolve: (path: string) => string,
   statOf: (op: 'stat' | 'lstat', path: string) => Promise<SyncFsBridgeStat>,
   open: (path: string, options?: JsOpenOptions, whole?: boolean) => Promise<JsFile>,
-  tryDev: (abs: string) => Promise<string | undefined>
+  tryDev: (abs: string) => Promise<string | undefined>,
+  clean: () => boolean
 ): JsProgramContext['fs'] {
   return {
     stat: (path) => statOf('stat', path),
@@ -1121,7 +1131,7 @@ function pathOps(
       const abs = resolve(path);
       if (inDev(abs)) return readWhole(await open(abs));
       try {
-        await kernel.call({ op: 'fd-path-flush', path: abs });
+        if (!clean()) await kernel.call({ op: 'fd-path-flush', path: abs });
         return await kernel.bytes({ op: 'read', path: abs });
       } catch (err) {
         if (!(err instanceof JsCallError) || err.code !== 'ENOENT') throw err;
