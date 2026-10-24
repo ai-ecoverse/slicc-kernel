@@ -48,6 +48,14 @@ import {
 import { callError, JsCallError, type JsKernel, modeOf } from './js-kernel.ts';
 import type { JsSyncNet } from './js-net.ts';
 import { procFsSync, procOpenSync } from './js-proc.ts';
+import {
+  decodeReceived,
+  type JsReceived,
+  type JsRecvmsgOptions,
+  type JsSendmsgOptions,
+  recvmsgRequest,
+  sendmsgRequest,
+} from './js-rights.ts';
 import type { JsRunOptions, JsRunResult } from './js-run.ts';
 import type { JsSyncTty } from './js-tty.ts';
 import type { JsWasi, JsWasiOptions } from './js-wasi.ts';
@@ -95,6 +103,8 @@ export interface JsSyncContext {
   write(fd: number, data: Uint8Array | string, options?: JsWriteOptions): number;
   close(fd: number): void;
   socketpair(): [number, number];
+  sendmsg(fd: number, data: Uint8Array | string, options?: JsSendmsgOptions): number;
+  recvmsg(fd: number, max?: number, options?: JsRecvmsgOptions): JsReceived;
   pipe(): [number, number];
   open(path: string, options?: JsOpenOptions): JsSyncFile;
   wasi: { create(options?: JsWasiOptions): JsWasi };
@@ -359,6 +369,12 @@ export function syncOps(
     },
     socketpair: () =>
       kernel.json({ op: 'sock-pair', domain: 'unix', type: 'stream' }) as [number, number],
+    sendmsg: (fd, data, options) => kernel.json(sendmsgRequest(fd, data, options)) as number,
+    recvmsg(fd, max, options) {
+      const got = decodeReceived(kernel.bytes(recvmsgRequest(fd, max, options)));
+      for (const n of got.fds) infos.delete(n);
+      return got;
+    },
     pipe: () => kernel.json({ op: 'fd-pipe' }) as [number, number],
     open: procOpenSync(open, kernel, { resolve, pid: shared.pid }),
     fs: procFsSync(syncPathOps(kernel, resolve, statOf, open, tryDevSync), kernel, {

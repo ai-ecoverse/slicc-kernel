@@ -6,7 +6,7 @@ import { SwitchConn } from './net/switch-conn.ts';
 import type { TlsClientSupport } from './net/tls-uplink.ts';
 import type { NetworkUplink, UplinkConn } from './net/uplink.ts';
 import { hostPort, uplinkLink } from './net/uplink-socket.ts';
-import { KernelPipe, PIPE_CAPACITY, PipeError } from './pipe.ts';
+import { KernelPipe, PIPE_CAPACITY, PipeError, type PipeMark } from './pipe.ts';
 import type { SealedCaller } from './sealed.ts';
 import type { UnixDgram } from './unix-dgram.ts';
 export type SockAddr =
@@ -180,6 +180,36 @@ export class KernelSocket implements KernelFile {
     if (bytes.length === 0 && this.reset) throw this.reset;
     return bytes;
   }
+  private rightsLink(): Link {
+    const link = this.connection();
+    if (this.domain !== 'unix' || this.switch || this.served) throw new KernelError('EOPNOTSUPP');
+    if (this.refused) throw this.refused;
+    return link;
+  }
+  sendRights(
+    bytes: Uint8Array,
+    mark: (at: number, inFlight: number) => PipeMark,
+    nonblock: boolean,
+    signal?: AbortSignal
+  ): Promise<number> {
+    const { tx } = this.rightsLink();
+    if (this.writeShut) throw new KernelError('EPIPE');
+    return pipeCall(() => tx.writeMarked(bytes, (at) => mark(at, tx.inFlight), nonblock, signal));
+  }
+  async receiveRights(
+    max: number,
+    nonblock: boolean,
+    signal?: AbortSignal
+  ): Promise<{ bytes: Uint8Array; marks: PipeMark[] }> {
+    const { rx } = this.rightsLink();
+    if (this.readShut || max <= 0) return { bytes: EMPTY, marks: [] };
+    const got = await pipeCall(() => rx.receive(max, nonblock, signal));
+    if (this.refused) throw this.refused;
+    return got;
+  }
+  get secured(): boolean {
+    return this.served || this.tlsDial || this.serving !== undefined || !!this.switch?.upgraded;
+  }
   async write(bytes: Uint8Array, signal?: AbortSignal): Promise<number> {
     const { tx } = this.connection();
     if (this.refused) throw this.refused;
@@ -342,11 +372,13 @@ export class KernelSocket implements KernelFile {
     secure: (conn: SwitchConn) => Promise<void>
   ): Promise<void> {
     if (this.state !== 'open') throw new KernelError('EISCONN');
+    this.tlsDial = true;
     return this.dial(addr, route, secure);
   }
   serving: { release(): void } | undefined;
   pending: (() => void) | undefined;
   private served = false;
+  private tlsDial = false;
   get loopbackLinked(): boolean {
     return this.state === 'connected' && !this.switch;
   }
