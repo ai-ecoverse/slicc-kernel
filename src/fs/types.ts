@@ -142,6 +142,12 @@ export interface KernelFs {
   };
   opfsOps?(): number;
   fileIdWrites?(): number;
+  announceHolds?(
+    add: ReadonlyArray<[string, string | undefined]>,
+    drop: readonly string[],
+    wait: boolean
+  ): Promise<void>;
+  holdCounts?(): { mine: number; peers: number; sent: number } | undefined;
 }
 
 export interface PwriteOptions {

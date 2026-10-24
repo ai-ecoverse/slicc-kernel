@@ -2152,6 +2152,7 @@ export class Launcher {
         renameAcks: this.rootFs.renameWaits?.(),
         staleFds: staleFdCount(),
         fileIds: this.rootFs.fileIdWrites?.() ?? 0,
+        holds: this.rootFs.holdCounts?.(),
       }),
       sudo: (call, signal) => this.sudo(pid, call, signal),
       crontab: (call) => this.crontab(pid, call),
@@ -2163,6 +2164,10 @@ export class Launcher {
       statfs: (path) => this.mounts.statfs(path),
       renames: (since, held) => this.renameLog.since(since, held),
       fileId: (path) => (this.locks.shared?.() === true ? this.rootFileId(path) : undefined),
+      announceHold: (path, fid, created) =>
+        this.locks.shared?.() === true && this.mounts.locate(path) === undefined
+          ? this.rootFs.announceHolds?.([[path, fid]], [], !created)
+          : undefined,
       renameSeq: (from, to) => this.renameLog.seqOf(from, to),
       mounts: () => this.mounts.list(),
       mount: (call, signal) => this.processMount(pid, call, signal),
@@ -2656,6 +2661,8 @@ export class Launcher {
     const at = normalizePath(path);
     this.unlinked.closed(at);
     this.writers?.unlinked.closed(at);
+    if (![...this.held].some((holds) => holds.holding(at)))
+      void this.rootFs.announceHolds?.([], [at], false);
     const open = [...this.openFiles].some((nodes) => nodes.writes(at)) || heldUnder(this.held, at);
     if (!open) void this.mounts.commit(at).catch(() => undefined);
   }

@@ -49,6 +49,7 @@ export interface ProcessListing {
   cwdChecks?: number;
   staleFds?: number;
   fileIds?: number;
+  holds?: { mine: number; peers: number; sent: number };
   renameAcks?: {
     acks: number;
     busy: number;
