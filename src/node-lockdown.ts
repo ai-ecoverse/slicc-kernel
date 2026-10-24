@@ -47,15 +47,28 @@ const toText = Function.prototype.call.bind(Buffer.prototype.toString) as (
 ) => string;
 const PLAIN_BASE64 = /^[A-Za-z0-9+/]+={0,2}$/;
 
+const SOURCE_MODULE = 'slicc-module:';
+const sources = new Map<string, string>();
+
+export function moduleSource(url: string, source: string): void {
+  sources.set(url, source);
+}
+
 export function refuseModules(): void {
   registerHooks({
     resolve(specifier, context, next) {
+      if (specifier.startsWith(SOURCE_MODULE)) {
+        if (!sources.has(specifier)) throw refused(specifier);
+        return { url: specifier, shortCircuit: true };
+      }
       if (isBuiltin(specifier)) throw refused(specifier);
       const resolved = next(specifier, context);
       if (!resolved.url.startsWith('data:')) throw refused(resolved.url);
       return resolved;
     },
     load(url, context, next) {
+      const known = sources.get(url);
+      if (known !== undefined) return { format: 'module', source: known, shortCircuit: true };
       const payload = url.startsWith(BASE64_MODULE) ? url.slice(BASE64_MODULE.length) : '';
       const typed = Object.keys(context.importAttributes ?? {}).length > 0;
       if (typed || payload.length % 4 !== 0 || !PLAIN_BASE64.test(payload))

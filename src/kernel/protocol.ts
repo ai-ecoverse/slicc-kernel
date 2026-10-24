@@ -40,6 +40,7 @@ export interface JsProgram {
   glue: string;
   path: string;
   url?: string;
+  source?: string;
 }
 
 export type Program = WasmProgram | JsProgram;

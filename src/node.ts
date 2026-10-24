@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import { MessageChannel, type MessagePort, Worker } from 'node:worker_threads';
 import type { CdpHook } from './cdp/types.ts';
@@ -265,6 +266,11 @@ function processWorker(file: string | URL, workerData?: { compileCache: string }
   return new Worker(file, { env: workerEnv(), ...(workerData ? { workerData } : {}) });
 }
 
+export function sourceModule(source: string): { url: string; source: string; revoke(): void } {
+  const url = `slicc-module:${createHash('sha256').update(source).digest('hex')}`;
+  return { url, source, revoke: () => {} };
+}
+
 function warmPoolOf(
   options: NodeKernelOptions,
   file: string | URL,
@@ -409,6 +415,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
   const transport = options.network?.transport;
   const launcher = new Launcher({
     fs,
+    moduleUrl: sourceModule,
     unlinkOwner: pidOwner(process),
     createWorker: () =>
       nodeWorker(file, live, terminated, workerData, warm ? () => warm.take() : undefined),

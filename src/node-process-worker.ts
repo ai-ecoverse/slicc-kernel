@@ -2,6 +2,7 @@ import { createRequire, enableCompileCache, flushCompileCache } from 'node:modul
 import { parentPort, workerData } from 'node:worker_threads';
 import {
   glueUrl,
+  moduleSource,
   nodeAsyncContext,
   nodeLockdown,
   nodeMemory,
@@ -46,6 +47,7 @@ const onMessage = processEntry(
         memory: nodeMemory,
         asyncContext: nodeAsyncContext,
         runScript: nodeRunScript,
+        moduleSource,
         promiseState: nodePromiseState,
         imported,
       }),
@@ -56,6 +58,7 @@ const onMessage = processEntry(
         memory: nodeMemory,
         asyncContext: nodeAsyncContext,
         runScript: nodeRunScript,
+        moduleSource,
         promiseState: nodePromiseState,
         imported,
       }),
