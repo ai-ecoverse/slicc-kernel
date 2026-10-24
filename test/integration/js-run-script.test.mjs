@@ -15,6 +15,8 @@ const PROGRAM = `const probe = async (ctx) => {
     run('throw new Error("boom")', { filename: 'named-file.js' });
   } catch (err) {
     out.thrown = [err instanceof Error, err.message, /named-file\\.js/.test(err.stack)];
+    out.stackHead = String(err.stack).split('\\n')[0];
+    out.arrow = /\\n\\s*\\^/.test(String(err.stack));
   }
   out.importNode = await run('import("node:fs")').value.then(() => 'loaded', (err) => 'rejected ' + (err?.code ?? err?.name));
   out.importRelative = await run('import("./x.mjs")').value.then(() => 'loaded', (err) => 'rejected ' + (err?.code ?? err?.name));
@@ -66,6 +68,8 @@ const WANT = {
   lexical: ['number', 3, 'function', false],
   completion: { value: 3, completion: true },
   thrown: [true, 'boom', true],
+  stackHead: 'Error: boom',
+  arrow: false,
   importNode: 'rejected ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING',
   importRelative: 'rejected ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING',
   same: true,
