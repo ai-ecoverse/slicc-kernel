@@ -121,3 +121,62 @@ test('reset() works on TLS connections too: a loopback TLS client that resets gi
   assert.equal(r.stderr, '');
   assert.deepEqual(JSON.parse(r.stdout), { tls: 'ECONNRESET', secured: 'ECONNRESET' });
 });
+
+const SERVE_PROGRAM = `export default async function main(ctx) {
+  const o = JSON.parse(ctx.argv[1]);
+  const out = {};
+  const l = await ctx.net.listen({});
+  for (const how of ['reset', 'close']) {
+    const acc = l.accept();
+    const raw = await ctx.net.connect({ port: l.port });
+    const s = await acc;
+    const serving = ctx.net.secure(s, { server: true, cert: o.cert, key: o.key }).then(
+      () => 'ok',
+      (e) => ({ code: e.code, message: String(e.message) })
+    );
+    await raw[how]();
+    out[how] = await serving;
+    await s.close();
+  }
+  await l.close();
+  ctx.write(1, JSON.stringify(out));
+  return 0;
+}
+`;
+
+test('a server handshake tells a client that resets (read ECONNRESET) from one that closes, as Node 22 does (#1578)', async (t) => {
+  const { readdir, readFile } = await import('node:fs/promises');
+  const { join, relative } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const { selfSigned } = await import('./test-certs.mjs');
+  const kernel = await createNodeKernel({ users: 'off' });
+  t.after(() => kernel.terminate());
+  const base = new URL('../../node_modules/@ai-ecoverse/wasm-tls-engine/', import.meta.url);
+  for (const e of await readdir(base, { recursive: true, withFileTypes: true })) {
+    if (!e.isFile()) continue;
+    const f = join(e.parentPath, e.name);
+    await kernel.writeFile(
+      `/node_modules/@ai-ecoverse/wasm-tls-engine/${relative(fileURLToPath(base), f)}`,
+      await readFile(f)
+    );
+  }
+  await kernel.writeFile(
+    '/node_modules/srvrst/package.json',
+    JSON.stringify({
+      name: 'srvrst',
+      slicc: { commands: { srvrst: { abi: 'js', module: 's.mjs' } } },
+    })
+  );
+  await kernel.writeFile('/node_modules/srvrst/s.mjs', SERVE_PROGRAM);
+  const own = selfSigned('localhost');
+  const r = await kernel.run(['srvrst', JSON.stringify({ cert: own.cert, key: own.key })], {
+    cwd: '/',
+  });
+  assert.equal(r.stderr, '');
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.reset.code, 'ECONNRESET', r.stdout);
+  assert.match(out.reset.message, /read ECONNRESET/);
+  assert.equal(out.close.code, 'ECONNRESET', r.stdout);
+  assert.match(out.close.message, /the client closed the connection during the TLS handshake/);
+  assert.doesNotMatch(out.close.message, /read ECONNRESET/);
+});
