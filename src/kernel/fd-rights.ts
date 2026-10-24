@@ -67,6 +67,8 @@ export async function sendRights(
   signal?: AbortSignal
 ): Promise<number> {
   const carrier = carrierAt(fds, req.fd);
+  if (req.nonblock && !carrier.poll().writable) throw new KernelError('EAGAIN');
+  if (req.nonblock) signal = AbortSignal.abort();
   if (req.fds.length === 0) return carrier.write(req.body, signal);
   if (req.fds.length > RIGHTS_MAX || req.body.length === 0) throw new KernelError('EINVAL');
   const passed = req.fds.map((fd) => ({ file: fds.get(fd), status: fds.statusFlags(fd) }));

@@ -1,4 +1,10 @@
+import type { WasmSyscall } from '../../kernel/process.ts';
+import type { SyncFsResult } from '../../realm/sync-fs-wire.ts';
 import type { SyncSabRequestBody } from '../../realm/sync-sab-wire.ts';
+
+const jsonOf = (r: SyncFsResult): unknown => (r.ok && r.kind === 'json' ? r.json : undefined);
+const bytesOf = (r: SyncFsResult): Uint8Array =>
+  r.ok && r.kind === 'bytes' ? r.bytes : new Uint8Array(8);
 
 export interface JsSendmsgOptions {
   fds?: number[];
@@ -57,17 +63,36 @@ export function decodeReceived(frame: Uint8Array): JsReceived {
 
 interface AsyncKernel {
   json(req: SyncSabRequestBody): Promise<unknown>;
-  bytes(req: SyncSabRequestBody): Promise<Uint8Array>;
+  blocking(req: WasmSyscall, signal?: AbortSignal): Promise<SyncFsResult>;
+  call(req: SyncSabRequestBody): Promise<SyncFsResult>;
 }
 
-export function rightsAsync(kernel: AsyncKernel, forget: (fd: number) => void) {
+type Watch = (fd: number) => { signal: AbortSignal; done(): void };
+
+async function blocked(
+  kernel: AsyncKernel,
+  watch: Watch,
+  req: WasmSyscall & { fd: number; nonblock: boolean }
+) {
+  if (req.nonblock) return kernel.call(req);
+  const { signal, done } = watch(req.fd);
+  try {
+    return await kernel.blocking(req, signal);
+  } finally {
+    done();
+  }
+}
+
+export function rightsAsync(kernel: AsyncKernel, forget: (fd: number) => void, watch: Watch) {
   return {
     socketpair: async () =>
       (await kernel.json({ op: 'sock-pair', domain: 'unix', type: 'stream' })) as [number, number],
     sendmsg: async (fd: number, data: Uint8Array | string, options?: JsSendmsgOptions) =>
-      (await kernel.json(sendmsgRequest(fd, data, options))) as number,
+      jsonOf(await blocked(kernel, watch, sendmsgRequest(fd, data, options))) as number,
     async recvmsg(fd: number, max?: number, options?: JsRecvmsgOptions): Promise<JsReceived> {
-      const got = decodeReceived(await kernel.bytes(recvmsgRequest(fd, max, options)));
+      const got = decodeReceived(
+        bytesOf(await blocked(kernel, watch, recvmsgRequest(fd, max, options)))
+      );
       for (const n of got.fds) forget(n);
       return got;
     },

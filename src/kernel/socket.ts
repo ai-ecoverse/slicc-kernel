@@ -204,7 +204,10 @@ export class KernelSocket implements KernelFile {
     const { rx } = this.rightsLink();
     if (this.readShut || max <= 0) return { bytes: EMPTY, marks: [] };
     const got = await pipeCall(() => rx.receive(max, nonblock, signal));
-    if (this.refused) throw this.refused;
+    if (this.refused) {
+      for (const mark of got.marks) mark.drop();
+      throw this.refused;
+    }
     return got;
   }
   get secured(): boolean {

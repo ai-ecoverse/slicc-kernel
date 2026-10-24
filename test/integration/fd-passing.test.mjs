@@ -172,3 +172,54 @@ test('a descriptor passes over a socketpair write as SCM_RIGHTS: the open file d
   });
   assert.equal(new TextDecoder().decode(await kernel.readFile('/srv/out')), 'from the child');
 });
+
+const LANES = `export default async function main(ctx) {
+  const out = {};
+  const code = (p) => p.then(() => 'ok', (e) => e.code);
+  const [a, b] = await ctx.socketpair();
+  const receiving = ctx.recvmsg(b, 64);
+  await ctx.write(a, 'hello');
+  out.received = new TextDecoder().decode((await receiving).bytes);
+  const pending = code(ctx.recvmsg(b, 64));
+  await ctx.close(b);
+  out.closed = await pending;
+  const [c, d] = await ctx.socketpair();
+  const nul = await ctx.open('/dev/null', { read: true });
+  out.partial = await ctx.sendmsg(c, new Uint8Array(65537), { fds: [nul.fd], nonblock: true });
+  out.full = await code(ctx.sendmsg(c, 'x', { nonblock: true }));
+  out.fullRights = await code(ctx.sendmsg(c, 'x', { fds: [nul.fd], nonblock: true }));
+  const first = await ctx.recvmsg(d, 65536);
+  out.firstFds = first.fds.length;
+  const [e, f] = await ctx.socketpair();
+  await ctx.write(e, new Uint8Array(65536));
+  out.plainFull = await code(ctx.sendmsg(e, 'x', { nonblock: true }));
+  const sending = ctx.sendmsg(e, 'y', { fds: [nul.fd] });
+  await ctx.read(f, 65536);
+  out.unblocked = await sending;
+  for (const fd of [a, c, d, e, f, nul.fd]) await ctx.close(fd);
+  ctx.write(1, JSON.stringify(out));
+  return 0;
+}
+`;
+
+test('recvmsg and sendmsg wait without holding the program: a pending receive lets a write through and close cancels it, and nonblock sends a partial count or EAGAIN (#1562)', async (t) => {
+  const kernel = await createNodeKernel({ users: 'off' });
+  t.after(() => kernel.terminate());
+  await kernel.writeFile(
+    '/node_modules/fdl/package.json',
+    JSON.stringify({ name: 'fdl', slicc: { commands: { fdl: { abi: 'js', module: 'l.mjs' } } } })
+  );
+  await kernel.writeFile('/node_modules/fdl/l.mjs', LANES);
+  const r = await kernel.run(['fdl'], { cwd: '/' });
+  assert.equal(r.stderr, '');
+  assert.deepEqual(JSON.parse(r.stdout), {
+    received: 'hello',
+    closed: 'EBADF',
+    partial: 65536,
+    full: 'EAGAIN',
+    fullRights: 'EAGAIN',
+    firstFds: 1,
+    plainFull: 'EAGAIN',
+    unblocked: 1,
+  });
+});
