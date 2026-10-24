@@ -222,6 +222,10 @@ export class HeldPaths extends Map<string, number> implements UnlinkHolder {
     }
   }
 
+  boundFid(handle: number): string | undefined {
+    return this.bound.get(handle)?.fid;
+  }
+
   trust(handle: number, doubt: number): void {
     if (this.doubted.get(handle) === doubt) this.doubted.delete(handle);
   }
@@ -1153,15 +1157,20 @@ class MountFs implements KernelFs {
     }
   }
 
-  async append(path: string, bytes: Uint8Array, redirects = 0): Promise<number> {
+  async append(
+    path: string,
+    bytes: Uint8Array,
+    options?: PwriteOptions,
+    redirects = 0
+  ): Promise<number> {
     const real = await this.follow(path, 0, true);
     const { append } = this.base;
     if (!this.at(real) && append) {
       return this.based(
         [real],
         redirects,
-        () => append.call(this.base, real, bytes),
-        ([to], n) => this.append(to as string, bytes, n)
+        () => append.call(this.base, real, bytes, options),
+        ([to], n) => this.append(to as string, bytes, options, n)
       );
     }
     throw errnoError('ENOTSUP', `${real}: appended by position on a mount`);
@@ -1233,7 +1242,12 @@ class MountFs implements KernelFs {
     }
   }
 
-  async truncate(path: string, size: number, redirects = 0): Promise<void> {
+  async truncate(
+    path: string,
+    size: number,
+    options?: PwriteOptions,
+    redirects = 0
+  ): Promise<void> {
     const real = await this.follow(path);
     const found = this.at(real);
     const { truncate } = this.base;
@@ -1241,8 +1255,8 @@ class MountFs implements KernelFs {
       return this.based(
         [real],
         redirects,
-        () => truncate.call(this.base, real, size),
-        ([to], n) => this.truncate(to as string, size, n)
+        () => truncate.call(this.base, real, size, options),
+        ([to], n) => this.truncate(to as string, size, options, n)
       );
     }
     if (!found?.mount.caps.ranges) {

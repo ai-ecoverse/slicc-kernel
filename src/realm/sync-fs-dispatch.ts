@@ -263,7 +263,7 @@ async function run(
     case 'read':
       return { ok: true, kind: 'bytes', bytes: await readSource(entry, path) };
     case 'write':
-      await fs.writeFile(path, req.body ?? new Uint8Array(0), ownerFor(entry, 0o666));
+      await fs.writeFile(path, req.body ?? new Uint8Array(0), writeOwner(entry, req));
       return done;
     case 'exists':
       return json(await fs.exists(path));
@@ -339,9 +339,9 @@ async function run(
     case 'pread':
     case 'pwrite':
     case 'truncate':
-      return ranged(fs, path, req);
+      return ranged(entry, path, req);
     case 'append':
-      return json(await appended(fs, path, req.body ?? new Uint8Array(0), req.handle));
+      return json(await appended(entry, path, req.body ?? new Uint8Array(0), req.handle));
     default:
       return { ok: false, errno: 'EINVAL', message: `sync-fs: unknown op '${req.op as string}'` };
   }
@@ -638,18 +638,19 @@ async function createExclusive(fs: KernelFs, path: string, owner?: NewOwner): Pr
 const appending = new Map<string, Promise<unknown>>();
 
 async function appended(
-  fs: KernelFs,
+  entry: SyncFsTokenEntry,
   path: string,
   body: Uint8Array,
   handle?: number
 ): Promise<number> {
+  const { fs } = entry;
   const key = (await fs.realpath?.(path, true).catch(() => undefined)) ?? path;
   const before = appending.get(key) ?? Promise.resolve();
   const run = before.then(async () => {
-    if (fs.append) return fs.append(path, body);
+    if (fs.append) return fs.append(path, body, handleWrite(entry, handle));
     const size = (await fs.stat(path)).size;
     const ops = rangedOps(fs);
-    if (ops) await ops.pwrite(path, size, body, true, noCreate(handle));
+    if (ops) await ops.pwrite(path, size, body, true, handleWrite(entry, handle));
     else {
       const whole = new Uint8Array(size + body.length);
       whole.set(await fs.readFileBuffer(path));
@@ -666,12 +667,27 @@ async function appended(
   return run;
 }
 
-function noCreate(handle: number | undefined): PwriteOptions | undefined {
-  return handle === undefined ? undefined : { create: false };
+function handleWrite(
+  entry: SyncFsTokenEntry,
+  handle: number | undefined
+): PwriteOptions | undefined {
+  if (handle === undefined) return undefined;
+  const fid = entry.boundFid?.(handle);
+  return fid === undefined ? { create: false } : { create: false, fid };
 }
 
-async function ranged(fs: KernelFs, path: string, req: SyncFsRequest): Promise<SyncFsResult> {
-  const ops = rangedOps(fs);
+function writeOwner(entry: SyncFsTokenEntry, req: SyncFsRequest): NewOwner | undefined {
+  const owner = ownerFor(entry, 0o666);
+  const fid = req.handle === undefined || req.mode !== 1 ? undefined : entry.boundFid?.(req.handle);
+  return fid === undefined ? owner : { ...(owner ?? ({} as NewOwner)), fid };
+}
+
+async function ranged(
+  entry: SyncFsTokenEntry,
+  path: string,
+  req: SyncFsRequest
+): Promise<SyncFsResult> {
+  const ops = rangedOps(entry.fs);
   if (!ops) throw syncError('ENOSYS', path);
   const offset = req.offset ?? 0;
   if (req.op === 'pread')
@@ -681,8 +697,14 @@ async function ranged(fs: KernelFs, path: string, req: SyncFsRequest): Promise<S
       bytes: await ops.pread(path, offset, req.length ?? 0, req.version),
     };
   if (req.op === 'pwrite')
-    await ops.pwrite(path, offset, req.body ?? new Uint8Array(0), true, noCreate(req.handle));
-  else await ops.truncate(path, req.length ?? 0);
+    await ops.pwrite(
+      path,
+      offset,
+      req.body ?? new Uint8Array(0),
+      true,
+      handleWrite(entry, req.handle)
+    );
+  else await ops.truncate(path, req.length ?? 0, handleWrite(entry, req.handle));
   return done;
 }
 
