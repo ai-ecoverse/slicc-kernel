@@ -7,6 +7,10 @@ const state = {
 };
 const control = new BroadcastChannel('rename-peer-control');
 control.onmessage = ({ data }) => {
+  if (data?.get !== undefined) {
+    control.postMessage({ done: data.id, value: state[data.get] });
+    return;
+  }
   if (!data?.set) return;
   Object.assign(state, data.set);
   control.postMessage({ done: data.id });
@@ -37,8 +41,10 @@ Object.defineProperty(BroadcastChannel.prototype, 'onmessage', {
         (event.data?.holds || event.data?.keeping || event.data?.kept)
       )
         return undefined;
-      if (state.holdsOnly && watching(this) && (event.data?.keeping || event.data?.kept))
+      if (state.holdsOnly && watching(this) && (event.data?.keeping || event.data?.kept)) {
+        state.keepAsks = (state.keepAsks ?? 0) + 1;
         return undefined;
+      }
       const missing = state.old || state.deaf;
       const touched = [...(event.data?.paths ?? []), ...(event.data?.trees ?? [])];
       if (

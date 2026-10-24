@@ -158,7 +158,21 @@ test('a holder whose tab runs 4(a) only (holds without an instance) is never ask
   assert.deepEqual(await sh(other, `cd ${dir} && echo NEW > h && mv h f2 && cat f2`), ok('NEW\n'));
   const mv = Date.now() - t0;
   console.log(`4(a) holder: rm ${rm} ms, mv over ${mv} ms`);
-  assert.ok(rm < 950 && mv < 5000, `rm ${rm} ms, mv ${mv} ms`);
+  const asks = await page.evaluate(
+    () =>
+      new Promise((resolve) => {
+        const channel = new BroadcastChannel('rename-peer-control');
+        const id = Math.random();
+        channel.onmessage = ({ data }) => {
+          if (data?.done !== id) return;
+          channel.close();
+          resolve(data.value ?? 0);
+        };
+        channel.postMessage({ get: 'keepAsks', id });
+      })
+  );
+  assert.equal(asks, 0, 'the 4(a) holder was asked to keep');
+  assert.ok(rm < 5000 && mv < 5000, `rm ${rm} ms, mv ${mv} ms`);
   assert.deepEqual(await kept(other), []);
   await sh(page, `: > ${dir}/go`);
   await page.evaluate(() => window.holder);
