@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { after, test } from 'node:test';
 import { launch } from './chrome.mjs';
 import { booted, installPackage } from './kernel.mjs';
-import { peerTab, sh } from './rename-tabs.mjs';
+import { PEER_WORKER, peerTab, sh } from './rename-tabs.mjs';
 
 const chrome = await launch();
 after(() => chrome.close());
@@ -70,4 +70,47 @@ test("a descriptor's write-back never lands in a file another tab renamed over i
     'NEWNEW',
     "the replacement took the writer's bytes"
   );
+});
+
+const KEEPER = [
+  'import os, time',
+  "os.chdir('/root/ok')",
+  "open('f', 'w').write('old')",
+  "fd = os.open('f', os.O_RDWR)",
+  "open('ready', 'w').close()",
+  'errs = {}; n = 0',
+  "while not os.path.exists('stop'):",
+  '    try:',
+  "        os.pwrite(fd, b'x', 0); os.fsync(fd)",
+  '    except OSError as e:',
+  '        errs[e.errno] = errs.get(e.errno, 0) + 1',
+  '    n += 1',
+  '    time.sleep(0.005)',
+  'print(n, errs)',
+].join('\n');
+
+test("a descriptor's write-backs are never stale while an older tab writes, chmods and touches the same file (#1454)", {
+  timeout: 600_000,
+}, async (t) => {
+  const { page } = await booted(chrome, t);
+  await installPackage(page, 'wasm-coreutils');
+  await installPackage(page, 'wasix-python', { skip: /^lib\/libpython[^/]*\.a$/ });
+  const other = await peerTab(page, { worker: `${PEER_WORKER}?old=1` });
+  assert.equal(
+    (await sh(page, 'rm -rf /root/ok && mkdir -p /root/ok && echo made')).stdout,
+    'made\n'
+  );
+  await page.evaluate((s) => {
+    window.keeper = window.kernel.run(['python3', '-c', s], { cwd: '/' });
+  }, KEEPER);
+  while (!(await page.evaluate(() => window.opfs.exists('root/ok/ready'))))
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  const peer = await sh(
+    other,
+    'cd /root/ok && for i in $(seq 1 30); do printf y >> f; chmod 600 f; chmod 644 f; touch f; done; : > stop; echo done'
+  );
+  assert.equal(peer.stdout, 'done\n', peer.stderr);
+  const keeper = await page.evaluate(() => window.keeper);
+  console.log(`keeper: ${keeper.stdout.trim()}`);
+  assert.match(keeper.stdout, /^\d+ \{\}\n$/, 'the writer got errors');
 });
