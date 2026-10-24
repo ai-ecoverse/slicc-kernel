@@ -143,7 +143,7 @@ export class HeldSet extends Set<HeldPaths> {
     }
   }
 
-  async bindIds(id: (path: string) => Promise<string> | undefined): Promise<void> {
+  async bindIds(id: (path: string) => Promise<string | undefined> | undefined): Promise<void> {
     for (const holds of [...this]) await holds.bindIds(id);
   }
 
@@ -216,7 +216,7 @@ export class HeldPaths extends Map<string, number> implements UnlinkHolder {
     return doubt === undefined || bound === undefined ? undefined : { ...bound, doubt };
   }
 
-  async bindIds(id: (path: string) => Promise<string> | undefined): Promise<void> {
+  async bindIds(id: (path: string) => Promise<string | undefined> | undefined): Promise<void> {
     for (const [handle, bound] of [...this.bound]) {
       const key = this.handles.get(handle);
       if (bound.fid !== undefined || key === undefined) continue;
@@ -246,6 +246,18 @@ export class HeldPaths extends Map<string, number> implements UnlinkHolder {
     for (const file of this.uses.keys()) if (file.hidden === hidden) return true;
     for (const file of this.unlinked.values()) if (file.hidden === hidden) return true;
     return false;
+  }
+
+  boundAt(path: string, fid: string | undefined): number[] {
+    return this.handlesAt(path).filter(
+      (id) => !this.keptHandles.has(id) && this.bound.get(id)?.fid === fid
+    );
+  }
+
+  keepBound(ids: readonly number[], path: string, file: KeptFile): void {
+    for (const id of ids) this.keptHandles.set(id, file);
+    this.uses.set(file, ids.length);
+    this.unlinked.set(path, file);
   }
 
   keep(path: string, file: KeptFile): void {
@@ -926,13 +938,14 @@ class MountFs implements KernelFs {
     mount: Mount,
     rel: string,
     write: boolean,
-    owner?: DriverOwner
+    owner?: DriverOwner,
+    create = write
   ): Promise<number> {
     return (await mount.conn.call({
       op: 'open',
       path: rel,
       write,
-      create: write,
+      create,
       truncate: write,
       exclusive: false,
       ...owner,
@@ -1042,10 +1055,10 @@ class MountFs implements KernelFs {
         `${real} would be larger than this mount's maxfile (${mount.maxFile})`
       );
     }
-    const made = await this.driverOwner(found, real, owner, false);
+    const made = owner?.existing ? undefined : await this.driverOwner(found, real, owner, false);
     for (let attempt = 1; ; attempt++) {
       try {
-        return await this.writeWhole(mount, real, rel, bytes, made);
+        return await this.writeWhole(mount, real, rel, bytes, made, owner?.existing !== true);
       } catch (err) {
         if ((err as { code?: unknown }).code !== 'ESTALE' || attempt >= STALE_RETRIES) throw err;
       }
@@ -1070,11 +1083,12 @@ class MountFs implements KernelFs {
     real: string,
     rel: string,
     bytes: Uint8Array,
-    owner?: DriverOwner
+    owner?: DriverOwner,
+    create = true
   ) {
     await this.table.commit(real);
     this.table.forget(mount, real);
-    const fh = await this.open(mount, rel, true, owner);
+    const fh = await this.open(mount, rel, true, owner, create);
     const chunk = mount.caps.maxIo ?? DEFAULT_IO;
     try {
       for (let offset = 0; offset < bytes.length; offset += chunk) {
