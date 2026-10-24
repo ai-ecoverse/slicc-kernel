@@ -142,10 +142,11 @@ export function workerShaped(scope: object, href: string): void {
   });
 }
 
-export function ownCache(dir: string, result: { directory?: string }): boolean {
+export function ownCache(dir: string, result: { directory?: string }, optional = false): boolean {
   const active = result.directory;
   if (active === undefined) return false;
   if (!`${resolve(active)}${sep}`.startsWith(`${resolve(dir)}${sep}`)) {
+    if (optional) return false;
     throw new Error(
       `slicc-kernel: compileCache ${dir} was asked for, but this worker already caches in ${active} (a host preload enabled it): refusing to run programs`
     );
