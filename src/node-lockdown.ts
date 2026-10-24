@@ -326,6 +326,7 @@ function probe(promise: unknown, group: string, key: string): Settled | undefine
   if (typeof resultId !== 'string') return seal({ state, value: primitive(result) });
   const holder = nothing(null) as { v?: unknown };
   const holderId = idOf(key, holder, group);
+  if (holderId === undefined) return undefined;
   post('Runtime.callFunctionOn', {
     objectId: resultId,
     functionDeclaration: 'function (h) { "use strict"; h.v = this; }',
