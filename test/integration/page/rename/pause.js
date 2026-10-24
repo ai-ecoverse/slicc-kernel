@@ -1,10 +1,14 @@
 const id = new URL(self.location.href).searchParams.get('id') ?? '';
 const control = new BroadcastChannel('pause-control');
-const state = { pause: undefined, watch: undefined, held: [] };
+const state = { pause: undefined, watch: undefined, held: [], freeze: false, frozen: [] };
 control.onmessage = ({ data }) => {
   if (data?.id !== id) return;
   if (data.set) Object.assign(state, data.set);
   if (data.release) for (const go of state.held.splice(0)) go();
+  if (data.thaw) {
+    state.freeze = false;
+    for (const go of state.frozen.splice(0)) go();
+  }
   control.postMessage({ id, done: data.seq });
 };
 const get = IDBObjectStore.prototype.get;
@@ -40,6 +44,10 @@ Object.defineProperty(BroadcastChannel.prototype, 'onmessage', {
   ...handler,
   set(listener) {
     handler.set.call(this, (event) => {
+      if (state.freeze && this.name !== 'pause-control') {
+        state.frozen.push(() => listener.call(this, event));
+        return undefined;
+      }
       const out = listener.call(this, event);
       const touched = [
         ...(event.data?.paths ?? []),

@@ -750,7 +750,12 @@ export class Launcher {
   readonly identities = { asked: 0, timedOut: 0 };
   private readonly nodes: VfsNodes;
   private readonly unlinked: UnlinkedKeeper;
-  private readonly held = new HeldSet((path) => this.released(path));
+  private readonly held = new HeldSet(
+    (path) => this.released(path),
+    (from, to) => {
+      if (this.mounts.locate(to) === undefined) this.rootFs.rehold?.(from, to);
+    }
+  );
   private readonly processMounts: ProcessMountPolicy;
   private readonly booting = new AbortController();
   fstab: Promise<FstabResult[]> = Promise.resolve([]);

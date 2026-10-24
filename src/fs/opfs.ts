@@ -505,8 +505,13 @@ export class OpfsFs implements KernelFs {
     return this.remote?.hold(add, drop, wait) ?? Promise.resolve();
   }
 
-  holdCounts(): { mine: number; peers: number; sent: number } | undefined {
-    return this.remote?.holdCounts();
+  holdCounts(): { mine: number; peers: number; sent: number; held: string[] } | undefined {
+    const remote = this.remote;
+    return remote && { ...remote.holdCounts(), held: remote.peerHeldPaths() };
+  }
+
+  rehold(from: string, to: string): void {
+    this.remote?.rehold(from, to);
   }
 
   announceWatch(paths: readonly string[]): Promise<void> {

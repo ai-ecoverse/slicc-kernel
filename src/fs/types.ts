@@ -147,7 +147,8 @@ export interface KernelFs {
     drop: readonly string[],
     wait: boolean
   ): Promise<void>;
-  holdCounts?(): { mine: number; peers: number; sent: number } | undefined;
+  holdCounts?(): { mine: number; peers: number; sent: number; held: string[] } | undefined;
+  rehold?(from: string, to: string): void;
 }
 
 export interface PwriteOptions {

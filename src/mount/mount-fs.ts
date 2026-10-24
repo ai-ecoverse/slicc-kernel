@@ -122,14 +122,17 @@ const within = (path: string, target: string) =>
   path === target || target === '/' || path.startsWith(`${target}/`);
 export class HeldSet extends Set<HeldPaths> {
   private readonly idle: (path: string) => void;
+  private readonly moved: ((from: string, to: string) => void) | undefined;
 
-  constructor(idle: (path: string) => void) {
+  constructor(idle: (path: string) => void, moved?: (from: string, to: string) => void) {
     super();
     this.idle = idle;
+    this.moved = moved;
   }
 
   override add(holds: HeldPaths): this {
     holds.onIdle = this.idle;
+    holds.onMoved = this.moved;
     return super.add(holds);
   }
 
@@ -172,6 +175,7 @@ export class HeldPaths extends Map<string, number> implements UnlinkHolder {
   private doubts = 0;
 
   onIdle?: (path: string) => void;
+  onMoved?: (from: string, to: string) => void;
 
   keyOf(path: string): string {
     return this.aliases.get(path) ?? path;
@@ -365,6 +369,7 @@ export class HeldPaths extends Map<string, number> implements UnlinkHolder {
     for (const [id, key] of this.handles) {
       if (within(key, from)) this.handles.set(id, to + key.slice(from.length));
     }
+    this.onMoved?.(from, to);
   }
 
   isRevoked(path: string): boolean {
