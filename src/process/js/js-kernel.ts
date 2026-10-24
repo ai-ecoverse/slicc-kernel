@@ -15,12 +15,19 @@ export class JsCallError extends Error {
 
   readonly detail: string | undefined;
 
+  dev: string | undefined;
+
   constructor(code: string, what: string, detail?: string) {
     super(`${what}: ${code}`);
     this.name = 'JsCallError';
     this.code = code;
     this.detail = detail;
   }
+}
+
+export function devOf(found: unknown): string | undefined {
+  const dev = (found as { dev?: unknown } | null)?.dev;
+  return typeof dev === 'string' ? dev : undefined;
 }
 
 const DETAILED: ReadonlySet<string> = new Set([
@@ -53,14 +60,19 @@ export function modeOf(mode: unknown): number {
   return mode as number;
 }
 
-export function callError(result: { errno: string; message: string }, op: string): JsCallError {
+export function callError(
+  result: { errno: string; message: string; dev?: string },
+  op: string
+): JsCallError {
   const { errno, message } = result;
   const detailed = typeof message === 'string' && message !== errno && DETAILED.has(op);
-  return new JsCallError(
+  const err = new JsCallError(
     errno,
     detailed ? `${op}: ${message}` : op,
     detailed ? message : undefined
   );
+  err.dev = result.dev;
+  return err;
 }
 
 function untilAborted(work: Promise<void>, signal: AbortSignal | undefined): Promise<void> {

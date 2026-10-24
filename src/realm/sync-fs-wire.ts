@@ -65,13 +65,14 @@ export interface SyncFsRequest {
   nofollow?: boolean;
   direct?: boolean;
   opening?: boolean;
+  devs?: true;
 }
 
 export type SyncFsResult =
   | { ok: true; kind: 'bytes'; bytes: Uint8Array }
   | { ok: true; kind: 'json'; json: unknown }
   | { ok: true; kind: 'void' }
-  | { ok: false; errno: string; message: string; direct?: true };
+  | { ok: false; errno: string; message: string; direct?: true; dev?: string };
 
 export const SYNC_FS_REQUEST_TIMEOUT_MS = 25_000;
 

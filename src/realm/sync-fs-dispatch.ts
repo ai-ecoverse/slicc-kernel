@@ -20,6 +20,7 @@ import {
 } from '../fs/dac.ts';
 import { devCreation, devRemoval } from '../fs/dev-removal.ts';
 import { chownAs, ownerOf } from '../fs/owners.ts';
+import { physicalPathAsync } from '../fs/physical-path.ts';
 import {
   type FsStat,
   type HeldEntry,
@@ -796,7 +797,8 @@ export async function dispatchSyncFs(req: SyncFsRequest): Promise<SyncFsResult> 
   const entry = resolveSyncFsToken(req.token);
   if (!entry) return { ok: false, errno: 'EACCES', message: 'sync-fs: unknown or revoked token' };
   if (req.identity && req.op === 'create') return created(entry, req);
-  if (!req.identity || !IDENTITY_OPS.has(req.op)) return dispatchOne(entry, req);
+  if (!req.identity || !IDENTITY_OPS.has(req.op))
+    return devsOf(entry, req, await dispatchOne(entry, req));
   const { fs, cwd } = entry;
   const path = fs.resolvePath(cwd, req.path);
   const identified = async (held?: HeldEntry): Promise<SyncFsResult> => {
@@ -815,6 +817,45 @@ export async function dispatchSyncFs(req: SyncFsRequest): Promise<SyncFsResult> 
   } catch (err) {
     return toErrno(err);
   }
+}
+
+const DEV_PROBES: ReadonlySet<string> = new Set(['stat', 'lstat', 'read', 'exists']);
+
+async function devsOf(
+  entry: SyncFsTokenEntry,
+  req: SyncFsRequest,
+  result: SyncFsResult
+): Promise<SyncFsResult> {
+  if (req.devs !== true || !DEV_PROBES.has(req.op)) return result;
+  const absent = result.ok
+    ? result.kind === 'json' && result.json === false
+    : result.errno === 'ENOENT';
+  if (!absent) return result;
+  const dev = await devTarget(entry, req, entry.fs.resolvePath(entry.cwd, req.path));
+  if (dev === undefined) return result;
+  return result.ok ? json({ dev }) : { ...result, dev };
+}
+
+async function devTarget(
+  entry: SyncFsTokenEntry,
+  req: SyncFsRequest,
+  path: string
+): Promise<string | undefined> {
+  const look = async (op: 'lstat' | 'readlink', at: string) => {
+    const r = await dispatchPath(entry, { token: req.token, op, path: at });
+    if (!r.ok) throw new Error(r.errno);
+    return (r as { json?: unknown }).json;
+  };
+  const resolved = await physicalPathAsync(
+    {
+      lstat: async (p) => (await look('lstat', p)) as { isSymbolicLink?: boolean },
+      readlink: async (p) => String(await look('readlink', p)),
+    },
+    path
+  );
+  return resolved !== path && (resolved === '/dev' || resolved.startsWith('/dev/'))
+    ? resolved
+    : undefined;
 }
 
 async function created(entry: SyncFsTokenEntry, req: SyncFsRequest): Promise<SyncFsResult> {
