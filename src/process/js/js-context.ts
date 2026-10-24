@@ -112,6 +112,7 @@ export interface JsMemory {
   heapLimit?: number;
   external?: number;
   arrayBuffers?: number;
+  rss?: number;
 }
 
 export interface JsAsyncContext {
@@ -655,7 +656,14 @@ function heldOn(
   return new HeldCwd(init.sab, init.slot, ask, init);
 }
 
-const MEMORY_FIELDS = ['heapUsed', 'heapTotal', 'heapLimit', 'external', 'arrayBuffers'] as const;
+const MEMORY_FIELDS = [
+  'heapUsed',
+  'heapTotal',
+  'heapLimit',
+  'external',
+  'arrayBuffers',
+  'rss',
+] as const;
 
 function measured(measure: (() => JsMemory) | undefined): JsMemory {
   const got = measure?.() ?? {};

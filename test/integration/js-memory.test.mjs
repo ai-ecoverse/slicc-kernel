@@ -23,14 +23,14 @@ async function booted(t) {
   };
 }
 
-test("ctx.memory() on the Node entry: the calling isolate's heapUsed, heapTotal and heapLimit in bytes, a fresh plain object of numbers each call, no rss, and Node's process still out of reach (#1240)", async (t) => {
+test("ctx.memory() on the Node entry: the calling isolate's heapUsed, heapTotal and heapLimit in bytes, the host's rss (above the heap), a fresh plain object of numbers each call, and Node's process still out of reach (#1240, #1563)", async (t) => {
   const run = await booted(t);
   assert.deepEqual(await run('shape'), {
     keys: [],
     numbers: true,
     plain: true,
     fresh: true,
-    rss: false,
+    rss: true,
     positive: [true, true, true],
     process: 'undefined',
     viaFunction: 'undefined',
