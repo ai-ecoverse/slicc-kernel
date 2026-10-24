@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { appendFile, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
@@ -64,6 +64,10 @@ await build({
   define,
   logLevel: 'warning',
 });
+await appendFile(
+  new URL('./dist/node-process-worker.js', import.meta.url),
+  '//# sourceURL=slicc-kernel:/node-process-worker.js\n'
+);
 execFileSync(
   process.execPath,
   [
