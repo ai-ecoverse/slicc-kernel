@@ -222,6 +222,7 @@ export interface LauncherOptions {
 export interface ModuleUrl {
   url: string;
   revoke(): void;
+  source?: string;
 }
 
 export type ModuleUrlMaker = (source: string) => ModuleUrl;
@@ -1782,13 +1783,13 @@ export class Launcher {
     });
   }
 
-  private urlFor(source: string): string {
+  private urlFor(source: string): ModuleUrl {
     const known = this.moduleUrls.get(source);
     if (known) {
       this.moduleUrls.delete(source);
       this.moduleUrls.set(source, known);
       known.users++;
-      return known.made.url;
+      return known.made;
     }
     const held: HeldUrl = {
       made: (this.moduleUrl ?? dataModuleUrl)(source),
@@ -1803,7 +1804,7 @@ export class Launcher {
       entry.evicted = true;
       this.releaseUrl(entry);
     }
-    return held.made.url;
+    return held.made;
   }
 
   private heldUrl(program: Program): () => void {
@@ -1903,8 +1904,8 @@ export class Launcher {
     }
     const { asked } = target;
     if (target.abi === 'js') {
-      const url = this.urlFor(await this.text(target.wasm, caller, asked));
-      return { abi: 'js', glue: '', url, path: target.wasm };
+      const { url, source } = this.urlFor(await this.text(target.wasm, caller, asked));
+      return { abi: 'js', glue: '', url, path: target.wasm, ...(source ? { source } : {}) };
     }
     if (target.abi !== 'wasi') {
       const [glue, { module }] = await Promise.all([

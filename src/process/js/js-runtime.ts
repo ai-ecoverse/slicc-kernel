@@ -30,6 +30,7 @@ export interface JsRuntimeDeps {
   memory?: () => JsMemory;
   asyncContext?: () => JsAsyncContext;
   runScript?: JsRunScript;
+  moduleSource?: (url: string, source: string) => void;
   promiseState?: JsPromiseProbe;
   imported?: () => void;
 }
@@ -174,7 +175,8 @@ async function runJs(
   });
   try {
     (deps.lockdown ?? lockdown)();
-    const { url, glue } = init.program;
+    const { url, glue, source } = init.program;
+    if (url && source !== undefined) deps.moduleSource?.(url, source);
     main = mainOf(await (url ? import(url) : (deps.load ?? importSource)(glue)));
     deps.imported?.();
   } catch (err) {
