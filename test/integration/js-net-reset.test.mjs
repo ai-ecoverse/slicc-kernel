@@ -23,7 +23,9 @@ const PROGRAM = `export default async function main(ctx) {
   const w2 = c2.writable.getWriter();
   await w2.write(new TextEncoder().encode('lost'));
   await c2.reset();
-  out.buffered = await code(s2.readable.getReader().read());
+  const r2 = s2.readable.getReader();
+  out.buffered = await r2.read().then((r) => new TextDecoder().decode(r.value), (e) => e.code);
+  out.afterBuffered = await code(r2.read());
   await s2.close();
   const acc3 = l.accept();
   const c3 = await ctx.net.connect({ port: l.port });
@@ -38,7 +40,7 @@ const PROGRAM = `export default async function main(ctx) {
 }
 `;
 
-test('conn.reset() closes a loopback connection with an RST: the peer pending and next reads and its writes are ECONNRESET, data in flight is dropped, and close() stays a FIN (#1530)', async (t) => {
+test('conn.reset() closes a loopback connection with an RST: the peer pending and next reads and its writes are ECONNRESET, the peer reads what it already received and then gets ECONNRESET (#1577), and close() stays a FIN (#1530)', async (t) => {
   const kernel = await createNodeKernel({ users: 'off' });
   t.after(() => kernel.terminate());
   await kernel.writeFile(
@@ -52,7 +54,8 @@ test('conn.reset() closes a loopback connection with an RST: the peer pending an
     pending: 'ECONNRESET',
     again: 'ECONNRESET',
     write: 'ECONNRESET',
-    buffered: 'ECONNRESET',
+    buffered: 'lost',
+    afterBuffered: 'ECONNRESET',
     fin: 'eof',
   });
 });
