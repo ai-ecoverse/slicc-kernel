@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { lstatSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { MessageChannel, type MessagePort, Worker } from 'node:worker_threads';
@@ -403,30 +403,48 @@ export { ownCacheDir };
 
 let swept = false;
 
-export function privateCacheDir(base = tmpdir(), alive = pidAlive): string {
+export function privateCacheDir(
+  base = tmpdir(),
+  alive = pidAlive,
+  uid: number | undefined = process.getuid?.()
+): string {
+  const parent = cacheParent(base, uid);
   if (!swept) {
     swept = true;
-    sweepCacheDirs(base, alive);
+    sweepCacheDirs(parent, alive, uid);
   }
-  return mkdtempSync(join(base, `${CACHE_PREFIX}${process.pid}-`));
+  return mkdtempSync(join(parent, `${process.pid}-`));
+}
+
+function cacheParent(base: string, uid: number | undefined): string {
+  const parent = join(base, uid === undefined ? 'slicc-kernel-cc' : `${CACHE_PREFIX}${uid}`);
+  try {
+    mkdirSync(parent, { mode: 0o700 });
+  } catch (err) {
+    if ((err as { code?: string }).code !== 'EEXIST') throw err;
+  }
+  const st = lstatSync(parent);
+  if (!st.isDirectory() || (uid !== undefined && (st.uid !== uid || (st.mode & 0o077) !== 0))) {
+    throw new Error(`slicc-kernel: ${parent} is not a private directory of this user`);
+  }
+  return parent;
 }
 
 export function sweepCacheDirs(
-  base: string,
+  parent: string,
   alive: (pid: number) => boolean = pidAlive,
   uid: number | undefined = process.getuid?.()
 ): void {
   let names: string[];
   try {
-    names = readdirSync(base);
+    names = readdirSync(parent);
   } catch {
     return;
   }
   for (const name of names) {
-    if (!name.startsWith(CACHE_PREFIX)) continue;
-    const pid = Number(name.slice(CACHE_PREFIX.length).split('-')[0]);
+    const pid = Number(name.split('-')[0]);
     if (!Number.isInteger(pid) || pid <= 0 || alive(pid)) continue;
-    removeOurs(join(base, name), uid);
+    removeOurs(join(parent, name), uid);
   }
 }
 
