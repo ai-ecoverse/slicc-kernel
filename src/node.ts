@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { lstatSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { MessageChannel, type MessagePort, Worker } from 'node:worker_threads';
@@ -366,7 +366,7 @@ const CACHE_PREFIX = 'slicc-kernel-cc-';
 
 function cacheDirOf(dir: unknown): { dir: string; own: boolean } | undefined {
   if (dir === false) return undefined;
-  if (dir === undefined) return { dir: privateCacheDir(), own: true };
+  if (dir === undefined) return ownCacheDir();
   if (typeof dir !== 'string' || !isAbsolute(dir)) {
     throw new TypeError(
       'createNodeKernel: compileCache must be an absolute directory path or false'
@@ -386,6 +386,18 @@ function dropCache(cache: { dir: string; own: boolean } | undefined): void {
   if (cache?.own) rmSync(cache.dir, { recursive: true, force: true });
 }
 
+function ownCacheDir(
+  make: () => string = privateCacheDir
+): { dir: string; own: boolean } | undefined {
+  try {
+    return { dir: make(), own: true };
+  } catch {
+    return undefined;
+  }
+}
+
+export { ownCacheDir };
+
 let swept = false;
 
 export function privateCacheDir(base = tmpdir(), alive = pidAlive): string {
@@ -396,7 +408,11 @@ export function privateCacheDir(base = tmpdir(), alive = pidAlive): string {
   return mkdtempSync(join(base, `${CACHE_PREFIX}${process.pid}-`));
 }
 
-export function sweepCacheDirs(base: string, alive: (pid: number) => boolean = pidAlive): void {
+export function sweepCacheDirs(
+  base: string,
+  alive: (pid: number) => boolean = pidAlive,
+  uid: number | undefined = process.getuid?.()
+): void {
   let names: string[];
   try {
     names = readdirSync(base);
@@ -407,8 +423,16 @@ export function sweepCacheDirs(base: string, alive: (pid: number) => boolean = p
     if (!name.startsWith(CACHE_PREFIX)) continue;
     const pid = Number(name.slice(CACHE_PREFIX.length).split('-')[0]);
     if (!Number.isInteger(pid) || pid <= 0 || alive(pid)) continue;
-    rmSync(join(base, name), { recursive: true, force: true });
+    removeOurs(join(base, name), uid);
   }
+}
+
+function removeOurs(path: string, uid: number | undefined): void {
+  try {
+    const st = lstatSync(path);
+    if (!st.isDirectory() || (uid !== undefined && st.uid !== uid)) return;
+    rmSync(path, { recursive: true, force: true });
+  } catch {}
 }
 
 function pidAlive(pid: number): boolean {
