@@ -1,9 +1,15 @@
 export const PIPE_CAPACITY = 64 * 1024;
 
-export class PipeError extends Error {
-  readonly code: 'EPIPE' | 'EINTR';
+export interface PipeMark {
+  readonly at: number;
+  readonly count: number;
+  drop(): void;
+}
 
-  constructor(code: 'EPIPE' | 'EINTR') {
+export class PipeError extends Error {
+  readonly code: 'EPIPE' | 'EINTR' | 'EAGAIN';
+
+  constructor(code: 'EPIPE' | 'EINTR' | 'EAGAIN') {
     super(code);
     this.code = code;
   }
@@ -15,6 +21,9 @@ export class KernelPipe {
   private readers = 0;
   private writers = 0;
   private waiters: Array<() => void> = [];
+  private pushed = 0;
+  private taken = 0;
+  private marks: PipeMark[] = [];
 
   readonly capacity: number;
 
@@ -55,6 +64,7 @@ export class KernelPipe {
     if (this.readers === 0) {
       this.chunks = [];
       this.size = 0;
+      this.dropMarks(() => true);
     }
     this.wake();
   }
@@ -69,9 +79,73 @@ export class KernelPipe {
       if (this.writers === 0) return new Uint8Array(0);
       await this.changed(signal);
     }
-    const out = this.take(Math.min(max, this.size));
+    const out = this.take(this.bounded(Math.min(max, this.size)));
+    this.dropMarks((mark) => mark.at < this.taken);
     this.wake();
     return out;
+  }
+
+  get inFlight(): number {
+    return this.marks.reduce((sum, mark) => sum + mark.count, 0);
+  }
+
+  async receive(
+    max: number,
+    nonblock: boolean,
+    signal?: AbortSignal
+  ): Promise<{ bytes: Uint8Array; marks: PipeMark[] }> {
+    while (this.size === 0) {
+      if (this.writers === 0) return { bytes: new Uint8Array(0), marks: [] };
+      if (nonblock) throw new PipeError('EAGAIN');
+      await this.changed(signal);
+    }
+    const marks = this.marks.filter((mark) => mark.at === this.taken);
+    this.marks = this.marks.filter((mark) => mark.at !== this.taken);
+    const bytes = this.take(this.bounded(Math.min(max, this.size)));
+    this.dropMarks((mark) => mark.at < this.taken);
+    this.wake();
+    return { bytes, marks };
+  }
+
+  async writeMarked(
+    bytes: Uint8Array,
+    mark: (at: number) => PipeMark,
+    nonblock: boolean,
+    signal?: AbortSignal
+  ): Promise<number> {
+    while (this.readers > 0 && this.size >= this.capacity) {
+      if (nonblock) throw new PipeError('EAGAIN');
+      await this.changed(signal);
+    }
+    if (this.readers === 0) throw new PipeError('EPIPE');
+    const before = this.pushed;
+    const made = mark(before);
+    this.marks.push(made);
+    try {
+      const n = await this.write(bytes, signal);
+      this.orphan(made, before);
+      return n;
+    } catch (err) {
+      this.orphan(made, before);
+      throw err;
+    }
+  }
+
+  private orphan(made: PipeMark, before: number): void {
+    if (this.pushed !== before) return;
+    this.dropMarks((mark) => mark === made);
+  }
+
+  private bounded(n: number): number {
+    const next = this.marks.find((mark) => mark.at > this.taken);
+    return next ? Math.min(n, next.at - this.taken) : n;
+  }
+
+  private dropMarks(gone: (mark: PipeMark) => boolean): void {
+    const dropped = this.marks.filter(gone);
+    if (dropped.length === 0) return;
+    this.marks = this.marks.filter((mark) => !gone(mark));
+    for (const mark of dropped) mark.drop();
   }
 
   async peek(max: number, signal?: AbortSignal): Promise<Uint8Array> {
@@ -107,6 +181,7 @@ export class KernelPipe {
       const n = Math.min(room, bytes.length - offset);
       this.chunks.push(bytes.slice(offset, offset + n));
       this.size += n;
+      this.pushed += n;
       offset += n;
       this.wake();
     }
@@ -125,6 +200,7 @@ export class KernelPipe {
       else this.chunks[0] = head.subarray(count);
     }
     this.size -= n;
+    this.taken += n;
     return out;
   }
 

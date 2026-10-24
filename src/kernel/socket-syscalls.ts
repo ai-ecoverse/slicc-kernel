@@ -1,5 +1,6 @@
 import type { SyncFsResult } from '../realm/sync-fs-wire.ts';
 import { KernelDgram } from './dgram.ts';
+import { receiveRights, sendRights } from './fd-rights.ts';
 import { type FdTable, KernelError, OpenFile, pollFile } from './fd-table.ts';
 import { encodeReceived } from './net/datagram-wire.ts';
 import { isLoopbackHost } from './net/proxy-service.ts';
@@ -61,6 +62,8 @@ export type SocketSyscall =
       how: number;
     }
   | { op: 'sock-reset'; fd: number }
+  | { op: 'sock-sendmsg'; fd: number; body: Uint8Array; fds: number[]; nonblock: boolean }
+  | { op: 'sock-recvmsg'; fd: number; max: number; cloexec: boolean; nonblock: boolean }
   | {
       op: 'sock-name';
       fd: number;
@@ -148,6 +151,8 @@ export const SOCKET_OPS: readonly SocketSyscall['op'][] = [
   'sock-connect',
   'sock-shutdown',
   'sock-reset',
+  'sock-sendmsg',
+  'sock-recvmsg',
   'sock-name',
   'sock-getopt',
   'sock-setopt',
@@ -245,6 +250,10 @@ export async function socketSyscall(
     case 'sock-reset':
       socketAt(fds, req.fd).resetOnClose();
       return ok();
+    case 'sock-sendmsg':
+      return ok(await sendRights(fds, req, proc.blocking()));
+    case 'sock-recvmsg':
+      return { ok: true, kind: 'bytes', bytes: await receiveRights(fds, req, proc.blocking()) };
     case 'sock-name': {
       const socket = anySocketAt(fds, req.fd);
       const addr = req.peer ? socket.peer : socket.local;

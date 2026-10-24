@@ -285,7 +285,7 @@ export async function serveSecure(
 
 const REFUSALS: ReadonlySet<number> = new Set([112, 120, 40, 49, 80]);
 
-class TlsContext implements KernelFile {
+export class TlsContext implements KernelFile {
   readonly leaf: TlsLeaf;
   constructor(leaf: TlsLeaf) {
     this.leaf = leaf;

@@ -135,6 +135,7 @@ export interface JsNet {
   secure(conn: JsConnection, tls: JsTlsOptions): Promise<JsConnection>;
   tlsContext(options: JsTlsContextOptions): Promise<JsTlsContext>;
   resolve(name: string, options?: JsResolveOptions): Promise<string[]>;
+  adopt(fd: number): Promise<JsConnection | JsListener>;
 }
 
 interface WireSession {
@@ -340,6 +341,7 @@ const IPV4 = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/;
 const NEVER = new AbortController().signal;
 const SOL_SOCKET = 1;
 const SO_ERROR = 4;
+const SO_ACCEPTCONN = 30;
 
 function errnoName(errno: number): string {
   const found = Object.entries(E).find(([, n]) => n === errno);
@@ -620,6 +622,25 @@ function resetOf(
   };
 }
 
+const inetAt = (options: JsListenOptions): InetAddr => ({
+  family: 'inet',
+  host: options.host ?? '127.0.0.1',
+  port: port(options.port ?? 0),
+});
+
+function adoptOf(
+  kernel: JsKernel,
+  connection: (fd: number) => Promise<JsConnection>,
+  listening: (fd: number, at: JsAddress) => JsListener,
+  name: (fd: number, peer: boolean) => Promise<JsAddress>
+): (fd: number) => Promise<JsConnection | JsListener> {
+  return async (fd) => {
+    const req = { op: 'sock-getopt' as const, fd, level: SOL_SOCKET, name: SO_ACCEPTCONN };
+    if ((await kernel.json(req)) !== 1) return connection(fd);
+    return listening(fd, await name(fd, false));
+  };
+}
+
 export function netOps(
   kernel: JsKernel,
   io: NetIo,
@@ -760,12 +781,6 @@ export function netOps(
     return [...((r.ok && r.kind === 'json' ? r.json : []) as string[])];
   };
 
-  const inetAt = (options: JsListenOptions): InetAddr => ({
-    family: 'inet',
-    host: options.host ?? '127.0.0.1',
-    port: port(options.port ?? 0),
-  });
-
   const listenSync = (options: JsListenOptions = {}): JsListener => {
     const lane = sync as JsSyncKernel;
     const addr = inetAt(options);
@@ -786,6 +801,7 @@ export function netOps(
   return {
     sync: { listen: listenSync },
     resolve: lookup,
+    adopt: adoptOf(kernel, connection, listener, name),
     listen: async (options = {}) => {
       const tls = options.tls ? serveRequest(options.tls) : undefined;
       return opened(async (fd) => {

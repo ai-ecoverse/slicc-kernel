@@ -54,6 +54,12 @@ import {
 import { callError, JsCallError, type JsKernel, modeOf, umaskRequest } from './js-kernel.ts';
 import { type JsNet, netOps } from './js-net.ts';
 import { procFsAsync, procOpenAsync } from './js-proc.ts';
+import {
+  type JsReceived,
+  type JsRecvmsgOptions,
+  type JsSendmsgOptions,
+  rightsAsync,
+} from './js-rights.ts';
 import { runSync } from './js-run.ts';
 import {
   type JsCred,
@@ -151,6 +157,8 @@ export interface JsProgramContext {
   write(fd: number, data: Uint8Array | string, options?: JsWriteOptions): Promise<number>;
   close(fd: number): Promise<void>;
   socketpair(): Promise<[number, number]>;
+  sendmsg(fd: number, data: Uint8Array | string, options?: JsSendmsgOptions): Promise<number>;
+  recvmsg(fd: number, max?: number, options?: JsRecvmsgOptions): Promise<JsReceived>;
   pipe(): Promise<[number, number]>;
   select(sets: JsSelectSets, options?: { signal?: AbortSignal }): Promise<JsSelected>;
   fdStatus(fd: number): Promise<JsFdStatus>;
@@ -622,7 +630,17 @@ function pendingReads(
     for (const stop of reading.get(fd) ?? []) stop.abort(new JsCallError('EBADF', 'read'));
     reading.delete(fd);
   };
-  return { read, closing };
+  const watch = (fd: number): { signal: AbortSignal; done(): void } => {
+    const stop = new AbortController();
+    const waits = reading.get(fd) ?? new Set();
+    reading.set(fd, waits.add(stop));
+    const done = () => {
+      waits.delete(stop);
+      if (waits.size === 0 && reading.get(fd) === waits) reading.delete(fd);
+    };
+    return { signal: stop.signal, done };
+  };
+  return { read, closing, watch };
 }
 
 const cryptoRandom = (bytes: Uint8Array) =>
@@ -737,7 +755,7 @@ export function createContext(o: ContextOptions): CreatedContext {
     infos.set(fd, got);
     return got;
   };
-  const { read, closing } = pendingReads(kernel, info, random);
+  const { read, closing, watch } = pendingReads(kernel, info, random);
 
   const { writes, writeAll, writeSome } = writer(kernel, info, o.pid);
 
@@ -832,8 +850,7 @@ export function createContext(o: ContextOptions): CreatedContext {
       closing(fd);
       await kernel.call({ op: 'fd-close', fd });
     },
-    socketpair: async () =>
-      (await kernel.json({ op: 'sock-pair', domain: 'unix', type: 'stream' })) as [number, number],
+    ...rightsAsync(kernel, (fd) => infos.delete(fd), watch),
     pipe: async () => (await kernel.json({ op: 'fd-pipe' })) as [number, number],
     select: (sets, options) => selectOp(kernel, sets, options?.signal),
     async fdStatus(fd) {
