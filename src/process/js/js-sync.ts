@@ -45,7 +45,7 @@ import {
   writeDevice,
   written,
 } from './js-io.ts';
-import { callError, JsCallError, type JsKernel, modeOf } from './js-kernel.ts';
+import { callError, devOf, JsCallError, type JsKernel, modeOf } from './js-kernel.ts';
 import type { JsSyncNet } from './js-net.ts';
 import { procFsSync, procOpenSync } from './js-proc.ts';
 import {
@@ -301,12 +301,12 @@ export function syncOps(
     if (inDev(abs)) return devSync(kernel, devStat(abs, op === 'stat'));
     try {
       if (!clean()) kernel.call({ op: 'fd-path-flush', path: abs });
-      const s = parseSyncFsStat(kernel.json({ op, path: abs }));
+      const s = parseSyncFsStat(kernel.json({ op, path: abs, devs: true }));
       if (!s) throw new JsCallError('EIO', op);
       return s;
     } catch (err) {
       if (!(err instanceof JsCallError) || err.code !== 'ENOENT') throw err;
-      const devPath = tryDevSync(abs);
+      const devPath = err.dev;
       if (!devPath) throw err;
       return devSync(kernel, devStat(devPath, op === 'stat'));
     }
@@ -383,7 +383,7 @@ export function syncOps(
     },
     pipe: () => kernel.json({ op: 'fd-pipe' }) as [number, number],
     open: procOpenSync(open, kernel, { resolve, pid: shared.pid }),
-    fs: procFsSync(syncPathOps(kernel, resolve, statOf, open, tryDevSync, clean), kernel, {
+    fs: procFsSync(syncPathOps(kernel, resolve, statOf, open, clean), kernel, {
       resolve,
       pid: shared.pid,
     }),
@@ -477,7 +477,6 @@ function syncPathOps(
   resolve: (path: string) => string,
   statOf: (op: 'stat' | 'lstat', path: string) => SyncFsBridgeStat,
   open: (path: string, options?: JsOpenOptions) => JsSyncFile,
-  tryDev: (abs: string) => string | undefined,
   clean: () => boolean
 ): Omit<JsSyncContext['fs'], 'watch'> {
   return {
@@ -486,8 +485,9 @@ function syncPathOps(
     exists(path) {
       const abs = resolve(path);
       if (inDev(abs)) return devSync(kernel, devExists(abs));
-      if (kernel.json({ op: 'exists', path: abs }) === true) return true;
-      const devPath = tryDev(abs);
+      const found = kernel.json({ op: 'exists', path: abs, devs: true });
+      if (found === true) return true;
+      const devPath = devOf(found);
       return devPath ? devSync(kernel, devExists(devPath)) : false;
     },
     readdir(path) {
@@ -532,10 +532,10 @@ function syncPathOps(
       if (inDev(abs)) return readWholeSync(open(abs));
       try {
         if (!clean()) kernel.call({ op: 'fd-path-flush', path: abs });
-        return kernel.bytes({ op: 'read', path: abs });
+        return kernel.bytes({ op: 'read', path: abs, devs: true });
       } catch (err) {
         if (!(err instanceof JsCallError) || err.code !== 'ENOENT') throw err;
-        const devPath = tryDev(abs);
+        const devPath = err.dev;
         if (!devPath) throw err;
         return readWholeSync(open(devPath));
       }

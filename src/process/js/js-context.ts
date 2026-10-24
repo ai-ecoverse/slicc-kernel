@@ -52,7 +52,7 @@ import {
   writeDevice,
   written,
 } from './js-io.ts';
-import { callError, JsCallError, type JsKernel, modeOf, umaskRequest } from './js-kernel.ts';
+import { callError, devOf, JsCallError, type JsKernel, modeOf, umaskRequest } from './js-kernel.ts';
 import { type JsNet, netOps } from './js-net.ts';
 import { procFsAsync, procOpenAsync } from './js-proc.ts';
 import {
@@ -479,17 +479,16 @@ async function vfsStat(
   kernel: JsKernel,
   abs: string,
   op: 'stat' | 'lstat',
-  tryDev: (abs: string) => Promise<string | undefined>,
   clean: () => boolean
 ): Promise<SyncFsBridgeStat> {
   try {
     if (!clean()) await kernel.call({ op: 'fd-path-flush', path: abs });
-    const s = parseSyncFsStat(await kernel.json({ op, path: abs }));
+    const s = parseSyncFsStat(await kernel.json({ op, path: abs, devs: true }));
     if (!s) throw new JsCallError('EIO', op);
     return s;
   } catch (err) {
     if (!(err instanceof JsCallError) || err.code !== 'ENOENT') throw err;
-    const devPath = await tryDev(abs);
+    const devPath = err.dev;
     if (!devPath) throw err;
     return devAsync(kernel, devStat(devPath, op === 'stat'));
   }
@@ -786,7 +785,7 @@ export function createContext(o: ContextOptions): CreatedContext {
   const statOf = async (op: 'stat' | 'lstat', path: string): Promise<SyncFsBridgeStat> => {
     const abs = resolve(path);
     if (inDev(abs)) return devAsync(kernel, devStat(abs, op === 'stat'));
-    return vfsStat(kernel, abs, op, tryDev, clean);
+    return vfsStat(kernel, abs, op, clean);
   };
 
   const devIo = { infos, handles, read, write: writeAll };
@@ -808,7 +807,7 @@ export function createContext(o: ContextOptions): CreatedContext {
     }
   };
 
-  const fs = procFsAsync(pathOps(kernel, resolve, statOf, open, tryDev, clean), kernel, {
+  const fs = procFsAsync(pathOps(kernel, resolve, statOf, open, clean), kernel, {
     resolve,
     pid: o.pid,
   });
@@ -1079,7 +1078,6 @@ function pathOps(
   resolve: (path: string) => string,
   statOf: (op: 'stat' | 'lstat', path: string) => Promise<SyncFsBridgeStat>,
   open: (path: string, options?: JsOpenOptions, whole?: boolean) => Promise<JsFile>,
-  tryDev: (abs: string) => Promise<string | undefined>,
   clean: () => boolean
 ): JsProgramContext['fs'] {
   return {
@@ -1088,8 +1086,9 @@ function pathOps(
     async exists(path) {
       const abs = resolve(path);
       if (inDev(abs)) return devAsync(kernel, devExists(abs));
-      if ((await kernel.json({ op: 'exists', path: abs })) === true) return true;
-      const devPath = await tryDev(abs);
+      const found = await kernel.json({ op: 'exists', path: abs, devs: true });
+      if (found === true) return true;
+      const devPath = devOf(found);
       return devPath ? devAsync(kernel, devExists(devPath)) : false;
     },
     async readdir(path) {
@@ -1138,10 +1137,10 @@ function pathOps(
       if (inDev(abs)) return readWhole(await open(abs));
       try {
         if (!clean()) await kernel.call({ op: 'fd-path-flush', path: abs });
-        return await kernel.bytes({ op: 'read', path: abs });
+        return await kernel.bytes({ op: 'read', path: abs, devs: true });
       } catch (err) {
         if (!(err instanceof JsCallError) || err.code !== 'ENOENT') throw err;
-        const devPath = await tryDev(abs);
+        const devPath = err.dev;
         if (!devPath) throw err;
         return readWhole(await open(devPath));
       }
