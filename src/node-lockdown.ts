@@ -275,7 +275,9 @@ function connected(): boolean {
 }
 
 function idOf(key: string, value: unknown, group: string): unknown {
-  define(here, key, { __proto__: null, value, configurable: true } as PropertyDescriptor);
+  if (!define(here, key, { __proto__: null, value, configurable: true } as PropertyDescriptor)) {
+    return undefined;
+  }
   const result = own(
     post('Runtime.evaluate', {
       expression: `this[${stringify(key)}]`,
@@ -306,8 +308,9 @@ function internal(list: unknown, name: string): unknown {
 
 type Settled = { state: 'pending' | 'fulfilled' | 'rejected'; value: unknown };
 
-function probe(promise: unknown, group: string, key: string): Settled {
+function probe(promise: unknown, group: string, key: string): Settled | undefined {
   const promiseId = idOf(key, promise, group);
+  if (promiseId === undefined) return undefined;
   const found = own(
     post('Runtime.getProperties', {
       objectId: promiseId,
@@ -322,10 +325,11 @@ function probe(promise: unknown, group: string, key: string): Settled {
   const resultId = own(result, 'objectId');
   if (typeof resultId !== 'string') return seal({ state, value: primitive(result) });
   const holder = nothing(null) as { v?: unknown };
+  const holderId = idOf(key, holder, group);
   post('Runtime.callFunctionOn', {
     objectId: resultId,
     functionDeclaration: 'function (h) { "use strict"; h.v = this; }',
-    arguments: [bare({ objectId: idOf(`${key}_v`, holder, group) })],
+    arguments: [bare({ objectId: holderId })],
     objectGroup: group,
     silent: true,
     returnByValue: false,
@@ -346,7 +350,6 @@ export function nodePromiseState(promise: unknown): Settled | undefined {
     return probe(promise, group, key);
   } finally {
     remove(here, key);
-    remove(here, `${key}_v`);
     try {
       post('Runtime.releaseObjectGroup', { objectGroup: group });
     } finally {

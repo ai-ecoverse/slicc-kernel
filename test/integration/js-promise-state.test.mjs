@@ -80,6 +80,11 @@ const HOSTILE = `export default async function main(ctx) {
   const calls = [];
   const define = Object.defineProperty;
   const describe = Object.getOwnPropertyDescriptor;
+  const protoOf = Object.getPrototypeOf;
+  const setProto = Object.setPrototypeOf;
+  const noMore = Object.preventExtensions;
+  const reflectGet = Reflect.get;
+  const global = globalThis;
   const proto = Object.prototype;
   const trap = (name) =>
     new Proxy(function () {}, {
@@ -177,6 +182,20 @@ const HOSTILE = `export default async function main(ctx) {
   for (let i = 0; i < 32; i++) delete arrayProto[String(i)];
   delete proto.toJSON;
   got.push(polluted, swapped, indexed.length === 1 && (indexed[0] === undefined || indexed[0]?.value === 7), ps(seven).value);
+  const sealedGlobal = [];
+  setProto(
+    global,
+    new Proxy(protoOf(global), {
+      get(t, k, r) {
+        sealedGlobal.push(String(k));
+        return reflectGet(t, k, r);
+      },
+    })
+  );
+  noMore(global);
+  const afterSeal = ps(seven);
+  if (sealedGlobal.some((k) => k.startsWith('__slicc_promise_'))) calls.push('sealed.trap');
+  got.push(afterSeal);
   await ctx.write(1, JSON.stringify({ got, read, calls }));
   return 0;
 }
@@ -199,6 +218,7 @@ test('ctx.sync.promiseState runs no program code: global let shadows of globalTh
       [null, null, null],
       true,
       7,
+      null,
     ],
     read: 0,
     calls: [],
