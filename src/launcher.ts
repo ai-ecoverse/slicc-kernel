@@ -3207,8 +3207,8 @@ export class Launcher {
     return this.writers;
   }
 
-  private rootFileId(path: string): Promise<string> | undefined {
-    return this.mounts.locate(path) === undefined ? this.rootFs.fileId?.(path) : undefined;
+  private rootFileId(path: string): Promise<string | undefined> | undefined {
+    return this.mounts.locate(path) === undefined ? this.rootFs.bindId?.(path) : undefined;
   }
 
   private flushingPeers(fs: KernelFs): Peers | undefined {

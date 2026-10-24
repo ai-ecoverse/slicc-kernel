@@ -143,7 +143,7 @@ export interface SpawnWasmOptions {
     since: number,
     held: readonly string[]
   ) => { now: number; renames: Array<[string, string]> };
-  fileId?: (path: string) => Promise<string> | undefined;
+  fileId?: (path: string) => Promise<string | undefined> | undefined;
   renameSeq?: (from: string, to: string) => number | undefined;
   mounts?: () => MountLine[];
   mount?: WasmProcessOptions['mount'];
