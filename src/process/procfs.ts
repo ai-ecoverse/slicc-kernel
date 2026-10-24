@@ -42,6 +42,9 @@ export const SYS_TREE: ProcSysTree = {
     slicc_rename_ack_busy: (listing) => `${listing.renameAcks?.busy ?? 0}\n`,
     slicc_stale_fds: (listing) => `${listing.staleFds ?? 0}\n`,
     slicc_file_ids: (listing) => `${listing.fileIds ?? 0}\n`,
+    slicc_peer_holds: ({ holds }) =>
+      `${holds?.mine ?? 0} ${holds?.peers ?? 0} ${holds?.sent ?? 0}\n`,
+    slicc_peer_held: ({ holds }) => (holds?.held ?? []).map((path) => `${path}\n`).join(''),
     slicc_rename_acks: (listing) => {
       const samples = [...(listing.renameAcks?.ackMs ?? [])].sort((a, b) => a - b);
       const median = samples[Math.floor(samples.length / 2)] ?? 0;

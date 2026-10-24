@@ -512,11 +512,24 @@ async function holdOp(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest)
       if (req.nofollow && !(await ownEntry(entry, path, real ?? path))) continue;
       const fid = req.ino === undefined ? undefined : await idOf(entry, real ?? path);
       if (!r || (!r.missed(path) && !r.changedSince(path, gen) && !r.inFlight?.(path)))
-        return json(entry.hold?.(path, on, open, real, undefined, req.ino, fid) ?? null);
+        return json(await heldOpen(entry, path, real, req, fid));
     }
   }
   entry.hold?.(path, on, open, undefined, req.handle);
   return done;
+}
+
+async function heldOpen(
+  entry: SyncFsTokenEntry,
+  path: string,
+  real: string | undefined,
+  req: SyncFsRequest,
+  fid: string | undefined
+): Promise<number | null> {
+  const handle = entry.hold?.(path, true, true, real, undefined, req.ino, fid);
+  if (handle === undefined) return null;
+  await entry.announceHold?.(real ?? path, fid, ((req.mode ?? 0) & HOLD_CREATED) !== 0);
+  return handle;
 }
 
 async function idOf(entry: SyncFsTokenEntry, path: string): Promise<string | undefined> {

@@ -31,9 +31,11 @@ interface WatchMessage {
   from?: string;
   changed?: string[];
   renames?: true;
+  keeps?: true;
   renaming?: PeerRename;
   renamed?: string;
   flushing?: string;
+  holds?: { add: Array<[string, string | undefined]>; drop: string[] };
 }
 
 export interface LockManagerLike {
@@ -53,6 +55,11 @@ export class RemoteWatch {
   private readonly mourned = new Set<string>();
   private readonly others = new Map<string, readonly string[]>();
   private readonly union = new Set<string>();
+  private readonly myHolds = new Map<string, string | undefined>();
+  private readonly peerHolds = new Map<string, Map<string, string | undefined>>();
+  private holdsSent = 0;
+  private readonly silent = new Set<string>();
+  private readonly holders = new Set<string>();
   private readonly listeners = new Set<RemoteListener>();
   private readonly waiting = new Map<number, { left: Set<string>; done: () => void }>();
   private readonly locks: LockManagerLike | undefined;
@@ -99,7 +106,7 @@ export class RemoteWatch {
         this.settled = true;
         this.recount();
       });
-    this.channel.postMessage({ hello: this.tab, renames: true });
+    this.channel.postMessage({ hello: this.tab, renames: true, keeps: true });
   }
 
   private async join(): Promise<void> {
@@ -171,8 +178,12 @@ export class RemoteWatch {
   }
 
   private receive(data: WatchMessage): void {
+    const spoke = data.hello ?? data.here ?? data.tab ?? data.from;
+    if (spoke !== undefined) this.silent.delete(spoke);
     const sender = data.hello ?? data.here ?? (data.paths !== undefined ? data.tab : undefined);
     if (sender !== undefined && data.renames) this.ackers.add(sender);
+    const keeper = data.hello ?? data.here;
+    if (keeper !== undefined && data.keeps) this.holders.add(keeper);
     if (data.hello !== undefined) this.greeted(data.hello);
     if (data.renaming !== undefined && data.tab !== undefined) this.heard(data);
     if (data.renamed !== undefined) this.renamed?.(data.renamed);
@@ -183,6 +194,7 @@ export class RemoteWatch {
       this.met?.();
     }
     if (data.tab !== undefined && data.paths !== undefined) this.announced(data);
+    if (data.tab !== undefined && data.holds !== undefined) this.heldBy(data);
     if (data.ack !== undefined && data.to === this.tab && data.from !== undefined) {
       this.acked(data.ack, data.from);
     }
@@ -211,8 +223,10 @@ export class RemoteWatch {
     void this.locks.request(name, async () => {
       this.mourned.delete(peer);
       this.others.delete(peer);
+      this.peerHolds.delete(peer);
       this.peers.delete(peer);
       this.ackers.delete(peer);
+      this.holders.delete(peer);
       this.flushedAt(peer);
       this.rebuild();
       this.recount();
@@ -226,8 +240,9 @@ export class RemoteWatch {
   private greeted(peer: string): void {
     this.arrived(peer);
     const answer = () => {
-      this.channel.postMessage({ here: this.tab, to: peer, renames: true });
+      this.channel.postMessage({ here: this.tab, to: peer, renames: true, keeps: true });
       if (this.mine.length > 0) void this.announce(this.mine);
+      if (this.myHolds.size > 0) this.sendHolds([...this.myHolds], []);
     };
     if (!this.quiet) {
       answer();
@@ -253,6 +268,83 @@ export class RemoteWatch {
     this.channel.postMessage({ ack: seq, from: this.tab, to: from });
   }
 
+  private heldBy({ tab, holds, seq }: WatchMessage): void {
+    const from = tab as string;
+    const { add, drop } = holds as NonNullable<WatchMessage['holds']>;
+    const held = this.peerHolds.get(from) ?? new Map<string, string | undefined>();
+    for (const path of drop) held.delete(path);
+    for (const [path, fid] of add) held.set(path, fid);
+    if (held.size > 0) this.peerHolds.set(from, held);
+    else this.peerHolds.delete(from);
+    this.channel.postMessage({ ack: seq, from: this.tab, to: from });
+  }
+
+  hold(
+    add: ReadonlyArray<[string, string | undefined]>,
+    drop: readonly string[],
+    wait: boolean
+  ): Promise<void> {
+    const fresh = add.filter(
+      ([path, fid]) => !this.myHolds.has(path) || this.myHolds.get(path) !== fid
+    );
+    const gone = drop.filter((path) => this.myHolds.has(path));
+    for (const path of gone) this.myHolds.delete(path);
+    for (const [path, fid] of fresh) this.myHolds.set(path, fid);
+    if ((fresh.length === 0 && gone.length === 0) || this.peers.size === 0)
+      return Promise.resolve();
+    const seq = this.sendHolds(fresh, gone);
+    if (!wait) return Promise.resolve();
+    const heard = new Set(
+      [...this.peers].filter((peer) => this.holders.has(peer) && !this.silent.has(peer))
+    );
+    return this.acks(seq, heard, (left) => {
+      for (const peer of left) this.silent.add(peer);
+    });
+  }
+
+  rehold(from: string, to: string): void {
+    const add: Array<[string, string | undefined]> = [];
+    const drop: string[] = [];
+    for (const [path, fid] of [...this.myHolds]) {
+      if (path !== from && !path.startsWith(`${from}/`)) continue;
+      const moved = to + path.slice(from.length);
+      this.myHolds.delete(path);
+      this.myHolds.set(moved, fid);
+      drop.push(path);
+      add.push([moved, fid]);
+    }
+    if (drop.length > 0 && this.peers.size > 0) this.sendHolds(add, drop);
+  }
+
+  private sendHolds(
+    add: ReadonlyArray<[string, string | undefined]>,
+    drop: readonly string[]
+  ): number {
+    const seq = ++this.seq;
+    this.holdsSent++;
+    this.channel.postMessage({ tab: this.tab, holds: { add: [...add], drop: [...drop] }, seq });
+    return seq;
+  }
+
+  peerHeld(path: string): Array<{ tab: string; fid: string | undefined }> {
+    const out: Array<{ tab: string; fid: string | undefined }> = [];
+    for (const [tab, held] of this.peerHolds)
+      if (held.has(path)) out.push({ tab, fid: held.get(path) });
+    return out;
+  }
+
+  peerHeldPaths(): string[] {
+    const out = new Set<string>();
+    for (const held of this.peerHolds.values()) for (const path of held.keys()) out.add(path);
+    return [...out].sort();
+  }
+
+  holdCounts(): { mine: number; peers: number; sent: number } {
+    let peers = 0;
+    for (const held of this.peerHolds.values()) peers += held.size;
+    return { mine: this.myHolds.size, peers, sent: this.holdsSent };
+  }
+
   private acked(seq: number, from: string): void {
     const wait = this.waiting.get(seq);
     if (!wait) return;
@@ -269,11 +361,13 @@ export class RemoteWatch {
     if (!this.locks) return;
     const held = new Set(((await this.locks.query()).held ?? []).map((lock) => lock.name));
     let left = false;
-    for (const tab of new Set([...this.others.keys(), ...this.peers])) {
+    for (const tab of new Set([...this.others.keys(), ...this.peers, ...this.peerHolds.keys()])) {
       if (!held.has(this.lockOf(tab))) {
         if (this.peers.delete(tab)) left = true;
         this.others.delete(tab);
+        this.peerHolds.delete(tab);
         this.ackers.delete(tab);
+        this.holders.delete(tab);
       }
     }
     this.rebuild();
@@ -327,8 +421,13 @@ export class RemoteWatch {
     this.channel.postMessage({ renamed: lock });
   }
 
-  private acks(seq: number, from: ReadonlySet<string>): Promise<void> {
+  private acks(
+    seq: number,
+    from: ReadonlySet<string>,
+    missed?: (left: ReadonlySet<string>) => void
+  ): Promise<void> {
     if (from.size === 0) return Promise.resolve();
+    const left = new Set(from);
     return new Promise<void>((resolve) => {
       const done = () => {
         clearTimeout(timer);
@@ -336,10 +435,11 @@ export class RemoteWatch {
         resolve();
       };
       const timer = setTimeout(() => {
+        missed?.(left);
         done();
         void this.prune();
       }, ANNOUNCE_WAIT_MS);
-      this.waiting.set(seq, { left: new Set(from), done });
+      this.waiting.set(seq, { left, done });
     });
   }
 

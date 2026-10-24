@@ -11,8 +11,8 @@ const post = BroadcastChannel.prototype.postMessage;
 let me;
 BroadcastChannel.prototype.postMessage = function (data) {
   if (watching(this) && data?.hello !== undefined) me = data.hello;
-  if (watching(this) && state.old && data?.renames) {
-    const { renames: _, ...rest } = data;
+  if (watching(this) && state.old && (data?.renames || data?.keeps)) {
+    const { renames: _, keeps: __, ...rest } = data;
     return post.call(this, rest);
   }
   return post.call(this, data);
@@ -22,6 +22,12 @@ Object.defineProperty(BroadcastChannel.prototype, 'onmessage', {
   ...handler,
   set(listener) {
     handler.set.call(this, (event) => {
+      if (
+        state.old &&
+        watching(this) &&
+        (event.data?.holds || event.data?.keeping || event.data?.kept)
+      )
+        return undefined;
       const missing = state.old || state.deaf;
       const touched = [...(event.data?.paths ?? []), ...(event.data?.trees ?? [])];
       if (

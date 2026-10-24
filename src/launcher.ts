@@ -750,7 +750,12 @@ export class Launcher {
   readonly identities = { asked: 0, timedOut: 0 };
   private readonly nodes: VfsNodes;
   private readonly unlinked: UnlinkedKeeper;
-  private readonly held = new HeldSet((path) => this.released(path));
+  private readonly held = new HeldSet(
+    (path) => this.released(path),
+    (from, to) => {
+      if (this.mounts.locate(to) === undefined) this.rootFs.rehold?.(from, to);
+    }
+  );
   private readonly processMounts: ProcessMountPolicy;
   private readonly booting = new AbortController();
   fstab: Promise<FstabResult[]> = Promise.resolve([]);
@@ -2152,6 +2157,7 @@ export class Launcher {
         renameAcks: this.rootFs.renameWaits?.(),
         staleFds: staleFdCount(),
         fileIds: this.rootFs.fileIdWrites?.() ?? 0,
+        holds: this.rootFs.holdCounts?.(),
       }),
       sudo: (call, signal) => this.sudo(pid, call, signal),
       crontab: (call) => this.crontab(pid, call),
@@ -2163,6 +2169,10 @@ export class Launcher {
       statfs: (path) => this.mounts.statfs(path),
       renames: (since, held) => this.renameLog.since(since, held),
       fileId: (path) => (this.locks.shared?.() === true ? this.rootFileId(path) : undefined),
+      announceHold: (path, fid, created) =>
+        this.locks.shared?.() === true && this.mounts.locate(path) === undefined
+          ? this.rootFs.announceHolds?.([[path, fid]], [], !created)
+          : undefined,
       renameSeq: (from, to) => this.renameLog.seqOf(from, to),
       mounts: () => this.mounts.list(),
       mount: (call, signal) => this.processMount(pid, call, signal),
@@ -2656,6 +2666,8 @@ export class Launcher {
     const at = normalizePath(path);
     this.unlinked.closed(at);
     this.writers?.unlinked.closed(at);
+    if (![...this.held].some((holds) => holds.holding(at)))
+      void this.rootFs.announceHolds?.([], [at], false);
     const open = [...this.openFiles].some((nodes) => nodes.writes(at)) || heldUnder(this.held, at);
     if (!open) void this.mounts.commit(at).catch(() => undefined);
   }
