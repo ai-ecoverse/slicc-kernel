@@ -415,7 +415,7 @@ async function guard(
       return { path: w };
     }
     case 'mkdir': {
-      await makeIn(g, op, path);
+      await makeIn(g, op, path, !req.exclusive);
       return { path: await walkSafe(g, path, false) };
     }
     case 'create':
