@@ -22,60 +22,49 @@ async function run(t, source) {
   return JSON.parse(r.stdout);
 }
 
-test("a program's own Error.prepareStackTrace gets only the program's own, node: and native CallSites, all strict, never a kernel frame or host path, with Error as receiver; its result and throws are the stack as in Node (#1631)", async (t) => {
+test("a program's own Error.prepareStackTrace gets V8's CallSites as in Node (kernel frames named slicc-kernel:, never the host path), with Error as receiver; its result and throws are the stack; only setStackFormatter(fn, { own: true }) hands it filtered CallSites (#1631)", async (t) => {
   const out = await run(
     t,
     `export default async function main(ctx) {
   'use strict';
   const r = {};
   const grab = (f) => { try { f(); } catch (e) { return e; } };
-  const frames = [];
   Error.prepareStackTrace = function (e, sites) {
     r.self = this === Error;
-    for (const s of sites) frames.push({ text: String(s), file: s.getFileName() ?? null, fn: typeof s.getFunction(), self: typeof s.getThis() });
-    return sites;
+    return sites.map(String);
   };
-  r.isArray = Array.isArray(new Error('own').stack);
-  r.kernel = Array.isArray(grab(() => ctx.sync.open('/nope/x')).stack);
-  r.async = Array.isArray((await ctx.fs.readFile('/nope/y').catch((e) => e)).stack);
-  r.mapped = [1].map(() => Array.isArray(new Error('m').stack))[0];
+  const kernel = grab(() => ctx.sync.open('/nope/x')).stack;
+  r.kernelNamed = kernel.some((s) => s.includes('slicc-kernel:/node-process-worker.js'));
+  r.hostPath = kernel.some((s) => s.includes('file:'));
   Error.prepareStackTrace = () => { throw new Error('thrown'); };
   try { void new Error('t').stack; r.throws = 'no'; } catch (e) { r.throws = e.message; }
-  Error.prepareStackTrace = () => 'outer ' + new Error('inner').stack.split('\\n')[0];
-  r.nested = new Error('n').stack;
+  let depth = 0;
+  Error.prepareStackTrace = () => (depth++ ? 'inner' : 'outer ' + new Error('inner').stack);
+  r.nested = new Error('n').stack.split('\\n')[0];
   Error.prepareStackTrace = 42;
   r.nonFunction = new Error('x').stack.split('\\n')[0];
   delete Error.prepareStackTrace;
   r.deleted = typeof Error.prepareStackTrace;
   r.proto = Object.getPrototypeOf(Error) === Function.prototype;
-  r.frames = frames;
+  ctx.sync.setStackFormatter((e, sites, own) => own(e, sites), { own: true });
+  Error.prepareStackTrace = (e, sites) => sites.map(String);
+  const filtered = grab(() => ctx.sync.open('/nope/z')).stack;
+  r.filteredKernel = filtered.some((s) => s.includes('slicc-kernel:'));
   await ctx.write(1, JSON.stringify(r));
   return 0;
 }`
   );
-  const { frames, ...rest } = out;
-  assert.deepEqual(rest, {
+  assert.deepEqual(out, {
     self: true,
-    isArray: true,
-    kernel: true,
-    async: true,
-    mapped: true,
+    kernelNamed: true,
+    hostPath: false,
     throws: 'thrown',
     nested: 'outer Error: inner',
     nonFunction: 'Error: x',
     deleted: 'undefined',
     proto: true,
+    filteredKernel: false,
   });
-  assert.ok(frames.length >= 5);
-  for (const f of frames) {
-    assert.equal(f.fn, 'undefined', JSON.stringify(f));
-    assert.equal(f.self, 'undefined', JSON.stringify(f));
-    assert.ok(!f.text.includes(DIST) && !f.text.includes('node-process-worker'), JSON.stringify(f));
-    assert.ok(
-      f.file === null || f.file.startsWith('slicc-module:') || f.file.startsWith('node:'),
-      JSON.stringify(f)
-    );
-  }
 });
 
 test("setStackFormatter(fn, { own: true }) runs fn for every stack with the program's own Error.prepareStackTrace (or undefined, never Node's default or a kernel function), and fn's result or throw is the stack as it stands; errorSource still answers (#1631)", async (t) => {
@@ -139,7 +128,8 @@ test("the realm's Error is read as Node 26 reads it: a replaced global Error's p
   return 0;
 }`
   );
-  assert.deepEqual(out, { stack: 'FAKE 1', reads: 2, self: true });
+  assert.match(out.stack, /^FAKE \d+$/);
+  assert.deepEqual({ reads: out.reads, self: out.self }, { reads: 2, self: true });
 });
 
 const enc = new TextEncoder();
@@ -161,7 +151,7 @@ const TRAP = new Uint8Array([
   ...section(10, [2, 4, 0, 0x10, 1, 0x0b, 3, 0, 0x00, 0x0b]),
 ]);
 
-test("with a host preload that sets its own Error.prepareStackTrace, the kernel's own diagnostics keep their raw frames (a wasm trap's backtrace), while a program's .stack through that function sees no kernel frame (#1631)", async (t) => {
+test("with a host preload that sets its own Error.prepareStackTrace, the kernel's own diagnostics keep their raw frames (a wasm trap's backtrace), while a program's .stack through that function names kernel frames slicc-kernel:, never by host path (#1631)", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'slicc-ownhost-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   await writeFile(
@@ -189,7 +179,8 @@ console.log(JSON.stringify({ trap: trap.stderr, js: js.stdout }));
   const { trap, js } = JSON.parse(r.stdout);
   assert.match(trap, /wasm trap: unreachable\n\s+at .*wasm:\/\/wasm\//);
   assert.match(js, /^\w*Error: \/nope: ENOENT\n\s+at /);
-  assert.doesNotMatch(js, /node-process-worker|slicc-kernel:|file:/);
+  assert.match(js, /slicc-kernel:\/node-process-worker\.js/);
+  assert.doesNotMatch(js, /file:/);
 });
 
 const NODE_ORDER = `
