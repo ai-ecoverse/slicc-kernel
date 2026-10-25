@@ -436,3 +436,36 @@ test('a file held through a kernel descriptor follows its rename for the hold, s
   console.log(`kernel holder after a rename: ${r.stdout.trim()} ${r.stderr.trim()}`);
   assert.equal(r.stdout, 'old\n');
 });
+
+test("a JS program's file held through the kernel follows the program's own rename for the hold, with no other process running (#1652 review)", {
+  timeout: 900_000,
+}, async (t) => {
+  const dir = '/root/pkjs';
+  const { page } = await booted(chrome, t);
+  await installPackage(page, 'wasm-coreutils');
+  const other = await peerTab(page);
+  assert.deepEqual(
+    await sh(page, `rm -rf ${dir} && mkdir -p ${dir} && echo old > ${dir}/f && echo made`),
+    ok('made\n')
+  );
+  await page.evaluate((d) => {
+    window.holder = window.kernel.run(['jstest', 'holdrename', d], { cwd: '/' });
+  }, dir);
+  while (!(await page.evaluate((p) => window.opfs.exists(p), `${dir.slice(1)}/opened`)))
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  await page.evaluate((p) => window.opfs.write(p, ''), `${dir.slice(1)}/go1`);
+  while (!(await page.evaluate((p) => window.opfs.exists(p), `${dir.slice(1)}/renamed`)))
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  let listed = '';
+  for (let i = 0; i < 200 && !listed.includes(`${dir}/g`); i++) {
+    listed = (await sh(other, 'cat /proc/sys/kernel/slicc_peer_held')).stdout;
+    if (!listed.includes(`${dir}/g`)) await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.ok(listed.includes(`${dir}/g`) && !listed.includes(`${dir}/f`), listed);
+  assert.deepEqual(await sh(other, `rm ${dir}/g && echo removed`), ok('removed\n'));
+  await page.evaluate((p) => window.opfs.write(p, ''), `${dir.slice(1)}/go2`);
+  const r = await page.evaluate(() => window.holder);
+  const out = typeof r.stdout === 'string' ? r.stdout : new TextDecoder().decode(r.stdout);
+  console.log(`js holder after its own rename: ${out.trim()}`);
+  assert.equal(out, 'old\n');
+});

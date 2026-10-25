@@ -156,6 +156,14 @@ const within = (path: string, target: string) =>
 const TOUCHED_MAX = 4096;
 const parentOf = (path: string) => path.slice(0, path.lastIndexOf('/')) || '/';
 
+interface Shared {
+  path: string;
+  hidden: string;
+  release: () => void;
+  local: UnlinkHolder[];
+  file: KeptFile | undefined;
+}
+
 interface Send {
   tab: string;
   items: Array<{ path: string; hidden: string | undefined; fid: string | undefined }>;
@@ -168,8 +176,47 @@ export interface PeerKept {
 }
 
 export const PEER_RM_MS = 1000;
+export const SHARED_ACK_MS = 24 * 60 * 60 * 1000;
+
+const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 export const PEER_RENAME_MS = 10_000;
 export const PEER_GATE_MS = PEER_RENAME_MS + 5000;
+
+export const SHARED_PREFIX = 'shared.';
+export const keptLock = (hidden: string) => `slicc-kept:${hidden}`;
+
+export function sharedKept(hidden: string): boolean {
+  const at = `/${UNLINKED_DIR}/${SHARED_PREFIX}`;
+  return hidden.startsWith(at) && /^[0-9a-f]+$/.test(hidden.slice(at.length));
+}
+
+export interface SharedLocks {
+  request(
+    name: string,
+    options: { mode?: 'shared' | 'exclusive'; ifAvailable?: boolean },
+    callback: (lock: unknown) => Promise<unknown>
+  ): Promise<unknown>;
+}
+
+export function holdShared(locks: SharedLocks | undefined, name: string): Promise<() => void> {
+  if (!locks) return Promise.resolve(() => undefined);
+  return new Promise((resolve) => {
+    void locks.request(name, { mode: 'shared' }, () => {
+      const { promise, resolve: done } = Promise.withResolvers<void>();
+      resolve(() => done());
+      return promise;
+    });
+  });
+}
+
+export async function lastHolder(locks: SharedLocks | undefined, name: string): Promise<boolean> {
+  if (!locks) return true;
+  let free = false;
+  await locks.request(name, { mode: 'exclusive', ifAvailable: true }, async (lock) => {
+    free = lock !== null;
+  });
+  return free;
+}
 
 const lockName = (instance: string) => `slicc-unlinked:${instance}`;
 
@@ -546,8 +593,8 @@ export class UnlinkedKeeper {
         void peers.ask(tab, { kept: { items: [], paths } }, PEER_RM_MS);
       throw fsError('EBUSY', `${target}: open in another tab that did not answer`);
     }
-    const { whole, sends } = await this.setAside(target, asked);
-    return { whole, undoing: (op) => this.undoing(op, peers, sends, heard) };
+    const { whole, sends, shared } = await this.setAside(target, asked);
+    return { whole, undoing: (op) => this.undoing(op, peers, sends, heard, shared) };
   }
 
   private async setAside(
@@ -561,34 +608,92 @@ export class UnlinkedKeeper {
       }>;
       paths: string[];
     }>
-  ): Promise<{ whole: boolean; sends: Send[] }> {
+  ): Promise<{ whole: boolean; sends: Send[]; shared: Shared[] }> {
     const mine = this.heldWithin(target);
-    const taken = new Set<string>();
-    let whole = false;
+    const tabsOf = new Map<string, number>();
+    for (const { holders } of asked)
+      for (const { path } of holders) tabsOf.set(path, (tabsOf.get(path) ?? 0) + 1);
+    const done = new Map<string, string | undefined>();
+    const shared: Shared[] = [];
     const sends: Send[] = [];
     for (const { tab, holders, paths } of asked) {
       const items: Send['items'] = [];
       for (const holder of holders) {
-        const free = !mine.has(holder.path) && !taken.has(holder.path);
-        const hidden = free
-          ? await this.asideFor(holder.path, holder.instance as string)
-          : undefined;
-        if (hidden !== undefined) {
-          taken.add(holder.path);
-          if (holder.path === target) whole = true;
+        if (!done.has(holder.path)) {
+          const many = mine.has(holder.path) || (tabsOf.get(holder.path) ?? 0) > 1;
+          done.set(holder.path, await this.asideOne(holder, many, mine, shared));
         }
-        items.push({ path: holder.path, hidden, fid: holder.fid });
+        items.push({ path: holder.path, hidden: done.get(holder.path), fid: holder.fid });
       }
       sends.push({ tab, items, paths });
     }
-    return { whole, sends };
+    return { whole: done.get(target) !== undefined, sends, shared };
+  }
+
+  private async asideOne(
+    holder: { path: string; instance: string | undefined },
+    many: boolean,
+    mine: Map<string, UnlinkHolder[]>,
+    shared: Shared[]
+  ): Promise<string | undefined> {
+    if (!many) return this.asideFor(holder.path, holder.instance as string);
+    const one = await this.sharedAside(holder.path, mine);
+    if (one) shared.push(one);
+    return one?.hidden;
+  }
+
+  private async sharedAside(
+    path: string,
+    mine: Map<string, UnlinkHolder[]>
+  ): Promise<Shared | undefined> {
+    const hidden = `${dirOf('/')}/${SHARED_PREFIX}${crypto.randomUUID().replaceAll('-', '')}`;
+    const release = await holdShared(this.sharedLocks(), keptLock(hidden));
+    const moved = await this.serial(async () => {
+      try {
+        const owner = this.dirOwner;
+        await this.fs.mkdir(dirOf('/'), { recursive: true, ...(owner ? { owner } : {}) });
+        await this.fs.rename(path, hidden);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    if (!moved) {
+      release();
+      return undefined;
+    }
+    const local = mine.get(path) ?? [];
+    const file = local.length > 0 ? await this.sharedFile(hidden, local.length) : undefined;
+    if (file) for (const holder of local) holder.keep(path, file);
+    return { path, hidden, release, local, file };
+  }
+
+  async sharedFile(hidden: string, refs: number): Promise<KeptFile> {
+    const locks = this.sharedLocks();
+    const mine = await holdShared(locks, keptLock(hidden));
+    let left = refs;
+    return {
+      hidden,
+      release: () => {
+        if (--left > 0) return;
+        mine();
+        void lastHolder(locks, keptLock(hidden)).then((last) => {
+          if (last) void this.serial(() => this.drop(hidden));
+        });
+      },
+    };
+  }
+
+  private sharedLocks(): SharedLocks | undefined {
+    return this.locks as unknown as SharedLocks | undefined;
   }
 
   private async undoing<T>(
     op: () => Promise<T>,
     peers: PeerKeeps,
     sends: readonly Send[],
-    heard: readonly boolean[]
+    heard: readonly boolean[],
+    shared: readonly Shared[] = []
   ): Promise<T> {
     let failed: unknown;
     let out: T | undefined;
@@ -596,21 +701,44 @@ export class UnlinkedKeeper {
       out = await op();
     } catch (err) {
       failed = err ?? new Error('failed');
-      for (const send of sends) {
-        for (const item of send.items) {
-          const { hidden, path } = item;
-          if (hidden !== undefined && (await this.moveBack(hidden, path))) item.hidden = undefined;
-        }
-      }
+      await this.rollBackAsides(sends, shared);
     }
+    const hiddenShared = new Set(shared.map((one) => one.hidden));
+    const answers = sends.map(({ tab, items, paths }) => {
+      const keeps = items.some((item) => item.hidden && hiddenShared.has(item.hidden));
+      return {
+        keeps,
+        told: peers.ask(tab, { kept: { items, paths } }, keeps ? SHARED_ACK_MS : PEER_RM_MS),
+      };
+    });
     await Promise.all(
-      sends.map(({ tab, items, paths }, i) => {
-        const told = peers.ask(tab, { kept: { items, paths } }, PEER_RM_MS);
-        return heard[i] ? told : undefined;
-      })
+      answers.map(({ told }, i) => (heard[i] ? Promise.race([told, delay(PEER_RM_MS)]) : undefined))
     );
+    for (const one of shared) {
+      const waits = answers.filter(
+        ({ keeps }, i) => keeps && sends[i]?.items.some((item) => item.hidden === one.hidden)
+      );
+      void Promise.all(waits.map(({ told }) => told)).then(one.release, one.release);
+    }
     if (failed !== undefined) throw failed;
     return out as T;
+  }
+
+  private async rollBackAsides(sends: readonly Send[], shared: readonly Shared[]): Promise<void> {
+    const back = new Map<string, boolean>();
+    for (const item of sends.flatMap((send) => send.items)) {
+      const { hidden, path } = item;
+      if (hidden === undefined) continue;
+      if (!back.has(hidden)) back.set(hidden, await this.moveBack(hidden, path));
+      if (back.get(hidden)) item.hidden = undefined;
+    }
+    for (const { hidden, path, local, file } of shared) {
+      if (!back.get(hidden) || !file) continue;
+      for (const holder of local) {
+        holder.unkeep(path, file);
+        file.release();
+      }
+    }
   }
 
   private moveBack(hidden: string, path: string): Promise<boolean> {
@@ -733,11 +861,13 @@ export class UnlinkedKeeper {
       for (const name of names) {
         const id = name.slice(0, name.lastIndexOf('.'));
         const at = id.indexOf('~');
-        const dead =
-          id !== this.instance &&
-          (at < 0
-            ? held !== undefined && !held.has(lockName(id))
-            : owner?.alive(id.slice(0, at)) === false);
+        const shared = name.startsWith(SHARED_PREFIX);
+        const dead = shared
+          ? held !== undefined && !held.has(keptLock(`${dir}/${name}`))
+          : id !== this.instance &&
+            (at < 0
+              ? held !== undefined && !held.has(lockName(id))
+              : owner?.alive(id.slice(0, at)) === false);
         if (dead) await this.fs.rm(`${dir}/${name}`, { recursive: true }).catch(() => undefined);
       }
       await this.tidy(dir);
