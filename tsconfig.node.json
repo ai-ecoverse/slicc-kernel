@@ -7,6 +7,7 @@
     "src/node-driver-worker.ts",
     "src/node-lockdown.ts",
     "src/node-stack.ts",
+    "src/node/worker-boot.ts",
     "src/node/ws-diagnose.ts",
     "src/node/loopback.ts"
   ]

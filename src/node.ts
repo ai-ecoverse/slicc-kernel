@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
-import { MessageChannel, type MessagePort, Worker } from 'node:worker_threads';
+import { MessageChannel, type MessagePort, type Worker } from 'node:worker_threads';
 import type { CdpHook } from './cdp/types.ts';
 import type { MessagePortLike } from './client/protocol.ts';
 import { type ServedClient, serveClient } from './client/serve-client.ts';
@@ -36,6 +36,7 @@ import type { MountEntry, MountSpec } from './mount/mount-fs.ts';
 import type { ProcessMountPolicy } from './mount/syscall.ts';
 import { guardedLoopback, type HostLoopback } from './node/loopback.ts';
 import { isMemoryRoot, memoryRoot } from './node/memory-root.ts';
+import { bootWorker } from './node/worker-boot.ts';
 import { diagnosing } from './node/ws-diagnose.ts';
 import { signalNumber } from './serve.ts';
 import type { ApproveHook } from './sudo.ts';
@@ -303,7 +304,11 @@ function processWorker(
   internals = false
 ): Worker {
   const make = (execArgv?: string[]) =>
-    new Worker(file, { env: workerEnv(), ...(workerData ? { workerData } : {}), execArgv });
+    bootWorker(
+      file,
+      { env: workerEnv(), ...(workerData ? { workerData } : {}), execArgv },
+      new URL('./node-process-worker.cjs', import.meta.url)
+    );
   return internals ? internalsWorker(make) : make();
 }
 
@@ -545,7 +550,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
   const pending = new Set<(err: Error) => void>();
   const clients = new Set<ServedClient>();
   let terminated = false;
-  const file = options.worker ?? new URL('./node-process-worker.js', import.meta.url);
+  const file = options.worker ?? new URL('./node-process-worker.cjs', import.meta.url);
   const cache = cacheDirOf(options.compileCache);
   const workerData = cacheData(cache);
   const warm = warmPoolOf(options, file, workerData, live);

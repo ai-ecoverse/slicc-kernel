@@ -125,7 +125,7 @@ test("errorSource answers undefined for kernel-made errors, non-errors, a script
     kernel: null,
     kernelAsync: null,
     values: [null, null, null, null, null, null, null],
-    borrowed: [],
+    borrowed: [`${KERNEL_URL}: throw new Error("q")`],
     own: { sourceLine: 'null.x', lineNumber: 1, startColumn: 5 },
   });
 });
@@ -154,7 +154,7 @@ console.log(r.status + ' ' + r.stdout);
   assert.equal(r.stderr, '');
 });
 
-test("a program's new Function or eval code named by //# sourceURL keeps its frames for the formatter, and errorSource answers for it by that name; a sourceURL naming the kernel worker shows only the program's own frame and errorSource refuses it (#1632)", async (t) => {
+test("a program's new Function or eval code named by //# sourceURL keeps its frames for the formatter, and errorSource answers for it by that name; a sourceURL naming the virtual kernel worker shows only the program's own frame and errorSource refuses it, while a caller-supplied file URL is an ordinary script name (#1632, #1656)", async (t) => {
   const out = await run(
     t,
     `export default async function main(ctx) {
@@ -182,7 +182,7 @@ test("a program's new Function or eval code named by //# sourceURL keeps its fra
     fn: { sourceLine: 'o.f()', lineNumber: 5, startColumn: 2 },
     ev: { sourceLine: 'o.f()', lineNumber: 1, startColumn: 2 },
     spoof: null,
-    spoofUrl: null,
+    spoofUrl: { sourceLine: 'o.f()', lineNumber: 3, startColumn: 2 },
     top: [
       ['/os/a.js', 5, true],
       ['/os/b.js', 1, true],
