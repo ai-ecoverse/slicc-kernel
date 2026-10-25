@@ -61,7 +61,7 @@ import type { JsSyncTty } from './js-tty.ts';
 import type { JsWasi, JsWasiOptions } from './js-wasi.ts';
 import type { JsWatcher, JsWatchListener, JsWatchOptions } from './js-watch.ts';
 
-export type SyncCall = (req: SyncSabRequestBody) => SyncFsResult;
+export type SyncCall = (req: SyncSabRequestBody, sink?: Uint8Array) => SyncFsResult;
 
 export interface JsSyncFile {
   readonly fd: number;
@@ -161,6 +161,17 @@ export interface SyncShared {
 
 const encoder = new TextEncoder();
 
+const typed = Object.getPrototypeOf(Uint8Array.prototype) as object;
+const getter = (name: string) =>
+  Object.getOwnPropertyDescriptor(typed, name)?.get as (this: Uint8Array) => unknown;
+const bufferOf = getter('buffer') as (this: Uint8Array) => ArrayBufferLike;
+const offsetOf = getter('byteOffset') as (this: Uint8Array) => number;
+const setInto = Uint8Array.prototype.set;
+
+function viewOf(into: Uint8Array, at: number, length: number): Uint8Array {
+  return new Uint8Array(bufferOf.call(into), offsetOf.call(into) + at, length);
+}
+
 export const noLane: SyncCall = () => ({ ok: false, errno: 'ENOSYS', message: 'no sync lane' });
 
 const READ_ONLY: ReadonlySet<string> = new Set([...SYNC_FS_READ_ONLY, 'fd-path-flush']);
@@ -172,10 +183,11 @@ export function laneOf(
 ): SyncCall {
   if (!lane) return noLane;
   const transport = open(lane.sab, lane.port);
-  return (req) => {
-    if (!READ_ONLY.has(req.op)) return transport.call(req, Number.POSITIVE_INFINITY, req.op);
+  return (req, sink) => {
+    if (!READ_ONLY.has(req.op))
+      return transport.call(req, Number.POSITIVE_INFINITY, req.op, undefined, sink);
     try {
-      return transport.call(req, silence, req.op);
+      return transport.call(req, silence, req.op, undefined, sink);
     } catch (err) {
       const errno = (err as { code?: unknown } | null)?.code;
       return {
@@ -198,9 +210,9 @@ export class JsSyncKernel {
     this.unwind = unwind;
   }
 
-  raw(req: SyncSabRequestBody): SyncFsResult {
+  raw(req: SyncSabRequestBody, sink?: Uint8Array): SyncFsResult {
     this.unwind();
-    const result = this.lane(req);
+    const result = this.lane(req, sink);
     this.kernel.deliver();
     this.unwind();
     return result;
@@ -220,6 +232,19 @@ export class JsSyncKernel {
   bytes(req: SyncSabRequestBody): Uint8Array {
     const result = this.call(req);
     return result.ok && result.kind === 'bytes' ? result.bytes : new Uint8Array(0);
+  }
+
+  bytesInto(req: SyncSabRequestBody, sink: Uint8Array): number {
+    const result = this.raw(req, sink);
+    if (!result.ok) throw callError(result, req.op);
+    if (result.kind !== 'bytes') return 0;
+    const { bytes } = result;
+    if (
+      bufferOf.call(bytes) !== bufferOf.call(sink) ||
+      offsetOf.call(bytes) !== offsetOf.call(sink)
+    )
+      setInto.call(sink, bytes);
+    return bytes.length;
   }
 
   blocking(req: SyncSabRequestBody): SyncFsResult {
@@ -429,10 +454,17 @@ function syncFile(
       live();
       const max = Math.min(length - got, MAX_PREAD);
       if (max <= 0) break;
-      const chunk = kernel.bytes({ op: 'fd-pread', fd, offset: position + got, max });
+      const req = { op: 'fd-pread' as const, fd, offset: position + got, max };
+      if (target) {
+        const at = target.at + got;
+        const n = kernel.bytesInto(req, viewOf(target.into, at, max));
+        if (n === 0) break;
+        got += n;
+        continue;
+      }
+      const chunk = kernel.bytes(req);
       if (chunk.length === 0) break;
-      if (target) target.into.set(chunk, target.at + got);
-      else parts.push(chunk);
+      parts.push(chunk);
       got += chunk.length;
     } while (got < length);
     return target ? got : joined(parts, got);

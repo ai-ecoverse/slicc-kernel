@@ -1,6 +1,7 @@
 import type { SyncFsResult } from '../../realm/sync-fs-wire.ts';
 import { exactBody, type SabPostLike } from '../../realm/sync-sab-bridge.ts';
 import {
+  copyWindow,
   decodeSabResult,
   loadU53,
   SAB_I_CHUNK,
@@ -19,7 +20,10 @@ import {
   SYNC_SAB_NEXT_MSG,
   SYNC_SAB_REQ_MSG,
   type SyncSabRequestBody,
+  sabLoad,
+  sabStore,
   sabViews,
+  sabWaitAsync,
 } from '../../realm/sync-sab-wire.ts';
 
 export type WaitAsyncLike = (
@@ -32,12 +36,7 @@ export interface AsyncSabTransport {
   call(req: SyncSabRequestBody): Promise<SyncFsResult>;
 }
 
-const defaultWaitAsync: WaitAsyncLike = (a, i, v) =>
-  (
-    Atomics as unknown as {
-      waitAsync: WaitAsyncLike;
-    }
-  ).waitAsync(a, i, v);
+const defaultWaitAsync: WaitAsyncLike = (a, i, v) => (sabWaitAsync as WaitAsyncLike)(a, i, v);
 
 export async function changed(
   header: Int32Array,
@@ -60,11 +59,8 @@ export function createAsyncSabTransport(
 
   async function ready(id: number): Promise<void> {
     for (;;) {
-      const published = Atomics.load(header, SAB_I_PUB);
-      if (
-        Atomics.load(header, SAB_I_STATE) === SAB_STATE_READY &&
-        Atomics.load(header, SAB_I_SEQ) === id
-      ) {
+      const published = sabLoad(header, SAB_I_PUB);
+      if (sabLoad(header, SAB_I_STATE) === SAB_STATE_READY && sabLoad(header, SAB_I_SEQ) === id) {
         return;
       }
       await changed(header, SAB_I_PUB, published, waitAsync);
@@ -77,31 +73,31 @@ export function createAsyncSabTransport(
     let out: Uint8Array | null = null;
     let status = 0;
     let offset = 0;
-    Atomics.store(header, SAB_I_REQ, id);
+    sabStore(header, SAB_I_REQ, id);
     try {
       for (;;) {
-        Atomics.store(header, SAB_I_STATE, SAB_STATE_PENDING);
+        sabStore(header, SAB_I_STATE, SAB_STATE_PENDING);
         if (offset === 0) port.postMessage({ type: SYNC_SAB_REQ_MSG, id, req }, transfer);
         else port.postMessage({ type: SYNC_SAB_NEXT_MSG, id, offset });
         await ready(id);
         const total = loadU53(header, SAB_I_TOTAL, SAB_I_TOTAL_HI);
-        const chunk = Atomics.load(header, SAB_I_CHUNK);
+        const chunk = sabLoad(header, SAB_I_CHUNK);
         const at = loadU53(header, SAB_I_OFFSET, SAB_I_OFFSET_HI);
         if (at !== offset || chunk < 0 || total < 0 || offset + chunk > total) {
           return { ok: false, errno: 'EIO', message: 'sync-sab: torn reply' };
         }
         if (out === null) {
-          status = Atomics.load(header, SAB_I_STATUS);
+          status = sabLoad(header, SAB_I_STATUS);
           out = new Uint8Array(total);
         }
-        out.set(window.subarray(0, chunk), offset);
+        copyWindow(out, window, chunk, offset);
         offset += chunk;
         if (offset >= total) break;
         if (chunk === 0) return { ok: false, errno: 'EIO', message: 'sync-sab: empty chunk' };
       }
     } finally {
-      Atomics.store(header, SAB_I_REQ, 0);
-      Atomics.store(header, SAB_I_STATE, SAB_STATE_IDLE);
+      sabStore(header, SAB_I_REQ, 0);
+      sabStore(header, SAB_I_STATE, SAB_STATE_IDLE);
     }
     return decodeSabResult(status, out);
   }

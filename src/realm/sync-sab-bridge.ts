@@ -14,6 +14,7 @@ import {
   syncError,
 } from './sync-fs-wire.ts';
 import {
+  copyWindow,
   decodeSabResult,
   loadU53,
   publishMemory,
@@ -30,12 +31,15 @@ import {
   SAB_STATE_IDLE,
   SAB_STATE_PENDING,
   SAB_STATE_READY,
+  SAB_STATUS_BYTES,
   type SabViews,
   SYNC_SAB_NEXT_MSG,
   SYNC_SAB_REQ_MSG,
   type SyncSabNextMsg,
   type SyncSabReqMsg,
   type SyncSabRequestBody,
+  sabLoad,
+  sabStore,
   sabViews,
 } from './sync-sab-wire.ts';
 
@@ -48,7 +52,8 @@ export interface SyncSabTransport {
     req: SyncSabRequestBody,
     timeoutMs: number,
     label: string,
-    transfer?: Transferable[]
+    transfer?: Transferable[],
+    sink?: Uint8Array
   ): SyncFsResult;
 }
 
@@ -116,7 +121,7 @@ export function createSyncSabTransport(
   let typical = 0;
 
   const ready = (id: number): boolean =>
-    Atomics.load(header, SAB_I_STATE) === SAB_STATE_READY && Atomics.load(header, SAB_I_SEQ) === id;
+    sabLoad(header, SAB_I_STATE) === SAB_STATE_READY && sabLoad(header, SAB_I_SEQ) === id;
 
   function spinUntil(id: number, until: number): boolean {
     for (let stride = 0; stride < SPIN_STRIDES; stride++) {
@@ -137,7 +142,7 @@ export function createSyncSabTransport(
       return;
     }
     for (;;) {
-      const published = Atomics.load(header, SAB_I_PUB);
+      const published = sabLoad(header, SAB_I_PUB);
       if (ready(id)) {
         settled(start);
         return;
@@ -149,7 +154,7 @@ export function createSyncSabTransport(
   }
 
   return {
-    call(asked, timeoutMs, label, given = []): SyncFsResult {
+    call(asked, timeoutMs, label, given = [], sink?: Uint8Array): SyncFsResult {
       if (deps.memory) publishMemory(sab, deps.memory());
       const { req, transfer } = exactBody(asked, given);
       const id = ++seq;
@@ -157,10 +162,10 @@ export function createSyncSabTransport(
       let out: Uint8Array | null = null;
       let status = 0;
       let offset = 0;
-      Atomics.store(header, SAB_I_REQ, id);
+      sabStore(header, SAB_I_REQ, id);
       try {
         for (;;) {
-          Atomics.store(header, SAB_I_STATE, SAB_STATE_PENDING);
+          sabStore(header, SAB_I_STATE, SAB_STATE_PENDING);
           const msg: SyncSabReqMsg | SyncSabNextMsg =
             offset === 0
               ? { type: SYNC_SAB_REQ_MSG, id, req }
@@ -173,28 +178,42 @@ export function createSyncSabTransport(
           }
           awaitReady(id, now() + timeoutMs, label);
           const total = loadU53(header, SAB_I_TOTAL, SAB_I_TOTAL_HI);
-          const chunk = Atomics.load(header, SAB_I_CHUNK);
+          const chunk = sabLoad(header, SAB_I_CHUNK);
           const at = loadU53(header, SAB_I_OFFSET, SAB_I_OFFSET_HI);
           if (at !== offset || chunk < 0 || total < 0 || offset + chunk > total) {
             throw syncError('EIO', label);
           }
           if (out === null) {
-            status = Atomics.load(header, SAB_I_STATUS);
-            out = new Uint8Array(total);
+            status = sabLoad(header, SAB_I_STATUS);
+            out = landing(status, total, sink);
           }
-          out.set(window.subarray(0, chunk), offset);
+          copyWindow(out, window, chunk, offset);
           offset += chunk;
           if (offset >= total) break;
 
           if (chunk === 0) throw syncError('EIO', label);
         }
       } finally {
-        Atomics.store(header, SAB_I_REQ, 0);
-        Atomics.store(header, SAB_I_STATE, SAB_STATE_IDLE);
+        sabStore(header, SAB_I_REQ, 0);
+        sabStore(header, SAB_I_STATE, SAB_STATE_IDLE);
       }
       return decodeSabResult(status, out);
     },
   };
+}
+
+const typed = Object.getPrototypeOf(Uint8Array.prototype) as object;
+const getter = (name: string) =>
+  Object.getOwnPropertyDescriptor(typed, name)?.get as (this: Uint8Array) => unknown;
+const bufferOf = getter('buffer') as (this: Uint8Array) => ArrayBufferLike;
+const offsetOf = getter('byteOffset') as (this: Uint8Array) => number;
+const lengthOf = getter('length') as (this: Uint8Array) => number;
+
+function landing(status: number, total: number, sink: Uint8Array | undefined): Uint8Array {
+  if (!sink || status !== SAB_STATUS_BYTES || total > lengthOf.call(sink)) {
+    return new Uint8Array(total);
+  }
+  return new Uint8Array(bufferOf.call(sink), offsetOf.call(sink), total);
 }
 
 function errnoError(code: string, path: string, direct?: true): Error & { code: string } {

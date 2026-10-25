@@ -1,6 +1,21 @@
 import type { WasmSyscall } from '../kernel/process.ts';
 import type { SyncFsRequest, SyncFsResult } from './sync-fs-wire.ts';
 
+const atomicLoad = Atomics.load;
+const atomicStore = Atomics.store;
+const atomicWaitAsync = (Atomics as unknown as { waitAsync?: unknown }).waitAsync;
+const setBytes = Uint8Array.prototype.set;
+const bytesPart = Uint8Array.prototype.subarray;
+const decodeText = TextDecoder.prototype.decode;
+
+export const sabLoad = (a: Int32Array, i: number): number => atomicLoad(a, i);
+export const sabStore = (a: Int32Array, i: number, v: number): number => atomicStore(a, i, v);
+export const sabWaitAsync = atomicWaitAsync;
+
+export function copyWindow(out: Uint8Array, window: Uint8Array, chunk: number, at: number): void {
+  setBytes.call(out, bytesPart.call(window, 0, chunk), at);
+}
+
 export const SAB_HEADER_I32 = 18;
 export const SAB_CLOCK_OFFSET = SAB_HEADER_I32 * 4;
 export const SAB_CLOCK_I64 = 3;
@@ -38,12 +53,12 @@ export const SAB_I_BLOCKED_HI = 17;
 export type BlockedMask = readonly [number, number];
 
 export function loadBlocked(header: Int32Array): BlockedMask {
-  return [Atomics.load(header, SAB_I_BLOCKED), Atomics.load(header, SAB_I_BLOCKED_HI)];
+  return [sabLoad(header, SAB_I_BLOCKED), sabLoad(header, SAB_I_BLOCKED_HI)];
 }
 
 export function storeBlocked(header: Int32Array, [low, high]: BlockedMask): void {
-  Atomics.store(header, SAB_I_BLOCKED_HI, high);
-  Atomics.store(header, SAB_I_BLOCKED, low);
+  sabStore(header, SAB_I_BLOCKED_HI, high);
+  sabStore(header, SAB_I_BLOCKED, low);
 }
 
 export const anyBlocked = (mask: BlockedMask | undefined): boolean =>
@@ -52,17 +67,17 @@ export const anyBlocked = (mask: BlockedMask | undefined): boolean =>
 const U32 = 2 ** 32;
 
 export function storeU53(header: Int32Array, lo: number, hi: number, value: number): void {
-  Atomics.store(header, hi, Math.floor(value / U32));
-  Atomics.store(header, lo, (value % U32) | 0);
+  sabStore(header, hi, Math.floor(value / U32));
+  sabStore(header, lo, (value % U32) | 0);
 }
 
 export function loadU53(header: Int32Array, lo: number, hi: number): number {
-  return (Atomics.load(header, lo) >>> 0) + Atomics.load(header, hi) * U32;
+  return (sabLoad(header, lo) >>> 0) + sabLoad(header, hi) * U32;
 }
 
 export function publishMemory(sab: SharedArrayBuffer, bytes: number): void {
   if (bytes > 0)
-    Atomics.store(new Int32Array(sab, 0, SAB_HEADER_I32), SAB_I_MEMORY, Math.ceil(bytes / 65536));
+    sabStore(new Int32Array(sab, 0, SAB_HEADER_I32), SAB_I_MEMORY, Math.ceil(bytes / 65536));
 }
 
 export const SAB_STATE_IDLE = 0;
@@ -135,14 +150,14 @@ export function decodeSabResult(status: number, payload: Uint8Array): SyncFsResu
       return { ok: true, kind: 'void' };
     case SAB_STATUS_JSON: {
       try {
-        return { ok: true, kind: 'json', json: JSON.parse(decoder.decode(payload)) };
+        return { ok: true, kind: 'json', json: JSON.parse(decodeText.call(decoder, payload)) };
       } catch {
         return { ok: false, errno: 'EIO', message: 'sync-sab: malformed json payload' };
       }
     }
     case SAB_STATUS_ERRNO: {
       try {
-        const parsed = JSON.parse(decoder.decode(payload)) as {
+        const parsed = JSON.parse(decodeText.call(decoder, payload)) as {
           errno?: unknown;
           message?: unknown;
           direct?: unknown;

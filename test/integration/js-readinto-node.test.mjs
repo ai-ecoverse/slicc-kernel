@@ -52,3 +52,27 @@ test("readInto works on a JS program's device, /proc and FIFO files, async and s
     stderr: '',
   });
 });
+
+test("a JS program's readInto lands the same bytes across the bridge's 1 MiB windows, stops short at the end, and sees a write made between reads (#1626)", {
+  timeout: 120_000,
+}, async (t) => {
+  const kernel = await createNodeKernel();
+  t.after(() => kernel.terminate());
+  for (const file of ['package.json', 'bin/jstest.mjs']) {
+    await kernel.writeFile(`/node_modules/jstest/${file}`, await readFile(new URL(file, fixture)));
+  }
+  const r = await kernel.run(['jstest', 'readintowindows', '/tmp/windows'], { cwd: '/' });
+  assert.deepEqual(r, {
+    status: 0,
+    stdout: [
+      '0+2097159: 2097159 same',
+      '1048571+1048586: 1048586 same',
+      '1048575+2097152: 2097152 same',
+      '3144851+4096: 1000 same',
+      '3145861+16: 0 same',
+      'after write: 2097152 fresh',
+      '',
+    ].join('\n'),
+    stderr: '',
+  });
+});
