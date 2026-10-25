@@ -1,5 +1,5 @@
 import { permits, X_OK } from '../fs/access.ts';
-import { type ChangeView, RENAME_WAIT_MS, SHARED_TTL_MS } from '../fs/changes.ts';
+import { type ChangeView, renameWait, SHARED_TTL_MS } from '../fs/changes.ts';
 import {
   linkedWatch,
   RangedFile,
@@ -497,7 +497,7 @@ function renameFollower(
     const view = bridge.changes;
     const since = seen.get(bridge);
     let now = view?.renames() ?? 0;
-    if (missing && view && now === since) now = view.awaitRename(now, RENAME_WAIT_MS);
+    if (missing && view && now === since) now = view.awaitRename(now, renameWait(view));
     const ask = bridge.renames?.bind(bridge);
     if (since === undefined || now === since || !ask) return false;
     const held = [...open].filter((n) => !n.live.orphan && bridgeOf(n) === bridge);
