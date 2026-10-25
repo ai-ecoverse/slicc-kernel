@@ -1417,13 +1417,10 @@ export class OpfsFs implements KernelFs {
     return this.reading(path, async (handle) => {
       const seen = this.glanced(handle);
       if (seen && length > 0 && offset + length <= seen.size) {
-        const bytes = await seen
-          .slice(offset, offset + length)
-          .arrayBuffer()
-          .then(
-            (buffer) => new Uint8Array(buffer),
-            () => undefined
-          );
+        const bytes = await this.io(seen.slice(offset, offset + length).arrayBuffer()).then(
+          (buffer) => new Uint8Array(buffer),
+          () => undefined
+        );
         if (bytes?.length === length) return bytes;
         this.glances.delete(handle);
       }

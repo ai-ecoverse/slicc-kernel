@@ -46,10 +46,7 @@ test('/proc/sys/kernel/slicc_opfs_ops counts every request the root file system 
   const steps = [
     ['create', "os.close(os.open('/tmp/oo/f', os.O_WRONLY|os.O_CREAT|os.O_EXCL, 0o644))"],
     ['write', "fd = os.open('/tmp/oo/f', os.O_WRONLY); os.write(fd, b'abc'); os.close(fd)"],
-    [
-      'read',
-      "fd = os.open('/tmp/oo/f', os.O_RDONLY); time.sleep(0.15); os.read(fd, 3); os.close(fd)",
-    ],
+    ['read', "fd = os.open('/tmp/oo/f', os.O_RDONLY); os.read(fd, 3); os.close(fd)"],
     ['mkdir', "os.mkdir('/tmp/oo/d')"],
     ['list', "os.listdir('/tmp/oo/d')"],
     ['rename', "os.rename('/tmp/oo/f', '/tmp/oo/g')"],
