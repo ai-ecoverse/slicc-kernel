@@ -61,6 +61,10 @@ Object.defineProperty(BroadcastChannel.prototype, 'onmessage', {
       if (state.watch !== undefined && touched.includes(state.watch)) {
         control.postMessage({ id, seen: state.watch });
       }
+      const bound = (event.data?.holds?.add ?? []).some(
+        ([path, fid]) => path === state.watch && fid !== undefined
+      );
+      if (bound) control.postMessage({ id, bound: state.watch });
       return out;
     });
   },
