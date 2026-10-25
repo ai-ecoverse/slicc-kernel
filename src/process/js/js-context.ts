@@ -140,6 +140,10 @@ export interface JsPromiseState {
   value: unknown;
 }
 
+export type JsStackFormatter = (error: unknown, callSites: readonly object[]) => unknown;
+
+export type JsStackHook = (fn: JsStackFormatter | null) => JsStackFormatter | null;
+
 export type JsPromiseProbe = (promise: unknown) => JsPromiseState | undefined;
 
 export interface JsProgramContext {
@@ -304,6 +308,7 @@ export interface ContextOptions {
   runScript?: JsRunScript | undefined;
   modulePath?: string | undefined;
   promiseState?: JsPromiseProbe | undefined;
+  stackFormatter?: JsStackHook | undefined;
   fs?: { owners: boolean; links: boolean };
   owned?: SharedArrayBuffer;
   held?: HeldCwdInit | undefined;
@@ -705,10 +710,14 @@ function measured(measure: (() => JsMemory) | undefined): JsMemory {
   return out;
 }
 
-function realmOps(o: ContextOptions): Pick<JsSyncContext, 'runScript' | 'promiseState'> {
+function realmOps(
+  o: ContextOptions
+): Pick<JsSyncContext, 'runScript' | 'promiseState' | 'setStackFormatter'> {
+  const hook = o.stackFormatter;
   return {
     runScript: scriptRunner(o.runScript),
     promiseState: (promise) => o.promiseState?.(promise),
+    ...(hook ? { setStackFormatter: (fn: JsStackFormatter | null) => hook(fn) } : {}),
   };
 }
 
