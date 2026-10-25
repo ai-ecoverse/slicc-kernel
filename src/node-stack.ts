@@ -154,6 +154,7 @@ export function programScript(name: string, hash: string): void {
   apply(setAdd, programHashes, [hash]);
 }
 
+const SOURCE_NAMES = 4096;
 const sourceNames = new Set<string>();
 
 function programName(name: string): boolean {
@@ -171,9 +172,8 @@ export function noteSourceUrls(trace: readonly object[]): void {
     const origin = apply(originOf, site, []) as string | undefined;
     if (typeof origin !== 'string' || evalAt(origin)) continue;
     const name = apply(nameOf, site, []) as unknown;
-    if (typeof name === 'string' && apply(setHas, ownNames, [name]) !== true) {
-      apply(setAdd, sourceNames, [name]);
-    }
+    if (typeof name !== 'string' || apply(setHas, ownNames, [name]) === true) continue;
+    if (sourceNames.size < SOURCE_NAMES) apply(setAdd, sourceNames, [name]);
   }
 }
 
