@@ -17,6 +17,12 @@
     "repo": "ai-ecoverse/slicc-kernel",
     "publish": true
   },
+  "slicc": {
+    "unitSources": [
+      "src",
+      "tools"
+    ]
+  },
   "publishConfig": {
     "access": "public",
     "provenance": true
