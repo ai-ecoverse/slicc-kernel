@@ -156,11 +156,14 @@ export class FileBuffer {
     return this.data ? undefined : size;
   }
 
-  private wrote(at: number, bytes: Uint8Array): void {
+  private wrote(at: number, bytes: Uint8Array, stale: boolean): void {
+    const now = this.watch?.view.now() ?? 0;
     if (this.ranged) {
-      this.ranged.wrote(at, bytes.length);
+      this.ranged.wrote(at, bytes.length, now, stale);
       return;
     }
+    if (stale) this.data = undefined;
+    this.seen = now;
     if (!this.data) return;
     const end = at + bytes.length;
     this.ensure(end);
@@ -201,8 +204,11 @@ export class FileBuffer {
     const { pwrite } = this.fs;
     if (pwrite && this.crowded() && end > this.size()) {
       const copy = bytes.slice();
+      const before = this.ranged
+        ? this.ranged.stale()
+        : this.watch?.view.changedSince(this.seen, this.where).changed !== false;
       this.retried(() => pwrite.call(this.fs, this.where, at, copy, true));
-      this.wrote(at, bytes);
+      this.wrote(at, bytes, before);
       return bytes.length;
     }
     this.dirty = true;
