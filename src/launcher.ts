@@ -3314,7 +3314,7 @@ export class Launcher {
     const file = this.unlinked.adopt(hidden, Math.max(keeping.length + nodes.length, 1));
     const kept = nodes.filter((open) => open.keepBound([hidden, path], fid, file)).length;
     for (let i = kept; i < nodes.length; i++) file.release();
-    if (keeping.length === 0 && kept === 0) file.release();
+    if (keeping.length === 0 && nodes.length === 0) file.release();
     for (const [holds, ids] of keeping) holds.keepBound(ids, path, file);
     void this.rootFs.announceHolds?.([], [path, hidden], false);
   }
