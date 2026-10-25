@@ -250,3 +250,33 @@ test("errorSource answers for a SyntaxError from the native JSON.parse called by
     moved: null,
   });
 });
+
+test('the sourceURL names behind eval frames are kept as an LRU of 4096: a name first seen after 4096 others still answers, a refreshed early name survives 4095 newer ones, an unused one is evicted (#1658)', async (t) => {
+  const out = await run(
+    t,
+    `export default async function main(ctx) {
+  const grab = (f) => { try { f(); } catch (e) { return e; } };
+  const q = (e) => { void e.stack; return ctx.sync.errorSource(e)?.sourceLine ?? null; };
+  const mk = (n, s = '\\\\tundefinedFn()//' + n) => q(grab(() => new Function('const s = "' + s + '";\\nglobalThis["ev" + "al"](s)\\n//# sourceURL=/os/' + n + '.js')()));
+  const r = {};
+  r.early = mk('early');
+  r.unused = mk('unused');
+  for (let i = 0; i < 4100; i++) {
+    mk('n' + i);
+    if (i % 1000 === 0) mk('early');
+  }
+  r.late = mk('late');
+  r.earlyAgain = mk('earlyLast', '\\\\tundefinedFn()//early');
+  r.unusedAgain = mk('unusedLast', '\\\\tundefinedFn()//unused');
+  await ctx.write(1, JSON.stringify(r));
+  return 0;
+}`
+  );
+  assert.deepEqual(out, {
+    early: '\tundefinedFn()//early',
+    unused: '\tundefinedFn()//unused',
+    late: '\tundefinedFn()//late',
+    earlyAgain: '\tundefinedFn()//early',
+    unusedAgain: null,
+  });
+});
