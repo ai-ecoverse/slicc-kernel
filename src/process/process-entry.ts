@@ -17,6 +17,7 @@ import {
 } from '../kernel/protocol.ts';
 import type { SabPostLike } from '../realm/sync-sab-bridge.ts';
 import { runWasmProcess } from './process-runtime.ts';
+import { rawStack } from './raw-stack.ts';
 
 export type ProcessRunner = (init: WasmProcessInitMsg, port: SabPostLike) => Promise<number>;
 
@@ -66,7 +67,7 @@ export function processEntry(
   const failed = (err: unknown, code?: number): void =>
     port.postMessage({
       type: WASM_PROCESS_ERROR,
-      message: err instanceof Error ? (err.stack ?? err.message) : String(err),
+      message: err instanceof Error ? (rawStack(err) ?? err.message) : String(err),
       ...(code === undefined ? {} : { code }),
     } satisfies WasmProcessErrorMsg);
   let refused: { error: unknown } | null | undefined;

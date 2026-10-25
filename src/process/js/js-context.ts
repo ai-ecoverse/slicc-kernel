@@ -140,7 +140,11 @@ export interface JsPromiseState {
   value: unknown;
 }
 
-export type JsStackFormatter = (error: unknown, callSites: readonly object[]) => unknown;
+export type JsStackFormatter = (
+  error: unknown,
+  callSites: readonly object[],
+  own?: (error: unknown, callSites: object[]) => unknown
+) => unknown;
 
 export interface JsErrorSource {
   sourceLine: string;
@@ -150,7 +154,10 @@ export interface JsErrorSource {
 
 export type JsErrorSourceProbe = (error: unknown) => JsErrorSource | undefined;
 
-export type JsStackHook = (fn: JsStackFormatter | null) => JsStackFormatter | null;
+export type JsStackHook = (
+  fn: JsStackFormatter | null,
+  options?: { own?: boolean }
+) => JsStackFormatter | null;
 
 export type JsPromiseProbe = (promise: unknown) => JsPromiseState | undefined;
 
@@ -727,7 +734,12 @@ function realmOps(
   return {
     runScript: scriptRunner(o.runScript),
     promiseState: (promise) => o.promiseState?.(promise),
-    ...(hook ? { setStackFormatter: (fn: JsStackFormatter | null) => hook(fn) } : {}),
+    ...(hook
+      ? {
+          setStackFormatter: (fn: JsStackFormatter | null, options?: { own?: boolean }) =>
+            hook(fn, options),
+        }
+      : {}),
     ...(source ? { errorSource: (error: unknown) => source(error) } : {}),
   };
 }
