@@ -92,6 +92,7 @@ function within(path: string, root: string): boolean {
 }
 
 export class VfsNode {
+  fid: string | undefined;
   private data: Uint8Array | undefined;
   private ranged: AsyncRangedFile | undefined;
   private readonly pin: VersionPin | undefined;
@@ -475,6 +476,7 @@ export class VfsNodes implements UnlinkHolder {
 
   changed: ((path: string) => void) | undefined;
   movedAway: ((from: string, to: string) => void) | undefined;
+  opened: ((node: VfsNode) => void) | undefined;
 
   dirtied: ((delta: number) => void) | undefined;
 
@@ -674,6 +676,7 @@ export class VfsNodes implements UnlinkHolder {
     node.ino ??= ino;
     node.opens++;
     if (writable) node.writers++;
+    if (node.opens === 1) this.opened?.(node);
     return node;
   }
 
@@ -692,6 +695,7 @@ export class VfsNodes implements UnlinkHolder {
     }
     node.opens++;
     if (writable) node.writers++;
+    if (node.opens === 1) this.opened?.(node);
     return node;
   }
 
@@ -721,6 +725,36 @@ export class VfsNodes implements UnlinkHolder {
 
   held(): Iterable<string> {
     return this.byPath.keys();
+  }
+
+  heldIds(): Array<[string, string | undefined]> {
+    const out: Array<[string, string | undefined]> = [];
+    for (const [path, node] of this.byPath) if (!this.kept.has(node)) out.push([path, node.fid]);
+    return out;
+  }
+
+  holdsAt(path: string): boolean {
+    return this.byPath.has(path);
+  }
+
+  async bindIds(id: (path: string) => Promise<string | undefined> | undefined): Promise<void> {
+    for (const [path, node] of [...this.byPath]) {
+      if (node.fid !== undefined || this.kept.has(node)) continue;
+      node.fid = await id(path)?.catch(() => undefined);
+    }
+  }
+
+  keepBound(paths: readonly string[], fid: string | undefined, file: KeptFile): boolean {
+    for (const at of paths) {
+      const node = this.byPath.get(at);
+      if (!node || this.kept.has(node) || node.fid !== fid) continue;
+      this.byPath.delete(at);
+      node.renamedTo(file.hidden);
+      this.byPath.set(file.hidden, node);
+      this.kept.set(node, file);
+      return true;
+    }
+    return false;
   }
 
   owns(): boolean {
