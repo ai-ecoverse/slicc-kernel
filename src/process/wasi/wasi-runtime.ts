@@ -21,6 +21,7 @@ import { loadBlocked, publishMemory, SAB_HEADER_I32 } from '../../realm/sync-sab
 import { SyscallError } from '../kernel-streams.ts';
 import { identify, kernelSys } from '../process-runtime.ts';
 import { SignalGate, type SignalHooks } from '../process-signals.ts';
+import { rawStack } from '../raw-stack.ts';
 import { dylinkInfo } from './dylink.ts';
 import { cachingBridge } from './wasi-files.ts';
 import { WasiExit, type WasiFunction, WasiHost, type WasiHostOptions } from './wasi-host.ts';
@@ -833,7 +834,7 @@ export function trapMessage(
 ): string {
   const head = `wasm trap${where}: ${e.message}`;
   if (env.SLICC_WASM_BACKTRACE !== '1') return head;
-  const lines = (e.stack ?? '').split('\n');
+  const lines = (rawStack(e) ?? '').split('\n');
 
   const main = name && mainModule(lines);
 

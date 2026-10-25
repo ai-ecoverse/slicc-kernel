@@ -1,8 +1,11 @@
 import { createRequire } from 'node:module';
 import { types } from 'node:util';
 import type { JsErrorSource, JsStackFormatter } from './process/js/js-context.ts';
+import { setRawStack } from './process/raw-stack.ts';
 
 type Prepare = (error: unknown, trace: object[]) => unknown;
+
+type Callback = (realm: unknown, error: unknown, trace: object[]) => unknown;
 
 interface Positions {
   sourceLine?: unknown;
@@ -15,9 +18,17 @@ interface Internals {
   setInternalPrepareStackTrace: (fn: Prepare) => void;
   fallback: Prepare;
   positions: ((error: object) => Positions | undefined) | undefined;
+  setCallback: ((fn: Callback) => void) | undefined;
+  overrides: WeakMap<object, Prepare>;
+  nodeDefault: unknown;
 }
 
-type Binding = (name: string) => { getErrorSourcePositions?: unknown };
+interface ErrorsBinding {
+  getErrorSourcePositions?: unknown;
+  setPrepareStackTraceCallback?: unknown;
+}
+
+type Binding = (name: string) => ErrorsBinding;
 
 export function quietly<T>(target: { emitWarning: unknown }, run: () => T): T {
   const emit = target.emitWarning;
@@ -29,17 +40,20 @@ export function quietly<T>(target: { emitWarning: unknown }, run: () => T): T {
   }
 }
 
-export function positionsOf(load: (id: string) => unknown): Internals['positions'] {
+export function bindingOf(load: (id: string) => unknown): ErrorsBinding {
   try {
     const { internalBinding } = quietly(
       process,
       () => load('internal/test/binding') as { internalBinding: Binding }
     );
-    const get = internalBinding('errors').getErrorSourcePositions;
-    return typeof get === 'function' ? (get as Internals['positions']) : undefined;
+    return internalBinding('errors');
   } catch {
-    return undefined;
+    return {};
   }
+}
+
+function fn<T>(value: unknown): T | undefined {
+  return typeof value === 'function' ? (value as T) : undefined;
 }
 
 const apply = Reflect.apply;
@@ -52,6 +66,9 @@ const setHas = Set.prototype.has;
 const setAdd = Set.prototype.add;
 const mapGet = WeakMap.prototype.get;
 const mapSet = WeakMap.prototype.set;
+const mapHas = WeakMap.prototype.has;
+const mapDelete = WeakMap.prototype.delete;
+const MainError = Error;
 const isNativeError = types.isNativeError;
 const freeze = Object.freeze;
 const blank = Object.create;
@@ -62,6 +79,8 @@ function internals(): Internals | undefined {
     const errors = load('internal/errors') as {
       setInternalPrepareStackTrace?: unknown;
       defaultPrepareStackTrace?: unknown;
+      overrideStackTrace?: unknown;
+      ErrorPrepareStackTrace?: unknown;
     };
     const set = errors.setInternalPrepareStackTrace;
     let fallback = errors.defaultPrepareStackTrace;
@@ -72,11 +91,17 @@ function internals(): Internals | undefined {
         }
       ).prepareStackTraceWithSourceMaps;
     }
-    if (typeof set !== 'function' || typeof fallback !== 'function') return undefined;
+    const overrides = errors.overrideStackTrace;
+    const usable = typeof set === 'function' && typeof fallback === 'function';
+    if (!usable || !types.isWeakMap(overrides)) return undefined;
+    const binding = bindingOf(load);
     return {
       setInternalPrepareStackTrace: set as Internals['setInternalPrepareStackTrace'],
       fallback: fallback as Prepare,
-      positions: positionsOf(load),
+      positions: fn(binding.getErrorSourcePositions),
+      setCallback: fn(binding.setPrepareStackTraceCallback),
+      overrides: overrides as WeakMap<object, Prepare>,
+      nodeDefault: errors.ErrorPrepareStackTrace,
     };
   } catch {
     return undefined;
@@ -194,6 +219,7 @@ export function keptFrames(trace: readonly object[]): object[] {
 }
 
 let formatter: JsStackFormatter | null = null;
+let withOwn = false;
 let formatting = false;
 
 interface Seen {
@@ -216,12 +242,16 @@ function positionsAt(
   }
 }
 
+function record(positions: Internals['positions'], error: unknown, trace: object[]): void {
+  if (typeof error === 'object' && error !== null && trace.length > 0) {
+    const site = trace[0] as object;
+    apply(mapSet, seen, [error, { site, at: positionsAt(positions, error, site) }]);
+  }
+}
+
 export function stackDispatcher(fallback: Prepare, positions?: Internals['positions']): Prepare {
   return (error, trace) => {
-    if (typeof error === 'object' && error !== null && trace.length > 0) {
-      const site = trace[0] as object;
-      apply(mapSet, seen, [error, { site, at: positionsAt(positions, error, site) }]);
-    }
+    record(positions, error, trace);
     const fn = formatter;
     if (fn === null || formatting) return apply(fallback, undefined, [error, trace]);
     formatting = true;
@@ -236,18 +266,104 @@ export function stackDispatcher(fallback: Prepare, positions?: Internals['positi
   };
 }
 
+interface Own {
+  fn: Prepare;
+  self: unknown;
+}
+
+function errorOf(realm: unknown): unknown {
+  return realm === null || realm === undefined ? undefined : (realm as { Error?: unknown }).Error;
+}
+
+function prepareOf(holder: unknown): unknown {
+  return holder === null || holder === undefined
+    ? undefined
+    : (holder as { prepareStackTrace?: unknown }).prepareStackTrace;
+}
+
+export function ownPrepare(realm: unknown, nodeDefault: unknown): Own | undefined {
+  let self: unknown;
+  if (typeof prepareOf(errorOf(realm)) === 'function') self = errorOf(realm);
+  else if (typeof prepareOf(MainError) === 'function') self = MainError;
+  else return undefined;
+  const value = prepareOf(self);
+  return value === nodeDefault ? undefined : { fn: value as Prepare, self };
+}
+
+function calling<T>(run: () => T): T {
+  formatting = true;
+  try {
+    return run();
+  } finally {
+    formatting = false;
+  }
+}
+
+export function kernelCallback(
+  internal: Pick<Internals, 'fallback' | 'positions' | 'overrides' | 'nodeDefault'>,
+  dispatch: Prepare
+): Callback {
+  const { fallback, positions, overrides, nodeDefault } = internal;
+  return (realm, error, trace) => {
+    if (apply(mapHas, overrides, [error]) === true) {
+      const override = apply(mapGet, overrides, [error]) as Prepare;
+      apply(mapDelete, overrides, [error]);
+      return apply(override, undefined, [error, trace]);
+    }
+    const own = ownPrepare(realm, nodeDefault);
+    if (formatting) return apply(fallback, undefined, [error, keptFrames(trace)]);
+    const fmt = formatter;
+    if (fmt !== null && withOwn) {
+      record(positions, error, trace);
+      return calling(() => apply(fmt, undefined, [error, keptFrames(trace), own?.fn]));
+    }
+    if (own === undefined) return apply(dispatch, undefined, [error, trace]);
+    record(positions, error, trace);
+    return calling(() => apply(own.fn, own.self, [error, keptFrames(trace)]));
+  };
+}
+
+export function rawReader(
+  overrides: WeakMap<object, Prepare>,
+  fallback: Prepare
+): (error: Error) => unknown {
+  return (error) => {
+    apply(mapSet, overrides, [
+      error,
+      (e: unknown, trace: object[]) => apply(fallback, undefined, [e, trace]),
+    ]);
+    try {
+      return error.stack;
+    } finally {
+      apply(mapDelete, overrides, [error]);
+    }
+  };
+}
+
 const found = internals();
-if (found) found.setInternalPrepareStackTrace(stackDispatcher(found.fallback, found.positions));
+if (found) {
+  const dispatch = stackDispatcher(found.fallback, found.positions);
+  found.setInternalPrepareStackTrace(dispatch);
+  if (found.setCallback) {
+    found.setCallback(kernelCallback(found, dispatch));
+    setRawStack(rawReader(found.overrides, found.fallback));
+  }
+}
 
 export const nodeStackFormatter:
-  | ((fn: JsStackFormatter | null) => JsStackFormatter | null)
+  | ((fn: JsStackFormatter | null, options?: { own?: boolean }) => JsStackFormatter | null)
   | undefined = found
-  ? (fn) => {
-      if (fn !== null && typeof fn !== 'function') {
+  ? (next, options) => {
+      if (next !== null && typeof next !== 'function') {
         throw new TypeError('setStackFormatter needs a function or null');
       }
+      const own = options === undefined ? false : (options as { own?: unknown }).own;
+      if (typeof own !== 'boolean' && own !== undefined) {
+        throw new TypeError('setStackFormatter: own must be a boolean');
+      }
       const previous = formatter;
-      formatter = fn;
+      formatter = next;
+      withOwn = next !== null && own === true;
       return previous;
     }
   : undefined;

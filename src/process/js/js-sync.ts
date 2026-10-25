@@ -85,6 +85,12 @@ export interface JsCred {
   groups: number[];
 }
 
+export type JsStackFormatterFn = (
+  error: unknown,
+  callSites: readonly object[],
+  own?: (error: unknown, callSites: object[]) => unknown
+) => unknown;
+
 export interface JsSyncContext {
   readonly kernel: { readonly version: string };
   tty: JsSyncTty;
@@ -103,8 +109,9 @@ export interface JsSyncContext {
     promise: unknown
   ): { state: 'pending' | 'fulfilled' | 'rejected'; value: unknown } | undefined;
   setStackFormatter?(
-    fn: ((error: unknown, callSites: readonly object[]) => unknown) | null
-  ): ((error: unknown, callSites: readonly object[]) => unknown) | null;
+    fn: JsStackFormatterFn | null,
+    options?: { own?: boolean }
+  ): JsStackFormatterFn | null;
   errorSource?(
     error: unknown
   ): { sourceLine: string; lineNumber: number; startColumn: number } | undefined;

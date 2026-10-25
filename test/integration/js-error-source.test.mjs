@@ -95,7 +95,7 @@ test("ctx.sync.errorSource gives the source line of an error in the program's ow
   assert.deepEqual(thread, one);
 });
 
-test("errorSource answers undefined for kernel-made errors, non-errors, a script named like the kernel worker at the kernel's own line, and errors an own Error.prepareStackTrace formats (#1610)", async (t) => {
+test("errorSource answers undefined for kernel-made errors, non-errors, a script named like the kernel worker at the kernel's own line, and still answers for an error an own Error.prepareStackTrace formats (#1610, #1631)", async (t) => {
   const bundle = await readFile(new URL(KERNEL_URL), 'utf8');
   const line = bundle.split('\n').findIndex((l) => /return positions\d*\(error\)/.test(l)) + 1;
   assert.ok(line > 0, 'the kernel line that asks V8 for the positions');
@@ -126,7 +126,7 @@ test("errorSource answers undefined for kernel-made errors, non-errors, a script
     kernelAsync: null,
     values: [null, null, null, null, null, null, null],
     borrowed: [],
-    own: null,
+    own: { sourceLine: 'null.x', lineNumber: 1, startColumn: 5 },
   });
 });
 
