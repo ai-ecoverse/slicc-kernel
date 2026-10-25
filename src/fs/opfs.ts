@@ -1740,6 +1740,10 @@ export class OpfsFs implements KernelFs {
     const children = new Map<string, Handle | MetaEntry>();
     this.others++;
     for await (const child of handle.values()) children.set(child.name, child);
+    if (this.absent.size > 0) {
+      const base = found.path === '/' ? '' : found.path;
+      for (const name of children.keys()) this.absent.deleteTree(`${base}/${name}`);
+    }
     for (const link of await this.meta.links(found.path)) {
       const name = baseOf(link.path);
       if (!children.has(name)) children.set(name, link);
