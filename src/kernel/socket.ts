@@ -180,6 +180,10 @@ export class KernelSocket implements KernelFile {
     if (bytes.length === 0 && this.reset) throw this.reset;
     return bytes;
   }
+  private connectReset(): string {
+    const at = this.peer?.family === 'inet' ? ` ${this.peer.host}:${this.peer.port}` : '';
+    return `connect ECONNRESET${at}`;
+  }
   private drained(rx: KernelPipe): void {
     if (this.refused && rx.buffered === 0) throw this.refused;
   }
@@ -397,6 +401,7 @@ export class KernelSocket implements KernelFile {
     signal.throwIfAborted();
     this.served = true;
     let handshaking = true;
+    let heard = false;
     const view: UplinkConn = {
       localAddr: '',
       remoteAddr: '',
@@ -406,11 +411,13 @@ export class KernelSocket implements KernelFile {
           .catch(() => EMPTY);
         if (bytes.length === 0 && this.refused)
           throw new KernelError('ECONNRESET', 'read ECONNRESET');
+        heard ||= bytes.length > 0;
         return bytes.length > 0 ? bytes : null;
       },
       write: (bytes) =>
         raw.tx.write(bytes).catch((err: unknown) => {
-          throw this.refused ? new KernelError('ECONNRESET', 'read ECONNRESET') : err;
+          if (!this.refused) throw err;
+          throw new KernelError('ECONNRESET', heard ? 'read ECONNRESET' : this.connectReset());
         }),
       closeWrite: () => raw.tx.closeWrite(),
       close: () => {
