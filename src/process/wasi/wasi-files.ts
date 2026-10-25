@@ -152,7 +152,8 @@ export class FileBuffer {
 
   private exact(): number | undefined {
     this.flush();
-    const size = (this.watch as RangedWatch).stat(this.where).size;
+    const watch = this.watch as RangedWatch;
+    const size = this.retried(() => watch.stat(this.where)).size;
     if (this.ranged) {
       if (size !== this.ranged.size()) this.ranged.reread();
       return undefined;
