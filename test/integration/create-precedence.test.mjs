@@ -162,7 +162,13 @@ const shRows = (paths, src, rc, msg) =>
     )
     .join('');
 
-const HIDDEN = ['/home/alice/x', '/home/alice/f', '/home/alice/nx', '/home/alice/x/y'];
+const HIDDEN = [
+  '/home/alice/x',
+  '/home/alice/f',
+  '/home/alice/nx',
+  '/home/alice/x/y',
+  '/home/alice/nx/y',
+];
 const EXISTING = ['/home/alice/x', '/home/alice/f'];
 const NO_RENAME_PY = PY_OPS.filter((op) => op !== 'rename');
 const NO_RENAME_JS = JS_OPS.filter((op) => !op.endsWith('rename'));

@@ -196,7 +196,7 @@ async function unwritable(g: Guard, op: string, path: string, dir: Walked): Prom
     deny(g, op, dir.denied);
     return false;
   }
-  const perm = dir.perm;
+  const perm = dir.denied === dir.path ? dir.perm : undefined;
   if (perm && !(await present(g.fs, dir.path, true))) return false;
   if (perm && permits(g.cred, perm, X_OK)) return true;
   deny(g, op, path);
