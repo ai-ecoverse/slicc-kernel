@@ -154,6 +154,16 @@ export interface SyncShared {
 
 const encoder = new TextEncoder();
 
+const typed = Object.getPrototypeOf(Uint8Array.prototype) as object;
+const getter = (name: string) =>
+  Object.getOwnPropertyDescriptor(typed, name)?.get as (this: Uint8Array) => unknown;
+const bufferOf = getter('buffer') as (this: Uint8Array) => ArrayBufferLike;
+const offsetOf = getter('byteOffset') as (this: Uint8Array) => number;
+
+function viewOf(into: Uint8Array, at: number, length: number): Uint8Array {
+  return new Uint8Array(bufferOf.call(into), offsetOf.call(into) + at, length);
+}
+
 export const noLane: SyncCall = () => ({ ok: false, errno: 'ENOSYS', message: 'no sync lane' });
 
 const READ_ONLY: ReadonlySet<string> = new Set([...SYNC_FS_READ_ONLY, 'fd-path-flush']);
@@ -166,7 +176,8 @@ export function laneOf(
   if (!lane) return noLane;
   const transport = open(lane.sab, lane.port);
   return (req, sink) => {
-    if (!READ_ONLY.has(req.op)) return transport.call(req, Number.POSITIVE_INFINITY, req.op);
+    if (!READ_ONLY.has(req.op))
+      return transport.call(req, Number.POSITIVE_INFINITY, req.op, undefined, sink);
     try {
       return transport.call(req, silence, req.op, undefined, sink);
     } catch (err) {
@@ -220,7 +231,11 @@ export class JsSyncKernel {
     if (!result.ok) throw callError(result, req.op);
     if (result.kind !== 'bytes') return 0;
     const { bytes } = result;
-    if (bytes.buffer !== sink.buffer || bytes.byteOffset !== sink.byteOffset) sink.set(bytes);
+    if (
+      bufferOf.call(bytes) !== bufferOf.call(sink) ||
+      offsetOf.call(bytes) !== offsetOf.call(sink)
+    )
+      sink.set(bytes);
     return bytes.length;
   }
 
@@ -434,7 +449,7 @@ function syncFile(
       const req = { op: 'fd-pread' as const, fd, offset: position + got, max };
       if (target) {
         const at = target.at + got;
-        const n = kernel.bytesInto(req, target.into.subarray(at, at + max));
+        const n = kernel.bytesInto(req, viewOf(target.into, at, max));
         if (n === 0) break;
         got += n;
         continue;

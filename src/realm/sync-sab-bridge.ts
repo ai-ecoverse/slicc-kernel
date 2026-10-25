@@ -199,9 +199,18 @@ export function createSyncSabTransport(
   };
 }
 
+const typed = Object.getPrototypeOf(Uint8Array.prototype) as object;
+const getter = (name: string) =>
+  Object.getOwnPropertyDescriptor(typed, name)?.get as (this: Uint8Array) => unknown;
+const bufferOf = getter('buffer') as (this: Uint8Array) => ArrayBufferLike;
+const offsetOf = getter('byteOffset') as (this: Uint8Array) => number;
+const lengthOf = getter('length') as (this: Uint8Array) => number;
+
 function landing(status: number, total: number, sink: Uint8Array | undefined): Uint8Array {
-  if (sink && status === SAB_STATUS_BYTES && total <= sink.length) return sink.subarray(0, total);
-  return new Uint8Array(total);
+  if (!sink || status !== SAB_STATUS_BYTES || total > lengthOf.call(sink)) {
+    return new Uint8Array(total);
+  }
+  return new Uint8Array(bufferOf.call(sink), offsetOf.call(sink), total);
 }
 
 function errnoError(code: string, path: string, direct?: true): Error & { code: string } {
