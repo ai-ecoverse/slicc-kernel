@@ -190,6 +190,19 @@ async function stickyEntry(g: Guard, op: string, path: string, dir: Walked): Pro
   if (await present(g.fs, entry, false)) deny(g, op, path, 'EPERM');
 }
 
+async function unwritable(g: Guard, op: string, path: string, dir: Walked): Promise<boolean> {
+  if (dir.denied === undefined) return false;
+  if (dir.link) {
+    deny(g, op, dir.denied);
+    return false;
+  }
+  const perm = dir.perm;
+  if (perm && !(await present(g.fs, dir.path, true))) return false;
+  if (perm && permits(g.cred, perm, X_OK)) return true;
+  deny(g, op, path);
+  return false;
+}
+
 export async function inParent(
   g: Guard,
   op: string,
@@ -197,27 +210,26 @@ export async function inParent(
   old: boolean | 'replaced' = false
 ): Promise<void> {
   await fence(g, op, path);
-  if (old === 'replaced') {
-    const dir = await need(g, op, parentOf(path), W_OK | X_OK, DIR, path);
-    return dir.denied === undefined ? stickyEntry(g, op, path, dir) : undefined;
-  }
-  if (!old) return void (await need(g, op, parentOf(path), W_OK | X_OK, DIR, path));
   const dir = await access(g.fs, g.cred, parentOf(path), W_OK | X_OK, linked(g, DIR));
+  if (old !== true) {
+    if (await unwritable(g, op, path, dir)) deny(g, op, path);
+    else if (old === 'replaced' && dir.denied === undefined) await stickyEntry(g, op, path, dir);
+    return;
+  }
   if (dir.denied === undefined) return stickyEntry(g, op, path, dir);
   if (dir.link) return deny(g, op, dir.denied);
   const lookup = dir.denied === dir.path && dir.perm && permits(g.cred, dir.perm, X_OK);
   if (!lookup || (await present(g.fs, entryIn(dir, path), false))) deny(g, op, path);
 }
 
-export async function makeIn(g: Guard, op: string, path: string): Promise<void> {
+export async function makeIn(g: Guard, op: string, path: string, parents = true): Promise<void> {
   for (let dir = parentOf(path); ; dir = parentOf(dir)) {
     const walked = await access(g.fs, g.cred, dir, W_OK | X_OK, linked(g, DIR));
-    if (walked.link) return deny(g, op, walked.denied as string);
-    if (walked.denied !== undefined) {
+    if (await unwritable(g, op, path, walked)) {
       if (!(await present(g.fs, path, true))) deny(g, op, path);
       return;
     }
-    if (!walked.missing || dir === '/') return;
+    if (!parents || !walked.missing || dir === '/') return;
   }
 }
 
