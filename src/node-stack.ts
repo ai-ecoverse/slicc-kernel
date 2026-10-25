@@ -319,7 +319,7 @@ export function kernelCallback(
     }
     if (own === undefined) return apply(dispatch, undefined, [error, trace]);
     record(positions, error, trace);
-    return calling(() => apply(own.fn, own.self, [error, keptFrames(trace)]));
+    return apply(own.fn, own.self, [error, trace]);
   };
 }
 

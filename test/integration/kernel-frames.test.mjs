@@ -28,8 +28,7 @@ const PROBE = `const probe = async (ctx, name) => {
   Error.prepareStackTrace = before;
   const all = stacks.join('\\n') + '\\n' + custom;
   return {
-    named: stacks.every((s) => s.includes('slicc-kernel:/' + name)),
-    ownGetsNone: !custom.includes('slicc-kernel:') && !custom.includes('file:'),
+    named: stacks.every((s) => s.includes('slicc-kernel:/' + name)) && custom.includes('slicc-kernel:/' + name),
     leaked: all.split('\\n').filter((l) => /(file|https?):\\/\\/\\S*(node-)?process-worker\\.js/.test(l)),
   };
 };
@@ -56,7 +55,7 @@ export default async function main(ctx) {
 `;
 
 for (const where of ['process', 'thread']) {
-  test(`on Node, in a ${where}, the kernel's own frames in a program's stacks are named slicc-kernel:/node-process-worker.js, not the host's file URL: in its own errors, a failed ctx call, sync.fs and runScript, while a program's own prepareStackTrace gets no kernel frame at all (#1583, #1631)`, async (t) => {
+  test(`on Node, in a ${where}, the kernel's own frames in a program's stacks are named slicc-kernel:/node-process-worker.js, not the host's file URL: in its own errors, a failed ctx call, sync.fs and runScript, and for a program's own prepareStackTrace, which gets V8's CallSites as in Node (#1583, #1631)`, async (t) => {
     const kernel = await createNodeKernel({ users: 'off' });
     t.after(() => kernel.terminate());
     await kernel.writeFile(
@@ -66,6 +65,6 @@ for (const where of ['process', 'thread']) {
     await kernel.writeFile('/node_modules/kf/main.mjs', MAIN);
     const r = await kernel.run(['kf', where], { cwd: '/' });
     assert.equal(r.status, 0, r.stderr);
-    assert.deepEqual(JSON.parse(r.stdout), { named: true, ownGetsNone: true, leaked: [] });
+    assert.deepEqual(JSON.parse(r.stdout), { named: true, leaked: [] });
   });
 }
