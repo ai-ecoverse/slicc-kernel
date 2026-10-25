@@ -159,7 +159,7 @@ const parentOf = (path: string) => path.slice(0, path.lastIndexOf('/')) || '/';
 interface Shared {
   path: string;
   hidden: string;
-  release: () => void;
+  release: () => Promise<void>;
   local: UnlinkHolder[];
   file: KeptFile | undefined;
 }
@@ -198,12 +198,18 @@ export interface SharedLocks {
   ): Promise<unknown>;
 }
 
-export function holdShared(locks: SharedLocks | undefined, name: string): Promise<() => void> {
-  if (!locks) return Promise.resolve(() => undefined);
+export function holdShared(
+  locks: SharedLocks | undefined,
+  name: string
+): Promise<() => Promise<void>> {
+  if (!locks) return Promise.resolve(async () => undefined);
   return new Promise((resolve) => {
-    void locks.request(name, { mode: 'shared' }, () => {
+    const settled = locks.request(name, { mode: 'shared' }, () => {
       const { promise, resolve: done } = Promise.withResolvers<void>();
-      resolve(() => done());
+      resolve(async () => {
+        done();
+        await settled.catch(() => undefined);
+      });
       return promise;
     });
   });
@@ -667,7 +673,7 @@ export class UnlinkedKeeper {
       }
     });
     if (!moved) {
-      release();
+      await release();
       return undefined;
     }
     const local = mine.get(path) ?? [];
@@ -684,10 +690,15 @@ export class UnlinkedKeeper {
       hidden,
       release: () => {
         if (--left > 0) return;
-        mine();
-        void this.serial(() => whenLast(locks, keptLock(hidden), () => this.drop(hidden)));
+        void mine().then(() => this.dropIfLast(hidden));
       },
     };
+  }
+
+  private dropIfLast(hidden: string): Promise<boolean> {
+    return this.serial(() =>
+      whenLast(this.sharedLocks(), keptLock(hidden), () => this.drop(hidden))
+    );
   }
 
   private sharedLocks(): SharedLocks | undefined {
@@ -724,7 +735,8 @@ export class UnlinkedKeeper {
       const waits = answers.filter(
         ({ keeps }, i) => keeps && sends[i]?.items.some((item) => item.hidden === one.hidden)
       );
-      void Promise.all(waits.map(({ told }) => told)).then(one.release, one.release);
+      const done = () => one.release().then(() => this.dropIfLast(one.hidden));
+      void Promise.all(waits.map(({ told }) => told)).then(done, done);
     }
     if (failed !== undefined) throw failed;
     return out as T;

@@ -35,6 +35,24 @@ const steer = (tab, msg) =>
     msg
   );
 
+const sharedLeft = (tab) =>
+  tab.evaluate(async () => {
+    const top = await navigator.storage.getDirectory();
+    const dir = await top.getDirectoryHandle('.slicc-unlinked').catch(() => undefined);
+    if (!dir) return [];
+    const out = [];
+    for await (const [name] of dir.entries()) if (name.startsWith('shared.')) out.push(name);
+    return out;
+  });
+
+const gone = async (tab) => {
+  for (let i = 0; i < 200; i++) {
+    if ((await sharedLeft(tab)).length === 0) return [];
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return sharedLeft(tab);
+};
+
 async function setup(t, dir, second = {}) {
   const { page } = await booted(chrome, t);
   await installPackage(page, 'wasm-coreutils');
@@ -79,6 +97,7 @@ test('a file two tabs hold open is kept for both when a third removes it (#1608 
   console.log(`two holders: ${one.stdout.trim()} / ${two.stdout.trim()}`);
   assert.equal(one.stdout, 'old\n');
   assert.equal(two.stdout, 'old\n');
+  assert.deepEqual(await gone(page), [], 'the shared kept file was left behind');
 });
 
 test("a file two tabs hold open survives one holder closing while the other's kept is still on its way (#1608 b)", {
@@ -99,4 +118,5 @@ test("a file two tabs hold open survives one holder closing while the other's ke
   console.log(`first closed, second thawed: ${one.stdout.trim()} / ${two.stdout.trim()}`);
   assert.equal(one.stdout, 'old\n');
   assert.equal(two.stdout, 'old\n');
+  assert.deepEqual(await gone(page), [], 'the shared kept file was left behind');
 });
