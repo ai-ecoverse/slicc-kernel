@@ -147,13 +147,26 @@ const SERVE_PROGRAM = `export default async function main(ctx) {
     (e) => ({ code: e.code, message: String(e.message) })
   );
   await raw.close();
+  out.port = l.port;
+  const acc2 = l.accept();
+  const raw2 = await ctx.net.connect({ port: l.port });
+  const s2 = await acc2;
+  const securing = ctx.net.secure(raw2, { ca: o.cert, servername: 'localhost' }).then(
+    () => 'ok',
+    (e) => ({ code: e.code, message: String(e.message) })
+  );
+  const hello = await s2.readable.getReader().read();
+  out.helloBytes = hello.value?.length > 0;
+  await s2.reset();
+  out.onHello = await securing;
+  await raw2.close();
   await l.close();
   ctx.write(1, JSON.stringify(out));
   return 0;
 }
 `;
 
-test('a server handshake tells a client that resets (read ECONNRESET) from one that closes, as Node 22 does (#1578), and a client whose server reset before the ClientHello gets read ECONNRESET too, not EPIPE (#1611)', async (t) => {
+test('a server handshake tells a client that resets (read ECONNRESET) from one that closes, as Node 22 does (#1578), and a client whose server resets before its ClientHello gets connect ECONNRESET with the address, one reset on its ClientHello read ECONNRESET, as Node 22 (#1611, #1624)', async (t) => {
   const { readdir, readFile } = await import('node:fs/promises');
   const { join, relative } = await import('node:path');
   const { fileURLToPath } = await import('node:url');
@@ -189,5 +202,9 @@ test('a server handshake tells a client that resets (read ECONNRESET) from one t
   assert.match(out.close.message, /the client closed the connection during the TLS handshake/);
   assert.doesNotMatch(out.close.message, /read ECONNRESET/);
   assert.equal(out.early.code, 'ECONNRESET', r.stdout);
-  assert.match(out.early.message, /read ECONNRESET/);
+  assert.match(out.early.message, new RegExp(`connect ECONNRESET 127\\.0\\.0\\.1:${out.port}`));
+  assert.doesNotMatch(out.early.message, /read ECONNRESET/);
+  assert.equal(out.helloBytes, true);
+  assert.equal(out.onHello.code, 'ECONNRESET', r.stdout);
+  assert.match(out.onHello.message, /read ECONNRESET/);
 });
