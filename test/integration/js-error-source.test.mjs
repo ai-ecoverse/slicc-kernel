@@ -223,3 +223,30 @@ test("an indirect eval inside a program's sourceURL-named Function body keeps it
   assert.notEqual(out.tops[2]?.[0], 'eval at <anonymous> (slicc-kernel:/node-process-worker.js)');
   assert.notEqual(out.tops[3]?.[0], `eval at <anonymous> (${KERNEL_URL})`);
 });
+
+test("errorSource answers for a SyntaxError from the native JSON.parse called by the program's own code, with the parsed text's line; one raised by a JSON.parse that Node's or the kernel's code called, or with its prototype changed, gives undefined (#1649)", async (t) => {
+  const out = await run(
+    t,
+    `export default async function main(ctx) {
+  const grab = (f) => { try { f(); } catch (e) { return e; } };
+  const q = (e) => ctx.sync.errorSource(e) ?? null;
+  const r = {};
+  r.own = q(grab(() => JSON.parse('{')));
+  r.lines = q(grab(() => JSON.parse('{\\n"a": 1,\\n"b"')));
+  r.evald = q(grab(() => eval('JSON.parse("[1,")')));
+  r.node = q(await new Response('{').json().catch((e) => e));
+  const moved = grab(() => JSON.parse('['));
+  Object.setPrototypeOf(moved, Error.prototype);
+  r.moved = q(moved);
+  await ctx.write(1, JSON.stringify(r));
+  return 0;
+}`
+  );
+  assert.deepEqual(out, {
+    own: { sourceLine: '{', lineNumber: 1, startColumn: 1 },
+    lines: { sourceLine: '"b"', lineNumber: 3, startColumn: 3 },
+    evald: { sourceLine: '[1,', lineNumber: 1, startColumn: 3 },
+    node: null,
+    moved: null,
+  });
+});
