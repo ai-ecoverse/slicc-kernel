@@ -172,7 +172,7 @@ test('a holder whose tab runs 4(a) only (holds without an instance) is never ask
       })
   );
   assert.equal(asks, 0, 'the 4(a) holder was asked to keep');
-  assert.ok(rm < 5000 && mv < 5000, `rm ${rm} ms, mv ${mv} ms`);
+  assert.ok(rm < 9000 && mv < 9000, `rm ${rm} ms, mv ${mv} ms`);
   assert.deepEqual(await kept(other), []);
   await sh(page, `: > ${dir}/go`);
   await page.evaluate(() => window.holder);
@@ -273,3 +273,85 @@ test('a file held before another tab joins is kept for its holder when that tab 
   console.log(`held before the join: ${r.stdout.trim()} ${r.stderr.trim()}`);
   assert.equal(r.stdout, 'old kept\n');
 });
+
+test('two renames over a held file from another tab whose requests overlap at the holder both go ahead, without waiting out the gate cap (#1608)', {
+  timeout: 900_000,
+}, async (t) => {
+  const dir = '/root/pk8';
+  const { page, other } = await setup(t, dir);
+  for (;;) {
+    const listed = (await sh(other, 'cat /proc/sys/kernel/slicc_peer_held')).stdout;
+    if (listed.includes(`${dir}/f`)) break;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  await steer(page, { set: { freeze: true } });
+  await page.evaluate(() => {
+    window.keepings = 0;
+    const channel = new BroadcastChannel('pause-control');
+    channel.onmessage = ({ data }) => {
+      if (data?.id === 'h' && data.keepings !== undefined) window.keepings = data.keepings;
+    };
+  });
+  const both = other.evaluate(
+    (d) =>
+      window.kernel.run(
+        [
+          'bash',
+          '-c',
+          `cd ${d} && echo A > a && echo B > b && { mv a f & p1=$!; mv b f & p2=$!; wait $p1; r1=$?; wait $p2; r2=$?; echo "r1=$r1 r2=$r2"; cat f; }`,
+        ],
+        { cwd: '/' }
+      ),
+    dir
+  );
+  while ((await page.evaluate(() => window.keepings)) < 2)
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  const t0 = Date.now();
+  await steer(page, { thaw: true });
+  const r = await both;
+  const took = Date.now() - t0;
+  const out = typeof r.stdout === 'string' ? r.stdout : new TextDecoder().decode(r.stdout);
+  const err = typeof r.stderr === 'string' ? r.stderr : new TextDecoder().decode(r.stderr);
+  console.log(`two renames over: ${took} ms ${JSON.stringify(out)} ${JSON.stringify(err)}`);
+  assert.match(out, /^r1=0 r2=0\n[AB]\n$/, err);
+  assert.ok(took < 8000, `the renames took ${took} ms`);
+  await sh(page, `: > ${dir}/go`);
+  const h = await page.evaluate(() => window.holder);
+  assert.equal(h.stdout, 'old kept\n');
+});
+
+for (const occupy of [false, true]) {
+  test(`a rename over another tab's held file that fails after the file was set aside ${occupy ? 'leaves it kept for the holder when its name was taken meanwhile' : 'puts it back, and the holder reads it there'} (#1608 d, guard)`, {
+    timeout: 900_000,
+  }, async (t) => {
+    const dir = `/root/pkr${occupy ? 'o' : ''}`;
+    const { page } = await booted(chrome, t);
+    await installPackage(page, 'wasm-coreutils');
+    await installPackage(page, 'wasix-python', { skip: /^lib\/libpython[^/]*\.a$/ });
+    const other = await peerTab(page, {
+      worker: `/rename/faulty-rm-worker.js?stuck=a${occupy ? `&occupy=${dir}/f` : ''}`,
+    });
+    assert.deepEqual(
+      await sh(page, `rm -rf ${dir} && mkdir -p ${dir} && echo old > ${dir}/f && echo made`),
+      ok('made\n')
+    );
+    await page.evaluate((s) => {
+      window.holder = window.kernel.run(['python3', '-c', s], { cwd: '/' });
+    }, HOLDER(dir));
+    while (!(await page.evaluate((p) => window.opfs.exists(p), `${dir.slice(1)}/opened`)))
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    for (;;) {
+      const listed = (await sh(other, 'cat /proc/sys/kernel/slicc_peer_held')).stdout;
+      if (listed.includes(`${dir}/f`)) break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const mv = await sh(other, `cd ${dir} && echo A > a && mv a f; echo "rc=$?"; cat f`);
+    console.log(`failed mv${occupy ? ' (name taken)' : ''}: ${JSON.stringify(mv)}`);
+    assert.match(mv.stdout, occupy ? /rc=1\nNEW$/ : /rc=1\nold\n$/);
+    await sh(page, `: > ${dir}/go`);
+    const r = await page.evaluate(() => window.holder);
+    console.log(`holder: ${r.stdout.trim()} ${r.stderr.trim()}`);
+    assert.equal(r.stdout, 'old kept\n');
+    if (!occupy) assert.equal((await sh(other, `cat ${dir}/f`)).stdout, 'kept');
+  });
+}

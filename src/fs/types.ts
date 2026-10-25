@@ -162,7 +162,6 @@ export interface KernelFs {
           path: string;
           hidden: string | undefined;
           fid: string | undefined;
-          undo?: string;
         }>,
         paths: readonly string[]
       ): Promise<void>;
@@ -185,7 +184,6 @@ export interface PeerKeeps {
           path: string;
           hidden: string | undefined;
           fid: string | undefined;
-          undo?: string;
         }>;
         paths?: string[];
       };
