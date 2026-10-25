@@ -242,3 +242,34 @@ test('a rename onto, or a removal of the directory of, a file another tab holds 
   assert.equal(r.stdout, 'old kept\n');
   assert.equal((await sh(other, `cat ${dir}/f`)).stdout, 'kept');
 });
+
+test('a file held before another tab joins is kept for its holder when that tab removes it (#1522)', {
+  timeout: 900_000,
+}, async (t) => {
+  const dir = '/root/pk7';
+  const { page } = await booted(chrome, t);
+  await installPackage(page, 'wasm-coreutils');
+  await installPackage(page, 'wasix-python', { skip: /^lib\/libpython[^/]*\.a$/ });
+  assert.deepEqual(
+    await sh(page, `rm -rf ${dir} && mkdir -p ${dir} && echo old > ${dir}/f && echo made`),
+    ok('made\n')
+  );
+  await page.evaluate((s) => {
+    window.holder = window.kernel.run(['python3', '-c', s], { cwd: '/' });
+  }, HOLDER(dir));
+  while (!(await page.evaluate((p) => window.opfs.exists(p), `${dir.slice(1)}/opened`)))
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  const other = await peerTab(page);
+  let listed = '';
+  for (let i = 0; i < 200 && !listed.includes(`${dir}/f`); i++) {
+    listed = (await sh(other, 'cat /proc/sys/kernel/slicc_peer_held')).stdout;
+    if (!listed.includes(`${dir}/f`)) await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  console.log(`joined peer sees: ${JSON.stringify(listed)}`);
+  assert.deepEqual(await sh(other, `rm ${dir}/f && echo removed`), ok('removed\n'));
+  assert.deepEqual(await kept(other), ['old\n']);
+  await sh(page, `: > ${dir}/go`);
+  const r = await page.evaluate(() => window.holder);
+  console.log(`held before the join: ${r.stdout.trim()} ${r.stderr.trim()}`);
+  assert.equal(r.stdout, 'old kept\n');
+});
