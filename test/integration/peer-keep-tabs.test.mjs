@@ -405,3 +405,34 @@ for (const [name, early] of [
     assert.equal(r.stdout, 'old\n');
   });
 }
+
+test('a file held through a kernel descriptor follows its rename for the hold, so another tab removing it at the new name keeps it (#1652 review)', {
+  timeout: 900_000,
+}, async (t) => {
+  const dir = '/root/pk9r';
+  const { page } = await booted(chrome, t);
+  await installPackage(page, 'wasm-coreutils');
+  await installPackage(page, 'wasix-python', { skip: /^lib\/libpython[^/]*\.a$/ });
+  const other = await peerTab(page);
+  assert.deepEqual(
+    await sh(page, `rm -rf ${dir} && mkdir -p ${dir} && echo old > ${dir}/f && echo made`),
+    ok('made\n')
+  );
+  await page.evaluate((s) => {
+    window.holder = window.kernel.run(['python3', '-c', s], { cwd: '/' });
+  }, KERNEL_HOLDER(dir));
+  while (!(await page.evaluate((p) => window.opfs.exists(p), `${dir.slice(1)}/opened`)))
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(await sh(page, `mv ${dir}/f ${dir}/g && echo moved`), ok('moved\n'));
+  let listed = '';
+  for (let i = 0; i < 200 && !listed.includes(`${dir}/g`); i++) {
+    listed = (await sh(other, 'cat /proc/sys/kernel/slicc_peer_held')).stdout;
+    if (!listed.includes(`${dir}/g`)) await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.ok(listed.includes(`${dir}/g`) && !listed.includes(`${dir}/f`), listed);
+  assert.deepEqual(await sh(other, `rm ${dir}/g && echo removed`), ok('removed\n'));
+  await sh(page, `: > ${dir}/go`);
+  const r = await page.evaluate(() => window.holder);
+  console.log(`kernel holder after a rename: ${r.stdout.trim()} ${r.stderr.trim()}`);
+  assert.equal(r.stdout, 'old\n');
+});
