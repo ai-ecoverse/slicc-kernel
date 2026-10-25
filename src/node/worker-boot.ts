@@ -44,17 +44,11 @@ export interface BootCache {
 
 const bundles = new Map<string, BootCache>();
 
-function sharedBytes(bytes: Uint8Array): Uint8Array {
-  const shared = new Uint8Array(new SharedArrayBuffer(bytes.byteLength));
-  shared.set(bytes);
-  return shared;
-}
-
 export function bootCache(file: URL, read = readFileSync): BootCache {
   let cache = bundles.get(file.href);
   if (!cache) {
     cache = {
-      source: sharedBytes(new TextEncoder().encode(read(file, 'utf8'))),
+      source: new TextEncoder().encode(read(file, 'utf8')),
       attempts: 0,
       rejected: 0,
     };
@@ -68,7 +62,7 @@ export function cachedBoot(
   data: { cachedData?: Uint8Array; rejected: boolean }
 ): void {
   if (data.rejected) cache.rejected++;
-  if (data.cachedData) cache.cachedData = sharedBytes(data.cachedData);
+  if (data.cachedData) cache.cachedData = data.cachedData;
   else if (data.rejected) cache.cachedData = undefined;
 }
 
