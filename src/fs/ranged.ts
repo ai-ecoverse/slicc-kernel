@@ -233,6 +233,11 @@ export class AsyncRangedFile {
     this.pages.truncate(size);
   }
 
+  wrote(at: number, length: number): void {
+    this.pages.landed(at, length);
+    this.version = undefined;
+  }
+
   async flush(): Promise<void> {
     if (this.pinned || !this.pages.changed) return;
     const plan = this.pages.plan();

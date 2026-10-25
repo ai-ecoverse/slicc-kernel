@@ -17,6 +17,12 @@
     "repo": "ai-ecoverse/slicc-kernel",
     "publish": true
   },
+  "slicc": {
+    "unitSources": [
+      "src",
+      "tools"
+    ]
+  },
   "publishConfig": {
     "access": "public",
     "provenance": true
@@ -64,7 +70,7 @@
   },
   "devDependencies": {
     "@ai-ecoverse/py-numpy": "2.5.4-4",
-    "@ai-ecoverse/slicc-cdp": "1.41.18",
+    "@ai-ecoverse/slicc-cdp": "1.41.22",
     "@ai-ecoverse/slicc-node": "2.5.2",
     "@ai-ecoverse/slicc-scrub": "1.1.0",
     "@ai-ecoverse/slicc-shared-web": "2.12.4",
@@ -79,7 +85,7 @@
     "@ai-ecoverse/wasm-curl": "8.22.0-10",
     "@ai-ecoverse/wasm-git": "2.55.0-22",
     "@ai-ecoverse/wasm-gmake": "4.4.1-9",
-    "@ai-ecoverse/wasm-procps": "4.0.7-5",
+    "@ai-ecoverse/wasm-procps": "4.0.7-6",
     "@ai-ecoverse/wasm-sqlite3": "3.54.1-1",
     "@ai-ecoverse/wasm-tar": "1.35.0-9",
     "@ai-ecoverse/wasm-tls-engine": "4.2.0-12",

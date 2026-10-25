@@ -132,6 +132,8 @@ export class VfsNode {
 
   onDirtyState: ((on: boolean) => void) | undefined;
 
+  crowded: ((path: string) => boolean) | undefined;
+
   private counted = false;
 
   recount(): void {
@@ -279,8 +281,51 @@ export class VfsNode {
   }
 
   async size(): Promise<number> {
+    if (this.peerHeld()) {
+      const known = await this.exact();
+      if (known !== undefined) return known;
+    }
     const ranged = await this.prepare();
     return ranged ? ranged.size() : this.length;
+  }
+
+  private peered = false;
+
+  private peerHeld(): boolean {
+    if (this.orphaned || this.revoked || this.pin) return false;
+    if (this.crowded?.(this.path) === true) this.peered = true;
+    return this.peered;
+  }
+
+  private async exact(): Promise<number | undefined> {
+    await this.flush();
+    const { stat } = this.fs;
+    const io = rangedOps(this.fs);
+    if (!stat || !io) return undefined;
+    const st = await this.followed(() => stat.call(this.fs, this.path));
+    this.peered = this.crowded?.(this.path) === true;
+    const size = st.size ?? 0;
+    if (this.ranged) {
+      if (size !== this.ranged.size()) {
+        this.ranged = new AsyncRangedFile(io, this.path, size, st.version);
+      }
+      return undefined;
+    }
+    if (this.data && size !== this.length) this.data = undefined;
+    return this.data ? undefined : size;
+  }
+
+  private landed(at: number, bytes: Uint8Array): void {
+    if (this.ranged) {
+      this.ranged.wrote(at, bytes.length);
+      return;
+    }
+    if (!this.data) return;
+    const end = at + bytes.length;
+    const buf = this.ensure(end);
+    if (at > this.length) buf.fill(0, this.length, at);
+    buf.set(bytes, at);
+    this.length = Math.max(this.length, end);
   }
 
   async pread(max: number, at: number): Promise<Uint8Array> {
@@ -368,6 +413,13 @@ export class VfsNode {
     if (bytes.length === 0) return 0;
     await this.settled();
     await this.fits(at + bytes.length);
+    const io = this.peerHeld() ? rangedOps(this.fs) : undefined;
+    if (io && at + bytes.length > (await this.size())) {
+      const copy = bytes.slice();
+      await this.followed(() => io.pwrite(this.path, at, copy, true));
+      this.landed(at, bytes);
+      return bytes.length;
+    }
     const ranged = await this.prepare();
     if (ranged) {
       await this.followed(() => ranged.write(at, bytes));
@@ -479,6 +531,8 @@ export class VfsNodes implements UnlinkHolder {
   opened: ((node: VfsNode) => void) | undefined;
 
   dirtied: ((delta: number) => void) | undefined;
+
+  crowded: ((path: string) => boolean) | undefined;
 
   private readonly fs: VfsFileFs;
 
@@ -660,6 +714,7 @@ export class VfsNodes implements UnlinkHolder {
     this.reshaped();
     node.onDirty = () => this.changed?.(node.path);
     node.onDirtyState = (on) => this.dirtied?.(on ? 1 : -1);
+    node.crowded = (at) => this.crowded?.(at) === true;
     node.recount();
     this.byPath.set(path, node);
     if (id !== undefined) this.know(node, id);

@@ -173,6 +173,7 @@ export interface SyncFsPosixBridge {
     want?: number,
     seen?: { gen?: number; nofollow?: boolean; ino?: number }
   ): number | undefined;
+  heldReal?(handle: number): string | undefined;
   access?(path: string, mode: number, kind?: AccessKind, nofollow?: boolean): void;
   create?(path: string, mode?: number, opening?: boolean): SyncFsCreated | undefined | void;
   mkfifo?(path: string, mode: number): void;

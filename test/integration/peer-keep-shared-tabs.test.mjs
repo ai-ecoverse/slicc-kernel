@@ -41,16 +41,23 @@ const sharedLeft = (tab) =>
     const dir = await top.getDirectoryHandle('.slicc-unlinked').catch(() => undefined);
     if (!dir) return [];
     const out = [];
-    for await (const [name] of dir.entries()) if (name.startsWith('shared.')) out.push(name);
+    try {
+      for await (const [name] of dir.entries()) if (name.startsWith('shared.')) out.push(name);
+    } catch (e) {
+      if (e?.name === 'NotFoundError') return null;
+      throw e;
+    }
     return out;
   });
 
 const gone = async (tab) => {
+  let left = null;
   for (let i = 0; i < 200; i++) {
-    if ((await sharedLeft(tab)).length === 0) return [];
+    left = await sharedLeft(tab);
+    if (left?.length === 0) return [];
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  return sharedLeft(tab);
+  return left ?? ['.slicc-unlinked kept vanishing mid-listing'];
 };
 
 async function setup(t, dir, second = {}) {

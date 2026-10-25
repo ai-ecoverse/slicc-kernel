@@ -225,6 +225,30 @@ function holdSeen(seen: { gen?: number; nofollow?: boolean; ino?: number }) {
   return { gen: seen.gen, ino: seen.ino, ...(seen.nofollow ? { nofollow: true } : {}) };
 }
 
+function holds(
+  json: (req: SyncSabRequestBody, path: string) => unknown,
+  run: (req: SyncSabRequestBody, path: string) => SyncFsResult
+): Pick<SyncFsPosixBridge, 'hold' | 'heldReal'> {
+  const reals = new Map<number, string>();
+  return {
+    hold: (path, held, open, handle, want = 0, seen = {}) => {
+      const mode = (held ? 1 : 0) | (open ? 2 : 0);
+      if (mode === 3) {
+        const reply = json({ op: 'hold', path, mode: mode | want, ...holdSeen(seen) }, path) as
+          | number
+          | { handle: number; real: string };
+        if (typeof reply !== 'object' || reply === null) return reply;
+        reals.set(reply.handle, reply.real);
+        return reply.handle;
+      }
+      if (handle !== undefined) reals.delete(handle);
+      run({ op: 'hold', path, mode, ...(handle !== undefined ? { handle } : {}) }, path);
+      return undefined;
+    },
+    heldReal: (handle) => reals.get(handle),
+  };
+}
+
 export function createSyncFsSabBridge(
   transport: SyncSabTransport,
   opts: {
@@ -409,14 +433,7 @@ export function createSyncFsSabBridge(
     access: (path, mode, kind = 'access', nofollow) => {
       run({ op: 'access', path, mode, arg2: kind, ...(nofollow ? { nofollow } : {}) }, path);
     },
-    hold: (path, held, open, handle, want = 0, seen = {}) => {
-      const mode = (held ? 1 : 0) | (open ? 2 : 0);
-      if (mode === 3) {
-        return json({ op: 'hold', path, mode: mode | want, ...holdSeen(seen) }, path) as number;
-      }
-      run({ op: 'hold', path, mode, ...(handle !== undefined ? { handle } : {}) }, path);
-      return undefined;
-    },
+    ...holds(json, run),
     statfs: (path = '/') => parseSyncFsUsage(json({ op: 'statfs', path }, path)),
     renames: (since, held) =>
       json(

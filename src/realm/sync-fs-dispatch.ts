@@ -531,11 +531,11 @@ async function heldOpen(
   real: string | undefined,
   req: SyncFsRequest,
   fid: string | undefined
-): Promise<number | null> {
+): Promise<number | { handle: number; real: string } | null> {
   const handle = entry.hold?.(path, true, true, real, undefined, req.ino, fid);
   if (handle === undefined) return null;
   await entry.announceHold?.(real ?? path, fid, ((req.mode ?? 0) & HOLD_CREATED) !== 0);
-  return handle;
+  return real !== undefined && real !== path ? { handle, real } : handle;
 }
 
 async function idOf(entry: SyncFsTokenEntry, path: string): Promise<string | undefined> {
