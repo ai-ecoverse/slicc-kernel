@@ -268,7 +268,7 @@ function positionsAt(
 }
 
 function record(positions: Internals['positions'], error: unknown, trace: object[]): void {
-  if (typeof error === 'object' && error !== null && trace.length > 0) {
+  if (trace.length > 0 && isNativeError(error)) {
     noteSourceUrls(trace);
     const site = trace[0] as object;
     const next = trace[1] as object | undefined;
