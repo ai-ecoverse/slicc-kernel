@@ -101,7 +101,10 @@ export function laneSab(): SharedArrayBuffer {
 export function widened(sab: SharedArrayBuffer, op: string, max: unknown): void {
   if (op !== 'fd-pread' || !sab.growable || typeof max !== 'number') return;
   const want = Math.min(SAB_HEADER_BYTES + max, sab.maxByteLength);
-  if (want > sab.byteLength) sab.grow(want);
+  if (want <= sab.byteLength) return;
+  try {
+    sab.grow(want);
+  } catch {}
 }
 
 export const SAB_MIN_BYTES = SAB_HEADER_BYTES + 4096;
