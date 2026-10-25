@@ -115,6 +115,8 @@ interface Site {
   getEvalOrigin(): string | undefined;
   getLineNumber(): number | null;
   getScriptNameOrSourceURL(): string | null | undefined;
+  getFunctionName(): string | null;
+  getTypeName(): string | null;
 }
 
 function ownSite(): Site {
@@ -140,6 +142,10 @@ const isEval = proto.isEval;
 const originOf = proto.getEvalOrigin;
 const lineOf = proto.getLineNumber;
 const nameOf = proto.getScriptNameOrSourceURL;
+const functionOf = proto.getFunctionName;
+const typeOf = proto.getTypeName;
+const syntaxProto = SyntaxError.prototype;
+const protoOf = Object.getPrototypeOf;
 const ownNames = new Set<unknown>([
   apply(fileOf, self, []),
   apply(proto.getScriptNameOrSourceURL, self, []),
@@ -242,6 +248,7 @@ let formatting = false;
 
 interface Seen {
   site: object;
+  next: object | undefined;
   at: Positions | undefined;
 }
 
@@ -264,7 +271,8 @@ function record(positions: Internals['positions'], error: unknown, trace: object
   if (typeof error === 'object' && error !== null && trace.length > 0) {
     noteSourceUrls(trace);
     const site = trace[0] as object;
-    apply(mapSet, seen, [error, { site, at: positionsAt(positions, error, site) }]);
+    const next = trace[1] as object | undefined;
+    apply(mapSet, seen, [error, { site, next, at: positionsAt(positions, error, site) }]);
   }
 }
 
@@ -387,6 +395,20 @@ export const nodeStackFormatter:
     }
   : undefined;
 
+function programFrame(site: object | undefined): boolean {
+  if (site === undefined || !keptFrame(site)) return false;
+  if (apply(isEval, site, []) === true) return true;
+  const file = apply(fileOf, site, []) as unknown;
+  return typeof file === 'string' && apply(startsWith, file, ['node:']) !== true;
+}
+
+export function jsonParseSite(error: object, got: Seen): boolean {
+  const { site, next } = got;
+  if (protoOf(error) !== syntaxProto || apply(fileOf, site, []) !== null) return false;
+  if (apply(functionOf, site, []) !== 'parse' || apply(typeOf, site, []) !== 'JSON') return false;
+  return programFrame(next);
+}
+
 export function errorSourceOf(error: unknown): JsErrorSource | undefined {
   if (typeof error !== 'object' || error === null || !isNativeError(error)) return undefined;
   try {
@@ -400,11 +422,17 @@ export function errorSourceOf(error: unknown): JsErrorSource | undefined {
   if (!at || typeof at.sourceLine !== 'string' || typeof at.lineNumber !== 'number')
     return undefined;
   if (apply(setHas, ownNames, [at.scriptResourceName]) === true) return undefined;
+  if (jsonParseSite(error, got))
+    return at.scriptResourceName === undefined ? answer(at) : undefined;
   const file = scriptOf(site);
   if (at.scriptResourceName !== file || apply(lineOf, site, []) !== at.lineNumber) return undefined;
+  return answer(at);
+}
+
+function answer(at: Positions): JsErrorSource {
   const out = blank(null) as JsErrorSource;
-  out.sourceLine = at.sourceLine;
-  out.lineNumber = at.lineNumber;
+  out.sourceLine = at.sourceLine as string;
+  out.lineNumber = at.lineNumber as number;
   out.startColumn = typeof at.startColumn === 'number' ? at.startColumn : 0;
   return freeze(out);
 }
