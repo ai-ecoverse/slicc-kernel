@@ -36,28 +36,23 @@ test('a file the page writes through the OPFS API and posts a notice for, at a n
   }
 });
 
-test('in a running shell, a file the page writes through the OPFS API at a name the kernel has just found missing is there once a listing shows it (#1693)', async (t) => {
-  const { page } = await booted(chrome, t, { users: 'enforce' });
-  await page.evaluate(() => window.kernel.users.add({ name: 'b' }));
-  const screen = await page.evaluate(async () => {
-    await window.terminal(
-      [
-        'bash',
-        '-c',
-        'cat /home/b/z 2>/dev/null || echo first-missing; read -r go; echo /home/b/*; cat /home/b/z 2>/dev/null || echo then-missing; echo done',
-      ],
-      { cwd: '/home/b', user: 'b' }
-    );
-    const shown = window.term.onData;
-    let wrote = false;
-    window.term.onData = (bytes) => {
-      shown(bytes);
-      if (wrote || !window.screen.screen.includes('first-missing')) return;
-      wrote = true;
-      window.opfs.write('home/b/z', 'hi\n').then(() => window.term.write('\r'));
-    };
-    while (window.screen.status === null) await new Promise((r) => setTimeout(r, 5));
-    return window.screen.screen;
+test('a file the page writes through the OPFS API at a name the kernel has just found missing is still missing to a stat, and found once a listing of its directory shows it (#1693)', async (t) => {
+  const { page, bash } = await booted(chrome, t, { users: 'enforce' });
+  assert.deepEqual(await bash('rm -rf /home/ls && mkdir /home/ls', { cwd: '/' }), ok());
+  const seen = await page.evaluate(async () => {
+    const { attachKernel } = await import('/dist/index.js');
+    const { fs } = await attachKernel(await window.kernel.connect());
+    const code = (p) =>
+      p.then(
+        () => 'found',
+        (e) => e.code
+      );
+    const before = await code(fs.stat('/home/ls/q'));
+    await window.opfs.write('home/ls/q', 'hi\n');
+    const cached = await code(fs.stat('/home/ls/q'));
+    const listed = await fs.readdir('/home/ls');
+    const after = await code(fs.stat('/home/ls/q'));
+    return { before, cached, listed, after };
   });
-  assert.match(screen, /\/home\/b\/z\r\nhi\r\ndone\r\n$/, JSON.stringify(screen));
+  assert.deepEqual(seen, { before: 'ENOENT', cached: 'ENOENT', listed: ['q'], after: 'found' });
 });
