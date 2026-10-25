@@ -46,6 +46,10 @@ Object.defineProperty(BroadcastChannel.prototype, 'onmessage', {
     handler.set.call(this, (event) => {
       if (state.freeze && this.name !== 'pause-control') {
         state.frozen.push(() => listener.call(this, event));
+        if (event.data?.keeping !== undefined) {
+          state.keepings = (state.keepings ?? 0) + 1;
+          control.postMessage({ id, keepings: state.keepings });
+        }
         return undefined;
       }
       const out = listener.call(this, event);

@@ -285,7 +285,13 @@ test('two renames over a held file from another tab whose requests overlap at th
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   await steer(page, { set: { freeze: true } });
-  const t0 = Date.now();
+  await page.evaluate(() => {
+    window.keepings = 0;
+    const channel = new BroadcastChannel('pause-control');
+    channel.onmessage = ({ data }) => {
+      if (data?.id === 'h' && data.keepings !== undefined) window.keepings = data.keepings;
+    };
+  });
   const both = other.evaluate(
     (d) =>
       window.kernel.run(
@@ -298,7 +304,9 @@ test('two renames over a held file from another tab whose requests overlap at th
       ),
     dir
   );
-  await new Promise((resolve) => setTimeout(resolve, 500));
+  while ((await page.evaluate(() => window.keepings)) < 2)
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  const t0 = Date.now();
   await steer(page, { thaw: true });
   const r = await both;
   const took = Date.now() - t0;
@@ -311,3 +319,39 @@ test('two renames over a held file from another tab whose requests overlap at th
   const h = await page.evaluate(() => window.holder);
   assert.equal(h.stdout, 'old kept\n');
 });
+
+for (const occupy of [false, true]) {
+  test(`a rename over another tab's held file that fails after the file was set aside ${occupy ? 'leaves it kept for the holder when its name was taken meanwhile' : 'puts it back, and the holder reads it there'} (#1608 d, guard)`, {
+    timeout: 900_000,
+  }, async (t) => {
+    const dir = `/root/pkr${occupy ? 'o' : ''}`;
+    const { page } = await booted(chrome, t);
+    await installPackage(page, 'wasm-coreutils');
+    await installPackage(page, 'wasix-python', { skip: /^lib\/libpython[^/]*\.a$/ });
+    const other = await peerTab(page, {
+      worker: `/rename/faulty-rm-worker.js?stuck=a${occupy ? `&occupy=${dir}/f` : ''}`,
+    });
+    assert.deepEqual(
+      await sh(page, `rm -rf ${dir} && mkdir -p ${dir} && echo old > ${dir}/f && echo made`),
+      ok('made\n')
+    );
+    await page.evaluate((s) => {
+      window.holder = window.kernel.run(['python3', '-c', s], { cwd: '/' });
+    }, HOLDER(dir));
+    while (!(await page.evaluate((p) => window.opfs.exists(p), `${dir.slice(1)}/opened`)))
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    for (;;) {
+      const listed = (await sh(other, 'cat /proc/sys/kernel/slicc_peer_held')).stdout;
+      if (listed.includes(`${dir}/f`)) break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const mv = await sh(other, `cd ${dir} && echo A > a && mv a f; echo "rc=$?"; cat f`);
+    console.log(`failed mv${occupy ? ' (name taken)' : ''}: ${JSON.stringify(mv)}`);
+    assert.match(mv.stdout, occupy ? /rc=1\nNEW$/ : /rc=1\nold\n$/);
+    await sh(page, `: > ${dir}/go`);
+    const r = await page.evaluate(() => window.holder);
+    console.log(`holder: ${r.stdout.trim()} ${r.stderr.trim()}`);
+    assert.equal(r.stdout, 'old kept\n');
+    if (!occupy) assert.equal((await sh(other, `cat ${dir}/f`)).stdout, 'kept');
+  });
+}
