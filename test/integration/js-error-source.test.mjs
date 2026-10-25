@@ -250,3 +250,37 @@ test("errorSource answers for a SyntaxError from the native JSON.parse called by
     moved: null,
   });
 });
+
+test('the sourceURL names behind eval frames are kept as an LRU of 4096: a name first seen after 4096 others still answers, an early name refreshed meanwhile keeps answering for a function its eval made, and one never seen again is evicted (#1658)', async (t) => {
+  const out = await run(
+    t,
+    `export default async function main(ctx) {
+  const grab = (f) => { try { f(); } catch (e) { return e; } };
+  const q = (e) => { void e.stack; return ctx.sync.errorSource(e)?.sourceLine ?? null; };
+  const body = (n) => new Function('const s = "\\\\tundefinedFn()//' + n + '";\\nglobalThis["ev" + "al"](s)\\n//# sourceURL=/os/' + n + '.js');
+  const maker = (n) => new Function('void new Error().stack;\\nreturn globalThis["ev" + "al"]("(function () {\\\\n\\\\tmissing_' + n + '()\\\\n})")\\n//# sourceURL=/os/' + n + '.js')();
+  const r = {};
+  const early = maker('early');
+  const unused = maker('unused');
+  r.earlyFirst = q(grab(early));
+  r.unusedFirst = q(grab(unused));
+  const earlyBody = body('early');
+  for (let i = 0; i < 4100; i++) {
+    q(grab(body('n' + i)));
+    if (i % 1000 === 0) q(grab(earlyBody));
+  }
+  r.late = q(grab(body('late')));
+  r.early = q(grab(early));
+  r.unused = q(grab(unused));
+  await ctx.write(1, JSON.stringify(r));
+  return 0;
+}`
+  );
+  assert.deepEqual(out, {
+    earlyFirst: '\tmissing_early()',
+    unusedFirst: '\tmissing_unused()',
+    late: '\tundefinedFn()//late',
+    early: '\tmissing_early()',
+    unused: null,
+  });
+});

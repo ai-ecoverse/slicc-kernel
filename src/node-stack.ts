@@ -162,6 +162,25 @@ export function programScript(name: string, hash: string): void {
 
 const SOURCE_NAMES = 4096;
 const sourceNames = new Set<string>();
+const setDelete = Set.prototype.delete;
+const setValues = Set.prototype.values;
+const sizeOf = Object.getOwnPropertyDescriptor(Set.prototype, 'size')?.get as (
+  this: Set<string>
+) => number;
+const nextOf = Object.getPrototypeOf(new Set().values()).next as (
+  this: Iterator<string>
+) => IteratorResult<string>;
+
+function noteName(name: string): void {
+  if (
+    apply(setDelete, sourceNames, [name]) !== true &&
+    apply(sizeOf, sourceNames, []) >= SOURCE_NAMES
+  ) {
+    const oldest = apply(nextOf, apply(setValues, sourceNames, []), []) as IteratorResult<string>;
+    apply(setDelete, sourceNames, [oldest.value]);
+  }
+  apply(setAdd, sourceNames, [name]);
+}
 
 function programName(name: string): boolean {
   return (
@@ -179,7 +198,7 @@ export function noteSourceUrls(trace: readonly object[]): void {
     if (typeof origin !== 'string' || evalAt(origin)) continue;
     const name = apply(nameOf, site, []) as unknown;
     if (typeof name !== 'string' || apply(setHas, ownNames, [name]) === true) continue;
-    if (sourceNames.size < SOURCE_NAMES) apply(setAdd, sourceNames, [name]);
+    noteName(name);
   }
 }
 
