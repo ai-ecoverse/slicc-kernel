@@ -1572,9 +1572,27 @@ async function readintoall(ctx, [dir]) {
   await ctx.write(1, `${out.join('\n')}\n`);
 }
 
+async function holdrename(ctx, [dir]) {
+  const file = ctx.sync.open(`${dir}/f`, { read: true, write: true });
+  await ctx.fs.writeFile(`${dir}/opened`, '');
+  while (!(await ctx.fs.exists(`${dir}/go1`))) await sleep(10);
+  await ctx.fs.rename(`${dir}/f`, `${dir}/g`);
+  await ctx.fs.writeFile(`${dir}/renamed`, '');
+  while (!(await ctx.fs.exists(`${dir}/go2`))) await sleep(10);
+  let out;
+  try {
+    out = new TextDecoder().decode(file.read(0, 16)).trim();
+  } catch (err) {
+    out = `error ${err.code}`;
+  }
+  file.close();
+  await ctx.write(1, `${out}\n`);
+}
+
 const modes = {
   preadbench,
   readintowindows,
+  holdrename,
   readintoall,
   rawkeys,
   rawclosed,

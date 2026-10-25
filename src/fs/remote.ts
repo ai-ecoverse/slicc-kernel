@@ -410,6 +410,7 @@ export class RemoteWatch {
       };
       const left = new Set([to]);
       const timer = setTimeout(done, cap);
+      (timer as { unref?: () => void }).unref?.();
       this.waiting.set(seq, { left, done });
     });
   }
@@ -457,6 +458,9 @@ export class RemoteWatch {
         this.keeps?.left(tab);
         this.ackers.delete(tab);
         this.holders.delete(tab);
+        for (const wait of [...this.waiting.values()]) {
+          if (wait.left.delete(tab) && wait.left.size === 0) wait.done();
+        }
       }
     }
     this.rebuild();

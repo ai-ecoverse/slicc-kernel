@@ -50,6 +50,7 @@ import { fsError, normalizePath } from './fs/types.ts';
 import {
   PathMarks,
   PEER_GATE_MS,
+  sharedKept,
   UNLINKED_DIR,
   UnlinkedKeeper,
   type UnlinkOwner,
@@ -3284,7 +3285,10 @@ export class Launcher {
         }>,
         paths: readonly string[]
       ) => {
-        for (const { path, hidden, fid } of items) this.adoptKept(path, hidden, fid, ours);
+        for (const { path, hidden, fid } of items) {
+          if (hidden !== undefined && sharedKept(hidden)) await this.adoptShared(path, hidden, fid);
+          else this.adoptKept(path, hidden, fid, ours);
+        }
         await open(tab, paths);
       },
       left: (tab: string) => {
@@ -3292,6 +3296,36 @@ export class Launcher {
         void open(tab, undefined, true);
       },
     };
+  }
+
+  private async adoptShared(path: string, hidden: string, fid: string | undefined): Promise<void> {
+    const bound = [...this.held].map(
+      (holds) => [holds, [...holds.boundAt(path, fid), ...holds.boundAt(hidden, fid)]] as const
+    );
+    const keeping = bound.filter(([, ids]) => ids.length > 0);
+    const nodes = [...this.openFiles].filter((open) =>
+      [path, hidden].some((at) => open.holdsAt(at))
+    );
+    const refs = keeping.length + nodes.length;
+    if (refs === 0) {
+      this.held.doubt([path]);
+      return;
+    }
+    const file = await this.unlinked.sharedFile(hidden, refs);
+    if (
+      !(await this.rootFs.lstat(hidden).then(
+        () => true,
+        () => false
+      ))
+    ) {
+      for (let i = 0; i < refs; i++) file.release();
+      this.held.doubt([path]);
+      return;
+    }
+    const kept = nodes.filter((open) => open.keepBound([hidden, path], fid, file)).length;
+    for (let i = kept; i < nodes.length; i++) file.release();
+    for (const [holds, ids] of keeping) holds.keepBound(ids, path, file);
+    void this.rootFs.announceHolds?.([], [path, hidden], false);
   }
 
   private adoptKept(
@@ -3458,7 +3492,6 @@ export class Launcher {
   private moved(from: string, to: string, source?: VfsNodes): void {
     this.renameLog.add(from, to);
     for (const holds of this.held) holds.renamed(from, to);
-    if (this.mounts.locate(to) === undefined) this.rootFs.rehold?.(from, to);
     if (source) return;
     for (const nodes of this.openFiles) nodes.renamed(from, to);
     this.watchers.moved(from, to);
