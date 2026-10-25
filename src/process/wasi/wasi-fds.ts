@@ -1056,6 +1056,7 @@ export class WasiFds {
     buffer.moved = (missing) => this.followRenames(missing);
     buffer.bound = st;
     buffer.handle = handle;
+    if (handle !== undefined) buffer.real = this.fs.heldReal?.(handle);
     if (st.ino !== undefined) this.inos.set(buffer, st.ino);
     this.buffers.set(path, buffer);
     const id = this.identity(st);

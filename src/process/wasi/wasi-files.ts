@@ -46,6 +46,7 @@ export class FileBuffer {
   handle: number | undefined;
   moved: ((missing: boolean) => boolean) | undefined;
   bound: SyncFsBridgeStat | undefined;
+  real: string | undefined;
 
   constructor(
     fs: SyncFsFileIo,
@@ -146,14 +147,24 @@ export class FileBuffer {
     if (this.spoiled) throw new WasiError('ESTALE');
   }
 
+  private peered = false;
+
+  private held(): boolean {
+    const view = this.watch?.view;
+    if (!view) return false;
+    return view.peerHeld(this.where) || (this.real !== undefined && view.peerHeld(this.real));
+  }
+
   private crowded(): boolean {
-    return this.watch?.view.peerHeld(this.where) === true;
+    if (this.held()) this.peered = true;
+    return this.peered;
   }
 
   private exact(): number | undefined {
     this.flush();
     const watch = this.watch as RangedWatch;
     const size = this.retried(() => watch.stat(this.where)).size;
+    this.peered = this.held();
     if (this.ranged) {
       if (size !== this.ranged.size()) this.ranged.reread();
       return undefined;
@@ -940,6 +951,7 @@ export function cachingBridge(
     utimes: (p, a, m, now) => relabeling(p, () => bridge.utimes(p, a, m, now)),
     lutimes: (p, a, m, now) => mutating(() => bridge.lutimes(p, a, m, now)),
     ...(bridge.hold ? { hold: bridge.hold.bind(bridge) } : {}),
+    ...(bridge.heldReal ? { heldReal: bridge.heldReal.bind(bridge) } : {}),
     ...(bridge.access ? { access: bridge.access.bind(bridge) } : {}),
     ...(bridge.kept ? { kept: bridge.kept.bind(bridge) } : {}),
     ...(bridge.keptStat ? { keptStat: bridge.keptStat.bind(bridge) } : {}),
