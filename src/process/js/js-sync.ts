@@ -159,6 +159,7 @@ const getter = (name: string) =>
   Object.getOwnPropertyDescriptor(typed, name)?.get as (this: Uint8Array) => unknown;
 const bufferOf = getter('buffer') as (this: Uint8Array) => ArrayBufferLike;
 const offsetOf = getter('byteOffset') as (this: Uint8Array) => number;
+const setInto = Uint8Array.prototype.set;
 
 function viewOf(into: Uint8Array, at: number, length: number): Uint8Array {
   return new Uint8Array(bufferOf.call(into), offsetOf.call(into) + at, length);
@@ -235,7 +236,7 @@ export class JsSyncKernel {
       bufferOf.call(bytes) !== bufferOf.call(sink) ||
       offsetOf.call(bytes) !== offsetOf.call(sink)
     )
-      sink.set(bytes);
+      setInto.call(sink, bytes);
     return bytes.length;
   }
 

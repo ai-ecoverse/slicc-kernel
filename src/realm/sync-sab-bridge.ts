@@ -184,7 +184,7 @@ export function createSyncSabTransport(
             status = Atomics.load(header, SAB_I_STATUS);
             out = landing(status, total, sink);
           }
-          out.set(window.subarray(0, chunk), offset);
+          setInto.call(out, partOf.call(window, 0, chunk), offset);
           offset += chunk;
           if (offset >= total) break;
 
@@ -205,6 +205,8 @@ const getter = (name: string) =>
 const bufferOf = getter('buffer') as (this: Uint8Array) => ArrayBufferLike;
 const offsetOf = getter('byteOffset') as (this: Uint8Array) => number;
 const lengthOf = getter('length') as (this: Uint8Array) => number;
+const setInto = Uint8Array.prototype.set;
+const partOf = Uint8Array.prototype.subarray;
 
 function landing(status: number, total: number, sink: Uint8Array | undefined): Uint8Array {
   if (!sink || status !== SAB_STATUS_BYTES || total > lengthOf.call(sink)) {
