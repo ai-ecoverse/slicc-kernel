@@ -3317,6 +3317,11 @@ export class Launcher {
     void this.rootFs.announceHolds?.([], [path, hidden], false);
   }
 
+  private announceHeld(): Promise<void> | undefined {
+    const held = this.held.heldIds().filter(([path]) => this.mounts.locate(path) === undefined);
+    return held.length === 0 ? undefined : this.rootFs.announceHolds?.(held, [], false);
+  }
+
   private rootFileId(path: string): Promise<string | undefined> | undefined {
     return this.mounts.locate(path) === undefined ? this.rootFs.bindId?.(path) : undefined;
   }
@@ -3328,7 +3333,7 @@ export class Launcher {
       this.changes.flush();
       this.changes.foreign(crowded);
       if (crowded) {
-        void this.held?.bindIds((path) => this.rootFileId(path));
+        void this.held?.bindIds((path) => this.rootFileId(path)).then(() => this.announceHeld());
         for (const nodes of this.openFiles) nodes.shared();
       }
     });
