@@ -8,7 +8,7 @@ after(() => chrome.close());
 
 const SIZE = 64 * 1024 * 1024;
 
-for (let pair = 0; pair < 6; pair++) {
+for (let pair = 0; pair < 10; pair++) {
   for (const which of pair % 2 === 0 ? ['head', 'main'] : ['main', 'head']) {
     test(`ab ${pair} ${which}: readInto throughput`, { timeout: 600_000 }, async (t) => {
       const { page } = await booted(
