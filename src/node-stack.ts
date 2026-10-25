@@ -154,10 +154,27 @@ export function programScript(name: string, hash: string): void {
   apply(setAdd, programHashes, [hash]);
 }
 
+const SOURCE_NAMES = 4096;
+const sourceNames = new Set<string>();
+
 function programName(name: string): boolean {
   return (
-    apply(startsWith, name, ['data:']) === true || apply(setHas, programNames, [name]) === true
+    apply(startsWith, name, ['data:']) === true ||
+    apply(setHas, programNames, [name]) === true ||
+    apply(setHas, sourceNames, [name]) === true
   );
+}
+
+export function noteSourceUrls(trace: readonly object[]): void {
+  for (let i = 0; i < trace.length; i++) {
+    const site = trace[i] as object;
+    if (apply(isEval, site, []) !== true || apply(hashOf, site, []) === ownHash) continue;
+    const origin = apply(originOf, site, []) as string | undefined;
+    if (typeof origin !== 'string' || evalAt(origin)) continue;
+    const name = apply(nameOf, site, []) as unknown;
+    if (typeof name !== 'string' || apply(setHas, ownNames, [name]) === true) continue;
+    if (sourceNames.size < SOURCE_NAMES) apply(setAdd, sourceNames, [name]);
+  }
 }
 
 export function rootOrigin(origin: string): string {
@@ -210,6 +227,7 @@ export function keptFrame(site: object): boolean {
 }
 
 export function keptFrames(trace: readonly object[]): object[] {
+  noteSourceUrls(trace);
   const out: object[] = [];
   for (let i = 0; i < trace.length; i++) {
     const site = trace[i] as object;
@@ -244,6 +262,7 @@ function positionsAt(
 
 function record(positions: Internals['positions'], error: unknown, trace: object[]): void {
   if (typeof error === 'object' && error !== null && trace.length > 0) {
+    noteSourceUrls(trace);
     const site = trace[0] as object;
     apply(mapSet, seen, [error, { site, at: positionsAt(positions, error, site) }]);
   }

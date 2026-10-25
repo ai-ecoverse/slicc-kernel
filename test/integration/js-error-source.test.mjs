@@ -193,3 +193,33 @@ test("a program's new Function or eval code named by //# sourceURL keeps its fra
     names: ['/os/a.js', '/os/b.js', 'file', 'slicc-kernel', 'slicc-module'].sort(),
   });
 });
+
+test("an indirect eval inside a program's sourceURL-named Function body keeps its frame, so errorSource answers and the formatter's top frame is that eval; a body whose sourceURL names the kernel worker gets neither (#1648)", async (t) => {
+  const out = await run(
+    t,
+    `export default async function main(ctx) {
+  const grab = (f) => { try { f(); } catch (e) { return e; } };
+  const tops = [];
+  ctx.sync.setStackFormatter((e, sites) => {
+    tops.push(sites[0] ? [sites[0].getEvalOrigin() ?? null, sites[0].getLineNumber()] : null);
+    return 'FMT';
+  });
+  const q = (e) => { void e.stack; return ctx.sync.errorSource(e) ?? null; };
+  const r = {};
+  r.own = q(grab(() => new Function('const s = "\\\\tundefinedFn()";\\nglobalThis["ev" + "al"](s)\\n//# sourceURL=/os/c4.js')()));
+  r.comma = q(grab(() => new Function('o', '(0, globalThis.eval)("o.f()")\\n//# sourceURL=/os/a.js')({})));
+  r.spoof = q(grab(() => new Function('const s = "\\\\tundefinedSpoof()";\\nglobalThis["ev" + "al"](s)\\n//# sourceURL=slicc-kernel:/node-process-worker.js')()));
+  r.spoofUrl = q(grab(() => new Function('const s = "\\\\tundefinedUrl()";\\nglobalThis["ev" + "al"](s)\\n//# sourceURL=' + ${JSON.stringify(KERNEL_URL)})()));
+  r.tops = tops;
+  await ctx.write(1, JSON.stringify(r));
+  return 0;
+}`
+  );
+  assert.deepEqual(out.own, { sourceLine: '\tundefinedFn()', lineNumber: 1, startColumn: 1 });
+  assert.deepEqual(out.comma, { sourceLine: 'o.f()', lineNumber: 1, startColumn: 0 });
+  assert.equal(out.spoof, null);
+  assert.equal(out.spoofUrl, null);
+  assert.deepEqual(out.tops[0], ['eval at <anonymous> (/os/c4.js)', 1]);
+  assert.notEqual(out.tops[2]?.[0], 'eval at <anonymous> (slicc-kernel:/node-process-worker.js)');
+  assert.notEqual(out.tops[3]?.[0], `eval at <anonymous> (${KERNEL_URL})`);
+});
