@@ -34,13 +34,13 @@ const seeker = [
   "print('y done')",
 ].join('\n');
 
-test('a write at SEEK_END in one tab and O_APPEND writes in another, taking turns on one held file, keep every record in order, as on one Linux file (#1546)', {
+test('a write at SEEK_END in one tab and O_APPEND writes in another, taking turns on one held file, keep every record in order, as on one Linux file, even when the SEEK_END tab never hears of the appends (#1546)', {
   timeout: 600_000,
 }, async (t) => {
   const { page } = await booted(chrome, t);
   await installPackage(page, 'wasix-python', { skip: /^lib\/libpython[^/]*\.a$/ });
   await installPackage(page, 'wasm-coreutils');
-  const other = await peerTab(page);
+  const other = await peerTab(page, { worker: '/blind-worker.js?path=%2Froot%2Fap%2Flog' });
   assert.deepEqual(
     await sh(page, 'rm -rf /root/ap && mkdir -p /root/ap && : > /root/ap/log && echo made'),
     ok('made\n')
