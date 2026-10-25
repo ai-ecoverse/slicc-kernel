@@ -99,6 +99,7 @@ export class RemoteWatch {
   quiet: (() => Promise<void>) | undefined;
   crowd: ((crowded: boolean) => void) | undefined;
   gone: (() => void) | undefined;
+  holdsChanged: (() => void) | undefined;
   renaming: ((rename: PeerRename) => Promise<void>) | undefined;
   renamed: ((lock: string) => void) | undefined;
   private readonly ackers = new Set<string>();
@@ -250,7 +251,7 @@ export class RemoteWatch {
     void this.locks.request(name, async () => {
       this.mourned.delete(peer);
       this.others.delete(peer);
-      this.peerHolds.delete(peer);
+      if (this.peerHolds.delete(peer)) this.holdsChanged?.();
       this.keeps?.left(peer);
       this.peers.delete(peer);
       this.ackers.delete(peer);
@@ -337,6 +338,7 @@ export class RemoteWatch {
     for (const [path, fid] of add) held.set(path, fid);
     if (held.size > 0) this.peerHolds.set(from, held);
     else this.peerHolds.delete(from);
+    this.holdsChanged?.();
     this.channel.postMessage({ ack: seq, from: this.tab, to: from });
   }
 
@@ -457,7 +459,7 @@ export class RemoteWatch {
       if (!held.has(this.lockOf(tab))) {
         if (this.peers.delete(tab)) left = true;
         this.others.delete(tab);
-        this.peerHolds.delete(tab);
+        if (this.peerHolds.delete(tab)) this.holdsChanged?.();
         this.keeps?.left(tab);
         this.ackers.delete(tab);
         this.holders.delete(tab);

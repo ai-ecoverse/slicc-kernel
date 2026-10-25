@@ -150,6 +150,7 @@ export interface KernelFs {
     wait: boolean
   ): Promise<void>;
   holdCounts?(): { mine: number; peers: number; sent: number; held: string[] } | undefined;
+  peerHolds?(listener: (paths: string[]) => void): void;
   rehold?(from: string, to: string): void;
   peerKeeps?(): PeerKeeps | undefined;
   servePeerKeeps?(
