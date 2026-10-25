@@ -114,6 +114,7 @@ const hashOf = proto.getScriptHash;
 const isEval = proto.isEval;
 const originOf = proto.getEvalOrigin;
 const lineOf = proto.getLineNumber;
+const nameOf = proto.getScriptNameOrSourceURL;
 const ownNames = new Set<unknown>([
   apply(fileOf, self, []),
   apply(proto.getScriptNameOrSourceURL, self, []),
@@ -158,12 +159,24 @@ export function rootOrigin(origin: string): string {
   return apply(slice, at, [0, end]) as string;
 }
 
+function evalAt(origin: string): boolean {
+  return apply(startsWith, origin, ['eval at ']) === true;
+}
+
+function scriptOf(site: object): unknown {
+  if (apply(isEval, site, []) !== true) return apply(fileOf, site, []);
+  const origin = apply(originOf, site, []) as string | undefined;
+  if (typeof origin !== 'string' || evalAt(origin)) return undefined;
+  return apply(nameOf, site, []);
+}
+
 export function keptFrame(site: object): boolean {
   const hash = apply(hashOf, site, []) as string;
   if (hash === ownHash) return false;
   if (apply(isEval, site, []) === true) {
     const origin = apply(originOf, site, []) as string | undefined;
-    return typeof origin === 'string' && programName(rootOrigin(origin));
+    if (typeof origin !== 'string') return false;
+    return !evalAt(origin) || programName(rootOrigin(origin));
   }
   const file = apply(fileOf, site, []) as unknown;
   if (typeof file !== 'string') return true;
@@ -252,7 +265,7 @@ export function errorSourceOf(error: unknown): JsErrorSource | undefined {
   if (!at || typeof at.sourceLine !== 'string' || typeof at.lineNumber !== 'number')
     return undefined;
   if (apply(setHas, ownNames, [at.scriptResourceName]) === true) return undefined;
-  const file = apply(isEval, site, []) === true ? undefined : apply(fileOf, site, []);
+  const file = scriptOf(site);
   if (at.scriptResourceName !== file || apply(lineOf, site, []) !== at.lineNumber) return undefined;
   const out = blank(null) as JsErrorSource;
   out.sourceLine = at.sourceLine;
