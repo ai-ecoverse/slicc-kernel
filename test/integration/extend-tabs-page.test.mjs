@@ -98,9 +98,11 @@ test('on a shared root, SEEK_END writes to a file no other tab holds stay buffer
     solo
   );
   const [locks1, ops1] = [await taken(), await ops()];
-  console.log(`#1546 uncrowded: append locks ${locks1 - locks0}, opfs ops ${ops1 - ops0}`);
+  console.log(
+    `#1546 uncrowded: append locks ${locks1.taken - locks0.taken}, opfs ops ${ops1 - ops0}`
+  );
   assert.deepEqual(r, ok('890\n'));
-  assert.equal(locks1 - locks0, 0);
+  assert.equal(locks1.taken - locks0.taken, 0);
 });
 
 const MB = 1024 * 1024;
@@ -166,11 +168,14 @@ for (const { kind, size, worker } of [
     const [c1, ops1] = [await counted(), await ops()];
     const held = await page.evaluate(() => window.big_hold);
     console.log(
-      `#1546 crowded ${kind}: append locks ${c1.taken - c0.taken}, opfs ops ${ops1 - ops0}, bytes read ${c1.read - c0.read}`
+      `#1546 crowded ${kind}: append locks ${c1.taken - c0.taken}, opfs ops ${ops1 - ops0}, bytes read ${(c1.read.big ?? 0) - (c0.read.big ?? 0)}, by file ${JSON.stringify(c1.read)}`
     );
     assert.deepEqual(r, ok(`${size + 890}\n`));
     assert.deepEqual(held, ok('held\n'));
     assert.ok(c1.taken - c0.taken >= 200, `locks ${c1.taken - c0.taken}`);
-    assert.ok(c1.read - c0.read < size, `read ${c1.read - c0.read} bytes`);
+    assert.ok(
+      (c1.read.big ?? 0) - (c0.read.big ?? 0) < size,
+      `read ${(c1.read.big ?? 0) - (c0.read.big ?? 0)} bytes`
+    );
   });
 }
