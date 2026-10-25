@@ -156,11 +156,10 @@ const within = (path: string, target: string) =>
 const TOUCHED_MAX = 4096;
 const parentOf = (path: string) => path.slice(0, path.lastIndexOf('/')) || '/';
 
-interface Moved {
+interface Send {
   tab: string;
-  path: string;
-  hidden: string;
-  fid: string | undefined;
+  items: Array<{ path: string; hidden: string | undefined; fid: string | undefined }>;
+  paths: string[];
 }
 
 export interface PeerKept {
@@ -328,7 +327,7 @@ export class UnlinkedKeeper {
       async rm(path, options) {
         const target = fs.resolvePath('/', path);
         const kept = await keeper.peerKeep(target, false, () => keeper.removable(target, options));
-        if (kept.whole) return;
+        if (kept.whole) return kept.undoing(async () => undefined);
         await kept.undoing(() =>
           replace(target, async (gated, sealed) => {
             const pinned = await keeper.pin(target, gated, sealed);
@@ -547,12 +546,11 @@ export class UnlinkedKeeper {
         void peers.ask(tab, { kept: { items: [], paths } }, PEER_RM_MS);
       throw fsError('EBUSY', `${target}: open in another tab that did not answer`);
     }
-    const { whole, moved } = await this.setAside(peers, target, asked, heard);
-    return { whole, undoing: (op) => this.undoing(op, moved) };
+    const { whole, sends } = await this.setAside(target, asked);
+    return { whole, undoing: (op) => this.undoing(op, peers, sends, heard) };
   }
 
   private async setAside(
-    peers: PeerKeeps,
     target: string,
     asked: ReadonlyArray<{
       tab: string;
@@ -562,16 +560,14 @@ export class UnlinkedKeeper {
         instance: string | undefined;
       }>;
       paths: string[];
-    }>,
-    heard: readonly boolean[]
-  ): Promise<{ whole: boolean; moved: Moved[] }> {
+    }>
+  ): Promise<{ whole: boolean; sends: Send[] }> {
     const mine = this.heldWithin(target);
     const taken = new Set<string>();
     let whole = false;
-    const told: Array<Promise<boolean>> = [];
-    const moved: Moved[] = [];
-    for (const [i, { tab, holders, paths }] of asked.entries()) {
-      const items = [];
+    const sends: Send[] = [];
+    for (const { tab, holders, paths } of asked) {
+      const items: Send['items'] = [];
       for (const holder of holders) {
         const free = !mine.has(holder.path) && !taken.has(holder.path);
         const hidden = free
@@ -579,39 +575,52 @@ export class UnlinkedKeeper {
           : undefined;
         if (hidden !== undefined) {
           taken.add(holder.path);
-          moved.push({ tab, path: holder.path, hidden, fid: holder.fid });
           if (holder.path === target) whole = true;
         }
         items.push({ path: holder.path, hidden, fid: holder.fid });
       }
-      const answer = peers.ask(tab, { kept: { items, paths } }, PEER_RM_MS);
-      if (heard[i]) told.push(answer);
+      sends.push({ tab, items, paths });
     }
-    await Promise.all(told);
-    return { whole, moved };
+    return { whole, sends };
   }
 
-  private async undoing<T>(op: () => Promise<T>, moved: readonly Moved[]): Promise<T> {
+  private async undoing<T>(
+    op: () => Promise<T>,
+    peers: PeerKeeps,
+    sends: readonly Send[],
+    heard: readonly boolean[]
+  ): Promise<T> {
+    let failed: unknown;
+    let out: T | undefined;
     try {
-      return await op();
+      out = await op();
     } catch (err) {
-      for (const { tab, path, hidden, fid } of moved) {
-        const back = await this.serial(async () => {
-          if (await this.present(path)) return false;
-          return this.fs.rename(hidden, path).then(
-            () => true,
-            () => false
-          );
-        });
-        if (!back) continue;
-        void this.peers?.ask(
-          tab,
-          { kept: { items: [{ path, hidden: undefined, fid, undo: hidden }], paths: [] } },
-          PEER_RM_MS
-        );
+      failed = err ?? new Error('failed');
+      for (const send of sends) {
+        for (const item of send.items) {
+          const { hidden, path } = item;
+          if (hidden !== undefined && (await this.moveBack(hidden, path))) item.hidden = undefined;
+        }
       }
-      throw err;
     }
+    await Promise.all(
+      sends.map(({ tab, items, paths }, i) => {
+        const told = peers.ask(tab, { kept: { items, paths } }, PEER_RM_MS);
+        return heard[i] ? told : undefined;
+      })
+    );
+    if (failed !== undefined) throw failed;
+    return out as T;
+  }
+
+  private moveBack(hidden: string, path: string): Promise<boolean> {
+    return this.serial(async () => {
+      if (await this.present(path)) return false;
+      return this.fs.rename(hidden, path).then(
+        () => true,
+        () => false
+      );
+    });
   }
 
   async removable(target: string, options?: { recursive?: boolean }): Promise<boolean> {

@@ -282,10 +282,6 @@ export class HeldPaths extends Map<string, number> implements UnlinkHolder {
     this.unlinked.set(path, file);
   }
 
-  unkeepAt(path: string, hidden: string): void {
-    for (const file of [...this.uses.keys()]) if (file.hidden === hidden) this.unkeep(path, file);
-  }
-
   unkeep(path: string, file: KeptFile): void {
     for (const [id, kept] of this.keptHandles) if (kept === file) this.keptHandles.delete(id);
     this.uses.delete(file);

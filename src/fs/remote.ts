@@ -45,7 +45,6 @@ export interface PeerKept {
   path: string;
   hidden: string | undefined;
   fid: string | undefined;
-  undo?: string;
 }
 
 export interface PeerHolder {
@@ -302,13 +301,8 @@ export class RemoteWatch {
     if (data.to === this.tab && (data.keeping || data.kept)) void this.keepAsked(data);
   }
 
-  private readonly keepChains = new Map<string, Promise<void>>();
-
   private keepAsked(data: WatchMessage): Promise<void> {
-    const from = data.tab as string;
-    const next = (this.keepChains.get(from) ?? Promise.resolve()).then(() => this.keepOne(data));
-    this.keepChains.set(from, next);
-    return next;
+    return this.keepOne(data);
   }
 
   private async keepOne({ tab, seq, keeping, kept }: WatchMessage): Promise<void> {

@@ -3222,7 +3222,7 @@ export class Launcher {
     return this.writers;
   }
 
-  private readonly peerGates = new Map<string, () => void>();
+  private readonly peerGates = new Map<string, Array<Promise<() => void>>>();
 
   private peerOptions(fs: KernelFs): { peers?: PeerKeeps; dirOwner?: NewOwner } {
     const peers = fs.peerKeeps?.();
@@ -3240,34 +3240,38 @@ export class Launcher {
     const ours = (hidden: string) =>
       hidden.startsWith(`/${UNLINKED_DIR}/${instance}.p`) &&
       /^[0-9a-f]+$/.test(hidden.slice(`/${UNLINKED_DIR}/${instance}.p`.length));
-    const open = (tab: string, paths?: readonly string[]) => {
-      for (const [key, release] of [...gates]) {
+    const gate = async (tab: string, path: string): Promise<() => void> => {
+      const release = await this.unlinked.gate.acquire(path);
+      let done = false;
+      const once = () => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        release();
+      };
+      const timer = setTimeout(once, PEER_GATE_MS);
+      if (gone.has(tab)) once();
+      return once;
+    };
+    const open = async (tab: string, paths?: readonly string[], all = false) => {
+      for (const [key, queue] of [...gates]) {
         const [owner, path] = key.split('\0') as [string, string];
         if (owner !== tab || (paths && !paths.includes(path))) continue;
-        gates.delete(key);
-        release();
+        const taken = all ? queue.splice(0) : queue.splice(0, 1);
+        if (queue.length === 0) gates.delete(key);
+        for (const entry of taken) (await entry)();
       }
     };
     return {
       keeping: async (tab: string, paths: readonly string[]) => {
-        for (const path of paths) {
-          if (gone.has(tab)) return;
-          const release = await this.unlinked.gate.acquire(path);
+        if (gone.has(tab)) return;
+        const mine = paths.map((path) => {
           const key = `${tab}\0${path}`;
-          let done = false;
-          const once = () => {
-            if (done) return;
-            done = true;
-            clearTimeout(timer);
-            release();
-          };
-          const timer = setTimeout(() => {
-            if (gates.get(key) === once) gates.delete(key);
-            once();
-          }, PEER_GATE_MS);
-          if (gone.has(tab)) once();
-          else gates.set(key, once);
-        }
+          const entry = gate(tab, path);
+          gates.set(key, [...(gates.get(key) ?? []), entry]);
+          return entry;
+        });
+        await Promise.all(mine);
       },
       kept: async (
         tab: string,
@@ -3275,26 +3279,17 @@ export class Launcher {
           path: string;
           hidden: string | undefined;
           fid: string | undefined;
-          undo?: string;
         }>,
         paths: readonly string[]
       ) => {
-        for (const { path, hidden, fid, undo } of items) {
-          if (undo !== undefined) this.unadopt(path, undo, fid);
-          else this.adoptKept(path, hidden, fid, ours);
-        }
-        open(tab, paths);
+        for (const { path, hidden, fid } of items) this.adoptKept(path, hidden, fid, ours);
+        await open(tab, paths);
       },
       left: (tab: string) => {
         gone.add(tab);
-        open(tab);
+        void open(tab, undefined, true);
       },
     };
-  }
-
-  private unadopt(path: string, undo: string, fid: string | undefined): void {
-    for (const holds of this.held) holds.unkeepAt(path, undo);
-    void this.rootFs.announceHolds?.([[path, fid]], [], false);
   }
 
   private adoptKept(

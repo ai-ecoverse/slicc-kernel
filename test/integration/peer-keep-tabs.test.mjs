@@ -273,3 +273,28 @@ test('a file held before another tab joins is kept for its holder when that tab 
   console.log(`held before the join: ${r.stdout.trim()} ${r.stderr.trim()}`);
   assert.equal(r.stdout, 'old kept\n');
 });
+
+test('two renames over a held file at once from another tab both go ahead, without waiting out the gate cap (#1608)', {
+  timeout: 900_000,
+}, async (t) => {
+  const dir = '/root/pk8';
+  const { page, other } = await setup(t, dir);
+  for (;;) {
+    const listed = (await sh(other, 'cat /proc/sys/kernel/slicc_peer_held')).stdout;
+    if (listed.includes(`${dir}/f`)) break;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  const t0 = Date.now();
+  const both = await sh(
+    other,
+    `cd ${dir} && echo A > a && echo B > b && { mv a f & mv b f & wait; } ; echo "rc=$?"; cat f`
+  );
+  const took = Date.now() - t0;
+  console.log(`two renames over: ${took} ms ${JSON.stringify(both)}`);
+  assert.equal(both.stderr, '');
+  assert.match(both.stdout, /^rc=0\n[AB]\n$/);
+  assert.ok(took < 8000, `the renames took ${took} ms`);
+  await sh(page, `: > ${dir}/go`);
+  const r = await page.evaluate(() => window.holder);
+  assert.equal(r.stdout, 'old kept\n');
+});
