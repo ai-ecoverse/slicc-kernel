@@ -13,8 +13,14 @@ export function renameWait(view: ChangeView): number {
 const DIRTY = RING + RING_SIZE * SLOT;
 const FOREIGN = DIRTY + 1;
 const RENAMES = FOREIGN + 1;
+const HELD = RENAMES + 1;
+const HELD_SLOTS = 1024;
 
-export const CHANGES_BYTES = (RENAMES + 1) * 4;
+export const CHANGES_BYTES = (HELD + HELD_SLOTS) * 4;
+
+function heldSlot(path: string): number {
+  return HELD + (changeHash(normal(path)) & (HELD_SLOTS - 1));
+}
 
 export function changeHash(path: string): number {
   let h = 0x811c9dc5;
@@ -56,6 +62,14 @@ export class FileChanges {
     Atomics.add(this.view, GEN, RING_SIZE + 1);
   }
 
+  peerHeld(paths: readonly string[]): void {
+    const on = new Set(paths.map(heldSlot));
+    for (const slot of on) Atomics.store(this.view, slot, 1);
+    for (let slot = HELD; slot < HELD + HELD_SLOTS; slot++) {
+      if (!on.has(slot)) Atomics.store(this.view, slot, 0);
+    }
+  }
+
   renamed(): number {
     const seq = (Atomics.add(this.view, RENAMES, 1) + 1) | 0;
     Atomics.notify(this.view, RENAMES);
@@ -90,6 +104,10 @@ export class ChangeView {
 
   foreign(): boolean {
     return this.view.length > FOREIGN && Atomics.load(this.view, FOREIGN) === 1;
+  }
+
+  peerHeld(path: string): boolean {
+    return this.view.length > HELD && Atomics.load(this.view, heldSlot(path)) === 1;
   }
 
   renames(): number {

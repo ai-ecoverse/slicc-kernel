@@ -146,8 +146,16 @@ export class FileBuffer {
     if (this.spoiled) throw new WasiError('ESTALE');
   }
 
+  private crowded(): boolean {
+    return this.watch?.view.peerHeld(this.where) === true;
+  }
+
   size(): number {
     this.live();
+    if (this.crowded()) {
+      this.flush();
+      this.reread();
+    }
     if (this.ranged) return this.ranged.size();
     this.load();
     return this.length;
@@ -170,6 +178,13 @@ export class FileBuffer {
     if (bytes.length === 0) return 0;
     const end = at + bytes.length;
     this.fits(end);
+    const { pwrite } = this.fs;
+    if (pwrite && this.crowded() && end > this.size()) {
+      const copy = bytes.slice();
+      this.retried(() => pwrite.call(this.fs, this.where, at, copy, true));
+      this.reread();
+      return bytes.length;
+    }
     this.dirty = true;
     if (this.ranged) {
       this.ranged.write(at, bytes);
