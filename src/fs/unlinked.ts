@@ -209,11 +209,19 @@ export function holdShared(locks: SharedLocks | undefined, name: string): Promis
   });
 }
 
-export async function lastHolder(locks: SharedLocks | undefined, name: string): Promise<boolean> {
-  if (!locks) return true;
+export async function whenLast(
+  locks: SharedLocks | undefined,
+  name: string,
+  op: () => Promise<unknown>
+): Promise<boolean> {
+  if (!locks) {
+    await op();
+    return true;
+  }
   let free = false;
   await locks.request(name, { mode: 'exclusive', ifAvailable: true }, async (lock) => {
     free = lock !== null;
+    if (free) await op();
   });
   return free;
 }
@@ -677,9 +685,7 @@ export class UnlinkedKeeper {
       release: () => {
         if (--left > 0) return;
         mine();
-        void lastHolder(locks, keptLock(hidden)).then((last) => {
-          if (last) void this.serial(() => this.drop(hidden));
-        });
+        void this.serial(() => whenLast(locks, keptLock(hidden), () => this.drop(hidden)));
       },
     };
   }
@@ -861,13 +867,18 @@ export class UnlinkedKeeper {
       for (const name of names) {
         const id = name.slice(0, name.lastIndexOf('.'));
         const at = id.indexOf('~');
-        const shared = name.startsWith(SHARED_PREFIX);
-        const dead = shared
-          ? held !== undefined && !held.has(keptLock(`${dir}/${name}`))
-          : id !== this.instance &&
-            (at < 0
-              ? held !== undefined && !held.has(lockName(id))
-              : owner?.alive(id.slice(0, at)) === false);
+        if (name.startsWith(SHARED_PREFIX)) {
+          const at = `${dir}/${name}`;
+          await whenLast(this.sharedLocks(), keptLock(at), () =>
+            this.fs.rm(at, { recursive: true }).catch(() => undefined)
+          );
+          continue;
+        }
+        const dead =
+          id !== this.instance &&
+          (at < 0
+            ? held !== undefined && !held.has(lockName(id))
+            : owner?.alive(id.slice(0, at)) === false);
         if (dead) await this.fs.rm(`${dir}/${name}`, { recursive: true }).catch(() => undefined);
       }
       await this.tidy(dir);
