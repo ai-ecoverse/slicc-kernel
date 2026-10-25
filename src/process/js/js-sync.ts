@@ -102,6 +102,9 @@ export interface JsSyncContext {
   promiseState(
     promise: unknown
   ): { state: 'pending' | 'fulfilled' | 'rejected'; value: unknown } | undefined;
+  setStackFormatter?(
+    fn: ((error: unknown, callSites: readonly object[]) => unknown) | null
+  ): ((error: unknown, callSites: readonly object[]) => unknown) | null;
   read(fd: number, max?: number): Uint8Array;
   write(fd: number, data: Uint8Array | string, options?: JsWriteOptions): number;
   close(fd: number): void;
@@ -237,6 +240,7 @@ export function syncOps(
   | 'net'
   | 'runScript'
   | 'promiseState'
+  | 'setStackFormatter'
 > & { fs: Omit<JsSyncContext['fs'], 'watch'> } {
   const { infos, handles, resolve } = shared;
   const clean = () => shared.clean?.() === true;

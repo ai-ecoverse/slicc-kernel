@@ -264,11 +264,47 @@ export function sparesOf(options: { warmWorker?: boolean; warmWorkers?: unknown 
   return n;
 }
 
+const INTERNALS = '--expose-internals';
+let internalArgv: string[] | null | undefined;
+
+export function narrowArgv(argv: readonly string[], message: string): string[] | null {
+  const at = message.indexOf(': ');
+  if (at < 0) return null;
+  const bad = new Set(message.slice(at + 2).split(', '));
+  const kept = argv.filter((arg) => !bad.has(arg));
+  return kept.length < argv.length ? kept : null;
+}
+
+export function internalsWorker(
+  make: (execArgv?: string[]) => Worker,
+  argv: readonly string[] = process.execArgv
+): Worker {
+  internalArgv ??= [...argv, INTERNALS];
+  for (let tries = 0; internalArgv !== null && tries < 2; tries++) {
+    try {
+      return make(internalArgv);
+    } catch (err) {
+      const { code, message } = err as { code?: unknown; message?: unknown };
+      if (code !== 'ERR_WORKER_INVALID_EXEC_ARGV' || typeof message !== 'string') throw err;
+      internalArgv = narrowArgv(internalArgv, message);
+    }
+  }
+  internalArgv = null;
+  return make();
+}
+
+export function resetInternalArgv(): void {
+  internalArgv = undefined;
+}
+
 function processWorker(
   file: string | URL,
-  workerData?: { compileCache: string; ownedCache?: boolean }
+  workerData?: { compileCache: string; ownedCache?: boolean },
+  internals = false
 ): Worker {
-  return new Worker(file, { env: workerEnv(), ...(workerData ? { workerData } : {}) });
+  const make = (execArgv?: string[]) =>
+    new Worker(file, { env: workerEnv(), ...(workerData ? { workerData } : {}), execArgv });
+  return internals ? internalsWorker(make) : make();
 }
 
 export function sourceModule(source: string): { url: string; source: string; revoke(): void } {
@@ -284,7 +320,7 @@ function warmPoolOf(
 ) {
   const size = sparesOf(options);
   if (size === 0) return undefined;
-  return warmPool(() => processWorker(file, workerData), live, WARM_IDLE_MS, size);
+  return warmPool(() => processWorker(file, workerData, true), live, WARM_IDLE_MS, size);
 }
 
 function nodeWorker(
@@ -292,7 +328,8 @@ function nodeWorker(
   live: Set<() => void>,
   closed: boolean,
   workerData?: { compileCache: string; ownedCache?: boolean },
-  take?: () => Worker
+  take?: () => Worker,
+  internals = false
 ): WasmWorkerLike {
   const errors = new Set<(event: MessageEvent) => void>();
   const messages = new Map<(event: MessageEvent) => void, (data: unknown) => void>();
@@ -301,7 +338,7 @@ function nodeWorker(
       handler({ message, preventDefault() {} } as unknown as MessageEvent);
     }
   };
-  const worker = closed ? undefined : (take?.() ?? processWorker(file, workerData));
+  const worker = closed ? undefined : (take?.() ?? processWorker(file, workerData, internals));
   let ending = false;
   if (worker) {
     const kill = () => {
@@ -518,7 +555,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     moduleUrl: sourceModule,
     unlinkOwner: pidOwner(process),
     createWorker: () =>
-      nodeWorker(file, live, terminated, workerData, warm ? () => warm.take() : undefined),
+      nodeWorker(file, live, terminated, workerData, warm ? () => warm.take() : undefined, true),
     createDriverWorker: () =>
       nodeWorker(
         options.driverWorker ?? new URL('./node-driver-worker.js', import.meta.url),

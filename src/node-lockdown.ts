@@ -1,10 +1,12 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { createHash } from 'node:crypto';
 import type { Session } from 'node:inspector';
 import { isBuiltin, registerHooks } from 'node:module';
 import { resolve, sep } from 'node:path';
 import { types } from 'node:util';
 import { getHeapStatistics } from 'node:v8';
 import { runInThisContext } from 'node:vm';
+import { programScript } from './node-stack.ts';
 import { hide, lockdown, vacate } from './process/js/lockdown.ts';
 
 export { vacate };
@@ -52,6 +54,13 @@ const sources = new Map<string, string>();
 
 export function moduleSource(url: string, source: string): void {
   sources.set(url, source);
+  programScript(url, url.slice(SOURCE_MODULE.length));
+}
+
+const sha256 = createHash;
+
+function sourceHash(source: string): string {
+  return sha256('sha256').update(source).digest('hex');
 }
 
 export function refuseModules(): void {
@@ -163,6 +172,7 @@ export function nodeRunScript(
   const options = blank(null) as { filename: string; displayErrors: boolean };
   options.filename = filename;
   options.displayErrors = false;
+  programScript(filename, sourceHash(source));
   return freeze({ value: runHere(source, options), completion: true });
 }
 

@@ -12,6 +12,7 @@ import {
   ownCache,
   workerShaped,
 } from './node-lockdown.ts';
+import { nodeStackFormatter } from './node-stack.ts';
 import { runJsProcess, runJsThread } from './process/js/js-runtime.ts';
 import { processEntry } from './process/process-entry.ts';
 import { runWasmProcess } from './process/process-runtime.ts';
@@ -52,6 +53,7 @@ const onMessage = processEntry(
         runScript: nodeRunScript,
         moduleSource,
         promiseState: nodePromiseState,
+        stackFormatter: nodeStackFormatter,
         imported,
       }),
     runJsThread: (init, at) =>
@@ -63,6 +65,7 @@ const onMessage = processEntry(
         runScript: nodeRunScript,
         moduleSource,
         promiseState: nodePromiseState,
+        stackFormatter: nodeStackFormatter,
         imported,
       }),
   }),
