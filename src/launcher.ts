@@ -48,6 +48,7 @@ import {
 import type { KernelFs, NewOwner, PeerKeeps, Peers, UsersMode } from './fs/types.ts';
 import { fsError, normalizePath } from './fs/types.ts';
 import {
+  type KeptFile,
   PathMarks,
   PEER_GATE_MS,
   sharedKept,
@@ -3289,7 +3290,7 @@ export class Launcher {
       ) => {
         for (const { path, hidden, fid } of items) {
           if (hidden !== undefined && sharedKept(hidden)) await this.adoptShared(path, hidden, fid);
-          else this.adoptKept(path, hidden, fid, ours);
+          else await this.adoptKept(path, hidden, fid, ours);
         }
         await open(tab, paths);
       },
@@ -3300,14 +3301,41 @@ export class Launcher {
     };
   }
 
-  private async adoptShared(path: string, hidden: string, fid: string | undefined): Promise<void> {
-    const bound = [...this.held].map(
-      (holds) => [holds, [...holds.boundAt(path, fid), ...holds.boundAt(hidden, fid)]] as const
-    );
-    const keeping = bound.filter(([, ids]) => ids.length > 0);
+  private async keptIds(
+    hidden: string,
+    fid: string | undefined
+  ): Promise<Array<string | undefined>> {
+    if (fid !== undefined) return [fid];
+    const st = await this.rootFs.lstat(hidden).catch(() => undefined);
+    return st?.fid === undefined ? [undefined] : [undefined, st.fid];
+  }
+
+  private boundTo(path: string, hidden: string, fids: ReadonlyArray<string | undefined>) {
+    const keeping = [...this.held]
+      .map(
+        (holds) =>
+          [
+            holds,
+            fids.flatMap((fid) => [...holds.boundAt(path, fid), ...holds.boundAt(hidden, fid)]),
+          ] as const
+      )
+      .filter(([, ids]) => ids.length > 0);
     const nodes = [...this.openFiles].filter((open) =>
       [path, hidden].some((at) => open.holdsAt(at))
     );
+    const keep = (file: KeptFile) => {
+      const kept = nodes.filter((open) =>
+        fids.some((fid) => open.keepBound([hidden, path], fid, file))
+      ).length;
+      for (let i = kept; i < nodes.length; i++) file.release();
+      for (const [holds, ids] of keeping) holds.keepBound(ids, path, file);
+      void this.rootFs.announceHolds?.([], [path, hidden], false);
+    };
+    return { keeping, nodes, keep };
+  }
+
+  private async adoptShared(path: string, hidden: string, fid: string | undefined): Promise<void> {
+    const { keeping, nodes, keep } = this.boundTo(path, hidden, await this.keptIds(hidden, fid));
     const refs = keeping.length + nodes.length;
     if (refs === 0) {
       this.held.doubt([path]);
@@ -3324,35 +3352,23 @@ export class Launcher {
       this.held.doubt([path]);
       return;
     }
-    const kept = nodes.filter((open) => open.keepBound([hidden, path], fid, file)).length;
-    for (let i = kept; i < nodes.length; i++) file.release();
-    for (const [holds, ids] of keeping) holds.keepBound(ids, path, file);
-    void this.rootFs.announceHolds?.([], [path, hidden], false);
+    keep(file);
   }
 
-  private adoptKept(
+  private async adoptKept(
     path: string,
     hidden: string | undefined,
     fid: string | undefined,
     ours: (hidden: string) => boolean
-  ): void {
+  ): Promise<void> {
     if (hidden === undefined || !ours(hidden)) {
       this.held.doubt([path]);
       return;
     }
-    const bound = [...this.held].map(
-      (holds) => [holds, [...holds.boundAt(path, fid), ...holds.boundAt(hidden, fid)]] as const
-    );
-    const keeping = bound.filter(([, ids]) => ids.length > 0);
-    const nodes = [...this.openFiles].filter((open) =>
-      [path, hidden].some((at) => open.holdsAt(at))
-    );
+    const { keeping, nodes, keep } = this.boundTo(path, hidden, await this.keptIds(hidden, fid));
     const file = this.unlinked.adopt(hidden, Math.max(keeping.length + nodes.length, 1));
-    const kept = nodes.filter((open) => open.keepBound([hidden, path], fid, file)).length;
-    for (let i = kept; i < nodes.length; i++) file.release();
     if (keeping.length === 0 && nodes.length === 0) file.release();
-    for (const [holds, ids] of keeping) holds.keepBound(ids, path, file);
-    void this.rootFs.announceHolds?.([], [path, hidden], false);
+    keep(file);
   }
 
   private openNodes(fs: VfsFileFs, entries?: Map<string, Promise<unknown>>): VfsNodes {
@@ -3394,6 +3410,7 @@ export class Launcher {
       this.changes.flush();
       this.changes.foreign(crowded);
       if (crowded) {
+        void this.announceHeld();
         void this.held
           .bindIds((path) => this.rootFileId(path))
           .then(() =>
