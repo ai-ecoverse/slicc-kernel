@@ -146,8 +146,46 @@ export class FileBuffer {
     if (this.spoiled) throw new WasiError('ESTALE');
   }
 
+  private crowded(): boolean {
+    return this.watch?.view.peerHeld(this.where) === true;
+  }
+
+  private exact(): number | undefined {
+    this.flush();
+    const watch = this.watch as RangedWatch;
+    const size = this.retried(() => watch.stat(this.where)).size;
+    if (this.ranged) {
+      if (size !== this.ranged.size()) this.ranged.reread();
+      return undefined;
+    }
+    if (this.data && size !== this.length) this.data = undefined;
+    return this.data ? undefined : size;
+  }
+
+  private wrote(at: number, bytes: Uint8Array): void {
+    if (this.ranged) {
+      this.ranged.wrote(at, bytes.length);
+      return;
+    }
+    const view = (this.watch as RangedWatch).view;
+    const { now, changed } = view.changedSince(this.seen, this.where);
+    this.seen = now;
+    if (changed) this.data = undefined;
+    if (!this.data) return;
+    const end = at + bytes.length;
+    this.ensure(end);
+    const buf = this.data as Uint8Array;
+    if (at > this.length) buf.fill(0, this.length, at);
+    buf.set(bytes, at);
+    this.length = Math.max(this.length, end);
+  }
+
   size(): number {
     this.live();
+    if (this.crowded()) {
+      const known = this.exact();
+      if (known !== undefined) return known;
+    }
     if (this.ranged) return this.ranged.size();
     this.load();
     return this.length;
@@ -170,6 +208,13 @@ export class FileBuffer {
     if (bytes.length === 0) return 0;
     const end = at + bytes.length;
     this.fits(end);
+    const { pwrite } = this.fs;
+    if (pwrite && this.crowded() && end > this.size()) {
+      const copy = bytes.slice();
+      this.retried(() => pwrite.call(this.fs, this.where, at, copy, true));
+      this.wrote(at, bytes);
+      return bytes.length;
+    }
     this.dirty = true;
     if (this.ranged) {
       this.ranged.write(at, bytes);

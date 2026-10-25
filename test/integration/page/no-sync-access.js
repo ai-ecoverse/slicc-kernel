@@ -1,0 +1,1 @@
+delete FileSystemFileHandle.prototype.createSyncAccessHandle;

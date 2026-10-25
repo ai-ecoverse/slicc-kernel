@@ -541,6 +541,11 @@ export class OpfsFs implements KernelFs {
     return this.remote?.hold(add, drop, wait) ?? Promise.resolve();
   }
 
+  peerHolds(listener: (paths: string[]) => void): void {
+    const remote = this.remote;
+    if (remote) remote.holdsChanged = () => listener(remote.peerHeldPaths());
+  }
+
   holdCounts(): { mine: number; peers: number; sent: number; held: string[] } | undefined {
     const remote = this.remote;
     return remote && { ...remote.holdCounts(), held: remote.peerHeldPaths() };
@@ -1426,7 +1431,7 @@ export class OpfsFs implements KernelFs {
     const at = normalizePath(path);
     const movedAway = this.renamesInFlight() ? await this.writeWaits(at) : false;
     const ended = this.writeStarted(at);
-    try {
+    const write = async () => {
       const [kept, target, existed] = await this.keptFor(path);
       if (kept) {
         try {
@@ -1442,6 +1447,9 @@ export class OpfsFs implements KernelFs {
         !existed && !movedAway && options?.create !== false
       );
       await this.writeAt(handle, target, path, offset, bytes);
+    };
+    try {
+      await (this.remote?.peerHeld(at).length ? this.ending(path, write) : write());
     } finally {
       ended();
     }

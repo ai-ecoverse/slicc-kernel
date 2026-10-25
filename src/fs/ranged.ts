@@ -120,6 +120,12 @@ export class RangedFile {
     return this.pages.changed;
   }
 
+  wrote(at: number, length: number): void {
+    this.pages.landed(at, length);
+    this.version = undefined;
+    this.fresh();
+  }
+
   get pinnedVersion(): string | undefined {
     return this.version;
   }
