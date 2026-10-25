@@ -1446,9 +1446,9 @@ function crc(bytes, start = 0) {
   return h;
 }
 
-async function readintowindows(ctx, [path]) {
+async function readintowindows(ctx, [path, unit]) {
   const { sync } = ctx;
-  const MIB = 1 << 20;
+  const MIB = unit ? Number(unit) : 1 << 20;
   const size = 3 * MIB + 123;
   const byte = (i) => (i * 31 + (i >> 16)) & 0xff;
   const w = sync.open(path, { write: true, create: true, truncate: true });
