@@ -355,3 +355,53 @@ for (const occupy of [false, true]) {
     if (!occupy) assert.equal((await sh(other, `cat ${dir}/f`)).stdout, 'kept');
   });
 }
+
+const KERNEL_HOLDER = (dir) =>
+  [
+    'import os, time',
+    `fd = os.open('${dir}/f', os.O_RDWR)`,
+    "os.system('true')",
+    `open('${dir}/opened', 'w').close()`,
+    `while not os.path.exists('${dir}/go'): time.sleep(0.02)`,
+    'try:',
+    '    print(os.pread(fd, 16, 0).decode().strip())',
+    'except OSError as e:',
+    "    print(f'errno {e.errno}')",
+  ].join('\n');
+
+for (const [name, early] of [
+  ['while the root is shared', true],
+  ['before another tab joins', false],
+]) {
+  test(`a file held through a kernel descriptor ${name} is kept for it when another tab removes it (#1608 a)`, {
+    timeout: 900_000,
+  }, async (t) => {
+    const dir = `/root/pk9${early ? 'a' : 'b'}`;
+    const { page } = await booted(chrome, t);
+    await installPackage(page, 'wasm-coreutils');
+    await installPackage(page, 'wasix-python', { skip: /^lib\/libpython[^/]*\.a$/ });
+    let other = early ? await peerTab(page) : undefined;
+    assert.deepEqual(
+      await sh(page, `rm -rf ${dir} && mkdir -p ${dir} && echo old > ${dir}/f && echo made`),
+      ok('made\n')
+    );
+    await page.evaluate((s) => {
+      window.holder = window.kernel.run(['python3', '-c', s], { cwd: '/' });
+    }, KERNEL_HOLDER(dir));
+    while (!(await page.evaluate((p) => window.opfs.exists(p), `${dir.slice(1)}/opened`)))
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    other ??= await peerTab(page);
+    let listed = '';
+    for (let i = 0; i < 200 && !listed.includes(`${dir}/f`); i++) {
+      listed = (await sh(other, 'cat /proc/sys/kernel/slicc_peer_held')).stdout;
+      if (!listed.includes(`${dir}/f`)) await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.deepEqual(await sh(other, `rm ${dir}/f && echo removed`), ok('removed\n'));
+    await sh(page, `: > ${dir}/go`);
+    const r = await page.evaluate(() => window.holder);
+    console.log(
+      `kernel holder ${name}: listed ${JSON.stringify(listed)}; ${r.stdout.trim()} ${r.stderr.trim()}`
+    );
+    assert.equal(r.stdout, 'old\n');
+  });
+}

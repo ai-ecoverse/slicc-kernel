@@ -119,7 +119,7 @@ import { SettlingChildren } from './kernel/settling.ts';
 import { SI, SIG, type SigInfo, sigbit, signalField } from './kernel/signals.ts';
 import { LoopbackNet } from './kernel/socket.ts';
 import { KernelTty } from './kernel/tty.ts';
-import { keepingOpen, VfsNodes } from './kernel/vfs-file.ts';
+import { keepingOpen, type VfsFileFs, type VfsNode, VfsNodes } from './kernel/vfs-file.ts';
 import { defaultCeiling, WasmMemories } from './kernel/wasm-memories.ts';
 import { visibleTo, type WatchSource } from './kernel/watch-ops.ts';
 import { type ServedFilesystem, serveFilesystem } from './mount/driver.ts';
@@ -864,7 +864,7 @@ export class Launcher {
     enableCdp(this.net, this.cdp);
     this.facades.enable(this.net);
     const fs = this.commandFs(this.base);
-    this.nodes = new VfsNodes(fs, (path) => this.released(path));
+    this.nodes = this.openNodes(fs);
     this.nodes.keepsOnDisk = true;
     this.openFiles.add(this.nodes);
     options.fs.onPeer?.(() => this.flushOpen());
@@ -2668,8 +2668,10 @@ export class Launcher {
     const at = normalizePath(path);
     this.unlinked.closed(at);
     this.writers?.unlinked.closed(at);
-    if (![...this.held].some((holds) => holds.holding(at)))
-      void this.rootFs.announceHolds?.([], [at], false);
+    const holding =
+      [...this.held].some((holds) => holds.holding(at)) ||
+      [...this.openFiles].some((open) => open.holdsAt(at));
+    if (!holding) void this.rootFs.announceHolds?.([], [at], false);
     const open = [...this.openFiles].some((nodes) => nodes.writes(at)) || heldUnder(this.held, at);
     if (!open) void this.mounts.commit(at).catch(() => undefined);
   }
@@ -3306,14 +3308,37 @@ export class Launcher {
       (holds) => [holds, [...holds.boundAt(path, fid), ...holds.boundAt(hidden, fid)]] as const
     );
     const keeping = bound.filter(([, ids]) => ids.length > 0);
-    const file = this.unlinked.adopt(hidden, Math.max(keeping.length, 1));
-    if (keeping.length === 0) file.release();
+    const nodes = [...this.openFiles].filter((open) =>
+      [path, hidden].some((at) => open.holdsAt(at))
+    );
+    const file = this.unlinked.adopt(hidden, Math.max(keeping.length + nodes.length, 1));
+    const kept = nodes.filter((open) => open.keepBound([hidden, path], fid, file)).length;
+    for (let i = kept; i < nodes.length; i++) file.release();
+    if (keeping.length === 0 && kept === 0) file.release();
     for (const [holds, ids] of keeping) holds.keepBound(ids, path, file);
     void this.rootFs.announceHolds?.([], [path, hidden], false);
   }
 
+  private openNodes(fs: VfsFileFs, entries?: Map<string, Promise<unknown>>): VfsNodes {
+    const nodes = new VfsNodes(fs, (path) => this.released(path), entries);
+    nodes.opened = (node) => this.nodeOpened(node);
+    return nodes;
+  }
+
+  private nodeOpened(node: VfsNode): void {
+    const path = node.path;
+    if (this.locks.shared?.() !== true || this.mounts.locate(path) !== undefined) return;
+    void (async () => {
+      node.fid ??= await this.rootFileId(path)?.catch(() => undefined);
+      if (node.opens > 0) await this.rootFs.announceHolds?.([[node.path, node.fid]], [], false);
+    })();
+  }
+
   private announceHeld(): Promise<void> | undefined {
-    const held = this.held.heldIds().filter(([path]) => this.mounts.locate(path) === undefined);
+    const nodes = [...this.openFiles].flatMap((open) => open.heldIds());
+    const held = [...this.held.heldIds(), ...nodes].filter(
+      ([path]) => this.mounts.locate(path) === undefined && !path.startsWith(`/${UNLINKED_DIR}/`)
+    );
     return held.length === 0 ? undefined : this.rootFs.announceHolds?.(held, [], false);
   }
 
@@ -3329,7 +3354,12 @@ export class Launcher {
       this.changes.flush();
       this.changes.foreign(crowded);
       if (crowded) {
-        void this.held?.bindIds((path) => this.rootFileId(path)).then(() => this.announceHeld());
+        void this.held
+          .bindIds((path) => this.rootFileId(path))
+          .then(() =>
+            Promise.all([...this.openFiles].map((open) => open.bindIds((p) => this.rootFileId(p))))
+          )
+          .then(() => this.announceHeld());
         for (const nodes of this.openFiles) nodes.shared();
       }
     });
@@ -3357,7 +3387,7 @@ export class Launcher {
   private writerStack(): WriterStack {
     const mounted = this.mounts.wrap(this.unguardedRoot);
     const fs = this.commandFs(this.rooted(mounted));
-    const nodes = new VfsNodes(fs, (path) => this.released(path), this.nodes.entries);
+    const nodes = this.openNodes(fs, this.nodes.entries);
     nodes.keepsOnDisk = true;
     this.openFiles.add(nodes);
     const unlinked = new UnlinkedKeeper(
@@ -3428,6 +3458,7 @@ export class Launcher {
   private moved(from: string, to: string, source?: VfsNodes): void {
     this.renameLog.add(from, to);
     for (const holds of this.held) holds.renamed(from, to);
+    if (this.mounts.locate(to) === undefined) this.rootFs.rehold?.(from, to);
     if (source) return;
     for (const nodes of this.openFiles) nodes.renamed(from, to);
     this.watchers.moved(from, to);
