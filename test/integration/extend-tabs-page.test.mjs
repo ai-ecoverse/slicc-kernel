@@ -124,48 +124,53 @@ const bigWriter = [
   "print(os.path.getsize('/root/ap/big'))",
 ].join('\n');
 
-test('SEEK_END writes to a 1 MB file another tab holds stay cheap: each takes the append lock, none reads the file back (#1546)', {
-  timeout: 600_000,
-}, async (t) => {
-  const { page } = await booted(chrome, t);
-  await installPackage(page, 'wasix-python', { skip: /^lib\/libpython[^/]*\.a$/ });
-  await installPackage(page, 'wasm-coreutils');
-  const other = await peerTab(page, { worker: '/lock-count-worker.js' });
-  assert.deepEqual(
-    await sh(
-      page,
-      `rm -rf /root/ap && mkdir -p /root/ap && head -c ${MB} /dev/zero > /root/ap/big && echo made`
-    ),
-    ok('made\n')
-  );
-  const counted = () =>
-    other.evaluate(
-      () =>
-        new Promise((resolve) => {
-          const c = new BroadcastChannel('lock-count');
-          c.onmessage = ({ data }) => {
-            c.close();
-            resolve(data);
-          };
-          c.postMessage('?');
-        })
+for (const { kind, size, worker } of [
+  { kind: 'ranged, 1 MB', size: MB, worker: '/lock-count-worker.js' },
+  { kind: 'whole-file, 64 kB', size: 64 * 1024, worker: '/whole-count-worker.js' },
+]) {
+  test(`SEEK_END writes to a file another tab holds (${kind} buffer) each take the append lock, and none reads the file back (#1546)`, {
+    timeout: 600_000,
+  }, async (t) => {
+    const { page } = await booted(chrome, t);
+    await installPackage(page, 'wasix-python', { skip: /^lib\/libpython[^/]*\.a$/ });
+    await installPackage(page, 'wasm-coreutils');
+    const other = await peerTab(page, { worker });
+    assert.deepEqual(
+      await sh(
+        page,
+        `rm -rf /root/ap && mkdir -p /root/ap && head -c ${size} /dev/zero > /root/ap/big && echo made`
+      ),
+      ok('made\n')
     );
-  const ops = async () => Number((await sh(other, 'cat /proc/sys/kernel/slicc_opfs_ops')).stdout);
-  await page.evaluate((s) => {
-    window.big_hold = window.kernel.run(['python3', '-c', s], { cwd: '/' });
-  }, holder);
-  const [c0, ops0] = [await counted(), await ops()];
-  const r = await other.evaluate(
-    (s) => window.kernel.run(['python3', '-c', s], { cwd: '/' }),
-    bigWriter
-  );
-  const [c1, ops1] = [await counted(), await ops()];
-  const held = await page.evaluate(() => window.big_hold);
-  console.log(
-    `#1546 crowded 1 MB: append locks ${c1.taken - c0.taken}, opfs ops ${ops1 - ops0}, bytes read ${c1.read - c0.read}`
-  );
-  assert.deepEqual(r, ok(`${MB + 890}\n`));
-  assert.deepEqual(held, ok('held\n'));
-  assert.ok(c1.taken - c0.taken >= 200, `locks ${c1.taken - c0.taken}`);
-  assert.ok(c1.read - c0.read < MB, `read ${c1.read - c0.read} bytes`);
-});
+    const counted = () =>
+      other.evaluate(
+        () =>
+          new Promise((resolve) => {
+            const c = new BroadcastChannel('lock-count');
+            c.onmessage = ({ data }) => {
+              c.close();
+              resolve(data);
+            };
+            c.postMessage('?');
+          })
+      );
+    const ops = async () => Number((await sh(other, 'cat /proc/sys/kernel/slicc_opfs_ops')).stdout);
+    await page.evaluate((s) => {
+      window.big_hold = window.kernel.run(['python3', '-c', s], { cwd: '/' });
+    }, holder);
+    const [c0, ops0] = [await counted(), await ops()];
+    const r = await other.evaluate(
+      (s) => window.kernel.run(['python3', '-c', s], { cwd: '/' }),
+      bigWriter
+    );
+    const [c1, ops1] = [await counted(), await ops()];
+    const held = await page.evaluate(() => window.big_hold);
+    console.log(
+      `#1546 crowded ${kind}: append locks ${c1.taken - c0.taken}, opfs ops ${ops1 - ops0}, bytes read ${c1.read - c0.read}`
+    );
+    assert.deepEqual(r, ok(`${size + 890}\n`));
+    assert.deepEqual(held, ok('held\n'));
+    assert.ok(c1.taken - c0.taken >= 200, `locks ${c1.taken - c0.taken}`);
+    assert.ok(c1.read - c0.read < size, `read ${c1.read - c0.read} bytes`);
+  });
+}
