@@ -99,27 +99,68 @@ async function takingTurns(page, other, argv) {
 const fresh = 'rm -rf /root/ap && mkdir -p /root/ap && : > /root/ap/log && echo made';
 
 for (const { kind, argv } of [
+  { kind: 'a JS ctx.sync.open', argv: ['seekend', String(N), '/root/ap/log', 'wait'] },
   {
-    kind: "a JS program's ctx.sync.open, writing at f.size()",
-    argv: ['seekend', String(N), '/root/ap/log', 'wait'],
-  },
-  {
-    kind: "a shell's exec 3<> descriptor, which a child seeks to the end and writes",
+    kind: 'a shell exec 3<> fd',
     argv: ['bash', '-c', 'exec 3<>/root/ap/log; python3 -c "$1"', 'bash', seeker(inherited)],
   },
-  {
-    kind: 'a WASI program that opened the file through a symlink',
-    argv: ['python3', '-c', seeker("fd = os.open('/root/ap/link', os.O_WRONLY)")],
-  },
 ]) {
-  test(`writes at the end through ${kind}, taking turns with O_APPEND writes in another tab on one held file, keep every record in order, even when the writing tab never hears of the appends (#1675)`, {
+  test(`SEEK_END writes through ${kind} taking turns with another tab's O_APPEND keep every record, unseen appends too (#1675)`, {
     timeout: 600_000,
   }, async (t) => {
     const { page, other } = await twoTabs(t, BLIND);
-    assert.deepEqual(await sh(page, `${fresh} && ln -s log /root/ap/link`), ok('made\n'));
+    assert.deepEqual(await sh(page, fresh), ok('made\n'));
     await takingTurns(page, other, argv);
   });
 }
+
+const T = 10;
+const step = (k) => `'/root/ap/${k}%d' % i`;
+const lateAppender = [
+  'import os, time',
+  "fd = os.open('/root/ap/log', os.O_WRONLY | os.O_APPEND)",
+  "open('/root/ap/held-x', 'w').close()",
+  `for i in range(${T}):`,
+  `    while not os.path.exists(${step('a')}): pass`,
+  '    time.sleep(0.2)',
+  "    os.write(fd, b'x%d\\n' % i)",
+  `    while not os.path.exists(${step('b')}): pass`,
+  `    open(${step('c')}, 'w').close()`,
+  'os.close(fd)',
+  "print('x done')",
+].join('\n');
+const linkWriter = [
+  'import os, time',
+  "while not os.path.exists('/root/ap/held-x'): pass",
+  "fd = os.open('/root/ap/link', os.O_WRONLY)",
+  `for i in range(${T}):`,
+  `    open(${step('a')}, 'w').close()`,
+  '    os.lseek(fd, 0, os.SEEK_END)',
+  "    os.write(fd, b'y%d\\n' % i)",
+  '    end = time.monotonic() + 0.6',
+  '    while time.monotonic() < end: pass',
+  `    open(${step('b')}, 'w').close()`,
+  `    while not os.path.exists(${step('c')}): pass`,
+  "print('y done')",
+].join('\n');
+
+test("a WASI write past the end through a symlink is in the file before another tab's O_APPEND lands, as on Linux (#1675)", {
+  timeout: 600_000,
+}, async (t) => {
+  const { page, other } = await twoTabs(t, BLIND);
+  assert.deepEqual(await sh(page, `${fresh} && ln -s log /root/ap/link`), ok('made\n'));
+  await page.evaluate((s) => {
+    window.late_x = window.kernel.run(['python3', '-c', s], { cwd: '/' });
+  }, lateAppender);
+  await other.evaluate((s) => {
+    window.link_y = window.kernel.run(['python3', '-c', s], { cwd: '/' });
+  }, linkWriter);
+  const x = await page.evaluate(() => window.late_x);
+  const y = await other.evaluate(() => window.link_y);
+  assert.deepEqual([x.stdout, y.stdout], ['x done\n', 'y done\n'], JSON.stringify([x, y]));
+  const want = Array.from({ length: T }, (_, i) => `y${i}\nx${i}\n`).join('');
+  assert.deepEqual(await sh(page, 'cat /root/ap/log'), ok(want));
+});
 
 const counted = (tab) =>
   tab.evaluate(
@@ -145,13 +186,13 @@ const solo = [
 ].join('\n');
 
 for (const { kind, argv } of [
-  { kind: "a JS program's ctx.sync.open", argv: ['seekend', '200', '/root/ap/solo', 'solo'] },
+  { kind: 'a JS ctx.sync.open', argv: ['seekend', '200', '/root/ap/solo', 'solo'] },
   {
-    kind: "a shell's exec 3<> descriptor",
+    kind: 'a shell exec 3<> fd',
     argv: ['bash', '-c', 'exec 3<>/root/ap/solo; python3 -c "$1"', 'bash', solo],
   },
 ]) {
-  test(`on a shared root, writes at the end through ${kind} to a file no other tab holds stay buffered: no append lock is taken (#1675)`, {
+  test(`SEEK_END writes through ${kind} to a file no other tab holds take no append lock (#1675)`, {
     timeout: 600_000,
   }, async (t) => {
     const { other } = await twoTabs(t, '/lock-count-worker.js');
