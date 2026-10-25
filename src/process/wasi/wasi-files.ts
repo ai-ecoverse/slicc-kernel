@@ -147,16 +147,24 @@ export class FileBuffer {
     if (this.spoiled) throw new WasiError('ESTALE');
   }
 
-  private crowded(): boolean {
+  private peered = false;
+
+  private held(): boolean {
     const view = this.watch?.view;
     if (!view) return false;
     return view.peerHeld(this.where) || (this.real !== undefined && view.peerHeld(this.real));
+  }
+
+  private crowded(): boolean {
+    if (this.held()) this.peered = true;
+    return this.peered;
   }
 
   private exact(): number | undefined {
     this.flush();
     const watch = this.watch as RangedWatch;
     const size = this.retried(() => watch.stat(this.where)).size;
+    this.peered = this.held();
     if (this.ranged) {
       if (size !== this.ranged.size()) this.ranged.reread();
       return undefined;

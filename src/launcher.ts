@@ -3351,11 +3351,8 @@ export class Launcher {
 
   private flushingPeers(fs: KernelFs): Peers | undefined {
     fs.peerHolds?.((paths) => {
-      const was = this.peerHeldPaths;
       this.peerHeldPaths = new Set(paths);
       this.changes.peerHeld(paths);
-      const left = [...was].filter((path) => !this.peerHeldPaths.has(path));
-      if (left.length > 0) this.rewritten(left);
     });
     const peers = fs.peers?.();
     if (!peers) return undefined;

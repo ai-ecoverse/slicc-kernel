@@ -289,9 +289,12 @@ export class VfsNode {
     return ranged ? ranged.size() : this.length;
   }
 
+  private peered = false;
+
   private peerHeld(): boolean {
     if (this.orphaned || this.revoked || this.pin) return false;
-    return this.crowded?.(this.path) === true;
+    if (this.crowded?.(this.path) === true) this.peered = true;
+    return this.peered;
   }
 
   private async exact(): Promise<number | undefined> {
@@ -300,6 +303,7 @@ export class VfsNode {
     const io = rangedOps(this.fs);
     if (!stat || !io) return undefined;
     const st = await this.followed(() => stat.call(this.fs, this.path));
+    this.peered = this.crowded?.(this.path) === true;
     const size = st.size ?? 0;
     if (this.ranged) {
       if (size !== this.ranged.size()) {
