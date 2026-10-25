@@ -8,7 +8,16 @@ const chrome = await launch();
 after(() => chrome.close());
 
 const N = 40;
-const BLIND = '/blind-worker.js?path=%2Froot%2Fap%2Flog';
+const BLIND = 'blind-worker.js?path=%2Froot%2Fap%2Flog';
+const ab = (base, w) => `/${base ? 'ab-' : ''}${w}`;
+const verdict = (base, got, want, what) => {
+  const lines = got.split('\n').filter(Boolean);
+  console.log(
+    `AB ${base ? 'main' : 'head'} ${what}: ${got === want ? 'keeps every record' : `loses: ${lines.length} lines, ${lines.filter((l) => l[0] === 'x').length} x`}`
+  );
+  if (base) assert.notEqual(got, want);
+  else assert.equal(got, want);
+};
 const turn = (n) => `'/root/ap/t%d' % (${n})`;
 const appender = [
   'import os',
@@ -82,7 +91,7 @@ async function twoTabs(t, worker) {
   return { page, other };
 }
 
-async function takingTurns(page, other, argv) {
+async function takingTurns(page, other, argv, base, what) {
   await page.evaluate((s) => {
     window.extend_x = window.kernel.run(['python3', '-c', s], { cwd: '/' });
   }, appender);
@@ -93,26 +102,27 @@ async function takingTurns(page, other, argv) {
   const y = await other.evaluate(() => window.extend_y);
   assert.deepEqual([x.stdout, y.stdout], ['x done\n', 'y done\n'], JSON.stringify([x, y]));
   const want = Array.from({ length: N }, (_, i) => `x${i}\ny${i}\n`).join('');
-  assert.deepEqual(await sh(page, 'cat /root/ap/log'), ok(want));
+  verdict(base, (await sh(page, 'cat /root/ap/log')).stdout, want, what);
 }
 
 const fresh = 'rm -rf /root/ap && mkdir -p /root/ap && : > /root/ap/log && echo made';
 
-for (const { kind, argv } of [
-  { kind: 'a JS ctx.sync.open', argv: ['seekend', String(N), '/root/ap/log', 'wait'] },
-  {
-    kind: 'a shell exec 3<> fd',
-    argv: ['bash', '-c', 'exec 3<>/root/ap/log; python3 -c "$1"', 'bash', seeker(inherited)],
-  },
-]) {
-  test(`SEEK_END writes through ${kind} taking turns with another tab's O_APPEND keep every record, unseen appends too (#1675)`, {
-    timeout: 600_000,
-  }, async (t) => {
-    const { page, other } = await twoTabs(t, BLIND);
-    assert.deepEqual(await sh(page, fresh), ok('made\n'));
-    await takingTurns(page, other, argv);
-  });
-}
+for (const base of [true, false])
+  for (const { kind, argv } of [
+    { kind: 'a JS ctx.sync.open', argv: ['seekend', String(N), '/root/ap/log', 'wait'] },
+    {
+      kind: 'a shell exec 3<> fd',
+      argv: ['bash', '-c', 'exec 3<>/root/ap/log; python3 -c "$1"', 'bash', seeker(inherited)],
+    },
+  ]) {
+    test(`${base ? 'MAIN' : 'HEAD'} SEEK_END writes through ${kind} taking turns with another tab's O_APPEND keep every record, unseen appends too (#1675)`, {
+      timeout: 600_000,
+    }, async (t) => {
+      const { page, other } = await twoTabs(t, ab(base, BLIND));
+      assert.deepEqual(await sh(page, fresh), ok('made\n'));
+      await takingTurns(page, other, argv, base, kind);
+    });
+  }
 
 const T = 10;
 const step = (k) => `'/root/ap/${k}%d' % i`;
@@ -144,23 +154,24 @@ const linkWriter = [
   "print('y done')",
 ].join('\n');
 
-test("a WASI write past the end through a symlink is in the file before another tab's O_APPEND lands, as on Linux (#1675)", {
-  timeout: 600_000,
-}, async (t) => {
-  const { page, other } = await twoTabs(t, BLIND);
-  assert.deepEqual(await sh(page, `${fresh} && ln -s log /root/ap/link`), ok('made\n'));
-  await page.evaluate((s) => {
-    window.late_x = window.kernel.run(['python3', '-c', s], { cwd: '/' });
-  }, lateAppender);
-  await other.evaluate((s) => {
-    window.link_y = window.kernel.run(['python3', '-c', s], { cwd: '/' });
-  }, linkWriter);
-  const x = await page.evaluate(() => window.late_x);
-  const y = await other.evaluate(() => window.link_y);
-  assert.deepEqual([x.stdout, y.stdout], ['x done\n', 'y done\n'], JSON.stringify([x, y]));
-  const want = Array.from({ length: T }, (_, i) => `y${i}\nx${i}\n`).join('');
-  assert.deepEqual(await sh(page, 'cat /root/ap/log'), ok(want));
-});
+for (const base of [true, false])
+  test(`${base ? 'MAIN' : 'HEAD'} a WASI write past the end through a symlink is in the file before another tab's O_APPEND lands, as on Linux (#1675)`, {
+    timeout: 600_000,
+  }, async (t) => {
+    const { page, other } = await twoTabs(t, ab(base, BLIND));
+    assert.deepEqual(await sh(page, `${fresh} && ln -s log /root/ap/link`), ok('made\n'));
+    await page.evaluate((s) => {
+      window.late_x = window.kernel.run(['python3', '-c', s], { cwd: '/' });
+    }, lateAppender);
+    await other.evaluate((s) => {
+      window.link_y = window.kernel.run(['python3', '-c', s], { cwd: '/' });
+    }, linkWriter);
+    const x = await page.evaluate(() => window.late_x);
+    const y = await other.evaluate(() => window.link_y);
+    assert.deepEqual([x.stdout, y.stdout], ['x done\n', 'y done\n'], JSON.stringify([x, y]));
+    const want = Array.from({ length: T }, (_, i) => `y${i}\nx${i}\n`).join('');
+    verdict(base, (await sh(page, 'cat /root/ap/log')).stdout, want, 'symlink');
+  });
 
 const counted = (tab) =>
   tab.evaluate(
@@ -185,28 +196,31 @@ const solo = [
   "print(os.path.getsize('/root/ap/solo'))",
 ].join('\n');
 
-for (const { kind, argv } of [
-  { kind: 'a JS ctx.sync.open', argv: ['seekend', '200', '/root/ap/solo', 'solo'] },
-  {
-    kind: 'a shell exec 3<> fd',
-    argv: ['bash', '-c', 'exec 3<>/root/ap/solo; python3 -c "$1"', 'bash', solo],
-  },
-]) {
-  test(`SEEK_END writes through ${kind} to a file no other tab holds take no append lock (#1675)`, {
-    timeout: 600_000,
-  }, async (t) => {
-    const { other } = await twoTabs(t, '/lock-count-worker.js');
-    assert.deepEqual(
-      await sh(other, 'rm -rf /root/ap && mkdir -p /root/ap && : > /root/ap/solo && echo made'),
-      ok('made\n')
-    );
-    const [c0, ops0] = [await counted(other), await opfsOps(other)];
-    const r = await other.evaluate((a) => window.kernel.run(a, { cwd: '/' }), argv);
-    const [c1, ops1] = [await counted(other), await opfsOps(other)];
-    console.log(
-      `#1675 uncrowded, ${kind}: append locks ${c1.taken - c0.taken}, opfs ops ${ops1 - ops0}`
-    );
-    assert.deepEqual(r, ok('890\n'));
-    assert.equal(c1.taken - c0.taken, 0);
-  });
-}
+for (const base of [true, false])
+  for (const { kind, argv } of [
+    { kind: 'a JS ctx.sync.open', argv: ['seekend', '200', '/root/ap/solo', 'solo'] },
+    {
+      kind: 'a shell exec 3<> fd',
+      argv: ['bash', '-c', 'exec 3<>/root/ap/solo; python3 -c "$1"', 'bash', solo],
+    },
+  ]) {
+    test(`${base ? 'MAIN' : 'HEAD'} SEEK_END writes through ${kind} to a file no other tab holds take no append lock (#1675)`, {
+      timeout: 600_000,
+    }, async (t) => {
+      const { other } = await twoTabs(t, ab(base, 'lock-count-worker.js'));
+      for (let rep = 0; rep < 4; rep++) {
+        assert.deepEqual(
+          await sh(other, 'rm -rf /root/ap && mkdir -p /root/ap && : > /root/ap/solo && echo made'),
+          ok('made\n')
+        );
+        const [c0, ops0] = [await counted(other), await opfsOps(other)];
+        const r = await other.evaluate((a) => window.kernel.run(a, { cwd: '/' }), argv);
+        const [c1, ops1] = [await counted(other), await opfsOps(other)];
+        console.log(
+          `AB ${base ? 'main' : 'head'} #1675 uncrowded, ${kind}, rep ${rep}: append locks ${c1.taken - c0.taken}, opfs ops ${ops1 - ops0}`
+        );
+        assert.deepEqual(r, ok('890\n'));
+        assert.equal(c1.taken - c0.taken, 0);
+      }
+    });
+  }
