@@ -172,6 +172,15 @@ export class Pages {
     this.pinned = true;
   }
 
+  landed(at: number, length: number): void {
+    const end = at + length;
+    for (let page = Math.floor(at / PAGE); page * PAGE < end; page++) {
+      if (this.pages.has(page) && !this.dirty.has(page)) this.drop(page);
+    }
+    this.length = Math.max(this.length, end);
+    this.stored = Math.max(this.stored, end);
+  }
+
   reset(size: number): void {
     if (this.pinned) return;
     for (const page of [...this.pages.keys()]) if (!this.dirty.has(page)) this.drop(page);

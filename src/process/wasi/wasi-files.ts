@@ -145,11 +145,36 @@ export class FileBuffer {
     return this.watch?.view.peerHeld(this.where) === true;
   }
 
+  private exact(): number | undefined {
+    this.flush();
+    const size = (this.watch as RangedWatch).stat(this.where).size;
+    if (this.ranged) {
+      if (size !== this.ranged.size()) this.ranged.reread();
+      return undefined;
+    }
+    if (this.data && size !== this.length) this.data = undefined;
+    return this.data ? undefined : size;
+  }
+
+  private wrote(at: number, bytes: Uint8Array): void {
+    if (this.ranged) {
+      this.ranged.wrote(at, bytes.length);
+      return;
+    }
+    if (!this.data) return;
+    const end = at + bytes.length;
+    this.ensure(end);
+    const buf = this.data as Uint8Array;
+    if (at > this.length) buf.fill(0, this.length, at);
+    buf.set(bytes, at);
+    this.length = Math.max(this.length, end);
+  }
+
   size(): number {
     this.live();
     if (this.crowded()) {
-      this.flush();
-      this.reread();
+      const known = this.exact();
+      if (known !== undefined) return known;
     }
     if (this.ranged) return this.ranged.size();
     this.load();
@@ -177,7 +202,7 @@ export class FileBuffer {
     if (pwrite && this.crowded() && end > this.size()) {
       const copy = bytes.slice();
       this.retried(() => pwrite.call(this.fs, this.where, at, copy, true));
-      this.reread();
+      this.wrote(at, bytes);
       return bytes.length;
     }
     this.dirty = true;
