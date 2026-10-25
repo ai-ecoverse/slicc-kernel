@@ -17,6 +17,7 @@ import {
 import {
   anyBlocked,
   type BlockedMask,
+  laneSab,
   loadBlocked,
   SAB_DEFAULT_WINDOW_BYTES,
   SAB_HEADER_BYTES,
@@ -362,9 +363,12 @@ function transferOf(opts: SpawnWasmOptions, lane: JsLane | undefined): Transfera
 
 function openLane(
   token: string,
-  dispatch: (req: SyncSabDispatchRequest) => Promise<SyncFsResult>
+  dispatch: (req: SyncSabDispatchRequest) => Promise<SyncFsResult>,
+  growable = false
 ): { lane: JsLane; dispose(): void } {
-  const sab = new SharedArrayBuffer(SAB_HEADER_BYTES + SAB_DEFAULT_WINDOW_BYTES);
+  const sab = growable
+    ? laneSab()
+    : new SharedArrayBuffer(SAB_HEADER_BYTES + SAB_DEFAULT_WINDOW_BYTES);
   const { port1, port2 } = new MessageChannel();
   const responder = attachSyncSabResponder(port1, sab, token, { dispatch });
   port1.start();
@@ -684,7 +688,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
   const responder = attachSyncSabResponder(worker, sab, token, {
     dispatch: clocks.timed(undefined, dispatch),
   });
-  const lane = opts.program.abi === 'js' ? openLane(token, dispatch) : undefined;
+  const lane = opts.program.abi === 'js' ? openLane(token, dispatch, true) : undefined;
   const jsThreads = jsThreadsOf(opts, process, token, dispatch, clocks, header);
 
   const { promise: exited, resolve: settle } = Promise.withResolvers<number>();

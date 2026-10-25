@@ -41,6 +41,7 @@ import {
   sabLoad,
   sabStore,
   sabViews,
+  widened,
 } from './sync-sab-wire.ts';
 
 export interface SabPostLike {
@@ -157,6 +158,7 @@ export function createSyncSabTransport(
     call(asked, timeoutMs, label, given = [], sink?: Uint8Array): SyncFsResult {
       if (deps.memory) publishMemory(sab, deps.memory());
       const { req, transfer } = exactBody(asked, given);
+      widened(sab, req.op, (req as { max?: unknown }).max);
       const id = ++seq;
       calls += Number(!UNCOUNTED_OPS.has(req.op));
       let out: Uint8Array | null = null;

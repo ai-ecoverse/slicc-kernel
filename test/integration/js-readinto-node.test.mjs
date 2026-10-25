@@ -76,3 +76,31 @@ test("a JS program's readInto lands the same bytes across the bridge's 1 MiB win
     stderr: '',
   });
 });
+
+test('readInto across a 16 MiB unit lands the same bytes through the widened bridge window, stops short at the end, and sees a write between reads (#1626)', {
+  timeout: 300_000,
+}, async (t) => {
+  const kernel = await createNodeKernel();
+  t.after(() => kernel.terminate());
+  for (const file of ['package.json', 'bin/jstest.mjs']) {
+    await kernel.writeFile(`/node_modules/jstest/${file}`, await readFile(new URL(file, fixture)));
+  }
+  const W = 16 << 20;
+  const size = 3 * W + 123;
+  const r = await kernel.run(['jstest', 'readintowindows', '/tmp/windows', String(W)], {
+    cwd: '/',
+  });
+  assert.deepEqual(r, {
+    status: 0,
+    stdout: [
+      `0+${2 * W + 7}: ${2 * W + 7} same`,
+      `${W - 5}+${W + 10}: ${W + 10} same`,
+      `${W - 1}+${2 * W}: ${2 * W} same`,
+      `${size - 1000}+4096: 1000 same`,
+      `${size + 10}+16: 0 same`,
+      `after write: ${2 * W} fresh`,
+      '',
+    ].join('\n'),
+    stderr: '',
+  });
+});

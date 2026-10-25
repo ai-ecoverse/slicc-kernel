@@ -90,6 +90,19 @@ export const SAB_STATUS_VOID = 3;
 export const SAB_STATUS_ERRNO = 4;
 
 export const SAB_DEFAULT_WINDOW_BYTES = 1024 * 1024;
+export const SAB_BULK_WINDOW_BYTES = 16 * 1024 * 1024;
+
+export function laneSab(): SharedArrayBuffer {
+  return new SharedArrayBuffer(SAB_HEADER_BYTES + SAB_DEFAULT_WINDOW_BYTES, {
+    maxByteLength: SAB_HEADER_BYTES + SAB_BULK_WINDOW_BYTES,
+  });
+}
+
+export function widened(sab: SharedArrayBuffer, op: string, max: unknown): void {
+  if (op !== 'fd-pread' || !sab.growable || typeof max !== 'number') return;
+  const want = Math.min(SAB_HEADER_BYTES + max, sab.maxByteLength);
+  if (want > sab.byteLength) sab.grow(want);
+}
 
 export const SAB_MIN_BYTES = SAB_HEADER_BYTES + 4096;
 
