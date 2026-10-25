@@ -142,6 +142,14 @@ export interface JsPromiseState {
 
 export type JsStackFormatter = (error: unknown, callSites: readonly object[]) => unknown;
 
+export interface JsErrorSource {
+  sourceLine: string;
+  lineNumber: number;
+  startColumn: number;
+}
+
+export type JsErrorSourceProbe = (error: unknown) => JsErrorSource | undefined;
+
 export type JsStackHook = (fn: JsStackFormatter | null) => JsStackFormatter | null;
 
 export type JsPromiseProbe = (promise: unknown) => JsPromiseState | undefined;
@@ -309,6 +317,7 @@ export interface ContextOptions {
   modulePath?: string | undefined;
   promiseState?: JsPromiseProbe | undefined;
   stackFormatter?: JsStackHook | undefined;
+  errorSource?: JsErrorSourceProbe | undefined;
   fs?: { owners: boolean; links: boolean };
   owned?: SharedArrayBuffer;
   held?: HeldCwdInit | undefined;
@@ -712,12 +721,14 @@ function measured(measure: (() => JsMemory) | undefined): JsMemory {
 
 function realmOps(
   o: ContextOptions
-): Pick<JsSyncContext, 'runScript' | 'promiseState' | 'setStackFormatter'> {
+): Pick<JsSyncContext, 'runScript' | 'promiseState' | 'setStackFormatter' | 'errorSource'> {
   const hook = o.stackFormatter;
+  const source = o.errorSource;
   return {
     runScript: scriptRunner(o.runScript),
     promiseState: (promise) => o.promiseState?.(promise),
     ...(hook ? { setStackFormatter: (fn: JsStackFormatter | null) => hook(fn) } : {}),
+    ...(source ? { errorSource: (error: unknown) => source(error) } : {}),
   };
 }
 

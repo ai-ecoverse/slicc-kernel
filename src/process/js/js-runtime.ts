@@ -9,6 +9,7 @@ import { importSource } from '../wasi/wasi-imports.ts';
 import { createAsyncSabTransport, type WaitAsyncLike } from './async-sab.ts';
 import type {
   JsAsyncContext,
+  JsErrorSourceProbe,
   JsMemory,
   JsPromiseProbe,
   JsRunScript,
@@ -39,6 +40,7 @@ export interface JsRuntimeDeps {
   moduleSource?: (url: string, source: string) => void;
   promiseState?: JsPromiseProbe;
   stackFormatter?: JsStackHook | undefined;
+  errorSource?: JsErrorSourceProbe | undefined;
   imported?: () => void;
 }
 
@@ -163,6 +165,7 @@ async function runJs(
     modulePath: modulePathOf(init.program),
     promiseState: deps.promiseState,
     stackFormatter: deps.stackFormatter,
+    errorSource: deps.errorSource,
     ...(thread?.owned ? { owned: thread.owned } : {}),
     held: init.held,
     failed: () => failedWith,
