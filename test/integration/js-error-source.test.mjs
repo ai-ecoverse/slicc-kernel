@@ -30,6 +30,13 @@ async function body(ctx) {
   r.type = typeof ctx.sync.errorSource;
   r.eval = plain(ctx.sync.errorSource(grab(() => eval(s))));
   r.nested = plain(ctx.sync.errorSource(grab(() => eval('eval(s)'))));
+  const o = {};
+  for (const [k, src] of Object.entries({ undefinedFn: 'undefinedFn()', notFn: 'o.f()', ref: 'zzz', tdz: '{ x; let x = 1; }', made: 'throw new Error("m")' })) {
+    r[k] = plain(ctx.sync.errorSource(grab(() => eval(src))));
+  }
+  const late = grab(() => eval('o.g()'));
+  void late.stack;
+  r.afterStack = plain(ctx.sync.errorSource(late));
   r.script = plain(ctx.sync.errorSource(grab(() => ctx.sync.runScript('\\n\\nundefined.q', { filename: 's.js' }))));
   return r;
 }
@@ -46,11 +53,35 @@ export default async function main(ctx) {
   return 0;
 }`;
 
-test("ctx.sync.errorSource gives the source line of an error V8 raised in the program's own eval'd code or runScript script, as Node prints it, in a process and a thread (#1610)", async (t) => {
+test("ctx.sync.errorSource gives the source line of an error in the program's own eval'd code or runScript script, as Node prints it, in a process and a thread, also for a call of a non-function, a ReferenceError, a TDZ error and a thrown Error, and after .stack was read (#1610, #1633)", async (t) => {
   const one = {
     type: 'function',
     eval: { sourceLine: 'null.d', lineNumber: 1, startColumn: 5, proto: null, frozen: true },
     nested: { sourceLine: 'null.d', lineNumber: 1, startColumn: 5, proto: null, frozen: true },
+    undefinedFn: {
+      sourceLine: 'undefinedFn()',
+      lineNumber: 1,
+      startColumn: 0,
+      proto: null,
+      frozen: true,
+    },
+    notFn: { sourceLine: 'o.f()', lineNumber: 1, startColumn: 2, proto: null, frozen: true },
+    ref: { sourceLine: 'zzz', lineNumber: 1, startColumn: 0, proto: null, frozen: true },
+    tdz: {
+      sourceLine: '{ x; let x = 1; }',
+      lineNumber: 1,
+      startColumn: 2,
+      proto: null,
+      frozen: true,
+    },
+    made: {
+      sourceLine: 'throw new Error("m")',
+      lineNumber: 1,
+      startColumn: 6,
+      proto: null,
+      frozen: true,
+    },
+    afterStack: { sourceLine: 'o.g()', lineNumber: 1, startColumn: 2, proto: null, frozen: true },
     script: {
       sourceLine: 'undefined.q',
       lineNumber: 3,
@@ -64,9 +95,9 @@ test("ctx.sync.errorSource gives the source line of an error V8 raised in the pr
   assert.deepEqual(thread, one);
 });
 
-test("errorSource answers undefined for kernel-made errors, non-errors, errors whose position V8 didn't keep, a script named like the kernel worker at the kernel's own line, and errors an own Error.prepareStackTrace formats (#1610)", async (t) => {
+test("errorSource answers undefined for kernel-made errors, non-errors, a script named like the kernel worker at the kernel's own line, and errors an own Error.prepareStackTrace formats (#1610)", async (t) => {
   const bundle = await readFile(new URL(KERNEL_URL), 'utf8');
-  const line = bundle.split('\n').findIndex((l) => /const at = positions\d*\(error\)/.test(l)) + 1;
+  const line = bundle.split('\n').findIndex((l) => /return positions\d*\(error\)/.test(l)) + 1;
   assert.ok(line > 0, 'the kernel line that asks V8 for the positions');
   const out = await run(
     t,
@@ -77,8 +108,6 @@ test("errorSource answers undefined for kernel-made errors, non-errors, errors w
   r.kernel = q(grab(() => ctx.sync.open('/nope/x')));
   r.kernelAsync = q(await ctx.fs.readFile('/nope/y').catch((e) => e));
   r.values = [q({}), q(1), q(null), q(undefined), q('x'), q(Object.create(Error.prototype)), q(new Proxy(new Error('p'), {}))];
-  r.made = q(new Error('m'));
-  r.thrown = q(grab(() => { throw new Error('t'); }));
   r.borrowed = [];
   for (const name of ['slicc-kernel:/node-process-worker.js', ${JSON.stringify(KERNEL_URL)}]) {
     const src = '\\n'.repeat(${line} - 1) + 'throw new Error("q")';
@@ -96,8 +125,6 @@ test("errorSource answers undefined for kernel-made errors, non-errors, errors w
     kernel: null,
     kernelAsync: null,
     values: [null, null, null, null, null, null, null],
-    made: null,
-    thrown: null,
     borrowed: [],
     own: null,
   });

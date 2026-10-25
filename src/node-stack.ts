@@ -183,12 +183,31 @@ export function keptFrames(trace: readonly object[]): object[] {
 let formatter: JsStackFormatter | null = null;
 let formatting = false;
 
-const tops = new WeakMap<object, object>();
+interface Seen {
+  site: object;
+  at: Positions | undefined;
+}
 
-export function stackDispatcher(fallback: Prepare): Prepare {
+const seen = new WeakMap<object, Seen>();
+
+function positionsAt(
+  positions: Internals['positions'],
+  error: object,
+  site: object
+): Positions | undefined {
+  if (positions === undefined || !keptFrame(site)) return undefined;
+  try {
+    return positions(error);
+  } catch {
+    return undefined;
+  }
+}
+
+export function stackDispatcher(fallback: Prepare, positions?: Internals['positions']): Prepare {
   return (error, trace) => {
     if (typeof error === 'object' && error !== null && trace.length > 0) {
-      apply(mapSet, tops, [error, trace[0]]);
+      const site = trace[0] as object;
+      apply(mapSet, seen, [error, { site, at: positionsAt(positions, error, site) }]);
     }
     const fn = formatter;
     if (fn === null || formatting) return apply(fallback, undefined, [error, trace]);
@@ -205,7 +224,7 @@ export function stackDispatcher(fallback: Prepare): Prepare {
 }
 
 const found = internals();
-if (found) found.setInternalPrepareStackTrace(stackDispatcher(found.fallback));
+if (found) found.setInternalPrepareStackTrace(stackDispatcher(found.fallback, found.positions));
 
 export const nodeStackFormatter:
   | ((fn: JsStackFormatter | null) => JsStackFormatter | null)
@@ -220,19 +239,16 @@ export const nodeStackFormatter:
     }
   : undefined;
 
-export function errorSourceOf(
-  positions: (error: object) => Positions | undefined,
-  error: unknown
-): JsErrorSource | undefined {
+export function errorSourceOf(error: unknown): JsErrorSource | undefined {
   if (typeof error !== 'object' || error === null || !isNativeError(error)) return undefined;
   try {
     void (error as { stack?: unknown }).stack;
   } catch {
     return undefined;
   }
-  const site = apply(mapGet, tops, [error]) as object | undefined;
-  if (site === undefined || !keptFrame(site)) return undefined;
-  const at = positions(error);
+  const got = apply(mapGet, seen, [error]) as Seen | undefined;
+  if (got === undefined || !keptFrame(got.site)) return undefined;
+  const { site, at } = got;
   if (!at || typeof at.sourceLine !== 'string' || typeof at.lineNumber !== 'number')
     return undefined;
   if (apply(setHas, ownNames, [at.scriptResourceName]) === true) return undefined;
@@ -245,7 +261,5 @@ export function errorSourceOf(
   return freeze(out);
 }
 
-const positions = found?.positions;
-
 export const nodeErrorSource: ((error: unknown) => JsErrorSource | undefined) | undefined =
-  positions ? (error) => errorSourceOf(positions, error) : undefined;
+  found?.positions ? errorSourceOf : undefined;
