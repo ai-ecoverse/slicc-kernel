@@ -153,3 +153,43 @@ console.log(r.status + ' ' + r.stdout);
   assert.equal(r.stdout, '0 function\n');
   assert.equal(r.stderr, '');
 });
+
+test("a program's new Function or eval code named by //# sourceURL keeps its frames for the formatter, and errorSource answers for it by that name; a sourceURL naming the kernel worker shows only the program's own frame and errorSource refuses it (#1632)", async (t) => {
+  const out = await run(
+    t,
+    `export default async function main(ctx) {
+  const grab = (f) => { try { f(); } catch (e) { return e; } };
+  const o = {};
+  const seen = [];
+  ctx.sync.setStackFormatter((e, sites) => {
+    seen.push(sites.map((s) => [s.getScriptNameOrSourceURL() ?? null, s.getLineNumber(), s.isEval()]));
+    return 'FMT';
+  });
+  const q = (e) => { void e.stack; return ctx.sync.errorSource(e) ?? null; };
+  const r = {};
+  r.fn = q(grab(() => new Function('o', '\\n\\no.f()\\n//# sourceURL=/os/a.js')(o)));
+  r.ev = q(grab(() => eval('o.f()\\n//# sourceURL=/os/b.js')));
+  r.spoof = q(grab(() => new Function('o', 'o.f()\\n//# sourceURL=slicc-kernel:/node-process-worker.js')(o)));
+  r.spoofUrl = q(grab(() => new Function('o', 'o.f()\\n//# sourceURL=' + ${JSON.stringify(KERNEL_URL)})(o)));
+  r.top = seen.map((frames) => frames[0]);
+  r.kernelLines = seen.flat().filter(([name, line]) => /node-process-worker/.test(name ?? '') && line > 10).length;
+  r.names = [...new Set(seen.flat().map(([name]) => (name ?? '').split(':')[0]))].sort();
+  await ctx.write(1, JSON.stringify(r));
+  return 0;
+}`
+  );
+  assert.deepEqual(out, {
+    fn: { sourceLine: 'o.f()', lineNumber: 5, startColumn: 2 },
+    ev: { sourceLine: 'o.f()', lineNumber: 1, startColumn: 2 },
+    spoof: null,
+    spoofUrl: null,
+    top: [
+      ['/os/a.js', 5, true],
+      ['/os/b.js', 1, true],
+      ['slicc-kernel:/node-process-worker.js', 3, true],
+      [KERNEL_URL, 3, true],
+    ],
+    kernelLines: 0,
+    names: ['/os/a.js', '/os/b.js', 'file', 'slicc-kernel', 'slicc-module'].sort(),
+  });
+});
