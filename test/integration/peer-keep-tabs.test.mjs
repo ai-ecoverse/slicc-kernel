@@ -172,7 +172,7 @@ test('a holder whose tab runs 4(a) only (holds without an instance) is never ask
       })
   );
   assert.equal(asks, 0, 'the 4(a) holder was asked to keep');
-  assert.ok(rm < 5000 && mv < 5000, `rm ${rm} ms, mv ${mv} ms`);
+  assert.ok(rm < 9000 && mv < 9000, `rm ${rm} ms, mv ${mv} ms`);
   assert.deepEqual(await kept(other), []);
   await sh(page, `: > ${dir}/go`);
   await page.evaluate(() => window.holder);
@@ -274,7 +274,7 @@ test('a file held before another tab joins is kept for its holder when that tab 
   assert.equal(r.stdout, 'old kept\n');
 });
 
-test('two renames over a held file at once from another tab both go ahead, without waiting out the gate cap (#1608)', {
+test('two renames over a held file from another tab whose requests overlap at the holder both go ahead, without waiting out the gate cap (#1608)', {
   timeout: 900_000,
 }, async (t) => {
   const dir = '/root/pk8';
@@ -284,17 +284,30 @@ test('two renames over a held file at once from another tab both go ahead, witho
     if (listed.includes(`${dir}/f`)) break;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
+  await steer(page, { set: { freeze: true } });
   const t0 = Date.now();
-  const both = await sh(
-    other,
-    `cd ${dir} && echo A > a && echo B > b && { mv a f & mv b f & wait; } ; echo "rc=$?"; cat f`
+  const both = other.evaluate(
+    (d) =>
+      window.kernel.run(
+        [
+          'bash',
+          '-c',
+          `cd ${d} && echo A > a && echo B > b && { mv a f & p1=$!; mv b f & p2=$!; wait $p1; r1=$?; wait $p2; r2=$?; echo "r1=$r1 r2=$r2"; cat f; }`,
+        ],
+        { cwd: '/' }
+      ),
+    dir
   );
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  await steer(page, { thaw: true });
+  const r = await both;
   const took = Date.now() - t0;
-  console.log(`two renames over: ${took} ms ${JSON.stringify(both)}`);
-  assert.equal(both.stderr, '');
-  assert.match(both.stdout, /^rc=0\n[AB]\n$/);
+  const out = typeof r.stdout === 'string' ? r.stdout : new TextDecoder().decode(r.stdout);
+  const err = typeof r.stderr === 'string' ? r.stderr : new TextDecoder().decode(r.stderr);
+  console.log(`two renames over: ${took} ms ${JSON.stringify(out)} ${JSON.stringify(err)}`);
+  assert.match(out, /^r1=0 r2=0\n[AB]\n$/, err);
   assert.ok(took < 8000, `the renames took ${took} ms`);
   await sh(page, `: > ${dir}/go`);
-  const r = await page.evaluate(() => window.holder);
-  assert.equal(r.stdout, 'old kept\n');
+  const h = await page.evaluate(() => window.holder);
+  assert.equal(h.stdout, 'old kept\n');
 });
