@@ -14,6 +14,7 @@ import {
   syncError,
 } from './sync-fs-wire.ts';
 import {
+  copyWindow,
   decodeSabResult,
   loadU53,
   publishMemory,
@@ -37,6 +38,8 @@ import {
   type SyncSabNextMsg,
   type SyncSabReqMsg,
   type SyncSabRequestBody,
+  sabLoad,
+  sabStore,
   sabViews,
 } from './sync-sab-wire.ts';
 
@@ -118,7 +121,7 @@ export function createSyncSabTransport(
   let typical = 0;
 
   const ready = (id: number): boolean =>
-    Atomics.load(header, SAB_I_STATE) === SAB_STATE_READY && Atomics.load(header, SAB_I_SEQ) === id;
+    sabLoad(header, SAB_I_STATE) === SAB_STATE_READY && sabLoad(header, SAB_I_SEQ) === id;
 
   function spinUntil(id: number, until: number): boolean {
     for (let stride = 0; stride < SPIN_STRIDES; stride++) {
@@ -139,7 +142,7 @@ export function createSyncSabTransport(
       return;
     }
     for (;;) {
-      const published = Atomics.load(header, SAB_I_PUB);
+      const published = sabLoad(header, SAB_I_PUB);
       if (ready(id)) {
         settled(start);
         return;
@@ -159,10 +162,10 @@ export function createSyncSabTransport(
       let out: Uint8Array | null = null;
       let status = 0;
       let offset = 0;
-      Atomics.store(header, SAB_I_REQ, id);
+      sabStore(header, SAB_I_REQ, id);
       try {
         for (;;) {
-          Atomics.store(header, SAB_I_STATE, SAB_STATE_PENDING);
+          sabStore(header, SAB_I_STATE, SAB_STATE_PENDING);
           const msg: SyncSabReqMsg | SyncSabNextMsg =
             offset === 0
               ? { type: SYNC_SAB_REQ_MSG, id, req }
@@ -175,24 +178,24 @@ export function createSyncSabTransport(
           }
           awaitReady(id, now() + timeoutMs, label);
           const total = loadU53(header, SAB_I_TOTAL, SAB_I_TOTAL_HI);
-          const chunk = Atomics.load(header, SAB_I_CHUNK);
+          const chunk = sabLoad(header, SAB_I_CHUNK);
           const at = loadU53(header, SAB_I_OFFSET, SAB_I_OFFSET_HI);
           if (at !== offset || chunk < 0 || total < 0 || offset + chunk > total) {
             throw syncError('EIO', label);
           }
           if (out === null) {
-            status = Atomics.load(header, SAB_I_STATUS);
+            status = sabLoad(header, SAB_I_STATUS);
             out = landing(status, total, sink);
           }
-          setInto.call(out, partOf.call(window, 0, chunk), offset);
+          copyWindow(out, window, chunk, offset);
           offset += chunk;
           if (offset >= total) break;
 
           if (chunk === 0) throw syncError('EIO', label);
         }
       } finally {
-        Atomics.store(header, SAB_I_REQ, 0);
-        Atomics.store(header, SAB_I_STATE, SAB_STATE_IDLE);
+        sabStore(header, SAB_I_REQ, 0);
+        sabStore(header, SAB_I_STATE, SAB_STATE_IDLE);
       }
       return decodeSabResult(status, out);
     },
@@ -205,8 +208,6 @@ const getter = (name: string) =>
 const bufferOf = getter('buffer') as (this: Uint8Array) => ArrayBufferLike;
 const offsetOf = getter('byteOffset') as (this: Uint8Array) => number;
 const lengthOf = getter('length') as (this: Uint8Array) => number;
-const setInto = Uint8Array.prototype.set;
-const partOf = Uint8Array.prototype.subarray;
 
 function landing(status: number, total: number, sink: Uint8Array | undefined): Uint8Array {
   if (!sink || status !== SAB_STATUS_BYTES || total > lengthOf.call(sink)) {
