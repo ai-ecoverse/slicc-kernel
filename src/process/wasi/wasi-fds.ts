@@ -1,4 +1,4 @@
-import { RENAME_WAIT_MS } from '../../fs/changes.ts';
+import { renameWait } from '../../fs/changes.ts';
 import { linkedWatch } from '../../fs/ranged.ts';
 import {
   type DeviceAccess,
@@ -106,15 +106,28 @@ export class WasiFds {
 
   followRenames(missing = false): boolean {
     const view = this.fs.changes;
-    let now = view?.renames() ?? 0;
-    if (missing && view && now === this.renamesSeen) now = view.awaitRename(now, RENAME_WAIT_MS);
-    if (now === this.renamesSeen || !this.fs.renames) return false;
+    const end = missing && view ? performance.now() + renameWait(view) : 0;
+    const start = this.renamesSeen;
+    for (;;) {
+      const now = view?.renames() ?? 0;
+      if (now !== this.renamesSeen && this.fs.renames && this.followTo(now)) return true;
+      if (missing && this.renamesSeen !== start) return true;
+      const left = end - performance.now();
+      if (!view || left <= 0) return false;
+      view.awaitRename(now, left);
+    }
+  }
+
+  private followTo(now: number): boolean {
     const held = [...this.buffers].filter(([, b]) => !b.isOrphan()).map(([p]) => p);
     if (held.length === 0) {
       this.renamesSeen = now;
       return false;
     }
-    const { now: seen, renames } = this.fs.renames(this.renamesSeen, held);
+    const { now: seen, renames } = (this.fs.renames as NonNullable<typeof this.fs.renames>)(
+      this.renamesSeen,
+      held
+    );
     this.renamesSeen = seen;
     for (const [from, to] of renames) this.renamed(from, to, undefined, true);
     return renames.length > 0;

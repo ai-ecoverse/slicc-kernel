@@ -13,6 +13,8 @@ import {
   syncError,
 } from '../../realm/sync-fs-wire.ts';
 
+const FOLLOW_MS = 2000;
+
 export class WasiError extends Error {
   readonly code: string;
   constructor(code: string) {
@@ -84,11 +86,14 @@ export class FileBuffer {
   }
 
   private retried<T>(op: () => T): T {
-    try {
-      return op();
-    } catch (err) {
-      if ((err as { code?: unknown }).code !== 'ENOENT' || !this.moved?.(true)) throw err;
-      return op();
+    const end = performance.now() + FOLLOW_MS;
+    for (;;) {
+      try {
+        return op();
+      } catch (err) {
+        const gone = (err as { code?: unknown }).code === 'ENOENT';
+        if (!gone || performance.now() > end || !this.moved?.(true)) throw err;
+      }
     }
   }
 

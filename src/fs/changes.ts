@@ -4,6 +4,11 @@ const RING_SIZE = 4096;
 const SLOT = 2;
 export const SHARED_TTL_MS = 100;
 export const RENAME_WAIT_MS = 100;
+export const RENAME_WAIT_SHARED_MS = 1000;
+
+export function renameWait(view: ChangeView): number {
+  return view.foreign() ? RENAME_WAIT_SHARED_MS : RENAME_WAIT_MS;
+}
 
 const DIRTY = RING + RING_SIZE * SLOT;
 const FOREIGN = DIRTY + 1;
