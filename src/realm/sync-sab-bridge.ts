@@ -30,6 +30,7 @@ import {
   SAB_STATE_IDLE,
   SAB_STATE_PENDING,
   SAB_STATE_READY,
+  SAB_STATUS_BYTES,
   type SabViews,
   SYNC_SAB_NEXT_MSG,
   SYNC_SAB_REQ_MSG,
@@ -48,7 +49,8 @@ export interface SyncSabTransport {
     req: SyncSabRequestBody,
     timeoutMs: number,
     label: string,
-    transfer?: Transferable[]
+    transfer?: Transferable[],
+    sink?: Uint8Array
   ): SyncFsResult;
 }
 
@@ -149,7 +151,7 @@ export function createSyncSabTransport(
   }
 
   return {
-    call(asked, timeoutMs, label, given = []): SyncFsResult {
+    call(asked, timeoutMs, label, given = [], sink?: Uint8Array): SyncFsResult {
       if (deps.memory) publishMemory(sab, deps.memory());
       const { req, transfer } = exactBody(asked, given);
       const id = ++seq;
@@ -180,7 +182,7 @@ export function createSyncSabTransport(
           }
           if (out === null) {
             status = Atomics.load(header, SAB_I_STATUS);
-            out = new Uint8Array(total);
+            out = landing(status, total, sink);
           }
           out.set(window.subarray(0, chunk), offset);
           offset += chunk;
@@ -195,6 +197,11 @@ export function createSyncSabTransport(
       return decodeSabResult(status, out);
     },
   };
+}
+
+function landing(status: number, total: number, sink: Uint8Array | undefined): Uint8Array {
+  if (sink && status === SAB_STATUS_BYTES && total <= sink.length) return sink.subarray(0, total);
+  return new Uint8Array(total);
 }
 
 function errnoError(code: string, path: string, direct?: true): Error & { code: string } {

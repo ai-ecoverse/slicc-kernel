@@ -1446,6 +1446,44 @@ function crc(bytes, start = 0) {
   return h;
 }
 
+async function readintowindows(ctx, [path]) {
+  const { sync } = ctx;
+  const MIB = 1 << 20;
+  const size = 3 * MIB + 123;
+  const byte = (i) => (i * 31 + (i >> 16)) & 0xff;
+  const w = sync.open(path, { write: true, create: true, truncate: true });
+  w.write(
+    0,
+    new Uint8Array(size).map((_, i) => byte(i))
+  );
+  const f = sync.open(path, { read: true });
+  const out = [];
+  for (const [at, len] of [
+    [0, 2 * MIB + 7],
+    [MIB - 5, MIB + 10],
+    [MIB - 1, 2 * MIB],
+    [size - 1000, 4096],
+    [size + 10, 16],
+  ]) {
+    const buf = new Uint8Array(len + 8).fill(0xee);
+    const n = f.readInto(at, buf, 4, len);
+    let same =
+      buf.slice(0, 4).every((b) => b === 0xee) && buf.slice(4 + n).every((b) => b === 0xee);
+    for (let i = 0; i < n && same; i++) same = buf[4 + i] === byte(at + i);
+    out.push(`${at}+${len}: ${n} ${same ? 'same' : 'DIFFERENT'}`);
+  }
+  const patch = new Uint8Array(MIB).fill(0x5a);
+  w.write(MIB - 100, patch);
+  const buf = new Uint8Array(2 * MIB);
+  const n = f.readInto(MIB - 200, buf);
+  const fresh =
+    buf.subarray(100, 100 + MIB).every((b) => b === 0x5a) && buf[99] === byte(MIB - 101);
+  out.push(`after write: ${n} ${fresh ? 'fresh' : 'STALE'}`);
+  w.close();
+  f.close();
+  await ctx.write(1, `${out.join('\n')}\n`);
+}
+
 async function preadbench(ctx, [path]) {
   const sync = ctx.sync;
   const f = sync.open(path, { read: true });
@@ -1536,6 +1574,7 @@ async function readintoall(ctx, [dir]) {
 
 const modes = {
   preadbench,
+  readintowindows,
   readintoall,
   rawkeys,
   rawclosed,
