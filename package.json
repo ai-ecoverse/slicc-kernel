@@ -64,7 +64,7 @@
   },
   "devDependencies": {
     "@ai-ecoverse/py-numpy": "2.5.4-4",
-    "@ai-ecoverse/slicc-cdp": "1.41.11",
+    "@ai-ecoverse/slicc-cdp": "1.41.12",
     "@ai-ecoverse/slicc-node": "2.5.2",
     "@ai-ecoverse/slicc-scrub": "1.1.0",
     "@ai-ecoverse/slicc-shared-web": "2.12.1",
