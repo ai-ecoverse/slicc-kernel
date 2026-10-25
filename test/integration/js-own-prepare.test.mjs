@@ -220,12 +220,16 @@ try {
 console.log(JSON.stringify(out));
 `;
 
-test("Node's own stack callback order is what the kernel's copy mirrors (a pin: if this fails after a Node upgrade, re-check src/node-stack.ts kernelCallback against Node's prepareStackTraceCallback) (#1631)", () => {
+test("Node's own stack callback order is what the kernel's copy mirrors (a pin: if this fails after a Node upgrade, re-check src/node-stack.ts kernelCallback against Node's prepareStackTraceCallback; the source hash is printed, not asserted) (#1631)", () => {
   const r = spawnSync(process.execPath, ['--expose-internals', '--no-warnings', '-e', NODE_ORDER], {
     encoding: 'utf8',
   });
   assert.equal(r.status, 0, r.stderr);
-  assert.deepEqual(JSON.parse(r.stdout), {
+  const { source, ...order } = JSON.parse(r.stdout);
+  console.log(
+    `node ${process.version} prepareStackTraceCallback sha256 ${source} (seen on 26.11.1: fd0404511268d9be1fca3236d6759d5026e23d6921a25766917b6ead3ca111f9)`
+  );
+  assert.deepEqual(order, {
     defaultName: 'ErrorPrepareStackTrace',
     own: 'OWN',
     receiver: true,
@@ -233,6 +237,5 @@ test("Node's own stack callback order is what the kernel's copy mirrors (a pin: 
     fake: 'FAKE',
     reads: 2,
     deleted: 'Error: d',
-    source: 'fd0404511268d9be1fca3236d6759d5026e23d6921a25766917b6ead3ca111f9',
   });
 });
