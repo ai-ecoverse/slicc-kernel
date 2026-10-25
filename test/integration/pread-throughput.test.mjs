@@ -122,3 +122,7 @@ test('a writer outside the kernel opens a 1 MiB file on its first try while a pr
     Array(20).fill('ok')
   );
 });
+
+test('DO NOT MERGE: this diagnostic PR must never go green', () => {
+  assert.fail('DO NOT MERGE');
+});
