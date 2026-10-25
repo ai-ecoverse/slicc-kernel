@@ -3,6 +3,7 @@ import { appendFile, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
+import { assertWorkerBuild } from './tools/worker-build.mjs';
 
 const { version: declared } = JSON.parse(
   await readFile(new URL('./package.json', import.meta.url), 'utf8')
@@ -80,10 +81,27 @@ for (const [entry, platform] of [
     logLevel: 'warning',
   });
 }
-await appendFile(
-  new URL('./dist/node-process-worker.js', import.meta.url),
-  '//# sourceURL=slicc-kernel:/node-process-worker.js\n'
+await build({
+  entryPoints: ['src/node-process-worker.ts'],
+  outfile: 'dist/node-process-worker.cjs',
+  bundle: true,
+  format: 'cjs',
+  platform: 'node',
+  target: 'node22',
+  sourcemap: 'linked',
+  define: { ...define, 'import.meta.url': 'importMetaUrl' },
+  inject: ['src/captured-globals.ts'],
+  logLevel: 'warning',
+});
+assertWorkerBuild(
+  await readFile(new URL('./dist/node-process-worker.cjs', import.meta.url), 'utf8')
 );
+for (const file of ['node-process-worker.js', 'node-process-worker.cjs']) {
+  await appendFile(
+    new URL(`./dist/${file}`, import.meta.url),
+    '//# sourceURL=slicc-kernel:/node-process-worker.js\n'
+  );
+}
 execFileSync(
   process.execPath,
   [
