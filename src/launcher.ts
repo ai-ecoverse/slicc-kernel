@@ -727,6 +727,8 @@ export class Launcher {
   readonly hostname: string;
   readonly watchers = new FsWatchers();
   private readonly changes = new FileChanges();
+
+  private peerHeldPaths: ReadonlySet<string> = new Set();
   private readonly renameLog = new RenameLog(this.changes);
   readonly cwds = new CwdTable(async (path) => {
     const { dev, ino } = await this.base.stat(path);
@@ -3322,6 +3324,7 @@ export class Launcher {
   private openNodes(fs: VfsFileFs, entries?: Map<string, Promise<unknown>>): VfsNodes {
     const nodes = new VfsNodes(fs, (path) => this.released(path), entries);
     nodes.opened = (node) => this.nodeOpened(node);
+    nodes.crowded = (path) => this.peerHeldPaths.has(path);
     return nodes;
   }
 
@@ -3347,7 +3350,10 @@ export class Launcher {
   }
 
   private flushingPeers(fs: KernelFs): Peers | undefined {
-    fs.peerHolds?.((paths) => this.changes.peerHeld(paths));
+    fs.peerHolds?.((paths) => {
+      this.peerHeldPaths = new Set(paths);
+      this.changes.peerHeld(paths);
+    });
     const peers = fs.peers?.();
     if (!peers) return undefined;
     peers.watch((crowded) => {

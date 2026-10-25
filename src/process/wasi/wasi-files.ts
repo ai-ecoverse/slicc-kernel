@@ -46,6 +46,7 @@ export class FileBuffer {
   handle: number | undefined;
   moved: ((missing: boolean) => boolean) | undefined;
   bound: SyncFsBridgeStat | undefined;
+  real: string | undefined;
 
   constructor(
     fs: SyncFsFileIo,
@@ -147,7 +148,9 @@ export class FileBuffer {
   }
 
   private crowded(): boolean {
-    return this.watch?.view.peerHeld(this.where) === true;
+    const view = this.watch?.view;
+    if (!view) return false;
+    return view.peerHeld(this.where) || (this.real !== undefined && view.peerHeld(this.real));
   }
 
   private exact(): number | undefined {
@@ -940,6 +943,7 @@ export function cachingBridge(
     utimes: (p, a, m, now) => relabeling(p, () => bridge.utimes(p, a, m, now)),
     lutimes: (p, a, m, now) => mutating(() => bridge.lutimes(p, a, m, now)),
     ...(bridge.hold ? { hold: bridge.hold.bind(bridge) } : {}),
+    ...(bridge.heldReal ? { heldReal: bridge.heldReal.bind(bridge) } : {}),
     ...(bridge.access ? { access: bridge.access.bind(bridge) } : {}),
     ...(bridge.kept ? { kept: bridge.kept.bind(bridge) } : {}),
     ...(bridge.keptStat ? { keptStat: bridge.keptStat.bind(bridge) } : {}),
