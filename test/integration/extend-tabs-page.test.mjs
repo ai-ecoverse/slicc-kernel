@@ -179,3 +179,7 @@ for (const { kind, size, worker } of [
     );
   });
 }
+
+test('DO NOT MERGE: this diagnostic PR must never go green', () => {
+  assert.fail('DO NOT MERGE');
+});
