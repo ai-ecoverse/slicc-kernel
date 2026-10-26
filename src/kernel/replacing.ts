@@ -58,4 +58,18 @@ export class PackageLocks {
     const names = roots.map((root) => replacingLock(this.metadata, root));
     return shared(this.locks, names, run, false);
   }
+
+  holding(root: string): Promise<() => void> {
+    const { locks } = this;
+    if (!locks) return Promise.resolve(() => {});
+    const { promise: held, resolve: release } = Promise.withResolvers<void>();
+    return new Promise((granted, failed) => {
+      locks
+        .request(replacingLock(this.metadata, root), { mode: 'exclusive' }, () => {
+          granted(() => release());
+          return held;
+        })
+        .catch(failed);
+    });
+  }
 }
