@@ -357,6 +357,15 @@ interface Planned {
   bins?: string[];
   asked?: Record<string, string>;
   replan?: Replan;
+  recheck?: ((planned: Planned) => Promise<void>) | undefined;
+}
+
+interface Redeemed {
+  env: Record<string, string>;
+  pid?: number;
+  cwd?: string;
+  scrub?: Scrubber;
+  recheck?: (planned: Planned) => Promise<void>;
 }
 
 type Replan = () => Promise<Planned | undefined>;
@@ -528,6 +537,23 @@ function packageRootOf(path: string, roots: readonly string[]): string | undefin
       : `${base}/${first}`;
   }
   return undefined;
+}
+
+function planFiles(planned: Planned): string[] {
+  const { target } = planned;
+  const files = [
+    target.glue,
+    target.wasm,
+    target.imports,
+    target.copy,
+    ...(target.variants ?? []).map((variant) => variant.wasm),
+    ...(planned.sources ?? []),
+  ];
+  return files.filter((file): file is string => file !== undefined);
+}
+
+function sameList(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((item, i) => item === b[i]);
 }
 
 function modulePath(glue: string): string {
@@ -1584,7 +1610,7 @@ export class Launcher {
     who: Redeemer,
     planned: Planned,
     fds: FdTable
-  ): Promise<{ env: Record<string, string>; pid?: number; cwd?: string; scrub?: Scrubber }> {
+  ): Promise<Redeemed> {
     if (who.booked === undefined) return { env: req.env };
     try {
       const redeemed = await this.redeem(req, who, planned);
@@ -1600,7 +1626,7 @@ export class Launcher {
     req: ChildSpawnRequest,
     { ppid, cred, scope, booked }: Redeemer,
     planned: Planned
-  ): Promise<{ env: Record<string, string>; pid: number; cwd: string; scrub?: Scrubber }> {
+  ): Promise<Redeemed & { pid: number; cwd: string }> {
     const { [TICKET_ENV]: ticket = '', ...env } = req.env;
     const caller = this.jobs.shown(ppid);
     const named = typeof req.argv0 === 'string' && !planned.script && !planned.target.fixed;
@@ -1638,7 +1664,15 @@ export class Launcher {
       secrets.push({ name, value, placeholder });
     }
     const scrub = scrubberOf(secrets);
-    return { env, pid, cwd: booked.cwd, ...(scrub ? { scrub } : {}) };
+    const recheck = async (next: Planned) => {
+      const same =
+        sameList(planFiles(next), planFiles(planned)) &&
+        sameList(await this.interpreterChain(next, booked.cwd, scope), interpreters) &&
+        (this.usersMode === 'enforce' &&
+          (await this.trustedFiles(next, req.file, booked.cwd, scope))) === trusted;
+      if (!same) throw new SpawnError('EACCES');
+    };
+    return { env, pid, cwd: booked.cwd, ...(scrub ? { scrub } : {}), recheck };
   }
 
   private async interpreterChain(planned: Planned, cwd: string, scope: string): Promise<string[]> {
@@ -2046,19 +2080,10 @@ export class Launcher {
   }
 
   private packageRoots(planned: Planned): string[] {
-    const { target } = planned;
-    const files = [
-      target.glue,
-      target.wasm,
-      target.imports,
-      target.copy,
-      ...(target.variants ?? []).map((variant) => variant.wasm),
-      ...(planned.sources ?? []),
-    ];
     const packages = [this.modulesDir, ...this.appended];
     const roots = new Set<string>();
-    for (const file of files) {
-      if (file === undefined || !file.startsWith('/')) continue;
+    for (const file of planFiles(planned)) {
+      if (!file.startsWith('/')) continue;
       const at = normalizePath(file);
       const root = PACKAGE_ROOT.exec(at)?.[1] ?? packageRootOf(at, packages);
       if (root !== undefined && root !== at) roots.add(root);
@@ -2067,7 +2092,7 @@ export class Launcher {
   }
 
   private async loadedUnder<T>(asked: Planned, load: (planned: Planned) => Promise<T>): Promise<T> {
-    const { replan } = asked;
+    const { replan, recheck } = asked;
     let planned = asked;
     let roots = this.packageRoots(planned);
     let stale = false;
@@ -2078,6 +2103,7 @@ export class Launcher {
         this.rootFs.refresh?.(held);
         this.resetCatalogs();
         if (replan) planned = (await replan()) ?? planned;
+        await recheck?.(planned);
         const now = this.packageRoots(planned);
         if (now.every((root) => held.includes(root))) return { value: await load(planned) };
         roots = [...new Set([...held, ...now])].sort();
@@ -2559,7 +2585,7 @@ export class Launcher {
       const scope = grant ? '' : await this.scopeOf(cred.euid);
       const file = booked === undefined ? req.file : await this.ticketFile(req, fds);
       const planned = await this.checkedPlan({ ...req, file }, { ppid, cred, scope }, fds);
-      const redeemed = await this.redeemed(
+      const { recheck, ...redeemed } = await this.redeemed(
         { ...req, file },
         { ppid, cred, scope, booked },
         planned,
@@ -2568,7 +2594,7 @@ export class Launcher {
       const exec = req.exec ? { exec: true } : {};
       const deciding = req.exec ? undefined : this.undecided(ppid);
       const replan = () => this.planOrSearch({ ...req, file }, { ppid, cred, scope });
-      const again = { ...planned, replan };
+      const again = { ...planned, replan, recheck };
       const handle = await this.launch(again, {
         ...(deciding ? { decided: deciding.promise } : {}),
         cwd: req.cwd,
