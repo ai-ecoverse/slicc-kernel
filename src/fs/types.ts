@@ -108,8 +108,10 @@ export interface KernelFs {
       trees?: readonly string[];
       moved?: { from: string; to: string };
       content?: true;
+      outside?: true;
     }) => void
   ): () => void;
+  refresh?(trees: readonly string[]): void;
   peers?(): Peers | undefined;
   crossings?(mounted: (path: string) => boolean): void;
   ancestry?(path: string): Promise<Array<Perm | undefined>>;

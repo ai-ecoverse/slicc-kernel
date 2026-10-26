@@ -3,6 +3,7 @@ export interface RemoteChange {
   trees: readonly string[];
   moved?: { from: string; to: string };
   content?: true;
+  outside?: true;
 }
 
 export interface PeerRename {

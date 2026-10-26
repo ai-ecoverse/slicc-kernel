@@ -35,6 +35,7 @@ import {
   integrityOptions,
   KERNEL_CALLER,
 } from './fs/integrity.ts';
+import { META_DB } from './fs/meta.ts';
 import { chain } from './fs/owners.ts';
 import { physicalPathAsync } from './fs/physical-path.ts';
 import {
@@ -114,6 +115,7 @@ import { DEFAULT_UMASK } from './kernel/process.ts';
 import type { ForkState, Program } from './kernel/protocol.ts';
 import { PtyTable } from './kernel/pty.ts';
 import { RenameLog } from './kernel/rename-log.ts';
+import { PackageLocks } from './kernel/replacing.ts';
 import { type ScrubSecret, scrubbedAll, scrubberOf, scrubStdio } from './kernel/scrub-file.ts';
 import { SealedBroker, type SealedCaller, type SealedHook, tagFields } from './kernel/sealed.ts';
 import { SemTable } from './kernel/sem.ts';
@@ -220,6 +222,7 @@ export interface LauncherOptions {
   protect?: Protection;
   cron?: CronOptions;
   moduleUrl?: ModuleUrlMaker;
+  packageLocks?: string;
 }
 
 export interface ModuleUrl {
@@ -353,6 +356,33 @@ interface Planned {
   sources?: string[];
   bins?: string[];
   asked?: Record<string, string>;
+  replan?: Replan;
+  recheck?: ((planned: Planned) => Promise<void>) | undefined;
+}
+
+interface Redeemed {
+  env: Record<string, string>;
+  pid?: number;
+  cwd?: string;
+  scrub?: Scrubber;
+  recheck?: (planned: Planned) => Promise<void>;
+}
+
+type Replan = () => Promise<Planned | undefined>;
+
+interface HeardChange {
+  paths: readonly string[];
+  trees?: readonly string[];
+  moved?: { from: string; to: string };
+  content?: true;
+  outside?: true;
+}
+
+interface LoadedProgram {
+  planned: Planned;
+  env: Record<string, string>;
+  program: Program;
+  exeId: { exeId?: string };
 }
 
 interface Redeemer {
@@ -421,6 +451,7 @@ const COMMAND = /^\/(?:usr\/)?bin\/([^/]+)$/;
 const SHIM_MARKER = /^\/\/ pnpm-wasm-shim=(\{.*\})$/gm;
 const SHIM_MAX = 64 * 1024;
 const PACKAGE_ROOT = /^(.*\/node_modules\/(?:@[^/]+\/)?[^/]+)\//;
+const NODE_MODULES = /\/node_modules(?:\/|$)/;
 const ENV_REFERENCE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
 const WASM_MAGIC = [0x00, 0x61, 0x73, 0x6d];
 const SHEBANG_MAX = 256;
@@ -506,6 +537,23 @@ function packageRootOf(path: string, roots: readonly string[]): string | undefin
       : `${base}/${first}`;
   }
   return undefined;
+}
+
+function planFiles(planned: Planned): string[] {
+  const { target } = planned;
+  const files = [
+    target.glue,
+    target.wasm,
+    target.imports,
+    target.copy,
+    ...(target.variants ?? []).map((variant) => variant.wasm),
+    ...(planned.sources ?? []),
+  ];
+  return files.filter((file): file is string => file !== undefined);
+}
+
+function sameList(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((item, i) => item === b[i]);
 }
 
 function modulePath(glue: string): string {
@@ -709,6 +757,7 @@ export class Launcher {
   private readonly sudoer: Sudo;
   private readonly jobs = new JobTable();
   private readonly locks: KernelLocks;
+  private readonly packageLocks: PackageLocks;
   private readonly fifos = new FifoTable();
   private readonly memories: WasmMemories;
 
@@ -784,6 +833,7 @@ export class Launcher {
     this.memories = memoriesOf(options.wasmMemories);
     this.rootFs = options.fs;
     this.locks = kernelLocks(options.fs.rootName, this.flushingPeers(options.fs));
+    this.packageLocks = new PackageLocks(options.packageLocks ?? META_DB);
     this.dac = this.usersMode === 'off' ? undefined : new Dac(this.usersMode, options.onDenial);
     if (this.dac) this.wireDac(this.dac);
     this.clipboard = new ClipboardBroker(options.clipboard, this.usersMode, undefined, (pid) =>
@@ -872,15 +922,7 @@ export class Launcher {
     this.nodes.keepsOnDisk = true;
     this.openFiles.add(this.nodes);
     options.fs.onPeer?.(() => this.flushOpen());
-    options.fs.remoteChanges?.((change) => {
-      this.held.doubt(change.paths, change.moved?.to);
-      if (change.moved) this.moved(change.moved.from, change.moved.to);
-      this.changes.flush();
-      this.cwds.touched(change.paths, change.trees);
-      this.rewritten(change.paths, change.trees);
-      this.watchers.heard(change.content ? 'change' : 'rename', change.paths);
-      this.watchers.heard('rename', change.trees ?? []);
-    });
+    options.fs.remoteChanges?.((change) => this.remoteChanged(change));
     const holders = [this.held, this.openFiles];
     options.fs.heldBy?.((dir) =>
       holders
@@ -1110,6 +1152,33 @@ export class Launcher {
       }
     }
     return trusted;
+  }
+
+  private remoteChanged(change: HeardChange): void {
+    this.held.doubt(change.paths, change.moved?.to);
+    if (change.moved) this.moved(change.moved.from, change.moved.to);
+    this.changes.flush();
+    this.cwds.touched(change.paths, change.trees);
+    this.rewritten(change.paths, change.trees);
+    this.watchers.heard(change.content ? 'change' : 'rename', change.paths);
+    this.watchers.heard('rename', change.trees ?? []);
+    if (change.outside && this.catalogChanged([...change.paths, ...(change.trees ?? [])])) {
+      this.resetCatalogs();
+    }
+  }
+
+  private catalogChanged(paths: readonly string[]): boolean {
+    const roots = [this.modulesDir, this.pnpmHome, ...this.appended].map(normalizePath);
+    return paths
+      .map(normalizePath)
+      .some(
+        (at) =>
+          at === '/' ||
+          NODE_MODULES.test(at) ||
+          roots.some(
+            (root) => at === root || at.startsWith(`${root}/`) || root.startsWith(`${at}/`)
+          )
+      );
   }
 
   private resetCatalogs(): void {
@@ -1541,7 +1610,7 @@ export class Launcher {
     who: Redeemer,
     planned: Planned,
     fds: FdTable
-  ): Promise<{ env: Record<string, string>; pid?: number; cwd?: string; scrub?: Scrubber }> {
+  ): Promise<Redeemed> {
     if (who.booked === undefined) return { env: req.env };
     try {
       const redeemed = await this.redeem(req, who, planned);
@@ -1557,7 +1626,7 @@ export class Launcher {
     req: ChildSpawnRequest,
     { ppid, cred, scope, booked }: Redeemer,
     planned: Planned
-  ): Promise<{ env: Record<string, string>; pid: number; cwd: string; scrub?: Scrubber }> {
+  ): Promise<Redeemed & { pid: number; cwd: string }> {
     const { [TICKET_ENV]: ticket = '', ...env } = req.env;
     const caller = this.jobs.shown(ppid);
     const named = typeof req.argv0 === 'string' && !planned.script && !planned.target.fixed;
@@ -1595,7 +1664,15 @@ export class Launcher {
       secrets.push({ name, value, placeholder });
     }
     const scrub = scrubberOf(secrets);
-    return { env, pid, cwd: booked.cwd, ...(scrub ? { scrub } : {}) };
+    const recheck = async (next: Planned) => {
+      const same =
+        sameList(planFiles(next), planFiles(planned)) &&
+        sameList(await this.interpreterChain(next, booked.cwd, scope), interpreters) &&
+        (this.usersMode === 'enforce' &&
+          (await this.trustedFiles(next, req.file, booked.cwd, scope))) === trusted;
+      if (!same) throw new SpawnError('EACCES');
+    };
+    return { env, pid, cwd: booked.cwd, ...(scrub ? { scrub } : {}), recheck };
   }
 
   private async interpreterChain(planned: Planned, cwd: string, scope: string): Promise<string[]> {
@@ -1948,25 +2025,16 @@ export class Launcher {
   ): Promise<WasmProcessHandle> {
     const cwd = await physicalPathAsync(this.base, req.cwd);
     const seen = { ...req.env, HOSTNAME: this.hostname, cwd };
-    const env = { ...expandDefaults(asked.target.env, seen), ...req.env };
-    for (const key of asked.target.unset ?? []) delete env[key];
-    delete env[TICKET_ENV];
-    const own = env.HOSTNAME;
-    if (asked.target.abi === 'wasi') env.HOSTNAME = this.hostname;
-    const planned = chosen(asked, env);
-    const { target, args } = planned;
-    let program: Program;
-    let exeId: { exeId?: string };
     await this.pnpmReady();
+    let loaded: LoadedProgram;
     try {
-      const caller = { pid: req.ppid ?? 0, uid: req.cred.euid, tag: req.tags?.[0] };
-      if (this.integrity) await this.checkedSources(planned, caller);
-      [program, exeId] = await this.loaded(target, env, caller);
-      if (readsEtcHostname(program)) setOrDrop(env, 'HOSTNAME', own);
+      loaded = await this.loadedUnder(asked, (planned) => this.loadPlanned(planned, req, seen));
     } catch (err) {
       await req.fds.closeAll();
       throw err;
     }
+    const { planned, env, program, exeId } = loaded;
+    const { target, args } = planned;
     const done = this.heldUrl(program);
     try {
       const cwdSlot = await this.cwds.hold(cwd, req.cwdFrom);
@@ -1990,6 +2058,59 @@ export class Launcher {
     } catch (err) {
       done();
       throw err;
+    }
+  }
+
+  private async loadPlanned(
+    asked: Planned,
+    req: Omit<StartRequest, 'program' | 'argv0' | 'args'>,
+    seen: Record<string, string>
+  ): Promise<LoadedProgram> {
+    const env = { ...expandDefaults(asked.target.env, seen), ...req.env };
+    for (const key of asked.target.unset ?? []) delete env[key];
+    delete env[TICKET_ENV];
+    const own = env.HOSTNAME;
+    if (asked.target.abi === 'wasi') env.HOSTNAME = this.hostname;
+    const planned = chosen(asked, env);
+    const caller = { pid: req.ppid ?? 0, uid: req.cred.euid, tag: req.tags?.[0] };
+    if (this.integrity) await this.checkedSources(planned, caller);
+    const [program, exeId] = await this.loaded(planned.target, env, caller);
+    if (readsEtcHostname(program)) setOrDrop(env, 'HOSTNAME', own);
+    return { planned, env, program, exeId };
+  }
+
+  private packageRoots(planned: Planned): string[] {
+    const packages = [this.modulesDir, ...this.appended];
+    const roots = new Set<string>();
+    for (const file of planFiles(planned)) {
+      if (!file.startsWith('/')) continue;
+      const at = normalizePath(file);
+      const root = PACKAGE_ROOT.exec(at)?.[1] ?? packageRootOf(at, packages);
+      if (root !== undefined && root !== at) roots.add(root);
+    }
+    return [...roots].sort();
+  }
+
+  private async loadedUnder<T>(asked: Planned, load: (planned: Planned) => Promise<T>): Promise<T> {
+    const { replan, recheck } = asked;
+    let planned = asked;
+    let roots = this.packageRoots(planned);
+    let stale = false;
+    for (;;) {
+      const held = roots;
+      const done = await this.packageLocks.loading(held, async (waited) => {
+        if (!waited && !stale) return { value: await load(planned) };
+        this.rootFs.refresh?.(held);
+        this.resetCatalogs();
+        if (replan) planned = (await replan()) ?? planned;
+        await recheck?.(planned);
+        const now = this.packageRoots(planned);
+        if (now.every((root) => held.includes(root))) return { value: await load(planned) };
+        roots = [...new Set([...held, ...now])].sort();
+        stale = true;
+        return undefined;
+      });
+      if (done) return done.value;
     }
   }
 
@@ -2464,7 +2585,7 @@ export class Launcher {
       const scope = grant ? '' : await this.scopeOf(cred.euid);
       const file = booked === undefined ? req.file : await this.ticketFile(req, fds);
       const planned = await this.checkedPlan({ ...req, file }, { ppid, cred, scope }, fds);
-      const redeemed = await this.redeemed(
+      const { recheck, ...redeemed } = await this.redeemed(
         { ...req, file },
         { ppid, cred, scope, booked },
         planned,
@@ -2472,7 +2593,9 @@ export class Launcher {
       );
       const exec = req.exec ? { exec: true } : {};
       const deciding = req.exec ? undefined : this.undecided(ppid);
-      const handle = await this.launch(planned, {
+      const replan = () => this.planOrSearch({ ...req, file }, { ppid, cred, scope });
+      const again = { ...planned, replan, recheck };
+      const handle = await this.launch(again, {
         ...(deciding ? { decided: deciding.promise } : {}),
         cwd: req.cwd,
         cwdFrom: inheritedCwd(req.chdir, this.cwdSlots.get(ppid)),
@@ -3543,9 +3666,13 @@ export class Launcher {
     const file = await this.execFile(argv[0] ?? '', cwd, this.execGuard(credOf(account), 0, tag));
     if (!(await this.base.exists(cwd)))
       await this.stackFor(tags, base).fs.mkdir(cwd, { recursive: true });
-    const planned = await this.plan(file, argv, cwd, scope);
-    await this.mayExec(credOf(account), { file, cwd, pid: 0, tag }, planned);
-    return { cwd, file, planned };
+    const plan = async () => {
+      const found = await this.plan(file, argv, cwd, scope);
+      await this.mayExec(credOf(account), { file, cwd, pid: 0, tag }, found);
+      return found;
+    };
+    const planned = await plan();
+    return { cwd, file, planned: planned && { ...planned, replan: plan } };
   }
 
   async openTerminal(argv: string[], options: TerminalOptions): Promise<TerminalSession> {
