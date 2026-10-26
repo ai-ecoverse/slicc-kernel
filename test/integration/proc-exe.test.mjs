@@ -4,12 +4,11 @@ import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { startProxy } from '@ai-ecoverse/slicc-node';
 import { createNodeKernel } from '../../dist/node.js';
+import { hostfsProxy } from './hostfs-proxy.mjs';
 
 const modules = new URL('../../node_modules/@ai-ecoverse/', import.meta.url);
 const fixture = new URL('./fixtures/exetest/', import.meta.url);
-const ORIGIN = 'http://localhost:8787';
 
 async function install(kernel, name) {
   const base = new URL(`${name}/`, modules);
@@ -168,23 +167,11 @@ test('a WASI program run from a tmpfs or a hostfs mount reads its /proc/self/exe
 }, async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'slicc-exe-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
-  const proxy = await startProxy({
-    port: 0,
-    origins: [ORIGIN],
-    mounts: [`${dir}:project`],
-    kernelPort: null,
-  });
+  const proxy = await hostfsProxy({ folders: { project: dir }, capabilities: { ranges: true } });
   t.after(() => proxy.close());
-  const hostfs = async (mount, { readonly }) => {
-    const response = await fetch(`${proxy.url}/api/hostfs/grant`, {
-      method: 'POST',
-      headers: { 'X-Bridge-Token': proxy.key, Origin: ORIGIN, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mount, readonly }),
-    });
-    const { token, capabilities } = await response.json();
-    return { url: proxy.url, token, capabilities };
-  };
-  const kernel = await createNodeKernel({ hostfs, hostfsOrigin: ORIGIN });
+  const kernel = await createNodeKernel({
+    hostfs: (mount, { readonly }) => proxy.grant(mount, readonly),
+  });
   t.after(() => kernel.terminate());
   for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
   await kernel.writeFile('/mnt/t/.keep', '');

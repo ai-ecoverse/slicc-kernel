@@ -67,6 +67,18 @@ test('without a transport, a request is answered 502 naming the missing option',
   assert.match(stdout, /no network transport \(createKernel\(\{ network: \{ transport \} \}\)\)/);
 });
 
+test('the page transport names a way out in its 502', async (t) => {
+  const hint = 'for the whole web, run npx sliccy@next or install slicc-extension';
+  const { bash } = await booted(chrome, t, { hint });
+
+  const { stdout } = await bash('curl -sS -w " %{http_code}" https://unreachable.invalid/');
+  assert.match(
+    stdout,
+    /not allowed by CORS\): for the whole web, run npx sliccy@next or install slicc-extension/
+  );
+  assert.match(stdout, / 502$/);
+});
+
 test('a TLS engine without entropy fails each https cleanly, and the kernel keeps serving', async (t) => {
   const { page, bash, read } = await booted(chrome, t);
   const glue = 'node_modules/@ai-ecoverse/wasm-tls-engine/dist/slicc-tls-engine.mjs';

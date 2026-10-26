@@ -75,6 +75,7 @@ export async function hostfsProxy({
   pingMs = 15000,
   maxIo = 16 * 1024 * 1024,
   capabilities = {},
+  origins,
 }) {
   const roots = new Map();
   for (const [name, path] of Object.entries(folders)) roots.set(name, await fsp.realpath(path));
@@ -263,6 +264,8 @@ export async function hostfsProxy({
 
   async function handle(req, res) {
     cors(req, res);
+    if (origins && !origins.includes(req.headers.origin))
+      return refuse(res, 403, 'origin not allowed');
     if (req.method === 'OPTIONS') {
       res.writeHead(204, {
         'Access-Control-Allow-Methods': 'POST, PUT, DELETE, OPTIONS',
@@ -290,7 +293,11 @@ export async function hostfsProxy({
       if (!root) return errno(res, fail('ENOENT', `no folder ${ask.mount}`));
       counts.grants++;
       const token = randomBytes(32).toString('base64url');
-      tokens.set(token, { root, readonly: ask.readonly === true });
+      tokens.set(token, {
+        root,
+        readonly: ask.readonly === true,
+        origin: req.headers.origin,
+      });
       return json(res, {
         token,
         mount: ask.mount,
@@ -299,7 +306,8 @@ export async function hostfsProxy({
       });
     }
     const grant = tokens.get(req.headers['x-hostfs-token']);
-    if (!grant) return refuse(res, 403, 'hostfs token missing or wrong');
+    if (!grant || (origins && grant.origin !== req.headers.origin))
+      return refuse(res, 403, 'hostfs token missing or wrong');
     try {
       if (path === '/api/hostfs/write' && req.method === 'PUT') return await put(req, res);
       if (path === '/api/hostfs/watch' && req.method === 'POST')
@@ -322,10 +330,14 @@ export async function hostfsProxy({
   const { port } = server.address();
   const url = `http://127.0.0.1:${port}`;
 
-  async function grantFor(name, readonly = false) {
+  async function grantFor(name, readonly = false, origin) {
     const response = await fetch(`${url}/api/hostfs/grant`, {
       method: 'POST',
-      headers: { 'X-Bridge-Token': key, 'Content-Type': 'application/json' },
+      headers: {
+        'X-Bridge-Token': key,
+        'Content-Type': 'application/json',
+        ...(origin ? { Origin: origin } : {}),
+      },
       body: JSON.stringify({ mount: name, readonly }),
     });
     const grant = await response.json();
