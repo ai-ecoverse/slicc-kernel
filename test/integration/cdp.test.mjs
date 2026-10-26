@@ -60,6 +60,24 @@ test('a WASI guest drives the harness browser through the CDP facade', async (t)
   assert.deepEqual(page.errors, []);
 });
 
+test('a host that closes with a reason right after the first command gives the guest 1011 and that reason, every time', async (t) => {
+  const { page, run } = await booted(chrome, t, { cdp: true });
+  const reason =
+    'another page took over the local proxy’s browser connection (superseded-by-new-cdp-client)';
+  await page.expose('cdpOut', ({ id, m }) => {
+    if (m === undefined) return;
+    void page.evaluate((i, r) => window.cdpIn(i, null, r), id, reason).catch(() => false);
+  });
+  await installPackage(page, 'wasix-python');
+  const client = await readFile(new URL('fixtures/cdp/client.py', import.meta.url), 'utf8');
+  assert.equal((await run(['bash', '-c', 'cat > /home/client.py'], { stdin: client })).status, 0);
+
+  const r = await run(['python3', '/home/client.py', 'closes', '50'], { cwd: '/home' });
+  assert.equal(r.stderr, '');
+  assert.equal(r.stdout, `closed 1011 ${reason}\n`.repeat(50));
+  assert.deepEqual(page.errors, []);
+});
+
 test('the page cannot dial the CDP facade, by port or through loopbackFetch', async (t) => {
   const { page } = await booted(chrome, t, { cdp: true });
   const refused = await page.evaluate(async () => {

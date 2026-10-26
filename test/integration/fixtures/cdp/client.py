@@ -138,6 +138,20 @@ def main():
         print('held', flush=True)
         op, payload = ws_recv(cdp.f)
         print('closed', op, struct.unpack('>H', payload[:2])[0], payload[2:].decode())
+    elif mode == 'closes':
+        for _ in range(int(sys.argv[2])):
+            cdp = Cdp(base)
+            ws_send(cdp.s, json.dumps({'id': 1, 'method': 'Browser.getVersion'}))
+            try:
+                op, payload = ws_recv(cdp.f)
+            except ValueError:
+                print('eof', flush=True)
+                continue
+            if op != 8:
+                print('frame', op, flush=True)
+            else:
+                print('closed', struct.unpack('>H', payload[:2])[0], payload[2:].decode(), flush=True)
+            cdp.s.close()
 
 
 main()
