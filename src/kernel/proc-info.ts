@@ -50,6 +50,7 @@ export interface ProcessListing {
   staleFds?: number;
   fileIds?: number;
   holds?: { mine: number; peers: number; sent: number; held?: readonly string[] };
+  swaps?: { swaps: number; longestMs: number; waits: number; waitedMs: number };
   renameAcks?: {
     acks: number;
     busy: number;

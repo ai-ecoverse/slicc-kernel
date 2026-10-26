@@ -110,6 +110,7 @@ import { Resolver } from './kernel/net/resolver.ts';
 import { Routes, type RouteTable } from './kernel/net/routes.ts';
 import type { RealmTransport } from './kernel/net/transport.ts';
 import type { NetworkUplink } from './kernel/net/uplink.ts';
+import { PackageSwaps } from './kernel/package-swaps.ts';
 import { fileIdentity, type ProcessInfo } from './kernel/proc-info.ts';
 import { DEFAULT_UMASK } from './kernel/process.ts';
 import type { ForkState, Program } from './kernel/protocol.ts';
@@ -758,6 +759,11 @@ export class Launcher {
   private readonly jobs = new JobTable();
   private readonly locks: KernelLocks;
   private readonly packageLocks: PackageLocks;
+  private readonly swaps = new PackageSwaps(
+    (path) => this.packageRootIs(path),
+    (root) => this.packageLocks.holding(root),
+    () => this.resetCatalogs()
+  );
   private readonly fifos = new FifoTable();
   private readonly memories: WasmMemories;
 
@@ -1053,7 +1059,9 @@ export class Launcher {
   commands(scope = ''): Promise<Map<string, Command>> {
     let found = this.catalogs.get(scope);
     if (!found) {
-      found = this.trustedAppended()
+      found = this.swaps
+        .settled()
+        .then(() => this.trustedAppended())
         .then(async (appended) => {
           const tiers = await this.tiers(scope, appended);
           const refused: Command[] = [];
@@ -2079,6 +2087,14 @@ export class Launcher {
     return { planned, env, program, exeId };
   }
 
+  private packageRootIs(path: string): boolean {
+    const at = normalizePath(path);
+    const within = `${at}/`;
+    const roots = [this.modulesDir, ...this.appended];
+    const root = PACKAGE_ROOT.exec(within)?.[1] ?? packageRootOf(within, roots);
+    return root === at;
+  }
+
   private packageRoots(planned: Planned): string[] {
     const packages = [this.modulesDir, ...this.appended];
     const roots = new Set<string>();
@@ -2282,6 +2298,7 @@ export class Launcher {
         opfsOps: this.rootFs.opfsOps?.() ?? 0,
         cwdChecks: this.cwds.checks,
         renameAcks: this.rootFs.renameWaits?.(),
+        swaps: this.swaps.counts(),
         staleFds: staleFdCount(),
         fileIds: this.rootFs.fileIdWrites?.() ?? 0,
         holds: this.rootFs.holdCounts?.(),
@@ -2565,6 +2582,7 @@ export class Launcher {
   private spawner(ppid: number, report: (message: string) => void): ChildSpawner {
     return async (req, fds, grant) => {
       const booked = this.takeTicket(req);
+      await this.swaps.settled();
       if (grant && !(await this.grantedCwd(grant.caller, req.cwd))) {
         await fds.closeAll();
         throw new SpawnError('EACCES');
@@ -3647,7 +3665,8 @@ export class Launcher {
     nodes.changed = (path) => this.changes.publish(path);
     nodes.movedAway = (from, to) => this.moved(from, to, nodes);
     nodes.dirtied = (delta) => this.changes.dirtied(delta);
-    return unlinked.wrap(keepingOpen(fs, nodes, (path) => this.changes.publish(path)));
+    const kept = keepingOpen(fs, nodes, (path) => this.changes.publish(path));
+    return this.swaps.wrap(unlinked.wrap(kept));
   }
 
   private async starting(
@@ -3658,6 +3677,7 @@ export class Launcher {
     base?: number
   ) {
     const tag = tags?.[0];
+    await this.swaps.settled();
     this.resetCatalogs();
     const scope = account.uid === 0 ? '' : pnpmHomeOf(account, this.pnpmHome);
     const start = dir ?? '/';
