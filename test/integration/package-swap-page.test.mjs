@@ -7,8 +7,8 @@ import { PAIR_FILES, PAIR_ROOT } from './pair-package.mjs';
 const chrome = await launch();
 after(() => chrome.close());
 
-const ASIDE = `${PAIR_ROOT}_old`;
-const STAGE = `${PAIR_ROOT}_tmp`;
+const ASIDE = `${PAIR_ROOT}_pacquet-stage_1`;
+const STAGE = `${PAIR_ROOT}_pacquet-stage_2`;
 const LOCK = `slicc-kernel-replacing:v1:slicc-kernel:${PAIR_ROOT}`;
 const SWAP = ['swapper', PAIR_ROOT, ASIDE, STAGE];
 

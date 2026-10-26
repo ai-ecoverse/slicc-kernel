@@ -3,9 +3,13 @@ import { parentOf } from '../fs/walk.ts';
 
 export const SWAP_GAP_MS = 2000;
 
+const STAGES = ['_tmp_', '_pacquet-stage_'];
+
 function staged(source: string, target: string): boolean {
-  const dir = parentOf(target);
-  return parentOf(source) === dir && source.length > target.length && source.startsWith(target);
+  if (parentOf(source) !== parentOf(target)) return false;
+  const name = target.slice(target.lastIndexOf('/') + 1);
+  const from = source.slice(source.lastIndexOf('/') + 1);
+  return from.startsWith(`.${name}-`) || STAGES.some((stage) => from.startsWith(`${name}${stage}`));
 }
 
 interface Gap {

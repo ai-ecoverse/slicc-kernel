@@ -5,8 +5,8 @@ import { createNodeKernel, memoryRoot } from '../../dist/node.js';
 import * as testing from '../../dist/testing.js';
 import { PAIR_FILES, PAIR_ROOT } from './pair-package.mjs';
 
-const ASIDE = `${PAIR_ROOT}_old`;
-const STAGE = `${PAIR_ROOT}_tmp`;
+const ASIDE = `${PAIR_ROOT}_pacquet-stage_1`;
+const STAGE = `${PAIR_ROOT}_pacquet-stage_2`;
 const WASM = `${PAIR_ROOT}/bin/pairtest.wasm`;
 const LOCK = `slicc-kernel-replacing:v1:slicc-kernel:${PAIR_ROOT}`;
 const BASH = new URL('../../node_modules/@ai-ecoverse/wasm-bash/', import.meta.url);
