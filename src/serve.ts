@@ -604,6 +604,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
       await fs.reconcile();
       const started = new Launcher({
         fs,
+        ...(name ? { packageLocks: name } : {}),
         ...workers(deps),
         ...(req.modules ? { modules: req.modules } : {}),
         ...(req.commands ? { commands: req.commands } : {}),
