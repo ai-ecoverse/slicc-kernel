@@ -128,6 +128,7 @@ export function encodeSabResult(result: SyncFsResult): SabEncodedResult {
           message: result.message,
           ...(result.direct ? { direct: true } : {}),
           ...(result.dev !== undefined ? { dev: result.dev } : {}),
+          ...(result.detail === 'transport' ? { detail: result.detail } : {}),
         })
       ),
     };
@@ -162,6 +163,7 @@ export function decodeSabResult(status: number, payload: Uint8Array): SyncFsResu
           message?: unknown;
           direct?: unknown;
           dev?: unknown;
+          detail?: unknown;
         };
         const errno =
           typeof parsed.errno === 'string' && /^E[A-Z]+$|^EAI_[A-Z]+$/.test(parsed.errno)
@@ -174,6 +176,7 @@ export function decodeSabResult(status: number, payload: Uint8Array): SyncFsResu
           message,
           ...(parsed.direct === true ? { direct: true as const } : {}),
           ...(typeof parsed.dev === 'string' ? { dev: parsed.dev } : {}),
+          ...(parsed.detail === 'transport' ? { detail: 'transport' as const } : {}),
         };
       } catch {
         return { ok: false, errno: 'EIO', message: 'sync-sab: malformed errno payload' };

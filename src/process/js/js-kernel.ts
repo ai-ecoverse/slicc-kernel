@@ -61,7 +61,7 @@ export function modeOf(mode: unknown): number {
 }
 
 export function callError(
-  result: { errno: string; message: string; dev?: string },
+  result: { errno: string; message: string; dev?: string; detail?: string },
   op: string
 ): JsCallError {
   const { errno, message } = result;
@@ -69,7 +69,7 @@ export function callError(
   const err = new JsCallError(
     errno,
     detailed ? `${op}: ${message}` : op,
-    detailed ? message : undefined
+    detailed ? message : result.detail === 'transport' ? 'transport' : undefined
   );
   err.dev = result.dev;
   return err;

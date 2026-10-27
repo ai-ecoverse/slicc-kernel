@@ -45,7 +45,14 @@ export type TransportReply =
   | { net: 'chunk'; nid: number; bytes: Uint8Array }
   | { net: 'body-pull'; nid: number }
   | { net: 'end'; nid: number }
-  | { net: 'error'; nid: number; message: string; status?: number; code?: string }
+  | {
+      net: 'error';
+      nid: number;
+      message: string;
+      status?: number;
+      code?: string;
+      detail?: 'transport';
+    }
   | { net: 'ws-opened'; nid: number; protocol: string }
   | { net: 'ws-message'; nid: number; data: RealmWebSocketMessage }
   | { net: 'ws-acked'; nid: number; n: number }
@@ -58,11 +65,13 @@ export interface TransportPort {
 export class TransportError extends Error {
   readonly status: number | undefined;
   readonly code: string | undefined;
+  readonly detail: 'transport' | undefined;
 
-  constructor(message: string, status?: number, code?: string) {
+  constructor(message: string, status?: number, code?: string, detail?: unknown) {
     super(message);
     this.status = status;
     this.code = code;
+    this.detail = detail === 'transport' ? detail : undefined;
   }
 }
 
@@ -102,7 +111,7 @@ export class RemoteTransport implements RealmTransport {
     if (!waiter) return;
     this.waiting.delete(reply.nid);
     if (reply.net === 'error') {
-      waiter.reject(new TransportError(reply.message, reply.status, reply.code));
+      waiter.reject(new TransportError(reply.message, reply.status, reply.code, reply.detail));
     } else waiter.resolve(reply);
   }
 
