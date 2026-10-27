@@ -69,7 +69,7 @@ export function callError(
   const err = new JsCallError(
     errno,
     detailed ? `${op}: ${message}` : op,
-    detailed ? message : result.detail
+    detailed ? message : result.detail === 'transport' ? 'transport' : undefined
   );
   err.dev = result.dev;
   return err;
