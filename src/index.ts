@@ -94,16 +94,6 @@ export type {
   SealedRequest,
 } from './kernel/sealed.ts';
 export type { ConnectorStamp } from './kernel/socket.ts';
-export {
-  checkLocalProxy,
-  type LocalProxyCheckOptions,
-  type LocalProxyOptions,
-  type LocalProxyProbe,
-  type LocalProxyStatus,
-  type LocalProxyTransportOptions,
-  localProxyTransport,
-  probeLocalProxy,
-} from './local-proxy-transport.ts';
 export type {
   HostfsEvent,
   HostfsGrant,

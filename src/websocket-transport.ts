@@ -42,7 +42,7 @@ export function sendableClose(code?: number): number {
 function blockedReason(url: string, e: unknown): string {
   const name = (e as { name?: unknown } | null)?.name;
   if (name === 'SecurityError' && url.startsWith('ws:')) {
-    return `${url}: ws:// is blocked from an https page; use wss:// or slicc-node`;
+    return `${url}: ws:// is blocked from an https page; use wss://, or link a slicc CLI (npx sliccy@next)`;
   }
   return `${url}: ${e instanceof Error ? e.message : String(e)}`;
 }

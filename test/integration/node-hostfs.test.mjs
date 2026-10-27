@@ -4,7 +4,6 @@ import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { startProxy } from '@ai-ecoverse/slicc-node';
 import { createNodeKernel } from '../../dist/node.js';
 import { hostfsProxy } from './hostfs-proxy.mjs';
 
@@ -133,30 +132,17 @@ test('hostfs through the Node entry: a host edit mid-read is ESTALE on an inheri
 
 const ORIGIN = 'http://localhost:8787';
 
-async function sliccNode(t) {
+async function originBound(t) {
   const dir = await folder(t, 'slicc-origin-');
   await writeFile(join(dir, 'hello'), 'from the host\n');
-  const proxy = await startProxy({
-    port: 0,
-    origins: [ORIGIN],
-    mounts: [`${dir}:project`],
-    kernelPort: null,
-  });
+  const proxy = await hostfsProxy({ folders: { project: dir }, origins: [ORIGIN] });
   t.after(() => proxy.close());
-  const hostfs = async (mount, { readonly }) => {
-    const response = await fetch(`${proxy.url}/api/hostfs/grant`, {
-      method: 'POST',
-      headers: { 'X-Bridge-Token': proxy.key, Origin: ORIGIN, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mount, readonly }),
-    });
-    const { token, capabilities } = await response.json();
-    return { url: proxy.url, token, capabilities };
-  };
+  const hostfs = async (mount, { readonly }) => proxy.grant(mount, readonly, ORIGIN);
   return { dir, hostfs };
 }
 
-test('hostfs from the Node entry against slicc-node sends the origin the token was granted to, with no global fetch patched', async (t) => {
-  const { dir, hostfs } = await sliccNode(t);
+test('hostfs from the Node entry against a host that binds tokens to an origin sends the origin the token was granted to, with no global fetch patched', async (t) => {
+  const { dir, hostfs } = await originBound(t);
   const kernel = await mounted(t, { hostfs, hostfsOrigin: ORIGIN });
   assert.deepEqual(
     (await kernel.mounts()).map((m) => [m.type, m.state]),
@@ -172,8 +158,8 @@ test('hostfs from the Node entry against slicc-node sends the origin the token w
   );
 });
 
-test('hostfs from the Node entry against slicc-node goes through hostfsFetch, with the origin added when both are given', async (t) => {
-  const { hostfs } = await sliccNode(t);
+test('hostfs from the Node entry against a host that binds tokens to an origin goes through hostfsFetch, with the origin added when both are given', async (t) => {
+  const { hostfs } = await originBound(t);
   const seen = [];
   const hostfsFetch = (url, init) => {
     seen.push([new URL(url).pathname, new Headers(init.headers).get('Origin')]);

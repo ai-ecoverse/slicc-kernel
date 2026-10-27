@@ -1,12 +1,4 @@
-import {
-  attachKernel,
-  checkLocalProxy,
-  createKernel,
-  fetchTransport,
-  localProxyTransport,
-  probeLocalProxy,
-  serveHostfsPort,
-} from '/dist/index.js';
+import { attachKernel, createKernel, fetchTransport, serveHostfsPort } from '/dist/index.js';
 
 const packages = {
   'node_modules/locktry/': ['package.json', 'locktry.wasm', 'host.mjs'],
@@ -548,9 +540,7 @@ function protection({ hashes, unknown, ...rest }) {
 
 window.boot = async (options = {}) => {
   await install();
-  const base = options.proxy
-    ? localProxyTransport(options.proxy)
-    : fetchTransport(options.hint ? { hint: options.hint } : {});
+  const base = fetchTransport(options.hint ? { hint: options.hint } : {});
   const sunk = options.uploadSink ? uploadSink(base, options.uploadSink) : base;
   const stored = options.store ? storeTransport(sunk) : sunk;
   const served = options.registry ? registryTransport(stored) : stored;
@@ -584,9 +574,6 @@ window.secondKernel = async (options, name = 'second') => {
   });
   return true;
 };
-
-window.probeLocalProxy = probeLocalProxy;
-window.checkLocalProxy = checkLocalProxy;
 
 window.opfs = {
   async read(path) {
