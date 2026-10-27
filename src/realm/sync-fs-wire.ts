@@ -72,7 +72,14 @@ export type SyncFsResult =
   | { ok: true; kind: 'bytes'; bytes: Uint8Array }
   | { ok: true; kind: 'json'; json: unknown }
   | { ok: true; kind: 'void' }
-  | { ok: false; errno: string; message: string; direct?: true; dev?: string };
+  | {
+      ok: false;
+      errno: string;
+      message: string;
+      direct?: true;
+      dev?: string;
+      detail?: 'transport';
+    };
 
 export const SYNC_FS_REQUEST_TIMEOUT_MS = 25_000;
 

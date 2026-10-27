@@ -234,7 +234,8 @@ export class HttpHandles {
         const code = codeOf(e);
         const errno =
           text === NO_TRANSPORT ? 'ENETUNREACH' : code !== 'EIO' ? code : 'ECONNREFUSED';
-        return { ok: false, errno, message: text };
+        const failed = (e as { detail?: unknown }).detail === 'transport';
+        return { ok: false, errno, message: text, ...(failed ? { detail: 'transport' } : {}) };
       }
       entry.body = once(new TextEncoder().encode(text))[Symbol.asyncIterator]();
       return this.headOf(handle, req.url, {

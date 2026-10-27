@@ -139,7 +139,8 @@ export function fetchTransport(options: FetchTransportOptions = {}): RealmTransp
             `fetch ${request.url} failed (unreachable, or not allowed by CORS)${options.hint ? `: ${options.hint}` : ''}`
           ),
           { status: 502 },
-          dns ? { code: causeCode } : {}
+          dns ? { code: causeCode } : {},
+          typeof causeCode === 'string' ? {} : { detail: 'transport' }
         );
       }
       const headers: Array<[string, string]> = [];
@@ -214,13 +215,14 @@ export function serveTransport(
   >();
   const fail = (nid: number, e: unknown) => {
     open.delete(nid);
-    const { status, code } = e as { status?: unknown; code?: unknown };
+    const { status, code, detail } = e as { status?: unknown; code?: unknown; detail?: unknown };
     peer.postMessage({
       net: 'error',
       nid,
       message: e instanceof Error ? e.message : String(e),
       ...(typeof status === 'number' ? { status } : {}),
       ...(typeof code === 'string' ? { code } : {}),
+      ...(detail === 'transport' ? { detail } : {}),
     });
   };
   const uploads = uploadsFor(peer);
