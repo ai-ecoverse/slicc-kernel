@@ -72,7 +72,7 @@
     "@ai-ecoverse/py-numpy": "2.5.4-4",
     "@ai-ecoverse/slicc-cdp": "1.42.4",
     "@ai-ecoverse/slicc-scrub": "1.1.0",
-    "@ai-ecoverse/slicc-shared-web": "2.13.4",
+    "@ai-ecoverse/slicc-shared-web": "2.13.6",
     "@ai-ecoverse/wasi-cargo": "0.99.0-6",
     "@ai-ecoverse/wasi-pnpm": "12.9.1-21",
     "@ai-ecoverse/wasi-ripgrep": "15.2.0-5",
