@@ -20,14 +20,14 @@ type TlsExport =
   | 'tls_session_free';
 
 interface TlsNamedModule {
-  _tls_client_new_name(
+  _tls_client_new_name: (
     store: number,
     name: number,
     nameLen: number,
     alpn: number,
     alpnLen: number,
     flags: number
-  ): number;
+  ) => number;
 }
 
 type TlsClientExport =

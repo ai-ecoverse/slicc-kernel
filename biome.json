@@ -1,4 +1,17 @@
 {
   "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
-  "extends": ["@ai-ecoverse/slicc-shared-web/biome"]
+  "extends": ["@ai-ecoverse/slicc-shared-web/biome"],
+  "files": {
+    "includes": ["**", "!**/pnpm-lock.yaml"]
+  },
+  "markdown": {
+    "formatter": {
+      "enabled": false
+    }
+  },
+  "yaml": {
+    "formatter": {
+      "quoteStyle": "single"
+    }
+  }
 }
