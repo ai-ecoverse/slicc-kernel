@@ -89,7 +89,7 @@
     "@ai-ecoverse/wasm-tar": "1.35.0-9",
     "@ai-ecoverse/wasm-tls-engine": "4.2.0-12",
     "@ai-ecoverse/wasm-util-linux": "2.42.4-7",
-    "@biomejs/biome": "2.5.15",
+    "@biomejs/biome": "2.6.2",
     "@types/node": "26.6.5",
     "acorn": "8.19.0",
     "esbuild": "0.28.2",
