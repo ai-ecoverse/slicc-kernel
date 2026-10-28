@@ -920,7 +920,8 @@ export function cachingBridge(
       return list;
     },
     readlink: (p) => {
-      const known = blind ? undefined : (cache.fresh(), lstats.get(p));
+      if (!blind) cache.fresh();
+      const known = blind ? undefined : lstats.get(p);
       const gen = seen.lstat(p);
       const current = view !== undefined && gen !== undefined && !view.changedSince(gen, p).changed;
       if (known && current && !('until' in known) && young(known) && !known.isSymbolicLink) {
