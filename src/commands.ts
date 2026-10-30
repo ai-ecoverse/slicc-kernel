@@ -18,6 +18,7 @@ export interface Command {
   unset?: string[];
   script?: string;
   bin?: true;
+  dependency?: true;
   imports?: string;
   refused?: string;
   shows?: string;
@@ -377,6 +378,17 @@ interface Provided {
   pkg: string;
   replaces: string[];
   commands: Command[];
+  dependency: boolean;
+}
+
+async function directInstalls(fs: KernelFs, root: string): Promise<Set<string> | undefined> {
+  try {
+    const project = root.slice(0, root.lastIndexOf('/'));
+    const { dependencies } = JSON.parse(await fs.readFile(`${project}/package.json`));
+    return new Set(Object.keys(dependencies ?? {}));
+  } catch {
+    return undefined;
+  }
 }
 
 async function tierPackages(
@@ -384,10 +396,12 @@ async function tierPackages(
   physical: Physical,
   roots: string[],
   bins: boolean,
-  kernel: string
+  kernel: string,
+  global: ReadonlySet<string>
 ): Promise<Provided[]> {
   const out: Provided[] = [];
   for (const root of roots) {
+    const direct = global.has(root) ? await directInstalls(fs, root) : undefined;
     for (const pkg of await packages(fs, root)) {
       let manifest: Manifest;
       try {
@@ -399,12 +413,15 @@ async function tierPackages(
       const named = new Set(own.map((command) => command.name));
       const extra = bins ? await binCommandsOf(physical, pkg, manifest, named) : [];
       const refused = engineRefusal(manifest, kernel);
-      const commands = [...own, ...extra];
+      const name = pkg.slice(root.length + 1);
+      const dependency = direct?.has(name) === false;
+      const marks = { ...(refused ? { refused } : {}), ...(dependency ? { dependency } : {}) };
       out.push({
-        name: pkg.slice(root.length + 1),
+        name,
         pkg,
         replaces: replacesOf(manifest),
-        commands: refused ? commands.map((command) => ({ ...command, refused })) : commands,
+        commands: [...own, ...extra].map((command) => ({ ...command, ...marks })),
+        dependency,
       });
     }
   }
@@ -437,20 +454,27 @@ export async function scanCommands(
   modules: string | (string | string[])[],
   binsFrom = Number.POSITIVE_INFINITY,
   kernel = KERNEL_VERSION,
-  refused?: Command[]
+  refused?: Command[],
+  global: ReadonlySet<string> = new Set()
 ): Promise<Map<string, Command>> {
   const found = new Map<string, Command>();
   const physical = physicalResolver(fs);
   const tiers = (typeof modules === 'string' ? [modules] : modules).map((tier) =>
     typeof tier === 'string' ? [tier] : tier
   );
-  for (const [index, roots] of tiers.entries()) {
-    const tier = await tierPackages(fs, physical, roots, index >= binsFrom, kernel);
-    if (refused) refused.push(...tier.flatMap((entry) => entry.commands.filter((c) => c.refused)));
+  const take = async (tier: Provided[]) => {
     for (const [name, { pkg, command }] of winners(tier)) {
       if (!found.has(name)) found.set(name, await withPackagePaths(fs, pkg, command));
     }
+  };
+  const dependencies: Provided[][] = [];
+  for (const [index, roots] of tiers.entries()) {
+    const tier = await tierPackages(fs, physical, roots, index >= binsFrom, kernel, global);
+    if (refused) refused.push(...tier.flatMap((entry) => entry.commands.filter((c) => c.refused)));
+    await take(tier.filter((entry) => !entry.dependency));
+    dependencies.push(tier.filter((entry) => entry.dependency));
   }
+  for (const tier of dependencies) await take(tier);
   if (!found.has('sh') && found.has('bash')) {
     found.set('sh', { ...(found.get('bash') as Command), name: 'sh', argv0: 'sh' });
   }

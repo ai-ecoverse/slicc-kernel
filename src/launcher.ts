@@ -1070,7 +1070,8 @@ export class Launcher {
             tiers,
             tiers.length - appended.length,
             undefined,
-            refused
+            refused,
+            await this.globalRoots(scope)
           );
           this.refusedOf.set(commands, refused.map(refusing));
           return commands;
@@ -1101,12 +1102,34 @@ export class Launcher {
   private ownCommands(scope: string): Promise<ReadonlySet<string>> {
     let found = this.ownCatalogs.get(scope);
     if (!found) {
-      found = pnpmGlobalRoots(this.base, scope)
-        .then((roots) => scanCommands(this.scanned, roots))
-        .then((commands) => new Set(commands.keys()));
+      found = this.ownCatalog(scope);
       this.ownCatalogs.set(scope, found);
     }
     return found;
+  }
+
+  private async ownCatalog(scope: string): Promise<ReadonlySet<string>> {
+    const roots = await pnpmGlobalRoots(this.base, scope);
+    const own = await scanCommands(
+      this.scanned,
+      roots,
+      undefined,
+      undefined,
+      undefined,
+      new Set(roots)
+    );
+    const system = await this.commands();
+    return new Set(
+      [...own.values()]
+        .filter((command) => !command.dependency || !system.has(command.name))
+        .map((command) => command.name)
+    );
+  }
+
+  private async globalRoots(scope: string): Promise<ReadonlySet<string>> {
+    const homes = scope ? [scope, this.pnpmHome] : [this.pnpmHome];
+    const roots = await Promise.all(homes.map((home) => pnpmGlobalRoots(this.base, home)));
+    return new Set(roots.flat());
   }
 
   private interpreters(scope = ''): Promise<Map<string, string>> {
