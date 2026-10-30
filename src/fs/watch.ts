@@ -10,6 +10,8 @@ import {
 
 export type WatchChange = { paths: string[] } | { overflow: true };
 
+type RmOptions = Parameters<KernelFs['rm']>[1];
+
 export type WatchEventType = 'rename' | 'change';
 
 export type WatchNote =
@@ -266,8 +268,9 @@ export class FsWatchers {
     this.emit('change', paths);
   }
 
-  private report(paths: string[]): void {
+  private report(paths: string[], notify = true): void {
     for (const tap of this.taps) tap(paths);
+    if (!notify) return;
     for (const watcher of this.watchers) {
       for (const path of paths) {
         const changed = normalizePath(path);
@@ -292,18 +295,19 @@ export class FsWatchers {
       <A extends unknown[]>(
         run: (...args: A) => Promise<void>,
         changed: (...args: A) => string[],
-        type: WatchEventType
+        type: WatchEventType,
+        partly: (err: unknown, ...args: A) => boolean = () => false
       ) =>
       async (...args: A) => {
-        let done = false;
         try {
           await run(...args);
-          done = true;
-        } finally {
-          const paths = changed(...args);
-          this.report(paths);
-          if (done) this.emit(type, paths);
+        } catch (err) {
+          this.report(changed(...args), partly(err, ...args));
+          throw err;
         }
+        const paths = changed(...args);
+        this.report(paths);
+        this.emit(type, paths);
       };
     const reals = this.reals;
     const realOf = async (path: string): Promise<string> => {
@@ -354,6 +358,13 @@ export class FsWatchers {
           this.reshaped();
         }
       };
+    const removing = after<[string, RmOptions?]>(
+      fs.rm.bind(fs),
+      (path) => [path],
+      'rename',
+      (err, _path, options) =>
+        options?.recursive === true && (err as { code?: unknown })?.code !== 'ENOENT'
+    );
     const overrides: Partial<Record<keyof KernelFs, unknown>> = {
       writeFile: content(fs.writeFile.bind(fs), overwritten),
       ...(fs.createExclusive
@@ -387,14 +398,22 @@ export class FsWatchers {
           if (done) this.emit('rename', fresh ? [...created, path] : created);
         }
       },
-      rm: reshaping(after(fs.rm.bind(fs), (path) => [path], 'rename')),
+      rm: reshaping(async (path: string, options?: RmOptions) => {
+        const absent =
+          options?.force === true &&
+          (await fs.lstat(path).then(
+            () => false,
+            () => true
+          ));
+        return absent ? fs.rm(path, options) : removing(path, options);
+      }),
       rename: reshaping(async (from: string, to: string) => {
         let done = false;
         try {
           await fs.rename(from, to);
           done = true;
         } finally {
-          this.report([from, to]);
+          this.report([from, to], done);
           if (done) this.renamed(from, to);
         }
       }),

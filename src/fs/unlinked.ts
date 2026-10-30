@@ -566,7 +566,8 @@ export class UnlinkedKeeper {
     throw fsError('EBUSY', `${path}: open, and it could not be kept aside`);
   }
 
-  private present(path: string): Promise<boolean> {
+  private async present(path: string): Promise<boolean> {
+    if (await this.fs.commandTarget?.(path)) return false;
     return this.fs.lstat(path).then(
       () => true,
       (err: { code?: string }) => err?.code !== 'ENOENT' && err?.code !== 'ENOTDIR'
