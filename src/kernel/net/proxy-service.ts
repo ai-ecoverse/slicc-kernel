@@ -477,7 +477,7 @@ export class RealmProxy {
         const waiting = new AbortController();
         void watchHangup(ctx.socket, abort, waiting.signal);
         try {
-          response = await this.upstream(req, url, body, abort.signal, ctx.socket.peerCred?.pid);
+          response = await this.upstream(req, url, body, abort.signal, ctx.socket);
         } finally {
           waiting.abort();
         }
@@ -509,7 +509,7 @@ export class RealmProxy {
     url: string,
     body: Uint8Array | AsyncIterable<Uint8Array> | undefined,
     signal: AbortSignal,
-    owner?: number
+    socket: KernelSocket
   ): Promise<RealmTransportResponse> {
     const sent = BODILESS_METHODS.has(req.method) ? undefined : body;
     try {
@@ -521,7 +521,8 @@ export class RealmProxy {
           ...(sent instanceof Uint8Array ? { body: sent } : sent ? { bodyStream: sent } : {}),
           signal,
         },
-        owner
+        socket.peerCred?.pid,
+        socket.peerStamp
       );
       return await untilAborted(fetching, signal);
     } catch (e) {

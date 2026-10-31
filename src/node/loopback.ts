@@ -7,6 +7,7 @@ import type {
   RealmTransportRequest,
   RealmTransportResponse,
 } from '../kernel/net/transport.ts';
+import type { SealedCaller } from '../kernel/sealed.ts';
 import { followRedirects } from './follow.ts';
 
 export type HostLoopback = boolean | readonly number[];
@@ -241,12 +242,13 @@ export function guardedLoopback(
   const open = transport.websocket?.bind(transport);
   const send = async (
     request: RealmTransportRequest,
-    owner?: number
+    owner?: number,
+    stamp?: SealedCaller
   ): Promise<RealmTransportResponse> => {
     await guarded(checkDestination(request.url, policy, resolve), request.signal);
     const entry: LoopbackEntry = { policy };
     try {
-      return await loopbackStore.run(entry, () => transport.fetch(request, owner));
+      return await loopbackStore.run(entry, () => transport.fetch(request, owner, stamp));
     } catch (err) {
       throw entry.refused ?? err;
     }
@@ -255,10 +257,10 @@ export function guardedLoopback(
     get traits() {
       return transport.traits;
     },
-    fetch: (request, owner) =>
+    fetch: (request, owner, stamp) =>
       request.redirect === 'follow'
-        ? followRedirects((hop) => send(hop, owner), request)
-        : send(request, owner),
+        ? followRedirects((hop) => send(hop, owner, stamp), request)
+        : send(request, owner, stamp),
     ...(open
       ? {
           websocket: async (request) => {

@@ -222,10 +222,29 @@ function headOf(nid: number, response: RealmTransportResponse): TransportReply {
   };
 }
 
+function requestOf(
+  call: Extract<TransportCall, { net: 'fetch' }>,
+  signal: AbortSignal,
+  uploads: ReturnType<typeof uploadsFor>
+): RealmTransportRequest {
+  const { url, method, headers, streamed, body, redirect, nid } = call;
+  return {
+    url,
+    method,
+    headers,
+    ...(streamed ? { bodyStream: uploads.of(nid, signal) } : body ? { body } : {}),
+    ...(redirect !== undefined ? { redirect } : {}),
+    signal,
+  };
+}
+
 export function serveTransport(
   peer: TransportPeer,
   transport: RealmTransport,
-  { closeWaitMs = CLOSE_WAIT_MS }: { closeWaitMs?: number } = {}
+  {
+    closeWaitMs = CLOSE_WAIT_MS,
+    attributed = false,
+  }: { closeWaitMs?: number; attributed?: boolean } = {}
 ): TransportServer {
   const open = new Map<
     number,
@@ -249,18 +268,11 @@ export function serveTransport(
     const entry: { abort: AbortController; body?: AsyncIterator<Uint8Array> } = { abort };
     open.set(call.nid, entry);
     try {
-      const response = await transport.fetch({
-        url: call.url,
-        method: call.method,
-        headers: call.headers,
-        ...(call.streamed
-          ? { bodyStream: uploads.of(call.nid, abort.signal) }
-          : call.body
-            ? { body: call.body }
-            : {}),
-        ...(call.redirect !== undefined ? { redirect: call.redirect } : {}),
-        signal: abort.signal,
-      });
+      const response = await transport.fetch(
+        requestOf(call, abort.signal, uploads),
+        attributed ? call.owner : undefined,
+        attributed ? call.stamp : undefined
+      );
       if (!open.has(call.nid)) {
         await response.cancel();
         return;

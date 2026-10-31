@@ -538,6 +538,35 @@ function protection({ hashes, unknown, ...rest }) {
   return { ...rest, integrity: { lookup, ...(unknown ? { unknown } : {}) } };
 }
 
+window.sealedFetch = { calls: [], mode: 'fill', stopped: [] };
+
+const sealedFetchHook = {
+  request: async () => ({ v: 1, ok: true }),
+  async fetch(req, { signal }) {
+    const state = window.sealedFetch;
+    signal.addEventListener('abort', () => state.stopped.push(String(signal.reason)));
+    const parts = [];
+    for await (const part of req.bodyStream ?? []) parts.push(part);
+    if (req.body) parts.push(req.body);
+    const sent = await new Blob(parts).text();
+    state.calls.push({ caller: req.caller, method: req.method, url: req.url, sent });
+    if (state.mode === 'throw') throw new Error('no rule');
+    if (state.mode === 'hang') return new Promise(() => undefined);
+    const body = (async function* () {
+      yield new TextEncoder().encode('scrubbed');
+      yield new TextEncoder().encode(' reply');
+    })();
+    return {
+      status: 200,
+      statusText: 'OK',
+      headers: [['content-type', 'text/plain']],
+      body,
+      cancel: async () => undefined,
+      ...(state.mode === 'hops' ? { redirects: [] } : {}),
+    };
+  },
+};
+
 window.boot = async (options = {}) => {
   await install();
   const base = fetchTransport(options.hint ? { hint: options.hint } : {});
@@ -559,6 +588,7 @@ window.boot = async (options = {}) => {
       ...(options.cdp ? { cdp: cdpHook } : {}),
       ...(options.protect ? { protect: protection(options.protect) } : {}),
       ...(options.clipboard ? { clipboard: clipboardHook } : {}),
+      ...(options.sealedFetch ? { sealed: sealedFetchHook } : {}),
       ...(options.requests ? { requests: requestHook } : {}),
       ...(options.worker ? { worker: new URL(options.worker, location.href) } : {}),
     })

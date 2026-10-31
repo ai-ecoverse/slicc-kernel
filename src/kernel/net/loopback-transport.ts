@@ -164,9 +164,13 @@ function bodyOf(
 export class KernelLoopback {
   private readonly net: LoopbackNet;
   private readonly cred: () => PeerCred;
-  private readonly stamp?: () => Promise<ConnectorStamp>;
+  private readonly stamp?: () => Promise<ConnectorStamp | undefined>;
 
-  constructor(net: LoopbackNet, cred: () => PeerCred, stamp?: () => Promise<ConnectorStamp>) {
+  constructor(
+    net: LoopbackNet,
+    cred: () => PeerCred,
+    stamp?: () => Promise<ConnectorStamp | undefined>
+  ) {
     this.net = net;
     this.cred = cred;
     this.stamp = stamp;

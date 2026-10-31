@@ -27,7 +27,19 @@ export interface Attestation {
   parents: AttestedDir[];
 }
 
-export interface AttestContext {
+export interface AttestTombstone {
+  path: string;
+  absent: true;
+  users: UsersMode;
+  onRootFs: true;
+  parents: AttestedDir[];
+}
+
+export interface AttestOptions {
+  absent?: 'allow';
+}
+
+export interface AttestContext extends AttestOptions {
   users: UsersMode;
   mounts: readonly string[];
 }
@@ -108,7 +120,18 @@ async function trustedParents(
   return parents;
 }
 
-export async function attest(fs: KernelFs, asked: string, o: AttestContext): Promise<Attestation> {
+function missing(e: unknown): boolean {
+  return (e as { code?: unknown } | null)?.code === 'ENOENT';
+}
+
+export async function attest(
+  fs: KernelFs,
+  asked: string,
+  o: AttestContext
+): Promise<Attestation | AttestTombstone> {
+  if (o.absent !== undefined && o.absent !== 'allow') {
+    refuse('EINVAL', String(asked), 'absent takes only allow');
+  }
   if (typeof asked !== 'string' || !asked.startsWith('/')) {
     refuse('EINVAL', String(asked), 'not an absolute path');
   }
@@ -120,7 +143,11 @@ export async function attest(fs: KernelFs, asked: string, o: AttestContext): Pro
   if (mount !== undefined) refuse('EACCES', path, `under the mount ${mount}`);
   const parents = await trustedParents(fs, path, o);
   for (let tries = 0; ; tries++) {
-    const before = await fs.lstat(path);
+    const before = await fs.lstat(path).catch((e: unknown) => {
+      if (o.absent === 'allow' && missing(e)) return undefined;
+      throw e;
+    });
+    if (!before) return { path, absent: true, users: o.users, onRootFs: true, parents };
     if (before.isSymbolicLink) refuse('EACCES', path, 'is a symlink');
     if (!before.isFile)
       refuse(before.isDirectory ? 'EISDIR' : 'EINVAL', path, 'is not a regular file');

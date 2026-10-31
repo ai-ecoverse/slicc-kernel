@@ -1,3 +1,4 @@
+import type { SealedCaller } from '../sealed.ts';
 import type {
   HeaderList,
   RealmRedirectHop,
@@ -22,6 +23,8 @@ export type TransportCall =
       body?: Uint8Array;
       streamed?: true;
       redirect?: RealmRedirectPolicy;
+      owner?: number;
+      stamp?: SealedCaller;
     }
   | { net: 'body-chunk'; nid: number; bytes: Uint8Array }
   | { net: 'body-end'; nid: number }
@@ -199,7 +202,11 @@ export class RemoteTransport implements RealmTransport {
     this.port.postMessage({ net: 'cancel', nid });
   }
 
-  async fetch(request: RealmTransportRequest): Promise<RealmTransportResponse> {
+  async fetch(
+    request: RealmTransportRequest,
+    owner?: number,
+    stamp?: SealedCaller
+  ): Promise<RealmTransportResponse> {
     const nid = ++this.nextId;
     const { signal, redirect } = request;
     signal.throwIfAborted();
@@ -234,6 +241,8 @@ export class RemoteTransport implements RealmTransport {
             ? { body: request.body }
             : {}),
         ...(redirect !== undefined ? { redirect } : {}),
+        ...(owner !== undefined ? { owner } : {}),
+        ...(stamp ? { stamp } : {}),
       });
     } catch (e) {
       finish();
