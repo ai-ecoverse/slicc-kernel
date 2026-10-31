@@ -151,7 +151,7 @@ async function booted(t) {
   return { transport, run };
 }
 
-test('ctx.net.connect with tls carries HTTP/1.1 to the transport as ctx.fetch does, a sealed placeholder header included, and says the transport verified it (#914)', async (t) => {
+test('ctx.net.connect with tls carries HTTP/1.1 to the transport as ctx.fetch does, its headers included, and says the transport verified it (#914)', async (t) => {
   const { transport, run } = await booted(t);
   const got = await run('get');
   assert.equal(got.stderr, '');

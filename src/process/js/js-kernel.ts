@@ -65,7 +65,10 @@ export function callError(
   op: string
 ): JsCallError {
   const { errno, message } = result;
-  const detailed = typeof message === 'string' && message !== errno && DETAILED.has(op);
+  const detailed =
+    typeof message === 'string' &&
+    message !== errno &&
+    (DETAILED.has(op) || result.detail === 'placeholder');
   const err = new JsCallError(
     errno,
     detailed ? `${op}: ${message}` : op,

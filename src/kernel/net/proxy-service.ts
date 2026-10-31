@@ -31,6 +31,7 @@ import {
   streamBody,
 } from './http1.ts';
 import { toHostLoopback } from './loopback-names.ts';
+import { PlaceholderRefused } from './placeholder-floor.ts';
 import type {
   HeaderList,
   RealmTransport,
@@ -635,7 +636,8 @@ export class RealmProxy {
       });
     } catch (e) {
       waiting.abort();
-      throw new HttpError(502, e instanceof Error ? e.message : String(e));
+      const status = e instanceof PlaceholderRefused ? e.status : 502;
+      throw new HttpError(status, e instanceof Error ? e.message : String(e));
     }
     ctx.idle.ms = Number.POSITIVE_INFINITY;
     try {
