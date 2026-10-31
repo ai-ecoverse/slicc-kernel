@@ -78,13 +78,15 @@ export class TransportError extends Error {
   }
 }
 
-function unfollowed(redirect?: RealmRedirectPolicy): boolean {
+export function unfollowed(redirect?: RealmRedirectPolicy): boolean {
   return redirect !== undefined && redirect !== 'follow';
 }
 
 function honors(traits: RealmTransportTraits, redirect?: RealmRedirectPolicy): boolean {
-  if (traits.redirectPolicy) return true;
-  return redirect === 'manual' && traits.manualRedirects && !traits.redirectHops;
+  if (traits.redirectPolicy === true) return true;
+  const hops = traits.redirectHops as unknown;
+  const raw = traits.manualRedirects === true && (hops === undefined || hops === false);
+  return redirect === 'manual' && raw;
 }
 
 function refused(message: string): TransportError {

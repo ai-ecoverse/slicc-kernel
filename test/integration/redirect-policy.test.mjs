@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { test } from 'node:test';
 import { attachKernel, createNodeKernel, fetchTransport, nodeTransport } from '../../dist/node.js';
+import { replayingHops } from '../../src/kernel/net/redirect-hops.ts';
 
 const TRAITS = { manualRedirects: false, encodedBodies: false, maxRequestBody: 1024 };
 
@@ -126,6 +127,45 @@ test('a followed redirect may not leave the loopback guard', async (t) => {
   assert.deepEqual(open.hits, []);
 });
 
+test('a followed redirect may not reach a refused port over a pooled connection', async (t) => {
+  const open = await listen(t, (_req, res) => res.writeHead(200).end('secret'));
+  assert.equal(await (await fetch(`${open.origin}/`)).text(), 'secret');
+  const { hits, origin } = await listen(t, (_req, res) =>
+    res.writeHead(302, { location: `${open.origin}/` }).end()
+  );
+  const transport = nodeTransport({ hostLoopback: [Number(new URL(origin).port)] });
+  const { client } = await clientOf(t, transport);
+  await assert.rejects(get(client, `${origin}/hop`, 'follow'), { status: 403, code: 'EACCES' });
+  assert.deepEqual(hits, ['/hop']);
+  assert.deepEqual(open.hits, ['/']);
+});
+
+test('a followed POST turns into a GET as fetch does, and credentials stay home', async (t) => {
+  const seen = [];
+  const away = await listen(t, (req, res) => {
+    seen.push([req.method, req.headers.authorization, req.headers['content-type']]);
+    res.writeHead(200).end('away');
+  });
+  const { origin } = await listen(t, (_req, res) =>
+    res.writeHead(303, { location: `${away.origin}/end` }).end()
+  );
+  const { client } = await clientOf(t, nodeTransport({ hostLoopback: true }));
+  const response = await client.fetch({
+    url: `${origin}/post`,
+    method: 'POST',
+    headers: [
+      ['authorization', 'Bearer x'],
+      ['content-type', 'text/plain'],
+    ],
+    body: new TextEncoder().encode('hello'),
+    redirect: 'follow',
+  });
+  assert.equal(await text(response), 'away');
+  assert.equal(response.url, `${away.origin}/end`);
+  assert.equal(response.redirected, true);
+  assert.deepEqual(seen, [['GET', undefined, undefined]]);
+});
+
 test('a per-request error fails on a redirect, and only on a redirect', async (t) => {
   for (const transport of [fetchTransport(), nodeTransport({ hostLoopback: true })]) {
     const { hits, origin } = await hopping(t);
@@ -211,15 +251,34 @@ test('an explicit manual neither fills nor reads the held chain, and answers no 
   assert.equal(seen.length, 4);
 });
 
-test('an explicit follow answers the end of the chain, not its first hop', async (t) => {
+test('a bypass hands the owner on as it came', async () => {
+  const told = [];
+  const inner = {
+    traits: { ...TRAITS, redirectPolicy: true, redirectHops: true },
+    fetch: async (...args) => {
+      told.push(args.slice(1));
+      return answer();
+    },
+  };
+  const hops = replayingHops(inner);
+  const { signal } = new AbortController();
+  const request = { url: 'https://hops.test/', method: 'GET', headers: [], signal };
+  await hops.fetch({ ...request, redirect: 'manual' }, 7);
+  await hops.fetch({ ...request, redirect: 'error' });
+  assert.deepEqual(told, [[7], []]);
+});
+
+test('an explicit follow on a hops transport is held like no policy at all', async (t) => {
   const { seen, transport } = hopsTransport();
   const { client } = await clientOf(t, transport);
   const response = await get(client, 'https://hops.test/hop', 'follow');
-  assert.equal(response.status, 200);
-  assert.equal(response.url, 'https://hops.test/final');
+  assert.equal(response.status, 302);
+  assert.equal(location(response), 'https://hops.test/final');
+  assert.equal(response.redirects, undefined);
   assert.equal(seen.length, 1);
-  await get(client, 'https://hops.test/final');
-  assert.equal(seen.length, 2);
+  assert.equal(seen[0].redirect, 'follow');
+  assert.equal((await get(client, 'https://hops.test/final', 'follow')).status, 200);
+  assert.equal(seen.length, 1);
 });
 
 test('a transport that cannot honor a policy is never asked', async (t) => {
@@ -232,6 +291,22 @@ test('a transport that cannot honor a policy is never asked', async (t) => {
     await get(client, 'https://old.test/', 'follow');
     await get(client, 'https://old.test/');
     assert.equal(seen.length, 2);
+  }
+});
+
+test('malformed traits admit nothing', async (t) => {
+  const malformed = [
+    { redirectPolicy: 'true' },
+    { redirectPolicy: 1 },
+    { manualRedirects: 'true' },
+    { manualRedirects: true, redirectHops: 'false' },
+  ];
+  for (const traits of malformed) {
+    const { seen, transport } = recording(() => answer(), traits);
+    const { client } = await clientOf(t, transport);
+    await assert.rejects(get(client, 'https://bad.test/', 'manual'), refused);
+    await assert.rejects(get(client, 'https://bad.test/', 'error'), refused);
+    assert.equal(seen.length, 0);
   }
 });
 

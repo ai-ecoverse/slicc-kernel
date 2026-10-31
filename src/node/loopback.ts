@@ -2,7 +2,12 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { subscribe } from 'node:diagnostics_channel';
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
-import type { RealmTransport } from '../kernel/net/transport.ts';
+import type {
+  RealmTransport,
+  RealmTransportRequest,
+  RealmTransportResponse,
+} from '../kernel/net/transport.ts';
+import { followRedirects } from './follow.ts';
 
 export type HostLoopback = boolean | readonly number[];
 
@@ -234,19 +239,26 @@ export function guardedLoopback(
 ): RealmTransport {
   ensureSubscribed();
   const open = transport.websocket?.bind(transport);
+  const send = async (
+    request: RealmTransportRequest,
+    owner?: number
+  ): Promise<RealmTransportResponse> => {
+    await guarded(checkDestination(request.url, policy, resolve), request.signal);
+    const entry: LoopbackEntry = { policy };
+    try {
+      return await loopbackStore.run(entry, () => transport.fetch(request, owner));
+    } catch (err) {
+      throw entry.refused ?? err;
+    }
+  };
   return {
     get traits() {
       return transport.traits;
     },
-    fetch: async (request, owner) => {
-      await guarded(checkDestination(request.url, policy, resolve), request.signal);
-      const entry: LoopbackEntry = { policy };
-      try {
-        return await loopbackStore.run(entry, () => transport.fetch(request, owner));
-      } catch (err) {
-        throw entry.refused ?? err;
-      }
-    },
+    fetch: (request, owner) =>
+      request.redirect === 'follow'
+        ? followRedirects((hop) => send(hop, owner), request)
+        : send(request, owner),
     ...(open
       ? {
           websocket: async (request) => {

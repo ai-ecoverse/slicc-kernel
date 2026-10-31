@@ -1,3 +1,4 @@
+import { unfollowed } from './remote-transport.ts';
 import type {
   HeaderList,
   RealmRedirectHop,
@@ -99,8 +100,12 @@ export function replayingHops(inner: RealmTransport, heldMs = HELD_MS): RealmTra
       return { ...inner.traits, manualRedirects: true };
     },
     ...(inner.websocket ? { websocket: inner.websocket.bind(inner) } : {}),
-    async fetch(request: RealmTransportRequest, caller?: number): Promise<RealmTransportResponse> {
-      if (request.redirect) return inner.fetch(request, caller);
+    async fetch(
+      request: RealmTransportRequest,
+      ...rest: [caller?: number]
+    ): Promise<RealmTransportResponse> {
+      if (unfollowed(request.redirect)) return inner.fetch(request, ...rest);
+      const [caller] = rest;
       const owner = caller ?? KERNEL;
       const key = keyOf(owner, request.method, request.url);
       const waiting = held.get(key);
@@ -110,7 +115,7 @@ export function replayingHops(inner: RealmTransport, heldMs = HELD_MS): RealmTra
         return replay(waiting);
       }
       if (waiting) drop(key);
-      const response = await inner.fetch(request, caller);
+      const response = await inner.fetch(request, ...rest);
       if (!response.redirects?.length) return response;
       return replay({
         owner,
