@@ -1,3 +1,4 @@
+import type { SealedCaller } from '../sealed.ts';
 import { unfollowed } from './remote-transport.ts';
 import type {
   HeaderList,
@@ -102,7 +103,7 @@ export function replayingHops(inner: RealmTransport, heldMs = HELD_MS): RealmTra
     ...(inner.websocket ? { websocket: inner.websocket.bind(inner) } : {}),
     async fetch(
       request: RealmTransportRequest,
-      ...rest: [caller?: number]
+      ...rest: [caller?: number, stamp?: SealedCaller]
     ): Promise<RealmTransportResponse> {
       if (unfollowed(request.redirect)) return inner.fetch(request, ...rest);
       const [caller] = rest;

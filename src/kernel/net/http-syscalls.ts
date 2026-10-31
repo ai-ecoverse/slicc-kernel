@@ -1,4 +1,5 @@
 import type { SyncFsResult } from '../../realm/sync-fs-wire.ts';
+import type { SealedCaller } from '../sealed.ts';
 import { toHostLoopback } from './loopback-names.ts';
 import { type KernelLoopback, LOOPBACK_TRAITS } from './loopback-transport.ts';
 import { NO_TRANSPORT } from './network.ts';
@@ -126,10 +127,18 @@ export class HttpHandles {
 
   private readonly local: KernelLoopback | undefined;
 
-  constructor(transport: RealmTransport, owner?: number, local?: KernelLoopback) {
+  private readonly stamp: (() => Promise<SealedCaller | undefined>) | undefined;
+
+  constructor(
+    transport: RealmTransport,
+    owner?: number,
+    local?: KernelLoopback,
+    stamp?: () => Promise<SealedCaller | undefined>
+  ) {
     this.transport = transport;
     this.owner = owner;
     this.local = local;
+    this.stamp = stamp;
     this.ws = new WsHandles(transport, () => ++this.nextHandle, local);
   }
 
@@ -218,7 +227,7 @@ export class HttpHandles {
       };
       const response =
         port === undefined
-          ? await this.transport.fetch(request, this.owner)
+          ? await this.transport.fetch(request, this.owner, await this.stamp?.())
           : await (this.local as KernelLoopback).fetch(request, port);
       entry.body = response.body[Symbol.asyncIterator]();
       entry.cancel = () => response.cancel();

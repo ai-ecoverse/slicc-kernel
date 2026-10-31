@@ -378,7 +378,7 @@ test('a raw transport that reports redirect hops gets the owner, an undefined ow
   t.after(() => client.close());
   const response = await client.fetch({ url: 'https://raw.test/c', method: 'GET', headers: [] });
   await response.cancel();
-  assert.deepEqual(transport.calls.at(-1).rest, [undefined]);
+  assert.deepEqual(transport.calls.at(-1).rest, [undefined, undefined]);
 });
 
 test('a placeholder is refused, not replayed, at the target of a held chain that its Authorization would match', async (t) => {

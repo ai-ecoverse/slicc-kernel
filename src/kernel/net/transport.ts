@@ -1,3 +1,5 @@
+import type { SealedCaller } from '../sealed.ts';
+
 export type HeaderList = ReadonlyArray<readonly [name: string, value: string]>;
 export type RealmRedirectPolicy = 'follow' | 'manual' | 'error';
 export interface RealmTransportRequest {
@@ -65,6 +67,10 @@ export interface RealmWebSocket {
 }
 export interface RealmTransport {
   readonly traits: RealmTransportTraits;
-  fetch(request: RealmTransportRequest, owner?: number): Promise<RealmTransportResponse>;
+  fetch(
+    request: RealmTransportRequest,
+    owner?: number,
+    stamp?: SealedCaller
+  ): Promise<RealmTransportResponse>;
   websocket?(request: RealmWebSocketRequest): Promise<RealmWebSocket>;
 }

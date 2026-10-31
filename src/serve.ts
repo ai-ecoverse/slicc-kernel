@@ -6,7 +6,7 @@ import { type ClipboardReply, clipboardAsker } from './clipboard-relay.ts';
 import { embedderAsker, embedderReplyOf } from './embedder-relay.ts';
 import { portFacadeHook } from './facade/port.ts';
 import type { FacadeSpec } from './facade/types.ts';
-import type { Attestation } from './fs/attest.ts';
+import type { Attestation, AttestOptions } from './fs/attest.ts';
 import type { Denial, DenialHook } from './fs/dac.ts';
 import type { IntegrityLookup } from './fs/integrity.ts';
 import { META_DB, type MetaStore } from './fs/meta.ts';
@@ -23,6 +23,7 @@ import type { WasmWorkerLike } from './kernel/host.ts';
 import { CA_DB, caStore } from './kernel/net/network.ts';
 import { RemoteTransport, type TransportReply } from './kernel/net/remote-transport.ts';
 import type { RouteTable } from './kernel/net/routes.ts';
+import type { SealedFetchHook } from './kernel/net/sealed-fetch.ts';
 import type { RealmTransportTraits } from './kernel/net/transport.ts';
 import { RemoteUplink, type UplinkReply, type UplinkTraits } from './kernel/net/uplink.ts';
 import type { SealedHook } from './kernel/sealed.ts';
@@ -70,6 +71,7 @@ export interface InitRequest {
   protect?: ProtectInit;
   denials?: boolean;
   sealed?: boolean;
+  sealedFetch?: boolean;
   clipboard?: boolean;
   requests?: Record<string, EmbedderKindPolicy>;
   approve?: boolean;
@@ -141,7 +143,7 @@ export interface DialRequest {
 }
 
 export type AttestRequest =
-  | { id: number; op: 'attest'; path: string }
+  | { id: number; op: 'attest'; path: string; options?: AttestOptions }
   | { id: number; op: 'chmod'; path: string; mode: number }
   | { id: number; op: 'integrity-revoke'; path?: string }
   | { id: number; op: 'watch-files'; paths: string[] }
@@ -152,6 +154,7 @@ export interface FileChanged {
 }
 
 export type KernelRequest =
+  | { id: number; op: 'sealed-placeholders'; list: readonly string[] }
   | AttestRequest
   | InitRequest
   | RunRequest
@@ -397,14 +400,16 @@ function transferOf(req: KernelRequest, result: unknown): Transferable[] | undef
   if (result instanceof MessagePort) return [result];
   const bound = (result as { port?: unknown } | null)?.port;
   if (req.op === 'connect' && bound instanceof MessagePort) return [bound];
-  if (req.op === 'attest') return [(result as Attestation).bytes.buffer as ArrayBuffer];
+  if (req.op === 'attest' && 'bytes' in (result as object)) {
+    return [(result as Attestation).bytes.buffer as ArrayBuffer];
+  }
   return undefined;
 }
 
 function attestOps(port: KernelPort) {
   const watches = new Map<number, () => void>();
   return async (l: Launcher, req: AttestRequest): Promise<unknown> => {
-    if (req.op === 'attest') return l.attest(req.path);
+    if (req.op === 'attest') return l.attest(req.path, req.options);
     if (req.op === 'chmod') return l.fs.chmod(req.path, modeOption(req.mode)).then(() => true);
     if (req.op === 'integrity-revoke') return l.revokeIntegrity(req.path).then(() => true);
     if (req.op === 'unwatch-files') {
@@ -484,6 +489,7 @@ function hostOptions(
   req: InitRequest,
   port: KernelPort,
   sealed: SealedHook,
+  sealedFetch: SealedFetchHook,
   clipboard: ClipboardHook,
   lookup: IntegrityLookup,
   requests: ReturnType<typeof embedderAsker>
@@ -493,6 +499,7 @@ function hostOptions(
   users?: UsersMode;
   onDenial?: DenialHook;
   sealed?: SealedHook;
+  sealedFetch?: SealedFetchHook;
   clipboard?: ClipboardHook;
   embedder?: EmbedderHook;
   protect?: Protection;
@@ -506,6 +513,7 @@ function hostOptions(
     ...(req.denials ? { onDenial: (denial: Denial) => port.postMessage({ denial }) } : {}),
     ...(req.protect ? { protect: hostProtect(req.protect, lookup) } : {}),
     ...(req.sealed ? { sealed } : {}),
+    ...(req.sealedFetch ? { sealedFetch } : {}),
     ...(req.clipboard ? { clipboard } : {}),
     ...(req.requests ? { embedder: requests.hookFor(0, req.requests) } : {}),
   };
@@ -609,7 +617,15 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
         ...(req.modules ? { modules: req.modules } : {}),
         ...(req.commands ? { commands: req.commands } : {}),
         ...(req.env ? { env: req.env } : {}),
-        ...hostOptions(req, port, sealed.hook, clipboard.hook, integrity.lookup, requests),
+        ...hostOptions(
+          req,
+          port,
+          sealed.hook,
+          sealed.fetch,
+          clipboard.hook,
+          integrity.lookup,
+          requests
+        ),
         ...(req.approve ? { approve: approvals.ask } : {}),
         ...net,
         ...(media ? { media } : {}),
@@ -639,6 +655,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
   async function handle(req: KernelRequest): Promise<unknown> {
     if (req.op === 'init') return init(req);
     if (isAttestRequest(req)) return attestOp(await ready(), req);
+    if (req.op === 'sealed-placeholders') return (await ready()).setPlaceholders(req.list);
     if (req.op === 'open-terminal') return terminal(req);
     if (req.op === 'connect') return connect(req.user, req.tag, req.requests);
     if (isUsersRequest(req)) return usersOp(await ready(), req);

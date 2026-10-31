@@ -14,11 +14,14 @@ import {
 } from './kernel/net/uplink.ts';
 
 export { type CronClock, type FakeCronClock, fakeCronClock } from './cron/clock.ts';
+export { placeholderFloor } from './kernel/net/placeholder-floor.ts';
+export { sealedFetcher } from './kernel/net/sealed-fetch.ts';
 export {
   setTestSyscallHook,
   type TestSyscall,
   type TestSyscallHook,
 } from './kernel/test-hooks.ts';
+export { sealedAnswerer, sealedAsker } from './sealed-relay.ts';
 export type {
   NetworkUplink,
   ResolveAnswer,

@@ -8,6 +8,7 @@ import type { MessagePortLike } from './client/protocol.ts';
 import { type ServedClient, serveClient } from './client/serve-client.ts';
 import type { CronClock } from './cron/clock.ts';
 import type { FacadeSpecs } from './facade/types.ts';
+import type { Attestation, AttestTombstone } from './fs/attest.ts';
 import type { DenialHook } from './fs/dac.ts';
 import { OpfsFs } from './fs/opfs.ts';
 import type { Protection } from './fs/protect.ts';
@@ -17,6 +18,7 @@ import type {
   ConnectOptions,
   KernelGroups,
   KernelIntegrity,
+  KernelSealed,
   KernelUsers,
   RunOptions,
   RunResult,
@@ -27,8 +29,8 @@ import type { ClipboardHook } from './kernel/clipboard.ts';
 import { type EmbedderHook, kindsOf } from './kernel/embedder.ts';
 import type { WasmWorkerLike } from './kernel/host.ts';
 import type { RouteTable } from './kernel/net/routes.ts';
+import { type SealedOption, sealedHooks } from './kernel/net/sealed-fetch.ts';
 import type { NetworkUplink } from './kernel/net/uplink.ts';
-import type { SealedHook } from './kernel/sealed.ts';
 import { quiet, signalField } from './kernel/signals.ts';
 import { Launcher, tagOption } from './launcher.ts';
 import type { FetchLike, HostfsGrantHook } from './mount/hostfs.ts';
@@ -68,12 +70,14 @@ export type {
   FacadeSpec,
   FacadeSpecs,
 } from './facade/types.ts';
+export type { Attestation, AttestedDir, AttestOptions, AttestTombstone } from './fs/attest.ts';
 export type { Denial, DenialHook } from './fs/dac.ts';
 export type {
   ConnectOptions,
   Ended,
   KernelGroups,
   KernelIntegrity,
+  KernelSealed,
   KernelUsers,
   NetworkUplink,
   ResolveAnswer,
@@ -93,6 +97,12 @@ export type {
   EmbedderRequest,
   EmbedderStamp,
 } from './kernel/embedder.ts';
+export {
+  SEALED_FETCH_VERSION,
+  type SealedFetchHook,
+  type SealedFetchRequest,
+  type SealedOption,
+} from './kernel/net/sealed-fetch.ts';
 export type {
   SealedAbortReason,
   SealedCaller,
@@ -132,7 +142,7 @@ export interface NodeKernelOptions {
   hostname?: string;
   users?: UsersMode;
   onDenial?: DenialHook;
-  sealed?: SealedHook;
+  sealed?: SealedOption;
   clipboard?: ClipboardHook;
   requests?: EmbedderHook;
   approve?: ApproveHook;
@@ -152,6 +162,9 @@ export interface NodeKernel {
   readFile(path: string): Promise<Uint8Array>;
   chmod(path: string, mode: number): Promise<void>;
   readonly integrity: KernelIntegrity;
+  readonly sealed: KernelSealed;
+  attest(path: string): Promise<Attestation>;
+  attest(path: string, options: { absent: 'allow' }): Promise<Attestation | AttestTombstone>;
   connect(options?: ConnectOptions): Promise<MessagePort>;
   readonly users: KernelUsers;
   readonly groups: KernelGroups;
@@ -544,6 +557,7 @@ function checkedRequests(hook: EmbedderHook): EmbedderHook {
 }
 
 export async function createNodeKernel(options: NodeKernelOptions = {}): Promise<NodeKernel> {
+  const hooks = sealedHooks(options.sealed);
   const root = options.root ?? memoryRoot();
   const fs = new OpfsFs(root, undefined, undefined, { ranged: isMemoryRoot(root) });
   await fs.reconcile();
@@ -584,7 +598,8 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     users: options.users === undefined ? DEFAULT_USERS : options.users,
     ...(options.onDenial ? { onDenial: options.onDenial } : {}),
     ...(options.protect ? { protect: options.protect } : {}),
-    ...(options.sealed ? { sealed: options.sealed } : {}),
+    ...(hooks.request ? { sealed: hooks.request } : {}),
+    ...(hooks.fetch ? { sealedFetch: hooks.fetch } : {}),
     ...(options.clipboard ? { clipboard: options.clipboard } : {}),
     ...(options.requests ? { embedder: checkedRequests(options.requests) } : {}),
     ...(options.approve ? { approve: options.approve } : {}),
@@ -666,6 +681,9 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     },
     chmod: async (path, mode) => launcher.fs.chmod(path, modeOption(mode)),
     integrity: { revoke: (path) => guard(() => launcher.revokeIntegrity(path)) },
+    sealed: { setPlaceholders: (list) => guard(async () => launcher.setPlaceholders(list)) },
+    attest: ((path, attestOptions) =>
+      guard(() => launcher.attest(path, attestOptions))) as NodeKernel['attest'],
     readFile: async (path) => launcher.fs.readFileBuffer(path),
     mount: (spec) => guard(() => launcher.mount(spec)),
     umount: (target) => guard(async () => launcher.umount(target)),
@@ -698,6 +716,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
       for (const reject of [...pending]) reject(new Error(TERMINATED));
       for (const kill of [...live]) kill();
       launcher.cdp.close();
+      launcher.endFills();
       launcher.unmountAll();
       dropCache(cache);
     },

@@ -22,7 +22,14 @@ import { type CronLocks, CronService } from './cron/service.ts';
 import { FacadeHosts } from './facade/hosts.ts';
 import type { FacadeSpecs } from './facade/types.ts';
 import { access, R_OK, X_OK } from './fs/access.ts';
-import { type Attestation, attest, FileWatches, type RemoteFs } from './fs/attest.ts';
+import {
+  type Attestation,
+  type AttestOptions,
+  type AttestTombstone,
+  attest,
+  FileWatches,
+  type RemoteFs,
+} from './fs/attest.ts';
 import { FileChanges } from './fs/changes.ts';
 import { type EntryTarget, followLinks, withCommandDirs } from './fs/commands.ts';
 import { Dac, type DenialHook, type Guard, need, readable, TTY_MODE } from './fs/dac.ts';
@@ -104,11 +111,13 @@ import {
   packageTlsRoots,
   writeCaFile,
 } from './kernel/net/network.ts';
-import { placeholderFloor } from './kernel/net/placeholder-floor.ts';
+import { type PlaceholderFill, placeholderFloor } from './kernel/net/placeholder-floor.ts';
+import { REALM_PROXY_PORT } from './kernel/net/proxy-service.ts';
 import type { CaStore, RealmCa } from './kernel/net/realm-ca.ts';
 import { replayingHops } from './kernel/net/redirect-hops.ts';
 import { Resolver } from './kernel/net/resolver.ts';
 import { Routes, type RouteTable } from './kernel/net/routes.ts';
+import { type SealedFetchHook, sealedFetcher } from './kernel/net/sealed-fetch.ts';
 import type { RealmTransport } from './kernel/net/transport.ts';
 import type { NetworkUplink } from './kernel/net/uplink.ts';
 import { PackageSwaps } from './kernel/package-swaps.ts';
@@ -217,6 +226,7 @@ export interface LauncherOptions {
   wasmMemories?: { ceiling?: number; idleMs?: number };
   onDenial?: DenialHook;
   sealed?: SealedHook;
+  sealedFetch?: SealedFetchHook;
   clipboard?: ClipboardHook;
   embedder?: EmbedderHook;
   approve?: ApproveHook;
@@ -823,6 +833,9 @@ export class Launcher {
   readonly usersMode: UsersMode;
   readonly dac: Dac | undefined;
   private readonly sealed: SealedBroker;
+  private fill: PlaceholderFill | undefined;
+  private readonly fills = new AbortController();
+  private placeholders: readonly string[] = [];
   private readonly scrubs = new Map<number, Scrubber[]>();
   private readonly clipboard: ClipboardBroker;
   readonly embedder: EmbedderBroker;
@@ -900,7 +913,7 @@ export class Launcher {
       ...options.env,
     };
     this.ca = kernelCa(options.caStore ?? memoryCaStore());
-    this.transport = placeholderFloor(replayingHops(options.transport ?? missingTransport()));
+    this.transport = this.floored(options);
     this.announcedTraits = JSON.stringify(this.transport.traits);
     this.uplink = options.uplink;
     this.routes = new Routes(options.uplink?.traits.ipv6 === true);
@@ -2158,6 +2171,24 @@ export class Launcher {
     return this.jobs.sessionOf(pgid);
   }
 
+  private floored(options: LauncherOptions): RealmTransport {
+    const { sealedFetch } = options;
+    this.fill =
+      sealedFetch && this.usersMode === 'enforce'
+        ? sealedFetcher(sealedFetch, this.fills.signal)
+        : undefined;
+    if (this.fill) this.net.stampProxy(REALM_PROXY_PORT);
+    return placeholderFloor(replayingHops(options.transport ?? missingTransport()), {
+      known: () => this.placeholders,
+      ...(this.fill ? { fill: this.fill } : {}),
+    });
+  }
+
+  private httpFor(pid: number): HttpHandles {
+    const stamp = this.fill ? () => this.liveStamp(pid) : undefined;
+    return new HttpHandles(this.transport, pid, this.loopbackFor(pid), stamp);
+  }
+
   private loopbackFor(pid: number): KernelLoopback {
     return new KernelLoopback(
       this.net,
@@ -2165,7 +2196,7 @@ export class Launcher {
         const cred = this.credOf(pid);
         return { pid, uid: cred.euid, gid: cred.egid };
       },
-      () => this.connectorStamp(pid)
+      () => this.liveStamp(pid)
     );
   }
 
@@ -2348,7 +2379,7 @@ export class Launcher {
       jobs: this.jobs,
       ptys: this.ptys,
       net: this.net,
-      http: new HttpHandles(this.transport, pid, this.loopbackFor(pid)),
+      http: this.httpFor(pid),
       locks: this.locks,
       fifos: this.fifos,
       sems: this.sems,
@@ -2692,6 +2723,22 @@ export class Launcher {
 
   connectorStamp(pid: number): Promise<SealedCaller> {
     return this.sealed.stamp(this.identityOf(pid), this.credOf(pid), this.tagsOf(pid));
+  }
+
+  async liveStamp(pid: number): Promise<SealedCaller | undefined> {
+    if (!this.creds.has(pid) || this.zombies.has(pid)) return undefined;
+    return this.connectorStamp(pid);
+  }
+
+  setPlaceholders(list: readonly string[]): void {
+    if (!Array.isArray(list) || !list.every((p) => typeof p === 'string' && p !== '')) {
+      throw fsError('EINVAL', 'setPlaceholders takes a list of non-empty strings');
+    }
+    this.placeholders = [...list];
+  }
+
+  endFills(): void {
+    this.fills.abort('terminated');
   }
 
   private identityOf(pid: number): { pid: number; ppid: number } {
@@ -3038,8 +3085,9 @@ export class Launcher {
     this.resetCatalogs();
   }
 
-  attest(path: string): Promise<Attestation> {
+  attest(path: string, options: AttestOptions = {}): Promise<Attestation | AttestTombstone> {
     return attest(this.rootFs, path, {
+      ...options,
       users: this.usersMode,
       mounts: this.mounts
         .list()

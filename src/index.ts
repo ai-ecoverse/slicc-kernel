@@ -12,7 +12,7 @@ import { clipboardAnswerer } from './clipboard-relay.ts';
 import { embedderAnswerer } from './embedder-relay.ts';
 import { type FacadeOpen, serveFacadePort } from './facade/port.ts';
 import type { FacadeSpecs } from './facade/types.ts';
-import type { Attestation } from './fs/attest.ts';
+import type { Attestation, AttestOptions, AttestTombstone } from './fs/attest.ts';
 import type { Denial, DenialHook } from './fs/dac.ts';
 import { integrityOptions } from './fs/integrity.ts';
 import { type Protection, protectInit } from './fs/protect.ts';
@@ -23,13 +23,13 @@ import { type EmbedderHook, kindsOf } from './kernel/embedder.ts';
 import { isHostname } from './kernel/net/loopback-names.ts';
 import type { TransportCall } from './kernel/net/remote-transport.ts';
 import type { RouteTable } from './kernel/net/routes.ts';
+import { type SealedOption, sealedHooks } from './kernel/net/sealed-fetch.ts';
 import {
   carriesUdp,
   type NetworkUplink,
   serveUplink,
   type UplinkCall,
 } from './kernel/net/uplink.ts';
-import type { SealedHook } from './kernel/sealed.ts';
 import { quiet, signalField } from './kernel/signals.ts';
 import type { PendingMedium } from './launcher.ts';
 import type { MediumHandle } from './mount/fsa.ts';
@@ -70,7 +70,7 @@ export type {
   FacadeSpec,
   FacadeSpecs,
 } from './facade/types.ts';
-export type { Attestation, AttestedDir } from './fs/attest.ts';
+export type { Attestation, AttestedDir, AttestOptions, AttestTombstone } from './fs/attest.ts';
 export type { Denial, DenialHook } from './fs/dac.ts';
 export type { ClipboardHook, ClipboardStamp } from './kernel/clipboard.ts';
 export type {
@@ -81,6 +81,12 @@ export type {
   EmbedderStamp,
 } from './kernel/embedder.ts';
 export type { RouteTable } from './kernel/net/routes.ts';
+export {
+  SEALED_FETCH_VERSION,
+  type SealedFetchHook,
+  type SealedFetchRequest,
+  type SealedOption,
+} from './kernel/net/sealed-fetch.ts';
 export type {
   NetworkUplink,
   ResolveAnswer,
@@ -189,7 +195,7 @@ export interface KernelOptions {
   hostname?: string;
   users?: UsersMode;
   onDenial?: DenialHook;
-  sealed?: SealedHook;
+  sealed?: SealedOption;
   clipboard?: ClipboardHook;
   requests?: EmbedderHook;
   approve?: ApproveHook;
@@ -248,6 +254,10 @@ export interface KernelIntegrity {
   revoke(path?: string): Promise<void>;
 }
 
+export interface KernelSealed {
+  setPlaceholders(list: readonly string[]): Promise<void>;
+}
+
 export interface Kernel {
   run(argv: string[], options?: RunOptions): Promise<RunResult>;
   openTerminal(argv: string[], options?: TerminalOptions): Promise<Terminal>;
@@ -257,6 +267,7 @@ export interface Kernel {
   setRoutes(routes: RouteTable): Promise<void>;
   chmod(path: string, mode: number): Promise<void>;
   readonly integrity: KernelIntegrity;
+  readonly sealed: KernelSealed;
   updateTransportTraits(): Promise<boolean>;
   dial(options: DialOptions): Promise<DialledSocket>;
   loopbackFetch(input: RequestInfo | URL, options: LoopbackFetchOptions): Promise<Response>;
@@ -265,6 +276,7 @@ export interface Kernel {
   mounts(): Promise<MountEntry[]>;
   insert(target: string, handle: FileSystemDirectoryHandle): Promise<void>;
   attest(path: string): Promise<Attestation>;
+  attest(path: string, options: { absent: 'allow' }): Promise<Attestation | AttestTombstone>;
   watch(paths: string[], onChange: (path: string) => void): Promise<() => void>;
   terminate(): void;
 }
@@ -361,6 +373,7 @@ function uplinkInit(uplink: NetworkUplink | undefined): Pick<InitRequest, 'uplin
 }
 
 function initCall(options: KernelOptions, transport: NetworkTransport | undefined): KernelCall {
+  const hooks = sealedHooks(options.sealed);
   return {
     op: 'init',
     ...(options.root ? { root: options.root } : {}),
@@ -379,7 +392,8 @@ function initCall(options: KernelOptions, transport: NetworkTransport | undefine
     ...(options.hostname !== undefined ? { hostname: options.hostname } : {}),
     users: options.users === undefined ? DEFAULT_USERS : options.users,
     ...(options.onDenial ? { denials: true } : {}),
-    ...(options.sealed ? { sealed: true } : {}),
+    ...(hooks.request ? { sealed: true } : {}),
+    ...(hooks.fetch ? { sealedFetch: true } : {}),
     ...(options.clipboard ? { clipboard: true } : {}),
     ...(options.requests ? { requests: kindsOf(options.requests) } : {}),
     ...(options.approve ? { approve: true } : {}),
@@ -591,6 +605,7 @@ function checkOptions(options: KernelOptions): void {
   if (options.protect) protectInit(options.protect);
   integrityOptions(options.protect?.integrity);
   facadesInit(options.facades);
+  sealedHooks(options.sealed);
 }
 
 function connector(
@@ -619,7 +634,8 @@ function hookRelays(
   options: KernelOptions,
   bound: Map<number, EmbedderHook>
 ): { handle(data: unknown): boolean; close(): void } {
-  const sealed = sealedAnswerer(worker, options.sealed);
+  const hooks = sealedHooks(options.sealed);
+  const sealed = sealedAnswerer(worker, hooks.request, hooks.fetch);
   const clipboard = clipboardAnswerer(worker, options.clipboard);
   const integrity = integrityAnswerer(worker, options.protect?.integrity?.lookup);
   const requests = embedderAnswerer(worker, (client) =>
@@ -672,6 +688,23 @@ function traitsUpdater(
   };
 }
 
+function transportBridge(
+  worker: Worker,
+  transport: NetworkTransport | undefined
+): ReturnType<typeof serveTransport> | undefined {
+  return transport ? serveTransport(worker, transport, { attributed: true }) : undefined;
+}
+
+function pageOnly(call: (req: KernelCall) => Promise<unknown>): Pick<Kernel, 'attest' | 'sealed'> {
+  return {
+    sealed: {
+      setPlaceholders: async (list) => void (await call({ op: 'sealed-placeholders', list })),
+    },
+    attest: ((path: string, options?: AttestOptions) =>
+      call({ op: 'attest', path, ...(options ? { options } : {}) })) as Kernel['attest'],
+  };
+}
+
 export async function createKernel(options: KernelOptions = {}): Promise<Kernel> {
   checkOptions(options);
   const url = options.worker ?? new URL('./kernel-worker.js', import.meta.url);
@@ -703,7 +736,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     pending.clear();
   };
   const transport = options.network?.transport;
-  const bridge = transport ? serveTransport(worker, transport) : undefined;
+  const bridge = transportBridge(worker, transport);
   const uplinks = uplinkServer(worker, options.network?.uplink);
   async function chosen(handle: MediumHandle | undefined): Promise<FileSystemDirectoryHandle> {
     if (handle) {
@@ -842,7 +875,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     umount: async (target) => void (await call({ op: 'umount', target })),
     mounts: async () => (await call({ op: 'mounts' })) as MountEntry[],
     insert: async (target, handle) => void (await call({ op: 'insert', target, handle })),
-    attest: async (path) => (await call({ op: 'attest', path })) as Attestation,
+    ...pageOnly(call),
     watch: files.watch,
     terminate() {
       fail(new Error('slicc-kernel terminated'));

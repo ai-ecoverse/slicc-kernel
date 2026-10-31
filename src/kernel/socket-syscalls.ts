@@ -307,7 +307,7 @@ async function connect(
   }
   const path = filePath(req.addr);
   const name = path !== undefined ? await proc.names?.find(path) : undefined;
-  const stamp = proc.net.facadeAt(req.addr) && (await proc.stamp?.());
+  const stamp = proc.net.stampsPeers(req.addr) && (await proc.stamp?.());
   const dialing = target.connect(req.addr, true, proc.cred?.(), stamp || undefined, true, name);
   if (req.nonblock) {
     dialing?.catch(() => undefined);
@@ -451,7 +451,7 @@ async function secureConnect(
       delete req.clientCert;
       throw new KernelError('ENOTSUP');
     }
-    return { ...tlsOverTransport(req, proc), path: 'transport', substitutes: true };
+    return { ...(await tlsOverTransport(req, proc)), path: 'transport', substitutes: true };
   }
   const socket = proc.net.socket('inet');
   const fd = proc.fds.install(new OpenFile(socket), 3);
@@ -472,10 +472,10 @@ async function uplinked(proc: SocketProcess, host: string): Promise<boolean> {
   }
 }
 
-function tlsOverTransport(
+async function tlsOverTransport(
   req: Extract<SocketSyscall, { op: 'sock-tls' }>,
   proc: SocketProcess
-): { fd: number; alpnProtocol: string; servername: string } {
+): Promise<{ fd: number; alpnProtocol: string; servername: string }> {
   if (req.ca) throw new KernelError('ENOTSUP');
   if (req.alpn && req.alpn.length > 0 && !req.alpn.includes('http/1.1')) {
     throw new KernelError('EPROTONOSUPPORT');
@@ -489,7 +489,9 @@ function tlsOverTransport(
   const host =
     servername.includes(':') && !servername.startsWith('[') ? `[${servername}]` : servername;
   const origin = req.port === 443 ? `https://${host}` : `https://${host}:${req.port}`;
+  const stamp = proc.net.originsStamped ? await proc.stamp?.() : undefined;
   const [mine, theirs] = KernelSocket.pair(proc.net, 'inet', proc.cred?.());
+  theirs.peerStamp = stamp;
   mine.peer = { family: 'inet', host: req.host, port: req.port };
   try {
     proc.net.serveOrigin(theirs, origin);
