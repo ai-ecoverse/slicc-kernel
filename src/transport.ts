@@ -78,6 +78,12 @@ async function* chunks(
   }
 }
 
+function sentHeaders(headers: HeaderList, inPage: boolean): Headers {
+  const out = joinHeaders(headers);
+  if (inPage) out.delete('user-agent');
+  return out;
+}
+
 function streamOf(body: AsyncIterable<Uint8Array>): ReadableStream<Uint8Array> {
   const it = body[Symbol.asyncIterator]();
   return new ReadableStream<Uint8Array>(
@@ -110,6 +116,7 @@ export function fetchTransport(options: FetchTransportOptions = {}): RealmTransp
       : options.webSocket || undefined;
   const headers = options.webSocketHeaders === true;
   const instance = options.redirect ?? 'follow';
+  const inPage = !options.fetch && 'location' in globalThis;
   return {
     traits: {
       manualRedirects: instance === 'manual',
@@ -126,7 +133,7 @@ export function fetchTransport(options: FetchTransportOptions = {}): RealmTransp
       try {
         response = await send(request.url, {
           method: request.method,
-          headers: joinHeaders(request.headers),
+          headers: sentHeaders(request.headers, inPage),
           ...requestBody(request),
           signal: request.signal,
           redirect: request.redirect ?? instance,
