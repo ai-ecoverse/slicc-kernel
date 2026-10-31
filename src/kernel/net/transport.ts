@@ -1,10 +1,12 @@
 export type HeaderList = ReadonlyArray<readonly [name: string, value: string]>;
+export type RealmRedirectPolicy = 'follow' | 'manual' | 'error';
 export interface RealmTransportRequest {
   url: string;
   method: string;
   headers: HeaderList;
   body?: Uint8Array;
   bodyStream?: AsyncIterable<Uint8Array>;
+  redirect?: RealmRedirectPolicy;
   signal: AbortSignal;
 }
 export interface RealmRedirectHop {
@@ -16,6 +18,7 @@ export interface RealmTransportResponse {
   url?: string;
   redirected?: boolean;
   redirects?: readonly RealmRedirectHop[];
+  opaqueRedirect?: true;
   status: number;
   statusText: string;
   headers: HeaderList;
@@ -36,6 +39,7 @@ export interface RealmTransportTraits {
   websocket?: true;
   streamingBodies?: true;
   redirectHops?: true;
+  redirectPolicy?: true;
   exit?: RealmTransportExit;
   [trait: string]: unknown;
 }

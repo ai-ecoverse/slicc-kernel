@@ -1,6 +1,7 @@
 import type {
   HeaderList,
   RealmRedirectHop,
+  RealmRedirectPolicy,
   RealmTransport,
   RealmTransportRequest,
   RealmTransportResponse,
@@ -20,6 +21,7 @@ export type TransportCall =
       headers: HeaderList;
       body?: Uint8Array;
       streamed?: true;
+      redirect?: RealmRedirectPolicy;
     }
   | { net: 'body-chunk'; nid: number; bytes: Uint8Array }
   | { net: 'body-end'; nid: number }
@@ -41,6 +43,7 @@ export type TransportReply =
       url?: string;
       redirected?: boolean;
       redirects?: readonly RealmRedirectHop[];
+      opaqueRedirect?: true;
     }
   | { net: 'chunk'; nid: number; bytes: Uint8Array }
   | { net: 'body-pull'; nid: number }
@@ -73,6 +76,21 @@ export class TransportError extends Error {
     this.code = code;
     this.detail = detail === 'transport' ? detail : undefined;
   }
+}
+
+export function unfollowed(redirect?: RealmRedirectPolicy): boolean {
+  return redirect !== undefined && redirect !== 'follow';
+}
+
+function honors(traits: RealmTransportTraits, redirect?: RealmRedirectPolicy): boolean {
+  if (traits.redirectPolicy === true) return true;
+  const hops = traits.redirectHops as unknown;
+  const raw = traits.manualRedirects === true && (hops === undefined || hops === false);
+  return redirect === 'manual' && raw;
+}
+
+function refused(message: string): TransportError {
+  return new TransportError(message, 502, undefined, 'transport');
 }
 
 interface Waiter {
@@ -183,8 +201,11 @@ export class RemoteTransport implements RealmTransport {
 
   async fetch(request: RealmTransportRequest): Promise<RealmTransportResponse> {
     const nid = ++this.nextId;
-    const { signal } = request;
+    const { signal, redirect } = request;
     signal.throwIfAborted();
+    if (unfollowed(redirect) && !honors(this.traits, redirect)) {
+      throw refused(`this transport cannot honor redirect: ${redirect}`);
+    }
     let finished = false;
     const abort = () => {
       finished = true;
@@ -212,15 +233,14 @@ export class RemoteTransport implements RealmTransport {
           : request.body
             ? { body: request.body }
             : {}),
+        ...(redirect !== undefined ? { redirect } : {}),
       });
     } catch (e) {
       finish();
       throw e;
     }
-    const { status, statusText, headers, url, redirected, redirects } = head as Extract<
-      TransportReply,
-      { net: 'head' }
-    >;
+    const { status, statusText, headers, url, redirected, redirects, opaqueRedirect } =
+      head as Extract<TransportReply, { net: 'head' }>;
     const read = async (): Promise<Uint8Array | undefined> => {
       if (finished) return undefined;
       const reply = await this.ask({ net: 'read', nid }).catch((e: unknown) => {
@@ -236,9 +256,15 @@ export class RemoteTransport implements RealmTransport {
       finish();
       this.cancel(nid);
     };
+    if (unfollowed(redirect) && (redirected || redirects?.length)) {
+      await cancel();
+      throw refused(`this transport followed a redirect despite redirect: ${redirect}`);
+    }
     return {
-      ...(redirected ? { url, redirected } : {}),
+      ...(url !== undefined ? { url } : {}),
+      ...(redirected !== undefined ? { redirected } : {}),
       ...(redirects ? { redirects } : {}),
+      ...(opaqueRedirect ? { opaqueRedirect } : {}),
       status,
       statusText,
       headers,
