@@ -4,6 +4,7 @@ import type { TransportCall, TransportReply } from './kernel/net/remote-transpor
 import type {
   HeaderList,
   RealmRedirectHop,
+  RealmRedirectPolicy,
   RealmTransport,
   RealmTransportExit,
   RealmTransportRequest,
@@ -18,6 +19,7 @@ import { openWebSocket, type WebSocketConstructor } from './websocket-transport.
 export type {
   HeaderList,
   RealmRedirectHop as NetworkRedirectHop,
+  RealmRedirectPolicy as NetworkRedirectPolicy,
   RealmTransport as NetworkTransport,
   RealmTransportExit as NetworkExit,
   RealmTransportRequest as NetworkRequest,
@@ -107,10 +109,11 @@ export function fetchTransport(options: FetchTransportOptions = {}): RealmTransp
       ? (globalThis as { WebSocket?: WebSocketConstructor }).WebSocket
       : options.webSocket || undefined;
   const headers = options.webSocketHeaders === true;
-  const redirect = options.redirect ?? 'follow';
+  const instance = options.redirect ?? 'follow';
   return {
     traits: {
-      manualRedirects: redirect === 'manual',
+      manualRedirects: instance === 'manual',
+      redirectPolicy: true,
       encodedBodies: false,
       maxRequestBody: options.maxRequestBody ?? MAX_REQUEST_BODY,
       crossOrigin: 'cors',
@@ -126,7 +129,7 @@ export function fetchTransport(options: FetchTransportOptions = {}): RealmTransp
           headers: joinHeaders(request.headers),
           ...requestBody(request),
           signal: request.signal,
-          redirect,
+          redirect: request.redirect ?? instance,
           credentials: 'omit',
           mode: 'cors',
         });
@@ -150,6 +153,7 @@ export function fetchTransport(options: FetchTransportOptions = {}): RealmTransp
       const body = chunks(response.body, options.bodyIdleMs ?? BODY_IDLE_MS);
       return {
         ...(response.redirected ? { url: response.url, redirected: true } : {}),
+        ...(response.type === 'opaqueredirect' ? { opaqueRedirect: true as const } : {}),
         status: response.status,
         statusText: response.statusText,
         headers,
@@ -204,6 +208,20 @@ function uploadsFor(peer: TransportPeer) {
   return { of, answer: (call: TransportCall) => pulls.get(call.nid)?.(call) };
 }
 
+function headOf(nid: number, response: RealmTransportResponse): TransportReply {
+  return {
+    net: 'head',
+    nid,
+    ...(response.url !== undefined ? { url: response.url } : {}),
+    ...(response.redirected !== undefined ? { redirected: response.redirected } : {}),
+    ...(response.redirects ? { redirects: response.redirects } : {}),
+    ...(response.opaqueRedirect ? { opaqueRedirect: true } : {}),
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  };
+}
+
 export function serveTransport(
   peer: TransportPeer,
   transport: RealmTransport,
@@ -240,6 +258,7 @@ export function serveTransport(
           : call.body
             ? { body: call.body }
             : {}),
+        ...(call.redirect !== undefined ? { redirect: call.redirect } : {}),
         signal: abort.signal,
       });
       if (!open.has(call.nid)) {
@@ -247,15 +266,7 @@ export function serveTransport(
         return;
       }
       open.set(call.nid, { abort, body: response.body[Symbol.asyncIterator](), response });
-      peer.postMessage({
-        net: 'head',
-        nid: call.nid,
-        ...(response.redirected ? { url: response.url, redirected: true } : {}),
-        ...(response.redirects ? { redirects: response.redirects } : {}),
-        status: response.status,
-        statusText: response.statusText,
-        headers: response.headers,
-      });
+      peer.postMessage(headOf(call.nid, response));
     } catch (e) {
       fail(call.nid, e);
     }

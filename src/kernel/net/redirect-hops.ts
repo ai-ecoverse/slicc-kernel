@@ -100,6 +100,7 @@ export function replayingHops(inner: RealmTransport, heldMs = HELD_MS): RealmTra
     },
     ...(inner.websocket ? { websocket: inner.websocket.bind(inner) } : {}),
     async fetch(request: RealmTransportRequest, caller?: number): Promise<RealmTransportResponse> {
+      if (request.redirect) return inner.fetch(request, caller);
       const owner = caller ?? KERNEL;
       const key = keyOf(owner, request.method, request.url);
       const waiting = held.get(key);

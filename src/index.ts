@@ -154,6 +154,7 @@ export {
   fetchTransport,
   type HeaderList,
   type NetworkExit,
+  type NetworkRedirectPolicy,
   type NetworkRequest,
   type NetworkResponse,
   type NetworkTraits,
