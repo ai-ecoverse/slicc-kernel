@@ -12,6 +12,7 @@ import type { IntegrityLookup } from './fs/integrity.ts';
 import { META_DB, type MetaStore } from './fs/meta.ts';
 import { dirsChannel } from './fs/notice.ts';
 import { OpfsFs } from './fs/opfs.ts';
+import { clonable, directoryAt, type Portable } from './fs/portable.ts';
 import { type ProtectInit, type Protection, protectInit } from './fs/protect.ts';
 import { metadataName } from './fs/roots.ts';
 import { fsError, modeOption, type UsersMode } from './fs/types.ts';
@@ -33,6 +34,7 @@ import {
   Launcher,
   type LauncherOptions,
   type ModuleUrlMaker,
+  type PendingMedium,
   type RunOptions,
   type TerminalOptions,
   type TerminalSession,
@@ -56,6 +58,7 @@ export interface InitRequest {
   id: number;
   op: 'init';
   root?: FileSystemDirectoryHandle;
+  rootPath?: string[];
   modules?: string;
   commands?: { append?: readonly string[] };
   env?: Record<string, string>;
@@ -133,7 +136,7 @@ export type MountRequest =
   | { id: number; op: 'mount'; spec: MountSpec }
   | { id: number; op: 'umount'; target: string }
   | { id: number; op: 'mounts' }
-  | { id: number; op: 'insert'; target: string; source?: string; handle: MediumHandle };
+  | ({ id: number; op: 'insert'; target: string; source?: string } & Portable<MediumHandle>);
 
 export interface DialRequest {
   id: number;
@@ -195,10 +198,28 @@ async function rootNamed(
   req: InitRequest,
   root: FileSystemDirectoryHandle
 ): Promise<InitRequest> {
-  if (req.metadata !== undefined || !req.root || !deps.rootId) return req;
+  if (req.metadata !== undefined || (!req.root && !req.rootPath) || !deps.rootId) return req;
   const top = await deps.storage().catch(() => undefined);
   const name = await metadataName(top, root, deps.rootId);
   return name === META_DB ? req : { ...req, metadata: name };
+}
+
+async function rootOf(deps: ServeDeps, req: InitRequest): Promise<FileSystemDirectoryHandle> {
+  if (req.root) return req.root;
+  const top = await deps.storage();
+  return req.rootPath ? directoryAt(top, req.rootPath) : top;
+}
+
+type InsertRequest = Extract<MountRequest, { op: 'insert' }>;
+
+async function insertedHandle(deps: ServeDeps, req: InsertRequest): Promise<MediumHandle> {
+  return 'path' in req ? directoryAt(await deps.storage(), req.path) : req.handle;
+}
+
+export function crossable(medium: PendingMedium): PendingMedium {
+  if (!medium.handle || clonable(medium.handle)) return medium;
+  const { handle: _, ...rest } = medium;
+  return rest;
 }
 
 export interface ServeDeps {
@@ -601,7 +622,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
   }
 
   async function init(req: InitRequest): Promise<boolean> {
-    launcher = (req.root ? Promise.resolve(req.root) : deps.storage()).then(async (root) => {
+    launcher = rootOf(deps, req).then(async (root) => {
       req = await rootNamed(deps, req, root);
       const name = req.metadata ?? META_DB;
       const { meta, media } = await stores(deps, name, req.media);
@@ -629,7 +650,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
         ...(req.approve ? { approve: approvals.ask } : {}),
         ...net,
         ...(media ? { media } : {}),
-        onMountPending: (medium) => port.postMessage({ medium }),
+        onMountPending: (medium) => port.postMessage({ medium: crossable(medium) }),
         ...(req.hostfs ? { hostfs: askGrant } : {}),
         ...pageHooks(req, port),
         ...mountPolicy(req.processMounts),
@@ -646,7 +667,8 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
     const l = await ready();
     if (req.op === 'mount') return l.mount(req.spec);
     if (req.op === 'umount') return l.umount(req.target);
-    if (req.op === 'insert') return l.insert(req.target, req.handle, req.source);
+    if (req.op === 'insert')
+      return l.insert(req.target, await insertedHandle(deps, req), req.source);
     return l.mounts.listed();
   }
 

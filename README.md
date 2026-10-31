@@ -25,7 +25,7 @@ TypeScript declarations ship in `dist/types/`, and each entry (`.`, `./node`, `.
 
 | option | default | |
 | --- | --- | --- |
-| `root` | `navigator.storage.getDirectory()` | the `FileSystemDirectoryHandle` that becomes `/` |
+| `root` | `navigator.storage.getDirectory()` | the `FileSystemDirectoryHandle` that becomes `/`. WebKit cannot clone a handle, so there it must lie in OPFS, and the kernel worker reopens it by path |
 | `modules` | `'/node_modules'` | where installed packages are scanned for commands |
 | `commands` | none | `{ append: ['/opt/user/node_modules'] }`: more `node_modules` directories scanned for commands after all the others, so they never shadow one (see [Commands](#commands)) |
 | `env` | `{}` | environment added to every run |
@@ -915,6 +915,7 @@ An `fsa` mount is a drive for a local folder, from the File System Access API, a
 - **Insert request:** at the same time the kernel calls the page's `onMountPending({ target, source, insert })`, so the page can show "Insert a folder for /mnt/x" with a button.
 - **Inserting:** calling `insert()` from that button's click picks the folder with `requestDirectory()`, or asks for permission again on a folder the drive had before. The medium goes in without a remount, and the state becomes `ok`. `kernel.insert(target, handle)` inserts a handle the page already has.
 - **Persistence:** the drive's source is `fsa:<id>`, and the kernel keeps the folder's handle under that id in IndexedDB (`<metadata>:media`). Mounting `fsa:<id>` again, after a reboot too, inserts the folder at once while its permission holds, and asks again when it is back to `prompt`. In an Incognito window Chrome crashes a page that reads a folder handle back from IndexedDB ([#95](https://github.com/ai-ecoverse/slicc-kernel/issues/95)). Pass `media: false` there: the kernel then never opens the handle database, and keeps the handles in memory, so a remount finds its folder only within the same kernel, while POSIX metadata still persists. `metadata: false` keeps the handles in memory too.
+- **WebKit:** it has no folder picker and cannot clone a handle or keep one in IndexedDB, so a folder must lie in OPFS. The page sends its path, the kernel worker reopens it, and the media store keeps the path.
 - **Ejecting:** `umount` ejects. So does the permission going away: the next operation fails with `ENOMEDIUM` and the kernel asks again. The folder is untouched either way.
 - **Limits:** the folder has no symlinks or modes, and `df` reports no size for it either.
 
