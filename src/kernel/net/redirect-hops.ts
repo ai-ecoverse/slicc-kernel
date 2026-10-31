@@ -99,7 +99,8 @@ export function replayingHops(inner: RealmTransport, heldMs = HELD_MS): RealmTra
       return { ...inner.traits, manualRedirects: true };
     },
     ...(inner.websocket ? { websocket: inner.websocket.bind(inner) } : {}),
-    async fetch(request: RealmTransportRequest, owner = KERNEL): Promise<RealmTransportResponse> {
+    async fetch(request: RealmTransportRequest, caller?: number): Promise<RealmTransportResponse> {
+      const owner = caller ?? KERNEL;
       const key = keyOf(owner, request.method, request.url);
       const waiting = held.get(key);
       if (waiting && waiting.fingerprint === fingerprint(request.headers)) {
@@ -108,7 +109,7 @@ export function replayingHops(inner: RealmTransport, heldMs = HELD_MS): RealmTra
         return replay(waiting);
       }
       if (waiting) drop(key);
-      const response = await inner.fetch(request);
+      const response = await inner.fetch(request, caller);
       if (!response.redirects?.length) return response;
       return replay({
         owner,

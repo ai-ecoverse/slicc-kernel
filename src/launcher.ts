@@ -104,6 +104,7 @@ import {
   packageTlsRoots,
   writeCaFile,
 } from './kernel/net/network.ts';
+import { placeholderFloor } from './kernel/net/placeholder-floor.ts';
 import type { CaStore, RealmCa } from './kernel/net/realm-ca.ts';
 import { replayingHops } from './kernel/net/redirect-hops.ts';
 import { Resolver } from './kernel/net/resolver.ts';
@@ -899,7 +900,7 @@ export class Launcher {
       ...options.env,
     };
     this.ca = kernelCa(options.caStore ?? memoryCaStore());
-    this.transport = replayingHops(options.transport ?? missingTransport());
+    this.transport = placeholderFloor(replayingHops(options.transport ?? missingTransport()));
     this.announcedTraits = JSON.stringify(this.transport.traits);
     this.uplink = options.uplink;
     this.routes = new Routes(options.uplink?.traits.ipv6 === true);
