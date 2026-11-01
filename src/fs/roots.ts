@@ -1,12 +1,13 @@
 import { META_DB, META_STORE, openMetaDb } from './meta.ts';
+import { type Portable, portable, samePath } from './portable.ts';
 
 const ROOTS_DB = 'slicc-kernel-roots';
 const ROOTS_STORE = 'roots';
 
-interface RootRecord {
-  id: string;
+type RootRecord = { id: string } & Partial<{
   handle: FileSystemDirectoryHandle;
-}
+  path: string[];
+}>;
 
 function request<T>(req: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -27,6 +28,15 @@ async function same(a: FileSystemHandle, b: FileSystemHandle): Promise<boolean> 
   } catch {
     return false;
   }
+}
+
+async function matches(
+  record: RootRecord,
+  root: FileSystemDirectoryHandle,
+  at: Portable<FileSystemDirectoryHandle>
+): Promise<boolean> {
+  if (record.handle) return same(record.handle, root);
+  return 'path' in at && record.path !== undefined && samePath(record.path, at.path);
 }
 
 export const nameOf = (id: string): string => `${META_DB}:${id}`;
@@ -69,19 +79,21 @@ async function seed(factory: IDBFactory, name: string): Promise<void> {
 export async function rootId(
   factory: IDBFactory,
   root: FileSystemDirectoryHandle,
-  locks: LockManager | undefined = globalThis.navigator?.locks
+  locks: LockManager | undefined = globalThis.navigator?.locks,
+  top?: () => Promise<FileSystemDirectoryHandle>
 ): Promise<string> {
   const find = async () => {
+    const at = await portable(root, top);
     const db = await open(factory);
     try {
       const all = (await request(
         db.transaction(ROOTS_STORE, 'readonly').objectStore(ROOTS_STORE).getAll()
       )) as RootRecord[];
-      for (const record of all) if (await same(record.handle, root)) return record.id;
+      for (const record of all) if (await matches(record, root, at)) return record.id;
       const id = crypto.randomUUID();
       if (await used(root)) await seed(factory, nameOf(id));
       const tx = db.transaction(ROOTS_STORE, 'readwrite');
-      tx.objectStore(ROOTS_STORE).put({ id, handle: root });
+      tx.objectStore(ROOTS_STORE).put({ id, ...at });
       await done(tx);
       return id;
     } finally {

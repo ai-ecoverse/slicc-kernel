@@ -15,6 +15,7 @@ import type { FacadeSpecs } from './facade/types.ts';
 import type { Attestation, AttestOptions, AttestTombstone } from './fs/attest.ts';
 import type { Denial, DenialHook } from './fs/dac.ts';
 import { integrityOptions } from './fs/integrity.ts';
+import { type Portable, portable } from './fs/portable.ts';
 import { type Protection, protectInit } from './fs/protect.ts';
 import { DEFAULT_USERS, type UsersMode } from './fs/types.ts';
 import { integrityAnswerer } from './integrity-relay.ts';
@@ -372,11 +373,28 @@ function uplinkInit(uplink: NetworkUplink | undefined): Pick<InitRequest, 'uplin
   return { uplink: { traits, ...(uplink.routes ? { routes: uplink.routes } : {}), ...nameserver } };
 }
 
-function initCall(options: KernelOptions, transport: NetworkTransport | undefined): KernelCall {
+function rootField(
+  at: Portable<FileSystemDirectoryHandle>
+): Pick<InitRequest, 'root' | 'rootPath'> {
+  return 'path' in at ? { rootPath: at.path } : { root: at.handle };
+}
+
+async function insertCall(
+  target: string,
+  handle: FileSystemDirectoryHandle,
+  source?: string
+): Promise<KernelCall> {
+  return { op: 'insert', target, source, ...(await portable(handle)) };
+}
+
+async function initCall(
+  options: KernelOptions,
+  transport: NetworkTransport | undefined
+): Promise<KernelCall> {
   const hooks = sealedHooks(options.sealed);
   return {
     op: 'init',
-    ...(options.root ? { root: options.root } : {}),
+    ...(options.root ? rootField(await portable(options.root)) : {}),
     ...(options.modules ? { modules: options.modules } : {}),
     ...(options.commands ? { commands: options.commands } : {}),
     ...(options.env ? { env: options.env } : {}),
@@ -762,8 +780,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     options.onMountPending?.({
       target,
       source,
-      insert: async () =>
-        void (await call({ op: 'insert', target, source, handle: await chosen(handle) })),
+      insert: async () => void (await call(await insertCall(target, await chosen(handle), source))),
     });
   const aside = (data: WorkerMessage): data is { denial: Denial } | FileChanged => {
     if (files.event(data)) return true;
@@ -846,7 +863,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
 
   const { dial } = dials;
 
-  await call(initCall(options, transport));
+  await call(await initCall(options, transport));
 
   return {
     async run(argv, runOptions = {}) {
@@ -874,7 +891,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     mount: async (spec) => (await call({ op: 'mount', spec })) as MountEntry,
     umount: async (target) => void (await call({ op: 'umount', target })),
     mounts: async () => (await call({ op: 'mounts' })) as MountEntry[],
-    insert: async (target, handle) => void (await call({ op: 'insert', target, handle })),
+    insert: async (target, handle) => void (await call(await insertCall(target, handle))),
     ...pageOnly(call),
     watch: files.watch,
     terminate() {
