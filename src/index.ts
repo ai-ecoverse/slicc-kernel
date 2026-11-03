@@ -155,7 +155,7 @@ export type {
   JsWebSocketMessage,
   JsWebSocketOptions,
 } from './process/js/js-websocket.ts';
-export type { ApproveHook, SudoAnswer, SudoRequest } from './sudo.ts';
+export type { ApproveHook, SudoAnswer, SudoDenial, SudoRequest } from './sudo.ts';
 export {
   type FetchTransportOptions,
   fetchTransport,
@@ -583,6 +583,17 @@ function fileWatches(request: Requester, call: (req: KernelCall) => Promise<unkn
   };
 }
 
+function relayable(answer: unknown): unknown {
+  if (typeof answer === 'symbol' || typeof answer === 'function') return 'deny';
+  if (typeof answer !== 'object' || answer === null) return answer;
+  try {
+    const { answer: kind, message } = answer as { answer?: unknown; message?: unknown };
+    return kind === 'deny' && typeof message === 'string' ? { answer: kind, message } : 'deny';
+  } catch {
+    return 'deny';
+  }
+}
+
 function approver(approve: ApproveHook | undefined, worker: Worker) {
   const asked = new Map<string, AbortController>();
   const handlers = {
@@ -601,7 +612,7 @@ function approver(approve: ApproveHook | undefined, worker: Worker) {
       } catch {}
       asked.delete(req.id);
       if (control.signal.aborted) return;
-      worker.postMessage({ sudoAnswer: { id: req.id, answer } });
+      worker.postMessage({ sudoAnswer: { id: req.id, answer: relayable(answer) } });
     },
     abort({ id, reason }: { id: string; reason: string }): void {
       asked.get(id)?.abort(reason);

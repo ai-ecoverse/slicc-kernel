@@ -119,7 +119,7 @@ export type {
 } from './mount/hostfs.ts';
 export { serveHostfsPort } from './mount/hostfs.ts';
 export type { MountEntry, MountSpec } from './mount/mount-fs.ts';
-export type { ApproveHook, SudoAnswer, SudoRequest } from './sudo.ts';
+export type { ApproveHook, SudoAnswer, SudoDenial, SudoRequest } from './sudo.ts';
 export type { NetworkRedirectPolicy } from './transport.ts';
 export { fetchTransport, type NetworkTransport } from './transport.ts';
 export { memoryRoot };
