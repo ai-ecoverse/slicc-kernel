@@ -20,6 +20,9 @@ const TERM = /^[A-Za-z0-9._+-]+$/;
 const PLAIN = /^[A-Za-z0-9_@%+=:,./-]+$/;
 const CONTROL = /[\0-\x1f\x7f]/;
 const USAGE = 'usage: sudo [-n] [-u user] [--] command [args...]\n       sudo -l';
+const DENIED = 'sudo: approval denied';
+const DENIAL_MAX = 500;
+const ABORTED = Symbol('aborted');
 
 function hasControl(text: string): boolean {
   return CONTROL.test(text);
@@ -55,10 +58,15 @@ export interface SudoRequest {
 
 export type SudoAnswer = 'once' | 'always' | 'deny';
 
+export interface SudoDenial {
+  answer: 'deny';
+  message: string;
+}
+
 export type ApproveHook = (
   req: SudoRequest,
   options: { signal: AbortSignal }
-) => SudoAnswer | Promise<SudoAnswer>;
+) => SudoAnswer | SudoDenial | Promise<SudoAnswer | SudoDenial>;
 
 export interface SudoCall {
   op: 'proc-sudo';
@@ -126,6 +134,61 @@ export interface SudoOptions {
 
 function failed(errno: string, error: string): { error: string; errno: string } {
   return { error, errno };
+}
+
+function denialText(answer: unknown): string {
+  try {
+    if (typeof answer !== 'object' || answer === null) return DENIED;
+    const { answer: kind, message } = answer as { answer?: unknown; message?: unknown };
+    if (kind !== 'deny' || typeof message !== 'string') return DENIED;
+    const chars = [
+      ...message
+        .replace(/[\t\n\v\f\r\u0085\u2028\u2029]+/g, ' ')
+        .replace(/\p{Cc}/gu, '')
+        .trimEnd(),
+    ];
+    const text =
+      chars.length > DENIAL_MAX
+        ? `${chars.slice(0, DENIAL_MAX - 1).join('')}\u2026`
+        : chars.join('');
+    return text.startsWith('sudo: ') && text.slice(6).trim() !== '' ? text : DENIED;
+  } catch {
+    return DENIED;
+  }
+}
+
+async function answerOf(
+  approve: ApproveHook,
+  req: SudoRequest,
+  signal: AbortSignal
+): Promise<unknown> {
+  let reply: Promise<unknown> | undefined;
+  let cut: Promise<unknown> | undefined;
+  const snapshot = () =>
+    reply === undefined
+      ? Promise.resolve(ABORTED)
+      : Promise.race([reply, Promise.resolve(ABORTED)]).catch(() => 'deny');
+  const aborted = new Promise<void>((resolve) =>
+    signal.addEventListener(
+      'abort',
+      () => {
+        cut = snapshot();
+        resolve();
+      },
+      { once: true }
+    )
+  );
+  try {
+    reply = Promise.resolve(approve(req, { signal }));
+  } catch {
+    reply = Promise.resolve('deny');
+  }
+  try {
+    const answer = await Promise.race([reply, aborted]);
+    return cut === undefined ? answer : await cut;
+  } catch {
+    return cut === undefined ? 'deny' : await cut;
+  }
 }
 
 function unescaped(double: string): string {
@@ -573,7 +636,7 @@ export class Sudo {
     requester: AbortSignal
   ): Promise<'once' | 'always' | { error: string; errno: string }> {
     const { approve } = this.o;
-    if (!approve || requester.aborted) return failed('EACCES', 'sudo: approval denied');
+    if (!approve || requester.aborted) return failed('EACCES', DENIED);
     const createdAt = Date.now();
     const timeout = this.o.timeoutMs ?? SUDO_TIMEOUT_MS;
     const req: SudoRequest = {
@@ -596,22 +659,17 @@ export class Sudo {
     const timer = setTimeout(() => control.abort('expired'), timeout);
     const withdraw = () => control.abort('withdrawn');
     requester.addEventListener('abort', withdraw, { once: true });
-    const aborted = new Promise<'aborted'>((resolve) =>
-      control.signal.addEventListener('abort', () => resolve('aborted'), { once: true })
-    );
+    const ended = () =>
+      control.signal.reason === 'expired'
+        ? failed('ETIMEDOUT', 'sudo: the request expired')
+        : failed('EINTR', 'sudo: the request was withdrawn');
     try {
-      const answered = Promise.resolve()
-        .then(() => approve(req, { signal: control.signal }))
-        .catch(() => 'deny' as const);
-      const answer = await Promise.race([answered, aborted]);
-      if (answer === 'aborted' || control.signal.aborted) {
-        return control.signal.reason === 'expired'
-          ? failed('ETIMEDOUT', 'sudo: the request expired')
-          : failed('EINTR', 'sudo: the request was withdrawn');
+      const answer = await answerOf(approve, req, control.signal);
+      if (answer === ABORTED) return ended();
+      if (answer === 'once' || answer === 'always') {
+        return control.signal.aborted ? ended() : answer;
       }
-      return answer === 'once' || answer === 'always'
-        ? answer
-        : failed('EACCES', 'sudo: approval denied');
+      return failed('EACCES', denialText(answer));
     } finally {
       clearTimeout(timer);
       requester.removeEventListener('abort', withdraw);

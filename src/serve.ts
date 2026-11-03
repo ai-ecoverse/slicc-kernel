@@ -46,7 +46,7 @@ import type { MediaStore } from './mount/media.ts';
 import type { MountSpec } from './mount/mount-fs.ts';
 import type { ProcessMountRequest } from './mount/syscall.ts';
 import { type SealedReply, sealedAsker } from './sealed-relay.ts';
-import type { ApproveHook, SudoAnswer } from './sudo.ts';
+import type { ApproveHook, SudoAnswer, SudoDenial } from './sudo.ts';
 import type { AddUser, RemoveUser } from './users.ts';
 
 export interface KernelPort {
@@ -342,14 +342,14 @@ function dial(l: Launcher, req: DialRequest): MessagePort {
 
 interface SudoApprovals {
   ask: ApproveHook;
-  answer(reply: { id: string; answer: SudoAnswer }): void;
+  answer(reply: { id: string; answer: SudoAnswer | SudoDenial }): void;
 }
 
 function sudoApprovals(port: KernelPort): SudoApprovals {
-  const waiting = new Map<string, (answer: SudoAnswer) => void>();
+  const waiting = new Map<string, (answer: SudoAnswer | SudoDenial) => void>();
   return {
     ask: (req, { signal }) =>
-      new Promise<SudoAnswer>((resolve) => {
+      new Promise<SudoAnswer | SudoDenial>((resolve) => {
         waiting.set(req.id, resolve);
         signal.addEventListener(
           'abort',
@@ -373,7 +373,7 @@ function answered(
   data: {
     net?: unknown;
     uplink?: unknown;
-    sudoAnswer?: { id: string; answer: SudoAnswer };
+    sudoAnswer?: { id: string; answer: SudoAnswer | SudoDenial };
   },
   remote: RemoteTransport | undefined,
   uplink: RemoteUplink | undefined,
