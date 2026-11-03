@@ -2351,6 +2351,7 @@ export class Launcher {
         fsCalls: servedFsCalls(),
         opfsCalls: this.rootFs.opfsCalls?.() ?? 0,
         opfsOps: this.rootFs.opfsOps?.() ?? 0,
+        meta: this.rootFs.metaTransactions?.(),
         cwdChecks: this.cwds.checks,
         renameAcks: this.rootFs.renameWaits?.(),
         swaps: this.swaps.counts(),

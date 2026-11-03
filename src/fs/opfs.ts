@@ -1,5 +1,11 @@
 import { SHARED_TTL_MS } from './changes.ts';
-import { MemoryMeta, type MetaEntry, type MetaStore, type MetaUpdate } from './meta.ts';
+import {
+  MemoryMeta,
+  type MetaEntry,
+  type MetaStore,
+  type MetaTransactions,
+  type MetaUpdate,
+} from './meta.ts';
 import { noticeOf } from './notice.ts';
 import { chain, inherit, ownOf, ROOT_OWNER, sameOwner } from './owners.ts';
 import { PathMap } from './path-map.ts';
@@ -172,6 +178,7 @@ function sidecar(meta: MetaStore): MetaStore {
       };
   if (meta.absent) ops.absent = meta.absent.bind(meta);
   if (meta.forgetTrees) ops.forgetTrees = meta.forgetTrees.bind(meta);
+  if (meta.transactions) ops.transactions = meta.transactions.bind(meta);
   const { removeFile } = meta;
   if (removeFile)
     ops.removeFile = (path: string) =>
@@ -879,6 +886,10 @@ export class OpfsFs implements KernelFs {
 
   opfsOps(): number {
     return this.calls + this.others;
+  }
+
+  metaTransactions(): MetaTransactions | undefined {
+    return this.meta.transactions?.();
   }
 
   private io<T>(request: Promise<T>): Promise<T> {

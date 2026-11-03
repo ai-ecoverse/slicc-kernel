@@ -145,6 +145,7 @@ export interface KernelFs {
     ackMs: readonly number[];
   };
   opfsOps?(): number;
+  metaTransactions?(): { reads: number; writes: number } | undefined;
   fileIdWrites?(): number;
   announceHolds?(
     add: ReadonlyArray<[string, string | undefined]>,
