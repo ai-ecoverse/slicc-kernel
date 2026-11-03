@@ -23,6 +23,9 @@ async function prepared(t) {
       const r = await kernel.run(['cat', '/proc/sys/kernel/slicc_meta_transactions'], {
         cwd: '/',
       });
+      if (r.status !== 0 || !/^\d+ \d+\n?$/.test(r.stdout)) {
+        throw new Error(`slicc_meta_transactions: ${JSON.stringify(r)}`);
+      }
       const [reads, writes] = r.stdout.trim().split(' ').map(Number);
       return { reads, writes };
     };
