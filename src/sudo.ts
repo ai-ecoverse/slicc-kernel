@@ -10,7 +10,6 @@ export const SUDOERS_D = '/etc/sudoers.d';
 export const SECURE_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
 export const DEFAULT_SUDOERS = '%sudo Cmnd *\n';
 export const SUDO_TIMEOUT_MS = 300_000;
-export const SUDOERS_MIGRATED = `${SUDOERS_D}/.bare-calls-recorded`;
 
 const NAME = /^[a-z_][a-z0-9_.-]*$/;
 const WORD = String.raw`(?:'[^']*'|"(?:[^"\\]|\\[\s\S])*"|\\[\s\S]|[^\s'"\\])+`;
@@ -366,35 +365,6 @@ export class Sudo {
       await fs.mkdir(SUDOERS_D, { recursive: true });
       await fs.chown?.(SUDOERS_D, { uid: 0, gid: 0, mode: 0o750, follow: false });
     }
-    if (!(await this.migrated())) await this.migrate();
-  }
-
-  private async migrated(): Promise<boolean> {
-    return (await this.o.fs.exists(SUDOERS_MIGRATED)) && this.trusted(SUDOERS_MIGRATED);
-  }
-
-  private async migrate(): Promise<void> {
-    const { fs } = this.o;
-    try {
-      for (const name of await fs.readdir(SUDOERS_D)) {
-        const path = `${SUDOERS_D}/${name}`;
-        const st = await fs.lstat(path).catch(() => undefined);
-        if (!st?.isFile || st.isSymbolicLink || !NAME.test(name)) continue;
-        const text = await fs.readFile(path);
-        const lines = text.split('\n');
-        const fixed = lines.map((line) => {
-          const rule = parseRule(line);
-          return rule && recordedBare(line, path, rule) ? `${line} ""` : line;
-        });
-        if (fixed.every((line, i) => line === lines[i])) continue;
-        await fs.writeFile(path, fixed.join('\n'));
-        await fs.chown?.(path, { uid: st.uid, gid: st.gid, mode: st.mode & 0o7777, follow: false });
-      }
-      await fs.writeFile(SUDOERS_MIGRATED, '');
-      await fs.chown?.(SUDOERS_MIGRATED, { uid: 0, gid: 0, mode: 0o440, follow: false });
-    } catch (e) {
-      this.warn(`sudo: ${SUDOERS_D}: recorded bare calls not migrated: ${String(e)}`);
-    }
   }
 
   async trusted(path: string): Promise<boolean> {
@@ -407,7 +377,7 @@ export class Sudo {
     return true;
   }
 
-  private async policyFile(path: string, migrated: boolean): Promise<Rule[]> {
+  private async policyFile(path: string): Promise<Rule[]> {
     if (!(await this.trusted(path))) {
       this.warn(`sudo: ${path} skipped: it must be root's, no symlink, and writable by root only`);
       return [];
@@ -416,7 +386,7 @@ export class Sudo {
     const rules: Rule[] = [];
     for (const [n, line] of text.split('\n').entries()) {
       const rule = parseRule(line);
-      if (rule && !migrated && recordedBare(line, path, rule) && rule.cmnd !== '*') {
+      if (rule && recordedBare(line, path, rule) && rule.cmnd !== '*') {
         rules.push({ ...rule, cmnd: { path: rule.cmnd.path, args: [] } });
       } else if (rule) rules.push(rule);
       else if (rule === undefined) this.warn(`sudo: ${path}:${n + 1}: bad line skipped: ${line}`);
@@ -425,8 +395,7 @@ export class Sudo {
   }
 
   private async policy(): Promise<Rule[]> {
-    const migrated = await this.migrated();
-    const rules = await this.policyFile(SUDOERS, migrated);
+    const rules = await this.policyFile(SUDOERS);
     const names = await this.o.fs.readdir(SUDOERS_D).catch(() => [] as string[]);
     if (names.length > 0 && !(await this.trusted(SUDOERS_D))) {
       this.warn(`sudo: ${SUDOERS_D} skipped: it must be root's and writable by root only`);
@@ -434,7 +403,7 @@ export class Sudo {
     }
     for (const name of [...names].sort()) {
       if (name.startsWith('.') || name.endsWith('~')) continue;
-      rules.push(...(await this.policyFile(`${SUDOERS_D}/${name}`, migrated)));
+      rules.push(...(await this.policyFile(`${SUDOERS_D}/${name}`)));
     }
     return rules;
   }

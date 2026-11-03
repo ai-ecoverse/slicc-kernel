@@ -162,7 +162,7 @@ test("an 'always' answer records its argv, and the line it writes matches that a
   assert.equal((await run("printf '%s|' '*' 'a b' ''")).asked, 1);
 });
 
-test('a line an always answer recorded for a bare call keeps allowing only that call, before and after its one migration', async (t) => {
+test('a line in the format an always answer wrote for a bare call allows only that call, whenever it was written', async (t) => {
   const root = memoryRoot();
   const start = async () => {
     const kernel = await createNodeKernel({ root, users: 'enforce', approve: () => 'deny' });
@@ -185,13 +185,13 @@ test('a line an always answer recorded for a bare call keeps allowing only that 
   const r = await first.sh(
     `printf %s ${quote(recorded)} > /etc/sudoers.d/cone && chmod 440 /etc/sudoers.d/cone && ` +
       `printf '%s\\n' 'NOPASSWD cone (root) Cmnd /usr/bin/yes' > /etc/sudoers.d/other && ` +
-      'chmod 440 /etc/sudoers.d/other && rm /etc/sudoers.d/.bare-calls-recorded'
+      'chmod 440 /etc/sudoers.d/other'
   );
   assert.equal(r.status, 0, r.stderr);
-  const check = async ({ rc }) => {
+  const check = async ({ rc, sh }) => {
     assert.equal(await rc('printf'), 0);
     assert.equal(await rc('printf ""'), 1);
-    assert.equal(await rc('printf x'), 1);
+    assert.equal(await rc('printf %s widened'), 1);
     assert.equal(await rc('echo'), 0);
     assert.equal(await rc('echo x'), 1);
     assert.equal(await rc('seq 2'), 0);
@@ -199,30 +199,14 @@ test('a line an always answer recorded for a bare call keeps allowing only that 
     assert.equal(await rc('true x'), 1);
     assert.equal(await rc('yes | head -1'), 0);
     assert.equal(await rc('yes x | head -1'), 0);
+    assert.match(
+      (await sh('sudo -l', 'cone')).stdout,
+      /\(root\) NOPASSWD: \/usr\/bin\/printf ""\n.*CWD=\/home\/cone NOPASSWD: \/usr\/bin\/echo ""\n.*NOPASSWD: \/usr\/bin\/seq\n.*NOPASSWD: \/usr\/bin\/true \\\*\n.*NOPASSWD: \/usr\/bin\/yes\n/s
+    );
   };
   await check(first);
-  assert.equal((await first.sh('cat /etc/sudoers.d/cone')).stdout, recorded);
   await first.kernel.terminate();
-
   const second = await start();
-  assert.equal(
-    (await second.sh('cat /etc/sudoers.d/cone')).stdout,
-    'NOPASSWD cone (root) Cmnd /usr/bin/printf ""\n' +
-      'NOPASSWD cone (root) Cwd /home/cone Cmnd /usr/bin/echo ""\n' +
-      'NOPASSWD cone Cmnd /usr/bin/seq\n' +
-      "NOPASSWD cone (root) Cwd /home/cone Cmnd /usr/bin/true '*'\n"
-  );
-  assert.equal(
-    (await second.sh('stat -c "%U %a" /etc/sudoers.d/.bare-calls-recorded')).stdout,
-    'root 440\n'
-  );
-  assert.equal(
-    (await second.sh('cat /etc/sudoers.d/other')).stdout,
-    'NOPASSWD cone (root) Cmnd /usr/bin/yes\n'
-  );
   await check(second);
-  assert.match(
-    (await second.sh('sudo -l', 'cone')).stdout,
-    /\(root\) NOPASSWD: \/usr\/bin\/printf ""\n.*CWD=\/home\/cone NOPASSWD: \/usr\/bin\/echo ""\n.*NOPASSWD: \/usr\/bin\/seq\n/s
-  );
+  assert.equal((await second.sh('cat /etc/sudoers.d/cone')).stdout, recorded);
 });
