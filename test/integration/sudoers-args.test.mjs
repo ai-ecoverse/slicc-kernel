@@ -162,6 +162,49 @@ test("an 'always' answer records its argv, and the line it writes matches that a
   assert.equal((await run("printf '%s|' '*' 'a b' ''")).asked, 1);
 });
 
+test("an 'always' answer records its command line safely, and refuses a command line with a control character", async (t) => {
+  const { kernel, root, policy, cone, asked } = await boot(t, () => 'always');
+  await policy('cone Cmnd *');
+  const before = (await root('cat /etc/sudoers.d/cone')).stdout;
+  const bad = [
+    ['printf', 'a\nb'],
+    ['printf', 'a\rb'],
+    ['printf', 'a\r\nb'],
+    ['printf', 'a\0b'],
+    ['printf', "a'\nb"],
+  ];
+  for (const argv of bad) {
+    const n = asked.length;
+    const r = await kernel.run(['sudo', ...argv], { cwd: '/home/cone', user: 'cone' });
+    assert.equal(asked.length, n + 1, argv.join(' '));
+    assert.equal(r.status, 1, argv.join(' '));
+    assert.equal(r.stdout, '', argv.join(' '));
+    assert.equal(r.stderr, 'sudo: the rule could not be recorded\n', argv.join(' '));
+    assert.equal((await root('cat /etc/sudoers.d/cone')).stdout, before, argv.join(' '));
+  }
+  assert.equal((await cone('sudo -n printf %s other')).stderr, 'sudo: a password is required\n');
+  const ok = await cone(`sudo printf '%s|' '*' 'a b' '' 'x*'`);
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.equal(ok.stdout, '*|a b||x*|');
+  assert.equal(
+    (await root('cat /etc/sudoers.d/cone')).stdout,
+    before + "NOPASSWD cone (root) Cwd /home/cone Cmnd /usr/bin/printf '%s|' \\* 'a b' '' x\\*\n"
+  );
+  assert.equal((await cone(`sudo -n printf '%s|' '*' 'a b' '' 'x*'`)).stdout, '*|a b||x*|');
+  assert.equal((await cone('sudo -n printf %s other')).stderr, 'sudo: a password is required\n');
+});
+
+test('a kernel-format bare line with a trailing space or carriage return allows only that bare call', async (t) => {
+  const { root, policy, sudo, cone } = await boot(t);
+  for (const suffix of [' ', '\r', ' \r']) {
+    await policy(`NOPASSWD cone (root) Cmnd /usr/bin/printf${suffix}`);
+    assert.equal((await sudo('printf')).err, MISSING);
+    assert.equal((await sudo('printf %s list')).refused, true);
+    assert.match((await cone('sudo -l')).stdout, /^ {4}\(root\) NOPASSWD: \/usr\/bin\/printf ""$/m);
+  }
+  assert.equal((await root('cat /etc/sudoers.d/cone')).stdout.endsWith(' \r\n'), true);
+});
+
 test('a line in the format an always answer wrote for a bare call allows only that call, whenever it was written', async (t) => {
   const root = memoryRoot();
   const start = async () => {

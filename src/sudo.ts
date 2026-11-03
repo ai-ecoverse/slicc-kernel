@@ -18,7 +18,22 @@ const RULE = new RegExp(
 );
 const TERM = /^[A-Za-z0-9._+-]+$/;
 const PLAIN = /^[A-Za-z0-9_@%+=:,./-]+$/;
+const CONTROL = /[\0-\x1f\x7f]/;
 const USAGE = 'usage: sudo [-n] [-u user] [--] command [args...]\n       sudo -l';
+
+function hasControl(text: string): boolean {
+  return CONTROL.test(text);
+}
+
+function withoutControl(text: string): string {
+  return text.replace(CONTROL, (ch) => {
+    const n = ch.charCodeAt(0);
+    if (n === 9) return '\\t';
+    if (n === 10) return '\\n';
+    if (n === 13) return '\\r';
+    return `\\x${n.toString(16).padStart(2, '0')}`;
+  });
+}
 
 export interface SudoRequest {
   id: string;
@@ -138,7 +153,8 @@ export function splitWords(text: string): string[] | undefined {
 }
 
 export function quoteWord(word: string): string {
-  return PLAIN.test(word) ? word : `'${word.replaceAll("'", `'\\''`)}'`;
+  const text = hasControl(word) ? withoutControl(word) : word;
+  return PLAIN.test(text) ? text : `'${text.replaceAll("'", `'\\''`)}'`;
 }
 
 function addPart(word: Pattern, part: string | null): void {
@@ -295,7 +311,7 @@ function recordedBare(line: string, file: string, rule: Rule): boolean {
   const head = `NOPASSWD ${rule.who} (${rule.target}) `;
   const cmnd = `Cmnd ${quoteWord(rule.cmnd.path)}`;
   const cwd = rule.cwd === undefined ? '' : `Cwd ${quoteWord(rule.cwd)} `;
-  return line === `${head}${cwd}${cmnd}`;
+  return line.trimEnd() === `${head}${cwd}${cmnd}`;
 }
 
 function flags(parsed: Parsed, arg: string, next: string | undefined): number | string {
@@ -611,6 +627,7 @@ export class Sudo {
     const { fs } = this.o;
     const path = `${SUDOERS_D}/${self.name}`;
     if (!NAME.test(self.name)) return false;
+    if (hasControl(cwd) || argv.some(hasControl)) return false;
     try {
       await this.provision();
       if (!(await this.trusted(SUDOERS_D))) return false;
