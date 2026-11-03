@@ -1207,6 +1207,7 @@ export class Launcher {
     this.rewritten(change.paths, change.trees);
     this.watchers.heard(change.content ? 'change' : 'rename', change.paths);
     this.watchers.heard('rename', change.trees ?? []);
+    this.watchers.peerChanged([...change.paths, ...(change.trees ?? [])]);
     if (change.outside && this.catalogChanged([...change.paths, ...(change.trees ?? [])])) {
       this.resetCatalogs();
     }

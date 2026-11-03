@@ -423,7 +423,7 @@ async function watchOp(
   }
   if (g) for (const path of req.paths) await readable(g, 'watch', l.fs.resolvePath('/', path));
   const notify = visibleTo(g, (change) => send({ watch: req.id, change }));
-  const unwatch = l.watchers.watch(req.paths, { recursive: req.recursive }, notify);
+  const unwatch = l.watchers.watch(req.paths, { recursive: req.recursive, peers: true }, notify);
   watches.set(req.id, unwatch);
   return { result: req.id };
 }
