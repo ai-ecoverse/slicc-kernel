@@ -1,3 +1,4 @@
+import { BatchedReads, Invalidations, type ReadBatch, type ReadResult } from './meta-reads.ts';
 import { PathMap } from './path-map.ts';
 export interface MetaEntry {
   path: string;
@@ -55,6 +56,12 @@ export interface MetaStore {
   absent?(path: string): boolean;
   removeFile?(path: string): Promise<void>;
   forgetTrees?(trees: readonly string[]): void;
+  transactions?(): MetaTransactions;
+}
+
+export interface MetaTransactions {
+  reads: number;
+  writes: number;
 }
 
 export const META_DB = 'slicc-kernel';
@@ -152,12 +159,22 @@ interface Invalidation {
 
 const REMOVE_BATCH = 256;
 const REMOVE_WAIT_MS = 5;
+const LISTINGS_KEPT = 4096;
 
 export class IndexedDbMeta implements MetaStore {
   private readonly db: IDBDatabase;
   private readonly cache = new PathMap<MetaEntry | null>();
+  private readonly listings = new PathMap<readonly MetaEntry[]>();
   private readonly channel: BroadcastChannel;
-  private generation = 0;
+  private readonly invalidations = new Invalidations();
+  private readonly reads = new BatchedReads(
+    this.invalidations,
+    (batch) => this.read(batch),
+    (kind, key, value) => {
+      if (kind === 'entry') this.cache.set(key, value as MetaEntry | null);
+      else this.keepListing(key, value as MetaEntry[]);
+    }
+  );
   private readonly listeners = new Set<(change: Invalidation) => void>();
 
   listen(listener: (change: Invalidation) => void): void {
@@ -180,9 +197,39 @@ export class IndexedDbMeta implements MetaStore {
   }
 
   private drop({ paths = [], trees = [] }: Invalidation): void {
-    this.generation++;
-    for (const path of paths) this.cache.delete(path);
-    for (const tree of trees) this.cache.deleteTree(tree);
+    this.invalidations.note({ paths, trees });
+    for (const path of paths) {
+      this.cache.delete(path);
+      if (path !== '/') this.listings.delete(parentOf(path));
+    }
+    for (const tree of trees) {
+      this.cache.deleteTree(tree);
+      this.listings.deleteTree(tree);
+      if (tree !== '/') this.listings.delete(parentOf(tree));
+    }
+  }
+
+  private keepListing(dir: string, links: MetaEntry[]): void {
+    if (this.listings.size >= LISTINGS_KEPT) this.listings.clear();
+    this.listings.set(dir, links);
+  }
+
+  private async read({ entries, links }: ReadBatch): Promise<ReadResult> {
+    this.settleRemoves();
+    const [transaction, store] = this.transaction('readonly');
+    const result: ReadResult = { entries: new Map(), links: new Map() };
+    for (const path of entries) {
+      const request = store.get(path);
+      request.onsuccess = () => void result.entries.set(path, request.result ?? null);
+    }
+    if (links.length > 0) {
+      const index = store.index('dir');
+      for (const dir of links) {
+        const request = index.getAll(dir);
+        request.onsuccess = () => void result.links.set(dir, request.result as MetaEntry[]);
+      }
+    }
+    return settle(transaction, () => result);
   }
 
   private changed(invalidation: Invalidation): void {
@@ -190,7 +237,15 @@ export class IndexedDbMeta implements MetaStore {
     this.channel.postMessage(invalidation);
   }
 
+  private readonly counted: MetaTransactions = { reads: 0, writes: 0 };
+
+  transactions(): MetaTransactions {
+    return { ...this.counted };
+  }
+
   private transaction(mode: IDBTransactionMode): [IDBTransaction, IDBObjectStore] {
+    if (mode === 'readonly') this.counted.reads++;
+    else this.counted.writes++;
     const transaction = this.db.transaction(META_STORE, mode);
     return [transaction, transaction.objectStore(META_STORE)];
   }
@@ -198,17 +253,7 @@ export class IndexedDbMeta implements MetaStore {
   async get(paths: readonly string[]): Promise<Array<MetaEntry | undefined>> {
     const missing = paths.filter((path) => !this.cache.has(path));
     if (missing.length > 0) {
-      this.settleRemoves();
-      const generation = this.generation;
-      const [transaction, store] = this.transaction('readonly');
-      const found = new Map<string, MetaEntry | null>();
-      for (const path of missing) {
-        const request = store.get(path);
-        request.onsuccess = () => void found.set(path, request.result ?? null);
-      }
-      await settle(transaction, () => undefined);
-      if (generation === this.generation)
-        for (const [path, entry] of found) this.cache.set(path, entry);
+      const found = await this.reads.entries(missing);
       return paths.map(
         (path) => (found.has(path) ? found.get(path) : this.cache.get(path)) ?? undefined
       );
@@ -303,7 +348,8 @@ export class IndexedDbMeta implements MetaStore {
   async removeFile(path: string): Promise<void> {
     const known = this.cache.get(path);
     if (!known) return this.remove([path]);
-    this.generation++;
+    this.invalidations.note({ paths: [path] });
+    if (path !== '/') this.listings.delete(parentOf(path));
     this.cache.set(path, null);
     this.removing.set(path, JSON.stringify(known));
     if (this.removing.size >= REMOVE_BATCH) return this.flushRemoves();
@@ -347,10 +393,8 @@ export class IndexedDbMeta implements MetaStore {
   }
 
   async links(dir: string): Promise<MetaEntry[]> {
-    this.settleRemoves();
-    const [transaction, store] = this.transaction('readonly');
-    const request = store.index('dir').getAll(dir);
-    return settle(transaction, () => request.result as MetaEntry[]);
+    const known = this.listings.get(dir);
+    return [...(known ?? (await this.reads.links(dir)))];
   }
 
   async under(path: string): Promise<MetaEntry[]> {

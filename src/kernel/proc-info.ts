@@ -46,6 +46,7 @@ export interface ProcessListing {
   fsCalls?: number;
   opfsCalls?: number;
   opfsOps?: number;
+  meta?: { reads: number; writes: number } | undefined;
   cwdChecks?: number;
   staleFds?: number;
   fileIds?: number;

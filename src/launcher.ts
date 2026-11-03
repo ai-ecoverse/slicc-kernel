@@ -1207,6 +1207,7 @@ export class Launcher {
     this.rewritten(change.paths, change.trees);
     this.watchers.heard(change.content ? 'change' : 'rename', change.paths);
     this.watchers.heard('rename', change.trees ?? []);
+    this.watchers.peerChanged([...change.paths, ...(change.trees ?? [])]);
     if (change.outside && this.catalogChanged([...change.paths, ...(change.trees ?? [])])) {
       this.resetCatalogs();
     }
@@ -2351,6 +2352,7 @@ export class Launcher {
         fsCalls: servedFsCalls(),
         opfsCalls: this.rootFs.opfsCalls?.() ?? 0,
         opfsOps: this.rootFs.opfsOps?.() ?? 0,
+        meta: this.rootFs.metaTransactions?.(),
         cwdChecks: this.cwds.checks,
         renameAcks: this.rootFs.renameWaits?.(),
         swaps: this.swaps.counts(),

@@ -38,6 +38,7 @@ export const SYS_TREE: ProcSysTree = {
     slicc_fs_calls: (listing) => `${listing.fsCalls ?? 0}\n`,
     slicc_opfs_calls: (listing) => `${listing.opfsCalls ?? 0}\n`,
     slicc_opfs_ops: (listing) => `${listing.opfsOps ?? 0}\n`,
+    slicc_meta_transactions: ({ meta }) => `${meta?.reads ?? 0} ${meta?.writes ?? 0}\n`,
     slicc_cwd_checks: (listing) => `${listing.cwdChecks ?? 0}\n`,
     slicc_package_swaps: ({ swaps }) =>
       `${swaps?.swaps ?? 0} ${(swaps?.longestMs ?? 0).toFixed(1)} ${swaps?.waits ?? 0} ${(swaps?.waitedMs ?? 0).toFixed(1)}\n`,

@@ -42,11 +42,13 @@ const baseOf = (path: string) => path.slice(path.lastIndexOf('/') + 1);
 
 export interface WatchOptions {
   recursive?: boolean;
+  peers?: boolean;
 }
 
 interface Watcher {
   paths: string[];
   recursive: boolean;
+  peers: boolean;
   notify: (change: WatchChange) => void;
   pending: Set<string>;
   scheduled: boolean;
@@ -139,6 +141,7 @@ export class FsWatchers {
     const watcher: Watcher = {
       paths: paths.map(normalizePath),
       recursive: options.recursive === true,
+      peers: options.peers === true,
       notify,
       pending: new Set(),
       scheduled: false,
@@ -268,10 +271,18 @@ export class FsWatchers {
     this.emit('change', paths);
   }
 
+  peerChanged(paths: readonly string[]): void {
+    if (paths.length > 0) this.notify(paths, true);
+  }
+
   private report(paths: string[], notify = true): void {
     for (const tap of this.taps) tap(paths);
-    if (!notify) return;
+    if (notify) this.notify(paths);
+  }
+
+  private notify(paths: readonly string[], peer = false): void {
     for (const watcher of this.watchers) {
+      if (peer && !watcher.peers) continue;
       for (const path of paths) {
         const changed = normalizePath(path);
         if (touches(watcher, changed)) watcher.pending.add(changed);
