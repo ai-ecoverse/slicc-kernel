@@ -151,8 +151,8 @@ test("an 'always' answer records its argv, and the line it writes matches that a
   assert.equal(
     text,
     'cone Cmnd *\n' +
-      'NOPASSWD cone (root) Cwd /home/cone Cmnd /usr/bin/printf ""\n' +
-      "NOPASSWD cone (root) Cwd /home/cone Cmnd /usr/bin/printf '%s|' \\* 'a b' '' x\\*\n"
+      'NOPASSWD cone (root) Cwd /home/cone Stdin none Cmnd /usr/bin/printf ""\n' +
+      "NOPASSWD cone (root) Cwd /home/cone Stdin none Cmnd /usr/bin/printf '%s|' \\* 'a b' '' x\\*\n"
   );
   assert.equal((await run('printf')).asked, 0);
   assert.equal((await run("printf '%s|' '*' 'a b' '' 'x*'")).asked, 0);
@@ -162,7 +162,7 @@ test("an 'always' answer records its argv, and the line it writes matches that a
   assert.equal((await run("printf '%s|' '*' 'a b' ''")).asked, 1);
 });
 
-test("an 'always' answer records its command line safely, and refuses a command line with a control character", async (t) => {
+test("an 'always' answer records its command line safely, and runs a command line with a control character once without recording it", async (t) => {
   const { kernel, root, policy, cone, asked } = await boot(t, () => 'always');
   await policy('cone Cmnd *');
   const before = (await root('cat /etc/sudoers.d/cone')).stdout;
@@ -177,9 +177,8 @@ test("an 'always' answer records its command line safely, and refuses a command 
     const n = asked.length;
     const r = await kernel.run(['sudo', ...argv], { cwd: '/home/cone', user: 'cone' });
     assert.equal(asked.length, n + 1, argv.join(' '));
-    assert.equal(r.status, 1, argv.join(' '));
-    assert.equal(r.stdout, '', argv.join(' '));
-    assert.equal(r.stderr, 'sudo: the rule could not be recorded\n', argv.join(' '));
+    assert.equal(r.status, 0, argv.join(' '));
+    assert.equal(r.stderr, "sudo: ran once; this command line can't be recorded as always\n");
     assert.equal((await root('cat /etc/sudoers.d/cone')).stdout, before, argv.join(' '));
   }
   assert.equal((await cone('sudo -n printf %s other')).stderr, 'sudo: a password is required\n');
@@ -188,7 +187,8 @@ test("an 'always' answer records its command line safely, and refuses a command 
   assert.equal(ok.stdout, '*|a b||x*|');
   assert.equal(
     (await root('cat /etc/sudoers.d/cone')).stdout,
-    before + "NOPASSWD cone (root) Cwd /home/cone Cmnd /usr/bin/printf '%s|' \\* 'a b' '' x\\*\n"
+    before +
+      "NOPASSWD cone (root) Cwd /home/cone Stdin none Cmnd /usr/bin/printf '%s|' \\* 'a b' '' x\\*\n"
   );
   assert.equal((await cone(`sudo -n printf '%s|' '*' 'a b' '' 'x*'`)).stdout, '*|a b||x*|');
   assert.equal((await cone('sudo -n printf %s other')).stderr, 'sudo: a password is required\n');

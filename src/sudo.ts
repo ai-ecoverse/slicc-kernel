@@ -14,26 +14,40 @@ export const SUDO_TIMEOUT_MS = 300_000;
 const NAME = /^[a-z_][a-z0-9_.-]*$/;
 const WORD = String.raw`(?:'[^']*'|"(?:[^"\\]|\\[\s\S])*"|\\[\s\S]|[^\s'"\\])+`;
 const RULE = new RegExp(
-  String.raw`^(NOPASSWD\s+)?(\S+)\s+(?:\(([^()\s]+)\)\s+)?(?:Cwd\s+(${WORD})\s+)?Cmnd(?:\s+(.*))?$`
+  String.raw`^(NOPASSWD\s+)?(\S+)\s+(?:\(([^()\s]+)\)\s+)?(?:Cwd\s+(${WORD})\s+)?(?:Stdin\s+(none)\s+)?Cmnd(?:\s+(.*))?$`
 );
 const TERM = /^[A-Za-z0-9._+-]+$/;
 const PLAIN = /^[A-Za-z0-9_@%+=:,./-]+$/;
-const CONTROL = /[\0-\x1f\x7f]/;
+const CONTROL = /[\p{Cc}\u2028\u2029]/u;
+const CONTROLS = /[\p{Cc}\u2028\u2029]/gu;
 const USAGE = 'usage: sudo [-n] [-u user] [--] command [args...]\n       sudo -l';
 const DENIED = 'sudo: approval denied';
 const DENIAL_MAX = 500;
 const ABORTED = Symbol('aborted');
+const RAN_ONCE = "sudo: ran once; this command line can't be recorded as always";
+const ROOT_ONLY_MAX = 64;
+const OPERANDS_MAX = 256;
+const PATH_MAX = 4096;
 
 function hasControl(text: string): boolean {
   return CONTROL.test(text);
 }
 
+function stdinMatches(rule: Rule, stdin: SudoStdin): boolean {
+  return rule.stdin === undefined || stdin === 'tty' || stdin === 'none';
+}
+
+function recordable(cwd: string, argv: readonly string[]): boolean {
+  return !hasControl(cwd) && !argv.some(hasControl);
+}
+
 function withoutControl(text: string): string {
-  return text.replace(CONTROL, (ch) => {
+  return text.replace(CONTROLS, (ch) => {
     const n = ch.charCodeAt(0);
     if (n === 9) return '\\t';
     if (n === 10) return '\\n';
     if (n === 13) return '\\r';
+    if (n > 0xff) return `\\u${n.toString(16)}`;
     return `\\x${n.toString(16).padStart(2, '0')}`;
   });
 }
@@ -54,7 +68,11 @@ export interface SudoRequest {
   createdAt: number;
   expiresAt: number;
   always: boolean;
+  stdin?: SudoStdin;
+  rootOnly?: Record<string, boolean>;
 }
+
+export type SudoStdin = 'tty' | 'none' | 'pipe' | 'file';
 
 export type SudoAnswer = 'once' | 'always' | 'deny';
 
@@ -88,13 +106,14 @@ export type SudoResult =
   | { error: string; errno: string }
   | { list: string }
   | { run: string[] }
-  | { grant: SudoGrant };
+  | { grant: SudoGrant; notice?: string };
 
 export interface SudoCaller {
   cred: Cred;
   pid: number;
   tags?: readonly string[] | undefined;
   tty?: string | null | undefined;
+  stdin: SudoStdin;
 }
 
 type Pattern = (string | null)[];
@@ -109,6 +128,7 @@ interface Rule {
   who: string;
   target: string;
   cwd?: string;
+  stdin?: 'none';
   cmnd: Command | '*';
 }
 
@@ -351,11 +371,17 @@ export function parseRule(line: string): Rule | null | undefined {
   if (text === '' || text.startsWith('#')) return null;
   const m = RULE.exec(text);
   if (!m) return undefined;
-  const [, nopasswd, who = '', target = 'root', dir, rest = ''] = m;
+  const [, nopasswd, who = '', target = 'root', dir, stdin, rest = ''] = m;
   if (!validWho(who) || (target !== 'ALL' && !NAME.test(target))) return undefined;
   const cwd = dir === undefined ? undefined : cwdOf(dir);
   if (cwd === '') return undefined;
-  const rule = { nopasswd: !!nopasswd, who, target, ...(cwd !== undefined ? { cwd } : {}) };
+  const rule = {
+    nopasswd: !!nopasswd,
+    who,
+    target,
+    ...(cwd !== undefined ? { cwd } : {}),
+    ...(stdin === 'none' ? { stdin: 'none' as const } : {}),
+  };
   if (rest.trim() === '*') return { ...rule, cmnd: '*' };
   const words = splitPatterns(rest);
   const [first, ...args] = words ?? [];
@@ -374,7 +400,8 @@ function recordedBare(line: string, file: string, rule: Rule): boolean {
   const head = `NOPASSWD ${rule.who} (${rule.target}) `;
   const cmnd = `Cmnd ${quoteWord(rule.cmnd.path)}`;
   const cwd = rule.cwd === undefined ? '' : `Cwd ${quoteWord(rule.cwd)} `;
-  return line.trimEnd() === `${head}${cwd}${cmnd}`;
+  const stdin = rule.stdin === undefined ? '' : 'Stdin none ';
+  return line.trimEnd() === `${head}${cwd}${stdin}${cmnd}`;
 }
 
 function flags(parsed: Parsed, arg: string, next: string | undefined): number | string {
@@ -415,7 +442,8 @@ function parseArgs(args: readonly string[]): Parsed | string {
 function described(rule: Rule): string {
   const cmnd = rule.cmnd === '*' ? 'ALL' : commandText(rule.cmnd);
   const cwd = rule.cwd === undefined ? '' : `CWD=${quoteWord(rule.cwd)} `;
-  return `    (${rule.target}) ${cwd}${rule.nopasswd ? 'NOPASSWD: ' : ''}${cmnd}`;
+  const stdin = rule.stdin === undefined ? '' : 'STDIN=none ';
+  return `    (${rule.target}) ${cwd}${stdin}${rule.nopasswd ? 'NOPASSWD: ' : ''}${cmnd}`;
 }
 
 export class Sudo {
@@ -454,6 +482,54 @@ export class Sudo {
       if (!st || st.isSymbolicLink || st.uid !== 0 || (st.mode & 0o022) !== 0) return false;
     }
     return true;
+  }
+
+  private async rootOnly(cwd: string, args: readonly string[]): Promise<Record<string, boolean>> {
+    const { fs } = this.o;
+    const found: Record<string, boolean> = {};
+    const paths = [cwd];
+    for (const arg of args.slice(0, OPERANDS_MAX)) {
+      const value = /^--[^=]+=(.+)$/s.exec(arg)?.[1];
+      for (const word of value === undefined ? [arg] : [arg, value]) {
+        if (word === '' || word.length > PATH_MAX) continue;
+        const raw = word.startsWith('/') ? word : `${cwd}/${word}`;
+        if (word.startsWith('/') || (await fs.lstat(normalizePath(raw)).catch(() => undefined))) {
+          paths.push(raw);
+        }
+      }
+    }
+    for (const raw of paths) {
+      const key = normalizePath(raw);
+      const known = Object.hasOwn(found, key);
+      if (!known && Object.keys(found).length >= ROOT_ONLY_MAX) break;
+      if (known && !found[key]) continue;
+      found[key] = !(await this.crossesLink(raw)) && (await this.trusted(await this.existing(key)));
+    }
+    return found;
+  }
+
+  private async crossesLink(path: string): Promise<boolean> {
+    const parts: string[] = [];
+    for (const part of path.split('/')) {
+      if (part === '' || part === '.') continue;
+      if (part !== '..') {
+        parts.push(part);
+        continue;
+      }
+      const at = `/${parts.join('/')}`;
+      const st = parts.length > 0 ? await this.o.fs.lstat(at).catch(() => undefined) : undefined;
+      if (st?.isSymbolicLink) return true;
+      parts.pop();
+    }
+    return false;
+  }
+
+  private async existing(path: string): Promise<string> {
+    let at = normalizePath(path);
+    while (at !== '/' && !(await this.o.fs.lstat(at).catch(() => undefined))) {
+      at = at.slice(0, at.lastIndexOf('/')) || '/';
+    }
+    return at;
   }
 
   private async policyFile(path: string): Promise<Rule[]> {
@@ -581,6 +657,7 @@ export class Sudo {
         applies(rule) &&
         (rule.target === 'ALL' || rule.target === target.name) &&
         (rule.cwd === undefined || rule.cwd === cwd) &&
+        stdinMatches(rule, caller.stdin) &&
         commandMatches(rule.cmnd, argv)
     );
     const grant = () => this.grant(self, target, cred, parsed.command, path, cwd, call.term);
@@ -603,13 +680,26 @@ export class Sudo {
       }
       const changed = await this.untrusted(path, cwd, word);
       if (changed) return changed;
-      if (answer === 'always' && !(await this.remember(self, target, cwd, argv))) {
-        return failed('EIO', 'sudo: the rule could not be recorded');
-      }
-      return grant();
+      if (answer === 'once') return grant();
+      return await this.always(self, target, cwd, argv, recordable(cwd, parsed.command), grant);
     } finally {
       this.pending.delete(cred.ruid);
     }
+  }
+
+  private async always(
+    self: Account,
+    target: Account,
+    cwd: string,
+    argv: string[],
+    shown: boolean,
+    grant: () => { grant: SudoGrant }
+  ): Promise<SudoResult> {
+    if (!shown || !recordable(cwd, argv)) return { ...grant(), notice: RAN_ONCE };
+    if (!(await this.remember(self, target, cwd, argv))) {
+      return failed('EIO', 'sudo: the rule could not be recorded');
+    }
+    return grant();
   }
 
   private listed(self: Account, root: boolean, rules: Rule[]): SudoResult {
@@ -653,7 +743,9 @@ export class Sudo {
       ...(caller.tty ? { tty: caller.tty } : {}),
       createdAt,
       expiresAt: createdAt + timeout,
-      always: true,
+      always: recordable(cwd, [path, ...argv]),
+      stdin: caller.stdin,
+      rootOnly: await this.rootOnly(cwd, argv.slice(1)),
     };
     const control = new AbortController();
     const timer = setTimeout(() => control.abort('expired'), timeout);
@@ -685,7 +777,6 @@ export class Sudo {
     const { fs } = this.o;
     const path = `${SUDOERS_D}/${self.name}`;
     if (!NAME.test(self.name)) return false;
-    if (hasControl(cwd) || argv.some(hasControl)) return false;
     try {
       await this.provision();
       if (!(await this.trusted(SUDOERS_D))) return false;
@@ -693,7 +784,7 @@ export class Sudo {
       if (st && !(await this.trusted(path))) return false;
       const old = st ? await fs.readFile(path) : '';
       const words = recordedCommand(argv);
-      const line = `NOPASSWD ${self.name} (${target.name}) Cwd ${quoteWord(cwd)} Cmnd ${words}\n`;
+      const line = `NOPASSWD ${self.name} (${target.name}) Cwd ${quoteWord(cwd)} Stdin none Cmnd ${words}\n`;
       const text = old === '' || old.endsWith('\n') ? `${old}${line}` : `${old}\n${line}`;
       await fs.writeFile(path, text);
       await fs.chown?.(path, { uid: 0, gid: 0, mode: 0o440, follow: false });
@@ -711,7 +802,7 @@ export class Sudo {
     file: string,
     cwd: string,
     term: string | undefined
-  ): SudoResult {
+  ): { grant: SudoGrant } {
     const env = {
       ...this.o.env(),
       ...userEnv(target, this.o.pnpmHome),

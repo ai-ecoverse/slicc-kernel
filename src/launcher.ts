@@ -187,7 +187,7 @@ import { servedFsCalls, staleFdCount } from './realm/sync-fs-dispatch.ts';
 import type { SourceCheck } from './realm/sync-fs-token-registry.ts';
 import { anyBlocked, type BlockedMask } from './realm/sync-sab-wire.ts';
 import { REFUSED_PATH, REFUSED_SOURCE, refusing } from './refused-command.ts';
-import { type ApproveHook, Sudo, type SudoCall, type SudoResult } from './sudo.ts';
+import { type ApproveHook, Sudo, type SudoCall, type SudoResult, type SudoStdin } from './sudo.ts';
 import { SUDO_COMMAND, SUDO_PATH, SUDO_SOURCE } from './sudo-command.ts';
 import {
   type Account,
@@ -2360,7 +2360,7 @@ export class Launcher {
         fileIds: this.rootFs.fileIdWrites?.() ?? 0,
         holds: this.rootFs.holdCounts?.(),
       }),
-      sudo: (call, signal) => this.sudo(pid, call, signal),
+      sudo: (call, signal, stdin) => this.sudo(pid, call, signal, stdin),
       crontab: (call) => this.crontab(pid, call),
       openFiles: this.openFiles,
       nodes: stack.nodes,
@@ -2626,12 +2626,18 @@ export class Launcher {
     });
   }
 
-  private sudo(pid: number, call: SudoCall, signal: AbortSignal): Promise<SudoResult> {
+  private sudo(
+    pid: number,
+    call: SudoCall,
+    signal: AbortSignal,
+    stdin: SudoStdin
+  ): Promise<SudoResult> {
     const caller = {
       cred: this.credOf(pid),
       pid: this.jobs.shown(pid),
       tags: this.tagsOf(pid),
       tty: this.described.get(pid)?.tty,
+      stdin,
     };
     return this.sudoer.request(caller, call, signal);
   }
