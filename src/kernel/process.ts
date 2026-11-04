@@ -20,7 +20,7 @@ import { inProc, ProcTree, procAlias } from '../process/wasi/wasi-procfs.ts';
 import type { LinkRecord } from '../process/wasi/wasix-linker.ts';
 import type { SourceCheck } from '../realm/sync-fs-token-registry.ts';
 import type { SyncFsResult } from '../realm/sync-fs-wire.ts';
-import type { SudoCall, SudoResult } from '../sudo.ts';
+import type { SudoCall, SudoResult, SudoStdin } from '../sudo.ts';
 import {
   type ChildEvent,
   type ChildForker,
@@ -589,7 +589,7 @@ export interface WasmProcessOptions {
 
   processes?: () => ProcessListing;
 
-  sudo?: (call: SudoCall, signal: AbortSignal) => Promise<SudoResult>;
+  sudo?: (call: SudoCall, signal: AbortSignal, stdin: SudoStdin) => Promise<SudoResult>;
 
   crontab?: (call: CrontabCall) => Promise<CrontabResult>;
 
@@ -2321,9 +2321,10 @@ export class WasmProcess {
       cwd: typeof req.cwd === 'string' && req.cwd.startsWith('/') ? req.cwd : '/',
       ...(typeof req.term === 'string' ? { term: req.term } : {}),
     };
-    const answer = await sudo(call, this.blockingSignal(cancelled));
+    const answer = await sudo(call, this.blockingSignal(cancelled), this.stdinKind());
     if (!('grant' in answer)) return answer;
     if (this.dying) throw new KernelError('EINTR');
+    if (answer.notice !== undefined) await this.complainLine(answer.notice);
     const { file, argv, env, cwd, cred, caller } = answer.grant;
     const stdio = [{ fd: 0 }, { fd: 1 }, { fd: 2 }];
     return {
@@ -2332,6 +2333,15 @@ export class WasmProcess {
         caller,
       }),
     };
+  }
+
+  private stdinKind(): SudoStdin {
+    if (!this.fds.has(0)) return 'none';
+    const { file } = this.fds.get(0);
+    if (file.tty) return 'tty';
+    const meta = file.heldMeta;
+    if (meta && 'device' in meta) return meta.device === 'null' ? 'none' : 'file';
+    return file.seek || file.held ? 'file' : 'pipe';
   }
 
   private async mountSyscall(

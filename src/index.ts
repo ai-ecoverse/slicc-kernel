@@ -155,7 +155,7 @@ export type {
   JsWebSocketMessage,
   JsWebSocketOptions,
 } from './process/js/js-websocket.ts';
-export type { ApproveHook, SudoAnswer, SudoDenial, SudoRequest } from './sudo.ts';
+export type { ApproveHook, SudoAnswer, SudoDenial, SudoRequest, SudoStdin } from './sudo.ts';
 export {
   type FetchTransportOptions,
   fetchTransport,
