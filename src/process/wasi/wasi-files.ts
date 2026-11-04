@@ -92,8 +92,9 @@ export class FileBuffer {
       try {
         return op();
       } catch (err) {
-        const gone = (err as { code?: unknown }).code === 'ENOENT';
-        if (!gone || performance.now() > end || !this.moved?.(true)) throw err;
+        const code = (err as { code?: unknown }).code;
+        const followable = code === 'ENOENT' || code === 'EIO';
+        if (!followable || performance.now() > end || !this.moved?.(true)) throw err;
       }
     }
   }
