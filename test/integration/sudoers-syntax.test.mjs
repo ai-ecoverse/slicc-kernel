@@ -150,8 +150,11 @@ test('the common subset of sudoers(5) maps onto kernel rules', async (t) => {
   assert.equal((await cone('sudo -n true')).stderr, 'sudo: a password is required\n');
 });
 
-test('a line sudo cannot use is reported with its file, line and what was expected, and grants nothing', async (t) => {
-  const { write, cone } = await boot(t);
+const notice = (n) =>
+  `sudo: ${n} ${n === 1 ? 'policy line or file was' : 'policy lines or files were'} skipped and grant nothing; ask an administrator to run sudo visudo -c\n`;
+
+test('a line sudo cannot use grants nothing; root sees its file, line and what was expected, anyone else a count', async (t) => {
+  const { root, write, cone } = await boot(t);
   await write('/etc/sudoers.d/cone', [
     '# kernel rules',
     'cone ALL=(root) SETENV: /usr/bin/printf',
@@ -165,17 +168,50 @@ test('a line sudo cannot use is reported with its file, line and what was expect
     `sudo: /etc/sudoers.d/cone:5: line skipped: ${EXPECTED}`,
   ].join('\n');
   const ok = await cone('sudo -n true');
-  assert.deepEqual([ok.status, ok.stderr], [0, `${reported}\n`]);
+  assert.deepEqual([ok.status, ok.stderr], [0, notice(3)]);
   const denied = await cone('sudo -n printf x');
   assert.equal(denied.status, 1);
   assert.equal(
     denied.stderr,
-    `${reported}\nsudo: cone is not allowed to run /usr/bin/printf x as root\n`
+    `${notice(3)}sudo: cone is not allowed to run /usr/bin/printf x as root\n`
   );
   const listed = await cone('sudo -l');
-  assert.equal(listed.stderr, `${reported}\n`);
+  assert.equal(listed.stderr, notice(3));
   assert.match(listed.stdout, /^ {4}\(root\) NOPASSWD: \/usr\/bin\/true$/m);
   assert.doesNotMatch(listed.stdout, /printf/);
+
+  const asRoot = await root('sudo -n true');
+  assert.deepEqual([asRoot.status, asRoot.stderr], [0, `${reported}\n`]);
+  assert.equal((await root('sudo -l')).stderr, `${reported}\n`);
+
+  await write('/etc/sudoers.d/cone', ['NOPASSWD cone Cmnd /usr/bin/true']);
+  const clean = await cone('sudo -n true');
+  assert.deepEqual([clean.status, clean.stderr], [0, '']);
+});
+
+test('a non-root caller never sees the name or the tokens of a policy file it cannot read', async (t) => {
+  const { kernel, root, write } = await boot(t);
+  await kernel.users.add({ name: 'bob' });
+  await write('/etc/sudoers.d/canary-secret-project-xyz', [
+    'nobody production-leakme-credential-9f3a=(root) /bin/false',
+  ]);
+  await write('/etc/sudoers.d/open-secret-name', ['ALL Cmnd *'], '666');
+  await root('chmod 750 /etc/sudoers.d');
+  const bob = (script) => kernel.run(['bash', '-c', script], { cwd: '/', user: 'bob' });
+  assert.notEqual((await bob('ls /etc/sudoers.d')).status, 0);
+  for (const script of ['sudo -n true', 'sudo -l', 'sudo -n -u bob true']) {
+    const r = await bob(script);
+    assert.equal(r.status, 1, script);
+    assert.ok(r.stderr.startsWith(notice(2)), `${script}: ${r.stderr}`);
+    assert.doesNotMatch(r.stderr, /canary|secret|leakme|9f3a|sudoers\.d/, script);
+  }
+  const details = await root('sudo -n true');
+  assert.equal(details.status, 0);
+  assert.match(
+    details.stderr,
+    /^sudo: \/etc\/sudoers\.d\/canary-secret-project-xyz:1: line skipped: the host must be ALL \(the kernel is one host\), not 'production-leakme-credential-9f3a'$/m
+  );
+  assert.match(details.stderr, /^sudo: \/etc\/sudoers\.d\/open-secret-name skipped: /m);
 });
 
 test('visudo -c -f checks a file the caller can read, line by line, and fails closed on every unsupported form', async (t) => {
@@ -269,12 +305,7 @@ test('visudo -c checks the whole policy as root, and says so to anyone else', as
   const viaSudo = await cone('sudo -n visudo -c');
   assert.equal(viaSudo.status, 1);
   assert.equal(viaSudo.stdout, expected.stdout);
-  assert.equal(
-    viaSudo.stderr,
-    "sudo: /etc/sudoers.d/cone:2: line skipped: expected a command after '=': an absolute path, or ALL\n" +
-      "sudo: /etc/sudoers.d/open skipped: it must be root's, no symlink, and writable by root only\n" +
-      expected.stderr
-  );
+  assert.equal(viaSudo.stderr, notice(2) + expected.stderr);
 
   await root(
     'chmod 440 /etc/sudoers.d/open && printf "NOPASSWD cone Cmnd /usr/bin/visudo -c\\n" > /etc/sudoers.d/cone'

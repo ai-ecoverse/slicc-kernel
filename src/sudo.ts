@@ -143,6 +143,11 @@ export function visudoCall(req: Partial<VisudoCall>): VisudoCall | undefined {
     : undefined;
 }
 
+function skippedNotice(n: number): string {
+  const what = n === 1 ? 'policy line or file was' : 'policy lines or files were';
+  return `sudo: ${n} ${what} skipped and grant nothing; ask an administrator to run sudo visudo -c`;
+}
+
 interface Parsed {
   list: boolean;
   nonInteractive: boolean;
@@ -391,6 +396,8 @@ export class Sudo {
 
   private async policyRules(caller: SudoCaller): Promise<Rule[]> {
     const files = await this.policy();
+    const detailed = caller.cred.euid === 0;
+    let skipped = 0;
     for (const { path, problems } of files) {
       for (const problem of problems) {
         const text =
@@ -398,9 +405,11 @@ export class Sudo {
             ? `sudo: ${path} skipped: ${problem.message}`
             : `sudo: ${path}:${problem.line}: line skipped: ${problem.message}`;
         this.warn(text);
-        await caller.report?.(text);
+        skipped++;
+        if (detailed) await caller.report?.(text);
       }
     }
+    if (!detailed && skipped > 0) await caller.report?.(skippedNotice(skipped));
     return files.flatMap((f) => f.rules);
   }
 
