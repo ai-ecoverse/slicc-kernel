@@ -70,6 +70,7 @@ export interface InitRequest {
   doh?: string | false;
   hostfs?: boolean;
   hostname?: string;
+  timeZone?: string;
   users?: UsersMode;
   protect?: ProtectInit;
   denials?: boolean;
@@ -516,6 +517,7 @@ function hostOptions(
   requests: ReturnType<typeof embedderAsker>
 ): {
   hostname?: string;
+  timeZone?: string;
   doh?: string | false;
   users?: UsersMode;
   onDenial?: DenialHook;
@@ -529,6 +531,7 @@ function hostOptions(
   return {
     cron: { lock: `slicc-kernel-cron:${req.metadata ?? META_DB}` },
     ...(req.hostname !== undefined ? { hostname: req.hostname } : {}),
+    ...(req.timeZone !== undefined ? { timeZone: req.timeZone } : {}),
     ...(req.doh !== undefined ? { doh: req.doh } : {}),
     ...(req.users !== undefined ? { users: req.users } : {}),
     ...(req.denials ? { onDenial: (denial: Denial) => port.postMessage({ denial }) } : {}),

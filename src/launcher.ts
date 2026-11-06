@@ -15,7 +15,7 @@ import {
   scanFilesystems,
   variantFor,
 } from './commands.ts';
-import type { CronClock } from './cron/clock.ts';
+import { type CronClock, clockZone } from './cron/clock.ts';
 import { CRONTAB_COMMAND, CRONTAB_PATH, CRONTAB_SOURCE } from './cron/command.ts';
 import { type CrontabCall, type CrontabResult, Crontabs } from './cron/crontab.ts';
 import { type CronLocks, CronService } from './cron/service.ts';
@@ -76,6 +76,7 @@ import {
 } from './kernel/children.ts';
 import { ClipboardBroker, type ClipboardHook } from './kernel/clipboard.ts';
 import { EmbedderBroker, type EmbedderHook } from './kernel/embedder.ts';
+import { systemTimeZone } from './time-zone.ts';
 
 type EmbedderSession = { client: number; uid: number };
 
@@ -237,6 +238,7 @@ export interface LauncherOptions {
   uplink?: NetworkUplink;
   doh?: string | false;
   hostname?: string;
+  timeZone?: string;
   users?: UsersMode;
   wasmMemories?: { ceiling?: number; idleMs?: number };
   onDenial?: DenialHook;
@@ -808,6 +810,7 @@ export class Launcher {
   readonly routes: Routes;
   readonly resolver: Resolver;
   readonly hostname: string;
+  readonly timeZone: string;
   readonly watchers = new FsWatchers();
   private readonly changes = new FileChanges();
 
@@ -920,9 +923,11 @@ export class Launcher {
     const hostname = options.hostname ?? DEFAULT_HOSTNAME;
     if (!isHostname(hostname)) throw new Error(`not a host name: ${String(hostname)}`);
     this.hostname = hostname;
+    this.timeZone = systemTimeZone(options.timeZone, clockZone(options.cron?.clock));
     this.env = {
       ...networkEnv(hostname),
       HOSTNAME: hostname,
+      TZ: this.timeZone,
       SLICC_CDP_URL: this.cdp.url,
       ...this.facades.env(),
       ...options.env,
@@ -1032,6 +1037,7 @@ export class Launcher {
       owners: this.owners,
       lock: options.lock ?? 'slicc-kernel-cron',
       bootId: this.bootId,
+      timeZone: this.timeZone,
       ...(options.clock ? { clock: options.clock } : {}),
       locks: cronLocks(),
       ready: () => this.fstab,
@@ -3415,7 +3421,9 @@ export class Launcher {
     login = false
   ) {
     const env: Record<string, string> = {
-      ...(login ? { ...networkEnv(this.hostname), HOSTNAME: this.hostname } : this.env),
+      ...(login
+        ? { ...networkEnv(this.hostname), HOSTNAME: this.hostname, TZ: this.timeZone }
+        : this.env),
       ...userEnv(account, this.pnpmHome),
       PWD: cwd,
       ...extra,

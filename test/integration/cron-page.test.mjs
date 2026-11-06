@@ -57,3 +57,18 @@ test('on a page, a crontab survives a reload, @reboot runs once per boot, and of
   await delay(1500);
   assert.equal(runs(await otherLog()).length, 2);
 });
+
+test('on a page, TZ is the page time zone unless createKernel names one, so date and cron agree', async (t) => {
+  const { page, run } = await booted(chrome, t, { network: false });
+  const zone = await page.evaluate(() => Intl.DateTimeFormat().resolvedOptions().timeZone);
+  const env = await run(['bash', '-c', 'echo "$TZ"'], { cwd: '/' });
+  assert.equal(env.stdout, `${zone}\n`);
+  await page.evaluate(() => window.kernel.terminate());
+  await page.evaluate(() => window.boot({ network: false, timeZone: 'Asia/Tokyo' }));
+  const named = await run(['bash', '-c', 'echo "$TZ"; date -d @0 "+%H %Z"'], { cwd: '/' });
+  assert.equal(named.stdout, 'Asia/Tokyo\n09 JST\n');
+  await assert.rejects(
+    page.evaluate(() => window.boot({ network: false, timeZone: 'Nowhere/Land' })),
+    /not a time zone: Nowhere\/Land/
+  );
+});

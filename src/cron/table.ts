@@ -1,3 +1,4 @@
+import { canonicalZone } from '../time-zone.ts';
 import { parseWhen, type When } from './schedule.ts';
 
 export const SYSTEM_CRONTAB = '/etc/crontab';
@@ -70,7 +71,8 @@ interface Context {
 function jobOf(
   content: string,
   pending: string | undefined,
-  ctx: Context
+  ctx: Context,
+  env: Readonly<Record<string, string>>
 ): Omit<CronJob, 'line' | 'env'> {
   const fields = content.startsWith('@') ? 1 : 5;
   const parts = split(content, fields + (ctx.system ? 1 : 0));
@@ -78,6 +80,9 @@ function jobOf(
   const [words, command] = parts;
   const schedule = words.slice(0, fields).join(' ');
   const when = parseWhen(schedule);
+  const zone = env.CRON_TZ;
+  if (zone && !when.reboot && canonicalZone(zone) === undefined)
+    throw new Error(`CRON_TZ: unknown time zone "${zone}"`);
   const user = ctx.system ? words[fields] : undefined;
   if (user !== undefined && !USER_NAME.test(user)) throw new Error(`bad user name ${user}`);
   if (pending !== undefined && !JOB_NAME.test(pending))
@@ -121,7 +126,7 @@ export function parseCrontab(text: string, path: string, system = false): CronTa
       continue;
     }
     try {
-      jobs.push({ line, ...jobOf(content, pending, ctx), env: { ...env } });
+      jobs.push({ line, ...jobOf(content, pending, ctx, env), env: { ...env } });
     } catch (err) {
       errors.push({ line, message: (err as Error).message });
     }

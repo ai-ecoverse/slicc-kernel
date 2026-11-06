@@ -1,6 +1,7 @@
 import type { FsStat, NewOwner } from '../fs/types.ts';
 import { type KernelFs, normalizePath } from '../fs/types.ts';
 import { PathGate } from '../fs/unlinked.ts';
+import { zoneOf } from '../time-zone.ts';
 import type { Account } from '../users.ts';
 import { type CronClock, systemCronClock } from './clock.ts';
 import { type JobTags, readTags } from './crontab.ts';
@@ -40,6 +41,7 @@ export interface CronHost {
   owners: boolean;
   lock: string;
   bootId: string;
+  timeZone: string;
   clock?: CronClock;
   locks?: CronLocks | undefined;
   ready?: () => Promise<unknown>;
@@ -58,6 +60,7 @@ interface Loaded {
 interface Stamp {
   jobs: Record<string, number>;
   reboot: Record<string, string>;
+  when: Record<string, string>;
 }
 
 interface Due {
@@ -68,11 +71,13 @@ interface Due {
 
 const encoder = new TextEncoder();
 
-const EMPTY_STAMP = JSON.stringify({ jobs: {}, reboot: {} });
+const EMPTY_STAMP = JSON.stringify({ jobs: {}, reboot: {}, when: {} });
 
 const messageOf = (err: unknown) => (err as Error)?.message ?? String(err);
 
 const keyOf = ({ source, job }: Loaded) => `${source}\t${job.id}`;
+
+const whenOf = ({ job }: Loaded) => `${job.schedule}\t${job.env.CRON_TZ ?? ''}`;
 
 function tail(bytes: Uint8Array, cap = LOG_CAP): Uint8Array {
   return bytes.length > cap ? bytes.slice(bytes.length - cap) : bytes;
@@ -112,9 +117,10 @@ function readStamp(text: string | undefined): Stamp {
     const parsed = JSON.parse(text ?? '') as Partial<Stamp>;
     const jobs = parsed.jobs && typeof parsed.jobs === 'object' ? parsed.jobs : {};
     const reboot = parsed.reboot && typeof parsed.reboot === 'object' ? parsed.reboot : {};
-    return { jobs: { ...jobs }, reboot: { ...reboot } };
+    const when = parsed.when && typeof parsed.when === 'object' ? parsed.when : {};
+    return { jobs: { ...jobs }, reboot: { ...reboot }, when: { ...when } };
   } catch {
-    return { jobs: {}, reboot: {} };
+    return { jobs: {}, reboot: {}, when: {} };
   }
 }
 
@@ -202,7 +208,7 @@ export class CronService {
     const loaded = await this.load();
     const stamp = readStamp(await fs.readFile(STAMP_PATH).catch(() => undefined));
     const now = this.clock.now();
-    const utc = this.clock.utc === true;
+    const system = this.host.timeZone;
     const due: Due[] = [];
     const keys = new Set<string>();
     let next = now + WAKE_MS;
@@ -216,20 +222,24 @@ export class CronService {
         due.push({ entry, due: now, missed: 0 });
         continue;
       }
+      const zone = zoneOf(entry.job.env.CRON_TZ || system);
       const last = stamp.jobs[key];
-      if (typeof last !== 'number' || last > now + BACK_JUMP_MS) stamp.jobs[key] = now;
+      const was = stamp.when[key];
+      stamp.when[key] = whenOf(entry);
+      const changed = was !== undefined && was !== stamp.when[key];
+      if (typeof last !== 'number' || changed || last > now + BACK_JUMP_MS) stamp.jobs[key] = now;
       else {
-        const missed = missedFires(when.schedule, last, now, utc);
+        const missed = missedFires(when.schedule, last, now, zone);
         if (missed.last !== null) {
           stamp.jobs[key] = now;
           due.push({ entry, due: missed.last, missed: missed.count - 1 });
         }
       }
-      const coming = nextFire(when.schedule, Math.max(now, stamp.jobs[key] as number), utc);
+      const coming = nextFire(when.schedule, Math.max(now, stamp.jobs[key] as number), zone);
       if (coming !== null && coming < next) next = coming;
     }
     this.rebooted = true;
-    for (const map of [stamp.jobs, stamp.reboot])
+    for (const map of [stamp.jobs, stamp.reboot, stamp.when])
       for (const key of Object.keys(map)) if (!keys.has(key)) delete map[key];
     await this.writeStamp(stamp);
     for (const each of due) void this.spawn(each);

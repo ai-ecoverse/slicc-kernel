@@ -31,6 +31,10 @@ test('a fake cron clock wakes sleepers as time moves, and flush waits for them t
 test('an aborted sleep on a fake cron clock ends at once', async () => {
   const clock = fakeCronClock(0, false);
   assert.equal(clock.utc, false);
+  assert.equal(clock.timeZone, undefined);
+  const berlin = fakeCronClock(0, 'Europe/Berlin');
+  assert.equal(berlin.utc, false);
+  assert.equal(berlin.timeZone, 'Europe/Berlin');
   const stop = new AbortController();
   const sleeping = clock.sleep(60_000, stop.signal);
   assert.equal(clock.sleepers, 1);

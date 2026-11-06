@@ -72,7 +72,7 @@ test('a user crontab job runs on time as its user, in its home, with only a logi
   await kernel.users.add({ name: 'cone' });
   await kernel.writeFile(
     `${SPOOL}/cone`,
-    'GREETING=hi\n* * * * * echo "$(id -u) $(pwd) $HOME $USER $LOGNAME $SHELL $GREETING $SLICC_CRON $SLICC_CRON_DUE $SLICC_CRON_MISSED ${HOST_SECRET-none}" >> ran\n'
+    'GREETING=hi\n* * * * * echo "$(id -u) $(pwd) $HOME $USER $LOGNAME $SHELL $GREETING $SLICC_CRON $SLICC_CRON_DUE $SLICC_CRON_MISSED $TZ ${HOST_SECRET-none}" >> ran\n'
   );
   await settle();
   assert.equal(await read('/home/cone/ran'), undefined);
@@ -80,7 +80,7 @@ test('a user crontab job runs on time as its user, in its home, with only a logi
   const ran = await until(() => read('/home/cone/ran'), 'the job');
   assert.equal(
     ran,
-    '1000 /home/cone /home/cone cone cone /bin/bash hi 1 2026-01-01T10:01:00.000Z 0 none\n'
+    '1000 /home/cone /home/cone cone cone /bin/bash hi 1 2026-01-01T10:01:00.000Z 0 UTC none\n'
   );
   const owner = await kernel.run(['bash', '-c', 'stat -c %U /home/cone/ran'], { cwd: '/' });
   assert.equal(owner.stdout, 'cone\n');

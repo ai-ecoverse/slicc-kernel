@@ -586,6 +586,7 @@ window.boot = async (options = {}) => {
       ...policy,
       ...handles,
       ...(options.cdp ? { cdp: cdpHook } : {}),
+      ...(options.timeZone ? { timeZone: options.timeZone } : {}),
       ...(options.protect ? { protect: protection(options.protect) } : {}),
       ...(options.clipboard ? { clipboard: clipboardHook } : {}),
       ...(options.sealedFetch ? { sealed: sealedFetchHook } : {}),

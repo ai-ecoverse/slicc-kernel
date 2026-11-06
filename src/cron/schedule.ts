@@ -1,4 +1,7 @@
+import { MAX_SHIFT_MS, MINUTE_MS, utcZone as UTC_ZONE, type Zone } from '../time-zone.ts';
+
 export interface Schedule {
+  fixed: boolean;
   minutes: ReadonlySet<number>;
   hours: ReadonlySet<number>;
   days: ReadonlySet<number>;
@@ -96,6 +99,7 @@ export function parseSchedule(expression: string): Schedule {
   ) as [Set<number>, Set<number>, Set<number>, Set<number>, Set<number>];
   if (weekdays.delete(7)) weekdays.add(0);
   return {
+    fixed: !(parts[0] as string).startsWith('*') && !(parts[1] as string).startsWith('*'),
     minutes,
     hours,
     days,
@@ -111,70 +115,98 @@ export function parseWhen(expression: string): When {
   return { reboot: false, schedule: parseSchedule(expression) };
 }
 
-interface Calendar {
-  year(d: Date): number;
-  month(d: Date): number;
-  date(d: Date): number;
-  day(d: Date): number;
-  hours(d: Date): number;
-  minutes(d: Date): number;
-  setMonth(d: Date, month: number): void;
-  setDate(d: Date, date: number): void;
-  setHours(d: Date, hours: number): void;
-  setMinutes(d: Date, minutes: number): void;
-}
-
-const LOCAL: Calendar = {
-  year: (d) => d.getFullYear(),
-  month: (d) => d.getMonth(),
-  date: (d) => d.getDate(),
-  day: (d) => d.getDay(),
-  hours: (d) => d.getHours(),
-  minutes: (d) => d.getMinutes(),
-  setMonth: (d, month) => d.setMonth(month, 1),
-  setDate: (d, date) => d.setDate(date),
-  setHours: (d, hours) => d.setHours(hours, 0, 0, 0),
-  setMinutes: (d, minutes) => d.setMinutes(minutes, 0, 0),
+const UTC = {
+  year: (d: Date) => d.getUTCFullYear(),
+  month: (d: Date) => d.getUTCMonth(),
+  date: (d: Date) => d.getUTCDate(),
+  day: (d: Date) => d.getUTCDay(),
+  hours: (d: Date) => d.getUTCHours(),
+  minutes: (d: Date) => d.getUTCMinutes(),
+  setMonth: (d: Date, month: number) => d.setUTCMonth(month, 1),
+  setDate: (d: Date, date: number) => d.setUTCDate(date),
+  setHours: (d: Date, hours: number) => d.setUTCHours(hours, 0, 0, 0),
+  setMinutes: (d: Date, minutes: number) => d.setUTCMinutes(minutes, 0, 0),
 };
 
-const UTC: Calendar = {
-  year: (d) => d.getUTCFullYear(),
-  month: (d) => d.getUTCMonth(),
-  date: (d) => d.getUTCDate(),
-  day: (d) => d.getUTCDay(),
-  hours: (d) => d.getUTCHours(),
-  minutes: (d) => d.getUTCMinutes(),
-  setMonth: (d, month) => d.setUTCMonth(month, 1),
-  setDate: (d, date) => d.setUTCDate(date),
-  setHours: (d, hours) => d.setUTCHours(hours, 0, 0, 0),
-  setMinutes: (d, minutes) => d.setUTCMinutes(minutes, 0, 0),
-};
-
-function dayMatches(schedule: Schedule, cal: Calendar, date: Date): boolean {
-  const day = schedule.days.has(cal.date(date));
-  const weekday = schedule.weekdays.has(cal.day(date));
+function dayMatches(schedule: Schedule, date: Date): boolean {
+  const day = schedule.days.has(UTC.date(date));
+  const weekday = schedule.weekdays.has(UTC.day(date));
   if (schedule.anyDay || schedule.anyWeekday) return day && weekday;
   return day || weekday;
 }
 
 const LIMIT_YEARS = 8;
+const LIMIT_MS = (LIMIT_YEARS + 1) * 366 * 24 * 60 * MINUTE_MS;
+const SCAN_MS = 6 * 60 * MINUTE_MS;
 
-export function nextFire(schedule: Schedule, after: number, utc = false): number | null {
-  const cal = utc ? UTC : LOCAL;
-  const date = new Date(Math.floor(after / 60_000) * 60_000 + 60_000);
-  const limit = cal.year(date) + LIMIT_YEARS;
-  while (cal.year(date) <= limit) {
-    if (!schedule.months.has(cal.month(date) + 1)) {
-      cal.setMonth(date, cal.month(date) + 1);
-      cal.setHours(date, 0);
-    } else if (!dayMatches(schedule, cal, date)) {
-      cal.setDate(date, cal.date(date) + 1);
-      cal.setHours(date, 0);
-    } else if (!schedule.hours.has(cal.hours(date))) {
-      cal.setHours(date, cal.hours(date) + 1);
-    } else if (!schedule.minutes.has(cal.minutes(date))) {
-      cal.setMinutes(date, cal.minutes(date) + 1);
+function nextWall(schedule: Schedule, from: number): number | null {
+  const date = new Date(Math.ceil(from / MINUTE_MS) * MINUTE_MS);
+  const limit = UTC.year(date) + LIMIT_YEARS;
+  while (UTC.year(date) <= limit) {
+    if (!schedule.months.has(UTC.month(date) + 1)) {
+      UTC.setMonth(date, UTC.month(date) + 1);
+      UTC.setHours(date, 0);
+    } else if (!dayMatches(schedule, date)) {
+      UTC.setDate(date, UTC.date(date) + 1);
+      UTC.setHours(date, 0);
+    } else if (!schedule.hours.has(UTC.hours(date))) {
+      UTC.setHours(date, UTC.hours(date) + 1);
+    } else if (!schedule.minutes.has(UTC.minutes(date))) {
+      UTC.setMinutes(date, UTC.minutes(date) + 1);
     } else return date.getTime();
+  }
+  return null;
+}
+
+function firstChange(zone: Zone, from: number, to: number, offset: number): number {
+  let lo = from;
+  let hi = to;
+  for (let at = from + SCAN_MS; at < to; at += SCAN_MS) {
+    if (zone.offset(at) !== offset) {
+      hi = at;
+      break;
+    }
+    lo = at;
+  }
+  while (hi - lo > MINUTE_MS) {
+    const mid = lo + Math.floor((hi - lo) / 2 / MINUTE_MS) * MINUTE_MS;
+    if (zone.offset(mid) === offset) lo = mid;
+    else hi = mid;
+  }
+  return hi;
+}
+
+function afterRepeat(zone: Zone, at: number): number {
+  const offset = zone.offset(at);
+  const earlier = zone.offset(at - MAX_SHIFT_MS);
+  if (earlier <= offset) return at;
+  const shift = firstChange(zone, at - MAX_SHIFT_MS, at, earlier);
+  const end = shift + (earlier - zone.offset(shift));
+  return Math.max(at, end);
+}
+
+export function nextFire(schedule: Schedule, after: number, zone: Zone = UTC_ZONE): number | null {
+  let at = Math.floor(after / MINUTE_MS) * MINUTE_MS + MINUTE_MS;
+  const limit = at + LIMIT_MS;
+  while (at <= limit) {
+    if (schedule.fixed) {
+      const end = afterRepeat(zone, at);
+      if (end > at) {
+        at = end;
+        continue;
+      }
+    }
+    const offset = zone.offset(at);
+    const before = zone.offset(at - MINUTE_MS);
+    if (schedule.fixed && before < offset && offset - before <= MAX_SHIFT_MS) {
+      const skipped = nextWall(schedule, at + before);
+      if (skipped !== null && skipped < at + offset) return at;
+    }
+    const wall = nextWall(schedule, at + offset);
+    if (wall === null) return null;
+    const found = at + (wall - (at + offset));
+    if (zone.offset(found) === offset) return found;
+    at = firstChange(zone, at, found, offset);
   }
   return null;
 }
@@ -189,37 +221,42 @@ export function missedFires(
   schedule: Schedule,
   from: number,
   until: number,
-  utc = false,
+  zone: Zone = UTC_ZONE,
   cap = MISSED_CAP
 ): Missed {
   let count = 0;
   let last: number | null = null;
   let at: number | null = from;
   while (count < cap) {
-    at = nextFire(schedule, at, utc);
+    at = nextFire(schedule, at, zone);
     if (at === null || at > until) return { count, last, more: false };
     last = at;
     count++;
   }
-  const next = nextFire(schedule, last as number, utc);
+  const next = nextFire(schedule, last as number, zone);
   if (next === null || next > until) return { count, last, more: false };
-  return { count, last: latestFire(schedule, last as number, until, utc), more: true };
+  return { count, last: latestFire(schedule, last as number, until, zone), more: true };
 }
 
-export function latestFire(schedule: Schedule, from: number, until: number, utc = false): number {
+export function latestFire(
+  schedule: Schedule,
+  from: number,
+  until: number,
+  zone: Zone = UTC_ZONE
+): number {
   let found = from;
   for (let span = 60_000; ; span *= 2) {
     const start = Math.max(from, until - span);
-    const first = nextFire(schedule, start, utc);
+    const first = nextFire(schedule, start, zone);
     if (first !== null && first <= until) {
       found = first;
       break;
     }
     if (start === from) return from;
   }
-  for (let at = nextFire(schedule, found, utc); at !== null && at <= until; ) {
+  for (let at = nextFire(schedule, found, zone); at !== null && at <= until; ) {
     found = at;
-    at = nextFire(schedule, at, utc);
+    at = nextFire(schedule, at, zone);
   }
   return found;
 }
