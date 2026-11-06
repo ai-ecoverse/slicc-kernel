@@ -218,6 +218,7 @@ export interface JsProgramContext {
   wait(pid: number, options?: JsWaitOptions): Promise<JsExited>;
   kill(pid: number, signal?: JsSignal): Promise<void>;
   sudo(args: readonly string[]): Promise<JsSudoAnswer>;
+  visudo(call?: JsVisudoCall): Promise<JsVisudoAnswer>;
   crontab(call: JsCrontabCall): Promise<JsCrontabAnswer>;
   umask(mask?: number): Promise<number>;
   net: JsNet;
@@ -276,6 +277,15 @@ export interface JsCrontabCall {
 export type JsCrontabAnswer =
   | { text: string; error?: undefined }
   | { error: string; text?: undefined };
+
+export interface JsVisudoCall {
+  files?: { name: string; text: string }[];
+}
+
+export interface JsVisudoAnswer {
+  lines: [1 | 2, string][];
+  ok: boolean;
+}
 
 export type JsSudoAnswer =
   | { error: string; errno: string }
@@ -774,6 +784,24 @@ function cleanOf(sab: SharedArrayBuffer | undefined): () => boolean {
   return () => changes?.clean() === true;
 }
 
+function policyOps(
+  kernel: JsKernel,
+  o: ContextOptions
+): Pick<JsProgramContext, 'sudo' | 'visudo' | 'crontab'> {
+  return {
+    sudo: async (args) =>
+      (await kernel.json({
+        op: 'proc-sudo',
+        args: [...args],
+        cwd: o.cwd,
+        ...(o.env.TERM !== undefined ? { term: o.env.TERM } : {}),
+      })) as JsSudoAnswer,
+    visudo: async (call) => (await kernel.json({ ...call, op: 'proc-visudo' })) as JsVisudoAnswer,
+    crontab: async (call) =>
+      (await kernel.json({ ...call, op: 'proc-crontab' })) as JsCrontabAnswer,
+  };
+}
+
 export function createContext(o: ContextOptions): CreatedContext {
   const { kernel } = o;
   const infos = new Map<number, FdInfo>();
@@ -915,15 +943,7 @@ export function createContext(o: ContextOptions): CreatedContext {
     sync,
     fetch: fetchOp(kernel),
     umask: async (mask) => (await kernel.json(umaskRequest(mask))) as number,
-    sudo: async (args) =>
-      (await kernel.json({
-        op: 'proc-sudo',
-        args: [...args],
-        cwd: o.cwd,
-        ...(o.env.TERM !== undefined ? { term: o.env.TERM } : {}),
-      })) as JsSudoAnswer,
-    crontab: async (call) =>
-      (await kernel.json({ ...call, op: 'proc-crontab' })) as JsCrontabAnswer,
+    ...policyOps(kernel, o),
     ...children,
     net,
     websocket: websocketOp(kernel),

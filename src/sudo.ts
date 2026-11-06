@@ -3,23 +3,25 @@ import type { KernelFs, UsersMode } from './fs/types.ts';
 import { normalizePath } from './fs/types.ts';
 import type { Cred } from './kernel/cred.ts';
 import { tagFields } from './kernel/sealed.ts';
+import {
+  commandMatches,
+  commandText,
+  hasControl,
+  NAME,
+  parsePolicy,
+  quoteWord,
+  type Rule,
+  SUDOERS,
+  SUDOERS_D,
+} from './sudoers.ts';
 import { type Account, credOf, type UserDb, userEnv } from './users.ts';
 
-export const SUDOERS = '/etc/sudoers';
-export const SUDOERS_D = '/etc/sudoers.d';
+export { SUDOERS, SUDOERS_D } from './sudoers.ts';
 export const SECURE_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
 export const DEFAULT_SUDOERS = '%sudo Cmnd *\n';
 export const SUDO_TIMEOUT_MS = 300_000;
 
-const NAME = /^[a-z_][a-z0-9_.-]*$/;
-const WORD = String.raw`(?:'[^']*'|"(?:[^"\\]|\\[\s\S])*"|\\[\s\S]|[^\s'"\\])+`;
-const RULE = new RegExp(
-  String.raw`^(NOPASSWD\s+)?(\S+)\s+(?:\(([^()\s]+)\)\s+)?(?:Cwd\s+(${WORD})\s+)?(?:Stdin\s+(none)\s+)?Cmnd(?:\s+(.*))?$`
-);
 const TERM = /^[A-Za-z0-9._+-]+$/;
-const PLAIN = /^[A-Za-z0-9_@%+=:,./-]+$/;
-const CONTROL = /[\p{Cc}\u2028\u2029]/u;
-const CONTROLS = /[\p{Cc}\u2028\u2029]/gu;
 const USAGE = 'usage: sudo [-n] [-u user] [--] command [args...]\n       sudo -l';
 const DENIED = 'sudo: approval denied';
 const DENIAL_MAX = 500;
@@ -29,27 +31,12 @@ const ROOT_ONLY_MAX = 64;
 const OPERANDS_MAX = 256;
 const PATH_MAX = 4096;
 
-function hasControl(text: string): boolean {
-  return CONTROL.test(text);
-}
-
 function stdinMatches(rule: Rule, stdin: SudoStdin): boolean {
   return rule.stdin === undefined || stdin === 'tty' || stdin === 'none';
 }
 
 function recordable(cwd: string, argv: readonly string[]): boolean {
   return !hasControl(cwd) && !argv.some(hasControl);
-}
-
-function withoutControl(text: string): string {
-  return text.replace(CONTROLS, (ch) => {
-    const n = ch.charCodeAt(0);
-    if (n === 9) return '\\t';
-    if (n === 10) return '\\n';
-    if (n === 13) return '\\r';
-    if (n > 0xff) return `\\u${n.toString(16)}`;
-    return `\\x${n.toString(16).padStart(2, '0')}`;
-  });
 }
 
 export interface SudoRequest {
@@ -114,22 +101,46 @@ export interface SudoCaller {
   tags?: readonly string[] | undefined;
   tty?: string | null | undefined;
   stdin: SudoStdin;
+  report?: ((line: string) => Promise<void>) | undefined;
 }
 
-type Pattern = (string | null)[];
+export interface VisudoCall {
+  op: 'proc-visudo';
+  files?: { name: string; text: string }[];
+}
 
-interface Command {
+export interface VisudoResult {
+  lines: [1 | 2, string][];
+  ok: boolean;
+}
+
+interface PolicyFile {
   path: string;
-  args?: Pattern[];
+  rules: Rule[];
+  problems: { line?: number; message: string }[];
+  ok: boolean;
 }
 
-interface Rule {
-  nopasswd: boolean;
-  who: string;
-  target: string;
-  cwd?: string;
-  stdin?: 'none';
-  cmnd: Command | '*';
+const VISUDO_FILES_MAX = 64;
+const VISUDO_TEXT_MAX = 1024 * 1024;
+
+export function visudoCall(req: Partial<VisudoCall>): VisudoCall | undefined {
+  const { files } = req;
+  if (files === undefined) return { op: 'proc-visudo' };
+  if (!Array.isArray(files) || files.length === 0 || files.length > VISUDO_FILES_MAX) {
+    return undefined;
+  }
+  const valid = files.every(
+    (f) =>
+      typeof f === 'object' &&
+      f !== null &&
+      typeof f.name === 'string' &&
+      typeof f.text === 'string' &&
+      f.text.length <= VISUDO_TEXT_MAX
+  );
+  return valid
+    ? { op: 'proc-visudo', files: files.map(({ name, text }) => ({ name, text })) }
+    : undefined;
 }
 
 interface Parsed {
@@ -211,197 +222,9 @@ async function answerOf(
   }
 }
 
-function unescaped(double: string): string {
-  return double.replace(/\\(["\\$`])/g, '$1');
-}
-
-export function splitWords(text: string): string[] | undefined {
-  const piece = /'([^']*)'|"((?:[^"\\]|\\[\s\S])*)"|\\([\s\S])|([^\s'"\\]+)|(\s+)/y;
-  const words: string[] = [];
-  let word: string | undefined;
-  while (piece.lastIndex < text.length) {
-    const m = piece.exec(text);
-    if (!m) return undefined;
-    const [, single, double, escaped, plain, space] = m;
-    if (space !== undefined) {
-      if (word !== undefined) words.push(word);
-      word = undefined;
-      continue;
-    }
-    word =
-      (word ?? '') + (single ?? (double !== undefined ? unescaped(double) : (escaped ?? plain)));
-  }
-  if (word !== undefined) words.push(word);
-  return words;
-}
-
-export function quoteWord(word: string): string {
-  const text = hasControl(word) ? withoutControl(word) : word;
-  return PLAIN.test(text) ? text : `'${text.replaceAll("'", `'\\''`)}'`;
-}
-
-function addPart(word: Pattern, part: string | null): void {
-  const last = word.length - 1;
-  if (part === null) {
-    if (word[last] !== null) word.push(null);
-  } else if (typeof word[last] === 'string') word[last] += part;
-  else word.push(part);
-}
-
-function addPlain(word: Pattern, plain: string): void {
-  for (const [i, part] of plain.split('*').entries()) {
-    if (i > 0) addPart(word, null);
-    if (part !== '') addPart(word, part);
-  }
-}
-
-function splitPatterns(text: string): Pattern[] | undefined {
-  const piece = /'([^']*)'|"((?:[^"\\]|\\[\s\S])*)"|\\([\s\S])|([^\s'"\\]+)|(\s+)/y;
-  const words: Pattern[] = [];
-  let word: Pattern | undefined;
-  while (piece.lastIndex < text.length) {
-    const m = piece.exec(text);
-    if (!m) return undefined;
-    const [, single, double, escaped, plain, space] = m;
-    if (space !== undefined) {
-      if (word !== undefined) words.push(word);
-      word = undefined;
-      continue;
-    }
-    word ??= [];
-    if (plain !== undefined) addPlain(word, plain);
-    else addPart(word, single ?? (double !== undefined ? unescaped(double) : (escaped as string)));
-  }
-  if (word !== undefined) words.push(word);
-  return words;
-}
-
-const literal = (pattern: Pattern): string => pattern.map((p) => p ?? '*').join('');
-const isAny = (pattern: Pattern | undefined): boolean =>
-  pattern?.length === 1 && pattern[0] === null;
-
-function literalWord(word: string): string {
-  if (!word.includes('*')) return quoteWord(word);
-  const bare = word.replaceAll('*', '');
-  return bare === '' || PLAIN.test(bare) ? word.replaceAll('*', '\\*') : quoteWord(word);
-}
-
-function patternWord(pattern: Pattern): string {
-  if (pattern.length === 1 && typeof pattern[0] === 'string') return literalWord(pattern[0]);
-  return pattern.map((p) => (p === null ? '*' : literalWord(p))).join('');
-}
-
-function globMatch(
-  items: number,
-  subjects: number,
-  star: (i: number) => boolean,
-  one: (i: number, j: number) => boolean
-): boolean {
-  let i = 0;
-  let j = 0;
-  let back = -1;
-  let from = 0;
-  while (j < subjects) {
-    if (i < items && star(i)) {
-      back = i++;
-      from = j;
-    } else if (i < items && one(i, j)) {
-      i++;
-      j++;
-    } else if (back >= 0) {
-      i = back + 1;
-      j = ++from;
-    } else return false;
-  }
-  while (i < items && star(i)) i++;
-  return i === items;
-}
-
-function wordMatch(pattern: Pattern, arg: string): boolean {
-  if (pattern.every((p) => p !== null)) return literal(pattern) === arg;
-  const chars = pattern.flatMap((p) => (p === null ? [null] : [...p]));
-  const subject = [...arg];
-  return globMatch(
-    chars.length,
-    subject.length,
-    (i) => chars[i] === null,
-    (i, j) => chars[i] === subject[j]
-  );
-}
-
-function commandMatches(cmnd: Command | '*', argv: readonly string[]): boolean {
-  if (cmnd === '*') return true;
-  const [path, ...args] = argv;
-  if (path !== cmnd.path) return false;
-  const want = cmnd.args;
-  if (want === undefined) return true;
-  return globMatch(
-    want.length,
-    args.length,
-    (i) => isAny(want[i]),
-    (i, j) => wordMatch(want[i] as Pattern, args[j] as string)
-  );
-}
-
-function commandText(cmnd: Command): string {
-  const path = quoteWord(cmnd.path);
-  if (cmnd.args === undefined) return path;
-  if (cmnd.args.length === 0) return `${path} ""`;
-  return [path, ...cmnd.args.map(patternWord)].join(' ');
-}
-
 function recordedCommand(argv: readonly string[]): string {
   const [path = '', ...args] = argv;
   return commandText({ path, args: args.map((a) => [a]) });
-}
-
-function validWho(who: string): boolean {
-  if (who === 'ALL') return true;
-  return NAME.test(who.startsWith('%') ? who.slice(1) : who);
-}
-
-function cwdOf(word: string): string {
-  const words = splitWords(word);
-  const path = words?.length === 1 ? (words[0] as string) : '';
-  return path.startsWith('/') ? normalizePath(path) : '';
-}
-
-export function parseRule(line: string): Rule | null | undefined {
-  const text = line.trim();
-  if (text === '' || text.startsWith('#')) return null;
-  const m = RULE.exec(text);
-  if (!m) return undefined;
-  const [, nopasswd, who = '', target = 'root', dir, stdin, rest = ''] = m;
-  if (!validWho(who) || (target !== 'ALL' && !NAME.test(target))) return undefined;
-  const cwd = dir === undefined ? undefined : cwdOf(dir);
-  if (cwd === '') return undefined;
-  const rule = {
-    nopasswd: !!nopasswd,
-    who,
-    target,
-    ...(cwd !== undefined ? { cwd } : {}),
-    ...(stdin === 'none' ? { stdin: 'none' as const } : {}),
-  };
-  if (rest.trim() === '*') return { ...rule, cmnd: '*' };
-  const words = splitPatterns(rest);
-  const [first, ...args] = words ?? [];
-  const path = first ? literal(first) : '';
-  if (!path.startsWith('/')) return undefined;
-  const only = args.length === 1 && args[0]?.length === 1 && args[0][0] === '';
-  if (only && /\s""$/.test(rest.trim())) return { ...rule, cmnd: { path, args: [] } };
-  return { ...rule, cmnd: args.length === 0 ? { path } : { path, args } };
-}
-
-function recordedBare(line: string, file: string, rule: Rule): boolean {
-  if (rule.cmnd === '*' || rule.cmnd.args !== undefined || !rule.nopasswd) return false;
-  if (file !== `${SUDOERS_D}/${rule.who}` || !NAME.test(rule.who) || !NAME.test(rule.target)) {
-    return false;
-  }
-  const head = `NOPASSWD ${rule.who} (${rule.target}) `;
-  const cmnd = `Cmnd ${quoteWord(rule.cmnd.path)}`;
-  const cwd = rule.cwd === undefined ? '' : `Cwd ${quoteWord(rule.cwd)} `;
-  const stdin = rule.stdin === undefined ? '' : 'Stdin none ';
-  return line.trimEnd() === `${head}${cwd}${stdin}${cmnd}`;
 }
 
 function flags(parsed: Parsed, arg: string, next: string | undefined): number | string {
@@ -532,35 +355,79 @@ export class Sudo {
     return at;
   }
 
-  private async policyFile(path: string): Promise<Rule[]> {
+  private async policyFile(path: string): Promise<PolicyFile> {
+    const skipped = (message: string) => ({ path, rules: [], problems: [{ message }], ok: false });
+    if (!(await this.o.fs.lstat(path).catch(() => undefined))) {
+      return { path, rules: [], problems: [], ok: false };
+    }
     if (!(await this.trusted(path))) {
-      this.warn(`sudo: ${path} skipped: it must be root's, no symlink, and writable by root only`);
-      return [];
+      return skipped("it must be root's, no symlink, and writable by root only");
     }
-    const text = await this.o.fs.readFile(path).catch(() => '');
-    const rules: Rule[] = [];
-    for (const [n, line] of text.split('\n').entries()) {
-      const rule = parseRule(line);
-      if (rule && recordedBare(line, path, rule) && rule.cmnd !== '*') {
-        rules.push({ ...rule, cmnd: { path: rule.cmnd.path, args: [] } });
-      } else if (rule) rules.push(rule);
-      else if (rule === undefined) this.warn(`sudo: ${path}:${n + 1}: bad line skipped: ${line}`);
+    let text: string;
+    try {
+      text = await this.o.fs.readFile(path);
+    } catch (err) {
+      const code = (err as { code?: unknown }).code;
+      return skipped(`it can't be read (${typeof code === 'string' ? code : 'error'})`);
     }
-    return rules;
+    const { rules, errors } = parsePolicy(text, path);
+    return { path, rules, problems: errors, ok: true };
   }
 
-  private async policy(): Promise<Rule[]> {
-    const rules = await this.policyFile(SUDOERS);
+  private async policy(): Promise<PolicyFile[]> {
+    const files = [await this.policyFile(SUDOERS)];
     const names = await this.o.fs.readdir(SUDOERS_D).catch(() => [] as string[]);
     if (names.length > 0 && !(await this.trusted(SUDOERS_D))) {
-      this.warn(`sudo: ${SUDOERS_D} skipped: it must be root's and writable by root only`);
-      return rules;
+      const message = "it must be root's and writable by root only";
+      files.push({ path: SUDOERS_D, rules: [], problems: [{ message }], ok: false });
+      return files;
     }
     for (const name of [...names].sort()) {
       if (name.startsWith('.') || name.endsWith('~')) continue;
-      rules.push(...(await this.policyFile(`${SUDOERS_D}/${name}`)));
+      files.push(await this.policyFile(`${SUDOERS_D}/${name}`));
     }
-    return rules;
+    return files;
+  }
+
+  private async policyRules(caller: SudoCaller): Promise<Rule[]> {
+    const files = await this.policy();
+    for (const { path, problems } of files) {
+      for (const problem of problems) {
+        const text =
+          problem.line === undefined
+            ? `sudo: ${path} skipped: ${problem.message}`
+            : `sudo: ${path}:${problem.line}: line skipped: ${problem.message}`;
+        this.warn(text);
+        await caller.report?.(text);
+      }
+    }
+    return files.flatMap((f) => f.rules);
+  }
+
+  async check(cred: Cred, call: VisudoCall): Promise<VisudoResult> {
+    const lines: VisudoResult['lines'] = [];
+    let ok = true;
+    const report = ({ path, problems, ok: read }: PolicyFile) => {
+      for (const problem of problems) {
+        const where =
+          problem.line === undefined ? `${path}: sudo skips it:` : `${path}:${problem.line}:`;
+        lines.push([2, `visudo: ${where} ${problem.message}`]);
+      }
+      if (read && problems.length === 0) lines.push([1, `${path}: parsed OK`]);
+      if (problems.length > 0) ok = false;
+    };
+    if (call.files !== undefined) {
+      for (const { name, text } of call.files) {
+        report({ path: name, rules: [], problems: parsePolicy(text).errors, ok: true });
+      }
+      return { lines, ok };
+    }
+    if (this.o.mode === 'enforce' && cred.euid !== 0) {
+      const hint = 'check the policy as root (sudo visudo -c), or a file with visudo -c -f <file>';
+      return { lines: [[2, `visudo: ${SUDOERS}: Permission denied: ${hint}`]], ok: false };
+    }
+    for (const file of await this.policy()) report(file);
+    return { lines, ok };
   }
 
   private async groupIds(): Promise<Map<string, number>> {
@@ -631,12 +498,13 @@ export class Sudo {
       return { run: parsed.command };
     }
     const { cred } = caller;
+    const policy = await this.policyRules(caller);
     const self = await this.o.users.lookup(cred.ruid);
     if (!self) return failed('EPERM', `sudo: uid ${cred.ruid} is not in the passwd database`);
     const target = await this.lookup(parsed.user);
     if (!target) return failed('ENOENT', `sudo: unknown user ${parsed.user}`);
     const root = cred.euid === 0;
-    const rules = root ? [] : await this.policy();
+    const rules = root ? [] : policy;
     const applies = await this.applies(self, cred);
     if (parsed.list) return this.listed(self, root, rules.filter(applies));
     const [word = '', ...args] = parsed.command;

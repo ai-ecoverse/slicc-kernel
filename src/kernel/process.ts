@@ -20,7 +20,14 @@ import { inProc, ProcTree, procAlias } from '../process/wasi/wasi-procfs.ts';
 import type { LinkRecord } from '../process/wasi/wasix-linker.ts';
 import type { SourceCheck } from '../realm/sync-fs-token-registry.ts';
 import type { SyncFsResult } from '../realm/sync-fs-wire.ts';
-import type { SudoCall, SudoResult, SudoStdin } from '../sudo.ts';
+import {
+  type SudoCall,
+  type SudoResult,
+  type SudoStdin,
+  type VisudoCall,
+  type VisudoResult,
+  visudoCall,
+} from '../sudo.ts';
 import {
   type ChildEvent,
   type ChildForker,
@@ -255,6 +262,7 @@ export type WasmSyscall =
     }
   | { op: 'proc-captured'; pid: number; slot: number }
   | SudoCall
+  | VisudoCall
   | CrontabCall
   | RunRequest
   | { op: 'proc-exit'; status: number }
@@ -441,6 +449,7 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'proc-wait',
   'proc-captured',
   'proc-sudo',
+  'proc-visudo',
   'proc-crontab',
   'proc-run',
   'proc-exit',
@@ -589,7 +598,14 @@ export interface WasmProcessOptions {
 
   processes?: () => ProcessListing;
 
-  sudo?: (call: SudoCall, signal: AbortSignal, stdin: SudoStdin) => Promise<SudoResult>;
+  sudo?: (
+    call: SudoCall,
+    signal: AbortSignal,
+    stdin: SudoStdin,
+    report: (line: string) => Promise<void>
+  ) => Promise<SudoResult>;
+
+  visudo?: (call: VisudoCall) => Promise<VisudoResult>;
 
   crontab?: (call: CrontabCall) => Promise<CrontabResult>;
 
@@ -2282,9 +2298,19 @@ export class WasmProcess {
         return { ok: true, kind: 'bytes', bytes: this.children.captured(req.pid, req.slot) };
       case 'proc-sudo':
         return { ok: true, kind: 'json', json: await this.sudo(req, cancelled) };
+      case 'proc-visudo':
+        return { ok: true, kind: 'json', json: await this.visudo(req) };
       case 'proc-crontab':
         return { ok: true, kind: 'json', json: await this.crontab(req) };
     }
+  }
+
+  private async visudo(req: VisudoCall): Promise<VisudoResult> {
+    const { visudo } = this.options;
+    if (!visudo) throw new KernelError('ENOSYS');
+    const call = visudoCall(req);
+    if (!call) throw new KernelError('EINVAL');
+    return visudo(call);
   }
 
   private async crontab(req: CrontabCall): Promise<CrontabResult> {
@@ -2321,7 +2347,9 @@ export class WasmProcess {
       cwd: typeof req.cwd === 'string' && req.cwd.startsWith('/') ? req.cwd : '/',
       ...(typeof req.term === 'string' ? { term: req.term } : {}),
     };
-    const answer = await sudo(call, this.blockingSignal(cancelled), this.stdinKind());
+    const answer = await sudo(call, this.blockingSignal(cancelled), this.stdinKind(), (line) =>
+      this.complainLine(line)
+    );
     if (!('grant' in answer)) return answer;
     if (this.dying) throw new KernelError('EINTR');
     if (answer.notice !== undefined) await this.complainLine(answer.notice);

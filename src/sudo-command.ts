@@ -76,3 +76,89 @@ export const SUDO_SOURCE = [
   '}',
   '',
 ].join('\n');
+
+export const VISUDO_PATH = '/usr/bin/visudo';
+
+export const VISUDO_COMMAND: Command = {
+  name: 'visudo',
+  abi: 'js',
+  glue: VISUDO_PATH,
+  wasm: VISUDO_PATH,
+  argv0: 'visudo',
+};
+
+export const VISUDO_SOURCE = `export default async function visudo(ctx) {
+  const say = (fd, text) => ctx.write(fd, text).catch(() => undefined);
+  const USAGE = "usage: visudo -c [-qs] [[-f] sudoers ...]\\n";
+  const usage = async (why) => {
+    await say(2, (why ? "visudo: " + why + "\\n" : "") + USAGE);
+    return 1;
+  };
+  const args = ctx.argv.slice(1);
+  const files = [];
+  let check = false;
+  let quiet = false;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--check") check = true;
+    else if (arg === "--quiet") quiet = true;
+    else if (arg === "--strict") continue;
+    else if (arg === "--help") return say(1, USAGE).then(() => 0);
+    else if (arg === "--file" || arg.startsWith("--file=")) {
+      const file = arg === "--file" ? args[++i] : arg.slice(7);
+      if (file === undefined) return usage("option '--file' requires an argument");
+      files.push(file);
+    } else if (arg === "-" || !arg.startsWith("-")) files.push(arg);
+    else if (arg.startsWith("--")) return usage("unrecognized option '" + arg + "'");
+    else {
+      for (let j = 1; j < arg.length; j++) {
+        const flag = arg[j];
+        if (flag === "c") check = true;
+        else if (flag === "q") quiet = true;
+        else if (flag === "s") continue;
+        else if (flag === "h") return say(1, USAGE).then(() => 0);
+        else if (flag === "f") {
+          const file = arg.slice(j + 1) || args[++i];
+          if (file === undefined) return usage("option requires an argument -- 'f'");
+          files.push(file);
+          break;
+        } else return usage("invalid option -- '" + flag + "'");
+      }
+    }
+  }
+  if (!check) {
+    await say(2, "visudo: only -c is supported: check a file with visudo -c -f <file>, install it as root with mode 0440 in /etc/sudoers.d, and check the policy with sudo visudo -c\\n");
+    return 1;
+  }
+  const decode = (bytes) => new TextDecoder().decode(bytes);
+  const read = async (file) => {
+    if (file !== "-") return decode(await ctx.fs.readFile(ctx.resolve(file)));
+    const stream = new TextDecoder();
+    const parts = [];
+    for (;;) {
+      const chunk = await ctx.read(0);
+      if (chunk.length === 0) break;
+      parts.push(stream.decode(chunk, { stream: true }));
+    }
+    return parts.join("") + stream.decode();
+  };
+  const texts = [];
+  for (const file of files) {
+    try {
+      texts.push({ name: file === "-" ? "stdin" : file, text: await read(file) });
+    } catch (err) {
+      if (!quiet) await say(2, "visudo: " + file + ": " + (err && err.code ? err.code : String(err)) + "\\n");
+      return 1;
+    }
+  }
+  let answer;
+  try {
+    answer = texts.length > 0 ? await ctx.visudo({ files: texts }) : await ctx.visudo();
+  } catch (err) {
+    if (!quiet) await say(2, "visudo: " + (err && err.code ? err.code : String(err)) + "\\n");
+    return 1;
+  }
+  if (!quiet) for (const [fd, line] of answer.lines) await say(fd, line + "\\n");
+  return answer.ok ? 0 : 1;
+}
+`;

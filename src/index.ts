@@ -124,6 +124,8 @@ export type {
   JsSelectSets,
   JsSignal,
   JsSudoAnswer,
+  JsVisudoAnswer,
+  JsVisudoCall,
   JsWriteOptions,
 } from './process/js/js-context.ts';
 export type { JsStatFs } from './process/js/js-io.ts';
