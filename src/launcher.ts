@@ -187,8 +187,23 @@ import { servedFsCalls, staleFdCount } from './realm/sync-fs-dispatch.ts';
 import type { SourceCheck } from './realm/sync-fs-token-registry.ts';
 import { anyBlocked, type BlockedMask } from './realm/sync-sab-wire.ts';
 import { REFUSED_PATH, REFUSED_SOURCE, refusing } from './refused-command.ts';
-import { type ApproveHook, Sudo, type SudoCall, type SudoResult, type SudoStdin } from './sudo.ts';
-import { SUDO_COMMAND, SUDO_PATH, SUDO_SOURCE } from './sudo-command.ts';
+import {
+  type ApproveHook,
+  Sudo,
+  type SudoCall,
+  type SudoResult,
+  type SudoStdin,
+  type VisudoCall,
+  type VisudoResult,
+} from './sudo.ts';
+import {
+  SUDO_COMMAND,
+  SUDO_PATH,
+  SUDO_SOURCE,
+  VISUDO_COMMAND,
+  VISUDO_PATH,
+  VISUDO_SOURCE,
+} from './sudo-command.ts';
 import {
   type Account,
   credOf,
@@ -485,7 +500,7 @@ const LAYOUT: ReadonlyArray<[string, number]> = [
   ['/usr', 0o755],
   ['/usr/local', 0o755],
 ];
-const IN_TREE: ReadonlySet<string> = new Set([SUDO_PATH, CRONTAB_PATH]);
+const IN_TREE: ReadonlySet<string> = new Set([SUDO_PATH, VISUDO_PATH, CRONTAB_PATH]);
 const LOAD_SAMPLE_MS = 5000;
 const LOAD_WINDOWS_MS = [60_000, 300_000, 900_000] as const;
 const encoder = new TextEncoder();
@@ -1093,6 +1108,7 @@ export class Launcher {
         .then((commands) =>
           this.refusals(commands)
             .set(SUDO_COMMAND.name, SUDO_COMMAND)
+            .set(VISUDO_COMMAND.name, VISUDO_COMMAND)
             .set(CRONTAB_COMMAND.name, CRONTAB_COMMAND)
         );
       this.catalogs.set(scope, found);
@@ -2030,6 +2046,9 @@ export class Launcher {
     if (target.abi === 'js' && target.wasm === SUDO_PATH) {
       return { abi: 'js', glue: SUDO_SOURCE, path: SUDO_PATH };
     }
+    if (target.abi === 'js' && target.wasm === VISUDO_PATH) {
+      return { abi: 'js', glue: VISUDO_SOURCE, path: VISUDO_PATH };
+    }
     if (target.abi === 'js' && target.wasm === CRONTAB_PATH) {
       return { abi: 'js', glue: CRONTAB_SOURCE, path: CRONTAB_PATH };
     }
@@ -2360,7 +2379,8 @@ export class Launcher {
         fileIds: this.rootFs.fileIdWrites?.() ?? 0,
         holds: this.rootFs.holdCounts?.(),
       }),
-      sudo: (call, signal, stdin) => this.sudo(pid, call, signal, stdin),
+      sudo: (call, signal, stdin, report) => this.sudo(pid, call, signal, stdin, report),
+      visudo: (call) => this.visudo(pid, call),
       crontab: (call) => this.crontab(pid, call),
       openFiles: this.openFiles,
       nodes: stack.nodes,
@@ -2630,7 +2650,8 @@ export class Launcher {
     pid: number,
     call: SudoCall,
     signal: AbortSignal,
-    stdin: SudoStdin
+    stdin: SudoStdin,
+    report?: (line: string) => Promise<void>
   ): Promise<SudoResult> {
     const caller = {
       cred: this.credOf(pid),
@@ -2638,8 +2659,13 @@ export class Launcher {
       tags: this.tagsOf(pid),
       tty: this.described.get(pid)?.tty,
       stdin,
+      report,
     };
     return this.sudoer.request(caller, call, signal);
+  }
+
+  private visudo(pid: number, call: VisudoCall): Promise<VisudoResult> {
+    return this.sudoer.check(this.credOf(pid), call);
   }
 
   private spawner(ppid: number, report: (message: string) => void): ChildSpawner {
