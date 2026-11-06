@@ -567,6 +567,18 @@ const sealedFetchHook = {
   },
 };
 
+window.sealedAsk = { asks: [], aborted: [] };
+
+const sealedAskHook = (req, { signal }) => {
+  const state = window.sealedAsk;
+  const held = Promise.withResolvers();
+  const at = state.asks.push({ req, answer: held.resolve }) - 1;
+  signal.addEventListener('abort', () => state.aborted.push({ at, reason: String(signal.reason) }));
+  return held.promise;
+};
+
+window.answerAsk = (at, reply) => window.sealedAsk.asks[at].answer(reply);
+
 window.boot = async (options = {}) => {
   await install();
   const base = fetchTransport(options.hint ? { hint: options.hint } : {});
@@ -590,6 +602,7 @@ window.boot = async (options = {}) => {
       ...(options.protect ? { protect: protection(options.protect) } : {}),
       ...(options.clipboard ? { clipboard: clipboardHook } : {}),
       ...(options.sealedFetch ? { sealed: sealedFetchHook } : {}),
+      ...(options.sealedAsk ? { sealed: sealedAskHook } : {}),
       ...(options.requests ? { requests: requestHook } : {}),
       ...(options.worker ? { worker: new URL(options.worker, location.href) } : {}),
     })

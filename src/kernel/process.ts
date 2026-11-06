@@ -73,7 +73,7 @@ import type { MountLine, ProcessListing } from './proc-info.ts';
 import type { DlState, ForkState } from './protocol.ts';
 import { PTY_OPS, type PtySyscall, type PtyTable, ptsNumber, ptySyscall, sizeKey } from './pty.ts';
 import { type RunRequest, runChild } from './run-child.ts';
-import { type SealedBroker, type SealedCaller, tagFields } from './sealed.ts';
+import { type SealedBroker, type SealedCaller, type SealedRequester, tagFields } from './sealed.ts';
 import { selectFds } from './select.ts';
 import { SEM_OPS, SemHandles, type SemSyscall, type SemTable, semSyscall } from './sem.ts';
 import {
@@ -1393,7 +1393,10 @@ export class WasmProcess {
     cancelled: AbortSignal
   ): Promise<number> {
     const file = this.fds.get(fd).file;
-    if (file.sealed) return file.sealed.send(body, await this.sealedCaller(), this.gone.signal);
+    if (file.sealed) {
+      const caller = await this.sealedCaller();
+      return file.sealed.send(body, caller, this.gone.signal, () => this.sealedRequester());
+    }
     if (!file.write) throw new KernelError('EBADF');
     if (file.embedder) return this.writeEmbedder(file, body, nonblock, cancelled);
     if (!pollFile(file).writable) {
@@ -1648,6 +1651,11 @@ export class WasmProcess {
     const broker = this.options.sealed as SealedBroker;
     const ids = { pid: shown?.pid ?? this.pid, ppid: shown?.ppid ?? 0 };
     return broker.stamp(ids, this.cred, broker.tagOf(this.pid));
+  }
+
+  private async sealedRequester(): Promise<SealedRequester | undefined> {
+    const facts = await (this.options.sealed as SealedBroker).factsOf(this.pid);
+    return facts && { ...facts, stdin: this.stdinKind() };
   }
 
   private guarded(): Guard | undefined {

@@ -100,6 +100,7 @@ export type {
   SealedCaller,
   SealedHook,
   SealedRequest,
+  SealedRequester,
 } from './kernel/sealed.ts';
 export type { ConnectorStamp } from './kernel/socket.ts';
 export type {
