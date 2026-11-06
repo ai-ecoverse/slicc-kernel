@@ -74,7 +74,7 @@ test('a job runs at the wall time that date shows in its environment, in the sys
   await minutes(1);
   assert.equal(await until(() => read('/home/cone/ran'), 'the job'), '18:22 CET Europe/Berlin\n');
   assert.match(
-    await read('/var/log/cron/cone/selftest.log'),
+    await until(() => read('/var/log/cron/cone/selftest.log'), 'the log'),
     /^--- 2026-11-06T17:22:00\.000Z exit=0 missed=0 ---\n/
   );
 });
@@ -162,19 +162,41 @@ test('across daylight saving changes a fixed-time job runs once, and one in the 
     const all = runs(await read(half)).filter((line) => line.includes('2026-10-25'));
     return all.length === 6 && all;
   }, 'the half-hourly runs');
+  assert.deepEqual(autumn.map((line) => line.slice(4, 28)).sort(), [
+    '2026-10-25T00:00:00.000Z',
+    '2026-10-25T00:30:00.000Z',
+    '2026-10-25T01:00:00.000Z',
+    '2026-10-25T01:30:00.000Z',
+    '2026-10-25T02:00:00.000Z',
+    '2026-10-25T02:30:00.000Z',
+  ]);
+  const days = await until(async () => {
+    const all = runs(await read(fixed))
+      .map((line) => line.slice(4, 28))
+      .filter((due) => /^2026-(03-29|10-25)/.test(due));
+    return all.length >= 2 && all;
+  }, 'both fixed runs');
+  await delay(300);
   assert.deepEqual(
-    autumn.map((line) => line.slice(4, 28)),
-    [
-      '2026-10-25T00:00:00.000Z',
-      '2026-10-25T00:30:00.000Z',
-      '2026-10-25T01:00:00.000Z',
-      '2026-10-25T01:30:00.000Z',
-      '2026-10-25T02:00:00.000Z',
-      '2026-10-25T02:30:00.000Z',
-    ]
+    runs(await read(fixed))
+      .map((line) => line.slice(4, 28))
+      .filter((due) => /^2026-(03-29|10-25)/.test(due)),
+    days
   );
-  const days = runs(await read(fixed))
-    .map((line) => line.slice(4, 28))
-    .filter((due) => /^2026-(03-29|10-25)/.test(due));
   assert.deepEqual(days, ['2026-03-29T01:00:00.000Z', '2026-10-25T00:30:00.000Z']);
+});
+
+test('a yearly job in the repeated hour, installed months before, runs at its first occurrence', async (t) => {
+  const clock = fakeCronClock(Date.UTC(2026, 0, 1, 0, 0, 30), 'Europe/Berlin');
+  const { read, settle, until, as } = await boot(t, { clock });
+  const table = '# name: yearly\n30 2 25 10 * echo yearly\n';
+  assert.equal((await as('cone', 'crontab -', { stdin: table })).status, 0);
+  await settle();
+  clock.set(Date.UTC(2026, 9, 25, 0, 29, 30));
+  await settle();
+  clock.advance(60_000);
+  await settle();
+  const log = '/var/log/cron/cone/yearly.log';
+  const first = await until(async () => runs(await read(log))[0], 'the run');
+  assert.equal(first, '--- 2026-10-25T00:30:00.000Z exit=0 missed=0 ---');
 });

@@ -205,8 +205,9 @@ export function nextFire(schedule: Schedule, after: number, zone: Zone = UTC_ZON
     const wall = nextWall(schedule, at + offset);
     if (wall === null) return null;
     const found = at + (wall - (at + offset));
-    if (zone.offset(found) === offset) return found;
-    at = firstChange(zone, at, found, offset);
+    const change = firstChange(zone, at, found, offset);
+    if (change >= found && zone.offset(found) === offset) return found;
+    at = change;
   }
   return null;
 }
