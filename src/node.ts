@@ -6,7 +6,7 @@ import { MessageChannel, type MessagePort, type Worker } from 'node:worker_threa
 import type { CdpHook } from './cdp/types.ts';
 import type { MessagePortLike } from './client/protocol.ts';
 import { type ServedClient, serveClient } from './client/serve-client.ts';
-import type { CronClock } from './cron/clock.ts';
+import { type CronClock, clockZone } from './cron/clock.ts';
 import type { FacadeSpecs } from './facade/types.ts';
 import type { Attestation, AttestTombstone } from './fs/attest.ts';
 import type { DenialHook } from './fs/dac.ts';
@@ -42,6 +42,7 @@ import { bootWorker } from './node/worker-boot.ts';
 import { diagnosing } from './node/ws-diagnose.ts';
 import { signalNumber } from './serve.ts';
 import type { ApproveHook } from './sudo.ts';
+import { systemTimeZone } from './time-zone.ts';
 import { fetchTransport, type NetworkTransport } from './transport.ts';
 
 export type { CdpConnection, CdpHook, CdpRequest } from './cdp/types.ts';
@@ -140,6 +141,7 @@ export interface NodeKernelOptions {
   cdp?: CdpHook;
   facades?: FacadeSpecs;
   hostname?: string;
+  timeZone?: string;
   users?: UsersMode;
   onDenial?: DenialHook;
   sealed?: SealedOption;
@@ -558,6 +560,7 @@ function checkedRequests(hook: EmbedderHook): EmbedderHook {
 
 export async function createNodeKernel(options: NodeKernelOptions = {}): Promise<NodeKernel> {
   const hooks = sealedHooks(options.sealed);
+  const timeZone = systemTimeZone(options.timeZone, clockZone(options.cron?.clock));
   const root = options.root ?? memoryRoot();
   const fs = new OpfsFs(root, undefined, undefined, { ranged: isMemoryRoot(root) });
   await fs.reconcile();
@@ -595,6 +598,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     ...(options.cdp ? { cdp: options.cdp } : {}),
     ...(options.facades ? { facades: options.facades } : {}),
     ...(options.hostname !== undefined ? { hostname: options.hostname } : {}),
+    timeZone,
     users: options.users === undefined ? DEFAULT_USERS : options.users,
     ...(options.onDenial ? { onDenial: options.onDenial } : {}),
     ...(options.protect ? { protect: options.protect } : {}),

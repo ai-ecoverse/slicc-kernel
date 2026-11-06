@@ -1,7 +1,12 @@
 export interface CronClock {
   now(): number;
   readonly utc?: boolean;
+  readonly timeZone?: string;
   sleep(until: number, signal: AbortSignal): Promise<void>;
+}
+
+export function clockZone(clock: CronClock | undefined): string | undefined {
+  return clock?.timeZone ?? (clock?.utc === true ? 'UTC' : undefined);
 }
 
 export const systemCronClock: CronClock = {
@@ -34,7 +39,11 @@ interface Sleeper {
   ring: () => void;
 }
 
-export function fakeCronClock(start = Date.UTC(2026, 0, 1), utc = true): FakeCronClock {
+export function fakeCronClock(
+  start = Date.UTC(2026, 0, 1),
+  zone: boolean | string = true
+): FakeCronClock {
+  const timeZone = zone === true ? 'UTC' : zone === false ? undefined : zone;
   let now = start;
   const sleepers = new Set<Sleeper>();
   let idle: Array<() => void> = [];
@@ -51,7 +60,8 @@ export function fakeCronClock(start = Date.UTC(2026, 0, 1), utc = true): FakeCro
     for (const sleeper of [...sleepers]) if (sleeper.until <= now) sleeper.ring();
   };
   return {
-    utc,
+    utc: timeZone === 'UTC',
+    ...(timeZone !== undefined ? { timeZone } : {}),
     now: () => now,
     get sleepers() {
       return sleepers.size;

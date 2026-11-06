@@ -40,6 +40,7 @@ import type { ProcessMountPolicy, ProcessMountRequest } from './mount/syscall.ts
 import { sealedAnswerer } from './sealed-relay.ts';
 import type { FileChanged, InitRequest, KernelCall, TerminalAction } from './serve.ts';
 import type { ApproveHook, SudoRequest } from './sudo.ts';
+import { systemTimeZone } from './time-zone.ts';
 import { type NetworkTransport, serveTransport } from './transport.ts';
 import type { Account, AddUser, Group, RemoveUser } from './users.ts';
 
@@ -196,6 +197,7 @@ export interface KernelOptions {
   cdp?: CdpHook;
   facades?: FacadeSpecs;
   hostname?: string;
+  timeZone?: string;
   users?: UsersMode;
   onDenial?: DenialHook;
   sealed?: SealedOption;
@@ -410,6 +412,7 @@ async function initCall(
     ...(options.cdp ? { cdp: true } : {}),
     ...facadesInit(options.facades),
     ...(options.hostname !== undefined ? { hostname: options.hostname } : {}),
+    ...(options.timeZone !== undefined ? { timeZone: options.timeZone } : {}),
     users: options.users === undefined ? DEFAULT_USERS : options.users,
     ...(options.onDenial ? { denials: true } : {}),
     ...(hooks.request ? { sealed: true } : {}),
@@ -633,6 +636,7 @@ function checkOptions(options: KernelOptions): void {
   if (options.hostname !== undefined && !isHostname(options.hostname)) {
     throw new Error(`not a host name: ${String(options.hostname)}`);
   }
+  if (options.timeZone !== undefined) systemTimeZone(options.timeZone);
   if (options.protect) protectInit(options.protect);
   integrityOptions(options.protect?.integrity);
   facadesInit(options.facades);
