@@ -39,7 +39,8 @@ async function boot(t, { clock, fresh = true, ...options }) {
   const until = async (check, what) => {
     for (let i = 0; i < 400; i++) {
       const value = await check();
-      if (value) return value;
+      if (value != null && value !== false && !(Array.isArray(value) && value.length === 0))
+        return value;
       await delay(50);
     }
     assert.fail(`timed out waiting for ${what}`);
@@ -98,7 +99,7 @@ test('the time zone is the browser one unless the embedder names another, and a 
 });
 
 test('a schedule replaced under the same name counts from its install, not from the old line (item 5)', async (t) => {
-  const clock = fakeCronClock(Date.UTC(2026, 10, 6, 17, 20, 42));
+  const clock = fakeCronClock(Date.UTC(2026, 10, 6, 17, 20, 42), 'UTC');
   const { kernel, read, settle, until, minutes, as } = await boot(t, { clock });
   const log = '/var/log/cron/cone/selftest.log';
   const job = (when) => `# name: selftest\n${when} echo "missed $SLICC_CRON_MISSED"\n`;
@@ -111,11 +112,14 @@ test('a schedule replaced under the same name counts from its install, not from 
   await delay(300);
   assert.equal(await read(log), undefined);
   await minutes(1);
-  const lines = await until(async () => runs(await read(log)), 'the first run of the new schedule');
+  const lines = await until(async () => {
+    const found = runs(await read(log));
+    return found.length > 0 ? found : undefined;
+  }, 'the first run of the new schedule');
   assert.deepEqual(lines, ['--- 2026-11-06T17:24:00.000Z exit=0 missed=0 ---']);
   assert.match(await read(log), /missed 0\n$/);
   kernel.terminate();
-  const later = fakeCronClock(Date.UTC(2026, 10, 6, 17, 30, 10));
+  const later = fakeCronClock(Date.UTC(2026, 10, 6, 17, 30, 10), 'UTC');
   const again = await boot(t, { clock: later, root: kernel.root, fresh: false });
   await again.until(async () => runs(await again.read(log)).length === 2, 'the catch-up');
   assert.match(
