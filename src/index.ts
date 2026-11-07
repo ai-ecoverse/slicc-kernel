@@ -42,7 +42,7 @@ import type { FileChanged, InitRequest, KernelCall, TerminalAction } from './ser
 import type { ApproveHook, SudoRequest } from './sudo.ts';
 import { systemTimeZone } from './time-zone.ts';
 import { type NetworkTransport, serveTransport } from './transport.ts';
-import type { Account, AddUser, Group, RemoveUser } from './users.ts';
+import type { Account, AddGroup, AddUser, Group, RemoveUser } from './users.ts';
 
 export type { CdpConnection, CdpHook, CdpRequest } from './cdp/types.ts';
 export {
@@ -173,7 +173,7 @@ export {
   type NetworkWebSocket,
   type NetworkWebSocketRequest,
 } from './transport.ts';
-export type { Account, AddUser, Group, RemoveUser } from './users.ts';
+export type { Account, AddGroup, AddUser, Group, RemoveUser } from './users.ts';
 
 export interface NetworkOptions {
   transport?: NetworkTransport;
@@ -245,6 +245,7 @@ export interface ConnectOptions {
 
 export interface KernelGroups {
   list(): Promise<Group[]>;
+  add(name: string, options: AddGroup): Promise<Group>;
   addMember(group: string, user: string): Promise<Group>;
   removeMember(group: string, user: string): Promise<Group>;
 }
@@ -511,6 +512,8 @@ function kernelGroups(call: (req: KernelCall) => Promise<unknown>): KernelGroups
       (await call({ op, group, user })) as Group;
   return {
     list: async () => (await call({ op: 'groups-list' })) as Group[],
+    add: async (name: string, options: AddGroup) =>
+      (await call({ op: 'groups-add', name, gid: options?.gid })) as Group,
     addMember: member('groups-add-member'),
     removeMember: member('groups-remove-member'),
   };

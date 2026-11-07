@@ -24,6 +24,7 @@ export interface Denial {
   path: string;
   errno: string;
   tag?: string;
+  kind?: string;
   expected?: string;
   actual?: string;
 }

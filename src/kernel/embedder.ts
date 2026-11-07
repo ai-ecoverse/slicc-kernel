@@ -1,3 +1,4 @@
+import type { DenialHook } from '../fs/dac.ts';
 import type { UsersMode } from '../fs/types.ts';
 import { KernelError, type OpenAccess, OpenFile, type PollState } from './fd-table.ts';
 
@@ -26,6 +27,7 @@ export interface EmbedderStamp {
 export interface EmbedderKindPolicy {
   group?: string;
   users?: Array<string | number>;
+  session?: boolean;
 }
 
 export type EmbedderReply = ReadableStream<Uint8Array> | Uint8Array | string | undefined | void;
@@ -472,6 +474,7 @@ export class EmbedderBroker {
   private readonly open = new Map<number, Set<EmbedderChannel>>();
 
   readonly tagsOf: (pid: number) => readonly string[] | undefined;
+  denied: DenialHook | undefined;
 
   constructor(
     users: UsersMode,
@@ -498,7 +501,8 @@ export class EmbedderBroker {
   }
 
   private async allowed(policy: EmbedderKindPolicy, caller: EmbedderCaller): Promise<boolean> {
-    if (caller.euid === 0 || caller.euid === caller.sessionUid) return true;
+    if (caller.euid === 0) return true;
+    if (policy.session !== false && caller.euid === caller.sessionUid) return true;
     if (policy.group !== undefined) {
       const gid = await this.lookup.groupId(policy.group);
       if (gid !== undefined && (caller.egid === gid || caller.groups.includes(gid))) return true;
@@ -515,9 +519,21 @@ export class EmbedderBroker {
     if (!hook) throw new KernelError('ENOTSUP', 'no page answers requests for this session');
     const policy = Object.hasOwn(hook.kinds, kind) ? hook.kinds[kind] : undefined;
     if (!policy) throw new KernelError('ENOTSUP', `this embedder does not answer ${kind}`);
-    if (this.users !== 'off' && !(await this.allowed(policy, caller)))
-      throw new KernelError('EACCES', `${kind} is not allowed for this user`);
     const tags = caller.tags;
+    if (this.users !== 'off' && !(await this.allowed(policy, caller))) {
+      try {
+        this.denied?.({
+          pid: caller.pid,
+          uid: caller.euid,
+          op: 'embedder',
+          path: EMBEDDER_PATH,
+          errno: 'EACCES',
+          kind,
+          ...(tags?.length ? { tag: tags[0] as string } : {}),
+        });
+      } catch {}
+      throw new KernelError('EACCES', `${kind} is not allowed for this user`);
+    }
     return {
       pid: caller.shownPid,
       uid: caller.euid,
@@ -564,6 +580,7 @@ export function kindsOf(hook: EmbedderHook): Record<string, EmbedderKindPolicy> 
       {
         ...(policy?.group !== undefined ? { group: String(policy.group) } : {}),
         ...(policy?.users ? { users: [...policy.users] } : {}),
+        ...(policy?.session === false ? { session: false } : {}),
       },
     ])
   );

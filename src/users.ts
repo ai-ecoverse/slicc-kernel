@@ -7,12 +7,14 @@ export const GROUP = '/etc/group';
 
 export const DEFAULT_PASSWD =
   'root:x:0:0:root:/root:/bin/bash\nnobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\n';
-export const DEFAULT_GROUP = 'root:x:0:\nsudo:x:27:\nusers:x:100:\nnogroup:x:65534:\n';
+export const DEFAULT_GROUP =
+  'root:x:0:\ndialout:x:20:\nsudo:x:27:\nusers:x:100:\nnogroup:x:65534:\n';
 
 const NAME = /^[a-z_][a-z0-9_.-]*$/;
 const MAX_NAME = 255;
 const FIRST_UID = 1000;
 const LAST_UID = 60000;
+const MAX_GID = 0xfffffffe;
 const USERS_GROUP = 'users';
 const HOME_DIR = /^\/home\/[^/]+$/;
 export const SYSTEM_PNPM_HOME = '/usr/local/share/pnpm';
@@ -35,6 +37,10 @@ export interface AddUser {
   umask?: number;
   homeGroup?: string;
   homeMode?: number;
+}
+
+export interface AddGroup {
+  gid: number;
 }
 
 export interface Group {
@@ -395,6 +401,27 @@ export class UserDb {
   async groups(): Promise<Group[]> {
     const { group } = await this.tables();
     return parsed(group).map(({ name, gid, members }) => ({ name, gid, members: [...members] }));
+  }
+
+  addGroup(name: string, gid: number): Promise<Group> {
+    return this.serial(async () => {
+      if (typeof name !== 'string' || name.length > MAX_NAME || !NAME.test(name)) {
+        throw fsError('EINVAL', `not a group name: ${String(name)}`);
+      }
+      if (typeof gid !== 'number' || !Number.isInteger(gid) || gid < 0 || gid > MAX_GID) {
+        throw fsError('EINVAL', `not a group id: ${String(gid)}`);
+      }
+      const { group } = await this.tables();
+      const rows = parsed(group);
+      const found = rows.find((g) => g.name === name);
+      if (found) return { name: found.name, gid: found.gid, members: [...found.members] };
+      const taken = rows.find((g) => g.gid === gid);
+      if (taken) throw fsError('EEXIST', `group id ${gid} is group ${taken.name}`);
+      group.push({ name, gid, members: [] });
+      await this.fs.mkdir('/etc', { recursive: true });
+      await this.fs.writeFile(GROUP, formatGroup(group));
+      return { name, gid, members: [] };
+    });
   }
 
   addMember(group: string, user: string): Promise<Group> {
