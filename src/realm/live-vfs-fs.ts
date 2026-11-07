@@ -1340,6 +1340,7 @@ export interface LiveMountFsApi extends LiveFsApi {
   root?: MemfsRoot;
   rename?(from: string, to: string): void;
   lookupPath?(path: string, opts?: { follow?: boolean; parent?: boolean }): { node: object };
+  cwd?(): string;
   sliccRename?: true;
   sliccCreateParent?: true;
   sliccKept?: true;
@@ -1614,20 +1615,37 @@ function aboveOf(path: string): string {
   return above <= 0 ? '/' : parent.slice(0, above);
 }
 
-function refreshCreateParent(bridge: SyncFsPosixBridge, path: string): void {
+function absoluteCreatePath(Fs: LiveMountFsApi, path: string): string | undefined {
+  if (typeof path !== 'string' || path.length === 0) return undefined;
+  if (path.startsWith('/')) return path.replace(/\/+$/, '') || '/';
+  const cwd = Fs.cwd?.();
+  if (typeof cwd !== 'string') return undefined;
+  const base = cwd.replace(/\/+$/, '') || '';
+  const rel = path.replace(/^\.\//, '');
+  if (rel === '' || rel === '.') return base || '/';
+  return `${base}/${rel}`.replace(/\/{2,}/g, '/');
+}
+
+function refreshCreateParent(Fs: LiveMountFsApi, bridge: SyncFsPosixBridge, path: string): void {
+  const abs = absoluteCreatePath(Fs, path);
+  if (abs === undefined) return;
   createParentRefresh++;
-  const above = aboveOf(typeof path === 'string' ? path : '');
   try {
-    bridge.readdir(above);
+    bridge.readdir(aboveOf(abs));
   } catch {}
 }
 
-function oncePastStaleParent<T>(bridge: SyncFsPosixBridge, path: string, op: () => T): T {
+function oncePastStaleParent<T>(
+  Fs: LiveMountFsApi,
+  bridge: SyncFsPosixBridge,
+  path: string,
+  op: () => T
+): T {
   try {
     return op();
   } catch (err) {
     if ((err as { errno?: number }).errno !== wasiErrno('ENOENT')) throw err;
-    refreshCreateParent(bridge, path);
+    refreshCreateParent(Fs, bridge, path);
     return op();
   }
 }
@@ -1637,21 +1655,22 @@ function guardCreateParents(Fs: LiveMountFsApi, bridge: SyncFsPosixBridge): void
   Fs.sliccCreateParent = true;
   const mkdir = Fs.mkdir?.bind(Fs);
   if (mkdir) {
-    Fs.mkdir = (path, mode) => oncePastStaleParent(bridge, path, () => mkdir(path, mode));
+    Fs.mkdir = (path, mode) => oncePastStaleParent(Fs, bridge, path, () => mkdir(path, mode));
   }
   const symlink = Fs.symlink?.bind(Fs);
   if (symlink) {
-    Fs.symlink = (target, path) => oncePastStaleParent(bridge, path, () => symlink(target, path));
+    Fs.symlink = (target, path) =>
+      oncePastStaleParent(Fs, bridge, path, () => symlink(target, path));
   }
   const rename = Fs.rename?.bind(Fs);
   if (rename) {
-    Fs.rename = (from, to) => oncePastStaleParent(bridge, to, () => rename(from, to));
+    Fs.rename = (from, to) => oncePastStaleParent(Fs, bridge, to, () => rename(from, to));
   }
   const open = Fs.open?.bind(Fs);
   if (open) {
     Fs.open = (path, flags, mode) => {
       if ((flags & O_CREAT) === 0) return open(path, flags, mode);
-      return oncePastStaleParent(bridge, path, () => open(path, flags, mode));
+      return oncePastStaleParent(Fs, bridge, path, () => open(path, flags, mode));
     };
   }
 }
@@ -1756,6 +1775,7 @@ export function linkLive(Fs: LiveLinkFs, from: string, to: string, follow: boole
   if (!source.live) return false;
   const parentAt = target.slice(0, slash) || '/';
   const parent = oncePastStaleParent(
+    Fs as LiveMountFsApi,
     source.mount.opts.bridge,
     target,
     () => Fs.lookupPath(parentAt, { follow: true }).node as LiveFsNode
