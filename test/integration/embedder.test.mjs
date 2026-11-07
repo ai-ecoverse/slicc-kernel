@@ -4,6 +4,17 @@ import { join, relative } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { attachKernel, createNodeKernel } from '../../dist/node.js';
+import {
+  AHEAD,
+  CHUNK,
+  digest,
+  FLOW,
+  FLOW_CLOSE_SH,
+  FLOW_SH,
+  heldBack,
+  READ,
+  TOTAL,
+} from './embedder-flow.mjs';
 
 const modules = new URL('../../node_modules/@ai-ecoverse/', import.meta.url);
 const TIMEOUT = { timeout: 120_000 };
@@ -404,3 +415,72 @@ test(
     assert.equal(r.stdout, '4000000', JSON.stringify(r));
   }
 );
+
+function flowing() {
+  const asked = [];
+  const hook = {
+    kinds: { 'test.flow': {} },
+    handle: async () => {
+      const state = { produced: 0, pulls: [], cancelled: Promise.withResolvers() };
+      asked.push(state);
+      return new ReadableStream({
+        pull(controller) {
+          if (state.produced >= TOTAL) return controller.close();
+          controller.enqueue(new Uint8Array(CHUNK).fill((state.produced / CHUNK) % 251));
+          state.produced += CHUNK;
+          state.pulls.push([performance.now(), state.produced]);
+        },
+        cancel(reason) {
+          state.cancelled.resolve(String(reason));
+        },
+      });
+    },
+  };
+  return { hook, asked };
+}
+
+test('a slow reader holds the page back, on the Node entry and an attached client, within two chunks, and gets the whole reply; an early close cancels it (media capture)', {
+  timeout: 300_000,
+}, async (t) => {
+  const { hook, asked } = flowing();
+  const { kernel } = await booted(t, { requests: hook });
+  await kernel.writeFile(
+    '/node_modules/embflow/package.json',
+    JSON.stringify({
+      name: 'embflow',
+      slicc: { commands: { embflow: { abi: 'js', module: 'flow.mjs' } } },
+    })
+  );
+  await kernel.writeFile('/node_modules/embflow/flow.mjs', FLOW);
+  const attached = await attachKernel(await kernel.connect({ requests: 'attach' }), {
+    requests: hook,
+  });
+  t.after(() => attached.close?.());
+  const whole = `${digest(0, READ)}  -\n${digest(READ, TOTAL)}  -\n`;
+  for (const [via, client] of [
+    ['node', kernel],
+    ['attached', attached],
+  ]) {
+    const run = async (argv) => {
+      const { status, stdout, stderr } = await client.run(argv, { cwd: '/tmp' });
+      return { status, stdout, stderr };
+    };
+    assert.deepEqual(await run(['embflow']), { status: 0, stdout: `${TOTAL} 0\n`, stderr: '' });
+    heldBack(asked.at(-1), `${via} js`);
+    const sh = await run(['bash', '-c', FLOW_SH]);
+    assert.deepEqual(sh, { status: 0, stdout: whole, stderr: '' });
+    heldBack(asked.at(-1), `${via} sh`);
+    assert.deepEqual(await run(['embflow', 'close']), {
+      status: 0,
+      stdout: `${READ}\n`,
+      stderr: '',
+    });
+    assert.equal(await asked.at(-1).cancelled.promise, 'closed');
+    assert.ok(asked.at(-1).produced <= READ + AHEAD, `${via} js close`);
+    const closed = await run(['bash', '-c', FLOW_CLOSE_SH]);
+    assert.deepEqual(closed, { status: 0, stdout: `${READ}\nclosed\n`, stderr: '' });
+    assert.equal(await asked.at(-1).cancelled.promise, 'closed');
+    assert.ok(asked.at(-1).produced <= READ + AHEAD, `${via} sh close`);
+  }
+  assert.equal(asked.length, 8);
+});
