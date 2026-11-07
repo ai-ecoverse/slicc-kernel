@@ -55,6 +55,33 @@ test("a name another kernel creates while its notice is lost stays missing to a 
   assert.deepEqual(await mine('cat /tmp/nl/g'), ok('late\n'));
 });
 
+test('O_CREAT whose parent and name this kernel cached as missing succeeds once the parent is there, even before the create notice (#1777)', async (t) => {
+  const { page, bash } = await booted(chrome, t);
+  await installPackage(page, 'wasix-python', { skip: /^lib\/libpython[^/]*\.a$/ });
+  assert.deepEqual(await bash('rm -rf /tmp/e1777 && mkdir /tmp/e1777', { cwd: '/' }), ok());
+  const { mine, other } = await pair(page);
+  await freeze(page);
+  assert.deepEqual(
+    await mine('[ -e /tmp/e1777/ap ] || echo d; [ -e /tmp/e1777/ap/log ] || echo f'),
+    ok('d\nf\n')
+  );
+  assert.deepEqual(await other('mkdir -p /tmp/e1777/ap && echo made'), ok('made\n'));
+  assert.deepEqual(
+    await mine('[ -e /tmp/e1777/ap ] || echo d; [ -e /tmp/e1777/ap/log ] || echo f'),
+    ok('d\nf\n')
+  );
+  const opened = await mine(
+    py([
+      'fd = os.open("/tmp/e1777/ap/log", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)',
+      'os.write(fd, b"x\\n")',
+      'os.close(fd)',
+      'print("ok")',
+    ])
+  );
+  assert.deepEqual(opened, ok('ok\n'), JSON.stringify(opened));
+  assert.deepEqual(await other('cat /tmp/e1777/ap/log'), ok('x\n'));
+});
+
 test('a name another kernel created is found by O_EXCL, mkdir, symlink, link and rename-over even while a lookup still has it as missing (#984, #942)', async (t) => {
   const { page, bash } = await booted(chrome, t);
   assert.deepEqual(
