@@ -1598,6 +1598,12 @@ function guardRenames(Fs: LiveMountFsApi): void {
 
 const O_CREAT = 0o100;
 
+let createParentRefresh = 0;
+
+export function createParentRefreshCount(): number {
+  return createParentRefresh;
+}
+
 function aboveOf(path: string): string {
   const norm = path.replace(/\/+$/, '') || '/';
   if (norm === '/') return '/';
@@ -1609,10 +1615,21 @@ function aboveOf(path: string): string {
 }
 
 function refreshCreateParent(bridge: SyncFsPosixBridge, path: string): void {
+  createParentRefresh++;
   const above = aboveOf(typeof path === 'string' ? path : '');
   try {
     bridge.readdir(above);
   } catch {}
+}
+
+function oncePastStaleParent<T>(bridge: SyncFsPosixBridge, path: string, op: () => T): T {
+  try {
+    return op();
+  } catch (err) {
+    if ((err as { errno?: number }).errno !== wasiErrno('ENOENT')) throw err;
+    refreshCreateParent(bridge, path);
+    return op();
+  }
 }
 
 function guardCreateParents(Fs: LiveMountFsApi, bridge: SyncFsPosixBridge): void {
@@ -1620,30 +1637,21 @@ function guardCreateParents(Fs: LiveMountFsApi, bridge: SyncFsPosixBridge): void
   Fs.sliccCreateParent = true;
   const mkdir = Fs.mkdir?.bind(Fs);
   if (mkdir) {
-    Fs.mkdir = (path, mode) => {
-      refreshCreateParent(bridge, path);
-      return mkdir(path, mode);
-    };
+    Fs.mkdir = (path, mode) => oncePastStaleParent(bridge, path, () => mkdir(path, mode));
   }
   const symlink = Fs.symlink?.bind(Fs);
   if (symlink) {
-    Fs.symlink = (target, path) => {
-      refreshCreateParent(bridge, path);
-      return symlink(target, path);
-    };
+    Fs.symlink = (target, path) => oncePastStaleParent(bridge, path, () => symlink(target, path));
   }
   const rename = Fs.rename?.bind(Fs);
   if (rename) {
-    Fs.rename = (from, to) => {
-      refreshCreateParent(bridge, to);
-      return rename(from, to);
-    };
+    Fs.rename = (from, to) => oncePastStaleParent(bridge, to, () => rename(from, to));
   }
   const open = Fs.open?.bind(Fs);
   if (open) {
     Fs.open = (path, flags, mode) => {
-      if ((flags & O_CREAT) !== 0) refreshCreateParent(bridge, path);
-      return open(path, flags, mode);
+      if ((flags & O_CREAT) === 0) return open(path, flags, mode);
+      return oncePastStaleParent(bridge, path, () => open(path, flags, mode));
     };
   }
 }
@@ -1745,9 +1753,14 @@ export function linkLive(Fs: LiveLinkFs, from: string, to: string, follow: boole
   const slash = target.lastIndexOf('/');
   const name = target.slice(slash + 1);
   const source = Fs.lookupPath(from, { follow }).node as LiveFsNode;
-  if (source.live) refreshCreateParent(source.mount.opts.bridge, target);
-  const parent = Fs.lookupPath(target.slice(0, slash) || '/', { follow: true }).node as LiveFsNode;
-  if (!source.live || !parent.live) return false;
+  if (!source.live) return false;
+  const parentAt = target.slice(0, slash) || '/';
+  const parent = oncePastStaleParent(
+    source.mount.opts.bridge,
+    target,
+    () => Fs.lookupPath(parentAt, { follow: true }).node as LiveFsNode
+  );
+  if (!parent.live) return false;
   flushOne(Fs, source);
   const base = liveNodePath(parent);
   const bridge = source.mount.opts.bridge;

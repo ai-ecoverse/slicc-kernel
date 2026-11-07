@@ -82,6 +82,18 @@ test('O_CREAT whose parent and name this kernel cached as missing succeeds once 
   assert.deepEqual(await other('cat /tmp/e1777/ap/log'), ok('x\n'));
 });
 
+test('mkdir under an existing parent does not refresh via readdir of the grandparent (#1780)', async (t) => {
+  const { bash } = await booted(chrome, t);
+  assert.deepEqual(await bash('rm -rf /tmp/e1780f && mkdir -p /tmp/e1780f/ap', { cwd: '/' }), ok());
+  assert.deepEqual(
+    await bash(
+      'read -r b < /proc/sys/kernel/slicc_create_parent_refresh; mkdir /tmp/e1780f/ap/d; read -r a < /proc/sys/kernel/slicc_create_parent_refresh; echo "$b $a"',
+      { cwd: '/' }
+    ),
+    ok('0 0\n')
+  );
+});
+
 test('mkdir whose parent this kernel cached as missing succeeds once the parent is there, even before the create notice (#1780)', async (t) => {
   const { page, bash } = await booted(chrome, t);
   assert.deepEqual(await bash('rm -rf /tmp/e1780m && mkdir /tmp/e1780m', { cwd: '/' }), ok());

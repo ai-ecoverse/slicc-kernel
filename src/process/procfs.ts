@@ -5,6 +5,7 @@ import {
   type ProcessInfo,
   type ProcessListing,
 } from '../kernel/proc-info.ts';
+import { createParentRefreshCount } from '../realm/live-vfs-fs.ts';
 import { OS_RELEASE, procVersion } from '../version.ts';
 import { mountTable } from './process-fds.ts';
 
@@ -38,6 +39,7 @@ export const SYS_TREE: ProcSysTree = {
     slicc_fs_calls: (listing) => `${listing.fsCalls ?? 0}\n`,
     slicc_opfs_calls: (listing) => `${listing.opfsCalls ?? 0}\n`,
     slicc_opfs_ops: (listing) => `${listing.opfsOps ?? 0}\n`,
+    slicc_create_parent_refresh: (_listing) => `${createParentRefreshCount()}\n`,
     slicc_meta_transactions: ({ meta }) => `${meta?.reads ?? 0} ${meta?.writes ?? 0}\n`,
     slicc_cwd_checks: (listing) => `${listing.cwdChecks ?? 0}\n`,
     slicc_package_swaps: ({ swaps }) =>
