@@ -119,6 +119,7 @@ export type UsersRequest =
   | { id: number; op: 'users-remove'; name: string; options?: RemoveUser }
   | { id: number; op: 'users-list' }
   | { id: number; op: 'groups-list' }
+  | { id: number; op: 'groups-add'; name: string; gid: number }
   | { id: number; op: 'groups-add-member' | 'groups-remove-member'; group: string; user: string };
 
 export interface RoutesRequest {
@@ -398,6 +399,7 @@ const USERS_OPS: ReadonlySet<string> = new Set([
   'users-remove',
   'users-list',
   'groups-list',
+  'groups-add',
   'groups-add-member',
   'groups-remove-member',
 ]);
@@ -456,6 +458,7 @@ function usersOp(l: Launcher, req: UsersRequest): Promise<unknown> {
   if (req.op === 'users-add') return l.users.add(req.user);
   if (req.op === 'users-remove') return l.users.remove(req.name, req.options);
   if (req.op === 'groups-list') return l.users.groups();
+  if (req.op === 'groups-add') return l.users.addGroup(req.name, req.gid);
   if (req.op === 'groups-add-member') return l.users.addMember(req.group, req.user);
   if (req.op === 'groups-remove-member') return l.users.removeMember(req.group, req.user);
   return l.users.list();

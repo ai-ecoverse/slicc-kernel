@@ -890,6 +890,7 @@ export class Launcher {
       this.tagsOf(pid)
     );
     this.embedder = this.embedderBroker(options.embedder);
+    this.embedder.denied = options.onDenial;
     this.sealed = new SealedBroker(options.sealed, this.usersMode, undefined, (pid) =>
       this.tagsOf(pid)
     );

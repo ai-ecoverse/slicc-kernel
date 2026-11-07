@@ -703,6 +703,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     },
     groups: {
       list: () => guard(() => launcher.users.groups()),
+      add: (name, options) => guard(() => launcher.users.addGroup(name, options?.gid)),
       addMember: (group, user) => guard(() => launcher.users.addMember(group, user)),
       removeMember: (group, user) => guard(() => launcher.users.removeMember(group, user)),
     },
