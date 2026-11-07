@@ -148,52 +148,6 @@ test('symlink whose parent this kernel cached as missing succeeds once the paren
   assert.deepEqual(await other('readlink /tmp/e1780s/ap/l'), ok('target\n'));
 });
 
-test('link whose parent this kernel cached as missing reaches EPERM once the parent is there, not ENOENT (#1780)', async (t) => {
-  const { page, bash } = await booted(chrome, t);
-  await installPackage(page, 'wasix-python', { skip: /^lib\/libpython[^/]*\.a$/ });
-  assert.deepEqual(
-    await bash('rm -rf /tmp/e1780h && mkdir /tmp/e1780h && echo src > /tmp/e1780h/g', { cwd: '/' }),
-    ok()
-  );
-  const { mine, other } = await pair(page);
-  await freeze(page);
-  assert.deepEqual(await mine('[ -e /tmp/e1780h/ap ] || echo d'), ok('d\n'));
-  assert.deepEqual(await other('mkdir -p /tmp/e1780h/ap && echo made'), ok('made\n'));
-  assert.deepEqual(await mine('[ -e /tmp/e1780h/ap ] || echo d'), ok('d\n'));
-  assert.deepEqual(
-    await mine(
-      py([
-        'try:',
-        '  os.link("/tmp/e1780h/g", "/tmp/e1780h/ap/h")',
-        '  print("ok")',
-        'except OSError as e:',
-        '  import errno',
-        '  print(errno.errorcode.get(e.errno, e.errno))',
-      ])
-    ),
-    ok('EPERM\n')
-  );
-});
-
-test('rename into a parent this kernel cached as missing succeeds once the parent is there, even before the create notice (#1780)', async (t) => {
-  const { page, bash } = await booted(chrome, t);
-  await installPackage(page, 'wasix-python', { skip: /^lib\/libpython[^/]*\.a$/ });
-  assert.deepEqual(
-    await bash('rm -rf /tmp/e1780r && mkdir /tmp/e1780r && echo src > /tmp/e1780r/f', { cwd: '/' }),
-    ok()
-  );
-  const { mine, other } = await pair(page);
-  await freeze(page);
-  assert.deepEqual(await mine('[ -e /tmp/e1780r/ap ] || echo d'), ok('d\n'));
-  assert.deepEqual(await other('mkdir -p /tmp/e1780r/ap && echo made'), ok('made\n'));
-  assert.deepEqual(await mine('[ -e /tmp/e1780r/ap ] || echo d'), ok('d\n'));
-  assert.deepEqual(
-    await mine(py(['os.rename("/tmp/e1780r/f", "/tmp/e1780r/ap/f")', 'print("ok")'])),
-    ok('ok\n')
-  );
-  assert.deepEqual(await other('cat /tmp/e1780r/ap/f'), ok('src\n'));
-});
-
 test('mkdir with a cwd-relative path whose parent was a cached miss succeeds (#1780)', async (t) => {
   const { page, bash } = await booted(chrome, t);
   assert.deepEqual(await bash('rm -rf /tmp/e1780c && mkdir /tmp/e1780c', { cwd: '/' }), ok());

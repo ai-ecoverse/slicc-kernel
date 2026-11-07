@@ -1659,10 +1659,6 @@ function guardCreateParents(Fs: LiveMountFsApi, bridge: SyncFsPosixBridge): void
     Fs.symlink = (target, path) =>
       oncePastStaleParent(Fs, bridge, path, () => symlink(target, path));
   }
-  const rename = Fs.rename?.bind(Fs);
-  if (rename) {
-    Fs.rename = (from, to) => oncePastStaleParent(Fs, bridge, to, () => rename(from, to));
-  }
   const open = Fs.open?.bind(Fs);
   if (open) {
     Fs.open = (path, flags, mode) => {
@@ -1769,15 +1765,8 @@ export function linkLive(Fs: LiveLinkFs, from: string, to: string, follow: boole
   const slash = target.lastIndexOf('/');
   const name = target.slice(slash + 1);
   const source = Fs.lookupPath(from, { follow }).node as LiveFsNode;
-  if (!source.live) return false;
-  const parentAt = target.slice(0, slash) || '/';
-  const parent = oncePastStaleParent(
-    Fs as LiveMountFsApi,
-    source.mount.opts.bridge,
-    target,
-    () => Fs.lookupPath(parentAt, { follow: true }).node as LiveFsNode
-  );
-  if (!parent.live) return false;
+  const parent = Fs.lookupPath(target.slice(0, slash) || '/', { follow: true }).node as LiveFsNode;
+  if (!source.live || !parent.live) return false;
   flushOne(Fs, source);
   const base = liveNodePath(parent);
   const bridge = source.mount.opts.bridge;
