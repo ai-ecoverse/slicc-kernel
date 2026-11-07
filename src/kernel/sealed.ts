@@ -1,4 +1,5 @@
 import type { UsersMode } from '../fs/types.ts';
+import type { SudoStdin } from '../sudo.ts';
 import type { Cred } from './cred.ts';
 import { isStrings, stringRecord, TicketBook } from './exec-ticket.ts';
 import { KernelError, type OpenAccess, OpenFile, type PollState } from './fd-table.ts';
@@ -17,7 +18,12 @@ import {
 export const SEALED_PATH = '/dev/sealed';
 export const SEALED_MAX_BYTES = 64 * 1024;
 export const SEALED_TIMEOUT_MS = 10_000;
+export const SEALED_ASK_TIMEOUT_MS = 305_000;
+export const SEALED_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+export const SEALED_NAME_MAX = 128;
+export const SEALED_PROMPT_MAX = 200;
 export const SEALED_OPS: ReadonlySet<string> = new Set([
+  'ask',
   'seal',
   'placeholder',
   'list',
@@ -50,7 +56,31 @@ export type SealedRequest = { v: 1; op: string; caller: SealedCaller } & Record<
 
 export type SealedHook = (req: SealedRequest, options: { signal: AbortSignal }) => Promise<object>;
 
-export type SealedAbortReason = 'replaced' | 'timeout' | 'withdrawn';
+export type SealedAbortReason = 'expired' | 'replaced' | 'timeout' | 'withdrawn';
+
+export interface SealedProcessFacts {
+  exe: string;
+  argv: string[];
+  cwd: string;
+  tty: string | null;
+}
+
+export interface SealedRequester extends SealedProcessFacts {
+  stdin: SudoStdin;
+}
+
+export type SealedRequesterOf = () => Promise<SealedRequester | undefined>;
+
+const ASK_FIELDS: ReadonlySet<string> = new Set([
+  'v',
+  'op',
+  'name',
+  'prompt',
+  'reveal',
+  'replace',
+  'caller',
+  'requester',
+]);
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8', { fatal: true });
@@ -70,6 +100,7 @@ export function parseSealed(bytes: Uint8Array): Record<string, unknown> {
     if (req.v !== 1 || typeof req.op !== 'string' || !SEALED_OPS.has(req.op))
       throw new KernelError('EINVAL');
     if (req.op === 'materialize' && !materializable(req)) throw new KernelError('EINVAL');
+    if (req.op === 'ask' && !askable(req)) throw new KernelError('EINVAL');
     return req;
   } finally {
     bytes.fill(0);
@@ -79,6 +110,36 @@ export function parseSealed(bytes: Uint8Array): Record<string, unknown> {
 function materializable(req: Record<string, unknown>): boolean {
   if (req.shellGrants !== true && !isStrings(req.names)) return false;
   return isStrings(req.argv) && typeof req.path === 'string' && typeof req.cwd === 'string';
+}
+
+function askable(req: Record<string, unknown>): boolean {
+  if (Object.keys(req).some((key) => !ASK_FIELDS.has(key))) return false;
+  const { name, prompt, reveal, replace } = req;
+  if (typeof name !== 'string' || name.length > SEALED_NAME_MAX || !SEALED_NAME.test(name))
+    return false;
+  if (
+    prompt !== undefined &&
+    (typeof prompt !== 'string' || [...prompt].length > SEALED_PROMPT_MAX)
+  )
+    return false;
+  return [reveal, replace].every((flag) => flag === undefined || typeof flag === 'boolean');
+}
+
+function askRequest(
+  fields: Record<string, unknown>,
+  caller: SealedCaller,
+  requester: SealedRequester
+): SealedRequest {
+  return {
+    v: 1,
+    op: 'ask',
+    name: fields.name,
+    ...(fields.prompt !== undefined ? { prompt: fields.prompt } : {}),
+    reveal: fields.reveal === true,
+    replace: fields.replace === true,
+    caller,
+    requester,
+  };
 }
 
 function errorReply(code: string, message: string): object {
@@ -124,7 +185,12 @@ class SealedChannel {
     this.access = access;
   }
 
-  send(bytes: Uint8Array, caller: SealedCaller, gone: AbortSignal): number {
+  send(
+    bytes: Uint8Array,
+    caller: SealedCaller,
+    gone: AbortSignal,
+    requester: SealedRequesterOf = async () => undefined
+  ): number {
     if (this.access === 'read') {
       bytes.fill(0);
       throw new KernelError('EBADF');
@@ -137,10 +203,15 @@ class SealedChannel {
     const withdraw = () => control.abort('withdrawn');
     if (gone.aborted) withdraw();
     else gone.addEventListener('abort', withdraw, { once: true });
-    const timer = setTimeout(() => control.abort('timeout'), this.broker.timeoutMs);
+    const ask = fields.op === 'ask';
+    const timer = setTimeout(
+      () => control.abort(ask ? 'expired' : 'timeout'),
+      ask ? this.broker.askTimeoutMs : this.broker.timeoutMs
+    );
     const req = { ...fields, v: 1, op: fields.op as string, caller } as SealedRequest;
+    const asked = ask ? this.asking(fields, caller, requester, control.signal) : undefined;
     const flight: Inflight = { control, done: Promise.resolve() };
-    flight.done = this.answer(req, control.signal).then(async (reply) => {
+    flight.done = (asked ?? this.answer(req, control.signal)).then(async (reply) => {
       clearTimeout(timer);
       gone.removeEventListener('abort', withdraw);
       if (reply && req.op === 'materialize')
@@ -151,6 +222,24 @@ class SealedChannel {
     });
     this.inflight = flight;
     return length;
+  }
+
+  private async asking(
+    fields: Record<string, unknown>,
+    caller: SealedCaller,
+    requester: SealedRequesterOf,
+    signal: AbortSignal
+  ): Promise<object | undefined> {
+    const facts = await requester().catch(() => undefined);
+    if (signal.aborted) return this.stopped(signal);
+    if (!facts) return errorReply('EIO', 'the kernel has no record of this process');
+    return this.answer(askRequest(fields, caller, facts), signal);
+  }
+
+  private stopped(signal: AbortSignal): object | undefined {
+    if (signal.reason === 'timeout')
+      return errorReply('ETIMEDOUT', 'the vault did not answer within 10 s');
+    return signal.reason === 'expired' ? { v: 1, state: 'expired' } : undefined;
   }
 
   private async answer(req: SealedRequest, signal: AbortSignal): Promise<object | undefined> {
@@ -167,10 +256,7 @@ class SealedChannel {
         (err: unknown) => errorReply('EIO', lineOf(err))
       );
     const reply = await Promise.race([asked, stopped]);
-    if (!signal.aborted) return reply;
-    return signal.reason === 'timeout'
-      ? errorReply('ETIMEDOUT', 'the vault did not answer within 10 s')
-      : undefined;
+    return signal.aborted ? this.stopped(signal) : reply;
   }
 
   private drop(): void {
@@ -255,7 +341,9 @@ export class SealedBroker {
   readonly tagOf: (pid: number) => readonly string[] | undefined;
   readonly tickets = new TicketBook();
   readonly sessions = new SessionScrubs();
+  askTimeoutMs = SEALED_ASK_TIMEOUT_MS;
   userOf: (uid: number) => Promise<string | undefined> = async () => undefined;
+  factsOf: (pid: number) => Promise<SealedProcessFacts | undefined> = async () => undefined;
 
   constructor(
     hook: SealedHook | undefined,

@@ -129,7 +129,13 @@ import { PtyTable } from './kernel/pty.ts';
 import { RenameLog } from './kernel/rename-log.ts';
 import { PackageLocks } from './kernel/replacing.ts';
 import { type ScrubSecret, scrubbedAll, scrubberOf, scrubStdio } from './kernel/scrub-file.ts';
-import { SealedBroker, type SealedCaller, type SealedHook, tagFields } from './kernel/sealed.ts';
+import {
+  SealedBroker,
+  type SealedCaller,
+  type SealedHook,
+  type SealedProcessFacts,
+  tagFields,
+} from './kernel/sealed.ts';
 import { SemTable } from './kernel/sem.ts';
 import { SettlingChildren } from './kernel/settling.ts';
 import { SI, SIG, type SigInfo, sigbit, signalField } from './kernel/signals.ts';
@@ -188,6 +194,7 @@ import { servedFsCalls, staleFdCount } from './realm/sync-fs-dispatch.ts';
 import type { SourceCheck } from './realm/sync-fs-token-registry.ts';
 import { anyBlocked, type BlockedMask } from './realm/sync-sab-wire.ts';
 import { REFUSED_PATH, REFUSED_SOURCE, refusing } from './refused-command.ts';
+import { SEALED_BIN, SEALED_COMMAND, SEALED_SOURCE } from './sealed-command.ts';
 import {
   type ApproveHook,
   Sudo,
@@ -350,6 +357,7 @@ export interface RunResult {
 
 interface Target {
   abi: Abi;
+  command?: string;
   glue: string;
   wasm: string;
   argv0: string;
@@ -447,6 +455,7 @@ interface StartRequest {
   argv0: string;
   exe?: string;
   exeId?: string;
+  command?: string;
   args: string[];
   env: Record<string, string>;
   cwd: string;
@@ -502,7 +511,7 @@ const LAYOUT: ReadonlyArray<[string, number]> = [
   ['/usr', 0o755],
   ['/usr/local', 0o755],
 ];
-const IN_TREE: ReadonlySet<string> = new Set([SUDO_PATH, VISUDO_PATH, CRONTAB_PATH]);
+const IN_TREE: ReadonlySet<string> = new Set([SUDO_PATH, VISUDO_PATH, CRONTAB_PATH, SEALED_BIN]);
 const LOAD_SAMPLE_MS = 5000;
 const LOAD_WINDOWS_MS = [60_000, 300_000, 900_000] as const;
 const encoder = new TextEncoder();
@@ -669,6 +678,7 @@ export function expandDefaults(
 function targetOf(command: Command): Target {
   return {
     abi: command.abi,
+    command: command.name,
     glue: command.glue,
     wasm: command.wasm,
     argv0: command.argv0,
@@ -776,6 +786,8 @@ export class Launcher {
     Pick<ProcessInfo, 'argv' | 'tty' | 'started' | 'exe' | 'exeId'>
   >();
   private readonly creds = new Map<number, () => Cred>();
+  private readonly programs = new Map<number, string>();
+  private readonly cwdPaths = new Map<number, string>();
   private readonly tags = new Map<number, readonly string[]>();
   private readonly sessions = new Map<number, EmbedderSession>();
   private readonly tagBases = new Map<number, number>();
@@ -1116,6 +1128,7 @@ export class Launcher {
             .set(SUDO_COMMAND.name, SUDO_COMMAND)
             .set(VISUDO_COMMAND.name, VISUDO_COMMAND)
             .set(CRONTAB_COMMAND.name, CRONTAB_COMMAND)
+            .set(SEALED_COMMAND.name, SEALED_COMMAND)
         );
       this.catalogs.set(scope, found);
     }
@@ -2058,6 +2071,9 @@ export class Launcher {
     if (target.abi === 'js' && target.wasm === CRONTAB_PATH) {
       return { abi: 'js', glue: CRONTAB_SOURCE, path: CRONTAB_PATH };
     }
+    if (target.abi === 'js' && target.wasm === SEALED_BIN) {
+      return { abi: 'js', glue: SEALED_SOURCE, path: SEALED_BIN };
+    }
     if (target.abi === 'js' && target.wasm === REFUSED_PATH) {
       return { abi: 'js', glue: REFUSED_SOURCE, path: REFUSED_PATH };
     }
@@ -2119,6 +2135,9 @@ export class Launcher {
           argv0: target.argv0,
           exe: target.copy ?? target.glue,
           ...exeId,
+          ...(target.command !== undefined && target.copy === undefined
+            ? { command: target.command }
+            : {}),
           args,
           env,
           cwdSlot,
@@ -2253,6 +2272,8 @@ export class Launcher {
     if (session) this.sessions.set(pid, session);
     if (req.tags?.length) this.tagBases.set(pid, req.tagBase ?? req.tags.length);
     if (req.links !== undefined) this.links.set(pid, req.links);
+    if (req.command !== undefined) this.programs.set(pid, req.command);
+    this.cwdPaths.set(pid, req.cwd);
   }
 
   private async admitted(
@@ -2436,6 +2457,7 @@ export class Launcher {
     void handle.exited.then(() => {
       this.cwds.release(this.cwdSlots.get(pid));
       this.cwdSlots.delete(pid);
+      this.cwdPaths.delete(pid);
       this.freshModules.forget(pid);
       const spent = handle.times?.();
       if (spent) this.spent.set(pid, spent);
@@ -2471,6 +2493,7 @@ export class Launcher {
     }
     this.jobs.remove(pid);
     this.described.delete(pid);
+    this.programs.delete(pid);
     const spent = this.spent.get(pid);
     if (spent) {
       this.reapedTimes.utime += spent.utime;
@@ -2815,7 +2838,22 @@ export class Launcher {
     };
   }
 
+  private async processFacts(pid: number): Promise<SealedProcessFacts | undefined> {
+    const described = this.described.get(pid);
+    const cwd = this.cwdPaths.get(pid);
+    if (!described || described.exe === undefined || cwd === undefined) return undefined;
+    const real = (path: string) => physicalPathAsync(this.base, path).catch(() => path);
+    const command = this.programs.get(pid);
+    return {
+      exe: command !== undefined ? `/usr/bin/${command}` : await real(described.exe),
+      argv: [...described.argv],
+      cwd: await real(cwd),
+      tty: described.tty,
+    };
+  }
+
   private async chdirHeld(pid: number, path: string): Promise<HeldCwdReply> {
+    this.cwdPaths.set(pid, path);
     this.cwds.release(this.cwdSlots.get(pid));
     const slot = await this.cwds.hold(path);
     this.cwdSlots.set(pid, slot);
@@ -2888,6 +2926,7 @@ export class Launcher {
   private wireSealed(): void {
     this.sealed.tickets.normalise = (path) => physicalPathAsync(this.base, path);
     this.sealed.userOf = async (uid) => (await this.users.lookup(uid))?.name;
+    this.sealed.factsOf = (pid) => this.processFacts(pid);
   }
 
   private embedderBroker(hook: EmbedderHook | undefined): EmbedderBroker {
