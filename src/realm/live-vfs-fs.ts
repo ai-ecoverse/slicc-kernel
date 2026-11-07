@@ -7,7 +7,7 @@ import {
   type RangedWatch,
   watchedChange,
 } from '../fs/ranged.ts';
-import { inodeOf } from '../fs/types.ts';
+import { inodeOf, normalizePath, resolvePath } from '../fs/types.ts';
 import type { Cred } from '../kernel/cred.ts';
 import { wasiErrno } from '../process/wasi-errno.ts';
 import {
@@ -1617,13 +1617,10 @@ function aboveOf(path: string): string {
 
 function absoluteCreatePath(Fs: LiveMountFsApi, path: string): string | undefined {
   if (typeof path !== 'string' || path.length === 0) return undefined;
-  if (path.startsWith('/')) return path.replace(/\/+$/, '') || '/';
+  if (path.startsWith('/')) return normalizePath(path);
   const cwd = Fs.cwd?.();
   if (typeof cwd !== 'string') return undefined;
-  const base = cwd.replace(/\/+$/, '') || '';
-  const rel = path.replace(/^\.\//, '');
-  if (rel === '' || rel === '.') return base || '/';
-  return `${base}/${rel}`.replace(/\/{2,}/g, '/');
+  return resolvePath(cwd, path);
 }
 
 function refreshCreateParent(Fs: LiveMountFsApi, bridge: SyncFsPosixBridge, path: string): void {
