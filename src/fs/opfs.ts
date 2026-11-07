@@ -1835,7 +1835,7 @@ export class OpfsFs implements KernelFs {
 
   private async mkdirExcl(path: string, owner?: NewOwner): Promise<void> {
     if (normalizePath(path) === '/') throw fsError('EEXIST', path);
-    const parent = await this.locate(parentOf(path), true);
+    const parent = await this.exactly(() => this.locate(parentOf(path), true));
     if (parent.handle?.kind !== 'directory') throw fsError('ENOTDIR', path);
     const dir = parent.handle;
     const name = baseOf(path);
@@ -1860,7 +1860,7 @@ export class OpfsFs implements KernelFs {
 
   async createExclusive(path: string, owner?: NewOwner): Promise<void> {
     if (normalizePath(path) === '/') throw fsError('EEXIST', path);
-    const parent = await this.locate(parentOf(path), true);
+    const parent = await this.exactly(() => this.locate(parentOf(path), true));
     if (parent.handle?.kind !== 'directory') throw fsError('ENOTDIR', path);
     const dir = parent.handle;
     const name = baseOf(path);
@@ -1949,7 +1949,8 @@ export class OpfsFs implements KernelFs {
 
   async link(from: string, to: string, follow?: boolean): Promise<void> {
     await (follow ? this.stat(from) : this.lstat(from));
-    if (!(await this.stat(parentOf(to))).isDirectory) throw fsError('ENOTDIR', to);
+    if (!(await this.exactly(() => this.stat(parentOf(to)))).isDirectory)
+      throw fsError('ENOTDIR', to);
     const taken = await this.exactly(() => this.lstat(to)).then(
       () => true,
       (err) => {
@@ -1978,7 +1979,7 @@ export class OpfsFs implements KernelFs {
     const source = await this.locate(from, false);
     this.refuse(source.path, true);
     this.forget(source.path);
-    const parent = await this.locate(parentOf(to), true);
+    const parent = await this.exactly(() => this.locate(parentOf(to), true));
     const destination = resolvePath(parent.path, baseOf(to));
     this.refuse(destination, true);
     await this.entering(destination, () => this.moveTo(source, parent, destination, to, call));
@@ -2722,7 +2723,7 @@ export class OpfsFs implements KernelFs {
   }
 
   async symlink(target: string, path: string, owner?: NewOwner): Promise<void> {
-    const parent = await this.locate(parentOf(path), true);
+    const parent = await this.exactly(() => this.locate(parentOf(path), true));
     if (parent.handle?.kind !== 'directory') throw fsError('ENOTDIR', path);
     const at = resolvePath(parent.path, baseOf(path));
     this.refuse(at);

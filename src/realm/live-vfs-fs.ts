@@ -1341,10 +1341,13 @@ export interface LiveMountFsApi extends LiveFsApi {
   rename?(from: string, to: string): void;
   lookupPath?(path: string, opts?: { follow?: boolean; parent?: boolean }): { node: object };
   sliccRename?: true;
+  sliccCreateParent?: true;
   sliccKept?: true;
   sliccStale?: true;
   sliccVanished?: true;
   open?(path: string, flags: number, mode?: number): unknown;
+  mkdir?(path: string, mode?: number): unknown;
+  symlink?(target: string, path: string): unknown;
   statfsNode?(node: LiveFsNode): Record<string, number>;
   sliccStatfs?: true;
   filesystems: { SLICC_LIVE_FS?: LiveVfsPlugin };
@@ -1404,6 +1407,7 @@ export function liveRoot(Fs: LiveMountFsApi, bridge: SyncFsPosixBridge): void {
   plugin.mounts.add(root.mount);
   invalidateLiveVfs(Fs, plugin);
   guardRenames(Fs);
+  guardCreateParents(Fs, bridge);
   guardKeptNodes(Fs, plugin.handled);
   guardStaleNodes(Fs, plugin);
   guardVanished(Fs);
@@ -1592,6 +1596,58 @@ function guardRenames(Fs: LiveMountFsApi): void {
   };
 }
 
+const O_CREAT = 0o100;
+
+function aboveOf(path: string): string {
+  const norm = path.replace(/\/+$/, '') || '/';
+  if (norm === '/') return '/';
+  const slash = norm.lastIndexOf('/');
+  const parent = slash <= 0 ? '/' : norm.slice(0, slash);
+  if (parent === '/') return '/';
+  const above = parent.lastIndexOf('/');
+  return above <= 0 ? '/' : parent.slice(0, above);
+}
+
+function refreshCreateParent(bridge: SyncFsPosixBridge, path: string): void {
+  const above = aboveOf(typeof path === 'string' ? path : '');
+  try {
+    bridge.readdir(above);
+  } catch {}
+}
+
+function guardCreateParents(Fs: LiveMountFsApi, bridge: SyncFsPosixBridge): void {
+  if (Fs.sliccCreateParent) return;
+  Fs.sliccCreateParent = true;
+  const mkdir = Fs.mkdir?.bind(Fs);
+  if (mkdir) {
+    Fs.mkdir = (path, mode) => {
+      refreshCreateParent(bridge, path);
+      return mkdir(path, mode);
+    };
+  }
+  const symlink = Fs.symlink?.bind(Fs);
+  if (symlink) {
+    Fs.symlink = (target, path) => {
+      refreshCreateParent(bridge, path);
+      return symlink(target, path);
+    };
+  }
+  const rename = Fs.rename?.bind(Fs);
+  if (rename) {
+    Fs.rename = (from, to) => {
+      refreshCreateParent(bridge, to);
+      return rename(from, to);
+    };
+  }
+  const open = Fs.open?.bind(Fs);
+  if (open) {
+    Fs.open = (path, flags, mode) => {
+      if ((flags & O_CREAT) !== 0) refreshCreateParent(bridge, path);
+      return open(path, flags, mode);
+    };
+  }
+}
+
 export interface LiveChownFs extends LiveFsApi {
   lookupPath(path: string, opts?: { follow?: boolean }): { node: object };
   chown?(path: string | object, uid: number, gid: number, dontFollow?: boolean): void;
@@ -1689,6 +1745,7 @@ export function linkLive(Fs: LiveLinkFs, from: string, to: string, follow: boole
   const slash = target.lastIndexOf('/');
   const name = target.slice(slash + 1);
   const source = Fs.lookupPath(from, { follow }).node as LiveFsNode;
+  if (source.live) refreshCreateParent(source.mount.opts.bridge, target);
   const parent = Fs.lookupPath(target.slice(0, slash) || '/', { follow: true }).node as LiveFsNode;
   if (!source.live || !parent.live) return false;
   flushOne(Fs, source);
