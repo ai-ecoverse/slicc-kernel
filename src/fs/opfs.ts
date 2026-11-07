@@ -834,8 +834,10 @@ export class OpfsFs implements KernelFs {
     for (let at = from; at < parts.length; at++) {
       this.calls++;
       dir = await dir.getDirectoryHandle(parts[at] as string);
-      this.dirs.set(`/${parts.slice(0, at + 1).join('/')}`, dir);
+      const path = `/${parts.slice(0, at + 1).join('/')}`;
+      this.dirs.set(path, dir);
       this.checked.set(dir, performance.now());
+      this.absent.delete(path);
     }
     return dir;
   }
@@ -932,6 +934,7 @@ export class OpfsFs implements KernelFs {
       if (looked) {
         this.dirs.set(path, handle as FileSystemDirectoryHandle);
         this.checked.set(handle as FileSystemDirectoryHandle, performance.now());
+        this.absent.delete(path);
       }
       return handle;
     }
@@ -1700,7 +1703,8 @@ export class OpfsFs implements KernelFs {
     }
     const [entry] = await this.meta.get([path]);
     const wanted = entry?.link === undefined ? path : resolvePath(parentOf(path), entry.link);
-    return [resolvePath((await this.locate(parentOf(wanted), true)).path, baseOf(wanted)), false];
+    const parent = await this.exactly(() => this.locate(parentOf(wanted), true));
+    return [resolvePath(parent.path, baseOf(wanted)), false];
   }
 
   private async fileFor(
@@ -1819,10 +1823,12 @@ export class OpfsFs implements KernelFs {
     await this.mkdir(parentOf(path), { recursive: true, ...(above ? { owner: above } : {}) });
     const parent = await this.locate(parentOf(path), true);
     if (parent.handle?.kind !== 'directory') throw fsError('ENOTDIR', path);
-    this.refuse(resolvePath(parent.path, baseOf(path)));
-    await this.io(parent.handle.getDirectoryHandle(baseOf(path), { create: true }));
+    const made = resolvePath(parent.path, baseOf(path));
+    this.forget(made);
+    this.refuse(made);
+    const handle = await this.io(parent.handle.getDirectoryHandle(baseOf(path), { create: true }));
+    this.remember(made, handle, true);
     const now = Date.now();
-    const made = `${parent.path === '/' ? '' : parent.path}/${baseOf(path)}`;
     await this.stampNew(made, owner, true);
     this.touch(now, parent.path, made);
   }
