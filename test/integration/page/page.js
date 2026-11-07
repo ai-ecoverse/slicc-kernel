@@ -464,11 +464,28 @@ const clipboardHook = {
   },
 };
 
-window.requests = { calls: [] };
+window.requests = { calls: [], flows: [] };
+
+const flow = () => {
+  const state = { produced: 0, pulls: [], cancelled: null };
+  window.requests.flows.push(state);
+  return new ReadableStream({
+    pull(controller) {
+      if (state.produced >= 256 * 1024 * 1024) return controller.close();
+      controller.enqueue(new Uint8Array(65536).fill((state.produced / 65536) % 251));
+      state.produced += 65536;
+      state.pulls.push([performance.now(), state.produced]);
+    },
+    cancel(reason) {
+      state.cancelled = String(reason);
+    },
+  });
+};
 
 const requestHook = {
-  kinds: { 'page.echo': {}, 'page.fail': {}, 'page.count': {}, 'page.held': {} },
+  kinds: { 'page.echo': {}, 'page.fail': {}, 'page.count': {}, 'page.held': {}, 'test.flow': {} },
   handle: async (request) => {
+    if (request.kind === 'test.flow') return flow();
     window.requests.calls.push({
       kind: request.kind,
       options: request.options,
