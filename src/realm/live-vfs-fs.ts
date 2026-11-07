@@ -7,7 +7,7 @@ import {
   type RangedWatch,
   watchedChange,
 } from '../fs/ranged.ts';
-import { inodeOf } from '../fs/types.ts';
+import { inodeOf, normalizePath, resolvePath } from '../fs/types.ts';
 import type { Cred } from '../kernel/cred.ts';
 import { wasiErrno } from '../process/wasi-errno.ts';
 import {
@@ -1340,11 +1340,15 @@ export interface LiveMountFsApi extends LiveFsApi {
   root?: MemfsRoot;
   rename?(from: string, to: string): void;
   lookupPath?(path: string, opts?: { follow?: boolean; parent?: boolean }): { node: object };
+  cwd?(): string;
   sliccRename?: true;
+  sliccCreateParent?: true;
   sliccKept?: true;
   sliccStale?: true;
   sliccVanished?: true;
   open?(path: string, flags: number, mode?: number): unknown;
+  mkdir?(path: string, mode?: number): unknown;
+  symlink?(target: string, path: string): unknown;
   statfsNode?(node: LiveFsNode): Record<string, number>;
   sliccStatfs?: true;
   filesystems: { SLICC_LIVE_FS?: LiveVfsPlugin };
@@ -1404,6 +1408,7 @@ export function liveRoot(Fs: LiveMountFsApi, bridge: SyncFsPosixBridge): void {
   plugin.mounts.add(root.mount);
   invalidateLiveVfs(Fs, plugin);
   guardRenames(Fs);
+  guardCreateParents(Fs, bridge);
   guardKeptNodes(Fs, plugin.handled);
   guardStaleNodes(Fs, plugin);
   guardVanished(Fs);
@@ -1590,6 +1595,77 @@ function guardRenames(Fs: LiveMountFsApi): void {
     if (crosses(Fs, from, to)) throw new Fs.ErrnoError(wasiErrno('EXDEV'));
     rename(from, to);
   };
+}
+
+const O_CREAT = 0o100;
+
+let createParentRefresh = 0;
+
+export function createParentRefreshCount(): number {
+  return createParentRefresh;
+}
+
+function aboveOf(path: string): string {
+  const norm = path.replace(/\/+$/, '') || '/';
+  if (norm === '/') return '/';
+  const slash = norm.lastIndexOf('/');
+  const parent = slash <= 0 ? '/' : norm.slice(0, slash);
+  if (parent === '/') return '/';
+  const above = parent.lastIndexOf('/');
+  return above <= 0 ? '/' : parent.slice(0, above);
+}
+
+function absoluteCreatePath(Fs: LiveMountFsApi, path: string): string | undefined {
+  if (typeof path !== 'string' || path.length === 0) return undefined;
+  if (path.startsWith('/')) return normalizePath(path);
+  const cwd = Fs.cwd?.();
+  if (typeof cwd !== 'string') return undefined;
+  return resolvePath(cwd, path);
+}
+
+function refreshCreateParent(Fs: LiveMountFsApi, bridge: SyncFsPosixBridge, path: string): void {
+  const abs = absoluteCreatePath(Fs, path);
+  if (abs === undefined) return;
+  createParentRefresh++;
+  try {
+    bridge.readdir(aboveOf(abs));
+  } catch {}
+}
+
+function oncePastStaleParent<T>(
+  Fs: LiveMountFsApi,
+  bridge: SyncFsPosixBridge,
+  path: string,
+  op: () => T
+): T {
+  try {
+    return op();
+  } catch (err) {
+    if ((err as { errno?: number }).errno !== wasiErrno('ENOENT')) throw err;
+    refreshCreateParent(Fs, bridge, path);
+    return op();
+  }
+}
+
+function guardCreateParents(Fs: LiveMountFsApi, bridge: SyncFsPosixBridge): void {
+  if (Fs.sliccCreateParent) return;
+  Fs.sliccCreateParent = true;
+  const mkdir = Fs.mkdir?.bind(Fs);
+  if (mkdir) {
+    Fs.mkdir = (path, mode) => oncePastStaleParent(Fs, bridge, path, () => mkdir(path, mode));
+  }
+  const symlink = Fs.symlink?.bind(Fs);
+  if (symlink) {
+    Fs.symlink = (target, path) =>
+      oncePastStaleParent(Fs, bridge, path, () => symlink(target, path));
+  }
+  const open = Fs.open?.bind(Fs);
+  if (open) {
+    Fs.open = (path, flags, mode) => {
+      if ((flags & O_CREAT) === 0) return open(path, flags, mode);
+      return oncePastStaleParent(Fs, bridge, path, () => open(path, flags, mode));
+    };
+  }
 }
 
 export interface LiveChownFs extends LiveFsApi {

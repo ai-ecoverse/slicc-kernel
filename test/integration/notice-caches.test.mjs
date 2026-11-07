@@ -82,6 +82,111 @@ test('O_CREAT whose parent and name this kernel cached as missing succeeds once 
   assert.deepEqual(await other('cat /tmp/e1777/ap/log'), ok('x\n'));
 });
 
+test('mkdir under an existing parent does not refresh via readdir of the grandparent (#1780)', async (t) => {
+  const { bash } = await booted(chrome, t);
+  assert.deepEqual(await bash('rm -rf /tmp/e1780f && mkdir -p /tmp/e1780f/ap', { cwd: '/' }), ok());
+  assert.deepEqual(
+    await bash(
+      'read -r b < /proc/sys/kernel/slicc_create_parent_refresh; mkdir /tmp/e1780f/ap/d; read -r a < /proc/sys/kernel/slicc_create_parent_refresh; echo "$b $a"',
+      { cwd: '/' }
+    ),
+    ok('0 0\n')
+  );
+});
+
+test('mkdir whose parent this kernel cached as missing succeeds once the parent is there, even before the create notice (#1780)', async (t) => {
+  const { page, bash } = await booted(chrome, t);
+  assert.deepEqual(await bash('rm -rf /tmp/e1780m && mkdir /tmp/e1780m', { cwd: '/' }), ok());
+  const { mine, other } = await pair(page);
+  await freeze(page);
+  assert.deepEqual(
+    await mine('[ -e /tmp/e1780m/ap ] || echo d; [ -e /tmp/e1780m/ap/d ] || echo c'),
+    ok('d\nc\n')
+  );
+  assert.deepEqual(await other('mkdir -p /tmp/e1780m/ap && echo made'), ok('made\n'));
+  assert.deepEqual(
+    await mine('[ -e /tmp/e1780m/ap ] || echo d; [ -e /tmp/e1780m/ap/d ] || echo c'),
+    ok('d\nc\n')
+  );
+  assert.deepEqual(await mine('mkdir /tmp/e1780m/ap/d && echo ok'), ok('ok\n'));
+  assert.deepEqual(await other('test -d /tmp/e1780m/ap/d && echo there'), ok('there\n'));
+});
+
+test('O_EXCL create whose parent this kernel cached as missing succeeds once the parent is there, even before the create notice (#1780)', async (t) => {
+  const { page, bash } = await booted(chrome, t);
+  assert.deepEqual(await bash('rm -rf /tmp/e1780e && mkdir /tmp/e1780e', { cwd: '/' }), ok());
+  const { mine, other } = await pair(page);
+  await freeze(page);
+  assert.deepEqual(
+    await mine('[ -e /tmp/e1780e/ap ] || echo d; [ -e /tmp/e1780e/ap/f ] || echo f'),
+    ok('d\nf\n')
+  );
+  assert.deepEqual(await other('mkdir -p /tmp/e1780e/ap && echo made'), ok('made\n'));
+  assert.deepEqual(
+    await mine('[ -e /tmp/e1780e/ap ] || echo d; [ -e /tmp/e1780e/ap/f ] || echo f'),
+    ok('d\nf\n')
+  );
+  assert.deepEqual(await mine('set -C; echo x > /tmp/e1780e/ap/f && echo ok'), ok('ok\n'));
+  assert.deepEqual(await other('cat /tmp/e1780e/ap/f'), ok('x\n'));
+});
+
+test('symlink whose parent this kernel cached as missing succeeds once the parent is there, even before the create notice (#1780)', async (t) => {
+  const { page, bash } = await booted(chrome, t);
+  assert.deepEqual(await bash('rm -rf /tmp/e1780s && mkdir /tmp/e1780s', { cwd: '/' }), ok());
+  const { mine, other } = await pair(page);
+  await freeze(page);
+  assert.deepEqual(
+    await mine('[ -e /tmp/e1780s/ap ] || echo d; [ -e /tmp/e1780s/ap/l ] || echo l'),
+    ok('d\nl\n')
+  );
+  assert.deepEqual(await other('mkdir -p /tmp/e1780s/ap && echo made'), ok('made\n'));
+  assert.deepEqual(
+    await mine('[ -e /tmp/e1780s/ap ] || echo d; [ -e /tmp/e1780s/ap/l ] || echo l'),
+    ok('d\nl\n')
+  );
+  assert.deepEqual(await mine('ln -s target /tmp/e1780s/ap/l && echo ok'), ok('ok\n'));
+  assert.deepEqual(await other('readlink /tmp/e1780s/ap/l'), ok('target\n'));
+});
+
+test('mkdir with a cwd-relative path whose parent was a cached miss succeeds (#1780)', async (t) => {
+  const { page, bash } = await booted(chrome, t);
+  assert.deepEqual(await bash('rm -rf /tmp/e1780c && mkdir /tmp/e1780c', { cwd: '/' }), ok());
+  const { mine, other } = await pair(page);
+  await freeze(page);
+  assert.deepEqual(await mine('[ -e /tmp/e1780c/ap ] || echo d'), ok('d\n'));
+  assert.deepEqual(await other('mkdir -p /tmp/e1780c/ap && echo made'), ok('made\n'));
+  assert.deepEqual(await mine('[ -e /tmp/e1780c/ap ] || echo d'), ok('d\n'));
+  assert.deepEqual(await mine('cd /tmp/e1780c && mkdir ap/d && echo ok'), ok('ok\n'));
+  assert.deepEqual(await other('test -d /tmp/e1780c/ap/d && echo there'), ok('there\n'));
+});
+
+test('mkdir with cwd-relative ../d whose parent was a cached miss succeeds (#1780)', async (t) => {
+  const { page, bash } = await booted(chrome, t);
+  assert.deepEqual(
+    await bash('rm -rf /tmp/e1780u /tmp/d && mkdir -p /tmp/e1780u', { cwd: '/' }),
+    ok()
+  );
+  const { mine, other } = await pair(page);
+  await freeze(page);
+  assert.deepEqual(await mine('[ -e /tmp/d ] || echo d'), ok('d\n'));
+  assert.deepEqual(await other('mkdir -p /tmp/d && echo made'), ok('made\n'));
+  assert.deepEqual(await mine('[ -e /tmp/d ] || echo d'), ok('d\n'));
+  assert.deepEqual(await mine('cd /tmp/e1780u && mkdir ../d/x && echo ok'), ok('ok\n'));
+  assert.deepEqual(await other('test -d /tmp/d/x && echo there'), ok('there\n'));
+});
+
+test('mkdir with ap/../x/y whose parent was a cached miss succeeds (#1780)', async (t) => {
+  const { page, bash } = await booted(chrome, t);
+  assert.deepEqual(await bash('rm -rf /tmp/e1780v && mkdir -p /tmp/e1780v/ap', { cwd: '/' }), ok());
+  const { mine, other } = await pair(page);
+  await freeze(page);
+  assert.deepEqual(await mine('[ -e /tmp/e1780v/x ] || echo d'), ok('d\n'));
+  assert.deepEqual(await other('mkdir -p /tmp/e1780v/x && echo made'), ok('made\n'));
+  assert.deepEqual(await mine('[ -e /tmp/e1780v/x ] || echo d'), ok('d\n'));
+  assert.deepEqual(await mine('cd /tmp/e1780v && mkdir ap/../x/y && echo ok'), ok('ok\n'));
+  assert.deepEqual(await other('test -d /tmp/e1780v/x/y && echo there'), ok('there\n'));
+});
+
 test('a name another kernel created is found by O_EXCL, mkdir, symlink, link and rename-over even while a lookup still has it as missing (#984, #942)', async (t) => {
   const { page, bash } = await booted(chrome, t);
   assert.deepEqual(
