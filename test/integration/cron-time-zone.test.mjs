@@ -39,8 +39,7 @@ async function boot(t, { clock, fresh = true, ...options }) {
   const until = async (check, what) => {
     for (let i = 0; i < 400; i++) {
       const value = await check();
-      if (value != null && value !== false && !(Array.isArray(value) && value.length === 0))
-        return value;
+      if (value) return value;
       await delay(50);
     }
     assert.fail(`timed out waiting for ${what}`);
