@@ -1835,7 +1835,7 @@ export class OpfsFs implements KernelFs {
 
   private async mkdirExcl(path: string, owner?: NewOwner): Promise<void> {
     if (normalizePath(path) === '/') throw fsError('EEXIST', path);
-    const parent = await this.locate(parentOf(path), true);
+    const parent = await this.exactly(() => this.locate(parentOf(path), true));
     if (parent.handle?.kind !== 'directory') throw fsError('ENOTDIR', path);
     const dir = parent.handle;
     const name = baseOf(path);
@@ -1860,7 +1860,7 @@ export class OpfsFs implements KernelFs {
 
   async createExclusive(path: string, owner?: NewOwner): Promise<void> {
     if (normalizePath(path) === '/') throw fsError('EEXIST', path);
-    const parent = await this.locate(parentOf(path), true);
+    const parent = await this.exactly(() => this.locate(parentOf(path), true));
     if (parent.handle?.kind !== 'directory') throw fsError('ENOTDIR', path);
     const dir = parent.handle;
     const name = baseOf(path);
@@ -2722,7 +2722,7 @@ export class OpfsFs implements KernelFs {
   }
 
   async symlink(target: string, path: string, owner?: NewOwner): Promise<void> {
-    const parent = await this.locate(parentOf(path), true);
+    const parent = await this.exactly(() => this.locate(parentOf(path), true));
     if (parent.handle?.kind !== 'directory') throw fsError('ENOTDIR', path);
     const at = resolvePath(parent.path, baseOf(path));
     this.refuse(at);
