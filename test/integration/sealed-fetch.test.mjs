@@ -858,11 +858,13 @@ for (const [where, wrap] of [
     const { port } = await receiver(t);
     const transport = wired(port, { streamingBodies: true, maxRequestBody: 1 << 24 });
     const pace = Promise.withResolvers();
+    const first = Promise.withResolvers();
     const got = [];
     const fetch = async (req) => {
       assert.equal(req.body, undefined);
       const reader = req.bodyStream[Symbol.asyncIterator]();
       got.push(await reader.next());
+      first.resolve();
       await pace.promise;
       for (;;) {
         const next = await reader.next();
@@ -877,6 +879,12 @@ for (const [where, wrap] of [
     });
     const running = probe([
       { kind: 'upload', url: ORDINARY, init: bearer, chunks: 64, size: 65536 },
+    ]);
+    await Promise.race([
+      first.promise,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('first upload chunk did not reach the hook')), 10_000)
+      ),
     ]);
     await new Promise((resolve) => setTimeout(resolve, 300));
     assert.equal(got.length, 1);
