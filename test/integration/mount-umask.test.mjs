@@ -172,3 +172,99 @@ test('a bad umask= value is EINVAL', async (t) => {
     (e) => e.code === 'EINVAL'
   );
 });
+
+const CHMODABLE = `
+const errno = (code) => Object.assign(new Error(code), { code });
+export default function () {
+  const files = new Map([['/note', { bytes: new TextEncoder().encode('secret'), mode: 0o100600 }]]);
+  const open = new Map();
+  let fh = 0;
+  return {
+    capabilities: { attrTtl: 0, ranges: true, chmod: true },
+    handlers: {
+      async getattr(p) {
+        if (p === '/') return { kind: 'directory', size: 0, mtime: 0, mode: 0o40755 };
+        const f = files.get(p);
+        if (!f) throw errno('ENOENT');
+        return { kind: 'file', size: f.bytes.length, mtime: 0, mode: f.mode };
+      },
+      async readdir() {
+        return [...files.keys()].map((p) => ({ name: p.slice(1), kind: 'file' }));
+      },
+      async open(p, flags) {
+        const f = files.get(p);
+        if (!f) throw errno('ENOENT');
+        open.set(++fh, { p, bytes: f.bytes });
+        return fh;
+      },
+      async read(h, o, n) { return open.get(h).bytes.slice(o, o + n); },
+      async write(h, o, b) {
+        const e = open.get(h);
+        const next = new Uint8Array(Math.max(e.bytes.length, o + b.length));
+        next.set(e.bytes);
+        next.set(b, o);
+        e.bytes = next;
+      },
+      async release(h) {
+        const e = open.get(h);
+        files.get(e.p).bytes = e.bytes;
+        open.delete(h);
+      },
+      async setattr(p, change) {
+        const f = files.get(p);
+        if (!f) throw errno('ENOENT');
+        if (change.mode !== undefined) f.mode = (f.mode & ~0o7777) | (change.mode & 0o7777);
+      },
+    },
+  };
+}
+`;
+
+test('a no-owners mount with chmod still refuses another uid chmod, so private modes stay private', async (t) => {
+  const kernel = await createNodeKernel({ users: 'enforce' });
+  t.after(() => kernel.terminate());
+  for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
+  await kernel.writeFile(
+    '/node_modules/chmodable/package.json',
+    JSON.stringify({ slicc: { filesystems: { chmodable: { module: 'd.mjs' } } } })
+  );
+  await kernel.writeFile('/node_modules/chmodable/d.mjs', CHMODABLE);
+  await kernel.users.add({ name: 'cone' });
+  await kernel.users.add({ name: 'cone-33' });
+  await kernel.run(['bash', '-c', 'mkdir -p /mnt/kb'], { cwd: '/' });
+  assert.equal(
+    (
+      await kernel.mount({
+        type: 'chmodable',
+        source: 'none',
+        target: '/mnt/kb',
+        options: { uid: '1000', gid: '1000' },
+      })
+    ).state,
+    'ok'
+  );
+  const other = await kernel.run(
+    [
+      'bash',
+      '-c',
+      [
+        'cat /mnt/kb/note; echo "cat $?"',
+        'chmod 666 /mnt/kb/note; echo "chmod $?"',
+        'stat -c %a /mnt/kb/note',
+        'echo pwned > /mnt/kb/note; echo "write $?"',
+        'cat /mnt/kb/note; echo "cat2 $?"',
+      ].join('\n'),
+    ],
+    { cwd: '/', user: 'cone-33' }
+  );
+  assert.match(other.stdout, /cat 1\n/);
+  assert.match(other.stdout, /chmod 1\n/);
+  assert.match(other.stdout, /^600$/m);
+  assert.match(other.stdout, /write 1\n/);
+  assert.match(other.stderr, /Permission denied|Operation not permitted/);
+  assert.deepEqual(await kernel.run(['bash', '-c', 'cat /mnt/kb/note'], { cwd: '/' }), {
+    status: 0,
+    stdout: 'secret',
+    stderr: '',
+  });
+});
