@@ -82,10 +82,16 @@ interface Mount extends MountEntry {
 
 const S_ISGID = 0o2000;
 const ID = /^\d{1,10}$/;
+const MASK = /^0*[0-7]{1,4}$/;
 const MAX_ID = 0xfffffffe;
 
 function idOption(value: string | undefined): number {
   return value === undefined ? 0 : Number(value);
+}
+
+function maskOption(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  return Number.parseInt(value, 8) & 0o777;
 }
 
 function checkIds(options: Record<string, string>): void {
@@ -94,6 +100,37 @@ function checkIds(options: Record<string, string>): void {
     if (value === undefined) continue;
     if (!ID.test(value) || Number(value) > MAX_ID) throw errnoError('EINVAL', `${key}=${value}`);
   }
+}
+
+function checkMasks(options: Record<string, string>): void {
+  for (const key of ['umask', 'fmask', 'dmask']) {
+    const value = options[key];
+    if (value === undefined) continue;
+    if (!MASK.test(value) || Number.parseInt(value, 8) > 0o777) {
+      throw errnoError('EINVAL', `${key}=${value}`);
+    }
+  }
+}
+
+function modeOf(attr: DriverAttr, mount: Mount): number {
+  const type =
+    attr.kind === 'directory'
+      ? 0o40000
+      : attr.kind === 'symlink'
+        ? 0o120000
+        : attr.kind === 'fifo'
+          ? 0o10000
+          : 0o100000;
+  const fallback =
+    type | (attr.kind === 'directory' ? 0o755 : attr.kind === 'symlink' ? 0o777 : 0o644);
+  if (mount.caps.owners) return attr.mode ?? fallback;
+  const umask = maskOption(mount.options.umask);
+  const fmask = maskOption(mount.options.fmask) ?? umask;
+  const dmask = maskOption(mount.options.dmask) ?? umask;
+  const mask = attr.kind === 'directory' ? dmask : fmask;
+  if (mask === undefined) return attr.mode ?? fallback;
+  const base = attr.kind === 'directory' || attr.kind === 'symlink' ? 0o777 : 0o666;
+  return type | (base & ~mask);
 }
 
 const MAX_LINKS = 40;
@@ -417,21 +454,13 @@ function inodeless(mount: Mount, attr: DriverAttr): boolean {
 
 function statOf(attr: DriverAttr, path: string, mount: Mount): FsStat {
   const mtime = new Date(attr.mtime);
-  const fallback =
-    attr.kind === 'directory'
-      ? 0o40755
-      : attr.kind === 'symlink'
-        ? 0o120777
-        : attr.kind === 'fifo'
-          ? 0o10644
-          : 0o100644;
   return {
     isFile: attr.kind === 'file',
     isDirectory: attr.kind === 'directory',
     isSymbolicLink: attr.kind === 'symlink',
     ...(attr.kind === 'fifo' ? { isFifo: true } : {}),
     size: attr.size,
-    mode: attr.mode ?? fallback,
+    mode: modeOf(attr, mount),
     mtime,
     atime: attr.atime === undefined ? mtime : new Date(attr.atime),
     ctime: mtime,
@@ -447,6 +476,7 @@ function statOf(attr: DriverAttr, path: string, mount: Mount): FsStat {
       ? {
           uid: (mount.caps.owners ? attr.uid : undefined) ?? idOption(mount.options.uid),
           gid: (mount.caps.owners ? attr.gid : undefined) ?? idOption(mount.options.gid),
+          ...(!mount.caps.owners ? { fat: true as const } : {}),
         }
       : {}),
   };
@@ -576,6 +606,7 @@ export class MountTable {
     if (!st.isDirectory) throw errnoError('ENOTDIR', target);
     const options = { ...spec.options };
     if (this.deps.owners) checkIds(options);
+    checkMasks(options);
     const maxFile = options.maxfile !== undefined ? parseSize(options.maxfile) : undefined;
     const opened = await this.deps.open(spec.type, { ...spec, target, options });
     let mounted: Mount | undefined;

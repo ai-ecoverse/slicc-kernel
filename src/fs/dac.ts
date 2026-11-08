@@ -280,15 +280,22 @@ async function ownerOnly(g: Guard, op: string, path: string, follow: boolean) {
 }
 
 export async function chmodMode(g: Guard, path: string, mode: number): Promise<number> {
-  const perm = (await ownerOnly(g, 'chmod', path, true)).perm;
-  if (!g.dac.enforcing || !perm || g.cred.euid === 0 || inGroup(g.cred, perm.gid)) return mode;
+  const walked = await need(g, 'chmod', path, 0, { follow: true });
+  const perm = walked.perm;
+  const st = await g.fs.stat(walked.path).catch(() => undefined);
+  if (!st?.fat && perm && g.cred.euid !== 0 && perm.uid !== g.cred.euid) {
+    if (await present(g.fs, walked.path, false)) deny(g, 'chmod', path, 'EPERM');
+  }
+  if (!g.dac.enforcing || !perm || g.cred.euid === 0 || st?.fat || inGroup(g.cred, perm.gid)) {
+    return mode;
+  }
   return mode & ~S_ISGID;
 }
 
 export function heldChmodMode(g: Guard, path: string, st: FsStat, mode: number): number {
   const perm = permOf(st);
-  if (g.cred.euid !== 0 && perm.uid !== g.cred.euid) deny(g, 'fchmod', path, 'EPERM');
-  if (!g.dac.enforcing || g.cred.euid === 0 || inGroup(g.cred, perm.gid)) return mode;
+  if (!st.fat && g.cred.euid !== 0 && perm.uid !== g.cred.euid) deny(g, 'fchmod', path, 'EPERM');
+  if (!g.dac.enforcing || g.cred.euid === 0 || st.fat || inGroup(g.cred, perm.gid)) return mode;
   return mode & ~S_ISGID;
 }
 

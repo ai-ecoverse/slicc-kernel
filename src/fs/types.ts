@@ -20,6 +20,7 @@ export interface FsStat {
   version?: string;
   uid?: number;
   gid?: number;
+  fat?: true;
 }
 
 export type UsersMode = 'off' | 'report' | 'enforce';
