@@ -97,11 +97,21 @@ test('a no-owners mount with uid=1000 keeps 0644/0755 by default, so another use
   });
   assert.equal(root.stdout, '755 1000 1000\n644 1000 1000\n', root.stderr);
   const other = await kernel.run(
-    ['bash', '-c', 'echo probe > /mnt/kb/.write-probe; echo "rc $?"'],
+    [
+      'bash',
+      '-c',
+      [
+        'echo probe > /mnt/kb/.write-probe; echo "write $?"',
+        'chmod 600 /mnt/kb/note; echo "chmod $?"',
+        'stat -c %a /mnt/kb/note',
+      ].join('\n'),
+    ],
     { cwd: '/', user: 'cone-33' }
   );
-  assert.match(other.stdout, /rc 1\n$/);
-  assert.match(other.stderr, /Permission denied/);
+  assert.match(other.stdout, /write 1\n/);
+  assert.match(other.stdout, /chmod 1\n/);
+  assert.match(other.stdout, /^644$/m);
+  assert.match(other.stderr, /Permission denied|Operation not permitted/);
 });
 
 test('a no-owners mount with uid=1000,umask=000 lets another user write; fmask/dmask work the same', async (t) => {

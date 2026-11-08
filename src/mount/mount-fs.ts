@@ -476,7 +476,13 @@ function statOf(attr: DriverAttr, path: string, mount: Mount): FsStat {
       ? {
           uid: (mount.caps.owners ? attr.uid : undefined) ?? idOption(mount.options.uid),
           gid: (mount.caps.owners ? attr.gid : undefined) ?? idOption(mount.options.gid),
-          ...(!mount.caps.owners && !mount.caps.chmod ? { fat: true as const } : {}),
+          ...(!mount.caps.owners &&
+          !mount.caps.chmod &&
+          (mount.options.umask !== undefined ||
+            mount.options.fmask !== undefined ||
+            mount.options.dmask !== undefined)
+            ? { fat: true as const }
+            : {}),
         }
       : {}),
   };
