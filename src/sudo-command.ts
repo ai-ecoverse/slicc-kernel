@@ -38,6 +38,7 @@ export const SUDO_SOURCE = [
   '    await say(1, answer.list);',
   '    return 0;',
   '  }',
+  '  if (answer.done === true) return 0;',
   '  if (answer.run !== undefined) {',
   '    try {',
   '      pid = (await ctx.spawn({ argv: answer.run, pgid: 0 })).pid;',

@@ -3,14 +3,19 @@ import type { KernelFs, UsersMode } from './fs/types.ts';
 import { normalizePath } from './fs/types.ts';
 import type { Cred } from './kernel/cred.ts';
 import { tagFields } from './kernel/sealed.ts';
+import { type TimestampOwner, type TimestampPolicy, Timestamps } from './sudo-timestamp.ts';
 import {
   commandMatches,
   commandText,
+  type DefaultsEntry,
+  defaultsText,
   hasControl,
   NAME,
   parsePolicy,
   quoteWord,
+  type Resolved,
   type Rule,
+  resolveDefaults,
   SUDOERS,
   SUDOERS_D,
 } from './sudoers.ts';
@@ -22,7 +27,15 @@ export const DEFAULT_SUDOERS = '%sudo Cmnd *\n';
 export const SUDO_TIMEOUT_MS = 300_000;
 
 const TERM = /^[A-Za-z0-9._+-]+$/;
-const USAGE = 'usage: sudo [-n] [-u user] [--] command [args...]\n       sudo -l';
+const USAGE = [
+  'usage: sudo -K | -k',
+  '       sudo -v [-kn] [-u user]',
+  '       sudo -l [-kn]',
+  '       sudo [-kn] [-u user] [--] command [args...]',
+].join('\n');
+const DONE = { done: true } as const;
+const NOT_STAMPED =
+  "sudo: approved, but the approver didn't say a person decided, so no timestamp was recorded";
 const DENIED = 'sudo: approval denied';
 const DENIAL_MAX = 500;
 const ABORTED = Symbol('aborted');
@@ -57,6 +70,8 @@ export interface SudoRequest {
   always: boolean;
   stdin?: SudoStdin;
   rootOnly?: Record<string, boolean>;
+  validate?: true;
+  timestamp?: true;
 }
 
 export type SudoStdin = 'tty' | 'none' | 'pipe' | 'file';
@@ -68,10 +83,17 @@ export interface SudoDenial {
   message: string;
 }
 
+export interface SudoApproval {
+  answer: 'once' | 'always';
+  timestamp: true;
+}
+
+export type SudoReply = SudoAnswer | SudoDenial | SudoApproval;
+
 export type ApproveHook = (
   req: SudoRequest,
   options: { signal: AbortSignal }
-) => SudoAnswer | SudoDenial | Promise<SudoAnswer | SudoDenial>;
+) => SudoReply | Promise<SudoReply>;
 
 export interface SudoCall {
   op: 'proc-sudo';
@@ -93,6 +115,7 @@ export type SudoResult =
   | { error: string; errno: string }
   | { list: string }
   | { run: string[] }
+  | { done: true }
   | { grant: SudoGrant; notice?: string };
 
 export interface SudoCaller {
@@ -100,6 +123,8 @@ export interface SudoCaller {
   pid: number;
   tags?: readonly string[] | undefined;
   tty?: string | null | undefined;
+  terminal?: TimestampOwner['terminal'];
+  parent?: TimestampOwner['parent'];
   stdin: SudoStdin;
   report?: ((line: string) => Promise<void>) | undefined;
 }
@@ -117,6 +142,7 @@ export interface VisudoResult {
 interface PolicyFile {
   path: string;
   rules: Rule[];
+  defaults?: DefaultsEntry[];
   problems: { line?: number; message: string }[];
   ok: boolean;
 }
@@ -151,8 +177,35 @@ function skippedNotice(n: number): string {
 interface Parsed {
   list: boolean;
   nonInteractive: boolean;
+  validate: boolean;
+  reset: boolean;
+  removeAll: boolean;
   user: string;
   command: string[];
+}
+
+interface Approved {
+  answer: 'once' | 'always';
+  person: boolean;
+}
+
+type Failure = { error: string; errno: string };
+
+interface Session {
+  caller: SudoCaller;
+  self: Account;
+  target: Account;
+  owner: TimestampOwner;
+  policy: TimestampPolicy;
+  parsed: Parsed;
+  signal: AbortSignal;
+}
+
+interface Asked {
+  argv: string[];
+  path: string;
+  cwd: string;
+  validate?: true;
 }
 
 export interface SudoOptions {
@@ -166,9 +219,10 @@ export interface SudoOptions {
   approve?: ApproveHook | undefined;
   timeoutMs?: number | undefined;
   warn?: (message: string) => void;
+  now?: (() => number) | undefined;
 }
 
-function failed(errno: string, error: string): { error: string; errno: string } {
+function failed(errno: string, error: string): Failure {
   return { error, errno };
 }
 
@@ -227,6 +281,18 @@ async function answerOf(
   }
 }
 
+function approvalOf(answer: unknown): Approved | undefined {
+  if (answer === 'once' || answer === 'always') return { answer, person: false };
+  if (typeof answer !== 'object' || answer === null) return undefined;
+  try {
+    const { answer: kind, timestamp } = answer as { answer?: unknown; timestamp?: unknown };
+    if ((kind !== 'once' && kind !== 'always') || timestamp !== true) return undefined;
+    return { answer: kind, person: true };
+  } catch {
+    return undefined;
+  }
+}
+
 function recordedCommand(argv: readonly string[]): string {
   const [path = '', ...args] = argv;
   return commandText({ path, args: args.map((a) => [a]) });
@@ -237,6 +303,9 @@ function flags(parsed: Parsed, arg: string, next: string | undefined): number | 
     const flag = arg[j];
     if (flag === 'n') parsed.nonInteractive = true;
     else if (flag === 'l') parsed.list = true;
+    else if (flag === 'v') parsed.validate = true;
+    else if (flag === 'k') parsed.reset = true;
+    else if (flag === 'K') parsed.removeAll = true;
     else if (flag !== 'u') return `sudo: invalid option -- '${flag}'\n${USAGE}`;
     else {
       const user = arg.slice(j + 1) || next;
@@ -249,7 +318,15 @@ function flags(parsed: Parsed, arg: string, next: string | undefined): number | 
 }
 
 function parseArgs(args: readonly string[]): Parsed | string {
-  const parsed: Parsed = { list: false, nonInteractive: false, user: 'root', command: [] };
+  const parsed: Parsed = {
+    list: false,
+    nonInteractive: false,
+    validate: false,
+    reset: false,
+    removeAll: false,
+    user: 'root',
+    command: [],
+  };
   let i = 0;
   for (; i < args.length; i++) {
     const arg = args[i] as string;
@@ -263,8 +340,19 @@ function parseArgs(args: readonly string[]): Parsed | string {
     i += used;
   }
   parsed.command = args.slice(i);
-  if (parsed.list ? parsed.command.length > 0 : parsed.command.length === 0) return USAGE;
-  return parsed;
+  return usable(parsed) ? parsed : USAGE;
+}
+
+function usable(parsed: Parsed): boolean {
+  const command = parsed.command.length > 0;
+  const modes = [parsed.list, parsed.validate, parsed.removeAll].filter(Boolean).length;
+  if (modes > 1 || (parsed.removeAll && parsed.reset)) return false;
+  if (modes === 1) return !command;
+  return command || parsed.reset;
+}
+
+function policyOf(settings: Resolved): TimestampPolicy {
+  return { type: settings.timestampType, minutes: settings.timestampTimeout };
 }
 
 function described(rule: Rule): string {
@@ -278,10 +366,12 @@ export class Sudo {
   private readonly o: SudoOptions;
   private readonly warned = new Set<string>();
   private readonly pending = new Set<number>();
+  private readonly timestamps: Timestamps;
   private next = 0;
 
   constructor(options: SudoOptions) {
     this.o = options;
+    this.timestamps = new Timestamps(options.now ?? (() => performance.now()));
   }
 
   private warn(message: string): void {
@@ -375,8 +465,8 @@ export class Sudo {
       const code = (err as { code?: unknown }).code;
       return skipped(`it can't be read (${typeof code === 'string' ? code : 'error'})`);
     }
-    const { rules, errors } = parsePolicy(text, path);
-    return { path, rules, problems: errors, ok: true };
+    const { rules, defaults, errors } = parsePolicy(text, path);
+    return { path, rules, defaults, problems: errors, ok: true };
   }
 
   private async policy(): Promise<PolicyFile[]> {
@@ -394,7 +484,9 @@ export class Sudo {
     return files;
   }
 
-  private async policyRules(caller: SudoCaller): Promise<Rule[]> {
+  private async policyRules(
+    caller: SudoCaller
+  ): Promise<{ rules: Rule[]; defaults: DefaultsEntry[] }> {
     const files = await this.policy();
     const detailed = caller.cred.euid === 0;
     let skipped = 0;
@@ -410,7 +502,10 @@ export class Sudo {
       }
     }
     if (!detailed && skipped > 0) await caller.report?.(skippedNotice(skipped));
-    return files.flatMap((f) => f.rules);
+    return {
+      rules: files.flatMap((f) => f.rules),
+      defaults: files.flatMap((f) => f.defaults ?? []),
+    };
   }
 
   async check(cred: Cred, call: VisudoCall): Promise<VisudoResult> {
@@ -425,17 +520,26 @@ export class Sudo {
       if (read && problems.length === 0) lines.push([1, `${path}: parsed OK`]);
       if (problems.length > 0) ok = false;
     };
+    const values = (defaults: DefaultsEntry[]) => {
+      for (const line of defaultsText(defaults)) lines.push([1, line]);
+    };
     if (call.files !== undefined) {
+      const defaults: DefaultsEntry[] = [];
       for (const { name, text } of call.files) {
-        report({ path: name, rules: [], problems: parsePolicy(text).errors, ok: true });
+        const parsed = parsePolicy(text);
+        defaults.push(...parsed.defaults);
+        report({ path: name, rules: [], problems: parsed.errors, ok: true });
       }
+      if (defaults.length > 0) values(defaults);
       return { lines, ok };
     }
     if (this.o.mode === 'enforce' && cred.euid !== 0) {
       const hint = 'check the policy as root (sudo visudo -c), or a file with visudo -c -f <file>';
       return { lines: [[2, `visudo: ${SUDOERS}: Permission denied: ${hint}`]], ok: false };
     }
-    for (const file of await this.policy()) report(file);
+    const files = await this.policy();
+    for (const file of files) report(file);
+    values(files.flatMap((f) => f.defaults ?? []));
     return { lines, ok };
   }
 
@@ -443,12 +547,12 @@ export class Sudo {
     return new Map((await this.o.users.groups()).map((g) => [g.name, g.gid]));
   }
 
-  private async applies(caller: Account, cred: Cred): Promise<(rule: Rule) => boolean> {
+  private async applies(caller: Account, cred: Cred): Promise<(who: string) => boolean> {
     const gids = await this.groupIds();
     const mine = new Set([cred.rgid, cred.egid, ...cred.groups]);
-    return (rule) => {
-      if (rule.who === 'ALL' || rule.who === caller.name) return true;
-      const gid = rule.who.startsWith('%') ? gids.get(rule.who.slice(1)) : undefined;
+    return (who) => {
+      if (who === 'ALL' || who === caller.name) return true;
+      const gid = who.startsWith('%') ? gids.get(who.slice(1)) : undefined;
       return gid !== undefined && mine.has(gid);
     };
   }
@@ -504,18 +608,46 @@ export class Sudo {
     if (this.o.mode !== 'enforce') {
       const mode = this.o.mode;
       if (parsed.list) return { list: `sudo: users are '${mode}': commands run as the caller\n` };
-      return { run: parsed.command };
+      return parsed.command.length > 0 ? { run: parsed.command } : DONE;
     }
     const { cred } = caller;
     const policy = await this.policyRules(caller);
     const self = await this.o.users.lookup(cred.ruid);
     if (!self) return failed('EPERM', `sudo: uid ${cred.ruid} is not in the passwd database`);
+    const owner: TimestampOwner = {
+      uid: cred.ruid,
+      terminal: caller.terminal,
+      parent: caller.parent,
+    };
+    const applies = await this.applies(self, cred);
+    const settings = resolveDefaults(policy.defaults, applies);
+    if (parsed.removeAll) {
+      this.timestamps.remove(owner.uid);
+      return DONE;
+    }
+    if (parsed.reset && !parsed.validate && !parsed.list && parsed.command.length === 0) {
+      this.timestamps.invalidate(owner, settings.timestampType);
+      return DONE;
+    }
     const target = await this.lookup(parsed.user);
     if (!target) return failed('ENOENT', `sudo: unknown user ${parsed.user}`);
     const root = cred.euid === 0;
-    const rules = root ? [] : policy;
-    const applies = await this.applies(self, cred);
-    if (parsed.list) return this.listed(self, root, rules.filter(applies));
+    const rules = root ? [] : policy.rules;
+    const mine = rules.filter((rule) => applies(rule.who));
+    if (parsed.list) return this.listed(self, root, mine, settings.matching);
+    const session = { caller, self, target, owner, policy: policyOf(settings), parsed, signal };
+    if (parsed.validate) return this.validate(session, root, mine, call.cwd);
+    return this.command(session, root, mine, call);
+  }
+
+  private async command(
+    s: Session,
+    root: boolean,
+    mine: Rule[],
+    call: SudoCall
+  ): Promise<SudoResult> {
+    const { caller, self, target, parsed } = s;
+    const { cred } = caller;
     const [word = '', ...args] = parsed.command;
     const cwd = await this.canonical(call.cwd);
     if (cwd === undefined || !(await this.reachable(cred, cwd))) {
@@ -529,9 +661,8 @@ export class Sudo {
     const untrusted = await this.untrusted(path, cwd, word);
     if (untrusted) return untrusted;
     const argv = [path, ...args];
-    const matching = rules.filter(
+    const matching = mine.filter(
       (rule) =>
-        applies(rule) &&
         (rule.target === 'ALL' || rule.target === target.name) &&
         (rule.cwd === undefined || rule.cwd === cwd) &&
         stdinMatches(rule, caller.stdin) &&
@@ -546,22 +677,78 @@ export class Sudo {
         `sudo: ${self.name} is not allowed to run ${quoted} as ${target.name}`
       );
     }
+    if (!parsed.reset && this.timestamps.current(s.owner, s.policy)) {
+      this.timestamps.stamp(s.owner, s.policy);
+      this.logged(s, cwd, argv);
+      return grant();
+    }
     if (parsed.nonInteractive) return failed('EPERM', 'sudo: a password is required');
-    if (this.pending.has(cred.ruid)) return failed('EBUSY', 'sudo: another request is pending');
-    this.pending.add(cred.ruid);
-    try {
-      const answer = await this.ask(caller, self, target, parsed.command, path, cwd, signal);
-      if (typeof answer !== 'string') return answer;
+    return this.pendingFor(cred.ruid, async () => {
+      const answer = await this.ask(s, { argv: parsed.command, path, cwd });
+      if ('error' in answer) return answer;
       if ((await this.canonical(call.cwd)) !== cwd || !(await this.reachable(cred, cwd))) {
         return failed('EACCES', `sudo: ${call.cwd} changed while the request waited`);
       }
       const changed = await this.untrusted(path, cwd, word);
       if (changed) return changed;
-      if (answer === 'once') return grant();
-      return await this.always(self, target, cwd, argv, recordable(cwd, parsed.command), grant);
-    } finally {
-      this.pending.delete(cred.ruid);
+      const result =
+        answer.answer === 'once'
+          ? grant()
+          : await this.always(self, target, cwd, argv, recordable(cwd, parsed.command), grant);
+      if (!('error' in result)) this.stamped(s, answer);
+      return result;
+    });
+  }
+
+  private async validate(
+    s: Session,
+    root: boolean,
+    mine: Rule[],
+    dir: string
+  ): Promise<SudoResult> {
+    const { self, parsed } = s;
+    if (root) return DONE;
+    if (mine.length === 0) {
+      return failed('EPERM', `Sorry, user ${self.name} may not run sudo on ${this.o.hostname}.`);
     }
+    if (mine.every((rule) => rule.nopasswd)) return DONE;
+    if (!parsed.reset && this.timestamps.current(s.owner, s.policy)) {
+      this.timestamps.stamp(s.owner, s.policy);
+      return DONE;
+    }
+    if (parsed.nonInteractive) return failed('EPERM', 'sudo: a password is required');
+    const cwd = (await this.canonical(dir)) ?? normalizePath(dir);
+    return this.pendingFor(s.caller.cred.ruid, async () => {
+      const answer = await this.ask(s, { argv: [], path: '', cwd, validate: true });
+      if ('error' in answer) return answer;
+      if (!answer.person) await s.caller.report?.(NOT_STAMPED);
+      this.stamped(s, answer);
+      return DONE;
+    });
+  }
+
+  private async pendingFor(uid: number, work: () => Promise<SudoResult>): Promise<SudoResult> {
+    if (this.pending.has(uid)) return failed('EBUSY', 'sudo: another request is pending');
+    this.pending.add(uid);
+    try {
+      return await work();
+    } finally {
+      this.pending.delete(uid);
+    }
+  }
+
+  private stamped(s: Session, answer: Approved): void {
+    if (answer.person && !s.parsed.reset) this.timestamps.stamp(s.owner, s.policy);
+  }
+
+  private logged(s: Session, cwd: string, argv: readonly string[]): void {
+    const { caller, self, target, owner, policy } = s;
+    const type = policy.type === 'tty' && !owner.terminal ? 'ppid' : policy.type;
+    const tty = owner.terminal?.tty ?? caller.tty ?? 'unknown';
+    const command = argv.map(quoteWord).join(' ');
+    (this.o.warn ?? console.warn)(
+      `sudo: ${self.name} : TTY=${tty} ; PWD=${quoteWord(cwd)} ; USER=${target.name} ; TIMESTAMP=${type} ; COMMAND=${command}`
+    );
   }
 
   private async always(
@@ -579,7 +766,12 @@ export class Sudo {
     return grant();
   }
 
-  private listed(self: Account, root: boolean, rules: Rule[]): SudoResult {
+  private listed(
+    self: Account,
+    root: boolean,
+    rules: Rule[],
+    defaults: DefaultsEntry[]
+  ): SudoResult {
     const host = this.o.hostname;
     if (root) {
       return {
@@ -590,18 +782,19 @@ export class Sudo {
       return failed('EPERM', `User ${self.name} is not allowed to run sudo on ${host}.`);
     }
     const lines = rules.map(described).join('\n');
-    return { list: `User ${self.name} may run the following commands on ${host}:\n${lines}\n` };
+    const params = defaults.flatMap((d) => d.params).join(', ');
+    const matching =
+      params === ''
+        ? ''
+        : `Matching Defaults entries for ${self.name} on ${host}:\n    ${params}\n\n`;
+    return {
+      list: `${matching}User ${self.name} may run the following commands on ${host}:\n${lines}\n`,
+    };
   }
 
-  private async ask(
-    caller: SudoCaller,
-    self: Account,
-    target: Account,
-    argv: string[],
-    path: string,
-    cwd: string,
-    requester: AbortSignal
-  ): Promise<'once' | 'always' | { error: string; errno: string }> {
+  private async ask(s: Session, asked: Asked): Promise<Approved | Failure> {
+    const { caller, self, target, signal: requester } = s;
+    const { argv, path, cwd } = asked;
     const { approve } = this.o;
     if (!approve || requester.aborted) return failed('EACCES', DENIED);
     const createdAt = Date.now();
@@ -620,9 +813,11 @@ export class Sudo {
       ...(caller.tty ? { tty: caller.tty } : {}),
       createdAt,
       expiresAt: createdAt + timeout,
-      always: recordable(cwd, [path, ...argv]),
+      always: asked.validate ? false : recordable(cwd, [path, ...argv]),
       stdin: caller.stdin,
-      rootOnly: await this.rootOnly(cwd, argv.slice(1)),
+      rootOnly: asked.validate ? {} : await this.rootOnly(cwd, argv.slice(1)),
+      ...(asked.validate ? { validate: true as const } : {}),
+      timestamp: true,
     };
     const control = new AbortController();
     const timer = setTimeout(() => control.abort('expired'), timeout);
@@ -635,9 +830,8 @@ export class Sudo {
     try {
       const answer = await answerOf(approve, req, control.signal);
       if (answer === ABORTED) return ended();
-      if (answer === 'once' || answer === 'always') {
-        return control.signal.aborted ? ended() : answer;
-      }
+      const approved = approvalOf(answer);
+      if (approved) return control.signal.aborted ? ended() : approved;
       return failed('EACCES', denialText(answer));
     } finally {
       clearTimeout(timer);

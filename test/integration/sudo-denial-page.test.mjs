@@ -36,3 +36,39 @@ test("on the page, createKernel relays the approver's denial message to sudo, ex
   assert.deepEqual(await sudo('extra'), denied(JUDGE));
   assert.deepEqual(await sudo('symbol'), denied('sudo: approval denied'));
 });
+
+test("on the page, createKernel relays a person's { answer, timestamp: true } to sudo, which opens the window, while a plain 'once' never does", async (t) => {
+  const page = await chrome.page(t);
+  await page.goto('/');
+  await page.until(() => typeof window.boot === 'function');
+  await installPackage(page, 'wasm-bash');
+  await installPackage(page, 'wasm-coreutils');
+  await page.evaluate(async () => {
+    const { createKernel } = await import('/dist/index.js');
+    window.asked = [];
+    window.kernel = await createKernel({
+      root: await navigator.storage.getDirectory(),
+      users: 'enforce',
+      approve: (req) => {
+        window.asked.push(req);
+        return req.argv[1] === 'person'
+          ? { answer: 'once', timestamp: true, extra: () => 'not cloneable' }
+          : 'once';
+      },
+    });
+    await window.kernel.users.add({ name: 'cone', groups: ['sudo'] });
+  });
+  const shell = (word) =>
+    page.evaluate(
+      (w) =>
+        window.kernel.run(['bash', '-c', `sudo echo ${w}; sudo -n true && echo open; :`], {
+          cwd: '/',
+          user: 'cone',
+        }),
+      word
+    );
+  assert.equal((await shell('plain')).stdout, 'plain\n');
+  assert.equal((await shell('person')).stdout, 'person\nopen\n');
+  const asked = await page.evaluate(() => window.asked.map((r) => r.timestamp));
+  assert.deepEqual(asked, [true, true]);
+});

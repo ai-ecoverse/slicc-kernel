@@ -287,7 +287,7 @@ test('visudo -c checks the whole policy as root, and says so to anyone else', as
   await write('/etc/sudoers.d/open', ['ALL ALL=(ALL) NOPASSWD: ALL'], '666');
   const expected = {
     status: 1,
-    stdout: '/etc/sudoers: parsed OK\n',
+    stdout: '/etc/sudoers: parsed OK\nDefaults timestamp_timeout=5, timestamp_type=tty\n',
     stderr:
       "visudo: /etc/sudoers.d/cone:2: expected a command after '=': an absolute path, or ALL\n" +
       "visudo: /etc/sudoers.d/open: sudo skips it: it must be root's, no symlink, and writable by root only\n",
@@ -314,6 +314,6 @@ test('visudo -c checks the whole policy as root, and says so to anyone else', as
   assert.deepEqual([clean.status, clean.stderr], [0, '']);
   assert.equal(
     clean.stdout,
-    '/etc/sudoers: parsed OK\n/etc/sudoers.d/cone: parsed OK\n/etc/sudoers.d/open: parsed OK\n'
+    '/etc/sudoers: parsed OK\n/etc/sudoers.d/cone: parsed OK\n/etc/sudoers.d/open: parsed OK\nDefaults timestamp_timeout=5, timestamp_type=tty\n'
   );
 });

@@ -121,7 +121,15 @@ export type {
 } from './mount/hostfs.ts';
 export { serveHostfsPort } from './mount/hostfs.ts';
 export type { MountEntry, MountSpec } from './mount/mount-fs.ts';
-export type { ApproveHook, SudoAnswer, SudoDenial, SudoRequest, SudoStdin } from './sudo.ts';
+export type {
+  ApproveHook,
+  SudoAnswer,
+  SudoApproval,
+  SudoDenial,
+  SudoReply,
+  SudoRequest,
+  SudoStdin,
+} from './sudo.ts';
 export type { NetworkRedirectPolicy } from './transport.ts';
 export { fetchTransport, type NetworkTransport } from './transport.ts';
 export { memoryRoot };
@@ -151,6 +159,7 @@ export interface NodeKernelOptions {
   approve?: ApproveHook;
   protect?: Protection;
   cron?: { clock?: CronClock };
+  sudo?: { clock?: { now(): number } };
   compileCache?: string | false;
   warmWorker?: boolean;
   warmWorkers?: number;
@@ -608,6 +617,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     ...(options.clipboard ? { clipboard: options.clipboard } : {}),
     ...(options.requests ? { embedder: checkedRequests(options.requests) } : {}),
     ...(options.approve ? { approve: options.approve } : {}),
+    ...(options.sudo?.clock ? { sudoClock: options.sudo.clock } : {}),
     ...(options.wasmMemories ? { wasmMemories: options.wasmMemories } : {}),
     cron: { lock: cronLock(root), ...(options.cron?.clock ? { clock: options.cron.clock } : {}) },
   });

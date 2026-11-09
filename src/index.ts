@@ -159,7 +159,15 @@ export type {
   JsWebSocketMessage,
   JsWebSocketOptions,
 } from './process/js/js-websocket.ts';
-export type { ApproveHook, SudoAnswer, SudoDenial, SudoRequest, SudoStdin } from './sudo.ts';
+export type {
+  ApproveHook,
+  SudoAnswer,
+  SudoApproval,
+  SudoDenial,
+  SudoReply,
+  SudoRequest,
+  SudoStdin,
+} from './sudo.ts';
 export {
   type FetchTransportOptions,
   fetchTransport,
@@ -596,7 +604,18 @@ function relayable(answer: unknown): unknown {
   if (typeof answer === 'symbol' || typeof answer === 'function') return 'deny';
   if (typeof answer !== 'object' || answer === null) return answer;
   try {
-    const { answer: kind, message } = answer as { answer?: unknown; message?: unknown };
+    const {
+      answer: kind,
+      message,
+      timestamp,
+    } = answer as {
+      answer?: unknown;
+      message?: unknown;
+      timestamp?: unknown;
+    };
+    if ((kind === 'once' || kind === 'always') && timestamp === true) {
+      return { answer: kind, timestamp };
+    }
     return kind === 'deny' && typeof message === 'string' ? { answer: kind, message } : 'deny';
   } catch {
     return 'deny';
