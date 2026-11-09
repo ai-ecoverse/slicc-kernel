@@ -291,6 +291,7 @@ export type JsSudoAnswer =
   | { error: string; errno: string }
   | { list: string }
   | { run: string[] }
+  | { done: true }
   | { pid: number };
 
 export type JsStrayListener = (error: unknown, promise?: Promise<unknown>) => void;

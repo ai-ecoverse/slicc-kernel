@@ -199,6 +199,7 @@ import {
   type ApproveHook,
   Sudo,
   type SudoCall,
+  type SudoCaller,
   type SudoResult,
   type SudoStdin,
   type VisudoCall,
@@ -255,6 +256,7 @@ export interface LauncherOptions {
   embedder?: EmbedderHook;
   approve?: ApproveHook;
   sudoTimeoutMs?: number;
+  sudoClock?: { now(): number };
   protect?: Protection;
   cron?: CronOptions;
   moduleUrl?: ModuleUrlMaker;
@@ -1020,6 +1022,7 @@ export class Launcher {
       );
     }
     this.users = new UserDb(this.fs, this.owners);
+    const { sudoClock } = options;
     this.sudoer = new Sudo({
       fs: this.fs,
       users: this.users,
@@ -1030,6 +1033,7 @@ export class Launcher {
       backing: (path, cwd) => this.backing(path, cwd),
       approve: options.approve,
       timeoutMs: options.sudoTimeoutMs,
+      now: sudoClock ? () => sudoClock.now() : undefined,
     });
     this.cron = this.cronService(options.cron);
     void this.unlinked.sweep('/');
@@ -2688,10 +2692,29 @@ export class Launcher {
       pid: this.jobs.shown(pid),
       tags: this.tagsOf(pid),
       tty: this.described.get(pid)?.tty,
+      ...this.timestampOwner(pid),
       stdin,
       report,
     };
     return this.sudoer.request(caller, call, signal);
+  }
+
+  private timestampOwner(pid: number): Pick<SudoCaller, 'terminal' | 'parent'> {
+    const sid = this.jobs.sidOf(pid);
+    const tty = this.jobs.controllingTerminal(pid)?.name;
+    const leader = sid === undefined ? undefined : this.startedOf(sid);
+    const host = this.jobs.shownParent(pid) ?? this.jobs.shown(pid);
+    const started = this.startedOf(host);
+    return {
+      ...(tty && sid !== undefined && leader !== undefined
+        ? { terminal: { tty, sid, started: leader } }
+        : {}),
+      ...(started === undefined ? {} : { parent: { pid: host, started } }),
+    };
+  }
+
+  private startedOf(shown: number): number | undefined {
+    return this.running(shown) ? this.described.get(shown)?.started : undefined;
   }
 
   private visudo(pid: number, call: VisudoCall): Promise<VisudoResult> {

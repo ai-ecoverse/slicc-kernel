@@ -39,7 +39,29 @@ export interface Rule {
   cmnd: Command | '*';
 }
 
-export type PolicyLine = { rules: Rule[] } | { error: string } | null;
+export type TimestampType = 'tty' | 'ppid' | 'global';
+
+export interface Settings {
+  timestampTimeout?: number;
+  timestampType?: TimestampType;
+}
+
+export interface DefaultsEntry {
+  who: string[] | null;
+  settings: Settings;
+  params: string[];
+}
+
+export interface Resolved {
+  timestampTimeout: number;
+  timestampType: TimestampType;
+  matching: DefaultsEntry[];
+}
+
+export const TIMESTAMP_TIMEOUT = 5;
+export const TIMESTAMP_TYPE: TimestampType = 'tty';
+
+export type PolicyLine = { rules: Rule[] } | { defaults: DefaultsEntry } | { error: string } | null;
 
 export function hasControl(text: string): boolean {
   return CONTROL.test(text);
@@ -368,9 +390,6 @@ function directiveError(text: string): string | null | undefined {
       : null;
   }
   const first = /^\S+/.exec(text)?.[0] ?? '';
-  if (/^Defaults([:@>!]|$)/.test(first)) {
-    return "Defaults aren't supported: the kernel's sudo has no settings, so this changes nothing";
-  }
   if (/^[A-Z][A-Za-z]*_Alias$/.test(first)) {
     return "aliases aren't supported: name the users, targets and commands in each line";
   }
@@ -401,9 +420,116 @@ function kernelLine(m: RegExpExecArray, line: string, file: string | undefined):
   };
 }
 
+const DEFAULTS = /^Defaults(?=[:@>!\s]|$)/;
+const DEFAULTS_ONLY = `Defaults aren't supported, except timestamp_timeout and timestamp_type for everyone, a user or a %group: this line changes nothing`;
+const PARAM = /^(!*)([A-Za-z_]+)(?:\s*([-+]?=)\s*(.*))?$/s;
+const MINUTES = /^[-+]?(?:\d+(?:\.\d*)?|\.\d+)$/;
+const TYPES: readonly string[] = ['tty', 'ppid', 'global'];
+
+function defaultsValue(raw: string): string {
+  const quoted = /^"(.*)"$/s.exec(raw);
+  return quoted ? (quoted[1] as string) : raw;
+}
+
+interface Param {
+  text: string;
+  negated: boolean;
+  op: string | undefined;
+  value: string;
+}
+
+function timeoutParam({ text, negated, op, value }: Param): Settings | string {
+  if (negated && op === undefined) return { timestampTimeout: 0 };
+  if (negated || op !== '=' || !MINUTES.test(value) || !Number.isFinite(Number(value))) {
+    return `timestamp_timeout takes minutes, such as =5 or =2.5 (0 always asks, below 0 never expires), not ${shown(text)}`;
+  }
+  return { timestampTimeout: Number(value) };
+}
+
+function typeParam({ text, negated, op, value }: Param): Settings | string {
+  if (!negated && op === '=' && TYPES.includes(value)) {
+    return { timestampType: value as TimestampType };
+  }
+  if (value === 'kernel') return "timestamp_type=kernel isn't supported: use tty, ppid or global";
+  return `timestamp_type takes =tty, =ppid or =global, not ${shown(text)}`;
+}
+
+function defaultsParam(param: string): { settings: Settings; text: string } | string {
+  const m = PARAM.exec(param);
+  if (!m) return DEFAULTS_ONLY;
+  const [, bangs = '', name, op, raw = ''] = m;
+  const read: Param = { text: param, negated: bangs !== '', op, value: defaultsValue(raw.trim()) };
+  const settings =
+    name === 'timestamp_timeout'
+      ? timeoutParam(read)
+      : name === 'timestamp_type'
+        ? typeParam(read)
+        : DEFAULTS_ONLY;
+  if (typeof settings === 'string') return settings;
+  const value = settings.timestampTimeout ?? settings.timestampType;
+  return { settings, text: `${name}=${value}` };
+}
+
+function defaultsWho(binding: string): string[] | null | string {
+  if (binding === '') return null;
+  if (!binding.startsWith(':')) return DEFAULTS_ONLY;
+  const who = binding.slice(1).split(',');
+  for (const name of who) {
+    if (!validWho(name))
+      return `expected users, %groups or ALL after Defaults:, not ${shown(name)}`;
+  }
+  return who;
+}
+
+function defaultsLine(text: string): PolicyLine {
+  const m = /^Defaults(\S*)(?:\s+(.*))?$/s.exec(text);
+  const who = defaultsWho(m?.[1] ?? '');
+  if (typeof who === 'string') return { error: who };
+  const list = (m?.[2] ?? '').trim();
+  if (list === '')
+    return {
+      error: 'expected timestamp_timeout=<minutes> or timestamp_type=<type> after Defaults',
+    };
+  const settings: Settings = {};
+  const params: string[] = [];
+  for (const param of list.split(',')) {
+    const read = defaultsParam(param.trim());
+    if (typeof read === 'string') return { error: read };
+    Object.assign(settings, read.settings);
+    params.push(read.text);
+  }
+  return { defaults: { who, settings, params } };
+}
+
+export function resolveDefaults(
+  entries: readonly DefaultsEntry[],
+  applies: (who: string) => boolean
+): Resolved {
+  const everyone = entries.filter((e) => e.who === null);
+  const mine = entries.filter((e) => e.who?.some(applies));
+  const matching = [...everyone, ...mine];
+  const settings: Settings = Object.assign({}, ...matching.map((e) => e.settings));
+  return {
+    timestampTimeout: settings.timestampTimeout ?? TIMESTAMP_TIMEOUT,
+    timestampType: settings.timestampType ?? TIMESTAMP_TYPE,
+    matching,
+  };
+}
+
+export function defaultsText(entries: readonly DefaultsEntry[]): string[] {
+  const all = resolveDefaults(entries, () => false);
+  return [
+    `Defaults timestamp_timeout=${all.timestampTimeout}, timestamp_type=${all.timestampType}`,
+    ...entries
+      .filter((e) => e.who !== null)
+      .map((e) => `Defaults:${(e.who as string[]).join(',')} ${e.params.join(', ')}`),
+  ];
+}
+
 export function parseLine(line: string, file?: string): PolicyLine {
   const text = line.trim();
   if (text === '') return null;
+  if (DEFAULTS.test(text)) return defaultsLine(text);
   const directive = directiveError(text);
   if (directive !== undefined) return directive === null ? null : { error: directive };
   const kernel = KERNEL_FORM.exec(text);
@@ -419,14 +545,22 @@ export interface PolicyError {
   message: string;
 }
 
-export function parsePolicy(text: string, file?: string): { rules: Rule[]; errors: PolicyError[] } {
+export interface Policy {
+  rules: Rule[];
+  defaults: DefaultsEntry[];
+  errors: PolicyError[];
+}
+
+export function parsePolicy(text: string, file?: string): Policy {
   const rules: Rule[] = [];
+  const defaults: DefaultsEntry[] = [];
   const errors: PolicyError[] = [];
   for (const [n, line] of text.split('\n').entries()) {
     const parsed = parseLine(line, file);
     if (parsed === null) continue;
     if ('error' in parsed) errors.push({ line: n + 1, message: parsed.error });
+    else if ('defaults' in parsed) defaults.push(parsed.defaults);
     else rules.push(...parsed.rules);
   }
-  return { rules, errors };
+  return { rules, defaults, errors };
 }
