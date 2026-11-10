@@ -609,12 +609,17 @@ export class Sudo {
     return (await this.o.fs.stat(cwd).catch(() => undefined))?.isDirectory === true;
   }
 
+  async real(file: string): Promise<string> {
+    const { fs } = this.o;
+    return (await fs.realpath?.(file, true).catch(() => file)) ?? file;
+  }
+
   async digests(files: readonly string[]): Promise<Record<string, string>> {
     const { fs } = this.o;
     const found: Record<string, string> = {};
     for (const file of new Set(files)) {
       if (await this.trusted(file)) continue;
-      const real = (await fs.realpath?.(file, true).catch(() => file)) ?? file;
+      const real = await this.real(file);
       found[real] = await fs.readFileBuffer(real).then(sha256, () => '');
     }
     return found;

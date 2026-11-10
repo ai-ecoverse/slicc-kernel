@@ -146,6 +146,49 @@ test("a user's own pnpm command runs as root once approved, binding its script a
   assert.deepEqual([denied.status, denied.stdout, asked.length], [1, '', n + 1]);
 });
 
+test('a granted wasm program loads the bytes that were hashed, not a module cached under the same size and mtime', async (t) => {
+  const { kernel, cone, box, asked, last } = await boot(t, () => 'once');
+  const good = await readFile(new URL('./fixtures/exetest/bin/exetest.wasm', import.meta.url));
+  const evil = Buffer.from(good);
+  const at = evil.indexOf('argv0=');
+  assert.ok(at > 0);
+  evil.write('EVIL0=', at);
+  await kernel.writeFile('/tmp/good.wasm', good);
+  await kernel.writeFile('/tmp/evil.wasm', evil);
+  const cached = await cone(
+    'cp /tmp/evil.wasm prog && chmod 755 prog && ./prog && touch -r prog ref && cp /tmp/good.wasm prog && touch -r ref prog'
+  );
+  assert.equal(cached.stdout, 'exe=/home/cone/prog EVIL0=./prog\n', cached.stderr);
+  const once = await cone('sudo ./prog');
+  assert.deepEqual([once.status, once.stdout], [0, 'exe=/home/cone/prog argv0=./prog\n']);
+  assert.deepEqual(last().userWritable, [{ path: '/home/cone/prog', sha256: sha(good) }]);
+  box.approve = () => 'always';
+  assert.equal((await cone('sudo ./prog')).stdout, 'exe=/home/cone/prog argv0=./prog\n');
+  const n = asked.length;
+  assert.equal((await cone('sudo -n ./prog')).stdout, 'exe=/home/cone/prog argv0=./prog\n');
+  assert.equal(asked.length, n);
+});
+
+test("a user's own JS command runs as root once approved, from the module that was hashed", async (t) => {
+  const { cone, last } = await boot(t, () => 'once');
+  const pkg = '/home/cone/.local/share/pnpm/global/5/g/node_modules/hi';
+  const source =
+    'export default async function hi(ctx) { await ctx.write(1, "hi\\n"); return 0; }\n';
+  const manifest = JSON.stringify({
+    name: 'hi',
+    slicc: { commands: { hi: { abi: 'js', module: 'bin/hi.mjs' } } },
+  });
+  const made = await cone(
+    `mkdir -p ${pkg}/bin && printf %s ${quote(source)} > ${pkg}/bin/hi.mjs && printf %s ${quote(manifest)} > ${pkg}/package.json && hi`
+  );
+  assert.equal(made.stdout, 'hi\n', made.stderr);
+  const r = await cone('sudo ~/.local/share/pnpm/bin/hi');
+  assert.deepEqual([r.status, r.stdout, r.stderr], [0, 'hi\n', '']);
+  assert.ok(
+    last().userWritable.some((f) => f.path === `${pkg}/bin/hi.mjs` && f.sha256 === sha(source))
+  );
+});
+
 test('a hand-written NOPASSWD line for a user-writable path runs it without asking, whatever it holds, and sudo -l flags it', async (t) => {
   const { cone, script, policy, asked } = await boot(t);
   await script(SCRIPT);

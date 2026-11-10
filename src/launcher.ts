@@ -41,6 +41,7 @@ import {
   type IntegrityCaller,
   integrityOptions,
   KERNEL_CALLER,
+  sha256,
 } from './fs/integrity.ts';
 import { META_DB } from './fs/meta.ts';
 import { chain } from './fs/owners.ts';
@@ -455,7 +456,18 @@ function describe(req: StartRequest, tty: string | null) {
   return { argv: [req.argv0, ...req.args], tty, started: Date.now(), ...exe };
 }
 
+type LoadCaller = IntegrityCaller & { pinned?: Readonly<Record<string, string>> | undefined };
+
+function refuseChanged(
+  approved: Readonly<Record<string, string>>,
+  now: Readonly<Record<string, string>>
+): void {
+  const changed = changedFile(approved, now);
+  if (changed !== undefined) throw new ChangedError(changedText(changed));
+}
+
 interface StartRequest {
+  pinned?: Readonly<Record<string, string>> | undefined;
   quietOom?: boolean | undefined;
   program: Program;
   argv0: string;
@@ -1804,16 +1816,25 @@ export class Launcher {
     planned: Planned,
     file: string,
     cwd: string,
-    grant: SpawnGrant | undefined,
-    fds: FdTable
-  ): Promise<void> {
+    grant: SpawnGrant | undefined
+  ): Promise<{ pinned?: Readonly<Record<string, string>> }> {
     const approved = grant?.files;
-    if (!approved) return;
+    if (!approved) return {};
     const files = await this.backingOf(planned, file, cwd, '');
-    const changed = changedFile(approved, await this.sudoer.digests([file, ...files]));
-    if (changed === undefined) return;
-    await fds.closeAll();
-    throw new ChangedError(changedText(changed));
+    refuseChanged(approved, await this.sudoer.digests([file, ...files]));
+    return { pinned: approved };
+  }
+
+  private async pinOf(path: string, caller: LoadCaller): Promise<Record<string, string>> {
+    const real = caller.pinned && (await this.sudoer.real(path));
+    const hex = real === undefined ? undefined : caller.pinned?.[real];
+    return real === undefined || hex === undefined ? {} : { [real]: hex };
+  }
+
+  private async pinnedBytes(pin: Record<string, string>, bytes: Uint8Array): Promise<Uint8Array> {
+    const [real = ''] = Object.keys(pin);
+    refuseChanged(pin, { [real]: await sha256(bytes) });
+    return bytes;
   }
 
   private async grantedCwd(caller: Cred, cwd: string): Promise<boolean> {
@@ -1934,14 +1955,20 @@ export class Launcher {
     return found;
   }
 
-  private async module(path: string, caller: IntegrityCaller, asked?: string): Promise<Compiled> {
-    const key = await this.cacheKey(path, asked);
+  private async module(path: string, caller: LoadCaller, asked?: string): Promise<Compiled> {
+    const pin = await this.pinOf(path, caller);
+    const sum = Object.values(pin)[0];
+    const key = sum === undefined ? await this.cacheKey(path, asked) : `${path}:sha256:${sum}`;
     return this.cached(this.compiled, key, async () => {
-      const { bytes, key: read } = await this.keyed(path, caller, asked);
+      const { bytes: read, key: readKey } = await this.keyed(path, caller, asked);
+      const bytes = sum === undefined ? read : await this.pinnedBytes(pin, read);
       const memory = importedMemory(bytes);
       const foreign = foreignImports(bytes);
       const compiled = await WebAssembly.compile(bytes as BufferSource);
-      return { value: { module: compiled, ...(memory ? { memory } : {}), foreign }, key: read };
+      return {
+        value: { module: compiled, ...(memory ? { memory } : {}), foreign },
+        key: sum === undefined ? readKey : key,
+      };
     });
   }
 
@@ -1967,7 +1994,12 @@ export class Launcher {
     }
   }
 
-  private async text(path: string, caller: IntegrityCaller, asked?: string): Promise<string> {
+  private async text(path: string, caller: LoadCaller, asked?: string): Promise<string> {
+    const pin = await this.pinOf(path, caller);
+    if (Object.keys(pin).length > 0) {
+      const { bytes } = await this.keyed(path, caller, asked);
+      return new TextDecoder().decode(await this.pinnedBytes(pin, bytes));
+    }
     if (!this.integrity) return this.base.readFile(path);
     const key = await this.cacheKey(path, asked);
     return this.cached(this.texts, key, async () => {
@@ -2028,7 +2060,7 @@ export class Launcher {
   private loaded(
     target: Target,
     env: Record<string, string>,
-    caller: IntegrityCaller
+    caller: LoadCaller
   ): Promise<[Program, { exeId?: string }]> {
     const read = () => this.program(target, env, caller);
     const id = () => this.exeId(target);
@@ -2085,7 +2117,7 @@ export class Launcher {
   private async program(
     target: Target,
     env: Record<string, string>,
-    caller: IntegrityCaller
+    caller: LoadCaller
   ): Promise<Program> {
     if (target.abi === 'js' && target.wasm === SUDO_PATH) {
       return { abi: 'js', glue: SUDO_SOURCE, path: SUDO_PATH };
@@ -2187,7 +2219,12 @@ export class Launcher {
     const own = env.HOSTNAME;
     if (asked.target.abi === 'wasi') env.HOSTNAME = this.hostname;
     const planned = chosen(asked, env);
-    const caller = { pid: req.ppid ?? 0, uid: req.cred.euid, tag: req.tags?.[0] };
+    const caller = {
+      pid: req.ppid ?? 0,
+      uid: req.cred.euid,
+      tag: req.tags?.[0],
+      pinned: req.pinned,
+    };
     if (this.integrity) await this.checkedSources(planned, caller);
     const [program, exeId] = await this.loaded(planned.target, env, caller);
     if (readsEtcHostname(program)) setOrDrop(env, 'HOSTNAME', own);
@@ -2765,7 +2802,7 @@ export class Launcher {
       const scope = grant ? '' : await this.scopeOf(cred.euid);
       const file = booked === undefined ? req.file : await this.ticketFile(req, fds);
       const planned = await this.checkedPlan({ ...req, file }, { ppid, cred, scope }, fds);
-      await this.unchanged(planned, file, req.cwd, grant, fds);
+      const pin = await this.unchanged(planned, file, req.cwd, grant);
       const { recheck, ...redeemed } = await this.redeemed(
         { ...req, file },
         { ppid, cred, scope, booked },
@@ -2777,6 +2814,7 @@ export class Launcher {
       const replan = () => this.planOrSearch({ ...req, file }, { ppid, cred, scope });
       const again = { ...planned, replan, recheck };
       const handle = await this.launch(again, {
+        ...pin,
         ...(deciding ? { decided: deciding.promise } : {}),
         cwd: req.cwd,
         cwdFrom: inheritedCwd(req.chdir, this.cwdSlots.get(ppid)),
