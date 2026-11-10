@@ -536,6 +536,33 @@ window.boundRun = async (script) => {
 
 window.extraTraits = {};
 
+const exitTransport = (exit) => ({
+  traits: {
+    manualRedirects: false,
+    encodedBodies: false,
+    maxRequestBody: 64 * 1024 * 1024,
+    crossOrigin: 'any',
+    exit: { kind: 'local', caps: ['net', 'http'] },
+  },
+  async fetch(request) {
+    const sent = await fetch(exit, {
+      method: 'POST',
+      body: JSON.stringify({ url: request.url, method: request.method, headers: request.headers }),
+      signal: request.signal,
+    });
+    const { status, statusText, headers, body } = await sent.json();
+    return {
+      status,
+      statusText,
+      headers,
+      body: (async function* () {
+        yield new TextEncoder().encode(body);
+      })(),
+      cancel: async () => undefined,
+    };
+  },
+});
+
 const liveTraits = (inner) => ({
   fetch: (...args) => inner.fetch(...args),
   ...(inner.websocket ? { websocket: (...args) => inner.websocket(...args) } : {}),
@@ -596,9 +623,23 @@ const sealedAskHook = (req, { signal }) => {
 
 window.answerAsk = (at, reply) => window.sealedAsk.asks[at].answer(reply);
 
+const extensionFetch = (exit) => async (url, init) => {
+  const sent = await fetch(exit, {
+    method: 'POST',
+    body: JSON.stringify({ url, method: init.method, headers: [...new Headers(init.headers)] }),
+    signal: init.signal,
+  });
+  const { status, statusText, headers, body } = await sent.json();
+  return new Response(body, { status, statusText, headers });
+};
+
 window.boot = async (options = {}) => {
   await install();
-  const base = fetchTransport(options.hint ? { hint: options.hint } : {});
+  const base = options.exit
+    ? exitTransport(options.exit)
+    : options.extension
+      ? fetchTransport({ fetch: extensionFetch(options.extension) })
+      : fetchTransport(options.hint ? { hint: options.hint } : {});
   const sunk = options.uploadSink ? uploadSink(base, options.uploadSink) : base;
   const stored = options.store ? storeTransport(sunk) : sunk;
   const served = options.registry ? registryTransport(stored) : stored;

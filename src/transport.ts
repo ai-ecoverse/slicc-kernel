@@ -1,17 +1,18 @@
 import { BODY_IDLE_MS, readWithin } from './body-idle.ts';
 import { fresh } from './bytes.ts';
 import type { TransportCall, TransportReply } from './kernel/net/remote-transport.ts';
-import type {
-  HeaderList,
-  RealmRedirectHop,
-  RealmRedirectPolicy,
-  RealmTransport,
-  RealmTransportExit,
-  RealmTransportRequest,
-  RealmTransportResponse,
-  RealmTransportTraits,
-  RealmWebSocket,
-  RealmWebSocketRequest,
+import {
+  FORBIDDEN_HEADER,
+  type HeaderList,
+  type RealmRedirectHop,
+  type RealmRedirectPolicy,
+  type RealmTransport,
+  type RealmTransportExit,
+  type RealmTransportRequest,
+  type RealmTransportResponse,
+  type RealmTransportTraits,
+  type RealmWebSocket,
+  type RealmWebSocketRequest,
 } from './kernel/net/transport.ts';
 import { INBOUND_LIMIT, MESSAGE_LIMIT, payloadSize } from './kernel/net/ws-queue.ts';
 import { openWebSocket, type WebSocketConstructor } from './websocket-transport.ts';
@@ -38,6 +39,7 @@ export interface FetchTransportOptions {
   webSocketHeaders?: boolean;
   redirect?: 'follow' | 'manual';
   streamingBodies?: boolean;
+  forbiddenHeaders?: 'send' | 'refuse';
 }
 
 export const SEND_BUFFER = 1024 * 1024;
@@ -84,6 +86,50 @@ function sentHeaders(headers: HeaderList, inPage: boolean): Headers {
   return out;
 }
 
+const TRANSPORT_OWN = new Set([
+  'accept-encoding',
+  'connection',
+  'content-length',
+  'expect',
+  'host',
+  'keep-alive',
+  'te',
+  'trailer',
+  'transfer-encoding',
+  'upgrade',
+]);
+
+const PROBE = 'http://forbidden-headers.invalid/';
+
+let filters: boolean | undefined;
+
+function platformFilters(): boolean {
+  filters ??= !new Request(PROBE, { headers: [['cookie', 'probe=1']] }).headers.has('cookie');
+  return filters;
+}
+
+function unsendableHeaders(url: string, names: readonly string[], hint?: string): Error {
+  const which = names.length > 1 ? 'headers' : 'header';
+  return Object.assign(
+    new Error(
+      `fetch ${url} refused: the page's fetch can't send the request ${which} ${names.join(', ')}, so it was not sent${hint ? `: ${hint}` : ''}`
+    ),
+    { status: 502, code: 'ENOTSUP', detail: FORBIDDEN_HEADER, headers: [...names] }
+  );
+}
+
+function refuseUnsendable(url: string, out: Headers, hint: string | undefined): void {
+  if (!platformFilters()) return;
+  const kept = new Request(PROBE, { headers: out }).headers;
+  const refused: string[] = [];
+  for (const name of new Set(out.keys())) {
+    if (kept.has(name)) continue;
+    if (TRANSPORT_OWN.has(name)) out.delete(name);
+    else refused.push(name);
+  }
+  if (refused.length > 0) throw unsendableHeaders(url, refused, hint);
+}
+
 function streamOf(body: AsyncIterable<Uint8Array>): ReadableStream<Uint8Array> {
   const it = body[Symbol.asyncIterator]();
   return new ReadableStream<Uint8Array>(
@@ -117,6 +163,7 @@ export function fetchTransport(options: FetchTransportOptions = {}): RealmTransp
   const headers = options.webSocketHeaders === true;
   const instance = options.redirect ?? 'follow';
   const inPage = !options.fetch && 'location' in globalThis;
+  const refuse = (options.forbiddenHeaders ?? (options.fetch ? 'send' : 'refuse')) === 'refuse';
   return {
     traits: {
       manualRedirects: instance === 'manual',
@@ -129,11 +176,13 @@ export function fetchTransport(options: FetchTransportOptions = {}): RealmTransp
     },
     ...(Socket ? { websocket: (request) => openWebSocket(Socket, request, headers) } : {}),
     async fetch(request: RealmTransportRequest): Promise<RealmTransportResponse> {
+      const sent = sentHeaders(request.headers, inPage);
+      if (refuse) refuseUnsendable(request.url, sent, options.hint);
       let response: Response;
       try {
         response = await send(request.url, {
           method: request.method,
-          headers: sentHeaders(request.headers, inPage),
+          headers: sent,
           ...requestBody(request),
           signal: request.signal,
           redirect: request.redirect ?? instance,
@@ -266,7 +315,7 @@ export function serveTransport(
       message: e instanceof Error ? e.message : String(e),
       ...(typeof status === 'number' ? { status } : {}),
       ...(typeof code === 'string' ? { code } : {}),
-      ...(detail === 'transport' ? { detail } : {}),
+      ...(detail === 'transport' || detail === FORBIDDEN_HEADER ? { detail } : {}),
     });
   };
   const uploads = uploadsFor(peer);

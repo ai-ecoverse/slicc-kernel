@@ -1,15 +1,16 @@
 import type { SealedCaller } from '../sealed.ts';
-import type {
-  HeaderList,
-  RealmRedirectHop,
-  RealmRedirectPolicy,
-  RealmTransport,
-  RealmTransportRequest,
-  RealmTransportResponse,
-  RealmTransportTraits,
-  RealmWebSocket,
-  RealmWebSocketMessage,
-  RealmWebSocketRequest,
+import {
+  FORBIDDEN_HEADER,
+  type HeaderList,
+  type RealmRedirectHop,
+  type RealmRedirectPolicy,
+  type RealmTransport,
+  type RealmTransportRequest,
+  type RealmTransportResponse,
+  type RealmTransportTraits,
+  type RealmWebSocket,
+  type RealmWebSocketMessage,
+  type RealmWebSocketRequest,
 } from './transport.ts';
 import { MessageQueue, payloadSize } from './ws-queue.ts';
 
@@ -57,7 +58,7 @@ export type TransportReply =
       message: string;
       status?: number;
       code?: string;
-      detail?: 'transport';
+      detail?: 'transport' | typeof FORBIDDEN_HEADER;
     }
   | { net: 'ws-opened'; nid: number; protocol: string }
   | { net: 'ws-message'; nid: number; data: RealmWebSocketMessage }
@@ -71,13 +72,13 @@ export interface TransportPort {
 export class TransportError extends Error {
   readonly status: number | undefined;
   readonly code: string | undefined;
-  readonly detail: 'transport' | undefined;
+  readonly detail: 'transport' | typeof FORBIDDEN_HEADER | undefined;
 
   constructor(message: string, status?: number, code?: string, detail?: unknown) {
     super(message);
     this.status = status;
     this.code = code;
-    this.detail = detail === 'transport' ? detail : undefined;
+    this.detail = detail === 'transport' || detail === FORBIDDEN_HEADER ? detail : undefined;
   }
 }
 

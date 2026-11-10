@@ -4,7 +4,7 @@ import { toHostLoopback } from './loopback-names.ts';
 import { type KernelLoopback, LOOPBACK_TRAITS } from './loopback-transport.ts';
 import { NO_TRANSPORT } from './network.ts';
 import { PlaceholderRefused } from './placeholder-floor.ts';
-import type { HeaderList, RealmTransport } from './transport.ts';
+import { FORBIDDEN_HEADER, type HeaderList, type RealmTransport } from './transport.ts';
 import { WS_OPS, WsHandles, type WsSyscall } from './ws-syscalls.ts';
 
 export interface HttpRequestBody {
@@ -246,6 +246,9 @@ export class HttpHandles {
     const text = message(e);
     if (e instanceof PlaceholderRefused) {
       return { ok: false, errno: e.code, message: text, detail: 'placeholder' };
+    }
+    if ((e as { detail?: unknown }).detail === FORBIDDEN_HEADER) {
+      return { ok: false, errno: 'ENOTSUP', message: text, detail: FORBIDDEN_HEADER };
     }
     const status = (e as { status?: unknown }).status;
     if (text === NO_TRANSPORT || typeof status !== 'number' || status === 502) {

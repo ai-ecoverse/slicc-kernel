@@ -1,5 +1,7 @@
 import type { SealedCaller } from '../sealed.ts';
 
+export const FORBIDDEN_HEADER = 'forbidden-header';
+
 export type HeaderList = ReadonlyArray<readonly [name: string, value: string]>;
 export type RealmRedirectPolicy = 'follow' | 'manual' | 'error';
 export interface RealmTransportRequest {

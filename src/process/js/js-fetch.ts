@@ -49,6 +49,9 @@ function givenNames(given: HeadersInit | undefined): string[] {
 
 function inOrder(headers: Headers, given: HeadersInit | undefined): [string, string][] {
   const all = new Map(headers);
+  if (given !== undefined) {
+    for (const [name, value] of new Headers(given)) if (!all.has(name)) all.set(name, value);
+  }
   const out: [string, string][] = [];
   for (const name of [...givenNames(given), ...all.keys()]) {
     const value = all.get(name);

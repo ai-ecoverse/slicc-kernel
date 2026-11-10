@@ -176,7 +176,9 @@ export function decodeSabResult(status: number, payload: Uint8Array): SyncFsResu
           message,
           ...(parsed.direct === true ? { direct: true as const } : {}),
           ...(typeof parsed.dev === 'string' ? { dev: parsed.dev } : {}),
-          ...(parsed.detail === 'transport' || parsed.detail === 'placeholder'
+          ...(parsed.detail === 'transport' ||
+          parsed.detail === 'placeholder' ||
+          parsed.detail === 'forbidden-header'
             ? { detail: parsed.detail }
             : {}),
         };

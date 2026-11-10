@@ -65,14 +65,21 @@ export function callError(
   op: string
 ): JsCallError {
   const { errno, message } = result;
+  const named = result.detail === 'forbidden-header';
   const detailed =
     typeof message === 'string' &&
     message !== errno &&
-    (DETAILED.has(op) || result.detail === 'placeholder');
+    (DETAILED.has(op) || result.detail === 'placeholder' || named);
   const err = new JsCallError(
     errno,
     detailed ? `${op}: ${message}` : op,
-    detailed ? message : result.detail === 'transport' ? 'transport' : undefined
+    named
+      ? result.detail
+      : detailed
+        ? message
+        : result.detail === 'transport'
+          ? 'transport'
+          : undefined
   );
   err.dev = result.dev;
   return err;

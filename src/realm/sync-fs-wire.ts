@@ -78,7 +78,7 @@ export type SyncFsResult =
       message: string;
       direct?: true;
       dev?: string;
-      detail?: 'transport' | 'placeholder';
+      detail?: 'transport' | 'placeholder' | 'forbidden-header';
     };
 
 export const SYNC_FS_REQUEST_TIMEOUT_MS = 25_000;
