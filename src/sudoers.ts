@@ -6,8 +6,10 @@ export const SUDOERS_D = '/etc/sudoers.d';
 export const NAME = /^[a-z_][a-z0-9_.-]*$/;
 const WORD = String.raw`(?:'[^']*'|"(?:[^"\\]|\\[\s\S])*"|\\[\s\S]|[^\s'"\\])+`;
 const KERNEL_FORM = new RegExp(
-  String.raw`^(NOPASSWD\s+)?(\S+)\s+(?:\(([^()]*)\)\s+)?(?:Cwd\s+(${WORD})\s+)?(?:Stdin\s+(\S+)\s+)?Cmnd(?:\s+(.*))?$`
+  String.raw`^(NOPASSWD\s+)?(\S+)\s+(?:\(([^()]*)\)\s+)?(?:Cwd\s+(${WORD})\s+)?(?:Stdin\s+(\S+)\s+)?((?:Sha256\s+${WORD}\s+)*)Cmnd(?:\s+(.*))?$`
 );
+const SHA256_CLAUSE = new RegExp(String.raw`Sha256\s+(${WORD})`, 'g');
+const HEX = /^[0-9a-f]{64}$/;
 const SUDOERS_FORM = /^(\S+)\s+([^\s=]+)\s*=\s*(.*)$/;
 const RUNAS = /^\(([^()]*)\)\s*/;
 const TAG = /^([A-Z_]+)\s*:\s*/;
@@ -18,7 +20,7 @@ const CONTROLS = /[\p{Cc}\u2028\u2029]/gu;
 const SHOWN_MAX = 60;
 
 export const KERNEL_SYNTAX =
-  '[NOPASSWD] <user|%group|ALL> [(<target>)] [Cwd <dir>] [Stdin none] Cmnd <command…|*>';
+  '[NOPASSWD] <user|%group|ALL> [(<target>)] [Cwd <dir>] [Stdin none] [Sha256 <file>=<sha256>…] Cmnd <command…|*>';
 export const SUDOERS_SYNTAX =
   '<user|%group|ALL> ALL=[(<target>[,<target>…])] [NOPASSWD:] <command…|ALL>';
 const EXPECTED = `expected '${KERNEL_SYNTAX}' or '${SUDOERS_SYNTAX}'`;
@@ -36,6 +38,7 @@ export interface Rule {
   target: string;
   cwd?: string;
   stdin?: 'none';
+  sha256?: Record<string, string>;
   cmnd: Command | '*';
 }
 
@@ -252,6 +255,27 @@ function commandOf(text: string, after: string): Command | string {
   return args.length === 0 ? { path } : { path, args };
 }
 
+function sha256Of(clauses: string): Record<string, string> | string {
+  const files: Record<string, string> = {};
+  for (const [, word = ''] of clauses.matchAll(SHA256_CLAUSE)) {
+    const [text = ''] = splitWords(word) ?? [];
+    const at = text.lastIndexOf('=');
+    const path = text.slice(0, at);
+    const hex = text.slice(at + 1).toLowerCase();
+    if (!path.startsWith('/') || !HEX.test(hex)) {
+      return `Sha256 expects <absolute file>=<sha256 in hex>, not ${shown(word)}`;
+    }
+    files[normalizePath(path)] = hex;
+  }
+  return files;
+}
+
+export function sha256Text(files: Readonly<Record<string, string>>): string {
+  return Object.entries(files)
+    .map(([path, hex]) => `Sha256 ${quoteWord(`${path}=${hex}`)} `)
+    .join('');
+}
+
 function targetError(list: string): string {
   if (list.includes(',')) {
     return `(${list}) names one user in this form: write one line per user, or use '${SUDOERS_SYNTAX}'`;
@@ -260,19 +284,22 @@ function targetError(list: string): string {
 }
 
 function kernelRules(m: RegExpExecArray): Rule[] | string {
-  const [, nopasswd, who = '', target = 'root', dir, stdin, rest = ''] = m;
+  const [, nopasswd, who = '', target = 'root', dir, stdin, sums = '', rest = ''] = m;
   const bad = whoError(who);
   if (bad !== undefined) return bad;
   if (target !== 'ALL' && !NAME.test(target)) return targetError(target);
   const cwd = dir === undefined ? undefined : cwdOf(dir);
   if (cwd === '') return `Cwd expects one absolute directory, not ${shown(dir as string)}`;
   if (stdin !== undefined && stdin !== 'none') return `Stdin takes none, not ${shown(stdin)}`;
+  const sha256 = sha256Of(sums);
+  if (typeof sha256 === 'string') return sha256;
   const rule = {
     nopasswd: !!nopasswd,
     who,
     target,
     ...(cwd !== undefined ? { cwd } : {}),
     ...(stdin === 'none' ? { stdin: 'none' as const } : {}),
+    ...(sums === '' ? {} : { sha256 }),
   };
   const text = rest.trim();
   if (text === '*') return [{ ...rule, cmnd: '*' }];

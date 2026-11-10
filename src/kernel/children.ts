@@ -88,9 +88,19 @@ export class SpawnError extends Error {
   }
 }
 
+export class ChangedError extends SpawnError {
+  readonly notice: string;
+
+  constructor(notice: string) {
+    super('EPERM');
+    this.notice = notice;
+  }
+}
+
 export interface SpawnGrant {
   cred: Cred;
   caller: Cred;
+  files?: Readonly<Record<string, string>>;
 }
 
 export type ChildSpawner = (
