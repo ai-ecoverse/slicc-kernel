@@ -291,7 +291,7 @@ export function oauthDeviceTests(create) {
       { ...STATUS, state: 'active' },
       { ...STATUS, placeholder: 'fnox_proxy_SECRET' },
       { v: 1, error: { code: 'UNKNOWN', message: GRANT.refreshToken } },
-      { v: 1, error: { code: 'EACCES', cause: GRANT.refreshToken } },
+      { v: 1, error: { code: 'EACCES', cause: GRANT.refreshToken, message: 'fake-message' } },
       { v: 1, error: { code: 'EACCES', message: 3 } },
       { v: 1, error: { code: 'EACCES', value: GRANT.refreshToken } },
       { v: 1, error: 'fake-refresh-token' },
@@ -358,6 +358,38 @@ export function oauthDeviceTests(create) {
       { v: 1, removed: true, token: GRANT.refreshToken },
     ])
       assert.deepEqual(JSON.parse((await run({ v: 1, op: 'oauthRemove', ...ID })).stdout), EIO);
+  });
+
+  test('OAuth errors require an own string message while legacy error envelopes stay unchanged', async (t) => {
+    let reply;
+    const { run } = await boot(t, create, async () => reply);
+    const requests = [
+      { v: 1, op: 'capabilities' },
+      GRANT,
+      ...['oauthStatus', 'oauthRefresh', 'oauthRemove'].map((op) => ({ v: 1, op, ...ID })),
+    ];
+    for (const error of [
+      { code: 'EACCES' },
+      { code: 'EACCES', message: undefined },
+      { code: 'EACCES', message: null },
+      { code: 'EACCES', message: 3 },
+      Object.assign(Object.create({ message: GRANT.refreshToken }), { code: 'EACCES' }),
+    ]) {
+      reply = { v: 1, error };
+      for (const request of requests)
+        assert.deepEqual(JSON.parse((await run(request)).stdout), EIO);
+    }
+    reply = { v: 1, error: { code: 'EACCES', message: GRANT.refreshToken } };
+    for (const request of requests)
+      assert.deepEqual(JSON.parse((await run(request)).stdout), {
+        v: 1,
+        error: { code: 'EACCES', message: 'OAuth operation refused' },
+      });
+    reply = { v: 1, error: { code: 'EACCES' } };
+    assert.deepEqual(
+      JSON.parse((await run({ v: 1, op: 'placeholder', name: ID.name })).stdout),
+      reply
+    );
   });
 
   test('a disconnected vault fails closed while legacy replies retain their existing behavior', async (t) => {

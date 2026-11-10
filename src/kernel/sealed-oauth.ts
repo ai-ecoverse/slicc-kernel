@@ -188,14 +188,19 @@ export function sealedOAuthReply(op: string, value: unknown): SealedOAuthReply {
 
 function checkedError(value: Record<string, unknown>): SealedOAuthError | undefined {
   const error = value.error;
-  if (!exact(value, ['v', 'error']) || !record(error) || !Object.hasOwn(error, 'code'))
+  if (
+    !exact(value, ['v', 'error']) ||
+    !record(error) ||
+    !Object.hasOwn(error, 'code') ||
+    !Object.hasOwn(error, 'message')
+  )
     return undefined;
   const { code, cause, message } = error;
   if (
     !keys(error, ['code', 'cause', 'message']) ||
     typeof code !== 'string' ||
     !Object.hasOwn(MESSAGES, code) ||
-    (message !== undefined && typeof message !== 'string') ||
+    typeof message !== 'string' ||
     (cause !== undefined && (typeof cause !== 'string' || !Object.hasOwn(CAUSES, cause)))
   )
     return undefined;
