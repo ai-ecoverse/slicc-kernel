@@ -1826,9 +1826,13 @@ export class Launcher {
   }
 
   private async pinOf(path: string, caller: LoadCaller): Promise<Record<string, string>> {
-    const real = caller.pinned && (await this.sudoer.real(path));
-    const hex = real === undefined ? undefined : caller.pinned?.[real];
-    return real === undefined || hex === undefined ? {} : { [real]: hex };
+    const { pinned } = caller;
+    if (!pinned) return {};
+    const real = await this.sudoer.real(path);
+    const hex = pinned[real];
+    if (hex !== undefined) return { [real]: hex };
+    if (await this.sudoer.trusted(real)) return {};
+    throw new ChangedError(changedText(real));
   }
 
   private async pinnedBytes(pin: Record<string, string>, bytes: Uint8Array): Promise<Uint8Array> {

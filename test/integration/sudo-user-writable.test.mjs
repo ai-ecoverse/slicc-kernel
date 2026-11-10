@@ -167,6 +167,18 @@ test('a granted wasm program loads the bytes that were hashed, not a module cach
   const n = asked.length;
   assert.equal((await cone('sudo -n ./prog')).stdout, 'exe=/home/cone/prog argv0=./prog\n');
   assert.equal(asked.length, n);
+  const script = await cone(
+    "printf '#!/home/cone/interp\\n' > t.sh && chmod 755 t.sh && cp /tmp/evil.wasm interp && chmod 755 interp && ./t.sh && touch -r interp ref && cp /tmp/good.wasm interp && touch -r ref interp"
+  );
+  assert.match(script.stdout, /^exe=\/home\/cone\/interp EVIL0=/, script.stderr);
+  box.approve = () => 'once';
+  const viaInterp = await cone('sudo ./t.sh');
+  assert.equal(viaInterp.status, 0, viaInterp.stderr);
+  assert.match(viaInterp.stdout, /^exe=\/home\/cone\/interp argv0=/);
+  assert.deepEqual(
+    last().userWritable.map((f) => f.path),
+    ['/home/cone/t.sh', '/home/cone/interp']
+  );
 });
 
 test("a user's own JS command runs as root once approved, from the module that was hashed", async (t) => {
