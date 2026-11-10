@@ -135,6 +135,7 @@ export type {
   SudoAnswer,
   SudoApproval,
   SudoDenial,
+  SudoFile,
   SudoReply,
   SudoRequest,
   SudoStdin,

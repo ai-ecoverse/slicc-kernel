@@ -68,11 +68,13 @@ import {
 import { joinName, parentOf, realDir } from './fs/walk.ts';
 import { FsWatchers } from './fs/watch.ts';
 import {
+  ChangedError,
   type ChildForker,
   type ChildHandle,
   type ChildSpawner,
   type ChildSpawnRequest,
   SpawnError,
+  type SpawnGrant,
 } from './kernel/children.ts';
 import { ClipboardBroker, type ClipboardHook } from './kernel/clipboard.ts';
 import { EmbedderBroker, type EmbedderHook } from './kernel/embedder.ts';
@@ -197,6 +199,8 @@ import { REFUSED_PATH, REFUSED_SOURCE, refusing } from './refused-command.ts';
 import { SEALED_BIN, SEALED_COMMAND, SEALED_SOURCE } from './sealed-command.ts';
 import {
   type ApproveHook,
+  changedFile,
+  changedText,
   Sudo,
   type SudoCall,
   type SudoCaller,
@@ -1796,6 +1800,22 @@ export class Launcher {
     return true;
   }
 
+  private async unchanged(
+    planned: Planned,
+    file: string,
+    cwd: string,
+    grant: SpawnGrant | undefined,
+    fds: FdTable
+  ): Promise<void> {
+    const approved = grant?.files;
+    if (!approved) return;
+    const files = await this.backingOf(planned, file, cwd, '');
+    const changed = changedFile(approved, await this.sudoer.digests([file, ...files]));
+    if (changed === undefined) return;
+    await fds.closeAll();
+    throw new ChangedError(changedText(changed));
+  }
+
   private async grantedCwd(caller: Cred, cwd: string): Promise<boolean> {
     const real = await physicalPathAsync(this.base, cwd).catch(() => undefined);
     return real === cwd && (await this.sudoer.reachable(caller, cwd));
@@ -2745,6 +2765,7 @@ export class Launcher {
       const scope = grant ? '' : await this.scopeOf(cred.euid);
       const file = booked === undefined ? req.file : await this.ticketFile(req, fds);
       const planned = await this.checkedPlan({ ...req, file }, { ppid, cred, scope }, fds);
+      await this.unchanged(planned, file, req.cwd, grant, fds);
       const { recheck, ...redeemed } = await this.redeemed(
         { ...req, file },
         { ppid, cred, scope, booked },

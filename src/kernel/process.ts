@@ -29,6 +29,7 @@ import {
   visudoCall,
 } from '../sudo.ts';
 import {
+  ChangedError,
   type ChildEvent,
   type ChildForker,
   type ChildSpawner,
@@ -2361,14 +2362,20 @@ export class WasmProcess {
     if (!('grant' in answer)) return answer;
     if (this.dying) throw new KernelError('EINTR');
     if (answer.notice !== undefined) await this.complainLine(answer.notice);
-    const { file, argv, env, cwd, cred, caller } = answer.grant;
+    const { file, argv, env, cwd, cred, caller, files } = answer.grant;
     const stdio = [{ fd: 0 }, { fd: 1 }, { fd: 2 }];
-    return {
-      pid: await this.children.spawn({ file, argv, env, cwd, pgid: 0 }, stdio, [], {
-        cred,
-        caller,
-      }),
-    };
+    try {
+      return {
+        pid: await this.children.spawn({ file, argv, env, cwd, pgid: 0 }, stdio, [], {
+          cred,
+          caller,
+          files,
+        }),
+      };
+    } catch (err) {
+      if (err instanceof ChangedError) return { error: err.notice, errno: err.code };
+      throw err;
+    }
   }
 
   private stdinKind(): SudoStdin {

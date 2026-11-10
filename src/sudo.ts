@@ -1,4 +1,5 @@
 import { access, X_OK } from './fs/access.ts';
+import { sha256 } from './fs/integrity.ts';
 import type { KernelFs, UsersMode } from './fs/types.ts';
 import { normalizePath } from './fs/types.ts';
 import type { Cred } from './kernel/cred.ts';
@@ -18,6 +19,7 @@ import {
   resolveDefaults,
   SUDOERS,
   SUDOERS_D,
+  sha256Text,
 } from './sudoers.ts';
 import { type Account, credOf, type UserDb, userEnv } from './users.ts';
 
@@ -44,12 +46,33 @@ const ROOT_ONLY_MAX = 64;
 const OPERANDS_MAX = 256;
 const PATH_MAX = 4096;
 
+function userWritable(bound: Record<string, string>): { userWritable?: SudoFile[] } {
+  const files = Object.entries(bound).map(([path, hex]) => ({ path, sha256: hex }));
+  return files.length > 0 ? { userWritable: files } : {};
+}
+
 function stdinMatches(rule: Rule, stdin: SudoStdin): boolean {
   return rule.stdin === undefined || stdin === 'tty' || stdin === 'none';
 }
 
 function recordable(cwd: string, argv: readonly string[]): boolean {
   return !hasControl(cwd) && !argv.some(hasControl);
+}
+
+export function changedText(file: string): string {
+  return `sudo: ${file} changed since it was approved`;
+}
+
+export function changedFile(
+  approved: Readonly<Record<string, string>>,
+  now: Readonly<Record<string, string>>
+): string | undefined {
+  const files = new Set([...Object.keys(approved), ...Object.keys(now)]);
+  return [...files].find((file) => approved[file] !== now[file]);
+}
+
+function pinned(rule: Rule, bound: Readonly<Record<string, string>>): boolean {
+  return rule.sha256 === undefined || changedFile(rule.sha256, bound) === undefined;
 }
 
 export interface SudoRequest {
@@ -70,8 +93,14 @@ export interface SudoRequest {
   always: boolean;
   stdin?: SudoStdin;
   rootOnly?: Record<string, boolean>;
+  userWritable?: SudoFile[];
   validate?: true;
   timestamp?: true;
+}
+
+export interface SudoFile {
+  path: string;
+  sha256: string;
 }
 
 export type SudoStdin = 'tty' | 'none' | 'pipe' | 'file';
@@ -109,6 +138,7 @@ export interface SudoGrant {
   cwd: string;
   cred: Cred;
   caller: Cred;
+  files: Record<string, string>;
 }
 
 export type SudoResult =
@@ -205,6 +235,7 @@ interface Asked {
   argv: string[];
   path: string;
   cwd: string;
+  bound: Record<string, string>;
   validate?: true;
 }
 
@@ -355,11 +386,15 @@ function policyOf(settings: Resolved): TimestampPolicy {
   return { type: settings.timestampType, minutes: settings.timestampTimeout };
 }
 
-function described(rule: Rule): string {
+function described(rule: Rule, writable: boolean): string {
   const cmnd = rule.cmnd === '*' ? 'ALL' : commandText(rule.cmnd);
   const cwd = rule.cwd === undefined ? '' : `CWD=${quoteWord(rule.cwd)} `;
   const stdin = rule.stdin === undefined ? '' : 'STDIN=none ';
-  return `    (${rule.target}) ${cwd}${stdin}${rule.nopasswd ? 'NOPASSWD: ' : ''}${cmnd}`;
+  const sums = Object.entries(rule.sha256 ?? {})
+    .map(([path, hex]) => `SHA256=${quoteWord(path)}:${hex} `)
+    .join('');
+  const flag = writable ? '  # user-writable command' : '';
+  return `    (${rule.target}) ${cwd}${stdin}${sums}${rule.nopasswd ? 'NOPASSWD: ' : ''}${cmnd}${flag}`;
 }
 
 export class Sudo {
@@ -574,19 +609,29 @@ export class Sudo {
     return (await this.o.fs.stat(cwd).catch(() => undefined))?.isDirectory === true;
   }
 
-  private async untrusted(
-    path: string,
-    cwd: string,
-    word: string
-  ): Promise<SudoResult | undefined> {
-    const files = this.o.backing ? await this.o.backing(path, cwd) : [];
-    if (!files) return failed('ENOENT', `sudo: ${word}: command not found`);
-    for (const file of [path, ...files]) {
-      if (!(await this.trusted(file))) {
-        return failed('EPERM', `sudo: ${file} must be root's, and writable by root only`);
-      }
+  async digests(files: readonly string[]): Promise<Record<string, string>> {
+    const { fs } = this.o;
+    const found: Record<string, string> = {};
+    for (const file of new Set(files)) {
+      if (await this.trusted(file)) continue;
+      const real = (await fs.realpath?.(file, true).catch(() => file)) ?? file;
+      found[real] = await fs.readFileBuffer(real).then(sha256, () => '');
     }
-    return undefined;
+    return found;
+  }
+
+  private async bound(path: string, cwd: string): Promise<Record<string, string> | undefined> {
+    const files = this.o.backing ? await this.o.backing(path, cwd) : [];
+    const bound = files && (await this.digests([path, ...files]));
+    return bound && !Object.values(bound).includes('') ? bound : undefined;
+  }
+
+  private async writable(rule: Rule): Promise<boolean> {
+    if (rule.cmnd === '*') return false;
+    const { path } = rule.cmnd;
+    const bound = await this.bound(path, '/');
+    if (bound) return Object.keys(bound).length > 0;
+    return !(await this.trusted(await this.existing(path)));
   }
 
   private async locate(word: string, cwd: string): Promise<string | undefined> {
@@ -634,7 +679,7 @@ export class Sudo {
     const root = cred.euid === 0;
     const rules = root ? [] : policy.rules;
     const mine = rules.filter((rule) => applies(rule.who));
-    if (parsed.list) return this.listed(self, root, mine, settings.matching);
+    if (parsed.list) return await this.listed(self, root, mine, settings.matching);
     const session = { caller, self, target, owner, policy: policyOf(settings), parsed, signal };
     if (parsed.validate) return this.validate(session, root, mine, call.cwd);
     return this.command(session, root, mine, call);
@@ -657,18 +702,18 @@ export class Sudo {
       );
     }
     const path = await this.locate(word, cwd);
-    if (!path) return failed('ENOENT', `sudo: ${word}: command not found`);
-    const untrusted = await this.untrusted(path, cwd, word);
-    if (untrusted) return untrusted;
+    const bound = path && (await this.bound(path, cwd));
+    if (!path || !bound) return failed('ENOENT', `sudo: ${word}: command not found`);
     const argv = [path, ...args];
     const matching = mine.filter(
       (rule) =>
         (rule.target === 'ALL' || rule.target === target.name) &&
         (rule.cwd === undefined || rule.cwd === cwd) &&
         stdinMatches(rule, caller.stdin) &&
-        commandMatches(rule.cmnd, argv)
+        commandMatches(rule.cmnd, argv) &&
+        pinned(rule, bound)
     );
-    const grant = () => this.grant(self, target, cred, parsed.command, path, cwd, call.term);
+    const grant = () => this.grant(self, target, cred, parsed.command, path, cwd, call.term, bound);
     if (root || matching.some((rule) => rule.nopasswd)) return grant();
     const quoted = argv.map(quoteWord).join(' ');
     if (matching.length === 0) {
@@ -684,17 +729,18 @@ export class Sudo {
     }
     if (parsed.nonInteractive) return failed('EPERM', 'sudo: a password is required');
     return this.pendingFor(cred.ruid, async () => {
-      const answer = await this.ask(s, { argv: parsed.command, path, cwd });
+      const answer = await this.ask(s, { argv: parsed.command, path, cwd, bound });
       if ('error' in answer) return answer;
       if ((await this.canonical(call.cwd)) !== cwd || !(await this.reachable(cred, cwd))) {
         return failed('EACCES', `sudo: ${call.cwd} changed while the request waited`);
       }
-      const changed = await this.untrusted(path, cwd, word);
-      if (changed) return changed;
+      const now = await this.bound(path, cwd);
+      if (!now) return failed('ENOENT', `sudo: ${word}: command not found`);
+      const shown = recordable(cwd, [...parsed.command, ...Object.keys(bound)]);
       const result =
         answer.answer === 'once'
           ? grant()
-          : await this.always(self, target, cwd, argv, recordable(cwd, parsed.command), grant);
+          : await this.always(self, target, { cwd, argv, bound }, now, shown, grant);
       if (!('error' in result)) this.stamped(s, answer);
       return result;
     });
@@ -719,7 +765,7 @@ export class Sudo {
     if (parsed.nonInteractive) return failed('EPERM', 'sudo: a password is required');
     const cwd = (await this.canonical(dir)) ?? normalizePath(dir);
     return this.pendingFor(s.caller.cred.ruid, async () => {
-      const answer = await this.ask(s, { argv: [], path: '', cwd, validate: true });
+      const answer = await this.ask(s, { argv: [], path: '', cwd, bound: {}, validate: true });
       if ('error' in answer) return answer;
       if (!answer.person) await s.caller.report?.(NOT_STAMPED);
       this.stamped(s, answer);
@@ -754,24 +800,27 @@ export class Sudo {
   private async always(
     self: Account,
     target: Account,
-    cwd: string,
-    argv: string[],
+    line: { cwd: string; argv: string[]; bound: Record<string, string> },
+    now: Record<string, string>,
     shown: boolean,
     grant: () => { grant: SudoGrant }
   ): Promise<SudoResult> {
+    const { cwd, argv, bound } = line;
     if (!shown || !recordable(cwd, argv)) return { ...grant(), notice: RAN_ONCE };
-    if (!(await this.remember(self, target, cwd, argv))) {
+    const changed = changedFile(bound, now);
+    if (changed !== undefined) return failed('EPERM', changedText(changed));
+    if (!(await this.remember(self, target, line))) {
       return failed('EIO', 'sudo: the rule could not be recorded');
     }
     return grant();
   }
 
-  private listed(
+  private async listed(
     self: Account,
     root: boolean,
     rules: Rule[],
     defaults: DefaultsEntry[]
-  ): SudoResult {
+  ): Promise<SudoResult> {
     const host = this.o.hostname;
     if (root) {
       return {
@@ -781,7 +830,9 @@ export class Sudo {
     if (rules.length === 0) {
       return failed('EPERM', `User ${self.name} is not allowed to run sudo on ${host}.`);
     }
-    const lines = rules.map(described).join('\n');
+    const shown: string[] = [];
+    for (const rule of rules) shown.push(described(rule, await this.writable(rule)));
+    const lines = shown.join('\n');
     const params = defaults.flatMap((d) => d.params).join(', ');
     const matching =
       params === ''
@@ -813,9 +864,12 @@ export class Sudo {
       ...(caller.tty ? { tty: caller.tty } : {}),
       createdAt,
       expiresAt: createdAt + timeout,
-      always: asked.validate ? false : recordable(cwd, [path, ...argv]),
+      always: asked.validate
+        ? false
+        : recordable(cwd, [path, ...argv, ...Object.keys(asked.bound)]),
       stdin: caller.stdin,
       rootOnly: asked.validate ? {} : await this.rootOnly(cwd, argv.slice(1)),
+      ...userWritable(asked.bound),
       ...(asked.validate ? { validate: true as const } : {}),
       timestamp: true,
     };
@@ -842,8 +896,7 @@ export class Sudo {
   private async remember(
     self: Account,
     target: Account,
-    cwd: string,
-    argv: string[]
+    { cwd, argv, bound }: { cwd: string; argv: string[]; bound: Record<string, string> }
   ): Promise<boolean> {
     const { fs } = this.o;
     const path = `${SUDOERS_D}/${self.name}`;
@@ -855,7 +908,7 @@ export class Sudo {
       if (st && !(await this.trusted(path))) return false;
       const old = st ? await fs.readFile(path) : '';
       const words = recordedCommand(argv);
-      const line = `NOPASSWD ${self.name} (${target.name}) Cwd ${quoteWord(cwd)} Stdin none Cmnd ${words}\n`;
+      const line = `NOPASSWD ${self.name} (${target.name}) Cwd ${quoteWord(cwd)} Stdin none ${sha256Text(bound)}Cmnd ${words}\n`;
       const text = old === '' || old.endsWith('\n') ? `${old}${line}` : `${old}\n${line}`;
       await fs.writeFile(path, text);
       await fs.chown?.(path, { uid: 0, gid: 0, mode: 0o440, follow: false });
@@ -872,7 +925,8 @@ export class Sudo {
     argv: string[],
     file: string,
     cwd: string,
-    term: string | undefined
+    term: string | undefined,
+    files: Record<string, string>
   ): { grant: SudoGrant } {
     const env = {
       ...this.o.env(),
@@ -886,6 +940,8 @@ export class Sudo {
       SUDO_GID: String(cred.rgid),
       SUDO_COMMAND: [file, ...argv.slice(1)].join(' '),
     };
-    return { grant: { file, argv: [...argv], env, cwd, cred: credOf(target), caller: cred } };
+    return {
+      grant: { file, argv: [...argv], env, cwd, cred: credOf(target), caller: cred, files },
+    };
   }
 }

@@ -24,7 +24,7 @@ const quote = (s) => `'${s.replaceAll("'", `'\\''`)}'`;
 const HANDOFF =
   'cone ALL=(cone-32,cone-33,cone-34,cone-35,cone-36) /usr/local/bin/agent send cone --lick=cron --file /tmp/msg-*.md';
 const KERNEL_SYNTAX =
-  '[NOPASSWD] <user|%group|ALL> [(<target>)] [Cwd <dir>] [Stdin none] Cmnd <command…|*>';
+  '[NOPASSWD] <user|%group|ALL> [(<target>)] [Cwd <dir>] [Stdin none] [Sha256 <file>=<sha256>…] Cmnd <command…|*>';
 const SUDOERS_SYNTAX = '<user|%group|ALL> ALL=[(<target>[,<target>…])] [NOPASSWD:] <command…|ALL>';
 const EXPECTED = `expected '${KERNEL_SYNTAX}' or '${SUDOERS_SYNTAX}'`;
 
