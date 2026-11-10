@@ -10,7 +10,8 @@ const root = fileURLToPath(new URL('../../', import.meta.url));
 const tsc = join(root, 'node_modules/typescript/bin/tsc');
 
 const USE = `import { createKernel, fetchTransport, type KernelClient, type NetworkExit } from '@ai-ecoverse/slicc-kernel';
-import { createNodeKernel, nodeTransport } from '@ai-ecoverse/slicc-kernel/node';
+import { createNodeKernel, nodeTransport, type SealedOAuthReply } from '@ai-ecoverse/slicc-kernel/node';
+import type { SealedOAuthRequest } from '@ai-ecoverse/slicc-kernel';
 import { fakeUplink } from '@ai-ecoverse/slicc-kernel/testing';
 export async function main(client: KernelClient): Promise<number> {
   const exit: NetworkExit | undefined = client.transport.traits.exit;
@@ -18,13 +19,16 @@ export async function main(client: KernelClient): Promise<number> {
     network: { transport: nodeTransport({ hostLoopback: [8080] }), uplink: fakeUplink({}) },
   });
   const ran = await kernel.run(['true']);
-  void [createKernel, fetchTransport, exit];
+  const request: SealedOAuthRequest = { v: 1, op: 'oauthGrant', name: 'EXAMPLE_TOKEN', provider: 'example', account: 'default', accessToken: 'fake-access-token', oauth: { tokenUrl: 'https://auth.example.invalid/token', clientId: 'example-public-client', authMethod: 'none' } };
+  const reply: SealedOAuthReply = { v: 1, placeholder: 'fnox_proxy_0123456789abcdef01234567', state: 'ready', expiresAt: null, refreshable: false };
+  void [createKernel, fetchTransport, exit, request, reply];
   return ran.status;
 }
 `;
 
-const WRONG = `import { createNodeKernel } from '@ai-ecoverse/slicc-kernel/node';
+const WRONG = `import { createNodeKernel, type SealedOAuthConfig } from '@ai-ecoverse/slicc-kernel/node';
 export const wrong: string = createNodeKernel;
+export const confidential: SealedOAuthConfig = { tokenUrl: 'https://auth.example.invalid/token', clientId: 'example-client', authMethod: 'client_secret_post' };
 `;
 
 test('the packed tarball ships declarations: a TypeScript consumer of its public entries type-checks, and a wrong use is an error (#693)', {
@@ -79,4 +83,5 @@ test('the packed tarball ships declarations: a TypeScript consumer of its public
   const bad = check('tsconfig.wrong.json');
   assert.notEqual(bad.status, 0);
   assert.match(bad.stdout, /is not assignable to type 'string'/);
+  assert.match(bad.stdout, /client_secret_post/);
 });

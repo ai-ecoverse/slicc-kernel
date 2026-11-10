@@ -102,6 +102,15 @@ export type {
   SealedRequest,
   SealedRequester,
 } from './kernel/sealed.ts';
+export type {
+  SealedOAuthConfig,
+  SealedOAuthError,
+  SealedOAuthIdentity,
+  SealedOAuthReply,
+  SealedOAuthRequest,
+  SealedOAuthState,
+  SealedOAuthStatus,
+} from './kernel/sealed-oauth.ts';
 export type { ConnectorStamp } from './kernel/socket.ts';
 export type {
   HostfsEvent,

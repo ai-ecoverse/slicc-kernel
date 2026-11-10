@@ -6,6 +6,14 @@ import { KernelError, type OpenAccess, OpenFile, type PollState } from './fd-tab
 import { type Anchors, anchorsOf } from './net/sealed-anchor.ts';
 import { SessionScrubs } from './net/sealed-scrubs.ts';
 import {
+  SEALED_OAUTH_OPS,
+  SEALED_OAUTH_TIMEOUT_MS,
+  sealedOAuthError,
+  sealedOAuthOperation,
+  sealedOAuthReply,
+  validateSealedOAuth,
+} from './sealed-oauth.ts';
+import {
   anchorsAskable,
   anchorsRequest,
   type SessionAnchorFields,
@@ -32,6 +40,8 @@ export const SEALED_OPS: ReadonlySet<string> = new Set([
   'status',
   'cancel',
   'materialize',
+  'capabilities',
+  ...SEALED_OAUTH_OPS,
 ]);
 
 export interface SealedCaller {
@@ -101,6 +111,7 @@ export function parseSealed(bytes: Uint8Array): Record<string, unknown> {
       throw new KernelError('EINVAL');
     if (req.op === 'materialize' && !materializable(req)) throw new KernelError('EINVAL');
     if (req.op === 'ask' && !askable(req)) throw new KernelError('EINVAL');
+    if (sealedOAuthOperation(req.op)) validateSealedOAuth(req);
     return req;
   } finally {
     bytes.fill(0);
@@ -206,7 +217,11 @@ class SealedChannel {
     const ask = fields.op === 'ask';
     const timer = setTimeout(
       () => control.abort(ask ? 'expired' : 'timeout'),
-      ask ? this.broker.askTimeoutMs : this.broker.timeoutMs
+      ask
+        ? this.broker.askTimeoutMs
+        : SEALED_OAUTH_OPS.has(fields.op as string)
+          ? this.broker.oauthTimeoutMs
+          : this.broker.timeoutMs
     );
     const req = { ...fields, v: 1, op: fields.op as string, caller } as SealedRequest;
     const asked = ask ? this.asking(fields, caller, requester, control.signal) : undefined;
@@ -236,15 +251,19 @@ class SealedChannel {
     return this.answer(askRequest(fields, caller, facts), signal);
   }
 
-  private stopped(signal: AbortSignal): object | undefined {
+  private stopped(signal: AbortSignal, oauth = false): object | undefined {
     if (signal.reason === 'timeout')
-      return errorReply('ETIMEDOUT', 'the vault did not answer within 10 s');
+      return oauth
+        ? sealedOAuthError('ETIMEDOUT')
+        : errorReply('ETIMEDOUT', 'the vault did not answer within 10 s');
     return signal.reason === 'expired' ? { v: 1, state: 'expired' } : undefined;
   }
 
   private async answer(req: SealedRequest, signal: AbortSignal): Promise<object | undefined> {
     const hook = this.broker.hook;
-    if (!hook) return errorReply('ENOTCONN', 'no vault is connected');
+    const oauth = sealedOAuthOperation(req.op);
+    if (!hook)
+      return oauth ? sealedOAuthError('ENOTCONN') : errorReply('ENOTCONN', 'no vault is connected');
     const stopped = new Promise<undefined>((resolve) => {
       signal.addEventListener('abort', () => resolve(undefined), { once: true });
     });
@@ -252,11 +271,16 @@ class SealedChannel {
     const asked = Promise.resolve()
       .then(() => hook(req, { signal }))
       .then(
-        (reply) => (isRecord(reply) ? reply : errorReply('EIO', 'the vault gave no reply')),
-        (err: unknown) => errorReply('EIO', lineOf(err))
+        (reply) =>
+          oauth
+            ? sealedOAuthReply(req.op, reply)
+            : isRecord(reply)
+              ? reply
+              : errorReply('EIO', 'the vault gave no reply'),
+        (err: unknown) => (oauth ? sealedOAuthError() : errorReply('EIO', lineOf(err)))
       );
     const reply = await Promise.race([asked, stopped]);
-    return signal.aborted ? this.stopped(signal) : reply;
+    return signal.aborted ? this.stopped(signal, oauth) : reply;
   }
 
   private drop(): void {
@@ -342,6 +366,7 @@ export class SealedBroker {
   readonly tickets = new TicketBook();
   readonly sessions = new SessionScrubs();
   askTimeoutMs = SEALED_ASK_TIMEOUT_MS;
+  oauthTimeoutMs = SEALED_OAUTH_TIMEOUT_MS;
   userOf: (uid: number) => Promise<string | undefined> = async () => undefined;
   factsOf: (pid: number) => Promise<SealedProcessFacts | undefined> = async () => undefined;
 
