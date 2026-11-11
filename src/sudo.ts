@@ -727,8 +727,8 @@ export class Sudo {
         `sudo: ${self.name} is not allowed to run ${quoted} as ${target.name}`
       );
     }
-    if (!parsed.reset && this.timestamps.current(s.owner, s.policy)) {
-      this.timestamps.stamp(s.owner, s.policy);
+    if (!parsed.reset && this.timestamps.current(s.owner, s.policy, bound)) {
+      this.timestamps.stamp(s.owner, s.policy, bound);
       this.logged(s, cwd, argv);
       return grant();
     }
@@ -746,7 +746,7 @@ export class Sudo {
         answer.answer === 'once'
           ? grant()
           : await this.always(self, target, { cwd, argv, bound }, now, shown, grant);
-      if (!('error' in result)) this.stamped(s, answer);
+      if (!('error' in result)) this.stamped(s, answer, bound);
       return result;
     });
   }
@@ -788,8 +788,8 @@ export class Sudo {
     }
   }
 
-  private stamped(s: Session, answer: Approved): void {
-    if (answer.person && !s.parsed.reset) this.timestamps.stamp(s.owner, s.policy);
+  private stamped(s: Session, answer: Approved, bound: Record<string, string> = {}): void {
+    if (answer.person && !s.parsed.reset) this.timestamps.stamp(s.owner, s.policy, bound);
   }
 
   private logged(s: Session, cwd: string, argv: readonly string[]): void {

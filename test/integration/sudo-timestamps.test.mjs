@@ -543,3 +543,80 @@ test('a record matches only the same process: a reused pid, a new session leader
     false
   );
 });
+
+test('a stamp covers only the bound hashes it recorded: a later user-writable digest must match one of them', () => {
+  const now = 1_000_000;
+  const ts = new Timestamps(() => now);
+  const policy = { type: 'ppid', minutes: 5 };
+  const shell = { uid: 1000, parent: { pid: 1001, started: 5 } };
+  const first = { '/home/cone/t.sh': 'aaa' };
+  const second = { '/home/cone/t.sh': 'bbb' };
+  assert.equal(ts.stamp(shell, policy, first), true);
+  assert.equal(ts.current(shell, policy), true);
+  assert.equal(ts.current(shell, policy, {}), true);
+  assert.equal(ts.current(shell, policy, first), true);
+  assert.equal(ts.current(shell, policy, second), false);
+  assert.equal(ts.stamp(shell, policy), true);
+  assert.equal(ts.current(shell, policy, first), true);
+  assert.equal(ts.stamp(shell, policy, second), true);
+  assert.equal(ts.current(shell, policy, first), true);
+  assert.equal(ts.current(shell, policy, second), true);
+  assert.equal(ts.current(shell, policy, { '/home/cone/u.sh': 'aaa' }), false);
+  ts.invalidate(shell, 'ppid');
+  assert.equal(ts.current(shell, policy, first), false);
+});
+
+test('always+timestamp for a user-writable script asks again after the file changes, within the window', async (t) => {
+  const { cone, asked } = await boot(t, {
+    approve: () => ({ answer: 'always', timestamp: true }),
+  });
+  const r = await cone(
+    `printf %s ${quote('#!/bin/bash\nid -u\n')} > t.sh && chmod 755 t.sh && sudo ./t.sh && sudo -n ./t.sh && printf %s ${quote('#!/bin/bash\necho swapped\n')} > t.sh && (sudo -n ./t.sh || echo asks) && sudo ./t.sh; :`
+  );
+  assert.deepEqual([r.status, r.stdout, r.stderr], [0, '0\n0\nasks\nswapped\n', REQUIRED]);
+  assert.equal(asked.length, 2);
+});
+
+test('once+timestamp for a user-writable script asks again after the file changes, within the window', async (t) => {
+  const { cone, asked } = await boot(t, {
+    approve: () => ({ answer: 'once', timestamp: true }),
+  });
+  const r = await cone(
+    `printf %s ${quote('#!/bin/bash\nid -u\n')} > t.sh && chmod 755 t.sh && sudo ./t.sh && sudo -n ./t.sh && printf %s ${quote('#!/bin/bash\necho swapped\n')} > t.sh && (sudo -n ./t.sh || echo asks) && sudo ./t.sh; :`
+  );
+  assert.deepEqual([r.status, r.stdout, r.stderr], [0, '0\n0\nasks\nswapped\n', REQUIRED]);
+  assert.equal(asked.length, 2);
+});
+
+test('the same user-writable content within the window still skips the ask', async (t) => {
+  const { cone, asked } = await boot(t, {
+    approve: () => ({ answer: 'once', timestamp: true }),
+  });
+  const r = await cone(
+    `printf %s ${quote('#!/bin/bash\nid -u\n')} > t.sh && chmod 755 t.sh && sudo ./t.sh && sudo -n ./t.sh && sudo ./t.sh; :`
+  );
+  assert.deepEqual([r.status, r.stdout, r.stderr], [0, '0\n0\n0\n', '']);
+  assert.equal(asked.length, 1);
+});
+
+test('a non-user-writable command keeps the timestamp skip after a user-writable stamp', async (t) => {
+  const { cone, asked } = await boot(t, {
+    approve: () => ({ answer: 'once', timestamp: true }),
+  });
+  const r = await cone(
+    `printf %s ${quote('#!/bin/bash\nid -u\n')} > t.sh && chmod 755 t.sh && sudo ./t.sh && sudo -n true && sudo -n id -un; :`
+  );
+  assert.deepEqual([r.status, r.stdout, r.stderr], [0, '0\nroot\n', '']);
+  assert.equal(asked.length, 1);
+});
+
+test('a timestamp from a non-user-writable command does not cover a user-writable one', async (t) => {
+  const { cone, asked } = await boot(t, {
+    approve: () => ({ answer: 'once', timestamp: true }),
+  });
+  const r = await cone(
+    `sudo true && sudo -n true && printf %s ${quote('#!/bin/bash\nid -u\n')} > t.sh && chmod 755 t.sh && (sudo -n ./t.sh || echo asks) && sudo ./t.sh; :`
+  );
+  assert.deepEqual([r.status, r.stdout, r.stderr], [0, 'asks\n0\n', REQUIRED]);
+  assert.equal(asked.length, 2);
+});
