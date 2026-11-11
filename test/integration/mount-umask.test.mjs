@@ -22,27 +22,33 @@ async function install(kernel, name) {
 const FATLIKE = `
 const errno = (code) => Object.assign(new Error(code), { code });
 export default function () {
-  const files = new Map([['/note', new TextEncoder().encode('seed')]]);
+  const files = new Map([
+    ['/note', { bytes: new TextEncoder().encode('seed'), mtime: 0, atime: 0 }],
+  ]);
   const open = new Map();
+  const dir = { mtime: 0, atime: 0 };
   let fh = 0;
   return {
     capabilities: { attrTtl: 0, ranges: true },
     handlers: {
       async getattr(p) {
-        if (p === '/') return { kind: 'directory', size: 0, mtime: 0, mode: 0o40755 };
-        if (!files.has(p)) throw errno('ENOENT');
-        return { kind: 'file', size: files.get(p).length, mtime: 0, mode: 0o100644 };
+        if (p === '/') return { kind: 'directory', size: 0, mtime: dir.mtime, atime: dir.atime, mode: 0o40755 };
+        const f = files.get(p);
+        if (!f) throw errno('ENOENT');
+        return { kind: 'file', size: f.bytes.length, mtime: f.mtime, atime: f.atime, mode: 0o100644 };
       },
       async readdir() {
         return [...files.keys()].map((p) => ({ name: p.slice(1), kind: 'file' }));
       },
       async open(p, flags) {
-        if (!files.has(p)) {
+        let f = files.get(p);
+        if (!f) {
           if (!flags.create) throw errno('ENOENT');
-          files.set(p, new Uint8Array());
+          f = { bytes: new Uint8Array(), mtime: Date.now(), atime: Date.now() };
+          files.set(p, f);
         }
-        if (flags.truncate) files.set(p, new Uint8Array());
-        open.set(++fh, { p, bytes: files.get(p) });
+        if (flags.truncate) f.bytes = new Uint8Array();
+        open.set(++fh, { p, bytes: f.bytes });
         return fh;
       },
       async read(h, o, n) { return open.get(h).bytes.slice(o, o + n); },
@@ -55,8 +61,14 @@ export default function () {
       },
       async release(h) {
         const e = open.get(h);
-        files.set(e.p, e.bytes);
+        files.get(e.p).bytes = e.bytes;
         open.delete(h);
+      },
+      async setattr(p, change) {
+        const target = p === '/' ? dir : files.get(p);
+        if (!target) throw errno('ENOENT');
+        if (change.mtime !== undefined) target.mtime = change.mtime;
+        if (change.atime !== undefined) target.atime = change.atime;
       },
       async mkdir() { throw errno('EPERM'); },
       async unlink(p) {
@@ -68,10 +80,10 @@ export default function () {
 }
 `;
 
-async function boot(t) {
+async function boot(t, extra = []) {
   const kernel = await createNodeKernel({ users: 'enforce' });
   t.after(() => kernel.terminate());
-  for (const name of ['wasm-bash', 'wasm-coreutils']) await install(kernel, name);
+  for (const name of ['wasm-bash', 'wasm-coreutils', ...extra]) await install(kernel, name);
   await kernel.writeFile(
     '/node_modules/fatlike/package.json',
     JSON.stringify({ slicc: { filesystems: { fatlike: { module: 'd.mjs' } } } })
@@ -181,6 +193,111 @@ test('a bad umask= value is EINVAL', async (t) => {
     }),
     (e) => e.code === 'EINVAL'
   );
+});
+
+test('a FAT-like mount with umask=000 lets a non-owner writer set explicit times (cp -p, touch -d, tar x)', async (t) => {
+  const kernel = await boot(t, ['wasm-tar']);
+  assert.equal(
+    (
+      await kernel.mount({
+        type: 'fatlike',
+        source: 'none',
+        target: '/mnt/kb',
+        options: { uid: '1000', gid: '1000', umask: '000' },
+      })
+    ).state,
+    'ok'
+  );
+  const owner = await kernel.run(
+    ['bash', '-c', 'touch -d @1577836800 /mnt/kb/note && stat -c %Y /mnt/kb/note'],
+    { cwd: '/' }
+  );
+  assert.equal(owner.stdout, '1577836800\n', owner.stderr);
+  const other = await kernel.run(
+    [
+      'bash',
+      '-c',
+      [
+        'cp -p /mnt/kb/note /mnt/kb/y && stat -c %Y /mnt/kb/y',
+        'touch -d @1500000000 /mnt/kb/y && stat -c %Y /mnt/kb/y',
+        'echo body > /mnt/kb/t && touch -d @1400000000 /mnt/kb/t',
+        'tar -C /mnt/kb -cf /tmp/t.tar t && rm /mnt/kb/t',
+        'tar -C /mnt/kb -xf /tmp/t.tar && stat -c %Y /mnt/kb/t',
+      ].join('\n'),
+    ],
+    { cwd: '/', user: 'cone-33' }
+  );
+  assert.equal(other.stdout, '1577836800\n1500000000\n1400000000\n', other.stderr);
+  assert.equal(other.status, 0);
+});
+
+test('a non-owner without write, a mount without a mask, and an owners mount keep EPERM for explicit times', async (t) => {
+  const kernel = await boot(t);
+  assert.equal(
+    (
+      await kernel.mount({
+        type: 'fatlike',
+        source: 'none',
+        target: '/mnt/kb',
+        options: { uid: '1000', gid: '1000', umask: '077' },
+      })
+    ).state,
+    'ok'
+  );
+  const denied = await kernel.run(['bash', '-c', 'touch -d @5 /mnt/kb/note; echo "rc $?"'], {
+    cwd: '/',
+    user: 'cone-33',
+  });
+  assert.match(denied.stdout, /rc 1\n$/);
+  assert.match(denied.stderr, /Operation not permitted|Permission denied/);
+  await kernel.umount('/mnt/kb');
+  const openWrite = FATLIKE.replace('mode: 0o100644', 'mode: 0o100666').replace(
+    'mode: 0o40755',
+    'mode: 0o40777'
+  );
+  await kernel.writeFile(
+    '/node_modules/fatwrite/package.json',
+    JSON.stringify({ slicc: { filesystems: { fatwrite: { module: 'd.mjs' } } } })
+  );
+  await kernel.writeFile('/node_modules/fatwrite/d.mjs', openWrite);
+  assert.equal(
+    (
+      await kernel.mount({
+        type: 'fatwrite',
+        source: 'none',
+        target: '/mnt/kb',
+        options: { uid: '1000', gid: '1000' },
+      })
+    ).state,
+    'ok'
+  );
+  const modes = await kernel.run(['bash', '-c', 'stat -c %a /mnt/kb/note'], { cwd: '/' });
+  assert.equal(modes.stdout, '666\n', modes.stderr);
+  const plain = await kernel.run(
+    ['bash', '-c', 'echo x >> /mnt/kb/note && touch -d @5 /mnt/kb/note; echo "rc $?"'],
+    { cwd: '/', user: 'cone-33' }
+  );
+  assert.match(plain.stdout, /rc 1\n$/);
+  assert.match(plain.stderr, /Operation not permitted/);
+  await kernel.umount('/mnt/kb');
+  assert.equal(
+    (
+      await kernel.mount({
+        type: 'tmpfs',
+        source: 'none',
+        target: '/mnt/kb',
+        options: { uid: '1000', gid: '1000', umask: '000' },
+      })
+    ).state,
+    'ok'
+  );
+  await kernel.run(['bash', '-c', 'echo x > /mnt/kb/f && chmod 666 /mnt/kb/f'], { cwd: '/' });
+  const owners = await kernel.run(['bash', '-c', 'touch -d @5 /mnt/kb/f; echo "rc $?"'], {
+    cwd: '/',
+    user: 'cone-33',
+  });
+  assert.match(owners.stdout, /rc 1\n$/);
+  assert.match(owners.stderr, /Operation not permitted/);
 });
 
 const CHMODABLE = `

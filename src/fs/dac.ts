@@ -271,14 +271,6 @@ export async function linkable(g: Guard, from: string, to: string, follow: boole
   await inParent(g, 'link', to);
 }
 
-async function ownerOnly(g: Guard, op: string, path: string, follow: boolean) {
-  const walked = await need(g, op, path, 0, { follow });
-  const perm = walked.perm;
-  if (!perm || g.cred.euid === 0 || perm.uid === g.cred.euid) return walked;
-  if (await present(g.fs, walked.path, false)) deny(g, op, path, 'EPERM');
-  return walked;
-}
-
 export async function chmodMode(g: Guard, path: string, mode: number): Promise<number> {
   const walked = await need(g, 'chmod', path, 0, { follow: true });
   const perm = walked.perm;
@@ -302,18 +294,27 @@ export function heldChmodMode(g: Guard, path: string, st: FsStat, mode: number):
 export function heldRetimable(g: Guard, path: string, st: FsStat, now: boolean): void {
   const perm = permOf(st);
   if (g.cred.euid === 0 || perm.uid === g.cred.euid) return;
-  if (!now) deny(g, 'futimens', path, 'EPERM');
-  else if (!permits(g.cred, perm, W_OK, false)) deny(g, 'futimens', path);
+  if (now || st.fat) {
+    if (!permits(g.cred, perm, W_OK, false)) deny(g, 'futimens', path);
+    return;
+  }
+  deny(g, 'futimens', path, 'EPERM');
 }
 
 export async function retimable(g: Guard, op: string, path: string, now = false) {
   const follow = op !== 'lutimes';
-  if (!now) return void (await ownerOnly(g, op, path, follow));
   const walked = await need(g, op, path, 0, { follow });
   const perm = walked.perm;
   if (!perm || g.cred.euid === 0 || perm.uid === g.cred.euid) return;
-  if (permits(g.cred, perm, W_OK, false)) return;
-  if (await present(g.fs, walked.path, false)) deny(g, op, path);
+  const look = follow ? g.fs.stat : g.fs.lstat;
+  const st = await look.call(g.fs, walked.path).catch(() => undefined);
+  if (now || st?.fat) {
+    if (!permits(g.cred, perm, W_OK, false) && (await present(g.fs, walked.path, false))) {
+      deny(g, op, path);
+    }
+    return;
+  }
+  if (await present(g.fs, walked.path, false)) deny(g, op, path, 'EPERM');
 }
 
 export async function fileWritable(g: Guard, op: string, path: string): Promise<void> {
