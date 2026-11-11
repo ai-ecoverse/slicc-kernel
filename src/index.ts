@@ -238,8 +238,11 @@ export interface MountPending {
   insert(): Promise<void>;
 }
 
+export type CwdMissing = 'create' | 'error';
+
 export interface RunOptions {
   cwd?: string;
+  cwdMissing?: CwdMissing;
   user?: string | number;
   tag?: string;
   env?: Record<string, string>;
@@ -308,6 +311,7 @@ export interface Kernel {
 
 export interface TerminalOptions {
   cwd?: string;
+  cwdMissing?: CwdMissing;
   user?: string | number;
   tag?: string;
   env?: Record<string, string>;
