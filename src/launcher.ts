@@ -330,10 +330,12 @@ export interface RunOptions {
   tagBase?: number;
   login?: boolean;
   session?: number;
+  cwdMissing?: CwdMissing;
 }
 
 export interface TerminalOptions {
   cwd?: string;
+  cwdMissing?: CwdMissing;
   env?: Record<string, string>;
   cols?: number;
   rows?: number;
@@ -543,6 +545,14 @@ function usersMode(mode: unknown = 'off'): UsersMode {
 
 export function tagOption(tag: unknown): void {
   if (tag !== undefined && typeof tag !== 'string') throw new TypeError('a tag must be a string');
+}
+
+export type CwdMissing = 'create' | 'error';
+
+export function cwdMissingOption(value: unknown): CwdMissing {
+  if (value === undefined || value === 'create') return 'create';
+  if (value === 'error') return 'error';
+  throw new TypeError("cwdMissing must be 'create' or 'error'");
 }
 
 export function withTag(
@@ -3914,7 +3924,8 @@ export class Launcher {
     dir: string | undefined,
     account: Account,
     tags?: readonly string[],
-    base?: number
+    base?: number,
+    missing: CwdMissing = 'create'
   ) {
     const tag = tags?.[0];
     await this.swaps.settled();
@@ -3924,8 +3935,13 @@ export class Launcher {
     const cwd = await physicalPathAsync(this.base, start.startsWith('/') ? start : `/${start}`);
     await this.enterable(this.execGuard(credOf(account), 0, tag), cwd);
     const file = await this.execFile(argv[0] ?? '', cwd, this.execGuard(credOf(account), 0, tag));
-    if (!(await this.base.exists(cwd)))
+    if (!(await this.base.exists(cwd))) {
+      if (missing === 'error')
+        throw Object.assign(new Error(`cannot change to ${cwd}: No such file or directory`), {
+          code: 'ENOENT',
+        });
       await this.stackFor(tags, base).fs.mkdir(cwd, { recursive: true });
+    }
     const plan = async () => {
       const found = await this.plan(file, argv, cwd, scope);
       await this.mayExec(credOf(account), { file, cwd, pid: 0, tag }, found);
@@ -3937,6 +3953,7 @@ export class Launcher {
 
   async openTerminal(argv: string[], options: TerminalOptions): Promise<TerminalSession> {
     const tagged = tagsOption(options);
+    const missing = cwdMissingOption(options.cwdMissing);
     const { tags } = tagged;
     const { account, tty: ttyGroup } = await this.terminalAccount(options.user);
     const { cwd, file, planned } = await this.starting(
@@ -3944,7 +3961,8 @@ export class Launcher {
       options.cwd,
       account,
       tags,
-      tagged.tagBase
+      tagged.tagBase,
+      missing
     );
     if (!planned) throw new Error(`${file}: command not found`);
     let leader = 0;
@@ -3996,6 +4014,7 @@ export class Launcher {
 
   async run(argv: string[], options: RunOptions = {}): Promise<RunResult> {
     const tagged = tagsOption(options);
+    const missing = cwdMissingOption(options.cwdMissing);
     const { tags } = tagged;
     const account = await this.account(options.user);
     const { cwd, file, planned } = await this.starting(
@@ -4003,7 +4022,8 @@ export class Launcher {
       options.cwd,
       account,
       tags,
-      tagged.tagBase
+      tagged.tagBase,
+      missing
     );
     const env = this.environment(cwd, options.env, account, options.login);
     const out: Uint8Array[] = [];

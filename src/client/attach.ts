@@ -59,6 +59,7 @@ export interface AttachOptions {
 
 export interface SpawnOptions {
   cwd?: string;
+  cwdMissing?: 'create' | 'error';
   user?: string | number;
   env?: Record<string, string>;
   stdin?: string | Uint8Array;
@@ -84,6 +85,7 @@ export interface SpawnedProcess {
 
 export interface ClientRunOptions {
   cwd?: string;
+  cwdMissing?: 'create' | 'error';
   user?: string | number;
   env?: Record<string, string>;
   stdin?: string | Uint8Array;
@@ -102,6 +104,7 @@ export interface ClientRunResult {
 
 export interface ClientTerminalOptions {
   cwd?: string;
+  cwdMissing?: 'create' | 'error';
   user?: string | number;
   env?: Record<string, string>;
   cols?: number;
@@ -423,6 +426,7 @@ async function spawnOn(
     await since(channel, 3, 'spawn into a process group', async () => {});
   if (opts.user !== undefined) await since(channel, 8, 'spawn as a user', async () => {});
   if (opts.tag !== undefined) await since(channel, 12, 'a tag per spawn', async () => {});
+  if (opts.cwdMissing === 'error') await since(channel, 14, "cwdMissing: 'error'", async () => {});
   const started = Promise.withResolvers<number>();
   let endedBy: string | undefined;
   const options = { ...rest, ...(stdin !== undefined ? { stdin: bytesOf(stdin) } : {}) };
@@ -492,6 +496,7 @@ async function terminalOn(
   const { onData, ...options } = opts;
   if (opts.user !== undefined) await since(channel, 8, 'a terminal as a user', async () => {});
   if (opts.tag !== undefined) await since(channel, 12, 'a tag per terminal', async () => {});
+  if (opts.cwdMissing === 'error') await since(channel, 14, "cwdMissing: 'error'", async () => {});
   let listener = onData ?? null;
   const backlog: Uint8Array[] = [];
   const started = Promise.withResolvers<number>();

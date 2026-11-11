@@ -75,6 +75,7 @@ export type { Attestation, AttestedDir, AttestOptions, AttestTombstone } from '.
 export type { Denial, DenialHook } from './fs/dac.ts';
 export type {
   ConnectOptions,
+  CwdMissing,
   Ended,
   KernelGroups,
   KernelIntegrity,
