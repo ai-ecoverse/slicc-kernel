@@ -42,6 +42,10 @@ function writable(bound: BoundHashes | undefined): boolean {
   return bound !== undefined && Object.keys(bound).length > 0;
 }
 
+function live(stamp: Stamp, policy: TimestampPolicy, now: number): boolean {
+  return stamp.at <= now && (policy.minutes < 0 || now - stamp.at < policy.minutes * MINUTE_MS);
+}
+
 export class Timestamps {
   private readonly users = new Map<number, Map<string, Stamp>>();
   private readonly now: () => number;
@@ -56,7 +60,8 @@ export class Timestamps {
     const stamp = key === undefined ? undefined : this.users.get(owner.uid)?.get(key);
     if (stamp === undefined) return false;
     const now = this.now();
-    if (!(stamp.at <= now && (policy.minutes < 0 || now - stamp.at < policy.minutes * MINUTE_MS))) {
+    if (!live(stamp, policy, now)) {
+      this.drop(owner.uid, key as string);
       return false;
     }
     if (!writable(bound)) return true;
@@ -70,13 +75,13 @@ export class Timestamps {
     const records = this.users.get(owner.uid) ?? new Map<string, Stamp>();
     this.users.set(owner.uid, records);
     const prior = records.get(key);
-    const covered = prior?.covered ?? new Set<string>();
+    const covered =
+      prior !== undefined && live(prior, policy, now) ? prior.covered : new Set<string>();
     if (writable(bound)) covered.add(boundKey(bound as BoundHashes));
     records.delete(key);
     records.set(key, { at: now, covered });
     for (const [old, stamp] of records) {
-      const stale =
-        policy.minutes > 0 && (stamp.at > now || now - stamp.at >= policy.minutes * MINUTE_MS);
+      const stale = policy.minutes > 0 && !live(stamp, policy, now);
       if (stale || records.size > TIMESTAMPS_MAX) records.delete(old);
     }
     return true;
@@ -91,5 +96,11 @@ export class Timestamps {
 
   remove(uid: number): void {
     this.users.delete(uid);
+  }
+
+  private drop(uid: number, key: string): void {
+    const records = this.users.get(uid);
+    records?.delete(key);
+    if (records?.size === 0) this.users.delete(uid);
   }
 }

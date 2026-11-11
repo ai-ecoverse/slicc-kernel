@@ -545,7 +545,7 @@ test('a record matches only the same process: a reused pid, a new session leader
 });
 
 test('a stamp covers only the bound hashes it recorded: a later user-writable digest must match one of them', () => {
-  const now = 1_000_000;
+  let now = 1_000_000;
   const ts = new Timestamps(() => now);
   const policy = { type: 'ppid', minutes: 5 };
   const shell = { uid: 1000, parent: { pid: 1001, started: 5 } };
@@ -562,6 +562,15 @@ test('a stamp covers only the bound hashes it recorded: a later user-writable di
   assert.equal(ts.current(shell, policy, first), true);
   assert.equal(ts.current(shell, policy, second), true);
   assert.equal(ts.current(shell, policy, { '/home/cone/u.sh': 'aaa' }), false);
+  now += 5 * MINUTE;
+  assert.equal(ts.current(shell, policy, first), false);
+  assert.equal(ts.stamp(shell, policy, first), true);
+  assert.equal(ts.current(shell, policy, first), true);
+  assert.equal(ts.current(shell, policy, second), false);
+  now += 5 * MINUTE;
+  assert.equal(ts.stamp(shell, policy), true);
+  assert.equal(ts.current(shell, policy, first), false);
+  assert.equal(ts.current(shell, policy, second), false);
   ts.invalidate(shell, 'ppid');
   assert.equal(ts.current(shell, policy, first), false);
 });
@@ -619,4 +628,34 @@ test('a timestamp from a non-user-writable command does not cover a user-writabl
   );
   assert.deepEqual([r.status, r.stdout, r.stderr], [0, 'asks\n0\n', REQUIRED]);
   assert.equal(asked.length, 2);
+});
+
+test('an expired stamp drops covered digests: approving A again after timeout does not re-cover B', async (t) => {
+  const { cone, asked, gate, pass } = await boot(t, {
+    approve: () => ({ answer: 'once', timestamp: true }),
+  });
+  const a = '#!/bin/bash\necho A\n';
+  const b = '#!/bin/bash\necho B\n';
+  const ran = cone(
+    `printf %s ${quote(a)} > t.sh && chmod 755 t.sh && sudo ./t.sh && printf %s ${quote(b)} > t.sh && sudo ./t.sh && ${gate('wait')} printf %s ${quote(a)} > t.sh && sudo ./t.sh && printf %s ${quote(b)} > t.sh && sudo -n ./t.sh || echo asks; :`
+  );
+  await pass('wait', 6 * MINUTE);
+  const r = await ran;
+  assert.deepEqual([r.status, r.stdout, r.stderr], [0, 'A\nB\nA\nasks\n', REQUIRED]);
+  assert.equal(asked.length, 3);
+});
+
+test('an expired stamp is not revived by sudo -v: prior covered digests stay gone', async (t) => {
+  const { cone, asked, gate, pass } = await boot(t, {
+    approve: () => ({ answer: 'once', timestamp: true }),
+  });
+  const a = '#!/bin/bash\necho A\n';
+  const b = '#!/bin/bash\necho B\n';
+  const ran = cone(
+    `printf %s ${quote(a)} > t.sh && chmod 755 t.sh && sudo ./t.sh && printf %s ${quote(b)} > t.sh && sudo ./t.sh && ${gate('wait')} sudo -v && printf %s ${quote(b)} > t.sh && sudo -n ./t.sh || echo asks; :`
+  );
+  await pass('wait', 6 * MINUTE);
+  const r = await ran;
+  assert.deepEqual([r.status, r.stdout, r.stderr], [0, 'A\nB\nasks\n', REQUIRED]);
+  assert.equal(asked.length, 3);
 });
