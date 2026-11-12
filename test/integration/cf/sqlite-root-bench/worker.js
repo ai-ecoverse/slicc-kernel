@@ -39,7 +39,7 @@ async function install(kernel) {
 }
 
 export class Kernel extends DurableObject {
-  kernel(mode, maxMs) {
+  kernel(mode, window) {
     this.booting ??= (async () => {
       const storage = this.ctx.storage;
       const kernel = await createCloudflareKernel({
@@ -47,7 +47,7 @@ export class Kernel extends DurableObject {
         sql: storage.sql,
         sqlite: {
           transaction: (fn) => storage.transactionSync(fn),
-          writeBehind: mode === 'behind' && (maxMs ? { maxMs } : true),
+          writeBehind: mode === 'behind' && (window ?? true),
         },
       });
       await install(kernel);
@@ -66,10 +66,15 @@ export class Kernel extends DurableObject {
       return new Response('aborted\n');
     }
     const maxMs = url.searchParams.get('maxMs');
-    const kernel = await this.kernel(
-      url.searchParams.get('mode'),
-      maxMs ? Number(maxMs) : undefined
-    );
+    const idleMs = url.searchParams.get('idleMs');
+    const window =
+      maxMs || idleMs
+        ? {
+            ...(maxMs ? { maxMs: Number(maxMs) } : {}),
+            ...(idleMs ? { idleMs: Number(idleMs) } : {}),
+          }
+        : undefined;
+    const kernel = await this.kernel(url.searchParams.get('mode'), window);
     if (url.pathname === '/boot') return Response.json({ ok: true });
     const body = await request.json();
     const before = sqliteFlush(this.ctx.storage.sql).flushes;

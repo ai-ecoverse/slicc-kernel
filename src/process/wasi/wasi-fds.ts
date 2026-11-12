@@ -668,6 +668,7 @@ export class WasiFds {
   synced(file: LocalFile): void {
     try {
       file.flush();
+      this.kernel.call({ op: 'fd-path-flush', path: file.buffer.path, durable: true });
       this.reported.delete(file.buffer);
     } catch (err) {
       this.reported.add(file.buffer);

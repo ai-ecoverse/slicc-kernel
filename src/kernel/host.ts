@@ -113,6 +113,7 @@ export interface SpawnWasmOptions {
   dac?: Dac;
   identity?: () => Promise<{ pid: number; ppid: number }>;
   onSyscall?: (req: WasmSyscall) => void;
+  durable?: (() => void | Promise<void>) | undefined;
 
   settling?: () => boolean;
   program: Program;
@@ -518,6 +519,7 @@ function processOptions(
     ...(opts.dac ? { guard: { dac: opts.dac, fs: opts.fs, created, ...linksOf(opts) } } : {}),
     ...(opts.identity ? { identity: opts.identity } : {}),
     ...(opts.onSyscall ? { onSyscall: opts.onSyscall } : {}),
+    ...(opts.durable ? { durable: opts.durable } : {}),
     ...(opts.settling ? { settling: opts.settling } : {}),
     ...heldHooks(opts),
     spawner: opts.spawner,

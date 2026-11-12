@@ -27,9 +27,10 @@ const EXPECTED = {
   milestone: 'a\nbin\ndev\netc\n3\n',
 };
 
-async function call(mode, path, script) {
+async function call(mode, path, script, kernel = 'deployed-test') {
+  const extra = kernel === 'deployed-test' ? '' : '&maxMs=600000&idleMs=600000';
   const started = performance.now();
-  const response = await fetch(`${url}${path}?key=${key}&mode=${mode}&kernel=deployed-test`, {
+  const response = await fetch(`${url}${path}?key=${key}&mode=${mode}&kernel=${kernel}${extra}`, {
     method: script === undefined ? 'GET' : 'POST',
     ...(script === undefined ? {} : { body: JSON.stringify({ script }) }),
   });
@@ -98,5 +99,32 @@ for (const mode of modes) {
       ).catch(() => undefined);
     }
     assert.equal(seen?.stdout, `${token}\n600\nkept\n`);
+  });
+
+  test(`deployed SQLite root (${mode}): fsync makes writes durable while the run is still going, an abort then loses only the rest`, {
+    skip,
+  }, async () => {
+    await call(mode, '/boot', undefined, 'fsync-window');
+    const token = crypto.randomUUID();
+    const running = call(
+      mode,
+      '/run',
+      `rm -f /root/synced /root/unsynced; echo ${token} | dd of=/root/synced conv=fsync 2>/dev/null; echo ${token} > /root/unsynced; sleep 60`,
+      'fsync-window'
+    ).catch(() => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 8000));
+    await call(mode, '/crash', undefined, 'fsync-window');
+    await running;
+    let seen;
+    for (let attempt = 0; attempt < 10 && seen?.status !== 0; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      seen = await call(
+        mode,
+        '/run',
+        'cat /root/synced; test -e /root/unsynced && echo kept || echo lost',
+        'fsync-window'
+      ).catch(() => undefined);
+    }
+    assert.equal(seen?.stdout, `${token}\nlost\n`);
   });
 }
