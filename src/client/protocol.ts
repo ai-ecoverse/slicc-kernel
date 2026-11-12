@@ -2,9 +2,10 @@ import type { UsersMode } from '../fs/types.ts';
 import type { WatchChange } from '../fs/watch.ts';
 import type { TransportCall, TransportReply } from '../kernel/net/remote-transport.ts';
 import type { RealmTransportTraits } from '../kernel/net/transport.ts';
+import type { TraceEvent } from '../kernel/trace.ts';
 import type { MountSpec } from '../mount/mount-fs.ts';
 
-export const PROTOCOL: readonly [number, number] = [1, 14];
+export const PROTOCOL: readonly [number, number] = [1, 15];
 
 export interface ClientHello {
   protocol: readonly [number, number];
@@ -27,7 +28,7 @@ export interface SpawnRequestOptions {
   env?: Record<string, string>;
   stdin?: Uint8Array;
   pgid?: number;
-  tag?: string;
+  tag?: string | readonly string[];
 }
 
 export interface TerminalRequestOptions {
@@ -37,7 +38,7 @@ export interface TerminalRequestOptions {
   env?: Record<string, string>;
   cols?: number;
   rows?: number;
-  tag?: string;
+  tag?: string | readonly string[];
 }
 
 export type TerminalAction =
@@ -80,6 +81,8 @@ export type ClientCall =
   | { op: 'unserve-cdp'; registration: number }
   | { op: 'serve-facade'; name: string }
   | { op: 'unserve-facade'; registration: number }
+  | { op: 'trace'; tag: string; limit?: number }
+  | { op: 'untrace'; trace: number }
   | { op: 'detach'; kill?: boolean };
 
 export type ClientRequest = ClientCall & { id: number };
@@ -95,14 +98,29 @@ export interface ClientReply {
   signal?: string;
 }
 
-export type ClientMessage = { hello: ClientHello } | ClientRequest | TransportCall;
+export interface TraceAck {
+  traceAck: number;
+}
+
+export type ClientMessage = { hello: ClientHello } | ClientRequest | TransportCall | TraceAck;
 
 export interface WatchEvent {
   watch: number;
   change: WatchChange;
 }
 
-export type KernelMessage = { hello: KernelHello } | ClientReply | WatchEvent | TransportReply;
+export interface TraceMessage {
+  trace: number;
+  events: TraceEvent[];
+  dropped?: number;
+}
+
+export type KernelMessage =
+  | { hello: KernelHello }
+  | ClientReply
+  | WatchEvent
+  | TraceMessage
+  | TransportReply;
 
 export interface ProcessEntry {
   pid: number;

@@ -61,6 +61,12 @@ export {
   type ProcessEntry,
   type SpawnedProcess,
   type SpawnOptions,
+  type TraceBatch,
+  type TraceEvent,
+  type TraceExec,
+  type TraceExit,
+  type TraceFork,
+  type TraceOptions,
   type WatchChange,
 } from './client/attach.ts';
 export type { DialledSocket, DialOptions } from './client/dial-stream.ts';

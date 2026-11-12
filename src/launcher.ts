@@ -143,6 +143,7 @@ import { SemTable } from './kernel/sem.ts';
 import { SettlingChildren } from './kernel/settling.ts';
 import { SI, SIG, type SigInfo, sigbit, signalField } from './kernel/signals.ts';
 import { LoopbackNet } from './kernel/socket.ts';
+import { type TraceDraft, TraceHub } from './kernel/trace.ts';
 import { KernelTty } from './kernel/tty.ts';
 import { keepingOpen, type VfsFileFs, type VfsNode, VfsNodes } from './kernel/vfs-file.ts';
 import { defaultCeiling, WasmMemories } from './kernel/wasm-memories.ts';
@@ -466,6 +467,11 @@ function refuseChanged(
 ): void {
   const changed = changedFile(approved, now);
   if (changed !== undefined) throw new ChangedError(changedText(changed));
+}
+
+interface HeldTrace {
+  replaces: number | undefined;
+  events: Array<{ tags: readonly string[] | undefined; cred: Cred; draft: TraceDraft }>;
 }
 
 interface StartRequest {
@@ -2385,10 +2391,12 @@ export class Launcher {
         });
       const fit = await (handle.ready ?? true);
       if (fit) {
+        this.traceAdmitted(handle.pid, true);
         await fds.closeAll();
         return handle;
       }
       await handle.exited;
+      this.traceAdmitted(handle.pid, false);
       await this.memories.refused().catch(async (err) => {
         await fds.closeAll();
         throw err;
@@ -2527,10 +2535,12 @@ export class Launcher {
     if (req.group === 'lead') this.jobs.lead(pid);
     if (req.group === 'session') this.jobs.setsid(pid);
     this.described.set(pid, describe(req, terminal?.name ?? null));
+    this.traceStarted(pid, req);
     handle.onState((state) =>
       state === 'stopped' ? this.stopped.add(pid) : this.stopped.delete(pid)
     );
-    void handle.exited.then(() => {
+    void handle.exited.then((status) => {
+      this.traceEnded(pid, handle, status);
       this.cwds.release(this.cwdSlots.get(pid));
       this.cwdSlots.delete(pid);
       this.cwdPaths.delete(pid);
@@ -2657,6 +2667,77 @@ export class Launcher {
   private readonly imageTimes = new Map<number, CpuTimes>();
   private readonly childTimes = new Map<number, CpuTimes>();
   private readonly stopped = new Set<number>();
+
+  readonly traces = new TraceHub();
+  private readonly traceHeld = new Map<number, HeldTrace>();
+  private readonly replacedImages = new Set<number>();
+
+  private traceStarted(pid: number, req: StartRequest): void {
+    const replaces = req.exec ? req.ppid : undefined;
+    if (req.quietOom) this.traceHeld.set(pid, { replaces, events: [] });
+    else if (replaces !== undefined) this.replacedImages.add(replaces);
+    this.traceEmit(pid, () => {
+      const { pid: shown, ppid } = this.identityOf(pid);
+      const described = this.described.get(pid) as ReturnType<typeof describe>;
+      const { argv, started, tty: _tty, exeId: _exeId, ...exe } = described;
+      return {
+        type: req.fork ? 'fork' : 'exec',
+        pid: shown,
+        ppid,
+        pgid: this.jobs.pgidOf(pid) as number,
+        argv: [...argv],
+        ...exe,
+        uid: this.credOf(pid).euid,
+        at: started,
+        ...(req.exec ? { replaced: true as const } : {}),
+      };
+    });
+  }
+
+  private traceEnded(pid: number, handle: WasmProcessHandle, status: number): void {
+    if (this.replacedImages.delete(pid)) return;
+    this.traceEmit(pid, () => ({
+      type: 'exit',
+      pid: this.jobs.idOf(pid),
+      status,
+      ...signalField(handle.termsig()),
+      ...this.chainTimes(pid),
+      at: Date.now(),
+    }));
+  }
+
+  private traceEmit(pid: number, build: () => TraceDraft): void {
+    if (this.traces.idle) return;
+    const tags = this.tagsOf(pid);
+    const cred = this.credOf(pid);
+    if (!this.traces.wants(tags, cred)) return;
+    const held = this.traceHeld.get(pid);
+    if (held) held.events.push({ tags, cred: copyCred(cred), draft: build() });
+    else this.traces.publish(tags, cred, build());
+  }
+
+  private traceAdmitted(pid: number, fit: boolean): void {
+    const held = this.traceHeld.get(pid);
+    if (!held) return;
+    this.traceHeld.delete(pid);
+    if (!fit) return;
+    if (held.replaces !== undefined) this.replacedImages.add(held.replaces);
+    for (const { tags, cred, draft } of held.events) this.traces.publish(tags, cred, draft);
+  }
+
+  private chainTimes(pid: number): { utime?: number; stime?: number } {
+    let utime = 0;
+    let stime = 0;
+    let timed = false;
+    for (let at: number | undefined = pid; at !== undefined; at = this.jobs.execParentOf(at)) {
+      const t = this.timesAt(at);
+      if (!t) continue;
+      timed = true;
+      utime += t.utime;
+      stime += t.stime;
+    }
+    return timed ? { utime, stime } : {};
+  }
 
   private stateOf(pid: number): ProcessInfo['state'] {
     if (!this.processes.has(pid)) return 'Z';

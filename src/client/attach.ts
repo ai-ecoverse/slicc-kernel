@@ -14,6 +14,7 @@ import type {
   RealmTransportTraits,
 } from '../kernel/net/transport.ts';
 import { quiet } from '../kernel/signals.ts';
+import type { TraceEvent } from '../kernel/trace.ts';
 import type { MountEntry, MountSpec } from '../mount/mount-fs.ts';
 import { type DialledSocket, type DialOptions, dialStream } from './dial-stream.ts';
 import { type LoopbackFetchOptions, loopbackFetch } from './loopback-fetch.ts';
@@ -32,6 +33,7 @@ import {
 } from './protocol.ts';
 
 export type { WatchChange } from '../fs/watch.ts';
+export type { TraceEvent, TraceExec, TraceExit, TraceFork } from '../kernel/trace.ts';
 export type { ProcessEntry } from './protocol.ts';
 
 export class KernelGoneError extends Error {
@@ -65,7 +67,7 @@ export interface SpawnOptions {
   stdin?: string | Uint8Array;
   group?: 'new';
   pgid?: number;
-  tag?: string;
+  tag?: string | readonly string[];
   onStdout?: (bytes: Uint8Array) => void;
   onStderr?: (bytes: Uint8Array) => void;
 }
@@ -89,7 +91,7 @@ export interface ClientRunOptions {
   user?: string | number;
   env?: Record<string, string>;
   stdin?: string | Uint8Array;
-  tag?: string;
+  tag?: string | readonly string[];
   onStdout?: (text: string) => void;
   onStderr?: (text: string) => void;
 }
@@ -109,7 +111,7 @@ export interface ClientTerminalOptions {
   env?: Record<string, string>;
   cols?: number;
   rows?: number;
-  tag?: string;
+  tag?: string | readonly string[];
   onData?: (bytes: Uint8Array) => void;
 }
 
@@ -145,6 +147,15 @@ export interface ClientFs {
   ): Promise<{ close(): void }>;
 }
 
+export interface TraceBatch {
+  events: TraceEvent[];
+  dropped: number;
+}
+
+export interface TraceOptions {
+  limit?: number;
+}
+
 export type ClientFetchRequest = Omit<RealmTransportRequest, 'signal'> & { signal?: AbortSignal };
 
 export interface KernelClient {
@@ -167,6 +178,11 @@ export interface KernelClient {
   serveCdp(hook: CdpHook, options?: { runtime?: string }): Promise<{ close(): void }>;
   serveFacade(name: string, hook: FacadeHook): Promise<{ close(): void }>;
   onTraits(listener: (traits: RealmTransportTraits) => void): () => void;
+  trace(
+    tag: string,
+    onEvents: (batch: TraceBatch) => void | Promise<unknown>,
+    options?: TraceOptions
+  ): Promise<{ close(): void }>;
   close(options?: { kill?: boolean }): Promise<void>;
 }
 
@@ -225,6 +241,7 @@ class Channel {
   failure: Error | undefined;
   private readonly pending = new Map<number, Pending>();
   readonly watching = new Map<number, (change: WatchChange) => void>();
+  readonly tracing = new Map<number, (batch: TraceBatch) => unknown>();
   readonly cdpHooks = new Map<number, CdpHook>();
   private readonly cdpOpen = new Set<() => void>();
   readonly facadeHooks = new Map<number, FacadeHook>();
@@ -290,6 +307,9 @@ class Channel {
     facadeOpen?: FacadeOpen['facadeOpen'];
     port?: CdpOpen['port'];
     traits?: RealmTransportTraits;
+    trace?: number;
+    events?: TraceEvent[];
+    dropped?: number;
     id?: number;
   }): void {
     if (this.requests?.handle(data)) return;
@@ -308,6 +328,10 @@ class Channel {
     }
     if (data.watch !== undefined) {
       this.watching.get(data.watch)?.(data.change as WatchChange);
+      return;
+    }
+    if (data.trace !== undefined && data.id === undefined) {
+      this.traced(data.trace, data.events ?? [], data.dropped ?? 0);
       return;
     }
     if (data.bye !== undefined) {
@@ -337,6 +361,24 @@ class Channel {
     call.ended?.(reply.signal);
     if (reply.error !== undefined) call.reject(new KernelCallError(reply.error, reply.code));
     else call.resolve(reply.result);
+  }
+
+  private traced(trace: number, events: TraceEvent[], dropped: number): void {
+    const listener = this.tracing.get(trace);
+    if (!listener) return;
+    const ack = () => {
+      if (this.tracing.has(trace)) this.post({ traceAck: trace });
+    };
+    let consumed: unknown;
+    try {
+      consumed = listener({ events, dropped });
+    } finally {
+      if (typeof (consumed as PromiseLike<unknown> | undefined)?.then === 'function') {
+        void Promise.resolve(consumed).then(ack, ack);
+      } else {
+        ack();
+      }
+    }
   }
 
   private openCdp({ cdpOpen: { registration, ...request }, port }: CdpOpen): void {
@@ -411,6 +453,34 @@ async function serveCdpOn(
   };
 }
 
+async function traceOn(
+  channel: Channel,
+  tag: string,
+  onEvents: (batch: TraceBatch) => unknown,
+  options: TraceOptions
+): Promise<{ close(): void }> {
+  if (typeof onEvents !== 'function') throw new TypeError('trace: onEvents must be a function');
+  await since(channel, 15, 'trace', async () => {});
+  const { id, done } = channel.request({
+    op: 'trace',
+    tag,
+    ...(options.limit !== undefined ? { limit: options.limit } : {}),
+  });
+  channel.tracing.set(id, onEvents);
+  try {
+    await done;
+  } catch (error) {
+    channel.tracing.delete(id);
+    throw error;
+  }
+  return {
+    close: () => {
+      if (!channel.tracing.delete(id)) return;
+      void channel.call({ op: 'untrace', trace: id }).catch(() => undefined);
+    },
+  };
+}
+
 async function dialOn(channel: Channel, { port, host }: DialOptions): Promise<DialledSocket> {
   const req = { op: 'dial' as const, port, ...(host ? { host } : {}) };
   return dialStream((await since(channel, 4, 'dial', () => channel.call(req))) as MessagePort);
@@ -426,6 +496,7 @@ async function spawnOn(
     await since(channel, 3, 'spawn into a process group', async () => {});
   if (opts.user !== undefined) await since(channel, 8, 'spawn as a user', async () => {});
   if (opts.tag !== undefined) await since(channel, 12, 'a tag per spawn', async () => {});
+  if (Array.isArray(opts.tag)) await since(channel, 15, 'several tags per spawn', async () => {});
   if (opts.cwdMissing === 'error') await since(channel, 14, "cwdMissing: 'error'", async () => {});
   const started = Promise.withResolvers<number>();
   let endedBy: string | undefined;
@@ -496,6 +567,9 @@ async function terminalOn(
   const { onData, ...options } = opts;
   if (opts.user !== undefined) await since(channel, 8, 'a terminal as a user', async () => {});
   if (opts.tag !== undefined) await since(channel, 12, 'a tag per terminal', async () => {});
+  if (Array.isArray(opts.tag)) {
+    await since(channel, 15, 'several tags per terminal', async () => {});
+  }
   if (opts.cwdMissing === 'error') await since(channel, 14, "cwdMissing: 'error'", async () => {});
   let listener = onData ?? null;
   const backlog: Uint8Array[] = [];
@@ -671,6 +745,7 @@ export async function attachKernel(
       channel.traitsListeners.add(listener);
       return () => channel.traitsListeners.delete(listener);
     },
+    trace: (tag, onEvents, options = {}) => traceOn(channel, tag, onEvents, options),
     async close(o = {}) {
       if (channel.failure) return;
       await channel
