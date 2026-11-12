@@ -618,3 +618,82 @@ test(
     await until('the abort', () => aborted.length === 1);
   }
 );
+
+test(
+  'B0 keeps the line hung up across opens, and a real speed raises DTR and RTS again',
+  TIMEOUT,
+  async (t) => {
+    const { kernel, bash, devices } = await booted(t);
+    await kernel.devices.add({ path: 'ttyUSB0' });
+    await bash('stty -F /dev/ttyUSB0 0');
+    const reopened = devices.calls.length;
+    const r = await kernel.run(['ttyprobe', '/dev/ttyUSB0', 'mget'], { cwd: '/tmp' });
+    assert.equal(r.stdout, 'modem=0x60\n');
+    const after = devices.calls.slice(reopened);
+    assert.deepEqual(
+      after.filter((c) => c.op === 'setSignals').map((c) => c.args),
+      [{ dataTerminalReady: false, requestToSend: false }]
+    );
+    assert.deepEqual(
+      after.filter((c) => c.op === 'configure'),
+      []
+    );
+    const raised = await kernel.run(
+      ['bash', '-c', 'stty -F /dev/ttyUSB0 115200 && ttyprobe /dev/ttyUSB0 mget'],
+      {
+        cwd: '/tmp',
+      }
+    );
+    assert.equal(raised.stdout, 'modem=0x66\n', raised.stderr);
+    assert.deepEqual(devices.ops('setSignals').at(-1).args, {
+      dataTerminalReady: true,
+      requestToSend: true,
+    });
+    assert.deepEqual(devices.ops('configure').at(-1).args.baudRate, 115200);
+  }
+);
+
+test(
+  'chmod, chown and touch of a node follow the file rules and show in stat everywhere',
+  TIMEOUT,
+  async (t) => {
+    const { kernel, bash, denials } = await booted(t);
+    await kernel.users.add({ name: 'cone', groups: ['dialout'] });
+    await kernel.devices.add({ path: 'ttyUSB0', group: 'dialout', mode: 0o640, links: ['l'] });
+    const user = await bash(
+      'chmod 666 /dev/ttyUSB0; echo "chmod $?"; chown cone /dev/ttyUSB0; echo "chown $?"; touch -d 2001-01-01 /dev/ttyUSB0; echo "touch $?"',
+      {
+        user: 'cone',
+      }
+    );
+    assert.equal(user.stdout, 'chmod 1\nchown 1\ntouch 1\n');
+    assert.match(user.stderr, /Operation not permitted/);
+    assert.deepEqual(
+      denials.filter((d) => d.path === '/dev/ttyUSB0').map((d) => [d.op, d.errno]),
+      [
+        ['chmod', 'EPERM'],
+        ['chown', 'EPERM'],
+        ['open', 'EACCES'],
+        ['utimes', 'EPERM'],
+      ]
+    );
+    const root = await bash(
+      'chmod 660 /dev/serial/by-id/l && chown cone:root /dev/ttyUSB0 && touch -d "2001-02-03 04:05:06" /dev/ttyUSB0 && stat -c "%a %U %G %y" /dev/ttyUSB0 | cut -c1-33'
+    );
+    assert.equal(root.stdout, '660 cone root 2001-02-03 04:05:06\n', root.stderr);
+    const owner = await bash('chmod 600 /dev/ttyUSB0 && stat -c %a /dev/ttyUSB0', { user: 'cone' });
+    assert.equal(owner.stdout, '600\n', owner.stderr);
+    await kernel.writeFile(
+      '/node_modules/st/package.json',
+      JSON.stringify({ name: 'st', slicc: { commands: { st: { abi: 'js', module: 'st.mjs' } } } })
+    );
+    await kernel.writeFile(
+      '/node_modules/st/st.mjs',
+      `export default async function main(ctx) {
+  const s = await ctx.fs.stat('/dev/ttyUSB0');
+  await ctx.write(1, [(s.mode & 0o7777).toString(8), s.uid, s.gid, new Date(s.mtimeMs).getUTCFullYear()].join(' ') + '\\n');
+}`
+    );
+    assert.equal((await kernel.run(['st'], { cwd: '/tmp' })).stdout, '600 1000 0 2001\n');
+  }
+);

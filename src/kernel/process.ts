@@ -40,7 +40,7 @@ import {
 } from './children.ts';
 import type { ClipboardBroker, ClipboardChannel, ClipboardStamp } from './clipboard.ts';
 import { type Cred, type CredChange, changeCred, copyCred, ROOT } from './cred.ts';
-import type { DeviceNodes, DeviceStamp } from './devices.ts';
+import type { DeviceMetaChange, DeviceNodes, DeviceStamp } from './devices.ts';
 import { EMBEDDER_PATH, type EmbedderBroker, type EmbedderCaller } from './embedder.ts';
 import { EPOLL_OPS, type EpollSyscall, epollSyscall } from './epoll.ts';
 import { EventFd } from './eventfd.ts';
@@ -233,6 +233,7 @@ export type WasmSyscall =
   | { op: 'fd-dev-nodes' }
   | { op: 'fd-open-dev'; path: string; flags: number }
   | { op: 'fd-dev-ioctl'; fd: number; request: number; arg?: unknown }
+  | ({ op: 'fd-dev-meta'; path: string } & DeviceMetaChange)
   | { op: 'tty-get'; fd: number }
   | { op: 'tty-set'; fd: number; termios: Termios; flush?: boolean; drain?: boolean }
   | { op: 'tty-winsz'; fd: number }
@@ -449,6 +450,7 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'fd-dev-nodes',
   'fd-open-dev',
   'fd-dev-ioctl',
+  'fd-dev-meta',
   'tty-get',
   'tty-set',
   'tty-winsz',
@@ -1385,6 +1387,13 @@ export class WasmProcess {
     return this.fds.install(this.options.outputFilter?.(file) ?? file, 3);
   }
 
+  private devMeta(path: string, change: DeviceMetaChange): SyncFsResult {
+    const devices = this.options.devices;
+    if (!devices) throw new KernelError('ENOENT');
+    devices.meta(path, change, this.guarded());
+    return { ok: true, kind: 'void' };
+  }
+
   private async devIoctl(
     req: Extract<FdSyscall, { op: 'fd-dev-ioctl' }>,
     cancelled: AbortSignal
@@ -1867,6 +1876,10 @@ export class WasmProcess {
         return { ok: true, kind: 'json', json: await this.openDev(req.path, req.flags, cancelled) };
       case 'fd-dev-ioctl':
         return { ok: true, kind: 'json', json: await this.devIoctl(req, cancelled) };
+      case 'fd-dev-meta': {
+        const { op: _, path, ...change } = req;
+        return this.devMeta(path, change);
+      }
       case 'fd-clipboard-abort': {
         const file = this.fds.get(req.fd);
         file.file.clipboard?.abort();
@@ -1912,6 +1925,11 @@ export class WasmProcess {
       return { ok: true, kind: 'void' };
     }
     const file = this.fds.get(req.fd).file;
+    const device = file.device;
+    if (device && (req.op === 'fd-chmod' || req.op === 'fd-chown' || req.op === 'fd-utimes')) {
+      const { op: _, fd: __, ...change } = req;
+      return this.devMeta(device.path, change);
+    }
     if (!file.pread || !file.pwrite || !file.resize || !file.stat) throw new KernelError('ESPIPE');
     switch (req.op) {
       case 'fd-pread':

@@ -77,6 +77,18 @@ export interface DeviceNodeInfo {
   major: number;
   minor: number;
   links: string[];
+  atimeMs: number;
+  mtimeMs: number;
+  ctimeMs: number;
+}
+
+export interface DeviceMetaChange {
+  mode?: number;
+  uid?: number;
+  gid?: number;
+  atimeMs?: number | null;
+  mtimeMs?: number | null;
+  now?: boolean;
 }
 
 export interface DeviceLookup {
@@ -163,6 +175,25 @@ export function devicesHook(hook: DeviceHook): DeviceHook {
   return { open: (request) => hook.open(request) };
 }
 
+function checkMeta(
+  node: DeviceNode,
+  change: DeviceMetaChange,
+  uid: number,
+  gid: number,
+  guard: Guard
+): void {
+  const { cred } = guard;
+  const owner = cred.euid === 0 || cred.euid === node.uid;
+  const member = cred.egid === gid || cred.groups.includes(gid);
+  const chown = uid !== node.uid || gid !== node.gid;
+  const times = (change.atimeMs ?? change.mtimeMs ?? null) !== null;
+  if (change.mode !== undefined && !owner) deny(guard, 'chmod', node.path, 'EPERM');
+  if (chown && cred.euid !== 0 && (uid !== node.uid || !owner || !member))
+    deny(guard, 'chown', node.path, 'EPERM');
+  if (times && !owner && !(change.now && permits(cred, node, W_OK, false)))
+    deny(guard, 'utimes', node.path, change.now ? 'EACCES' : 'EPERM');
+}
+
 export class DeviceNodes {
   private readonly hooks = new Map<number, DeviceHook>();
   private readonly nodes = new Map<string, DeviceNode>();
@@ -209,6 +240,9 @@ export class DeviceNodes {
       minor,
       links,
       opening: false,
+      atimeMs: Date.now(),
+      mtimeMs: Date.now(),
+      ctimeMs: Date.now(),
     };
     this.nodes.set(path, node);
     for (const link of links) this.links.set(link, node);
@@ -231,7 +265,7 @@ export class DeviceNodes {
   list(): DeviceNodeInfo[] {
     return [...this.nodes.values()]
       .sort((a, b) => (a.path < b.path ? -1 : 1))
-      .map(({ path, uid, gid, mode, major, minor, links }) => ({
+      .map(({ path, uid, gid, mode, major, minor, links, atimeMs, mtimeMs, ctimeMs }) => ({
         path,
         uid,
         gid,
@@ -239,7 +273,28 @@ export class DeviceNodes {
         major,
         minor,
         links: [...links],
+        atimeMs,
+        mtimeMs,
+        ctimeMs,
       }));
+  }
+
+  meta(path: string, change: DeviceMetaChange, guard?: Guard): void {
+    const node = this.find(path);
+    if (!node) throw new KernelError('ENOENT');
+    const uid = change.uid === undefined || change.uid === -1 ? node.uid : change.uid >>> 0;
+    const gid = change.gid === undefined || change.gid === -1 ? node.gid : change.gid >>> 0;
+    if (guard) checkMeta(node, change, uid, gid, guard);
+    const now = Date.now();
+    if (change.mode !== undefined) node.mode = change.mode & 0o7777;
+    node.uid = uid;
+    node.gid = gid;
+    const at = (ms: number | null | undefined, kept: number): number =>
+      ms === undefined || ms === null ? kept : change.now ? now : ms;
+    node.atimeMs = at(change.atimeMs, node.atimeMs);
+    node.mtimeMs = at(change.mtimeMs, node.mtimeMs);
+    node.ctimeMs = now;
+    if (node.channel) node.channel.tty.owner = { uid: node.uid, gid: node.gid, mode: node.mode };
   }
 
   find(path: string): DeviceNode | undefined {
@@ -364,6 +419,7 @@ export class DeviceChannel {
     if (saved) {
       this.ispeed = saved.ispeed;
       this.ospeed = saved.ospeed;
+      this.dtr = this.rts = saved.ospeed !== 0;
     }
     this.inner = this.tty.file();
     this.reader = streams.readable.getReader();
@@ -503,7 +559,9 @@ export class DeviceChannel {
 
   async restore(): Promise<void> {
     const settings = this.settings();
-    if (settings.baudRate === 0 || sameSettings(settings, DEFAULT_SETTINGS)) return;
+    if (settings.baudRate === 0)
+      return this.signals({ dataTerminalReady: false, requestToSend: false });
+    if (sameSettings(settings, DEFAULT_SETTINGS)) return;
     try {
       await this.control('configure', settings);
     } catch (err) {
@@ -534,8 +592,11 @@ export class DeviceChannel {
     this.ospeed = speeds.ospeed;
     try {
       if (speeds.ospeed === 0) await this.setModem(this.bits() & ~(TIOCM.DTR | TIOCM.RTS));
-      else if (!sameSettings(before, this.settings()))
-        await this.control('configure', this.settings());
+      else {
+        if (!sameSettings(before, this.settings()))
+          await this.control('configure', this.settings());
+        if (old.ospeed === 0) await this.setModem(this.bits() | TIOCM.DTR | TIOCM.RTS);
+      }
       if (how.flush) await this.control('flush', { input: true, output: false });
     } catch (err) {
       this.tty.tcsets(old.termios);

@@ -183,6 +183,15 @@ export function devFdStat(fd: number): DevStep<SyncFsBridgeStat> {
   return fdStat(fd, `/dev/fd/${fd}`);
 }
 
+function serialStat(node: DeviceNodeInfo): SyncFsBridgeStat {
+  return {
+    ...nodeStat(CHAR | node.mode, 0, node),
+    atimeMs: node.atimeMs,
+    mtimeMs: node.mtimeMs,
+    ctimeMs: node.ctimeMs,
+  };
+}
+
 function linkStat(target: string): SyncFsBridgeStat {
   return nodeStat(LINK | 0o777, target.length);
 }
@@ -201,9 +210,9 @@ export function* devStat(abs: string, follow: boolean): DevStep<SyncFsBridgeStat
     case 'terminal':
       return yield* terminalStat(node.name);
     case 'serial':
-      return nodeStat(CHAR | node.node.mode, 0, node.node);
+      return serialStat(node.node);
     case 'devlink':
-      return follow ? nodeStat(CHAR | node.node.mode, 0, node.node) : linkStat(node.target);
+      return follow ? serialStat(node.node) : linkStat(node.target);
     case 'link':
       if (!follow) return linkStat(node.target);
       return node.fd === undefined ? nodeStat(DIR | 0o555) : yield* fdStat(node.fd, abs);

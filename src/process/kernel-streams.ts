@@ -1,4 +1,4 @@
-import type { DeviceNodeInfo } from '../kernel/devices.ts';
+import type { DeviceMetaChange, DeviceNodeInfo } from '../kernel/devices.ts';
 import type { HeldMeta, PollState } from '../kernel/fd-table.ts';
 import type { MountLine, ProcessListing } from '../kernel/proc-info.ts';
 import type { Termios } from '../kernel/tty.ts';
@@ -39,6 +39,15 @@ interface TtyNodeFs {
   registerDevice?: (dev: number, ops: object) => void;
 }
 
+interface DeviceMetaFs {
+  lookupPath?: (path: string, opts: { follow: boolean }) => { path: string };
+  getPath?: (node: object) => string;
+  chmod?: (path: string | object, mode: number, dontFollow?: boolean) => void;
+  chown?: (path: string | object, uid: number, gid: number, dontFollow?: boolean) => void;
+  utime?: (path: string | object, atime: number, mtime: number) => void;
+  sliccTouch?: boolean;
+}
+
 interface DevDirFs extends TtyNodeFs {
   mkdir?: (path: string, mode?: number) => unknown;
   lookupNode?: (parent: object, name: string) => object;
@@ -56,7 +65,6 @@ const SERIAL_DIR = '/dev/serial';
 const BY_ID_DIR = '/dev/serial/by-id';
 
 function deviceStat(node: DeviceNodeInfo): object {
-  const now = new Date();
   return {
     dev: 0x16,
     ino: 0x1000 + (node.major << 8) + node.minor,
@@ -68,9 +76,9 @@ function deviceStat(node: DeviceNodeInfo): object {
     size: 0,
     blksize: 4096,
     blocks: 0,
-    atime: now,
-    mtime: now,
-    ctime: now,
+    atime: new Date(node.atimeMs),
+    mtime: new Date(node.mtimeMs),
+    ctime: new Date(node.ctimeMs),
   };
 }
 
@@ -230,6 +238,7 @@ export interface ProcessSys {
   devNodes?(): DeviceNodeInfo[];
   openDev?(path: string, flags: number): number;
   devIoctl?(fd: number, request: number, arg?: unknown): unknown;
+  devMeta?(path: string, change: DeviceMetaChange): void;
   winsize?(fd: number): [number, number];
 
   openPty?(): number;
@@ -672,6 +681,7 @@ export class KernelStreams {
         return lookupNode.call(fs, parent, name);
       }
     };
+    this.useDeviceMeta();
     fs.readdir = (path) => {
       const at = path.replace(/\/+$/, '');
       const names = readdir.call(fs, path);
@@ -693,6 +703,49 @@ export class KernelStreams {
       const kept = names.filter((name) => !stale(name));
       return [...kept, ...wanted.filter((name) => !kept.includes(name))];
     };
+  }
+
+  private useDeviceMeta(): void {
+    const fs = this.Fs as unknown as DeviceMetaFs;
+    const { lookupPath, getPath } = fs;
+    const devMeta = this.sys.devMeta?.bind(this.sys);
+    if (!lookupPath || !getPath || !devMeta) return;
+    const deviceOf = (path: string | object, follow: boolean): string | undefined => {
+      try {
+        const at =
+          typeof path === 'string'
+            ? lookupPath.call(fs, path, { follow }).path
+            : getPath.call(fs, path);
+        return DEVICE_PATH.test(at) ? at : undefined;
+      } catch {
+        return undefined;
+      }
+    };
+    const set = (path: string, change: DeviceMetaChange): void =>
+      this.call(() => devMeta(path, change));
+    const { chmod, chown, utime } = fs;
+    if (chmod)
+      fs.chmod = (path, mode, dontFollow) => {
+        const device = deviceOf(path, !dontFollow);
+        if (device === undefined) return chmod.call(fs, path, mode, dontFollow);
+        set(device, { mode: mode & 0o7777 });
+      };
+    if (chown)
+      fs.chown = (path, uid, gid, dontFollow) => {
+        const device = deviceOf(path, !dontFollow);
+        if (device === undefined) return chown.call(fs, path, uid, gid, dontFollow);
+        set(device, { uid, gid });
+      };
+    if (utime)
+      fs.utime = (path, atime, mtime) => {
+        const device = deviceOf(path, true);
+        if (device === undefined) return utime.call(fs, path, atime, mtime);
+        set(device, {
+          atimeMs: Number(atime),
+          mtimeMs: Number(mtime),
+          now: fs.sliccTouch === true,
+        });
+      };
   }
 
   private liveDeviceStat(path: string): object {

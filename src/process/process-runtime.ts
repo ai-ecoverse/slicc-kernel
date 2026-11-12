@@ -104,7 +104,7 @@ const FS_OPS: ReadonlySet<string> = new Set(SYNC_FS_OPS);
 
 function deviceSys(
   call: (req: SyncSabRequestBody, label: string) => SyncFsResult
-): Pick<ProcessSys, 'devNodes' | 'openDev' | 'devIoctl'> {
+): Pick<ProcessSys, 'devNodes' | 'openDev' | 'devIoctl' | 'devMeta'> {
   const json = (r: SyncFsResult): unknown => (r.ok && r.kind === 'json' ? r.json : undefined);
   return {
     devNodes() {
@@ -121,6 +121,9 @@ function deviceSys(
         ...(arg !== undefined ? { arg } : {}),
       };
       return json(call(req, `fd-dev-ioctl ${fd}`));
+    },
+    devMeta(path, change) {
+      call({ op: 'fd-dev-meta', path, ...change }, `fd-dev-meta ${path}`);
     },
   };
 }
