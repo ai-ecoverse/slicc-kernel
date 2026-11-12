@@ -268,6 +268,7 @@ export interface LauncherOptions {
   cron?: CronOptions;
   moduleUrl?: ModuleUrlMaker;
   packageLocks?: string;
+  emscripten?: 'glue' | 'kernel';
   compile?: (bytes: Uint8Array, key: string) => Promise<WebAssembly.Module>;
 }
 
@@ -779,6 +780,7 @@ function addTimes(into: Map<number, CpuTimes>, pid: number, t: CpuTimes): void {
 }
 
 export class Launcher {
+  private readonly emscripten: LauncherOptions['emscripten'];
   readonly fs: KernelFs;
   readonly processFs: KernelFs;
   private readonly noLinksFs: KernelFs;
@@ -957,7 +959,7 @@ export class Launcher {
     this.mounted = this.mounts.wrap(options.fs);
     this.base = this.rooted(this.mounted);
     this.createWorker = options.createWorker;
-    this.compile = options.compile;
+    ({ compile: this.compile, emscripten: this.emscripten } = options);
     this.moduleUrl = options.moduleUrl;
     this.createDriverWorker = options.createDriverWorker;
     this.media = options.media ?? memoryMedia();
@@ -2164,6 +2166,10 @@ export class Launcher {
     if (target.abi === 'js') {
       const { url, source } = this.urlFor(await this.text(target.wasm, caller, asked));
       return { abi: 'js', glue: '', url, path: target.wasm, ...(source ? { source } : {}) };
+    }
+    if (target.abi !== 'wasi' && this.emscripten === 'kernel') {
+      const { module } = await this.module(target.wasm, caller, asked && modulePath(asked));
+      return { abi: 'emscripten', emscripten: 'kernel', glue: '', module, path: target.glue };
     }
     if (target.abi !== 'wasi') {
       const [glue, { module }] = await Promise.all([

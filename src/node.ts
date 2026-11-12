@@ -34,7 +34,7 @@ import type { RouteTable } from './kernel/net/routes.ts';
 import { type SealedOption, sealedHooks } from './kernel/net/sealed-fetch.ts';
 import type { NetworkUplink } from './kernel/net/uplink.ts';
 import { quiet, signalField } from './kernel/signals.ts';
-import { Launcher, tagOption } from './launcher.ts';
+import { Launcher, type LauncherOptions, tagOption } from './launcher.ts';
 import type { FetchLike, HostfsGrantHook } from './mount/hostfs.ts';
 import type { MountEntry, MountSpec } from './mount/mount-fs.ts';
 import type { ProcessMountPolicy } from './mount/syscall.ts';
@@ -199,6 +199,7 @@ export interface NodeKernelOptions {
   warmWorker?: boolean;
   warmWorkers?: number;
   wasmMemories?: { ceiling?: number; idleMs?: number };
+  emscripten?: 'glue' | 'kernel';
   blocking?: 'sync' | 'async';
   asyncProcess?: AsyncProcessOptions;
 }
@@ -223,6 +224,15 @@ export interface NodeKernel {
   umount(target: string): Promise<void>;
   mounts(): Promise<MountEntry[]>;
   terminate(): void;
+}
+
+function tuningOf(
+  options: NodeKernelOptions
+): Pick<LauncherOptions, 'wasmMemories' | 'emscripten'> {
+  return {
+    ...(options.wasmMemories ? { wasmMemories: options.wasmMemories } : {}),
+    ...(options.emscripten ? { emscripten: options.emscripten } : {}),
+  };
 }
 
 function hostfsFetchOf(options: NodeKernelOptions): { hostfsFetch?: FetchLike } {
@@ -689,7 +699,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     ...(options.requests ? { embedder: checkedRequests(options.requests) } : {}),
     ...(options.approve ? { approve: options.approve } : {}),
     ...(options.sudo?.clock ? { sudoClock: options.sudo.clock } : {}),
-    ...(options.wasmMemories ? { wasmMemories: options.wasmMemories } : {}),
+    ...tuningOf(options),
     cron: { lock: cronLock(root), ...(options.cron?.clock ? { clock: options.cron.clock } : {}) },
   });
   await launcher.prepare();
