@@ -121,8 +121,7 @@ export function diffRuns(last: Int32Array, now: Int32Array): Int32Array | undefi
   const length = now.length;
   let i = 0;
   while (i < length) {
-    const value = Atomics.load(now, i);
-    if (value === last[i]) {
+    if (now[i] === last[i]) {
       i++;
       continue;
     }
@@ -130,7 +129,7 @@ export function diffRuns(last: Int32Array, now: Int32Array): Int32Array | undefi
     const at = out.length;
     out.push(start, 0);
     while (i < length) {
-      const next = Atomics.load(now, i);
+      const next = now[i] as number;
       if (next === last[i]) break;
       last[i] = next;
       out.push(next);

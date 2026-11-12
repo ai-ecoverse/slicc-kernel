@@ -37,6 +37,10 @@
       "types": "./dist/types/node.d.ts",
       "default": "./dist/node.js"
     },
+    "./cloudflare": {
+      "types": "./dist/types/cloudflare.d.ts",
+      "default": "./dist/cloudflare.js"
+    },
     "./driver": {
       "types": "./dist/types/driver.d.ts",
       "default": "./dist/driver.js"
@@ -90,6 +94,7 @@
     "@ai-ecoverse/wasm-tls-engine": "4.2.0-12",
     "@ai-ecoverse/wasm-util-linux": "2.42.4-7",
     "@biomejs/biome": "2.6.5",
+    "@cloudflare/computer": "0.11.1",
     "@types/node": "26.6.6",
     "acorn": "8.19.0",
     "esbuild": "0.28.2",
@@ -99,6 +104,7 @@
     "pg-gateway": "0.3.0-beta.4",
     "semantic-release": "25.0.9",
     "typescript": "7.0.2",
-    "wabt": "1.0.39"
+    "wabt": "1.0.39",
+    "wrangler": "4.161.0"
   }
 }

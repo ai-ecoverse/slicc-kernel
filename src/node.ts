@@ -11,6 +11,7 @@ import { type CronClock, clockZone } from './cron/clock.ts';
 import type { FacadeSpecs } from './facade/types.ts';
 import type { Attestation, AttestTombstone } from './fs/attest.ts';
 import type { DenialHook } from './fs/dac.ts';
+import type { MetaStore } from './fs/meta.ts';
 import { OpfsFs } from './fs/opfs.ts';
 import type { Protection } from './fs/protect.ts';
 import { DEFAULT_USERS, fsError, modeOption, type UsersMode } from './fs/types.ts';
@@ -33,7 +34,7 @@ import type { RouteTable } from './kernel/net/routes.ts';
 import { type SealedOption, sealedHooks } from './kernel/net/sealed-fetch.ts';
 import type { NetworkUplink } from './kernel/net/uplink.ts';
 import { quiet, signalField } from './kernel/signals.ts';
-import { Launcher, tagOption } from './launcher.ts';
+import { Launcher, type LauncherOptions, tagOption } from './launcher.ts';
 import type { FetchLike, HostfsGrantHook } from './mount/hostfs.ts';
 import type { MountEntry, MountSpec } from './mount/mount-fs.ts';
 import type { ProcessMountPolicy } from './mount/syscall.ts';
@@ -168,6 +169,8 @@ export { memoryRoot };
 
 export interface NodeKernelOptions {
   root?: FileSystemDirectoryHandle;
+  meta?: MetaStore;
+  ranged?: boolean;
   modules?: string;
   commands?: { append?: readonly string[] };
   env?: Record<string, string>;
@@ -196,6 +199,7 @@ export interface NodeKernelOptions {
   warmWorker?: boolean;
   warmWorkers?: number;
   wasmMemories?: { ceiling?: number; idleMs?: number };
+  emscripten?: 'glue' | 'kernel';
   blocking?: 'sync' | 'async';
   asyncProcess?: AsyncProcessOptions;
 }
@@ -220,6 +224,15 @@ export interface NodeKernel {
   umount(target: string): Promise<void>;
   mounts(): Promise<MountEntry[]>;
   terminate(): void;
+}
+
+function tuningOf(
+  options: NodeKernelOptions
+): Pick<LauncherOptions, 'wasmMemories' | 'emscripten'> {
+  return {
+    ...(options.wasmMemories ? { wasmMemories: options.wasmMemories } : {}),
+    ...(options.emscripten ? { emscripten: options.emscripten } : {}),
+  };
 }
 
 function hostfsFetchOf(options: NodeKernelOptions): { hostfsFetch?: FetchLike } {
@@ -602,6 +615,12 @@ function checkedRequests(hook: EmbedderHook): EmbedderHook {
   return { kinds, handle: (request) => hook.handle(request) };
 }
 
+function rootFs(root: FileSystemDirectoryHandle, options: NodeKernelOptions): OpfsFs {
+  return new OpfsFs(root, options.meta, undefined, {
+    ranged: options.ranged ?? isMemoryRoot(root),
+  });
+}
+
 function blockingOf(options: NodeKernelOptions): 'sync' | 'async' {
   const { blocking } = options;
   if (blocking === undefined || blocking === 'sync' || blocking === 'async')
@@ -635,7 +654,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
   const hooks = sealedHooks(options.sealed);
   const timeZone = systemTimeZone(options.timeZone, clockZone(options.cron?.clock));
   const root = options.root ?? memoryRoot();
-  const fs = new OpfsFs(root, undefined, undefined, { ranged: isMemoryRoot(root) });
+  const fs = rootFs(root, options);
   await fs.reconcile();
   const live = new Set<() => void>();
   const pending = new Set<(err: Error) => void>();
@@ -680,7 +699,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     ...(options.requests ? { embedder: checkedRequests(options.requests) } : {}),
     ...(options.approve ? { approve: options.approve } : {}),
     ...(options.sudo?.clock ? { sudoClock: options.sudo.clock } : {}),
-    ...(options.wasmMemories ? { wasmMemories: options.wasmMemories } : {}),
+    ...tuningOf(options),
     cron: { lock: cronLock(root), ...(options.cron?.clock ? { clock: options.cron.clock } : {}) },
   });
   await launcher.prepare();

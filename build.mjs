@@ -55,6 +55,17 @@ await build({
   logLevel: 'warning',
 });
 await build({
+  entryPoints: ['src/cloudflare/computer.ts'],
+  outfile: 'dist/cloudflare/computer.js',
+  bundle: true,
+  format: 'esm',
+  platform: 'neutral',
+  target: 'es2024',
+  sourcemap: 'linked',
+  define,
+  logLevel: 'warning',
+});
+await build({
   entryPoints: ['src/node.ts', 'src/node-driver-worker.ts'],
   outdir: 'dist',
   bundle: true,
@@ -107,6 +118,46 @@ await buildAsyncProcess({
   root: fileURLToPath(new URL('.', import.meta.url)),
   outfile: 'dist/async-process.js',
   define,
+});
+const externalAs = (map) => ({
+  name: 'cloudflare-externals',
+  setup(on) {
+    on.onResolve({ filter: /^(slicc|cloudflare):/ }, ({ path }) => ({
+      path: map[path] ?? path,
+      external: true,
+    }));
+  },
+});
+const host = await build({
+  entryPoints: ['src/cloudflare/process-host.ts'],
+  bundle: true,
+  write: false,
+  format: 'esm',
+  platform: 'browser',
+  target: 'es2024',
+  define,
+  plugins: [externalAs({ 'slicc:process': './process.js', 'slicc:program': './program.wasm' })],
+  logLevel: 'warning',
+});
+const asyncProcess = await readFile(
+  new URL('./dist/async-process.js', import.meta.url),
+  'utf8'
+).catch(() => undefined);
+await writeFile(
+  new URL('./dist/cloudflare-sources.js', import.meta.url),
+  `export const HOST_SOURCE = ${JSON.stringify(host.outputFiles[0].text)};\nexport const PROCESS_SOURCE = ${asyncProcess === undefined ? 'undefined' : JSON.stringify(asyncProcess.replace(/\n\/\/# sourceMappingURL=.*\n?$/, '\n'))};\n`
+);
+await build({
+  entryPoints: ['src/cloudflare.ts'],
+  outdir: 'dist',
+  bundle: true,
+  format: 'esm',
+  platform: 'browser',
+  target: 'es2024',
+  sourcemap: 'linked',
+  define,
+  plugins: [externalAs({ 'slicc:cloudflare-sources': './cloudflare-sources.js' })],
+  logLevel: 'warning',
 });
 execFileSync(
   process.execPath,
