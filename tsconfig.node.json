@@ -9,6 +9,7 @@
     "src/node-stack.ts",
     "src/node/worker-boot.ts",
     "src/node/ws-diagnose.ts",
-    "src/node/loopback.ts"
+    "src/node/loopback.ts",
+    "src/async/node-host.ts"
   ]
 }
