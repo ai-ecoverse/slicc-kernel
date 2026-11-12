@@ -23,6 +23,7 @@ import { sealedHooks } from './kernel/net/sealed-fetch.ts';
 import { quiet, signalField } from './kernel/signals.ts';
 import { Launcher, type ModuleUrl, tagOption } from './launcher.ts';
 import { isMemoryRoot, memoryRoot } from './node/memory-root.ts';
+import { localPorts } from './ports.ts';
 import { signalNumber } from './serve.ts';
 
 export { attachKernel, type KernelClient } from './client/attach.ts';
@@ -143,7 +144,7 @@ function client(
   { user, tag, requests }: ConnectOptions
 ): MessagePort {
   tagOption(tag);
-  const { port1, port2 } = new MessageChannel();
+  const { port1, port2 } = launcher.ports();
   const session = ++sessions;
   const served = serveClient(port1 as unknown as MessagePortLike, {
     launcher: async () => launcher,
@@ -193,6 +194,7 @@ export async function createCloudflareKernel(
     fs,
     moduleUrl: sourceModule,
     compile: images.compile,
+    ports: localPorts,
     emscripten: 'kernel',
     admit: (program, from) =>
       processes.admit(program.abi === 'js' ? undefined : program.module, from),

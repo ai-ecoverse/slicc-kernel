@@ -1,3 +1,4 @@
+import { type MakePortPair, messageChannel } from '../ports.ts';
 import type { CdpConnection, CdpHook, CdpRequest } from './types.ts';
 
 export interface CdpPortLike {
@@ -65,11 +66,12 @@ export function serveCdpPort(
 
 export function portCdpHook(
   ask: (request: CdpRequest, port: CdpPortLike) => void,
-  gone?: Promise<unknown>
+  gone?: Promise<unknown>,
+  ports: MakePortPair = messageChannel
 ): CdpHook {
   return (request) =>
     new Promise((resolve, reject) => {
-      const { port1, port2 } = new MessageChannel();
+      const { port1, port2 } = ports();
       let closed = false;
       const conn: CdpConnection = {
         send: (m) => {

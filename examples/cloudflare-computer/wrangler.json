@@ -1,0 +1,14 @@
+{
+  "name": "slicc-kernel-do-computer-example",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "durable_objects": { "bindings": [{ "name": "COMPUTER", "class_name": "Computer" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Computer"] }],
+  "worker_loaders": [{ "binding": "LOADER" }],
+  "rules": [
+    { "type": "Data", "globs": ["**/*.wasm"], "fallthrough": false },
+    { "type": "Text", "globs": ["**/bin/bash", "**/bin/coreutils"], "fallthrough": false }
+  ]
+}
