@@ -180,7 +180,7 @@ function zoneName(offset: number): string {
   return `UTC${sign}${String(Math.floor(abs / 60)).padStart(2, '0')}${String(abs % 60).padStart(2, '0')}`;
 }
 
-export function timeImports(ctx: EmContext): Record<string, unknown> {
+export function timeImports(ctx: EmContext): WebAssembly.ModuleImports {
   const { mem } = ctx;
   const i32 = (at: number) => mem.view().getInt32(at, true);
   const put = (at: number, value: number) => mem.view().setInt32(at, value, true);

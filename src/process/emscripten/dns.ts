@@ -214,7 +214,7 @@ function getaddrinfo(
   return put(0, h.family === 10 ? [0, 0, htonl(0xffff), fake] : fake);
 }
 
-export function dnsImports(ctx: EmContext): Record<string, unknown> {
+export function dnsImports(ctx: EmContext): WebAssembly.ModuleImports {
   return {
     getaddrinfo: (node: number, service: number, hint: number, out: number) =>
       getaddrinfo(ctx, node, service, hint, out),

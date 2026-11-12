@@ -154,7 +154,7 @@ export function createJsWasi(deps: JsWasiDeps, o: JsWasiOptions = {}): JsWasi {
     kernel: { sys, call: call as WasiHost['o']['kernel']['call'] },
     fs: createSyncFsSabBridge(transport, { ...deps.fs, direct: true }),
     bare: true,
-  });
+  }).attach();
   const owned = deps.owned;
   const guest = new Map<number, number>();
   const own = (g: number, k: number): void => {

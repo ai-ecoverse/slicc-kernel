@@ -17,7 +17,7 @@ import { cachingBridge } from '../wasi/wasi-files.ts';
 import { WasiExit, WasiHost } from '../wasi/wasi-host.ts';
 import { ProcTree, procfsBridge } from '../wasi/wasi-procfs.ts';
 import { ptsBridge } from '../wasi/wasi-ptsfs.ts';
-import { wireSignals } from '../wasi/wasi-runtime.ts';
+import { type TransportFactory, wireSignals } from '../wasi/wasi-runtime.ts';
 import type { EmContext, EmExports } from './context.ts';
 import { EmCwd } from './cwd.ts';
 import { dnsImports } from './dns.ts';
@@ -187,7 +187,7 @@ function resizeHeap(ctx: EmContext, requested: number): number {
   return 0;
 }
 
-function runtimeImports(ctx: EmContext, rt: EmRuntime): Record<string, unknown> {
+function runtimeImports(ctx: EmContext, rt: EmRuntime): WebAssembly.ModuleImports {
   const { mem } = ctx;
   const sighandler = invoke(ctx, 'vi');
   return {
@@ -243,7 +243,7 @@ function buildImports(
   module: WebAssembly.Module
 ): WebAssembly.Imports {
   const state: FilesState = { listings: new WeakMap() };
-  const env: Record<string, unknown> = {
+  const env: WebAssembly.ModuleImports = {
     ...fileImports(ctx, state),
     ...fdImports(ctx),
     ...procImports(ctx, { seeded: rt.seeded, raise: (sig) => rt.raise(sig) }),
@@ -256,7 +256,7 @@ function buildImports(
   };
   const preview1 = wasiImports(ctx, state);
   if (ctx.init.env.SLICC_EMSCRIPTEN_TRACE === '1') {
-    for (const table of [env, preview1] as Record<string, unknown>[]) {
+    for (const table of [env, preview1]) {
       for (const [name, fn] of Object.entries(table)) {
         if (typeof fn !== 'function' || name.startsWith('invoke_')) continue;
         table[name] = (...args: unknown[]) => {
@@ -301,14 +301,19 @@ function runMain(ctx: EmContext, rt: EmRuntime): number {
   return rt.exit(Number(settled ?? 0));
 }
 
+const sabTransport: TransportFactory = (sab, port, memory) =>
+  createSyncSabTransport(sab, port, memory ? { memory } : {});
+
 export async function runEmscriptenProcess(
   init: WasmProcessInitMsg,
-  port: SabPostLike
+  port: SabPostLike,
+  given: { transport?: TransportFactory } = {}
 ): Promise<number> {
   const rt = new EmRuntime();
   let memory: WebAssembly.Memory | undefined;
+  const transports = given.transport ?? sabTransport;
   const gate = new SignalGate(
-    createSyncSabTransport(init.sab, port, { memory: () => memory?.buffer.byteLength ?? 0 }),
+    transports(init.sab, port, () => memory?.buffer.byteLength ?? 0),
     new Int32Array(init.sab, 0, SAB_HEADER_I32),
     {
       masks: () => rt.masks(),
@@ -343,7 +348,7 @@ export async function runEmscriptenProcess(
       call
     ),
     bare: true,
-  });
+  }).attach();
   if (fork) host.fds.restore(fork.fds, fork.cloexec);
   else {
     const { fds, cloexec } = stdioEntries(init, call);

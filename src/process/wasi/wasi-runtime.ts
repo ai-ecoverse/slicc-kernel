@@ -16,6 +16,7 @@ import {
   createSyncFsSabBridge,
   createSyncSabTransport,
   type SabPostLike,
+  type SyncSabTransport,
 } from '../../realm/sync-sab-bridge.ts';
 import { loadBlocked, publishMemory, SAB_HEADER_I32 } from '../../realm/sync-sab-wire.ts';
 import { SyscallError } from '../kernel-streams.ts';
@@ -37,6 +38,7 @@ import { AsyncifyDriver, type WasiForkState } from './wasix-fork.ts';
 import { WasixHost } from './wasix-host.ts';
 import { type LinkerHost, type LinkRecord, TABLE_BASE, WasixLinker } from './wasix-linker.ts';
 import { definedFunctions, mainModule, nameFrame, sidecarNames } from './wasm-names.ts';
+import { reentered } from './wasm-reentry.ts';
 
 type ProgramOption = (
   memory: () => WebAssembly.Memory,
@@ -151,7 +153,8 @@ export function sigmaskOf(
   sab: SharedArrayBuffer,
   gate: Pick<SignalGate, 'deliver'>,
   threads: WasiThreads | undefined,
-  process?: SharedArrayBuffer
+  process?: SharedArrayBuffer,
+  published?: () => void
 ): WasiSigmask | undefined {
   const header = new Int32Array(sab, 0, SAB_HEADER_I32);
   if (!importsSlicc(module, 'sigmask_set')) {
@@ -160,7 +163,7 @@ export function sigmaskOf(
   }
   if (threads) threads.blocked = () => loadBlocked(header);
   const shared = process && new Int32Array(process, 0, SAB_HEADER_I32);
-  return new WasiSigmask(header, () => gate.deliver(), shared, threads?.tid ?? MAIN_TID);
+  return new WasiSigmask(header, () => gate.deliver(), shared, threads?.tid ?? MAIN_TID, published);
 }
 
 const noErrno = (key: string) =>
@@ -314,18 +317,25 @@ function memoryOf(
   return imported ?? (instance.exports.memory as WebAssembly.Memory | undefined);
 }
 
+export type TransportFactory = (
+  sab: SharedArrayBuffer,
+  port: SabPostLike,
+  memory?: () => number
+) => SyncSabTransport;
+
+const sabTransport: TransportFactory = (sab, port, memory) =>
+  createSyncSabTransport(sab, port, memory ? { memory } : {});
+
 function kernelOf(
   init: { sab: SharedArrayBuffer; argv0: string },
   port: SabPostLike,
 
   hooks: SignalHooks = { masks: () => null, raise: () => {} },
-  memory?: () => number
+  memory?: () => number,
+  transports: TransportFactory = sabTransport
 ) {
-  const gate = new SignalGate(
-    createSyncSabTransport(init.sab, port, memory ? { memory } : {}),
-    new Int32Array(init.sab, 0, SAB_HEADER_I32),
-    hooks
-  );
+  const raw = transports(init.sab, port, memory);
+  const gate = new SignalGate(raw, new Int32Array(init.sab, 0, SAB_HEADER_I32), hooks);
   const transport = gate.transport();
   const sys = kernelSys(transport);
   const call = (req: WasmSyscall): unknown => {
@@ -334,7 +344,8 @@ function kernelOf(
     return r.kind === 'json' ? r.json : r.kind === 'bytes' ? r.bytes : undefined;
   };
   const say = (text: string) => sys.write(2, new TextEncoder().encode(`${init.argv0}: ${text}\n`));
-  return { transport, sys, call, say, gate };
+  const published = raw.publish && (() => raw.publish?.());
+  return { transport, sys, call, say, gate, published };
 }
 
 function traced<T extends object>(stats: WasiStats | undefined, tag: string, table: T): T {
@@ -392,7 +403,7 @@ function untilDone(run: () => void, driver: AsyncifyDriver): void {
 }
 
 function threadStart(instance: WebAssembly.Instance): (tid: number, arg: number) => void {
-  return instance.exports.wasi_thread_start as (tid: number, arg: number) => void;
+  return reentered(instance.exports.wasi_thread_start as (tid: number, arg: number) => void);
 }
 
 function spawnsThreads(module: WebAssembly.Module): boolean {
@@ -705,7 +716,27 @@ function heldOf(
   return { held: new HeldCwd(held.sab, held.slot, ask, { ...held, path: init.cwd }) };
 }
 
-export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike): Promise<number> {
+function mainThreads(
+  port: SabPostLike,
+  module: WebAssembly.Module,
+  memory: WebAssembly.Memory | undefined,
+  cap: number
+): WasiThreads | undefined {
+  return memory?.buffer instanceof SharedArrayBuffer && spawnsThreads(module)
+    ? new WasiThreads(port, memory, cap, MAIN_TID)
+    : undefined;
+}
+
+export interface WasiProcessHost {
+  transport?: TransportFactory;
+  threadCap?: number;
+}
+
+export async function runWasiProcess(
+  init: WasmProcessInitMsg,
+  port: SabPostLike,
+  given: WasiProcessHost = {}
+): Promise<number> {
   captureBacktraces(init.env);
 
   const signals = new WasiSignals(
@@ -721,7 +752,8 @@ export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike
     call: kernelCall,
     say,
     gate,
-  } = kernelOf(init, port, signals, sizeOf(main));
+    published,
+  } = kernelOf(init, port, signals, sizeOf(main), given.transport);
   const id = identify(transport, init);
 
   const stats = init.env.SLICC_WASI_STATS === '1' ? new WasiStats() : undefined;
@@ -739,10 +771,7 @@ export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike
   }
   const fork = init.fork?.wasi;
   const memory = createImportedMemory(init.program.memory, fork ? init.fork?.memory : undefined);
-  const threads =
-    memory?.buffer instanceof SharedArrayBuffer && spawnsThreads(module)
-      ? new WasiThreads(port, memory, threadCap(init.env), MAIN_TID)
-      : undefined;
+  const threads = mainThreads(port, module, memory, given.threadCap ?? threadCap(init.env));
   const host = new WasiHost({
     args: [init.argv0, ...init.args],
     env: init.env,
@@ -769,8 +798,8 @@ export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike
     ...descriptors(init, fork, threads),
     ...heldOf(init, call),
     ...(threads ? { credGen: threads.ids } : {}),
-  });
-  host.sigmask = sigmaskOf(module, init.sab, gate, threads);
+  }).attach();
+  host.sigmask = sigmaskOf(module, init.sab, gate, threads, undefined, published);
   if (threads) {
     threads.beforeSpawn = () => {
       if (!host.fds.isShared) host.fds.share(threads.ids, false);
@@ -803,7 +832,9 @@ export async function runWasiProcess(init: WasmProcessInitMsg, port: SabPostLike
     ownStack(driver, instance, linkedStack, entry.low);
     host.threadEntry = entry;
   }
-  const run = entry ? () => threadStart(instance)(entry.tid, entry.arg) : () => exports._start();
+  const run = entry
+    ? () => threadStart(instance)(entry.tid, entry.arg)
+    : () => reentered(exports._start)();
   try {
     if (fork) driver.startChild(fork);
 
@@ -838,10 +869,11 @@ export function trapMessage(
 
   const main = name && mainModule(lines);
 
-  const frames = lines
+  const frames: string[] = [];
+  const shown = lines
     .filter((line) => /^\s+at .*wasm:\/\/wasm\//.test(line))
-    .slice(0, BACKTRACE_FRAMES)
-    .map((line) => (name && main ? nameFrame(line, main, name) : line));
+    .slice(0, BACKTRACE_FRAMES);
+  for (const line of shown) frames.push(name && main ? nameFrame(line, main, name) : line);
   return frames.length ? `${head}\n${frames.join('\n')}` : head;
 }
 
@@ -922,7 +954,7 @@ export async function runWasiThread(init: WasmThreadInitMsg, port: SabPostLike):
     ),
     shared: threads.ids,
     ...heldOf(init, call),
-  });
+  }).attach();
   host.tid = thread.tid;
   host.sigmask = sigmaskOf(init.program.module, init.sab, gate, threads, init.signals);
 

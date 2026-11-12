@@ -66,17 +66,17 @@ export class WasixProcess {
   }
 
   private environment(): Record<string, string> {
-    return { ...this.host.o.env, PWD: this.host.cwd };
+    return { ...this.host.o.env, PWD: this.host.workingDir() };
   }
 
   private locate(name: string, search: boolean, path: string): string {
     if (name.includes('/'))
-      return name.startsWith('/') ? name : normalize(`${this.host.cwd}/${name}`);
+      return name.startsWith('/') ? name : normalize(`${this.host.workingDir()}/${name}`);
     if (!search) return name;
     for (const dir of path.split(':')) {
       if (!dir) continue;
       const candidate = normalize(
-        `${dir.startsWith('/') ? '' : `${this.host.cwd}/`}${dir}/${name}`
+        `${dir.startsWith('/') ? '' : `${this.host.workingDir()}/`}${dir}/${name}`
       );
       if (this.host.o.fs.exists(candidate)) return candidate;
     }
@@ -95,7 +95,7 @@ export class WasixProcess {
 
     const nulls = new Set<number>();
     const opened: number[] = [];
-    let cwd = this.host.cwd;
+    let cwd = this.host.workingDir();
     try {
       for (const op of ops) cwd = this.applyFdOp(op, { map, nulls, opened }, cwd);
     } catch (e) {
@@ -253,7 +253,7 @@ export class WasixProcess {
       globals,
       fds: fds.snapshot(),
       cloexec: [...fds.cloexec],
-      cwd: this.host.cwd,
+      cwd: this.host.workingDir(),
       ...(fds.isShared ? { shared: true as const } : {}),
       setjmps: this.driver.setjmps(),
       ...(this.host.signals ? { signals: this.host.signals.snapshot() } : {}),

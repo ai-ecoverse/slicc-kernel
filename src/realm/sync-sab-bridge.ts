@@ -55,6 +55,7 @@ export interface SyncSabTransport {
     transfer?: Transferable[],
     sink?: Uint8Array
   ): SyncFsResult;
+  publish?(): void;
 }
 
 export type AtomicsWaitLike = (

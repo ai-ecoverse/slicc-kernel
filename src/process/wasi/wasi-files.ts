@@ -74,7 +74,6 @@ export class FileBuffer {
           this.retried(() => truncate.call(fs, this.where, size)),
       };
       this.ranged = new RangedFile(io, path, size, version, watch);
-      if (empty) this.truncate(0);
     } else if (empty) {
       this.data = new Uint8Array(0);
       this.dirty = true;
@@ -84,6 +83,11 @@ export class FileBuffer {
 
   get path(): string {
     return this.where;
+  }
+
+  emptied(empty: boolean): this {
+    if (empty && this.ranged) this.truncate(0);
+    return this;
   }
 
   private retried<T>(op: () => T): T {
