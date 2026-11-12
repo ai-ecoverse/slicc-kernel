@@ -81,7 +81,6 @@ export function devicesAsker(port: DevicesPort) {
           else controller.error(raised(item));
         },
         cancel: (reason) => {
-          remotes.delete(id);
           post({ id, cancel: String(reason ?? 'closed') });
         },
       },
@@ -97,7 +96,6 @@ export function devicesAsker(port: DevicesPort) {
         return done.promise;
       },
       abort: (reason) => {
-        remotes.delete(id);
         post({ id, cancel: String(reason ?? 'closed') });
       },
     }),
@@ -106,6 +104,7 @@ export function devicesAsker(port: DevicesPort) {
       const done = Promise.withResolvers<unknown>();
       remote.controls.set(seq, done);
       post({ id, control: { seq, op, ...(args ? { args } : {}) } });
+      if (op === 'close') void done.promise.finally(() => remotes.delete(id)).catch(quiet);
       return done.promise;
     },
   });
@@ -166,6 +165,7 @@ export function devicesAsker(port: DevicesPort) {
 
 interface Local {
   abort: AbortController;
+  closing?: Promise<void>;
   streams?: DeviceStreams;
   reader?: ReadableStreamDefaultReader<Uint8Array>;
   writer?: WritableStreamDefaultWriter<Uint8Array>;
@@ -197,9 +197,9 @@ export function devicesAnswerer(
         signal: local.abort.signal,
       });
       if (!locals.has(id)) {
-        void Promise.resolve(streams?.control?.('close')).catch(quiet);
-        void streams?.readable?.cancel('closed').catch(quiet);
-        void streams?.writable?.abort('closed').catch(quiet);
+        await streams?.readable?.cancel('closed').catch(quiet);
+        await streams?.writable?.abort('closed').catch(quiet);
+        await Promise.resolve(streams?.control?.('close')).catch(quiet);
         return;
       }
       local.streams = streams;
@@ -235,17 +235,30 @@ export function devicesAnswerer(
     asked: { seq: number; op: string; args?: object }
   ) => {
     try {
+      await local.closing;
       const value = await (local.streams as DeviceStreams).control(asked.op, asked.args);
       post({ id, answered: asked.seq, ...(value !== undefined ? { value } : {}) });
     } catch (err) {
       post({ id, refused: asked.seq, error: errorOf(err) });
     }
+    if (asked.op === 'close') locals.delete(id);
+  };
+  const release = async (local: Local, reason: string): Promise<void> => {
+    const { reader, writer } = local;
+    local.reader = undefined;
+    local.writer = undefined;
+    await reader?.cancel(reason).catch(quiet);
+    reader?.releaseLock();
+    await writer?.abort(reason).catch(quiet);
+    writer?.releaseLock();
   };
   const cancel = (id: number, local: Local, reason: string): void => {
-    locals.delete(id);
     local.abort.abort(new DOMException(reason, 'AbortError'));
-    void local.reader?.cancel(reason).catch(quiet);
-    void local.writer?.abort(reason).catch(quiet);
+    if (!local.streams) {
+      locals.delete(id);
+      return;
+    }
+    local.closing = Promise.resolve(local.closing).then(() => release(local, reason));
   };
   return {
     handle(data) {

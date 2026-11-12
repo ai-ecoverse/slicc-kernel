@@ -274,7 +274,7 @@ export class DeviceNodes {
     node.opening = false;
     if (!isStreams(streams)) throw new KernelError('EIO', 'the devices hook gave no streams');
     if (this.nodes.get(node.path) !== node) {
-      abandon(streams);
+      void abandon(streams);
       throw new KernelError('ENOENT');
     }
     const channel = new DeviceChannel(node.path, streams, node.saved, (saved) => {
@@ -303,13 +303,13 @@ function isStreams(value: unknown): value is DeviceStreams {
   );
 }
 
-function abandon(streams: DeviceStreams): void {
+async function abandon(streams: DeviceStreams): Promise<void> {
   if (!isStreams(streams)) return;
-  void Promise.resolve()
+  await streams.readable.cancel('closed').catch(quiet);
+  await streams.writable.abort('closed').catch(quiet);
+  await Promise.resolve()
     .then(() => streams.control('close'))
     .catch(quiet);
-  void streams.readable.cancel('closed').catch(quiet);
-  void streams.writable.abort('closed').catch(quiet);
 }
 
 function serialTermios(): SerialTermios {
@@ -681,9 +681,11 @@ export class DeviceChannel {
       this.closed = true;
       this.resume?.();
       this.wake();
-      await this.control('close').catch(quiet);
       await this.reader.cancel('closed').catch(quiet);
+      this.reader.releaseLock();
       await this.writer.abort('closed').catch(quiet);
+      this.writer.releaseLock();
+      await this.control('close').catch(quiet);
     } finally {
       this.closed = true;
       this.onClosed({ termios: this.tty.tcgets(), ispeed: this.ispeed, ospeed: this.ospeed });

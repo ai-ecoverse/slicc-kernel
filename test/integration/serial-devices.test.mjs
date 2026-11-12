@@ -62,6 +62,7 @@ function fakeDevices(name = 'page', start = {}) {
         writable,
         control(op, args) {
           calls.push({ op, ...(args ? { args } : {}) });
+          if (op === 'close') calls.at(-1).locked = [readable.locked, writable.locked];
           if (op === 'signals')
             return {
               clearToSend: true,
@@ -226,6 +227,13 @@ test(
     assert.deepEqual(
       devices.calls.map((c) => c.op),
       ['open', 'close', 'open', 'close']
+    );
+    assert.deepEqual(
+      devices.ops('close').map((c) => c.locked),
+      [
+        [false, false],
+        [false, false],
+      ]
     );
   }
 );

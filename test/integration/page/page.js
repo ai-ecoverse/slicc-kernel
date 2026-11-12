@@ -558,6 +558,9 @@ const fakeDevices = (name) => ({
       writable,
       control: async (op, args) => {
         window.devices.calls.push({ page: name, op, ...(args ? { args } : {}) });
+        if (op === 'close' && (readable.locked || writable.locked))
+          throw new DOMException('the streams are locked', 'InvalidStateError');
+        if (op === 'close') window.devices.calls.at(-1).unlocked = true;
         if (op === 'signals')
           return {
             clearToSend: true,

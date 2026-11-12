@@ -625,7 +625,12 @@ export class KernelStreams {
     const { lookupNode, readdir, getPath, mkdir, mkdev, makedev, registerDevice } = fs;
     const nodes = this.sys.devNodes?.bind(this.sys);
     if (!lookupNode || !readdir || !getPath || !mkdir || !mkdev || !makedev || !nodes) return;
+    const serial = (dir: string, name: string): boolean =>
+      (dir === '/dev' && (DEVICE_LEAF.test(name) || name === 'serial')) ||
+      (dir === SERIAL_DIR && name === 'by-id') ||
+      dir === BY_ID_DIR;
     const make = (dir: string, name: string): boolean => {
+      if (!serial(dir, name)) return false;
       const known = nodes();
       const links = byIdNames(known);
       if (dir === '/dev' && DEVICE_LEAF.test(name)) {

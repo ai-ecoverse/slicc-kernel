@@ -28,6 +28,10 @@ test('serial nodes through the page relay: stat, stty, a loopback, removal', asy
   const gone = await blocked;
   assert.equal(gone.stdout, 'cat 1\n');
   assert.match(gone.stderr, /Input\/output error|I\/O error/);
+  const unlocked = await page.evaluate(() =>
+    window.devices.calls.filter((c) => c.op === 'close').map((c) => c.unlocked === true)
+  );
+  assert.deepEqual(unlocked, [true, true, true]);
   const calls = await page.evaluate(() => window.devices.calls.map((c) => c.op));
   assert.deepEqual(calls, [
     'open',
