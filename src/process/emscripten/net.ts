@@ -57,7 +57,7 @@ function writeAddr(ctx: EmContext, out: number, a: SockAddr | undefined): void {
   v.setInt32(out + 8, a.port, true);
 }
 
-export function netImports(ctx: EmContext): Record<string, unknown> {
+export function netImports(ctx: EmContext): WebAssembly.ModuleImports {
   const { mem } = ctx;
   const json = (req: Parameters<EmContext['call']>[0]) => ctx.call(req);
   return {

@@ -229,7 +229,7 @@ function credOf(ctx: EmContext): Cred {
   return ctx.call({ op: 'proc-cred' }) as Cred;
 }
 
-export function procImports(ctx: EmContext, state: ProcState): Record<string, unknown> {
+export function procImports(ctx: EmContext, state: ProcState): WebAssembly.ModuleImports {
   const { mem } = ctx;
   const cred = ctx.host.sliccImports();
   return {

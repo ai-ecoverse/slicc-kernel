@@ -53,7 +53,7 @@ function restarting(
   }
 }
 
-export function wasiImports(ctx: EmContext, state: FilesState): Record<string, unknown> {
+export function wasiImports(ctx: EmContext, state: FilesState): WebAssembly.ModuleImports {
   const host = ctx.host.imports();
   const { mem } = ctx;
   const call = (name: string): WasiFunction => host[name] as WasiFunction;

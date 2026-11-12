@@ -38,8 +38,11 @@ export function invoke(ctx: EmContext, sig: string): (...args: unknown[]) => unk
   };
 }
 
-export function invokeImports(ctx: EmContext, module: WebAssembly.Module): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
+export function invokeImports(
+  ctx: EmContext,
+  module: WebAssembly.Module
+): WebAssembly.ModuleImports {
+  const out: WebAssembly.ModuleImports = {};
   for (const imp of WebAssembly.Module.imports(module)) {
     if (imp.module !== 'env' || !imp.name.startsWith('invoke_')) continue;
     out[imp.name] = invoke(ctx, imp.name.slice('invoke_'.length));
