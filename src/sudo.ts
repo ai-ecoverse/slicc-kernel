@@ -63,6 +63,10 @@ export function changedText(file: string): string {
   return `sudo: ${file} changed since it was approved`;
 }
 
+export function requestedText(file: string): string {
+  return `sudo: ${file} changed since it was requested`;
+}
+
 export function changedFile(
   approved: Readonly<Record<string, string>>,
   now: Readonly<Record<string, string>>
@@ -101,6 +105,126 @@ export interface SudoRequest {
 export interface SudoFile {
   path: string;
   sha256: string;
+}
+
+export type SudoReplay = Pick<
+  SudoRequest,
+  | 'id'
+  | 'user'
+  | 'uid'
+  | 'target'
+  | 'argv'
+  | 'path'
+  | 'cwd'
+  | 'stdin'
+  | 'rootOnly'
+  | 'userWritable'
+  | 'tag'
+  | 'tags'
+  | 'validate'
+>;
+
+export interface SudoReplayed {
+  grant: SudoGrant;
+  caller: Account;
+  target: Account;
+  tags: readonly string[];
+}
+
+const REPLAY_ID = /^[!-~]{1,256}$/;
+const REPLAY_TAGS_MAX = 64;
+const REPLAY_ARGV_MAX = 4096;
+const REPLAY_BYTES_MAX = 1024 * 1024;
+const NOT_A_REQUEST = "sudo: that isn't a sudo request this kernel can run";
+
+function strings(value: unknown, max: number): value is string[] {
+  return Array.isArray(value) && value.length <= max && value.every((s) => typeof s === 'string');
+}
+
+function words(value: unknown): value is string[] {
+  if (!strings(value, REPLAY_ARGV_MAX) || value.length === 0) return false;
+  const bytes = value.reduce((n, s) => n + s.length + 1, 0);
+  return bytes <= REPLAY_BYTES_MAX && !value.some((s) => s.includes('\0'));
+}
+
+function filesOf(value: unknown): Record<string, string> | undefined {
+  if (value === undefined) return {};
+  if (!Array.isArray(value) || value.length > OPERANDS_MAX) return undefined;
+  const files: Record<string, string> = {};
+  for (const file of value as unknown[]) {
+    const { path, sha256: hex } = (file ?? {}) as { path?: unknown; sha256?: unknown };
+    if (typeof path !== 'string' || typeof hex !== 'string') return undefined;
+    files[path] = hex;
+  }
+  return files;
+}
+
+function flagsOf(value: unknown): Record<string, boolean> | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const entries = Object.entries(value);
+  if (entries.length > ROOT_ONLY_MAX || entries.some(([, v]) => typeof v !== 'boolean')) {
+    return undefined;
+  }
+  return Object.fromEntries(entries) as Record<string, boolean>;
+}
+
+interface Replay {
+  id: string;
+  user: string;
+  uid: number;
+  target: string;
+  argv: string[];
+  path: string;
+  cwd: string;
+  stdin: 'tty' | 'none';
+  rootOnly: Record<string, boolean>;
+  bound: Record<string, string>;
+  tags: string[];
+}
+
+function replayOf(value: unknown): Replay | Failure {
+  if (typeof value !== 'object' || value === null) return failed('EINVAL', NOT_A_REQUEST);
+  const r = value as Record<string, unknown>;
+  if (r.validate === true) return failed('EINVAL', 'sudo: a sudo -v request runs no command');
+  if (r.stdin === 'pipe' || r.stdin === 'file') {
+    return failed('EINVAL', `sudo: the request read a ${r.stdin}, and that input is gone`);
+  }
+  const { id, user, uid, target, argv, path, cwd, stdin, tag, tags } = r;
+  const rootOnly = flagsOf(r.rootOnly);
+  const bound = filesOf(r.userWritable);
+  const named = (s: unknown): s is string => typeof s === 'string' && s !== '';
+  const absolute = (s: unknown): s is string =>
+    typeof s === 'string' && s.startsWith('/') && s.length <= PATH_MAX && !s.includes('\0');
+  const valid =
+    typeof id === 'string' &&
+    REPLAY_ID.test(id) &&
+    named(user) &&
+    named(target) &&
+    Number.isInteger(uid) &&
+    (uid as number) >= 0 &&
+    words(argv) &&
+    absolute(path) &&
+    absolute(cwd) &&
+    (stdin === 'tty' || stdin === 'none') &&
+    (tag === undefined || typeof tag === 'string') &&
+    (tags === undefined || strings(tags, REPLAY_TAGS_MAX)) &&
+    rootOnly !== undefined &&
+    bound !== undefined;
+  if (!valid) return failed('EINVAL', NOT_A_REQUEST);
+  const all = tags ?? (tag === undefined ? [] : [tag]);
+  return {
+    id,
+    user,
+    uid: uid as number,
+    target,
+    argv,
+    path,
+    cwd,
+    stdin,
+    rootOnly,
+    bound,
+    tags: [...new Set(all)],
+  };
 }
 
 export type SudoStdin = 'tty' | 'none' | 'pipe' | 'file';
@@ -688,6 +812,74 @@ export class Sudo {
     const session = { caller, self, target, owner, policy: policyOf(settings), parsed, signal };
     if (parsed.validate) return this.validate(session, root, mine, call.cwd);
     return this.command(session, root, mine, call);
+  }
+
+  async replay(value: unknown): Promise<SudoReplayed | Failure> {
+    const r = replayOf(value);
+    if ('error' in r) return r;
+    if (this.o.mode !== 'enforce') {
+      return failed('EINVAL', `sudo: users are '${this.o.mode}', so no request needed approval`);
+    }
+    const self = await this.o.users.lookup(r.user);
+    if (!self) return failed('ENOENT', `sudo: unknown user ${r.user}`);
+    if (self.uid !== r.uid) return failed('EPERM', `sudo: ${self.name} is no longer uid ${r.uid}`);
+    const target = await this.lookup(r.target);
+    if (!target) return failed('ENOENT', `sudo: unknown user ${r.target}`);
+    const cred = credOf(self);
+    const [word = '', ...args] = r.argv;
+    const argv = [r.path, ...args];
+    if (!(await this.mayAsk(self, target, r, argv))) {
+      const quoted = argv.map(quoteWord).join(' ');
+      return failed(
+        'EACCES',
+        `sudo: ${self.name} may no longer ask to run ${quoted} as ${target.name}`
+      );
+    }
+    if ((await this.canonical(r.cwd)) !== r.cwd) {
+      return failed('EACCES', `sudo: ${r.cwd} changed since it was requested`);
+    }
+    if (!(await this.reachable(cred, r.cwd))) {
+      return failed(
+        'EACCES',
+        `sudo: cannot run in ${r.cwd}: it isn't a directory ${self.name} can enter`
+      );
+    }
+    const path = await this.locate(word, r.cwd);
+    if (!path) return failed('ENOENT', `sudo: ${word}: command not found`);
+    if (path !== r.path) return failed('EPERM', `sudo: ${word} now runs ${path}, not ${r.path}`);
+    const bound = await this.bound(path, r.cwd);
+    if (!bound) return failed('ENOENT', `sudo: ${word}: command not found`);
+    const changed = changedFile(r.bound, bound);
+    if (changed !== undefined) return failed('EPERM', requestedText(changed));
+    const now = await this.rootOnly(r.cwd, args);
+    const flipped = Object.keys(r.rootOnly).find((at) => r.rootOnly[at] && now[at] !== true);
+    if (flipped !== undefined) return failed('EPERM', `sudo: ${flipped} is no longer root-only`);
+    const { grant } = this.grant(self, target, cred, r.argv, path, r.cwd, undefined, bound);
+    (this.o.warn ?? console.warn)(
+      `sudo: ${self.name} : TTY=unknown ; PWD=${quoteWord(r.cwd)} ; USER=${target.name} ; REPLAY=${r.id} ; COMMAND=${argv.map(quoteWord).join(' ')}`
+    );
+    return { grant, caller: self, target, tags: r.tags };
+  }
+
+  private async mayAsk(
+    self: Account,
+    target: Account,
+    r: Replay,
+    argv: readonly string[]
+  ): Promise<boolean> {
+    if (self.uid === 0) return true;
+    const cred = credOf(self);
+    const { rules } = await this.policyRules({ cred, pid: 0, stdin: r.stdin });
+    const applies = await this.applies(self, cred);
+    return rules.some(
+      (rule) =>
+        applies(rule.who) &&
+        (rule.target === 'ALL' || rule.target === target.name) &&
+        (rule.cwd === undefined || rule.cwd === r.cwd) &&
+        stdinMatches(rule, r.stdin) &&
+        commandMatches(rule.cmnd, argv) &&
+        pinned(rule, r.bound)
+    );
   }
 
   private async command(

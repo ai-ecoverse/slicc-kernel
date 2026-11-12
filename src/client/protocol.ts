@@ -5,7 +5,7 @@ import type { RealmTransportTraits } from '../kernel/net/transport.ts';
 import type { TraceEvent } from '../kernel/trace.ts';
 import type { MountSpec } from '../mount/mount-fs.ts';
 
-export const PROTOCOL: readonly [number, number] = [1, 15];
+export const PROTOCOL: readonly [number, number] = [1, 16];
 
 export interface ClientHello {
   protocol: readonly [number, number];
@@ -38,6 +38,12 @@ export interface TerminalRequestOptions {
   env?: Record<string, string>;
   cols?: number;
   rows?: number;
+  tag?: string | readonly string[];
+}
+
+export interface SudoRunRequestOptions {
+  stdout?: string;
+  stderr?: string;
   tag?: string | readonly string[];
 }
 
@@ -83,6 +89,7 @@ export type ClientCall =
   | { op: 'unserve-facade'; registration: number }
   | { op: 'trace'; tag: string; limit?: number }
   | { op: 'untrace'; trace: number }
+  | { op: 'sudo-run'; replay: unknown; options: SudoRunRequestOptions }
   | { op: 'detach'; kill?: boolean };
 
 export type ClientRequest = ClientCall & { id: number };

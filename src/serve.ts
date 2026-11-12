@@ -98,6 +98,13 @@ export interface OpenTerminalRequest {
   options: Omit<TerminalOptions, 'onData'>;
 }
 
+export interface SudoRunKernelRequest {
+  id: number;
+  op: 'sudo-run';
+  replay: unknown;
+  options: { stdout?: string; stderr?: string; tag?: string | readonly string[] };
+}
+
 export type TerminalAction =
   | { action: 'write'; bytes: Uint8Array }
   | { action: 'resize'; cols: number; rows: number }
@@ -164,6 +171,7 @@ export type KernelRequest =
   | InitRequest
   | RunRequest
   | OpenTerminalRequest
+  | SudoRunKernelRequest
   | TerminalRequest
   | ConnectRequest
   | UsersRequest
@@ -573,11 +581,45 @@ function policyAsker(port: KernelPort) {
   };
 }
 
+function processOps(ready: () => Promise<Launcher>, reply: (id: number, body: object) => void) {
+  const terminals = new Map<number, TerminalSession>();
+
+  async function terminal(
+    req: OpenTerminalRequest
+  ): Promise<number | { status: number; signal: number }> {
+    const onData = (bytes: Uint8Array) => reply(req.id, { fd: 1, bytes });
+    const session = await (await ready()).openTerminal(req.argv, { ...req.options, onData });
+    terminals.set(req.id, session);
+    reply(req.id, { started: session.pid });
+    try {
+      const status = await session.exited;
+      const signal = session.termsig();
+      return signal ? { status, signal } : status;
+    } finally {
+      terminals.delete(req.id);
+    }
+  }
+
+  async function sudoRun(req: SudoRunKernelRequest): Promise<{ status: number; signal?: number }> {
+    const running = await (await ready()).sudoRun(req.replay, req.options);
+    reply(req.id, { started: running.pid });
+    return running.ended;
+  }
+
+  function onTerminal(req: TerminalRequest): boolean {
+    const session = terminals.get(req.terminal);
+    if (!session) throw new Error(`no terminal ${req.terminal}`);
+    act(session, req);
+    return true;
+  }
+
+  return { terminal, sudoRun, act: onTerminal };
+}
+
 export function serveKernel(port: KernelPort, deps: ServeDeps): void {
   let launcher: Promise<Launcher> | undefined;
   let remote: RemoteTransport | undefined;
   let uplink: RemoteUplink | undefined;
-  const terminals = new Map<number, TerminalSession>();
   const reply = (id: number, body: object, transfer?: Transferable[]) =>
     port.postMessage({ id, ...body }, transfer);
   const clients = new Set<ServedClient>();
@@ -611,21 +653,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
     return launcher;
   }
 
-  async function terminal(
-    req: OpenTerminalRequest
-  ): Promise<number | { status: number; signal: number }> {
-    const onData = (bytes: Uint8Array) => reply(req.id, { fd: 1, bytes });
-    const session = await (await ready()).openTerminal(req.argv, { ...req.options, onData });
-    terminals.set(req.id, session);
-    reply(req.id, { started: session.pid });
-    try {
-      const status = await session.exited;
-      const signal = session.termsig();
-      return signal ? { status, signal } : status;
-    } finally {
-      terminals.delete(req.id);
-    }
-  }
+  const processes = processOps(ready, reply);
 
   async function init(req: InitRequest): Promise<boolean> {
     launcher = rootOf(deps, req).then(async (root) => {
@@ -684,7 +712,8 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
     if (req.op === 'init') return init(req);
     if (isAttestRequest(req)) return attestOp(await ready(), req);
     if (req.op === 'sealed-placeholders') return (await ready()).setPlaceholders(req.list);
-    if (req.op === 'open-terminal') return terminal(req);
+    if (req.op === 'open-terminal') return processes.terminal(req);
+    if (req.op === 'sudo-run') return processes.sudoRun(req);
     if (req.op === 'connect') return connect(req.user, req.tag, req.requests);
     if (isUsersRequest(req)) return usersOp(await ready(), req);
     if (req.op === 'routes' || req.op === 'transport-traits') {
@@ -693,12 +722,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
     if (req.op === 'dial') return dial(await ready(), req);
     if (req.op === 'mount' || req.op === 'umount' || req.op === 'mounts' || req.op === 'insert')
       return mountOp(req);
-    if (req.op === 'terminal') {
-      const session = terminals.get(req.terminal);
-      if (!session) throw new Error(`no terminal ${req.terminal}`);
-      act(session, req);
-      return true;
-    }
+    if (req.op === 'terminal') return processes.act(req);
     return (await ready()).run(req.argv, {
       ...req.options,
       onStdout: (bytes) => reply(req.id, { fd: 1, bytes }),

@@ -23,7 +23,7 @@ import type { TransportCall } from '../kernel/net/remote-transport.ts';
 import type { RealmTransport } from '../kernel/net/transport.ts';
 import { SIG, signalField } from '../kernel/signals.ts';
 import { type TraceBatch, type TraceSubscription, traceLimit } from '../kernel/trace.ts';
-import { type Launcher, type TerminalSession, tagOption, withTag } from '../launcher.ts';
+import { type Launcher, sudoFailure, type TerminalSession, tagList, withTag } from '../launcher.ts';
 import { serveTransport, type TransportServer } from '../transport.ts';
 import { type Account, credOf } from '../users.ts';
 import {
@@ -237,20 +237,6 @@ function clientCred(self: Account | undefined): Cred {
   return self ? credOf(self) : copyCred(ROOT);
 }
 
-const MAX_SPAWN_TAGS = 8;
-
-function spawnTags(value: unknown): readonly string[] {
-  if (!Array.isArray(value)) {
-    tagOption(value);
-    return value === undefined ? [] : [value as string];
-  }
-  if (value.length > MAX_SPAWN_TAGS) {
-    throw new TypeError(`a spawn adds at most ${MAX_SPAWN_TAGS} tags`);
-  }
-  for (const each of value) tagOption(each ?? 0);
-  return value as string[];
-}
-
 async function runTagged(
   l: Launcher,
   self: Account,
@@ -265,7 +251,7 @@ async function runTagged(
   session: number;
 }> {
   let tags = withTag(undefined, tag);
-  for (const added of spawnTags(options.tag)) tags = withTag(tags, added);
+  for (const added of tagList(options.tag)) tags = withTag(tags, added);
   return {
     user: await runAs(l, self, options.user),
     tag,
@@ -513,6 +499,27 @@ function requestBinding(
   };
 }
 
+async function sudoRunAs(
+  l: Launcher,
+  self: Account,
+  host: ClientHost,
+  req: Extract<ClientRequest, { op: 'sudo-run' }>,
+  reply: (id: number, body: object) => void
+): Promise<Answer> {
+  if (self.uid !== 0) throw sudoFailure('EPERM', 'sudo: only a root client may run a sudo request');
+  const { stdout, stderr, tag } = req.options;
+  const running = await l.sudoRun(req.replay, {
+    stdout,
+    stderr,
+    tag,
+    base: host.tag,
+    session: host.session,
+  });
+  reply(req.id, { started: running.pid });
+  const { status, signal } = await running.ended;
+  return { result: status, ...signalField(signal) };
+}
+
 function answered(
   pending: Promise<Answer>,
   req: ClientRequest,
@@ -674,6 +681,8 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
       case 'trace':
       case 'untrace':
         return traces.answer(l, self as Account, req);
+      case 'sudo-run':
+        return sudoRunAs(l, self as Account, host, req, reply);
       case 'detach':
         return { result: true };
       default:
