@@ -9,7 +9,7 @@ import { runEmscriptenProcess } from '../process/emscripten/runtime.ts';
 import { rawStack } from '../process/raw-stack.ts';
 import { runWasiProcess, type TransportFactory } from '../process/wasi/wasi-runtime.ts';
 import type { SabPostLike, SyncSabTransport } from '../realm/sync-sab-bridge.ts';
-import { jspiAvailable, registerWaiter } from './jspi.ts';
+import { type AsyncWaiter, jspiAvailable, registerMemoryWaiter, registerWaiter } from './jspi.ts';
 import type { KernelLink } from './link.ts';
 import type { ForkSnapshots } from './snapshots.ts';
 import { type AsyncTransport, createAsyncTransport } from './transport.ts';
@@ -58,11 +58,26 @@ function guarded(transport: AsyncTransport): SyncSabTransport {
   return { call, publish: () => transport.publish() } as unknown as SyncSabTransport;
 }
 
-function waitsOn(transport: AsyncTransport, buffer: ArrayBufferLike | undefined): void {
-  if (!buffer) return;
-  registerWaiter(buffer, (view, index, value, timeout) =>
-    transport.wait(view, index, value, timeout)
-  );
+export const KERNEL_WAIT = 'kernel-wait';
+
+export function kernelWaiter(
+  transport: Pick<AsyncTransport, 'wait'>,
+  kernel: Pick<SyncSabTransport, 'call'>,
+  mirrored: boolean
+): AsyncWaiter {
+  return async (view, index, value, timeout = Number.POSITIVE_INFINITY) => {
+    if (Atomics.load(view, index) !== value) return 'not-equal';
+    if (timeout <= 0) return 'timed-out';
+    const forever = !Number.isFinite(timeout);
+    if (forever && mirrored) return transport.wait(view, index, value);
+    const timeoutMs = forever ? -1 : Math.max(1, Math.ceil(timeout));
+    await kernel.call({ op: 'fd-select', read: [], write: [], timeoutMs }, Infinity, KERNEL_WAIT);
+    return forever || Atomics.load(view, index) !== value ? 'ok' : 'timed-out';
+  };
+}
+
+function waitsOn(waiter: AsyncWaiter, buffer: ArrayBufferLike | undefined): void {
+  if (buffer) registerWaiter(buffer, waiter);
 }
 
 function localInit(
@@ -90,13 +105,14 @@ async function started(
   size: { memory: (() => number) | undefined }
 ): Promise<number> {
   const module = await deps.module(init.program.image);
-  waitsOn(transport, transport.buffer);
-  waitsOn(transport, transport.changes);
-  waitsOn(transport, transport.cwds);
+  const kernel = guarded(transport);
+  const mirrored = kernelWaiter(transport, kernel, true);
+  waitsOn(mirrored, transport.buffer);
+  waitsOn(mirrored, transport.changes);
+  waitsOn(mirrored, transport.cwds);
   const port: SabPostLike = {
     postMessage: (message, transfer) => transport.post(message, transfer),
   };
-  const kernel = guarded(transport);
   const local = localInit(init, transport, module);
   const transports: TransportFactory = (_sab, _port, memory) => {
     size.memory = memory;
@@ -104,7 +120,19 @@ async function started(
   };
   if (local.program.abi !== 'wasi')
     return runEmscriptenProcess(local, port, { transport: transports });
-  return runWasiProcess(local, port, { transport: transports, threadCap: 1 });
+  let forget = () => {};
+  try {
+    return await runWasiProcess(local, port, {
+      transport: transports,
+      threadCap: 1,
+      bound: (memory) => {
+        forget();
+        forget = registerMemoryWaiter(memory, kernelWaiter(transport, kernel, false));
+      },
+    });
+  } finally {
+    forget();
+  }
 }
 
 export function asyncProcessEntry(link: KernelLink, deps: AsyncProcessEntryDeps): void {

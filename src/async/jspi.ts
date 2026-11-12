@@ -22,11 +22,29 @@ const AsyncFunction = (async () => {}).constructor;
 
 const waiters = new WeakMap<ArrayBufferLike, AsyncWaiter>();
 
+interface MemoryWaiter {
+  memory: WebAssembly.Memory;
+  waiter: AsyncWaiter;
+}
+
+const memories = new Set<MemoryWaiter>();
+
 export function registerWaiter(buffer: ArrayBufferLike, waiter: AsyncWaiter): void {
   waiters.set(buffer, waiter);
 }
 
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+export function registerMemoryWaiter(memory: WebAssembly.Memory, waiter: AsyncWaiter): () => void {
+  const entry = { memory, waiter };
+  memories.add(entry);
+  return () => void memories.delete(entry);
+}
+
+function waiterOf(buffer: ArrayBufferLike): AsyncWaiter | undefined {
+  const known = waiters.get(buffer);
+  if (known) return known;
+  for (const entry of memories) if (entry.memory.buffer === buffer) return entry.waiter;
+  return undefined;
+}
 
 export async function atomicsWait(
   typed: Int32Array,
@@ -34,15 +52,13 @@ export async function atomicsWait(
   value: number,
   timeout?: number
 ): Promise<WaitResult> {
-  const waiter = waiters.get(typed.buffer);
+  const waiter = waiterOf(typed.buffer);
   if (waiter) return waiter(typed, index, value, timeout);
   if (Atomics.load(typed, index) !== value) return 'not-equal';
-  const ms = timeout ?? Number.POSITIVE_INFINITY;
-  if (!Number.isFinite(ms)) {
-    throw new Error('async process: a blocking wait that nothing can wake (no threads here)');
-  }
-  await sleep(Math.max(0, ms));
-  return Atomics.load(typed, index) !== value ? 'ok' : 'timed-out';
+  if (timeout !== undefined && timeout <= 0) return 'timed-out';
+  throw new Error(
+    'async process: a wait on memory no process owns: nothing can wake it, and no wait runs on a local timer'
+  );
 }
 
 function checked(
