@@ -3,6 +3,7 @@ import type { CdpHook } from './cdp/types.ts';
 import { type LockManagerLike, locksOf } from './client/protocol.ts';
 import { type ServedClient, serveClient } from './client/serve-client.ts';
 import { type ClipboardReply, clipboardAsker } from './clipboard-relay.ts';
+import { devicesAsker, devicesReplyOf } from './devices-relay.ts';
 import { embedderAsker, embedderReplyOf } from './embedder-relay.ts';
 import { portFacadeHook } from './facade/port.ts';
 import type { FacadeSpec } from './facade/types.ts';
@@ -18,6 +19,7 @@ import { metadataName } from './fs/roots.ts';
 import { fsError, modeOption, type UsersMode } from './fs/types.ts';
 import { type IntegrityReply, integrityAsker } from './integrity-relay.ts';
 import type { ClipboardHook } from './kernel/clipboard.ts';
+import type { DeviceHook, DeviceSpec } from './kernel/devices.ts';
 import { dialSocket, serveSocket } from './kernel/dial.ts';
 import type { EmbedderHook, EmbedderKindPolicy } from './kernel/embedder.ts';
 import type { WasmWorkerLike } from './kernel/host.ts';
@@ -78,6 +80,7 @@ export interface InitRequest {
   sealedFetch?: boolean;
   clipboard?: boolean;
   requests?: Record<string, EmbedderKindPolicy>;
+  devices?: boolean;
   approve?: boolean;
   processMounts?: boolean | 'ask';
   cdp?: boolean;
@@ -119,7 +122,12 @@ export interface ConnectRequest {
   user?: string | number;
   tag?: string;
   requests?: Record<string, EmbedderKindPolicy> | 'attach';
+  devices?: true | 'attach';
 }
+
+export type DevicesRequest =
+  | { id: number; op: 'devices-add'; spec: DeviceSpec; client: number }
+  | { id: number; op: 'devices-remove'; node: number };
 
 export type UsersRequest =
   | { id: number; op: 'users-add'; user: AddUser }
@@ -174,6 +182,7 @@ export type KernelRequest =
   | SudoRunKernelRequest
   | TerminalRequest
   | ConnectRequest
+  | DevicesRequest
   | UsersRequest
   | MountRequest
   | DialRequest
@@ -424,8 +433,8 @@ function isAttestRequest(req: KernelRequest): req is AttestRequest {
   return ATTEST_OPS.has(req.op);
 }
 
-function isUsersRequest(req: KernelRequest): req is UsersRequest {
-  return USERS_OPS.has(req.op);
+function isUsersRequest(req: KernelRequest): req is UsersRequest | DevicesRequest {
+  return USERS_OPS.has(req.op) || req.op === 'devices-add' || req.op === 'devices-remove';
 }
 
 function transferOf(req: KernelRequest, result: unknown): Transferable[] | undefined {
@@ -462,7 +471,26 @@ function failure(err: unknown): { error: string; code?: string } {
   };
 }
 
-function usersOp(l: Launcher, req: UsersRequest): Promise<unknown> {
+function pageReplied(
+  data: unknown,
+  requests: ReturnType<typeof embedderAsker>,
+  devices: ReturnType<typeof devicesAsker>
+): boolean {
+  const embedderReply = embedderReplyOf(data);
+  if (embedderReply) requests.answer(embedderReply);
+  const devicesReply = devicesReplyOf(data);
+  if (devicesReply) devices.answer(devicesReply);
+  return embedderReply !== undefined || devicesReply !== undefined;
+}
+
+function devicesOp(l: Launcher, req: DevicesRequest): Promise<number> | boolean {
+  return req.op === 'devices-add'
+    ? l.devices.add(req.spec, req.client)
+    : l.devices.remove(req.node);
+}
+
+function usersOp(l: Launcher, req: UsersRequest | DevicesRequest): Promise<unknown> | boolean {
+  if (req.op === 'devices-add' || req.op === 'devices-remove') return devicesOp(l, req);
   if (req.op === 'users-add') return l.users.add(req.user);
   if (req.op === 'users-remove') return l.users.remove(req.name, req.options);
   if (req.op === 'groups-list') return l.users.groups();
@@ -472,12 +500,11 @@ function usersOp(l: Launcher, req: UsersRequest): Promise<unknown> {
   return l.users.list();
 }
 
-type Binding = ConnectRequest['requests'];
-
 interface ConnectDeps {
   ready(): Promise<Launcher>;
   clients: Set<ServedClient>;
   requests: ReturnType<typeof embedderAsker>;
+  devices: ReturnType<typeof devicesAsker>;
   held: (() => Promise<string>) | undefined;
   locks: LockManagerLike | undefined;
 }
@@ -486,7 +513,7 @@ let clientIds = 0;
 
 async function connectClient(
   deps: ConnectDeps,
-  { user, tag, bind }: { user: string | number | undefined; tag?: string; bind?: Binding }
+  { user, tag, requests: bind, devices }: Omit<ConnectRequest, 'id' | 'op'>
 ): Promise<MessagePort | { port: MessagePort; client: number }> {
   const l = await deps.ready();
   tagOption(tag);
@@ -501,6 +528,7 @@ async function connectClient(
     signal: signalNumber,
     session: client,
     ...(bind === 'attach' ? { attachRequests: true } : {}),
+    ...(devices === 'attach' ? { attachDevices: true } : {}),
     ...(user !== undefined ? { user } : {}),
     ...(tag !== undefined ? { tag } : {}),
     ...(deps.locks ? { locks: deps.locks } : {}),
@@ -511,11 +539,14 @@ async function connectClient(
     bind && bind !== 'attach'
       ? l.embedder.register(client, deps.requests.hookFor(client, bind))
       : undefined;
+  const unbindDevices =
+    devices === true ? l.devices.register(client, deps.devices.hookFor(client)) : undefined;
   void served.closed.then(() => {
     deps.clients.delete(served);
     unbind?.();
+    unbindDevices?.();
   });
-  return unbind ? { port: port2, client } : port2;
+  return unbind || devices ? { port: port2, client } : port2;
 }
 
 function hostOptions(
@@ -525,7 +556,8 @@ function hostOptions(
   sealedFetch: SealedFetchHook,
   clipboard: ClipboardHook,
   lookup: IntegrityLookup,
-  requests: ReturnType<typeof embedderAsker>
+  requests: ReturnType<typeof embedderAsker>,
+  devices: ReturnType<typeof devicesAsker>
 ): {
   hostname?: string;
   timeZone?: string;
@@ -536,6 +568,7 @@ function hostOptions(
   sealedFetch?: SealedFetchHook;
   clipboard?: ClipboardHook;
   embedder?: EmbedderHook;
+  devices?: DeviceHook;
   protect?: Protection;
   cron: CronOptions;
 } {
@@ -551,6 +584,7 @@ function hostOptions(
     ...(req.sealedFetch ? { sealedFetch } : {}),
     ...(req.clipboard ? { clipboard } : {}),
     ...(req.requests ? { embedder: requests.hookFor(0, req.requests) } : {}),
+    ...(req.devices ? { devices: devices.hookFor(0) } : {}),
   };
 }
 
@@ -616,6 +650,20 @@ function processOps(ready: () => Promise<Launcher>, reply: (id: number, body: ob
   return { terminal, sudoRun, act: onTerminal };
 }
 
+function lockHolder(): (locks: LockManagerLike) => Promise<string> {
+  let holding: Promise<string> | undefined;
+  return (locks) => {
+    holding ??= new Promise<string>((resolve) => {
+      const name = `slicc-kernel:${crypto.randomUUID()}`;
+      void locks.request(name, () => {
+        resolve(name);
+        return new Promise(() => {});
+      });
+    });
+    return holding;
+  };
+}
+
 export function serveKernel(port: KernelPort, deps: ServeDeps): void {
   let launcher: Promise<Launcher> | undefined;
   let remote: RemoteTransport | undefined;
@@ -626,26 +674,16 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
   const sealed = sealedAsker(port);
   const clipboard = clipboardAsker(port);
   const requests = embedderAsker(port);
+  const devices = devicesAsker(port);
   const integrity = integrityAsker(port);
   const approvals = sudoApprovals(port);
   const locks = deps.locks === null ? undefined : (deps.locks ?? locksOf());
-  let holding: Promise<string> | undefined;
+  const holdLock = lockHolder();
 
-  function holdLock(locks: LockManagerLike): Promise<string> {
-    holding ??= new Promise<string>((resolve) => {
-      const name = `slicc-kernel:${crypto.randomUUID()}`;
-      void locks.request(name, () => {
-        resolve(name);
-        return new Promise(() => {});
-      });
-    });
-    return holding;
-  }
-
-  const connect = (user: string | number | undefined, tag?: string, bind?: Binding) =>
+  const connect = (req: ConnectRequest) =>
     connectClient(
-      { ready, clients, requests, held: locks ? () => holdLock(locks) : undefined, locks },
-      { user, tag, bind }
+      { ready, clients, requests, devices, held: locks && (() => holdLock(locks)), locks },
+      req
     );
 
   async function ready(): Promise<Launcher> {
@@ -679,7 +717,8 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
           sealed.fetch,
           clipboard.hook,
           integrity.lookup,
-          requests
+          requests,
+          devices
         ),
         ...(req.approve ? { approve: approvals.ask } : {}),
         ...net,
@@ -714,7 +753,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
     if (req.op === 'sealed-placeholders') return (await ready()).setPlaceholders(req.list);
     if (req.op === 'open-terminal') return processes.terminal(req);
     if (req.op === 'sudo-run') return processes.sudoRun(req);
-    if (req.op === 'connect') return connect(req.user, req.tag, req.requests);
+    if (req.op === 'connect') return connect(req);
     if (isUsersRequest(req)) return usersOp(await ready(), req);
     if (req.op === 'routes' || req.op === 'transport-traits') {
       return networkOp(await ready(), req, remote);
@@ -754,8 +793,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
     if (sealedReply) return sealed.answer(sealedReply);
     const clipboardReply = (event.data as { clipboardReply?: ClipboardReply }).clipboardReply;
     if (clipboardReply) return clipboard.answer(clipboardReply);
-    const embedderReply = embedderReplyOf(event.data);
-    if (embedderReply) return requests.answer(embedderReply);
+    if (pageReplied(event.data, requests, devices)) return;
     const integrityReply = (event.data as { integrityReply?: IntegrityReply }).integrityReply;
     if (integrityReply) return integrity.answer(integrityReply);
     const grant = (event.data as { hostfsGrant?: GrantReply }).hostfsGrant;

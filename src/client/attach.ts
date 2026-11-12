@@ -1,10 +1,12 @@
 import { type CdpOpen, serveCdpPort } from '../cdp/port.ts';
 import type { CdpHook } from '../cdp/types.ts';
+import { devicesAnswerer } from '../devices-relay.ts';
 import { embedderAnswerer } from '../embedder-relay.ts';
 import { type FacadeOpen, serveFacadePort } from '../facade/port.ts';
 import type { FacadeHook } from '../facade/types.ts';
 import type { FsStat, UsersMode } from '../fs/types.ts';
 import type { WatchChange } from '../fs/watch.ts';
+import { type DeviceHook, devicesHook } from '../kernel/devices.ts';
 import { type EmbedderHook, type EmbedderKindPolicy, kindsOf } from '../kernel/embedder.ts';
 import { RemoteTransport, type TransportReply } from '../kernel/net/remote-transport.ts';
 import type {
@@ -58,6 +60,7 @@ export interface AttachOptions {
   timeoutMs?: number;
   locks?: LockManagerLike | null;
   requests?: EmbedderHook;
+  devices?: DeviceHook;
 }
 
 export interface SpawnOptions {
@@ -311,6 +314,8 @@ class Channel {
 
   requests: { handle(data: unknown): boolean } | undefined;
 
+  devices: { handle(data: unknown): boolean } | undefined;
+
   private receive(data: {
     hello?: KernelHello;
     net?: unknown;
@@ -327,6 +332,7 @@ class Channel {
     id?: number;
   }): void {
     if (this.requests?.handle(data)) return;
+    if (this.devices?.handle(data)) return;
     if (data.traits && data.id === undefined) {
       if (this.remote) this.remote.traits = data.traits;
       for (const listener of [...this.traitsListeners]) listener(data.traits);
@@ -698,10 +704,16 @@ async function greet(
   channel: Channel,
   lock: string | undefined,
   timeoutMs: number,
-  requests?: Record<string, EmbedderKindPolicy>
+  requests?: Record<string, EmbedderKindPolicy>,
+  devices?: boolean
 ): Promise<KernelHello> {
   channel.post({
-    hello: { protocol: PROTOCOL, ...(lock ? { lock } : {}), ...(requests ? { requests } : {}) },
+    hello: {
+      protocol: PROTOCOL,
+      ...(lock ? { lock } : {}),
+      ...(requests ? { requests } : {}),
+      ...(devices ? { devices: true } : {}),
+    },
   });
   const timer = setTimeout(
     () =>
@@ -734,11 +746,14 @@ export async function attachKernel(
   const channel = new Channel(port, own.release);
   const requests = options.requests;
   if (requests) channel.requests = embedderAnswerer(port, () => requests);
+  const devices = options.devices ? devicesHook(options.devices) : undefined;
+  if (devices) channel.devices = devicesAnswerer(port, () => devices);
   const hello = await greet(
     channel,
     own.name,
     options.timeoutMs ?? 10_000,
-    requests ? kindsOf(requests) : undefined
+    requests ? kindsOf(requests) : undefined,
+    devices !== undefined
   );
   channel.protocol = hello.protocol;
   if (hello.lock && locks) void locks.request(hello.lock, () => channel.end(new KernelGoneError()));

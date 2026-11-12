@@ -1,3 +1,4 @@
+import type { DeviceNodeInfo } from '../kernel/devices.ts';
 import type { HeldMeta, PollState } from '../kernel/fd-table.ts';
 import type { MountLine, ProcessListing } from '../kernel/proc-info.ts';
 import type { Termios } from '../kernel/tty.ts';
@@ -48,6 +49,37 @@ interface DevDirFs extends TtyNodeFs {
 }
 
 const TTY_NAME = /^tty\d+$/;
+
+const DEVICE_PATH = /^\/dev\/tty(?:USB|ACM)\d+$/;
+const DEVICE_LEAF = /^tty(?:USB|ACM)\d+$/;
+const SERIAL_DIR = '/dev/serial';
+const BY_ID_DIR = '/dev/serial/by-id';
+
+function deviceStat(node: DeviceNodeInfo): object {
+  const now = new Date();
+  return {
+    dev: 0x16,
+    ino: 0x1000 + (node.major << 8) + node.minor,
+    mode: 0o20000 | node.mode,
+    nlink: 1,
+    uid: node.uid,
+    gid: node.gid,
+    rdev: (node.major << 8) | node.minor,
+    size: 0,
+    blksize: 4096,
+    blocks: 0,
+    atime: now,
+    mtime: now,
+    ctime: now,
+  };
+}
+
+function byIdNames(nodes: DeviceNodeInfo[]): Map<string, string> {
+  const names = new Map<string, string>();
+  for (const node of nodes)
+    for (const link of node.links) names.set(link.slice(BY_ID_DIR.length + 1), node.path);
+  return names;
+}
 
 function isPtyPath(path: string): boolean {
   return PTY_PATH.test(path);
@@ -194,7 +226,10 @@ export interface ProcessSys {
   ttyOwner?(name: string): TtyOwner | null;
 
   tcgets?(fd: number): Termios;
-  tcsets?(fd: number, termios: Termios, flush?: boolean): void;
+  tcsets?(fd: number, termios: Termios, flush?: boolean, drain?: boolean): void;
+  devNodes?(): DeviceNodeInfo[];
+  openDev?(path: string, flags: number): number;
+  devIoctl?(fd: number, request: number, arg?: unknown): unknown;
   winsize?(fd: number): [number, number];
 
   openPty?(): number;
@@ -233,6 +268,7 @@ export interface ProcessStream {
 
   sliccKernelSocket?: boolean;
   sliccKernelFifo?: string;
+  sliccDevice?: boolean;
   path?: string;
   flags: number;
   position: number;
@@ -389,6 +425,7 @@ export class KernelStreams {
     const kfd = stream.sliccKernelFd;
     if (!stream.tty || kfd === undefined) return;
     const name = this.sys.ttyName?.(kfd);
+    if (name && DEVICE_PATH.test(name)) stream.sliccDevice = true;
     if (name) this.nameStream(stream, name);
   }
 
@@ -581,6 +618,95 @@ export class KernelStreams {
     };
   }
 
+  private useDeviceNodes(): void {
+    const fs = this.Fs as unknown as DevDirFs & {
+      symlink?: (target: string, path: string) => void;
+    };
+    const { lookupNode, readdir, getPath, mkdir, mkdev, makedev, registerDevice } = fs;
+    const nodes = this.sys.devNodes?.bind(this.sys);
+    if (!lookupNode || !readdir || !getPath || !mkdir || !mkdev || !makedev || !nodes) return;
+    const make = (dir: string, name: string): boolean => {
+      const known = nodes();
+      const links = byIdNames(known);
+      if (dir === '/dev' && DEVICE_LEAF.test(name)) {
+        const node = known.find((n) => n.path === `/dev/${name}`);
+        if (!node) return false;
+        const dev = makedev.call(fs, node.major, node.minor);
+        registerDevice?.call(fs, dev, {
+          open: (stream: ProcessStream) => this.openDeviceNode(stream, node.path),
+        });
+        const made = mkdev.call(fs, node.path, dev) as { node_ops?: object };
+        made.node_ops = { ...made.node_ops, getattr: () => this.liveDeviceStat(node.path) };
+      } else if (dir === '/dev' && name === 'serial' && links.size > 0)
+        mkdir.call(fs, SERIAL_DIR, 0o755);
+      else if (dir === SERIAL_DIR && name === 'by-id' && links.size > 0)
+        mkdir.call(fs, BY_ID_DIR, 0o755);
+      else if (dir === BY_ID_DIR && links.has(name))
+        fs.symlink?.call(
+          fs,
+          `../..${(links.get(name) as string).slice(4)}`,
+          `${BY_ID_DIR}/${name}`
+        );
+      else return false;
+      return true;
+    };
+    let making = false;
+    fs.lookupNode = (parent, name) => {
+      try {
+        return lookupNode.call(fs, parent, name);
+      } catch (e) {
+        if (making) throw e;
+        making = true;
+        let made: boolean;
+        try {
+          made = make(getPath.call(fs, parent), name);
+        } finally {
+          making = false;
+        }
+        if (!made) throw e;
+        return lookupNode.call(fs, parent, name);
+      }
+    };
+    fs.readdir = (path) => {
+      const at = path.replace(/\/+$/, '');
+      const names = readdir.call(fs, path);
+      if (at !== '/dev' && at !== SERIAL_DIR && at !== BY_ID_DIR) return names;
+      const known = nodes();
+      const links = byIdNames(known);
+      const wanted =
+        at === '/dev'
+          ? [...known.map((n) => n.path.slice(5)), ...(links.size > 0 ? ['serial'] : [])]
+          : at === SERIAL_DIR
+            ? links.size > 0
+              ? ['by-id']
+              : []
+            : [...links.keys()];
+      const stale = (name: string) =>
+        at === '/dev'
+          ? (DEVICE_LEAF.test(name) || name === 'serial') && !wanted.includes(name)
+          : name !== '.' && name !== '..' && !wanted.includes(name);
+      const kept = names.filter((name) => !stale(name));
+      return [...kept, ...wanted.filter((name) => !kept.includes(name))];
+    };
+  }
+
+  private liveDeviceStat(path: string): object {
+    const node = this.call(() => this.sys.devNodes?.() ?? []).find((n) => n.path === path);
+    if (!node) throw new this.Fs.ErrnoError(wasiErrno('ENOENT'));
+    return deviceStat(node);
+  }
+
+  private openDeviceNode(stream: ProcessStream, path: string): void {
+    const { openDev } = this.sys as Required<Pick<ProcessSys, 'openDev'>>;
+    stream.sliccDevice = true;
+    this.openNode(
+      stream,
+      path,
+      (flags) => openDev.call(this.sys, path, flags | (stream.flags & O_NONBLOCK)),
+      true
+    );
+  }
+
   private ptyNode(path: string, dev: number): void {
     const fs = this.Fs as unknown as DevDirFs;
     fs.registerDevice?.call(fs, dev, {
@@ -691,6 +817,7 @@ export class KernelStreams {
     this.usePtyPaths();
     this.useTerminalNodes();
     this.usePtsNodes();
+    this.useDeviceNodes();
     this.listSealed();
     const open = this.Fs.open.bind(this.Fs);
     this.Fs.open = (path, flags, mode) => {
@@ -706,7 +833,7 @@ export class KernelStreams {
       this.refuseExclusiveLink(path, flags);
       const stream = this.openRacing(open, path, flags, mode);
 
-      if (!stream.tty) return stream;
+      if (!stream.tty || stream.sliccDevice) return stream;
       if (stream.path === '/dev/tty' && this.sys.openTty) {
         let kfd: number;
         try {
@@ -1005,6 +1132,7 @@ export class KernelStreams {
         if (state.writable) mask |= POLLOUT | POLLWRNORM;
 
         if (state.hangup) mask |= state.readable ? POLLHUP : POLLERR;
+        if (state.error) mask |= POLLERR;
         return mask;
       },
       dup: (stream) => {

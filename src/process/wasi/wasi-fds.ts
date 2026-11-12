@@ -1,5 +1,6 @@
 import { renameWait } from '../../fs/changes.ts';
 import { linkedWatch } from '../../fs/ranged.ts';
+import { BY_ID } from '../../kernel/devices.ts';
 import {
   type DeviceAccess,
   type DeviceMeta,
@@ -55,6 +56,8 @@ function stdioAlias(path: string): number | undefined {
   if (!m) return undefined;
   return m[1] ? 0 : m[2] ? 1 : m[3] ? 2 : Number(m[4]);
 }
+
+const DEVICE_PATH = /^\/dev\/tty(?:USB|ACM)\d+$/;
 
 export const SEALED_PATH = '/dev/sealed';
 export const CLIPBOARD_PATH = '/dev/clipboard';
@@ -849,6 +852,25 @@ export class WasiFds {
     return fd;
   }
 
+  private openSerial(
+    path: string,
+    oflags: number,
+    fdflags: number,
+    rights: bigint
+  ): number | undefined {
+    const { openDev } = this.kernel.sys;
+    const linked = path.startsWith(`${BY_ID}/`);
+    if (!openDev || !(linked || DEVICE_PATH.test(path))) return undefined;
+    if (this.nofollow && linked) throw new WasiError('ELOOP');
+    const fd = this.openCharDevice(
+      (flags) => openDev.call(this.kernel.sys, path, flags),
+      oflags,
+      rights
+    );
+    this.adopt(fd, 'tty', (fdflags & FDFLAGS.NONBLOCK) !== 0);
+    return fd;
+  }
+
   private openCharDevice(
     openDevice: (flags: number) => number,
     oflags: number,
@@ -920,6 +942,8 @@ export class WasiFds {
     if (exclusive && namedDevice(path)) throw new WasiError('EEXIST');
     const device = deviceOf(path);
     if (device) return this.install({ type: 'device', device });
+    const serial = this.openSerial(path, oflags, fdflags, rights);
+    if (serial !== undefined) return serial;
     const kernelDevice = this.openKernelDevice(path, oflags, fdflags, rights);
     if (kernelDevice !== undefined) return kernelDevice;
     const alias = stdioAlias(path);

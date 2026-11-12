@@ -11,6 +11,7 @@ export interface ClientHello {
   protocol: readonly [number, number];
   lock?: string;
   requests?: Record<string, { group?: string; users?: Array<string | number> }>;
+  devices?: true;
 }
 
 export interface KernelHello {

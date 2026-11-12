@@ -78,6 +78,7 @@ import {
   type SpawnGrant,
 } from './kernel/children.ts';
 import { ClipboardBroker, type ClipboardHook } from './kernel/clipboard.ts';
+import { type DeviceHook, DeviceNodes } from './kernel/devices.ts';
 import { EmbedderBroker, type EmbedderHook } from './kernel/embedder.ts';
 import { systemTimeZone } from './time-zone.ts';
 
@@ -261,6 +262,7 @@ export interface LauncherOptions {
   sealedFetch?: SealedFetchHook;
   clipboard?: ClipboardHook;
   embedder?: EmbedderHook;
+  devices?: DeviceHook;
   approve?: ApproveHook;
   sudoTimeoutMs?: number;
   sudoClock?: { now(): number };
@@ -957,6 +959,7 @@ export class Launcher {
   private readonly scrubs = new Map<number, Scrubber[]>();
   private readonly clipboard: ClipboardBroker;
   readonly embedder: EmbedderBroker;
+  readonly devices: DeviceNodes;
   private readonly rootFs: KernelFs;
   private fileWatches: FileWatches | undefined;
   private nextPid = 1000;
@@ -979,6 +982,7 @@ export class Launcher {
     );
     this.embedder = this.embedderBroker(options.embedder);
     this.embedder.denied = options.onDenial;
+    this.devices = this.deviceNodes(options.devices);
     this.sealed = new SealedBroker(options.sealed, this.usersMode, undefined, (pid) =>
       this.tagsOf(pid)
     );
@@ -2504,6 +2508,7 @@ export class Launcher {
       ...(scrubs ? { outputFilter: (file: OpenFile) => scrubbedAll(file, scrubs) } : {}),
       clipboard: this.clipboard,
       embedder: { broker: this.embedder, session: () => this.sessionOf(pid) },
+      devices: this.devices,
       ...(this.dac ? { dac: this.dac } : {}),
       program: req.program,
       changes: this.changes.sab,
@@ -3163,6 +3168,15 @@ export class Launcher {
     this.sealed.tickets.normalise = (path) => physicalPathAsync(this.base, path);
     this.sealed.userOf = async (uid) => (await this.users.lookup(uid))?.name;
     this.sealed.factsOf = (pid) => this.processFacts(pid);
+  }
+
+  private deviceNodes(hook: DeviceHook | undefined): DeviceNodes {
+    const nodes = new DeviceNodes(this.usersMode, {
+      groupId: async (name) => (await this.users.groups()).find((g) => g.name === name)?.gid,
+      userId: async (name) => (await this.users.lookup(name))?.uid,
+    });
+    if (hook) nodes.register(0, hook);
+    return nodes;
   }
 
   private embedderBroker(hook: EmbedderHook | undefined): EmbedderBroker {

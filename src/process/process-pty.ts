@@ -1,4 +1,5 @@
-import type { ProcessFs } from './kernel-streams.ts';
+import { FILE_IOCTLS, ioctlArg, ioctlResult } from '../kernel/serial-ioctl.ts';
+import type { ProcessFs, ProcessStream } from './kernel-streams.ts';
 import type { GlueSyscall } from './process-fds.ts';
 import { wasiErrno } from './wasi-errno.ts';
 
@@ -18,6 +19,8 @@ export interface PtyKernel {
   setPacketMode(kfd: number, on: boolean): void;
 
   setWinsize(kfd: number, rows: number, cols: number): void;
+
+  devIoctl?(fd: number, request: number, arg?: unknown): unknown;
 }
 
 export interface PtyIoctlDeps {
@@ -33,9 +36,33 @@ function failed(e: unknown): number {
   throw e;
 }
 
+function deviceIoctl(
+  stream: ProcessStream,
+  request: number,
+  varargs: number,
+  deps: PtyIoctlDeps
+): number {
+  const heap = deps.heap();
+  if (!heap) return -wasiErrno('EFAULT');
+  const view = new DataView(heap.buffer);
+  const argp = (heap[varargs >> 2] ?? 0) >>> 0;
+  try {
+    const arg = ioctlArg(view, request, argp);
+    const kernel = deps.kernel as Required<Pick<PtyKernel, 'devIoctl'>>;
+    const result = kernel.devIoctl(stream.sliccKernelFd as number, request, arg);
+    ioctlResult(new DataView(heap.buffer), request, argp, result);
+    return 0;
+  } catch (e) {
+    return failed(e);
+  }
+}
+
 export function ptyIoctl(ioctl: GlueSyscall, deps: PtyIoctlDeps): GlueSyscall {
   return (fd, op, varargs) => {
     const request = op >>> 0;
+    const device = deps.fs()?.getStream(fd);
+    if (device?.sliccDevice && deps.kernel.devIoctl && !FILE_IOCTLS.has(request))
+      return deviceIoctl(device, request, varargs ?? 0, deps);
     if (
       request !== TIOCGPTN &&
       request !== TIOCSPTLCK &&

@@ -1,5 +1,7 @@
 import { inShm } from '../../fs/dev-removal.ts';
+import { BY_ID, DEVICE_NAME, type DeviceNodeInfo } from '../../kernel/devices.ts';
 import type { DeviceMeta } from '../../kernel/fd-table.ts';
+import { CBAUD, codeOf, IOCTL, type SerialTermios, TIOCM } from '../../kernel/serial-ioctl.ts';
 import { parseSyncFsStat, type SyncFsBridgeStat } from '../../realm/sync-fs-wire.ts';
 import type { SyncSabRequestBody } from '../../realm/sync-sab-wire.ts';
 import type { JsFile } from './js-context.ts';
@@ -45,6 +47,8 @@ type DevNode =
   | { kind: 'embedder' }
   | { kind: 'sealed' }
   | { kind: 'terminal'; name: string; pts?: number }
+  | { kind: 'serial'; node: DeviceNodeInfo }
+  | { kind: 'devlink'; target: string; node: DeviceNodeInfo }
   | { kind: 'link'; target: string; fd?: number }
   | { kind: 'fd'; fd: number };
 
@@ -78,9 +82,33 @@ function nodeStat(mode: number, size = 0, owner?: { uid: number; gid: number }):
   };
 }
 
+const SERIAL = '/dev/serial';
+
+function serialNamed(name: string): boolean {
+  return DEVICE_NAME.test(name) || name === 'serial' || name.startsWith('serial/');
+}
+
+function serialNode(abs: string, nodes: DeviceNodeInfo[]): DevNode | undefined {
+  const node = nodes.find((n) => n.path === abs);
+  if (node) return { kind: 'serial', node };
+  const links = nodes.some((n) => n.links.length > 0);
+  if (links && (abs === SERIAL || abs === BY_ID)) return { kind: 'dir', mode: DIR | 0o755 };
+  const owner = nodes.find((n) => n.links.includes(abs));
+  if (owner) return { kind: 'devlink', target: `../..${owner.path.slice(4)}`, node: owner };
+  return undefined;
+}
+
+function* deviceNodes(): DevStep<DeviceNodeInfo[]> {
+  return (yield { op: 'fd-dev-nodes' }) as DeviceNodeInfo[];
+}
+
 function* lookup(abs: string): DevStep<DevNode> {
   if (abs === '/dev') return { kind: 'dir', mode: DIR | 0o755 };
   const name = abs.slice('/dev/'.length);
+  if (serialNamed(name)) {
+    const found = serialNode(abs, yield* deviceNodes());
+    if (found) return found;
+  }
   if (DEVICES.includes(name)) return { kind: 'device' };
   if (name === 'tty') return { kind: 'tty' };
   if (name === 'clipboard') return { kind: 'clipboard' };
@@ -172,6 +200,10 @@ export function* devStat(abs: string, follow: boolean): DevStep<SyncFsBridgeStat
       return nodeStat(CHAR | 0o666);
     case 'terminal':
       return yield* terminalStat(node.name);
+    case 'serial':
+      return nodeStat(CHAR | node.node.mode, 0, node.node);
+    case 'devlink':
+      return follow ? nodeStat(CHAR | node.node.mode, 0, node.node) : linkStat(node.target);
     case 'link':
       if (!follow) return linkStat(node.target);
       return node.fd === undefined ? nodeStat(DIR | 0o555) : yield* fdStat(node.fd, abs);
@@ -192,7 +224,7 @@ export function* devExists(abs: string): DevStep<boolean> {
 
 export function* devReadlink(abs: string): DevStep<string> {
   const node = yield* lookup(abs);
-  if (node.kind === 'link') return node.target;
+  if (node.kind === 'link' || node.kind === 'devlink') return node.target;
   if (node.kind === 'fd') return yield* fdTarget(node.fd, abs);
   throw new JsCallError('EINVAL', abs);
 }
@@ -215,9 +247,18 @@ export function* devReaddir(abs: string): DevStep<string[]> {
   }
   const node = yield* lookup(abs);
   if (node.kind !== 'dir') throw new JsCallError('ENOTDIR', abs);
+  if (abs === SERIAL || abs === BY_ID) {
+    const nodes = yield* deviceNodes();
+    if (abs === SERIAL) return ['by-id'];
+    return nodes.flatMap((n) => n.links.map((l) => l.slice(BY_ID.length + 1))).sort();
+  }
   const names = (yield { op: 'fd-tty-names' }) as string[];
   const ttys = names.filter((n) => /^\/dev\/tty\d+$/.test(n)).map((n) => n.slice(5));
+  const nodes = yield* deviceNodes();
+  const serial = nodes.map((n) => n.path.slice(5));
+  if (nodes.some((n) => n.links.length > 0)) serial.push('serial');
   return [
+    ...serial,
     ...DEVICES,
     'clipboard',
     'embedder',
@@ -236,6 +277,7 @@ export interface DevOpened {
   file: boolean;
   read: boolean;
   write: boolean;
+  device?: boolean;
 }
 
 function* aliasOf(
@@ -290,6 +332,13 @@ function* opened(abs: string, o: JsOpenOptions): DevStep<Omit<DevOpened, 'read' 
       };
     case 'sealed':
       return { fd: (yield { op: 'fd-open-sealed', flags: accessFlags(o) }) as number, file: false };
+    case 'serial':
+    case 'devlink':
+      return {
+        fd: (yield { op: 'fd-open-dev', path: node.node.path, flags: accessFlags(o) }) as number,
+        file: false,
+        device: true,
+      };
     case 'terminal': {
       const req =
         node.pts === undefined
@@ -354,12 +403,136 @@ export interface StreamIo {
   read(fd: number, max: number): Promise<Uint8Array>;
   write(fd: number, data: Uint8Array): Promise<void>;
   close(fd: number): Promise<void>;
+  ioctl?(fd: number, request: number, arg?: unknown): Promise<unknown>;
 }
 
 export interface StreamSyncIo {
   read(fd: number, max: number): Uint8Array;
   write(fd: number, data: Uint8Array): void;
   close(fd: number): void;
+  ioctl?(fd: number, request: number, arg?: unknown): unknown;
+}
+
+export function ioctlRequest(fd: number, request: number, arg?: unknown): SyncSabRequestBody {
+  return { op: 'fd-dev-ioctl', fd, request, ...(arg !== undefined ? { arg } : {}) };
+}
+
+export interface JsSerialTermios {
+  c_iflag: number;
+  c_oflag: number;
+  c_cflag: number;
+  c_lflag: number;
+  c_cc: number[];
+  ispeed: number;
+  ospeed: number;
+}
+
+export interface JsModem {
+  dtr: boolean;
+  rts: boolean;
+  cts: boolean;
+  dsr: boolean;
+  cd: boolean;
+  ri: boolean;
+}
+
+export type JsTermiosWhen = 'now' | 'drain' | 'flush';
+
+export type JsFlushQueue = 'input' | 'output' | 'both';
+
+const WHEN: Readonly<Record<JsTermiosWhen, number>> = {
+  now: IOCTL.TCSETS2,
+  drain: IOCTL.TCSETSW2,
+  flush: IOCTL.TCSETSF2,
+};
+
+const QUEUE: Readonly<Record<JsFlushQueue, number>> = { input: 0, output: 1, both: 2 };
+
+function jsTermios(t: SerialTermios): JsSerialTermios {
+  const { c_iflag, c_oflag, c_cflag, c_lflag, c_cc } = t;
+  return {
+    c_iflag,
+    c_oflag,
+    c_cflag,
+    c_lflag,
+    c_cc,
+    ispeed: t.c_ispeed as number,
+    ospeed: t.c_ospeed as number,
+  };
+}
+
+function kernelTermios(t: JsSerialTermios): SerialTermios {
+  const ospeed = speedArg(t?.ospeed);
+  const ispeed = t.ispeed === undefined ? ospeed : speedArg(t.ispeed);
+  const out = codeOf(ospeed);
+  const cflag = ((Number(t.c_cflag) >>> 0) & ~(CBAUD | (CBAUD << 16))) | out;
+  return {
+    c_iflag: Number(t.c_iflag) >>> 0,
+    c_oflag: Number(t.c_oflag) >>> 0,
+    c_cflag: (ispeed === ospeed ? cflag : cflag | (codeOf(ispeed) << 16)) >>> 0,
+    c_lflag: Number(t.c_lflag) >>> 0,
+    c_cc: Array.from({ length: 32 }, (_, i) => Number(t.c_cc?.[i] ?? 0) & 0xff),
+    c_ispeed: ispeed,
+    c_ospeed: ospeed,
+  };
+}
+
+function speedArg(speed: unknown): number {
+  if (!Number.isInteger(speed) || (speed as number) < 0 || (speed as number) > 0xffffffff)
+    throw new JsCallError('EINVAL', 'setTermios');
+  return speed as number;
+}
+
+function modemOf(bits: unknown): JsModem {
+  const b = Number(bits);
+  return {
+    dtr: (b & TIOCM.DTR) !== 0,
+    rts: (b & TIOCM.RTS) !== 0,
+    cts: (b & TIOCM.CTS) !== 0,
+    dsr: (b & TIOCM.DSR) !== 0,
+    cd: (b & TIOCM.CD) !== 0,
+    ri: (b & TIOCM.RI) !== 0,
+  };
+}
+
+function lines(m: { dtr?: boolean; rts?: boolean }, on: boolean): number {
+  return (m?.dtr === on ? TIOCM.DTR : 0) | (m?.rts === on ? TIOCM.RTS : 0);
+}
+
+function serialControls(
+  fd: number,
+  live: () => void,
+  ioctl: (fd: number, request: number, arg?: unknown) => unknown,
+  then: (value: unknown, next: (value: unknown) => unknown) => unknown
+): Record<string, (...args: never[]) => unknown> {
+  const ask = (request: number, arg?: unknown): unknown => {
+    live();
+    return ioctl(fd, request, arg);
+  };
+  const none = (): undefined => undefined;
+  return {
+    termios: () => then(ask(IOCTL.TCGETS2), (t) => jsTermios(t as SerialTermios)),
+    setTermios: (termios: JsSerialTermios, when: JsTermiosWhen = 'now') => {
+      const request = WHEN[when];
+      if (request === undefined) throw new JsCallError('EINVAL', 'setTermios');
+      return then(ask(request, kernelTermios(termios)), none);
+    },
+    modem: () => then(ask(IOCTL.TIOCMGET), modemOf),
+    setModem: (modem: { dtr?: boolean; rts?: boolean }) => {
+      const on = lines(modem, true);
+      const off = lines(modem, false);
+      const clear = () => (off ? then(ask(IOCTL.TIOCMBIC, off), none) : undefined);
+      return on ? then(ask(IOCTL.TIOCMBIS, on), clear) : then(clear(), none);
+    },
+    setBreak: (on: boolean) => then(ask(on ? IOCTL.TIOCSBRK : IOCTL.TIOCCBRK), none),
+    sendBreak: () => then(ask(IOCTL.TCSBRK, 0), none),
+    drain: () => then(ask(IOCTL.TCSBRK, 1), none),
+    flush: (queue: JsFlushQueue = 'both') => {
+      const n = QUEUE[queue];
+      if (n === undefined) throw new JsCallError('EINVAL', 'flush');
+      return then(ask(IOCTL.TCFLSH, n), none);
+    },
+  };
 }
 
 function liveness(path: string) {
@@ -377,6 +550,7 @@ function liveness(path: string) {
 export interface StreamAccess {
   read: boolean;
   write: boolean;
+  device?: boolean;
 }
 
 function allowed(may: boolean, what: string): void {
@@ -425,6 +599,13 @@ export function streamFile(
       await io.close(fd);
     },
   };
+  if (access.device && io.ioctl) {
+    const ioctl = io.ioctl;
+    Object.assign(
+      file,
+      serialControls(fd, live, ioctl, (v, next) => Promise.resolve(v).then(next))
+    );
+  }
   return { file, invalidate: end };
 }
 
@@ -470,6 +651,11 @@ export function streamSyncFile(
       io.close(fd);
     },
   };
+  if (access.device && io.ioctl)
+    Object.assign(
+      file,
+      serialControls(fd, live, io.ioctl, (v, next) => next(v))
+    );
   return { file, invalidate: end };
 }
 

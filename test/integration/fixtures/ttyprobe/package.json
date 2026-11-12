@@ -1,0 +1,12 @@
+{
+  "name": "ttyprobe",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "ttyprobe": {
+        "wasm": "bin/ttyprobe.wasm"
+      }
+    }
+  }
+}

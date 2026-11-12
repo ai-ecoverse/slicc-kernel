@@ -67,7 +67,7 @@ export interface EmbedderLookup {
 
 const READY: PollState = { readable: true, writable: true, hangup: false };
 
-function lineOf(err: unknown): string {
+export function lineOf(err: unknown): string {
   const text = err instanceof Error ? err.message : String(err);
   return (text.split('\n')[0] ?? '').slice(0, 200);
 }
@@ -116,7 +116,10 @@ function aborted(signal: AbortSignal | undefined): Promise<never> | undefined {
   });
 }
 
-async function interruptible<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+export async function interruptible<T>(
+  work: Promise<T>,
+  signal: AbortSignal | undefined
+): Promise<T> {
   const stop = aborted(signal);
   if (!stop) return work;
   stop.catch(() => undefined);

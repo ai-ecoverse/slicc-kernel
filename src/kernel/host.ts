@@ -34,6 +34,7 @@ import type { ChildForker, ChildSpawner } from './children.ts';
 import type { ClipboardBroker } from './clipboard.ts';
 import { type CpuTimes, ProcessClocks } from './cpu-clock.ts';
 import { type Cred, copyCred } from './cred.ts';
+import type { DeviceNodes } from './devices.ts';
 import type { EmbedderBroker } from './embedder.ts';
 import { type FdTable, kernelFdKind, type OpenFile } from './fd-table.ts';
 import type { FifoTable } from './fifo.ts';
@@ -108,6 +109,7 @@ export interface SpawnWasmOptions {
   outputFilter?: (file: OpenFile) => OpenFile;
   clipboard?: ClipboardBroker;
   embedder?: { broker: EmbedderBroker; session: () => { client: number; uid: number } };
+  devices?: DeviceNodes;
   readonlyAt?: (path: string) => boolean;
   dac?: Dac;
   identity?: () => Promise<{ pid: number; ppid: number }>;
@@ -507,6 +509,7 @@ function processOptions(
     ...(opts.outputFilter ? { outputFilter: opts.outputFilter } : {}),
     ...(opts.clipboard ? { clipboard: opts.clipboard, ...clipboardName(opts) } : {}),
     ...embedderOptions(opts),
+    devices: opts.devices,
     ...(opts.readonlyAt ? { readonlyAt: opts.readonlyAt } : {}),
     ...(opts.source ? { source: opts.source } : {}),
     noLinks: opts.noLinks,

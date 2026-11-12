@@ -1,4 +1,5 @@
 import type { Cred } from '../kernel/cred.ts';
+import type { DeviceNodeInfo } from '../kernel/devices.ts';
 import type { DeviceMeta, HeldMeta, PollState } from '../kernel/fd-table.ts';
 import { type CwdAnswer, HeldCwd, type HeldCwdReply } from '../kernel/held-cwd.ts';
 import { initHostname } from '../kernel/net/loopback-names.ts';
@@ -101,6 +102,29 @@ export {
 
 const FS_OPS: ReadonlySet<string> = new Set(SYNC_FS_OPS);
 
+function deviceSys(
+  call: (req: SyncSabRequestBody, label: string) => SyncFsResult
+): Pick<ProcessSys, 'devNodes' | 'openDev' | 'devIoctl'> {
+  const json = (r: SyncFsResult): unknown => (r.ok && r.kind === 'json' ? r.json : undefined);
+  return {
+    devNodes() {
+      return json(call({ op: 'fd-dev-nodes' }, 'fd-dev-nodes')) as DeviceNodeInfo[];
+    },
+    openDev(path, flags) {
+      return json(call({ op: 'fd-open-dev', path, flags }, `fd-open-dev ${path}`)) as number;
+    },
+    devIoctl(fd, request, arg) {
+      const req = {
+        op: 'fd-dev-ioctl' as const,
+        fd,
+        request,
+        ...(arg !== undefined ? { arg } : {}),
+      };
+      return json(call(req, `fd-dev-ioctl ${fd}`));
+    },
+  };
+}
+
 export function kernelSys(transport: SyncSabTransport): ProcessSys & PtyKernel & LockKernel {
   const call = (
     req: SyncSabRequestBody,
@@ -113,6 +137,7 @@ export function kernelSys(transport: SyncSabTransport): ProcessSys & PtyKernel &
   };
   const json = (r: SyncFsResult): unknown => (r.ok && r.kind === 'json' ? r.json : undefined);
   return {
+    ...deviceSys(call),
     read(fd, max, opts) {
       const flags = {
         ...(opts?.nonblock ? { nonblock: true } : {}),
@@ -231,8 +256,9 @@ export function kernelSys(transport: SyncSabTransport): ProcessSys & PtyKernel &
     tcgets(fd) {
       return json(call({ op: 'tty-get', fd }, `tty-get ${fd}`)) as Termios;
     },
-    tcsets(fd, termios, flush) {
-      call({ op: 'tty-set', fd, termios, ...(flush ? { flush } : {}) }, `tty-set ${fd}`);
+    tcsets(fd, termios, flush, drain) {
+      const how = { ...(flush ? { flush } : {}), ...(drain ? { drain } : {}) };
+      call({ op: 'tty-set', fd, termios, ...how }, `tty-set ${fd}`);
     },
     winsize(fd) {
       return json(call({ op: 'tty-winsz', fd }, `tty-winsz ${fd}`)) as [number, number];
