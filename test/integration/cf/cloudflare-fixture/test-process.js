@@ -1,9 +1,12 @@
 let isolate;
-const stats = { opened: 0, ended: 0, closedCalls: 0 };
+const stats = { opened: 0, ended: 0, closedCalls: 0, closedByKernel: 0 };
 
 async function serve(link, module) {
   isolate ??= crypto.randomUUID();
   let blocked = false;
+  link.onClose(() => {
+    stats.closedByKernel++;
+  });
   link.onMessage((message) => {
     if (message?.type === 'signal') link.post({ type: 'signalled', sig: message.sig, blocked });
   });
@@ -37,6 +40,9 @@ async function serve(link, module) {
         last: back.bytes[back.bytes.byteLength - 1],
         kind: back.bytes.constructor.name,
       });
+    } else if (cmd.do === 'close') {
+      link.close();
+      return;
     } else if (cmd.do === 'exit') {
       link.post({ type: 'exit', code: cmd.code });
       return;

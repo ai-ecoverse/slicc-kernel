@@ -1,11 +1,12 @@
 import { HOST_SOURCE, PROCESS_SOURCE } from 'slicc:cloudflare-sources';
+import { remoteWorker } from './async/remote-worker.ts';
 import type { MessagePortLike } from './client/protocol.ts';
 import { type ServedClient, serveClient } from './client/serve-client.ts';
 import { Images } from './cloudflare/images.ts';
 import { ISOLATE_WAIT_MS, IsolateGate, MAX_ISOLATES } from './cloudflare/isolates.ts';
 import { cloudflareProcesses, type ProcessHostCode } from './cloudflare/loader.ts';
 import type { CloudflareKernel, CloudflareKernelOptions } from './cloudflare/options.ts';
-import { pendingRemoteWorker } from './cloudflare/pending-remote.ts';
+import { PIECE_BYTES } from './cloudflare/rpc-pack.ts';
 import { OpfsFs } from './fs/opfs.ts';
 import { DEFAULT_USERS, fsError, modeOption } from './fs/types.ts';
 import type { ConnectOptions } from './index.ts';
@@ -115,8 +116,11 @@ export async function createCloudflareKernel(
   const launcher = new Launcher({
     fs,
     moduleUrl: sourceModule,
+    compile: images.compile,
     createWorker: () => {
-      const worker = pendingRemoteWorker((init) => processes.open(init));
+      const worker = remoteWorker((init) => processes.open(init), {
+        maxMessageBytes: PIECE_BYTES,
+      });
       const tracked = {
         ...worker,
         terminate() {
@@ -161,6 +165,7 @@ export async function createCloudflareKernel(
     root,
     images,
     isolates: gate,
+    processes,
     async run(argv, opts = {}) {
       const { stdin, onStdout, onStderr, ...rest } = opts;
       const onOut = textOf(onStdout);
@@ -256,6 +261,7 @@ export async function createCloudflareKernel(
       launcher.cdp.close();
       launcher.endFills();
       launcher.unmountAll();
+      images.release();
     },
   };
 }

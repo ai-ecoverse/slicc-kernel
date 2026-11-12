@@ -21,7 +21,7 @@ import type { ApproveHook } from '../sudo.ts';
 import type { NetworkTransport } from '../transport.ts';
 import type { Images } from './images.ts';
 import type { IsolateGate } from './isolates.ts';
-import type { ProcessHostCode, WorkerLoaderLike } from './loader.ts';
+import type { Processes, ProcessHostCode, WorkerLoaderLike } from './loader.ts';
 
 export interface CloudflareKernelOptions {
   loader: WorkerLoaderLike;
@@ -49,6 +49,7 @@ export interface CloudflareKernel {
   readonly root: FileSystemDirectoryHandle;
   readonly images: Images;
   readonly isolates: IsolateGate;
+  readonly processes: Processes;
   run(argv: string[], options?: RunOptions): Promise<RunResult>;
   openTerminal(argv: string[], options?: TerminalOptions): Promise<Terminal>;
   writeFile(path: string, data: string | Uint8Array, options?: { mode?: number }): Promise<void>;

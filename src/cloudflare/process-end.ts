@@ -7,6 +7,7 @@ const CLOSED = 'the kernel closed this process';
 
 class ProcessState {
   readonly inbox = new Inbox();
+  readonly closers: ((reason: string) => void)[] = [];
   closed = false;
   done: () => void = () => {};
   readonly settled = new Promise<void>((resolve) => {
@@ -19,12 +20,14 @@ class ProcessState {
     this.kernel = kernel;
   }
 
-  close(): void {
+  close(reason?: string): void {
     if (this.closed) return;
     this.closed = true;
     this.inbox.clear();
-    dispose(this.kernel);
     this.done();
+    dispose(this.kernel);
+    if (reason === undefined) return;
+    for (const handler of this.closers.splice(0)) handler(reason);
   }
 }
 
@@ -46,7 +49,7 @@ export class ProcessEnd extends RpcTarget {
   }
 
   close(): void {
-    this.#state.close();
+    this.#state.close('the kernel closed this process');
   }
 
   settled(): Promise<void> {
@@ -54,9 +57,18 @@ export class ProcessEnd extends RpcTarget {
   }
 }
 
-export function processSide(kernel: KernelEndStub): { end: ProcessEnd; link: KernelLink } {
+export interface ClosableKernelLink extends KernelLink {
+  onClose(handler: (reason: string) => void): void;
+  close(): void;
+}
+
+export function processSide(kernel: KernelEndStub): { end: ProcessEnd; link: ClosableKernelLink } {
   const state = new ProcessState(kernel);
-  const link: KernelLink = {
+  const link: ClosableKernelLink = {
+    onClose: (handler) => {
+      state.closers.push(handler);
+    },
+    close: () => state.close(),
     post(message) {
       if (!state.closed) send(kernel, message);
     },

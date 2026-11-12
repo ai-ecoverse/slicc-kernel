@@ -5,6 +5,7 @@ import {
   IsolateGate,
   PROCESS_HOST_SOURCE,
 } from '../../../../dist/cloudflare.js';
+import { KernelRoutes } from './kernel-routes.js';
 import TEST_PROCESS from './test-process.js';
 
 class Fake {
@@ -82,6 +83,7 @@ export class Plumbing extends DurableObject {
     this.fakes = new Map();
     this.links = new Map();
     this.nextPid = 1;
+    this.kernelRoutes = new KernelRoutes(env);
   }
 
   spawn(image) {
@@ -94,6 +96,7 @@ export class Plumbing extends DurableObject {
         this.links.set(pid, link);
         fake.events.push({ type: 'opened', ms: Date.now() - started });
         link.onPost((message) => fake.events.push(message));
+        link.onClose((reason) => fake.events.push({ type: 'closed', reason }));
         link.onCall((message) => fake.call(message));
         link.post({ type: 'init', pid });
       },
@@ -107,6 +110,7 @@ export class Plumbing extends DurableObject {
     const body = request.method === 'POST' ? await request.arrayBuffer() : undefined;
     const args =
       body && url.pathname !== '/image' ? JSON.parse(new TextDecoder().decode(body)) : {};
+    if (url.pathname.startsWith('/kernel/')) return this.kernelRoutes.handle(url.pathname, args);
     const fake = this.fakes.get(args.pid ?? Number(url.searchParams.get('pid')));
     switch (url.pathname) {
       case '/image':

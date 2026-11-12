@@ -19,7 +19,8 @@ function freePort() {
   });
 }
 
-export async function startDev(config, { timeoutMs = 90_000 } = {}) {
+export async function startDev(config, { timeoutMs = 90_000, remote } = {}) {
+  if (remote?.url && remote?.key) return { url: remote.url, key: remote.key, stop: async () => {} };
   if (!existsSync(join(REPO, 'dist/cloudflare.js'))) {
     return { skip: 'dist/cloudflare.js is missing; run npm run build first' };
   }

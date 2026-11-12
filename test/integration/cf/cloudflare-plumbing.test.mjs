@@ -40,7 +40,9 @@ let call;
 let base;
 
 before(async () => {
-  dev = await startDev(config);
+  dev = await startDev(config, {
+    remote: { url: process.env.SLICC_CF_FIXTURE_URL, key: process.env.SLICC_CF_FIXTURE_KEY },
+  });
   if (dev.skip) return;
   call = client(dev);
   const wabt = await wabtInit();
@@ -148,7 +150,21 @@ describe('Cloudflare process plumbing under wrangler dev', { concurrency: false 
     assert.equal(c.isolate, a.isolate);
     assert.equal(c.stats.ended, 2);
     assert.equal(c.stats.closedCalls >= 1, true);
+    assert.equal(c.stats.closedByKernel, 2);
     await call('/terminate', { pid: third });
+  });
+
+  test('a process that closes its link is reported to the kernel and frees its slot', async (t) => {
+    if (skipped(t)) return;
+    const id = await image('self-close');
+    await until(async () => (await call('/gate')).active === 0);
+    const { pid } = await call('/spawn', { image: id });
+    await waitFor(pid, 'hello');
+    assert.equal((await call('/gate')).active, 1);
+    await call('/cmd', { pid, cmd: { do: 'close' } });
+    const [closed] = await waitFor(pid, 'closed');
+    assert.equal(closed.reason, 'the process closed its link');
+    await until(async () => (await call('/gate')).active === 0);
   });
 
   test('eleven distinct images do not break the isolate limit', async (t) => {

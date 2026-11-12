@@ -77,6 +77,10 @@ export class KernelEnd extends RpcTarget {
   }
 }
 
+export interface ClosableProcessLink extends ProcessLink {
+  onClose(handler: (reason: string) => void): void;
+}
+
 export interface ProcessHostStub {
   open(kernel: KernelEnd): Promise<ProcessEndStub>;
 }
@@ -85,7 +89,10 @@ function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-export async function openLink(host: ProcessHostStub, released: () => void): Promise<ProcessLink> {
+export async function openLink(
+  host: ProcessHostStub,
+  released: () => void
+): Promise<ClosableProcessLink> {
   const state = new KernelState();
   let gone = false;
   const release = (): void => {
@@ -100,15 +107,21 @@ export async function openLink(host: ProcessHostStub, released: () => void): Pro
     release();
     throw err;
   }
-  end.settled().then(release, (err: unknown) => {
+  const closers: ((reason: string) => void)[] = [];
+  const lost = (reason: string, failed: boolean): void => {
     release();
     if (state.closed) return;
-    state.inbox.deliver({
-      type: WASM_PROCESS_ERROR,
-      message: `the process isolate failed: ${describe(err)}`,
-    });
-  });
+    if (failed) state.inbox.deliver({ type: WASM_PROCESS_ERROR, message: reason });
+    for (const handler of closers.splice(0)) handler(reason);
+  };
+  end.settled().then(
+    () => lost('the process closed its link', false),
+    (err: unknown) => lost(`the process isolate failed: ${describe(err)}`, true)
+  );
   return {
+    onClose: (handler) => {
+      closers.push(handler);
+    },
     post(message) {
       if (!state.closed) send(end, message);
     },
