@@ -48,6 +48,7 @@ export function imageOfInit(init: unknown): string | undefined {
 
 export interface Processes {
   open(init: unknown): Promise<ProcessLink>;
+  admit(module: unknown): Promise<() => void>;
   workerId(image: string): Promise<string>;
   readonly loads: number;
 }
@@ -78,17 +79,43 @@ export function cloudflareProcesses(
       globalOutbound: null,
     };
   };
+  const reservations = new Map<string, (() => void)[]>();
+  const reservedFor = (image: string): (() => void) | undefined => {
+    const list = reservations.get(image);
+    const release = list?.shift();
+    if (list?.length === 0) reservations.delete(image);
+    return release;
+  };
   return {
     workerId,
     get loads() {
       return loads;
     },
+    async admit(module) {
+      const image = imageOf(module);
+      if (image === undefined) return () => {};
+      const release = await gate.acquire(await workerId(image));
+      const list = reservations.get(image) ?? [];
+      list.push(release);
+      reservations.set(image, list);
+      return () => {
+        const at = list.indexOf(release);
+        if (at < 0) return;
+        list.splice(at, 1);
+        if (list.length === 0 && reservations.get(image) === list) reservations.delete(image);
+        release();
+      };
+    },
     async open(init) {
       const image = imageOfInit(init);
       if (image === undefined) throw new Error('this host runs only wasm programs with an image');
-      if (!images.has(image)) throw new Error(`no program image ${image}`);
+      const reserved = reservedFor(image);
+      if (!images.has(image)) {
+        reserved?.();
+        throw new Error(`no program image ${image}`);
+      }
       const id = await workerId(image);
-      const release = await gate.acquire(id);
+      const release = reserved ?? (await gate.acquire(id));
       try {
         const host = loader.get(id, () => workerCode(image)).getEntrypoint() as ProcessHostStub;
         return await openLink(host, release);

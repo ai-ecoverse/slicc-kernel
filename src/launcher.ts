@@ -270,6 +270,7 @@ export interface LauncherOptions {
   moduleUrl?: ModuleUrlMaker;
   packageLocks?: string;
   emscripten?: 'glue' | 'kernel';
+  admit?: (program: Program) => Promise<() => void>;
   compile?: (bytes: Uint8Array, key: string) => Promise<WebAssembly.Module>;
 }
 
@@ -783,6 +784,7 @@ function addTimes(into: Map<number, CpuTimes>, pid: number, t: CpuTimes): void {
 
 export class Launcher {
   private readonly emscripten: LauncherOptions['emscripten'];
+  private readonly admit: LauncherOptions['admit'];
   readonly fs: KernelFs;
   readonly processFs: KernelFs;
   private readonly noLinksFs: KernelFs;
@@ -962,7 +964,7 @@ export class Launcher {
     this.mounted = this.mounts.wrap(options.fs);
     this.base = this.rooted(this.mounted);
     this.createWorker = options.createWorker;
-    ({ compile: this.compile, emscripten: this.emscripten } = options);
+    ({ compile: this.compile, emscripten: this.emscripten, admit: this.admit } = options);
     this.moduleUrl = options.moduleUrl;
     this.createDriverWorker = options.createDriverWorker;
     this.media = options.media ?? memoryMedia();
@@ -2219,7 +2221,7 @@ export class Launcher {
     const done = this.heldUrl(program);
     try {
       const cwdSlot = await this.cwds.hold(cwd, req.cwdFrom);
-      const handle = await this.admitted(program.abi !== 'js', req.fds, (fds, quietOom) =>
+      const handle = await this.admitted(program, req.fds, (fds, quietOom) =>
         this.start({
           ...req,
           fds,
@@ -2376,16 +2378,29 @@ export class Launcher {
     this.cwdPaths.set(pid, req.cwd);
   }
 
+  private async reserved(program: Program, fds: FdTable): Promise<() => void> {
+    if (!this.admit) return () => {};
+    try {
+      return await this.admit(program);
+    } catch (err) {
+      this.memories.ended();
+      await fds.closeAll();
+      throw err;
+    }
+  }
+
   private async admitted(
-    wasm: boolean,
+    program: Program,
     fds: FdTable,
     start: (fds: FdTable, quietOom?: boolean) => WasmProcessHandle
   ): Promise<WasmProcessHandle> {
+    const wasm = program.abi !== 'js';
     for (;;) {
       await this.memories.admit().catch(async (err) => {
         await fds.closeAll();
         throw err;
       });
+      const release = await this.reserved(program, fds);
       const counted = (handle: WasmProcessHandle) => {
         void handle.exited.finally(() => this.memories.ended());
         void Promise.resolve(handle.ready).then(() => this.memories.started());
@@ -2397,6 +2412,8 @@ export class Launcher {
         } catch (err) {
           this.memories.ended();
           throw err;
+        } finally {
+          release();
         }
       }
       const forked = fds.fork();
@@ -2406,7 +2423,8 @@ export class Launcher {
           this.memories.ended();
           await forked.closeAll();
           throw err;
-        });
+        })
+        .finally(release);
       const fit = await (handle.ready ?? true);
       if (fit) {
         this.traceAdmitted(handle.pid, true);
@@ -3076,7 +3094,7 @@ export class Launcher {
           tagBase: this.tagBases.get(ppid),
           links: this.links.get(ppid),
         });
-      return childHandle(await this.admitted(parent.program.abi !== 'js', given, fresh));
+      return childHandle(await this.admitted(parent.program, given, fresh));
     };
   }
 
