@@ -139,7 +139,7 @@ describe('the real kernel in a Durable Object with processes in Dynamic Workers'
     t.diagnostic(`${r.loads} Dynamic Workers loaded, at most ${r.peak} in flight`);
   });
 
-  test('a spawn that finds no isolate slot fails after the wait', async (t) => {
+  test('a spawn that finds no isolate slot fails with EAGAIN after the wait', async (t) => {
     if (skipped(t)) return;
     await until(async () => (await call('/kernel/stats')).active === 0);
     const hangs = [];
@@ -147,9 +147,13 @@ describe('the real kernel in a Durable Object with processes in Dynamic Workers'
     for (const hang of hangs) await hang.seen('ready');
     const started = Date.now();
     const late = await call('/kernel/run', { argv: ['fake9', 'id'] });
-    assert.notEqual(late.status, 0);
-    assert.match(late.stderr, /EAGAIN/);
+    assert.equal(late.code, 'EAGAIN', JSON.stringify(late));
     assert.ok(Date.now() - started >= 2500);
+    const stats = await call('/kernel/stats');
+    assert.equal(stats.active, 8);
+    await call('/kernel/signal', { id: hangs[0].id, signal: 'SIGKILL' });
+    const admitted = await call('/kernel/run', { argv: ['fake9', 'out'] });
+    assert.equal(admitted.status, 7, JSON.stringify(admitted));
     for (const hang of hangs) await call('/kernel/signal', { id: hang.id, signal: 'SIGKILL' });
   });
 

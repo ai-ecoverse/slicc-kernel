@@ -151,6 +151,7 @@ export async function createCloudflareKernel(
     moduleUrl: sourceModule,
     compile: images.compile,
     emscripten: 'kernel',
+    admit: (program) => processes.admit(program.abi === 'js' ? undefined : program.module),
     createWorker: () => {
       const worker = remoteWorker((init) => processes.open(init), {
         maxMessageBytes: PIECE_BYTES,
