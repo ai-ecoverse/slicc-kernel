@@ -2,10 +2,11 @@ import { devCreation } from '../../fs/dev-removal.ts';
 import { physicalPath } from '../../fs/physical-path.ts';
 import { inodeOf } from '../../fs/types.ts';
 import type { Cred } from '../../kernel/cred.ts';
-import { initHostname } from '../../kernel/net/loopback-names.ts';
+import { hostnameOf, hostsFile, initHostname } from '../../kernel/net/loopback-names.ts';
 import type { SyncFsBridgeStat } from '../../realm/sync-fs-wire.ts';
 import { OS_RELEASE } from '../../version.ts';
 import { devFdStat, devReaddir, devResolveTarget, devStat, devSync, inDev } from '../js/js-dev.ts';
+import { accounts } from '../process-fds.ts';
 import { FDFLAGS, OFLAGS, RIGHTS } from '../wasi/wasi-abi.ts';
 import { deviceOf } from '../wasi/wasi-fds.ts';
 import type { WasiEntry } from '../wasi/wasi-files.ts';
@@ -207,7 +208,7 @@ function kernelFdStat(ctx: EmContext, fd: number, kind: string): EmStat {
     const base = st.stat ?? { isFile: true, isDirectory: false, size: st.size };
     return emStat(ctx, path, base, st.size);
   }
-  if (kind === 'tty') return emStat(ctx, `/dev/fd/${fd}`, devSync(devKernel(ctx), devFdStat(fd)));
+  if (kind === 'tty') return emStat(ctx, fdTarget(ctx, fd), devSync(devKernel(ctx), devFdStat(fd)));
   const type = kind === 'socket' ? S_IFSOCK : kind === 'stream' ? S_IFIFO : S_IFCHR;
   const now = Date.now();
   return emStat(ctx, `pipe:${fd}`, {
@@ -289,7 +290,47 @@ function refusedCreation(ctx: EmContext, path: string): void {
   }
 }
 
+function etcDefaults(ctx: EmContext): Record<string, string> {
+  const env = { ...ctx.init.env, HOSTNAME: initHostname(ctx.init) };
+  const { passwd, group } = accounts(env);
+  return {
+    '/etc/passwd': passwd,
+    '/etc/group': group,
+    '/etc/hosts': hostsFile(hostnameOf(env)),
+    '/etc/hostname': `${hostnameOf(env)}\n`,
+  };
+}
+
+function seed(ctx: EmContext, path: string, text: string): void {
+  const fs = ctx.host.o.fs;
+  if (fs.exists(path)) return;
+  try {
+    fs.writeFile(path, encoder.encode(text));
+  } catch {}
+}
+
+function missing(err: unknown): boolean {
+  return (err as { code?: unknown }).code === 'ENOENT';
+}
+
 export function openPath(ctx: EmContext, path: string, flags: number, mode: number): number {
+  const writes = (flags & (O_ACCMODE | O_CREAT)) !== 0;
+  const text = path.startsWith('/etc/') ? etcDefaults(ctx)[path] : undefined;
+  if (text !== undefined && writes) seed(ctx, path, text);
+  if ((text === undefined && path !== '/etc/mtab') || writes) return openAt(ctx, path, flags, mode);
+  try {
+    return openAt(ctx, path, flags, mode);
+  } catch (err) {
+    if (!missing(err)) throw err;
+    if (text === undefined) return openAt(ctx, '/proc/mounts', flags, mode);
+    const fd = ctx.sys.openVfs(path, 0, 0, { contents: encoder.encode(text), orphan: true });
+    ctx.host.fds.adopt(fd, 'file', false);
+    if (flags & O_CLOEXEC) ctx.host.fds.setCloexec(fd, true);
+    return fd;
+  }
+}
+
+function openAt(ctx: EmContext, path: string, flags: number, mode: number): number {
   const { fds } = ctx.host;
   if (flags & O_CREAT) refusedCreation(ctx, path);
   const alias = fdAlias(ctx, path);
@@ -489,7 +530,7 @@ export function seekDir(state: FilesState, entry: object, offset: number, whence
 
 const UTS_FIELD = 65;
 
-function hostnameOf(ctx: EmContext): string {
+function unameHost(ctx: EmContext): string {
   return initHostname(ctx.init);
 }
 
@@ -846,7 +887,7 @@ function moreFileImports(ctx: EmContext, state: FilesState): Record<string, unkn
       if (!buf) return -EM.FAULT;
       const fields = [
         'Linux',
-        hostnameOf(ctx),
+        unameHost(ctx),
         OS_RELEASE,
         '#1 SMP PREEMPT_DYNAMIC',
         'wasm32',
