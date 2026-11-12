@@ -14,6 +14,7 @@ import type { CloudflareKernel, CloudflareKernelOptions } from './cloudflare/opt
 import { PIECE_BYTES } from './cloudflare/rpc-pack.ts';
 import { sqliteMeta } from './cloudflare/sqlite-meta.ts';
 import { sqliteRoot } from './cloudflare/sqlite-root.ts';
+import { sqliteFlush } from './cloudflare/sqlite-store.ts';
 import { OpfsFs } from './fs/opfs.ts';
 import { DEFAULT_USERS, fsError, modeOption } from './fs/types.ts';
 import type { ConnectOptions } from './index.ts';
@@ -56,7 +57,14 @@ export {
 export type { CloudflareKernel, CloudflareKernelOptions } from './cloudflare/options.ts';
 export { sqliteMeta } from './cloudflare/sqlite-meta.ts';
 export { isSqliteRoot, sqliteRoot } from './cloudflare/sqlite-root.ts';
-export type { SqlCursorLike, SqliteOptions, SqlStorageLike } from './cloudflare/sqlite-store.ts';
+export type {
+  FlushStats,
+  SqlCursorLike,
+  SqliteOptions,
+  SqlStorageLike,
+  WriteBehindOptions,
+} from './cloudflare/sqlite-store.ts';
+export { sqliteFlush } from './cloudflare/sqlite-store.ts';
 export { memoryRoot };
 export const PROCESS_HOST_SOURCE: string = HOST_SOURCE;
 export const ASYNC_PROCESS_SOURCE: string | undefined = PROCESS_SOURCE;
@@ -100,8 +108,9 @@ function rootFs(options: CloudflareKernelOptions): { root: FileSystemDirectoryHa
   if (sql && (options.root || options.meta)) {
     throw new TypeError('createCloudflareKernel: give either sql or root and meta');
   }
-  const root = options.root ?? (sql ? sqliteRoot(sql, options.sqlite) : memoryRoot());
-  const meta = options.meta ?? (sql ? sqliteMeta(sql, options.sqlite) : undefined);
+  const sqlite = { writeBehind: true, ...options.sqlite };
+  const root = options.root ?? (sql ? sqliteRoot(sql, sqlite) : memoryRoot());
+  const meta = options.meta ?? (sql ? sqliteMeta(sql, sqlite) : undefined);
   const ranged = options.ranged ?? (sql !== undefined || isMemoryRoot(root));
   return { root, fs: new OpfsFs(root, meta, undefined, { ranged }) };
 }
@@ -138,13 +147,27 @@ function trackedWorker(
 
 let sessions = 0;
 
+function settled(port: MessagePort, flush: () => void): MessagePort {
+  const post = port.postMessage.bind(port);
+  port.postMessage = ((message: unknown, transfer?: Transferable[]) => {
+    if (message && typeof message === 'object' && ('result' in message || 'error' in message)) {
+      flush();
+    }
+    post(message, transfer as Transferable[]);
+  }) as MessagePort['postMessage'];
+  return port;
+}
+
 function client(
   launcher: Launcher,
   clients: Set<ServedClient>,
-  { user, tag, requests }: ConnectOptions
+  { user, tag, requests }: ConnectOptions,
+  flush: () => void
 ): MessagePort {
   tagOption(tag);
-  const { port1, port2 } = launcher.ports();
+  const ports = launcher.ports();
+  const port1 = settled(ports.port1, flush);
+  const { port2 } = ports;
   const session = ++sessions;
   const served = serveClient(port1 as unknown as MessagePortLike, {
     launcher: async () => launcher,
@@ -172,6 +195,9 @@ export async function createCloudflareKernel(
   if (!options?.loader) throw new TypeError('createCloudflareKernel: loader is required');
   const hooks = sealedHooks(options.sealed);
   const { root, fs } = rootFs(options);
+  const flush = () => {
+    if (options.sql) sqliteFlush(options.sql);
+  };
   await fs.reconcile();
   const images = new Images();
   const gate = new IsolateGate(
@@ -246,7 +272,7 @@ export async function createCloudflareKernel(
           ...(onOut ? { onStdout: onOut } : {}),
           ...(onErr ? { onStderr: onErr } : {}),
         })
-      );
+      ).finally(flush);
       return {
         status: result.status,
         ...signalField(result.signal),
@@ -266,7 +292,7 @@ export async function createCloudflareKernel(
       );
       return {
         pid: session.pid,
-        exited: quiet(guard(() => session.exited)),
+        exited: quiet(guard(() => session.exited.finally(flush))),
         ended: quiet(
           guard(async () => ({ status: await session.exited, ...signalField(session.termsig()) }))
         ),
@@ -292,9 +318,9 @@ export async function createCloudflareKernel(
         await launcher.fs.writeFile(path, '');
         await launcher.fs.chmod(path, mode);
       }
-      await launcher.fs.writeFile(path, data);
+      await launcher.fs.writeFile(path, data).finally(flush);
     },
-    chmod: async (path, mode) => launcher.fs.chmod(path, modeOption(mode)),
+    chmod: async (path, mode) => launcher.fs.chmod(path, modeOption(mode)).finally(flush),
     readFile: async (path) => launcher.fs.readFileBuffer(path),
     mount: (spec) => guard(() => launcher.mount(spec)),
     umount: (target) => guard(async () => launcher.umount(target)),
@@ -318,7 +344,7 @@ export async function createCloudflareKernel(
       if (user !== undefined && !(await guard(() => launcher.users.lookup(user)))) {
         throw fsError('ENOENT', `no user ${String(user)}`);
       }
-      return client(launcher, clients, connectOptions);
+      return client(launcher, clients, connectOptions, flush);
     },
     terminate() {
       terminated = true;

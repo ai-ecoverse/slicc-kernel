@@ -3,8 +3,9 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { sqliteFlush } from '../../../src/cloudflare/sqlite-store.ts';
 import { sqlStorage } from './sqlite-root-adapter.mjs';
-import { bash, install, memoryKernel, sqliteKernel } from './sqlite-root-helpers.mjs';
+import { bash, closeSql, install, memoryKernel, sqliteKernel } from './sqlite-root-helpers.mjs';
 
 const DIRS = 40;
 const PER_DIR = 50;
@@ -81,15 +82,27 @@ test(`numbers: unpacking ${FILES} small files with tar and reading them back, me
         return { kernel: await sqliteKernel(sql), sql };
       },
     ],
+    [
+      'behind',
+      async () => {
+        const sql = sqlStorage(join(dir, 'behind.sqlite'));
+        return { kernel: await sqliteKernel(sql, {}, { writeBehind: true }), sql };
+      },
+    ],
   ]) {
     const { kernel, sql } = await boot();
     try {
       await install(kernel, ['wasm-bash', 'wasm-coreutils', 'wasm-tar']);
       await kernel.writeFile('/root/tree.tar', archive);
       const before = sql ? { ...sql.counted } : undefined;
-      const [unpack, untar] = await time(() =>
-        bash(kernel, 'mkdir -p /root/x && tar -xf /root/tree.tar -C /root/x')
-      );
+      if (sql) sqliteFlush(sql);
+      const commitsBefore = sql ? sql.counted.transactions + sql.counted.writes : 0;
+      const [unpack, untar] = await time(async () => {
+        const r = await bash(kernel, 'mkdir -p /root/x && tar -xf /root/tree.tar -C /root/x');
+        if (sql) sqliteFlush(sql);
+        return r;
+      });
+      const commitCount = sql ? sql.counted.transactions + sql.counted.writes - commitsBefore : 0;
       assert.equal(untar.status, 0, untar.stderr);
       const wrote = sql ? { ...sql.counted } : undefined;
       const [list, listed] = await time(() => bash(kernel, 'ls -1 /root/x/tree/d*/* | wc -l'));
@@ -114,6 +127,7 @@ test(`numbers: unpacking ${FILES} small files with tar and reading them back, me
         bytes: sizes,
         ...(sql
           ? {
+              commits: commitCount,
               statements: wrote.statements - before.statements,
               rowsWritten: wrote.rowsWritten - before.rowsWritten,
               readStatements: sql.counted.statements - wrote.statements,
@@ -122,19 +136,23 @@ test(`numbers: unpacking ${FILES} small files with tar and reading them back, me
       };
     } finally {
       kernel.terminate();
-      sql?.close();
+      if (sql) closeSql(sql);
     }
   }
   console.log(
     [
-      `${FILES} files, ${rows.memory.bytes} bytes, ms (memory / sqlite):`,
-      `tar -xf ${rows.memory.unpack} / ${rows.sqlite.unpack}`,
-      `ls ${rows.memory.list} / ${rows.sqlite.list}`,
-      `cat * | cksum ${rows.memory.cat} / ${rows.sqlite.cat}`,
-      `kernel.readFile each ${rows.memory.api} / ${rows.sqlite.api}`,
-      `SQLite unpack: ${rows.sqlite.statements} statements, ${rows.sqlite.rowsWritten} rows written; read back: ${rows.sqlite.readStatements} statements`,
+      `${FILES} files, ${rows.memory.bytes} bytes, ms (memory / sqlite write-through / sqlite write-behind):`,
+      `tar -xf ${rows.memory.unpack} / ${rows.sqlite.unpack} / ${rows.behind.unpack}`,
+      `ls ${rows.memory.list} / ${rows.sqlite.list} / ${rows.behind.list}`,
+      `cat * | cksum ${rows.memory.cat} / ${rows.sqlite.cat} / ${rows.behind.cat}`,
+      `kernel.readFile each ${rows.memory.api} / ${rows.sqlite.api} / ${rows.behind.api}`,
+      `SQLite unpack, write-through: ${rows.sqlite.commits} commits, ${rows.sqlite.statements} statements, ${rows.sqlite.rowsWritten} rows written; read back: ${rows.sqlite.readStatements} statements`,
+      `SQLite unpack, write-behind: ${rows.behind.commits} commits, ${rows.behind.statements} statements, ${rows.behind.rowsWritten} rows written; read back: ${rows.behind.readStatements} statements`,
     ].join('\n  ')
   );
   assert.equal(rows.sqlite.cksum, rows.memory.cksum);
   assert.equal(rows.sqlite.bytes, rows.memory.bytes);
+  assert.equal(rows.behind.cksum, rows.memory.cksum);
+  assert.equal(rows.behind.bytes, rows.memory.bytes);
+  assert.ok(rows.behind.commits * 50 < rows.sqlite.commits, JSON.stringify(rows));
 });
