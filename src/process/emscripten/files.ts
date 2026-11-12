@@ -354,8 +354,24 @@ function openAt(ctx: EmContext, path: string, flags: number, mode: number): numb
     created,
     nofollow
   );
+  dirAccess(ctx, fd, flags);
   if (flags & O_CLOEXEC) fds.setCloexec(fd, true);
   return fd;
+}
+
+function dirAccess(ctx: EmContext, fd: number, flags: number): void {
+  const fs = ctx.host.o.fs;
+  if (!fs.owners || !fs.access || flags & O_PATH) return;
+  const e = ctx.host.fds.find(fd);
+  if (e?.type !== 'dir') return;
+  const acc = flags & O_ACCMODE;
+  const want = (acc === O_WRONLY ? 0 : 4) | (acc !== 0 || flags & O_TRUNC ? 2 : 0);
+  try {
+    fs.access(e.path, want, 'open');
+  } catch (err) {
+    ctx.host.fds.close(fd);
+    throw err;
+  }
 }
 
 function times(ctx: EmContext, ptr: number): [number | null, number | null] {

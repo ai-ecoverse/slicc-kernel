@@ -10,14 +10,20 @@ import { WasiExit, type WasiFunction } from '../wasi/wasi-host.ts';
 import type { EmContext } from './context.ts';
 import { EM, positive } from './errno.ts';
 import { type FilesState, seekDir } from './files.ts';
+import { sigpipeSpared } from './net.ts';
 
 const EINTR = 27;
+const KILLED_BY_SIGPIPE = 141;
 
 const encoder = new TextEncoder();
 
 export function holdStopped(ctx: EmContext): void {
   const header = new Int32Array(ctx.init.sab, 0, SAB_HEADER_I32);
   while (Atomics.load(header, SAB_I_STOP) === 1) Atomics.wait(header, SAB_I_STOP, 1);
+}
+
+export function sleepFor(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 export function afterStopped(ctx: EmContext): void {
@@ -53,6 +59,30 @@ function restarting(
   }
 }
 
+function streamed(ctx: EmContext, fd: number): boolean {
+  const e = ctx.host.fds.find(fd);
+  if (e?.type !== 'kernel') return false;
+  const kind = ctx.host.fds.kind(fd, e);
+  return kind !== 'file' && kind !== 'socket';
+}
+
+function streamWrite(ctx: EmContext): WasiFunction {
+  return positive((fd: number, iov: number, n: number, out: number) => {
+    const e = ctx.host.fds.get(fd);
+    const nonblock = e.type === 'kernel' && e.nonblock;
+    let written: number;
+    try {
+      written = ctx.sys.write(fd, ctx.mem.gather(iov, n), { nonblock });
+    } catch (err) {
+      if ((err as { code?: unknown }).code === 'EPIPE' && !sigpipeSpared(ctx)) {
+        throw new WasiExit(KILLED_BY_SIGPIPE);
+      }
+      throw err;
+    }
+    ctx.mem.view().setUint32(out, written, true);
+  }) as WasiFunction;
+}
+
 export function wasiImports(ctx: EmContext, state: FilesState): Record<string, unknown> {
   const host = ctx.host.imports();
   const { mem } = ctx;
@@ -60,7 +90,9 @@ export function wasiImports(ctx: EmContext, state: FilesState): Record<string, u
   return {
     fd_write: (fd: number, iov: number, n: number, out: number) => {
       holdStopped(ctx);
-      const r = restarting(ctx, call('fd_write'), [fd, iov, n, out]);
+      const r = streamed(ctx, fd)
+        ? restarting(ctx, streamWrite(ctx), [fd, iov, n, out])
+        : restarting(ctx, call('fd_write'), [fd, iov, n, out]);
       afterStopped(ctx);
       return r;
     },
