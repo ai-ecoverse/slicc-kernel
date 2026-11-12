@@ -1,3 +1,4 @@
+import { isMainThread } from 'node:worker_threads';
 import { createAsyncTransport } from '../../../dist/node.js';
 
 const SAB_I_SIGNALS = 8;
@@ -62,17 +63,17 @@ const commands = {
       await sys.write(1, bytes);
     }
   },
-  async big(sys, _t, init) {
+  async big(sys, _t, init, { sizes }) {
     const bytes = await sys.json({ op: 'read', path: init.args[1] });
-    await sys.write(1, `${bytes.length} ${checksum(bytes)}\n`);
+    await sys.write(1, `${bytes.length} ${checksum(bytes)} ${sizes.received}\n`);
     return 0;
   },
-  async bigwrite(sys, _t, init) {
+  async bigwrite(sys, _t, init, { sizes }) {
     const size = Number(init.args[2]);
     const body = new Uint8Array(size);
     for (let i = 0; i < size; i++) body[i] = i % 251;
     await sys.json({ op: 'write', path: init.args[1], body });
-    await sys.write(1, `${size} ${checksum(body)}\n`);
+    await sys.write(1, `${size} ${checksum(body)} ${sizes.sent}\n`);
     return 0;
   },
   async sleep(sys, _t, init) {
@@ -138,11 +139,58 @@ const commands = {
   },
   async vanish(sys, t, init, link) {
     await sys.write(1, 'ready\n');
-    if (init.args[1] === 'exit' && typeof process !== 'undefined' && !globalThis.inlineProcess) {
-      process.exit(3);
-    }
+    if (init.args[1] === 'exit' && !isMainThread) process.exit(3);
     link.close();
     return new Promise(() => {});
+  },
+  async fork(sys, _t, init) {
+    if (init.fork) {
+      const { memory } = init.fork;
+      await sys.write(1, `child ${memory.length} ${checksum(memory)}\n`);
+      return 0;
+    }
+    const memory = new Uint8Array(Number(init.args[1]));
+    for (let i = 0; i < memory.length; i++) memory[i] = (i * 13) % 256;
+    await sys.write(1, `parent ${memory.length} ${checksum(memory)}\n`);
+    const state = { memory, currData: 0, forkSp: 0, callStackNames: [], ppid: init.pid };
+    const child = await sys.json({ op: 'proc-fork', state });
+    const waited = await sys.json({ op: 'proc-wait', pid: child, nohang: false });
+    return waited[1];
+  },
+  async changes(sys, t, init) {
+    const log = new Int32Array(t.changes);
+    const before = log[0];
+    await sys.json({ op: 'write', path: init.args[1], body: encoder.encode('x') });
+    await sys.sleep(20);
+    await sys.write(
+      1,
+      `changes ${log[0] !== before ? 'advanced' : 'stuck'} cwds ${t.cwds ? t.cwds.byteLength : 0}\n`
+    );
+    return 0;
+  },
+  async cwdgone(sys, t, init) {
+    const view = new Int32Array(t.cwds);
+    const { slot, seen } = init.held;
+    const before = view[slot] === seen;
+    await sys.json({ op: 'rmdir', path: init.cwd });
+    await sys.sleep(20);
+    await sys.write(
+      1,
+      `slot ${before ? 'current' : 'stale'} then ${view[slot] !== seen ? 'moved' : 'same'}\n`
+    );
+    return 0;
+  },
+  async bench(sys, _t, init) {
+    const n = Number(init.args[1]);
+    const start = performance.now();
+    for (let i = 0; i < n; i++) await sys.json({ op: 'fd-info', fd: 1 });
+    await sys.write(1, `${((performance.now() - start) * 1000) / n}\n`);
+    return 0;
+  },
+  async thread(sys, t) {
+    await sys.write(1, 'ready\n');
+    t.post({ type: 'wasm-thread-spawn', thread: { tid: 2, arg: 0 } });
+    for (;;) await sys.sleep(-1);
   },
   async pipe(sys, _t, init) {
     const [r, w] = await sys.json({ op: 'fd-pipe' });
@@ -164,7 +212,32 @@ const commands = {
   },
 };
 
-export function asyncProcessEntry(link) {
+function lengthOf(value) {
+  return value instanceof Uint8Array ? value.length : 0;
+}
+
+function measured(link) {
+  const sizes = { sent: 0, received: 0 };
+  return {
+    sizes,
+    post: (message, transfer) => link.post(message, transfer),
+    onMessage: (handler) => link.onMessage(handler),
+    onClose: (handler) => link.onClose(handler),
+    close: () => link.close(),
+    async call(message, transfer) {
+      sizes.sent = Math.max(sizes.sent, lengthOf(message?.bytes), lengthOf(message?.req?.body));
+      const reply = await link.call(message, transfer);
+      sizes.received = Math.max(sizes.received, lengthOf(reply?.bytes));
+      return reply;
+    },
+  };
+}
+
+export const closes = [];
+
+export function asyncProcessEntry(given) {
+  const link = measured(given);
+  link.onClose((reason) => closes.push(reason));
   const t = createAsyncTransport(link);
   t.init.then(
     async (init) => {
