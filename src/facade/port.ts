@@ -1,4 +1,5 @@
 import type { ConnectorStamp } from '../kernel/socket.ts';
+import { type MakePortPair, messageChannel } from '../ports.ts';
 import type { FacadeConnection, FacadeHook, FacadeOpenRequest } from './types.ts';
 
 export interface FacadePortLike {
@@ -73,11 +74,12 @@ export function serveFacadePort(
 
 export function portFacadeHook(
   ask: (request: FacadeOpenRequest, port: FacadePortLike) => void,
-  gone?: Promise<unknown>
+  gone?: Promise<unknown>,
+  ports: MakePortPair = messageChannel
 ): FacadeHook {
   return (stamp: ConnectorStamp, { name }) =>
     new Promise((resolve, reject) => {
-      const { port1, port2 } = new MessageChannel();
+      const { port1, port2 } = ports();
       let closed = false;
       const shut = () => {
         closed = true;

@@ -191,7 +191,7 @@ function dialFor(
   open: Map<number, () => void>
 ): Answer {
   const socket = dialSocket(l.net, req.port, req.host);
-  const { port1, port2 } = new MessageChannel();
+  const { port1, port2 } = l.ports();
   open.set(
     req.id,
     serveSocket(socket, port1, () => open.delete(req.id))
@@ -339,7 +339,8 @@ function cdpRegistry(
           send({ cdpOpen: { ...request, registration: req.id }, port: cdp }, [
             cdp as unknown as Transferable,
           ]),
-        gone
+        gone,
+        l.ports
       );
       registered.set(req.id, l.cdp.register(hook, req.runtime));
       return req.id;
@@ -367,7 +368,8 @@ function facadeRegistry(
           send({ facadeOpen: { ...request, registration: req.id }, port: facade }, [
             facade as unknown as Transferable,
           ]),
-        gone
+        gone,
+        l.ports
       );
       registered.set(req.id, l.facades.register(req.name, hook));
       return req.id;

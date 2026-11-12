@@ -188,6 +188,7 @@ import {
   umountCall,
 } from './mount/syscall.ts';
 import { tmpfs } from './mount/tmpfs.ts';
+import { type MakePortPair, messageChannel } from './ports.ts';
 import {
   customSectionsOf,
   type ForeignResults,
@@ -272,6 +273,7 @@ export interface LauncherOptions {
   emscripten?: 'glue' | 'kernel';
   admit?: (program: Program) => Promise<() => void>;
   compile?: (bytes: Uint8Array, key: string) => Promise<WebAssembly.Module>;
+  ports?: MakePortPair;
 }
 
 export interface ModuleUrl {
@@ -886,7 +888,14 @@ export class Launcher {
   private readonly media: MediaStore;
   private readonly onMountPending: ((pending: PendingMedium) => void) | undefined;
   private readonly removable = new Map<string, Removable>();
-  private readonly hostfs: Pick<LauncherOptions, 'hostfs' | 'hostfsFetch' | 'hostfsTiming'>;
+  private readonly hostfs: Pick<
+    LauncherOptions,
+    'hostfs' | 'hostfsFetch' | 'hostfsTiming' | 'ports'
+  >;
+
+  get ports(): MakePortPair {
+    return this.hostfs.ports ?? messageChannel;
+  }
   private readonly fstabRetries: readonly number[];
   private readonly inserted = new Map<string, MediumHandle>();
   private readonly openFiles = new Set<VfsNodes>();
@@ -3256,7 +3265,7 @@ export class Launcher {
   }
 
   private async driver(type: string, spec: MountSpec): Promise<OpenedDriver> {
-    const inProcess = openInProcess(spec);
+    const inProcess = openInProcess(spec, this.ports);
     if (inProcess) return inProcess;
     if (type === 'fsa') return this.fsaDriver(spec);
     if (type === 'hostfs') {
@@ -3266,11 +3275,12 @@ export class Launcher {
       return openHostfs(
         spec,
         grantConnect(hostfs, hostfsFetch ?? ((url, init) => fetch(url, init)), hostfsTiming),
-        hostfsTiming
+        hostfsTiming,
+        this.ports
       );
     }
     if (type === 'tmpfs') {
-      const { port1, port2 } = new MessageChannel();
+      const { port1, port2 } = this.ports();
       serveFilesystem(
         port2,
         tmpfs(),
@@ -3334,7 +3344,7 @@ export class Launcher {
     const { target, source } = spec;
     const ask = (handle?: MediumHandle) =>
       this.onMountPending?.({ target, source, ...(handle ? { handle } : {}) });
-    const { port1, port2 } = new MessageChannel();
+    const { port1, port2 } = this.ports();
     const medium = removableMedium((handle) => {
       served.invalidate(true);
       ask(handle);
