@@ -95,9 +95,10 @@ export async function startDev(config, { timeoutMs = 90_000, remote } = {}) {
   return { skip: `wrangler dev did not start:\n${log.split('\n').slice(-20).join('\n')}` };
 }
 
-export function client({ url, key }) {
+export function client({ url, key }, scope = crypto.randomUUID()) {
   return async (path, body, { raw, query = '' } = {}) => {
-    const response = await fetch(`${url}${path}${query}`, {
+    const joined = `${query}${query ? '&' : '?'}do=${scope}`;
+    const response = await fetch(`${url}${path}${joined}`, {
       method: body === undefined ? 'GET' : 'POST',
       headers: { 'x-slicc-key': key },
       ...(body === undefined ? {} : { body: raw ? body : JSON.stringify(body) }),

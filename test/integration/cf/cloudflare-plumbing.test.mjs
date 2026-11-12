@@ -59,8 +59,10 @@ const skipped = (t) => {
   return true;
 };
 
+const RUN = crypto.randomUUID().slice(0, 8);
+
 async function image(tag) {
-  const r = await call('/image', tagged(base, tag), { raw: true });
+  const r = await call('/image', tagged(base, `${tag}-${RUN}`), { raw: true });
   return r.image;
 }
 
@@ -80,7 +82,7 @@ describe('Cloudflare process plumbing under wrangler dev', { concurrency: false 
     const id = await image('syscalls');
     const { pid } = await call('/spawn', { image: id });
     const [hello] = await waitFor(pid, 'hello');
-    assert.equal(hello.tag, 'syscalls');
+    assert.equal(hello.tag, `syscalls-${RUN}`);
     await call('/cmd', { pid, cmd: { do: 'wasm', n: 1000 } });
     const [sum] = await waitFor(pid, 'sum');
     assert.equal(sum.sum, (1000 * 1001) / 2);
