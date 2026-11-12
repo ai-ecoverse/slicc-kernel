@@ -68,6 +68,7 @@ export interface AsyncTransportOptions {
   maxMessageBytes?: number;
   memory?: () => number | undefined;
   snapshots?: ForkSnapshots;
+  deadlines?: boolean;
 }
 
 interface ForkRequest {
@@ -480,7 +481,8 @@ export function createAsyncTransport(
     get closed() {
       return closedBy !== undefined;
     },
-    async call(asked, timeoutMs, label, given = [], sink) {
+    async call(asked, askedMs, label, given = [], sink) {
+      const timeoutMs = options.deadlines === false ? Number.POSITIVE_INFINITY : askedMs;
       if (closedBy !== undefined) throw syncError('EIO', label);
       const { req, token } = snapshotted(asked, options.snapshots);
       const forget = () => {
