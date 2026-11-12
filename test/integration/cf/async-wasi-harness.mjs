@@ -58,3 +58,28 @@ export function shown(result) {
     stderr: result.stderr,
   };
 }
+
+export async function terminal(kernel, argv, options = {}) {
+  let text = '';
+  const term = await kernel.openTerminal(argv, {
+    cwd: '/',
+    ...options,
+    onData: (bytes) => {
+      text += new TextDecoder().decode(bytes);
+    },
+  });
+  const until = async (needle, ms = 20000) => {
+    const end = Date.now() + ms;
+    while (!text.includes(needle)) {
+      if (Date.now() > end)
+        throw new Error(`no ${JSON.stringify(needle)} in ${JSON.stringify(text)}`);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  };
+  const ended = (ms = 10000) =>
+    Promise.race([
+      term.ended,
+      new Promise((resolve) => setTimeout(() => resolve(`still running after ${ms} ms`), ms)),
+    ]);
+  return { term, until, ended, text: () => text };
+}

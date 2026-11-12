@@ -117,7 +117,7 @@ export function asyncProcessEntry(link: KernelLink, deps: AsyncProcessEntryDeps)
   transport.init.then(
     (init) => {
       const refused = refusal(init);
-      if (refused) return failed(new Error(refused), NOT_RUNNABLE);
+      if (refused) return failed(refused, NOT_RUNNABLE);
       started(init, transport, deps, size).then(
         (code) => transport.post({ type: WASM_PROCESS_EXIT, code } satisfies WasmProcessExitMsg),
         (err) => {
