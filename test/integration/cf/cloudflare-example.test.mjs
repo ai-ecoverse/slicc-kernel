@@ -70,7 +70,7 @@ describe('the example Worker', { concurrency: false }, () => {
     if (skipped(t)) return;
     const first = await (await request(dev, '/boot')).json();
     assert.equal(first.cold, true);
-    if (!remote.url) assert.equal(first.installed, 2);
+    if (!remote.url) assert.equal(first.installed, 3);
     t.diagnostic(`cold boot with install: ${first.bootMs} ms`);
     const again = await (await request(dev, '/boot')).json();
     assert.equal(again.cold, false);
@@ -100,6 +100,12 @@ describe('the example Worker', { concurrency: false }, () => {
     assert.equal(r.status, 0, JSON.stringify(r));
     assert.match(r.stdout, /^a\n(\S+\n){3}3\n$/);
     assert.equal(r.stderr, '');
+    const rg = await run(dev, [
+      'bash',
+      '-c',
+      'mkdir -p /tmp/t; echo needle > /tmp/t/a; echo hay > /tmp/t/b; rg -l needle /tmp/t',
+    ]);
+    assert.deepEqual({ status: rg.status, stdout: rg.stdout }, { status: 0, stdout: '/tmp/t/a\n' });
     const stdin = await run(dev, ['cat'], { stdin: 'from stdin\n', cwd: '/' });
     assert.equal(stdin.stdout, 'from stdin\n');
   });

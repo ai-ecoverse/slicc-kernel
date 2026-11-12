@@ -21,7 +21,7 @@ export default class ProcessHost extends WorkerEntrypoint<{ SLICC_LOCAL_FORKS?: 
   open(kernel: KernelEndStub): ProcessEnd {
     const store = this.env?.SLICC_LOCAL_FORKS === 'off' ? kernelOnly : snapshots;
     const { end, link } = processSide(kernel.dup(), store);
-    void asyncProcessEntry(link, { module: () => program, snapshots: store });
+    void asyncProcessEntry(link, { module: () => program, snapshots: store, deadlines: false });
     return end;
   }
 }

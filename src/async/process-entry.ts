@@ -19,6 +19,7 @@ export interface AsyncProcessEntryDeps {
   module(image: string): WebAssembly.Module | Promise<WebAssembly.Module>;
   maxMessageBytes?: number;
   snapshots?: ForkSnapshots;
+  deadlines?: boolean;
 }
 
 const NOT_RUNNABLE = 126;
@@ -140,6 +141,7 @@ export function asyncProcessEntry(link: KernelLink, deps: AsyncProcessEntryDeps)
   const transport = createAsyncTransport(link, {
     ...(deps.maxMessageBytes !== undefined ? { maxMessageBytes: deps.maxMessageBytes } : {}),
     ...(deps.snapshots ? { snapshots: deps.snapshots } : {}),
+    ...(deps.deadlines === false ? { deadlines: false } : {}),
     memory: () => size.memory?.(),
   });
   const failed = (err: unknown, code?: number): void =>

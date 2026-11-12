@@ -22,6 +22,7 @@ declare module 'slicc:process' {
     deps: {
       module(image: string): WebAssembly.Module | Promise<WebAssembly.Module>;
       snapshots?: unknown;
+      deadlines?: boolean;
     }
   ): unknown;
 }
