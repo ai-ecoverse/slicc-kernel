@@ -113,6 +113,16 @@ function unref<T>(timer: T): T {
   return timer;
 }
 
+const LANDING_ROUNDS = 4;
+
+async function landed(driver: WorkspaceDriver): Promise<void> {
+  for (let round = 0; round < LANDING_ROUNDS; round++) {
+    await driver.flush(true).catch(() => undefined);
+    await driver.settled().catch(() => undefined);
+    if (!driver.pending()) return;
+  }
+}
+
 function exitCodeOf(status: number, signal: string | undefined): number {
   if (signal === undefined) return status;
   const number = (SIG as Record<string, number>)[signal.replace(/^SIG/, '')];
@@ -290,8 +300,7 @@ function shellFor(
     }
     void run.process.ended.then(
       async ({ status, signal: by }) => {
-        await driver.flush().catch(() => undefined);
-        await driver.settled().catch(() => undefined);
+        await landed(driver);
         run.exit(exitCodeOf(status, by));
         unref(setTimeout(() => forget(run), retention));
       },
@@ -392,8 +401,7 @@ export function sliccBackend(options: SliccBackendOptions): SliccBackend {
       const close = () => {
         closing ??= (async () => {
           await shell.closeAll();
-          await driver.flush().catch(() => undefined);
-          await driver.settled().catch(() => undefined);
+          await landed(driver);
           await kernel.umount(mountPoint).catch(() => undefined);
           await client.close();
           if (held.get(mountPoint) === close) held.delete(mountPoint);

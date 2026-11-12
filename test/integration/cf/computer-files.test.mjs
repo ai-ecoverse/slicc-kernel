@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
-import { computerWith, run } from './computer-harness.mjs';
+import { computerWith, run, workspaceDriver } from './computer-harness.mjs';
 
 const MOUNT = '/workspace';
 
@@ -247,6 +247,40 @@ describe('closed files committed behind the run', () => {
       assert.equal(text, 'late\n');
     } finally {
       await prompt.close();
+    }
+  });
+});
+
+describe('a close that reaches the mount after the run has ended', () => {
+  it('finds the bytes already landed by the flush before the exit event', async () => {
+    const computer = await computerWith();
+    try {
+      const { fs } = computer.workspace;
+      const driver = workspaceDriver(fs, { root: '/late', writeBehind: true });
+      await driver.mount();
+      const bytes = (text) => new TextEncoder().encode(text);
+      const flags = { write: true, create: true, truncate: false, exclusive: false };
+      const first = await driver.open('/f', flags);
+      await driver.write(first, 0, bytes('one\n'));
+      await driver.release(first);
+      const second = await driver.open('/f', flags);
+      await driver.write(second, 4, bytes('Z'));
+      await driver.flush();
+      await assert.rejects(fs.lstat('/late/f'), { code: 'ENOENT' });
+      assert.equal(driver.pending(), true);
+      await driver.flush(true);
+      assert.equal(await fs.readFile('/late/f', 'utf8'), 'one\nZ');
+      assert.equal(driver.pending(), false);
+      await driver.release(second);
+      await driver.flush(true);
+      assert.equal(await fs.readFile('/late/f', 'utf8'), 'one\nZ');
+      const third = await driver.open('/f', flags);
+      await driver.write(third, 5, bytes('!'));
+      await driver.release(third);
+      await driver.flush(true);
+      assert.equal(await fs.readFile('/late/f', 'utf8'), 'one\nZ!');
+    } finally {
+      await computer.close();
     }
   });
 });

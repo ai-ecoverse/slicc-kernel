@@ -81,7 +81,8 @@ function unrefTimer<T>(timer: T): T {
 export interface WorkspaceDriver extends FilesystemHandlers {
   readonly capabilities: DriverCapabilities;
   settled(): Promise<void>;
-  flush(): Promise<void>;
+  flush(open?: boolean): Promise<void>;
+  pending(): boolean;
   served(served: ServedFilesystem): void;
   invalidate(paths?: string[]): void;
 }
@@ -309,13 +310,13 @@ class DriverState {
     this.oldest = undefined;
   }
 
-  async flush(): Promise<void> {
+  async flush(open = false): Promise<void> {
     this.stopTimers();
-    const paths = [...this.closed];
+    const paths = open ? [...this.drafts.keys()] : [...this.closed];
     this.closed.clear();
     let failed: unknown;
     for (const path of paths) {
-      if (this.writing(path)) continue;
+      if (!open && this.writing(path)) continue;
       await this.finish(path).catch((err: unknown) => {
         failed ??= err;
       });
@@ -622,7 +623,8 @@ export function workspaceDriver(
   return {
     capabilities,
     settled: () => state.settled(),
-    flush: () => serial(() => state.flush()),
+    flush: (open) => serial(() => state.flush(open)),
+    pending: () => state.drafts.size > 0,
     served: (next) => {
       served = next;
     },
