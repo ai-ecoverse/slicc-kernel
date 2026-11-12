@@ -78,7 +78,7 @@ export function processSide(kernel: KernelEndStub): { end: ProcessEnd; link: Ker
       const { value, pieces } = pack(message);
       for (const piece of pieces) quietly(kernel.part(piece));
       return state.closers.guard(
-        kernel.call(value, pieces.length).then((answer) => answered(kernel, answer))
+        kernel.call(value, pieces.length, Date.now()).then((answer) => answered(kernel, answer))
       );
     },
     onMessage: (handler) => state.inbox.listen(handler),

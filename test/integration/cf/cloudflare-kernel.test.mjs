@@ -133,10 +133,8 @@ describe('the real kernel in a Durable Object with processes in Dynamic Workers'
     const r = await call('/kernel/runs', { argvs });
     for (const result of r.results) {
       assert.equal(result.status, 0, result.stderr);
-      assert.match(result.stdout, /^slept (enough|short)\n$/);
+      assert.equal(result.stdout, 'slept enough\n');
     }
-    const short = r.results.filter((result) => result.stdout.includes('short')).length;
-    if (short) t.diagnostic(`${short} of 11 processes saw their clock advance less than 1000 ms`);
     assert.equal(r.peak, 8);
     t.diagnostic(`${r.loads} Dynamic Workers loaded, at most ${r.peak} in flight`);
   });
