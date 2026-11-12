@@ -1,4 +1,5 @@
 import type { ProcessLink } from '../async/link.ts';
+import { ForkTokens } from './fork-tokens.ts';
 import { digest, type Images, imageOf } from './images.ts';
 import type { IsolateGate } from './isolates.ts';
 import { openLink, type ProcessHostStub } from './kernel-end.ts';
@@ -32,6 +33,7 @@ export interface ProcessHostCode {
   process: string;
   compatibilityDate?: string;
   compatibilityFlags?: string[];
+  localForks?: boolean;
 }
 
 export const PROCESS_COMPATIBILITY_DATE = '2026-09-01';
@@ -47,6 +49,7 @@ export function imageOfInit(init: unknown): string | undefined {
 }
 
 export interface Processes {
+  readonly forks: ForkTokens;
   open(init: unknown): Promise<ProcessLink>;
   admit(module: unknown): Promise<() => void>;
   workerId(image: string): Promise<string>;
@@ -62,7 +65,7 @@ export function cloudflareProcesses(
   let hostDigest: Promise<string> | undefined;
   let loads = 0;
   const workerId = async (image: string): Promise<string> => {
-    hostDigest ??= digest(`${code.host}\u0000${code.process}`);
+    hostDigest ??= digest(`${code.host}\u0000${code.process}\u0000${code.localForks !== false}`);
     return `slicc-${(await hostDigest).slice(0, 16)}-${image.slice(0, 40)}`;
   };
   const workerCode = (image: string): WorkerCode => {
@@ -77,8 +80,10 @@ export function cloudflareProcesses(
         'program.wasm': { wasm: images.get(image) },
       },
       globalOutbound: null,
+      ...(code.localForks === false ? { env: { SLICC_LOCAL_FORKS: 'off' } } : {}),
     };
   };
+  const forks = new ForkTokens();
   const reservations = new Map<string, (() => void)[]>();
   const reservedFor = (image: string): (() => void) | undefined => {
     const list = reservations.get(image);
@@ -87,6 +92,7 @@ export function cloudflareProcesses(
     return release;
   };
   return {
+    forks,
     workerId,
     get loads() {
       return loads;
@@ -118,7 +124,7 @@ export function cloudflareProcesses(
       const release = reserved ?? (await gate.acquire(id));
       try {
         const host = loader.get(id, () => workerCode(image)).getEntrypoint() as ProcessHostStub;
-        return await openLink(host, release);
+        return await openLink(host, release, forks);
       } catch (err) {
         release();
         throw err;

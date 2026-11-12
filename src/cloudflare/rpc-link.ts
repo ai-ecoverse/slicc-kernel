@@ -20,6 +20,8 @@ export interface KernelEndStub extends WireEnd {
 export interface ProcessEndStub extends WireEnd {
   close(reason: string): Promise<void>;
   settled(): Promise<string>;
+  snapshot(token: string, offset: number, max: number): Promise<Uint8Array | null>;
+  dup(): ProcessEndStub;
 }
 
 const ignore = (): void => {};

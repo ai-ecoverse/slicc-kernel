@@ -11,12 +11,14 @@ import { runWasiProcess, type TransportFactory } from '../process/wasi/wasi-runt
 import type { SabPostLike, SyncSabTransport } from '../realm/sync-sab-bridge.ts';
 import { jspiAvailable, registerWaiter } from './jspi.ts';
 import type { KernelLink } from './link.ts';
+import type { ForkSnapshots } from './snapshots.ts';
 import { type AsyncTransport, createAsyncTransport } from './transport.ts';
 import type { AsyncProcessInit } from './wire.ts';
 
 export interface AsyncProcessEntryDeps {
   module(image: string): WebAssembly.Module | Promise<WebAssembly.Module>;
   maxMessageBytes?: number;
+  snapshots?: ForkSnapshots;
 }
 
 const NOT_RUNNABLE = 126;
@@ -109,6 +111,7 @@ export function asyncProcessEntry(link: KernelLink, deps: AsyncProcessEntryDeps)
   const size: { memory: (() => number) | undefined } = { memory: undefined };
   const transport = createAsyncTransport(link, {
     ...(deps.maxMessageBytes !== undefined ? { maxMessageBytes: deps.maxMessageBytes } : {}),
+    ...(deps.snapshots ? { snapshots: deps.snapshots } : {}),
     memory: () => size.memory?.(),
   });
   const failed = (err: unknown, code?: number): void =>

@@ -84,6 +84,7 @@ function hostCode(options: CloudflareKernelOptions): ProcessHostCode {
     ...(options.processHost?.compatibilityFlags
       ? { compatibilityFlags: options.processHost.compatibilityFlags }
       : {}),
+    ...(options.processHost?.localForks === false ? { localForks: false } : {}),
   };
 }
 
@@ -155,6 +156,7 @@ export async function createCloudflareKernel(
     createWorker: () => {
       const worker = remoteWorker((init) => processes.open(init), {
         maxMessageBytes: PIECE_BYTES,
+        snapshot: (token, offset, max) => processes.forks.read(token, offset, max),
       });
       const tracked = {
         ...worker,
@@ -296,6 +298,7 @@ export async function createCloudflareKernel(
       launcher.cdp.close();
       launcher.endFills();
       launcher.unmountAll();
+      processes.forks.clear();
     },
   };
 }

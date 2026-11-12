@@ -19,7 +19,10 @@ declare module 'slicc:process' {
       call(message: unknown, transfer?: Transferable[]): Promise<unknown>;
       onMessage(handler: (message: unknown) => void): void;
     },
-    deps: { module(image: string): WebAssembly.Module | Promise<WebAssembly.Module> }
+    deps: {
+      module(image: string): WebAssembly.Module | Promise<WebAssembly.Module>;
+      snapshots?: unknown;
+    }
   ): unknown;
 }
 

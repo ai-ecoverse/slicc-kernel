@@ -1,5 +1,6 @@
 import { RpcTarget } from 'cloudflare:workers';
 import type { KernelLink } from '../async/link.ts';
+import type { ForkSnapshots } from '../async/snapshots.ts';
 import {
   answered,
   Closers,
@@ -41,10 +42,12 @@ class ProcessState {
 
 export class ProcessEnd extends RpcTarget {
   readonly #state: ProcessState;
+  readonly #snapshots: ForkSnapshots | undefined;
 
-  constructor(state: ProcessState) {
+  constructor(state: ProcessState, snapshots?: ForkSnapshots) {
     super();
     this.#state = state;
+    this.#snapshots = snapshots;
   }
 
   part(bytes: Uint8Array): void {
@@ -53,11 +56,16 @@ export class ProcessEnd extends RpcTarget {
 
   post(value: unknown, count: number): void {
     const inbox = this.#state.inbox;
-    inbox.deliver(inbox.take(value, count));
+    const message = inbox.take(value, count);
+    inbox.deliver(message);
   }
 
   close(reason: string): void {
     this.#state.close(typeof reason === 'string' ? reason : 'the kernel closed the process');
+  }
+
+  snapshot(token: string, offset: number, max: number): Uint8Array | null {
+    return this.#snapshots?.read(token, offset, max) ?? null;
   }
 
   settled(): Promise<string> {
@@ -65,7 +73,10 @@ export class ProcessEnd extends RpcTarget {
   }
 }
 
-export function processSide(kernel: KernelEndStub): { end: ProcessEnd; link: KernelLink } {
+export function processSide(
+  kernel: KernelEndStub,
+  snapshots?: ForkSnapshots
+): { end: ProcessEnd; link: KernelLink } {
   const state = new ProcessState(kernel);
   const link: KernelLink = {
     onClose: (handler) => state.closers.listen(handler),
@@ -83,5 +94,5 @@ export function processSide(kernel: KernelEndStub): { end: ProcessEnd; link: Ker
     },
     onMessage: (handler) => state.inbox.listen(handler),
   };
-  return { end: new ProcessEnd(state), link };
+  return { end: new ProcessEnd(state, snapshots), link };
 }

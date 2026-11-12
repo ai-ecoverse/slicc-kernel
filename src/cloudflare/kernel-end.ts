@@ -2,6 +2,7 @@ import { RpcTarget } from 'cloudflare:workers';
 import type { ProcessLink } from '../async/link.ts';
 import { WASM_PROCESS_ERROR } from '../kernel/protocol.ts';
 import { behindProcess } from './clock-skew.ts';
+import type { ForkTokens } from './fork-tokens.ts';
 import {
   type Answer,
   Closers,
@@ -21,6 +22,12 @@ class KernelState {
   readonly early: { message: unknown; resolve(value: unknown): void; reject(err: Error): void }[] =
     [];
   handler: ((message: unknown) => Promise<unknown>) | undefined;
+  end: ProcessEndStub | undefined;
+  readonly forks: ForkTokens | undefined;
+
+  constructor(forks?: ForkTokens) {
+    this.forks = forks;
+  }
 
   get closed(): boolean {
     return this.closers.reason !== undefined;
@@ -67,12 +74,16 @@ export class KernelEnd extends RpcTarget {
 
   post(value: unknown, count: number): void {
     const inbox = this.#state.inbox;
-    inbox.deliver(inbox.take(value, count));
+    const message = inbox.take(value, count);
+    if (this.#state.forks?.watchPost(message)) return;
+    inbox.deliver(message);
   }
 
   async call(value: unknown, count: number, sent?: number): Promise<Answer> {
     const state = this.#state;
-    const result = await state.call(behindProcess(state.inbox.take(value, count), sent));
+    const message = state.inbox.take(value, count);
+    state.forks?.watchCall(message, state.end);
+    const result = await state.call(behindProcess(message, sent));
     return state.held.answer(result);
   }
 
@@ -89,8 +100,12 @@ function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-export async function openLink(host: ProcessHostStub, released: () => void): Promise<ProcessLink> {
-  const state = new KernelState();
+export async function openLink(
+  host: ProcessHostStub,
+  released: () => void,
+  forks?: ForkTokens
+): Promise<ProcessLink> {
+  const state = new KernelState(forks);
   let gone = false;
   const release = (): void => {
     if (gone) return;
@@ -104,6 +119,7 @@ export async function openLink(host: ProcessHostStub, released: () => void): Pro
     release();
     throw err;
   }
+  state.end = end;
   const lost = (reason: string, failed: boolean): void => {
     release();
     if (state.closed) return;
