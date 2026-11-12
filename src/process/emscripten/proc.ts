@@ -5,7 +5,7 @@ import { inheritedSignals } from '../process-children.ts';
 import { identify } from '../process-runtime.ts';
 import type { EmContext } from './context.ts';
 import { EM, errnoOf, negated } from './errno.ts';
-import { afterStopped, holdStopped } from './wasi.ts';
+import { afterStopped, holdStopped, sleepFor } from './wasi.ts';
 
 const WNOHANG = 1;
 const WUNTRACED = 2;
@@ -333,7 +333,7 @@ export function procImports(ctx: EmContext, state: ProcState): WebAssembly.Modul
     },
     slicc_sleep_ms: (ms: number) => {
       holdStopped(ctx);
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+      sleepFor(ms);
       afterStopped(ctx);
     },
   };
