@@ -1,5 +1,5 @@
 import { type MakePortPair, messageChannel } from '../ports.ts';
-import { type FilesystemHandlers, serveFilesystem } from './driver.ts';
+import { type FilesystemHandlers, type ServedFilesystem, serveFilesystem } from './driver.ts';
 import type { MountSpec, OpenedDriver } from './mount-fs.ts';
 import type { DriverCapabilities } from './protocol.ts';
 
@@ -10,6 +10,7 @@ export const IN_PROCESS_DRIVER: unique symbol = Symbol.for(
 export interface InProcessDriver {
   handlers: FilesystemHandlers;
   capabilities?: DriverCapabilities;
+  served?(served: ServedFilesystem): void;
 }
 
 export type InProcessMountSpec = MountSpec & { [IN_PROCESS_DRIVER]?: InProcessDriver };
@@ -25,7 +26,9 @@ export function openInProcess(
   const driver = (spec as InProcessMountSpec)[IN_PROCESS_DRIVER];
   if (!driver) return undefined;
   const { port1, port2 } = ports();
-  serveFilesystem(port2, driver.handlers, driver.capabilities ?? {}, { owned: true });
+  driver.served?.(
+    serveFilesystem(port2, driver.handlers, driver.capabilities ?? {}, { owned: true })
+  );
   return {
     port: port1,
     dispose: () => {

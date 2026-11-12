@@ -257,6 +257,7 @@ function shellFor(
 
   async function start(run: Run, input: ShellExecInput): Promise<void> {
     const encoder = new TextEncoder();
+    driver.invalidate();
     try {
       run.process = await client.spawn([...shell, input.source], {
         cwd: input.cwd ?? mountPoint,
@@ -376,7 +377,7 @@ export function sliccBackend(options: SliccBackendOptions): SliccBackend {
         await kernel.mount(
           inProcessMount(
             { type: options.type ?? 'workspace', source: `workspace:${root}`, target: mountPoint },
-            { handlers: driver, capabilities: driver.capabilities }
+            { handlers: driver, capabilities: driver.capabilities, served: driver.served }
           )
         );
       } catch (err) {
