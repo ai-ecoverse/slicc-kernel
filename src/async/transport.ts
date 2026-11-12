@@ -281,20 +281,29 @@ class Caller {
     return id;
   }
 
-  async request(
+  staging(asked: SyncSabRequestBody): Uint8Array | undefined {
+    const body = bodyOf(asked);
+    return body && body.byteLength > this.max ? body : undefined;
+  }
+
+  async staged(
     asked: SyncSabRequestBody,
-    given: Transferable[],
+    body: Uint8Array,
     timeoutMs: number,
     label: string
-  ): Promise<{ req: SyncSabRequestBody; transfer: Transferable[]; staged?: number }> {
+  ): Promise<{ req: SyncSabRequestBody; transfer: Transferable[]; staged: number }> {
+    const staged = await withTimeout(this.stage(body), timeoutMs, label).catch(() => {
+      throw syncError('EIO', label);
+    });
+    const { body: _dropped, ...rest } = asked as SyncSabRequestBody & { body?: unknown };
+    return { req: rest as SyncSabRequestBody, transfer: [], staged };
+  }
+
+  exact(
+    asked: SyncSabRequestBody,
+    given: Transferable[]
+  ): { req: SyncSabRequestBody; transfer: Transferable[] } {
     const body = bodyOf(asked);
-    if (body && body.byteLength > this.max) {
-      const staged = await withTimeout(this.stage(body), timeoutMs, label).catch(() => {
-        throw syncError('EIO', label);
-      });
-      const { body: _dropped, ...rest } = asked as SyncSabRequestBody & { body?: unknown };
-      return { req: rest as SyncSabRequestBody, transfer: [], staged };
-    }
     if (!body) return { req: asked, transfer: given };
     const exact = exactCopy(body);
     if (exact.body === body) return { req: asked, transfer: given };
@@ -366,19 +375,12 @@ export function createAsyncTransport(
     mirrors.failAll(syncError('EIO', `kernel link closed: ${reason}`));
   });
 
-  const send = async (
-    asked: SyncSabRequestBody,
-    given: Transferable[],
+  const send = (
+    msg: AsyncSyscallMsg,
+    transfer: Transferable[],
     ms: number,
     label: string
-  ) => {
-    const { req, transfer, staged } = await caller.request(asked, given, ms, label);
-    const msg: AsyncSyscallMsg = {
-      type: ASYNC_SYSCALL,
-      req,
-      words: current(),
-      ...(staged !== undefined ? { staged } : {}),
-    };
+  ): Promise<AsyncAnswer> => {
     const answered = link.call(msg, transfer).then(async (value) => {
       const reply = value as AsyncSyscallReply;
       if (!reply || !isAnswer(reply)) throw syncError('EIO', label);
@@ -389,6 +391,22 @@ export function createAsyncTransport(
     return withTimeout(answered, ms, label).catch((err) => {
       throw (err as { code?: unknown }).code === 'EIO' ? err : syncError('EIO', label);
     });
+  };
+
+  const issue = async (
+    asked: SyncSabRequestBody,
+    given: Transferable[],
+    ms: number,
+    label: string
+  ): Promise<AsyncAnswer> => {
+    const words = current();
+    const body = caller.staging(asked);
+    if (!body) {
+      const { req, transfer } = caller.exact(asked, given);
+      return send({ type: ASYNC_SYSCALL, req, words }, transfer, ms, label);
+    }
+    const { req, staged } = await caller.staged(asked, body, ms, label);
+    return send({ type: ASYNC_SYSCALL, req, words, staged }, [], ms, label);
   };
 
   return {
@@ -407,7 +425,7 @@ export function createAsyncTransport(
     },
     async call(asked, timeoutMs, label, given = [], sink) {
       if (closedBy !== undefined) throw syncError('EIO', label);
-      const reply = await send(asked, given, timeoutMs, label);
+      const reply = await issue(asked, given, timeoutMs, label);
       return caller.answer(reply, timeoutMs, label, sink);
     },
     wait(view, index, value, timeoutMs = Number.POSITIVE_INFINITY) {
