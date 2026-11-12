@@ -128,7 +128,10 @@ export function emStat(ctx: EmContext, path: string, st: SyncFsBridgeStat, size?
   const mtimeMs = st.mtimeMs ?? 0;
   let uid = owners ? (st.uid ?? 0) : 0;
   let gid = owners ? (st.gid ?? 0) : 0;
-  if (!ctx.init.owners) {
+  if (!ctx.init.owners && !ctx.credAbi) {
+    uid = 1000;
+    gid = 1000;
+  } else if (!ctx.init.owners) {
     const cred = credOf(ctx);
     uid = cred.euid;
     gid = cred.egid;
@@ -252,7 +255,9 @@ function kernelFdStat(ctx: EmContext, fd: number, kind: string): EmStat {
     const base = st.stat ?? { isFile: true, isDirectory: false, size: st.size };
     return emStat(ctx, path, base, st.size);
   }
-  if (kind === 'tty') return emStat(ctx, fdTarget(ctx, fd), devSync(devKernel(ctx), devFdStat(fd)));
+  if (kind === 'tty' || kind === 'device') {
+    return emStat(ctx, fdTarget(ctx, fd), devSync(devKernel(ctx), devFdStat(fd)));
+  }
   const type = kind === 'socket' ? S_IFSOCK : kind === 'stream' ? S_IFIFO : S_IFCHR;
   const now = Date.now();
   return emStat(ctx, `pipe:${fd}`, {
@@ -276,13 +281,22 @@ export function fdStat(ctx: EmContext, fd: number): EmStat {
   if (e.type === 'file') {
     const file = e.file;
     let st: SyncFsBridgeStat | undefined;
+    const kept = (): SyncFsBridgeStat | undefined => {
+      const handle = file.buffer.handle;
+      try {
+        return handle === undefined ? undefined : ctx.host.o.fs.keptStat?.(handle);
+      } catch {
+        return undefined;
+      }
+    };
     try {
       file.buffer.flush();
       st = ctx.host.o.fs.stat(file.path);
     } catch {
-      const handle = file.buffer.handle;
-      st = handle === undefined ? undefined : ctx.host.o.fs.keptStat?.(handle);
+      st = kept();
     }
+    const bound = file.buffer.bound;
+    if (st && bound?.ino !== undefined && st.ino !== bound.ino) st = kept() ?? bound;
     const base = st ?? { isFile: true, isDirectory: false, size: 0, nlink: 0 };
     const orphan = file.buffer.isOrphan();
     return emStat(ctx, file.path, orphan ? { ...base, nlink: 0 } : base, file.size());
@@ -420,6 +434,7 @@ function openFile(ctx: EmContext, path: string, flags: number, mode: number): nu
   const created = flags & O_CREAT ? mode & 0o7777 & ~umask : undefined;
   const nofollow = (flags & O_NOFOLLOW) !== 0;
   if (deviceOf(target)) ctx.host.interrupted?.();
+  if (target === path && !deviceOf(path) && !inDev(path)) refusedLookup(ctx, path);
   const opened = readOnlyCreate(ctx, target, flags, created);
   const fd = fds.open(
     target,
@@ -432,6 +447,15 @@ function openFile(ctx: EmContext, path: string, flags: number, mode: number): nu
   dirAccess(ctx, fd, flags);
   if (flags & O_CLOEXEC) fds.setCloexec(fd, true);
   return fd;
+}
+
+function refusedLookup(ctx: EmContext, path: string): void {
+  try {
+    ctx.host.o.fs.lstat(path);
+  } catch (err) {
+    const code = (err as { code?: unknown }).code;
+    if (code === 'EACCES' || code === 'EPERM') throw err;
+  }
 }
 
 function readOnlyCreate(
@@ -536,6 +560,20 @@ function fdNames(ctx: EmContext): string[] {
   return names;
 }
 
+const PROC_PID = /^\/proc\/(self|[1-9]\d*)$/;
+
+function procListing(
+  ctx: EmContext,
+  path: string,
+  listed: Array<[string, SyncFsBridgeStat | null]>
+): Listing {
+  const stats = new Map<string, SyncFsBridgeStat | null>();
+  for (const [name, st] of listed) if (name !== 'task') stats.set(name, st);
+  stats.set('fd', { isFile: false, isDirectory: true, size: 0, mode: S_IFDIR | 0o555 });
+  const sorted = [...stats.keys()].sort();
+  return { names: ['.', '..', ...sorted], stats, path };
+}
+
 function listing(ctx: EmContext, path: string): Listing {
   if (procFdDir(ctx, path) || path === '/dev/fd') {
     const names = ['.', '..'];
@@ -565,6 +603,7 @@ function listing(ctx: EmContext, path: string): Listing {
     return { names, stats, path };
   }
   const listed = ctx.host.o.fs.readdirStat(path);
+  if (PROC_PID.test(path)) return procListing(ctx, path, listed);
   const names = ['.', '..'];
   const stats = new Map<string, SyncFsBridgeStat | null>();
   for (const [name, st] of listed) {
@@ -907,15 +946,16 @@ export function fileImports(ctx: EmContext, state: FilesState): WebAssembly.Modu
       writeStat(mem, buf, pathStat(ctx, path, (flags & AT_SYMLINK_NOFOLLOW) === 0));
     }),
     __syscall_statfs64: negated((p: number, _size: number, buf: number) => {
-      at(AT_FDCWD, p);
-      const usage = ctx.host.o.fs.statfs?.(at(AT_FDCWD, p)) ?? null;
+      const path = at(AT_FDCWD, p);
+      bridgeStat(ctx, path, true);
+      const usage = ctx.statfs(path);
       const blocks = usage ? Math.ceil(usage.quota / 4096) : 1000000;
-      const used = usage ? Math.ceil(usage.usage / 4096) : 500000;
+      const free = usage ? Math.max(0, Math.floor((usage.quota - usage.usage) / 4096)) : 500000;
       writeStatfs(mem, buf, {
         bsize: 4096,
         blocks,
-        bfree: Math.max(0, blocks - used),
-        bavail: Math.max(0, blocks - used),
+        bfree: free,
+        bavail: free,
         files: 1000000,
         ffree: 500000,
         fsid: 42,

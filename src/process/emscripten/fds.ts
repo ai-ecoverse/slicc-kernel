@@ -3,6 +3,7 @@ import { TIOCGPTN, TIOCPKT, TIOCSCTTY, TIOCSPTLCK, TIOCSWINSZ } from '../process
 import type { EmContext } from './context.ts';
 import { EM, negated } from './errno.ts';
 import { fdFlags, O_APPEND, O_CLOEXEC, O_NONBLOCK } from './files.ts';
+import { emscriptenErrno } from './wasi.ts';
 
 const F_DUPFD = 0;
 const F_GETFD = 1;
@@ -190,7 +191,7 @@ function fcntl(ctx: EmContext, fd: number, cmd: number, varargs: number): number
         at: number
       ) => number;
       const r = lock(fd, cmd, ctx.mem.view().getUint32(varargs, true));
-      return r === 0 ? 0 : -r;
+      return r === 0 ? 0 : -emscriptenErrno(r);
     }
     default:
       return -EM.INVAL;
@@ -305,6 +306,11 @@ export function fdImports(ctx: EmContext): WebAssembly.ModuleImports {
       fds.get(fd);
       if (fd === newfd) return -EM.INVAL;
       if (newfd < 0 || newfd >= 4096) return -EM.BADF;
+      if (flags === 0 && fds.find(newfd)) {
+        try {
+          fds.close(newfd);
+        } catch {}
+      }
       fds.renumber(fd, newfd, true);
       if (flags & O_CLOEXEC) fds.setCloexec(newfd, true);
       return newfd;
@@ -325,7 +331,7 @@ export function fdImports(ctx: EmContext): WebAssembly.ModuleImports {
     __syscall_flock: negated((fd: number, op: number) => {
       const flock = ctx.host.sliccImports().flock as (fd: number, op: number) => number;
       const r = flock(fd, op);
-      return r === 0 ? 0 : -r;
+      return r === 0 ? 0 : -emscriptenErrno(r);
     }),
     _poll_js: negated((ptr: number, nfds: number) => {
       let count = 0;

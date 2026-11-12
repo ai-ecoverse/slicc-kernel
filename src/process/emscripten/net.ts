@@ -87,6 +87,15 @@ export function netImports(ctx: EmContext): WebAssembly.ModuleImports {
         else json({ op: 'sock-bind', fd, addr });
         return 0;
       }),
+    slicc_socketpair_js: (unix: number, nonblock: number, cloexec: number, out: number) =>
+      guard(ctx, () => {
+        const pair = json({ op: 'sock-pair', domain: unix ? 'unix' : 'inet' }) as [number, number];
+        install(ctx, pair[0], !!nonblock, !!cloexec);
+        install(ctx, pair[1], !!nonblock, !!cloexec);
+        mem.view().setInt32(out, pair[0], true);
+        mem.view().setInt32(out + 4, pair[1], true);
+        return 0;
+      }),
     slicc_listen_js: (fd: number, backlog: number) =>
       guard(ctx, () => {
         socketFd(ctx, fd);

@@ -32,7 +32,7 @@ import { netImports } from './net.ts';
 import { procImports } from './proc.ts';
 import { Reentry, type WasmExport } from './reentry.ts';
 import { timeImports } from './time.ts';
-import { wasiImports } from './wasi.ts';
+import { commitStdout, wasiImports } from './wasi.ts';
 
 const NOT_RUNNABLE = 126;
 const HEAP_MAX = 2147483648;
@@ -107,6 +107,13 @@ function missingImports(module: WebAssembly.Module, imports: WebAssembly.Imports
   return missing;
 }
 
+function importsCred(module: WebAssembly.Module): boolean {
+  for (const imp of WebAssembly.Module.imports(module)) {
+    if (imp.module === 'env' && imp.name === 'slicc_cred_js') return true;
+  }
+  return false;
+}
+
 class EmRuntime {
   readonly reentry = new Reentry();
   private ex: EmExports | undefined;
@@ -154,12 +161,16 @@ class EmRuntime {
     if (!this.exiting) {
       this.exiting = true;
       const atexit = this.ex?.__funcs_on_exit;
+      const quit = this.ctx?.quit;
+      if (quit) quit.atExit = true;
       if (typeof atexit === 'function') this.enter('__funcs_on_exit', atexit as WasmExport, []);
       const flush = this.ex?.fflush;
       if (typeof flush === 'function') this.enter('fflush', flush as WasmExport, [0]);
+      if (this.ctx) commitStdout(this.ctx);
+      if (quit) quit.atExit = false;
       this.up = false;
     }
-    throw new WasiExit(status);
+    throw new WasiExit(this.ctx?.quit.failed && status === 0 ? 1 : status);
   }
 }
 
@@ -332,6 +343,7 @@ export async function runEmscriptenProcess(
   const say = (text: string) => void sys.write(2, encoder.encode(`${text}\n`));
   const id = identify(transport, init);
   const fork = init.fork?.wasi;
+  const raw = createSyncFsSabBridge(transport, { ...ownersOf(init), direct: true });
   const host = new WasiHost({
     args: [init.argv0, ...init.args],
     env: init.env,
@@ -340,13 +352,7 @@ export async function runEmscriptenProcess(
     ppid: id.ppid,
     parent: () => identify(transport, init).ppid,
     kernel: { sys, call },
-    fs: ptsBridge(
-      procfsBridge(
-        cachingBridge(createSyncFsSabBridge(transport, { ...ownersOf(init), direct: true })),
-        procTree(call, id.pid)
-      ),
-      call
-    ),
+    fs: ptsBridge(procfsBridge(cachingBridge(raw), procTree(call, id.pid)), call),
     bare: true,
   }).attach();
   if (fork) host.fds.restore(fork.fds, fork.cloexec);
@@ -367,6 +373,9 @@ export async function runEmscriptenProcess(
     reentry: rt.reentry,
     pid: init.pid,
     ppid: id.ppid,
+    credAbi: importsCred(init.program.module),
+    statfs: (path) => raw.statfs?.(path) ?? null,
+    quit: { atExit: false, failed: false },
     call,
     exports: () => rt.exports(),
     enter: (name, fn, args) => rt.enter(name, fn, args),

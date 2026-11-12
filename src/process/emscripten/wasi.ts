@@ -59,6 +59,46 @@ function restarting(
   }
 }
 
+const STRERROR: Readonly<Record<string, string>> = {
+  EACCES: 'Permission denied',
+  EIO: 'I/O error',
+  ENOTSUP: 'Not supported',
+  EOPNOTSUPP: 'Not supported',
+  EFBIG: 'File too large',
+  EILSEQ: 'Illegal byte sequence',
+  EINTR: 'Interrupted system call',
+};
+
+const REPORTING: ReadonlySet<string> = new Set(['clipboard', 'embedder']);
+
+export function commitStdout(ctx: EmContext): void {
+  const e = ctx.host.fds.find(1);
+  if (e?.type !== 'kernel' || !REPORTING.has(ctx.host.fds.kind(1, e))) return;
+  try {
+    ctx.host.fds.close(1);
+  } catch (err) {
+    const code = (err as { code?: unknown }).code;
+    if (typeof code !== 'string') throw err;
+    ctx.quit.failed = true;
+    try {
+      ctx.sys.write(
+        2,
+        encoder.encode(`${ctx.init.argv0}: write error: ${STRERROR[code] ?? code}\n`)
+      );
+    } catch {}
+  }
+}
+
+const WASI_NOTSUP = 58;
+
+export function emscriptenErrno(errno: number): number {
+  return errno === WASI_NOTSUP ? EM.NOTSUP : errno;
+}
+
+function emscriptenErrnos(fn: WasiFunction): WasiFunction {
+  return ((...args: never[]) => emscriptenErrno(fn(...args) ?? 0)) as WasiFunction;
+}
+
 function streamed(ctx: EmContext, fd: number): boolean {
   const e = ctx.host.fds.find(fd);
   if (e?.type !== 'kernel') return false;
@@ -86,7 +126,7 @@ function streamWrite(ctx: EmContext): WasiFunction {
 export function wasiImports(ctx: EmContext, state: FilesState): WebAssembly.ModuleImports {
   const host = ctx.host.imports();
   const { mem } = ctx;
-  const call = (name: string): WasiFunction => host[name] as WasiFunction;
+  const call = (name: string): WasiFunction => emscriptenErrnos(host[name] as WasiFunction);
   return {
     fd_write: (fd: number, iov: number, n: number, out: number) => {
       holdStopped(ctx);
@@ -106,9 +146,14 @@ export function wasiImports(ctx: EmContext, state: FilesState): WebAssembly.Modu
       if (at < 0n || at > BigInt(Number.MAX_SAFE_INTEGER)) return EM.OVERFLOW;
       return call('fd_pread')(...([fd, iov, n, at, out] as never[])) ?? 0;
     },
+    fd_pwrite: (fd: number, iov: number, n: number, at: bigint, out: number) => {
+      if (at < 0n || at > BigInt(Number.MAX_SAFE_INTEGER)) return EM.OVERFLOW;
+      return call('fd_pwrite')(...([fd, iov, n, at, out] as never[])) ?? 0;
+    },
     fd_close: (fd: number) => {
       const e = ctx.host.fds.find(fd);
       if (e) state.listings.delete(e);
+      if (fd === 2 && ctx.quit.atExit) commitStdout(ctx);
       return call('fd_close')(...([fd] as never[])) ?? 0;
     },
     fd_seek: positive((fd: number, offset: bigint, whence: number, out: number) => {
