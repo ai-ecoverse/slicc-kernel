@@ -21,7 +21,7 @@ import { type CrontabCall, type CrontabResult, Crontabs } from './cron/crontab.t
 import { type CronLocks, CronService } from './cron/service.ts';
 import { FacadeHosts } from './facade/hosts.ts';
 import type { FacadeSpecs } from './facade/types.ts';
-import { access, R_OK, X_OK } from './fs/access.ts';
+import { access, R_OK, walk, X_OK } from './fs/access.ts';
 import {
   type Attestation,
   type AttestOptions,
@@ -32,7 +32,7 @@ import {
 } from './fs/attest.ts';
 import { FileChanges } from './fs/changes.ts';
 import { type EntryTarget, followLinks, withCommandDirs } from './fs/commands.ts';
-import { Dac, type DenialHook, type Guard, need, readable, TTY_MODE } from './fs/dac.ts';
+import { Dac, type DenialHook, type Guard, need, readable, TTY_MODE, writable } from './fs/dac.ts';
 import { SHM } from './fs/dev-removal.ts';
 import { HOSTNAME_PATH, withEtcFiles } from './fs/etc-files.ts';
 import { FreshModules } from './fs/fresh-modules.ts';
@@ -145,7 +145,7 @@ import { SI, SIG, type SigInfo, sigbit, signalField } from './kernel/signals.ts'
 import { LoopbackNet } from './kernel/socket.ts';
 import { type TraceDraft, TraceHub } from './kernel/trace.ts';
 import { KernelTty } from './kernel/tty.ts';
-import { keepingOpen, type VfsFileFs, type VfsNode, VfsNodes } from './kernel/vfs-file.ts';
+import { keepingOpen, type VfsFileFs, type VfsNode, VfsNodes, vfsFile } from './kernel/vfs-file.ts';
 import { defaultCeiling, WasmMemories } from './kernel/wasm-memories.ts';
 import { visibleTo, type WatchSource } from './kernel/watch-ops.ts';
 import { type ServedFilesystem, serveFilesystem } from './mount/driver.ts';
@@ -203,6 +203,7 @@ import {
   type ApproveHook,
   changedFile,
   changedText,
+  requestedText,
   Sudo,
   type SudoCall,
   type SudoCaller,
@@ -466,7 +467,59 @@ function refuseChanged(
   now: Readonly<Record<string, string>>
 ): void {
   const changed = changedFile(approved, now);
-  if (changed !== undefined) throw new ChangedError(changedText(changed));
+  if (changed !== undefined) throw new ChangedError(changedText(changed), changed);
+}
+
+const O_WRONLY = 0o1;
+const OUTPUT_MODE = 0o600;
+const ERRNO_TEXT: Readonly<Record<string, string>> = {
+  EACCES: 'Permission denied',
+  EISDIR: 'Is a directory',
+  ENOENT: 'No such file or directory',
+  ENOTDIR: 'Not a directory',
+  EROFS: 'Read-only file system',
+};
+
+export function sudoFailure(errno: string, message: string): Error & { code: string } {
+  return Object.assign(new Error(message), { code: errno });
+}
+
+function sudoCause(err: unknown): string {
+  const code = codeOf(err);
+  if (typeof code !== 'string') throw err;
+  return code;
+}
+
+function requested(err: unknown): never {
+  if (err instanceof ChangedError) throw sudoFailure(err.code, requestedText(err.file));
+  throw err;
+}
+
+export interface SudoRunRequest {
+  stdout?: unknown;
+  stderr?: unknown;
+  tag?: unknown;
+  base?: string | undefined;
+  session?: number | undefined;
+}
+
+export interface SudoRunning {
+  pid: number;
+  ended: Promise<{ status: number; signal?: number }>;
+}
+
+export const MAX_SPAWN_TAGS = 8;
+
+export function tagList(value: unknown): readonly string[] {
+  if (!Array.isArray(value)) {
+    tagOption(value);
+    return value === undefined ? [] : [value as string];
+  }
+  if (value.length > MAX_SPAWN_TAGS) {
+    throw new TypeError(`a spawn adds at most ${MAX_SPAWN_TAGS} tags`);
+  }
+  for (const each of value) tagOption(each ?? 0);
+  return value as string[];
 }
 
 interface HeldTrace {
@@ -1848,7 +1901,7 @@ export class Launcher {
     const hex = pinned[real];
     if (hex !== undefined) return { [real]: hex };
     if (await this.sudoer.trusted(real)) return {};
-    throw new ChangedError(changedText(real));
+    throw new ChangedError(changedText(real), real);
   }
 
   private async pinnedBytes(pin: Record<string, string>, bytes: Uint8Array): Promise<Uint8Array> {
@@ -4141,6 +4194,97 @@ export class Launcher {
     const status = await handle.exited;
     const signal = handle.termsig();
     return { status, ...(signal ? { signal } : {}), stdout: concat(out), stderr: concat(err) };
+  }
+
+  async sudoRun(replay: unknown, options: SudoRunRequest = {}): Promise<SudoRunning> {
+    const added = tagList(options.tag);
+    const replayed = await this.sudoer.replay(replay);
+    if ('error' in replayed) throw sudoFailure(replayed.errno, replayed.error);
+    const { grant, caller, target } = replayed;
+    let tags = withTag(undefined, options.base);
+    for (const tag of [...replayed.tags, ...added]) tags = withTag(tags, tag);
+    const tagged = { tags, tagBase: options.base === undefined ? 0 : 1 };
+    await this.swaps.settled();
+    this.resetCatalogs();
+    const req = { file: grant.file, argv: grant.argv, env: grant.env, cwd: grant.cwd };
+    const ctx = { ppid: 0, cred: grant.cred, scope: '' };
+    const planned = await this.planOne(req, ctx).catch((err: unknown) => {
+      const code = sudoCause(err);
+      const word = grant.argv[0] ?? grant.file;
+      if (code === 'ENOENT') throw sudoFailure(code, `sudo: ${word}: command not found`);
+      throw sudoFailure(code, `sudo: ${grant.file}: ${ERRNO_TEXT[code] ?? code}`);
+    });
+    const pin = await this.unchanged(planned, grant.file, grant.cwd, grant).catch(requested);
+    const fds = await this.sudoOutputs(options, caller, this.stackFor(tags, tagged.tagBase));
+    const err = fds.get(2).file;
+    const report = (message: string) =>
+      void Promise.resolve(err.write?.(encoder.encode(`${message}\n`))).catch(() => undefined);
+    const replan = () => this.planOne(req, ctx);
+    const handle = await this.launch(
+      { ...planned, replan },
+      {
+        ...pin,
+        env: grant.env,
+        cwd: grant.cwd,
+        fds,
+        report,
+        ...this.identity(target, tagged, options.session),
+        ...(caller.umask !== undefined ? { umask: caller.umask } : {}),
+        links: grant.cred.euid,
+      }
+    ).catch(requested);
+    const ended = handle.exited.then((status) => {
+      const signal = handle.termsig();
+      return { status, ...(signal ? { signal } : {}) };
+    });
+    return { pid: handle.pid, ended };
+  }
+
+  private async sudoOutputs(
+    options: SudoRunRequest,
+    caller: Account,
+    stack: WriterStack
+  ): Promise<FdTable> {
+    const fds = new FdTable();
+    const opened = new Map<string, OpenFile>();
+    fds.installAt(0, deviceFile('null'));
+    try {
+      fds.installAt(1, await this.sudoOutput(options.stdout, caller, stack, opened));
+      fds.installAt(2, await this.sudoOutput(options.stderr, caller, stack, opened));
+    } catch (err) {
+      await fds.closeAll();
+      throw err;
+    }
+    return fds;
+  }
+
+  private async sudoOutput(
+    path: unknown,
+    caller: Account,
+    stack: WriterStack,
+    opened: Map<string, OpenFile>
+  ): Promise<OpenFile> {
+    if (path === undefined) return deviceFile('null');
+    if (typeof path !== 'string' || !path.startsWith('/')) {
+      throw sudoFailure('EINVAL', `sudo: ${String(path)} is not an absolute path`);
+    }
+    const cred = credOf(caller);
+    const walked = await walk(this.fs, cred, normalizePath(path), true, caller.uid);
+    const real = walked.path;
+    const same = opened.get(real);
+    if (same) return same.retain();
+    try {
+      if (walked.denied !== undefined) throw fsError('EACCES', path);
+      await writable({ ...(this.execGuard(cred, 0) as Guard), links: caller.uid }, 'open', real);
+      const owner = { uid: caller.uid, gid: caller.gid, mode: OUTPUT_MODE };
+      await stack.noLinks.writeFile(real, new Uint8Array(0), owner);
+    } catch (err) {
+      const code = sudoCause(err);
+      throw sudoFailure(code, `sudo: ${path}: ${ERRNO_TEXT[code] ?? code}`);
+    }
+    const file = vfsFile(stack.fs, { path: real, flags: O_WRONLY, position: 0 }, stack.nodes);
+    opened.set(real, file);
+    return file;
   }
 }
 

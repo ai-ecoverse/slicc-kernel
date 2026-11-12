@@ -1,5 +1,6 @@
 import { type CdpOpen, serveCdpPort } from './cdp/port.ts';
 import type { CdpHook } from './cdp/types.ts';
+import type { SudoRun, SudoRunOptions } from './client/attach.ts';
 import {
   type DialHandle,
   type DialledSocket,
@@ -39,7 +40,7 @@ import type { MountEntry, MountSpec } from './mount/mount-fs.ts';
 import type { ProcessMountPolicy, ProcessMountRequest } from './mount/syscall.ts';
 import { sealedAnswerer } from './sealed-relay.ts';
 import type { FileChanged, InitRequest, KernelCall, TerminalAction } from './serve.ts';
-import type { ApproveHook, SudoRequest } from './sudo.ts';
+import type { ApproveHook, SudoReplay, SudoRequest } from './sudo.ts';
 import { systemTimeZone } from './time-zone.ts';
 import { type NetworkTransport, serveTransport } from './transport.ts';
 import type { Account, AddGroup, AddUser, Group, RemoveUser } from './users.ts';
@@ -61,6 +62,8 @@ export {
   type ProcessEntry,
   type SpawnedProcess,
   type SpawnOptions,
+  type SudoRun,
+  type SudoRunOptions,
   type TraceBatch,
   type TraceEvent,
   type TraceExec,
@@ -180,6 +183,7 @@ export type {
   SudoApproval,
   SudoDenial,
   SudoFile,
+  SudoReplay,
   SudoReply,
   SudoRequest,
   SudoStdin,
@@ -296,6 +300,7 @@ export interface Kernel {
   run(argv: string[], options?: RunOptions): Promise<RunResult>;
   openTerminal(argv: string[], options?: TerminalOptions): Promise<Terminal>;
   connect(options?: ConnectOptions): Promise<MessagePort>;
+  sudoRun(request: SudoReplay, options?: SudoRunOptions): Promise<SudoRun>;
   readonly users: KernelUsers;
   readonly groups: KernelGroups;
   setRoutes(routes: RouteTable): Promise<void>;
@@ -743,6 +748,21 @@ function decodedRun(result: RawRun): RunResult {
   };
 }
 
+async function sudoRunOn(
+  request: (req: KernelCall, handlers: Handlers) => { done: Promise<unknown> },
+  replay: SudoReplay,
+  { stdout, stderr, tag }: SudoRunOptions
+): Promise<SudoRun> {
+  const started = Promise.withResolvers<number>();
+  const { done } = request(
+    { op: 'sudo-run', replay, options: { stdout, stderr, tag } },
+    { started: started.resolve }
+  );
+  done.catch(started.reject);
+  const pid = await started.promise;
+  return { pid, pgid: pid, ended: quiet(done.then(endedOf)) };
+}
+
 function endedOf(r: unknown): Ended {
   if (typeof r === 'number') return { status: r };
   const { status, signal } = r as { status: number; signal?: number };
@@ -937,6 +957,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
       return decodedRun(result);
     },
     openTerminal,
+    sudoRun: (replay, sudoOptions = {}) => sudoRunOn(request, replay, sudoOptions),
     connect: connector(call, bound),
     ...accounts(call, options.users === undefined ? DEFAULT_USERS : options.users),
     setRoutes: async (routes) => void (await call({ op: 'routes', routes })),
