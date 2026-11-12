@@ -155,6 +155,8 @@ class EmRuntime {
       this.exiting = true;
       const atexit = this.ex?.__funcs_on_exit;
       if (typeof atexit === 'function') this.enter('__funcs_on_exit', atexit as WasmExport, []);
+      const flush = this.ex?.fflush;
+      if (typeof flush === 'function') this.enter('fflush', flush as WasmExport, [0]);
       this.up = false;
     }
     throw new WasiExit(status);
