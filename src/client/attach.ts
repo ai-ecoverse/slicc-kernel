@@ -16,6 +16,7 @@ import type {
 import { quiet } from '../kernel/signals.ts';
 import type { TraceEvent } from '../kernel/trace.ts';
 import type { MountEntry, MountSpec } from '../mount/mount-fs.ts';
+import type { SudoReplay } from '../sudo.ts';
 import { type DialledSocket, type DialOptions, dialStream } from './dial-stream.ts';
 import { type LoopbackFetchOptions, loopbackFetch } from './loopback-fetch.ts';
 import {
@@ -83,6 +84,18 @@ export interface SpawnedProcess {
   readonly exited: Promise<number>;
   readonly ended: Promise<ClientEnded>;
   signal(name?: string): Promise<void>;
+}
+
+export interface SudoRunOptions {
+  stdout?: string;
+  stderr?: string;
+  tag?: string | readonly string[];
+}
+
+export interface SudoRun {
+  readonly pid: number;
+  readonly pgid: number;
+  readonly ended: Promise<ClientEnded>;
 }
 
 export interface ClientRunOptions {
@@ -183,6 +196,7 @@ export interface KernelClient {
     onEvents: (batch: TraceBatch) => void | Promise<unknown>,
     options?: TraceOptions
   ): Promise<{ close(): void }>;
+  sudoRun(request: SudoReplay, options?: SudoRunOptions): Promise<SudoRun>;
   close(options?: { kill?: boolean }): Promise<void>;
 }
 
@@ -522,6 +536,23 @@ async function spawnOn(
   };
 }
 
+async function sudoRunOn(
+  channel: Channel,
+  replay: SudoReplay,
+  { stdout, stderr, tag }: SudoRunOptions
+): Promise<SudoRun> {
+  await since(channel, 16, 'sudoRun', async () => {});
+  const started = Promise.withResolvers<number>();
+  let endedBy: string | undefined;
+  const { done } = channel.request(
+    { op: 'sudo-run', replay, options: { stdout, stderr, tag } },
+    { started: started.resolve, ended: (signal) => (endedBy = signal) }
+  );
+  done.catch(started.reject);
+  const pid = await started.promise;
+  return { pid, pgid: pid, ended: endedOf(done, () => endedBy) };
+}
+
 function endedOf(done: Promise<unknown>, signal: () => string | undefined): Promise<ClientEnded> {
   return quiet(
     done.then((status) => {
@@ -746,6 +777,7 @@ export async function attachKernel(
       return () => channel.traitsListeners.delete(listener);
     },
     trace: (tag, onEvents, options = {}) => traceOn(channel, tag, onEvents, options),
+    sudoRun: (replay, options = {}) => sudoRunOn(channel, replay, options),
     async close(o = {}) {
       if (channel.failure) return;
       await channel

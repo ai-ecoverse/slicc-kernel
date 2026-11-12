@@ -5,6 +5,7 @@ import { isAbsolute, join } from 'node:path';
 import { MessageChannel, type MessagePort, type Worker } from 'node:worker_threads';
 import { type AsyncProcessOptions, nodeAsyncHost } from './async/node-host.ts';
 import type { CdpHook } from './cdp/types.ts';
+import type { SudoRun, SudoRunOptions } from './client/attach.ts';
 import type { MessagePortLike } from './client/protocol.ts';
 import { type ServedClient, serveClient } from './client/serve-client.ts';
 import { type CronClock, clockZone } from './cron/clock.ts';
@@ -43,7 +44,7 @@ import { isMemoryRoot, memoryRoot } from './node/memory-root.ts';
 import { bootWorker } from './node/worker-boot.ts';
 import { diagnosing } from './node/ws-diagnose.ts';
 import { signalNumber } from './serve.ts';
-import type { ApproveHook } from './sudo.ts';
+import type { ApproveHook, SudoReplay } from './sudo.ts';
 import { systemTimeZone } from './time-zone.ts';
 import { fetchTransport, type NetworkTransport } from './transport.ts';
 
@@ -78,6 +79,8 @@ export {
   type ProcessEntry,
   type SpawnedProcess,
   type SpawnOptions,
+  type SudoRun,
+  type SudoRunOptions,
   type TraceBatch,
   type TraceEvent,
   type TraceExec,
@@ -159,6 +162,7 @@ export type {
   SudoApproval,
   SudoDenial,
   SudoFile,
+  SudoReplay,
   SudoReply,
   SudoRequest,
   SudoStdin,
@@ -217,6 +221,7 @@ export interface NodeKernel {
   attest(path: string): Promise<Attestation>;
   attest(path: string, options: { absent: 'allow' }): Promise<Attestation | AttestTombstone>;
   connect(options?: ConnectOptions): Promise<MessagePort>;
+  sudoRun(request: SudoReplay, options?: SudoRunOptions): Promise<SudoRun>;
   readonly users: KernelUsers;
   readonly groups: KernelGroups;
   setRoutes(routes: RouteTable): Promise<void>;
@@ -651,6 +656,40 @@ function processWorkers(
   };
 }
 
+function nodeAccounts(
+  launcher: Launcher,
+  guard: <T>(work: () => Promise<T>) => Promise<T>
+): Pick<NodeKernel, 'users' | 'groups'> {
+  return {
+    users: {
+      mode: launcher.usersMode,
+      add: (user) => guard(() => launcher.users.add(user)),
+      remove: (name, options) => guard(() => launcher.users.remove(name, options)),
+      list: () => guard(() => launcher.users.list()),
+    },
+    groups: {
+      list: () => guard(() => launcher.users.groups()),
+      add: (name, options) => guard(() => launcher.users.addGroup(name, options?.gid)),
+      addMember: (group, user) => guard(() => launcher.users.addMember(group, user)),
+      removeMember: (group, user) => guard(() => launcher.users.removeMember(group, user)),
+    },
+  };
+}
+
+async function nodeSudoRun(
+  launcher: Launcher,
+  guard: <T>(work: () => Promise<T>) => Promise<T>,
+  replay: SudoReplay,
+  options: SudoRunOptions
+): Promise<SudoRun> {
+  const running = await guard(() => launcher.sudoRun(replay, options));
+  const ended = guard(async () => {
+    const { status, signal } = await running.ended;
+    return { status, ...signalField(signal) };
+  });
+  return { pid: running.pid, pgid: running.pid, ended: quiet(ended) };
+}
+
 export async function createNodeKernel(options: NodeKernelOptions = {}): Promise<NodeKernel> {
   const hooks = sealedHooks(options.sealed);
   const timeZone = systemTimeZone(options.timeZone, clockZone(options.cron?.clock));
@@ -788,18 +827,8 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     mounts: async () => launcher.mounts.listed(),
     setRoutes: (routes) => guard(async () => launcher.setRoutes(routes)),
     updateTransportTraits: () => guard(async () => launcher.updateTransportTraits()),
-    users: {
-      mode: launcher.usersMode,
-      add: (user) => guard(() => launcher.users.add(user)),
-      remove: (name, options) => guard(() => launcher.users.remove(name, options)),
-      list: () => guard(() => launcher.users.list()),
-    },
-    groups: {
-      list: () => guard(() => launcher.users.groups()),
-      add: (name, options) => guard(() => launcher.users.addGroup(name, options?.gid)),
-      addMember: (group, user) => guard(() => launcher.users.addMember(group, user)),
-      removeMember: (group, user) => guard(() => launcher.users.removeMember(group, user)),
-    },
+    ...nodeAccounts(launcher, guard),
+    sudoRun: (replay, sudoOptions = {}) => nodeSudoRun(launcher, guard, replay, sudoOptions),
     async connect(connectOptions = {}) {
       if (terminated) throw new Error(TERMINATED);
       const { user } = connectOptions;

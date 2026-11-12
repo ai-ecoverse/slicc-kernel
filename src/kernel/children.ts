@@ -90,10 +90,12 @@ export class SpawnError extends Error {
 
 export class ChangedError extends SpawnError {
   readonly notice: string;
+  readonly file: string;
 
-  constructor(notice: string) {
+  constructor(notice: string, file: string) {
     super('EPERM');
     this.notice = notice;
+    this.file = file;
   }
 }
 
