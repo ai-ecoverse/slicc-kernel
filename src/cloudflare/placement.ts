@@ -2,7 +2,7 @@ import { SpawnError } from '../kernel/children.ts';
 import type { IsolateGate } from './isolates.ts';
 
 export const ISOLATE_MEMORY_BUDGET = 64 * 2 ** 20;
-export const INSTANCE_ALLOWANCE = 2 ** 20;
+export const INSTANCE_ALLOWANCE = 8 * 2 ** 20;
 export const MODULE_ALLOWANCE_FACTOR = 3;
 export const MAX_SHARDS = 8;
 export const DEPTH_RESERVE = 2;
@@ -18,6 +18,7 @@ export interface Seat {
   readonly shard: number;
   readonly image: string;
   readonly depth: number;
+  readonly forking: number;
   memory(bytes: number): void;
   hold(bytes: number): () => void;
   release(): void;
@@ -41,6 +42,7 @@ interface Shard {
 interface SeatState {
   bytes: number;
   held: number;
+  holds: number;
   released: boolean;
 }
 
@@ -80,11 +82,13 @@ export class Placement {
     return total;
   }
 
-  describe(): Record<string, { seats: number; used: number; pending: number }> {
-    const out: Record<string, { seats: number; used: number; pending: number }> = {};
+  describe(): Record<string, { seats: number; used: number; pending: number; holds: number[] }> {
+    const out: Record<string, { seats: number; used: number; pending: number; holds: number[] }> =
+      {};
     for (const shard of this.shards.values()) {
       out[shard.id.slice(-12)] = {
         seats: shard.seats.size,
+        holds: [...shard.seats].map((seat) => seat.holds),
         used: Math.round(this.used(shard.id) / 2 ** 20),
         pending: Math.round(this.pending(shard.id) / 2 ** 20),
       };
@@ -140,7 +144,7 @@ export class Placement {
       if (!release) throw new Error('isolate gate refused a placed shard');
       shard.release = release;
     }
-    const state: SeatState = { bytes: need, held: 0, released: false };
+    const state: SeatState = { bytes: need, held: 0, holds: 0, released: false };
     shard.seats.add(state);
     this.peakShards = Math.max(this.peakShards, this.shardsOf(size.base).length);
     const seat: Seat = {
@@ -148,6 +152,9 @@ export class Placement {
       shard: shard.index,
       image: size.image,
       depth,
+      get forking() {
+        return state.holds;
+      },
       memory: (bytes) => {
         if (state.released || !(bytes > 0)) return;
         const shrank = bytes < state.bytes;
@@ -157,11 +164,13 @@ export class Placement {
       hold: (bytes) => {
         if (state.released || !(bytes > 0)) return () => {};
         state.held += bytes;
+        state.holds++;
         let given = false;
         return () => {
           if (given) return;
           given = true;
           state.held = Math.max(0, state.held - bytes);
+          state.holds = Math.max(0, state.holds - 1);
           this.wake();
         };
       },
@@ -229,9 +238,9 @@ export class Placement {
     return undefined;
   }
 
-  async place(size: ImageSize, need?: number, depth = 0): Promise<Seat> {
+  async place(size: ImageSize, need?: number, depth = 0, parent?: Seat): Promise<Seat> {
     for (;;) {
-      const seat = this.tryPlace(size, need, depth);
+      const seat = parent && parent.forking > 1 ? undefined : this.tryPlace(size, need, depth);
       if (seat) return seat;
       if (!(await this.changed())) throw new SpawnError('EAGAIN');
     }

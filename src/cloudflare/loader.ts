@@ -153,7 +153,13 @@ export function cloudflareProcesses(
     async admit(module, from = {}) {
       const image = imageOf(module);
       if (image === undefined || !images.has(image)) return () => {};
-      const seat = await placement.place(await sizeOf(image), undefined, depthOf(from.ppid));
+      const parent = from.ppid === undefined ? undefined : seated.get(from.ppid);
+      const seat = await placement.place(
+        await sizeOf(image),
+        undefined,
+        depthOf(from.ppid),
+        parent
+      );
       const list = reservations.get(image) ?? [];
       list.push(seat);
       reservations.set(image, list);

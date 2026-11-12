@@ -1,4 +1,5 @@
 import { ASYNC_SNAPSHOT_TAKEN } from '../async/wire.ts';
+import { decodeSabResult } from '../realm/sync-sab-wire.ts';
 import { dispose, type ProcessEndStub } from './rpc-link.ts';
 
 export const FORK_TOKEN_TTL_MS = 30_000;
@@ -33,12 +34,28 @@ export class ForkTokens {
     message: unknown,
     end: ProcessEndStub | undefined,
     hold: (bytes: number) => () => void = () => () => {}
-  ): void {
+  ): string | undefined {
     const call = message as ForkCall | null;
-    if (!end || call?.type !== 'async-syscall' || call.req?.op !== 'proc-fork') return;
+    if (!end || call?.type !== 'async-syscall' || call.req?.op !== 'proc-fork') return undefined;
     const snapshot = call.req.state?.snapshot;
-    if (typeof snapshot?.token !== 'string' || typeof snapshot.total !== 'number') return;
+    if (typeof snapshot?.token !== 'string' || typeof snapshot.total !== 'number') return undefined;
     this.hold(snapshot.token, snapshot.total, end, hold(snapshot.total));
+    return snapshot.token;
+  }
+
+  watchAnswer(token: string | undefined, answer: unknown): void {
+    if (token === undefined) return;
+    const reply = answer as { failed?: unknown; status?: unknown; bytes?: unknown } | null;
+    if (!reply || reply.failed !== undefined) {
+      this.drop(token);
+      return;
+    }
+    if (typeof reply.status !== 'number' || !(reply.bytes instanceof Uint8Array)) return;
+    try {
+      if (!decodeSabResult(reply.status, reply.bytes).ok) this.drop(token);
+    } catch {
+      this.drop(token);
+    }
   }
 
   watchPost(message: unknown): boolean {

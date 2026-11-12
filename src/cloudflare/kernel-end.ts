@@ -95,11 +95,17 @@ export class KernelEnd extends RpcTarget {
   async call(value: unknown, count: number, sent?: number): Promise<Answer> {
     const state = this.#state;
     const message = state.inbox.take(value, count);
-    state.forks?.watchCall(message, state.end, state.holds);
+    const token = state.forks?.watchCall(message, state.end, state.holds);
     state.words(message);
     if (state.refresh && timed(message)) await state.refresh().catch(() => undefined);
-    const result = await state.call(behindProcess(message, sent));
-    return state.held.answer(result);
+    try {
+      const result = await state.call(behindProcess(message, sent));
+      state.forks?.watchAnswer(token, result);
+      return state.held.answer(result);
+    } catch (err) {
+      if (token !== undefined) state.forks?.drop(token);
+      throw err;
+    }
   }
 
   take(held: number, index: number): Uint8Array {
