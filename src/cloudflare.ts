@@ -7,6 +7,8 @@ import { ISOLATE_WAIT_MS, IsolateGate, MAX_ISOLATES } from './cloudflare/isolate
 import { cloudflareProcesses, type ProcessHostCode } from './cloudflare/loader.ts';
 import type { CloudflareKernel, CloudflareKernelOptions } from './cloudflare/options.ts';
 import { PIECE_BYTES } from './cloudflare/rpc-pack.ts';
+import { sqliteMeta } from './cloudflare/sqlite-meta.ts';
+import { sqliteRoot } from './cloudflare/sqlite-root.ts';
 import { OpfsFs } from './fs/opfs.ts';
 import { DEFAULT_USERS, fsError, modeOption } from './fs/types.ts';
 import type { ConnectOptions } from './index.ts';
@@ -45,6 +47,9 @@ export {
   type WorkerLoaderLike,
 } from './cloudflare/loader.ts';
 export type { CloudflareKernel, CloudflareKernelOptions } from './cloudflare/options.ts';
+export { sqliteMeta } from './cloudflare/sqlite-meta.ts';
+export { isSqliteRoot, sqliteRoot } from './cloudflare/sqlite-root.ts';
+export type { SqlCursorLike, SqliteOptions, SqlStorageLike } from './cloudflare/sqlite-store.ts';
 export { memoryRoot };
 export const PROCESS_HOST_SOURCE: string = HOST_SOURCE;
 export const ASYNC_PROCESS_SOURCE: string | undefined = PROCESS_SOURCE;
@@ -82,6 +87,17 @@ function hostCode(options: CloudflareKernelOptions): ProcessHostCode {
   };
 }
 
+function rootFs(options: CloudflareKernelOptions): { root: FileSystemDirectoryHandle; fs: OpfsFs } {
+  const { sql } = options;
+  if (sql && (options.root || options.meta)) {
+    throw new TypeError('createCloudflareKernel: give either sql or root and meta');
+  }
+  const root = options.root ?? (sql ? sqliteRoot(sql, options.sqlite) : memoryRoot());
+  const meta = options.meta ?? (sql ? sqliteMeta(sql, options.sqlite) : undefined);
+  const ranged = options.ranged ?? (sql !== undefined || isMemoryRoot(root));
+  return { root, fs: new OpfsFs(root, meta, undefined, { ranged }) };
+}
+
 let sessions = 0;
 
 function client(
@@ -117,8 +133,7 @@ export async function createCloudflareKernel(
 ): Promise<CloudflareKernel> {
   if (!options?.loader) throw new TypeError('createCloudflareKernel: loader is required');
   const hooks = sealedHooks(options.sealed);
-  const root = options.root ?? memoryRoot();
-  const fs = new OpfsFs(root, undefined, undefined, { ranged: isMemoryRoot(root) });
+  const { root, fs } = rootFs(options);
   await fs.reconcile();
   const images = new Images();
   const gate = new IsolateGate(

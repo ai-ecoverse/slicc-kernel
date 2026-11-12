@@ -1,5 +1,6 @@
 import type { CronClock } from '../cron/clock.ts';
 import type { DenialHook } from '../fs/dac.ts';
+import type { MetaStore } from '../fs/meta.ts';
 import type { Protection } from '../fs/protect.ts';
 import type { UsersMode } from '../fs/types.ts';
 import type {
@@ -22,10 +23,15 @@ import type { NetworkTransport } from '../transport.ts';
 import type { Images } from './images.ts';
 import type { IsolateGate } from './isolates.ts';
 import type { Processes, ProcessHostCode, WorkerLoaderLike } from './loader.ts';
+import type { SqliteOptions, SqlStorageLike } from './sqlite-store.ts';
 
 export interface CloudflareKernelOptions {
   loader: WorkerLoaderLike;
   root?: FileSystemDirectoryHandle;
+  meta?: MetaStore;
+  ranged?: boolean;
+  sql?: SqlStorageLike;
+  sqlite?: SqliteOptions;
   processHost?: Partial<ProcessHostCode>;
   isolates?: { max?: number; waitMs?: number };
   modules?: string;

@@ -83,7 +83,7 @@ export class Plumbing extends DurableObject {
     this.fakes = new Map();
     this.links = new Map();
     this.nextPid = 1;
-    this.kernelRoutes = new KernelRoutes(env);
+    this.kernelRoutes = new KernelRoutes(ctx, env);
   }
 
   spawn(image) {

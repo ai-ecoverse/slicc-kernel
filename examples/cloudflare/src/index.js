@@ -17,24 +17,47 @@ function same(a, b) {
   return diff === 0;
 }
 
+async function installed(kernel, name, manifest) {
+  try {
+    const text = new TextDecoder().decode(
+      await kernel.readFile(`/node_modules/${name}/package.json`)
+    );
+    return text === manifest;
+  } catch {
+    return false;
+  }
+}
+
 async function install(kernel) {
+  let wrote = 0;
   for (const { name, files } of PACKAGES) {
-    for (const [path, data] of Object.entries(files)) {
+    const { 'package.json': manifest, ...rest } = files;
+    if (await installed(kernel, name, manifest)) continue;
+    for (const [path, data] of Object.entries(rest)) {
       const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : data;
       await kernel.writeFile(`/node_modules/${name}/${path}`, bytes);
     }
+    await kernel.writeFile(`/node_modules/${name}/package.json`, manifest);
+    wrote++;
   }
+  return wrote;
 }
 
 export class Kernel extends DurableObject {
   booting;
   bootMs;
+  installed;
 
   kernel() {
     this.booting ??= (async () => {
       const started = Date.now();
-      const kernel = await createCloudflareKernel({ loader: this.env.LOADER });
-      await install(kernel);
+      const storage = this.ctx.storage;
+      const kernel = await createCloudflareKernel({
+        loader: this.env.LOADER,
+        sql: storage.sql,
+        sqlite: { transaction: (fn) => storage.transactionSync(fn) },
+      });
+      this.installed = await install(kernel);
       this.bootMs = Date.now() - started;
       return kernel;
     })().catch((err) => {
@@ -49,7 +72,12 @@ export class Kernel extends DurableObject {
     const cold = this.booting === undefined;
     const kernel = await this.kernel();
     if (url.pathname === '/boot') {
-      return Response.json({ cold, bootMs: this.bootMs, images: kernel.images.size });
+      return Response.json({
+        cold,
+        bootMs: this.bootMs,
+        installed: this.installed,
+        images: kernel.images.size,
+      });
     }
     if (url.pathname !== '/run' || request.method !== 'POST') {
       return new Response('routes: POST /run, GET /boot\n', { status: 404 });
@@ -70,7 +98,7 @@ export class Kernel extends DurableObject {
       stderr: result.stderr,
       ...(result.signal ? { signal: result.signal } : {}),
       ms: Date.now() - started,
-      ...(cold ? { bootMs: this.bootMs } : {}),
+      ...(cold ? { bootMs: this.bootMs, installed: this.installed } : {}),
     });
   }
 }

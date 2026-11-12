@@ -19,7 +19,7 @@ function freePort() {
   });
 }
 
-export async function startDev(config, { timeoutMs = 90_000, remote } = {}) {
+export async function startDev(config, { timeoutMs = 90_000, remote, persist } = {}) {
   if (remote?.url && remote?.key) return { url: remote.url, key: remote.key, stop: async () => {} };
   if (!existsSync(join(REPO, 'dist/cloudflare.js'))) {
     return { skip: 'dist/cloudflare.js is missing; run npm run build first' };
@@ -44,7 +44,7 @@ export async function startDev(config, { timeoutMs = 90_000, remote } = {}) {
       '--inspector-port',
       String(inspector),
       '--persist-to',
-      join(dir, 'state'),
+      persist ?? join(dir, 'state'),
       '--var',
       `KEY:${key}`,
       '--show-interactive-dev-session=false',
@@ -85,7 +85,7 @@ export async function startDev(config, { timeoutMs = 90_000, remote } = {}) {
   while (Date.now() < deadline && !ended) {
     if (log.includes('Ready on')) {
       try {
-        await fetch(url, { headers: { 'x-slicc-key': key } });
+        await fetch(`${url}/ready`);
         return { url, key, stop, log: () => log };
       } catch {}
     }

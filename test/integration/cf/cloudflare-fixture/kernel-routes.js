@@ -34,20 +34,25 @@ async function install(kernel) {
 const json = (value, status = 200) => Response.json(value, { status });
 
 export class KernelRoutes {
-  constructor(env) {
+  constructor(ctx, env) {
+    this.ctx = ctx;
     this.env = env;
     this.kernel = undefined;
     this.terminals = new Map();
     this.next = 1;
   }
 
-  async boot({ process, waitMs }) {
+  async boot({ process, waitMs, persist }) {
     this.kernel?.terminate();
     const started = Date.now();
+    const storage = this.ctx.storage;
     this.kernel = await createCloudflareKernel({
       loader: this.env.LOADER,
       processHost: { process },
       ...(waitMs ? { isolates: { waitMs } } : {}),
+      ...(persist
+        ? { sql: storage.sql, sqlite: { transaction: (fn) => storage.transactionSync(fn) } }
+        : {}),
     });
     await install(this.kernel);
     return { bootMs: Date.now() - started };
@@ -127,6 +132,15 @@ export class KernelRoutes {
           mounts: mounts.map((entry) => entry.target),
         });
       }
+      case '/kernel/file-write':
+        await this.kernel.writeFile(args.path, args.data);
+        return json({ ok: true });
+      case '/kernel/file-read':
+        try {
+          return json({ data: new TextDecoder().decode(await this.kernel.readFile(args.path)) });
+        } catch (err) {
+          return json({ error: String(err?.code ?? err?.message ?? err) });
+        }
       case '/kernel/stats':
         return json(this.stats());
       case '/kernel/terminate':
