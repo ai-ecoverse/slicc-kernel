@@ -114,6 +114,35 @@ describe('the Workspace mounted in the kernel', () => {
     assert.deepEqual([...bytes], [...new TextEncoder().encode('onXYtw\0\0\0Z')]);
   });
 
+  it('shows a file it creates while the file is still open', async () => {
+    const script = [
+      'mkdir -p open',
+      'exec 3>open/pending.txt',
+      'ls open',
+      'stat -c %s open/pending.txt',
+      'echo hi >&3',
+      'set -C',
+      '(echo x > open/pending.txt) 2>/dev/null || echo refused',
+      'set +C',
+      'chmod 600 open/pending.txt',
+      'exec 3>&-',
+      'cat open/pending.txt',
+      ': > open/empty.txt',
+      '(umask 077; echo s > open/secret.txt)',
+      'mv open/pending.txt open/moved.txt',
+    ].join('\n');
+    const result = await run(ws, script);
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.equal(result.stdout, 'pending.txt\n0\nrefused\nhi\n');
+    assert.equal(await ws.fs.readFile(`${MOUNT}/open/moved.txt`, 'utf8'), 'hi\n');
+    assert.equal((await ws.fs.stat(`${MOUNT}/open/moved.txt`)).mode & 0o777, 0o600);
+    assert.equal((await ws.fs.stat(`${MOUNT}/open/empty.txt`)).size, 0);
+    assert.equal((await ws.fs.stat(`${MOUNT}/open/secret.txt`)).mode & 0o777, 0o600);
+    const missing = await run(ws, 'echo x > open/no/such/file');
+    assert.notEqual(missing.exitCode, 0);
+    assert.match(missing.stderr, /No such file or directory/);
+  });
+
   it('keeps the mode of a file it rewrites', async () => {
     await ws.fs.writeFile(`${MOUNT}/kept.sh`, 'old', { mode: 0o750 });
     const result = await run(ws, 'echo new > kept.sh && cat kept.sh');

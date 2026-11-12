@@ -181,8 +181,27 @@ describe('the Computer example Worker', { concurrency: false }, () => {
         ['exit', 0],
       ]
     );
-    const [one, , , exit] = events;
-    assert.ok(exit.at - one.at > 1500, `one came ${Math.round(exit.at - one.at)} ms before exit`);
+    const [one, two, three, exit] = events;
+    t.diagnostic(
+      `arrivals after one: two +${Math.round(two.at - one.at)} ms, three +${Math.round(three.at - one.at)} ms, exit +${Math.round(exit.at - one.at)} ms`
+    );
+    assert.ok(two.at - one.at > 200, `two came ${Math.round(two.at - one.at)} ms after one`);
+    assert.ok(three.at - two.at > 200, `three came ${Math.round(three.at - two.at)} ms after two`);
+  });
+
+  test('three sleeps of one second take at least three seconds', async (t) => {
+    if (skipped(t)) return;
+    const gaps = [];
+    let last;
+    const start = performance.now();
+    await streamed('for i in 1 2 3 4; do echo $i; [ $i = 4 ] || sleep 1; done', {}, (event) => {
+      if (event.name !== 'stdout') return;
+      if (last !== undefined) gaps.push(Math.round(event.at - last));
+      last = event.at;
+    });
+    const total = performance.now() - start;
+    t.diagnostic(`gaps between lines: ${gaps.join(', ')} ms, run ${Math.round(total)} ms`);
+    assert.ok(total >= 3000, `the run took ${Math.round(total)} ms; gaps ${gaps.join(', ')} ms`);
   });
 
   test('killExec ends a sleep 100', async (t) => {
