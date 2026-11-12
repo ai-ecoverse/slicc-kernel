@@ -5,7 +5,7 @@ import type { RealmTransportTraits } from '../kernel/net/transport.ts';
 import type { TraceEvent } from '../kernel/trace.ts';
 import type { MountSpec } from '../mount/mount-fs.ts';
 
-export const PROTOCOL: readonly [number, number] = [1, 16];
+export const PROTOCOL: readonly [number, number] = [1, 17];
 
 export interface ClientHello {
   protocol: readonly [number, number];

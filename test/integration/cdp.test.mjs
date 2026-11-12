@@ -16,12 +16,13 @@ after(() => chrome.close());
 const browser = (await (await fetch(`http://127.0.0.1:${port}/json/version`)).json())
   .webSocketDebuggerUrl;
 
-function relay(page) {
+function relay(page, opened = []) {
   const sockets = new Map();
   const deliver = (...args) =>
     page.evaluate((id, m, closed) => window.cdpIn(id, m, closed), ...args).catch(() => false);
   page.expose('cdpOut', ({ id, open, m, close }) => {
     if (open) {
+      opened.push(open);
       const ws = new WebSocket(browser);
       const queued = [];
       ws.onopen = () => {
@@ -44,19 +45,29 @@ function relay(page) {
 
 test('a WASI guest drives the harness browser through the CDP facade', async (t) => {
   const { page, run } = await booted(chrome, t, { cdp: true });
-  const sockets = relay(page);
+  const opened = [];
+  const sockets = relay(page, opened);
   await installPackage(page, 'wasix-python');
   const client = await readFile(new URL('fixtures/cdp/client.py', import.meta.url), 'utf8');
   assert.equal((await run(['bash', '-c', 'cat > /home/client.py'], { stdin: client })).status, 0);
 
   const target = new URL('/fixtures/cdp/page.html', chrome.url).href;
-  const r = await run(['python3', '/home/client.py', 'drive', target], { cwd: '/home' });
+  const r = await run(['python3', '/home/client.py', 'drive', target], {
+    cwd: '/home',
+    tag: 'slicc-taint:page',
+  });
   assert.equal(r.stderr, '');
   assert.match(
     r.stdout,
     /^targets [1-9]\d*\nnavigated True False\nscreenshot 89504e470d0a1a0a\ndone\n$/
   );
   assert.equal(sockets.size, 0);
+  assert.ok(opened.length > 0);
+  for (const { stamp } of opened) {
+    assert.equal(stamp.tag, 'slicc-taint:page');
+    assert.equal(stamp.uid, 0);
+    assert.ok(stamp.pid > 0);
+  }
   assert.deepEqual(page.errors, []);
 });
 

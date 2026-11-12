@@ -650,6 +650,7 @@ export class LoopbackNet {
   private readonly reserved = new Set<number>();
   private readonly facades = new Map<number, string>();
   private proxyStamped: number | undefined;
+  private readonly stamped = new Set<number>();
   private nextEphemeral = EPHEMERAL_FIRST;
   private route: UplinkRoute | undefined;
   private origins: ((conn: KernelSocket, origin: string) => Promise<void>) | undefined;
@@ -724,6 +725,9 @@ export class LoopbackNet {
     this.kernelOnly(port, true);
     this.facades.set(port, name);
   }
+  stampPeers(port: number): void {
+    this.stamped.add(port);
+  }
   stampProxy(port: number): void {
     this.proxyStamped = port;
   }
@@ -732,7 +736,9 @@ export class LoopbackNet {
   }
   stampsPeers(addr: SockAddr): boolean {
     if (addr.family !== 'inet' || !isLoopback(canonicalHost(addr.host))) return false;
-    return this.facades.has(addr.port) || this.proxyStamped === addr.port;
+    return (
+      this.facades.has(addr.port) || this.stamped.has(addr.port) || this.proxyStamped === addr.port
+    );
   }
   activate(addr: SockAddr, start: () => void): void {
     this.activators.set(keyOf(addr), start);

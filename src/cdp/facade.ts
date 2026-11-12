@@ -6,7 +6,7 @@ import {
   REASON,
   type RequestHead,
 } from '../kernel/net/http1.ts';
-import type { KernelSocket, LoopbackNet } from '../kernel/socket.ts';
+import type { ConnectorStamp, KernelSocket, LoopbackNet } from '../kernel/socket.ts';
 import type { CdpHosts } from './hosts.ts';
 import { CDP_PORT, type CdpConnection, NO_CDP_HOST } from './types.ts';
 import {
@@ -146,11 +146,14 @@ export class CdpFacade {
       );
       return;
     }
-    await this.write(conn, json(await this.list(runtime)));
+    await this.write(conn, json(await this.list(runtime, conn.peerStamp)));
   }
 
-  private async list(runtime: string | undefined): Promise<unknown[]> {
-    const conn = await this.host(runtime);
+  private async list(
+    runtime: string | undefined,
+    stamp: ConnectorStamp | undefined
+  ): Promise<unknown[]> {
+    const conn = await this.host(runtime, stamp);
     try {
       const reply = await new Promise<{ result?: { targetInfos?: TargetInfo[] }; error?: unknown }>(
         (resolve, reject) => {
@@ -186,8 +189,14 @@ export class CdpFacade {
     }
   }
 
-  private host(runtime: string | undefined): Promise<CdpConnection> {
-    return this.options.hosts.connect(runtime ? { runtime } : {});
+  private host(
+    runtime: string | undefined,
+    stamp: ConnectorStamp | undefined
+  ): Promise<CdpConnection> {
+    return this.options.hosts.connect({
+      ...(runtime ? { runtime } : {}),
+      ...(stamp ? { stamp } : {}),
+    });
   }
 
   private async upgrade(
@@ -197,7 +206,7 @@ export class CdpFacade {
     runtime: string | undefined
   ): Promise<void> {
     const accept = await acceptKey(req.headers);
-    const host = await this.host(runtime);
+    const host = await this.host(runtime, conn.peerStamp);
     const limits = {
       max: this.options.maxMessage ?? MAX_MESSAGE,
       closeWaitMs: this.options.closeWaitMs ?? CLOSE_WAIT_MS,
@@ -293,6 +302,7 @@ export function enableCdp(net: LoopbackNet, hosts: CdpHosts): () => CdpFacade | 
   let facade: CdpFacade | undefined;
   net.kernelOnly(CDP_PORT, true);
   net.reserve(CDP_PORT);
+  net.stampPeers(CDP_PORT);
   net.activate({ family: 'inet', host: '127.0.0.1', port: CDP_PORT }, () => {
     const started = new CdpFacade({ net, hosts });
     facade = started;
