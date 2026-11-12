@@ -192,7 +192,10 @@ describe('closed files committed behind the run', () => {
       },
     });
   before(async () => {
-    computer = await computerWith({ wrapFs: counting });
+    computer = await computerWith({
+      wrapFs: counting,
+      backend: { writeBehind: { idleMs: 60_000, maxMs: 60_000 } },
+    });
     ws = computer.workspace;
   });
   after(() => computer.close());
@@ -229,14 +232,21 @@ describe('closed files committed behind the run', () => {
   });
 
   it('lands what a background process writes after the run ends', async () => {
-    const result = await run(ws, '(sleep 0.3; echo late > wb/late.txt) > /dev/null 2>&1 &');
-    assert.equal(result.exitCode, 0);
-    const deadline = Date.now() + 5000;
-    let text;
-    while (Date.now() < deadline && text === undefined) {
-      text = await ws.fs.readFile(`${MOUNT}/wb/late.txt`, 'utf8').catch(() => undefined);
-      if (text === undefined) await new Promise((resolve) => setTimeout(resolve, 50));
+    const prompt = await computerWith();
+    try {
+      const fs = prompt.workspace.fs;
+      const script = 'mkdir -p wb; (sleep 0.3; echo late > wb/late.txt) > /dev/null 2>&1 &';
+      const result = await run(prompt.workspace, script);
+      assert.equal(result.exitCode, 0);
+      const deadline = Date.now() + 5000;
+      let text;
+      while (Date.now() < deadline && text === undefined) {
+        text = await fs.readFile(`${MOUNT}/wb/late.txt`, 'utf8').catch(() => undefined);
+        if (text === undefined) await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      assert.equal(text, 'late\n');
+    } finally {
+      await prompt.close();
     }
-    assert.equal(text, 'late\n');
   });
 });

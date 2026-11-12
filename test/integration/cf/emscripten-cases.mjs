@@ -68,7 +68,7 @@ export const TIER2 = [
   'sqlite3 db "create table t(a,b); insert into t values(1,2),(3,4); select * from t; select sum(a) from t;"; sqlite3 db "select count(*) from t"; sqlite3 db .dump',
   'printf "all: out\\nout: in\\n\\tcat in > out\\n\\techo built\\nclean:\\n\\trm -f out\\n" > Makefile; echo data > in; make; make; cat out; make clean',
   'printf "%%.o: %%.c\\n\\tcp \\$< \\$@\\nall: a.o b.o\\n\\techo linked\\n" > Makefile; touch a.c b.c; make -j2 2>&1 | sort; make',
-  'ps; ps -o comm | sort; ps -e -o comm= | sort | head -3',
+  'ps -o comm= -p $$; ps -e -o comm= | sort -u | head -1; ps -p 99999 > /dev/null; echo rc=$?',
 ];
 
 export const TERMINAL_STEPS = [
