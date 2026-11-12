@@ -55,17 +55,6 @@ await build({
   logLevel: 'warning',
 });
 await build({
-  entryPoints: ['src/cloudflare/computer.ts'],
-  outfile: 'dist/cloudflare/computer.js',
-  bundle: true,
-  format: 'esm',
-  platform: 'neutral',
-  target: 'es2024',
-  sourcemap: 'linked',
-  define,
-  logLevel: 'warning',
-});
-await build({
   entryPoints: ['src/node.ts', 'src/node-driver-worker.ts'],
   outdir: 'dist',
   bundle: true,

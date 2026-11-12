@@ -23,9 +23,7 @@ export const repo = new URL('../../../', import.meta.url).pathname;
 const computer = await import('@cloudflare/computer');
 export const { Workspace } = computer;
 export const { createNodeKernel } = await import(join(repo, 'dist/node.js'));
-export const { sliccBackend, workspaceDriver } = await import(
-  join(repo, 'dist/cloudflare/computer.js')
-);
+export const { sliccBackend, workspaceDriver } = await import(join(repo, 'dist/cloudflare.js'));
 
 const bindable = (value) => {
   if (value === undefined || value === null) return null;
