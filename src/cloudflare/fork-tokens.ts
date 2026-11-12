@@ -1,4 +1,5 @@
 import { ASYNC_SNAPSHOT_TAKEN } from '../async/wire.ts';
+import { decodeSabResult } from '../realm/sync-sab-wire.ts';
 import { dispose, type ProcessEndStub } from './rpc-link.ts';
 
 export const FORK_TOKEN_TTL_MS = 30_000;
@@ -7,6 +8,7 @@ interface Holder {
   end: ProcessEndStub;
   total: number;
   timer: ReturnType<typeof setTimeout>;
+  unhold: () => void;
 }
 
 interface ForkCall {
@@ -28,12 +30,32 @@ export class ForkTokens {
     return this.held.size;
   }
 
-  watchCall(message: unknown, end: ProcessEndStub | undefined): void {
+  watchCall(
+    message: unknown,
+    end: ProcessEndStub | undefined,
+    hold: (bytes: number) => () => void = () => () => {}
+  ): string | undefined {
     const call = message as ForkCall | null;
-    if (!end || call?.type !== 'async-syscall' || call.req?.op !== 'proc-fork') return;
+    if (!end || call?.type !== 'async-syscall' || call.req?.op !== 'proc-fork') return undefined;
     const snapshot = call.req.state?.snapshot;
-    if (typeof snapshot?.token !== 'string' || typeof snapshot.total !== 'number') return;
-    this.hold(snapshot.token, snapshot.total, end);
+    if (typeof snapshot?.token !== 'string' || typeof snapshot.total !== 'number') return undefined;
+    this.hold(snapshot.token, snapshot.total, end, hold(snapshot.total));
+    return snapshot.token;
+  }
+
+  watchAnswer(token: string | undefined, answer: unknown): void {
+    if (token === undefined) return;
+    const reply = answer as { failed?: unknown; status?: unknown; bytes?: unknown } | null;
+    if (!reply || reply.failed !== undefined) {
+      this.drop(token);
+      return;
+    }
+    if (typeof reply.status !== 'number' || !(reply.bytes instanceof Uint8Array)) return;
+    try {
+      if (!decodeSabResult(reply.status, reply.bytes).ok) this.drop(token);
+    } catch {
+      this.drop(token);
+    }
   }
 
   watchPost(message: unknown): boolean {
@@ -46,10 +68,10 @@ export class ForkTokens {
     return true;
   }
 
-  private hold(token: string, total: number, end: ProcessEndStub): void {
+  private hold(token: string, total: number, end: ProcessEndStub, unhold: () => void): void {
     this.drop(token);
     const timer = setTimeout(() => this.drop(token), this.ttlMs);
-    this.held.set(token, { end: end.dup(), total, timer });
+    this.held.set(token, { end: end.dup(), total, timer, unhold });
   }
 
   drop(token: string): void {
@@ -57,6 +79,7 @@ export class ForkTokens {
     if (!holder) return;
     clearTimeout(holder.timer);
     this.held.delete(token);
+    holder.unhold();
     dispose(holder.end);
   }
 

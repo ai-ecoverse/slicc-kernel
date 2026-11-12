@@ -298,6 +298,7 @@ function restoreExportedMemory(
 ): void {
   if (imported || !init.fork?.wasi) return;
   fillMemory(instance.exports.memory as WebAssembly.Memory, init.fork.memory);
+  init.fork.memory = new Uint8Array(0);
 }
 
 function fillMemory(memory: WebAssembly.Memory, copy: Uint8Array): void {

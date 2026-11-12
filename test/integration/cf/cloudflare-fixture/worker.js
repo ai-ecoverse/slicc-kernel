@@ -86,6 +86,10 @@ export class Plumbing extends DurableObject {
     this.kernelRoutes = new KernelRoutes(ctx, env);
   }
 
+  now() {
+    return Date.now();
+  }
+
   spawn(image) {
     const pid = this.nextPid++;
     const fake = new Fake(pid);

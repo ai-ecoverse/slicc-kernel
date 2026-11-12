@@ -33,7 +33,8 @@ export interface CloudflareKernelOptions {
   sql?: SqlStorageLike;
   sqlite?: SqliteOptions;
   processHost?: Partial<ProcessHostCode>;
-  isolates?: { max?: number; waitMs?: number };
+  isolates?: { max?: number; waitMs?: number; memory?: number; perInstance?: number };
+  clock?: () => Promise<unknown>;
   modules?: string;
   commands?: { append?: readonly string[] };
   env?: Record<string, string>;

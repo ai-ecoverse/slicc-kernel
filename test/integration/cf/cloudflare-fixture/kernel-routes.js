@@ -42,14 +42,20 @@ export class KernelRoutes {
     this.next = 1;
   }
 
-  async boot({ process, waitMs, persist, localForks }) {
+  async boot({ process, waitMs, persist, localForks, memory, max, clock = true }) {
     this.kernel?.terminate();
     const started = Date.now();
     const storage = this.ctx.storage;
+    const self = () => this.env.PLUMBING.get(this.ctx.id);
     this.kernel = await createCloudflareKernel({
       loader: this.env.LOADER,
+      ...(clock ? { clock: () => self().now() } : {}),
       processHost: { process, ...(localForks === false ? { localForks: false } : {}) },
-      ...(waitMs ? { isolates: { waitMs } } : {}),
+      isolates: {
+        ...(waitMs ? { waitMs } : {}),
+        ...(memory ? { memory } : {}),
+        ...(max ? { max } : {}),
+      },
       ...(persist
         ? { sql: storage.sql, sqlite: { transaction: (fn) => storage.transactionSync(fn) } }
         : {}),
@@ -60,12 +66,20 @@ export class KernelRoutes {
 
   async terminal({ argv }) {
     const id = this.next++;
-    const entry = { out: '', ended: undefined };
+    const entry = { out: '', ended: undefined, stamps: [] };
     const decoder = new TextDecoder();
     entry.terminal = await this.kernel.openTerminal(argv, {
       cwd: '/',
       onData: (bytes) => {
-        entry.out += decoder.decode(bytes, { stream: true });
+        const text = decoder.decode(bytes, { stream: true });
+        entry.out += text;
+        const at = entry.stamps.length;
+        entry.stamps.push([Date.now(), text]);
+        this.env.PLUMBING.get(this.ctx.id)
+          .now()
+          .then((now) => {
+            entry.stamps[at][0] = now;
+          });
       },
     });
     entry.terminal.ended.then(
@@ -87,6 +101,7 @@ export class KernelRoutes {
       peak: isolates.peak,
       loads: processes.loads,
       images: images.size,
+      peakShards: processes.placement.peakShards,
     };
   }
 
@@ -122,7 +137,7 @@ export class KernelRoutes {
         entry.terminal.signal(args.signal);
         return json({ ok: true });
       case '/kernel/output':
-        return json({ out: entry.out, ended: entry.ended ?? null });
+        return json({ out: entry.out, ended: entry.ended ?? null, stamps: entry.stamps });
       case '/kernel/connect': {
         const attached = await attachKernel(await this.kernel.connect({ user: args.user }));
         const result = await attached.run(args.argv, { cwd: '/' });
@@ -147,7 +162,12 @@ export class KernelRoutes {
         }
       case '/kernel/forks': {
         const { forks } = this.kernel.processes;
-        return json({ held: forks.size, fetched: forks.fetched, taken: forks.taken });
+        return json({
+          held: forks.size,
+          fetched: forks.fetched,
+          taken: forks.taken,
+          placement: this.kernel.processes.placement.describe(),
+        });
       }
       case '/kernel/stats':
         return json(this.stats());
