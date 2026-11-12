@@ -30,6 +30,18 @@ async function kernel(boot = {}) {
   return { call, run };
 }
 
+function waitsOf(reads, stamps, pattern) {
+  const after = [];
+  for (const [, text, seen] of stamps) {
+    for (const line of text.split(/\r?\n/)) if (pattern.test(line)) after.push(seen);
+  }
+  const out = [];
+  for (let i = 1; i < after.length; i++) {
+    if (after[i] < reads.length) out.push(reads[after[i]] - reads[after[i - 1]]);
+  }
+  return out;
+}
+
 const shown = (r) => ({ status: r.status, stdout: r.stdout, stderr: r.stderr });
 const pipeline = (stages) =>
   `cd /root; cat f ${'| cat '.repeat(stages - 1)}> out${stages}; wc -l < out${stages}`;
@@ -129,7 +141,9 @@ describe('sleeping in a Dynamic Worker', { concurrency: false }, () => {
     const rounds = Number(process.env.SLICC_CF_SLEEP_ROUNDS ?? 1);
     const totals = [];
     const gaps = [];
+    const waits = [];
     for (let round = 0; round < rounds; round++) {
+      await call('/kernel/clock-reads', {});
       const started = performance.now();
       const { id } = await call('/kernel/terminal', {
         argv: [
@@ -156,12 +170,17 @@ describe('sleeping in a Dynamic Worker', { concurrency: false }, () => {
         ['1', '2', '3', '4']
       );
       for (let i = 1; i < lines.length; i++) gaps.push(lines[i][0] - lines[i - 1][0]);
+      if (clock) {
+        const { reads } = await call('/kernel/clock-reads', {});
+        waits.push(...waitsOf(reads, done.stamps, /^[1-4]$/));
+      }
     }
     t.diagnostic(
       `totals ${totals.join(' ')} ms; gaps ${Math.min(...gaps)}..${Math.max(...gaps)} ms`
     );
+    if (clock) t.diagnostic(`kernel waits ${Math.min(...waits)}..${Math.max(...waits)} ms`);
     for (const total of totals) assert.ok(total >= 4000, `a round took ${total} ms`);
-    for (const gap of gaps) assert.ok(gap >= 1000, `a gap of ${gap} ms`);
+    for (const wait of clock ? waits : gaps) assert.ok(wait >= 1000, `a wait of ${wait} ms`);
   });
 
   test('a WASI futex_wait and sigtimedwait with a timeout never end early', async (t) => {
@@ -175,7 +194,9 @@ describe('sleeping in a Dynamic Worker', { concurrency: false }, () => {
     const rounds = Number(process.env.SLICC_CF_SLEEP_ROUNDS ?? 1);
     const gaps = [];
     const totals = [];
+    const waits = [];
     for (let round = 0; round < rounds; round++) {
+      await call('/kernel/clock-reads', {});
       const started = performance.now();
       const { id } = await call('/kernel/terminal', { argv: ['timedwaits'] });
       const done = await until(
@@ -195,11 +216,16 @@ describe('sleeping in a Dynamic Worker', { concurrency: false }, () => {
       }
       assert.equal(lines.length, 8, done.out);
       for (let i = 1; i < lines.length; i++) gaps.push(lines[i][0] - lines[i - 1][0]);
+      if (clock) {
+        const { reads } = await call('/kernel/clock-reads', {});
+        waits.push(...waitsOf(reads, done.stamps, /^(futex|sigwait) /));
+      }
     }
     t.diagnostic(
       `totals ${totals.join(' ')} ms; gaps ${Math.min(...gaps)}..${Math.max(...gaps)} ms`
     );
+    if (clock) t.diagnostic(`kernel waits ${Math.min(...waits)}..${Math.max(...waits)} ms`);
     for (const total of totals) assert.ok(total >= 8 * WAIT_MS, `a round took ${total} ms`);
-    for (const gap of gaps) assert.ok(gap >= WAIT_MS, `a gap of ${gap} ms`);
+    for (const wait of clock ? waits : gaps) assert.ok(wait >= WAIT_MS, `a wait of ${wait} ms`);
   });
 });

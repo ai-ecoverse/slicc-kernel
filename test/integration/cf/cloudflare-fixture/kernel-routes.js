@@ -39,6 +39,7 @@ export class KernelRoutes {
     this.env = env;
     this.kernel = undefined;
     this.terminals = new Map();
+    this.clockReads = [];
     this.next = 1;
   }
 
@@ -49,7 +50,17 @@ export class KernelRoutes {
     const self = () => this.env.PLUMBING.get(this.ctx.id);
     this.kernel = await createCloudflareKernel({
       loader: this.env.LOADER,
-      ...(clock ? { clock: () => self().now() } : {}),
+      ...(clock
+        ? {
+            clock: () =>
+              self()
+                .now()
+                .then((now) => {
+                  this.clockReads.push(now);
+                  return now;
+                }),
+          }
+        : {}),
       processHost: { process, ...(localForks === false ? { localForks: false } : {}) },
       isolates: {
         ...(waitMs ? { waitMs } : {}),
@@ -74,7 +85,7 @@ export class KernelRoutes {
         const text = decoder.decode(bytes, { stream: true });
         entry.out += text;
         const at = entry.stamps.length;
-        entry.stamps.push([Date.now(), text]);
+        entry.stamps.push([Date.now(), text, this.clockReads.length]);
         this.env.PLUMBING.get(this.ctx.id)
           .now()
           .then((now) => {
@@ -169,6 +180,8 @@ export class KernelRoutes {
           placement: this.kernel.processes.placement.describe(),
         });
       }
+      case '/kernel/clock-reads':
+        return json({ reads: this.clockReads.splice(0) });
       case '/kernel/stats':
         return json(this.stats());
       case '/kernel/terminate':
