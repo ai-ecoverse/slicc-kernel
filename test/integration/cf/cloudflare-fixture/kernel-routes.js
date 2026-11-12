@@ -97,11 +97,15 @@ export class KernelRoutes {
         return json(await this.boot(args));
       case '/kernel/run': {
         const started = Date.now();
-        const result = await this.kernel.run(args.argv, {
-          cwd: '/',
-          ...(args.stdin !== undefined ? { stdin: args.stdin } : {}),
-        });
-        return json({ ...result, ms: Date.now() - started });
+        try {
+          const result = await this.kernel.run(args.argv, {
+            cwd: '/',
+            ...(args.stdin !== undefined ? { stdin: args.stdin } : {}),
+          });
+          return json({ ...result, ms: Date.now() - started });
+        } catch (err) {
+          return json({ thrown: String(err?.message ?? err), code: err?.code ?? null });
+        }
       }
       case '/kernel/runs': {
         const results = await Promise.all(

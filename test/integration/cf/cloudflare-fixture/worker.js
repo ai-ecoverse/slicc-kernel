@@ -108,11 +108,22 @@ export class Plumbing extends DurableObject {
   async fetch(request) {
     const url = new URL(request.url);
     const body = request.method === 'POST' ? await request.arrayBuffer() : undefined;
-    const raw = url.pathname === '/image' || url.pathname === '/kernel/upload';
+    const raw = ['/image', '/kernel/upload', '/kernel/bulk'].includes(url.pathname);
     const args = body && !raw ? JSON.parse(new TextDecoder().decode(body)) : {};
     if (url.pathname === '/kernel/upload') {
       await this.kernelRoutes.kernel.writeFile(url.searchParams.get('path'), new Uint8Array(body));
       return json({ ok: true });
+    }
+    if (url.pathname === '/kernel/bulk') {
+      const bytes = new Uint8Array(body);
+      const length = new DataView(body).getUint32(0, true);
+      const manifest = JSON.parse(new TextDecoder().decode(bytes.subarray(4, 4 + length)));
+      let at = 4 + length;
+      for (const [path, size] of manifest) {
+        await this.kernelRoutes.kernel.writeFile(path, bytes.slice(at, at + size));
+        at += size;
+      }
+      return json({ ok: true, files: manifest.length });
     }
     if (url.pathname.startsWith('/kernel/')) return this.kernelRoutes.handle(url.pathname, args);
     const fake = this.fakes.get(args.pid ?? Number(url.searchParams.get('pid')));

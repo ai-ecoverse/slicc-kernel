@@ -45,6 +45,21 @@ export async function atomicsWait(
   return Atomics.load(typed, index) !== value ? 'ok' : 'timed-out';
 }
 
+function checked(
+  name: string,
+  fn: (...args: unknown[]) => unknown
+): (...args: unknown[]) => unknown {
+  return (...args) => {
+    const result = fn(...args);
+    if (result instanceof Promise) {
+      throw new Error(
+        `async process: the import ${name} returned a promise to wasm without suspending`
+      );
+    }
+    return result;
+  };
+}
+
 export function suspendingImports(imports: WebAssembly.Imports): WebAssembly.Imports {
   const Suspending = jspi.Suspending;
   if (!Suspending) throw new Error('async process: this engine has no WebAssembly.Suspending');
@@ -55,7 +70,9 @@ export function suspendingImports(imports: WebAssembly.Imports): WebAssembly.Imp
       wrapped[name] =
         value instanceof AsyncFunction
           ? (new Suspending(value as (...args: never[]) => unknown) as WebAssembly.ImportValue)
-          : value;
+          : typeof value === 'function'
+            ? (checked(`${ns}.${name}`, value as (...args: unknown[]) => unknown) as Function)
+            : value;
     }
     out[ns] = wrapped;
   }

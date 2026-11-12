@@ -14,6 +14,8 @@ const cases = {
     ...['select', 'ppoll', 'nanosleep'].map((m) => ['longwait', m]),
   ],
   npolltest: [['npolltest']],
+  epollmask: [['epollmask']],
+  maskentry: [['maskentry']],
   epolltest: [
     'closed',
     'connect',
