@@ -22,6 +22,7 @@ import { dialSocket, serveSocket } from '../kernel/dial.ts';
 import type { TransportCall } from '../kernel/net/remote-transport.ts';
 import type { RealmTransport } from '../kernel/net/transport.ts';
 import { SIG, signalField } from '../kernel/signals.ts';
+import { type TraceBatch, type TraceSubscription, traceLimit } from '../kernel/trace.ts';
 import { type Launcher, type TerminalSession, tagOption, withTag } from '../launcher.ts';
 import { serveTransport, type TransportServer } from '../transport.ts';
 import { type Account, credOf } from '../users.ts';
@@ -236,6 +237,20 @@ function clientCred(self: Account | undefined): Cred {
   return self ? credOf(self) : copyCred(ROOT);
 }
 
+const MAX_SPAWN_TAGS = 8;
+
+function spawnTags(value: unknown): readonly string[] {
+  if (!Array.isArray(value)) {
+    tagOption(value);
+    return value === undefined ? [] : [value as string];
+  }
+  if (value.length > MAX_SPAWN_TAGS) {
+    throw new TypeError(`a spawn adds at most ${MAX_SPAWN_TAGS} tags`);
+  }
+  for (const each of value) tagOption(each ?? 0);
+  return value as string[];
+}
+
 async function runTagged(
   l: Launcher,
   self: Account,
@@ -249,8 +264,8 @@ async function runTagged(
   tagBase: number;
   session: number;
 }> {
-  tagOption(options.tag);
-  const tags = withTag(withTag(undefined, tag), options.tag as string | undefined);
+  let tags = withTag(undefined, tag);
+  for (const added of spawnTags(options.tag)) tags = withTag(tags, added);
   return {
     user: await runAs(l, self, options.user),
     tag,
@@ -428,6 +443,40 @@ async function watchOp(
   return { result: req.id };
 }
 
+function traceRegistry(send: (message: object) => void) {
+  const traces = new Map<number, TraceSubscription>();
+  return {
+    answer(
+      l: Launcher,
+      self: Account,
+      req: Extract<ClientRequest, { op: 'trace' | 'untrace' }>
+    ): Answer {
+      if (req.op === 'untrace') {
+        traces.get(req.trace)?.close();
+        return { result: traces.delete(req.trace) };
+      }
+      if (typeof req.tag !== 'string' || req.tag === '') {
+        throw fsError('EINVAL', 'trace: a tag is a non-empty string');
+      }
+      const limit = traceLimit(req.limit);
+      const id = req.id;
+      const deliver = ({ events, dropped }: TraceBatch) =>
+        send({ trace: id, events, ...(dropped > 0 ? { dropped } : {}) });
+      traces.set(id, l.traces.subscribe(req.tag, credOf(self), deliver, limit));
+      return { result: id };
+    },
+    ack(data: { traceAck?: unknown }): boolean {
+      if (typeof data.traceAck !== 'number') return false;
+      traces.get(data.traceAck)?.ack();
+      return true;
+    },
+    close(): void {
+      for (const trace of traces.values()) trace.close();
+      traces.clear();
+    },
+  };
+}
+
 const TRAITS_WATCH = -1;
 
 function traitsWatch(
@@ -464,6 +513,27 @@ function requestBinding(
   };
 }
 
+function answered(
+  pending: Promise<Answer>,
+  req: ClientRequest,
+  reply: (id: number, body: object, transfer?: Transferable[]) => void,
+  detach: (kill: boolean) => void
+): void {
+  pending.then(
+    ({ result, signal, transfer }) => {
+      reply(req.id, { result, ...(signal ? { signal } : {}) }, transfer);
+      if (req.op === 'detach') detach(req.kill === true);
+    },
+    (err: unknown) => {
+      const code = (err as { code?: unknown })?.code;
+      reply(req.id, {
+        error: err instanceof Error ? err.message : String(err),
+        ...(typeof code === 'string' ? { code } : {}),
+      });
+    }
+  );
+}
+
 export function serveClient(port: MessagePortLike, host: ClientHost): ServedClient {
   let state: 'new' | 'open' | 'closed' = 'new';
   let self: Account | undefined;
@@ -480,6 +550,7 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
   const reply = (id: number, body: object, transfer?: Transferable[]) =>
     send({ id, ...body }, transfer);
   const hosts = hostRegistries(send, ended.promise, port);
+  const traces = traceRegistry(send);
 
   function detach(kill = false, bye = 'the slicc-kernel detached this client'): void {
     if (state === 'closed') return;
@@ -488,6 +559,7 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
     net?.close();
     for (const unwatch of watches.values()) unwatch();
     watches.clear();
+    traces.close();
     hosts.close();
     for (const session of terminals.values()) session.close();
     terminals.clear();
@@ -599,6 +671,9 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
       case 'serve-facade':
       case 'unserve-facade':
         return { result: hosts.answer(l, req) };
+      case 'trace':
+      case 'untrace':
+        return traces.answer(l, self as Account, req);
       case 'detach':
         return { result: true };
       default:
@@ -607,7 +682,7 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
   }
 
   port.addEventListener('message', (event) => {
-    const data = event.data as { hello?: ClientHello; net?: unknown };
+    const data = event.data as { hello?: ClientHello; net?: unknown; traceAck?: unknown };
     if (state === 'closed') return;
     if (data.hello) {
       if (state === 'new') {
@@ -623,20 +698,9 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
       net?.answer(data as TransportCall);
       return;
     }
+    if (traces.ack(data)) return;
     const req = data as ClientRequest;
-    handle(req).then(
-      ({ result, signal, transfer }) => {
-        reply(req.id, { result, ...(signal ? { signal } : {}) }, transfer);
-        if (req.op === 'detach') detach(req.kill === true);
-      },
-      (err: unknown) => {
-        const code = (err as { code?: unknown })?.code;
-        reply(req.id, {
-          error: err instanceof Error ? err.message : String(err),
-          ...(typeof code === 'string' ? { code } : {}),
-        });
-      }
-    );
+    answered(handle(req), req, reply, detach);
   });
   port.addEventListener('close', () => detach());
   port.start?.();

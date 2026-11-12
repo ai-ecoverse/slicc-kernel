@@ -111,8 +111,12 @@ export class JobTable {
     return member;
   }
 
-  private idOf(pid: number): number {
+  idOf(pid: number): number {
     return this.members.get(pid)?.shownAs ?? pid;
+  }
+
+  execParentOf(pid: number): number | undefined {
+    return this.members.get(pid)?.execParent;
   }
 
   private byId(id: number): JobMember {
