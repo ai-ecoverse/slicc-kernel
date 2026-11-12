@@ -170,6 +170,7 @@ import {
   type HostfsTiming,
   openHostfs,
 } from './mount/hostfs.ts';
+import { openInProcess } from './mount/in-process.ts';
 import { type MediaStore, memoryMedia } from './mount/media.ts';
 import {
   HeldSet,
@@ -3225,6 +3226,8 @@ export class Launcher {
   }
 
   private async driver(type: string, spec: MountSpec): Promise<OpenedDriver> {
+    const inProcess = openInProcess(spec);
+    if (inProcess) return inProcess;
     if (type === 'fsa') return this.fsaDriver(spec);
     if (type === 'hostfs') {
       const { hostfs, hostfsFetch, hostfsTiming } = this.hostfs;
