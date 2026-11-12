@@ -3,6 +3,7 @@ import { lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { MessageChannel, type MessagePort, type Worker } from 'node:worker_threads';
+import { type AsyncProcessOptions, nodeAsyncHost } from './async/node-host.ts';
 import type { CdpHook } from './cdp/types.ts';
 import type { MessagePortLike } from './client/protocol.ts';
 import { type ServedClient, serveClient } from './client/serve-client.ts';
@@ -46,6 +47,20 @@ import type { ApproveHook } from './sudo.ts';
 import { systemTimeZone } from './time-zone.ts';
 import { fetchTransport, type NetworkTransport } from './transport.ts';
 
+export type { KernelLink, ProcessLink } from './async/link.ts';
+export { type MessageLinks, type MessagePortLike, messageLinks } from './async/message-link.ts';
+export type {
+  AsyncProcessDeps,
+  AsyncProcessEntry,
+  AsyncProcessOptions,
+} from './async/node-host.ts';
+export { type RemoteWorkerOptions, remoteWorker } from './async/remote-worker.ts';
+export {
+  type AsyncTransport,
+  type AsyncTransportOptions,
+  createAsyncTransport,
+} from './async/transport.ts';
+export type { AsyncProcessInit } from './async/wire.ts';
 export type { CdpConnection, CdpHook, CdpRequest } from './cdp/types.ts';
 export {
   type AttachOptions,
@@ -184,6 +199,8 @@ export interface NodeKernelOptions {
   warmWorker?: boolean;
   warmWorkers?: number;
   wasmMemories?: { ceiling?: number; idleMs?: number };
+  blocking?: 'sync' | 'async';
+  asyncProcess?: AsyncProcessOptions;
 }
 
 export interface NodeKernel {
@@ -594,6 +611,35 @@ function rootFs(root: FileSystemDirectoryHandle, options: NodeKernelOptions): Op
   });
 }
 
+function blockingOf(options: NodeKernelOptions): 'sync' | 'async' {
+  const { blocking } = options;
+  if (blocking === undefined || blocking === 'sync' || blocking === 'async')
+    return blocking ?? 'sync';
+  throw new TypeError("createNodeKernel: blocking must be 'sync' or 'async'");
+}
+
+function processWorkers(
+  options: NodeKernelOptions,
+  file: string | URL,
+  workerData: { compileCache: string; ownedCache?: boolean } | undefined,
+  live: Set<() => void>,
+  closed: () => boolean
+) {
+  if (blockingOf(options) === 'async') {
+    const remote = nodeAsyncHost(options.asyncProcess ?? {}, live);
+    return {
+      warm: undefined,
+      launch: { createWorker: () => remote.createWorker(closed()), compile: remote.compile },
+    };
+  }
+  const warm = warmPoolOf(options, file, workerData, live);
+  const take = warm ? () => warm.take() : undefined;
+  return {
+    warm,
+    launch: { createWorker: () => nodeWorker(file, live, closed(), workerData, take, true) },
+  };
+}
+
 export async function createNodeKernel(options: NodeKernelOptions = {}): Promise<NodeKernel> {
   const hooks = sealedHooks(options.sealed);
   const timeZone = systemTimeZone(options.timeZone, clockZone(options.cron?.clock));
@@ -607,14 +653,13 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
   const file = options.worker ?? new URL('./node-process-worker.cjs', import.meta.url);
   const cache = cacheDirOf(options.compileCache);
   const workerData = cacheData(cache);
-  const warm = warmPoolOf(options, file, workerData, live);
+  const { warm, launch } = processWorkers(options, file, workerData, live, () => terminated);
   const transport = options.network?.transport;
   const launcher = new Launcher({
     fs,
     moduleUrl: sourceModule,
     unlinkOwner: pidOwner(process),
-    createWorker: () =>
-      nodeWorker(file, live, terminated, workerData, warm ? () => warm.take() : undefined, true),
+    ...launch,
     createDriverWorker: () =>
       nodeWorker(
         options.driverWorker ?? new URL('./node-driver-worker.js', import.meta.url),
