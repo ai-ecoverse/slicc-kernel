@@ -242,7 +242,8 @@ function runtimeImports(ctx: EmContext, rt: EmRuntime): WebAssembly.ModuleImport
       return 0;
     },
     slicc_fork_js: () => {
-      if (!rt.fork?.supported()) return -EM.NOSYS;
+      if (!rt.fork) return -1;
+      if (!rt.fork.supported()) return rt.fork.failed(-EM.NOSYS);
       return rt.fork.forkImport();
     },
   };

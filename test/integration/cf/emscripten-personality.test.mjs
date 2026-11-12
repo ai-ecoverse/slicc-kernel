@@ -9,6 +9,9 @@ import {
   BASE,
   CURL,
   GIT,
+  REFUSAL_PACKAGES,
+  REFUSALS,
+  refusalOptions,
   TERMINAL_STEPS,
   TIER1,
   TIER2,
@@ -142,3 +145,16 @@ test('a program importing what the kernel does not provide fails with 126 and na
   assert.match(r.stderr, /env\.nope, env\.also_missed/);
   assert.doesNotMatch(r.stderr, /LinkError|at /);
 });
+
+for (const c of REFUSALS) {
+  test(`a refused spawn: ${c.name}`, async (t) => {
+    const modes = c.glue ? ['glue', 'kernel'] : ['kernel'];
+    for (const mode of modes) {
+      const kernel = await booted(t, mode, REFUSAL_PACKAGES, refusalOptions(c.ceiling));
+      const r = shown(await kernel.run(c.argv, { cwd: '/tmp' }));
+      assert.equal(r.status, c.status, `${mode}: ${r.stderr}`);
+      assert.equal(r.stdout, c.stdout, mode);
+      assert.match(r.stderr, c.stderr, mode);
+    }
+  });
+}
