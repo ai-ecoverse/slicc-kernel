@@ -1,3 +1,4 @@
+import { type MakePortPair, messageChannel } from '../ports.ts';
 import { type FilesystemHandlers, fsError, type OpenFlags, serveFilesystem } from './driver.ts';
 import { type MediumHandlers, mediumSlot } from './medium.ts';
 import type { MountSpec, OpenedDriver } from './mount-fs.ts';
@@ -904,10 +905,11 @@ export function grantConnect(
 export async function openHostfs(
   spec: MountSpec,
   connect: HostfsConnect,
-  timing: HostfsTiming = {}
+  timing: HostfsTiming = {},
+  ports: MakePortPair = messageChannel
 ): Promise<OpenedDriver> {
   const readonly = spec.options?.ro !== undefined;
-  const { port1, port2 } = new MessageChannel();
+  const { port1, port2 } = ports();
   const slot = mediumSlot<HostfsTransport>(
     async (err) => unreachable(err),
     () => watching.kick()

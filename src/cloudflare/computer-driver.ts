@@ -3,6 +3,7 @@ import {
   type FilesystemHandlers,
   fsError,
   type OpenFlags,
+  type ServedFilesystem,
 } from '../mount/driver.ts';
 import type { DriverAttr, DriverCapabilities, DriverEntry } from '../mount/protocol.ts';
 
@@ -49,14 +50,18 @@ export interface WorkspaceDriverOptions {
   root?: string;
   maxIo?: number;
   bufferBytes?: number;
+  attrTtl?: number;
 }
 
 export interface WorkspaceDriver extends FilesystemHandlers {
   readonly capabilities: DriverCapabilities;
   settled(): Promise<void>;
+  served(served: ServedFilesystem): void;
+  invalidate(paths?: string[]): void;
 }
 
 const MAX_IO = 1024 * 1024;
+const ATTR_TTL = 1000;
 const BUFFER_BYTES = 1024 * 1024;
 const FILL_STEP = 512 * 1024;
 const TYPE_BITS = { file: 0o100000, directory: 0o40000, symlink: 0o120000, fifo: 0o10000 };
@@ -412,19 +417,23 @@ export function workspaceDriver(
   const root = (options.root ?? '/').replace(/\/+$/, '');
   const state = new DriverState(fs, root, options.bufferBytes ?? BUFFER_BYTES);
   const serial = <T>(work: () => Promise<T>) => state.serial(work);
+  let served: ServedFilesystem | undefined;
   const capabilities: DriverCapabilities = {
     symlinks: true,
     chmod: true,
     ranges: true,
     sessions: true,
     maxIo: options.maxIo ?? MAX_IO,
-    attrTtl: 0,
-    entryTtl: 0,
+    attrTtl: options.attrTtl ?? ATTR_TTL,
     ...(fs.link ? { links: true } : {}),
   };
   return {
     capabilities,
     settled: () => state.settled(),
+    served: (next) => {
+      served = next;
+    },
+    invalidate: (paths) => served?.invalidate(paths ?? true),
     mount: () =>
       serial(async () => {
         if (root) await fs.mkdir(root, { recursive: true });

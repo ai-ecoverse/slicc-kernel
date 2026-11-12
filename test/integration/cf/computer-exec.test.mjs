@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
-import { computerWith, run } from './computer-harness.mjs';
+import {
+  computerWith,
+  nodeStorage,
+  run,
+  shellKernel,
+  sliccBackend,
+  Workspace,
+} from './computer-harness.mjs';
 
 const MOUNT = '/workspace';
 
@@ -166,6 +173,36 @@ describe('the slicc backend in the Workspace runtime', () => {
       assert.equal(seen.get('doomed.txt'), 'rename');
     } finally {
       watcher.close();
+    }
+  });
+});
+
+describe('reconnecting to the same kernel', () => {
+  it('lets a new Workspace take the mount over, closed or not', async () => {
+    const kernel = await shellKernel();
+    const storage = nodeStorage();
+    const open = () =>
+      new Workspace({ storage, backends: [sliccBackend({ kernel: () => kernel })] });
+    try {
+      const first = open();
+      assert.equal((await run(first, 'echo one > turns.txt; cat turns.txt')).stdout, 'one\n');
+      const second = open();
+      assert.equal(
+        (await run(second, 'echo two >> turns.txt; cat turns.txt')).stdout,
+        'one\ntwo\n'
+      );
+      await second.close();
+      const third = open();
+      assert.equal((await run(third, 'cat turns.txt')).stdout, 'one\ntwo\n');
+      await third.close();
+      await first.close();
+      assert.deepEqual(
+        (await kernel.mounts()).filter((entry) => entry.target === MOUNT),
+        []
+      );
+    } finally {
+      kernel.terminate();
+      storage.close();
     }
   });
 });
