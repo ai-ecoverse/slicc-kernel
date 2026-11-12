@@ -1,6 +1,7 @@
 import { RpcTarget } from 'cloudflare:workers';
 import type { ProcessLink } from '../async/link.ts';
 import { WASM_PROCESS_ERROR } from '../kernel/protocol.ts';
+import { behindProcess } from './clock-skew.ts';
 import {
   type Answer,
   Closers,
@@ -69,9 +70,9 @@ export class KernelEnd extends RpcTarget {
     inbox.deliver(inbox.take(value, count));
   }
 
-  async call(value: unknown, count: number): Promise<Answer> {
+  async call(value: unknown, count: number, sent?: number): Promise<Answer> {
     const state = this.#state;
-    const result = await state.call(state.inbox.take(value, count));
+    const result = await state.call(behindProcess(state.inbox.take(value, count), sent));
     return state.held.answer(result);
   }
 

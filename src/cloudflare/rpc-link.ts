@@ -12,7 +12,7 @@ export interface WireEnd {
 }
 
 export interface KernelEndStub extends WireEnd {
-  call(value: unknown, count: number): Promise<Answer>;
+  call(value: unknown, count: number, sent?: number): Promise<Answer>;
   take(held: number, index: number): Promise<Uint8Array>;
   dup(): KernelEndStub;
 }
