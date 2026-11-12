@@ -5,6 +5,7 @@ import { inProcessMount } from '../mount/in-process.ts';
 import type { MountSpec } from '../mount/mount-fs.ts';
 import {
   type WorkspaceDriver,
+  type WorkspaceDriverOptions,
   type WorkspaceFilesystemLike,
   workspaceDriver,
 } from './computer-driver.ts';
@@ -86,6 +87,7 @@ export interface SliccBackendOptions {
   killGraceMs?: number;
   retentionMs?: number;
   logBytes?: number;
+  writeBehind?: WorkspaceDriverOptions['writeBehind'];
 }
 
 export interface SliccBackend {
@@ -288,6 +290,7 @@ function shellFor(
     }
     void run.process.ended.then(
       async ({ status, signal: by }) => {
+        await driver.flush().catch(() => undefined);
         await driver.settled().catch(() => undefined);
         run.exit(exitCodeOf(status, by));
         unref(setTimeout(() => forget(run), retention));
@@ -367,7 +370,7 @@ export function sliccBackend(options: SliccBackendOptions): SliccBackend {
       const kernel = await options.kernel();
       const held = holdersOf(kernel);
       await held.get(mountPoint)?.();
-      const driver = workspaceDriver(host.fs, { root });
+      const driver = workspaceDriver(host.fs, { root, writeBehind: options.writeBehind ?? true });
       const client = await attachKernel(
         await kernel.connect(options.user !== undefined ? { user: options.user } : {}),
         { locks: null }
@@ -389,6 +392,7 @@ export function sliccBackend(options: SliccBackendOptions): SliccBackend {
       const close = () => {
         closing ??= (async () => {
           await shell.closeAll();
+          await driver.flush().catch(() => undefined);
           await driver.settled().catch(() => undefined);
           await kernel.umount(mountPoint).catch(() => undefined);
           await client.close();

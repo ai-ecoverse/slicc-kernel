@@ -173,3 +173,70 @@ describe('the Workspace mounted in the kernel', () => {
     assert.notEqual(result.exitCode, 0);
   });
 });
+
+describe('closed files committed behind the run', () => {
+  let computer;
+  let ws;
+  const writes = [];
+  const counting = (fs) =>
+    new Proxy(fs, {
+      get(target, key) {
+        const value = target[key];
+        if (typeof value !== 'function') return value;
+        if (key !== 'writeFile' && key !== 'rm') return value.bind(target);
+        return async (path, ...rest) => {
+          const done = await value.call(target, path, ...rest);
+          writes.push(`${key} ${path}`);
+          return done;
+        };
+      },
+    });
+  before(async () => {
+    computer = await computerWith({ wrapFs: counting });
+    ws = computer.workspace;
+  });
+  after(() => computer.close());
+
+  it('lands every file before the result, and a removed temporary file never', async () => {
+    writes.length = 0;
+    const result = await run(
+      ws,
+      'mkdir -p wb/d && for i in 1 2 3; do echo $i > wb/f$i; done; echo t > wb/tmp; rm wb/tmp; echo x > wb/d/x; rm -r wb/d; cat wb/f2'
+    );
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.equal(result.stdout, '2\n');
+    for (const i of [1, 2, 3])
+      assert.equal(await ws.fs.readFile(`${MOUNT}/wb/f${i}`, 'utf8'), `${i}\n`);
+    await assert.rejects(ws.fs.lstat(`${MOUNT}/wb/tmp`), { code: 'ENOENT' });
+    await assert.rejects(ws.fs.lstat(`${MOUNT}/wb/d`), { code: 'ENOENT' });
+    assert.ok(!writes.some((entry) => entry.endsWith('/wb/tmp')), writes.join('\n'));
+  });
+
+  it('commits a file rewritten many times in one run about once', async () => {
+    await ws.fs.mkdir(`${MOUNT}/wb`, { recursive: true });
+    await ws.fs.writeFile(`${MOUNT}/wb/again.sh`, 'old', { mode: 0o750 });
+    writes.length = 0;
+    const result = await run(
+      ws,
+      'for i in $(seq 1 20); do echo $i > wb/again.sh; echo $i > wb/new.txt; done'
+    );
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.equal(await ws.fs.readFile(`${MOUNT}/wb/again.sh`, 'utf8'), '20\n');
+    assert.equal(await ws.fs.readFile(`${MOUNT}/wb/new.txt`, 'utf8'), '20\n');
+    assert.equal((await ws.fs.stat(`${MOUNT}/wb/again.sh`)).mode & 0o777, 0o750);
+    const commits = writes.filter((entry) => entry.includes('/wb/')).length;
+    assert.ok(commits <= 6, writes.join('\n'));
+  });
+
+  it('lands what a background process writes after the run ends', async () => {
+    const result = await run(ws, '(sleep 0.3; echo late > wb/late.txt) > /dev/null 2>&1 &');
+    assert.equal(result.exitCode, 0);
+    const deadline = Date.now() + 5000;
+    let text;
+    while (Date.now() < deadline && text === undefined) {
+      text = await ws.fs.readFile(`${MOUNT}/wb/late.txt`, 'utf8').catch(() => undefined);
+      if (text === undefined) await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.equal(text, 'late\n');
+  });
+});
