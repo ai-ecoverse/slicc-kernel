@@ -18,9 +18,8 @@ function workerdRow(row) {
 
 export function sqlStorage(path = ':memory:', { transactions = true } = {}) {
   const db = new DatabaseSync(path);
-  db.exec('PRAGMA foreign_keys = OFF');
+  if (path !== ':memory:') db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL');
   const statements = new Map();
-  const totals = db.prepare('SELECT total_changes() AS n');
   const counted = { statements: 0, rowsWritten: 0 };
   let depth = 0;
   const sql = {
@@ -32,12 +31,11 @@ export function sqlStorage(path = ':memory:', { transactions = true } = {}) {
       }
       let statement = statements.get(query);
       if (!statement) statements.set(query, (statement = db.prepare(query)));
-      const before = Number(totals.get().n);
       const args = bindings.map(bound);
       const reads = statement.columns().length > 0;
       const rows = reads ? statement.all(...args) : [];
-      if (!reads) statement.run(...args);
-      const rowsWritten = Number(totals.get().n) - before;
+      const changes = reads ? 0 : Number(statement.run(...args).changes);
+      const rowsWritten = reads && /\bRETURNING\b/i.test(query) ? rows.length : changes;
       counted.statements++;
       counted.rowsWritten += rowsWritten;
       const result = rows.map(workerdRow);

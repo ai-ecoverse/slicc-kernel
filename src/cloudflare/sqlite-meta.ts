@@ -27,19 +27,45 @@ function treeBindings(path: string): Uint8Array[] {
   return [encodeText(path), encodeText(`${path}/`), encodeText(`${path}0`)];
 }
 
+const CACHED = 8192;
+
+function within(path: string, root: string): boolean {
+  return root === '/' || path === root || path.startsWith(`${root}/`);
+}
+
 class SqliteMeta implements MetaStore {
   private readonly store: SqlStore;
+  private readonly cache = new Map<string, MetaEntry | null>();
 
   constructor(store: SqlStore) {
     this.store = store;
   }
 
+  private atomically<T>(fn: () => T): T {
+    try {
+      return this.store.atomically(fn);
+    } catch (err) {
+      this.cache.clear();
+      throw err;
+    }
+  }
+
+  private remember(path: string, entry: MetaEntry | null): void {
+    if (this.cache.size >= CACHED && !this.cache.has(path)) this.cache.clear();
+    this.cache.set(path, entry);
+  }
+
   private read(path: string): MetaEntry | undefined {
+    const known = this.cache.get(path);
+    if (known !== undefined) return known ?? undefined;
     const row = this.store.row('SELECT entry FROM slicc_meta WHERE path = ?', encodeText(path));
-    return row && entryOf(row);
+    const entry = row ? entryOf(row) : undefined;
+    this.remember(path, entry ?? null);
+    return entry;
   }
 
   private write(path: string, entry: MetaEntry | undefined): void {
+    this.remember(path, entry ?? null);
     if (!entry) {
       this.store.run('DELETE FROM slicc_meta WHERE path = ?', encodeText(path));
       return;
@@ -60,6 +86,7 @@ class SqliteMeta implements MetaStore {
   }
 
   private dropTree(path: string): void {
+    for (const known of [...this.cache.keys()]) if (within(known, path)) this.cache.delete(known);
     if (path === '/') this.store.run('DELETE FROM slicc_meta');
     else this.store.run(`DELETE FROM slicc_meta WHERE ${TREE}`, ...treeBindings(path));
   }
@@ -73,11 +100,11 @@ class SqliteMeta implements MetaStore {
   }
 
   async update(path: string, change: MetaChange): Promise<void> {
-    this.store.atomically(() => this.write(path, change(this.read(path))));
+    this.atomically(() => this.write(path, change(this.read(path))));
   }
 
   async updateMany(changes: ReadonlyArray<MetaUpdate>): Promise<void> {
-    this.store.atomically(() => {
+    this.atomically(() => {
       for (const { path, change } of changes) this.write(path, change(this.read(path)));
     });
   }
@@ -88,7 +115,7 @@ class SqliteMeta implements MetaStore {
     root: (entry: MetaEntry | undefined) => MetaEntry,
     left?: MetaEntry
   ): Promise<void> {
-    this.store.atomically(() => {
+    this.atomically(() => {
       this.dropTree(to);
       const carried = this.tree(from);
       this.dropTree(from);
@@ -102,17 +129,14 @@ class SqliteMeta implements MetaStore {
   }
 
   async remove(paths: readonly string[], left?: MetaEntry): Promise<void> {
-    this.store.atomically(() => {
+    this.atomically(() => {
       for (const path of paths) this.dropTree(path);
       if (left) this.write(left.path, left);
     });
   }
 
   absent(path: string): boolean {
-    return (
-      this.store.row('SELECT 1 AS found FROM slicc_meta WHERE path = ?', encodeText(path)) ===
-      undefined
-    );
+    return this.read(path) === undefined;
   }
 
   async links(dir: string): Promise<MetaEntry[]> {
@@ -132,6 +156,11 @@ class SqliteMeta implements MetaStore {
   }
 }
 
+const metas = new WeakMap<SqlStore, SqliteMeta>();
+
 export function sqliteMeta(sql: SqlStorageLike, options: SqliteOptions = {}): MetaStore {
-  return new SqliteMeta(storeOf(sql, options));
+  const store = storeOf(sql, options);
+  let meta = metas.get(store);
+  if (!meta) metas.set(store, (meta = new SqliteMeta(store)));
+  return meta;
 }

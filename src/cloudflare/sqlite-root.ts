@@ -41,11 +41,12 @@ interface NodeRow {
   version: number;
 }
 
-interface WriterRow {
+interface Writer {
   id: number;
   node: number;
   size: number;
   visible: number;
+  staged: Set<number>;
 }
 
 function nodeOf(row: Record<string, unknown>): NodeRow {
@@ -64,6 +65,8 @@ const NODE_COLUMNS = 'id, parent, name, dir, size, modified, version';
 
 class Files {
   readonly store: SqlStore;
+  private readonly writers = new Map<number, Writer>();
+  private nextWriter = 1;
 
   constructor(store: SqlStore) {
     this.store = store;
@@ -75,7 +78,6 @@ class Files {
         Date.now()
       );
       store.run('DELETE FROM slicc_staged');
-      store.run('DELETE FROM slicc_writers');
     });
   }
 
@@ -173,40 +175,30 @@ class Files {
     return out;
   }
 
-  writer(id: number): WriterRow {
-    const row = this.store.row(
-      'SELECT id, node, size, visible FROM slicc_writers WHERE id = ?',
-      id
-    );
-    if (!row) return fail('InvalidStateError', 'the writable was closed');
-    return {
-      id: Number(row.id),
-      node: Number(row.node),
-      size: Number(row.size),
-      visible: Number(row.visible),
-    };
+  private writer(id: number): Writer {
+    const writer = this.writers.get(id);
+    if (!writer) return fail('InvalidStateError', 'the writable was closed');
+    return writer;
   }
 
   open(node: number, keep: boolean): number {
     const found = this.node(node);
     if (!found || found.dir) return fail('NotFoundError');
     const size = keep ? found.size : 0;
-    const row = this.store.row(
-      'INSERT INTO slicc_writers (node, size, visible) VALUES (?, ?, ?) RETURNING id',
-      node,
-      size,
-      size
-    );
-    return Number(row?.id);
+    const id = this.nextWriter++;
+    this.writers.set(id, { id, node, size, visible: size, staged: new Set() });
+    return id;
   }
 
-  private view(writer: WriterRow, idx: number): Uint8Array {
-    const staged = this.store.row(
-      'SELECT data FROM slicc_staged WHERE writer = ? AND idx = ?',
-      writer.id,
-      idx
-    );
-    if (staged) return bytesOf(staged.data);
+  private view(writer: Writer, idx: number): Uint8Array {
+    if (writer.staged.has(idx)) {
+      const staged = this.store.row(
+        'SELECT data FROM slicc_staged WHERE writer = ? AND idx = ?',
+        writer.id,
+        idx
+      );
+      return bytesOf(staged?.data);
+    }
     const keep = Math.min(CHUNK_BYTES, writer.visible - idx * CHUNK_BYTES);
     if (keep <= 0) return new Uint8Array(0);
     const base = this.store.row(
@@ -215,13 +207,14 @@ class Files {
       writer.node,
       idx
     );
-    return base ? bytesOf(base.data) : new Uint8Array(0);
+    return bytesOf(base?.data);
   }
 
   write(id: number, at: number, bytes: Uint8Array): void {
     if (bytes.length === 0) return;
+    const writer = this.writer(id);
+    const staged: number[] = [];
     this.store.atomically(() => {
-      const writer = this.writer(id);
       for (let done = 0; done < bytes.length; ) {
         const idx = Math.floor((at + done) / CHUNK_BYTES);
         const from = at + done - idx * CHUNK_BYTES;
@@ -242,26 +235,21 @@ class Files {
           idx,
           data
         );
+        staged.push(idx);
         done += n;
       }
-      this.store.run(
-        'UPDATE slicc_writers SET size = max(size, ?) WHERE id = ?',
-        at + bytes.length,
-        id
-      );
     });
+    for (const idx of staged) writer.staged.add(idx);
+    writer.size = Math.max(writer.size, at + bytes.length);
   }
 
   truncate(id: number, size: number): void {
     if (!Number.isSafeInteger(size) || size < 0) throw new TypeError(`invalid size: ${size}`);
-    this.store.atomically(() => {
-      const writer = this.writer(id);
-      if (size < writer.size) {
-        this.store.run(
-          'DELETE FROM slicc_staged WHERE writer = ? AND idx >= ?',
-          id,
-          Math.ceil(size / CHUNK_BYTES)
-        );
+    const writer = this.writer(id);
+    const kept = Math.ceil(size / CHUNK_BYTES);
+    if (size < writer.size) {
+      this.store.atomically(() => {
+        this.store.run('DELETE FROM slicc_staged WHERE writer = ? AND idx >= ?', id, kept);
         const tail = size % CHUNK_BYTES;
         if (tail !== 0) {
           this.store.run(
@@ -272,46 +260,32 @@ class Files {
             tail
           );
         }
-      }
-      this.store.run(
-        'UPDATE slicc_writers SET size = ?, visible = min(visible, ?) WHERE id = ?',
-        size,
-        size,
-        id
-      );
-    });
+      });
+      for (const idx of [...writer.staged]) if (idx >= kept) writer.staged.delete(idx);
+    }
+    writer.size = size;
+    writer.visible = Math.min(writer.visible, size);
   }
 
   commit(id: number): void {
-    this.store.atomically(() => {
-      const writer = this.writer(id);
+    const writer = this.writer(id);
+    const preserved = this.store.atomically(() => {
       const node = this.node(writer.node);
-      if (node && !node.dir) this.land(writer, node);
-      this.discard(id);
+      const landed = node && !node.dir ? this.land(writer, node) : [];
+      this.store.run('DELETE FROM slicc_staged WHERE writer = ?', id);
+      return landed;
     });
+    this.writers.delete(id);
+    for (const [other, idx] of preserved) other.staged.add(idx);
   }
 
-  private land(writer: WriterRow, node: NodeRow): void {
+  private land(writer: Writer, node: NodeRow): Array<[Writer, number]> {
     const cut = writer.visible < node.size ? writer.visible : undefined;
     const cutIdx = cut === undefined ? NO_CUT : Math.floor(cut / CHUNK_BYTES);
-    const others = this.store.rows(
-      'SELECT id, visible FROM slicc_writers WHERE node = ? AND id <> ? AND visible > 0',
-      node.id,
-      writer.id
-    );
-    for (const other of others) {
-      const visible = Number(other.visible);
-      this.store.run(
-        `INSERT INTO slicc_staged (writer, idx, data) SELECT ?, idx, CASE WHEN (idx + 1) * ${CHUNK_BYTES} > ? THEN substr(data, 1, ? - idx * ${CHUNK_BYTES}) ELSE data END FROM slicc_chunks WHERE node = ? AND idx < ? AND (idx >= ? OR idx IN (SELECT idx FROM slicc_staged WHERE writer = ?)) AND idx NOT IN (SELECT idx FROM slicc_staged WHERE writer = ?)`,
-        Number(other.id),
-        visible,
-        visible,
-        node.id,
-        Math.ceil(visible / CHUNK_BYTES),
-        cutIdx,
-        writer.id,
-        Number(other.id)
-      );
+    const preserved: Array<[Writer, number]> = [];
+    for (const other of this.writers.values()) {
+      if (other === writer || other.node !== node.id || other.visible <= 0) continue;
+      for (const idx of this.preserve(other, writer.staged, cutIdx)) preserved.push([other, idx]);
     }
     if (cut !== undefined) {
       this.store.run(
@@ -330,24 +304,57 @@ class Files {
         );
       }
     }
-    this.store.run(
-      'INSERT OR REPLACE INTO slicc_chunks (node, idx, data) SELECT ?, idx, data FROM slicc_staged WHERE writer = ?',
-      node.id,
-      writer.id
-    );
+    if (writer.staged.size > 0) {
+      this.store.run(
+        'DELETE FROM slicc_chunks WHERE node = ? AND idx IN (SELECT idx FROM slicc_staged WHERE writer = ? AND length(data) = 0)',
+        node.id,
+        writer.id
+      );
+      this.store.run(
+        'INSERT OR REPLACE INTO slicc_chunks (node, idx, data) SELECT ?, idx, data FROM slicc_staged WHERE writer = ? AND length(data) > 0',
+        node.id,
+        writer.id
+      );
+    }
     this.store.run(
       'UPDATE slicc_nodes SET size = ?, modified = ?, version = version + 1 WHERE id = ?',
       writer.size,
       Date.now(),
       node.id
     );
+    return preserved;
+  }
+
+  private preserve(other: Writer, staged: ReadonlySet<number>, cutIdx: number): number[] {
+    const limit = Math.ceil(other.visible / CHUNK_BYTES);
+    const touched = new Set([...staged].filter((idx) => idx < limit));
+    for (let idx = cutIdx; idx < limit; idx++) touched.add(idx);
+    const kept: number[] = [];
+    for (const idx of touched) {
+      if (other.staged.has(idx)) continue;
+      const keep = Math.min(CHUNK_BYTES, other.visible - idx * CHUNK_BYTES);
+      const copied = this.store.run(
+        'INSERT INTO slicc_staged (writer, idx, data) SELECT ?, idx, substr(data, 1, ?) FROM slicc_chunks WHERE node = ? AND idx = ?',
+        other.id,
+        keep,
+        other.node,
+        idx
+      );
+      if (copied === 0) {
+        this.store.run(
+          "INSERT INTO slicc_staged (writer, idx, data) VALUES (?, ?, x'')",
+          other.id,
+          idx
+        );
+      }
+      kept.push(idx);
+    }
+    return kept;
   }
 
   discard(id: number): void {
-    this.store.atomically(() => {
-      this.store.run('DELETE FROM slicc_staged WHERE writer = ?', id);
-      this.store.run('DELETE FROM slicc_writers WHERE id = ?', id);
-    });
+    if (!this.writers.delete(id)) return;
+    this.store.run('DELETE FROM slicc_staged WHERE writer = ?', id);
   }
 }
 

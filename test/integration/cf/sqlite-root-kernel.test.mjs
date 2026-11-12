@@ -26,12 +26,11 @@ function sane(sql) {
     overlong: q(
       `SELECT count(*) AS n FROM slicc_chunks c JOIN slicc_nodes n ON n.id = c.node WHERE c.idx * ${256 * 1024} + length(c.data) > n.size`
     )[0].n,
-    writers: q('SELECT count(*) AS n FROM slicc_writers')[0].n,
     staged: q('SELECT count(*) AS n FROM slicc_staged')[0].n,
   };
 }
 
-const CLEAN = { orphans: 0, strayChunks: 0, overlong: 0, writers: 0, staged: 0 };
+const CLEAN = { orphans: 0, strayChunks: 0, overlong: 0, staged: 0 };
 
 test('the kernel runs bash and coreutils on the SQLite root: baseline cases', async (t) => {
   const sql = sqlStorage();

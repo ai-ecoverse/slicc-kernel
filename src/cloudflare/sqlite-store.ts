@@ -20,8 +20,6 @@ const SCHEMA = [
   'CREATE TABLE IF NOT EXISTS slicc_nodes (id INTEGER PRIMARY KEY, parent INTEGER, name BLOB NOT NULL, dir INTEGER NOT NULL, size INTEGER NOT NULL DEFAULT 0, modified REAL NOT NULL, version INTEGER NOT NULL DEFAULT 0)',
   'CREATE UNIQUE INDEX IF NOT EXISTS slicc_nodes_child ON slicc_nodes (parent, name)',
   'CREATE TABLE IF NOT EXISTS slicc_chunks (node INTEGER NOT NULL, idx INTEGER NOT NULL, data BLOB NOT NULL, PRIMARY KEY (node, idx))',
-  'CREATE TABLE IF NOT EXISTS slicc_writers (id INTEGER PRIMARY KEY, node INTEGER NOT NULL, size INTEGER NOT NULL, visible INTEGER NOT NULL)',
-  'CREATE INDEX IF NOT EXISTS slicc_writers_node ON slicc_writers (node)',
   'CREATE TABLE IF NOT EXISTS slicc_staged (writer INTEGER NOT NULL, idx INTEGER NOT NULL, data BLOB NOT NULL, PRIMARY KEY (writer, idx))',
   'CREATE TABLE IF NOT EXISTS slicc_meta (path BLOB PRIMARY KEY, dir BLOB, entry TEXT NOT NULL)',
   'CREATE INDEX IF NOT EXISTS slicc_meta_dir ON slicc_meta (dir)',
