@@ -1,3 +1,5 @@
+import { reentered } from '../wasi/wasm-reentry.ts';
+
 export type WasmExport = (...args: never[]) => unknown;
 
 const UNWINDING = 1;
@@ -18,7 +20,7 @@ export class Reentry {
   enter(name: string, fn: WasmExport, args: readonly unknown[]): unknown {
     this.stack.push(name);
     try {
-      return (fn as (...a: unknown[]) => unknown)(...args);
+      return reentered(fn as (...a: unknown[]) => unknown)(...args);
     } finally {
       this.stack.pop();
       if (this.stack.length === 0 && this.state() === UNWINDING) {
