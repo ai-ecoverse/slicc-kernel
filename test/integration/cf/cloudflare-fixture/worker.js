@@ -108,8 +108,12 @@ export class Plumbing extends DurableObject {
   async fetch(request) {
     const url = new URL(request.url);
     const body = request.method === 'POST' ? await request.arrayBuffer() : undefined;
-    const args =
-      body && url.pathname !== '/image' ? JSON.parse(new TextDecoder().decode(body)) : {};
+    const raw = url.pathname === '/image' || url.pathname === '/kernel/upload';
+    const args = body && !raw ? JSON.parse(new TextDecoder().decode(body)) : {};
+    if (url.pathname === '/kernel/upload') {
+      await this.kernelRoutes.kernel.writeFile(url.searchParams.get('path'), new Uint8Array(body));
+      return json({ ok: true });
+    }
     if (url.pathname.startsWith('/kernel/')) return this.kernelRoutes.handle(url.pathname, args);
     const fake = this.fakes.get(args.pid ?? Number(url.searchParams.get('pid')));
     switch (url.pathname) {
