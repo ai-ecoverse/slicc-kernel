@@ -731,6 +731,7 @@ function mainThreads(
 export interface WasiProcessHost {
   transport?: TransportFactory;
   threadCap?: number;
+  bound?: (memory: WebAssembly.Memory) => void;
 }
 
 export async function runWasiProcess(
@@ -817,6 +818,7 @@ export async function runWasiProcess(
   });
   restoreExportedMemory(instance, memory, init);
   main.memory = memoryOf(instance, memory);
+  if (main.memory) given.bound?.(main.memory);
   publishMemory(init.sab, sizeOf(main)());
   port.postMessage({ type: WASM_PROCESS_READY });
   signals.bind(instance.exports);

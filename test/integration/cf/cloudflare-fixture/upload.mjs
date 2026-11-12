@@ -45,3 +45,12 @@ export async function uploadTree(call, from, to, wanted = () => true) {
   await flush();
   return sent;
 }
+
+export async function uploadFiles(call, files) {
+  const batch = files.map(([path, data]) => [
+    path,
+    Buffer.from(typeof data === 'string' ? new TextEncoder().encode(data) : data),
+  ]);
+  const r = await call('/kernel/bulk', frame(batch), { raw: true });
+  if (r.status !== 200) throw new Error(`bulk upload failed: ${JSON.stringify(r).slice(0, 300)}`);
+}

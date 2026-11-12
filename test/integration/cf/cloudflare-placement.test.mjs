@@ -2,8 +2,9 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { PACKAGE, timedwaitsWasm, WAIT_MS } from './async-waits/timedwaits.mjs';
 import { client, REPO, startDev, until } from './cloudflare-fixture/dev.mjs';
-import { uploadTree } from './cloudflare-fixture/upload.mjs';
+import { uploadFiles, uploadTree } from './cloudflare-fixture/upload.mjs';
 
 const config = fileURLToPath(new URL('./cloudflare-fixture/wrangler.json', import.meta.url));
 const MODULES = join(REPO, 'node_modules/@ai-ecoverse');
@@ -161,5 +162,44 @@ describe('sleeping in a Dynamic Worker', { concurrency: false }, () => {
     );
     for (const total of totals) assert.ok(total >= 4000, `a round took ${total} ms`);
     for (const gap of gaps) assert.ok(gap >= 1000, `a gap of ${gap} ms`);
+  });
+
+  test('a WASI futex_wait and sigtimedwait with a timeout never end early', async (t) => {
+    if (skipped(t)) return;
+    const clock = process.env.SLICC_CF_NO_CLOCK === undefined;
+    const { call } = await kernel({ clock });
+    await uploadFiles(call, [
+      ['/node_modules/timedwaits/package.json', JSON.stringify(PACKAGE)],
+      ['/node_modules/timedwaits/bin/timedwaits.wasm', await timedwaitsWasm()],
+    ]);
+    const rounds = Number(process.env.SLICC_CF_SLEEP_ROUNDS ?? 1);
+    const gaps = [];
+    const totals = [];
+    for (let round = 0; round < rounds; round++) {
+      const started = performance.now();
+      const { id } = await call('/kernel/terminal', { argv: ['timedwaits'] });
+      const done = await until(
+        async () => {
+          const output = await call('/kernel/output', { id });
+          return output.ended ? output : undefined;
+        },
+        { timeoutMs: 30_000, everyMs: 50 }
+      );
+      totals.push(Math.round(performance.now() - started));
+      assert.equal(done.ended.status, 0, JSON.stringify(done).slice(0, 500));
+      const lines = [];
+      for (const [at, text] of done.stamps) {
+        for (const line of text.split(/\r?\n/)) {
+          if (/^(futex 0 0|sigwait 6 0)$/.test(line.replace(/ \d+ /, ' '))) lines.push([at, line]);
+        }
+      }
+      assert.equal(lines.length, 8, done.out);
+      for (let i = 1; i < lines.length; i++) gaps.push(lines[i][0] - lines[i - 1][0]);
+    }
+    t.diagnostic(
+      `totals ${totals.join(' ')} ms; gaps ${Math.min(...gaps)}..${Math.max(...gaps)} ms`
+    );
+    for (const total of totals) assert.ok(total >= 8 * WAIT_MS, `a round took ${total} ms`);
+    for (const gap of gaps) assert.ok(gap >= WAIT_MS, `a gap of ${gap} ms`);
   });
 });
