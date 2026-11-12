@@ -170,6 +170,7 @@ import {
   type HostfsTiming,
   openHostfs,
 } from './mount/hostfs.ts';
+import { openInProcess } from './mount/in-process.ts';
 import { type MediaStore, memoryMedia } from './mount/media.ts';
 import {
   HeldSet,
@@ -268,6 +269,7 @@ export interface LauncherOptions {
   moduleUrl?: ModuleUrlMaker;
   packageLocks?: string;
   emscripten?: 'glue' | 'kernel';
+  compile?: (bytes: Uint8Array, key: string) => Promise<WebAssembly.Module>;
 }
 
 export interface ModuleUrl {
@@ -791,6 +793,7 @@ export class Launcher {
   private readonly unlinkOwnerOption: UnlinkOwner | undefined;
   private readonly base: KernelFs;
   private readonly createWorker: () => WasmWorkerLike;
+  private readonly compile: LauncherOptions['compile'];
   private readonly moduleUrl: ModuleUrlMaker | undefined;
   private readonly moduleUrls = new Map<string, HeldUrl>();
   private readonly urlsInUse = new Map<string, HeldUrl>();
@@ -915,7 +918,6 @@ export class Launcher {
   private terminals = 0;
 
   constructor(options: LauncherOptions) {
-    this.emscripten = options.emscripten;
     this.usersMode = usersMode(options.users);
     this.memories = memoriesOf(options.wasmMemories);
     this.rootFs = options.fs;
@@ -957,6 +959,7 @@ export class Launcher {
     this.mounted = this.mounts.wrap(options.fs);
     this.base = this.rooted(this.mounted);
     this.createWorker = options.createWorker;
+    ({ compile: this.compile, emscripten: this.emscripten } = options);
     this.moduleUrl = options.moduleUrl;
     this.createDriverWorker = options.createDriverWorker;
     this.media = options.media ?? memoryMedia();
@@ -1987,7 +1990,9 @@ export class Launcher {
       const bytes = sum === undefined ? read : await this.pinnedBytes(pin, read);
       const memory = importedMemory(bytes);
       const foreign = foreignImports(bytes);
-      const compiled = await WebAssembly.compile(bytes as BufferSource);
+      const compiled = this.compile
+        ? await this.compile(bytes, key)
+        : await WebAssembly.compile(bytes as BufferSource);
       return {
         value: { module: compiled, ...(memory ? { memory } : {}), foreign },
         key: sum === undefined ? readKey : key,
@@ -3227,6 +3232,8 @@ export class Launcher {
   }
 
   private async driver(type: string, spec: MountSpec): Promise<OpenedDriver> {
+    const inProcess = openInProcess(spec);
+    if (inProcess) return inProcess;
     if (type === 'fsa') return this.fsaDriver(spec);
     if (type === 'hostfs') {
       const { hostfs, hostfsFetch, hostfsTiming } = this.hostfs;

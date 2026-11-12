@@ -1,0 +1,454 @@
+import {
+  type DriverSetAttr,
+  type FilesystemHandlers,
+  fsError,
+  type OpenFlags,
+} from '../mount/driver.ts';
+import type { DriverAttr, DriverCapabilities, DriverEntry } from '../mount/protocol.ts';
+
+export interface WorkspaceStatLike {
+  inode?: number;
+  mode: number;
+  mtime: number;
+  size: number;
+  isFile: boolean;
+  isDirectory: boolean;
+  isSymbolicLink: boolean;
+}
+
+export interface WorkspaceDirentLike {
+  name: string;
+  isFile: boolean;
+  isDirectory: boolean;
+  isSymbolicLink: boolean;
+}
+
+export interface WorkspaceFilesystemLike {
+  readFile(
+    path: string,
+    options: { byteOffset?: number; byteLength?: number }
+  ): Promise<ReadableStream<Uint8Array> | string>;
+  writeFile(
+    path: string,
+    content: Uint8Array | ReadableStream<Uint8Array>,
+    options?: { mode?: number; exclusive?: boolean }
+  ): Promise<void>;
+  stat(path: string): Promise<WorkspaceStatLike>;
+  lstat(path: string): Promise<WorkspaceStatLike>;
+  readdir(path: string): Promise<WorkspaceDirentLike[]>;
+  readlink(path: string): Promise<string>;
+  mkdir(path: string, options?: { recursive?: boolean; mode?: number }): Promise<void>;
+  rm(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
+  rename(from: string, to: string): Promise<void>;
+  chmod(path: string, mode: number): Promise<void>;
+  symlink(target: string, path: string): Promise<void>;
+  link?(existing: string, path: string): Promise<void>;
+}
+
+export interface WorkspaceDriverOptions {
+  root?: string;
+  maxIo?: number;
+  bufferBytes?: number;
+}
+
+export interface WorkspaceDriver extends FilesystemHandlers {
+  readonly capabilities: DriverCapabilities;
+  settled(): Promise<void>;
+}
+
+const MAX_IO = 1024 * 1024;
+const BUFFER_BYTES = 1024 * 1024;
+const FILL_STEP = 512 * 1024;
+const TYPE_BITS = { file: 0o100000, directory: 0o40000, symlink: 0o120000, fifo: 0o10000 };
+
+const kindOf = (st: WorkspaceStatLike | WorkspaceDirentLike): DriverAttr['kind'] =>
+  st.isDirectory ? 'directory' : st.isSymbolicLink ? 'symlink' : 'file';
+
+const codeOf = (err: unknown) => (err as { code?: unknown } | null)?.code;
+
+function attrOf(st: WorkspaceStatLike): DriverAttr {
+  const kind = kindOf(st);
+  const perms = kind === 'symlink' ? 0o777 : st.mode & 0o7777;
+  return {
+    kind,
+    size: st.size,
+    mtime: st.mtime,
+    mode: TYPE_BITS[kind] | perms,
+    ...(st.inode ? { ino: st.inode } : {}),
+  };
+}
+
+function translated(err: unknown): unknown {
+  const code = codeOf(err);
+  if (typeof code !== 'string' || /^E[A-Z]+$/.test(code) === false || code === 'EUNKNOWN_HASH') {
+    return fsError('EIO', err instanceof Error ? err.message : String(err));
+  }
+  return err;
+}
+
+async function collect(
+  source: ReadableStream<Uint8Array> | string,
+  limit: number
+): Promise<Uint8Array> {
+  if (typeof source === 'string') return new TextEncoder().encode(source).slice(0, limit);
+  const parts: Uint8Array[] = [];
+  let total = 0;
+  const reader = source.getReader();
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (!value || value.byteLength === 0) continue;
+      parts.push(value);
+      total += value.byteLength;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const out = new Uint8Array(Math.min(total, limit));
+  let at = 0;
+  for (const part of parts) {
+    if (at >= out.length) break;
+    const take = Math.min(part.byteLength, out.length - at);
+    out.set(part.subarray(0, take), at);
+    at += take;
+  }
+  return out;
+}
+
+interface Handle {
+  path: string;
+  write: boolean;
+  drafting: boolean;
+}
+
+class Draft {
+  readonly path: string;
+  mode: number;
+  modeChanged = false;
+  size: number;
+  private limit: number;
+  private written = 0;
+  private readonly fs: WorkspaceFilesystemLike;
+  private controller!: ReadableStreamDefaultController<Uint8Array>;
+  private readonly committed: Promise<void>;
+  private failure: unknown;
+  private wake: (() => void) | undefined;
+
+  constructor(fs: WorkspaceFilesystemLike, path: string, st: WorkspaceStatLike, buffer: number) {
+    this.fs = fs;
+    this.path = path;
+    this.mode = st.mode & 0o7777;
+    this.size = st.size;
+    this.limit = st.size;
+    const stream = new ReadableStream<Uint8Array>(
+      {
+        start: (controller) => {
+          this.controller = controller;
+        },
+        pull: () => this.poke(),
+      },
+      { highWaterMark: buffer, size: (chunk) => chunk.byteLength }
+    );
+    this.committed = fs.writeFile(path, stream, { mode: this.mode });
+    this.committed.catch((err: unknown) => {
+      this.failure = err;
+      this.poke();
+    });
+  }
+
+  private poke(): void {
+    const wake = this.wake;
+    this.wake = undefined;
+    wake?.();
+  }
+
+  private async emit(bytes: Uint8Array): Promise<void> {
+    if (this.failure) throw this.failure;
+    this.controller.enqueue(bytes);
+    this.written += bytes.byteLength;
+    while ((this.controller.desiredSize ?? 1) <= 0 && !this.failure) {
+      await new Promise<void>((resolve) => {
+        this.wake = resolve;
+      });
+    }
+    if (this.failure) throw this.failure;
+  }
+
+  private async fill(to: number): Promise<void> {
+    while (this.written < to) {
+      if (this.written < this.limit) {
+        const end = Math.min(to, this.limit, this.written + FILL_STEP);
+        const length = end - this.written;
+        const read = await collect(
+          await this.fs.readFile(this.path, { byteOffset: this.written, byteLength: length }),
+          length
+        );
+        if (read.byteLength < length) {
+          this.limit = this.written + read.byteLength;
+          if (read.byteLength > 0) await this.emit(read);
+          continue;
+        }
+        await this.emit(read);
+      } else {
+        await this.emit(new Uint8Array(Math.min(to - this.written, FILL_STEP)));
+      }
+    }
+  }
+
+  async write(offset: number, bytes: Uint8Array): Promise<boolean> {
+    if (offset < this.written) return false;
+    await this.fill(offset);
+    if (bytes.byteLength > 0) await this.emit(bytes);
+    this.size = Math.max(this.size, this.written);
+    return true;
+  }
+
+  truncate(size: number): boolean {
+    if (size < this.written) return false;
+    this.size = size;
+    this.limit = Math.min(this.limit, size);
+    return true;
+  }
+
+  async finish(): Promise<void> {
+    try {
+      await this.fill(this.size);
+      this.controller.close();
+    } catch (err) {
+      if (!this.failure) this.controller.error(err);
+      await this.committed.catch(() => undefined);
+      throw err;
+    }
+    await this.committed;
+    if (this.modeChanged) await this.fs.chmod(this.path, this.mode);
+  }
+}
+
+class DriverState {
+  readonly fs: WorkspaceFilesystemLike;
+  readonly root: string;
+  readonly buffer: number;
+  readonly handles = new Map<number, Handle>();
+  readonly drafts = new Map<string, Draft>();
+  private nextFh = 0;
+  tail: Promise<unknown> = Promise.resolve();
+
+  constructor(fs: WorkspaceFilesystemLike, root: string, buffer: number) {
+    this.fs = fs;
+    this.root = root;
+    this.buffer = buffer;
+  }
+
+  full(path: string): string {
+    return path === '/' ? this.root || '/' : `${this.root}${path}`;
+  }
+
+  serial<T>(work: () => Promise<T>): Promise<T> {
+    const run = this.tail.then(work, work);
+    this.tail = run.catch(() => undefined);
+    return run.catch((err: unknown) => {
+      throw translated(err);
+    });
+  }
+
+  async settled(): Promise<void> {
+    for (;;) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const seen = this.tail;
+      await seen;
+      if (seen === this.tail) return;
+    }
+  }
+
+  async finish(path: string): Promise<void> {
+    const draft = this.drafts.get(path);
+    if (!draft) return;
+    this.drafts.delete(path);
+    await draft.finish();
+  }
+
+  async finishUnder(path: string): Promise<void> {
+    for (const at of [...this.drafts.keys()]) {
+      if (at === path || at.startsWith(`${path}/`)) await this.finish(at);
+    }
+  }
+
+  async draftFor(path: string): Promise<Draft> {
+    const existing = this.drafts.get(path);
+    if (existing) return existing;
+    const st = await this.fs.stat(path);
+    if (st.isDirectory) throw fsError('EISDIR', path);
+    const draft = new Draft(this.fs, path, st, this.buffer);
+    this.drafts.set(path, draft);
+    return draft;
+  }
+
+  handle(fh: number): Handle {
+    const found = this.handles.get(fh);
+    if (!found) throw fsError('EBADF', `handle ${fh}`);
+    return found;
+  }
+
+  async truncateTo(path: string, size: number): Promise<void> {
+    if (this.drafts.get(path)?.truncate(size)) return;
+    await this.finish(path);
+    const st = await this.fs.stat(path);
+    if (st.isDirectory) throw fsError('EISDIR', path);
+    if (st.size === size) return;
+    if (size === 0) {
+      await this.fs.writeFile(path, new Uint8Array(0), { mode: st.mode & 0o7777 });
+      return;
+    }
+    const rewrite = new Draft(this.fs, path, st, this.buffer);
+    rewrite.truncate(size);
+    await rewrite.finish();
+  }
+
+  async getattr(path: string): Promise<DriverAttr> {
+    const at = this.full(path);
+    const attr = attrOf(await this.fs.lstat(at));
+    const draft = this.drafts.get(at);
+    return draft ? { ...attr, size: draft.size, mtime: Date.now() } : attr;
+  }
+
+  async open(path: string, flags: OpenFlags): Promise<number> {
+    const at = this.full(path);
+    const st = await this.fs.lstat(at).catch((err: unknown) => {
+      if (codeOf(err) === 'ENOENT') return undefined;
+      throw err;
+    });
+    if (st && flags.exclusive) throw fsError('EEXIST', path);
+    if (st?.isDirectory && flags.write) throw fsError('EISDIR', path);
+    if (!st) {
+      if (!flags.create) throw fsError('ENOENT', path);
+      await this.fs.writeFile(at, new Uint8Array(0), {
+        mode: (flags.owner?.mode ?? 0o644) & 0o7777,
+        ...(flags.exclusive ? { exclusive: true } : {}),
+      });
+    } else if (flags.truncate && flags.write) {
+      await this.truncateTo(at, 0);
+    }
+    this.handles.set(++this.nextFh, { path: at, write: flags.write, drafting: false });
+    return this.nextFh;
+  }
+
+  async read(fh: number, offset: number, size: number): Promise<Uint8Array> {
+    const h = this.handle(fh);
+    await this.finish(h.path);
+    if (size === 0) return new Uint8Array(0);
+    return collect(await this.fs.readFile(h.path, { byteOffset: offset, byteLength: size }), size);
+  }
+
+  async write(fh: number, offset: number, bytes: Uint8Array): Promise<void> {
+    const h = this.handle(fh);
+    if (!h.write) throw fsError('EBADF', `handle ${fh} is read-only`);
+    h.drafting = true;
+    if (await (await this.draftFor(h.path)).write(offset, bytes)) return;
+    await this.finish(h.path);
+    if (!(await (await this.draftFor(h.path)).write(offset, bytes))) {
+      throw fsError('EIO', `${h.path}: write refused`);
+    }
+  }
+
+  async release(fh: number): Promise<void> {
+    const h = this.handle(fh);
+    this.handles.delete(fh);
+    if (!h.drafting) return;
+    const writing = [...this.handles.values()].some((o) => o.path === h.path && o.drafting);
+    if (!writing) await this.finish(h.path);
+  }
+
+  async rmdir(path: string): Promise<void> {
+    const at = this.full(path);
+    const st = await this.fs.lstat(at);
+    if (!st.isDirectory) throw fsError('ENOTDIR', path);
+    if (path === '/') throw fsError('EBUSY', 'the root of a mount');
+    if ((await this.fs.readdir(at)).length > 0) throw fsError('ENOTEMPTY', path);
+    await this.fs.rm(at);
+  }
+
+  async unlink(path: string): Promise<void> {
+    const at = this.full(path);
+    await this.finish(at);
+    const st = await this.fs.lstat(at);
+    if (st.isDirectory) throw fsError('EISDIR', path);
+    await this.fs.rm(at);
+  }
+
+  async rename(from: string, to: string): Promise<void> {
+    const a = this.full(from);
+    const b = this.full(to);
+    await this.finishUnder(a);
+    await this.finishUnder(b);
+    await this.fs.rename(a, b);
+  }
+
+  async link(from: string, to: string): Promise<void> {
+    const a = this.full(from);
+    await this.finish(a);
+    if (!this.fs.link) throw fsError('EPERM', 'this file system has no hard links');
+    await this.fs.link(a, this.full(to));
+  }
+
+  async setattr(path: string, change: DriverSetAttr): Promise<void> {
+    const at = this.full(path);
+    if (change.size !== undefined) await this.truncateTo(at, change.size);
+    if (change.mode === undefined) return;
+    const mode = change.mode & 0o7777;
+    await this.fs.chmod(at, mode);
+    const draft = this.drafts.get(at);
+    if (draft) {
+      draft.mode = mode;
+      draft.modeChanged = true;
+    }
+  }
+}
+
+export function workspaceDriver(
+  fs: WorkspaceFilesystemLike,
+  options: WorkspaceDriverOptions = {}
+): WorkspaceDriver {
+  const root = (options.root ?? '/').replace(/\/+$/, '');
+  const state = new DriverState(fs, root, options.bufferBytes ?? BUFFER_BYTES);
+  const serial = <T>(work: () => Promise<T>) => state.serial(work);
+  const capabilities: DriverCapabilities = {
+    symlinks: true,
+    chmod: true,
+    ranges: true,
+    sessions: true,
+    maxIo: options.maxIo ?? MAX_IO,
+    attrTtl: 0,
+    entryTtl: 0,
+    ...(fs.link ? { links: true } : {}),
+  };
+  return {
+    capabilities,
+    settled: () => state.settled(),
+    mount: () =>
+      serial(async () => {
+        if (root) await fs.mkdir(root, { recursive: true });
+        return undefined;
+      }),
+    getattr: (path) => serial(() => state.getattr(path)),
+    readdir: (path) =>
+      serial(async () =>
+        (await fs.readdir(state.full(path))).map(
+          (entry): DriverEntry => ({ name: entry.name, kind: kindOf(entry) })
+        )
+      ),
+    open: (path, flags) => serial(() => state.open(path, flags)),
+    read: (fh, offset, size) => serial(() => state.read(fh, offset, size)),
+    write: (fh, offset, bytes) => serial(() => state.write(fh, offset, bytes)),
+    release: (fh) => serial(() => state.release(fh)),
+    mkdir: (path) => serial(() => fs.mkdir(state.full(path))),
+    rmdir: (path) => serial(() => state.rmdir(path)),
+    unlink: (path) => serial(() => state.unlink(path)),
+    rename: (from, to) => serial(() => state.rename(from, to)),
+    ...(fs.link ? { link: (from: string, to: string) => serial(() => state.link(from, to)) } : {}),
+    symlink: (target, path) => serial(() => fs.symlink(target, state.full(path))),
+    readlink: (path) => serial(() => fs.readlink(state.full(path))),
+    setattr: (path, change) => serial(() => state.setattr(path, change)),
+    statfs: async () => ({ bsize: 4096, blocks: 1 << 30, bfree: 1 << 30 }),
+  };
+}
