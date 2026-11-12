@@ -1,0 +1,13 @@
+{
+  "name": "slicc-kernel-do-example",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-01",
+  "workers_dev": true,
+  "durable_objects": { "bindings": [{ "name": "KERNEL", "class_name": "Kernel" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Kernel"] }],
+  "worker_loaders": [{ "binding": "LOADER" }],
+  "rules": [
+    { "type": "Data", "globs": ["**/*.wasm"], "fallthrough": false },
+    { "type": "Text", "globs": ["**/bin/bash", "**/bin/coreutils"], "fallthrough": false }
+  ]
+}
