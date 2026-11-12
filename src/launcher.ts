@@ -188,11 +188,12 @@ import {
 } from './mount/syscall.ts';
 import { tmpfs } from './mount/tmpfs.ts';
 import {
+  customSectionsOf,
   type ForeignResults,
   foreignImports,
   type ImportedMemory,
   importedMemory,
-  libcVersion,
+  libcVersionOf,
 } from './process/wasi/wasi-module.ts';
 import { servedFsCalls, staleFdCount } from './realm/sync-fs-dispatch.ts';
 import type { SourceCheck } from './realm/sync-fs-token-registry.ts';
@@ -388,6 +389,7 @@ interface Compiled {
   module: WebAssembly.Module;
   memory?: ImportedMemory;
   foreign?: ForeignResults | undefined;
+  named: boolean;
 }
 
 interface UserScopes {
@@ -587,8 +589,8 @@ export function cronPath(path: string): boolean {
 
 const ETC_HOSTNAME_LIBC = 42;
 
-function readsEtcHostname(program: Program): boolean {
-  return program.abi === 'wasi' && (libcVersion(program.module) ?? 0) >= ETC_HOSTNAME_LIBC;
+function readsEtcHostname(program: Program, libc: number | undefined): boolean {
+  return program.abi === 'wasi' && (libc ?? 0) >= ETC_HOSTNAME_LIBC;
 }
 
 function setOrDrop(env: Record<string, string>, key: string, value: string | undefined): void {
@@ -805,6 +807,7 @@ export class Launcher {
   private unwatchScopes: () => void = () => undefined;
   private readonly warned = new Set<string>();
   private readonly compiled = new Map<string, Promise<Compiled>>();
+  private readonly libcs = new WeakMap<WebAssembly.Module, number>();
   private readonly texts = new Map<string, Promise<string>>();
   private revocations = 0;
   private integrity: Integrity | undefined;
@@ -1987,11 +1990,14 @@ export class Launcher {
       const bytes = sum === undefined ? read : await this.pinnedBytes(pin, read);
       const memory = importedMemory(bytes);
       const foreign = foreignImports(bytes);
+      const libc = libcVersionOf(bytes);
+      const named = customSectionsOf(bytes, 'name').length > 0;
       const compiled = this.compile
         ? await this.compile(bytes, key)
         : await WebAssembly.compile(bytes as BufferSource);
+      if (libc !== undefined) this.libcs.set(compiled, libc);
       return {
-        value: { module: compiled, ...(memory ? { memory } : {}), foreign },
+        value: { module: compiled, ...(memory ? { memory } : {}), foreign, named },
         key: sum === undefined ? readKey : key,
       };
     });
@@ -2072,8 +2078,7 @@ export class Launcher {
     held.made.revoke();
   }
 
-  private async names(path: string, module: WebAssembly.Module): Promise<string | undefined> {
-    if (WebAssembly.Module.customSections(module, 'name').length > 0) return undefined;
+  private async names(path: string): Promise<string | undefined> {
     const beside = `${path}.names`;
     if (await this.base.exists(beside)) return beside;
     const root = PACKAGE_ROOT.exec(path)?.[1];
@@ -2171,9 +2176,9 @@ export class Launcher {
       ]);
       return { glue, module, path: target.glue };
     }
-    const { module, memory, foreign } = await this.module(target.wasm, caller, asked);
+    const { module, memory, foreign, named } = await this.module(target.wasm, caller, asked);
     const names =
-      env.SLICC_WASM_BACKTRACE === '1' ? await this.names(target.wasm, module) : undefined;
+      env.SLICC_WASM_BACKTRACE === '1' && !named ? await this.names(target.wasm) : undefined;
     const imports = target.imports ? await this.text(target.imports, caller) : undefined;
     return {
       abi: 'wasi',
@@ -2252,7 +2257,8 @@ export class Launcher {
     };
     if (this.integrity) await this.checkedSources(planned, caller);
     const [program, exeId] = await this.loaded(planned.target, env, caller);
-    if (readsEtcHostname(program)) setOrDrop(env, 'HOSTNAME', own);
+    const libc = program.abi === 'js' ? undefined : this.libcs.get(program.module);
+    if (readsEtcHostname(program, libc)) setOrDrop(env, 'HOSTNAME', own);
     return { planned, env, program, exeId };
   }
 

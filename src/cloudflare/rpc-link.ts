@@ -18,8 +18,8 @@ export interface KernelEndStub extends WireEnd {
 }
 
 export interface ProcessEndStub extends WireEnd {
-  close(): Promise<void>;
-  settled(): Promise<void>;
+  close(reason: string): Promise<void>;
+  settled(): Promise<string>;
 }
 
 const ignore = (): void => {};
@@ -111,4 +111,36 @@ export async function answered(end: KernelEndStub, answer: Answer): Promise<unkn
   const pieces: Uint8Array[] = [];
   for (let index = 0; index < count; index++) pieces.push(await end.take(held, index));
   return unpack(value, pieces);
+}
+
+export class Closers {
+  private readonly handlers: ((reason: string) => void)[] = [];
+  private readonly pending = new Set<(err: Error) => void>();
+  reason: string | undefined;
+
+  listen(handler: (reason: string) => void): void {
+    const reason = this.reason;
+    if (reason === undefined) this.handlers.push(handler);
+    else queueMicrotask(() => handler(reason));
+  }
+
+  guard<T>(work: Promise<T>): Promise<T> {
+    if (this.reason !== undefined) return Promise.reject(new Error(`link closed: ${this.reason}`));
+    let reject: (err: Error) => void = () => {};
+    const ended = new Promise<never>((_, fail) => {
+      reject = fail;
+    });
+    this.pending.add(reject);
+    return Promise.race([work, ended]).finally(() => this.pending.delete(reject));
+  }
+
+  close(reason: string): boolean {
+    if (this.reason !== undefined) return false;
+    this.reason = reason;
+    const err = new Error(`link closed: ${reason}`);
+    for (const reject of [...this.pending]) reject(err);
+    this.pending.clear();
+    for (const handler of this.handlers.splice(0)) handler(reason);
+    return true;
+  }
 }

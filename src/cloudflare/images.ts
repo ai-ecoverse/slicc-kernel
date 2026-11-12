@@ -1,5 +1,3 @@
-import { answerModuleQueries, type WasmInfo, wasmInfo } from './wasm-info.ts';
-
 export interface ImageHandle {
   readonly image: string;
 }
@@ -15,10 +13,6 @@ export async function digest(data: string | Uint8Array): Promise<string> {
 export class Images {
   private readonly bytes = new Map<string, ArrayBuffer>();
   private readonly handles = new Map<string, ImageHandle>();
-  private readonly infos = new WeakMap<object, WasmInfo>();
-  readonly release = answerModuleQueries((module) =>
-    module && typeof module === 'object' ? this.infos.get(module) : undefined
-  );
 
   async register(source: ArrayBuffer | ArrayBufferView): Promise<ImageHandle> {
     const view =
@@ -29,7 +23,6 @@ export class Images {
     const known = this.handles.get(image);
     if (known) return known;
     const handle: ImageHandle = Object.freeze({ image });
-    this.infos.set(handle, wasmInfo(view));
     this.bytes.set(image, view.slice().buffer);
     this.handles.set(image, handle);
     return handle;

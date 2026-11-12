@@ -184,10 +184,32 @@ export function foreignImports(bytes: Uint8Array): ForeignResults | undefined {
 
 const LIBC_MARK = /^wasix-sysroot \d{4}\.\d+\.\d+-(\d+)/;
 
-export function libcVersion(module: WebAssembly.Module): number | undefined {
-  for (const section of WebAssembly.Module.customSections(module, 'slicc.libc')) {
+function libcOf(sections: Iterable<ArrayBuffer | Uint8Array>): number | undefined {
+  for (const section of sections) {
     const found = LIBC_MARK.exec(new TextDecoder().decode(section));
     if (found) return Number(found[1]);
   }
   return undefined;
+}
+
+export function libcVersion(module: WebAssembly.Module): number | undefined {
+  return libcOf(WebAssembly.Module.customSections(module, 'slicc.libc'));
+}
+
+export function customSectionsOf(bytes: Uint8Array, wanted: string): Uint8Array[] {
+  const found: Uint8Array[] = [];
+  const r = new Reader(bytes);
+  r.at = 8;
+  while (r.at < bytes.length) {
+    const id = r.byte();
+    const size = r.u32();
+    const end = r.at + size;
+    if (id === 0 && r.name() === wanted) found.push(bytes.subarray(r.at, end));
+    r.at = end;
+  }
+  return found;
+}
+
+export function libcVersionOf(bytes: Uint8Array): number | undefined {
+  return libcOf(customSectionsOf(bytes, 'slicc.libc'));
 }

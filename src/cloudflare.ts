@@ -261,7 +261,6 @@ export async function createCloudflareKernel(
       launcher.cdp.close();
       launcher.endFills();
       launcher.unmountAll();
-      images.release();
     },
   };
 }

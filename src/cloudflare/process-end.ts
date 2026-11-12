@@ -1,16 +1,23 @@
 import { RpcTarget } from 'cloudflare:workers';
 import type { KernelLink } from '../async/link.ts';
-import { answered, dispose, Inbox, type KernelEndStub, quietly, send } from './rpc-link.ts';
+import {
+  answered,
+  Closers,
+  dispose,
+  Inbox,
+  type KernelEndStub,
+  quietly,
+  send,
+} from './rpc-link.ts';
 import { pack } from './rpc-pack.ts';
 
-const CLOSED = 'the kernel closed this process';
+const CLOSED_BY_PROCESS = 'the process closed its link';
 
 class ProcessState {
   readonly inbox = new Inbox();
-  readonly closers: ((reason: string) => void)[] = [];
-  closed = false;
-  done: () => void = () => {};
-  readonly settled = new Promise<void>((resolve) => {
+  readonly closers = new Closers();
+  done: (reason: string) => void = () => {};
+  readonly settled = new Promise<string>((resolve) => {
     this.done = resolve;
   });
 
@@ -20,14 +27,15 @@ class ProcessState {
     this.kernel = kernel;
   }
 
-  close(reason?: string): void {
-    if (this.closed) return;
-    this.closed = true;
+  get closed(): boolean {
+    return this.closers.reason !== undefined;
+  }
+
+  close(reason: string): void {
+    if (!this.closers.close(reason)) return;
     this.inbox.clear();
-    this.done();
+    this.done(reason);
     dispose(this.kernel);
-    if (reason === undefined) return;
-    for (const handler of this.closers.splice(0)) handler(reason);
   }
 }
 
@@ -48,35 +56,30 @@ export class ProcessEnd extends RpcTarget {
     inbox.deliver(inbox.take(value, count));
   }
 
-  close(): void {
-    this.#state.close('the kernel closed this process');
+  close(reason: string): void {
+    this.#state.close(typeof reason === 'string' ? reason : 'the kernel closed the process');
   }
 
-  settled(): Promise<void> {
+  settled(): Promise<string> {
     return this.#state.settled;
   }
 }
 
-export interface ClosableKernelLink extends KernelLink {
-  onClose(handler: (reason: string) => void): void;
-  close(): void;
-}
-
-export function processSide(kernel: KernelEndStub): { end: ProcessEnd; link: ClosableKernelLink } {
+export function processSide(kernel: KernelEndStub): { end: ProcessEnd; link: KernelLink } {
   const state = new ProcessState(kernel);
-  const link: ClosableKernelLink = {
-    onClose: (handler) => {
-      state.closers.push(handler);
-    },
-    close: () => state.close(),
+  const link: KernelLink = {
+    onClose: (handler) => state.closers.listen(handler),
+    close: () => state.close(CLOSED_BY_PROCESS),
     post(message) {
       if (!state.closed) send(kernel, message);
     },
-    async call(message) {
-      if (state.closed) throw new Error(CLOSED);
+    call(message) {
+      if (state.closed) return state.closers.guard(Promise.resolve());
       const { value, pieces } = pack(message);
       for (const piece of pieces) quietly(kernel.part(piece));
-      return answered(kernel, await kernel.call(value, pieces.length));
+      return state.closers.guard(
+        kernel.call(value, pieces.length).then((answer) => answered(kernel, answer))
+      );
     },
     onMessage: (handler) => state.inbox.listen(handler),
   };

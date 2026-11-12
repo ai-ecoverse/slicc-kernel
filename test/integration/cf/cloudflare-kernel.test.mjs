@@ -22,6 +22,13 @@ async function bundledProcess() {
           on.onResolve({ filter: /dist\/node\.js$/ }, () => ({
             path: `${REPO}src/async/transport.ts`,
           }));
+          on.onResolve({ filter: /^node:worker_threads$/ }, () => ({
+            path: 'worker_threads',
+            namespace: 'shim',
+          }));
+          on.onLoad({ filter: /.*/, namespace: 'shim' }, () => ({
+            contents: 'export const isMainThread = true;',
+          }));
         },
       },
     ],
