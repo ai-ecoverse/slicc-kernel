@@ -88,6 +88,27 @@ function identifiers(statements) {
   return ids;
 }
 
+const ASSIGNMENTS = new Set([
+  SyntaxKind.EqualsToken,
+  SyntaxKind.QuestionQuestionEqualsToken,
+  SyntaxKind.BarBarEqualsToken,
+  SyntaxKind.AmpersandAmpersandEqualsToken,
+]);
+
+const CASTS = new Set([
+  SyntaxKind.AsExpression,
+  SyntaxKind.TypeAssertionExpression,
+  SyntaxKind.ParenthesizedExpression,
+  SyntaxKind.NonNullExpression,
+  SyntaxKind.SatisfiesExpression,
+]);
+
+function uncast(expr) {
+  let at = expr;
+  while (CASTS.has(at.kind)) at = at.expression;
+  return at;
+}
+
 function flowOf(node) {
   switch (node.kind) {
     case SyntaxKind.PropertyAssignment:
@@ -111,12 +132,12 @@ function flowOf(node) {
     case SyntaxKind.Parameter:
       return node.initializer && { expr: node.initializer, site: 'default' };
     case SyntaxKind.BinaryExpression:
-      return node.operatorToken.kind === SyntaxKind.EqualsToken
+      return ASSIGNMENTS.has(node.operatorToken.kind)
         ? { expr: node.right, site: 'assignment' }
         : undefined;
     case SyntaxKind.AsExpression:
     case SyntaxKind.TypeAssertionExpression:
-      return { expr: node.expression, site: 'cast', target: node };
+      return { expr: uncast(node.expression), site: 'cast', target: node };
     default:
       return undefined;
   }
@@ -475,7 +496,8 @@ export class Analysis {
     if (from.length > 0 && to.length === 0 && depth === 0 && c.site !== 'cast') {
       this.lost.push({ from, flow: c, target });
     }
-    if (c.site === 'cast' && depth === 0 && from.length === 0 && this.importValue(source)) {
+    const opaque = source.flags & (TypeFlags.Unknown | TypeFlags.Any) || this.importValue(source);
+    if (c.site === 'cast' && depth === 0 && from.length === 0 && opaque) {
       for (const t of to)
         this.opaque.push([t, { seed: `a call through a wasm import value at ${where(c.source)}` }]);
     }
