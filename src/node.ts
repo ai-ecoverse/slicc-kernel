@@ -171,6 +171,7 @@ export interface NodeKernelOptions {
   root?: FileSystemDirectoryHandle;
   meta?: MetaStore;
   ranged?: boolean;
+  durable?: () => void | Promise<void>;
   modules?: string;
   commands?: { append?: readonly string[] };
   env?: Record<string, string>;
@@ -669,6 +670,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     fs,
     moduleUrl: sourceModule,
     unlinkOwner: pidOwner(process),
+    ...(options.durable ? { durable: options.durable } : {}),
     ...launch,
     createDriverWorker: () =>
       nodeWorker(

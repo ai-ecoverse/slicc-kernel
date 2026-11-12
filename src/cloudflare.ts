@@ -220,6 +220,7 @@ export async function createCloudflareKernel(
     fs,
     moduleUrl: sourceModule,
     compile: images.compile,
+    ...(options.sql ? { durable: flush } : {}),
     ports: localPorts,
     emscripten: 'kernel',
     admit: (program, from) =>

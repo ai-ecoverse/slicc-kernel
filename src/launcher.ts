@@ -235,6 +235,7 @@ import {
 
 export interface LauncherOptions {
   unlinkOwner?: UnlinkOwner;
+  durable?: () => void | Promise<void>;
   fs: KernelFs;
   createWorker: () => WasmWorkerLike;
   modules?: string;
@@ -797,6 +798,7 @@ export class Launcher {
   private readonly unguardedRoot: KernelFs;
   private writers: WriterStack | undefined;
   private readonly unlinkOwnerOption: UnlinkOwner | undefined;
+  private readonly durable: (() => void | Promise<void>) | undefined;
   private readonly base: KernelFs;
   private readonly createWorker: () => WasmWorkerLike;
   private readonly compile: LauncherOptions['compile'];
@@ -1050,7 +1052,7 @@ export class Launcher {
     );
     this.fs = this.processChain(fs, this.nodes, this.unlinked);
     this.writerTags = writerTags(options.protect);
-    this.unlinkOwnerOption = options.unlinkOwner;
+    ({ unlinkOwner: this.unlinkOwnerOption, durable: this.durable } = options);
     if (this.writerTags.size > 0 && options.fs.protect && !options.fs.unguarded) {
       throw new TypeError('protect.writers needs a root file system with an unguarded view');
     }
@@ -2486,6 +2488,7 @@ export class Launcher {
         this.settling.syscall(pid, call.op);
       },
       settling: () => this.settling.isSettling(pid),
+      durable: this.durable,
       ...(req.ignored ? { ignored: req.ignored } : {}),
       ...(anyBlocked(req.blocked) ? { blocked: req.blocked } : {}),
       ...(req.umask !== undefined ? { umask: req.umask } : {}),

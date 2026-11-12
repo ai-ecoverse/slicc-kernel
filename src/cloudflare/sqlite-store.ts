@@ -33,6 +33,8 @@ interface Behind {
   maxEntries: number;
 }
 
+const RETRY_MAX_MS = 60000;
+
 const BEHIND: Behind = { idleMs: 50, maxMs: 1000, maxBytes: 8 * 1024 * 1024, maxEntries: 4096 };
 
 function behindOf(option: SqliteOptions['writeBehind']): Behind | undefined {
@@ -83,6 +85,7 @@ export class SqlStore {
   private lastDirty = 0;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private flushing = false;
+  private failures = 0;
   flushes = 0;
 
   constructor(sql: SqlStorageLike, options: SqliteOptions = {}) {
@@ -158,9 +161,13 @@ export class SqlStore {
     }
     try {
       this.flush();
+      this.failures = 0;
     } catch (err) {
-      console.warn(`slicc-kernel: flushing the SQLite file system failed, will retry: ${err}`);
-      this.schedule(behind.idleMs);
+      if (this.failures === 0) {
+        console.warn(`slicc-kernel: flushing the SQLite file system failed, will retry: ${err}`);
+      }
+      this.failures++;
+      this.schedule(Math.min(behind.idleMs * 2 ** this.failures, RETRY_MAX_MS));
     }
   }
 
