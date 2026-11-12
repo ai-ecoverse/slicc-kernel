@@ -22,7 +22,7 @@ function readAt(ctx: EmContext, fd: number, target: Uint8Array, position: number
   return done;
 }
 
-export function mmapImport(ctx: EmContext): Record<string, unknown> {
+export function mmapImport(ctx: EmContext): WebAssembly.ModuleImports {
   return {
     _mmap_js: negated(
       (

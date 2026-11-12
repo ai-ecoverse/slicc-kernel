@@ -5,8 +5,9 @@ import {
   type WasmProcessErrorMsg,
   type WasmProcessExitMsg,
 } from '../kernel/protocol.ts';
+import { runEmscriptenProcess } from '../process/emscripten/runtime.ts';
 import { rawStack } from '../process/raw-stack.ts';
-import { runWasiProcess } from '../process/wasi/wasi-runtime.ts';
+import { runWasiProcess, type TransportFactory } from '../process/wasi/wasi-runtime.ts';
 import type { SabPostLike, SyncSabTransport } from '../realm/sync-sab-bridge.ts';
 import { jspiAvailable, registerWaiter } from './jspi.ts';
 import type { KernelLink } from './link.ts';
@@ -23,13 +24,14 @@ const NOT_RUNNABLE = 126;
 export const ASYNC_NO_JSPI =
   'the async process host needs WebAssembly JSPI (Suspending, promising)';
 export const ASYNC_NO_JS = 'the async process host runs no JavaScript programs';
-export const ASYNC_NO_EMSCRIPTEN = 'the async process host runs no Emscripten glue programs';
+export const ASYNC_NO_EMSCRIPTEN =
+  "the async process host runs Emscripten programs only on the kernel's personality (emscripten: 'kernel')";
 export const ASYNC_NO_IMPORTS = 'the async process host loads no JavaScript imports modules';
 
 function refusal(init: AsyncProcessInit): string | undefined {
   const program = init.program as Omit<AsyncProcessInit['program'], 'abi'> & { abi?: string };
   if (program.abi === 'js') return ASYNC_NO_JS;
-  if (program.abi !== 'wasi') return ASYNC_NO_EMSCRIPTEN;
+  if (program.abi !== 'wasi' && program.emscripten !== 'kernel') return ASYNC_NO_EMSCRIPTEN;
   if (program.imports !== undefined) return ASYNC_NO_IMPORTS;
   if (!jspiAvailable()) return ASYNC_NO_JSPI;
   return undefined;
@@ -93,13 +95,14 @@ async function started(
     postMessage: (message, transfer) => transport.post(message, transfer),
   };
   const kernel = guarded(transport);
-  return runWasiProcess(localInit(init, transport, module), port, {
-    transport: (_sab, _port, memory) => {
-      size.memory = memory;
-      return kernel;
-    },
-    threadCap: 1,
-  });
+  const local = localInit(init, transport, module);
+  const transports: TransportFactory = (_sab, _port, memory) => {
+    size.memory = memory;
+    return kernel;
+  };
+  if (local.program.abi !== 'wasi')
+    return runEmscriptenProcess(local, port, { transport: transports });
+  return runWasiProcess(local, port, { transport: transports, threadCap: 1 });
 }
 
 export function asyncProcessEntry(link: KernelLink, deps: AsyncProcessEntryDeps): void {

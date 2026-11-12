@@ -674,7 +674,7 @@ function readlink(ctx: EmContext, path: string): string {
   return ctx.host.o.fs.readlink(path);
 }
 
-export function fileImports(ctx: EmContext, state: FilesState): Record<string, unknown> {
+export function fileImports(ctx: EmContext, state: FilesState): WebAssembly.ModuleImports {
   const { mem } = ctx;
   const str = (ptr: number) => mem.cString(ptr);
   const at = (dirfd: number, ptr: number, empty = false) => ctx.cwd.resolve(dirfd, str(ptr), empty);
@@ -764,7 +764,7 @@ export function fileImports(ctx: EmContext, state: FilesState): Record<string, u
   };
 }
 
-function moreFileImports(ctx: EmContext, state: FilesState): Record<string, unknown> {
+function moreFileImports(ctx: EmContext, state: FilesState): WebAssembly.ModuleImports {
   const { mem } = ctx;
   const str = (ptr: number) => mem.cString(ptr);
   const at = (dirfd: number, ptr: number, empty = false) => ctx.cwd.resolve(dirfd, str(ptr), empty);

@@ -287,7 +287,7 @@ function blockingPoll(ctx: EmContext, ptr: number, n: number, timeoutMs: number)
   return count;
 }
 
-export function fdImports(ctx: EmContext): Record<string, unknown> {
+export function fdImports(ctx: EmContext): WebAssembly.ModuleImports {
   const { fds } = ctx.host;
   return {
     __syscall_dup: negated((fd: number) => fds.dup(fd, 0, false)),

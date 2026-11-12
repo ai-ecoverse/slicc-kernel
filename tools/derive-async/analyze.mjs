@@ -150,6 +150,7 @@ export class Analysis {
     this.libDecls = new Map();
     this.sources = new Map();
     this.lost = [];
+    this.opaque = [];
   }
 
   close() {
@@ -215,7 +216,9 @@ export class Analysis {
       const call = { node, fn, callees: new Set(), lib: undefined };
       this.calls.push(call);
       (fn ? fn.calls : this.topLevel).push(call);
-      for (const arg of node.arguments ?? []) flows.push({ expr: arg, site: 'argument', call });
+      for (const [index, arg] of (node.arguments ?? []).entries()) {
+        flows.push({ expr: arg, site: 'argument', call, index });
+      }
       return;
     }
     if (kind === SyntaxKind.ArrayLiteralExpression) {
@@ -305,6 +308,7 @@ export class Analysis {
         continue;
       }
       const key = this.declKeyOf(decl);
+      call.decl = decl;
       call.callees.add(key);
       call.lib = this.libName(key);
       if (call.lib !== undefined) this.functionMethod(call);
@@ -402,7 +406,6 @@ export class Analysis {
       case SyntaxKind.TypeOfExpression:
       case SyntaxKind.VoidExpression:
       case SyntaxKind.DeleteExpression:
-      case SyntaxKind.ObjectLiteralExpression:
       case SyntaxKind.ArrayLiteralExpression:
       case SyntaxKind.RegularExpressionLiteral:
         return false;
@@ -433,9 +436,22 @@ export class Analysis {
       const type = c.type;
       if (!type || type.flags & PRIMITIVE) continue;
       const target = this.targetOf(c);
+      if (c.site === 'argument') this.linkConstraint(type, c);
       if (!target || target.id === type.id) continue;
       this.link(type, target, c, 0);
     }
+  }
+
+  linkConstraint(type, c) {
+    const decl = c.call.decl;
+    if (!decl || isLibPath(decl.path)) return;
+    const node = decl.resolve();
+    const sig = node && this.checker.getSignatureFromDeclaration(node);
+    if (!sig) return;
+    const param = this.checker.getParameterType(sig, c.index);
+    if (!param || !(param.flags & TypeFlags.TypeParameter)) return;
+    const constraint = this.checker.getConstraintOfTypeParameter(param);
+    if (constraint) this.link(type, constraint, c, 0);
   }
 
   targetOf(c) {
@@ -458,6 +474,10 @@ export class Analysis {
     const to = this.signatureKeys(target);
     if (from.length > 0 && to.length === 0 && depth === 0 && c.site !== 'cast') {
       this.lost.push({ from, flow: c, target });
+    }
+    if (c.site === 'cast' && depth === 0 && from.length === 0 && this.importValue(source)) {
+      for (const t of to)
+        this.opaque.push([t, { seed: `a call through a wasm import value at ${where(c.source)}` }]);
     }
     for (const f of from) for (const t of to) this.linkSignature(f, t, c);
     if (depth < 2 && from.length === 0 && to.length === 0)
@@ -484,6 +504,17 @@ export class Analysis {
       if (!s || !t || s.id === t.id || s.flags & PRIMITIVE) continue;
       this.link(s, t, c, depth + 1);
     }
+  }
+
+  importValue(type) {
+    const parts = type.flags & TypeFlags.Union ? (type.getTypes() ?? []) : [type];
+    return (
+      parts.some((part) => {
+        const name = this.isLibType(part) ? this.libTypeName(part) : undefined;
+        return name === 'Function' || (name !== undefined && this.seeds.lostInto.has(name));
+      }) ||
+      (this.isLibType(type) && this.seeds.lostInto.has(this.libTypeName(type)))
+    );
   }
 
   libTypeName(type) {
@@ -590,6 +621,7 @@ export class Analysis {
         if (lib !== undefined && this.seeds.lib.has(lib)) out.push([k, { seed: lib }]);
       }
     }
+    out.push(...this.opaque);
     for (const { file, find } of this.seeds.source) {
       const sf = this.sources.get(file) ?? this.sourceFile(file);
       const node = find(sf);
