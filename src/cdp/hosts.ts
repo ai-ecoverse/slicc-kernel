@@ -49,7 +49,7 @@ export class CdpHosts {
     if (!entry) throw new HttpError(503, NO_CDP_HOST);
     let conn: CdpConnection;
     try {
-      conn = await entry.hook(request.runtime ? { runtime: request.runtime } : {});
+      conn = await entry.hook(hookRequest(request));
     } catch (e) {
       throw new HttpError(502, `CDP host: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -69,6 +69,13 @@ export class CdpHosts {
     this.closed = true;
     for (const entry of [this.embedder, ...this.clients]) if (entry) closeAll(entry);
   }
+}
+
+function hookRequest({ runtime, stamp }: CdpRequest): CdpRequest {
+  return {
+    ...(runtime ? { runtime } : {}),
+    ...(stamp ? { stamp: structuredClone(stamp) } : {}),
+  };
 }
 
 function closeAll(entry: Registration): void {
