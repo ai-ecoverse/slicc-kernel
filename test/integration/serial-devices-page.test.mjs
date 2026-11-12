@@ -23,7 +23,8 @@ test('serial nodes through the page relay: stat, stty, a loopback, removal', asy
   );
   assert.equal(loop.stdout, 'hello\n', loop.stderr);
   const blocked = bash('cat /dev/ttyUSB0; echo "cat $?"', { cwd: '/tmp' });
-  await page.until(() => window.devices.ports.length === 3);
+  await page.until(() => window.devices.calls.filter((c) => c.op === 'configure').length === 3);
+  await new Promise((r) => setTimeout(r, 300));
   await page.evaluate(() => window.removeDevice('ttyUSB0'));
   const gone = await blocked;
   assert.equal(gone.stdout, 'cat 1\n');
