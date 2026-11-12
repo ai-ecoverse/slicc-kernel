@@ -92,6 +92,14 @@ describe('the real kernel in a Durable Object with processes in Dynamic Workers'
     assert.equal(piped.stdout, 'through the kernel\n');
   });
 
+  test('connect returns a port that attachKernel drives', async (t) => {
+    if (skipped(t)) return;
+    const r = await call('/kernel/connect', { argv: ['fake', 'out'], user: 'root' });
+    assert.equal(r.status, 7, JSON.stringify(r));
+    assert.equal(r.stdout, 'to stdout\n');
+    assert.ok(Array.isArray(r.mounts));
+  });
+
   test('a blocking read is answered later', async (t) => {
     if (skipped(t)) return;
     const cat = await terminal(['fake', 'cat']);

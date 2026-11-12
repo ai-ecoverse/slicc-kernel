@@ -17,6 +17,24 @@ import { Launcher, type ModuleUrl, tagOption } from './launcher.ts';
 import { isMemoryRoot, memoryRoot } from './node/memory-root.ts';
 import { signalNumber } from './serve.ts';
 
+export { attachKernel, type KernelClient } from './client/attach.ts';
+export {
+  type ExecEvent,
+  type KillSignalName,
+  type ShellExecInput,
+  type SliccBackend,
+  type SliccBackendHandle,
+  type SliccBackendHost,
+  type SliccBackendOptions,
+  type SliccKernelLike,
+  sliccBackend,
+  type WorkspaceDirentLike,
+  type WorkspaceDriver,
+  type WorkspaceDriverOptions,
+  type WorkspaceFilesystemLike,
+  type WorkspaceStatLike,
+  workspaceDriver,
+} from './cloudflare/computer.ts';
 export { type ImageHandle, Images } from './cloudflare/images.ts';
 export { ISOLATE_WAIT_MS, IsolateGate, MAX_ISOLATES } from './cloudflare/isolates.ts';
 export {

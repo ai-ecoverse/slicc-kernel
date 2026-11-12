@@ -1,4 +1,4 @@
-import { createCloudflareKernel } from '../../../../dist/cloudflare.js';
+import { attachKernel, createCloudflareKernel } from '../../../../dist/cloudflare.js';
 
 function leb(n) {
   const out = [];
@@ -114,6 +114,19 @@ export class KernelRoutes {
         return json({ ok: true });
       case '/kernel/output':
         return json({ out: entry.out, ended: entry.ended ?? null });
+      case '/kernel/connect': {
+        const attached = await attachKernel(await this.kernel.connect({ user: args.user }));
+        const result = await attached.run(args.argv, { cwd: '/' });
+        const decoder = new TextDecoder();
+        const decoded = (value) => (typeof value === 'string' ? value : decoder.decode(value));
+        const mounts = await attached.mounts();
+        attached.close?.();
+        return json({
+          status: result.status,
+          stdout: decoded(result.stdout),
+          mounts: mounts.map((entry) => entry.target),
+        });
+      }
       case '/kernel/stats':
         return json(this.stats());
       case '/kernel/terminate':
