@@ -1,9 +1,9 @@
 import { sqlStorage } from './sqlite-root-adapter.mjs';
 import { bash, sqliteKernel } from './sqlite-root-helpers.mjs';
 
-const [path] = process.argv.slice(2);
+const [path, mode] = process.argv.slice(2);
 const sql = sqlStorage(path);
-const kernel = await sqliteKernel(sql);
+const kernel = await sqliteKernel(sql, {}, mode === 'write-behind' ? { writeBehind: true } : {});
 const loop = [
   'mkdir -p /root/work',
   '(while true; do head -c 3000000 /dev/zero > /root/work/big.tmp && mv /root/work/big.tmp /root/work/big; done) &',

@@ -1,6 +1,9 @@
 import type { MetaChange, MetaEntry, MetaStore, MetaUpdate } from '../fs/meta.ts';
+import { PathMap } from '../fs/path-map.ts';
 import {
+  decodeText,
   encodeText,
+  type Overlay,
   type SqliteOptions,
   type SqlStorageLike,
   type SqlStore,
@@ -33,21 +36,15 @@ function within(path: string, root: string): boolean {
   return root === '/' || path === root || path.startsWith(`${root}/`);
 }
 
-class SqliteMeta implements MetaStore {
+class SqliteMeta implements MetaStore, Overlay {
   private readonly store: SqlStore;
   private readonly cache = new Map<string, MetaEntry | null>();
+  private readonly dirty = new PathMap<MetaEntry | null>();
+  private readonly dirtyLinks = new Map<string, Set<string>>();
 
   constructor(store: SqlStore) {
     this.store = store;
-  }
-
-  private atomically<T>(fn: () => T): T {
-    try {
-      return this.store.atomically(fn);
-    } catch (err) {
-      this.cache.clear();
-      throw err;
-    }
+    store.register(this);
   }
 
   private remember(path: string, entry: MetaEntry | null): void {
@@ -55,7 +52,7 @@ class SqliteMeta implements MetaStore {
     this.cache.set(path, entry);
   }
 
-  private read(path: string): MetaEntry | undefined {
+  private stored(path: string): MetaEntry | undefined {
     const known = this.cache.get(path);
     if (known !== undefined) return known ?? undefined;
     const row = this.store.row('SELECT entry FROM slicc_meta WHERE path = ?', encodeText(path));
@@ -64,31 +61,50 @@ class SqliteMeta implements MetaStore {
     return entry;
   }
 
-  private write(path: string, entry: MetaEntry | undefined): void {
-    this.remember(path, entry ?? null);
-    if (!entry) {
-      this.store.run('DELETE FROM slicc_meta WHERE path = ?', encodeText(path));
-      return;
-    }
-    this.store.run(
-      'INSERT OR REPLACE INTO slicc_meta (path, dir, entry) VALUES (?, ?, ?)',
-      encodeText(path),
-      entry.dir === undefined ? null : encodeText(entry.dir),
-      JSON.stringify(entry)
-    );
+  private read(path: string): MetaEntry | undefined {
+    if (this.dirty.has(path)) return this.dirty.get(path) ?? undefined;
+    return this.stored(path);
   }
 
-  private tree(path: string): MetaEntry[] {
+  private write(path: string, entry: MetaEntry | undefined): void {
+    const old = this.read(path);
+    if (old?.dir !== undefined) this.dirtyLinks.get(old.dir)?.delete(path);
+    if (!this.dirty.has(path)) this.store.changed(1, 256);
+    this.dirty.set(path, entry ?? null);
+    if (entry?.dir !== undefined) {
+      let set = this.dirtyLinks.get(entry.dir);
+      if (!set) this.dirtyLinks.set(entry.dir, (set = new Set()));
+      set.add(path);
+    }
+  }
+
+  private storedTree(path: string): MetaEntry[] {
     if (path === '/') return this.store.rows('SELECT entry FROM slicc_meta').map(entryOf);
     return this.store
       .rows(`SELECT entry FROM slicc_meta WHERE ${TREE}`, ...treeBindings(path))
       .map(entryOf);
   }
 
+  private tree(path: string): MetaEntry[] {
+    const out = this.storedTree(path).filter((entry) => !this.dirty.has(entry.path));
+    for (const at of this.dirtyUnder(path)) {
+      const entry = this.dirty.get(at);
+      if (entry) out.push(entry);
+    }
+    return out;
+  }
+
+  private dirtyUnder(path: string): string[] {
+    return path === '/' ? [...this.dirty.keys()] : this.dirty.subtree(path);
+  }
+
   private dropTree(path: string): void {
-    for (const known of [...this.cache.keys()]) if (within(known, path)) this.cache.delete(known);
-    if (path === '/') this.store.run('DELETE FROM slicc_meta');
-    else this.store.run(`DELETE FROM slicc_meta WHERE ${TREE}`, ...treeBindings(path));
+    const paths =
+      path === '/'
+        ? this.store.rows('SELECT path FROM slicc_meta')
+        : this.store.rows(`SELECT path FROM slicc_meta WHERE ${TREE}`, ...treeBindings(path));
+    for (const row of paths) this.write(decodeText(row.path), undefined);
+    for (const at of this.dirtyUnder(path)) this.write(at, undefined);
   }
 
   async get(paths: readonly string[]): Promise<Array<MetaEntry | undefined>> {
@@ -100,11 +116,11 @@ class SqliteMeta implements MetaStore {
   }
 
   async update(path: string, change: MetaChange): Promise<void> {
-    this.atomically(() => this.write(path, change(this.read(path))));
+    this.store.batch(() => this.write(path, change(this.read(path))));
   }
 
   async updateMany(changes: ReadonlyArray<MetaUpdate>): Promise<void> {
-    this.atomically(() => {
+    this.store.batch(() => {
       for (const { path, change } of changes) this.write(path, change(this.read(path)));
     });
   }
@@ -115,21 +131,23 @@ class SqliteMeta implements MetaStore {
     root: (entry: MetaEntry | undefined) => MetaEntry,
     left?: MetaEntry
   ): Promise<void> {
-    this.atomically(() => {
+    this.store.batch(() => {
       this.dropTree(to);
       const carried = this.tree(from);
+      const source = carried.find((entry) => entry.path === from);
+      const placed = root(source);
       this.dropTree(from);
       for (const entry of carried) {
         const path = to + entry.path.slice(from.length);
         if (path !== to) this.write(path, moved(entry, path));
       }
-      this.write(to, moved(root(carried.find((entry) => entry.path === from)), to));
+      this.write(to, moved(placed, to));
       if (left) this.write(from, left);
     });
   }
 
   async remove(paths: readonly string[], left?: MetaEntry): Promise<void> {
-    this.atomically(() => {
+    this.store.batch(() => {
       for (const path of paths) this.dropTree(path);
       if (left) this.write(left.path, left);
     });
@@ -140,19 +158,47 @@ class SqliteMeta implements MetaStore {
   }
 
   async links(dir: string): Promise<MetaEntry[]> {
-    return this.store
+    const dirty = this.dirtyLinks.get(dir);
+    const out = this.store
       .rows('SELECT entry FROM slicc_meta WHERE dir = ?', encodeText(dir))
-      .map(entryOf);
+      .map(entryOf)
+      .filter((entry) => !this.dirty.has(entry.path));
+    if (dirty) {
+      for (const path of dirty) {
+        const entry = this.dirty.get(path);
+        if (entry && entry.dir === dir) out.push(entry);
+      }
+    }
+    return out;
   }
 
   async under(path: string): Promise<MetaEntry[]> {
-    return this.store
-      .rows(`SELECT entry FROM slicc_meta WHERE ${TREE}`, ...treeBindings(path))
-      .map(entryOf);
+    return this.tree(path).filter((entry) => within(entry.path, path));
   }
 
   async all(): Promise<MetaEntry[]> {
-    return this.store.rows('SELECT entry FROM slicc_meta').map(entryOf);
+    return this.tree('/');
+  }
+
+  flushInto(store: SqlStore): void {
+    for (const [path, entry] of this.dirty.entries()) {
+      if (!entry) {
+        store.run('DELETE FROM slicc_meta WHERE path = ?', encodeText(path));
+        continue;
+      }
+      store.run(
+        'INSERT OR REPLACE INTO slicc_meta (path, dir, entry) VALUES (?, ?, ?)',
+        encodeText(path),
+        entry.dir === undefined ? null : encodeText(entry.dir),
+        JSON.stringify(entry)
+      );
+    }
+  }
+
+  flushed(): void {
+    for (const [path, entry] of this.dirty.entries()) this.remember(path, entry);
+    this.dirty.clear();
+    this.dirtyLinks.clear();
   }
 }
 

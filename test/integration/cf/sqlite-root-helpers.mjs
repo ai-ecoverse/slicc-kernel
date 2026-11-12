@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { createNodeKernel, memoryRoot } from '../../../dist/node.js';
 import { sqliteMeta } from '../../../src/cloudflare/sqlite-meta.ts';
 import { sqliteRoot } from '../../../src/cloudflare/sqlite-root.ts';
+import { sqliteFlush } from '../../../src/cloudflare/sqlite-store.ts';
 
 const modules = new URL('../../../node_modules/@ai-ecoverse/', import.meta.url);
 
@@ -30,13 +31,23 @@ export async function install(kernel, names = PACKAGES) {
   }
 }
 
-export function sqliteKernel(sql, options = {}) {
+export const MODES = [
+  ['write-through', {}],
+  ['write-behind', { writeBehind: true }],
+];
+
+export function sqliteKernel(sql, options = {}, sqlite = {}) {
   return createNodeKernel({
-    root: sqliteRoot(sql),
-    meta: sqliteMeta(sql),
+    root: sqliteRoot(sql, sqlite),
+    meta: sqliteMeta(sql, sqlite),
     ranged: true,
     ...options,
   });
+}
+
+export function closeSql(sql) {
+  sqliteFlush(sql);
+  sql.close();
 }
 
 export function memoryKernel(options = {}) {

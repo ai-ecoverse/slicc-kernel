@@ -20,7 +20,7 @@ export function sqlStorage(path = ':memory:', { transactions = true } = {}) {
   const db = new DatabaseSync(path);
   if (path !== ':memory:') db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL');
   const statements = new Map();
-  const counted = { statements: 0, rowsWritten: 0 };
+  const counted = { statements: 0, rowsWritten: 0, transactions: 0, writes: 0 };
   let depth = 0;
   const sql = {
     counted,
@@ -38,6 +38,7 @@ export function sqlStorage(path = ':memory:', { transactions = true } = {}) {
       const rowsWritten = reads && /\bRETURNING\b/i.test(query) ? rows.length : changes;
       counted.statements++;
       counted.rowsWritten += rowsWritten;
+      if (rowsWritten > 0 && depth === 0) counted.writes++;
       const result = rows.map(workerdRow);
       return {
         rowsWritten,
@@ -54,6 +55,7 @@ export function sqlStorage(path = ':memory:', { transactions = true } = {}) {
   };
   if (transactions) {
     sql.transaction = (fn) => {
+      if (depth === 0) counted.transactions++;
       const name = `slicc_tx_${depth++}`;
       db.exec(`SAVEPOINT ${name}`);
       try {

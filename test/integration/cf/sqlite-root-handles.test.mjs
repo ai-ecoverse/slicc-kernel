@@ -2,14 +2,21 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { memoryRoot } from '../../../dist/node.js';
 import { CHUNK_BYTES, sqliteRoot } from '../../../src/cloudflare/sqlite-root.ts';
+import { sqliteFlush } from '../../../src/cloudflare/sqlite-store.ts';
 import { sqlStorage } from './sqlite-root-adapter.mjs';
 
 function roots(t) {
-  const sql = sqlStorage();
-  t.after(() => sql.close());
+  const through = sqlStorage();
+  const behind = sqlStorage();
+  t.after(() => {
+    sqliteFlush(behind);
+    through.close();
+    behind.close();
+  });
   return [
     ['memory', memoryRoot()],
-    ['sqlite', sqliteRoot(sql)],
+    ['sqlite', sqliteRoot(through)],
+    ['sqlite-behind', sqliteRoot(behind, { writeBehind: { idleMs: 1, maxMs: 5 } })],
   ];
 }
 
@@ -25,7 +32,7 @@ async function outcome(work) {
 async function same(pair, work) {
   const results = [];
   for (const [, root] of pair) results.push(await outcome(() => work(root)));
-  assert.deepEqual(results[1], results[0]);
+  for (const result of results.slice(1)) assert.deepEqual(result, results[0]);
   return results[0];
 }
 
@@ -250,9 +257,9 @@ test('ranged reads through File.slice across chunk boundaries', async (t) => {
 });
 
 test('a File read after its file was written: memory keeps the snapshot, SQLite refuses like OPFS', async (t) => {
-  const [[, memory], [, sqlite]] = roots(t);
+  const [[, memory], [, sqlite], [, behind]] = roots(t);
   const results = [];
-  for (const root of [memory, sqlite]) {
+  for (const root of [memory, sqlite, behind]) {
     const handle = await root.getFileHandle('s', { create: true });
     const w = await handle.createWritable();
     await w.write('one');
@@ -266,6 +273,8 @@ test('a File read after its file was written: memory keeps the snapshot, SQLite 
   }
   assert.deepEqual(results, [
     { value: 'one' },
+    { value: 'two!' },
+    { error: 'NotReadableError' },
     { value: 'two!' },
     { error: 'NotReadableError' },
     { value: 'two!' },
@@ -359,17 +368,19 @@ for (const seed of [1813, 7, 42])
       } else {
         for (const w of writers) await w.close();
         open.splice(at, 1);
-        const [m, s] = await Promise.all(pair.map(([, root]) => bytes(root, 'fuzz')));
-        assert.equal(s.length, m.length, `size after step ${step}`);
-        assert.ok(
-          s.every((x, i) => x === m[i]),
-          `bytes after step ${step}`
-        );
+        const [m, ...others] = await Promise.all(pair.map(([, root]) => bytes(root, 'fuzz')));
+        for (const s of others) {
+          assert.equal(s.length, m.length, `size after step ${step}`);
+          assert.ok(
+            s.every((x, i) => x === m[i]),
+            `bytes after step ${step}`
+          );
+        }
       }
     }
     for (const writers of open) for (const w of writers) await w.close();
-    const [m, s] = await Promise.all(pair.map(([, root]) => bytes(root, 'fuzz')));
-    assert.deepEqual(s, m);
+    const [m, ...others] = await Promise.all(pair.map(([, root]) => bytes(root, 'fuzz')));
+    for (const s of others) assert.deepEqual(s, m);
   });
 
 test('move and resolve: files replace files, directories refuse to land on names, handles follow', async (t) => {

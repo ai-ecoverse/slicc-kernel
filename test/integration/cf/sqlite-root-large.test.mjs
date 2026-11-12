@@ -7,7 +7,14 @@ import v8 from 'node:v8';
 import vm from 'node:vm';
 import { sqliteRoot } from '../../../src/cloudflare/sqlite-root.ts';
 import { sqlStorage } from './sqlite-root-adapter.mjs';
-import { bash, install, memoryKernel, sqliteKernel } from './sqlite-root-helpers.mjs';
+import {
+  bash,
+  closeSql,
+  install,
+  MODES,
+  memoryKernel,
+  sqliteKernel,
+} from './sqlite-root-helpers.mjs';
 
 v8.setFlagsFromString('--expose-gc');
 const gc = vm.runInNewContext('gc');
@@ -26,47 +33,53 @@ async function scratch(t) {
   return join(dir, 'root.sqlite');
 }
 
-test('a 64 MiB file written and read in 1 MiB pieces on the root keeps live memory near the piece size', async (t) => {
-  const sql = sqlStorage(await scratch(t));
-  t.after(() => sql.close());
-  const root = sqliteRoot(sql);
-  const handle = await root.getFileHandle('big', { create: true });
-  const piece = new Uint8Array(MiB);
-  const base = live();
-  let wrote = 0;
-  const writable = await handle.createWritable();
-  for (let i = 0; i < FILE / MiB; i++) {
-    piece.fill(i & 0xff);
-    piece[0] = i >> 8;
-    await writable.write(piece);
+for (const [mode, sqlite] of MODES) {
+  test(`a 64 MiB file written and read in 1 MiB pieces on the root (${mode}) keeps live memory near the piece size`, async (t) => {
+    const sql = sqlStorage(await scratch(t));
+    t.after(() => closeSql(sql));
+    const root = sqliteRoot(sql, sqlite);
+    const handle = await root.getFileHandle('big', { create: true });
+    const piece = new Uint8Array(MiB);
+    const base = live();
+    let wrote = 0;
+    const writable = await handle.createWritable();
+    for (let i = 0; i < FILE / MiB; i++) {
+      piece.fill(i & 0xff);
+      piece[0] = i >> 8;
+      await writable.write(piece);
+      wrote = Math.max(wrote, live() - base);
+    }
+    await writable.close();
     wrote = Math.max(wrote, live() - base);
-  }
-  await writable.close();
-  wrote = Math.max(wrote, live() - base);
-  const file = await handle.getFile();
-  assert.equal(file.size, FILE);
-  let read = 0;
-  for (let i = 0; i < FILE / MiB; i++) {
-    const part = new Uint8Array(await file.slice(i * MiB, (i + 1) * MiB).arrayBuffer());
-    assert.equal(part.length, MiB);
-    assert.equal(part[0], i >> 8);
-    assert.equal(part[MiB - 1], i & 0xff);
-    read = Math.max(read, live() - base);
-  }
-  const patch = await handle.createWritable({ keepExistingData: true });
-  await patch.write({ type: 'write', position: 40 * MiB - 3, data: new Uint8Array(6).fill(0xee) });
-  await patch.close();
-  const patched = await handle.getFile();
-  const around = new Uint8Array(await patched.slice(40 * MiB - 4, 40 * MiB + 4).arrayBuffer());
-  assert.deepEqual([...around], [39, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 40 & 0xff]);
-  const patching = live() - base;
-  console.log(
-    `64 MiB on the SQLite root in 1 MiB pieces: peak live growth write ${(wrote / MiB).toFixed(2)} MiB, read ${(read / MiB).toFixed(2)} MiB, after a 6-byte patch ${(patching / MiB).toFixed(2)} MiB`
-  );
-  assert.ok(wrote < 8 * MiB, `writing grew live memory by ${wrote} bytes`);
-  assert.ok(read < 8 * MiB, `reading grew live memory by ${read} bytes`);
-  assert.ok(patching < 8 * MiB, `patching grew live memory by ${patching} bytes`);
-});
+    const file = await handle.getFile();
+    assert.equal(file.size, FILE);
+    let read = 0;
+    for (let i = 0; i < FILE / MiB; i++) {
+      const part = new Uint8Array(await file.slice(i * MiB, (i + 1) * MiB).arrayBuffer());
+      assert.equal(part.length, MiB);
+      assert.equal(part[0], i >> 8);
+      assert.equal(part[MiB - 1], i & 0xff);
+      read = Math.max(read, live() - base);
+    }
+    const patch = await handle.createWritable({ keepExistingData: true });
+    await patch.write({
+      type: 'write',
+      position: 40 * MiB - 3,
+      data: new Uint8Array(6).fill(0xee),
+    });
+    await patch.close();
+    const patched = await handle.getFile();
+    const around = new Uint8Array(await patched.slice(40 * MiB - 4, 40 * MiB + 4).arrayBuffer());
+    assert.deepEqual([...around], [39, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 40 & 0xff]);
+    const patching = live() - base;
+    console.log(
+      `64 MiB on the SQLite root (${mode}) in 1 MiB pieces: peak live growth write ${(wrote / MiB).toFixed(2)} MiB, read ${(read / MiB).toFixed(2)} MiB, after a 6-byte patch ${(patching / MiB).toFixed(2)} MiB`
+    );
+    assert.ok(wrote < 8 * MiB, `writing grew live memory by ${wrote} bytes`);
+    assert.ok(read < 8 * MiB, `reading grew live memory by ${read} bytes`);
+    assert.ok(patching < 8 * MiB, `patching grew live memory by ${patching} bytes`);
+  });
+}
 
 function script(count, at = 41943040) {
   return [
@@ -94,7 +107,7 @@ test('the kernel writes and reads a 64 MiB file on the SQLite root in pieces: me
   const timed = {};
   for (const [name, boot] of [
     ['memory', () => memoryKernel()],
-    ['sqlite', async () => sqliteKernel(sqlStorage(await scratch(t)))],
+    ['sqlite', async () => sqliteKernel(sqlStorage(await scratch(t)), {}, { writeBehind: true })],
   ]) {
     const kernel = await boot();
     try {
@@ -111,7 +124,7 @@ test('the kernel writes and reads a 64 MiB file on the SQLite root in pieces: me
   assert.match(timed.sqlite.stdout, /^67108864\n\d+ 67108864\n \\0 X Y Z \\0\n$/);
   const sql = sqlStorage(await scratch(t));
   t.after(() => sql.close());
-  const kernel = await sqliteKernel(sql);
+  const kernel = await sqliteKernel(sql, {}, { writeBehind: true });
   t.after(() => kernel.terminate());
   await install(kernel);
   const small = await sampled(kernel, script(0, 40));
