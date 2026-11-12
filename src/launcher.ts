@@ -267,6 +267,7 @@ export interface LauncherOptions {
   cron?: CronOptions;
   moduleUrl?: ModuleUrlMaker;
   packageLocks?: string;
+  emscripten?: 'glue' | 'kernel';
 }
 
 export interface ModuleUrl {
@@ -777,6 +778,7 @@ function addTimes(into: Map<number, CpuTimes>, pid: number, t: CpuTimes): void {
 }
 
 export class Launcher {
+  private readonly emscripten: LauncherOptions['emscripten'];
   readonly fs: KernelFs;
   readonly processFs: KernelFs;
   private readonly noLinksFs: KernelFs;
@@ -913,6 +915,7 @@ export class Launcher {
   private terminals = 0;
 
   constructor(options: LauncherOptions) {
+    this.emscripten = options.emscripten;
     this.usersMode = usersMode(options.users);
     this.memories = memoriesOf(options.wasmMemories);
     this.rootFs = options.fs;
@@ -2158,6 +2161,10 @@ export class Launcher {
     if (target.abi === 'js') {
       const { url, source } = this.urlFor(await this.text(target.wasm, caller, asked));
       return { abi: 'js', glue: '', url, path: target.wasm, ...(source ? { source } : {}) };
+    }
+    if (target.abi !== 'wasi' && this.emscripten === 'kernel') {
+      const { module } = await this.module(target.wasm, caller, asked && modulePath(asked));
+      return { abi: 'emscripten', emscripten: 'kernel', glue: '', module, path: target.glue };
     }
     if (target.abi !== 'wasi') {
       const [glue, { module }] = await Promise.all([

@@ -53,6 +53,9 @@ function started(
     return js().then((m) => m.runJsProcess(jsInit, port));
   }
   const wasmInit = init as WasmProcessInitMsg;
+  if (wasmInit.program?.emscripten === 'kernel') {
+    return import('./emscripten/runtime.ts').then((m) => m.runEmscriptenProcess(wasmInit, port));
+  }
   if (wasmInit.program?.abi === 'wasi') return wasi().then((m) => m.runWasiProcess(wasmInit, port));
   return run(wasmInit, port);
 }

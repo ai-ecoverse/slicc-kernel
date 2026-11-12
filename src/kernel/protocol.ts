@@ -25,6 +25,7 @@ export const JS_THREAD_OWNED_FDS = 1024;
 
 export interface WasmProgram {
   abi?: 'emscripten' | 'wasi';
+  emscripten?: 'kernel';
   glue: string;
   module: WebAssembly.Module;
   memory?: ImportedMemory;
