@@ -716,10 +716,26 @@ function heldOf(
   return { held: new HeldCwd(held.sab, held.slot, ask, { ...held, path: init.cwd }) };
 }
 
+function mainThreads(
+  port: SabPostLike,
+  module: WebAssembly.Module,
+  memory: WebAssembly.Memory | undefined,
+  cap: number
+): WasiThreads | undefined {
+  return memory?.buffer instanceof SharedArrayBuffer && spawnsThreads(module)
+    ? new WasiThreads(port, memory, cap, MAIN_TID)
+    : undefined;
+}
+
+export interface WasiProcessHost {
+  transport?: TransportFactory;
+  threadCap?: number;
+}
+
 export async function runWasiProcess(
   init: WasmProcessInitMsg,
   port: SabPostLike,
-  transports?: TransportFactory
+  given: WasiProcessHost = {}
 ): Promise<number> {
   captureBacktraces(init.env);
 
@@ -737,7 +753,7 @@ export async function runWasiProcess(
     say,
     gate,
     published,
-  } = kernelOf(init, port, signals, sizeOf(main), transports);
+  } = kernelOf(init, port, signals, sizeOf(main), given.transport);
   const id = identify(transport, init);
 
   const stats = init.env.SLICC_WASI_STATS === '1' ? new WasiStats() : undefined;
@@ -755,10 +771,7 @@ export async function runWasiProcess(
   }
   const fork = init.fork?.wasi;
   const memory = createImportedMemory(init.program.memory, fork ? init.fork?.memory : undefined);
-  const threads =
-    memory?.buffer instanceof SharedArrayBuffer && spawnsThreads(module)
-      ? new WasiThreads(port, memory, threadCap(init.env), MAIN_TID)
-      : undefined;
+  const threads = mainThreads(port, module, memory, given.threadCap ?? threadCap(init.env));
   const host = new WasiHost({
     args: [init.argv0, ...init.args],
     env: init.env,

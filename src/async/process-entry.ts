@@ -24,17 +24,34 @@ export const ASYNC_NO_JSPI =
   'the async process host needs WebAssembly JSPI (Suspending, promising)';
 export const ASYNC_NO_JS = 'the async process host runs no JavaScript programs';
 export const ASYNC_NO_EMSCRIPTEN = 'the async process host runs no Emscripten glue programs';
-export const ASYNC_NO_THREADS = 'the async process host runs no threads';
 export const ASYNC_NO_IMPORTS = 'the async process host loads no JavaScript imports modules';
 
 function refusal(init: AsyncProcessInit): string | undefined {
   const program = init.program as Omit<AsyncProcessInit['program'], 'abi'> & { abi?: string };
   if (program.abi === 'js') return ASYNC_NO_JS;
   if (program.abi !== 'wasi') return ASYNC_NO_EMSCRIPTEN;
-  if (program.memory?.shared) return ASYNC_NO_THREADS;
   if (program.imports !== undefined) return ASYNC_NO_IMPORTS;
   if (!jspiAvailable()) return ASYNC_NO_JSPI;
   return undefined;
+}
+
+export class KernelGone extends Error {
+  constructor() {
+    super('the kernel link closed');
+  }
+}
+
+function guarded(transport: AsyncTransport): SyncSabTransport {
+  const call = async (...args: Parameters<AsyncTransport['call']>) => {
+    if (transport.closed) throw new KernelGone();
+    try {
+      return await transport.call(...args);
+    } catch (err) {
+      if (transport.closed) throw new KernelGone();
+      throw err;
+    }
+  };
+  return { call, publish: () => transport.publish() } as unknown as SyncSabTransport;
 }
 
 function waitsOn(transport: AsyncTransport, buffer: ArrayBufferLike | undefined): void {
@@ -75,9 +92,13 @@ async function started(
   const port: SabPostLike = {
     postMessage: (message, transfer) => transport.post(message, transfer),
   };
-  return runWasiProcess(localInit(init, transport, module), port, (_sab, _port, memory) => {
-    size.memory = memory;
-    return transport as unknown as SyncSabTransport;
+  const kernel = guarded(transport);
+  return runWasiProcess(localInit(init, transport, module), port, {
+    transport: (_sab, _port, memory) => {
+      size.memory = memory;
+      return kernel;
+    },
+    threadCap: 1,
   });
 }
 
