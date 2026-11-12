@@ -486,7 +486,7 @@ export function procfsBridge<T extends SyncFsPosixBridge>(fs: T, tree: ProcTree)
     const q = toProc(p, true);
     return q === undefined ? undefined : snapshot(q);
   };
-  const over: Partial<Record<keyof SyncFsPosixBridge, unknown>> = {
+  const over: Partial<SyncFsPosixBridge> = {
     readFile: (p: string) =>
       via(
         p,
@@ -550,14 +550,17 @@ export function procfsBridge<T extends SyncFsPosixBridge>(fs: T, tree: ProcTree)
     readdirStat: (p: string) =>
       via(
         p,
-        (q) =>
-          tree.readdir(q).map((name): [string, SyncFsBridgeStat | null] => {
+        (q) => {
+          const listed: Array<[string, SyncFsBridgeStat | null]> = [];
+          for (const name of tree.readdir(q)) {
             try {
-              return [name, tree.stat(`${q}/${name}`, false)];
+              listed.push([name, tree.stat(`${q}/${name}`, false)]);
             } catch {
-              return [name, null];
+              listed.push([name, null]);
             }
-          }),
+          }
+          return listed;
+        },
         () => {
           const listed = fs.readdirStat(p);
           if (p !== '/' || listed.some(([name]) => name === 'proc')) return listed;
@@ -618,8 +621,8 @@ export function procfsBridge<T extends SyncFsPosixBridge>(fs: T, tree: ProcTree)
     for (const name of names) {
       const fn = fs[name] as ((p: string, ...rest: unknown[]) => unknown) | undefined;
       if (!fn) continue;
-      over[name] = (p: string, ...rest: unknown[]) =>
-        readOnly([[p, follow]], () => fn.call(fs, p, ...rest));
+      (over as Record<string, unknown>)[name] = ((p: string, ...rest: unknown[]) =>
+        readOnly([[p, follow]], () => fn.call(fs, p, ...rest))) as SyncFsPosixBridge[typeof name];
     }
   }
   const { chown } = fs;

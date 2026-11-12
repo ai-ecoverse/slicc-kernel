@@ -246,7 +246,7 @@ export class WasixHost {
       },
       getcwd: (buf: number, lenPtr: number) => {
         if (host.cwdFd && host.fds.held && !host.fds.held.alive()) return E.NOENT;
-        const bytes = new TextEncoder().encode(host.cwd);
+        const bytes = new TextEncoder().encode(host.workingDir());
         const max = mem.view().getUint32(lenPtr, true);
         mem.view().setUint32(lenPtr, bytes.length, true);
         if (bytes.length > max) return E.RANGE;
@@ -436,7 +436,8 @@ export class WasixHost {
         return linked(
           buf,
           len,
-          (l) => l.open(this.str(p, pl), host.cwd, lp === 0 ? [] : this.str(lp, ll).split(':')),
+          (l) =>
+            l.open(this.str(p, pl), host.workingDir(), lp === 0 ? [] : this.str(lp, ll).split(':')),
           (h) => void mem.view().setUint32(out, h === 0 ? MAIN_HANDLE : h, true)
         );
       },

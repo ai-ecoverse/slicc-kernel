@@ -3,6 +3,7 @@ import { appendFile, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
+import { buildAsyncProcess } from './tools/derive-async/build.mjs';
 import { assertWorkerBuild } from './tools/worker-build.mjs';
 
 const { version: declared } = JSON.parse(
@@ -102,6 +103,11 @@ for (const file of ['node-process-worker.js', 'node-process-worker.cjs']) {
     '//# sourceURL=slicc-kernel:/node-process-worker.js\n'
   );
 }
+await buildAsyncProcess({
+  root: fileURLToPath(new URL('.', import.meta.url)),
+  outfile: 'dist/async-process.js',
+  define,
+});
 execFileSync(
   process.execPath,
   [

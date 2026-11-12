@@ -260,7 +260,7 @@ export class WasiHost {
 
   deliverDue: () => void = UNGATED.deliver;
 
-  private readonly listening: number[];
+  private listening: number[] = [];
 
   readonly o: WasiHostOptions;
   constructor(o: WasiHostOptions) {
@@ -295,19 +295,24 @@ export class WasiHost {
       o.credGen ?? o.shared,
       { quiet: (fn) => this.quietly(fn), deliver: () => this.deliverDue() }
     );
+  }
+
+  attach(): this {
+    const o = this.o;
     if (o.shared) this.fds.share(o.shared, true);
     else if (o.forked) this.fds.restore(o.forked.fds, o.forked.cloexec);
     else if (!o.bare) this.fds.setup(o.cwd, o.inherited ?? [], o.preopenRoot === true);
     this.listening = o.shared ? [] : this.fds.sockets();
+    return this;
   }
 
   private fromCwd(raw: string): string {
     return this.fds.cwd() === undefined
-      ? this.fds.resolve(3, `${this.cwd}/${raw}`)
+      ? this.fds.resolve(3, `${this.workingDir()}/${raw}`)
       : this.fds.resolve(3, raw);
   }
 
-  get cwd(): string {
+  workingDir(): string {
     return this.fds.cwd() ?? this.startCwd;
   }
 
@@ -567,7 +572,7 @@ export class WasiHost {
     const { mem } = this;
     const path = (p: number, l: number) => {
       const text = mem.string(p, l);
-      return text === '' || text.startsWith('/') ? text : normalize(`${this.cwd}/${text}`);
+      return text === '' || text.startsWith('/') ? text : normalize(`${this.workingDir()}/${text}`);
     };
     return wrap({
       mount: (
@@ -817,7 +822,7 @@ export class WasiHost {
   private environ(): string[] {
     if (this.o.bare) return Object.entries(this.o.env).map(([k, v]) => `${k}=${v}`);
     const listen = this.listening.length > 0 ? { SLICC_LISTEN_FDS: this.listening.join(' ') } : {};
-    const env = { PWD: this.cwd, ...this.o.env, ...listen };
+    const env = { PWD: this.workingDir(), ...this.o.env, ...listen };
     return Object.entries(env).map(([k, v]) => `${k}=${v}`);
   }
 

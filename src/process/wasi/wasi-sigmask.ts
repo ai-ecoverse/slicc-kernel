@@ -38,11 +38,19 @@ export class WasiSigmask {
   private readonly deliver: () => void;
   private readonly process: Int32Array | undefined;
   readonly tid: number;
-  constructor(header: Int32Array, deliver: () => void, process?: Int32Array, tid = 1) {
+  private readonly published: (() => void) | undefined;
+  constructor(
+    header: Int32Array,
+    deliver: () => void,
+    process?: Int32Array,
+    tid = 1,
+    published?: () => void
+  ) {
     this.header = header;
     this.deliver = deliver;
     this.process = process;
     this.tid = tid;
+    this.published = published;
     this.lo = libcBits(Atomics.load(header, SAB_I_BLOCKED));
     this.hi = Atomics.load(header, SAB_I_BLOCKED_HI);
   }
@@ -58,6 +66,7 @@ export class WasiSigmask {
     this.hi = apply(how, this.hi, setHi | 0);
     const now = kernelBits(this.lo);
     storeBlocked(this.header, [now, this.hi]);
+    this.published?.();
     if ((Atomics.load(this.header, SAB_I_SIGNALS) & ~now) !== 0) this.deliver();
     return E.SUCCESS;
   }
@@ -67,6 +76,7 @@ export class WasiSigmask {
     this.lo = setLo & ~LIBC_UNBLOCKABLE;
     this.hi = setHi | 0;
     storeBlocked(this.header, [kernelBits(this.lo), this.hi]);
+    this.published?.();
     return old;
   }
 
