@@ -5,12 +5,30 @@ import type {
   WasmProgram,
 } from '../kernel/protocol.ts';
 import type { SyncSabRequestBody } from '../realm/sync-sab-wire.ts';
+import type { ForkSnapshotRef } from './snapshots.ts';
 
 export const ASYNC_SYSCALL = 'async-syscall';
 export const ASYNC_MORE = 'async-more';
 export const ASYNC_STAGE = 'async-stage';
 export const ASYNC_WORDS = 'async-words';
 export const ASYNC_MIRROR = 'async-mirror';
+export const ASYNC_SNAPSHOT = 'async-snapshot';
+export const ASYNC_SNAPSHOT_TAKEN = 'async-snapshot-taken';
+
+export interface AsyncSnapshotMsg {
+  type: typeof ASYNC_SNAPSHOT;
+  token: string;
+  offset: number;
+}
+
+export interface AsyncSnapshotReply {
+  bytes: Uint8Array;
+}
+
+export interface AsyncSnapshotTakenMsg {
+  type: typeof ASYNC_SNAPSHOT_TAKEN;
+  token: string;
+}
 
 export interface ProcessWords {
   n: number;
@@ -52,7 +70,10 @@ export interface StagedBytes {
   total: number;
 }
 
-export type AsyncForkState = Omit<ForkState, 'memory'> & { memory: Uint8Array | StagedBytes };
+export type AsyncForkState = Omit<ForkState, 'memory'> & {
+  memory: Uint8Array | StagedBytes;
+  snapshot?: ForkSnapshotRef;
+};
 
 export type AsyncProgram = Omit<WasmProgram, 'module'> & { image: string };
 

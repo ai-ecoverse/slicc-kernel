@@ -132,9 +132,32 @@ export class Plumbing extends DurableObject {
         return json(await this.images.register(new Uint8Array(body)));
       case '/spawn':
         return json({ pid: this.spawn(args.image) });
+      case '/spawn-wait': {
+        const pid = this.spawn(args.image);
+        const spawned = this.fakes.get(pid);
+        for (let tries = 0; tries < 20_000; tries++) {
+          const event = spawned.events.find((e) => e.type === 'hello' || e.type === 'failed');
+          if (event) {
+            this.links.get(pid)?.close();
+            return json({ pid, event });
+          }
+          await new Promise((resolve) => setTimeout(resolve, 1));
+        }
+        return json({ error: 'timed out' }, 504);
+      }
       case '/cmd':
         fake.command(args.cmd);
         return json({ ok: true });
+      case '/cmd-wait': {
+        const before = fake.events.length;
+        fake.command(args.cmd);
+        for (let tries = 0; tries < 20_000; tries++) {
+          const event = fake.events.slice(before).find((e) => e.type === args.until);
+          if (event) return json({ event });
+          await new Promise((resolve) => setTimeout(resolve, 1));
+        }
+        return json({ error: 'timed out' }, 504);
+      }
       case '/feed':
         fake.feed(args.data);
         return json({ ok: true });

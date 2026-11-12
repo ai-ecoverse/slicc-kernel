@@ -42,13 +42,13 @@ export class KernelRoutes {
     this.next = 1;
   }
 
-  async boot({ process, waitMs, persist }) {
+  async boot({ process, waitMs, persist, localForks }) {
     this.kernel?.terminate();
     const started = Date.now();
     const storage = this.ctx.storage;
     this.kernel = await createCloudflareKernel({
       loader: this.env.LOADER,
-      processHost: { process },
+      processHost: { process, ...(localForks === false ? { localForks: false } : {}) },
       ...(waitMs ? { isolates: { waitMs } } : {}),
       ...(persist
         ? { sql: storage.sql, sqlite: { transaction: (fn) => storage.transactionSync(fn) } }
@@ -145,6 +145,10 @@ export class KernelRoutes {
         } catch (err) {
           return json({ error: String(err?.code ?? err?.message ?? err) });
         }
+      case '/kernel/forks': {
+        const { forks } = this.kernel.processes;
+        return json({ held: forks.size, fetched: forks.fetched, taken: forks.taken });
+      }
       case '/kernel/stats':
         return json(this.stats());
       case '/kernel/terminate':

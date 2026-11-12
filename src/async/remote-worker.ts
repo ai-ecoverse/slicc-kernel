@@ -46,6 +46,7 @@ import type { ProcessLink } from './link.ts';
 import {
   ASYNC_MIRROR,
   ASYNC_MORE,
+  ASYNC_SNAPSHOT,
   ASYNC_STAGE,
   ASYNC_SYSCALL,
   ASYNC_WORDS,
@@ -53,6 +54,8 @@ import {
   type AsyncMoreMsg,
   type AsyncMoreReply,
   type AsyncProcessInit,
+  type AsyncSnapshotMsg,
+  type AsyncSnapshotReply,
   type AsyncStageMsg,
   type AsyncSyscallMsg,
   type AsyncSyscallReply,
@@ -64,12 +67,14 @@ import {
 
 export interface RemoteWorkerOptions {
   maxMessageBytes?: number;
+  snapshot?: (token: string, offset: number, max: number) => Promise<Uint8Array> | Uint8Array;
   image?: (program: WasmProgram) => string | undefined;
 }
 
 type Listener = (event: MessageEvent) => void;
 
 const PART_TTL_MS = 60_000;
+const SNAPSHOT_PART_BYTES = 16 * 2 ** 20;
 const NOT_RUNNABLE = 126;
 const CLOCK_BLOCKED = 0;
 const CLOCK_IDLE = 1;
@@ -443,6 +448,12 @@ export function remoteWorker(
     emit(message);
   };
 
+  const snapshotPart = async (msg: AsyncSnapshotMsg): Promise<AsyncSnapshotReply> => {
+    if (!options.snapshot) throw new Error('async: this kernel keeps no fork snapshots');
+    const limit = Number.isFinite(max) ? max : SNAPSHOT_PART_BYTES;
+    return { bytes: await options.snapshot(msg.token, msg.offset, limit) };
+  };
+
   const answer = async (message: unknown): Promise<unknown> => {
     const data = message as { type?: unknown } | undefined;
     if (!side) return { failed: 'terminated' };
@@ -453,6 +464,8 @@ export function remoteWorker(
         return side.more(data as AsyncMoreMsg);
       case ASYNC_STAGE:
         return side.stage(data as AsyncStageMsg);
+      case ASYNC_SNAPSHOT:
+        return snapshotPart(data as AsyncSnapshotMsg);
       default:
         throw new Error(`async: unknown call ${String(data?.type)}`);
     }

@@ -18,15 +18,19 @@ import {
   type SyncSabRequestBody,
 } from '../realm/sync-sab-wire.ts';
 import type { KernelLink } from './link.ts';
+import type { ForkSnapshots } from './snapshots.ts';
 import {
   ASYNC_MIRROR,
   ASYNC_MORE,
+  ASYNC_SNAPSHOT,
+  ASYNC_SNAPSHOT_TAKEN,
   ASYNC_STAGE,
   ASYNC_SYSCALL,
   ASYNC_WORDS,
   type AsyncAnswer,
   type AsyncMoreReply,
   type AsyncProcessInit,
+  type AsyncSnapshotReply,
   type AsyncSyscallMsg,
   type AsyncSyscallReply,
   applyRuns,
@@ -63,6 +67,29 @@ export interface AsyncTransport {
 export interface AsyncTransportOptions {
   maxMessageBytes?: number;
   memory?: () => number | undefined;
+  snapshots?: ForkSnapshots;
+}
+
+interface ForkRequest {
+  op?: unknown;
+  state?: { memory?: unknown };
+}
+
+function snapshotted(
+  asked: SyncSabRequestBody,
+  snapshots: ForkSnapshots | undefined
+): { req: SyncSabRequestBody; token?: string } {
+  const fork = asked as ForkRequest;
+  const memory = fork.state?.memory;
+  if (!snapshots || fork.op !== 'proc-fork' || !(memory instanceof Uint8Array)) {
+    return { req: asked };
+  }
+  if (memory.byteLength === 0) return { req: asked };
+  const owned = memory.buffer instanceof ArrayBuffer ? memory : memory.slice();
+  const snapshot = snapshots.keep(owned);
+  const state = { ...fork.state, memory: new Uint8Array(0), snapshot };
+  const req = { ...asked, state } as unknown as SyncSabRequestBody;
+  return { req, token: snapshot.token };
 }
 
 interface Waiter {
@@ -270,6 +297,22 @@ class Caller {
     }
   }
 
+  async snapshot(token: string, out: Uint8Array): Promise<void> {
+    for (let offset = 0; offset < out.length; ) {
+      const reply = (await this.link.call({
+        type: ASYNC_SNAPSHOT,
+        token,
+        offset,
+      })) as AsyncSnapshotReply;
+      const bytes = reply?.bytes;
+      if (!(bytes instanceof Uint8Array) || bytes.length === 0)
+        throw syncError('EIO', 'fork memory');
+      if (offset + bytes.length > out.length) throw syncError('EIO', 'fork memory');
+      out.set(bytes, offset);
+      offset += bytes.length;
+    }
+  }
+
   async stage(body: Uint8Array): Promise<number> {
     const id = ++this.stages;
     for (let offset = 0; offset < body.length; offset += this.max) {
@@ -351,6 +394,20 @@ export function createAsyncTransport(
     if (options.maxMessageBytes === undefined && init.maxMessageBytes !== undefined) {
       caller.max = init.maxMessageBytes;
     }
+    const fork = init.fork;
+    const ref = fork?.snapshot;
+    if (fork && ref) {
+      delete fork.snapshot;
+      const local = options.snapshots?.take(ref.token);
+      if (local && local.byteLength === ref.total) {
+        fork.memory = local;
+        link.post({ type: ASYNC_SNAPSHOT_TAKEN, token: ref.token });
+      } else {
+        const whole = new Uint8Array(ref.total);
+        await caller.snapshot(ref.token, whole);
+        fork.memory = whole;
+      }
+    }
     const memory = init.fork?.memory as StagedBytes | Uint8Array | undefined;
     if (memory && !(memory instanceof Uint8Array) && init.fork) {
       const whole = new Uint8Array(memory.total);
@@ -425,8 +482,19 @@ export function createAsyncTransport(
     },
     async call(asked, timeoutMs, label, given = [], sink) {
       if (closedBy !== undefined) throw syncError('EIO', label);
-      const reply = await issue(asked, given, timeoutMs, label);
-      return caller.answer(reply, timeoutMs, label, sink);
+      const { req, token } = snapshotted(asked, options.snapshots);
+      const forget = () => {
+        if (token !== undefined) options.snapshots?.release(token);
+      };
+      try {
+        const reply = await issue(req, given, timeoutMs, label);
+        const result = await caller.answer(reply, timeoutMs, label, sink);
+        if (!result.ok) forget();
+        return result;
+      } catch (err) {
+        forget();
+        throw err;
+      }
     },
     wait(view, index, value, timeoutMs = Number.POSITIVE_INFINITY) {
       if (Atomics.load(view, index) !== value) return Promise.resolve('not-equal');
