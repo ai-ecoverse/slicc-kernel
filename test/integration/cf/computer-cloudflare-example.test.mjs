@@ -152,11 +152,21 @@ describe('the Computer example Worker', { concurrency: false }, () => {
       await put(`/workspace/fruit/${name}`, text);
     }
     const result = await exec(
-      'cat fruit/*.txt | tr a-z A-Z | sort | uniq -c | sort -rn | head -2 | tr -s " " | cut -c2- > fruit/top.txt; wc -l < fruit/top.txt; cat fruit/top.txt'
+      'cat fruit/*.txt | tr a-z A-Z | sort | uniq -c | sort -rn > fruit/counts.txt; head -2 fruit/counts.txt | tr -s " " | cut -c2- > fruit/top.txt; wc -l < fruit/top.txt; cat fruit/top.txt'
     );
     assert.equal(result.exitCode, 0, result.stderr);
     assert.equal(result.stdout, '2\n4 APPLE\n2 FIG\n');
     assert.equal((await read('/workspace/fruit/top.txt')).text, '4 APPLE\n2 FIG\n');
+  });
+
+  test('a pipeline of eight processes redirected into a file', async (t) => {
+    if (skipped(t)) return;
+    await put('/workspace/fruit/long.txt', 'pear\napple\nfig\napple\nkiwi\napple\nfig\n');
+    const result = await exec(
+      'cat fruit/long.txt | tr a-z A-Z | sort | uniq -c | sort -rn | head -2 | tr -s " " | cut -c2- > fruit/long-top.txt; cat fruit/long-top.txt'
+    );
+    assert.equal(result.stderr, '');
+    assert.equal(result.stdout, '3 APPLE\n2 FIG\n');
   });
 
   test('streams output before the run exits', async (t) => {
