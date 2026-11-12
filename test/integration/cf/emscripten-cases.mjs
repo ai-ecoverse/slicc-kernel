@@ -25,7 +25,7 @@ export const TIER1 = [
   'for i in 1 2 3; do echo $i; done; i=0; while [ $i -lt 3 ]; do i=$((i+1)); done; echo $i; case x in x) echo cx;; esac',
   'touch g1.txt g2.txt; echo g*.txt; shopt -s nullglob; echo none*; cd ..; cd -; pushd / >/dev/null; pwd; popd >/dev/null',
   'mkdir -p a/b/c && touch a/f && ls -R a && ls -la a | tail -n +2 | cut -c1-10',
-  'echo x > f; ls -la | tail -n +2 | cut -c1-24; ls -l f; ls -s f; ls -i f >/dev/null && echo inode',
+  'echo x > f; ls -la | tail -n +2 | cut -c1-24; ls -l f | cut -c1-24; ls -s f; ls -i f >/dev/null && echo inode',
   'echo abc > c1; cat c1 c1; wc c1; wc -c < c1; wc -l -w c1',
   "printf 'a\\nb\\nc\\nd\\n' > h; head -2 h; tail -1 h; sort -r h; printf '3\\n1\\n2\\n' | sort -n; sort -u h | head -n1",
   'mkdir -p rr/x/y; touch rr/x/y/z; rm -r rr; ls rr; echo $?; rm nope; echo $?; rm -f nope; echo $?',
