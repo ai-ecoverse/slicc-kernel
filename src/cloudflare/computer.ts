@@ -341,6 +341,17 @@ function shellFor(
   };
 }
 
+const holders = new WeakMap<object, Map<string, () => Promise<void>>>();
+
+function holdersOf(kernel: object): Map<string, () => Promise<void>> {
+  let held = holders.get(kernel);
+  if (!held) {
+    held = new Map();
+    holders.set(kernel, held);
+  }
+  return held;
+}
+
 export function sliccBackend(options: SliccBackendOptions): SliccBackend {
   const mountPoint = (options.mountPoint ?? '/workspace').replace(/\/+$/, '') || '/';
   const root = options.root ?? mountPoint;
@@ -353,6 +364,8 @@ export function sliccBackend(options: SliccBackendOptions): SliccBackend {
       `Runs the source with GNU bash in the SLICC kernel, with the packages installed in it, on the Workspace files at ${mountPoint}.`,
     async connect(host) {
       const kernel = await options.kernel();
+      const held = holdersOf(kernel);
+      await held.get(mountPoint)?.();
       const driver = workspaceDriver(host.fs, { root });
       const client = await attachKernel(
         await kernel.connect(options.user !== undefined ? { user: options.user } : {}),
@@ -372,20 +385,23 @@ export function sliccBackend(options: SliccBackendOptions): SliccBackend {
       }
       const shell = shellFor(client, driver, options, mountPoint);
       let closing: Promise<void> | undefined;
+      const close = () => {
+        closing ??= (async () => {
+          await shell.closeAll();
+          await driver.settled().catch(() => undefined);
+          await kernel.umount(mountPoint).catch(() => undefined);
+          await client.close();
+          if (held.get(mountPoint) === close) held.delete(mountPoint);
+        })();
+        return closing;
+      };
+      held.set(mountPoint, close);
       return {
         rpc: { sync: refusingSync(), shell },
         runtimeId: crypto.randomUUID(),
         sync: 'none',
         closed: client.closed.then(() => undefined),
-        close() {
-          closing ??= (async () => {
-            await shell.closeAll();
-            await driver.settled().catch(() => undefined);
-            await kernel.umount(mountPoint).catch(() => undefined);
-            await client.close();
-          })();
-          return closing;
-        },
+        close,
       };
     },
   };
