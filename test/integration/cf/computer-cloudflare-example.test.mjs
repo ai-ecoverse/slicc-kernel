@@ -189,19 +189,15 @@ describe('the Computer example Worker', { concurrency: false }, () => {
     assert.ok(three.at - two.at > 200, `three came ${Math.round(three.at - two.at)} ms after two`);
   });
 
-  test('three sleeps of one second take at least three seconds', async (t) => {
+  test('sleep 1 lasts a second on the kernel clock', async (t) => {
     if (skipped(t)) return;
-    const gaps = [];
-    let last;
-    const start = performance.now();
-    await streamed('for i in 1 2 3 4; do echo $i; [ $i = 4 ] || sleep 1; done', {}, (event) => {
-      if (event.name !== 'stdout') return;
-      if (last !== undefined) gaps.push(Math.round(event.at - last));
-      last = event.at;
-    });
-    const total = performance.now() - start;
-    t.diagnostic(`gaps between lines: ${gaps.join(', ')} ms, run ${Math.round(total)} ms`);
-    assert.ok(total >= 3000, `the run took ${Math.round(total)} ms; gaps ${gaps.join(', ')} ms`);
+    const result = await exec('for i in 1 2 3 4; do date +%s%3N; [ $i = 4 ] || sleep 1; done');
+    assert.equal(result.exitCode, 0, result.stderr);
+    const stamps = result.stdout.trim().split('\n').map(Number);
+    const gaps = stamps.slice(1).map((at, i) => at - (stamps[i] ?? 0));
+    t.diagnostic(`gaps between dates: ${gaps.join(', ')} ms`);
+    assert.equal(gaps.length, 3);
+    for (const gap of gaps) assert.ok(gap >= 1000, `a sleep of ${gap} ms`);
   });
 
   test('killExec ends a sleep 100', async (t) => {
