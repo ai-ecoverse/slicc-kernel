@@ -7,6 +7,9 @@ import {
   BASE,
   CURL,
   GIT,
+  REFUSAL_PACKAGES,
+  REFUSALS,
+  refusalOptions,
   TERMINAL_STEPS,
   TIER1,
   TIER2,
@@ -101,3 +104,17 @@ test('tier 3: curl on the async host matches the glue', { skip }, async (t) => {
   });
   for (const script of CURL(url)) await t.test(script, () => same(kernels, script));
 });
+
+for (const c of REFUSALS) {
+  test(`a refused spawn on the async host: ${c.name}`, { skip }, async (t) => {
+    const kernel = await booted(
+      t,
+      { blocking: 'async', emscripten: 'kernel', ...refusalOptions(c.ceiling) },
+      REFUSAL_PACKAGES
+    );
+    const r = shown(await kernel.run(c.argv, { cwd: '/tmp' }));
+    assert.equal(r.status, c.status, r.stderr);
+    assert.equal(r.stdout, c.stdout);
+    assert.match(r.stderr, c.stderr);
+  });
+}

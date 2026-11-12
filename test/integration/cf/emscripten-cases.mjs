@@ -128,3 +128,56 @@ export async function transcript(kernel, steps) {
   term.write('exit\n');
   return { status: await term.exited, out };
 }
+
+export const REFUSAL_PACKAGES = [...BASE, 'wasm-tar', 'wasm-git', 'wasm-gmake'];
+
+const AGAIN = 'Resource temporarily unavailable';
+
+const BUSY = '( end=$((SECONDS+2)); while [ $SECONDS -lt $end ]; do :; done ) &';
+
+export const REFUSALS = [
+  {
+    name: 'bash retries a refused fork as on Linux, then runs the subshell',
+    ceiling: 2,
+    argv: ['bash', '-c', `${BUSY} (echo sub); echo after; wait`],
+    status: 0,
+    stdout: 'sub\nafter\n',
+    stderr: new RegExp(`^(bash: fork: retry: ${AGAIN}\\n)+$`),
+  },
+  {
+    name: 'a refused execve is EAGAIN, exit 126',
+    ceiling: 2,
+    argv: ['bash', '-c', 'ls /; echo rc=$?'],
+    status: 0,
+    stdout: 'rc=126\n',
+    stderr: new RegExp(`^bash: line 1: /usr/bin/ls: ${AGAIN}\\n$`),
+    glue: true,
+  },
+  {
+    name: 'tar reports a refused fork with EAGAIN',
+    ceiling: 1,
+    argv: ['tar', 'czf', '/tmp/refused.tgz', '/etc'],
+    status: 2,
+    stdout: '',
+    stderr: new RegExp(`^tar: child process: Cannot fork: ${AGAIN}\\n`),
+  },
+  {
+    name: 'git reports a refused fork with EAGAIN',
+    ceiling: 1,
+    argv: ['git', '-c', 'alias.x=!echo hi', 'x'],
+    status: 128,
+    stdout: '',
+    stderr: new RegExp(`^error: cannot fork\\(\\) for echo hi: ${AGAIN}\\n`),
+  },
+  {
+    name: 'make reports a refused posix_spawn with EAGAIN',
+    ceiling: 1,
+    argv: ['make', '-s', '-f', '/dev/null', '--eval', 'all:\n\t@echo hi'],
+    status: 2,
+    stdout: '',
+    stderr: new RegExp(`^make: echo: ${AGAIN}\\n`),
+    glue: true,
+  },
+];
+
+export const refusalOptions = (ceiling) => ({ wasmMemories: { ceiling, idleMs: 50 } });

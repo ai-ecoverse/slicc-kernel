@@ -1,6 +1,8 @@
 import type { ForkState } from '../../kernel/protocol.ts';
 import type { WasiForkState } from '../wasi/wasix-fork.ts';
+import { wasiErrno } from '../wasi-errno.ts';
 import type { EmContext } from './context.ts';
+import { ErrnoCell } from './errno-cell.ts';
 
 const REWINDING = 2;
 const ASYNCIFY_STACK = 1048576;
@@ -11,9 +13,11 @@ export class EmFork {
   data = 0;
   private value = 0;
   private readonly ctx: EmContext;
+  private readonly errno: ErrnoCell;
 
   constructor(ctx: EmContext) {
     this.ctx = ctx;
+    this.errno = new ErrnoCell(ctx);
   }
 
   supported(): boolean {
@@ -50,8 +54,14 @@ export class EmFork {
         throw new Error(`${this.ctx.init.argv0}: unexpected Asyncify suspension (not a fork)`);
       }
       this.forking = false;
-      result = this.resume(name, this.kernelFork(name));
+      result = this.resume(name, this.failed(this.kernelFork(name)));
     }
+  }
+
+  failed(pid: number): number {
+    if (pid >= 0) return pid;
+    this.errno.set(-pid);
+    return -1;
   }
 
   resume(name: string, value: number): unknown {
@@ -103,7 +113,7 @@ export class EmFork {
     } catch (e) {
       const code = (e as { code?: unknown }).code;
       if (typeof code !== 'string') throw e;
-      return -5;
+      return -wasiErrno(code);
     }
     let seen = gate.deliveries();
     let state = this.snapshot(name);
@@ -114,7 +124,7 @@ export class EmFork {
         const code = (e as { code?: unknown }).code;
         if (code !== 'EINTR') {
           if (typeof code !== 'string') throw e;
-          return -11;
+          return -wasiErrno(code);
         }
         if (gate.deliveries() !== seen) {
           seen = gate.deliveries();
