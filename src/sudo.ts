@@ -134,10 +134,17 @@ export interface SudoReplayed {
 const REPLAY_ID = /^[!-~]{1,256}$/;
 const REPLAY_TAGS_MAX = 64;
 const REPLAY_ARGV_MAX = 4096;
+const REPLAY_BYTES_MAX = 1024 * 1024;
 const NOT_A_REQUEST = "sudo: that isn't a sudo request this kernel can run";
 
 function strings(value: unknown, max: number): value is string[] {
   return Array.isArray(value) && value.length <= max && value.every((s) => typeof s === 'string');
+}
+
+function words(value: unknown): value is string[] {
+  if (!strings(value, REPLAY_ARGV_MAX) || value.length === 0) return false;
+  const bytes = value.reduce((n, s) => n + s.length + 1, 0);
+  return bytes <= REPLAY_BYTES_MAX && !value.some((s) => s.includes('\0'));
 }
 
 function filesOf(value: unknown): Record<string, string> | undefined {
@@ -153,7 +160,6 @@ function filesOf(value: unknown): Record<string, string> | undefined {
 }
 
 function flagsOf(value: unknown): Record<string, boolean> | undefined {
-  if (value === undefined) return {};
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
   const entries = Object.entries(value);
   if (entries.length > ROOT_ONLY_MAX || entries.some(([, v]) => typeof v !== 'boolean')) {
@@ -187,7 +193,8 @@ function replayOf(value: unknown): Replay | Failure {
   const rootOnly = flagsOf(r.rootOnly);
   const bound = filesOf(r.userWritable);
   const named = (s: unknown): s is string => typeof s === 'string' && s !== '';
-  const absolute = (s: unknown): s is string => typeof s === 'string' && s.startsWith('/');
+  const absolute = (s: unknown): s is string =>
+    typeof s === 'string' && s.startsWith('/') && s.length <= PATH_MAX && !s.includes('\0');
   const valid =
     typeof id === 'string' &&
     REPLAY_ID.test(id) &&
@@ -195,8 +202,7 @@ function replayOf(value: unknown): Replay | Failure {
     named(target) &&
     Number.isInteger(uid) &&
     (uid as number) >= 0 &&
-    strings(argv, REPLAY_ARGV_MAX) &&
-    argv.length > 0 &&
+    words(argv) &&
     absolute(path) &&
     absolute(cwd) &&
     (stdin === 'tty' || stdin === 'none') &&

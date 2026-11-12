@@ -557,6 +557,7 @@ interface StartRequest {
   pid?: number;
   scrub?: Scrubber;
   cwdFrom?: number | undefined;
+  exactCwd?: true;
   cwdSlot?: number | undefined;
 }
 
@@ -2241,6 +2242,10 @@ export class Launcher {
     req: Omit<StartRequest, 'program' | 'argv0' | 'args'>
   ): Promise<WasmProcessHandle> {
     const cwd = await physicalPathAsync(this.base, req.cwd);
+    if (req.exactCwd && cwd !== req.cwd) {
+      await req.fds.closeAll();
+      throw sudoFailure('EACCES', `sudo: ${req.cwd} changed since it was requested`);
+    }
     const seen = { ...req.env, HOSTNAME: this.hostname, cwd };
     await this.pnpmReady();
     let loaded: LoadedProgram;
@@ -4220,6 +4225,10 @@ export class Launcher {
     const report = (message: string) =>
       void Promise.resolve(err.write?.(encoder.encode(`${message}\n`))).catch(() => undefined);
     const replan = () => this.planOne(req, ctx);
+    if (!(await this.grantedCwd(grant.caller, grant.cwd))) {
+      await fds.closeAll();
+      throw sudoFailure('EACCES', `sudo: ${grant.cwd} changed since it was requested`);
+    }
     const handle = await this.launch(
       { ...planned, replan },
       {
@@ -4231,6 +4240,7 @@ export class Launcher {
         ...this.identity(target, tagged, options.session),
         ...(caller.umask !== undefined ? { umask: caller.umask } : {}),
         links: grant.cred.euid,
+        exactCwd: true,
       }
     ).catch(requested);
     const ended = handle.exited.then((status) => {
@@ -4283,6 +4293,12 @@ export class Launcher {
       throw sudoFailure(code, `sudo: ${path}: ${ERRNO_TEXT[code] ?? code}`);
     }
     const file = vfsFile(stack.fs, { path: real, flags: O_WRONLY, position: 0 }, stack.nodes);
+    const again = await walk(this.fs, cred, real, true, caller.uid);
+    const st = await stack.noLinks.lstat(real).catch(() => undefined);
+    if (again.path !== real || again.denied !== undefined || !st?.isFile) {
+      await file.release();
+      throw sudoFailure('EACCES', `sudo: ${path} changed while it was opened`);
+    }
     opened.set(real, file);
     return file;
   }

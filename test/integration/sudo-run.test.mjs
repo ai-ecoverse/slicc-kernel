@@ -109,6 +109,11 @@ test('a request that went unanswered runs later as root, detached, with its outp
 test('the run carries the request’s tags and the caller’s, leads a session of its own, and outlives the client that started it', async (t) => {
   const { kernel, ask, client } = await boot(t);
   await refused(
+    kernel.sudoRun({ id: 'x', user: 'cone', uid: 1000, argv: ['true\0'] }),
+    'EINVAL',
+    "sudo: that isn't a sudo request this kernel can run"
+  );
+  await refused(
     kernel.sudoRun({}),
     'EINVAL',
     "sudo: that isn't a sudo request this kernel can run"
