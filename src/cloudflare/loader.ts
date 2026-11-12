@@ -3,6 +3,7 @@ import { ForkTokens } from './fork-tokens.ts';
 import { digest, type Images, imageOf } from './images.ts';
 import type { IsolateGate } from './isolates.ts';
 import { openLink, type ProcessHostStub } from './kernel-end.ts';
+import { type ImageSize, Placement, type Seat } from './placement.ts';
 
 export type WorkerModule =
   | string
@@ -50,17 +51,44 @@ export function imageOfInit(init: unknown): string | undefined {
 
 export interface Processes {
   readonly forks: ForkTokens;
+  readonly placement: Placement;
   open(init: unknown): Promise<ProcessLink>;
-  admit(module: unknown): Promise<() => void>;
+  admit(module: unknown, from?: { ppid?: number }): Promise<() => void>;
   workerId(image: string): Promise<string>;
   readonly loads: number;
+}
+
+export interface IsolateMemory {
+  budget?: number;
+  perInstance?: number;
+  clock?: () => Promise<unknown>;
+}
+
+interface ForkInit {
+  pid?: unknown;
+  ppid?: unknown;
+  fork?: { ppid?: unknown; snapshot?: { total?: unknown }; memory?: unknown };
+}
+
+function forkNeed(init: ForkInit): number | undefined {
+  const total = init.fork?.snapshot?.total;
+  if (typeof total === 'number' && total > 0) return total;
+  const memory = init.fork?.memory as { byteLength?: unknown; total?: unknown } | undefined;
+  const length = memory?.byteLength ?? memory?.total;
+  return typeof length === 'number' && length > 0 ? length : undefined;
+}
+
+function parentOf(init: ForkInit): number | undefined {
+  const ppid = init.fork?.ppid ?? init.ppid;
+  return init.fork && typeof ppid === 'number' ? ppid : undefined;
 }
 
 export function cloudflareProcesses(
   loader: WorkerLoaderLike,
   images: Images,
   gate: IsolateGate,
-  code: ProcessHostCode
+  code: ProcessHostCode,
+  memory: IsolateMemory = {}
 ): Processes {
   let hostDigest: Promise<string> | undefined;
   let loads = 0;
@@ -84,32 +112,57 @@ export function cloudflareProcesses(
     };
   };
   const forks = new ForkTokens();
-  const reservations = new Map<string, (() => void)[]>();
-  const reservedFor = (image: string): (() => void) | undefined => {
+  const placement = new Placement(gate, { ...memory, waitMs: gate.waitMs });
+  const reservations = new Map<string, Seat[]>();
+  const seated = new Map<number, Seat>();
+  const sizeOf = async (image: string): Promise<ImageSize> => ({
+    image,
+    base: await workerId(image),
+    ...images.sizeOf(image),
+  });
+  const reservedFor = (image: string): Seat | undefined => {
     const list = reservations.get(image);
-    const release = list?.shift();
+    const seat = list?.shift();
     if (list?.length === 0) reservations.delete(image);
-    return release;
+    return seat;
+  };
+  const depthOf = (ppid: number | undefined): number => {
+    const parent = ppid === undefined ? undefined : seated.get(ppid);
+    return parent ? parent.depth + 1 : 0;
+  };
+  const nearParent = (
+    size: ImageSize,
+    init: ForkInit,
+    seat: Seat | undefined
+  ): Seat | undefined => {
+    const ppid = parentOf(init);
+    const parent = ppid === undefined ? undefined : seated.get(ppid);
+    if (!parent || parent.image !== size.image || parent.shard === seat?.shard) return seat;
+    const moved = placement.tryOn(size, parent.shard, forkNeed(init), parent.depth + 1);
+    if (!moved) return seat;
+    seat?.release();
+    return moved;
   };
   return {
     forks,
+    placement,
     workerId,
     get loads() {
       return loads;
     },
-    async admit(module) {
+    async admit(module, from = {}) {
       const image = imageOf(module);
-      if (image === undefined) return () => {};
-      const release = await gate.acquire(await workerId(image));
+      if (image === undefined || !images.has(image)) return () => {};
+      const seat = await placement.place(await sizeOf(image), undefined, depthOf(from.ppid));
       const list = reservations.get(image) ?? [];
-      list.push(release);
+      list.push(seat);
       reservations.set(image, list);
       return () => {
-        const at = list.indexOf(release);
+        const at = list.indexOf(seat);
         if (at < 0) return;
         list.splice(at, 1);
         if (list.length === 0 && reservations.get(image) === list) reservations.delete(image);
-        release();
+        seat.release();
       };
     },
     async open(init) {
@@ -117,14 +170,30 @@ export function cloudflareProcesses(
       if (image === undefined) throw new Error('this host runs only wasm programs with an image');
       const reserved = reservedFor(image);
       if (!images.has(image)) {
-        reserved?.();
+        reserved?.release();
         throw new Error(`no program image ${image}`);
       }
-      const id = await workerId(image);
-      const release = reserved ?? (await gate.acquire(id));
+      const size = await sizeOf(image);
+      const forkInit = init as ForkInit;
+      const need = forkNeed(forkInit);
+      const seat = nearParent(size, forkInit, reserved) ?? (await placement.place(size, need));
+      if (need !== undefined) seat.memory(need);
+      const pid = typeof forkInit.pid === 'number' ? forkInit.pid : undefined;
+      if (pid !== undefined) seated.set(pid, seat);
+      const release = (): void => {
+        if (pid !== undefined && seated.get(pid) === seat) seated.delete(pid);
+        seat.release();
+      };
       try {
-        const host = loader.get(id, () => workerCode(image)).getEntrypoint() as ProcessHostStub;
-        return await openLink(host, release, forks);
+        const host = loader
+          .get(seat.id, () => workerCode(image))
+          .getEntrypoint() as ProcessHostStub;
+        return await openLink(host, release, {
+          forks,
+          sized: (bytes) => seat.memory(bytes),
+          holds: (bytes) => seat.hold(bytes),
+          ...(memory.clock ? { refresh: memory.clock } : {}),
+        });
       } catch (err) {
         release();
         throw err;

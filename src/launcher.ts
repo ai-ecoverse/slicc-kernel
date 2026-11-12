@@ -270,7 +270,7 @@ export interface LauncherOptions {
   moduleUrl?: ModuleUrlMaker;
   packageLocks?: string;
   emscripten?: 'glue' | 'kernel';
-  admit?: (program: Program) => Promise<() => void>;
+  admit?: (program: Program, from: { ppid?: number }) => Promise<() => void>;
   compile?: (bytes: Uint8Array, key: string) => Promise<WebAssembly.Module>;
 }
 
@@ -2221,23 +2221,27 @@ export class Launcher {
     const done = this.heldUrl(program);
     try {
       const cwdSlot = await this.cwds.hold(cwd, req.cwdFrom);
-      const handle = await this.admitted(program, req.fds, (fds, quietOom) =>
-        this.start({
-          ...req,
-          fds,
-          quietOom,
-          cwd,
-          program,
-          argv0: target.argv0,
-          exe: target.copy ?? target.glue,
-          ...exeId,
-          ...(target.command !== undefined && target.copy === undefined
-            ? { command: target.command }
-            : {}),
-          args,
-          env,
-          cwdSlot,
-        })
+      const handle = await this.admitted(
+        program,
+        req.fds,
+        (fds, quietOom) =>
+          this.start({
+            ...req,
+            fds,
+            quietOom,
+            cwd,
+            program,
+            argv0: target.argv0,
+            exe: target.copy ?? target.glue,
+            ...exeId,
+            ...(target.command !== undefined && target.copy === undefined
+              ? { command: target.command }
+              : {}),
+            args,
+            env,
+            cwdSlot,
+          }),
+        req.ppid
       ).finally(() => this.cwds.release(cwdSlot));
       void handle.exited.finally(done);
       return handle;
@@ -2378,10 +2382,14 @@ export class Launcher {
     this.cwdPaths.set(pid, req.cwd);
   }
 
-  private async reserved(program: Program, fds: FdTable): Promise<() => void> {
+  private async reserved(
+    program: Program,
+    fds: FdTable,
+    ppid: number | undefined
+  ): Promise<() => void> {
     if (!this.admit) return () => {};
     try {
-      return await this.admit(program);
+      return await this.admit(program, ppid === undefined ? {} : { ppid });
     } catch (err) {
       this.memories.ended();
       await fds.closeAll();
@@ -2392,7 +2400,8 @@ export class Launcher {
   private async admitted(
     program: Program,
     fds: FdTable,
-    start: (fds: FdTable, quietOom?: boolean) => WasmProcessHandle
+    start: (fds: FdTable, quietOom?: boolean) => WasmProcessHandle,
+    ppid?: number
   ): Promise<WasmProcessHandle> {
     const wasm = program.abi !== 'js';
     for (;;) {
@@ -2400,7 +2409,7 @@ export class Launcher {
         await fds.closeAll();
         throw err;
       });
-      const release = await this.reserved(program, fds);
+      const release = await this.reserved(program, fds, ppid);
       const counted = (handle: WasmProcessHandle) => {
         void handle.exited.finally(() => this.memories.ended());
         void Promise.resolve(handle.ready).then(() => this.memories.started());
@@ -3094,7 +3103,7 @@ export class Launcher {
           tagBase: this.tagBases.get(ppid),
           links: this.links.get(ppid),
         });
-      return childHandle(await this.admitted(parent.program, given, fresh));
+      return childHandle(await this.admitted(parent.program, given, fresh, ppid));
     };
   }
 

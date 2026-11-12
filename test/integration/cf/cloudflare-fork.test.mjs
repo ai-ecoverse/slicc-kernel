@@ -67,8 +67,14 @@ describe('bash forks in Dynamic Workers', { concurrency: false }, () => {
       { status: 0, stdout: 'hi\n3\nbg\n', stderr: '' }
     );
     const forks = await settledForks(call);
-    assert.ok(forks.taken >= 6, JSON.stringify(forks));
-    assert.equal(forks.fetched, 0);
+    assert.ok(forks.taken + forks.fetched >= 6, JSON.stringify(forks));
+    const single = await run('(true)');
+    assert.equal(single.status, 0);
+    const after = await settledForks(call);
+    assert.deepEqual(
+      { taken: after.taken - forks.taken, fetched: after.fetched - forks.fetched },
+      { taken: 1, fetched: 0 }
+    );
     const loop = await wall(() => run(SUBSTITUTIONS));
     assert.equal(loop.value.stdout, 'x\n');
     const one = await wall(() => run('(true)'));

@@ -48,12 +48,18 @@ export class Kernel extends DurableObject {
   bootMs;
   installed;
 
+  now() {
+    return Date.now();
+  }
+
   kernel() {
     this.booting ??= (async () => {
       const started = Date.now();
       const storage = this.ctx.storage;
+      const self = () => this.env.KERNEL.get(this.ctx.id);
       const kernel = await createCloudflareKernel({
         loader: this.env.LOADER,
+        clock: () => self().now(),
         sql: storage.sql,
         sqlite: { transaction: (fn) => storage.transactionSync(fn) },
       });

@@ -7,6 +7,7 @@ interface Holder {
   end: ProcessEndStub;
   total: number;
   timer: ReturnType<typeof setTimeout>;
+  unhold: () => void;
 }
 
 interface ForkCall {
@@ -28,12 +29,16 @@ export class ForkTokens {
     return this.held.size;
   }
 
-  watchCall(message: unknown, end: ProcessEndStub | undefined): void {
+  watchCall(
+    message: unknown,
+    end: ProcessEndStub | undefined,
+    hold: (bytes: number) => () => void = () => () => {}
+  ): void {
     const call = message as ForkCall | null;
     if (!end || call?.type !== 'async-syscall' || call.req?.op !== 'proc-fork') return;
     const snapshot = call.req.state?.snapshot;
     if (typeof snapshot?.token !== 'string' || typeof snapshot.total !== 'number') return;
-    this.hold(snapshot.token, snapshot.total, end);
+    this.hold(snapshot.token, snapshot.total, end, hold(snapshot.total));
   }
 
   watchPost(message: unknown): boolean {
@@ -46,10 +51,10 @@ export class ForkTokens {
     return true;
   }
 
-  private hold(token: string, total: number, end: ProcessEndStub): void {
+  private hold(token: string, total: number, end: ProcessEndStub, unhold: () => void): void {
     this.drop(token);
     const timer = setTimeout(() => this.drop(token), this.ttlMs);
-    this.held.set(token, { end: end.dup(), total, timer });
+    this.held.set(token, { end: end.dup(), total, timer, unhold });
   }
 
   drop(token: string): void {
@@ -57,6 +62,7 @@ export class ForkTokens {
     if (!holder) return;
     clearTimeout(holder.timer);
     this.held.delete(token);
+    holder.unhold();
     dispose(holder.end);
   }
 

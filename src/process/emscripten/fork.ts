@@ -68,6 +68,7 @@ export class EmFork {
       memory.grow(Math.ceil((state.memory.length - memory.buffer.byteLength) / 65536));
     }
     new Uint8Array(memory.buffer).set(state.memory);
+    state.memory = new Uint8Array(0);
     this.data = state.currData;
     this.forkSp = state.forkSp;
     const name = state.callStackNames[0]?.[1] ?? 'main';

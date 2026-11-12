@@ -8,7 +8,7 @@ import {
 } from '../../realm/sync-sab-wire.ts';
 import { WasiExit, type WasiFunction } from '../wasi/wasi-host.ts';
 import type { EmContext } from './context.ts';
-import { EM, positive } from './errno.ts';
+import { EM, errnoOf, positive } from './errno.ts';
 import { type FilesState, seekDir } from './files.ts';
 import { sigpipeSpared } from './net.ts';
 
@@ -24,6 +24,18 @@ export function holdStopped(ctx: EmContext): void {
 
 export function sleepFor(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+export function sleepIn(ctx: EmContext, ms: number): void {
+  if (ctx.init.sab instanceof SharedArrayBuffer || !(ms > 0)) {
+    sleepFor(ms);
+    return;
+  }
+  try {
+    ctx.call({ op: 'fd-select', read: [], write: [], timeoutMs: ms });
+  } catch (e) {
+    if (errnoOf(e) === undefined) throw e;
+  }
 }
 
 export function afterStopped(ctx: EmContext): void {

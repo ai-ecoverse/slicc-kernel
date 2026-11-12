@@ -1,7 +1,7 @@
 import { RpcTarget } from 'cloudflare:workers';
 import type { ProcessLink } from '../async/link.ts';
 import { WASM_PROCESS_ERROR } from '../kernel/protocol.ts';
-import { behindProcess } from './clock-skew.ts';
+import { behindProcess, timed } from './clock-skew.ts';
 import type { ForkTokens } from './fork-tokens.ts';
 import {
   type Answer,
@@ -13,6 +13,7 @@ import {
   send,
 } from './rpc-link.ts';
 
+const WASM_PAGE = 65536;
 const CLOSED_BY_KERNEL = 'the kernel closed the process';
 
 class KernelState {
@@ -24,9 +25,20 @@ class KernelState {
   handler: ((message: unknown) => Promise<unknown>) | undefined;
   end: ProcessEndStub | undefined;
   readonly forks: ForkTokens | undefined;
+  readonly sized: ((bytes: number) => void) | undefined;
+  readonly holds: ((bytes: number) => () => void) | undefined;
+  readonly refresh: (() => Promise<unknown>) | undefined;
 
-  constructor(forks?: ForkTokens) {
-    this.forks = forks;
+  constructor(hooks: LinkHooks = {}) {
+    this.forks = hooks.forks;
+    this.sized = hooks.sized;
+    this.holds = hooks.holds;
+    this.refresh = hooks.refresh;
+  }
+
+  words(message: unknown): void {
+    const pages = (message as { words?: { memory?: unknown } } | null)?.words?.memory;
+    if (typeof pages === 'number' && pages > 0) this.sized?.(pages * WASM_PAGE);
   }
 
   get closed(): boolean {
@@ -76,13 +88,16 @@ export class KernelEnd extends RpcTarget {
     const inbox = this.#state.inbox;
     const message = inbox.take(value, count);
     if (this.#state.forks?.watchPost(message)) return;
+    this.#state.words(message);
     inbox.deliver(message);
   }
 
   async call(value: unknown, count: number, sent?: number): Promise<Answer> {
     const state = this.#state;
     const message = state.inbox.take(value, count);
-    state.forks?.watchCall(message, state.end);
+    state.forks?.watchCall(message, state.end, state.holds);
+    state.words(message);
+    if (state.refresh && timed(message)) await state.refresh().catch(() => undefined);
     const result = await state.call(behindProcess(message, sent));
     return state.held.answer(result);
   }
@@ -100,12 +115,19 @@ function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+export interface LinkHooks {
+  forks?: ForkTokens;
+  sized?: (bytes: number) => void;
+  holds?: (bytes: number) => () => void;
+  refresh?: () => Promise<unknown>;
+}
+
 export async function openLink(
   host: ProcessHostStub,
   released: () => void,
-  forks?: ForkTokens
+  hooks: LinkHooks = {}
 ): Promise<ProcessLink> {
-  const state = new KernelState(forks);
+  const state = new KernelState(hooks);
   let gone = false;
   const release = (): void => {
     if (gone) return;

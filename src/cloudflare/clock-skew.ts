@@ -19,9 +19,17 @@ function later(req: Timed, lag: number): Timed {
 }
 
 export function behindProcess(message: unknown, sent: unknown, now = Date.now()): unknown {
-  if (typeof sent !== 'number' || !(sent > now)) return message;
   const call = message as { type?: unknown; req?: unknown } | null;
   if (call?.type !== ASYNC_SYSCALL || !call.req || typeof call.req !== 'object') return message;
+  if (typeof sent !== 'number' || !(sent > now)) return message;
   const req = later(call.req as Timed, sent - now);
   return req === call.req ? message : { ...call, req };
+}
+
+export function timed(message: unknown): boolean {
+  const call = message as { type?: unknown; req?: Timed } | null;
+  if (call?.type !== ASYNC_SYSCALL || !call.req) return false;
+  const { req } = call;
+  if (typeof req.timeoutMs === 'number') return req.timeoutMs > 0;
+  return req.op === 'proc-alarm' && typeof req.ms === 'number' && req.ms > 0;
 }

@@ -46,7 +46,12 @@ export class IsolateGate {
     this.wake();
   }
 
-  private fits(id: string): boolean {
+  tryAcquire(id: string): (() => void) | undefined {
+    if (!this.fits(id) || (this.queue.length > 0 && !this.live.has(id))) return undefined;
+    return this.enter(id);
+  }
+
+  fits(id: string): boolean {
     return this.live.has(id) || this.live.size < this.max;
   }
 

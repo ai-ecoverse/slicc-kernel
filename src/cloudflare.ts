@@ -4,7 +4,12 @@ import type { MessagePortLike } from './client/protocol.ts';
 import { type ServedClient, serveClient } from './client/serve-client.ts';
 import { Images } from './cloudflare/images.ts';
 import { ISOLATE_WAIT_MS, IsolateGate, MAX_ISOLATES } from './cloudflare/isolates.ts';
-import { cloudflareProcesses, type ProcessHostCode } from './cloudflare/loader.ts';
+import {
+  cloudflareProcesses,
+  type IsolateMemory,
+  type Processes,
+  type ProcessHostCode,
+} from './cloudflare/loader.ts';
 import type { CloudflareKernel, CloudflareKernelOptions } from './cloudflare/options.ts';
 import { PIECE_BYTES } from './cloudflare/rpc-pack.ts';
 import { sqliteMeta } from './cloudflare/sqlite-meta.ts';
@@ -13,6 +18,7 @@ import { OpfsFs } from './fs/opfs.ts';
 import { DEFAULT_USERS, fsError, modeOption } from './fs/types.ts';
 import type { ConnectOptions } from './index.ts';
 import { type EmbedderHook, kindsOf } from './kernel/embedder.ts';
+import type { WasmWorkerLike } from './kernel/host.ts';
 import { sealedHooks } from './kernel/net/sealed-fetch.ts';
 import { quiet, signalField } from './kernel/signals.ts';
 import { Launcher, type ModuleUrl, tagOption } from './launcher.ts';
@@ -99,6 +105,36 @@ function rootFs(options: CloudflareKernelOptions): { root: FileSystemDirectoryHa
   return { root, fs: new OpfsFs(root, meta, undefined, { ranged }) };
 }
 
+function isolateMemory(options: CloudflareKernelOptions): IsolateMemory {
+  const { memory, perInstance } = options.isolates ?? {};
+  return {
+    ...(memory !== undefined ? { budget: memory } : {}),
+    ...(perInstance !== undefined ? { perInstance } : {}),
+    ...(options.clock ? { clock: options.clock } : {}),
+  };
+}
+
+function trackedWorker(
+  processes: Processes,
+  live: Set<{ terminate(): void }>,
+  terminated: boolean
+): WasmWorkerLike {
+  const worker = remoteWorker((init) => processes.open(init), {
+    maxMessageBytes: PIECE_BYTES,
+    snapshot: (token, offset, max) => processes.forks.read(token, offset, max),
+  });
+  const tracked = {
+    ...worker,
+    terminate() {
+      live.delete(tracked);
+      worker.terminate();
+    },
+  };
+  live.add(tracked);
+  if (terminated) queueMicrotask(() => tracked.terminate());
+  return tracked;
+}
+
 let sessions = 0;
 
 function client(
@@ -141,7 +177,13 @@ export async function createCloudflareKernel(
     options.isolates?.max ?? MAX_ISOLATES,
     options.isolates?.waitMs ?? options.wasmMemories?.idleMs ?? ISOLATE_WAIT_MS
   );
-  const processes = cloudflareProcesses(options.loader, images, gate, hostCode(options));
+  const processes = cloudflareProcesses(
+    options.loader,
+    images,
+    gate,
+    hostCode(options),
+    isolateMemory(options)
+  );
   const live = new Set<{ terminate(): void }>();
   const pending = new Set<(err: Error) => void>();
   const clients = new Set<ServedClient>();
@@ -152,23 +194,9 @@ export async function createCloudflareKernel(
     moduleUrl: sourceModule,
     compile: images.compile,
     emscripten: 'kernel',
-    admit: (program) => processes.admit(program.abi === 'js' ? undefined : program.module),
-    createWorker: () => {
-      const worker = remoteWorker((init) => processes.open(init), {
-        maxMessageBytes: PIECE_BYTES,
-        snapshot: (token, offset, max) => processes.forks.read(token, offset, max),
-      });
-      const tracked = {
-        ...worker,
-        terminate() {
-          live.delete(tracked);
-          worker.terminate();
-        },
-      };
-      live.add(tracked);
-      if (terminated) queueMicrotask(() => tracked.terminate());
-      return tracked;
-    },
+    admit: (program, from) =>
+      processes.admit(program.abi === 'js' ? undefined : program.module, from),
+    createWorker: () => trackedWorker(processes, live, terminated),
     ...(options.modules ? { modules: options.modules } : {}),
     ...(options.commands ? { commands: options.commands } : {}),
     ...(options.env ? { env: options.env } : {}),
