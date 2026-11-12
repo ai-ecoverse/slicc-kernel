@@ -1,5 +1,6 @@
 import type { WasmSyscall } from '../../kernel/process.ts';
 import type { WasmProcessInitMsg } from '../../kernel/protocol.ts';
+import type { SyncFsUsage } from '../../realm/sync-fs-wire.ts';
 import type { SyncSabTransport } from '../../realm/sync-sab-bridge.ts';
 import type { ProcessSys } from '../kernel-streams.ts';
 import type { LockKernel } from '../process-locks.ts';
@@ -42,6 +43,9 @@ export interface EmContext {
   readonly reentry: Reentry;
   readonly pid: number;
   ppid: number;
+  readonly credAbi: boolean;
+  statfs(path: string): SyncFsUsage | null;
+  readonly quit: { atExit: boolean; failed: boolean };
   call(req: WasmSyscall): unknown;
   exports(): EmExports;
   enter(name: string, fn: WasmExport, args: readonly unknown[]): unknown;
