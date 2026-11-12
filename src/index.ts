@@ -745,6 +745,13 @@ function connector(
   };
 }
 
+function clientApi(
+  call: (req: KernelCall) => Promise<unknown>,
+  bound: Bound
+): Pick<Kernel, 'connect' | 'devices'> {
+  return { connect: connector(call, bound), devices: kernelDevices(call, bound) };
+}
+
 function kernelDevices(call: (req: KernelCall) => Promise<unknown>, bound: Bound): KernelDevices {
   return {
     async add({ client, ...spec }) {
@@ -1013,8 +1020,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     },
     openTerminal,
     sudoRun: (replay, sudoOptions = {}) => sudoRunOn(request, replay, sudoOptions),
-    connect: connector(call, bound),
-    devices: kernelDevices(call, bound),
+    ...clientApi(call, bound),
     ...accounts(call, options.users === undefined ? DEFAULT_USERS : options.users),
     setRoutes: async (routes) => void (await call({ op: 'routes', routes })),
     chmod: async (path, mode) => void (await call({ op: 'chmod', path, mode })),
