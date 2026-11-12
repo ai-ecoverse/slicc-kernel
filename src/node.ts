@@ -10,6 +10,7 @@ import { type CronClock, clockZone } from './cron/clock.ts';
 import type { FacadeSpecs } from './facade/types.ts';
 import type { Attestation, AttestTombstone } from './fs/attest.ts';
 import type { DenialHook } from './fs/dac.ts';
+import type { MetaStore } from './fs/meta.ts';
 import { OpfsFs } from './fs/opfs.ts';
 import type { Protection } from './fs/protect.ts';
 import { DEFAULT_USERS, fsError, modeOption, type UsersMode } from './fs/types.ts';
@@ -153,6 +154,8 @@ export { memoryRoot };
 
 export interface NodeKernelOptions {
   root?: FileSystemDirectoryHandle;
+  meta?: MetaStore;
+  ranged?: boolean;
   modules?: string;
   commands?: { append?: readonly string[] };
   env?: Record<string, string>;
@@ -585,11 +588,17 @@ function checkedRequests(hook: EmbedderHook): EmbedderHook {
   return { kinds, handle: (request) => hook.handle(request) };
 }
 
+function rootFs(root: FileSystemDirectoryHandle, options: NodeKernelOptions): OpfsFs {
+  return new OpfsFs(root, options.meta, undefined, {
+    ranged: options.ranged ?? isMemoryRoot(root),
+  });
+}
+
 export async function createNodeKernel(options: NodeKernelOptions = {}): Promise<NodeKernel> {
   const hooks = sealedHooks(options.sealed);
   const timeZone = systemTimeZone(options.timeZone, clockZone(options.cron?.clock));
   const root = options.root ?? memoryRoot();
-  const fs = new OpfsFs(root, undefined, undefined, { ranged: isMemoryRoot(root) });
+  const fs = rootFs(root, options);
   await fs.reconcile();
   const live = new Set<() => void>();
   const pending = new Set<(err: Error) => void>();
