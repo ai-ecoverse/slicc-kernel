@@ -1,6 +1,7 @@
 import { WasiError } from './wasi-files.ts';
 import type { WasiMemory } from './wasi-memory.ts';
 import type { FuncTypes, ValType } from './wasm-functypes.ts';
+import { reentered } from './wasm-reentry.ts';
 
 type Scalar = Exclude<ValType, 'other'>;
 type Value = number | bigint;
@@ -66,7 +67,7 @@ export function callDynamic(
     at += SIZE[type];
     return v;
   });
-  const returned = (fn as (...a: Value[]) => Value | Value[] | undefined)(...args);
+  const returned = reentered(fn as (...a: Value[]) => Value | Value[] | undefined)(...args);
   const got = outs.length === 1 ? [returned as Value] : ((returned ?? []) as Value[]);
   const after = ctx.mem.view();
   const stop = results + resultsLen;

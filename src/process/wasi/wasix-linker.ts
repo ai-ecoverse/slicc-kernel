@@ -359,9 +359,9 @@ export class WasixLinker {
 
     const dir = path.slice(0, path.lastIndexOf('/')) || '/';
     const search = [dir, ...ldPath, ...info.runtimePath.map((p) => expandOrigin(p, dir))];
-    const needed = info.needed.map(
-      (n) => this.load(this.locate(n, cwd, search), cwd, ldPath).handle
-    );
+    const needed: number[] = [];
+    for (const n of info.needed)
+      needed.push(this.load(this.locate(n, cwd, search), cwd, ldPath).handle);
     const memoryBase = this.allocate(info.memorySize, 2 ** info.memoryAlign);
     const { base: tableBase, handle } = this.reserveLoad(info.tableSize);
     const record: LinkRecord = {

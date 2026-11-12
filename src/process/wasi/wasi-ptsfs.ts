@@ -15,7 +15,8 @@ export function ptsBridge<T extends SyncFsPosixBridge>(
 ): T {
   const open = (): number[] => call({ op: 'pty-list' }) as number[];
   const kernel = { json: (req: Parameters<typeof call>[0]) => call(req) };
-  const entry = (p: string, known = open()): SyncFsBridgeStat => {
+  const entry = (p: string, given?: number[]): SyncFsBridgeStat => {
+    const known = given === undefined ? open() : given;
     const n = PTS_ENTRY.exec(p)?.[1];
     if (n === undefined || !known.includes(Number(n))) throw syncError('ENOENT', p);
     return devSync(kernel, devStat(p, true));
@@ -32,8 +33,9 @@ export function ptsBridge<T extends SyncFsPosixBridge>(
     if (p === PTS) return dir();
     return PTS_ENTRY.test(p) ? entry(p) : real();
   };
-  const names = (known = open()): string[] => known.map(String).sort();
-  const over: Partial<Record<keyof SyncFsPosixBridge, unknown>> = {
+  const names = (given?: number[]): string[] =>
+    (given === undefined ? open() : given).map(String).sort();
+  const over: Partial<SyncFsPosixBridge> = {
     stat: (p: string) => statOf(p, () => fs.stat(p)),
     lstat: (p: string) => statOf(p, () => fs.lstat(p)),
     exists: (p: string) => {
@@ -49,7 +51,9 @@ export function ptsBridge<T extends SyncFsPosixBridge>(
     readdirStat: (p: string) => {
       if (p === PTS) {
         const known = open();
-        return names(known).map((name) => listedEntry(name, known));
+        const listed: Array<[string, SyncFsBridgeStat | null]> = [];
+        for (const name of names(known)) listed.push(listedEntry(name, known));
+        return listed;
       }
       const listed = fs.readdirStat(p);
       if (p !== '/dev' || listed.some(([name]) => name === 'pts')) return listed;
