@@ -237,6 +237,9 @@ export class Computer extends DurableObject {
 
 export default {
   async fetch(request, env) {
+    if (env.EXPIRES && Date.now() > Number(env.EXPIRES)) {
+      return new Response('this staging Worker has expired\n', { status: 410 });
+    }
     if (!env.KEY || !same(keyOf(request), env.KEY)) {
       return new Response('forbidden\n', { status: 403 });
     }

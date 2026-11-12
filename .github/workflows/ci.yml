@@ -25,10 +25,12 @@ jobs:
     secrets: inherit
     with:
       node-version: '26'
-      test-glob: test/integration/*.test.mjs
+      test-glob: test/integration/{,cf/}*.test.mjs
       shards: 4
       timeout-minutes: 30
       review-timeout-minutes: 90
+      deploy: node tools/cf-staging.mjs >> "$GITHUB_STEP_SUMMARY"
+      deploy-secrets: SLICC_KERNEL_CLOUDFLARE_API_TOKEN SLICC_KERNEL_CLOUDFLARE_ACCOUNT_ID
       review-prompt: |
         SLICC-KERNEL
 
@@ -40,10 +42,12 @@ jobs:
         1. Correctness against Linux and POSIX: errno values, signals and job control, fork, exec, spawn and waitpid, descriptors, pipes and terminals, file system semantics (rename, links, permissions, times), and what the README says. Races between processes, threads, workers and tabs sharing one OPFS root, and promises that resolve late or never.
         2. Security: `users` (off, report, enforce) never grants more than it should, credentials and sudo, the lockdown of JS programs, the network policy (`hostLoopback`, DNS rebinding, the proxy and its CA), and secrets (TLS keys, passphrases, vault values) that must never reach a program, `/proc`, an error or the console.
         3. Data loss or corruption: OPFS writes, metadata, interrupted renames and their recovery at boot.
-        4. Compatibility for consumers: the public entries (`.`, `./node`, `./driver`, `./testing`, `./meta`) and their types change only additively, `files` ships everything the entries load, command resolution and `engines.slicc-kernel` keep every homescoop package (`wasm-*`, `wasi-*`, `wasix-*`, `py-*`) running.
+        4. Compatibility for consumers: the public entries (`.`, `./node`, `./cloudflare`, `./driver`, `./testing`, `./meta`) and their types change only additively, `files` ships everything the entries load, command resolution and `engines.slicc-kernel` keep every homescoop package (`wasm-*`, `wasi-*`, `wasix-*`, `py-*`) running.
         5. Tests: every behaviour change has an integration test in `test/integration/` through the public API, and a fix's test fails without the fix. Confirm that for a fix: copy the changed test files into `$RUNNER_TEMP/base`, build it and run them there.
         6. Repo rules: no comments anywhere (YAML too, except `# renovate:` annotations), no unit tests in git, and a conventional-commit title (`fix`, `feat` and `perf` release, the rest don't).
 
         Neither tree is built: run `npm run build` in a tree before you read or run its `dist/`. Run one test file with `node --test --test-timeout=180000 --test-global-setup=node_modules/@ai-ecoverse/slicc-shared-web/harness/global.mjs test/integration/<file>.test.mjs`. Tests that import `dist/node.js` need no browser. The review browsers aren't used by this repository. Don't report style preferences, or anything you haven't confirmed in the code or by a run.
+
+        When the prompt above names a staging deployment, it is `examples/cloudflare-computer` on Cloudflare, built from this pull request: the kernel in a Durable Object with a Cloudflare Computer Workspace mounted at `/workspace`, bash and coreutils installed. The address is `<origin>/?key=<key>`; every route needs that key, and `computer=<name>` picks the Durable Object (use a name of your own). `curl -s -X POST "<origin>/exec?key=<key>&computer=<name>" -d '{"source":"uname -a; ls -la /workspace"}'` runs `bash -c` and answers `{ exitCode, stdout, stderr }` (`"stream": true` answers events as lines of JSON); `PUT /file?path=/workspace/x` and `GET /file?path=…` write and read through the Workspace; `GET /boot` reports the kernel; `POST /abort` restarts the Durable Object. The README's "In a Cloudflare Durable Object" lists its limits. It stops answering 24 hours after its deploy. `test/integration/cf/computer-cloudflare-staging.test.mjs` ran against it on the shards.
 
         Severity: deny for a confirmed P1 or P2: a security or secret exposure, data loss or corruption, a crash or a kernel that doesn't boot, a regression in a common workflow or a base command (bash, coreutils, git, pnpm, python) without a workaround, a behaviour change without its test, or a fix whose test passes without it. A narrow problem with a workaround is P3: comment with a repro and approve. A problem in a package build belongs to ai-ecoverse/homescoop, one in bios's pins to ai-ecoverse/slicc-bios: open it there as an issue.
