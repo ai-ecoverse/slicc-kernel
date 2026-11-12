@@ -20,9 +20,9 @@ const wall = async (work) => {
   return { ms: Math.round(performance.now() - started), value };
 };
 
-async function kernel(localForks) {
+async function kernel(localForks, persist = false) {
   const call = client(dev);
-  assert.equal((await call('/kernel/boot', { localForks })).status, 200);
+  assert.equal((await call('/kernel/boot', { localForks, persist })).status, 200);
   for (const name of ['wasm-bash', 'wasm-coreutils']) {
     await uploadTree(call, join(MODULES, name), `/node_modules/@ai-ecoverse/${name}`, programs);
   }
@@ -88,5 +88,22 @@ describe('bash forks in Dynamic Workers', { concurrency: false }, () => {
     assert.ok(forks.fetched >= 7, JSON.stringify(forks));
     const one = await wall(() => run('(true)'));
     t.diagnostic(`through the kernel: (true) ${one.ms} ms, script ${r.ms} ms`);
+  });
+
+  test('a seven- and an eight-stage pipeline with a redirect on the SQLite root', async (t) => {
+    if (skipped(t)) return;
+    const { call, run } = await kernel(true, true);
+    await call('/kernel/file-write', { path: '/root/f', data: 'line\n'.repeat(100) });
+    for (const stages of [7, 8]) {
+      const script = `cd /root; cat f ${'| cat '.repeat(stages - 1)}> out${stages}; wc -l < out${stages}`;
+      const r = await wall(() => run(script));
+      assert.deepEqual(
+        { status: r.value.status, stdout: r.value.stdout, stderr: r.value.stderr },
+        { status: 0, stdout: '100\n', stderr: '' }
+      );
+      t.diagnostic(`${stages} stages: ${r.ms} ms`);
+    }
+    const again = await call('/kernel/file-read', { path: '/root/out7' });
+    assert.equal(again.data, 'line\n'.repeat(100));
   });
 });
