@@ -148,6 +148,15 @@ function ioctl(ctx: EmContext, fd: number, op: number, varargs: number): number 
   return request === FIONREAD || request === FIONBIO ? -EM.NOTTY : -EM.INVAL;
 }
 
+function lockAllowed(ctx: EmContext, fd: number, varargs: number): boolean {
+  const at = ctx.mem.view().getUint32(varargs, true);
+  const type = ctx.mem.view().getInt16(at, true);
+  const acc = fdFlags(ctx, fd) & 3;
+  if (type === 0) return acc !== 1;
+  if (type === 1) return acc !== 0;
+  return true;
+}
+
 function fcntl(ctx: EmContext, fd: number, cmd: number, varargs: number): number {
   const { fds } = ctx.host;
   const arg = () => ctx.mem.view().getInt32(varargs, true);
@@ -174,6 +183,7 @@ function fcntl(ctx: EmContext, fd: number, cmd: number, varargs: number): number
     case F_GETLK:
     case F_SETLK:
     case F_SETLKW: {
+      if (cmd !== F_GETLK && !lockAllowed(ctx, fd, varargs)) return -EM.BADF;
       const lock = ctx.host.sliccImports().fcntl_lock as (
         fd: number,
         cmd: number,

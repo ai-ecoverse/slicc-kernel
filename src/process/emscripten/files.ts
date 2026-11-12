@@ -1,4 +1,4 @@
-import { devCreation } from '../../fs/dev-removal.ts';
+import { devCreation, devRemoval } from '../../fs/dev-removal.ts';
 import { physicalPath } from '../../fs/physical-path.ts';
 import { inodeOf } from '../../fs/types.ts';
 import type { Cred } from '../../kernel/cred.ts';
@@ -109,6 +109,15 @@ const RDEV: Readonly<Record<string, number>> = {
   '/dev/embedder': 0xafc,
 };
 
+const PTS = /^\/dev\/pts\/(\d+)$/;
+
+function rdevOf(path: string): number {
+  const n = PTS.exec(path)?.[1];
+  if (n === undefined) return RDEV[path] ?? 0;
+  const minor = Number(n);
+  return ((minor & 0xfff00) << 12) | (136 << 8) | (minor & 0xff);
+}
+
 export function emStat(ctx: EmContext, path: string, st: SyncFsBridgeStat, size?: number): EmStat {
   const owners = ctx.host.o.fs.owners === true;
   const type = typeOf(st);
@@ -131,7 +140,7 @@ export function emStat(ctx: EmContext, path: string, st: SyncFsBridgeStat, size?
     nlink: st.nlink ?? 1,
     uid,
     gid,
-    rdev: type === S_IFCHR ? (RDEV[path] ?? 0) : 0,
+    rdev: type === S_IFCHR ? rdevOf(path) : 0,
     size: bytes,
     atimeMs: st.atimeMs ?? mtimeMs,
     mtimeMs,
@@ -144,8 +153,23 @@ function devKernel(ctx: EmContext) {
   return { json: (req: Parameters<EmContext['call']>[0]) => ctx.call(req) };
 }
 
+const PTMX = '/dev/ptmx';
+
+function ptmxStat(): SyncFsBridgeStat {
+  return {
+    isFile: false,
+    isDirectory: false,
+    size: 0,
+    mode: S_IFCHR | 0o666,
+    mtimeMs: Date.now(),
+    uid: 0,
+    gid: 0,
+  };
+}
+
 function bridgeStat(ctx: EmContext, path: string, follow: boolean): SyncFsBridgeStat {
   const fs = ctx.host.o.fs;
+  if (path === PTMX && ctx.sys.openPty) return ptmxStat();
   if (inDev(path)) {
     try {
       return devSync(devKernel(ctx), devStat(path, follow));
@@ -154,7 +178,23 @@ function bridgeStat(ctx: EmContext, path: string, follow: boolean): SyncFsBridge
     }
   }
   ctx.host.fds.flushPath(path);
-  return follow ? fs.stat(path) : fs.lstat(path);
+  try {
+    return follow ? fs.stat(path) : fs.lstat(path);
+  } catch (err) {
+    const real = follow && missing(err) ? devTarget(ctx, path) : undefined;
+    if (real === undefined) throw err;
+    return bridgeStat(ctx, real, true);
+  }
+}
+
+function devTarget(ctx: EmContext, path: string): string | undefined {
+  let real: string;
+  try {
+    real = physicalPath(ctx.host.o.fs, path);
+  } catch {
+    return undefined;
+  }
+  return real !== path && inDev(real) ? real : undefined;
 }
 
 function linkStat(target: string): SyncFsBridgeStat {
@@ -173,6 +213,10 @@ export function fdTarget(ctx: EmContext, fd: number): string {
   if (e.type === 'file') return e.file.path;
   if (e.type === 'dir') return e.path;
   if (e.type === 'device') return `/dev/${e.device}`;
+  if (ctx.host.fds.kind(fd, e) === 'stream') {
+    const info = ctx.call({ op: 'fd-info', fd }) as { fifo?: string };
+    if (info.fifo !== undefined) return info.fifo;
+  }
   const target = devSync(devKernel(ctx), devResolveTarget(`/dev/fd/${fd}`));
   return target ?? `pipe:[${fd}]`;
 }
@@ -305,7 +349,9 @@ function seed(ctx: EmContext, path: string, text: string): void {
   const fs = ctx.host.o.fs;
   if (fs.exists(path)) return;
   try {
+    fs.create?.(path, fs.owners ? 0o644 : undefined, false);
     fs.writeFile(path, encoder.encode(text));
+    if (((fs.stat(path).mode ?? 0o644) & 0o7777) !== 0o644) fs.chmod(path, 0o644);
   } catch {}
 }
 
@@ -330,7 +376,35 @@ export function openPath(ctx: EmContext, path: string, flags: number, mode: numb
   }
 }
 
+const O_NOCTTY = 0o400;
+
+function openPty(ctx: EmContext, path: string, flags: number): number | undefined {
+  const pts = PTS.exec(path)?.[1];
+  if (path !== PTMX && pts === undefined) return undefined;
+  const { openPty: master, openPts } = ctx.sys;
+  if (!master || !openPts) return undefined;
+  const fd =
+    pts === undefined
+      ? master.call(ctx.sys)
+      : openPts.call(ctx.sys, Number(pts), (flags & O_NOCTTY) !== 0);
+  ctx.host.fds.adopt(fd, 'tty', (flags & O_NONBLOCK) !== 0);
+  if (flags & O_CLOEXEC) ctx.host.fds.setCloexec(fd, true);
+  return fd;
+}
+
 function openAt(ctx: EmContext, path: string, flags: number, mode: number): number {
+  const pty = openPty(ctx, path, flags);
+  if (pty !== undefined) return pty;
+  try {
+    return openFile(ctx, path, flags, mode);
+  } catch (err) {
+    const real = missing(err) && !(flags & O_NOFOLLOW) ? devTarget(ctx, path) : undefined;
+    if (real === undefined) throw err;
+    return openAt(ctx, real, flags, mode);
+  }
+}
+
+function openFile(ctx: EmContext, path: string, flags: number, mode: number): number {
   const { fds } = ctx.host;
   if (flags & O_CREAT) refusedCreation(ctx, path);
   const alias = fdAlias(ctx, path);
@@ -346,9 +420,10 @@ function openAt(ctx: EmContext, path: string, flags: number, mode: number): numb
   const created = flags & O_CREAT ? mode & 0o7777 & ~umask : undefined;
   const nofollow = (flags & O_NOFOLLOW) !== 0;
   if (deviceOf(target)) ctx.host.interrupted?.();
+  const opened = readOnlyCreate(ctx, target, flags, created);
   const fd = fds.open(
     target,
-    oflagsOf(flags),
+    oflagsOf(opened),
     rightsOf(flags),
     fdflagsOf(flags),
     created,
@@ -357,6 +432,34 @@ function openAt(ctx: EmContext, path: string, flags: number, mode: number): numb
   dirAccess(ctx, fd, flags);
   if (flags & O_CLOEXEC) fds.setCloexec(fd, true);
   return fd;
+}
+
+function readOnlyCreate(
+  ctx: EmContext,
+  path: string,
+  flags: number,
+  mode: number | undefined
+): number {
+  if (!(flags & O_CREAT) || (flags & O_ACCMODE) !== 0 || flags & O_DIRECTORY) return flags;
+  if (deviceOf(path) || fdAlias(ctx, path) !== undefined || inDev(path)) return flags;
+  const fs = ctx.host.o.fs;
+  let exists = true;
+  try {
+    fs.lstat(path);
+  } catch (err) {
+    if (!missing(err)) throw err;
+    exists = false;
+  }
+  if (exists && flags & O_EXCL) throw new EmError(EM.EXIST);
+  if (!exists) {
+    try {
+      if (fs.create) fs.create(path, fs.owners ? mode : undefined, false);
+      else fs.writeFile(path, new Uint8Array(0));
+    } catch (err) {
+      if ((err as { code?: unknown }).code !== 'EEXIST' || flags & O_EXCL) throw err;
+    }
+  }
+  return flags & ~(O_CREAT | O_EXCL);
 }
 
 function dirAccess(ctx: EmContext, fd: number, flags: number): void {
@@ -448,6 +551,7 @@ function listing(ctx: EmContext, path: string): Listing {
     const stats = new Map<string, SyncFsBridgeStat | null>();
     const listed = devSync(devKernel(ctx), devReaddir(path));
     if (path === '/dev' && !listed.includes('fd')) listed.push('fd');
+    if (path === '/dev' && ctx.sys.openPty && !listed.includes('ptmx')) listed.push('ptmx');
     listed.sort();
     for (const name of listed) {
       names.push(name);
@@ -595,7 +699,14 @@ function access(ctx: EmContext, path: string, amode: number, flags: number): voi
   fs.access(path, amode & 7, kind, !follow);
 }
 
+function devRemove(ctx: EmContext, path: string): void {
+  const cred = ctx.host.o.fs.owners ? credOf(ctx) : undefined;
+  const refused = devRemoval(path, cred);
+  if (refused) throw new EmError(wasiErrno(refused));
+}
+
 function unlinkPath(ctx: EmContext, path: string): void {
+  devRemove(ctx, path);
   const fs = ctx.host.o.fs;
   const { fds } = ctx.host;
   const st = fs.lstat(path);
@@ -640,6 +751,7 @@ function mountPoints(ctx: EmContext, state: FilesState): Set<string> {
 }
 
 function removeDir(ctx: EmContext, state: FilesState, path: string): void {
+  devRemove(ctx, path);
   if (path === '/' || mountPoints(ctx, state).has(path)) {
     ctx.host.o.fs.lstat(path);
     throw new EmError(EM.BUSY);
