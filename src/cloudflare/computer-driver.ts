@@ -51,11 +51,37 @@ export interface WorkspaceDriverOptions {
   maxIo?: number;
   bufferBytes?: number;
   attrTtl?: number;
+  writeBehind?: boolean | Partial<WriteBehind>;
+}
+
+export interface WriteBehind {
+  idleMs: number;
+  maxMs: number;
+  maxEntries: number;
+  maxBytes: number;
+}
+
+const WRITE_BEHIND: WriteBehind = {
+  idleMs: 50,
+  maxMs: 1000,
+  maxEntries: 256,
+  maxBytes: 8 * 1024 * 1024,
+};
+
+function writeBehindOf(option: WorkspaceDriverOptions['writeBehind']): WriteBehind | undefined {
+  if (!option) return undefined;
+  return option === true ? WRITE_BEHIND : { ...WRITE_BEHIND, ...option };
+}
+
+function unrefTimer<T>(timer: T): T {
+  (timer as { unref?: () => void }).unref?.();
+  return timer;
 }
 
 export interface WorkspaceDriver extends FilesystemHandlers {
   readonly capabilities: DriverCapabilities;
   settled(): Promise<void>;
+  flush(): Promise<void>;
   served(served: ServedFilesystem): void;
   invalidate(paths?: string[]): void;
 }
@@ -228,6 +254,11 @@ class Draft {
     return true;
   }
 
+  async abandon(): Promise<void> {
+    if (!this.failure) this.controller.error(fsError('ECANCELED', `${this.path} was removed`));
+    await this.committed.catch(() => undefined);
+  }
+
   async finish(): Promise<void> {
     try {
       await this.fill(this.size);
@@ -248,13 +279,62 @@ class DriverState {
   readonly buffer: number;
   readonly handles = new Map<number, Handle>();
   readonly drafts = new Map<string, Draft>();
+  private readonly closed = new Set<string>();
   private nextFh = 0;
+  private idle: ReturnType<typeof setTimeout> | undefined;
+  private oldest: ReturnType<typeof setTimeout> | undefined;
   tail: Promise<unknown> = Promise.resolve();
+  readonly behind: WriteBehind | undefined;
 
-  constructor(fs: WorkspaceFilesystemLike, root: string, buffer: number) {
+  constructor(
+    fs: WorkspaceFilesystemLike,
+    root: string,
+    buffer: number,
+    behind: WriteBehind | undefined
+  ) {
     this.fs = fs;
     this.root = root;
     this.buffer = buffer;
+    this.behind = behind;
+  }
+
+  private writing(path: string): boolean {
+    return [...this.handles.values()].some((o) => o.path === path && o.drafting);
+  }
+
+  private stopTimers(): void {
+    clearTimeout(this.idle);
+    clearTimeout(this.oldest);
+    this.idle = undefined;
+    this.oldest = undefined;
+  }
+
+  async flush(): Promise<void> {
+    this.stopTimers();
+    const paths = [...this.closed];
+    this.closed.clear();
+    let failed: unknown;
+    for (const path of paths) {
+      if (this.writing(path)) continue;
+      await this.finish(path).catch((err: unknown) => {
+        failed ??= err;
+      });
+    }
+    if (failed) throw failed;
+  }
+
+  private later(path: string, behind: WriteBehind): Promise<void> | undefined {
+    this.closed.add(path);
+    let bytes = 0;
+    for (const at of this.closed) bytes += this.drafts.get(at)?.size ?? 0;
+    if (this.closed.size >= behind.maxEntries || bytes >= behind.maxBytes) return this.flush();
+    const run = () => {
+      void this.serial(() => this.flush()).catch(() => undefined);
+    };
+    clearTimeout(this.idle);
+    this.idle = unrefTimer(setTimeout(run, behind.idleMs));
+    this.oldest ??= unrefTimer(setTimeout(run, behind.maxMs));
+    return undefined;
   }
 
   full(path: string): string {
@@ -279,6 +359,7 @@ class DriverState {
   }
 
   async finish(path: string): Promise<void> {
+    this.closed.delete(path);
     const draft = this.drafts.get(path);
     if (!draft) return;
     this.drafts.delete(path);
@@ -308,7 +389,33 @@ class DriverState {
   }
 
   async truncateTo(path: string, size: number): Promise<void> {
-    if (this.drafts.get(path)?.truncate(size)) return;
+    const draft = this.drafts.get(path);
+    if (draft?.truncate(size)) return;
+    if (draft && size === 0 && !this.writing(path)) {
+      this.drafts.delete(path);
+      this.closed.delete(path);
+      await draft.abandon();
+      const st = {
+        mode: draft.mode,
+        mtime: Date.now(),
+        size: 0,
+        isFile: true,
+        isDirectory: false,
+        isSymbolicLink: false,
+      };
+      const fresh = draft.created
+        ? new Draft(this.fs, path, st, this.buffer, { exclusive: false })
+        : new Draft(
+            this.fs,
+            path,
+            { ...(await this.fs.stat(path)), mode: draft.mode },
+            this.buffer
+          );
+      fresh.truncate(0);
+      if (draft.modeChanged) fresh.modeChanged = true;
+      this.drafts.set(path, fresh);
+      return;
+    }
     await this.finish(path);
     const st = await this.fs.stat(path);
     if (st.isDirectory) throw fsError('EISDIR', path);
@@ -431,9 +538,9 @@ class DriverState {
   async release(fh: number): Promise<void> {
     const h = this.handle(fh);
     this.handles.delete(fh);
-    if (!h.drafting) return;
-    const writing = [...this.handles.values()].some((o) => o.path === h.path && o.drafting);
-    if (!writing) await this.finish(h.path);
+    if (!h.drafting || this.writing(h.path)) return;
+    if (this.behind && this.drafts.has(h.path)) await this.later(h.path, this.behind);
+    else await this.finish(h.path);
   }
 
   async rmdir(path: string): Promise<void> {
@@ -441,12 +548,20 @@ class DriverState {
     const st = await this.fs.lstat(at);
     if (!st.isDirectory) throw fsError('ENOTDIR', path);
     if (path === '/') throw fsError('EBUSY', 'the root of a mount');
+    await this.finishUnder(at);
     if ((await this.fs.readdir(at)).length > 0) throw fsError('ENOTEMPTY', path);
     await this.fs.rm(at);
   }
 
   async unlink(path: string): Promise<void> {
     const at = this.full(path);
+    const draft = this.drafts.get(at);
+    if (draft && !this.writing(at)) {
+      this.drafts.delete(at);
+      this.closed.delete(at);
+      await draft.abandon();
+      if (draft.created) return;
+    }
     await this.finish(at);
     const st = await this.fs.lstat(at);
     if (st.isDirectory) throw fsError('EISDIR', path);
@@ -477,7 +592,7 @@ class DriverState {
     if (!draft?.created) await this.fs.chmod(at, mode);
     if (draft) {
       draft.mode = mode;
-      draft.modeChanged = !draft.created;
+      draft.modeChanged = true;
     }
   }
 }
@@ -487,7 +602,12 @@ export function workspaceDriver(
   options: WorkspaceDriverOptions = {}
 ): WorkspaceDriver {
   const root = (options.root ?? '/').replace(/\/+$/, '');
-  const state = new DriverState(fs, root, options.bufferBytes ?? BUFFER_BYTES);
+  const state = new DriverState(
+    fs,
+    root,
+    options.bufferBytes ?? BUFFER_BYTES,
+    writeBehindOf(options.writeBehind)
+  );
   const serial = <T>(work: () => Promise<T>) => state.serial(work);
   let served: ServedFilesystem | undefined;
   const capabilities: DriverCapabilities = {
@@ -502,6 +622,7 @@ export function workspaceDriver(
   return {
     capabilities,
     settled: () => state.settled(),
+    flush: () => serial(() => state.flush()),
     served: (next) => {
       served = next;
     },
