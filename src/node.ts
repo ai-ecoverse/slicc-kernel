@@ -3,6 +3,7 @@ import { lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { MessageChannel, type MessagePort, type Worker } from 'node:worker_threads';
+import { type AsyncProcessOptions, nodeAsyncHost } from './async/node-host.ts';
 import type { CdpHook } from './cdp/types.ts';
 import type { SudoRun, SudoRunOptions } from './client/attach.ts';
 import type { MessagePortLike } from './client/protocol.ts';
@@ -11,6 +12,7 @@ import { type CronClock, clockZone } from './cron/clock.ts';
 import type { FacadeSpecs } from './facade/types.ts';
 import type { Attestation, AttestTombstone } from './fs/attest.ts';
 import type { DenialHook } from './fs/dac.ts';
+import type { MetaStore } from './fs/meta.ts';
 import { OpfsFs } from './fs/opfs.ts';
 import type { Protection } from './fs/protect.ts';
 import { DEFAULT_USERS, fsError, modeOption, type UsersMode } from './fs/types.ts';
@@ -36,7 +38,7 @@ import type { RouteTable } from './kernel/net/routes.ts';
 import { type SealedOption, sealedHooks } from './kernel/net/sealed-fetch.ts';
 import type { NetworkUplink } from './kernel/net/uplink.ts';
 import { quiet, signalField } from './kernel/signals.ts';
-import { Launcher, tagOption } from './launcher.ts';
+import { Launcher, type LauncherOptions, tagOption } from './launcher.ts';
 import type { FetchLike, HostfsGrantHook } from './mount/hostfs.ts';
 import type { MountEntry, MountSpec } from './mount/mount-fs.ts';
 import type { ProcessMountPolicy } from './mount/syscall.ts';
@@ -49,6 +51,20 @@ import type { ApproveHook, SudoReplay } from './sudo.ts';
 import { systemTimeZone } from './time-zone.ts';
 import { fetchTransport, type NetworkTransport } from './transport.ts';
 
+export type { KernelLink, ProcessLink } from './async/link.ts';
+export { type MessageLinks, type MessagePortLike, messageLinks } from './async/message-link.ts';
+export type {
+  AsyncProcessDeps,
+  AsyncProcessEntry,
+  AsyncProcessOptions,
+} from './async/node-host.ts';
+export { type RemoteWorkerOptions, remoteWorker } from './async/remote-worker.ts';
+export {
+  type AsyncTransport,
+  type AsyncTransportOptions,
+  createAsyncTransport,
+} from './async/transport.ts';
+export type { AsyncProcessInit } from './async/wire.ts';
 export type { CdpConnection, CdpHook, CdpRequest } from './cdp/types.ts';
 export {
   type AttachOptions,
@@ -171,6 +187,9 @@ export { memoryRoot };
 
 export interface NodeKernelOptions {
   root?: FileSystemDirectoryHandle;
+  meta?: MetaStore;
+  ranged?: boolean;
+  durable?: () => void | Promise<void>;
   modules?: string;
   commands?: { append?: readonly string[] };
   env?: Record<string, string>;
@@ -200,6 +219,9 @@ export interface NodeKernelOptions {
   warmWorker?: boolean;
   warmWorkers?: number;
   wasmMemories?: { ceiling?: number; idleMs?: number };
+  emscripten?: 'glue' | 'kernel';
+  blocking?: 'sync' | 'async';
+  asyncProcess?: AsyncProcessOptions;
 }
 
 export interface NodeKernel {
@@ -224,6 +246,15 @@ export interface NodeKernel {
   umount(target: string): Promise<void>;
   mounts(): Promise<MountEntry[]>;
   terminate(): void;
+}
+
+function tuningOf(
+  options: NodeKernelOptions
+): Pick<LauncherOptions, 'wasmMemories' | 'emscripten'> {
+  return {
+    ...(options.wasmMemories ? { wasmMemories: options.wasmMemories } : {}),
+    ...(options.emscripten ? { emscripten: options.emscripten } : {}),
+  };
 }
 
 function hostfsFetchOf(options: NodeKernelOptions): { hostfsFetch?: FetchLike } {
@@ -622,6 +653,41 @@ function checkedRequests(hook: EmbedderHook): EmbedderHook {
   return { kinds, handle: (request) => hook.handle(request) };
 }
 
+function rootFs(root: FileSystemDirectoryHandle, options: NodeKernelOptions): OpfsFs {
+  return new OpfsFs(root, options.meta, undefined, {
+    ranged: options.ranged ?? isMemoryRoot(root),
+  });
+}
+
+function blockingOf(options: NodeKernelOptions): 'sync' | 'async' {
+  const { blocking } = options;
+  if (blocking === undefined || blocking === 'sync' || blocking === 'async')
+    return blocking ?? 'sync';
+  throw new TypeError("createNodeKernel: blocking must be 'sync' or 'async'");
+}
+
+function processWorkers(
+  options: NodeKernelOptions,
+  file: string | URL,
+  workerData: { compileCache: string; ownedCache?: boolean } | undefined,
+  live: Set<() => void>,
+  closed: () => boolean
+) {
+  if (blockingOf(options) === 'async') {
+    const remote = nodeAsyncHost(options.asyncProcess ?? {}, live);
+    return {
+      warm: undefined,
+      launch: { createWorker: () => remote.createWorker(closed()), compile: remote.compile },
+    };
+  }
+  const warm = warmPoolOf(options, file, workerData, live);
+  const take = warm ? () => warm.take() : undefined;
+  return {
+    warm,
+    launch: { createWorker: () => nodeWorker(file, live, closed(), workerData, take, true) },
+  };
+}
+
 function nodeAccounts(
   launcher: Launcher,
   guard: <T>(work: () => Promise<T>) => Promise<T>
@@ -687,7 +753,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
   const hooks = sealedHooks(options.sealed);
   const timeZone = systemTimeZone(options.timeZone, clockZone(options.cron?.clock));
   const root = options.root ?? memoryRoot();
-  const fs = new OpfsFs(root, undefined, undefined, { ranged: isMemoryRoot(root) });
+  const fs = rootFs(root, options);
   await fs.reconcile();
   const live = new Set<() => void>();
   const pending = new Set<(err: Error) => void>();
@@ -696,14 +762,14 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
   const file = options.worker ?? new URL('./node-process-worker.cjs', import.meta.url);
   const cache = cacheDirOf(options.compileCache);
   const workerData = cacheData(cache);
-  const warm = warmPoolOf(options, file, workerData, live);
+  const { warm, launch } = processWorkers(options, file, workerData, live, () => terminated);
   const transport = options.network?.transport;
   const launcher = new Launcher({
     fs,
     moduleUrl: sourceModule,
     unlinkOwner: pidOwner(process),
-    createWorker: () =>
-      nodeWorker(file, live, terminated, workerData, warm ? () => warm.take() : undefined, true),
+    ...(options.durable ? { durable: options.durable } : {}),
+    ...launch,
     createDriverWorker: () =>
       nodeWorker(
         options.driverWorker ?? new URL('./node-driver-worker.js', import.meta.url),
@@ -731,7 +797,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     ...(hooks.fetch ? { sealedFetch: hooks.fetch } : {}),
     ...pageHooks(options),
     ...(options.sudo?.clock ? { sudoClock: options.sudo.clock } : {}),
-    ...(options.wasmMemories ? { wasmMemories: options.wasmMemories } : {}),
+    ...tuningOf(options),
     cron: { lock: cronLock(root), ...(options.cron?.clock ? { clock: options.cron.clock } : {}) },
   });
   await launcher.prepare();

@@ -16,7 +16,8 @@ export function ptsBridge<T extends SyncFsPosixBridge>(
 ): T {
   const open = (): number[] => call({ op: 'pty-list' }) as number[];
   const kernel = { json: (req: Parameters<typeof call>[0]) => call(req) };
-  const entry = (p: string, known = open()): SyncFsBridgeStat => {
+  const entry = (p: string, given?: number[]): SyncFsBridgeStat => {
+    const known = given === undefined ? open() : given;
     const n = PTS_ENTRY.exec(p)?.[1];
     if (n === undefined || !known.includes(Number(n))) throw syncError('ENOENT', p);
     return devSync(kernel, devStat(p, true));
@@ -40,7 +41,8 @@ export function ptsBridge<T extends SyncFsPosixBridge>(
     ...listed,
     ...serialNames().filter((n) => !listed.includes(n)),
   ];
-  const names = (known = open()): string[] => known.map(String).sort();
+  const names = (given?: number[]): string[] =>
+    (given === undefined ? open() : given).map(String).sort();
   const serialEntry = (p: string, name: string): [string, SyncFsBridgeStat | null] => {
     try {
       return [name, devSync(kernel, devStat(p, false))];
@@ -48,7 +50,7 @@ export function ptsBridge<T extends SyncFsPosixBridge>(
       return [name, null];
     }
   };
-  const over: Partial<Record<keyof SyncFsPosixBridge, unknown>> = {
+  const over: Partial<SyncFsPosixBridge> = {
     stat: (p: string) => statOf(p, () => fs.stat(p)),
     lstat: (p: string) => statOf(p, () => fs.lstat(p), false),
     readlink: (p: string) =>
@@ -76,16 +78,27 @@ export function ptsBridge<T extends SyncFsPosixBridge>(
     readdirStat: (p: string) => {
       if (p === PTS) {
         const known = open();
-        return names(known).map((name) => listedEntry(name, known));
+        const listed: Array<[string, SyncFsBridgeStat | null]> = [];
+        for (const name of names(known)) listed.push(listedEntry(name, known));
+        return listed;
       }
-      if (SERIAL_AREA.test(p))
-        return devSync(kernel, devReaddir(p)).map((name) => serialEntry(`${p}/${name}`, name));
+      if (SERIAL_AREA.test(p)) {
+        const serial: Array<[string, SyncFsBridgeStat | null]> = [];
+        for (const name of devSync(kernel, devReaddir(p))) {
+          serial.push(serialEntry(`${p}/${name}`, name));
+        }
+        return serial;
+      }
       const listed = fs.readdirStat(p);
       if (p !== '/dev') return listed;
-      const all = listed.some(([name]) => name === 'pts') ? listed : [...listed, ['pts', dir()]];
+      const all: Array<[string, SyncFsBridgeStat | null]> = listed.some(([name]) => name === 'pts')
+        ? [...listed]
+        : [...listed, ['pts', dir()]];
       const have = all.map(([name]) => name);
-      const extra = serialNames().filter((n) => !have.includes(n));
-      return [...all, ...extra.map((name) => serialEntry(`/dev/${name}`, name))];
+      for (const name of serialNames()) {
+        if (!have.includes(name)) all.push(serialEntry(`/dev/${name}`, name));
+      }
+      return all;
     },
   };
   return new Proxy(fs, {

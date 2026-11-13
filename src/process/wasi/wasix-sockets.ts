@@ -158,7 +158,7 @@ export function datagramCalls(host: WasiHost) {
     },
     sendTo(fd: number, nonblock: boolean, iovs: number, n: number, addr: number, out: number) {
       const named = optionalAddr(mem.view(), addr);
-      const to = named && absolute(host.cwd, named);
+      const to = named && absolute(host.workingDir(), named);
       const body = mem.gather(iovs, n);
       const sent = call({ op: 'sock-sendto', fd, body, ...(to ? { addr: to } : {}), nonblock });
       mem.view().setUint32(out, sent as number, true);
@@ -208,7 +208,7 @@ export function wasixSocketImports(
     },
     sock_bind: (fd: number, addr: number) => {
       socket(fd);
-      call({ op: 'sock-bind', fd, addr: absolute(host.cwd, readAddr(mem.view(), addr)) });
+      call({ op: 'sock-bind', fd, addr: absolute(host.workingDir(), readAddr(mem.view(), addr)) });
     },
     sock_listen: (fd: number, backlog: number) => {
       socket(fd);
@@ -216,7 +216,7 @@ export function wasixSocketImports(
     },
     sock_connect: (fd: number, addr: number) => {
       const e = socket(fd);
-      const to = absolute(host.cwd, readAddr(mem.view(), addr));
+      const to = absolute(host.workingDir(), readAddr(mem.view(), addr));
       call({ op: 'sock-connect', fd, addr: to, nonblock: e.nonblock });
     },
     sock_accept_v2: (fd: number, flags: number, outFd: number, outAddr: number) => {

@@ -1,3 +1,4 @@
+import { headerNotified } from '../async/header-hook.ts';
 import { ChangeView } from '../fs/changes.ts';
 import { Created, type Dac } from '../fs/dac.ts';
 import { type PathGate, type Replacements, UNLINKED_DIR } from '../fs/unlinked.ts';
@@ -114,6 +115,7 @@ export interface SpawnWasmOptions {
   dac?: Dac;
   identity?: () => Promise<{ pid: number; ppid: number }>;
   onSyscall?: (req: WasmSyscall) => void;
+  durable?: (() => void | Promise<void>) | undefined;
 
   settling?: () => boolean;
   program: Program;
@@ -254,6 +256,7 @@ class Dying {
     this.hard = setTimeout(finish, KILL_HARD_MS);
     this.arm();
     Atomics.store(header, SAB_I_KILLED, code);
+    headerNotified(header, SAB_I_KILLED);
     process.die();
   }
 
@@ -341,11 +344,13 @@ function notifiers(header: Int32Array): { onPending(sig: number): void; onAsync(
     onPending(sig) {
       Atomics.or(header, SAB_I_SIGNALS, sigbit(sig));
       Atomics.notify(header, SAB_I_SIGNALS);
+      headerNotified(header, SAB_I_SIGNALS, sigbit(sig));
     },
     onAsync() {
       for (const at of [header, ...(asyncFanout.get(header) ?? [])]) {
         Atomics.add(at, SAB_I_ASYNC, 1);
         Atomics.notify(at, SAB_I_ASYNC);
+        headerNotified(at, SAB_I_ASYNC);
       }
     },
   };
@@ -355,6 +360,7 @@ function publishStops(process: WasmProcess, header: Int32Array): void {
   process.onState((state) => {
     Atomics.store(header, SAB_I_STOP, state === 'stopped' ? 1 : 0);
     Atomics.notify(header, SAB_I_STOP);
+    headerNotified(header, SAB_I_STOP);
   });
 }
 
@@ -516,6 +522,7 @@ function processOptions(
     ...(opts.dac ? { guard: { dac: opts.dac, fs: opts.fs, created, ...linksOf(opts) } } : {}),
     ...(opts.identity ? { identity: opts.identity } : {}),
     ...(opts.onSyscall ? { onSyscall: opts.onSyscall } : {}),
+    ...(opts.durable ? { durable: opts.durable } : {}),
     ...(opts.settling ? { settling: opts.settling } : {}),
     ...heldHooks(opts),
     spawner: opts.spawner,
@@ -544,7 +551,10 @@ function processOptions(
     onReap: opts.onReap,
     resolver: opts.resolver,
     ...notifiers(header),
-    onTimer: (which) => void Atomics.or(header, SAB_I_TIMERS, 1 << which),
+    onTimer: (which) => {
+      Atomics.or(header, SAB_I_TIMERS, 1 << which);
+      headerNotified(header, SAB_I_TIMERS, 1 << which);
+    },
     hasPending: () => unblocked(header) !== 0 || Atomics.load(header, SAB_I_TIMERS) !== 0,
     raise: hooks.raise,
     threadKill: hooks.threadKill,

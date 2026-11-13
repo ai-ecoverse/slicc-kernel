@@ -163,10 +163,10 @@ export class WasiFds {
       const nonblock = ((flags ?? 0) & O_NONBLOCK) !== 0;
       this.table.set(at, { ...kernelEntry(), nonblock, ...(kind ? { kind } : {}) });
     }
-    preopens.forEach((entry, i) => {
+    for (const [i, entry] of preopens.entries()) {
       this.kernel.call({ op: 'fd-reserve', fd: 3 + i, meta: metaOf(entry) as HeldMeta });
       this.table.set(3 + i, entry);
-    });
+    }
   }
 
   adoptCopy(fd: number): number {
@@ -671,6 +671,7 @@ export class WasiFds {
   synced(file: LocalFile): void {
     try {
       file.flush();
+      this.kernel.call({ op: 'fd-path-flush', path: file.buffer.path, durable: true });
       this.reported.delete(file.buffer);
     } catch (err) {
       this.reported.add(file.buffer);
@@ -1076,7 +1077,9 @@ export class WasiFds {
         },
         st
       );
-    const buffer = new FileBuffer(io, path, empty, st.maxFile, ranged, st.version, watch);
+    const buffer = new FileBuffer(io, path, empty, st.maxFile, ranged, st.version, watch).emptied(
+      empty
+    );
     buffer.moved = (missing) => this.followRenames(missing);
     buffer.bound = st;
     buffer.handle = handle;

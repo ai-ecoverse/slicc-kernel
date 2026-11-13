@@ -262,6 +262,101 @@ By default `nodeTransport()` refuses destinations on the host itself, because No
 - **The opt-in:** `nodeTransport({ hostLoopback: true })` allows the host's loopback except ports 9222–9229. `nodeTransport({ hostLoopback: [8080, 9222] })` allows exactly the listed ports, so DevTools ports are reachable only when named. Link-local stays refused either way.
 - **Connect-time enforcement:** the kernel also checks the address each connection actually reaches, before anything is sent, so a name whose DNS answer changes after the check is still refused. A keep-alive connection opened outside this kernel's policy (by the host application, or by another kernel in the same process whose `hostLoopback` allows it) to the same origin could be reused without a new check. When a proxy is in use (`HTTP_PROXY`/`HTTPS_PROXY` with `--use-env-proxy` or `NODE_USE_ENV_PROXY=1`), a connection opened to the proxy's own host and port is allowed even on the host's loopback, and so is any request later tunnelled over that same live TCP connection (matched by its local and remote address and port, and forgotten when it closes), so only the pre-check applies to the target; a direct connection, a `NO_PROXY` host's included, is checked as usual, and a proxy that resolves names itself closes the rebinding window on its side.
 
+### In a Cloudflare Durable Object
+
+`@ai-ecoverse/slicc-kernel/cloudflare` runs the kernel inside a Durable Object, with its processes in Dynamic Workers. It is experimental: the API can change, and the limits below are real.
+
+```js
+import { DurableObject } from 'cloudflare:workers';
+import { createCloudflareKernel } from '@ai-ecoverse/slicc-kernel/cloudflare';
+
+export class Kernel extends DurableObject {
+  now() {
+    return Date.now();
+  }
+
+  kernel() {
+    const { storage } = this.ctx;
+    this.booting ??= createCloudflareKernel({
+      loader: this.env.LOADER,
+      sql: storage.sql,
+      sqlite: { transaction: (fn) => storage.transactionSync(fn) },
+      clock: () => this.env.KERNEL.get(this.ctx.id).now(),
+    });
+    return this.booting;
+  }
+
+  async fetch() {
+    const kernel = await this.kernel();
+    return Response.json(await kernel.run(['bash', '-c', 'ls / | head -3'], { cwd: '/root' }));
+  }
+}
+```
+
+The Worker needs a Worker Loader binding (`worker_loaders`) and a SQLite-backed Durable Object class. Packages are installed as on Node, with `kernel.writeFile` under `/node_modules`; [`examples/cloudflare`](examples/cloudflare) bundles bash and coreutils with the Worker and installs them on first boot, and [`examples/cloudflare-computer`](examples/cloudflare-computer) adds a [Cloudflare Computer](https://github.com/cloudflare/computer) Workspace.
+
+`createCloudflareKernel(options)` returns a kernel with `run`, `openTerminal`, `writeFile`, `readFile`, `chmod`, `connect`, `users`, `groups`, `setRoutes`, `mount`, `umount`, `mounts` and `terminate`, as `createNodeKernel` does. Its own options:
+
+| option | default | |
+| --- | --- | --- |
+| `loader` | required | the Worker Loader binding |
+| `sql`, `sqlite` | none | the Durable Object's `ctx.storage.sql`, and `{ transaction, writeBehind }`: the root file system and its POSIX metadata live in tables prefixed `slicc_` |
+| `root`, `meta`, `ranged` | `memoryRoot()` | a root of your own in place of `sql` |
+| `clock` | none | called before every timed wait; pass a call into the Durable Object's own namespace, as above. Without it, `sleep` and timeouts can end early |
+| `isolates` | `{ max: 8, waitMs: 10000, memory: 64 MiB, perInstance: 8 MiB }` | how many Dynamic Workers run at once, how long a spawn waits for one, and the memory budget per Dynamic Worker |
+
+**How it works.** Workers has no `Worker`, refuses `Atomics.wait`, and does not share memory between isolates, so a process cannot block the way it does in a page. Here a process is a wasm instance in a Dynamic Worker, parked with JSPI (`WebAssembly.Suspending`) while its system call is answered by the Durable Object over Workers RPC.
+- **The kernel side is the same code as in the page.** A proxy in the Durable Object speaks the kernel's shared-memory protocol on behalf of each remote process (`src/async/remote-worker.ts`).
+- **The process side is derived at build time.** `tools/derive-async` turns the synchronous process runtime (`src/process/wasi`, `src/process/emscripten`) into an async one, `dist/async-process.js`: functions that can reach a kernel call become `async`, and wasm is entered through `WebAssembly.promising`. The build fails where it cannot (a kernel call in a constructor, a getter, or a callback passed to a synchronous built-in).
+- **Emscripten programs run without their glue.** Workers refuses `eval`, and Emscripten's JavaScript file system layer cannot be suspended by JSPI. So the kernel implements the Emscripten import ABI itself (`src/process/emscripten`). `createNodeKernel({ emscripten: 'kernel' })` selects the same on Node; the default there and in the page stays the package's glue.
+- **Programs are Worker modules.** Workers also refuses `WebAssembly.compile` at run time, so each program's wasm is handed to the Worker Loader, one Dynamic Worker per program, with many processes in it. A fork's memory snapshot stays inside that Dynamic Worker.
+
+`createNodeKernel({ blocking: 'async', emscripten: 'kernel' })` runs the same async runtime on Node, for tests.
+
+**Limits.**
+- **Not supported:** threads (`pthread_create` fails with `EAGAIN`), `dlopen` and anything else that compiles wasm at run time, JS programs (`"abi": "js"`), and packages with an `imports` module. Each fails with an errno or a message, never a hang.
+- **Memory:** a Dynamic Worker has 128 MB. A program whose wasm memory starts above that cannot run (`python.wasm` declares 160 MiB). Processes of one program share a Dynamic Worker up to the budget and then spill into another; at most 8 Dynamic Workers run at once, and a spawn beyond that waits, then fails with `EAGAIN`, which bash retries. A Dynamic Worker that outgrows its limit is ended by Cloudflare: its processes exit with status 70 and the kernel carries on.
+- **CPU and signals:** a process that computes for 30 s without a system call is ended by Cloudflare. Nothing can interrupt it sooner: a signal, `SIGKILL` included, is seen at the process's next system call.
+- **Clocks:** inside a Workers request the clock stands still while code computes. `time` and CPU accounting are wrong, and a timed wait that follows a long computation in the same process can end early by that computation's length.
+- **Durability:** the SQLite root writes behind. Every `run()`, `writeFile()`, `chmod()`, terminal exit and client reply, and every `fsync` or `fdatasync`, makes all earlier writes durable. A program that never syncs can lose, on an unclean stop of the Durable Object, what it wrote since the last of those points: at most the last second, or 50 ms after its last write if it then went quiet. What survives is always a consistent tree. `sync` without a file does nothing, because Emscripten's libc compiles it away. `sqlite: { writeBehind: false }` commits every change at once, at about 25 ms per change.
+- **Hard links** are refused on the root, as on every root.
+- **Speed:** a system call costs about 0.3 ms and starting a process about 50–90 ms.
+
+Measured on a deployed Worker, from a client about 40 ms away, next to local `wrangler dev`:
+
+| | `wrangler dev` | deployed |
+| --- | --- | --- |
+| cold boot (SQLite root; bash, coreutils and ripgrep installed) | 67 ms | 736 ms |
+| first `bash -c 'echo hi'` | 16 ms | 305 ms |
+| warm `echo hi` | 9 ms | 100 ms |
+| `echo a \| cat; x=$(uname); ls / \| head -3; for i in 1 2 3; do echo $i; done \| wc -l` | 100 ms | 865 ms |
+| 1,000 `echo` lines | 87 ms | 506 ms |
+| 20 × `$(echo x)` | 100 ms | 1,036 ms |
+| 16-stage `cat` pipeline | 243 ms | 3,677 ms |
+| 100 redirections into new files | 244 ms | 1,226 ms |
+| `rg -l` over 200 files | 203 ms | 1,255 ms |
+
+#### As a Cloudflare Computer backend
+
+`sliccBackend` makes the kernel a `WorkspaceBackend` of `@cloudflare/computer`: `workspace.runtime.exec(source, { backend: 'slicc' })` runs `bash -c` with GNU bash and the installed packages, on the Workspace's own files, mounted at `/workspace`.
+
+```js
+import { Workspace } from '@cloudflare/computer';
+import { createCloudflareKernel, sliccBackend } from '@ai-ecoverse/slicc-kernel/cloudflare';
+
+const workspace = new Workspace({
+  storage: ctx.storage,
+  sessionId: ctx.id.toString(),
+  backends: [sliccBackend({ kernel: () => kernel })],
+});
+const run = await workspace.runtime.exec('ls -la /workspace | wc -l', { backend: 'slicc' });
+```
+
+Output is streamed, `killExec` signals the whole process group, and a timeout sends `SIGTERM` and then `SIGKILL`. The kernel's own root (`/root`, `/etc`, `/tmp`, `/node_modules`) lives in the same SQLite database as the Workspace, in its own tables.
+- **What the Workspace store does not have:** owners (files show as uid 0 and `chown` fails), `utimes` (`touch -d` does nothing), hard links, and ranged writes (a write that seeks backwards rewrites the file).
+- **Write-behind:** a file is committed to the Workspace up to 1 s after it is closed, and always before the run's exit event. `workspace.fs` can see a file that late during a run, and an error in a deferred commit is not reported to the program that wrote the file. `sliccBackend({ writeBehind: false })` commits at close.
+- **Deletes are slow:** each removed file is one durable commit, about 30 ms on a deployed Worker.
+
 ## Commands
 
 Commands come from installed packages in npm's `node_modules` layout: every `<modules>/<name>/package.json` and `<modules>/@scope/<name>/package.json` with a `slicc.commands` block. An Emscripten program names its glue and module, for example bash's:
@@ -1499,6 +1594,7 @@ The kernel is ported from SLICC's `packages/webapp/src/kernel/` with the browser
 - `src/cdp/`: the CDP facade on `127.0.0.1:9222`, its WebSocket framing, the registry of hosts and the `MessagePort` bridge to them.
 - `src/sudo.ts`, `src/sudoers.ts`, `src/sudo-command.ts`: the kernel side of `sudo` and `visudo -c`, the policy parser (both line forms and their diagnostics), and the two commands.
 - `src/time-zone.ts`: the system time zone (`timeZone`, or the browser's) and UTC offsets of a zone, which cron's schedules and `TZ` both come from.
+- `src/async/`, `src/process/emscripten/`, `src/cloudflare.ts`, `src/cloudflare/` and `tools/derive-async/`: the kernel [in a Cloudflare Durable Object](#in-a-cloudflare-durable-object). `src/async/` is the link between the kernel and a process that shares no memory with it; `src/process/emscripten/` the kernel's own Emscripten imports; `src/cloudflare/` the Durable Object host, the SQLite root and the Cloudflare Computer backend; `tools/derive-async/` the build step that derives the async process runtime. Their tests are in `test/integration/cf/` and run in Node, with `node --test --test-concurrency=2 'test/integration/cf/*.test.mjs'`; those named `cloudflare-*` and `computer-cloudflare-*` start `wrangler dev`, and run against a deployed Worker when given its URL and key. `npm test` and CI run them with the rest. On a pull request, CI's `deploy` job runs `tools/cf-staging.mjs`, which deploys `examples/cloudflare-computer` as the Worker `slicc-kernel-do-pr-<number>` with a fresh random key, and hands its address to the test shards and the reviewers as `STAGING_URL` (`https://…workers.dev/?key=…`); `computer-cloudflare-staging.test.mjs` then runs the Computer example's tests against it. That address, key included, shows in the run's log and on the pull request, so the Worker stops answering 24 hours after its deploy, and its programs have no network. The job needs the secret `SLICC_KERNEL_CLOUDFLARE_API_TOKEN` (a Cloudflare API token that may edit Workers scripts; `SLICC_KERNEL_CLOUDFLARE_ACCOUNT_ID` too when the token sees several accounts). Without it, on a fork, in the merge queue, or when the deploy fails, there is no staging Worker and that test file skips. Each deploy deletes the staging Workers of other pull requests that no deploy has touched for a week.
 - `src/cron/`: the cron service (`service.ts`), the schedule and table parsers, the clock, and the `crontab` command with the kernel side of `ctx.crontab`. An embedder that uses `Launcher` directly passes `cron: { lock }` to share the firing lock among the kernels on one root; the default, `slicc-kernel-cron`, is one lock for the whole origin.
 
 

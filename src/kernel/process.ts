@@ -170,7 +170,7 @@ export type WasmSyscall =
   | { op: 'fd-chmod'; fd: number; mode: number }
   | { op: 'fd-chown'; fd: number; uid?: number; gid?: number }
   | { op: 'fd-utimes'; fd: number; atimeMs: number | null; mtimeMs: number | null; now?: boolean }
-  | { op: 'fd-path-flush'; path: string }
+  | { op: 'fd-path-flush'; path: string; durable?: true }
   | { op: 'fd-path-unlinking'; path: string }
   | { op: 'fd-path-unlinked'; path: string }
   | { op: 'fd-path-renamed'; from: string; to: string }
@@ -597,6 +597,8 @@ export interface WasmProcessOptions {
   identity?: () => Promise<{ pid: number; ppid: number }>;
 
   onSyscall?: (req: WasmSyscall) => void;
+
+  durable?: () => void | Promise<void>;
 
   spawner?: ChildSpawner;
 
@@ -1906,6 +1908,7 @@ export class WasmProcess {
       case 'fd-flush': {
         const file = this.fds.get(req.fd).file;
         if (file.flush) await file.flush();
+        await this.options.durable?.();
         return { ok: true, kind: 'void' };
       }
     }
@@ -1916,6 +1919,7 @@ export class WasmProcess {
       const nodes = this.nodes;
       if (req.op === 'fd-path-flush') {
         await nodes.flush(await nodes.targetKey(req.path).catch(() => req.path));
+        if (req.durable) await this.options.durable?.();
       } else if (req.op === 'fd-path-unlinking')
         await nodes.unlinking(await nodes.entryKey(req.path));
       else if (req.op === 'fd-path-unlinked') nodes.unlinked(await nodes.entryKey(req.path));

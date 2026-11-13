@@ -1,3 +1,4 @@
+import { headerNotified } from '../async/header-hook.ts';
 import type { WasmSyscall } from '../kernel/process.ts';
 import {
   SYNC_FS_REQUEST_TIMEOUT_MS,
@@ -84,6 +85,7 @@ export function attachSyncSabResponder(
     Atomics.store(header, SAB_I_STATE, SAB_STATE_READY);
     Atomics.add(header, SAB_I_PUB, 1);
     Atomics.notify(header, SAB_I_PUB);
+    headerNotified(header, SAB_I_PUB);
 
     if (offset + chunk >= entry.payload.byteLength) drop(id);
     else if (entry.timer) {

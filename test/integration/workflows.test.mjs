@@ -41,13 +41,7 @@ test('CI runs on pull requests, merge groups and pushes to main, and cancels a s
 });
 
 test('the pipeline picks its runners and reviews no Renovate pull request, and nothing runs after a release', () => {
-  for (const name of [
-    'runs-on',
-    'after-release',
-    'review-renovate',
-    'release-environment',
-    'deploy',
-  ]) {
+  for (const name of ['runs-on', 'after-release', 'review-renovate', 'release-environment']) {
     assert.equal(input(name), undefined, name);
   }
   assert.doesNotMatch(ci, /vars\./);
@@ -56,9 +50,17 @@ test('the pipeline picks its runners and reviews no Renovate pull request, and n
   assert.match(input('review-prompt'), /^\|$/);
 });
 
+test('a pull request deploys the staging Worker with a token of its own', () => {
+  assert.equal(input('deploy'), 'node tools/cf-staging.mjs >> "$GITHUB_STEP_SUMMARY"');
+  assert.equal(
+    input('deploy-secrets'),
+    'SLICC_KERNEL_CLOUDFLARE_API_TOKEN SLICC_KERNEL_CLOUDFLARE_ACCOUNT_ID'
+  );
+});
+
 test('the shards split exactly the files npm test runs, on the Node the package asks for', () => {
   assert.equal(input('test'), undefined);
-  assert.equal(input('test-glob'), 'test/integration/*.test.mjs');
+  assert.equal(input('test-glob'), 'test/integration/{,cf/}*.test.mjs');
   assert.ok(pkg.scripts.test.endsWith(` '${input('test-glob')}'`), pkg.scripts.test);
   assert.doesNotMatch(pkg.scripts.test, /NODE_OPTIONS/);
   assert.equal(input('node-version'), `'${pkg.engines.node.replace(/^>=/, '')}'`);

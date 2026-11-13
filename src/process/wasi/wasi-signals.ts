@@ -2,6 +2,7 @@ import { defaultAction, SIG, sigbit } from '../../kernel/signals.ts';
 import type { SignalHooks, SignalMasks } from '../process-signals.ts';
 import { E } from './wasi-abi.ts';
 import { WasiExit } from './wasi-host.ts';
+import { reentered } from './wasm-reentry.ts';
 
 const DELIVERED_MASK = Object.values(SIG)
   .filter((sig) => sig !== SIG.KILL && sig !== SIG.STOP)
@@ -207,6 +208,6 @@ export class WasiSignals implements SignalHooks {
 
   private handler(): ((sig: number) => void) | undefined {
     const fn = this.callback ? this.exports?.[this.callback] : undefined;
-    return typeof fn === 'function' ? (fn as (sig: number) => void) : undefined;
+    return typeof fn === 'function' ? reentered(fn as (sig: number) => void) : undefined;
   }
 }

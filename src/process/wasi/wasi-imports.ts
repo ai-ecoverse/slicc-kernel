@@ -261,10 +261,11 @@ export function importsContext({
     tid,
     argv: host.o.args,
     env: host.o.env,
-    cwd: () => host.cwd,
+    cwd: () => host.workingDir(),
     fs: Object.assign(Object.create(fs) as SyncFsPosixBridge, {
       copyFile(from: string, to: string, options: { mode?: number; excl?: boolean } = {}) {
-        const at = (p: string) => host.fds.resolve(3, p.startsWith('/') ? p : `${host.cwd}/${p}`);
+        const at = (p: string) =>
+          host.fds.resolve(3, p.startsWith('/') ? p : `${host.workingDir()}/${p}`);
         host.copyFile(at(from), at(to), options.mode ?? 0o666, options.excl === true);
       },
     }),
@@ -364,13 +365,15 @@ function processes(
       const theirs: number[] = [];
       host.fds.promoteFiles();
       try {
-        const stdio = STDIO.map((name, n) => slot(n, o[name] ?? 'inherit', mine, theirs));
+        const stdio: ReturnType<typeof slot>[] = [];
+        for (const [n, name] of STDIO.entries())
+          stdio.push(slot(n, o[name] ?? 'inherit', mine, theirs));
         const req = {
           op: 'proc-spawn' as const,
           file: o.argv[0],
           argv: o.argv,
           env: o.env ?? { ...host.o.env },
-          cwd: o.cwd ?? host.cwd,
+          cwd: o.cwd ?? host.workingDir(),
           ...(o.cwd !== undefined ? { chdir: true as const } : {}),
           stdio,
           ...(inThread ? {} : { restart: true as const }),
