@@ -697,3 +697,19 @@ test(
     assert.equal((await kernel.run(['st'], { cwd: '/tmp' })).stdout, '600 1000 0 2001\n');
   }
 );
+
+test('touch -m and touch -a of a node keep the omitted time (#1821)', TIMEOUT, async (t) => {
+  const { bash, kernel } = await booted(t);
+  await kernel.devices.add({ path: 'ttyUSB0', group: 'dialout', mode: 0o640 });
+  const r = await bash(
+    [
+      'touch -d @981173106 /dev/ttyUSB0 /tmp/f',
+      'touch -m -d @1104537600 /dev/ttyUSB0 /tmp/f',
+      'stat -c "%X %Y" /dev/ttyUSB0 /tmp/f',
+      'touch -a -d @1136073600 /dev/ttyUSB0',
+      'stat -c "%X %Y" /dev/ttyUSB0',
+    ].join(' && ')
+  );
+  assert.equal(r.stderr, '');
+  assert.equal(r.stdout, '981173106 1104537600\n981173106 1104537600\n1136073600 1104537600\n');
+});
