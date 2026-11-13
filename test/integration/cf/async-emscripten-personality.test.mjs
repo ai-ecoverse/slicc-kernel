@@ -37,10 +37,33 @@ let serial = 0;
 async function same(kernels, script) {
   const dir = `/tmp/case${++serial}`;
   const argv = ['bash', '-c', `mkdir -p ${dir} && cd ${dir} && { ${script}\n}`];
-  const oracle = shown(await kernels.oracle.run(argv, { cwd: '/root' }));
-  const own = shown(await kernels.own.run(argv, { cwd: '/root' }));
-  assert.deepEqual(own, oracle, script);
+  const oracle = await kernels.oracle.run(argv, { cwd: '/root' });
+  const own = await kernels.own.run(argv, { cwd: '/root' });
+  assert.equal(own.status, oracle.status, script);
+  assert.equal(own.stdout, oracle.stdout, script);
+  assert.equal(shown(own).stderr, shown(oracle).stderr, script);
 }
+
+test('bash diagnostic process IDs in stderr are masked before kernels are compared', () => {
+  const a = shown({
+    status: 137,
+    stdout: 'status 0\n',
+    stderr: 'bash: line 1: 1088 Killed                 sleep 5\n',
+  });
+  const b = shown({
+    status: 137,
+    stdout: 'status 0\n',
+    stderr: 'bash: line 1: 1087 Killed                 sleep 5\n',
+  });
+  assert.equal(a.status, b.status);
+  assert.equal(a.stdout, b.stdout);
+  assert.equal(a.stderr, b.stderr);
+  assert.match(a.stderr, /: line 1: PID Killed/);
+  assert.notEqual(
+    'bash: line 1: 1088 Killed                 sleep 5\n',
+    'bash: line 1: 1087 Killed                 sleep 5\n'
+  );
+});
 
 test('bash and coreutils on the async host with the kernel personality match the glue on the sync kernel', {
   skip,
