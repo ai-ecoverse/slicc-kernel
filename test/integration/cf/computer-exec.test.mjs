@@ -134,6 +134,30 @@ describe('the slicc backend in the Workspace runtime', () => {
     assert.ok(performance.now() - start < 20_000);
   });
 
+  it('forgets a finished run once its retention has passed, at the next call and with no timer', async () => {
+    const RETENTION_MS = 987;
+    const asked = [];
+    const { setTimeout: real } = globalThis;
+    globalThis.setTimeout = (run, ms, ...rest) => {
+      asked.push(ms);
+      return real(run, ms, ...rest);
+    };
+    const short = await computerWith({ backend: { retentionMs: RETENTION_MS } });
+    try {
+      const options = { backend: 'slicc', encoding: 'utf8' };
+      const first = await short.workspace.runtime.exec('echo kept', { ...options, id: 'old' });
+      assert.equal((await first.result()).stdout, 'kept\n');
+      const again = await short.workspace.runtime.getExec('old', options);
+      assert.equal((await again.result()).stdout, 'kept\n');
+      await new Promise((resolve) => real(resolve, RETENTION_MS + 200));
+      await assert.rejects(short.workspace.runtime.getExec('old', options));
+      assert.ok(!asked.includes(RETENTION_MS), 'no retention timer');
+    } finally {
+      globalThis.setTimeout = real;
+      await short.close();
+    }
+  });
+
   it('re-attaches with getExec while the run is known', async () => {
     const first = await ws.runtime.exec('echo a; sleep 0.5; echo b', {
       backend: 'slicc',

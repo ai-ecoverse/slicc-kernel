@@ -140,6 +140,7 @@ class Run {
   private waiters = new Set<() => void>();
   private readers = new Set<{ cursor: number }>();
   exited = false;
+  exitedAt: number | undefined;
   process: SpawnedProcess | undefined;
   timers: ReturnType<typeof setTimeout>[] = [];
   private readonly logBytes: number;
@@ -174,6 +175,7 @@ class Run {
   exit(code: number): void {
     if (this.exited) return;
     this.exited = true;
+    this.exitedAt = Date.now();
     for (const timer of this.timers.splice(0)) clearTimeout(timer);
     this.add({ id: this.id, seq: ++this.seq, name: 'exit', code });
   }
@@ -263,8 +265,11 @@ function shellFor(
     await run.process.signal(name).catch(() => undefined);
   };
 
-  const forget = (run: Run) => {
-    if (runs.get(run.id) === run) runs.delete(run.id);
+  const forgetOld = () => {
+    const now = Date.now();
+    for (const [id, run] of runs) {
+      if (run.exitedAt !== undefined && now - run.exitedAt >= retention) runs.delete(id);
+    }
   };
 
   async function start(run: Run, input: ShellExecInput): Promise<void> {
@@ -284,7 +289,6 @@ function shellFor(
       const code = (err as { code?: unknown }).code;
       run.output('stderr', encoder.encode(`${err instanceof Error ? err.message : String(err)}\n`));
       run.exit(code === 'ENOENT' ? 127 : 126);
-      unref(setTimeout(() => forget(run), retention));
       return;
     }
     const timeoutMs = input.timeoutMs ?? options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -302,7 +306,6 @@ function shellFor(
       async ({ status, signal: by }) => {
         await landed(driver);
         run.exit(exitCodeOf(status, by));
-        unref(setTimeout(() => forget(run), retention));
       },
       async (err: unknown) => {
         run.output(
@@ -310,13 +313,13 @@ function shellFor(
           encoder.encode(`${err instanceof Error ? err.message : String(err)}\n`)
         );
         run.exit(-1);
-        unref(setTimeout(() => forget(run), retention));
       }
     );
   }
 
   return {
     async exec(input) {
+      forgetOld();
       const id = input.id ?? crypto.randomUUID();
       const previous = runs.get(id);
       if (previous && !previous.exited) throw coded('EEXEC_BUSY', `exec ${id} is still running`);
@@ -327,6 +330,7 @@ function shellFor(
       return { id, events };
     },
     async getExec({ id, after }) {
+      forgetOld();
       return { id, events: known(id).stream(after ?? 0) };
     },
     async killExec({ id, signal: name }) {

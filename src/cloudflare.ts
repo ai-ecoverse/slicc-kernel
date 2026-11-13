@@ -243,7 +243,7 @@ export async function createCloudflareKernel(
     ...(options.requests ? { embedder: checkedRequests(options.requests) } : {}),
     ...(options.approve ? { approve: options.approve } : {}),
     ...(options.wasmMemories ? { wasmMemories: options.wasmMemories } : {}),
-    ...(options.cron?.clock ? { cron: { clock: options.cron.clock } } : {}),
+    cron: { poll: false, ...options.cron },
   });
   await launcher.prepare();
   const guard = <T>(work: () => Promise<T>): Promise<T> =>

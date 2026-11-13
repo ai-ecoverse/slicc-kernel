@@ -313,6 +313,7 @@ export function blobModuleUrl(source: string): ModuleUrl {
 export interface CronOptions {
   clock?: CronClock;
   lock?: string;
+  poll?: boolean;
 }
 
 export interface PendingMedium {
@@ -1167,6 +1168,7 @@ export class Launcher {
       bootId: this.bootId,
       timeZone: this.timeZone,
       ...(options.clock ? { clock: options.clock } : {}),
+      ...(options.poll === false ? { poll: false } : {}),
       locks: cronLocks(),
       ready: () => this.fstab,
       lookup: (name) => this.users.lookup(name),

@@ -327,3 +327,29 @@ test('a user cannot point their job log at a root file, and the service refuses 
   );
   assert.equal(await read('/etc/passwd'), passwd);
 });
+
+test('with poll off the service sleeps only while a job is coming, and a table written later wakes it', async (t) => {
+  const clock = fakeCronClock(START);
+  const kernel = await createNodeKernel({ users: 'enforce', cron: { clock, poll: false } });
+  t.after(() => kernel.terminate());
+  await install(kernel, 'wasm-bash');
+  await install(kernel, 'wasm-coreutils');
+  const sleepers = async (count) => {
+    for (let i = 0; i < 200 && clock.sleepers !== count; i++) await delay(25);
+    return clock.sleepers;
+  };
+  await delay(300);
+  assert.equal(clock.sleepers, 0);
+  await kernel.users.add({ name: 'cone' });
+  await kernel.writeFile(`${SPOOL}/cone`, '* * * * * echo ran >> ran\n');
+  assert.equal(await sleepers(1), 1);
+  clock.advance(60_000);
+  let ran;
+  for (let i = 0; i < 400 && ran !== 'ran\n'; i++) {
+    ran = await kernel.readFile('/home/cone/ran').then(text, () => undefined);
+    if (ran !== 'ran\n') await delay(50);
+  }
+  assert.equal(ran, 'ran\n');
+  await kernel.writeFile(`${SPOOL}/cone`, '');
+  assert.equal(await sleepers(0), 0);
+});
