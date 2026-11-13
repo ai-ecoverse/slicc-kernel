@@ -1,3 +1,4 @@
+import './timers.js';
 import { DurableObject } from 'cloudflare:workers';
 import {
   cloudflareProcesses,

@@ -213,7 +213,7 @@ export interface NodeKernelOptions {
   devices?: DeviceHook;
   approve?: ApproveHook;
   protect?: Protection;
-  cron?: { clock?: CronClock };
+  cron?: { clock?: CronClock; poll?: boolean };
   sudo?: { clock?: { now(): number } };
   compileCache?: string | false;
   warmWorker?: boolean;
@@ -798,7 +798,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     ...pageHooks(options),
     ...(options.sudo?.clock ? { sudoClock: options.sudo.clock } : {}),
     ...tuningOf(options),
-    cron: { lock: cronLock(root), ...(options.cron?.clock ? { clock: options.cron.clock } : {}) },
+    cron: { lock: cronLock(root), ...options.cron },
   });
   await launcher.prepare();
   const guard = <T>(work: () => Promise<T>): Promise<T> =>

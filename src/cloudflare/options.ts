@@ -48,7 +48,7 @@ export interface CloudflareKernelOptions {
   requests?: EmbedderHook;
   approve?: ApproveHook;
   protect?: Protection;
-  cron?: { clock?: CronClock };
+  cron?: { clock?: CronClock; poll?: boolean };
   wasmMemories?: { ceiling?: number; idleMs?: number };
 }
 

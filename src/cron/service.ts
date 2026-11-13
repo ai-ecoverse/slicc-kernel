@@ -15,6 +15,14 @@ export const ERR_LOG = `${LOG_DIR}/cron.err`;
 export const LOG_CAP = 256 * 1024;
 export const JOBS_PER_USER = 16;
 export const WAKE_MS = 60_000;
+const LONGEST_SLEEP_MS = 2 ** 31 - 1;
+
+function aborted(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    signal.addEventListener('abort', () => resolve(), { once: true });
+  });
+}
 export const BACK_JUMP_MS = 120_000;
 export const DEFAULT_SHELL = '/bin/bash';
 
@@ -43,6 +51,7 @@ export interface CronHost {
   bootId: string;
   timeZone: string;
   clock?: CronClock;
+  poll?: boolean;
   locks?: CronLocks | undefined;
   ready?: () => Promise<unknown>;
   lookup(name: string): Promise<Account | undefined>;
@@ -187,7 +196,11 @@ export class CronService {
       until = this.clock.now() + WAKE_MS;
     }
     if (this.stopping.signal.aborted) return;
-    await this.clock.sleep(until, wake.signal);
+    if (until === Number.POSITIVE_INFINITY) await aborted(wake.signal);
+    else {
+      const longest = this.clock.now() + LONGEST_SLEEP_MS;
+      await this.clock.sleep(Math.min(until, longest), wake.signal);
+    }
   }
 
   async provision(): Promise<void> {
@@ -203,6 +216,10 @@ export class CronService {
     }
   }
 
+  private latestWake(now: number): number {
+    return this.host.poll === false ? Number.POSITIVE_INFINITY : now + WAKE_MS;
+  }
+
   private async tick(): Promise<number> {
     const { fs } = this.host;
     const loaded = await this.load();
@@ -211,7 +228,7 @@ export class CronService {
     const system = this.host.timeZone;
     const due: Due[] = [];
     const keys = new Set<string>();
-    let next = now + WAKE_MS;
+    let next = this.latestWake(now);
     for (const entry of loaded) {
       const key = keyOf(entry);
       keys.add(key);

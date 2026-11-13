@@ -1,4 +1,5 @@
 import { attachKernel, createCloudflareKernel } from '../../../../dist/cloudflare.js';
+import { pendingTimers } from './timers.js';
 
 function leb(n) {
   const out = [];
@@ -182,6 +183,8 @@ export class KernelRoutes {
       }
       case '/kernel/clock-reads':
         return json({ reads: this.clockReads.splice(0) });
+      case '/kernel/timers':
+        return json({ pending: pendingTimers() });
       case '/kernel/stats':
         return json(this.stats());
       case '/kernel/terminate':
