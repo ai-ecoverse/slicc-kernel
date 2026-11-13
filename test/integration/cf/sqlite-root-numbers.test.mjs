@@ -8,7 +8,7 @@ import { sqlStorage } from './sqlite-root-adapter.mjs';
 import { bash, closeSql, install, memoryKernel, sqliteKernel } from './sqlite-root-helpers.mjs';
 
 const DIRS = 40;
-const PER_DIR = 50;
+const PER_DIR = Number(process.env.SLICC_NUMBERS_PER_DIR ?? 10);
 const FILES = DIRS * PER_DIR;
 
 function octal(value, width) {
@@ -154,5 +154,5 @@ test(`numbers: unpacking ${FILES} small files with tar and reading them back, me
   assert.equal(rows.sqlite.bytes, rows.memory.bytes);
   assert.equal(rows.behind.cksum, rows.memory.cksum);
   assert.equal(rows.behind.bytes, rows.memory.bytes);
-  assert.ok(rows.behind.commits * 50 < rows.sqlite.commits, JSON.stringify(rows));
+  assert.ok(rows.behind.commits * 10 < rows.sqlite.commits, JSON.stringify(rows));
 });

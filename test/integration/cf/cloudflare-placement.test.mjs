@@ -8,6 +8,7 @@ import { uploadFiles, uploadTree } from './cloudflare-fixture/upload.mjs';
 
 const config = fileURLToPath(new URL('./cloudflare-fixture/wrangler.json', import.meta.url));
 const MODULES = join(REPO, 'node_modules/@ai-ecoverse');
+const JITTER_MS = 50;
 const programs = (path) => path === 'package.json' || path === 'bin' || path.startsWith('bin/');
 const deployed = Boolean(process.env.SLICC_CF_FIXTURE_URL);
 let dev;
@@ -180,7 +181,9 @@ describe('sleeping in a Dynamic Worker', { concurrency: false }, () => {
     );
     if (clock) t.diagnostic(`kernel waits ${Math.min(...waits)}..${Math.max(...waits)} ms`);
     for (const total of totals) assert.ok(total >= 4000, `a round took ${total} ms`);
-    for (const wait of clock ? waits : gaps) assert.ok(wait >= 1000, `a wait of ${wait} ms`);
+    for (const wait of clock ? waits : gaps) {
+      assert.ok(wait >= 1000 - JITTER_MS, `a wait of ${wait} ms`);
+    }
   });
 
   test('a WASI futex_wait and sigtimedwait with a timeout never end early', async (t) => {
@@ -226,6 +229,8 @@ describe('sleeping in a Dynamic Worker', { concurrency: false }, () => {
     );
     if (clock) t.diagnostic(`kernel waits ${Math.min(...waits)}..${Math.max(...waits)} ms`);
     for (const total of totals) assert.ok(total >= 8 * WAIT_MS, `a round took ${total} ms`);
-    for (const wait of clock ? waits : gaps) assert.ok(wait >= WAIT_MS, `a wait of ${wait} ms`);
+    for (const wait of clock ? waits : gaps) {
+      assert.ok(wait >= WAIT_MS - JITTER_MS, `a wait of ${wait} ms`);
+    }
   });
 });

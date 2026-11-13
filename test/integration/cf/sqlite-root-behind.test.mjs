@@ -43,7 +43,7 @@ test('the 100-file script commits far less often with write-behind', async (t) =
   const counts = {};
   for (const [mode, sqlite] of [
     ['through', {}],
-    ['behind', { writeBehind: true }],
+    ['behind', { writeBehind: { idleMs: 60_000, maxMs: 60_000 } }],
   ]) {
     const sql = sqlStorage();
     const kernel = await sqliteKernel(sql, {}, sqlite);
@@ -75,7 +75,7 @@ test('write-behind: reads see writes at once, the database only after the idle t
   const path = await scratch(t);
   const sql = sqlStorage(path);
   t.after(() => closeSql(sql));
-  const root = sqliteRoot(sql, { writeBehind: { idleMs: 30, maxMs: 1000 } });
+  const root = sqliteRoot(sql, { writeBehind: { idleMs: 1500, maxMs: 60_000 } });
   const meta = sqliteMeta(sql);
   const seen = watcher(t, path);
   const nodes = seen.nodes();
@@ -93,7 +93,7 @@ test('write-behind: reads see writes at once, the database only after the idle t
   assert.deepEqual(names, ['a']);
   assert.equal(seen.nodes(), nodes);
   assert.equal(seen.meta(), 0);
-  await sleep(120);
+  for (let waited = 0; waited < 15_000 && seen.meta() === 0; waited += 50) await sleep(50);
   assert.equal(seen.nodes(), nodes + 2);
   assert.equal(seen.meta(), 1);
   assert.equal(await (await file.getFile()).text(), 'hello');
@@ -103,16 +103,18 @@ test('write-behind: continuous writes flush at maxMs, a large overlay flushes at
   const sql = sqlStorage(await scratch(t));
   t.after(() => closeSql(sql));
   const root = sqliteRoot(sql, {
-    writeBehind: { idleMs: 40, maxMs: 120, maxBytes: 1024 * 1024 },
+    writeBehind: { idleMs: 60_000, maxMs: 120, maxBytes: 1024 * 1024 },
   });
   const before = commits(sql);
+  const started = performance.now();
   for (let i = 0; i < 60; i++) {
     await writeText(root, `f${i}`, `file ${i}`);
     await sleep(5);
   }
+  const lasted = performance.now() - started;
   const timed = commits(sql) - before;
-  assert.ok(timed >= 2, `continuous writes for 300 ms flushed ${timed} times`);
-  assert.ok(timed <= 6, `continuous writes for 300 ms flushed ${timed} times`);
+  assert.ok(timed >= 2, `continuous writes for ${lasted} ms flushed ${timed} times`);
+  assert.ok(timed <= lasted / 120 + 1, `continuous writes for ${lasted} ms flushed ${timed} times`);
   const quiet = sqliteRoot(sql, {
     writeBehind: { idleMs: 60000, maxMs: 60000, maxBytes: 1024 * 1024 },
   });

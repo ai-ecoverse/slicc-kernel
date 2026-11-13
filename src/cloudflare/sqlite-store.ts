@@ -136,7 +136,7 @@ export class SqlStore {
       this.flush();
       return;
     }
-    this.schedule(behind.idleMs);
+    this.schedule(Math.min(behind.idleMs, behind.maxMs));
   }
 
   private schedule(ms: number): void {

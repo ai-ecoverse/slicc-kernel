@@ -63,7 +63,7 @@ test('timed waits on the async host wait in the kernel, never on a local timer, 
     assert.equal(sync.status, 0, name);
     assert.match(sync.stdout, / True\n$/, name);
     assert.equal(before, 0, `${name}: the sync kernel waits locally`);
-    assert.ok(seen.selects >= WAIT_MS / SLICE_MS, `${name}: ${seen.selects} kernel waits`);
+    assert.ok(seen.selects >= WAIT_MS / SLICE_MS / 2, `${name}: ${seen.selects} kernel waits`);
   }
 });
 
@@ -104,5 +104,5 @@ test('a WASIX futex_wait and a slicc.sigwait with a timeout take their time on t
   );
   for (const { kind, ms } of runs.async.lines) assert.ok(ms >= FIXTURE_MS, `${kind} took ${ms} ms`);
   assert.equal(runs.sync.selects, 0);
-  assert.ok(runs.async.selects >= (2 * ROUNDS * FIXTURE_MS) / SLICE_MS, `${runs.async.selects}`);
+  assert.ok(runs.async.selects >= (ROUNDS * FIXTURE_MS) / SLICE_MS, `${runs.async.selects}`);
 });

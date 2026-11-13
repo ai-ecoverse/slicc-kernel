@@ -55,7 +55,7 @@ export function shown(result) {
     status: result.status,
     ...(result.signal !== undefined ? { signal: result.signal } : {}),
     stdout: result.stdout,
-    stderr: result.stderr,
+    stderr: result.stderr.replace(/(: line \d+: +)\d+ /g, '$1PID '),
   };
 }
 

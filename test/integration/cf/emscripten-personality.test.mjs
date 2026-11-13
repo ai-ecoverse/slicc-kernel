@@ -12,6 +12,7 @@ import {
   REFUSAL_PACKAGES,
   REFUSALS,
   refusalOptions,
+  steady,
   TERMINAL_STEPS,
   TIER1,
   TIER2,
@@ -49,7 +50,7 @@ async function pair(t, packages, options = {}) {
   return { glue, own };
 }
 
-const shown = (r) => ({ status: r.status, stdout: r.stdout, stderr: r.stderr });
+const shown = (r) => ({ status: r.status, stdout: r.stdout, stderr: steady(r.stderr) });
 
 let serial = 0;
 

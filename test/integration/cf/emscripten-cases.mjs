@@ -50,7 +50,7 @@ export const TIER2 = [
   'diff <(echo a) <(echo a) && echo same; cat < <(echo procsub); echo $(cat <(echo inner))',
   'yes | head -1; echo ${PIPESTATUS[@]}; seq 100000 | head -1; echo ${PIPESTATUS[@]}; (trap "" PIPE; yes | head -1)',
   'sleep 0.2 & pid=$!; echo started; wait $pid; echo "waited $?"; (exit 5) & wait $!; echo $?',
-  'sleep 0.1 & sleep 0.2 & jobs | wc -l; wait; echo all; sleep 3 & kill %1; wait; echo k=$?',
+  'sleep 2 & sleep 3 & jobs | wc -l; wait; echo all; sleep 5 & kill %1; wait; echo k=$?',
   'for i in 1 2 3; do (echo $i > o$i) & done; wait; cat o1 o2 o3',
   'sleep 5 & p=$!; kill $p; wait $p; echo "status $?"; sleep 3 & p=$!; kill -STOP $p; kill -CONT $p; kill -9 $p; wait $p; echo $?',
   'trap "echo got USR1" USR1; kill -USR1 $$; echo after; trap "echo bye" EXIT; echo end',
@@ -181,3 +181,5 @@ export const REFUSALS = [
 ];
 
 export const refusalOptions = (ceiling) => ({ wasmMemories: { ceiling, idleMs: 50 } });
+
+export const steady = (stderr) => stderr.replace(/(: line \d+: +)\d+ /g, '$1PID ');
