@@ -44,7 +44,7 @@ interface DeviceMetaFs {
   getPath?: (node: object) => string;
   chmod?: (path: string | object, mode: number, dontFollow?: boolean) => void;
   chown?: (path: string | object, uid: number, gid: number, dontFollow?: boolean) => void;
-  utime?: (path: string | object, atime: number, mtime: number) => void;
+  utime?: (path: string | object, atime: number | null, mtime: number | null) => void;
   sliccTouch?: boolean;
 }
 
@@ -723,6 +723,8 @@ export class KernelStreams {
     };
     const set = (path: string, change: DeviceMetaChange): void =>
       this.call(() => devMeta(path, change));
+    const timeOf = (value: number | null | undefined): number | null =>
+      typeof value === 'number' && Number.isFinite(value) ? value : null;
     const { chmod, chown, utime } = fs;
     if (chmod)
       fs.chmod = (path, mode, dontFollow) => {
@@ -741,8 +743,8 @@ export class KernelStreams {
         const device = deviceOf(path, true);
         if (device === undefined) return utime.call(fs, path, atime, mtime);
         set(device, {
-          atimeMs: Number(atime),
-          mtimeMs: Number(mtime),
+          atimeMs: timeOf(atime),
+          mtimeMs: timeOf(mtime),
           now: fs.sliccTouch === true,
         });
       };
