@@ -293,7 +293,7 @@ export class Kernel extends DurableObject {
 }
 ```
 
-The Worker needs a Worker Loader binding (`worker_loaders`) and a SQLite-backed Durable Object class. Packages are installed as on Node, with `kernel.writeFile` under `/node_modules`; [`examples/cloudflare`](examples/cloudflare) bundles bash and coreutils with the Worker and installs them on first boot, and [`examples/cloudflare-computer`](examples/cloudflare-computer) adds a [Cloudflare Computer](https://github.com/cloudflare/computer) Workspace.
+The Worker needs a Worker Loader binding (`worker_loaders`) and a SQLite-backed Durable Object class. Packages are installed as on Node, with `kernel.writeFile` under `/node_modules`; [`examples/cloudflare`](examples/cloudflare) bundles bash and coreutils with the Worker and installs them on first boot, and [`examples/cloudflare-computer`](examples/cloudflare-computer) adds a [Cloudflare Computer](https://github.com/cloudflare/computer) Workspace, and curl and jq with [the network](#the-network-in-a-durable-object).
 
 `createCloudflareKernel(options)` returns a kernel with `run`, `openTerminal`, `writeFile`, `readFile`, `chmod`, `connect`, `users`, `groups`, `setRoutes`, `mount`, `umount`, `mounts` and `terminate`, as `createNodeKernel` does. Its own options:
 

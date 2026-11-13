@@ -159,6 +159,19 @@ describe('the Computer example Worker', { concurrency: false }, () => {
     assert.equal((await read('/workspace/fruit/top.txt')).text, '4 APPLE\n2 FIG\n');
   });
 
+  test('curl reaches https through the Worker, and jq, linked with pthreads, reads the answer', async (t) => {
+    if (skipped(t)) return;
+    const result = await exec(
+      'curl -sS -o echo.txt -w "%{http_code} %{ssl_verify_result} %{scheme}\\n" https://echo.test/a?b=1; cat echo.txt; jq -Rc "split(\\" \\")" echo.txt; curl -sS http://echo.test/plain'
+    );
+    assert.equal(result.stderr, '');
+    assert.equal(
+      result.stdout,
+      '200 0 https\nGET https://echo.test/a?b=1\n["GET","https://echo.test/a?b=1"]\nGET http://echo.test/plain\n'
+    );
+    assert.equal((await read('/workspace/echo.txt')).text, 'GET https://echo.test/a?b=1\n');
+  });
+
   test('a pipeline of eight processes redirected into a file', async (t) => {
     if (skipped(t)) return;
     await put('/workspace/fruit/long.txt', 'pear\napple\nfig\napple\nkiwi\napple\nfig\n');
