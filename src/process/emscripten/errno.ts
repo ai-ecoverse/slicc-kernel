@@ -1,6 +1,7 @@
 import { wasiErrno } from '../wasi-errno.ts';
 
 export const EM = {
+  AGAIN: 6,
   BADF: 8,
   BUSY: 10,
   CHILD: 12,

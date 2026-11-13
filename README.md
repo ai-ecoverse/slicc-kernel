@@ -304,6 +304,7 @@ The Worker needs a Worker Loader binding (`worker_loaders`) and a SQLite-backed 
 | `root`, `meta`, `ranged` | `memoryRoot()` | a root of your own in place of `sql` |
 | `clock` | none | called before every timed wait; pass a call into the Durable Object's own namespace, as above. Without it, `sleep` and timeouts can end early |
 | `isolates` | `{ max: 8, waitMs: 10000, memory: 64 MiB, perInstance: 8 MiB }` | how many Dynamic Workers run at once, how long a spawn waits for one, and the memory budget per Dynamic Worker |
+| `network` | none | `{ transport, tlsEngine, uplink, doh }`: the transport programs reach the outside world through, and the TLS engine for their `https://` requests (see [The network](#the-network-in-a-durable-object)) |
 
 **How it works.** Workers has no `Worker`, refuses `Atomics.wait`, and does not share memory between isolates, so a process cannot block the way it does in a page. Here a process is a wasm instance in a Dynamic Worker, parked with JSPI (`WebAssembly.Suspending`) while its system call is answered by the Durable Object over Workers RPC.
 - **The kernel side is the same code as in the page.** A proxy in the Durable Object speaks the kernel's shared-memory protocol on behalf of each remote process (`src/async/remote-worker.ts`).
@@ -314,6 +315,7 @@ The Worker needs a Worker Loader binding (`worker_loaders`) and a SQLite-backed 
 `createNodeKernel({ blocking: 'async', emscripten: 'kernel' })` runs the same async runtime on Node, for tests.
 
 **Limits.**
+- **Programs linked with pthreads run on one thread.** An Emscripten program built with `-pthread` imports a shared memory and Emscripten's thread functions, even when it never starts a thread (jq does, for its thread-local storage). The kernel gives it that memory and sets up its main thread, so it runs as any other program does. A Dynamic Worker has no second thread to give, so `pthread_create` fails with `EAGAIN`. `createNodeKernel({ emscripten: 'kernel' })` does the same.
 - **Not supported:** threads (`pthread_create` fails with `EAGAIN`), `dlopen` and anything else that compiles wasm at run time, JS programs (`"abi": "js"`), and packages with an `imports` module. Each fails with an errno or a message, never a hang.
 - **Memory:** a Dynamic Worker has 128 MB. A program whose wasm memory starts above that cannot run (`python.wasm` declares 160 MiB). Processes of one program share a Dynamic Worker up to the budget and then spill into another; at most 8 Dynamic Workers run at once, and a spawn beyond that waits, then fails with `EAGAIN`, which bash retries. A Dynamic Worker that outgrows its limit is ended by Cloudflare: its processes exit with status 70 and the kernel carries on.
 - **CPU and signals:** a process that computes for 30 s without a system call is ended by Cloudflare. Nothing can interrupt it sooner: a signal, `SIGKILL` included, is seen at the process's next system call.
@@ -323,6 +325,33 @@ The Worker needs a Worker Loader binding (`worker_loaders`) and a SQLite-backed 
 - **Speed:** a system call costs about 0.3 ms and starting a process about 50–90 ms.
 - **Idle:** a kernel with no process running keeps no timer pending, so the Durable Object goes idle about 10 s after its last request and Cloudflare bills about the time it worked (1.5 s for four short commands on two objects, where a pending timer used to add 75 s for each object). What it held in memory is gone then, and the next request boots a new kernel on the persisted root, in 0.1–0.2 s. While a process runs or a terminal is open, the object stays active and is billed.
 - **Cron:** jobs run only while the Durable Object is awake, and a table with a job coming keeps a timer pending, so the object is billed until Cloudflare evicts it, about 70 s after its last request. The runs that were due meanwhile are folded into one at the next boot, as [Cron](#cron) says. `cron: { poll: false }` is the default here: the service reads the tables when one is written, not every minute.
+
+#### The network in a Durable Object
+
+`fetchTransport` is exported from the Cloudflare entry too, and a Durable Object passes it as on the page. `fetch` can be the Worker's own, to filter or sign what programs send:
+
+```js
+import {
+  compiledTlsEngine,
+  createCloudflareKernel,
+  fetchTransport,
+} from '@ai-ecoverse/slicc-kernel/cloudflare';
+import createTlsEngine from '@ai-ecoverse/wasm-tls-engine';
+import tlsWasm from '@ai-ecoverse/wasm-tls-engine/slicc-tls-engine.wasm';
+
+const kernel = await createCloudflareKernel({
+  loader: env.LOADER,
+  network: {
+    transport: fetchTransport({ redirect: 'manual' }),
+    tlsEngine: compiledTlsEngine(createTlsEngine, tlsWasm),
+  },
+});
+await kernel.run(['curl', '-sS', 'https://example.com/']);
+```
+
+- **Why `tlsEngine`:** curl speaks TLS to the kernel's proxy, which ends it with [`@ai-ecoverse/wasm-tls-engine`](https://www.npmjs.com/package/@ai-ecoverse/wasm-tls-engine) and hands the request to the transport. Elsewhere the kernel reads that package from `/node_modules`, imports its glue from a `data:` URL and compiles its wasm. Workers allow neither, so the Worker imports both itself (wrangler compiles a `.wasm` import to a `WebAssembly.Module` at deploy) and passes them in. Without `tlsEngine`, an `https://` request fails there with `CONNECT tunnel failed, response 501`; `http://` needs no engine.
+- **How `compiledTlsEngine(factory, module)` works:** the package's glue only instantiates from bytes. So while the engine loads, `WebAssembly.instantiate` answers that one call, which it knows by the bytes the glue was given, with an instance of `module`. Every other call goes to the real function, and the real function is back in place once the engine has loaded or failed.
+- **The option is `() => Promise<TlsEngineModule>`**, asked at the first `CONNECT` and once per kernel, so any other way of loading the engine works too.
 
 Measured on a deployed Worker, from a client about 40 ms away, next to local `wrangler dev`:
 

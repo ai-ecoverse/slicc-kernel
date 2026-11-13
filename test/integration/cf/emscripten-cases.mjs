@@ -104,6 +104,51 @@ export const CURL = (url) => [
   'curl -s file:///etc/hostname; curl -s http://127.0.0.1:1/; echo rc=$?',
 ];
 
+const STRPTIME = [
+  ['2015-03-05T23:51:47Z', '%Y-%m-%dT%H:%M:%SZ'],
+  ['10:15 March 2021', '%H:%M %B %Y'],
+  ['Thu Mar  5 23:51:47 2015', '%c'],
+  ['03/05/15', '%D'],
+  ['03/05/2015', '%x'],
+  ['11:05:09 PM', '%r'],
+  ['11:05:09 a.m.', '%I:%M:%S %p'],
+  ['7 pm', '%I %p'],
+  ['23:51', '%R'],
+  ['99 12 25', '%y %m %d'],
+  ['19 68 Dec 25', '%C %y %b %d'],
+  ['2024 060', '%Y %j'],
+  ['2023 365', '%Y %j'],
+  ['2023 369', '%Y %j'],
+  ['2023 Tue 10', '%Y %a %U'],
+  ['2023 Tue 10', '%Y %a %W'],
+  ['2023 Sun 00', '%Y %a %U'],
+  ['2024 Mon 01', '%Y %A %W'],
+  ['2015 Wednesday', '%Y %a'],
+  ['2015-03-05 +0530', '%F %z'],
+  ['2015-03-05 -05:30', '%F %z'],
+  ['2015-03-05 z', '%F %z'],
+  ['2015-03-05 rest', '%F'],
+  ['a.b(c) 2015', 'a.b(c) %Y'],
+  ['12\t 2015 5', '%m%n%Y%t%e'],
+  ['50% 2015', '50%% %Y'],
+  ['été 2015', 'été %Y'],
+  ['5 6', '%w %Q'],
+  ['nope', '%Y'],
+  ['0000 00:61', '%Y %H:%M'],
+];
+
+const quoted = (text) => `'${text.replace(/'/g, "'\\''")}'`;
+
+export const JQ = [
+  'echo \'{"a":[1,2,3],"b":{"c":"d"}}\' > in.json; jq -c ".a|map(.*2)" in.json; jq -r ".b.c, (.a|add)" < in.json; jq . in.json; jq -e ".nope" in.json; echo rc=$?',
+  'seq 1 2000 | jq -s "add, length"; jq -n "[range(200000)]|length"; echo "[1" | jq .; echo rc=$?; jq -n \'"x"|test("^X$";"i")\'',
+  'jq -n "now|type, (0|todate), (1425599507|gmtime|mktime), (1425599507|strftime(\\"%A %j %H\\"))"; echo "{}" | jq "." > o; (jq -r "keys|length" o) & wait; cat o',
+  ...STRPTIME.map(
+    ([input, format]) =>
+      `jq -nc --arg i ${quoted(input)} --arg f ${quoted(format)} 'try ($i|strptime($f)) catch .'`
+  ),
+];
+
 export async function transcript(kernel, steps) {
   let out = '';
   const term = await kernel.openTerminal(['bash', '-i'], {

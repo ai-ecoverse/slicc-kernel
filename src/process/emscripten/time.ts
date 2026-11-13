@@ -180,6 +180,154 @@ function zoneName(offset: number): string {
   return `UTC${sign}${String(Math.floor(abs / 60)).padStart(2, '0')}${String(abs % 60).padStart(2, '0')}`;
 }
 
+const ALIASES: Readonly<Record<string, string>> = {
+  A: '%a',
+  B: '%b',
+  c: '%a %b %d %H:%M:%S %Y',
+  D: '%m\\/%d\\/%y',
+  e: '%d',
+  F: '%Y-%m-%d',
+  h: '%b',
+  R: '%H\\:%M',
+  r: '%I\\:%M\\:%S\\s%p',
+  T: '%H\\:%M\\:%S',
+  x: '%m\\/%d\\/(?:%y|%Y)',
+  X: '%H\\:%M\\:%S',
+};
+
+const FIELDS: Readonly<Record<string, string>> = {
+  a: '(?:Sun(?:day)?)|(?:Mon(?:day)?)|(?:Tue(?:sday)?)|(?:Wed(?:nesday)?)|(?:Thu(?:rsday)?)|(?:Fri(?:day)?)|(?:Sat(?:urday)?)',
+  b: '(?:Jan(?:uary)?)|(?:Feb(?:ruary)?)|(?:Mar(?:ch)?)|(?:Apr(?:il)?)|May|(?:Jun(?:e)?)|(?:Jul(?:y)?)|(?:Aug(?:ust)?)|(?:Sep(?:tember)?)|(?:Oct(?:ober)?)|(?:Nov(?:ember)?)|(?:Dec(?:ember)?)',
+  C: '\\d\\d',
+  d: '0[1-9]|[1-9](?!\\d)|1\\d|2\\d|30|31',
+  H: '\\d(?!\\d)|[0,1]\\d|20|21|22|23',
+  I: '\\d(?!\\d)|0\\d|10|11|12',
+  j: '00[1-9]|0?[1-9](?!\\d)|0?[1-9]\\d(?!\\d)|[1,2]\\d\\d|3[0-6]\\d',
+  m: '0[1-9]|[1-9](?!\\d)|10|11|12',
+  M: '0\\d|\\d(?!\\d)|[1-5]\\d',
+  n: ' ',
+  p: 'AM|am|PM|pm|A\\.M\\.|a\\.m\\.|P\\.M\\.|p\\.m\\.',
+  S: '0\\d|\\d(?!\\d)|[1-5]\\d|60',
+  U: '0\\d|\\d(?!\\d)|[1-4]\\d|50|51|52|53',
+  W: '0\\d|\\d(?!\\d)|[1-4]\\d|50|51|52|53',
+  w: '[0-6]',
+  y: '\\d\\d',
+  Y: '\\d\\d\\d\\d',
+  t: ' ',
+  z: 'Z|(?:[\\+\\-]\\d\\d:?(?:\\d\\d)?)',
+};
+
+const ESCAPED = /[\\!@#$^&*()+=\-[\]/{}|:<>?,.]/g;
+const MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+const DAYS = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
+
+function parsePattern(format: string): { pattern: RegExp; fields: string[] } {
+  const fields: string[] = [];
+  const source = format
+    .replace(ESCAPED, '\\$&')
+    .replace(/%(.)/g, (whole, c: string) => ALIASES[c] || whole)
+    .replace(/%(.)/g, (_, c: string) => {
+      const field = FIELDS[c];
+      if (!field) return c;
+      fields.push(c);
+      return `(${field})`;
+    })
+    .replace(/\s+/g, '\\s*');
+  return { pattern: new RegExp(`^${source}`, 'i'), fields };
+}
+
+function within(value: number, min: number, max: number): number {
+  return Number.isNaN(value) || value < min ? min : Math.min(value, max);
+}
+
+function weekDate(year: number, week: number, day: number, first: number): Date {
+  const lead = new Date(year, 0, 1).getDay();
+  const before = lead === first ? 0 : 7 - lead + first;
+  return new Date(year, 0, 1 + Math.max(0, before + day + 7 * (week - 1)));
+}
+
+function offsetOf(zone: string): number {
+  if (zone.toLowerCase() === 'z') return 0;
+  const [, hours, minutes] = /^([-+]\d\d):?(\d\d)?/.exec(zone) as RegExpExecArray;
+  const base = Number(hours) * 3600;
+  return minutes ? base + (base > 0 ? 60 : -60) * Number(minutes) : base;
+}
+
+type Fields = (field: string) => number | undefined;
+
+function yearOf(num: Fields, fallback: number): number {
+  const short = num('y');
+  if (num('Y') !== undefined || short === undefined) return num('Y') ?? fallback;
+  const century = num('C');
+  return short + (century !== undefined ? century * 100 : short < 69 ? 2000 : 1900);
+}
+
+function monthOf(num: Fields, name: string, fallback: number): number {
+  const month = num('m');
+  if (month !== undefined) return month - 1;
+  return name ? Math.max(0, MONTHS.indexOf(name.slice(0, 3).toUpperCase())) : fallback;
+}
+
+function weekDay(num: Fields, name: string, year: number): Date | undefined {
+  const at = DAYS.indexOf(name.slice(0, 3).toUpperCase());
+  const sunday = num('U');
+  if (sunday !== undefined) return weekDate(year, sunday, at, 0);
+  const monday = num('W');
+  return monday === undefined ? undefined : weekDate(year, monday, (at + 6) % 7, 1);
+}
+
+function dayOf(
+  num: Fields,
+  name: string,
+  at: { year: number; month: number; day: number }
+): { month: number; day: number } {
+  const day = num('d');
+  if (day !== undefined) return { month: at.month, day };
+  const ofYear = num('j');
+  if (ofYear !== undefined) {
+    const fits = ofYear <= (leap(at.year) ? 366 : 365);
+    const december = (leap(at.year) ? LEAP : REGULAR)[11] as number;
+    return { month: at.month, day: fits ? ofYear - december : at.day };
+  }
+  const date = name ? weekDay(num, name, at.year) : undefined;
+  return date ? { month: date.getMonth(), day: date.getDate() } : at;
+}
+
+function hourOf(num: Fields, half: string, fallback: number): number {
+  const hour = num('I');
+  if (num('H') !== undefined || hour === undefined) return num('H') ?? fallback;
+  return hour + (half.toUpperCase().startsWith('P') ? 12 : 0);
+}
+
+function strptime(ctx: EmContext, buf: number, format: number, tm: number): number {
+  const { mem } = ctx;
+  const i32 = (at: number) => mem.view().getInt32(at, true);
+  const put = (at: number, value: number) => mem.view().setInt32(at, value, true);
+  const { pattern, fields } = parsePattern(mem.cString(format));
+  const found = pattern.exec(mem.cString(buf));
+  if (!found) return 0;
+  const got = (field: string) => (fields.includes(field) && found[fields.indexOf(field) + 1]) || '';
+  const num: Fields = (field) => (got(field) ? Number(got(field)) : undefined);
+  const year = yearOf(num, within(i32(tm + 20) + 1900, 1970, 9999));
+  const month = monthOf(num, got('b'), within(i32(tm + 16), 0, 11));
+  const on = dayOf(num, got('a'), { year, month, day: within(i32(tm + 12), 1, 31) });
+  const hour = hourOf(num, got('p'), within(i32(tm + 8), 0, 23));
+  const minute = num('M') ?? within(i32(tm + 4), 0, 59);
+  const second = num('S') ?? within(i32(tm), 0, 59);
+  const date = new Date(year, on.month, on.day, hour, minute, second, 0);
+  put(tm, date.getSeconds());
+  put(tm + 4, date.getMinutes());
+  put(tm + 8, date.getHours());
+  put(tm + 12, date.getDate());
+  put(tm + 16, date.getMonth());
+  put(tm + 20, date.getFullYear() - 1900);
+  put(tm + 24, date.getDay());
+  put(tm + 28, yday(date));
+  put(tm + 32, 0);
+  put(tm + 36, got('z') ? offsetOf(got('z')) : 0);
+  return buf + new TextEncoder().encode(found[0]).length;
+}
+
 export function timeImports(ctx: EmContext): WebAssembly.ModuleImports {
   const { mem } = ctx;
   const i32 = (at: number) => mem.view().getInt32(at, true);
@@ -288,6 +436,7 @@ export function timeImports(ctx: EmContext): WebAssembly.ModuleImports {
       put(tm + 28, ((date.getTime() - start) / 86400000) | 0);
       return BigInt(Math.trunc(date.getTime() / 1000));
     },
+    strptime: (buf: number, format: number, tm: number) => strptime(ctx, buf, format, tm),
     slicc_tz_intl: (name: number, t: number, abbr: number, abbrlen: number) => {
       try {
         const { value, label } = tzIntl(mem.cString(name), t);

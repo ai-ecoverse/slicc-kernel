@@ -17,7 +17,7 @@ import { cachingBridge } from '../wasi/wasi-files.ts';
 import { WasiExit, WasiHost } from '../wasi/wasi-host.ts';
 import { ProcTree, procfsBridge } from '../wasi/wasi-procfs.ts';
 import { ptsBridge } from '../wasi/wasi-ptsfs.ts';
-import { type TransportFactory, wireSignals } from '../wasi/wasi-runtime.ts';
+import { createImportedMemory, type TransportFactory, wireSignals } from '../wasi/wasi-runtime.ts';
 import type { EmContext, EmExports } from './context.ts';
 import { EmCwd } from './cwd.ts';
 import { dnsImports } from './dns.ts';
@@ -30,6 +30,7 @@ import { invoke, invokeImports } from './longjmp.ts';
 import { mmapImport } from './mmap.ts';
 import { netImports } from './net.ts';
 import { procImports } from './proc.ts';
+import { pthreadImports } from './pthread.ts';
 import { Reentry, type WasmExport } from './reentry.ts';
 import { timeImports } from './time.ts';
 import { commitStdout, wasiImports } from './wasi.ts';
@@ -128,8 +129,9 @@ class EmRuntime {
     return this.ex;
   }
 
-  bind(exports: WebAssembly.Exports): void {
-    this.ex = exports as unknown as EmExports;
+  bind(exports: WebAssembly.Exports, imported?: WebAssembly.Memory): void {
+    const own = exports as unknown as EmExports;
+    this.ex = imported && !own.memory ? { ...own, memory: imported } : own;
     this.reentry.bind(exports);
   }
 
@@ -263,6 +265,7 @@ function buildImports(
     ...netImports(ctx),
     ...mmapImport(ctx),
     ...dnsImports(ctx),
+    ...pthreadImports(ctx),
     ...runtimeImports(ctx, rt),
     ...invokeImports(ctx, module),
   };
@@ -386,6 +389,9 @@ export async function runEmscriptenProcess(
   rt.ctx = ctx;
   const { module } = init.program;
   const imports = buildImports(ctx, rt, module);
+  const spec = init.program.memory;
+  const imported = createImportedMemory(spec);
+  if (spec && imported) (imports[spec.module] ??= {})[spec.name] = imported;
   const missing = missingImports(module, imports);
   if (missing.length > 0) {
     say(
@@ -394,7 +400,7 @@ export async function runEmscriptenProcess(
     return NOT_RUNNABLE;
   }
   const instance = await WebAssembly.instantiate(module, imports);
-  rt.bind(instance.exports);
+  rt.bind(instance.exports, imported);
   memory = rt.exports().memory;
   host.mem.bind(memory);
   publishMemory(init.sab, memory.buffer.byteLength);

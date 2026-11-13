@@ -15,6 +15,7 @@ import type {
 import type { EmbedderHook } from '../kernel/embedder.ts';
 import type { RouteTable } from '../kernel/net/routes.ts';
 import type { SealedOption } from '../kernel/net/sealed-fetch.ts';
+import type { TlsEngineModule } from '../kernel/net/tls-engine.ts';
 import type { NetworkUplink } from '../kernel/net/uplink.ts';
 import type { MountEntry, MountSpec } from '../mount/mount-fs.ts';
 import type { ProcessMountPolicy } from '../mount/syscall.ts';
@@ -38,7 +39,12 @@ export interface CloudflareKernelOptions {
   modules?: string;
   commands?: { append?: readonly string[] };
   env?: Record<string, string>;
-  network?: { transport?: NetworkTransport; uplink?: NetworkUplink; doh?: string | false };
+  network?: {
+    transport?: NetworkTransport;
+    uplink?: NetworkUplink;
+    doh?: string | false;
+    tlsEngine?: () => Promise<TlsEngineModule>;
+  };
   processMounts?: ProcessMountPolicy;
   hostname?: string;
   timeZone?: string;

@@ -9,6 +9,7 @@ import {
   BASE,
   CURL,
   GIT,
+  JQ,
   REFUSAL_PACKAGES,
   REFUSALS,
   refusalOptions,
@@ -105,6 +106,11 @@ test('tier 3: curl over a host server behaves the same', async (t) => {
     network: { transport },
   });
   for (const script of CURL(url)) await t.test(script, () => same(kernels, script));
+});
+
+test('tier 3: jq, linked with pthreads, behaves the same on one thread', async (t) => {
+  const kernels = await pair(t, [...BASE, 'wasm-jq']);
+  for (const script of JQ) await t.test(script, () => same(kernels, script));
 });
 
 test('kernel mode never evaluates the package glue', async (t) => {

@@ -1,4 +1,11 @@
-import { attachKernel, createCloudflareKernel } from '../../../../dist/cloudflare.js';
+import {
+  attachKernel,
+  compiledTlsEngine,
+  createCloudflareKernel,
+  fetchTransport,
+} from '../../../../dist/cloudflare.js';
+import createTlsEngine from '../../../../node_modules/@ai-ecoverse/wasm-tls-engine/dist/slicc-tls-engine.mjs';
+import tlsWasm from '../../../../node_modules/@ai-ecoverse/wasm-tls-engine/dist/slicc-tls-engine.wasm';
 import { pendingTimers } from './timers.js';
 
 function leb(n) {
@@ -41,10 +48,26 @@ export class KernelRoutes {
     this.kernel = undefined;
     this.terminals = new Map();
     this.clockReads = [];
+    this.fetched = [];
     this.next = 1;
   }
 
-  async boot({ process, waitMs, persist, localForks, memory, max, clock = true }) {
+  network() {
+    const answer = async (url, init) => {
+      const body = init.body ? await new Response(init.body).text() : '';
+      this.fetched.push(`${init.method} ${url}`);
+      return new Response(`${init.method} ${url} ${init.headers.get('x-test')} ${body}\n`, {
+        status: url.endsWith('/teapot') ? 418 : 200,
+        headers: { 'x-served': 'fixture' },
+      });
+    };
+    return {
+      transport: fetchTransport({ fetch: answer, redirect: 'manual' }),
+      tlsEngine: compiledTlsEngine(createTlsEngine, tlsWasm),
+    };
+  }
+
+  async boot({ process, waitMs, persist, localForks, memory, max, network, clock = true }) {
     this.kernel?.terminate();
     const started = Date.now();
     const storage = this.ctx.storage;
@@ -71,6 +94,7 @@ export class KernelRoutes {
       ...(persist
         ? { sql: storage.sql, sqlite: { transaction: (fn) => storage.transactionSync(fn) } }
         : {}),
+      ...(network ? { network: this.network() } : {}),
     });
     await install(this.kernel);
     return { bootMs: Date.now() - started };
@@ -180,6 +204,16 @@ export class KernelRoutes {
           taken: forks.taken,
           placement: this.kernel.processes.placement.describe(),
         });
+      }
+      case '/kernel/fetched':
+        return json({ fetched: this.fetched.splice(0) });
+      case '/kernel/instantiate': {
+        const bytes = Uint8Array.from(args.bytes);
+        const made = await WebAssembly.instantiate(bytes, {}).then(
+          (result) => Object.keys(result).sort(),
+          (err) => String(err?.message ?? err)
+        );
+        return json({ made, patched: WebAssembly.instantiate.name });
       }
       case '/kernel/clock-reads':
         return json({ reads: this.clockReads.splice(0) });
