@@ -8,7 +8,7 @@ const CONFIG = 'examples/cloudflare-computer/wrangler.json';
 const API = 'https://api.cloudflare.com/client/v4';
 export const PREFIX = 'slicc-kernel-do-pr-';
 export const LIFETIME_MS = 24 * 60 * 60 * 1000;
-export const STALE_MS = 7 * 24 * 60 * 60 * 1000;
+export const STALE_MS = LIFETIME_MS;
 
 export function pullRequestOf(ref) {
   const found = /^refs\/pull\/(\d+)\//.exec(ref ?? '');
@@ -70,13 +70,14 @@ async function retried(work, tries = 3, pauseMs = 5000) {
   }
 }
 
-async function api(path, token) {
-  const response = await fetch(`${API}${path}`, {
+async function api(path, token, { method = 'GET', call = fetch } = {}) {
+  const response = await call(`${API}${path}`, {
+    method,
     headers: { authorization: `Bearer ${token}` },
     signal: AbortSignal.timeout(30_000),
   });
   const body = await response.json();
-  if (!response.ok || !body.success) throw new Error(`${path}: ${response.status}`);
+  if (!response.ok || !body.success) throw new Error(`${method} ${path}: ${response.status}`);
   return body.result;
 }
 
@@ -86,14 +87,18 @@ async function accountOf(token, given) {
   return accounts.length === 1 ? accounts[0].id : undefined;
 }
 
-async function sweep(token, account, keep, auth) {
-  const scripts = await api(`/accounts/${account}/workers/scripts`, token);
+export async function sweep(token, account, keep, call = fetch) {
+  const scripts = await api(`/accounts/${account}/workers/scripts`, token, { call });
   const gone = [];
+  const kept = [];
   for (const name of staleWorkers(scripts, keep)) {
-    await wrangler(['delete', '--name', name, '--force'], auth);
-    gone.push(name);
+    const path = `/accounts/${account}/workers/scripts/${name}?force=true`;
+    await api(path, token, { method: 'DELETE', call }).then(
+      () => gone.push(name),
+      (error) => kept.push(`${name}: ${error.message}`)
+    );
   }
-  return gone;
+  return { gone, kept };
 }
 
 export async function staging(env = process.env, login = false) {
@@ -120,7 +125,11 @@ export async function staging(env = process.env, login = false) {
   await retried(() =>
     wrangler(['secret', 'put', 'KEY', '--config', CONFIG, '--name', name], auth, key)
   );
-  const swept = token && account ? await sweep(token, account, name, auth).catch(() => []) : [];
+  const none = { gone: [], kept: [] };
+  const swept =
+    token && account
+      ? await sweep(token, account, name).catch((error) => ({ gone: [], kept: [error.message] }))
+      : none;
   return { name, origin, url: stagingUrl(origin, key), expires, swept };
 }
 
@@ -141,7 +150,12 @@ async function main() {
   else console.log(result.url);
   const until = new Date(result.expires).toISOString();
   console.log(`Staging Worker \`${result.name}\` at ${result.origin}, until ${until}.`);
-  for (const name of result.swept) console.log(`Deleted the stale staging Worker \`${name}\`.`);
+  for (const name of result.swept.gone) {
+    console.log(`Deleted the expired staging Worker \`${name}\`.`);
+  }
+  for (const why of result.swept.kept) {
+    console.error(`::warning title=Staging::an expired staging Worker stays: ${why}`);
+  }
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) await main();
