@@ -26,9 +26,10 @@ export function openInProcess(
   const driver = (spec as InProcessMountSpec)[IN_PROCESS_DRIVER];
   if (!driver) return undefined;
   const { port1, port2 } = ports();
-  driver.served?.(
-    serveFilesystem(port2, driver.handlers, driver.capabilities ?? {}, { owned: true })
-  );
+  const served = serveFilesystem(port2, driver.handlers, driver.capabilities ?? {}, {
+    owned: true,
+  });
+  driver.served?.(served);
   return {
     port: port1,
     dispose: () => {

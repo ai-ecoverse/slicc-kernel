@@ -304,6 +304,7 @@ The Worker needs a Worker Loader binding (`worker_loaders`) and a SQLite-backed 
 | `root`, `meta`, `ranged` | `memoryRoot()` | a root of your own in place of `sql` |
 | `clock` | none | called before every timed wait; pass a call into the Durable Object's own namespace, as above. Without it, `sleep` and timeouts can end early |
 | `isolates` | `{ max: 8, waitMs: 10000, memory: 64 MiB, perInstance: 8 MiB }` | how many Dynamic Workers run at once, how long a spawn waits for one, and the memory budget per Dynamic Worker |
+| `commands` | none | `{ append }`: more command roots, as for `createKernel`; one can be a mount (see [A file system the Durable Object serves](#a-file-system-the-durable-object-serves)) |
 | `network` | none | `{ transport, tlsEngine, uplink, doh }`: the transport programs reach the outside world through, and the TLS engine for their `https://` requests (see [The network](#the-network-in-a-durable-object)) |
 
 **How it works.** Workers has no `Worker`, refuses `Atomics.wait`, and does not share memory between isolates, so a process cannot block the way it does in a page. Here a process is a wasm instance in a Dynamic Worker, parked with JSPI (`WebAssembly.Suspending`) while its system call is answered by the Durable Object over Workers RPC.
@@ -352,6 +353,30 @@ await kernel.run(['curl', '-sS', 'https://example.com/']);
 - **Why `tlsEngine`:** curl speaks TLS to the kernel's proxy, which ends it with [`@ai-ecoverse/wasm-tls-engine`](https://www.npmjs.com/package/@ai-ecoverse/wasm-tls-engine) and hands the request to the transport. Elsewhere the kernel reads that package from `/node_modules`, imports its glue from a `data:` URL and compiles its wasm. Workers allow neither, so the Worker imports both itself (wrangler compiles a `.wasm` import to a `WebAssembly.Module` at deploy) and passes them in. Without `tlsEngine`, an `https://` request fails there with `CONNECT tunnel failed, response 501`; `http://` needs no engine.
 - **How `compiledTlsEngine(factory, module)` works:** the package's glue only instantiates from bytes. So while the engine loads, `WebAssembly.instantiate` answers that one call, which it knows by the bytes the glue was given, with an instance of `module`. Every other call goes to the real function, and the real function is back in place once the engine has loaded or failed.
 - **The option is `() => Promise<TlsEngineModule>`**, asked at the first `CONNECT` and once per kernel, so any other way of loading the engine works too.
+
+#### A file system the Durable Object serves
+
+A package driver runs in a worker of its own, which a Durable Object does not have. `inProcessMount(spec, driver)` mounts a file system whose handlers run in the Durable Object itself, with the same [handlers and capabilities](#mounts) as a package driver:
+
+```js
+import { fsError, inProcessMount } from '@ai-ecoverse/slicc-kernel/cloudflare';
+
+const kernel = await createCloudflareKernel({
+  loader: env.LOADER,
+  commands: { append: ['/image/node_modules'] },
+});
+await kernel.mount(
+  inProcessMount(
+    { type: 'image', source: 'tools', target: '/image', options: { ro: '' } },
+    { handlers, capabilities: { readonly: true, ranges: true } }
+  )
+);
+```
+
+- **Programs on a mount:** a mount under an appended command root (`commands.append`) provides commands as `/node_modules` does, so a kernel can run programs it never copied into its own root: from R2, from the Worker's own modules, or from memory. The kernel reads a program's file when it first runs it.
+- **The mount point** has to exist: `attachKernel(await kernel.connect()).fs.mkdir(target)` makes it, with its parents.
+- **`driver`** is `{ handlers, capabilities?, served? }`. `served` is called once with `{ invalidate(paths) }`, for a driver whose files change outside the kernel.
+- **Limits:** the handlers share the Durable Object's thread with the kernel, so a slow handler holds up every process. A handler that does not answer within 30 s fails its call with `EIO`, as any driver's does.
 
 Measured on a deployed Worker, from a client about 40 ms away, next to local `wrangler dev`:
 
