@@ -3,6 +3,8 @@ import {
   compiledTlsEngine,
   createCloudflareKernel,
   fetchTransport,
+  fsError,
+  inProcessMount,
 } from '../../../../dist/cloudflare.js';
 import createTlsEngine from '../../../../node_modules/@ai-ecoverse/wasm-tls-engine/dist/slicc-tls-engine.mjs';
 import tlsWasm from '../../../../node_modules/@ai-ecoverse/wasm-tls-engine/dist/slicc-tls-engine.wasm';
@@ -41,6 +43,45 @@ async function install(kernel) {
 
 const json = (value, status = 200) => Response.json(value, { status });
 
+function readOnlyTree(files) {
+  const refuse = async (path) => {
+    throw fsError('EROFS', path);
+  };
+  const isDir = (path) => path === '/' || [...files.keys()].some((f) => f.startsWith(`${path}/`));
+  const attr = (path) => {
+    const bytes = files.get(path);
+    if (bytes) return { kind: 'file', size: bytes.length, mtime: 0, mode: 0o555 };
+    if (isDir(path)) return { kind: 'directory', size: 0, mtime: 0, mode: 0o555 };
+    throw fsError('ENOENT', path);
+  };
+  const open = [];
+  const reads = [];
+  const handlers = {
+    getattr: async (path) => attr(path),
+    readdir: async (path) => {
+      const prefix = path === '/' ? '/' : `${path}/`;
+      const names = [...files.keys()]
+        .filter((f) => f.startsWith(prefix))
+        .map((f) => f.slice(prefix.length).split('/')[0]);
+      return [...new Set(names)].map((name) => ({ name, kind: attr(prefix + name).kind }));
+    },
+    open: async (path, flags) => {
+      if (flags.write || flags.create || flags.truncate) throw fsError('EROFS', path);
+      attr(path);
+      reads.push(path);
+      return open.push(path);
+    },
+    read: async (fh, offset, size) => files.get(open[fh - 1]).slice(offset, offset + size),
+    release: async () => {},
+    write: refuse,
+    mkdir: refuse,
+    rmdir: refuse,
+    unlink: refuse,
+    rename: refuse,
+  };
+  return { handlers, capabilities: { readonly: true, ranges: true }, reads };
+}
+
 export class KernelRoutes {
   constructor(ctx, env) {
     this.ctx = ctx;
@@ -49,7 +90,18 @@ export class KernelRoutes {
     this.terminals = new Map();
     this.clockReads = [];
     this.fetched = [];
+    this.tree = new Map();
     this.next = 1;
+  }
+
+  async mountTree({ target }) {
+    const client = await attachKernel(await this.kernel.connect(), { locks: null });
+    await client.fs.mkdir(target);
+    await client.close();
+    const driver = readOnlyTree(this.tree);
+    this.treeReads = driver.reads;
+    const spec = { type: 'tree', source: 'fixture', target, options: { ro: '' } };
+    return this.kernel.mount(inProcessMount(spec, driver));
   }
 
   network() {
@@ -67,7 +119,17 @@ export class KernelRoutes {
     };
   }
 
-  async boot({ process, waitMs, persist, localForks, memory, max, network, clock = true }) {
+  async boot({
+    process,
+    waitMs,
+    persist,
+    localForks,
+    memory,
+    max,
+    network,
+    commands,
+    clock = true,
+  }) {
     this.kernel?.terminate();
     const started = Date.now();
     const storage = this.ctx.storage;
@@ -95,6 +157,7 @@ export class KernelRoutes {
         ? { sql: storage.sql, sqlite: { transaction: (fn) => storage.transactionSync(fn) } }
         : {}),
       ...(network ? { network: this.network() } : {}),
+      ...(commands ? { commands: { append: commands } } : {}),
     });
     await install(this.kernel);
     return { bootMs: Date.now() - started };
@@ -205,6 +268,10 @@ export class KernelRoutes {
           placement: this.kernel.processes.placement.describe(),
         });
       }
+      case '/kernel/mount-tree':
+        return json(await this.mountTree(args));
+      case '/kernel/tree-reads':
+        return json({ reads: this.treeReads.splice(0) });
       case '/kernel/fetched':
         return json({ fetched: this.fetched.splice(0) });
       case '/kernel/instantiate': {

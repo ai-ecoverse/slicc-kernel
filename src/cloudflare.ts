@@ -70,6 +70,11 @@ export {
   type TlsEngineFactory,
   type TlsEngineModule,
 } from './cloudflare/tls.ts';
+export type { FilesystemHandlers, OpenFlags, ServedFilesystem } from './mount/driver.ts';
+export { fsError } from './mount/driver.ts';
+export { type InProcessDriver, inProcessMount } from './mount/in-process.ts';
+export type { MountEntry, MountSpec } from './mount/mount-fs.ts';
+export type { DriverAttr, DriverCapabilities, DriverEntry } from './mount/protocol.ts';
 export { type FetchTransportOptions, fetchTransport, type NetworkTransport } from './transport.ts';
 export { memoryRoot };
 export const PROCESS_HOST_SOURCE: string = HOST_SOURCE;

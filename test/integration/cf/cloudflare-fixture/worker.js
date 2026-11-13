@@ -113,19 +113,21 @@ export class Plumbing extends DurableObject {
   async fetch(request) {
     const url = new URL(request.url);
     const body = request.method === 'POST' ? await request.arrayBuffer() : undefined;
-    const raw = ['/image', '/kernel/upload', '/kernel/bulk'].includes(url.pathname);
+    const raw = ['/image', '/kernel/upload', '/kernel/bulk', '/kernel/tree'].includes(url.pathname);
     const args = body && !raw ? JSON.parse(new TextDecoder().decode(body)) : {};
     if (url.pathname === '/kernel/upload') {
       await this.kernelRoutes.kernel.writeFile(url.searchParams.get('path'), new Uint8Array(body));
       return json({ ok: true });
     }
-    if (url.pathname === '/kernel/bulk') {
+    if (url.pathname === '/kernel/bulk' || url.pathname === '/kernel/tree') {
       const bytes = new Uint8Array(body);
       const length = new DataView(body).getUint32(0, true);
       const manifest = JSON.parse(new TextDecoder().decode(bytes.subarray(4, 4 + length)));
       let at = 4 + length;
       for (const [path, size] of manifest) {
-        await this.kernelRoutes.kernel.writeFile(path, bytes.slice(at, at + size));
+        const file = bytes.slice(at, at + size);
+        if (url.pathname === '/kernel/tree') this.kernelRoutes.tree.set(path, file);
+        else await this.kernelRoutes.kernel.writeFile(path, file);
         at += size;
       }
       return json({ ok: true, files: manifest.length });

@@ -23,14 +23,14 @@ function frame(batch) {
   return Buffer.concat([head, manifest, ...batch.map(([, b]) => b)]);
 }
 
-export async function uploadTree(call, from, to, wanted = () => true) {
+export async function uploadTree(call, from, to, wanted = () => true, route = '/kernel/bulk') {
   const files = await filesOf(from, wanted);
   let batch = [];
   let size = 0;
   let sent = 0;
   const flush = async () => {
     if (batch.length === 0) return;
-    const r = await call('/kernel/bulk', frame(batch), { raw: true });
+    const r = await call(route, frame(batch), { raw: true });
     if (r.status !== 200) throw new Error(`bulk upload failed: ${JSON.stringify(r).slice(0, 300)}`);
     sent += batch.length;
     batch = [];
