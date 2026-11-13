@@ -133,6 +133,7 @@ export function scrubbed(inner: OpenFile, scrubber: Scrubber, idleMs = SCRUB_IDL
     identity: file.identity ?? file,
     ...(file.clipboard ? { clipboard: file.clipboard } : {}),
     ...(file.embedder ? { embedder: file.embedder } : {}),
+    ...(file.device ? { device: file.device } : {}),
     ...(file.write
       ? {
           write: async (bytes: Uint8Array, signal?: AbortSignal) => {

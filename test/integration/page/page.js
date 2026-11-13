@@ -534,6 +534,67 @@ window.boundRun = async (script) => {
   return r;
 };
 
+window.devices = { calls: [], ports: [], nodes: new Map() };
+
+const fakeDevices = (name) => ({
+  open(request) {
+    window.devices.calls.push({ page: name, op: 'open', path: request.path, flags: request.flags });
+    let controller;
+    const readable = new ReadableStream(
+      {
+        start: (c) => {
+          controller = c;
+        },
+      },
+      { highWaterMark: 0 }
+    );
+    const port = { name, push: (text) => controller.enqueue(new TextEncoder().encode(text)) };
+    window.devices.ports.push(port);
+    const writable = new WritableStream({
+      write: (chunk) => controller.enqueue(chunk.slice()),
+    });
+    return {
+      readable,
+      writable,
+      control: async (op, args) => {
+        window.devices.calls.push({ page: name, op, ...(args ? { args } : {}) });
+        if (op === 'close' && (readable.locked || writable.locked))
+          throw new DOMException('the streams are locked', 'InvalidStateError');
+        if (op === 'close') window.devices.calls.at(-1).unlocked = true;
+        if (op === 'signals')
+          return {
+            clearToSend: true,
+            dataCarrierDetect: false,
+            dataSetReady: true,
+            ringIndicator: false,
+          };
+      },
+    };
+  },
+});
+
+window.addDevice = async (spec) => {
+  const node = await window.kernel.devices.add(spec);
+  window.devices.nodes.set(spec.path, node);
+  return true;
+};
+
+window.removeDevice = async (path) => {
+  await window.devices.nodes.get(path).remove();
+  return true;
+};
+
+window.attachedDevice = async (script) => {
+  const port = await window.kernel.connect({ devices: 'attach' });
+  const client = await attachKernel(port, { devices: fakeDevices('tab') });
+  const bound = await window.kernel.connect({ devices: fakeDevices('agent') });
+  await window.kernel.devices.add({ path: 'ttyACM0', client: port });
+  await window.kernel.devices.add({ path: 'ttyACM1', client: bound });
+  const r = await client.run(['bash', '-c', script], { cwd: '/tmp' });
+  client.close();
+  return r;
+};
+
 window.extraTraits = {};
 
 const exitTransport = (exit) => ({
@@ -662,6 +723,7 @@ window.boot = async (options = {}) => {
       ...(options.sealedFetch ? { sealed: sealedFetchHook } : {}),
       ...(options.sealedAsk ? { sealed: sealedAskHook } : {}),
       ...(options.requests ? { requests: requestHook } : {}),
+      ...(options.devices ? { devices: fakeDevices('page') } : {}),
       ...(options.worker ? { worker: new URL(options.worker, location.href) } : {}),
     })
   );

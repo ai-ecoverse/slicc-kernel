@@ -1,5 +1,6 @@
 import { fresh } from '../bytes.ts';
 import { portCdpHook } from '../cdp/port.ts';
+import { devicesAsker, devicesReplyOf } from '../devices-relay.ts';
 import { embedderAsker, embedderReplyOf } from '../embedder-relay.ts';
 import { portFacadeHook } from '../facade/port.ts';
 import { access, R_OK, X_OK } from '../fs/access.ts';
@@ -49,6 +50,7 @@ export interface ClientHost {
   tag?: string;
   session?: number;
   attachRequests?: boolean;
+  attachDevices?: boolean;
 }
 
 export interface ServedClient {
@@ -378,8 +380,10 @@ function hostRegistries(
   const cdps = cdpRegistry(send, gone);
   const facades = facadeRegistry(send, gone);
   const requests = requestBinding(send, port);
+  const devices = deviceBinding(send, port);
   return {
     requests,
+    devices,
     answer(l: Launcher, req: HostOp): number | boolean {
       if (req.op === 'serve-cdp') return cdps.serve(l, req);
       if (req.op === 'unserve-cdp') return cdps.drop(req.registration);
@@ -388,6 +392,7 @@ function hostRegistries(
     },
     close(): void {
       requests.close();
+      devices.close();
       cdps.close();
       facades.close();
     },
@@ -541,6 +546,41 @@ function answered(
   );
 }
 
+async function helloRefused(
+  host: ClientHost,
+  hosts: ReturnType<typeof hostRegistries>,
+  message: ClientHello
+): Promise<string | undefined> {
+  return (
+    versionError(message.protocol) ??
+    (await hosts.requests.accept(host, message)) ??
+    (await hosts.devices.accept(host, message))
+  );
+}
+
+function deviceBinding(
+  send: (message: object, transfer: Transferable[]) => void,
+  port: MessagePortLike
+) {
+  const asker = devicesAsker({ postMessage: (m, t) => send(m as object, t as Transferable[]) });
+  let unbind: (() => void) | undefined;
+  port.addEventListener('message', (event) => {
+    const reply = devicesReplyOf(event.data);
+    if (reply) asker.answer(reply);
+  });
+  return {
+    async accept(host: ClientHost, hello: ClientHello) {
+      if (!hello.devices) return undefined;
+      if (!host.attachDevices || host.session === undefined)
+        return 'EPERM: this port may not answer device opens';
+      const launcher = await host.launcher();
+      unbind = launcher.devices.register(host.session, asker.hookFor(host.session));
+      return undefined;
+    },
+    close: () => unbind?.(),
+  };
+}
+
 export function serveClient(port: MessagePortLike, host: ClientHost): ServedClient {
   let state: 'new' | 'open' | 'closed' = 'new';
   let self: Account | undefined;
@@ -577,7 +617,7 @@ export function serveClient(port: MessagePortLike, host: ClientHost): ServedClie
   }
 
   async function hello(message: ClientHello): Promise<void> {
-    const refused = versionError(message.protocol) ?? (await hosts.requests.accept(host, message));
+    const refused = await helloRefused(host, hosts, message);
     if (refused) {
       send({ hello: { protocol: PROTOCOL, error: refused } });
       detach();

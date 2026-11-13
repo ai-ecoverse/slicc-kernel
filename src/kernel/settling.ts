@@ -2,6 +2,7 @@ const SETUP_OPS = new Set([
   'proc-list',
   'proc-identity',
   'fd-info',
+  'fd-dev-nodes',
   'sig-mask',
   'sig-inherited',
   'proc-setpgid',

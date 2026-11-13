@@ -88,7 +88,10 @@ export class KernelTty {
   }
 
   receive(bytes: Uint8Array): void {
-    for (const byte of bytes) this.key(byte);
+    const { c_iflag, c_lflag } = this.termios;
+    if (!(c_iflag & ICRNL) && !(c_lflag & (ISIG | ICANON | ECHO))) {
+      if (bytes.length > 0) this.readable.push(bytes.slice());
+    } else for (const byte of bytes) this.key(byte);
     this.wake();
   }
 

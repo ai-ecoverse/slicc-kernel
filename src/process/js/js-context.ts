@@ -22,6 +22,7 @@ import {
   devResolveTarget,
   devStat,
   inDev,
+  ioctlRequest,
   readWhole,
   streamFile,
 } from './js-dev.ts';
@@ -995,7 +996,12 @@ async function openDev(
     : streamFile(
         fd,
         abs,
-        { read: (n, max) => state.read(n, max), write: state.write, close },
+        {
+          read: (n, max) => state.read(n, max),
+          write: state.write,
+          close,
+          ioctl: (n, request, arg) => kernel.json(ioctlRequest(n, request, arg)),
+        },
         access
       );
   state.handles.set(fd, handle.invalidate);

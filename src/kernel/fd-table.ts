@@ -1,4 +1,5 @@
 import type { ClipboardChannel } from './clipboard.ts';
+import type { DeviceChannel } from './devices.ts';
 import type { EmbedderChannel } from './embedder.ts';
 import { KernelPipe, type PipeError } from './pipe.ts';
 import type { PtyPair } from './pty.ts';
@@ -55,7 +56,8 @@ export type KernelErrno =
   | 'EDESTADDRREQ'
   | 'ENOPROTOOPT'
   | 'ENOTSUP'
-  | 'EILSEQ';
+  | 'EILSEQ'
+  | 'EBUSY';
 
 export class KernelError extends Error {
   readonly code: KernelErrno;
@@ -119,6 +121,8 @@ export interface KernelFile {
 
   clipboard?: ClipboardChannel;
   embedder?: EmbedderChannel;
+
+  device?: DeviceChannel;
 
   held?: true;
 
@@ -362,8 +366,8 @@ export class FdTable {
 
   stdioTerminal(): KernelTty | undefined {
     for (const fd of [0, 1, 2]) {
-      const tty = this.fds.get(fd)?.file.tty;
-      if (tty) return tty;
+      const file = this.fds.get(fd)?.file;
+      if (file?.tty && !file.device) return file.tty;
     }
     return undefined;
   }

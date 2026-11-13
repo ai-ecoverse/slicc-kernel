@@ -20,6 +20,7 @@ import {
   devStat,
   devSync,
   inDev,
+  ioctlRequest,
   readWholeSync,
   streamSyncFile,
 } from './js-dev.ts';
@@ -365,7 +366,17 @@ export function syncOps(
     };
     const handle = file
       ? syncFile(kernel, fd, abs, options.append === true, forget)
-      : streamSyncFile(fd, abs, { read: (n, max) => read(n, max), write, close }, access);
+      : streamSyncFile(
+          fd,
+          abs,
+          {
+            read: (n, max) => read(n, max),
+            write,
+            close,
+            ioctl: (n, request, arg) => kernel.json(ioctlRequest(n, request, arg)),
+          },
+          access
+        );
     handles.set(fd, handle.invalidate);
     return handle.file;
   };
