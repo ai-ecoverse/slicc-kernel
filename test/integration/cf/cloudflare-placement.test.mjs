@@ -8,7 +8,7 @@ import { uploadFiles, uploadTree } from './cloudflare-fixture/upload.mjs';
 
 const config = fileURLToPath(new URL('./cloudflare-fixture/wrangler.json', import.meta.url));
 const MODULES = join(REPO, 'node_modules/@ai-ecoverse');
-const JITTER_MS = 50;
+const EARLY_MS = 16;
 const programs = (path) => path === 'package.json' || path === 'bin' || path.startsWith('bin/');
 const deployed = Boolean(process.env.SLICC_CF_FIXTURE_URL);
 let dev;
@@ -182,7 +182,7 @@ describe('sleeping in a Dynamic Worker', { concurrency: false }, () => {
     if (clock) t.diagnostic(`kernel waits ${Math.min(...waits)}..${Math.max(...waits)} ms`);
     for (const total of totals) assert.ok(total >= 4000, `a round took ${total} ms`);
     for (const wait of clock ? waits : gaps) {
-      assert.ok(wait >= 1000 - JITTER_MS, `a wait of ${wait} ms`);
+      assert.ok(wait >= 1000 - EARLY_MS, `a wait of ${wait} ms`);
     }
   });
 
@@ -198,6 +198,7 @@ describe('sleeping in a Dynamic Worker', { concurrency: false }, () => {
     const gaps = [];
     const totals = [];
     const waits = [];
+    const reported = [];
     for (let round = 0; round < rounds; round++) {
       await call('/kernel/clock-reads', {});
       const started = performance.now();
@@ -214,7 +215,14 @@ describe('sleeping in a Dynamic Worker', { concurrency: false }, () => {
       const lines = [];
       for (const [at, text] of done.stamps) {
         for (const line of text.split(/\r?\n/)) {
-          if (/^(futex 0 0|sigwait 6 0)$/.test(line.replace(/ \d+ /, ' '))) lines.push([at, line]);
+          const m = /^(futex|sigwait) (\d+) (\d+) (\d+)$/.exec(line);
+          if (!m) continue;
+          const ok =
+            (m[1] === 'futex' && m[3] === '0' && m[4] === '0') ||
+            (m[1] === 'sigwait' && m[3] === '6' && m[4] === '0');
+          if (!ok) continue;
+          lines.push([at, line]);
+          reported.push(Number(m[2]));
         }
       }
       assert.equal(lines.length, 8, done.out);
@@ -225,12 +233,16 @@ describe('sleeping in a Dynamic Worker', { concurrency: false }, () => {
       }
     }
     t.diagnostic(
-      `totals ${totals.join(' ')} ms; gaps ${Math.min(...gaps)}..${Math.max(...gaps)} ms`
+      `totals ${totals.join(' ')} ms; gaps ${Math.min(...gaps)}..${Math.max(...gaps)} ms; reported ${Math.min(...reported)}..${Math.max(...reported)} ms`
     );
     if (clock) t.diagnostic(`kernel waits ${Math.min(...waits)}..${Math.max(...waits)} ms`);
-    for (const total of totals) assert.ok(total >= 8 * WAIT_MS, `a round took ${total} ms`);
+    for (const total of totals)
+      assert.ok(total >= 8 * (WAIT_MS - EARLY_MS), `a round took ${total} ms`);
+    for (const ms of reported) {
+      assert.ok(ms >= WAIT_MS - EARLY_MS, `a wait of ${ms} ms`);
+    }
     for (const wait of clock ? waits : gaps) {
-      assert.ok(wait >= WAIT_MS - JITTER_MS, `a wait of ${wait} ms`);
+      assert.ok(wait >= WAIT_MS - EARLY_MS, `a wait of ${wait} ms`);
     }
   });
 });

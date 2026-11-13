@@ -57,10 +57,12 @@ let serial = 0;
 async function same(kernels, script, check) {
   const dir = `/tmp/case${++serial}`;
   const argv = ['bash', '-c', `mkdir -p ${dir} && cd ${dir} && { ${script}\n}`];
-  const glue = shown(await kernels.glue.run(argv, { cwd: '/root' }));
-  const own = shown(await kernels.own.run(argv, { cwd: '/root' }));
-  assert.deepEqual(own, glue, script);
-  check?.(own);
+  const glue = await kernels.glue.run(argv, { cwd: '/root' });
+  const own = await kernels.own.run(argv, { cwd: '/root' });
+  assert.equal(own.status, glue.status, script);
+  assert.equal(own.stdout, glue.stdout, script);
+  assert.equal(shown(own).stderr, shown(glue).stderr, script);
+  check?.(shown(own));
 }
 
 test('tier 1: bash builtins and coreutils behave the same without the glue', async (t) => {
