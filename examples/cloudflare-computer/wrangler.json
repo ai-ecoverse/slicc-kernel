@@ -8,7 +8,12 @@
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Computer"] }],
   "worker_loaders": [{ "binding": "LOADER" }],
   "rules": [
+    { "type": "CompiledWasm", "globs": ["**/slicc-tls-engine.wasm"], "fallthrough": false },
     { "type": "Data", "globs": ["**/*.wasm"], "fallthrough": false },
-    { "type": "Text", "globs": ["**/bin/bash", "**/bin/coreutils"], "fallthrough": false }
+    {
+      "type": "Text",
+      "globs": ["**/bin/bash", "**/bin/coreutils", "**/bin/curl", "**/bin/jq"],
+      "fallthrough": false
+    }
   ]
 }

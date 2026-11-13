@@ -123,6 +123,7 @@ import { replayingHops } from './kernel/net/redirect-hops.ts';
 import { Resolver } from './kernel/net/resolver.ts';
 import { Routes, type RouteTable } from './kernel/net/routes.ts';
 import { type SealedFetchHook, sealedFetcher } from './kernel/net/sealed-fetch.ts';
+import type { TlsEngine, TlsEngineModule } from './kernel/net/tls-engine.ts';
 import type { RealmTransport } from './kernel/net/transport.ts';
 import type { NetworkUplink } from './kernel/net/uplink.ts';
 import { PackageSwaps } from './kernel/package-swaps.ts';
@@ -277,7 +278,16 @@ export interface LauncherOptions {
   emscripten?: 'glue' | 'kernel';
   admit?: (program: Program, from: { ppid?: number }) => Promise<() => void>;
   compile?: (bytes: Uint8Array, key: string) => Promise<WebAssembly.Module>;
+  tlsEngine?: () => Promise<TlsEngineModule>;
   ports?: MakePortPair;
+}
+
+function tlsEngineOf(
+  options: LauncherOptions,
+  fs: KernelFs,
+  modules: string
+): () => Promise<TlsEngine> {
+  return kernelTlsEngine(options.tlsEngine ?? packageTlsEngine(fs, modules));
 }
 
 export interface ModuleUrl {
@@ -1074,7 +1084,7 @@ export class Launcher {
     if (options.uplink) this.net.useUplink({ uplink: options.uplink, routes: this.routes });
     enableNetwork(this.net, {
       transport: this.transport,
-      engine: kernelTlsEngine(packageTlsEngine(this.verifiedFs(options.fs), this.modulesDir)),
+      engine: tlsEngineOf(options, this.verifiedFs(options.fs), this.modulesDir),
       roots: packageTlsRoots(this.verifiedFs(options.fs), this.modulesDir),
       ca: this.ca,
     });
@@ -2219,6 +2229,13 @@ export class Launcher {
     );
   }
 
+  private async kernelProgram(target: Target, caller: LoadCaller): Promise<Program> {
+    const asked = target.asked && modulePath(target.asked);
+    const { module, memory } = await this.module(target.wasm, caller, asked);
+    const base = { abi: 'emscripten', emscripten: 'kernel', glue: '', module } as const;
+    return { ...base, ...(memory ? { memory } : {}), path: target.glue };
+  }
+
   private async program(
     target: Target,
     env: Record<string, string>,
@@ -2245,8 +2262,7 @@ export class Launcher {
       return { abi: 'js', glue: '', url, path: target.wasm, ...(source ? { source } : {}) };
     }
     if (target.abi !== 'wasi' && this.emscripten === 'kernel') {
-      const { module } = await this.module(target.wasm, caller, asked && modulePath(asked));
-      return { abi: 'emscripten', emscripten: 'kernel', glue: '', module, path: target.glue };
+      return this.kernelProgram(target, caller);
     }
     if (target.abi !== 'wasi') {
       const [glue, { module }] = await Promise.all([

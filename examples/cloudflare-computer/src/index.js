@@ -1,9 +1,23 @@
 import { DurableObject } from 'cloudflare:workers';
 import { Workspace } from '@cloudflare/computer';
-import { attachKernel, createCloudflareKernel, sliccBackend } from '../../../dist/cloudflare.js';
+import {
+  attachKernel,
+  compiledTlsEngine,
+  createCloudflareKernel,
+  fetchTransport,
+  sliccBackend,
+} from '../../../dist/cloudflare.js';
+import createTlsEngine from '../../../node_modules/@ai-ecoverse/wasm-tls-engine/dist/slicc-tls-engine.mjs';
+import tlsWasm from '../../../node_modules/@ai-ecoverse/wasm-tls-engine/dist/slicc-tls-engine.wasm';
 import { PACKAGES } from './packages.js';
 
 const MOUNT = '/workspace';
+const ECHO = 'echo.test';
+
+function outbound(url, init) {
+  if (new URL(url).hostname !== ECHO) return fetch(url, init);
+  return new Response(`${init.method} ${url}\n`, { headers: { 'x-answered-by': 'the Worker' } });
+}
 
 function keyOf(request) {
   const auth = request.headers.get('authorization') ?? '';
@@ -94,6 +108,10 @@ export class Computer extends DurableObject {
         clock: () => self().now(),
         sql: storage.sql,
         sqlite: { transaction: (fn) => storage.transactionSync(fn) },
+        network: {
+          transport: fetchTransport({ fetch: outbound, redirect: 'manual' }),
+          tlsEngine: compiledTlsEngine(createTlsEngine, tlsWasm),
+        },
       });
       this.installed = await install(kernel);
       return kernel;

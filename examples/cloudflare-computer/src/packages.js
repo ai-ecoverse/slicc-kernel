@@ -4,6 +4,12 @@ import bashManifest from '../../../node_modules/@ai-ecoverse/wasm-bash/package.j
 import coreutilsGlue from '../../../node_modules/@ai-ecoverse/wasm-coreutils/bin/coreutils';
 import coreutilsWasm from '../../../node_modules/@ai-ecoverse/wasm-coreutils/bin/coreutils.wasm';
 import coreutilsManifest from '../../../node_modules/@ai-ecoverse/wasm-coreutils/package.json';
+import curlGlue from '../../../node_modules/@ai-ecoverse/wasm-curl/bin/curl';
+import curlWasm from '../../../node_modules/@ai-ecoverse/wasm-curl/bin/curl.wasm';
+import curlManifest from '../../../node_modules/@ai-ecoverse/wasm-curl/package.json';
+import jqGlue from '../../../node_modules/@ai-ecoverse/wasm-jq/bin/jq';
+import jqWasm from '../../../node_modules/@ai-ecoverse/wasm-jq/bin/jq.wasm';
+import jqManifest from '../../../node_modules/@ai-ecoverse/wasm-jq/package.json';
 
 export const PACKAGES = [
   {
@@ -20,6 +26,22 @@ export const PACKAGES = [
       'package.json': JSON.stringify(coreutilsManifest, null, 2),
       'bin/coreutils': coreutilsGlue,
       'bin/coreutils.wasm': coreutilsWasm,
+    },
+  },
+  {
+    name: '@ai-ecoverse/wasm-curl',
+    files: {
+      'package.json': JSON.stringify(curlManifest, null, 2),
+      'bin/curl': curlGlue,
+      'bin/curl.wasm': curlWasm,
+    },
+  },
+  {
+    name: '@ai-ecoverse/wasm-jq',
+    files: {
+      'package.json': JSON.stringify(jqManifest, null, 2),
+      'bin/jq': jqGlue,
+      'bin/jq.wasm': jqWasm,
     },
   },
 ];

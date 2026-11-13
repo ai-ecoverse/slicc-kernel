@@ -65,6 +65,12 @@ export type {
   WriteBehindOptions,
 } from './cloudflare/sqlite-store.ts';
 export { sqliteFlush } from './cloudflare/sqlite-store.ts';
+export {
+  compiledTlsEngine,
+  type TlsEngineFactory,
+  type TlsEngineModule,
+} from './cloudflare/tls.ts';
+export { type FetchTransportOptions, fetchTransport, type NetworkTransport } from './transport.ts';
 export { memoryRoot };
 export const PROCESS_HOST_SOURCE: string = HOST_SOURCE;
 export const ASYNC_PROCESS_SOURCE: string | undefined = PROCESS_SOURCE;
@@ -232,6 +238,7 @@ export async function createCloudflareKernel(
     ...(transport ? { transport } : {}),
     ...(options.network?.uplink ? { uplink: options.network.uplink } : {}),
     ...(options.network?.doh !== undefined ? { doh: options.network.doh } : {}),
+    ...(options.network?.tlsEngine ? { tlsEngine: options.network.tlsEngine } : {}),
     ...(options.processMounts !== undefined ? { processMounts: options.processMounts } : {}),
     ...(options.hostname !== undefined ? { hostname: options.hostname } : {}),
     ...(options.timeZone !== undefined ? { timeZone: options.timeZone } : {}),

@@ -7,6 +7,7 @@ import {
   BASE,
   CURL,
   GIT,
+  JQ,
   REFUSAL_PACKAGES,
   REFUSALS,
   refusalOptions,
@@ -111,6 +112,13 @@ test('tier 3: an interactive bash on a terminal on the async host matches the gl
 test('tier 3: git on the async host matches the glue', { skip }, async (t) => {
   const kernels = await pair(t, [...BASE, 'wasm-git']);
   for (const script of GIT) await t.test(script, () => same(kernels, script));
+});
+
+test('tier 3: jq, linked with pthreads, on the async host matches the glue', {
+  skip,
+}, async (t) => {
+  const kernels = await pair(t, [...BASE, 'wasm-jq']);
+  for (const script of JQ) await t.test(script, () => same(kernels, script));
 });
 
 test('tier 3: curl on the async host matches the glue', { skip }, async (t) => {
