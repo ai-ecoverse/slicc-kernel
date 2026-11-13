@@ -19,6 +19,8 @@ import { DEFAULT_USERS, fsError, modeOption, type UsersMode } from './fs/types.t
 import { pidOwner } from './fs/unlinked.ts';
 import type {
   ConnectOptions,
+  DeviceAddOptions,
+  KernelDevices,
   KernelGroups,
   KernelIntegrity,
   KernelSealed,
@@ -29,6 +31,7 @@ import type {
   TerminalOptions,
 } from './index.ts';
 import type { ClipboardHook } from './kernel/clipboard.ts';
+import { type DeviceHook, devicesHook } from './kernel/devices.ts';
 import { type EmbedderHook, kindsOf } from './kernel/embedder.ts';
 import type { WasmWorkerLike } from './kernel/host.ts';
 import type { RouteTable } from './kernel/net/routes.ts';
@@ -101,7 +104,10 @@ export type { Denial, DenialHook } from './fs/dac.ts';
 export type {
   ConnectOptions,
   CwdMissing,
+  DeviceAddOptions,
+  DeviceNodeHandle,
   Ended,
+  KernelDevices,
   KernelGroups,
   KernelIntegrity,
   KernelSealed,
@@ -117,6 +123,14 @@ export type {
   TerminalSignal,
 } from './index.ts';
 export type { ClipboardHook, ClipboardStamp } from './kernel/clipboard.ts';
+export type {
+  DeviceHook,
+  DeviceOpenRequest,
+  DeviceSignals,
+  DeviceSpec,
+  DeviceStamp,
+  DeviceStreams,
+} from './kernel/devices.ts';
 export type {
   EmbedderHook,
   EmbedderKindPolicy,
@@ -196,6 +210,7 @@ export interface NodeKernelOptions {
   sealed?: SealedOption;
   clipboard?: ClipboardHook;
   requests?: EmbedderHook;
+  devices?: DeviceHook;
   approve?: ApproveHook;
   protect?: Protection;
   cron?: { clock?: CronClock };
@@ -224,6 +239,7 @@ export interface NodeKernel {
   sudoRun(request: SudoReplay, options?: SudoRunOptions): Promise<SudoRun>;
   readonly users: KernelUsers;
   readonly groups: KernelGroups;
+  readonly devices: KernelDevices;
   setRoutes(routes: RouteTable): Promise<void>;
   updateTransportTraits(): Promise<boolean>;
   mount(spec: MountSpec): Promise<MountEntry>;
@@ -588,10 +604,12 @@ function pidAlive(pid: number): boolean {
 
 let nodeSessions = 0;
 
+const portSessions = new WeakMap<object, number>();
+
 function nodeClient(
   launcher: Launcher,
   clients: Set<ServedClient>,
-  { user, tag, requests }: ConnectOptions
+  { user, tag, requests, devices }: ConnectOptions
 ): MessagePort {
   tagOption(tag);
   const { port1, port2 } = new MessageChannel();
@@ -601,6 +619,7 @@ function nodeClient(
     signal: signalNumber,
     session,
     ...(requests === 'attach' ? { attachRequests: true } : {}),
+    ...(devices === 'attach' ? { attachDevices: true } : {}),
     ...(user !== undefined ? { user } : {}),
     ...(tag !== undefined ? { tag } : {}),
   });
@@ -609,11 +628,24 @@ function nodeClient(
     requests && requests !== 'attach'
       ? launcher.embedder.register(session, checkedRequests(requests))
       : undefined;
+  const unbindDevices =
+    devices && devices !== 'attach'
+      ? launcher.devices.register(session, devicesHook(devices))
+      : undefined;
   void served.closed.then(() => {
     clients.delete(served);
     unbind?.();
+    unbindDevices?.();
   });
+  portSessions.set(port2, session);
   return port2 as unknown as MessagePort;
+}
+
+function sessionOfPort(client: DeviceAddOptions['client']): number {
+  if (client === undefined) return 0;
+  const session = portSessions.get(client as object);
+  if (session === undefined) throw fsError('EINVAL', 'client is not a port from connect()');
+  return session;
 }
 
 function checkedRequests(hook: EmbedderHook): EmbedderHook {
@@ -690,6 +722,33 @@ async function nodeSudoRun(
   return { pid: running.pid, pgid: running.pid, ended: quiet(ended) };
 }
 
+function pageHooks(options: NodeKernelOptions): {
+  clipboard?: ClipboardHook;
+  embedder?: EmbedderHook;
+  devices?: DeviceHook;
+  approve?: ApproveHook;
+} {
+  return {
+    ...(options.clipboard ? { clipboard: options.clipboard } : {}),
+    ...(options.approve ? { approve: options.approve } : {}),
+    ...(options.requests ? { embedder: checkedRequests(options.requests) } : {}),
+    ...(options.devices ? { devices: devicesHook(options.devices) } : {}),
+  };
+}
+
+function nodeDevices(
+  launcher: Launcher,
+  guard: <T>(work: () => Promise<T>) => Promise<T>
+): KernelDevices {
+  return {
+    add: ({ client, ...spec }) =>
+      guard(async () => {
+        const id = await launcher.devices.add(spec, sessionOfPort(client));
+        return { remove: async () => void launcher.devices.remove(id) };
+      }),
+  };
+}
+
 export async function createNodeKernel(options: NodeKernelOptions = {}): Promise<NodeKernel> {
   const hooks = sealedHooks(options.sealed);
   const timeZone = systemTimeZone(options.timeZone, clockZone(options.cron?.clock));
@@ -736,9 +795,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     ...(options.protect ? { protect: options.protect } : {}),
     ...(hooks.request ? { sealed: hooks.request } : {}),
     ...(hooks.fetch ? { sealedFetch: hooks.fetch } : {}),
-    ...(options.clipboard ? { clipboard: options.clipboard } : {}),
-    ...(options.requests ? { embedder: checkedRequests(options.requests) } : {}),
-    ...(options.approve ? { approve: options.approve } : {}),
+    ...pageHooks(options),
     ...(options.sudo?.clock ? { sudoClock: options.sudo.clock } : {}),
     ...tuningOf(options),
     cron: { lock: cronLock(root), ...(options.cron?.clock ? { clock: options.cron.clock } : {}) },
@@ -829,6 +886,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     updateTransportTraits: () => guard(async () => launcher.updateTransportTraits()),
     ...nodeAccounts(launcher, guard),
     sudoRun: (replay, sudoOptions = {}) => nodeSudoRun(launcher, guard, replay, sudoOptions),
+    devices: nodeDevices(launcher, guard),
     async connect(connectOptions = {}) {
       if (terminated) throw new Error(TERMINATED);
       const { user } = connectOptions;

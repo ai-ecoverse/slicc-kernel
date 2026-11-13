@@ -1,0 +1,12 @@
+{
+  "name": "cdpstamp",
+  "private": true,
+  "slicc": {
+    "commands": {
+      "cdpstamp": {
+        "abi": "js",
+        "module": "bin/cdpstamp.mjs"
+      }
+    }
+  }
+}

@@ -40,6 +40,7 @@ import {
 } from './children.ts';
 import type { ClipboardBroker, ClipboardChannel, ClipboardStamp } from './clipboard.ts';
 import { type Cred, type CredChange, changeCred, copyCred, ROOT } from './cred.ts';
+import type { DeviceMetaChange, DeviceNodes, DeviceStamp } from './devices.ts';
 import { EMBEDDER_PATH, type EmbedderBroker, type EmbedderCaller } from './embedder.ts';
 import { EPOLL_OPS, type EpollSyscall, epollSyscall } from './epoll.ts';
 import { EventFd } from './eventfd.ts';
@@ -229,8 +230,12 @@ export type WasmSyscall =
   | { op: 'fd-open-clipboard'; flags: number }
   | { op: 'fd-clipboard-abort'; fd: number }
   | { op: 'fd-open-embedder'; flags: number }
+  | { op: 'fd-dev-nodes' }
+  | { op: 'fd-open-dev'; path: string; flags: number }
+  | { op: 'fd-dev-ioctl'; fd: number; request: number; arg?: unknown }
+  | ({ op: 'fd-dev-meta'; path: string } & DeviceMetaChange)
   | { op: 'tty-get'; fd: number }
-  | { op: 'tty-set'; fd: number; termios: Termios; flush?: boolean }
+  | { op: 'tty-set'; fd: number; termios: Termios; flush?: boolean; drain?: boolean }
   | { op: 'tty-winsz'; fd: number }
   | { op: 'fd-flush'; fd: number }
   | {
@@ -442,6 +447,10 @@ const SYSCALL_OPS: ReadonlySet<string> = new Set([
   'fd-open-clipboard',
   'fd-clipboard-abort',
   'fd-open-embedder',
+  'fd-dev-nodes',
+  'fd-open-dev',
+  'fd-dev-ioctl',
+  'fd-dev-meta',
   'tty-get',
   'tty-set',
   'tty-winsz',
@@ -576,6 +585,8 @@ export interface WasmProcessOptions {
   embedderSession?: () => { client: number; uid: number };
 
   embedderName?: string;
+
+  devices?: DeviceNodes;
 
   readonlyAt?: (path: string) => boolean;
 
@@ -1037,7 +1048,7 @@ export class WasmProcess {
   private async dispatch(req: WasmSyscall, cancelled: AbortSignal): Promise<SyncFsResult> {
     try {
       if (isFdSyscall(req)) return await this.fdSyscall(req, cancelled);
-      if (isTtySyscall(req)) return this.ttySyscall(req);
+      if (isTtySyscall(req)) return await this.ttySyscall(req, cancelled);
       if (isJobSyscall(req)) return this.jobSyscall(req);
       if (isSocketSyscall(req)) return await this.socketSyscall(req, cancelled);
       if (isSemSyscall(req)) return await this.semSyscall(req, cancelled);
@@ -1238,7 +1249,7 @@ export class WasmProcess {
     const file = this.fds.get(req.fd).file;
     const read = req.peek ? file.peek : file.read;
     if (!read) throw new KernelError(req.peek && file.read ? 'EOPNOTSUPP' : 'EBADF');
-    if (file.tty) this.checkForeground(file.tty);
+    if (file.tty && !file.device) this.checkForeground(file.tty);
     if (file.clipboard) return this.readClipboard(file.clipboard, req, cancelled);
     if (file.embedder) return this.readEmbedder(file, req, cancelled);
 
@@ -1354,6 +1365,52 @@ export class WasmProcess {
       if (closing.embedder) await this.deviceComplaint(EMBEDDER_PATH, err);
       throw err;
     });
+  }
+
+  private async openDev(path: string, flags: number, cancelled: AbortSignal): Promise<number> {
+    const devices = this.options.devices;
+    if (!devices) throw new KernelError('ENOENT');
+    const shown = await this.options.identity?.();
+    const tags = this.options.embedder?.tagsOf(this.pid);
+    const stamp: DeviceStamp = {
+      pid: shown?.pid ?? this.pid,
+      uid: this.cred.euid,
+      gid: this.cred.egid,
+      groups: [...this.cred.groups],
+      users: devices.users,
+      ...(tags?.length ? { tag: tags[0] as string, tags: [...tags] } : {}),
+    };
+    const guard = this.guarded();
+    const file = await devices.open(path, flags, {
+      stamp,
+      ...(guard ? { guard } : {}),
+      signal: this.blockingSignal(cancelled),
+    });
+    return this.fds.install(this.options.outputFilter?.(file) ?? file, 3);
+  }
+
+  private devMeta(path: string, change: DeviceMetaChange): SyncFsResult {
+    const devices = this.options.devices;
+    if (!devices) throw new KernelError('ENOENT');
+    devices.meta(path, change, this.guarded());
+    return { ok: true, kind: 'void' };
+  }
+
+  private async devIoctl(
+    req: Extract<FdSyscall, { op: 'fd-dev-ioctl' }>,
+    cancelled: AbortSignal
+  ): Promise<unknown> {
+    const file = this.fds.get(req.fd).file;
+    if (!file.device) {
+      if (req.request >>> 0 === 0x541b) return pollFile(file).nread ?? 0;
+      throw new KernelError('ENOTTY');
+    }
+    const result = await file.device.ioctl(
+      req.request >>> 0,
+      req.arg,
+      this.blockingSignal(cancelled)
+    );
+    return result ?? null;
   }
 
   private async openEmbedder(flags: number): Promise<number> {
@@ -1675,7 +1732,9 @@ export class WasmProcess {
   private terminalByName(name: string): KernelTty {
     const n = ptsNumber(name);
     const tty =
-      n === undefined ? this.options.jobs?.terminalNamed(name) : this.options.ptys?.get(n).slave;
+      n === undefined
+        ? (this.options.jobs?.terminalNamed(name) ?? this.options.devices?.openTty(name))
+        : this.options.ptys?.get(n).slave;
     if (!tty) throw new KernelError('ENOENT');
     return tty;
   }
@@ -1813,6 +1872,16 @@ export class WasmProcess {
         return { ok: true, kind: 'json', json: await this.openClipboard(req.flags) };
       case 'fd-open-embedder':
         return { ok: true, kind: 'json', json: await this.openEmbedder(req.flags) };
+      case 'fd-dev-nodes':
+        return { ok: true, kind: 'json', json: this.options.devices?.list() ?? [] };
+      case 'fd-open-dev':
+        return { ok: true, kind: 'json', json: await this.openDev(req.path, req.flags, cancelled) };
+      case 'fd-dev-ioctl':
+        return { ok: true, kind: 'json', json: await this.devIoctl(req, cancelled) };
+      case 'fd-dev-meta': {
+        const { op: _, path, ...change } = req;
+        return this.devMeta(path, change);
+      }
       case 'fd-clipboard-abort': {
         const file = this.fds.get(req.fd);
         file.file.clipboard?.abort();
@@ -1860,6 +1929,11 @@ export class WasmProcess {
       return { ok: true, kind: 'void' };
     }
     const file = this.fds.get(req.fd).file;
+    const device = file.device;
+    if (device && (req.op === 'fd-chmod' || req.op === 'fd-chown' || req.op === 'fd-utimes')) {
+      const { op: _, fd: __, ...change } = req;
+      return this.devMeta(device.path, change);
+    }
     if (!file.pread || !file.pwrite || !file.resize || !file.stat) throw new KernelError('ESPIPE');
     switch (req.op) {
       case 'fd-pread':
@@ -2054,14 +2128,19 @@ export class WasmProcess {
     };
   }
 
-  private ttySyscall(req: TtySyscall): SyncFsResult {
+  private async ttySyscall(req: TtySyscall, cancelled: AbortSignal): Promise<SyncFsResult> {
     const tty = this.tty(req.fd);
     const jobs = this.options.jobs;
+    const device = this.fds.get(req.fd).file.device;
+    if (device && req.op.startsWith('tty-pgrp')) throw new KernelError('ENOTTY');
     switch (req.op) {
       case 'tty-get':
         return { ok: true, kind: 'json', json: tty.tcgets() };
       case 'tty-set':
-        tty.tcsets(req.termios, req.flush === true);
+        if (device) {
+          const how = { flush: req.flush === true, drain: req.drain === true };
+          await device.setTermios(req.termios, how, this.blockingSignal(cancelled));
+        } else tty.tcsets(req.termios, req.flush === true);
         return { ok: true, kind: 'void' };
       case 'tty-winsz': {
         const size = tty.winsize();

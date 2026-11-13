@@ -10,6 +10,7 @@ import {
 } from './client/dial-stream.ts';
 import { type LoopbackFetchOptions, loopbackFetch } from './client/loopback-fetch.ts';
 import { clipboardAnswerer } from './clipboard-relay.ts';
+import { devicesAnswerer } from './devices-relay.ts';
 import { embedderAnswerer } from './embedder-relay.ts';
 import { type FacadeOpen, serveFacadePort } from './facade/port.ts';
 import type { FacadeSpecs } from './facade/types.ts';
@@ -21,6 +22,7 @@ import { type Protection, protectInit } from './fs/protect.ts';
 import { DEFAULT_USERS, type UsersMode } from './fs/types.ts';
 import { integrityAnswerer } from './integrity-relay.ts';
 import type { ClipboardHook } from './kernel/clipboard.ts';
+import { type DeviceHook, type DeviceSpec, devicesHook } from './kernel/devices.ts';
 import { type EmbedderHook, kindsOf } from './kernel/embedder.ts';
 import { isHostname } from './kernel/net/loopback-names.ts';
 import type { TransportCall } from './kernel/net/remote-transport.ts';
@@ -84,6 +86,14 @@ export type {
 export type { Attestation, AttestedDir, AttestOptions, AttestTombstone } from './fs/attest.ts';
 export type { Denial, DenialHook } from './fs/dac.ts';
 export type { ClipboardHook, ClipboardStamp } from './kernel/clipboard.ts';
+export type {
+  DeviceHook,
+  DeviceOpenRequest,
+  DeviceSignals,
+  DeviceSpec,
+  DeviceStamp,
+  DeviceStreams,
+} from './kernel/devices.ts';
 export type {
   EmbedderHook,
   EmbedderKindPolicy,
@@ -232,6 +242,7 @@ export interface KernelOptions {
   sealed?: SealedOption;
   clipboard?: ClipboardHook;
   requests?: EmbedderHook;
+  devices?: DeviceHook;
   approve?: ApproveHook;
   protect?: Protection;
 }
@@ -272,6 +283,19 @@ export interface ConnectOptions {
   user?: string | number;
   tag?: string;
   requests?: EmbedderHook | 'attach';
+  devices?: DeviceHook | 'attach';
+}
+
+export interface DeviceAddOptions extends DeviceSpec {
+  client?: MessagePort;
+}
+
+export interface DeviceNodeHandle {
+  remove(): Promise<void>;
+}
+
+export interface KernelDevices {
+  add(spec: DeviceAddOptions): Promise<DeviceNodeHandle>;
 }
 
 export interface KernelGroups {
@@ -303,6 +327,7 @@ export interface Kernel {
   sudoRun(request: SudoReplay, options?: SudoRunOptions): Promise<SudoRun>;
   readonly users: KernelUsers;
   readonly groups: KernelGroups;
+  readonly devices: KernelDevices;
   setRoutes(routes: RouteTable): Promise<void>;
   chmod(path: string, mode: number): Promise<void>;
   readonly integrity: KernelIntegrity;
@@ -454,6 +479,7 @@ async function initCall(
     ...(hooks.fetch ? { sealedFetch: true } : {}),
     ...(options.clipboard ? { clipboard: true } : {}),
     ...(options.requests ? { requests: kindsOf(options.requests) } : {}),
+    ...(options.devices ? { devices: true } : {}),
     ...(options.approve ? { approve: true } : {}),
     ...(options.protect ? { protect: protectInit(options.protect) } : {}),
     ...(options.processMounts !== undefined
@@ -686,47 +712,83 @@ function checkOptions(options: KernelOptions): void {
   }
   if (options.timeZone !== undefined) systemTimeZone(options.timeZone);
   if (options.protect) protectInit(options.protect);
+  if (options.devices) devicesHook(options.devices);
   integrityOptions(options.protect?.integrity);
   facadesInit(options.facades);
   sealedHooks(options.sealed);
 }
 
+interface Bound {
+  requests: Map<number, EmbedderHook>;
+  devices: Map<number, DeviceHook>;
+  ports: WeakMap<object, number>;
+}
+
 function connector(
   call: (req: KernelCall) => Promise<unknown>,
-  bound: Map<number, EmbedderHook>
+  bound: Bound
 ): (options?: ConnectOptions) => Promise<MessagePort> {
   return async (connectOptions = {}) => {
-    const { requests, ...rest } = connectOptions;
-    if (requests === undefined || requests === 'attach')
-      return (await call({
-        op: 'connect',
-        ...rest,
-        ...(requests ? { requests } : {}),
-      })) as MessagePort;
-    const made = (await call({ op: 'connect', ...rest, requests: kindsOf(requests) })) as {
-      port: MessagePort;
-      client: number;
-    };
-    bound.set(made.client, requests);
+    const { requests, devices, ...rest } = connectOptions;
+    const hook = devices !== undefined && devices !== 'attach' ? devicesHook(devices) : undefined;
+    const made = (await call({
+      op: 'connect',
+      ...rest,
+      ...(requests === 'attach' ? { requests } : requests ? { requests: kindsOf(requests) } : {}),
+      ...(devices === 'attach' ? { devices } : hook ? { devices: true as const } : {}),
+    })) as MessagePort | { port: MessagePort; client: number };
+    if (!('client' in made)) return made;
+    if (requests && requests !== 'attach') bound.requests.set(made.client, requests);
+    if (hook) bound.devices.set(made.client, hook);
+    bound.ports.set(made.port, made.client);
     return made.port;
+  };
+}
+
+function clientApi(
+  call: (req: KernelCall) => Promise<unknown>,
+  bound: Bound
+): Pick<Kernel, 'connect' | 'devices'> {
+  return { connect: connector(call, bound), devices: kernelDevices(call, bound) };
+}
+
+function kernelDevices(call: (req: KernelCall) => Promise<unknown>, bound: Bound): KernelDevices {
+  return {
+    async add({ client, ...spec }) {
+      const id = client === undefined ? 0 : bound.ports.get(client);
+      if (id === undefined)
+        throw Object.assign(new Error('EINVAL: client is not a port from connect({ devices })'), {
+          code: 'EINVAL',
+        });
+      const node = (await call({ op: 'devices-add', spec, client: id })) as number;
+      return { remove: async () => void (await call({ op: 'devices-remove', node })) };
+    },
   };
 }
 
 function hookRelays(
   worker: Worker,
   options: KernelOptions,
-  bound: Map<number, EmbedderHook>
+  bound: Bound
 ): { handle(data: unknown): boolean; close(): void } {
   const hooks = sealedHooks(options.sealed);
   const sealed = sealedAnswerer(worker, hooks.request, hooks.fetch);
   const clipboard = clipboardAnswerer(worker, options.clipboard);
   const integrity = integrityAnswerer(worker, options.protect?.integrity?.lookup);
   const requests = embedderAnswerer(worker, (client) =>
-    client === 0 ? options.requests : bound.get(client)
+    client === 0 ? options.requests : bound.requests.get(client)
+  );
+  const pageDevices = options.devices ? devicesHook(options.devices) : undefined;
+  const devices = devicesAnswerer(worker, (client) =>
+    client === 0 ? pageDevices : bound.devices.get(client)
   );
   return {
     handle: (data) =>
-      sealed.handle(data) || clipboard.handle(data) || requests.handle(data) || integrity(data),
+      sealed.handle(data) ||
+      clipboard.handle(data) ||
+      requests.handle(data) ||
+      devices.handle(data) ||
+      integrity(data),
     close: () => sealed.close(),
   };
 }
@@ -818,7 +880,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
   );
   const cdp = cdpBridge(options.cdp);
   const facades = facadeBridge(options.facades);
-  const bound = new Map<number, EmbedderHook>();
+  const bound: Bound = { requests: new Map(), devices: new Map(), ports: new WeakMap() };
   const sealed = hookRelays(worker, options, bound);
   const approvals = approver(options.approve, worker);
   const fail = (error: Error) => {
@@ -958,7 +1020,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     },
     openTerminal,
     sudoRun: (replay, sudoOptions = {}) => sudoRunOn(request, replay, sudoOptions),
-    connect: connector(call, bound),
+    ...clientApi(call, bound),
     ...accounts(call, options.users === undefined ? DEFAULT_USERS : options.users),
     setRoutes: async (routes) => void (await call({ op: 'routes', routes })),
     chmod: async (path, mode) => void (await call({ op: 'chmod', path, mode })),

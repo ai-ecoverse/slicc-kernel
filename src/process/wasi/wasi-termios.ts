@@ -1,3 +1,4 @@
+import { ioctlArg, ioctlResult } from '../../kernel/serial-ioctl.ts';
 import type { Termios } from '../../kernel/tty.ts';
 import type { WasiFds, WasiKernel } from './wasi-fds.ts';
 import { WasiError } from './wasi-files.ts';
@@ -8,7 +9,7 @@ const C_LINE = 16;
 const C_CC = 17;
 const ISPEED = 52;
 const OSPEED = 56;
-const B38400 = 0o17;
+const CBAUD = 0o10017;
 const TCSAFLUSH = 2;
 
 export function writeTermios(mem: WasiMemory, ptr: number, termios: Termios): void {
@@ -20,8 +21,8 @@ export function writeTermios(mem: WasiMemory, ptr: number, termios: Termios): vo
   v.setUint32(ptr + 12, termios.c_lflag, true);
   for (let i = 0; i < NCCS; i++) v.setUint8(ptr + C_CC + i, termios.c_cc[i] ?? 0);
   v.setUint8(ptr + C_LINE, 0);
-  v.setUint32(ptr + ISPEED, B38400, true);
-  v.setUint32(ptr + OSPEED, B38400, true);
+  v.setUint32(ptr + ISPEED, termios.c_cflag & CBAUD, true);
+  v.setUint32(ptr + OSPEED, termios.c_cflag & CBAUD, true);
 }
 
 export function readTermios(mem: WasiMemory, ptr: number): Termios {
@@ -61,7 +62,17 @@ export function sliccTty(
     if (actions < 0 || actions > TCSAFLUSH) throw new WasiError('EINVAL');
     const at = terminal(fd);
     needs(sys.tcsets);
-    sys.tcsets?.(at, readTermios(mem, ptr), actions === TCSAFLUSH);
+    sys.tcsets?.(at, readTermios(mem, ptr), actions === TCSAFLUSH, actions !== 0);
+  };
+  const control = (fd: number, request: number, arg: number): void => {
+    interrupted();
+    const e = fds.find(fd);
+    if (!e) throw new WasiError('EBADF');
+    if (e.type !== 'kernel') throw new WasiError('ENOTTY');
+    const asked = request >>> 0;
+    const value = ioctlArg(mem.view(), asked, arg >>> 0);
+    const result = needs(sys.devIoctl).call(sys, fd, asked, value);
+    ioctlResult(mem.view(), asked, arg >>> 0, result);
   };
   const size = (fd: number, ptr: number): void => {
     interrupted();
@@ -75,5 +86,6 @@ export function sliccTty(
     tcgetattr: (fd: number, ptr: number) => void getAttr(fd, ptr),
     tcsetattr: (fd: number, actions: number, ptr: number) => void setAttr(fd, actions, ptr),
     winsize: (fd: number, ptr: number) => void size(fd, ptr),
+    ioctl: (fd: number, request: number, arg: number) => void control(fd, request, arg),
   };
 }

@@ -259,6 +259,7 @@ export function ptySyscall(req: PtySyscall, ctx: PtyContext): SyncFsResult {
       return done;
     case 'pty-ctty': {
       const tty = terminalOf(ctx, req.fd);
+      if (ctx.fds.get(req.fd).file.device) throw new KernelError('EPERM');
 
       const leader = ctx.jobs?.getsid(ctx.pid, 0) === ctx.pid;
       if (leader && ctx.jobs?.controllingTerminal(ctx.pid) === tty) return done;

@@ -1,3 +1,5 @@
+import type { ConnectorStamp } from '../kernel/socket.ts';
+
 export interface CdpConnection {
   send(message: string): void;
   onmessage: ((message: string) => void) | null;
@@ -7,6 +9,7 @@ export interface CdpConnection {
 
 export interface CdpRequest {
   runtime?: string;
+  stamp?: ConnectorStamp;
 }
 
 export type CdpHook = (request: CdpRequest) => Promise<CdpConnection>;
