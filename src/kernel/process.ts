@@ -92,6 +92,7 @@ import {
 import { KernelSocket, LoopbackNet } from './socket.ts';
 import { socketNames } from './socket-nodes.ts';
 import { SOCKET_OPS, type SocketSyscall, socketSyscall } from './socket-syscalls.ts';
+import { inSys, SysTree } from './sysfs.ts';
 import { testSyscallHook } from './test-hooks.ts';
 import { repeating } from './timer.ts';
 import type { KernelTty, Termios } from './tty.ts';
@@ -687,6 +688,10 @@ function timeLeft(req: WasmSyscall, started: number): WasmSyscall {
 export type StateListener = (state: 'stopped' | 'continued', sig: number) => void;
 
 export type SignalOutcome = DefaultAction | 'deliver' | 'forward';
+
+function kernelTree(path: string): boolean {
+  return inProc(path) || inSys(path);
+}
 
 export class WasmProcess {
   private exited = false;
@@ -1476,7 +1481,7 @@ export class WasmProcess {
     req: Extract<FdSyscall, { op: 'fd-open-vfs' }>,
     cancelled: AbortSignal
   ): Promise<number> {
-    if (inProc(req.path)) return this.openProc(req, req.path);
+    if (kernelTree(req.path)) return this.openProc(req, req.path);
     const device = req.orphan ? undefined : deviceAt(req.path);
     if (device) return this.openDevice(req, device);
     const alias = req.orphan
@@ -1763,6 +1768,10 @@ export class WasmProcess {
   ): Promise<OpenFile> {
     if (req.flags & WRITE_ACCESS || req.create || req.truncate || req.exclusive) {
       throw new KernelError('EROFS');
+    }
+    if (inSys(path)) {
+      const sys = new SysTree(() => this.options.devices?.list() ?? []);
+      return memoryFile(sys.read(path), path, req.position);
     }
     const tree = new ProcTree(
       {

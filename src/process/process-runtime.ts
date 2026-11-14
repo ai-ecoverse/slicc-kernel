@@ -83,6 +83,7 @@ import { SignalGate } from './process-signals.ts';
 import { createSocketKernel } from './process-sockets.ts';
 import { type ProcFs, useProcfs } from './procfs.ts';
 import { credAbi, type Owner, ownByCaller } from './realm-user.ts';
+import { type SysFs, useSysfs } from './sysfs.ts';
 
 function ownBytes(bytes: Uint8Array): Uint8Array {
   if (bytes.constructor === Uint8Array) return bytes;
@@ -691,6 +692,11 @@ function sigpipeSpared(transport: SyncSabTransport): boolean {
   return r.ok && !(r.kind === 'json' && r.json === 'terminate');
 }
 
+function ownDirs(Fs: ProcessFs, owners: boolean, sys: ProcessSys): void {
+  linuxDevices(Fs, owners);
+  useSysfs(Fs as unknown as SysFs, sys);
+}
+
 export async function runWasmProcess(
   init: WasmProcessInitMsg,
   port: SabPostLike,
@@ -797,7 +803,7 @@ export async function runWasmProcess(
   await initialized;
   const running = module as unknown as RunningModule;
   if (!hasStreams(running)) return runStdioOnly(running, init);
-  linuxDevices(running.FS, init.owners === true);
+  ownDirs(running.FS, init.owners === true, sys);
   const vfs = mountVfsIntoEmscripten(running.FS, {
     bridge: createSyncFsSabBridge(transport, bridgeFlags(init)),
     cwd: init.cwd,
