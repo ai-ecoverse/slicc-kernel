@@ -713,3 +713,231 @@ test('touch -m and touch -a of a node keep the omitted time (#1821)', TIMEOUT, a
   assert.equal(r.stderr, '');
   assert.equal(r.stdout, '981173106 1104537600\n981173106 1104537600\n1136073600 1104537600\n');
 });
+
+async function jsCommand(kernel, name, source) {
+  await kernel.writeFile(
+    `/node_modules/${name}/package.json`,
+    JSON.stringify({ name, slicc: { commands: { [name]: { abi: 'js', module: 'main.mjs' } } } })
+  );
+  await kernel.writeFile(`/node_modules/${name}/main.mjs`, source);
+}
+
+test(
+  'a hook that throws NoModificationAllowedError fails the open with EBUSY in every runtime',
+  TIMEOUT,
+  async (t) => {
+    const held = {
+      open() {
+        throw Object.assign(new Error('serial1 is open in serial (serial close serial1)'), {
+          name: 'NoModificationAllowedError',
+        });
+      },
+    };
+    const { kernel, bash } = await booted(t, { devices: held });
+    await kernel.devices.add({ path: 'ttyUSB0', mode: 0o600 });
+    await jsCommand(
+      kernel,
+      'jsopen',
+      `export default async function main(ctx) {
+  for (const open of [() => ctx.open('/dev/ttyUSB0', { read: true }), () => ctx.sync.open('/dev/ttyUSB0', { read: true })]) {
+    try {
+      await open();
+      await ctx.write(1, 'opened\\n');
+    } catch (err) {
+      await ctx.write(1, err.code + '\\n');
+    }
+  }
+}`
+    );
+    const r = await bash(
+      'cat /dev/ttyUSB0; echo "cat $?"; ttyprobe /dev/ttyUSB0 mget; echo "wasix $?"; jsopen'
+    );
+    assert.equal(r.stdout, 'cat 1\nwasix 1\nEBUSY\nEBUSY\n');
+    assert.match(r.stderr, /^cat: \/dev\/ttyUSB0: (Device or resource|Resource) busy$/m);
+    assert.match(r.stderr, /^open: (Device or resource|Resource) busy$/m);
+  }
+);
+
+const JS_META = `export default async function main(ctx) {
+  const [path, mode, uid, gid, atime, mtime] = ctx.argv.slice(1);
+  const out = [];
+  const step = async (name, call) => {
+    try {
+      await call();
+      out.push(name + ' done');
+    } catch (err) {
+      out.push(name + ' ' + err.code);
+    }
+  };
+  const sync = ctx.argv[0].endsWith('sync');
+  const fs = sync ? ctx.sync.fs : ctx.fs;
+  await step('chmod', () => fs.chmod(path, Number.parseInt(mode, 8)));
+  await step('chown', () => fs.chown(path, Number(uid), Number(gid)));
+  await step('utimes', () => fs.utimes(path, Number(atime), Number(mtime)));
+  const s = await ctx.fs.stat(path);
+  out.push([(s.mode & 0o7777).toString(8), s.uid, s.gid, s.atimeMs, s.mtimeMs].join(' '));
+  await ctx.write(1, out.join('\\n') + '\\n');
+}`;
+
+test(
+  'chmod, chown and utimes of a node from WASIX and JS programs follow the file rules and show in stat everywhere',
+  TIMEOUT,
+  async (t) => {
+    const { kernel, bash, devices, denials } = await booted(t);
+    await kernel.users.add({ name: 'cone', groups: ['dialout'] });
+    await kernel.devices.add({ path: 'ttyUSB0', group: 'dialout', mode: 0o640, links: ['l'] });
+    await jsCommand(kernel, 'jsmeta', JS_META);
+    await jsCommand(kernel, 'jsmetasync', JS_META);
+    await bash('ln -s /dev/ttyUSB0 /tmp/x');
+    const user = await bash(
+      [
+        'ttyprobe chmod /dev/ttyUSB0 666',
+        'ttyprobe chown /dev/serial/by-id/l 1000 20',
+        'ttyprobe utime /tmp/x 100 200',
+        'ttyprobe fchmod /dev/ttyUSB0 666',
+        'ttyprobe fchown /dev/ttyUSB0 1000 20',
+        'ttyprobe futimens /dev/ttyUSB0 300',
+        'jsmeta /dev/ttyUSB0 666 1000 20 1000 2000',
+        'jsmetasync /tmp/x 666 -1 0 1000 2000',
+      ].join('; '),
+      { user: 'cone' }
+    );
+    assert.equal(
+      user.stdout,
+      [
+        'chmod Operation not permitted',
+        'chown Operation not permitted',
+        'utime Operation not permitted',
+        'fchmod Operation not permitted',
+        'fchown Operation not permitted',
+        'futimens Operation not permitted',
+        'chmod EPERM',
+        'chown EPERM',
+        'utimes EPERM',
+        user.stdout.split('\n')[9],
+        'chmod EPERM',
+        'chown EPERM',
+        'utimes EPERM',
+        user.stdout.split('\n')[9],
+        '',
+      ].join('\n'),
+      user.stderr
+    );
+    assert.match(user.stdout.split('\n')[9], /^640 0 20 \d+ \d+$/);
+    assert.deepEqual(
+      denials.map((d) => [d.op, d.path, d.errno]),
+      ['chmod', 'chown', 'utimes', 'chmod', 'chown', 'utimes', 'chmod', 'chown', 'utimes']
+        .concat(['chmod', 'chown', 'utimes'])
+        .map((op) => [op, '/dev/ttyUSB0', 'EPERM'])
+    );
+    const root = await bash(
+      [
+        'ttyprobe chmod /dev/serial/by-id/l 600',
+        'ttyprobe chown /tmp/x 1000 20',
+        'ttyprobe utime /dev/ttyUSB0 100 200',
+        'ttyprobe utime /dev/ttyUSB0 omit 300',
+        'stat -c "%a %U %G %X %Y" /dev/ttyUSB0',
+        'ttyprobe fchmod /dev/ttyUSB0 660',
+        'ttyprobe fchown /dev/ttyUSB0 0 0',
+        'ttyprobe futimens /dev/ttyUSB0 400',
+        'stat -c "%a %u %g %X %Y" /dev/ttyUSB0',
+        'jsmeta /tmp/x 604 1000 20 5000 7000',
+        'jsmetasync /dev/serial/by-id/l 640 -1 0 9000 11000',
+        'stat -c "%a %u %g %X %Y" /dev/ttyUSB0',
+        'ttyprobe stat /dev/ttyUSB0',
+      ].join(' && ')
+    );
+    assert.equal(
+      root.stdout,
+      [
+        'chmod done',
+        'chown done',
+        'utime done',
+        'utime done',
+        '600 cone dialout 100 300',
+        'fchmod done',
+        'fchown done',
+        'futimens done',
+        '660 0 0 400 400',
+        'chmod done',
+        'chown done',
+        'utimes done',
+        '604 1000 20 5000 7000',
+        'chmod done',
+        'chown done',
+        'utimes done',
+        '640 1000 0 9000 11000',
+        '640 1000 0 9 11',
+        'stat mode=20640 uid=1000 gid=0',
+        '',
+      ].join('\n'),
+      root.stderr
+    );
+    const owner = await bash(
+      'ttyprobe chmod /dev/ttyUSB0 600 && ttyprobe utime /dev/ttyUSB0 50 60 && stat -c "%a %X %Y" /dev/ttyUSB0 && jsmeta /dev/ttyUSB0 640 -1 -1 70000 80000',
+      { user: 'cone' }
+    );
+    assert.equal(
+      owner.stdout,
+      'chmod done\nutime done\n600 50 60\nchmod done\nchown done\nutimes done\n640 1000 0 70000 80000\n',
+      owner.stderr
+    );
+    assert.equal(denials.length, 12);
+  }
+);
+
+test(
+  'a JS program chowns and retimes a regular file under the file rules, and a bad id or time is EINVAL, and /proc is EROFS',
+  TIMEOUT,
+  async (t) => {
+    const { kernel, bash } = await booted(t);
+    await kernel.users.add({ name: 'cone' });
+    await jsCommand(kernel, 'jsmeta', JS_META);
+    await jsCommand(kernel, 'jsmetasync', JS_META);
+    await jsCommand(
+      kernel,
+      'jsbad',
+      `export default async function main(ctx) {
+  const out = [];
+  for (const call of [
+    () => ctx.fs.chown('/tmp/f', 1.5, 0),
+    () => ctx.fs.chown('/tmp/f', -2, 0),
+    () => ctx.fs.chown('/tmp/f', 0, 0xffffffff),
+    () => ctx.fs.utimes('/tmp/f', Number.NaN, 0),
+    () => ctx.fs.utimes('/tmp/f', 0, '1'),
+    () => ctx.sync.fs.chown('/tmp/f', 0, null),
+    () => ctx.sync.fs.utimes('/tmp/f', Infinity, 0),
+    () => ctx.fs.chown('/tmp/missing', 0, 0),
+    () => ctx.sync.fs.utimes('/tmp/missing', 0, 0),
+    () => ctx.fs.chown('/proc/self/status', 0, 0),
+    () => ctx.sync.fs.utimes('/proc/uptime', 0, 0),
+  ]) {
+    try {
+      await call();
+      out.push('done');
+    } catch (err) {
+      out.push(err.code);
+    }
+  }
+  await ctx.write(1, out.join(' ') + '\\n');
+}`
+    );
+    const root = await bash('echo x > /tmp/f && jsmeta /tmp/f 640 1000 20 5000 7000 && jsbad');
+    assert.equal(
+      root.stdout,
+      'chmod done\nchown done\nutimes done\n640 1000 20 5000 7000\nEINVAL EINVAL EINVAL EINVAL EINVAL EINVAL EINVAL ENOENT ENOENT EROFS EROFS\n',
+      root.stderr
+    );
+    const owner = await bash(
+      'jsmetasync /tmp/f 600 0 -1 1000 2000 && stat -c "%a %u %X %Y" /tmp/f',
+      {
+        user: 'cone',
+      }
+    );
+    assert.equal(
+      owner.stdout,
+      'chmod done\nchown EPERM\nutimes done\n600 1000 20 1000 2000\n600 1000 1 2\n',
+      owner.stderr
+    );
+  }
+);

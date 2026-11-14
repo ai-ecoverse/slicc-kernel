@@ -69,6 +69,44 @@ static int look(int argc, char **argv) {
     printf("nofollow %s\n", fd < 0 ? strerror(errno) : "opened");
   } else if (strcmp(op, "access") == 0) {
     printf("access %d\n", access(path, F_OK));
+  } else if (strcmp(op, "chmod") == 0 && argc > 3) {
+    int r = chmod(path, (mode_t)strtol(argv[3], 0, 8));
+    printf("chmod %s\n", r == 0 ? "done" : strerror(errno));
+  } else if ((strcmp(op, "chown") == 0 || strcmp(op, "lchown") == 0) && argc > 4) {
+    uid_t u = (uid_t)atoi(argv[3]);
+    gid_t g = (gid_t)atoi(argv[4]);
+    int r = op[0] == 'c' ? chown(path, u, g) : lchown(path, u, g);
+    printf("%s %s\n", op, r == 0 ? "done" : strerror(errno));
+  } else if (strcmp(op, "utime") == 0 && argc > 4) {
+    struct timespec t[2];
+    for (int i = 0; i < 2; i++) {
+      const char *s = argv[3 + i];
+      t[i].tv_sec = strcmp(s, "omit") == 0 || strcmp(s, "now") == 0 ? 0 : atoll(s);
+      t[i].tv_nsec = strcmp(s, "omit") == 0 ? UTIME_OMIT : strcmp(s, "now") == 0 ? UTIME_NOW : 0;
+    }
+    int r = utimensat(AT_FDCWD, path, t, 0);
+    printf("utime %s\n", r == 0 ? "done" : strerror(errno));
+  } else if ((strcmp(op, "fchmod") == 0 && argc > 3) || (strcmp(op, "fchown") == 0 && argc > 4) ||
+             (strcmp(op, "futimens") == 0 && argc > 3)) {
+    int fd = open(path, O_RDONLY | O_NOCTTY);
+    if (fd < 0) {
+      printf("%s open %s\n", op, strerror(errno));
+      return 0;
+    }
+    int r;
+    if (op[1] == 'u') {
+      struct timespec t[2] = {{atoll(argv[3]), 0}, {atoll(argv[3]), 0}};
+      r = futimens(fd, t);
+    } else if (op[3] == 'm')
+      r = fchmod(fd, (mode_t)strtol(argv[3], 0, 8));
+    else
+      r = fchown(fd, (uid_t)atoi(argv[3]), (gid_t)atoi(argv[4]));
+    printf("%s %s\n", op, r == 0 ? "done" : strerror(errno));
+    close(fd);
+  } else if (strcmp(op, "times") == 0) {
+    struct stat st;
+    if (stat(path, &st) != 0) printf("times errno=%d\n", errno);
+    else printf("times %lld %lld\n", (long long)st.st_atim.tv_sec, (long long)st.st_mtim.tv_sec);
   } else if (strcmp(op, "tcsetw") == 0) {
     int fd = open(path, O_RDWR | O_NOCTTY);
     struct termios t;
