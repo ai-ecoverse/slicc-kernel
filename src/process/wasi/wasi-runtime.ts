@@ -1,4 +1,5 @@
 import { physicalPath } from '../../fs/physical-path.ts';
+import type { DeviceNodeInfo } from '../../kernel/devices.ts';
 import { type CwdAnswer, HeldCwd } from '../../kernel/held-cwd.ts';
 import type { MountLine, ProcessListing } from '../../kernel/proc-info.ts';
 import type { WasmSyscall } from '../../kernel/process.ts';
@@ -33,6 +34,7 @@ import { ptsBridge } from './wasi-ptsfs.ts';
 import { WasiSigmask } from './wasi-sigmask.ts';
 import { WasiSignals } from './wasi-signals.ts';
 import { WasiStats } from './wasi-stats.ts';
+import { sysfsBridge } from './wasi-sysfs.ts';
 import { MAIN_TID, ThreadExit, threadCap, WasiThreads } from './wasi-threads.ts';
 import { AsyncifyDriver, type WasiForkState } from './wasix-fork.ts';
 import { WasixHost } from './wasix-host.ts';
@@ -555,6 +557,10 @@ function procTree(call: (req: WasmSyscall) => unknown, pid: number): ProcTree {
   );
 }
 
+function devNodes(call: (req: WasmSyscall) => unknown): () => DeviceNodeInfo[] {
+  return () => call({ op: 'fd-dev-nodes' }) as DeviceNodeInfo[];
+}
+
 function exportedTable(instance: WebAssembly.Instance): WebAssembly.Table | undefined {
   const table = instance.exports.__indirect_function_table;
   return table instanceof WebAssembly.Table ? table : undefined;
@@ -783,17 +789,20 @@ export async function runWasiProcess(
     parent: () => identify(transport, init).ppid,
     kernel: { sys: traced(stats, 'kernel', sys), call },
     fs: ptsBridge(
-      procfsBridge(
-        cachingBridge(
-          traced(
-            stats,
-            'fs',
-            createSyncFsSabBridge(transport, { ...ownersOf(init), direct: true })
+      sysfsBridge(
+        procfsBridge(
+          cachingBridge(
+            traced(
+              stats,
+              'fs',
+              createSyncFsSabBridge(transport, { ...ownersOf(init), direct: true })
+            ),
+            undefined,
+            threads?.ids
           ),
-          undefined,
-          threads?.ids
+          procTree(call, id.pid)
         ),
-        procTree(call, id.pid)
+        devNodes(call)
       ),
       call
     ),
@@ -945,13 +954,16 @@ export async function runWasiThread(init: WasmThreadInitMsg, port: SabPostLike):
     parent: () => identify(transport, init).ppid,
     kernel: { sys, call },
     fs: ptsBridge(
-      procfsBridge(
-        cachingBridge(
-          createSyncFsSabBridge(transport, { ...ownersOf(init), direct: true }),
-          undefined,
-          threads.ids
+      sysfsBridge(
+        procfsBridge(
+          cachingBridge(
+            createSyncFsSabBridge(transport, { ...ownersOf(init), direct: true }),
+            undefined,
+            threads.ids
+          ),
+          procTree(call, id.pid)
         ),
-        procTree(call, id.pid)
+        devNodes(call)
       ),
       call
     ),

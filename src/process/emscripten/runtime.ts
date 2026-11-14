@@ -1,3 +1,4 @@
+import type { DeviceNodeInfo } from '../../kernel/devices.ts';
 import type { MountLine, ProcessListing } from '../../kernel/proc-info.ts';
 import type { WasmSyscall } from '../../kernel/process.ts';
 import { WASM_PROCESS_READY, type WasmProcessInitMsg } from '../../kernel/protocol.ts';
@@ -18,6 +19,7 @@ import { WasiExit, WasiHost } from '../wasi/wasi-host.ts';
 import { ProcTree, procfsBridge } from '../wasi/wasi-procfs.ts';
 import { ptsBridge } from '../wasi/wasi-ptsfs.ts';
 import { createImportedMemory, type TransportFactory, wireSignals } from '../wasi/wasi-runtime.ts';
+import { sysfsBridge } from '../wasi/wasi-sysfs.ts';
 import type { EmContext, EmExports } from './context.ts';
 import { EmCwd } from './cwd.ts';
 import { dnsImports } from './dns.ts';
@@ -356,7 +358,13 @@ export async function runEmscriptenProcess(
     ppid: id.ppid,
     parent: () => identify(transport, init).ppid,
     kernel: { sys, call },
-    fs: ptsBridge(procfsBridge(cachingBridge(raw), procTree(call, id.pid)), call),
+    fs: ptsBridge(
+      sysfsBridge(
+        procfsBridge(cachingBridge(raw), procTree(call, id.pid)),
+        () => call({ op: 'fd-dev-nodes' }) as DeviceNodeInfo[]
+      ),
+      call
+    ),
     bare: true,
   }).attach();
   if (fork) host.fds.restore(fork.fds, fork.cloexec);

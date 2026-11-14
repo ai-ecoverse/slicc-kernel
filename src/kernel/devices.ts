@@ -61,12 +61,27 @@ export interface DeviceHook {
   open(request: DeviceOpenRequest): DeviceStreams | Promise<DeviceStreams>;
 }
 
+export interface DeviceSys {
+  idVendor: string;
+  idProduct: string;
+  manufacturer?: string;
+  product?: string;
+  serial?: string;
+}
+
 export interface DeviceSpec {
   path: string;
   owner?: string | number;
   group?: string | number;
   mode?: number;
   links?: readonly string[];
+  sys?: {
+    idVendor?: string | number;
+    idProduct?: string | number;
+    manufacturer?: string;
+    product?: string;
+    serial?: string;
+  };
 }
 
 export interface DeviceNodeInfo {
@@ -80,6 +95,7 @@ export interface DeviceNodeInfo {
   atimeMs: number;
   mtimeMs: number;
   ctimeMs: number;
+  sys?: DeviceSys;
 }
 
 export interface DeviceMetaChange {
@@ -146,6 +162,41 @@ function modeOf(mode: unknown): number {
   if (!Number.isInteger(mode) || (mode as number) < 0 || (mode as number) > 0o7777)
     throw invalid('mode must be permission bits');
   return mode as number;
+}
+
+const HEX_ID = /^(?:0x)?[0-9a-f]{1,4}$/i;
+const STRING_MAX = 255;
+
+function usbId(value: unknown, what: string): string {
+  if (value === undefined) return '0000';
+  if (Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 0xffff)
+    return (value as number).toString(16).padStart(4, '0');
+  if (typeof value !== 'string' || !HEX_ID.test(value))
+    throw invalid(`${what} must be a 16-bit hex id`);
+  return value.replace(/^0x/i, '').toLowerCase().padStart(4, '0');
+}
+
+function usbString(value: unknown, what: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || value.length > STRING_MAX || /[\0-\x1f\x7f]/.test(value))
+    throw invalid(`${what} must be a printable string of at most ${STRING_MAX} characters`);
+  return value;
+}
+
+function sysOf(sys: unknown): DeviceSys | undefined {
+  if (sys === undefined) return undefined;
+  if (typeof sys !== 'object' || sys === null || Array.isArray(sys))
+    throw invalid('sys must be an object');
+  const given = sys as Record<string, unknown>;
+  const out: DeviceSys = {
+    idVendor: usbId(given.idVendor, 'idVendor'),
+    idProduct: usbId(given.idProduct, 'idProduct'),
+  };
+  for (const key of ['manufacturer', 'product', 'serial'] as const) {
+    const text = usbString(given[key], key);
+    if (text !== undefined) out[key] = text;
+  }
+  return out;
 }
 
 async function idOf(
@@ -223,6 +274,7 @@ export class DeviceNodes {
     if (spec.links !== undefined && !Array.isArray(spec.links))
       throw invalid('links must be a list');
     const links = (spec.links ?? []).map(linkPath);
+    const sys = sysOf(spec.sys);
     const uid = await idOf(spec.owner, (name) => this.lookup.userId(name));
     const gid = await idOf(spec.group, (name) => this.lookup.groupId(name));
     if (!this.hooks.has(client)) throw refused('ENOTSUP', 'this client has no devices hook');
@@ -243,6 +295,7 @@ export class DeviceNodes {
       atimeMs: Date.now(),
       mtimeMs: Date.now(),
       ctimeMs: Date.now(),
+      ...(sys ? { sys } : {}),
     };
     this.nodes.set(path, node);
     for (const link of links) this.links.set(link, node);
@@ -265,7 +318,7 @@ export class DeviceNodes {
   list(): DeviceNodeInfo[] {
     return [...this.nodes.values()]
       .sort((a, b) => (a.path < b.path ? -1 : 1))
-      .map(({ path, uid, gid, mode, major, minor, links, atimeMs, mtimeMs, ctimeMs }) => ({
+      .map(({ path, uid, gid, mode, major, minor, links, atimeMs, mtimeMs, ctimeMs, sys }) => ({
         path,
         uid,
         gid,
@@ -276,6 +329,7 @@ export class DeviceNodes {
         atimeMs,
         mtimeMs,
         ctimeMs,
+        ...(sys ? { sys: { ...sys } } : {}),
       }));
   }
 
