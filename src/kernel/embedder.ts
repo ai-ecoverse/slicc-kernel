@@ -72,11 +72,12 @@ export function lineOf(err: unknown): string {
   return (text.split('\n')[0] ?? '').slice(0, 200);
 }
 
-const ERRNOS: Readonly<Record<string, 'EACCES' | 'ENOTSUP' | 'ENOENT'>> = {
+const ERRNOS: Readonly<Record<string, 'EACCES' | 'ENOTSUP' | 'ENOENT' | 'EBUSY'>> = {
   NotAllowedError: 'EACCES',
   AbortError: 'EACCES',
   NotSupportedError: 'ENOTSUP',
   NotFoundError: 'ENOENT',
+  NoModificationAllowedError: 'EBUSY',
 };
 
 export function embedderFailure(err: unknown): KernelError {

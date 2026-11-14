@@ -2,12 +2,13 @@ import { inDevTree } from '../../fs/dev-removal.ts';
 import { physicalLeaf, physicalPath } from '../../fs/physical-path.ts';
 import { localCpuNanos } from '../../kernel/cpu-clock.ts';
 import { type Cred, type CredChange, MAX_GROUPS } from '../../kernel/cred.ts';
+import { DEVICE_NAME, type DeviceMetaChange } from '../../kernel/devices.ts';
 import type { DeviceMeta, KernelFdKind } from '../../kernel/fd-table.ts';
 import type { HeldCwd } from '../../kernel/held-cwd.ts';
 import type { FdInfo } from '../../kernel/process.ts';
 import { KERNEL_SIGINFO, SIG, type SigInfo } from '../../kernel/signals.ts';
 import type { SyncFsBridgeStat, SyncFsPosixBridge } from '../../realm/sync-fs-wire.ts';
-import { devFdStat, devStat, devSync, inDev } from '../js/js-dev.ts';
+import { devFdStat, devMeta, devStat, devSync, inDev } from '../js/js-dev.ts';
 import type { LockHeld } from '../process-locks.ts';
 import { type LockedFile, type LockHost, lockImports } from './slicc-lock.ts';
 import { semImports } from './slicc-sem.ts';
@@ -115,6 +116,23 @@ const AT_EACCESS = 2;
 
 const ROOT_IDS = Object.freeze({ uid: 0, gid: 0 });
 const GONE: ReadonlySet<string> = new Set(['ENOENT', 'ENOTDIR']);
+
+interface TimesChange {
+  atimeMs: number | null;
+  mtimeMs: number | null;
+  now: boolean;
+}
+
+function timesChange(atim: bigint, mtim: bigint, flags: number): TimesChange {
+  const now = Date.now();
+  const pick = (set: number, setNow: number, value: bigint): number | null =>
+    flags & setNow ? now : flags & set ? Number(value / NS_PER_MS) : null;
+  return {
+    atimeMs: pick(FSTFLAGS.ATIM, FSTFLAGS.ATIM_NOW, atim),
+    mtimeMs: pick(FSTFLAGS.MTIM, FSTFLAGS.MTIM_NOW, mtim),
+    now: (flags & (FSTFLAGS.ATIM | FSTFLAGS.MTIM)) === 0,
+  };
+}
 
 function idOf(value: number): number | undefined {
   return value >>> 0 === 0xffffffff ? undefined : value >>> 0;
@@ -384,11 +402,6 @@ export class WasiHost {
       return path;
     };
     const modeOf = (st: { mode?: number }) => (st.mode ?? 0) & 0o7777;
-    const chown = (path: string, uid: number, gid: number, follow: boolean, handle?: number) => {
-      const { chown: own } = this.o.fs;
-      if (!own) throw new WasiError('ENOSYS');
-      own.call(this.o.fs, path, idOf(uid), idOf(gid), follow, handle);
-    };
     const caller = (): [number, number] => {
       const cred = this.creds.get();
       return [cred.euid, cred.egid];
@@ -458,12 +471,13 @@ export class WasiHost {
     };
     return wrap({
       fd_chown: (fd: number, uid: number, gid: number) => {
+        if (this.serialFd(fd)) return void this.o.kernel.sys.fdChown?.(fd, idOf(uid), idOf(gid));
         const e = fds.get(fd);
         const handle = e.type === 'file' ? e.file.buffer.handle : undefined;
-        void chown(pathOf(fd), uid, gid, true, handle);
+        void this.chownPath(pathOf(fd), uid, gid, true, handle);
       },
       path_chown: (dirfd: number, p: number, l: number, uid: number, gid: number, flags: number) =>
-        void chown(at(dirfd, p, l), uid, gid, (flags & AT_SYMLINK_NOFOLLOW) === 0),
+        void this.pathChown(at(dirfd, p, l), uid, gid, (flags & AT_SYMLINK_NOFOLLOW) === 0),
       fd_owner: (fd: number, out: number) => {
         if (!this.o.fs.owners) throw new WasiError('ENOTSUP');
         owner(fdOwned(fd), out);
@@ -504,9 +518,15 @@ export class WasiHost {
         const kind = flags & AT_EACCESS ? 'eaccess' : 'access';
         this.o.fs.access?.(path, amode & 7, kind, nofollow);
       },
-      fd_chmod: (fd: number, mode: number) => void this.o.fs.chmod(pathOf(fd), mode & 0o7777),
-      path_chmod: (dirfd: number, p: number, l: number, mode: number, flags: number) =>
-        void this.o.fs.chmod(target(at(dirfd, p, l), flags), mode & 0o7777),
+      fd_chmod: (fd: number, mode: number) => {
+        if (this.serialFd(fd)) return void this.o.kernel.sys.fdChmod?.(fd, mode & 0o7777);
+        this.o.fs.chmod(pathOf(fd), mode & 0o7777);
+      },
+      path_chmod: (dirfd: number, p: number, l: number, mode: number, flags: number) => {
+        const path = target(at(dirfd, p, l), flags);
+        const bits = mode & 0o7777;
+        this.devChange(path, true, { mode: bits }, () => this.o.fs.chmod(path, bits));
+      },
       path_mkfifo: (dirfd: number, p: number, l: number, mode: number) => {
         const { mkfifo } = this.o.fs;
         if (!mkfifo) return E.NOSYS;
@@ -533,6 +553,17 @@ export class WasiHost {
         mem.view().setUint32(out, mode, true);
       },
     });
+  }
+
+  private pathChown(path: string, uid: number, gid: number, follow: boolean): void {
+    const ids = { uid: idOf(uid), gid: idOf(gid) };
+    this.devChange(path, follow, ids, () => this.chownPath(path, uid, gid, follow));
+  }
+
+  private chownPath(path: string, uid: number, gid: number, follow: boolean, handle?: number) {
+    const { chown: own } = this.o.fs;
+    if (!own) throw new WasiError('ENOSYS');
+    own.call(this.o.fs, path, idOf(uid), idOf(gid), follow, handle);
   }
 
   private lockHost(mem: WasiMemory): LockHost {
@@ -911,6 +942,10 @@ export class WasiHost {
           e.file.flush();
           this.setTimes(e.file.path, atim, mtim, flags);
         } else if (e.type === 'dir') this.setTimes(e.path, atim, mtim, flags);
+        else if (this.serialFd(fd)) {
+          const { atimeMs, mtimeMs, now } = timesChange(atim, mtim, flags);
+          this.o.kernel.sys.fdUtimes?.(fd, atimeMs, mtimeMs, now);
+        }
       },
       fd_prestat_get: (fd: number, out: number) => {
         const name = new TextEncoder().encode(fds.preopen(fd).preopen);
@@ -1427,6 +1462,32 @@ export class WasiHost {
     );
   }
 
+  private serialFd(fd: number): boolean {
+    const e = this.fds.get(fd);
+    if (e.type !== 'kernel' || this.fds.kind(fd, e) !== 'tty') return false;
+    const { terminal } = this.o.kernel.call({ op: 'fd-info', fd }) as FdInfo;
+    return terminal?.startsWith('/dev/') === true && DEVICE_NAME.test(terminal.slice(5));
+  }
+
+  private devChange(
+    path: string,
+    follow: boolean,
+    change: DeviceMetaChange,
+    plain: () => void
+  ): void {
+    const dev = {
+      json: (req: Parameters<WasiHost['o']['kernel']['call']>[0]) => this.o.kernel.call(req),
+    };
+    if (devSync(dev, devMeta(path, follow, change))) return;
+    try {
+      plain();
+    } catch (err) {
+      const gone = (err as { code?: string }).code === 'ENOENT';
+      const linked = gone ? this.linkedDev(path, follow) : undefined;
+      if (linked === undefined || !devSync(dev, devMeta(linked, true, change))) throw err;
+    }
+  }
+
   private linkedDev(path: string, follow: boolean): string | undefined {
     if (!follow) return undefined;
     const real = physicalLeaf(this.o.fs, path);
@@ -1595,6 +1656,18 @@ export class WasiHost {
   private setTimes(path: string, atim: bigint, mtim: bigint, flags: number, follow = true): void {
     const asked = FSTFLAGS.ATIM | FSTFLAGS.ATIM_NOW | FSTFLAGS.MTIM | FSTFLAGS.MTIM_NOW;
     if (this.o.fs.owners && (flags & asked) === 0) return;
+    this.devChange(path, follow, timesChange(atim, mtim, flags), () =>
+      this.fileTimes(path, atim, mtim, flags, follow)
+    );
+  }
+
+  private fileTimes(
+    path: string,
+    atim: bigint,
+    mtim: bigint,
+    flags: number,
+    follow: boolean
+  ): void {
     const now = Date.now();
     let current: SyncFsBridgeStat | undefined;
     const statOf = follow ? this.o.fs.stat.bind(this.o.fs) : this.o.fs.lstat.bind(this.o.fs);

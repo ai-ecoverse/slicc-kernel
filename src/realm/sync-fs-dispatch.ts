@@ -838,7 +838,15 @@ export async function dispatchSyncFs(req: SyncFsRequest): Promise<SyncFsResult> 
   }
 }
 
-const DEV_PROBES: ReadonlySet<string> = new Set(['stat', 'lstat', 'read', 'exists']);
+const DEV_PROBES: ReadonlySet<string> = new Set([
+  'stat',
+  'lstat',
+  'read',
+  'exists',
+  'chmod',
+  'chown',
+  'utimes',
+]);
 
 async function devsOf(
   entry: SyncFsTokenEntry,
