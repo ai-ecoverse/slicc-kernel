@@ -2,6 +2,7 @@ import { HOST_SOURCE, PROCESS_SOURCE } from 'slicc:cloudflare-sources';
 import { remoteWorker } from './async/remote-worker.ts';
 import type { MessagePortLike } from './client/protocol.ts';
 import { type ServedClient, serveClient } from './client/serve-client.ts';
+import { tick } from './cloudflare/clock-skew.ts';
 import { Images } from './cloudflare/images.ts';
 import { ISOLATE_WAIT_MS, IsolateGate, MAX_ISOLATES } from './cloudflare/isolates.ts';
 import {
@@ -132,7 +133,7 @@ function isolateMemory(options: CloudflareKernelOptions): IsolateMemory {
   return {
     ...(memory !== undefined ? { budget: memory } : {}),
     ...(perInstance !== undefined ? { perInstance } : {}),
-    ...(options.clock ? { clock: options.clock } : {}),
+    clock: options.clock ?? tick,
   };
 }
 

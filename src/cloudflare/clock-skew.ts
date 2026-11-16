@@ -20,6 +20,10 @@ function later(req: Timed, lag: number): Timed {
   return req;
 }
 
+export function tick(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 export function behindProcess(message: unknown, sent: unknown, now = Date.now()): unknown {
   const call = unthreaded(message) as { type?: unknown; req?: unknown } | null;
   if (call?.type !== ASYNC_SYSCALL || !call.req || typeof call.req !== 'object') return message;
