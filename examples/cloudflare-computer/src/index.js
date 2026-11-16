@@ -14,9 +14,12 @@ import { PACKAGES } from './packages.js';
 const MOUNT = '/workspace';
 const ECHO = 'echo.test';
 
-function outbound(url, init) {
-  if (new URL(url).hostname !== ECHO) return fetch(url, init);
-  return new Response(`${init.method} ${url}\n`, { headers: { 'x-answered-by': 'the Worker' } });
+function outbound(self) {
+  return async (url, init) => {
+    if (new URL(url).hostname !== ECHO) return fetch(url, init);
+    const text = await self().echo(init.method, url);
+    return new Response(text, { headers: { 'x-answered-by': 'the Worker' } });
+  };
 }
 
 function keyOf(request) {
@@ -99,6 +102,10 @@ export class Computer extends DurableObject {
     return Date.now();
   }
 
+  echo(method, url) {
+    return `${method} ${url}\n`;
+  }
+
   kernel() {
     this.booting ??= (async () => {
       const storage = this.ctx.storage;
@@ -109,7 +116,7 @@ export class Computer extends DurableObject {
         sql: storage.sql,
         sqlite: { transaction: (fn) => storage.transactionSync(fn) },
         network: {
-          transport: fetchTransport({ fetch: outbound, redirect: 'manual' }),
+          transport: fetchTransport({ fetch: outbound(self), redirect: 'manual' }),
           tlsEngine: compiledTlsEngine(createTlsEngine, tlsWasm),
         },
       });

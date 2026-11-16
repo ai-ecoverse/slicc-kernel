@@ -172,6 +172,15 @@ describe('the Computer example Worker', { concurrency: false }, () => {
     assert.equal((await read('/workspace/echo.txt')).text, 'GET https://echo.test/a?b=1\n');
   });
 
+  test("after forty timed waits in one run, a call into the object's own namespace still answers", async (t) => {
+    if (skipped(t)) return;
+    const result = await exec(
+      'for i in $(seq 40); do sleep 0.01; done; curl -sS http://echo.test/after-sleeps'
+    );
+    assert.equal(result.stderr, '');
+    assert.equal(result.stdout, 'GET http://echo.test/after-sleeps\n');
+  });
+
   test('a pipeline of eight processes redirected into a file', async (t) => {
     if (skipped(t)) return;
     await put('/workspace/fruit/long.txt', 'pear\napple\nfig\napple\nkiwi\napple\nfig\n');
