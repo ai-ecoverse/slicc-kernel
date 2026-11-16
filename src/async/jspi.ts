@@ -22,28 +22,47 @@ const AsyncFunction = (async () => {}).constructor;
 
 const waiters = new WeakMap<ArrayBufferLike, AsyncWaiter>();
 
-interface MemoryWaiter {
-  memory: WebAssembly.Memory;
-  waiter: AsyncWaiter;
+interface Sleeper {
+  index: number;
+  wake: () => void;
 }
 
-const memories = new Set<MemoryWaiter>();
+const sleepers = new WeakMap<ArrayBufferLike, Set<Sleeper>>();
+
+export const localWaiter: AsyncWaiter = (typed, index, value, timeout) => {
+  if (Atomics.load(typed, index) !== value) return Promise.resolve('not-equal');
+  if (timeout !== undefined && Number.isFinite(timeout)) return Promise.resolve('timed-out');
+  let set = sleepers.get(typed.buffer);
+  if (!set) {
+    set = new Set();
+    sleepers.set(typed.buffer, set);
+  }
+  const own = set;
+  return new Promise((resolve) => {
+    const sleeper: Sleeper = {
+      index,
+      wake: () => {
+        own.delete(sleeper);
+        resolve('ok');
+      },
+    };
+    own.add(sleeper);
+  });
+};
+
+export function atomicsNotify(typed: Int32Array, index: number, count?: number): number {
+  let woken = 0;
+  for (const sleeper of [...(sleepers.get(typed.buffer) ?? [])]) {
+    if (count !== undefined && woken >= count) break;
+    if (sleeper.index !== index) continue;
+    sleeper.wake();
+    woken++;
+  }
+  return woken + Atomics.notify(typed, index, count);
+}
 
 export function registerWaiter(buffer: ArrayBufferLike, waiter: AsyncWaiter): void {
   waiters.set(buffer, waiter);
-}
-
-export function registerMemoryWaiter(memory: WebAssembly.Memory, waiter: AsyncWaiter): () => void {
-  const entry = { memory, waiter };
-  memories.add(entry);
-  return () => void memories.delete(entry);
-}
-
-function waiterOf(buffer: ArrayBufferLike): AsyncWaiter | undefined {
-  const known = waiters.get(buffer);
-  if (known) return known;
-  for (const entry of memories) if (entry.memory.buffer === buffer) return entry.waiter;
-  return undefined;
 }
 
 export async function atomicsWait(
@@ -52,7 +71,7 @@ export async function atomicsWait(
   value: number,
   timeout?: number
 ): Promise<WaitResult> {
-  const waiter = waiterOf(typed.buffer);
+  const waiter = waiters.get(typed.buffer);
   if (waiter) return waiter(typed, index, value, timeout);
   if (Atomics.load(typed, index) !== value) return 'not-equal';
   if (timeout !== undefined && timeout <= 0) return 'timed-out';

@@ -1,10 +1,11 @@
 import type {
   ForkState,
   HeldCwdInit,
+  WASM_THREAD_INIT,
   WasmProcessInitMsg,
   WasmProgram,
 } from '../kernel/protocol.ts';
-import type { SyncSabRequestBody } from '../realm/sync-sab-wire.ts';
+import type { BlockedMask, SyncSabRequestBody } from '../realm/sync-sab-wire.ts';
 import type { ForkSnapshotRef } from './snapshots.ts';
 
 export const ASYNC_SYSCALL = 'async-syscall';
@@ -14,6 +15,34 @@ export const ASYNC_WORDS = 'async-words';
 export const ASYNC_MIRROR = 'async-mirror';
 export const ASYNC_SNAPSHOT = 'async-snapshot';
 export const ASYNC_SNAPSHOT_TAKEN = 'async-snapshot-taken';
+export const ASYNC_CANCEL = 'async-cancel';
+export const ASYNC_THREAD = 'async-thread';
+
+export interface AsyncCancelMsg {
+  type: typeof ASYNC_CANCEL;
+  n: number;
+}
+
+export interface AsyncThreadMsg {
+  type: typeof ASYNC_THREAD;
+  channel: number;
+  message?: unknown;
+  closed?: string;
+}
+
+export function isThreadMsg(message: unknown): message is AsyncThreadMsg {
+  const data = message as Partial<AsyncThreadMsg> | null | undefined;
+  return data?.type === ASYNC_THREAD && typeof data.channel === 'number';
+}
+
+export function unthreaded(message: unknown): unknown {
+  return isThreadMsg(message) ? message.message : message;
+}
+
+export function rethreaded(message: unknown, inner: unknown): unknown {
+  if (!isThreadMsg(message)) return inner;
+  return inner === message.message ? message : { ...message, message: inner };
+}
 
 export interface AsyncSnapshotMsg {
   type: typeof ASYNC_SNAPSHOT;
@@ -87,6 +116,19 @@ export type AsyncProcessInit = Omit<
   mirror: InitMirror;
   maxMessageBytes?: number;
 };
+
+export interface AsyncThread {
+  tid: number;
+  arg: number;
+  blocked?: BlockedMask;
+}
+
+export type AsyncThreadInit = Omit<AsyncProcessInit, 'type' | 'fork' | 'fds'> & {
+  type: typeof WASM_THREAD_INIT;
+  thread: AsyncThread;
+};
+
+export type AsyncInit = AsyncProcessInit | AsyncThreadInit;
 
 export interface AsyncSyscallMsg {
   type: typeof ASYNC_SYSCALL;

@@ -9,6 +9,8 @@ export const config = {
     typeSeed('src/realm/sync-sab-bridge.ts', 'AtomicsWaitLike'),
     typeSeed('src/kernel/cpu-clock.ts', 'rawWait'),
     returnSeed('src/process/wasi/wasm-reentry.ts', 'reentered'),
+    memberSeed('src/process/wasi/wasi-futex.ts', 'Futexes', 'wait'),
+    memberSeed('src/process/wasi/wasi-futex.ts', 'Futexes', 'pause'),
   ],
   asyncCallbacks: ['Promise.then', 'Promise.catch', 'Promise.finally'],
   lostInto: ['WebAssembly.ImportValue', 'WebAssembly.ModuleImports', 'WebAssembly.Imports'],
@@ -17,6 +19,7 @@ export const config = {
   ],
   replaceCalls: [
     { lib: 'Atomics.wait', with: 'atomicsWait', await: true },
+    { lib: 'Atomics.notify', with: 'atomicsNotify' },
     { lib: 'WebAssembly.Module', with: 'refusedModule' },
     { lib: 'WebAssembly.compile', with: 'refusedModule' },
   ],

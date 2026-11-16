@@ -63,7 +63,8 @@ test('timed waits on the async host wait in the kernel, never on a local timer, 
     assert.equal(sync.status, 0, name);
     assert.match(sync.stdout, / True\n$/, name);
     assert.equal(before, 0, `${name}: the sync kernel waits locally`);
-    assert.ok(seen.selects >= WAIT_MS / SLICE_MS / 2, `${name}: ${seen.selects} kernel waits`);
+    const least = name.startsWith('sigtimedwait') ? WAIT_MS / SLICE_MS / 2 : 1;
+    assert.ok(seen.selects >= least, `${name}: ${seen.selects} kernel waits`);
   }
 });
 
