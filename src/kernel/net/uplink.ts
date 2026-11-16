@@ -60,7 +60,7 @@ export interface NetworkUplink {
   readonly traits: UplinkTraits;
   readonly routes?: RouteTable;
   readonly nameserver?: string;
-  resolve(
+  resolve?(
     name: string,
     family: ResolveFamily,
     signal?: AbortSignal
@@ -178,7 +178,7 @@ export function serveUplink(peer: UplinkPeer, uplink: NetworkUplink): UplinkServ
           return run(call.uid, async (signal) => ({
             uplink: 'resolved',
             uid: call.uid,
-            ...answerOf(await uplink.resolve(call.name, call.family, signal)),
+            ...answerOf((await uplink.resolve?.(call.name, call.family, signal)) ?? []),
           }));
         case 'dial':
           return run(call.uid, (signal) => dial(call, signal));
