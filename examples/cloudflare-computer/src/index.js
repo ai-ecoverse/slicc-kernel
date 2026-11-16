@@ -98,10 +98,6 @@ export class Computer extends DurableObject {
     this.workspace = this.open();
   }
 
-  now() {
-    return Date.now();
-  }
-
   echo(method, url) {
     return `${method} ${url}\n`;
   }
@@ -112,7 +108,6 @@ export class Computer extends DurableObject {
       const self = () => this.env.COMPUTER.get(this.ctx.id);
       const kernel = await createCloudflareKernel({
         loader: this.env.LOADER,
-        clock: () => self().now(),
         sql: storage.sql,
         sqlite: { transaction: (fn) => storage.transactionSync(fn) },
         network: {

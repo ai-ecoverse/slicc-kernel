@@ -271,17 +271,12 @@ import { DurableObject } from 'cloudflare:workers';
 import { createCloudflareKernel } from '@ai-ecoverse/slicc-kernel/cloudflare';
 
 export class Kernel extends DurableObject {
-  now() {
-    return Date.now();
-  }
-
   kernel() {
     const { storage } = this.ctx;
     this.booting ??= createCloudflareKernel({
       loader: this.env.LOADER,
       sql: storage.sql,
       sqlite: { transaction: (fn) => storage.transactionSync(fn) },
-      clock: () => this.env.KERNEL.get(this.ctx.id).now(),
     });
     return this.booting;
   }
@@ -302,7 +297,7 @@ The Worker needs a Worker Loader binding (`worker_loaders`) and a SQLite-backed 
 | `loader` | required | the Worker Loader binding |
 | `sql`, `sqlite` | none | the Durable Object's `ctx.storage.sql`, and `{ transaction, writeBehind }`: the root file system and its POSIX metadata live in tables prefixed `slicc_` |
 | `root`, `meta`, `ranged` | `memoryRoot()` | a root of your own in place of `sql` |
-| `clock` | none | called before every timed wait; pass a call into the Durable Object's own namespace, as above. Without it, `sleep` and timeouts can end early |
+| `clock` | a timer of 0 ms | awaited before every timed wait, so that the object's clock has moved on when the kernel reads it: a Workers clock stands still while code computes, and a timer moves it. Don't pass a call into the object's own namespace (`this.env.KERNEL.get(this.ctx.id).now()`), as this table used to say: on Cloudflare each such call raises the subrequest depth of the request it is made in, for the rest of that request, so after about 14 timed waits in one request (a `git clone`, eight `curl`s, a loop of `sleep`s) the clock fails, and so does every later call of the object that loops back into the Workers runtime: an R2 `get` with `Unspecified error (0)`, which a program that reads a file from such a mount sees as `EIO`, and a Durable Object stub with `Subrequest depth limit exceeded`. Local `workerd` has no such limit |
 | `isolates` | `{ max: 8, waitMs: 10000, memory: 64 MiB, perInstance: 8 MiB }` | how many Dynamic Workers run at once, how long a spawn waits for one, and the memory budget per Dynamic Worker |
 | `commands` | none | `{ append }`: more command roots, as for `createKernel`; one can be a mount (see [A file system the Durable Object serves](#a-file-system-the-durable-object-serves)) |
 | `network` | none | `{ transport, tlsEngine, uplink, doh }`: the transport programs reach the outside world through, and the TLS engine for their `https://` requests (see [The network](#the-network-in-a-durable-object)) |
