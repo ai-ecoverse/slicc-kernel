@@ -72,48 +72,135 @@ export function initialMemory(bytes: Uint8Array): number {
   return 0;
 }
 
-export class Images {
-  private readonly initial = new Map<string, number>();
-  private readonly bytes = new Map<string, ArrayBuffer>();
-  private readonly handles = new Map<string, ImageHandle>();
+export interface ImageSource {
+  readonly path: string;
+  read(): Promise<Uint8Array>;
+  stale?(): void;
+}
 
-  async register(source: ArrayBuffer | ArrayBufferView): Promise<ImageHandle> {
-    const view =
-      source instanceof ArrayBuffer
-        ? new Uint8Array(source)
-        : new Uint8Array(source.buffer, source.byteOffset, source.byteLength);
+interface Image {
+  readonly handle: ImageHandle;
+  readonly initial: number;
+  readonly module: number;
+  readonly sources: Map<string, ImageSource>;
+  bytes?: ArrayBuffer;
+}
+
+const viewOf = (source: ArrayBuffer | ArrayBufferView): Uint8Array =>
+  source instanceof ArrayBuffer
+    ? new Uint8Array(source)
+    : new Uint8Array(source.buffer, source.byteOffset, source.byteLength);
+
+const bufferOf = (bytes: Uint8Array): ArrayBuffer =>
+  bytes.byteOffset === 0 &&
+  bytes.byteLength === bytes.buffer.byteLength &&
+  bytes.buffer instanceof ArrayBuffer
+    ? bytes.buffer
+    : (bytes.slice().buffer as ArrayBuffer);
+
+export class ImageError extends Error {
+  readonly code: string;
+  readonly exitStatus: number;
+
+  constructor(code: string, message: string) {
+    super(`${code}: ${message}`);
+    this.code = code;
+    this.exitStatus = code === 'ENOENT' ? 127 : 126;
+  }
+}
+
+function unread(path: string, err: unknown): ImageError {
+  const code = (err as { code?: unknown } | null)?.code;
+  if (code === 'ENOENT' || code === 'ENOTDIR') {
+    return new ImageError('ENOENT', `${path} is gone since the kernel compiled it`);
+  }
+  const why = err instanceof Error ? err.message : String(err);
+  return new ImageError(typeof code === 'string' ? code : 'EIO', `${path} cannot be read: ${why}`);
+}
+
+export class Images {
+  private readonly images = new Map<string, Image>();
+  private readonly reading = new Map<string, Promise<ArrayBuffer>>();
+
+  async register(source: ArrayBuffer | ArrayBufferView, from?: ImageSource): Promise<ImageHandle> {
+    const view = viewOf(source);
     const image = await digest(view);
-    const known = this.handles.get(image);
-    if (known) return known;
+    const known = this.images.get(image);
+    if (known) {
+      if (from) known.sources.set(from.path, from);
+      else known.bytes ??= view.slice().buffer;
+      return known.handle;
+    }
     const handle: ImageHandle = Object.freeze({ image });
-    this.bytes.set(image, view.slice().buffer);
-    this.initial.set(image, initialMemory(view));
-    this.handles.set(image, handle);
+    this.images.set(image, {
+      handle,
+      initial: initialMemory(view),
+      module: view.byteLength,
+      sources: new Map(from ? [[from.path, from]] : []),
+      ...(from ? {} : { bytes: view.slice().buffer }),
+    });
     return handle;
   }
 
-  compile = async (bytes: ArrayBuffer | ArrayBufferView): Promise<WebAssembly.Module> =>
-    (await this.register(bytes)) as unknown as WebAssembly.Module;
+  compile = async (
+    bytes: ArrayBuffer | ArrayBufferView,
+    _key?: string,
+    from?: ImageSource
+  ): Promise<WebAssembly.Module> =>
+    (await this.register(bytes, from)) as unknown as WebAssembly.Module;
+
+  load(image: string): Promise<ArrayBuffer> {
+    const entry = this.images.get(image);
+    if (!entry) return Promise.reject(new ImageError('ENOENT', `no program image ${image}`));
+    if (entry.bytes) return Promise.resolve(entry.bytes);
+    const known = this.reading.get(image);
+    if (known !== undefined) return known;
+    const read = this.read(image, entry).finally(() => this.reading.delete(image));
+    this.reading.set(image, read);
+    return read;
+  }
+
+  private async read(image: string, entry: Image): Promise<ArrayBuffer> {
+    let failed: ImageError | undefined;
+    for (const source of [...entry.sources.values()]) {
+      try {
+        const bytes = await source.read();
+        if (bytes.byteLength === entry.module && (await digest(bytes)) === image) {
+          return bufferOf(bytes);
+        }
+        failed ??= new ImageError('ESTALE', `${source.path} changed since the kernel compiled it`);
+      } catch (err) {
+        failed ??= unread(source.path, err);
+      }
+      entry.sources.delete(source.path);
+      source.stale?.();
+    }
+    throw failed ?? new ImageError('ENOENT', `no file holds program image ${image}`);
+  }
 
   get(image: string): ArrayBuffer {
-    const bytes = this.bytes.get(image);
-    if (!bytes) throw new Error(`no program image ${image}`);
+    const bytes = this.images.get(image)?.bytes;
+    if (!bytes) throw new Error(`no program image ${image} kept in memory: load() reads it`);
     return bytes;
   }
 
   sizeOf(image: string): { initial: number; module: number } {
-    return {
-      initial: this.initial.get(image) ?? 0,
-      module: this.bytes.get(image)?.byteLength ?? 0,
-    };
+    const entry = this.images.get(image);
+    return { initial: entry?.initial ?? 0, module: entry?.module ?? 0 };
   }
 
   has(image: string): boolean {
-    return this.bytes.has(image);
+    return this.images.has(image);
   }
 
   get size(): number {
-    return this.bytes.size;
+    return this.images.size;
+  }
+
+  get held(): number {
+    let total = 0;
+    for (const entry of this.images.values()) total += entry.bytes?.byteLength ?? 0;
+    return total;
   }
 }
 

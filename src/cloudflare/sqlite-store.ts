@@ -1,5 +1,6 @@
 export interface SqlCursorLike {
   toArray(): Record<string, unknown>[];
+  [Symbol.iterator]?(): Iterator<Record<string, unknown>>;
   one(): Record<string, unknown>;
   readonly rowsWritten: number;
 }
@@ -198,6 +199,13 @@ export class SqlStore {
 
   rows(query: string, ...bindings: unknown[]): Record<string, unknown>[] {
     return this.sql.exec(query, ...bindings).toArray();
+  }
+
+  each(query: string, ...bindings: unknown[]): Iterable<Record<string, unknown>> {
+    const cursor = this.sql.exec(query, ...bindings);
+    return cursor[Symbol.iterator]
+      ? (cursor as Iterable<Record<string, unknown>>)
+      : cursor.toArray();
   }
 
   row(query: string, ...bindings: unknown[]): Record<string, unknown> | undefined {

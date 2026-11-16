@@ -85,6 +85,22 @@ export class Plumbing extends DurableObject {
     this.links = new Map();
     this.nextPid = 1;
     this.kernelRoutes = new KernelRoutes(ctx, env);
+    this.files = new Map();
+    this.reads = [];
+    this.staled = [];
+  }
+
+  source(path) {
+    return {
+      path,
+      read: async () => {
+        this.reads.push(path);
+        const bytes = this.files.get(path);
+        if (!bytes) throw Object.assign(new Error(`ENOENT: ${path}`), { code: 'ENOENT' });
+        return bytes.slice();
+      },
+      stale: () => this.staled.push(path),
+    };
   }
 
   now() {
@@ -113,7 +129,14 @@ export class Plumbing extends DurableObject {
   async fetch(request) {
     const url = new URL(request.url);
     const body = request.method === 'POST' ? await request.arrayBuffer() : undefined;
-    const raw = ['/image', '/kernel/upload', '/kernel/bulk', '/kernel/tree'].includes(url.pathname);
+    const raw = [
+      '/image',
+      '/file',
+      '/file-image',
+      '/kernel/upload',
+      '/kernel/bulk',
+      '/kernel/tree',
+    ].includes(url.pathname);
     const args = body && !raw ? JSON.parse(new TextDecoder().decode(body)) : {};
     if (url.pathname === '/kernel/upload') {
       await this.kernelRoutes.kernel.writeFile(url.searchParams.get('path'), new Uint8Array(body));
@@ -137,6 +160,24 @@ export class Plumbing extends DurableObject {
     switch (url.pathname) {
       case '/image':
         return json(await this.images.register(new Uint8Array(body)));
+      case '/file':
+        this.files.set(url.searchParams.get('path'), new Uint8Array(body));
+        return json({ ok: true });
+      case '/file-drop':
+        this.files.delete(args.path);
+        return json({ ok: true });
+      case '/file-image': {
+        const path = url.searchParams.get('path');
+        this.files.set(path, new Uint8Array(body));
+        return json(await this.images.register(new Uint8Array(body), this.source(path)));
+      }
+      case '/images':
+        return json({
+          size: this.images.size,
+          held: this.images.held,
+          reads: this.reads.splice(0),
+          staled: this.staled.splice(0),
+        });
       case '/spawn':
         return json({ pid: this.spawn(args.image) });
       case '/spawn-wait': {

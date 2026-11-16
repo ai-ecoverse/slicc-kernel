@@ -80,7 +80,11 @@ function readOnlyTree(files) {
     unlink: refuse,
     rename: refuse,
   };
-  return { handlers, capabilities: { readonly: true, ranges: true }, reads };
+  const driver = { handlers, capabilities: { readonly: true, ranges: true }, reads };
+  driver.served = (served) => {
+    driver.invalidate = (path) => served.invalidate([path]);
+  };
+  return driver;
 }
 
 export class KernelRoutes {
@@ -101,6 +105,7 @@ export class KernelRoutes {
     await client.close();
     const driver = readOnlyTree(this.tree);
     this.treeReads = driver.reads;
+    this.treeDriver = driver;
     const spec = { type: 'tree', source: 'fixture', target, options: { ro: '' } };
     return this.kernel.mount(inProcessMount(spec, driver));
   }
@@ -210,6 +215,7 @@ export class KernelRoutes {
       peak: isolates.peak,
       loads: processes.loads,
       images: images.size,
+      held: images.held,
       peakShards: processes.placement.peakShards,
     };
   }
@@ -280,6 +286,15 @@ export class KernelRoutes {
       }
       case '/kernel/mount-tree':
         return json(await this.mountTree(args));
+      case '/kernel/tree-put':
+        this.tree.set(args.path, Uint8Array.from(args.bytes));
+        this.treeDriver?.invalidate?.(args.path);
+        return json({ ok: true });
+      case '/kernel/tree-drop': {
+        const dropped = this.tree.delete(args.path);
+        this.treeDriver?.invalidate?.(args.path);
+        return json({ dropped });
+      }
       case '/kernel/tree-reads':
         return json({ reads: this.treeReads.splice(0) });
       case '/kernel/fetched':

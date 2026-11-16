@@ -209,6 +209,8 @@ describe('the Computer example Worker', { concurrency: false }, () => {
       );
     }
     t.diagnostic(`eight programs of 20 MiB in ${Math.round(performance.now() - started)} ms`);
+    const boot = await json('GET', '/boot');
+    assert.equal(boot.held, 0, JSON.stringify(boot));
   });
 
   test('streams output before the run exits', async (t) => {

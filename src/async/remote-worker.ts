@@ -636,7 +636,10 @@ export function remoteWorker(
       opened = await open(wire);
     } catch (err) {
       kernel.end();
-      queueMicrotask(() => fail(err instanceof Error ? err.message : String(err)));
+      const status = (err as { exitStatus?: unknown } | null)?.exitStatus;
+      const message = err instanceof Error ? err.message : String(err);
+      if (typeof status === 'number') refuse(message, status);
+      else queueMicrotask(() => fail(message));
       return;
     }
     if (ended) {

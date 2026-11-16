@@ -66,6 +66,14 @@ async function image(tag) {
   return r.image;
 }
 
+async function fileImage(tag, path, bytes = tagged(base, `${tag}-${RUN}`)) {
+  const query = `?path=${encodeURIComponent(path)}`;
+  return (await call('/file-image', bytes, { raw: true, query })).image;
+}
+
+const putFile = (path, bytes) =>
+  call('/file', bytes, { raw: true, query: `?path=${encodeURIComponent(path)}` });
+
 const events = async (pid, query = '') =>
   (await call('/events', undefined, { query: `?pid=${pid}${query}` })).events;
 
@@ -167,6 +175,61 @@ describe('Cloudflare process plumbing under wrangler dev', { concurrency: false 
     const [closed] = await waitFor(pid, 'closed');
     assert.equal(closed.reason, 'the process closed its link');
     await until(async () => (await call('/gate')).active === 0);
+  });
+
+  test('an image registered with its file keeps no bytes, and only a cold load reads the file again', async (t) => {
+    if (skipped(t)) return;
+    const path = `/programs/cold-${RUN}.wasm`;
+    const before = await call('/images');
+    const id = await fileImage('cold', path);
+    const registered = await call('/images');
+    assert.equal(registered.size, before.size + 1);
+    assert.equal(registered.held, before.held);
+    const first = (await call('/spawn', { image: id })).pid;
+    const [a] = await waitFor(first, 'hello');
+    assert.equal(a.tag, `cold-${RUN}`);
+    const second = (await call('/spawn', { image: id })).pid;
+    const [b] = await waitFor(second, 'hello');
+    assert.equal(b.isolate, a.isolate);
+    const loaded = await call('/images');
+    assert.deepEqual(
+      { reads: loaded.reads, held: loaded.held },
+      { reads: [path], held: before.held }
+    );
+    for (const pid of [first, second]) await call('/terminate', { pid });
+  });
+
+  test('a cold load of a file that changed fails with ESTALE, and one whose file is gone with ENOENT', async (t) => {
+    if (skipped(t)) return;
+    const path = `/programs/changed-${RUN}.wasm`;
+    const bytes = tagged(base, `changed-${RUN}`);
+    const id = await fileImage('changed', path, bytes);
+    await putFile(path, tagged(base, `other-${RUN}`));
+    const changed = await call('/spawn-wait', { image: id });
+    assert.equal(changed.event.type, 'failed', JSON.stringify(changed));
+    assert.equal(changed.event.code, 'ESTALE');
+    assert.match(changed.event.message, /changed since the kernel compiled it/);
+    const stale = await call('/images');
+    assert.deepEqual(
+      { reads: stale.reads, staled: stale.staled },
+      { reads: [path], staled: [path] }
+    );
+    assert.equal(await fileImage('changed', path, bytes), id);
+    const again = await call('/spawn-wait', { image: id });
+    assert.equal(again.event.type, 'hello', JSON.stringify(again));
+    assert.equal(again.event.tag, `changed-${RUN}`);
+    const gonePath = `/programs/gone-${RUN}.wasm`;
+    const gone = await fileImage('gone', gonePath);
+    await call('/file-drop', { path: gonePath });
+    const missing = await call('/spawn-wait', { image: gone });
+    assert.equal(missing.event.type, 'failed', JSON.stringify(missing));
+    assert.equal(missing.event.code, 'ENOENT');
+    assert.match(missing.event.message, /is gone since the kernel compiled it/);
+    const after = await call('/images');
+    assert.deepEqual(
+      { reads: after.reads, staled: after.staled },
+      { reads: [path, gonePath], staled: [gonePath] }
+    );
   });
 
   test('eleven distinct images do not break the isolate limit', async (t) => {

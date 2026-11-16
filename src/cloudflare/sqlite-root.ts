@@ -255,7 +255,7 @@ class Files implements Overlay {
     const first = Math.floor(start / CHUNK_BYTES);
     const last = Math.floor((end - 1) / CHUNK_BYTES);
     const state = this.chunks.get(node);
-    const rows = this.store.rows(
+    const rows = this.store.each(
       `SELECT idx, substr(data, max(? - idx * ${CHUNK_BYTES}, 0) + 1, min(? - idx * ${CHUNK_BYTES}, ${CHUNK_BYTES}) - max(? - idx * ${CHUNK_BYTES}, 0)) AS part FROM slicc_chunks WHERE node = ? AND idx BETWEEN ? AND ?`,
       start,
       end,
