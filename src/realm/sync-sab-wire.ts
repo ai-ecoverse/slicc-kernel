@@ -99,6 +99,13 @@ export const SYNC_SAB_NEXT_MSG = 'sync-sab-next';
 
 export type SyncSabRequestBody = Omit<SyncFsRequest, 'token'> | WasmSyscall;
 
+export const CALL_ABORT: unique symbol = Symbol('slicc-call-abort');
+
+export function callAbort(req: object): AbortSignal | undefined {
+  const signal = (req as { [CALL_ABORT]?: unknown })[CALL_ABORT];
+  return signal instanceof AbortSignal ? signal : undefined;
+}
+
 export interface SyncSabReqMsg {
   type: typeof SYNC_SAB_REQ_MSG;
   id: number;

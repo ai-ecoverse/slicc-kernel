@@ -8,6 +8,7 @@ import {
 } from '../../../../dist/cloudflare.js';
 import createTlsEngine from '../../../../node_modules/@ai-ecoverse/wasm-tls-engine/dist/slicc-tls-engine.mjs';
 import tlsWasm from '../../../../node_modules/@ai-ecoverse/wasm-tls-engine/dist/slicc-tls-engine.wasm';
+import { dnsAnswer } from './dns-answer.js';
 import { pendingTimers } from './timers.js';
 
 function leb(n) {
@@ -104,8 +105,15 @@ export class KernelRoutes {
     return this.kernel.mount(inProcessMount(spec, driver));
   }
 
-  network() {
+  network(doh) {
     const answer = async (url, init) => {
+      if (doh && url === doh) {
+        const query = new Uint8Array(await new Response(init.body).arrayBuffer());
+        this.fetched.push(`${init.method} ${url}`);
+        return new Response(dnsAnswer(query), {
+          headers: { 'content-type': 'application/dns-message' },
+        });
+      }
       const body = init.body ? await new Response(init.body).text() : '';
       this.fetched.push(`${init.method} ${url}`);
       return new Response(`${init.method} ${url} ${init.headers.get('x-test')} ${body}\n`, {
@@ -116,6 +124,7 @@ export class KernelRoutes {
     return {
       transport: fetchTransport({ fetch: answer, redirect: 'manual' }),
       tlsEngine: compiledTlsEngine(createTlsEngine, tlsWasm),
+      ...(doh ? { doh } : {}),
     };
   }
 
@@ -127,6 +136,7 @@ export class KernelRoutes {
     memory,
     max,
     network,
+    doh,
     commands,
     clock = true,
   }) {
@@ -156,7 +166,7 @@ export class KernelRoutes {
       ...(persist
         ? { sql: storage.sql, sqlite: { transaction: (fn) => storage.transactionSync(fn) } }
         : {}),
-      ...(network ? { network: this.network() } : {}),
+      ...(network ? { network: this.network(doh) } : {}),
       ...(commands ? { commands: { append: commands } } : {}),
     });
     await install(this.kernel);

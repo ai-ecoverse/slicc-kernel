@@ -10,8 +10,11 @@ import {
   WASM_THREAD_SPAWN,
   type WasmProcessInitMsg,
   type WasmProgram,
+  type WasmThread,
+  type WasmThreadInitMsg,
 } from '../kernel/protocol.ts';
 import {
+  CALL_ABORT,
   encodeSabResult,
   loadU53,
   SAB_CLOCK_I64,
@@ -44,13 +47,16 @@ import {
 import { watchHeader } from './header-hook.ts';
 import type { ProcessLink } from './link.ts';
 import {
+  ASYNC_CANCEL,
   ASYNC_MIRROR,
   ASYNC_MORE,
   ASYNC_SNAPSHOT,
   ASYNC_STAGE,
   ASYNC_SYSCALL,
+  ASYNC_THREAD,
   ASYNC_WORDS,
   type AsyncAnswer,
+  type AsyncCancelMsg,
   type AsyncMoreMsg,
   type AsyncMoreReply,
   type AsyncProcessInit,
@@ -59,7 +65,10 @@ import {
   type AsyncStageMsg,
   type AsyncSyscallMsg,
   type AsyncSyscallReply,
+  type AsyncThreadInit,
+  type AsyncThreadMsg,
   diffRuns,
+  isThreadMsg,
   type MirroredBuffer,
   type MirrorUpdate,
   type ProcessWords,
@@ -108,6 +117,8 @@ function initial(mirror: Mirror | undefined): MirroredBuffer | undefined {
 
 interface Pending {
   id: number;
+  n: number | undefined;
+  abort: AbortController;
   resolve: (reply: AsyncSyscallReply) => void;
   out: Uint8Array | null;
   status: number;
@@ -144,7 +155,7 @@ class KernelSide {
   private readonly push: (message: unknown) => void;
 
   constructor(
-    init: WasmProcessInitMsg,
+    init: WasmProcessInitMsg | WasmThreadInitMsg,
     max: number,
     emit: (data: unknown) => void,
     push: (message: unknown) => void
@@ -162,32 +173,56 @@ class KernelSide {
     this.sent = this.words4();
   }
 
+  threadWire(init: WasmThreadInitMsg, image: string): AsyncThreadInit {
+    const {
+      sab: _sab,
+      changes: _changes,
+      held,
+      program,
+      signals: _signals,
+      thread,
+      ...rest
+    } = init;
+    const { memory: _memory, ids: _ids, modules: _modules, blocked, tid, arg } = thread;
+    return {
+      ...rest,
+      ...this.shared(program, held, image),
+      thread: { tid, arg, ...(blocked ? { blocked } : {}) },
+    };
+  }
+
+  private shared(program: WasmProgram, held: WasmProcessInitMsg['held'], image: string) {
+    const { module: _module, ...shown } = program;
+    const changes = initial(this.changes);
+    const cwds = initial(this.cwds);
+    return {
+      program: { ...shown, image },
+      ...(held ? { held: { slot: held.slot, seen: held.seen, dead: held.dead } } : {}),
+      ...(Number.isFinite(this.max) ? { maxMessageBytes: this.max } : {}),
+      mirror: {
+        seq: 0 as const,
+        header: Int32Array.from(this.header),
+        clock: [
+          Number(Atomics.load(this.clock, CLOCK_BLOCKED)),
+          Number(Atomics.load(this.clock, CLOCK_IDLE)),
+        ] as [number, number],
+        ...(changes ? { changes } : {}),
+        ...(cwds ? { cwds } : {}),
+      },
+    };
+  }
+
   wire(init: WasmProcessInitMsg, image: string): AsyncProcessInit {
     const { sab: _sab, changes: _changes, held, program, fork, ...rest } = init;
-    const { module: _module, ...shown } = program;
     const memory = fork?.memory;
     let forkWire: AsyncProcessInit['fork'];
     if (fork && memory && memory.byteLength > this.max) {
       forkWire = { ...fork, memory: { part: this.keep(memory.slice()), total: memory.byteLength } };
     } else if (fork) forkWire = fork;
-    const changes = initial(this.changes);
-    const cwds = initial(this.cwds);
     return {
       ...rest,
-      program: { ...shown, image },
-      ...(held ? { held: { slot: held.slot, seen: held.seen, dead: held.dead } } : {}),
+      ...this.shared(program, held, image),
       ...(forkWire ? { fork: forkWire } : {}),
-      ...(Number.isFinite(this.max) ? { maxMessageBytes: this.max } : {}),
-      mirror: {
-        seq: 0,
-        header: Int32Array.from(this.header),
-        clock: [
-          Number(Atomics.load(this.clock, CLOCK_BLOCKED)),
-          Number(Atomics.load(this.clock, CLOCK_IDLE)),
-        ],
-        ...(changes ? { changes } : {}),
-        ...(cwds ? { cwds } : {}),
-      },
     };
   }
 
@@ -304,6 +339,7 @@ class KernelSide {
 
   syscall(msg: AsyncSyscallMsg): Promise<AsyncSyscallReply> {
     if (this.ended) return Promise.resolve({ failed: 'terminated' });
+    this.current?.abort.abort();
     this.current?.resolve({ failed: 'superseded' });
     this.current = undefined;
     this.applyWords(msg.words);
@@ -316,11 +352,18 @@ class KernelSide {
     }
     const id = ++this.requests;
     const { promise, resolve } = Promise.withResolvers<AsyncSyscallReply>();
-    this.current = { id, resolve, out: null, status: 0, offset: 0 };
+    const abort = new AbortController();
+    const n = typeof msg.words?.n === 'number' ? msg.words.n : undefined;
+    this.current = { id, n, abort, resolve, out: null, status: 0, offset: 0 };
     Atomics.store(this.header, SAB_I_REQ, id);
     Atomics.store(this.header, SAB_I_STATE, SAB_STATE_PENDING);
-    this.emit({ type: SYNC_SAB_REQ_MSG, id, req });
+    this.emit({ type: SYNC_SAB_REQ_MSG, id, req: { ...req, [CALL_ABORT]: abort.signal } });
     return promise;
+  }
+
+  cancel(msg: AsyncCancelMsg): void {
+    const pending = this.current;
+    if (pending && pending.n !== undefined && pending.n === msg.n) pending.abort.abort();
   }
 
   private schedulePump(): void {
@@ -386,6 +429,7 @@ class KernelSide {
     if (this.ended) return;
     this.ended = true;
     this.unwatch();
+    this.current?.abort.abort();
     this.current?.resolve({ failed: 'terminated' });
     this.current = undefined;
     for (const part of this.parts.values()) clearTimeout(part.timer);
@@ -402,6 +446,75 @@ function refusal(init: ProcessInitMsg | { type?: unknown }): string | undefined 
   return undefined;
 }
 
+interface Channel {
+  posts: Array<(message: unknown) => void>;
+  call: ((message: unknown) => Promise<unknown>) | undefined;
+  closes: Array<(reason: string) => void>;
+}
+
+const THREAD_CLOSED = 'the kernel closed the thread';
+
+class Channels {
+  private readonly open = new Map<number, Channel>();
+  private reason: string | undefined;
+  private readonly root: ProcessLink;
+
+  constructor(root: ProcessLink) {
+    this.root = root;
+    root.onClose((reason) => this.closeAll(reason));
+  }
+
+  private closeAll(reason: string): void {
+    this.reason = reason;
+    const open = [...this.open.values()];
+    this.open.clear();
+    for (const channel of open) for (const handler of channel.closes.splice(0)) handler(reason);
+  }
+
+  link(id: number): ProcessLink {
+    const channel: Channel = { posts: [], call: undefined, closes: [] };
+    if (this.reason === undefined) this.open.set(id, channel);
+    const live = () => this.open.get(id) === channel;
+    return {
+      post: (message, transfer) => {
+        if (live()) this.root.post({ type: ASYNC_THREAD, channel: id, message }, transfer);
+      },
+      onPost: (handler) => void channel.posts.push(handler),
+      onCall: (handler) => {
+        channel.call = handler;
+      },
+      onClose: (handler) => {
+        const reason = this.reason;
+        if (reason === undefined) channel.closes.push(handler);
+        else queueMicrotask(() => handler(reason));
+      },
+      close: () => {
+        if (!live()) return;
+        this.open.delete(id);
+        this.root.post({ type: ASYNC_THREAD, channel: id, closed: THREAD_CLOSED });
+      },
+    };
+  }
+
+  post(msg: AsyncThreadMsg): void {
+    for (const handler of this.open.get(msg.channel)?.posts ?? []) handler(msg.message);
+  }
+
+  call(msg: AsyncThreadMsg): Promise<unknown> {
+    const handler = this.open.get(msg.channel)?.call;
+    return handler ? handler(msg.message) : Promise.resolve({ failed: 'terminated' });
+  }
+}
+
+const parents = new WeakMap<object, Channels>();
+
+function parentOf(init: unknown): Channels | undefined {
+  const data = init as Partial<WasmThreadInitMsg> | null | undefined;
+  if (data?.type !== WASM_THREAD_INIT) return undefined;
+  const token = data.thread?.memory as unknown;
+  return token && typeof token === 'object' ? parents.get(token) : undefined;
+}
+
 export function remoteWorker(
   open: (init: AsyncProcessInit) => ProcessLink | Promise<ProcessLink>,
   options: RemoteWorkerOptions = {}
@@ -415,6 +528,7 @@ export function remoteWorker(
   let exited = false;
   let link: ProcessLink | undefined;
   let side: KernelSide | undefined;
+  let channels: Channels | undefined;
 
   const emit = (data: unknown): void => {
     if (ended) return;
@@ -432,15 +546,39 @@ export function remoteWorker(
     );
   };
 
+  const spawned = (thread: Partial<WasmThread> | undefined): void => {
+    if (!channels || typeof thread?.tid !== 'number') {
+      emit({ type: WASM_PROCESS_ERROR, message: ASYNC_NO_THREADS });
+      return;
+    }
+    const token = {};
+    parents.set(token, channels);
+    emit({ type: WASM_THREAD_SPAWN, thread: { ...thread, memory: token } });
+  };
+
   const fromProcess = (message: unknown): void => {
     if (ended) return;
-    const data = message as { type?: unknown; words?: ProcessWords } | undefined;
+    if (isThreadMsg(message)) {
+      channels?.post(message);
+      return;
+    }
+    const data = message as
+      | { type?: unknown; words?: ProcessWords; thread?: Partial<WasmThread> }
+      | undefined;
     const type = data?.type;
     if (type === ASYNC_WORDS) {
       if (data?.words) side?.applyWords(data.words);
       return;
     }
-    if (type === WASM_THREAD_SPAWN || type === JS_THREAD_SPAWN) {
+    if (type === ASYNC_CANCEL) {
+      side?.cancel(data as AsyncCancelMsg);
+      return;
+    }
+    if (type === WASM_THREAD_SPAWN) {
+      spawned(data?.thread);
+      return;
+    }
+    if (type === JS_THREAD_SPAWN) {
       emit({ type: WASM_PROCESS_ERROR, message: ASYNC_NO_THREADS });
       return;
     }
@@ -455,6 +593,7 @@ export function remoteWorker(
   };
 
   const answer = async (message: unknown): Promise<unknown> => {
+    if (isThreadMsg(message)) return channels ? channels.call(message) : { failed: 'terminated' };
     const data = message as { type?: unknown } | undefined;
     if (!side) return { failed: 'terminated' };
     switch (data?.type) {
@@ -469,6 +608,18 @@ export function remoteWorker(
       default:
         throw new Error(`async: unknown call ${String(data?.type)}`);
     }
+  };
+
+  const attach = (opened: ProcessLink, kernel: KernelSide, wire: unknown): void => {
+    link = opened;
+    opened.onClose((reason) => {
+      if (ended) return;
+      kernel.end();
+      fail(`the async process link closed: ${reason}`);
+    });
+    opened.onPost(fromProcess);
+    opened.onCall(answer);
+    opened.post(wire);
   };
 
   const start = async (init: WasmProcessInitMsg): Promise<void> => {
@@ -492,21 +643,31 @@ export function remoteWorker(
       opened.close();
       return;
     }
-    link = opened;
-    opened.onClose((reason) => {
-      if (ended) return;
-      kernel.end();
-      fail(`the async process link closed: ${reason}`);
-    });
-    opened.onPost(fromProcess);
-    opened.onCall(answer);
-    opened.post(wire);
+    channels = new Channels(opened);
+    attach(opened, kernel, wire);
+  };
+
+  const startThread = (init: WasmThreadInitMsg, parent: Channels): void => {
+    const image = imageOf(init.program);
+    if (image === undefined) {
+      refuse('the async process host needs a program image id', NOT_RUNNABLE);
+      return;
+    }
+    const kernel = new KernelSide(init, max, emit, (msg) => link?.post(msg));
+    side = kernel;
+    channels = parent;
+    attach(parent.link(init.thread.tid), kernel, kernel.threadWire(init, image));
   };
 
   return {
     postMessage(message) {
       if (started || ended) return;
       started = true;
+      const parent = parentOf(message);
+      if (parent) {
+        startThread(message as WasmThreadInitMsg, parent);
+        return;
+      }
       const refused = refusal(message as ProcessInitMsg);
       if (refused) {
         refuse(refused, refused === ASYNC_NO_JS ? NOT_RUNNABLE : undefined);

@@ -1,3 +1,4 @@
+import { WASM_PROCESS_INIT, WASM_THREAD_INIT } from '../kernel/protocol.ts';
 import type { SyncFsResult } from '../realm/sync-fs-wire.ts';
 import { syncError } from '../realm/sync-fs-wire.ts';
 import {
@@ -20,6 +21,7 @@ import {
 import type { KernelLink } from './link.ts';
 import type { ForkSnapshots } from './snapshots.ts';
 import {
+  ASYNC_CANCEL,
   ASYNC_MIRROR,
   ASYNC_MORE,
   ASYNC_SNAPSHOT,
@@ -28,8 +30,8 @@ import {
   ASYNC_SYSCALL,
   ASYNC_WORDS,
   type AsyncAnswer,
+  type AsyncInit,
   type AsyncMoreReply,
-  type AsyncProcessInit,
   type AsyncSnapshotReply,
   type AsyncSyscallMsg,
   type AsyncSyscallReply,
@@ -43,7 +45,7 @@ import {
 export type WaitResult = 'ok' | 'not-equal' | 'timed-out';
 
 export interface AsyncTransport {
-  readonly init: Promise<AsyncProcessInit>;
+  readonly init: Promise<AsyncInit>;
   readonly buffer: ArrayBuffer;
   readonly header: Int32Array;
   readonly clock: BigInt64Array;
@@ -59,6 +61,8 @@ export interface AsyncTransport {
   ): Promise<SyncFsResult>;
   wait(view: Int32Array, index: number, value: number, timeoutMs?: number): Promise<WaitResult>;
   notify(view: Int32Array, index: number): void;
+  watch(): { changed: Promise<void>; forget(): void };
+  cancel(): void;
   publish(): void;
   post(message: unknown, transfer?: Transferable[]): void;
   onClose(handler: (reason: string) => void): void;
@@ -161,8 +165,9 @@ class Mirrors {
   private readonly early = new Map<number, MirrorUpdate>();
   private readonly settled = new Map<number, Array<() => void>>();
   readonly waiters = new Set<Waiter>();
+  private readonly watchers = new Set<Waiter>();
 
-  start(mirror: AsyncProcessInit['mirror']): void {
+  start(mirror: AsyncInit['mirror']): void {
     this.header.set(mirror.header.subarray(0, SAB_HEADER_I32));
     Atomics.store(this.clock, CLOCK_BLOCKED, BigInt(mirror.clock[0]));
     Atomics.store(this.clock, CLOCK_IDLE, BigInt(mirror.clock[1]));
@@ -209,7 +214,18 @@ class Mirrors {
     return done;
   }
 
+  watch(): { changed: Promise<void>; forget(): void } {
+    let watcher: Waiter | undefined;
+    const changed = new Promise<void>((resolve, reject) => {
+      watcher = { view: this.header, index: 0, value: 0, settle: () => resolve(), fail: reject };
+      this.watchers.add(watcher);
+    });
+    return { changed, forget: () => void (watcher && this.watchers.delete(watcher)) };
+  }
+
   wake(): void {
+    for (const watcher of [...this.watchers]) watcher.settle('ok');
+    this.watchers.clear();
     for (const waiter of [...this.waiters]) {
       if (Atomics.load(waiter.view, waiter.index) === waiter.value) continue;
       this.waiters.delete(waiter);
@@ -226,6 +242,8 @@ class Mirrors {
   }
 
   failAll(err: Error): void {
+    for (const watcher of [...this.watchers]) watcher.fail(err);
+    this.watchers.clear();
     for (const waiter of [...this.waiters]) {
       this.waiters.delete(waiter);
       waiter.fail(err);
@@ -384,16 +402,21 @@ export function createAsyncTransport(
 ): AsyncTransport {
   const mirrors = new Mirrors();
   const caller = new Caller(link, options.maxMessageBytes ?? Number.POSITIVE_INFINITY);
-  const started = Promise.withResolvers<AsyncProcessInit>();
+  const started = Promise.withResolvers<AsyncInit>();
   let words = 0;
+  let lastCall = 0;
   let initialised = false;
   let closedBy: string | undefined;
   const current = () => mirrors.words(++words, options.memory?.());
 
-  const begin = async (init: AsyncProcessInit): Promise<void> => {
+  const begin = async (init: AsyncInit): Promise<void> => {
     mirrors.start(init.mirror);
     if (options.maxMessageBytes === undefined && init.maxMessageBytes !== undefined) {
       caller.max = init.maxMessageBytes;
+    }
+    if (init.type === WASM_THREAD_INIT) {
+      started.resolve(init);
+      return;
     }
     const fork = init.fork;
     const ref = fork?.snapshot;
@@ -420,9 +443,9 @@ export function createAsyncTransport(
 
   link.onMessage((message) => {
     const data = message as { type?: unknown; mirror?: MirrorUpdate } | undefined;
-    if (!initialised && data?.type === 'wasm-process-init') {
+    if (!initialised && (data?.type === WASM_PROCESS_INIT || data?.type === WASM_THREAD_INIT)) {
       initialised = true;
-      begin(data as unknown as AsyncProcessInit).catch((err) => started.reject(err));
+      begin(data as unknown as AsyncInit).catch((err) => started.reject(err));
     } else if (initialised && data?.type === ASYNC_MIRROR && data.mirror) {
       void mirrors.accept(data.mirror);
     }
@@ -458,6 +481,7 @@ export function createAsyncTransport(
     label: string
   ): Promise<AsyncAnswer> => {
     const words = current();
+    lastCall = words.n;
     const body = caller.staging(asked);
     if (!body) {
       const { req, transfer } = caller.exact(asked, given);
@@ -506,6 +530,16 @@ export function createAsyncTransport(
       return mirrors.wait(view, index, value, timeoutMs);
     },
     notify: (view, index) => mirrors.notify(view, index),
+    watch() {
+      if (closedBy === undefined) return mirrors.watch();
+      const changed = Promise.reject(syncError('EIO', `kernel link closed: ${closedBy}`));
+      return { changed, forget: () => {} };
+    },
+    cancel() {
+      if (closedBy === undefined && initialised && lastCall > 0) {
+        link.post({ type: ASYNC_CANCEL, n: lastCall });
+      }
+    },
     publish() {
       if (closedBy === undefined && initialised) {
         link.post({ type: ASYNC_WORDS, words: current() });

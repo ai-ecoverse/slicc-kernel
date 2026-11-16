@@ -18,6 +18,7 @@ import {
 import {
   anyBlocked,
   type BlockedMask,
+  callAbort,
   loadBlocked,
   SAB_DEFAULT_WINDOW_BYTES,
   SAB_HEADER_BYTES,
@@ -302,6 +303,7 @@ function killThread(thread: ThreadSignals | undefined, caught: number, sig: numb
   if (!held && (caught & sigbit(sig)) === 0) return false;
   Atomics.or(thread.header, SAB_I_SIGNALS, sigbit(sig));
   Atomics.notify(thread.header, SAB_I_SIGNALS);
+  headerNotified(thread.header, SAB_I_SIGNALS, sigbit(sig));
   if (held) return true;
   const blocked = thread.interrupt;
   thread.interrupt = new AbortController();
@@ -326,7 +328,9 @@ function threadCall(
   cancelled: AbortSignal,
   block: () => void
 ): Promise<SyncFsResult> {
-  return isWasmSyscall(req) ? process.syscall(req, cancelled, block) : dispatchSyncFs(req);
+  if (!isWasmSyscall(req)) return dispatchSyncFs(req);
+  const abort = callAbort(req);
+  return process.syscall(req, abort ? AbortSignal.any([cancelled, abort]) : cancelled, block);
 }
 
 function threadSignalsOf(sab: SharedArrayBuffer): ThreadSignals {
@@ -693,7 +697,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
   const dying = new Dying();
   const dispatch = (req: SyncSabDispatchRequest, block?: () => void): Promise<SyncFsResult> =>
     dying.serve(req, () =>
-      isWasmSyscall(req) ? process.syscall(req, undefined, block) : dispatchSyncFs(req)
+      isWasmSyscall(req) ? process.syscall(req, callAbort(req), block) : dispatchSyncFs(req)
     );
   const clocks = new ProcessClocks(sab, opts.program.abi !== 'js', process);
   const responder = attachSyncSabResponder(worker, sab, token, {

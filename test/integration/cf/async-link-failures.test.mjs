@@ -43,12 +43,15 @@ for (const mode of ['inline', 'thread']) {
       }
     });
 
-    test('a thread spawn is refused with a clear error', async (t) => {
+    test('a thread spawn opens a channel to the same process, carrying the thread init', async (t) => {
       const kernel = await asyncKernel(mode);
       t.after(() => kernel.terminate());
       const r = await within(kernel.run(['fake', 'thread']), 5000, 'run');
-      assert.equal(r.status, 70);
-      assert.match(r.stderr, /runs no threads/);
+      assert.deepEqual(r, {
+        status: 0,
+        stdout: 'ready\nchannel 2 tid 2 arg 0 sha256:\n',
+        stderr: '',
+      });
     });
 
     test('a JS program is refused with a clear error', async (t) => {

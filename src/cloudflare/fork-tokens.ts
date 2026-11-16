@@ -1,4 +1,4 @@
-import { ASYNC_SNAPSHOT_TAKEN } from '../async/wire.ts';
+import { ASYNC_SNAPSHOT_TAKEN, unthreaded } from '../async/wire.ts';
 import { decodeSabResult } from '../realm/sync-sab-wire.ts';
 import { dispose, type ProcessEndStub } from './rpc-link.ts';
 
@@ -35,7 +35,7 @@ export class ForkTokens {
     end: ProcessEndStub | undefined,
     hold: (bytes: number) => () => void = () => () => {}
   ): string | undefined {
-    const call = message as ForkCall | null;
+    const call = unthreaded(message) as ForkCall | null;
     if (!end || call?.type !== 'async-syscall' || call.req?.op !== 'proc-fork') return undefined;
     const snapshot = call.req.state?.snapshot;
     if (typeof snapshot?.token !== 'string' || typeof snapshot.total !== 'number') return undefined;

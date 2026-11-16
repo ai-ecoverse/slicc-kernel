@@ -187,10 +187,23 @@ const commands = {
     await sys.write(1, `${((performance.now() - start) * 1000) / n}\n`);
     return 0;
   },
-  async thread(sys, t) {
+  async thread(sys, t, _init, link) {
     await sys.write(1, 'ready\n');
+    const opened = new Promise((resolve) =>
+      link.onMessage((message) => {
+        if (message?.type === 'async-thread' && message.message?.type === 'wasm-thread-init') {
+          resolve(message);
+        }
+      })
+    );
     t.post({ type: 'wasm-thread-spawn', thread: { tid: 2, arg: 0 } });
-    for (;;) await sys.sleep(-1);
+    const { channel, message } = await opened;
+    const { tid, arg } = message.thread;
+    await sys.write(
+      1,
+      `channel ${channel} tid ${tid} arg ${arg} ${message.program.image.slice(0, 7)}\n`
+    );
+    return 0;
   },
   async pipe(sys, _t, init) {
     const [r, w] = await sys.json({ op: 'fd-pipe' });

@@ -15,7 +15,7 @@ async function asyncKernel(t) {
 const soon = (work, ms = 20000) =>
   Promise.race([work, new Promise((resolve) => setTimeout(() => resolve('timed out'), ms))]);
 
-test('a thread cannot start on the async host: pthread_create fails at once, nothing hangs', {
+test('a thread starts on the async host, in the same process, and wakes its epoll', {
   skip,
 }, async (t) => {
   const kernel = await asyncKernel(t);
@@ -26,15 +26,15 @@ test('a thread cannot start on the async host: pthread_create fails at once, not
       [
         'python',
         '-c',
-        'import threading\ntry:\n  threading.Thread(target=print).start()\nexcept RuntimeError as e:\n  print("refused:", e)',
+        'import os, threading\nseen = []\nt = threading.Thread(target=lambda: seen.append(os.getpid()))\nt.start()\nt.join()\nprint(seen == [os.getpid()], threading.active_count())',
       ],
       { cwd: '/' }
     )
   );
-  assert.deepEqual(r, { status: 0, stdout: "refused: can't start new thread\n", stderr: '' });
+  assert.deepEqual(r, { status: 0, stdout: 'True 1\n', stderr: '' });
   assert.deepEqual(await soon(kernel.run(['epolltest', 'cross-thread'], { cwd: '/' })), {
     status: 0,
-    stdout: 'woken by thread: 0\n',
+    stdout: 'woken by thread: 1 13=IN\n',
     stderr: '',
   });
 });

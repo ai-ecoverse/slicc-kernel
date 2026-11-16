@@ -25,6 +25,7 @@ import { SignalGate, type SignalHooks } from '../process-signals.ts';
 import { rawStack } from '../raw-stack.ts';
 import { dylinkInfo } from './dylink.ts';
 import { cachingBridge } from './wasi-files.ts';
+import type { Futexes } from './wasi-futex.ts';
 import { WasiExit, type WasiFunction, WasiHost, type WasiHostOptions } from './wasi-host.ts';
 import { importsContext, loadImports, type ProgramImports, type Raw } from './wasi-imports.ts';
 import { type ForeignResults, type ImportedMemory, RESERVED_NAMESPACES } from './wasi-module.ts';
@@ -731,7 +732,7 @@ function mainThreads(
 export interface WasiProcessHost {
   transport?: TransportFactory;
   threadCap?: number;
-  bound?: (memory: WebAssembly.Memory) => void;
+  futexes?: Futexes;
 }
 
 export async function runWasiProcess(
@@ -801,6 +802,7 @@ export async function runWasiProcess(
     ...heldOf(init, call),
     ...(threads ? { credGen: threads.ids } : {}),
   }).attach();
+  if (given.futexes) host.futexes = given.futexes;
   host.sigmask = sigmaskOf(module, init.sab, gate, threads, undefined, published);
   if (threads) {
     threads.beforeSpawn = () => {
@@ -818,7 +820,6 @@ export async function runWasiProcess(
   });
   restoreExportedMemory(instance, memory, init);
   main.memory = memoryOf(instance, memory);
-  if (main.memory) given.bound?.(main.memory);
   publishMemory(init.sab, sizeOf(main)());
   port.postMessage({ type: WASM_PROCESS_READY });
   signals.bind(instance.exports);
@@ -925,15 +926,21 @@ export function captureBacktraces(env: Readonly<Record<string, string>>): void {
   v8.stackTraceLimit = Math.max(v8.stackTraceLimit ?? 0, BACKTRACE_FRAMES + 20);
 }
 
-export async function runWasiThread(init: WasmThreadInitMsg, port: SabPostLike): Promise<void> {
+export async function runWasiThread(
+  init: WasmThreadInitMsg,
+  port: SabPostLike,
+  given: WasiProcessHost = {}
+): Promise<void> {
   captureBacktraces(init.env);
   const { thread } = init;
-  const { transport, sys, call, say, gate } = kernelOf(init, port, {
+  const kernelFor = (hooks: SignalHooks) => kernelOf(init, port, hooks, undefined, given.transport);
+  const { transport, sys, call, say, gate } = kernelFor({
     masks: () => null,
     raise: (sig) => signals.raise(sig),
   });
   const signals = new WasiSignals(takeThreadDefault(call, init.pid));
-  const threads = new WasiThreads(port, thread.memory, threadCap(init.env), thread.tid, thread.ids);
+  const cap = given.threadCap ?? threadCap(init.env);
+  const threads = new WasiThreads(port, thread.memory, cap, thread.tid, thread.ids);
   threads.received = thread.modules;
   const id = identify(transport, init);
   const host = new WasiHost({
@@ -959,6 +966,7 @@ export async function runWasiThread(init: WasmThreadInitMsg, port: SabPostLike):
     ...heldOf(init, call),
   }).attach();
   host.tid = thread.tid;
+  if (given.futexes) host.futexes = given.futexes;
   host.sigmask = sigmaskOf(init.program.module, init.sab, gate, threads, init.signals);
 
   const program = await programImports(init.program, host, transport, thread.tid);

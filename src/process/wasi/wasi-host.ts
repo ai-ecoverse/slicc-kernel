@@ -46,6 +46,7 @@ import {
   type WasiEntry,
   WasiError,
 } from './wasi-files.ts';
+import { atomicFutexes, type Futexes } from './wasi-futex.ts';
 import { WasiMemory } from './wasi-memory.ts';
 import { pollOneoff } from './wasi-poll.ts';
 import { libcBits, SIG_SETMASK, SIG_UNBLOCK, type WasiSigmask } from './wasi-sigmask.ts';
@@ -259,6 +260,8 @@ export class WasiHost {
   quietly: <T>(fn: () => T) => T = UNGATED.quiet;
 
   deliverDue: () => void = UNGATED.deliver;
+
+  futexes: Futexes = atomicFutexes;
 
   private listening: number[] = [];
 
@@ -843,7 +846,10 @@ export class WasiHost {
           mem.bytes(buf + at, chunk.length).set(chunk);
         }
       },
-      sched_yield: () => E.SUCCESS,
+      sched_yield: () => {
+        this.futexes.pause();
+        return E.SUCCESS;
+      },
       proc_exit: (code: number) => {
         throw new WasiExit(code);
       },
