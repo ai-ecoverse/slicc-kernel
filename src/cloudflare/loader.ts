@@ -1,6 +1,6 @@
 import type { ProcessLink } from '../async/link.ts';
 import { ForkTokens } from './fork-tokens.ts';
-import { digest, type Images, imageOf } from './images.ts';
+import { digest, ImageError, type Images, imageOf } from './images.ts';
 import type { IsolateGate } from './isolates.ts';
 import { openLink, type ProcessHostStub } from './kernel-end.ts';
 import { type ImageSize, Placement, type Seat } from './placement.ts';
@@ -112,12 +112,16 @@ export function cloudflareProcesses(
 ): Processes {
   let hostDigest: Promise<string> | undefined;
   let loads = 0;
+  const failedLoads = new Map<string, number>();
   const idOf = async (ref: ProgramRef): Promise<string> => {
     hostDigest ??= digest(`${code.host}\u0000${code.process}\u0000${code.localForks !== false}`);
     const imports = ref.imports ? `-${ref.imports.digest.slice(0, 16)}` : '';
-    return `slicc-${(await hostDigest).slice(0, 16)}-${ref.image.slice(0, 40)}${imports}`;
+    const failed = failedLoads.get(keyOf(ref));
+    const again = failed === undefined ? '' : `-r${failed}`;
+    return `slicc-${(await hostDigest).slice(0, 16)}-${ref.image.slice(0, 40)}${imports}${again}`;
   };
-  const workerCode = (ref: ProgramRef): WorkerCode => {
+  const workerCode = async (ref: ProgramRef): Promise<WorkerCode> => {
+    const wasm = await images.load(ref.image);
     loads++;
     const env = {
       ...(code.localForks === false ? { SLICC_LOCAL_FORKS: 'off' } : {}),
@@ -130,7 +134,7 @@ export function cloudflareProcesses(
       modules: {
         'host.js': code.host,
         'process.js': code.process,
-        'program.wasm': { wasm: images.get(ref.image) },
+        'program.wasm': { wasm },
         'imports.js': ref.imports?.source ?? NO_IMPORTS_MODULE,
       },
       globalOutbound: null,
@@ -218,8 +222,14 @@ export function cloudflareProcesses(
         if (pid !== undefined && seated.get(pid) === seat) seated.delete(pid);
         seat.release();
       };
+      const cold: { failed?: unknown } = {};
+      const code = () =>
+        workerCode(ref).catch((err: unknown) => {
+          cold.failed = err;
+          throw err;
+        });
       try {
-        const host = loader.get(seat.id, () => workerCode(ref)).getEntrypoint() as ProcessHostStub;
+        const host = loader.get(seat.id, code).getEntrypoint() as ProcessHostStub;
         return await openLink(host, release, {
           forks,
           sized: (bytes) => seat.memory(bytes),
@@ -228,7 +238,11 @@ export function cloudflareProcesses(
         });
       } catch (err) {
         release();
-        throw err;
+        const failed = cold.failed ?? err;
+        if (failed instanceof ImageError) {
+          failedLoads.set(keyOf(ref), (failedLoads.get(keyOf(ref)) ?? 0) + 1);
+        }
+        throw failed;
       }
     },
   };

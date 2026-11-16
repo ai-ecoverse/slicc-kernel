@@ -278,9 +278,15 @@ export interface LauncherOptions {
   packageLocks?: string;
   emscripten?: 'glue' | 'kernel';
   admit?: (program: Program, from: { ppid?: number }) => Promise<() => void>;
-  compile?: (bytes: Uint8Array, key: string) => Promise<WebAssembly.Module>;
+  compile?: (bytes: Uint8Array, key: string, source: ProgramSource) => Promise<WebAssembly.Module>;
   tlsEngine?: () => Promise<TlsEngineModule>;
   ports?: MakePortPair;
+}
+
+export interface ProgramSource {
+  readonly path: string;
+  read(): Promise<Uint8Array>;
+  stale(): void;
 }
 
 function tlsEngineOf(
@@ -2078,7 +2084,7 @@ export class Launcher {
       const libc = libcVersionOf(bytes);
       const named = customSectionsOf(bytes, 'name').length > 0;
       const compiled = this.compile
-        ? await this.compile(bytes, key)
+        ? await this.compile(bytes, key, this.sourceOf(path))
         : await WebAssembly.compile(bytes as BufferSource);
       if (libc !== undefined) this.libcs.set(compiled, libc);
       return {
@@ -2207,10 +2213,22 @@ export class Launcher {
   }
 
   private reread(target: Target, read: () => Promise<Program>): Promise<Program> {
-    for (const key of this.compiled.keys()) {
-      if (key.startsWith(`${target.wasm}:`)) this.compiled.delete(key);
-    }
+    this.forgetCompiled(target.wasm);
     return read();
+  }
+
+  private forgetCompiled(path: string): void {
+    for (const key of this.compiled.keys()) {
+      if (key.startsWith(`${path}:`) || key.startsWith(`${path}\0`)) this.compiled.delete(key);
+    }
+  }
+
+  private sourceOf(path: string): ProgramSource {
+    return {
+      path,
+      read: () => this.base.readFileBuffer(path),
+      stale: () => this.forgetCompiled(path),
+    };
   }
 
   private exeId(target: Target): Promise<{ exeId?: string }> {

@@ -203,6 +203,7 @@ export class Computer extends DurableObject {
           cold,
           installed: this.installed,
           images: kernel.images.size,
+          held: kernel.images.held,
           opened: this.opened,
           mounts: (await kernel.mounts()).map((entry) => `${entry.type} ${entry.target}`),
         });

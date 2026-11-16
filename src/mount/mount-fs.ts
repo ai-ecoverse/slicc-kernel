@@ -488,6 +488,39 @@ function statOf(attr: DriverAttr, path: string, mount: Mount): FsStat {
   };
 }
 
+class Gathered {
+  private bytes: Uint8Array = new Uint8Array(0);
+  private owned = false;
+  private readonly size: number;
+  length = 0;
+
+  constructor(size: number) {
+    this.size = size;
+  }
+
+  add(chunk: Uint8Array): void {
+    const need = this.length + chunk.length;
+    if (this.length === 0) {
+      this.bytes = chunk;
+    } else {
+      if (!this.owned || this.bytes.length < need) {
+        const grown = new Uint8Array(
+          Math.max(this.size, need, this.owned ? this.bytes.length * 2 : 0)
+        );
+        grown.set(this.bytes.subarray(0, this.length));
+        this.bytes = grown;
+        this.owned = true;
+      }
+      this.bytes.set(chunk, this.length);
+    }
+    this.length = need;
+  }
+
+  get whole(): Uint8Array {
+    return this.length === this.bytes.length ? this.bytes : this.bytes.subarray(0, this.length);
+  }
+}
+
 function concat(chunks: Uint8Array[], total: number): Uint8Array {
   if (chunks.length === 1 && chunks[0]?.length === total) return chunks[0];
   const out = new Uint8Array(total);
@@ -1062,25 +1095,23 @@ class MountFs implements KernelFs {
     }
     const fh = await this.open(mount, rel, false);
     const chunk = mount.caps.maxIo ?? DEFAULT_IO;
-    const chunks: Uint8Array[] = [];
-    let total = 0;
+    const out = new Gathered(attr.size);
     try {
       for (;;) {
         const bytes = (await mount.conn.call({
           op: 'read',
           fh,
-          offset: total,
+          offset: out.length,
           size: chunk,
         })) as Uint8Array;
         if (bytes.length === 0) break;
-        chunks.push(bytes);
-        total += bytes.length;
-        if (bytes.length < chunk && total >= attr.size) break;
+        out.add(bytes);
+        if (bytes.length < chunk && out.length >= attr.size) break;
       }
     } finally {
       await mount.conn.call({ op: 'release', fh });
     }
-    return concat(chunks, total);
+    return out.whole;
   }
 
   async writeFile(
