@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { startDev } from './cloudflare-fixture/dev.mjs';
+import { messageWasm, printfOf } from './message-wasm.mjs';
 
 const config = fileURLToPath(
   new URL('../../../examples/cloudflare-computer/wrangler.json', import.meta.url)
@@ -189,6 +190,25 @@ describe('the Computer example Worker', { concurrency: false }, () => {
     );
     assert.equal(result.stderr, '');
     assert.equal(result.stdout, '3 APPLE\n2 FIG\n');
+  });
+
+  test('eight programs of 20 MiB run one after another, more than the Durable Object could hold at once', async (t) => {
+    if (skipped(t)) return;
+    const size = 20 * 2 ** 20;
+    const started = performance.now();
+    for (let i = 1; i <= 8; i++) {
+      const { head, fill } = messageWasm(`big ${i}\n`, { fill: size });
+      const file = `/tmp/big${i}.wasm`;
+      const result = await exec(
+        `printf '${printfOf(head)}' > ${file} && head -c ${fill} /dev/zero >> ${file} && chmod +x ${file} && ${file}; echo "status $?"; rm -f ${file}`
+      );
+      assert.equal(
+        result.stdout,
+        `big ${i}\nstatus 0\n`,
+        `program ${i}: ${JSON.stringify(result)}`
+      );
+    }
+    t.diagnostic(`eight programs of 20 MiB in ${Math.round(performance.now() - started)} ms`);
   });
 
   test('streams output before the run exits', async (t) => {
