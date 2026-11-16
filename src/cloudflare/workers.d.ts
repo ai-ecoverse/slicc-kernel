@@ -21,6 +21,7 @@ declare module 'slicc:process' {
     },
     deps: {
       module(image: string): WebAssembly.Module | Promise<WebAssembly.Module>;
+      imports?(source: string): Record<string, unknown> | Promise<Record<string, unknown>>;
       snapshots?: unknown;
       deadlines?: boolean;
     }
@@ -30,4 +31,8 @@ declare module 'slicc:process' {
 declare module 'slicc:program' {
   const program: WebAssembly.Module;
   export default program;
+}
+
+declare module 'slicc:imports' {
+  export const createAsyncImports: unknown;
 }

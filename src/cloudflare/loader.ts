@@ -40,7 +40,7 @@ export interface ProcessHostCode {
 export const PROCESS_COMPATIBILITY_DATE = '2026-09-01';
 
 interface InitLike {
-  program?: { module?: unknown; image?: unknown; abi?: unknown };
+  program?: { module?: unknown; image?: unknown; abi?: unknown; imports?: unknown };
 }
 
 export function imageOfInit(init: unknown): string | undefined {
@@ -49,12 +49,32 @@ export function imageOfInit(init: unknown): string | undefined {
   return imageOf(program.module) ?? (typeof program.image === 'string' ? program.image : undefined);
 }
 
+export function importsOfInit(init: unknown): string | undefined {
+  const imports = (init as InitLike | null | undefined)?.program?.imports;
+  return typeof imports === 'string' ? imports : undefined;
+}
+
+export const NO_IMPORTS_MODULE = 'export {};\n';
+
+interface ProgramRef {
+  image: string;
+  imports?: { source: string; digest: string };
+}
+
+async function programRef(image: string, source: string | undefined): Promise<ProgramRef> {
+  if (source === undefined) return { image };
+  return { image, imports: { source, digest: await digest(source) } };
+}
+
+const keyOf = (ref: ProgramRef): string =>
+  ref.imports ? `${ref.image}+${ref.imports.digest}` : ref.image;
+
 export interface Processes {
   readonly forks: ForkTokens;
   readonly placement: Placement;
   open(init: unknown): Promise<ProcessLink>;
-  admit(module: unknown, from?: { ppid?: number }): Promise<() => void>;
-  workerId(image: string): Promise<string>;
+  admit(module: unknown, from?: { ppid?: number }, imports?: string): Promise<() => void>;
+  workerId(image: string, imports?: string): Promise<string>;
   readonly loads: number;
 }
 
@@ -92,12 +112,17 @@ export function cloudflareProcesses(
 ): Processes {
   let hostDigest: Promise<string> | undefined;
   let loads = 0;
-  const workerId = async (image: string): Promise<string> => {
+  const idOf = async (ref: ProgramRef): Promise<string> => {
     hostDigest ??= digest(`${code.host}\u0000${code.process}\u0000${code.localForks !== false}`);
-    return `slicc-${(await hostDigest).slice(0, 16)}-${image.slice(0, 40)}`;
+    const imports = ref.imports ? `-${ref.imports.digest.slice(0, 16)}` : '';
+    return `slicc-${(await hostDigest).slice(0, 16)}-${ref.image.slice(0, 40)}${imports}`;
   };
-  const workerCode = (image: string): WorkerCode => {
+  const workerCode = (ref: ProgramRef): WorkerCode => {
     loads++;
+    const env = {
+      ...(code.localForks === false ? { SLICC_LOCAL_FORKS: 'off' } : {}),
+      ...(ref.imports ? { SLICC_IMPORTS: ref.imports.digest } : {}),
+    };
     return {
       compatibilityDate: code.compatibilityDate ?? PROCESS_COMPATIBILITY_DATE,
       ...(code.compatibilityFlags ? { compatibilityFlags: code.compatibilityFlags } : {}),
@@ -105,25 +130,30 @@ export function cloudflareProcesses(
       modules: {
         'host.js': code.host,
         'process.js': code.process,
-        'program.wasm': { wasm: images.get(image) },
+        'program.wasm': { wasm: images.get(ref.image) },
+        'imports.js': ref.imports?.source ?? NO_IMPORTS_MODULE,
       },
       globalOutbound: null,
-      ...(code.localForks === false ? { env: { SLICC_LOCAL_FORKS: 'off' } } : {}),
+      ...(Object.keys(env).length > 0 ? { env } : {}),
     };
   };
   const forks = new ForkTokens();
   const placement = new Placement(gate, { ...memory, waitMs: gate.waitMs });
   const reservations = new Map<string, Seat[]>();
   const seated = new Map<number, Seat>();
-  const sizeOf = async (image: string): Promise<ImageSize> => ({
-    image,
-    base: await workerId(image),
-    ...images.sizeOf(image),
-  });
-  const reservedFor = (image: string): Seat | undefined => {
-    const list = reservations.get(image);
+  const sizeOf = async (ref: ProgramRef): Promise<ImageSize> => {
+    const { initial, module } = images.sizeOf(ref.image);
+    return {
+      image: keyOf(ref),
+      base: await idOf(ref),
+      initial,
+      module: module + (ref.imports?.source.length ?? 0),
+    };
+  };
+  const reservedFor = (key: string): Seat | undefined => {
+    const list = reservations.get(key);
     const seat = list?.shift();
-    if (list?.length === 0) reservations.delete(image);
+    if (list?.length === 0) reservations.delete(key);
     return seat;
   };
   const depthOf = (ppid: number | undefined): number => {
@@ -146,40 +176,38 @@ export function cloudflareProcesses(
   return {
     forks,
     placement,
-    workerId,
+    workerId: async (image, imports) => idOf(await programRef(image, imports)),
     get loads() {
       return loads;
     },
-    async admit(module, from = {}) {
+    async admit(module, from = {}, imports) {
       const image = imageOf(module);
       if (image === undefined || !images.has(image)) return () => {};
+      const ref = await programRef(image, imports);
+      const key = keyOf(ref);
       const parent = from.ppid === undefined ? undefined : seated.get(from.ppid);
-      const seat = await placement.place(
-        await sizeOf(image),
-        undefined,
-        depthOf(from.ppid),
-        parent
-      );
-      const list = reservations.get(image) ?? [];
+      const seat = await placement.place(await sizeOf(ref), undefined, depthOf(from.ppid), parent);
+      const list = reservations.get(key) ?? [];
       list.push(seat);
-      reservations.set(image, list);
+      reservations.set(key, list);
       return () => {
         const at = list.indexOf(seat);
         if (at < 0) return;
         list.splice(at, 1);
-        if (list.length === 0 && reservations.get(image) === list) reservations.delete(image);
+        if (list.length === 0 && reservations.get(key) === list) reservations.delete(key);
         seat.release();
       };
     },
     async open(init) {
       const image = imageOfInit(init);
       if (image === undefined) throw new Error('this host runs only wasm programs with an image');
-      const reserved = reservedFor(image);
+      const ref = await programRef(image, importsOfInit(init));
+      const reserved = reservedFor(keyOf(ref));
       if (!images.has(image)) {
         reserved?.release();
         throw new Error(`no program image ${image}`);
       }
-      const size = await sizeOf(image);
+      const size = await sizeOf(ref);
       const forkInit = init as ForkInit;
       const need = forkNeed(forkInit);
       const seat = nearParent(size, forkInit, reserved) ?? (await placement.place(size, need));
@@ -191,9 +219,7 @@ export function cloudflareProcesses(
         seat.release();
       };
       try {
-        const host = loader
-          .get(seat.id, () => workerCode(image))
-          .getEntrypoint() as ProcessHostStub;
+        const host = loader.get(seat.id, () => workerCode(ref)).getEntrypoint() as ProcessHostStub;
         return await openLink(host, release, {
           forks,
           sized: (bytes) => seat.memory(bytes),

@@ -236,7 +236,9 @@ export async function createCloudflareKernel(
     ports: localPorts,
     emscripten: 'kernel',
     admit: (program, from) =>
-      processes.admit(program.abi === 'js' ? undefined : program.module, from),
+      program.abi === 'js'
+        ? processes.admit(undefined, from)
+        : processes.admit(program.module, from, program.imports),
     createWorker: () => trackedWorker(processes, live, terminated),
     ...(options.modules ? { modules: options.modules } : {}),
     ...(options.commands ? { commands: options.commands } : {}),

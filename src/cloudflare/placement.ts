@@ -50,6 +50,8 @@ export function shardId(base: string, index: number): string {
   return index === 0 ? base : `${base}~${index}`;
 }
 
+const ofBase = (id: string, base: string): boolean => id === base || id.startsWith(`${base}~`);
+
 export class Placement {
   private readonly shards = new Map<string, Shard>();
   private readonly waiters = new Set<() => void>();
@@ -105,7 +107,7 @@ export class Placement {
   private expected(size: ImageSize): number {
     let largest = size.initial;
     for (const shard of this.shards.values()) {
-      if (!shard.id.startsWith(size.base)) continue;
+      if (!ofBase(shard.id, size.base)) continue;
       for (const seat of shard.seats) largest = Math.max(largest, seat.bytes);
     }
     return largest;
@@ -127,7 +129,7 @@ export class Placement {
     let spare = 0;
     let shards = 0;
     for (const shard of this.shards.values()) {
-      if (shard.seats.size === 0 || !shard.id.startsWith(size.base)) continue;
+      if (shard.seats.size === 0 || !ofBase(shard.id, size.base)) continue;
       shards++;
       const used = this.used(shard.id) + this.pending(shard.id);
       const room = this.budget - size.module * MODULE_ALLOWANCE_FACTOR - used;
