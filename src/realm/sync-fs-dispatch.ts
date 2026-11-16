@@ -307,10 +307,7 @@ async function run(
       await fs.rm(path, { file: true });
       return done;
     case 'rmdir':
-      if (!(await fs.lstat(path)).isDirectory) throw syncError('ENOTDIR', path);
-      if ((await fs.readdir(path)).length > 0) throw syncError('ENOTEMPTY', path);
-      await fs.rm(path, { recursive: true });
-      return done;
+      return rmdir(fs, path);
     case 'symlink':
       await fs.symlink(req.arg2 ?? '', path, ownerFor(entry));
       return done;
@@ -640,6 +637,15 @@ async function copyOp(
   await (fs.copyFile ? fs.copyFile(path, to, options) : copyByBytes(fs, path, to, options));
   if (!owner) await fs.chmod(to, mode);
   entry.fresh?.(to);
+  return done;
+}
+
+async function rmdir(fs: KernelFs, path: string): Promise<SyncFsResult> {
+  const st = await fs.lstat(path);
+  if (!st.isDirectory) throw syncError('ENOTDIR', path);
+  if (st.readonly) throw syncError('EROFS', path);
+  if ((await fs.readdir(path)).length > 0) throw syncError('ENOTEMPTY', path);
+  await fs.rm(path, { recursive: true });
   return done;
 }
 

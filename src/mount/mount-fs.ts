@@ -467,7 +467,7 @@ function statOf(attr: DriverAttr, path: string, mount: Mount): FsStat {
     ino: attr.ino ?? inodeOf(path),
     ...(!inodeless(mount, attr) && attr.nlink !== undefined ? { nlink: attr.nlink } : {}),
     dev: mount.dev,
-    ...(readonly(mount) ? { readonly: true } : {}),
+    ...(readonly(mount) || attr.readonly === true ? { readonly: true } : {}),
     ...(mount.maxFile > 0 ? { maxFile: mount.maxFile } : {}),
     ...(mount.caps.ranges ? { ranged: true } : {}),
     ...(mount.caps.links ? { linkable: true } : {}),
@@ -1629,6 +1629,9 @@ class MountFs implements KernelFs {
     this.writable(a.mount, normalizePath(to));
     if (a.mount.caps.links) await this.lstat(from);
     if (!a.mount.caps.links) {
+      if ((await this.lstat(parentOf(to)).catch(() => undefined))?.readonly) {
+        throw errnoError('EROFS', to);
+      }
       throw errnoError('EPERM', `${from}: this file system has no hard links`);
     }
     await this.table.commitUnder(from);

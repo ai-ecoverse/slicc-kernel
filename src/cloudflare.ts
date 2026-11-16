@@ -38,6 +38,7 @@ export {
   type SliccBackendOptions,
   type SliccKernelLike,
   sliccBackend,
+  type WorkspaceDatabaseLike,
   type WorkspaceDirentLike,
   type WorkspaceDriver,
   type WorkspaceDriverOptions,
