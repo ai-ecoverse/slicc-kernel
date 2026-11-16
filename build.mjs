@@ -125,7 +125,13 @@ const host = await build({
   platform: 'browser',
   target: 'es2024',
   define,
-  plugins: [externalAs({ 'slicc:process': './process.js', 'slicc:program': './program.wasm' })],
+  plugins: [
+    externalAs({
+      'slicc:process': './process.js',
+      'slicc:program': './program.wasm',
+      'slicc:imports': './imports.js',
+    }),
+  ],
   logLevel: 'warning',
 });
 const asyncProcess = await readFile(

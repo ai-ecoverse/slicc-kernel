@@ -27,7 +27,13 @@ import { dylinkInfo } from './dylink.ts';
 import { cachingBridge } from './wasi-files.ts';
 import type { Futexes } from './wasi-futex.ts';
 import { WasiExit, type WasiFunction, WasiHost, type WasiHostOptions } from './wasi-host.ts';
-import { importsContext, loadImports, type ProgramImports, type Raw } from './wasi-imports.ts';
+import {
+  type CreateImports,
+  importsContext,
+  loadImports,
+  type ProgramImports,
+  type Raw,
+} from './wasi-imports.ts';
 import { type ForeignResults, type ImportedMemory, RESERVED_NAMESPACES } from './wasi-module.ts';
 import { ProcTree, procfsBridge } from './wasi-procfs.ts';
 import { ptsBridge } from './wasi-ptsfs.ts';
@@ -733,6 +739,7 @@ export interface WasiProcessHost {
   transport?: TransportFactory;
   threadCap?: number;
   futexes?: Futexes;
+  imports?: CreateImports;
 }
 
 export async function runWasiProcess(
@@ -809,7 +816,7 @@ export async function runWasiProcess(
       if (!host.fds.isShared) host.fds.share(threads.ids, false);
     };
   }
-  const program = await programImports(init.program, host, transport, MAIN_TID);
+  const program = await programImports(init.program, host, transport, MAIN_TID, given.imports);
   const { instance, driver, linkedStack } = await instantiate(host, module, memory, threads, {
     ...(fork ? { forked: fork } : {}),
     stats,
@@ -911,10 +918,11 @@ async function programImports(
   program: WasmProgram,
   host: WasiHost,
   transport: { call(req: WasmSyscall, timeoutMs: number, label: string): SyncFsResult },
-  tid: number
+  tid: number,
+  given?: CreateImports
 ): Promise<ProgramOption | undefined> {
   if (program.imports === undefined) return undefined;
-  const create = await loadImports(program.imports);
+  const create = given ?? (await loadImports(program.imports));
   const raw: Raw = (req) => transport.call(req as WasmSyscall, Number.POSITIVE_INFINITY, req.op);
   return (memory, instance) => create(importsContext({ host, raw, tid, memory, instance }));
 }
@@ -969,7 +977,7 @@ export async function runWasiThread(
   if (given.futexes) host.futexes = given.futexes;
   host.sigmask = sigmaskOf(init.program.module, init.sab, gate, threads, init.signals);
 
-  const program = await programImports(init.program, host, transport, thread.tid);
+  const program = await programImports(init.program, host, transport, thread.tid, given.imports);
   const { module } = init.program;
   const { memory } = thread;
   const { instance, driver, linkedStack } = await instantiate(host, module, memory, threads, {

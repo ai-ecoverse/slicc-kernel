@@ -1,0 +1,17 @@
+{
+  "name": "hostcall",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "hostcall": {
+        "wasm": "bin/hostcall.wasm",
+        "imports": "host/hostcall-host.mjs"
+      },
+      "hostcall-sync": {
+        "wasm": "bin/hostcall.wasm",
+        "imports": "host/sync-only.mjs"
+      }
+    }
+  }
+}

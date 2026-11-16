@@ -73,8 +73,8 @@ async function install(kernel, name) {
   await walk('');
 }
 
-export async function shellKernel() {
-  const kernel = await createNodeKernel();
+export async function shellKernel(options = {}) {
+  const kernel = await createNodeKernel(options);
   for (const name of ['@ai-ecoverse/wasm-bash', '@ai-ecoverse/wasm-coreutils']) {
     await install(kernel, name);
   }
@@ -82,7 +82,7 @@ export async function shellKernel() {
 }
 
 export async function computerWith(options = {}) {
-  const kernel = options.kernel ?? (await shellKernel());
+  const kernel = options.kernel ?? (await shellKernel(options.kernelOptions));
   const storage = nodeStorage();
   const slicc = sliccBackend({ kernel: () => kernel, ...options.backend });
   const wrap = options.wrapFs;
@@ -92,10 +92,14 @@ export async function computerWith(options = {}) {
         type: slicc.type,
         callable: slicc.callable,
         description: slicc.description,
-        connect: (host) => slicc.connect({ fs: wrap(host.fs) }),
+        connect: (host) => slicc.connect({ ...host, fs: wrap(host.fs) }),
       }
     : slicc;
-  const workspace = new Workspace({ storage, backends: [backend] });
+  const workspace = new Workspace({
+    storage,
+    backends: [backend],
+    ...(options.mounts ? { mounts: options.mounts } : {}),
+  });
   await workspace.ready();
   return {
     kernel,

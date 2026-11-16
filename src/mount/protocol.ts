@@ -1,4 +1,4 @@
-export const DRIVER_PROTOCOL: readonly [number, number] = [1, 3];
+export const DRIVER_PROTOCOL: readonly [number, number] = [1, 4];
 
 export interface DriverCapabilities {
   readonly?: boolean;
@@ -30,6 +30,7 @@ export interface DriverAttr {
   etag?: string;
   uid?: number;
   gid?: number;
+  readonly?: boolean;
 }
 
 export interface DriverOwner {

@@ -11,6 +11,7 @@ import {
 } from '../kernel/protocol.ts';
 import { runEmscriptenProcess } from '../process/emscripten/runtime.ts';
 import { rawStack } from '../process/raw-stack.ts';
+import type { CreateImports } from '../process/wasi/wasi-imports.ts';
 import {
   runWasiProcess,
   runWasiThread,
@@ -30,8 +31,11 @@ import {
   isThreadMsg,
 } from './wire.ts';
 
+export type ImportsNamespace = Record<string, unknown>;
+
 export interface AsyncProcessEntryDeps {
   module(image: string): WebAssembly.Module | Promise<WebAssembly.Module>;
+  imports?(source: string): ImportsNamespace | Promise<ImportsNamespace>;
   maxMessageBytes?: number;
   snapshots?: ForkSnapshots;
   deadlines?: boolean;
@@ -46,14 +50,29 @@ export const ASYNC_NO_EMSCRIPTEN =
   "the async process host runs Emscripten programs only on the kernel's personality (emscripten: 'kernel')";
 export const ASYNC_NO_IMPORTS = 'the async process host loads no JavaScript imports modules';
 export const ASYNC_LOST_THREAD = 'the async process host has no memory for this thread';
+export const ASYNC_NO_CREATE =
+  'the imports module exports no createAsyncImports function, which the async process host calls';
 
-function refusal(init: AsyncInit): string | undefined {
+function refusal(init: AsyncInit, deps: AsyncProcessEntryDeps): string | undefined {
   const program = init.program as Omit<AsyncProcessInit['program'], 'abi'> & { abi?: string };
   if (program.abi === 'js') return ASYNC_NO_JS;
   if (program.abi !== 'wasi' && program.emscripten !== 'kernel') return ASYNC_NO_EMSCRIPTEN;
-  if (program.imports !== undefined) return ASYNC_NO_IMPORTS;
+  if (program.imports !== undefined && !deps.imports) return ASYNC_NO_IMPORTS;
   if (!jspiAvailable()) return ASYNC_NO_JSPI;
   return undefined;
+}
+
+class NotRunnable extends Error {}
+
+async function importsOf(
+  init: AsyncInit,
+  deps: AsyncProcessEntryDeps
+): Promise<CreateImports | undefined> {
+  const source = init.program.imports;
+  if (source === undefined || !deps.imports) return undefined;
+  const create = (await deps.imports(source)).createAsyncImports;
+  if (typeof create !== 'function') throw new NotRunnable(ASYNC_NO_CREATE);
+  return create as CreateImports;
 }
 
 export class KernelGone extends Error {
@@ -264,6 +283,7 @@ async function started(
   size: { memory: (() => number) | undefined },
   threads: ProcessThreads
 ): Promise<number> {
+  const create = await importsOf(init, deps);
   const module = await deps.module(init.program.image);
   const { kernel, port } = running(transport, threads);
   const local = localInit(init, transport, module);
@@ -276,6 +296,7 @@ async function started(
   return runWasiProcess(local, port, {
     transport: transports,
     futexes: asyncFutexes(threads.hub, transport),
+    ...(create ? { imports: create } : {}),
   });
 }
 
@@ -288,6 +309,7 @@ export async function threadStarted(
   const local = threads.take(init.thread.tid);
   const main = threads.main;
   if (!local || !main) throw new Error(ASYNC_LOST_THREAD);
+  const create = await importsOf(init, deps);
   const module = await deps.module(init.program.image);
   const { kernel, port } = running(transport, threads);
   threads.hub.threads++;
@@ -295,6 +317,7 @@ export async function threadStarted(
     await runWasiThread(threadInit(init, transport, module, local, main), port, {
       transport: () => kernel,
       futexes: asyncFutexes(threads.hub, transport),
+      ...(create ? { imports: create } : {}),
     });
   } finally {
     threads.hub.threads--;
@@ -338,13 +361,15 @@ export function asyncProcessEntry(link: KernelLink, deps: AsyncProcessEntryDeps)
   const failed = failure(transport);
   transport.init.then(
     (init) => {
-      const refused = refusal(init);
+      const refused = refusal(init, deps);
       if (refused) return failed(refused, NOT_RUNNABLE);
       if (init.type === WASM_THREAD_INIT) return failed(ASYNC_LOST_THREAD);
       started(init, transport, deps, size, threads).then(
         (code) => transport.post({ type: WASM_PROCESS_EXIT, code } satisfies WasmProcessExitMsg),
         (err) => {
-          if (!transport.closed) failed(err);
+          if (transport.closed) return;
+          if (err instanceof NotRunnable) failed(err.message, NOT_RUNNABLE);
+          else failed(err);
         }
       );
     },
