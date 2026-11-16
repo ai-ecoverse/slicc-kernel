@@ -105,6 +105,23 @@ test(
         k.name
       );
       assert.ok(k.asked.length > 0 && k.asked.every((url) => url === DOH), k.name);
+      const before = k.asked.length;
+      assert.deepEqual(
+        await k.run([
+          'python',
+          '-c',
+          'import socket\nfor name in ("gone.slicc.internal", "broken.example", "broken.example"):\n  try:\n    socket.getaddrinfo(name, 443, socket.AF_INET)\n  except socket.gaierror:\n    print(name, "not resolved")',
+        ]),
+        ok(
+          'gone.slicc.internal not resolved\nbroken.example not resolved\nbroken.example not resolved\n'
+        ),
+        k.name
+      );
+      assert.equal(
+        k.asked.length,
+        before + 2,
+        `${k.name}: a slicc.internal name is never forwarded, and a SERVFAIL is not remembered`
+      );
     }
   }
 );

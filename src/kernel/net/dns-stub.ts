@@ -239,7 +239,7 @@ export function sameAddress(a: string, b: string): boolean {
   return a === b;
 }
 
-function local(name: string): boolean {
+export function local(name: string): boolean {
   return LOCAL_ZONES.some((zone) => name === zone || name.endsWith(`.${zone}`));
 }
 
@@ -421,7 +421,9 @@ function addressText(type: number, rdata: Uint8Array): string | undefined {
 
 export function addressesOf(reply: Uint8Array, type: number): ResolveAnswer | undefined {
   if (reply.length < 12 || !(u16(reply, 2) & QR)) return undefined;
-  if ((u16(reply, 2) & 0xf) !== NOERROR) return { addresses: [] };
+  const rcode = u16(reply, 2) & 0xf;
+  if (rcode === NXDOMAIN) return { addresses: [] };
+  if (rcode !== NOERROR) return undefined;
   let at = 12;
   for (let n = u16(reply, 4); n > 0; n--) {
     const after = skipName(reply, at);

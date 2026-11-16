@@ -1,5 +1,5 @@
 import { KernelError } from '../fd-table.ts';
-import { type DnsForward, forwardedLookup } from './dns-stub.ts';
+import { type DnsForward, forwardedLookup, local as localZone } from './dns-stub.ts';
 import { type HostsTable, parseHosts } from './hosts-file.ts';
 import {
   DEFAULT_HOSTNAME,
@@ -160,7 +160,7 @@ export class Resolver {
     );
     let answer = { ...own, addresses: own.addresses.filter((a) => this.usable(name, a, family)) };
     const forward = this.forward;
-    if (answer.addresses.length === 0 && forwarded && forward) {
+    if (answer.addresses.length === 0 && forwarded && forward && !localZone(name)) {
       const found = await this.ask(
         name,
         `resolve ${name}: the DNS forwarder gave no answer`,

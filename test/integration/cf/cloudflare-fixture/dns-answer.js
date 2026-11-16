@@ -105,6 +105,7 @@ function reply(query, end, rcode, records) {
 
 export function dnsAnswer(query) {
   const { name: asked, type, end } = question(query);
+  if (asked === 'broken.example') return reply(query, end, 2, []);
   const chain = DNS_CHAINS[asked];
   if (chain) {
     const { to, ttl } = chain.alias;
