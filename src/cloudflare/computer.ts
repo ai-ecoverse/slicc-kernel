@@ -4,6 +4,7 @@ import { SIG } from '../kernel/signals.ts';
 import { inProcessMount } from '../mount/in-process.ts';
 import type { MountSpec } from '../mount/mount-fs.ts';
 import {
+  type WorkspaceDatabaseLike,
   type WorkspaceDriver,
   type WorkspaceDriverOptions,
   type WorkspaceFilesystemLike,
@@ -11,6 +12,7 @@ import {
 } from './computer-driver.ts';
 
 export type {
+  WorkspaceDatabaseLike,
   WorkspaceDirentLike,
   WorkspaceDriver,
   WorkspaceDriverOptions,
@@ -72,6 +74,7 @@ export interface SliccKernelLike {
 
 export interface SliccBackendHost {
   readonly fs: WorkspaceFilesystemLike;
+  readonly db?: WorkspaceDatabaseLike;
 }
 
 export interface SliccBackendOptions {
@@ -383,7 +386,11 @@ export function sliccBackend(options: SliccBackendOptions): SliccBackend {
       const kernel = await options.kernel();
       const held = holdersOf(kernel);
       await held.get(mountPoint)?.();
-      const driver = workspaceDriver(host.fs, { root, writeBehind: options.writeBehind ?? true });
+      const driver = workspaceDriver(host.fs, {
+        root,
+        writeBehind: options.writeBehind ?? true,
+        ...(host.db ? { db: host.db } : {}),
+      });
       const client = await attachKernel(
         await kernel.connect(options.user !== undefined ? { user: options.user } : {}),
         { locks: null }
