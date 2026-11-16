@@ -96,8 +96,9 @@ import { spawnWasmProcess, type WasmProcessHandle, type WasmWorkerLike } from '.
 import { type JobMember, JobTable } from './kernel/jobs.ts';
 import { type KernelLocks, kernelLocks } from './kernel/lock-service.ts';
 import {
+  DnsStub,
+  dnsForward,
   enableDnsStub,
-  kernelDnsStub,
   RESOLV_CONF,
   RESOLV_CONF_PATH,
 } from './kernel/net/dns-stub.ts';
@@ -1075,8 +1076,10 @@ export class Launcher {
     this.uplink = options.uplink;
     this.routes = new Routes(options.uplink?.traits.ipv6 === true);
     if (options.uplink?.routes) this.routes.set(options.uplink.routes);
+    const forward = dnsForward(options.uplink, this.transport, options.doh);
     this.resolver = new Resolver({
       uplink: options.uplink,
+      forward,
       routes: this.routes,
       hostname,
       hosts: hostsReader(this.base),
@@ -1088,10 +1091,7 @@ export class Launcher {
       roots: packageTlsRoots(this.verifiedFs(options.fs), this.modulesDir),
       ca: this.ca,
     });
-    enableDnsStub(
-      this.net,
-      kernelDnsStub(this.resolver, this.transport, options.uplink, options.doh)
-    );
+    enableDnsStub(this.net, new DnsStub({ resolver: this.resolver, forward }));
     enableCdp(this.net, this.cdp);
     this.facades.enable(this.net);
     const fs = this.commandFs(this.base);

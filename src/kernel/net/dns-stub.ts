@@ -2,7 +2,7 @@ import type { InetAddr } from '../dgram.ts';
 import type { KernelSocket, LoopbackNet } from '../socket.ts';
 import { ipv4Bytes, ipv6Groups } from './routes.ts';
 import type { RealmTransport } from './transport.ts';
-import type { NetworkUplink, ResolveFamily, UplinkConn } from './uplink.ts';
+import type { NetworkUplink, ResolveAnswer, ResolveFamily, UplinkConn } from './uplink.ts';
 
 export const DNS_PORT = 53;
 export const DNS_STUB_ADDRESS = '127.0.0.53';
@@ -38,7 +38,12 @@ const LOCAL_ZONES = ['localhost', 'slicc.internal'];
 const MESSAGE = 'application/dns-message';
 
 export interface StubResolver {
-  resolve(name: string, family: ResolveFamily): Promise<string[]>;
+  resolve(
+    name: string,
+    family: ResolveFamily,
+    blocking?: () => AbortSignal,
+    forwarded?: boolean
+  ): Promise<string[]>;
   known(name: string): Promise<boolean>;
   reverse(address: string): Promise<string | undefined>;
 }
@@ -306,7 +311,7 @@ export class DnsStub {
   }
 
   private lookup(name: string): Promise<string[]> {
-    return this.resolver.resolve(name, 0).catch(() => []);
+    return this.resolver.resolve(name, 0, undefined, false).catch(() => []);
   }
 
   private known(name: string): Promise<boolean> {
@@ -406,6 +411,76 @@ export function uplinkForward(uplink: NetworkUplink, server: string): DnsForward
   };
 }
 
+const u32 = (b: Uint8Array, at: number): number => u16(b, at) * 65536 + u16(b, at + 2);
+
+function addressText(type: number, rdata: Uint8Array): string | undefined {
+  if (type === TYPE_A && rdata.length === 4) return rdata.join('.');
+  if (type !== TYPE_AAAA || rdata.length !== 16) return undefined;
+  return ipv6Text(Array.from({ length: 8 }, (_, i) => u16(rdata, i * 2)));
+}
+
+export function addressesOf(reply: Uint8Array, type: number): ResolveAnswer | undefined {
+  if (reply.length < 12 || !(u16(reply, 2) & QR)) return undefined;
+  if ((u16(reply, 2) & 0xf) !== NOERROR) return { addresses: [] };
+  let at = 12;
+  for (let n = u16(reply, 4); n > 0; n--) {
+    const after = skipName(reply, at);
+    if (after === undefined) return undefined;
+    at = after + 4;
+  }
+  const addresses: string[] = [];
+  let ttl: number | undefined;
+  for (let n = u16(reply, 6); n > 0; n--) {
+    const after = skipName(reply, at);
+    if (after === undefined || after + 10 > reply.length) return undefined;
+    const end = after + 10 + u16(reply, after + 8);
+    if (end > reply.length) return undefined;
+    const text =
+      u16(reply, after) === type && u16(reply, after + 2) === CLASS_IN
+        ? addressText(type, reply.subarray(after + 10, end))
+        : undefined;
+    if (text !== undefined) {
+      addresses.push(text);
+      ttl = Math.min(ttl ?? Number.POSITIVE_INFINITY, u32(reply, after + 4));
+    }
+    at = end;
+  }
+  return { addresses, ...(ttl !== undefined ? { ttl } : {}) };
+}
+
+export function addressQuery(name: string, type: number): Uint8Array {
+  return new Uint8Array([
+    ...header(0, RD, [1, 0, 0, 0]),
+    ...encodeName(name),
+    type >> 8,
+    type & 0xff,
+    0,
+    CLASS_IN,
+  ]);
+}
+
+export async function forwardedLookup(
+  forward: DnsForward,
+  name: string,
+  family: ResolveFamily,
+  signal: AbortSignal
+): Promise<ResolveAnswer> {
+  const types = family === 4 ? [TYPE_A] : family === 6 ? [TYPE_AAAA] : [TYPE_A, TYPE_AAAA];
+  const answers = await Promise.all(
+    types.map(async (type) => {
+      const reply = await forward(addressQuery(name, type), signal);
+      const answer = reply ? addressesOf(reply, type) : undefined;
+      if (!answer) throw new Error(`the DNS forwarder gave no answer for ${name}`);
+      return answer;
+    })
+  );
+  const ttls = answers.flatMap((a) => (a.ttl === undefined ? [] : [a.ttl]));
+  return {
+    addresses: answers.flatMap((a) => a.addresses),
+    ...(ttls.length > 0 ? { ttl: Math.min(...ttls) } : {}),
+  };
+}
+
 export function dnsForward(
   uplink: NetworkUplink | undefined,
   transport: RealmTransport,
@@ -415,15 +490,6 @@ export function dnsForward(
   if (uplink && server && (ipv4Bytes(server) || ipv6Groups(server)))
     return uplinkForward(uplink, server);
   return typeof doh === 'string' ? dohForward(transport, doh) : undefined;
-}
-
-export function kernelDnsStub(
-  resolver: StubResolver,
-  transport: RealmTransport,
-  uplink: NetworkUplink | undefined,
-  doh: string | false | undefined
-): DnsStub {
-  return new DnsStub({ resolver, forward: dnsForward(uplink, transport, doh) });
 }
 
 async function readExactly(

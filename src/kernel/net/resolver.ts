@@ -1,4 +1,5 @@
 import { KernelError } from '../fd-table.ts';
+import { type DnsForward, forwardedLookup } from './dns-stub.ts';
 import { type HostsTable, parseHosts } from './hosts-file.ts';
 import {
   DEFAULT_HOSTNAME,
@@ -9,7 +10,7 @@ import {
   ownNames,
 } from './loopback-names.ts';
 import { ipv4Bytes, ipv6Groups, type Routes } from './routes.ts';
-import { answerOf, type NetworkUplink, type ResolveFamily } from './uplink.ts';
+import { answerOf, type NetworkUplink, type ResolveAnswer, type ResolveFamily } from './uplink.ts';
 
 export const RESOLVE_TTL_MAX = 60;
 export const RESOLVE_TIMEOUT_MS = 10_000;
@@ -30,6 +31,7 @@ export interface ResolverOptions {
   log?: (message: string) => void;
   hostname?: string;
   hosts?: () => Promise<HostsTable | undefined>;
+  forward?: DnsForward | undefined;
 }
 
 function loopbackName(name: string, own: readonly string[]): boolean {
@@ -57,6 +59,7 @@ export class Resolver {
   private readonly cache = new Map<string, Cached>();
   private readonly pending = new Map<string, Lookup>();
   private readonly hosts: (() => Promise<HostsTable | undefined>) | undefined;
+  private readonly forward: DnsForward | undefined;
 
   constructor(options: ResolverOptions) {
     this.uplink = options.uplink;
@@ -67,6 +70,7 @@ export class Resolver {
     this.own = ownNames(options.hostname ?? DEFAULT_HOSTNAME);
     this.builtin = parseHosts(hostsFile(options.hostname ?? DEFAULT_HOSTNAME));
     this.hosts = options.hosts;
+    this.forward = options.forward;
   }
 
   private async fromFile(key: string, family: ResolveFamily): Promise<string[] | undefined> {
@@ -99,7 +103,8 @@ export class Resolver {
   async resolve(
     name: string,
     family: ResolveFamily,
-    blocking?: () => AbortSignal
+    blocking?: () => AbortSignal,
+    forwarded = true
   ): Promise<string[]> {
     const key = name.toLowerCase().replace(/\.$/, '');
     const local = hostsEntry(key, this.own);
@@ -116,15 +121,25 @@ export class Resolver {
     if (!this.uplink || key === '') return [];
     const asked: ResolveFamily = this.uplink.traits.ipv6 ? family : 4;
     if (family === 6 && asked !== 6) return [];
-    const id = `${asked}:${key}`;
+    return this.remote(key, asked, blocking, forwarded);
+  }
+
+  private remote(
+    key: string,
+    asked: ResolveFamily,
+    blocking: (() => AbortSignal) | undefined,
+    forwarded: boolean
+  ): Promise<string[]> {
+    const id = `${forwarded && this.forward ? 'forwarded' : 'uplink'}:${asked}:${key}`;
     const hit = this.cache.get(id);
-    if (hit && hit.expires > this.now()) return hit.addresses;
+    if (hit && hit.expires > this.now()) return Promise.resolve(hit.addresses);
     const signal = blocking?.();
-    if (signal?.aborted) throw new KernelError('EINTR');
+    if (signal?.aborted) return Promise.reject(new KernelError('EINTR'));
     let lookup = this.pending.get(id);
     if (!lookup) {
       const abort = new AbortController();
-      lookup = { work: this.lookup(key, asked, id, abort.signal), abort, waiters: 0 };
+      const work = this.lookup(key, asked, id, abort.signal, forwarded);
+      lookup = { work, abort, waiters: 0 };
       this.pending.set(id, lookup);
       const done = () => this.pending.delete(id);
       void lookup.work.then(done, done);
@@ -136,26 +151,46 @@ export class Resolver {
     name: string,
     family: ResolveFamily,
     id: string,
-    abandoned: AbortSignal
+    abandoned: AbortSignal,
+    forwarded: boolean
   ): Promise<string[]> {
-    const uplink = this.uplink as NetworkUplink;
     const timeout = AbortSignal.any([AbortSignal.timeout(this.timeoutMs), abandoned]);
-    let answer: { addresses: string[]; ttl?: number };
+    const own = await this.ask(name, `resolve ${name}: the uplink gave no answer`, timeout, () =>
+      this.uplink?.resolve ? this.uplink.resolve(name, family, timeout) : Promise.resolve([])
+    );
+    let answer = { ...own, addresses: own.addresses.filter((a) => this.usable(name, a, family)) };
+    const forward = this.forward;
+    if (answer.addresses.length === 0 && forwarded && forward) {
+      const found = await this.ask(
+        name,
+        `resolve ${name}: the DNS forwarder gave no answer`,
+        timeout,
+        () => forwardedLookup(forward, name, family, timeout)
+      );
+      answer = { ...found, addresses: found.addresses.filter((a) => this.usable(name, a, family)) };
+    }
+    if (answer.addresses.length > 0) this.remember(id, answer.addresses, answer.ttl);
+    return answer.addresses;
+  }
+
+  private async ask(
+    name: string,
+    failure: string,
+    timeout: AbortSignal,
+    work: () => Promise<string[] | ResolveAnswer>
+  ): Promise<ResolveAnswer> {
     try {
-      answer = answerOf(
+      return answerOf(
         await Promise.race([
-          uplink.resolve(name, family, timeout),
+          work(),
           new Promise<never>((_, reject) =>
             timeout.addEventListener('abort', () => reject(timeout.reason), { once: true })
           ),
         ])
       );
     } catch {
-      throw new KernelError('ETIMEDOUT', `resolve ${name}: the uplink gave no answer`);
+      throw new KernelError('ETIMEDOUT', failure);
     }
-    const addresses = answer.addresses.filter((a) => this.usable(name, a, family));
-    if (addresses.length > 0) this.remember(id, addresses, answer.ttl);
-    return addresses;
   }
 
   private usable(name: string, address: string, family: ResolveFamily): boolean {
