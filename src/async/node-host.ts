@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { MessageChannel, type MessagePort, Worker } from 'node:worker_threads';
 import type { WasmWorkerLike } from '../kernel/host.ts';
 import type { WasmProgram } from '../kernel/protocol.ts';
+import { importSource } from '../process/wasi/wasi-imports.ts';
 import type { KernelLink, ProcessLink } from './link.ts';
 import { type MessagePortLike, messageLinks } from './message-link.ts';
 import { remoteWorker } from './remote-worker.ts';
@@ -9,6 +10,7 @@ import type { AsyncProcessInit } from './wire.ts';
 
 export interface AsyncProcessDeps {
   module(image: string): WebAssembly.Module | Promise<WebAssembly.Module>;
+  imports?(source: string): Promise<Record<string, unknown>>;
 }
 
 export type AsyncProcessEntry = (link: KernelLink, deps: AsyncProcessDeps) => void;
@@ -52,7 +54,9 @@ const THREAD_BOOT = `(async () => {
     }).finally(() => {
       if (waiting.size === 0) modules.unref();
     });
-  entry(messageLinks(workerData.link).kernel, { module });
+  const imports = (source) =>
+    import(\`data:text/javascript;base64,\${Buffer.from(source).toString('base64')}\`);
+  entry(messageLinks(workerData.link).kernel, { module, imports });
 })().catch((err) => {
   setImmediate(() => {
     throw err;
@@ -139,6 +143,7 @@ function entryUrl(entry: string | URL | undefined): string {
 export function nodeAsyncHost(options: AsyncProcessOptions, live: Set<() => void>): NodeAsyncHost {
   const registry = imageRegistry();
   const deps: AsyncProcessDeps = { module: (image) => registry.module(image) };
+  deps.imports = importSource;
   const open: (init: AsyncProcessInit) => ProcessLink = options.inline
     ? inlineOpen(options.inline, deps)
     : threadOpen(entryUrl(options.entry), (image) => registry.module(image));
