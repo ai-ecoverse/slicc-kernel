@@ -96,7 +96,7 @@ interface ProcPaths {
   pid: number;
 }
 
-const WRITES = ['mkdir', 'rm', 'unlink', 'chmod', 'writeFile'] as const;
+const WRITES = ['mkdir', 'rm', 'unlink', 'chmod', 'chown', 'utimes', 'writeFile'] as const;
 const TWO = ['rename', 'link'] as const;
 
 function procOps(paths: ProcPaths, run: ProcRun) {

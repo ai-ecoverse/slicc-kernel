@@ -10,6 +10,8 @@ import {
 } from '../../realm/sync-sab-wire.ts';
 import { type AsyncSabTransport, changed, type WaitAsyncLike } from './async-sab.ts';
 
+const MAX_ID = 0xffffffff;
+
 export class JsCallError extends Error {
   readonly code: string;
 
@@ -60,6 +62,23 @@ export function modeOf(mode: unknown): number {
     throw new JsCallError('EINVAL', 'chmod');
   }
   return mode as number;
+}
+
+export function idsOf(uid: unknown, gid: unknown): { uid?: number; gid?: number } {
+  const ok = (id: unknown) =>
+    Number.isInteger(id) && (id as number) >= -1 && (id as number) < MAX_ID;
+  if (!ok(uid) || !ok(gid)) throw new JsCallError('EINVAL', 'chown');
+  return {
+    ...(uid !== -1 ? { uid: uid as number } : {}),
+    ...(gid !== -1 ? { gid: gid as number } : {}),
+  };
+}
+
+export function timesOf(atimeMs: unknown, mtimeMs: unknown): { atimeMs: number; mtimeMs: number } {
+  if (!Number.isFinite(atimeMs) || !Number.isFinite(mtimeMs)) {
+    throw new JsCallError('EINVAL', 'utimes');
+  }
+  return { atimeMs: atimeMs as number, mtimeMs: mtimeMs as number };
 }
 
 export function callError(

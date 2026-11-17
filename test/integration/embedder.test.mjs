@@ -182,6 +182,7 @@ test(
       ['NotAllowedError', /Permission denied/],
       ['NotSupportedError', /not supported/i],
       ['NotFoundError', /No such file/],
+      ['NoModificationAllowedError', /Resource busy|Device or resource busy/],
       ['TypeError', /Input\/output error|I\/O error/],
     ]) {
       const r = await ask(`{"kind":"test.fail","as":"${as}"}`);

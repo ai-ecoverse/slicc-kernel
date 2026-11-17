@@ -15,6 +15,7 @@ import {
 } from './js-children.ts';
 import {
   devAsync,
+  devChangeAsync,
   devExists,
   devOpen,
   devReaddir,
@@ -53,7 +54,16 @@ import {
   writeDevice,
   written,
 } from './js-io.ts';
-import { callError, devOf, JsCallError, type JsKernel, modeOf, umaskRequest } from './js-kernel.ts';
+import {
+  callError,
+  devOf,
+  idsOf,
+  JsCallError,
+  type JsKernel,
+  modeOf,
+  timesOf,
+  umaskRequest,
+} from './js-kernel.ts';
 import { type JsNet, netOps } from './js-net.ts';
 import { procFsAsync, procOpenAsync } from './js-proc.ts';
 import {
@@ -197,6 +207,8 @@ export interface JsProgramContext {
     unlink(path: string): Promise<void>;
     rename(from: string, to: string): Promise<void>;
     chmod(path: string, mode: number): Promise<void>;
+    chown(path: string, uid: number, gid: number): Promise<void>;
+    utimes(path: string, atimeMs: number, mtimeMs: number): Promise<void>;
     link(from: string, to: string): Promise<void>;
     symlink(target: string, path: string): Promise<void>;
     readlink(path: string): Promise<string>;
@@ -1166,8 +1178,27 @@ function pathOps(
     unlink: async (path) => void (await kernel.call({ op: 'unlink', path: resolve(path) })),
     rename: async (from, to) =>
       void (await kernel.call({ op: 'rename', path: resolve(from), arg2: resolve(to) })),
-    chmod: async (path, mode) =>
-      void (await kernel.call({ op: 'chmod', path: resolve(path), mode: modeOf(mode) })),
+    async chmod(path, mode) {
+      const abs = resolve(path);
+      const bits = modeOf(mode);
+      await devChangeAsync(kernel, abs, { mode: bits }, () =>
+        kernel.call({ op: 'chmod', path: abs, mode: bits, devs: true })
+      );
+    },
+    async chown(path, uid, gid) {
+      const abs = resolve(path);
+      const ids = idsOf(uid, gid);
+      await devChangeAsync(kernel, abs, ids, () =>
+        kernel.call({ op: 'chown', path: abs, ...ids, devs: true })
+      );
+    },
+    async utimes(path, atimeMs, mtimeMs) {
+      const abs = resolve(path);
+      const times = timesOf(atimeMs, mtimeMs);
+      await devChangeAsync(kernel, abs, times, () =>
+        kernel.call({ op: 'utimes', path: abs, ...times, devs: true })
+      );
+    },
     link: async (from, to) =>
       void (await kernel.call({ op: 'link', path: resolve(from), arg2: resolve(to) })),
     symlink: async (target, path) =>

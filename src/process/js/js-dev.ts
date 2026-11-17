@@ -1,5 +1,10 @@
 import { inShm } from '../../fs/dev-removal.ts';
-import { BY_ID, DEVICE_NAME, type DeviceNodeInfo } from '../../kernel/devices.ts';
+import {
+  BY_ID,
+  DEVICE_NAME,
+  type DeviceMetaChange,
+  type DeviceNodeInfo,
+} from '../../kernel/devices.ts';
 import type { DeviceMeta } from '../../kernel/fd-table.ts';
 import { CBAUD, codeOf, IOCTL, type SerialTermios, TIOCM } from '../../kernel/serial-ioctl.ts';
 import { parseSyncFsStat, type SyncFsBridgeStat } from '../../realm/sync-fs-wire.ts';
@@ -218,6 +223,44 @@ export function* devStat(abs: string, follow: boolean): DevStep<SyncFsBridgeStat
       return node.fd === undefined ? nodeStat(DIR | 0o555) : yield* fdStat(node.fd, abs);
     case 'fd':
       return follow ? yield* fdStat(node.fd, abs) : linkStat(yield* fdTarget(node.fd, abs));
+  }
+}
+
+export function* devMeta(abs: string, follow: boolean, change: DeviceMetaChange): DevStep<boolean> {
+  if (!abs.startsWith('/dev/') || !serialNamed(abs.slice(5))) return false;
+  const found = serialNode(abs, yield* deviceNodes());
+  if (found?.kind !== 'serial' && !(found?.kind === 'devlink' && follow)) return false;
+  yield { op: 'fd-dev-meta', path: found.node.path, ...change };
+  return true;
+}
+
+export async function devChangeAsync(
+  kernel: { json(req: SyncSabRequestBody): Promise<unknown> },
+  abs: string,
+  change: DeviceMetaChange,
+  plain: () => Promise<unknown>
+): Promise<void> {
+  if (await devAsync(kernel, devMeta(abs, true, change))) return;
+  try {
+    await plain();
+  } catch (err) {
+    const dev = err instanceof JsCallError && err.code === 'ENOENT' ? err.dev : undefined;
+    if (dev === undefined || !(await devAsync(kernel, devMeta(dev, true, change)))) throw err;
+  }
+}
+
+export function devChangeSync(
+  kernel: { json(req: SyncSabRequestBody): unknown },
+  abs: string,
+  change: DeviceMetaChange,
+  plain: () => unknown
+): void {
+  if (devSync(kernel, devMeta(abs, true, change))) return;
+  try {
+    plain();
+  } catch (err) {
+    const dev = err instanceof JsCallError && err.code === 'ENOENT' ? err.dev : undefined;
+    if (dev === undefined || !devSync(kernel, devMeta(dev, true, change))) throw err;
   }
 }
 

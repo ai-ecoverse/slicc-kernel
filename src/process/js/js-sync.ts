@@ -12,6 +12,7 @@ import { createSyncSabTransport, type SyncSabTransport } from '../../realm/sync-
 import type { SyncSabRequestBody } from '../../realm/sync-sab-wire.ts';
 import type { JsChild, JsSpawnOptions } from './js-children.ts';
 import {
+  devChangeSync,
   devExists,
   devOpen,
   devReaddir,
@@ -46,7 +47,15 @@ import {
   writeDevice,
   written,
 } from './js-io.ts';
-import { callError, devOf, JsCallError, type JsKernel, modeOf } from './js-kernel.ts';
+import {
+  callError,
+  devOf,
+  idsOf,
+  JsCallError,
+  type JsKernel,
+  modeOf,
+  timesOf,
+} from './js-kernel.ts';
 import type { JsSyncNet } from './js-net.ts';
 import { procFsSync, procOpenSync } from './js-proc.ts';
 import {
@@ -136,6 +145,8 @@ export interface JsSyncContext {
     unlink(path: string): void;
     rename(from: string, to: string): void;
     chmod(path: string, mode: number): void;
+    chown(path: string, uid: number, gid: number): void;
+    utimes(path: string, atimeMs: number, mtimeMs: number): void;
     link(from: string, to: string): void;
     symlink(target: string, path: string): void;
     readlink(path: string): string;
@@ -564,8 +575,27 @@ function syncPathOps(
     unlink: (path) => void kernel.call({ op: 'unlink', path: resolve(path) }),
     rename: (from, to) =>
       void kernel.call({ op: 'rename', path: resolve(from), arg2: resolve(to) }),
-    chmod: (path, mode) =>
-      void kernel.call({ op: 'chmod', path: resolve(path), mode: modeOf(mode) }),
+    chmod(path, mode) {
+      const abs = resolve(path);
+      const bits = modeOf(mode);
+      devChangeSync(kernel, abs, { mode: bits }, () =>
+        kernel.call({ op: 'chmod', path: abs, mode: bits, devs: true })
+      );
+    },
+    chown(path, uid, gid) {
+      const abs = resolve(path);
+      const ids = idsOf(uid, gid);
+      devChangeSync(kernel, abs, ids, () =>
+        kernel.call({ op: 'chown', path: abs, ...ids, devs: true })
+      );
+    },
+    utimes(path, atimeMs, mtimeMs) {
+      const abs = resolve(path);
+      const times = timesOf(atimeMs, mtimeMs);
+      devChangeSync(kernel, abs, times, () =>
+        kernel.call({ op: 'utimes', path: abs, ...times, devs: true })
+      );
+    },
     link: (from, to) => void kernel.call({ op: 'link', path: resolve(from), arg2: resolve(to) }),
     symlink: (target, path) =>
       void kernel.call({ op: 'symlink', path: resolve(path), arg2: target }),
