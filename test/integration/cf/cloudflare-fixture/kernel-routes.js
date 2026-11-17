@@ -267,8 +267,12 @@ export class KernelRoutes {
         });
       }
       case '/kernel/file-write':
-        await this.kernel.writeFile(args.path, args.data);
-        return json({ ok: true });
+        try {
+          await this.kernel.writeFile(args.path, args.data);
+          return json({ ok: true });
+        } catch (err) {
+          return json({ thrown: String(err?.message ?? err), code: err?.code ?? null });
+        }
       case '/kernel/file-read':
         try {
           return json({ data: new TextDecoder().decode(await this.kernel.readFile(args.path)) });

@@ -130,19 +130,22 @@ describe('a running program whose wasm is replaced keeps forking into new Dynami
     assert.match(out.out, /child\r?\nstatus 0\r?\n/, JSON.stringify(out));
   });
 
-  test('after its wasm is written over in place, a fork into a cold Dynamic Worker fails with ESTALE, not a hang', async (t) => {
+  test('a write into its wasm fails with ETXTBSY, so a fork into a cold Dynamic Worker still runs it, and the write works once it ends', async (t) => {
     if (skipped(t)) return;
     const wasm = await shell('cpsh');
     const shell1 = await waiting(['cpsh', '-c', WAIT_THEN_FORK]);
+    const copy = `{ cat ${wasm}; printf '${section(`cp-${RUN}`)}'; } > /tmp/cp.wasm`;
     const written = await sh(
-      `{ cat ${wasm}; printf '${section(`cp-${RUN}`)}'; } > /tmp/cp.wasm && cat /tmp/cp.wasm > ${wasm}`
+      `${copy} && cat /tmp/cp.wasm > ${wasm}; echo "cat rc=$?"; cp /tmp/cp.wasm ${wasm}; echo "cp rc=$?"; truncate -s 0 ${wasm}; echo "truncate rc=$?"`
     );
-    assert.equal(written.status, 0, JSON.stringify(written));
+    assert.equal(written.stdout, 'cat rc=1\ncp rc=1\ntruncate rc=1\n', JSON.stringify(written));
+    assert.equal(written.stderr.match(/Text file busy/g)?.length, 3, written.stderr);
+    const api = await call('/kernel/file-write', { path: wasm, data: 'x' });
+    assert.equal(api.code, 'ETXTBSY', JSON.stringify(api));
     const out = await shell1.go();
-    assert.match(
-      out.out,
-      /ESTALE: \/node_modules\/cpsh\/bin\/bash\.wasm changed since the kernel compiled it\r?\nstatus 126\r?\n/,
-      JSON.stringify(out)
-    );
+    assert.match(out.out, /child\r?\nstatus 0\r?\n/, JSON.stringify(out));
+    assert.equal(out.ended.status, 0);
+    const freed = await sh(`cp /tmp/cp.wasm ${wasm} && cpsh -c 'echo fresh'`);
+    assert.deepEqual(outcome(freed), { status: 0, stdout: 'fresh\n', stderr: '' });
   });
 });
