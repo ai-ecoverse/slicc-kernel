@@ -768,16 +768,18 @@ function mountOf(ctx: EmContext, state: FilesState, dir: string): string {
   return mountPoints(ctx, state).has(top) ? top : '/';
 }
 
+const OWN_MOUNTS: ReadonlySet<string> = new Set(['dev', 'proc', 'sys']);
+
 function mountPoints(ctx: EmContext, state: FilesState): Set<string> {
   if (state.mounts) return state.mounts;
   const fs = ctx.host.o.fs;
-  const out = new Set<string>(['/dev', '/proc']);
+  const out = new Set<string>(['/dev', '/proc', '/sys']);
   let names: string[] = [];
   try {
     names = fs.readdir('/');
   } catch {}
   for (const name of [...names, 'usr', 'bin']) {
-    if (!name || name.includes('/') || name === 'dev' || name === 'proc') continue;
+    if (!name || name.includes('/') || OWN_MOUNTS.has(name)) continue;
     try {
       if (fs.stat(`/${name}`).isDirectory) out.add(`/${name}`);
     } catch {}

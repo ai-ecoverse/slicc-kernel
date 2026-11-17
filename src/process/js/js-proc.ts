@@ -1,4 +1,6 @@
+import type { DeviceNodeInfo } from '../../kernel/devices.ts';
 import type { MountLine, ProcessListing } from '../../kernel/proc-info.ts';
+import { inSys, SysTree } from '../../kernel/sysfs.ts';
 import type { SyncSabRequestBody } from '../../realm/sync-sab-wire.ts';
 import { memorySource } from '../procfs.ts';
 import { inProc, ProcTree } from '../wasi/wasi-procfs.ts';
@@ -7,6 +9,32 @@ import { index, readingInto } from './js-io.ts';
 import { JsCallError } from './js-kernel.ts';
 
 export { inProc };
+
+type ReadTree = Pick<ProcTree, 'stat' | 'exists' | 'readdir' | 'readlink' | 'read'>;
+
+function callError(err: unknown, abs: string): JsCallError {
+  return new JsCallError((err as { code?: string }).code ?? 'EIO', abs);
+}
+
+const UNLISTED = new Error('the device list is needed');
+
+export function* sysStep<T>(abs: string, run: (tree: ReadTree) => T): DevStep<T> {
+  try {
+    return run(
+      new SysTree(() => {
+        throw UNLISTED;
+      })
+    );
+  } catch (err) {
+    if (err !== UNLISTED) throw callError(err, abs);
+  }
+  const nodes = (yield { op: 'fd-dev-nodes' }) as DeviceNodeInfo[];
+  try {
+    return run(new SysTree(() => nodes));
+  } catch (err) {
+    throw callError(err, abs);
+  }
+}
 
 export function* procStep<T>(abs: string, pid: number, run: (tree: ProcTree) => T): DevStep<T> {
   const listing = (yield { op: 'proc-list' }) as ProcessListing;
@@ -19,7 +47,7 @@ export function* procStep<T>(abs: string, pid: number, run: (tree: ProcTree) => 
   try {
     return run(tree);
   } catch (err) {
-    throw new JsCallError((err as { code?: string }).code ?? 'EIO', abs);
+    throw callError(err, abs);
   }
 }
 
@@ -102,9 +130,10 @@ const TWO = ['rename', 'link'] as const;
 function procOps(paths: ProcPaths, run: ProcRun) {
   const at = (path: string) => {
     const abs = paths.resolve(path);
-    return inProc(abs) ? abs : undefined;
+    return inProc(abs) || inSys(abs) ? abs : undefined;
   };
-  const step = <T>(abs: string, op: (tree: ProcTree) => T) => run(procStep(abs, paths.pid, op));
+  const step = <T>(abs: string, op: (tree: ReadTree) => T) =>
+    run(inSys(abs) ? sysStep(abs, op) : procStep(abs, paths.pid, op));
   return { at, step };
 }
 
@@ -116,7 +145,7 @@ export function withProc<F extends Record<string, unknown>>(
   const { at, step } = procOps(paths, run);
   const out: Record<string, unknown> = { ...fs };
   const pass = fs as Record<string, (...args: unknown[]) => unknown>;
-  const reads: Record<string, (tree: ProcTree, abs: string) => unknown> = {
+  const reads: Record<string, (tree: ReadTree, abs: string) => unknown> = {
     stat: (tree, abs) => tree.stat(abs, true),
     lstat: (tree, abs) => tree.stat(abs, false),
     exists: (tree, abs) => tree.exists(abs),
@@ -130,6 +159,13 @@ export function withProc<F extends Record<string, unknown>>(
       return abs ? step(abs, (tree) => read(tree, abs)) : pass[name]?.(path, ...rest);
     };
   }
+  const readdir = out.readdir as (path: string) => unknown;
+  out.readdir = (path: string) => {
+    if (paths.resolve(path) !== '/') return readdir(path);
+    const listed = readdir(path);
+    const add = (names: string[]) => (names.includes('sys') ? names : [...names, 'sys']);
+    return listed instanceof Promise ? listed.then(add) : add(listed as string[]);
+  };
   for (const name of WRITES) {
     out[name] = (path: string, ...rest: unknown[]) => {
       const abs = at(path);

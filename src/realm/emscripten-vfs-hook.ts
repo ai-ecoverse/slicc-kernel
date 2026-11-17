@@ -10,7 +10,7 @@ import {
 } from './live-vfs-fs.ts';
 import type { SyncFsPosixBridge } from './sync-fs-wire.ts';
 
-const MODULE_OWNED_DIRS = new Set(['dev', 'proc']);
+const MODULE_OWNED_DIRS = new Set(['dev', 'proc', 'sys']);
 
 const SYNTHETIC_DIRS = ['/usr', '/bin'];
 

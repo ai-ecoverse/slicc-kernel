@@ -9,10 +9,15 @@ export function inDevTree(path: string): boolean {
   return path === '/dev' || path.startsWith('/dev/');
 }
 
+export function inSys(path: string): boolean {
+  return path === '/sys' || path.startsWith('/sys/');
+}
+
 export function devRemoval(
   path: string,
   cred: Readonly<{ euid: number }> | undefined
-): 'EACCES' | 'EPERM' | 'EBUSY' | undefined {
+): 'EACCES' | 'EPERM' | 'EBUSY' | 'EROFS' | undefined {
+  if (inSys(path)) return 'EROFS';
   if (!inDevTree(path)) return undefined;
   if (cred && cred.euid !== 0) return 'EACCES';
   return path === '/dev' ? 'EBUSY' : 'EPERM';
@@ -22,7 +27,7 @@ export function devCreation(
   path: string,
   cred: Readonly<{ euid: number }> | undefined
 ): 'EACCES' | 'EPERM' | 'EROFS' | undefined {
-  if (path === '/proc' || path.startsWith('/proc/')) return 'EROFS';
+  if (path === '/proc' || path.startsWith('/proc/') || inSys(path)) return 'EROFS';
   if (path === '/dev' || !inDevTree(path)) return undefined;
   return cred && cred.euid !== 0 ? 'EACCES' : 'EPERM';
 }
