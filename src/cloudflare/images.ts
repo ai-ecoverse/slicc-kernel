@@ -76,6 +76,7 @@ export interface ImageSource {
   readonly path: string;
   read(): Promise<Uint8Array>;
   stale?(): void;
+  kept?(): ImageSource[];
 }
 
 interface Image {
@@ -163,11 +164,13 @@ export class Images {
   private async read(image: string, entry: Image): Promise<ArrayBuffer> {
     let failed: ImageError | undefined;
     for (const source of [...entry.sources.values()]) {
+      for (const kept of source.kept?.() ?? []) {
+        const bytes = await kept.read().catch(() => undefined);
+        if (bytes && (await this.matches(bytes, entry, image))) return bufferOf(bytes);
+      }
       try {
         const bytes = await source.read();
-        if (bytes.byteLength === entry.module && (await digest(bytes)) === image) {
-          return bufferOf(bytes);
-        }
+        if (await this.matches(bytes, entry, image)) return bufferOf(bytes);
         failed ??= new ImageError('ESTALE', `${source.path} changed since the kernel compiled it`);
       } catch (err) {
         failed ??= unread(source.path, err);
@@ -176,6 +179,10 @@ export class Images {
       source.stale?.();
     }
     throw failed ?? new ImageError('ENOENT', `no file holds program image ${image}`);
+  }
+
+  private async matches(bytes: Uint8Array, entry: Image, image: string): Promise<boolean> {
+    return bytes.byteLength === entry.module && (await digest(bytes)) === image;
   }
 
   get(image: string): ArrayBuffer {
