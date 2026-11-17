@@ -57,7 +57,7 @@ export interface MountDeps {
   busy(target: string): boolean;
   changed?(...paths: string[]): void;
   doubted?(target: string): void;
-  reshaped?(): void;
+  reshaped?(target: string): void;
   timeoutMs?: number;
   owners?: boolean;
 }
@@ -616,6 +616,10 @@ export class MountTable {
     return false;
   }
 
+  linksAt(path: string): boolean {
+    return this.locate(path)?.mount.caps.links === true;
+  }
+
   readOnlyAt(path: string): boolean {
     const found = this.locate(path);
     return found !== undefined && readonly(found.mount);
@@ -703,7 +707,7 @@ export class MountTable {
     };
     mounted = mount;
     this.mounts.set(target, mount);
-    this.deps.reshaped?.();
+    this.deps.reshaped?.(target);
     this.notes.delete(target);
     return this.list().find((m) => m.target === target) as MountEntry;
   }
@@ -721,7 +725,7 @@ export class MountTable {
     this.system.delete(at);
     this.notes.delete(at);
     this.mounts.delete(at);
-    this.deps.reshaped?.();
+    this.deps.reshaped?.(at);
     const waits = [...this.sessions]
       .filter(([, s]) => s.mount === mount)
       .map(([real]) => this.commit(real));

@@ -17,6 +17,7 @@ export interface VfsFileFs extends Partial<AsyncRangedIo> {
   readFileBuffer(path: string): Promise<Uint8Array>;
   writeFile(path: string, content: Uint8Array, owner?: NewOwner): Promise<void>;
   mayChange?(path: string, follow: boolean, whole?: boolean): Promise<void>;
+  mayWrite?(path: string): Promise<void>;
   stat?(path: string): Promise<{
     readonly?: boolean;
     maxFile?: number;

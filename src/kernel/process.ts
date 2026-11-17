@@ -1504,7 +1504,7 @@ export class WasmProcess {
         this.fds.installAt(fd, await this.procFile(req, path));
         return fd;
       }
-      if (this.writesAt(req) && this.options.readonlyAt?.(path)) throw new KernelError('EROFS');
+      await this.refuseWrites(req, path);
       const open = { ...req, path };
       const plain = this.plainMode(req.mode);
       if (req.exclusive) {
@@ -1580,6 +1580,14 @@ export class WasmProcess {
       return st?.ino === undefined ? now : { ...now, ino: st.ino };
     };
     return fs.exclusive ? fs.exclusive(first.path, look) : look();
+  }
+
+  private async refuseWrites(
+    req: Extract<FdSyscall, { op: 'fd-open-vfs' }>,
+    path: string
+  ): Promise<void> {
+    if (this.writesAt(req) && this.options.readonlyAt?.(path)) throw new KernelError('EROFS');
+    if (writesData(req)) await this.options.fs.mayWrite?.(path);
   }
 
   private writesAt(req: Extract<FdSyscall, { op: 'fd-open-vfs' }>): boolean {
@@ -2630,6 +2638,13 @@ export class WasmProcess {
     if (!this.options.nodes) this.options.openFiles?.delete(this.nodes);
     await this.options.http?.closeAll();
   }
+}
+
+function writesData(req: Extract<FdSyscall, { op: 'fd-open-vfs' }>): boolean {
+  const inherited = req.orphan || req.contents !== undefined || req.handle !== undefined;
+  return (
+    !inherited && !req.exclusive && (req.truncate === true || (req.flags & WRITE_ACCESS) !== 0)
+  );
 }
 
 function unfollowed(req: Extract<FdSyscall, { op: 'fd-open-vfs' }>): boolean {

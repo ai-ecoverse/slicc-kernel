@@ -315,6 +315,10 @@ function refusal(err: unknown): boolean {
   return code === 'EACCES' || code === 'EPERM';
 }
 
+function busy(err: unknown): boolean {
+  return (err as { code?: unknown } | null)?.code === 'ETXTBSY';
+}
+
 function gone(err: unknown): boolean {
   return (err as { code?: unknown } | null)?.code === 'ENOENT';
 }
@@ -1068,7 +1072,7 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
       if (s.handle === undefined) h.handled.delete(node);
       else h.handled.add(node);
     } catch (err) {
-      if (refusal(err) || gone(err)) {
+      if (refusal(err) || gone(err) || busy(err)) {
         throw new Fs.ErrnoError(wasiErrno((err as { code: string }).code));
       }
     }
@@ -1076,7 +1080,7 @@ function createStreamOps(h: LiveHelpers): LiveStreamOps {
   const permitted = (stream: LiveFsStream, created: boolean): number => {
     const s = stream.node.live;
     const bridge = bridgeOf(stream.node);
-    if (!bridge.owners || s.orphan) return 0;
+    if (!bridge.owners || s.orphan) return s.orphan ? 0 : wantOf(stream.flags) & HOLD_WRITE;
     const want = wantOf(stream.flags) | (created ? HOLD_CREATED : 0);
     if (s.openCount > 0 && !created) {
       h.call(() => bridge.access?.(liveNodePath(stream.node), accessOf(want), 'open'));
