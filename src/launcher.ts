@@ -176,6 +176,7 @@ import {
 import { openInProcess } from './mount/in-process.ts';
 import { type MediaStore, memoryMedia } from './mount/media.ts';
 import {
+  HeldPaths,
   HeldSet,
   heldUnder,
   type MountEntry,
@@ -287,6 +288,13 @@ export interface ProgramSource {
   readonly path: string;
   read(): Promise<Uint8Array>;
   stale(): void;
+  kept(): { path: string; read(): Promise<Uint8Array> }[];
+}
+
+interface ImageHold {
+  readonly module: object;
+  readonly holds: HeldPaths;
+  users: number;
 }
 
 function tlsEngineOf(
@@ -915,6 +923,8 @@ export class Launcher {
   private readonly tagBases = new Map<number, number>();
   private readonly links = new Map<number, number>();
   private readonly freshModules = new FreshModules();
+  private readonly imagePaths = new WeakMap<object, string>();
+  private readonly imageHolds = new Map<string, Set<ImageHold>>();
   private readonly granted = new Map<number, number>();
   readonly users: UserDb;
   private readonly sudoer: Sudo;
@@ -2076,7 +2086,7 @@ export class Launcher {
     const pin = await this.pinOf(path, caller);
     const sum = Object.values(pin)[0];
     const key = sum === undefined ? await this.cacheKey(path, asked) : `${path}:sha256:${sum}`;
-    return this.cached(this.compiled, key, async () => {
+    const loaded = this.cached(this.compiled, key, async () => {
       const { bytes: read, key: readKey } = await this.keyed(path, caller, asked);
       const bytes = sum === undefined ? read : await this.pinnedBytes(pin, read);
       const memory = importedMemory(bytes);
@@ -2092,6 +2102,9 @@ export class Launcher {
         key: sum === undefined ? readKey : key,
       };
     });
+    const value = await loaded;
+    this.imagePaths.set(value.module, path);
+    return value;
   }
 
   private async checkedSources(planned: Planned, caller: IntegrityCaller): Promise<void> {
@@ -2228,6 +2241,41 @@ export class Launcher {
       path,
       read: () => this.base.readFileBuffer(path),
       stale: () => this.forgetCompiled(path),
+      kept: () =>
+        this.keptCopies(path).map((at) => ({ path: at, read: () => this.base.readFileBuffer(at) })),
+    };
+  }
+
+  private keptCopies(path: string): string[] {
+    const out = new Set<string>();
+    for (const hold of this.imageHolds.get(path) ?? []) {
+      for (const key of hold.holds.held()) out.add(hold.holds.keptAt(key)?.hidden ?? key);
+    }
+    out.delete(path);
+    return [...out];
+  }
+
+  private holdImage(program: Program): <T>(status: T) => T {
+    const module = program.abi === 'js' ? undefined : program.module;
+    const path = this.compile && module ? this.imagePaths.get(module) : undefined;
+    if (!module || path === undefined || this.mounts.readOnlyAt(path)) return (status) => status;
+    const holds = this.imageHolds.get(path) ?? new Set<ImageHold>();
+    this.imageHolds.set(path, holds);
+    let hold = [...holds].find((known) => known.module === module);
+    if (!hold) {
+      hold = { module, holds: new HeldPaths(), users: 0 };
+      hold.holds.hold(path, true, true);
+      holds.add(hold);
+      this.held.add(hold.holds);
+    }
+    const mine = hold;
+    mine.users++;
+    return (status) => {
+      if (--mine.users > 0) return status;
+      holds.delete(mine);
+      if (holds.size === 0 && this.imageHolds.get(path) === holds) this.imageHolds.delete(path);
+      this.held.delete(mine.holds);
+      return status;
     };
   }
 
@@ -2694,7 +2742,7 @@ export class Launcher {
     handle.onState((state) =>
       state === 'stopped' ? this.stopped.add(pid) : this.stopped.delete(pid)
     );
-    void handle.exited.then((status) => {
+    void handle.exited.then(this.holdImage(req.program)).then((status) => {
       this.traceEnded(pid, handle, status);
       this.cwds.release(this.cwdSlots.get(pid));
       this.cwdSlots.delete(pid);

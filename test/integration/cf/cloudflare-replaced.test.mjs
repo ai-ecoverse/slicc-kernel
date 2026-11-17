@@ -81,7 +81,7 @@ async function waiting(argv) {
   };
 }
 
-const WAIT_THEN_FORK = 'echo ready; read x; (echo child; true); echo "status $?"';
+const WAIT_THEN_FORK = 'echo ready; read x; (echo child; exec true); echo "status $?"';
 
 describe('a running program whose wasm is replaced keeps forking into new Dynamic Workers', {
   concurrency: false,
@@ -96,6 +96,9 @@ describe('a running program whose wasm is replaced keeps forking into new Dynami
     assert.equal(out.ended.status, 0);
     const gone = await run(['rmsh', '-c', 'echo again']);
     assert.equal(gone.code, 'ENOENT', JSON.stringify(gone));
+    await until(
+      async () => (await sh('test -e /.slicc-unlinked || echo none')).stdout === 'none\n'
+    );
   });
 
   test('after a new wasm is renamed over it, a fork still runs the old program and a fresh exec the new one', async (t) => {
@@ -113,5 +116,33 @@ describe('a running program whose wasm is replaced keeps forking into new Dynami
     const stats = await call('/kernel/stats');
     assert.equal(stats.held, 0);
     assert.equal(stats.images, before + 1, JSON.stringify({ before, stats }));
+    await until(
+      async () => (await sh('test -e /.slicc-unlinked || echo none')).stdout === 'none\n'
+    );
+  });
+
+  test('after its wasm is moved to another name, a fork into a cold Dynamic Worker reads it there', async (t) => {
+    if (skipped(t)) return;
+    const wasm = await shell('awaysh');
+    const shell1 = await waiting(['awaysh', '-c', WAIT_THEN_FORK]);
+    assert.equal((await sh(`mv ${wasm} /tmp/away.wasm`)).status, 0);
+    const out = await shell1.go();
+    assert.match(out.out, /child\r?\nstatus 0\r?\n/, JSON.stringify(out));
+  });
+
+  test('after its wasm is written over in place, a fork into a cold Dynamic Worker fails with ESTALE, not a hang', async (t) => {
+    if (skipped(t)) return;
+    const wasm = await shell('cpsh');
+    const shell1 = await waiting(['cpsh', '-c', WAIT_THEN_FORK]);
+    const written = await sh(
+      `{ cat ${wasm}; printf '${section(`cp-${RUN}`)}'; } > /tmp/cp.wasm && cat /tmp/cp.wasm > ${wasm}`
+    );
+    assert.equal(written.status, 0, JSON.stringify(written));
+    const out = await shell1.go();
+    assert.match(
+      out.out,
+      /ESTALE: \/node_modules\/cpsh\/bin\/bash\.wasm changed since the kernel compiled it\r?\nstatus 126\r?\n/,
+      JSON.stringify(out)
+    );
   });
 });

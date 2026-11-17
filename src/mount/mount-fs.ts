@@ -616,6 +616,11 @@ export class MountTable {
     return false;
   }
 
+  readOnlyAt(path: string): boolean {
+    const found = this.locate(path);
+    return found !== undefined && readonly(found.mount);
+  }
+
   locate(path: string): { mount: Mount; rel: string } | undefined {
     let best: Mount | undefined;
     for (const mount of this.mounts.values()) {
