@@ -497,6 +497,10 @@ async function stillThere(entry: SyncFsTokenEntry, path: string, req: SyncFsRequ
   if (!st) throw syncError('ENOENT', path);
 }
 
+async function writing(entry: SyncFsTokenEntry, path: string, mode: number): Promise<void> {
+  if (mode & HOLD_WRITE) await entry.fs.mayWrite?.(path);
+}
+
 async function holdOp(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest) {
   const mode = req.mode ?? 0;
   const [on, open] = [(mode & 1) === 1, (mode & 2) === 2];
@@ -510,6 +514,7 @@ async function holdOp(entry: SyncFsTokenEntry, path: string, req: SyncFsRequest)
         throw syncError('ELOOP', path);
       }
       const real = await entry.fs.realpath?.(path, true).catch(() => path);
+      await writing(entry, real ?? path, mode);
       await entry.source?.open(path, real);
       await stillThere(entry, path, req);
       if (req.nofollow && !(await ownEntry(entry, path, real ?? path))) continue;

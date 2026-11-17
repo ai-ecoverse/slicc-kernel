@@ -1055,7 +1055,8 @@ export class WasiFds {
     const ranged = st.ranged ? st.size : undefined;
     const asked =
       (want & 4 ? HOLD_READ : 0) | (want & 2 ? HOLD_WRITE : 0) | (made ? HOLD_CREATED : 0);
-    const handle = this.fs.hold?.(path, true, true, undefined, this.fs.owners ? asked : 0, {
+    const asking = this.fs.owners ? asked : asked & HOLD_WRITE;
+    const handle = this.fs.hold?.(path, true, true, undefined, asking, {
       gen: st.gen,
       ...(this.nofollow ? { nofollow: true } : {}),
       ...(st.ino !== undefined ? { ino: st.ino } : {}),

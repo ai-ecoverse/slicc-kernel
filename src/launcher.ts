@@ -54,6 +54,7 @@ import {
   protectedPrefixes,
   writerTags,
 } from './fs/protect.ts';
+import { TextBusy } from './fs/text-busy.ts';
 import type { KernelFs, NewOwner, PeerKeeps, Peers, UsersMode } from './fs/types.ts';
 import { fsError, normalizePath } from './fs/types.ts';
 import {
@@ -293,8 +294,15 @@ export interface ProgramSource {
 
 interface ImageHold {
   readonly module: object;
-  readonly holds: HeldPaths;
+  readonly holds: HeldPaths | undefined;
+  readonly busy: () => void;
   users: number;
+}
+
+interface ImagePath {
+  readonly path: string;
+  readonly real: string;
+  readonly id: string | undefined;
 }
 
 function tlsEngineOf(
@@ -923,8 +931,10 @@ export class Launcher {
   private readonly tagBases = new Map<number, number>();
   private readonly links = new Map<number, number>();
   private readonly freshModules = new FreshModules();
-  private readonly imagePaths = new WeakMap<object, string>();
+  private readonly imagePaths = new WeakMap<object, ImagePath>();
+  private readonly textBusy: TextBusy;
   private readonly imageHolds = new Map<string, Set<ImageHold>>();
+  private readonly imageReleases = new Map<number, () => void>();
   private readonly granted = new Map<number, number>();
   readonly users: UserDb;
   private readonly sudoer: Sudo;
@@ -1055,7 +1065,7 @@ export class Launcher {
       doubted: (target) => {
         for (const nodes of this.openFiles) nodes.doubted(target);
       },
-      reshaped: () => this.watchers.reshaped(),
+      reshaped: (target) => this.remounted(target),
       owners: this.owners,
     });
     this.mounted = this.mounts.wrap(options.fs);
@@ -1111,6 +1121,7 @@ export class Launcher {
     enableCdp(this.net, this.cdp);
     this.facades.enable(this.net);
     const fs = this.commandFs(this.base);
+    this.textBusy = this.busyImages(fs);
     this.nodes = this.openNodes(fs);
     this.nodes.keepsOnDisk = true;
     this.openFiles.add(this.nodes);
@@ -2103,8 +2114,27 @@ export class Launcher {
       };
     });
     const value = await loaded;
-    this.imagePaths.set(value.module, path);
+    this.imagePaths.set(value.module, await this.imagePath(path));
     return value;
+  }
+
+  private remounted(target: string): void {
+    this.textBusy?.removed(target);
+    this.watchers.reshaped();
+  }
+
+  private busyImages(fs: KernelFs): TextBusy {
+    const busy = new TextBusy(fs, (path) => this.mounts.linksAt(path));
+    this.watchers.onReshape(() => busy.reshaped());
+    return busy;
+  }
+
+  private async imagePath(path: string): Promise<ImagePath> {
+    const real = (await this.base.realpath?.(path, true).catch(() => undefined)) ?? path;
+    const linked = this.mounts.linksAt(real);
+    const st = linked ? await this.base.stat(real).catch(() => undefined) : undefined;
+    const id = st?.ino === undefined ? undefined : `${st.dev ?? 0}:${st.ino}`;
+    return { path, real, id };
   }
 
   private async checkedSources(planned: Planned, caller: IntegrityCaller): Promise<void> {
@@ -2249,33 +2279,50 @@ export class Launcher {
   private keptCopies(path: string): string[] {
     const out = new Set<string>();
     for (const hold of this.imageHolds.get(path) ?? []) {
-      for (const key of hold.holds.held()) out.add(hold.holds.keptAt(key)?.hidden ?? key);
+      const kept = hold.holds;
+      for (const key of kept?.held() ?? []) out.add(kept?.keptAt(key)?.hidden ?? key);
     }
     out.delete(path);
     return [...out];
   }
 
-  private holdImage(program: Program): <T>(status: T) => T {
+  private imageHeld(pid: number, req: StartRequest): <T>(status: T) => T {
+    const release = this.holdImage(req.program);
+    if (req.exec && req.ppid !== undefined) this.imageReleases.get(req.ppid)?.();
+    this.imageReleases.set(pid, release);
+    return (status) => {
+      release();
+      if (this.imageReleases.get(pid) === release) this.imageReleases.delete(pid);
+      return status;
+    };
+  }
+
+  private holdImage(program: Program): () => void {
     const module = program.abi === 'js' ? undefined : program.module;
-    const path = this.compile && module ? this.imagePaths.get(module) : undefined;
-    if (!module || path === undefined || this.mounts.readOnlyAt(path)) return (status) => status;
+    const image = module ? this.imagePaths.get(module) : undefined;
+    if (!module || !image || this.mounts.readOnlyAt(image.path)) return () => undefined;
+    const { path } = image;
     const holds = this.imageHolds.get(path) ?? new Set<ImageHold>();
     this.imageHolds.set(path, holds);
     let hold = [...holds].find((known) => known.module === module);
     if (!hold) {
-      hold = { module, holds: new HeldPaths(), users: 0 };
-      hold.holds.hold(path, true, true);
+      const kept = this.compile ? new HeldPaths() : undefined;
+      kept?.hold(path, true, true);
+      hold = { module, holds: kept, busy: this.textBusy.hold(image.real, image.id), users: 0 };
       holds.add(hold);
-      this.held.add(hold.holds);
+      if (kept) this.held.add(kept);
     }
     const mine = hold;
     mine.users++;
-    return (status) => {
-      if (--mine.users > 0) return status;
+    let held = true;
+    return () => {
+      if (!held) return;
+      held = false;
+      if (--mine.users > 0) return;
       holds.delete(mine);
       if (holds.size === 0 && this.imageHolds.get(path) === holds) this.imageHolds.delete(path);
-      this.held.delete(mine.holds);
-      return status;
+      if (mine.holds) this.held.delete(mine.holds);
+      mine.busy();
     };
   }
 
@@ -2742,7 +2789,7 @@ export class Launcher {
     handle.onState((state) =>
       state === 'stopped' ? this.stopped.add(pid) : this.stopped.delete(pid)
     );
-    void handle.exited.then(this.holdImage(req.program)).then((status) => {
+    void handle.exited.then(this.imageHeld(pid, req)).then((status) => {
       this.traceEnded(pid, handle, status);
       this.cwds.release(this.cwdSlots.get(pid));
       this.cwdSlots.delete(pid);
@@ -4202,6 +4249,7 @@ export class Launcher {
   private moved(from: string, to: string, source?: VfsNodes): void {
     this.renameLog.add(from, to);
     for (const holds of this.held) holds.renamed(from, to);
+    this.textBusy.renamed(from, to);
     if (source) return;
     for (const nodes of this.openFiles) nodes.renamed(from, to);
     this.watchers.moved(from, to);
@@ -4212,7 +4260,7 @@ export class Launcher {
     nodes.movedAway = (from, to) => this.moved(from, to, nodes);
     nodes.dirtied = (delta) => this.changes.dirtied(delta);
     const kept = keepingOpen(fs, nodes, (path) => this.changes.publish(path));
-    return this.swaps.wrap(unlinked.wrap(kept));
+    return this.textBusy.view(this.swaps.wrap(unlinked.wrap(kept)));
   }
 
   private async starting(
