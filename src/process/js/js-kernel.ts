@@ -11,6 +11,7 @@ import {
 import { type AsyncSabTransport, changed, type WaitAsyncLike } from './async-sab.ts';
 
 const MAX_ID = 0xffffffff;
+const MAX_DATE_MS = 8.64e15;
 
 export class JsCallError extends Error {
   readonly code: string;
@@ -75,7 +76,8 @@ export function idsOf(uid: unknown, gid: unknown): { uid?: number; gid?: number 
 }
 
 export function timesOf(atimeMs: unknown, mtimeMs: unknown): { atimeMs: number; mtimeMs: number } {
-  if (!Number.isFinite(atimeMs) || !Number.isFinite(mtimeMs)) {
+  const ok = (v: unknown) => Number.isFinite(v) && Math.abs(v as number) <= MAX_DATE_MS;
+  if (!ok(atimeMs) || !ok(mtimeMs)) {
     throw new JsCallError('EINVAL', 'utimes');
   }
   return { atimeMs: atimeMs as number, mtimeMs: mtimeMs as number };

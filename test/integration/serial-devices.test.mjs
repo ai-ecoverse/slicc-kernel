@@ -907,14 +907,18 @@ test(
     () => ctx.fs.utimes('/tmp/f', 0, '1'),
     () => ctx.sync.fs.chown('/tmp/f', 0, null),
     () => ctx.sync.fs.utimes('/tmp/f', Infinity, 0),
+    () => ctx.fs.utimes('/tmp/f', 1e20, 0),
+    () => ctx.sync.fs.utimes('/tmp/f', 0, -8.64e15 - 1),
+    () => ctx.fs.utimes('/tmp/f', 8.64e15, -8.64e15),
+    () => ctx.sync.fs.stat('/tmp/f').mtimeMs,
     () => ctx.fs.chown('/tmp/missing', 0, 0),
     () => ctx.sync.fs.utimes('/tmp/missing', 0, 0),
     () => ctx.fs.chown('/proc/self/status', 0, 0),
     () => ctx.sync.fs.utimes('/proc/uptime', 0, 0),
   ]) {
     try {
-      await call();
-      out.push('done');
+      const got = await call();
+      out.push(got === undefined ? 'done' : String(got));
     } catch (err) {
       out.push(err.code);
     }
@@ -925,7 +929,7 @@ test(
     const root = await bash('echo x > /tmp/f && jsmeta /tmp/f 640 1000 20 5000 7000 && jsbad');
     assert.equal(
       root.stdout,
-      'chmod done\nchown done\nutimes done\n640 1000 20 5000 7000\nEINVAL EINVAL EINVAL EINVAL EINVAL EINVAL EINVAL ENOENT ENOENT EROFS EROFS\n',
+      'chmod done\nchown done\nutimes done\n640 1000 20 5000 7000\nEINVAL EINVAL EINVAL EINVAL EINVAL EINVAL EINVAL EINVAL EINVAL done -8640000000000000 ENOENT ENOENT EROFS EROFS\n',
       root.stderr
     );
     const owner = await bash(
