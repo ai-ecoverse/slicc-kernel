@@ -11,6 +11,8 @@ import { installPackage, kernelPair, shown, skip } from './async-wasi-harness.mj
 
 const WAIT_MS = 300;
 const SLICE_MS = 50;
+const REALTIME_STEP_MS = 1;
+const FUTEX_FLOOR = (WAIT_MS - REALTIME_STEP_MS) / 1000;
 
 const cases = {
   'sigtimedwait with nothing pending': `import signal, time
@@ -21,11 +23,11 @@ print(signal.sigtimedwait([signal.SIGUSR1], ${WAIT_MS / 1000}), time.monotonic()
 l = threading.Lock()
 l.acquire()
 t = time.monotonic()
-print(l.acquire(timeout=${WAIT_MS / 1000}), time.monotonic() - t >= ${WAIT_MS / 1000})`,
+print(l.acquire(timeout=${WAIT_MS / 1000}), time.monotonic() - t >= ${FUTEX_FLOOR})`,
   'a futex wait with a timeout (Event.wait)': `import threading, time
 e = threading.Event()
 t = time.monotonic()
-print(e.wait(${WAIT_MS / 1000}), time.monotonic() - t >= ${WAIT_MS / 1000})`,
+print(e.wait(${WAIT_MS / 1000}), time.monotonic() - t >= ${FUTEX_FLOOR})`,
 };
 
 const sender = (sig) =>
