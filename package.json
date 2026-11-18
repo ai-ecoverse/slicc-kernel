@@ -73,7 +73,7 @@
     "format": "biome check --write ."
   },
   "devDependencies": {
-    "@ai-ecoverse/py-numpy": "2.5.4-4",
+    "@ai-ecoverse/py-numpy": "2.5.4-5",
     "@ai-ecoverse/slicc-cdp": "1.52.4",
     "@ai-ecoverse/slicc-scrub": "1.1.1",
     "@ai-ecoverse/slicc-shared-web": "2.14.4",
