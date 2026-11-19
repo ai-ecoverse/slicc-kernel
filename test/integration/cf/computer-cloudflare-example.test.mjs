@@ -17,7 +17,7 @@ let dev;
 
 function call(method, path, body, { key = dev.key, query = '' } = {}) {
   const joined = `${path}${path.includes('?') ? '&' : '?'}computer=${computer}${query}`;
-  return fetch(`${dev.url}${joined}`, {
+  return dev.fetch(`${dev.url}${joined}`, {
     method,
     headers: key ? { authorization: `Bearer ${key}` } : {},
     ...(body === undefined ? {} : { body }),

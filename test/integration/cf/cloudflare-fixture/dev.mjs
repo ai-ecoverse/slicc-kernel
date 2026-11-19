@@ -8,6 +8,27 @@ import { fileURLToPath } from 'node:url';
 
 export const REPO = fileURLToPath(new URL('../../../../', import.meta.url));
 
+export function resetRetried(send = fetch, { tries = 3, waitMs = 250, onRetry = () => {} } = {}) {
+  return async (url, init) => {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await send(url, init);
+      } catch (err) {
+        if (attempt >= tries || err?.cause?.code !== 'ECONNRESET') throw err;
+        onRetry(err, { url, method: init?.method ?? 'GET', attempt });
+        await new Promise((resolve) => setTimeout(resolve, waitMs * attempt));
+      }
+    }
+  };
+}
+
+function noteRetry(err, { url, method, attempt }) {
+  const { pathname } = new URL(url);
+  process.stderr.write(
+    `${method} ${pathname}: ${err.cause.code} before any answer on try ${attempt}; trying again on a new connection\n`
+  );
+}
+
 function freePort() {
   return new Promise((resolve, reject) => {
     const server = createServer();
@@ -20,7 +41,14 @@ function freePort() {
 }
 
 export async function startDev(config, { timeoutMs = 90_000, remote, persist } = {}) {
-  if (remote?.url && remote?.key) return { url: remote.url, key: remote.key, stop: async () => {} };
+  if (remote?.url && remote?.key) {
+    return {
+      url: remote.url,
+      key: remote.key,
+      stop: async () => {},
+      fetch: resetRetried(fetch, { onRetry: noteRetry }),
+    };
+  }
   if (!existsSync(join(REPO, 'dist/cloudflare.js'))) {
     return { skip: 'dist/cloudflare.js is missing; run npm run build first' };
   }
@@ -86,7 +114,7 @@ export async function startDev(config, { timeoutMs = 90_000, remote, persist } =
     if (log.includes('Ready on')) {
       try {
         await fetch(`${url}/ready`);
-        return { url, key, stop, log: () => log };
+        return { url, key, stop, log: () => log, fetch };
       } catch {}
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
