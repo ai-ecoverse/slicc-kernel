@@ -13,7 +13,7 @@ let dev;
 
 async function json(method, path, body) {
   const joined = `${path}${path.includes('?') ? '&' : '?'}computer=${computer}`;
-  const response = await fetch(`${dev.url}${joined}`, {
+  const response = await dev.fetch(`${dev.url}${joined}`, {
     method,
     headers: { authorization: `Bearer ${dev.key}` },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -77,9 +77,12 @@ describe('kernel port pairs inside the Durable Object', { concurrency: false }, 
     );
     assert.equal(result.exitCode, 0, JSON.stringify(result));
     assert.equal(result.stdout, `1\n${size}\n`);
-    const response = await fetch(`${dev.url}/file?path=/workspace/big.bin&computer=${computer}`, {
-      headers: { authorization: `Bearer ${dev.key}` },
-    });
+    const response = await dev.fetch(
+      `${dev.url}/file?path=/workspace/big.bin&computer=${computer}`,
+      {
+        headers: { authorization: `Bearer ${dev.key}` },
+      }
+    );
     assert.equal((await response.arrayBuffer()).byteLength, size);
   });
 
