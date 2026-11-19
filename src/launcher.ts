@@ -1491,6 +1491,7 @@ export class Launcher {
         glue,
         wasm: glue,
         argv0,
+        preopenRoot: true,
         ...asked,
       };
     }
