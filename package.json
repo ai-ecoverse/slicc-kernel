@@ -93,7 +93,7 @@
     "@ai-ecoverse/wasm-procps": "4.0.7-6",
     "@ai-ecoverse/wasm-sqlite3": "3.54.1-1",
     "@ai-ecoverse/wasm-tar": "1.35.0-9",
-    "@ai-ecoverse/wasm-tls-engine": "4.2.0-12",
+    "@ai-ecoverse/wasm-tls-engine": "4.3.0-1",
     "@ai-ecoverse/wasm-util-linux": "2.42.4-7",
     "@biomejs/biome": "2.6.8",
     "@cloudflare/computer": "0.11.2",
