@@ -8,6 +8,7 @@ import {
 } from '../../../../dist/cloudflare.js';
 import createTlsEngine from '../../../../node_modules/@ai-ecoverse/wasm-tls-engine/dist/slicc-tls-engine.mjs';
 import tlsWasm from '../../../../node_modules/@ai-ecoverse/wasm-tls-engine/dist/slicc-tls-engine.wasm';
+import { fixtureAdapter } from '../../fixtures/lease-adapter.mjs';
 import { dnsAnswer } from './dns-answer.js';
 import { pendingTimers } from './timers.js';
 
@@ -176,13 +177,18 @@ export class KernelRoutes {
     commands,
     cdp,
     clock = true,
+    leaseFixture = false,
   }) {
     this.kernel?.terminate();
+    this.leaseClient = undefined;
+    const tag = `lease:${crypto.randomUUID()}`;
+    const lease = leaseFixture ? await fixtureAdapter() : undefined;
     const started = Date.now();
     const storage = this.ctx.storage;
     const self = () => this.env.PLUMBING.get(this.ctx.id);
     this.kernel = await createCloudflareKernel({
       loader: this.env.LOADER,
+      ...(lease ? { cdpLease: { tag, adapter: lease.adapter } } : {}),
       ...(clock
         ? {
             clock: () =>
@@ -208,6 +214,8 @@ export class KernelRoutes {
       ...(cdp ? { cdp: fakeBrowser((runtime) => EMBEDDER_MODES[runtime] ?? 'answer') } : {}),
     });
     await install(this.kernel);
+    if (lease)
+      this.leaseClient = await attachKernel(await this.kernel.connect({ tag }), { locks: null });
     return { bootMs: Date.now() - started };
   }
 
@@ -258,6 +266,8 @@ export class KernelRoutes {
     switch (path) {
       case '/kernel/boot':
         return json(await this.boot(args));
+      case '/kernel/job-run':
+        return json(await this.leaseClient.run(args.argv, { cwd: '/' }));
       case '/kernel/run': {
         const started = Date.now();
         try {

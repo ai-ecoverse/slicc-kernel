@@ -84,6 +84,7 @@ export interface InitRequest {
   approve?: boolean;
   processMounts?: boolean | 'ask';
   cdp?: boolean;
+  leaseTag?: string;
   facades?: Record<string, { port: number; hook?: boolean }>;
 }
 
@@ -305,9 +306,10 @@ async function stores(
   };
 }
 
-function cdpOption(req: InitRequest, port: KernelPort): { cdp?: CdpHook } {
-  if (!req.cdp) return {};
+function cdpOption(req: InitRequest, port: KernelPort): { cdp?: CdpHook; leaseTag?: string } {
+  if (!req.cdp && !req.leaseTag) return {};
   return {
+    ...(req.leaseTag ? { leaseTag: req.leaseTag } : {}),
     cdp: portCdpHook((request, cdp) =>
       port.postMessage({ cdpOpen: request, port: cdp }, [cdp as unknown as MessagePort])
     ),
@@ -520,9 +522,10 @@ async function connectClient(
   if (user !== undefined && !(await l.users.lookup(user))) {
     throw fsError('ENOENT', `no user ${String(user)}`);
   }
-  const { port1, port2 } = new MessageChannel();
   const held = deps.held ? await deps.held() : undefined;
   const client = ++clientIds;
+  const endLease = l.cdp.bindClient(client, tag, bind || devices);
+  const { port1, port2 } = new MessageChannel();
   const served = serveClient(port1, {
     launcher: deps.ready,
     signal: signalNumber,
@@ -542,6 +545,7 @@ async function connectClient(
   const unbindDevices =
     devices === true ? l.devices.register(client, deps.devices.hookFor(client)) : undefined;
   void served.closed.then(() => {
+    endLease?.();
     deps.clients.delete(served);
     unbind?.();
     unbindDevices?.();
@@ -693,7 +697,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
 
   const processes = processOps(ready, reply);
 
-  async function init(req: InitRequest): Promise<boolean> {
+  async function init(req: InitRequest): Promise<true | 'cdp-lease-v1'> {
     launcher = rootOf(deps, req).then(async (root) => {
       req = await rootNamed(deps, req, root);
       const name = req.metadata ?? META_DB;
@@ -732,8 +736,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
       await started.prepare();
       return started;
     });
-    await launcher;
-    return true;
+    return (await launcher).cdp.leaseOnly ? 'cdp-lease-v1' : true;
   }
 
   async function mountOp(req: MountRequest): Promise<unknown> {

@@ -1,3 +1,4 @@
+import type { CdpLeaseOptions } from '../cdp/lease.ts';
 import type { CdpHook } from '../cdp/types.ts';
 import type { CronClock } from '../cron/clock.ts';
 import type { DenialHook } from '../fs/dac.ts';
@@ -29,6 +30,7 @@ import type { SqliteOptions, SqlStorageLike } from './sqlite-store.ts';
 
 export interface CloudflareKernelOptions {
   loader: WorkerLoaderLike;
+  cdpLease?: CdpLeaseOptions;
   root?: FileSystemDirectoryHandle;
   meta?: MetaStore;
   ranged?: boolean;

@@ -980,6 +980,42 @@ A connection is one browser-level CDP session; a host with only per-tab debuggin
 
 Process workers can also use the transport directly, without a socket: the `net-request`, `net-read` and `net-close` syscalls (`Module.sliccKernel.http` in a process) open a request and read its body in pieces. `net-open` starts a request and answers its handle at once, and `net-head` waits for its response head, so `net-close` can abort a request whose head has not come yet. Requests are per process and closed when it exits, and a request body has no size limit of its own (the transport's `maxRequestBody` applies to the proxy). `net-open` with `stream: true` instead of `body` (only on a transport with `streamingBodies`, else `ENOTSUP`) takes the body in pieces: `net-write { handle, bytes }` returns once the transport has taken the piece (`EPIPE` once the request is closed or failed), and `net-end { handle }` ends it. JS programs' `fetch` uses it for stream bodies. `net-traits` answers the transport's `traits` with `crossOrigin`: `'cors'` when it is bound by CORS like `fetchTransport()`, `'any'` (the default for a transport that does not say) when it is not; without a transport it fails with `ENETUNREACH`.
 
+### Dedicated browser lease jobs
+
+A **separate, single-job kernel** can give a WASI program a mediated browser lease instead of CDP. Check the module's `CDP_LEASE_VERSION === 1` before boot: earlier kernels ignore unknown options. Browser kernels also check the worker's handshake. Ordinary kernels and their `serveCdp` host selection are unchanged.
+
+```ts
+import { attachKernel, CDP_LEASE_VERSION, createCloudflareKernel } from '@ai-ecoverse/slicc-kernel/cloudflare';
+
+if (CDP_LEASE_VERSION !== 1) throw new Error('lease kernel unavailable');
+const tag = `lease:${crypto.randomUUID()}`;
+const kernel = await createCloudflareKernel({ loader: env.LOADER, cdpLease: { tag, adapter } });
+try {
+  const client = await attachKernel(await kernel.connect({ tag }));
+  try {
+    await installJobPackage(client);
+    await client.run(['playwright-cli', 'lease', 'request', '--allow', 'https://billing.example', '--for', '1h'], { cwd: '/' });
+  } finally { await client.close(); }
+} finally { kernel.terminate(); }
+```
+
+`adapter` is **host code, not a URL**. Create it for this job only and keep its holder private key, broker identity and grants outside the guest filesystem, options sent to the process, and logs. The host authenticates the job **before** giving it a port; never turn the `tag`, DO name, handle, or runtime from an incoming request into authority. Only one `connect({tag})` is admitted; its closure permanently closes the lease facade. The kernel checks both the kernel-owned client session of the connecting process and its stamped first tag. A per-spawn tag, even on `kernel.run`, does not suffice. End the link and destroy the adapter and kernel at job end. Never reuse the holder state or root for a new job.
+
+The same option is available on `createNodeKernel` and `createKernel`. Use an isolated environment and a fresh job root (the Node and Cloudflare defaults use memory). Browser boot requires an explicit private `root` and `metadata:false, media:false, ca:false`. No raw CDP registrations, alternate runtimes, guest network transport/uplink, host devices/requests, page facades, or external mounts in this mode. Only WASI programs without guest JavaScript glue/imports may run: JS lockdown is not a sandbox. Apply normal host isolation; do not share writable storage, install extra host services or expose a general kernel control API to a job.
+
+**Job socket.** Use only `SLICC_CDP_LEASE_URL`, `ws://127.0.0.1:9222/slicc/lease/v1/<boot uuid>`, on the *kernel's* loopback. No query or legacy CDP fallback. For the bound job `/json/version` names only this endpoint and `/json` and `/json/list` return `[]` without calling the adapter. An unbound connector is refused, including on discovery. Old kernels do not implement this route.
+
+**Adapter contract.** The socket accepts only `{id,method,params}` text frames. Up to eight connections and eight outstanding adapter calls, one command at a time per socket; each frame/message is limited to 128 KiB. Adapter methods receive `(params, {stamp, signal})`; the signal aborts on close. Honor cancellation, do not automatically retry site actions and recheck authorization before releasing results.
+
+| Method | Adapter input | Adapter reply (inside the CDP `result`) |
+| --- | --- | --- |
+| `Slicc.leaseRequest` → `adapter.request` | `{allow,ttlSeconds,reason?}` initially; `{lease,allow,reason?}` for a scope delta retaining expiry. `allow` is a nonempty list of canonical HTTPS `{kind,url}` rules (`origin`, `exact`, `path-prefix`). | `{request,lease,jkt}`. The handles are job-local, not tokens; `jkt` is the bare RFC 7638 thumbprint. The CLI constructs its own review command. |
+| `Slicc.leaseAction` → `adapter.action` | `{lease,op,args}`: `goto:{url}`, `snapshot:{}`, `click:{ref}` or `fill:{ref,value}`. No arbitrary CDP, page JS, session or target selectors. | `{result:{text}}` for a scoped snapshot, otherwise `{result:{}}`. |
+
+The adapter must reject handles outside its own job, including pending/retired grants. Throw an error with a stable `reason` such as `E_PENDING`, `E_SCOPE`, `E_EXPIRED` or `E_REVOKED`; only a known reason and static safe message are exposed in `error.data.reason` and `error.message`. Unknown action failures are not evidence an action didn't happen.
+
+**Cloudflare transport boundary.** The DO boot hook is implemented, not a production outbound transport. An actual adapter must use an explicitly supplied, end-to-end broker-authenticated, lease-only channel with connection-bound holder proof. A tray controller WebSocket is signaling, not the WebRTC data channel. No such tunnel, key store, JWT minting/validation, browser, or relay is supplied by this package. Do not boot a remote job adapter without those prerequisites. Owner consent, expiry/revocation, tab/frame/URL checks and withholding stale results belong to the trusted adapter/broker. Local verification: `npm run build && node --test test/integration/{cdp-lease,cdp-lease-page,cf/cloudflare-lease}.test.mjs`. The DO test runs local `wrangler dev` with a disposable key and in-DO fixture adapter, not a remote broker. To also run the real command path, set `SLICC_TEST_LEASE_CLI_WASM` to a matching `playwright-cli.wasm` build.
+
 ### Page facades
 
 A facade is a loopback port that only programs in the kernel can reach, whose connections the embedder serves, much like the CDP facade, but as a plain duplex byte stream with no protocol of the kernel's. slicc's link layer is the first user.
