@@ -1,3 +1,4 @@
+import { type CdpLeaseOptions, checkedLease, leaseHook } from './cdp/lease.ts';
 import { type CdpOpen, serveCdpPort } from './cdp/port.ts';
 import type { CdpHook } from './cdp/types.ts';
 import type { SudoRun, SudoRunOptions } from './client/attach.ts';
@@ -47,6 +48,14 @@ import { systemTimeZone } from './time-zone.ts';
 import { type NetworkTransport, serveTransport } from './transport.ts';
 import type { Account, AddGroup, AddUser, Group, RemoveUser } from './users.ts';
 
+export {
+  CDP_LEASE_VERSION,
+  type CdpLeaseAction,
+  type CdpLeaseAdapter,
+  type CdpLeaseContext,
+  type CdpLeaseOptions,
+  type CdpLeaseRequest,
+} from './cdp/lease.ts';
 export type { CdpConnection, CdpHook, CdpRequest } from './cdp/types.ts';
 export {
   type AttachOptions,
@@ -234,6 +243,7 @@ export interface KernelOptions {
   hostfs?: HostfsGrantHook;
   processMounts?: ProcessMountPolicy;
   cdp?: CdpHook;
+  cdpLease?: CdpLeaseOptions;
   facades?: FacadeSpecs;
   hostname?: string;
   timeZone?: string;
@@ -705,7 +715,7 @@ function approver(approve: ApproveHook | undefined, worker: Worker) {
   return handlers;
 }
 
-function checkOptions(options: KernelOptions): void {
+function checkOptions(options: KernelOptions): CdpLeaseOptions | undefined {
   if (!globalThis.crossOriginIsolated) throw new Error(ISOLATION);
   if (options.hostname !== undefined && !isHostname(options.hostname)) {
     throw new Error(`not a host name: ${String(options.hostname)}`);
@@ -716,6 +726,16 @@ function checkOptions(options: KernelOptions): void {
   integrityOptions(options.protect?.integrity);
   facadesInit(options.facades);
   sealedHooks(options.sealed);
+  const lease = checkedLease(options);
+  if (
+    lease &&
+    (!options.root || options.metadata !== false || options.media !== false || options.ca !== false)
+  ) {
+    throw new TypeError(
+      'a browser lease-only kernel requires a private job root and metadata:false, media:false, ca:false'
+    );
+  }
+  return lease;
 }
 
 interface Bound {
@@ -865,8 +885,27 @@ function pageOnly(call: (req: KernelCall) => Promise<unknown>): Pick<Kernel, 'at
   };
 }
 
+async function bootWorker(
+  options: KernelOptions,
+  leaseTag: string | undefined,
+  call: (req: KernelCall) => Promise<unknown>,
+  worker: Worker,
+  fail: (err: Error) => void
+) {
+  try {
+    const init = await initCall(options, options.network?.transport);
+    const initialized = await call({ ...init, ...(leaseTag ? { leaseTag } : {}) });
+    if (leaseTag && initialized !== 'cdp-lease-v1')
+      throw new Error('worker does not support a lease-only kernel');
+  } catch (err) {
+    fail(err instanceof Error ? err : new Error('kernel initialization failed'));
+    worker.terminate();
+    throw err;
+  }
+}
+
 export async function createKernel(options: KernelOptions = {}): Promise<Kernel> {
-  checkOptions(options);
+  const lease = checkOptions(options);
   const url = options.worker ?? new URL('./kernel-worker.js', import.meta.url);
   const worker = new Worker(url, { type: 'module', name: 'slicc-kernel' });
   const pending = new Map<number, Pending>();
@@ -878,7 +917,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     (req) => request(req),
     (req) => call(req)
   );
-  const cdp = cdpBridge(options.cdp);
+  const cdp = cdpBridge(lease ? leaseHook(lease) : options.cdp);
   const facades = facadeBridge(options.facades);
   const bound: Bound = { requests: new Map(), devices: new Map(), ports: new WeakMap() };
   const sealed = hookRelays(worker, options, bound);
@@ -1005,7 +1044,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
 
   const { dial } = dials;
 
-  await call(await initCall(options, transport));
+  await bootWorker(options, lease?.tag, call, worker, fail);
 
   return {
     async run(argv, runOptions = {}) {

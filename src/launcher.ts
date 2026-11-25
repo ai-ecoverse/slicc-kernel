@@ -258,6 +258,7 @@ export interface LauncherOptions {
   processMounts?: ProcessMountPolicy;
   fstabRetries?: readonly number[];
   cdp?: CdpHook;
+  leaseTag?: string;
   facades?: FacadeSpecs;
   uplink?: NetworkUplink;
   doh?: string | false;
@@ -1082,7 +1083,7 @@ export class Launcher {
     this.pnpmChain = new Set(chain(normalizePath(this.pnpmHome)));
     this.modulesDir = options.modules ?? '/node_modules';
     this.appended = appendedRoots(options.commands);
-    this.cdp = new CdpHosts(options.cdp);
+    this.cdp = new CdpHosts(options.cdp, options.leaseTag, (pid) => this.sessionOf(pid).client);
     this.facades = new FacadeHosts(options.facades);
     const hostname = options.hostname ?? DEFAULT_HOSTNAME;
     if (!isHostname(hostname)) throw new Error(`not a host name: ${String(hostname)}`);
@@ -1092,7 +1093,7 @@ export class Launcher {
       ...networkEnv(hostname),
       HOSTNAME: hostname,
       TZ: this.timeZone,
-      SLICC_CDP_URL: this.cdp.url,
+      ...this.cdp.env(),
       ...this.facades.env(),
       ...options.env,
     };
@@ -2350,11 +2351,21 @@ export class Launcher {
     return { ...base, ...(memory ? { memory } : {}), path: target.glue };
   }
 
+  private checkLeaseProgram(target: Target): void {
+    if (this.cdp.leaseOnly && (target.abi !== 'wasi' || target.imports !== undefined)) {
+      throw fsError(
+        'EACCES',
+        'a lease-only kernel runs only WASI modules without JavaScript imports'
+      );
+    }
+  }
+
   private async program(
     target: Target,
     env: Record<string, string>,
     caller: LoadCaller
   ): Promise<Program> {
+    this.checkLeaseProgram(target);
     if (target.abi === 'js' && target.wasm === SUDO_PATH) {
       return { abi: 'js', glue: SUDO_SOURCE, path: SUDO_PATH };
     }
@@ -3645,6 +3656,8 @@ export class Launcher {
   }
 
   async mount(spec: MountSpec): Promise<MountEntry> {
+    if (this.cdp.leaseOnly)
+      throw fsError('EACCES', 'a lease-only kernel cannot mount host services');
     this.guardMount(spec.target);
     const fsa = spec.type === 'fsa' && !spec.source.startsWith('fsa:');
     const entry = await this.mounts.mount(
@@ -3799,7 +3812,7 @@ export class Launcher {
   }
 
   private async permit(req: ProcessMountRequest): Promise<void> {
-    const policy = this.processMounts;
+    const policy = !this.cdp.leaseOnly && this.processMounts;
     const allowed = typeof policy === 'function' ? await policy(req) : policy;
     if (!allowed) throw fsError('EPERM', `process ${req.pid} may not ${req.op} ${req.target}`);
   }

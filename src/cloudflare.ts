@@ -1,5 +1,6 @@
 import { HOST_SOURCE, PROCESS_SOURCE } from 'slicc:cloudflare-sources';
 import { remoteWorker } from './async/remote-worker.ts';
+import { checkedLease, leaseHook } from './cdp/lease.ts';
 import type { MessagePortLike } from './client/protocol.ts';
 import { type ServedClient, serveClient } from './client/serve-client.ts';
 import { tick } from './cloudflare/clock-skew.ts';
@@ -28,6 +29,14 @@ import { isMemoryRoot, memoryRoot } from './node/memory-root.ts';
 import { localPorts } from './ports.ts';
 import { signalNumber } from './serve.ts';
 
+export {
+  CDP_LEASE_VERSION,
+  type CdpLeaseAction,
+  type CdpLeaseAdapter,
+  type CdpLeaseContext,
+  type CdpLeaseOptions,
+  type CdpLeaseRequest,
+} from './cdp/lease.ts';
 export type { CdpConnection, CdpHook, CdpRequest } from './cdp/types.ts';
 export { attachKernel, type KernelClient } from './client/attach.ts';
 export {
@@ -137,6 +146,13 @@ function rootFs(options: CloudflareKernelOptions): { root: FileSystemDirectoryHa
   return { root, fs: new OpfsFs(root, meta, undefined, { ranged }) };
 }
 
+function isolateGate(options: CloudflareKernelOptions): IsolateGate {
+  return new IsolateGate(
+    options.isolates?.max ?? MAX_ISOLATES,
+    options.isolates?.waitMs ?? options.wasmMemories?.idleMs ?? ISOLATE_WAIT_MS
+  );
+}
+
 function isolateMemory(options: CloudflareKernelOptions): IsolateMemory {
   const { memory, perInstance } = options.isolates ?? {};
   return {
@@ -183,14 +199,15 @@ function settled(port: MessagePort, flush: () => void): MessagePort {
 function client(
   launcher: Launcher,
   clients: Set<ServedClient>,
-  { user, tag, requests }: ConnectOptions,
+  { user, tag, requests, devices }: ConnectOptions,
   flush: () => void
 ): MessagePort {
   tagOption(tag);
+  const session = ++sessions;
+  const endLease = launcher.cdp.bindClient(session, tag, requests || devices);
   const ports = launcher.ports();
   const port1 = settled(ports.port1, flush);
   const { port2 } = ports;
-  const session = ++sessions;
   const served = serveClient(port1 as unknown as MessagePortLike, {
     launcher: async () => launcher,
     signal: signalNumber,
@@ -205,6 +222,7 @@ function client(
       ? launcher.embedder.register(session, checkedRequests(requests))
       : undefined;
   void served.closed.then(() => {
+    endLease?.();
     clients.delete(served);
     unbind?.();
   });
@@ -215,6 +233,7 @@ export async function createCloudflareKernel(
   options: CloudflareKernelOptions
 ): Promise<CloudflareKernel> {
   if (!options?.loader) throw new TypeError('createCloudflareKernel: loader is required');
+  const lease = checkedLease(options);
   const hooks = sealedHooks(options.sealed);
   const { root, fs } = rootFs(options);
   const flush = () => {
@@ -222,10 +241,7 @@ export async function createCloudflareKernel(
   };
   await fs.reconcile();
   const images = new Images();
-  const gate = new IsolateGate(
-    options.isolates?.max ?? MAX_ISOLATES,
-    options.isolates?.waitMs ?? options.wasmMemories?.idleMs ?? ISOLATE_WAIT_MS
-  );
+  const gate = isolateGate(options);
   const processes = cloudflareProcesses(
     options.loader,
     images,
@@ -265,7 +281,7 @@ export async function createCloudflareKernel(
     ...(options.protect ? { protect: options.protect } : {}),
     ...(hooks.request ? { sealed: hooks.request } : {}),
     ...(hooks.fetch ? { sealedFetch: hooks.fetch } : {}),
-    ...embedderHooks(options),
+    ...(lease ? { leaseTag: lease.tag, cdp: leaseHook(lease) } : embedderHooks(options)),
     ...(options.wasmMemories ? { wasmMemories: options.wasmMemories } : {}),
     cron: { poll: false, ...options.cron },
   });
