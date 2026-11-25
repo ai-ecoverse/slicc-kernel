@@ -3,6 +3,7 @@ import { sha256 } from './fs/integrity.ts';
 import type { KernelFs, UsersMode } from './fs/types.ts';
 import { normalizePath } from './fs/types.ts';
 import type { Cred } from './kernel/cred.ts';
+import { TICKET_ENV } from './kernel/exec-ticket.ts';
 import { tagFields } from './kernel/sealed.ts';
 import { type TimestampOwner, type TimestampPolicy, Timestamps } from './sudo-timestamp.ts';
 import {
@@ -11,6 +12,7 @@ import {
   type DefaultsEntry,
   defaultsText,
   hasControl,
+  keptEnv,
   NAME,
   parsePolicy,
   quoteWord,
@@ -253,6 +255,7 @@ export interface SudoCall {
   args: string[];
   cwd: string;
   term?: string;
+  env?: Record<string, string>;
 }
 
 export interface SudoGrant {
@@ -351,6 +354,7 @@ interface Session {
   target: Account;
   owner: TimestampOwner;
   policy: TimestampPolicy;
+  kept: Record<string, string>;
   parsed: Parsed;
   signal: AbortSignal;
 }
@@ -809,7 +813,17 @@ export class Sudo {
     const rules = root ? [] : policy.rules;
     const mine = rules.filter((rule) => applies(rule.who));
     if (parsed.list) return await this.listed(self, root, mine, settings.matching);
-    const session = { caller, self, target, owner, policy: policyOf(settings), parsed, signal };
+    const kept = keptEnv(call.env ?? {}, settings.envKeep);
+    const session = {
+      caller,
+      self,
+      target,
+      owner,
+      policy: policyOf(settings),
+      kept,
+      parsed,
+      signal,
+    };
     if (parsed.validate) return this.validate(session, root, mine, call.cwd);
     return this.command(session, root, mine, call);
   }
@@ -854,7 +868,7 @@ export class Sudo {
     const now = await this.rootOnly(r.cwd, args);
     const flipped = Object.keys(r.rootOnly).find((at) => r.rootOnly[at] && now[at] !== true);
     if (flipped !== undefined) return failed('EPERM', `sudo: ${flipped} is no longer root-only`);
-    const { grant } = this.grant(self, target, cred, r.argv, path, r.cwd, undefined, bound);
+    const { grant } = this.grant(self, target, cred, r.argv, path, r.cwd, undefined, bound, {});
     (this.o.warn ?? console.warn)(
       `sudo: ${self.name} : TTY=unknown ; PWD=${quoteWord(r.cwd)} ; USER=${target.name} ; REPLAY=${r.id} ; COMMAND=${argv.map(quoteWord).join(' ')}`
     );
@@ -910,7 +924,8 @@ export class Sudo {
         commandMatches(rule.cmnd, argv) &&
         pinned(rule, bound)
     );
-    const grant = () => this.grant(self, target, cred, parsed.command, path, cwd, call.term, bound);
+    const grant = () =>
+      this.grant(self, target, cred, parsed.command, path, cwd, call.term, bound, s.kept);
     if (root || matching.some((rule) => rule.nopasswd)) return grant();
     const quoted = argv.map(quoteWord).join(' ');
     if (matching.length === 0) {
@@ -1123,12 +1138,15 @@ export class Sudo {
     file: string,
     cwd: string,
     term: string | undefined,
-    files: Record<string, string>
+    files: Record<string, string>,
+    kept: Readonly<Record<string, string>>
   ): { grant: SudoGrant } {
+    const { TERM: _term, [TICKET_ENV]: _ticket, ...caller } = kept;
     const env = {
       ...this.o.env(),
       ...userEnv(target, this.o.pnpmHome),
       SHELL: target.shell,
+      ...caller,
       PATH: SECURE_PATH,
       PWD: cwd,
       ...(term !== undefined && TERM.test(term) ? { TERM: term } : {}),
