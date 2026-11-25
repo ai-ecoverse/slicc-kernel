@@ -1,4 +1,5 @@
 import { type MakePortPair, messageChannel } from '../ports.ts';
+import { heldConnection } from './held.ts';
 import type { CdpConnection, CdpHook, CdpRequest } from './types.ts';
 
 export interface CdpPortLike {
@@ -45,11 +46,11 @@ export function serveCdpPort(
     (opened) => {
       conn = opened;
       if (done) return opened.close();
+      port.postMessage({ open: true });
       opened.onmessage = (m) => {
         if (!done) port.postMessage({ m });
       };
       opened.onclose = (reason) => finish(reason ?? null);
-      port.postMessage({ open: true });
     },
     (e: unknown) => {
       if (done) return;
@@ -73,22 +74,20 @@ export function portCdpHook(
     new Promise((resolve, reject) => {
       const { port1, port2 } = ports();
       let closed = false;
-      const conn: CdpConnection = {
-        send: (m) => {
+      const held = heldConnection(
+        (m) => {
           if (!closed) port1.postMessage({ m });
         },
-        onmessage: null,
-        onclose: null,
-        close: () => {
+        () => {
           if (closed) return;
           closed = true;
           port1.postMessage({ close: true });
           port1.close();
-        },
-      };
+        }
+      );
       port1.addEventListener('message', ({ data }: MessageEvent<CdpWire>) => {
-        if ('m' in data) conn.onmessage?.(data.m);
-        else if ('open' in data) resolve(conn);
+        if ('m' in data) held.message(data.m);
+        else if ('open' in data) resolve(held.conn);
         else if ('error' in data) {
           closed = true;
           port1.close();
@@ -96,17 +95,20 @@ export function portCdpHook(
         } else if (!closed) {
           closed = true;
           port1.close();
-          conn.onclose?.(data.close ?? undefined);
+          reject(new Error(data.close ?? 'the CDP host closed'));
+          held.end(data.close ?? undefined);
         }
       });
-      port1.start();
-      void gone?.then(() => {
+      const lost = (reason: string) => {
         if (closed) return;
         closed = true;
         port1.close();
-        reject(new Error('the CDP host is gone'));
-        conn.onclose?.('the CDP host is gone');
-      });
+        reject(new Error(reason));
+        held.end(reason);
+      };
+      port1.addEventListener('close', () => lost('the CDP host closed its port'));
+      port1.start();
+      void gone?.then(() => lost('the CDP host is gone'));
       ask(request, port2 as unknown as CdpPortLike);
     });
 }

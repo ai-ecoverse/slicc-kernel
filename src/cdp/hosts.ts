@@ -1,4 +1,5 @@
 import { HttpError } from '../kernel/net/http1.ts';
+import { heldConnection } from './held.ts';
 import {
   CDP_PORT,
   type CdpConnection,
@@ -49,7 +50,7 @@ export class CdpHosts {
     if (!entry) throw new HttpError(503, NO_CDP_HOST);
     let conn: CdpConnection;
     try {
-      conn = await entry.hook(hookRequest(request));
+      conn = held(await entry.hook(hookRequest(request)));
     } catch (e) {
       throw new HttpError(502, `CDP host: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -69,6 +70,16 @@ export class CdpHosts {
     this.closed = true;
     for (const entry of [this.embedder, ...this.clients]) if (entry) closeAll(entry);
   }
+}
+
+function held(host: CdpConnection): CdpConnection {
+  const { conn, message, end } = heldConnection(
+    (m) => host.send(m),
+    () => host.close()
+  );
+  host.onmessage = message;
+  host.onclose = end;
+  return conn;
 }
 
 function hookRequest({ runtime, stamp }: CdpRequest): CdpRequest {

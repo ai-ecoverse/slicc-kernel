@@ -13,6 +13,7 @@ class LocalPort extends EventTarget {
   peer: LocalPort | undefined;
   private started = false;
   private closed = false;
+  private ending = false;
   private readonly inbox: unknown[] = [];
   private flushing = false;
   private handler: ((event: MessageEvent) => void) | null = null;
@@ -64,7 +65,15 @@ class LocalPort extends EventTarget {
       while (this.inbox.length > 0 && !this.closed) {
         this.dispatchEvent(new MessageEvent('message', { data: this.inbox.shift() }));
       }
+      if (this.ending) this.close();
     });
+  }
+
+  private peerClosed(): void {
+    this.peer = undefined;
+    this.ending = true;
+    if (this.inbox.length === 0) this.close();
+    else this.schedule();
   }
 
   close(): void {
@@ -74,7 +83,7 @@ class LocalPort extends EventTarget {
     const peer = this.peer;
     this.peer = undefined;
     queueMicrotask(() => this.dispatchEvent(new Event('close')));
-    peer?.close();
+    peer?.peerClosed();
   }
 }
 
