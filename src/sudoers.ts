@@ -49,15 +49,22 @@ export interface Settings {
   timestampType?: TimestampType;
 }
 
+export interface KeepOp {
+  op: '=' | '+=' | '-=' | '!';
+  names: string[];
+}
+
 export interface DefaultsEntry {
   who: string[] | null;
   settings: Settings;
+  keep?: KeepOp[];
   params: string[];
 }
 
 export interface Resolved {
   timestampTimeout: number;
   timestampType: TimestampType;
+  envKeep: string[];
   matching: DefaultsEntry[];
 }
 
@@ -448,10 +455,13 @@ function kernelLine(m: RegExpExecArray, line: string, file: string | undefined):
 }
 
 const DEFAULTS = /^Defaults(?=[:@>!\s]|$)/;
-const DEFAULTS_ONLY = `Defaults aren't supported, except timestamp_timeout and timestamp_type for everyone, a user or a %group: this line changes nothing`;
+const DEFAULTS_ONLY = `Defaults aren't supported, except timestamp_timeout, timestamp_type and env_keep for everyone, a user or a %group: this line changes nothing`;
+const DEFAULTS_EXPECTED =
+  'expected timestamp_timeout=<minutes>, timestamp_type=<type> or env_keep+="<names>" after Defaults';
 const PARAM = /^(!*)([A-Za-z_]+)(?:\s*([-+]?=)\s*(.*))?$/s;
 const MINUTES = /^[-+]?(?:\d+(?:\.\d*)?|\.\d+)$/;
 const TYPES: readonly string[] = ['tty', 'ppid', 'global'];
+const KEEP_OPS: readonly string[] = ['=', '+=', '-='];
 
 function defaultsValue(raw: string): string {
   const quoted = /^"(.*)"$/s.exec(raw);
@@ -481,10 +491,46 @@ function typeParam({ text, negated, op, value }: Param): Settings | string {
   return `timestamp_type takes =tty, =ppid or =global, not ${shown(text)}`;
 }
 
-function defaultsParam(param: string): { settings: Settings; text: string } | string {
+interface Read {
+  settings: Settings;
+  keep?: KeepOp;
+  text: string;
+}
+
+function keepValue(names: readonly string[]): string {
+  const text = names.join(' ');
+  return names.length === 1 ? text : `"${text}"`;
+}
+
+function keepParam(
+  param: string,
+  bangs: string,
+  op: string | undefined,
+  raw: string
+): Read | string {
+  if (bangs === '!' && op === undefined) {
+    return { settings: {}, keep: { op: '!', names: [] }, text: '!env_keep' };
+  }
+  const quoted = /^"(.*)"$/s.exec(raw);
+  const value = (quoted ? (quoted[1] as string) : raw).trim();
+  const names = value === '' ? [] : value.split(/[ \t]+/);
+  const named = names.every((name) => !/["\\]/.test(name) && !hasControl(name));
+  const listed = quoted ? named : named && names.length === 1;
+  if (bangs !== '' || op === undefined || !KEEP_OPS.includes(op) || !listed) {
+    return `env_keep takes a double-quoted, space-separated list of names, or one name without quotes, after =, += or -= (!env_keep empties the list), not ${shown(param)}`;
+  }
+  return {
+    settings: {},
+    keep: { op: op as KeepOp['op'], names },
+    text: `env_keep${op}${keepValue(names)}`,
+  };
+}
+
+function defaultsParam(param: string): Read | string {
   const m = PARAM.exec(param);
   if (!m) return DEFAULTS_ONLY;
   const [, bangs = '', name, op, raw = ''] = m;
+  if (name === 'env_keep') return keepParam(param, bangs, op, raw.trim());
   const read: Param = { text: param, negated: bangs !== '', op, value: defaultsValue(raw.trim()) };
   const settings =
     name === 'timestamp_timeout'
@@ -508,24 +554,108 @@ function defaultsWho(binding: string): string[] | null | string {
   return who;
 }
 
+function splitParams(list: string): string[] {
+  const params: string[] = [];
+  let from = 0;
+  let quoted = false;
+  for (let i = 0; i < list.length; i++) {
+    if (list[i] === '"') quoted = !quoted;
+    else if (list[i] === ',' && !quoted) {
+      params.push(list.slice(from, i));
+      from = i + 1;
+    }
+  }
+  params.push(list.slice(from));
+  return params;
+}
+
 function defaultsLine(text: string): PolicyLine {
   const m = /^Defaults(\S*)(?:\s+(.*))?$/s.exec(text);
   const who = defaultsWho(m?.[1] ?? '');
   if (typeof who === 'string') return { error: who };
   const list = (m?.[2] ?? '').trim();
-  if (list === '')
-    return {
-      error: 'expected timestamp_timeout=<minutes> or timestamp_type=<type> after Defaults',
-    };
+  if (list === '') return { error: DEFAULTS_EXPECTED };
   const settings: Settings = {};
+  const keep: KeepOp[] = [];
   const params: string[] = [];
-  for (const param of list.split(',')) {
+  for (const param of splitParams(list)) {
     const read = defaultsParam(param.trim());
     if (typeof read === 'string') return { error: read };
     Object.assign(settings, read.settings);
+    if (read.keep) keep.push(read.keep);
     params.push(read.text);
   }
-  return { defaults: { who, settings, params } };
+  return { defaults: { who, settings, ...(keep.length > 0 ? { keep } : {}), params } };
+}
+
+function keepList(entries: readonly DefaultsEntry[]): string[] {
+  let list: string[] = [];
+  for (const { op, names } of entries.flatMap((e) => e.keep ?? [])) {
+    if (op === '=' || op === '!') list = [];
+    for (const name of names) {
+      const at = list.indexOf(name);
+      if (op !== '-=' && at < 0) list.push(name);
+      else if (op === '-=' && at >= 0) list.splice(at, 1);
+    }
+  }
+  return list;
+}
+
+function seek(entry: string, from: number, ch: string | undefined, stop: number): number {
+  let at = from;
+  while (at !== stop && at < entry.length && entry[at] !== ch) at++;
+  return at;
+}
+
+function wildEnd(pattern: string, entry: string, star: number, sep: number): number | undefined {
+  let len = star;
+  let sawSep = false;
+  for (let at = star; at < pattern.length; at++, len++) {
+    if (pattern[at] === '*') {
+      while (pattern[at] === '*') at++;
+      if (at === pattern.length) return len;
+      sawSep ||= pattern[at] === '=';
+      len = seek(entry, len, pattern[at], sawSep ? -1 : sep);
+    }
+    if (entry[len] !== pattern[at]) return undefined;
+  }
+  return len === sep || len === entry.length ? len : undefined;
+}
+
+function envPatternMatch(pattern: string, entry: string): boolean | undefined {
+  const eq = entry.indexOf('=');
+  const sep = eq < 0 ? entry.length : eq;
+  const star = pattern.indexOf('*');
+  const prefix = star < 0 ? pattern.length : star;
+  if (!entry.startsWith(pattern.slice(0, prefix))) return undefined;
+  const whole = prefix === sep || prefix === entry.length ? prefix : undefined;
+  const len = star < 0 ? whole : wildEnd(pattern, entry, star, sep);
+  return len === undefined ? undefined : len > sep + 1;
+}
+
+export function keptEnv(
+  env: Readonly<Record<string, string>>,
+  keep: readonly string[]
+): Record<string, string> {
+  const kept: Record<string, string> = {};
+  const patterns = [...keep].reverse();
+  for (const [name, value] of Object.entries(env)) {
+    const entries =
+      name === 'LOGNAME' || name === 'USER' ? ['LOGNAME', 'USER'] : [`${name}=${value}`];
+    let full: boolean | undefined;
+    for (const pattern of patterns) {
+      for (const entry of entries) full ??= envPatternMatch(pattern, entry);
+      if (full !== undefined) break;
+    }
+    if (full === undefined || (!full && value.startsWith('() '))) continue;
+    kept[name] = value;
+  }
+  const user = kept.LOGNAME ?? kept.USER;
+  if (user !== undefined) {
+    kept.LOGNAME ??= user;
+    kept.USER ??= user;
+  }
+  return kept;
 }
 
 export function resolveDefaults(
@@ -539,14 +669,16 @@ export function resolveDefaults(
   return {
     timestampTimeout: settings.timestampTimeout ?? TIMESTAMP_TIMEOUT,
     timestampType: settings.timestampType ?? TIMESTAMP_TYPE,
+    envKeep: keepList(matching),
     matching,
   };
 }
 
 export function defaultsText(entries: readonly DefaultsEntry[]): string[] {
   const all = resolveDefaults(entries, () => false);
+  const keep = all.envKeep.length === 0 ? '' : `, env_keep="${all.envKeep.join(' ')}"`;
   return [
-    `Defaults timestamp_timeout=${all.timestampTimeout}, timestamp_type=${all.timestampType}`,
+    `Defaults timestamp_timeout=${all.timestampTimeout}, timestamp_type=${all.timestampType}${keep}`,
     ...entries
       .filter((e) => e.who !== null)
       .map((e) => `Defaults:${(e.who as string[]).join(',')} ${e.params.join(', ')}`),

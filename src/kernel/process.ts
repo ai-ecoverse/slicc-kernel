@@ -518,6 +518,15 @@ function words(value: unknown): string[] {
   return [...value];
 }
 
+function variables(value: unknown): Record<string, string> {
+  if (typeof value !== 'object' || value === null) return {};
+  return Object.fromEntries(
+    Object.entries(value).filter(
+      ([name, v]) => typeof v === 'string' && /^[^=\0]+$/.test(name) && !v.includes('\0')
+    )
+  );
+}
+
 const ESCAPES: Readonly<Record<string, string>> = { '\t': '\\t', '\n': '\\n', '\r': '\\r' };
 
 function clipboardLine(text: string): string {
@@ -2455,6 +2464,7 @@ export class WasmProcess {
       args: words(req.args),
       cwd: typeof req.cwd === 'string' && req.cwd.startsWith('/') ? req.cwd : '/',
       ...(typeof req.term === 'string' ? { term: req.term } : {}),
+      env: variables(req.env),
     };
     const answer = await sudo(call, this.blockingSignal(cancelled), this.stdinKind(), (line) =>
       this.complainLine(line)

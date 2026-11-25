@@ -809,6 +809,7 @@ function policyOps(
         args: [...args],
         cwd: o.cwd,
         ...(o.env.TERM !== undefined ? { term: o.env.TERM } : {}),
+        env: o.env,
       })) as JsSudoAnswer,
     visudo: async (call) => (await kernel.json({ ...call, op: 'proc-visudo' })) as JsVisudoAnswer,
     crontab: async (call) =>

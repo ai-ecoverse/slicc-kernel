@@ -433,7 +433,7 @@ test('visudo -c lists the timestamp values that apply, sudo -l shows the matchin
   for (const i of [0, 6, 7, 8, 11])
     assert.match(
       errors[i],
-      /Defaults aren't supported, except timestamp_timeout and timestamp_type/
+      /Defaults aren't supported, except timestamp_timeout, timestamp_type and env_keep/
     );
   assert.match(errors[1], /timestamp_type=kernel isn't supported: use tty, ppid or global/);
   for (const i of [2, 3, 4])
@@ -442,7 +442,7 @@ test('visudo -c lists the timestamp values that apply, sudo -l shows the matchin
   assert.match(errors[9], /expected users, %groups or ALL after Defaults:, not '!cone'/);
   assert.match(
     errors[10],
-    /expected timestamp_timeout=<minutes> or timestamp_type=<type> after Defaults/
+    /expected timestamp_timeout=<minutes>, timestamp_type=<type> or env_keep\+="<names>" after Defaults/
   );
 
   await write('/tmp/good', 'Defaults:cone timestamp_timeout=1\n', '644');
