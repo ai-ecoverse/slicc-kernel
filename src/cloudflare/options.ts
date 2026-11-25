@@ -1,3 +1,4 @@
+import type { CdpHook } from '../cdp/types.ts';
 import type { CronClock } from '../cron/clock.ts';
 import type { DenialHook } from '../fs/dac.ts';
 import type { MetaStore } from '../fs/meta.ts';
@@ -53,6 +54,7 @@ export interface CloudflareKernelOptions {
   sealed?: SealedOption;
   requests?: EmbedderHook;
   approve?: ApproveHook;
+  cdp?: CdpHook;
   protect?: Protection;
   cron?: { clock?: CronClock; poll?: boolean };
   wasmMemories?: { ceiling?: number; idleMs?: number };

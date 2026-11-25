@@ -28,6 +28,7 @@ import { isMemoryRoot, memoryRoot } from './node/memory-root.ts';
 import { localPorts } from './ports.ts';
 import { signalNumber } from './serve.ts';
 
+export type { CdpConnection, CdpHook, CdpRequest } from './cdp/types.ts';
 export { attachKernel, type KernelClient } from './client/attach.ts';
 export {
   type ExecEvent,
@@ -95,6 +96,14 @@ function textOf(on: ((text: string) => void) | undefined) {
 function checkedRequests(hook: EmbedderHook): EmbedderHook {
   const kinds = kindsOf(hook);
   return { kinds, handle: (request) => hook.handle(request) };
+}
+
+function embedderHooks({ requests, approve, cdp }: CloudflareKernelOptions) {
+  return {
+    ...(requests ? { embedder: checkedRequests(requests) } : {}),
+    ...(approve ? { approve } : {}),
+    ...(cdp ? { cdp } : {}),
+  };
 }
 
 function sourceModule(source: string): ModuleUrl {
@@ -256,8 +265,7 @@ export async function createCloudflareKernel(
     ...(options.protect ? { protect: options.protect } : {}),
     ...(hooks.request ? { sealed: hooks.request } : {}),
     ...(hooks.fetch ? { sealedFetch: hooks.fetch } : {}),
-    ...(options.requests ? { embedder: checkedRequests(options.requests) } : {}),
-    ...(options.approve ? { approve: options.approve } : {}),
+    ...embedderHooks(options),
     ...(options.wasmMemories ? { wasmMemories: options.wasmMemories } : {}),
     cron: { poll: false, ...options.cron },
   });

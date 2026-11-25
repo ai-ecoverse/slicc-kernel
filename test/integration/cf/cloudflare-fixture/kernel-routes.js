@@ -87,6 +87,37 @@ function readOnlyTree(files) {
   return driver;
 }
 
+const TARGETS = [{ targetId: 't1', type: 'page', title: 'fixture', url: 'about:blank' }];
+
+function fakeBrowser(modeOf) {
+  return async (request) => {
+    const mode = modeOf(request.runtime);
+    if (mode === 'reject') throw new Error(`no browser for runtime ${request.runtime}`);
+    let onclose = null;
+    const gone = () => onclose?.('the browser went away');
+    return {
+      onmessage: null,
+      get onclose() {
+        return onclose;
+      },
+      set onclose(next) {
+        onclose = next;
+        if (next && mode === 'close') gone();
+      },
+      send(message) {
+        if (mode === 'close') return gone();
+        const { id } = JSON.parse(message);
+        queueMicrotask(() =>
+          this.onmessage?.(JSON.stringify({ id, result: { targetInfos: TARGETS } }))
+        );
+      },
+      close() {},
+    };
+  };
+}
+
+const EMBEDDER_MODES = { refuse: 'reject', gone: 'close' };
+
 export class KernelRoutes {
   constructor(ctx, env) {
     this.ctx = ctx;
@@ -143,6 +174,7 @@ export class KernelRoutes {
     network,
     doh,
     commands,
+    cdp,
     clock = true,
   }) {
     this.kernel?.terminate();
@@ -173,6 +205,7 @@ export class KernelRoutes {
         : {}),
       ...(network ? { network: this.network(doh) } : {}),
       ...(commands ? { commands: { append: commands } } : {}),
+      ...(cdp ? { cdp: fakeBrowser((runtime) => EMBEDDER_MODES[runtime] ?? 'answer') } : {}),
     });
     await install(this.kernel);
     return { bootMs: Date.now() - started };
@@ -265,6 +298,14 @@ export class KernelRoutes {
           stdout: decoded(result.stdout),
           mounts: mounts.map((entry) => entry.target),
         });
+      }
+      case '/kernel/serve-cdp': {
+        const attached = await attachKernel(await this.kernel.connect(), { locks: null });
+        await attached.serveCdp(
+          fakeBrowser(() => args.mode),
+          args.runtime ? { runtime: args.runtime } : {}
+        );
+        return json({ ok: true });
       }
       case '/kernel/file-write':
         try {
