@@ -17,6 +17,7 @@ import {
 } from './sqlite-root-helpers.mjs';
 
 v8.setFlagsFromString('--expose-gc');
+v8.setFlagsFromString('--no-concurrent-array-buffer-sweeping');
 const gc = vm.runInNewContext('gc');
 const MiB = 1024 * 1024;
 const FILE = 64 * MiB;
@@ -91,16 +92,34 @@ function script(count, at = 41943040) {
   ].join('; ');
 }
 
-async function sampled(kernel, text) {
+function steps(count, at = 41943040) {
+  return [
+    [`dd if=/dev/zero of=/root/big bs=1M count=${count} status=none`],
+    [`dd of=/root/big bs=1 seek=${at} count=3 conv=notrunc status=none`, 'XYZ'],
+    ['ls -l /root/big'],
+    ['cksum /root/big'],
+    [`dd if=/root/big bs=1 skip=${at - 1} count=5 status=none`],
+  ];
+}
+
+async function sampled(kernel, list) {
   const base = live();
   let peak = 0;
+  const out = [];
   const timer = setInterval(() => {
     peak = Math.max(peak, live() - base);
   }, 25);
-  const r = await bash(kernel, text);
-  clearInterval(timer);
-  assert.equal(r.status, 0, r.stderr);
-  return Math.max(peak, live() - base);
+  try {
+    for (const [text, stdin] of list) {
+      const r = await bash(kernel, text, { stdin });
+      assert.equal(r.status, 0, r.stderr);
+      out.push(r.stdout);
+      peak = Math.max(peak, live() - base);
+    }
+  } finally {
+    clearInterval(timer);
+  }
+  return { peak, out };
 }
 
 test('the kernel writes and reads a 64 MiB file on the SQLite root in pieces: memory does not grow with the file', async (t) => {
@@ -127,13 +146,17 @@ test('the kernel writes and reads a 64 MiB file on the SQLite root in pieces: me
   const kernel = await sqliteKernel(sql, {}, { writeBehind: true });
   t.after(() => kernel.terminate());
   await install(kernel);
-  const small = await sampled(kernel, script(0, 40));
-  const big = await sampled(kernel, script(64));
+  await sampled(kernel, steps(0, 40));
+  const small = await sampled(kernel, steps(0, 40));
+  const big = await sampled(kernel, steps(64));
+  assert.equal(small.out[4], '\0XYZ');
+  assert.equal(big.out[4], '\0XYZ\0');
+  assert.equal(big.out[3], `${timed.sqlite.stdout.split('\n')[1]} /root/big\n`);
   console.log(
-    `kernel, 64 MiB dd + 3-byte patch + cksum + ranged read: memory root ${timed.memory.ms} ms, SQLite root ${timed.sqlite.ms} ms; SQLite peak live growth ${(big / MiB).toFixed(1)} MiB against ${(small / MiB).toFixed(1)} MiB for the same script on a 43-byte file`
+    `kernel, 64 MiB dd + 3-byte patch + cksum + ranged read: memory root ${timed.memory.ms} ms, SQLite root ${timed.sqlite.ms} ms; SQLite peak live growth ${(big.peak / MiB).toFixed(1)} MiB against ${(small.peak / MiB).toFixed(1)} MiB for the same commands on a 43-byte file`
   );
   assert.ok(
-    big < small + 16 * MiB,
-    `64 MiB grew live memory by ${big} bytes, the small run by ${small}`
+    big.peak < small.peak + 16 * MiB,
+    `64 MiB grew live memory by ${big.peak} bytes, the small run by ${small.peak}`
   );
 });
