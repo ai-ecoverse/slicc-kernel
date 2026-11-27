@@ -2121,7 +2121,7 @@ export class Launcher {
     const pin = await this.pinOf(path, caller);
     const sum = Object.values(pin)[0];
     const key = sum === undefined ? await this.cacheKey(path, asked) : `${path}:sha256:${sum}`;
-    const checked = await this.leaseImage?.bytes(path);
+    const checked = this.leaseImage ? await this.leaseImage.bytes(path) : undefined;
     const loaded = this.cached(this.compiled, key, async () => {
       const { bytes: read, key: readKey } = checked
         ? { bytes: checked, key }
