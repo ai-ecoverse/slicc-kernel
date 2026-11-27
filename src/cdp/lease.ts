@@ -46,20 +46,16 @@ export interface CdpLeaseOptions {
   adapter: CdpLeaseAdapter;
 }
 
-export function checkedLease(options: {
-  cdpLease?: CdpLeaseOptions;
-  env?: Record<string, string>;
-  cdp?: unknown;
-  network?: { transport?: unknown; uplink?: unknown; doh?: string | false };
-  facades?: unknown;
-  requests?: unknown;
-  devices?: unknown;
-  clipboard?: unknown;
-  sealed?: unknown;
-  hostfs?: unknown;
-  approve?: unknown;
-  processMounts?: unknown;
-}): CdpLeaseOptions | undefined {
+const BOOT_FIELDS = {
+  browser: new Set(['cdpLease', 'root', 'metadata', 'media', 'ca']),
+  node: new Set(['cdpLease']),
+  cloudflare: new Set(['cdpLease', 'loader']),
+};
+
+export function checkedLease(
+  options: { cdpLease?: CdpLeaseOptions },
+  host: keyof typeof BOOT_FIELDS
+): CdpLeaseOptions | undefined {
   const lease = options.cdpLease;
   if (lease === undefined) return undefined;
   if (
@@ -71,23 +67,10 @@ export function checkedLease(options: {
     throw new TypeError('cdpLease requires one job tag and a request/action adapter');
   }
   if (
-    options.cdp ||
-    options.network?.transport ||
-    options.network?.uplink ||
-    options.network?.doh ||
-    options.facades ||
-    options.requests ||
-    options.devices ||
-    options.clipboard ||
-    options.hostfs ||
-    options.sealed ||
-    options.approve ||
-    (options.processMounts !== undefined && options.processMounts !== false)
+    Object.getPrototypeOf(options) !== Object.prototype ||
+    Reflect.ownKeys(options).some((k) => typeof k !== 'string' || !BOOT_FIELDS[host].has(k))
   ) {
-    throw new TypeError('a lease-only kernel cannot also offer host services or egress');
-  }
-  if (options.env && ('SLICC_CDP_URL' in options.env || 'SLICC_CDP_LEASE_URL' in options.env)) {
-    throw new TypeError('a lease-only kernel supplies its own CDP endpoint');
+    throw new TypeError('unexpected boot option for a lease-only kernel');
   }
   return { tag: lease.tag, adapter: lease.adapter };
 }
@@ -116,12 +99,21 @@ function fields(obj: Record<string, unknown>, ...keys: string[]): boolean {
 function opaque(v: unknown): v is string {
   return typeof v === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(v);
 }
+function hasControl(text: string): boolean {
+  for (let i = 0; i < text.length; i++) {
+    const n = text.charCodeAt(i);
+    if (n < 32 || n === 127) return true;
+  }
+  return false;
+}
 function https(v: unknown): v is string {
   if (
     typeof v !== 'string' ||
     v.length > 8192 ||
     !v.startsWith('https://') ||
-    /[\s\\\u0000-\u001f\u007f]/u.test(v)
+    /\s/u.test(v) ||
+    v.includes('\\') ||
+    hasControl(v)
   )
     return false;
   const url = URL.parse(v);

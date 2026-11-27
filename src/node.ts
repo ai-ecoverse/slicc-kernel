@@ -762,7 +762,7 @@ function nodeDevices(
 }
 
 export async function createNodeKernel(options: NodeKernelOptions = {}): Promise<NodeKernel> {
-  const lease = checkedLease(options);
+  const lease = checkedLease(options, 'node');
   const hooks = sealedHooks(options.sealed);
   const timeZone = systemTimeZone(options.timeZone, clockZone(options.cron?.clock));
   const root = options.root ?? memoryRoot();

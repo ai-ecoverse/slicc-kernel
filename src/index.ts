@@ -726,7 +726,7 @@ function checkOptions(options: KernelOptions): CdpLeaseOptions | undefined {
   integrityOptions(options.protect?.integrity);
   facadesInit(options.facades);
   sealedHooks(options.sealed);
-  const lease = checkedLease(options);
+  const lease = checkedLease(options, 'browser');
   if (
     lease &&
     (!options.root || options.metadata !== false || options.media !== false || options.ca !== false)
