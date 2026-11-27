@@ -3911,6 +3911,7 @@ export class Launcher {
     cwd: string,
     extra: Record<string, string> | undefined,
     account: Account,
+    session: number | undefined,
     login = false
   ) {
     const env: Record<string, string> = {
@@ -3918,6 +3919,7 @@ export class Launcher {
         ? { ...networkEnv(this.hostname), HOSTNAME: this.hostname, TZ: this.timeZone }
         : this.env),
       ...userEnv(account, this.pnpmHome),
+      ...(this.cdp.leaseOnly ? this.cdp.env(session) : {}),
       PWD: cwd,
       ...extra,
     };
@@ -4344,7 +4346,8 @@ export class Launcher {
         COLORTERM: 'truecolor',
         ...options.env,
       },
-      account
+      account,
+      options.session
     );
     const report = (message: string) => options.onData(encoder.encode(`${message}\r\n`));
     const handle = await this.launch(planned, {
@@ -4383,7 +4386,7 @@ export class Launcher {
       tagged.tagBase,
       missing
     );
-    const env = this.environment(cwd, options.env, account, options.login);
+    const env = this.environment(cwd, options.env, account, options.session, options.login);
     const out: Uint8Array[] = [];
     const err: Uint8Array[] = [];
     const keep = options.collect !== false;

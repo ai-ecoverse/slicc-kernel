@@ -3,17 +3,18 @@ import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { attachKernel, CDP_LEASE_VERSION, createNodeKernel } from '../../dist/node.js';
 import { fixtureAdapter } from './fixtures/lease-adapter.mjs';
-import { cliFiles, exerciseCli, externalCli } from './lease-cli.mjs';
+import { cliFiles, exerciseCli } from './lease-cli.mjs';
 
-test('matching branch WASI command calls only the stamped adapter', {
-  skip: !externalCli,
-}, async (t) => {
+test('the published playwright-cli WASI calls only the stamped read-only adapter', async (t) => {
   const fixture = await fixtureAdapter();
   const kernel = await setup(t, { tag, adapter: fixture.adapter });
   for (const [path, data] of await cliFiles()) await kernel.writeFile(path, data);
   const client = await job(t, kernel);
   await exerciseCli((argv) => client.run(argv, { cwd: '/' }), fixture);
-  assert.equal(fixture.seen.length, 6);
+  assert.deepEqual(
+    fixture.seen.map(({ method, params }) => params.op ?? method),
+    ['request', 'goto', 'snapshot', 'request']
+  );
   assert.ok(fixture.seen.every(({ stamp }) => stamp.tag === tag && stamp.pid > 1));
 });
 
@@ -27,8 +28,8 @@ const action = (lease, op, args) => ({
   params: { lease, op, args },
 });
 
-async function setup(t, cdpLease) {
-  const kernel = await createNodeKernel(cdpLease ? { cdpLease } : {});
+async function setup(t, cdpLease, options = {}) {
+  const kernel = await createNodeKernel(cdpLease ? { cdpLease } : options);
   t.after(() => kernel.terminate());
   for (const file of ['package.json', 'probe.wasm']) {
     await kernel.writeFile(
@@ -66,6 +67,7 @@ test('lease-only boot admits one host-bound job, never a spawn tag, URL, or runt
   await assert.rejects(kernel.connect({ tag: 'other' }), /lease unavailable/);
   await assert.rejects(kernel.connect({ tag, requests: 'attach' }), /lease unavailable/);
   const client = await job(t, kernel);
+  for (const [path, data] of await cliFiles()) await kernel.writeFile(path, data);
   await assert.rejects(kernel.connect({ tag }), /lease unavailable/);
   await assert.rejects(
     client.serveCdp(
@@ -80,6 +82,7 @@ test('lease-only boot admits one host-bound job, never a spawn tag, URL, or runt
   const [endpoint, raw] = await run(client, 'env');
   assert.match(endpoint, /^ws:\/\/127\.0\.0\.1:9222\/slicc\/lease\/v1\/[a-f0-9-]{36}$/);
   assert.equal(raw, null);
+  assert.deepEqual(await run(kernel, 'env', '', { tag }), [null, null]);
   const rawPath = new URL(endpoint).pathname.replace('/slicc/lease/v1/', '/devtools/browser/');
   for (const path of [
     '/json/version',
@@ -92,7 +95,10 @@ test('lease-only boot admits one host-bound job, never a spawn tag, URL, or runt
     assert.equal(status, 403);
     assert.doesNotMatch(body, /DebuggerUrl|target|slicc\/lease\/v1/);
   }
-  assert.match((await run(kernel, 'ws', [request()], { tag })).refused, /403/);
+  assert.match(
+    (await run(kernel, 'ws', [request()], { tag, env: { SLICC_CDP_LEASE_URL: endpoint } })).refused,
+    /403/
+  );
   for (const path of [rawPath, '/json?runtime=other', '/json/version?runtime=other'])
     assert.equal((await run(client, 'get', path))[0], 404);
   const [status, body] = await run(client, 'get', '/json/version');
@@ -100,6 +106,17 @@ test('lease-only boot admits one host-bound job, never a spawn tag, URL, or runt
   assert.equal(JSON.parse(body).webSocketDebuggerUrl, endpoint);
   assert.deepEqual(JSON.parse((await run(client, 'get', '/json/list'))[1]), []);
   assert.match((await run(client, 'ws', [request()], {}, '?runtime=other')).refused, /404/);
+  for (const env of [
+    { SLICC_CDP_LEASE_URL: endpoint },
+    { SLICC_CDP_LEASE_URL: `${endpoint}?runtime=other` },
+  ]) {
+    const result = await kernel.run(
+      ['playwright-cli', 'lease', 'request', '--allow', 'https://billing.example', '--for', '1h'],
+      { tag, cwd: '/', env }
+    );
+    assert.equal(result.status, 1, result.stderr);
+    assert.equal(JSON.parse(result.stderr).reason, 'E_UNAVAILABLE');
+  }
   assert.deepEqual(fixture.seen, []);
   await client.close();
   await assert.rejects(kernel.connect({ tag }), /lease unavailable/);
@@ -113,8 +130,6 @@ test('validated lease calls, projected replies and safe errors cross the real jo
     request({ lease, allow: [{ kind: 'exact', url: 'https://billing.example/x' }] }),
     action(lease, 'goto', { url: allow[0].url }),
     action(lease, 'snapshot', {}),
-    action(lease, 'click', { ref: 'e1' }),
-    action(lease, 'fill', { ref: 'e1', value: 'test' }),
     action('another_job', 'snapshot', {}),
   ];
   const responses = await run(client, 'ws', valid, { tag: 'another-job' });
@@ -125,8 +140,6 @@ test('validated lease calls, projected replies and safe errors cross the real jo
     granted,
     ack,
     { id: 2, result: { result: { text: 'fixture document' } } },
-    ack,
-    ack,
   ]);
   assert.equal(responses.at(-1).error.data.reason, 'E_REVOKED');
   assert.ok(
@@ -147,6 +160,8 @@ test('validated lease calls, projected replies and safe errors cross the real jo
       ttlSeconds: 1,
     }),
     request({ ...params, tag }),
+    action(lease, 'click', { ref: 'e1' }),
+    action(lease, 'fill', { ref: 'e1', value: 'test' }),
     action(lease, 'click', { x: 1, y: 2 }),
     action(lease, 'snapshot', { expression: 'test' }),
     action(lease, 'goto', { url: 'file:///' }),
@@ -157,6 +172,23 @@ test('validated lease calls, projected replies and safe errors cross the real jo
   assert.equal(invalid.length, malformed.length);
   assert.ok(invalid.every((r) => r.error?.data.reason === 'E_UNSUPPORTED'));
   assert.equal(seen.length, valid.length);
+});
+
+test('128 KiB inclusive on wire in both directions; oversized input is never dispatched', async (t) => {
+  const { adapter } = await fixtureAdapter();
+  const limit = 128 * 1024;
+  const empty = JSON.stringify({ id: 1, result: { result: { text: '' } } }).length;
+  const text = 'é'.repeat(Math.floor((limit - empty) / 2)) + 'x'.repeat((limit - empty) % 2);
+  let calls = 0;
+  adapter.action = async () => ({ result: { text: ++calls === 1 ? text : text + 'x' } });
+  const client = await job(t, await setup(t, { tag, adapter }));
+  const [at] = await run(client, 'ws', [`pad:${limit}`]);
+  assert.equal(Buffer.byteLength(JSON.stringify(at)), limit);
+  assert.equal(at.result.result.text, text);
+  const [over] = await run(client, 'ws', [`pad:${limit}`]);
+  assert.equal(over.error.data.reason, 'E_UNSUPPORTED');
+  assert.deepEqual(await run(client, 'ws', [`pad:${limit + 1}`]), [{ close: 1009 }]);
+  assert.equal(calls, 2);
 });
 
 test('a lease job cannot execute JS, WASI imports or a package driver', async (t) => {
@@ -216,8 +248,8 @@ test('unacknowledged site actions return a safe unknown outcome without replay',
     return Promise.resolve({ result: { token: 'private transport value' } });
   };
   const client = await job(t, await setup(t, { tag, adapter }));
-  const click = action(lease, 'click', { ref: 'e5' });
-  const replies = await run(client, 'ws', [click, click]);
+  const goto = action(lease, 'goto', { url: allow[0].url });
+  const replies = await run(client, 'ws', [goto, goto]);
   assert.deepEqual(
     replies.map((r) => r.error.data.reason),
     ['E_OUTCOME_UNKNOWN', 'E_OUTCOME_UNKNOWN']
@@ -227,7 +259,24 @@ test('unacknowledged site actions return a safe unknown outcome without replay',
 });
 
 test('a normal kernel does not serve a lease URL; a lease kernel refuses mixed host services', async (t) => {
-  const kernel = await setup(t);
+  const ledger = [];
+  const kernel = await setup(t, undefined, {
+    cdp: async () => {
+      ledger.push('open');
+      const conn = {
+        onmessage: null,
+        onclose: null,
+        close() {},
+        send(text) {
+          const { id, method } = JSON.parse(text);
+          ledger.push(method);
+          conn.onmessage(JSON.stringify({ id, result: { targetInfos: [] } }));
+        },
+      };
+      return conn;
+    },
+  });
+  for (const [path, data] of await cliFiles()) await kernel.writeFile(path, data);
   const [lease, raw] = await run(kernel, 'env');
   assert.equal(lease, null);
   const endpoint = raw.replace('/devtools/browser/', '/slicc/lease/v1/');
@@ -235,6 +284,18 @@ test('a normal kernel does not serve a lease URL; a lease kernel refuses mixed h
     (await run(kernel, 'ws', [request()], { env: { SLICC_CDP_LEASE_URL: endpoint } })).refused,
     /404/
   );
+  for (const selector of [undefined, '', `${endpoint}?runtime=other`, raw, endpoint]) {
+    const env = selector === undefined ? {} : { SLICC_CDP_LEASE_URL: selector };
+    const result = await kernel.run(
+      ['playwright-cli', 'lease', 'request', '--allow', 'https://billing.example', '--for', '1h'],
+      { cwd: '/', env }
+    );
+    assert.equal(result.status, 1, result.stderr);
+    assert.equal(JSON.parse(result.stderr).reason, 'E_UNAVAILABLE');
+    assert.deepEqual(ledger, []);
+  }
+  assert.equal((await run(kernel, 'get', '/json/list'))[0], 200);
+  assert.deepEqual(ledger, ['open', 'Target.getTargets']);
   const { adapter } = await fixtureAdapter();
   for (const mixed of [
     { cdp: () => {} },

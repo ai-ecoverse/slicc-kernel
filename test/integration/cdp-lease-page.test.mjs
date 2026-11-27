@@ -39,22 +39,30 @@ test('the browser worker confirms lease mode and dispatches a WASI call to the d
     const kernel = await createKernel(options);
     try {
       const client = await attachKernel(await kernel.connect({ tag }));
-      await client.fs.mkdir('/node_modules/leaseprobe', { recursive: true });
-      for (const file of ['package.json', 'probe.wasm']) {
-        const bytes = new Uint8Array(
-          await (await fetch(`/fixtures/leaseprobe/${file}`)).arrayBuffer()
-        );
-        await client.fs.writeFile(`/node_modules/leaseprobe/${file}`, bytes);
-      }
-      const cmd = {
-        id: 1,
-        method: 'Slicc.leaseAction',
-        params: { lease: fixture.lease, op: 'snapshot', args: {} },
-      };
-      const result = await client.run(['leaseprobe', 'ws', '', JSON.stringify(cmd)], { cwd: '/' });
+      const pkg = '/node_modules/@ai-ecoverse/slicc-cdp';
+      const manifest = await (await fetch(`${pkg}/package.json`)).json();
+      const { wasm } = manifest.slicc.commands['playwright-cli'];
+      const artifact = await fetch(`${pkg}/${wasm}`);
+      if (!artifact.ok) throw new Error('missing published CLI');
+      await client.fs.mkdir(`${pkg}/bin`, { recursive: true });
+      await client.fs.writeFile(`${pkg}/package.json`, JSON.stringify(manifest));
+      await client.fs.writeFile(`${pkg}/${wasm}`, new Uint8Array(await artifact.arrayBuffer()));
+      const cli = (...args) => client.run(['playwright-cli', ...args], { cwd: '/' });
+      const pending = await cli(
+        'lease',
+        'request',
+        '--allow',
+        'https://billing.example',
+        '--for',
+        '1h'
+      );
+      const result = await cli('--lease', fixture.lease, 'snapshot');
+      const denied = await cli('--lease', fixture.lease, 'click', 'e1');
       await client.close();
       return {
         result,
+        pending,
+        denied,
         version: CDP_LEASE_VERSION,
         refused,
         seen: fixture.seen.map(({ stamp }) => stamp.tag),
@@ -65,9 +73,14 @@ test('the browser worker confirms lease mode and dispatches a WASI call to the d
   });
   assert.equal(result.version, 1);
   assert.match(result.refused, /worker does not support/);
-  assert.deepEqual(result.seen, ['lease:page']);
+  assert.deepEqual(result.seen, ['lease:page', 'lease:page']);
+  assert.equal(result.pending.status, 0, result.pending.stderr);
+  assert.match(
+    result.pending.stdout,
+    /slicc lease review --to jkt:[A-Za-z0-9_-]{43} --allow https:\/\/billing\.example --for 1h/
+  );
+  assert.equal(result.denied.status, 1);
+  assert.equal(JSON.parse(result.denied.stderr).reason, 'E_UNSUPPORTED');
   assert.equal(result.result.status, 0, result.result.stderr);
-  assert.deepEqual(JSON.parse(result.result.stdout), [
-    { id: 1, result: { result: { text: 'fixture document' } } },
-  ]);
+  assert.equal(result.result.stdout, 'fixture document\n');
 });
