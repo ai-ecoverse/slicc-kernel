@@ -200,7 +200,7 @@ describe('the Computer example Worker', { concurrency: false }, () => {
       const { head, fill } = messageWasm(`big ${i}\n`, { fill: size });
       const file = `/tmp/big${i}.wasm`;
       const result = await exec(
-        `printf '${printfOf(head)}' > ${file} && head -c ${fill} /dev/zero >> ${file} && chmod +x ${file} && ${file}; echo "status $?"; rm -f ${file}`
+        `printf '${printfOf(head)}' > ${file} && dd if=/dev/zero bs=65536 iflag=fullblock,count_bytes count=${fill} status=none >> ${file} && chmod +x ${file} && ${file}; echo "status $?"; rm -f ${file}`
       );
       assert.equal(
         result.stdout,
