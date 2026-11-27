@@ -6,8 +6,9 @@ import {
   REASON,
   type RequestHead,
 } from '../kernel/net/http1.ts';
-import type { ConnectorStamp, KernelSocket, LoopbackNet } from '../kernel/socket.ts';
+import type { KernelSocket, LoopbackNet } from '../kernel/socket.ts';
 import type { CdpHosts } from './hosts.ts';
+import { LEASE_MAX_MESSAGE } from './lease.ts';
 import { CDP_PORT, type CdpConnection, NO_CDP_HOST } from './types.ts';
 import {
   acceptKey,
@@ -120,11 +121,21 @@ export class CdpFacade {
   }
 
   private async route(conn: KernelSocket, incoming: Incoming, req: RequestHead): Promise<void> {
+    const { hosts } = this.options;
+    if (hosts.leaseOnly) {
+      hosts.authorize(conn);
+      if (req.method !== 'GET') throw new HttpError(405, 'expected GET');
+      if (req.target === hosts.path && isUpgrade(req.headers))
+        return this.upgrade(conn, incoming, req);
+      if (req.target === '/json/version')
+        return this.write(conn, json({ Browser: 'cdp-lease-v1', webSocketDebuggerUrl: hosts.url }));
+      if (req.target === '/json' || req.target === '/json/list') return this.write(conn, json([]));
+      throw new HttpError(404, 'lease route unavailable');
+    }
     const url = new URL(req.target, 'http://127.0.0.1');
     const runtime = url.searchParams.get('runtime') ?? undefined;
     const host = req.headers.find(([n]) => n.toLowerCase() === 'host')?.[1] ?? '127.0.0.1';
     if (req.method !== 'GET') throw new HttpError(405, `${req.method} is not supported here`);
-    const { hosts } = this.options;
     if (url.pathname === hosts.path && isUpgrade(req.headers)) {
       return this.upgrade(conn, incoming, req, runtime);
     }
@@ -146,14 +157,11 @@ export class CdpFacade {
       );
       return;
     }
-    await this.write(conn, json(await this.list(runtime, conn.peerStamp)));
+    await this.write(conn, json(await this.list(conn, runtime)));
   }
 
-  private async list(
-    runtime: string | undefined,
-    stamp: ConnectorStamp | undefined
-  ): Promise<unknown[]> {
-    const conn = await this.host(runtime, stamp);
+  private async list(peer: KernelSocket, runtime: string | undefined): Promise<unknown[]> {
+    const conn = await this.options.hosts.connect(peer, runtime);
     try {
       const reply = await new Promise<{ result?: { targetInfos?: TargetInfo[] }; error?: unknown }>(
         (resolve, reject) => {
@@ -189,26 +197,19 @@ export class CdpFacade {
     }
   }
 
-  private host(
-    runtime: string | undefined,
-    stamp: ConnectorStamp | undefined
-  ): Promise<CdpConnection> {
-    return this.options.hosts.connect({
-      ...(runtime ? { runtime } : {}),
-      ...(stamp ? { stamp } : {}),
-    });
-  }
-
   private async upgrade(
     conn: KernelSocket,
     incoming: Incoming,
     req: RequestHead,
-    runtime: string | undefined
+    runtime?: string
   ): Promise<void> {
     const accept = await acceptKey(req.headers);
-    const host = await this.host(runtime, conn.peerStamp);
+    const host = await this.options.hosts.connect(conn, runtime);
     const limits = {
-      max: this.options.maxMessage ?? MAX_MESSAGE,
+      max: this.options.hosts.leaseOnly
+        ? LEASE_MAX_MESSAGE
+        : (this.options.maxMessage ?? MAX_MESSAGE),
+      serial: this.options.hosts.leaseOnly,
       closeWaitMs: this.options.closeWaitMs ?? CLOSE_WAIT_MS,
     };
     await new Relay(conn, incoming, host, limits, this.stop.signal)
@@ -220,6 +221,8 @@ export class CdpFacade {
 class Relay {
   private writes: Promise<unknown> = Promise.resolve();
   private ended = false;
+  private busy = false;
+  private readonly serial: boolean;
 
   private readonly conn: KernelSocket;
   private readonly incoming: Incoming;
@@ -232,13 +235,14 @@ class Relay {
     conn: KernelSocket,
     incoming: Incoming,
     host: CdpConnection,
-    limits: { max: number; closeWaitMs: number },
+    limits: { max: number; closeWaitMs: number; serial: boolean },
     stop: AbortSignal
   ) {
     this.conn = conn;
     this.incoming = incoming;
     this.host = host;
     this.max = limits.max;
+    this.serial = limits.serial;
     this.closeWaitMs = limits.closeWaitMs;
     this.stop = stop;
   }
@@ -255,7 +259,8 @@ class Relay {
   }
 
   async start(head: Uint8Array): Promise<void> {
-    await this.send(head);
+    const handshake = this.send(head);
+    if (!this.serial) await handshake;
     const hostGone = new Promise<void>((resolve) => {
       this.host.onclose = (reason) => {
         void this.end(reason ? CLOSE.error : CLOSE.normal, reason ?? '').then(() => resolve());
@@ -266,8 +271,13 @@ class Relay {
       const bytes = new TextEncoder().encode(message);
       if (bytes.length > this.max)
         void this.end(CLOSE.tooBig, `a message is over ${this.max} bytes`);
-      else void this.send(frame(OP_TEXT, bytes));
+      else if (!this.serial) void this.send(frame(OP_TEXT, bytes));
+      else
+        void this.send(frame(OP_TEXT, bytes)).then(() => {
+          this.busy = false;
+        });
     };
+    await handshake;
     const pumping = this.pump();
     await Promise.race([pumping, hostGone]);
     await this.writes;
@@ -284,10 +294,18 @@ class Relay {
     try {
       for (;;) {
         const event = await reader.next(this.stop);
-        if (!event) return;
-        if (event.kind === 'text') this.host.send(event.text);
-        else if (event.kind === 'ping') void this.send(pongFrame(event.payload));
-        else {
+        if (!event || (this.serial && this.ended)) return;
+        if (event.kind === 'text') {
+          if (this.serial && this.busy) {
+            await this.end(CLOSE.protocol, 'one lease operation at a time');
+            return;
+          }
+          this.busy = this.serial;
+          this.host.send(event.text);
+        } else if (event.kind === 'ping') {
+          const pong = this.send(pongFrame(event.payload));
+          if (this.serial) await pong;
+        } else {
           await this.end(event.code === 1005 ? CLOSE.normal : event.code, '');
           return;
         }

@@ -1,3 +1,5 @@
+import { type CdpLeaseOptions, checkedLease, leaseHook } from './cdp/lease.ts';
+import { checkCli, type LeaseCliInput } from './cdp/lease-cli.ts';
 import { type CdpOpen, serveCdpPort } from './cdp/port.ts';
 import type { CdpHook } from './cdp/types.ts';
 import type { SudoRun, SudoRunOptions } from './client/attach.ts';
@@ -47,6 +49,14 @@ import { systemTimeZone } from './time-zone.ts';
 import { type NetworkTransport, serveTransport } from './transport.ts';
 import type { Account, AddGroup, AddUser, Group, RemoveUser } from './users.ts';
 
+export {
+  CDP_LEASE_VERSION,
+  type CdpLeaseAction,
+  type CdpLeaseAdapter,
+  type CdpLeaseContext,
+  type CdpLeaseOptions,
+  type CdpLeaseRequest,
+} from './cdp/lease.ts';
 export type { CdpConnection, CdpHook, CdpRequest } from './cdp/types.ts';
 export {
   type AttachOptions,
@@ -234,6 +244,7 @@ export interface KernelOptions {
   hostfs?: HostfsGrantHook;
   processMounts?: ProcessMountPolicy;
   cdp?: CdpHook;
+  cdpLease?: CdpLeaseOptions;
   facades?: FacadeSpecs;
   hostname?: string;
   timeZone?: string;
@@ -321,6 +332,7 @@ export interface KernelSealed {
 }
 
 export interface Kernel {
+  installLeaseCli(input: LeaseCliInput): Promise<void>;
   run(argv: string[], options?: RunOptions): Promise<RunResult>;
   openTerminal(argv: string[], options?: TerminalOptions): Promise<Terminal>;
   connect(options?: ConnectOptions): Promise<MessagePort>;
@@ -342,7 +354,7 @@ export interface Kernel {
   attest(path: string): Promise<Attestation>;
   attest(path: string, options: { absent: 'allow' }): Promise<Attestation | AttestTombstone>;
   watch(paths: string[], onChange: (path: string) => void): Promise<() => void>;
-  terminate(): void;
+  terminate(): void | Promise<void>;
 }
 
 export interface TerminalOptions {
@@ -705,7 +717,7 @@ function approver(approve: ApproveHook | undefined, worker: Worker) {
   return handlers;
 }
 
-function checkOptions(options: KernelOptions): void {
+function checkOptions(options: KernelOptions): CdpLeaseOptions | undefined {
   if (!globalThis.crossOriginIsolated) throw new Error(ISOLATION);
   if (options.hostname !== undefined && !isHostname(options.hostname)) {
     throw new Error(`not a host name: ${String(options.hostname)}`);
@@ -716,6 +728,13 @@ function checkOptions(options: KernelOptions): void {
   integrityOptions(options.protect?.integrity);
   facadesInit(options.facades);
   sealedHooks(options.sealed);
+  const lease = checkedLease(options, 'browser');
+  if (lease && (options.metadata !== false || options.media !== false || options.ca !== false)) {
+    throw new TypeError(
+      'a browser lease-only kernel requires metadata:false, media:false, ca:false'
+    );
+  }
+  return lease;
 }
 
 interface Bound {
@@ -865,8 +884,60 @@ function pageOnly(call: (req: KernelCall) => Promise<unknown>): Pick<Kernel, 'at
   };
 }
 
+async function bootWorker(
+  options: KernelOptions,
+  leaseTag: string | undefined,
+  call: (req: KernelCall) => Promise<unknown>,
+  worker: Worker,
+  fail: (err: Error) => void
+) {
+  try {
+    const init = await initCall(options, options.network?.transport);
+    const initialized = await call({
+      ...init,
+      ...(leaseTag ? { leaseTag, leaseMemory: true as const } : {}),
+    });
+    if (leaseTag && initialized !== 'cdp-lease-v1')
+      throw new Error('worker does not support a lease-only kernel');
+  } catch (err) {
+    fail(err instanceof Error ? err : new Error('kernel initialization failed'));
+    worker.terminate();
+    throw err;
+  }
+}
+
+function endWorker(
+  worker: Worker,
+  lease: boolean,
+  call: (req: KernelCall) => Promise<unknown>,
+  close: () => void
+) {
+  let ending: Promise<void> | undefined;
+  const end = () => {
+    close();
+    worker.terminate();
+  };
+  return () => {
+    if (!lease) return end();
+    ending ??= call({ op: 'lease-memory-end' })
+      .then(
+        () => {},
+        () => {}
+      )
+      .finally(end);
+    return ending;
+  };
+}
+
+function installer(call: (req: KernelCall) => Promise<unknown>) {
+  return async (input: LeaseCliInput) => {
+    checkCli(input);
+    await call({ op: 'lease-cli-install', input });
+  };
+}
+
 export async function createKernel(options: KernelOptions = {}): Promise<Kernel> {
-  checkOptions(options);
+  const lease = checkOptions(options);
   const url = options.worker ?? new URL('./kernel-worker.js', import.meta.url);
   const worker = new Worker(url, { type: 'module', name: 'slicc-kernel' });
   const pending = new Map<number, Pending>();
@@ -878,7 +949,7 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     (req) => request(req),
     (req) => call(req)
   );
-  const cdp = cdpBridge(options.cdp);
+  const cdp = cdpBridge(lease ? leaseHook(lease) : options.cdp);
   const facades = facadeBridge(options.facades);
   const bound: Bound = { requests: new Map(), devices: new Map(), ports: new WeakMap() };
   const sealed = hookRelays(worker, options, bound);
@@ -1003,11 +1074,10 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     };
   }
 
-  const { dial } = dials;
-
-  await call(await initCall(options, transport));
+  await bootWorker(options, lease?.tag, call, worker, fail);
 
   return {
+    installLeaseCli: installer(call),
     async run(argv, runOptions = {}) {
       const { onStdout, onStderr, stdin, ...rest } = runOptions;
       const streams = { 1: streamer(onStdout), 2: streamer(onStderr) };
@@ -1029,17 +1099,16 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
         void (await call({ op: 'integrity-revoke', ...(path !== undefined ? { path } : {}) })),
     },
     updateTransportTraits: traitsUpdater(transport, call),
-    dial,
-    loopbackFetch: (input, fetchOptions) => loopbackFetch(dial, input, fetchOptions),
+    dial: dials.dial,
+    loopbackFetch: (input, fetchOptions) => loopbackFetch(dials.dial, input, fetchOptions),
     mount: async (spec) => (await call({ op: 'mount', spec })) as MountEntry,
     umount: async (target) => void (await call({ op: 'umount', target })),
     mounts: async () => (await call({ op: 'mounts' })) as MountEntry[],
     insert: async (target, handle) => void (await call(await insertCall(target, handle))),
     ...pageOnly(call),
     watch: files.watch,
-    terminate() {
-      fail(new Error('slicc-kernel terminated'));
-      worker.terminate();
-    },
+    terminate: endWorker(worker, Boolean(lease), call, () =>
+      fail(new Error('slicc-kernel terminated'))
+    ),
   };
 }

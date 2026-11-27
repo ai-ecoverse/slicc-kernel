@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { MessageChannel, type MessagePort, type Worker } from 'node:worker_threads';
 import { type AsyncProcessOptions, nodeAsyncHost } from './async/node-host.ts';
+import { type CdpLeaseOptions, checkedLease, leaseHook } from './cdp/lease.ts';
 import type { CdpHook } from './cdp/types.ts';
 import type { SudoRun, SudoRunOptions } from './client/attach.ts';
 import type { MessagePortLike } from './client/protocol.ts';
@@ -65,6 +66,14 @@ export {
   createAsyncTransport,
 } from './async/transport.ts';
 export type { AsyncProcessInit } from './async/wire.ts';
+export {
+  CDP_LEASE_VERSION,
+  type CdpLeaseAction,
+  type CdpLeaseAdapter,
+  type CdpLeaseContext,
+  type CdpLeaseOptions,
+  type CdpLeaseRequest,
+} from './cdp/lease.ts';
 export type { CdpConnection, CdpHook, CdpRequest } from './cdp/types.ts';
 export {
   type AttachOptions,
@@ -202,6 +211,7 @@ export interface NodeKernelOptions {
   hostfsFetch?: FetchLike;
   hostfsOrigin?: string;
   cdp?: CdpHook;
+  cdpLease?: CdpLeaseOptions;
   facades?: FacadeSpecs;
   hostname?: string;
   timeZone?: string;
@@ -612,8 +622,9 @@ function nodeClient(
   { user, tag, requests, devices }: ConnectOptions
 ): MessagePort {
   tagOption(tag);
-  const { port1, port2 } = new MessageChannel();
   const session = ++nodeSessions;
+  const endLease = launcher.cdp.bindClient(session, tag, requests || devices);
+  const { port1, port2 } = new MessageChannel();
   const served = serveClient(port1 as unknown as MessagePortLike, {
     launcher: async () => launcher,
     signal: signalNumber,
@@ -633,6 +644,7 @@ function nodeClient(
       ? launcher.devices.register(session, devicesHook(devices))
       : undefined;
   void served.closed.then(() => {
+    endLease?.();
     clients.delete(served);
     unbind?.();
     unbindDevices?.();
@@ -750,6 +762,7 @@ function nodeDevices(
 }
 
 export async function createNodeKernel(options: NodeKernelOptions = {}): Promise<NodeKernel> {
+  const lease = checkedLease(options, 'node');
   const hooks = sealedHooks(options.sealed);
   const timeZone = systemTimeZone(options.timeZone, clockZone(options.cron?.clock));
   const root = options.root ?? memoryRoot();
@@ -787,6 +800,7 @@ export async function createNodeKernel(options: NodeKernelOptions = {}): Promise
     ...(options.hostfs ? { hostfs: options.hostfs } : {}),
     ...hostfsFetchOf(options),
     ...(options.cdp ? { cdp: options.cdp } : {}),
+    ...(lease ? { leaseTag: lease.tag, cdp: leaseHook(lease) } : {}),
     ...(options.facades ? { facades: options.facades } : {}),
     ...(options.hostname !== undefined ? { hostname: options.hostname } : {}),
     timeZone,

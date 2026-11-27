@@ -1,0 +1,12 @@
+{
+  "name": "leaseprobe",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "leaseprobe": {
+        "wasm": "probe.wasm"
+      }
+    }
+  }
+}
