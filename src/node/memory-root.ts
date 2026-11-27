@@ -137,7 +137,7 @@ class MemoryFile {
     };
     if (budget) this.staging.add(abort);
     const reserve = (size: number) => {
-      if (ended || this.removed) fail('NotFoundError');
+      if (budget && (ended || this.removed)) fail('NotFoundError');
       budget?.resize(reserved, size);
       reserved = size;
     };
@@ -163,7 +163,7 @@ class MemoryFile {
       },
       truncate: async (size: number) => truncate(size),
       close: async () => {
-        if (ended || this.removed) fail('NotFoundError');
+        if (budget && (ended || this.removed)) fail('NotFoundError');
         budget?.resize(this.data.size, 0);
         ended = true;
         this.staging.delete(abort);
