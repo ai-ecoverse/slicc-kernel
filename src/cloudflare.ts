@@ -233,7 +233,7 @@ export async function createCloudflareKernel(
   options: CloudflareKernelOptions
 ): Promise<CloudflareKernel> {
   if (!options?.loader) throw new TypeError('createCloudflareKernel: loader is required');
-  const lease = checkedLease(options);
+  const lease = checkedLease(options, 'cloudflare');
   const hooks = sealedHooks(options.sealed);
   const { root, fs } = rootFs(options);
   const flush = () => {

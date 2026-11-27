@@ -23,19 +23,13 @@ test('the browser worker confirms lease mode and dispatches a WASI call to the d
       ca: false,
       cdpLease: { tag, adapter: fixture.adapter },
     };
-    const obsolete = URL.createObjectURL(
-      new Blob([`onmessage=({data})=>postMessage({id:data.id,result:!data.cdp})`], {
-        type: 'text/javascript',
-      })
-    );
-    const refused = await createKernel({ ...options, worker: obsolete }).then(
+    const refused = await createKernel({ ...options, worker: '/not-a-trusted-worker.js' }).then(
       (k) => {
         k.terminate();
         return false;
       },
       (e) => e.message
     );
-    URL.revokeObjectURL(obsolete);
     const kernel = await createKernel(options);
     try {
       const client = await attachKernel(await kernel.connect({ tag }));
@@ -72,7 +66,7 @@ test('the browser worker confirms lease mode and dispatches a WASI call to the d
     }
   });
   assert.equal(result.version, 1);
-  assert.match(result.refused, /worker does not support/);
+  assert.match(result.refused, /unexpected boot option/);
   assert.deepEqual(result.seen, ['lease:page', 'lease:page']);
   assert.equal(result.pending.status, 0, result.pending.stderr);
   assert.match(

@@ -186,33 +186,36 @@ export class KernelRoutes {
     const started = Date.now();
     const storage = this.ctx.storage;
     const self = () => this.env.PLUMBING.get(this.ctx.id);
-    this.kernel = await createCloudflareKernel({
-      loader: this.env.LOADER,
-      ...(lease ? { cdpLease: { tag, adapter: lease.adapter } } : {}),
-      ...(clock
-        ? {
-            clock: () =>
-              self()
-                .now()
-                .then((now) => {
-                  this.clockReads.push(now);
-                  return now;
-                }),
+    this.kernel = await createCloudflareKernel(
+      lease
+        ? { loader: this.env.LOADER, cdpLease: { tag, adapter: lease.adapter } }
+        : {
+            loader: this.env.LOADER,
+            ...(clock
+              ? {
+                  clock: () =>
+                    self()
+                      .now()
+                      .then((now) => {
+                        this.clockReads.push(now);
+                        return now;
+                      }),
+                }
+              : {}),
+            processHost: { process, ...(localForks === false ? { localForks: false } : {}) },
+            isolates: {
+              ...(waitMs ? { waitMs } : {}),
+              ...(memory ? { memory } : {}),
+              ...(max ? { max } : {}),
+            },
+            ...(persist
+              ? { sql: storage.sql, sqlite: { transaction: (fn) => storage.transactionSync(fn) } }
+              : {}),
+            ...(network ? { network: this.network(doh) } : {}),
+            ...(commands ? { commands: { append: commands } } : {}),
+            ...(cdp ? { cdp: fakeBrowser((runtime) => EMBEDDER_MODES[runtime] ?? 'answer') } : {}),
           }
-        : {}),
-      processHost: { process, ...(localForks === false ? { localForks: false } : {}) },
-      isolates: {
-        ...(waitMs ? { waitMs } : {}),
-        ...(memory ? { memory } : {}),
-        ...(max ? { max } : {}),
-      },
-      ...(persist
-        ? { sql: storage.sql, sqlite: { transaction: (fn) => storage.transactionSync(fn) } }
-        : {}),
-      ...(network ? { network: this.network(doh) } : {}),
-      ...(commands ? { commands: { append: commands } } : {}),
-      ...(cdp ? { cdp: fakeBrowser((runtime) => EMBEDDER_MODES[runtime] ?? 'answer') } : {}),
-    });
+    );
     await install(this.kernel);
     if (lease)
       this.leaseClient = await attachKernel(await this.kernel.connect({ tag }), { locks: null });

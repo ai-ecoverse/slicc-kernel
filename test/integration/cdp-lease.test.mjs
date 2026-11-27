@@ -174,6 +174,30 @@ test('validated lease calls, projected replies and safe errors cross the real jo
   assert.equal(seen.length, valid.length);
 });
 
+test('goto preserves mixed-case paths, query, underscores and brackets; controls never reach the adapter', async (t) => {
+  const { adapter, lease, seen } = await fixtureAdapter();
+  const client = await job(t, await setup(t, { tag, adapter }));
+  const valid = ['https://Example.com/Path_a[1]?q=A', 'https://billing.example/invoices/@OLD'];
+  const invalid = [
+    'https://myself@billing.example/a',
+    'https://@billing.example/a',
+    'https://billing.example/a b',
+    'https://billing.example/a\\b',
+    ...[0, 1, 9, 31, 127].map((c) => 'https://billing.example/a' + String.fromCharCode(c) + 'b'),
+  ];
+  const replies = await run(
+    client,
+    'ws',
+    [...valid, ...invalid].map((url) => action(lease, 'goto', { url }))
+  );
+  assert.ok(replies.slice(0, valid.length).every((r) => r.result));
+  assert.ok(replies.slice(valid.length).every((r) => r.error?.data.reason === 'E_UNSUPPORTED'));
+  assert.deepEqual(
+    seen.map((e) => e.params.args.url),
+    valid
+  );
+});
+
 test('128 KiB inclusive on wire in both directions; oversized input is never dispatched', async (t) => {
   const { adapter } = await fixtureAdapter();
   const limit = 128 * 1024;
@@ -307,8 +331,58 @@ test('a normal kernel does not serve a lease URL; a lease kernel refuses mixed h
     { devices: {} },
     { clipboard: {} },
     { processMounts: true },
+    { worker: 'untrusted.js' },
+    { driverWorker: 'untrusted.js' },
+    { asyncProcess: {} },
+    { root: {} },
+    { commands: { append: ['/other'] } },
+    { modules: '/other' },
+    { ports: [] },
+    { mounts: [] },
+    { fstab: [] },
+    { hostfsFetch: () => {} },
+    { onDenial: () => {} },
+    { protect: {} },
+    { durable: () => {} },
+    { clock: () => {} },
+    { processHost: {} },
+    { network: { tlsEngine: () => {} } },
+    { cron: {} },
+    ...[
+      'meta',
+      'ranged',
+      'hostfs',
+      'hostfsOrigin',
+      'approve',
+      'fstabRetries',
+      'requestDirectory',
+      'onMountPending',
+      'loader',
+      'env',
+      'metadata',
+      'media',
+      'ca',
+      'timeZone',
+      'hostname',
+      'users',
+      'sudo',
+      'compileCache',
+      'warmWorker',
+      'warmWorkers',
+      'wasmMemories',
+      'emscripten',
+      'blocking',
+      'isolates',
+      'sqlite',
+      'sql',
+      'unknown',
+    ].map((k) => ({ [k]: true })),
   ]) {
-    await assert.rejects(createNodeKernel({ cdpLease: { tag, adapter }, ...mixed }), /lease-only/);
+    await assert.rejects(
+      createNodeKernel({ cdpLease: { tag, adapter }, ...mixed }),
+      /lease-only/,
+      Object.keys(mixed).join(',')
+    );
   }
   for (const invalid of [null, {}, { tag, adapter: {} }, { tag: '', adapter }])
     await assert.rejects(createNodeKernel({ cdpLease: invalid }), /cdpLease/);
