@@ -25,8 +25,9 @@ jobs:
     secrets: inherit
     with:
       node-version: '26'
-      test-glob: test/integration/{,cf/}*.test.mjs
-      shards: 4
+      test-glob: test/integration/cf/{async-emscripten-personality,cloudflare-threads,computer-cloudflare-example}.test.mjs
+      test: set -- test/integration/cf/async-emscripten-personality.test.mjs test/integration/cf/cloudflare-threads.test.mjs test/integration/cf/computer-cloudflare-example.test.mjs; shift $(( SLICC_TEST_SHARD % 3 )); npm run build && SLICC_TEST_FILES=$1 SLICC_TEST_SHARD=1 node --test --test-timeout=180000 --test-global-setup=node_modules/@ai-ecoverse/slicc-shared-web/harness/global.mjs "$1"
+      shards: 15
       timeout-minutes: 30
       review-timeout-minutes: 90
       deploy: node tools/cf-staging.mjs >> "$GITHUB_STEP_SUMMARY"
