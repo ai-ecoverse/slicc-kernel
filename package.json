@@ -107,6 +107,6 @@
     "semantic-release": "25.0.9",
     "typescript": "7.0.2",
     "wabt": "1.0.39",
-    "wrangler": "4.165.0"
+    "wrangler": "4.166.0"
   }
 }
