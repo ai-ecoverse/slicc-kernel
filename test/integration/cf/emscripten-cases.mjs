@@ -1,3 +1,5 @@
+import { attachKernel } from '../../../dist/node.js';
+
 export const BASE = ['wasm-bash', 'wasm-coreutils'];
 
 export const TIER2_PACKAGES = [
@@ -77,15 +79,15 @@ export const TERMINAL_STEPS = [
   { write: 'read -p "name? " n\n', until: 'name? ' },
   { write: 'bob\n' },
   { write: 'echo $n\n' },
-  { write: 'sleep 10\n', until: '', settle: 300 },
+  { write: 'sleep 10\n', until: '', job: 'sleep' },
   { write: '\u0003' },
-  { write: 'sleep 10\n', until: '', settle: 300 },
-  { write: '\u001a', until: 'Stopped' },
+  { write: 'sleep 10\n', until: '', job: 'sleep' },
+  { write: '\u001a', until: /Stopped +sleep 10\r\n\$ / },
   { write: 'jobs\n' },
-  { write: 'fg\n', until: 'sleep', settle: 300 },
+  { write: 'fg\n', until: 'sleep', job: 'sleep' },
   { write: '\u0003' },
   { write: 'echo $?\n' },
-  { write: 'cat\n', until: '', settle: 200 },
+  { write: 'cat\n', until: '', job: 'cat' },
   { write: 'line1\n', until: 'line1\r\nline1' },
   { write: '\u0004' },
   { write: 'stty -echo; echo hidden; stty echo\n' },
@@ -149,29 +151,65 @@ export const JQ = [
   ),
 ];
 
+const WAIT_MS = 10_000;
+
+const shows = (text, want) => (typeof want === 'string' ? text.includes(want) : want.test(text));
+
+const named = (want) => (typeof want === 'string' ? JSON.stringify(want) : String(want));
+
+const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+
 export async function transcript(kernel, steps) {
   let out = '';
-  const term = await kernel.openTerminal(['bash', '-i'], {
-    cwd: '/root',
-    env: { PS1: '$ ', TERM: 'dumb' },
-    onData: () => {},
-  });
-  term.onData = (bytes) => {
-    out += new TextDecoder().decode(bytes);
-  };
-  const until = async (seen, ms = 10000) => {
-    const end = Date.now() + ms;
-    while (!seen() && Date.now() < end) await new Promise((r) => setTimeout(r, 20));
-  };
-  await until(() => out.includes('$ '));
-  for (const step of steps) {
-    const mark = out.length;
-    term.write(step.write);
-    await until(() => out.slice(mark).includes(step.until ?? '$ '));
-    await new Promise((r) => setTimeout(r, step.settle ?? 100));
+  const client = await attachKernel(await kernel.connect());
+  try {
+    const term = await kernel.openTerminal(['bash', '-i'], {
+      cwd: '/root',
+      env: { PS1: '$ ', TERM: 'dumb' },
+      onData: () => {},
+    });
+    term.onData = (bytes) => {
+      out += new TextDecoder().decode(bytes);
+    };
+    const until = async (what, seen) => {
+      const end = Date.now() + WAIT_MS;
+      while (!(await seen())) {
+        if (Date.now() > end) {
+          throw new Error(
+            `${what} within ${WAIT_MS} ms; the terminal shows ${JSON.stringify(out)}`
+          );
+        }
+        await pause(20);
+      }
+    };
+    const owns = async (command) => {
+      const ps = await client.ps();
+      const shell = ps.find((p) => p.pid === term.pid);
+      if (!shell) return false;
+      return ps.some(
+        (p) =>
+          p.sid === shell.sid && p.pgid !== shell.pgid && p.argv[0] === command && p.state === 'S'
+      );
+    };
+    await until('bash printed no prompt', () => out.includes('$ '));
+    for (const step of steps) {
+      const mark = out.length;
+      const want = step.until ?? '$ ';
+      const typed = JSON.stringify(step.write);
+      term.write(step.write);
+      await until(`after ${typed} the terminal showed no ${named(want)}`, () =>
+        shows(out.slice(mark), want)
+      );
+      if (step.job) {
+        await until(`after ${typed} no ${step.job} job took the terminal`, () => owns(step.job));
+      }
+      await pause(100);
+    }
+    term.write('exit\n');
+    return { status: await term.exited, out };
+  } finally {
+    await client.close();
   }
-  term.write('exit\n');
-  return { status: await term.exited, out };
 }
 
 export const REFUSAL_PACKAGES = [...BASE, 'wasm-tar', 'wasm-git', 'wasm-gmake'];
