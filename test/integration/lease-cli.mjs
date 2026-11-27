@@ -1,16 +1,21 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-export const externalCli = process.env.SLICC_TEST_LEASE_CLI_WASM;
+export const cliPackage = '/node_modules/@ai-ecoverse/slicc-cdp';
 
 export async function cliFiles() {
-  const manifest = {
-    name: 'cdp',
-    slicc: { abi: 'wasi', commands: { 'playwright-cli': { wasm: 'cli.wasm' } } },
-  };
+  const manifest = await readFile(
+    new URL(`../..${cliPackage}/package.json`, import.meta.url),
+    'utf8'
+  );
+  const { wasm } = JSON.parse(manifest).slicc.commands['playwright-cli'];
+  assert.equal(wasm, 'bin/playwright-cli.wasm');
   return [
-    ['/node_modules/cdp/package.json', JSON.stringify(manifest)],
-    ['/node_modules/cdp/cli.wasm', await readFile(externalCli)],
+    [`${cliPackage}/package.json`, manifest],
+    [
+      `${cliPackage}/${wasm}`,
+      await readFile(new URL(`../..${cliPackage}/${wasm}`, import.meta.url)),
+    ],
   ];
 }
 
@@ -27,13 +32,18 @@ export async function exerciseCli(run, { lease, jkt }) {
     pending.trimEnd().split('\n').at(-1),
     `slicc lease review --to jkt:${jkt} --allow ${origin} --for 1h`
   );
+  assert.equal(await cli('--lease', lease, 'goto', origin), 'OK\n');
+  assert.equal(await cli('--lease', lease, 'snapshot'), 'fixture document\n');
   for (const args of [
-    ['goto', origin],
     ['click', 'e1'],
     ['fill', 'e1', 'test'],
-  ])
-    assert.equal(await cli('--lease', lease, ...args), 'OK\n');
-  assert.equal(await cli('--lease', lease, 'snapshot'), 'fixture document\n');
+    ['eval', '1'],
+  ]) {
+    const r = await run(['playwright-cli', '--lease', lease, ...args]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stdout, '');
+    assert.equal(JSON.parse(r.stderr).reason, 'E_UNSUPPORTED');
+  }
   assert.ok(
     (await cli('lease', 'request', '--from', lease, '--add', `${origin}/receipt`)).includes(
       'Pending owner review.'

@@ -39,8 +39,10 @@ export class CdpHosts {
     return this.leaseTag !== undefined;
   }
 
-  env(): Record<string, string> {
-    return { [this.leaseOnly ? 'SLICC_CDP_LEASE_URL' : 'SLICC_CDP_URL']: this.url };
+  env(session?: number): Record<string, string> {
+    if (!this.leaseOnly) return { SLICC_CDP_URL: this.url };
+    if (session === undefined || this.session !== session || this.closed) return {};
+    return { SLICC_CDP_LEASE_URL: this.url };
   }
 
   bindClient(

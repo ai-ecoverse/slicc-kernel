@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { cliFiles, exerciseCli, externalCli } from '../lease-cli.mjs';
+import { cliFiles, exerciseCli } from '../lease-cli.mjs';
 import { client, startDev } from './cloudflare-fixture/dev.mjs';
 import { uploadFiles } from './cloudflare-fixture/upload.mjs';
 
@@ -73,12 +73,8 @@ test('a local Durable Object runs the lease facade for its bound WASI job, witho
   assert.notEqual(separate.result.lease, result.lease);
   assert.equal(rejected.error.data.reason, 'E_REVOKED');
 
-  await t.test(
-    'matching branch playwright-cli.wasm uses the same DO hook',
-    { skip: !externalCli },
-    async () => {
-      await uploadFiles(call, await cliFiles());
-      await exerciseCli((argv) => call('/kernel/job-run', { argv }), result);
-    }
-  );
+  await t.test('the released WASI client uses the same read-only DO hook', async () => {
+    await uploadFiles(call, await cliFiles());
+    await exerciseCli((argv) => call('/kernel/job-run', { argv }), result);
+  });
 });

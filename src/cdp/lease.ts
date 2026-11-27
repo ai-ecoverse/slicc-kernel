@@ -17,8 +17,6 @@ export type CdpLeaseRequest = { allow: LeaseRule[]; reason?: string } & (
 export type CdpLeaseAction = { lease: string } & (
   | { op: 'goto'; args: { url: string } }
   | { op: 'snapshot'; args: Record<string, never> }
-  | { op: 'click'; args: { ref: string } }
-  | { op: 'fill'; args: { ref: string; value: string } }
 );
 
 export interface CdpLeaseContext {
@@ -170,15 +168,6 @@ function action(p: Record<string, unknown>): p is CdpLeaseAction {
       return fields(a, 'url') && https(a.url);
     case 'snapshot':
       return fields(a);
-    case 'click':
-      return fields(a, 'ref') && opaque(a.ref);
-    case 'fill':
-      return (
-        fields(a, 'ref', 'value') &&
-        opaque(a.ref) &&
-        typeof a.value === 'string' &&
-        a.value.length <= 65536
-      );
     default:
       return false;
   }

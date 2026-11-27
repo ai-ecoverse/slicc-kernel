@@ -24,24 +24,51 @@ fn exchange(mut args: impl Iterator<Item = String>, reader: &mut BufReader<File>
     print!("[");
     let mut sep = "";
     for command in &mut args {
-        let bytes = command.as_bytes();
+        let sized;
+        let bytes = if let Some(length) = command.strip_prefix("pad:") {
+            let length = length.parse::<usize>().unwrap();
+            sized = format!(
+                "{:width$}",
+                r#"{"id":1,"method":"Slicc.leaseAction","params":{"lease":"L1","op":"snapshot","args":{}}}"#,
+                width = length
+            );
+            sized.as_bytes()
+        } else {
+            command.as_bytes()
+        };
         let mut frame = vec![0x81];
         if bytes.len() < 126 {
             frame.push(0x80 | bytes.len() as u8);
-        } else {
+        } else if bytes.len() <= u16::MAX as usize {
             frame.push(0xfe);
-            frame.extend_from_slice(&u16::try_from(bytes.len()).unwrap().to_be_bytes());
+            frame.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+        } else {
+            frame.push(0xff);
+            frame.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
         }
         let mask = [1, 2, 3, 4];
         frame.extend(mask);
         frame.extend(bytes.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
-        reader.get_mut().write_all(&frame).unwrap();
+        match reader.get_mut().write_all(&frame) {
+            Ok(()) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => (),
+            Err(e) => panic!("{e}"),
+        }
         let mut head = [0; 2];
         reader.read_exact(&mut head).unwrap();
+        if head[0] == 0x88 {
+            reader.read_exact(&mut head).unwrap();
+            print!("{sep}{{\"close\":{}}}", u16::from_be_bytes(head));
+            break;
+        }
         assert_eq!(head[0], 0x81);
         let len = if head[1] == 126 {
             reader.read_exact(&mut head).unwrap();
             u16::from_be_bytes(head) as usize
+        } else if head[1] == 127 {
+            let mut size = [0; 8];
+            reader.read_exact(&mut size).unwrap();
+            u64::from_be_bytes(size) as usize
         } else {
             head[1] as usize
         };

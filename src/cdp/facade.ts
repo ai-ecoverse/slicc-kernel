@@ -259,6 +259,8 @@ class Relay {
   }
 
   async start(head: Uint8Array): Promise<void> {
+    const handshake = this.send(head);
+    if (!this.serial) await handshake;
     const hostGone = new Promise<void>((resolve) => {
       this.host.onclose = (reason) => {
         void this.end(reason ? CLOSE.error : CLOSE.normal, reason ?? '').then(() => resolve());
@@ -269,12 +271,13 @@ class Relay {
       const bytes = new TextEncoder().encode(message);
       if (bytes.length > this.max)
         void this.end(CLOSE.tooBig, `a message is over ${this.max} bytes`);
+      else if (!this.serial) void this.send(frame(OP_TEXT, bytes));
       else
         void this.send(frame(OP_TEXT, bytes)).then(() => {
           this.busy = false;
         });
     };
-    await this.send(head);
+    await handshake;
     const pumping = this.pump();
     await Promise.race([pumping, hostGone]);
     await this.writes;
@@ -291,7 +294,7 @@ class Relay {
     try {
       for (;;) {
         const event = await reader.next(this.stop);
-        if (!event || this.ended) return;
+        if (!event || (this.serial && this.ended)) return;
         if (event.kind === 'text') {
           if (this.serial && this.busy) {
             await this.end(CLOSE.protocol, 'one lease operation at a time');
@@ -299,8 +302,10 @@ class Relay {
           }
           this.busy = this.serial;
           this.host.send(event.text);
-        } else if (event.kind === 'ping') await this.send(pongFrame(event.payload));
-        else {
+        } else if (event.kind === 'ping') {
+          const pong = this.send(pongFrame(event.payload));
+          if (this.serial) await pong;
+        } else {
           await this.end(event.code === 1005 ? CLOSE.normal : event.code, '');
           return;
         }
