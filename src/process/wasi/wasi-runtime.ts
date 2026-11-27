@@ -951,7 +951,7 @@ export async function runWasiThread(
   captureBacktraces(init.env);
   const { thread } = init;
   const kernelFor = (hooks: SignalHooks) => kernelOf(init, port, hooks, undefined, given.transport);
-  const { transport, sys, call, say, gate } = kernelFor({
+  const { transport, sys, call, say, gate, published } = kernelFor({
     masks: () => null,
     raise: (sig) => signals.raise(sig),
   });
@@ -987,7 +987,7 @@ export async function runWasiThread(
   }).attach();
   host.tid = thread.tid;
   if (given.futexes) host.futexes = given.futexes;
-  host.sigmask = sigmaskOf(init.program.module, init.sab, gate, threads, init.signals);
+  host.sigmask = sigmaskOf(init.program.module, init.sab, gate, threads, init.signals, published);
 
   const program = await programImports(init.program, host, transport, thread.tid, given.imports);
   const { module } = init.program;
