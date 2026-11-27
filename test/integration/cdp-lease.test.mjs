@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { attachKernel, CDP_LEASE_VERSION, createNodeKernel } from '../../dist/node.js';
@@ -195,6 +196,41 @@ test('goto preserves mixed-case paths, query, underscores and brackets; controls
   assert.deepEqual(
     seen.map((e) => e.params.args.url),
     valid
+  );
+});
+
+test('D2 candidate: kernel generic typed offer ingress, not pilot eligibility or document authority', async (t) => {
+  const bytes = await readFile(new URL('./fixtures/lease-scope-v1.fixture', import.meta.url));
+  assert.equal(
+    createHash('sha256').update(bytes).digest('hex'),
+    '0fbec3e0add0af611c196a0ab5cb8918a933db243d7724cfe9df441889e01246'
+  );
+  const { exactInitialPilotCases: rows } = JSON.parse(bytes);
+  const fixture = await fixtureAdapter();
+  const client = await job(t, await setup(t, { tag, adapter: fixture.adapter }));
+  let approved = 0,
+    rejected = 0;
+  for (let i = 0; i < rows.length; i += 20) {
+    const batch = rows.slice(i, i + 20);
+    const proposals = batch.map((r) =>
+      r.initial ? { allow: r.allow, ttlSeconds: 900 } : { lease: fixture.lease, allow: r.allow }
+    );
+    const replies = await run(client, 'ws', proposals.map(request));
+    for (const [j, r] of batch.entries()) {
+      const valid = r.consumerOverrides?.kernelRuleValid ?? r.contexts.general.ruleValid;
+      if (valid) {
+        assert.ok(replies[j].result, r.id);
+        assert.deepEqual(fixture.seen[approved++].params, proposals[j], r.id);
+      } else {
+        assert.equal(replies[j].error?.data.reason, 'E_UNSUPPORTED', r.id);
+        rejected++;
+      }
+    }
+    assert.equal(fixture.seen.length, approved);
+  }
+  assert.deepEqual([approved, rejected], [169, 46]);
+  t.diagnostic(
+    `kernel rule ingress: ${approved} forwarded unchanged, ${rejected} refused before adapter; matcher/pilot/grant echo/owner review/final document not classified`
   );
 });
 

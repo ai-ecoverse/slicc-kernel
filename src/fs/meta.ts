@@ -82,6 +82,10 @@ function under(path: string, root: string): boolean {
 
 export class MemoryMeta implements MetaStore {
   private readonly entries = new PathMap<MetaEntry>();
+  private readonly limit: number;
+  constructor(limit = Infinity) {
+    this.limit = limit;
+  }
 
   async get(paths: readonly string[]): Promise<Array<MetaEntry | undefined>> {
     return paths.map((path) => this.entries.get(path));
@@ -96,6 +100,8 @@ export class MemoryMeta implements MetaStore {
   }
 
   private set(path: string, entry: MetaEntry | undefined): void {
+    if (entry && this.entries.size >= this.limit && !this.entries.has(path))
+      throw Object.assign(new Error('metadata quota'), { code: 'ENOSPC' });
     if (entry) this.entries.set(path, entry);
     else this.entries.delete(path);
   }
@@ -111,15 +117,15 @@ export class MemoryMeta implements MetaStore {
     for (const entry of carried) this.entries.delete(entry.path);
     for (const entry of carried) {
       const path = to + entry.path.slice(from.length);
-      if (path !== to) this.entries.set(path, moved(entry, path));
+      if (path !== to) this.set(path, moved(entry, path));
     }
-    this.entries.set(to, moved(root(carried.find((entry) => entry.path === from)), to));
-    if (left) this.entries.set(from, left);
+    this.set(to, moved(root(carried.find((entry) => entry.path === from)), to));
+    if (left) this.set(from, left);
   }
 
   async remove(paths: readonly string[], left?: MetaEntry): Promise<void> {
     for (const path of paths) this.entries.deleteTree(path);
-    if (left) this.entries.set(left.path, left);
+    if (left) this.set(left.path, left);
   }
 
   absent(path: string): boolean {

@@ -2,79 +2,56 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { launch } from './chrome.mjs';
 
-test('the browser worker confirms lease mode and dispatches a WASI call to the dedicated page adapter', async (t) => {
+test('browser memory lease kernels run only their sealed released CLI and never persist job files', async (t) => {
   const chrome = await launch();
   t.after(() => chrome.close());
   const page = await chrome.page(t);
-  await page.goto('/');
-  const result = await page.evaluate(async () => {
-    const { CDP_LEASE_VERSION, createKernel, attachKernel } = await import('/dist/index.js');
-    const { fixtureAdapter } = await import('/fixtures/lease-adapter.mjs');
-    const fixture = await fixtureAdapter();
-    const root = await (await navigator.storage.getDirectory()).getDirectoryHandle(
-      crypto.randomUUID(),
-      { create: true }
-    );
-    const tag = 'lease:page';
-    const options = {
-      root,
-      metadata: false,
-      media: false,
-      ca: false,
-      cdpLease: { tag, adapter: fixture.adapter },
-    };
-    const refused = await createKernel({ ...options, worker: '/not-a-trusted-worker.js' }).then(
-      (k) => {
-        k.terminate();
-        return false;
-      },
-      (e) => e.message
-    );
-    const kernel = await createKernel(options);
-    try {
-      const client = await attachKernel(await kernel.connect({ tag }));
-      const pkg = '/node_modules/@ai-ecoverse/slicc-cdp';
-      const manifest = await (await fetch(`${pkg}/package.json`)).json();
-      const { wasm } = manifest.slicc.commands['playwright-cli'];
-      const artifact = await fetch(`${pkg}/${wasm}`);
-      if (!artifact.ok) throw new Error('missing published CLI');
-      await client.fs.mkdir(`${pkg}/bin`, { recursive: true });
-      await client.fs.writeFile(`${pkg}/package.json`, JSON.stringify(manifest));
-      await client.fs.writeFile(`${pkg}/${wasm}`, new Uint8Array(await artifact.arrayBuffer()));
-      const cli = (...args) => client.run(['playwright-cli', ...args], { cwd: '/' });
-      const pending = await cli(
-        'lease',
-        'request',
-        '--allow',
-        'https://billing.example',
-        '--for',
-        '1h'
-      );
-      const result = await cli('--lease', fixture.lease, 'snapshot');
-      const denied = await cli('--lease', fixture.lease, 'click', 'e1');
-      await client.close();
-      return {
-        result,
-        pending,
-        denied,
-        version: CDP_LEASE_VERSION,
-        refused,
-        seen: fixture.seen.map(({ stamp }) => stamp.tag),
-      };
-    } finally {
-      kernel.terminate();
-    }
-  });
-  assert.equal(result.version, 1);
-  assert.match(result.refused, /unexpected boot option/);
-  assert.deepEqual(result.seen, ['lease:page', 'lease:page']);
-  assert.equal(result.pending.status, 0, result.pending.stderr);
-  assert.match(
-    result.pending.stdout,
-    /slicc lease review --to jkt:[A-Za-z0-9_-]{43} --allow https:\/\/billing\.example --for 1h/
+  await page.goto('/fixtures/cdp/page.html');
+  const before = await page.evaluate(async () =>
+    (await import('/fixtures/lease-memory-page.mjs')).observe()
   );
-  assert.equal(result.denied.status, 1);
-  assert.equal(JSON.parse(result.denied.stderr).reason, 'E_UNSUPPORTED');
-  assert.equal(result.result.status, 0, result.result.stderr);
-  assert.equal(result.result.stdout, 'fixture document\n');
+  const r = await page.evaluate(async () =>
+    (await import('/fixtures/lease-memory-page.mjs')).isolation()
+  );
+  for (const obs of r.snapshots) assert.deepEqual(obs, before);
+  assert.deepEqual(
+    await page.evaluate(async () => (await import('/fixtures/lease-memory-page.mjs')).observe()),
+    before
+  );
+  assert.equal(r.missing, 'ENOENT');
+  assert.equal(r.fresh, 'ENOENT');
+  assert.equal(r.listed, false);
+  assert.deepEqual(r.files, ['first job only', 'second job only']);
+  assert.equal(r.remaining, 'second job only');
+  assert.equal(r.extra, 'EACCES');
+  assert.equal(r.script, 'EACCES');
+  assert.equal(r.quota, 'ENOSPC');
+  assert.equal(r.late, 'EPERM');
+  assert.ok(
+    r.refusals.every((c) => ['EACCES', 'EROFS', 'EPERM'].includes(c)),
+    JSON.stringify(r.refusals)
+  );
+  assert.equal(r.req.status, 0, r.req.stderr);
+  assert.ok(r.req.stdout.includes(`slicc lease review --to jkt:${r.jkt}`));
+  assert.deepEqual([r.snap.status, r.snap.stdout], [0, 'fixture document\n']);
+  assert.equal(JSON.parse(r.write.stderr).reason, 'E_UNSUPPORTED');
+  assert.equal(r.user.length, 2);
+  assert.ok(r.user.every((u) => u > 0));
+  const failed = await page.evaluate(async () =>
+    (await import('/fixtures/lease-memory-page.mjs')).bootFailures()
+  );
+  assert.ok(
+    failed.errors.every((e) => /boot option|cdpLease/.test(e)),
+    JSON.stringify(failed)
+  );
+  assert.deepEqual(
+    [failed.early, failed.oversize, failed.bad, failed.sealed],
+    ['EACCES', 'EINVAL', 'EACCES', 'EPERM']
+  );
+  const entries = await page.evaluate(async () =>
+    (await import('/fixtures/lease-memory-page.mjs')).entries()
+  );
+  assert.ok(entries.count > 0 && entries.count < 4096, JSON.stringify(entries));
+  assert.equal(entries.refusal, 'ENOSPC');
+  assert.equal(entries.existing, true);
 });

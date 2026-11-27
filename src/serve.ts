@@ -1,3 +1,4 @@
+import { LEASE_USER, LeaseCliImage, type LeaseCliInput } from './cdp/lease-cli.ts';
 import { portCdpHook } from './cdp/port.ts';
 import type { CdpHook } from './cdp/types.ts';
 import { type LockManagerLike, locksOf } from './client/protocol.ts';
@@ -10,7 +11,8 @@ import type { FacadeSpec } from './facade/types.ts';
 import type { Attestation, AttestOptions } from './fs/attest.ts';
 import type { Denial, DenialHook } from './fs/dac.ts';
 import type { IntegrityLookup } from './fs/integrity.ts';
-import { META_DB, type MetaStore } from './fs/meta.ts';
+import { LEASE_FS_ENTRIES } from './fs/memory-budget.ts';
+import { META_DB, MemoryMeta, type MetaStore } from './fs/meta.ts';
 import { dirsChannel } from './fs/notice.ts';
 import { OpfsFs } from './fs/opfs.ts';
 import { clonable, directoryAt, type Portable } from './fs/portable.ts';
@@ -47,6 +49,7 @@ import type { HostfsGrant, HostfsGrantHook, HostfsPortGrant } from './mount/host
 import type { MediaStore } from './mount/media.ts';
 import type { MountSpec } from './mount/mount-fs.ts';
 import type { ProcessMountRequest } from './mount/syscall.ts';
+import { leaseMemoryRoot } from './node/memory-root.ts';
 import { type SealedReply, sealedAsker } from './sealed-relay.ts';
 import type { ApproveHook, SudoReply } from './sudo.ts';
 import type { AddUser, RemoveUser } from './users.ts';
@@ -85,6 +88,7 @@ export interface InitRequest {
   processMounts?: boolean | 'ask';
   cdp?: boolean;
   leaseTag?: string;
+  leaseMemory?: true;
   facades?: Record<string, { port: number; hook?: boolean }>;
 }
 
@@ -175,6 +179,8 @@ export interface FileChanged {
 }
 
 export type KernelRequest =
+  | { id: number; op: 'lease-cli-install'; input: LeaseCliInput }
+  | { id: number; op: 'lease-memory-end' }
   | { id: number; op: 'sealed-placeholders'; list: readonly string[] }
   | AttestRequest
   | InitRequest
@@ -522,7 +528,13 @@ async function connectClient(
   if (user !== undefined && !(await l.users.lookup(user))) {
     throw fsError('ENOENT', `no user ${String(user)}`);
   }
-  const held = deps.held ? await deps.held() : undefined;
+  if (l.leaseImage) {
+    l.leaseImage.ready();
+    if (user !== undefined && user !== LEASE_USER)
+      throw fsError('EPERM', 'lease job user is fixed');
+    user = LEASE_USER;
+  }
+  const held = !l.leaseImage && deps.held ? await deps.held() : undefined;
   const client = ++clientIds;
   const endLease = l.cdp.bindClient(client, tag, bind || devices);
   const { port1, port2 } = new MessageChannel();
@@ -534,7 +546,7 @@ async function connectClient(
     ...(devices === 'attach' ? { attachDevices: true } : {}),
     ...(user !== undefined ? { user } : {}),
     ...(tag !== undefined ? { tag } : {}),
-    ...(deps.locks ? { locks: deps.locks } : {}),
+    ...(!l.leaseImage && deps.locks ? { locks: deps.locks } : {}),
     ...(held ? { lock: held } : {}),
   });
   deps.clients.add(served);
@@ -668,8 +680,86 @@ function lockHolder(): (locks: LockManagerLike) => Promise<string> {
   };
 }
 
+async function memoryLauncher(
+  deps: ServeDeps,
+  port: KernelPort,
+  req: InitRequest,
+  root: FileSystemDirectoryHandle
+): Promise<Launcher> {
+  const fs = new OpfsFs(root, new MemoryMeta(LEASE_FS_ENTRIES), undefined, {
+    ranged: true,
+    locks: null,
+  });
+  const image = new LeaseCliImage(fs.unguarded());
+  const l = new Launcher({
+    fs,
+    ...workers(deps),
+    ...cdpOption(req, port),
+    leaseImage: image,
+    protect: { paths: ['/node_modules'] },
+    users: 'enforce',
+    cron: { poll: false },
+  });
+  await l.prepare();
+  await l.users.add({ name: LEASE_USER });
+  return l;
+}
+
+class LeaseWorker {
+  private memory: ReturnType<typeof leaseMemoryRoot> | undefined;
+  disposed = false;
+  get active() {
+    return this.memory !== undefined;
+  }
+  boot(req: InitRequest, deps: ServeDeps, port: KernelPort, initialized: boolean) {
+    if (
+      initialized ||
+      !req.leaseTag ||
+      !req.leaseMemory ||
+      req.root ||
+      req.rootPath ||
+      req.metadata !== false ||
+      req.media !== false ||
+      req.ca !== false
+    )
+      throw fsError('EINVAL', 'invalid memory lease initialization');
+    this.memory = leaseMemoryRoot();
+    return memoryLauncher(deps, port, req, this.memory.root);
+  }
+  async command(
+    req: KernelRequest,
+    ready: () => Promise<Launcher>,
+    clients: Set<ServedClient>,
+    next: (
+      req: Exclude<KernelRequest, { op: 'lease-cli-install' | 'lease-memory-end' }>
+    ) => Promise<unknown>
+  ) {
+    if (this.disposed) throw fsError('EPERM', 'lease job ended');
+    if (req.op === 'lease-memory-end') {
+      if (this.memory === undefined) throw fsError('EPERM', 'not a memory lease');
+      this.disposed = true;
+      const l = await ready();
+      l.endLeaseProcesses();
+      for (const c of clients) c.detach();
+      l.unmountAll();
+      this.memory.clear();
+      return true;
+    }
+    if (req.op === 'lease-cli-install') {
+      const l = await ready();
+      if (!l.leaseImage) throw fsError('EPERM', 'not a memory lease');
+      await l.leaseImage.install(req.input);
+      return true;
+    }
+    if (this.active && req.op !== 'attest' && req.op !== 'connect')
+      throw fsError('EPERM', 'use the bound lease job port');
+    return next(req);
+  }
+}
+
 export function serveKernel(port: KernelPort, deps: ServeDeps): void {
   let launcher: Promise<Launcher> | undefined;
+  const leaseWorker = new LeaseWorker();
   let remote: RemoteTransport | undefined;
   let uplink: RemoteUplink | undefined;
   const reply = (id: number, body: object, transfer?: Transferable[]) =>
@@ -698,6 +788,11 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
   const processes = processOps(ready, reply);
 
   async function init(req: InitRequest): Promise<true | 'cdp-lease-v1'> {
+    if (req.leaseTag || req.leaseMemory) {
+      launcher = leaseWorker.boot(req, deps, port, launcher !== undefined);
+      await launcher;
+      return 'cdp-lease-v1';
+    }
     launcher = rootOf(deps, req).then(async (root) => {
       req = await rootNamed(deps, req, root);
       const name = req.metadata ?? META_DB;
@@ -736,7 +831,8 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
       await started.prepare();
       return started;
     });
-    return (await launcher).cdp.leaseOnly ? 'cdp-lease-v1' : true;
+    await launcher;
+    return true;
   }
 
   async function mountOp(req: MountRequest): Promise<unknown> {
@@ -750,7 +846,9 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
 
   const attestOp = attestOps(port);
 
-  async function handle(req: KernelRequest): Promise<unknown> {
+  async function handle(
+    req: Exclude<KernelRequest, { op: 'lease-cli-install' | 'lease-memory-end' }>
+  ): Promise<unknown> {
     if (req.op === 'init') return init(req);
     if (isAttestRequest(req)) return attestOp(await ready(), req);
     if (req.op === 'sealed-placeholders') return (await ready()).setPlaceholders(req.list);
@@ -804,7 +902,7 @@ export function serveKernel(port: KernelPort, deps: ServeDeps): void {
     if (allowed(event.data)) return;
     if (answered(event.data, remote, uplink, approvals)) return;
     const req = event.data as KernelRequest;
-    handle(req).then(
+    leaseWorker.command(req, ready, clients, handle).then(
       (result) => reply(req.id, { result }, transferOf(req, result)),
       (err) => reply(req.id, failure(err))
     );

@@ -1,3 +1,5 @@
+import { MemoryBudget } from '../fs/memory-budget.ts';
+
 type Handle = MemoryFile | MemoryDirectory;
 
 const fail = (name: string): never => {
@@ -98,6 +100,16 @@ class MemoryFile {
   name: string;
   parent: MemoryDirectory;
   data = new Chunks();
+  private removed = false;
+  private staging = new Set<() => void>();
+
+  remove(): void {
+    this.removed = true;
+    for (const done of this.staging) done();
+    this.parent.budget?.resize(this.data.size, 0);
+    this.data = new Chunks();
+    this.parent.budget?.entry(-1);
+  }
   lastModified = Date.now();
 
   constructor(name: string, parent: MemoryDirectory) {
@@ -113,33 +125,60 @@ class MemoryFile {
   async createWritable({ keepExistingData = false } = {}) {
     const next = keepExistingData ? new Chunks([...this.data.blobs], this.data.size) : new Chunks();
     let position = 0;
+    const budget = this.parent.budget;
+    let reserved = next.size;
+    budget?.resize(0, reserved);
+    let ended = false;
+    const abort = () => {
+      if (ended) return;
+      ended = true;
+      budget?.resize(reserved, 0);
+      this.staging.delete(abort);
+    };
+    if (budget) this.staging.add(abort);
+    const reserve = (size: number) => {
+      if (ended || this.removed) fail('NotFoundError');
+      budget?.resize(reserved, size);
+      reserved = size;
+    };
+    const truncate = (size: number) => {
+      reserve(size);
+      next.truncate(size);
+    };
     const put = async (data: unknown) => {
       const bytes = await bytesOf(data);
+      reserve(Math.max(next.size, position + bytes.length));
       await next.write(position, bytes);
       position += bytes.length;
     };
     return {
       write: async (data: unknown) => {
         if (!isParams(data)) return put(data);
-        if (data.type === 'truncate') return next.truncate(data.size ?? 0);
+        if (data.type === 'truncate') return truncate(data.size ?? 0);
         position = data.position ?? position;
         if (data.type === 'write') await put(data.data);
       },
       seek: async (at: number) => {
         position = at;
       },
-      truncate: async (size: number) => next.truncate(size),
+      truncate: async (size: number) => truncate(size),
       close: async () => {
+        if (ended || this.removed) fail('NotFoundError');
+        budget?.resize(this.data.size, 0);
+        ended = true;
+        this.staging.delete(abort);
         this.data = next;
         this.lastModified = Date.now();
       },
-      abort: async () => {},
+      abort: async () => abort(),
     };
   }
 
   async move(parent: MemoryDirectory, name: string): Promise<void> {
     valid(name);
-    if (parent.children.get(name)?.kind === 'directory') fail('InvalidModificationError');
+    const old = parent.children.get(name);
+    if (old?.kind === 'directory') fail('InvalidModificationError');
+    if (old && old !== this && parent.budget) old.remove();
     this.parent.children.delete(this.name);
     this.name = name;
     this.parent = parent;
@@ -154,7 +193,10 @@ class MemoryDirectory {
   readonly children = new Map<string, Handle>();
   removed = false;
 
-  constructor(name: string, parent: MemoryDirectory | null) {
+  readonly budget: MemoryBudget | undefined;
+
+  constructor(name: string, parent: MemoryDirectory | null, budget = parent?.budget) {
+    this.budget = budget;
     this.name = name;
     this.parent = parent;
   }
@@ -170,6 +212,7 @@ class MemoryDirectory {
     if (found?.kind === 'file') fail('TypeMismatchError');
     if (found) return found as MemoryDirectory;
     if (!create) fail('NotFoundError');
+    this.budget?.entry(1);
     const dir = new MemoryDirectory(name, this);
     this.children.set(name, dir);
     return dir;
@@ -182,6 +225,7 @@ class MemoryDirectory {
     if (found?.kind === 'directory') fail('TypeMismatchError');
     if (found) return found as MemoryFile;
     if (!create) fail('NotFoundError');
+    this.budget?.entry(1);
     const file = new MemoryFile(name, this);
     this.children.set(name, file);
     return file;
@@ -196,7 +240,7 @@ class MemoryDirectory {
       fail('InvalidModificationError');
     }
     this.children.delete(name);
-    if (found.kind === 'directory') found.remove();
+    if (found.kind === 'directory' || this.budget) found.remove();
   }
 
   async resolve(handle: Handle): Promise<string[] | null> {
@@ -210,7 +254,12 @@ class MemoryDirectory {
 
   remove(): void {
     this.removed = true;
-    for (const child of this.children.values()) if (child.kind === 'directory') child.remove();
+    for (const child of this.children.values())
+      if (child.kind === 'directory' || this.budget) child.remove();
+    if (this.budget) {
+      this.children.clear();
+      if (this.parent) this.budget.entry(-1);
+    }
   }
 
   async *keys(): AsyncGenerator<string> {
@@ -234,6 +283,18 @@ class MemoryDirectory {
     this.parent = parent;
     parent.children.set(name, this);
   }
+}
+
+export function leaseMemoryRoot() {
+  const budget = new MemoryBudget();
+  const dir = new MemoryDirectory('', null, budget);
+  return {
+    root: dir as unknown as FileSystemDirectoryHandle,
+    clear() {
+      dir.remove();
+      budget.close();
+    },
+  };
 }
 
 export function memoryRoot(): FileSystemDirectoryHandle {
