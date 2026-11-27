@@ -42,6 +42,7 @@ export interface AttestOptions {
 export interface AttestContext extends AttestOptions {
   users: UsersMode;
   mounts: readonly string[];
+  maxBytes?: number;
 }
 
 function refuse(code: string, path: string, why: string): never {
@@ -151,7 +152,8 @@ export async function attest(
     if (before.isSymbolicLink) refuse('EACCES', path, 'is a symlink');
     if (!before.isFile)
       refuse(before.isDirectory ? 'EISDIR' : 'EINVAL', path, 'is not a regular file');
-    if (before.size > ATTEST_MAX) refuse('EFBIG', path, `is over ${ATTEST_MAX} bytes`);
+    if (before.size > (o.maxBytes ?? ATTEST_MAX))
+      refuse('EFBIG', path, `is over ${o.maxBytes ?? ATTEST_MAX} bytes`);
     const bytes = (await fs.readFileBuffer(path)).slice();
     const after = await fs.lstat(path);
     if (unchanged(before, after, bytes)) {

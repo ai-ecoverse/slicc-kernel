@@ -47,7 +47,7 @@ export interface CdpLeaseOptions {
 }
 
 const BOOT_FIELDS = {
-  browser: new Set(['cdpLease', 'root', 'metadata', 'media', 'ca']),
+  browser: new Set(['cdpLease', 'metadata', 'media', 'ca']),
   node: new Set(['cdpLease']),
   cloudflare: new Set(['cdpLease', 'loader']),
 };
@@ -60,6 +60,7 @@ export function checkedLease(
   if (lease === undefined) return undefined;
   if (
     typeof lease?.tag !== 'string' ||
+    Reflect.ownKeys(lease).some((k) => k !== 'tag' && k !== 'adapter') ||
     !/^[a-zA-Z0-9:_-]{1,128}$/.test(lease.tag) ||
     typeof lease.adapter?.request !== 'function' ||
     typeof lease.adapter?.action !== 'function'

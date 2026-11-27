@@ -1,6 +1,7 @@
 import type { Scrubber } from '@ai-ecoverse/slicc-scrub';
 import { enableCdp } from './cdp/facade.ts';
 import { CdpHosts } from './cdp/hosts.ts';
+import { CLI_FILE, CLI_MAX, type LeaseCliImage } from './cdp/lease-cli.ts';
 import type { CdpHook } from './cdp/types.ts';
 import { serveClient } from './client/serve-client.ts';
 import {
@@ -259,6 +260,7 @@ export interface LauncherOptions {
   fstabRetries?: readonly number[];
   cdp?: CdpHook;
   leaseTag?: string;
+  leaseImage?: LeaseCliImage;
   facades?: FacadeSpecs;
   uplink?: NetworkUplink;
   doh?: string | false;
@@ -876,6 +878,10 @@ function addTimes(into: Map<number, CpuTimes>, pid: number, t: CpuTimes): void {
   into.set(pid, { utime: at.utime + t.utime, stime: at.stime + t.stime });
 }
 
+function locksForPackages(options: LauncherOptions) {
+  return new PackageLocks(options.packageLocks ?? META_DB, options.leaseImage ? null : undefined);
+}
+
 export class Launcher {
   private readonly emscripten: LauncherOptions['emscripten'];
   private readonly admit: LauncherOptions['admit'];
@@ -891,6 +897,8 @@ export class Launcher {
   private readonly unlinkOwnerOption: UnlinkOwner | undefined;
   private readonly durable: (() => void | Promise<void>) | undefined;
   private readonly base: KernelFs;
+  readonly leaseImage: LeaseCliImage | undefined;
+  private disposing = false;
   private readonly createWorker: () => WasmWorkerLike;
   private readonly compile: LauncherOptions['compile'];
   private readonly moduleUrl: ModuleUrlMaker | undefined;
@@ -1034,7 +1042,8 @@ export class Launcher {
     this.memories = memoriesOf(options.wasmMemories);
     this.rootFs = options.fs;
     this.locks = kernelLocks(options.fs.rootName, this.flushingPeers(options.fs));
-    this.packageLocks = new PackageLocks(options.packageLocks ?? META_DB);
+    this.leaseImage = options.leaseImage;
+    this.packageLocks = locksForPackages(options);
     this.dac = this.usersMode === 'off' ? undefined : new Dac(this.usersMode, options.onDenial);
     if (this.dac) this.wireDac(this.dac);
     this.clipboard = new ClipboardBroker(options.clipboard, this.usersMode, undefined, (pid) =>
@@ -1139,7 +1148,7 @@ export class Launcher {
       { [Symbol.iterator]: () => holders.flatMap((set) => [...set]).values() },
       (path) => this.mountRoot(path),
       {
-        locks: webLocks(),
+        locks: this.leaseImage ? undefined : webLocks(),
         busy: (path) => [...this.openFiles].some((nodes) => nodes.holds(path)),
         owner: options.unlinkOwner,
         marks: this.pathMarks,
@@ -1186,6 +1195,10 @@ export class Launcher {
       now: sudoClock ? () => sudoClock.now() : undefined,
     });
     this.cron = this.cronService(options.cron);
+    this.watchCatalogs();
+  }
+
+  private watchCatalogs() {
     void this.unlinked.sweep('/');
     this.watchers.watch(
       [this.modulesDir, this.pnpmHome, ...this.appended],
@@ -1700,9 +1713,18 @@ export class Launcher {
     argv0?: unknown,
     catalogOnly = false
   ): Promise<Planned | undefined> {
+    if (
+      this.leaseImage &&
+      file !== 'playwright-cli' &&
+      file !== '/usr/bin/playwright-cli' &&
+      file !== CLI_FILE
+    )
+      throw fsError('EACCES', 'only the installed lease CLI can execute');
     const found = await this.resolve(file, argv[0] ?? file, cwd, scope);
     const named = typeof argv0 === 'string' && found && !found.fixed;
     const direct = named ? { ...found, argv0 } : found;
+    if (this.leaseImage && (!direct || direct.wasm !== CLI_FILE || direct.shim || direct.copy))
+      throw fsError('EACCES', 'lease CLI path mismatch');
     if (direct) {
       const shim = direct.shim
         ? { sources: [direct.shim], asked: direct.asked ? { [direct.shim]: direct.asked } : {} }
@@ -2099,8 +2121,11 @@ export class Launcher {
     const pin = await this.pinOf(path, caller);
     const sum = Object.values(pin)[0];
     const key = sum === undefined ? await this.cacheKey(path, asked) : `${path}:sha256:${sum}`;
+    const checked = await this.leaseImage?.bytes(path);
     const loaded = this.cached(this.compiled, key, async () => {
-      const { bytes: read, key: readKey } = await this.keyed(path, caller, asked);
+      const { bytes: read, key: readKey } = checked
+        ? { bytes: checked, key }
+        : await this.keyed(path, caller, asked);
       const bytes = sum === undefined ? read : await this.pinnedBytes(pin, read);
       const memory = importedMemory(bytes);
       const foreign = foreignImports(bytes);
@@ -2664,11 +2689,17 @@ export class Launcher {
     }
   }
 
-  private start(req: StartRequest): WasmProcessHandle {
-    this.sampling();
-    if (req.pgid !== undefined && this.jobs.sessionOf(req.pgid) === undefined) {
+  private mayStart(req: StartRequest): void {
+    if (this.leaseImage && req.cred.euid === 0)
+      throw fsError('EACCES', 'lease CLI may not run as root');
+    if (this.disposing) throw fsError('EACCES', 'lease job ended');
+    if (req.pgid !== undefined && this.jobs.sessionOf(req.pgid) === undefined)
       throw new SpawnError('ESRCH');
-    }
+  }
+
+  private start(req: StartRequest): WasmProcessHandle {
+    this.mayStart(req);
+    this.sampling();
     const pid = req.pid ?? this.nextPid++;
     const cwdSlot = this.cwds.share(req.cwdSlot);
     this.cwdSlots.set(pid, cwdSlot);
@@ -3619,11 +3650,15 @@ export class Launcher {
   attest(path: string, options: AttestOptions = {}): Promise<Attestation | AttestTombstone> {
     return attest(this.rootFs, path, {
       ...options,
+      ...(this.leaseImage && path === CLI_FILE ? { maxBytes: CLI_MAX } : {}),
       users: this.usersMode,
       mounts: this.mounts
         .list()
         .map((entry) => entry.target)
         .filter((target) => this.mounts.mounted(target) !== undefined),
+    }).then((record) => {
+      this.leaseImage?.attest(record);
+      return record;
     });
   }
 
@@ -3671,7 +3706,8 @@ export class Launcher {
 
   private async mountShm(): Promise<void> {
     await this.base.mkdir(SHM, { recursive: true });
-    await this.mounts.mountSystem({ type: 'tmpfs', source: 'shm', target: SHM }, this.fs);
+    if (!this.leaseImage)
+      await this.mounts.mountSystem({ type: 'tmpfs', source: 'shm', target: SHM }, this.fs);
     await this.fs.chmod(SHM, 0o1777);
   }
 
@@ -3804,6 +3840,13 @@ export class Launcher {
     for (const holds of this.held) holds.revoke(at);
   }
 
+  endLeaseProcesses(): void {
+    this.disposing = true;
+    this.leaseImage?.close();
+    this.cdp.close();
+    for (const process of this.processes.values()) process.kill();
+  }
+
   unmountAll(): void {
     this.cron.stop();
     this.booting.abort();
@@ -3882,7 +3925,7 @@ export class Launcher {
     await writeCaFile(this.base, this.ca).catch(() => undefined);
     await this.cron.provision().catch(() => undefined);
     this.fstab = this.mountFstab();
-    void this.cron.start();
+    if (!this.leaseImage) void this.cron.start();
   }
 
   private async mountFstab(): Promise<FstabResult[]> {

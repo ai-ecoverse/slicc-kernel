@@ -48,9 +48,9 @@ export class PackageLocks {
   private readonly locks: ReplacingLocks | undefined;
   private readonly metadata: string;
 
-  constructor(metadata: string, locks = replacingLocks()) {
+  constructor(metadata: string, locks: ReplacingLocks | null | undefined = replacingLocks()) {
     this.metadata = metadata;
-    this.locks = locks;
+    this.locks = locks ?? undefined;
   }
 
   loading<T>(roots: readonly string[], run: (waited: boolean) => Promise<T>): Promise<T> {

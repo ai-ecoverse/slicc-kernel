@@ -24,15 +24,12 @@ fn exchange(mut args: impl Iterator<Item = String>, reader: &mut BufReader<File>
     print!("[");
     let mut sep = "";
     for command in &mut args {
-        let sized;
+        let mut sized;
         let bytes = if let Some(length) = command.strip_prefix("pad:") {
             let length = length.parse::<usize>().unwrap();
-            sized = format!(
-                "{:width$}",
-                r#"{"id":1,"method":"Slicc.leaseAction","params":{"lease":"L1","op":"snapshot","args":{}}}"#,
-                width = length
-            );
-            sized.as_bytes()
+            sized = br#"{"id":1,"method":"Slicc.leaseAction","params":{"lease":"L1","op":"snapshot","args":{}}}"#.to_vec();
+            sized.resize(length, b' ');
+            sized.as_slice()
         } else {
             command.as_bytes()
         };

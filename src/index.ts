@@ -1,4 +1,5 @@
 import { type CdpLeaseOptions, checkedLease, leaseHook } from './cdp/lease.ts';
+import { checkCli, type LeaseCliInput } from './cdp/lease-cli.ts';
 import { type CdpOpen, serveCdpPort } from './cdp/port.ts';
 import type { CdpHook } from './cdp/types.ts';
 import type { SudoRun, SudoRunOptions } from './client/attach.ts';
@@ -331,6 +332,7 @@ export interface KernelSealed {
 }
 
 export interface Kernel {
+  installLeaseCli(input: LeaseCliInput): Promise<void>;
   run(argv: string[], options?: RunOptions): Promise<RunResult>;
   openTerminal(argv: string[], options?: TerminalOptions): Promise<Terminal>;
   connect(options?: ConnectOptions): Promise<MessagePort>;
@@ -352,7 +354,7 @@ export interface Kernel {
   attest(path: string): Promise<Attestation>;
   attest(path: string, options: { absent: 'allow' }): Promise<Attestation | AttestTombstone>;
   watch(paths: string[], onChange: (path: string) => void): Promise<() => void>;
-  terminate(): void;
+  terminate(): void | Promise<void>;
 }
 
 export interface TerminalOptions {
@@ -727,12 +729,9 @@ function checkOptions(options: KernelOptions): CdpLeaseOptions | undefined {
   facadesInit(options.facades);
   sealedHooks(options.sealed);
   const lease = checkedLease(options, 'browser');
-  if (
-    lease &&
-    (!options.root || options.metadata !== false || options.media !== false || options.ca !== false)
-  ) {
+  if (lease && (options.metadata !== false || options.media !== false || options.ca !== false)) {
     throw new TypeError(
-      'a browser lease-only kernel requires a private job root and metadata:false, media:false, ca:false'
+      'a browser lease-only kernel requires metadata:false, media:false, ca:false'
     );
   }
   return lease;
@@ -894,7 +893,10 @@ async function bootWorker(
 ) {
   try {
     const init = await initCall(options, options.network?.transport);
-    const initialized = await call({ ...init, ...(leaseTag ? { leaseTag } : {}) });
+    const initialized = await call({
+      ...init,
+      ...(leaseTag ? { leaseTag, leaseMemory: true as const } : {}),
+    });
     if (leaseTag && initialized !== 'cdp-lease-v1')
       throw new Error('worker does not support a lease-only kernel');
   } catch (err) {
@@ -902,6 +904,36 @@ async function bootWorker(
     worker.terminate();
     throw err;
   }
+}
+
+function endWorker(
+  worker: Worker,
+  lease: boolean,
+  call: (req: KernelCall) => Promise<unknown>,
+  close: () => void
+) {
+  let ending: Promise<void> | undefined;
+  const end = () => {
+    close();
+    worker.terminate();
+  };
+  return () => {
+    if (!lease) return end();
+    ending ??= call({ op: 'lease-memory-end' })
+      .then(
+        () => {},
+        () => {}
+      )
+      .finally(end);
+    return ending;
+  };
+}
+
+function installer(call: (req: KernelCall) => Promise<unknown>) {
+  return async (input: LeaseCliInput) => {
+    checkCli(input);
+    await call({ op: 'lease-cli-install', input });
+  };
 }
 
 export async function createKernel(options: KernelOptions = {}): Promise<Kernel> {
@@ -1042,11 +1074,10 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
     };
   }
 
-  const { dial } = dials;
-
   await bootWorker(options, lease?.tag, call, worker, fail);
 
   return {
+    installLeaseCli: installer(call),
     async run(argv, runOptions = {}) {
       const { onStdout, onStderr, stdin, ...rest } = runOptions;
       const streams = { 1: streamer(onStdout), 2: streamer(onStderr) };
@@ -1068,17 +1099,16 @@ export async function createKernel(options: KernelOptions = {}): Promise<Kernel>
         void (await call({ op: 'integrity-revoke', ...(path !== undefined ? { path } : {}) })),
     },
     updateTransportTraits: traitsUpdater(transport, call),
-    dial,
-    loopbackFetch: (input, fetchOptions) => loopbackFetch(dial, input, fetchOptions),
+    dial: dials.dial,
+    loopbackFetch: (input, fetchOptions) => loopbackFetch(dials.dial, input, fetchOptions),
     mount: async (spec) => (await call({ op: 'mount', spec })) as MountEntry,
     umount: async (target) => void (await call({ op: 'umount', target })),
     mounts: async () => (await call({ op: 'mounts' })) as MountEntry[],
     insert: async (target, handle) => void (await call(await insertCall(target, handle))),
     ...pageOnly(call),
     watch: files.watch,
-    terminate() {
-      fail(new Error('slicc-kernel terminated'));
-      worker.terminate();
-    },
+    terminate: endWorker(worker, Boolean(lease), call, () =>
+      fail(new Error('slicc-kernel terminated'))
+    ),
   };
 }
