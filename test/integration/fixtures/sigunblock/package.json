@@ -1,0 +1,12 @@
+{
+  "name": "sigunblock",
+  "private": true,
+  "slicc": {
+    "abi": "wasi",
+    "commands": {
+      "sigunblock": {
+        "wasm": "bin/sigunblock.wasm"
+      }
+    }
+  }
+}

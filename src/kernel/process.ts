@@ -655,6 +655,8 @@ export interface WasmProcessOptions {
 
   unblockedThread?: (sig: number) => number | undefined;
 
+  unparked?: (sig: number) => number | undefined;
+
   settling?: () => boolean;
 
   pendingBits?: () => number;
@@ -879,10 +881,12 @@ export class WasmProcess {
 
   private routeBlocked(sig: number, bit: number): boolean {
     const waiter = this.waiterFor(bit);
-    const tid = waiter ?? this.options.unblockedThread?.(sig);
+    let tid = waiter ?? this.options.unblockedThread?.(sig);
     if (tid === undefined || tid === 1) {
       this.options.onPending?.(sig);
-      return true;
+      if (tid === 1) return true;
+      tid = this.options.unparked?.(sig);
+      if (tid === undefined) return true;
     }
     if (waiter === undefined && !(this.caught & bit)) return false;
     this.options.threadKill?.(tid, sig);

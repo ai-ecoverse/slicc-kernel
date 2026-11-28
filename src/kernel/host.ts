@@ -318,6 +318,17 @@ function unblockedThread(threads: Map<number, ThreadSignals>, sig: number): numb
   return undefined;
 }
 
+function unparked(
+  header: Int32Array,
+  threads: Map<number, ThreadSignals>,
+  sig: number
+): number | undefined {
+  const tid = unblockedThread(threads, sig);
+  if (tid === undefined) return undefined;
+  const bit = sigbit(sig);
+  return (Atomics.and(header, SAB_I_SIGNALS, ~bit) & bit) !== 0 ? tid : undefined;
+}
+
 function unblocked(header: Int32Array): number {
   return Atomics.load(header, SAB_I_SIGNALS) & ~Atomics.load(header, SAB_I_BLOCKED);
 }
@@ -508,7 +519,7 @@ function processOptions(
   header: Int32Array,
   hooks: Pick<
     WasmProcessOptions,
-    'raise' | 'threadKill' | 'unblockedThread' | 'exitNow' | 'exitSignal'
+    'raise' | 'threadKill' | 'unblockedThread' | 'unparked' | 'exitNow' | 'exitSignal'
   >,
   created: Created
 ): WasmProcessOptions {
@@ -563,6 +574,7 @@ function processOptions(
     raise: hooks.raise,
     threadKill: hooks.threadKill,
     unblockedThread: hooks.unblockedThread,
+    unparked: hooks.unparked,
     ...(hooks.exitNow ? { exitNow: hooks.exitNow } : {}),
     ...(hooks.exitSignal ? { exitSignal: hooks.exitSignal } : {}),
     ...(opts.program.abi === 'wasi' || opts.program.abi === 'js'
@@ -672,6 +684,7 @@ export function spawnWasmProcess(opts: SpawnWasmOptions): WasmProcessHandle {
         threadKill: (tid, sig) =>
           killThread(threadSignals.get(tid), process.signalMasks().caught, sig),
         unblockedThread: (sig) => unblockedThread(threadSignals, sig),
+        unparked: (sig) => unparked(header, threadSignals, sig),
         ...(opts.program.abi === 'js'
           ? {
               exitNow: (code: number) => exitNow(code),

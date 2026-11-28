@@ -30,7 +30,7 @@ before(async () => {
     '/node_modules/@ai-ecoverse/wasix-bind',
     programs
   );
-  for (const name of ['epolltest', 'sigthread']) {
+  for (const name of ['epolltest', 'sigthread', 'sigunblock']) {
     await uploadTree(call, join(FIXTURES, name), `/node_modules/${name}`, programs);
   }
 });
@@ -86,5 +86,19 @@ describe('threads in a Dynamic Worker', { concurrency: false }, () => {
     );
     const stats = await call('/kernel/stats');
     assert.ok(stats.peak <= 2, `peak ${stats.peak} Dynamic Workers`);
+  });
+
+  test('a signal pending for the process goes once to the WASIX thread that unblocks it later, not to the main thread (#1922)', async (t) => {
+    if (skipped(t)) return;
+    assert.deepEqual(await run(['sigunblock', 'late']), ok('late: pending 1, workers 1, main 0\n'));
+    assert.deepEqual(await run(['sigunblock', 'race']), ok('race: pending 1, workers 1, main 0\n'));
+    assert.deepEqual(
+      await run(['sigunblock', 'pselect']),
+      ok('pselect: pending 1, workers 1, interrupted 1, main 0\n')
+    );
+    assert.deepEqual(
+      await run(['sigunblock', 'directed']),
+      ok('directed: pending 0, signalled worker 1, other worker 0, main 0\n')
+    );
   });
 });

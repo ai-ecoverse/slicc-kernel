@@ -40,15 +40,12 @@ test('a terminating signal sent to one thread of a WASIX program ends the whole 
   assert.match(r.stderr, /Terminated/);
 });
 
-async function sigthread(t) {
-  const kernel = await createNodeKernel();
+async function sigthread(t, name = 'sigthread', options = {}) {
+  const kernel = await createNodeKernel(options);
   t.after(() => kernel.terminate());
-  const fixture = new URL('fixtures/sigthread/', import.meta.url);
-  for (const file of ['package.json', 'bin/sigthread.wasm']) {
-    await kernel.writeFile(
-      `/node_modules/sigthread/${file}`,
-      await readFile(new URL(file, fixture))
-    );
+  const fixture = new URL(`fixtures/${name}/`, import.meta.url);
+  for (const file of ['package.json', `bin/${name}.wasm`]) {
+    await kernel.writeFile(`/node_modules/${name}/${file}`, await readFile(new URL(file, fixture)));
   }
   return kernel;
 }
@@ -71,3 +68,26 @@ test('a terminating signal that the main thread blocks, but another thread does 
     stderr: '',
   });
 });
+
+const jspi =
+  typeof WebAssembly.Suspending === 'function' && typeof WebAssembly.promising === 'function';
+
+for (const blocking of ['sync', 'async']) {
+  test(`a signal pending for the process goes once to the thread that unblocks it later, not to the main thread, on the ${blocking} host (#1922)`, {
+    skip: blocking === 'async' && !jspi ? 'this Node has no WebAssembly.Suspending (JSPI)' : false,
+  }, async (t) => {
+    const kernel = await sigthread(t, 'sigunblock', blocking === 'async' ? { blocking } : {});
+    const run = (mode) => kernel.run(['sigunblock', mode], { cwd: '/' });
+    const ok = (stdout) => ({ status: 0, stdout, stderr: '' });
+    assert.deepEqual(await run('late'), ok('late: pending 1, workers 1, main 0\n'));
+    assert.deepEqual(await run('race'), ok('race: pending 1, workers 1, main 0\n'));
+    assert.deepEqual(
+      await run('pselect'),
+      ok('pselect: pending 1, workers 1, interrupted 1, main 0\n')
+    );
+    assert.deepEqual(
+      await run('directed'),
+      ok('directed: pending 0, signalled worker 1, other worker 0, main 0\n')
+    );
+  });
+}

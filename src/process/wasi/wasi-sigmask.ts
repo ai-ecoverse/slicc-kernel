@@ -67,6 +67,7 @@ export class WasiSigmask {
     const now = kernelBits(this.lo);
     storeBlocked(this.header, [now, this.hi]);
     this.published?.();
+    this.adopt(now);
     if ((Atomics.load(this.header, SAB_I_SIGNALS) & ~now) !== 0) this.deliver();
     return E.SUCCESS;
   }
@@ -75,9 +76,21 @@ export class WasiSigmask {
     const old: [number, number] = [this.lo, this.hi];
     this.lo = setLo & ~LIBC_UNBLOCKABLE;
     this.hi = setHi | 0;
-    storeBlocked(this.header, [kernelBits(this.lo), this.hi]);
+    const now = kernelBits(this.lo);
+    storeBlocked(this.header, [now, this.hi]);
     this.published?.();
+    this.adopt(now);
     return old;
+  }
+
+  private adopt(now: number): void {
+    const process = this.process;
+    if (!process) return;
+    const offered =
+      Atomics.load(process, SAB_I_SIGNALS) & Atomics.load(process, SAB_I_BLOCKED) & ~now;
+    if (offered === 0) return;
+    const taken = Atomics.and(process, SAB_I_SIGNALS, ~offered) & offered;
+    if (taken !== 0) Atomics.or(this.header, SAB_I_SIGNALS, taken);
   }
 
   deliverUnblocked(): boolean {
