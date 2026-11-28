@@ -3,7 +3,7 @@ import { fixtureAdapter } from './lease-adapter.mjs';
 
 const pkg = '/node_modules/@ai-ecoverse/slicc-cdp';
 const file = `${pkg}/bin/playwright-cli.wasm`;
-const sha256 = '8a8e1bcd81ae1b53e0bfe6a2b2d4863ffe40b4cee2269fc11f9a3d38bccad1b4';
+const sha256 = 'c3978b88a9190e50ad60ed93aeaf0c1db98d86b03e181f2a9207a7ac1ad99d96';
 const options = { metadata: false, media: false, ca: false };
 
 export async function observe() {
